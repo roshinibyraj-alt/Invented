@@ -569,9 +569,9 @@ async function gridTick(m, side) {
   // ── PROCESS EACH GRID LEVEL ──
   for (const lv of g.levels) {
 
-    // Place initial BUY order (once per window per level)
-    // LIVE: posts a real GTC limit BUY on the CLOB.
-    if (!lv.initialPlaced && !lv.buyPending && !g.noMoreEntries && !DRY_RUN) {
+    // Place initial BUY order — only when mid has RISEN to this level
+    // LIVE: posts a real GTC limit BUY on the CLOB once price reaches level.
+    if (!lv.initialPlaced && !lv.buyPending && !g.noMoreEntries && !DRY_RUN && mid >= lv.price) {
       const cost = fl2(lv.initShares * lv.price);
       if (balance >= cost + 5) {
         lv.initialPlaced = true;
