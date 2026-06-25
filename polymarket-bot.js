@@ -109,6 +109,7 @@ let startTime     = Date.now();
 let lastResCheck  = 0;
 let emitFn        = () => {};
 let logFn         = () => {};
+let nextFreshWindow = 0; // Unix timestamp of next window to trade on (0 = normal operation)
 
 function slog(msg) {
   const ts = new Date().toTimeString().slice(0, 8);
@@ -462,6 +463,42 @@ async function gridTick(m, side) {
   const g = getGrid(m.slug, side);
   if (g.settled) return;
 
+  // ── Startup phase: skip windows that started before nextFreshWindow ──
+  if (nextFreshWindow > 0) {
+    const windowStart = Math.floor(m.endTime / 1000) - m.windowS;
+    if (windowStart < nextFreshWindow) return; // skip partial window
+    // Once we've passed the next fresh window, clear startup phase
+    if (Math.floor(Date.now() / 1000) >= nextFreshWindow + m.windowS + 10) {
+      nextFreshWindow = 0;
+    }
+  }
+
+  // ── Force-close in last 5 seconds of window ──
+  if (m.secondsToEnd <= 5 && m.secondsToEnd > 0) {
+    for (const lv of g.levels) {
+      for (const grp of lv.groups) {
+        if (grp.marketSold || grp.inResolution || grp.stopFilled) continue;
+        if (grp.tpFilled && grp.runnerFilled) continue;
+
+        let leftSh = 0;
+        if (!grp.tpFilled && !grp.stopFilled) leftSh += grp.tpShares;
+        if (!grp.runnerFilled && !grp.stopFilled && !grp.inResolution) leftSh += grp.runnerShares;
+
+        if (leftSh > 0) {
+          if (!DRY_RUN) {
+            const tokenId = side === 'up' ? m.upTokenId : m.downTokenId;
+            placeRealSell(tokenId, side, mid, leftSh, g.slug, g.levels.indexOf(lv), lv.groups.indexOf(grp), 'stop')
+              .catch(e => slog(`❌ Force-sell: ${e.message}`));
+          }
+          grp.tpFilled = true;
+          grp.runnerFilled = true;
+          grp.stopFilled = true;
+          slog(`⏰ FORCE SELL ${label} @${fl4(mid)} x ${leftSh}sh (window ending)`);
+        }
+      }
+    }
+  }
+
   // Track highest mid seen this window
   if (mid > g.highestMid) g.highestMid = mid;
 
@@ -809,6 +846,12 @@ async function start(emit, log) {
     }
     if (rb > 0) { balance = rb; startBalance = rb; }
     slog(`✅ Connected | wallet:${trader.address} bal:$${fl2(balance)}`);
+
+    // Skip the current partial window — wait for the next fresh 5m window
+    const _nowSec = Math.floor(Date.now() / 1000);
+    const _ws = 300;
+    nextFreshWindow = (Math.floor(_nowSec / _ws) + 1) * _ws + 2;
+    slog(`⏳ Startup: waiting for next window at ${new Date((nextFreshWindow - 2) * 1000).toTimeString().slice(0,8)}`);
   } catch (e) {
     slog(`❌ Auth failed: ${e.message}`);
     process.exit(1);
@@ -841,6 +884,12 @@ async function setDryRun(val) {
     const rb = await trader.getBalance().catch(() => -1);
     if (rb > 0) { balance = rb; startBalance = rb; }
     slog(`🔴 LIVE — real orders on Polymarket CLOB | bal:$${fl2(balance)}`);
+
+    // Skip any current partial window — wait for next fresh 5m window
+    const _nowSec = Math.floor(Date.now() / 1000);
+    const _ws = 300;
+    nextFreshWindow = (Math.floor(_nowSec / _ws) + 1) * _ws + 2;
+    slog(`⏳ Startup: waiting for next window at ${new Date((nextFreshWindow - 2) * 1000).toTimeString().slice(0,8)}`);
   } else {
     slog('📋 PAUSED — monitoring only, no orders placed');
   }
