@@ -115,10 +115,11 @@ async function discoverMarkets() {
       dnHistory: [],
     };
   }));
-  // Clean stale
+  // Clean stale + non-target pairs
   const expired = [];
   for (const [slug, m] of Object.entries(marketCache)) {
     if (Date.now() - m.endTime > 10000) expired.push(slug);
+    else if (!slug.startsWith('btc') && !slug.startsWith('eth')) expired.push(slug);
   }
   for (const slug of expired) {
     delete marketCache[slug];
@@ -338,6 +339,30 @@ async function tick() {
     slog(`⚠️ tick: ${e.message}`);
   }
 }
+
+// ── Independent price refresh (every 1s) to keep dashboard live ──
+setInterval(async () => {
+  try {
+    const promises = [];
+    for (const m of Object.values(marketCache)) {
+      if (!m.resolved && m.upTokenId && m.downTokenId) {
+        promises.push(
+          (async () => {
+            try {
+              const [upR, dnR] = await Promise.all([
+                getJson(`${CLOB}/midpoint?token_id=${m.upTokenId}`),
+                getJson(`${CLOB}/midpoint?token_id=${m.downTokenId}`),
+              ]);
+              if (upR?.mid) m.upMid   = fl4(parseFloat(upR.mid));
+              if (dnR?.mid) m.downMid = fl4(parseFloat(dnR.mid));
+            } catch (_) {}
+          })()
+        );
+      }
+    }
+    await Promise.allSettled(promises);
+  } catch (_) {}
+}, 1000);
 
 // ── Snapshot ──
 function buildSnapshot() {
