@@ -259,7 +259,11 @@ async function checkRealFills() {
         const grp = lv.groups[grpIdx];
         placeRealSell(tokenId, po.side, lv.tp, tpSh, po.slug, po.levelIdx, grpIdx, 'tp').then(id => { if (id) grp.tpOrderId = id; });
         placeRealSell(tokenId, po.side, RUNNER_PRICE, runSh, po.slug, po.levelIdx, grpIdx, 'runner').then(id => { if (id) grp.runnerOrderId = id; });
-        placeRealSell(tokenId, po.side, lv.stop, sh, po.slug, po.levelIdx, grpIdx, 'stop').then(id => { if (id) grp.stopOrderId = id; });
+        // STOP only covers the runner portion (the shares NOT covered by TP).
+        // TP fill handler cancels+replaces STOP for remaining runner shares.
+        // Runner fill handler relies on TP+STOP covering the position.
+        // Initial STOP = runSh so total sell exposure never exceeds position size.
+        placeRealSell(tokenId, po.side, lv.stop, runSh, po.slug, po.levelIdx, grpIdx, 'stop').then(id => { if (id) grp.stopOrderId = id; });
       }
 
     } else if (po.dir === 'tp') {
