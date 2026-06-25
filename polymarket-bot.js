@@ -1,6 +1,6 @@
 'use strict';
 
-// ── Time-Decay Checkpoint Strategy for Polymarket BTC/ETH/SOL 5m ──────
+// ── Time-Decay Checkpoint Strategy for Polymarket BTC/ETH 5m ──────
 // Every 25s: buy 100 shares of the cheapest side
 // For lots held ≥25s: sell if in profit, buy 100 more if in loss (avg down)
 // At 240s (4th min): force sell ALL, stop new entries
@@ -18,7 +18,7 @@ const SHARES_PER_LOT    = 100;
 const DEMO_BALANCE      = 2000;
 const TAKER_FEE         = 0.003;
 const STOP_ELAPSED      = 240;   // 4th minute — force sell all
-const TARGET_PAIRS      = ['BTC', 'ETH', 'SOL'];
+const TARGET_PAIRS      = ['BTC', 'ETH'];
 
 let DRY_RUN = true;
 const KILL_SWITCH = process.env.KILL_SWITCH === 'true';
@@ -102,7 +102,7 @@ async function discoverMarkets() {
     if (!endTime) return;
     marketCache[slug] = {
       slug,
-      pair: slug.startsWith('btc') ? 'BTC' : slug.startsWith('eth') ? 'ETH' : 'SOL',
+      pair: slug.startsWith('btc') ? 'BTC' : 'ETH',
       windowS: WINDOW_SECS,
       upTokenId: ids[0], downTokenId: ids[1],
       endTime, active: false, resolved: false,
@@ -294,20 +294,25 @@ async function tick() {
         m.active = false;
         return;
       }
-      if (!m.active && !m.forceStopped && getPositionsForMarket(m.slug).length > 0) {
-        // Market ended with open positions — force sell
-        await sellAllForMarket(m);
-        return;
-      }
-      if (!m.active) return;
-
-      // Fetch prices
+      // Always fetch prices (even for upcoming markets) so dashboard shows live prices
       const [upR, dnR] = await Promise.all([
         getJson(`${CLOB}/midpoint?token_id=${m.upTokenId}`),
         getJson(`${CLOB}/midpoint?token_id=${m.downTokenId}`),
       ]);
       if (upR?.mid) m.upMid   = fl4(parseFloat(upR.mid));
       if (dnR?.mid) m.downMid = fl4(parseFloat(dnR.mid));
+
+      if (!m.active && !m.forceStopped && getPositionsForMarket(m.slug).length > 0) {
+        // Market ended with open positions — force sell
+        await sellAllForMarket(m);
+        return;
+      }
+      if (!m.active && m.secondsToEnd <= 0) return;
+      // For upcoming markets (secondsToEnd > 300), we still show prices but skip trading
+      if (!m.active && m.secondsToEnd > m.windowS) {
+        // Just emit snapshot, don't process checkpoints
+        return;
+      }
 
       const elapsed = Math.max(0, WINDOW_SECS - m.secondsToEnd);
 
@@ -373,7 +378,7 @@ function buildSnapshot() {
     }
   }
 
-  const activeMkts = Object.values(marketCache).filter(m => m.active || (!m.resolved && m.secondsToEnd > 0));
+  const activeMkts = Object.values(marketCache).filter(m => !m.resolved && m.secondsToEnd > -300);
 
   return {
     dryRun: DRY_RUN,
