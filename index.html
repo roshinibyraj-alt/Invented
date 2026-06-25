@@ -175,12 +175,12 @@ function render(d){
   var tbtn=document.getElementById('toggleBtn');
   var warn=document.getElementById('liveWarn');
   if(d.dryRun){
-    mode.textContent='📋 DRY RUN';mode.className='badge dry';
+    mode.textContent="📋 PAUSED";;mode.className='badge dry';
     tbtn.textContent='🔴 Go Live';tbtn.style.borderColor='#2563eb';tbtn.style.color='#2563eb';
     if(warn)warn.style.display='none';
   }else{
     mode.textContent='🔴 LIVE';mode.className='badge live';
-    tbtn.textContent='📋 Go Dry Run';tbtn.style.borderColor='#16a34a';tbtn.style.color='#16a34a';
+    tbtn.textContent="⏸️ Pause";;tbtn.style.borderColor='#16a34a';tbtn.style.color='#16a34a';
     if(warn)warn.style.display='block';
   }
 
@@ -425,7 +425,7 @@ function render(d){
   // ── Footer ────────────────────────────────────────────────────────────
   var up=d.uptime||0;
   var upStr=up>3600?Math.floor(up/3600)+'h '+Math.floor((up%3600)/60)+'m':up>60?Math.floor(up/60)+'m '+(up%60)+'s':up+'s';
-  document.getElementById('footer').textContent='Grid Bot v9 MOMENTUM | uptime: '+upStr+' | ticks: '+(d.tickCount||0)+(d.dryRun?' | DRY RUN':'');
+  document.getElementById('footer').textContent='Grid Bot v9 MOMENTUM | uptime: '+upStr+' | ticks: '+(d.tickCount||0)+(d.dryRun?" | PAUSED':'');
 }
 
 socket.on('connect',    function(){document.getElementById('dot').className='dot on';});
@@ -440,8 +440,8 @@ setInterval(function(){
 function doToggle(){
   var isLive=document.getElementById('modeBadge').className.indexOf('live')>=0;
   var msg=isLive
-    ? 'Switch to DRY RUN? (orders will be simulated, no real trades)'
-    : 'Switch to LIVE TRADING? Real orders will be placed on Polymarket!';
+    ? 'Switch to PAUSED? (monitoring only, no orders placed)'
+    : 'Switch to LIVE TRADING? Real orders will be placed on Polymarket CLOB!';
   if(!confirm(msg))return;
   fetch('/api/set-dry-run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({dryRun:isLive})})
     .then(function(r){return r.json();})

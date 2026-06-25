@@ -1,6 +1,6 @@
 'use strict';
 
-// ── Proxy setup (must be first — patches globalThis.fetch before any bot code) ──
+// ── Proxy setup (must be first) ──
 const _proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
 if (_proxyUrl) {
   try {
@@ -40,13 +40,13 @@ app.get('/api/snapshot', (_req, res) => {
 
 app.get('/healthz', (_req, res) => res.json({ ok: true }));
 
-app.post('/api/reset', (_req, res) => {
-  try { bot.resetState(); res.json({ ok: true }); } catch(e) { res.json({ error: e.message }); }
-});
-
 app.post('/api/set-dry-run', express.json(), async (req, res) => {
-  try { await bot.setDryRun(req.body?.dryRun); res.json({ ok: true, dryRun: bot.getDryRun() }); }
-  catch(e) { res.json({ error: e.message }); }
+  try {
+    await bot.setDryRun(req.body?.dryRun);
+    res.json({ ok: true, dryRun: bot.getDryRun() });
+  } catch(e) {
+    res.json({ error: e.message });
+  }
 });
 
 let lastEmit = 0;
@@ -68,7 +68,7 @@ async function main() {
     (event, data) => { if (event === 'snapshot') broadcast(data); },
     (msg) => console.log(msg),
   );
-  server.listen(PORT, () => console.log(`🌐 Gabagool Bot running on http://0.0.0.0:${PORT}`));
+  server.listen(PORT, () => console.log(`🌐 Grid Bot running on http://0.0.0.0:${PORT}`));
 }
 
 main();

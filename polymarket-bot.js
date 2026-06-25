@@ -1,14 +1,10 @@
 'use strict';
-// ── Gabagool Grid Bot v9 ──────────────────────────────────────────────────────
+// ── Grid Bot v9 — Merged from reference bot auth + grid strategy ──────────
 // BTC 5m binary markets. Fixed 8-level MOMENTUM LONG grid.
-// TRUE opposite of v7 (mean-reversion buy-the-dip):
-//
-// v7: Fill when mid FALLS to level → TP above entry (bet on recovery)
-// v9: Fill when mid RISES to level → TP above entry (bet on continuation)
 //
 // ENTRY  : Limit BUY at 0.15 / 0.25 / 0.35 / 0.45 / 0.55 / 0.65 / 0.75 / 0.85
 //          Fills when mid RISES to ≥ level price  (buy the breakout)
-//          $10 per level → shares = floor(10 / price), balance decreases at fill
+//          ~$10 per level → shares = floor(10 / price), balance decreases at fill
 //
 // ON FILL (N shares bought at price P):
 //   tpShares     = floor(N / 2)
@@ -18,19 +14,10 @@
 //   STOP  SELL @ max(P − 0.15, 0.01)  for ALL remaining ← Stop-loss if reversal
 //
 // PULL-STOP: if highestMid seen ≥ 0.75 and current mid drops to ≤ 0.40
-//            → market-sell ALL open long positions immediately (limit losses on reversal)
+//            → market-sell ALL open long positions immediately
 //
-// CUTOFF : no new BUY orders when ≤ 30 s remain (the 4:30 mark)
-//
-// RESOLUTION: open longs at window end → pendingRes bucket,
-//             polled every 10 s until Polymarket declares binary outcome.
-//             WIN = market WINS (payout 1): receive $1/share → profit.
-//             LOSS = market LOSES (payout 0): receive $0 → lose cost.
-//
-// DRY_RUN=true: real auth, $2000 simulated, no real orders placed.
-//   BUY fills when mid ≥ level price.
-//   SELL (TP) fills when mid ≥ tp price.
-//   STOP fills when mid ≤ stop price.
+// DRY_RUN=true: PAUSED — no orders placed, no simulated fills, just monitoring.
+// DRY_RUN=false: LIVE — real orders on Polymarket CLOB.
 
 const fs   = require('fs');
 const path = require('path');
@@ -38,11 +25,8 @@ const PolymarketTrader = require('./polymarket-trader');
 
 const GAMMA      = 'https://gamma-api.polymarket.com';
 const CLOB       = 'https://clob.polymarket.com';
-const STATE_FILE = path.join(__dirname, 'state.json');
-const STATE_TMP  = path.join(__dirname, 'state.json.tmp');
 
-let DRY_RUN           = process.env.DRY_RUN !== 'false';
-const DRY_RUN_BALANCE = parseFloat(process.env.DRY_RUN_BALANCE || '2000');
+let DRY_RUN           = true;  // start paused by default
 const KILL_SWITCH     = process.env.KILL_SWITCH === 'true';
 
 const TICK_MS           = 100;    // main loop interval
@@ -53,8 +37,8 @@ const RESOLUTION_MS     = 10_000; // check market resolution every 10 s
 
 // ── Strategy constants ────────────────────────────────────────────────────────
 const GRID_PRICES    = [0.15, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.85];
-const BUDGET         = 4.50;   // $ spent buying per level per window
-const TP_STEP        = 0.15;   // half-TP sell offset ABOVE entry price
+const BUDGET         = 10.00;  // $ spent buying per level per window
+const TP_STEP        = 0.15;   // half-TP sell offset ABOVE entry price (max 0.99)
 const RUNNER_PRICE   = 0.99;   // runner sell target (near $1 = max profit)
 const PULLBACK_HIGH  = 0.75;   // if highestMid rose to or above this...
 const PULLBACK_LOW   = 0.40;   // ...and mid drops back to or below this → sell all longs
@@ -104,15 +88,15 @@ function mktLabel(slug) {
 
 function generate5mSlugs() {
   const now = Math.floor(Date.now() / 1000);
-  const ws  = 300;
+  const ws  = 300; // 5 minutes
   const cur = Math.floor(now / ws) * ws;
   return [-1, 0, 1, 2].map(d => `btc-updown-5m-${cur + d * ws}`);
 }
 
 // ── Runtime state ─────────────────────────────────────────────────────────────
 let trader        = null;
-let balance       = DRY_RUN ? DRY_RUN_BALANCE : 0;
-let startBalance  = DRY_RUN ? DRY_RUN_BALANCE : 0;
+let balance       = 0;
+let startBalance  = 0;
 let marketCache   = {};   // slug → market object
 let tokenGrids    = {};   // `${slug}:${side}` → grid state
 let pendingRes    = [];   // shares awaiting binary market resolution
@@ -145,24 +129,6 @@ function pushFill(action, label, shares, price, pnl, bal) {
 }
 
 // ── Grid data structures ──────────────────────────────────────────────────────
-//
-// level = {
-//   price, tp, stop, initShares,
-//   initialPlaced: bool,   ← initial buy has been submitted
-//   buyPending:    bool,   ← a limit buy order is waiting
-//   pendingShares: int,    ← shares for the current pending buy
-//   groups: [group, ...]   ← one entry per filled buy
-// }
-//
-// group = {
-//   shares, cost,            ← total shares bought + dollar cost paid
-//   tpShares, runnerShares,
-//   tpFilled,  tpPnl,        ← half-TP sell leg
-//   runnerFilled, runnerPnl, ← runner sell leg
-//   stopFilled, stopPnl,     ← stop-loss sell (all remaining shares)
-//   inResolution,            ← moved to pendingRes bucket
-//   marketSold,              ← pulled out by emergency pull-stop sell
-// }
 
 function makeLevel(price) {
   const sh = gridShares(price);
@@ -184,7 +150,7 @@ function makeGrid(slug, side) {
     slug, side,
     key:           `${slug}:${side}`,
     levels:        GRID_PRICES.map(makeLevel),
-    highestMid:    0,     // track highest mid seen this window
+    highestMid:    0,
     pullbackDone:  false,
     noMoreEntries: false,
     settled:       false,
@@ -219,6 +185,7 @@ async function placeRealBuy(g, lv, tokenId, label) {
     };
     slog(`🔏 BUY ORDER ${label} @${lv.price} | ${sh}sh id:${res.id}`);
   } catch (e) {
+    // Refund on failure
     balance = fl2(balance + cost);
     lv.initialPlaced = false;
     slog(`❌ BUY failed ${label} @${lv.price}: ${e.message}`);
@@ -284,7 +251,7 @@ async function checkRealFills() {
       });
       lv.buyPending = false;
       lv.buyOrderId = null;
-      slog(`📤 BUY ${label} @${fl4(lv.price)} | ${sh}sh (-$${fl2(cost)}) → TP:${fl4(lv.tp)} Runner:${RUNNER_PRICE} Stop:${fl4(lv.stop)} | bal:$${fl2(balance)}`);
+      slog(`📤 BUY FILLED ${label} @${fl4(lv.price)} | ${sh}sh (-$${fl2(cost)}) → TP:${fl4(lv.tp)} Runner:${RUNNER_PRICE} Stop:${fl4(lv.stop)} | bal:$${fl2(balance)}`);
       pushFill('BUY', label, sh, lv.price, 0, balance);
       changed = true;
       if (tokenId) {
@@ -347,59 +314,7 @@ async function checkRealFills() {
 
     delete pendingRealOrders[orderId];
   }
-  if (changed) { recordEquity(); saveState(); }
-}
-
-// ── State persistence ─────────────────────────────────────────────────────────
-function saveState() {
-  try {
-    fs.writeFileSync(STATE_TMP, JSON.stringify({
-      v: 9, savedAt: Date.now(),
-      balance, startBalance,
-      tokenGrids, pendingRes,
-      equityHistory: equityHistory.slice(-MAX_EQUITY_POINTS),
-      recentFills:   recentFills.slice(0, 100),
-      activityLog:   activityLog.slice(0, 200),
-    }), 'utf8');
-    fs.renameSync(STATE_TMP, STATE_FILE);
-  } catch (e) { logFn(`⚠️  saveState: ${e.message}`); }
-}
-
-function loadState() {
-  try {
-    if (!fs.existsSync(STATE_FILE)) return false;
-    const data = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-    if (!data || data.v !== 9) return false;
-    const age = Math.floor((Date.now() - (data.savedAt || 0)) / 1000);
-    balance       = typeof data.balance      === 'number' ? data.balance      : balance;
-    startBalance  = typeof data.startBalance === 'number' ? data.startBalance : startBalance;
-    tokenGrids    = (data.tokenGrids && typeof data.tokenGrids === 'object') ? data.tokenGrids : {};
-    pendingRes    = Array.isArray(data.pendingRes)    ? data.pendingRes    : [];
-    equityHistory = Array.isArray(data.equityHistory) ? data.equityHistory : [];
-    recentFills   = Array.isArray(data.recentFills)   ? data.recentFills   : [];
-    activityLog   = Array.isArray(data.activityLog)   ? data.activityLog   : [];
-    slog(`♻️  Restored v9 | age:${age}s | bal:$${fl2(balance)} | grids:${Object.keys(tokenGrids).length} | res:${pendingRes.length}`);
-    return true;
-  } catch (e) {
-    slog(`⚠️  loadState: ${e.message}`);
-    return false;
-  }
-}
-
-// ── Reset ─────────────────────────────────────────────────────────────────────
-function resetState() {
-  balance       = DRY_RUN_BALANCE;
-  startBalance  = DRY_RUN_BALANCE;
-  tokenGrids    = {};
-  pendingRes    = [];
-  recentFills   = [];
-  activityLog   = [];
-  equityHistory = [];
-  tickCount     = 0;
-  startTime     = Date.now();
-  try { fs.unlinkSync(STATE_FILE); } catch (_) {}
-  saveState();
-  slog(`🔄 Reset → bal:$${fl2(balance)}`);
+  if (changed) { recordEquity(); }
 }
 
 // ── Market discovery ──────────────────────────────────────────────────────────
@@ -428,12 +343,6 @@ async function discoverMarkets() {
 }
 
 // ── Resolution poller ─────────────────────────────────────────────────────────
-// Polymarket UP/DN binary markets resolve via UMA.
-//
-// Detection:  mk.umaResolutionStatus === 'resolved'
-// Outcome:    mk.outcomePrices = ["1","0"] or ["0","1"]
-//               outcomePrices[0] = UP token payout  (1 if UP won, 0 if DOWN won)
-//               outcomePrices[1] = DN token payout  (1 if DOWN won, 0 if UP won)
 async function checkResolution() {
   if (pendingRes.length === 0) return;
   const now = Date.now();
@@ -460,8 +369,8 @@ async function checkResolution() {
     } catch (_) { continue; }
 
     if (!Array.isArray(prices) || prices.length < 2) continue;
-    const upPayout = prices[0];   // 1.0 if UP won, 0.0 if DOWN won
-    const dnPayout = prices[1];   // 1.0 if DOWN won, 0.0 if UP won
+    const upPayout = prices[0];
+    const dnPayout = prices[1];
 
     if (isNaN(upPayout) || isNaN(dnPayout)) continue;
 
@@ -469,15 +378,12 @@ async function checkResolution() {
     for (const r of pendingRes) {
       if (r.slug !== slug || r.resolved) continue;
 
-      // LONG positions: we PAID cost at buy time, now RECEIVE the payout
-      // WIN  = market WINS (payout 1) — receive $1/share, profit = $1/sh - cost/sh
-      // LOSS = market LOSES (payout 0) — receive $0, lose full cost
       const payoutPerShare = r.side === 'up' ? upPayout : dnPayout;
-      const proceeds = fl2(payoutPerShare * r.shares);  // received at resolution
-      const pnl      = fl2(proceeds - r.cost);          // received − paid
+      // In live mode, balance is synced from chain — no need to add proceeds.
+      // In dry-run, we also don't simulate — the resolution is just informational.
+      const proceeds = fl2(payoutPerShare * r.shares);
+      const pnl      = fl2(proceeds - r.cost);
 
-      // In live mode balance is synced from chain — don't double-count
-      if (DRY_RUN) { balance += proceeds; balance = fl2(balance); }
       r.resolved   = true;
       r.outcome    = payoutPerShare === 1 ? 'WIN' : 'LOSS';
       r.proceeds   = proceeds;
@@ -485,11 +391,11 @@ async function checkResolution() {
       r.resolvedAt = Date.now();
 
       const sign = pnl >= 0 ? '+' : '';
-      slog(`🏁 RESOLVED ${r.outcome} BUY ${r.label} @${fl4(r.levelPrice)} | ${r.shares}sh paid:$${fl2(r.cost)} received:$${fl2(proceeds)} pnl:${sign}$${fl2(pnl)} bal:$${fl2(balance)}`);
+      slog(`🏁 RESOLVED ${r.outcome} BUY ${r.label} @${fl4(r.levelPrice)} | ${r.shares}sh paid:$${fl2(r.cost)} received:$${fl2(proceeds)} pnl:${sign}$${fl2(pnl)}`);
       pushFill('RESOLVE', r.label, r.shares, payoutPerShare, pnl, balance);
       changed = true;
     }
-    if (changed) { recordEquity(); saveState(); }
+    if (changed) { recordEquity(); }
   }
 }
 
@@ -503,11 +409,10 @@ function expireGrid(m, side) {
   const tokenId = side === 'up' ? m.upTokenId : m.downTokenId;
 
   for (const lv of g.levels) {
-    lv.buyPending = false;  // cancel pending buy orders (no cash impact, never filled)
+    lv.buyPending = false;
     for (const grp of lv.groups) {
       if (grp.marketSold) continue;
 
-      // Collect unsold shares
       let leftSh   = 0;
       let leftCost = 0;
 
@@ -533,7 +438,7 @@ function expireGrid(m, side) {
         label,
         levelPrice: lv.price,
         shares:     leftSh,
-        cost:       leftCost,   // amount PAID at buy time
+        cost:       leftCost,
         resolved:   false,
         outcome:    null,
         proceeds:   0,
@@ -543,7 +448,6 @@ function expireGrid(m, side) {
       slog(`⏳ PENDING_RES BUY ${label} @${fl4(lv.price)} | ${leftSh}sh paid:$${fl2(leftCost)}`);
     }
   }
-  saveState();
 }
 
 // ── Grid tick: one token, one market ─────────────────────────────────────────
@@ -561,16 +465,12 @@ async function gridTick(m, side) {
   // Track highest mid seen this window
   if (mid > g.highestMid) g.highestMid = mid;
 
-  // Apply 4:30 cutoff
+  // Apply cutoff
   if (m.secondsToEnd <= CUTOFF_SECS) g.noMoreEntries = true;
 
   let changed = false;
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // PULL-STOP (momentum reversal guard)
-  // If mid ever rose HIGH (≥ 0.75) and has now FALLEN back to ≤ 0.40,
-  // the momentum has reversed — sell ALL open long positions at current mid.
-  // ─────────────────────────────────────────────────────────────────────────
+  // ── PULL-STOP (momentum reversal guard) ──
   if (!g.pullbackDone && g.highestMid >= PULLBACK_HIGH && mid <= PULLBACK_LOW) {
     g.pullbackDone  = true;
     g.noMoreEntries = true;
@@ -579,14 +479,12 @@ async function gridTick(m, side) {
 
     for (const lv of g.levels) {
       lv.initialPlaced = true;
-      // Cancel pending buy order (live)
       if (!DRY_RUN && lv.buyOrderId) { cancelRealOrder(lv.buyOrderId); lv.buyOrderId = null; }
-      lv.buyPending    = false;
+      lv.buyPending = false;
 
       for (const grp of lv.groups) {
         if (grp.marketSold || grp.inResolution) continue;
 
-        // Cancel any live sell orders on this group so we can re-sell at current mid
         if (!DRY_RUN) {
           if (grp.tpOrderId)     { cancelRealOrder(grp.tpOrderId);     grp.tpOrderId     = null; }
           if (grp.runnerOrderId) { cancelRealOrder(grp.runnerOrderId); grp.runnerOrderId = null; }
@@ -606,14 +504,6 @@ async function gridTick(m, side) {
         }
 
         if (leftSh > 0) {
-          if (DRY_RUN) {
-            // Simulate immediate sell at current mid
-            const proceeds = fl2(leftSh * mid);
-            const pnl      = fl2(proceeds - leftCost);
-            balance       = fl2(balance + proceeds);
-            g.realizedPnl = fl2(g.realizedPnl + pnl);
-            totalProceeds += proceeds;
-          }
           grp.tpFilled     = true;
           grp.runnerFilled = true;
           grp.stopFilled   = true;
@@ -621,7 +511,6 @@ async function gridTick(m, side) {
           totalSh   += leftSh;
           totalCost += leftCost;
 
-          // Live: post an aggressive limit sell at current mid to exit
           if (!DRY_RUN) {
             const tokenId = side === 'up' ? m.upTokenId : m.downTokenId;
             placeRealSell(tokenId, side, mid, leftSh, g.slug, g.levels.indexOf(lv), lv.groups.indexOf(grp), 'stop')
@@ -631,147 +520,27 @@ async function gridTick(m, side) {
       }
     }
 
-    const totalPnl = fl2(totalProceeds - totalCost);
-    slog(`⚠️  PULL-STOP ${label} | high:${fl4(g.highestMid)} now:${fl4(mid)} | ${totalSh}sh pnl:$${fl2(totalPnl)} bal:$${fl2(balance)}`);
-    pushFill('PULL-STOP', label, totalSh, mid, totalPnl, balance);
+    slog(`⚠️  PULL-STOP ${label} | high:${fl4(g.highestMid)} now:${fl4(mid)} | ${totalSh}sh`);
+    pushFill('PULL-STOP', label, totalSh, mid, 0, balance);
     changed = true;
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // PROCESS EACH GRID LEVEL
-  // ─────────────────────────────────────────────────────────────────────────
+  // ── PROCESS EACH GRID LEVEL ──
   for (const lv of g.levels) {
 
-    // ── 1. Check if pending BUY fills (DRY_RUN only — live fills come from checkRealFills) ──
-    if (DRY_RUN && lv.buyPending && mid >= lv.price) {
-      const sh   = lv.pendingShares;
-      const cost = fl2(sh * lv.price);   // amount PAID
-      const tpSh = Math.floor(sh / 2);
-      const runSh = sh - tpSh;
-
-      // Budget check
-      if (balance < cost + 200) {
-        slog(`⚠️  SKIP BUY ${label} @${lv.price} — balance low ($${fl2(balance)})`);
-        lv.buyPending = false;
-      } else {
-        balance = fl2(balance - cost);   // PAY for the tokens
-        lv.buyPending = false;
-
-        lv.groups.push({
-          shares:        sh,
-          cost,           // amount PAID at buy time
-          tpShares:      tpSh,
-          runnerShares:  runSh,
-          tpFilled:      false,
-          tpPnl:         0,
-          runnerFilled:  false,
-          runnerPnl:     0,
-          stopFilled:    false,
-          stopPnl:       0,
-          inResolution:  false,
-          marketSold:    false,
-          tpOrderId:     null, runnerOrderId: null, stopOrderId: null,
-        });
-
-        slog(`📤 BUY ${label} @${fl4(lv.price)} | ${sh}sh (-$${fl2(cost)}) → TP:${fl4(lv.tp)} Runner:${RUNNER_PRICE} Stop:${fl4(lv.stop)} | bal:$${fl2(balance)}`);
-        pushFill('BUY', label, sh, lv.price, 0, balance);
-        changed = true;
-      }
-    }
-
-    // ── 2. Check TP, Runner, and Stop on every open group (DRY_RUN only) ──
-    if (DRY_RUN) {
-    for (const grp of lv.groups) {
-      if (grp.marketSold || grp.inResolution || grp.stopFilled) continue;
-
-      // Half-TP sell: fires when mid ≥ tp price (price continues upward)
-      if (!grp.tpFilled && mid >= lv.tp) {
-        const proceeds  = fl2(grp.tpShares * lv.tp);
-        const costBasis = partCost(grp.tpShares, grp.shares, grp.cost);
-        const pnl       = fl2(proceeds - costBasis);
-
-        balance       = fl2(balance + proceeds);
-        g.realizedPnl = fl2(g.realizedPnl + pnl);
-        grp.tpFilled  = true;
-        grp.tpPnl     = pnl;
-        if (pnl >= 0) g.wins++; else g.losses++;
-
-        slog(`✅ HALF-TP ${label} @${fl4(lv.price)}→${fl4(lv.tp)} | ${grp.tpShares}sh received:$${fl2(proceeds)} pnl:$${fl2(pnl)} bal:$${fl2(balance)}`);
-        pushFill('HALF-TP', label, grp.tpShares, lv.tp, pnl, balance);
-        changed = true;
-      }
-
-      // Runner sell: fires when mid ≥ 0.99 (near $1 = maximum long profit)
-      if (!grp.runnerFilled && mid >= RUNNER_PRICE) {
-        const proceeds  = fl2(grp.runnerShares * RUNNER_PRICE);
-        const costBasis = partCost(grp.runnerShares, grp.shares, grp.cost);
-        const pnl       = fl2(proceeds - costBasis);
-
-        balance          = fl2(balance + proceeds);
-        g.realizedPnl    = fl2(g.realizedPnl + pnl);
-        grp.runnerFilled = true;
-        grp.runnerPnl    = pnl;
-        if (pnl >= 0) g.wins++; else g.losses++;
-
-        slog(`🚀 RUNNER ${label} @${fl4(lv.price)}→${RUNNER_PRICE} | ${grp.runnerShares}sh received:$${fl2(proceeds)} pnl:$${fl2(pnl)} bal:$${fl2(balance)}`);
-        pushFill('RUNNER', label, grp.runnerShares, RUNNER_PRICE, pnl, balance);
-        changed = true;
-      }
-
-      // Stop-loss: fires when mid ≤ stop price (momentum reversed, cut the loss)
-      // Sells ALL remaining shares (tpShares if not yet sold, plus runnerShares)
-      if (mid <= lv.stop) {
-        let leftSh   = 0;
-        let leftCost = 0;
-
-        if (!grp.tpFilled) {
-          leftSh   += grp.tpShares;
-          leftCost += partCost(grp.tpShares, grp.shares, grp.cost);
-        }
-        if (!grp.runnerFilled) {
-          leftSh   += grp.runnerShares;
-          leftCost += partCost(grp.runnerShares, grp.shares, grp.cost);
-        }
-
-        if (leftSh > 0) {
-          const proceeds = fl2(leftSh * lv.stop);
-          const pnl      = fl2(proceeds - leftCost);
-
-          balance          = fl2(balance + proceeds);
-          g.realizedPnl    = fl2(g.realizedPnl + pnl);
-          grp.stopFilled   = true;
-          grp.tpFilled     = true;
-          grp.runnerFilled = true;
-          grp.stopPnl      = pnl;
-          if (pnl >= 0) g.wins++; else g.losses++;
-
-          slog(`🛑 STOP ${label} @${fl4(lv.price)}→${fl4(lv.stop)} | ${leftSh}sh received:$${fl2(proceeds)} pnl:$${fl2(pnl)} bal:$${fl2(balance)}`);
-          pushFill('STOP', label, leftSh, lv.stop, pnl, balance);
-          changed = true;
-        }
-      }
-    }
-    } // end if (DRY_RUN) for step 2
-
-    // ── 3. Place initial BUY order (once per window per level) ───────────
-    // DRY_RUN: queued silently, fills when mid rises to lv.price.
+    // Place initial BUY order (once per window per level)
     // LIVE: posts a real GTC limit BUY on the CLOB.
-    if (!lv.initialPlaced && !lv.buyPending && !g.noMoreEntries) {
+    if (!lv.initialPlaced && !lv.buyPending && !g.noMoreEntries && !DRY_RUN) {
       const cost = fl2(lv.initShares * lv.price);
-      if (balance >= cost + (DRY_RUN ? 200 : 5)) {
+      if (balance >= cost + 5) {
         lv.initialPlaced = true;
-        if (DRY_RUN) {
-          lv.buyPending    = true;
-          lv.pendingShares = lv.initShares;
-        } else {
-          const tokenId = side === 'up' ? m.upTokenId : m.downTokenId;
-          placeRealBuy(g, lv, tokenId, label).catch(e => slog(`❌ placeRealBuy: ${e.message}`));
-        }
+        const tokenId = side === 'up' ? m.upTokenId : m.downTokenId;
+        placeRealBuy(g, lv, tokenId, label).catch(e => slog(`❌ placeRealBuy: ${e.message}`));
       }
     }
   }
 
-  if (changed) { recordEquity(); saveState(); }
+  if (changed) { recordEquity(); }
 }
 
 // ── Per-market update ─────────────────────────────────────────────────────────
@@ -809,20 +578,9 @@ async function updateMarket(m, fetchPrice) {
 }
 
 // ── Equity tracking ───────────────────────────────────────────────────────────
-//
-// Float = balance + current market value of all held tokens
-//
-// LONG math:
-//   balance already has −cost for every buy filled.
-//   Outstanding asset value = mid × openShares (what you'd get selling now).
-//   float = balance + holdingValueAtMid  →  mtmValue = +holdingValueAtMid
-//
-//   unrealizedPnl = holdingValueAtMid − totalCostPaid = (mid − entry) × shares
-//   Positive when mid > entry (price has risen → longs in profit).
-//
 function computeOpenPositions() {
-  let holdingValue = 0;   // total value of open positions at current mid
-  let totalCost    = 0;   // total amount paid for open positions
+  let holdingValue = 0;
+  let totalCost    = 0;
   for (const g of Object.values(tokenGrids)) {
     const m   = marketCache[g.slug];
     const mid = m ? (g.side === 'up' ? m.upMid : m.downMid) : 0;
@@ -842,9 +600,9 @@ function computeOpenPositions() {
     }
   }
   return {
-    mtmValue:      fl2(holdingValue),                    // positive: asset value
-    openCost:      fl2(totalCost),                       // for display reference
-    unrealizedPnl: fl2(holdingValue - totalCost),        // (mid − entry) × shares
+    mtmValue:      fl2(holdingValue),
+    openCost:      fl2(totalCost),
+    unrealizedPnl: fl2(holdingValue - totalCost),
   };
 }
 
@@ -863,19 +621,22 @@ function recordEquity(force) {
 async function tick() {
   try {
     tickCount++;
+
+    // Always sync balance from chain (even in DRY_RUN, shows real balance)
+    if (tickCount % 50 === 0 && trader) {
+      const rb = await trader.getBalance().catch(() => -1);
+      if (rb > 0) balance = rb;
+    }
+
     if (tickCount === 1 || tickCount % DISCOVER_EVERY === 0) {
       await discoverMarkets();
     }
     const fetchPrice = (tickCount % PRICE_FETCH_EVERY === 0);
     await Promise.allSettled(Object.values(marketCache).map(m => updateMarket(m, fetchPrice)));
     await checkResolution();
-    if (!DRY_RUN && tickCount % 50 === 0 && trader) {
-      const rb = await trader.getBalance().catch(() => -1);
-      if (rb > 0) balance = rb;
-    }
     if (!DRY_RUN) await checkRealFills();
-    if (tickCount === 1)              { recordEquity(true); saveState(); }
-    else if (tickCount % 300 === 0)   { recordEquity();     saveState(); }
+    if (tickCount === 1)              { recordEquity(true); }
+    else if (tickCount % 300 === 0)   { recordEquity(); }
     emitFn('snapshot', buildSnapshot());
   } catch (e) {
     slog(`⚠️  tick: ${e.message}`);
@@ -1029,33 +790,27 @@ function buildSnapshot() {
 async function start(emit, log) {
   emitFn = emit || (() => {});
   logFn  = log  || (() => {});
+  startTime = Date.now();
 
-  slog(`🤖 Grid Bot v9 MOMENTUM | levels:[${GRID_PRICES.join(',')}] | $${BUDGET}/level | tp:+${TP_STEP} | stop:-${TP_STEP} | runner:${RUNNER_PRICE} | cutoff:${CUTOFF_SECS}s`);
+  slog(`🤖 Grid Bot v9 | levels:[${GRID_PRICES.join(',')}] | $${BUDGET}/level | tp:+${TP_STEP} | stop:-${TP_STEP} | runner:${RUNNER_PRICE}`);
 
-  loadState();
+  try {
+    trader = new PolymarketTrader(process.env.POLYMARKET_PRIVATE_KEY, process.env.FUNDER_ADDRESS);
+    trader.setLogFn(logFn);
+    slog('🔑 Authenticating with Polymarket CLOB...');
+    const authResult = await trader.authenticate();
+    if (!authResult) throw new Error('authentication returned empty');
 
-  if (process.env.POLYMARKET_PRIVATE_KEY) {
-    try {
-      slog('🔑 Authenticating with Polymarket CLOB...');
-      trader = new PolymarketTrader(process.env.POLYMARKET_PRIVATE_KEY, process.env.FUNDER_ADDRESS);
-      trader.setLogFn(logFn);
-      const info = await trader.authenticate();
-      slog(`✅ Auth OK — wallet: ${trader.address}`);
-      if (!DRY_RUN) {
-        const rb = await trader.getBalance().catch(() => -1);
-        if (rb > 0) { balance = rb; startBalance = rb; }
-        slog(`💰 Live balance: $${fl2(balance)}`);
-      }
-    } catch (e) {
-      slog(`⚠️  Auth failed: ${e.message} — live trading will require HTTPS_PROXY or valid key`);
-    }
+    const rb = await trader.getBalance().catch(() => -1);
+    if (rb > 0) { balance = rb; startBalance = rb; }
+    slog(`✅ Connected | wallet:${trader.address} bal:$${fl2(balance)}`);
+  } catch (e) {
+    slog(`❌ Auth failed: ${e.message}`);
+    process.exit(1);
   }
 
-  if (DRY_RUN) {
-    slog(`📋 DRY RUN — $${DRY_RUN_BALANCE} simulated · demo trading only`);
-  } else {
-    slog(`🔴 LIVE TRADING — real orders on Polymarket CLOB`);
-  }
+  if (DRY_RUN) slog('📋 PAUSED — monitoring only, toggle LIVE to start trading');
+  else slog('🔴 LIVE TRADING — real orders on Polymarket CLOB');
 
   setInterval(tick, TICK_MS);
 }
@@ -1071,23 +826,21 @@ function flushState() {
   tickCount         = 0;
   startTime         = Date.now();
   lastResCheck      = 0;
-  saveState();
 }
 
 async function setDryRun(val) {
   DRY_RUN = !!val;
   flushState();
-
-  if (DRY_RUN) {
-    balance      = DRY_RUN_BALANCE;
-    startBalance = DRY_RUN_BALANCE;
-    slog('📋 Switched to DRY RUN — $' + fl2(DRY_RUN_BALANCE) + ' simulated');
+  if (!DRY_RUN && trader) {
+    // Re-fetch real balance immediately when going live
+    const rb = await trader.getBalance().catch(() => -1);
+    if (rb > 0) { balance = rb; startBalance = rb; }
+    slog(`🔴 LIVE — real orders on Polymarket CLOB | bal:$${fl2(balance)}`);
   } else {
-    balance      = 0;
-    startBalance = 0;
-    slog('🔴 Switched to LIVE — balance will sync from CLOB within 5s');
+    slog('📋 PAUSED — monitoring only, no orders placed');
   }
 }
+
 function getDryRun() { return DRY_RUN; }
 
-module.exports = { start, buildSnapshot, resetState, setDryRun, getDryRun };
+module.exports = { start, buildSnapshot, setDryRun, getDryRun };
