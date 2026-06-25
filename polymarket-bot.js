@@ -165,7 +165,7 @@ async function updateMarket(m) {
 }
 
 async function processSide(m, side) {
-  if (KILL_SWITCH || DRY_RUN) return;
+  if (KILL_SWITCH) return;
 
   const mid = side === 'up' ? m.upMid : m.downMid;
   if (!mid) return;
@@ -365,8 +365,26 @@ function flushState() {
 }
 
 async function setDryRun(val) {
+  const wasDryRun = DRY_RUN;
   DRY_RUN = !!val;
   flushState();
+
+  // Initialize trader when switching from PAUSED to LIVE
+  if (wasDryRun && !DRY_RUN && !trader) {
+    try {
+      trader = new PolymarketTrader(process.env.POLYMARKET_PRIVATE_KEY, process.env.FUNDER_ADDRESS);
+      trader.setLogFn(logFn);
+      slog('🔑 Authenticating...');
+      const authResult = await trader.authenticate();
+      if (!authResult) throw new Error('auth returned empty');
+      slog('✅ Authenticated: ' + trader.address);
+    } catch (e) {
+      slog('❌ Auth failed: ' + e.message);
+      DRY_RUN = true;
+      slog('↩️ Reverted to PAUSED — auth failed');
+    }
+  }
+
   if (DRY_RUN) {
     slog('📋 PAUSED — monitoring only');
   } else {
