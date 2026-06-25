@@ -850,7 +850,7 @@ async function start(emit, log) {
     // Skip the current partial window — wait for the next fresh 5m window
     const _nowSec = Math.floor(Date.now() / 1000);
     const _ws = 300;
-    nextFreshWindow = (Math.floor(_nowSec / _ws) + 1) * _ws + 2;
+    nextFreshWindow = (Math.floor(_nowSec / _ws) + 1) * _ws;
     slog(`⏳ Startup: waiting for next window at ${new Date((nextFreshWindow - 2) * 1000).toTimeString().slice(0,8)}`);
   } catch (e) {
     slog(`❌ Auth failed: ${e.message}`);
@@ -888,7 +888,7 @@ async function setDryRun(val) {
     // Skip any current partial window — wait for next fresh 5m window
     const _nowSec = Math.floor(Date.now() / 1000);
     const _ws = 300;
-    nextFreshWindow = (Math.floor(_nowSec / _ws) + 1) * _ws + 2;
+    nextFreshWindow = (Math.floor(_nowSec / _ws) + 1) * _ws;
     slog(`⏳ Startup: waiting for next window at ${new Date((nextFreshWindow - 2) * 1000).toTimeString().slice(0,8)}`);
   } else {
     slog('📋 PAUSED — monitoring only, no orders placed');
