@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
-<title>Dip-Buying Bot</title>
+<title>Time-Decay Checkpoint Bot</title>
 <script src="/socket.io/socket.io.js"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -41,7 +41,7 @@ footer{text-align:center;padding:10px;color:#9ca3af;font-size:9px;border-top:1px
 <body>
 <header>
   <div class="hrow">
-    <div class="logo"><span class="dot off" id="dot"></span>Dip-Buying Bot</div>
+    <div class="logo"><span class="dot off" id="dot"></span>Time-Decay Bot</div>
     <span class="badge paused" id="modeBadge">📋 PAUSED</span>
     <div class="stats" id="headerStats"></div>
     <button id="toggleBtn" onclick="doToggle()" style="padding:4px 10px;font-size:10px;font-weight:700;background:#fff;border:1.5px solid #2563eb;color:#2563eb;border-radius:6px;cursor:pointer;letter-spacing:.4px">🔴 Go Live</button>
@@ -50,11 +50,11 @@ footer{text-align:center;padding:10px;color:#9ca3af;font-size:9px;border-top:1px
 <main>
   <div class="grid2">
     <div class="card">
-      <div class="card-title">📊 Markets</div>
+      <div class="card-title">📊 Markets & Checkpoints</div>
       <div id="mktBody"><div class="empty">Waiting for markets...</div></div>
     </div>
     <div class="card">
-      <div class="card-title">📈 Open Positions</div>
+      <div class="card-title">📈 Open Lots</div>
       <div id="posBody"><div class="empty">No open positions</div></div>
     </div>
   </div>
@@ -69,7 +69,7 @@ footer{text-align:center;padding:10px;color:#9ca3af;font-size:9px;border-top:1px
     </div>
   </div>
 </main>
-<footer id="footer">Dip-Buying Bot | loading...</footer>
+<footer id="footer">Time-Decay Bot | loading...</footer>
 
 <script>
 var socket=io({transports:['websocket','polling'],reconnection:true,reconnectionDelay:1000});
@@ -97,20 +97,25 @@ function render(d){
   h+='<div class="stat"><div class="sl">Balance</div><div class="sv w">$'+f2(d.balance)+'</div></div>';
   h+='<div class="stat"><div class="sl">Equity</div><div class="sv w">$'+f2(d.openEquity)+'</div></div>';
   h+='<div class="stat"><div class="sl">PnL</div><div class="sv '+cls(d.pnl)+'">'+sgn(d.pnl)+'$'+f2(d.pnl)+'</div></div>';
-  h+='<div class="stat"><div class="sl">Open</div><div class="sv b">'+d.openPositions.length+'</div></div>';
+  h+='<div class="stat"><div class="sl">Lots</div><div class="sv b">'+(d.openLotCount||0)+'</div></div>';
   h+='<div class="stat"><div class="sl">Markets</div><div class="sv g">'+(d.activeMarkets||0)+'</div></div>';
-  h+='<div class="stat"><div class="sl">Dip</div><div class="sv gr">'+f2(d.dipThreshold)+'</div></div>';
+  h+='<div class="stat"><div class="sl">Fees</div><div class="sv gr">$'+f4(d.totalFees)+'</div></div>';
   document.getElementById('headerStats').innerHTML=h;
 
   // Markets
   var mc='';
   if(!d.allMarkets||!d.allMarkets.length){mc='<div class="empty">No active markets</div>';}
   else{
-    mc+='<table><tr><th>Pair</th><th>Time</th><th>UP</th><th>DN</th><th>Active</th></tr>';
+    mc+='<table><tr><th>Pair</th><th>Elapsed</th><th>CP</th><th>UP</th><th>DN</th><th>Spread</th><th>Fair ↑</th><th>Fair ↓</th><th>Lots</th><th>Status</th></tr>';
     for(var m of d.allMarkets){
-      mc+='<tr><td>'+m.label+'</td><td>'+(m.secondsToEnd||0)+'s</td>'+
+      var domCls=m.dominantSide==='UP'?'g':'r';
+      mc+='<tr><td>'+m.label+'</td><td>'+m.elapsed+'</td><td>'+m.checkpoint+'</td>'+
         '<td class="g">$'+f4(m.upMid)+'</td><td class="r">$'+f4(m.dnMid)+'</td>'+
-        '<td>'+(m.active?'✅':'❌')+'</td></tr>';
+        '<td class="b">'+f4(m.spread)+'</td>'+
+        '<td class="'+domCls+'">$'+f4(m.fairDominant)+'</td>'+
+        '<td class="gr">$'+f4(m.fairLagging)+'</td>'+
+        '<td class="b">'+(m.lots||0)+'</td>'+
+        '<td>'+(m.stopped?'⛔':m.active?'✅':'❌')+'</td></tr>';
     }
     mc+='</table>';
   }
@@ -120,14 +125,15 @@ function render(d){
   var pc='';
   if(!d.openPositions||!d.openPositions.length){pc='<div class="empty">No open positions</div>';}
   else{
-    pc+='<table><tr><th>Pair</th><th>Side</th><th>Entry</th><th>Current</th><th>Shares</th><th>Cost</th><th>Value</th><th>Unreal</th><th>Ticks</th></tr>';
+    pc+='<table><tr><th>Pair</th><th>Side</th><th>Lot</th><th>Entry</th><th>Current</th><th>Shares</th><th>Cost</th><th>Value</th><th>Unreal</th><th>CPs</th></tr>';
     for(var p of d.openPositions){
       var sideCls=p.side==='UP'?'up':'dn';
       pc+='<tr><td>'+p.pair+'</td><td><span class="badge '+sideCls+'">'+p.side+'</span></td>'+
+        '<td class="gr">#'+p.lotId+'</td>'+
         '<td>$'+f4(p.entryPrice)+'</td><td>$'+f4(p.currentPrice)+'</td>'+
         '<td>'+p.shares+'</td><td>$'+f2(p.cost)+'</td><td>$'+f2(p.currentValue)+'</td>'+
         '<td class="'+cls(p.unrealizedPnl)+'">'+sgn(p.unrealizedPnl)+'$'+f2(p.unrealizedPnl)+'</td>'+
-        '<td>'+(p.ticksHeld||0)+'</td></tr>';
+        '<td>'+(p.checkpointsHeld||0)+'</td></tr>';
     }
     pc+='</table>';
   }
@@ -137,13 +143,14 @@ function render(d){
   var tc='';
   if(!d.recentTrades||!d.recentTrades.length){tc='<div class="empty">No trades yet</div>';}
   else{
-    tc+='<table><tr><th>Time</th><th>Pair</th><th>Side</th><th>Entry</th><th>Exit</th><th>Shares</th><th>PnL</th><th>Bal</th></tr>';
+    tc+='<table><tr><th>Time</th><th>Pair</th><th>Side</th><th>Action</th><th>Entry</th><th>Exit</th><th>Shares</th><th>PnL</th><th>Bal</th><th>Reason</th></tr>';
     for(var t of d.recentTrades){
       tc+='<tr><td>'+t.ts+'</td><td>'+t.pair+'</td>'+
         '<td><span class="badge '+(t.side==='UP'?'up':'dn')+'">'+t.side+'</span></td>'+
+        '<td>'+(t.action||'')+'</td>'+
         '<td>$'+f4(t.entry)+'</td><td>$'+f4(t.exit)+'</td>'+
         '<td>'+t.shares+'</td><td class="'+cls(t.pnl)+'">'+sgn(t.pnl)+'$'+f2(t.pnl)+'</td>'+
-        '<td>$'+f2(t.bal)+'</td></tr>';
+        '<td>$'+f2(t.bal)+'</td><td class="gr">'+(t.reason||'')+'</td></tr>';
     }
     tc+='</table>';
   }
@@ -158,7 +165,10 @@ function render(d){
 
   var up=d.uptime||0;
   var upStr=up>3600?Math.floor(up/3600)+'h '+Math.floor((up%3600)/60)+'m':up>60?Math.floor(up/60)+'m '+(up%60)+'s':up+'s';
-  document.getElementById('footer').textContent='Dip-Buying Bot | '+d.targetPairs.join(',')+' | dip:'+f2(d.dipThreshold)+' buy:$'+d.buyAmount+' hold:'+d.sellAfterTicks+'ticks | uptime: '+upStr+' | ticks: '+(d.tickCount||0);
+  var cfg=d.config||{};
+  document.getElementById('footer').textContent='Time-Decay Bot | '+(d.targetPairs||[]).join(',')+
+    ' | '+cfg.windowSecs+'s windows | '+cfg.checkpointSecs+'s CP | '+cfg.sharesPerLot+'sh/lot'+
+    ' | stop:'+cfg.stopElapsed+'s | fee:'+(cfg.takerFee*100)+'bps | uptime: '+upStr+' | ticks: '+(d.tickCount||0);
 }
 
 socket.on('connect',    function(){document.getElementById('dot').className='dot on';});
