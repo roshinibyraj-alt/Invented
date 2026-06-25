@@ -1,7 +1,7 @@
 'use strict';
 
-// ── Time-Decay Checkpoint Strategy for Polymarket BTC/ETH 5m ──────
-// Every 25s: buy 100 shares of the cheapest side
+// ── Trend-Dip Strategy for Polymarket BTC/ETH 5m — buy leader on dip, trailing stop, no avg-down ──────
+// Every 25s CP: buy leader on dip (dev>threshold), trailing stop, hard stop, no avg-down
 // For lots held ≥25s: sell if in profit, buy 100 more if in loss (avg down)
 // At 240s (4th min): force sell ALL, stop new entries
 
@@ -156,6 +156,7 @@ async function buyShares(m, side, shares) {
     tickBought: tickCount,
     checkpointIdx: cpIdx,
     lotId,
+    peakPrice: mid,
   });
 
   slog(`📥 BUY ${m.pair} ${side.toUpperCase()} x${shares} @ $${fl4(mid)} (-$${cost}) fee:$${fee} bal:$${fl2(balance)}`);
@@ -220,8 +221,7 @@ async function processCheckpoint(m) {
   const elapsed = Math.max(0, WINDOW_SECS - m.secondsToEnd);
   const cpIdx   = Math.floor(elapsed / CHECKPOINT_SECS);
 
-  // ── 4th minute: force sell ALL, stop ──
-  // Check BEFORE cpIdx guard so we catch it even if cpIdx didn't change
+  // ── 4th minute force sell ──
   if (elapsed >= STOP_ELAPSED && !m.forceStopped) {
     m.forceStopped = true;
     await sellAllForMarket(m);
@@ -229,7 +229,7 @@ async function processCheckpoint(m) {
     return;
   }
 
-  // Track history
+  // Track price history for leader determination
   if (m.upMid > 0) {
     m.upHistory.push({ t: Date.now(), p: m.upMid });
     if (m.upHistory.length > 100) m.upHistory.shift();
@@ -245,37 +245,83 @@ async function processCheckpoint(m) {
 
   if (!m.started) {
     m.started = true;
-    slog(`🟢 ${m.pair} window started — ${WINDOW_SECS}s remaining`);
+    slog(`\U0001f7e2 ${m.pair} window started \u2014 ${WINDOW_SECS}s remaining`);
   }
 
   if (m.forceStopped) return;
 
-  // ── Step 1: Buy 100 shares of the cheapest side ──
-  const cheaperSide = m.upMid <= m.downMid ? 'up' : 'dn';
-  const cheaperPrice = cheaperSide === 'up' ? m.upMid : m.downMid;
-  if (cheaperPrice > 0 && cheaperPrice < 0.99) {
-    await buyShares(m, cheaperSide, SHARES_PER_LOT);
+  // ── Determine dominant side via MA over last checkpoints ──
+  if (!m.leaderHistory) m.leaderHistory = [];
+  m.leaderHistory.push({ cpIdx, up: m.upMid, dn: m.downMid, leader: m.upMid >= m.downMid ? 'up' : 'dn' });
+  if (m.leaderHistory.length > 3) m.leaderHistory.shift();
+
+  if (m.leaderHistory.length < 2) return; // need at least 2 checkpoints of history
+
+  // Moving averages to smooth out noise
+  const upMA = m.leaderHistory.reduce((s, h) => s + h.up, 0) / m.leaderHistory.length;
+  const dnMA = m.leaderHistory.reduce((s, h) => s + h.dn, 0) / m.leaderHistory.length;
+  const leaderSide = upMA >= dnMA ? 'up' : 'dn';
+
+  // Fair value: dominant side trends 0.50 -> 1.00 over the window
+  const leaderFair = 0.50 + (elapsed / WINDOW_SECS) * 0.50;
+  const leaderPrice = leaderSide === 'up' ? m.upMid : m.downMid;
+
+  // Dynamic threshold: wider as time passes (less time for reversion)
+  const threshold = 0.04 + (elapsed / WINDOW_SECS) * 0.04; // 0.04 at t=0, 0.08 at t=300
+  const deviation = leaderFair - leaderPrice; // positive = leader is underpriced = buy
+
+  // Record analytics for dashboard
+  m.leaderSide = leaderSide;
+  m.leaderFair = fl4(leaderFair);
+  m.deviation = fl4(deviation);
+  m.threshold = fl4(threshold);
+
+  if (deviation > 0) {
+    slog(`\U0001f4ca ${m.pair} ${leaderSide.toUpperCase()} fair:$${fl4(leaderFair)} actual:$${fl4(leaderPrice)} dev:+${fl4(deviation)} thr:$${fl4(threshold)}`);
   }
 
-  // ── Step 2: Check existing lots held ≥1 checkpoint ──
+  // ── Buy signal: leader dip below fair value + threshold met ──
   const myLots = getPositionsForMarket(m.slug);
+  const lotsThisSide = myLots.filter(l => l.side === leaderSide);
+
+  if (deviation > threshold && myLots.length < 3 && lotsThisSide.length === 0) {
+    slog(`\U0001f4e3 ${m.pair} ${leaderSide.toUpperCase()} DIP! $${fl4(leaderPrice)} vs fair $${fl4(leaderFair)}`);
+    await buyShares(m, leaderSide, SHARES_PER_LOT);
+  }
+
+  // ── Manage existing lots: trailing stop + hard stop ──
   for (const pos of myLots) {
-    if (cpIdx - pos.checkpointIdx < 1) continue; // held less than 25s
+    if (cpIdx - pos.checkpointIdx < 1) continue; // min 25s hold
+
     const mid = pos.side === 'up' ? m.upMid : m.downMid;
     if (!mid || mid <= 0) continue;
 
-    if (mid > pos.entryPrice) {
-      // In profit → sell (take profit)
+    // Track peak for trailing stop
+    if (!pos.peakPrice) pos.peakPrice = pos.entryPrice;
+    if (mid > pos.peakPrice) pos.peakPrice = mid;
+
+    const trailDrop = pos.peakPrice - mid; // drop from peak
+    const fromEntry = pos.entryPrice - mid; // loss from entry (positive = loss)
+
+    // Trailing stop: dropped 0.03 from peak
+    if (trailDrop >= 0.03) {
+      slog(`\U0001f4aa ${m.pair} ${pos.side.toUpperCase()} trail @ $${fl4(mid)} (peak:$${fl4(pos.peakPrice)}, -$${fl2(trailDrop)})`);
       await sellPosition(pos, m);
-      // Don't avg down after selling
-    } else if (mid < pos.entryPrice) {
-      // In loss → average down: buy another lot
-      slog(`📉 ${m.pair} ${pos.side.toUpperCase()} dropping — averaging down @ $${fl4(mid)}`);
-      await buyShares(m, pos.side, SHARES_PER_LOT);
+    }
+    // Hard stop: dropped 0.05 from entry
+    else if (fromEntry >= 0.05) {
+      slog(`\U0001f6d1 ${m.pair} ${pos.side.toUpperCase()} stop @ $${fl4(mid)} (entry:$${fl4(pos.entryPrice)}, -$${fl2(fromEntry)})`);
+      await sellPosition(pos, m);
+    }
+    // Time stop: held 4+ CPs with no profit, tighten trail to 0.02
+    else if (cpIdx - pos.checkpointIdx >= 4 && trailDrop >= 0.02) {
+      slog(`\u23f0 ${m.pair} ${pos.side.toUpperCase()} time @ $${fl4(mid)} (${cpIdx - pos.checkpointIdx}CPs)`);
+      await sellPosition(pos, m);
     }
   }
 }
 
+// ── Main tick ──
 // ── Main tick ──
 async function tick() {
   try {
@@ -398,6 +444,8 @@ function buildSnapshot() {
         unrealizedPnl: fl2((lot.shares * cur) - (lot.shares * lot.entryPrice)),
         checkpointsHeld: cpIdx - lot.checkpointIdx,
         lotId: lot.lotId,
+        peakPrice: fl4(lot.peakPrice || lot.entryPrice),
+        trailDrop: fl4(Math.max(0, (lot.peakPrice || lot.entryPrice) - cur)),
         time: new Date().toTimeString().slice(0, 8),
       });
     }
@@ -425,9 +473,6 @@ function buildSnapshot() {
       const cpIdx = Math.floor(elapsed / CHECKPOINT_SECS);
       const cpTotal = Math.floor(WINDOW_SECS / CHECKPOINT_SECS);
       // Time decay fair value estimate
-      const isUpDominant = m.upMid > m.downMid;
-      const fairDominant  = fl4(0.50 + (elapsed / WINDOW_SECS) * 0.50);
-      const fairLagging   = fl4(1.0 - fairDominant);
       return {
         label: `${m.pair} 5m`,
         elapsed: `${elapsed}s`,
@@ -436,9 +481,11 @@ function buildSnapshot() {
         dnMid: fl4(m.dnMid),
         spread: fl4(Math.abs((m.upMid || 0) - (m.downMid || 0))),
         checkpoint: `${cpIdx}/${cpTotal}`,
-        dominantSide: isUpDominant ? 'UP' : 'DN',
-        fairDominant,
-        fairLagging,
+        dominantSide: (m.leaderSide || (m.upMid >= m.downMid ? 'UP' : 'DN')).toUpperCase(),
+        fairDominant: m.leaderFair || 0.50,
+        fairLagging: m.leaderFair ? fl4(1.0 - m.leaderFair) : 0.50,
+        deviation: m.deviation || 0,
+        threshold: m.threshold || 0.04,
         active: m.active,
         stopped: m.forceStopped,
         lots: getPositionsForMarket(m.slug).length,
@@ -467,8 +514,8 @@ async function start(emit, log) {
   recentTrades = [];
   activityLog = [];
 
-  slog(`🤖 Time-Decay Bot | ${TARGET_PAIRS.join(',')} | ${WINDOW_SECS}s windows | ${CHECKPOINT_SECS}s checkpoints | ${SHARES_PER_LOT}sh/lot`);
-  slog(`📐 Stop at ${STOP_ELAPSED}s — force sell all`);
+  slog(`🤖 Trend-Dip Bot | ${TARGET_PAIRS.join(',')} | ${WINDOW_SECS}s windows | dev:0.04→0.08 | trail:0.03 stop:0.05`);
+  slog(`📐 Max lots: 3 | Trail: 0.03 | Hard stop: 0.05 | Force sell at ${STOP_ELAPSED}s`);
 
   if (!DRY_RUN) {
     try {
