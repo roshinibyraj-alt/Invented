@@ -69,11 +69,16 @@ class PolymarketTrader {
   async getBalance() {
     try {
       const resp = await this._clob.getBalanceAllowance({ asset_type: AssetType.COLLATERAL });
+      if (resp?.error) {
+        this._log('getBalanceAllowance error: ' + JSON.stringify(resp).substring(0, 200));
+        return this.balance;
+      }
       const raw  = parseFloat(resp?.balance ?? '0');
       const bal  = raw / 1e6;
       this.balance = bal;
       return bal;
-    } catch (_) {
+    } catch (e) {
+      this._log('getBalanceAllowance exception: ' + (e?.message || e));
       return this.balance;
     }
   }

@@ -1094,7 +1094,17 @@ async function setDryRun(val) {
       return;
     }
 
-    // Re-authenticate for live trading (trader._clob may be null if startup auth failed)
+    // Try existing trader first (avoid re-auth if already valid)
+    if (trader) {
+      const rb = await trader.getBalance().catch(() => -1);
+      if (rb > 0) {
+        balance = rb; startBalance = rb;
+        slog('💰 Live balance: $' + fl2(rb));
+        return;
+      }
+    }
+
+    // Re-authenticate if existing trader couldn't fetch balance
     slog('🔑 Authenticating for LIVE trading...');
     try {
       trader = new PolymarketTrader(process.env.POLYMARKET_PRIVATE_KEY, process.env.FUNDER_ADDRESS);
@@ -1108,10 +1118,13 @@ async function setDryRun(val) {
         slog('💰 Live balance: $' + fl2(rb));
       } else {
         slog('⚠️  Live balance: $0 — no USDC found');
+        if (rb === 0) {
+          const full = await trader.getBalanceAllowance().catch(() => '');
+          slog('   → Balance details: ' + full);
+        }
       }
     } catch (e) {
       slog('❌ Live auth failed: ' + e.message);
-      slog('   → Check POLYMARKET_PRIVATE_KEY or set HTTPS_PROXY for geo-blocked servers');
       DRY_RUN = true;
       balance = DRY_RUN_BALANCE;
       startBalance = DRY_RUN_BALANCE;
