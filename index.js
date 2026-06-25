@@ -1,12 +1,12 @@
 'use strict';
 
-const _proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
-if (_proxyUrl) {
+// ── Proxy setup (MUST be first — patches HTTP module before any imports) ──
+if (process.env.HTTPS_PROXY || process.env.HTTP_PROXY) {
   try {
-    const { ProxyAgent, fetch: _uFetch } = require('undici');
-    const _agent = new ProxyAgent({ uri: _proxyUrl, requestTls: { rejectUnauthorized: false } });
-    globalThis.fetch = (url, opts = {}) => _uFetch(url, { ...opts, dispatcher: _agent });
-    console.log('🌐 Proxy active:', _proxyUrl.replace(/:[^:@]*@/, ':***@'));
+    const { bootstrap } = require('global-agent');
+    bootstrap();
+    global.GLOBAL_AGENT.HTTP_PROXY = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
+    console.log('🌐 Proxy active:', (process.env.HTTPS_PROXY || process.env.HTTP_PROXY).replace(/:[^:@]*@/, ':***@'));
   } catch(e) {
     console.log('⚠️ Proxy setup error:', e.message);
   }
