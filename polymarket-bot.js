@@ -1,7 +1,7 @@
 'use strict';
 
 // ── Trend-Dip Strategy for Polymarket BTC/ETH 5m — buy leader on dip, trailing stop, no avg-down ──────
-// Every 25s CP: buy leader on dip (dev>threshold), trailing stop, hard stop, no avg-down
+// Every 25s CP: buy leader on dip (dev>0.02), pyramid if profitable, trailing stop 0.015, force sell 210s
 // For lots held ≥25s: sell if in profit, buy 100 more if in loss (avg down)
 // At 240s (4th min): force sell ALL, stop new entries
 
@@ -17,7 +17,7 @@ const CHECKPOINT_SECS   = 25;
 const SHARES_PER_LOT    = 100;
 const DEMO_BALANCE      = 2000;
 const TAKER_FEE         = 0.003;
-const STOP_ELAPSED      = 240;   // 4th minute — force sell all
+const STOP_ELAPSED      = 210;   // 4th minute — force sell all
 const TARGET_PAIRS      = ['BTC', 'ETH'];
 
 let DRY_RUN = true;
@@ -267,7 +267,7 @@ async function processCheckpoint(m) {
   const leaderPrice = leaderSide === 'up' ? m.upMid : m.downMid;
 
   // Dynamic threshold: wider as time passes (less time for reversion)
-  const threshold = 0.04 + (elapsed / WINDOW_SECS) * 0.04; // 0.04 at t=0, 0.08 at t=300
+  const threshold = 0.02 + (elapsed / WINDOW_SECS) * 0.04; // 0.02 at t=0, 0.06 at t=300
   const deviation = leaderFair - leaderPrice; // positive = leader is underpriced = buy
 
   // Record analytics for dashboard
@@ -284,26 +284,23 @@ async function processCheckpoint(m) {
   const myLots = getPositionsForMarket(m.slug);
   const lotsThisSide = myLots.filter(l => l.side === leaderSide);
 
-  if (deviation > threshold && myLots.length < 3 && lotsThisSide.length === 0) {
-    slog(`\U0001f4e3 ${m.pair} ${leaderSide.toUpperCase()} DIP! $${fl4(leaderPrice)} vs fair $${fl4(leaderFair)}`);
+  // Can buy if: under max lots, AND (no lot on this side OR all existing lots on this side are profitable)
+  const canPyramid = lotsThisSide.length === 0 || lotsThisSide.every(l => {
+    const lp = leaderSide === 'up' ? m.upMid : m.downMid;
+    return lp > l.entryPrice;
+  });
+  if (deviation > threshold && myLots.length < 3 && canPyramid) {
+    slog(`\U0001f4e3 ${m.pair} ${leaderSide.toUpperCase()} DIP! $${fl4(leaderPrice)} vs fair $${fl4(leaderFair)} (lots:${myLots.length})`);
     await buyShares(m, leaderSide, SHARES_PER_LOT);
   }
 
-  // ── Time-based exit (only at checkpoints, not tick-level) ──
-  // Trailing/hard stops handled every tick above for reactivity.
-  // Here we only do the "time stop" for lots held too long.
+  // ── Time exit: held 5+ CPs (125s+), get out regardless ──
   for (const pos of myLots) {
-    if (cpIdx - pos.checkpointIdx < 4) continue; // only check lots held 4+ CPs
-
+    if (cpIdx - pos.checkpointIdx < 5) continue;
     const mid = pos.side === 'up' ? m.upMid : m.downMid;
     if (!mid || mid <= 0) continue;
-
-    const fromEntry = pos.entryPrice - mid;
-    // Time stop: held 4+ CPs and not in profit
-    if (fromEntry >= 0.02) {
-      slog(`\u23f0 ${m.pair} ${pos.side.toUpperCase()} time @ $${fl4(mid)} (${cpIdx - pos.checkpointIdx}CPs)`);
-      await sellPosition(pos, m);
-    }
+    slog(`\u23f0 ${m.pair} ${pos.side.toUpperCase()} time @ $${fl4(mid)} (${cpIdx - pos.checkpointIdx}CPs)`);
+    await sellPosition(pos, m);
   }
 }
 
@@ -382,13 +379,13 @@ async function tick() {
       const fromEntry = pos.entryPrice - mid;
 
       // Skip min hold for exit check (exits are reactive, not time-gated)
-      // Trailing stop
-      if (trailDrop >= 0.03 && mid > 0.01) {
+      // Trailing stop: 0.015 from peak (tight — captures gains, protects profits)
+      if (trailDrop >= 0.015 && mid > 0.01) {
         slog(`\U0001f4aa ${m.pair} ${pos.side.toUpperCase()} trail @ $${fl4(mid)} (peak:$${fl4(pos.peakPrice)}, -$${fl2(trailDrop)})`);
         await sellPosition(pos, m);
       }
-      // Hard stop
-      else if (fromEntry >= 0.05 && mid > 0.01) {
+      // Hard stop: safety net if price gaps past trail
+      else if (fromEntry >= 0.08 && mid > 0.01) {
         slog(`\U0001f6d1 ${m.pair} ${pos.side.toUpperCase()} stop @ $${fl4(mid)} (entry:$${fl4(pos.entryPrice)}, -$${fl2(fromEntry)})`);
         await sellPosition(pos, m);
       }
@@ -529,7 +526,7 @@ async function start(emit, log) {
   activityLog = [];
 
   slog(`🤖 Trend-Dip Bot | ${TARGET_PAIRS.join(',')} | ${WINDOW_SECS}s windows | dev:0.04→0.08 | trail:0.03 stop:0.05`);
-  slog(`📐 Max lots: 3 | Trail: 0.03 | Hard stop: 0.05 | Force sell at ${STOP_ELAPSED}s`);
+  slog(`📐 Max lots: 3 | Trail: 0.015 | Threshold: 0.02→0.06 | Pyramid same-side | Force: ${STOP_ELAPSED}s`);
 
   if (!DRY_RUN) {
     try {

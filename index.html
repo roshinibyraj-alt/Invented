@@ -168,7 +168,7 @@ function render(d){
   var cfg=d.config||{};
   document.getElementById('footer').textContent='Trend-Dip Bot | '+(d.targetPairs||[]).join(',')+
     ' | '+cfg.windowSecs+'s windows | '+cfg.checkpointSecs+'s CP | '+cfg.sharesPerLot+'sh/lot'+
-    ' | trail:0.03 stop:0.05 | stop:'+cfg.stopElapsed+'s | fee:'+(cfg.takerFee*100)+'bps | uptime: '+upStr+' | ticks: '+(d.tickCount||0);
+    ' | trail:0.015 pyr:on | stop:'+cfg.stopElapsed+'s | fee:'+(cfg.takerFee*100)+'bps | uptime: '+upStr+' | ticks: '+(d.tickCount||0);
 }
 
 socket.on('connect',    function(){document.getElementById('dot').className='dot on';});
