@@ -289,32 +289,18 @@ async function processCheckpoint(m) {
     await buyShares(m, leaderSide, SHARES_PER_LOT);
   }
 
-  // ── Manage existing lots: trailing stop + hard stop ──
+  // ── Time-based exit (only at checkpoints, not tick-level) ──
+  // Trailing/hard stops handled every tick above for reactivity.
+  // Here we only do the "time stop" for lots held too long.
   for (const pos of myLots) {
-    if (cpIdx - pos.checkpointIdx < 1) continue; // min 25s hold
+    if (cpIdx - pos.checkpointIdx < 4) continue; // only check lots held 4+ CPs
 
     const mid = pos.side === 'up' ? m.upMid : m.downMid;
     if (!mid || mid <= 0) continue;
 
-    // Track peak for trailing stop
-    if (!pos.peakPrice) pos.peakPrice = pos.entryPrice;
-    if (mid > pos.peakPrice) pos.peakPrice = mid;
-
-    const trailDrop = pos.peakPrice - mid; // drop from peak
-    const fromEntry = pos.entryPrice - mid; // loss from entry (positive = loss)
-
-    // Trailing stop: dropped 0.03 from peak
-    if (trailDrop >= 0.03) {
-      slog(`\U0001f4aa ${m.pair} ${pos.side.toUpperCase()} trail @ $${fl4(mid)} (peak:$${fl4(pos.peakPrice)}, -$${fl2(trailDrop)})`);
-      await sellPosition(pos, m);
-    }
-    // Hard stop: dropped 0.05 from entry
-    else if (fromEntry >= 0.05) {
-      slog(`\U0001f6d1 ${m.pair} ${pos.side.toUpperCase()} stop @ $${fl4(mid)} (entry:$${fl4(pos.entryPrice)}, -$${fl2(fromEntry)})`);
-      await sellPosition(pos, m);
-    }
-    // Time stop: held 4+ CPs with no profit, tighten trail to 0.02
-    else if (cpIdx - pos.checkpointIdx >= 4 && trailDrop >= 0.02) {
+    const fromEntry = pos.entryPrice - mid;
+    // Time stop: held 4+ CPs and not in profit
+    if (fromEntry >= 0.02) {
       slog(`\u23f0 ${m.pair} ${pos.side.toUpperCase()} time @ $${fl4(mid)} (${cpIdx - pos.checkpointIdx}CPs)`);
       await sellPosition(pos, m);
     }
@@ -379,6 +365,34 @@ async function tick() {
         await processCheckpoint(m);
       }
     }));
+
+    // ── Tick-level exit checks (every 100ms, not just at checkpoints) ──
+    // This makes trailing/hard stops reactive instead of waiting 25s
+    for (const pos of [...positions]) {
+      const m = marketCache[pos.slug];
+      if (!m || m.resolved) continue;
+      const mid = pos.side === 'up' ? m.upMid : m.downMid;
+      if (!mid || mid <= 0) continue;
+
+      // Update peak every tick
+      if (!pos.peakPrice) pos.peakPrice = pos.entryPrice;
+      if (mid > pos.peakPrice) pos.peakPrice = mid;
+
+      const trailDrop = pos.peakPrice - mid;
+      const fromEntry = pos.entryPrice - mid;
+
+      // Skip min hold for exit check (exits are reactive, not time-gated)
+      // Trailing stop
+      if (trailDrop >= 0.03 && mid > 0.01) {
+        slog(`\U0001f4aa ${m.pair} ${pos.side.toUpperCase()} trail @ $${fl4(mid)} (peak:$${fl4(pos.peakPrice)}, -$${fl2(trailDrop)})`);
+        await sellPosition(pos, m);
+      }
+      // Hard stop
+      else if (fromEntry >= 0.05 && mid > 0.01) {
+        slog(`\U0001f6d1 ${m.pair} ${pos.side.toUpperCase()} stop @ $${fl4(mid)} (entry:$${fl4(pos.entryPrice)}, -$${fl2(fromEntry)})`);
+        await sellPosition(pos, m);
+      }
+    }
 
     emitFn('snapshot', buildSnapshot());
   } catch (e) {
