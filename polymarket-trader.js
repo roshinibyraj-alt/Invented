@@ -1,5 +1,21 @@
 'use strict';
 
+// ── Web Crypto API polyfill for Node.js environments that lack crypto.subtle ──
+// Railway / some Node 20+ deployments don't expose globalThis.crypto.subtle
+// even though Node's built-in webcrypto module has it.
+if (!globalThis.crypto || typeof globalThis.crypto.subtle === 'undefined') {
+  try {
+    const { webcrypto } = require('node:crypto');
+    Object.defineProperty(globalThis, 'crypto', {
+      value: webcrypto,
+      writable: false,
+      configurable: true,
+    });
+  } catch (_e) {
+    // webcrypto not available — CLOB SDK will emit a clear error
+  }
+}
+
 const { privateKeyToAccount } = require('viem/accounts');
 const { createWalletClient, http } = require('viem');
 const { polygon } = require('viem/chains');

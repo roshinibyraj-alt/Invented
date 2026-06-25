@@ -622,8 +622,8 @@ async function tick() {
   try {
     tickCount++;
 
-    // Always sync balance from chain (even in DRY_RUN, shows real balance)
-    if (tickCount % 50 === 0 && trader) {
+    // Sync balance from chain (every 5 ticks if 0, every 50 ticks otherwise)
+    if (trader && (balance <= 0 ? tickCount % 5 === 0 : tickCount % 50 === 0)) {
       const rb = await trader.getBalance().catch(() => -1);
       if (rb > 0) balance = rb;
     }
@@ -801,7 +801,12 @@ async function start(emit, log) {
     const authResult = await trader.authenticate();
     if (!authResult) throw new Error('authentication returned empty');
 
-    const rb = await trader.getBalance().catch(() => -1);
+    // Retry balance fetch up to 10 times with delays for slow CLOB responses
+    let rb = -1;
+    for (let attempt = 0; attempt < 10 && rb <= 0; attempt++) {
+      if (attempt > 0) await new Promise(r => setTimeout(r, 3000));
+      rb = await trader.getBalance().catch(() => -1);
+    }
     if (rb > 0) { balance = rb; startBalance = rb; }
     slog(`✅ Connected | wallet:${trader.address} bal:$${fl2(balance)}`);
   } catch (e) {
