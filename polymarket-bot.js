@@ -37,7 +37,7 @@ const RESOLUTION_MS     = 10_000; // check market resolution every 10 s
 
 // ── Strategy constants ────────────────────────────────────────────────────────
 const GRID_PRICES    = [0.15, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.85];
-const BUDGET         = 10.00;  // $ spent buying per level per window
+const BUDGET         = 4.50;  // $ spent buying per level per window
 const TP_STEP        = 0.15;   // half-TP sell offset ABOVE entry price (max 0.99)
 const RUNNER_PRICE   = 0.99;   // runner sell target (near $1 = max profit)
 const PULLBACK_HIGH  = 0.75;   // if highestMid rose to or above this...
