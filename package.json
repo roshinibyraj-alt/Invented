@@ -6,11 +6,11 @@
   "main": "index.js",
   "scripts": { "start": "node index.js" },
   "dependencies": {
-    "@polymarket/builder-relayer-client": "latest",
-    "@polymarket/clob-client-v2": "latest",
+    "@polymarket/builder-relayer-client": "0.0.10",
+    "@polymarket/clob-client-v2": "1.0.6",
     "ethers": "^6.17.0",
     "express": "^4.21.0",
     "socket.io": "^4.7.0",
-    "viem": "latest"
+    "viem": "^2.53.1"
   }
 }
