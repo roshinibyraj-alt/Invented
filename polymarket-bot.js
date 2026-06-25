@@ -12,12 +12,13 @@ const CLOB     = 'https://clob.polymarket.com';
 
 const TICK_MS           = 100;
 const DISCOVER_EVERY    = 300;  // ticks between market discovery
-const PRICE_FETCH_EVERY = 3;    // fetch price every N ticks
+const PRICE_FETCH_EVERY = 1;    // fetch price every tick (super fast)
 
-const DIP_THRESHOLD     = 0.10;
-const PRICE_HISTORY_LEN = 3;
+const DIP_THRESHOLD     = 0.05;
+const PRICE_HISTORY_LEN = 40;
 const BUY_AMOUNT        = 100;  // $100 per dip
-const SELL_AFTER_TICKS  = 3;
+const TAKER_FEE         = 0.003; // 30 bps Polymarket taker fee
+const SELL_AFTER_TICKS  = 40;
 
 const DEMO_BALANCE      = 2000;
 const WINDOW_SECS       = 300;  // 5 minutes
@@ -57,6 +58,7 @@ function generateSlugs() {
 let trader        = null;
 let balance       = DEMO_BALANCE;
 let startBalance  = DEMO_BALANCE;
+let totalFees     = 0;
 let marketCache   = {};   // slug → market object
 let dipState      = {};   // slug:side → { prices:[], bought:false, buyTick:-1, entryPrice:0, shares:0, sellTick:-1 }
 let pendingRes    = [];
@@ -155,9 +157,11 @@ async function updateMarket(m) {
   if (upR?.mid) m.upMid   = fl4(parseFloat(upR.mid));
   if (dnR?.mid) m.downMid = fl4(parseFloat(dnR.mid));
 
-  // Process each side independently — one may have a price when the other doesn't
-  if (m.upMid > 0)   await processSide(m, 'up');
-  if (m.downMid > 0) await processSide(m, 'dn');
+  // Process each side independently and concurrently for speed
+  await Promise.all([
+    m.upMid > 0   ? processSide(m, 'up') : Promise.resolve(),
+    m.downMid > 0 ? processSide(m, 'dn') : Promise.resolve(),
+  ]);
 }
 
 async function processSide(m, side) {
@@ -178,7 +182,7 @@ async function processSide(m, side) {
 
   // ── BUY logic: price dropped 0.10 in last 3 ticks ──
   if (!st.bought) {
-    const recent = st.prices.slice(-PRICE_HISTORY_LEN); // last 3 prices
+    const recent = st.prices.slice(-PRICE_HISTORY_LEN); // last N prices
     const highest = Math.max(...recent);
     if (highest - mid >= DIP_THRESHOLD) {
       const shares = Math.floor(BUY_AMOUNT / mid);
@@ -187,7 +191,9 @@ async function processSide(m, side) {
       const cost = fl2(shares * mid);
       if (balance < cost) return;
 
-      balance = fl2(balance - cost);
+      const buyFeeAmt = fl2(cost * TAKER_FEE);
+      balance = fl2(balance - cost - buyFeeAmt);
+      totalFees = fl4(totalFees + buyFeeAmt);
       st.bought = true;
       st.buyTick = tickCount;
       st.entryPrice = mid;
@@ -217,8 +223,12 @@ async function processSide(m, side) {
     const cost     = fl2(st.shares * st.entryPrice);
     const pnl      = fl2(proceeds - cost);
 
-    balance = fl2(balance + proceeds);
-    slog(`📤 SELL ${m.pair} ${side.toUpperCase()} @ ${fl4(mid)} x ${st.shares}sh (+$${fl2(proceeds)}) pnl:$${fl2(pnl)} | bal:$${fl2(balance)}`);
+    const sellFee = fl2(proceeds * TAKER_FEE);
+    totalFees = fl4(totalFees + sellFee);
+    balance = fl2(balance + proceeds - sellFee);
+    const buyFeeAmt2 = fl2(st.shares * st.entryPrice * TAKER_FEE);
+    const netPnl = fl2(pnl - buyFeeAmt2 - sellFee);
+    slog(`📤 SELL ${m.pair} ${side.toUpperCase()} @ $${fl4(mid)} x ${st.shares}sh (+$${fl2(proceeds)}) fee:$${fl2(buyFeeAmt2 + sellFee)} pnl:$${fl2(netPnl)} | bal:$${fl2(balance)}`);
     pushTrade(m.pair, side.toUpperCase(), 'SELL', st.entryPrice, mid, st.shares, pnl, balance);
 
     // Place real sell on CLOB
@@ -291,6 +301,7 @@ function buildSnapshot() {
     openEquity: fl2(balance + openValue),
     startBalance: fl2(startBalance),
     pnl: fl2((balance + openValue) - startBalance),
+    totalFees: fl4(totalFees),
     uptime: Math.floor((Date.now() - startTime) / 1000),
     tickCount,
     activeMarkets: activeMkts.length,
@@ -318,6 +329,7 @@ async function start(emit, log) {
   startTime = Date.now();
   balance = DEMO_BALANCE;
   startBalance = DEMO_BALANCE;
+  totalFees = 0;
 
   slog(`🤖 Dip-Buying Bot v1 | Pairs:${TARGET_PAIRS.join(',')} | Dip:${DIP_THRESHOLD} | Buy:$${BUY_AMOUNT} | Hold:${SELL_AFTER_TICKS}ticks`);
 
@@ -349,6 +361,7 @@ function flushState() {
   tickCount = 0;
   startTime = Date.now();
   balance = DEMO_BALANCE;
+  totalFees = 0;
 }
 
 async function setDryRun(val) {
