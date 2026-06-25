@@ -17,7 +17,7 @@ const CHECKPOINT_SECS   = 25;
 const SHARES_PER_LOT    = 100;
 const DEMO_BALANCE      = 2000;
 const TAKER_FEE         = 0.003;
-const STOP_ELAPSED      = 210;   // 4th minute — force sell all
+const STOP_ELAPSED      = 270;   // 4.5 minutes — force sell all   // 4th minute — force sell all
 const TARGET_PAIRS      = ['BTC', 'ETH'];
 
 let DRY_RUN = true;
