@@ -1085,50 +1085,7 @@ async function setDryRun(val) {
   } else {
     balance      = 0;
     startBalance = 0;
-
-    if (!process.env.POLYMARKET_PRIVATE_KEY) {
-      slog('⛔ POLYMARKET_PRIVATE_KEY not set — set it on Railway and toggle again');
-      DRY_RUN = true;
-      balance = DRY_RUN_BALANCE;
-      startBalance = DRY_RUN_BALANCE;
-      return;
-    }
-
-    // Try existing trader first (avoid re-auth if already valid)
-    if (trader) {
-      const rb = await trader.getBalance().catch(() => -1);
-      if (rb > 0) {
-        balance = rb; startBalance = rb;
-        slog('💰 Live balance: $' + fl2(rb));
-        return;
-      }
-    }
-
-    // Re-authenticate if existing trader couldn't fetch balance
-    slog('🔑 Authenticating for LIVE trading...');
-    try {
-      trader = new PolymarketTrader(process.env.POLYMARKET_PRIVATE_KEY, process.env.FUNDER_ADDRESS);
-      trader.setLogFn(logFn);
-      await trader.authenticate();
-      slog('✅ Live auth OK — wallet: ' + trader.address);
-
-      const rb = await trader.getBalance();
-      if (rb > 0) {
-        balance = rb; startBalance = rb;
-        slog('💰 Live balance: $' + fl2(rb));
-      } else {
-        slog('⚠️  Live balance: $0 — no USDC found');
-        if (rb === 0) {
-          const full = await trader.getBalanceAllowance().catch(() => '');
-          slog('   → Balance details: ' + full);
-        }
-      }
-    } catch (e) {
-      slog('❌ Live auth failed: ' + e.message);
-      DRY_RUN = true;
-      balance = DRY_RUN_BALANCE;
-      startBalance = DRY_RUN_BALANCE;
-    }
+    slog('🔴 Switched to LIVE — balance will sync from CLOB within 5s');
   }
 }
 function getDryRun() { return DRY_RUN; }
