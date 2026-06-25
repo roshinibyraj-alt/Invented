@@ -77,7 +77,7 @@ footer{text-align:center;padding:10px;color:#9ca3af;font-size:9px;border-top:1px
 <header>
   <div class="hrow">
     <div class="logo"><span class="dot off" id="dot"></span>Grid Bot v9</div>
-    <span class="badge dry" id="modeBadge">📋 DRY RUN</span>
+    <span class="badge dry" id="modeBadge">📋 PAUSED</span>
     <div class="stats" id="headerStats"></div>
     <button id="toggleBtn" onclick="doToggle()" style="padding:4px 10px;font-size:10px;font-weight:700;background:#fff;border:1.5px solid #2563eb;color:#2563eb;border-radius:6px;cursor:pointer;letter-spacing:.4px">🔴 Go Live</button>
     <button id="resetBtn" onclick="doReset()" style="margin-left:0;padding:4px 10px;font-size:10px;font-weight:700;background:#fff;border:1.5px solid #e53e3e;color:#e53e3e;border-radius:6px;cursor:pointer;letter-spacing:.4px">↺ RESET</button>
@@ -175,12 +175,12 @@ function render(d){
   var tbtn=document.getElementById('toggleBtn');
   var warn=document.getElementById('liveWarn');
   if(d.dryRun){
-    mode.textContent="📋 PAUSED";;mode.className='badge dry';
+    mode.textContent="📋 PAUSED";mode.className='badge dry';
     tbtn.textContent='🔴 Go Live';tbtn.style.borderColor='#2563eb';tbtn.style.color='#2563eb';
     if(warn)warn.style.display='none';
   }else{
     mode.textContent='🔴 LIVE';mode.className='badge live';
-    tbtn.textContent="⏸️ Pause";;tbtn.style.borderColor='#16a34a';tbtn.style.color='#16a34a';
+    tbtn.textContent="⏸️ Pause";tbtn.style.borderColor='#16a34a';tbtn.style.color='#16a34a';
     if(warn)warn.style.display='block';
   }
 
@@ -425,7 +425,7 @@ function render(d){
   // ── Footer ────────────────────────────────────────────────────────────
   var up=d.uptime||0;
   var upStr=up>3600?Math.floor(up/3600)+'h '+Math.floor((up%3600)/60)+'m':up>60?Math.floor(up/60)+'m '+(up%60)+'s':up+'s';
-  document.getElementById('footer').textContent='Grid Bot v9 MOMENTUM | uptime: '+upStr+' | ticks: '+(d.tickCount||0)+(d.dryRun?" | PAUSED':'');
+  document.getElementById('footer').textContent='Grid Bot v9 MOMENTUM | uptime: '+upStr+' | ticks: '+(d.tickCount||0)+(d.dryRun?' | PAUSED':'');
 }
 
 socket.on('connect',    function(){document.getElementById('dot').className='dot on';});
