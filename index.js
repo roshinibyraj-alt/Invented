@@ -43,8 +43,8 @@ app.post('/api/reset', (_req, res) => {
   try { bot.resetState(); res.json({ ok: true }); } catch(e) { res.json({ error: e.message }); }
 });
 
-app.post('/api/set-dry-run', express.json(), (req, res) => {
-  try { bot.setDryRun(req.body?.dryRun); res.json({ ok: true, dryRun: bot.getDryRun() }); }
+app.post('/api/set-dry-run', express.json(), async (req, res) => {
+  try { await bot.setDryRun(req.body?.dryRun); res.json({ ok: true, dryRun: bot.getDryRun() }); }
   catch(e) { res.json({ error: e.message }); }
 });
 

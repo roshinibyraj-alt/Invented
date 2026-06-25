@@ -1030,35 +1030,31 @@ async function start(emit, log) {
   emitFn = emit || (() => {});
   logFn  = log  || (() => {});
 
-  if (DRY_RUN) {
-    slog(`📋 DRY RUN — $${DRY_RUN_BALANCE} simulated · real auth · no real orders`);
-  } else {
-    slog(`🔴 LIVE TRADING — real orders will be placed on Polymarket CLOB`);
-  }
   slog(`🤖 Grid Bot v9 MOMENTUM | levels:[${GRID_PRICES.join(',')}] | $${BUDGET}/level | tp:+${TP_STEP} | stop:-${TP_STEP} | runner:${RUNNER_PRICE} | cutoff:${CUTOFF_SECS}s`);
 
   loadState();
 
-  try {
-    slog('🔑 Authenticating with Polymarket CLOB...');
-    trader = new PolymarketTrader(process.env.POLYMARKET_PRIVATE_KEY, process.env.FUNDER_ADDRESS);
-    const info = await trader.authenticate();
-    const addr = info?.address || info?.wallet || '(unknown)';
-    slog(`✅ Authenticated: ${addr}`);
-    if (info?.proxyWallet) slog(`💼 Deposit wallet: ${info.proxyWallet}`);
-    slog(`✅ AUTH OK | wallet:${addr}`);
-    if (!DRY_RUN) {
-      const rb = await trader.getBalance().catch(() => -1);
-      if (rb > 0) {
-        balance = rb;
-        startBalance = rb;
-        slog(`💰 Live balance from chain: $${fl2(rb)}`);
-      } else {
-        slog(`⚠️  Could not fetch live balance — check POLYMARKET_PRIVATE_KEY and FUNDER_ADDRESS`);
+  if (process.env.POLYMARKET_PRIVATE_KEY) {
+    try {
+      slog('🔑 Authenticating with Polymarket CLOB...');
+      trader = new PolymarketTrader(process.env.POLYMARKET_PRIVATE_KEY, process.env.FUNDER_ADDRESS);
+      trader.setLogFn(logFn);
+      const info = await trader.authenticate();
+      slog(`✅ Auth OK — wallet: ${trader.address}`);
+      if (!DRY_RUN) {
+        const rb = await trader.getBalance().catch(() => -1);
+        if (rb > 0) { balance = rb; startBalance = rb; }
+        slog(`💰 Live balance: $${fl2(balance)}`);
       }
+    } catch (e) {
+      slog(`⚠️  Auth failed: ${e.message} — live trading will require HTTPS_PROXY or valid key`);
     }
-  } catch (e) {
-    slog(`⚠️  Auth: ${e.message}`);
+  }
+
+  if (DRY_RUN) {
+    slog(`📋 DRY RUN — $${DRY_RUN_BALANCE} simulated · demo trading only`);
+  } else {
+    slog(`🔴 LIVE TRADING — real orders on Polymarket CLOB`);
   }
 
   setInterval(tick, TICK_MS);
@@ -1078,37 +1074,47 @@ function flushState() {
   saveState();
 }
 
-function setDryRun(val) {
+async function setDryRun(val) {
   DRY_RUN = !!val;
-  // Always flush all grid/fill/market state when toggling — no sim ghosts in live mode
   flushState();
 
   if (DRY_RUN) {
     balance      = DRY_RUN_BALANCE;
     startBalance = DRY_RUN_BALANCE;
-    slog('📋 Switched to DRY RUN — sim state cleared, starting fresh with $' + fl2(DRY_RUN_BALANCE));
+    slog('📋 Switched to DRY RUN — $' + fl2(DRY_RUN_BALANCE) + ' simulated');
   } else {
     balance      = 0;
     startBalance = 0;
-    slog('🔴 Switched to LIVE — all sim state cleared, balance reset to $0');
+
     if (!process.env.POLYMARKET_PRIVATE_KEY) {
-      slog('⛔ POLYMARKET_PRIVATE_KEY not set — live orders will fail. Set it in Replit Secrets.');
+      slog('⛔ POLYMARKET_PRIVATE_KEY not set — set it on Railway and toggle again');
+      DRY_RUN = true;
+      balance = DRY_RUN_BALANCE;
+      startBalance = DRY_RUN_BALANCE;
+      return;
     }
-    if (trader) {
-      trader.getBalance().then(b => {
-        if (b > 0) {
-          balance = b; startBalance = b;
-          slog(`💰 Live balance from chain: $${fl2(b)}`);
-        } else {
-          slog('⚠️  getBalance returned 0 — likely geo-blocked or no USDC in deposit wallet.');
-          slog('   → Set HTTPS_PROXY env var to a non-US proxy (e.g. EU) and restart.');
-        }
-      }).catch(e => {
-        slog(`⚠️  getBalance failed: ${e.message}`);
-        slog('   → Polymarket CLOB is geo-blocked from US servers. Set HTTPS_PROXY to a non-US proxy and restart.');
-      });
-    } else {
-      slog('⛔ No trader — POLYMARKET_PRIVATE_KEY missing. Set it in Replit Secrets and restart.');
+
+    // Re-authenticate for live trading (trader._clob may be null if startup auth failed)
+    slog('🔑 Authenticating for LIVE trading...');
+    try {
+      trader = new PolymarketTrader(process.env.POLYMARKET_PRIVATE_KEY, process.env.FUNDER_ADDRESS);
+      trader.setLogFn(logFn);
+      await trader.authenticate();
+      slog('✅ Live auth OK — wallet: ' + trader.address);
+
+      const rb = await trader.getBalance();
+      if (rb > 0) {
+        balance = rb; startBalance = rb;
+        slog('💰 Live balance: $' + fl2(rb));
+      } else {
+        slog('⚠️  Live balance: $0 — no USDC found');
+      }
+    } catch (e) {
+      slog('❌ Live auth failed: ' + e.message);
+      slog('   → Check POLYMARKET_PRIVATE_KEY or set HTTPS_PROXY for geo-blocked servers');
+      DRY_RUN = true;
+      balance = DRY_RUN_BALANCE;
+      startBalance = DRY_RUN_BALANCE;
     }
   }
 }
