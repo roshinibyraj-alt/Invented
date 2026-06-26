@@ -1,27 +1,37 @@
 'use strict';
 
-// ── Trend-Dip Strategy for Polymarket BTC/ETH 5m — buy leader on dip, trailing stop, no avg-down ──────
-// Every 25s CP: buy leader on dip (dev>0.02), pyramid if profitable, trailing stop 0.015, force sell 210s
-// For lots held ≥25s: sell if in profit, buy 100 more if in loss (avg down)
-// At 240s (4th min): force sell ALL, stop new entries
+// ── Time-Decay Trend Strategy for BTC/ETH 5m ─────────────────────────────
+// Fair value decays linearly from 0.50→1.00 over 300s.
+// Buy leader when price is significantly below fair value (deviation > threshold).
+// Exit with trailing stop / hard stop / time stop / force sell via FOK.
 
 const PolymarketTrader = require('./polymarket-trader');
 
-const GAMMA = 'https://gamma-api.polymarket.com';
-const CLOB  = 'https://clob.polymarket.com';
+// ── Constants ──
+const GAMMA       = 'https://gamma-api.polymarket.com';
+const CLOB        = 'https://clob.polymarket.com';
 
 const TICK_MS           = 100;
-const DISCOVER_EVERY    = 300;   // ticks between market discovery
-const WINDOW_SECS       = 300;   // 5 minutes
-const CHECKPOINT_SECS   = 25;
-const SHARES_PER_LOT    = 300;   // 300 shares per lot
+const DISCOVER_EVERY    = 300;
+const PRICE_FETCH_EVERY = 5;
+const CHECKPOINT_EVERY  = 250;
+const WINDOW_SECS       = 300;
 const DEMO_BALANCE      = 2000;
-const TAKER_FEE         = 0.003;
-const STOP_ELAPSED      = 270;   // 4.5 minutes — force sell all   // 4th minute — force sell all
-const TARGET_PAIRS      = ['BTC', 'ETH'];
+const DEMO_FEE_RATE     = 0.07;
+const DEMO_FEE_EXP      = 1;
 
-let DRY_RUN = true;
+const DEVIATION_THRESHOLD  = 0.05;
+const SHARES_PER_LOT       = 300;
+const MAX_LOTS             = 3;
+const TRAILING_STOP_DIST   = 0.015;
+const HARD_STOP_DIST       = 0.08;
+const TIME_STOP_CP         = 5;
+const FORCE_SELL_SECS      = 270;
+const PRICE_HISTORY_LEN    = 3;
+
+let DRY_RUN       = true;
 const KILL_SWITCH = process.env.KILL_SWITCH === 'true';
+const TARGET_PAIRS = ['BTC', 'ETH'];
 
 const fl2 = v => Math.round((v || 0) * 100) / 100;
 const fl4 = v => Math.round((v || 0) * 10_000) / 10_000;
@@ -37,33 +47,39 @@ async function getJson(url) {
   } catch (_) { return null; }
 }
 
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+function calcFee(amount, price) {
+  if (!price || price <= 0 || price >= 1) return 0;
+  const eff = DEMO_FEE_RATE * Math.pow(price * (1 - price), DEMO_FEE_EXP);
+  return amount * eff;
+}
+
 function generateSlugs() {
-  const now  = Math.floor(Date.now() / 1000);
-  const cur  = Math.floor(now / WINDOW_SECS) * WINDOW_SECS;
+  const now = Math.floor(Date.now() / 1000);
+  const cur = Math.floor(now / WINDOW_SECS) * WINDOW_SECS;
   const slugs = [];
   for (const pair of TARGET_PAIRS) {
     const prefix = pair.toLowerCase() + '-updown-5m-';
-    for (const d of [0, 1, 2]) {
-      slugs.push(prefix + (cur + d * WINDOW_SECS));
-    }
+    for (const d of [0, 1, 2]) slugs.push(prefix + (cur + d * WINDOW_SECS));
   }
   return slugs;
 }
 
 // ── State ──
-let trader       = null;
-let balance      = DEMO_BALANCE;
-let startBalance = DEMO_BALANCE;
-let totalFees    = 0;
-let marketCache  = {};      // slug → market object
-let positions    = [];      // { slug, side, entryPrice, shares, tickBought, checkpointIdx, lotId }
-let recentTrades = [];
-let activityLog  = [];
-let tickCount    = 0;
-let startTime    = Date.now();
-let lotCounter   = 0;
-let emitFn       = () => {};
-let logFn        = () => {};
+let trader          = null;
+let balance         = DEMO_BALANCE;
+let startBalance    = DEMO_BALANCE;
+let totalFeesPaid   = 0;
+let marketCache     = {};
+let positions       = [];
+let pendingOrders   = [];
+let recentTrades    = [];
+let activityLog     = [];
+let tickCount       = 0;
+let startTime       = Date.now();
+let emitFn          = () => {};
+let logFn           = () => {};
 
 function slog(msg) {
   const ts = new Date().toTimeString().slice(0, 8);
@@ -72,16 +88,11 @@ function slog(msg) {
   logFn(msg);
 }
 
-function pushTrade(pair, side, action, entry, exit, shares, pnl, bal, reason) {
+function pushTrade(pair, side, action, entry, exit, shares, pnl, bal, fees) {
   recentTrades.unshift({
-    ts: new Date().toTimeString().slice(0, 8),
-    pair, side, action,
-    entry: fl4(entry),
-    exit: fl4(exit || 0),
-    shares,
-    pnl: fl2(pnl || 0),
-    bal: fl2(bal),
-    reason: reason || '',
+    ts: new Date().toTimeString().slice(0, 8), pair, side, action,
+    entry: fl4(entry), exit: fl4(exit || 0), shares,
+    pnl: fl2(pnl || 0), bal: fl2(bal), fees: fl2(fees || 0),
   });
   if (recentTrades.length > 100) recentTrades.length = 100;
 }
@@ -101,517 +112,306 @@ async function discoverMarkets() {
     const endTime = mk.endDate ? new Date(mk.endDate).getTime() : null;
     if (!endTime) return;
     marketCache[slug] = {
-      slug,
-      pair: slug.startsWith('btc') ? 'BTC' : 'ETH',
-      windowS: WINDOW_SECS,
-      upTokenId: ids[0], downTokenId: ids[1],
+      slug, pair: slug.startsWith('btc') ? 'BTC' : 'ETH',
+      windowS: WINDOW_SECS, upTokenId: ids[0], downTokenId: ids[1],
       endTime, active: false, resolved: false,
-      upMid: 0, downMid: 0, upAsk: 0, dnAsk: 0,
+      upMid: 0, downMid: 0,
       secondsToEnd: Math.floor((endTime - Date.now()) / 1000),
-      lastCheckpointElapsed: -1,  // tracks which checkpoint we've processed
-      started: false,
-      forceStopped: false,
-      upHistory: [],
-      dnHistory: [],
+      fairValue: 0.50,
+      windowStart: endTime - WINDOW_SECS * 1000,
+      checkpointData: { prices: [], leader: null },
     };
   }));
-  // Clean stale + non-target pairs
   const expired = [];
   for (const [slug, m] of Object.entries(marketCache)) {
     if (Date.now() - m.endTime > 10000) expired.push(slug);
-    else if (!slug.startsWith('btc') && !slug.startsWith('eth')) expired.push(slug);
   }
   for (const slug of expired) {
     delete marketCache[slug];
     positions = positions.filter(p => p.slug !== slug);
+    pendingOrders = pendingOrders.filter(p => p.slug !== slug);
   }
 }
 
-// ── Position helpers ──
-function getPositionsForMarket(slug) {
-  return positions.filter(p => p.slug === slug);
+// ── Update market prices ──
+async function updateMarket(m) {
+  const now = Date.now();
+  m.secondsToEnd = Math.floor((m.endTime - now) / 1000);
+  m.active = !m.resolved && m.secondsToEnd > 0 && m.secondsToEnd <= m.windowS;
+  if (m.secondsToEnd < -5 && !m.resolved) { m.resolved = true; m.active = false; return; }
+  if (!m.active) return;
+
+  const elapsed = m.windowS - m.secondsToEnd;
+  m.fairValue = fl4(0.50 + (elapsed / m.windowS) * 0.50);
+
+  const [upR, dnR] = await Promise.all([
+    getJson(`${CLOB}/midpoint?token_id=${m.upTokenId}`),
+    getJson(`${CLOB}/midpoint?token_id=${m.downTokenId}`),
+  ]);
+  if (upR?.mid) m.upMid   = fl4(parseFloat(upR.mid));
+  if (dnR?.mid) m.downMid = fl4(parseFloat(dnR.mid));
+
+  if (!m.checkpointData) m.checkpointData = { prices: [], leader: null };
+  const cd = m.checkpointData;
+  const lastP = cd.prices.length > 0 ? cd.prices[cd.prices.length - 1] : null;
+  if (!lastP || tickCount % (CHECKPOINT_EVERY / 2) === 0) {
+    cd.prices.push({ tick: tickCount, upPrice: m.upMid || 0, dnPrice: m.downMid || 0 });
+    if (cd.prices.length > PRICE_HISTORY_LEN) cd.prices.shift();
+  }
+  if (cd.prices.length >= 2) {
+    const recent = cd.prices.slice(-2);
+    const upFair = m.fairValue;
+    const dnFair = 1 - m.fairValue;
+    const avgUpDev = recent.reduce((s, c) => s + (c.upPrice - upFair), 0) / recent.length;
+    const avgDnDev = recent.reduce((s, c) => s + (c.dnPrice - dnFair), 0) / recent.length;
+    cd.leader = avgUpDev <= avgDnDev ? 'up' : 'dn';
+  }
 }
 
-async function buyShares(m, side, shares) {
-  const mid = side === 'up' ? m.upMid : m.downMid;
-  if (!mid || mid <= 0) return;
+function sideFair(m, side) {
+  return side === 'up' ? m.fairValue : (1 - m.fairValue);
+}
 
-  // Use ASK price for buys (realistic taker fill), fallback to midpoint if book unavailable
-  const ask = side === 'up' ? m.upAsk : m.dnAsk;
-  const execPrice = ask > 0 ? ask : mid;
-  if (!execPrice || execPrice <= 0) return;
+// ── Checkpoint: evaluate entries ──
+async function runCheckpoint() {
+  slog(`📊 Checkpoint ${Math.floor(tickCount / CHECKPOINT_EVERY)}`);
+  for (const [slug, m] of Object.entries(marketCache)) {
+    if (!m.active) continue;
+    const cd = m.checkpointData;
+    if (!cd || !cd.leader) continue;
 
-  const cost = fl2(shares * execPrice);
-  const fee  = fl2(cost * TAKER_FEE);
+    const side = cd.leader;
+    const sidePrice = side === 'up' ? m.upMid : m.downMid;
+    if (!sidePrice || sidePrice === 0) continue;
 
-  if (balance < cost + fee) {
-    slog(`\u26a0\ufe0f ${m.pair} insufficient balance for ${side.toUpperCase()} buy $${cost}+fee`);
-    return;
+    const fair = sideFair(m, side);
+    const deviation = fair - sidePrice;
+
+    const existing = positions.filter(p => p.slug === slug && p.side === side);
+    const hasPending = pendingOrders.some(p => p.slug === slug && p.side === side && !p.resolved);
+
+    if (deviation > DEVIATION_THRESHOLD && existing.length < MAX_LOTS && !hasPending) {
+      await enterPosition(m, side, sidePrice);
+    }
   }
+}
 
-  balance     = fl2(balance - cost - fee);
-  totalFees   = fl4(totalFees + fee);
-  const lotId = ++lotCounter;
-  const elapsed = WINDOW_SECS - m.secondsToEnd;
-  const cpIdx   = Math.floor(elapsed / CHECKPOINT_SECS);
-
-  positions.push({
-    slug: m.slug, pair: m.pair,
-    side, entryPrice: execPrice, shares, cost,
-    tickBought: tickCount,
-    checkpointIdx: cpIdx,
-    lotId,
-    peakPrice: execPrice,
-  });
-
-  slog(`\U0001f4e5 BUY ${m.pair} ${side.toUpperCase()} x${shares} @ $${fl4(execPrice)} (-$${cost}) fee:$${fee} bal:$${fl2(balance)}`);
-
-  // Place real order on CLOB
+// ── Enter position ──
+async function enterPosition(m, side, price) {
+  const size = SHARES_PER_LOT;
+  const cost = fl2(size * price);
   const tokenId = side === 'up' ? m.upTokenId : m.downTokenId;
-  if (tokenId && !DRY_RUN) {
-    try {
-      const res = await trader.placeOrder(tokenId, 'BUY', mid, shares);
-      if (res?.id) slog(`🔏 BUY ORDER id:${res.id}`);
-    } catch (e) {
-      slog(`❌ BUY failed: ${e.message}`);
-      balance = fl2(balance + cost + fee);
-      positions = positions.filter(p => p.lotId !== lotId);
-    }
-  }
-}
 
-async function sellPosition(pos, m) {
-  // Use BID price for sells (realistic taker fill), fallback to midpoint if book unavailable
-  const bid = pos.side === 'up' ? m.upAsk : m.dnAsk;
-  const mid = pos.side === 'up' ? m.upMid : m.downMid;
-  const execPrice = bid > 0 ? bid : mid;
-  if (!execPrice || execPrice <= 0 || pos.shares <= 0) return;
-
-  const proceeds = fl2(pos.shares * execPrice);
-  const cost     = fl2(pos.shares * pos.entryPrice);
-  const fee      = fl2(proceeds * TAKER_FEE);
-  const pnl      = fl2(proceeds - cost);
-  const netPnl   = fl2(pnl - (pos.cost ? fl2(pos.cost * TAKER_FEE) : 0) - fee);
-
-  balance   = fl2(balance + proceeds - fee);
-  totalFees = fl4(totalFees + fee);
-
-  const reason = mid > pos.entryPrice ? 'TP' : 'STOP';
-  slog(`📤 SELL ${pos.pair} ${pos.side.toUpperCase()} x${pos.shares} @ $${fl4(execPrice)} (+$${fl2(proceeds)}) fee:$${fee} pnl:$${fl2(netPnl)} | bal:$${fl2(balance)}`);
-  pushTrade(pos.pair, pos.side.toUpperCase(), 'SELL', pos.entryPrice, execPrice, pos.shares, netPnl, balance, reason);
-
-  // Place real sell on CLOB
-  const tokenId = pos.side === 'up' ? m.upTokenId : m.downTokenId;
-  if (tokenId && !DRY_RUN) {
-    try {
-      const res = await trader.placeOrder(tokenId, 'SELL', mid, pos.shares);
-      if (res?.id) slog(`🔏 SELL ORDER id:${res.id}`);
-    } catch (e) {
-      slog(`❌ SELL failed: ${e.message}`);
-      balance = fl2(balance - proceeds + fee); // refund
-    }
-  }
-
-  // Remove position
-  positions = positions.filter(p => p.lotId !== pos.lotId);
-}
-
-async function sellAllForMarket(m) {
-  const lots = getPositionsForMarket(m.slug);
-  for (const pos of lots) {
-    await sellPosition(pos, m);
-  }
-  if (lots.length > 0) slog(`🏁 ${m.pair} — force sold ${lots.length} lots at 4th minute`);
-}
-
-// ── Checkpoint logic ──
-async function processCheckpoint(m) {
-  const elapsed = Math.max(0, WINDOW_SECS - m.secondsToEnd);
-  const cpIdx   = Math.floor(elapsed / CHECKPOINT_SECS);
-
-  // ── 4th minute force sell ──
-  if (elapsed >= STOP_ELAPSED && !m.forceStopped) {
-    m.forceStopped = true;
-    await sellAllForMarket(m);
-    slog(`\u23f9\ufe0f ${m.pair} force sold at ${elapsed}s`);
+  if (cost > balance) {
+    slog(`⛔ ${m.pair} ${side.toUpperCase()} too costly: $${cost} > $${balance}`);
     return;
   }
 
-  // Track price history for leader determination
-  if (m.upMid > 0) {
-    m.upHistory.push({ t: Date.now(), p: m.upMid });
-    if (m.upHistory.length > 100) m.upHistory.shift();
-  }
-  if (m.downMid > 0) {
-    m.dnHistory.push({ t: Date.now(), p: m.downMid });
-    if (m.dnHistory.length > 100) m.dnHistory.shift();
-  }
-
-  // Already processed this checkpoint
-  if (cpIdx === m.lastCheckpointElapsed) return;
-  m.lastCheckpointElapsed = cpIdx;
-
-  if (!m.started) {
-    m.started = true;
-    slog(`\U0001f7e2 ${m.pair} window started \u2014 ${WINDOW_SECS}s remaining`);
-  }
-
-  if (m.forceStopped) return;
-
-  // ── Determine dominant side via MA over last checkpoints ──
-  if (!m.leaderHistory) m.leaderHistory = [];
-  m.leaderHistory.push({ cpIdx, up: m.upMid, dn: m.downMid, leader: m.upMid >= m.downMid ? 'up' : 'dn' });
-  if (m.leaderHistory.length > 3) m.leaderHistory.shift();
-
-  if (m.leaderHistory.length < 2) return; // need at least 2 checkpoints of history
-
-  // Moving averages to smooth out noise
-  const upMA = m.leaderHistory.reduce((s, h) => s + h.up, 0) / m.leaderHistory.length;
-  const dnMA = m.leaderHistory.reduce((s, h) => s + h.dn, 0) / m.leaderHistory.length;
-  const leaderSide = upMA >= dnMA ? 'up' : 'dn';
-
-  // Fair value: dominant side trends 0.50 -> 1.00 over the window
-  const leaderFair = 0.50 + (elapsed / WINDOW_SECS) * 0.50;
-  const leaderPrice = leaderSide === 'up' ? m.upMid : m.downMid;
-
-  // Dynamic threshold: wider as time passes (less time for reversion)
-  const threshold = 0.02 + (elapsed / WINDOW_SECS) * 0.04; // 0.02 at t=0, 0.06 at t=300
-  const deviation = leaderFair - leaderPrice; // positive = leader is underpriced = buy
-
-  // Record analytics for dashboard
-  m.leaderSide = leaderSide;
-  m.leaderFair = fl4(leaderFair);
-  m.deviation = fl4(deviation);
-  m.threshold = fl4(threshold);
-
-  if (deviation > 0) {
-    slog(`\U0001f4ca ${m.pair} ${leaderSide.toUpperCase()} fair:$${fl4(leaderFair)} actual:$${fl4(leaderPrice)} dev:+${fl4(deviation)} thr:$${fl4(threshold)}`);
-  }
-
-  // ── Buy signal: leader dip below fair value + threshold met ──
-  const myLots = getPositionsForMarket(m.slug);
-  const lotsThisSide = myLots.filter(l => l.side === leaderSide);
-
-  // Can buy if: under max lots, AND (no lot on this side OR all existing lots on this side are profitable)
-  const canPyramid = lotsThisSide.length === 0 || lotsThisSide.every(l => {
-    const lp = leaderSide === 'up' ? m.upMid : m.downMid;
-    return lp > l.entryPrice;
-  });
-  if (deviation > threshold && myLots.length < 3 && canPyramid) {
-    slog(`\U0001f4e3 ${m.pair} ${leaderSide.toUpperCase()} DIP! $${fl4(leaderPrice)} vs fair $${fl4(leaderFair)} (lots:${myLots.length})`);
-    await buyShares(m, leaderSide, SHARES_PER_LOT);
-  }
-
-  // ── Time exit: held 5+ CPs (125s+), get out regardless ──
-  for (const pos of myLots) {
-    if (cpIdx - pos.checkpointIdx < 5) continue;
-    const mid = pos.side === 'up' ? m.upMid : m.downMid;
-    if (!mid || mid <= 0) continue;
-    slog(`\u23f0 ${m.pair} ${pos.side.toUpperCase()} time @ $${fl4(exitPrice)} (${cpIdx - pos.checkpointIdx}CPs)`);
-    await sellPosition(pos, m);
+  if (DRY_RUN) {
+    const fee = calcFee(cost, price);
+    balance = fl2(balance - cost - fee);
+    totalFeesPaid = fl2(totalFeesPaid + fee);
+    positions.push({
+      id: `d_${m.slug}_${side}_${tickCount}`, slug: m.slug, side,
+      entryPrice: price, size, entryTick: tickCount, peakPrice: price,
+      cpCount: 0, trailingActive: true, hardStopHit: false,
+      createdAt: Date.now(), totalCost: cost + fee, fees: fee,
+    });
+    slog(`🟢 ENTRY ${m.pair} ${side.toUpperCase()} ${size}sh@${fl4(price)} dev:${fl4(m.fairValue - price)} fee:$${fl2(fee)}`);
+    pushTrade(m.pair, side.toUpperCase(), 'ENTRY', price, 0, size, 0, balance, fee);
+  } else {
+    try {
+      const order = await trader.placeGtcOrder(tokenId, 'BUY', price, size);
+      slog(`⏳ GTC BUY pending id:${order.id.slice(0,12)}…`);
+      pendingOrders.push({ id: order.id, slug: m.slug, side, size, price, createdAt: Date.now(), resolved: false });
+    } catch (e) { slog(`❌ GTC BUY: ${e.message}`); }
   }
 }
 
-// ── Main tick ──
+// ── Process live pending ──
+async function processPendingOrders() {
+  for (const po of pendingOrders) {
+    if (po.resolved) continue;
+    const m = marketCache[po.slug];
+    if (!m || !m.active) { po.resolved = true; continue; }
+    try {
+      const result = await trader.waitForFill(po.id, 5000);
+      if (result.filled) {
+        const fee = calcFee(po.size * po.price, po.price);
+        balance = fl2(balance - po.size * po.price - fee);
+        totalFeesPaid = fl2(totalFeesPaid + fee);
+        positions.push({
+          id: po.id, slug: po.slug, side: po.side,
+          entryPrice: po.price, size: po.size, entryTick: tickCount,
+          peakPrice: po.price, cpCount: 0, trailingActive: true,
+          hardStopHit: false, createdAt: Date.now(),
+          totalCost: po.size * po.price + fee, fees: fee,
+        });
+        slog(`✅ FILLED ${m.pair} ${po.side.toUpperCase()} ${po.size}sh@${fl4(po.price)} fee:$${fl2(fee)}`);
+        pushTrade(m.pair, po.side.toUpperCase(), 'ENTRY', po.price, 0, po.size, 0, balance, fee);
+        po.resolved = true;
+      } else if (result.cancelled || result.timeout) {
+        slog(`❌ ORDER ${result.timeout ? 'TIMEOUT' : 'CANCELLED'} ${po.id.slice(0,12)}…`);
+        po.resolved = true;
+      }
+    } catch (e) { slog(`⚠️ Poll: ${e.message}`); }
+  }
+  pendingOrders = pendingOrders.filter(p => !p.resolved);
+}
+
+// ── Manage open positions ──
+async function managePositions(isCheckpoint) {
+  if (positions.length === 0) return;
+  for (const pos of positions) {
+    const m = marketCache[pos.slug];
+    if (!m || !m.active) continue;
+    const sidePrice = pos.side === 'up' ? m.upMid : m.downMid;
+    if (!sidePrice || sidePrice === 0) continue;
+    const elapsed = (Date.now() - m.windowStart) / 1000;
+    if (isCheckpoint) pos.cpCount++;
+    if (sidePrice > pos.peakPrice) pos.peakPrice = sidePrice;
+    if (checkExitConditions(pos, sidePrice, m, elapsed)) await exitPosition(pos, sidePrice, m);
+  }
+  positions = positions.filter(p => !p.resolved);
+}
+
+function checkExitConditions(pos, cp, m, elapsed) {
+  if (cp <= pos.entryPrice - HARD_STOP_DIST) {
+    slog(`🔴 HARD STOP ${m.pair} ${pos.side.toUpperCase()} entry:${fl4(pos.entryPrice)} → ${fl4(cp)}`);
+    return true;
+  }
+  if (pos.trailingActive && pos.peakPrice - cp >= TRAILING_STOP_DIST) {
+    slog(`🔶 TRAILING ${m.pair} ${pos.side.toUpperCase()} peak:${fl4(pos.peakPrice)} → ${fl4(cp)}`);
+    return true;
+  }
+  if (pos.cpCount >= TIME_STOP_CP && cp <= pos.entryPrice) {
+    slog(`⏰ TIME STOP ${m.pair} ${pos.side.toUpperCase()} ${pos.cpCount}cp`);
+    return true;
+  }
+  if (elapsed >= FORCE_SELL_SECS) {
+    slog(`⏳ FORCE SELL ${m.pair} ${pos.side.toUpperCase()} @ ${elapsed.toFixed(0)}s`);
+    return true;
+  }
+  return false;
+}
+
+async function exitPosition(pos, exitPrice, m) {
+  const proceeds = fl2(pos.size * exitPrice);
+  const cost     = fl2(pos.size * pos.entryPrice);
+  const fee      = calcFee(proceeds, exitPrice);
+  const pnl      = fl2(proceeds - cost - fee);
+  const tokenId  = pos.side === 'up' ? m.upTokenId : m.downTokenId;
+
+  if (DRY_RUN) {
+    balance = fl2(balance + proceeds - fee);
+    totalFeesPaid = fl2(totalFeesPaid + fee);
+    slog(`📤 SELL ${m.pair} ${pos.side.toUpperCase()} ${pos.size}sh@${fl4(exitPrice)} pnl:$${pnl} fee:$${fl2(fee)} bal:$${fl2(balance)}`);
+    pushTrade(m.pair, pos.side.toUpperCase(), 'SELL', pos.entryPrice, exitPrice, pos.size, pnl, balance, fee);
+    pos.resolved = true;
+  } else {
+    try {
+      const bb = await trader.getBestBidAsk(tokenId);
+      const ep = pos.side === 'up' ? (bb?.bestBid || exitPrice) : (bb?.bestAsk || exitPrice);
+      const order = await trader.placeFokOrder(tokenId, 'SELL', pos.size * ep);
+      if (order.status === 'FILLED') {
+        balance = fl2(balance + pos.size * ep);
+        totalFeesPaid = fl2(totalFeesPaid + fee);
+        slog(`📤 FOK FILLED ${m.pair} ${pos.side.toUpperCase()} ${pos.size}sh@${fl4(ep)} pnl:$${pnl}`);
+        pushTrade(m.pair, pos.side.toUpperCase(), 'SELL', pos.entryPrice, ep, pos.size, pnl, balance, fee);
+        pos.resolved = true;
+      } else {
+        slog(`⚠️ FOK not filled (${order.status})`);
+      }
+    } catch (e) { slog(`❌ FOK: ${e.message}`); }
+  }
+}
+
 // ── Main tick ──
 async function tick() {
   try {
     tickCount++;
-    if (tickCount === 1 || tickCount % DISCOVER_EVERY === 0) {
-      await discoverMarkets();
+    if (tickCount === 1 || tickCount % DISCOVER_EVERY === 0) await discoverMarkets();
+    if (tickCount % PRICE_FETCH_EVERY === 0) {
+      await Promise.allSettled(Object.values(marketCache).map(m => updateMarket(m)));
     }
-
-    // Update prices and check checkpoints for each active market
-    await Promise.allSettled(Object.values(marketCache).map(async m => {
-      const now = Date.now();
-      m.secondsToEnd = Math.floor((m.endTime - now) / 1000);
-      m.active = !m.resolved && m.secondsToEnd > 0 && m.secondsToEnd <= m.windowS;
-
-      if (m.secondsToEnd < -5 && !m.resolved) {
-        m.resolved = true;
-        m.active = false;
-        return;
-      }
-      // Fetch midpoint + order book for realistic pricing
-      const [upR, upBookR, dnR, dnBookR] = await Promise.all([
-        getJson(`${CLOB}/midpoint?token_id=${m.upTokenId}`),
-        getJson(`${CLOB}/book?token_id=${m.upTokenId}`),
-        getJson(`${CLOB}/midpoint?token_id=${m.downTokenId}`),
-        getJson(`${CLOB}/book?token_id=${m.downTokenId}`),
-      ]);
-      if (upR?.mid) m.upMid   = fl4(parseFloat(upR.mid));
-      if (dnR?.mid) m.downMid = fl4(parseFloat(dnR.mid));
-      // Parse order book for realistic bid/ask
-      if (Array.isArray(upBookR) && upBookR.length > 0) {
-        // Book returns [{price, size}, ...] sorted best first
-        m.upAsk = fl4(parseFloat(upBookR[0].price));
-      }
-      if (Array.isArray(dnBookR) && dnBookR.length > 0) {
-        m.dnAsk = fl4(parseFloat(dnBookR[0].price));
-      }
-
-      if (!m.active && !m.forceStopped && getPositionsForMarket(m.slug).length > 0) {
-        // Market ended with open positions — force sell
-        await sellAllForMarket(m);
-        return;
-      }
-      if (!m.active && m.secondsToEnd <= 0) return;
-      // For upcoming markets (secondsToEnd > 300), we still show prices but skip trading
-      if (!m.active && m.secondsToEnd > m.windowS) {
-        // Just emit snapshot, don't process checkpoints
-        return;
-      }
-
-      const elapsed = Math.max(0, WINDOW_SECS - m.secondsToEnd);
-
-      // ── 4th minute stop — check every tick ──
-      if (elapsed >= STOP_ELAPSED && !m.forceStopped) {
-        m.forceStopped = true;
-        const lots = getPositionsForMarket(m.slug);
-        if (lots.length > 0) {
-          await sellAllForMarket(m);
-          slog(`\u23f9\ufe0f ${m.pair} force sold at ${elapsed}s (4th minute)`);
-        }
-      }
-
-      // Process checkpoint if it's time
-      const cpIdx   = Math.floor(elapsed / CHECKPOINT_SECS);
-      if (cpIdx > (m.lastCheckpointElapsed || -1) && cpIdx >= 1 && m.upMid > 0 && m.downMid > 0) {
-        await processCheckpoint(m);
-      }
-    }));
-
-    // ── Tick-level exit checks (every 100ms, not just at checkpoints) ──
-    // This makes trailing/hard stops reactive instead of waiting 25s
-    for (const pos of [...positions]) {
-      const m = marketCache[pos.slug];
-      if (!m || m.resolved) continue;
-      const mid = pos.side === 'up' ? m.upMid : m.downMid;
-      if (!mid || mid <= 0) continue;
-
-      // Use BID for sell exit price, midpoint for peak tracking
-      const bid = pos.side === 'up' ? m.upAsk : m.dnAsk;
-      const exitPrice = bid > 0 ? bid : mid;
-
-      // Update peak every tick
-      if (!pos.peakPrice) pos.peakPrice = pos.entryPrice;
-      if (mid > pos.peakPrice) pos.peakPrice = mid;
-
-      const trailDrop = pos.peakPrice - exitPrice;
-      const fromEntry = pos.entryPrice - exitPrice;
-
-      // Skip min hold for exit check (exits are reactive, not time-gated)
-      // Trailing stop: 0.015 from peak (tight — captures gains, protects profits)
-      if (trailDrop >= 0.015 && mid > 0.01) {
-        slog(`\U0001f4aa ${m.pair} ${pos.side.toUpperCase()} trail @ ${fl4(exitPrice)} (peak:${fl4(pos.peakPrice)}, -${fl2(trailDrop)})`);
-        await sellPosition(pos, m);
-      }
-      // Hard stop: safety net if price gaps past trail
-      else if (fromEntry >= 0.08 && mid > 0.01) {
-        slog(`\U0001f6d1 ${m.pair} ${pos.side.toUpperCase()} stop @ ${fl4(exitPrice)} (entry:${fl4(pos.entryPrice)}, -${fl2(fromEntry)})`);
-        await sellPosition(pos, m);
-      }
-    }
-
+    const isCheckpoint = (tickCount % CHECKPOINT_EVERY === 0);
+    if (isCheckpoint) await runCheckpoint();
+    if (!DRY_RUN) await processPendingOrders();
+    await managePositions(isCheckpoint);
     emitFn('snapshot', buildSnapshot());
   } catch (e) {
     slog(`⚠️ tick: ${e.message}`);
   }
 }
 
-// ── Independent price refresh (every 1s) to keep dashboard live ──
-setInterval(async () => {
-  try {
-    const promises = [];
-    for (const m of Object.values(marketCache)) {
-      if (!m.resolved && m.upTokenId && m.downTokenId) {
-        promises.push(
-          (async () => {
-            try {
-              const [upR, upBookR, dnR, dnBookR] = await Promise.all([
-                getJson(`${CLOB}/midpoint?token_id=${m.upTokenId}`),
-                getJson(`${CLOB}/book?token_id=${m.upTokenId}`),
-                getJson(`${CLOB}/midpoint?token_id=${m.downTokenId}`),
-                getJson(`${CLOB}/book?token_id=${m.downTokenId}`),
-              ]);
-              if (upR?.mid) m.upMid   = fl4(parseFloat(upR.mid));
-              if (dnR?.mid) m.downMid = fl4(parseFloat(dnR.mid));
-              if (Array.isArray(upBookR) && upBookR.length > 0) {
-                m.upAsk = fl4(parseFloat(upBookR[0].price));
-              }
-              if (Array.isArray(dnBookR) && dnBookR.length > 0) {
-                m.dnAsk = fl4(parseFloat(dnBookR[0].price));
-              }
-            } catch (_) {}
-          })()
-        );
-      }
-    }
-    await Promise.allSettled(promises);
-  } catch (_) {}
-}, 1000);
-
-// ── Snapshot ──
 function buildSnapshot() {
-  const openPosLots = [...positions];
-  const byMarket = {};
-  for (const p of openPosLots) {
+  let openValue = 0, unrealizedPnl = 0;
+  const openPositions = positions.filter(p => !p.resolved).map(p => {
     const m = marketCache[p.slug];
-    const mid = m ? (p.side === 'up' ? m.upMid : m.downMid) : 0;
-    byMarket[p.slug] = byMarket[p.slug] || { pair: p.pair, lots: [], totalCost: 0, totalValue: 0 };
-    byMarket[p.slug].lots.push(p);
-    byMarket[p.slug].totalCost = fl2(byMarket[p.slug].totalCost + (p.shares * p.entryPrice));
-    byMarket[p.slug].totalValue = fl2(byMarket[p.slug].totalValue + (p.shares * mid));
-  }
+    const cp = m ? (p.side === 'up' ? m.upMid : m.downMid) : 0;
+    const cv = fl2(p.size * cp);
+    const upnl = fl2(cv - (p.size * p.entryPrice));
+    openValue += cv; unrealizedPnl += upnl;
+    return {
+      id: p.id.slice(0, 12), pair: m ? m.pair : '?',
+      side: p.side.toUpperCase(), entryPrice: fl4(p.entryPrice),
+      currentPrice: fl4(cp), shares: p.size, cost: fl2(p.size * p.entryPrice),
+      currentValue: cv, unrealizedPnl: upnl, peakPrice: fl4(p.peakPrice),
+      checkpoints: p.cpCount, trailingActive: p.trailingActive,
+    };
+  });
 
-  let openValue = 0;
-  const posDisplay = [];
-  for (const [slug, ms] of Object.entries(byMarket)) {
-    const m = marketCache[slug];
-    const elapsed = m ? Math.max(0, WINDOW_SECS - m.secondsToEnd) : 0;
-    const cpIdx = Math.floor(elapsed / CHECKPOINT_SECS);
-    openValue += ms.totalValue;
-    for (const lot of ms.lots) {
-      const mkt = marketCache[slug];
-      const cur = mkt ? (lot.side === 'up' ? mkt.upMid : mkt.downMid) : 0;
-      posDisplay.push({
-        pair: lot.pair,
-        side: lot.side.toUpperCase(),
-        entryPrice: fl4(lot.entryPrice),
-        currentPrice: fl4(cur),
-        shares: lot.shares,
-        cost: fl2(lot.shares * lot.entryPrice),
-        currentValue: fl2(lot.shares * cur),
-        unrealizedPnl: fl2((lot.shares * cur) - (lot.shares * lot.entryPrice)),
-        checkpointsHeld: cpIdx - lot.checkpointIdx,
-        lotId: lot.lotId,
-        peakPrice: fl4(lot.peakPrice || lot.entryPrice),
-        trailDrop: fl4(Math.max(0, (lot.peakPrice || lot.entryPrice) - cur)),
-        time: new Date().toTimeString().slice(0, 8),
-      });
-    }
-  }
-
-  const activeMkts = Object.values(marketCache).filter(m => !m.resolved && m.secondsToEnd > -300);
+  const allMarkets = Object.values(marketCache).filter(m => m.active).map(m => ({
+    label: `${m.pair} 5m`, secondsToEnd: m.secondsToEnd,
+    secondsSinceStart: m.windowS - m.secondsToEnd,
+    upMid: fl4(m.upMid), dnMid: fl4(m.downMid),
+    fairValue: fl4(m.fairValue), leader: m.checkpointData?.leader || '?', active: m.active,
+  }));
 
   return {
-    dryRun: DRY_RUN,
-    balance: fl2(balance),
-    openEquity: fl2(balance + openValue),
-    startBalance: fl2(startBalance),
+    dryRun: DRY_RUN, balance: fl2(balance),
+    openEquity: fl2(balance + openValue), startBalance: fl2(startBalance),
     pnl: fl2((balance + openValue) - startBalance),
-    totalFees: fl4(totalFees),
-    uptime: Math.floor((Date.now() - startTime) / 1000),
-    tickCount,
-    activeMarkets: activeMkts.length,
-    targetPairs: TARGET_PAIRS,
-    openPositions: posDisplay,
-    openLotCount: openPosLots.length,
-    recentTrades: recentTrades.slice(0, 40),
-    activityLog: activityLog.slice(0, 60),
-    allMarkets: activeMkts.map(m => {
-      const elapsed = Math.max(0, WINDOW_SECS - m.secondsToEnd);
-      const cpIdx = Math.floor(elapsed / CHECKPOINT_SECS);
-      const cpTotal = Math.floor(WINDOW_SECS / CHECKPOINT_SECS);
-      // Time decay fair value estimate
-      return {
-        label: `${m.pair} 5m`,
-        elapsed: `${elapsed}s`,
-        remaining: `${Math.max(0, m.secondsToEnd)}s`,
-        upMid: fl4(m.upMid),
-        dnMid: fl4(m.dnMid),
-        spread: fl4(Math.abs((m.upMid || 0) - (m.downMid || 0))),
-        checkpoint: `${cpIdx}/${cpTotal}`,
-        dominantSide: (m.leaderSide || (m.upMid >= m.downMid ? 'UP' : 'DN')).toUpperCase(),
-        fairDominant: m.leaderFair || 0.50,
-        fairLagging: m.leaderFair ? fl4(1.0 - m.leaderFair) : 0.50,
-        deviation: m.deviation || 0,
-        threshold: m.threshold || 0.04,
-        active: m.active,
-        stopped: m.forceStopped,
-        lots: getPositionsForMarket(m.slug).length,
-      };
-    }),
-    config: {
-      windowSecs: WINDOW_SECS,
-      checkpointSecs: CHECKPOINT_SECS,
-      sharesPerLot: SHARES_PER_LOT,
-      stopElapsed: STOP_ELAPSED,
-      demoBalance: DEMO_BALANCE,
-      takerFee: TAKER_FEE,
+    unrealizedPnl: fl2(unrealizedPnl), totalFeesPaid: fl2(totalFeesPaid),
+    uptime: Math.floor((Date.now() - startTime) / 1000), tickCount,
+    activeMarkets: allMarkets.length, openPositions,
+    pendingOrders: pendingOrders.filter(p => !p.resolved).length,
+    positionsCount: positions.filter(p => !p.resolved).length,
+    totalTrades: recentTrades.length, recentTrades: recentTrades.slice(0, 40),
+    activityLog: activityLog.slice(0, 60), allMarkets,
+    strategy: {
+      sharesPerLot: SHARES_PER_LOT, maxLots: MAX_LOTS,
+      deviationThreshold: DEVIATION_THRESHOLD, trailingStopDist: TRAILING_STOP_DIST,
+      hardStopDist: HARD_STOP_DIST, timeStopCp: TIME_STOP_CP, forceSellSecs: FORCE_SELL_SECS,
     },
   };
 }
 
-// ── Start ──
 async function start(emit, log) {
-  emitFn = emit || (() => {});
-  logFn  = log  || (() => {});
-  startTime = Date.now();
-  balance = DEMO_BALANCE;
-  startBalance = DEMO_BALANCE;
-  totalFees = 0;
-  positions = [];
-  recentTrades = [];
-  activityLog = [];
-
-  slog(`🤖 Trend-Dip Bot | ${TARGET_PAIRS.join(',')} | ${WINDOW_SECS}s windows | dev:0.04→0.08 | trail:0.03 stop:0.05`);
-  slog(`📐 Max lots: 3 | Trail: 0.015 | Threshold: 0.02→0.06 | Pyramid same-side | Force: ${STOP_ELAPSED}s`);
-
+  emitFn = emit || (() => {}); logFn = log || (() => {});
+  startTime = Date.now(); balance = DEMO_BALANCE; startBalance = DEMO_BALANCE;
+  slog(`🤖 Time-Decay v2 | ${TARGET_PAIRS.join(',')} 5m | lots:${SHARES_PER_LOT}x${MAX_LOTS} | dev:${DEVIATION_THRESHOLD} | trail:${TRAILING_STOP_DIST}`);
   if (!DRY_RUN) {
     try {
       trader = new PolymarketTrader(process.env.POLYMARKET_PRIVATE_KEY, process.env.FUNDER_ADDRESS);
-      trader.setLogFn(logFn);
-      slog('🔑 Authenticating...');
-      const authResult = await trader.authenticate();
-      if (!authResult) throw new Error('auth returned empty');
-      slog(`✅ Authenticated: ${trader.address}`);
-    } catch (e) {
-      slog(`❌ Auth failed: ${e.message}`);
-      process.exit(1);
-    }
+      trader.setLogFn(logFn); slog('🔑 Authenticating...'); await trader.authenticate();
+      slog(`✅ Auth: ${trader.address}`);
+    } catch (e) { slog(`❌ Auth: ${e.message}`); process.exit(1); }
   }
-
-  if (DRY_RUN) slog('📋 PAUSED — toggle LIVE to start trading');
-  else slog('🔴 LIVE — real Polymarket orders');
-
+  slog(DRY_RUN ? '📋 DEMO mode' : '🔴 LIVE mode');
   setInterval(tick, TICK_MS);
 }
 
 function flushState() {
-  positions = [];
-  recentTrades = [];
-  activityLog = [];
-  marketCache = {};
-  tickCount = 0;
-  startTime = Date.now();
-  balance = DEMO_BALANCE;
-  totalFees = 0;
-  lotCounter = 0;
+  positions = []; pendingOrders = []; recentTrades = [];
+  activityLog = []; marketCache = {};
+  tickCount = 0; startTime = Date.now();
+  balance = DEMO_BALANCE; startBalance = DEMO_BALANCE; totalFeesPaid = 0;
 }
 
 async function setDryRun(val) {
-  const wasDryRun = DRY_RUN;
-  DRY_RUN = !!val;
-  flushState();
-
-  if (wasDryRun && !DRY_RUN && !trader) {
-    try {
-      trader = new PolymarketTrader(process.env.POLYMARKET_PRIVATE_KEY, process.env.FUNDER_ADDRESS);
-      trader.setLogFn(logFn);
-      slog('🔑 Authenticating...');
-      const authResult = await trader.authenticate();
-      if (!authResult) throw new Error('auth returned empty');
-      slog(`✅ Authenticated: ${trader.address}`);
-    } catch (e) {
-      slog(`❌ Auth failed: ${e.message}`);
-      DRY_RUN = true;
-      slog('↩️ Reverted to PAUSED — auth failed');
-    }
-  }
-
-  if (DRY_RUN) slog('📋 PAUSED — monitoring only');
-  else slog('🔴 LIVE — real Polymarket orders');
+  DRY_RUN = !!val; flushState();
+  slog(DRY_RUN ? '📋 DEMO' : '🔴 LIVE');
 }
 
 function getDryRun() { return DRY_RUN; }
