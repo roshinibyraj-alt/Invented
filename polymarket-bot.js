@@ -307,11 +307,16 @@ async function processPendingExits() {
         }
         pe.resolved = true;
       } else if (result.timeout) {
-        if (Date.now() - pe.createdAt > 30000) {
-          slog(`⏰ GTC SELL TIMEOUT ${pe.id.slice(0,12)}…`);
-          // Unmark exiting so managePositions can retry FOK
+        if (Date.now() - pe.createdAt > 20000) {
+          slog(`⏰ GTC SELL TIMEOUT ${pe.id.slice(0,12)}… — cancelling`);
+          try { await trader.cancelOrder(pe.id); } catch(_) {}
+          // Unmark exiting + set cooldown so managePositions doesn't retry immediately
           for (const pos of positions) {
-            if (pos.slug === pe.slug && pos.side === pe.side && pos.exiting) pos.exiting = false;
+            if (pos.slug === pe.slug && pos.side === pe.side && pos.exiting) {
+              pos.exiting = false;
+              pos.exitCooldown = Date.now() + 2000; // 2s cooldown, then direct FOK retry
+              pos.retryFok = true;
+            }
           }
           pe.resolved = true;
         }
@@ -325,6 +330,17 @@ async function processPendingExits() {
 async function managePositions(isCheckpoint) {
   for (const pos of positions) {
     if (pos.exiting) continue; // GTC sell pending, don't re-evaluate
+    if (pos.exitCooldown && pos.exitCooldown > Date.now()) continue; // wait after GTC timeout
+    // After cooldown expires, retry FOK directly (skip trailing/hard re-eval)
+    if (pos.retryFok) {
+      pos.retryFok = false;
+      const m = marketCache[pos.slug];
+      if (m && m.active) {
+        const sp = pos.side === 'up' ? m.upMid : m.downMid;
+        if (sp > 0.01) await exitPosition(pos, sp, m);
+      }
+      continue;
+    }
     const m = marketCache[pos.slug];
     if (!m || !m.active) continue;
     const sidePrice = pos.side === 'up' ? m.upMid : m.downMid;
