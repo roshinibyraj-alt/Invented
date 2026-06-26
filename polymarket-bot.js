@@ -121,6 +121,7 @@ async function discoverMarkets() {
       fairValue: 0.50,
       windowStart: endTime - WINDOW_SECS * 1000,
       checkpointData: { prices: [], leader: null, entrySignals: 0 },
+      initialEntryDone: false,
     };
   }));
   const expired = [];
@@ -173,34 +174,17 @@ function sideFair(m, side) {
   return side === 'up' ? m.fairValue : (1 - m.fairValue);
 }
 
-// ── Checkpoint: evaluate entries ──
+// ── Checkpoint: initial dual entry ──
 async function runCheckpoint() {
   slog(`📊 Checkpoint ${Math.floor(tickCount / CHECKPOINT_EVERY)}`);
   for (const [slug, m] of Object.entries(marketCache)) {
     if (!m.active) continue;
-    const cd = m.checkpointData;
-    if (!cd || !cd.leader) continue;
 
-    const side = cd.leader;
-    const sidePrice = side === 'up' ? m.upMid : m.downMid;
-    if (!sidePrice || sidePrice === 0) continue;
-
-    const fair = sideFair(m, side);
-    const deviation = fair - sidePrice;
-
-    const existing = positions.filter(p => p.slug === slug && p.side === side);
-    const hasPending = pendingOrders.some(p => p.slug === slug && p.side === side && !p.resolved);
-
-    // Signal: deviation in sweet spot (not too little, not too extreme)
-    const signalGood = deviation > DEVIATION_THRESHOLD && deviation < MAX_DEVIATION && sidePrice > 0.20;
-    if (signalGood) {
-      cd.entrySignals = (cd.entrySignals || 0) + 1;
-    } else {
-      cd.entrySignals = 0;
-    }
-    if (cd.entrySignals >= 2 && existing.length < MAX_LOTS && !hasPending) {
-      cd.entrySignals = 0;
-      await enterPosition(m, side, sidePrice);
+    // First entry of window: enter both UP and DOWN
+    if (!m.initialEntryDone) {
+      m.initialEntryDone = true;
+      if (m.upMid > 0.01)   await enterPosition(m, 'up', m.upMid);
+      if (m.downMid > 0.01) await enterPosition(m, 'down', m.downMid);
     }
   }
 }
@@ -271,6 +255,7 @@ async function processPendingOrders() {
 // ── Manage open positions ──
 async function managePositions(isCheckpoint) {
   if (positions.length === 0) return;
+  const toFlip = [];
   for (const pos of positions) {
     const m = marketCache[pos.slug];
     if (!m || !m.active) continue;
@@ -279,29 +264,40 @@ async function managePositions(isCheckpoint) {
     const elapsed = (Date.now() - m.windowStart) / 1000;
     if (isCheckpoint) pos.cpCount++;
     if (sidePrice > pos.peakPrice) pos.peakPrice = sidePrice;
-    if (checkExitConditions(pos, sidePrice, m, elapsed)) await exitPosition(pos, sidePrice, m);
+    const reason = checkExitConditions(pos, sidePrice, m, elapsed);
+    if (reason) {
+      await exitPosition(pos, sidePrice, m);
+      if (reason === 'trailing') {
+        toFlip.push({ slug: m.slug, side: pos.side === 'up' ? 'down' : 'up', m });
+      }
+    }
   }
   positions = positions.filter(p => !p.resolved);
+  // Flip entries after exits so balance is updated
+  for (const f of toFlip) {
+    const price = f.side === 'up' ? f.m.upMid : f.m.downMid;
+    if (price > 0.01) await enterPosition(f.m, f.side, price);
+  }
 }
 
 function checkExitConditions(pos, cp, m, elapsed) {
   if (cp <= pos.entryPrice - HARD_STOP_DIST) {
     slog(`🔴 HARD STOP ${m.pair} ${pos.side.toUpperCase()} entry:${fl4(pos.entryPrice)} → ${fl4(cp)}`);
-    return true;
+    return 'hard_stop';
   }
   if (pos.trailingActive && pos.peakPrice - cp >= TRAILING_STOP_DIST) {
     slog(`🔶 TRAILING ${m.pair} ${pos.side.toUpperCase()} peak:${fl4(pos.peakPrice)} → ${fl4(cp)}`);
-    return true;
+    return 'trailing';
   }
   if (pos.cpCount >= TIME_STOP_CP && cp <= pos.entryPrice) {
     slog(`⏰ TIME STOP ${m.pair} ${pos.side.toUpperCase()} ${pos.cpCount}cp`);
-    return true;
+    return 'time_stop';
   }
   if (elapsed >= FORCE_SELL_SECS) {
     slog(`⏳ FORCE SELL ${m.pair} ${pos.side.toUpperCase()} @ ${elapsed.toFixed(0)}s`);
-    return true;
+    return 'force_sell';
   }
-  return false;
+  return null;
 }
 
 async function exitPosition(pos, exitPrice, m) {
