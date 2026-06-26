@@ -465,6 +465,8 @@ async function setDryRun(val) {
           slog('🔑 Authenticating for live...'); await trader.authenticate();
           slog(`✅ Auth: ${trader.address}`);
         }
+        // Approve CLOB allowance so orders don't fail on allowance
+        await trader.approveAllowance();
         const realBal = await trader.getBalance();
         if (realBal > 0) { balance = realBal; startBalance = realBal; }
         slog(`💰 Real balance: $${fl2(balance)}`);

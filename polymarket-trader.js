@@ -56,6 +56,17 @@ class PolymarketTrader {
     return { apiKey: this.apiKey };
   }
 
+  async approveAllowance(amount = null) {
+    try {
+      const resp = await this._clob.approveTokenForClob();
+      this._log('✅ CLOB allowance approved');
+      return true;
+    } catch (e) {
+      this._log(`⚠️ Allowance approve: ${e.message}`);
+      return false;
+    }
+  }
+
   async getBalance() {
     try {
       const resp = await this._clob.getBalanceAllowance({ asset_type: AssetType.COLLATERAL });
