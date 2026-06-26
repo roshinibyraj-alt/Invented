@@ -17,7 +17,7 @@ const PRICE_FETCH_EVERY = 5;
 const CHECKPOINT_EVERY  = 250;
 const WINDOW_SECS       = 300;
 const DEMO_BALANCE      = 50;
-const DEMO_FEE_RATE     = 0.07;
+const DEMO_FEE_RATE     = 0.03;
 const DEMO_FEE_EXP      = 1;
 
 const DEVIATION_THRESHOLD  = 0.05;
