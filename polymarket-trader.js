@@ -82,7 +82,7 @@ class PolymarketTrader {
     return { id };
   }
 
-  // ── FOK market order (exit) ──
+  // ── FOK market order (exit/entry) ──
   async placeFokOrder(tokenId, side, amount) {
     const sideVal = side === 'BUY' ? Side.BUY : Side.SELL;
     let tickSize = '0.01', negRisk = false;
@@ -94,9 +94,11 @@ class PolymarketTrader {
       OrderType.FOK
     );
     const id = resp?.orderID ?? resp?.id ?? null;
-    if (id) this._log(`🏁 FOK ${side} $${amount} id:${id}`);
     const status = resp?.status || (id ? 'UNKNOWN' : 'FAILED');
-    return { id, status };
+    const isFilled = status === 'FILLED' || resp?.match_status === 'filled' || (resp?.remaining_size && parseFloat(resp.remaining_size) === 0);
+    const avgPrice = parseFloat(resp?.avg_fill_price || resp?.price || '0');
+    if (id) this._log(`🏁 FOK ${side} $${amount} → ${status} avg:${avgPrice} id:${id ? id.slice(0,12) : '?'}…`);
+    return { id, status, isFilled, avgPrice, raw: resp };
   }
 
   // ── Poll order until filled or timeout ──

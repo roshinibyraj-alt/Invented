@@ -122,6 +122,7 @@ async function discoverMarkets() {
       windowStart: endTime - WINDOW_SECS * 1000,
       checkpointData: { prices: [], leader: null, entrySignals: 0 },
       initialEntryDone: false,
+      entryCooldown: 0,
     };
   }));
   const expired = [];
@@ -184,14 +185,16 @@ async function runCheckpoint() {
     const elapsed = (Date.now() - m.windowStart) / 1000;
     if (!m.initialEntryDone && elapsed >= 10) {
       m.initialEntryDone = true;
-      if (m.upMid > 0.01)   await enterPosition(m, 'up', m.upMid);
-      if (m.downMid > 0.01) await enterPosition(m, 'down', m.downMid);
+      if (m.upMid > 0.01 && m.upMid < 0.95)   await enterPosition(m, 'up', m.upMid);
+      if (m.downMid > 0.01 && m.downMid < 0.95) await enterPosition(m, 'down', m.downMid);
     }
   }
 }
 
 // ── Enter position ──
 async function enterPosition(m, side, price) {
+  // Respect cooldown (prevent spam on failed entries)
+  if (m.entryCooldown > Date.now()) return;
   const size = SHARES_PER_LOT;
   const cost = fl2(size * price);
   const tokenId = side === 'up' ? m.upTokenId : m.downTokenId;
@@ -214,39 +217,55 @@ async function enterPosition(m, side, price) {
     slog(`🟢 ENTRY ${m.pair} ${side.toUpperCase()} ${size}sh@${fl4(price)} dev:${fl4(m.fairValue - price)} fee:$${fl2(fee)}`);
     pushTrade(m.pair, side.toUpperCase(), 'ENTRY', price, 0, size, 0, balance, fee);
   } else {
+    // Skip if price is extreme (no liquidity near 0 or 1)
+    if (price < 0.05 || price > 0.95) {
+      slog(`⏭️ SKIP ${m.pair} ${side.toUpperCase()} @ ${fl4(price)} — extreme price`);
+      return;
+    }
     try {
-      const order = await trader.placeGtcOrder(tokenId, 'BUY', price, size);
-      slog(`⏳ GTC BUY pending id:${order.id.slice(0,12)}…`);
-      pendingOrders.push({ id: order.id, slug: m.slug, side, size, price, createdAt: Date.now(), resolved: false });
-    } catch (e) { slog(`❌ GTC BUY: ${e.message}`); }
+      const entryPrice = fl4(price);
+      const order = await trader.placeGtcOrder(tokenId, 'BUY', entryPrice, size);
+      slog(`⏳ GTC BUY ${m.pair} ${side.toUpperCase()} ${size}sh@${entryPrice} id:${order.id.slice(0,12)}…`);
+      pendingOrders.push({ id: order.id, slug: m.slug, side, size, price: entryPrice, createdAt: Date.now(), resolved: false });
+    } catch (e) {
+      m.entryCooldown = Date.now() + 5000; // 5s cooldown on failure
+      slog(`❌ GTC BUY: ${e.message}`);
+    }
   }
 }
 
-// ── Process live pending ──
+// ── Process live pending GTC orders ──
 async function processPendingOrders() {
   for (const po of pendingOrders) {
     if (po.resolved) continue;
     const m = marketCache[po.slug];
     if (!m || !m.active) { po.resolved = true; continue; }
     try {
-      const result = await trader.waitForFill(po.id, 5000);
+      const result = await trader.waitForFill(po.id, 2000);
       if (result.filled) {
         const fee = calcFee(po.size * po.price, po.price);
         balance = fl2(balance - po.size * po.price - fee);
         totalFeesPaid = fl2(totalFeesPaid + fee);
         positions.push({
-          id: po.id, slug: po.slug, side: po.side,
+          id: po.id.slice(0,12), slug: po.slug, side: po.side,
           entryPrice: po.price, size: po.size, entryTick: tickCount,
           peakPrice: po.price, cpCount: 0, trailingActive: true,
           hardStopHit: false, createdAt: Date.now(),
           totalCost: po.size * po.price + fee, fees: fee,
         });
-        slog(`✅ FILLED ${m.pair} ${po.side.toUpperCase()} ${po.size}sh@${fl4(po.price)} fee:$${fl2(fee)}`);
+        slog(`✅ GTC FILLED ${m.pair} ${po.side.toUpperCase()} ${po.size}sh@${fl4(po.price)} fee:$${fl2(fee)} bal:$${fl2(balance)}`);
         pushTrade(m.pair, po.side.toUpperCase(), 'ENTRY', po.price, 0, po.size, 0, balance, fee);
         po.resolved = true;
-      } else if (result.cancelled || result.timeout) {
-        slog(`❌ ORDER ${result.timeout ? 'TIMEOUT' : 'CANCELLED'} ${po.id.slice(0,12)}…`);
-        po.resolved = true;
+      } else if (result.timeout || result.cancelled) {
+        if (result.timeout) {
+          // Try again next tick instead of giving up
+          // Only cancel if waiting too long (>15s)
+          if (Date.now() - po.createdAt > 15000) {
+            slog(`⏰ GTC TIMEOUT ${po.id.slice(0,12)}… — cancelling`);
+            try { await trader.cancelOrder(po.id); } catch(_) {}
+            po.resolved = true;
+          }
+        }
       }
     } catch (e) { slog(`⚠️ Poll: ${e.message}`); }
   }
@@ -255,7 +274,6 @@ async function processPendingOrders() {
 
 // ── Manage open positions ──
 async function managePositions(isCheckpoint) {
-  const toFlip = [];
   for (const pos of positions) {
     const m = marketCache[pos.slug];
     if (!m || !m.active) continue;
@@ -267,17 +285,9 @@ async function managePositions(isCheckpoint) {
     const reason = checkExitConditions(pos, sidePrice, m, elapsed);
     if (reason) {
       await exitPosition(pos, sidePrice, m);
-      if (reason === 'trailing') {
-        toFlip.push({ slug: m.slug, side: pos.side === 'up' ? 'down' : 'up', m });
-      }
     }
   }
   positions = positions.filter(p => !p.resolved);
-  // Flip entries after exits so balance is updated
-  for (const f of toFlip) {
-    const price = f.side === 'up' ? f.m.upMid : f.m.downMid;
-    if (price > 0.01) await enterPosition(f.m, f.side, price);
-  }
   // Fallback: if any active market has zero positions mid-window, re-enter both sides
   const now = Date.now();
   for (const [, m] of Object.entries(marketCache)) {
@@ -288,8 +298,8 @@ async function managePositions(isCheckpoint) {
     const hasDn = positions.some(p => p.slug === m.slug && p.side === 'down');
     if (!hasUp && !hasDn) {
       m.initialEntryDone = false;
-      if (m.upMid > 0.01 && balance > m.upMid * 6) await enterPosition(m, 'up', m.upMid);
-      if (m.downMid > 0.01 && balance > m.downMid * 6) await enterPosition(m, 'down', m.downMid);
+      if (m.upMid > 0.01 && m.upMid < 0.95 && balance > m.upMid * 6) await enterPosition(m, 'up', m.upMid);
+      if (m.downMid > 0.01 && m.downMid < 0.95 && balance > m.downMid * 6) await enterPosition(m, 'down', m.downMid);
     }
   }
 }
@@ -327,18 +337,28 @@ async function exitPosition(pos, exitPrice, m) {
   } else {
     try {
       const bb = await trader.getBestBidAsk(tokenId);
-      const ep = pos.side === 'up' ? (bb?.bestBid || exitPrice) : (bb?.bestAsk || exitPrice);
-      const order = await trader.placeFokOrder(tokenId, 'SELL', pos.size * ep);
-      if (order.status === 'FILLED') {
-        balance = fl2(balance + pos.size * ep);
+      // For SELL: sell tokens into the best bid (highest buyer price)
+      const sellPrice = bb?.bestBid || exitPrice;
+      // FOK SELL amount = number of tokens (for SELL side)
+      const order = await trader.placeFokOrder(tokenId, 'SELL', pos.size);
+      if (order.isFilled) {
+        const fillPrice = order.avgPrice > 0 ? order.avgPrice : sellPrice;
+        const proceeds = fl2(pos.size * fillPrice);
+        const pnlAdj = fl2(proceeds - cost - fee);
+        balance = fl2(balance + proceeds - fee);
         totalFeesPaid = fl2(totalFeesPaid + fee);
-        slog(`📤 FOK FILLED ${m.pair} ${pos.side.toUpperCase()} ${pos.size}sh@${fl4(ep)} pnl:$${pnl}`);
-        pushTrade(m.pair, pos.side.toUpperCase(), 'SELL', pos.entryPrice, ep, pos.size, pnl, balance, fee);
+        slog(`📤 FOK FILLED ${m.pair} ${pos.side.toUpperCase()} ${pos.size}sh@${fl4(fillPrice)} pnl:$${pnlAdj}`);
         pos.resolved = true;
+        // Flip: immediately enter opposite side since FOK filled instantly
+        const flipSide = pos.side === 'up' ? 'down' : 'up';
+        const flipPrice = flipSide === 'up' ? m.upMid : m.downMid;
+        if (flipPrice > 0.01 && balance > flipPrice * 6) {
+          await enterPosition(m, flipSide, flipPrice);
+        }
       } else {
-        slog(`⚠️ FOK not filled (${order.status})`);
+        slog(`⚠️ FOK SELL not filled (${order.status}) — retrying next tick`);
       }
-    } catch (e) { slog(`❌ FOK: ${e.message}`); }
+    } catch (e) { slog(`❌ FOK SELL: ${e.message}`); }
   }
 }
 
@@ -406,6 +426,13 @@ function buildSnapshot() {
 async function start(emit, log) {
   emitFn = emit || (() => {}); logFn = log || (() => {});
   startTime = Date.now(); balance = DEMO_BALANCE; startBalance = DEMO_BALANCE;
+  if (!DRY_RUN && trader) {
+    try {
+      const realBal = await trader.getBalance();
+      if (realBal > 0) { balance = realBal; startBalance = realBal; }
+      slog(`💰 Real balance: $${fl2(balance)}`);
+    } catch (e) { slog(`⚠️ Balance sync: ${e.message}`); }
+  }
   slog(`🤖 Time-Decay v2 | ${TARGET_PAIRS.join(',')} 5m | lots:${SHARES_PER_LOT}x${MAX_LOTS} | dev:${DEVIATION_THRESHOLD} | trail:${TRAILING_STOP_DIST}`);
   if (!DRY_RUN) {
     try {
