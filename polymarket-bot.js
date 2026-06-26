@@ -75,6 +75,8 @@ let totalFeesPaid   = 0;
 let marketCache     = {};
 let positions       = [];
 let pendingOrders   = [];
+let pendingExits    = [];
+let pendingExitsDedup = new Set();
 let recentTrades    = [];
 let activityLog     = [];
 let tickCount       = 0;
@@ -133,6 +135,7 @@ async function discoverMarkets() {
     delete marketCache[slug];
     positions = positions.filter(p => p.slug !== slug);
     pendingOrders = pendingOrders.filter(p => p.slug !== slug);
+    pendingExits = pendingExits.filter(p => p.slug !== slug);
   }
 }
 
@@ -272,9 +275,56 @@ async function processPendingOrders() {
   pendingOrders = pendingOrders.filter(p => !p.resolved);
 }
 
+// ── Process pending GTC exits ──
+async function processPendingExits() {
+  for (const pe of pendingExits) {
+    if (pe.resolved) continue;
+    const m = marketCache[pe.slug];
+    if (!m || !m.active) { pe.resolved = true; continue; }
+    try {
+      const result = await trader.waitForFill(pe.id, 2000);
+      if (result.filled) {
+        slog(`✅ GTC SELL FILLED ${m.pair} ${pe.side.toUpperCase()} ${pe.size}sh@${fl4(pe.price)}`);
+        // Find and resolve the position
+        for (const pos of positions) {
+          if (pos.slug === pe.slug && pos.side === pe.side && pos.exiting && !pos.resolved) {
+            const proceeds = fl2(pos.size * pe.price);
+            const fee = calcFee(proceeds, pe.price);
+            const pnl = fl2(proceeds - (pos.size * pos.entryPrice) - fee);
+            balance = fl2(balance + proceeds - fee);
+            totalFeesPaid = fl2(totalFeesPaid + fee);
+            slog(`📤 GTC SELL DONE ${m.pair} ${pe.side.toUpperCase()} ${pos.size}sh@${fl4(pe.price)} pnl:$${pnl} bal:$${fl2(balance)}`);
+            pushTrade(m.pair, pe.side.toUpperCase(), 'SELL', pos.entryPrice, pe.price, pos.size, pnl, balance, fee);
+            pos.resolved = true;
+            // Flip: enter opposite side
+            const flipSide = pos.side === 'up' ? 'down' : 'up';
+            const flipPrice = flipSide === 'up' ? m.upMid : m.downMid;
+            if (flipPrice > 0.01 && flipPrice < 0.95 && balance > flipPrice * 6) {
+              await enterPosition(m, flipSide, flipPrice);
+            }
+            break;
+          }
+        }
+        pe.resolved = true;
+      } else if (result.timeout) {
+        if (Date.now() - pe.createdAt > 30000) {
+          slog(`⏰ GTC SELL TIMEOUT ${pe.id.slice(0,12)}…`);
+          // Unmark exiting so managePositions can retry FOK
+          for (const pos of positions) {
+            if (pos.slug === pe.slug && pos.side === pe.side && pos.exiting) pos.exiting = false;
+          }
+          pe.resolved = true;
+        }
+      }
+    } catch (e) { slog(`⚠️ Exit poll: ${e.message}`); }
+  }
+  pendingExits = pendingExits.filter(p => !p.resolved);
+}
+
 // ── Manage open positions ──
 async function managePositions(isCheckpoint) {
   for (const pos of positions) {
+    if (pos.exiting) continue; // GTC sell pending, don't re-evaluate
     const m = marketCache[pos.slug];
     if (!m || !m.active) continue;
     const sidePrice = pos.side === 'up' ? m.upMid : m.downMid;
@@ -356,7 +406,16 @@ async function exitPosition(pos, exitPrice, m) {
           await enterPosition(m, flipSide, flipPrice);
         }
       } else {
-        slog(`⚠️ FOK SELL not filled (${order.status}) — retrying next tick`);
+        // FOK failed — fallback to GTC limit sell at midpoint
+        pos.exiting = true;
+        try {
+          const gtcOrder = await trader.placeGtcOrder(tokenId, 'SELL', exitPrice, pos.size, true);
+          slog(`⏳ GTC SELL ${m.pair} ${pos.side.toUpperCase()} ${pos.size}sh@${fl4(exitPrice)} id:${gtcOrder.id.slice(0,12)}…`);
+          pendingExits.push({ id: gtcOrder.id, slug: m.slug, side: pos.side, size: pos.size, price: exitPrice, createdAt: Date.now(), resolved: false });
+        } catch (e2) {
+          slog(`❌ GTC SELL also failed: ${e2.message}`);
+          pos.exiting = false; // retry FOK next tick
+        }
       }
     } catch (e) { slog(`❌ FOK SELL: ${e.message}`); }
   }
@@ -372,7 +431,7 @@ async function tick() {
     }
     const isCheckpoint = (tickCount % CHECKPOINT_EVERY === 0);
     if (isCheckpoint) await runCheckpoint();
-    if (!DRY_RUN) await processPendingOrders();
+    if (!DRY_RUN) { await processPendingOrders(); await processPendingExits(); }
     await managePositions(isCheckpoint);
     emitFn('snapshot', buildSnapshot());
   } catch (e) {
@@ -446,7 +505,7 @@ async function start(emit, log) {
 }
 
 function flushState() {
-  positions = []; pendingOrders = []; recentTrades = [];
+  positions = []; pendingOrders = []; pendingExits = []; recentTrades = [];
   activityLog = []; marketCache = {};
   tickCount = 0; startTime = Date.now();
   balance = DEMO_BALANCE; startBalance = DEMO_BALANCE; totalFeesPaid = 0;
