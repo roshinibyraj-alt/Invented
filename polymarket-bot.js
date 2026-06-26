@@ -180,8 +180,9 @@ async function runCheckpoint() {
   for (const [slug, m] of Object.entries(marketCache)) {
     if (!m.active) continue;
 
-    // First entry of window: enter both UP and DOWN
-    if (!m.initialEntryDone) {
+    // Wait 10s after window start before first entry
+    const elapsed = (Date.now() - m.windowStart) / 1000;
+    if (!m.initialEntryDone && elapsed >= 10) {
       m.initialEntryDone = true;
       if (m.upMid > 0.01)   await enterPosition(m, 'up', m.upMid);
       if (m.downMid > 0.01) await enterPosition(m, 'down', m.downMid);
@@ -289,10 +290,7 @@ function checkExitConditions(pos, cp, m, elapsed) {
     slog(`🔶 TRAILING ${m.pair} ${pos.side.toUpperCase()} peak:${fl4(pos.peakPrice)} → ${fl4(cp)}`);
     return 'trailing';
   }
-  if (pos.cpCount >= TIME_STOP_CP && cp <= pos.entryPrice) {
-    slog(`⏰ TIME STOP ${m.pair} ${pos.side.toUpperCase()} ${pos.cpCount}cp`);
-    return 'time_stop';
-  }
+
   if (elapsed >= FORCE_SELL_SECS) {
     slog(`⏳ FORCE SELL ${m.pair} ${pos.side.toUpperCase()} @ ${elapsed.toFixed(0)}s`);
     return 'force_sell';
