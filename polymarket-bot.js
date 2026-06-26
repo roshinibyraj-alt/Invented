@@ -16,14 +16,14 @@ const DISCOVER_EVERY    = 300;
 const PRICE_FETCH_EVERY = 5;
 const CHECKPOINT_EVERY  = 250;
 const WINDOW_SECS       = 300;
-const DEMO_BALANCE      = 2000;
+const DEMO_BALANCE      = 50;
 const DEMO_FEE_RATE     = 0.07;
 const DEMO_FEE_EXP      = 1;
 
 const DEVIATION_THRESHOLD  = 0.05;
-const SHARES_PER_LOT       = 300;
+const SHARES_PER_LOT       = 6;
 const MAX_LOTS             = 3;
-const TRAILING_STOP_DIST   = 0.015;
+const TRAILING_STOP_DIST   = 0.025;
 const HARD_STOP_DIST       = 0.08;
 const TIME_STOP_CP         = 5;
 const FORCE_SELL_SECS      = 270;
