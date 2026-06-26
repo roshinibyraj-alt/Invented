@@ -23,7 +23,7 @@ const DEMO_FEE_EXP      = 1;
 const DEVIATION_THRESHOLD  = 0.05;
 const SHARES_PER_LOT       = 6;
 const MAX_LOTS             = 3;
-const TRAILING_STOP_DIST   = 0.015;
+const TRAILING_STOP_DIST   = 0.05;
 const HARD_STOP_DIST       = 0.08;
 const TIME_STOP_CP         = 5;
 const FORCE_SELL_SECS      = 270;
@@ -190,7 +190,7 @@ async function runCheckpoint() {
     const existing = positions.filter(p => p.slug === slug && p.side === side);
     const hasPending = pendingOrders.some(p => p.slug === slug && p.side === side && !p.resolved);
 
-    if (deviation > DEVIATION_THRESHOLD && existing.length < MAX_LOTS && !hasPending) {
+    if (deviation > DEVIATION_THRESHOLD && existing.length < MAX_LOTS && !hasPending && sidePrice > 0.20) {
       await enterPosition(m, side, sidePrice);
     }
   }
