@@ -106,7 +106,7 @@ async function discoverMarkets() {
       windowS: WINDOW_SECS,
       upTokenId: ids[0], downTokenId: ids[1],
       endTime, active: false, resolved: false,
-      upMid: 0, downMid: 0,
+      upMid: 0, downMid: 0, upAsk: 0, dnAsk: 0,
       secondsToEnd: Math.floor((endTime - Date.now()) / 1000),
       lastCheckpointElapsed: -1,  // tracks which checkpoint we've processed
       started: false,
@@ -136,11 +136,16 @@ async function buyShares(m, side, shares) {
   const mid = side === 'up' ? m.upMid : m.downMid;
   if (!mid || mid <= 0) return;
 
-  const cost = fl2(shares * mid);
+  // Use ASK price for buys (realistic taker fill), fallback to midpoint if book unavailable
+  const ask = side === 'up' ? m.upAsk : m.dnAsk;
+  const execPrice = ask > 0 ? ask : mid;
+  if (!execPrice || execPrice <= 0) return;
+
+  const cost = fl2(shares * execPrice);
   const fee  = fl2(cost * TAKER_FEE);
 
   if (balance < cost + fee) {
-    slog(`⚠️ ${m.pair} insufficient balance for ${side.toUpperCase()} buy $${cost}+fee`);
+    slog(`\u26a0\ufe0f ${m.pair} insufficient balance for ${side.toUpperCase()} buy $${cost}+fee`);
     return;
   }
 
@@ -152,14 +157,14 @@ async function buyShares(m, side, shares) {
 
   positions.push({
     slug: m.slug, pair: m.pair,
-    side, entryPrice: mid, shares, cost,
+    side, entryPrice: execPrice, shares, cost,
     tickBought: tickCount,
     checkpointIdx: cpIdx,
     lotId,
-    peakPrice: mid,
+    peakPrice: execPrice,
   });
 
-  slog(`📥 BUY ${m.pair} ${side.toUpperCase()} x${shares} @ $${fl4(mid)} (-$${cost}) fee:$${fee} bal:$${fl2(balance)}`);
+  slog(`\U0001f4e5 BUY ${m.pair} ${side.toUpperCase()} x${shares} @ $${fl4(execPrice)} (-$${cost}) fee:$${fee} bal:$${fl2(balance)}`);
 
   // Place real order on CLOB
   const tokenId = side === 'up' ? m.upTokenId : m.downTokenId;
@@ -176,10 +181,13 @@ async function buyShares(m, side, shares) {
 }
 
 async function sellPosition(pos, m) {
+  // Use BID price for sells (realistic taker fill), fallback to midpoint if book unavailable
+  const bid = pos.side === 'up' ? m.upAsk : m.dnAsk;
   const mid = pos.side === 'up' ? m.upMid : m.downMid;
-  if (!mid || mid <= 0 || pos.shares <= 0) return;
+  const execPrice = bid > 0 ? bid : mid;
+  if (!execPrice || execPrice <= 0 || pos.shares <= 0) return;
 
-  const proceeds = fl2(pos.shares * mid);
+  const proceeds = fl2(pos.shares * execPrice);
   const cost     = fl2(pos.shares * pos.entryPrice);
   const fee      = fl2(proceeds * TAKER_FEE);
   const pnl      = fl2(proceeds - cost);
@@ -189,8 +197,8 @@ async function sellPosition(pos, m) {
   totalFees = fl4(totalFees + fee);
 
   const reason = mid > pos.entryPrice ? 'TP' : 'STOP';
-  slog(`📤 SELL ${pos.pair} ${pos.side.toUpperCase()} x${pos.shares} @ $${fl4(mid)} (+$${fl2(proceeds)}) fee:$${fee} pnl:$${fl2(netPnl)} | bal:$${fl2(balance)}`);
-  pushTrade(pos.pair, pos.side.toUpperCase(), 'SELL', pos.entryPrice, mid, pos.shares, netPnl, balance, reason);
+  slog(`📤 SELL ${pos.pair} ${pos.side.toUpperCase()} x${pos.shares} @ $${fl4(execPrice)} (+$${fl2(proceeds)}) fee:$${fee} pnl:$${fl2(netPnl)} | bal:$${fl2(balance)}`);
+  pushTrade(pos.pair, pos.side.toUpperCase(), 'SELL', pos.entryPrice, execPrice, pos.shares, netPnl, balance, reason);
 
   // Place real sell on CLOB
   const tokenId = pos.side === 'up' ? m.upTokenId : m.downTokenId;
@@ -299,7 +307,7 @@ async function processCheckpoint(m) {
     if (cpIdx - pos.checkpointIdx < 5) continue;
     const mid = pos.side === 'up' ? m.upMid : m.downMid;
     if (!mid || mid <= 0) continue;
-    slog(`\u23f0 ${m.pair} ${pos.side.toUpperCase()} time @ $${fl4(mid)} (${cpIdx - pos.checkpointIdx}CPs)`);
+    slog(`\u23f0 ${m.pair} ${pos.side.toUpperCase()} time @ $${fl4(exitPrice)} (${cpIdx - pos.checkpointIdx}CPs)`);
     await sellPosition(pos, m);
   }
 }
@@ -324,13 +332,23 @@ async function tick() {
         m.active = false;
         return;
       }
-      // Always fetch prices (even for upcoming markets) so dashboard shows live prices
-      const [upR, dnR] = await Promise.all([
+      // Fetch midpoint + order book for realistic pricing
+      const [upR, upBookR, dnR, dnBookR] = await Promise.all([
         getJson(`${CLOB}/midpoint?token_id=${m.upTokenId}`),
+        getJson(`${CLOB}/book?token_id=${m.upTokenId}`),
         getJson(`${CLOB}/midpoint?token_id=${m.downTokenId}`),
+        getJson(`${CLOB}/book?token_id=${m.downTokenId}`),
       ]);
       if (upR?.mid) m.upMid   = fl4(parseFloat(upR.mid));
       if (dnR?.mid) m.downMid = fl4(parseFloat(dnR.mid));
+      // Parse order book for realistic bid/ask
+      if (Array.isArray(upBookR) && upBookR.length > 0) {
+        // Book returns [{price, size}, ...] sorted best first
+        m.upAsk = fl4(parseFloat(upBookR[0].price));
+      }
+      if (Array.isArray(dnBookR) && dnBookR.length > 0) {
+        m.dnAsk = fl4(parseFloat(dnBookR[0].price));
+      }
 
       if (!m.active && !m.forceStopped && getPositionsForMarket(m.slug).length > 0) {
         // Market ended with open positions — force sell
@@ -371,22 +389,26 @@ async function tick() {
       const mid = pos.side === 'up' ? m.upMid : m.downMid;
       if (!mid || mid <= 0) continue;
 
+      // Use BID for sell exit price, midpoint for peak tracking
+      const bid = pos.side === 'up' ? m.upAsk : m.dnAsk;
+      const exitPrice = bid > 0 ? bid : mid;
+
       // Update peak every tick
       if (!pos.peakPrice) pos.peakPrice = pos.entryPrice;
       if (mid > pos.peakPrice) pos.peakPrice = mid;
 
-      const trailDrop = pos.peakPrice - mid;
-      const fromEntry = pos.entryPrice - mid;
+      const trailDrop = pos.peakPrice - exitPrice;
+      const fromEntry = pos.entryPrice - exitPrice;
 
       // Skip min hold for exit check (exits are reactive, not time-gated)
       // Trailing stop: 0.015 from peak (tight — captures gains, protects profits)
       if (trailDrop >= 0.015 && mid > 0.01) {
-        slog(`\U0001f4aa ${m.pair} ${pos.side.toUpperCase()} trail @ $${fl4(mid)} (peak:$${fl4(pos.peakPrice)}, -$${fl2(trailDrop)})`);
+        slog(`\U0001f4aa ${m.pair} ${pos.side.toUpperCase()} trail @ ${fl4(exitPrice)} (peak:${fl4(pos.peakPrice)}, -${fl2(trailDrop)})`);
         await sellPosition(pos, m);
       }
       // Hard stop: safety net if price gaps past trail
       else if (fromEntry >= 0.08 && mid > 0.01) {
-        slog(`\U0001f6d1 ${m.pair} ${pos.side.toUpperCase()} stop @ $${fl4(mid)} (entry:$${fl4(pos.entryPrice)}, -$${fl2(fromEntry)})`);
+        slog(`\U0001f6d1 ${m.pair} ${pos.side.toUpperCase()} stop @ ${fl4(exitPrice)} (entry:${fl4(pos.entryPrice)}, -${fl2(fromEntry)})`);
         await sellPosition(pos, m);
       }
     }
@@ -406,12 +428,20 @@ setInterval(async () => {
         promises.push(
           (async () => {
             try {
-              const [upR, dnR] = await Promise.all([
+              const [upR, upBookR, dnR, dnBookR] = await Promise.all([
                 getJson(`${CLOB}/midpoint?token_id=${m.upTokenId}`),
+                getJson(`${CLOB}/book?token_id=${m.upTokenId}`),
                 getJson(`${CLOB}/midpoint?token_id=${m.downTokenId}`),
+                getJson(`${CLOB}/book?token_id=${m.downTokenId}`),
               ]);
               if (upR?.mid) m.upMid   = fl4(parseFloat(upR.mid));
               if (dnR?.mid) m.downMid = fl4(parseFloat(dnR.mid));
+              if (Array.isArray(upBookR) && upBookR.length > 0) {
+                m.upAsk = fl4(parseFloat(upBookR[0].price));
+              }
+              if (Array.isArray(dnBookR) && dnBookR.length > 0) {
+                m.dnAsk = fl4(parseFloat(dnBookR[0].price));
+              }
             } catch (_) {}
           })()
         );
