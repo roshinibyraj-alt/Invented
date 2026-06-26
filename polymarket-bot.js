@@ -453,7 +453,29 @@ function flushState() {
 }
 
 async function setDryRun(val) {
-  DRY_RUN = !!val; flushState();
+  const goingLive = !val && DRY_RUN;
+  DRY_RUN = !!val;
+  if (goingLive) {
+    flushState(); // clear demo state
+    if (process.env.POLYMARKET_PRIVATE_KEY) {
+      try {
+        if (!trader) {
+          trader = new PolymarketTrader(process.env.POLYMARKET_PRIVATE_KEY, process.env.FUNDER_ADDRESS);
+          trader.setLogFn(logFn || (() => {}));
+          slog('🔑 Authenticating for live...'); await trader.authenticate();
+          slog(`✅ Auth: ${trader.address}`);
+        }
+        const realBal = await trader.getBalance();
+        if (realBal > 0) { balance = realBal; startBalance = realBal; }
+        slog(`💰 Real balance: $${fl2(balance)}`);
+      } catch (e) { slog(`❌ Live setup failed: ${e.message}`); DRY_RUN = true; }
+    } else {
+      slog('⚠️ No POLYMARKET_PRIVATE_KEY — staying in DEMO');
+      DRY_RUN = true;
+    }
+  } else {
+    flushState();
+  }
   slog(DRY_RUN ? '📋 DEMO' : '🔴 LIVE');
 }
 
