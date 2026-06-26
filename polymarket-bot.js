@@ -255,7 +255,6 @@ async function processPendingOrders() {
 
 // ── Manage open positions ──
 async function managePositions(isCheckpoint) {
-  if (positions.length === 0) return;
   const toFlip = [];
   for (const pos of positions) {
     const m = marketCache[pos.slug];
@@ -278,6 +277,20 @@ async function managePositions(isCheckpoint) {
   for (const f of toFlip) {
     const price = f.side === 'up' ? f.m.upMid : f.m.downMid;
     if (price > 0.01) await enterPosition(f.m, f.side, price);
+  }
+  // Fallback: if any active market has zero positions mid-window, re-enter both sides
+  const now = Date.now();
+  for (const [, m] of Object.entries(marketCache)) {
+    if (!m.active) continue;
+    const elapsed = (now - m.windowStart) / 1000;
+    if (elapsed < 10 || elapsed >= FORCE_SELL_SECS) continue;
+    const hasUp = positions.some(p => p.slug === m.slug && p.side === 'up');
+    const hasDn = positions.some(p => p.slug === m.slug && p.side === 'down');
+    if (!hasUp && !hasDn) {
+      m.initialEntryDone = false;
+      if (m.upMid > 0.01 && balance > m.upMid * 6) await enterPosition(m, 'up', m.upMid);
+      if (m.downMid > 0.01 && balance > m.downMid * 6) await enterPosition(m, 'down', m.downMid);
+    }
   }
 }
 
