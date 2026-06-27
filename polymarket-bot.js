@@ -17,7 +17,7 @@ const CLOSE_AT_SECS     = 282;  // 4.70 minutes – cancel all + force sell
 const TARGET_PAIRS      = ['BTC'];
 
 let dryRun = process.env.DRY_RUN === 'true';
-const DEMO_BALANCE = parseFloat(process.env.DEMO_BALANCE || '50');
+const DEMO_BALANCE = parseFloat(process.env.DEMO_BALANCE || '200');
 
 let emitFn     = () => {};
 let slog       = () => {};
@@ -56,20 +56,21 @@ async function getJSON(url) {
 
 // ── Balance / Equity ──
 function calcEquity() {
-  let eq = cashBalance;
+  let eq = cashBalance, costBasis = 0;
   for (const [slug, gs] of Object.entries(gridState)) {
     const m = markets[slug];
     if (!m) continue;
     for (const side of ['up', 'down']) {
       for (const lv of gs[side]) {
         if (lv.filled && !lv.sold) {
+          costBasis += lv.entryCost;
           const mid = side === 'up' ? m.upMid : m.downMid;
           eq += SHARES * mid;
         }
       }
     }
   }
-  return eq;
+  return { equity: eq, costBasis, openValue: eq - cashBalance };
 }
 
 // ── WebSocket price feed ──
@@ -469,9 +470,10 @@ async function tick() {
 }
 
 function snapshot() {
-  const equity = calcEquity();
+  const calc = calcEquity();
+  const equity = calc.equity;
+  const unrealized = f2(calc.openValue - calc.costBasis);
   const pnl    = f2(equity - startBalance);
-  const unrealized = f2(equity - cashBalance);
 
   const activeMarkets = Object.values(markets).map(m => {
     const gs = gridState[m.slug] || { up: [], down: [], started: false, forceClosed: false, done: false };
