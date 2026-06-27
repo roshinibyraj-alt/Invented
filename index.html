@@ -15,12 +15,12 @@ header{background:#fff;border-bottom:2px solid #e8e8f0;padding:10px 14px;positio
 .dot.on{background:#22c55e;box-shadow:0 0 6px #22c55e}
 .dot.off{background:#ef4444}
 .badge{padding:2px 8px;border-radius:4px;font-size:9px;font-weight:700;letter-spacing:.5px}
-.badge.paused{background:#eff6ff;color:#2563eb;border:1px solid #93c5fd}
 .badge.live{background:#fef2f2;color:#dc2626;border:1px solid #fca5a5}
+.badge.paused{background:#eff6ff;color:#2563eb;border:1px solid #93c5fd}
 .badge.up{background:#f0fdf4;color:#16a34a;border:1px solid #86efac}
 .badge.dn{background:#fef2f2;color:#dc2626;border:1px solid #fca5a5}
 .stats{display:flex;gap:5px;flex-wrap:wrap}
-.stat{background:#f8f9fe;border:1px solid #e8e8f0;border-radius:8px;padding:4px 10px;text-align:center;min-width:65px}
+.stat{background:#f8f9fe;border:1px solid #e8e8f0;border-radius:8px;padding:4px 10px;text-align:center;min-width:60px}
 .stat .sl{font-size:8px;color:#6b7280;text-transform:uppercase;letter-spacing:.4px;font-weight:600}
 .stat .sv{font-size:13px;font-weight:800}
 .g{color:#16a34a}.r{color:#dc2626}.y{color:#d97706}.b{color:#2563eb}.w{color:#1a1a2e}.gr{color:#6b7280}
@@ -42,31 +42,25 @@ footer{text-align:center;padding:10px;color:#9ca3af;font-size:9px;border-top:1px
 <header>
   <div class="hrow">
     <div class="logo"><span class="dot off" id="dot"></span>Flip Bot</div>
-    <span class="badge paused" id="modeBadge">📋 PAUSED</span>
+    <span class="badge paused" id="modeBadge">PAUSED</span>
     <div class="stats" id="headerStats"></div>
-    <button id="toggleBtn" onclick="doToggle()" style="padding:4px 10px;font-size:10px;font-weight:700;background:#fff;border:1.5px solid #2563eb;color:#2563eb;border-radius:6px;cursor:pointer;letter-spacing:.4px">🔴 Go Live</button>
+    <button id="toggleBtn" onclick="doToggle()" style="padding:4px 10px;font-size:10px;font-weight:700;background:#fff;border:1.5px solid #2563eb;color:#2563eb;border-radius:6px;cursor:pointer;letter-spacing:.4px">Go Live</button>
   </div>
 </header>
 <main>
   <div class="grid2">
     <div class="card">
-      <div class="card-title">📊 Markets</div>
+      <div class="card-title">Markets</div>
       <div id="mktBody"><div class="empty">Waiting for markets...</div></div>
     </div>
     <div class="card">
-      <div class="card-title">📈 Positions</div>
-      <div id="posBody"><div class="empty">No open positions</div></div>
-    </div>
-  </div>
-  <div class="grid2">
-    <div class="card">
-      <div class="card-title">📜 Trades</div>
+      <div class="card-title">Trades</div>
       <div id="tradeBody"><div class="empty">No trades yet</div></div>
     </div>
-    <div class="card">
-      <div class="card-title">📝 Activity Log</div>
-      <div id="logBody"><div class="empty">No activity yet</div></div>
-    </div>
+  </div>
+  <div class="card">
+    <div class="card-title">Activity</div>
+    <div id="logBody"><div class="empty">No activity yet</div></div>
   </div>
 </main>
 <footer id="footer">Flip Bot | loading...</footer>
@@ -78,6 +72,7 @@ function f2(v){return typeof v==='number'?v.toFixed(2):'0.00';}
 function f4(v){return typeof v==='number'?v.toFixed(4):'0.0000';}
 function cls(v){return v>0?'g':v<0?'r':'gr';}
 function sgn(v){return v>0?'+':'';}
+function fmtUptime(s){if(!s)return'0s';return s>3600?Math.floor(s/3600)+'h '+Math.floor((s%3600)/60)+'m':s>60?Math.floor(s/60)+'m '+(s%60)+'s':s+'s';}
 
 function render(d){
   if(!d)return;
@@ -86,70 +81,51 @@ function render(d){
   var mode=document.getElementById('modeBadge');
   var tbtn=document.getElementById('toggleBtn');
   if(d.dryRun){
-    mode.textContent='📋 PAUSED';mode.className='badge paused';
-    tbtn.textContent='🔴 Go Live';tbtn.style.borderColor='#2563eb';tbtn.style.color='#2563eb';
+    mode.textContent='DEMO $'+f2(d.strategy?.demoBalance||50);mode.className='badge paused';
+    tbtn.textContent='Go Live';tbtn.style.borderColor='#2563eb';tbtn.style.color='#2563eb';
   }else{
-    mode.textContent='🔴 LIVE';mode.className='badge live';
-    tbtn.textContent='⏸️ Pause';tbtn.style.borderColor='#16a34a';tbtn.style.color='#16a34a';
+    mode.textContent='LIVE';mode.className='badge live';
+    tbtn.textContent='Demo';tbtn.style.borderColor='#16a34a';tbtn.style.color='#16a34a';
   }
 
   var h='';
   h+='<div class="stat"><div class="sl">Balance</div><div class="sv w">$'+f2(d.balance)+'</div></div>';
   h+='<div class="stat"><div class="sl">PnL</div><div class="sv '+cls(d.pnl)+'">'+sgn(d.pnl)+'$'+f2(d.pnl)+'</div></div>';
-  h+='<div class="stat"><div class="sl">Equity</div><div class="sv w">$'+f2(d.openEquity)+'</div></div>';
-  h+='<div class="stat"><div class="sl">Lots</div><div class="sv b">'+(d.positionsCount||0)+'</div></div>';
-  h+='<div class="stat"><div class="sl">Markets</div><div class="sv g">'+(d.activeMarkets||0)+'</div></div>';
-  h+='<div class="stat"><div class="sl">Fees</div><div class="sv gr">$'+f4(d.totalFees)+'</div></div>';
   h+='<div class="stat"><div class="sl">Trades</div><div class="sv b">'+(d.totalTrades||0)+'</div></div>';
+  h+='<div class="stat"><div class="sl">Uptime</div><div class="sv gr">'+fmtUptime(d.uptime)+'</div></div>';
   document.getElementById('headerStats').innerHTML=h;
 
   // Markets
   var mc='';
-  if(!d.allMarkets||!d.allMarkets.length){mc='<div class="empty">No active markets</div>';}
+  var mkts=d.activeMarkets||[];
+  if(!mkts.length){mc='<div class="empty">No active markets</div>';}
   else{
-    mc+='<table><tr><th>Pair</th><th>Phase</th><th>Side</th><th>Time</th><th>UP</th><th>DN</th><th>Fair</th></tr>';
-    for(var m of d.allMarkets){
-      mc+='<tr><td>'+m.label+'</td><td>'+m.phase+'</td><td><span class="badge '+(m.side==='UP'?'up':'dn')+'">'+m.side+'</span></td>'+
-        '<td>'+(m.secondsToEnd||0)+'s</td>'+
+    mc+='<table><tr><th>Pair</th><th>Time</th><th>UP</th><th>DN</th><th>Pref</th><th>Status</th></tr>';
+    for(var i=0;i<mkts.length;i++){
+      var m=mkts[i];
+      var st=m.done?'Done':m.loopRunning?'Running':'Wait';
+      var pref=m.upMid<=m.dnMid?'UP':'DOWN';
+      mc+='<tr><td><b>'+m.pair+'</b></td><td>'+m.secsLeft+'s</td>'+
         '<td class="g">$'+f4(m.upMid)+'</td><td class="r">$'+f4(m.dnMid)+'</td>'+
-        '<td class="b">$'+f4(m.fairValue)+'</td></tr>';
+        '<td><span class="badge '+(pref==='UP'?'up':'dn')+'">'+pref+'</span></td>'+
+        '<td>'+st+'</td></tr>';
     }
     mc+='</table>';
   }
   document.getElementById('mktBody').innerHTML=mc;
-
-  // Positions
-  var pc='';
-  var pos=d.positions||[];
-  if(!pos.length){pc='<div class="empty">No open positions</div>';}
-  else{
-    pc+='<table><tr><th>Pair</th><th>Side</th><th>Entry</th><th>Current</th><th>Peak</th><th>Trail</th><th>Shares</th><th>Cost</th><th>Value</th><th>Unreal</th></tr>';
-    for(var p of pos){
-      var sideCls=p.side==='UP'?'up':'dn';
-      pc+='<tr><td>'+p.pair+'</td><td><span class="badge '+sideCls+'">'+p.side+'</span></td>'+
-        '<td>$'+f4(p.entryPrice)+'</td><td>$'+f4(p.currentPrice)+'</td><td>$'+f4(p.peakPrice)+'</td>'+
-        '<td class="'+cls(-p.trailingDist)+'">$'+f4(p.trailingDist)+'</td><td>'+p.shares+'</td>'+
-        '<td>$'+f2(p.cost)+'</td><td>$'+f2(p.currentValue)+'</td>'+
-        '<td class="'+cls(p.unrealizedPnl)+'">'+sgn(p.unrealizedPnl)+'$'+f2(p.unrealizedPnl)+'</td></tr>';
-    }
-    pc+='</table>';
-  }
-  document.getElementById('posBody').innerHTML=pc;
 
   // Trades
   var tc='';
   var tr=d.recentTrades||[];
   if(!tr.length){tc='<div class="empty">No trades yet</div>';}
   else{
-    tc+='<table><tr><th>Time</th><th>Pair</th><th>Side</th><th>Action</th><th>Price</th><th>Shares</th><th>PnL</th><th>Bal</th></tr>';
-    for(var t of tr){
-      var isEntry=t.action==='ENTRY';
+    tc+='<table><tr><th>Time</th><th>Pair</th><th>Side</th><th>Action</th><th>Price</th><th>Sh</th><th>PnL</th></tr>';
+    for(var i=0;i<tr.length;i++){
+      var t=tr[i];
       tc+='<tr><td>'+t.ts+'</td><td>'+t.pair+'</td>'+
         '<td><span class="badge '+(t.side==='UP'?'up':'dn')+'">'+t.side+'</span></td>'+
-        '<td>'+(t.action||'')+'</td>'+
-        '<td>$'+f4(isEntry?t.entry:t.exit)+'</td>'+
-        '<td>'+t.shares+'</td><td class="'+cls(t.pnl)+'">'+sgn(t.pnl)+'$'+f2(t.pnl)+'</td>'+
-        '<td>$'+f2(t.bal)+'</td></tr>';
+        '<td>'+t.action+'</td><td>$'+f4(t.price)+'</td><td>'+(t.shares||'')+'</td>'+
+        '<td class="'+(t.pnl!==undefined?cls(t.pnl):'gr')+'">'+(t.pnl!==undefined?sgn(t.pnl)+'$'+f2(t.pnl):'-')+'</td></tr>';
     }
     tc+='</table>';
   }
@@ -159,36 +135,30 @@ function render(d){
   var lc='';
   var logs=d.activityLog||[];
   if(!logs.length){lc='<div class="empty">No activity yet</div>';}
-  else{for(var i=0;i<Math.min(logs.length,40);i++){lc+='<div class="log-line">'+logs[i].replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</div>';}}
+  else{for(var i=0;i<Math.min(logs.length,50);i++){lc+='<div class="log-line">'+logs[i].replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</div>';}}
   document.getElementById('logBody').innerHTML=lc;
 
-  var up=d.uptime||0;
-  var upStr=up>3600?Math.floor(up/3600)+'h '+Math.floor((up%3600)/60)+'m':up>60?Math.floor(up/60)+'m '+(up%60)+'s':up+'s';
   var s=d.strategy||{};
-  var pairs='';
-  try{pairs=d.allMarkets.map(function(m){return m.label.split(' ')[0];}).join(',');}catch(e){}
-  var footer=document.getElementById('footer');
-  footer.textContent='Flip Bot | '+pairs+' | '+s.sharesPerLot+'sh | trail:'+s.trailingStopDist+' | hardstop:'+s.hardStopDist+' | force:'+s.forceSellSecs+'s | uptime: '+upStr;
+  var pairs=(d.activeMarkets||[]).map(function(m){return m.pair;}).join(',');
+  document.getElementById('footer').textContent='Flip Bot | '+pairs+' | '+s.shares+'sh | trail:'+s.trailingDist+' | force:'+s.forceCloseSecs+'s | '+(s.dryRun?'DEMO $'+s.demoBalance:'LIVE')+' | '+fmtUptime(d.uptime);
 }
 
-socket.on('connect',    function(){document.getElementById('dot').className='dot on';});
-socket.on('disconnect', function(){document.getElementById('dot').className='dot off';});
-socket.on('snapshot',   function(d){if(d)render(d);});
+socket.on('connect',function(){document.getElementById('dot').className='dot on';});
+socket.on('disconnect',function(){document.getElementById('dot').className='dot off';});
+socket.on('snapshot',function(d){if(d)render(d);});
 
 setInterval(function(){
   fetch('/api/snapshot').then(function(r){return r.json();}).then(function(d){if(d)render(d);}).catch(function(){});
-}, 5000);
+}, 3000);
 
 function doToggle(){
   var modeEl=document.getElementById('modeBadge');
   var isLive=modeEl.className.indexOf('live')>=0;
-  if(!confirm(isLive?'Pause bot?':'Go LIVE trading on Polymarket?'))return;
-  fetch('/api/set-dry-run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({dryRun:isLive})})
+  if(!confirm(isLive?'Switch to DEMO?':'Switch to LIVE trading?'))return;
+  fetch('/api/set-dry-run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({dryRun:!isLive})})
     .then(function(r){return r.json();})
     .then(function(j){
       if(j.error){alert('Failed: '+j.error);return;}
-      // Immediately update UI from response
-      render({dryRun:j.dryRun});
     })
     .catch(function(e){alert('Failed: '+e.message);});
 }
