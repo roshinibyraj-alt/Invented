@@ -210,7 +210,7 @@ async function processPendingOrders() {
         po._filled = true;
       } else if (result.timeout) {
         // Not filled yet — retry next tick. Cancel only if stale.
-        if (Date.now() - po.createdAt > 30000) {
+        if (Date.now() - po.createdAt > 10000) {
           slog(`⏰ GTC BUY TIMEOUT ${po.id.slice(0,12)}… — retrying new order`);
           try { await trader.cancelOrder(po.id); } catch(_) {}
           po._filled = true;
@@ -455,6 +455,8 @@ async function start(emit, log) {
       trader.setLogFn(logFn); slog('🔑 Authenticating...'); await trader.authenticate();
       slog(`✅ Auth: ${trader.address}`);
       await trader.approveAllowance();
+      // Cancel stale open orders from previous runs
+      try { const oo = await trader.getOpenOrders(); if (Array.isArray(oo)) { for (const o of oo) { try { await trader.cancelOrder(o.id || o.orderID); } catch(_) {} } } slog(`🧹 Cancelled ${oo?.length||0} stale orders`); } catch(_) {}
       const realBal = await trader.getBalance();
       if (realBal > 0) { balance = realBal; startBalance = realBal; }
       slog(`💰 Real balance: $${fl2(balance)} (demo: $${DEMO_BALANCE})`);
@@ -486,6 +488,7 @@ async function setDryRun(val) {
           slog(`✅ Auth: ${trader.address}`);
         }
         await trader.approveAllowance();
+        try { const oo = await trader.getOpenOrders(); if (Array.isArray(oo)) { for (const o of oo) { try { await trader.cancelOrder(o.id || o.orderID); } catch(_) {} } } slog(`🧹 Cancelled ${oo?.length||0} stale orders`); } catch(_) {}
         const realBal = await trader.getBalance();
         if (realBal > 0) { balance = realBal; startBalance = realBal; }
         slog(`💰 Real balance: $${fl2(balance)}`);
