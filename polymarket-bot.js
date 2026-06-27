@@ -16,7 +16,8 @@ const WINDOW_SECS       = 300;    // 5-minute market window
 const ENTRY_WAIT_SECS  = 10;     // wait 10s after window opens before first entry
 const SHARES           = 6;      // always 6 shares, fixed
 const TRAILING_DIST    = 0.05;   // sell when price drops 0.05 from peak
-const FORCE_CLOSE_SECS = 30;     // force-sell when <=30s left in window
+const FORCE_CLOSE_SECS = 30;     // force-sell trigger at 4m30s (30s before end)
+const HARD_SELL_SECS   = 15;     // absolute deadline — retry sell until 15s left
 
 // ── Order retry ──
 const FOK_RETRY_MS   = 500;      // retry FOK sell after this delay if not filled
@@ -317,7 +318,8 @@ async function buyShares(m, side) {
   return null;
 }
 
-// ── Exit: FOK only, retry until filled ──
+// ── Exit: FOK only, hard retry until HARD_SELL_SECS before end ──
+// Guarantees no position is left unsold going into market expiry
 async function sellShares(m, side, reason) {
   const tokenId  = side === 'up' ? m.upTokenId  : m.downTokenId;
   const tickSize = side === 'up' ? m.upTickSize  : m.dnTickSize;
@@ -325,12 +327,18 @@ async function sellShares(m, side, reason) {
 
   log(`📤 ${m.pair} SELL ${side.toUpperCase()} ${SHARES}sh — ${reason}`);
 
+  let attempt = 0;
   while (true) {
     const secsLeft = (m.endTime - Date.now()) / 1000;
-    if (secsLeft < -10) {
-      log(`⌛ ${m.pair} market expired — shares will auto-resolve on-chain`);
+
+    // Hard deadline: if we're past HARD_SELL_SECS, market resolves on-chain
+    if (secsLeft < HARD_SELL_SECS) {
+      log(`⌛ ${m.pair} HARD DEADLINE reached (${Math.floor(secsLeft)}s left) — could not sell, shares auto-resolve on-chain`);
       return false;
     }
+
+    attempt++;
+    log(`📤 ${m.pair} SELL attempt #${attempt} (${Math.floor(secsLeft)}s left)`);
 
     try {
       const { Side, OrderType } = require('@polymarket/clob-client-v2');
@@ -346,7 +354,7 @@ async function sellShares(m, side, reason) {
       const fillPrice = parseFloat(resp?.avg_fill_price || resp?.price || '0');
 
       if (isFilled) {
-        log(`✅ SELL confirmed ${m.pair} ${side.toUpperCase()} @${f4(fillPrice)}`);
+        log(`✅ SELL confirmed ${m.pair} ${side.toUpperCase()} @${f4(fillPrice)} (attempt #${attempt})`);
         return true;
       }
       log(`⏭️  FOK SELL nofill ${m.pair} ${side.toUpperCase()}, retry in ${FOK_RETRY_MS}ms…`);
