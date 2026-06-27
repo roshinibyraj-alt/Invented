@@ -34,13 +34,22 @@ const io     = new Server(server, {
 
 app.use(express.static(path.join(__dirname)));
 
+app.options('/api/set-dry-run', (_req, res) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Headers', 'Content-Type');
+  res.header('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.sendStatus(204);
+});
+
 app.get('/api/snapshot', (_req, res) => {
-  try { res.json(bot.buildSnapshot()); } catch(e) { res.json({ error: e.message }); }
+  try { res.json(bot.snapshot()); } catch(e) { res.json({ error: e.message }); }
 });
 
 app.get('/healthz', (_req, res) => res.json({ ok: true }));
 
 app.post('/api/set-dry-run', express.json(), async (req, res) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Headers', 'Content-Type');
   try {
     await bot.setDryRun(req.body?.dryRun);
     res.json({ ok: true, dryRun: bot.getDryRun() });
@@ -59,7 +68,7 @@ function broadcast(snapshot) {
 
 io.on('connection', (socket) => {
   console.log(`🔌 Client ${socket.id}`);
-  try { socket.emit('snapshot', bot.buildSnapshot()); } catch (_) {}
+  try { socket.emit('snapshot', bot.snapshot()); } catch (_) {}
   socket.on('disconnect', () => console.log(`🔌 Left ${socket.id}`));
 });
 
