@@ -103,7 +103,7 @@ function render(d){
     mc+='<table><tr><th>Pair</th><th>Time</th><th>UP</th><th>DN</th><th>Pref</th><th>Status</th></tr>';
     for(var i=0;i<mkts.length;i++){
       var m=mkts[i];
-      var st=m.done?'Done':m.loopRunning?'Running':'Wait';
+      var st=m.done?"Done":m.secsLeft>300?"Waiting":m.loopRunning?"Running":"Wait";
       var pref=m.upMid<=m.dnMid?'UP':'DOWN';
       mc+='<tr><td><b>'+m.pair+'</b></td><td>'+m.secsLeft+'s</td>'+
         '<td class="g">$'+f4(m.upMid)+'</td><td class="r">$'+f4(m.dnMid)+'</td>'+

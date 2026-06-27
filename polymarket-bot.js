@@ -237,14 +237,16 @@ async function buyShares(m, side, fixedPrice) {
     }
 
     let price = fixedPrice;
-    
-    // Get best ask from order book for a fillable price
-    try {
-      const ba = await trader.getBestBidAsk(tokenId);
-      if (ba && ba.bestAsk && ba.bestAsk > 0) {
-        price = ba.bestAsk;
-      }
-    } catch (_) {}
+
+    // Demo mode: skip real order book, use fixedPrice directly
+    if (!dryRun) {
+      try {
+        const ba = await trader.getBestBidAsk(tokenId);
+        if (ba && ba.bestAsk && ba.bestAsk > 0) {
+          price = ba.bestAsk;
+        }
+      } catch (_) {}
+    }
     
     if (price < MIN_ENTRY_PRICE || price > MAX_ENTRY_PRICE) {
       log(`${m.pair} ${side.toUpperCase()} price ${f4(price)} outside safe range, skip`);
@@ -311,14 +313,16 @@ async function sellShares(m, side, reason) {
     }
 
     let price = side === 'up' ? m.upMid : m.downMid;
-    
-    // Get best bid from order book for a fillable price
-    try {
-      const ba = await trader.getBestBidAsk(tokenId);
-      if (ba && ba.bestBid && ba.bestBid > 0) {
-        price = ba.bestBid;
-      }
-    } catch (_) {}
+
+    // Demo mode: skip real order book
+    if (!dryRun) {
+      try {
+        const ba = await trader.getBestBidAsk(tokenId);
+        if (ba && ba.bestBid && ba.bestBid > 0) {
+          price = ba.bestBid;
+        }
+      } catch (_) {}
+    }
 
     attempt++;
     log(`SELL #${attempt} ${m.pair} ${SHARES}sh @ ${f4(price)} (${Math.floor(secsLeft)}s left)`);
