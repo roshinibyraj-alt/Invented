@@ -222,7 +222,7 @@ async function discover() {
 }
 
 // ── BUY - exact 6 shares via FOK at best ask ──
-async function buyShares(m, side) {
+async function buyShares(m, side, fixedPrice) {
   const tokenId  = side === 'up' ? m.upTokenId  : m.downTokenId;
   const tickSize = side === 'up' ? m.upTickSize  : m.dnTickSize;
   const negRisk  = side === 'up' ? m.upNegRisk   : m.dnNegRisk;
@@ -236,8 +236,7 @@ async function buyShares(m, side) {
       return null;
     }
 
-    await ensureFreshPrice(m);
-    let price = side === 'up' ? m.upMid : m.downMid;
+    let price = fixedPrice;
     
     // Get best ask from order book for a fillable price
     try {
@@ -311,7 +310,6 @@ async function sellShares(m, side, reason) {
       return false;
     }
 
-    await ensureFreshPrice(m);
     let price = side === 'up' ? m.upMid : m.downMid;
     
     // Get best bid from order book for a fillable price
@@ -366,6 +364,14 @@ async function tradeLoop(m) {
   m.loopRunning = true;
   log(`Trade loop started ${m.pair}`);
 
+  // If window hasn't started yet, wait until it opens
+  const nowMs = Date.now();
+  if (m.windowStartMs > nowMs + 5000) {
+    const sleepMs = m.windowStartMs - nowMs;
+    log(`${m.pair} window starts in ${Math.ceil(sleepMs / 1000)}s, waiting...`);
+    await sleep(sleepMs);
+  }
+
   const entryOpenAt = m.windowStartMs + ENTRY_WAIT_SECS * 1000;
   const waitMs      = entryOpenAt - Date.now();
   if (waitMs > 0) {
@@ -395,8 +401,12 @@ async function tradeLoop(m) {
       log(`${m.pair} cheapest = ${currentSide.toUpperCase()} (up:${f4(m.upMid)} dn:${f4(m.downMid)})`);
     }
 
+    // Use the price captured at cheapest-side check (no re-fetch inside buy)
+    const buyPrice = currentSide === 'up' ? m.upMid : m.downMid;
+    log(`${m.pair} entry price: ${f4(buyPrice)}`);
+
     // ── BUY ──
-    const entryPrice = await buyShares(m, currentSide);
+    const entryPrice = await buyShares(m, currentSide, buyPrice);
     if (entryPrice === null) {
       m.done = true; break;
     }
