@@ -216,7 +216,7 @@ async function discover() {
   }
 }
 
-// ── TAKER BUY - balance check only to confirm fill ──
+// ── BUY - exact 6 shares via FOK at best ask ──
 async function buyShares(m, side) {
   const tokenId  = side === 'up' ? m.upTokenId  : m.downTokenId;
   const tickSize = side === 'up' ? m.upTickSize  : m.dnTickSize;
@@ -232,31 +232,40 @@ async function buyShares(m, side) {
     }
 
     await ensureFreshPrice(m);
-    const price = side === 'up' ? m.upMid : m.downMid;
+    let price = side === 'up' ? m.upMid : m.downMid;
+    
+    // Get best ask from order book for a fillable price
+    try {
+      const ba = await trader.getBestBidAsk(tokenId);
+      if (ba && ba.bestAsk && ba.bestAsk > 0) {
+        price = ba.bestAsk;
+      }
+    } catch (_) {}
+    
     if (price < MIN_ENTRY_PRICE || price > MAX_ENTRY_PRICE) {
       log(`${m.pair} ${side.toUpperCase()} price ${f4(price)} outside safe range, skip`);
       return null;
     }
 
     attempt++;
-    const dollarAmount = f2(SHARES * price);
-    log(`${m.pair} BUY ${side.toUpperCase()} $${dollarAmount} (${SHARES}sh x ${f4(price)}) FOK #${attempt}`);
+    log(`${m.pair} BUY ${side.toUpperCase()} ${SHARES}sh @ ${f4(price)} FOK #${attempt}`);
 
     if (dryRun) {
-      if (balance < dollarAmount) {
+      const cost = f2(SHARES * price);
+      if (balance < cost) {
         log(`${m.pair} DEMO insufficient balance $${f2(balance)}`);
         return null;
       }
-      balance = f2(balance - dollarAmount);
-      log(`DEMO FILLED BUY ${m.pair} ${side.toUpperCase()} @${f4(price)}`);
+      balance = f2(balance - cost);
+      log(`DEMO FILLED BUY ${m.pair} ${side.toUpperCase()} ${SHARES}sh@${f4(price)}`);
       log(`Balance: $${f2(balance)}`);
       return price;
     }
 
     const balBefore = await trader.getBalance();
     try {
-      await trader._clob.createAndPostMarketOrder(
-        { tokenID: tokenId, amount: dollarAmount, side: Side.BUY, orderType: OrderType.FOK },
+      await trader._clob.createAndPostOrder(
+        { tokenID: tokenId, price: f4(price), size: SHARES, side: Side.BUY },
         { tickSize, negRisk },
         OrderType.FOK
       );
@@ -269,7 +278,7 @@ async function buyShares(m, side) {
     const expectedDrop = f2(SHARES * price);
     if (drop >= expectedDrop * 0.5) {
       balance = balAfter;
-      log(`FILLED BUY ${m.pair} ${side.toUpperCase()} cost~$${drop} @${f4(price)}`);
+      log(`FILLED BUY ${m.pair} ${side.toUpperCase()} ${SHARES}sh cost~$${drop}`);
       log(`Balance: $${f2(balance)}`);
       await sleep(2000);
       return price;
@@ -280,7 +289,7 @@ async function buyShares(m, side) {
   }
 }
 
-// ── TAKER SELL - balance check only to confirm fill ──
+// ── SELL - exact 6 shares via FOK at best bid ──
 async function sellShares(m, side, reason) {
   const tokenId  = side === 'up' ? m.upTokenId  : m.downTokenId;
   const tickSize = side === 'up' ? m.upTickSize  : m.dnTickSize;
@@ -298,7 +307,15 @@ async function sellShares(m, side, reason) {
     }
 
     await ensureFreshPrice(m);
-    const price = side === 'up' ? m.upMid : m.downMid;
+    let price = side === 'up' ? m.upMid : m.downMid;
+    
+    // Get best bid from order book for a fillable price
+    try {
+      const ba = await trader.getBestBidAsk(tokenId);
+      if (ba && ba.bestBid && ba.bestBid > 0) {
+        price = ba.bestBid;
+      }
+    } catch (_) {}
 
     attempt++;
     log(`SELL #${attempt} ${m.pair} ${SHARES}sh @ ${f4(price)} (${Math.floor(secsLeft)}s left)`);
@@ -313,8 +330,8 @@ async function sellShares(m, side, reason) {
 
     const balBefore = await trader.getBalance();
     try {
-      await trader._clob.createAndPostMarketOrder(
-        { tokenID: tokenId, amount: SHARES, side: Side.SELL, orderType: OrderType.FOK },
+      await trader._clob.createAndPostOrder(
+        { tokenID: tokenId, price: f4(price), size: SHARES, side: Side.SELL },
         { tickSize, negRisk },
         OrderType.FOK
       );
@@ -327,7 +344,7 @@ async function sellShares(m, side, reason) {
     const expectedRise = f2(SHARES * price);
     if (rise >= expectedRise * 0.5) {
       balance = balAfter;
-      log(`FILLED SELL ${m.pair} ${side.toUpperCase()} proceeds~$${rise} @${f4(price)}`);
+      log(`FILLED SELL ${m.pair} ${side.toUpperCase()} ${SHARES}sh proceeds~$${rise}`);
       log(`Balance: $${f2(balance)}`);
       await sleep(2000);
       return true;
