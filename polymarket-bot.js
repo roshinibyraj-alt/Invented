@@ -28,7 +28,7 @@ const MAX_ENTRY_PRICE  = 0.90;
 const FOK_RETRY_MS     = 2000;  // retry FOK buy every 2s if nofill
 const FOK_SELL_RETRY_MS = 500;  // retry FOK sell every 500ms
 
-const TARGET_PAIRS = ['BTC', 'ETH'];
+const TARGET_PAIRS = ['BTC'];
 
 let emitFn     = () => {};
 let slog       = () => {};
