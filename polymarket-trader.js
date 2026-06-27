@@ -14,6 +14,7 @@ const { polygon } = require('viem/chains');
 const {
   ClobClient, AssetType, Side, OrderType
 } = require('@polymarket/clob-client-v2');
+const { RelayClient } = require('@polymarket/builder-relayer-client');
 
 const CLOB_HOST = 'https://clob.polymarket.com';
 const CHAIN_ID = 137;
@@ -30,6 +31,7 @@ class PolymarketTrader {
     this._clob  = null;
     this.apiKey = null;
     this.balance = 0;
+    this.depositWallet = null;
     this._log   = () => {};
   }
 
@@ -37,6 +39,14 @@ class PolymarketTrader {
 
   async authenticate() {
     this._log('🔑 Authenticating...');
+    // Derive deposit wallet from EOA
+    try {
+      const relayer = new RelayClient('https://relayer-v2.polymarket.com', CHAIN_ID, this._walletClient);
+      this.depositWallet = await relayer.deriveDepositWalletAddress();
+      this._log(`🏦 Deposit wallet: ${this.depositWallet}`);
+    } catch (_) {
+      this._log('⚠️ Could not derive deposit wallet, falling back to EOA');
+    }
     const tempClient = new ClobClient({
       host: CLOB_HOST, chain: CHAIN_ID, signer: this._walletClient,
     });
@@ -44,6 +54,7 @@ class PolymarketTrader {
     this.apiKey = creds.key;
     this._clob = new ClobClient({
       host: CLOB_HOST, chain: CHAIN_ID, signer: this._walletClient, creds,
+      ...(this.depositWallet ? { signatureType: 3, funderAddress: this.depositWallet } : {}),
     });
     this._log(`✅ Auth OK: ${this.address}`);
     return { apiKey: this.apiKey };
