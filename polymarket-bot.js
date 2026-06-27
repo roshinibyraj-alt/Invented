@@ -1,10 +1,5 @@
 'use strict';
 
-// ── Flip Bot v3 — Clean rewrite ────────────────────────────────
-// One position per market. All orders FOK (fill-or-kill).
-// State machine per market — never two orders at once.
-// ────────────────────────────────────────────────────────────────
-
 const PolymarketTrader = require('./polymarket-trader');
 
 const GAMMA = 'https://gamma-api.polymarket.com';
@@ -15,35 +10,26 @@ const DISCOVER_EVERY    = 300;
 const PRICE_FETCH_EVERY = 5;
 const WINDOW_SECS       = 300;
 const DEMO_BALANCE      = 50;
-const DEMO_FEE_RATE     = 0.03;
 
 const SHARES_PER_LOT     = 6;
 const TRAILING_STOP_DIST = 0.05;
-const HARD_STOP_DIST     = 0.08;
 const FORCE_SELL_SECS    = 270;
 const ENTRY_WAIT_SECS    = 10;
-const MIN_HOLD_SECS      = 10;
+const MIN_HOLD_SECS      = 5;
 const RETRY_COOLDOWN_MS  = 300;
 
 let DRY_RUN = true;
 const TARGET_PAIRS = ['BTC', 'ETH'];
 
-// ── State ──
 let emitFn = () => {};
 let slog   = () => {};
 
-let balance = DEMO_BALANCE;
-let startBalance = DEMO_BALANCE;
-let totalFees = 0;
+let balance = 0;
+let startBalance = 0;
 let tickCount = 0;
 let startTime = Date.now();
 let trader    = null;
 
-// Per-market state machine
-// phase: 'idle'|'wait'|'enter'|'hold'|'exit'|'done'
-// side:  'up'|'down'
-// When phase='hold', trailing stop & exit checks run.
-// When phase='enter' or 'exit', exactly ONE FOK is in flight.
 const markets = {};
 const trades  = [];
 const logs    = [];
@@ -65,16 +51,10 @@ async function getJSON(url) {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-// ── Market discovery ──
 function genSlugs() {
   const now = Math.floor(Date.now() / 1000);
   const cur = Math.floor(now / WINDOW_SECS) * WINDOW_SECS;
-  const out = [];
-  for (const p of TARGET_PAIRS) {
-    const pre = p.toLowerCase() + '-updown-5m-';
-    for (const d of [0, 1, 2]) out.push(pre + (cur + d * WINDOW_SECS));
-  }
-  return out;
+  return TARGET_PAIRS.map(p => `${p.toLowerCase()}-updown-5m-${cur + WINDOW_SECS}`);
 }
 
 async function discover() {
@@ -95,32 +75,26 @@ async function discover() {
       upTokenId: ids[0], downTokenId: ids[1],
       endTime, windowStart: endTime - WINDOW_SECS * 1000,
       active: false, resolved: false,
-      upMid: 0, downMid: 0, fairValue: 0.5,
+      upMid: 0, downMid: 0,
       phase: 'idle', side: 'up',
-      entryLock: false,       // prevents placing >1 entry
-      exitLock: false,        // prevents placing >1 exit
-      retryAfter: 0,          // cooldown after failed FOK
-      holdStartedAt: 0,       // when position opened
-      entryPrice: 0, peakPrice: 0, posId: null,
+      entryLock: false, exitLock: false, retryAfter: 0,
+      holdStartedAt: 0, entryPrice: 0, peakPrice: 0,
     };
   }));
-  // Clean expired
+
   for (const [slug, m] of Object.entries(markets)) {
-    if (Date.now() - m.endTime > 10000) {
+    if (m.resolved || Date.now() - m.endTime > 10000) {
       delete markets[slug];
     }
   }
 }
 
-// ── Price update ──
 async function updatePrices(m) {
   const now = Date.now();
   const secsToEnd = Math.floor((m.endTime - now) / 1000);
   m.active = !m.resolved && secsToEnd > 0 && secsToEnd <= WINDOW_SECS;
   if (secsToEnd < -5 && !m.resolved) { m.resolved = true; m.active = false; return; }
   if (!m.active) return;
-  const elapsed = WINDOW_SECS - secsToEnd;
-  m.fairValue = f4(0.5 + (elapsed / WINDOW_SECS) * 0.5);
   const [ur, dr] = await Promise.all([
     getJSON(`${CLOB}/midpoint?token_id=${m.upTokenId}`),
     getJSON(`${CLOB}/midpoint?token_id=${m.downTokenId}`),
@@ -129,64 +103,58 @@ async function updatePrices(m) {
   if (dr?.mid) m.downMid = f4(parseFloat(dr.mid));
 }
 
-// ── FOK Entry ──
+function pickCheapestSide(m) {
+  return m.upMid <= m.downMid ? 'up' : 'down';
+}
+
 async function doEntry(m) {
+  const price = m.side === 'up' ? m.upMid : m.downMid;
+  if (price <= 0.01) return false;
+
   if (DRY_RUN) {
-    const price = m.side === 'up' ? m.upMid : m.downMid;
-    if (price < 0.05 || price > 0.95) { log(`⏭️ SKIP ${m.pair} ${m.side.toUpperCase()} @ ${f4(price)}`); return false; }
     const cost = f2(SHARES_PER_LOT * price);
-    if (cost > balance) { log(`⛔ ${m.pair} cost $${cost} > $${balance}`); return false; }
-    const fee = f2(cost * DEMO_FEE_RATE * price * (1 - price));
-    balance = f2(balance - cost - fee);
-    totalFees = f2(totalFees + fee);
+    balance = f2(balance - cost);
     m.entryPrice = price; m.peakPrice = price; m.holdStartedAt = Date.now();
-    log(`🟢 DEMO ENTRY ${m.pair} ${m.side.toUpperCase()} ${SHARES_PER_LOT}sh@${f4(price)}`);
+    log(`🟢 ENTRY ${m.pair} ${m.side.toUpperCase()} ${SHARES_PER_LOT}sh@${f4(price)}`);
     trades.unshift({ ts: new Date().toTimeString().slice(0,8), pair: m.pair, side: m.side.toUpperCase(), action: 'ENTRY', entry: price, shares: SHARES_PER_LOT, pnl: 0, bal: balance });
     if (trades.length > 100) trades.length = 100;
     return true;
   }
-  // LIVE: FOK at midpoint — fills instantly or cancels, no order book guesswork
-  const mid = m.side === 'up' ? m.upMid : m.downMid;
-  if (mid < 0.05 || mid > 0.95) { log(`⏭️ SKIP ${m.pair} ${m.side.toUpperCase()} @ ${f4(mid)}`); return false; }
-  const cost = f2(SHARES_PER_LOT * mid);
-  if (cost > balance) { log(`⛔ ${m.pair} cost ${cost} > ${balance}`); return false; }
+
   const tid = m.side === 'up' ? m.upTokenId : m.downTokenId;
+  const dollarAmount = parseFloat(f2(SHARES_PER_LOT * price));
+  if (dollarAmount <= 0) return false;
   try {
-    const order = await trader.placeFokLimitOrder(tid, 'BUY', mid, SHARES_PER_LOT);
+    const order = await trader.placeFokOrder(tid, 'BUY', dollarAmount);
     if (order.isFilled) {
-      const fillPrice = order.avgPrice > 0 ? order.avgPrice : mid;
-      const fee = f2(cost * DEMO_FEE_RATE * fillPrice * (1 - fillPrice));
-      balance = f2(balance - cost - fee);
-      totalFees = f2(totalFees + fee);
+      const fillPrice = order.avgPrice > 0 ? order.avgPrice : price;
       m.entryPrice = fillPrice; m.peakPrice = fillPrice; m.holdStartedAt = Date.now();
-      log(`🟢 FOK ENTRY ${m.pair} ${m.side.toUpperCase()} ${SHARES_PER_LOT}sh@${f4(fillPrice)}`);
+      log(`🟢 ENTRY ${m.pair} ${m.side.toUpperCase()} ${SHARES_PER_LOT}sh@${f4(fillPrice)}`);
       trades.unshift({ ts: new Date().toTimeString().slice(0,8), pair: m.pair, side: m.side.toUpperCase(), action: 'ENTRY', entry: fillPrice, shares: SHARES_PER_LOT, pnl: 0, bal: balance });
       if (trades.length > 100) trades.length = 100;
       return true;
     }
-    log(`⏭️ FOK nofill ${m.pair} ${m.side.toUpperCase()} @${f4(mid)}`);
+    log(`⏭️ ENTRY nofill ${m.pair} ${m.side.toUpperCase()} @${f4(price)}`);
     return false;
   } catch (e) {
-    log(`❌ FOK ENTRY ${m.pair}: ${e.message}`);
+    log(`❌ ENTRY ${m.pair}: ${e.message}`);
     return false;
   }
 }
 
-// ── FOK Exit ──
-async function doExit(m, exitReason) {
+async function doExit(m) {
   if (DRY_RUN) {
     const cp = m.side === 'up' ? m.upMid : m.downMid;
-    const cost = f2(SHARES_PER_LOT * m.entryPrice);
     const proc = f2(SHARES_PER_LOT * cp);
-    const fee  = f2(proc * DEMO_FEE_RATE * cp * (1 - cp));
-    const pnl  = f2(proc - cost - fee);
-    balance = f2(balance + proc - fee);
-    totalFees = f2(totalFees + fee);
-    log(`📤 DEMO EXIT ${m.pair} ${m.side.toUpperCase()} @${f4(cp)} pnl:$${pnl}`);
-    trades.unshift({ ts: new Date().toTimeString().slice(0,8), pair: m.pair, side: m.side.toUpperCase(), action: `EXIT(${exitReason})`, exit: cp, shares: SHARES_PER_LOT, pnl, bal: balance });
+    const cost = f2(SHARES_PER_LOT * m.entryPrice);
+    const pnl  = f2(proc - cost);
+    balance = f2(balance + proc);
+    log(`📤 EXIT ${m.pair} ${m.side.toUpperCase()} @${f4(cp)} pnl:$${pnl}`);
+    trades.unshift({ ts: new Date().toTimeString().slice(0,8), pair: m.pair, side: m.side.toUpperCase(), action: 'EXIT', exit: cp, shares: SHARES_PER_LOT, pnl, bal: balance });
     if (trades.length > 100) trades.length = 100;
     return true;
   }
+
   const tid = m.side === 'up' ? m.upTokenId : m.downTokenId;
   try {
     const order = await trader.placeFokOrder(tid, 'SELL', SHARES_PER_LOT);
@@ -194,109 +162,89 @@ async function doExit(m, exitReason) {
       const fillPrice = order.avgPrice > 0 ? order.avgPrice : (m.side === 'up' ? m.upMid : m.downMid);
       const cost = f2(SHARES_PER_LOT * m.entryPrice);
       const proc = f2(SHARES_PER_LOT * fillPrice);
-      const fee  = f2(proc * DEMO_FEE_RATE * fillPrice * (1 - fillPrice));
-      const pnl  = f2(proc - cost - fee);
-      balance = f2(balance + proc - fee);
-      totalFees = f2(totalFees + fee);
-      log(`📤 FOK EXIT ${m.pair} ${m.side.toUpperCase()} @${f4(fillPrice)} pnl:$${pnl}`);
-      trades.unshift({ ts: new Date().toTimeString().slice(0,8), pair: m.pair, side: m.side.toUpperCase(), action: `EXIT(${exitReason})`, exit: fillPrice, shares: SHARES_PER_LOT, pnl, bal: balance });
+      const pnl  = f2(proc - cost);
+      log(`📤 EXIT ${m.pair} ${m.side.toUpperCase()} @${f4(fillPrice)} pnl:$${pnl}`);
+      trades.unshift({ ts: new Date().toTimeString().slice(0,8), pair: m.pair, side: m.side.toUpperCase(), action: 'EXIT', exit: fillPrice, shares: SHARES_PER_LOT, pnl, bal: balance });
       if (trades.length > 100) trades.length = 100;
       return true;
     }
-    log(`⏭️ FOK nofill exit ${m.pair} ${m.side.toUpperCase()}`);
+    log(`⏭️ EXIT nofill ${m.pair} ${m.side.toUpperCase()}`);
     return false;
   } catch (e) {
-    log(`❌ FOK EXIT ${m.pair}: ${e.message}`);
+    log(`❌ EXIT ${m.pair}: ${e.message}`);
     return false;
   }
 }
 
-// ── Per-market tick (state machine) ──
 async function tickMarket(m) {
   if (!m.active || m.resolved) return;
   if (m.phase === 'done') return;
 
-  const elapsed = (Date.now() - m.windowStart) / 1000;
+  const now = Date.now();
+  const elapsed = (now - m.windowStart) / 1000;
+  const secsToEnd = Math.floor((m.endTime - now) / 1000);
 
-  // --- IDLE → WAIT after entry delay ---
   if (m.phase === 'idle' && elapsed >= ENTRY_WAIT_SECS) {
+    m.side = pickCheapestSide(m);
     m.phase = 'wait';
-    m.side = 'up';
-    log(`▶️ ${m.pair} START`);
+    log(`▶️ ${m.pair} START cheapest=${m.side.toUpperCase()} up=${f4(m.upMid)} dn=${f4(m.downMid)}`);
   }
 
-  // --- WAIT → ENTER (FOK) ---
   if (m.phase === 'wait') {
     if (m.entryLock) return;
-    if (Date.now() < m.retryAfter) return;
+    if (now < m.retryAfter) return;
     const price = m.side === 'up' ? m.upMid : m.downMid;
-    if (price <= 0.01) return; // no price yet
-    m.entryLock = true;           // LOCK — prevents concurrent FOK
+    if (price <= 0.01) { m.phase = 'idle'; return; }
+    m.entryLock = true;
     const ok = await doEntry(m);
+    m.entryLock = false;
     if (ok) {
       m.phase = 'hold';
-      m.entryLock = false;
     } else {
-      m.entryLock = false;
-      m.retryAfter = Date.now() + RETRY_COOLDOWN_MS;
+      m.retryAfter = now + RETRY_COOLDOWN_MS;
     }
     return;
   }
 
-  // --- HOLD → check exit conditions ---
   if (m.phase === 'hold') {
     const cp = m.side === 'up' ? m.upMid : m.downMid;
     if (!cp || cp === 0) return;
-    const age = (Date.now() - m.holdStartedAt) / 1000;
+    const age = (now - m.holdStartedAt) / 1000;
     if (cp > m.peakPrice) m.peakPrice = cp;
 
-    // Hard stop
-    if (cp <= m.entryPrice - HARD_STOP_DIST && age >= MIN_HOLD_SECS) {
-      m.phase = 'exit';
-      log(`🔴 HARD STOP ${m.pair} ${m.side.toUpperCase()}`);
-    }
-    // Trailing stop
     if (m.peakPrice - cp >= TRAILING_STOP_DIST && age >= MIN_HOLD_SECS) {
       m.phase = 'exit';
       log(`🔶 TRAILING ${m.pair} ${m.side.toUpperCase()} peak:${f4(m.peakPrice)} → ${f4(cp)}`);
     }
-    // Force sell
-    if (elapsed >= FORCE_SELL_SECS) {
+    if (secsToEnd <= 30 && age >= MIN_HOLD_SECS) {
       m.phase = 'exit';
-      log(`⏳ FORCE SELL ${m.pair} @ ${elapsed.toFixed(0)}s`);
+      log(`⏳ FORCE SELL ${m.pair} ${secsToEnd}s left`);
     }
     return;
   }
 
-  // --- EXIT (FOK SELL) ---
   if (m.phase === 'exit') {
-    if (m.exitLock) return; // FOK in-flight
-    if (Date.now() < m.retryAfter) return; // cooldown
-    const exitReason = elapsed >= FORCE_SELL_SECS ? 'force' : (m.side === 'up' ? (m.peakPrice - (m.side === 'up' ? m.upMid : m.downMid) >= TRAILING_STOP_DIST ? 'trail' : 'hard') : 'trail');
-    m.exitLock = true;        // LOCK — prevents concurrent FOK
-    const ok = await doExit(m, exitReason);
+    if (m.exitLock) return;
+    if (now < m.retryAfter) return;
+    m.exitLock = true;
+    const ok = await doExit(m);
+    m.exitLock = false;
     if (ok) {
-      // Flip to opposite side (unless force sell)
-      if (elapsed >= FORCE_SELL_SECS) {
+      if (secsToEnd <= 30) {
         m.phase = 'done';
-        m.exitLock = false;
-        log(`🏁 ${m.pair} DONE (force exit)`);
+        log(`🏁 ${m.pair} DONE`);
       } else {
         m.side = m.side === 'up' ? 'down' : 'up';
         m.phase = 'wait';
-        m.exitLock = false;
-        m.entryLock = false;
         log(`🔄 ${m.pair} FLIP to ${m.side.toUpperCase()}`);
       }
     } else {
-      m.exitLock = false;
-      m.retryAfter = Date.now() + RETRY_COOLDOWN_MS;
+      m.retryAfter = now + RETRY_COOLDOWN_MS;
     }
     return;
   }
 }
 
-// ── Main tick ──
 async function tick() {
   try {
     tickCount++;
@@ -304,7 +252,6 @@ async function tick() {
     if (tickCount % PRICE_FETCH_EVERY === 0) {
       await Promise.allSettled(Object.values(markets).map(m => updatePrices(m)));
     }
-    // Process all markets (state machine)
     for (const m of Object.values(markets)) {
       await tickMarket(m);
     }
@@ -314,7 +261,6 @@ async function tick() {
   }
 }
 
-// ── Snapshot ──
 function snapshot() {
   let openVal = 0, unreal = 0;
   const positions = Object.values(markets).filter(m => m.phase === 'hold').map(m => {
@@ -333,7 +279,7 @@ function snapshot() {
 
   const allMarkets = Object.values(markets).filter(m => m.active).map(m => ({
     label: `${m.pair} 5m`, secondsToEnd: Math.floor((m.endTime - Date.now()) / 1000),
-    upMid: f4(m.upMid), dnMid: f4(m.downMid), fairValue: f4(m.fairValue),
+    upMid: f4(m.upMid), dnMid: f4(m.downMid),
     phase: m.phase, side: m.side.toUpperCase(),
   }));
 
@@ -341,15 +287,14 @@ function snapshot() {
     dryRun: DRY_RUN, balance: f2(balance),
     openEquity: f2(balance + openVal), startBalance: f2(startBalance),
     pnl: f2((balance + openVal) - startBalance), unrealizedPnl: f2(unreal),
-    totalFees: f2(totalFees), uptime: Math.floor((Date.now() - startTime) / 1000),
+    uptime: Math.floor((Date.now() - startTime) / 1000),
     tickCount, activeMarkets: allMarkets.length,
     positions, positionsCount: positions.length,
     totalTrades: trades.length, recentTrades: trades.slice(0, 40),
     activityLog: logs.slice(0, 60), allMarkets,
-    pendingOrders: 0, // FOK = zero pending always
     strategy: {
       sharesPerLot: SHARES_PER_LOT, trailingStopDist: TRAILING_STOP_DIST,
-      hardStopDist: HARD_STOP_DIST, forceSellSecs: FORCE_SELL_SECS,
+      forceSellSecs: FORCE_SELL_SECS,
     },
   };
 }
@@ -358,7 +303,7 @@ function flushAll() {
   for (const k of Object.keys(markets)) delete markets[k];
   trades.length = 0; logs.length = 0;
   tickCount = 0; startTime = Date.now();
-  balance = DEMO_BALANCE; startBalance = DEMO_BALANCE; totalFees = 0;
+  balance = 0; startBalance = 0;
 }
 
 async function setDryRun(val) {
@@ -373,7 +318,6 @@ async function setDryRun(val) {
         log('🔑 Authenticating...'); await trader.authenticate();
         log(`✅ Auth: ${trader.address}`);
         await trader.approveAllowance();
-        // Cancel all stale open orders
         try {
           const oo = await trader.getOpenOrders();
           if (Array.isArray(oo)) {
@@ -405,7 +349,10 @@ async function start(emit, logFn) {
   emitFn = emit || (() => {});
   slog   = logFn || (() => {});
   startTime = Date.now();
-  if (!DRY_RUN) {
+  if (DRY_RUN) {
+    balance = DEMO_BALANCE;
+    startBalance = DEMO_BALANCE;
+  } else {
     try {
       trader = new PolymarketTrader(process.env.POLYMARKET_PRIVATE_KEY, process.env.FUNDER_ADDRESS);
       trader.setLogFn(log); log('🔑 Authenticating...'); await trader.authenticate();
