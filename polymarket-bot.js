@@ -206,14 +206,12 @@ async function discoverMarket(pair, customWsTs) {
 }
 
 async function discover() {
-  // Current window
-  await Promise.allSettled(TARGET_PAIRS.map(p => discoverMarket(p)));
-  // Next window (+300s) — discover early so bot is ready
-  const nextWs = currentWindowStart() + WINDOW_SECS;
-  await Promise.allSettled(TARGET_PAIRS.map(p => {
-    const slug = `${p.toLowerCase()}-updown-5m-${nextWs}`;
-    if (!markets[slug]) return discoverMarket(p, nextWs);
-  }));
+  // Discover 3 windows: previous, current, next (reference bot pattern)
+  const cw = currentWindowStart();
+  const timestamps = [cw - WINDOW_SECS, cw, cw + WINDOW_SECS];
+  await Promise.allSettled(timestamps.map(ep =>
+    Promise.allSettled(TARGET_PAIRS.map(p => discoverMarket(p, ep)))
+  ));
   for (const [slug, m] of Object.entries(markets)) {
     if (Date.now() > m.endTime + 15000) {
       delete wsTokenMap[m.upTokenId];
