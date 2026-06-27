@@ -239,7 +239,7 @@ async function buyShares(m, side) {
     const price = side === 'up' ? m.upMid : m.downMid;
 
     if (price < MIN_ENTRY_PRICE || price > MAX_ENTRY_PRICE) {
-      log(`⛔ ${m.pair} ${side.toUpperCase()} price ${f4(price)} outside safe range [${MIN_ENTRY_PRICE}–${MAX_ENTRY_PRICE}], skip`);
+      log(`⛗ ${m.pair} ${side.toUpperCase()} price ${f4(price)} outside safe range, skip`);
       return null;
     }
 
@@ -247,37 +247,34 @@ async function buyShares(m, side) {
     log(`🛒 ${m.pair} BUY ${side.toUpperCase()} ${SHARES}sh @ ${f4(price)} FOK attempt #${attempt}`);
 
     try {
-      // FOK limit order with exact price + share count = guarantees exactly SHARES shares if filled
+      // FOK limit order with exact price + size=SHARES -- guarantees exactly 6 shares if filled
       const resp = await trader._clob.createAndPostOrder(
         { tokenID: tokenId, price: f4(price), size: SHARES, side: Side.BUY },
         { tickSize, negRisk },
         OrderType.FOK
       );
       const id        = resp?.orderID ?? resp?.id ?? null;
+      const status    = resp?.status || (id ? 'UNKNOWN' : 'FAILED');
+      const remaining = parseFloat(resp?.remaining_size ?? '999');
+      const matchStatus = (resp?.match_status || '').toLowerCase();
+      const isFilled  = status === 'FILLED' || matchStatus === 'filled' || remaining === 0;
       const fillPrice = parseFloat(resp?.avg_fill_price || resp?.price || price);
 
-      if (id) {
-        // Poll CLOB to CONFIRM fill — don't trust the initial response alone
-        const confirm = await trader.waitForFill(id, 5000);
-        if (confirm.filled) {
-          log(`✅ BUY confirmed ${m.pair} ${side.toUpperCase()} ${SHARES}sh@${f4(fillPrice)}`);
-          const cost = f2(SHARES * fillPrice);
-          balance = f2(balance - cost);
-          log(`💰 Balance: $${f2(balance)} (-$${cost})`);
-          return fillPrice;
-        }
-        log(`⏭️  FOK nofill ${m.pair} ${side.toUpperCase()} — order cancelled or timeout`);
-      } else {
-        log(`⏭️  FOK rejected ${m.pair} ${side.toUpperCase()} — no orderID returned`);
+      if (isFilled && id) {
+        log(`✅ BUY filled ${m.pair} ${side.toUpperCase()} ${SHARES}sh@${f4(fillPrice)}`);
+        const cost = f2(SHARES * fillPrice);
+        balance = f2(balance - cost);
+        log(`💰 Balance: $${f2(balance)} (-$${cost})`);
+        return fillPrice;
       }
+      log(`⏭️ FOK nofill ${m.pair} ${side.toUpperCase()}${id ? '' : ' (no id)'} -- retry`);
     } catch (e) {
-      log(`⚠️  FOK BUY error ${m.pair}: ${e.message.slice(0, 80)} — retry`);
+      log(`⚠️ FOK BUY error ${m.pair}: ${e.message.slice(0, 80)} -- retry`);
     }
 
     await sleep(FOK_RETRY_MS);
   }
 }
-
 // ── Exit: FOK limit order with exact share count + poll confirmation ──
 async function sellShares(m, side, reason) {
   const tokenId  = side === 'up' ? m.upTokenId  : m.downTokenId;
@@ -285,14 +282,14 @@ async function sellShares(m, side, reason) {
   const negRisk  = side === 'up' ? m.upNegRisk   : m.dnNegRisk;
   const { Side, OrderType } = require('@polymarket/clob-client-v2');
 
-  log(`📤 ${m.pair} SELL ${side.toUpperCase()} ${SHARES}sh — ${reason}`);
+  log(`📤 ${m.pair} SELL ${side.toUpperCase()} ${SHARES}sh -- ${reason}`);
 
   let attempt = 0;
   while (true) {
     const secsLeft = (m.endTime - Date.now()) / 1000;
 
     if (secsLeft < HARD_SELL_SECS) {
-      log(`⌛ ${m.pair} HARD DEADLINE (${Math.floor(secsLeft)}s left) — shares auto-resolve on-chain`);
+      log(`⌛ ${m.pair} HARD DEADLINE (${Math.floor(secsLeft)}s left) -- auto-resolve`);
       return false;
     }
 
@@ -309,25 +306,23 @@ async function sellShares(m, side, reason) {
         { tickSize, negRisk },
         OrderType.FOK
       );
-      const id = resp?.orderID ?? resp?.id ?? null;
+      const id        = resp?.orderID ?? resp?.id ?? null;
+      const status    = resp?.status || (id ? 'UNKNOWN' : 'FAILED');
+      const remaining = parseFloat(resp?.remaining_size ?? '999');
+      const matchStatus = (resp?.match_status || '').toLowerCase();
+      const isFilled  = status === 'FILLED' || matchStatus === 'filled' || remaining === 0;
+      const fillPrice = parseFloat(resp?.avg_fill_price || resp?.price || price);
 
-      if (id) {
-        // Poll CLOB to CONFIRM fill
-        const confirm = await trader.waitForFill(id, 5000);
-        if (confirm.filled) {
-          const fillPrice = parseFloat(resp?.avg_fill_price || resp?.price || price);
-          log(`✅ SELL confirmed ${m.pair} ${side.toUpperCase()} ${SHARES}sh@${f4(fillPrice)}`);
-          const proceeds = f2(SHARES * fillPrice);
-          balance = f2(balance + proceeds);
-          log(`💰 Balance: $${f2(balance)} (+$${proceeds})`);
-          return true;
-        }
-        log(`⏭️  FOK SELL nofill ${m.pair} ${side.toUpperCase()}, retry…`);
-      } else {
-        log(`⏭️  FOK SELL rejected ${m.pair} ${side.toUpperCase()} — no orderID`);
+      if (isFilled && id) {
+        log(`✅ SELL filled ${m.pair} ${side.toUpperCase()} ${SHARES}sh@${f4(fillPrice)}`);
+        const proceeds = f2(SHARES * fillPrice);
+        balance = f2(balance + proceeds);
+        log(`💰 Balance: $${f2(balance)} (+$${proceeds})`);
+        return true;
       }
+      log(`⏭️ FOK SELL nofill ${m.pair} ${side.toUpperCase()} -- retry`);
     } catch (e) {
-      log(`⚠️  FOK SELL error ${m.pair}: ${e.message.slice(0, 80)}, retrying…`);
+      log(`⚠️ FOK SELL error ${m.pair}: ${e.message.slice(0, 80)} -- retry`);
     }
 
     await sleep(FOK_SELL_RETRY_MS);
