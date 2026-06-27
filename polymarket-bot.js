@@ -145,8 +145,8 @@ function currentWindowStart() {
   return Math.floor(now / WINDOW_SECS) * WINDOW_SECS;
 }
 
-async function discoverMarket(pair) {
-  const ws_ts = currentWindowStart();
+async function discoverMarket(pair, customWsTs) {
+  const ws_ts = customWsTs || currentWindowStart();
   const slug  = `${pair.toLowerCase()}-updown-5m-${ws_ts}`;
   if (markets[slug]) return;
 
@@ -160,19 +160,14 @@ async function discoverMarket(pair) {
   try { ids = JSON.parse(mk.clobTokenIds); } catch (_) { return; }
   if (ids.length < 2) return;
 
-  // Map token IDs to outcomes — Gamma API returns clobTokenIds in same order as outcomes
-  const outcomes = mk.outcomes || [];
-  const upIdx = outcomes.findIndex(o => o.toLowerCase() === 'up');
-  const dnIdx = outcomes.findIndex(o => o.toLowerCase() === 'down');
-  if (upIdx < 0 || dnIdx < 0) return;
-  const upTokenId   = ids[upIdx];
-  const downTokenId = ids[dnIdx];
+  const upTokenId   = ids[0];
+  const downTokenId = ids[1];
 
   const endTime = mk.endDate ? new Date(mk.endDate).getTime() : null;
   if (!endTime) return;
 
   const secsToEnd = (endTime - Date.now()) / 1000;
-  if (secsToEnd < 10 || secsToEnd > WINDOW_SECS + 30) return;
+  if (secsToEnd < 10 || secsToEnd > WINDOW_SECS * 2) return;
 
   let tickSize = '0.01';
   let negRisk  = false;
@@ -211,7 +206,14 @@ async function discoverMarket(pair) {
 }
 
 async function discover() {
+  // Current window
   await Promise.allSettled(TARGET_PAIRS.map(p => discoverMarket(p)));
+  // Next window (+300s) — discover early so bot is ready
+  const nextWs = currentWindowStart() + WINDOW_SECS;
+  await Promise.allSettled(TARGET_PAIRS.map(p => {
+    const slug = `${p.toLowerCase()}-updown-5m-${nextWs}`;
+    if (!markets[slug]) return discoverMarket(p, nextWs);
+  }));
   for (const [slug, m] of Object.entries(markets)) {
     if (Date.now() > m.endTime + 15000) {
       delete wsTokenMap[m.upTokenId];
