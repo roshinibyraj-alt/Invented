@@ -25,6 +25,7 @@ const TRAILING_STOP_DIST = 0.05;
 const HARD_STOP_DIST     = 0.08;
 const FORCE_SELL_SECS    = 270;
 const ENTRY_WAIT_SECS    = 10;
+const MIN_HOLD_SECS      = 10; // minimum seconds before any exit can fire
 
 let DRY_RUN       = true;
 const KILL_SWITCH = process.env.KILL_SWITCH === 'true';
@@ -278,6 +279,9 @@ async function managePositions() {
 }
 
 function checkExitConditions(pos, cp, m, elapsed) {
+  // Minimum hold — prevent rapid cycling
+  const age = (Date.now() - pos.createdAt) / 1000;
+  if (age < MIN_HOLD_SECS) return null;
   if (cp <= pos.entryPrice - HARD_STOP_DIST) {
     slog(`🔴 HARD STOP ${m.pair} ${pos.side.toUpperCase()} entry:${fl4(pos.entryPrice)} → ${fl4(cp)}`);
     return 'hard_stop';
@@ -306,7 +310,7 @@ async function exitPosition(pos, exitPrice, m, exitReason) {
     slog(`📤 SELL ${m.pair} ${pos.side.toUpperCase()} ${pos.size}sh@${fl4(exitPrice)} pnl:$${pnl} fee:$${fl2(fee)} bal:$${fl2(balance)}`);
     pushTrade(m.pair, pos.side.toUpperCase(), 'SELL', pos.entryPrice, exitPrice, pos.size, pnl, balance, fee);
     pos.resolved = true;
-    if (mState[pos.slug] && exitReason !== 'force_sell') {
+    if (mState[pos.slug] && exitReason !== 'force_sell' && exitReason !== 'hard_stop') {
       mState[pos.slug].side = pos.side === 'up' ? 'down' : 'up';
     }
     return;
@@ -328,7 +332,7 @@ async function exitPosition(pos, exitPrice, m, exitReason) {
       pushTrade(m.pair, pos.side.toUpperCase(), 'SELL', pos.entryPrice, fillPrice, pos.size, pnl, balance, fee);
       pos.resolved = true;
       // Flip to opposite side (only on trailing, not force sell)
-      if (mState[pos.slug] && exitReason !== 'force_sell') {
+      if (mState[pos.slug] && exitReason !== 'force_sell' && exitReason !== 'hard_stop') {
         mState[pos.slug].side = pos.side === 'up' ? 'down' : 'up';
         mState[pos.slug].entrySent = false;
         mState[pos.slug].exiting = false;
