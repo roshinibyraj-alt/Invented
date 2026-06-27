@@ -31,6 +31,8 @@ const trades   = [];
 const markets  = {};
 let lastDiscoverAt = 0;
 const gridState = {};
+const equityHistory = [];
+let lastEquityRecord = 0;
 
 const f2 = v => Math.round((v || 0) * 100) / 100;
 const f4 = v => Math.round((v || 0) * 10000) / 10000;
@@ -466,6 +468,12 @@ async function tick() {
     lastDiscoverAt = now;
     await discover();
   }
+  // Record equity every 5 seconds
+  if (now - lastEquityRecord >= 5000) {
+    lastEquityRecord = now;
+    equityHistory.push({ t: now - startTime, v: calcEquity().equity });
+    if (equityHistory.length > 1000) equityHistory.splice(0, equityHistory.length - 1000);
+  }
   emitFn('snapshot', snapshot());
 }
 
@@ -499,6 +507,7 @@ function snapshot() {
     activeMarkets, totalTrades: trades.length,
     recentTrades: trades.slice(0, 100),
     activityLog: logs.slice(0, 100),
+    equityHistory: equityHistory.slice(-500),
     strategy: {
       shares: SHARES, tpOffset: TP_OFFSET,
       gridLevels: GRID_LEVELS, closeAtSecs: CLOSE_AT_SECS,
