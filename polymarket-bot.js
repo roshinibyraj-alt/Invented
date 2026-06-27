@@ -7,29 +7,18 @@ const GAMMA   = 'https://gamma-api.polymarket.com';
 const CLOB    = 'https://clob.polymarket.com';
 const CLOB_WS = 'wss://ws-subscriptions-clob.polymarket.com/ws/market';
 
-// ── Timing ──
 const TICK_MS           = 500;
 const DISCOVER_EVERY_MS = 15000;
 const WINDOW_SECS       = 300;
-
-// ── Strategy ──
-const ENTRY_WAIT_SECS  = 10;
-const SHARES           = 6;
-const TRAILING_DIST    = 0.10;
-const FORCE_CLOSE_SECS = 30;
-const HARD_SELL_SECS   = 15;
-
-// ── Price guard ──
-const MIN_ENTRY_PRICE  = 0.10;
-const MAX_ENTRY_PRICE  = 0.90;
-
-// ── Order config ──
-const FOK_RETRY_MS     = 2000;
-const FOK_SELL_RETRY_MS = 500;
-
-const TARGET_PAIRS = ['BTC'];
-
-// ── Demo / Dry-Run ──
+const ENTRY_WAIT_SECS   = 10;
+const SHARES            = 6;
+const FORCE_CLOSE_SECS  = 30;
+const HARD_SELL_SECS    = 15;
+const MIN_ENTRY_PRICE   = 0.10;
+const MAX_ENTRY_PRICE   = 0.90;
+const LIMIT_OFFSET      = 0.10;
+const FOK_RETRY_MS      = 2000;
+const TARGET_PAIRS      = ['BTC'];
 let dryRun = process.env.DRY_RUN === 'true';
 const DEMO_BALANCE = parseFloat(process.env.DEMO_BALANCE || '50');
 
@@ -40,11 +29,13 @@ let balance    = 0;
 let startBalance = 0;
 let startTime  = Date.now();
 
-const logs   = [];
-const trades = [];
-const markets = {};
-
+const logs     = [];
+const trades   = [];
+const markets  = {};
 let lastDiscoverAt = 0;
+
+// Dashboard state per market
+const dashState = {};
 
 const f2 = v => Math.round((v || 0) * 100) / 100;
 const f4 = v => Math.round((v || 0) * 10000) / 10000;
@@ -69,59 +60,47 @@ async function getJSON(url) {
 }
 
 // ── WebSocket price feed ──
-let ws           = null;
-let wsReady      = false;
-let wsPingTimer  = null;
+let ws = null, wsReady = false, wsPingTimer = null;
 const wsTokenMap = {};
 
 function wsConnect() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
-  log('Connecting price WebSocket...');
+  log('Connecting price WS...');
   ws = new WebSocket(CLOB_WS);
-
   ws.on('open', () => {
     wsReady = true;
-    log('Price WebSocket connected');
-    const tokenIds = Object.keys(wsTokenMap);
-    if (tokenIds.length > 0) wsSubscribe(tokenIds);
-    wsPingTimer = setInterval(() => {
-      if (ws.readyState === WebSocket.OPEN) ws.ping();
-    }, 20000);
+    log('Price WS connected');
+    const ids = Object.keys(wsTokenMap);
+    if (ids.length) wsSubscribe(ids);
+    wsPingTimer = setInterval(() => { if (ws.readyState === WebSocket.OPEN) ws.ping(); }, 20000);
   });
-
   ws.on('message', (raw) => {
     try {
       const msgs = JSON.parse(raw);
-      const arr  = Array.isArray(msgs) ? msgs : [msgs];
+      const arr = Array.isArray(msgs) ? msgs : [msgs];
       for (const msg of arr) {
-        const tokenId = msg.asset_id;
-        const price   = parseFloat(msg.price || msg.mid_price || '0');
-        if (!tokenId || !price) continue;
-        const slug = wsTokenMap[tokenId];
+        const t = msg.asset_id, p = parseFloat(msg.price || msg.mid_price || '0');
+        if (!t || !p) continue;
+        const slug = wsTokenMap[t];
         if (!slug || !markets[slug]) continue;
         const m = markets[slug];
-        if (tokenId === m.upTokenId)   { m.upMid  = f4(price); m.lastPriceAt = Date.now(); }
-        if (tokenId === m.downTokenId) { m.downMid = f4(price); m.lastPriceAt = Date.now(); }
+        if (t === m.upTokenId) { m.upMid = f4(p); m.lastPriceAt = Date.now(); }
+        if (t === m.downTokenId) { m.downMid = f4(p); m.lastPriceAt = Date.now(); }
       }
     } catch (_) {}
   });
-
   ws.on('close', () => {
     wsReady = false;
     if (wsPingTimer) { clearInterval(wsPingTimer); wsPingTimer = null; }
-    log('Price WebSocket closed - reconnecting in 2s');
+    log('Price WS closed - reconnect 2s');
     setTimeout(wsConnect, 2000);
   });
-
-  ws.on('error', (e) => {
-    log(`WS error: ${e.message}`);
-    try { ws.terminate(); } catch (_) {}
-  });
+  ws.on('error', (e) => { log(`WS err: ${e.message}`); try { ws.terminate(); } catch(_) {} });
 }
 
-function wsSubscribe(tokenIds) {
+function wsSubscribe(ids) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  ws.send(JSON.stringify({ auth: {}, type: 'market', assets_ids: tokenIds }));
+  ws.send(JSON.stringify({ auth: {}, type: 'market', assets_ids: ids }));
 }
 
 async function restRefreshPrice(m) {
@@ -129,7 +108,7 @@ async function restRefreshPrice(m) {
     getJSON(`${CLOB}/midpoint?token_id=${m.upTokenId}`),
     getJSON(`${CLOB}/midpoint?token_id=${m.downTokenId}`),
   ]);
-  if (ur?.mid) m.upMid   = f4(parseFloat(ur.mid));
+  if (ur?.mid) m.upMid = f4(parseFloat(ur.mid));
   if (dr?.mid) m.downMid = f4(parseFloat(dr.mid));
   m.lastPriceAt = Date.now();
 }
@@ -139,12 +118,12 @@ async function ensureFreshPrice(m) {
   if (stale) await restRefreshPrice(m);
 }
 
-// ── Market Discovery ──
 function currentWindowStart() {
   const now = Math.floor(Date.now() / 1000);
   return Math.floor(now / WINDOW_SECS) * WINDOW_SECS;
 }
 
+// ── Market Discovery ──
 async function discoverMarket(pair, customWsTs) {
   const ws_ts = customWsTs || currentWindowStart();
   const slug  = `${pair.toLowerCase()}-updown-5m-${ws_ts}`;
@@ -152,7 +131,6 @@ async function discoverMarket(pair, customWsTs) {
 
   const d = await getJSON(`${GAMMA}/events?slug=${slug}`);
   if (!Array.isArray(d) || !d[0]?.markets?.[0]) return;
-
   const mk = d[0].markets[0];
   if (!mk.clobTokenIds) return;
 
@@ -160,17 +138,13 @@ async function discoverMarket(pair, customWsTs) {
   try { ids = JSON.parse(mk.clobTokenIds); } catch (_) { return; }
   if (ids.length < 2) return;
 
-  const upTokenId   = ids[0];
-  const downTokenId = ids[1];
-
   const endTime = mk.endDate ? new Date(mk.endDate).getTime() : null;
   if (!endTime) return;
-
   const secsToEnd = (endTime - Date.now()) / 1000;
   if (secsToEnd < 10 || secsToEnd > WINDOW_SECS * 2) return;
 
-  let tickSize = '0.01';
-  let negRisk  = false;
+  const upTokenId = ids[0], downTokenId = ids[1];
+  let tickSize = '0.01', negRisk = false;
   try {
     const tsData = await getJSON(`${CLOB}/tick-size?token_id=${upTokenId}`);
     if (tsData?.minimum_tick_size) tickSize = tsData.minimum_tick_size;
@@ -178,314 +152,313 @@ async function discoverMarket(pair, customWsTs) {
     if (nrData?.neg_risk !== undefined) negRisk = nrData.neg_risk;
   } catch (_) {}
 
-  const windowStartMs = ws_ts * 1000;
-
   markets[slug] = {
-    slug, pair,
-    upTokenId, downTokenId,
-    upMid: 0, downMid: 0,
-    lastPriceAt: 0,
-    endTime,
-    windowStartMs,
+    slug, pair, upTokenId, downTokenId,
+    upMid: 0, downMid: 0, lastPriceAt: 0,
+    endTime, windowStartMs: ws_ts * 1000,
     upTickSize: tickSize, dnTickSize: tickSize,
     upNegRisk: negRisk, dnNegRisk: negRisk,
-    loopRunning: false,
-    done: false,
+    loopRunning: false, done: false,
   };
 
-  wsTokenMap[upTokenId]   = slug;
+  wsTokenMap[upTokenId] = slug;
   wsTokenMap[downTokenId] = slug;
-
   if (wsReady) wsSubscribe([upTokenId, downTokenId]);
   log(`Market ${pair}: ${slug}`);
-
   await restRefreshPrice(markets[slug]);
   log(`${pair} UP:${f4(markets[slug].upMid)} DOWN:${f4(markets[slug].downMid)}`);
+
+  dashState[slug] = {
+    phase: 'entry',     // 'entry', 'holding', 'limit_watch', 'force_sell', 'done'
+    side: null,         // 'up' or 'down'
+    entryPrice: 0,
+    sellOrderId: null,  // current GTC sell limit order ID
+    buyOrderId: null,   // current GTC buy limit order ID
+    sellPrice: 0,       // current sell limit price
+    buyPrice: 0,        // current buy limit price
+  };
 
   tradeLoop(markets[slug]).catch(e => log(`Loop crash ${pair}: ${e.message}`));
 }
 
 async function discover() {
-  // Discover 3 windows: previous, current, next (reference bot pattern)
   const cw = currentWindowStart();
   const timestamps = [cw - WINDOW_SECS, cw, cw + WINDOW_SECS];
   await Promise.allSettled(timestamps.map(ep =>
     Promise.allSettled(TARGET_PAIRS.map(p => discoverMarket(p, ep)))
   ));
+  // Cleanup old markets
   for (const [slug, m] of Object.entries(markets)) {
     if (Date.now() > m.endTime + 15000) {
       delete wsTokenMap[m.upTokenId];
       delete wsTokenMap[m.downTokenId];
       delete markets[slug];
+      delete dashState[slug];
     }
   }
 }
 
-// ── BUY - exact 6 shares via FOK at best ask ──
-async function buyShares(m, side, fixedPrice) {
-  const tokenId  = side === 'up' ? m.upTokenId  : m.downTokenId;
-  const tickSize = side === 'up' ? m.upTickSize  : m.dnTickSize;
-  const negRisk  = side === 'up' ? m.upNegRisk   : m.dnNegRisk;
+// ── BUY initial position - FOK market order ──
+async function buyInitial(m, side) {
+  const tokenId = side === 'up' ? m.upTokenId : m.downTokenId;
+  const tickSize = side === 'up' ? m.upTickSize : m.dnTickSize;
+  const negRisk = side === 'up' ? m.upNegRisk : m.dnNegRisk;
   const { Side, OrderType } = require('@polymarket/clob-client-v2');
 
-  let attempt = 0;
-  while (true) {
-    const secsLeft = (m.endTime - Date.now()) / 1000;
-    if (secsLeft <= FORCE_CLOSE_SECS) {
-      log(`${m.pair} no time to enter (${Math.floor(secsLeft)}s left)`);
-      return null;
-    }
-
-    let price = fixedPrice;
-
-    // Demo mode: skip real order book, use fixedPrice directly
-    if (!dryRun) {
-      try {
-        const ba = await trader.getBestBidAsk(tokenId);
-        if (ba && ba.bestAsk && ba.bestAsk > 0) {
-          price = ba.bestAsk;
-        }
-      } catch (_) {}
-    }
-    
-    if (price < MIN_ENTRY_PRICE || price > MAX_ENTRY_PRICE) {
-      log(`${m.pair} ${side.toUpperCase()} price ${f4(price)} outside safe range, skip`);
-      return null;
-    }
-
-    attempt++;
-    log(`${m.pair} BUY ${side.toUpperCase()} ${SHARES}sh @ ${f4(price)} FOK #${attempt}`);
-
-    if (dryRun) {
-      const cost = f2(SHARES * price);
-      if (balance < cost) {
-        log(`${m.pair} DEMO insufficient balance $${f2(balance)}`);
-        return null;
-      }
-      balance = f2(balance - cost);
-      log(`DEMO FILLED BUY ${m.pair} ${side.toUpperCase()} ${SHARES}sh@${f4(price)}`);
-      log(`Balance: $${f2(balance)}`);
-      return price;
-    }
-
-    const balBefore = await trader.getBalance();
-    try {
-      await trader._clob.createAndPostOrder(
-        { tokenID: tokenId, price: f4(price), size: SHARES, side: Side.BUY },
-        { tickSize, negRisk },
-        OrderType.FOK
-      );
-    } catch (e) {
-      log(`BUY ERR ${m.pair}: ${e.message.slice(0, 80)}`);
-    }
-
-    const balAfter = await trader.getBalance();
-    const drop = f2(balBefore - balAfter);
-    const expectedDrop = f2(SHARES * price);
-    if (drop >= expectedDrop * 0.5) {
-      balance = balAfter;
-      log(`FILLED BUY ${m.pair} ${side.toUpperCase()} ${SHARES}sh cost~$${drop}`);
-      log(`Balance: $${f2(balance)}`);
-      await sleep(2000);
-      return price;
-    }
-
-    log(`NOFILL BUY ${m.pair} (bal dropped $${drop}) - retry`);
-    await sleep(FOK_RETRY_MS);
+  const price = side === 'up' ? m.upMid : m.downMid;
+  if (price < MIN_ENTRY_PRICE || price > MAX_ENTRY_PRICE) {
+    log(`${m.pair} ${side.toUpperCase()} price ${f4(price)} out of range`);
+    return null;
   }
+
+  const dollarAmount = f2(SHARES * price);
+  log(`${m.pair} BUY INITIAL ${side.toUpperCase()} $${dollarAmount} (${SHARES}sh)`);
+
+  if (dryRun) {
+    if (balance < dollarAmount) { log(`DEMO insufficient $${f2(balance)}`); return null; }
+    balance = f2(balance - dollarAmount);
+    log(`DEMO FILLED BUY ${m.pair} ${side.toUpperCase()} @${f4(price)}`);
+    return price;
+  }
+
+  const balBefore = await trader.getBalance();
+  try {
+    await trader._clob.createAndPostMarketOrder(
+      { tokenID: tokenId, amount: dollarAmount, side: Side.BUY, orderType: OrderType.FOK },
+      { tickSize, negRisk }, OrderType.FOK
+    );
+  } catch (e) { log(`BUY ERR ${m.pair}: ${e.message.slice(0, 80)}`); }
+
+  const balAfter = await trader.getBalance();
+  const drop = f2(balBefore - balAfter);
+  if (drop >= dollarAmount * 0.5) {
+    balance = balAfter;
+    log(`FILLED BUY ${m.pair} ${side.toUpperCase()} cost~$${drop}`);
+    return price;
+  }
+  log(`NOFILL BUY ${m.pair} (dropped $${drop})`);
+  return null;
 }
 
-// ── SELL - exact 6 shares via FOK at best bid ──
-async function sellShares(m, side, reason) {
-  const tokenId  = side === 'up' ? m.upTokenId  : m.downTokenId;
-  const tickSize = side === 'up' ? m.upTickSize  : m.dnTickSize;
-  const negRisk  = side === 'up' ? m.upNegRisk   : m.dnNegRisk;
+// ── FORCE SELL at market (for window end) ──
+async function forceSell(m, side) {
+  const tokenId = side === 'up' ? m.upTokenId : m.downTokenId;
+  const tickSize = side === 'up' ? m.upTickSize : m.dnTickSize;
+  const negRisk = side === 'up' ? m.upNegRisk : m.dnNegRisk;
   const { Side, OrderType } = require('@polymarket/clob-client-v2');
 
-  log(`SELL ${m.pair} ${side.toUpperCase()} ${SHARES}sh - ${reason}`);
+  log(`FORCE SELL ${m.pair} ${side.toUpperCase()} ${SHARES}sh`);
 
-  let attempt = 0;
-  while (true) {
-    const secsLeft = (m.endTime - Date.now()) / 1000;
-    if (secsLeft < HARD_SELL_SECS) {
-      log(`DEADLINE ${m.pair} (${Math.floor(secsLeft)}s left) - auto-resolve`);
-      return false;
-    }
+  if (dryRun) {
+    const price = side === 'up' ? m.upMid : m.downMid;
+    const proceeds = f2(SHARES * price);
+    balance = f2(balance + proceeds);
+    log(`DEMO FILLED SELL @${f4(price)}`);
+    return true;
+  }
 
-    let price = side === 'up' ? m.upMid : m.downMid;
+  const balBefore = await trader.getBalance();
+  try {
+    await trader._clob.createAndPostMarketOrder(
+      { tokenID: tokenId, amount: SHARES, side: Side.SELL, orderType: OrderType.FOK },
+      { tickSize, negRisk }, OrderType.FOK
+    );
+  } catch (e) { log(`SELL ERR ${m.pair}: ${e.message.slice(0, 80)}`); }
 
-    // Demo mode: skip real order book
-    if (!dryRun) {
-      try {
-        const ba = await trader.getBestBidAsk(tokenId);
-        if (ba && ba.bestBid && ba.bestBid > 0) {
-          price = ba.bestBid;
-        }
-      } catch (_) {}
-    }
+  const balAfter = await trader.getBalance();
+  const rise = f2(balAfter - balBefore);
+  if (rise > 0.01) { balance = balAfter; log(`FILLED SELL ${m.pair} proceeds~$${rise}`); return true; }
+  log(`NOFILL SELL ${m.pair}`);
+  return false;
+}
 
-    attempt++;
-    log(`SELL #${attempt} ${m.pair} ${SHARES}sh @ ${f4(price)} (${Math.floor(secsLeft)}s left)`);
-
-    if (dryRun) {
-      const proceeds = f2(SHARES * price);
-      balance = f2(balance + proceeds);
-      log(`DEMO FILLED SELL ${m.pair} ${side.toUpperCase()} @${f4(price)}`);
-      log(`Balance: $${f2(balance)}`);
-      return true;
-    }
-
-    const balBefore = await trader.getBalance();
-    try {
-      await trader._clob.createAndPostOrder(
-        { tokenID: tokenId, price: f4(price), size: SHARES, side: Side.SELL },
-        { tickSize, negRisk },
-        OrderType.FOK
-      );
-    } catch (e) {
-      log(`SELL ERR ${m.pair}: ${e.message.slice(0, 80)}`);
-    }
-
-    const balAfter = await trader.getBalance();
-    const rise = f2(balAfter - balBefore);
-    const expectedRise = f2(SHARES * price);
-    if (rise >= expectedRise * 0.5) {
-      balance = balAfter;
-      log(`FILLED SELL ${m.pair} ${side.toUpperCase()} ${SHARES}sh proceeds~$${rise}`);
-      log(`Balance: $${f2(balance)}`);
-      await sleep(2000);
-      return true;
-    }
-
-    log(`NOFILL SELL ${m.pair} (bal rose $${rise}) - retry`);
-    await sleep(FOK_SELL_RETRY_MS);
+// ── Cancel all pending GTC orders for a market ──
+async function cancelAllOrders(slug) {
+  const ds = dashState[slug];
+  if (!ds) return;
+  if (ds.sellOrderId) {
+    try { await trader.cancelOrder(ds.sellOrderId); } catch (_) {}
+    ds.sellOrderId = null;
+  }
+  if (ds.buyOrderId) {
+    try { await trader.cancelOrder(ds.buyOrderId); } catch (_) {}
+    ds.buyOrderId = null;
   }
 }
 
-// ── Core Trade Loop ──
+// ── Update GTC limit orders (cancel old, place new) ──
+async function updateLimitOrders(m) {
+  const ds = dashState[m.slug];
+  if (!ds || !ds.side) return;
+
+  const sellTokenId = ds.side === 'up' ? m.upTokenId : m.downTokenId;
+  const buyTokenId = ds.side === 'up' ? m.downTokenId : m.upTokenId;
+  const sellPrice = f4((ds.side === 'up' ? m.upMid : m.downMid) + LIMIT_OFFSET);
+  const buyPrice = f4((ds.side === 'up' ? m.downMid : m.upMid) - LIMIT_OFFSET);
+
+  // Skip if price is invalid
+  if (sellPrice <= 0 || buyPrice <= 0) return;
+
+  // Cancel old orders
+  if (ds.sellOrderId) {
+    try { await trader.cancelOrder(ds.sellOrderId); } catch (_) {}
+    ds.sellOrderId = null;
+  }
+  if (ds.buyOrderId) {
+    try { await trader.cancelOrder(ds.buyOrderId); } catch (_) {}
+    ds.buyOrderId = null;
+  }
+
+  // Place new GTC limit orders
+  try {
+    const sell = await trader.placeGtcOrder(sellTokenId, 'SELL', sellPrice, SHARES);
+    if (sell?.id) ds.sellOrderId = sell.id;
+  } catch (e) { log(`GTC SELL err: ${e.message.slice(0, 60)}`); }
+
+  try {
+    const buy = await trader.placeGtcOrder(buyTokenId, 'BUY', buyPrice, SHARES);
+    if (buy?.id) ds.buyOrderId = buy.id;
+  } catch (e) { log(`GTC BUY err: ${e.message.slice(0, 60)}`); }
+
+  ds.sellPrice = sellPrice;
+  ds.buyPrice = buyPrice;
+}
+
+// ── Check if GTC orders filled using getOpenOrders ──
+async function checkFills(m) {
+  const ds = dashState[m.slug];
+  if (!ds) return { sellFilled: false, buyFilled: false };
+
+  let openIds = new Set();
+  try {
+    const openOrders = await trader.getOpenOrders();
+    openIds = new Set((openOrders || []).map(o => o.id));
+  } catch (_) { return { sellFilled: false, buyFilled: false }; }
+
+  const sellFilled = ds.sellOrderId ? !openIds.has(ds.sellOrderId) : false;
+  const buyFilled = ds.buyOrderId ? !openIds.has(ds.buyOrderId) : false;
+
+  if (sellFilled) { ds.sellOrderId = null; }
+  if (buyFilled) { ds.buyOrderId = null; }
+
+  return { sellFilled, buyFilled };
+}
+
+// ── Core Trade Loop (limit-order strategy) ──
 async function tradeLoop(m) {
   if (m.loopRunning) return;
   m.loopRunning = true;
+  const ds = dashState[m.slug];
   log(`Trade loop started ${m.pair}`);
 
-  // If window hasn't started yet, wait until it opens
-  const nowMs = Date.now();
-  if (m.windowStartMs > nowMs + 5000) {
-    const sleepMs = m.windowStartMs - nowMs;
-    log(`${m.pair} window starts in ${Math.ceil(sleepMs / 1000)}s, waiting...`);
-    await sleep(sleepMs);
+  // Wait for window to open
+  if (m.windowStartMs > Date.now() + 5000) {
+    const w = m.windowStartMs - Date.now();
+    log(`${m.pair} window starts in ${Math.ceil(w / 1000)}s`);
+    await sleep(w);
   }
 
-  const entryOpenAt = m.windowStartMs + ENTRY_WAIT_SECS * 1000;
-  const waitMs      = entryOpenAt - Date.now();
-  if (waitMs > 0) {
-    log(`${m.pair} waiting ${Math.ceil(waitMs / 1000)}s before entry`);
-    await sleep(waitMs);
-  }
+  // Wait for entry delay (ENTRY_WAIT_SECS after window open)
+  const entryAt = m.windowStartMs + ENTRY_WAIT_SECS * 1000;
+  const ew = entryAt - Date.now();
+  if (ew > 0) { log(`${m.pair} entry in ${Math.ceil(ew / 1000)}s`); await sleep(ew); }
 
-  let currentSide = null;
+  // Pick cheapest side and buy initial
+  await ensureFreshPrice(m);
+  const initialSide = m.upMid <= m.downMid ? 'up' : 'down';
+  log(`${m.pair} cheapest = ${initialSide.toUpperCase()} (up:${f4(m.upMid)} dn:${f4(m.downMid)})`);
 
+  const ep = await buyInitial(m, initialSide);
+  if (!ep) { log(`${m.pair} no entry`); m.done = true; m.loopRunning = false; return; }
+
+  ds.side = initialSide;
+  ds.entryPrice = ep;
+  ds.phase = 'holding';
+
+  trades.unshift({
+    ts: new Date().toTimeString().slice(0, 8),
+    pair: m.pair, side: initialSide.toUpperCase(),
+    action: 'BUY', price: f4(ep), shares: SHARES,
+  });
+  if (trades.length > 200) trades.length = 200;
+
+  // ── Limit-order management loop ──
+  let forceSellTriggered = false;
   while (true) {
     const secsLeft = (m.endTime - Date.now()) / 1000;
+    if (secsLeft <= 0) { log(`${m.pair} window ended`); break; }
 
-    if (secsLeft <= 0) {
-      log(`${m.pair} window ended`);
-      m.done = true; break;
-    }
+    // Force sell at market when closing in
+    if (secsLeft <= FORCE_CLOSE_SECS && !forceSellTriggered) {
+      log(`${m.pair} force sell window closing (${Math.floor(secsLeft)}s)`);
+      await cancelAllOrders(m.slug);
 
-    if (secsLeft <= FORCE_CLOSE_SECS && currentSide === null) {
-      log(`${m.pair} <=${FORCE_CLOSE_SECS}s left, no entry`);
-      m.done = true; break;
-    }
-
-    // Pick cheapest side on first entry, then flip after each sell
-    if (currentSide === null) {
-      await ensureFreshPrice(m);
-      currentSide = m.upMid <= m.downMid ? 'up' : 'down';
-      log(`${m.pair} cheapest = ${currentSide.toUpperCase()} (up:${f4(m.upMid)} dn:${f4(m.downMid)})`);
-    }
-
-    // Use the price captured at cheapest-side check (no re-fetch inside buy)
-    const buyPrice = currentSide === 'up' ? m.upMid : m.downMid;
-    log(`${m.pair} entry price: ${f4(buyPrice)}`);
-
-    // ── BUY ──
-    const entryPrice = await buyShares(m, currentSide, buyPrice);
-    if (entryPrice === null) {
-      m.done = true; break;
-    }
-
-    trades.unshift({
-      ts: new Date().toTimeString().slice(0, 8),
-      pair: m.pair, side: currentSide.toUpperCase(),
-      action: 'BUY', price: f4(entryPrice), shares: SHARES,
-    });
-    if (trades.length > 200) trades.length = 200;
-
-    // ── TRAILING STOP WATCH ──
-    let peakPrice = entryPrice;
-    log(`${m.pair} trailing watch - peak:${f4(peakPrice)}`);
-
-    let sellReason = '';
-    let refreshCounter = 0;
-    while (true) {
-      await sleep(200);
-
-      refreshCounter++;
-      if (refreshCounter % 5 === 0) await ensureFreshPrice(m);
-
-      const cp      = currentSide === 'up' ? m.upMid : m.downMid;
-      const secsNow = (m.endTime - Date.now()) / 1000;
-
-      if (cp > 0 && cp > peakPrice) {
-        peakPrice = cp;
-        log(`${m.pair} new peak ${f4(peakPrice)}`);
+      if (ds.side) {
+        const sold = await forceSell(m, ds.side);
+        if (sold) {
+          const exitP = ds.side === 'up' ? m.upMid : m.downMid;
+          const pnl = f2((exitP - ds.entryPrice) * SHARES);
+          trades.unshift({
+            ts: new Date().toTimeString().slice(0, 8), pair: m.pair,
+            side: ds.side.toUpperCase(), action: 'SELL', price: f4(exitP),
+            shares: SHARES, pnl,
+          });
+          log(`${m.pair} closed pnl:$${pnl}`);
+          if (trades.length > 200) trades.length = 200;
+        }
+        ds.side = null;
       }
-
-      if (cp > 0 && (peakPrice - cp) >= TRAILING_DIST) {
-        sellReason = `trailing stop (peak:${f4(peakPrice)} now:${f4(cp)} drop:${f4(peakPrice - cp)})`;
-        break;
-      }
-      if (secsNow <= FORCE_CLOSE_SECS) {
-        sellReason = `force close (${Math.floor(secsNow)}s left)`;
-        break;
-      }
+      forceSellTriggered = true;
     }
 
-    log(`${m.pair} ${currentSide.toUpperCase()} EXIT trigger - ${sellReason}`);
+    // Update prices
+    await ensureFreshPrice(m);
 
-    // ── SELL ──
-    const sold = await sellShares(m, currentSide, sellReason);
+    // Check if our GTC limit orders filled
+    const fills = await checkFills(m);
 
-    if (sold) {
-      const exitPrice = currentSide === 'up' ? m.upMid : m.downMid;
-      const pnl       = f2((exitPrice - entryPrice) * SHARES);
+    if (fills.sellFilled && ds.side) {
+      // Sell limit filled! Position closed.
+      const exitP = ds.side === 'up' ? m.upMid : m.downMid;
+      const pnl = f2((exitP - ds.entryPrice) * SHARES);
       trades.unshift({
-        ts: new Date().toTimeString().slice(0, 8),
-        pair: m.pair, side: currentSide.toUpperCase(),
-        action: 'SELL', price: f4(exitPrice), shares: SHARES, pnl,
+        ts: new Date().toTimeString().slice(0, 8), pair: m.pair,
+        side: ds.side.toUpperCase(), action: 'SELL', price: f4(exitP),
+        shares: SHARES, pnl,
       });
+      log(`${m.pair} SELL LIMIT FILLED pnl:$${pnl}`);
       if (trades.length > 200) trades.length = 200;
-      log(`${m.pair} trade closed pnl:$${pnl}`);
-    } else {
-      log(`${m.pair} SELL failed - position may still be open. Stopping.`);
-      m.done = true; break;
+      ds.side = null;  // Flat now
+      ds.phase = 'flat';
     }
 
-    const secsAfterSell = (m.endTime - Date.now()) / 1000;
-    if (secsAfterSell <= FORCE_CLOSE_SECS) {
-      log(`${m.pair} no time for another trade (${Math.floor(secsAfterSell)}s left)`);
-      m.done = true; break;
+    if (fills.buyFilled && ds.side === null) {
+      // Buy limit filled on opposite! Now holding opposite.
+      const newSide = initialSide === 'up' ? 'down' : 'up';
+      ds.side = newSide;
+      ds.entryPrice = newSide === 'up' ? m.upMid : m.downMid;
+      ds.phase = 'holding';
+      log(`${m.pair} BUY LIMIT FILLED - now holding ${newSide.toUpperCase()} @ ${f4(ds.entryPrice)}`);
     }
 
-    // FLIP
-    const prev = currentSide;
-    currentSide = currentSide === 'up' ? 'down' : 'up';
-    log(`${m.pair} FLIP ${prev.toUpperCase()} -> ${currentSide.toUpperCase()}`);
+    // Place/update GTC limit orders
+    if (ds.side && !forceSellTriggered) {
+      await updateLimitOrders(m);
+    }
+
+    // Log current state every 5s for dashboard
+    if (ds.sellOrderId || ds.buyOrderId || ds.side) {
+      log(`Orders: sell${ds.sellOrderId ? '@' + f4(ds.sellPrice) : ' none'} buy${ds.buyOrderId ? '@' + f4(ds.buyPrice) : ' none'} held:${ds.side || 'none'}`);
+    }
+
+    await sleep(500);
   }
 
-  log(`${m.pair} loop finished`);
+  // Cleanup
+  await cancelAllOrders(m.slug);
+  m.done = true;
   m.loopRunning = false;
+  log(`${m.pair} loop finished`);
 }
 
 // ── Main tick ──
@@ -499,65 +472,52 @@ async function tick() {
 }
 
 function snapshot() {
-  const activeMarkets = Object.values(markets).map(m => ({
-    slug:        m.slug,
-    pair:        m.pair,
-    upMid:       f4(m.upMid),
-    dnMid:       f4(m.downMid),
-    secsLeft:    Math.max(0, Math.floor((m.endTime - Date.now()) / 1000)),
-    loopRunning: m.loopRunning,
-    done:        m.done,
-  }));
+  const activeMarkets = Object.values(markets).map(m => {
+    const ds = dashState[m.slug] || {};
+    return {
+      slug: m.slug, pair: m.pair,
+      upMid: f4(m.upMid), dnMid: f4(m.downMid),
+      secsLeft: Math.max(0, Math.floor((m.endTime - Date.now()) / 1000)),
+      loopRunning: m.loopRunning, done: m.done,
+      // Dashboard extras
+      phase: ds.phase || 'idle',
+      positionSide: ds.side ? ds.side.toUpperCase() : null,
+      entryPrice: f4(ds.entryPrice || 0),
+      sellLimitPrice: f4(ds.sellPrice || 0),
+      buyLimitPrice: f4(ds.buyPrice || 0),
+      sellOrderActive: !!ds.sellOrderId,
+      buyOrderActive: !!ds.buyOrderId,
+    };
+  });
 
   return {
-    dryRun:       dryRun,
-    balance:      f2(balance),
-    startBalance: f2(startBalance),
-    pnl:          f2(balance - startBalance),
-    uptime:       Math.floor((Date.now() - startTime) / 1000),
-    activeMarkets,
-    totalTrades:  trades.length,
+    dryRun, balance: f2(balance), startBalance: f2(startBalance),
+    pnl: f2(balance - startBalance),
+    uptime: Math.floor((Date.now() - startTime) / 1000),
+    activeMarkets, totalTrades: trades.length,
     recentTrades: trades.slice(0, 60),
-    activityLog:  logs.slice(0, 80),
-    strategy: {
-      shares:          SHARES,
-      trailingDist:    TRAILING_DIST,
-      entryWaitSecs:   ENTRY_WAIT_SECS,
-      forceCloseSecs:  FORCE_CLOSE_SECS,
-      minEntryPrice:   MIN_ENTRY_PRICE,
-      maxEntryPrice:   MAX_ENTRY_PRICE,
-      dryRun:          dryRun,
-      demoBalance:     DEMO_BALANCE,
-    },
+    activityLog: logs.slice(0, 80),
+    strategy: { shares: SHARES, limitOffset: LIMIT_OFFSET,
+      entryWaitSecs: ENTRY_WAIT_SECS, forceCloseSecs: FORCE_CLOSE_SECS,
+      dryRun, demoBalance: DEMO_BALANCE },
   };
 }
 
 async function setDryRun(v) {
   dryRun = !!v;
-  if (dryRun) {
-    balance = DEMO_BALANCE;
-    startBalance = DEMO_BALANCE;
-  }
-  log(`Dry-run mode: ${dryRun ? 'ON (demo $' + DEMO_BALANCE + ')' : 'OFF (live)'}`);
-  // Re-fetch live balance when toggling back to live
+  if (dryRun) { balance = DEMO_BALANCE; startBalance = DEMO_BALANCE; }
+  log(`Dry-run: ${dryRun ? 'ON $' + DEMO_BALANCE : 'OFF'}`);
   if (!dryRun && trader) {
-    try {
-      const realBal = await trader.getBalance();
-      if (realBal > 0) { balance = realBal; startBalance = realBal; }
-    } catch (_) {}
+    try { const b = await trader.getBalance(); if (b > 0) { balance = b; startBalance = b; } } catch (_) {}
   }
 }
 function getDryRun() { return dryRun; }
 
 async function start(emit, logFn) {
-  emitFn    = emit   || (() => {});
-  slog      = logFn  || (() => {});
+  emitFn = emit || (() => {});
+  slog = logFn || (() => {});
   startTime = Date.now();
-
-  if (!process.env.POLYMARKET_PRIVATE_KEY) {
-    console.error('POLYMARKET_PRIVATE_KEY not set');
-    process.exit(1);
-  }
+  if (!process.env.POLYMARKET_PRIVATE_KEY) { console.error('No private key'); process.exit(1); }
 
   try {
     trader = new PolymarketTrader(process.env.POLYMARKET_PRIVATE_KEY);
@@ -565,22 +525,12 @@ async function start(emit, logFn) {
     log('Authenticating...');
     await trader.authenticate();
     log(`Auth: ${trader.address}`);
-    if (dryRun) {
-      balance = DEMO_BALANCE;
-      startBalance = DEMO_BALANCE;
-      log(`DEMO MODE - Balance: $${f2(balance)}`);
-    } else {
-      const realBal = await trader.getBalance();
-      if (realBal > 0) { balance = realBal; startBalance = realBal; }
-      log(`LIVE - Balance: $${f2(balance)}`);
-    }
-  } catch (e) {
-    log(`Auth failed: ${e.message}`);
-    process.exit(1);
-  }
+    if (dryRun) { balance = DEMO_BALANCE; startBalance = DEMO_BALANCE; log(`DEMO $${f2(balance)}`); }
+    else { const b = await trader.getBalance(); if (b > 0) { balance = b; startBalance = b; } log(`LIVE $${f2(balance)}`); }
+  } catch (e) { log(`Auth fail: ${e.message}`); process.exit(1); }
 
   wsConnect();
-  log('LIVE - starting main loop');
+  log('Starting main loop');
   setInterval(tick, TICK_MS);
 }
 

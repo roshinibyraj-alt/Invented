@@ -8,7 +8,7 @@
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#f5f6fa;color:#1a1a2e;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:13px;line-height:1.5}
-header{background:#fff;border-bottom:2px solid #e8e8f0;padding:10px 14px;position:sticky;top:0;z-index:100;box-shadow:0 2px 8px rgba(0,0,0,0.06)}
+header{background:#fff;border-bottom:2px solid #e8e8f0;padding:10px 14px;position:sticky;top:0;z-index:100}
 .hrow{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .logo{font-weight:900;font-size:15px;color:#1a1a2e;white-space:nowrap}
 .dot{width:9px;height:9px;border-radius:50%;display:inline-block;margin-right:5px}
@@ -16,19 +16,23 @@ header{background:#fff;border-bottom:2px solid #e8e8f0;padding:10px 14px;positio
 .dot.off{background:#ef4444}
 .badge{padding:2px 8px;border-radius:4px;font-size:9px;font-weight:700;letter-spacing:.5px}
 .badge.live{background:#fef2f2;color:#dc2626;border:1px solid #fca5a5}
-.badge.paused{background:#eff6ff;color:#2563eb;border:1px solid #93c5fd}
+.badge.demo{background:#eff6ff;color:#2563eb;border:1px solid #93c5fd}
 .badge.up{background:#f0fdf4;color:#16a34a;border:1px solid #86efac}
 .badge.dn{background:#fef2f2;color:#dc2626;border:1px solid #fca5a5}
+.badge.entry{background:#fefce8;color:#a16207;border:1px solid #fde047}
+.badge.hold{background:#f0fdf4;color:#16a34a;border:1px solid #86efac}
+.badge.flat{background:#f1f5f9;color:#475569;border:1px solid #cbd5e1}
+.badge.done{background:#f1f5f9;color:#94a3b8;border:1px solid #e2e8f0}
 .stats{display:flex;gap:5px;flex-wrap:wrap}
 .stat{background:#f8f9fe;border:1px solid #e8e8f0;border-radius:8px;padding:4px 10px;text-align:center;min-width:60px}
 .stat .sl{font-size:8px;color:#6b7280;text-transform:uppercase;letter-spacing:.4px;font-weight:600}
 .stat .sv{font-size:13px;font-weight:800}
 .g{color:#16a34a}.r{color:#dc2626}.y{color:#d97706}.b{color:#2563eb}.w{color:#1a1a2e}.gr{color:#6b7280}
-main{padding:10px;max-width:1000px;margin:0 auto}
+main{padding:10px;max-width:1100px;margin:0 auto}
 .card{background:#fff;border:1px solid #e8e8f0;border-radius:10px;padding:12px;margin-bottom:10px;box-shadow:0 1px 4px rgba(0,0,0,0.04)}
 .card-title{font-size:9px;font-weight:800;margin-bottom:10px;text-transform:uppercase;color:#6b7280;letter-spacing:.6px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #f1f1f8;padding-bottom:6px}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-@media(max-width:700px){.grid2{grid-template-columns:1fr}}
+@media(max-width:800px){.grid2{grid-template-columns:1fr}}
 table{width:100%;border-collapse:collapse;font-size:11px}
 th{text-align:left;color:#6b7280;font-size:8px;text-transform:uppercase;padding:4px 3px;border-bottom:1px solid #f1f1f8;font-weight:700;letter-spacing:.4px}
 td{padding:4px 3px;border-bottom:1px solid #f8f9fe;font-variant-numeric:tabular-nums}
@@ -36,27 +40,26 @@ tr:last-child td{border-bottom:none}
 .empty{text-align:center;padding:30px;color:#9ca3af;font-size:13px}
 .log-line{padding:2px 0;border-bottom:1px solid #f8f9fe;font-size:10px;font-family:monospace;color:#374151}
 footer{text-align:center;padding:10px;color:#9ca3af;font-size:9px;border-top:1px solid #e8e8f0;margin-top:10px}
+.tag{font-size:9px;padding:1px 5px;border-radius:3px;background:#f1f5f9;color:#475569;margin-left:4px}
 </style>
 </head>
 <body>
 <header>
   <div class="hrow">
     <div class="logo"><span class="dot off" id="dot"></span>Flip Bot</div>
-    <span class="badge paused" id="modeBadge">PAUSED</span>
+    <span class="badge demo" id="modeBadge">DEMO</span>
     <div class="stats" id="headerStats"></div>
-    <button id="toggleBtn" onclick="doToggle()" style="padding:4px 10px;font-size:10px;font-weight:700;background:#fff;border:1.5px solid #2563eb;color:#2563eb;border-radius:6px;cursor:pointer;letter-spacing:.4px">Go Live</button>
+    <button id="toggleBtn" onclick="doToggle()" style="padding:4px 10px;font-size:10px;font-weight:700;background:#fff;border:1.5px solid #2563eb;color:#2563eb;border-radius:6px;cursor:pointer;letter-spacing:.4px">Toggle</button>
   </div>
 </header>
 <main>
-  <div class="grid2">
-    <div class="card">
-      <div class="card-title">Markets</div>
-      <div id="mktBody"><div class="empty">Waiting for markets...</div></div>
-    </div>
-    <div class="card">
-      <div class="card-title">Trades</div>
-      <div id="tradeBody"><div class="empty">No trades yet</div></div>
-    </div>
+  <div class="card">
+    <div class="card-title">Markets / Limit Orders</div>
+    <div id="mktBody"><div class="empty">Waiting for markets...</div></div>
+  </div>
+  <div class="card">
+    <div class="card-title">Trades</div>
+    <div id="tradeBody"><div class="empty">No trades yet</div></div>
   </div>
   <div class="card">
     <div class="card-title">Activity</div>
@@ -72,7 +75,9 @@ function f2(v){return typeof v==='number'?v.toFixed(2):'0.00';}
 function f4(v){return typeof v==='number'?v.toFixed(4):'0.0000';}
 function cls(v){return v>0?'g':v<0?'r':'gr';}
 function sgn(v){return v>0?'+':'';}
-function fmtUptime(s){if(!s)return'0s';return s>3600?Math.floor(s/3600)+'h '+Math.floor((s%3600)/60)+'m':s>60?Math.floor(s/60)+'m '+(s%60)+'s':s+'s';}
+function fmtU(s){if(!s)return'0s';return s>3600?Math.floor(s/3600)+'h '+Math.floor((s%3600)/60)+'m':s>60?Math.floor(s/60)+'m '+(s%60)+'s':s+'s';}
+
+function phaseCls(p){return p==='holding'?'hold':p==='entry'?'entry':p==='flat'?'flat':'done';}
 
 function render(d){
   if(!d)return;
@@ -81,34 +86,37 @@ function render(d){
   var mode=document.getElementById('modeBadge');
   var tbtn=document.getElementById('toggleBtn');
   if(d.dryRun){
-    mode.textContent='DEMO $'+f2(d.strategy?.demoBalance||50);mode.className='badge paused';
-    tbtn.textContent='Go Live';tbtn.style.borderColor='#2563eb';tbtn.style.color='#2563eb';
+    mode.textContent='DEMO $'+f2(d.balance);mode.className='badge demo';
+    tbtn.textContent='Go Live';tbtn.style.borderColor='#dc2626';tbtn.style.color='#dc2626';
   }else{
-    mode.textContent='LIVE';mode.className='badge live';
-    tbtn.textContent='Demo';tbtn.style.borderColor='#16a34a';tbtn.style.color='#16a34a';
+    mode.textContent='LIVE $'+f2(d.balance);mode.className='badge live';
+    tbtn.textContent='Demo';tbtn.style.borderColor='#2563eb';tbtn.style.color='#2563eb';
   }
 
   var h='';
   h+='<div class="stat"><div class="sl">Balance</div><div class="sv w">$'+f2(d.balance)+'</div></div>';
   h+='<div class="stat"><div class="sl">PnL</div><div class="sv '+cls(d.pnl)+'">'+sgn(d.pnl)+'$'+f2(d.pnl)+'</div></div>';
   h+='<div class="stat"><div class="sl">Trades</div><div class="sv b">'+(d.totalTrades||0)+'</div></div>';
-  h+='<div class="stat"><div class="sl">Uptime</div><div class="sv gr">'+fmtUptime(d.uptime)+'</div></div>';
+  h+='<div class="stat"><div class="sl">Up time</div><div class="sv gr">'+fmtU(d.uptime)+'</div></div>';
   document.getElementById('headerStats').innerHTML=h;
 
-  // Markets
+  // Markets with limit order details
   var mc='';
   var mkts=d.activeMarkets||[];
   if(!mkts.length){mc='<div class="empty">No active markets</div>';}
   else{
-    mc+='<table><tr><th>Pair</th><th>Time</th><th>UP</th><th>DN</th><th>Pref</th><th>Status</th></tr>';
+    mc+='<table><tr><th>Pair</th><th>Status</th><th>Time</th><th>UP</th><th>DN</th><th>Position</th><th>Entry</th><th>Sell Limit</th><th>Buy Limit</th></tr>';
     for(var i=0;i<mkts.length;i++){
       var m=mkts[i];
-      var st=m.done?"Done":m.secsLeft>300?"Waiting":m.loopRunning?"Running":"Wait";
-      var pref=m.upMid<=m.dnMid?'UP':'DOWN';
-      mc+='<tr><td><b>'+m.pair+'</b></td><td>'+m.secsLeft+'s</td>'+
-        '<td class="g">$'+f4(m.upMid)+'</td><td class="r">$'+f4(m.dnMid)+'</td>'+
-        '<td><span class="badge '+(pref==='UP'?'up':'dn')+'">'+pref+'</span></td>'+
-        '<td>'+st+'</td></tr>';
+      var st=m.done?'Done':m.secsLeft>300?'Waiting':m.phase==='holding'?'Holding':m.phase==='flat'?'Flat':m.phase==='entry'?'Enter':'Idle';
+      var pos=m.positionSide||'-';
+      var err=m.entryPrice>0?'$'+f4(m.entryPrice):'-';
+      var sl=m.sellOrderActive?'$'+f4(m.sellLimitPrice):'-';
+      var bl=m.buyOrderActive?'$'+f4(m.buyLimitPrice):'-';
+      mc+='<tr><td><b>'+m.pair+'</b></td><td><span class="badge '+phaseCls(m.phase)+'">'+st+'</span></td>'+
+        '<td>'+m.secsLeft+'s</td><td class="g">$'+f4(m.upMid)+'</td><td class="r">$'+f4(m.dnMid)+'</td>'+
+        '<td><span class="badge '+(pos==='UP'?'up':pos==='DOWN'?'dn':'flat')+'">'+pos+'</span></td>'+
+        '<td>'+err+'</td><td class="g">'+sl+'</td><td class="b">'+bl+'</td></tr>';
     }
     mc+='</table>';
   }
@@ -123,30 +131,30 @@ function render(d){
     for(var i=0;i<tr.length;i++){
       var t=tr[i];
       tc+='<tr><td>'+t.ts+'</td><td>'+t.pair+'</td>'+
-        '<td><span class="badge '+(t.side==='UP'?'up':'dn')+'">'+t.side+'</span></td>'+
-        '<td>'+t.action+'</td><td>$'+f4(t.price)+'</td><td>'+(t.shares||'')+'</td>'+
+        '<td><span class="badge '+(t.side==='UP'?'up':t.side==='DOWN'?'dn':'flat')+'">'+(t.side||'')+'</span></td>'+
+        '<td>'+(t.action||'')+'</td><td>$'+f4(t.price)+'</td><td>'+(t.shares||'')+'</td>'+
         '<td class="'+(t.pnl!==undefined?cls(t.pnl):'gr')+'">'+(t.pnl!==undefined?sgn(t.pnl)+'$'+f2(t.pnl):'-')+'</td></tr>';
     }
     tc+='</table>';
   }
   document.getElementById('tradeBody').innerHTML=tc;
 
-  // Activity log
+  // Activity
   var lc='';
   var logs=d.activityLog||[];
   if(!logs.length){lc='<div class="empty">No activity yet</div>';}
-  else{for(var i=0;i<Math.min(logs.length,50);i++){lc+='<div class="log-line">'+logs[i].replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</div>';}}
+  else{for(var i=0;i<Math.min(logs.length,40);i++){lc+='<div class="log-line">'+logs[i].replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</div>';}}
   document.getElementById('logBody').innerHTML=lc;
 
   var s=d.strategy||{};
   var pairs=(d.activeMarkets||[]).map(function(m){return m.pair;}).join(',');
-  document.getElementById('footer').textContent='Flip Bot | '+pairs+' | '+s.shares+'sh | trail:'+s.trailingDist+' | force:'+s.forceCloseSecs+'s | '+(s.dryRun?'DEMO $'+s.demoBalance:'LIVE')+' | '+fmtUptime(d.uptime);
+  var ftr='Flip Bot | '+pairs+' | '+s.shares+'sh | offset:'+s.limitOffset+' | '+(s.dryRun?'DEMO $'+s.demoBalance:'LIVE')+' | '+fmtU(d.uptime);
+  document.getElementById('footer').textContent=ftr;
 }
 
 socket.on('connect',function(){document.getElementById('dot').className='dot on';});
 socket.on('disconnect',function(){document.getElementById('dot').className='dot off';});
 socket.on('snapshot',function(d){if(d)render(d);});
-
 setInterval(function(){
   fetch('/api/snapshot').then(function(r){return r.json();}).then(function(d){if(d)render(d);}).catch(function(){});
 }, 3000);
@@ -154,13 +162,9 @@ setInterval(function(){
 function doToggle(){
   var modeEl=document.getElementById('modeBadge');
   var isLive=modeEl.className.indexOf('live')>=0;
-  if(!confirm(isLive?'Switch to DEMO?':'Switch to LIVE trading?'))return;
-  fetch('/api/set-dry-run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({dryRun:!isLive})})
-    .then(function(r){return r.json();})
-    .then(function(j){
-      if(j.error){alert('Failed: '+j.error);return;}
-    })
-    .catch(function(e){alert('Failed: '+e.message);});
+  if(!confirm(isLive?'Switch to DEMO?':'Switch to LIVE?'))return;
+  fetch('/api/set-dry-run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({dryRun:isLive})})
+    .then(function(r){return r.json();}).then(function(j){if(j.error)alert('Fail: '+j.error);}).catch(function(e){alert('Fail: '+e.message);});
 }
 </script>
 </body>
