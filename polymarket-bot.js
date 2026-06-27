@@ -216,7 +216,7 @@ async function discover() {
   }
 }
 
-// ── TAKER BUY - market order FOK, fills immediately at best available price ──
+// ── TAKER BUY - balance check only to confirm fill ──
 async function buyShares(m, side) {
   const tokenId  = side === 'up' ? m.upTokenId  : m.downTokenId;
   const tickSize = side === 'up' ? m.upTickSize  : m.dnTickSize;
@@ -233,87 +233,54 @@ async function buyShares(m, side) {
 
     await ensureFreshPrice(m);
     const price = side === 'up' ? m.upMid : m.downMid;
-
     if (price < MIN_ENTRY_PRICE || price > MAX_ENTRY_PRICE) {
       log(`${m.pair} ${side.toUpperCase()} price ${f4(price)} outside safe range, skip`);
       return null;
     }
 
     attempt++;
-    // TAKER: market order FOK, amount in dollars for BUY
     const dollarAmount = f2(SHARES * price);
     log(`${m.pair} BUY ${side.toUpperCase()} $${dollarAmount} (${SHARES}sh x ${f4(price)}) FOK #${attempt}`);
 
-    // Demo mode: simulate fill
     if (dryRun) {
-      const cost = dollarAmount;
-      if (balance < cost) {
-        log(`${m.pair} DEMO insufficient balance $${f2(balance)} < $${cost}`);
+      if (balance < dollarAmount) {
+        log(`${m.pair} DEMO insufficient balance $${f2(balance)}`);
         return null;
       }
-      balance = f2(balance - cost);
-      log(`DEMO FILLED BUY ${m.pair} ${side.toUpperCase()} ${SHARES}sh@${f4(price)}`);
-      log(`Balance: $${f2(balance)} (-$${cost})`);
+      balance = f2(balance - dollarAmount);
+      log(`DEMO FILLED BUY ${m.pair} ${side.toUpperCase()} @${f4(price)}`);
+      log(`Balance: $${f2(balance)}`);
       return price;
     }
 
     const balBefore = await trader.getBalance();
     try {
-      const resp = await trader._clob.createAndPostMarketOrder(
+      await trader._clob.createAndPostMarketOrder(
         { tokenID: tokenId, amount: dollarAmount, side: Side.BUY, orderType: OrderType.FOK },
         { tickSize, negRisk },
         OrderType.FOK
       );
-      const id        = resp?.orderID ?? resp?.id ?? null;
-      const status    = resp?.status || (id ? 'UNKNOWN' : 'FAILED');
-      const remaining = parseFloat(resp?.remaining_size ?? '999');
-      const matchStatus = (resp?.match_status || '').toLowerCase();
-      const isFilled  = status === 'FILLED' || matchStatus === 'filled' || remaining === 0;
-      const fillPrice = parseFloat(resp?.avg_fill_price || resp?.price || price);
-
-      if (isFilled && id) {
-        log(`FILLED BUY ${m.pair} ${side.toUpperCase()} @ ${f4(fillPrice)}`);
-        const cost = f2(SHARES * fillPrice);
-        balance = f2(balance - cost);
-        log(`Balance: $${f2(balance)} (-$${cost})`);
-        return fillPrice;
-      }
-
-      // Response says nofill - but CLOB might have filled it anyway.
-      // Poll getOrder for 5s to confirm.
-      if (id) {
-        log(`POLL BUY ${m.pair} - checking if actually filled...`);
-        const confirm = await trader.waitForFill(id, 5000);
-        if (confirm.filled) {
-          log(`POLL CONFIRMED BUY ${m.pair} ${side.toUpperCase()} @ ${f4(fillPrice)}`);
-          const cost = f2(SHARES * fillPrice);
-          balance = f2(balance - cost);
-          log(`Balance: $${f2(balance)} (-$${cost})`);
-          return fillPrice;
-        }
-      }
-
-      // Poll also inconclusive - check if balance actually changed
-      const balAfter = await trader.getBalance();
-      const diff = f2(balAfter - balBefore);
-      if (diff < -0.01) {
-        // Balance decreased - the order DID fill despite the response
-        log(`BALANCE CHECK BUY ${m.pair} - balance changed by $${diff}, assuming filled`);
-        balance = balAfter;
-        log(`Balance: $${f2(balance)}`);
-        return price;
-      }
-
-      log(`NOFILL BUY ${m.pair} ${side.toUpperCase()}${id ? '' : ' (no id)'} - retry`);
     } catch (e) {
-      log(`BUY ERR ${m.pair}: ${e.message.slice(0, 80)} - retry`);
+      log(`BUY ERR ${m.pair}: ${e.message.slice(0, 80)}`);
     }
 
+    const balAfter = await trader.getBalance();
+    const drop = f2(balBefore - balAfter);
+    const expectedDrop = f2(SHARES * price);
+    if (drop >= expectedDrop * 0.5) {
+      balance = balAfter;
+      log(`FILLED BUY ${m.pair} ${side.toUpperCase()} cost~$${drop} @${f4(price)}`);
+      log(`Balance: $${f2(balance)}`);
+      await sleep(2000);
+      return price;
+    }
+
+    log(`NOFILL BUY ${m.pair} (bal dropped $${drop}) - retry`);
     await sleep(FOK_RETRY_MS);
   }
 }
 
-// ── TAKER SELL - market order FOK, fills immediately at best available price ──
+// ── TAKER SELL - balance check only to confirm fill ──
 async function sellShares(m, side, reason) {
   const tokenId  = side === 'up' ? m.upTokenId  : m.downTokenId;
   const tickSize = side === 'up' ? m.upTickSize  : m.dnTickSize;
@@ -325,7 +292,6 @@ async function sellShares(m, side, reason) {
   let attempt = 0;
   while (true) {
     const secsLeft = (m.endTime - Date.now()) / 1000;
-
     if (secsLeft < HARD_SELL_SECS) {
       log(`DEADLINE ${m.pair} (${Math.floor(secsLeft)}s left) - auto-resolve`);
       return false;
@@ -335,68 +301,39 @@ async function sellShares(m, side, reason) {
     const price = side === 'up' ? m.upMid : m.downMid;
 
     attempt++;
-    // TAKER: market order FOK, amount in SHARES for SELL
     log(`SELL #${attempt} ${m.pair} ${SHARES}sh @ ${f4(price)} (${Math.floor(secsLeft)}s left)`);
 
-    // Demo mode: simulate fill
     if (dryRun) {
       const proceeds = f2(SHARES * price);
       balance = f2(balance + proceeds);
-      log(`DEMO FILLED SELL ${m.pair} ${side.toUpperCase()} ${SHARES}sh@${f4(price)}`);
-      log(`Balance: $${f2(balance)} (+$${proceeds})`);
+      log(`DEMO FILLED SELL ${m.pair} ${side.toUpperCase()} @${f4(price)}`);
+      log(`Balance: $${f2(balance)}`);
       return true;
     }
 
     const balBefore = await trader.getBalance();
     try {
-      const resp = await trader._clob.createAndPostMarketOrder(
+      await trader._clob.createAndPostMarketOrder(
         { tokenID: tokenId, amount: SHARES, side: Side.SELL, orderType: OrderType.FOK },
         { tickSize, negRisk },
         OrderType.FOK
       );
-      const id        = resp?.orderID ?? resp?.id ?? null;
-      const status    = resp?.status || (id ? 'UNKNOWN' : 'FAILED');
-      const remaining = parseFloat(resp?.remaining_size ?? '999');
-      const matchStatus = (resp?.match_status || '').toLowerCase();
-      const isFilled  = status === 'FILLED' || matchStatus === 'filled' || remaining === 0;
-      const fillPrice = parseFloat(resp?.avg_fill_price || resp?.price || price);
-
-      if (isFilled && id) {
-        log(`FILLED SELL ${m.pair} ${side.toUpperCase()} ${SHARES}sh@${f4(fillPrice)}`);
-        const proceeds = f2(SHARES * fillPrice);
-        balance = f2(balance + proceeds);
-        log(`Balance: $${f2(balance)} (+$${proceeds})`);
-        return true;
-      }
-
-      // Poll getOrder for 5s
-      if (id) {
-        log(`POLL SELL ${m.pair} - checking if actually filled...`);
-        const confirm = await trader.waitForFill(id, 5000);
-        if (confirm.filled) {
-          log(`POLL CONFIRMED SELL ${m.pair} ${side.toUpperCase()} @ ${f4(fillPrice)}`);
-          const proceeds = f2(SHARES * fillPrice);
-          balance = f2(balance + proceeds);
-          log(`Balance: $${f2(balance)} (+$${proceeds})`);
-          return true;
-        }
-      }
-
-      // Balance check fallback
-      const balAfter = await trader.getBalance();
-      const diff = f2(balAfter - balBefore);
-      if (diff > 0.01) {
-        log(`BALANCE CHECK SELL ${m.pair} - balance changed by +$${diff}, assuming filled`);
-        balance = balAfter;
-        log(`Balance: $${f2(balance)}`);
-        return true;
-      }
-
-      log(`NOFILL SELL ${m.pair} ${side.toUpperCase()}${id ? '' : ' (no id)'} - retry`);
     } catch (e) {
-      log(`SELL ERR ${m.pair}: ${e.message.slice(0, 80)} - retry`);
+      log(`SELL ERR ${m.pair}: ${e.message.slice(0, 80)}`);
     }
 
+    const balAfter = await trader.getBalance();
+    const rise = f2(balAfter - balBefore);
+    const expectedRise = f2(SHARES * price);
+    if (rise >= expectedRise * 0.5) {
+      balance = balAfter;
+      log(`FILLED SELL ${m.pair} ${side.toUpperCase()} proceeds~$${rise} @${f4(price)}`);
+      log(`Balance: $${f2(balance)}`);
+      await sleep(2000);
+      return true;
+    }
+
+    log(`NOFILL SELL ${m.pair} (bal rose $${rise}) - retry`);
     await sleep(FOK_SELL_RETRY_MS);
   }
 }
