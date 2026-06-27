@@ -17,7 +17,7 @@ const ENTRY_WAIT_SECS  = 10;
 const SHARES           = 6;
 const TRAILING_DIST    = 0.05;
 const FORCE_CLOSE_SECS = 30;   // trigger sell at 4m30s (30s before end)
-const HARD_SELL_SECS   = 15;   // absolute sell deadline
+const HARD_SELL_SECS   = 15;   // absolute sell deadline — after this, shares auto-resolve
 
 // ── Price guard — do NOT enter if price is outside this range ──
 // Prices <0.10 or >0.90 mean the market is nearly decided, book is empty
@@ -119,7 +119,8 @@ function wsConnect() {
 
 function wsSubscribe(tokenIds) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  ws.send(JSON.stringify({ auth: {}, type: 'Market', assets_ids: tokenIds }));
+  // Lowercase 'market' is required by Polymarket CLOB WS
+  ws.send(JSON.stringify({ auth: {}, type: 'market', assets_ids: tokenIds }));
 }
 
 async function restRefreshPrice(m) {
@@ -162,37 +163,45 @@ async function discoverMarket(pair) {
   if (!endTime) return;
 
   const secsToEnd = (endTime - Date.now()) / 1000;
-  if (secsToEnd <= 0 || secsToEnd > WINDOW_SECS + 5) return;
+  if (secsToEnd < 10 || secsToEnd > WINDOW_SECS + 30) return;
 
-  const windowStartMs = endTime - WINDOW_SECS * 1000;
+  const upTokenId   = ids[0];
+  const downTokenId = ids[1];
 
-  // Cache tickSize + negRisk — avoids 2 extra API calls on every order
-  let upTickSize = '0.01', upNegRisk = false;
-  let dnTickSize = '0.01', dnNegRisk = false;
+  let tickSize = '0.01';
+  let negRisk  = false;
   try {
-    [upTickSize, upNegRisk, dnTickSize, dnNegRisk] = await Promise.all([
-      trader._clob.getTickSize(ids[0]).catch(() => '0.01'),
-      trader._clob.getNegRisk(ids[0]).catch(() => false),
-      trader._clob.getTickSize(ids[1]).catch(() => '0.01'),
-      trader._clob.getNegRisk(ids[1]).catch(() => false),
-    ]);
+    const tsData = await getJSON(`${CLOB}/tick-size?token_id=${upTokenId}`);
+    if (tsData?.minimum_tick_size) tickSize = tsData.minimum_tick_size;
+    const nrData = await getJSON(`${CLOB}/neg-risk?token_id=${upTokenId}`);
+    if (nrData?.neg_risk !== undefined) negRisk = nrData.neg_risk;
   } catch (_) {}
 
-  log(`🔍 ${pair} window found: ${slug} ends in ${Math.floor(secsToEnd)}s`);
+  const windowStartMs = ws_ts * 1000;
 
   markets[slug] = {
     slug, pair,
-    upTokenId: ids[0], downTokenId: ids[1],
-    endTime, windowStartMs,
-    upMid: 0, downMid: 0, lastPriceAt: 0,
-    loopRunning: false, done: false,
-    upTickSize, upNegRisk, dnTickSize, dnNegRisk,
+    upTokenId, downTokenId,
+    upMid: 0, downMid: 0,
+    lastPriceAt: 0,
+    endTime,
+    windowStartMs,
+    upTickSize: tickSize, dnTickSize: tickSize,
+    upNegRisk: negRisk, dnNegRisk: negRisk,
+    loopRunning: false,
+    done: false,
   };
 
-  wsTokenMap[ids[0]] = slug;
-  wsTokenMap[ids[1]] = slug;
-  wsSubscribe([ids[0], ids[1]]);
+  wsTokenMap[upTokenId]   = slug;
+  wsTokenMap[downTokenId] = slug;
+
+  // Subscribe if WS already open
+  if (wsReady) wsSubscribe([upTokenId, downTokenId]);
+  log(`📡 ${pair} market: ${slug}`);
+
+  // Prime initial prices
   await restRefreshPrice(markets[slug]);
+  log(`📊 ${pair} UP:${f4(markets[slug].upMid)} DOWN:${f4(markets[slug].downMid)}`);
 
   tradeLoop(markets[slug]).catch(e => log(`❌ Loop crash ${pair}: ${e.message}`));
 }
@@ -208,8 +217,10 @@ async function discover() {
   }
 }
 
-// ── Entry: FOK only, retry every 2s ──
-// NO GTC — GTC fills silently after timeout and stacks positions
+// ── Entry: FOK limit order with exact share count + poll confirmation ──
+// Places a FOK limit order for exactly SHARES shares at the current mid price.
+// Then polls getOrder() for 5s to CONFIRM fill before returning.
+// Never places a second order unless the first is confirmed cancelled.
 async function buyShares(m, side) {
   const tokenId  = side === 'up' ? m.upTokenId  : m.downTokenId;
   const tickSize = side === 'up' ? m.upTickSize  : m.dnTickSize;
@@ -227,33 +238,38 @@ async function buyShares(m, side) {
     await ensureFreshPrice(m);
     const price = side === 'up' ? m.upMid : m.downMid;
 
-    // Price guard — skip if market is nearly decided (thin book, bad fills)
     if (price < MIN_ENTRY_PRICE || price > MAX_ENTRY_PRICE) {
       log(`⛔ ${m.pair} ${side.toUpperCase()} price ${f4(price)} outside safe range [${MIN_ENTRY_PRICE}–${MAX_ENTRY_PRICE}], skip`);
       return null;
     }
 
-    const dollarAmount = f2(SHARES * price);
     attempt++;
-    log(`🛒 ${m.pair} BUY ${side.toUpperCase()} ${SHARES}sh @ ~${f4(price)} ($${dollarAmount}) FOK attempt #${attempt}`);
+    log(`🛒 ${m.pair} BUY ${side.toUpperCase()} ${SHARES}sh @ ${f4(price)} FOK attempt #${attempt}`);
 
     try {
-      const resp = await trader._clob.createAndPostMarketOrder(
-        { tokenID: tokenId, amount: dollarAmount, side: Side.BUY, orderType: OrderType.FOK },
+      // FOK limit order with exact price + share count = guarantees exactly SHARES shares if filled
+      const resp = await trader._clob.createAndPostOrder(
+        { tokenID: tokenId, price: f4(price), size: SHARES, side: Side.BUY },
         { tickSize, negRisk },
         OrderType.FOK
       );
       const id        = resp?.orderID ?? resp?.id ?? null;
-      const status    = resp?.status || (id ? 'UNKNOWN' : 'FAILED');
-      const remaining = parseFloat(resp?.remaining_size ?? '999');
-      const isFilled  = status === 'FILLED' || (resp?.match_status || '').toLowerCase() === 'filled' || remaining === 0;
       const fillPrice = parseFloat(resp?.avg_fill_price || resp?.price || price);
 
-      if (isFilled) {
-        log(`✅ BUY filled ${m.pair} ${side.toUpperCase()} @${f4(fillPrice)} (attempt #${attempt})`);
-        return fillPrice;
+      if (id) {
+        // Poll CLOB to CONFIRM fill — don't trust the initial response alone
+        const confirm = await trader.waitForFill(id, 5000);
+        if (confirm.filled) {
+          log(`✅ BUY confirmed ${m.pair} ${side.toUpperCase()} ${SHARES}sh@${f4(fillPrice)}`);
+          const cost = f2(SHARES * fillPrice);
+          balance = f2(balance - cost);
+          log(`💰 Balance: $${f2(balance)} (-$${cost})`);
+          return fillPrice;
+        }
+        log(`⏭️  FOK nofill ${m.pair} ${side.toUpperCase()} — order cancelled or timeout`);
+      } else {
+        log(`⏭️  FOK rejected ${m.pair} ${side.toUpperCase()} — no orderID returned`);
       }
-      log(`⏭️  FOK nofill ${m.pair} ${side.toUpperCase()} — retry in ${FOK_RETRY_MS}ms`);
     } catch (e) {
       log(`⚠️  FOK BUY error ${m.pair}: ${e.message.slice(0, 80)} — retry`);
     }
@@ -262,7 +278,7 @@ async function buyShares(m, side) {
   }
 }
 
-// ── Exit: FOK only, hard retry until HARD_SELL_SECS ──
+// ── Exit: FOK limit order with exact share count + poll confirmation ──
 async function sellShares(m, side, reason) {
   const tokenId  = side === 'up' ? m.upTokenId  : m.downTokenId;
   const tickSize = side === 'up' ? m.upTickSize  : m.dnTickSize;
@@ -280,26 +296,36 @@ async function sellShares(m, side, reason) {
       return false;
     }
 
+    await ensureFreshPrice(m);
+    const price = side === 'up' ? m.upMid : m.downMid;
+
     attempt++;
-    log(`📤 ${m.pair} SELL attempt #${attempt} (${Math.floor(secsLeft)}s left)`);
+    log(`📤 ${m.pair} SELL attempt #${attempt} ${SHARES}sh @ ${f4(price)} (${Math.floor(secsLeft)}s left)`);
 
     try {
-      const resp = await trader._clob.createAndPostMarketOrder(
-        { tokenID: tokenId, amount: SHARES, side: Side.SELL, orderType: OrderType.FOK },
+      // FOK limit order with exact share count
+      const resp = await trader._clob.createAndPostOrder(
+        { tokenID: tokenId, price: f4(price), size: SHARES, side: Side.SELL },
         { tickSize, negRisk },
         OrderType.FOK
       );
-      const id        = resp?.orderID ?? resp?.id ?? null;
-      const status    = resp?.status || (id ? 'UNKNOWN' : 'FAILED');
-      const remaining = parseFloat(resp?.remaining_size ?? '999');
-      const isFilled  = status === 'FILLED' || (resp?.match_status || '').toLowerCase() === 'filled' || remaining === 0;
-      const fillPrice = parseFloat(resp?.avg_fill_price || resp?.price || '0');
+      const id = resp?.orderID ?? resp?.id ?? null;
 
-      if (isFilled) {
-        log(`✅ SELL confirmed ${m.pair} ${side.toUpperCase()} @${f4(fillPrice)} (attempt #${attempt})`);
-        return true;
+      if (id) {
+        // Poll CLOB to CONFIRM fill
+        const confirm = await trader.waitForFill(id, 5000);
+        if (confirm.filled) {
+          const fillPrice = parseFloat(resp?.avg_fill_price || resp?.price || price);
+          log(`✅ SELL confirmed ${m.pair} ${side.toUpperCase()} ${SHARES}sh@${f4(fillPrice)}`);
+          const proceeds = f2(SHARES * fillPrice);
+          balance = f2(balance + proceeds);
+          log(`💰 Balance: $${f2(balance)} (+$${proceeds})`);
+          return true;
+        }
+        log(`⏭️  FOK SELL nofill ${m.pair} ${side.toUpperCase()}, retry…`);
+      } else {
+        log(`⏭️  FOK SELL rejected ${m.pair} ${side.toUpperCase()} — no orderID`);
       }
-      log(`⏭️  FOK SELL nofill ${m.pair} ${side.toUpperCase()}, retry in ${FOK_SELL_RETRY_MS}ms…`);
     } catch (e) {
       log(`⚠️  FOK SELL error ${m.pair}: ${e.message.slice(0, 80)}, retrying…`);
     }
@@ -344,10 +370,9 @@ async function tradeLoop(m) {
       log(`🎯 ${m.pair} cheapest = ${currentSide.toUpperCase()} (up:${f4(m.upMid)} dn:${f4(m.downMid)})`);
     }
 
-    // ── BUY — FOK only, no GTC ──
+    // ── BUY — FOK limit order, exact 6 shares ──
     const entryPrice = await buyShares(m, currentSide);
     if (entryPrice === null) {
-      // Price outside safe range or ran out of time — stop trying
       m.done = true; break;
     }
 
@@ -358,13 +383,19 @@ async function tradeLoop(m) {
     });
     if (trades.length > 200) trades.length = 200;
 
-    // ── TRAILING STOP WATCH — 200ms loop, WS keeps price fresh ──
+    // ── TRAILING STOP WATCH — 200ms loop, refreshes price every 1s ──
     let peakPrice = entryPrice;
     log(`👀 ${m.pair} trailing watch — peak:${f4(peakPrice)}`);
 
     let sellReason = '';
+    let refreshCounter = 0;
     while (true) {
       await sleep(200);
+
+      // Refresh REST price every 5 ticks (1s) to ensure trailing stop works
+      // even if WS feed is slow
+      refreshCounter++;
+      if (refreshCounter % 5 === 0) await ensureFreshPrice(m);
 
       const cp      = currentSide === 'up' ? m.upMid : m.downMid;
       const secsNow = (m.endTime - Date.now()) / 1000;
@@ -390,6 +421,8 @@ async function tradeLoop(m) {
     const sold = await sellShares(m, currentSide, sellReason);
 
     if (sold) {
+      // Use the actual sell price from the order response (already captured in sellShares)
+      // but we don't return it, so use current midpoint as approximation
       const exitPrice = currentSide === 'up' ? m.upMid : m.downMid;
       const pnl       = f2((exitPrice - entryPrice) * SHARES);
       trades.unshift({
@@ -399,6 +432,10 @@ async function tradeLoop(m) {
       });
       if (trades.length > 200) trades.length = 200;
       log(`💰 ${m.pair} trade closed pnl:$${pnl}`);
+    } else {
+      // Sell failed — the position is stuck. Don't flip, don't retry.
+      log(`❌ ${m.pair} SELL failed — position may still be open. Stopping this window.`);
+      m.done = true; break;
     }
 
     // Time check before flipping
@@ -461,7 +498,9 @@ function snapshot() {
 }
 
 // ── Stubs for index.js compatibility ──
-async function setDryRun() { log('⚠️  setDryRun called — live-only bot, ignored'); }
+async function setDryRun(dryRun) {
+  log(`⚠️  setDryRun(${dryRun}) called — live-only bot, ignored`);
+}
 function getDryRun() { return false; }
 
 // ── Start ──
