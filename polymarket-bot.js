@@ -16,17 +16,16 @@ const WINDOW_SECS       = 300;
 const ENTRY_WAIT_SECS  = 10;
 const SHARES           = 6;
 const TRAILING_DIST    = 0.05;
-const FORCE_CLOSE_SECS = 30;   // trigger sell at 4m30s (30s before end)
-const HARD_SELL_SECS   = 15;   // absolute sell deadline — after this, shares auto-resolve
+const FORCE_CLOSE_SECS = 30;
+const HARD_SELL_SECS   = 15;
 
-// ── Price guard — do NOT enter if price is outside this range ──
-// Prices <0.10 or >0.90 mean the market is nearly decided, book is empty
+// ── Price guard ──
 const MIN_ENTRY_PRICE  = 0.10;
 const MAX_ENTRY_PRICE  = 0.90;
 
 // ── Order config ──
-const FOK_RETRY_MS     = 2000;  // retry FOK buy every 2s if nofill
-const FOK_SELL_RETRY_MS = 500;  // retry FOK sell every 500ms
+const FOK_RETRY_MS     = 2000;
+const FOK_SELL_RETRY_MS = 500;
 
 const TARGET_PAIRS = ['BTC'];
 
@@ -43,7 +42,6 @@ const markets = {};
 
 let lastDiscoverAt = 0;
 
-// ── Helpers ──
 const f2 = v => Math.round((v || 0) * 100) / 100;
 const f4 = v => Math.round((v || 0) * 10000) / 10000;
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -74,12 +72,12 @@ const wsTokenMap = {};
 
 function wsConnect() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
-  log('🔌 Connecting price WebSocket…');
+  log('Connecting price WebSocket...');
   ws = new WebSocket(CLOB_WS);
 
   ws.on('open', () => {
     wsReady = true;
-    log('✅ Price WebSocket connected');
+    log('Price WebSocket connected');
     const tokenIds = Object.keys(wsTokenMap);
     if (tokenIds.length > 0) wsSubscribe(tokenIds);
     wsPingTimer = setInterval(() => {
@@ -107,19 +105,18 @@ function wsConnect() {
   ws.on('close', () => {
     wsReady = false;
     if (wsPingTimer) { clearInterval(wsPingTimer); wsPingTimer = null; }
-    log('⚠️  Price WebSocket closed — reconnecting in 2s');
+    log('Price WebSocket closed - reconnecting in 2s');
     setTimeout(wsConnect, 2000);
   });
 
   ws.on('error', (e) => {
-    log(`⚠️  WS error: ${e.message}`);
+    log(`WS error: ${e.message}`);
     try { ws.terminate(); } catch (_) {}
   });
 }
 
 function wsSubscribe(tokenIds) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  // Lowercase 'market' is required by Polymarket CLOB WS
   ws.send(JSON.stringify({ auth: {}, type: 'market', assets_ids: tokenIds }));
 }
 
@@ -195,15 +192,13 @@ async function discoverMarket(pair) {
   wsTokenMap[upTokenId]   = slug;
   wsTokenMap[downTokenId] = slug;
 
-  // Subscribe if WS already open
   if (wsReady) wsSubscribe([upTokenId, downTokenId]);
-  log(`📡 ${pair} market: ${slug}`);
+  log(`Market ${pair}: ${slug}`);
 
-  // Prime initial prices
   await restRefreshPrice(markets[slug]);
-  log(`📊 ${pair} UP:${f4(markets[slug].upMid)} DOWN:${f4(markets[slug].downMid)}`);
+  log(`${pair} UP:${f4(markets[slug].upMid)} DOWN:${f4(markets[slug].downMid)}`);
 
-  tradeLoop(markets[slug]).catch(e => log(`❌ Loop crash ${pair}: ${e.message}`));
+  tradeLoop(markets[slug]).catch(e => log(`Loop crash ${pair}: ${e.message}`));
 }
 
 async function discover() {
@@ -217,10 +212,7 @@ async function discover() {
   }
 }
 
-// ── Entry: FOK limit order with exact share count + poll confirmation ──
-// Places a FOK limit order for exactly SHARES shares at the current mid price.
-// Then polls getOrder() for 5s to CONFIRM fill before returning.
-// Never places a second order unless the first is confirmed cancelled.
+// ── TAKER BUY - market order FOK, fills immediately at best available price ──
 async function buyShares(m, side) {
   const tokenId  = side === 'up' ? m.upTokenId  : m.downTokenId;
   const tickSize = side === 'up' ? m.upTickSize  : m.dnTickSize;
@@ -231,7 +223,7 @@ async function buyShares(m, side) {
   while (true) {
     const secsLeft = (m.endTime - Date.now()) / 1000;
     if (secsLeft <= FORCE_CLOSE_SECS) {
-      log(`⏳ ${m.pair} no time to enter (${Math.floor(secsLeft)}s left)`);
+      log(`${m.pair} no time to enter (${Math.floor(secsLeft)}s left)`);
       return null;
     }
 
@@ -239,17 +231,18 @@ async function buyShares(m, side) {
     const price = side === 'up' ? m.upMid : m.downMid;
 
     if (price < MIN_ENTRY_PRICE || price > MAX_ENTRY_PRICE) {
-      log(`⛗ ${m.pair} ${side.toUpperCase()} price ${f4(price)} outside safe range, skip`);
+      log(`${m.pair} ${side.toUpperCase()} price ${f4(price)} outside safe range, skip`);
       return null;
     }
 
     attempt++;
-    log(`🛒 ${m.pair} BUY ${side.toUpperCase()} ${SHARES}sh @ ${f4(price)} FOK attempt #${attempt}`);
+    // TAKER: market order FOK, amount in dollars for BUY
+    const dollarAmount = f2(SHARES * price);
+    log(`${m.pair} BUY ${side.toUpperCase()} $${dollarAmount} (${SHARES}sh x ${f4(price)}) FOK #${attempt}`);
 
     try {
-      // FOK limit order with exact price + size=SHARES -- guarantees exactly 6 shares if filled
-      const resp = await trader._clob.createAndPostOrder(
-        { tokenID: tokenId, price: f4(price), size: SHARES, side: Side.BUY },
+      const resp = await trader._clob.createAndPostMarketOrder(
+        { tokenID: tokenId, amount: dollarAmount, side: Side.BUY, orderType: OrderType.FOK },
         { tickSize, negRisk },
         OrderType.FOK
       );
@@ -261,35 +254,36 @@ async function buyShares(m, side) {
       const fillPrice = parseFloat(resp?.avg_fill_price || resp?.price || price);
 
       if (isFilled && id) {
-        log(`✅ BUY filled ${m.pair} ${side.toUpperCase()} ${SHARES}sh@${f4(fillPrice)}`);
+        log(`FILLED BUY ${m.pair} ${side.toUpperCase()} @ ${f4(fillPrice)}`);
         const cost = f2(SHARES * fillPrice);
         balance = f2(balance - cost);
-        log(`💰 Balance: $${f2(balance)} (-$${cost})`);
+        log(`Balance: $${f2(balance)} (-$${cost})`);
         return fillPrice;
       }
-      log(`⏭️ FOK nofill ${m.pair} ${side.toUpperCase()}${id ? '' : ' (no id)'} -- retry`);
+      log(`NOFILL BUY ${m.pair} ${side.toUpperCase()}${id ? '' : ' (no id)'} - retry`);
     } catch (e) {
-      log(`⚠️ FOK BUY error ${m.pair}: ${e.message.slice(0, 80)} -- retry`);
+      log(`BUY ERR ${m.pair}: ${e.message.slice(0, 80)} - retry`);
     }
 
     await sleep(FOK_RETRY_MS);
   }
 }
-// ── Exit: FOK limit order with exact share count + poll confirmation ──
+
+// ── TAKER SELL - market order FOK, fills immediately at best available price ──
 async function sellShares(m, side, reason) {
   const tokenId  = side === 'up' ? m.upTokenId  : m.downTokenId;
   const tickSize = side === 'up' ? m.upTickSize  : m.dnTickSize;
   const negRisk  = side === 'up' ? m.upNegRisk   : m.dnNegRisk;
   const { Side, OrderType } = require('@polymarket/clob-client-v2');
 
-  log(`📤 ${m.pair} SELL ${side.toUpperCase()} ${SHARES}sh -- ${reason}`);
+  log(`SELL ${m.pair} ${side.toUpperCase()} ${SHARES}sh - ${reason}`);
 
   let attempt = 0;
   while (true) {
     const secsLeft = (m.endTime - Date.now()) / 1000;
 
     if (secsLeft < HARD_SELL_SECS) {
-      log(`⌛ ${m.pair} HARD DEADLINE (${Math.floor(secsLeft)}s left) -- auto-resolve`);
+      log(`DEADLINE ${m.pair} (${Math.floor(secsLeft)}s left) - auto-resolve`);
       return false;
     }
 
@@ -297,12 +291,12 @@ async function sellShares(m, side, reason) {
     const price = side === 'up' ? m.upMid : m.downMid;
 
     attempt++;
-    log(`📤 ${m.pair} SELL attempt #${attempt} ${SHARES}sh @ ${f4(price)} (${Math.floor(secsLeft)}s left)`);
+    // TAKER: market order FOK, amount in SHARES for SELL
+    log(`SELL #${attempt} ${m.pair} ${SHARES}sh @ ${f4(price)} (${Math.floor(secsLeft)}s left)`);
 
     try {
-      // FOK limit order with exact share count
-      const resp = await trader._clob.createAndPostOrder(
-        { tokenID: tokenId, price: f4(price), size: SHARES, side: Side.SELL },
+      const resp = await trader._clob.createAndPostMarketOrder(
+        { tokenID: tokenId, amount: SHARES, side: Side.SELL, orderType: OrderType.FOK },
         { tickSize, negRisk },
         OrderType.FOK
       );
@@ -314,32 +308,31 @@ async function sellShares(m, side, reason) {
       const fillPrice = parseFloat(resp?.avg_fill_price || resp?.price || price);
 
       if (isFilled && id) {
-        log(`✅ SELL filled ${m.pair} ${side.toUpperCase()} ${SHARES}sh@${f4(fillPrice)}`);
+        log(`FILLED SELL ${m.pair} ${side.toUpperCase()} ${SHARES}sh@${f4(fillPrice)}`);
         const proceeds = f2(SHARES * fillPrice);
         balance = f2(balance + proceeds);
-        log(`💰 Balance: $${f2(balance)} (+$${proceeds})`);
+        log(`Balance: $${f2(balance)} (+$${proceeds})`);
         return true;
       }
-      log(`⏭️ FOK SELL nofill ${m.pair} ${side.toUpperCase()} -- retry`);
+      log(`NOFILL SELL ${m.pair} ${side.toUpperCase()}${id ? '' : ' (no id)'} - retry`);
     } catch (e) {
-      log(`⚠️ FOK SELL error ${m.pair}: ${e.message.slice(0, 80)} -- retry`);
+      log(`SELL ERR ${m.pair}: ${e.message.slice(0, 80)} - retry`);
     }
 
     await sleep(FOK_SELL_RETRY_MS);
   }
 }
 
-// ── Core Trade Loop — one per market, fully sequential ──
+// ── Core Trade Loop ──
 async function tradeLoop(m) {
   if (m.loopRunning) return;
   m.loopRunning = true;
-  log(`🚀 ${m.pair} trade loop started`);
+  log(`Trade loop started ${m.pair}`);
 
-  // Wait 10s from window open
   const entryOpenAt = m.windowStartMs + ENTRY_WAIT_SECS * 1000;
   const waitMs      = entryOpenAt - Date.now();
   if (waitMs > 0) {
-    log(`⏳ ${m.pair} waiting ${Math.ceil(waitMs / 1000)}s before entry`);
+    log(`${m.pair} waiting ${Math.ceil(waitMs / 1000)}s before entry`);
     await sleep(waitMs);
   }
 
@@ -349,23 +342,23 @@ async function tradeLoop(m) {
     const secsLeft = (m.endTime - Date.now()) / 1000;
 
     if (secsLeft <= 0) {
-      log(`🏁 ${m.pair} window ended`);
+      log(`${m.pair} window ended`);
       m.done = true; break;
     }
 
     if (secsLeft <= FORCE_CLOSE_SECS && currentSide === null) {
-      log(`⏳ ${m.pair} ≤${FORCE_CLOSE_SECS}s left, no entry`);
+      log(`${m.pair} <=${FORCE_CLOSE_SECS}s left, no entry`);
       m.done = true; break;
     }
 
-    // Pick side: cheapest on first entry, flip after each sell
+    // Pick cheapest side on first entry, then flip after each sell
     if (currentSide === null) {
       await ensureFreshPrice(m);
       currentSide = m.upMid <= m.downMid ? 'up' : 'down';
-      log(`🎯 ${m.pair} cheapest = ${currentSide.toUpperCase()} (up:${f4(m.upMid)} dn:${f4(m.downMid)})`);
+      log(`${m.pair} cheapest = ${currentSide.toUpperCase()} (up:${f4(m.upMid)} dn:${f4(m.downMid)})`);
     }
 
-    // ── BUY — FOK limit order, exact 6 shares ──
+    // ── BUY ──
     const entryPrice = await buyShares(m, currentSide);
     if (entryPrice === null) {
       m.done = true; break;
@@ -378,17 +371,15 @@ async function tradeLoop(m) {
     });
     if (trades.length > 200) trades.length = 200;
 
-    // ── TRAILING STOP WATCH — 200ms loop, refreshes price every 1s ──
+    // ── TRAILING STOP WATCH ──
     let peakPrice = entryPrice;
-    log(`👀 ${m.pair} trailing watch — peak:${f4(peakPrice)}`);
+    log(`${m.pair} trailing watch - peak:${f4(peakPrice)}`);
 
     let sellReason = '';
     let refreshCounter = 0;
     while (true) {
       await sleep(200);
 
-      // Refresh REST price every 5 ticks (1s) to ensure trailing stop works
-      // even if WS feed is slow
       refreshCounter++;
       if (refreshCounter % 5 === 0) await ensureFreshPrice(m);
 
@@ -397,7 +388,7 @@ async function tradeLoop(m) {
 
       if (cp > 0 && cp > peakPrice) {
         peakPrice = cp;
-        log(`📈 ${m.pair} new peak ${f4(peakPrice)}`);
+        log(`${m.pair} new peak ${f4(peakPrice)}`);
       }
 
       if (cp > 0 && (peakPrice - cp) >= TRAILING_DIST) {
@@ -410,14 +401,12 @@ async function tradeLoop(m) {
       }
     }
 
-    log(`🔶 ${m.pair} ${currentSide.toUpperCase()} EXIT trigger — ${sellReason}`);
+    log(`${m.pair} ${currentSide.toUpperCase()} EXIT trigger - ${sellReason}`);
 
     // ── SELL ──
     const sold = await sellShares(m, currentSide, sellReason);
 
     if (sold) {
-      // Use the actual sell price from the order response (already captured in sellShares)
-      // but we don't return it, so use current midpoint as approximation
       const exitPrice = currentSide === 'up' ? m.upMid : m.downMid;
       const pnl       = f2((exitPrice - entryPrice) * SHARES);
       trades.unshift({
@@ -426,27 +415,25 @@ async function tradeLoop(m) {
         action: 'SELL', price: f4(exitPrice), shares: SHARES, pnl,
       });
       if (trades.length > 200) trades.length = 200;
-      log(`💰 ${m.pair} trade closed pnl:$${pnl}`);
+      log(`${m.pair} trade closed pnl:$${pnl}`);
     } else {
-      // Sell failed — the position is stuck. Don't flip, don't retry.
-      log(`❌ ${m.pair} SELL failed — position may still be open. Stopping this window.`);
+      log(`${m.pair} SELL failed - position may still be open. Stopping.`);
       m.done = true; break;
     }
 
-    // Time check before flipping
     const secsAfterSell = (m.endTime - Date.now()) / 1000;
     if (secsAfterSell <= FORCE_CLOSE_SECS) {
-      log(`🏁 ${m.pair} no time for another trade (${Math.floor(secsAfterSell)}s left)`);
+      log(`${m.pair} no time for another trade (${Math.floor(secsAfterSell)}s left)`);
       m.done = true; break;
     }
 
-    // ── FLIP SIDE ──
+    // FLIP
     const prev = currentSide;
     currentSide = currentSide === 'up' ? 'down' : 'up';
-    log(`🔄 ${m.pair} FLIP ${prev.toUpperCase()} → ${currentSide.toUpperCase()}`);
+    log(`${m.pair} FLIP ${prev.toUpperCase()} -> ${currentSide.toUpperCase()}`);
   }
 
-  log(`✅ ${m.pair} loop finished`);
+  log(`${m.pair} loop finished`);
   m.loopRunning = false;
 }
 
@@ -460,7 +447,6 @@ async function tick() {
   emitFn('snapshot', snapshot());
 }
 
-// ── Snapshot ──
 function snapshot() {
   const activeMarkets = Object.values(markets).map(m => ({
     slug:        m.slug,
@@ -492,39 +478,37 @@ function snapshot() {
   };
 }
 
-// ── Stubs for index.js compatibility ──
 async function setDryRun(dryRun) {
-  log(`⚠️  setDryRun(${dryRun}) called — live-only bot, ignored`);
+  log(`setDryRun(${dryRun}) called - ignored`);
 }
 function getDryRun() { return false; }
 
-// ── Start ──
 async function start(emit, logFn) {
   emitFn    = emit   || (() => {});
   slog      = logFn  || (() => {});
   startTime = Date.now();
 
   if (!process.env.POLYMARKET_PRIVATE_KEY) {
-    console.error('❌ POLYMARKET_PRIVATE_KEY not set');
+    console.error('POLYMARKET_PRIVATE_KEY not set');
     process.exit(1);
   }
 
   try {
     trader = new PolymarketTrader(process.env.POLYMARKET_PRIVATE_KEY);
     trader.setLogFn(log);
-    log('🔑 Authenticating…');
+    log('Authenticating...');
     await trader.authenticate();
-    log(`✅ Auth: ${trader.address}`);
+    log(`Auth: ${trader.address}`);
     const realBal = await trader.getBalance();
     if (realBal > 0) { balance = realBal; startBalance = realBal; }
-    log(`💰 Balance: $${f2(balance)}`);
+    log(`Balance: $${f2(balance)}`);
   } catch (e) {
-    log(`❌ Auth failed: ${e.message}`);
+    log(`Auth failed: ${e.message}`);
     process.exit(1);
   }
 
   wsConnect();
-  log('🔴 LIVE — starting main loop');
+  log('LIVE - starting main loop');
   setInterval(tick, TICK_MS);
 }
 
