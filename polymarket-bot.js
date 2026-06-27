@@ -160,14 +160,19 @@ async function discoverMarket(pair) {
   try { ids = JSON.parse(mk.clobTokenIds); } catch (_) { return; }
   if (ids.length < 2) return;
 
+  // Map token IDs to outcomes — Gamma API returns clobTokenIds in same order as outcomes
+  const outcomes = mk.outcomes || [];
+  const upIdx = outcomes.findIndex(o => o.toLowerCase() === 'up');
+  const dnIdx = outcomes.findIndex(o => o.toLowerCase() === 'down');
+  if (upIdx < 0 || dnIdx < 0) return;
+  const upTokenId   = ids[upIdx];
+  const downTokenId = ids[dnIdx];
+
   const endTime = mk.endDate ? new Date(mk.endDate).getTime() : null;
   if (!endTime) return;
 
   const secsToEnd = (endTime - Date.now()) / 1000;
   if (secsToEnd < 10 || secsToEnd > WINDOW_SECS + 30) return;
-
-  const upTokenId   = ids[0];
-  const downTokenId = ids[1];
 
   let tickSize = '0.01';
   let negRisk  = false;
