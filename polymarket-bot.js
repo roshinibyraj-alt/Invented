@@ -145,25 +145,29 @@ async function doEntry(m) {
     if (trades.length > 100) trades.length = 100;
     return true;
   }
-  // LIVE: GTC BUY at best_ask (marketable limit, fills in 1-2 ticks)
+  // LIVE: FOK at midpoint — fills instantly or cancels, no order book guesswork
   const mid = m.side === 'up' ? m.upMid : m.downMid;
   if (mid < 0.05 || mid > 0.95) { log(`⏭️ SKIP ${m.pair} ${m.side.toUpperCase()} @ ${f4(mid)}`); return false; }
-  const tid = m.side === 'up' ? m.upTokenId : m.downTokenId;
-  let entryPrice = mid;
-  try {
-    const bb = await trader.getBestBidAsk(tid);
-    if (bb && bb.bestAsk && bb.bestAsk > 0.01 && bb.bestAsk < 0.99) entryPrice = Math.min(f4(bb.bestAsk), 0.99);
-  } catch (_) {}
-  const cost = f2(SHARES_PER_LOT * entryPrice);
+  const cost = f2(SHARES_PER_LOT * mid);
   if (cost > balance) { log(`⛔ ${m.pair} cost ${cost} > ${balance}`); return false; }
+  const tid = m.side === 'up' ? m.upTokenId : m.downTokenId;
   try {
-    const order = await trader.placeGtcOrder(tid, 'BUY', entryPrice, SHARES_PER_LOT);
-    log(`⏳ GTC ENTRY ${m.pair} ${m.side.toUpperCase()} ${SHARES_PER_LOT}sh@${f4(entryPrice)}`);
-    // Track this GTC order and poll next ticks
-    m._pendingEntry = { id: order.id, price: entryPrice, cost, createdAt: Date.now() };
-    return true;
+    const order = await trader.placeFokLimitOrder(tid, 'BUY', mid, SHARES_PER_LOT);
+    if (order.isFilled) {
+      const fillPrice = order.avgPrice > 0 ? order.avgPrice : mid;
+      const fee = f2(cost * DEMO_FEE_RATE * fillPrice * (1 - fillPrice));
+      balance = f2(balance - cost - fee);
+      totalFees = f2(totalFees + fee);
+      m.entryPrice = fillPrice; m.peakPrice = fillPrice; m.holdStartedAt = Date.now();
+      log(`🟢 FOK ENTRY ${m.pair} ${m.side.toUpperCase()} ${SHARES_PER_LOT}sh@${f4(fillPrice)}`);
+      trades.unshift({ ts: new Date().toTimeString().slice(0,8), pair: m.pair, side: m.side.toUpperCase(), action: 'ENTRY', entry: fillPrice, shares: SHARES_PER_LOT, pnl: 0, bal: balance });
+      if (trades.length > 100) trades.length = 100;
+      return true;
+    }
+    log(`⏭️ FOK nofill ${m.pair} ${m.side.toUpperCase()} @${f4(mid)}`);
+    return false;
   } catch (e) {
-    log(`❌ GTC ENTRY ${m.pair}: ${e.message}`);
+    log(`❌ FOK ENTRY ${m.pair}: ${e.message}`);
     return false;
   }
 }
@@ -221,42 +225,8 @@ async function tickMarket(m) {
     log(`▶️ ${m.pair} START`);
   }
 
-  // --- WAIT → poll pending GTC or place new entry ---
+  // --- WAIT → ENTER (FOK) ---
   if (m.phase === 'wait') {
-    // Check if a pending GTC order filled
-    if (m._pendingEntry) {
-      if (Date.now() - m._pendingEntry.createdAt > 2000) {
-        // 2s timeout: cancel and retry
-        try { await trader.cancelOrder(m._pendingEntry.id); } catch(_) {}
-        delete m._pendingEntry;
-        m.retryAfter = Date.now() + 200;
-        return;
-      }
-      try {
-        const ord = await trader._clob.getOrder(m._pendingEntry.id).catch(() => null);
-        if (ord) {
-          const oStatus = (ord.status || '').toUpperCase();
-          const oMatch = (ord.match_status || '').toLowerCase();
-          const oFilled = parseFloat(ord.size_matched || ord.filled_size || '0');
-          const filled = oStatus === 'FILLED' || oMatch === 'filled' || oFilled >= SHARES_PER_LOT;
-          if (filled) {
-            const fillPrice = parseFloat(ord.avg_fill_price || ord.price || m._pendingEntry.price);
-            const cost = m._pendingEntry.cost;
-            const fee = f2(cost * DEMO_FEE_RATE * fillPrice * (1 - fillPrice));
-            balance = f2(balance - cost - fee);
-            totalFees = f2(totalFees + fee);
-            m.entryPrice = fillPrice; m.peakPrice = fillPrice; m.holdStartedAt = Date.now();
-            delete m._pendingEntry;
-            log(`🟢 GTC ENTRY FILLED ${m.pair} ${m.side.toUpperCase()} ${SHARES_PER_LOT}sh@${f4(fillPrice)}`);
-            trades.unshift({ ts: new Date().toTimeString().slice(0,8), pair: m.pair, side: m.side.toUpperCase(), action: 'ENTRY', entry: fillPrice, shares: SHARES_PER_LOT, pnl: 0, bal: balance });
-            if (trades.length > 100) trades.length = 100;
-            m.phase = 'hold';
-            return;
-          }
-        }
-      } catch(_) {}
-      return; // still waiting for fill
-    }
     if (m.entryLock) return;
     if (Date.now() < m.retryAfter) return;
     const price = m.side === 'up' ? m.upMid : m.downMid;

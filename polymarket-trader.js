@@ -159,6 +159,27 @@ class PolymarketTrader {
     } catch (_) { return null; }
   }
 
+
+  // ── FOK order with explicit price & size (no market price calc) ──
+  async placeFokLimitOrder(tokenId, side, price, size) {
+    const sideVal = side === 'BUY' ? Side.BUY : Side.SELL;
+    let tickSize = '0.01', negRisk = false;
+    try { tickSize = (await this._clob.getTickSize(tokenId)) ?? '0.01'; } catch (_) {}
+    try { negRisk  = (await this._clob.getNegRisk(tokenId))  ?? false;  } catch (_) {}
+    const resp = await this._clob.createAndPostOrder(
+      { tokenID: tokenId, price: String(price), size: String(size), side: sideVal },
+      { tickSize, negRisk },
+      OrderType.FOK
+    );
+    const id = resp?.orderID ?? resp?.id ?? null;
+    const status = resp?.status || (id ? 'UNKNOWN' : 'FAILED');
+    const matchStatus = (resp?.match_status || '').toLowerCase();
+    const isFilled = status === 'FILLED' || matchStatus === 'filled' || (size > 0 && parseFloat(resp?.remaining_size || '999') === 0);
+    const avgPrice = parseFloat(resp?.avg_fill_price || resp?.price || price);
+    if (id) this._log(`🏁 FOK ${side} ${size}sh@${price} → ${status} avg:${avgPrice} id:${id.slice(0,12)}`);
+    return { id, status, isFilled, avgPrice, raw: resp };
+  }
+
   async getOpenOrders() { return this._clob.getOpenOrders(); }
   async cancelOrder(orderId) { return this._clob.cancelOrder(orderId); }
   defaultHeaders() { return { 'Content-Type': 'application/json' }; }
