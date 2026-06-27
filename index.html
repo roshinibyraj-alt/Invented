@@ -3,12 +3,12 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
-<title>Flip Bot</title>
+<title>Grid Bot</title>
 <script src="/socket.io/socket.io.js"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:#f5f6fa;color:#1a1a2e;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:13px;line-height:1.5}
-header{background:#fff;border-bottom:2px solid #e8e8f0;padding:10px 14px;position:sticky;top:0;z-index:100}
+body{background:#fff;color:#1a1a2e;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:13px;line-height:1.5}
+header{background:#fff;border-bottom:2px solid #eef0f5;padding:10px 14px;position:sticky;top:0;z-index:100;box-shadow:0 1px 3px rgba(0,0,0,0.04)}
 .hrow{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .logo{font-weight:900;font-size:15px;color:#1a1a2e;white-space:nowrap}
 .dot{width:9px;height:9px;border-radius:50%;display:inline-block;margin-right:5px}
@@ -19,43 +19,56 @@ header{background:#fff;border-bottom:2px solid #e8e8f0;padding:10px 14px;positio
 .badge.demo{background:#eff6ff;color:#2563eb;border:1px solid #93c5fd}
 .badge.up{background:#f0fdf4;color:#16a34a;border:1px solid #86efac}
 .badge.dn{background:#fef2f2;color:#dc2626;border:1px solid #fca5a5}
-.badge.entry{background:#fefce8;color:#a16207;border:1px solid #fde047}
-.badge.hold{background:#f0fdf4;color:#16a34a;border:1px solid #86efac}
-.badge.flat{background:#f1f5f9;color:#475569;border:1px solid #cbd5e1}
-.badge.done{background:#f1f5f9;color:#94a3b8;border:1px solid #e2e8f0}
 .stats{display:flex;gap:5px;flex-wrap:wrap}
-.stat{background:#f8f9fe;border:1px solid #e8e8f0;border-radius:8px;padding:4px 10px;text-align:center;min-width:60px}
+.stat{background:#f8f9fe;border:1px solid #eef0f5;border-radius:8px;padding:4px 10px;text-align:center;min-width:60px}
 .stat .sl{font-size:8px;color:#6b7280;text-transform:uppercase;letter-spacing:.4px;font-weight:600}
 .stat .sv{font-size:13px;font-weight:800}
 .g{color:#16a34a}.r{color:#dc2626}.y{color:#d97706}.b{color:#2563eb}.w{color:#1a1a2e}.gr{color:#6b7280}
 main{padding:10px;max-width:1100px;margin:0 auto}
-.card{background:#fff;border:1px solid #e8e8f0;border-radius:10px;padding:12px;margin-bottom:10px;box-shadow:0 1px 4px rgba(0,0,0,0.04)}
-.card-title{font-size:9px;font-weight:800;margin-bottom:10px;text-transform:uppercase;color:#6b7280;letter-spacing:.6px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #f1f1f8;padding-bottom:6px}
-.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-@media(max-width:800px){.grid2{grid-template-columns:1fr}}
+.card{background:#fff;border:1px solid #eef0f5;border-radius:10px;padding:12px;margin-bottom:10px;box-shadow:0 1px 4px rgba(0,0,0,0.03)}
+.card-title{font-size:9px;font-weight:800;margin-bottom:8px;text-transform:uppercase;color:#6b7280;letter-spacing:.6px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #f3f4f8;padding-bottom:6px}
+.market-hdr{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;padding:6px 0}
+.price-tag{font-size:18px;font-weight:900}
+.price-up{color:#16a34a}.price-dn{color:#dc2626}
+.timer{font-size:11px;color:#6b7280;font-weight:600}
+.grid-container{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:4px}
+.grid-col{background:#fafbfc;border-radius:8px;padding:8px;border:1px solid #eef0f5}
+.grid-col-title{font-size:8px;font-weight:800;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;text-align:center;padding:3px 0;border-radius:4px}
+.grid-col-title.up{background:#f0fdf4;color:#16a34a}
+.grid-col-title.dn{background:#fef2f2;color:#dc2626}
+.grid-row{display:flex;align-items:center;gap:6px;padding:4px 6px;border-radius:4px;margin-bottom:2px;font-size:11px;font-variant-numeric:tabular-nums}
+.grid-row:hover{background:#f3f4f8}
+.grid-row .level{font-weight:700;width:38px;text-align:right}
+.grid-row .status{font-size:10px;flex:1;text-align:center}
+.status-dot{width:7px;height:7px;border-radius:50%;display:inline-block;margin-right:3px}
+.s-wait{background:#d1d5db}
+.s-bought{background:#2563eb}
+.s-sold{background:#22c55e}
+.s-cancel{background:#ef4444}
+.grid-row .extra{font-size:9px;color:#6b7280;width:55px;text-align:right}
 table{width:100%;border-collapse:collapse;font-size:11px}
-th{text-align:left;color:#6b7280;font-size:8px;text-transform:uppercase;padding:4px 3px;border-bottom:1px solid #f1f1f8;font-weight:700;letter-spacing:.4px}
+th{text-align:left;color:#6b7280;font-size:8px;text-transform:uppercase;padding:4px 3px;border-bottom:1px solid #f3f4f8;font-weight:700;letter-spacing:.4px}
 td{padding:4px 3px;border-bottom:1px solid #f8f9fe;font-variant-numeric:tabular-nums}
 tr:last-child td{border-bottom:none}
 .empty{text-align:center;padding:30px;color:#9ca3af;font-size:13px}
-.log-line{padding:2px 0;border-bottom:1px solid #f8f9fe;font-size:10px;font-family:monospace;color:#374151}
-footer{text-align:center;padding:10px;color:#9ca3af;font-size:9px;border-top:1px solid #e8e8f0;margin-top:10px}
-.tag{font-size:9px;padding:1px 5px;border-radius:3px;background:#f1f5f9;color:#475569;margin-left:4px}
+.log-line{padding:2px 0;border-bottom:1px solid #f3f4f8;font-size:10px;font-family:monospace;color:#374151}
+footer{text-align:center;padding:10px;color:#9ca3af;font-size:9px;border-top:1px solid #eef0f5;margin-top:10px}
+@media(max-width:600px){.grid-container{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
 <header>
   <div class="hrow">
-    <div class="logo"><span class="dot off" id="dot"></span>Flip Bot</div>
+    <div class="logo"><span class="dot off" id="dot"></span>Grid Bot</div>
     <span class="badge demo" id="modeBadge">DEMO</span>
     <div class="stats" id="headerStats"></div>
     <button id="toggleBtn" onclick="doToggle()" style="padding:4px 10px;font-size:10px;font-weight:700;background:#fff;border:1.5px solid #2563eb;color:#2563eb;border-radius:6px;cursor:pointer;letter-spacing:.4px">Toggle</button>
   </div>
 </header>
 <main>
-  <div class="card">
-    <div class="card-title">Markets / Limit Orders</div>
-    <div id="mktBody"><div class="empty">Waiting for markets...</div></div>
+  <div class="card" id="gridCard">
+    <div class="card-title">Grid Orders <span id="mktTime" style="font-weight:400;text-transform:none;font-size:10px"></span></div>
+    <div id="gridBody"><div class="empty">Waiting for market window...</div></div>
   </div>
   <div class="card">
     <div class="card-title">Trades</div>
@@ -66,7 +79,7 @@ footer{text-align:center;padding:10px;color:#9ca3af;font-size:9px;border-top:1px
     <div id="logBody"><div class="empty">No activity yet</div></div>
   </div>
 </main>
-<footer id="footer">Flip Bot | loading...</footer>
+<footer id="footer">Grid Bot | loading...</footer>
 
 <script>
 var socket = io({transports:['websocket','polling'],reconnection:true,reconnectionDelay:1000});
@@ -77,11 +90,10 @@ function cls(v){return v>0?'g':v<0?'r':'gr';}
 function sgn(v){return v>0?'+':'';}
 function fmtU(s){if(!s)return'0s';return s>3600?Math.floor(s/3600)+'h '+Math.floor((s%3600)/60)+'m':s>60?Math.floor(s/60)+'m '+(s%60)+'s':s+'s';}
 
-function phaseCls(p){return p==='holding'?'hold':p==='entry'?'entry':p==='flat'?'flat':'done';}
-
 function render(d){
   if(!d)return;
-  document.getElementById('dot').className='dot on';
+  var dot=document.getElementById('dot');
+  dot.className='dot on';
 
   var mode=document.getElementById('modeBadge');
   var tbtn=document.getElementById('toggleBtn');
@@ -89,38 +101,71 @@ function render(d){
     mode.textContent='DEMO $'+f2(d.balance);mode.className='badge demo';
     tbtn.textContent='Go Live';tbtn.style.borderColor='#dc2626';tbtn.style.color='#dc2626';
   }else{
-    mode.textContent='LIVE $'+f2(d.balance);mode.className='badge live';
+    mode.textContent='LIVE';mode.className='badge live';
     tbtn.textContent='Demo';tbtn.style.borderColor='#2563eb';tbtn.style.color='#2563eb';
   }
 
   var h='';
-  h+='<div class="stat"><div class="sl">Balance</div><div class="sv w">$'+f2(d.balance)+'</div></div>';
+  h+='<div class="stat"><div class="sl">Equity</div><div class="sv w">$'+f2(d.balance)+'</div></div>';
+  h+='<div class="stat"><div class="sl">Cash</div><div class="sv gr">$'+f2(d.cashBalance)+'</div></div>';
+  h+='<div class="stat"><div class="sl">Unreal</div><div class="sv '+cls(d.unrealizedPnL)+'">'+sgn(d.unrealizedPnL)+'$'+f2(d.unrealizedPnL)+'</div></div>';
   h+='<div class="stat"><div class="sl">PnL</div><div class="sv '+cls(d.pnl)+'">'+sgn(d.pnl)+'$'+f2(d.pnl)+'</div></div>';
   h+='<div class="stat"><div class="sl">Trades</div><div class="sv b">'+(d.totalTrades||0)+'</div></div>';
-  h+='<div class="stat"><div class="sl">Up time</div><div class="sv gr">'+fmtU(d.uptime)+'</div></div>';
+  h+='<div class="stat"><div class="sl">Uptime</div><div class="sv gr">'+fmtU(d.uptime)+'</div></div>';
   document.getElementById('headerStats').innerHTML=h;
 
-  // Markets with limit order details
-  var mc='';
+  // Grid view
   var mkts=d.activeMarkets||[];
-  if(!mkts.length){mc='<div class="empty">No active markets</div>';}
-  else{
-    mc+='<table><tr><th>Pair</th><th>Status</th><th>Time</th><th>UP</th><th>DN</th><th>Position</th><th>Entry</th><th>Sell Limit</th><th>Buy Limit</th></tr>';
+  var gc='';
+  if(!mkts.length){gc='<div class="empty">No active markets</div>';}else{
     for(var i=0;i<mkts.length;i++){
       var m=mkts[i];
-      var st=m.done?'Done':m.secsLeft>300?'Waiting':m.phase==='holding'?'Holding':m.phase==='flat'?'Flat':m.phase==='entry'?'Enter':'Idle';
-      var pos=m.positionSide||'-';
-      var err=m.entryPrice>0?'$'+f4(m.entryPrice):'-';
-      var sl=m.sellOrderActive?'$'+f4(m.sellLimitPrice):'-';
-      var bl=m.buyOrderActive?'$'+f4(m.buyLimitPrice):'-';
-      mc+='<tr><td><b>'+m.pair+'</b></td><td><span class="badge '+phaseCls(m.phase)+'">'+st+'</span></td>'+
-        '<td>'+m.secsLeft+'s</td><td class="g">$'+f4(m.upMid)+'</td><td class="r">$'+f4(m.dnMid)+'</td>'+
-        '<td><span class="badge '+(pos==='UP'?'up':pos==='DOWN'?'dn':'flat')+'">'+pos+'</span></td>'+
-        '<td>'+err+'</td><td class="g">'+sl+'</td><td class="b">'+bl+'</td></tr>';
+      var secs=m.secsLeft>300?m.secsLeft-300:m.secsLeft;
+      var statusText='';
+      if(m.windowDone)statusText='DONE';
+      else if(m.forceClosed)statusText='FORCE CLOSED';
+      else if(m.started)statusText='RUNNING ('+secs+'s)';
+      else statusText='WAITING ('+secs+'s)';
+
+      gc+='<div class="market-hdr">'+
+        '<div><b>'+m.pair+' 5m</b> <span style="font-size:11px;color:#6b7280">| '+statusText+'</span></div>'+
+        '<div style="display:flex;gap:12px;align-items:center">'+
+          '<span><span style="font-size:8px;color:#6b7280">UP</span> <span class="price-up" style="font-size:16px">$'+f4(m.upMid)+'</span></span>'+
+          '<span><span style="font-size:8px;color:#6b7280">DN</span> <span class="price-dn" style="font-size:16px">$'+f4(m.dnMid)+'</span></span>'+
+        '</div></div>';
+
+      gc+='<div class="grid-container">';
+      // UP column
+      gc+='<div class="grid-col"><div class="grid-col-title up">▲ UP Grid</div>';
+      var ug=m.upGrid||[];
+      for(var j=0;j<ug.length;j++){
+        var l=ug[j];
+        var statusIcon='',statusText='',extra='';
+        if(l.c){statusIcon='<span class="status-dot s-cancel"></span>';statusText='Cancelled';}
+        else if(l.s){statusIcon='<span class="status-dot s-sold"></span>';statusText='Sold';extra='+$'+f2((l.st-l.p)*10);}
+        else if(l.f){statusIcon='<span class="status-dot s-bought"></span>';statusText='Bought → $'+f4(l.st);extra='$'+f2(l.p*10);}
+        else{statusIcon='<span class="status-dot s-wait"></span>';statusText='Waiting';}
+        gc+='<div class="grid-row"><span class="level">$'+f4(l.p)+'</span><span class="status">'+statusIcon+''+statusText+'</span><span class="extra">'+extra+'</span></div>';
+      }
+      gc+='</div>';
+
+      // DOWN column
+      gc+='<div class="grid-col"><div class="grid-col-title dn">▼ DN Grid</div>';
+      var dg=m.dnGrid||[];
+      for(var j=0;j<dg.length;j++){
+        var l=dg[j];
+        var statusIcon='',statusText='',extra='';
+        if(l.c){statusIcon='<span class="status-dot s-cancel"></span>';statusText='Cancelled';}
+        else if(l.s){statusIcon='<span class="status-dot s-sold"></span>';statusText='Sold';extra='+$'+f2((l.st-l.p)*10);}
+        else if(l.f){statusIcon='<span class="status-dot s-bought"></span>';statusText='Bought → $'+f4(l.st);extra='$'+f2(l.p*10);}
+        else{statusIcon='<span class="status-dot s-wait"></span>';statusText='Waiting';}
+        gc+='<div class="grid-row"><span class="level">$'+f4(l.p)+'</span><span class="status">'+statusIcon+''+statusText+'</span><span class="extra">'+extra+'</span></div>';
+      }
+      gc+='</div>';
+      gc+='</div>';
     }
-    mc+='</table>';
   }
-  document.getElementById('mktBody').innerHTML=mc;
+  document.getElementById('gridBody').innerHTML=gc;
 
   // Trades
   var tc='';
@@ -143,13 +188,12 @@ function render(d){
   var lc='';
   var logs=d.activityLog||[];
   if(!logs.length){lc='<div class="empty">No activity yet</div>';}
-  else{for(var i=0;i<Math.min(logs.length,40);i++){lc+='<div class="log-line">'+logs[i].replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</div>';}}
+  else{for(var i=0;i<Math.min(logs.length,50);i++){lc+='<div class="log-line">'+logs[i].replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</div>';}}
   document.getElementById('logBody').innerHTML=lc;
 
   var s=d.strategy||{};
-  var pairs=(d.activeMarkets||[]).map(function(m){return m.pair;}).join(',');
-  var ftr='Flip Bot | '+pairs+' | '+s.shares+'sh | offset:'+s.limitOffset+' | '+(s.dryRun?'DEMO $'+s.demoBalance:'LIVE')+' | '+fmtU(d.uptime);
-  document.getElementById('footer').textContent=ftr;
+  var caps='$'+s.shares*0.45*14+' max | '+s.shares+'sh × '+s.tpOffset+' TP | close@'+s.closeAtSecs+'s';
+  document.getElementById('footer').textContent='Grid Bot | '+(s.dryRun?'DEMO $'+s.demoBalance:'LIVE')+' | '+caps+' | '+fmtU(d.uptime);
 }
 
 socket.on('connect',function(){document.getElementById('dot').className='dot on';});
