@@ -29,6 +29,10 @@ const FOK_SELL_RETRY_MS = 500;
 
 const TARGET_PAIRS = ['BTC'];
 
+// ── Demo / Dry-Run ──
+let dryRun = process.env.DRY_RUN === 'true';
+const DEMO_BALANCE = parseFloat(process.env.DEMO_BALANCE || '50');
+
 let emitFn     = () => {};
 let slog       = () => {};
 let trader     = null;
@@ -240,6 +244,19 @@ async function buyShares(m, side) {
     const dollarAmount = f2(SHARES * price);
     log(`${m.pair} BUY ${side.toUpperCase()} $${dollarAmount} (${SHARES}sh x ${f4(price)}) FOK #${attempt}`);
 
+    // Demo mode: simulate fill
+    if (dryRun) {
+      const cost = dollarAmount;
+      if (balance < cost) {
+        log(`${m.pair} DEMO insufficient balance $${f2(balance)} < $${cost}`);
+        return null;
+      }
+      balance = f2(balance - cost);
+      log(`DEMO FILLED BUY ${m.pair} ${side.toUpperCase()} ${SHARES}sh@${f4(price)}`);
+      log(`Balance: $${f2(balance)} (-$${cost})`);
+      return price;
+    }
+
     try {
       const resp = await trader._clob.createAndPostMarketOrder(
         { tokenID: tokenId, amount: dollarAmount, side: Side.BUY, orderType: OrderType.FOK },
@@ -293,6 +310,15 @@ async function sellShares(m, side, reason) {
     attempt++;
     // TAKER: market order FOK, amount in SHARES for SELL
     log(`SELL #${attempt} ${m.pair} ${SHARES}sh @ ${f4(price)} (${Math.floor(secsLeft)}s left)`);
+
+    // Demo mode: simulate fill
+    if (dryRun) {
+      const proceeds = f2(SHARES * price);
+      balance = f2(balance + proceeds);
+      log(`DEMO FILLED SELL ${m.pair} ${side.toUpperCase()} ${SHARES}sh@${f4(price)}`);
+      log(`Balance: $${f2(balance)} (+$${proceeds})`);
+      return true;
+    }
 
     try {
       const resp = await trader._clob.createAndPostMarketOrder(
@@ -459,6 +485,7 @@ function snapshot() {
   }));
 
   return {
+    dryRun:       dryRun,
     balance:      f2(balance),
     startBalance: f2(startBalance),
     pnl:          f2(balance - startBalance),
@@ -474,14 +501,28 @@ function snapshot() {
       forceCloseSecs:  FORCE_CLOSE_SECS,
       minEntryPrice:   MIN_ENTRY_PRICE,
       maxEntryPrice:   MAX_ENTRY_PRICE,
+      dryRun:          dryRun,
+      demoBalance:     DEMO_BALANCE,
     },
   };
 }
 
-async function setDryRun(dryRun) {
-  log(`setDryRun(${dryRun}) called - ignored`);
+async function setDryRun(v) {
+  dryRun = !!v;
+  if (dryRun) {
+    balance = DEMO_BALANCE;
+    startBalance = DEMO_BALANCE;
+  }
+  log(`Dry-run mode: ${dryRun ? 'ON (demo $' + DEMO_BALANCE + ')' : 'OFF (live)'}`);
+  // Re-fetch live balance when toggling back to live
+  if (!dryRun && trader) {
+    try {
+      const realBal = await trader.getBalance();
+      if (realBal > 0) { balance = realBal; startBalance = realBal; }
+    } catch (_) {}
+  }
 }
-function getDryRun() { return false; }
+function getDryRun() { return dryRun; }
 
 async function start(emit, logFn) {
   emitFn    = emit   || (() => {});
@@ -499,9 +540,15 @@ async function start(emit, logFn) {
     log('Authenticating...');
     await trader.authenticate();
     log(`Auth: ${trader.address}`);
-    const realBal = await trader.getBalance();
-    if (realBal > 0) { balance = realBal; startBalance = realBal; }
-    log(`Balance: $${f2(balance)}`);
+    if (dryRun) {
+      balance = DEMO_BALANCE;
+      startBalance = DEMO_BALANCE;
+      log(`DEMO MODE - Balance: $${f2(balance)}`);
+    } else {
+      const realBal = await trader.getBalance();
+      if (realBal > 0) { balance = realBal; startBalance = realBal; }
+      log(`LIVE - Balance: $${f2(balance)}`);
+    }
   } catch (e) {
     log(`Auth failed: ${e.message}`);
     process.exit(1);
