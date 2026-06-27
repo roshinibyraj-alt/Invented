@@ -101,23 +101,48 @@ class PolymarketTrader {
     return { id };
   }
 
-  // ── FOK market order (exit/entry) ──
-  async placeFokOrder(tokenId, side, amount) {
-    const sideVal = side === 'BUY' ? Side.BUY : Side.SELL;
+  // ── FOK market BUY — amount is dollars ──
+  async placeFokBuy(tokenId, dollarAmount) {
     let tickSize = '0.01', negRisk = false;
     try { tickSize = (await this._clob.getTickSize(tokenId)) ?? '0.01'; } catch (_) {}
     try { negRisk  = (await this._clob.getNegRisk(tokenId))  ?? false;  } catch (_) {}
     const resp = await this._clob.createAndPostMarketOrder(
-      { tokenID: tokenId, amount, side: sideVal, orderType: OrderType.FOK },
+      { tokenID: tokenId, amount: dollarAmount, side: Side.BUY, orderType: OrderType.FOK },
       { tickSize, negRisk },
       OrderType.FOK
     );
-    const id = resp?.orderID ?? resp?.id ?? null;
-    const status = resp?.status || (id ? 'UNKNOWN' : 'FAILED');
-    const isFilled = status === 'FILLED' || resp?.match_status === 'filled' || (resp?.remaining_size && parseFloat(resp.remaining_size) === 0);
-    const avgPrice = parseFloat(resp?.avg_fill_price || resp?.price || '0');
-    if (id) this._log(`🏁 FOK ${side} $${amount} → ${status} avg:${avgPrice} id:${id ? id.slice(0,12) : '?'}…`);
+    const id        = resp?.orderID ?? resp?.id ?? null;
+    const status    = resp?.status || (id ? 'UNKNOWN' : 'FAILED');
+    const remaining = parseFloat(resp?.remaining_size ?? '999');
+    const isFilled  = status === 'FILLED' || (resp?.match_status || '').toLowerCase() === 'filled' || remaining === 0;
+    const avgPrice  = parseFloat(resp?.avg_fill_price || resp?.price || '0');
+    if (id) this._log(`🏁 FOK BUY $${dollarAmount} → ${status} avg:${avgPrice} id:${id.slice(0,12)}…`);
     return { id, status, isFilled, avgPrice, raw: resp };
+  }
+
+  // ── FOK market SELL — amount is number of shares ──
+  async placeFokSell(tokenId, shares) {
+    let tickSize = '0.01', negRisk = false;
+    try { tickSize = (await this._clob.getTickSize(tokenId)) ?? '0.01'; } catch (_) {}
+    try { negRisk  = (await this._clob.getNegRisk(tokenId))  ?? false;  } catch (_) {}
+    const resp = await this._clob.createAndPostMarketOrder(
+      { tokenID: tokenId, amount: shares, side: Side.SELL, orderType: OrderType.FOK },
+      { tickSize, negRisk },
+      OrderType.FOK
+    );
+    const id        = resp?.orderID ?? resp?.id ?? null;
+    const status    = resp?.status || (id ? 'UNKNOWN' : 'FAILED');
+    const remaining = parseFloat(resp?.remaining_size ?? '999');
+    const isFilled  = status === 'FILLED' || (resp?.match_status || '').toLowerCase() === 'filled' || remaining === 0;
+    const avgPrice  = parseFloat(resp?.avg_fill_price || resp?.price || '0');
+    if (id) this._log(`🏁 FOK SELL ${shares}sh → ${status} avg:${avgPrice} id:${id.slice(0,12)}…`);
+    return { id, status, isFilled, avgPrice, raw: resp };
+  }
+
+  // ── Kept for backward compatibility ──
+  async placeFokOrder(tokenId, side, amount) {
+    if (side === 'BUY') return this.placeFokBuy(tokenId, amount);
+    return this.placeFokSell(tokenId, amount);
   }
 
   // ── Poll order until filled or timeout ──
