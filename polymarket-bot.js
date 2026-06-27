@@ -245,7 +245,9 @@ async function managePositions() {
       } catch (_) {}
     }
     if (price > 0.01) {
-      st.entrySent = await enterPosition(m, st.side, price);
+      st.entrySent = true; // lock immediately to prevent concurrent entries
+      const _entered = await enterPosition(m, st.side, price);
+      if (!_entered) { st.entrySent = false; st.retryAfter = Date.now() + 200; }
     }
   }
 
