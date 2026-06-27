@@ -257,6 +257,7 @@ async function buyShares(m, side) {
       return price;
     }
 
+    const balBefore = await trader.getBalance();
     try {
       const resp = await trader._clob.createAndPostMarketOrder(
         { tokenID: tokenId, amount: dollarAmount, side: Side.BUY, orderType: OrderType.FOK },
@@ -277,6 +278,32 @@ async function buyShares(m, side) {
         log(`Balance: $${f2(balance)} (-$${cost})`);
         return fillPrice;
       }
+
+      // Response says nofill - but CLOB might have filled it anyway.
+      // Poll getOrder for 5s to confirm.
+      if (id) {
+        log(`POLL BUY ${m.pair} - checking if actually filled...`);
+        const confirm = await trader.waitForFill(id, 5000);
+        if (confirm.filled) {
+          log(`POLL CONFIRMED BUY ${m.pair} ${side.toUpperCase()} @ ${f4(fillPrice)}`);
+          const cost = f2(SHARES * fillPrice);
+          balance = f2(balance - cost);
+          log(`Balance: $${f2(balance)} (-$${cost})`);
+          return fillPrice;
+        }
+      }
+
+      // Poll also inconclusive - check if balance actually changed
+      const balAfter = await trader.getBalance();
+      const diff = f2(balAfter - balBefore);
+      if (diff < -0.01) {
+        // Balance decreased - the order DID fill despite the response
+        log(`BALANCE CHECK BUY ${m.pair} - balance changed by $${diff}, assuming filled`);
+        balance = balAfter;
+        log(`Balance: $${f2(balance)}`);
+        return price;
+      }
+
       log(`NOFILL BUY ${m.pair} ${side.toUpperCase()}${id ? '' : ' (no id)'} - retry`);
     } catch (e) {
       log(`BUY ERR ${m.pair}: ${e.message.slice(0, 80)} - retry`);
@@ -320,6 +347,7 @@ async function sellShares(m, side, reason) {
       return true;
     }
 
+    const balBefore = await trader.getBalance();
     try {
       const resp = await trader._clob.createAndPostMarketOrder(
         { tokenID: tokenId, amount: SHARES, side: Side.SELL, orderType: OrderType.FOK },
@@ -340,6 +368,30 @@ async function sellShares(m, side, reason) {
         log(`Balance: $${f2(balance)} (+$${proceeds})`);
         return true;
       }
+
+      // Poll getOrder for 5s
+      if (id) {
+        log(`POLL SELL ${m.pair} - checking if actually filled...`);
+        const confirm = await trader.waitForFill(id, 5000);
+        if (confirm.filled) {
+          log(`POLL CONFIRMED SELL ${m.pair} ${side.toUpperCase()} @ ${f4(fillPrice)}`);
+          const proceeds = f2(SHARES * fillPrice);
+          balance = f2(balance + proceeds);
+          log(`Balance: $${f2(balance)} (+$${proceeds})`);
+          return true;
+        }
+      }
+
+      // Balance check fallback
+      const balAfter = await trader.getBalance();
+      const diff = f2(balAfter - balBefore);
+      if (diff > 0.01) {
+        log(`BALANCE CHECK SELL ${m.pair} - balance changed by +$${diff}, assuming filled`);
+        balance = balAfter;
+        log(`Balance: $${f2(balance)}`);
+        return true;
+      }
+
       log(`NOFILL SELL ${m.pair} ${side.toUpperCase()}${id ? '' : ' (no id)'} - retry`);
     } catch (e) {
       log(`SELL ERR ${m.pair}: ${e.message.slice(0, 80)} - retry`);
