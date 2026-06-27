@@ -272,7 +272,7 @@ async function managePositions() {
     if (!reason) continue;
 
     if (st) st.exiting = true;
-    await exitPosition(pos, sidePrice, m);
+    await exitPosition(pos, sidePrice, m, reason);
   }
   positions = positions.filter(p => !p.resolved);
 }
@@ -293,7 +293,7 @@ function checkExitConditions(pos, cp, m, elapsed) {
   return null;
 }
 
-async function exitPosition(pos, exitPrice, m) {
+async function exitPosition(pos, exitPrice, m, exitReason) {
   const cost     = fl2(pos.size * pos.entryPrice);
   const tokenId  = pos.side === 'up' ? m.upTokenId : m.downTokenId;
 
@@ -306,8 +306,9 @@ async function exitPosition(pos, exitPrice, m) {
     slog(`📤 SELL ${m.pair} ${pos.side.toUpperCase()} ${pos.size}sh@${fl4(exitPrice)} pnl:$${pnl} fee:$${fl2(fee)} bal:$${fl2(balance)}`);
     pushTrade(m.pair, pos.side.toUpperCase(), 'SELL', pos.entryPrice, exitPrice, pos.size, pnl, balance, fee);
     pos.resolved = true;
-    // Flip
-    if (mState[pos.slug]) mState[pos.slug].side = pos.side === 'up' ? 'down' : 'up';
+    if (mState[pos.slug] && exitReason !== 'force_sell') {
+      mState[pos.slug].side = pos.side === 'up' ? 'down' : 'up';
+    }
     return;
   }
 
@@ -326,14 +327,41 @@ async function exitPosition(pos, exitPrice, m) {
       slog(`📤 FOK FILLED ${m.pair} ${pos.side.toUpperCase()} ${pos.size}sh@${fl4(fillPrice)} pnl:$${pnl} bal:$${fl2(balance)}`);
       pushTrade(m.pair, pos.side.toUpperCase(), 'SELL', pos.entryPrice, fillPrice, pos.size, pnl, balance, fee);
       pos.resolved = true;
-      // Flip to opposite side
-      if (mState[pos.slug]) {
+      // Flip to opposite side (only on trailing, not force sell)
+      if (mState[pos.slug] && exitReason !== 'force_sell') {
         mState[pos.slug].side = pos.side === 'up' ? 'down' : 'up';
-        mState[pos.slug].entrySent = false; // will trigger GTC BUY next tick
+        mState[pos.slug].entrySent = false;
         mState[pos.slug].exiting = false;
+      } else if (mState[pos.slug]) {
+        mState[pos.slug].exiting = false;
+        mState[pos.slug].started = false; // don't re-enter
       }
     } else {
-      slog(`⚠️ FOK SELL ${m.pair} ${pos.side.toUpperCase()} not filled — retry next tick`);
+      if (exitReason === 'force_sell') {
+        // Force sell: place GTC at extreme price to guarantee fill
+        try {
+          const dumpPrice = 0.01; // sell everything for pennies
+          const gtc = await trader.placeGtcOrder(tokenId, 'SELL', dumpPrice, pos.size);
+          slog(`⏳ GTC SELL ${m.pair} ${pos.side.toUpperCase()} @ ${dumpPrice} (FORCE — guaranteed fill) id:${gtc.id?.slice(0,12)||'?'}…`);
+          // Poll until it fills
+          const fill = await trader.waitForFill(gtc.id, 25000);
+          if (fill.filled) {
+            const proceeds = fl2(pos.size * dumpPrice);
+            const fee = calcFee(proceeds, dumpPrice);
+            const pnl = fl2(proceeds - (pos.size * pos.entryPrice) - fee);
+            balance = fl2(balance + proceeds - fee);
+            totalFeesPaid = fl2(totalFeesPaid + fee);
+            slog(`📤 FORCE DUMPED ${m.pair} ${pos.side.toUpperCase()} ${pos.size}sh@${dumpPrice} pnl:$${pnl} bal:$${fl2(balance)}`);
+            pushTrade(m.pair, pos.side.toUpperCase(), 'SELL', pos.entryPrice, dumpPrice, pos.size, pnl, balance, fee);
+            pos.resolved = true;
+            if (mState[pos.slug]) { mState[pos.slug].exiting = false; mState[pos.slug].started = false; }
+          } else {
+            slog(`⚠️ FORCE GTC didn't fill — retry next tick`);
+          }
+        } catch(e) { slog(`❌ FORCE SELL: ${e.message}`); }
+      } else {
+        slog(`⚠️ FOK SELL ${m.pair} ${pos.side.toUpperCase()} not filled — retry next tick`);
+      }
     }
   } catch (e) {
     slog(`❌ FOK SELL ${m.pair} ${pos.side.toUpperCase()}: ${e.message}`);
