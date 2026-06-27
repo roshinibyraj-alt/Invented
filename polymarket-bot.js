@@ -15,7 +15,7 @@ const WINDOW_SECS       = 300;
 // ── Strategy ──
 const ENTRY_WAIT_SECS  = 10;
 const SHARES           = 6;
-const TRAILING_DIST    = 0.05;
+const TRAILING_DIST    = 0.10;
 const FORCE_CLOSE_SECS = 30;
 const HARD_SELL_SECS   = 15;
 
