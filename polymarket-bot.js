@@ -17,8 +17,9 @@ const FORCE_SELL_SECS    = 270;
 const ENTRY_WAIT_SECS    = 10;
 const MIN_HOLD_SECS      = 5;
 const RETRY_COOLDOWN_MS  = 300;
+const ORDER_TIMEOUT_MS   = 30000;
 
-let DRY_RUN = true;
+let DRY_RUN = false;
 const TARGET_PAIRS = ['BTC', 'ETH'];
 
 let emitFn = () => {};
@@ -54,7 +55,7 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 function genSlugs() {
   const now = Math.floor(Date.now() / 1000);
   const cur = Math.floor(now / WINDOW_SECS) * WINDOW_SECS;
-  return TARGET_PAIRS.map(p => `${p.toLowerCase()}-updown-5m-${cur + WINDOW_SECS}`);
+  return TARGET_PAIRS.map(p => `${p.toLowerCase()}-updown-5m-${cur}`);
 }
 
 async function discover() {
@@ -79,6 +80,7 @@ async function discover() {
       phase: 'idle', side: 'up',
       entryLock: false, exitLock: false, retryAfter: 0,
       holdStartedAt: 0, entryPrice: 0, peakPrice: 0,
+      pendingOrderId: null, pendingOrderAt: 0,
     };
   }));
 
@@ -122,22 +124,52 @@ async function doEntry(m) {
   }
 
   const tid = m.side === 'up' ? m.upTokenId : m.downTokenId;
-  const dollarAmount = parseFloat(f2(SHARES_PER_LOT * price));
-  if (dollarAmount <= 0) return false;
   try {
-    const order = await trader.placeFokOrder(tid, 'BUY', dollarAmount);
-    if (order.isFilled) {
-      const fillPrice = order.avgPrice > 0 ? order.avgPrice : price;
+    // First: try FOK market order
+    const dollarAmount = parseFloat(f2(SHARES_PER_LOT * price));
+    if (dollarAmount <= 0) return false;
+    const fok = await trader.placeFokOrder(tid, 'BUY', dollarAmount);
+    if (fok.isFilled) {
+      const fillPrice = fok.avgPrice > 0 ? fok.avgPrice : price;
       m.entryPrice = fillPrice; m.peakPrice = fillPrice; m.holdStartedAt = Date.now();
-      log(`🟢 ENTRY ${m.pair} ${m.side.toUpperCase()} ${SHARES_PER_LOT}sh@${f4(fillPrice)}`);
+      log(`🟢 FOK ENTRY ${m.pair} ${m.side.toUpperCase()} ${SHARES_PER_LOT}sh@${f4(fillPrice)}`);
       trades.unshift({ ts: new Date().toTimeString().slice(0,8), pair: m.pair, side: m.side.toUpperCase(), action: 'ENTRY', entry: fillPrice, shares: SHARES_PER_LOT, pnl: 0, bal: balance });
       if (trades.length > 100) trades.length = 100;
       return true;
     }
-    log(`⏭️ ENTRY nofill ${m.pair} ${m.side.toUpperCase()} @${f4(price)}`);
+
+    // Fallback: GTC limit order at midpoint, poll for fill
+    log(`📋 GTC ENTRY ${m.pair} ${m.side.toUpperCase()} ${SHARES_PER_LOT}sh@${f4(price)} (FOK nofill)`);
+    const gtc = await trader.placeGtcOrder(tid, 'BUY', price, SHARES_PER_LOT);
+    const orderId = gtc.id;
+    if (!orderId) return false;
+
+    // Poll for fill
+    const deadline = Date.now() + ORDER_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      await sleep(2000);
+      try {
+          const order = await trader.getOrder(orderId);
+        if (!order) continue;
+        const status = order.status || '';
+        const matchStatus = (order.match_status || '').toLowerCase();
+        if (status === 'FILLED' || matchStatus === 'filled') {
+          const fillPrice = parseFloat(order.avg_fill_price || order.price || price);
+          m.entryPrice = fillPrice; m.peakPrice = fillPrice; m.holdStartedAt = Date.now();
+          log(`🟢 GTC FILLED ${m.pair} ${m.side.toUpperCase()} @${f4(fillPrice)}`);
+          trades.unshift({ ts: new Date().toTimeString().slice(0,8), pair: m.pair, side: m.side.toUpperCase(), action: 'ENTRY', entry: fillPrice, shares: SHARES_PER_LOT, pnl: 0, bal: balance });
+          if (trades.length > 100) trades.length = 100;
+          return true;
+        }
+        if (status === 'CANCELLED' || matchStatus === 'cancelled') break;
+      } catch (_) {}
+    }
+    // Timeout or cancelled - cancel the order
+    try { await trader.cancelOrder(orderId); } catch (_) {}
+    log(`⏰ GTC TIMEOUT ${m.pair} ${m.side.toUpperCase()}`);
     return false;
   } catch (e) {
-    log(`❌ ENTRY ${m.pair}: ${e.message}`);
+    log(`❌ ENTRY ${m.pair}: ${e.message.slice(0,80)}`);
     return false;
   }
 }
@@ -186,6 +218,8 @@ async function tickMarket(m) {
 
   if (m.phase === 'idle' && elapsed >= ENTRY_WAIT_SECS) {
     m.side = pickCheapestSide(m);
+    const price = m.side === 'up' ? m.upMid : m.downMid;
+    if (price <= 0.01) { m.phase = 'idle'; return; }
     m.phase = 'wait';
     log(`▶️ ${m.pair} START cheapest=${m.side.toUpperCase()} up=${f4(m.upMid)} dn=${f4(m.downMid)}`);
   }
