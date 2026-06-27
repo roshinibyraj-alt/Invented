@@ -9,41 +9,28 @@ if (!globalThis.crypto || typeof globalThis.crypto.subtle === 'undefined') {
 }
 
 const { privateKeyToAccount } = require('viem/accounts');
-const { createWalletClient, http, encodeFunctionData, prepareEncodeFunctionData, maxUint256 } = require('viem');
+const { createWalletClient, http } = require('viem');
 const { polygon } = require('viem/chains');
 const {
-  ClobClient, SignatureTypeV2, AssetType, Side, OrderType
+  ClobClient, AssetType, Side, OrderType
 } = require('@polymarket/clob-client-v2');
-const { RelayClient } = require('@polymarket/builder-relayer-client');
 
 const CLOB_HOST = 'https://clob.polymarket.com';
-const RELAYER_HOST = process.env.POLYMARKET_RELAYER_URL || 'https://relayer-v2.polymarket.com';
 const CHAIN_ID = 137;
 
 const ORDER_POLL_MS      = 200;
 const ORDER_POLL_TIMEOUT = 8000;
 
-const PUSD_TOKEN = '0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB';
-const EXCHANGE_V2 = '0xE111180000d2663C0091e4f400237545B87B996B';
-
-const ERC20_APPROVE_ABI = [{
-  name: 'approve', type: 'function',
-  inputs: [{ name: 'spender', type: 'address' }, { name: 'amount', type: 'uint256' }],
-  outputs: [{ name: '', type: 'bool' }],
-}];
-
 class PolymarketTrader {
-  constructor(privateKey, funderAddr) {
+  constructor(privateKey) {
     const pk = privateKey.startsWith('0x') ? privateKey : `0x${privateKey}`;
     this._account = privateKeyToAccount(pk);
     this.address  = this._account.address;
     this._walletClient = createWalletClient({ account: this._account, chain: polygon, transport: http() });
-    this.depositWallet = funderAddr;
     this._clob  = null;
     this.apiKey = null;
     this.balance = 0;
     this._log   = () => {};
-    this._relayClient = null;
   }
 
   setLogFn(fn) { this._log = fn; }
@@ -52,16 +39,13 @@ class PolymarketTrader {
     this._log('🔑 Authenticating...');
     const tempClient = new ClobClient({
       host: CLOB_HOST, chain: CHAIN_ID, signer: this._walletClient,
-      signatureType: SignatureTypeV2.POLY_1271, funderAddress: this.depositWallet
     });
     const creds = await tempClient.createOrDeriveApiKey();
     this.apiKey = creds.key;
     this._clob = new ClobClient({
       host: CLOB_HOST, chain: CHAIN_ID, signer: this._walletClient, creds,
-      signatureType: SignatureTypeV2.POLY_1271, funderAddress: this.depositWallet
     });
     this._log(`✅ Auth OK: ${this.address}`);
-    this._log(`💼 Deposit: ${this.depositWallet}`);
     return { apiKey: this.apiKey };
   }
 
@@ -69,64 +53,13 @@ class PolymarketTrader {
     try {
       await this._clob.updateBalanceAllowance({ asset_type: AssetType.COLLATERAL });
       const ba = await this._clob.getBalanceAllowance({ asset_type: AssetType.COLLATERAL });
-      let allowance = parseFloat(ba?.allowance ?? '0') / 1e6;
-      this._log(`ℹ️  Allowance: $${allowance.toFixed(2)}`);
-
-      if (allowance <= 0) {
-        this._log('🔏 Approving pUSD via deposit wallet relay...');
-        if (!this.depositWallet) throw new Error('FUNDER_ADDRESS (deposit wallet) required for approval');
-
-        if (!this._relayClient) {
-          this._relayClient = new RelayClient(RELAYER_HOST, CHAIN_ID, this._walletClient);
-        }
-
-        const erc20 = prepareEncodeFunctionData({
-          abi: ERC20_APPROVE_ABI,
-          functionName: 'approve',
-        });
-        const calldata = encodeFunctionData({
-          ...erc20,
-          args: [EXCHANGE_V2, maxUint256],
-        });
-        const approveCall = {
-          target: PUSD_TOKEN,
-          value: '0',
-          data: calldata,
-        };
-
-        // Deploy deposit wallet if not yet deployed
-        const deployed = await this._relayClient.getDeployed(this.depositWallet, 'WALLET');
-        if (!deployed) {
-          this._log('⏳ Deploying deposit wallet...');
-          const deployResp = await this._relayClient.deployDepositWallet();
-          const deployResult = await deployResp.wait();
-          this._log(deployResult ? '✅ Deposit wallet deployed' : '⚠️ Deploy pending');
-        }
-
-        const deadline = Math.floor(Date.now() / 1000 + 240).toString();
-        this._log('📤 Submitting deposit wallet batch approval...');
-        const resp = await this._relayClient.executeDepositWalletBatch(
-          [approveCall], this.depositWallet, deadline
-        );
-        const result = await resp.wait();
-
-        if (result) {
-          this._log(`✅ Relay approval tx: ${result.transactionHash || 'submitted'}`);
-        } else {
-          this._log('⚠️ Relay approval pending (check Polymarket for confirmation)');
-        }
-
-        await new Promise(r => setTimeout(r, 5000));
-        await this._clob.updateBalanceAllowance({ asset_type: AssetType.COLLATERAL });
-        const ba2 = await this._clob.getBalanceAllowance({ asset_type: AssetType.COLLATERAL });
-        allowance = parseFloat(ba2?.allowance ?? '0') / 1e6;
-        this._log(`✅ Allowance after approval: $${allowance.toFixed(2)}`);
-      } else {
-        this._log('✅ Allowance OK');
-      }
+      const allowance = parseFloat(ba?.allowance ?? '0') / 1e6;
+      const bal = parseFloat(ba?.balance ?? '0') / 1e6;
+      this._log(`ℹ️  Allowance: $${allowance.toFixed(2)} | Balance: $${bal.toFixed(2)}`);
+      if (allowance <= 0) this._log('⚠️  Allowance is $0 — run approveAllowance to approve pUSD');
       return allowance > 0;
     } catch (e) {
-      this._log(`⚠️ Allowance: ${e.message}`);
+      this._log(`⚠️  Allowance check: ${e.message}`);
       return false;
     }
   }
@@ -147,7 +80,7 @@ class PolymarketTrader {
     try { tickSize = (await this._clob.getTickSize(tokenId)) ?? '0.01'; } catch (_) {}
     try { negRisk  = (await this._clob.getNegRisk(tokenId))  ?? false;  } catch (_) {}
     const resp = await this._clob.createAndPostOrder(
-      { tokenID: tokenId, price: String(price), size: String(size), side: sideVal },
+      { tokenID: tokenId, price, size, side: sideVal },
       { tickSize, negRisk },
       OrderType.GTC
     );
@@ -231,7 +164,7 @@ class PolymarketTrader {
     try { tickSize = (await this._clob.getTickSize(tokenId)) ?? '0.01'; } catch (_) {}
     try { negRisk  = (await this._clob.getNegRisk(tokenId))  ?? false;  } catch (_) {}
     const resp = await this._clob.createAndPostOrder(
-      { tokenID: tokenId, price: String(price), size: String(size), side: sideVal },
+      { tokenID: tokenId, price, size, side: sideVal },
       { tickSize, negRisk },
       OrderType.FOK
     );

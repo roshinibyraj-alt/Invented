@@ -347,23 +347,10 @@ async function setDryRun(val) {
     flushAll();
     if (process.env.POLYMARKET_PRIVATE_KEY) {
       try {
-        trader = new PolymarketTrader(process.env.POLYMARKET_PRIVATE_KEY, process.env.FUNDER_ADDRESS);
+        trader = new PolymarketTrader(process.env.POLYMARKET_PRIVATE_KEY);
         trader.setLogFn(log);
         log('🔑 Authenticating...'); await trader.authenticate();
         log(`✅ Auth: ${trader.address}`);
-        await trader.approveAllowance();
-        try {
-          const oo = await trader.getOpenOrders();
-          if (Array.isArray(oo)) {
-            let cancelled = 0;
-            for (const o of oo) {
-              const oid = o.id || o.orderID;
-              const side = o.side || '';
-              if (oid && side === 'BUY') { try { await trader.cancelOrder(oid); cancelled++; } catch(_) {} }
-            }
-            if (cancelled > 0) log(`🧹 Cancelled ${cancelled} stale orders`);
-          }
-        } catch(_) {}
         const realBal = await trader.getBalance();
         if (realBal > 0) { balance = realBal; startBalance = realBal; }
         log(`💰 Balance: $${f2(balance)}`);
@@ -388,21 +375,9 @@ async function start(emit, logFn) {
     startBalance = DEMO_BALANCE;
   } else {
     try {
-      trader = new PolymarketTrader(process.env.POLYMARKET_PRIVATE_KEY, process.env.FUNDER_ADDRESS);
+      trader = new PolymarketTrader(process.env.POLYMARKET_PRIVATE_KEY);
       trader.setLogFn(log); log('🔑 Authenticating...'); await trader.authenticate();
       log(`✅ Auth: ${trader.address}`);
-      await trader.approveAllowance();
-      try {
-        const oo = await trader.getOpenOrders();
-        if (Array.isArray(oo)) {
-          let c = 0;
-          for (const o of oo) {
-            const oid = o.id || o.orderID;
-            if (oid && (o.side || '') === 'BUY') { try { await trader.cancelOrder(oid); c++; } catch(_) {} }
-          }
-          if (c > 0) log(`🧹 Cancelled ${c} stale orders`);
-        }
-      } catch(_) {}
       const realBal = await trader.getBalance();
       if (realBal > 0) { balance = realBal; startBalance = realBal; }
       log(`💰 Balance: $${f2(balance)}`);
