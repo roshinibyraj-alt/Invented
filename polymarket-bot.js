@@ -1,28 +1,32 @@
 'use strict';
 
-const WebSocket      = require('ws');
+const WebSocket        = require('ws');
 const PolymarketTrader = require('./polymarket-trader');
 
-const GAMMA = 'https://gamma-api.polymarket.com';
-const CLOB  = 'https://clob.polymarket.com';
+const GAMMA   = 'https://gamma-api.polymarket.com';
+const CLOB    = 'https://clob.polymarket.com';
 const CLOB_WS = 'wss://ws-subscriptions-clob.polymarket.com/ws/market';
 
 // ── Timing ──
-const TICK_MS           = 500;    // main loop interval
-const DISCOVER_EVERY_MS = 15000;  // re-run discovery every 15s
-const WINDOW_SECS       = 300;    // 5-minute market window
+const TICK_MS           = 500;
+const DISCOVER_EVERY_MS = 15000;
+const WINDOW_SECS       = 300;
 
 // ── Strategy ──
-const ENTRY_WAIT_SECS  = 10;     // wait 10s after window opens before first entry
-const SHARES           = 6;      // always 6 shares, fixed
-const TRAILING_DIST    = 0.05;   // sell when price drops 0.05 from peak
-const FORCE_CLOSE_SECS = 30;     // force-sell trigger at 4m30s (30s before end)
-const HARD_SELL_SECS   = 15;     // absolute deadline — retry sell until 15s left
+const ENTRY_WAIT_SECS  = 10;
+const SHARES           = 6;
+const TRAILING_DIST    = 0.05;
+const FORCE_CLOSE_SECS = 30;   // trigger sell at 4m30s (30s before end)
+const HARD_SELL_SECS   = 15;   // absolute sell deadline
 
-// ── Order retry ──
-const FOK_RETRY_MS   = 500;      // retry FOK sell after this delay if not filled
-const GTC_POLL_MS    = 2000;     // poll GTC fill every 2s
-const GTC_TIMEOUT_MS = 25000;    // give up on GTC entry after 25s
+// ── Price guard — do NOT enter if price is outside this range ──
+// Prices <0.10 or >0.90 mean the market is nearly decided, book is empty
+const MIN_ENTRY_PRICE  = 0.10;
+const MAX_ENTRY_PRICE  = 0.90;
+
+// ── Order config ──
+const FOK_RETRY_MS     = 2000;  // retry FOK buy every 2s if nofill
+const FOK_SELL_RETRY_MS = 500;  // retry FOK sell every 500ms
 
 const TARGET_PAIRS = ['BTC', 'ETH'];
 
@@ -63,25 +67,21 @@ async function getJSON(url) {
 }
 
 // ── WebSocket price feed ──
-// One shared WS connection; subscribes per token as markets are discovered
-let ws            = null;
-let wsReady       = false;
-let wsPingTimer   = null;
-const wsTokenMap  = {};  // tokenId -> market slug
+let ws           = null;
+let wsReady      = false;
+let wsPingTimer  = null;
+const wsTokenMap = {};
 
 function wsConnect() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
-
   log('🔌 Connecting price WebSocket…');
   ws = new WebSocket(CLOB_WS);
 
   ws.on('open', () => {
     wsReady = true;
     log('✅ Price WebSocket connected');
-    // re-subscribe all known tokens after reconnect
     const tokenIds = Object.keys(wsTokenMap);
     if (tokenIds.length > 0) wsSubscribe(tokenIds);
-    // keepalive ping every 20s
     wsPingTimer = setInterval(() => {
       if (ws.readyState === WebSocket.OPEN) ws.ping();
     }, 20000);
@@ -92,16 +92,14 @@ function wsConnect() {
       const msgs = JSON.parse(raw);
       const arr  = Array.isArray(msgs) ? msgs : [msgs];
       for (const msg of arr) {
-        if (msg.event_type !== 'price_change' && msg.asset_id === undefined) continue;
         const tokenId = msg.asset_id;
         const price   = parseFloat(msg.price || msg.mid_price || '0');
         if (!tokenId || !price) continue;
         const slug = wsTokenMap[tokenId];
         if (!slug || !markets[slug]) continue;
         const m = markets[slug];
-        if (tokenId === m.upTokenId)   m.upMid  = f4(price);
-        if (tokenId === m.downTokenId) m.downMid = f4(price);
-        m.lastPriceAt = Date.now();
+        if (tokenId === m.upTokenId)   { m.upMid  = f4(price); m.lastPriceAt = Date.now(); }
+        if (tokenId === m.downTokenId) { m.downMid = f4(price); m.lastPriceAt = Date.now(); }
       }
     } catch (_) {}
   });
@@ -121,15 +119,9 @@ function wsConnect() {
 
 function wsSubscribe(tokenIds) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  const msg = JSON.stringify({
-    auth:   {},
-    type:   'Market',
-    assets_ids: tokenIds,
-  });
-  ws.send(msg);
+  ws.send(JSON.stringify({ auth: {}, type: 'Market', assets_ids: tokenIds }));
 }
 
-// ── REST price fallback (used only if WS price is stale >3s) ──
 async function restRefreshPrice(m) {
   const [ur, dr] = await Promise.all([
     getJSON(`${CLOB}/midpoint?token_id=${m.upTokenId}`),
@@ -174,8 +166,7 @@ async function discoverMarket(pair) {
 
   const windowStartMs = endTime - WINDOW_SECS * 1000;
 
-  // ── Cache tickSize + negRisk per token at discovery time ──
-  // Avoids 2 extra API calls on every single order
+  // Cache tickSize + negRisk — avoids 2 extra API calls on every order
   let upTickSize = '0.01', upNegRisk = false;
   let dnTickSize = '0.01', dnNegRisk = false;
   try {
@@ -191,35 +182,23 @@ async function discoverMarket(pair) {
 
   markets[slug] = {
     slug, pair,
-    upTokenId:   ids[0],
-    downTokenId: ids[1],
-    endTime,
-    windowStartMs,
-    upMid:    0,
-    downMid:  0,
-    lastPriceAt: 0,
-    loopRunning: false,
-    done: false,
-    // cached order params — no per-order API calls needed
-    upTickSize,   upNegRisk,
-    dnTickSize,   dnNegRisk,
+    upTokenId: ids[0], downTokenId: ids[1],
+    endTime, windowStartMs,
+    upMid: 0, downMid: 0, lastPriceAt: 0,
+    loopRunning: false, done: false,
+    upTickSize, upNegRisk, dnTickSize, dnNegRisk,
   };
 
-  // Register tokens in WS map and subscribe
   wsTokenMap[ids[0]] = slug;
   wsTokenMap[ids[1]] = slug;
   wsSubscribe([ids[0], ids[1]]);
-
-  // seed price via REST immediately so we have something before WS kicks in
   await restRefreshPrice(markets[slug]);
 
-  // start the sequential trade loop
   tradeLoop(markets[slug]).catch(e => log(`❌ Loop crash ${pair}: ${e.message}`));
 }
 
 async function discover() {
   await Promise.allSettled(TARGET_PAIRS.map(p => discoverMarket(p)));
-  // prune expired
   for (const [slug, m] of Object.entries(markets)) {
     if (Date.now() > m.endTime + 15000) {
       delete wsTokenMap[m.upTokenId];
@@ -229,101 +208,66 @@ async function discover() {
   }
 }
 
-// ── Entry: FOK first, GTC fallback ──
-// Uses cached tickSize/negRisk — no extra API calls
+// ── Entry: FOK only, retry every 2s ──
+// NO GTC — GTC fills silently after timeout and stacks positions
 async function buyShares(m, side) {
   const tokenId  = side === 'up' ? m.upTokenId  : m.downTokenId;
   const tickSize = side === 'up' ? m.upTickSize  : m.dnTickSize;
   const negRisk  = side === 'up' ? m.upNegRisk   : m.dnNegRisk;
+  const { Side, OrderType } = require('@polymarket/clob-client-v2');
 
-  await ensureFreshPrice(m);
-  const price = side === 'up' ? m.upMid : m.downMid;
-
-  if (price <= 0.01) {
-    log(`⚠️  ${m.pair} ${side.toUpperCase()} price too low (${price}), skip`);
-    return null;
-  }
-
-  const dollarAmount = f2(SHARES * price);
-  log(`🛒 ${m.pair} BUY ${side.toUpperCase()} ${SHARES}sh @ ~${f4(price)} ($${dollarAmount}) — FOK`);
-
-  // ── FOK attempt (uses cached params) ──
-  try {
-    const resp = await trader._clob.createAndPostMarketOrder(
-      { tokenID: tokenId, amount: dollarAmount, side: 'BUY', orderType: 'FOK' },
-      { tickSize, negRisk },
-      'FOK'
-    );
-    const id        = resp?.orderID ?? resp?.id ?? null;
-    const status    = resp?.status || (id ? 'UNKNOWN' : 'FAILED');
-    const remaining = parseFloat(resp?.remaining_size ?? '999');
-    const isFilled  = status === 'FILLED' || (resp?.match_status || '').toLowerCase() === 'filled' || remaining === 0;
-    const fillPrice = parseFloat(resp?.avg_fill_price || resp?.price || price);
-
-    if (isFilled) {
-      log(`✅ FOK BUY filled ${m.pair} ${side.toUpperCase()} @${f4(fillPrice)}`);
-      return fillPrice;
-    }
-    log(`📋 FOK nofill — GTC fallback ${m.pair} ${side.toUpperCase()}`);
-  } catch (e) {
-    log(`⚠️  FOK BUY error ${m.pair}: ${e.message.slice(0, 80)} — GTC fallback`);
-  }
-
-  // ── GTC fallback (uses cached params) ──
-  let orderId;
-  try {
-    const { Side, OrderType } = require('@polymarket/clob-client-v2');
-    const resp = await trader._clob.createAndPostOrder(
-      { tokenID: tokenId, price, size: SHARES, side: Side.BUY },
-      { tickSize, negRisk },
-      OrderType.GTC
-    );
-    orderId = resp?.orderID ?? resp?.id ?? null;
-    if (!orderId) throw new Error('no orderId returned');
-    log(`📋 GTC placed ${m.pair} ${side.toUpperCase()} id:${orderId.slice(0, 12)}…`);
-  } catch (e) {
-    log(`❌ GTC place failed ${m.pair}: ${e.message.slice(0, 80)}`);
-    return null;
-  }
-
-  // Poll for fill
-  const deadline = Date.now() + GTC_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    await sleep(GTC_POLL_MS);
+  let attempt = 0;
+  while (true) {
     const secsLeft = (m.endTime - Date.now()) / 1000;
-    if (secsLeft <= FORCE_CLOSE_SECS + 5) {
-      log(`⏰ GTC abort — too close to end ${m.pair}, cancelling`);
-      try { await trader.cancelOrder(orderId); } catch (_) {}
+    if (secsLeft <= FORCE_CLOSE_SECS) {
+      log(`⏳ ${m.pair} no time to enter (${Math.floor(secsLeft)}s left)`);
       return null;
     }
+
+    await ensureFreshPrice(m);
+    const price = side === 'up' ? m.upMid : m.downMid;
+
+    // Price guard — skip if market is nearly decided (thin book, bad fills)
+    if (price < MIN_ENTRY_PRICE || price > MAX_ENTRY_PRICE) {
+      log(`⛔ ${m.pair} ${side.toUpperCase()} price ${f4(price)} outside safe range [${MIN_ENTRY_PRICE}–${MAX_ENTRY_PRICE}], skip`);
+      return null;
+    }
+
+    const dollarAmount = f2(SHARES * price);
+    attempt++;
+    log(`🛒 ${m.pair} BUY ${side.toUpperCase()} ${SHARES}sh @ ~${f4(price)} ($${dollarAmount}) FOK attempt #${attempt}`);
+
     try {
-      const order       = await trader.getOrder(orderId);
-      if (!order) continue;
-      const status      = (order.status || '').toUpperCase();
-      const matchStatus = (order.match_status || '').toLowerCase();
-      if (status === 'FILLED' || matchStatus === 'filled') {
-        const fillPrice = parseFloat(order.avg_fill_price || order.price || price);
-        log(`✅ GTC filled ${m.pair} ${side.toUpperCase()} @${f4(fillPrice)}`);
+      const resp = await trader._clob.createAndPostMarketOrder(
+        { tokenID: tokenId, amount: dollarAmount, side: Side.BUY, orderType: OrderType.FOK },
+        { tickSize, negRisk },
+        OrderType.FOK
+      );
+      const id        = resp?.orderID ?? resp?.id ?? null;
+      const status    = resp?.status || (id ? 'UNKNOWN' : 'FAILED');
+      const remaining = parseFloat(resp?.remaining_size ?? '999');
+      const isFilled  = status === 'FILLED' || (resp?.match_status || '').toLowerCase() === 'filled' || remaining === 0;
+      const fillPrice = parseFloat(resp?.avg_fill_price || resp?.price || price);
+
+      if (isFilled) {
+        log(`✅ BUY filled ${m.pair} ${side.toUpperCase()} @${f4(fillPrice)} (attempt #${attempt})`);
         return fillPrice;
       }
-      if (status === 'CANCELLED' || matchStatus === 'cancelled') {
-        log(`❌ GTC cancelled ${m.pair} ${side.toUpperCase()}`);
-        return null;
-      }
-    } catch (_) {}
-  }
+      log(`⏭️  FOK nofill ${m.pair} ${side.toUpperCase()} — retry in ${FOK_RETRY_MS}ms`);
+    } catch (e) {
+      log(`⚠️  FOK BUY error ${m.pair}: ${e.message.slice(0, 80)} — retry`);
+    }
 
-  log(`⏰ GTC timeout ${m.pair} ${side.toUpperCase()} — cancelling`);
-  try { await trader.cancelOrder(orderId); } catch (_) {}
-  return null;
+    await sleep(FOK_RETRY_MS);
+  }
 }
 
-// ── Exit: FOK only, hard retry until HARD_SELL_SECS before end ──
-// Guarantees no position is left unsold going into market expiry
+// ── Exit: FOK only, hard retry until HARD_SELL_SECS ──
 async function sellShares(m, side, reason) {
   const tokenId  = side === 'up' ? m.upTokenId  : m.downTokenId;
   const tickSize = side === 'up' ? m.upTickSize  : m.dnTickSize;
   const negRisk  = side === 'up' ? m.upNegRisk   : m.dnNegRisk;
+  const { Side, OrderType } = require('@polymarket/clob-client-v2');
 
   log(`📤 ${m.pair} SELL ${side.toUpperCase()} ${SHARES}sh — ${reason}`);
 
@@ -331,9 +275,8 @@ async function sellShares(m, side, reason) {
   while (true) {
     const secsLeft = (m.endTime - Date.now()) / 1000;
 
-    // Hard deadline: if we're past HARD_SELL_SECS, market resolves on-chain
     if (secsLeft < HARD_SELL_SECS) {
-      log(`⌛ ${m.pair} HARD DEADLINE reached (${Math.floor(secsLeft)}s left) — could not sell, shares auto-resolve on-chain`);
+      log(`⌛ ${m.pair} HARD DEADLINE (${Math.floor(secsLeft)}s left) — shares auto-resolve on-chain`);
       return false;
     }
 
@@ -341,7 +284,6 @@ async function sellShares(m, side, reason) {
     log(`📤 ${m.pair} SELL attempt #${attempt} (${Math.floor(secsLeft)}s left)`);
 
     try {
-      const { Side, OrderType } = require('@polymarket/clob-client-v2');
       const resp = await trader._clob.createAndPostMarketOrder(
         { tokenID: tokenId, amount: SHARES, side: Side.SELL, orderType: OrderType.FOK },
         { tickSize, negRisk },
@@ -357,12 +299,12 @@ async function sellShares(m, side, reason) {
         log(`✅ SELL confirmed ${m.pair} ${side.toUpperCase()} @${f4(fillPrice)} (attempt #${attempt})`);
         return true;
       }
-      log(`⏭️  FOK SELL nofill ${m.pair} ${side.toUpperCase()}, retry in ${FOK_RETRY_MS}ms…`);
+      log(`⏭️  FOK SELL nofill ${m.pair} ${side.toUpperCase()}, retry in ${FOK_SELL_RETRY_MS}ms…`);
     } catch (e) {
       log(`⚠️  FOK SELL error ${m.pair}: ${e.message.slice(0, 80)}, retrying…`);
     }
 
-    await sleep(FOK_RETRY_MS);
+    await sleep(FOK_SELL_RETRY_MS);
   }
 }
 
@@ -372,7 +314,7 @@ async function tradeLoop(m) {
   m.loopRunning = true;
   log(`🚀 ${m.pair} trade loop started`);
 
-  // Wait 10s from window open before first entry
+  // Wait 10s from window open
   const entryOpenAt = m.windowStartMs + ENTRY_WAIT_SECS * 1000;
   const waitMs      = entryOpenAt - Date.now();
   if (waitMs > 0) {
@@ -380,7 +322,7 @@ async function tradeLoop(m) {
     await sleep(waitMs);
   }
 
-  let currentSide = null; // set to cheapest on first entry
+  let currentSide = null;
 
   while (true) {
     const secsLeft = (m.endTime - Date.now()) / 1000;
@@ -391,25 +333,22 @@ async function tradeLoop(m) {
     }
 
     if (secsLeft <= FORCE_CLOSE_SECS && currentSide === null) {
-      log(`⏳ ${m.pair} ≤${FORCE_CLOSE_SECS}s left, skipping entry`);
+      log(`⏳ ${m.pair} ≤${FORCE_CLOSE_SECS}s left, no entry`);
       m.done = true; break;
     }
 
-    // Pick side: cheapest on first entry, flip on subsequent
+    // Pick side: cheapest on first entry, flip after each sell
     if (currentSide === null) {
       await ensureFreshPrice(m);
       currentSide = m.upMid <= m.downMid ? 'up' : 'down';
       log(`🎯 ${m.pair} cheapest = ${currentSide.toUpperCase()} (up:${f4(m.upMid)} dn:${f4(m.downMid)})`);
     }
 
-    // ── BUY ──
+    // ── BUY — FOK only, no GTC ──
     const entryPrice = await buyShares(m, currentSide);
     if (entryPrice === null) {
-      const sl = (m.endTime - Date.now()) / 1000;
-      if (sl <= FORCE_CLOSE_SECS) { m.done = true; break; }
-      log(`🔁 ${m.pair} entry failed, retry in 2s…`);
-      await sleep(2000);
-      continue;
+      // Price outside safe range or ran out of time — stop trying
+      m.done = true; break;
     }
 
     trades.unshift({
@@ -419,13 +358,13 @@ async function tradeLoop(m) {
     });
     if (trades.length > 200) trades.length = 200;
 
-    // ── TRAILING STOP WATCH ──
+    // ── TRAILING STOP WATCH — 200ms loop, WS keeps price fresh ──
     let peakPrice = entryPrice;
-    log(`👀 ${m.pair} trailing watch started — peak:${f4(peakPrice)}`);
+    log(`👀 ${m.pair} trailing watch — peak:${f4(peakPrice)}`);
 
     let sellReason = '';
     while (true) {
-      await sleep(200); // tight loop — WS keeps price fresh
+      await sleep(200);
 
       const cp      = currentSide === 'up' ? m.upMid : m.downMid;
       const secsNow = (m.endTime - Date.now()) / 1000;
@@ -435,10 +374,8 @@ async function tradeLoop(m) {
         log(`📈 ${m.pair} new peak ${f4(peakPrice)}`);
       }
 
-      const drawdown = peakPrice - cp;
-
-      if (cp > 0 && drawdown >= TRAILING_DIST) {
-        sellReason = `trailing stop (peak:${f4(peakPrice)} now:${f4(cp)} drop:${f4(drawdown)})`;
+      if (cp > 0 && (peakPrice - cp) >= TRAILING_DIST) {
+        sellReason = `trailing stop (peak:${f4(peakPrice)} now:${f4(cp)} drop:${f4(peakPrice - cp)})`;
         break;
       }
       if (secsNow <= FORCE_CLOSE_SECS) {
@@ -447,9 +384,9 @@ async function tradeLoop(m) {
       }
     }
 
-    log(`🔶 ${m.pair} ${currentSide.toUpperCase()} EXIT — ${sellReason}`);
+    log(`🔶 ${m.pair} ${currentSide.toUpperCase()} EXIT trigger — ${sellReason}`);
 
-    // ── SELL (confirmed) ──
+    // ── SELL ──
     const sold = await sellShares(m, currentSide, sellReason);
 
     if (sold) {
@@ -464,7 +401,7 @@ async function tradeLoop(m) {
       log(`💰 ${m.pair} trade closed pnl:$${pnl}`);
     }
 
-    // Check if time allows another trade
+    // Time check before flipping
     const secsAfterSell = (m.endTime - Date.now()) / 1000;
     if (secsAfterSell <= FORCE_CLOSE_SECS) {
       log(`🏁 ${m.pair} no time for another trade (${Math.floor(secsAfterSell)}s left)`);
@@ -481,7 +418,7 @@ async function tradeLoop(m) {
   m.loopRunning = false;
 }
 
-// ── Main tick (discovery only — prices come via WS) ──
+// ── Main tick ──
 async function tick() {
   const now = Date.now();
   if (now - lastDiscoverAt >= DISCOVER_EVERY_MS) {
@@ -504,7 +441,7 @@ function snapshot() {
   }));
 
   return {
-    balance,
+    balance:      f2(balance),
     startBalance: f2(startBalance),
     pnl:          f2(balance - startBalance),
     uptime:       Math.floor((Date.now() - startTime) / 1000),
@@ -513,19 +450,18 @@ function snapshot() {
     recentTrades: trades.slice(0, 60),
     activityLog:  logs.slice(0, 80),
     strategy: {
-      shares:         SHARES,
-      trailingDist:   TRAILING_DIST,
-      entryWaitSecs:  ENTRY_WAIT_SECS,
-      forceCloseSecs: FORCE_CLOSE_SECS,
+      shares:          SHARES,
+      trailingDist:    TRAILING_DIST,
+      entryWaitSecs:   ENTRY_WAIT_SECS,
+      forceCloseSecs:  FORCE_CLOSE_SECS,
+      minEntryPrice:   MIN_ENTRY_PRICE,
+      maxEntryPrice:   MAX_ENTRY_PRICE,
     },
   };
 }
 
 // ── Stubs for index.js compatibility ──
-// index.js calls setDryRun / getDryRun — kept as no-ops since this is live-only
-async function setDryRun() {
-  log('⚠️  setDryRun called but this bot is live-only — ignored');
-}
+async function setDryRun() { log('⚠️  setDryRun called — live-only bot, ignored'); }
 function getDryRun() { return false; }
 
 // ── Start ──
@@ -553,9 +489,7 @@ async function start(emit, logFn) {
     process.exit(1);
   }
 
-  // Start WebSocket price feed
   wsConnect();
-
   log('🔴 LIVE — starting main loop');
   setInterval(tick, TICK_MS);
 }
