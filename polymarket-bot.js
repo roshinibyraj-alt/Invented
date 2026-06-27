@@ -55,6 +55,8 @@ let trader        = null;
 //   entrySent: GTC BUY has been submitted
 //   exiting:   FOK SELL in progress (retrying until filled)
 const mState = {};
+let clobCleanupTick = 0;
+let liveClobOrders = 0;
 
 const fl2 = v => Math.round((v || 0) * 100) / 100;
 const fl4 = v => Math.round((v || 0) * 10_000) / 10_000;
@@ -112,7 +114,7 @@ async function discoverMarkets() {
       fairValue: 0.50,
       windowStart: endTime - WINDOW_SECS * 1000,
     };
-    mState[slug] = { started: false, side: 'up', entrySent: false, exiting: false, skipCooldown: 0 };
+    mState[slug] = { started: false, side: 'up', entrySent: false, exiting: false, skipCooldown: 0, retryAfter: 0 };
   }));
   const expired = [];
   for (const [slug, m] of Object.entries(marketCache)) {
@@ -122,7 +124,6 @@ async function discoverMarkets() {
     delete marketCache[slug];
     delete mState[slug];
     positions = positions.filter(p => p.slug !== slug);
-    pendingOrders = pendingOrders.filter(p => p.slug !== slug);
   }
 }
 
@@ -174,12 +175,28 @@ async function enterPosition(m, side, price) {
     return true;
   } else {
     try {
-      const order = await trader.placeGtcOrder(tokenId, 'BUY', price, size);
-      slog(`⏳ GTC BUY ${m.pair} ${side.toUpperCase()} ${size}sh@${fl4(price)} id:${order.id.slice(0,12)}…`);
-      pendingOrders.push({ id: order.id, slug: m.slug, side, size, price, createdAt: Date.now() });
-      return true;
+      const cost = Math.max(fl2(size * price), 1);
+      const order = await trader.placeFokOrder(tokenId, 'BUY', cost);
+      if (order.isFilled) {
+        const fillPrice = order.avgPrice > 0 ? order.avgPrice : price;
+        const fee = calcFee(size * fillPrice, fillPrice);
+        balance = fl2(balance - size * fillPrice - fee);
+        totalFeesPaid = fl2(totalFeesPaid + fee);
+        positions.push({
+          id: `f_${m.slug}_${side}_${tickCount}`, slug: m.slug, side,
+          entryPrice: fillPrice, size, entryTick: tickCount,
+          peakPrice: fillPrice, cpCount: 0, trailingActive: true,
+          createdAt: Date.now(), totalCost: size * fillPrice + fee, fees: fee,
+        });
+        slog(`🟢 FOK FILLED ${m.pair} ${side.toUpperCase()} ${size}sh@${fl4(fillPrice)} fee:${fl2(fee)} bal:${fl2(balance)}`);
+        pushTrade(m.pair, side.toUpperCase(), 'ENTRY', fillPrice, 0, size, 0, balance, fee);
+        return true;
+      } else {
+        slog(`⏭️ FOK no fill ${m.pair} ${side.toUpperCase()} ${size}sh@${fl4(price)}`);
+        return false;
+      }
     } catch (e) {
-      slog(`❌ GTC BUY ${m.pair} ${side.toUpperCase()}: ${e.message}`);
+      slog(`❌ FOK BUY ${m.pair} ${side.toUpperCase()}: ${e.message}`);
       return false;
     }
   }
@@ -187,39 +204,7 @@ async function enterPosition(m, side, price) {
 
 // ── Check GTC entry fills ──
 async function processPendingOrders() {
-  for (const po of pendingOrders) {
-    const m = marketCache[po.slug];
-    if (!m || !m.active) continue;
-    if (DRY_RUN) continue; // demo fills instantly via enterPosition
-    try {
-      const result = await trader.waitForFill(po.id, 500);
-      if (result.filled) {
-        const fee = calcFee(po.size * po.price, po.price);
-        balance = fl2(balance - po.size * po.price - fee);
-        totalFeesPaid = fl2(totalFeesPaid + fee);
-        positions.push({
-          id: po.id.slice(0,12), slug: po.slug, side: po.side,
-          entryPrice: po.price, size: po.size, entryTick: tickCount,
-          peakPrice: po.price, cpCount: 0, trailingActive: true,
-          createdAt: Date.now(), totalCost: po.size * po.price + fee, fees: fee,
-        });
-        slog(`✅ GTC BUY FILLED ${m.pair} ${po.side.toUpperCase()} ${po.size}sh@${fl4(po.price)} bal:$${fl2(balance)}`);
-        pushTrade(m.pair, po.side.toUpperCase(), 'ENTRY', po.price, 0, po.size, 0, balance, fee);
-        // Mark entry as sent, start trailing
-        if (mState[po.slug]) mState[po.slug].entrySent = false;
-        po._filled = true;
-      } else if (result.timeout) {
-        // Not filled yet — retry next tick. Cancel only if stale.
-        if (Date.now() - po.createdAt > 10000) {
-          slog(`⏰ GTC BUY TIMEOUT ${po.id.slice(0,12)}… — retrying new order`);
-          try { await trader.cancelOrder(po.id); } catch(_) {}
-          po._filled = true;
-          if (mState[po.slug]) mState[po.slug].entrySent = false;
-        }
-      }
-    } catch (e) { slog(`⚠️ Entry poll: ${e.message}`); }
-  }
-  pendingOrders = pendingOrders.filter(p => !p._filled);
+  // FOK entries fill or cancel instantly — nothing to poll
 }
 
 // ── Manage current position ──
@@ -245,10 +230,20 @@ async function managePositions() {
     const hasPos = positions.some(p => p.slug === slug && !p.resolved);
     if (hasPos) continue;
     if (st.entrySent) continue;
-    // Check no pending GTC already
-    if (pendingOrders.some(p => p.slug === slug && !p._filled)) continue;
+    // 200ms cooldown after a failed FOK entry
+    if (st.retryAfter && Date.now() < st.retryAfter) continue;
 
-    const price = st.side === 'up' ? m.upMid : m.downMid;
+    // LIVE: use best_ask for BUY so orders fill near-instantly
+    let price = st.side === 'up' ? m.upMid : m.downMid;
+    if (!DRY_RUN && trader) {
+      try {
+        const tid = st.side === 'up' ? m.upTokenId : m.downTokenId;
+        const bb = await trader.getBestBidAsk(tid);
+        if (bb && bb.bestAsk && bb.bestAsk > 0.01 && bb.bestAsk < 0.99) {
+          price = Math.min(fl4(bb.bestAsk + 0.01), 0.99);
+        }
+      } catch (_) {}
+    }
     if (price > 0.01) {
       st.entrySent = await enterPosition(m, st.side, price);
     }
@@ -342,27 +337,23 @@ async function exitPosition(pos, exitPrice, m, exitReason) {
       }
     } else {
       if (exitReason === 'force_sell') {
-        // Force sell: place GTC at extreme price to guarantee fill
         try {
-          const dumpPrice = 0.01; // sell everything for pennies
-          const gtc = await trader.placeGtcOrder(tokenId, 'SELL', dumpPrice, pos.size);
-          slog(`⏳ GTC SELL ${m.pair} ${pos.side.toUpperCase()} @ ${dumpPrice} (FORCE — guaranteed fill) id:${gtc.id?.slice(0,12)||'?'}…`);
-          // Poll until it fills
-          const fill = await trader.waitForFill(gtc.id, 25000);
-          if (fill.filled) {
-            const proceeds = fl2(pos.size * dumpPrice);
-            const fee = calcFee(proceeds, dumpPrice);
-            const pnl = fl2(proceeds - (pos.size * pos.entryPrice) - fee);
+          const order = await trader.placeFokOrder(tokenId, 'SELL', pos.size);
+          if (order.isFilled) {
+            const fillPrice = order.avgPrice > 0 ? order.avgPrice : exitPrice;
+            const proceeds = fl2(pos.size * fillPrice);
+            const fee = calcFee(proceeds, fillPrice);
+            const pnl = fl2(proceeds - cost - fee);
             balance = fl2(balance + proceeds - fee);
             totalFeesPaid = fl2(totalFeesPaid + fee);
-            slog(`📤 FORCE DUMPED ${m.pair} ${pos.side.toUpperCase()} ${pos.size}sh@${dumpPrice} pnl:$${pnl} bal:$${fl2(balance)}`);
-            pushTrade(m.pair, pos.side.toUpperCase(), 'SELL', pos.entryPrice, dumpPrice, pos.size, pnl, balance, fee);
+            slog(`📤 FORCE SELL FOK ${m.pair} ${pos.side.toUpperCase()} ${pos.size}sh@${fl4(fillPrice)} pnl:$${pnl} bal:$${fl2(balance)}`);
+            pushTrade(m.pair, pos.side.toUpperCase(), 'SELL', pos.entryPrice, fillPrice, pos.size, pnl, balance, fee);
             pos.resolved = true;
             if (mState[pos.slug]) { mState[pos.slug].exiting = false; mState[pos.slug].started = false; }
           } else {
-            slog(`⚠️ FORCE GTC didn't fill — retry next tick`);
+            slog(`⏭️ FORCE SELL FOK not filled — retry next tick`);
           }
-        } catch(e) { slog(`❌ FORCE SELL: ${e.message}`); }
+        } catch(e) { slog(`❌ FORCE SELL FOK: ${e.message}`); }
       } else {
         slog(`⚠️ FOK SELL ${m.pair} ${pos.side.toUpperCase()} not filled — retry next tick`);
       }
@@ -370,6 +361,25 @@ async function exitPosition(pos, exitPrice, m, exitReason) {
   } catch (e) {
     slog(`❌ FOK SELL ${m.pair} ${pos.side.toUpperCase()}: ${e.message}`);
   }
+}
+
+// ── Reconcile CLOB orders: cancel any orphaned GTC orders ──
+async function reconcileClobOrders() {
+  try {
+    const oo = await trader.getOpenOrders();
+    if (!Array.isArray(oo)) { liveClobOrders = 0; return; }
+    liveClobOrders = oo.length;
+    // Only cancel stale BUY orders — never cancel SELL orders
+    let cancelled = 0;
+    for (const o of oo) {
+      const oid = o.id || o.orderID;
+      const side = o.side || '';
+      if (oid && side === 'BUY') {
+        try { await trader.cancelOrder(oid); cancelled++; } catch(_) {}
+      }
+    }
+    if (cancelled > 0) slog(`🧹 Cleaned ${cancelled} orphan CLOB orders (${oo.length} total)`);
+  } catch (_) {}
 }
 
 // ── Main tick ──
@@ -380,7 +390,15 @@ async function tick() {
     if (tickCount % PRICE_FETCH_EVERY === 0) {
       await Promise.allSettled(Object.values(marketCache).map(m => updateMarket(m)));
     }
-    if (!DRY_RUN) await processPendingOrders();
+    if (!DRY_RUN) {
+      await processPendingOrders();
+      // Periodic CLOB reconciliation every 80 ticks, cancels orphan orders
+      clobCleanupTick++;
+      if (clobCleanupTick >= 80) {
+        clobCleanupTick = 0;
+        await reconcileClobOrders();
+      }
+    }
     await managePositions();
     emitFn('snapshot', buildSnapshot());
   } catch (e) {
@@ -436,6 +454,7 @@ function buildSnapshot() {
     uptime: Math.floor((Date.now() - startTime) / 1000), tickCount,
     activeMarkets: allMarkets.length, openPositions,
     pendingOrders: pendingOrders.filter(p => !p._filled).length,
+    liveClobOrders: liveClobOrders || 0,
     positionsCount: positions.filter(p => !p.resolved).length,
     totalTrades: recentTrades.length, recentTrades: recentTrades.slice(0, 40),
     activityLog: activityLog.slice(0, 60), allMarkets,
@@ -467,7 +486,7 @@ async function start(emit, log) {
 }
 
 function flushState() {
-  positions = []; pendingOrders = []; recentTrades = [];
+  positions = []; recentTrades = [];
   activityLog = []; marketCache = {};
   tickCount = 0; startTime = Date.now();
   balance = DEMO_BALANCE; startBalance = DEMO_BALANCE; totalFeesPaid = 0;

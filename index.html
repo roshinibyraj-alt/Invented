@@ -101,6 +101,7 @@ function render(d){
   h+='<div class="stat"><div class="sl">Markets</div><div class="sv g">'+(d.activeMarkets||0)+'</div></div>';
   h+='<div class="stat"><div class="sl">Fees</div><div class="sv gr">$'+f4(d.totalFeesPaid)+'</div></div>';
   h+='<div class="stat"><div class="sl">Pending</div><div class="sv y">'+(d.pendingOrders||0)+'</div></div>';
+  h+='<div class="stat"><div class="sl">CLOB Open</div><div class="sv y">'+(d.liveClobOrders||0)+'</div></div>'
   document.getElementById('headerStats').innerHTML=h;
 
   // Markets
@@ -168,10 +169,7 @@ function render(d){
   var s=d.strategy||{};
   var pairs='BTC,ETH';
   try{pairs=d.allMarkets.map(function(m){return m.label.split(' ')[0];}).join(',');}catch(e){}
-  document.getElementById('footer').textContent='Trend-Dip Bot | '+pairs+
-    ' | '+s.sharesPerLot+'sh x '+s.maxLots+'lots'+
-    ' | dev:'+s.deviationThreshold+' | trail:'+s.trailingStopDist+' | hardstop:'+s.hardStopDist+
-    ' | force:'+s.forceSellSecs+'s | uptime: '+upStr+' | ticks: '+(d.tickCount||0);
+  document.getElementById('footer').textContent='Flip Bot | '+pairs+' | '+s.sharesPerLot+'sh | trail:'+s.trailingStopDist+' | hardstop:'+s.hardStopDist+' | force:'+s.forceSellSecs+'s | uptime: '+upStr+' | ticks: '+(d.tickCount||0);
 }
 
 socket.on('connect',    function(){document.getElementById('dot').className='dot on';});
