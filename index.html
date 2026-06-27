@@ -53,6 +53,8 @@ tr:last-child td{border-bottom:none}
 .empty{text-align:center;padding:30px;color:#9ca3af;font-size:13px}
 .log-line{padding:2px 0;border-bottom:1px solid #f3f4f8;font-size:10px;font-family:monospace;color:#374151}
 footer{text-align:center;padding:10px;color:#9ca3af;font-size:9px;border-top:1px solid #eef0f5;margin-top:10px}
+.chart-wrap{width:100%;height:100px;margin-top:4px;position:relative}
+.chart-wrap canvas{width:100%;height:100px;display:block}
 @media(max-width:600px){.grid-container{grid-template-columns:1fr}}
 </style>
 </head>
@@ -206,7 +208,6 @@ function drawEquityChart(data, startBal){
   if(!c)return;
   var rect=c.parentElement.getBoundingClientRect();
   c.width=rect.width||c.clientWidth||800;
-  c.height=rect.height||c.clientHeight||180;
   var ctx=c.getContext('2d'),W=c.width,H=c.height;
   ctx.clearRect(0,0,W,H);
   if(!data||data.length<2){ctx.fillStyle='#9ca3af';ctx.font='12px sans-serif';ctx.textAlign='center';ctx.fillText('Waiting for data...',W/2,H/2);return;}

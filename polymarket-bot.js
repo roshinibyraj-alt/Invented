@@ -12,7 +12,12 @@ const DISCOVER_EVERY_MS = 15000;
 const WINDOW_SECS       = 300;
 const GRID_LEVELS       = [0.45, 0.40, 0.35, 0.30, 0.25, 0.20, 0.15];
 const SHARES            = 10;
-const TP_OFFSET         = 0.10;
+// Dynamic TP: lower entries get wider TP targets
+function calcSellTarget(entryPrice) {
+  // Formula: TP = 0.933 - 0.333 * entry (matches 0.10->0.90, 0.40->0.80)
+  const tp = 0.933 - 0.333 * entryPrice;
+  return f4(Math.min(Math.max(tp, entryPrice + 0.05), 0.95));
+}
 const CLOSE_AT_SECS     = 282;  // 4.70 minutes – cancel all + force sell
 const TARGET_PAIRS      = ['BTC'];
 
@@ -263,7 +268,7 @@ async function checkDemoFills(m) {
         cashBalance = f2(cashBalance - cost);
         lv.filled = true;
         lv.entryCost = cost;
-        lv.sellTarget = f4(lv.price + TP_OFFSET);
+        lv.sellTarget = calcSellTarget(lv.price);
         trades.unshift({
           ts: new Date().toTimeString().slice(0, 8),
           pair: m.pair, side: side.toUpperCase(),
@@ -311,7 +316,7 @@ async function checkRealFills(m) {
       if (lv.buyOrderId && !lv.filled && !openIds.has(lv.buyOrderId)) {
         lv.filled = true;
         lv.entryCost = SHARES * lv.price;
-        lv.sellTarget = f4(lv.price + TP_OFFSET);
+        lv.sellTarget = calcSellTarget(lv.price);
         try { const b = await trader.getBalance(); if (b > 0) cashBalance = b; } catch(_) {}
         trades.unshift({
           ts: new Date().toTimeString().slice(0, 8),
@@ -509,8 +514,7 @@ function snapshot() {
     activityLog: logs.slice(0, 100),
     equityHistory: equityHistory.slice(-500),
     strategy: {
-      shares: SHARES, tpOffset: TP_OFFSET,
-      gridLevels: GRID_LEVELS, closeAtSecs: CLOSE_AT_SECS,
+      shares: SHARES, gridLevels: GRID_LEVELS, closeAtSecs: CLOSE_AT_SECS,
       dryRun, demoBalance: DEMO_BALANCE,
     },
   };
