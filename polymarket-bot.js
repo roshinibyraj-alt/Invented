@@ -369,7 +369,7 @@ async function tradeLoop(m) {
       // UP buy every 10s
       if (elapsed - as.lastUpBuy >= UP_INTERVAL) {
         as.lastUpBuy = elapsed;
-        const shares = m.upMid < 0.50 ? 10 : 20;
+        const shares = elapsed < 150000 ? (m.upMid < 0.50 ? 20 : 10) : (m.upMid < 0.50 ? 10 : 20);
         const result = await placeBuy(m, 'up', shares);
         if (result) {
           as.up.shares += shares;
@@ -382,7 +382,7 @@ async function tradeLoop(m) {
       // DOWN buy every 15s
       if (elapsed - as.lastDownBuy >= DOWN_INTERVAL) {
         as.lastDownBuy = elapsed;
-        const shares = m.downMid < 0.50 ? 10 : 20;
+        const shares = elapsed < 150000 ? (m.downMid < 0.50 ? 20 : 10) : (m.downMid < 0.50 ? 10 : 20);
         const result = await placeBuy(m, 'down', shares);
         if (result) {
           as.down.shares += shares;
