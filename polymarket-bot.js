@@ -229,27 +229,48 @@ async function discover() {
 
 // ── Check Polymarket resolution ──
 async function checkResolution(m) {
-  try {
-    const d = await getJSON(`${GAMMA}/events?slug=${m.slug}`);
-    if (!Array.isArray(d) || !d[0]?.markets?.[0]) return null;
-    const mk = d[0].markets[0];
-    if (!mk.closed) return null;
+  // Try multiple endpoints to find resolution data
+  for (const endpoint of [
+    `${GAMMA}/events?slug=${m.slug}`,
+    m.gammaId ? `${GAMMA}/markets/${m.gammaId}` : null,
+  ].filter(Boolean)) {
+    try {
+      const d = await getJSON(endpoint);
+      if (!d) continue;
+      // events endpoint returns array, markets endpoint returns object
+      const mk = Array.isArray(d) ? d[0]?.markets?.[0] : d;
+      if (!mk) continue;
 
-    // Match outcome to token ID
-    const outcome = mk.outcome || mk.winning_outcome || '';
-    const outcomes = mk.outcomes || [];
-    // Try matching by outcome name
-    const outcomeIdx = outcomes.indexOf(outcome);
-    if (outcomeIdx >= 0) {
-      let ids;
-      try { ids = JSON.parse(mk.clobTokenIds); } catch (_) { return null; }
-      if (ids[outcomeIdx] === m.upTokenId) return 'up';
-      if (ids[outcomeIdx] === m.downTokenId) return 'down';
-    }
-    // Fallback: check winner field
-    if (mk.winner === m.upTokenId || mk.winner === 'up' || mk.winner === 'Up') return 'up';
-    if (mk.winner === m.downTokenId || mk.winner === 'down' || mk.winner === 'Down') return 'down';
-  } catch (_) {}
+      // Check closed status (various field names)
+      const closed = mk.closed === true || mk.closed === 'true' || mk.status === 'closed' || mk.status === 'resolved';
+      if (!closed) continue;
+
+      // Try to find the winning outcome
+      const outcome = mk.outcome || mk.winning_outcome || mk.winner_outcome || mk.resolved_outcome || '';
+      const outcomes = mk.outcomes || [];
+
+      // Match outcome name to index
+      const outcomeIdx = outcomes.indexOf(outcome);
+      if (outcomeIdx >= 0) {
+        let ids;
+        try { ids = JSON.parse(mk.clobTokenIds); } catch (_) { continue; }
+        if (ids[outcomeIdx] === m.upTokenId) return 'up';
+        if (ids[outcomeIdx] === m.downTokenId) return 'down';
+      }
+
+      // Fallback: winner field with token ID or side name
+      const w = (mk.winner || '').toString().toLowerCase();
+      if (w === m.upTokenId || w === 'up' || w === 'yes' || w === '1') return 'up';
+      if (w === m.downTokenId || w === 'down' || w === 'no' || w === '0') return 'down';
+
+      // Check winningOutcomeId field
+      if (mk.winningOutcomeId === m.upTokenId) return 'up';
+      if (mk.winningOutcomeId === m.downTokenId) return 'down';
+
+      // Check if one side's price is at 1.0/0.0 after resolution
+      // (Polymarket resolved tokens trade at $1 winner, $0 loser on secondary)
+    } catch (_) { continue; }
+  }
   return null;
 }
 
@@ -334,10 +355,12 @@ async function tradeLoop(m) {
 
   // Main loop
   let accumulationEnded = false;
+  let resolveRetries = 0;
   while (true) {
     const now = Date.now();
     const elapsed = now - m.windowStartMs;
-    if (elapsed >= WINDOW_SECS * 1000 + 5000) break; // window definitely over
+    // Keep loop alive for up to 10 minutes total (600s) for resolution checking
+    if (elapsed >= 600000) break;
 
     await ensureFreshPrice(m);
 
@@ -425,40 +448,48 @@ async function tradeLoop(m) {
       }
     }
 
-    // Phase 4: Window ended – check resolution
-    if (elapsed >= WINDOW_SECS * 1000 && !as.resolved && !as.resolutionChecked) {
-      as.resolutionChecked = true;
-      as.phase = 'resolving';
-      log(`${m.pair} window ended – checking resolution...`);
-
-      // Wait a bit for resolution data
-      await sleep(5000);
-
-      const winner = await checkResolution(m);
-      if (winner) {
-        as.resolved = true;
-        as.phase = 'resolved';
-        as.winner = winner;
-        log(`${m.pair} resolved: ${winner.toUpperCase()} wins`);
-
-        if (winner === 'up' && as.up.shares > 0 && !as.upSellFilled) {
-          const value = f2(as.up.shares * 1.0);
-          cashBalance = f2(cashBalance + value);
-          as.up.shares = 0;
-          log(`UP credited $${value}`);
+    // Phase 4: Window ended – check resolution with retry
+    // If both sides already sold at 0.99, skip resolution
+    const bothSold = as.upSellFilled && as.downSellFilled;
+    if (elapsed >= WINDOW_SECS * 1000 && !as.resolved && !bothSold) {
+      if (!as.resolutionChecked || resolveRetries < 10) {
+        if (!as.resolutionChecked) {
+          as.resolutionChecked = true;
+          as.phase = 'resolving';
+          log(`${m.pair} window ended – checking resolution...`);
         }
-        if (winner === 'down' && as.down.shares > 0 && !as.downSellFilled) {
-          const value = f2(as.down.shares * 1.0);
-          cashBalance = f2(cashBalance + value);
-          as.down.shares = 0;
-          log(`DOWN credited $${value}`);
+        // Wait before each retry (first check immediate, then every 15s)
+        if (resolveRetries > 0) {
+          log(`${m.pair} resolution retry ${resolveRetries}/10...`);
+          await sleep(15000);
         }
+        resolveRetries++;
 
-        const totalPnL = f2(cashBalance - startBalance);
-        log(`${m.pair} final capital: $${f2(cashBalance)} PnL: $${totalPnL}`);
-      } else {
-        log(`${m.pair} resolution not yet available – will retry`);
-        as.resolutionChecked = false;
+        const winner = await checkResolution(m);
+        if (winner) {
+          as.resolved = true;
+          as.phase = 'resolved';
+          as.winner = winner;
+          log(`${m.pair} resolved: ${winner.toUpperCase()} wins`);
+
+          if (winner === 'up' && as.up.shares > 0 && !as.upSellFilled) {
+            const value = f2(as.up.shares * 1.0);
+            cashBalance = f2(cashBalance + value);
+            as.up.shares = 0;
+            log(`UP credited $${value}`);
+          }
+          if (winner === 'down' && as.down.shares > 0 && !as.downSellFilled) {
+            const value = f2(as.down.shares * 1.0);
+            cashBalance = f2(cashBalance + value);
+            as.down.shares = 0;
+            log(`DOWN credited $${value}`);
+          }
+
+          const totalPnL = f2(cashBalance - startBalance);
+          log(`${m.pair} final capital: $${f2(cashBalance)} PnL: $${totalPnL}`);
+        } else if (resolveRetries >= 10) {
+          log(`${m.pair} max retries reached – market unresolved`);
+        }
       }
     }
 
