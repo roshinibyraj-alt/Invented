@@ -14,9 +14,9 @@ const GRID_LEVELS       = [0.45, 0.40, 0.35, 0.30, 0.25, 0.20, 0.15];
 const SHARES            = 10;
 // Dynamic TP: lower entries get wider TP targets
 function calcSellTarget(entryPrice) {
-  // Formula: TP = 0.933 - 0.333 * entry (matches 0.10->0.90, 0.40->0.80)
-  const tp = 0.933 - 0.333 * entryPrice;
-  return f4(Math.min(Math.max(tp, entryPrice + 0.05), 0.95));
+  // TP = entry * 2 (e.g., 0.45 -> 0.90, 0.15 -> 0.30)
+  const tp = entryPrice * 2;
+  return f4(Math.min(tp, 0.95));
 }
 const CLOSE_AT_SECS     = 282;  // 4.70 minutes – cancel all + force sell
 const TARGET_PAIRS      = ['BTC'];
