@@ -1,48 +1,76 @@
 'use strict';
 
-const WebSocket        = require('ws');
 const PolymarketTrader = require('./polymarket-trader');
 
-const GAMMA   = 'https://gamma-api.polymarket.com';
-const CLOB    = 'https://clob.polymarket.com';
-const CLOB_WS = 'wss://ws-subscriptions-clob.polymarket.com/ws/market';
+const GAMMA = 'https://gamma-api.polymarket.com';
+const CLOB  = 'https://clob.polymarket.com';
 
-const TICK_MS           = 500;
-const DISCOVER_EVERY_MS = 15000;
-const WINDOW_SECS       = 300;
-const TARGET_PAIRS      = ['BTC', 'ETH', 'SOL'];
+const TICK_MS       = 1000;
+const TRAIL_DIST    = 0.05;
+const BASE_SHARES   = 30;
+const CONFIRM_MS    = 2000;
+const MARKET_SLUG   = 'crint-irl4-ind4-2026-06-28';
 
-// Entry strategy – bucket system
-const BUCKETS = [0.40, 0.35, 0.30, 0.25, 0.20];
-const SHARES_PER_BUCKET = 50;
-const TP_PRICE = 0.99;
-const DEMO_BALANCE = 1000;
-const FORCE_AT = 298;
+// After determining the actual outcome names from the API:
+// Sport event markets have outcomes like ["Ireland", "India"]
+// Token_ID[0] = Ireland, Token_ID[1] = India
+const SIDE_IRELAND = 'ireland';  // "UP" analog
+const SIDE_INDIA   = 'india';    // "DOWN" analog
 
-let dryRun = process.env.DRY_RUN === "true";
-let emitFn     = () => {};
-let slog       = () => {};
-let trader     = null;
-let cashBalance = 0;
+let dryRun = false; // real trading only
+let emitFn = () => {};
+let slog   = () => {};
+let trader = null;
+
+let cashBalance  = 0;
 let startBalance = 0;
-let startTime  = Date.now();
+let startTime    = Date.now();
 
-const logs     = [];
-const trades   = [];
-const markets  = {};
-let lastDiscoverAt = 0;
-const stratState = {};
+const logs   = [];
+const trades = [];
+
+// Single market data
+let mkt = null;
+let mktReady = false;
+
+// Position state
+let position    = null; // 'ireland' | 'india' | null
+let entryPrice  = 0;
+let sharesHeld  = 0;
+let trailHigh   = 0; // for entry: peak of ireland price when no position
+let trailLow    = 0; // for entry: trough of... not used, we only trail ireland for first entry
+let stopPeak    = 0; // for position: highest price since entry (used for trailing stop)
+let stopTrough  = 0; // for position: lowest price since entry (used for trailing stop)
+let lastBuyTs   = 0;
+let lastSellTs  = 0;
+let flipCount   = 0;
+let pendingFlip = null; // 'to_ireland' | 'to_india' | null — we're in the middle of a flip
+let inTrade     = false; // true while executing a trade to prevent concurrent orders
+let pendingSellResult = null; // saved sell result while we wait to buy the other side
+
+let tradeLoopRunning = false;
 
 const f2 = v => Math.round((v || 0) * 100) / 100;
 const f4 = v => Math.round((v || 0) * 10000) / 10000;
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 function log(msg) {
   const ts   = new Date().toTimeString().slice(0, 8);
-  const line = `[${ts}] [ENTRY] ${msg}`;
+  const line = `[${ts}] [CRICKET] ${msg}`;
   logs.unshift(line);
   if (logs.length > 500) logs.length = 500;
   if (slog) slog(line);
+}
+
+function logTrade(action, side, price, pnl) {
+  trades.unshift({
+    ts: new Date().toTimeString().slice(0, 8),
+    action, side,
+    price: f4(price),
+    shares: BASE_SHARES,
+    pnl: f2(pnl || 0),
+  });
+  if (trades.length > 200) trades.length = 200;
 }
 
 async function getJSON(url) {
@@ -55,435 +83,434 @@ async function getJSON(url) {
   } catch (_) { return null; }
 }
 
-function calcEquity() {
-  let openValue = 0;
-  for (const [slug, ss] of Object.entries(stratState)) {
-    const m = markets[slug];
-    if (!m || ss.phase === 'done') continue;
-    for (const bk of Object.values(ss.buckets)) {
-      if (bk.upFilled && !bk.upTpFilled) openValue += SHARES_PER_BUCKET * m.upMid;
-      if (bk.dnFilled && !bk.dnTpFilled) openValue += SHARES_PER_BUCKET * m.downMid;
-    }
+// ── Market discovery ──
+async function discoverCricketMarket() {
+  if (mktReady) return;
+  log(`Looking up market: ${MARKET_SLUG}`);
+  const d = await getJSON(`${GAMMA}/events?slug=${MARKET_SLUG}`);
+  if (!Array.isArray(d) || !d[0]?.markets?.length) {
+    log('Market not found yet, retrying...');
+    return;
   }
-  return cashBalance + openValue;
-}
 
-// ── WebSocket ──
-let ws = null, wsReady = false, wsPingTimer = null;
-const wsTokenMap = {};
-
-function wsConnect() {
-  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
-  log('Connecting WS...');
-  ws = new WebSocket(CLOB_WS);
-  ws.on('open', () => {
-    wsReady = true;
-    log('WS connected');
-    const ids = Object.keys(wsTokenMap);
-    if (ids.length) wsSubscribe(ids);
-    wsPingTimer = setInterval(() => { if (ws.readyState === WebSocket.OPEN) ws.ping(); }, 20000);
-  });
-  ws.on('message', raw => {
+  // Find the match winner market (not the "Super Over" sub-market)
+  const ev = d[0];
+  const winnerMkt = ev.markets.find(m => {
     try {
-      const msgs = JSON.parse(raw);
-      const arr  = Array.isArray(msgs) ? msgs : [msgs];
-      for (const msg of arr) {
-        const t = msg.asset_id, p = parseFloat(msg.price || msg.mid_price || '0');
-        if (!t || !p) continue;
-        const slug = wsTokenMap[t];
-        if (!slug || !markets[slug]) continue;
-        const m = markets[slug];
-        if (t === m.upTokenId) { m.upMid = f4(p); m.lastPriceAt = Date.now(); }
-        if (t === m.downTokenId) { m.downMid = f4(p); m.lastPriceAt = Date.now(); }
-      }
-    } catch (_) {}
-  });
-  ws.on('close', () => {
-    wsReady = false;
-    if (wsPingTimer) { clearInterval(wsPingTimer); wsPingTimer = null; }
-    log('WS closed – reconnect 2s');
-    setTimeout(wsConnect, 2000);
-  });
-  ws.on('error', e => { log(`WS err: ${e.message}`); try { ws.terminate(); } catch(_) {} });
-}
+      const outcomes = JSON.parse(m.outcomes || '[]');
+      return outcomes.includes('Ireland') && outcomes.includes('India');
+    } catch (_) { return false; }
+  }) || ev.markets[0]; // fallback to first market
 
-function wsSubscribe(ids) {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  ws.send(JSON.stringify({ auth: {}, type: 'market', assets_ids: ids }));
-}
-
-async function restRefreshPrice(m) {
-  const [ur, dr] = await Promise.all([
-    getJSON(`${CLOB}/midpoint?token_id=${m.upTokenId}`),
-    getJSON(`${CLOB}/midpoint?token_id=${m.downTokenId}`),
-  ]);
-  if (ur?.mid) m.upMid   = f4(parseFloat(ur.mid));
-  if (dr?.mid) m.downMid = f4(parseFloat(dr.mid));
-  m.lastPriceAt = Date.now();
-}
-
-async function ensureFreshPrice(m) {
-  if (!m.lastPriceAt || Date.now() - m.lastPriceAt > 3000) await restRefreshPrice(m);
-}
-
-function currentWindowStart() {
-  const now = Math.floor(Date.now() / 1000);
-  return Math.floor(now / WINDOW_SECS) * WINDOW_SECS;
-}
-
-// ── Market Discovery ──
-async function discoverMarket(pair, customWsTs) {
-  const ws_ts = customWsTs || currentWindowStart();
-  const slug  = `${pair.toLowerCase()}-updown-5m-${ws_ts}`;
-  if (markets[slug]) return;
-
-  const d = await getJSON(`${GAMMA}/events?slug=${slug}`);
-  if (!Array.isArray(d) || !d[0]?.markets?.[0]) return;
-  const mk = d[0].markets[0];
-  if (!mk.clobTokenIds) return;
+  if (!winnerMkt) { log('No suitable market found'); return; }
 
   let ids;
-  try { ids = JSON.parse(mk.clobTokenIds); } catch (_) { return; }
-  if (ids.length < 2) return;
+  try { ids = JSON.parse(winnerMkt.clobTokenIds); } catch (_) { log('No token IDs'); return; }
+  if (ids.length < 2) { log('Need 2 tokens'); return; }
 
-  const endTime = mk.endDate ? new Date(mk.endDate).getTime() : null;
-  if (!endTime) return;
-  const secsToEnd = (endTime - Date.now()) / 1000;
-  if (secsToEnd < 10 || secsToEnd > WINDOW_SECS * 2) return;
+  const outcomes = JSON.parse(winnerMkt.outcomes || '[]');
+  // Determine which token is Ireland and which is India
+  // Typically token[0] = first outcome, token[1] = second outcome
+  const irelandIdx = outcomes.indexOf('Ireland');
+  const indiaIdx   = outcomes.indexOf('India');
+  if (irelandIdx < 0 || indiaIdx < 0) { log('Cannot map outcomes'); return; }
 
-  const upTokenId = ids[0], downTokenId = ids[1];
-  let tickSize = '0.01', negRisk = false;
-  try {
-    const tsData = await getJSON(`${CLOB}/tick-size?token_id=${upTokenId}`);
-    if (tsData?.minimum_tick_size) tickSize = tsData.minimum_tick_size;
-    const nrData = await getJSON(`${CLOB}/neg-risk?token_id=${upTokenId}`);
-    if (nrData?.neg_risk !== undefined) negRisk = nrData.neg_risk;
-  } catch (_) {}
+  const irelandTokenId = ids[irelandIdx];
+  const indiaTokenId   = ids[indiaIdx];
 
-  markets[slug] = {
-    slug, pair, upTokenId, downTokenId,
-    upMid: 0, downMid: 0, lastPriceAt: 0,
-    endTime, windowStartMs: ws_ts * 1000,
-    upTickSize: tickSize, dnTickSize: tickSize,
-    upNegRisk: negRisk, dnNegRisk: negRisk,
-    loopRunning: false, done: false,
+  // Get prices
+  const prices = JSON.parse(winnerMkt.outcomePrices || '[]');
+  const irelandPrice = parseFloat(prices[irelandIdx] || '0');
+  const indiaPrice   = parseFloat(prices[indiaIdx] || '0');
+
+  const endDate = new Date(winnerMkt.endDate || ev.endDate || Date.now() + 86400000).getTime();
+  const startDate = new Date(winnerMkt.gameStartTime || winnerMkt.startDate || Date.now()).getTime();
+
+  mkt = {
+    slug: MARKET_SLUG,
+    eventId: ev.id,
+    marketId: winnerMkt.id,
+    irelandTokenId,
+    indiaTokenId,
+    irelandPrice: f4(irelandPrice),
+    indiaPrice: f4(indiaPrice),
+    endDate,
+    startDate,
+    question: winnerMkt.question || 'Ireland vs India',
+    outcomes,
+    lastRefresh: Date.now(),
   };
 
-  wsTokenMap[upTokenId] = slug;
-  wsTokenMap[downTokenId] = slug;
-  if (wsReady) wsSubscribe([upTokenId, downTokenId]);
-  log(`Market ${pair}: ${slug}`);
-  await restRefreshPrice(markets[slug]);
-  log(`${pair} UP:${f4(markets[slug].upMid)} DOWN:${f4(markets[slug].downMid)}`);
+  log(`Market: ${mkt.question}`);
+  log(`Ireland: $${f4(mkt.irelandPrice)} (token: ${irelandTokenId.slice(0, 16)}…)`);
+  log(`India: $${f4(mkt.indiaPrice)} (token: ${indiaTokenId.slice(0, 16)}…)`);
+  log(`Ends: ${new Date(endDate).toISOString()}`);
 
-  // Build bucket state
-  const buckets = {};
-  for (const p of BUCKETS) {
-    buckets[p] = { upOrderId: null, dnOrderId: null, upFilled: false, dnFilled: false, upTpFilled: false, dnTpFilled: false };
-  }
-  stratState[slug] = {
-    phase: 'waiting',
-    buckets,
-    filledCount: 0,
-    tpCount: 0,
-    forceClosed: false,
-  };
+  mktReady = true;
 
-  tradeLoop(markets[slug]).catch(e => log(`Loop crash ${pair}: ${e.message}`));
+  // Reset state for new market
+  position = null;
+  entryPrice = 0;
+  sharesHeld = 0;
+  trailHigh = mkt.irelandPrice;
+  stopPeak = 0;
+  stopTrough = 0;
+  flipCount = 0;
+  pendingFlip = null;
+  inTrade = false;
+  pendingSellResult = null;
+
+  log('State reset – trailing Ireland for initial entry');
 }
 
-async function discover() {
-  const cw = currentWindowStart();
-  const timestamps = [cw - WINDOW_SECS, cw, cw + WINDOW_SECS];
-  await Promise.allSettled(timestamps.map(ep =>
-    Promise.allSettled(TARGET_PAIRS.map(p => discoverMarket(p, ep)))
-  ));
-  for (const [slug, m] of Object.entries(markets)) {
-    if (Date.now() > m.endTime + 2000) {
-      delete wsTokenMap[m.upTokenId];
-      delete wsTokenMap[m.downTokenId];
-      delete markets[slug];
-      delete stratState[slug];
+async function refreshPrices() {
+  if (!mktReady || !mkt) return;
+  const [ir, ia] = await Promise.all([
+    getJSON(`${CLOB}/midpoint?token_id=${mkt.irelandTokenId}`),
+    getJSON(`${CLOB}/midpoint?token_id=${mkt.indiaTokenId}`),
+  ]);
+  if (ir?.mid) mkt.irelandPrice = f4(parseFloat(ir.mid));
+  if (ia?.mid) mkt.indiaPrice   = f4(parseFloat(ia.mid));
+  mkt.lastRefresh = Date.now();
+}
+
+async function ensureFreshPrices() {
+  if (!mkt?.lastRefresh || Date.now() - mkt.lastRefresh > 3000) await refreshPrices();
+}
+
+// ── Trading functions ──
+async function checkBalance() {
+  if (!trader) return 0;
+  try {
+    const b = await trader.getBalance();
+    if (b > 0) cashBalance = b;
+    return cashBalance;
+  } catch (_) { return cashBalance; }
+}
+
+async function buyIreland() {
+  if (!mktReady || inTrade) return null;
+  inTrade = true;
+  try {
+    const cost = f2(BASE_SHARES * mkt.irelandPrice);
+    const preBal = await checkBalance();
+    log(`BUY Ireland ${BASE_SHARES}sh @ $${f4(mkt.irelandPrice)} (≈$${cost})`);
+
+    const result = await trader.placeFokBuy(mkt.irelandTokenId, cost);
+    if (!result) { inTrade = false; return null; }
+
+    if (result.isFilled) {
+      await sleep(CONFIRM_MS);
+      const postBal = await checkBalance();
+      const spent = f2(preBal - postBal);
+      log(`✅ Bought Ireland – spent ~$${spent}`);
+      position = 'ireland';
+      entryPrice = result.avgPrice || mkt.irelandPrice;
+      sharesHeld = BASE_SHARES;
+      stopPeak = entryPrice;
+      lastBuyTs = Date.now();
+      logTrade('BUY', 'IRELAND', entryPrice);
+      inTrade = false;
+      return { filled: true, price: entryPrice };
+    } else {
+      log(`FOK Ireland buy didn't fill – retrying next tick`);
+      inTrade = false;
+      return null;
     }
+  } catch (e) {
+    log(`Buy Ireland error: ${e.message.slice(0, 80)}`);
+    inTrade = false;
+    return null;
   }
 }
 
-// ── Place limit buy, sell ──
-async function placeBuyLimit(m, side) {
-  const tokenId = side === 'up' ? m.upTokenId : m.downTokenId;
-  if (dryRun) return 'demo_' + side + '_buy';
+async function buyIndia() {
+  if (!mktReady || inTrade) return null;
+  inTrade = true;
   try {
-    const ord = await trader.placeGtcOrder(tokenId, 'BUY', BUY_PRICE, SHARES);
-    return ord?.id || null;
-  } catch (e) { log(`BUY err ${side}: ${e.message.slice(0,60)}`); return null; }
-}
+    const cost = f2(BASE_SHARES * mkt.indiaPrice);
+    const preBal = await checkBalance();
+    log(`BUY India ${BASE_SHARES}sh @ $${f4(mkt.indiaPrice)} (≈$${cost})`);
 
-async function placeSellLimit(m, side, price) {
-  const tokenId = side === 'up' ? m.upTokenId : m.downTokenId;
-  if (dryRun) return 'demo_' + side + '_sell';
-  try {
-    const ord = await trader.placeGtcOrder(tokenId, 'SELL', price, SHARES);
-    return ord?.id || null;
-  } catch (e) { log(`SELL err ${side}: ${e.message.slice(0,60)}`); return null; }
-}
+    const result = await trader.placeFokBuy(mkt.indiaTokenId, cost);
+    if (!result) { inTrade = false; return null; }
 
-async function marketSell(m, side) {
-  const tokenId = side === 'up' ? m.upTokenId : m.downTokenId;
-  if (dryRun) {
-    const mid = side === 'up' ? m.upMid : m.downMid;
-    return { price: mid, proceeds: f2(SHARES_PER_BUCKET * mid) };
+    if (result.isFilled) {
+      await sleep(CONFIRM_MS);
+      const postBal = await checkBalance();
+      log(`✅ Bought India – balance change: $${f2(preBal)}→$${f2(postBal)}`);
+      position = 'india';
+      entryPrice = result.avgPrice || mkt.indiaPrice;
+      sharesHeld = BASE_SHARES;
+      stopTrough = entryPrice;
+      lastBuyTs = Date.now();
+      logTrade('BUY', 'INDIA', entryPrice);
+      inTrade = false;
+      return { filled: true, price: entryPrice };
+    } else {
+      log(`FOK India buy didn't fill – retrying next tick`);
+      inTrade = false;
+      return null;
+    }
+  } catch (e) {
+    log(`Buy India error: ${e.message.slice(0, 80)}`);
+    inTrade = false;
+    return null;
   }
-  try {
-    const { Side, OrderType } = require('@polymarket/clob-client-v2');
-    await trader._clob.createAndPostMarketOrder(
-      { tokenID: tokenId, amount: SHARES_PER_BUCKET, side: Side.SELL, orderType: OrderType.FOK },
-      {}, OrderType.FOK
-    );
-    return { price: 0, proceeds: 0 };
-  } catch (e) { log(`MKT SELL err ${side}: ${e.message.slice(0,60)}`); return null; }
 }
 
-// ── Core Trade Loop ──
-async function tradeLoop(m) {
-  if (m.loopRunning) return;
-  m.loopRunning = true;
-  const ss = stratState[m.slug];
-  log(`Loop ${m.pair} buckets: ${BUCKETS.join(',')}`);
+async function sellIreland(andFlipTo) {
+  // andFlipTo: 'india' — after selling ireland, buy india
+  if (!mktReady || inTrade || !position) return null;
+  inTrade = true;
+  try {
+    const mid = mkt.irelandPrice;
+    const proceeds = f2(BASE_SHARES * mid);
+    const preBal = await checkBalance();
+    const pnl = f2((mid - entryPrice) * BASE_SHARES);
+    log(`SELL Ireland ${BASE_SHARES}sh @ $${f4(mid)} PnL: $${pnl >= 0 ? '+' : ''}${pnl}`);
 
-  // Wait for window to open
-  if (m.windowStartMs > Date.now() + 2000) {
-    const w = m.windowStartMs - Date.now();
-    await sleep(w);
+    const result = await trader.placeFokSell(mkt.irelandTokenId, BASE_SHARES);
+    if (!result) { inTrade = false; return null; }
+
+    if (result.isFilled) {
+      await sleep(CONFIRM_MS);
+      await checkBalance();
+      log(`✅ Sold Ireland – PnL $${pnl >= 0 ? '+' : ''}${pnl}`);
+      logTrade('SELL', 'IRELAND', mid, pnl);
+      position = null;
+      sharesHeld = 0;
+      entryPrice = 0;
+      lastSellTs = Date.now();
+      flipCount++;
+
+      if (andFlipTo === 'india') {
+        // Immediately buy India
+        inTrade = false;
+        pendingFlip = null;
+        return await flipToIndia();
+      }
+      inTrade = false;
+      return { filled: true, price: mid, pnl };
+    } else {
+      log(`FOK Ireland sell didn't fill – retrying next tick`);
+      inTrade = false;
+      return null;
+    }
+  } catch (e) {
+    log(`Sell Ireland error: ${e.message.slice(0, 80)}`);
+    inTrade = false;
+    return null;
   }
+}
 
-  ss.phase = 'entry';
-  const costPerFill = f2(SHARES_PER_BUCKET * BUCKETS[0]); // approximate
-  log(`${m.pair} placing ${BUCKETS.length}×2 limit orders`);
+async function sellIndia(andFlipTo) {
+  // andFlipTo: 'ireland' — after selling india, buy ireland
+  if (!mktReady || inTrade || !position) return null;
+  inTrade = true;
+  try {
+    const mid = mkt.indiaPrice;
+    const pnl = f2((entryPrice - mid) * BASE_SHARES); // for india, we profit if price goes down
+    const preBal = await checkBalance();
+    log(`SELL India ${BASE_SHARES}sh @ $${f4(mid)} PnL: $${pnl >= 0 ? '+' : ''}${pnl}`);
 
-  // Main monitor loop
-  while (true) {
-    const elapsed = (Date.now() - m.windowStartMs) / 1000;
-    if (elapsed >= WINDOW_SECS + 1) break;
+    const result = await trader.placeFokSell(mkt.indiaTokenId, BASE_SHARES);
+    if (!result) { inTrade = false; return null; }
 
-    await ensureFreshPrice(m);
+    if (result.isFilled) {
+      await sleep(CONFIRM_MS);
+      await checkBalance();
+      log(`✅ Sold India – PnL $${pnl >= 0 ? '+' : ''}${pnl}`);
+      logTrade('SELL', 'INDIA', mid, pnl);
+      position = null;
+      sharesHeld = 0;
+      entryPrice = 0;
+      lastSellTs = Date.now();
+      flipCount++;
 
-    if (dryRun) {
-      // Check each bucket
-      for (const [priceStr, bk] of Object.entries(ss.buckets)) {
-        const p = parseFloat(priceStr);
-        if (elapsed < 5) continue; // brief settling delay
+      if (andFlipTo === 'ireland') {
+        inTrade = false;
+        pendingFlip = null;
+        return await flipToIreland();
+      }
+      inTrade = false;
+      return { filled: true, price: mid, pnl };
+    } else {
+      log(`FOK India sell didn't fill – retrying next tick`);
+      inTrade = false;
+      return null;
+    }
+  } catch (e) {
+    log(`Sell India error: ${e.message.slice(0, 80)}`);
+    inTrade = false;
+    return null;
+  }
+}
 
-        // Check UP fill
-        if (!bk.upFilled && !bk.upTpFilled && m.upMid > 0 && m.upMid <= p) {
-          cashBalance = f2(cashBalance - costPerFill);
-          bk.upFilled = true;
-          ss.filledCount++;
-          // Cancel opposite side at this level
-          if (!bk.dnFilled) {
-            bk.dnOrderId = null; // cancelled
-            log(`${m.pair} UP @${priceStr} FILLED — DN@${priceStr} cancelled`);
-          } else {
-            log(`${m.pair} UP @${priceStr} FILLED`);
-          }
-        }
-        // Check DN fill
-        if (!bk.dnFilled && !bk.dnTpFilled && m.downMid > 0 && m.downMid <= p) {
-          cashBalance = f2(cashBalance - costPerFill);
-          bk.dnFilled = true;
-          ss.filledCount++;
-          // Cancel opposite side at this level
-          if (!bk.upFilled) {
-            bk.upOrderId = null; // cancelled
-            log(`${m.pair} DN @${priceStr} FILLED — UP@${priceStr} cancelled`);
-          } else {
-            log(`${m.pair} DN @${priceStr} FILLED`);
-          }
-        }
+async function flipToIndia() {
+  if (inTrade) return null;
+  // Called after selling Ireland
+  pendingFlip = 'to_india';
+  log('FLIP → BUY India');
+  return await buyIndia();
+}
 
-        // Check TP at 0.99
-        if (bk.upFilled && !bk.upTpFilled && m.upMid >= TP_PRICE) {
-          cashBalance = f2(cashBalance + SHARES_PER_BUCKET * m.upMid);
-          bk.upTpFilled = true;
-          ss.tpCount++;
-          const pnl = f2((m.upMid - p) * SHARES_PER_BUCKET);
-          log(`${m.pair} UP @${priceStr} TP @0.99 +${pnl}`);
-          trades.unshift({ ts: new Date().toTimeString().slice(0,8), pair: m.pair, side: 'UP', action: 'TP', price: f4(m.upMid), shares: SHARES_PER_BUCKET, pnl });
-        }
-        if (bk.dnFilled && !bk.dnTpFilled && m.downMid >= TP_PRICE) {
-          cashBalance = f2(cashBalance + SHARES_PER_BUCKET * m.downMid);
-          bk.dnTpFilled = true;
-          ss.tpCount++;
-          const pnl = f2((m.downMid - p) * SHARES_PER_BUCKET);
-          log(`${m.pair} DN @${priceStr} TP @0.99 +${pnl}`);
-          trades.unshift({ ts: new Date().toTimeString().slice(0,8), pair: m.pair, side: 'DOWN', action: 'TP', price: f4(m.downMid), shares: SHARES_PER_BUCKET, pnl });
+async function flipToIreland() {
+  if (inTrade) return null;
+  // Called after selling India
+  pendingFlip = 'to_ireland';
+  log('FLIP → BUY Ireland');
+  return await buyIreland();
+}
+
+// ── Main trade loop ──
+async function tradeLoop() {
+  if (tradeLoopRunning) return;
+  tradeLoopRunning = true;
+
+  while (mktReady && Date.now() < mkt.endDate) {
+    await ensureFreshPrices();
+    const ire = mkt.irelandPrice;
+    const ind = mkt.indiaPrice;
+
+    // Update trailing values
+    if (position === 'ireland') {
+      // Track highest Ireland price since entry
+      if (ire > stopPeak) stopPeak = ire;
+    } else if (position === 'india') {
+      // Track lowest India price since entry (we profit when India goes down)
+      if (ind < stopTrough || stopTrough === 0) stopTrough = ind;
+    } else {
+      // No position – track Ireland peak for entry
+      if (ire > trailHigh) trailHigh = ire;
+    }
+
+    // ── STATE: No position, waiting for entry ──
+    if (!position && !inTrade && !pendingFlip) {
+      const drop = f4(trailHigh - ire);
+      if (drop >= TRAIL_DIST && ire > 0) {
+        log(`Ireland dropped $${f4(drop)} from peak $${f4(trailHigh)} → entering`);
+        await buyIreland();
+      } else if (ire > 0) {
+        // Log occasionally
+        if (Math.random() < 0.05) {
+          // silent
         }
       }
-    } else {
-      // Real mode – check order fills
-      try {
-        const openOrders = await trader.getOpenOrders();
-        const openIds = new Set((openOrders || []).map(o => o.id));
-        for (const [priceStr, bk] of Object.entries(ss.buckets)) {
-          if (bk.upOrderId && !bk.upFilled && !openIds.has(bk.upOrderId)) {
-            bk.upFilled = true; ss.filledCount++;
-            try { const b = await trader.getBalance(); if (b > 0) cashBalance = b; } catch(_) {}
-            log(`${m.pair} UP @${priceStr} FILLED`);
-          }
-          if (bk.dnOrderId && !bk.dnFilled && !openIds.has(bk.dnOrderId)) {
-            bk.dnFilled = true; ss.filledCount++;
-            try { const b = await trader.getBalance(); if (b > 0) cashBalance = b; } catch(_) {}
-            log(`${m.pair} DN @${priceStr} FILLED`);
-          }
-          // Place TP orders
-          if (bk.upFilled && !bk.upTpFilled && !bk.upSellId) {
-            bk.upSellId = await placeSellLimit(m, 'up', TP_PRICE);
-          }
-          if (bk.dnFilled && !bk.dnTpFilled && !bk.dnSellId) {
-            bk.dnSellId = await placeSellLimit(m, 'down', TP_PRICE);
-          }
-          // Check TP fills
-          if (bk.upSellId && bk.upFilled && !bk.upTpFilled && !openIds.has(bk.upSellId)) {
-            bk.upTpFilled = true; ss.tpCount++;
-            try { const b = await trader.getBalance(); if (b > 0) cashBalance = b; } catch(_) {}
-            log(`${m.pair} UP @${priceStr} TP EXIT`);
-          }
-          if (bk.dnSellId && bk.dnFilled && !bk.dnTpFilled && !openIds.has(bk.dnSellId)) {
-            bk.dnTpFilled = true; ss.tpCount++;
-            try { const b = await trader.getBalance(); if (b > 0) cashBalance = b; } catch(_) {}
-            log(`${m.pair} DN @${priceStr} TP EXIT`);
-          }
-        }
-      } catch (_) {}
     }
 
-    // Force sell at 298s
-    if (elapsed >= FORCE_AT && !ss.forceClosed && ss.filledCount > ss.tpCount) {
-      ss.forceClosed = true;
-      log(`${m.pair} FORCE SELL at ${elapsed.toFixed(1)}s`);
-      if (dryRun) {
-        for (const [priceStr, bk] of Object.entries(ss.buckets)) {
-          if (bk.upFilled && !bk.upTpFilled) {
-            const res = await marketSell(m, 'up');
-            if (res) { cashBalance = f2(cashBalance + res.proceeds); bk.upTpFilled = true; ss.tpCount++; }
-          }
-          if (bk.dnFilled && !bk.dnTpFilled) {
-            const res = await marketSell(m, 'down');
-            if (res) { cashBalance = f2(cashBalance + res.proceeds); bk.dnTpFilled = true; ss.tpCount++; }
-          }
-        }
-      } else {
-        for (const [priceStr, bk] of Object.entries(ss.buckets)) {
-          if (bk.upFilled && !bk.upTpFilled) {
-            await marketSell(m, 'up');
-            try { const b = await trader.getBalance(); if (b > 0) cashBalance = b; } catch(_) {}
-            bk.upTpFilled = true; ss.tpCount++;
-          }
-          if (bk.dnFilled && !bk.dnTpFilled) {
-            await marketSell(m, 'down');
-            try { const b = await trader.getBalance(); if (b > 0) cashBalance = b; } catch(_) {}
-            bk.dnTpFilled = true; ss.tpCount++;
-          }
-        }
+    // ── STATE: Holding Ireland ──
+    if (position === 'ireland' && !inTrade && !pendingFlip) {
+      const drop = f4(stopPeak - ire);
+      if (drop >= TRAIL_DIST && ire > 0) {
+        log(`Ireland trailing stop: dropped $${f4(drop)} from peak $${f4(stopPeak)} → sell & flip`);
+        await sellIreland('india');
+      }
+    }
+
+    // ── STATE: Holding India ──
+    if (position === 'india' && !inTrade && !pendingFlip) {
+      const rise = f4(ind - stopTrough);
+      if (rise >= TRAIL_DIST && ind > 0) {
+        log(`India trailing stop: rose $${f4(rise)} from trough $${f4(stopTrough)} → sell & flip`);
+        await sellIndia('ireland');
+      }
+    }
+
+    // ── Retry failed trades ──
+    // If we're in a pending flip but not inTrade, retry the buy
+    if (pendingFlip && !inTrade) {
+      if (pendingFlip === 'to_india' && !position) {
+        await buyIndia();
+      } else if (pendingFlip === 'to_ireland' && !position) {
+        await buyIreland();
+      } else if (position) {
+        // We somehow got a position while pending flip – clear it
+        pendingFlip = null;
       }
     }
 
     await sleep(TICK_MS);
   }
 
-  const total = f2(cashBalance - startBalance);
-  log(`${m.pair} done – balance ${f2(cashBalance)} PnL ${total}`);
-  ss.phase = 'done';
-  m.loopRunning = false;
+  log(`Market ended or loop finished`);
+  tradeLoopRunning = false;
+  mktReady = false;
 }
 
-// ── Main tick ──
-let lastEquityRecord = 0;
-const equityHistory = [];
-
-async function tick() {
-  const now = Date.now();
-  if (now - lastDiscoverAt >= DISCOVER_EVERY_MS) {
-    lastDiscoverAt = now;
-    await discover();
-  }
-  if (now - lastEquityRecord >= 5000) {
-    lastEquityRecord = now;
-    equityHistory.push({ t: now - startTime, v: calcEquity() });
-    if (equityHistory.length > 1000) equityHistory.splice(0, equityHistory.length - 1000);
-  }
-  emitFn('snapshot', snapshot());
-}
-
+// ── Snapshot ──
 function snapshot() {
-  const equity = calcEquity();
+  const equity = cashBalance;
   const pnl = f2(equity - startBalance);
+  const irePrice = mkt?.irelandPrice || 0;
+  const indPrice = mkt?.indiaPrice || 0;
 
-  const activeMarkets = Object.values(markets)
-    .filter(m => m.windowStartMs <= Date.now() && m.endTime > Date.now())
-    .map(m => {
-    const ss = stratState[m.slug] || { phase: 'waiting', buckets: {} };
-    const bkList = Object.entries(ss.buckets || {}).map(([p, bk]) => ({
-      price: parseFloat(p),
-      upFilled: bk.upFilled,
-      dnFilled: bk.dnFilled,
-      upTpFilled: bk.upTpFilled,
-      dnTpFilled: bk.dnTpFilled,
-    }));
+  // For position value
+  let posValue = 0;
+  let posPnl = 0;
+  if (position === 'ireland' && sharesHeld > 0) {
+    posValue = f2(sharesHeld * irePrice);
+    posPnl = f2((irePrice - entryPrice) * sharesHeld);
+  } else if (position === 'india' && sharesHeld > 0) {
+    posValue = f2(sharesHeld * indPrice);
+    posPnl = f2((entryPrice - indPrice) * sharesHeld);
+  }
 
-    // Aggregate stats
-    let upShares = 0, dnShares = 0, upCost = 0, dnCost = 0;
-    const upEntries = [], dnEntries = [];
-    for (const bk of bkList) {
-      if (bk.upFilled) { upShares += SHARES_PER_BUCKET; upCost += SHARES_PER_BUCKET * bk.price; upEntries.push(bk.price); }
-      if (bk.dnFilled) { dnShares += SHARES_PER_BUCKET; dnCost += SHARES_PER_BUCKET * bk.price; dnEntries.push(bk.price); }
-    }
-
-    return {
-      slug: m.slug, pair: m.pair,
-      upMid: f4(m.upMid), dnMid: f4(m.downMid),
-      secsLeft: Math.max(0, Math.floor((m.endTime - Date.now()) / 1000)),
-      phase: ss.phase,
-      filledCount: ss.filledCount || 0,
-      tpCount: ss.tpCount || 0,
-      buckets: bkList,
-      upShares, dnShares,
-      upCost: f2(upCost), dnCost: f2(dnCost),
-      upEntry: upEntries.length ? Math.min(...upEntries) : null,
-      dnEntry: dnEntries.length ? Math.min(...dnEntries) : null,
-      upTp: upShares > 0 ? TP_PRICE : null,
-      dnTp: dnShares > 0 ? TP_PRICE : null,
-    };
-  });
+  let stopLevel = 0;
+  let stopDist = 0;
+  if (position === 'ireland') {
+    stopLevel = f4(stopPeak - TRAIL_DIST);
+    stopDist = f4(stopPeak - irePrice);
+  } else if (position === 'india') {
+    stopLevel = f4(stopTrough + TRAIL_DIST);
+    stopDist = f4(indPrice - stopTrough);
+  }
 
   return {
-    dryRun, balance: f2(equity), cashBalance: f2(cashBalance),
-    startBalance: f2(startBalance), pnl,
+    dryRun,
+    balance: f2(equity),
+    cashBalance: f2(cashBalance),
+    startBalance: f2(startBalance),
+    pnl,
     uptime: Math.floor((Date.now() - startTime) / 1000),
-    activeMarkets,
+    activeMarkets: mktReady ? [{
+      slug: MARKET_SLUG,
+      pair: 'Ireland vs India',
+      upMid: f4(irePrice),      // ireland = "up"
+      dnMid: f4(indPrice),      // india = "down"
+      phase: mktReady && Date.now() < mkt.endDate ? 'trading' : 'ended',
+      position,
+      entryPrice: f4(entryPrice),
+      sharesHeld,
+      stopLevel: f4(stopLevel),
+      stopDist: f4(stopDist),
+      posValue: f2(posValue),
+      posPnl: f2(posPnl),
+      flipCount,
+      timeLeft: Math.max(0, Math.floor((mkt.endDate - Date.now()) / 1000)),
+      question: mkt?.question || '',
+    }] : [],
     recentTrades: trades.slice(0, 100),
     activityLog: logs.slice(0, 50),
-    equityHistory: equityHistory.slice(-500),
     strategy: {
-      type: 'bucket', buckets: BUCKETS, sharesPerBucket: SHARES_PER_BUCKET,
-      tpPrice: TP_PRICE, pairs: TARGET_PAIRS,
+      type: 'cricket_flip',
+      shares: BASE_SHARES,
+      trailDist: TRAIL_DIST,
+      market: MARKET_SLUG,
     },
   };
 }
-async function setDryRun(v) {
-  dryRun = !!v;
-  if (dryRun) { cashBalance = DEMO_BALANCE; startBalance = DEMO_BALANCE; }
-  equityHistory.length = 0;
-  if (!dryRun && trader) {
-    try { const b = await trader.getBalance(); if (b > 0) { cashBalance = b; startBalance = b; } } catch (_) {}
-  }
-}
-function getDryRun() { return dryRun; }
 
+// ── Start / Stop ──
 async function start(emit, logFn) {
   emitFn = emit || (() => {});
-  slog = logFn || (() => {});
+  slog   = logFn || (() => {});
   startTime = Date.now();
-  if (!process.env.POLYMARKET_PRIVATE_KEY) { console.error('No private key'); process.exit(1); }
+
+  if (!process.env.POLYMARKET_PRIVATE_KEY) {
+    console.error('No private key');
+    process.exit(1);
+  }
 
   try {
     trader = new PolymarketTrader(process.env.POLYMARKET_PRIVATE_KEY);
@@ -491,13 +518,34 @@ async function start(emit, logFn) {
     log('Authenticating...');
     await trader.authenticate();
     log(`Auth: ${trader.address}`);
-    if (dryRun) { cashBalance = DEMO_BALANCE; startBalance = DEMO_BALANCE; log(`DEMO $${f2(cashBalance)}`); }
-    else { const b = await trader.getBalance(); if (b > 0) { cashBalance = b; startBalance = b; } log(`LIVE $${f2(cashBalance)}`); }
-  } catch (e) { log(`Auth fail: ${e.message}`); process.exit(1); }
+    const b = await trader.getBalance();
+    if (b > 0) { cashBalance = b; startBalance = b; }
+    log(`Balance: $${f2(cashBalance)}`);
+  } catch (e) {
+    log(`Auth fail: ${e.message}`);
+    process.exit(1);
+  }
 
-  wsConnect();
-  log('Starting main loop');
-  setInterval(tick, TICK_MS);
+  // Discover the cricket market
+  while (!mktReady) {
+    await discoverCricketMarket();
+    if (!mktReady) await sleep(5000);
+  }
+
+  // Start the main loop
+  log('Starting cricket trading loop');
+  trailHigh = mkt.irelandPrice; // initialize trailing peak
+  tradeLoop().catch(e => log(`Loop error: ${e.message}`));
+
+  // Separate tick for snapshot updates
+  setInterval(() => {
+    emitFn('snapshot', snapshot());
+  }, TICK_MS);
 }
+
+async function setDryRun(v) {
+  dryRun = !!v;
+}
+function getDryRun() { return dryRun; }
 
 module.exports = { start, snapshot, setDryRun, getDryRun };

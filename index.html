@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
-<title>PolyBot</title>
+<title>Cricket Bot</title>
 <script src="/socket.io/socket.io.js"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -16,94 +16,71 @@ header{background:#fff;border-bottom:2px solid #eef0f5;padding:10px 14px;positio
 .dot.off{background:#ef4444}
 .badge{padding:2px 8px;border-radius:4px;font-size:9px;font-weight:700;letter-spacing:.5px}
 .badge.live{background:#fef2f2;color:#dc2626;border:1px solid #fca5a5}
-.badge.demo{background:#eff6ff;color:#2563eb;border:1px solid #93c5fd}
 .stats{display:flex;gap:5px;flex-wrap:wrap}
 .stat{background:#f8f9fe;border:1px solid #eef0f5;border-radius:8px;padding:4px 10px;text-align:center;min-width:60px}
 .stat .sl{font-size:8px;color:#6b7280;text-transform:uppercase;letter-spacing:.4px;font-weight:600}
 .stat .sv{font-size:13px;font-weight:800}
 .g{color:#16a34a}.r{color:#dc2626}.y{color:#d97706}.b{color:#2563eb}.w{color:#1a1a2e}.gr{color:#6b7280}
-main{padding:10px;max-width:1100px;margin:0 auto}
+main{padding:10px;max-width:800px;margin:0 auto}
 .card{background:#fff;border:1px solid #eef0f5;border-radius:10px;padding:12px;margin-bottom:10px;box-shadow:0 1px 4px rgba(0,0,0,0.03)}
-.card-title{font-size:9px;font-weight:800;margin-bottom:8px;text-transform:uppercase;color:#6b7280;letter-spacing:.6px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #f3f4f8;padding-bottom:6px}
-.pair-row{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;padding:8px 0;border-bottom:1px solid #f3f4f8}
-.pair-row:last-child{border-bottom:none}
-.pair-name{font-weight:700;font-size:14px;min-width:70px}
-.pair-prices{display:flex;gap:12px;align-items:center}
-.price-up{color:#16a34a;font-weight:700;font-size:18px}
-.price-dn{color:#dc2626;font-weight:700;font-size:18px}
-.price-label{font-size:9px;color:#6b7280;font-weight:600;text-transform:uppercase}
-.phase-badge{font-size:10px;padding:2px 8px;border-radius:6px;font-weight:700}
-.phase-wait{background:#f3f4f8;color:#6b7280;border:1px solid #d1d5db}
-.phase-entry{background:#fefce8;color:#a16207;border:1px solid #fde047}
-.phase-active{background:#eff6ff;color:#2563eb;border:1px solid #93c5fd}
-.phase-done{background:#f0fdf4;color:#16a34a;border:1px solid #86efac}
-.phase-sell{background:#fef2f2;color:#dc2626;border:1px solid #fca5a5}
-.row{display:flex;gap:10px;flex-wrap:wrap}
-.col{flex:1;min-width:200px}
-.bot-section{margin-top:6px}
-.sub-title{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:#6b7280;margin-bottom:6px}
-.side-card{background:#fafbfc;border:1px solid #eef0f5;border-radius:8px;padding:8px;margin-bottom:6px}
-.side-hdr{display:flex;justify-content:space-between;align-items:center;font-size:11px}
-.side-label{font-weight:700;padding:1px 6px;border-radius:4px;font-size:9px}
-.side-up{background:#f0fdf4;color:#16a34a}
-.side-dn{background:#fef2f2;color:#dc2626}
-.side-stat{display:flex;justify-content:space-between;padding:3px 0;font-size:11px;border-bottom:1px solid #f3f4f8}
-.side-stat:last-child{border-bottom:none}
-.side-stat .lb{color:#6b7280}
-.side-stat .vl{font-weight:600}
-.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-.status-ok{color:#16a34a}.status-no{color:#dc2626}.status-wait{color:#d97706}
+.card-title{font-size:9px;font-weight:800;margin-bottom:8px;text-transform:uppercase;color:#6b7280;letter-spacing:.6px;border-bottom:1px solid #f3f4f8;padding-bottom:6px}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.col{flex:1;min-width:180px}
+.price-lg{font-size:28px;font-weight:900;line-height:1.2}
+.price-sm{font-size:10px;color:#6b7280;font-weight:600}
+.team-card{background:#fafbfc;border:1px solid #eef0f5;border-radius:10px;padding:12px;text-align:center;min-width:140px}
+.team-card.active{background:#f0fdf4;border-color:#86efac}
+.team-card .team{font-size:9px;text-transform:uppercase;letter-spacing:.6px;color:#6b7280;font-weight:700}
+.team-card .price{font-size:24px;font-weight:900;margin:4px 0}
+.pos-badge{display:inline-block;padding:2px 10px;border-radius:6px;font-size:10px;font-weight:700;letter-spacing:.4px;text-transform:uppercase}
+.pos-ireland{background:#f0fdf4;color:#16a34a;border:1px solid #86efac}
+.pos-india{background:#fef2f2;color:#dc2626;border:1px solid #fca5a5}
+.pos-none{background:#f3f4f8;color:#6b7280;border:1px solid #d1d5db}
+.info-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.info-item{background:#f8f9fe;border:1px solid #eef0f5;border-radius:6px;padding:6px 8px}
+.info-item .lb{font-size:8px;text-transform:uppercase;color:#6b7280;letter-spacing:.4px;font-weight:600}
+.info-item .vl{font-size:14px;font-weight:700;margin-top:1px}
+.trade-line{padding:4px 0;border-bottom:1px solid #f3f4f8;font-size:10px;font-family:monospace;display:flex;gap:6px;align-items:center}
+.trade-line:last-child{border-bottom:none}
 .chart-wrap{width:100%;height:80px;margin-top:4px;position:relative}
 .chart-wrap canvas{width:100%;height:80px;display:block}
 .log-line{padding:2px 0;border-bottom:1px solid #f3f4f8;font-size:10px;font-family:monospace;color:#374151}
 .log-line:last-child{border-bottom:none}
 footer{text-align:center;padding:10px;color:#9ca3af;font-size:9px;border-top:1px solid #eef0f5;margin-top:10px}
 .empty{color:#9ca3af;font-size:12px;padding:8px;text-align:center}
-.btn{padding:4px 10px;font-size:10px;font-weight:700;background:#fff;border:1.5px solid #2563eb;color:#2563eb;border-radius:6px;cursor:pointer;letter-spacing:.4px;white-space:nowrap}
-.btn:active{opacity:.7}
-@media(max-width:600px){.grid-2{grid-template-columns:1fr}}
+@media(max-width:600px){.info-grid{grid-template-columns:1fr}.row{flex-direction:column}}
 </style>
 </head>
 <body>
 <header>
   <div class="hrow">
-    <div class="logo"><span class="dot off" id="dot"></span>PolyBot</div>
-    <span class="badge demo" id="modeBadge">DEMO</span>
+    <div class="logo"><span class="dot off" id="dot"></span>Cricket Bot</div>
+    <span class="badge live" id="modeBadge">LIVE</span>
     <div class="stats" id="headerStats"></div>
-    <button class="btn" id="toggleBtn" onclick="doToggle()">Toggle</button>
   </div>
 </header>
 <main>
   <div class="card">
-    <div class="card-title">Active Markets</div>
-    <div id="mktBody"><div class="empty">Waiting for markets...</div></div>
+    <div class="card-title">Ireland vs India — T20 <span id="timeLeft" style="font-weight:400;text-transform:none;font-size:10px">loading...</span></div>
+    <div id="marketBody"><div class="empty">Loading market...</div></div>
   </div>
-
   <div class="card">
-    <div class="card-title">Entry Bot <span style="font-weight:400;text-transform:none;font-size:10px;color:#9ca3af">buckets 0.40/0.35/0.30/0.25/0.20 × 50sh → TP 0.99</span></div>
-    <div id="entryBody"><div class="empty">Waiting for window...</div></div>
+    <div class="card-title">Position</div>
+    <div id="positionBody"><div class="empty">Waiting...</div></div>
   </div>
-
   <div class="card">
-    <div class="card-title">Crash Bot <span style="font-weight:400;text-transform:none;font-size:10px;color:#9ca3af">range 0.20-0.80 → buy 50sh @ 0.10 → TP 0.90</span></div>
-    <div id="crashBody"><div class="empty">Waiting for window...</div></div>
+    <div class="card-title">Trade History</div>
+    <div id="tradeBody"><div class="empty">No trades yet</div></div>
   </div>
-
-  <div class="card">
-    <div class="card-title">Equity</div>
-    <div class="chart-wrap"><canvas id="eqChart"></canvas></div>
-  </div>
-
   <div class="card">
     <div class="card-title">Activity</div>
     <div id="logBody"><div class="empty">No activity yet</div></div>
   </div>
 </main>
-<footer id="footer">PolyBot | loading...</footer>
+<footer id="footer">Cricket Flip Bot | loading...</footer>
 
 <script>
 var socket = io({transports:['websocket','polling'],reconnection:true,reconnectionDelay:1000});
-
 function f2(v){return typeof v==='number'?v.toFixed(2):'0.00';}
 function f4(v){return typeof v==='number'?v.toFixed(4):'0.0000';}
 function cls(v){return v>0?'g':v<0?'r':'gr';}
@@ -112,172 +89,77 @@ function fmtU(s){if(!s)return'0s';return s>3600?Math.floor(s/3600)+'h '+Math.flo
 
 function render(d){
   if(!d)return;
+  var b=d.bot||{};
   document.getElementById('dot').className='dot on';
-  var a=d.accum||{},c=d.crash||{};
-  var mode=document.getElementById('modeBadge');
-  var tbtn=document.getElementById('toggleBtn');
 
-  if(a.dryRun){
-    mode.textContent='DEMO $'+f2(a.balance)+' | C:$'+f2(c.balance);
-    mode.className='badge demo';
-    tbtn.textContent='Go Live';
-    tbtn.style.borderColor='#dc2626';tbtn.style.color='#dc2626';
-  }else{
-    mode.textContent='LIVE';
-    mode.className='badge live';
-    tbtn.textContent='Demo';
-    tbtn.style.borderColor='#2563eb';tbtn.style.color='#2563eb';
-  }
-
+  // Header stats
   var h='';
-  h+='<div class="stat"><div class="sl">Entry Bal</div><div class="sv w">$'+f2(a.balance)+'</div></div>';
-  h+='<div class="stat"><div class="sl">Crash Bal</div><div class="sv b">$'+f2(c.balance)+'</div></div>';
-  h+='<div class="stat"><div class="sl">Entry PnL</div><div class="sv '+cls(a.pnl)+'">'+sgn(a.pnl)+'$'+f2(a.pnl)+'</div></div>';
-  h+='<div class="stat"><div class="sl">Crash PnL</div><div class="sv '+cls(c.pnl)+'">'+sgn(c.pnl)+'$'+f2(c.pnl)+'</div></div>';
-  h+='<div class="stat"><div class="sl">Uptime</div><div class="sv gr">'+fmtU(a.uptime)+'</div></div>';
+  h+='<div class="stat"><div class="sl">Balance</div><div class="sv w">$'+f2(b.balance)+'</div></div>';
+  h+='<div class="stat"><div class="sl">PnL</div><div class="sv '+cls(b.pnl)+'">'+sgn(b.pnl)+'$'+f2(b.pnl)+'</div></div>';
+  h+='<div class="stat"><div class="sl">Flips</div><div class="sv b">'+(b.activeMarkets&&b.activeMarkets[0]?b.activeMarkets[0].flipCount:0)+'</div></div>';
+  h+='<div class="stat"><div class="sl">Uptime</div><div class="sv gr">'+fmtU(b.uptime)+'</div></div>';
   document.getElementById('headerStats').innerHTML=h;
 
-  // Markets
-  var entryMkts=a.activeMarkets||[];
-  var crashMkts=c.activeMarkets||[];
-  var allPairs={};
-  entryMkts.forEach(function(m){allPairs[m.slug]={pair:m.pair,upMid:m.upMid,dnMid:m.dnMid,secs:m.secsLeft};});
-  crashMkts.forEach(function(m){if(!allPairs[m.slug])allPairs[m.slug]={pair:m.pair,upMid:m.upMid,dnMid:m.dnMid,secs:m.secsLeft};});
-  var pairSlugs=Object.keys(allPairs);
-  var mc='';
-  if(!pairSlugs.length){mc='<div class="empty">No active markets</div>';}else{
-    for(var i=0;i<pairSlugs.length;i++){
-      var p=allPairs[pairSlugs[i]];
-      mc+='<div class="pair-row">'+
-        '<div style="display:flex;align-items:center;gap:8px"><span class="pair-name">'+p.pair+' 5m</span>'+
-        '<span style="font-size:10px;color:#6b7280">'+p.secs+'s left</span></div>'+
-        '<div class="pair-prices">'+
-        '<div><div class="price-label">UP</div><span class="price-up">$'+f4(p.upMid)+'</span></div>'+
-        '<div><div class="price-label">DN</div><span class="price-dn">$'+f4(p.dnMid)+'</span></div>'+
-        '</div></div>';
+  var mkts=b.activeMarkets||[];
+  if(!mkts.length){
+    document.getElementById('marketBody').innerHTML='<div class="empty">No active market</div>';
+    document.getElementById('positionBody').innerHTML='<div class="empty">Waiting...</div>';
+  } else {
+    var m=mkts[0];
+    document.getElementById('timeLeft').textContent=m.timeLeft>3600?Math.floor(m.timeLeft/3600)+'h '+Math.floor((m.timeLeft%3600)/60)+'m':m.timeLeft>60?Math.floor(m.timeLeft/60)+'m '+(m.timeLeft%60)+'s':m.timeLeft+'s left';
+
+    // Team cards
+    var pos=m.position||null;
+    var mc='<div class="row" style="justify-content:center;gap:16px;margin-bottom:8px">'+
+      '<div class="team-card'+(pos==='ireland'?' active':'')+'">'+
+        '<div class="team">Ireland</div>'+
+        '<div class="price" style="color:'+(pos==='ireland'?'#16a34a':'#1a1a2e')+'">
+    document.getElementById('marketBody').innerHTML=mc;
+
+    // Position info
+    var posLabel='NONE';
+    var posCls='pos-none';
+    if(pos==='ireland'){posLabel='■ IRELAND';posCls='pos-ireland';}
+    else if(pos==='india'){posLabel='▼ INDIA';posCls='pos-india';}
+
+    var pc='<div class="row" style="margin-bottom:8px"><span class="pos-badge '+posCls+'">'+posLabel+'</span></div>'+
+      '<div class="info-grid">'+
+      '<div class="info-item"><div class="lb">Entry Price</div><div class="vl">'+(m.entryPrice?'$'+f4(m.entryPrice):'-')+'</div></div>'+
+      '<div class="info-item"><div class="lb">Shares</div><div class="vl">'+(m.sharesHeld||0)+'</div></div>'+
+      '<div class="info-item"><div class="lb">Stop Level</div><div class="vl '+(m.stopLevel>0?'r':'gr')+'">'+(m.stopLevel?'$'+f4(m.stopLevel):'-')+'</div></div>'+
+      '<div class="info-item"><div class="lb">Stop Distance</div><div class="vl '+(m.stopDist>0?'y':'gr')+'">'+(m.stopDist?'$'+f4(m.stopDist):'-')+'</div></div>'+
+      '<div class="info-item"><div class="lb">Position Value</div><div class="vl">$'+(m.posValue||'0')+'</div></div>'+
+      '<div class="info-item"><div class="lb">Position PnL</div><div class="vl '+cls(m.posPnl)+'">'+(m.posPnl?sgn(m.posPnl)+'$'+f2(m.posPnl):'$0')+'</div></div>'+
+      '</div>';
+    document.getElementById('positionBody').innerHTML=pc;
+  }
+
+  // Trades
+  var tr=b.recentTrades||[];
+  var tc='';
+  if(!tr.length){tc='<div class="empty">No trades yet</div>';}
+  else{
+    for(var i=0;i<Math.min(tr.length,50);i++){
+      var t=tr[i];
+      var sideCls=t.side==='IRELAND'?'g':t.side==='INDIA'?'r':'gr';
+      tc+='<div class="trade-line"><span style="color:#6b7280">'+t.ts+'</span>'+
+        '<span style="font-weight:700;color:'+(t.action==='BUY'?'#2563eb':'#d97706')+'">'+t.action+'</span>'+
+        '<span class="'+sideCls+'" style="font-weight:700">'+t.side+'</span>'+
+        '<span>@ $'+f4(t.price)+'</span>'+
+        '<span class="'+(t.pnl>=0?'g':'r')+'">'+(t.pnl?sgn(t.pnl)+'$'+f2(t.pnl):'')+'</span></div>';
     }
   }
-  document.getElementById('mktBody').innerHTML=mc;
-
-  // Entry Bot
-  renderEntryBot(entryMkts);
-
-  // Crash Bot
-  renderCrashBot(crashMkts);
+  document.getElementById('tradeBody').innerHTML=tc;
 
   // Activity
-  var logs=(a.activityLog||[]).concat((c.activityLog||[]).slice(0,25));
+  var lg=b.activityLog||[];
   var lc='';
-  if(!logs.length){lc='<div class="empty">No activity yet</div>';}
-  else{
-    for(var i=0;i<Math.min(logs.length,50);i++){
-      lc+='<div class="log-line">'+logs[i].replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</div>';
-    }
-  }
+  if(!lg.length){lc='<div class="empty">No activity yet</div>';}
+  else{for(var i=0;i<Math.min(lg.length,30);i++){lc+='<div class="log-line">'+lg[i].replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</div>';}}
   document.getElementById('logBody').innerHTML=lc;
 
-  // Equity chart
-  drawEquityChart(a.equityHistory||[],a.startBalance);
-
-  var s=a.strategy||{};
-  var cs=c.strategy||{};
-  document.getElementById('footer').textContent=
-    'Entry: '+(s.dryRun?'DEMO':'LIVE')+' | buckets ['+(s.buckets||[]).join())+'] × '+s.sharesPerBucket+'sh → TP '+s.tpPrice+
-    ' || Crash: buy '+cs.shares+'sh @ '+cs.buyPrice+' → TP '+cs.tpPrice+' range ['+cs.range+']'+
-    ' | '+fmtU(a.uptime);
-}
-
-function renderEntryBot(mkts){
-  var ac='';
-  if(!mkts.length){ac='<div class="empty">No active windows</div>';}
-  else{
-    for(var i=0;i<mkts.length;i++){
-      var m=mkts[i];
-      var phaseCls='phase-';
-      if(m.phase==='entry')phaseCls+='entry';
-      else if(m.phase==='done')phaseCls+='done';
-      else phaseCls+='wait';
-      var phaseLbl=m.phase||'idle';
-
-      ac+='<div class="pair-row">';
-      ac+='<div style="display:flex;align-items:center;gap:8px"><span class="pair-name">'+m.pair+'</span><span class="phase-badge '+phaseCls+'">'+phaseLbl.toUpperCase()+'</span>'+
-        ' <span style="font-size:10px;color:#6b7280">fills:'+m.filledCount+' tp:'+m.tpCount+'</span></div>';
-      ac+='<div style="font-size:10px;color:#6b7280">'+m.secsLeft+'s left | UP function renderCrashBot(mkts){
-  var ac='';
-  if(!mkts.length){ac='<div class="empty">No active windows</div>';}
-  else{
-    for(var i=0;i<mkts.length;i++){
-      var m=mkts[i];
-      var phaseCls='phase-';
-      if(m.phase==='checking'||m.phase==='entering')phaseCls+='entry';
-      else if(m.phase==='entered'||m.phase==='sold')phaseCls+='active';
-      else if(m.phase==='done'||m.phase==='tp_hit')phaseCls+='done';
-      else phaseCls+='wait';
-      var phaseLbl=m.phase||'waiting';
-
-      ac+='<div class="pair-row">';
-      ac+='<div style="display:flex;align-items:center;gap:8px"><span class="pair-name">'+m.pair+'</span><span class="phase-badge '+phaseCls+'">'+phaseLbl.toUpperCase()+'</span></div>';
-      ac+='<div style="font-size:10px;color:#6b7280">Range: '+(m.rangeOk?'<span class="status-ok">OK</span>':'<span class="status-no">NO</span>')+' | '+m.secsLeft+'s left</div>';
-      ac+='</div>';
-
-      ac+='<div class="grid-2" style="margin-bottom:6px">';
-
-      // UP side
-      var upSt='waiting';
-      if(m.upTpFilled)upSt='tp_hit';
-      else if(m.upFilled)upSt='filled';
-      ac+='<div class="side-card"><div class="side-hdr"><span class="side-label side-up">▲ UP</span><span style="font-size:10px;font-weight:600;color:'+(upSt==='tp_hit'?'#16a34a':upSt==='filled'?'#d97706':'#6b7280')+'">'+(upSt==='tp_hit'?'✅ TP HIT':upSt==='filled'?'⏳ HOLDING':'⏳ PENDING')+'</span></div>'+
-        '<div class="side-stat"><span class="lb">Filled</span><span class="vl">'+(m.upFilled?'✅ YES':'❌ NO')+'</span></div>'+
-        '<div class="side-stat"><span class="lb">TP Hit</span><span class="vl">'+(m.upTpFilled?'✅ YES':'❌ NO')+'</span></div>'+
-        '<div class="side-stat"><span class="lb">Current</span><span class="vl">$'+f4(m.upMid)+'</span></div></div>';
-
-      // DOWN side
-      var dnSt='waiting';
-      if(m.dnTpFilled)dnSt='tp_hit';
-      else if(m.dnFilled)dnSt='filled';
-      ac+='<div class="side-card"><div class="side-hdr"><span class="side-label side-dn">▼ DOWN</span><span style="font-size:10px;font-weight:600;color:'+(dnSt==='tp_hit'?'#16a34a':dnSt==='filled'?'#d97706':'#6b7280')+'">'+(dnSt==='tp_hit'?'✅ TP HIT':dnSt==='filled'?'⏳ HOLDING':'⏳ PENDING')+'</span></div>'+
-        '<div class="side-stat"><span class="lb">Filled</span><span class="vl">'+(m.dnFilled?'✅ YES':'❌ NO')+'</span></div>'+
-        '<div class="side-stat"><span class="lb">TP Hit</span><span class="vl">'+(m.dnTpFilled?'✅ YES':'❌ NO')+'</span></div>'+
-        '<div class="side-stat"><span class="lb">Current</span><span class="vl">$'+f4(m.dnMid)+'</span></div></div>';
-
-      ac+='</div>';
-    }
-  }
-  document.getElementById('crashBody').innerHTML=ac;
-}
-
-function drawEquityChart(data, startBal){
-  var c=document.getElementById('eqChart');
-  if(!c)return;
-  var rect=c.parentElement.getBoundingClientRect();
-  c.width=rect.width||c.clientWidth||800;
-  var ctx=c.getContext('2d'),W=c.width,H=c.height||80;
-  ctx.clearRect(0,0,W,H);
-  if(!data||data.length<2){ctx.fillStyle='#9ca3af';ctx.font='12px sans-serif';ctx.textAlign='center';ctx.fillText('Waiting for data...',W/2,40);return;}
-  var pad={t:10,b:15,l:45,r:15};
-  var cw=W-pad.l-pad.r,ch=H-pad.t-pad.b;
-  var vals=data.map(function(d){return d.v;});
-  var min=Math.min.apply(null,vals),max=Math.max.apply(null,vals);
-  var range=max-min||1;min-=range*0.1;max+=range*0.1;
-  function y(v){return pad.t+ch-(v-min)/(max-min)*ch;}
-  function x(i){return pad.l+i/(data.length-1)*cw;}
-  ctx.strokeStyle='#eef0f5';ctx.lineWidth=1;
-  for(var g=0;g<4;g++){var gy=pad.t+g*ch/3;ctx.beginPath();ctx.moveTo(pad.l,gy);ctx.lineTo(W-pad.r,gy);ctx.stroke();}
-  ctx.fillStyle='#6b7280';ctx.font='8px sans-serif';ctx.textAlign='right';
-  for(var g=0;g<4;g++){var gy=pad.t+g*ch/3;ctx.fillText('$'+f2(min+(max-min)*(1-g/3)),pad.l-3,gy+3);}
-  ctx.strokeStyle='#93c5fd';ctx.lineWidth=1;ctx.setLineDash([3,3]);
-  var sy=y(startBal);ctx.beginPath();ctx.moveTo(pad.l,sy);ctx.lineTo(W-pad.r,sy);ctx.stroke();ctx.setLineDash([]);
-  ctx.fillStyle='#93c5fd';ctx.font='7px sans-serif';ctx.textAlign='left';ctx.fillText('start $'+f2(startBal),W-pad.r-60,sy-2);
-  ctx.strokeStyle=vals[vals.length-1]>=startBal?'#22c55e':'#ef4444';ctx.lineWidth=2;ctx.lineJoin='round';
-  ctx.beginPath();
-  for(var i=0;i<data.length;i++){var px=x(i),py=y(data[i].v);if(i===0)ctx.moveTo(px,py);else ctx.lineTo(px,py);}
-  ctx.stroke();
-  var last=vals[vals.length-1];
-  ctx.fillStyle=last>=startBal?'#16a34a':'#dc2626';ctx.font='bold 10px sans-serif';ctx.textAlign='right';
-  ctx.fillText('$'+f2(last),W-pad.r-3,y(last)-10);
-  var change=last-startBal;
-  ctx.fillStyle=change>=0?'#16a34a':'#dc2626';ctx.font='8px sans-serif';
-  ctx.fillText((change>=0?'+':'')+'$'+f2(change),W-pad.r-3,y(last)+2);
+  var s=b.strategy||{};
+  document.getElementById('footer').textContent='Cricket Flip | '+s.shares+'sh × $'+f2(s.trailDist)+' trail | '+fmtU(b.uptime);
 }
 
 socket.on('connect',function(){document.getElementById('dot').className='dot on';});
@@ -286,93 +168,61 @@ socket.on('snapshot',function(d){if(d)render(d);});
 setInterval(function(){
   fetch('/api/snapshot').then(function(r){return r.json();}).then(function(d){if(d)render(d);}).catch(function(){});
 }, 3000);
-
-function doToggle(){
-  var modeEl=document.getElementById('modeBadge');
-  var isLive=modeEl.className.indexOf('live')>=0;
-  if(!confirm(isLive?'Switch to DEMO?':'Switch to LIVE?'))return;
-  fetch('/api/set-dry-run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({dryRun:isLive})})
-    .then(function(r){return r.json();}).then(function(j){if(j.error)alert('Fail: '+j.error);}).catch(function(e){alert('Fail: '+e.message);});
-}
 </script>
 </body>
 </html>
-+f4(m.upMid)+' DN function renderCrashBot(mkts){
-  var ac='';
-  if(!mkts.length){ac='<div class="empty">No active windows</div>';}
++f4(m.upMid)+'</div>'+
+        '<div style="font-size:10px;color:#6b7280;margin-top:2px">implied: '+f4(m.dnMid*100)+'%</div>'+
+      '</div>'+
+      '<div class="team-card'+(pos==='india'?' active':'')+'">'+
+        '<div class="team">India</div>'+
+        '<div class="price" style="color:'+(pos==='india'?'#dc2626':'#1a1a2e')+'">
+    document.getElementById('marketBody').innerHTML=mc;
+
+    // Position info
+    var posLabel='NONE';
+    var posCls='pos-none';
+    if(pos==='ireland'){posLabel='■ IRELAND';posCls='pos-ireland';}
+    else if(pos==='india'){posLabel='▼ INDIA';posCls='pos-india';}
+
+    var pc='<div class="row" style="margin-bottom:8px"><span class="pos-badge '+posCls+'">'+posLabel+'</span></div>'+
+      '<div class="info-grid">'+
+      '<div class="info-item"><div class="lb">Entry Price</div><div class="vl">'+(m.entryPrice?'$'+f4(m.entryPrice):'-')+'</div></div>'+
+      '<div class="info-item"><div class="lb">Shares</div><div class="vl">'+(m.sharesHeld||0)+'</div></div>'+
+      '<div class="info-item"><div class="lb">Stop Level</div><div class="vl '+(m.stopLevel>0?'r':'gr')+'">'+(m.stopLevel?'$'+f4(m.stopLevel):'-')+'</div></div>'+
+      '<div class="info-item"><div class="lb">Stop Distance</div><div class="vl '+(m.stopDist>0?'y':'gr')+'">'+(m.stopDist?'$'+f4(m.stopDist):'-')+'</div></div>'+
+      '<div class="info-item"><div class="lb">Position Value</div><div class="vl">$'+(m.posValue||'0')+'</div></div>'+
+      '<div class="info-item"><div class="lb">Position PnL</div><div class="vl '+cls(m.posPnl)+'">'+(m.posPnl?sgn(m.posPnl)+'$'+f2(m.posPnl):'$0')+'</div></div>'+
+      '</div>';
+    document.getElementById('positionBody').innerHTML=pc;
+  }
+
+  // Trades
+  var tr=b.recentTrades||[];
+  var tc='';
+  if(!tr.length){tc='<div class="empty">No trades yet</div>';}
   else{
-    for(var i=0;i<mkts.length;i++){
-      var m=mkts[i];
-      var phaseCls='phase-';
-      if(m.phase==='checking'||m.phase==='entering')phaseCls+='entry';
-      else if(m.phase==='entered'||m.phase==='sold')phaseCls+='active';
-      else if(m.phase==='done'||m.phase==='tp_hit')phaseCls+='done';
-      else phaseCls+='wait';
-      var phaseLbl=m.phase||'waiting';
-
-      ac+='<div class="pair-row">';
-      ac+='<div style="display:flex;align-items:center;gap:8px"><span class="pair-name">'+m.pair+'</span><span class="phase-badge '+phaseCls+'">'+phaseLbl.toUpperCase()+'</span></div>';
-      ac+='<div style="font-size:10px;color:#6b7280">Range: '+(m.rangeOk?'<span class="status-ok">OK</span>':'<span class="status-no">NO</span>')+' | '+m.secsLeft+'s left</div>';
-      ac+='</div>';
-
-      ac+='<div class="grid-2" style="margin-bottom:6px">';
-
-      // UP side
-      var upSt='waiting';
-      if(m.upTpFilled)upSt='tp_hit';
-      else if(m.upFilled)upSt='filled';
-      ac+='<div class="side-card"><div class="side-hdr"><span class="side-label side-up">▲ UP</span><span style="font-size:10px;font-weight:600;color:'+(upSt==='tp_hit'?'#16a34a':upSt==='filled'?'#d97706':'#6b7280')+'">'+(upSt==='tp_hit'?'✅ TP HIT':upSt==='filled'?'⏳ HOLDING':'⏳ PENDING')+'</span></div>'+
-        '<div class="side-stat"><span class="lb">Filled</span><span class="vl">'+(m.upFilled?'✅ YES':'❌ NO')+'</span></div>'+
-        '<div class="side-stat"><span class="lb">TP Hit</span><span class="vl">'+(m.upTpFilled?'✅ YES':'❌ NO')+'</span></div>'+
-        '<div class="side-stat"><span class="lb">Current</span><span class="vl">$'+f4(m.upMid)+'</span></div></div>';
-
-      // DOWN side
-      var dnSt='waiting';
-      if(m.dnTpFilled)dnSt='tp_hit';
-      else if(m.dnFilled)dnSt='filled';
-      ac+='<div class="side-card"><div class="side-hdr"><span class="side-label side-dn">▼ DOWN</span><span style="font-size:10px;font-weight:600;color:'+(dnSt==='tp_hit'?'#16a34a':dnSt==='filled'?'#d97706':'#6b7280')+'">'+(dnSt==='tp_hit'?'✅ TP HIT':dnSt==='filled'?'⏳ HOLDING':'⏳ PENDING')+'</span></div>'+
-        '<div class="side-stat"><span class="lb">Filled</span><span class="vl">'+(m.dnFilled?'✅ YES':'❌ NO')+'</span></div>'+
-        '<div class="side-stat"><span class="lb">TP Hit</span><span class="vl">'+(m.dnTpFilled?'✅ YES':'❌ NO')+'</span></div>'+
-        '<div class="side-stat"><span class="lb">Current</span><span class="vl">$'+f4(m.dnMid)+'</span></div></div>';
-
-      ac+='</div>';
+    for(var i=0;i<Math.min(tr.length,50);i++){
+      var t=tr[i];
+      var sideCls=t.side==='IRELAND'?'g':t.side==='INDIA'?'r':'gr';
+      tc+='<div class="trade-line"><span style="color:#6b7280">'+t.ts+'</span>'+
+        '<span style="font-weight:700;color:'+(t.action==='BUY'?'#2563eb':'#d97706')+'">'+t.action+'</span>'+
+        '<span class="'+sideCls+'" style="font-weight:700">'+t.side+'</span>'+
+        '<span>@ $'+f4(t.price)+'</span>'+
+        '<span class="'+(t.pnl>=0?'g':'r')+'">'+(t.pnl?sgn(t.pnl)+'$'+f2(t.pnl):'')+'</span></div>';
     }
   }
-  document.getElementById('crashBody').innerHTML=ac;
-}
+  document.getElementById('tradeBody').innerHTML=tc;
 
-function drawEquityChart(data, startBal){
-  var c=document.getElementById('eqChart');
-  if(!c)return;
-  var rect=c.parentElement.getBoundingClientRect();
-  c.width=rect.width||c.clientWidth||800;
-  var ctx=c.getContext('2d'),W=c.width,H=c.height||80;
-  ctx.clearRect(0,0,W,H);
-  if(!data||data.length<2){ctx.fillStyle='#9ca3af';ctx.font='12px sans-serif';ctx.textAlign='center';ctx.fillText('Waiting for data...',W/2,40);return;}
-  var pad={t:10,b:15,l:45,r:15};
-  var cw=W-pad.l-pad.r,ch=H-pad.t-pad.b;
-  var vals=data.map(function(d){return d.v;});
-  var min=Math.min.apply(null,vals),max=Math.max.apply(null,vals);
-  var range=max-min||1;min-=range*0.1;max+=range*0.1;
-  function y(v){return pad.t+ch-(v-min)/(max-min)*ch;}
-  function x(i){return pad.l+i/(data.length-1)*cw;}
-  ctx.strokeStyle='#eef0f5';ctx.lineWidth=1;
-  for(var g=0;g<4;g++){var gy=pad.t+g*ch/3;ctx.beginPath();ctx.moveTo(pad.l,gy);ctx.lineTo(W-pad.r,gy);ctx.stroke();}
-  ctx.fillStyle='#6b7280';ctx.font='8px sans-serif';ctx.textAlign='right';
-  for(var g=0;g<4;g++){var gy=pad.t+g*ch/3;ctx.fillText('$'+f2(min+(max-min)*(1-g/3)),pad.l-3,gy+3);}
-  ctx.strokeStyle='#93c5fd';ctx.lineWidth=1;ctx.setLineDash([3,3]);
-  var sy=y(startBal);ctx.beginPath();ctx.moveTo(pad.l,sy);ctx.lineTo(W-pad.r,sy);ctx.stroke();ctx.setLineDash([]);
-  ctx.fillStyle='#93c5fd';ctx.font='7px sans-serif';ctx.textAlign='left';ctx.fillText('start $'+f2(startBal),W-pad.r-60,sy-2);
-  ctx.strokeStyle=vals[vals.length-1]>=startBal?'#22c55e':'#ef4444';ctx.lineWidth=2;ctx.lineJoin='round';
-  ctx.beginPath();
-  for(var i=0;i<data.length;i++){var px=x(i),py=y(data[i].v);if(i===0)ctx.moveTo(px,py);else ctx.lineTo(px,py);}
-  ctx.stroke();
-  var last=vals[vals.length-1];
-  ctx.fillStyle=last>=startBal?'#16a34a':'#dc2626';ctx.font='bold 10px sans-serif';ctx.textAlign='right';
-  ctx.fillText('$'+f2(last),W-pad.r-3,y(last)-10);
-  var change=last-startBal;
-  ctx.fillStyle=change>=0?'#16a34a':'#dc2626';ctx.font='8px sans-serif';
-  ctx.fillText((change>=0?'+':'')+'$'+f2(change),W-pad.r-3,y(last)+2);
+  // Activity
+  var lg=b.activityLog||[];
+  var lc='';
+  if(!lg.length){lc='<div class="empty">No activity yet</div>';}
+  else{for(var i=0;i<Math.min(lg.length,30);i++){lc+='<div class="log-line">'+lg[i].replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</div>';}}
+  document.getElementById('logBody').innerHTML=lc;
+
+  var s=b.strategy||{};
+  document.getElementById('footer').textContent='Cricket Flip | '+s.shares+'sh × $'+f2(s.trailDist)+' trail | '+fmtU(b.uptime);
 }
 
 socket.on('connect',function(){document.getElementById('dot').className='dot on';});
@@ -381,111 +231,59 @@ socket.on('snapshot',function(d){if(d)render(d);});
 setInterval(function(){
   fetch('/api/snapshot').then(function(r){return r.json();}).then(function(d){if(d)render(d);}).catch(function(){});
 }, 3000);
-
-function doToggle(){
-  var modeEl=document.getElementById('modeBadge');
-  var isLive=modeEl.className.indexOf('live')>=0;
-  if(!confirm(isLive?'Switch to DEMO?':'Switch to LIVE?'))return;
-  fetch('/api/set-dry-run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({dryRun:isLive})})
-    .then(function(r){return r.json();}).then(function(j){if(j.error)alert('Fail: '+j.error);}).catch(function(e){alert('Fail: '+e.message);});
-}
 </script>
 </body>
 </html>
-+f4(m.dnMid)+'</div>';
-      ac+='</div>';
++f4(m.dnMid)+'</div>'+
+        '<div style="font-size:10px;color:#6b7280;margin-top:2px">implied: '+f4(m.upMid*100)+'%</div>'+
+      '</div>'+
+    '</div>';
+    document.getElementById('marketBody').innerHTML=mc;
 
-      // Buckets table
-      ac+='<div style="overflow-x:auto;margin:4px 0">';
-      ac+='<table style="width:100%;border-collapse:collapse;font-size:10px">';
-      ac+='<tr style="background:#f3f4f8"><th style="padding:4px 6px;text-align:left">Level</th>'+
-        '<th style="padding:4px 6px;text-align:center">UP</th><th style="padding:4px 6px;text-align:center">DN</th></tr>';
+    // Position info
+    var posLabel='NONE';
+    var posCls='pos-none';
+    if(pos==='ireland'){posLabel='■ IRELAND';posCls='pos-ireland';}
+    else if(pos==='india'){posLabel='▼ INDIA';posCls='pos-india';}
 
-      var bks=m.buckets||[];
-      // Sort descending by price
-      bks.sort(function(a,b){return b.price-a.price;});
-      for(var j=0;j<bks.length;j++){
-        var bk=bks[j];
-        var upIc=bk.upFilled?(bk.upTpFilled?'✅':'⏳'):'⬜';
-        var dnIc=bk.dnFilled?(bk.dnTpFilled?'✅':'⏳'):'⬜';
-        var upBg=bk.upTpFilled?'#f0fdf4':bk.upFilled?'#fefce8':'#fff';
-        var dnBg=bk.dnTpFilled?'#f0fdf4':bk.dnFilled?'#fefce8':'#fff';
-        ac+='<tr style="border-top:1px solid #eef0f5"><td style="padding:4px 6px;font-weight:700">function renderCrashBot(mkts){
-  var ac='';
-  if(!mkts.length){ac='<div class="empty">No active windows</div>';}
+    var pc='<div class="row" style="margin-bottom:8px"><span class="pos-badge '+posCls+'">'+posLabel+'</span></div>'+
+      '<div class="info-grid">'+
+      '<div class="info-item"><div class="lb">Entry Price</div><div class="vl">'+(m.entryPrice?'$'+f4(m.entryPrice):'-')+'</div></div>'+
+      '<div class="info-item"><div class="lb">Shares</div><div class="vl">'+(m.sharesHeld||0)+'</div></div>'+
+      '<div class="info-item"><div class="lb">Stop Level</div><div class="vl '+(m.stopLevel>0?'r':'gr')+'">'+(m.stopLevel?'$'+f4(m.stopLevel):'-')+'</div></div>'+
+      '<div class="info-item"><div class="lb">Stop Distance</div><div class="vl '+(m.stopDist>0?'y':'gr')+'">'+(m.stopDist?'$'+f4(m.stopDist):'-')+'</div></div>'+
+      '<div class="info-item"><div class="lb">Position Value</div><div class="vl">$'+(m.posValue||'0')+'</div></div>'+
+      '<div class="info-item"><div class="lb">Position PnL</div><div class="vl '+cls(m.posPnl)+'">'+(m.posPnl?sgn(m.posPnl)+'$'+f2(m.posPnl):'$0')+'</div></div>'+
+      '</div>';
+    document.getElementById('positionBody').innerHTML=pc;
+  }
+
+  // Trades
+  var tr=b.recentTrades||[];
+  var tc='';
+  if(!tr.length){tc='<div class="empty">No trades yet</div>';}
   else{
-    for(var i=0;i<mkts.length;i++){
-      var m=mkts[i];
-      var phaseCls='phase-';
-      if(m.phase==='checking'||m.phase==='entering')phaseCls+='entry';
-      else if(m.phase==='entered'||m.phase==='sold')phaseCls+='active';
-      else if(m.phase==='done'||m.phase==='tp_hit')phaseCls+='done';
-      else phaseCls+='wait';
-      var phaseLbl=m.phase||'waiting';
-
-      ac+='<div class="pair-row">';
-      ac+='<div style="display:flex;align-items:center;gap:8px"><span class="pair-name">'+m.pair+'</span><span class="phase-badge '+phaseCls+'">'+phaseLbl.toUpperCase()+'</span></div>';
-      ac+='<div style="font-size:10px;color:#6b7280">Range: '+(m.rangeOk?'<span class="status-ok">OK</span>':'<span class="status-no">NO</span>')+' | '+m.secsLeft+'s left</div>';
-      ac+='</div>';
-
-      ac+='<div class="grid-2" style="margin-bottom:6px">';
-
-      // UP side
-      var upSt='waiting';
-      if(m.upTpFilled)upSt='tp_hit';
-      else if(m.upFilled)upSt='filled';
-      ac+='<div class="side-card"><div class="side-hdr"><span class="side-label side-up">▲ UP</span><span style="font-size:10px;font-weight:600;color:'+(upSt==='tp_hit'?'#16a34a':upSt==='filled'?'#d97706':'#6b7280')+'">'+(upSt==='tp_hit'?'✅ TP HIT':upSt==='filled'?'⏳ HOLDING':'⏳ PENDING')+'</span></div>'+
-        '<div class="side-stat"><span class="lb">Filled</span><span class="vl">'+(m.upFilled?'✅ YES':'❌ NO')+'</span></div>'+
-        '<div class="side-stat"><span class="lb">TP Hit</span><span class="vl">'+(m.upTpFilled?'✅ YES':'❌ NO')+'</span></div>'+
-        '<div class="side-stat"><span class="lb">Current</span><span class="vl">$'+f4(m.upMid)+'</span></div></div>';
-
-      // DOWN side
-      var dnSt='waiting';
-      if(m.dnTpFilled)dnSt='tp_hit';
-      else if(m.dnFilled)dnSt='filled';
-      ac+='<div class="side-card"><div class="side-hdr"><span class="side-label side-dn">▼ DOWN</span><span style="font-size:10px;font-weight:600;color:'+(dnSt==='tp_hit'?'#16a34a':dnSt==='filled'?'#d97706':'#6b7280')+'">'+(dnSt==='tp_hit'?'✅ TP HIT':dnSt==='filled'?'⏳ HOLDING':'⏳ PENDING')+'</span></div>'+
-        '<div class="side-stat"><span class="lb">Filled</span><span class="vl">'+(m.dnFilled?'✅ YES':'❌ NO')+'</span></div>'+
-        '<div class="side-stat"><span class="lb">TP Hit</span><span class="vl">'+(m.dnTpFilled?'✅ YES':'❌ NO')+'</span></div>'+
-        '<div class="side-stat"><span class="lb">Current</span><span class="vl">$'+f4(m.dnMid)+'</span></div></div>';
-
-      ac+='</div>';
+    for(var i=0;i<Math.min(tr.length,50);i++){
+      var t=tr[i];
+      var sideCls=t.side==='IRELAND'?'g':t.side==='INDIA'?'r':'gr';
+      tc+='<div class="trade-line"><span style="color:#6b7280">'+t.ts+'</span>'+
+        '<span style="font-weight:700;color:'+(t.action==='BUY'?'#2563eb':'#d97706')+'">'+t.action+'</span>'+
+        '<span class="'+sideCls+'" style="font-weight:700">'+t.side+'</span>'+
+        '<span>@ $'+f4(t.price)+'</span>'+
+        '<span class="'+(t.pnl>=0?'g':'r')+'">'+(t.pnl?sgn(t.pnl)+'$'+f2(t.pnl):'')+'</span></div>';
     }
   }
-  document.getElementById('crashBody').innerHTML=ac;
-}
+  document.getElementById('tradeBody').innerHTML=tc;
 
-function drawEquityChart(data, startBal){
-  var c=document.getElementById('eqChart');
-  if(!c)return;
-  var rect=c.parentElement.getBoundingClientRect();
-  c.width=rect.width||c.clientWidth||800;
-  var ctx=c.getContext('2d'),W=c.width,H=c.height||80;
-  ctx.clearRect(0,0,W,H);
-  if(!data||data.length<2){ctx.fillStyle='#9ca3af';ctx.font='12px sans-serif';ctx.textAlign='center';ctx.fillText('Waiting for data...',W/2,40);return;}
-  var pad={t:10,b:15,l:45,r:15};
-  var cw=W-pad.l-pad.r,ch=H-pad.t-pad.b;
-  var vals=data.map(function(d){return d.v;});
-  var min=Math.min.apply(null,vals),max=Math.max.apply(null,vals);
-  var range=max-min||1;min-=range*0.1;max+=range*0.1;
-  function y(v){return pad.t+ch-(v-min)/(max-min)*ch;}
-  function x(i){return pad.l+i/(data.length-1)*cw;}
-  ctx.strokeStyle='#eef0f5';ctx.lineWidth=1;
-  for(var g=0;g<4;g++){var gy=pad.t+g*ch/3;ctx.beginPath();ctx.moveTo(pad.l,gy);ctx.lineTo(W-pad.r,gy);ctx.stroke();}
-  ctx.fillStyle='#6b7280';ctx.font='8px sans-serif';ctx.textAlign='right';
-  for(var g=0;g<4;g++){var gy=pad.t+g*ch/3;ctx.fillText('$'+f2(min+(max-min)*(1-g/3)),pad.l-3,gy+3);}
-  ctx.strokeStyle='#93c5fd';ctx.lineWidth=1;ctx.setLineDash([3,3]);
-  var sy=y(startBal);ctx.beginPath();ctx.moveTo(pad.l,sy);ctx.lineTo(W-pad.r,sy);ctx.stroke();ctx.setLineDash([]);
-  ctx.fillStyle='#93c5fd';ctx.font='7px sans-serif';ctx.textAlign='left';ctx.fillText('start $'+f2(startBal),W-pad.r-60,sy-2);
-  ctx.strokeStyle=vals[vals.length-1]>=startBal?'#22c55e':'#ef4444';ctx.lineWidth=2;ctx.lineJoin='round';
-  ctx.beginPath();
-  for(var i=0;i<data.length;i++){var px=x(i),py=y(data[i].v);if(i===0)ctx.moveTo(px,py);else ctx.lineTo(px,py);}
-  ctx.stroke();
-  var last=vals[vals.length-1];
-  ctx.fillStyle=last>=startBal?'#16a34a':'#dc2626';ctx.font='bold 10px sans-serif';ctx.textAlign='right';
-  ctx.fillText('$'+f2(last),W-pad.r-3,y(last)-10);
-  var change=last-startBal;
-  ctx.fillStyle=change>=0?'#16a34a':'#dc2626';ctx.font='8px sans-serif';
-  ctx.fillText((change>=0?'+':'')+'$'+f2(change),W-pad.r-3,y(last)+2);
+  // Activity
+  var lg=b.activityLog||[];
+  var lc='';
+  if(!lg.length){lc='<div class="empty">No activity yet</div>';}
+  else{for(var i=0;i<Math.min(lg.length,30);i++){lc+='<div class="log-line">'+lg[i].replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</div>';}}
+  document.getElementById('logBody').innerHTML=lc;
+
+  var s=b.strategy||{};
+  document.getElementById('footer').textContent='Cricket Flip | '+s.shares+'sh × $'+f2(s.trailDist)+' trail | '+fmtU(b.uptime);
 }
 
 socket.on('connect',function(){document.getElementById('dot').className='dot on';});
@@ -494,411 +292,6 @@ socket.on('snapshot',function(d){if(d)render(d);});
 setInterval(function(){
   fetch('/api/snapshot').then(function(r){return r.json();}).then(function(d){if(d)render(d);}).catch(function(){});
 }, 3000);
-
-function doToggle(){
-  var modeEl=document.getElementById('modeBadge');
-  var isLive=modeEl.className.indexOf('live')>=0;
-  if(!confirm(isLive?'Switch to DEMO?':'Switch to LIVE?'))return;
-  fetch('/api/set-dry-run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({dryRun:isLive})})
-    .then(function(r){return r.json();}).then(function(j){if(j.error)alert('Fail: '+j.error);}).catch(function(e){alert('Fail: '+e.message);});
-}
-</script>
-</body>
-</html>
-+f2(bk.price)+'</td>'+
-          '<td style="padding:4px 6px;text-align:center;background:'+upBg+'">'+upIc+'</td>'+
-          '<td style="padding:4px 6px;text-align:center;background:'+dnBg+'">'+dnIc+'</td></tr>';
-      }
-      ac+='</table></div>';
-
-      // Aggregated summary
-      var totalCost=(m.upCost||0)+(m.dnCost||0);
-      var totalShares=(m.upShares||0)+(m.dnShares||0);
-      ac+='<div style="display:flex;gap:12px;margin:4px 0;font-size:10px;color:#6b7280">'+
-        '<span><b>UP:</b> '+(m.upShares||0)+'sh function renderCrashBot(mkts){
-  var ac='';
-  if(!mkts.length){ac='<div class="empty">No active windows</div>';}
-  else{
-    for(var i=0;i<mkts.length;i++){
-      var m=mkts[i];
-      var phaseCls='phase-';
-      if(m.phase==='checking'||m.phase==='entering')phaseCls+='entry';
-      else if(m.phase==='entered'||m.phase==='sold')phaseCls+='active';
-      else if(m.phase==='done'||m.phase==='tp_hit')phaseCls+='done';
-      else phaseCls+='wait';
-      var phaseLbl=m.phase||'waiting';
-
-      ac+='<div class="pair-row">';
-      ac+='<div style="display:flex;align-items:center;gap:8px"><span class="pair-name">'+m.pair+'</span><span class="phase-badge '+phaseCls+'">'+phaseLbl.toUpperCase()+'</span></div>';
-      ac+='<div style="font-size:10px;color:#6b7280">Range: '+(m.rangeOk?'<span class="status-ok">OK</span>':'<span class="status-no">NO</span>')+' | '+m.secsLeft+'s left</div>';
-      ac+='</div>';
-
-      ac+='<div class="grid-2" style="margin-bottom:6px">';
-
-      // UP side
-      var upSt='waiting';
-      if(m.upTpFilled)upSt='tp_hit';
-      else if(m.upFilled)upSt='filled';
-      ac+='<div class="side-card"><div class="side-hdr"><span class="side-label side-up">▲ UP</span><span style="font-size:10px;font-weight:600;color:'+(upSt==='tp_hit'?'#16a34a':upSt==='filled'?'#d97706':'#6b7280')+'">'+(upSt==='tp_hit'?'✅ TP HIT':upSt==='filled'?'⏳ HOLDING':'⏳ PENDING')+'</span></div>'+
-        '<div class="side-stat"><span class="lb">Filled</span><span class="vl">'+(m.upFilled?'✅ YES':'❌ NO')+'</span></div>'+
-        '<div class="side-stat"><span class="lb">TP Hit</span><span class="vl">'+(m.upTpFilled?'✅ YES':'❌ NO')+'</span></div>'+
-        '<div class="side-stat"><span class="lb">Current</span><span class="vl">$'+f4(m.upMid)+'</span></div></div>';
-
-      // DOWN side
-      var dnSt='waiting';
-      if(m.dnTpFilled)dnSt='tp_hit';
-      else if(m.dnFilled)dnSt='filled';
-      ac+='<div class="side-card"><div class="side-hdr"><span class="side-label side-dn">▼ DOWN</span><span style="font-size:10px;font-weight:600;color:'+(dnSt==='tp_hit'?'#16a34a':dnSt==='filled'?'#d97706':'#6b7280')+'">'+(dnSt==='tp_hit'?'✅ TP HIT':dnSt==='filled'?'⏳ HOLDING':'⏳ PENDING')+'</span></div>'+
-        '<div class="side-stat"><span class="lb">Filled</span><span class="vl">'+(m.dnFilled?'✅ YES':'❌ NO')+'</span></div>'+
-        '<div class="side-stat"><span class="lb">TP Hit</span><span class="vl">'+(m.dnTpFilled?'✅ YES':'❌ NO')+'</span></div>'+
-        '<div class="side-stat"><span class="lb">Current</span><span class="vl">$'+f4(m.dnMid)+'</span></div></div>';
-
-      ac+='</div>';
-    }
-  }
-  document.getElementById('crashBody').innerHTML=ac;
-}
-
-function drawEquityChart(data, startBal){
-  var c=document.getElementById('eqChart');
-  if(!c)return;
-  var rect=c.parentElement.getBoundingClientRect();
-  c.width=rect.width||c.clientWidth||800;
-  var ctx=c.getContext('2d'),W=c.width,H=c.height||80;
-  ctx.clearRect(0,0,W,H);
-  if(!data||data.length<2){ctx.fillStyle='#9ca3af';ctx.font='12px sans-serif';ctx.textAlign='center';ctx.fillText('Waiting for data...',W/2,40);return;}
-  var pad={t:10,b:15,l:45,r:15};
-  var cw=W-pad.l-pad.r,ch=H-pad.t-pad.b;
-  var vals=data.map(function(d){return d.v;});
-  var min=Math.min.apply(null,vals),max=Math.max.apply(null,vals);
-  var range=max-min||1;min-=range*0.1;max+=range*0.1;
-  function y(v){return pad.t+ch-(v-min)/(max-min)*ch;}
-  function x(i){return pad.l+i/(data.length-1)*cw;}
-  ctx.strokeStyle='#eef0f5';ctx.lineWidth=1;
-  for(var g=0;g<4;g++){var gy=pad.t+g*ch/3;ctx.beginPath();ctx.moveTo(pad.l,gy);ctx.lineTo(W-pad.r,gy);ctx.stroke();}
-  ctx.fillStyle='#6b7280';ctx.font='8px sans-serif';ctx.textAlign='right';
-  for(var g=0;g<4;g++){var gy=pad.t+g*ch/3;ctx.fillText('$'+f2(min+(max-min)*(1-g/3)),pad.l-3,gy+3);}
-  ctx.strokeStyle='#93c5fd';ctx.lineWidth=1;ctx.setLineDash([3,3]);
-  var sy=y(startBal);ctx.beginPath();ctx.moveTo(pad.l,sy);ctx.lineTo(W-pad.r,sy);ctx.stroke();ctx.setLineDash([]);
-  ctx.fillStyle='#93c5fd';ctx.font='7px sans-serif';ctx.textAlign='left';ctx.fillText('start $'+f2(startBal),W-pad.r-60,sy-2);
-  ctx.strokeStyle=vals[vals.length-1]>=startBal?'#22c55e':'#ef4444';ctx.lineWidth=2;ctx.lineJoin='round';
-  ctx.beginPath();
-  for(var i=0;i<data.length;i++){var px=x(i),py=y(data[i].v);if(i===0)ctx.moveTo(px,py);else ctx.lineTo(px,py);}
-  ctx.stroke();
-  var last=vals[vals.length-1];
-  ctx.fillStyle=last>=startBal?'#16a34a':'#dc2626';ctx.font='bold 10px sans-serif';ctx.textAlign='right';
-  ctx.fillText('$'+f2(last),W-pad.r-3,y(last)-10);
-  var change=last-startBal;
-  ctx.fillStyle=change>=0?'#16a34a':'#dc2626';ctx.font='8px sans-serif';
-  ctx.fillText((change>=0?'+':'')+'$'+f2(change),W-pad.r-3,y(last)+2);
-}
-
-socket.on('connect',function(){document.getElementById('dot').className='dot on';});
-socket.on('disconnect',function(){document.getElementById('dot').className='dot off';});
-socket.on('snapshot',function(d){if(d)render(d);});
-setInterval(function(){
-  fetch('/api/snapshot').then(function(r){return r.json();}).then(function(d){if(d)render(d);}).catch(function(){});
-}, 3000);
-
-function doToggle(){
-  var modeEl=document.getElementById('modeBadge');
-  var isLive=modeEl.className.indexOf('live')>=0;
-  if(!confirm(isLive?'Switch to DEMO?':'Switch to LIVE?'))return;
-  fetch('/api/set-dry-run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({dryRun:isLive})})
-    .then(function(r){return r.json();}).then(function(j){if(j.error)alert('Fail: '+j.error);}).catch(function(e){alert('Fail: '+e.message);});
-}
-</script>
-</body>
-</html>
-+(m.upCost||0)+'</span>'+
-        '<span><b>DN:</b> '+(m.dnShares||0)+'sh function renderCrashBot(mkts){
-  var ac='';
-  if(!mkts.length){ac='<div class="empty">No active windows</div>';}
-  else{
-    for(var i=0;i<mkts.length;i++){
-      var m=mkts[i];
-      var phaseCls='phase-';
-      if(m.phase==='checking'||m.phase==='entering')phaseCls+='entry';
-      else if(m.phase==='entered'||m.phase==='sold')phaseCls+='active';
-      else if(m.phase==='done'||m.phase==='tp_hit')phaseCls+='done';
-      else phaseCls+='wait';
-      var phaseLbl=m.phase||'waiting';
-
-      ac+='<div class="pair-row">';
-      ac+='<div style="display:flex;align-items:center;gap:8px"><span class="pair-name">'+m.pair+'</span><span class="phase-badge '+phaseCls+'">'+phaseLbl.toUpperCase()+'</span></div>';
-      ac+='<div style="font-size:10px;color:#6b7280">Range: '+(m.rangeOk?'<span class="status-ok">OK</span>':'<span class="status-no">NO</span>')+' | '+m.secsLeft+'s left</div>';
-      ac+='</div>';
-
-      ac+='<div class="grid-2" style="margin-bottom:6px">';
-
-      // UP side
-      var upSt='waiting';
-      if(m.upTpFilled)upSt='tp_hit';
-      else if(m.upFilled)upSt='filled';
-      ac+='<div class="side-card"><div class="side-hdr"><span class="side-label side-up">▲ UP</span><span style="font-size:10px;font-weight:600;color:'+(upSt==='tp_hit'?'#16a34a':upSt==='filled'?'#d97706':'#6b7280')+'">'+(upSt==='tp_hit'?'✅ TP HIT':upSt==='filled'?'⏳ HOLDING':'⏳ PENDING')+'</span></div>'+
-        '<div class="side-stat"><span class="lb">Filled</span><span class="vl">'+(m.upFilled?'✅ YES':'❌ NO')+'</span></div>'+
-        '<div class="side-stat"><span class="lb">TP Hit</span><span class="vl">'+(m.upTpFilled?'✅ YES':'❌ NO')+'</span></div>'+
-        '<div class="side-stat"><span class="lb">Current</span><span class="vl">$'+f4(m.upMid)+'</span></div></div>';
-
-      // DOWN side
-      var dnSt='waiting';
-      if(m.dnTpFilled)dnSt='tp_hit';
-      else if(m.dnFilled)dnSt='filled';
-      ac+='<div class="side-card"><div class="side-hdr"><span class="side-label side-dn">▼ DOWN</span><span style="font-size:10px;font-weight:600;color:'+(dnSt==='tp_hit'?'#16a34a':dnSt==='filled'?'#d97706':'#6b7280')+'">'+(dnSt==='tp_hit'?'✅ TP HIT':dnSt==='filled'?'⏳ HOLDING':'⏳ PENDING')+'</span></div>'+
-        '<div class="side-stat"><span class="lb">Filled</span><span class="vl">'+(m.dnFilled?'✅ YES':'❌ NO')+'</span></div>'+
-        '<div class="side-stat"><span class="lb">TP Hit</span><span class="vl">'+(m.dnTpFilled?'✅ YES':'❌ NO')+'</span></div>'+
-        '<div class="side-stat"><span class="lb">Current</span><span class="vl">$'+f4(m.dnMid)+'</span></div></div>';
-
-      ac+='</div>';
-    }
-  }
-  document.getElementById('crashBody').innerHTML=ac;
-}
-
-function drawEquityChart(data, startBal){
-  var c=document.getElementById('eqChart');
-  if(!c)return;
-  var rect=c.parentElement.getBoundingClientRect();
-  c.width=rect.width||c.clientWidth||800;
-  var ctx=c.getContext('2d'),W=c.width,H=c.height||80;
-  ctx.clearRect(0,0,W,H);
-  if(!data||data.length<2){ctx.fillStyle='#9ca3af';ctx.font='12px sans-serif';ctx.textAlign='center';ctx.fillText('Waiting for data...',W/2,40);return;}
-  var pad={t:10,b:15,l:45,r:15};
-  var cw=W-pad.l-pad.r,ch=H-pad.t-pad.b;
-  var vals=data.map(function(d){return d.v;});
-  var min=Math.min.apply(null,vals),max=Math.max.apply(null,vals);
-  var range=max-min||1;min-=range*0.1;max+=range*0.1;
-  function y(v){return pad.t+ch-(v-min)/(max-min)*ch;}
-  function x(i){return pad.l+i/(data.length-1)*cw;}
-  ctx.strokeStyle='#eef0f5';ctx.lineWidth=1;
-  for(var g=0;g<4;g++){var gy=pad.t+g*ch/3;ctx.beginPath();ctx.moveTo(pad.l,gy);ctx.lineTo(W-pad.r,gy);ctx.stroke();}
-  ctx.fillStyle='#6b7280';ctx.font='8px sans-serif';ctx.textAlign='right';
-  for(var g=0;g<4;g++){var gy=pad.t+g*ch/3;ctx.fillText('$'+f2(min+(max-min)*(1-g/3)),pad.l-3,gy+3);}
-  ctx.strokeStyle='#93c5fd';ctx.lineWidth=1;ctx.setLineDash([3,3]);
-  var sy=y(startBal);ctx.beginPath();ctx.moveTo(pad.l,sy);ctx.lineTo(W-pad.r,sy);ctx.stroke();ctx.setLineDash([]);
-  ctx.fillStyle='#93c5fd';ctx.font='7px sans-serif';ctx.textAlign='left';ctx.fillText('start $'+f2(startBal),W-pad.r-60,sy-2);
-  ctx.strokeStyle=vals[vals.length-1]>=startBal?'#22c55e':'#ef4444';ctx.lineWidth=2;ctx.lineJoin='round';
-  ctx.beginPath();
-  for(var i=0;i<data.length;i++){var px=x(i),py=y(data[i].v);if(i===0)ctx.moveTo(px,py);else ctx.lineTo(px,py);}
-  ctx.stroke();
-  var last=vals[vals.length-1];
-  ctx.fillStyle=last>=startBal?'#16a34a':'#dc2626';ctx.font='bold 10px sans-serif';ctx.textAlign='right';
-  ctx.fillText('$'+f2(last),W-pad.r-3,y(last)-10);
-  var change=last-startBal;
-  ctx.fillStyle=change>=0?'#16a34a':'#dc2626';ctx.font='8px sans-serif';
-  ctx.fillText((change>=0?'+':'')+'$'+f2(change),W-pad.r-3,y(last)+2);
-}
-
-socket.on('connect',function(){document.getElementById('dot').className='dot on';});
-socket.on('disconnect',function(){document.getElementById('dot').className='dot off';});
-socket.on('snapshot',function(d){if(d)render(d);});
-setInterval(function(){
-  fetch('/api/snapshot').then(function(r){return r.json();}).then(function(d){if(d)render(d);}).catch(function(){});
-}, 3000);
-
-function doToggle(){
-  var modeEl=document.getElementById('modeBadge');
-  var isLive=modeEl.className.indexOf('live')>=0;
-  if(!confirm(isLive?'Switch to DEMO?':'Switch to LIVE?'))return;
-  fetch('/api/set-dry-run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({dryRun:isLive})})
-    .then(function(r){return r.json();}).then(function(j){if(j.error)alert('Fail: '+j.error);}).catch(function(e){alert('Fail: '+e.message);});
-}
-</script>
-</body>
-</html>
-+(m.dnCost||0)+'</span>'+
-        '<span><b>Total:</b> '+totalShares+'sh function renderCrashBot(mkts){
-  var ac='';
-  if(!mkts.length){ac='<div class="empty">No active windows</div>';}
-  else{
-    for(var i=0;i<mkts.length;i++){
-      var m=mkts[i];
-      var phaseCls='phase-';
-      if(m.phase==='checking'||m.phase==='entering')phaseCls+='entry';
-      else if(m.phase==='entered'||m.phase==='sold')phaseCls+='active';
-      else if(m.phase==='done'||m.phase==='tp_hit')phaseCls+='done';
-      else phaseCls+='wait';
-      var phaseLbl=m.phase||'waiting';
-
-      ac+='<div class="pair-row">';
-      ac+='<div style="display:flex;align-items:center;gap:8px"><span class="pair-name">'+m.pair+'</span><span class="phase-badge '+phaseCls+'">'+phaseLbl.toUpperCase()+'</span></div>';
-      ac+='<div style="font-size:10px;color:#6b7280">Range: '+(m.rangeOk?'<span class="status-ok">OK</span>':'<span class="status-no">NO</span>')+' | '+m.secsLeft+'s left</div>';
-      ac+='</div>';
-
-      ac+='<div class="grid-2" style="margin-bottom:6px">';
-
-      // UP side
-      var upSt='waiting';
-      if(m.upTpFilled)upSt='tp_hit';
-      else if(m.upFilled)upSt='filled';
-      ac+='<div class="side-card"><div class="side-hdr"><span class="side-label side-up">▲ UP</span><span style="font-size:10px;font-weight:600;color:'+(upSt==='tp_hit'?'#16a34a':upSt==='filled'?'#d97706':'#6b7280')+'">'+(upSt==='tp_hit'?'✅ TP HIT':upSt==='filled'?'⏳ HOLDING':'⏳ PENDING')+'</span></div>'+
-        '<div class="side-stat"><span class="lb">Filled</span><span class="vl">'+(m.upFilled?'✅ YES':'❌ NO')+'</span></div>'+
-        '<div class="side-stat"><span class="lb">TP Hit</span><span class="vl">'+(m.upTpFilled?'✅ YES':'❌ NO')+'</span></div>'+
-        '<div class="side-stat"><span class="lb">Current</span><span class="vl">$'+f4(m.upMid)+'</span></div></div>';
-
-      // DOWN side
-      var dnSt='waiting';
-      if(m.dnTpFilled)dnSt='tp_hit';
-      else if(m.dnFilled)dnSt='filled';
-      ac+='<div class="side-card"><div class="side-hdr"><span class="side-label side-dn">▼ DOWN</span><span style="font-size:10px;font-weight:600;color:'+(dnSt==='tp_hit'?'#16a34a':dnSt==='filled'?'#d97706':'#6b7280')+'">'+(dnSt==='tp_hit'?'✅ TP HIT':dnSt==='filled'?'⏳ HOLDING':'⏳ PENDING')+'</span></div>'+
-        '<div class="side-stat"><span class="lb">Filled</span><span class="vl">'+(m.dnFilled?'✅ YES':'❌ NO')+'</span></div>'+
-        '<div class="side-stat"><span class="lb">TP Hit</span><span class="vl">'+(m.dnTpFilled?'✅ YES':'❌ NO')+'</span></div>'+
-        '<div class="side-stat"><span class="lb">Current</span><span class="vl">$'+f4(m.dnMid)+'</span></div></div>';
-
-      ac+='</div>';
-    }
-  }
-  document.getElementById('crashBody').innerHTML=ac;
-}
-
-function drawEquityChart(data, startBal){
-  var c=document.getElementById('eqChart');
-  if(!c)return;
-  var rect=c.parentElement.getBoundingClientRect();
-  c.width=rect.width||c.clientWidth||800;
-  var ctx=c.getContext('2d'),W=c.width,H=c.height||80;
-  ctx.clearRect(0,0,W,H);
-  if(!data||data.length<2){ctx.fillStyle='#9ca3af';ctx.font='12px sans-serif';ctx.textAlign='center';ctx.fillText('Waiting for data...',W/2,40);return;}
-  var pad={t:10,b:15,l:45,r:15};
-  var cw=W-pad.l-pad.r,ch=H-pad.t-pad.b;
-  var vals=data.map(function(d){return d.v;});
-  var min=Math.min.apply(null,vals),max=Math.max.apply(null,vals);
-  var range=max-min||1;min-=range*0.1;max+=range*0.1;
-  function y(v){return pad.t+ch-(v-min)/(max-min)*ch;}
-  function x(i){return pad.l+i/(data.length-1)*cw;}
-  ctx.strokeStyle='#eef0f5';ctx.lineWidth=1;
-  for(var g=0;g<4;g++){var gy=pad.t+g*ch/3;ctx.beginPath();ctx.moveTo(pad.l,gy);ctx.lineTo(W-pad.r,gy);ctx.stroke();}
-  ctx.fillStyle='#6b7280';ctx.font='8px sans-serif';ctx.textAlign='right';
-  for(var g=0;g<4;g++){var gy=pad.t+g*ch/3;ctx.fillText('$'+f2(min+(max-min)*(1-g/3)),pad.l-3,gy+3);}
-  ctx.strokeStyle='#93c5fd';ctx.lineWidth=1;ctx.setLineDash([3,3]);
-  var sy=y(startBal);ctx.beginPath();ctx.moveTo(pad.l,sy);ctx.lineTo(W-pad.r,sy);ctx.stroke();ctx.setLineDash([]);
-  ctx.fillStyle='#93c5fd';ctx.font='7px sans-serif';ctx.textAlign='left';ctx.fillText('start $'+f2(startBal),W-pad.r-60,sy-2);
-  ctx.strokeStyle=vals[vals.length-1]>=startBal?'#22c55e':'#ef4444';ctx.lineWidth=2;ctx.lineJoin='round';
-  ctx.beginPath();
-  for(var i=0;i<data.length;i++){var px=x(i),py=y(data[i].v);if(i===0)ctx.moveTo(px,py);else ctx.lineTo(px,py);}
-  ctx.stroke();
-  var last=vals[vals.length-1];
-  ctx.fillStyle=last>=startBal?'#16a34a':'#dc2626';ctx.font='bold 10px sans-serif';ctx.textAlign='right';
-  ctx.fillText('$'+f2(last),W-pad.r-3,y(last)-10);
-  var change=last-startBal;
-  ctx.fillStyle=change>=0?'#16a34a':'#dc2626';ctx.font='8px sans-serif';
-  ctx.fillText((change>=0?'+':'')+'$'+f2(change),W-pad.r-3,y(last)+2);
-}
-
-socket.on('connect',function(){document.getElementById('dot').className='dot on';});
-socket.on('disconnect',function(){document.getElementById('dot').className='dot off';});
-socket.on('snapshot',function(d){if(d)render(d);});
-setInterval(function(){
-  fetch('/api/snapshot').then(function(r){return r.json();}).then(function(d){if(d)render(d);}).catch(function(){});
-}, 3000);
-
-function doToggle(){
-  var modeEl=document.getElementById('modeBadge');
-  var isLive=modeEl.className.indexOf('live')>=0;
-  if(!confirm(isLive?'Switch to DEMO?':'Switch to LIVE?'))return;
-  fetch('/api/set-dry-run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({dryRun:isLive})})
-    .then(function(r){return r.json();}).then(function(j){if(j.error)alert('Fail: '+j.error);}).catch(function(e){alert('Fail: '+e.message);});
-}
-</script>
-</body>
-</html>
-+f2(totalCost)+'</span>'+
-        '</div>';
-    }
-  }
-  document.getElementById('entryBody').innerHTML=ac;
-}function renderCrashBot(mkts){
-  var ac='';
-  if(!mkts.length){ac='<div class="empty">No active windows</div>';}
-  else{
-    for(var i=0;i<mkts.length;i++){
-      var m=mkts[i];
-      var phaseCls='phase-';
-      if(m.phase==='checking'||m.phase==='entering')phaseCls+='entry';
-      else if(m.phase==='entered'||m.phase==='sold')phaseCls+='active';
-      else if(m.phase==='done'||m.phase==='tp_hit')phaseCls+='done';
-      else phaseCls+='wait';
-      var phaseLbl=m.phase||'waiting';
-
-      ac+='<div class="pair-row">';
-      ac+='<div style="display:flex;align-items:center;gap:8px"><span class="pair-name">'+m.pair+'</span><span class="phase-badge '+phaseCls+'">'+phaseLbl.toUpperCase()+'</span></div>';
-      ac+='<div style="font-size:10px;color:#6b7280">Range: '+(m.rangeOk?'<span class="status-ok">OK</span>':'<span class="status-no">NO</span>')+' | '+m.secsLeft+'s left</div>';
-      ac+='</div>';
-
-      ac+='<div class="grid-2" style="margin-bottom:6px">';
-
-      // UP side
-      var upSt='waiting';
-      if(m.upTpFilled)upSt='tp_hit';
-      else if(m.upFilled)upSt='filled';
-      ac+='<div class="side-card"><div class="side-hdr"><span class="side-label side-up">▲ UP</span><span style="font-size:10px;font-weight:600;color:'+(upSt==='tp_hit'?'#16a34a':upSt==='filled'?'#d97706':'#6b7280')+'">'+(upSt==='tp_hit'?'✅ TP HIT':upSt==='filled'?'⏳ HOLDING':'⏳ PENDING')+'</span></div>'+
-        '<div class="side-stat"><span class="lb">Filled</span><span class="vl">'+(m.upFilled?'✅ YES':'❌ NO')+'</span></div>'+
-        '<div class="side-stat"><span class="lb">TP Hit</span><span class="vl">'+(m.upTpFilled?'✅ YES':'❌ NO')+'</span></div>'+
-        '<div class="side-stat"><span class="lb">Current</span><span class="vl">$'+f4(m.upMid)+'</span></div></div>';
-
-      // DOWN side
-      var dnSt='waiting';
-      if(m.dnTpFilled)dnSt='tp_hit';
-      else if(m.dnFilled)dnSt='filled';
-      ac+='<div class="side-card"><div class="side-hdr"><span class="side-label side-dn">▼ DOWN</span><span style="font-size:10px;font-weight:600;color:'+(dnSt==='tp_hit'?'#16a34a':dnSt==='filled'?'#d97706':'#6b7280')+'">'+(dnSt==='tp_hit'?'✅ TP HIT':dnSt==='filled'?'⏳ HOLDING':'⏳ PENDING')+'</span></div>'+
-        '<div class="side-stat"><span class="lb">Filled</span><span class="vl">'+(m.dnFilled?'✅ YES':'❌ NO')+'</span></div>'+
-        '<div class="side-stat"><span class="lb">TP Hit</span><span class="vl">'+(m.dnTpFilled?'✅ YES':'❌ NO')+'</span></div>'+
-        '<div class="side-stat"><span class="lb">Current</span><span class="vl">$'+f4(m.dnMid)+'</span></div></div>';
-
-      ac+='</div>';
-    }
-  }
-  document.getElementById('crashBody').innerHTML=ac;
-}
-
-function drawEquityChart(data, startBal){
-  var c=document.getElementById('eqChart');
-  if(!c)return;
-  var rect=c.parentElement.getBoundingClientRect();
-  c.width=rect.width||c.clientWidth||800;
-  var ctx=c.getContext('2d'),W=c.width,H=c.height||80;
-  ctx.clearRect(0,0,W,H);
-  if(!data||data.length<2){ctx.fillStyle='#9ca3af';ctx.font='12px sans-serif';ctx.textAlign='center';ctx.fillText('Waiting for data...',W/2,40);return;}
-  var pad={t:10,b:15,l:45,r:15};
-  var cw=W-pad.l-pad.r,ch=H-pad.t-pad.b;
-  var vals=data.map(function(d){return d.v;});
-  var min=Math.min.apply(null,vals),max=Math.max.apply(null,vals);
-  var range=max-min||1;min-=range*0.1;max+=range*0.1;
-  function y(v){return pad.t+ch-(v-min)/(max-min)*ch;}
-  function x(i){return pad.l+i/(data.length-1)*cw;}
-  ctx.strokeStyle='#eef0f5';ctx.lineWidth=1;
-  for(var g=0;g<4;g++){var gy=pad.t+g*ch/3;ctx.beginPath();ctx.moveTo(pad.l,gy);ctx.lineTo(W-pad.r,gy);ctx.stroke();}
-  ctx.fillStyle='#6b7280';ctx.font='8px sans-serif';ctx.textAlign='right';
-  for(var g=0;g<4;g++){var gy=pad.t+g*ch/3;ctx.fillText('$'+f2(min+(max-min)*(1-g/3)),pad.l-3,gy+3);}
-  ctx.strokeStyle='#93c5fd';ctx.lineWidth=1;ctx.setLineDash([3,3]);
-  var sy=y(startBal);ctx.beginPath();ctx.moveTo(pad.l,sy);ctx.lineTo(W-pad.r,sy);ctx.stroke();ctx.setLineDash([]);
-  ctx.fillStyle='#93c5fd';ctx.font='7px sans-serif';ctx.textAlign='left';ctx.fillText('start $'+f2(startBal),W-pad.r-60,sy-2);
-  ctx.strokeStyle=vals[vals.length-1]>=startBal?'#22c55e':'#ef4444';ctx.lineWidth=2;ctx.lineJoin='round';
-  ctx.beginPath();
-  for(var i=0;i<data.length;i++){var px=x(i),py=y(data[i].v);if(i===0)ctx.moveTo(px,py);else ctx.lineTo(px,py);}
-  ctx.stroke();
-  var last=vals[vals.length-1];
-  ctx.fillStyle=last>=startBal?'#16a34a':'#dc2626';ctx.font='bold 10px sans-serif';ctx.textAlign='right';
-  ctx.fillText('$'+f2(last),W-pad.r-3,y(last)-10);
-  var change=last-startBal;
-  ctx.fillStyle=change>=0?'#16a34a':'#dc2626';ctx.font='8px sans-serif';
-  ctx.fillText((change>=0?'+':'')+'$'+f2(change),W-pad.r-3,y(last)+2);
-}
-
-socket.on('connect',function(){document.getElementById('dot').className='dot on';});
-socket.on('disconnect',function(){document.getElementById('dot').className='dot off';});
-socket.on('snapshot',function(d){if(d)render(d);});
-setInterval(function(){
-  fetch('/api/snapshot').then(function(r){return r.json();}).then(function(d){if(d)render(d);}).catch(function(){});
-}, 3000);
-
-function doToggle(){
-  var modeEl=document.getElementById('modeBadge');
-  var isLive=modeEl.className.indexOf('live')>=0;
-  if(!confirm(isLive?'Switch to DEMO?':'Switch to LIVE?'))return;
-  fetch('/api/set-dry-run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({dryRun:isLive})})
-    .then(function(r){return r.json();}).then(function(j){if(j.error)alert('Fail: '+j.error);}).catch(function(e){alert('Fail: '+e.message);});
-}
 </script>
 </body>
 </html>
