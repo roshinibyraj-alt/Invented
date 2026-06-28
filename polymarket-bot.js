@@ -17,10 +17,10 @@ const UP_INTERVAL    = 10000;  // ms
 const DOWN_INTERVAL  = 10000;  // ms
 const SELL_AT_SECS   = 270;    // 4.5 min – stop accumulation, place sells
 const SELL_PRICE     = 0.99;
-const BUY_SLIP       = 0.02;   // buy at mid - 0.02
+const BUY_SLIP       = 0.04;   // buy at mid - 0.04
 
 let dryRun = process.env.DRY_RUN === 'true';
-const DEMO_BALANCE = parseFloat(process.env.DEMO_BALANCE || '1000');
+const DEMO_BALANCE = parseFloat(process.env.DEMO_BALANCE || '500');
 
 let emitFn     = () => {};
 let slog       = () => {};
@@ -343,7 +343,7 @@ async function tradeLoop(m) {
       // UP buy every 10s
       if (elapsed - as.lastUpBuy >= UP_INTERVAL) {
         as.lastUpBuy = elapsed;
-        const shares = elapsed < 150000 ? (m.upMid < 0.50 ? 20 : 10) : (m.upMid < 0.50 ? 10 : 20);
+        const shares = elapsed < 150000 ? (m.upMid < 0.50 ? 12 : 6) : (m.upMid < 0.50 ? 6 : 12);
         const result = await placeBuy(m, 'up', shares);
         if (result) {
           as.up.shares += shares;
@@ -356,7 +356,7 @@ async function tradeLoop(m) {
       // DOWN buy every 15s
       if (elapsed - as.lastDownBuy >= DOWN_INTERVAL) {
         as.lastDownBuy = elapsed;
-        const shares = elapsed < 150000 ? (m.downMid < 0.50 ? 20 : 10) : (m.downMid < 0.50 ? 10 : 20);
+        const shares = elapsed < 150000 ? (m.downMid < 0.50 ? 12 : 6) : (m.downMid < 0.50 ? 6 : 12);
         const result = await placeBuy(m, 'down', shares);
         if (result) {
           as.down.shares += shares;
