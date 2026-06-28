@@ -17,7 +17,7 @@ const UP_INTERVAL    = 10000;  // ms
 const DOWN_INTERVAL  = 10000;  // ms
 const SELL_AT_SECS   = 270;    // 4.5 min – stop accumulation, place sells
 const SELL_PRICE     = 0.99;
-const BUY_SLIP       = 0.01;   // buy at mid - 0.01
+const BUY_SLIP       = 0.10;   // buy at mid - 0.10
 
 let dryRun = process.env.DRY_RUN === 'true';
 const DEMO_BALANCE = parseFloat(process.env.DEMO_BALANCE || '500');
