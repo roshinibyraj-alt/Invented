@@ -238,26 +238,35 @@ async function tradeLoop(m) {
   const checkAt = m.windowStartMs + CHECK_AT_SECS * 1000;
   const waitTime = checkAt - Date.now();
   if (waitTime > 0) {
-    log(`${m.pair} waiting ${Math.ceil(waitTime/1000)}s to check range`);
+    log(`${m.pair} waiting ${Math.ceil(waitTime/1000)}s to start range check`);
     await sleep(waitTime);
   }
 
-  // Check range condition
-  await ensureFreshPrice(m);
-  const upOk = m.upMid >= RANGE_MIN && m.upMid <= RANGE_MAX;
-  const dnOk = m.downMid >= RANGE_MIN && m.downMid <= RANGE_MAX;
-  cs.rangeOk = upOk && dnOk;
+  // Monitor range from 240s to 280s – place orders if both sides in range
+  const rangeEnd = m.windowStartMs + 280000;
+  const cost = f2(SHARES * BUY_PRICE);
+  let ordersPlaced = false;
+  while (Date.now() < rangeEnd && !ordersPlaced) {
+    await ensureFreshPrice(m);
+    const upOk = m.upMid >= RANGE_MIN && m.upMid <= RANGE_MAX;
+    const dnOk = m.downMid >= RANGE_MIN && m.downMid <= RANGE_MAX;
+    if (upOk && dnOk) {
+      ordersPlaced = true;
+      cs.rangeOk = true;
+      log(`${m.pair} range OK (UP:${f4(m.upMid)} DN:${f4(m.downMid)}) at ${Math.floor((Date.now()-m.windowStartMs)/1000)}s`);
+    } else {
+      await sleep(TICK_MS);
+    }
+  }
 
-  if (!cs.rangeOk) {
-    log(`${m.pair} range SKIP (UP:${f4(m.upMid)} DN:${f4(m.downMid)}) outside [${RANGE_MIN},${RANGE_MAX}]`);
+  if (!ordersPlaced) {
+    log(`${m.pair} range never OK between 240-280s – skip`);
     cs.done = true;
     m.loopRunning = false;
     return;
   }
 
-  log(`${m.pair} range OK (UP:${f4(m.upMid)} DN:${f4(m.downMid)}) – placing 50sh@0.10 on both`);
   cs.phase = 'monitoring';
-  const cost = f2(SHARES * BUY_PRICE);
 
   // Place BUY orders at 0.10 on both sides (pending in demo)
   if (dryRun) {
