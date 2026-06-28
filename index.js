@@ -1,6 +1,5 @@
 'use strict';
 
-// ── Proxy setup (must be first) ──
 const _proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
 if (_proxyUrl) {
   try {
@@ -17,7 +16,8 @@ const express = require('express');
 const http = require('http');
 const path = require('path');
 const { Server } = require('socket.io');
-const bot = require('./polymarket-bot');
+const accumBot = require('./polymarket-bot');
+const crashBot = require('./crash-bot');
 
 process.on('unhandledRejection', (err) => console.error('❌', err?.message));
 process.on('uncaughtException',  (err) => console.error('❌', err?.message));
@@ -42,7 +42,12 @@ app.options('/api/set-dry-run', (_req, res) => {
 });
 
 app.get('/api/snapshot', (_req, res) => {
-  try { res.json(bot.snapshot()); } catch(e) { res.json({ error: e.message }); }
+  try {
+    res.json({
+      accum: accumBot.snapshot(),
+      crash: crashBot.snapshot(),
+    });
+  } catch(e) { res.json({ error: e.message }); }
 });
 
 app.get('/healthz', (_req, res) => res.json({ ok: true }));
@@ -51,8 +56,9 @@ app.post('/api/set-dry-run', express.json(), async (req, res) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Headers', 'Content-Type');
   try {
-    await bot.setDryRun(req.body?.dryRun);
-    res.json({ ok: true, dryRun: bot.getDryRun() });
+    await accumBot.setDryRun(req.body?.dryRun);
+    await crashBot.setDryRun(req.body?.dryRun);
+    res.json({ ok: true, dryRun: accumBot.getDryRun() });
   } catch(e) {
     res.json({ error: e.message });
   }
@@ -68,16 +74,27 @@ function broadcast(snapshot) {
 
 io.on('connection', (socket) => {
   console.log(`🔌 Client ${socket.id}`);
-  try { socket.emit('snapshot', bot.snapshot()); } catch (_) {}
+  try {
+    socket.emit('snapshot', {
+      accum: accumBot.snapshot(),
+      crash: crashBot.snapshot(),
+    });
+  } catch (_) {}
   socket.on('disconnect', () => console.log(`🔌 Left ${socket.id}`));
 });
 
 async function main() {
-  await bot.start(
-    (event, data) => { if (event === 'snapshot') broadcast(data); },
-    (msg) => console.log(msg),
-  );
-  server.listen(PORT, () => console.log(`🌐 Grid Bot running on http://0.0.0.0:${PORT}`));
+  await Promise.all([
+    accumBot.start(
+      (event, data) => { if (event === 'snapshot') broadcast({ accum: data, crash: crashBot.snapshot() }); },
+      (msg) => console.log(msg),
+    ),
+    crashBot.start(
+      (event, data) => { if (event === 'snapshot') broadcast({ accum: accumBot.snapshot(), crash: data }); },
+      (msg) => console.log(msg),
+    ),
+  ]);
+  server.listen(PORT, () => console.log(`🌐 Bot server running on http://0.0.0.0:${PORT}`));
 }
 
 main();

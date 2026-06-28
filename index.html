@@ -95,12 +95,15 @@ function fmtU(s){if(!s)return'0s';return s>3600?Math.floor(s/3600)+'h '+Math.flo
 
 function render(d){
   if(!d)return;
+  // Combined snapshot: d.accum (accumulation bot) and d.crash (crash bot)
+  var a=d.accum||{},c=d.crash||{};
+  // Use accum bot mode for toggle
   document.getElementById('dot').className='dot on';
 
   var mode=document.getElementById('modeBadge');
   var tbtn=document.getElementById('toggleBtn');
-  if(d.dryRun){
-    mode.textContent='DEMO $'+f2(d.balance);mode.className='badge demo';
+  if(a.dryRun){
+    mode.textContent='DEMO $'+f2(a.balance)+' | Crash $'+f2(c.balance);mode.className='badge demo';
     tbtn.textContent='Go Live';tbtn.style.borderColor='#dc2626';tbtn.style.color='#dc2626';
   }else{
     mode.textContent='LIVE';mode.className='badge live';
@@ -108,25 +111,27 @@ function render(d){
   }
 
   var h='';
-  h+='<div class="stat"><div class="sl">Balance</div><div class="sv w">$'+f2(d.balance)+'</div></div>';
-  h+='<div class="stat"><div class="sl">Cash</div><div class="sv gr">$'+f2(d.cashBalance)+'</div></div>';
-  h+='<div class="stat"><div class="sl">PnL</div><div class="sv '+cls(d.pnl)+'">'+sgn(d.pnl)+'$'+f2(d.pnl)+'</div></div>';
-  h+='<div class="stat"><div class="sl">Uptime</div><div class="sv gr">'+fmtU(d.uptime)+'</div></div>';
+  h+='<div class="stat"><div class="sl">Accum Bal</div><div class="sv w">$'+f2(a.balance)+'</div></div>';
+  h+='<div class="stat"><div class="sl">Crash Bal</div><div class="sv b">$'+f2(c.balance)+'</div></div>';
+  h+='<div class="stat"><div class="sl">PnL</div><div class="sv '+cls(a.pnl)+'">A:'+sgn(a.pnl)+'$'+f2(a.pnl)+'</div></div>';
+  h+='<div class="stat"><div class="sl">Crash PnL</div><div class="sv '+cls(c.pnl)+'">C:'+sgn(c.pnl)+'$'+f2(c.pnl)+'</div></div>';
+  h+='<div class="stat"><div class="sl">Uptime</div><div class="sv gr">'+fmtU(a.uptime)+'</div></div>';
   document.getElementById('headerStats').innerHTML=h;
 
   // Market state
-  var mkts=d.activeMarkets||[];
+  var mkts=(a.activeMarkets||[]).concat((c.activeMarkets||[]).map(function(x){x._bot='CRASH';return x;}));mkts.forEach(function(x){if(!x._bot)x._bot='ACCUM';});
   var mc='';
   if(!mkts.length){mc='<div class="empty">No active markets</div>';}else{
     for(var i=0;i<mkts.length;i++){
       var m=mkts[i];
+      var isCrash=m._bot==='CRASH';
       var phase=m.phase||'idle';
       var phaseLabel=phase.toUpperCase();
       var phaseCls='p-'+((phase==='accumulating'||phase==='selling')?phase:phase==='force_sell'?'sell':'resolve');
       if(phase==='done')phaseLabel='DONE';else if(phase==='force_sell')phaseLabel='FORCE SELL';
 
       mc+='<div class="mkt-hdr">'+
-        '<div><b>'+m.pair+' 5m</b> <span class="phase-badge '+phaseCls+'">'+phaseLabel+'</span></div>'+
+        '<div><b>'+(isCrash?'⚠️ ':'')+m.pair+' 5m</b> <span style="font-size:8px;color:#6b7280;background:#f3f4f8;padding:1px 4px;border-radius:3px">'+(isCrash?'CRASH':'ACCUM')+'</span> <span class="phase-badge '+phaseCls+'">'+phaseLabel+'</span></div>'+
         '<div class="price-row">'+
           '<span><span style="font-size:9px;color:#6b7280">UP</span> <span class="price-big price-up">$'+f4(m.upMid)+'</span></span>'+
           '<span><span style="font-size:9px;color:#6b7280">DN</span> <span class="price-big price-dn">$'+f4(m.dnMid)+'</span></span>'+
@@ -180,16 +185,18 @@ function render(d){
 
   // Activity
   var lc='';
-  var logs=d.activityLog||[];
+  // Combine logs
+  var logs=(a.activityLog||[]).concat((c.activityLog||[]).slice(0,25));
   if(!logs.length){lc='<div class="empty">No activity yet</div>';}
   else{for(var i=0;i<Math.min(logs.length,50);i++){lc+='<div class="log-line">'+logs[i].replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</div>';}}
   document.getElementById('logBody').innerHTML=lc;
 
   // Equity chart
-  drawEquityChart(d.equityHistory||[],d.startBalance);
+  drawEquityChart(a.equityHistory||[],a.startBalance);
 
-  var s=d.strategy||{};
-  var ftr='Accum Bot | '+(s.dryRun?'DEMO $'+s.demoBalance:'LIVE')+' | UP:'+s.upInterval+'s x'+(s.slip*100)+'slip | DN:'+s.downInterval+'s | sell@'+s.sellPrice+' at '+s.sellAt+'s | '+fmtU(d.uptime);
+  var s=a.strategy||{};
+  var cs=c.strategy||{};
+  var ftr='Accum | '+(s.dryRun?'DEMO $'+s.demoBalance:'LIVE')+' | UP:'+s.upInterval+'s/'+s.slip+'slip | DN:'+s.downInterval+'s | sell@'+s.sellPrice+' at '+s.sellAt+'s || Crash | '+(cs.buyPrice||'')+'→'+(cs.tpPrice||'')+' '+(cs.shares||'')+'sh x '+(cs.pairs||[]).join(',')+' | '+fmtU(a.uptime);
   document.getElementById('footer').textContent=ftr;
 }
 
