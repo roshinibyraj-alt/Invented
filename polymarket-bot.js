@@ -40,15 +40,8 @@ let sharesHeld = 0;
 let peak = 0;
 let trough = 0;
 let inTrade = false;
-let trailHigh = 0;
-let stopPeak = 0;
-let stopTrough = 0;
-let windowEnding = false;
-let forceSold = false;
 let pendingTrade = null;
 let pendingCheckAt = 0;
-
-let tradeLoopRunning = false;
 
 const f2 = v => Math.round((v || 0) * 100) / 100;
 const f4 = v => Math.round((v || 0) * 10000) / 10000;
@@ -88,8 +81,8 @@ function calcEquity() {
   for (const [slug, ss] of Object.entries(stratState)) {
     const m = markets[slug];
     if (!m || ss.done) continue;
-    if (ss.side === 'up' && !ss.sold) openValue += BASE_SHARES * m.upMid;
-    if (ss.side === 'down' && !ss.sold) openValue += BASE_SHARES * m.downMid;
+    if (ss.side === 'up' && ss.positionOpen) openValue += BASE_SHARES * m.upMid;
+    if (ss.side === 'down' && ss.positionOpen) openValue += BASE_SHARES * m.downMid;
   }
   return cashBalance + openValue;
 }
@@ -198,8 +191,10 @@ async function discoverMarket(pair, customWsTs) {
   await restRefreshPrice(markets[slug]);
   log(pair + ' UP:$' + f4(markets[slug].upMid) + ' DN:$' + f4(markets[slug].downMid));
 
-  markets[slug].loopRunning = true;
-  tradeLoop(markets[slug]).catch(e => log('Loop crash ' + pair + ': ' + e.message));
+  if (!markets[slug].loopRunning) {
+    markets[slug].loopRunning = true;
+    tradeLoop(markets[slug]).catch(e => log('Loop crash ' + pair + ': ' + e.message));
+  }
 }
 
 async function discover() {
@@ -225,108 +220,124 @@ async function checkBalance() {
   catch (_) { return cashBalance; }
 }
 
-// ── Trade functions — balance-based confirmation only ──
+// ── Unified trade functions — no inline confirmation, use pendingTrade ──
 
-async function buyUp(m, st) {
+async function buySide(m, side) {
   if (!m || inTrade || pendingTrade) return null;
   inTrade = true;
+  const tokenId = side === 'up' ? m.upTokenId : m.downTokenId;
   try {
-    var ask = await trader.getBestBidAsk(m.upTokenId);
-    var askPrice = (ask && ask.bestAsk) ? ask.bestAsk : m.upMid;
+    var ask = await trader.getBestBidAsk(tokenId);
+    var askPrice = (ask && ask.bestAsk) ? ask.bestAsk : (side === 'up' ? m.upMid : m.downMid);
     var cost = f2(BASE_SHARES * askPrice);
     var preBal = await checkBalance();
-    log('BUY UP ' + BASE_SHARES + 'sh @ ask $' + f4(askPrice) + ' (~$' + cost + ') bal=$' + f2(preBal));
+    log('BUY ' + side.toUpperCase() + ' ' + BASE_SHARES + 'sh @ ask $' + f4(askPrice) + ' (~$' + cost + ') bal=$' + f2(preBal));
 
-    await trader.placeFokBuy(m.upTokenId, cost);
+    await trader.placeFokBuy(tokenId, cost);
 
-    pendingTrade = { type: 'buyUp', m: m, st: st, preBal: preBal, cost: cost, entryPriceAt: askPrice };
+    pendingTrade = { type: 'buy', side: side, m: m, preBal: preBal, cost: cost, entryPriceAt: askPrice };
     pendingCheckAt = Date.now();
     return { pending: true };
   } catch (e) {
-    log('Buy UP error: ' + (e.message || '').slice(0, 80));
+    log('Buy ' + side.toUpperCase() + ' error: ' + (e.message || '').slice(0, 80));
     inTrade = false;
     return null;
   }
 }
 
-async function buyDown(m, st) {
-  if (!m || inTrade || pendingTrade) return null;
-  inTrade = true;
-  try {
-    var ask = await trader.getBestBidAsk(m.downTokenId);
-    var askPrice = (ask && ask.bestAsk) ? ask.bestAsk : m.downMid;
-    var cost = f2(BASE_SHARES * askPrice);
-    var preBal = await checkBalance();
-    log('BUY DOWN ' + BASE_SHARES + 'sh @ ask $' + f4(askPrice) + ' (~$' + cost + ') bal=$' + f2(preBal));
-
-    await trader.placeFokBuy(m.downTokenId, cost);
-
-    pendingTrade = { type: 'buyDown', m: m, st: st, preBal: preBal, cost: cost, entryPriceAt: askPrice };
-    pendingCheckAt = Date.now();
-    return { pending: true };
-  } catch (e) {
-    log('Buy DOWN error: ' + (e.message || '').slice(0, 80));
-    inTrade = false;
-    return null;
-  }
-}
-
-async function sellUp(m, flipTo, st) {
+async function sellSide(m, flipTo, ss) {
   if (!m || inTrade || !position || pendingTrade) return null;
+  if (!ss) ss = {};
   inTrade = true;
+  const side = position;
+  const tokenId = side === 'up' ? m.upTokenId : m.downTokenId;
   try {
-    var mid = m.upMid;
-    var pnl = f2((mid - entryPrice) * BASE_SHARES);
+    var mid = side === 'up' ? m.upMid : m.downMid;
+    var pnl = side === 'up'
+      ? f2((mid - entryPrice) * BASE_SHARES)
+      : f2((entryPrice - mid) * BASE_SHARES);
     var preBal = await checkBalance();
-    log('SELL UP @ $' + f4(mid) + ' PnL: ' + (pnl >= 0 ? '+' : '') + '$' + pnl + ' bal=$' + f2(preBal));
+    log('SELL ' + side.toUpperCase() + ' @ $' + f4(mid) + ' PnL: ' + (pnl >= 0 ? '+' : '') + '$' + pnl + ' bal=$' + f2(preBal));
 
-    await trader.placeFokSell(m.upTokenId, BASE_SHARES);
+    await trader.placeFokSell(tokenId, BASE_SHARES);
 
-    pendingTrade = { type: 'sellUp', m: m, st: st, flipTo: flipTo, preBal: preBal, pnl: pnl, priceAt: mid };
+    pendingTrade = { type: 'sell', side: side, m: m, ss: ss, flipTo: flipTo, preBal: preBal, pnl: pnl, priceAt: mid };
     pendingCheckAt = Date.now();
     return { pending: true };
   } catch (e) {
-    log('Sell UP error: ' + (e.message || '').slice(0, 80));
+    log('Sell ' + side.toUpperCase() + ' error: ' + (e.message || '').slice(0, 80));
     inTrade = false;
     return null;
   }
 }
 
-async function sellDown(m, flipTo, st) {
-  if (!m || inTrade || !position) return null;
-  inTrade = true;
-  try {
-    var mid = m.downMid;
-    var pnl = f2((entryPrice - mid) * BASE_SHARES);
-    var preBal = await checkBalance();
-    log('SELL DOWN @ $' + f4(mid) + ' PnL: ' + (pnl >= 0 ? '+' : '') + '$' + pnl + ' bal=$' + f2(preBal));
+// ── Pending trade confirmation (runs every tick, non-blocking) ──
+async function checkPendingTrade() {
+  if (!pendingTrade) return;
+  if (Date.now() - pendingCheckAt < 3000) return;
 
-    await trader.placeFokSell(m.downTokenId, BASE_SHARES);
+  var pt = pendingTrade;
+  var postBal = await checkBalance();
 
-    await sleep(3000);
-    var postBal = await checkBalance();
-    var gained = f2(postBal - preBal);
+  if (pt.type === 'buy') {
+    var spent = f2(pt.preBal - postBal);
+    if (spent >= pt.cost * 0.5) {
+      log(pt.side.toUpperCase() + ' BUY FILLED spent $' + spent);
+      position = pt.side;
+      entryPrice = pt.entryPriceAt;
+      sharesHeld = BASE_SHARES;
+      logTrade('BUY', pt.side.toUpperCase(), pt.entryPriceAt);
+      inTrade = false;
+      pendingTrade = null;
+    } else {
+      log(pt.side.toUpperCase() + ' BUY NOT filled (spent $' + spent + ') — retrying');
+      pendingTrade = null;
+      inTrade = false;
+    }
+    return;
+  }
 
+  if (pt.type === 'sell') {
+    var gained = f2(postBal - pt.preBal);
     if (gained > 0.01) {
-      log('DOWN SOLD PnL: ' + (pnl >= 0 ? '+' : '') + '$' + pnl + ' gained $' + gained);
-      logTrade('SELL', 'DOWN', mid, pnl);
+      log(pt.side.toUpperCase() + ' SOLD PnL: ' + (pt.pnl >= 0 ? '+' : '') + '$' + pt.pnl);
+      logTrade('SELL', pt.side.toUpperCase(), pt.priceAt, pt.pnl);
+
       position = null;
       sharesHeld = 0;
       entryPrice = 0;
-      if (st) { st.side = null; st.sharesHeld = 0; st.entryPrice = 0; }
-      inTrade = false;
-      if (flipTo === 'up') return await buyDown(m, st);
-      return { filled: true, price: mid, pnl: pnl };
-    }
 
-    log('DOWN NOT sold (gained $' + f2(gained) + ') - retry in 3s');
-    await sleep(RETRY_MS);
-    inTrade = false;
-    return null;
-  } catch (e) {
-    log('Sell DOWN error: ' + (e.message || '').slice(0, 80));
-    inTrade = false;
-    return null;
+      if (pt.ss) {
+        pt.ss.side = null;
+        pt.ss.sharesHeld = 0;
+        pt.ss.entryPrice = 0;
+        pt.ss.peak = 0;
+        pt.ss.trough = 0;
+        pt.ss.positionOpen = false;
+        if (pt.ss._forceSold) pt.ss.sold = true;
+        if (pt.ss._forceSelling) pt.ss._forceSelling = false;
+      }
+
+      inTrade = false;
+      pendingTrade = null;
+
+      // Flip to opposite side if requested
+      if (pt.flipTo) {
+        log('Flipping to ' + pt.flipTo.toUpperCase());
+        await buySide(pt.m, pt.flipTo);
+      }
+    } else {
+      log(pt.side.toUpperCase() + ' NOT sold (gained $' + f2(gained) + ') — retrying');
+      pendingTrade = null;
+      inTrade = false;
+
+      // If force selling, retry immediately
+      if (pt.ss && pt.ss._forceSelling) {
+        log('Force sell retrying...');
+        await sellSide(pt.m, null, pt.ss);
+      }
+    }
+    return;
   }
 }
 
@@ -340,7 +351,13 @@ async function tradeLoop(m) {
 
   log(m.pair + ' window STARTED');
 
-  var ss = { side: null, sold: false, done: false, entryPrice: 0, sharesHeld: 0, peak: 0, trough: 0 };
+  var ss = {
+    side: null, sold: false, done: false,
+    entryPrice: 0, sharesHeld: 0,
+    peak: 0, trough: 0,
+    positionOpen: false,
+    _forceSold: false, _forceSelling: false,
+  };
   stratState[m.slug] = ss;
 
   while (true) {
@@ -354,128 +371,74 @@ async function tradeLoop(m) {
     if (up <= 0 || dn <= 0) { await sleep(TICK_MS); continue; }
 
     // Track trailing values (runs EVERY tick, never blocked)
-    if (ss.side === 'up') {
-      if (up > ss.peak) ss.peak = up;
-    } else if (ss.side === 'down') {
-      if (dn < ss.trough || ss.trough === 0) ss.trough = dn;
+    if (ss.positionOpen) {
+      if (ss.side === 'up') {
+        if (up > ss.peak) ss.peak = up;
+      } else if (ss.side === 'down') {
+        if (dn < ss.trough || ss.trough === 0) ss.trough = dn;
+      }
     } else {
       if (up > ss.peak || ss.peak === 0) ss.peak = up;
+      if ((dn < ss.trough || ss.trough === 0) && dn > 0) ss.trough = dn;
     }
 
-    // Check pending trade confirmation (non-blocking, runs every tick)
-    if (pendingTrade && Date.now() - pendingCheckAt > 3000) {
-      var pt = pendingTrade;
-      var postBal = await checkBalance();
+    // Check pending trade confirmations (non-blocking)
+    await checkPendingTrade();
 
-      if (pt.type === 'buyUp' || pt.type === 'buyDown') {
-        var spent = f2(pt.preBal - postBal);
-        if (spent >= pt.cost * 0.3) {
-          log((pt.type === 'buyUp' ? 'UP' : 'DOWN') + ' FILLED spent $' + spent);
-          var side = pt.type === 'buyUp' ? 'up' : 'down';
-          var priceKey = pt.type === 'buyUp' ? 'entryPriceAt' : 'entryPriceAt';
-          position = side;
-          entryPrice = pt[priceKey];
-          sharesHeld = BASE_SHARES;
-          if (side === 'up') peak = pt[priceKey];
-          else trough = pt[priceKey];
-          if (pt.st) {
-            pt.st.side = side;
-            pt.st.entryPrice = pt[priceKey];
-            pt.st.sharesHeld = BASE_SHARES;
-            if (side === 'up') pt.st.peak = pt[priceKey];
-            else pt.st.trough = pt[priceKey];
-          }
-          logTrade('BUY', side.toUpperCase(), pt[priceKey]);
-          inTrade = false;
-          pendingTrade = null;
-        } else {
-          log((pt.type === 'buyUp' ? 'UP' : 'DOWN') + ' NOT filled (spent $' + spent + ') - retrying');
-          // Retry
-          if (pt.type === 'buyUp') {
-            pendingTrade = null; inTrade = false;
-            // Will trigger re-entry on next tick if condition still met
-          } else {
-            pendingTrade = null; inTrade = false;
-          }
-        }
-      }
-
-      if (pt.type === 'sellUp' || pt.type === 'sellDown') {
-        var gained = f2(postBal - pt.preBal);
-        if (gained > 0.01) {
-          log((pt.type === 'sellUp' ? 'UP' : 'DOWN') + ' SOLD PnL: ' + (pt.pnl >= 0 ? '+' : '') + '$' + pt.pnl);
-          logTrade('SELL', (pt.type === 'sellUp' ? 'UP' : 'DOWN'), pt.priceAt, pt.pnl);
-          position = null; sharesHeld = 0; entryPrice = 0;
-          if (pt.st) { pt.st.side = null; pt.st.sharesHeld = 0; pt.st.entryPrice = 0; }
-          inTrade = false;
-          pendingTrade = null;
-          if (pt.flipTo) {
-            // Trigger flip immediately
-            if (pt.flipTo === 'down') await buyDown(pt.m, pt.st);
-            else if (pt.flipTo === 'up') await buyUp(pt.m, pt.st);
-          }
-        } else {
-          log((pt.type === 'sellUp' ? 'UP' : 'DOWN') + ' NOT sold (gained $' + f2(gained) + ') - retrying');
-          pendingTrade = null; inTrade = false;
-        }
-      }
-
-      if (pendingTrade === null) {
-        // Reset peak/trough after position change
-        if (position === 'up' && peak > 0) { ss.peak = peak; }
-        if (position === 'down' && trough > 0) { ss.trough = trough; }
-      }
-    }
-
-    // Phase 1: < 280s — trailing + flip
+    // Phase 1: < 280s — trailing stop + flip
     if (elapsed < STOP_ENTRY_AT) {
-      if (!ss.side && !inTrade) {
+      // No position — entry opportunity
+      if (!ss.positionOpen && !inTrade && !pendingTrade) {
         var drop = f4(ss.peak - up);
         if (drop >= TRAIL_DIST) {
-          log('UP dropped $' + f4(drop) + ' from peak $' + f4(ss.peak) + ' — entering');
-          var r = await buyUp(m, ss);
-          if (r && r.filled) {
-            ss.side = 'up'; ss.entryPrice = m.upMid; ss.sharesHeld = BASE_SHARES; ss.peak = m.upMid;
-            position = 'up'; entryPrice = m.upMid; sharesHeld = BASE_SHARES; peak = m.upMid;
+          log('UP dropped $' + f4(drop) + ' from peak $' + f4(ss.peak) + ' — entering UP');
+          var r = await buySide(m, 'up');
+          if (r && r.pending) {
+            ss.side = 'up';
+            ss.sharesHeld = BASE_SHARES;
+            ss.positionOpen = true;
           }
         }
       }
 
-      if (ss.side === 'up' && !inTrade) {
+      // UP position — check trailing stop
+      if (ss.positionOpen && ss.side === 'up' && !inTrade && !pendingTrade) {
         var drop = f4(ss.peak - up);
         if (drop >= TRAIL_DIST) {
           log('UP stop hit — selling & flipping DOWN');
-          await sellUp(m, 'down', ss);
+          await sellSide(m, 'down', ss);
         }
       }
 
-      if (ss.side === 'down' && !inTrade) {
+      // DOWN position — check trailing stop
+      if (ss.positionOpen && ss.side === 'down' && !inTrade && !pendingTrade) {
         var rise = f4(dn - ss.trough);
         if (rise >= TRAIL_DIST) {
           log('DOWN stop hit — selling & flipping UP');
-          await sellDown(m, 'up', ss);
+          await sellSide(m, 'up', ss);
         }
       }
     }
 
-    // Phase 2: 280-295s — stop entries, place TP sell @0.99
-    if (elapsed >= STOP_ENTRY_AT && elapsed < FORCE_SELL_AT && !ss._tpPlaced && ss.side) {
+    // Phase 2: 280-295s — stop entries, place TP @0.99
+    if (elapsed >= STOP_ENTRY_AT && elapsed < FORCE_SELL_AT && !ss._tpPlaced && ss.positionOpen) {
       ss._tpPlaced = true;
       log(m.pair + ' — placing TP @0.99 for ' + ss.side.toUpperCase());
-      if (dryRun) { ss._tpId = 'demo_tp'; }
-      else {
+      if (!dryRun) {
         var tokenId = ss.side === 'up' ? m.upTokenId : m.downTokenId;
-        try { var r = await trader.placeGtcOrder(tokenId, 'SELL', TP_PRICE, BASE_SHARES); ss._tpId = r ? r.id : null; }
+        try { await trader.placeGtcOrder(tokenId, 'SELL', TP_PRICE, BASE_SHARES); }
         catch(e) { log('TP err: ' + (e.message || '').slice(0, 60)); }
       }
     }
 
-    // Phase 3: 295s+ — force sell
-    if (elapsed >= FORCE_SELL_AT && !ss._forceSold && ss.side) {
+    // Phase 3: 295s+ — force sell (async with retry via pendingTrade)
+    if (elapsed >= FORCE_SELL_AT && !ss._forceSold && ss.positionOpen) {
       ss._forceSold = true;
+      ss._forceSelling = true;
       log(m.pair + ' FORCE SELL at ' + elapsed.toFixed(1) + 's');
-      if (ss.side === 'up') { await sellUp(m, null, ss); ss.side = null; ss.sold = true; position = null; }
-      if (ss.side === 'down') { await sellDown(m, null, ss); ss.side = null; ss.sold = true; position = null; }
+      if (!inTrade && !pendingTrade) {
+        await sellSide(m, null, ss);
+      }
     }
 
     await sleep(TICK_MS);
@@ -507,7 +470,7 @@ function snapshot() {
       secsLeft: Math.max(0, Math.floor((m.endTime - Date.now()) / 1000)),
       elapsed: Math.floor(elapsed),
       phase: phase,
-      position: ss.side || null,
+      position: (ss.positionOpen ? ss.side : null) || null,
       entryPrice: f4(ss.entryPrice || 0),
       sharesHeld: ss.sharesHeld || 0,
       stopPeak: f4(ss.peak || 0),

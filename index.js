@@ -43,9 +43,11 @@ app.get('/api/snapshot', (_req, res) => {
 
 app.get('/healthz', (_req, res) => res.json({ ok: true }));
 
-app.post('/api/set-dry-run', express.json(), (req, res) => {
+app.post('/api/set-dry-run', express.json(), async (req, res) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Headers', 'Content-Type');
+    var newVal = req.body.dryRun === true;
+  await bot.setDryRun(newVal);
   res.json({ ok: true, dryRun: bot.getDryRun() });
 });
 
