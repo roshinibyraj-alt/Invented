@@ -234,6 +234,14 @@ async function buySide(m, side, ss) {
     if (cost > preBal * 0.9) cost = f2(preBal * 0.9);
     if (cost <= 0.01) { inTrade = false; return null; }
     log('BUY ' + side.toUpperCase() + ' ~' + BASE_SHARES + 'sh @ $' + f4(price) + ' (~$' + cost + ') bal=$' + f2(preBal));
+    if (dryRun) {
+      cashBalance -= cost;
+      if (cashBalance < 0) cashBalance = 0;
+      log('DEMO placed -$' + f2(cost) + ' bal=$' + f2(cashBalance));
+      pendingTrade = { type: 'buy', side: side, m: m, ss: ss, preBal: preBal, cost: cost, entryPriceAt: price, isDemo: true };
+      pendingCheckAt = Date.now();
+      return { pending: true };
+    }
     await trader.placeFokBuy(tokenId, cost);
     pendingTrade = { type: 'buy', side: side, m: m, ss: ss, preBal: preBal, cost: cost, entryPriceAt: price };
     pendingCheckAt = Date.now();
@@ -255,11 +263,34 @@ async function sellSide(m, flipTo, ss) {
   try {
     var actualShares = (ss && ss.sharesHeld > 0) ? ss.sharesHeld : (sharesHeld > 0 ? sharesHeld : BASE_SHARES);
     var mid = sellSideName === 'up' ? m.upMid : m.downMid;
-    var pnl = sellSideName === 'up'
-      ? f2((mid - entryPrice) * actualShares)
-      : f2((entryPrice - mid) * actualShares);
+    var pnl = f2((mid - entryPrice) * actualShares);
     var preBal = await checkBalance();
     log('SELL ' + sellSideName.toUpperCase() + ' ' + actualShares + 'sh @ $' + f4(mid) + ' PnL: ' + (pnl >= 0 ? '+' : '') + '$' + pnl + ' bal=$' + f2(preBal));
+    if (dryRun) {
+      var proceeds = f4(actualShares * mid);
+      cashBalance += proceeds;
+      log('DEMO sold +$' + f2(proceeds) + ' bal=$' + f2(cashBalance));
+      // In demo, skip sell confirmation, mark as sold immediately
+      position = null;
+      sharesHeld = 0;
+      entryPrice = 0;
+      if (ss) {
+        ss.side = null;
+        ss.sharesHeld = 0;
+        ss.entryPrice = 0;
+        ss.peak = 0;
+        ss.trough = 0;
+        ss.positionOpen = false;
+        if (ss._forceSold) ss.sold = true;
+        ss._forceSelling = false;
+      }
+      inTrade = false;
+      if (flipTo) {
+        log('Flipping to ' + flipTo.toUpperCase());
+        await buySide(m, flipTo, ss);
+      }
+      return { pending: false };
+    }
     await trader.placeFokSell(tokenId, actualShares);
     pendingTrade = { type: 'sell', side: sellSideName, m: m, ss: ss, flipTo: flipTo, preBal: preBal, pnl: pnl, priceAt: mid, shares: actualShares };
     pendingCheckAt = Date.now();
@@ -279,6 +310,25 @@ async function checkPendingTrade() {
   var postBal = await checkBalance();
 
   if (pt.type === 'buy') {
+    if (pt.isDemo) {
+      var actualShares = Math.round(pt.cost / pt.entryPriceAt);
+      if (actualShares < 1) actualShares = BASE_SHARES;
+      log(pt.side.toUpperCase() + ' DEMO BUY FILLED ~' + actualShares + 'sh');
+      position = pt.side;
+      entryPrice = pt.entryPriceAt;
+      sharesHeld = actualShares;
+      logTrade('BUY', pt.side.toUpperCase(), pt.entryPriceAt, 0, actualShares);
+      if (pt.ss) {
+        pt.ss.side = pt.side;
+        pt.ss.entryPrice = pt.entryPriceAt;
+        pt.ss.sharesHeld = actualShares;
+        pt.ss.positionOpen = true;
+        pt.ss._pendingEntry = false;
+      }
+      inTrade = false;
+      pendingTrade = null;
+      return;
+    }
     var spent = f2(pt.preBal - postBal);
     if (spent >= pt.cost * 0.3) {
       var actualShares = Math.round(spent / pt.entryPriceAt);
@@ -313,6 +363,8 @@ async function checkPendingTrade() {
   }
 
   if (pt.type === 'sell') {
+    // Demo sells are handled inline in sellSide, skip confirmation
+    if (pt.isDemo) { pendingTrade = null; inTrade = false; return; }
     var gained = f2(postBal - pt.preBal);
     var expectedGain = (pt.shares || BASE_SHARES) * (pt.priceAt || 0.5);
     if (gained >= expectedGain * 0.3) {
@@ -523,7 +575,10 @@ async function start(emit, logFn) {
     log('Auth: ' + trader.address);
     if (dryRun) { cashBalance = DEMO_BALANCE; startBalance = DEMO_BALANCE; log('DEMO $' + f2(cashBalance)); }
     else { var b = await trader.getBalance(); if (b > 0) { cashBalance = b; startBalance = b; } log('LIVE $' + f2(cashBalance)); }
-  } catch (e) { log('Auth fail: ' + e.message); process.exit(1); }
+  } catch (e) {
+    if (dryRun) { cashBalance = DEMO_BALANCE; startBalance = DEMO_BALANCE; log('DEMO $' + f2(cashBalance) + ' (auth failed, data only)'); }
+    else { log('Auth fail: ' + e.message); process.exit(1); }
+  }
 
   wsConnect();
   log('Starting main loop');
