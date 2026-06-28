@@ -37,7 +37,13 @@ let lastDiscoverAt = 0;
 
 let trailHigh = 0;         // peak UP price (no position or holding UP)
 let stopPeak = 0;          // highest UP price since entry (UP position)
-let stopTrough = 0;        // lowest DOWN price since entry (DOWN position)
+let stopTrough = 0;
+let position = null;
+let entryPrice = 0;
+let sharesHeld = 0;
+let peak = 0;
+let trough = 0;
+let inTrade = false;        // lowest DOWN price since entry (DOWN position)
 let windowEnding = false;  // 280s+ flag
 let forceSold = false;     // 295s+ flag
 
@@ -413,6 +419,7 @@ async function tradeLoop(m) {
         if (drop >= TRAIL_DIST) {
           log("UP dropped $" + f4(drop) + " from peak $" + f4(ss.peak) + " — entering");
           var r = await buyUp(m, ss);
+          if(ss.side){position=ss.side;entryPrice=ss.entryPrice;sharesHeld=ss.sharesHeld;peak=ss.peak;}
         }
       }
 
@@ -422,6 +429,7 @@ async function tradeLoop(m) {
         if (drop >= TRAIL_DIST) {
           log("UP stop hit — selling & flipping DOWN");
           await sellUp(m, "down", ss);
+          if(ss.side){position=ss.side;entryPrice=ss.entryPrice;sharesHeld=ss.sharesHeld;peak=ss.peak;trough=ss.trough;}else{position=null;sharesHeld=0;}
         }
       }
 
@@ -431,6 +439,7 @@ async function tradeLoop(m) {
         if (rise >= TRAIL_DIST) {
           log("DOWN stop hit — selling & flipping UP");
           await sellDown(m, "up", ss);
+          if(ss.side){position=ss.side;entryPrice=ss.entryPrice;sharesHeld=ss.sharesHeld;trough=ss.trough;peak=ss.peak;}else{position=null;sharesHeld=0;}
         }
       }
     }
@@ -452,8 +461,8 @@ async function tradeLoop(m) {
     if (elapsed >= FORCE_SELL_AT && !ss._forceSold && ss.side) {
       ss._forceSold = true;
       log(m.pair + " FORCE SELL at " + elapsed.toFixed(1) + "s");
-      if (ss.side === "up") { await sellUp(m, null, ss); ss.side = null; ss.sold = true; }
-      if (ss.side === "down") { await sellDown(m, null, ss); ss.side = null; ss.sold = true; }
+      if (ss.side === "up") { await sellUp(m, null, ss); position=null;sharesHeld=0;ss.side=null;ss.sold=true; }
+      if (ss.side === "down") { await sellDown(m, null, ss); position=null;sharesHeld=0;ss.side=null;ss.sold=true; }
     }
 
     await sleep(TICK_MS);
