@@ -1,5 +1,18 @@
 'use strict';
 
+// Proxy support for Railway
+const _proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
+if (_proxyUrl) {
+  try {
+    const { ProxyAgent, fetch: _uFetch } = require('undici');
+    const _agent = new ProxyAgent({ uri: _proxyUrl, requestTls: { rejectUnauthorized: false } });
+    globalThis.fetch = (url, opts = {}) => _uFetch(url, { ...opts, dispatcher: _agent });
+    console.log('🌐 Proxy active:', _proxyUrl.replace(/:[^:@]*@/, ':***@'));
+  } catch(e) {
+    console.log('⚠️ Proxy setup error:', e.message);
+  }
+}
+
 const express = require('express');
 const http = require('http');
 const path = require('path');
@@ -33,7 +46,6 @@ app.get('/healthz', (_req, res) => res.json({ ok: true }));
 app.post('/api/set-dry-run', express.json(), (req, res) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Headers', 'Content-Type');
-  // Always real trading for cricket
   res.json({ ok: true, dryRun: bot.getDryRun() });
 });
 
