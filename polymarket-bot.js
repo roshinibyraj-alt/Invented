@@ -593,7 +593,41 @@ async function start(emit, logFn) {
   }, TICK_MS);
 }
 
-async function setDryRun(v) { dryRun = !!v; }
+async function setDryRun(v) {
+  var wasDry = dryRun;
+  dryRun = !!v;
+  // Switching from DEMO → LIVE: sync balance and clear stale demo positions
+  if (wasDry && !dryRun && trader) {
+    try {
+      var b = await trader.getBalance();
+      if (b > 0) { cashBalance = b; startBalance = b; }
+      log('Switched to LIVE — balance: $' + f2(cashBalance));
+    } catch(e) { log('Live sync err: ' + e.message); }
+    // Clear any stale positions from demo mode
+    position = null; sharesHeld = 0; entryPrice = 0;
+    inTrade = false; pendingTrade = null;
+    for (var k in stratState) {
+      var ss = stratState[k];
+      ss.positionOpen = false; ss.side = null; ss.sharesHeld = 0;
+      ss.entryPrice = 0; ss.peak = 0; ss.trough = 0;
+      ss._pendingEntry = false; ss._retryCooldown = 0;
+    }
+    log('Demo positions cleared');
+  }
+  // Switching from LIVE → DEMO: reset demo balance
+  if (!wasDry && dryRun) {
+    cashBalance = DEMO_BALANCE; startBalance = DEMO_BALANCE;
+    position = null; sharesHeld = 0; entryPrice = 0;
+    inTrade = false; pendingTrade = null;
+    for (var k in stratState) {
+      var ss = stratState[k];
+      ss.positionOpen = false; ss.side = null; ss.sharesHeld = 0;
+      ss.entryPrice = 0; ss.peak = 0; ss.trough = 0;
+      ss._pendingEntry = false; ss._retryCooldown = 0;
+    }
+    log('Switched to DEMO — balance: $' + f2(cashBalance));
+  }
+}
 function getDryRun() { return dryRun; }
 
 module.exports = { start, snapshot, setDryRun, getDryRun };
