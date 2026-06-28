@@ -198,25 +198,26 @@ async function buyIreland() {
   try {
     var cost = f2(BASE_SHARES * mkt.irelandPrice);
     var preBal = await checkBalance();
-    log('BUY Ireland ' + BASE_SHARES + 'sh @ $' + f4(mkt.irelandPrice) + ' (~$' + cost + ')');
+    log('BUY Ireland ' + BASE_SHARES + 'sh @ $' + f4(mkt.irelandPrice) + ' (~$' + cost + ') bal=$' + f2(preBal));
 
-    var result = await trader.placeFokBuy(mkt.irelandTokenId, cost);
-    if (!result) { inTrade = false; return null; }
+    await trader.placeFokBuy(mkt.irelandTokenId, cost);
 
-    if (result.isFilled) {
-      await sleep(CONFIRM_MS);
-      var postBal = await checkBalance();
-      var spent = f2(preBal - postBal);
-      log('Bought Ireland — spent ~$' + spent);
+    // ALWAYS verify via balance change, not API response
+    await sleep(CONFIRM_MS);
+    var postBal = await checkBalance();
+    var spent = f2(preBal - postBal);
+
+    if (spent >= cost * 0.3) {
+      log('Ireland filled - spent $' + spent);
       position = 'ireland';
-      entryPrice = result.avgPrice || mkt.irelandPrice;
+      entryPrice = mkt.irelandPrice;
       sharesHeld = BASE_SHARES;
       stopPeak = entryPrice;
       logTrade('BUY', 'IRELAND', entryPrice);
       inTrade = false;
       return { filled: true, price: entryPrice };
     } else {
-      log('FOK Ireland fill failed — retrying in ' + (RETRY_MS/1000) + 's');
+      log('Ireland NOT filled (spent $' + spent + ' vs expected $' + cost + ') - retry in 4s');
       await sleep(RETRY_MS);
       inTrade = false;
       return null;
@@ -227,31 +228,31 @@ async function buyIreland() {
     return null;
   }
 }
-
 async function buyIndia() {
   if (!mktReady || inTrade) return null;
   inTrade = true;
   try {
     var cost = f2(BASE_SHARES * mkt.indiaPrice);
     var preBal = await checkBalance();
-    log('BUY India ' + BASE_SHARES + 'sh @ $' + f4(mkt.indiaPrice) + ' (~$' + cost + ')');
+    log('BUY India ' + BASE_SHARES + 'sh @ $' + f4(mkt.indiaPrice) + ' (~$' + cost + ') bal=$' + f2(preBal));
 
-    var result = await trader.placeFokBuy(mkt.indiaTokenId, cost);
-    if (!result) { inTrade = false; return null; }
+    await trader.placeFokBuy(mkt.indiaTokenId, cost);
 
-    if (result.isFilled) {
-      await sleep(CONFIRM_MS);
-      await checkBalance();
-      log('Bought India');
+    await sleep(CONFIRM_MS);
+    var postBal = await checkBalance();
+    var spent = f2(preBal - postBal);
+
+    if (spent >= cost * 0.3) {
+      log('India filled - spent $' + spent);
       position = 'india';
-      entryPrice = result.avgPrice || mkt.indiaPrice;
+      entryPrice = mkt.indiaPrice;
       sharesHeld = BASE_SHARES;
       stopTrough = entryPrice;
       logTrade('BUY', 'INDIA', entryPrice);
       inTrade = false;
       return { filled: true, price: entryPrice };
     } else {
-      log('FOK India fill failed — retrying in ' + (RETRY_MS/1000) + 's');
+      log('India NOT filled (spent $' + spent + ' vs expected $' + cost + ') - retry in 4s');
       await sleep(RETRY_MS);
       inTrade = false;
       return null;
@@ -261,23 +262,23 @@ async function buyIndia() {
     inTrade = false;
     return null;
   }
-}
-
-async function sellIreland(andFlipTo) {
+}async function sellIreland(andFlipTo) {
   if (!mktReady || inTrade || !position) return null;
   inTrade = true;
   try {
     var mid = mkt.irelandPrice;
+    var preBal = await checkBalance();
     var pnl = f2((mid - entryPrice) * BASE_SHARES);
-    log('SELL Ireland ' + BASE_SHARES + 'sh @ $' + f4(mid) + ' PnL: ' + (pnl >= 0 ? '+' : '') + '$' + pnl);
+    log('SELL Ireland ' + BASE_SHARES + 'sh @ $' + f4(mid) + ' PnL: ' + (pnl >= 0 ? '+' : '') + '$' + pnl + ' bal=$' + f2(preBal));
 
-    var result = await trader.placeFokSell(mkt.irelandTokenId, BASE_SHARES);
-    if (!result) { inTrade = false; return null; }
+    await trader.placeFokSell(mkt.irelandTokenId, BASE_SHARES);
 
-    if (result.isFilled) {
-      await sleep(CONFIRM_MS);
-      await checkBalance();
-      log('Sold Ireland — PnL ' + (pnl >= 0 ? '+' : '') + '$' + pnl);
+    await sleep(CONFIRM_MS);
+    var postBal = await checkBalance();
+    var gained = f2(postBal - preBal);
+
+    if (gained > 0.01) {
+      log('Ireland sold - PnL ' + (pnl >= 0 ? '+' : '') + '$' + pnl + ' bal $' + f2(preBal) + ' -> $' + f2(postBal));
       logTrade('SELL', 'IRELAND', mid, pnl);
       position = null;
       sharesHeld = 0;
@@ -289,7 +290,7 @@ async function sellIreland(andFlipTo) {
       }
       return { filled: true, price: mid, pnl: pnl };
     } else {
-      log('FOK Ireland sell failed — retrying in ' + (RETRY_MS/1000) + 's');
+      log('Ireland NOT sold (bal change $' + f2(gained) + ') - retry in 4s');
       await sleep(RETRY_MS);
       inTrade = false;
       return null;
@@ -299,23 +300,23 @@ async function sellIreland(andFlipTo) {
     inTrade = false;
     return null;
   }
-}
-
-async function sellIndia(andFlipTo) {
+}async function sellIndia(andFlipTo) {
   if (!mktReady || inTrade || !position) return null;
   inTrade = true;
   try {
     var mid = mkt.indiaPrice;
+    var preBal = await checkBalance();
     var pnl = f2((entryPrice - mid) * BASE_SHARES);
-    log('SELL India ' + BASE_SHARES + 'sh @ $' + f4(mid) + ' PnL: ' + (pnl >= 0 ? '+' : '') + '$' + pnl);
+    log('SELL India ' + BASE_SHARES + 'sh @ $' + f4(mid) + ' PnL: ' + (pnl >= 0 ? '+' : '') + '$' + pnl + ' bal=$' + f2(preBal));
 
-    var result = await trader.placeFokSell(mkt.indiaTokenId, BASE_SHARES);
-    if (!result) { inTrade = false; return null; }
+    await trader.placeFokSell(mkt.indiaTokenId, BASE_SHARES);
 
-    if (result.isFilled) {
-      await sleep(CONFIRM_MS);
-      await checkBalance();
-      log('Sold India — PnL ' + (pnl >= 0 ? '+' : '') + '$' + pnl);
+    await sleep(CONFIRM_MS);
+    var postBal = await checkBalance();
+    var gained = f2(postBal - preBal);
+
+    if (gained > 0.01) {
+      log('India sold - PnL ' + (pnl >= 0 ? '+' : '') + '$' + pnl + ' bal $' + f2(preBal) + ' -> $' + f2(postBal));
       logTrade('SELL', 'INDIA', mid, pnl);
       position = null;
       sharesHeld = 0;
@@ -327,7 +328,7 @@ async function sellIndia(andFlipTo) {
       }
       return { filled: true, price: mid, pnl: pnl };
     } else {
-      log('FOK India sell failed — retrying in ' + (RETRY_MS/1000) + 's');
+      log('India NOT sold (bal change $' + f2(gained) + ') - retry in 4s');
       await sleep(RETRY_MS);
       inTrade = false;
       return null;
@@ -337,10 +338,7 @@ async function sellIndia(andFlipTo) {
     inTrade = false;
     return null;
   }
-}
-
-// Main trade loop
-async function tradeLoop() {
+}async function tradeLoop() {
   if (tradeLoopRunning) return;
   tradeLoopRunning = true;
 
