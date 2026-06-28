@@ -10,19 +10,17 @@ const CLOB_WS = 'wss://ws-subscriptions-clob.polymarket.com/ws/market';
 const TICK_MS           = 500;
 const DISCOVER_EVERY_MS = 15000;
 const WINDOW_SECS       = 300;
-const GRID_LEVELS       = [0.45, 0.40, 0.35, 0.30, 0.25, 0.20, 0.15];
-const SHARES            = 10;
-// Dynamic TP: lower entries get wider TP targets
-function calcSellTarget(entryPrice) {
-  // TP = entry * 2 (e.g., 0.45 -> 0.90, 0.15 -> 0.30)
-  const tp = entryPrice * 2;
-  return f4(Math.min(tp, 0.95));
-}
-const CLOSE_AT_SECS     = 282;  // 4.70 minutes – cancel all + force sell
 const TARGET_PAIRS      = ['BTC'];
 
+// Accumulation strategy params
+const UP_INTERVAL    = 10000;  // ms
+const DOWN_INTERVAL  = 15000;  // ms
+const SELL_AT_SECS   = 270;    // 4.5 min – stop accumulation, place sells
+const SELL_PRICE     = 0.99;
+const BUY_SLIP       = 0.02;   // buy at mid - 0.02
+
 let dryRun = process.env.DRY_RUN === 'true';
-const DEMO_BALANCE = parseFloat(process.env.DEMO_BALANCE || '200');
+const DEMO_BALANCE = parseFloat(process.env.DEMO_BALANCE || '1000');
 
 let emitFn     = () => {};
 let slog       = () => {};
@@ -35,9 +33,9 @@ const logs     = [];
 const trades   = [];
 const markets  = {};
 let lastDiscoverAt = 0;
-const gridState = {};
-const equityHistory = [];
-let lastEquityRecord = 0;
+
+// Per-market accumulation state
+const accState = {};
 
 const f2 = v => Math.round((v || 0) * 100) / 100;
 const f4 = v => Math.round((v || 0) * 10000) / 10000;
@@ -54,7 +52,7 @@ function log(msg) {
 async function getJSON(url) {
   try {
     const ac = new AbortController();
-    const t  = setTimeout(() => ac.abort(), 8000);
+    const t  = setTimeout(() => ac.abort(), 10000);
     const r  = await fetch(url, { signal: ac.signal });
     clearTimeout(t);
     return r.ok ? r.json() : null;
@@ -63,21 +61,14 @@ async function getJSON(url) {
 
 // ── Balance / Equity ──
 function calcEquity() {
-  let eq = cashBalance, costBasis = 0;
-  for (const [slug, gs] of Object.entries(gridState)) {
+  let openValue = 0;
+  for (const [slug, as] of Object.entries(accState)) {
     const m = markets[slug];
-    if (!m) continue;
-    for (const side of ['up', 'down']) {
-      for (const lv of gs[side]) {
-        if (lv.filled && !lv.sold) {
-          costBasis += lv.entryCost;
-          const mid = side === 'up' ? m.upMid : m.downMid;
-          eq += SHARES * mid;
-        }
-      }
-    }
+    if (!m || as.resolved) continue;
+    if (as.winner === 'up')   openValue += as.up.shares * 1.0;
+    if (as.winner === 'down') openValue += as.down.shares * 1.0;
   }
-  return { equity: eq, costBasis, openValue: eq - cashBalance };
+  return cashBalance + openValue;
 }
 
 // ── WebSocket price feed ──
@@ -172,14 +163,19 @@ async function discoverMarket(pair, customWsTs) {
     if (nrData?.neg_risk !== undefined) negRisk = nrData.neg_risk;
   } catch (_) {}
 
-  markets[slug] = {
-    slug, pair, upTokenId, downTokenId,
+  // Save market info
+  const marketInfo = {
+    slug, pair: mk.question || pair, upTokenId, downTokenId,
     upMid: 0, downMid: 0, lastPriceAt: 0,
     endTime, windowStartMs: ws_ts * 1000,
     upTickSize: tickSize, dnTickSize: tickSize,
     upNegRisk: negRisk, dnNegRisk: negRisk,
+    gammaId: mk.id || mk._id,  // save for resolution check
+    outcomes: mk.outcomes || [],
     loopRunning: false, done: false,
   };
+
+  markets[slug] = marketInfo;
 
   wsTokenMap[upTokenId] = slug;
   wsTokenMap[downTokenId] = slug;
@@ -188,22 +184,23 @@ async function discoverMarket(pair, customWsTs) {
   await restRefreshPrice(markets[slug]);
   log(`${pair} UP:${f4(markets[slug].upMid)} DOWN:${f4(markets[slug].downMid)}`);
 
-  // Init grid state
-  gridState[slug] = {
-    up:   GRID_LEVELS.map(p => makeGridLevel(p)),
-    down: GRID_LEVELS.map(p => makeGridLevel(p)),
-    started: false, forceClosed: false, done: false,
+  // Init accumulation state
+  accState[slug] = {
+    up:   { shares: 0, totalCost: 0, buyCount: 0 },
+    down: { shares: 0, totalCost: 0, buyCount: 0 },
+    phase: 'idle',     // idle → accumulating → selling → resolved
+    lastUpBuy: 0,
+    lastDownBuy: 0,
+    sellUpOrderId: null,
+    sellDownOrderId: null,
+    resolved: false,
+    winner: null,
+    upSellFilled: false,
+    downSellFilled: false,
+    resolutionChecked: false,
   };
 
   tradeLoop(markets[slug]).catch(e => log(`Loop crash ${pair}: ${e.message}`));
-}
-
-function makeGridLevel(price) {
-  return {
-    price, shares: SHARES,
-    buyOrderId: null, filled: false, entryCost: 0,
-    sellTarget: 0, sellOrderId: null, sold: false, cancelled: false,
-  };
 }
 
 async function discover() {
@@ -214,216 +211,105 @@ async function discover() {
   ));
   // Cleanup old markets
   for (const [slug, m] of Object.entries(markets)) {
-    if (Date.now() > m.endTime + 15000) {
+    if (Date.now() > m.endTime + 60000) {
       delete wsTokenMap[m.upTokenId];
       delete wsTokenMap[m.downTokenId];
       delete markets[slug];
-      delete gridState[slug];
+      delete accState[slug];
     }
   }
 }
 
-// ── Place GRID orders at window start ──
-async function placeGridOrders(m) {
-  const gs = gridState[m.slug];
-  if (!gs) return;
-
-  for (const side of ['up', 'down']) {
-    const tokenId = side === 'up' ? m.upTokenId : m.downTokenId;
-    for (const lv of gs[side]) {
-      if (lv.cancelled) continue;
-      if (dryRun) {
-        lv.buyOrderId = 'demo_' + side + '_' + lv.price;
-        log(`GRID ${side.toUpperCase()} BUY ${SHARES}sh@${f4(lv.price)}`);
-      } else {
-        try {
-          const ord = await trader.placeGtcOrder(tokenId, 'BUY', lv.price, SHARES);
-          if (ord?.id) lv.buyOrderId = ord.id;
-          log(`GRID ${side.toUpperCase()} BUY ${SHARES}sh@${f4(lv.price)} id:${(ord?.id||'').slice(0,10)}`);
-        } catch (e) {
-          log(`GRID BUY err ${side}@${lv.price}: ${e.message.slice(0,60)}`);
-        }
-      }
-    }
-  }
-}
-
-// ── Demo fill simulator ──
-async function checkDemoFills(m) {
-  const gs = gridState[m.slug];
-  if (!gs) return;
-
-  for (const side of ['up', 'down']) {
-    const mid = side === 'up' ? m.upMid : m.downMid;
-    for (const lv of gs[side]) {
-      if (lv.cancelled) continue;
-
-      // Check if grid BUY fills (mid <= grid price)
-      if (!lv.filled && mid <= lv.price && mid > 0) {
-        const cost = SHARES * lv.price;
-        if (cashBalance < cost) {
-          log(`DEMO insufficient cash $${f2(cashBalance)} for ${side}@${f4(lv.price)}`);
-          continue;
-        }
-        cashBalance = f2(cashBalance - cost);
-        lv.filled = true;
-        lv.entryCost = cost;
-        lv.sellTarget = calcSellTarget(lv.price);
-        trades.unshift({
-          ts: new Date().toTimeString().slice(0, 8),
-          pair: m.pair, side: side.toUpperCase(),
-          action: 'BUY', price: f4(lv.price), shares: SHARES,
-        });
-        if (trades.length > 400) trades.length = 400;
-        log(`DEMO FILLED ${side} ${SHARES}sh@${f4(lv.price)} sell@${f4(lv.sellTarget)}`);
-      }
-
-      // Check if SELL fills (mid >= sell target)
-      if (lv.filled && !lv.sold && mid >= lv.sellTarget) {
-        const proceeds = SHARES * lv.sellTarget;
-        cashBalance = f2(cashBalance + proceeds);
-        lv.sold = true;
-        const pnl = f2((lv.sellTarget - lv.price) * SHARES);
-        trades.unshift({
-          ts: new Date().toTimeString().slice(0, 8),
-          pair: m.pair, side: side.toUpperCase(),
-          action: 'SELL', price: f4(lv.sellTarget), shares: SHARES, pnl,
-        });
-        if (trades.length > 400) trades.length = 400;
-        log(`DEMO TP ${side}@${f4(lv.sellTarget)} pnl:$${pnl}`);
-      }
-    }
-  }
-}
-
-// ── Real fill checker via getOpenOrders ──
-async function checkRealFills(m) {
-  const gs = gridState[m.slug];
-  if (!gs) return;
-
-  let openIds = new Set();
+// ── Check Polymarket resolution ──
+async function checkResolution(m) {
   try {
-    const openOrders = await trader.getOpenOrders();
-    openIds = new Set((openOrders || []).map(o => o.id));
-  } catch (_) { return; }
+    const d = await getJSON(`${GAMMA}/events?slug=${m.slug}`);
+    if (!Array.isArray(d) || !d[0]?.markets?.[0]) return null;
+    const mk = d[0].markets[0];
+    if (!mk.closed) return null;
 
-  for (const side of ['up', 'down']) {
-    const tokenId = side === 'up' ? m.upTokenId : m.downTokenId;
-    for (const lv of gs[side]) {
-      if (lv.cancelled) continue;
-
-      // Grid BUY filled
-      if (lv.buyOrderId && !lv.filled && !openIds.has(lv.buyOrderId)) {
-        lv.filled = true;
-        lv.entryCost = SHARES * lv.price;
-        lv.sellTarget = calcSellTarget(lv.price);
-        try { const b = await trader.getBalance(); if (b > 0) cashBalance = b; } catch(_) {}
-        trades.unshift({
-          ts: new Date().toTimeString().slice(0, 8),
-          pair: m.pair, side: side.toUpperCase(),
-          action: 'BUY', price: f4(lv.price), shares: SHARES,
-        });
-        if (trades.length > 400) trades.length = 400;
-        log(`FILLED BUY ${side} ${SHARES}sh@${f4(lv.price)}`);
-
-        // Place SELL at target
-        try {
-          const ord = await trader.placeGtcOrder(tokenId, 'SELL', lv.sellTarget, SHARES);
-          if (ord?.id) lv.sellOrderId = ord.id;
-          log(`PLACED SELL ${side} ${SHARES}sh@${f4(lv.sellTarget)}`);
-        } catch (e) {
-          log(`SELL err ${side}@${lv.sellTarget}: ${e.message.slice(0,60)}`);
-        }
-      }
-
-      // SELL filled
-      if (lv.sellOrderId && lv.filled && !lv.sold && !openIds.has(lv.sellOrderId)) {
-        lv.sold = true;
-        try { const b = await trader.getBalance(); if (b > 0) cashBalance = b; } catch(_) {}
-        const pnl = f2((lv.sellTarget - lv.price) * SHARES);
-        trades.unshift({
-          ts: new Date().toTimeString().slice(0, 8),
-          pair: m.pair, side: side.toUpperCase(),
-          action: 'SELL', price: f4(lv.sellTarget), shares: SHARES, pnl,
-        });
-        if (trades.length > 400) trades.length = 400;
-        log(`TP FILLED ${side}@${f4(lv.sellTarget)} pnl:$${pnl}`);
-      }
+    // Match outcome to token ID
+    const outcome = mk.outcome || mk.winning_outcome || '';
+    const outcomes = mk.outcomes || [];
+    // Try matching by outcome name
+    const outcomeIdx = outcomes.indexOf(outcome);
+    if (outcomeIdx >= 0) {
+      let ids;
+      try { ids = JSON.parse(mk.clobTokenIds); } catch (_) { return null; }
+      if (ids[outcomeIdx] === m.upTokenId) return 'up';
+      if (ids[outcomeIdx] === m.downTokenId) return 'down';
     }
-  }
+    // Fallback: check winner field
+    if (mk.winner === m.upTokenId || mk.winner === 'up' || mk.winner === 'Up') return 'up';
+    if (mk.winner === m.downTokenId || mk.winner === 'down' || mk.winner === 'Down') return 'down';
+  } catch (_) {}
+  return null;
 }
 
-// ── Force close at 4.70 min ──
-async function forceCloseWindow(m) {
-  const gs = gridState[m.slug];
-  if (!gs) return;
-  log(`${m.pair} FORCE CLOSE at 4.70min`);
+// ── Place a buy order (demo or real) ──
+async function placeBuy(m, side, shares) {
+  const tokenId = side === 'up' ? m.upTokenId : m.downTokenId;
+  const mid = side === 'up' ? m.upMid : m.downMid;
+  const buyPrice = f4(Math.max(mid - BUY_SLIP, 0.01));
+  const cost = f2(shares * buyPrice);
 
-  for (const side of ['up', 'down']) {
-    const tokenId = side === 'up' ? m.upTokenId : m.downTokenId;
-    for (const lv of gs[side]) {
-      if (lv.cancelled) continue;
-
-      // Cancel pending BUY
-      if (lv.buyOrderId && !lv.filled) {
-        if (!dryRun) { try { await trader.cancelOrder(lv.buyOrderId); } catch(_) {} }
-        lv.buyOrderId = null;
-        lv.cancelled = true;
-        log(`CANCELLED BUY ${side}@${f4(lv.price)}`);
-      }
-      // Cancel pending SELL and market-sell
-      if (lv.sellOrderId && lv.filled && !lv.sold) {
-        if (!dryRun) { try { await trader.cancelOrder(lv.sellOrderId); } catch(_) {} }
-        lv.sellOrderId = null;
-        // Force sell at market
-        if (dryRun) {
-          const mid = side === 'up' ? m.upMid : m.downMid;
-          const proceeds = SHARES * mid;
-          cashBalance = f2(cashBalance + proceeds);
-          lv.sold = true;
-          const pnl = f2((mid - lv.price) * SHARES);
-          trades.unshift({
-            ts: new Date().toTimeString().slice(0, 8),
-            pair: m.pair, side: side.toUpperCase(),
-            action: 'SELL', price: f4(mid), shares: SHARES, pnl,
-          });
-          if (trades.length > 400) trades.length = 400;
-          log(`DEMO FORCE SELL ${side}@${f4(mid)} pnl:$${pnl}`);
-        } else {
-          try {
-            const { Side, OrderType } = require('@polymarket/clob-client-v2');
-            await trader._clob.createAndPostMarketOrder(
-              { tokenID: tokenId, amount: SHARES, side: Side.SELL, orderType: OrderType.FOK },
-              {}, OrderType.FOK
-            );
-            try { const b = await trader.getBalance(); if (b > 0) cashBalance = b; } catch(_) {}
-            lv.sold = true;
-            log(`FORCE SELL ${side} ${SHARES}sh`);
-          } catch (e) {
-            log(`FORCE SELL err ${side}: ${e.message.slice(0,60)}`);
-          }
-        }
-      }
-      // Fill-only but no sell placed yet (shouldn't happen)
-      if (lv.filled && !lv.sold && !lv.sellOrderId) {
-        if (dryRun) {
-          const mid = side === 'up' ? m.upMid : m.downMid;
-          const proceeds = SHARES * mid;
-          cashBalance = f2(cashBalance + proceeds);
-          lv.sold = true;
-        }
-      }
-    }
+  if (cashBalance < cost) {
+    log(`INSUFFICIENT cash $${f2(cashBalance)} for ${side} ${shares}sh`);
+    return null;
   }
-  gs.forceClosed = true;
-  log(`${m.pair} force close done`);
+
+  if (dryRun) {
+    cashBalance = f2(cashBalance - cost);
+    return { price: buyPrice, cost, orderId: 'demo_' + side + '_' + Date.now() };
+  }
+
+  try {
+    const ord = await trader.placeGtcOrder(tokenId, 'BUY', buyPrice, shares);
+    const orderId = ord?.id || null;
+    if (orderId) {
+      cashBalance = f2(cashBalance - cost);
+      log(`BUY ${side} ${shares}sh@${f4(buyPrice)} id:${orderId.slice(0,10)}`);
+      return { price: buyPrice, cost, orderId };
+    }
+  } catch (e) {
+    log(`BUY err ${side}: ${e.message.slice(0,60)}`);
+  }
+  return null;
 }
 
-// ── Core trade loop (grid strategy) ──
+// ── Place sell at 0.99 ──
+async function placeSell(m, side, shares) {
+  if (shares <= 0) return null;
+  const tokenId = side === 'up' ? m.upTokenId : m.downTokenId;
+
+  if (dryRun) {
+    log(`SELL ${side} ${shares}sh@${SELL_PRICE}`);
+    return 'demo_' + side + '_sell';
+  }
+
+  try {
+    const ord = await trader.placeGtcOrder(tokenId, 'SELL', SELL_PRICE, shares);
+    if (ord?.id) {
+      log(`SELL ${side} ${shares}sh@${SELL_PRICE} id:${ord.id.slice(0,10)}`);
+      return ord.id;
+    }
+  } catch (e) {
+    log(`SELL err ${side}: ${e.message.slice(0,60)}`);
+  }
+  return null;
+}
+
+// ── Cancel order ──
+async function cancelOrder(orderId) {
+  if (dryRun || !orderId) return;
+  try { await trader.cancelOrder(orderId); } catch (_) {}
+}
+
+// ── Core Trade Loop (Accumulation Strategy) ──
 async function tradeLoop(m) {
   if (m.loopRunning) return;
   m.loopRunning = true;
-  const gs = gridState[m.slug];
+  const as = accState[m.slug];
   log(`Trade loop ${m.pair}`);
 
   // Wait for window to open
@@ -433,89 +319,206 @@ async function tradeLoop(m) {
     await sleep(w);
   }
 
-  // Place all grid BUY orders immediately
-  gs.started = true;
-  await placeGridOrders(m);
+  // Start accumulation
+  as.phase = 'accumulating';
+  as.lastUpBuy = 0;
+  as.lastDownBuy = 0;
+  log(`${m.pair} accumulation started`);
 
-  // Main loop: monitor fills, place sells, force close at 282s
-  let done = false;
-  while (!done) {
-    const elapsed = (Date.now() - m.windowStartMs) / 1000;
-    if (elapsed >= WINDOW_SECS) { done = true; break; }
+  // Main loop
+  let accumulationEnded = false;
+  while (true) {
+    const now = Date.now();
+    const elapsed = now - m.windowStartMs;
+    if (elapsed >= WINDOW_SECS * 1000 + 5000) break; // window definitely over
 
     await ensureFreshPrice(m);
 
-    if (dryRun) await checkDemoFills(m);
-    else        await checkRealFills(m);
+    // Phase 1: Accumulation (0 to 270s)
+    if (!accumulationEnded && elapsed < SELL_AT_SECS * 1000) {
+      // UP buy every 10s
+      if (elapsed - as.lastUpBuy >= UP_INTERVAL) {
+        as.lastUpBuy = elapsed;
+        const shares = m.upMid < 0.50 ? 10 : 20;
+        const result = await placeBuy(m, 'up', shares);
+        if (result) {
+          as.up.shares += shares;
+          as.up.totalCost = f2(as.up.totalCost + result.cost);
+          as.up.buyCount++;
+          log(`UP ACCUM ${shares}sh@${f4(result.price)} tot:${as.up.shares}sh cost:$${f2(as.up.totalCost)}`);
+        }
+      }
 
-    // Force close at 4.70 minutes
-    if (elapsed >= CLOSE_AT_SECS && !gs.forceClosed) {
-      await forceCloseWindow(m);
-      done = true;
-      break;
+      // DOWN buy every 15s
+      if (elapsed - as.lastDownBuy >= DOWN_INTERVAL) {
+        as.lastDownBuy = elapsed;
+        const shares = m.downMid < 0.50 ? 15 : 30;
+        const result = await placeBuy(m, 'down', shares);
+        if (result) {
+          as.down.shares += shares;
+          as.down.totalCost = f2(as.down.totalCost + result.cost);
+          as.down.buyCount++;
+          log(`DOWN ACCUM ${shares}sh@${f4(result.price)} tot:${as.down.shares}sh cost:$${f2(as.down.totalCost)}`);
+        }
+      }
     }
+
+    // Phase 2: Place sells at 0.99 (at 270s)
+    if (elapsed >= SELL_AT_SECS * 1000 && !accumulationEnded && m.upMid > 0 && m.downMid > 0) {
+      accumulationEnded = true;
+      as.phase = 'selling';
+      log(`${m.pair} ACCUM ENDED at ${Math.floor(elapsed/1000)}s — placing sells@${SELL_PRICE}`);
+
+      if (as.up.shares > 0) {
+        const oid = await placeSell(m, 'up', as.up.shares);
+        if (oid) as.sellUpOrderId = oid;
+      }
+      if (as.down.shares > 0) {
+        const oid = await placeSell(m, 'down', as.down.shares);
+        if (oid) as.sellDownOrderId = oid;
+      }
+
+      const total = as.up.totalCost + as.down.totalCost;
+      log(`${m.pair} invested $${f2(total)} | UP ${as.up.shares}sh $${f2(as.up.totalCost)} | DOWN ${as.down.shares}sh $${f2(as.down.totalCost)}`);
+    }
+
+    // Phase 3: Check if 0.99 sells filled (demo: price >= 0.99)
+    if (as.phase === 'selling' && !as.resolved) {
+      if (dryRun) {
+        if (as.up.shares > 0 && m.upMid >= SELL_PRICE && !as.upSellFilled) {
+          const proceeds = f2(as.up.shares * SELL_PRICE);
+          cashBalance = f2(cashBalance + proceeds);
+          as.upSellFilled = true;
+          log(`UP SELL FILLED @0.99 proceeds:$${proceeds}`);
+        }
+        if (as.down.shares > 0 && m.downMid >= SELL_PRICE && !as.downSellFilled) {
+          const proceeds = f2(as.down.shares * SELL_PRICE);
+          cashBalance = f2(cashBalance + proceeds);
+          as.downSellFilled = true;
+          log(`DOWN SELL FILLED @0.99 proceeds:$${proceeds}`);
+        }
+      } else {
+        // Real: check via getOpenOrders
+        try {
+          const openOrders = await trader.getOpenOrders();
+          const openIds = new Set((openOrders || []).map(o => o.id));
+          if (as.sellUpOrderId && !as.upSellFilled && !openIds.has(as.sellUpOrderId)) {
+            as.upSellFilled = true;
+            try { const b = await trader.getBalance(); if (b > 0) cashBalance = b; } catch(_) {}
+            log(`UP SELL FILLED @0.99`);
+          }
+          if (as.sellDownOrderId && !as.downSellFilled && !openIds.has(as.sellDownOrderId)) {
+            as.downSellFilled = true;
+            try { const b = await trader.getBalance(); if (b > 0) cashBalance = b; } catch(_) {}
+            log(`DOWN SELL FILLED @0.99`);
+          }
+        } catch (_) {}
+      }
+    }
+
+    // Phase 4: Window ended – check resolution
+    if (elapsed >= WINDOW_SECS * 1000 && !as.resolved && !as.resolutionChecked) {
+      as.resolutionChecked = true;
+      as.phase = 'resolving';
+      log(`${m.pair} window ended – checking resolution...`);
+
+      // Wait a bit for resolution data
+      await sleep(5000);
+
+      const winner = await checkResolution(m);
+      if (winner) {
+        as.resolved = true;
+        as.phase = 'resolved';
+        as.winner = winner;
+        log(`${m.pair} resolved: ${winner.toUpperCase()} wins`);
+
+        if (winner === 'up' && as.up.shares > 0 && !as.upSellFilled) {
+          const value = f2(as.up.shares * 1.0);
+          cashBalance = f2(cashBalance + value);
+          log(`UP credited $${value} (${as.up.shares}sh × $1.00)`);
+        }
+        if (winner === 'down' && as.down.shares > 0 && !as.downSellFilled) {
+          const value = f2(as.down.shares * 1.0);
+          cashBalance = f2(cashBalance + value);
+          log(`DOWN credited $${value} (${as.down.shares}sh × $1.00)`);
+        }
+
+        const totalPnL = f2(cashBalance - startBalance);
+        log(`${m.pair} final capital: $${f2(cashBalance)} PnL: $${totalPnL}`);
+      } else {
+        log(`${m.pair} resolution not yet available – will retry`);
+        as.resolutionChecked = false;
+      }
+    }
+
+    // If resolved, stop looping
+    if (as.resolved) break;
 
     await sleep(TICK_MS);
   }
 
-  // If natural end reached without force close, clean up
-  if (!gs.forceClosed) await forceCloseWindow(m);
+  // Final cleanup
+  if (!as.resolved) {
+    log(`${m.pair} unresolved – cleaning up`);
+    if (as.sellUpOrderId) await cancelOrder(as.sellUpOrderId);
+    if (as.sellDownOrderId) await cancelOrder(as.sellDownOrderId);
+  }
 
-  gs.done = true;
+  m.done = true;
   m.loopRunning = false;
-  log(`${m.pair} window finished`);
+  log(`${m.pair} loop finished`);
 }
 
 // ── Main tick ──
+let lastEquityRecord = 0;
+const equityHistory = [];
+
 async function tick() {
   const now = Date.now();
   if (now - lastDiscoverAt >= DISCOVER_EVERY_MS) {
     lastDiscoverAt = now;
     await discover();
   }
-  // Record equity every 5 seconds
+  // Record equity every 5s
   if (now - lastEquityRecord >= 5000) {
     lastEquityRecord = now;
-    equityHistory.push({ t: now - startTime, v: calcEquity().equity });
+    equityHistory.push({ t: now - startTime, v: calcEquity() });
     if (equityHistory.length > 1000) equityHistory.splice(0, equityHistory.length - 1000);
   }
   emitFn('snapshot', snapshot());
 }
 
 function snapshot() {
-  const calc = calcEquity();
-  const equity = calc.equity;
-  const unrealized = f2(calc.openValue - calc.costBasis);
+  const equity = calcEquity();
   const pnl    = f2(equity - startBalance);
 
   const activeMarkets = Object.values(markets).map(m => {
-    const gs = gridState[m.slug] || { up: [], down: [], started: false, forceClosed: false, done: false };
+    const as = accState[m.slug] || { up: { shares: 0, totalCost: 0, buyCount: 0 }, down: { shares: 0, totalCost: 0, buyCount: 0 }, phase: 'idle', resolved: false, winner: null, upSellFilled: false, downSellFilled: false };
+    const elapsed = Math.max(0, (Date.now() - m.windowStartMs) / 1000);
     return {
       slug: m.slug, pair: m.pair,
       upMid: f4(m.upMid), dnMid: f4(m.downMid),
       secsLeft: Math.max(0, Math.floor((m.endTime - Date.now()) / 1000)),
-      started: gs.started, forceClosed: gs.forceClosed,
-      windowDone: gs.done,
-      upGrid: (gs.up || []).map(l => ({
-        p: l.price, f: l.filled, s: l.sold, c: l.cancelled, st: f4(l.sellTarget),
-      })),
-      dnGrid: (gs.down || []).map(l => ({
-        p: l.price, f: l.filled, s: l.sold, c: l.cancelled, st: f4(l.sellTarget),
-      })),
+      elapsed: Math.floor(elapsed),
+      phase: as.phase,
+      resolved: as.resolved, winner: as.winner,
+      upShares: as.up.shares, upCost: f2(as.up.totalCost), upBuys: as.up.buyCount, upSellFilled: as.upSellFilled,
+      dnShares: as.down.shares, dnCost: f2(as.down.totalCost), dnBuys: as.down.buyCount, dnSellFilled: as.downSellFilled,
     };
   });
 
   return {
     dryRun, balance: f2(equity), cashBalance: f2(cashBalance),
-    startBalance: f2(startBalance), pnl, unrealizedPnL: unrealized,
+    startBalance: f2(startBalance), pnl,
     uptime: Math.floor((Date.now() - startTime) / 1000),
-    activeMarkets, totalTrades: trades.length,
-    recentTrades: trades.slice(0, 100),
-    activityLog: logs.slice(0, 100),
+    activeMarkets, totalTrades: 0,
+    recentTrades: [],
+    activityLog: logs.slice(0, 80),
     equityHistory: equityHistory.slice(-500),
     strategy: {
-      shares: SHARES, gridLevels: GRID_LEVELS, closeAtSecs: CLOSE_AT_SECS,
       dryRun, demoBalance: DEMO_BALANCE,
+      upInterval: UP_INTERVAL/1000, downInterval: DOWN_INTERVAL/1000,
+      sellAt: SELL_AT_SECS, sellPrice: SELL_PRICE, slip: BUY_SLIP,
     },
   };
 }
@@ -524,6 +527,7 @@ async function setDryRun(v) {
   dryRun = !!v;
   if (dryRun) { cashBalance = DEMO_BALANCE; startBalance = DEMO_BALANCE; }
   log(`Dry-run: ${dryRun ? 'ON $' + DEMO_BALANCE : 'OFF'}`);
+  equityHistory.length = 0;
   if (!dryRun && trader) {
     try { const b = await trader.getBalance(); if (b > 0) { cashBalance = b; startBalance = b; } } catch (_) {}
   }
