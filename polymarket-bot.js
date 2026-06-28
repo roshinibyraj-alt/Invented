@@ -64,9 +64,16 @@ function calcEquity() {
   let openValue = 0;
   for (const [slug, as] of Object.entries(accState)) {
     const m = markets[slug];
-    if (!m || as.resolved) continue;
-    if (as.winner === 'up')   openValue += as.up.shares * 1.0;
-    if (as.winner === 'down') openValue += as.down.shares * 1.0;
+    if (!m) continue;
+    if (as.resolved) {
+      if (as.winner === 'up')   openValue += as.up.shares * 1.0;
+      if (as.winner === 'down') openValue += as.down.shares * 1.0;
+    } else {
+      if (as.up.shares > 0 && !as.upSellFilled)
+        openValue += as.up.shares * m.upMid;
+      if (as.down.shares > 0 && !as.downSellFilled)
+        openValue += as.down.shares * m.downMid;
+    }
   }
   return cashBalance + openValue;
 }
@@ -388,12 +395,14 @@ async function tradeLoop(m) {
         if (as.up.shares > 0 && m.upMid >= SELL_PRICE && !as.upSellFilled) {
           const proceeds = f2(as.up.shares * SELL_PRICE);
           cashBalance = f2(cashBalance + proceeds);
+          as.up.shares = 0;
           as.upSellFilled = true;
           log(`UP SELL FILLED @0.99 proceeds:$${proceeds}`);
         }
         if (as.down.shares > 0 && m.downMid >= SELL_PRICE && !as.downSellFilled) {
           const proceeds = f2(as.down.shares * SELL_PRICE);
           cashBalance = f2(cashBalance + proceeds);
+          as.down.shares = 0;
           as.downSellFilled = true;
           log(`DOWN SELL FILLED @0.99 proceeds:$${proceeds}`);
         }
@@ -435,12 +444,14 @@ async function tradeLoop(m) {
         if (winner === 'up' && as.up.shares > 0 && !as.upSellFilled) {
           const value = f2(as.up.shares * 1.0);
           cashBalance = f2(cashBalance + value);
-          log(`UP credited $${value} (${as.up.shares}sh × $1.00)`);
+          as.up.shares = 0;
+          log(`UP credited $${value}`);
         }
         if (winner === 'down' && as.down.shares > 0 && !as.downSellFilled) {
           const value = f2(as.down.shares * 1.0);
           cashBalance = f2(cashBalance + value);
-          log(`DOWN credited $${value} (${as.down.shares}sh × $1.00)`);
+          as.down.shares = 0;
+          log(`DOWN credited $${value}`);
         }
 
         const totalPnL = f2(cashBalance - startBalance);
