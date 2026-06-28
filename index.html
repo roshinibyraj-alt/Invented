@@ -151,6 +151,7 @@ function render(d){
         '<div class="accum-stat"><span class="label">Total Cost</span><span class="value">$'+f2(upCost)+'</span></div>'+
         '<div class="accum-stat"><span class="label">Avg Price</span><span class="value">'+upAvg+'</span></div>'+
         '<div class="accum-stat"><span class="label">Buys</span><span class="value">'+(m.upBuys||0)+'</span></div>'+
+        '<div class="accum-stat"><span class="label">Pending</span><span class="value '+(m.upPending>0?'y':'gr')+'">'+(m.upPending||0)+'</span></div>'+
         '<div class="accum-stat"><span class="label">Sell @0.99</span><span class="value '+(m.upSellFilled?'g':'gr')+'">'+(m.upSellFilled?'✅ FILLED':'⏳ Pending')+'</span></div>'+
         '</div>';
 
@@ -162,6 +163,7 @@ function render(d){
         '<div class="accum-stat"><span class="label">Total Cost</span><span class="value">$'+f2(dnCost)+'</span></div>'+
         '<div class="accum-stat"><span class="label">Avg Price</span><span class="value">'+dnAvg+'</span></div>'+
         '<div class="accum-stat"><span class="label">Buys</span><span class="value">'+(m.dnBuys||0)+'</span></div>'+
+        '<div class="accum-stat"><span class="label">Pending</span><span class="value '+(m.dnPending>0?'y':'gr')+'">'+(m.dnPending||0)+'</span></div>'+
         '<div class="accum-stat"><span class="label">Sell @0.99</span><span class="value '+(m.dnSellFilled?'g':'gr')+'">'+(m.dnSellFilled?'✅ FILLED':'⏳ Pending')+'</span></div>'+
         '</div>';
 

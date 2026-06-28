@@ -187,8 +187,8 @@ async function discoverMarket(pair, customWsTs) {
 
   // Init accumulation state
   accState[slug] = {
-    up:   { shares: 0, totalCost: 0, buyCount: 0 },
-    down: { shares: 0, totalCost: 0, buyCount: 0 },
+    up:   { shares: 0, totalCost: 0, buyCount: 0, pending: [] },
+    down: { shares: 0, totalCost: 0, buyCount: 0, pending: [] },
     phase: 'idle',     // idle → accumulating → selling → force_sell → done
     lastUpBuy: 0,
     lastDownBuy: 0,
@@ -280,6 +280,33 @@ async function forceSell(m, side, shares) {
   }
 }
 
+// ── Check pending demo orders (fill when price drops to limit) ──
+async function checkPendingFills(m, as) {
+  for (const side of ['up', 'down']) {
+    const mid = side === 'up' ? m.upMid : m.downMid;
+    // Sort: higher limit prices first (they fill first when market drops)
+    const fillable = as[side].pending
+      .map((o, i) => ({ o, i }))
+      .filter(x => mid <= x.o.price)
+      .sort((a, b) => b.o.price - a.o.price);
+    // Splice from highest index to lowest to avoid index shifting
+    const toSplice = [];
+    for (const { o, i } of fillable) {
+      if (cashBalance >= o.cost) {
+        cashBalance = f2(cashBalance - o.cost);
+        as[side].shares += o.shares;
+        as[side].totalCost = f2(as[side].totalCost + o.cost);
+        as[side].buyCount++;
+        log(`FILLED ${side} ${o.shares}sh@${f4(o.price)} tot:${as[side].shares}sh cost:$${f2(as[side].totalCost)}`);
+        toSplice.push(i);
+      }
+    }
+    // Remove from highest index to lowest
+    toSplice.sort((a, b) => b - a);
+    for (const idx of toSplice) as[side].pending.splice(idx, 1);
+  }
+}
+
 // ── Place sell at 0.99 ──
 async function placeSell(m, side, shares) {
   if (shares <= 0) return null;
@@ -344,28 +371,47 @@ async function tradeLoop(m) {
       if (elapsed - as.lastUpBuy >= UP_INTERVAL) {
         as.lastUpBuy = elapsed;
         const shares = elapsed < 150000 ? (m.upMid < 0.50 ? 12 : 6) : (m.upMid < 0.50 ? 6 : 12);
-        const result = await placeBuy(m, 'up', shares);
-        if (result) {
-          as.up.shares += shares;
-          as.up.totalCost = f2(as.up.totalCost + result.cost);
-          as.up.buyCount++;
-          log(`UP ACCUM ${shares}sh@${f4(result.price)} tot:${as.up.shares}sh cost:$${f2(as.up.totalCost)}`);
+        const mid = m.upMid;
+        const buyPrice = f4(Math.max(mid - BUY_SLIP, 0.01));
+        const cost = f2(shares * buyPrice);
+        if (dryRun) {
+          as.up.pending.push({ price: buyPrice, shares, cost, placedAt: elapsed });
+          log(`UP ORDER ${shares}sh@${f4(buyPrice)} (pending)`);
+        } else {
+          const result = await placeBuy(m, 'up', shares);
+          if (result) {
+            as.up.shares += shares;
+            as.up.totalCost = f2(as.up.totalCost + result.cost);
+            as.up.buyCount++;
+            log(`UP ACCUM ${shares}sh@${f4(result.price)} tot:${as.up.shares}sh cost:$${f2(as.up.totalCost)}`);
+          }
         }
       }
 
-      // DOWN buy every 15s
+      // DOWN buy every 10s
       if (elapsed - as.lastDownBuy >= DOWN_INTERVAL) {
         as.lastDownBuy = elapsed;
         const shares = elapsed < 150000 ? (m.downMid < 0.50 ? 12 : 6) : (m.downMid < 0.50 ? 6 : 12);
-        const result = await placeBuy(m, 'down', shares);
-        if (result) {
-          as.down.shares += shares;
-          as.down.totalCost = f2(as.down.totalCost + result.cost);
-          as.down.buyCount++;
-          log(`DOWN ACCUM ${shares}sh@${f4(result.price)} tot:${as.down.shares}sh cost:$${f2(as.down.totalCost)}`);
+        const mid = m.downMid;
+        const buyPrice = f4(Math.max(mid - BUY_SLIP, 0.01));
+        const cost = f2(shares * buyPrice);
+        if (dryRun) {
+          as.down.pending.push({ price: buyPrice, shares, cost, placedAt: elapsed });
+          log(`DOWN ORDER ${shares}sh@${f4(buyPrice)} (pending)`);
+        } else {
+          const result = await placeBuy(m, 'down', shares);
+          if (result) {
+            as.down.shares += shares;
+            as.down.totalCost = f2(as.down.totalCost + result.cost);
+            as.down.buyCount++;
+            log(`DOWN ACCUM ${shares}sh@${f4(result.price)} tot:${as.down.shares}sh cost:$${f2(as.down.totalCost)}`);
+          }
         }
       }
     }
+
+    // Check pending demo order fills every tick
+    if (dryRun) await checkPendingFills(m, as);
 
     // Phase 2: Place sells at 0.99 (at 270s)
     if (elapsed >= SELL_AT_SECS * 1000 && !accumulationEnded && m.upMid > 0 && m.downMid > 0) {
@@ -382,6 +428,15 @@ async function tradeLoop(m) {
         if (oid) as.sellDownOrderId = oid;
       }
 
+      // Clear any unfilled pending orders
+      if (dryRun) {
+        const upPending = as.up.pending.length;
+        const dnPending = as.down.pending.length;
+        if (upPending) log(`UP ${upPending} orders unfilled – cleared`);
+        if (dnPending) log(`DOWN ${dnPending} orders unfilled – cleared`);
+        as.up.pending = [];
+        as.down.pending = [];
+      }
       const total = as.up.totalCost + as.down.totalCost;
       log(`${m.pair} invested $${f2(total)} | UP ${as.up.shares}sh $${f2(as.up.totalCost)} | DOWN ${as.down.shares}sh $${f2(as.down.totalCost)}`);
     }
@@ -482,7 +537,7 @@ function snapshot() {
   const pnl    = f2(equity - startBalance);
 
   const activeMarkets = Object.values(markets).map(m => {
-    const as = accState[m.slug] || { up: { shares: 0, totalCost: 0, buyCount: 0 }, down: { shares: 0, totalCost: 0, buyCount: 0 }, phase: 'idle', upSellFilled: false, downSellFilled: false };
+    const as = accState[m.slug] || { up: { shares: 0, totalCost: 0, buyCount: 0, pending: [] }, down: { shares: 0, totalCost: 0, buyCount: 0, pending: [] }, phase: 'idle', upSellFilled: false, downSellFilled: false };
     const elapsed = Math.max(0, (Date.now() - m.windowStartMs) / 1000);
     return {
       slug: m.slug, pair: m.pair,
@@ -490,8 +545,8 @@ function snapshot() {
       secsLeft: Math.max(0, Math.floor((m.endTime - Date.now()) / 1000)),
       elapsed: Math.floor(elapsed),
       phase: as.phase,
-      upShares: as.up.shares, upCost: f2(as.up.totalCost), upBuys: as.up.buyCount, upSellFilled: as.upSellFilled,
-      dnShares: as.down.shares, dnCost: f2(as.down.totalCost), dnBuys: as.down.buyCount, dnSellFilled: as.downSellFilled,
+      upShares: as.up.shares, upCost: f2(as.up.totalCost), upBuys: as.up.buyCount, upSellFilled: as.upSellFilled, upPending: (as.up.pending||[]).length,
+      dnShares: as.down.shares, dnCost: f2(as.down.totalCost), dnBuys: as.down.buyCount, dnSellFilled: as.downSellFilled, dnPending: (as.down.pending||[]).length,
     };
   });
 
