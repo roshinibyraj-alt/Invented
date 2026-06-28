@@ -483,6 +483,16 @@ function snapshot() {
       upTpFilled: ss.upTpFilled, dnTpFilled: ss.dnTpFilled,
       upSlHit: ss.upSlHit, dnSlHit: ss.dnSlHit,
       firstExited: ss.firstExited, secondExited: ss.secondExited,
+      upShares: ss.upFilled ? SHARES : 0,
+      dnShares: ss.dnFilled ? SHARES : 0,
+      upEntry: ss.upFilled ? BUY_PRICE : null,
+      dnEntry: ss.dnFilled ? BUY_PRICE : null,
+      upCost: ss.upFilled ? f2(SHARES * BUY_PRICE) : 0,
+      dnCost: ss.dnFilled ? f2(SHARES * BUY_PRICE) : 0,
+      upTp: ss.upFilled ? (ss.firstSide === "up" && !ss.firstExited ? TP_FIRST : TP_SECOND) : null,
+      dnTp: ss.dnFilled ? (ss.firstSide === "down" && !ss.firstExited ? TP_FIRST : TP_SECOND) : null,
+      upSl: ss.upFilled ? SL_PRICE : null,
+      dnSl: ss.dnFilled ? SL_PRICE : null,
     };
   });
 
