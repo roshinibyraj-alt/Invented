@@ -220,9 +220,9 @@ async function checkBalance() {
   catch (_) { return cashBalance; }
 }
 
-// ── Unified trade functions — no inline confirmation, use pendingTrade ──
+// ── Trade functions ──
 
-async function buySide(m, side) {
+async function buySide(m, side, ss) {
   if (!m || inTrade || pendingTrade) return null;
   inTrade = true;
   const tokenId = side === 'up' ? m.upTokenId : m.downTokenId;
@@ -235,7 +235,7 @@ async function buySide(m, side) {
 
     await trader.placeFokBuy(tokenId, cost);
 
-    pendingTrade = { type: 'buy', side: side, m: m, preBal: preBal, cost: cost, entryPriceAt: askPrice };
+    pendingTrade = { type: 'buy', side: side, m: m, ss: ss, preBal: preBal, cost: cost, entryPriceAt: askPrice };
     pendingCheckAt = Date.now();
     return { pending: true };
   } catch (e) {
@@ -246,26 +246,27 @@ async function buySide(m, side) {
 }
 
 async function sellSide(m, flipTo, ss) {
-  if (!m || inTrade || !position || pendingTrade) return null;
-  if (!ss) ss = {};
+  if (!m || inTrade || pendingTrade) return null;
+  // Determine which side to sell: use position global, fallback to ss.side for force sell
+  var sellSideName = position || (ss && ss.side) || null;
+  if (!sellSideName) { log('SELL skipped — no position'); return null; }
   inTrade = true;
-  const side = position;
-  const tokenId = side === 'up' ? m.upTokenId : m.downTokenId;
+  const tokenId = sellSideName === 'up' ? m.upTokenId : m.downTokenId;
   try {
-    var mid = side === 'up' ? m.upMid : m.downMid;
-    var pnl = side === 'up'
+    var mid = sellSideName === 'up' ? m.upMid : m.downMid;
+    var pnl = sellSideName === 'up'
       ? f2((mid - entryPrice) * BASE_SHARES)
       : f2((entryPrice - mid) * BASE_SHARES);
     var preBal = await checkBalance();
-    log('SELL ' + side.toUpperCase() + ' @ $' + f4(mid) + ' PnL: ' + (pnl >= 0 ? '+' : '') + '$' + pnl + ' bal=$' + f2(preBal));
+    log('SELL ' + sellSideName.toUpperCase() + ' @ $' + f4(mid) + ' PnL: ' + (pnl >= 0 ? '+' : '') + '$' + pnl + ' bal=$' + f2(preBal));
 
     await trader.placeFokSell(tokenId, BASE_SHARES);
 
-    pendingTrade = { type: 'sell', side: side, m: m, ss: ss, flipTo: flipTo, preBal: preBal, pnl: pnl, priceAt: mid };
+    pendingTrade = { type: 'sell', side: sellSideName, m: m, ss: ss, flipTo: flipTo, preBal: preBal, pnl: pnl, priceAt: mid };
     pendingCheckAt = Date.now();
     return { pending: true };
   } catch (e) {
-    log('Sell ' + side.toUpperCase() + ' error: ' + (e.message || '').slice(0, 80));
+    log('Sell ' + sellSideName.toUpperCase() + ' error: ' + (e.message || '').slice(0, 80));
     inTrade = false;
     return null;
   }
@@ -287,12 +288,26 @@ async function checkPendingTrade() {
       entryPrice = pt.entryPriceAt;
       sharesHeld = BASE_SHARES;
       logTrade('BUY', pt.side.toUpperCase(), pt.entryPriceAt);
+      if (pt.ss) {
+        pt.ss.side = pt.side;
+        pt.ss.entryPrice = pt.entryPriceAt;
+        pt.ss.sharesHeld = BASE_SHARES;
+        pt.ss.positionOpen = true;
+        pt.ss._pendingEntry = false;
+      }
       inTrade = false;
       pendingTrade = null;
     } else {
-      log(pt.side.toUpperCase() + ' BUY NOT filled (spent $' + spent + ') — retrying');
-      pendingTrade = null;
+      log(pt.side.toUpperCase() + ' BUY NOT filled (spent $' + spent + ')');
+      // Reset pending state so entry can retry
+      if (pt.ss) {
+        pt.ss._pendingEntry = false;
+        pt.ss.side = null;
+        pt.ss.sharesHeld = 0;
+        pt.ss.positionOpen = false;
+      }
       inTrade = false;
+      pendingTrade = null;
     }
     return;
   }
@@ -315,7 +330,7 @@ async function checkPendingTrade() {
         pt.ss.trough = 0;
         pt.ss.positionOpen = false;
         if (pt.ss._forceSold) pt.ss.sold = true;
-        if (pt.ss._forceSelling) pt.ss._forceSelling = false;
+        pt.ss._forceSelling = false;
       }
 
       inTrade = false;
@@ -324,10 +339,10 @@ async function checkPendingTrade() {
       // Flip to opposite side if requested
       if (pt.flipTo) {
         log('Flipping to ' + pt.flipTo.toUpperCase());
-        await buySide(pt.m, pt.flipTo);
+        await buySide(pt.m, pt.flipTo, pt.ss);
       }
     } else {
-      log(pt.side.toUpperCase() + ' NOT sold (gained $' + f2(gained) + ') — retrying');
+      log(pt.side.toUpperCase() + ' NOT sold (gained $' + f2(gained) + ')');
       pendingTrade = null;
       inTrade = false;
 
@@ -356,6 +371,7 @@ async function tradeLoop(m) {
     entryPrice: 0, sharesHeld: 0,
     peak: 0, trough: 0,
     positionOpen: false,
+    _pendingEntry: false,
     _forceSold: false, _forceSelling: false,
   };
   stratState[m.slug] = ss;
@@ -387,17 +403,14 @@ async function tradeLoop(m) {
 
     // Phase 1: < 280s — trailing stop + flip
     if (elapsed < STOP_ENTRY_AT) {
-      // No position — entry opportunity
-      if (!ss.positionOpen && !inTrade && !pendingTrade) {
+      // No position — entry opportunity (only UP first, flip to DOWN via trailing stop)
+      if (!ss.positionOpen && !ss._pendingEntry && !inTrade && !pendingTrade) {
         var drop = f4(ss.peak - up);
         if (drop >= TRAIL_DIST) {
           log('UP dropped $' + f4(drop) + ' from peak $' + f4(ss.peak) + ' — entering UP');
-          var r = await buySide(m, 'up');
-          if (r && r.pending) {
-            ss.side = 'up';
-            ss.sharesHeld = BASE_SHARES;
-            ss.positionOpen = true;
-          }
+          ss._pendingEntry = true;
+          var r = await buySide(m, 'up', ss);
+          if (!r) ss._pendingEntry = false; // buy rejected immediately
         }
       }
 
@@ -431,10 +444,12 @@ async function tradeLoop(m) {
       }
     }
 
-    // Phase 3: 295s+ — force sell (async with retry via pendingTrade)
+    // Phase 3: 295s+ — force sell with retry
     if (elapsed >= FORCE_SELL_AT && !ss._forceSold && ss.positionOpen) {
       ss._forceSold = true;
       ss._forceSelling = true;
+      // Ensure position global matches ss.side for sellSide to work
+      if (!position && ss.side) position = ss.side;
       log(m.pair + ' FORCE SELL at ' + elapsed.toFixed(1) + 's');
       if (!inTrade && !pendingTrade) {
         await sellSide(m, null, ss);
