@@ -12,17 +12,14 @@ const DISCOVER_EVERY_MS = 15000;
 const WINDOW_SECS       = 300;
 const TARGET_PAIRS      = ['BTC', 'ETH', 'SOL'];
 
-// Entry strategy
-const BUY_PRICE   = 0.35;
-const TP_FIRST    = 0.66;  // first filled side
-const TP_SECOND   = 0.99;  // second filled side
-const SL_PRICE    = 0.15;
-const SHARES      = 50;
-const FORCE_AT    = 298;   // force sell at 298s (last 2s)
+// Entry strategy – bucket system
+const BUCKETS = [0.40, 0.35, 0.30, 0.25, 0.20];
+const SHARES_PER_BUCKET = 50;
+const TP_PRICE = 0.99;
+const DEMO_BALANCE = 1000;
+const FORCE_AT = 298;
 
-let dryRun = process.env.DRY_RUN === 'true';
-const DEMO_BALANCE = parseFloat(process.env.DEMO_BALANCE || '250');
-
+let dryRun = process.env.DRY_RUN === "true";
 let emitFn     = () => {};
 let slog       = () => {};
 let trader     = null;
@@ -63,10 +60,10 @@ function calcEquity() {
   for (const [slug, ss] of Object.entries(stratState)) {
     const m = markets[slug];
     if (!m || ss.phase === 'done') continue;
-    if (ss.upFilled && !ss.upTpFilled && !ss.upSlHit)
-      openValue += SHARES * m.upMid;
-    if (ss.dnFilled && !ss.dnTpFilled && !ss.dnSlHit)
-      openValue += SHARES * m.downMid;
+    for (const bk of Object.values(ss.buckets)) {
+      if (bk.upFilled && !bk.upTpFilled) openValue += SHARES_PER_BUCKET * m.upMid;
+      if (bk.dnFilled && !bk.dnTpFilled) openValue += SHARES_PER_BUCKET * m.downMid;
+    }
   }
   return cashBalance + openValue;
 }
@@ -179,15 +176,17 @@ async function discoverMarket(pair, customWsTs) {
   await restRefreshPrice(markets[slug]);
   log(`${pair} UP:${f4(markets[slug].upMid)} DOWN:${f4(markets[slug].downMid)}`);
 
+  // Build bucket state
+  const buckets = {};
+  for (const p of BUCKETS) {
+    buckets[p] = { upOrderId: null, dnOrderId: null, upFilled: false, dnFilled: false, upTpFilled: false, dnTpFilled: false };
+  }
   stratState[slug] = {
-    phase: 'waiting', // waiting → entry → first_active → second_active → done
-    upFilled: false, dnFilled: false,
-    upTpFilled: false, dnTpFilled: false,
-    upSlHit: false, dnSlHit: false,
-    firstSide: null, // 'up' or 'down'
-    firstExited: false,
-    secondExited: false,
-    upOrderId: null, dnOrderId: null,
+    phase: 'waiting',
+    buckets,
+    filledCount: 0,
+    tpCount: 0,
+    forceClosed: false,
   };
 
   tradeLoop(markets[slug]).catch(e => log(`Loop crash ${pair}: ${e.message}`));
@@ -232,12 +231,12 @@ async function marketSell(m, side) {
   const tokenId = side === 'up' ? m.upTokenId : m.downTokenId;
   if (dryRun) {
     const mid = side === 'up' ? m.upMid : m.downMid;
-    return { price: mid, proceeds: f2(SHARES * mid) };
+    return { price: mid, proceeds: f2(SHARES_PER_BUCKET * mid) };
   }
   try {
     const { Side, OrderType } = require('@polymarket/clob-client-v2');
     await trader._clob.createAndPostMarketOrder(
-      { tokenID: tokenId, amount: SHARES, side: Side.SELL, orderType: OrderType.FOK },
+      { tokenID: tokenId, amount: SHARES_PER_BUCKET, side: Side.SELL, orderType: OrderType.FOK },
       {}, OrderType.FOK
     );
     return { price: 0, proceeds: 0 };
@@ -249,7 +248,7 @@ async function tradeLoop(m) {
   if (m.loopRunning) return;
   m.loopRunning = true;
   const ss = stratState[m.slug];
-  log(`Loop ${m.pair}`);
+  log(`Loop ${m.pair} buckets: ${BUCKETS.join(',')}`);
 
   // Wait for window to open
   if (m.windowStartMs > Date.now() + 2000) {
@@ -257,192 +256,142 @@ async function tradeLoop(m) {
     await sleep(w);
   }
 
-  const cost = f2(SHARES * BUY_PRICE);
   ss.phase = 'entry';
-
-  // Place buy at 0.35 on both sides
-  log(`${m.pair} placing BUY ${SHARES}sh@${BUY_PRICE} on both`);
-  ss.upOrderId = await placeBuyLimit(m, 'up');
-  ss.dnOrderId = await placeBuyLimit(m, 'down');
+  const costPerFill = f2(SHARES_PER_BUCKET * BUCKETS[0]); // approximate
+  log(`${m.pair} placing ${BUCKETS.length}×2 limit orders`);
 
   // Main monitor loop
-  let forceClosed = false;
   while (true) {
     const elapsed = (Date.now() - m.windowStartMs) / 1000;
     if (elapsed >= WINDOW_SECS + 1) break;
 
     await ensureFreshPrice(m);
 
-    // Check fills and TP/SL in demo mode
     if (dryRun) {
-      // Check if 0.35 buy fills
-      if (!ss.upFilled && m.upMid <= BUY_PRICE && m.upMid > 0) {
-        cashBalance = f2(cashBalance - cost);
-        ss.upFilled = true;
-        log(`${m.pair} UP FILLED @${BUY_PRICE}`);
-        if (!ss.firstSide) {
-          ss.firstSide = 'up';
-          ss.phase = 'first_active';
-          log(`${m.pair} FIRST SIDE = UP → TP ${TP_FIRST} / SL ${SL_PRICE}`);
-        }
-      }
-      if (!ss.dnFilled && m.downMid <= BUY_PRICE && m.downMid > 0) {
-        cashBalance = f2(cashBalance - cost);
-        ss.dnFilled = true;
-        log(`${m.pair} DN FILLED @${BUY_PRICE}`);
-        if (!ss.firstSide) {
-          ss.firstSide = 'down';
-          ss.phase = 'first_active';
-          log(`${m.pair} FIRST SIDE = DN → TP ${TP_FIRST} / SL ${SL_PRICE}`);
-        }
-      }
+      // Check each bucket
+      for (const [priceStr, bk] of Object.entries(ss.buckets)) {
+        const p = parseFloat(priceStr);
+        if (elapsed < 5) continue; // brief settling delay
 
-      // If both filled, move to second_active
-      if (ss.upFilled && ss.dnFilled && ss.firstSide && ss.phase === 'first_active') {
-        ss.phase = 'second_active';
-        const second = ss.firstSide === 'up' ? 'DOWN' : 'UP';
-        log(`${m.pair} BOTH FILLED – ${second} TP ${TP_SECOND} / SL ${SL_PRICE}`);
-      }
+        // Check UP fill
+        if (!bk.upFilled && !bk.upTpFilled && m.upMid > 0 && m.upMid <= p) {
+          cashBalance = f2(cashBalance - costPerFill);
+          bk.upFilled = true;
+          ss.filledCount++;
+          // Cancel opposite side at this level
+          if (!bk.dnFilled) {
+            bk.dnOrderId = null; // cancelled
+            log(`${m.pair} UP @${priceStr} FILLED — DN@${priceStr} cancelled`);
+          } else {
+            log(`${m.pair} UP @${priceStr} FILLED`);
+          }
+        }
+        // Check DN fill
+        if (!bk.dnFilled && !bk.dnTpFilled && m.downMid > 0 && m.downMid <= p) {
+          cashBalance = f2(cashBalance - costPerFill);
+          bk.dnFilled = true;
+          ss.filledCount++;
+          // Cancel opposite side at this level
+          if (!bk.upFilled) {
+            bk.upOrderId = null; // cancelled
+            log(`${m.pair} DN @${priceStr} FILLED — UP@${priceStr} cancelled`);
+          } else {
+            log(`${m.pair} DN @${priceStr} FILLED`);
+          }
+        }
 
-      // Check TP/SL for UP
-      if (ss.upFilled) {
-        const upTp = ss.firstSide === 'up' && !ss.firstExited ? TP_FIRST : TP_SECOND;
-        if (!ss.upTpFilled && !ss.upSlHit && m.upMid >= upTp) {
-          cashBalance = f2(cashBalance + SHARES * m.upMid);
-          ss.upTpFilled = true;
-          const pnl = f2((m.upMid - BUY_PRICE) * SHARES);
-          log(`${m.pair} UP TP @${f4(m.upMid)} +$${pnl}`);
-          trades.unshift({ ts: new Date().toTimeString().slice(0,8), pair: m.pair, side: 'UP', action: 'SELL', price: f4(m.upMid), shares: SHARES, pnl });
-          if (ss.firstSide === 'up') ss.firstExited = true;
-          else ss.secondExited = true;
+        // Check TP at 0.99
+        if (bk.upFilled && !bk.upTpFilled && m.upMid >= TP_PRICE) {
+          cashBalance = f2(cashBalance + SHARES_PER_BUCKET * m.upMid);
+          bk.upTpFilled = true;
+          ss.tpCount++;
+          const pnl = f2((m.upMid - p) * SHARES_PER_BUCKET);
+          log(`${m.pair} UP @${priceStr} TP @0.99 +${pnl}`);
+          trades.unshift({ ts: new Date().toTimeString().slice(0,8), pair: m.pair, side: 'UP', action: 'TP', price: f4(m.upMid), shares: SHARES_PER_BUCKET, pnl });
         }
-        if (!ss.upTpFilled && !ss.upSlHit && m.upMid <= SL_PRICE) {
-          cashBalance = f2(cashBalance + SHARES * m.upMid);
-          ss.upSlHit = true;
-          const pnl = f2((m.upMid - BUY_PRICE) * SHARES);
-          log(`${m.pair} UP SL @${f4(m.upMid)} ${pnl >= 0 ? '+' : ''}$${pnl}`);
-          trades.unshift({ ts: new Date().toTimeString().slice(0,8), pair: m.pair, side: 'UP', action: 'SELL', price: f4(m.upMid), shares: SHARES, pnl });
-          if (ss.firstSide === 'up') ss.firstExited = true;
-          else ss.secondExited = true;
+        if (bk.dnFilled && !bk.dnTpFilled && m.downMid >= TP_PRICE) {
+          cashBalance = f2(cashBalance + SHARES_PER_BUCKET * m.downMid);
+          bk.dnTpFilled = true;
+          ss.tpCount++;
+          const pnl = f2((m.downMid - p) * SHARES_PER_BUCKET);
+          log(`${m.pair} DN @${priceStr} TP @0.99 +${pnl}`);
+          trades.unshift({ ts: new Date().toTimeString().slice(0,8), pair: m.pair, side: 'DOWN', action: 'TP', price: f4(m.downMid), shares: SHARES_PER_BUCKET, pnl });
         }
-      }
-
-      // Check TP/SL for DOWN
-      if (ss.dnFilled) {
-        const dnTp = ss.firstSide === 'down' && !ss.firstExited ? TP_FIRST : TP_SECOND;
-        if (!ss.dnTpFilled && !ss.dnSlHit && m.downMid >= dnTp) {
-          cashBalance = f2(cashBalance + SHARES * m.downMid);
-          ss.dnTpFilled = true;
-          const pnl = f2((m.downMid - BUY_PRICE) * SHARES);
-          log(`${m.pair} DN TP @${f4(m.downMid)} +$${pnl}`);
-          trades.unshift({ ts: new Date().toTimeString().slice(0,8), pair: m.pair, side: 'DOWN', action: 'SELL', price: f4(m.downMid), shares: SHARES, pnl });
-          if (ss.firstSide === 'down') ss.firstExited = true;
-          else ss.secondExited = true;
-        }
-        if (!ss.dnTpFilled && !ss.dnSlHit && m.downMid <= SL_PRICE) {
-          cashBalance = f2(cashBalance + SHARES * m.downMid);
-          ss.dnSlHit = true;
-          const pnl = f2((m.downMid - BUY_PRICE) * SHARES);
-          log(`${m.pair} DN SL @${f4(m.downMid)} ${pnl >= 0 ? '+' : ''}$${pnl}`);
-          trades.unshift({ ts: new Date().toTimeString().slice(0,8), pair: m.pair, side: 'DOWN', action: 'SELL', price: f4(m.downMid), shares: SHARES, pnl });
-          if (ss.firstSide === 'down') ss.firstExited = true;
-          else ss.secondExited = true;
-        }
-      }
-
-      // Both sides exited? done
-      if ((ss.upSlHit || ss.upTpFilled) && (ss.dnSlHit || ss.dnTpFilled)) {
-        ss.phase = 'done';
-        break;
       }
     } else {
-      // Real mode: check via getOpenOrders
+      // Real mode – check order fills
       try {
         const openOrders = await trader.getOpenOrders();
         const openIds = new Set((openOrders || []).map(o => o.id));
-        // Check buys
-        if (ss.upOrderId && !ss.upFilled && !openIds.has(ss.upOrderId)) {
-          ss.upFilled = true;
-          try { const b = await trader.getBalance(); if (b > 0) cashBalance = b; } catch(_) {}
-          log(`${m.pair} UP FILLED @${BUY_PRICE}`);
-          if (!ss.firstSide) { ss.firstSide = 'up'; ss.phase = 'first_active'; }
-        }
-        if (ss.dnOrderId && !ss.dnFilled && !openIds.has(ss.dnOrderId)) {
-          ss.dnFilled = true;
-          try { const b = await trader.getBalance(); if (b > 0) cashBalance = b; } catch(_) {}
-          log(`${m.pair} DN FILLED @${BUY_PRICE}`);
-          if (!ss.firstSide) { ss.firstSide = 'down'; ss.phase = 'first_active'; }
-        }
-        // If both filled, place TP/SL orders
-        if (ss.upFilled && ss.dnFilled && ss.phase === 'first_active') {
-          ss.phase = 'second_active';
-          // Place sells: first side at TP_FIRST, second at TP_SECOND
-          // For SL at 0.15, we just monitor and market sell
-        }
-        // Place sell orders for filled positions
-        if (ss.upFilled && !ss.upTpFilled && !ss.upSlHit && !ss.upSellId) {
-          const tp = ss.firstSide === 'up' && !ss.firstExited ? TP_FIRST : TP_SECOND;
-          const oid = await placeSellLimit(m, 'up', tp);
-          if (oid) ss.upSellId = oid;
-        }
-        if (ss.dnFilled && !ss.dnTpFilled && !ss.dnSlHit && !ss.dnSellId) {
-          const tp = ss.firstSide === 'down' && !ss.firstExited ? TP_FIRST : TP_SECOND;
-          const oid = await placeSellLimit(m, 'down', tp);
-          if (oid) ss.dnSellId = oid;
-        }
-        // Check sells
-        if (ss.upSellId && ss.upFilled && !ss.upTpFilled && !openIds.has(ss.upSellId)) {
-          ss.upTpFilled = true;
-          if (ss.firstSide === 'up') ss.firstExited = true; else ss.secondExited = true;
-          try { const b = await trader.getBalance(); if (b > 0) cashBalance = b; } catch(_) {}
-          log(`${m.pair} UP TP EXIT`);
-        }
-        if (ss.dnSellId && ss.dnFilled && !ss.dnTpFilled && !openIds.has(ss.dnSellId)) {
-          ss.dnTpFilled = true;
-          if (ss.firstSide === 'down') ss.firstExited = true; else ss.secondExited = true;
-          try { const b = await trader.getBalance(); if (b > 0) cashBalance = b; } catch(_) {}
-          log(`${m.pair} DN TP EXIT`);
+        for (const [priceStr, bk] of Object.entries(ss.buckets)) {
+          if (bk.upOrderId && !bk.upFilled && !openIds.has(bk.upOrderId)) {
+            bk.upFilled = true; ss.filledCount++;
+            try { const b = await trader.getBalance(); if (b > 0) cashBalance = b; } catch(_) {}
+            log(`${m.pair} UP @${priceStr} FILLED`);
+          }
+          if (bk.dnOrderId && !bk.dnFilled && !openIds.has(bk.dnOrderId)) {
+            bk.dnFilled = true; ss.filledCount++;
+            try { const b = await trader.getBalance(); if (b > 0) cashBalance = b; } catch(_) {}
+            log(`${m.pair} DN @${priceStr} FILLED`);
+          }
+          // Place TP orders
+          if (bk.upFilled && !bk.upTpFilled && !bk.upSellId) {
+            bk.upSellId = await placeSellLimit(m, 'up', TP_PRICE);
+          }
+          if (bk.dnFilled && !bk.dnTpFilled && !bk.dnSellId) {
+            bk.dnSellId = await placeSellLimit(m, 'down', TP_PRICE);
+          }
+          // Check TP fills
+          if (bk.upSellId && bk.upFilled && !bk.upTpFilled && !openIds.has(bk.upSellId)) {
+            bk.upTpFilled = true; ss.tpCount++;
+            try { const b = await trader.getBalance(); if (b > 0) cashBalance = b; } catch(_) {}
+            log(`${m.pair} UP @${priceStr} TP EXIT`);
+          }
+          if (bk.dnSellId && bk.dnFilled && !bk.dnTpFilled && !openIds.has(bk.dnSellId)) {
+            bk.dnTpFilled = true; ss.tpCount++;
+            try { const b = await trader.getBalance(); if (b > 0) cashBalance = b; } catch(_) {}
+            log(`${m.pair} DN @${priceStr} TP EXIT`);
+          }
         }
       } catch (_) {}
     }
 
-    // Force sell at 295s if still holding
-    if (elapsed >= FORCE_AT && !forceClosed && (ss.upFilled || ss.dnFilled)) {
-      forceClosed = true;
+    // Force sell at 298s
+    if (elapsed >= FORCE_AT && !ss.forceClosed && ss.filledCount > ss.tpCount) {
+      ss.forceClosed = true;
       log(`${m.pair} FORCE SELL at ${elapsed.toFixed(1)}s`);
       if (dryRun) {
-        if (ss.upFilled && !ss.upTpFilled && !ss.upSlHit) {
-          const res = await marketSell(m, 'up');
-          if (res) { cashBalance = f2(cashBalance + res.proceeds); ss.upTpFilled = true; }
-        }
-        if (ss.dnFilled && !ss.dnTpFilled && !ss.dnSlHit) {
-          const res = await marketSell(m, 'down');
-          if (res) { cashBalance = f2(cashBalance + res.proceeds); ss.dnTpFilled = true; }
+        for (const [priceStr, bk] of Object.entries(ss.buckets)) {
+          if (bk.upFilled && !bk.upTpFilled) {
+            const res = await marketSell(m, 'up');
+            if (res) { cashBalance = f2(cashBalance + res.proceeds); bk.upTpFilled = true; ss.tpCount++; }
+          }
+          if (bk.dnFilled && !bk.dnTpFilled) {
+            const res = await marketSell(m, 'down');
+            if (res) { cashBalance = f2(cashBalance + res.proceeds); bk.dnTpFilled = true; ss.tpCount++; }
+          }
         }
       } else {
-        if (ss.upFilled && !ss.upTpFilled && !ss.upSlHit) {
-          await marketSell(m, 'up');
-          try { const b = await trader.getBalance(); if (b > 0) cashBalance = b; } catch(_) {}
-          ss.upTpFilled = true;
-        }
-        if (ss.dnFilled && !ss.dnTpFilled && !ss.dnSlHit) {
-          await marketSell(m, 'down');
-          try { const b = await trader.getBalance(); if (b > 0) cashBalance = b; } catch(_) {}
-          ss.dnTpFilled = true;
+        for (const [priceStr, bk] of Object.entries(ss.buckets)) {
+          if (bk.upFilled && !bk.upTpFilled) {
+            await marketSell(m, 'up');
+            try { const b = await trader.getBalance(); if (b > 0) cashBalance = b; } catch(_) {}
+            bk.upTpFilled = true; ss.tpCount++;
+          }
+          if (bk.dnFilled && !bk.dnTpFilled) {
+            await marketSell(m, 'down');
+            try { const b = await trader.getBalance(); if (b > 0) cashBalance = b; } catch(_) {}
+            bk.dnTpFilled = true; ss.tpCount++;
+          }
         }
       }
-    }
-
-    if ((ss.upSlHit || ss.upTpFilled) && (ss.dnSlHit || ss.dnTpFilled)) {
-      ss.phase = 'done';
-      break;
     }
 
     await sleep(TICK_MS);
   }
 
   const total = f2(cashBalance - startBalance);
-  log(`${m.pair} done – balance $${f2(cashBalance)} PnL $${total}`);
+  log(`${m.pair} done – balance ${f2(cashBalance)} PnL ${total}`);
   ss.phase = 'done';
   m.loopRunning = false;
 }
@@ -472,27 +421,37 @@ function snapshot() {
   const activeMarkets = Object.values(markets)
     .filter(m => m.windowStartMs <= Date.now() && m.endTime > Date.now())
     .map(m => {
-    const ss = stratState[m.slug] || { phase: 'waiting', upFilled: false, dnFilled: false, upTpFilled: false, dnTpFilled: false, upSlHit: false, dnSlHit: false, firstSide: null, firstExited: false, secondExited: false };
+    const ss = stratState[m.slug] || { phase: 'waiting', buckets: {} };
+    const bkList = Object.entries(ss.buckets || {}).map(([p, bk]) => ({
+      price: parseFloat(p),
+      upFilled: bk.upFilled,
+      dnFilled: bk.dnFilled,
+      upTpFilled: bk.upTpFilled,
+      dnTpFilled: bk.dnTpFilled,
+    }));
+
+    // Aggregate stats
+    let upShares = 0, dnShares = 0, upCost = 0, dnCost = 0;
+    const upEntries = [], dnEntries = [];
+    for (const bk of bkList) {
+      if (bk.upFilled) { upShares += SHARES_PER_BUCKET; upCost += SHARES_PER_BUCKET * bk.price; upEntries.push(bk.price); }
+      if (bk.dnFilled) { dnShares += SHARES_PER_BUCKET; dnCost += SHARES_PER_BUCKET * bk.price; dnEntries.push(bk.price); }
+    }
+
     return {
       slug: m.slug, pair: m.pair,
       upMid: f4(m.upMid), dnMid: f4(m.downMid),
       secsLeft: Math.max(0, Math.floor((m.endTime - Date.now()) / 1000)),
       phase: ss.phase,
-      firstSide: ss.firstSide,
-      upFilled: ss.upFilled, dnFilled: ss.dnFilled,
-      upTpFilled: ss.upTpFilled, dnTpFilled: ss.dnTpFilled,
-      upSlHit: ss.upSlHit, dnSlHit: ss.dnSlHit,
-      firstExited: ss.firstExited, secondExited: ss.secondExited,
-      upShares: ss.upFilled ? SHARES : 0,
-      dnShares: ss.dnFilled ? SHARES : 0,
-      upEntry: ss.upFilled ? BUY_PRICE : null,
-      dnEntry: ss.dnFilled ? BUY_PRICE : null,
-      upCost: ss.upFilled ? f2(SHARES * BUY_PRICE) : 0,
-      dnCost: ss.dnFilled ? f2(SHARES * BUY_PRICE) : 0,
-      upTp: ss.upFilled ? (ss.firstSide === "up" && !ss.firstExited ? TP_FIRST : TP_SECOND) : null,
-      dnTp: ss.dnFilled ? (ss.firstSide === "down" && !ss.firstExited ? TP_FIRST : TP_SECOND) : null,
-      upSl: ss.upFilled ? SL_PRICE : null,
-      dnSl: ss.dnFilled ? SL_PRICE : null,
+      filledCount: ss.filledCount || 0,
+      tpCount: ss.tpCount || 0,
+      buckets: bkList,
+      upShares, dnShares,
+      upCost: f2(upCost), dnCost: f2(dnCost),
+      upEntry: upEntries.length ? Math.min(...upEntries) : null,
+      dnEntry: dnEntries.length ? Math.min(...dnEntries) : null,
+      upTp: upShares > 0 ? TP_PRICE : null,
+      dnTp: dnShares > 0 ? TP_PRICE : null,
     };
   });
 
@@ -505,13 +464,11 @@ function snapshot() {
     activityLog: logs.slice(0, 50),
     equityHistory: equityHistory.slice(-500),
     strategy: {
-      type: 'entry', shares: SHARES, buyPrice: BUY_PRICE,
-      tpFirst: TP_FIRST, tpSecond: TP_SECOND, sl: SL_PRICE,
-      pairs: TARGET_PAIRS,
+      type: 'bucket', buckets: BUCKETS, sharesPerBucket: SHARES_PER_BUCKET,
+      tpPrice: TP_PRICE, pairs: TARGET_PAIRS,
     },
   };
 }
-
 async function setDryRun(v) {
   dryRun = !!v;
   if (dryRun) { cashBalance = DEMO_BALANCE; startBalance = DEMO_BALANCE; }
