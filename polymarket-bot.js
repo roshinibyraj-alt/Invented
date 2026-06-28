@@ -231,14 +231,15 @@ async function buyUp(m, st) {
   if (!m || inTrade || pendingTrade) return null;
   inTrade = true;
   try {
-    var cost = f2(BASE_SHARES * m.upMid);
+    var ask = await trader.getBestBidAsk(m.upTokenId);
+    var askPrice = (ask && ask.bestAsk) ? ask.bestAsk : m.upMid;
+    var cost = f2(BASE_SHARES * askPrice);
     var preBal = await checkBalance();
-    log('BUY UP ' + BASE_SHARES + 'sh @ $' + f4(m.upMid) + ' (~$' + cost + ') bal=$' + f2(preBal));
+    log('BUY UP ' + BASE_SHARES + 'sh @ ask $' + f4(askPrice) + ' (~$' + cost + ') bal=$' + f2(preBal));
 
     await trader.placeFokBuy(m.upTokenId, cost);
 
-    // Non-blocking: set pendingTrade, main loop checks balance
-    pendingTrade = { type: 'buyUp', m: m, st: st, preBal: preBal, cost: cost, entryPriceAt: m.upMid };
+    pendingTrade = { type: 'buyUp', m: m, st: st, preBal: preBal, cost: cost, entryPriceAt: askPrice };
     pendingCheckAt = Date.now();
     return { pending: true };
   } catch (e) {
@@ -252,13 +253,15 @@ async function buyDown(m, st) {
   if (!m || inTrade || pendingTrade) return null;
   inTrade = true;
   try {
-    var cost = f2(BASE_SHARES * m.downMid);
+    var ask = await trader.getBestBidAsk(m.downTokenId);
+    var askPrice = (ask && ask.bestAsk) ? ask.bestAsk : m.downMid;
+    var cost = f2(BASE_SHARES * askPrice);
     var preBal = await checkBalance();
-    log('BUY DOWN ' + BASE_SHARES + 'sh @ $' + f4(m.downMid) + ' (~$' + cost + ') bal=$' + f2(preBal));
+    log('BUY DOWN ' + BASE_SHARES + 'sh @ ask $' + f4(askPrice) + ' (~$' + cost + ') bal=$' + f2(preBal));
 
     await trader.placeFokBuy(m.downTokenId, cost);
 
-    pendingTrade = { type: 'buyDown', m: m, st: st, preBal: preBal, cost: cost, entryPriceAt: m.downMid };
+    pendingTrade = { type: 'buyDown', m: m, st: st, preBal: preBal, cost: cost, entryPriceAt: askPrice };
     pendingCheckAt = Date.now();
     return { pending: true };
   } catch (e) {
