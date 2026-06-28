@@ -14,7 +14,7 @@ const TARGET_PAIRS      = ['BTC'];
 
 // Accumulation strategy params
 const UP_INTERVAL    = 10000;  // ms
-const DOWN_INTERVAL  = 15000;  // ms
+const DOWN_INTERVAL  = 10000;  // ms
 const SELL_AT_SECS   = 270;    // 4.5 min – stop accumulation, place sells
 const SELL_PRICE     = 0.99;
 const BUY_SLIP       = 0.02;   // buy at mid - 0.02
@@ -382,7 +382,7 @@ async function tradeLoop(m) {
       // DOWN buy every 15s
       if (elapsed - as.lastDownBuy >= DOWN_INTERVAL) {
         as.lastDownBuy = elapsed;
-        const shares = m.downMid < 0.50 ? 15 : 30;
+        const shares = m.downMid < 0.50 ? 10 : 20;
         const result = await placeBuy(m, 'down', shares);
         if (result) {
           as.down.shares += shares;
