@@ -71,7 +71,7 @@ footer{text-align:center;padding:10px;color:#9ca3af;font-size:9px;border-top:1px
   </div>
   <div class="card">
     <div class="card-title">Accumulation</div>
-    <div id="accumBody"><div class="empty">No active window</div></div>
+    <div id="accumBody"><div class="empty">Waiting for window...</div></div>
   </div>
   <div class="card">
     <div class="card-title">Equity Curve</div>
@@ -122,8 +122,8 @@ function render(d){
       var m=mkts[i];
       var phase=m.phase||'idle';
       var phaseLabel=phase.toUpperCase();
-      var phaseCls='p-'+(phase==='accumulating'?'accum':phase==='selling'?'sell':'resolve');
-      if(phase==='resolved')phaseLabel=m.winner?m.winner.toUpperCase()+' WINS':'RESOLVING';
+      var phaseCls='p-'+((phase==='accumulating'||phase==='selling')?phase:phase==='force_sell'?'sell':'resolve');
+      if(phase==='done')phaseLabel='DONE';else if(phase==='force_sell')phaseLabel='FORCE SELL';
 
       mc+='<div class="mkt-hdr">'+
         '<div><b>'+m.pair+' 5m</b> <span class="phase-badge '+phaseCls+'">'+phaseLabel+'</span></div>'+
@@ -138,7 +138,7 @@ function render(d){
 
   // Accumulation stats
   var ac='';
-  if(!mkts.length){ac='<div class="empty">No active window</div>';}else{
+  if(!mkts.length){ac='<div class="empty">Waiting for window...</div>';}else{
     for(var i=0;i<mkts.length;i++){
       var m=mkts[i];
       ac+='<div class="accum-grid">';
