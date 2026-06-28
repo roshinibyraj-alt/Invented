@@ -455,7 +455,7 @@ function snapshot() {
   const equity = calcEquity();
   const pnl = f2(equity - startBalance);
 
-  const activeMarkets = Object.values(markets).map(m => {
+  const activeMarkets = Object.values(markets).filter(m => m.endTime > Date.now()).map(m => {
     const cs = crashState[m.slug] || { phase: 'waiting', bought: false, side: null, sold: false, tpHit: false, upFilled: false, dnFilled: false, upTpFilled: false, dnTpFilled: false, rangeOk: false, done: false };
     return {
       slug: m.slug, pair: m.pair,

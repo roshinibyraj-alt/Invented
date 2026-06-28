@@ -536,7 +536,7 @@ function snapshot() {
   const equity = calcEquity();
   const pnl    = f2(equity - startBalance);
 
-  const activeMarkets = Object.values(markets).map(m => {
+  const activeMarkets = Object.values(markets).filter(m => m.endTime > Date.now()).map(m => {
     const as = accState[m.slug] || { up: { shares: 0, totalCost: 0, buyCount: 0, pending: [] }, down: { shares: 0, totalCost: 0, buyCount: 0, pending: [] }, phase: 'idle', upSellFilled: false, downSellFilled: false };
     const elapsed = Math.max(0, (Date.now() - m.windowStartMs) / 1000);
     return {
