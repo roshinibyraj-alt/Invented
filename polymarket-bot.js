@@ -66,7 +66,9 @@ const candleHistory = {}; // keyed by pair
 function classifyCandle(open, close) {
   const diff = close - open;
   const pct  = Math.abs(diff) / (open || 1);
-  if (pct < 0.0015) return 'doji';   // < 0.15% body = doji
+  // For high-price assets like BTC ($60k+), 0.15% body = $90 move — far too tight.
+  // Use 0.05% so only true indecision candles are doji.
+  if (pct < 0.0005) return 'doji';   // < 0.05% body = doji
   return diff > 0 ? 'green' : 'red';
 }
 
@@ -74,9 +76,13 @@ function classifyCandle(open, close) {
 // Returns 'up', 'down', or null (unknown)
 function resolveTradeDirection(pair) {
   const hist = candleHistory[pair];
-  if (!hist || hist.length === 0) return null;
+  if (!hist || hist.length === 0) {
+    log(`🕯️  ${pair} resolveTradeDirection: no candle history yet`);
+    return null;
+  }
 
   const last = hist[hist.length - 1];
+  log(`🕯️  ${pair} resolveTradeDirection: history=${hist.length} candles, last=${last.type.toUpperCase()} (${last.open}→${last.close})`);
 
   // Doji resolution: look back at 2 consecutive candles before doji
   if (last.type === 'doji') {
