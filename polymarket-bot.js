@@ -1,41 +1,97 @@
 'use strict';
 
+/**
+ * ═══════════════════════════════════════════════════════════════
+ *  POLYMARKET OPPORTUNIST BOT
+ *  Strategy: Liquidity Momentum + Spread Fade
+ * ═══════════════════════════════════════════════════════════════
+ *
+ *  CONCEPT:
+ *  Scans ALL live Polymarket markets ending within 60 minutes.
+ *  For each, it identifies the "overpriced" side using 3 signals:
+ *
+ *  1. SPREAD SIGNAL — If YES ask is far above 0.50 and spread is
+ *     wide, the market is leaning YES. We fade the consensus by
+ *     buying the cheaper NO side (and vice versa). Markets with
+ *     extreme consensus (>0.85 or <0.15) are skipped — too risky.
+ *
+ *  2. VOLUME IMBALANCE — If one side has significantly more
+ *     liquidity depth in the order book, we trade WITH that side
+ *     (smart money signal). Books are fetched from CLOB REST.
+ *
+ *  3. PRICE VELOCITY — We track mid-price over 60s. If YES is
+ *     drifting DOWN fast, we buy YES (mean-reversion). If it's
+ *     rising fast, we buy NO. Velocity magnitude gate: ≥ 0.005
+ *     movement in 60s to qualify.
+ *
+ *  Signals are scored: each gives +1 or -1 for YES/NO.
+ *  Net score ≥ +2 → buy YES. Net score ≤ -2 → buy NO. Else skip.
+ *
+ *  TRADE STRUCTURE (10-minute window per market):
+ *  - Entry 1 at   0s  (immediate on discovery)
+ *  - Entry 2 at 120s  (2 min in — average in if still confident)
+ *  - Entry 3 at 300s  (5 min in — final entry)
+ *  - Force exit at 540s (9 min in — 60s before expiry window close)
+ *  - TP limit at 0.96 (take profit if market moves fast)
+ *
+ *  MARKET FILTER:
+ *  - endTime between 5 min and 60 min from now
+ *  - YES mid between 0.10 and 0.90 (not already decided)
+ *  - Both YES and NO tokens must have orderbook data
+ *  - Minimum $20 liquidity on each side
+ *  - Not already trading this slug
+ *
+ * ═══════════════════════════════════════════════════════════════
+ */
+
 const WebSocket        = require('ws');
 const PolymarketTrader = require('./polymarket-trader');
 
+// ── API endpoints ──
 const GAMMA   = 'https://gamma-api.polymarket.com';
 const CLOB    = 'https://clob.polymarket.com';
 const CLOB_WS = 'wss://ws-subscriptions-clob.polymarket.com/ws/market';
 
-// ── Window & timing ──
-const WINDOW_SECS       = 300;
-const DISCOVER_EVERY_MS = 15000;
-const TICK_MS           = 200;
+// ── Timing ──
+const SCAN_EVERY_MS      = 20_000;   // Scan for new markets every 20s
+const TICK_MS            = 250;      // Main loop tick
+const TRADE_WINDOW_SECS  = 600;      // 10-minute trade window
+const FORCE_EXIT_SECS    = 540;      // Exit 60s before window ends
+const ENTRY_SECS         = [0, 120, 300]; // 3 entries in the window
 
-// ── Strategy config ──
-const TP_PRICE        = 0.99;   // Take-profit limit price
-const SHARES_PER_FIRE = 6;      // Fixed 6 shares every fire, no exceptions
-const FORCE_SELL_SECS = 298;    // Force-sell all positions at this second
-// Entry fires at end of each minute: 60s, 120s, 180s, 240s (4 total)
-const ENTRY_FIRE_SECS = [60, 120, 180, 240];
+// ── Market filter ──
+const MIN_MINS_TO_END    = 5;        // Market must have at least 5 min left
+const MAX_MINS_TO_END    = 60;       // Market must end within 60 min
+const MIN_YES_MID        = 0.10;     // Skip near-certain NO
+const MAX_YES_MID        = 0.90;     // Skip near-certain YES
+const MIN_LIQUIDITY_USD  = 20;       // Min $ liquidity per side
 
-const DRY_RUN     = (process.env.DRY_RUN || 'true').toLowerCase() === 'true';
-const TARGET_PAIRS = ['BTC'];
+// ── Strategy ──
+const TP_PRICE           = 0.96;
+const SHARES_PER_ENTRY   = 5;
+const VELOCITY_WINDOW_MS = 60_000;   // 60s for price velocity calc
+const VELOCITY_MIN       = 0.005;    // Minimum move to count as signal
 
-let emitFn       = () => {};
-let slog         = () => {};
-let trader       = null;
-let demoBalance  = 0;   // Starting balance (never mutated after init)
-let realizedPnl  = 0;   // Sum of closed trade P&L
-let startTime    = Date.now();
+// ── Env ──
+const DRY_RUN = (process.env.DRY_RUN || 'true').toLowerCase() === 'true';
+
+// ── State ──
+let emitFn      = () => {};
+let slog        = () => {};
+let trader      = null;
+let demoBalance = 0;
+let realizedPnl = 0;
+let startTime   = Date.now();
+let lastScanAt  = 0;
 
 const logs    = [];
 const trades  = [];
-const markets = {};
-let lastDiscoverAt = 0;
+const markets = {}; // slug → market object
+const priceHistory = {}; // tokenId → [{mid, ts}]
 
-const f2 = v => Math.round((v || 0) * 100) / 100;
-const f4 = v => Math.round((v || 0) * 10000) / 10000;
+// ── Helpers ──
+const f2  = v => Math.round((v || 0) * 100) / 100;
+const f4  = v => Math.round((v || 0) * 10000) / 10000;
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 function log(msg) {
@@ -43,7 +99,7 @@ function log(msg) {
   const ts     = new Date().toTimeString().slice(0, 8);
   const line   = `[${ts}] ${prefix}${msg}`;
   logs.unshift(line);
-  if (logs.length > 300) logs.length = 300;
+  if (logs.length > 400) logs.length = 400;
   if (slog) slog(line);
 }
 
@@ -57,88 +113,22 @@ async function getJSON(url) {
   } catch (_) { return null; }
 }
 
-// ─────────────────────────────────────────────
-// CANDLE HISTORY (tracks last few 5m candles)
-// ─────────────────────────────────────────────
-// Each entry: { open, close, type } where type = 'green'|'red'|'doji'
-const candleHistory = {}; // keyed by pair
-
-function classifyCandle(open, close) {
-  const diff = close - open;
-  const pct  = Math.abs(diff) / (open || 1);
-  // For high-price assets like BTC ($60k+), 0.15% body = $90 move — far too tight.
-  // Use 0.05% so only true indecision candles are doji.
-  if (pct < 0.0005) return 'doji';   // < 0.05% body = doji
-  return diff > 0 ? 'green' : 'red';
-}
-
-// Determine which side to trade based on previous candle & history
-// Returns 'up', 'down', or null (unknown)
-function resolveTradeDirection(pair) {
-  const hist = candleHistory[pair];
-  if (!hist || hist.length === 0) {
-    log(`🕯️  ${pair} resolveTradeDirection: no candle history yet`);
-    return null;
-  }
-
-  const last = hist[hist.length - 1];
-  log(`🕯️  ${pair} resolveTradeDirection: history=${hist.length} candles, last=${last.type.toUpperCase()} (${last.open}→${last.close})`);
-
-  // Doji resolution: look back at 2 consecutive candles before doji
-  if (last.type === 'doji') {
-    if (hist.length >= 3) {
-      const prev1 = hist[hist.length - 2];
-      const prev2 = hist[hist.length - 3];
-      if (prev1.type === 'green' && prev2.type === 'green') {
-        log(`🕯️  ${pair} Doji after 2 consecutive GREEN → treated as RED → trade DOWN`);
-        return 'down';
-      }
-      if (prev1.type === 'red' && prev2.type === 'red') {
-        log(`🕯️  ${pair} Doji after 2 consecutive RED → treated as GREEN → trade UP`);
-        return 'up';
-      }
-    }
-    // Doji with no clear consecutive context — skip
-    log(`🕯️  ${pair} Doji with no clear consecutive context — skipping window`);
-    return null;
-  }
-
-  if (last.type === 'green') {
-    log(`🕯️  ${pair} Previous candle GREEN → trading UP only`);
-    return 'up';
-  }
-  if (last.type === 'red') {
-    log(`🕯️  ${pair} Previous candle RED → trading DOWN only`);
-    return 'down';
-  }
-
-  return null;
-}
-
-// Record a completed candle for a pair
-function recordCandle(pair, open, close) {
-  if (!candleHistory[pair]) candleHistory[pair] = [];
-  const type = classifyCandle(open, close);
-  candleHistory[pair].push({ open, close, type });
-  // Keep last 5 candles
-  if (candleHistory[pair].length > 5) candleHistory[pair].shift();
-  log(`🕯️  ${pair} Candle recorded: ${type.toUpperCase()} (${open.toFixed(4)} → ${close.toFixed(4)})`);
-}
-
-// ── WebSocket price feed ──
+// ══════════════════════════════════════════
+//  WEBSOCKET PRICE FEED
+// ══════════════════════════════════════════
 let ws          = null;
 let wsPingTimer = null;
-const wsTokenMap = {};
+const wsTokenMap = {}; // tokenId → slug
 
 function wsConnect() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
-  log('🔌 Connecting price WebSocket…');
+  log('🔌 Connecting WebSocket price feed…');
   ws = new WebSocket(CLOB_WS);
 
   ws.on('open', () => {
-    log('✅ Price WebSocket connected');
-    const tokenIds = Object.keys(wsTokenMap);
-    if (tokenIds.length > 0) wsSubscribe(tokenIds);
+    log('✅ WebSocket connected');
+    const ids = Object.keys(wsTokenMap);
+    if (ids.length) wsSubscribe(ids);
     wsPingTimer = setInterval(() => {
       if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({}));
     }, 10000);
@@ -146,19 +136,16 @@ function wsConnect() {
 
   ws.on('message', (raw) => {
     try {
-      const msgs = JSON.parse(raw);
-      const arr  = Array.isArray(msgs) ? msgs : [msgs];
-      for (const msg of arr) {
+      const msgs = Array.isArray(JSON.parse(raw)) ? JSON.parse(raw) : [JSON.parse(raw)];
+      for (const msg of msgs) {
         if (msg.event_type === 'price_change' && Array.isArray(msg.price_changes)) {
-          for (const pc of msg.price_changes) updateMarketPrice(pc.asset_id, pc.best_bid, pc.best_ask);
+          for (const pc of msg.price_changes) onPriceUpdate(pc.asset_id, pc.best_bid, pc.best_ask);
         }
-        if (msg.event_type === 'best_bid_ask') {
-          updateMarketPrice(msg.asset_id, msg.best_bid, msg.best_ask);
-        }
+        if (msg.event_type === 'best_bid_ask') onPriceUpdate(msg.asset_id, msg.best_bid, msg.best_ask);
         if (msg.event_type === 'book') {
-          const bestBid = msg.bids?.[0]?.price ? parseFloat(msg.bids[0].price) : null;
-          const bestAsk = msg.asks?.[0]?.price ? parseFloat(msg.asks[0].price) : null;
-          updateMarketPrice(msg.asset_id, bestBid, bestAsk);
+          const bid = msg.bids?.[0]?.price ? parseFloat(msg.bids[0].price) : null;
+          const ask = msg.asks?.[0]?.price ? parseFloat(msg.asks[0].price) : null;
+          onPriceUpdate(msg.asset_id, bid, ask);
         }
       }
     } catch (_) {}
@@ -166,8 +153,8 @@ function wsConnect() {
 
   ws.on('close', () => {
     if (wsPingTimer) { clearInterval(wsPingTimer); wsPingTimer = null; }
-    log('⚠️  Price WebSocket closed — reconnecting in 2s');
-    setTimeout(wsConnect, 2000);
+    log('⚠️  WebSocket closed — reconnecting in 3s');
+    setTimeout(wsConnect, 3000);
   });
 
   ws.on('error', (e) => {
@@ -176,28 +163,28 @@ function wsConnect() {
   });
 }
 
-function updateMarketPrice(tokenId, bestBid, bestAsk) {
+function onPriceUpdate(tokenId, bestBid, bestAsk) {
   if (!tokenId) return;
   const slug = wsTokenMap[tokenId];
   if (!slug || !markets[slug]) return;
   const m   = markets[slug];
   const bid = bestBid ? f4(parseFloat(bestBid)) : null;
-  const rawAsk = bestAsk ? f4(parseFloat(bestAsk)) : null;
-  const ask = (rawAsk && rawAsk < TP_PRICE) ? rawAsk : null;
+  const ask = bestAsk ? f4(parseFloat(bestAsk)) : null;
 
-  if (tokenId === m.upTokenId) {
-    if (bid) m.upBestBid = bid;
-    if (ask) m.upBestAsk = ask;
-    const b = m.upBestBid, a = m.upBestAsk;
-    if (b && a) { m.upMid = f4((b + a) / 2); m.lastPriceAt = Date.now(); }
-    else if (bid || ask) { m.upMid = bid || ask; m.lastPriceAt = Date.now(); }
+  if (tokenId === m.yesTokenId) {
+    if (bid) m.yesBid = bid;
+    if (ask && ask < TP_PRICE) m.yesAsk = ask;
+    if (m.yesBid && m.yesAsk) m.yesMid = f4((m.yesBid + m.yesAsk) / 2);
+    else if (m.yesBid) m.yesMid = m.yesBid;
+    m.lastPriceAt = Date.now();
+    recordPriceHistory(tokenId, m.yesMid);
   }
-  if (tokenId === m.downTokenId) {
-    if (bid) m.dnBestBid = bid;
-    if (ask) m.dnBestAsk = ask;
-    const b = m.dnBestBid, a = m.dnBestAsk;
-    if (b && a) { m.downMid = f4((b + a) / 2); m.lastPriceAt = Date.now(); }
-    else if (bid || ask) { m.downMid = bid || ask; m.lastPriceAt = Date.now(); }
+  if (tokenId === m.noTokenId) {
+    if (bid) m.noBid = bid;
+    if (ask && ask < TP_PRICE) m.noAsk = ask;
+    if (m.noBid && m.noAsk) m.noMid = f4((m.noBid + m.noAsk) / 2);
+    else if (m.noBid) m.noMid = m.noBid;
+    m.lastPriceAt = Date.now();
   }
 }
 
@@ -206,527 +193,600 @@ function wsSubscribe(tokenIds) {
   ws.send(JSON.stringify({ assets_ids: tokenIds, type: 'market' }));
 }
 
-async function restRefreshPrice(m) {
-  const [ur, dr, ubba, dbba] = await Promise.all([
-    getJSON(`${CLOB}/midpoint?token_id=${m.upTokenId}`),
-    getJSON(`${CLOB}/midpoint?token_id=${m.downTokenId}`),
-    getJSON(`${CLOB}/book?token_id=${m.upTokenId}`),
-    getJSON(`${CLOB}/book?token_id=${m.downTokenId}`),
+function recordPriceHistory(tokenId, mid) {
+  if (!mid) return;
+  if (!priceHistory[tokenId]) priceHistory[tokenId] = [];
+  const now = Date.now();
+  priceHistory[tokenId].push({ mid, ts: now });
+  // Keep only last 5 min
+  const cutoff = now - 5 * 60_000;
+  priceHistory[tokenId] = priceHistory[tokenId].filter(p => p.ts > cutoff);
+}
+
+// Price velocity: change in mid over VELOCITY_WINDOW_MS
+// Positive = rising, Negative = falling
+function getPriceVelocity(tokenId) {
+  const hist = priceHistory[tokenId];
+  if (!hist || hist.length < 2) return 0;
+  const now    = Date.now();
+  const cutoff = now - VELOCITY_WINDOW_MS;
+  const old    = hist.find(p => p.ts >= cutoff);
+  const recent = hist[hist.length - 1];
+  if (!old || old === recent) return 0;
+  return f4(recent.mid - old.mid);
+}
+
+// ══════════════════════════════════════════
+//  REST PRICE & BOOK FETCH
+// ══════════════════════════════════════════
+async function refreshPriceRest(m) {
+  const [yMid, nMid, yBook, nBook] = await Promise.all([
+    getJSON(`${CLOB}/midpoint?token_id=${m.yesTokenId}`),
+    getJSON(`${CLOB}/midpoint?token_id=${m.noTokenId}`),
+    getJSON(`${CLOB}/book?token_id=${m.yesTokenId}`),
+    getJSON(`${CLOB}/book?token_id=${m.noTokenId}`),
   ]);
-  if (ur?.mid)  m.upMid   = f4(parseFloat(ur.mid));
-  if (dr?.mid)  m.downMid = f4(parseFloat(dr.mid));
-  if (ubba?.bids?.[0]?.price) m.upBestBid = f4(parseFloat(ubba.bids[0].price));
-  const upAsk = ubba?.asks?.[0]?.price ? f4(parseFloat(ubba.asks[0].price)) : null;
-  if (upAsk && upAsk < TP_PRICE) m.upBestAsk = upAsk;
-  if (dbba?.bids?.[0]?.price) m.dnBestBid = f4(parseFloat(dbba.bids[0].price));
-  const dnAsk = dbba?.asks?.[0]?.price ? f4(parseFloat(dbba.asks[0].price)) : null;
-  if (dnAsk && dnAsk < TP_PRICE) m.dnBestAsk = dnAsk;
-  if (!m.upBestAsk && m.upMid)   { m.upBestAsk = f4(m.upMid + 0.01); m.upBestBid = f4(m.upMid - 0.01); }
-  if (!m.dnBestAsk && m.downMid) { m.dnBestAsk = f4(m.downMid + 0.01); m.dnBestBid = f4(m.downMid - 0.01); }
+  if (yMid?.mid) m.yesMid = f4(parseFloat(yMid.mid));
+  if (nMid?.mid) m.noMid  = f4(parseFloat(nMid.mid));
+
+  if (yBook) {
+    m.yesBid = yBook.bids?.[0]?.price ? f4(parseFloat(yBook.bids[0].price)) : m.yesBid;
+    m.yesAsk = yBook.asks?.[0]?.price ? f4(parseFloat(yBook.asks[0].price)) : m.yesAsk;
+    // Liquidity = sum of top 5 levels * price
+    m.yesLiquidityUsd = sumLiquidity(yBook.bids);
+  }
+  if (nBook) {
+    m.noBid = nBook.bids?.[0]?.price ? f4(parseFloat(nBook.bids[0].price)) : m.noBid;
+    m.noAsk = nBook.asks?.[0]?.price ? f4(parseFloat(nBook.asks[0].price)) : m.noAsk;
+    m.noLiquidityUsd = sumLiquidity(nBook.bids);
+  }
   m.lastPriceAt = Date.now();
+  if (!m.yesMid && m.yesBid && m.yesAsk) m.yesMid = f4((m.yesBid + m.yesAsk) / 2);
+  if (!m.noMid  && m.noBid  && m.noAsk)  m.noMid  = f4((m.noBid  + m.noAsk)  / 2);
+}
+
+function sumLiquidity(levels) {
+  if (!Array.isArray(levels)) return 0;
+  return levels.slice(0, 5).reduce((acc, l) => {
+    const price = parseFloat(l.price || 0);
+    const size  = parseFloat(l.size  || 0);
+    return acc + price * size;
+  }, 0);
 }
 
 async function ensureFreshPrice(m) {
-  const stale = !m.lastPriceAt || (Date.now() - m.lastPriceAt) > 3000;
-  if (stale) await restRefreshPrice(m);
+  const stale = !m.lastPriceAt || (Date.now() - m.lastPriceAt) > 4000;
+  if (stale) await refreshPriceRest(m);
 }
 
-// -- Binance candle helpers --
-// Maps our pair names to Binance symbols (free public API, no key required)
-const BINANCE_SYMBOL = { BTC: 'BTCUSDT' };
-const BINANCE_API    = 'https://api.binance.com';
+// ══════════════════════════════════════════
+//  SIGNAL ENGINE
+// ══════════════════════════════════════════
+/**
+ * Returns { side: 'yes'|'no'|null, score, signals[] }
+ * score ≥ 2 → trade that side
+ */
+function analyzeMarket(m) {
+  const signals = [];
+  let yesScore  = 0;
 
-// Fetch the last N *closed* 5m candles from Binance.
-// Binance kline array: [openTime, open, high, low, close, vol, closeTime, ...]
-// Returns oldest -> newest, current open candle excluded.
-async function fetchBinanceCandles(pair, limit) {
-  if (limit === undefined) limit = 6;
-  const symbol = BINANCE_SYMBOL[pair];
-  if (!symbol) { log('No Binance symbol for ' + pair); return []; }
-  // Request one extra so we can drop the still-open current candle
-  const url  = BINANCE_API + '/api/v3/klines?symbol=' + symbol + '&interval=5m&limit=' + (limit + 1);
-  const data = await getJSON(url);
-  if (!Array.isArray(data) || data.length === 0) {
-    log('Binance klines fetch failed for ' + symbol);
-    return [];
-  }
-  // Drop last entry = still-open candle
-  const closed = data.slice(0, -1).slice(-limit);
-  return closed.map(function(k) {
-    const open  = parseFloat(k[1]);
-    const close = parseFloat(k[4]);
-    const type  = classifyCandle(open, close);
-    return { open: Math.round(open * 100) / 100, close: Math.round(close * 100) / 100, type, openTime: k[0] };
-  });
-}
-
-// Fetch current BTC spot price from Binance
-async function fetchBinancePrice(pair) {
-  const symbol = BINANCE_SYMBOL[pair];
-  if (!symbol) return null;
-  const data = await getJSON(BINANCE_API + '/api/v3/ticker/price?symbol=' + symbol);
-  return data && data.price ? parseFloat(data.price) : null;
-}
-
-// -- Candle Bootstrap --
-// Pull the last 5 closed 5m BTC/USDT candles straight from Binance.
-// Real BTC price candles -- no Polymarket token prices involved.
-async function bootstrapCandleHistory(pair, limit) {
-  if (limit === undefined) limit = 5;
-  log('[CANDLE] Bootstrapping ' + pair + ' from Binance (last ' + limit + ' closed 5m candles)...');
-
-  const candles = await fetchBinanceCandles(pair, limit);
-
-  if (candles.length === 0) {
-    log('[CANDLE] Bootstrap failed: no Binance candles for ' + pair + ' -- bot will skip first window');
-    return;
-  }
-
-  candleHistory[pair] = candles;
-
-  for (const c of candles) {
-    const ts = new Date(c.openTime).toISOString().slice(11, 19);
-    log('[CANDLE] Bootstrap [' + ts + '] ' + c.type.toUpperCase() + ' $' + c.open + ' -> $' + c.close);
-  }
-
-  log('[CANDLE] Bootstrap complete: ' + candles.length + ' real BTC candles seeded -> direction: ' + (resolveTradeDirection(pair) || 'UNDECIDED'));
-}
-
-// ── Market Discovery ──
-function currentWindowStart() {
-  const now = Math.floor(Date.now() / 1000);
-  return Math.floor(now / WINDOW_SECS) * WINDOW_SECS;
-}
-
-async function discoverMarket(pair) {
-  const ws_ts = currentWindowStart();
-  const slug  = `${pair.toLowerCase()}-updown-5m-${ws_ts}`;
-  if (markets[slug]) return;
-
-  const d = await getJSON(`${GAMMA}/events?slug=${slug}`);
-  if (!Array.isArray(d) || !d[0]?.markets?.[0]) return;
-
-  const mk = d[0].markets[0];
-  if (!mk.clobTokenIds) return;
-
-  let ids;
-  try { ids = JSON.parse(mk.clobTokenIds); } catch (_) { return; }
-  if (ids.length < 2) return;
-
-  const endTime = mk.endDate ? new Date(mk.endDate).getTime() : null;
-  if (!endTime) return;
-
-  const secsToEnd      = (endTime - Date.now()) / 1000;
-  if (secsToEnd <= 0 || secsToEnd > WINDOW_SECS + 5) return;
-
-  const windowStartMs  = endTime - WINDOW_SECS * 1000;
-  const secsIntoWindow = (Date.now() - windowStartMs) / 1000;
-
-  // Don't enter if we're past the last fire point (240s) + buffer
-  if (secsIntoWindow >= ENTRY_FIRE_SECS[ENTRY_FIRE_SECS.length - 1] + 10) {
-    log(`⏭️  ${pair} past all entry windows (${Math.floor(secsIntoWindow)}s in) — waiting for next`);
-    return;
-  }
-
-  // Resolve trade direction from candle history
-  const direction = resolveTradeDirection(pair);
-  if (!direction) {
-    log(`⏭️  ${pair} no clear candle direction — skipping window (need more history)`);
-    return;
-  }
-
-  let upTickSize = '0.01', upNegRisk = false;
-  let dnTickSize = '0.01', dnNegRisk = false;
-  try {
-    [upTickSize, upNegRisk, dnTickSize, dnNegRisk] = await Promise.all([
-      trader._clob.getTickSize(ids[0]).catch(() => '0.01'),
-      trader._clob.getNegRisk(ids[0]).catch(() => false),
-      trader._clob.getTickSize(ids[1]).catch(() => '0.01'),
-      trader._clob.getNegRisk(ids[1]).catch(() => false),
-    ]);
-  } catch (_) {}
-
-  log(`🔍 ${pair} window found: ${slug} — direction=${direction.toUpperCase()} — ends in ${Math.floor(secsToEnd)}s (${Math.floor(secsIntoWindow)}s in)`);
-
-  markets[slug] = {
-    slug, pair,
-    upTokenId: ids[0], downTokenId: ids[1],
-    endTime, windowStartMs,
-    upMid: 0.5, downMid: 0.5,
-    upBestBid: 0, upBestAsk: 0,
-    dnBestBid: 0, dnBestAsk: 0,
-    lastPriceAt: 0,
-    upTickSize, upNegRisk,
-    dnTickSize, dnNegRisk,
-
-    direction,          // 'up' or 'down' — only side we trade
-    openPrice: 0,       // price at window open (for candle recording)
-
-    // Position tracking for the one active side
-    shares: 0,          // total shares currently held
-    totalCost: 0,       // total cost basis of open position
-    openTrades: [],     // [{ shares, entryPrice, cost }]
-    openOrderIds: [],   // all open order IDs (entries + TPs)
-    tpOrderIds: [],     // TP order IDs pending fill
-    firedCount: 0,      // how many of the 4 entry fires have happened
-    nextFireIdx: 0,     // index into ENTRY_FIRE_SECS
-    forceSellDone: false,
-    done: false,
-    loopRunning: false,
-
-    // Candle tracking
-    candleOpen: null,   // price at window open (set on first price)
-  };
-
-  wsTokenMap[ids[0]] = slug;
-  wsTokenMap[ids[1]] = slug;
-  wsSubscribe([ids[0], ids[1]]);
-  await restRefreshPrice(markets[slug]);
-
-  // Capture real BTC opening price from Binance for candle recording
-  const m = markets[slug];
-  fetchBinancePrice(pair).then(px => {
-    if (px) {
-      m.candleOpen = px;
-      log('[CANDLE] Window open BTC price: $' + px);
+  // ── Signal 1: Spread Fade ──
+  // Wide spread on YES side → market is uncertain/overextended
+  // If YES is above 0.5, fade it by buying NO (contrarian)
+  // If YES is below 0.5, fade NO by buying YES
+  if (m.yesMid && m.yesAsk && m.yesBid) {
+    const spread = f4(m.yesAsk - m.yesBid);
+    if (spread > 0.04) {
+      // Wide spread: bet against the leading side
+      if (m.yesMid > 0.5) {
+        yesScore -= 1;
+        signals.push({ name: 'SpreadFade', vote: 'NO', detail: `wide spread ${spread.toFixed(3)}, YES=${m.yesMid.toFixed(3)} overpriced` });
+      } else {
+        yesScore += 1;
+        signals.push({ name: 'SpreadFade', vote: 'YES', detail: `wide spread ${spread.toFixed(3)}, YES=${m.yesMid.toFixed(3)} underpriced` });
+      }
+    } else {
+      signals.push({ name: 'SpreadFade', vote: 'SKIP', detail: `tight spread ${spread.toFixed(3)} — no edge` });
     }
-  }).catch(() => {});
+  }
 
-  // Launch the single trading loop
-  tradeLoop(markets[slug]).catch(e => log(`❌ Trade loop crash ${pair}: ${e.message}`));
+  // ── Signal 2: Volume/Liquidity Imbalance ──
+  // More liquidity on YES side = smart money backing YES
+  const yesLiq = m.yesLiquidityUsd || 0;
+  const noLiq  = m.noLiquidityUsd  || 0;
+  if (yesLiq > 0 && noLiq > 0) {
+    const ratio = yesLiq / (yesLiq + noLiq);
+    if (ratio > 0.62) {
+      yesScore += 1;
+      signals.push({ name: 'LiqImbalance', vote: 'YES', detail: `YES liq ${f2(yesLiq)} vs NO liq ${f2(noLiq)} (${(ratio*100).toFixed(0)}% YES)` });
+    } else if (ratio < 0.38) {
+      yesScore -= 1;
+      signals.push({ name: 'LiqImbalance', vote: 'NO', detail: `NO liq ${f2(noLiq)} vs YES liq ${f2(yesLiq)} (${((1-ratio)*100).toFixed(0)}% NO)` });
+    } else {
+      signals.push({ name: 'LiqImbalance', vote: 'SKIP', detail: `balanced liquidity ${(ratio*100).toFixed(0)}%/YES` });
+    }
+  }
+
+  // ── Signal 3: Price Velocity (mean reversion) ──
+  // YES rising fast → likely to revert → buy NO
+  // YES falling fast → likely to revert → buy YES
+  const velocity = getPriceVelocity(m.yesTokenId);
+  if (Math.abs(velocity) >= VELOCITY_MIN) {
+    if (velocity > 0) {
+      // YES rising: fade it → NO
+      yesScore -= 1;
+      signals.push({ name: 'Velocity', vote: 'NO', detail: `YES rising +${velocity.toFixed(4)} in 60s → mean revert` });
+    } else {
+      // YES falling: buy it → YES
+      yesScore += 1;
+      signals.push({ name: 'Velocity', vote: 'YES', detail: `YES falling ${velocity.toFixed(4)} in 60s → mean revert` });
+    }
+  } else {
+    signals.push({ name: 'Velocity', vote: 'SKIP', detail: `velocity ${velocity.toFixed(4)} < threshold` });
+  }
+
+  // ── Decision ──
+  let side = null;
+  if (yesScore >= 2)       side = 'yes';
+  else if (yesScore <= -2) side = 'no';
+
+  return { side, score: yesScore, signals };
 }
 
-// ── Place a limit order ──
+// ══════════════════════════════════════════
+//  ORDER MANAGEMENT
+// ══════════════════════════════════════════
 async function placeLimitOrder(tokenId, side, price, shares, label) {
   if (DRY_RUN) {
-    const fakeId = `DRY-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-    log(`[DRY_RUN] ${side} limit ${shares}sh @ ${price} for ${label} → id=${fakeId}`);
-    return fakeId;
+    const id = `DRY-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`;
+    log(`[DRY] ${side} ${shares}sh @ ${price} (${label}) → ${id}`);
+    return id;
   }
   try {
     const r = await trader.placeGtcOrder(tokenId, side, price, shares);
-    if (r?.id) return r.id;
-    log(`⚠️  ${label} limit order returned no ID`);
-    return null;
+    return r?.id || null;
   } catch (e) {
-    log(`⚠️  ${label} limit order error: ${e.message}`);
+    log(`⚠️  Order error (${label}): ${e.message}`);
     return null;
   }
 }
 
 async function cancelOrder(orderId, label) {
-  if (DRY_RUN) {
-    log(`[DRY_RUN] Cancel order ${orderId} (${label})`);
-    return;
-  }
+  if (DRY_RUN) { log(`[DRY] Cancel ${orderId} (${label})`); return; }
   try { await trader.cancelOrder(orderId); } catch (_) {}
 }
 
 async function waitForFill(orderId, timeoutMs, label) {
   if (DRY_RUN) {
-    await sleep(800);
-    log(`[DRY_RUN] Simulated fill for ${orderId} (${label})`);
+    await sleep(600);
+    log(`[DRY] Simulated fill: ${orderId} (${label})`);
     return true;
   }
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     await sleep(500);
     try {
-      const order = await trader.getOrder(orderId);
-      if (!order) continue;
-      const status      = (order.status || '').toUpperCase();
-      const matchStatus = (order.match_status || order.matchStatus || '').toLowerCase();
-      const state       = (order.state || '').toLowerCase();
-      if (status === 'FILLED' || matchStatus === 'filled' || state === 'filled') return true;
-      if (status === 'CANCELLED' || matchStatus === 'cancelled') {
-        log(`⚠️  ${label} order cancelled externally`);
-        return false;
-      }
+      const o = await trader.getOrder(orderId);
+      if (!o) continue;
+      const st = (o.status || o.match_status || o.state || '').toLowerCase();
+      if (st === 'filled')    return true;
+      if (st === 'cancelled') { log(`⚠️  ${label} cancelled externally`); return false; }
     } catch (_) {}
   }
   return false;
 }
 
-// ── Calculate unrealized P&L in real time ──
-// For the active direction: currentPrice vs avgCostBasis
-// Win = price resolves to 1.00, loss = price resolves to 0.00
-// Unrealized = (currentMid - avgCost) * shares  (rough mark-to-market)
-function calcUnrealized(m) {
-  if (!m || m.shares === 0) return 0;
-  const avgCost    = m.totalCost / m.shares;
-  const currentMid = m.direction === 'up' ? m.upMid : m.downMid;
-  return f2((currentMid - avgCost) * m.shares);
-}
+// ══════════════════════════════════════════
+//  FIRE ENTRY
+// ══════════════════════════════════════════
+async function fireEntry(m, entryNum) {
+  const isYes   = m.side === 'yes';
+  const label   = isYes ? 'YES' : 'NO';
+  const tokenId = isYes ? m.yesTokenId : m.noTokenId;
+  const tick    = isYes ? (m.yesTick || 0.01) : (m.noTick || 0.01);
 
-// Capital = demoBalance + realizedPnl + sum(unrealizedPnl across all active markets)
-function calcCapital() {
-  let unrealized = 0;
-  for (const m of Object.values(markets)) {
-    unrealized += calcUnrealized(m);
+  await ensureFreshPrice(m);
+
+  let mid = isYes ? m.yesMid : m.noMid;
+  if (!mid || mid <= 0) { log(`⚠️  ${m.label} Entry ${entryNum}: no price — skipping`); return; }
+
+  // Re-check signal still valid (don't enter if consensus shifted)
+  const analysis = analyzeMarket(m);
+  if (analysis.side !== m.side) {
+    log(`⚠️  ${m.label} Entry ${entryNum}: signal flipped (${analysis.score}) — skipping`);
+    return;
   }
-  return f2(demoBalance + realizedPnl + unrealized);
-}
 
-// ── Fire a single entry (called at each 60/120/180/240s mark) ──
-async function fireEntry(m) {
-  const isUp    = m.direction === 'up';
-  const label   = isUp ? 'UP' : 'DOWN';
-  const tokenId = isUp ? m.upTokenId : m.downTokenId;
-  const mid     = isUp ? m.upMid : m.downMid;
-  const tick    = parseFloat(isUp ? m.upTickSize : m.dnTickSize) || 0.01;
+  // Price just below TP
+  let px = Math.min(mid, TP_PRICE - tick);
+  px = f4(Math.max(0.01, Math.round(px / tick) * tick));
 
-  let rawPx = mid > 0 ? mid : 0;
-  if (rawPx <= 0) { log(`⚠️  ${label} no price — skip fire`); return; }
-  rawPx = Math.min(rawPx, TP_PRICE - tick);
-  const entryPx = f4(Math.round(rawPx / tick) * tick);
-  if (entryPx <= 0.01) { log(`⚠️  ${label} price ${entryPx} too low — skip`); return; }
+  const shares = SHARES_PER_ENTRY;
+  log(`📥 ${m.label} Entry ${entryNum}/3 — BUY ${label} ${shares}sh @ ${px}`);
 
-  const shares = SHARES_PER_FIRE; // always 6
-  log(`📥 FIRE ${m.firedCount + 1}/4 — ${label} BUY ${shares}sh @ ${entryPx}`);
-
-  const orderId = await placeLimitOrder(tokenId, 'BUY', entryPx, shares, `${label}-fire${m.firedCount + 1}`);
+  const orderId = await placeLimitOrder(tokenId, 'BUY', px, shares, `${label}-E${entryNum}`);
   if (!orderId) return;
   m.openOrderIds.push(orderId);
 
-  // Wait up to 15s for fill
-  const filled = await waitForFill(orderId, 15000, `${label}-fire${m.firedCount + 1}`);
-
+  const filled = await waitForFill(orderId, 12000, `${label}-E${entryNum}`);
   m.openOrderIds = m.openOrderIds.filter(id => id !== orderId);
 
   if (!filled) {
-    log(`⏰ ${label} fire${m.firedCount + 1} not filled — cancelling`);
-    await cancelOrder(orderId, `${label}-fire${m.firedCount + 1}`);
+    log(`⏰ ${m.label} Entry ${entryNum} not filled — cancelling`);
+    await cancelOrder(orderId, `${label}-E${entryNum}`);
     return;
   }
 
-  const cost = f4(entryPx * shares);
-  log(`✅ ${label} fire${m.firedCount + 1} FILLED ${shares}sh @ ${entryPx} | cost $${cost}`);
-
-  m.shares     += shares;
-  m.totalCost  += cost;
+  const cost = f4(px * shares);
+  m.shares    += shares;
+  m.totalCost += cost;
   m.firedCount++;
-  m.openTrades.push({ shares, entryPrice: entryPx, cost });
+  m.openTrades.push({ shares, entryPrice: px, cost });
+  log(`✅ ${m.label} Entry ${entryNum} FILLED: ${shares}sh @ ${px} | cost $${cost}`);
 
   trades.push({
     time: new Date().toTimeString().slice(0, 8),
-    pair: m.pair, side: label,
-    shares, price: entryPx, cost,
-    fire: m.firedCount,
+    label: m.label, side: label,
+    entryNum, shares, price: px, cost,
+    category: m.category,
   });
 
   // Place TP immediately
-  const tpId = await placeLimitOrder(tokenId, 'SELL', TP_PRICE, shares, `${label}-TP${m.firedCount}`);
+  const tpId = await placeLimitOrder(tokenId, 'SELL', TP_PRICE, shares, `${label}-TP${entryNum}`);
   if (tpId) {
     m.tpOrderIds.push(tpId);
     m.openOrderIds.push(tpId);
-    log(`🎯 TP placed ${shares}sh @ ${TP_PRICE} → id=${tpId}`);
+    log(`🎯 TP placed ${shares}sh @ ${TP_PRICE} → ${tpId}`);
   }
 
-  // Capital updates in real-time via calcCapital()
-  log(`💰 Capital (real-time): $${calcCapital()} | Unrealized: $${calcUnrealized(m)}`);
+  log(`💰 Capital: $${calcCapital()} | Unrealized: $${calcUnrealized(m)}`);
   emitFn('state', buildState());
 }
 
-// ── Force sell ALL shares at 298s ──
-async function forceSell(m) {
-  if (m.forceSellDone) return;
-  m.forceSellDone = true;
+// ══════════════════════════════════════════
+//  FORCE EXIT
+// ══════════════════════════════════════════
+async function forceExit(m) {
+  if (m.exitDone) return;
+  m.exitDone = true;
 
   if (m.shares === 0) {
-    log(`✅ ${m.pair} force-sell: no open shares to sell`);
+    log(`✅ ${m.label} Exit: no open shares`);
     return;
   }
 
-  const isUp    = m.direction === 'up';
-  const label   = isUp ? 'UP' : 'DOWN';
-  const tokenId = isUp ? m.upTokenId : m.downTokenId;
-  const bid     = isUp ? m.upBestBid : m.dnBestBid;
-  const mid     = isUp ? m.upMid : m.downMid;
-  const tick    = parseFloat(isUp ? m.upTickSize : m.dnTickSize) || 0.01;
-
-  // First: cancel all open TP orders
+  // Cancel all open orders
   if (m.openOrderIds.length > 0) {
-    log(`🧹 Cancelling ${m.openOrderIds.length} open orders before force-sell`);
-    await Promise.all(m.openOrderIds.map(id => cancelOrder(id, 'pre-forcesell')));
+    log(`🧹 ${m.label} Cancelling ${m.openOrderIds.length} orders before exit`);
+    await Promise.all(m.openOrderIds.map(id => cancelOrder(id, 'pre-exit')));
     m.openOrderIds = [];
     m.tpOrderIds   = [];
   }
 
-  // Use mid price for force-sell — NOT the filtered bid.
-  // Near window resolution the losing side's bid disappears from the book,
-  // making upBestBid/dnBestBid fall to 0 even when the market still has value.
-  // The mid from the WebSocket/REST feed is accurate right up to expiry.
-  // Priority: mid → bid → 0.01 (absolute last resort)
-  await restRefreshPrice(m); // force a fresh REST fetch at the critical moment
-  const freshMid = isUp ? m.upMid : m.downMid;
-  const freshBid = isUp ? m.upBestBid : m.dnBestBid;
-  let sellPx = freshMid > 0 ? freshMid : (freshBid > 0 ? freshBid : 0.01);
-  // Cap one tick below TP_PRICE
+  const isYes   = m.side === 'yes';
+  const label   = isYes ? 'YES' : 'NO';
+  const tokenId = isYes ? m.yesTokenId : m.noTokenId;
+  const tick    = isYes ? (m.yesTick || 0.01) : (m.noTick || 0.01);
+
+  await refreshPriceRest(m);
+  const mid = isYes ? m.yesMid : m.noMid;
+  const bid = isYes ? m.yesBid : m.noBid;
+  let sellPx = mid > 0 ? mid : (bid > 0 ? bid : 0.01);
   sellPx = Math.min(sellPx, TP_PRICE - tick);
   sellPx = f4(Math.max(0.01, Math.round(sellPx / tick) * tick));
 
-  const totalShares = m.shares;
-  log(`🚨 FORCE SELL ${m.pair} ${totalShares}sh @ ${sellPx} at 298s`);
+  log(`🚨 ${m.label} FORCE EXIT ${m.shares}sh ${label} @ ${sellPx}`);
 
-  const orderId = await placeLimitOrder(tokenId, 'SELL', sellPx, totalShares, `${label}-FORCE`);
-  if (!orderId) {
-    log(`❌ Force sell order failed for ${m.pair}`);
-    return;
-  }
+  const orderId = await placeLimitOrder(tokenId, 'SELL', sellPx, m.shares, `${label}-EXIT`);
+  if (!orderId) { log(`❌ ${m.label} Exit order failed`); return; }
   m.openOrderIds.push(orderId);
 
-  // Wait up to 4s for fill (only 2s left in window)
-  const filled = await waitForFill(orderId, 4000, `${label}-FORCE`);
+  const filled = await waitForFill(orderId, 5000, `${label}-EXIT`);
   m.openOrderIds = m.openOrderIds.filter(id => id !== orderId);
-
   if (!filled) {
-    log(`⚠️  Force sell not filled in time — cancelling ${orderId}`);
-    await cancelOrder(orderId, `${label}-FORCE`);
-    // Even if not filled, record the attempted close
+    log(`⚠️  ${m.label} Exit not filled — cancelling`);
+    await cancelOrder(orderId, `${label}-EXIT`);
   }
 
-  // Compute realized P&L from this force-sell
-  const revenue    = f4(sellPx * totalShares);
-  const tradePnl   = f2(revenue - m.totalCost);
-  const won        = tradePnl > 0;
+  const revenue = f4(sellPx * m.shares);
+  const pnl     = f2(revenue - m.totalCost);
+  realizedPnl   = f2(realizedPnl + pnl);
 
-  log(`📊 Force-sell result: revenue=$${revenue} | cost=$${f2(m.totalCost)} | P&L=$${tradePnl}`);
+  log(`📊 ${m.label} Exit: revenue $${revenue} | cost $${f2(m.totalCost)} | P&L $${pnl}`);
+  log(`💰 Realized P&L: $${realizedPnl} | Capital: $${calcCapital()}`);
 
-  // Update realized P&L immediately
-  realizedPnl = f2(realizedPnl + tradePnl);
-
-  // Clear position
-  m.shares    = 0;
-  m.totalCost = 0;
+  m.shares     = 0;
+  m.totalCost  = 0;
   m.openTrades = [];
-
-  log(`💰 Capital UPDATED (realized): $${calcCapital()} | Session P&L: $${realizedPnl}`);
-  if (won) log(`🏆 ${m.pair} WINNER — capital updated immediately`);
-  else     log(`📉 ${m.pair} loss — capital updated`);
-
-  // Record real BTC close price from Binance for this window's candle
-  try {
-    const btcClose = await fetchBinancePrice(m.pair);
-    if (m.candleOpen && btcClose) {
-      recordCandle(m.pair, m.candleOpen, btcClose);
-    } else {
-      log('[CANDLE] Could not record candle: open=' + m.candleOpen + ' close=' + btcClose);
-    }
-  } catch (e) {
-    log('[CANDLE] recordCandle error: ' + e.message);
-  }
-
+  m.exitPnl    = pnl;
   emitFn('state', buildState());
 }
 
-// ── Main trading loop for one market window ──
+// ══════════════════════════════════════════
+//  TRADE LOOP (per market)
+// ══════════════════════════════════════════
 async function tradeLoop(m) {
   m.loopRunning = true;
-  const label = m.direction.toUpperCase();
-  log(`🚀 Trade loop: ${m.pair} direction=${label} fires at ${ENTRY_FIRE_SECS.join('/')}s`);
+  const sideLabel = m.side.toUpperCase();
+  log(`🚀 ${m.label} loop started — signal=${sideLabel} score=${m.signalScore} entries@${ENTRY_SECS.join('/')}s`);
 
-  const secsIn = () => (Date.now() - m.windowStartMs) / 1000;
-
-  // Track which fire indices we've already fired
-  const fired = new Set();
+  const fired  = new Set();
+  const secsIn = () => (Date.now() - m.tradeStartMs) / 1000;
 
   while (!m.done) {
     const secs = secsIn();
 
-    // ── 298s: force sell ──
-    if (secs >= FORCE_SELL_SECS && !m.forceSellDone) {
-      await forceSell(m);
+    if (secs >= FORCE_EXIT_SECS && !m.exitDone) {
+      await forceExit(m);
       m.done = true;
+      log(`🏁 ${m.label} window closed at ${secs.toFixed(0)}s`);
       break;
     }
 
     await ensureFreshPrice(m);
 
-    // ── Check each fire point (60, 120, 180, 240s) ──
-    for (let i = 0; i < ENTRY_FIRE_SECS.length; i++) {
-      const fireAt = ENTRY_FIRE_SECS[i];
-      if (!fired.has(i) && secs >= fireAt && secs < fireAt + 5) {
+    for (let i = 0; i < ENTRY_SECS.length; i++) {
+      const fireAt = ENTRY_SECS[i];
+      if (!fired.has(i) && secs >= fireAt && secs < fireAt + 8) {
         fired.add(i);
-        log(`⏱️  ${m.pair} ${secs.toFixed(1)}s — firing entry ${i + 1}/4`);
-        await fireEntry(m);
-        break;  // Only one entry per tick cycle
+        await fireEntry(m, i + 1);
+        break;
       }
     }
 
-    // ── Real-time capital broadcast every tick ──
     emitFn('state', buildState());
-
     await sleep(TICK_MS);
   }
 
   m.loopRunning = false;
-  log(`🏁 Trade loop ended for ${m.pair}`);
+  log(`🏁 ${m.label} trade loop ended`);
 }
 
-// ── Discovery loop ──
-async function discoverLoop() {
-  while (true) {
-    if (trader && Date.now() - lastDiscoverAt > DISCOVER_EVERY_MS) {
-      lastDiscoverAt = Date.now();
-      for (const pair of TARGET_PAIRS) {
-        await discoverMarket(pair).catch(e => log(`⚠️  Discover ${pair}: ${e.message}`));
+// ══════════════════════════════════════════
+//  MARKET SCANNER
+// ══════════════════════════════════════════
+async function scanMarkets() {
+  log('🔭 Scanning Polymarket for live opportunities…');
+
+  const nowMs       = Date.now();
+  const minEndMs    = nowMs + MIN_MINS_TO_END * 60_000;
+  const maxEndMs    = nowMs + MAX_MINS_TO_END * 60_000;
+
+  // Fetch live markets from Gamma (paginated, get most recent)
+  // Filter: active, not resolved, binary markets
+  let candidates = [];
+  try {
+    // Gamma: fetch markets ending soon, active=true
+    const minEndISO = new Date(minEndMs).toISOString();
+    const maxEndISO = new Date(maxEndMs).toISOString();
+
+    // Fetch multiple pages to get good coverage
+    const pages = await Promise.all([
+      getJSON(`${GAMMA}/markets?active=true&closed=false&limit=100&offset=0`),
+      getJSON(`${GAMMA}/markets?active=true&closed=false&limit=100&offset=100`),
+    ]);
+
+    for (const page of pages) {
+      if (!Array.isArray(page)) continue;
+      for (const mk of page) {
+        if (!mk.endDate) continue;
+        const endMs = new Date(mk.endDate).getTime();
+        if (endMs < minEndMs || endMs > maxEndMs) continue;
+        if (!mk.clobTokenIds) continue;
+        if (mk.closed || mk.archived) continue;
+        candidates.push(mk);
       }
     }
-    await sleep(2000);
+  } catch (e) {
+    log(`⚠️  Scan error: ${e.message}`);
+    return;
+  }
+
+  log(`🔭 Found ${candidates.length} candidate markets ending in ${MIN_MINS_TO_END}–${MAX_MINS_TO_END} min`);
+
+  // Process each candidate
+  for (const mk of candidates) {
+    try {
+      await evaluateCandidate(mk);
+    } catch (e) {
+      log(`⚠️  Evaluate error [${mk.slug}]: ${e.message}`);
+    }
+    await sleep(300); // throttle
   }
 }
 
-// ── Build dashboard state ──
+async function evaluateCandidate(mk) {
+  let ids;
+  try { ids = JSON.parse(mk.clobTokenIds); } catch (_) { return; }
+  if (!ids || ids.length < 2) return;
+
+  const slug = mk.slug;
+  if (markets[slug]) return; // already tracking
+
+  const yesTokenId = ids[0];
+  const noTokenId  = ids[1];
+  const endTime    = new Date(mk.endDate).getTime();
+  const minsLeft   = Math.floor((endTime - Date.now()) / 60_000);
+
+  // Build a temporary market object to run price/analysis
+  const tmp = {
+    slug, yesTokenId, noTokenId, endTime,
+    yesMid: 0, noMid: 0,
+    yesBid: 0, yesAsk: 0,
+    noBid: 0,  noAsk: 0,
+    yesLiquidityUsd: 0,
+    noLiquidityUsd:  0,
+    lastPriceAt: 0,
+    yesTick: parseFloat(mk.yesTick || '0.01') || 0.01,
+    noTick:  parseFloat(mk.noTick  || '0.01') || 0.01,
+  };
+
+  await refreshPriceRest(tmp);
+
+  // Price filter
+  if (!tmp.yesMid || tmp.yesMid < MIN_YES_MID || tmp.yesMid > MAX_YES_MID) return;
+
+  // Liquidity filter
+  if (tmp.yesLiquidityUsd < MIN_LIQUIDITY_USD || tmp.noLiquidityUsd < MIN_LIQUIDITY_USD) return;
+
+  // Seed price history for velocity calculation
+  if (yesTokenId) {
+    recordPriceHistory(yesTokenId, tmp.yesMid);
+  }
+
+  // Run signal engine
+  const analysis = analyzeMarket(tmp);
+  const { side, score, signals } = analysis;
+
+  const sigSummary = signals.map(s => `${s.name}:${s.vote}`).join(' | ');
+  log(`📊 [${slug.slice(0, 40)}] score=${score} ${sigSummary} | YES=${tmp.yesMid} minsLeft=${minsLeft}`);
+
+  if (!side) return; // No clear signal
+
+  // All checks passed — open this market
+  const question = mk.question || mk.title || slug;
+  const label    = question.length > 50 ? question.slice(0, 47) + '…' : question;
+
+  log(`✨ OPPORTUNITY: ${label}`);
+  log(`   Side=${side.toUpperCase()} | Score=${score} | YES=${tmp.yesMid} | NO=${tmp.noMid} | ${minsLeft}min left`);
+  signals.forEach(s => log(`   [${s.name}] ${s.vote}: ${s.detail}`));
+
+  // Get tick sizes from CLOB
+  let yesTick = '0.01', noTick = '0.01';
+  try {
+    [yesTick, noTick] = await Promise.all([
+      trader._clob.getTickSize(yesTokenId).catch(() => '0.01'),
+      trader._clob.getTickSize(noTokenId).catch(() => '0.01'),
+    ]);
+  } catch (_) {}
+
+  markets[slug] = {
+    slug, label,
+    question: mk.question || mk.title || slug,
+    category: mk.category || 'unknown',
+    yesTokenId, noTokenId, endTime,
+    tradeStartMs: Date.now(),
+
+    // Prices
+    yesMid: tmp.yesMid, noMid: tmp.noMid,
+    yesBid: tmp.yesBid, yesAsk: tmp.yesAsk,
+    noBid:  tmp.noBid,  noAsk:  tmp.noAsk,
+    yesLiquidityUsd: tmp.yesLiquidityUsd,
+    noLiquidityUsd:  tmp.noLiquidityUsd,
+    lastPriceAt: tmp.lastPriceAt,
+    yesTick: parseFloat(yesTick) || 0.01,
+    noTick:  parseFloat(noTick)  || 0.01,
+
+    // Signal
+    side,
+    signalScore: score,
+    signals,
+
+    // Position
+    shares: 0, totalCost: 0,
+    openTrades: [], openOrderIds: [], tpOrderIds: [],
+    firedCount: 0,
+    exitDone: false, done: false, loopRunning: false,
+    exitPnl: null,
+    minsLeft,
+  };
+
+  // Subscribe to WS
+  wsTokenMap[yesTokenId] = slug;
+  wsTokenMap[noTokenId]  = slug;
+  wsSubscribe([yesTokenId, noTokenId]);
+
+  // Launch trade loop
+  tradeLoop(markets[slug]).catch(e => log(`❌ Trade loop crash [${slug}]: ${e.message}`));
+}
+
+// ══════════════════════════════════════════
+//  P&L CALCULATIONS
+// ══════════════════════════════════════════
+function calcUnrealized(m) {
+  if (!m || m.shares === 0) return 0;
+  const mid = m.side === 'yes' ? m.yesMid : m.noMid;
+  const avg = m.totalCost / m.shares;
+  return f2((mid - avg) * m.shares);
+}
+
+function calcCapital() {
+  let unreal = 0;
+  for (const m of Object.values(markets)) unreal += calcUnrealized(m);
+  return f2(demoBalance + realizedPnl + unreal);
+}
+
+// ══════════════════════════════════════════
+//  SCAN LOOP
+// ══════════════════════════════════════════
+async function scanLoop() {
+  while (true) {
+    if (trader && Date.now() - lastScanAt > SCAN_EVERY_MS) {
+      lastScanAt = Date.now();
+      await scanMarkets().catch(e => log(`⚠️  Scan loop error: ${e.message}`));
+    }
+    await sleep(3000);
+  }
+}
+
+// ══════════════════════════════════════════
+//  STATE BUILDER
+// ══════════════════════════════════════════
 function buildState() {
   const capital    = calcCapital();
   const sessionPnl = f2(capital - demoBalance);
 
-  const mktList = Object.values(markets).map(m => {
-    const unrealized = calcUnrealized(m);
-    const avgCost    = m.shares > 0 ? f4(m.totalCost / m.shares) : 0;
-    return {
-      slug:        m.slug,
-      pair:        m.pair,
-      direction:   m.direction,
-      secsIn:      Math.floor((Date.now() - m.windowStartMs) / 1000),
-      secsLeft:    Math.max(0, Math.floor((m.endTime - Date.now()) / 1000)),
-      upPrice:     m.upMid,
-      downPrice:   m.downMid,
-      upBid:       m.upBestBid,
-      downBid:     m.dnBestBid,
-      shares:      m.shares,
-      totalCost:   f2(m.totalCost),
-      avgCost,
-      unrealized,
-      firedCount:  m.firedCount,
-      openOrders:  m.openOrderIds.length,
-      forceSellDone: m.forceSellDone,
-      done:        m.done,
-      dryRun:      DRY_RUN,
-    };
-  });
+  const mktList = Object.values(markets).map(m => ({
+    slug:        m.slug,
+    label:       m.label,
+    category:    m.category,
+    side:        m.side,
+    signalScore: m.signalScore,
+    signals:     (m.signals || []).map(s => `${s.name}:${s.vote}`).join(' '),
+    secsIn:      Math.floor((Date.now() - m.tradeStartMs) / 1000),
+    secsLeft:    Math.max(0, Math.floor((m.tradeStartMs + TRADE_WINDOW_SECS * 1000 - Date.now()) / 1000)),
+    minsLeft:    m.minsLeft,
+    yesMid:      m.yesMid,
+    noMid:       m.noMid,
+    yesLiq:      f2(m.yesLiquidityUsd || 0),
+    noLiq:       f2(m.noLiquidityUsd || 0),
+    shares:      m.shares,
+    totalCost:   f2(m.totalCost),
+    avgCost:     m.shares > 0 ? f4(m.totalCost / m.shares) : 0,
+    unrealized:  calcUnrealized(m),
+    firedCount:  m.firedCount,
+    openOrders:  m.openOrderIds.length,
+    exitDone:    m.exitDone,
+    done:        m.done,
+    exitPnl:     m.exitPnl,
+    dryRun:      DRY_RUN,
+  }));
 
   return {
-    capital,                          // real-time: demoBalance + realizedPnl + unrealized
-    startBalance: demoBalance,
-    realizedPnl,
-    pnl: sessionPnl,
-    uptime: Math.floor((Date.now() - startTime) / 1000),
-    dryRun: DRY_RUN,
+    capital, startBalance: demoBalance,
+    realizedPnl, pnl: sessionPnl,
+    uptime:  Math.floor((Date.now() - startTime) / 1000),
+    dryRun:  DRY_RUN,
     markets: mktList,
-    trades: trades.slice(-50),
-    logs: logs.slice(0, 80),
-    candleHistory,
+    trades:  trades.slice(-50),
+    logs:    logs.slice(0, 100),
+    activeCount:  mktList.filter(m => !m.done).length,
+    doneCount:    mktList.filter(m => m.done).length,
+    lastScanAgo:  Math.floor((Date.now() - lastScanAt) / 1000),
   };
 }
 
-// ── Exports ──
+// ══════════════════════════════════════════
+//  INIT
+// ══════════════════════════════════════════
 async function init(privateKey, emit, serverLog) {
   emitFn = emit || (() => {});
   slog   = serverLog || (() => {});
 
-  log(`🤖 Bot starting… DRY_RUN=${DRY_RUN}`);
-  if (DRY_RUN) log('⚠️  DRY RUN MODE — no real orders will be placed');
+  log('🤖 Polymarket Opportunist Bot starting…');
+  log(`   DRY_RUN=${DRY_RUN} | Strategy: Liquidity Momentum + Spread Fade`);
+  log(`   Window: ${TRADE_WINDOW_SECS / 60}min | Entries at ${ENTRY_SECS.join('/')}s | Exit at ${FORCE_EXIT_SECS}s`);
+  log(`   Targets: markets ending in ${MIN_MINS_TO_END}–${MAX_MINS_TO_END} min | YES mid ${MIN_YES_MID}–${MAX_YES_MID}`);
 
   trader = new PolymarketTrader(privateKey);
   trader.setLogFn(log);
@@ -735,25 +795,22 @@ async function init(privateKey, emit, serverLog) {
   await trader.approveAllowance();
 
   if (DRY_RUN) {
-    demoBalance = 200;
-    log('💰 DRY RUN demo balance set to $200');
+    demoBalance = 500;
+    log('💰 DRY RUN: demo balance $500');
   } else {
     demoBalance = await trader.getBalance();
     log(`💰 Live balance: $${demoBalance}`);
   }
+
   realizedPnl = 0;
   startTime   = Date.now();
 
   wsConnect();
 
-  // Bootstrap candle history from past completed windows before trading
-  for (const pair of TARGET_PAIRS) {
-    await bootstrapCandleHistory(pair, 5).catch(e => log(`⚠️  Bootstrap ${pair} failed: ${e.message}`));
-  }
+  // Kick off scan loop
+  scanLoop().catch(e => log(`❌ Scan loop crashed: ${e.message}`));
 
-  discoverLoop().catch(e => log(`❌ Discover loop crashed: ${e.message}`));
-
-  // Broadcast state every second
+  // State broadcast
   setInterval(() => emitFn('state', buildState()), 1000);
 }
 
