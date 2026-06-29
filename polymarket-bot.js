@@ -305,11 +305,14 @@ async function placeTP(m, isUp, shares, entryPrice) {
     if (isUp)  m.upOpenOrders.push(tpId);
     else       m.downOpenOrders.push(tpId);
     log(`✅ ${label} order placed → id=${tpId}`);
-    // In DRY_RUN, simulate TP filling and credit proceeds to demo balance
+    // In DRY_RUN, simulate TP filling, credit proceeds, and remove from open orders
     if (DRY_RUN) {
       const proceeds = f2(TP_PRICE * shares);
       balance = f2(balance + proceeds);
       log(`[DRY_RUN] Simulated ${label} TP fill → +$${proceeds} | demo balance: $${balance}`);
+      // Remove from open orders since it is now filled
+      if (isUp) m.upOpenOrders   = m.upOpenOrders.filter(id => id !== tpId);
+      else      m.downOpenOrders = m.downOpenOrders.filter(id => id !== tpId);
     }
   }
   return tpId;
