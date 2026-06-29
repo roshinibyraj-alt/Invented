@@ -15,7 +15,7 @@ const WINDOW_SECS       = 300;
 // ── Arbitrage Strategy Config ──
 const ENTRY_WAIT_SECS  = 10;    // wait 10s after window open for prices to settle
 const ARB_SHARES       = 6;     // shares to buy on each side per arb
-const ARB_THRESHOLD    = 0.97;  // buy both when combined ask <= this (guaranteed profit on resolution)
+const ARB_THRESHOLD    = 0.98;  // buy both when combined ask <= this (guaranteed profit on resolution)
 const ARB_EXIT_PROFIT  = 0.995; // sell early if combined bid reaches this (lock in instant profit)
 const FORCE_CLOSE_SECS = 10;    // no new entries in last 10s, attempt early-exit sell
 const NUKE_SECS        = 5;     // T-5s: nuclear close of all open positions
