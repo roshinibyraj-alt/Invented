@@ -13,32 +13,27 @@ const DISCOVER_EVERY_MS = 15000;
 const TICK_MS           = 500;
 
 // ── Strategy config ──
-const SHARES          = 6;          // shares per order attempt on each side
-const PRICE_OFFSET    = 0.03;       // limit = ask - 0.03
-const FILL_WAIT_MS    = 20000;      // cancel if not filled in 20 s
-const ENTRY_INTERVAL  = 25;         // place orders every 25 s into window
-const LAST_ENTRY_SECS = 125;        // last entry attempt at 125 s
-const NUKE_SECS       = 230;        // at 230 s: force-sell any remaining position at market
+const SHARES          = 6;
+const PRICE_OFFSET    = 0.03;
+const FILL_WAIT_MS    = 20000;
+const ENTRY_INTERVAL  = 25;
+const LAST_ENTRY_SECS = 125;
+const NUKE_SECS       = 230;
 
 const TARGET_PAIRS = ['BTC'];
 
-// ── Runtime state ──
 let emitFn       = () => {};
 let slog         = () => {};
 let trader       = null;
 let balance      = 0;
 let startBalance = 0;
 let startTime    = Date.now();
-const BOT_START_TIME = Date.now();
 
 const logs    = [];
 const trades  = [];
 const markets = {};
-let lastDiscoverAt  = 0;
-let heartbeatId     = '';
-let lastHeartbeatAt = 0;
+let lastDiscoverAt = 0;
 
-// ── Helpers ──
 const f2 = v => Math.round((v || 0) * 100) / 100;
 const f4 = v => Math.round((v || 0) * 10000) / 10000;
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -187,15 +182,14 @@ async function discoverMarket(pair) {
   const endTime = mk.endDate ? new Date(mk.endDate).getTime() : null;
   if (!endTime) return;
 
-  const secsToEnd = (endTime - Date.now()) / 1000;
+  const secsToEnd      = (endTime - Date.now()) / 1000;
   if (secsToEnd <= 0 || secsToEnd > WINDOW_SECS + 5) return;
 
-  const windowStartMs    = endTime - WINDOW_SECS * 1000;
-  const secsIntoWindow   = (Date.now() - windowStartMs) / 1000;
+  const windowStartMs  = endTime - WINDOW_SECS * 1000;
+  const secsIntoWindow = (Date.now() - windowStartMs) / 1000;
 
-  // Allow joining as long as we're before the last entry point
   if (secsIntoWindow > LAST_ENTRY_SECS) {
-    log(`⏭️  ${pair} window already past last entry (${Math.floor(secsIntoWindow)}s in) — waiting for next`);
+    log(`⏭️  ${pair} past last entry slot (${Math.floor(secsIntoWindow)}s in) — waiting for next window`);
     return;
   }
 
@@ -220,20 +214,12 @@ async function discoverMarket(pair) {
     upBestBid: 0, upBestAsk: 0,
     dnBestBid: 0, dnBestAsk: 0,
     lastPriceAt: 0,
-    upTickSize, upNegRisk, dnTickSize, dnNegRisk,
-    // ── Position tracking ──
-    upShares:   0,    // confirmed filled UP shares
-    downShares: 0,    // confirmed filled DOWN shares
-    upCost:     0,    // total cost paid for UP shares
-    downCost:   0,    // total cost paid for DOWN shares
-    // ── State flags ──
-    merging:    false,  // cash-out in progress
-    nuking:     false,  // force-sell in progress
-    done:       false,
-    loopRunning: false,
-    // ── Entry tracking ──
-    lastEntryAt: 0,     // timestamp of last entry tick
-    nextEntrySlot: 0,   // which 25s slot to attempt next (0,1,2,3,4,5)
+    upTickSize, upNegRisk,
+    dnTickSize, dnNegRisk,
+    upShares: 0, downShares: 0,
+    upCost:   0, downCost:   0,
+    merging: false, nuking: false,
+    done: false, loopRunning: false,
   };
 
   wsTokenMap[ids[0]] = slug;
@@ -244,59 +230,42 @@ async function discoverMarket(pair) {
   tradeLoop(markets[slug]).catch(e => log(`❌ Loop crash ${pair}: ${e.message}`));
 }
 
-// ─────────────────────────────────────────────────────────────
-//  SINGLE-SIDE ENTRY: place GTC limit buy, wait up to 20s, cancel if not filled
-//  Returns number of shares confirmed filled (0 or SHARES)
-// ─────────────────────────────────────────────────────────────
+// ── Single-side entry: GTC limit buy, wait 20s, cancel if not filled ──
 async function tryEntry(m, side) {
-  // side = 'up' or 'down'
   const isUp     = side === 'up';
   const tokenId  = isUp ? m.upTokenId  : m.downTokenId;
   const ask      = isUp ? m.upBestAsk  : m.dnBestAsk;
   const mid      = isUp ? m.upMid      : m.downMid;
   const tickSize = isUp ? m.upTickSize : m.dnTickSize;
-  const negRisk  = isUp ? m.upNegRisk  : m.dnNegRisk;
   const label    = isUp ? 'UP' : 'DOWN';
 
-  // Price rule: UP side only when price < 0.50, DOWN side only when price > 0.50
   const currentPrice = mid || ask || 0.5;
-  if (isUp  && currentPrice >= 0.50) {
-    log(`⏸  ${label} price ${currentPrice} >= 0.50 — skip`);
-    return 0;
-  }
-  if (!isUp && currentPrice <= 0.50) {
-    log(`⏸  ${label} price ${currentPrice} <= 0.50 — skip`);
-    return 0;
-  }
 
-  if (!ask || ask <= 0) {
-    log(`⚠️  ${label} no ask price available — skip`);
-    return 0;
-  }
+  // UP buys only when price < 0.50, DOWN buys only when price > 0.50
+  if (isUp  && currentPrice >= 0.50) { log(`⏸  ${label} price ${currentPrice} >= 0.50 — skip`); return 0; }
+  if (!isUp && currentPrice <= 0.50) { log(`⏸  ${label} price ${currentPrice} <= 0.50 — skip`); return 0; }
 
-  // Limit price = ask - 0.03, snapped to tick
+  if (!ask || ask <= 0) { log(`⚠️  ${label} no ask price — skip`); return 0; }
+
   const tick     = parseFloat(tickSize) || 0.01;
   const rawPrice = ask - PRICE_OFFSET;
   const price    = f4(Math.max(0.01, Math.round(rawPrice / tick) * tick));
 
-  if (price <= 0.01) {
-    log(`⚠️  ${label} computed price ${price} too low — skip`);
-    return 0;
-  }
+  if (price <= 0.01) { log(`⚠️  ${label} price ${price} too low — skip`); return 0; }
 
-  log(`📥 Placing ${label} GTC limit BUY ${SHARES}sh @ ${price} (ask=${ask})`);
+  log(`📥 ${label} GTC BUY ${SHARES}sh @ ${price} (ask=${ask})`);
 
   let orderId;
   try {
     const resp = await trader.placeGtcOrder(tokenId, 'BUY', price, SHARES);
     orderId = resp?.id;
-    if (!orderId) throw new Error('no orderID returned');
+    if (!orderId) throw new Error('no orderID');
   } catch (e) {
-    log(`❌ ${label} order placement failed: ${e.message}`);
+    log(`❌ ${label} order failed: ${e.message}`);
     return 0;
   }
 
-  // Poll for fill for up to FILL_WAIT_MS
+  // Poll for fill up to 20s
   const deadline = Date.now() + FILL_WAIT_MS;
   let filled = false;
   while (Date.now() < deadline) {
@@ -307,10 +276,7 @@ async function tryEntry(m, side) {
       const status      = (order.status || '').toUpperCase();
       const matchStatus = (order.match_status || order.matchStatus || '').toLowerCase();
       const state       = (order.state || '').toLowerCase();
-      if (status === 'FILLED' || matchStatus === 'filled' || state === 'filled') {
-        filled = true;
-        break;
-      }
+      if (status === 'FILLED' || matchStatus === 'filled' || state === 'filled') { filled = true; break; }
       if (status === 'CANCELLED' || matchStatus === 'cancelled') {
         log(`⚠️  ${label} order cancelled externally`);
         return 0;
@@ -319,201 +285,150 @@ async function tryEntry(m, side) {
   }
 
   if (!filled) {
-    // Cancel the unfilled order
-    log(`⏰ ${label} order not filled in 20s — cancelling`);
+    log(`⏰ ${label} not filled in 20s — cancelling`);
     try { await trader.cancelOrder(orderId); } catch (_) {}
     return 0;
   }
 
   const cost = f4(price * SHARES);
-  log(`✅ ${label} FILLED ${SHARES}sh @ ${price} (cost $${cost})`);
+  log(`✅ ${label} FILLED ${SHARES}sh @ ${price} | cost $${cost}`);
 
-  if (isUp) {
-    m.upShares += SHARES;
-    m.upCost   += cost;
-  } else {
-    m.downShares += SHARES;
-    m.downCost   += cost;
-  }
+  if (isUp) { m.upShares += SHARES;   m.upCost   += cost; }
+  else      { m.downShares += SHARES; m.downCost += cost; }
 
   trades.push({
     time: new Date().toTimeString().slice(0, 8),
-    pair: m.pair,
-    side: label,
-    shares: SHARES,
-    price,
-    cost,
+    pair: m.pair, side: label,
+    shares: SHARES, price, cost,
   });
 
   emitFn('state', buildState());
   return SHARES;
 }
 
-// ─────────────────────────────────────────────────────────────
-//  CASH OUT: both sides have 6 shares — sell both via GTC market bids
-//  This is off-chain, no gas needed
-// ─────────────────────────────────────────────────────────────
+// ── Cash-out: sell both sides via GTC at best bid (off-chain) ──
 async function cashOut(m) {
   if (m.merging) return;
   m.merging = true;
-  log(`💰 CASH OUT: ${m.upShares} UP + ${m.downShares} DOWN shares → selling both sides`);
+  log(`💰 CASH OUT — selling ${m.upShares} UP + ${m.downShares} DOWN`);
 
-  // Sell UP shares at best bid (or slightly above to ensure fill)
-  const upSell   = async () => {
+  const sellSide = async (isUp) => {
     await ensureFreshPrice(m);
-    const bid   = m.upBestBid || f4((m.upMid || 0.5) - 0.01);
-    const price = f4(Math.max(0.01, bid));
-    log(`💸 Selling ${m.upShares} UP @ ${price}`);
+    const shares  = isUp ? m.upShares   : m.downShares;
+    const tokenId = isUp ? m.upTokenId  : m.downTokenId;
+    const bid     = isUp ? m.upBestBid  : m.dnBestBid;
+    const mid     = isUp ? m.upMid      : m.downMid;
+    const label   = isUp ? 'UP' : 'DOWN';
+    if (shares <= 0) return;
+    const price = f4(Math.max(0.01, bid || (mid - 0.01) || 0.01));
+    log(`💸 Selling ${shares} ${label} @ ${price}`);
     try {
-      const r = await trader.placeGtcOrder(m.upTokenId, 'SELL', price, m.upShares);
+      const r = await trader.placeGtcOrder(tokenId, 'SELL', price, shares);
       if (r?.id) {
         await trader.waitForFill(r.id, 15000);
-        log(`✅ UP sell filled`);
+        log(`✅ ${label} sell filled`);
       }
-    } catch (e) { log(`⚠️  UP sell error: ${e.message}`); }
+    } catch (e) { log(`⚠️  ${label} sell error: ${e.message}`); }
   };
 
-  // Sell DOWN shares at best bid
-  const downSell = async () => {
-    await ensureFreshPrice(m);
-    const bid   = m.dnBestBid || f4((m.downMid || 0.5) - 0.01);
-    const price = f4(Math.max(0.01, bid));
-    log(`💸 Selling ${m.downShares} DOWN @ ${price}`);
-    try {
-      const r = await trader.placeGtcOrder(m.downTokenId, 'SELL', price, m.downShares);
-      if (r?.id) {
-        await trader.waitForFill(r.id, 15000);
-        log(`✅ DOWN sell filled`);
-      }
-    } catch (e) { log(`⚠️  DOWN sell error: ${e.message}`); }
-  };
+  await Promise.all([sellSide(true), sellSide(false)]);
 
-  // Run both sells in parallel
-  await Promise.all([
-    m.upShares   > 0 ? upSell()   : Promise.resolve(),
-    m.downShares > 0 ? downSell() : Promise.resolve(),
-  ]);
-
-  const totalCost    = f4(m.upCost + m.downCost);
-  const mergedValue  = f4(Math.min(m.upShares, m.downShares) * 1.0);
-  log(`📊 Cash-out complete. Cost: $${totalCost} | Pairs merged value: $${mergedValue}`);
-
-  m.upShares   = 0;
-  m.downShares = 0;
-  m.upCost     = 0;
-  m.downCost   = 0;
-  m.done       = true;
-
+  log(`📊 Cash-out done. Total cost was $${f2(m.upCost + m.downCost)}`);
+  m.upShares = 0; m.downShares = 0;
+  m.upCost   = 0; m.downCost   = 0;
+  m.done     = true;
   balance = await trader.getBalance();
   emitFn('state', buildState());
 }
 
-// ─────────────────────────────────────────────────────────────
-//  FORCE SELL at 230s: FOK market sell any remaining position
-// ─────────────────────────────────────────────────────────────
+// ── Force-sell at 230s: FOK market sell all remaining positions ──
 async function forceSell(m) {
   if (m.nuking) return;
   m.nuking = true;
-  log(`🚨 FORCE SELL at 230s — liquidating all positions`);
+  log(`🚨 FORCE SELL at ${NUKE_SECS}s — liquidating all open positions`);
 
   const jobs = [];
 
   if (m.upShares > 0) {
     jobs.push((async () => {
-      log(`🔥 Force-selling ${m.upShares} UP shares (FOK market)`);
+      log(`🔥 Force-selling ${m.upShares} UP (FOK market)`);
       try {
         const r = await trader.placeFokSell(m.upTokenId, m.upShares);
-        log(`🔥 UP force-sell → ${r.isFilled ? 'FILLED' : 'NOT FILLED'} avg:${r.avgPrice}`);
-      } catch (e) { log(`⚠️  UP force-sell error: ${e.message}`); }
+        log(`🔥 UP → ${r.isFilled ? 'FILLED' : 'NOT FILLED'} avg:${r.avgPrice}`);
+      } catch (e) { log(`⚠️  UP force-sell: ${e.message}`); }
     })());
   }
 
   if (m.downShares > 0) {
     jobs.push((async () => {
-      log(`🔥 Force-selling ${m.downShares} DOWN shares (FOK market)`);
+      log(`🔥 Force-selling ${m.downShares} DOWN (FOK market)`);
       try {
         const r = await trader.placeFokSell(m.downTokenId, m.downShares);
-        log(`🔥 DOWN force-sell → ${r.isFilled ? 'FILLED' : 'NOT FILLED'} avg:${r.avgPrice}`);
-      } catch (e) { log(`⚠️  DOWN force-sell error: ${e.message}`); }
+        log(`🔥 DOWN → ${r.isFilled ? 'FILLED' : 'NOT FILLED'} avg:${r.avgPrice}`);
+      } catch (e) { log(`⚠️  DOWN force-sell: ${e.message}`); }
     })());
   }
 
-  if (jobs.length === 0) {
-    log(`✅ No positions to force-sell`);
-  } else {
-    await Promise.all(jobs);
-  }
+  if (jobs.length === 0) log(`✅ No open positions at force-sell`);
+  else await Promise.all(jobs);
 
-  m.upShares   = 0;
-  m.downShares = 0;
-  m.done       = true;
-
+  m.upShares = 0; m.downShares = 0;
+  m.done     = true;
   balance = await trader.getBalance();
   emitFn('state', buildState());
 }
 
-// ─────────────────────────────────────────────────────────────
-//  MAIN TRADE LOOP for one market window
-// ─────────────────────────────────────────────────────────────
+// ── Main trade loop ──
 async function tradeLoop(m) {
   if (m.loopRunning) return;
   m.loopRunning = true;
+  log(`🚀 Trade loop started for ${m.pair}`);
 
-  log(`🚀 Trade loop started for ${m.pair} | window ends ${new Date(m.endTime).toTimeString().slice(0,8)}`);
-
-  // Figure out which 25s slots we've already passed
-  const secsIntoWindow = () => (Date.now() - m.windowStartMs) / 1000;
-
-  // The slots we attempt: 0s, 25s, 50s, 75s, 100s, 125s
+  const secsIn = () => (Date.now() - m.windowStartMs) / 1000;
   const entrySlots = [0, 25, 50, 75, 100, 125];
   let slotIndex = 0;
 
-  // Fast-forward past already-elapsed slots (if bot joined mid-window)
-  while (slotIndex < entrySlots.length && secsIntoWindow() > entrySlots[slotIndex] + 2) {
-    log(`⏩ Skipping already-elapsed slot ${entrySlots[slotIndex]}s`);
+  // Skip slots already elapsed when joining mid-window
+  while (slotIndex < entrySlots.length && secsIn() > entrySlots[slotIndex] + 2) {
+    log(`⏩ Skipping elapsed slot ${entrySlots[slotIndex]}s`);
     slotIndex++;
   }
 
   while (!m.done) {
-    const secs = secsIntoWindow();
+    const secs = secsIn();
 
-    // ── 230s: force-sell any remaining position ──
+    // 230s: force-sell everything
     if (secs >= NUKE_SECS && !m.nuking) {
       await forceSell(m);
       break;
     }
 
-    // ── Check if we have a full set → cash out immediately ──
+    // Full set achieved: cash out immediately
     if (m.upShares >= SHARES && m.downShares >= SHARES && !m.merging && !m.nuking) {
       await cashOut(m);
       break;
     }
 
-    // ── Entry tick: is it time for the next 25s slot? ──
-    if (slotIndex < entrySlots.length) {
-      const targetSec = entrySlots[slotIndex];
+    // Next entry slot reached
+    if (slotIndex < entrySlots.length && secs >= entrySlots[slotIndex]) {
+      log(`⏱  Entry slot ${entrySlots[slotIndex]}s`);
+      slotIndex++;
 
-      if (secs >= targetSec) {
-        log(`⏱  Entry slot ${targetSec}s (secs into window: ${secs.toFixed(1)})`);
-        slotIndex++;
+      await ensureFreshPrice(m);
 
-        // Refresh prices before deciding
-        await ensureFreshPrice(m);
+      // Both sides fire in parallel, each decides independently
+      await Promise.all([
+        m.upShares   < SHARES && !m.merging ? tryEntry(m, 'up')   : Promise.resolve(),
+        m.downShares < SHARES && !m.merging ? tryEntry(m, 'down') : Promise.resolve(),
+      ]);
 
-        // Run both sides in parallel — each decides independently based on its own price
-        await Promise.all([
-          m.upShares   < SHARES && !m.merging ? tryEntry(m, 'up')   : Promise.resolve(),
-          m.downShares < SHARES && !m.merging ? tryEntry(m, 'down') : Promise.resolve(),
-        ]);
-
-        // Check merge immediately after any fill
-        if (m.upShares >= SHARES && m.downShares >= SHARES && !m.merging) {
-          await cashOut(m);
-          break;
-        }
-
-        emitFn('state', buildState());
+      // Check for full set immediately after fills
+      if (m.upShares >= SHARES && m.downShares >= SHARES && !m.merging) {
+        await cashOut(m);
+        break;
       }
+
+      emitFn('state', buildState());
     }
 
     await sleep(TICK_MS);
@@ -529,58 +444,35 @@ async function discoverLoop() {
     if (trader && Date.now() - lastDiscoverAt > DISCOVER_EVERY_MS) {
       lastDiscoverAt = Date.now();
       for (const pair of TARGET_PAIRS) {
-        await discoverMarket(pair).catch(e => log(`⚠️  Discover error ${pair}: ${e.message}`));
+        await discoverMarket(pair).catch(e => log(`⚠️  Discover ${pair}: ${e.message}`));
       }
     }
     await sleep(2000);
   }
 }
 
-// ── Heartbeat ──
-async function heartbeatLoop() {
-  while (true) {
-    if (trader) {
-      try {
-        if (!heartbeatId) {
-          const r = await trader._clob.createApiKey?.().catch(() => null);
-          heartbeatId = r?.id || 'ok';
-        }
-        await trader._clob.getOk?.().catch(() => null);
-        lastHeartbeatAt = Date.now();
-      } catch (_) {}
-    }
-    await sleep(30000);
-  }
-}
-
-// ─────────────────────────────────────────────────────────────
-//  STATE for dashboard
-// ─────────────────────────────────────────────────────────────
+// ── Build dashboard state ──
 function buildState() {
-  const mktList = Object.values(markets).map(m => {
-    const secs = (Date.now() - m.windowStartMs) / 1000;
-    return {
-      slug:        m.slug,
-      pair:        m.pair,
-      secsIn:      Math.floor(secs),
-      secsLeft:    Math.max(0, Math.floor((m.endTime - Date.now()) / 1000)),
-      upPrice:     m.upMid,
-      downPrice:   m.downMid,
-      upAsk:       m.upBestAsk,
-      downAsk:     m.dnBestAsk,
-      upBid:       m.upBestBid,
-      downBid:     m.dnBestBid,
-      upShares:    m.upShares,
-      downShares:  m.downShares,
-      upCost:      f2(m.upCost),
-      downCost:    f2(m.downCost),
-      totalCost:   f2(m.upCost + m.downCost),
-      pnl:         f2((m.upShares + m.downShares) * 0 - m.upCost - m.downCost), // live pnl needs sell price
-      merging:     m.merging,
-      nuking:      m.nuking,
-      done:        m.done,
-    };
-  });
+  const mktList = Object.values(markets).map(m => ({
+    slug:       m.slug,
+    pair:       m.pair,
+    secsIn:     Math.floor((Date.now() - m.windowStartMs) / 1000),
+    secsLeft:   Math.max(0, Math.floor((m.endTime - Date.now()) / 1000)),
+    upPrice:    m.upMid,
+    downPrice:  m.downMid,
+    upAsk:      m.upBestAsk,
+    downAsk:    m.dnBestAsk,
+    upBid:      m.upBestBid,
+    downBid:    m.dnBestBid,
+    upShares:   m.upShares,
+    downShares: m.downShares,
+    upCost:     f2(m.upCost),
+    downCost:   f2(m.downCost),
+    totalCost:  f2(m.upCost + m.downCost),
+    merging:    m.merging,
+    nuking:     m.nuking,
+    done:       m.done,
+  }));
   return {
     balance:      f2(balance),
     startBalance: f2(startBalance),
@@ -592,15 +484,12 @@ function buildState() {
   };
 }
 
-// ─────────────────────────────────────────────────────────────
-//  EXPORTS (called by server.js)
-// ─────────────────────────────────────────────────────────────
+// ── Exports called by server.js ──
 async function init(privateKey, emit, serverLog) {
   emitFn = emit || (() => {});
   slog   = serverLog || (() => {});
 
   log('🤖 Sniper bot starting…');
-
   trader = new PolymarketTrader(privateKey);
   trader.setLogFn(log);
 
@@ -614,10 +503,8 @@ async function init(privateKey, emit, serverLog) {
   log(`💰 Balance: $${balance}`);
 
   wsConnect();
-  discoverLoop().catch(e => log(`❌ Discover loop: ${e.message}`));
-  heartbeatLoop().catch(() => {});
+  discoverLoop().catch(e => log(`❌ Discover loop crashed: ${e.message}`));
 
-  // Emit state every 2s
   setInterval(() => emitFn('state', buildState()), 2000);
 }
 
