@@ -12,10 +12,8 @@ const PORT   = process.env.PORT || 8080;
 
 const DRY_RUN = (process.env.DRY_RUN || 'true').toLowerCase() === 'true';
 
-// ── Healthcheck ──
 app.get('/healthz', (req, res) => res.sendStatus(200));
 
-// ── Dashboard HTML ──
 app.get('/', (req, res) => {
   res.send(`<!DOCTYPE html>
 <html>
@@ -25,30 +23,38 @@ app.get('/', (req, res) => {
   <style>
     body { font-family: monospace; background: #0d0d0d; color: #e0e0e0; padding: 16px; font-size: 13px; }
     h2 { color: #00e5ff; margin: 0 0 4px; }
-    .dry-banner { background: #ffd74033; border: 1px solid #ffd740; color: #ffd740;
-                  padding: 8px 14px; border-radius: 6px; margin-bottom: 14px;
-                  font-size: 13px; font-weight: bold; display: none; }
+    .dry-banner  { background: #ffd74033; border: 1px solid #ffd740; color: #ffd740;
+                   padding: 8px 14px; border-radius: 6px; margin-bottom: 14px; font-size: 13px; font-weight: bold; display: none; }
     .live-banner { background: #ff525233; border: 1px solid #ff5252; color: #ff5252;
-                   padding: 8px 14px; border-radius: 6px; margin-bottom: 14px;
-                   font-size: 13px; font-weight: bold; display: none; }
+                   padding: 8px 14px; border-radius: 6px; margin-bottom: 14px; font-size: 13px; font-weight: bold; display: none; }
     .row { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; }
-    .card { background: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 12px; min-width: 180px; flex: 1; }
+    .card { background: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 12px; min-width: 160px; flex: 1; }
     .card h3 { margin: 0 0 8px; color: #aaa; font-size: 11px; text-transform: uppercase; }
     .big { font-size: 22px; font-weight: bold; color: #fff; }
     .green  { color: #00e676; }
     .red    { color: #ff5252; }
     .yellow { color: #ffd740; }
+    .cyan   { color: #00e5ff; }
     table { width: 100%; border-collapse: collapse; margin-bottom: 16px; }
     th { background: #222; color: #888; padding: 6px 8px; text-align: left; font-size: 11px; }
     td { padding: 5px 8px; border-bottom: 1px solid #222; font-size: 12px; }
     .log-box { background: #111; border: 1px solid #333; border-radius: 6px; padding: 10px;
-               height: 280px; overflow-y: auto; font-size: 11px; line-height: 1.6; }
+               height: 300px; overflow-y: auto; font-size: 11px; line-height: 1.6; }
     .badge { display: inline-block; padding: 2px 7px; border-radius: 10px; font-size: 10px; font-weight: bold; }
     .badge-green  { background: #00e67622; color: #00e676; border: 1px solid #00e676; }
     .badge-yellow { background: #ffd74022; color: #ffd740; border: 1px solid #ffd740; }
     .badge-red    { background: #ff525222; color: #ff5252; border: 1px solid #ff5252; }
-    .badge-grey   { background: #33333322; color: #888;    border: 1px solid #555; }
     .badge-blue   { background: #00e5ff22; color: #00e5ff; border: 1px solid #00e5ff; }
+    .badge-grey   { background: #33333322; color: #888;    border: 1px solid #555; }
+    .fire-pip { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 3px; }
+    .fire-lit  { background: #00e676; }
+    .fire-dark { background: #333; border: 1px solid #555; }
+    .section-title { color: #aaa; margin: 0 0 8px; font-size: 12px; }
+    .candle-hist { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 14px; }
+    .candle-chip { padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: bold; }
+    .candle-green  { background: #00e67622; color: #00e676; border: 1px solid #00e676; }
+    .candle-red    { background: #ff525222; color: #ff5252; border: 1px solid #ff5252; }
+    .candle-doji   { background: #ffd74022; color: #ffd740; border: 1px solid #ffd740; }
   </style>
 </head>
 <body>
@@ -56,14 +62,20 @@ app.get('/', (req, res) => {
   <div class="dry-banner"  id="dry-banner">⚠️ DRY RUN MODE — No real orders are being placed</div>
   <div class="live-banner" id="live-banner">🔴 LIVE MODE — Real money is active</div>
 
+  <!-- Capital row -->
   <div class="row">
     <div class="card">
-      <h3>Balance</h3>
-      <div class="big" id="bal">—</div>
+      <h3>Capital (real-time)</h3>
+      <div class="big cyan" id="capital">—</div>
+      <div style="font-size:10px;color:#555;margin-top:4px;">start + realized + unrealized</div>
     </div>
     <div class="card">
-      <h3>Session PnL</h3>
+      <h3>Session P&amp;L</h3>
       <div class="big" id="pnl">—</div>
+    </div>
+    <div class="card">
+      <h3>Realized P&amp;L</h3>
+      <div class="big" id="realized">—</div>
     </div>
     <div class="card">
       <h3>Uptime</h3>
@@ -71,78 +83,120 @@ app.get('/', (req, res) => {
     </div>
   </div>
 
-  <h3 style="color:#aaa;margin:0 0 8px;font-size:12px;">ACTIVE MARKETS</h3>
+  <!-- Candle history -->
+  <h3 class="section-title">CANDLE HISTORY (last 5)</h3>
+  <div class="candle-hist" id="candle-hist">—</div>
+
+  <!-- Active markets -->
+  <h3 class="section-title">ACTIVE MARKETS</h3>
   <table>
     <thead>
       <tr>
-        <th>Pair</th><th>Secs In</th><th>Secs Left</th>
-        <th>UP Price</th><th>DN Price</th>
-        <th>UP Shares</th><th>DN Shares</th>
-        <th>UP Orders</th><th>DN Orders</th>
-        <th>Cost</th><th>UP</th><th>DN</th>
+        <th>Pair</th>
+        <th>Direction</th>
+        <th>Secs In</th>
+        <th>Secs Left</th>
+        <th>Price (side)</th>
+        <th>Shares</th>
+        <th>Avg Cost</th>
+        <th>Total Cost</th>
+        <th>Unrealized</th>
+        <th>Fires</th>
+        <th>Open Orders</th>
+        <th>Status</th>
       </tr>
     </thead>
     <tbody id="mkt-body"><tr><td colspan="12" style="color:#555">Waiting for window…</td></tr></tbody>
   </table>
 
-  <h3 style="color:#aaa;margin:0 0 8px;font-size:12px;">RECENT TRADES</h3>
+  <!-- Recent trades -->
+  <h3 class="section-title">RECENT TRADES</h3>
   <table>
-    <thead><tr><th>Time</th><th>Pair</th><th>Side</th><th>Shares</th><th>Price</th><th>Cost</th></tr></thead>
-    <tbody id="trade-body"><tr><td colspan="6" style="color:#555">No trades yet</td></tr></tbody>
+    <thead><tr><th>Time</th><th>Pair</th><th>Side</th><th>Fire#</th><th>Shares</th><th>Price</th><th>Cost</th></tr></thead>
+    <tbody id="trade-body"><tr><td colspan="7" style="color:#555">No trades yet</td></tr></tbody>
   </table>
 
-  <h3 style="color:#aaa;margin:0 0 8px;font-size:12px;">LOGS</h3>
+  <!-- Logs -->
+  <h3 class="section-title">LOGS</h3>
   <div class="log-box" id="logs"></div>
 
   <script src="/socket.io/socket.io.js"></script>
   <script>
     const socket = io();
-    const fmt  = v => v !== undefined ? (v >= 0 ? '+' : '') + v.toFixed(2) : '—';
-    const fmtS = s => { const m = Math.floor(s/60), sec = s%60; return m + 'm ' + String(sec).padStart(2,'0') + 's'; }
+    const fmtS   = s => { const m = Math.floor(s/60), sec = s%60; return m + 'm ' + String(sec).padStart(2,'0') + 's'; };
+    const sgn    = v => (v >= 0 ? '+' : '') + v.toFixed(2);
 
     socket.on('state', s => {
-      // DRY RUN banner
-      if (s.dryRun) {
-        document.getElementById('dry-banner').style.display  = 'block';
-        document.getElementById('live-banner').style.display = 'none';
-      } else {
-        document.getElementById('dry-banner').style.display  = 'none';
-        document.getElementById('live-banner').style.display = 'block';
-      }
+      // Banner
+      document.getElementById('dry-banner').style.display  = s.dryRun ? 'block' : 'none';
+      document.getElementById('live-banner').style.display = s.dryRun ? 'none'  : 'block';
 
-      document.getElementById('bal').textContent = '$' + (s.balance || 0).toFixed(2);
+      // Capital
+      const capEl = document.getElementById('capital');
+      capEl.textContent = '$' + (s.capital || 0).toFixed(2);
+
       const pnlEl = document.getElementById('pnl');
-      pnlEl.textContent = fmt(s.pnl);
+      pnlEl.textContent = sgn(s.pnl || 0);
       pnlEl.className   = 'big ' + (s.pnl >= 0 ? 'green' : 'red');
+
+      const realEl = document.getElementById('realized');
+      realEl.textContent = sgn(s.realizedPnl || 0);
+      realEl.className   = 'big ' + ((s.realizedPnl||0) >= 0 ? 'green' : 'red');
+
       document.getElementById('uptime').textContent = fmtS(s.uptime || 0);
+
+      // Candle history
+      const ch  = s.candleHistory || {};
+      const chEl = document.getElementById('candle-hist');
+      const parts = [];
+      for (const [pair, candles] of Object.entries(ch)) {
+        if (!candles || candles.length === 0) continue;
+        parts.push('<strong style="color:#aaa">' + pair + ':</strong> ');
+        candles.forEach(c => {
+          const cls = c.type === 'green' ? 'candle-green' : c.type === 'red' ? 'candle-red' : 'candle-doji';
+          parts.push('<span class="candle-chip ' + cls + '">' + c.type.toUpperCase() + '</span>');
+        });
+      }
+      chEl.innerHTML = parts.length > 0 ? parts.join(' ') : '<span style="color:#555">No candle data yet</span>';
 
       // Markets
       const mb = document.getElementById('mkt-body');
       if (s.markets && s.markets.length > 0) {
         mb.innerHTML = s.markets.map(m => {
-          const upBadge = m.upDone
-            ? '<span class="badge badge-green">DONE</span>'
-            : '<span class="badge badge-yellow">LIVE</span>';
-          const dnBadge = m.downDone
-            ? '<span class="badge badge-green">DONE</span>'
-            : '<span class="badge badge-yellow">LIVE</span>';
-          const upCol = m.upPrice  < 0.5 ? 'green' : 'red';
-          const dnCol = m.downPrice < 0.5 ? 'green' : 'red';
-          const upRule = m.upPrice  < 0.5 ? '6sh/25s' : '12sh/50s';
-          const dnRule = m.downPrice < 0.5 ? '6sh/25s' : '12sh/50s';
+          // Direction badge
+          const dirBadge = m.direction === 'up'
+            ? '<span class="badge badge-green">▲ UP</span>'
+            : '<span class="badge badge-red">▼ DOWN</span>';
+
+          // Fire pips (4 total)
+          const pips = [0,1,2,3].map(i =>
+            '<span class="fire-pip ' + (i < m.firedCount ? 'fire-lit' : 'fire-dark') + '"></span>'
+          ).join('');
+
+          const price = m.direction === 'up' ? m.upPrice : m.downPrice;
+          const priceCol = price >= 0.5 ? 'red' : 'green';
+
+          const unrCol = (m.unrealized||0) >= 0 ? 'green' : 'red';
+
+          const statusBadge = m.done
+            ? '<span class="badge badge-grey">DONE</span>'
+            : m.forceSellDone
+              ? '<span class="badge badge-yellow">SOLD</span>'
+              : '<span class="badge badge-green">LIVE</span>';
+
           return '<tr>' +
             '<td>' + m.pair + (m.dryRun ? ' <span class="badge badge-blue">DRY</span>' : '') + '</td>' +
+            '<td>' + dirBadge + '</td>' +
             '<td>' + m.secsIn + 's</td>' +
             '<td>' + m.secsLeft + 's</td>' +
-            '<td class="' + upCol + '">' + (m.upPrice||0).toFixed(3) + ' <small style="color:#555">' + upRule + '</small></td>' +
-            '<td class="' + dnCol + '">' + (m.downPrice||0).toFixed(3) + ' <small style="color:#555">' + dnRule + '</small></td>' +
-            '<td class="' + (m.upShares>0?'green':'') + '">' + m.upShares + 'sh</td>' +
-            '<td class="' + (m.downShares>0?'green':'') + '">' + m.downShares + 'sh</td>' +
-            '<td class="' + (m.upOpenOrders>0?'yellow':'') + '">' + m.upOpenOrders + ' open</td>' +
-            '<td class="' + (m.dnOpenOrders>0?'yellow':'') + '">' + m.dnOpenOrders + ' open</td>' +
+            '<td class="' + priceCol + '">' + (price||0).toFixed(4) + '</td>' +
+            '<td class="' + (m.shares>0?'green':'') + '">' + m.shares + 'sh</td>' +
+            '<td>' + (m.avgCost||0).toFixed(4) + '</td>' +
             '<td>$' + (m.totalCost||0).toFixed(2) + '</td>' +
-            '<td>' + upBadge + '</td>' +
-            '<td>' + dnBadge + '</td>' +
+            '<td class="' + unrCol + '">' + sgn(m.unrealized||0) + '</td>' +
+            '<td>' + pips + ' ' + m.firedCount + '/4</td>' +
+            '<td class="' + (m.openOrders>0?'yellow':'') + '">' + m.openOrders + '</td>' +
+            '<td>' + statusBadge + '</td>' +
             '</tr>';
         }).join('');
       }
@@ -155,8 +209,9 @@ app.get('/', (req, res) => {
           '<td>' + t.time + '</td>' +
           '<td>' + t.pair + '</td>' +
           '<td class="' + (t.side==='UP'?'green':'yellow') + '">' + t.side + '</td>' +
+          '<td>#' + (t.fire||'?') + '</td>' +
           '<td>' + t.shares + '</td>' +
-          '<td>' + (t.price||0).toFixed(3) + '</td>' +
+          '<td>' + (t.price||0).toFixed(4) + '</td>' +
           '<td>$' + (t.cost||0).toFixed(2) + '</td>' +
           '</tr>'
         ).join('');
@@ -166,9 +221,10 @@ app.get('/', (req, res) => {
       const logEl = document.getElementById('logs');
       if (s.logs && s.logs.length > 0) {
         logEl.innerHTML = s.logs.map(l => {
-          const col = l.includes('❌')||l.includes('🚨')||l.includes('🔥') ? '#ff5252'
-                    : l.includes('✅')||l.includes('💰')||l.includes('🎯') ? '#00e676'
-                    : l.includes('📥')||l.includes('⏱')||l.includes('[DRY') ? '#ffd740'
+          const col = l.includes('❌')||l.includes('🚨')||l.includes('📉') ? '#ff5252'
+                    : l.includes('✅')||l.includes('💰')||l.includes('🏆') ? '#00e676'
+                    : l.includes('📥')||l.includes('⏱')||l.includes('[DRY')||l.includes('🎯') ? '#ffd740'
+                    : l.includes('🕯️') ? '#00e5ff'
                     : '#aaa';
           return '<div style="color:' + col + '">' + l + '</div>';
         }).join('');
