@@ -201,30 +201,7 @@ async function ensureFreshPrice(m) {
   if (stale) await restRefreshPrice(m);
 }
 
-// ── Order status check ──
-// Docs confirmed exact status strings from GET /data/order/{orderID}:
-//   ORDER_STATUS_LIVE     = still open
-//   ORDER_STATUS_MATCHED  = filled ✅
-//   ORDER_STATUS_CANCELED = cancelled
-async function checkOrderStatus(orderId) {
-  try {
-    const order = await trader.getOrder(orderId);
-    if (!order) return 'open';
-    const s = order.status || '';
-    if (s === 'ORDER_STATUS_MATCHED')  return 'filled';
-    if (s === 'ORDER_STATUS_CANCELED' ||
-        s === 'ORDER_STATUS_CANCELED_MARKET_RESOLVED' ||
-        s === 'ORDER_STATUS_INVALID')  return 'cancelled';
-    return 'open'; // ORDER_STATUS_LIVE or unknown
-  } catch (_) { return 'open'; }
-}
 
-// Safe cancel: cancel then verify — catches ghost fills in the cancel window
-async function safeCancel(orderId) {
-  try { await trader.cancelOrder(orderId); } catch (_) {}
-  await sleep(CANCEL_VERIFY_MS);
-  return checkOrderStatus(orderId); // returns 'filled' | 'cancelled' | 'open'
-}
 
 // ── Market Discovery ──
 function currentWindowStart() {
@@ -649,9 +626,9 @@ function snapshot() {
     recentTrades: trades.slice(0, 60),
     activityLog: logs.slice(0, 80),
     strategy: {
-      shares: ARB_SHARES, trailingDist: TRAILING_DIST,
+      shares: ARB_SHARES, arbThreshold: ARB_THRESHOLD, arbExitProfit: ARB_EXIT_PROFIT,
       entryWaitSecs: ENTRY_WAIT_SECS, forceCloseSecs: FORCE_CLOSE_SECS,
-      minEntryPrice: MIN_ENTRY_PRICE, maxEntryPrice: MAX_ENTRY_PRICE,
+      trailingDist: null, minEntryPrice: null, maxEntryPrice: null,
     },
   };
 }
