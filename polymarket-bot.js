@@ -225,88 +225,65 @@ async function ensureFreshPrice(m) {
   if (stale) await restRefreshPrice(m);
 }
 
-// ── Candle Bootstrap ──
-// Walk back through the last N completed 5m windows using the same slug
-// structure the bot already knows: btc-updown-5m-{windowStartUnix}
-// For each window fetch its UP token's opening + closing midpoint prices
-// from the CLOB /timeseries endpoint, classify the candle and seed history.
-async function bootstrapCandleHistory(pair, windowsToFetch = 5) {
-  log(`🕯️  Bootstrapping candle history for ${pair} (last ${windowsToFetch} windows)…`);
+// -- Binance candle helpers --
+// Maps our pair names to Binance symbols (free public API, no key required)
+const BINANCE_SYMBOL = { BTC: 'BTCUSDT' };
+const BINANCE_API    = 'https://api.binance.com';
 
-  const nowSecs      = Math.floor(Date.now() / 1000);
-  const curWinStart  = Math.floor(nowSecs / WINDOW_SECS) * WINDOW_SECS;
-  const fetched      = [];
-
-  // Walk backwards: skip the current (live) window, go back windowsToFetch
-  for (let i = windowsToFetch; i >= 1; i--) {
-    const winStart = curWinStart - i * WINDOW_SECS;
-    const slug     = `${pair.toLowerCase()}-updown-5m-${winStart}`;
-
-    // 1. Fetch event to get token IDs
-    const d = await getJSON(`${GAMMA}/events?slug=${slug}`);
-    if (!Array.isArray(d) || !d[0]?.markets?.[0]) {
-      log(`🕯️  Bootstrap: no event for ${slug} — skipping`);
-      continue;
-    }
-
-    const mk = d[0].markets[0];
-    if (!mk.clobTokenIds) continue;
-
-    let ids;
-    try { ids = JSON.parse(mk.clobTokenIds); } catch (_) { continue; }
-    if (ids.length < 2) continue;
-
-    const upTokenId = ids[0];  // UP token
-    const endTime   = mk.endDate ? Math.floor(new Date(mk.endDate).getTime() / 1000) : null;
-    if (!endTime) continue;
-
-    const startTime = endTime - WINDOW_SECS;  // unix seconds
-
-    // 2. Fetch CLOB timeseries for the UP token over this window
-    //    fidelity=1 gives per-minute bars; we want open (first bar) and close (last bar)
-    const tsUrl = `${CLOB}/prices-history?market=${upTokenId}&startTs=${startTime}&endTs=${endTime}&fidelity=1`;
-    const ts    = await getJSON(tsUrl);
-
-    let open = null, close = null;
-
-    if (ts?.history && Array.isArray(ts.history) && ts.history.length >= 2) {
-      // history entries: { t: unixSecs, p: price }
-      open  = parseFloat(ts.history[0].p);
-      close = parseFloat(ts.history[ts.history.length - 1].p);
-    } else {
-      // Fallback: use midpoint at startTs and endTs via separate calls
-      const [mStart, mEnd] = await Promise.all([
-        getJSON(`${CLOB}/midpoint?token_id=${upTokenId}`),   // best we can do without historical snapshot
-        getJSON(`${CLOB}/midpoint?token_id=${upTokenId}`),
-      ]);
-      // If timeseries unavailable we can still try the resolved/final price
-      // from the market data itself (outcomePrices field on the event)
-      const outcomes = mk.outcomePrices ? JSON.parse(mk.outcomePrices) : null;
-      if (outcomes && outcomes.length >= 2) {
-        // outcomePrices = [upFinalPrice, downFinalPrice] as strings
-        close = parseFloat(outcomes[0]);
-        // For open, we estimate 0.50 (market opens near 50/50)
-        open  = 0.50;
-      }
-    }
-
-    if (open === null || close === null || isNaN(open) || isNaN(close)) {
-      log(`🕯️  Bootstrap: could not get open/close for ${slug} — skipping`);
-      continue;
-    }
-
-    const type = classifyCandle(open, close);
-    fetched.push({ open: f4(open), close: f4(close), type, slug });
-    log(`🕯️  Bootstrap ${slug}: ${type.toUpperCase()} (${f4(open)} → ${f4(close)})`);
+// Fetch the last N *closed* 5m candles from Binance.
+// Binance kline array: [openTime, open, high, low, close, vol, closeTime, ...]
+// Returns oldest -> newest, current open candle excluded.
+async function fetchBinanceCandles(pair, limit) {
+  if (limit === undefined) limit = 6;
+  const symbol = BINANCE_SYMBOL[pair];
+  if (!symbol) { log('No Binance symbol for ' + pair); return []; }
+  // Request one extra so we can drop the still-open current candle
+  const url  = BINANCE_API + '/api/v3/klines?symbol=' + symbol + '&interval=5m&limit=' + (limit + 1);
+  const data = await getJSON(url);
+  if (!Array.isArray(data) || data.length === 0) {
+    log('Binance klines fetch failed for ' + symbol);
+    return [];
   }
+  // Drop last entry = still-open candle
+  const closed = data.slice(0, -1).slice(-limit);
+  return closed.map(function(k) {
+    const open  = parseFloat(k[1]);
+    const close = parseFloat(k[4]);
+    const type  = classifyCandle(open, close);
+    return { open: Math.round(open * 100) / 100, close: Math.round(close * 100) / 100, type, openTime: k[0] };
+  });
+}
 
-  if (fetched.length === 0) {
-    log(`⚠️  Bootstrap: no historical candles found for ${pair} — bot will skip first window`);
+// Fetch current BTC spot price from Binance
+async function fetchBinancePrice(pair) {
+  const symbol = BINANCE_SYMBOL[pair];
+  if (!symbol) return null;
+  const data = await getJSON(BINANCE_API + '/api/v3/ticker/price?symbol=' + symbol);
+  return data && data.price ? parseFloat(data.price) : null;
+}
+
+// -- Candle Bootstrap --
+// Pull the last 5 closed 5m BTC/USDT candles straight from Binance.
+// Real BTC price candles -- no Polymarket token prices involved.
+async function bootstrapCandleHistory(pair, limit) {
+  if (limit === undefined) limit = 5;
+  log('[CANDLE] Bootstrapping ' + pair + ' from Binance (last ' + limit + ' closed 5m candles)...');
+
+  const candles = await fetchBinanceCandles(pair, limit);
+
+  if (candles.length === 0) {
+    log('[CANDLE] Bootstrap failed: no Binance candles for ' + pair + ' -- bot will skip first window');
     return;
   }
 
-  candleHistory[pair] = fetched;
-  log(`✅ Bootstrap complete: ${fetched.length} candles seeded for ${pair} → direction will be: ${resolveTradeDirection(pair) || 'UNDECIDED'}`);
+  candleHistory[pair] = candles;
+
+  for (const c of candles) {
+    const ts = new Date(c.openTime).toISOString().slice(11, 19);
+    log('[CANDLE] Bootstrap [' + ts + '] ' + c.type.toUpperCase() + ' $' + c.open + ' -> $' + c.close);
+  }
+
+  log('[CANDLE] Bootstrap complete: ' + candles.length + ' real BTC candles seeded -> direction: ' + (resolveTradeDirection(pair) || 'UNDECIDED'));
 }
 
 // ── Market Discovery ──
@@ -400,9 +377,14 @@ async function discoverMarket(pair) {
   wsSubscribe([ids[0], ids[1]]);
   await restRefreshPrice(markets[slug]);
 
-  // Capture opening price for candle recording at end of window
+  // Capture real BTC opening price from Binance for candle recording
   const m = markets[slug];
-  m.candleOpen = direction === 'up' ? m.upMid : m.downMid;
+  fetchBinancePrice(pair).then(px => {
+    if (px) {
+      m.candleOpen = px;
+      log('[CANDLE] Window open BTC price: $' + px);
+    }
+  }).catch(() => {});
 
   // Launch the single trading loop
   tradeLoop(markets[slug]).catch(e => log(`❌ Trade loop crash ${pair}: ${e.message}`));
@@ -564,10 +546,18 @@ async function forceSell(m) {
     m.tpOrderIds   = [];
   }
 
-  // Sell at best available price (bid or mid - 1 tick)
-  let sellPx = bid > 0 ? bid : (mid > 0 ? f4(mid - tick) : 0);
-  if (sellPx <= 0) sellPx = 0.01;
-  sellPx = f4(Math.round(sellPx / tick) * tick);
+  // Use mid price for force-sell — NOT the filtered bid.
+  // Near window resolution the losing side's bid disappears from the book,
+  // making upBestBid/dnBestBid fall to 0 even when the market still has value.
+  // The mid from the WebSocket/REST feed is accurate right up to expiry.
+  // Priority: mid → bid → 0.01 (absolute last resort)
+  await restRefreshPrice(m); // force a fresh REST fetch at the critical moment
+  const freshMid = isUp ? m.upMid : m.downMid;
+  const freshBid = isUp ? m.upBestBid : m.dnBestBid;
+  let sellPx = freshMid > 0 ? freshMid : (freshBid > 0 ? freshBid : 0.01);
+  // Cap one tick below TP_PRICE
+  sellPx = Math.min(sellPx, TP_PRICE - tick);
+  sellPx = f4(Math.max(0.01, Math.round(sellPx / tick) * tick));
 
   const totalShares = m.shares;
   log(`🚨 FORCE SELL ${m.pair} ${totalShares}sh @ ${sellPx} at 298s`);
@@ -608,10 +598,16 @@ async function forceSell(m) {
   if (won) log(`🏆 ${m.pair} WINNER — capital updated immediately`);
   else     log(`📉 ${m.pair} loss — capital updated`);
 
-  // Record candle close price for next window's direction
-  const closePrice = isUp ? m.upMid : m.downMid;
-  if (m.candleOpen && closePrice) {
-    recordCandle(m.pair, m.candleOpen, closePrice);
+  // Record real BTC close price from Binance for this window's candle
+  try {
+    const btcClose = await fetchBinancePrice(m.pair);
+    if (m.candleOpen && btcClose) {
+      recordCandle(m.pair, m.candleOpen, btcClose);
+    } else {
+      log('[CANDLE] Could not record candle: open=' + m.candleOpen + ' close=' + btcClose);
+    }
+  } catch (e) {
+    log('[CANDLE] recordCandle error: ' + e.message);
   }
 
   emitFn('state', buildState());
