@@ -10,6 +10,9 @@ const server = http.createServer(app);
 const io     = new Server(server);
 const PORT   = process.env.PORT || 8080;
 
+// ── Healthcheck ──
+app.get('/healthz', (req, res) => res.sendStatus(200));
+
 // ── Dashboard HTML ──
 app.get('/', (req, res) => {
   res.send(`<!DOCTYPE html>
