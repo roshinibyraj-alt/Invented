@@ -556,14 +556,14 @@ async function scanMarkets() {
   // Filter: active, not resolved, binary markets
   let candidates = [];
   try {
-    // Gamma: fetch markets ending soon, active=true
+    // Gamma: fetch markets ending soon, filtered by end_date_min/max
     const minEndISO = new Date(minEndMs).toISOString();
     const maxEndISO = new Date(maxEndMs).toISOString();
 
-    // Fetch multiple pages to get good coverage
+    // Fetch multiple pages to get good coverage, filtered server-side by end date
     const pages = await Promise.all([
-      getJSON(`${GAMMA}/markets?active=true&closed=false&limit=100&offset=0`),
-      getJSON(`${GAMMA}/markets?active=true&closed=false&limit=100&offset=100`),
+      getJSON(`${GAMMA}/markets?closed=false&limit=100&offset=0&end_date_min=${encodeURIComponent(minEndISO)}&end_date_max=${encodeURIComponent(maxEndISO)}&order=endDate&ascending=true`),
+      getJSON(`${GAMMA}/markets?closed=false&limit=100&offset=100&end_date_min=${encodeURIComponent(minEndISO)}&end_date_max=${encodeURIComponent(maxEndISO)}&order=endDate&ascending=true`),
     ]);
 
     for (const page of pages) {
