@@ -16,7 +16,6 @@ const TICK_MS           = 500;
 const SHARES          = 6;
 const PRICE_OFFSET    = 0.03;
 const FILL_WAIT_MS    = 20000;
-const ENTRY_INTERVAL  = 25;
 const LAST_ENTRY_SECS = 125;
 const NUKE_SECS       = 230;
 
@@ -235,15 +234,8 @@ async function tryEntry(m, side) {
   const isUp     = side === 'up';
   const tokenId  = isUp ? m.upTokenId  : m.downTokenId;
   const ask      = isUp ? m.upBestAsk  : m.dnBestAsk;
-  const mid      = isUp ? m.upMid      : m.downMid;
   const tickSize = isUp ? m.upTickSize : m.dnTickSize;
   const label    = isUp ? 'UP' : 'DOWN';
-
-  const currentPrice = mid || ask || 0.5;
-
-  // UP buys only when price < 0.50, DOWN buys only when price > 0.50
-  if (isUp  && currentPrice >= 0.50) { log(`⏸  ${label} price ${currentPrice} >= 0.50 — skip`); return 0; }
-  if (!isUp && currentPrice <= 0.50) { log(`⏸  ${label} price ${currentPrice} <= 0.50 — skip`); return 0; }
 
   if (!ask || ask <= 0) { log(`⚠️  ${label} no ask price — skip`); return 0; }
 
@@ -265,7 +257,6 @@ async function tryEntry(m, side) {
     return 0;
   }
 
-  // Poll for fill up to 20s
   const deadline = Date.now() + FILL_WAIT_MS;
   let filled = false;
   while (Date.now() < deadline) {
@@ -416,7 +407,7 @@ async function tradeLoop(m) {
 
       await ensureFreshPrice(m);
 
-      // Both sides fire in parallel, each decides independently
+      // Both sides fire in parallel unconditionally
       await Promise.all([
         m.upShares   < SHARES && !m.merging ? tryEntry(m, 'up')   : Promise.resolve(),
         m.downShares < SHARES && !m.merging ? tryEntry(m, 'down') : Promise.resolve(),
@@ -484,7 +475,7 @@ function buildState() {
   };
 }
 
-// ── Exports called by server.js ──
+// ── Exports called by index.js ──
 async function init(privateKey, emit, serverLog) {
   emitFn = emit || (() => {});
   slog   = serverLog || (() => {});
