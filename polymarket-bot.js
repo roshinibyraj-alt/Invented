@@ -117,7 +117,9 @@ function updateMarketPrice(tokenId, bestBid, bestAsk) {
   if (!slug || !markets[slug]) return;
   const m   = markets[slug];
   const bid = bestBid ? f4(parseFloat(bestBid)) : null;
-  const ask = bestAsk ? f4(parseFloat(bestAsk)) : null;
+  // Ignore ask prices at or above TP_PRICE — could be our own TP sell orders polluting the book
+  const rawAsk = bestAsk ? f4(parseFloat(bestAsk)) : null;
+  const ask = (rawAsk && rawAsk < TP_PRICE) ? rawAsk : null;
   if (tokenId === m.upTokenId) {
     if (bid) m.upBestBid = bid;
     if (ask) m.upBestAsk = ask;
@@ -149,9 +151,11 @@ async function restRefreshPrice(m) {
   if (ur?.mid)  m.upMid   = f4(parseFloat(ur.mid));
   if (dr?.mid)  m.downMid = f4(parseFloat(dr.mid));
   if (ubba?.bids?.[0]?.price) m.upBestBid = f4(parseFloat(ubba.bids[0].price));
-  if (ubba?.asks?.[0]?.price) m.upBestAsk = f4(parseFloat(ubba.asks[0].price));
+  const upAsk = ubba?.asks?.[0]?.price ? f4(parseFloat(ubba.asks[0].price)) : null;
+  if (upAsk && upAsk < TP_PRICE) m.upBestAsk = upAsk;
   if (dbba?.bids?.[0]?.price) m.dnBestBid = f4(parseFloat(dbba.bids[0].price));
-  if (dbba?.asks?.[0]?.price) m.dnBestAsk = f4(parseFloat(dbba.asks[0].price));
+  const dnAsk = dbba?.asks?.[0]?.price ? f4(parseFloat(dbba.asks[0].price)) : null;
+  if (dnAsk && dnAsk < TP_PRICE) m.dnBestAsk = dnAsk;
   if (!m.upBestAsk && m.upMid)   { m.upBestAsk = f4(m.upMid + 0.01); m.upBestBid = f4(m.upMid - 0.01); }
   if (!m.dnBestAsk && m.downMid) { m.dnBestAsk = f4(m.downMid + 0.01); m.dnBestBid = f4(m.downMid - 0.01); }
   m.lastPriceAt = Date.now();
@@ -331,11 +335,14 @@ async function tryEntry(m, isUp) {
   const rule      = price_now < 0.50 ? RULE_LOW : RULE_HIGH;
   const shares    = rule.shares;
 
-  // Use current ask as entry price (limit order at market ask = aggressive limit)
+  // Use mid as entry price — avoids picking up our own TP sell orders from the ask
+  // Fall back to ask only if mid unavailable and ask is genuinely below TP
   const tick  = parseFloat(tickSize) || 0.01;
-  let entryPx = ask || mid || 0;
-  if (entryPx <= 0) { log(`⚠️  ${label} no price — skip entry`); return false; }
-  entryPx = f4(Math.round(entryPx / tick) * tick);
+  let rawPx   = (mid && mid > 0) ? mid : (ask && ask < TP_PRICE ? ask : 0);
+  if (rawPx <= 0) { log(`⚠️  ${label} no price — skip entry`); return false; }
+  // Hard cap: entry must always be strictly below TP price
+  rawPx = Math.min(rawPx, TP_PRICE - tick);
+  let entryPx = f4(Math.round(rawPx / tick) * tick);
   if (entryPx <= 0.01) { log(`⚠️  ${label} price ${entryPx} too low — skip`); return false; }
 
   log(`📥 ${label} LIMIT BUY ${shares}sh @ ${entryPx} (price=${price_now}, rule=${price_now < 0.50 ? 'LOW' : 'HIGH'})`);
