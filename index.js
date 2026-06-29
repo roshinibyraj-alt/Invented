@@ -35,26 +35,26 @@ app.get('/', (_, res) => {
   <title>⚽ Draw-NO Block Bot</title>
   <style>
     :root {
-      --bg:     #070c10;
-      --bg2:    #0d1520;
-      --bg3:    #111d2b;
-      --border: #1a2d42;
-      --text:   #c9d8e8;
-      --muted:  #3d5066;
-      --cyan:   #00d4ff;
-      --green:  #00e676;
-      --red:    #ff4757;
-      --yellow: #ffd740;
-      --purple: #bf5af2;
-      --orange: #ff9f0a;
-      --gold:   #f5c518;
+      --bg:     #ffffff;
+      --bg2:    #f5f7fa;
+      --bg3:    #edf0f4;
+      --border: #d0d7e2;
+      --text:   #1a2535;
+      --muted:  #7a8fa8;
+      --cyan:   #0099cc;
+      --green:  #00a854;
+      --red:    #e8304a;
+      --yellow: #e6a800;
+      --purple: #7c3aed;
+      --orange: #d97706;
+      --gold:   #b8860b;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: 'Courier New', monospace; background: var(--bg); color: var(--text); font-size: 12px; min-height: 100vh; }
 
     .header {
-      background: linear-gradient(135deg, #081428, #0c1e38);
-      border-bottom: 2px solid #00d4ff33;
+      background: linear-gradient(135deg, #f0f4f8, #e4ecf5);
+      border-bottom: 2px solid #0099cc44;
       padding: 14px 20px;
       display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px;
     }
@@ -143,7 +143,7 @@ app.get('/', (_, res) => {
     .tbl th { background: var(--bg3); color: var(--muted); padding: 6px 8px; text-align: left; font-size: 9px; text-transform: uppercase; letter-spacing: 1px; position: sticky; top: 0; }
     .tbl td { padding: 5px 8px; border-bottom: 1px solid var(--border); font-size: 10px; }
     .tbl tr:last-child td { border-bottom: none; }
-    .log-wrap { background: #040810; border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; height: 280px; overflow-y: auto; font-size: 11px; line-height: 1.7; }
+    .log-wrap { background: #f8fafc; border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; height: 280px; overflow-y: auto; font-size: 11px; line-height: 1.7; }
     .scan-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--cyan); margin-right: 6px; animation: blink 1.5s infinite; }
     @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.2} }
     .empty { color: var(--muted); padding: 20px; text-align: center; font-size: 11px; }
