@@ -172,12 +172,27 @@ function wsSubscribe(tokenIds) {
 
 // REST midpoint fallback if WS is stale >3s
 async function restRefreshPrice(m) {
-  const [ur, dr] = await Promise.all([
+  // Fetch both midpoint AND best_bid_ask from REST so we have real ask prices for arb
+  const [ur, dr, ubba, dbba] = await Promise.all([
     getJSON(`${CLOB}/midpoint?token_id=${m.upTokenId}`),
     getJSON(`${CLOB}/midpoint?token_id=${m.downTokenId}`),
+    getJSON(`${CLOB}/book?token_id=${m.upTokenId}`),
+    getJSON(`${CLOB}/book?token_id=${m.downTokenId}`),
   ]);
   if (ur?.mid) m.upMid   = f4(parseFloat(ur.mid));
   if (dr?.mid) m.downMid = f4(parseFloat(dr.mid));
+
+  // Extract best bid/ask from order book REST response
+  // book response: { bids: [{price, size},...], asks: [{price, size},...] }
+  if (ubba?.bids?.[0]?.price) m.upBestBid = f4(parseFloat(ubba.bids[0].price));
+  if (ubba?.asks?.[0]?.price) m.upBestAsk = f4(parseFloat(ubba.asks[0].price));
+  if (dbba?.bids?.[0]?.price) m.dnBestBid = f4(parseFloat(dbba.bids[0].price));
+  if (dbba?.asks?.[0]?.price) m.dnBestAsk = f4(parseFloat(dbba.asks[0].price));
+
+  // Fallback: if book unavailable, estimate bid/ask from mid with typical 0.02 spread
+  if (!m.upBestAsk && m.upMid) { m.upBestAsk = f4(m.upMid + 0.01); m.upBestBid = f4(m.upMid - 0.01); }
+  if (!m.dnBestAsk && m.downMid) { m.dnBestAsk = f4(m.downMid + 0.01); m.dnBestBid = f4(m.downMid - 0.01); }
+
   m.lastPriceAt = Date.now();
 }
 
