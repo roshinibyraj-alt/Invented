@@ -2,819 +2,817 @@
 
 /**
  * ═══════════════════════════════════════════════════════════════
- *  POLYMARKET OPPORTUNIST BOT
- *  Strategy: Liquidity Momentum + Spread Fade
+ *  POLYMARKET FIFA WORLD CUP CROSS-MARKET ARBITRAGE BOT
+ *  Strategy: Cross-Market Implied Probability Arbitrage
  * ═══════════════════════════════════════════════════════════════
  *
  *  CONCEPT:
- *  Scans ALL live Polymarket markets ending within 60 minutes.
- *  For each, it identifies the "overpriced" side using 3 signals:
+ *  Targets a single live FIFA World Cup match and scans ALL its
+ *  sub-markets simultaneously. It detects pricing inconsistencies
+ *  between logically linked markets and trades the mispriced side.
  *
- *  1. SPREAD SIGNAL — If YES ask is far above 0.50 and spread is
- *     wide, the market is leaning YES. We fade the consensus by
- *     buying the cheaper NO side (and vice versa). Markets with
- *     extreme consensus (>0.85 or <0.15) are skipped — too risky.
+ *  ARBITRAGE LOGIC (examples from Germany vs Paraguay):
  *
- *  2. VOLUME IMBALANCE — If one side has significantly more
- *     liquidity depth in the order book, we trade WITH that side
- *     (smart money signal). Books are fetched from CLOB REST.
+ *  1. TOTAL GOALS LADDER ARBS
+ *     Over 2.5 implies a price for Over 3.5 (must be ≤ Over 2.5).
+ *     If Over 3.5 > Over 2.5 → Over 3.5 is mispriced HIGH → buy Under 3.5
+ *     If Over 2.5 < Over 1.5 → Over 2.5 is mispriced LOW → buy Over 2.5
  *
- *  3. PRICE VELOCITY — We track mid-price over 60s. If YES is
- *     drifting DOWN fast, we buy YES (mean-reversion). If it's
- *     rising fast, we buy NO. Velocity magnitude gate: ≥ 0.005
- *     movement in 60s to qualify.
+ *  2. TEAM TOTAL vs MATCH TOTAL ARBS
+ *     P(Match Over 2.5) ≥ P(Germany Over 2.5) since match includes both teams.
+ *     When this breaks, buy the underpriced side.
  *
- *  Signals are scored: each gives +1 or -1 for YES/NO.
- *  Net score ≥ +2 → buy YES. Net score ≤ -2 → buy NO. Else skip.
+ *  3. BOTH TEAMS TO SCORE vs TEAM TOTALS
+ *     P(BTTS Yes) ≤ P(GER scores) and P(BTTS Yes) ≤ P(PAR scores)
+ *     BTTS requires BOTH teams to score — can never exceed either team's individual
+ *     scoring probability. Trade the discrepancy.
  *
- *  TRADE STRUCTURE (10-minute window per market):
- *  - Entry 1 at   0s  (immediate on discovery)
- *  - Entry 2 at 120s  (2 min in — average in if still confident)
- *  - Entry 3 at 300s  (5 min in — final entry)
- *  - Force exit at 540s (9 min in — 60s before expiry window close)
- *  - TP limit at 0.96 (take profit if market moves fast)
+ *  4. HALFTIME vs FULLTIME
+ *     P(HT GER lead) vs P(FT GER win) relationship.
+ *     Large mismatches indicate mispricing.
  *
- *  MARKET FILTER:
- *  - endTime between 5 min and 60 min from now
- *  - YES mid between 0.10 and 0.90 (not already decided)
- *  - Both YES and NO tokens must have orderbook data
- *  - Minimum $20 liquidity on each side
- *  - Not already trading this slug
+ *  5. FIRST HALF TOTALS vs MATCH TOTALS
+ *     P(Match Over N) ≥ P(H1 Over N) — full game easier to hit.
+ *
+ *  6. SPREADS vs MONEYLINE
+ *     GER -1.5 (win by 2+) must be ≤ GER ML (win by any margin).
+ *
+ *  7. CORNERS LADDER
+ *     Same monotonicity rule as goals ladder for corner markets.
+ *
+ *  HOW SUB-MARKETS ARE FETCHED:
+ *  Uses Gamma API /events?slug= endpoint which returns the parent
+ *  event with ALL nested markets[] in a single call.
+ *  Slug comes from the Polymarket URL path:
+ *    /sports/world-cup/fifwc-ger-par-2026-06-29
+ *    → MATCH_EVENT_SLUG = 'fifwc-ger-par-2026-06-29'
  *
  * ═══════════════════════════════════════════════════════════════
  */
 
-const WebSocket        = require('ws');
 const PolymarketTrader = require('./polymarket-trader');
 
 // ── API endpoints ──
-const GAMMA   = 'https://gamma-api.polymarket.com';
-const CLOB    = 'https://clob.polymarket.com';
-const CLOB_WS = 'wss://ws-subscriptions-clob.polymarket.com/ws/market';
+const GAMMA = 'https://gamma-api.polymarket.com';
+const CLOB  = 'https://clob.polymarket.com';
+
+// ── Target match slug — change via env or edit here ──
+const MATCH_EVENT_SLUG = process.env.MATCH_SLUG || 'fifwc-ger-par-2026-06-29';
 
 // ── Timing ──
-const SCAN_EVERY_MS      = 20_000;   // Scan for new markets every 20s
-const TICK_MS            = 250;      // Main loop tick
-const TRADE_WINDOW_SECS  = 600;      // 10-minute trade window
-const FORCE_EXIT_SECS    = 540;      // Exit 60s before window ends
-const ENTRY_SECS         = [0, 120, 300]; // 3 entries in the window
-
-// ── Market filter ──
-const MIN_MINS_TO_END    = 5;        // Market must have at least 5 min left
-const MAX_MINS_TO_END    = 60;       // Market must end within 60 min
-const MIN_YES_MID        = 0.10;     // Skip near-certain NO
-const MAX_YES_MID        = 0.90;     // Skip near-certain YES
-const MIN_LIQUIDITY_USD  = 20;       // Min $ liquidity per side
+const SCAN_EVERY_MS      = 15_000;
+const TICK_MS            = 500;
+const HARD_EXIT_MINS     = 5;
+const MARKET_REFETCH_MS  = 300_000; // Re-fetch market list every 5 min
 
 // ── Strategy ──
-const TP_PRICE           = 0.96;
-const SHARES_PER_ENTRY   = 5;
-const VELOCITY_WINDOW_MS = 60_000;   // 60s for price velocity calc
-const VELOCITY_MIN       = 0.005;    // Minimum move to count as signal
+const MIN_EDGE         = 0.03;   // Minimum price discrepancy to trigger (3¢)
+const SHARES_PER_ARB   = 10;     // Shares per arb leg
+const MIN_LIQUIDITY    = 15;     // Min $ liquidity required
+const MAX_POSITIONS    = 8;      // Max concurrent open arb positions
+const STOP_LOSS_MULT   = 2;      // Stop loss at MIN_EDGE * this multiplier
+const TIME_EXIT_SECS   = 600;    // Force exit after 10 minutes
 
 // ── Env ──
 const DRY_RUN = (process.env.DRY_RUN || 'true').toLowerCase() === 'true';
 
 // ── State ──
-let emitFn      = () => {};
-let slog        = () => {};
-let trader      = null;
-let demoBalance = 0;
-let realizedPnl = 0;
-let startTime   = Date.now();
-let lastScanAt  = 0;
+let emitFn        = () => {};
+let slog          = () => {};
+let trader        = null;
+let startBalance  = 500;
+let startTime     = Date.now();
+let lastScanAt    = 0;
+let lastMarketFetch = 0;
+let logs          = [];
+let trades        = [];
+let openPositions = new Map();
+let realizedPnl   = 0;
+let allMarkets    = [];
+let priceCache    = new Map();
+let matchEndTime  = null;
+let arbRules      = [];
 
-const logs    = [];
-const trades  = [];
-const markets = {}; // slug → market object
-const priceHistory = {}; // tokenId → [{mid, ts}]
-
-// ── Helpers ──
-const f2  = v => Math.round((v || 0) * 100) / 100;
-const f4  = v => Math.round((v || 0) * 10000) / 10000;
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-
+// ─────────────────────────────────────────
+//  Logging
+// ─────────────────────────────────────────
 function log(msg) {
-  const prefix = DRY_RUN ? '[DRY] ' : '';
-  const ts     = new Date().toTimeString().slice(0, 8);
-  const line   = `[${ts}] ${prefix}${msg}`;
-  logs.unshift(line);
-  if (logs.length > 400) logs.length = 400;
-  if (slog) slog(line);
+  const line = `[${new Date().toISOString().slice(11,19)}] ${msg}`;
+  logs.push(line);
+  if (logs.length > 200) logs.shift();
+  slog(line);
 }
 
+// ─────────────────────────────────────────
+//  HTTP helper
+// ─────────────────────────────────────────
 async function getJSON(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`HTTP ${res.status}: ${url}`);
+  return res.json();
+}
+
+async function postJSON(url, body) {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}: ${url}`);
+  return res.json();
+}
+
+// ─────────────────────────────────────────
+//  STEP 1: Fetch all sub-markets for the match
+//  Gamma /events?slug= returns parent event + all nested markets[]
+// ─────────────────────────────────────────
+async function fetchMatchMarkets() {
+  log(`🔭 Fetching sub-markets: ${MATCH_EVENT_SLUG}`);
   try {
-    const ac = new AbortController();
-    const t  = setTimeout(() => ac.abort(), 8000);
-    const r  = await fetch(url, { signal: ac.signal });
-    clearTimeout(t);
-    return r.ok ? r.json() : null;
-  } catch (_) { return null; }
+    const data = await getJSON(`${GAMMA}/events?slug=${encodeURIComponent(MATCH_EVENT_SLUG)}&limit=1`);
+    const arr = Array.isArray(data) ? data : (data.data || data.events || [data]);
+    if (!arr || arr.length === 0) {
+      log(`❌ No event found for slug. Trying markets fallback...`);
+      return await fetchMarketsViaMarketEndpoint();
+    }
+    const event = arr[0];
+    const markets = event.markets || event.sub_markets || [];
+    allMarkets = markets.filter(m => m.active !== false && !m.closed);
+
+    // Capture match end time from event or latest market
+    if (!matchEndTime && event.endDate) {
+      matchEndTime = new Date(event.endDate).getTime();
+    }
+    if (!matchEndTime && allMarkets.length > 0) {
+      const ends = allMarkets
+        .map(m => new Date(m.endDate || m.endDateIso || 0).getTime())
+        .filter(Boolean);
+      if (ends.length) matchEndTime = Math.max(...ends);
+    }
+
+    log(`✅ ${allMarkets.length} active sub-markets loaded (event: ${event.title || event.slug})`);
+    if (matchEndTime) log(`⏰ Match ends: ${new Date(matchEndTime).toISOString()}`);
+    buildArbRules();
+  } catch(e) {
+    log(`⚠️  Event fetch error: ${e.message} — trying markets fallback`);
+    await fetchMarketsViaMarketEndpoint();
+  }
 }
 
-// ══════════════════════════════════════════
-//  WEBSOCKET PRICE FEED
-// ══════════════════════════════════════════
-let ws          = null;
-let wsPingTimer = null;
-const wsTokenMap = {}; // tokenId → slug
+// Fallback: search markets directly by event_slug or tag
+async function fetchMarketsViaMarketEndpoint() {
+  try {
+    const urls = [
+      `${GAMMA}/markets?event_slug=${encodeURIComponent(MATCH_EVENT_SLUG)}&closed=false&limit=200`,
+      `${GAMMA}/markets?tag_slug=${encodeURIComponent(MATCH_EVENT_SLUG)}&closed=false&limit=200`,
+    ];
+    let found = [];
+    for (const url of urls) {
+      try {
+        const r = await getJSON(url);
+        const arr = Array.isArray(r) ? r : (r.data || r.markets || []);
+        found = found.concat(arr);
+      } catch(_) {}
+    }
+    const seen = new Set();
+    allMarkets = found.filter(m => {
+      if (seen.has(m.id) || m.closed || m.active === false) return false;
+      seen.add(m.id);
+      return true;
+    });
+    log(`✅ Fallback: ${allMarkets.length} markets`);
+    buildArbRules();
+  } catch(e) {
+    log(`❌ fetchMarketsViaMarketEndpoint: ${e.message}`);
+  }
+}
 
-function wsConnect() {
-  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
-  log('🔌 Connecting WebSocket price feed…');
-  ws = new WebSocket(CLOB_WS);
+// ─────────────────────────────────────────
+//  STEP 2: Parse markets into categories and build arb rules
+// ─────────────────────────────────────────
+function qOf(m) {
+  return (m.question || m.groupItemTitle || m.title || '').toLowerCase();
+}
 
-  ws.on('open', () => {
-    log('✅ WebSocket connected');
-    const ids = Object.keys(wsTokenMap);
-    if (ids.length) wsSubscribe(ids);
-    wsPingTimer = setInterval(() => {
-      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({}));
-    }, 10000);
-  });
+function tokensOf(m) {
+  return m.tokens || m.outcomes || [];
+}
 
-  ws.on('message', (raw) => {
-    try {
-      const msgs = Array.isArray(JSON.parse(raw)) ? JSON.parse(raw) : [JSON.parse(raw)];
-      for (const msg of msgs) {
-        if (msg.event_type === 'price_change' && Array.isArray(msg.price_changes)) {
-          for (const pc of msg.price_changes) onPriceUpdate(pc.asset_id, pc.best_bid, pc.best_ask);
-        }
-        if (msg.event_type === 'best_bid_ask') onPriceUpdate(msg.asset_id, msg.best_bid, msg.best_ask);
-        if (msg.event_type === 'book') {
-          const bid = msg.bids?.[0]?.price ? parseFloat(msg.bids[0].price) : null;
-          const ask = msg.asks?.[0]?.price ? parseFloat(msg.asks[0].price) : null;
-          onPriceUpdate(msg.asset_id, bid, ask);
-        }
+function buildArbRules() {
+  arbRules = [];
+  if (allMarkets.length === 0) return;
+
+  // ── Categorize ──
+  const totalsOver  = [];  // full-match total goals Over N
+  const htTotals    = [];  // first half total goals Over N
+  const h2Totals    = [];  // second half total goals Over N
+  const gerTotals   = [];  // germany team total goals Over N
+  const parTotals   = [];  // paraguay team total goals Over N
+  const corners     = [];  // total corners Over N
+  const gerCorners  = [];  // germany corners Over N
+  const parCorners  = [];  // paraguay corners Over N
+  let   btts        = null;
+  let   bttsHT      = null;
+  const spreads     = [];
+  let   mlGer       = null;
+  let   mlPar       = null;
+  let   mlDraw      = null;
+  let   htGer       = null;  // halftime result GER wins
+  let   advanceGer  = null;  // GER to advance
+
+  for (const m of allMarkets) {
+    const q = qOf(m);
+    const t = tokensOf(m);
+
+    // Skip player props
+    if (/goals\s*:\s*\d|assists|shots|cards|yellow|red/.test(q)) continue;
+
+    const isFirstHalf  = q.includes('first half') || q.includes('1st half') || (q.includes('halftime') && !q.includes('second'));
+    const isSecondHalf = q.includes('second half') || q.includes('2nd half');
+    const isCorner     = q.includes('corner');
+    const isGer        = q.includes('germany') || (q.includes('ger') && !q.includes('overall'));
+    const isPar        = q.includes('paraguay') || q.includes('par ') || q.match(/\bpar\b/);
+
+    // Over lines
+    const overMatch = q.match(/over\s+([\d.]+)/i);
+    const line = overMatch ? parseFloat(overMatch[1]) : null;
+
+    if (q.includes('both') && q.includes('score')) {
+      if (isFirstHalf) bttsHT = { m, t };
+      else btts = { m, t };
+      continue;
+    }
+
+    if (isCorner && line !== null) {
+      if (isGer) gerCorners.push({ m, t, line });
+      else if (isPar) parCorners.push({ m, t, line });
+      else corners.push({ m, t, line });
+      continue;
+    }
+
+    if (line !== null && !q.includes('shot') && !q.includes('assist')) {
+      if (isFirstHalf) htTotals.push({ m, t, line });
+      else if (isSecondHalf) h2Totals.push({ m, t, line });
+      else if (isGer) gerTotals.push({ m, t, line });
+      else if (isPar) parTotals.push({ m, t, line });
+      else if (!q.includes('spread') && !q.match(/[+-]\d+\.5/)) {
+        totalsOver.push({ m, t, line });
       }
-    } catch (_) {}
+    }
+
+    // Spreads
+    if (q.match(/[+-]\d+\.5/)) spreads.push({ m, t, q });
+
+    // Moneyline / winner
+    if ((q.includes('winner') || q.includes('moneyline') || (q.includes('win') && !q.includes('winning score')))
+        && !isCorner && !line && !q.match(/[+-]\d+\.5/)) {
+      if (q.includes('draw')) mlDraw = { m, t };
+      else if (isGer) mlGer = { m, t };
+      else if (isPar) mlPar = { m, t };
+    }
+
+    // Halftime result / HT winner
+    if ((q.includes('halftime result') || q.includes('half time result') || q.includes('ht result'))
+        && !isSecondHalf) {
+      if (isGer) htGer = { m, t };
+    }
+
+    // Team to advance
+    if (q.includes('advance') || q.includes('team to advance')) {
+      if (isGer) advanceGer = { m, t };
+    }
+  }
+
+  log(`📊 Parsed: ${totalsOver.length} total-overs, ${gerTotals.length} GER-totals, ${parTotals.length} PAR-totals, ${htTotals.length} H1, ${h2Totals.length} H2, ${corners.length} corners, btts=${!!btts}, mlGer=${!!mlGer}`);
+
+  // ── Helper: sort by line ──
+  const byLine = arr => [...arr].sort((a, b) => a.line - b.line);
+
+  // ── Rule factory ──
+  function ladderRule(type, label, lower, upper) {
+    return {
+      type, label,
+      check: (prices) => {
+        const lP = yesPrice(lower, prices);
+        const uP = yesPrice(upper, prices);
+        if (lP === null || uP === null) return null;
+        if (yesLiq(lower, prices) < MIN_LIQUIDITY) return null;
+        if (yesLiq(upper, prices) < MIN_LIQUIDITY) return null;
+        if (uP > lP + MIN_EDGE) {
+          // Upper line priced higher than lower — buy lower (it's cheaper, should be more likely)
+          return { mktObj: lower, side: 'yes', edge: uP - lP,
+            reason: `Over${lower.line}(${lP.toFixed(3)}) < Over${upper.line}(${uP.toFixed(3)}) — ladder violation` };
+        }
+        return null;
+      },
+    };
+  }
+
+  // 1. Full-match total goals ladder
+  const st = byLine(totalsOver);
+  for (let i = 0; i < st.length - 1; i++) ladderRule('LADDER_TOTAL', `Total: Over${st[i].line} ≥ Over${st[i+1].line}`, st[i], st[i+1]) && arbRules.push(ladderRule('LADDER_TOTAL', `Total: Over${st[i].line} ≥ Over${st[i+1].line}`, st[i], st[i+1]));
+
+  // 2. Germany totals ladder
+  const sg = byLine(gerTotals);
+  for (let i = 0; i < sg.length - 1; i++) arbRules.push(ladderRule('LADDER_GER', `GER: Over${sg[i].line} ≥ Over${sg[i+1].line}`, sg[i], sg[i+1]));
+
+  // 3. Paraguay totals ladder
+  const sp = byLine(parTotals);
+  for (let i = 0; i < sp.length - 1; i++) arbRules.push(ladderRule('LADDER_PAR', `PAR: Over${sp[i].line} ≥ Over${sp[i+1].line}`, sp[i], sp[i+1]));
+
+  // 4. Corners ladder
+  const sc = byLine(corners);
+  for (let i = 0; i < sc.length - 1; i++) arbRules.push(ladderRule('LADDER_CORNERS', `Corners: Over${sc[i].line} ≥ Over${sc[i+1].line}`, sc[i], sc[i+1]));
+
+  // 5. HT totals ladder
+  const sh = byLine(htTotals);
+  for (let i = 0; i < sh.length - 1; i++) arbRules.push(ladderRule('LADDER_HT', `H1: Over${sh[i].line} ≥ Over${sh[i+1].line}`, sh[i], sh[i+1]));
+
+  // 6. H2 totals ladder
+  const s2 = byLine(h2Totals);
+  for (let i = 0; i < s2.length - 1; i++) arbRules.push(ladderRule('LADDER_H2', `H2: Over${s2[i].line} ≥ Over${s2[i+1].line}`, s2[i], s2[i+1]));
+
+  // 7. Match total ≥ GER total (same line)
+  const totalByLine = new Map(st.map(x => [x.line, x]));
+  for (const g of gerTotals) {
+    const matchMkt = totalByLine.get(g.line);
+    if (!matchMkt) continue;
+    arbRules.push({
+      type: 'TEAM_VS_MATCH_GER',
+      label: `Match Over${g.line} ≥ GER Over${g.line}`,
+      check: (prices) => {
+        const gP = yesPrice(g, prices);
+        const mP = yesPrice(matchMkt, prices);
+        if (gP === null || mP === null) return null;
+        if (yesLiq(g, prices) < MIN_LIQUIDITY) return null;
+        if (yesLiq(matchMkt, prices) < MIN_LIQUIDITY) return null;
+        if (gP > mP + MIN_EDGE) {
+          return { mktObj: matchMkt, side: 'yes', edge: gP - mP,
+            reason: `GER Over${g.line}(${gP.toFixed(3)}) > Match Over${g.line}(${mP.toFixed(3)}) — buy match total` };
+        }
+        return null;
+      },
+    });
+  }
+
+  // 8. Match total ≥ PAR total (same line)
+  for (const p of parTotals) {
+    const matchMkt = totalByLine.get(p.line);
+    if (!matchMkt) continue;
+    arbRules.push({
+      type: 'TEAM_VS_MATCH_PAR',
+      label: `Match Over${p.line} ≥ PAR Over${p.line}`,
+      check: (prices) => {
+        const pP = yesPrice(p, prices);
+        const mP = yesPrice(matchMkt, prices);
+        if (pP === null || mP === null) return null;
+        if (yesLiq(p, prices) < MIN_LIQUIDITY) return null;
+        if (yesLiq(matchMkt, prices) < MIN_LIQUIDITY) return null;
+        if (pP > mP + MIN_EDGE) {
+          return { mktObj: matchMkt, side: 'yes', edge: pP - mP,
+            reason: `PAR Over${p.line}(${pP.toFixed(3)}) > Match Over${p.line}(${mP.toFixed(3)}) — buy match total` };
+        }
+        return null;
+      },
+    });
+  }
+
+  // 9. BTTS ≤ GER Over 0.5 and BTTS ≤ PAR Over 0.5
+  if (btts) {
+    const ger05 = gerTotals.find(x => x.line === 0.5);
+    if (ger05) arbRules.push({
+      type: 'BTTS_VS_GER05',
+      label: 'BTTS ≤ GER Over 0.5',
+      check: (prices) => {
+        const bP = yesPrice(btts, prices);
+        const gP = yesPrice(ger05, prices);
+        if (bP === null || gP === null) return null;
+        if (yesLiq(btts, prices) < MIN_LIQUIDITY) return null;
+        if (yesLiq(ger05, prices) < MIN_LIQUIDITY) return null;
+        if (bP > gP + MIN_EDGE) {
+          return { mktObj: ger05, side: 'yes', edge: bP - gP,
+            reason: `BTTS(${bP.toFixed(3)}) > GER Over0.5(${gP.toFixed(3)}) — buy GER to score` };
+        }
+        return null;
+      },
+    });
+
+    const par05 = parTotals.find(x => x.line === 0.5);
+    if (par05) arbRules.push({
+      type: 'BTTS_VS_PAR05',
+      label: 'BTTS ≤ PAR Over 0.5',
+      check: (prices) => {
+        const bP = yesPrice(btts, prices);
+        const pP = yesPrice(par05, prices);
+        if (bP === null || pP === null) return null;
+        if (yesLiq(btts, prices) < MIN_LIQUIDITY) return null;
+        if (yesLiq(par05, prices) < MIN_LIQUIDITY) return null;
+        if (bP > pP + MIN_EDGE) {
+          return { mktObj: par05, side: 'yes', edge: bP - pP,
+            reason: `BTTS(${bP.toFixed(3)}) > PAR Over0.5(${pP.toFixed(3)}) — buy PAR to score` };
+        }
+        return null;
+      },
+    });
+  }
+
+  // 10. GER ML ≥ GER -1.5 spread
+  if (mlGer) {
+    const gerMinus15 = spreads.find(s => s.q.includes('germany') && s.q.includes('-1.5'));
+    if (gerMinus15) arbRules.push({
+      type: 'SPREAD_VS_ML_GER',
+      label: 'GER ML ≥ GER -1.5',
+      check: (prices) => {
+        const mlP  = yesPrice(mlGer, prices);
+        const spdP = yesPrice(gerMinus15, prices);
+        if (mlP === null || spdP === null) return null;
+        if (yesLiq(mlGer, prices) < MIN_LIQUIDITY) return null;
+        if (yesLiq(gerMinus15, prices) < MIN_LIQUIDITY) return null;
+        if (spdP > mlP + MIN_EDGE) {
+          return { mktObj: mlGer, side: 'yes', edge: spdP - mlP,
+            reason: `GER -1.5(${spdP.toFixed(3)}) > GER ML(${mlP.toFixed(3)}) — buy GER ML` };
+        }
+        return null;
+      },
+    });
+  }
+
+  // 11. HT result vs FT moneyline
+  if (htGer && mlGer) arbRules.push({
+    type: 'HT_VS_FT_GER',
+    label: 'FT GER ML vs HT GER lead',
+    check: (prices) => {
+      const htP = yesPrice(htGer, prices);
+      const ftP = yesPrice(mlGer, prices);
+      if (htP === null || ftP === null) return null;
+      if (yesLiq(htGer, prices) < MIN_LIQUIDITY) return null;
+      if (yesLiq(mlGer, prices) < MIN_LIQUIDITY) return null;
+      // HT GER lead price >> FT GER win price is unusual — could mean FT is cheap
+      if (htP > ftP + MIN_EDGE * 1.5) {
+        return { mktObj: mlGer, side: 'yes', edge: htP - ftP,
+          reason: `HT GER(${htP.toFixed(3)}) >> FT GER(${ftP.toFixed(3)}) — buy FT GER ML` };
+      }
+      return null;
+    },
   });
 
-  ws.on('close', () => {
-    if (wsPingTimer) { clearInterval(wsPingTimer); wsPingTimer = null; }
-    log('⚠️  WebSocket closed — reconnecting in 3s');
-    setTimeout(wsConnect, 3000);
+  // 12. H1 total ≤ Match total (same line)
+  for (const h of htTotals) {
+    const matchMkt = totalByLine.get(h.line);
+    if (!matchMkt) continue;
+    arbRules.push({
+      type: 'H1_VS_MATCH',
+      label: `Match Over${h.line} ≥ H1 Over${h.line}`,
+      check: (prices) => {
+        const hP = yesPrice(h, prices);
+        const mP = yesPrice(matchMkt, prices);
+        if (hP === null || mP === null) return null;
+        if (yesLiq(h, prices) < MIN_LIQUIDITY) return null;
+        if (yesLiq(matchMkt, prices) < MIN_LIQUIDITY) return null;
+        if (hP > mP + MIN_EDGE) {
+          return { mktObj: matchMkt, side: 'yes', edge: hP - mP,
+            reason: `H1 Over${h.line}(${hP.toFixed(3)}) > Match Over${h.line}(${mP.toFixed(3)}) — buy match total` };
+        }
+        return null;
+      },
+    });
+  }
+
+  // 13. GER advance ≥ GER ML (advance includes ET + pens, so it's easier)
+  if (advanceGer && mlGer) arbRules.push({
+    type: 'ADVANCE_VS_ML',
+    label: 'GER Advance ≥ GER ML',
+    check: (prices) => {
+      const advP = yesPrice(advanceGer, prices);
+      const mlP  = yesPrice(mlGer, prices);
+      if (advP === null || mlP === null) return null;
+      if (yesLiq(advanceGer, prices) < MIN_LIQUIDITY) return null;
+      if (yesLiq(mlGer, prices) < MIN_LIQUIDITY) return null;
+      // Advance must be >= ML (advance covers ET + pens = more paths to win)
+      if (mlP > advP + MIN_EDGE) {
+        return { mktObj: advanceGer, side: 'yes', edge: mlP - advP,
+          reason: `GER ML(${mlP.toFixed(3)}) > GER Advance(${advP.toFixed(3)}) — buy advance` };
+      }
+      return null;
+    },
   });
 
-  ws.on('error', (e) => {
-    log(`⚠️  WS error: ${e.message}`);
-    try { ws.terminate(); } catch (_) {}
-  });
+  // 14. GER corners + PAR corners ladder
+  const sgc = byLine(gerCorners);
+  for (let i = 0; i < sgc.length - 1; i++) arbRules.push(ladderRule('LADDER_GER_CORNERS', `GER Corners: Over${sgc[i].line} ≥ Over${sgc[i+1].line}`, sgc[i], sgc[i+1]));
+  const spc = byLine(parCorners);
+  for (let i = 0; i < spc.length - 1; i++) arbRules.push(ladderRule('LADDER_PAR_CORNERS', `PAR Corners: Over${spc[i].line} ≥ Over${spc[i+1].line}`, spc[i], spc[i+1]));
+
+  log(`🎯 ${arbRules.length} arbitrage rules built`);
 }
 
-function onPriceUpdate(tokenId, bestBid, bestAsk) {
-  if (!tokenId) return;
-  const slug = wsTokenMap[tokenId];
-  if (!slug || !markets[slug]) return;
-  const m   = markets[slug];
-  const bid = bestBid ? f4(parseFloat(bestBid)) : null;
-  const ask = bestAsk ? f4(parseFloat(bestAsk)) : null;
+// ─────────────────────────────────────────
+//  Price helpers
+// ─────────────────────────────────────────
+function yesToken(mktObj) {
+  const tokens = mktObj.t || tokensOf(mktObj.m || mktObj);
+  return tokens.find(t => (t.outcome || t.side || '').toLowerCase() === 'yes');
+}
 
-  if (tokenId === m.yesTokenId) {
-    if (bid) m.yesBid = bid;
-    if (ask && ask < TP_PRICE) m.yesAsk = ask;
-    if (m.yesBid && m.yesAsk) m.yesMid = f4((m.yesBid + m.yesAsk) / 2);
-    else if (m.yesBid) m.yesMid = m.yesBid;
-    m.lastPriceAt = Date.now();
-    recordPriceHistory(tokenId, m.yesMid);
+function yesTokenId(mktObj) {
+  return yesToken(mktObj)?.token_id || yesToken(mktObj)?.id || null;
+}
+
+function yesPrice(mktObj, prices) {
+  const tid = yesTokenId(mktObj);
+  if (!tid) return null;
+  const cached = prices.get(tid);
+  if (cached) return cached.mid;
+  // Fallback: inline price on token
+  const tok = yesToken(mktObj);
+  const p = parseFloat(tok?.price || 0);
+  return p > 0 ? p : null;
+}
+
+function yesLiq(mktObj, prices) {
+  const tid = yesTokenId(mktObj);
+  if (!tid) return 0;
+  return prices.get(tid)?.liq || 0;
+}
+
+// ─────────────────────────────────────────
+//  STEP 3: Refresh live prices from CLOB
+// ─────────────────────────────────────────
+async function refreshPrices() {
+  if (allMarkets.length === 0) return;
+  const tokenIds = [];
+  for (const m of allMarkets) {
+    for (const t of tokensOf(m)) {
+      const tid = t.token_id || t.id;
+      if (tid) tokenIds.push(tid);
+    }
   }
-  if (tokenId === m.noTokenId) {
-    if (bid) m.noBid = bid;
-    if (ask && ask < TP_PRICE) m.noAsk = ask;
-    if (m.noBid && m.noAsk) m.noMid = f4((m.noBid + m.noAsk) / 2);
-    else if (m.noBid) m.noMid = m.noBid;
-    m.lastPriceAt = Date.now();
+  if (tokenIds.length === 0) return;
+
+  const newPrices = new Map();
+  const batchSize = 25;
+
+  // Try CLOB /prices (batch POST)
+  for (let i = 0; i < tokenIds.length; i += batchSize) {
+    const batch = tokenIds.slice(i, i + batchSize);
+    try {
+      const data = await postJSON(`${CLOB}/prices`, { token_ids: batch });
+      const arr = Array.isArray(data) ? data : Object.values(data);
+      for (const item of arr) {
+        const tid = item.token_id || item.asset_id || item.tokenId;
+        const p = parseFloat(item.price || item.mid || 0);
+        if (tid && p > 0) newPrices.set(tid, { mid: p, liq: parseFloat(item.liquidity || 0) || 50 });
+      }
+    } catch(_) {
+      // Batch failed — try individual midpoint endpoints
+      for (const tid of batch) {
+        try {
+          const d = await getJSON(`${CLOB}/midpoint?token_id=${tid}`);
+          const p = parseFloat(d.mid || d.price || 0);
+          if (p > 0) newPrices.set(tid, { mid: p, liq: 50 });
+        } catch(_2) {}
+      }
+    }
+  }
+
+  // Fill gaps with inline token prices from market data
+  for (const m of allMarkets) {
+    for (const t of tokensOf(m)) {
+      const tid = t.token_id || t.id;
+      if (!tid || newPrices.has(tid)) continue;
+      const p = parseFloat(t.price || 0);
+      if (p > 0) newPrices.set(tid, { mid: p, liq: parseFloat(t.liquidity || 0) || 0 });
+    }
+  }
+
+  if (newPrices.size > 0) {
+    priceCache = newPrices;
+    log(`💹 Prices: ${newPrices.size} tokens refreshed`);
   }
 }
 
-function wsSubscribe(tokenIds) {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  ws.send(JSON.stringify({ assets_ids: tokenIds, type: 'market' }));
-}
+// ─────────────────────────────────────────
+//  STEP 4: Scan arb rules and trade
+// ─────────────────────────────────────────
+async function scanArbs() {
+  if (arbRules.length === 0) { log('⏳ No arb rules yet'); return; }
+  if (priceCache.size === 0)  { log('⏳ Price cache empty'); return; }
 
-function recordPriceHistory(tokenId, mid) {
-  if (!mid) return;
-  if (!priceHistory[tokenId]) priceHistory[tokenId] = [];
-  const now = Date.now();
-  priceHistory[tokenId].push({ mid, ts: now });
-  // Keep only last 5 min
-  const cutoff = now - 5 * 60_000;
-  priceHistory[tokenId] = priceHistory[tokenId].filter(p => p.ts > cutoff);
-}
-
-// Price velocity: change in mid over VELOCITY_WINDOW_MS
-// Positive = rising, Negative = falling
-function getPriceVelocity(tokenId) {
-  const hist = priceHistory[tokenId];
-  if (!hist || hist.length < 2) return 0;
-  const now    = Date.now();
-  const cutoff = now - VELOCITY_WINDOW_MS;
-  const old    = hist.find(p => p.ts >= cutoff);
-  const recent = hist[hist.length - 1];
-  if (!old || old === recent) return 0;
-  return f4(recent.mid - old.mid);
-}
-
-// ══════════════════════════════════════════
-//  REST PRICE & BOOK FETCH
-// ══════════════════════════════════════════
-async function refreshPriceRest(m) {
-  const [yMid, nMid, yBook, nBook] = await Promise.all([
-    getJSON(`${CLOB}/midpoint?token_id=${m.yesTokenId}`),
-    getJSON(`${CLOB}/midpoint?token_id=${m.noTokenId}`),
-    getJSON(`${CLOB}/book?token_id=${m.yesTokenId}`),
-    getJSON(`${CLOB}/book?token_id=${m.noTokenId}`),
-  ]);
-  if (yMid?.mid) m.yesMid = f4(parseFloat(yMid.mid));
-  if (nMid?.mid) m.noMid  = f4(parseFloat(nMid.mid));
-
-  if (yBook) {
-    m.yesBid = yBook.bids?.[0]?.price ? f4(parseFloat(yBook.bids[0].price)) : m.yesBid;
-    m.yesAsk = yBook.asks?.[0]?.price ? f4(parseFloat(yBook.asks[0].price)) : m.yesAsk;
-    // Liquidity = sum of top 5 levels * price
-    m.yesLiquidityUsd = sumLiquidity(yBook.bids);
+  // Hard exit check
+  if (matchEndTime) {
+    const minsLeft = (matchEndTime - Date.now()) / 60000;
+    if (minsLeft < HARD_EXIT_MINS && openPositions.size > 0) {
+      log(`⏰ ${minsLeft.toFixed(1)}m to end — closing all positions`);
+      await closeAllPositions('HARD_EXIT');
+      return;
+    }
   }
-  if (nBook) {
-    m.noBid = nBook.bids?.[0]?.price ? f4(parseFloat(nBook.bids[0].price)) : m.noBid;
-    m.noAsk = nBook.asks?.[0]?.price ? f4(parseFloat(nBook.asks[0].price)) : m.noAsk;
-    m.noLiquidityUsd = sumLiquidity(nBook.bids);
+
+  let arbs = 0;
+  for (const rule of arbRules) {
+    const key = `${rule.type}::${rule.label}`;
+
+    // Check exit for existing positions
+    if (openPositions.has(key)) {
+      await maybeExit(key);
+      continue;
+    }
+
+    if (openPositions.size >= MAX_POSITIONS) continue;
+
+    const signal = rule.check(priceCache);
+    if (!signal) continue;
+
+    log(`✨ ARB [${rule.type}] ${rule.label} | edge=${signal.edge.toFixed(4)} | ${signal.reason}`);
+    await enterArb(key, rule, signal);
+    arbs++;
   }
-  m.lastPriceAt = Date.now();
-  if (!m.yesMid && m.yesBid && m.yesAsk) m.yesMid = f4((m.yesBid + m.yesAsk) / 2);
-  if (!m.noMid  && m.noBid  && m.noAsk)  m.noMid  = f4((m.noBid  + m.noAsk)  / 2);
+
+  if (arbs === 0 && priceCache.size > 0) {
+    log(`🔍 ${arbRules.length} rules checked — no arbs above ¢${(MIN_EDGE * 100).toFixed(0)} threshold`);
+  }
 }
 
-function sumLiquidity(levels) {
-  if (!Array.isArray(levels)) return 0;
-  return levels.slice(0, 5).reduce((acc, l) => {
-    const price = parseFloat(l.price || 0);
-    const size  = parseFloat(l.size  || 0);
-    return acc + price * size;
+async function enterArb(key, rule, signal) {
+  try {
+    const tid = yesTokenId(signal.mktObj);
+    if (!tid) { log(`❌ No token ID for ${rule.label}`); return; }
+    const cached = priceCache.get(tid);
+    const price = cached?.mid;
+    if (!price) { log(`❌ No price for ${tid}`); return; }
+
+    const cost = price * SHARES_PER_ARB;
+    log(`📥 ENTER ${rule.type} | ${rule.label} | YES @ ${price.toFixed(4)} | ${SHARES_PER_ARB}sh | $${cost.toFixed(2)}`);
+
+    if (!DRY_RUN && trader) {
+      await trader.marketBuy(tid, SHARES_PER_ARB, price * 1.02);
+    } else {
+      log(`[DRY] BUY ${SHARES_PER_ARB}sh ${tid} @ ${price.toFixed(4)}`);
+    }
+
+    openPositions.set(key, {
+      rule, signal, tid,
+      shares: SHARES_PER_ARB,
+      avgCost: price,
+      entryEdge: signal.edge,
+      enteredAt: Date.now(),
+      label: rule.label,
+      type: rule.type,
+    });
+
+    trades.push({
+      time: new Date().toISOString().slice(11,19),
+      label: rule.label,
+      type: rule.type,
+      side: 'YES',
+      shares: SHARES_PER_ARB,
+      price,
+      cost,
+      edge: signal.edge,
+    });
+    if (trades.length > 100) trades.shift();
+  } catch(e) {
+    log(`❌ enterArb: ${e.message}`);
+  }
+}
+
+async function maybeExit(key) {
+  const pos = openPositions.get(key);
+  if (!pos) return;
+  const cur = priceCache.get(pos.tid)?.mid;
+  if (!cur) return;
+  const pnl = (cur - pos.avgCost) * pos.shares;
+  const secsOpen = (Date.now() - pos.enteredAt) / 1000;
+  const takeProfit = cur > pos.avgCost + MIN_EDGE;
+  const stopLoss   = cur < pos.avgCost - MIN_EDGE * STOP_LOSS_MULT;
+  const timeExit   = secsOpen > TIME_EXIT_SECS;
+  if (!takeProfit && !stopLoss && !timeExit) return;
+  const reason = takeProfit ? 'TAKE_PROFIT' : stopLoss ? 'STOP_LOSS' : 'TIME_EXIT';
+  log(`${takeProfit ? '💰' : '📉'} EXIT [${reason}] ${pos.label} | in=${pos.avgCost.toFixed(4)} cur=${cur.toFixed(4)} pnl=$${pnl.toFixed(2)}`);
+  if (!DRY_RUN && trader) {
+    try { await trader.marketSell(pos.tid, pos.shares, cur * 0.98); } catch(e) { log(`⚠️  Exit err: ${e.message}`); }
+  } else {
+    log(`[DRY] SELL ${pos.shares}sh @ ${cur.toFixed(4)} | PnL: $${pnl.toFixed(2)}`);
+  }
+  realizedPnl += pnl;
+  openPositions.delete(key);
+}
+
+async function closeAllPositions(reason) {
+  for (const [key, pos] of openPositions) {
+    const cur = priceCache.get(pos.tid)?.mid || pos.avgCost;
+    const pnl = (cur - pos.avgCost) * pos.shares;
+    log(`🔒 ${reason} | ${pos.label} | pnl=$${pnl.toFixed(2)}`);
+    if (!DRY_RUN && trader) {
+      try { await trader.marketSell(pos.tid, pos.shares, cur * 0.98); } catch(e) {}
+    } else {
+      log(`[DRY] Close ${pos.shares}sh @ ${cur.toFixed(4)} | PnL: $${pnl.toFixed(2)}`);
+    }
+    realizedPnl += pnl;
+    openPositions.delete(key);
+  }
+}
+
+// ─────────────────────────────────────────
+//  UI State
+// ─────────────────────────────────────────
+function buildState(balance) {
+  const unrealized = [...openPositions.values()].reduce((sum, pos) => {
+    const cur = priceCache.get(pos.tid)?.mid || pos.avgCost;
+    return sum + (cur - pos.avgCost) * pos.shares;
   }, 0);
-}
-
-async function ensureFreshPrice(m) {
-  const stale = !m.lastPriceAt || (Date.now() - m.lastPriceAt) > 4000;
-  if (stale) await refreshPriceRest(m);
-}
-
-// ══════════════════════════════════════════
-//  SIGNAL ENGINE
-// ══════════════════════════════════════════
-/**
- * Returns { side: 'yes'|'no'|null, score, signals[] }
- * score ≥ 2 → trade that side
- */
-function analyzeMarket(m) {
-  const signals = [];
-  let yesScore  = 0;
-
-  // ── Signal 1: Spread Fade ──
-  // Wide spread on YES side → market is uncertain/overextended
-  // If YES is above 0.5, fade it by buying NO (contrarian)
-  // If YES is below 0.5, fade NO by buying YES
-  if (m.yesMid && m.yesAsk && m.yesBid) {
-    const spread = f4(m.yesAsk - m.yesBid);
-    if (spread > 0.04) {
-      // Wide spread: bet against the leading side
-      if (m.yesMid > 0.5) {
-        yesScore -= 1;
-        signals.push({ name: 'SpreadFade', vote: 'NO', detail: `wide spread ${spread.toFixed(3)}, YES=${m.yesMid.toFixed(3)} overpriced` });
-      } else {
-        yesScore += 1;
-        signals.push({ name: 'SpreadFade', vote: 'YES', detail: `wide spread ${spread.toFixed(3)}, YES=${m.yesMid.toFixed(3)} underpriced` });
-      }
-    } else {
-      signals.push({ name: 'SpreadFade', vote: 'SKIP', detail: `tight spread ${spread.toFixed(3)} — no edge` });
-    }
-  }
-
-  // ── Signal 2: Volume/Liquidity Imbalance ──
-  // More liquidity on YES side = smart money backing YES
-  const yesLiq = m.yesLiquidityUsd || 0;
-  const noLiq  = m.noLiquidityUsd  || 0;
-  if (yesLiq > 0 && noLiq > 0) {
-    const ratio = yesLiq / (yesLiq + noLiq);
-    if (ratio > 0.62) {
-      yesScore += 1;
-      signals.push({ name: 'LiqImbalance', vote: 'YES', detail: `YES liq ${f2(yesLiq)} vs NO liq ${f2(noLiq)} (${(ratio*100).toFixed(0)}% YES)` });
-    } else if (ratio < 0.38) {
-      yesScore -= 1;
-      signals.push({ name: 'LiqImbalance', vote: 'NO', detail: `NO liq ${f2(noLiq)} vs YES liq ${f2(yesLiq)} (${((1-ratio)*100).toFixed(0)}% NO)` });
-    } else {
-      signals.push({ name: 'LiqImbalance', vote: 'SKIP', detail: `balanced liquidity ${(ratio*100).toFixed(0)}%/YES` });
-    }
-  }
-
-  // ── Signal 3: Price Velocity (mean reversion) ──
-  // YES rising fast → likely to revert → buy NO
-  // YES falling fast → likely to revert → buy YES
-  const velocity = getPriceVelocity(m.yesTokenId);
-  if (Math.abs(velocity) >= VELOCITY_MIN) {
-    if (velocity > 0) {
-      // YES rising: fade it → NO
-      yesScore -= 1;
-      signals.push({ name: 'Velocity', vote: 'NO', detail: `YES rising +${velocity.toFixed(4)} in 60s → mean revert` });
-    } else {
-      // YES falling: buy it → YES
-      yesScore += 1;
-      signals.push({ name: 'Velocity', vote: 'YES', detail: `YES falling ${velocity.toFixed(4)} in 60s → mean revert` });
-    }
-  } else {
-    signals.push({ name: 'Velocity', vote: 'SKIP', detail: `velocity ${velocity.toFixed(4)} < threshold` });
-  }
-
-  // ── Decision ──
-  let side = null;
-  if (yesScore >= 2)       side = 'yes';
-  else if (yesScore <= -2) side = 'no';
-
-  return { side, score: yesScore, signals };
-}
-
-// ══════════════════════════════════════════
-//  ORDER MANAGEMENT
-// ══════════════════════════════════════════
-async function placeLimitOrder(tokenId, side, price, shares, label) {
-  if (DRY_RUN) {
-    const id = `DRY-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`;
-    log(`[DRY] ${side} ${shares}sh @ ${price} (${label}) → ${id}`);
-    return id;
-  }
-  try {
-    const r = await trader.placeGtcOrder(tokenId, side, price, shares);
-    return r?.id || null;
-  } catch (e) {
-    log(`⚠️  Order error (${label}): ${e.message}`);
-    return null;
-  }
-}
-
-async function cancelOrder(orderId, label) {
-  if (DRY_RUN) { log(`[DRY] Cancel ${orderId} (${label})`); return; }
-  try { await trader.cancelOrder(orderId); } catch (_) {}
-}
-
-async function waitForFill(orderId, timeoutMs, label) {
-  if (DRY_RUN) {
-    await sleep(600);
-    log(`[DRY] Simulated fill: ${orderId} (${label})`);
-    return true;
-  }
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    await sleep(500);
-    try {
-      const o = await trader.getOrder(orderId);
-      if (!o) continue;
-      const st = (o.status || o.match_status || o.state || '').toLowerCase();
-      if (st === 'filled')    return true;
-      if (st === 'cancelled') { log(`⚠️  ${label} cancelled externally`); return false; }
-    } catch (_) {}
-  }
-  return false;
-}
-
-// ══════════════════════════════════════════
-//  FIRE ENTRY
-// ══════════════════════════════════════════
-async function fireEntry(m, entryNum) {
-  const isYes   = m.side === 'yes';
-  const label   = isYes ? 'YES' : 'NO';
-  const tokenId = isYes ? m.yesTokenId : m.noTokenId;
-  const tick    = isYes ? (m.yesTick || 0.01) : (m.noTick || 0.01);
-
-  await ensureFreshPrice(m);
-
-  let mid = isYes ? m.yesMid : m.noMid;
-  if (!mid || mid <= 0) { log(`⚠️  ${m.label} Entry ${entryNum}: no price — skipping`); return; }
-
-  // Re-check signal still valid (don't enter if consensus shifted)
-  const analysis = analyzeMarket(m);
-  if (analysis.side !== m.side) {
-    log(`⚠️  ${m.label} Entry ${entryNum}: signal flipped (${analysis.score}) — skipping`);
-    return;
-  }
-
-  // Price just below TP
-  let px = Math.min(mid, TP_PRICE - tick);
-  px = f4(Math.max(0.01, Math.round(px / tick) * tick));
-
-  const shares = SHARES_PER_ENTRY;
-  log(`📥 ${m.label} Entry ${entryNum}/3 — BUY ${label} ${shares}sh @ ${px}`);
-
-  const orderId = await placeLimitOrder(tokenId, 'BUY', px, shares, `${label}-E${entryNum}`);
-  if (!orderId) return;
-  m.openOrderIds.push(orderId);
-
-  const filled = await waitForFill(orderId, 12000, `${label}-E${entryNum}`);
-  m.openOrderIds = m.openOrderIds.filter(id => id !== orderId);
-
-  if (!filled) {
-    log(`⏰ ${m.label} Entry ${entryNum} not filled — cancelling`);
-    await cancelOrder(orderId, `${label}-E${entryNum}`);
-    return;
-  }
-
-  const cost = f4(px * shares);
-  m.shares    += shares;
-  m.totalCost += cost;
-  m.firedCount++;
-  m.openTrades.push({ shares, entryPrice: px, cost });
-  log(`✅ ${m.label} Entry ${entryNum} FILLED: ${shares}sh @ ${px} | cost $${cost}`);
-
-  trades.push({
-    time: new Date().toTimeString().slice(0, 8),
-    label: m.label, side: label,
-    entryNum, shares, price: px, cost,
-    category: m.category,
-  });
-
-  // Place TP immediately
-  const tpId = await placeLimitOrder(tokenId, 'SELL', TP_PRICE, shares, `${label}-TP${entryNum}`);
-  if (tpId) {
-    m.tpOrderIds.push(tpId);
-    m.openOrderIds.push(tpId);
-    log(`🎯 TP placed ${shares}sh @ ${TP_PRICE} → ${tpId}`);
-  }
-
-  log(`💰 Capital: $${calcCapital()} | Unrealized: $${calcUnrealized(m)}`);
-  emitFn('state', buildState());
-}
-
-// ══════════════════════════════════════════
-//  FORCE EXIT
-// ══════════════════════════════════════════
-async function forceExit(m) {
-  if (m.exitDone) return;
-  m.exitDone = true;
-
-  if (m.shares === 0) {
-    log(`✅ ${m.label} Exit: no open shares`);
-    return;
-  }
-
-  // Cancel all open orders
-  if (m.openOrderIds.length > 0) {
-    log(`🧹 ${m.label} Cancelling ${m.openOrderIds.length} orders before exit`);
-    await Promise.all(m.openOrderIds.map(id => cancelOrder(id, 'pre-exit')));
-    m.openOrderIds = [];
-    m.tpOrderIds   = [];
-  }
-
-  const isYes   = m.side === 'yes';
-  const label   = isYes ? 'YES' : 'NO';
-  const tokenId = isYes ? m.yesTokenId : m.noTokenId;
-  const tick    = isYes ? (m.yesTick || 0.01) : (m.noTick || 0.01);
-
-  await refreshPriceRest(m);
-  const mid = isYes ? m.yesMid : m.noMid;
-  const bid = isYes ? m.yesBid : m.noBid;
-  let sellPx = mid > 0 ? mid : (bid > 0 ? bid : 0.01);
-  sellPx = Math.min(sellPx, TP_PRICE - tick);
-  sellPx = f4(Math.max(0.01, Math.round(sellPx / tick) * tick));
-
-  log(`🚨 ${m.label} FORCE EXIT ${m.shares}sh ${label} @ ${sellPx}`);
-
-  const orderId = await placeLimitOrder(tokenId, 'SELL', sellPx, m.shares, `${label}-EXIT`);
-  if (!orderId) { log(`❌ ${m.label} Exit order failed`); return; }
-  m.openOrderIds.push(orderId);
-
-  const filled = await waitForFill(orderId, 5000, `${label}-EXIT`);
-  m.openOrderIds = m.openOrderIds.filter(id => id !== orderId);
-  if (!filled) {
-    log(`⚠️  ${m.label} Exit not filled — cancelling`);
-    await cancelOrder(orderId, `${label}-EXIT`);
-  }
-
-  const revenue = f4(sellPx * m.shares);
-  const pnl     = f2(revenue - m.totalCost);
-  realizedPnl   = f2(realizedPnl + pnl);
-
-  log(`📊 ${m.label} Exit: revenue $${revenue} | cost $${f2(m.totalCost)} | P&L $${pnl}`);
-  log(`💰 Realized P&L: $${realizedPnl} | Capital: $${calcCapital()}`);
-
-  m.shares     = 0;
-  m.totalCost  = 0;
-  m.openTrades = [];
-  m.exitPnl    = pnl;
-  emitFn('state', buildState());
-}
-
-// ══════════════════════════════════════════
-//  TRADE LOOP (per market)
-// ══════════════════════════════════════════
-async function tradeLoop(m) {
-  m.loopRunning = true;
-  const sideLabel = m.side.toUpperCase();
-  log(`🚀 ${m.label} loop started — signal=${sideLabel} score=${m.signalScore} entries@${ENTRY_SECS.join('/')}s`);
-
-  const fired  = new Set();
-  const secsIn = () => (Date.now() - m.tradeStartMs) / 1000;
-
-  while (!m.done) {
-    const secs = secsIn();
-
-    if (secs >= FORCE_EXIT_SECS && !m.exitDone) {
-      await forceExit(m);
-      m.done = true;
-      log(`🏁 ${m.label} window closed at ${secs.toFixed(0)}s`);
-      break;
-    }
-
-    await ensureFreshPrice(m);
-
-    for (let i = 0; i < ENTRY_SECS.length; i++) {
-      const fireAt = ENTRY_SECS[i];
-      if (!fired.has(i) && secs >= fireAt && secs < fireAt + 8) {
-        fired.add(i);
-        await fireEntry(m, i + 1);
-        break;
-      }
-    }
-
-    emitFn('state', buildState());
-    await sleep(TICK_MS);
-  }
-
-  m.loopRunning = false;
-  log(`🏁 ${m.label} trade loop ended`);
-}
-
-// ══════════════════════════════════════════
-//  MARKET SCANNER
-// ══════════════════════════════════════════
-async function scanMarkets() {
-  log('🔭 Scanning Polymarket for live opportunities…');
-
-  const nowMs       = Date.now();
-  const minEndMs    = nowMs + MIN_MINS_TO_END * 60_000;
-  const maxEndMs    = nowMs + MAX_MINS_TO_END * 60_000;
-
-  // Fetch live markets from Gamma (paginated, get most recent)
-  // Filter: active, not resolved, binary markets
-  let candidates = [];
-  try {
-    // Gamma: fetch markets ending soon, filtered by end_date_min/max
-    const minEndISO = new Date(minEndMs).toISOString();
-    const maxEndISO = new Date(maxEndMs).toISOString();
-
-    // Fetch multiple pages to get good coverage, filtered server-side by end date
-    const pages = await Promise.all([
-      getJSON(`${GAMMA}/markets?closed=false&limit=100&offset=0&end_date_min=${encodeURIComponent(minEndISO)}&end_date_max=${encodeURIComponent(maxEndISO)}&order=endDate&ascending=true`),
-      getJSON(`${GAMMA}/markets?closed=false&limit=100&offset=100&end_date_min=${encodeURIComponent(minEndISO)}&end_date_max=${encodeURIComponent(maxEndISO)}&order=endDate&ascending=true`),
-    ]);
-
-    for (const page of pages) {
-      if (!Array.isArray(page)) continue;
-      for (const mk of page) {
-        if (!mk.endDate) continue;
-        const endMs = new Date(mk.endDate).getTime();
-        if (endMs < minEndMs || endMs > maxEndMs) continue;
-        if (!mk.clobTokenIds) continue;
-        if (mk.closed || mk.archived) continue;
-        candidates.push(mk);
-      }
-    }
-  } catch (e) {
-    log(`⚠️  Scan error: ${e.message}`);
-    return;
-  }
-
-  log(`🔭 Found ${candidates.length} candidate markets ending in ${MIN_MINS_TO_END}–${MAX_MINS_TO_END} min`);
-
-  // Process each candidate
-  for (const mk of candidates) {
-    try {
-      await evaluateCandidate(mk);
-    } catch (e) {
-      log(`⚠️  Evaluate error [${mk.slug}]: ${e.message}`);
-    }
-    await sleep(300); // throttle
-  }
-}
-
-async function evaluateCandidate(mk) {
-  let ids;
-  try { ids = JSON.parse(mk.clobTokenIds); } catch (_) { return; }
-  if (!ids || ids.length < 2) return;
-
-  const slug = mk.slug;
-  if (markets[slug]) return; // already tracking
-
-  const yesTokenId = ids[0];
-  const noTokenId  = ids[1];
-  const endTime    = new Date(mk.endDate).getTime();
-  const minsLeft   = Math.floor((endTime - Date.now()) / 60_000);
-
-  // Build a temporary market object to run price/analysis
-  const tmp = {
-    slug, yesTokenId, noTokenId, endTime,
-    yesMid: 0, noMid: 0,
-    yesBid: 0, yesAsk: 0,
-    noBid: 0,  noAsk: 0,
-    yesLiquidityUsd: 0,
-    noLiquidityUsd:  0,
-    lastPriceAt: 0,
-    yesTick: parseFloat(mk.yesTick || '0.01') || 0.01,
-    noTick:  parseFloat(mk.noTick  || '0.01') || 0.01,
-  };
-
-  await refreshPriceRest(tmp);
-
-  // Price filter
-  if (!tmp.yesMid || tmp.yesMid < MIN_YES_MID || tmp.yesMid > MAX_YES_MID) return;
-
-  // Liquidity filter
-  if (tmp.yesLiquidityUsd < MIN_LIQUIDITY_USD || tmp.noLiquidityUsd < MIN_LIQUIDITY_USD) return;
-
-  // Seed price history for velocity calculation
-  if (yesTokenId) {
-    recordPriceHistory(yesTokenId, tmp.yesMid);
-  }
-
-  // Run signal engine
-  const analysis = analyzeMarket(tmp);
-  const { side, score, signals } = analysis;
-
-  const sigSummary = signals.map(s => `${s.name}:${s.vote}`).join(' | ');
-  log(`📊 [${slug.slice(0, 40)}] score=${score} ${sigSummary} | YES=${tmp.yesMid} minsLeft=${minsLeft}`);
-
-  if (!side) return; // No clear signal
-
-  // All checks passed — open this market
-  const question = mk.question || mk.title || slug;
-  const label    = question.length > 50 ? question.slice(0, 47) + '…' : question;
-
-  log(`✨ OPPORTUNITY: ${label}`);
-  log(`   Side=${side.toUpperCase()} | Score=${score} | YES=${tmp.yesMid} | NO=${tmp.noMid} | ${minsLeft}min left`);
-  signals.forEach(s => log(`   [${s.name}] ${s.vote}: ${s.detail}`));
-
-  // Get tick sizes from CLOB
-  let yesTick = '0.01', noTick = '0.01';
-  try {
-    [yesTick, noTick] = await Promise.all([
-      trader._clob.getTickSize(yesTokenId).catch(() => '0.01'),
-      trader._clob.getTickSize(noTokenId).catch(() => '0.01'),
-    ]);
-  } catch (_) {}
-
-  markets[slug] = {
-    slug, label,
-    question: mk.question || mk.title || slug,
-    category: mk.category || 'unknown',
-    yesTokenId, noTokenId, endTime,
-    tradeStartMs: Date.now(),
-
-    // Prices
-    yesMid: tmp.yesMid, noMid: tmp.noMid,
-    yesBid: tmp.yesBid, yesAsk: tmp.yesAsk,
-    noBid:  tmp.noBid,  noAsk:  tmp.noAsk,
-    yesLiquidityUsd: tmp.yesLiquidityUsd,
-    noLiquidityUsd:  tmp.noLiquidityUsd,
-    lastPriceAt: tmp.lastPriceAt,
-    yesTick: parseFloat(yesTick) || 0.01,
-    noTick:  parseFloat(noTick)  || 0.01,
-
-    // Signal
-    side,
-    signalScore: score,
-    signals,
-
-    // Position
-    shares: 0, totalCost: 0,
-    openTrades: [], openOrderIds: [], tpOrderIds: [],
-    firedCount: 0,
-    exitDone: false, done: false, loopRunning: false,
-    exitPnl: null,
-    minsLeft,
-  };
-
-  // Subscribe to WS
-  wsTokenMap[yesTokenId] = slug;
-  wsTokenMap[noTokenId]  = slug;
-  wsSubscribe([yesTokenId, noTokenId]);
-
-  // Launch trade loop
-  tradeLoop(markets[slug]).catch(e => log(`❌ Trade loop crash [${slug}]: ${e.message}`));
-}
-
-// ══════════════════════════════════════════
-//  P&L CALCULATIONS
-// ══════════════════════════════════════════
-function calcUnrealized(m) {
-  if (!m || m.shares === 0) return 0;
-  const mid = m.side === 'yes' ? m.yesMid : m.noMid;
-  const avg = m.totalCost / m.shares;
-  return f2((mid - avg) * m.shares);
-}
-
-function calcCapital() {
-  let unreal = 0;
-  for (const m of Object.values(markets)) unreal += calcUnrealized(m);
-  return f2(demoBalance + realizedPnl + unreal);
-}
-
-// ══════════════════════════════════════════
-//  SCAN LOOP
-// ══════════════════════════════════════════
-async function scanLoop() {
-  while (true) {
-    if (trader && Date.now() - lastScanAt > SCAN_EVERY_MS) {
-      lastScanAt = Date.now();
-      await scanMarkets().catch(e => log(`⚠️  Scan loop error: ${e.message}`));
-    }
-    await sleep(3000);
-  }
-}
-
-// ══════════════════════════════════════════
-//  STATE BUILDER
-// ══════════════════════════════════════════
-function buildState() {
-  const capital    = calcCapital();
-  const sessionPnl = f2(capital - demoBalance);
-
-  const mktList = Object.values(markets).map(m => ({
-    slug:        m.slug,
-    label:       m.label,
-    category:    m.category,
-    side:        m.side,
-    signalScore: m.signalScore,
-    signals:     (m.signals || []).map(s => `${s.name}:${s.vote}`).join(' '),
-    secsIn:      Math.floor((Date.now() - m.tradeStartMs) / 1000),
-    secsLeft:    Math.max(0, Math.floor((m.tradeStartMs + TRADE_WINDOW_SECS * 1000 - Date.now()) / 1000)),
-    minsLeft:    m.minsLeft,
-    yesMid:      m.yesMid,
-    noMid:       m.noMid,
-    yesLiq:      f2(m.yesLiquidityUsd || 0),
-    noLiq:       f2(m.noLiquidityUsd || 0),
-    shares:      m.shares,
-    totalCost:   f2(m.totalCost),
-    avgCost:     m.shares > 0 ? f4(m.totalCost / m.shares) : 0,
-    unrealized:  calcUnrealized(m),
-    firedCount:  m.firedCount,
-    openOrders:  m.openOrderIds.length,
-    exitDone:    m.exitDone,
-    done:        m.done,
-    exitPnl:     m.exitPnl,
-    dryRun:      DRY_RUN,
-  }));
-
   return {
-    capital, startBalance: demoBalance,
-    realizedPnl, pnl: sessionPnl,
-    uptime:  Math.floor((Date.now() - startTime) / 1000),
-    dryRun:  DRY_RUN,
-    markets: mktList,
-    trades:  trades.slice(-50),
-    logs:    logs.slice(0, 100),
-    activeCount:  mktList.filter(m => !m.done).length,
-    doneCount:    mktList.filter(m => m.done).length,
-    lastScanAgo:  Math.floor((Date.now() - lastScanAt) / 1000),
+    dryRun: DRY_RUN,
+    capital: balance,
+    pnl: balance - startBalance + realizedPnl,
+    realizedPnl,
+    unrealized,
+    uptime: Math.floor((Date.now() - startTime) / 1000),
+    lastScanAgo: Math.floor((Date.now() - lastScanAt) / 1000),
+    eventSlug: MATCH_EVENT_SLUG,
+    totalMarkets: allMarkets.length,
+    arbRules: arbRules.length,
+    pricesTracked: priceCache.size,
+    matchEndTime: matchEndTime ? new Date(matchEndTime).toISOString() : null,
+    minsToEnd: matchEndTime ? ((matchEndTime - Date.now()) / 60000).toFixed(1) : null,
+    positions: [...openPositions.values()].map(pos => {
+      const cur = priceCache.get(pos.tid)?.mid || pos.avgCost;
+      return {
+        label: pos.label,
+        type: pos.type,
+        shares: pos.shares,
+        entry: pos.avgCost,
+        current: cur,
+        pnl: (cur - pos.avgCost) * pos.shares,
+        secsOpen: Math.floor((Date.now() - pos.enteredAt) / 1000),
+        edge: pos.entryEdge,
+      };
+    }),
+    activeCount: openPositions.size,
+    logs: logs.slice(-60),
+    trades: trades.slice(-50),
   };
 }
 
-// ══════════════════════════════════════════
-//  INIT
-// ══════════════════════════════════════════
-async function init(privateKey, emit, serverLog) {
-  emitFn = emit || (() => {});
-  slog   = serverLog || (() => {});
+// ─────────────────────────────────────────
+//  Main loop
+// ─────────────────────────────────────────
+async function mainLoop() {
+  let balance = startBalance;
+  let tick = 0;
+  while (true) {
+    try {
+      const now = Date.now();
 
-  log('🤖 Polymarket Opportunist Bot starting…');
-  log(`   DRY_RUN=${DRY_RUN} | Strategy: Liquidity Momentum + Spread Fade`);
-  log(`   Window: ${TRADE_WINDOW_SECS / 60}min | Entries at ${ENTRY_SECS.join('/')}s | Exit at ${FORCE_EXIT_SECS}s`);
-  log(`   Targets: markets ending in ${MIN_MINS_TO_END}–${MAX_MINS_TO_END} min | YES mid ${MIN_YES_MID}–${MAX_YES_MID}`);
+      // Re-fetch markets every MARKET_REFETCH_MS
+      if (now - lastMarketFetch > MARKET_REFETCH_MS) {
+        await fetchMatchMarkets();
+        lastMarketFetch = now;
+      }
 
-  trader = new PolymarketTrader(privateKey);
-  trader.setLogFn(log);
+      // Refresh prices + scan arbs on interval
+      if (now - lastScanAt > SCAN_EVERY_MS) {
+        await refreshPrices();
+        await scanArbs();
+        lastScanAt = now;
+      }
 
-  await trader.authenticate();
-  await trader.approveAllowance();
+      if (trader && !DRY_RUN) {
+        try { balance = await trader.getBalance(); } catch(_) {}
+      }
 
-  if (DRY_RUN) {
-    demoBalance = 500;
-    log('💰 DRY RUN: demo balance $500');
-  } else {
-    demoBalance = await trader.getBalance();
-    log(`💰 Live balance: $${demoBalance}`);
+      emitFn('state', buildState(balance));
+    } catch(e) {
+      log(`⚠️  Loop error: ${e.message}`);
+    }
+    await new Promise(r => setTimeout(r, TICK_MS));
+    tick++;
   }
-
-  realizedPnl = 0;
-  startTime   = Date.now();
-
-  wsConnect();
-
-  // Kick off scan loop
-  scanLoop().catch(e => log(`❌ Scan loop crashed: ${e.message}`));
-
-  // State broadcast
-  setInterval(() => emitFn('state', buildState()), 1000);
 }
 
-function getState() { return buildState(); }
-function getLogs()  { return logs; }
+// ─────────────────────────────────────────
+//  Init
+// ─────────────────────────────────────────
+async function init(privateKey, emit, slogFn) {
+  emitFn = emit;
+  slog   = slogFn;
+  log(`🚀 FIFA Cross-Market Arb Bot`);
+  log(`🎯 Match: ${MATCH_EVENT_SLUG}`);
+  log(`⚙️  Edge: ¢${(MIN_EDGE*100).toFixed(0)} | ${SHARES_PER_ARB}sh/arb | max ${MAX_POSITIONS} positions`);
+  log(`${DRY_RUN ? '⚠️  DRY RUN — $500 demo balance' : '🔴 LIVE MODE'}`);
 
-module.exports = { init, getState, getLogs };
+  if (!DRY_RUN) {
+    trader = new PolymarketTrader(privateKey);
+    await trader.init();
+    startBalance = await trader.getBalance();
+  }
+
+  log(`💰 Balance: $${startBalance.toFixed(2)}`);
+  await fetchMatchMarkets();
+  lastMarketFetch = Date.now();
+  await refreshPrices();
+  lastScanAt = Date.now();
+  mainLoop().catch(e => log(`❌ Fatal: ${e.message}`));
+}
+
+module.exports = { init };
