@@ -676,7 +676,7 @@ async function init(privateKey, emit, slogFn) {
   log(`${DRY_RUN ? '⚠️  DRY RUN — simulated fills, real API for data/order calls' : '🔴 LIVE MODE — real money'}`);
 
   trader = new PolymarketTrader(privateKey);
-  await trader.init();
+  await trader.authenticate();
 
   await loadMatch(MATCH_EVENT_SLUG);
   lastMarketFetch = Date.now();
