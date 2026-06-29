@@ -225,6 +225,90 @@ async function ensureFreshPrice(m) {
   if (stale) await restRefreshPrice(m);
 }
 
+// ── Candle Bootstrap ──
+// Walk back through the last N completed 5m windows using the same slug
+// structure the bot already knows: btc-updown-5m-{windowStartUnix}
+// For each window fetch its UP token's opening + closing midpoint prices
+// from the CLOB /timeseries endpoint, classify the candle and seed history.
+async function bootstrapCandleHistory(pair, windowsToFetch = 5) {
+  log(`🕯️  Bootstrapping candle history for ${pair} (last ${windowsToFetch} windows)…`);
+
+  const nowSecs      = Math.floor(Date.now() / 1000);
+  const curWinStart  = Math.floor(nowSecs / WINDOW_SECS) * WINDOW_SECS;
+  const fetched      = [];
+
+  // Walk backwards: skip the current (live) window, go back windowsToFetch
+  for (let i = windowsToFetch; i >= 1; i--) {
+    const winStart = curWinStart - i * WINDOW_SECS;
+    const slug     = `${pair.toLowerCase()}-updown-5m-${winStart}`;
+
+    // 1. Fetch event to get token IDs
+    const d = await getJSON(`${GAMMA}/events?slug=${slug}`);
+    if (!Array.isArray(d) || !d[0]?.markets?.[0]) {
+      log(`🕯️  Bootstrap: no event for ${slug} — skipping`);
+      continue;
+    }
+
+    const mk = d[0].markets[0];
+    if (!mk.clobTokenIds) continue;
+
+    let ids;
+    try { ids = JSON.parse(mk.clobTokenIds); } catch (_) { continue; }
+    if (ids.length < 2) continue;
+
+    const upTokenId = ids[0];  // UP token
+    const endTime   = mk.endDate ? Math.floor(new Date(mk.endDate).getTime() / 1000) : null;
+    if (!endTime) continue;
+
+    const startTime = endTime - WINDOW_SECS;  // unix seconds
+
+    // 2. Fetch CLOB timeseries for the UP token over this window
+    //    fidelity=1 gives per-minute bars; we want open (first bar) and close (last bar)
+    const tsUrl = `${CLOB}/prices-history?market=${upTokenId}&startTs=${startTime}&endTs=${endTime}&fidelity=1`;
+    const ts    = await getJSON(tsUrl);
+
+    let open = null, close = null;
+
+    if (ts?.history && Array.isArray(ts.history) && ts.history.length >= 2) {
+      // history entries: { t: unixSecs, p: price }
+      open  = parseFloat(ts.history[0].p);
+      close = parseFloat(ts.history[ts.history.length - 1].p);
+    } else {
+      // Fallback: use midpoint at startTs and endTs via separate calls
+      const [mStart, mEnd] = await Promise.all([
+        getJSON(`${CLOB}/midpoint?token_id=${upTokenId}`),   // best we can do without historical snapshot
+        getJSON(`${CLOB}/midpoint?token_id=${upTokenId}`),
+      ]);
+      // If timeseries unavailable we can still try the resolved/final price
+      // from the market data itself (outcomePrices field on the event)
+      const outcomes = mk.outcomePrices ? JSON.parse(mk.outcomePrices) : null;
+      if (outcomes && outcomes.length >= 2) {
+        // outcomePrices = [upFinalPrice, downFinalPrice] as strings
+        close = parseFloat(outcomes[0]);
+        // For open, we estimate 0.50 (market opens near 50/50)
+        open  = 0.50;
+      }
+    }
+
+    if (open === null || close === null || isNaN(open) || isNaN(close)) {
+      log(`🕯️  Bootstrap: could not get open/close for ${slug} — skipping`);
+      continue;
+    }
+
+    const type = classifyCandle(open, close);
+    fetched.push({ open: f4(open), close: f4(close), type, slug });
+    log(`🕯️  Bootstrap ${slug}: ${type.toUpperCase()} (${f4(open)} → ${f4(close)})`);
+  }
+
+  if (fetched.length === 0) {
+    log(`⚠️  Bootstrap: no historical candles found for ${pair} — bot will skip first window`);
+    return;
+  }
+
+  candleHistory[pair] = fetched;
+  log(`✅ Bootstrap complete: ${fetched.length} candles seeded for ${pair} → direction will be: ${resolveTradeDirection(pair) || 'UNDECIDED'}`);
+}
+
 // ── Market Discovery ──
 function currentWindowStart() {
   const now = Math.floor(Date.now() / 1000);
@@ -659,6 +743,12 @@ async function init(privateKey, emit, serverLog) {
   startTime   = Date.now();
 
   wsConnect();
+
+  // Bootstrap candle history from past completed windows before trading
+  for (const pair of TARGET_PAIRS) {
+    await bootstrapCandleHistory(pair, 5).catch(e => log(`⚠️  Bootstrap ${pair} failed: ${e.message}`));
+  }
+
   discoverLoop().catch(e => log(`❌ Discover loop crashed: ${e.message}`));
 
   // Broadcast state every second
