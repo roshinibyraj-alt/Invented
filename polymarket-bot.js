@@ -7,16 +7,43 @@ const GAMMA   = 'https://gamma-api.polymarket.com';
 const CLOB    = 'https://clob.polymarket.com';
 const CLOB_WS = 'wss://ws-subscriptions-clob.polymarket.com/ws/market';
 
-const TICK_MS           = 350;
-const DISCOVER_EVERY_MS = 10000;
-const WINDOW_SECS       = 300;
-const TRAIL_DIST        = 0.05;
-const BASE_SHARES       = 6;
-const RETRY_MS          = 3000;
-const TP_PRICE          = 0.99;
-const STOP_ENTRY_AT     = 280;
-const FORCE_SELL_AT     = 295;
-const TARGET_PAIRS      = ['BTC'];
+// ── Gabagool Config ──
+const TICK_MS              = 350;
+const DISCOVER_EVERY_MS    = 10000;
+const WINDOW_SECS          = 300;
+const STOP_ENTRY_AT        = 280;
+const FORCE_SELL_AT        = 295;
+const MIN_REPLACE_MS       = 1000;
+const MIN_SECS_TO_END      = 5;
+const MAX_SECS_TO_END      = 295;
+
+// Sizing (base unit = 6 shares)
+const BASE_SHARES          = 6;
+const IMPROVE_TICKS        = 1;
+const QUOTE_SIZE           = 6.00;   // dollars per order leg (~6 shares @ $1)
+
+// Complete-set edge config
+const MIN_EDGE             = 0.01;   // 1% min edge to trade
+const MAX_SKEW_TICKS       = 2;
+const IMBALANCE_FOR_MAX_SKEW = 40;   // shares imbalance for full skew
+
+// Top-Up config
+const TOP_UP_ENABLED          = true;
+const TOP_UP_MIN_SHARES       = 6;
+const FAST_TOP_UP_ENABLED     = true;
+const FAST_TOP_UP_MIN_SHARES = 6;      // min imbalance to trigger top-up
+const FAST_TOP_UP_MIN_SHAFTER = 2;    // seconds after fill
+const FAST_TOP_UP_MAX_SHAFTER = 120;
+const FAST_TOP_UP_COOLDOWN_MS = 5000;
+const FAST_TOP_UP_MIN_EDGE    = 0.00;
+
+// Taker config (disabled by default)
+const TAKER_ENABLED    = false;
+const TAKER_MAX_EDGE   = 0.015;
+const TAKER_MAX_SPREAD = 0.02;
+
+// TICK_SIZE
+const DEFAULT_TICK_SIZE = 0.01;
 
 let dryRun = process.env.DRY_RUN !== 'false';
 const DEMO_BALANCE = parseFloat(process.env.DEMO_BALANCE || '1000');
@@ -34,33 +61,24 @@ const markets = {};
 const stratState = {};
 let lastDiscoverAt = 0;
 
-let position = null;
-let entryPrice = 0;
-let sharesHeld = 0;
-let peak = 0;
-let trough = 0;
-let inTrade = false;
-let pendingTrade = null;
-let pendingCheckAt = 0;
-
 const f2 = v => Math.round((v || 0) * 100) / 100;
 const f4 = v => Math.round((v || 0) * 10000) / 10000;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 function log(msg) {
   const ts = new Date().toTimeString().slice(0, 8);
-  const line = '[' + ts + '] [BTC] ' + msg;
+  const line = '[' + ts + '] [GAB] ' + msg;
   logs.unshift(line);
   if (logs.length > 500) logs.length = 500;
   if (slog) slog(line);
 }
 
-function logTrade(action, side, price, pnl, shares) {
+function logTrade(action, side, price, shares, pnl) {
   trades.unshift({
     ts: new Date().toTimeString().slice(0, 8),
-    action, side,
-    price: f4(price),
-    shares: shares || BASE_SHARES,
+    action, side: side || '',
+    price: f4(price || 0),
+    shares: shares || 0,
     pnl: f2(pnl || 0),
   });
   if (trades.length > 200) trades.length = 200;
@@ -81,8 +99,8 @@ function calcEquity() {
   for (const [slug, ss] of Object.entries(stratState)) {
     const m = markets[slug];
     if (!m || ss.done) continue;
-    if (ss.side === 'up' && ss.positionOpen) openValue += (ss.sharesHeld || BASE_SHARES) * m.upMid;
-    if (ss.side === 'down' && ss.positionOpen) openValue += (ss.sharesHeld || BASE_SHARES) * m.downMid;
+    if (ss.upShares > 0) openValue += ss.upShares * m.upMid;
+    if (ss.downShares > 0) openValue += ss.downShares * m.downMid;
   }
   return cashBalance + openValue;
 }
@@ -147,11 +165,157 @@ function currentWindowStart() {
   return Math.floor(now / WINDOW_SECS) * WINDOW_SECS;
 }
 
-// ── Discovery ──
+// ── Order Book (best bid/ask) via REST ──
+async function refreshOrderBook(m) {
+  if (!trader) return;
+  // Fetch order book with timeout
+  var upBook = null, dnBook = null;
+  try {
+    upBook = await Promise.race([
+      trader.getOrderBook(m.upTokenId),
+      new Promise(function(r) { setTimeout(function() { r(null); }, 3000); }),
+    ]);
+  } catch (_) {}
+  try {
+    dnBook = await Promise.race([
+      trader.getOrderBook(m.downTokenId),
+      new Promise(function(r) { setTimeout(function() { r(null); }, 3000); }),
+    ]);
+  } catch (_) {}
+
+  if (upBook && upBook.bids && upBook.bids.length > 0 && upBook.asks && upBook.asks.length > 0) {
+    m.upBid = parseFloat(upBook.bids[0]?.price || '0');
+    m.upAsk = parseFloat(upBook.asks[0]?.price || '0');
+  }
+  if (dnBook && dnBook.bids && dnBook.bids.length > 0 && dnBook.asks && dnBook.asks.length > 0) {
+    m.downBid = parseFloat(dnBook.bids[0]?.price || '0');
+    m.downAsk = parseFloat(dnBook.asks[0]?.price || '0');
+  }
+
+  // Fallback: derive bid/ask from midpoint with synthetic spread
+  if ((!m.upBid || !m.upAsk) && m.upMid > 0) {
+    m.upBid = f4(m.upMid - 0.015);
+    m.upAsk = f4(m.upMid + 0.015);
+    if (m.upBid < 0.01) m.upBid = 0.01;
+    if (m.upAsk > 0.99) m.upAsk = 0.99;
+  }
+  if ((!m.downBid || !m.downAsk) && m.downMid > 0) {
+    m.downBid = f4(m.downMid - 0.015);
+    m.downAsk = f4(m.downMid + 0.015);
+    if (m.downBid < 0.01) m.downBid = 0.01;
+    if (m.downAsk > 0.99) m.downAsk = 0.99;
+  }
+}
+
+async function ensureFreshBook(m) {
+  if (!m.lastBookAt || Date.now() - m.lastBookAt > 1000) {
+    await refreshOrderBook(m);
+    m.lastBookAt = Date.now();
+  }
+}
+
+// ── Helper: round to tick ──
+function roundToTick(value, tickSize, mode) {
+  if (!tickSize || tickSize <= 0) return value;
+  if (mode === 'down') return Math.floor(value / tickSize) * tickSize;
+  if (mode === 'up') return Math.ceil(value / tickSize) * tickSize;
+  return Math.round(value / tickSize) * tickSize;
+}
+
+// ── Gabagool: pickSide ──
+function pickSide(upBid, upAsk, downBid, downAsk, ss) {
+  if (!upBid || !upAsk || !downBid || !downAsk) return null;
+
+  // edgeTakeUp = 1.0 - (askUp + bidDown) — buy UP at ask, buy DOWN at bid
+  // edgeTakeDown = 1.0 - (bidUp + askDown) — buy UP at bid, buy DOWN at ask
+  var edgeUp = f4(1.0 - (upAsk + downBid));
+  var edgeDown = f4(1.0 - (upBid + downAsk));
+
+  var upOk = edgeUp >= FAST_TOP_UP_MIN_EDGE;
+  var downOk = edgeDown >= FAST_TOP_UP_MIN_EDGE;
+
+  if (!upOk && !downOk) return null;
+  if (upOk && !downOk) return 'up';
+  if (downOk && !upOk) return 'down';
+
+  if (edgeUp > edgeDown) return 'up';
+  if (edgeDown > edgeUp) return 'down';
+
+  // Tie-break by inventory imbalance
+  var imbalance = (ss.upShares || 0) - (ss.downShares || 0);
+  if (imbalance > 0) return 'down';   // more UP → buy DOWN
+  if (imbalance < 0) return 'up';     // more DOWN → buy UP
+  return 'up';
+}
+
+// ── Gabagool: calculateSkewTicks ──
+function calculateSkewTicks(ss) {
+  var imbalance = (ss.upShares || 0) - (ss.downShares || 0);
+  var skewUp = 0, skewDown = 0;
+
+  if (IMBALANCE_FOR_MAX_SKEW > 0 && MAX_SKEW_TICKS > 0) {
+    var ratio = Math.min(1, Math.abs(imbalance) / IMBALANCE_FOR_MAX_SKEW);
+    var ticks = Math.round(ratio * MAX_SKEW_TICKS);
+    if (imbalance > 0) {
+      // More UP → improve DOWN (positive skew), penalize UP (negative skew)
+      skewDown = ticks;
+      skewUp = -ticks;
+    } else if (imbalance < 0) {
+      // More DOWN → improve UP, penalize DOWN
+      skewUp = ticks;
+      skewDown = -ticks;
+    }
+  }
+  return [skewUp, skewDown];
+}
+
+// ── Gabagool: calculateEntryPrice (maker) ──
+function calculateEntryPrice(bid, ask, tickSize, skewTicks) {
+  if (!bid || !ask) return null;
+  var mid = f4((bid + ask) / 2);
+  var spread = f4(ask - bid);
+  var effectiveImprove = IMPROVE_TICKS + (skewTicks || 0);
+  var entryPrice;
+
+  if (spread >= 0.06) {
+    // Wide book: quote near mid
+    entryPrice = f4(mid - tickSize * Math.max(0, IMPROVE_TICKS - (skewTicks || 0)));
+  } else {
+    // Tight book: improve bid
+    entryPrice = f4(bid + tickSize * effectiveImprove);
+    entryPrice = Math.min(entryPrice, mid);
+  }
+
+  entryPrice = roundToTick(entryPrice, tickSize, 'down');
+  if (entryPrice < 0.01 || entryPrice > 0.99) return null;
+  if (entryPrice >= ask) entryPrice = f4(ask - tickSize);
+  if (entryPrice < 0.01) return null;
+
+  return f4(entryPrice);
+}
+
+// ── Gabagool: calculateShares ──
+function calculateShares(entryPrice, secondsToEnd) {
+  if (!entryPrice || entryPrice <= 0) return null;
+  // Base size = BASE_SHARES, regardless of time-to-end for 5m windows
+  var shares = BASE_SHARES;
+  if (entryPrice > 0) {
+    // Cap by QUOTE_SIZE dollars
+    var maxShares = Math.floor(QUOTE_SIZE / entryPrice);
+    shares = Math.min(shares, maxShares);
+  }
+  return Math.max(shares, 1);
+}
+
+// ── Market Discovery ──
 async function discoverMarket(pair, customWsTs) {
   const ws_ts = customWsTs || currentWindowStart();
   const slug = pair.toLowerCase() + '-updown-5m-' + ws_ts;
   if (markets[slug]) return;
+
+  var m = { slug, pair, upMid: 0, downMid: 0, upBid: null, upAsk: null, downBid: null, downAsk: null,
+    upTokenId: null, downTokenId: null, endTime: 0, windowStartMs: 0, lastPriceAt: 0, lastBookAt: 0,
+    loopRunning: false, active: false };
 
   const d = await getJSON(GAMMA + '/events?slug=' + slug);
   if (!Array.isArray(d) || !d[0] || !d[0].markets || !d[0].markets[0]) return;
@@ -164,385 +328,536 @@ async function discoverMarket(pair, customWsTs) {
 
   const endTime = mk.endDate ? new Date(mk.endDate).getTime() : null;
   if (!endTime) return;
-  const secsToEnd = (endTime - Date.now()) / 1000;
-  if (secsToEnd < 10 || secsToEnd > WINDOW_SECS * 2) return;
+  const startTime = mk.startDate ? new Date(mk.startDate).getTime() : endTime - WINDOW_SECS * 1000;
 
-  const upTokenId = ids[0], downTokenId = ids[1];
-  const tickSize = mk.orderPriceMinTickSize || '0.01';
-  const negRisk = mk.negRisk || false;
+  m.upTokenId = ids[0];
+  m.downTokenId = ids[1];
+  // Use slug timestamp as windowStart (NOT the API's startDate which is wrong)
+  m.windowStartMs = ws_ts * 1000;
+  m.endTime = endTime;
+  markets[slug] = m;
 
-  const outcomePrices = JSON.parse(mk.outcomePrices || '[]');
-  const upMid = parseFloat(outcomePrices[0] || '0');
-  const downMid = parseFloat(outcomePrices[1] || '0');
+  // Subscribe to WS price updates
+  wsTokenMap[m.upTokenId] = slug;
+  wsTokenMap[m.downTokenId] = slug;
+  if (wsReady) wsSubscribe([m.upTokenId, m.downTokenId]);
 
-  markets[slug] = {
-    slug, pair, upTokenId, downTokenId,
-    upMid: f4(upMid), downMid: f4(downMid), lastPriceAt: 0,
-    endTime, windowStartMs: ws_ts * 1000,
-    upTickSize: tickSize, dnTickSize: tickSize,
-    upNegRisk: negRisk, dnNegRisk: negRisk,
-    loopRunning: false, done: false,
-  };
+  log('Discovered ' + slug + ' end=' + new Date(endTime).toTimeString().slice(0,8));
 
-  wsTokenMap[upTokenId] = slug;
-  wsTokenMap[downTokenId] = slug;
-  if (wsReady) wsSubscribe([upTokenId, downTokenId]);
-
-  await restRefreshPrice(markets[slug]);
-  log(pair + ' UP:$' + f4(markets[slug].upMid) + ' DN:$' + f4(markets[slug].downMid));
-
-  if (!markets[slug].loopRunning) {
-    markets[slug].loopRunning = true;
-    tradeLoop(markets[slug]).catch(e => log('Loop crash ' + pair + ': ' + e.message));
+  // Start trade loop if not already running
+  if (!m.loopRunning) {
+    m.loopRunning = true;
+    tradeLoop(m).catch(e => log('Loop err: ' + (e.message || '').slice(0, 80)));
   }
 }
 
 async function discover() {
-  const cw = currentWindowStart();
-  const timestamps = [cw, cw + WINDOW_SECS];
-  await Promise.allSettled(timestamps.map(ep =>
-    Promise.allSettled(TARGET_PAIRS.map(p => discoverMarket(p, ep)))
-  ));
-  for (const [slug, m] of Object.entries(markets)) {
-    if (Date.now() > m.endTime + 2000) {
-      delete wsTokenMap[m.upTokenId];
-      delete wsTokenMap[m.downTokenId];
-      delete markets[slug];
-      delete stratState[slug];
-    }
-  }
+  var ws_ts = currentWindowStart();
+  await discoverMarket('BTC', ws_ts);
+  await discoverMarket('BTC', ws_ts + WINDOW_SECS);
 }
 
-// ── Balance check ──
+// ── Position Tracking ──
+let lastPosRefreshAt = 0;
+
+async function syncPositions() {
+  if (dryRun) return;
+  if (Date.now() - lastPosRefreshAt < 5000) return;
+  lastPosRefreshAt = Date.now();
+  try {
+    var pos = await trader._clob.getPositions(200, 0);
+    if (!Array.isArray(pos)) return;
+    // Reset all per-market share counts
+    for (var k in stratState) {
+      var ss = stratState[k];
+      var m = markets[k];
+      if (!m) continue;
+      ss.upShares = 0;
+      ss.downShares = 0;
+    }
+    // Aggregate positions by market
+    for (var p of pos) {
+      if (p.redeemable) continue;
+      var assetId = p.asset;
+      var size = parseFloat(p.size || '0');
+      if (size <= 0) continue;
+      // Find which market this token belongs to
+      for (var k in markets) {
+        var m = markets[k];
+        if (m.upTokenId === assetId) {
+          var ss = stratState[k];
+          if (ss) ss.upShares += Math.round(size);
+        }
+        if (m.downTokenId === assetId) {
+          var ss = stratState[k];
+          if (ss) ss.downShares += Math.round(size);
+        }
+      }
+    }
+  } catch (_) {}
+}
+
+// ── Check balance (dry/live) ──
 async function checkBalance() {
-  if (!trader) return 0;
-  try { const b = await trader.getBalance(); if (b > 0) cashBalance = b; return cashBalance; }
-  catch (_) { return cashBalance; }
+  if (dryRun) return cashBalance;
+  try {
+    var b = await trader.getBalance();
+    if (b > 0) cashBalance = b;
+  } catch (_) {}
+  return cashBalance || 0;
 }
 
-// ── Trade functions ──
+// ── Gabagool: evaluate markets (main tick) ──
+async function evaluateMarket(m, ss) {
+  if (!m || !m.upTokenId || !ss || ss.done) return;
 
-async function buySide(m, side, ss) {
-  if (!m || inTrade || pendingTrade) return null;
-  inTrade = true;
-  const tokenId = side === 'up' ? m.upTokenId : m.downTokenId;
+  var elapsed = (Date.now() - m.windowStartMs) / 1000;
+  if (elapsed < 0 || elapsed > WINDOW_SECS + 5) return;
+
+  // Get fresh prices
+  await ensureFreshPrice(m);
+  await ensureFreshBook(m);
+
+  var upBid = m.upBid, upAsk = m.upAsk;
+  var downBid = m.downBid, downAsk = m.downAsk;
+  if (!upBid || !upAsk || !downBid || !downAsk) {
+    if (Date.now() % 5000 < 100) log('No book data for ' + m.slug + ' upBid=' + upBid + ' upAsk=' + upAsk + ' dnBid=' + downBid + ' dnAsk=' + downAsk);
+    return;
+  }
+
+  var secondsToEnd = Math.max(0, (m.endTime - Date.now()) / 1000);
+  if (secondsToEnd < MIN_SECS_TO_END || secondsToEnd > MAX_SECS_TO_END) return;
+
+  // Phase 3: Force sell
+  if (elapsed >= FORCE_SELL_AT) {
+    if (!ss._forceSold) {
+      ss._forceSold = true;
+      await forceSell(m, ss);
+    }
+    return;
+  }
+  // If window hasn't started yet, skip
+  if (elapsed < 0) return;
+
+  // Phase 2: Stop entries
+  if (elapsed >= STOP_ENTRY_AT) {
+    await cancelPendingOrders(m, ss);
+    return;
+  }
+
+  // Phase 1: Active trading
+  var [skewUp, skewDown] = calculateSkewTicks(ss);
+
+  await maybeQuoteToken(m, 'up', upBid, upAsk, downBid, downAsk, skewUp, secondsToEnd);
+  await maybeQuoteToken(m, 'down', downBid, downAsk, upBid, upAsk, skewDown, secondsToEnd);
+
+  if (FAST_TOP_UP_ENABLED) {
+    await maybeFastTopUp(m, ss, upBid, upAsk, downBid, downAsk, secondsToEnd);
+  }
+}
+
+// ── Gabagool: maybeQuoteToken (maker) ──
+async function maybeQuoteToken(m, side, bid, ask, otherBid, otherAsk, skewTicks, secondsToEnd) {
+  if (!bid || !ask) return;
+  var tickSize = DEFAULT_TICK_SIZE;
+
+  // Calculate entry price
+  var entryPrice = calculateEntryPrice(bid, ask, tickSize, skewTicks);
+  if (!entryPrice) return;
+
+  // Calculate shares
+  var shares = calculateShares(entryPrice, secondsToEnd);
+  if (!shares || shares < 1) return;
+
+  var tokenId = side === 'up' ? m.upTokenId : m.downTokenId;
+  var ss = stratState[m.slug];
+  if (!ss) return;
+
+  // Check existing order
+  var pendingKey = side === 'up' ? '_pendingUp' : '_pendingDown';
+  var pending = ss[pendingKey];
+
+  if (pending) {
+    // Check if order should be replaced (price improved enough)
+    if (Date.now() - pending.placedAt < MIN_REPLACE_MS) return;
+    var priceDiff = Math.abs(entryPrice - pending.price);
+    if (priceDiff < tickSize) return; // not enough improvement
+
+    // Cancel old order
+    await cancelOrder(side, m, ss);
+  }
+
+  // Check if we already have enough shares
+  var sharesKey = side === 'up' ? 'upShares' : 'downShares';
+  if (ss[sharesKey] >= BASE_SHARES * 3) return; // cap at 3 base units
+
+  // Place GTC limit order
+  var cost = f4(shares * entryPrice);
+  var preBal = await checkBalance();
+  if (cost > preBal * 0.9) {
+    shares = Math.floor(preBal * 0.9 / entryPrice);
+    if (shares < 1) return;
+  }
+
+  if (dryRun) {
+    // Simulate fill after 3s
+    log('DEMO GTC ' + side.toUpperCase() + ' ' + shares + 'sh @ $' + f4(entryPrice) + ' (skew=' + (skewTicks || 0) + ')');
+    ss[pendingKey] = { orderId: 'demo-' + side + '-' + Date.now(), price: entryPrice, size: shares, placedAt: Date.now() };
+    ss['_pending' + (side === 'up' ? 'Up' : 'Down') + 'At'] = Date.now();
+    return;
+  }
+
   try {
-    var price = side === 'up' ? m.upMid : m.downMid;
-    if (!price || price <= 0.01) { inTrade = false; return null; }
-    var cost = f2(BASE_SHARES * price);
-    var preBal = await checkBalance();
-    if (cost > preBal * 0.9) cost = f2(preBal * 0.9);
-    if (cost <= 0.01) { inTrade = false; return null; }
-    log('BUY ' + side.toUpperCase() + ' ~' + BASE_SHARES + 'sh @ $' + f4(price) + ' (~$' + cost + ') bal=$' + f2(preBal));
-    if (dryRun) {
+    log('GTC ' + side.toUpperCase() + ' ' + shares + 'sh @ $' + f4(entryPrice) + ' bid=$' + f4(bid) + ' skew=' + (skewTicks || 0));
+    var result = await trader.placeGtcOrder(tokenId, 'BUY', entryPrice, shares);
+    if (result && result.id) {
+      ss[pendingKey] = { orderId: result.id, price: entryPrice, size: shares, placedAt: Date.now() };
+      ss['_pending' + (side === 'up' ? 'Up' : 'Down') + 'At'] = Date.now();
+    }
+  } catch (e) {
+    log('GTC ' + side.toUpperCase() + ' err: ' + (e.message || '').slice(0, 60));
+  }
+}
+
+// ── Gabagool: maybeFastTopUp ──
+async function maybeFastTopUp(m, ss, upBid, upAsk, downBid, downAsk, secondsToEnd) {
+  if (!ss) return;
+  var imbalance = (ss.upShares || 0) - (ss.downShares || 0);
+  var absImbalance = Math.abs(imbalance);
+  if (absImbalance < FAST_TOP_UP_MIN_SHARES) return;
+
+  // Check cooldown
+  if (ss._lastTopUpAt && Date.now() - ss._lastTopUpAt < FAST_TOP_UP_COOLDOWN_MS) return;
+
+  // Determine lagging leg (the side we have less of)
+  var laggingSide = imbalance > 0 ? 'down' : 'up';
+  var leadingSide = imbalance > 0 ? 'up' : 'down';
+
+  var lagFillAtKey = laggingSide === 'up' ? '_lastUpFillAt' : '_lastDownFillAt';
+  var leadFillAtKey = leadingSide === 'up' ? '_lastUpFillAt' : '_lastDownFillAt';
+
+  var leadFillAt = ss[leadFillAtKey];
+  if (!leadFillAt) return;
+
+  var sinceLeadFillSec = (Date.now() - leadFillAt) / 1000;
+  if (sinceLeadFillSec < FAST_TOP_UP_MIN_SHAFTER || sinceLeadFillSec > FAST_TOP_UP_MAX_SHAFTER) return;
+
+  // Check that lag hasn't filled after lead
+  var lagFillAt = ss[lagFillAtKey];
+  if (lagFillAt && lagFillAt >= leadFillAt) return;
+
+  // Check spread
+  var lagBid = laggingSide === 'up' ? upBid : downBid;
+  var lagAsk = laggingSide === 'up' ? upAsk : downAsk;
+  if (!lagBid || !lagAsk) return;
+  var spread = f4(lagAsk - lagBid);
+  if (spread > TAKER_MAX_SPREAD) return;
+
+  // Check edge for lagging leg
+  var edgeTakeLag = laggingSide === 'up'
+    ? f4(1.0 - (upAsk + downBid))
+    : f4(1.0 - (upBid + downAsk));
+  if (edgeTakeLag < FAST_TOP_UP_MIN_EDGE) return;
+
+  // Don't top-up if lagging already has a pending order
+  var pendingKey = laggingSide === 'up' ? '_pendingUp' : '_pendingDown';
+  if (ss[pendingKey]) return;
+
+  // Calculate top-up shares = absImbalance, capped at BASE_SHARES
+  var topUpShares = Math.min(absImbalance, BASE_SHARES);
+
+  // Place FOK (aggressive) at ask for the lagging leg
+  var cost = f4(topUpShares * lagAsk);
+  var preBal = await checkBalance();
+  if (cost > preBal * 0.9) return;
+
+  var lagTokenId = laggingSide === 'up' ? m.upTokenId : m.downTokenId;
+
+  log('TOP-UP ' + laggingSide.toUpperCase() + ' ' + topUpShares + 'sh @ ask $' + f4(lagAsk) + ' imbalance=' + absImbalance);
+
+  if (dryRun) {
+    // Simulate fill
+    ss[laggingSide + 'Shares'] = (ss[laggingSide + 'Shares'] || 0) + topUpShares;
+    ss[lagFillAtKey] = Date.now();
+    ss._lastTopUpAt = Date.now();
+    if (!dryRun) cashBalance -= cost;
+    log('DEMO TOP-UP filled +' + topUpShares + ' ' + laggingSide.toUpperCase());
+    logTrade('TOP-UP', laggingSide.toUpperCase(), lagAsk, topUpShares);
+    return;
+  }
+
+  try {
+    var result = await trader.placeFokBuy(lagTokenId, cost);
+    // Check if filled
+    if (result && result.isFilled) {
+      ss[laggingSide + 'Shares'] = (ss[laggingSide + 'Shares'] || 0) + topUpShares;
+      ss[lagFillAtKey] = Date.now();
+      ss._lastTopUpAt = Date.now();
       cashBalance -= cost;
-      if (cashBalance < 0) cashBalance = 0;
-      log('DEMO placed -$' + f2(cost) + ' bal=$' + f2(cashBalance));
-      pendingTrade = { type: 'buy', side: side, m: m, ss: ss, preBal: preBal, cost: cost, entryPriceAt: price, isDemo: true };
-      pendingCheckAt = Date.now();
-      return { pending: true };
+      log('TOP-UP filled +' + topUpShares + ' ' + laggingSide.toUpperCase());
+      logTrade('TOP-UP', laggingSide.toUpperCase(), lagAsk, topUpShares);
+    } else {
+      log('TOP-UP ' + laggingSide.toUpperCase() + ' NOT filled');
     }
-    await trader.placeFokBuy(tokenId, cost);
-    pendingTrade = { type: 'buy', side: side, m: m, ss: ss, preBal: preBal, cost: cost, entryPriceAt: price };
-    pendingCheckAt = Date.now();
-    return { pending: true };
   } catch (e) {
-    log('Buy ' + side.toUpperCase() + ' error: ' + (e.message || '').slice(0, 80));
-    inTrade = false;
-    if (ss) ss._retryCooldown = Date.now() + 5000;
-    return null;
+    log('TOP-UP err: ' + (e.message || '').slice(0, 60));
   }
 }
 
-async function sellSide(m, flipTo, ss) {
-  if (!m || inTrade || pendingTrade) return null;
-  var sellSideName = position || (ss && ss.side) || null;
-  if (!sellSideName) { log('SELL skipped — no position'); return null; }
-  inTrade = true;
-  const tokenId = sellSideName === 'up' ? m.upTokenId : m.downTokenId;
-  try {
-    var actualShares = (ss && ss.sharesHeld > 0) ? ss.sharesHeld : (sharesHeld > 0 ? sharesHeld : BASE_SHARES);
-    var mid = sellSideName === 'up' ? m.upMid : m.downMid;
-    var pnl = f2((mid - entryPrice) * actualShares);
-    var preBal = await checkBalance();
-    log('SELL ' + sellSideName.toUpperCase() + ' ' + actualShares + 'sh @ $' + f4(mid) + ' PnL: ' + (pnl >= 0 ? '+' : '') + '$' + pnl + ' bal=$' + f2(preBal));
+// ── Cancel pending order ──
+async function cancelOrder(side, m, ss) {
+  if (!ss) return;
+  var pendingKey = side === 'up' ? '_pendingUp' : '_pendingDown';
+  var pending = ss[pendingKey];
+  if (!pending) return;
+
+  if (!dryRun && pending.orderId && !pending.orderId.startsWith('demo-')) {
+    try {
+      await trader.cancelOrder(pending.orderId);
+      log('Cancelled ' + side.toUpperCase() + ' ' + pending.orderId.slice(0, 12));
+    } catch (e) {
+      log('Cancel ' + side.toUpperCase() + ' err: ' + (e.message || '').slice(0, 60));
+    }
+  }
+  ss[pendingKey] = null;
+}
+
+async function cancelPendingOrders(m, ss) {
+  if (!ss) return;
+  await cancelOrder('up', m, ss);
+  await cancelOrder('down', m, ss);
+}
+
+// ── Force sell both sides at end of window ──
+async function forceSell(m, ss) {
+  if (!ss) return;
+  log('FORCE SELL');
+
+  // Cancel any pending GTC orders first
+  await cancelPendingOrders(m, ss);
+
+  // Sell UP shares
+  if (ss.upShares > 0) {
+    var tokenId = m.upTokenId;
+    var mid = m.upMid || m.upBid || 0;
+    var pnl = f2((mid - (ss._avgUpPrice || mid)) * ss.upShares);
+    var cost = f4(ss.upShares * mid);
+    log('SELL UP ' + ss.upShares + 'sh @ $' + f4(mid) + ' PnL: ' + (pnl >= 0 ? '+' : '') + '$' + pnl);
+
     if (dryRun) {
-      var proceeds = f4(actualShares * mid);
-      cashBalance += proceeds;
-      log('DEMO sold +$' + f2(proceeds) + ' bal=$' + f2(cashBalance));
-      // In demo, skip sell confirmation, mark as sold immediately
-      position = null;
-      sharesHeld = 0;
-      entryPrice = 0;
-      if (ss) {
-        ss.side = null;
-        ss.sharesHeld = 0;
-        ss.entryPrice = 0;
-        ss.peak = 0;
-        ss.trough = 0;
-        ss.positionOpen = false;
-        if (ss._forceSold) ss.sold = true;
-        ss._forceSelling = false;
+      cashBalance += cost;
+      logTrade('SELL', 'UP', mid, ss.upShares, pnl);
+      ss.upShares = 0;
+      ss._pendingUp = null;
+    } else if (ss.upShares > 0) {
+      try {
+        var r = await trader.placeFokSell(tokenId, ss.upShares);
+        if (r && r.isFilled) {
+          cashBalance += cost;
+          logTrade('SELL', 'UP', mid, ss.upShares, pnl);
+          ss.upShares = 0;
+          ss._pendingUp = null;
+        } else {
+          log('SELL UP NOT filled, will retry');
+          ss._forceRetry = Date.now() + 2000;
+        }
+      } catch (e) {
+        log('SELL UP err: ' + (e.message || '').slice(0, 60));
+        ss._forceRetry = Date.now() + 2000;
       }
-      inTrade = false;
-      if (flipTo) {
-        log('Flipping to ' + flipTo.toUpperCase());
-        await buySide(m, flipTo, ss);
-      }
-      return { pending: false };
     }
-    await trader.placeFokSell(tokenId, actualShares);
-    pendingTrade = { type: 'sell', side: sellSideName, m: m, ss: ss, flipTo: flipTo, preBal: preBal, pnl: pnl, priceAt: mid, shares: actualShares };
-    pendingCheckAt = Date.now();
-    return { pending: true };
-  } catch (e) {
-    log('Sell ' + sellSideName.toUpperCase() + ' error: ' + (e.message || '').slice(0, 80));
-    inTrade = false;
-    return null;
+  }
+
+  // Sell DOWN shares
+  if (ss.downShares > 0) {
+    var tokenId = m.downTokenId;
+    var mid = m.downMid || m.downBid || 0;
+    var pnl = f2((mid - (ss._avgDownPrice || mid)) * ss.downShares);
+    var cost = f4(ss.downShares * mid);
+    log('SELL DOWN ' + ss.downShares + 'sh @ $' + f4(mid) + ' PnL: ' + (pnl >= 0 ? '+' : '') + '$' + pnl);
+
+    if (dryRun) {
+      cashBalance += cost;
+      logTrade('SELL', 'DOWN', mid, ss.downShares, pnl);
+      ss.downShares = 0;
+      ss._pendingDown = null;
+    } else if (ss.downShares > 0) {
+      try {
+        var r = await trader.placeFokSell(tokenId, ss.downShares);
+        if (r && r.isFilled) {
+          cashBalance += cost;
+          logTrade('SELL', 'DOWN', mid, ss.downShares, pnl);
+          ss.downShares = 0;
+          ss._pendingDown = null;
+        } else {
+          log('SELL DOWN NOT filled, will retry');
+          ss._forceRetry = Date.now() + 2000;
+        }
+      } catch (e) {
+        log('SELL DOWN err: ' + (e.message || '').slice(0, 60));
+        ss._forceRetry = Date.now() + 2000;
+      }
+    }
+  }
+
+  ss.done = true;
+}
+
+// ── Fill monitoring via order polling ──
+async function checkPendingFills() {
+  for (var slug in markets) {
+    var m = markets[slug];
+    if (!m || !m.upTokenId) continue;
+    var ss = stratState[slug];
+    if (!ss || ss.done) continue;
+
+    // Check UP pending order
+    if (ss._pendingUp) {
+      var pending = ss._pendingUp;
+      if (pending.orderId.startsWith('demo-')) {
+        // Demo: simulate fill after 3s
+        if (Date.now() - pending.placedAt >= 3000) {
+          ss.upShares = (ss.upShares || 0) + pending.size;
+          ss._avgUpPrice = ss._avgUpPrice
+            ? f4((ss._avgUpPrice * (ss.upShares - pending.size) + pending.price * pending.size) / ss.upShares)
+            : pending.price;
+          ss._lastUpFillAt = Date.now();
+          ss._pendingUp = null;
+          log('DEMO UP FILLED +' + pending.size + 'sh @ $' + f4(pending.price) + ' total=' + ss.upShares);
+          logTrade('BUY', 'UP', pending.price, pending.size);
+        }
+      } else {
+        // Real: check order status
+        try {
+          var order = await trader.getOrder(pending.orderId);
+          if (order) {
+            var status = (order.status || '').toLowerCase();
+            var matchStatus = (order.match_status || '').toLowerCase();
+            var filled = status === 'filled' || matchStatus === 'filled';
+            if (filled) {
+              var filledSize = parseFloat(order.size_matched || order.filled_size || pending.size);
+              ss.upShares = (ss.upShares || 0) + Math.round(filledSize);
+              ss._avgUpPrice = pending.price;
+              ss._lastUpFillAt = Date.now();
+              ss._pendingUp = null;
+              log('UP FILLED +' + Math.round(filledSize) + 'sh @ $' + f4(pending.price));
+              logTrade('BUY', 'UP', pending.price, Math.round(filledSize));
+            } else if (status === 'cancelled' || matchStatus === 'cancelled') {
+              ss._pendingUp = null;
+            }
+          }
+        } catch (_) {}
+      }
+    }
+
+    // Check DOWN pending order (same logic)
+    if (ss._pendingDown) {
+      var pending = ss._pendingDown;
+      if (pending.orderId.startsWith('demo-')) {
+        if (Date.now() - pending.placedAt >= 3000) {
+          ss.downShares = (ss.downShares || 0) + pending.size;
+          ss._avgDownPrice = ss._avgDownPrice
+            ? f4((ss._avgDownPrice * (ss.downShares - pending.size) + pending.price * pending.size) / ss.downShares)
+            : pending.price;
+          ss._lastDownFillAt = Date.now();
+          ss._pendingDown = null;
+          log('DEMO DOWN FILLED +' + pending.size + 'sh @ $' + f4(pending.price) + ' total=' + ss.downShares);
+          logTrade('BUY', 'DOWN', pending.price, pending.size);
+        }
+      } else {
+        try {
+          var order = await trader.getOrder(pending.orderId);
+          if (order) {
+            var status = (order.status || '').toLowerCase();
+            var matchStatus = (order.match_status || '').toLowerCase();
+            var filled = status === 'filled' || matchStatus === 'filled';
+            if (filled) {
+              var filledSize = parseFloat(order.size_matched || order.filled_size || pending.size);
+              ss.downShares = (ss.downShares || 0) + Math.round(filledSize);
+              ss._avgDownPrice = pending.price;
+              ss._lastDownFillAt = Date.now();
+              ss._pendingDown = null;
+              log('DOWN FILLED +' + Math.round(filledSize) + 'sh @ $' + f4(pending.price));
+              logTrade('BUY', 'DOWN', pending.price, Math.round(filledSize));
+            } else if (status === 'cancelled' || matchStatus === 'cancelled') {
+              ss._pendingDown = null;
+            }
+          }
+        } catch (_) {}
+      }
+    }
   }
 }
 
-async function checkPendingTrade() {
-  if (!pendingTrade) return;
-  if (Date.now() - pendingCheckAt < 3000) return;
-
-  var pt = pendingTrade;
-  var postBal = await checkBalance();
-
-  if (pt.type === 'buy') {
-    if (pt.isDemo) {
-      var actualShares = Math.round(pt.cost / pt.entryPriceAt);
-      if (actualShares < 1) actualShares = BASE_SHARES;
-      log(pt.side.toUpperCase() + ' DEMO BUY FILLED ~' + actualShares + 'sh');
-      position = pt.side;
-      entryPrice = pt.entryPriceAt;
-      sharesHeld = actualShares;
-      logTrade('BUY', pt.side.toUpperCase(), pt.entryPriceAt, 0, actualShares);
-      if (pt.ss) {
-        pt.ss.side = pt.side;
-        pt.ss.entryPrice = pt.entryPriceAt;
-        pt.ss.sharesHeld = actualShares;
-        pt.ss.positionOpen = true;
-        pt.ss._pendingEntry = false;
-      }
-      inTrade = false;
-      pendingTrade = null;
-      return;
-    }
-    var spent = f2(pt.preBal - postBal);
-    if (spent >= pt.cost * 0.3) {
-      var actualShares = Math.round(spent / pt.entryPriceAt);
-      if (actualShares < 1) actualShares = Math.round(spent / (spent / BASE_SHARES));
-      log(pt.side.toUpperCase() + ' BUY FILLED spent $' + spent + ' got ~' + actualShares + 'sh');
-      position = pt.side;
-      entryPrice = pt.entryPriceAt;
-      sharesHeld = actualShares;
-      logTrade('BUY', pt.side.toUpperCase(), pt.entryPriceAt, 0, actualShares);
-      if (pt.ss) {
-        pt.ss.side = pt.side;
-        pt.ss.entryPrice = pt.entryPriceAt;
-        pt.ss.sharesHeld = actualShares;
-        pt.ss.positionOpen = true;
-        pt.ss._pendingEntry = false;
-      }
-      inTrade = false;
-      pendingTrade = null;
-    } else {
-      log(pt.side.toUpperCase() + ' BUY NOT filled (spent $' + spent + ')');
-      if (pt.ss) {
-        pt.ss._pendingEntry = false;
-        pt.ss.side = null;
-        pt.ss.sharesHeld = 0;
-        pt.ss.positionOpen = false;
-        pt.ss._retryCooldown = Date.now() + 5000;
-      }
-      inTrade = false;
-      pendingTrade = null;
-    }
-    return;
-  }
-
-  if (pt.type === 'sell') {
-    // Demo sells are handled inline in sellSide, skip confirmation
-    if (pt.isDemo) { pendingTrade = null; inTrade = false; return; }
-    var gained = f2(postBal - pt.preBal);
-    var expectedGain = (pt.shares || BASE_SHARES) * (pt.priceAt || 0.5);
-    if (gained >= expectedGain * 0.3) {
-      log(pt.side.toUpperCase() + ' SOLD PnL: ' + (pt.pnl >= 0 ? '+' : '') + '$' + pt.pnl);
-      logTrade('SELL', pt.side.toUpperCase(), pt.priceAt, pt.pnl, pt.shares || BASE_SHARES);
-
-      position = null;
-      sharesHeld = 0;
-      entryPrice = 0;
-
-      if (pt.ss) {
-        pt.ss.side = null;
-        pt.ss.sharesHeld = 0;
-        pt.ss.entryPrice = 0;
-        pt.ss.peak = 0;
-        pt.ss.trough = 0;
-        pt.ss.positionOpen = false;
-        if (pt.ss._forceSold) pt.ss.sold = true;
-        pt.ss._forceSelling = false;
-      }
-
-      inTrade = false;
-      pendingTrade = null;
-
-      if (pt.flipTo) {
-        log('Flipping to ' + pt.flipTo.toUpperCase());
-        await buySide(pt.m, pt.flipTo, pt.ss);
-      }
-    } else {
-      log(pt.side.toUpperCase() + ' NOT sold (gained $' + f2(gained) + ')');
-      pendingTrade = null;
-      inTrade = false;
-
-      if (pt.ss && pt.ss._forceSelling) {
-        log('Force sell retrying...');
-        await sellSide(pt.m, null, pt.ss);
-      }
-    }
-    return;
-  }
-}
-
-// ── Trade Loop ──
+// ── Trade Loop (per market) ──
 async function tradeLoop(m) {
-  log('Loop ' + m.pair + ' waiting for window...');
+  log('Loop ' + m.slug + ' waiting...');
 
   if (m.windowStartMs > Date.now() + 2000) {
     await sleep(m.windowStartMs - Date.now());
   }
 
-  log(m.pair + ' window STARTED');
+  log(m.slug + ' STARTED ws=' + new Date(m.windowStartMs).toTimeString().slice(0,8) + ' end=' + new Date(m.endTime).toTimeString().slice(0,8) + ' now=' + new Date().toTimeString().slice(0,8));
 
   var ss = {
-    side: null, sold: false, done: false,
-    entryPrice: 0, sharesHeld: 0,
-    peak: 0, trough: 0,
-    positionOpen: false,
-    _pendingEntry: false,
-    _retryCooldown: 0,
-    _forceSold: false, _forceSelling: false,
+    upShares: 0, downShares: 0,
+    _pendingUp: null, _pendingDown: null,
+    _lastUpFillAt: null, _lastDownFillAt: null,
+    _lastTopUpAt: null, _avgUpPrice: null, _avgDownPrice: null,
+    _forceSold: false, _forceRetry: 0,
+    done: false,
   };
   stratState[m.slug] = ss;
 
   while (true) {
     var elapsed = (Date.now() - m.windowStartMs) / 1000;
-    if (elapsed >= WINDOW_SECS + 1) break;
+    if (elapsed >= WINDOW_SECS + 5) break;
 
-    await ensureFreshPrice(m);
+    // Check pending fills (non-blocking order status poll)
+    await checkPendingFills();
 
-    var up = m.upMid;
-    var dn = m.downMid;
-    if (up <= 0 || dn <= 0) { await sleep(TICK_MS); continue; }
-
-    // Track trailing values (runs EVERY tick, never blocked)
-    if (ss.positionOpen) {
-      if (ss.side === 'up') {
-        if (up > ss.peak) ss.peak = up;
-      } else if (ss.side === 'down') {
-        if (dn < ss.trough || ss.trough === 0) ss.trough = dn;
-      }
-    } else {
-      if (up > ss.peak || ss.peak === 0) ss.peak = up;
-      if ((dn < ss.trough || ss.trough === 0) && dn > 0) ss.trough = dn;
-    }
-
-    // Check pending trade confirmations (non-blocking)
-    await checkPendingTrade();
-
-    // Phase 1: < 280s — trailing stop + flip
-    if (elapsed < STOP_ENTRY_AT) {
-      // No position — entry opportunity (only UP first, flip to DOWN via trailing stop)
-      if (!ss.positionOpen && !ss._pendingEntry && !inTrade && !pendingTrade && (!ss._retryCooldown || Date.now() > ss._retryCooldown)) {
-        var drop = f4(ss.peak - up);
-        if (drop >= TRAIL_DIST) {
-          log('UP dropped $' + f4(drop) + ' from peak $' + f4(ss.peak) + ' — entering UP');
-          ss._pendingEntry = true;
-          var r = await buySide(m, 'up', ss);
-          if (!r) ss._pendingEntry = false; // buy rejected immediately
-        }
-      }
-
-      // UP position — check trailing stop
-      if (ss.positionOpen && ss.side === 'up' && !inTrade && !pendingTrade) {
-        var drop = f4(ss.peak - up);
-        if (drop >= TRAIL_DIST) {
-          log('UP stop hit — selling & flipping DOWN');
-          await sellSide(m, 'down', ss);
-        }
-      }
-
-      // DOWN position — check trailing stop
-      if (ss.positionOpen && ss.side === 'down' && !inTrade && !pendingTrade) {
-        var rise = f4(dn - ss.trough);
-        if (rise >= TRAIL_DIST) {
-          log('DOWN stop hit — selling & flipping UP');
-          await sellSide(m, 'up', ss);
-        }
-      }
-    }
-
-    // Phase 2: 280-295s — stop entries, place TP @0.99
-    if (elapsed >= STOP_ENTRY_AT && elapsed < FORCE_SELL_AT && !ss._tpPlaced && ss.positionOpen) {
-      ss._tpPlaced = true;
-      log(m.pair + ' — placing TP @0.99 for ' + ss.side.toUpperCase());
-      if (!dryRun) {
-        var tokenId = ss.side === 'up' ? m.upTokenId : m.downTokenId;
-        var tpShares = ss.sharesHeld > 0 ? ss.sharesHeld : BASE_SHARES;
-        try { await trader.placeGtcOrder(tokenId, 'SELL', TP_PRICE, tpShares); }
-        catch(e) { log('TP err: ' + (e.message || '').slice(0, 60)); }
-      }
-    }
-
-    // Phase 3: 295s+ — force sell with retry
-    if (elapsed >= FORCE_SELL_AT && !ss._forceSold && ss.positionOpen) {
-      ss._forceSold = true;
-      ss._forceSelling = true;
-      // Ensure position global matches ss.side for sellSide to work
-      if (!position && ss.side) position = ss.side;
-      log(m.pair + ' FORCE SELL at ' + elapsed.toFixed(1) + 's');
-      if (!inTrade && !pendingTrade) {
-        await sellSide(m, null, ss);
-      }
-    }
+    // Evaluate this specific market (Gabagool logic)
+    await evaluateMarket(m, ss);
 
     await sleep(TICK_MS);
   }
 
-  log(m.pair + ' window done');
-  ss.done = true;
-  m.loopRunning = false;
+  log(m.slug + ' DONE');
+  var mObj = markets[m.slug];
+  if (mObj) mObj.loopRunning = false;
 }
 
-// ── Snapshot ──
+// ── Snapshot (for dashboard) ──
 function snapshot() {
   const equity = calcEquity();
   const pnl = f2(equity - startBalance);
 
   const activeMarkets = Object.values(markets)
-    .filter(m => m.windowStartMs <= Date.now() && Date.now() < m.endTime + 30000)
+    .filter(m => m.windowStartMs <= Date.now() && Date.now() < m.endTime + 30000 && m.upTokenId)
     .map(m => {
     var ss = stratState[m.slug] || {};
     var elapsed = Math.max(0, (Date.now() - m.windowStartMs) / 1000);
+    var secsLeft = Math.max(0, Math.floor((m.endTime - Date.now()) / 1000));
     var phase = 'waiting';
     if (elapsed >= FORCE_SELL_AT) phase = 'force_sell';
-    else if (elapsed >= STOP_ENTRY_AT) phase = 'tp_phase';
-    else if (elapsed > 0) phase = 'trading';
+    else if (elapsed >= STOP_ENTRY_AT) phase = 'closing';
+    else if (elapsed > 0 && secsLeft < 300) phase = 'trading';
+
+    var edge = 0;
+    if (m.upBid && m.downBid) edge = f4(1.0 - (m.upBid + m.downBid));
 
     return {
       slug: m.slug, pair: m.pair,
       upMid: f4(m.upMid), dnMid: f4(m.downMid),
-      secsLeft: Math.max(0, Math.floor((m.endTime - Date.now()) / 1000)),
-      elapsed: Math.floor(elapsed),
-      phase: phase,
-      position: (ss.positionOpen ? ss.side : null) || null,
-      entryPrice: f4(ss.entryPrice || 0),
-      sharesHeld: ss.sharesHeld || 0,
-      stopPeak: f4(ss.peak || 0),
-      stopTrough: f4(ss.trough || 0),
+      upBid: f4(m.upBid || 0), upAsk: f4(m.upAsk || 0),
+      downBid: f4(m.downBid || 0), downAsk: f4(m.downAsk || 0),
+      secsLeft, elapsed: Math.floor(elapsed), phase,
+      upShares: ss.upShares || 0,
+      downShares: ss.downShares || 0,
+      hasPendingUp: !!ss._pendingUp,
+      hasPendingDown: !!ss._pendingDown,
+      edge: edge,
+      edgePct: (edge * 100).toFixed(2) + '%',
     };
   });
 
@@ -553,7 +868,7 @@ function snapshot() {
     activeMarkets,
     recentTrades: trades.slice(0, 100),
     activityLog: logs.slice(0, 50),
-    strategy: { type: 'btc_trail_flip', shares: BASE_SHARES, trailDist: TRAIL_DIST, tpPrice: TP_PRICE },
+    strategy: { type: 'gabagool_complete_set', baseShares: BASE_SHARES, minEdge: MIN_EDGE },
   };
 }
 
@@ -576,13 +891,14 @@ async function start(emit, logFn) {
     if (dryRun) { cashBalance = DEMO_BALANCE; startBalance = DEMO_BALANCE; log('DEMO $' + f2(cashBalance)); }
     else { var b = await trader.getBalance(); if (b > 0) { cashBalance = b; startBalance = b; } log('LIVE $' + f2(cashBalance)); }
   } catch (e) {
-    if (dryRun) { cashBalance = DEMO_BALANCE; startBalance = DEMO_BALANCE; log('DEMO $' + f2(cashBalance) + ' (auth failed, data only)'); }
+    if (dryRun) { cashBalance = DEMO_BALANCE; startBalance = DEMO_BALANCE; log('DEMO $' + f2(cashBalance) + ' (auth fail)'); }
     else { log('Auth fail: ' + e.message); process.exit(1); }
   }
 
   wsConnect();
-  log('Starting main loop');
+  log('Starting Gabagool engine');
 
+  // Main interval: discover markets + evaluate + emit snapshot
   setInterval(async () => {
     var now = Date.now();
     if (now - lastDiscoverAt >= DISCOVER_EVERY_MS) {
@@ -596,36 +912,20 @@ async function start(emit, logFn) {
 async function setDryRun(v) {
   var wasDry = dryRun;
   dryRun = !!v;
-  // Switching from DEMO → LIVE: sync balance and clear stale demo positions
   if (wasDry && !dryRun && trader) {
     try {
       var b = await trader.getBalance();
       if (b > 0) { cashBalance = b; startBalance = b; }
-      log('Switched to LIVE — balance: $' + f2(cashBalance));
+      log('Switched LIVE — balance: $' + f2(cashBalance));
     } catch(e) { log('Live sync err: ' + e.message); }
-    // Clear any stale positions from demo mode
-    position = null; sharesHeld = 0; entryPrice = 0;
-    inTrade = false; pendingTrade = null;
-    for (var k in stratState) {
-      var ss = stratState[k];
-      ss.positionOpen = false; ss.side = null; ss.sharesHeld = 0;
-      ss.entryPrice = 0; ss.peak = 0; ss.trough = 0;
-      ss._pendingEntry = false; ss._retryCooldown = 0;
-    }
-    log('Demo positions cleared');
+    // Clear all demo state
+    for (var k in stratState) delete stratState[k];
+    log('State cleared');
   }
-  // Switching from LIVE → DEMO: reset demo balance
   if (!wasDry && dryRun) {
     cashBalance = DEMO_BALANCE; startBalance = DEMO_BALANCE;
-    position = null; sharesHeld = 0; entryPrice = 0;
-    inTrade = false; pendingTrade = null;
-    for (var k in stratState) {
-      var ss = stratState[k];
-      ss.positionOpen = false; ss.side = null; ss.sharesHeld = 0;
-      ss.entryPrice = 0; ss.peak = 0; ss.trough = 0;
-      ss._pendingEntry = false; ss._retryCooldown = 0;
-    }
-    log('Switched to DEMO — balance: $' + f2(cashBalance));
+    for (var k in stratState) delete stratState[k];
+    log('Switched DEMO — balance: $' + f2(cashBalance));
   }
 }
 function getDryRun() { return dryRun; }
