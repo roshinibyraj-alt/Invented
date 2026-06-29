@@ -189,12 +189,35 @@ function extractSlug(input) {
 
 // ─────────────────────────────────────────
 //  Fetch event + find "Draw - Yes or No" sub-market
+//
+//  Gamma API market schema (from official docs):
+//    outcomes     → JSON-encoded string: '["Yes","No"]'
+//    clobTokenIds → JSON-encoded string: '["tokenIdYes","tokenIdNo"]'
+//  The token at index i in clobTokenIds corresponds to outcomes[i].
+//  There is NO `tokens` array — that field doesn't exist on Gamma markets.
+//
+//  Correct endpoint: GET /events/slug/{slug}  (not /events?slug=)
 // ─────────────────────────────────────────
 function qOf(m) {
   return (m.question || m.groupItemTitle || m.title || '').toLowerCase();
 }
-function tokensOf(m) {
-  return m.tokens || m.outcomes || [];
+
+// Parse a Gamma market's outcomes+clobTokenIds into [{outcome, token_id}]
+function parseMarketTokens(m) {
+  try {
+    const outcomes = typeof m.outcomes === 'string' ? JSON.parse(m.outcomes) : (m.outcomes || []);
+    const tokenIds = typeof m.clobTokenIds === 'string' ? JSON.parse(m.clobTokenIds) : (m.clobTokenIds || []);
+    return outcomes.map((outcome, i) => ({ outcome, token_id: tokenIds[i] || null }));
+  } catch (_) {
+    return [];
+  }
+}
+
+// Return the NO token_id from a Gamma market, or null
+function noTokenIdFromMarket(m) {
+  const tokens = parseMarketTokens(m);
+  const noTok = tokens.find(t => (t.outcome || '').toLowerCase() === 'no');
+  return noTok?.token_id || null;
 }
 
 function findDrawMarket(markets) {
@@ -205,37 +228,30 @@ function findDrawMarket(markets) {
   return null;
 }
 
-function noToken(mktObj) {
-  const tokens = tokensOf(mktObj);
-  return tokens.find(t => (t.outcome || t.side || '').toLowerCase() === 'no');
-}
-
-function noTokenId(mktObj) {
-  const t = noToken(mktObj);
-  return t?.token_id || t?.id || null;
-}
-
 async function loadMatch(slugInput) {
   const slug = extractSlug(slugInput) || MATCH_EVENT_SLUG;
   MATCH_EVENT_SLUG = slug;
   log(`🔭 Loading match: ${slug}`);
   try {
-    const data = await getJSON(`${GAMMA}/events?slug=${encodeURIComponent(slug)}&limit=1`);
-    const arr = Array.isArray(data) ? data : (data.data || data.events || [data]);
-    if (!arr || arr.length === 0) {
+    // Correct endpoint per Polymarket docs: GET /events/slug/{slug}
+    const event = await getJSON(`${GAMMA}/events/slug/${encodeURIComponent(slug)}`);
+    if (!event || !event.id) {
       log(`❌ No event found for slug "${slug}"`);
       return { ok: false, error: 'Event not found' };
     }
-    const event = arr[0];
-    const markets = event.markets || event.sub_markets || [];
+    const markets = event.markets || [];
+    log(`📋 ${markets.length} sub-markets found in event`);
+
     const draw = findDrawMarket(markets);
     if (!draw) {
-      log(`❌ No "Draw - Yes or No" sub-market found in this event`);
+      const names = markets.map(m => qOf(m)).join(' | ');
+      log(`❌ No draw market found. Markets: ${names}`);
       return { ok: false, error: 'Draw market not found in this event' };
     }
-    const tid = noTokenId(draw);
+
+    const tid = noTokenIdFromMarket(draw);
     if (!tid) {
-      log(`❌ Draw market found but no NO token id present`);
+      log(`❌ Draw market found ("${qOf(draw)}") but NO token id is missing. outcomes=${draw.outcomes} clobTokenIds=${draw.clobTokenIds}`);
       return { ok: false, error: 'NO token id missing on draw market' };
     }
 
@@ -245,14 +261,13 @@ async function loadMatch(slugInput) {
     matchEndTime = event.endDate ? new Date(event.endDate).getTime() : null;
     endgameTriggered = false;
 
-    // New match -> reset the whole capital ladder
     resetAllBlocks();
     currentNoPrice = null;
 
     log(`✅ Match loaded: ${eventInfo.title}`);
-    log(`🎯 Draw market: ${qOf(draw)} | NO token: ${tid}`);
+    log(`🎯 Draw market: "${qOf(draw)}" | NO token: ${tid}`);
     if (matchEndTime) log(`⏰ Match ends: ${new Date(matchEndTime).toISOString()}`);
-    else log(`⚠️  No end time on event — endgame auto-exit will not trigger from schedule`);
+    else log(`⚠️  No end time on event — endgame auto-exit disabled`);
 
     return { ok: true, title: eventInfo.title, slug };
   } catch (e) {
