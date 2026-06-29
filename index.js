@@ -11,7 +11,20 @@ const io     = new Server(server);
 const PORT   = process.env.PORT || 8080;
 const DRY_RUN = (process.env.DRY_RUN || 'true').toLowerCase() === 'true';
 
+app.use(express.json());
+
 app.get('/healthz', (_, res) => res.sendStatus(200));
+
+app.post('/api/search-match', async (req, res) => {
+  const { url } = req.body || {};
+  if (!url) return res.status(400).json({ ok: false, error: 'Missing url' });
+  try {
+    const result = await bot.searchMatch(url);
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
 
 app.get('/', (_, res) => {
   res.send(`<!DOCTYPE html>
@@ -19,7 +32,7 @@ app.get('/', (_, res) => {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>⚽ FIFA Arb Bot</title>
+  <title>⚽ Draw-NO Block Bot</title>
   <style>
     :root {
       --bg:     #070c10;
@@ -39,7 +52,6 @@ app.get('/', (_, res) => {
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: 'Courier New', monospace; background: var(--bg); color: var(--text); font-size: 12px; min-height: 100vh; }
 
-    /* Header */
     .header {
       background: linear-gradient(135deg, #081428, #0c1e38);
       border-bottom: 2px solid #00d4ff33;
@@ -51,20 +63,36 @@ app.get('/', (_, res) => {
     .match-tag {
       font-size: 11px; background: #00d4ff11; color: var(--cyan);
       border: 1px solid #00d4ff33; border-radius: 20px; padding: 4px 12px;
+      max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
     .mode-badge { padding: 4px 14px; border-radius: 20px; font-size: 11px; font-weight: bold; }
     .mode-dry  { background: #ffd74022; color: var(--yellow); border: 1px solid var(--yellow); }
     .mode-live { background: #ff475722; color: var(--red);    border: 1px solid var(--red); animation: pulse 2s infinite; }
     @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
 
-    /* Stats row */
+    .search-bar {
+      display: flex; gap: 8px; padding: 14px 20px 0; flex-wrap: wrap;
+    }
+    .search-bar input {
+      flex: 1; min-width: 240px; background: var(--bg2); border: 1px solid var(--border);
+      color: var(--text); padding: 10px 14px; border-radius: 8px; font-family: inherit; font-size: 12px;
+    }
+    .search-bar input:focus { outline: none; border-color: var(--cyan); }
+    .search-bar button {
+      background: var(--cyan); color: #001018; border: none; padding: 10px 20px;
+      border-radius: 8px; font-weight: bold; cursor: pointer; font-family: inherit; font-size: 12px;
+    }
+    .search-bar button:hover { opacity: .85; }
+    .search-status { padding: 6px 20px 0; font-size: 10px; color: var(--muted); min-height: 14px; }
+    .search-status.ok  { color: var(--green); }
+    .search-status.err { color: var(--red); }
+
     .stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; padding: 14px 20px; }
     .stat { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
     .stat-label { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
     .stat-val   { font-size: 20px; font-weight: bold; color: #fff; }
     .stat-sub   { font-size: 9px; color: var(--muted); margin-top: 3px; }
 
-    /* Match info bar */
     .match-bar {
       background: var(--bg2); border: 1px solid var(--border);
       margin: 0 20px 14px; border-radius: 10px; padding: 10px 16px;
@@ -74,17 +102,6 @@ app.get('/', (_, res) => {
     .match-bar-label { color: var(--muted); margin-right: 6px; }
     .match-bar-val { color: var(--cyan); font-weight: bold; }
 
-    /* Arb rule types legend */
-    .legend {
-      display: flex; flex-wrap: wrap; gap: 6px;
-      padding: 0 20px 14px;
-    }
-    .leg-item {
-      font-size: 9px; padding: 2px 8px; border-radius: 8px;
-      background: #ffffff08; border: 1px solid #ffffff15; color: #aaa;
-    }
-
-    /* Positions grid */
     .section { padding: 0 20px 16px; }
     .section-hdr {
       font-size: 10px; color: var(--muted); text-transform: uppercase;
@@ -93,22 +110,32 @@ app.get('/', (_, res) => {
     }
     .section-hdr::after { content:''; flex:1; height:1px; background: var(--border); }
 
-    .pos-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 10px; }
-    .pos-card {
+    .block-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px; }
+    .block-card {
       background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; overflow: hidden;
     }
-    .pos-card.profit { border-color: #00e67633; }
-    .pos-card.loss   { border-color: #ff475733; }
-    .pos-hdr { background: #0d1d30; padding: 8px 12px; display: flex; justify-content: space-between; align-items: center; }
-    .pos-type { font-size: 9px; color: var(--purple); background: #bf5af211; border: 1px solid #bf5af233; border-radius: 6px; padding: 1px 6px; }
-    .pos-label { font-size: 10px; color: #ccc; flex: 1; margin-right: 8px; }
-    .pos-body { padding: 8px 12px; }
-    .pos-row { display: flex; justify-content: space-between; margin-bottom: 4px; font-size: 10px; }
-    .pos-key { color: var(--muted); }
+    .block-card.is-active { border-color: var(--cyan); box-shadow: 0 0 0 1px #00d4ff22; }
+    .block-hdr {
+      background: #0d1d30; padding: 8px 12px; display: flex; justify-content: space-between; align-items: center;
+    }
+    .block-range { font-size: 11px; font-weight: bold; color: #ddd; }
+    .block-active-pill {
+      font-size: 8px; padding: 1px 7px; border-radius: 6px; background: #00d4ff15; color: var(--cyan); border: 1px solid #00d4ff44;
+    }
+    .block-dormant-pill {
+      font-size: 8px; padding: 1px 7px; border-radius: 6px; background: #ffffff08; color: var(--muted); border: 1px solid #ffffff15;
+    }
+    .block-body { padding: 8px 12px; }
+    .block-row { display: flex; justify-content: space-between; margin-bottom: 4px; font-size: 10px; }
+    .block-key { color: var(--muted); }
     .pnl-pos { color: var(--green); }
     .pnl-neg { color: var(--red); }
+    .rungs { margin-top: 6px; border-top: 1px solid var(--border); padding-top: 6px; }
+    .rung-row { display: flex; justify-content: space-between; font-size: 9px; padding: 2px 0; color: #8aa; }
+    .rung-resting { color: var(--yellow); }
+    .rung-filled { color: var(--green); }
+    .rung-empty { color: var(--muted); }
 
-    /* Trade/log tables */
     .bottom-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 0 20px 20px; }
     @media (max-width: 700px) { .bottom-grid { grid-template-columns: 1fr; } }
     .tbl-wrap { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; max-height: 280px; overflow-y: auto; }
@@ -133,60 +160,56 @@ app.get('/', (_, res) => {
 
 <div class="header">
   <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-    <div class="logo">⚽ FIFA <span>Arb</span>Bot</div>
+    <div class="logo">⚽ Draw<span>NO</span>Bot</div>
     <div class="match-tag" id="match-slug">loading…</div>
   </div>
   <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-    <span style="color:var(--muted);font-size:10px"><span class="scan-dot"></span><span id="scan-ago">scanning…</span></span>
+    <span style="color:var(--muted);font-size:10px"><span class="scan-dot"></span><span id="price-tag">NO price —</span></span>
     <span id="mode-badge" class="mode-badge ${DRY_RUN ? 'mode-dry' : 'mode-live'}">${DRY_RUN ? '⚠️ DRY RUN' : '🔴 LIVE'}</span>
   </div>
 </div>
 
+<!-- Search -->
+<div class="search-bar">
+  <input id="match-url" type="text" placeholder="Paste Polymarket match URL (e.g. https://polymarket.com/sports/world-cup/fifwc-ger-par-2026-06-29)">
+  <button id="search-btn">Load Match</button>
+</div>
+<div class="search-status" id="search-status"></div>
+
 <!-- Stats -->
 <div class="stats-row">
-  <div class="stat"><div class="stat-label">Balance</div><div class="stat-val c-cyan" id="capital">—</div><div class="stat-sub">USDC</div></div>
-  <div class="stat"><div class="stat-label">Session P&L</div><div class="stat-val" id="pnl">—</div><div class="stat-sub">vs start</div></div>
-  <div class="stat"><div class="stat-label">Realized P&L</div><div class="stat-val" id="realized">—</div><div class="stat-sub">closed</div></div>
-  <div class="stat"><div class="stat-label">Open Positions</div><div class="stat-val c-purple" id="active-count">—</div><div class="stat-sub" id="rules-count">— arb rules</div></div>
-  <div class="stat"><div class="stat-label">Markets</div><div class="stat-val c-gold" id="markets-count">—</div><div class="stat-sub" id="prices-count">— prices</div></div>
-  <div class="stat"><div class="stat-label">Match Ends</div><div class="stat-val c-yellow" id="mins-to-end">—</div><div class="stat-sub">minutes</div></div>
+  <div class="stat"><div class="stat-label">Total Capital</div><div class="stat-val c-cyan" id="total-mark">—</div><div class="stat-sub">mark-to-market</div></div>
+  <div class="stat"><div class="stat-label">Session P&L</div><div class="stat-val" id="total-pnl">—</div><div class="stat-sub">vs $2000 start</div></div>
+  <div class="stat"><div class="stat-label">Realized P&L</div><div class="stat-val" id="realized-pnl">—</div><div class="stat-sub">booked</div></div>
+  <div class="stat"><div class="stat-label">Unrealized P&L</div><div class="stat-val" id="unrealized-pnl">—</div><div class="stat-sub">open positions</div></div>
+  <div class="stat"><div class="stat-label">Cash (unallocated)</div><div class="stat-val c-gold" id="total-cash">—</div><div class="stat-sub" id="open-shares">— open shares</div></div>
+  <div class="stat"><div class="stat-label">Match Ends In</div><div class="stat-val c-yellow" id="secs-to-end">—</div><div class="stat-sub">seconds</div></div>
   <div class="stat"><div class="stat-label">Uptime</div><div class="stat-val" id="uptime">—</div><div class="stat-sub">hh:mm:ss</div></div>
 </div>
 
 <!-- Match bar -->
 <div class="match-bar">
-  <div class="match-bar-item"><span class="match-bar-label">Event:</span><span class="match-bar-val" id="bar-slug">—</span></div>
-  <div class="match-bar-item"><span class="match-bar-label">Arb Rules:</span><span class="match-bar-val" id="bar-rules">—</span></div>
-  <div class="match-bar-item"><span class="match-bar-label">Unrealized:</span><span class="match-bar-val" id="bar-unrealized">—</span></div>
+  <div class="match-bar-item"><span class="match-bar-label">Event:</span><span class="match-bar-val" id="bar-title">—</span></div>
+  <div class="match-bar-item"><span class="match-bar-label">NO Price:</span><span class="match-bar-val" id="bar-price">—</span></div>
+  <div class="match-bar-item"><span class="match-bar-label">Active Block:</span><span class="match-bar-val" id="bar-active-block">—</span></div>
   <div class="match-bar-item"><span class="match-bar-label">End Time:</span><span class="match-bar-val" id="bar-endtime">—</span></div>
+  <div class="match-bar-item" id="endgame-flag" style="display:none"><span class="match-bar-val c-red">🚨 ENDGAME TRIGGERED</span></div>
 </div>
 
-<!-- Arb type legend -->
-<div class="legend">
-  <span class="leg-item" style="color:#00d4ff">LADDER_TOTAL: Goals over-line ladder</span>
-  <span class="leg-item" style="color:#00e676">TEAM_VS_MATCH: Team total vs match total</span>
-  <span class="leg-item" style="color:#bf5af2">BTTS_VS_*: Both teams to score vs team scoring</span>
-  <span class="leg-item" style="color:#ffd740">SPREAD_VS_ML: Spread vs moneyline</span>
-  <span class="leg-item" style="color:#ff9f0a">HT_VS_FT: Halftime vs fulltime</span>
-  <span class="leg-item" style="color:#f5c518">LADDER_CORNERS: Corners over-line ladder</span>
-  <span class="leg-item" style="color:#ff4757">LADDER_GER/PAR: Team total ladders</span>
-  <span class="leg-item" style="color:#aaa">H1_VS_MATCH: Half total vs match total</span>
-</div>
-
-<!-- Open positions -->
+<!-- Blocks -->
 <div class="section">
-  <div class="section-hdr">Open Arb Positions</div>
-  <div class="pos-grid" id="pos-grid"><div class="empty">🔭 No open positions — scanning for arbs…</div></div>
+  <div class="section-hdr">Price Blocks (10 x $200, real-time mark-to-market)</div>
+  <div class="block-grid" id="block-grid"><div class="empty">🔭 Loading blocks…</div></div>
 </div>
 
 <!-- Trades + Logs -->
 <div class="bottom-grid">
   <div>
-    <div class="section-hdr" style="margin:0 0 8px">Arb Trades</div>
+    <div class="section-hdr" style="margin:0 0 8px">Trades</div>
     <div class="tbl-wrap">
       <table class="tbl">
-        <thead><tr><th>Time</th><th>Type</th><th>Label</th><th>Shares</th><th>Entry</th><th>Edge</th><th>Cost</th></tr></thead>
-        <tbody id="trade-body"><tr><td colspan="7" class="empty">No trades yet</td></tr></tbody>
+        <thead><tr><th>Time</th><th>Block</th><th>Side</th><th>Price</th><th>Shares</th><th>P&L</th></tr></thead>
+        <tbody id="trade-body"><tr><td colspan="6" class="empty">No trades yet</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -206,88 +229,111 @@ app.get('/', (_, res) => {
   function sgn(v) { return (v>=0?'+':'')+(v||0).toFixed(2); }
   function pClass(v) { return v>=0?'c-green':'c-red'; }
 
-  const TYPE_COLORS = {
-    LADDER_TOTAL:'#00d4ff', LADDER_GER:'#ff4757', LADDER_PAR:'#ff4757',
-    LADDER_CORNERS:'#f5c518', LADDER_HT:'#aaa', LADDER_H2:'#aaa',
-    LADDER_GER_CORNERS:'#ff9f0a', LADDER_PAR_CORNERS:'#ff9f0a',
-    TEAM_VS_MATCH_GER:'#00e676', TEAM_VS_MATCH_PAR:'#00e676',
-    BTTS_VS_GER05:'#bf5af2', BTTS_VS_PAR05:'#bf5af2',
-    SPREAD_VS_ML_GER:'#ffd740', HT_VS_FT_GER:'#ff9f0a',
-    ADVANCE_VS_ML:'#f5c518', H1_VS_MATCH:'#aaa',
-  };
+  document.getElementById('search-btn').addEventListener('click', async () => {
+    const url = document.getElementById('match-url').value.trim();
+    const statusEl = document.getElementById('search-status');
+    if (!url) return;
+    statusEl.textContent = 'Loading match…';
+    statusEl.className = 'search-status';
+    try {
+      const res = await fetch('/api/search-match', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url })
+      });
+      const data = await res.json();
+      if (data.ok) {
+        statusEl.textContent = '✅ Loaded: ' + (data.title || data.slug);
+        statusEl.className = 'search-status ok';
+      } else {
+        statusEl.textContent = '❌ ' + (data.error || 'Failed to load match');
+        statusEl.className = 'search-status err';
+      }
+    } catch (e) {
+      statusEl.textContent = '❌ ' + e.message;
+      statusEl.className = 'search-status err';
+    }
+  });
 
   socket.on('state', s => {
-    // Stats
-    document.getElementById('capital').textContent = '$'+(s.capital||0).toFixed(2);
-    const pnlEl = document.getElementById('pnl');
-    pnlEl.textContent = sgn(s.pnl||0);
-    pnlEl.className = 'stat-val '+pClass(s.pnl);
-    const relEl = document.getElementById('realized');
-    relEl.textContent = sgn(s.realizedPnl||0);
-    relEl.className = 'stat-val '+pClass(s.realizedPnl);
-    document.getElementById('active-count').textContent = s.activeCount??'—';
-    document.getElementById('rules-count').textContent = (s.arbRules||0)+' arb rules';
-    document.getElementById('markets-count').textContent = s.totalMarkets||'—';
-    document.getElementById('prices-count').textContent = (s.pricesTracked||0)+' prices cached';
-    document.getElementById('mins-to-end').textContent = s.minsToEnd ? s.minsToEnd+'m' : '—';
+    document.getElementById('total-mark').textContent = '$'+(s.totalMarkValue||0).toFixed(2);
+    const pnlEl = document.getElementById('total-pnl');
+    pnlEl.textContent = sgn(s.totalPnl||0);
+    pnlEl.className = 'stat-val '+pClass(s.totalPnl);
+    const relEl = document.getElementById('realized-pnl');
+    relEl.textContent = sgn(s.totalRealizedPnl||0);
+    relEl.className = 'stat-val '+pClass(s.totalRealizedPnl);
+    const unrelEl = document.getElementById('unrealized-pnl');
+    unrelEl.textContent = sgn(s.totalUnrealizedPnl||0);
+    unrelEl.className = 'stat-val '+pClass(s.totalUnrealizedPnl);
+    document.getElementById('total-cash').textContent = '$'+(s.totalCash||0).toFixed(2);
+    document.getElementById('open-shares').textContent = (s.totalOpenShares||0).toFixed(2)+' open shares';
+    document.getElementById('secs-to-end').textContent = (s.secsToEnd!==null && s.secsToEnd!==undefined) ? s.secsToEnd+'s' : '—';
     document.getElementById('uptime').textContent = fmt(s.uptime||0);
-    document.getElementById('scan-ago').textContent = 'last scan '+(s.lastScanAgo||0)+'s ago';
-    document.getElementById('match-slug').textContent = s.eventSlug||'—';
-    document.getElementById('bar-slug').textContent = s.eventSlug||'—';
-    document.getElementById('bar-rules').textContent = (s.arbRules||0)+' rules';
-    const unrelEl = document.getElementById('bar-unrealized');
-    unrelEl.textContent = sgn(s.unrealized||0);
-    unrelEl.className = 'match-bar-val '+(s.unrealized>=0?'c-green':'c-red');
+    document.getElementById('price-tag').textContent = 'NO price '+(s.noPrice!==null ? s.noPrice.toFixed(3) : '—');
+    document.getElementById('match-slug').textContent = s.eventTitle || s.eventSlug || '—';
+    document.getElementById('bar-title').textContent = s.eventTitle || s.eventSlug || '—';
+    document.getElementById('bar-price').textContent = s.noPrice!==null ? s.noPrice.toFixed(3) : '—';
     document.getElementById('bar-endtime').textContent = s.matchEndTime ? s.matchEndTime.slice(0,19).replace('T',' ')+'Z' : 'unknown';
+    document.getElementById('endgame-flag').style.display = s.endgameTriggered ? '' : 'none';
 
-    // Positions
-    const grid = document.getElementById('pos-grid');
-    if (!s.positions || s.positions.length === 0) {
-      grid.innerHTML = '<div class="empty">🔭 No open positions — scanning '+( s.arbRules||0)+' arb rules…</div>';
+    const activeBlock = (s.blocks||[]).find(b => b.active);
+    document.getElementById('bar-active-block').textContent = activeBlock ? activeBlock.range : '—';
+
+    const grid = document.getElementById('block-grid');
+    if (!s.blocks || s.blocks.length === 0) {
+      grid.innerHTML = '<div class="empty">🔭 No blocks yet</div>';
     } else {
-      grid.innerHTML = s.positions.map(p => {
-        const col = TYPE_COLORS[p.type] || '#aaa';
-        const pClass2 = p.pnl >= 0 ? 'profit' : 'loss';
-        return \`<div class="pos-card \${pClass2}">
-          <div class="pos-hdr">
-            <div class="pos-label">\${p.label}</div>
-            <span class="pos-type" style="border-color:\${col}33;color:\${col}">\${p.type}</span>
+      grid.innerHTML = s.blocks.map(b => {
+        const rungsHtml = b.rungs.map(r => {
+          if (r.hasPosition) {
+            return '<div class="rung-row rung-filled"><span>r'+r.offsetIdx+' filled @'+r.entryPrice.toFixed(2)+' ('+r.shares.toFixed(2)+'sh)</span><span>TP@'+r.tpPrice.toFixed(2)+' '+sgn(r.unrealizedPnl)+'</span></div>';
+          } else if (r.restingPrice) {
+            return '<div class="rung-row rung-resting"><span>r'+r.offsetIdx+' resting BUY @'+r.restingPrice.toFixed(2)+'</span><span>'+r.restingSize.toFixed(2)+'sh</span></div>';
+          }
+          return '<div class="rung-row rung-empty"><span>r'+r.offsetIdx+' idle</span><span>—</span></div>';
+        }).join('');
+        return \`<div class="block-card \${b.active ? 'is-active' : ''}">
+          <div class="block-hdr">
+            <div class="block-range">\${b.range}</div>
+            <span class="\${b.active ? 'block-active-pill' : 'block-dormant-pill'}">\${b.active ? 'ACTIVE' : 'dormant'}</span>
           </div>
-          <div class="pos-body">
-            <div class="pos-row"><span class="pos-key">Shares</span><span>\${p.shares}</span></div>
-            <div class="pos-row"><span class="pos-key">Entry</span><span>\${(p.entry||0).toFixed(4)}</span><span class="pos-key">Current</span><span>\${(p.current||0).toFixed(4)}</span></div>
-            <div class="pos-row"><span class="pos-key">P&L</span><span class="\${p.pnl>=0?'pnl-pos':'pnl-neg'}">\${sgn(p.pnl)}</span><span class="pos-key">Edge</span><span style="color:var(--gold)">¢\${((p.edge||0)*100).toFixed(1)}</span></div>
-            <div class="pos-row"><span class="pos-key">Open</span><span>\${p.secsOpen}s</span></div>
+          <div class="block-body">
+            <div class="block-row"><span class="block-key">Pivot</span><span>\${b.pivot.toFixed(2)}</span><span class="block-key">Cash</span><span>$\${b.cash.toFixed(2)}</span></div>
+            <div class="block-row"><span class="block-key">Mark Value</span><span class="c-cyan">$\${b.markValue.toFixed(2)}</span></div>
+            <div class="block-row"><span class="block-key">Realized</span><span class="\${b.realizedPnl>=0?'pnl-pos':'pnl-neg'}">\${sgn(b.realizedPnl)}</span><span class="block-key">Unrealized</span><span class="\${b.unrealized>=0?'pnl-pos':'pnl-neg'}">\${sgn(b.unrealized)}</span></div>
+            <div class="rungs">\${rungsHtml}</div>
           </div>
         </div>\`;
       }).join('');
     }
 
-    // Trades
     const tb = document.getElementById('trade-body');
     if (s.trades && s.trades.length > 0) {
-      tb.innerHTML = s.trades.slice().reverse().map(t => {
-        const col = TYPE_COLORS[t.type] || '#aaa';
+      tb.innerHTML = s.trades.map(t => {
+        const pnlStr = (t.profit !== undefined) ? sgn(t.profit) : '—';
+        const pnlCls = (t.profit !== undefined) ? (t.profit>=0?'pnl-pos':'pnl-neg') : '';
+        const sideColor = t.side === 'BUY' ? '#ffd740' : (t.side === 'SELL_ENDGAME' ? '#ff4757' : '#00e676');
         return '<tr>'+
           '<td>'+t.time+'</td>'+
-          '<td style="font-size:9px;color:'+col+'">'+t.type+'</td>'+
-          '<td style="max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+t.label+'">'+t.label.slice(0,18)+'</td>'+
-          '<td>'+t.shares+'</td>'+
-          '<td>'+(t.price||0).toFixed(4)+'</td>'+
-          '<td style="color:var(--gold)">¢'+((t.edge||0)*100).toFixed(1)+'</td>'+
-          '<td>$'+(t.cost||0).toFixed(2)+'</td>'+
+          '<td>#'+t.block+'</td>'+
+          '<td style="color:'+sideColor+'">'+t.side+'</td>'+
+          '<td>'+(t.price||0).toFixed(3)+'</td>'+
+          '<td>'+(t.shares||0).toFixed(2)+'</td>'+
+          '<td class="'+pnlCls+'">'+pnlStr+'</td>'+
           '</tr>';
       }).join('');
+    } else {
+      tb.innerHTML = '<tr><td colspan="6" class="empty">No trades yet</td></tr>';
     }
 
-    // Logs
     const logEl = document.getElementById('logs');
     if (s.logs && s.logs.length > 0) {
       logEl.innerHTML = s.logs.map(l => {
-        const col = l.includes('❌')||l.includes('🚨')||l.includes('📉') ? '#ff4757'
-                  : l.includes('💰')||l.includes('✅')||l.includes('✨') ? '#00e676'
-                  : l.includes('📥')||l.includes('[DRY')||l.includes('🎯') ? '#ffd740'
-                  : l.includes('💹')||l.includes('🔭')||l.includes('📊') ? '#00d4ff'
+        const col = l.includes('❌')||l.includes('🚨') ? '#ff4757'
+                  : l.includes('💰')||l.includes('✅') ? '#00e676'
+                  : l.includes('🪣')||l.includes('⬆️')||l.includes('🏁') ? '#ffd740'
+                  : l.includes('🔭')||l.includes('🎯')||l.includes('⏰') ? '#00d4ff'
                   : l.includes('⚠️') ? '#ff9f0a'
                   : '#4a6080';
         return '<div style="color:'+col+'">'+l+'</div>';
@@ -306,9 +352,9 @@ const slog = (line) => { console.log(line); io.emit('log', line); };
 const PK = process.env.PRIVATE_KEY;
 if (!PK) { console.error('❌ PRIVATE_KEY env var missing'); process.exit(1); }
 
-console.log(`⚽ FIFA Cross-Market Arb Bot`);
+console.log(`⚽ Draw-NO Block-Ladder Bot`);
 console.log(`🚦 DRY_RUN=${DRY_RUN}`);
-if (DRY_RUN) console.log('⚠️  DRY RUN — demo mode, no real orders');
+if (DRY_RUN) console.log('⚠️  DRY RUN — demo $2000 capital, simulated fills, real API for data/orders');
 else         console.log('🔴 LIVE MODE — real money');
 
 server.listen(PORT, '0.0.0.0', () => {
