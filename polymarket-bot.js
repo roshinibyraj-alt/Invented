@@ -305,6 +305,12 @@ async function placeTP(m, isUp, shares, entryPrice) {
     if (isUp)  m.upOpenOrders.push(tpId);
     else       m.downOpenOrders.push(tpId);
     log(`✅ ${label} order placed → id=${tpId}`);
+    // In DRY_RUN, simulate TP filling and credit proceeds to demo balance
+    if (DRY_RUN) {
+      const proceeds = f2(TP_PRICE * shares);
+      balance = f2(balance + proceeds);
+      log(`[DRY_RUN] Simulated ${label} TP fill → +$${proceeds} | demo balance: $${balance}`);
+    }
   }
   return tpId;
 }
@@ -362,6 +368,12 @@ async function tryEntry(m, isUp) {
 
   if (isUp) { m.upShares += shares;   m.upCost   += cost; }
   else      { m.downShares += shares; m.downCost += cost; }
+
+  // Deduct cost from demo balance in DRY_RUN
+  if (DRY_RUN) {
+    balance = f2(balance - cost);
+    log(`[DRY_RUN] Demo balance after entry: $${balance}`);
+  }
 
   trades.push({
     time: new Date().toTimeString().slice(0, 8),
@@ -506,11 +518,15 @@ async function init(privateKey, emit, serverLog) {
   await trader.authenticate();
   await trader.approveAllowance();
 
-  balance      = await trader.getBalance();
+  if (DRY_RUN) {
+    balance = 200;
+    log('💰 DRY RUN demo balance set to $200');
+  } else {
+    balance = await trader.getBalance();
+    log(`💰 Live balance: $${balance}`);
+  }
   startBalance = balance;
   startTime    = Date.now();
-
-  log(`💰 Balance: $${balance}`);
 
   wsConnect();
   discoverLoop().catch(e => log(`❌ Discover loop crashed: ${e.message}`));
