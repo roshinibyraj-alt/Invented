@@ -1,324 +1,230 @@
 'use strict';
 
-const WebSocket = require('ws');
+const WebSocket        = require('ws');
 const PolymarketTrader = require('./polymarket-trader');
 
 const GAMMA   = 'https://gamma-api.polymarket.com';
 const CLOB    = 'https://clob.polymarket.com';
 const CLOB_WS = 'wss://ws-subscriptions-clob.polymarket.com/ws/market';
 
-// ── Gabagool Config ──
-const TICK_MS              = 350;
-const DISCOVER_EVERY_MS    = 10000;
-const WINDOW_SECS          = 300;
-const STOP_ENTRY_AT        = 280;
-const FORCE_SELL_AT        = 295;
-const MIN_REPLACE_MS       = 1000;
-const MIN_SECS_TO_END      = 5;
-const MAX_SECS_TO_END      = 295;
+// ── Timing ──
+const TICK_MS           = 500;
+const DISCOVER_EVERY_MS = 15000;
+const WINDOW_SECS       = 300;
 
-// Sizing (base unit = 6 shares)
-const BASE_SHARES          = 6;
-const IMPROVE_TICKS        = 1;
-const QUOTE_SIZE           = 6.00;   // dollars per order leg (~6 shares @ $1)
+// ── Arbitrage Strategy Config ──
+const ENTRY_WAIT_SECS  = 10;    // wait 10s after window open for prices to settle
+const ARB_SHARES       = 6;     // shares to buy on each side per arb
+const ARB_THRESHOLD    = 0.97;  // buy both when combined ask <= this (guaranteed profit on resolution)
+const ARB_EXIT_PROFIT  = 0.995; // sell early if combined bid reaches this (lock in instant profit)
+const FORCE_CLOSE_SECS = 10;    // no new entries in last 10s, attempt early-exit sell
+const NUKE_SECS        = 5;     // T-5s: nuclear close of all open positions
 
-// Complete-set edge config
-const MIN_EDGE             = 0.01;   // 1% min edge to trade
-const MAX_SKEW_TICKS       = 2;
-const IMBALANCE_FOR_MAX_SKEW = 40;   // shares imbalance for full skew
+// ── Order config ──
+const SELL_RETRY_MS    = 300;
 
-// Top-Up config
-const TOP_UP_ENABLED          = true;
-const TOP_UP_MIN_SHARES       = 6;
-const FAST_TOP_UP_ENABLED     = true;
-const FAST_TOP_UP_MIN_SHARES = 6;      // min imbalance to trigger top-up
-const FAST_TOP_UP_MIN_SHAFTER = 2;    // seconds after fill
-const FAST_TOP_UP_MAX_SHAFTER = 120;
-const FAST_TOP_UP_COOLDOWN_MS = 5000;
-const FAST_TOP_UP_MIN_EDGE    = 0.00;
+const TARGET_PAIRS = ['BTC'];
 
-// Taker config (disabled by default)
-const TAKER_ENABLED    = false;
-const TAKER_MAX_EDGE   = 0.015;
-const TAKER_MAX_SPREAD = 0.02;
-
-// TICK_SIZE
-const DEFAULT_TICK_SIZE = 0.01;
-
-let dryRun = process.env.DRY_RUN !== 'false';
-const DEMO_BALANCE = parseFloat(process.env.DEMO_BALANCE || '1000');
-
-let emitFn = () => {};
-let slog   = () => {};
-let trader = null;
-let cashBalance = 0;
+let emitFn       = () => {};
+let slog         = () => {};
+let trader       = null;
+let balance      = 0;
 let startBalance = 0;
-let startTime = Date.now();
+let startTime    = Date.now();
+const BOT_START_TIME = Date.now(); // used to skip mid-window markets on deploy
 
-const logs = [];
-const trades = [];
+const logs    = [];
+const trades  = [];
 const markets = {};
-const stratState = {};
-let lastDiscoverAt = 0;
+let lastDiscoverAt  = 0;
+let heartbeatId     = '';   // docs: use empty string for first call, then chain the returned id
+let lastHeartbeatAt = 0;
 
+// ── Helpers ──
 const f2 = v => Math.round((v || 0) * 100) / 100;
 const f4 = v => Math.round((v || 0) * 10000) / 10000;
-const sleep = ms => new Promise(r => setTimeout(r, ms));
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 function log(msg) {
-  const ts = new Date().toTimeString().slice(0, 8);
-  const line = '[' + ts + '] [GAB] ' + msg;
+  const ts   = new Date().toTimeString().slice(0, 8);
+  const line = `[${ts}] ${msg}`;
   logs.unshift(line);
-  if (logs.length > 500) logs.length = 500;
+  if (logs.length > 300) logs.length = 300;
   if (slog) slog(line);
-}
-
-function logTrade(action, side, price, shares, pnl) {
-  trades.unshift({
-    ts: new Date().toTimeString().slice(0, 8),
-    action, side: side || '',
-    price: f4(price || 0),
-    shares: shares || 0,
-    pnl: f2(pnl || 0),
-  });
-  if (trades.length > 200) trades.length = 200;
 }
 
 async function getJSON(url) {
   try {
     const ac = new AbortController();
-    const t = setTimeout(() => ac.abort(), 8000);
-    const r = await fetch(url, { signal: ac.signal });
+    const t  = setTimeout(() => ac.abort(), 8000);
+    const r  = await fetch(url, { signal: ac.signal });
     clearTimeout(t);
     return r.ok ? r.json() : null;
   } catch (_) { return null; }
 }
 
-function calcEquity() {
-  let openValue = 0;
-  for (const [slug, ss] of Object.entries(stratState)) {
-    const m = markets[slug];
-    if (!m || ss.done) continue;
-    if (ss.upShares > 0) openValue += ss.upShares * m.upMid;
-    if (ss.downShares > 0) openValue += ss.downShares * m.downMid;
-  }
-  return cashBalance + openValue;
-}
-
-// ── WS ──
-let ws = null, wsReady = false, wsPingTimer = null;
-const wsTokenMap = {};
+// ── WebSocket price feed ──
+// Docs: wss://ws-subscriptions-clob.polymarket.com/ws/market
+// Subscribe with: { assets_ids: [...], type: "market" }  ← lowercase "market"
+// price_change events give: best_bid, best_ask per asset_id
+// book events give: full bids/asks snapshot on subscribe
+let ws          = null;
+let wsPingTimer = null;
+const wsTokenMap = {}; // tokenId → slug
 
 function wsConnect() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+  log('🔌 Connecting price WebSocket…');
   ws = new WebSocket(CLOB_WS);
+
   ws.on('open', () => {
-    wsReady = true;
-    const ids = Object.keys(wsTokenMap);
-    if (ids.length) wsSubscribe(ids);
-    wsPingTimer = setInterval(() => { if (ws.readyState === WebSocket.OPEN) ws.ping(); }, 20000);
+    log('✅ Price WebSocket connected');
+    const tokenIds = Object.keys(wsTokenMap);
+    if (tokenIds.length > 0) wsSubscribe(tokenIds);
+    // Docs say to send ping every 10s
+    wsPingTimer = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({}));
+    }, 10000);
   });
-  ws.on('message', raw => {
+
+  ws.on('message', (raw) => {
     try {
       const msgs = JSON.parse(raw);
-      const arr = Array.isArray(msgs) ? msgs : [msgs];
+      const arr  = Array.isArray(msgs) ? msgs : [msgs];
       for (const msg of arr) {
-        const t = msg.asset_id, p = parseFloat(msg.price || msg.mid_price || '0');
-        if (!t || !p) continue;
-        const slug = wsTokenMap[t];
-        if (!slug || !markets[slug]) continue;
-        const m = markets[slug];
-        if (t === m.upTokenId) m.upMid = f4(p);
-        if (t === m.downTokenId) m.downMid = f4(p);
+        // price_change: has price_changes array with best_bid/best_ask per asset
+        if (msg.event_type === 'price_change' && Array.isArray(msg.price_changes)) {
+          for (const pc of msg.price_changes) {
+            updateMarketPrice(pc.asset_id, pc.best_bid, pc.best_ask);
+          }
+        }
+        // best_bid_ask: direct best_bid/best_ask per asset
+        if (msg.event_type === 'best_bid_ask') {
+          updateMarketPrice(msg.asset_id, msg.best_bid, msg.best_ask);
+        }
+        // book snapshot: first ask = best ask, first bid = best bid
+        if (msg.event_type === 'book') {
+          const bestBid = msg.bids?.[0]?.price ? parseFloat(msg.bids[0].price) : null;
+          const bestAsk = msg.asks?.[0]?.price ? parseFloat(msg.asks[0].price) : null;
+          updateMarketPrice(msg.asset_id, bestBid, bestAsk);
+          // Also update midpoint for trailing stop
+          if (bestBid && bestAsk) {
+            const mid = f4((bestBid + bestAsk) / 2);
+            const slug = wsTokenMap[msg.asset_id];
+            if (slug && markets[slug]) {
+              const m = markets[slug];
+              if (msg.asset_id === m.upTokenId)   m.upMid  = mid;
+              if (msg.asset_id === m.downTokenId)  m.downMid = mid;
+              m.lastPriceAt = Date.now();
+            }
+          }
+        }
       }
     } catch (_) {}
   });
+
   ws.on('close', () => {
-    wsReady = false;
     if (wsPingTimer) { clearInterval(wsPingTimer); wsPingTimer = null; }
+    log('⚠️  Price WebSocket closed — reconnecting in 2s');
     setTimeout(wsConnect, 2000);
   });
-  ws.on('error', () => { try { ws.terminate(); } catch(_) {} });
+
+  ws.on('error', (e) => {
+    log(`⚠️  WS error: ${e.message}`);
+    try { ws.terminate(); } catch (_) {}
+  });
 }
 
-function wsSubscribe(ids) {
+function updateMarketPrice(tokenId, bestBid, bestAsk) {
+  if (!tokenId) return;
+  const slug = wsTokenMap[tokenId];
+  if (!slug || !markets[slug]) return;
+  const m = markets[slug];
+  const bid = bestBid ? f4(parseFloat(bestBid)) : null;
+  const ask = bestAsk ? f4(parseFloat(bestAsk)) : null;
+  if (tokenId === m.upTokenId) {
+    if (bid) m.upBestBid = bid;
+    if (ask) m.upBestAsk = ask;
+    // Update mid using whichever values we have — fall back to last known
+    const b = m.upBestBid, a = m.upBestAsk;
+    if (b && a) { m.upMid = f4((b + a) / 2); m.lastPriceAt = Date.now(); }
+    else if (bid) { m.upMid = bid; m.lastPriceAt = Date.now(); }   // only bid arrived
+    else if (ask) { m.upMid = ask; m.lastPriceAt = Date.now(); }   // only ask arrived
+  }
+  if (tokenId === m.downTokenId) {
+    if (bid) m.dnBestBid = bid;
+    if (ask) m.dnBestAsk = ask;
+    const b = m.dnBestBid, a = m.dnBestAsk;
+    if (b && a) { m.downMid = f4((b + a) / 2); m.lastPriceAt = Date.now(); }
+    else if (bid) { m.downMid = bid; m.lastPriceAt = Date.now(); }
+    else if (ask) { m.downMid = ask; m.lastPriceAt = Date.now(); }
+  }
+}
+
+// Docs: subscription message format
+function wsSubscribe(tokenIds) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  ws.send(JSON.stringify({ auth: {}, type: 'market', assets_ids: ids }));
+  ws.send(JSON.stringify({
+    assets_ids: tokenIds,
+    type: 'market',   // ← docs confirm lowercase "market"
+  }));
 }
 
+// REST midpoint fallback if WS is stale >3s
 async function restRefreshPrice(m) {
   const [ur, dr] = await Promise.all([
-    getJSON(CLOB + '/midpoint?token_id=' + m.upTokenId),
-    getJSON(CLOB + '/midpoint?token_id=' + m.downTokenId),
+    getJSON(`${CLOB}/midpoint?token_id=${m.upTokenId}`),
+    getJSON(`${CLOB}/midpoint?token_id=${m.downTokenId}`),
   ]);
-  if (ur && ur.mid) m.upMid = f4(parseFloat(ur.mid));
-  if (dr && dr.mid) m.downMid = f4(parseFloat(dr.mid));
+  if (ur?.mid) m.upMid   = f4(parseFloat(ur.mid));
+  if (dr?.mid) m.downMid = f4(parseFloat(dr.mid));
   m.lastPriceAt = Date.now();
 }
 
 async function ensureFreshPrice(m) {
-  if (!m.lastPriceAt || Date.now() - m.lastPriceAt > 2000) await restRefreshPrice(m);
+  const stale = !m.lastPriceAt || (Date.now() - m.lastPriceAt) > 3000;
+  if (stale) await restRefreshPrice(m);
 }
 
+// ── Order status check ──
+// Docs confirmed exact status strings from GET /data/order/{orderID}:
+//   ORDER_STATUS_LIVE     = still open
+//   ORDER_STATUS_MATCHED  = filled ✅
+//   ORDER_STATUS_CANCELED = cancelled
+async function checkOrderStatus(orderId) {
+  try {
+    const order = await trader.getOrder(orderId);
+    if (!order) return 'open';
+    const s = order.status || '';
+    if (s === 'ORDER_STATUS_MATCHED')  return 'filled';
+    if (s === 'ORDER_STATUS_CANCELED' ||
+        s === 'ORDER_STATUS_CANCELED_MARKET_RESOLVED' ||
+        s === 'ORDER_STATUS_INVALID')  return 'cancelled';
+    return 'open'; // ORDER_STATUS_LIVE or unknown
+  } catch (_) { return 'open'; }
+}
+
+// Safe cancel: cancel then verify — catches ghost fills in the cancel window
+async function safeCancel(orderId) {
+  try { await trader.cancelOrder(orderId); } catch (_) {}
+  await sleep(CANCEL_VERIFY_MS);
+  return checkOrderStatus(orderId); // returns 'filled' | 'cancelled' | 'open'
+}
+
+// ── Market Discovery ──
 function currentWindowStart() {
   const now = Math.floor(Date.now() / 1000);
   return Math.floor(now / WINDOW_SECS) * WINDOW_SECS;
 }
 
-// ── Order Book (best bid/ask) via REST ──
-async function refreshOrderBook(m) {
-  if (!trader) return;
-  // Fetch order book with timeout
-  var upBook = null, dnBook = null;
-  try {
-    upBook = await Promise.race([
-      trader.getOrderBook(m.upTokenId),
-      new Promise(function(r) { setTimeout(function() { r(null); }, 3000); }),
-    ]);
-  } catch (_) {}
-  try {
-    dnBook = await Promise.race([
-      trader.getOrderBook(m.downTokenId),
-      new Promise(function(r) { setTimeout(function() { r(null); }, 3000); }),
-    ]);
-  } catch (_) {}
-
-  if (upBook && upBook.bids && upBook.bids.length > 0 && upBook.asks && upBook.asks.length > 0) {
-    m.upBid = parseFloat(upBook.bids[0]?.price || '0');
-    m.upAsk = parseFloat(upBook.asks[0]?.price || '0');
-  }
-  if (dnBook && dnBook.bids && dnBook.bids.length > 0 && dnBook.asks && dnBook.asks.length > 0) {
-    m.downBid = parseFloat(dnBook.bids[0]?.price || '0');
-    m.downAsk = parseFloat(dnBook.asks[0]?.price || '0');
-  }
-
-  // Fallback: derive bid/ask from midpoint with synthetic spread
-  if ((!m.upBid || !m.upAsk) && m.upMid > 0) {
-    m.upBid = f4(m.upMid - 0.015);
-    m.upAsk = f4(m.upMid + 0.015);
-    if (m.upBid < 0.01) m.upBid = 0.01;
-    if (m.upAsk > 0.99) m.upAsk = 0.99;
-  }
-  if ((!m.downBid || !m.downAsk) && m.downMid > 0) {
-    m.downBid = f4(m.downMid - 0.015);
-    m.downAsk = f4(m.downMid + 0.015);
-    if (m.downBid < 0.01) m.downBid = 0.01;
-    if (m.downAsk > 0.99) m.downAsk = 0.99;
-  }
-}
-
-async function ensureFreshBook(m) {
-  if (!m.lastBookAt || Date.now() - m.lastBookAt > 1000) {
-    await refreshOrderBook(m);
-    m.lastBookAt = Date.now();
-  }
-}
-
-// ── Helper: round to tick ──
-function roundToTick(value, tickSize, mode) {
-  if (!tickSize || tickSize <= 0) return value;
-  if (mode === 'down') return Math.floor(value / tickSize) * tickSize;
-  if (mode === 'up') return Math.ceil(value / tickSize) * tickSize;
-  return Math.round(value / tickSize) * tickSize;
-}
-
-// ── Gabagool: pickSide ──
-function pickSide(upBid, upAsk, downBid, downAsk, ss) {
-  if (!upBid || !upAsk || !downBid || !downAsk) return null;
-
-  // edgeTakeUp = 1.0 - (askUp + bidDown) — buy UP at ask, buy DOWN at bid
-  // edgeTakeDown = 1.0 - (bidUp + askDown) — buy UP at bid, buy DOWN at ask
-  var edgeUp = f4(1.0 - (upAsk + downBid));
-  var edgeDown = f4(1.0 - (upBid + downAsk));
-
-  var upOk = edgeUp >= FAST_TOP_UP_MIN_EDGE;
-  var downOk = edgeDown >= FAST_TOP_UP_MIN_EDGE;
-
-  if (!upOk && !downOk) return null;
-  if (upOk && !downOk) return 'up';
-  if (downOk && !upOk) return 'down';
-
-  if (edgeUp > edgeDown) return 'up';
-  if (edgeDown > edgeUp) return 'down';
-
-  // Tie-break by inventory imbalance
-  var imbalance = (ss.upShares || 0) - (ss.downShares || 0);
-  if (imbalance > 0) return 'down';   // more UP → buy DOWN
-  if (imbalance < 0) return 'up';     // more DOWN → buy UP
-  return 'up';
-}
-
-// ── Gabagool: calculateSkewTicks ──
-function calculateSkewTicks(ss) {
-  var imbalance = (ss.upShares || 0) - (ss.downShares || 0);
-  var skewUp = 0, skewDown = 0;
-
-  if (IMBALANCE_FOR_MAX_SKEW > 0 && MAX_SKEW_TICKS > 0) {
-    var ratio = Math.min(1, Math.abs(imbalance) / IMBALANCE_FOR_MAX_SKEW);
-    var ticks = Math.round(ratio * MAX_SKEW_TICKS);
-    if (imbalance > 0) {
-      // More UP → improve DOWN (positive skew), penalize UP (negative skew)
-      skewDown = ticks;
-      skewUp = -ticks;
-    } else if (imbalance < 0) {
-      // More DOWN → improve UP, penalize DOWN
-      skewUp = ticks;
-      skewDown = -ticks;
-    }
-  }
-  return [skewUp, skewDown];
-}
-
-// ── Gabagool: calculateEntryPrice (maker) ──
-function calculateEntryPrice(bid, ask, tickSize, skewTicks) {
-  if (!bid || !ask) return null;
-  var mid = f4((bid + ask) / 2);
-  var spread = f4(ask - bid);
-  var effectiveImprove = IMPROVE_TICKS + (skewTicks || 0);
-  var entryPrice;
-
-  if (spread >= 0.06) {
-    // Wide book: quote near mid
-    entryPrice = f4(mid - tickSize * Math.max(0, IMPROVE_TICKS - (skewTicks || 0)));
-  } else {
-    // Tight book: improve bid
-    entryPrice = f4(bid + tickSize * effectiveImprove);
-    entryPrice = Math.min(entryPrice, mid);
-  }
-
-  entryPrice = roundToTick(entryPrice, tickSize, 'down');
-  if (entryPrice < 0.01 || entryPrice > 0.99) return null;
-  if (entryPrice >= ask) entryPrice = f4(ask - tickSize);
-  if (entryPrice < 0.01) return null;
-
-  return f4(entryPrice);
-}
-
-// ── Gabagool: calculateShares ──
-function calculateShares(entryPrice, secondsToEnd) {
-  if (!entryPrice || entryPrice <= 0) return null;
-  // Base size = BASE_SHARES, regardless of time-to-end for 5m windows
-  var shares = BASE_SHARES;
-  if (entryPrice > 0) {
-    // Cap by QUOTE_SIZE dollars
-    var maxShares = Math.floor(QUOTE_SIZE / entryPrice);
-    shares = Math.min(shares, maxShares);
-  }
-  return Math.max(shares, 1);
-}
-
-// ── Market Discovery ──
-async function discoverMarket(pair, customWsTs) {
-  const ws_ts = customWsTs || currentWindowStart();
-  const slug = pair.toLowerCase() + '-updown-5m-' + ws_ts;
+async function discoverMarket(pair) {
+  const ws_ts = currentWindowStart();
+  const slug  = `${pair.toLowerCase()}-updown-5m-${ws_ts}`;
   if (markets[slug]) return;
 
-  var m = { slug, pair, upMid: 0, downMid: 0, upBid: null, upAsk: null, downBid: null, downAsk: null,
-    upTokenId: null, downTokenId: null, endTime: 0, windowStartMs: 0, lastPriceAt: 0, lastBookAt: 0,
-    loopRunning: false, active: false };
+  const d = await getJSON(`${GAMMA}/events?slug=${slug}`);
+  if (!Array.isArray(d) || !d[0]?.markets?.[0]) return;
 
-  const d = await getJSON(GAMMA + '/events?slug=' + slug);
-  if (!Array.isArray(d) || !d[0] || !d[0].markets || !d[0].markets[0]) return;
   const mk = d[0].markets[0];
   if (!mk.clobTokenIds) return;
 
@@ -328,606 +234,441 @@ async function discoverMarket(pair, customWsTs) {
 
   const endTime = mk.endDate ? new Date(mk.endDate).getTime() : null;
   if (!endTime) return;
-  const startTime = mk.startDate ? new Date(mk.startDate).getTime() : endTime - WINDOW_SECS * 1000;
 
-  m.upTokenId = ids[0];
-  m.downTokenId = ids[1];
-  // Use slug timestamp as windowStart (NOT the API's startDate which is wrong)
-  m.windowStartMs = ws_ts * 1000;
-  m.endTime = endTime;
-  markets[slug] = m;
+  const secsToEnd = (endTime - Date.now()) / 1000;
+  if (secsToEnd <= 0 || secsToEnd > WINDOW_SECS + 5) return;
 
-  // Subscribe to WS price updates
-  wsTokenMap[m.upTokenId] = slug;
-  wsTokenMap[m.downTokenId] = slug;
-  if (wsReady) wsSubscribe([m.upTokenId, m.downTokenId]);
+  const windowStartMs = endTime - WINDOW_SECS * 1000;
 
-  log('Discovered ' + slug + ' end=' + new Date(endTime).toTimeString().slice(0,8));
-
-  // Start trade loop if not already running
-  if (!m.loopRunning) {
-    m.loopRunning = true;
-    tradeLoop(m).catch(e => log('Loop err: ' + (e.message || '').slice(0, 80)));
+  // Skip this window if we deployed mid-window — wait for the next clean window
+  // A window is "clean" if the bot started before ENTRY_WAIT_SECS had elapsed
+  const secsIntoWindow = (BOT_START_TIME - windowStartMs) / 1000;
+  if (secsIntoWindow > ENTRY_WAIT_SECS) {
+    log(`⏭️  ${pair} deployed mid-window (${Math.floor(secsIntoWindow)}s in) — skipping, waiting for next window`);
+    return;
   }
+
+  // Cache tickSize + negRisk once at discovery — avoids per-order API calls
+  let upTickSize = '0.01', upNegRisk = false;
+  let dnTickSize = '0.01', dnNegRisk = false;
+  try {
+    [upTickSize, upNegRisk, dnTickSize, dnNegRisk] = await Promise.all([
+      trader._clob.getTickSize(ids[0]).catch(() => '0.01'),
+      trader._clob.getNegRisk(ids[0]).catch(() => false),
+      trader._clob.getTickSize(ids[1]).catch(() => '0.01'),
+      trader._clob.getNegRisk(ids[1]).catch(() => false),
+    ]);
+  } catch (_) {}
+
+  log(`🔍 ${pair} window found: ${slug} ends in ${Math.floor(secsToEnd)}s`);
+
+  markets[slug] = {
+    slug, pair,
+    upTokenId: ids[0], downTokenId: ids[1],
+    endTime, windowStartMs,
+    upMid: 0, downMid: 0, lastPriceAt: 0,
+    upBestBid: 0, upBestAsk: 0,
+    dnBestBid: 0, dnBestAsk: 0,
+    // arb state
+    arbUpBought: false, arbDownBought: false, arbEntryPrice: 0, exitStarted: false,
+    loopRunning: false, done: false,
+    upTickSize, upNegRisk, dnTickSize, dnNegRisk,
+  };
+
+  wsTokenMap[ids[0]] = slug;
+  wsTokenMap[ids[1]] = slug;
+  wsSubscribe([ids[0], ids[1]]); // triggers book snapshot immediately
+  await restRefreshPrice(markets[slug]); // seed mid before WS warms up
+
+  tradeLoop(markets[slug]).catch(e => log(`❌ Loop crash ${pair}: ${e.message}`));
 }
 
 async function discover() {
-  var ws_ts = currentWindowStart();
-  await discoverMarket('BTC', ws_ts);
-  await discoverMarket('BTC', ws_ts + WINDOW_SECS);
-}
-
-// ── Position Tracking ──
-let lastPosRefreshAt = 0;
-
-async function syncPositions() {
-  if (dryRun) return;
-  if (Date.now() - lastPosRefreshAt < 5000) return;
-  lastPosRefreshAt = Date.now();
-  try {
-    var pos = await trader._clob.getPositions(200, 0);
-    if (!Array.isArray(pos)) return;
-    // Reset all per-market share counts
-    for (var k in stratState) {
-      var ss = stratState[k];
-      var m = markets[k];
-      if (!m) continue;
-      ss.upShares = 0;
-      ss.downShares = 0;
+  await Promise.allSettled(TARGET_PAIRS.map(p => discoverMarket(p)));
+  for (const [slug, m] of Object.entries(markets)) {
+    if (Date.now() > m.endTime + 15000) {
+      delete wsTokenMap[m.upTokenId];
+      delete wsTokenMap[m.downTokenId];
+      delete markets[slug];
     }
-    // Aggregate positions by market
-    for (var p of pos) {
-      if (p.redeemable) continue;
-      var assetId = p.asset;
-      var size = parseFloat(p.size || '0');
-      if (size <= 0) continue;
-      // Find which market this token belongs to
-      for (var k in markets) {
-        var m = markets[k];
-        if (m.upTokenId === assetId) {
-          var ss = stratState[k];
-          if (ss) ss.upShares += Math.round(size);
-        }
-        if (m.downTokenId === assetId) {
-          var ss = stratState[k];
-          if (ss) ss.downShares += Math.round(size);
-        }
-      }
-    }
-  } catch (_) {}
-}
-
-// ── Check balance (dry/live) ──
-async function checkBalance() {
-  if (dryRun) return cashBalance;
-  try {
-    var b = await trader.getBalance();
-    if (b > 0) cashBalance = b;
-  } catch (_) {}
-  return cashBalance || 0;
-}
-
-// ── Gabagool: evaluate markets (main tick) ──
-async function evaluateMarket(m, ss) {
-  if (!m || !m.upTokenId || !ss || ss.done) return;
-
-  var elapsed = (Date.now() - m.windowStartMs) / 1000;
-  if (elapsed < 0 || elapsed > WINDOW_SECS + 5) return;
-
-  // Get fresh prices
-  await ensureFreshPrice(m);
-  await ensureFreshBook(m);
-
-  var upBid = m.upBid, upAsk = m.upAsk;
-  var downBid = m.downBid, downAsk = m.downAsk;
-  if (!upBid || !upAsk || !downBid || !downAsk) {
-    if (Date.now() % 5000 < 100) log('No book data for ' + m.slug + ' upBid=' + upBid + ' upAsk=' + upAsk + ' dnBid=' + downBid + ' dnAsk=' + downAsk);
-    return;
-  }
-
-  var secondsToEnd = Math.max(0, (m.endTime - Date.now()) / 1000);
-  if (secondsToEnd < MIN_SECS_TO_END || secondsToEnd > MAX_SECS_TO_END) return;
-
-  // Phase 3: Force sell
-  if (elapsed >= FORCE_SELL_AT) {
-    if (!ss._forceSold) {
-      ss._forceSold = true;
-      await forceSell(m, ss);
-    }
-    return;
-  }
-  // If window hasn't started yet, skip
-  if (elapsed < 0) return;
-
-  // Phase 2: Stop entries
-  if (elapsed >= STOP_ENTRY_AT) {
-    await cancelPendingOrders(m, ss);
-    return;
-  }
-
-  // Phase 1: Active trading
-  var [skewUp, skewDown] = calculateSkewTicks(ss);
-
-  await maybeQuoteToken(m, 'up', upBid, upAsk, downBid, downAsk, skewUp, secondsToEnd);
-  await maybeQuoteToken(m, 'down', downBid, downAsk, upBid, upAsk, skewDown, secondsToEnd);
-
-  if (FAST_TOP_UP_ENABLED) {
-    await maybeFastTopUp(m, ss, upBid, upAsk, downBid, downAsk, secondsToEnd);
   }
 }
 
-// ── Gabagool: maybeQuoteToken (maker) ──
-async function maybeQuoteToken(m, side, bid, ask, otherBid, otherAsk, skewTicks, secondsToEnd) {
-  if (!bid || !ask) return;
-  var tickSize = DEFAULT_TICK_SIZE;
+// Safe status extractor — clob client sometimes returns a plain string instead of {status, ...}
+function respStatus(resp) {
+  if (!resp) return '';
+  if (typeof resp === 'string') return resp.toLowerCase();
+  if (typeof resp.status === 'string') return resp.status.toLowerCase();
+  return '';
+}
+function respError(resp) {
+  if (!resp) return 'null response';
+  if (typeof resp === 'string') return resp.slice(0, 150);
+  return resp?.errorMsg || resp?.error || respStatus(resp) || 'unknown';
+}
 
-  // Calculate entry price
-  var entryPrice = calculateEntryPrice(bid, ask, tickSize, skewTicks);
-  if (!entryPrice) return;
+// ── Arbitrage Buy — FAK market order for one side ──
+// amount = dollars (shares × ask), price = slippage cap
+async function arbBuy(m, side) {
+  const tokenId  = side === 'up' ? m.upTokenId  : m.downTokenId;
+  const tickSize = side === 'up' ? m.upTickSize  : m.dnTickSize;
+  const negRisk  = side === 'up' ? m.upNegRisk   : m.dnNegRisk;
+  const { Side, OrderType } = require('@polymarket/clob-client-v2');
 
-  // Calculate shares
-  var shares = calculateShares(entryPrice, secondsToEnd);
-  if (!shares || shares < 1) return;
-
-  var tokenId = side === 'up' ? m.upTokenId : m.downTokenId;
-  var ss = stratState[m.slug];
-  if (!ss) return;
-
-  // Check existing order
-  var pendingKey = side === 'up' ? '_pendingUp' : '_pendingDown';
-  var pending = ss[pendingKey];
-
-  if (pending) {
-    // Check if order should be replaced (price improved enough)
-    if (Date.now() - pending.placedAt < MIN_REPLACE_MS) return;
-    var priceDiff = Math.abs(entryPrice - pending.price);
-    if (priceDiff < tickSize) return; // not enough improvement
-
-    // Cancel old order
-    await cancelOrder(side, m, ss);
+  const ask = side === 'up' ? m.upBestAsk : m.dnBestAsk;
+  if (!ask || ask <= 0) {
+    log(`⚠️  ${m.pair} ARB ${side.toUpperCase()} no ask price`);
+    return false;
   }
 
-  // Check if we already have enough shares
-  var sharesKey = side === 'up' ? 'upShares' : 'downShares';
-  if (ss[sharesKey] >= BASE_SHARES * 3) return; // cap at 3 base units
-
-  // Place GTC limit order
-  var cost = f4(shares * entryPrice);
-  var preBal = await checkBalance();
-  if (cost > preBal * 0.9) {
-    shares = Math.floor(preBal * 0.9 / entryPrice);
-    if (shares < 1) return;
-  }
-
-  if (dryRun) {
-    // Simulate fill after 3s
-    log('DEMO GTC ' + side.toUpperCase() + ' ' + shares + 'sh @ $' + f4(entryPrice) + ' (skew=' + (skewTicks || 0) + ')');
-    ss[pendingKey] = { orderId: 'demo-' + side + '-' + Date.now(), price: entryPrice, size: shares, placedAt: Date.now() };
-    ss['_pending' + (side === 'up' ? 'Up' : 'Down') + 'At'] = Date.now();
-    return;
-  }
+  const spendAmount = f4(ARB_SHARES * ask);
+  log(`🛒 ARB BUY ${side.toUpperCase()} ${ARB_SHARES}sh ~$${spendAmount} @ ${f4(ask)}`);
 
   try {
-    log('GTC ' + side.toUpperCase() + ' ' + shares + 'sh @ $' + f4(entryPrice) + ' bid=$' + f4(bid) + ' skew=' + (skewTicks || 0));
-    var result = await trader.placeGtcOrder(tokenId, 'BUY', entryPrice, shares);
-    if (result && result.id) {
-      ss[pendingKey] = { orderId: result.id, price: entryPrice, size: shares, placedAt: Date.now() };
-      ss['_pending' + (side === 'up' ? 'Up' : 'Down') + 'At'] = Date.now();
+    const resp = await trader._clob.createAndPostMarketOrder(
+      { tokenID: tokenId, side: Side.BUY, amount: spendAmount, price: ask },
+      { tickSize, negRisk },
+      OrderType.FAK
+    );
+    if (respStatus(resp) === 'matched') {
+      log(`✅ ARB BUY ${side.toUpperCase()} filled @${f4(ask)}`);
+      return true;
     }
+    log(`❌ ARB BUY ${side.toUpperCase()} not filled: ${respError(resp)}`);
+    return false;
   } catch (e) {
-    log('GTC ' + side.toUpperCase() + ' err: ' + (e.message || '').slice(0, 60));
+    log(`❌ ARB BUY ${side.toUpperCase()} error: ${e.message.slice(0, 120)}`);
+    return false;
   }
 }
 
-// ── Gabagool: maybeFastTopUp ──
-async function maybeFastTopUp(m, ss, upBid, upAsk, downBid, downAsk, secondsToEnd) {
-  if (!ss) return;
-  var imbalance = (ss.upShares || 0) - (ss.downShares || 0);
-  var absImbalance = Math.abs(imbalance);
-  if (absImbalance < FAST_TOP_UP_MIN_SHARES) return;
+// ── Arbitrage Sell — FOK market order, chases live bid each retry ──
+// amount = shares, price = live bid (refreshed every attempt)
+async function arbSell(m, side, label) {
+  const tokenId  = side === 'up' ? m.upTokenId  : m.downTokenId;
+  const tickSize = side === 'up' ? m.upTickSize  : m.dnTickSize;
+  const negRisk  = side === 'up' ? m.upNegRisk   : m.dnNegRisk;
+  const { Side, OrderType } = require('@polymarket/clob-client-v2');
 
-  // Check cooldown
-  if (ss._lastTopUpAt && Date.now() - ss._lastTopUpAt < FAST_TOP_UP_COOLDOWN_MS) return;
-
-  // Determine lagging leg (the side we have less of)
-  var laggingSide = imbalance > 0 ? 'down' : 'up';
-  var leadingSide = imbalance > 0 ? 'up' : 'down';
-
-  var lagFillAtKey = laggingSide === 'up' ? '_lastUpFillAt' : '_lastDownFillAt';
-  var leadFillAtKey = leadingSide === 'up' ? '_lastUpFillAt' : '_lastDownFillAt';
-
-  var leadFillAt = ss[leadFillAtKey];
-  if (!leadFillAt) return;
-
-  var sinceLeadFillSec = (Date.now() - leadFillAt) / 1000;
-  if (sinceLeadFillSec < FAST_TOP_UP_MIN_SHAFTER || sinceLeadFillSec > FAST_TOP_UP_MAX_SHAFTER) return;
-
-  // Check that lag hasn't filled after lead
-  var lagFillAt = ss[lagFillAtKey];
-  if (lagFillAt && lagFillAt >= leadFillAt) return;
-
-  // Check spread
-  var lagBid = laggingSide === 'up' ? upBid : downBid;
-  var lagAsk = laggingSide === 'up' ? upAsk : downAsk;
-  if (!lagBid || !lagAsk) return;
-  var spread = f4(lagAsk - lagBid);
-  if (spread > TAKER_MAX_SPREAD) return;
-
-  // Check edge for lagging leg
-  var edgeTakeLag = laggingSide === 'up'
-    ? f4(1.0 - (upAsk + downBid))
-    : f4(1.0 - (upBid + downAsk));
-  if (edgeTakeLag < FAST_TOP_UP_MIN_EDGE) return;
-
-  // Don't top-up if lagging already has a pending order
-  var pendingKey = laggingSide === 'up' ? '_pendingUp' : '_pendingDown';
-  if (ss[pendingKey]) return;
-
-  // Calculate top-up shares = absImbalance, capped at BASE_SHARES
-  var topUpShares = Math.min(absImbalance, BASE_SHARES);
-
-  // Place FOK (aggressive) at ask for the lagging leg
-  var cost = f4(topUpShares * lagAsk);
-  var preBal = await checkBalance();
-  if (cost > preBal * 0.9) return;
-
-  var lagTokenId = laggingSide === 'up' ? m.upTokenId : m.downTokenId;
-
-  log('TOP-UP ' + laggingSide.toUpperCase() + ' ' + topUpShares + 'sh @ ask $' + f4(lagAsk) + ' imbalance=' + absImbalance);
-
-  if (dryRun) {
-    // Simulate fill
-    ss[laggingSide + 'Shares'] = (ss[laggingSide + 'Shares'] || 0) + topUpShares;
-    ss[lagFillAtKey] = Date.now();
-    ss._lastTopUpAt = Date.now();
-    if (!dryRun) cashBalance -= cost;
-    log('DEMO TOP-UP filled +' + topUpShares + ' ' + laggingSide.toUpperCase());
-    logTrade('TOP-UP', laggingSide.toUpperCase(), lagAsk, topUpShares);
-    return;
-  }
-
-  try {
-    var result = await trader.placeFokBuy(lagTokenId, cost);
-    // Check if filled
-    if (result && result.isFilled) {
-      ss[laggingSide + 'Shares'] = (ss[laggingSide + 'Shares'] || 0) + topUpShares;
-      ss[lagFillAtKey] = Date.now();
-      ss._lastTopUpAt = Date.now();
-      cashBalance -= cost;
-      log('TOP-UP filled +' + topUpShares + ' ' + laggingSide.toUpperCase());
-      logTrade('TOP-UP', laggingSide.toUpperCase(), lagAsk, topUpShares);
-    } else {
-      log('TOP-UP ' + laggingSide.toUpperCase() + ' NOT filled');
+  let attempt = 0;
+  while (true) {
+    const secsLeft = (m.endTime - Date.now()) / 1000;
+    if (secsLeft < NUKE_SECS) {
+      log(`⌛ ${m.pair} ${label} SELL ${side.toUpperCase()} — deadline, letting resolve on-chain`);
+      return false;
     }
-  } catch (e) {
-    log('TOP-UP err: ' + (e.message || '').slice(0, 60));
-  }
-}
 
-// ── Cancel pending order ──
-async function cancelOrder(side, m, ss) {
-  if (!ss) return;
-  var pendingKey = side === 'up' ? '_pendingUp' : '_pendingDown';
-  var pending = ss[pendingKey];
-  if (!pending) return;
+    await ensureFreshPrice(m);
+    const bid = side === 'up'
+      ? (m.upBestBid  || m.upMid)
+      : (m.dnBestBid  || m.downMid);
 
-  if (!dryRun && pending.orderId && !pending.orderId.startsWith('demo-')) {
+    if (!bid || bid <= 0) { await sleep(SELL_RETRY_MS); continue; }
+
+    attempt++;
+    log(`📤 ${label} SELL ${side.toUpperCase()} ${ARB_SHARES}sh @ bid ${f4(bid)} — FOK #${attempt}`);
     try {
-      await trader.cancelOrder(pending.orderId);
-      log('Cancelled ' + side.toUpperCase() + ' ' + pending.orderId.slice(0, 12));
+      const resp = await trader._clob.createAndPostMarketOrder(
+        { tokenID: tokenId, side: Side.SELL, amount: ARB_SHARES, price: bid },
+        { tickSize, negRisk },
+        OrderType.FOK
+      );
+      if (respStatus(resp) === 'matched') {
+        log(`✅ ${label} SELL ${side.toUpperCase()} filled @${f4(bid)}`);
+        return true;
+      }
+      log(`🔁 ${label} SELL ${side.toUpperCase()} not filled (${respError(resp)}) — retry`);
     } catch (e) {
-      log('Cancel ' + side.toUpperCase() + ' err: ' + (e.message || '').slice(0, 60));
+      log(`⚠️  ${label} SELL ${side.toUpperCase()} error: ${e.message.slice(0, 100)}`);
     }
+    await sleep(SELL_RETRY_MS);
   }
-  ss[pendingKey] = null;
 }
 
-async function cancelPendingOrders(m, ss) {
-  if (!ss) return;
-  await cancelOrder('up', m, ss);
-  await cancelOrder('down', m, ss);
-}
+// ── Nuclear Close — at T-5s sell every open arb position, no exceptions ──
+const nukedMarkets = new Set();
 
-// ── Force sell both sides at end of window ──
-async function forceSell(m, ss) {
-  if (!ss) return;
-  log('FORCE SELL');
+async function emergencyCloseAll(m) {
+  if (nukedMarkets.has(m.slug)) return;
+  nukedMarkets.add(m.slug);
+  log(`🚨 ${m.pair} NUKE — T-${NUKE_SECS}s force-sell ALL open arb positions`);
+  const { Side, OrderType } = require('@polymarket/clob-client-v2');
 
-  // Cancel any pending GTC orders first
-  await cancelPendingOrders(m, ss);
-
-  // Sell UP shares
-  if (ss.upShares > 0) {
-    var tokenId = m.upTokenId;
-    var mid = m.upMid || m.upBid || 0;
-    var pnl = f2((mid - (ss._avgUpPrice || mid)) * ss.upShares);
-    var cost = f4(ss.upShares * mid);
-    log('SELL UP ' + ss.upShares + 'sh @ $' + f4(mid) + ' PnL: ' + (pnl >= 0 ? '+' : '') + '$' + pnl);
-
-    if (dryRun) {
-      cashBalance += cost;
-      logTrade('SELL', 'UP', mid, ss.upShares, pnl);
-      ss.upShares = 0;
-      ss._pendingUp = null;
-    } else if (ss.upShares > 0) {
-      try {
-        var r = await trader.placeFokSell(tokenId, ss.upShares);
-        if (r && r.isFilled) {
-          cashBalance += cost;
-          logTrade('SELL', 'UP', mid, ss.upShares, pnl);
-          ss.upShares = 0;
-          ss._pendingUp = null;
-        } else {
-          log('SELL UP NOT filled, will retry');
-          ss._forceRetry = Date.now() + 2000;
-        }
-      } catch (e) {
-        log('SELL UP err: ' + (e.message || '').slice(0, 60));
-        ss._forceRetry = Date.now() + 2000;
-      }
-    }
-  }
-
-  // Sell DOWN shares
-  if (ss.downShares > 0) {
-    var tokenId = m.downTokenId;
-    var mid = m.downMid || m.downBid || 0;
-    var pnl = f2((mid - (ss._avgDownPrice || mid)) * ss.downShares);
-    var cost = f4(ss.downShares * mid);
-    log('SELL DOWN ' + ss.downShares + 'sh @ $' + f4(mid) + ' PnL: ' + (pnl >= 0 ? '+' : '') + '$' + pnl);
-
-    if (dryRun) {
-      cashBalance += cost;
-      logTrade('SELL', 'DOWN', mid, ss.downShares, pnl);
-      ss.downShares = 0;
-      ss._pendingDown = null;
-    } else if (ss.downShares > 0) {
-      try {
-        var r = await trader.placeFokSell(tokenId, ss.downShares);
-        if (r && r.isFilled) {
-          cashBalance += cost;
-          logTrade('SELL', 'DOWN', mid, ss.downShares, pnl);
-          ss.downShares = 0;
-          ss._pendingDown = null;
-        } else {
-          log('SELL DOWN NOT filled, will retry');
-          ss._forceRetry = Date.now() + 2000;
-        }
-      } catch (e) {
-        log('SELL DOWN err: ' + (e.message || '').slice(0, 60));
-        ss._forceRetry = Date.now() + 2000;
-      }
-    }
-  }
-
-  ss.done = true;
-}
-
-// ── Fill monitoring via order polling ──
-async function checkPendingFills() {
-  for (var slug in markets) {
-    var m = markets[slug];
-    if (!m || !m.upTokenId) continue;
-    var ss = stratState[slug];
-    if (!ss || ss.done) continue;
-
-    // Check UP pending order
-    if (ss._pendingUp) {
-      var pending = ss._pendingUp;
-      if (pending.orderId.startsWith('demo-')) {
-        // Demo: simulate fill after 3s
-        if (Date.now() - pending.placedAt >= 3000) {
-          ss.upShares = (ss.upShares || 0) + pending.size;
-          ss._avgUpPrice = ss._avgUpPrice
-            ? f4((ss._avgUpPrice * (ss.upShares - pending.size) + pending.price * pending.size) / ss.upShares)
-            : pending.price;
-          ss._lastUpFillAt = Date.now();
-          ss._pendingUp = null;
-          log('DEMO UP FILLED +' + pending.size + 'sh @ $' + f4(pending.price) + ' total=' + ss.upShares);
-          logTrade('BUY', 'UP', pending.price, pending.size);
-        }
+  const sellSide = async (side) => {
+    const tokenId  = side === 'up' ? m.upTokenId  : m.downTokenId;
+    const tickSize = side === 'up' ? m.upTickSize  : m.dnTickSize;
+    const negRisk  = side === 'up' ? m.upNegRisk   : m.dnNegRisk;
+    let bid = side === 'up' ? (m.upBestBid || m.upMid) : (m.dnBestBid || m.downMid);
+    if (!bid || bid <= 0) { log(`⚠️  NUKE ${side.toUpperCase()} no price`); return; }
+    const floorPrice = Math.max(0.01, f4(bid * 0.80));
+    try {
+      const resp = await trader._clob.createAndPostMarketOrder(
+        { tokenID: tokenId, side: Side.SELL, amount: ARB_SHARES, price: floorPrice },
+        { tickSize, negRisk },
+        OrderType.FOK
+      );
+      const st = respStatus(resp);
+      if (st !== 'matched') {
+        // FOK failed — FAK fallback
+        const r2 = await trader._clob.createAndPostMarketOrder(
+          { tokenID: tokenId, side: Side.SELL, amount: ARB_SHARES, price: floorPrice },
+          { tickSize, negRisk },
+          OrderType.FAK
+        );
+        log(`${respStatus(r2) === 'matched' ? '✅' : '❌'} NUKE FAK ${side.toUpperCase()}: ${respError(r2)}`);
       } else {
-        // Real: check order status
-        try {
-          var order = await trader.getOrder(pending.orderId);
-          if (order) {
-            var status = (order.status || '').toLowerCase();
-            var matchStatus = (order.match_status || '').toLowerCase();
-            var filled = status === 'filled' || matchStatus === 'filled';
-            if (filled) {
-              var filledSize = parseFloat(order.size_matched || order.filled_size || pending.size);
-              ss.upShares = (ss.upShares || 0) + Math.round(filledSize);
-              ss._avgUpPrice = pending.price;
-              ss._lastUpFillAt = Date.now();
-              ss._pendingUp = null;
-              log('UP FILLED +' + Math.round(filledSize) + 'sh @ $' + f4(pending.price));
-              logTrade('BUY', 'UP', pending.price, Math.round(filledSize));
-            } else if (status === 'cancelled' || matchStatus === 'cancelled') {
-              ss._pendingUp = null;
-            }
-          }
-        } catch (_) {}
+        log(`✅ NUKE SELL ${side.toUpperCase()} cleared`);
       }
-    }
-
-    // Check DOWN pending order (same logic)
-    if (ss._pendingDown) {
-      var pending = ss._pendingDown;
-      if (pending.orderId.startsWith('demo-')) {
-        if (Date.now() - pending.placedAt >= 3000) {
-          ss.downShares = (ss.downShares || 0) + pending.size;
-          ss._avgDownPrice = ss._avgDownPrice
-            ? f4((ss._avgDownPrice * (ss.downShares - pending.size) + pending.price * pending.size) / ss.downShares)
-            : pending.price;
-          ss._lastDownFillAt = Date.now();
-          ss._pendingDown = null;
-          log('DEMO DOWN FILLED +' + pending.size + 'sh @ $' + f4(pending.price) + ' total=' + ss.downShares);
-          logTrade('BUY', 'DOWN', pending.price, pending.size);
-        }
-      } else {
-        try {
-          var order = await trader.getOrder(pending.orderId);
-          if (order) {
-            var status = (order.status || '').toLowerCase();
-            var matchStatus = (order.match_status || '').toLowerCase();
-            var filled = status === 'filled' || matchStatus === 'filled';
-            if (filled) {
-              var filledSize = parseFloat(order.size_matched || order.filled_size || pending.size);
-              ss.downShares = (ss.downShares || 0) + Math.round(filledSize);
-              ss._avgDownPrice = pending.price;
-              ss._lastDownFillAt = Date.now();
-              ss._pendingDown = null;
-              log('DOWN FILLED +' + Math.round(filledSize) + 'sh @ $' + f4(pending.price));
-              logTrade('BUY', 'DOWN', pending.price, Math.round(filledSize));
-            } else if (status === 'cancelled' || matchStatus === 'cancelled') {
-              ss._pendingDown = null;
-            }
-          }
-        } catch (_) {}
-      }
-    }
-  }
-}
-
-// ── Trade Loop (per market) ──
-async function tradeLoop(m) {
-  log('Loop ' + m.slug + ' waiting...');
-
-  if (m.windowStartMs > Date.now() + 2000) {
-    await sleep(m.windowStartMs - Date.now());
-  }
-
-  log(m.slug + ' STARTED ws=' + new Date(m.windowStartMs).toTimeString().slice(0,8) + ' end=' + new Date(m.endTime).toTimeString().slice(0,8) + ' now=' + new Date().toTimeString().slice(0,8));
-
-  var ss = {
-    upShares: 0, downShares: 0,
-    _pendingUp: null, _pendingDown: null,
-    _lastUpFillAt: null, _lastDownFillAt: null,
-    _lastTopUpAt: null, _avgUpPrice: null, _avgDownPrice: null,
-    _forceSold: false, _forceRetry: 0,
-    done: false,
+    } catch (e) { log(`❌ NUKE ${side.toUpperCase()} error: ${e.message.slice(0, 80)}`); }
   };
-  stratState[m.slug] = ss;
+
+  // Only sell sides that were actually bought in this window
+  const tasks = [];
+  if (m.arbUpBought)   tasks.push(sellSide('up'));
+  if (m.arbDownBought) tasks.push(sellSide('down'));
+  if (tasks.length) await Promise.all(tasks);
+  log(`🏁 ${m.pair} NUKE complete`);
+}
+
+// ── Core Arbitrage Loop ──
+// Strategy: watch combined ask (upAsk + downAsk). When it dips below ARB_THRESHOLD,
+// buy both sides simultaneously. Both tokens always resolve to $1.00 combined —
+// so buying at $0.97 combined = guaranteed $0.03/share profit on resolution.
+// Early exit: if combined bid rises above ARB_EXIT_PROFIT, sell both for instant profit.
+async function tradeLoop(m) {
+  if (m.loopRunning) return;
+  m.loopRunning = true;
+  log(`🚀 ${m.pair} arb loop started`);
+
+  // Wait for prices to settle after window open
+  const entryOpenAt = m.windowStartMs + ENTRY_WAIT_SECS * 1000;
+  const waitMs = entryOpenAt - Date.now();
+  if (waitMs > 0) {
+    log(`⏳ ${m.pair} waiting ${Math.ceil(waitMs / 1000)}s for prices to settle`);
+    await sleep(waitMs);
+  }
+
+  let arbCount = 0; // how many arb positions opened this window
 
   while (true) {
-    var elapsed = (Date.now() - m.windowStartMs) / 1000;
-    if (elapsed >= WINDOW_SECS + 5) break;
+    const secsLeft = (m.endTime - Date.now()) / 1000;
 
-    // Check pending fills (non-blocking order status poll)
-    await checkPendingFills();
+    if (secsLeft <= NUKE_SECS) {
+      log(`⏳ ${m.pair} T-${Math.floor(secsLeft)}s — handing to nuke`);
+      break;
+    }
+    // Start exit attempts at T-60s so we have plenty of retries before resolution
+    if (secsLeft <= 60 && (m.arbUpBought || m.arbDownBought)) {
+      if (!m.exitStarted) {
+        m.exitStarted = true;
+        log(`⏳ ${m.pair} T-${Math.floor(secsLeft)}s — starting pre-resolution exit, selling all open sides`);
+      }
+      const tasks = [];
+      if (m.arbUpBought)   tasks.push(arbSell(m, 'up',   'PRE-RES').then(ok => { if (ok) m.arbUpBought   = false; }));
+      if (m.arbDownBought) tasks.push(arbSell(m, 'down', 'PRE-RES').then(ok => { if (ok) m.arbDownBought = false; }));
+      await Promise.all(tasks);
+      if (!m.arbUpBought && !m.arbDownBought) {
+        log(`✅ ${m.pair} all positions cleared before resolution`);
+        m.done = true; break;
+      }
+      await sleep(300);
+      continue;
+    }
+    if (secsLeft <= FORCE_CLOSE_SECS) {
+      await sleep(200);
+      continue;
+    }
 
-    // Evaluate this specific market (Gabagool logic)
-    await evaluateMarket(m, ss);
+    await ensureFreshPrice(m);
 
-    await sleep(TICK_MS);
+    const upAsk   = m.upBestAsk  || m.upMid;
+    const dnAsk   = m.dnBestAsk  || m.downMid;
+    const upBid   = m.upBestBid  || m.upMid;
+    const dnBid   = m.dnBestBid  || m.downMid;
+    const combined = f4((upAsk || 0) + (dnAsk || 0));
+    const combinedBid = f4((upBid || 0) + (dnBid || 0));
+
+    if (!upAsk || !dnAsk || combined <= 0) {
+      await sleep(200);
+      continue;
+    }
+
+    // ── EARLY EXIT: if combined bid > ARB_EXIT_PROFIT, lock in profit immediately ──
+    // e.g. bought at 0.96 combined, combined bid is now 0.99 → sell both now for +$0.18
+    if (m.arbUpBought && m.arbDownBought && combinedBid >= ARB_EXIT_PROFIT) {
+      log(`💰 ${m.pair} early exit! combined bid ${f4(combinedBid)} >= ${ARB_EXIT_PROFIT} — selling both`);
+      const [soldUp, soldDn] = await Promise.all([
+        arbSell(m, 'up',   'PROFIT-EXIT'),
+        arbSell(m, 'down', 'PROFIT-EXIT'),
+      ]);
+      if (soldUp)  m.arbUpBought   = false;
+      if (soldDn)  m.arbDownBought = false;
+
+      if (!m.arbUpBought && !m.arbDownBought) {
+        const exitCombined = combinedBid;
+        const pnl = f2((exitCombined - m.arbEntryPrice) * ARB_SHARES);
+        log(`✅ ${m.pair} arb closed — entry:${f4(m.arbEntryPrice)} exit:${f4(exitCombined)} pnl:$${pnl}`);
+        trades.unshift({ ts: new Date().toTimeString().slice(0,8), pair: m.pair,
+          action: 'ARB-CLOSE', entryPrice: f4(m.arbEntryPrice), exitPrice: f4(exitCombined), pnl });
+        if (trades.length > 200) trades.length = 200;
+        // Look for another arb opportunity if time allows
+        m.arbEntryPrice = 0;
+        arbCount++;
+      }
+      await sleep(200);
+      continue;
+    }
+
+    // ── ENTRY: if combined ask < ARB_THRESHOLD and not already in a position ──
+    if (!m.arbUpBought && !m.arbDownBought && combined < ARB_THRESHOLD) {
+      // Check balance
+      let availBal = balance;
+      try { availBal = await trader.getBalance(); } catch (_) {}
+      const needed = f4(ARB_SHARES * (upAsk + dnAsk));
+      if (availBal < needed) {
+        log(`⛔ ${m.pair} arb: need $${needed} but balance $${f4(availBal)} — skip`);
+        await sleep(500);
+        continue;
+      }
+
+      log(`🎯 ${m.pair} ARB OPPORTUNITY — combined ask ${f4(combined)} < ${ARB_THRESHOLD} — buying both sides`);
+      m.arbEntryPrice = combined;
+
+      // Buy both sides simultaneously — if one fails we immediately sell the other
+      const [boughtUp, boughtDn] = await Promise.all([
+        arbBuy(m, 'up'),
+        arbBuy(m, 'down'),
+      ]);
+
+      m.arbUpBought   = boughtUp;
+      m.arbDownBought = boughtDn;
+
+      if (boughtUp && boughtDn) {
+        log(`✅ ${m.pair} BOTH sides filled @ combined ${f4(combined)} — holding for resolution or early exit`);
+        trades.unshift({ ts: new Date().toTimeString().slice(0,8), pair: m.pair,
+          action: 'ARB-OPEN', combined: f4(combined), shares: ARB_SHARES,
+          estProfit: f2((1.00 - combined) * ARB_SHARES) });
+        if (trades.length > 200) trades.length = 200;
+      } else if (boughtUp && !boughtDn) {
+        // One-sided fill — dangerous, sell UP immediately to avoid directional risk
+        log(`⚠️  ${m.pair} only UP filled — bailing, selling UP to avoid directional exposure`);
+        await arbSell(m, 'up', 'BAIL');
+        m.arbUpBought = false;
+      } else if (!boughtUp && boughtDn) {
+        log(`⚠️  ${m.pair} only DOWN filled — bailing, selling DOWN`);
+        await arbSell(m, 'down', 'BAIL');
+        m.arbDownBought = false;
+      } else {
+        log(`❌ ${m.pair} both sides failed to fill — will retry next opportunity`);
+      }
+      await sleep(500);
+      continue;
+    }
+
+    // Log opportunity scanner every 30s
+    if (!m._lastScanLog || Date.now() - m._lastScanLog >= 30000) {
+      log(`🔍 ${m.pair} scanning — combined ask:${f4(combined)} threshold:${ARB_THRESHOLD} secsLeft:${Math.floor(secsLeft)}`);
+      m._lastScanLog = Date.now();
+    }
+
+    await sleep(200); // scan 5x per second
   }
 
-  log(m.slug + ' DONE');
-  var mObj = markets[m.slug];
-  if (mObj) mObj.loopRunning = false;
+  log(`✅ ${m.pair} arb loop finished — ${arbCount} arbs executed this window`);
+  m.loopRunning = false;
 }
 
-// ── Snapshot (for dashboard) ──
+// ── Heartbeat — docs: must send every 5s or all open orders are cancelled ──
+// Chain heartbeat_id from each response; use empty string for first call
+async function sendHeartbeat() {
+  try {
+    const resp = await trader._clob.postHeartbeat(heartbeatId);
+    heartbeatId = resp?.heartbeat_id ?? resp?.id ?? heartbeatId;
+  } catch (e) {
+    log(`⚠️  Heartbeat error: ${e.message.slice(0, 60)}`);
+  }
+}
+
+// ── Main tick (discovery + heartbeat — prices come via WS) ──
+async function tick() {
+  const now = Date.now();
+
+  // Send heartbeat every 5s — docs say 10s timeout with 5s buffer
+  if (now - lastHeartbeatAt >= 5000) {
+    lastHeartbeatAt = now;
+    sendHeartbeat(); // fire-and-forget, don't await — must not block tick
+  }
+
+  if (now - lastDiscoverAt >= DISCOVER_EVERY_MS) {
+    lastDiscoverAt = now;
+    await discover();
+  }
+
+  // Nuclear close — fire emergencyCloseAll for any market at T-5s
+  // Runs independently so it catches positions even if the trade loop is mid-operation
+  for (const m of Object.values(markets)) {
+    const secsLeft = (m.endTime - Date.now()) / 1000;
+    if (secsLeft <= NUKE_SECS && secsLeft > 0 && !nukedMarkets.has(m.slug)) {
+      emergencyCloseAll(m).catch(e => log(`❌ Nuke error ${m.pair}: ${e.message}`));
+    }
+  }
+
+  emitFn('snapshot', snapshot());
+}
+
+// ── Snapshot ──
 function snapshot() {
-  const equity = calcEquity();
-  const pnl = f2(equity - startBalance);
-
-  const activeMarkets = Object.values(markets)
-    .filter(m => m.windowStartMs <= Date.now() && Date.now() < m.endTime + 30000 && m.upTokenId)
-    .map(m => {
-    var ss = stratState[m.slug] || {};
-    var elapsed = Math.max(0, (Date.now() - m.windowStartMs) / 1000);
-    var secsLeft = Math.max(0, Math.floor((m.endTime - Date.now()) / 1000));
-    var phase = 'waiting';
-    if (elapsed >= FORCE_SELL_AT) phase = 'force_sell';
-    else if (elapsed >= STOP_ENTRY_AT) phase = 'closing';
-    else if (elapsed > 0 && secsLeft < 300) phase = 'trading';
-
-    var edge = 0;
-    if (m.upBid && m.downBid) edge = f4(1.0 - (m.upBid + m.downBid));
-
-    return {
-      slug: m.slug, pair: m.pair,
-      upMid: f4(m.upMid), dnMid: f4(m.downMid),
-      upBid: f4(m.upBid || 0), upAsk: f4(m.upAsk || 0),
-      downBid: f4(m.downBid || 0), downAsk: f4(m.downAsk || 0),
-      secsLeft, elapsed: Math.floor(elapsed), phase,
-      upShares: ss.upShares || 0,
-      downShares: ss.downShares || 0,
-      hasPendingUp: !!ss._pendingUp,
-      hasPendingDown: !!ss._pendingDown,
-      edge: edge,
-      edgePct: (edge * 100).toFixed(2) + '%',
-    };
-  });
-
+  const activeMarkets = Object.values(markets).map(m => ({
+    slug: m.slug, pair: m.pair,
+    upMid: f4(m.upMid), dnMid: f4(m.downMid),
+    upAsk: f4(m.upBestAsk), dnAsk: f4(m.dnBestAsk),
+    upBid: f4(m.upBestBid), dnBid: f4(m.dnBestBid),
+    secsLeft: Math.max(0, Math.floor((m.endTime - Date.now()) / 1000)),
+    loopRunning: m.loopRunning, done: m.done,
+  }));
   return {
-    dryRun, balance: f2(equity), cashBalance: f2(cashBalance),
-    startBalance: f2(startBalance), pnl,
+    balance: f2(balance), startBalance: f2(startBalance),
+    pnl: f2(balance - startBalance),
     uptime: Math.floor((Date.now() - startTime) / 1000),
-    activeMarkets,
-    recentTrades: trades.slice(0, 100),
-    activityLog: logs.slice(0, 50),
-    strategy: { type: 'gabagool_complete_set', baseShares: BASE_SHARES, minEdge: MIN_EDGE },
+    activeMarkets, totalTrades: trades.length,
+    recentTrades: trades.slice(0, 60),
+    activityLog: logs.slice(0, 80),
+    strategy: {
+      shares: ARB_SHARES, trailingDist: TRAILING_DIST,
+      entryWaitSecs: ENTRY_WAIT_SECS, forceCloseSecs: FORCE_CLOSE_SECS,
+      minEntryPrice: MIN_ENTRY_PRICE, maxEntryPrice: MAX_ENTRY_PRICE,
+    },
   };
 }
+
+async function setDryRun() { log('⚠️  setDryRun — live-only bot, ignored'); }
+function getDryRun() { return false; }
 
 // ── Start ──
 async function start(emit, logFn) {
-  emitFn = emit || (() => {});
-  slog = logFn || (() => {});
+  emitFn = emit || (() => {}); slog = logFn || (() => {});
   startTime = Date.now();
 
   if (!process.env.POLYMARKET_PRIVATE_KEY) {
-    console.error('No private key'); process.exit(1);
+    console.error('❌ POLYMARKET_PRIVATE_KEY not set'); process.exit(1);
   }
 
   try {
     trader = new PolymarketTrader(process.env.POLYMARKET_PRIVATE_KEY);
     trader.setLogFn(log);
-    log('Authenticating...');
+    log('🔑 Authenticating…');
     await trader.authenticate();
-    log('Auth: ' + trader.address);
-    if (dryRun) { cashBalance = DEMO_BALANCE; startBalance = DEMO_BALANCE; log('DEMO $' + f2(cashBalance)); }
-    else { var b = await trader.getBalance(); if (b > 0) { cashBalance = b; startBalance = b; } log('LIVE $' + f2(cashBalance)); }
+    log(`✅ Auth: ${trader.address}`);
+    const realBal = await trader.getBalance();
+    if (realBal > 0) { balance = realBal; startBalance = realBal; }
+    log(`💰 Balance: $${f2(balance)}`);
   } catch (e) {
-    if (dryRun) { cashBalance = DEMO_BALANCE; startBalance = DEMO_BALANCE; log('DEMO $' + f2(cashBalance) + ' (auth fail)'); }
-    else { log('Auth fail: ' + e.message); process.exit(1); }
+    log(`❌ Auth failed: ${e.message}`); process.exit(1);
   }
 
   wsConnect();
-  log('Starting Gabagool engine');
-
-  // Main interval: discover markets + evaluate + emit snapshot
-  setInterval(async () => {
-    var now = Date.now();
-    if (now - lastDiscoverAt >= DISCOVER_EVERY_MS) {
-      lastDiscoverAt = now;
-      await discover();
-    }
-    emitFn('snapshot', snapshot());
-  }, TICK_MS);
+  log('🔴 LIVE — main loop started');
+  setInterval(tick, TICK_MS);
 }
-
-async function setDryRun(v) {
-  var wasDry = dryRun;
-  dryRun = !!v;
-  if (wasDry && !dryRun && trader) {
-    try {
-      var b = await trader.getBalance();
-      if (b > 0) { cashBalance = b; startBalance = b; }
-      log('Switched LIVE — balance: $' + f2(cashBalance));
-    } catch(e) { log('Live sync err: ' + e.message); }
-    // Clear all demo state
-    for (var k in stratState) delete stratState[k];
-    log('State cleared');
-  }
-  if (!wasDry && dryRun) {
-    cashBalance = DEMO_BALANCE; startBalance = DEMO_BALANCE;
-    for (var k in stratState) delete stratState[k];
-    log('Switched DEMO — balance: $' + f2(cashBalance));
-  }
-}
-function getDryRun() { return dryRun; }
 
 module.exports = { start, snapshot, setDryRun, getDryRun };
