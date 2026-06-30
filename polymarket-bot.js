@@ -292,11 +292,57 @@ async function loadMatch(slugInput) {
 // ─────────────────────────────────────────
 
 // Search Gamma's public search for events/markets matching a keyword
-// (e.g. "bitcoin up or down", "fed rate", "premier league").
+// (e.g. "bitcoin up or down", "fed rate", "premier league") — OR, if the
+// input looks like a direct Polymarket URL/slug (e.g. someone pasted
+// https://polymarket.com/event/btc-updown-15m-1782798300), fetch that
+// event directly. This matters a lot for short-lived markets (5m/15m/1h
+// crypto up-down windows named by unix timestamp) which Gamma's keyword
+// search frequently does NOT index in time, since they're created and
+// expire every few minutes.
+function looksLikeUrlOrSlug(input) {
+  const s = input.trim();
+  if (s.includes('polymarket.com')) return true;
+  // bare slug: no spaces, has at least one hyphen (e.g. btc-updown-15m-1782798300)
+  return !/\s/.test(s) && s.includes('-');
+}
+
 async function searchMarkets(query) {
   if (!query || !query.trim()) return { ok: false, error: 'Missing search query' };
+  const q = query.trim();
+
+  // 1) Direct URL/slug path — try this first since it's exact and fast.
+  if (looksLikeUrlOrSlug(q)) {
+    const slug = extractSlug(q);
+    try {
+      const event = await getJSON(`${GAMMA}/events/slug/${encodeURIComponent(slug)}`);
+      if (event && event.id) {
+        const markets = event.markets || [];
+        const results = [];
+        for (const m of markets) {
+          const tokens = parseMarketTokens(m);
+          if (!tokens.length || tokens.every(t => !t.token_id)) continue;
+          results.push({
+            eventSlug: event.slug,
+            eventTitle: event.title || event.slug,
+            marketId: m.id,
+            question: m.question || qOf(m),
+            outcomes: tokens.map(t => t.outcome),
+            endDate: event.endDate || m.endDate || null,
+          });
+        }
+        if (results.length > 0) return { ok: true, results };
+        log(`⚠️  Event "${slug}" found but has no tradable (open) markets`);
+        return { ok: false, error: `Event found but no tradable markets on it (may be closed/resolved)` };
+      }
+      // fall through to keyword search if slug lookup 404'd
+    } catch (e) {
+      log(`⚠️  Direct slug lookup failed for "${slug}": ${e.message} — falling back to keyword search`);
+    }
+  }
+
+  // 2) Keyword/full-text search path.
   try {
-    const url = `${GAMMA}/public-search?q=${encodeURIComponent(query.trim())}&limit_per_type=15&events_status=active`;
+    const url = `${GAMMA}/public-search?q=${encodeURIComponent(q)}&limit_per_type=15&events_status=active`;
     const data = await getJSON(url);
     const events = data.events || data.Events || [];
     const results = [];
