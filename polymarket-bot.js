@@ -29,9 +29,13 @@
  *     (added on top of landing block's own base/existing pool)
  *   - if price jumps multiple blocks at once, it cascades through
  *     every skipped block into the final landing block
- *   - the vacated block goes dormant (its resting orders cancelled)
- *   - if price later returns to a dormant block, it reactivates
- *     fresh at base $200 (cascaded money does NOT come back down)
+ *   - the vacated block goes dormant (its resting orders cancelled) and
+ *     is marked spent — it never gets a free re-seed again this session
+ *   - if price later returns to a spent, empty block, it is BLOCKED from
+ *     trading (no capital, no armed orders) rather than minting a new
+ *     $200; the bot's total capital is fixed and only ever moves upward
+ *   - a block only receives capital again if a still-active lower block
+ *     genuinely cascades real cash into it (not synthetic re-seeding)
  *
  *  ENDGAME:
  *   - at T-10s before match end (incl. stoppage/extra time), cancel
@@ -124,6 +128,8 @@ function freshBlock(def) {
     capital: BLOCK_SIZE,     // cash available to this block right now
     realizedPnl: 0,          // cumulative profit ever booked in this block's lineage
     active: false,
+    spent: false,             // true once this block has cascaded its capital away —
+                               // it never gets a free re-seed again (see activateBlock)
     rungs: Array.from({ length: RUNGS_PER_BLOCK }, (_, i) => ({
       offsetIdx: i + 1,        // 1..4 -> pivot - 0.01*offsetIdx
       restingOrderId: null,
@@ -570,12 +576,20 @@ async function armRung(block, rung) {
 }
 
 // Activate a block: arm all rungs that don't already have a resting order or open position.
-// If the block was dormant and fully emptied (no cash, no open positions anywhere in it),
-// it reactivates fresh at base $200 — cascaded-away money never comes back down.
+// A block only ever gets its base $200 ONCE per market session. Once it cascades that
+// capital (+ profit) upward, it's marked `spent` and is permanently blocked from trading
+// again this session — price returning to its range will NOT mint a fresh $200. The only
+// way it holds capital again is if a still-active lower block genuinely cascades real cash
+// into it, which arms it with that real amount (not a synthetic re-seed).
 async function activateBlock(block) {
   const wasDormant = !block.active;
   const hasAnyPosition = block.rungs.some(r => r.position);
+
   if (wasDormant && block.capital <= 0 && !hasAnyPosition) {
+    if (block.spent) {
+      log(`🚫 Block#${block.index} [${block.lo.toFixed(2)}-${block.hi.toFixed(2)}] blocked — capital already cascaded upward this session, not re-seeding`);
+      return; // stays inactive: no capital, no armed rungs
+    }
     block.capital = BLOCK_SIZE;
     log(`🔄 Block#${block.index} [${block.lo.toFixed(2)}-${block.hi.toFixed(2)}] reactivated fresh at base $${BLOCK_SIZE.toFixed(2)}`);
   }
@@ -684,6 +698,7 @@ async function cascadeUp(fromBlock, toBlock) {
   const moving = fromBlock.capital;
   await deactivateBlock(fromBlock);
   fromBlock.capital = 0;
+  fromBlock.spent = true; // this block's allocation has moved up for good — no free re-seed later
   toBlock.capital = round2(toBlock.capital + moving);
   log(`⬆️  CASCADE Block#${fromBlock.index} -> Block#${toBlock.index} | moved $${moving.toFixed(2)} | Block#${toBlock.index} pool now $${toBlock.capital.toFixed(2)}`);
 }
