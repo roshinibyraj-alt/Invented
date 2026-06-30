@@ -145,6 +145,15 @@ function resetAllBlocks() {
 }
 resetAllBlocks();
 
+// Wipe logs/trades/uptime so each newly-loaded market starts with a clean
+// slate — makes it easy to pull logs for just one window's activity instead
+// of it being mixed in with whatever the bot was doing on the previous market.
+function resetSession() {
+  logs = [];
+  trades = [];
+  startTime = Date.now();
+}
+
 // ─────────────────────────────────────────
 //  Logging
 // ─────────────────────────────────────────
@@ -276,6 +285,7 @@ async function loadMatch(slugInput) {
     endgameTriggered = false;
 
     resetAllBlocks();
+    resetSession();
     currentNoPrice = null;
 
     log(`✅ Match loaded: ${eventInfo.title}`);
@@ -407,6 +417,7 @@ async function loadMarket({ eventSlug, marketId, side }) {
     endgameTriggered = false;
 
     resetAllBlocks();
+    resetSession();
     currentNoPrice = null;
 
     log(`✅ Market loaded: ${eventInfo.title} — "${qOf(market)}" — trading "${side}"`);
