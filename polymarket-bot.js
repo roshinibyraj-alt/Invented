@@ -24,18 +24,21 @@
  *   - NO stop loss, ever
  *
  *  CASCADE (capital only ever moves UP, never down):
- *   - when price exits a block upward, ALL of that block's remaining
- *     cash + open-position value rolls into the landing block's pool
- *     (added on top of landing block's own base/existing pool)
+ *   - when price exits a block upward, that block's pool cascades into
+ *     the landing block's pool (added on top of landing block's own
+ *     base/existing pool)
+ *   - FIRST cascade ever for a block: its WHOLE pool (the $200 principal
+ *     + any profit already realized) moves up
+ *   - if price LATER returns to that block, it reactivates with a FRESH
+ *     $200 and trades again independently; when it cascades again, only
+ *     the PROFIT earned this round moves up — the $200 principal stays
+ *     behind in the block and is never swept upward a second time
  *   - if price jumps multiple blocks at once, it cascades through
- *     every skipped block into the final landing block
- *   - the vacated block goes dormant (its resting orders cancelled) and
- *     is marked spent — it never gets a free re-seed again this session
- *   - if price later returns to a spent, empty block, it is BLOCKED from
- *     trading (no capital, no armed orders) rather than minting a new
- *     $200; the bot's total capital is fixed and only ever moves upward
- *   - a block only receives capital again if a still-active lower block
- *     genuinely cascades real cash into it (not synthetic re-seeding)
+ *     every skipped block into the final landing block, each following
+ *     its own first-cascade/repeat-cascade rule above
+ *   - the vacated block goes dormant (its resting orders cancelled);
+ *     open positions keep living and ticking toward their own TP
+ *     independently of which block currently "owns" the cash
  *
  *  ENDGAME:
  *   - at T-10s before match end (incl. stoppage/extra time), cancel
@@ -131,8 +134,9 @@ function freshBlock(def) {
     everActivated: false,     // true once this block has actually been armed/traded —
                                // only blocks that were genuinely live can cascade their
                                // capital upward; a pristine, never-visited block must not
-    spent: false,             // true once this block has cascaded its capital away —
-                               // it never gets a free re-seed again (see activateBlock)
+    cascadedBefore: false,    // true once this block has cascaded at least once — its
+                               // first cascade moves the WHOLE pool; every cascade after
+                               // that moves PROFIT ONLY (see cascadeUp)
     rungs: Array.from({ length: RUNGS_PER_BLOCK }, (_, i) => ({
       offsetIdx: i + 1,        // 1..4 -> pivot - 0.01*offsetIdx
       restingOrderId: null,
@@ -592,18 +596,15 @@ async function armRung(block, rung) {
 // Activate a block: arm all rungs that don't already have a resting order or open position.
 // A block only ever gets its base $200 ONCE per market session. Once it cascades that
 // capital (+ profit) upward, it's marked `spent` and is permanently blocked from trading
-// again this session — price returning to its range will NOT mint a fresh $200. The only
-// way it holds capital again is if a still-active lower block genuinely cascades real cash
-// into it, which arms it with that real amount (not a synthetic re-seed).
+// again this session — price returning to its range WILL mint a fresh $200 to trade with.
+// What changes on revisit is only how much cascades upward when it exits again: the first
+// ever cascade for a block moves its whole pool (principal + profit); every cascade after
+// that moves profit only — the fresh $200 stays behind in the block (see cascadeUp).
 async function activateBlock(block) {
   const wasDormant = !block.active;
   const hasAnyPosition = block.rungs.some(r => r.position);
 
   if (wasDormant && block.capital <= 0 && !hasAnyPosition) {
-    if (block.spent) {
-      log(`🚫 Block#${block.index} [${block.lo.toFixed(2)}-${block.hi.toFixed(2)}] blocked — capital already cascaded upward this session, not re-seeding`);
-      return; // stays inactive: no capital, no armed rungs
-    }
     block.capital = BLOCK_SIZE;
     log(`🔄 Block#${block.index} [${block.lo.toFixed(2)}-${block.hi.toFixed(2)}] reactivated fresh at base $${BLOCK_SIZE.toFixed(2)}`);
   }
@@ -699,25 +700,41 @@ function blockOpenShares(block) {
   return block.rungs.reduce((sum, r) => sum + (r.position ? r.position.shares : 0), 0);
 }
 
-// Cascade: move ALL of a block's cash + open position VALUE up into target block.
-// Open positions themselves keep living (their TP orders stay resting) — only the
-// block's cash pool is what transfers; mark-to-market value is for display, but the
-// actual transferable capital is realized cash (positions remain attached to their
-// own rungs and keep ticking toward their own TP independently of which block "owns"
-// the cash). This matches "no stop loss" — we never force-liquidate to cascade.
+// Cascade: move a block's cash up into the target block. Open positions themselves
+// keep living (their TP orders stay resting) -- only the block's cash pool transfers;
+// positions remain attached to their own rungs and keep ticking toward their own TP
+// independently of which block "owns" the cash. This matches "no stop loss" -- we
+// never force-liquidate to cascade.
+//
+// First-ever cascade for a block: its WHOLE pool (the $200 principal + any profit
+// already realized into it) moves up, same as before.
+// Every cascade after that (block was revisited, reseeded fresh $200, traded again):
+// only the PROFIT earned this round moves up -- i.e. whatever the pool grew beyond
+// the fresh $200 reseed. The $200 principal itself stays behind in the block, ready
+// for next time, and is never swept upward again.
 async function cascadeUp(fromBlock, toBlock) {
   if (fromBlock.capital <= 0) {
     await deactivateBlock(fromBlock);
     return;
   }
-  const moving = fromBlock.capital;
-  await deactivateBlock(fromBlock);
-  fromBlock.capital = 0;
-  fromBlock.spent = true; // this block's allocation has moved up for good — no free re-seed later
-  toBlock.capital = round2(toBlock.capital + moving);
-  log(`⬆️  CASCADE Block#${fromBlock.index} -> Block#${toBlock.index} | moved $${moving.toFixed(2)} | Block#${toBlock.index} pool now $${toBlock.capital.toFixed(2)}`);
-}
 
+  const isFirstCascade = !fromBlock.cascadedBefore;
+  let moving;
+
+  if (isFirstCascade) {
+    moving = fromBlock.capital;
+    fromBlock.capital = 0;
+  } else {
+    const profit = round2(fromBlock.capital - BLOCK_SIZE);
+    moving = profit > 0 ? profit : 0;
+    fromBlock.capital = round2(fromBlock.capital - moving); // principal (or leftover) stays put
+  }
+
+  await deactivateBlock(fromBlock);
+  fromBlock.cascadedBefore = true;
+  toBlock.capital = round2(toBlock.capital + moving);
+  log(`⬆️  CASCADE Block#${fromBlock.index} -> Block#${toBlock.index} | moved $${moving.toFixed(2)} (${isFirstCascade ? 'first cascade: full pool' : 'repeat cascade: profit only'}) | Block#${toBlock.index} pool now $${toBlock.capital.toFixed(2)}`);
+}
 // Main per-tick block state machine
 async function processBlocks(price) {
   if (price === null) return;
