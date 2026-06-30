@@ -72,7 +72,7 @@ app.get('/', (_, res) => {
       --gold:   #b8860b;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: 'Courier New', monospace; background: var(--bg); color: var(--text); font-size: 12px; min-height: 100vh; }
+    body { font-family: 'Courier New', monospace; background: var(--bg); color: var(--text); font-size: 12px; min-height: 100vh; font-weight: bold; }
 
     .header {
       background: linear-gradient(135deg, #f0f4f8, #e4ecf5);
