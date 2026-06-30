@@ -9,36 +9,47 @@
  *          for one FIFA match. We trade the NO side exclusively.
  *          Thesis: match does NOT end in a draw.
  *
- *  CAPITAL: $2000 demo split into 10 fixed price-blocks of $200:
+ *  CAPITAL: $2000 total, hard-capped, tracked by a single shared
+ *           RESERVE plus 10 price-blocks of up to $200 each:
  *           0.01-0.10, 0.10-0.20, ... 0.90-0.99
+ *           Blocks start EMPTY. A block only ever receives cash by
+ *           drawing it from the shared reserve (capped at $200/draw)
+ *           or by a cascade transfer from another block. No code path
+ *           ever creates capital out of nothing — reserve + sum(block
+ *           cash) + sum(open position cost) == $2000 at all times.
+ *           This means total realistic risk is always exactly $2000,
+ *           never more, even across a choppy match that revisits the
+ *           same blocks many times — late-match reactivations simply
+ *           get a smaller draw (or $0) once the reserve runs dry.
  *
  *  PER-BLOCK LOGIC (while live NO price sits inside a block's range):
  *   - pivot = block midpoint (e.g. 0.40-0.50 -> pivot 0.45)
  *   - unit  = block's current capital pool / 4
  *   - 4 resting limit BUY orders at pivot-0.01, -0.02, -0.03, -0.04,
  *     each sized at `unit` dollars worth of shares
- *   - each FILL gets its own limit SELL (take-profit) at entry+0.06
+ *   - each FILL gets its own limit SELL (take-profit) at
+ *     min(entry+0.06, 0.99) — capped so the top block's rungs never
+ *     try to place an invalid >0.99 order
  *   - when a TP fills: profit returns to this block's pool, and the
  *     same rung re-arms a fresh buy order off the new (larger) pool
  *     -> continuous compounding ladder within the block
  *   - NO stop loss, ever
  *
  *  CASCADE (capital only ever moves UP, never down):
- *   - when price exits a block upward, that block's pool cascades into
- *     the landing block's pool (added on top of landing block's own
- *     base/existing pool)
- *   - FIRST cascade ever for a block: its WHOLE pool (the $200 principal
- *     + any profit already realized) moves up
- *   - if price LATER returns to that block, it reactivates with a FRESH
- *     $200 and trades again independently; when it cascades again, only
- *     the PROFIT earned this round moves up — the $200 principal stays
- *     behind in the block and is never swept upward a second time
+ *   - when price exits a block upward, that block's ENTIRE pool
+ *     (100% — principal and profit alike) cascades into the landing
+ *     block's pool, on top of whatever that block already holds —
+ *     this is the compounding engine: capital concentrates behind
+ *     wherever price currently is
  *   - if price jumps multiple blocks at once, it cascades through
- *     every skipped block into the final landing block, each following
- *     its own first-cascade/repeat-cascade rule above
- *   - the vacated block goes dormant (its resting orders cancelled);
- *     open positions keep living and ticking toward their own TP
- *     independently of which block currently "owns" the cash
+ *     every skipped block into the final landing block
+ *   - the vacated block goes dormant (its resting orders cancelled)
+ *     and its cash is gone (capital=0); open positions keep living
+ *     and ticking toward their own TP regardless of which block
+ *     currently "owns" the cash
+ *   - if price LATER returns to a now-empty block, it reactivates by
+ *     drawing a fresh draw (up to $200) from the shared reserve —
+ *     see CAPITAL above for why this can never exceed $2000 total
  *
  *  ENDGAME:
  *   - at T-10s before match end (incl. stoppage/extra time), cancel
@@ -128,15 +139,13 @@ function freshBlock(def) {
     lo: def.lo,
     hi: def.hi,
     pivot: def.pivot,
-    capital: BLOCK_SIZE,     // cash available to this block right now
+    capital: 0,               // cash available to this block right now — starts empty,
+                               // drawn from the shared reserve when first activated
     realizedPnl: 0,          // cumulative profit ever booked in this block's lineage
     active: false,
     everActivated: false,     // true once this block has actually been armed/traded —
                                // only blocks that were genuinely live can cascade their
                                // capital upward; a pristine, never-visited block must not
-    cascadedBefore: false,    // true once this block has cascaded at least once — its
-                               // first cascade moves the WHOLE pool; every cascade after
-                               // that moves PROFIT ONLY (see cascadeUp)
     rungs: Array.from({ length: RUNGS_PER_BLOCK }, (_, i) => ({
       offsetIdx: i + 1,        // 1..4 -> pivot - 0.01*offsetIdx
       restingOrderId: null,
@@ -147,8 +156,17 @@ function freshBlock(def) {
   };
 }
 
+// ── Shared capital reserve — the ONLY source of fresh cash for any block.
+// Starts at TOTAL_CAPITAL; every block draw (first activation or a later
+// reactivation after going to zero) subtracts from it, capped at BLOCK_SIZE
+// per draw. Once it hits 0, no block can be seeded further — this is what
+// guarantees the bot can never have more than $2000 genuinely at risk,
+// no matter how many times price whips back and forth across blocks.
+let reserveCapital = TOTAL_CAPITAL;
+
 function resetAllBlocks() {
   blocks = BLOCK_DEFS.map(freshBlock);
+  reserveCapital = TOTAL_CAPITAL;
 }
 resetAllBlocks();
 
@@ -593,20 +611,24 @@ async function armRung(block, rung) {
   log(`🪣 Block#${block.index} [${block.lo.toFixed(2)}-${block.hi.toFixed(2)}] rung${rung.offsetIdx} armed BUY ${shares}sh @ ${price.toFixed(2)} (unit=$${unit.toFixed(2)})`);
 }
 
-// Activate a block: arm all rungs that don't already have a resting order or open position.
-// A block only ever gets its base $200 ONCE per market session. Once it cascades that
-// capital (+ profit) upward, it's marked `spent` and is permanently blocked from trading
-// again this session — price returning to its range WILL mint a fresh $200 to trade with.
-// What changes on revisit is only how much cascades upward when it exits again: the first
-// ever cascade for a block moves its whole pool (principal + profit); every cascade after
-// that moves profit only — the fresh $200 stays behind in the block (see cascadeUp).
+// Activate a block: draw fresh cash from the shared reserve if it's currently
+// empty (true first activation, or reactivation after a prior full cascade),
+// then arm all rungs that don't already have a resting order or open position.
+// The reserve draw is capped at BLOCK_SIZE and at whatever's actually left in
+// the shared reserve — this is the only thing standing between this bot and
+// genuinely risking more than $2000 (see CAPITAL reserve note near the top).
 async function activateBlock(block) {
-  const wasDormant = !block.active;
   const hasAnyPosition = block.rungs.some(r => r.position);
 
-  if (wasDormant && block.capital <= 0 && !hasAnyPosition) {
-    block.capital = BLOCK_SIZE;
-    log(`🔄 Block#${block.index} [${block.lo.toFixed(2)}-${block.hi.toFixed(2)}] reactivated fresh at base $${BLOCK_SIZE.toFixed(2)}`);
+  if (block.capital <= 0 && !hasAnyPosition) {
+    const draw = round2(Math.min(BLOCK_SIZE, reserveCapital));
+    if (draw > 0) {
+      reserveCapital = round2(reserveCapital - draw);
+      block.capital = draw;
+      log(`🔄 Block#${block.index} [${block.lo.toFixed(2)}-${block.hi.toFixed(2)}] drew $${draw.toFixed(2)} from reserve (reserve now $${reserveCapital.toFixed(2)})`);
+    } else {
+      log(`⛔ Block#${block.index} [${block.lo.toFixed(2)}-${block.hi.toFixed(2)}] reserve exhausted — $0 available, staying unfunded`);
+    }
   }
   block.active = true;
   block.everActivated = true;
@@ -631,7 +653,7 @@ async function checkRungFill(block, rung, price) {
     rung.restingPrice = null;
     rung.restingSize = null;
 
-    const tpPrice = round2(entryPrice + TP_OFFSET);
+    const tpPrice = Math.min(round2(entryPrice + TP_OFFSET), 0.99);
     const tpOrder = await placeLimitSell(tpPrice, shares);
 
     rung.position = {
@@ -706,34 +728,26 @@ function blockOpenShares(block) {
 // independently of which block "owns" the cash. This matches "no stop loss" -- we
 // never force-liquidate to cascade.
 //
-// First-ever cascade for a block: its WHOLE pool (the $200 principal + any profit
-// already realized into it) moves up, same as before.
-// Every cascade after that (block was revisited, reseeded fresh $200, traded again):
-// only the PROFIT earned this round moves up -- i.e. whatever the pool grew beyond
-// the fresh $200 reseed. The $200 principal itself stays behind in the block, ready
-// for next time, and is never swept upward again.
+// Every cascade moves the block's ENTIRE current pool (100% — principal and any
+// profit realized into it) up into the landing block. This is the compounding
+// engine: capital concentrates fully behind wherever price currently sits. It's
+// safe to do unconditionally (no more "first cascade only" special-casing) because
+// capital is no longer minted on reactivation — if price later returns to this now-
+// empty block, activateBlock() will draw a fresh, reserve-gated amount instead (see
+// the shared reserve note near the top), so total system capital still never exceeds
+// $2000 regardless of how many times a block cascades.
 async function cascadeUp(fromBlock, toBlock) {
   if (fromBlock.capital <= 0) {
     await deactivateBlock(fromBlock);
     return;
   }
 
-  const isFirstCascade = !fromBlock.cascadedBefore;
-  let moving;
-
-  if (isFirstCascade) {
-    moving = fromBlock.capital;
-    fromBlock.capital = 0;
-  } else {
-    const profit = round2(fromBlock.capital - BLOCK_SIZE);
-    moving = profit > 0 ? profit : 0;
-    fromBlock.capital = round2(fromBlock.capital - moving); // principal (or leftover) stays put
-  }
+  const moving = fromBlock.capital;
+  fromBlock.capital = 0;
 
   await deactivateBlock(fromBlock);
-  fromBlock.cascadedBefore = true;
   toBlock.capital = round2(toBlock.capital + moving);
-  log(`⬆️  CASCADE Block#${fromBlock.index} -> Block#${toBlock.index} | moved $${moving.toFixed(2)} (${isFirstCascade ? 'first cascade: full pool' : 'repeat cascade: profit only'}) | Block#${toBlock.index} pool now $${toBlock.capital.toFixed(2)}`);
+  log(`⬆️  CASCADE Block#${fromBlock.index} -> Block#${toBlock.index} | moved $${moving.toFixed(2)} (full pool) | Block#${toBlock.index} pool now $${toBlock.capital.toFixed(2)}`);
 }
 // Main per-tick block state machine
 async function processBlocks(price) {
@@ -866,8 +880,8 @@ function buildState() {
     };
   });
 
-  const totalCash = round2(blocks.reduce((s, b) => s + b.capital, 0));
-  const totalMark = round2(blocks.reduce((s, b) => s + (price !== null ? blockMarkValue(b, price) : b.capital), 0));
+  const totalCash = round2(blocks.reduce((s, b) => s + b.capital, 0) + reserveCapital);
+  const totalMark = round2(blocks.reduce((s, b) => s + (price !== null ? blockMarkValue(b, price) : b.capital), 0) + reserveCapital);
   const totalRealized = round2(blocks.reduce((s, b) => s + b.realizedPnl, 0));
   const totalUnrealized = round2(totalMark - totalCash - blocks.reduce((s, b) => s + blockOpenShares(b), 0) * 0 + (price !== null ? blocks.reduce((s, b) => s + b.rungs.reduce((s2, r) => r.position ? s2 + (price - r.position.entryPrice) * r.position.shares : s2, 0), 0) : 0));
   const totalOpenShares = blocks.reduce((s, b) => s + blockOpenShares(b), 0);
@@ -880,6 +894,7 @@ function buildState() {
     tradeSide,
     noPrice: price,
     totalCapital: TOTAL_CAPITAL,
+    reserveCapital,
     totalCash,
     totalMarkValue: totalMark,
     totalRealizedPnl: totalRealized,
@@ -949,7 +964,7 @@ async function init(privateKey, emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
   log(`🚀 Draw-NO Block-Ladder Bot`);
-  log(`⚙️  $${TOTAL_CAPITAL} demo capital | ${NUM_BLOCKS} blocks x $${BLOCK_SIZE} | ${RUNGS_PER_BLOCK} rungs/block | TP +${TP_OFFSET}`);
+  log(`⚙️  $${TOTAL_CAPITAL} shared reserve | up to $${BLOCK_SIZE}/block draw, ${NUM_BLOCKS} blocks | ${RUNGS_PER_BLOCK} rungs/block | TP +${TP_OFFSET} (capped @0.99) | full-pool cascade`);
   log(`${DRY_RUN ? '⚠️  DRY RUN — simulated fills, real API for data/order calls' : '🔴 LIVE MODE — real money'}`);
 
   trader = new PolymarketTrader(privateKey);
