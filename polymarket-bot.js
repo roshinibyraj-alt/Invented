@@ -56,7 +56,7 @@ let MATCH_EVENT_SLUG = process.env.MATCH_SLUG || 'fifwc-ger-par-2026-06-29';
 // ── Timing ──
 const TICK_MS            = 500;
 const PRICE_REFRESH_MS   = 3_000;
-const MARKET_REFETCH_MS  = 300_000;
+const MARKET_REFETCH_MS  = 60_000;
 const ENDGAME_SECS       = 10;       // force-close window before match end
 
 // ── Strategy constants ──
@@ -258,7 +258,7 @@ async function loadMatch(slugInput) {
     drawMarket = draw;
     drawTokenId = tid;
     eventInfo = { title: event.title || event.slug, slug };
-    matchEndTime = event.endDate ? new Date(event.endDate).getTime() : null;
+    matchEndTime = sanitizeEndTime(event.endDate, draw);
     endgameTriggered = false;
 
     resetAllBlocks();
@@ -266,13 +266,77 @@ async function loadMatch(slugInput) {
 
     log(`✅ Match loaded: ${eventInfo.title}`);
     log(`🎯 Draw market: "${qOf(draw)}" | NO token: ${tid}`);
-    if (matchEndTime) log(`⏰ Match ends: ${new Date(matchEndTime).toISOString()}`);
-    else log(`⚠️  No end time on event — endgame auto-exit disabled`);
+    if (matchEndTime) log(`⏰ Match ends (est.): ${new Date(matchEndTime).toISOString()}`);
+    else log(`⚠️  No reliable end time yet — endgame auto-exit disabled until one is confirmed`);
 
     return { ok: true, title: eventInfo.title, slug };
   } catch (e) {
     log(`❌ loadMatch error: ${e.message}`);
     return { ok: false, error: e.message };
+  }
+}
+
+// ─────────────────────────────────────────
+//  Match end time — sanity-checked & periodically re-confirmed.
+//
+//  Why: Polymarket's Gamma `event.endDate` for live sports is frequently
+//  just a rough scheduled estimate (e.g. kickoff + regulation time) and
+//  does NOT account for stoppage time, extra time, delays, or postponed
+//  starts. Trusting it blindly means the moment the match goes live and
+//  real time crosses that estimate, `secsLeft` goes negative and the bot
+//  force-triggers ENDGAME immediately — then stays idle for the rest of
+//  the match (the trigger is a one-shot latch). To fix this:
+//   1. A freshly-loaded endDate that's already <= now (or within a small
+//      buffer) is treated as unreliable and discarded (-> null), so it
+//      can never arm a false-positive endgame.
+//   2. We periodically re-fetch the event while the match is loaded
+//      (MARKET_REFETCH_MS) so a *real*, updated endDate (Polymarket does
+//      push these out as matches run long) gets picked up.
+//   3. We additionally watch the draw market's own `closed` flag as a
+//      corroborating signal — only that, or a sane future endDate that
+//      has actually arrived, should ever cause the bot to stop trading.
+// ─────────────────────────────────────────
+const END_TIME_STALE_BUFFER_MS = 60_000; // ignore endDate if already <=60s old when loaded/refetched
+
+function sanitizeEndTime(rawEndDate, market) {
+  if (!rawEndDate) return null;
+  const t = new Date(rawEndDate).getTime();
+  if (!Number.isFinite(t)) return null;
+  if (t <= Date.now() + END_TIME_STALE_BUFFER_MS) {
+    // Stale/too-soon estimate (typical for in-play sports markets) — don't trust it.
+    return null;
+  }
+  return t;
+}
+
+// Re-pull the event during a live match to pick up a corrected endDate,
+// and to check whether the draw market has actually closed/resolved.
+async function refreshMatchEndTime() {
+  if (!MATCH_EVENT_SLUG) return;
+  try {
+    const event = await getJSON(`${GAMMA}/events/slug/${encodeURIComponent(MATCH_EVENT_SLUG)}`);
+    if (!event) return;
+
+    const markets = event.markets || [];
+    const draw = findDrawMarket(markets) || drawMarket;
+
+    // Corroborating hard signal: the draw market itself has actually closed.
+    if (draw && draw.closed === true && !endgameTriggered) {
+      log(`🏁 Draw market reports closed — forcing endgame exit now`);
+      matchEndTime = Date.now(); // treat as "ended right now"
+      await runEndgame();
+      return;
+    }
+
+    const newEnd = sanitizeEndTime(event.endDate, draw);
+    if (newEnd && newEnd !== matchEndTime) {
+      matchEndTime = newEnd;
+      log(`⏰ Match end time updated: ${new Date(matchEndTime).toISOString()}`);
+    } else if (!newEnd && matchEndTime === null) {
+      // still no reliable estimate — fine, we just keep trading without a timer
+    }
+  } catch (e) {
+    log(`⚠️  refreshMatchEndTime error: ${e.message}`);
   }
 }
 
@@ -646,6 +710,7 @@ async function mainLoop() {
       if (drawTokenId && now - lastMarketFetch > MARKET_REFETCH_MS) {
         // Periodically reconfirm match hasn't closed / refresh end time
         lastMarketFetch = now;
+        await refreshMatchEndTime();
       }
 
       if (drawTokenId && now - lastPriceFetch > PRICE_REFRESH_MS) {
