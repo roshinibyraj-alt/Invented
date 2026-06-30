@@ -59,7 +59,7 @@ let MATCH_EVENT_SLUG = process.env.MATCH_SLUG || 'fifwc-ger-par-2026-06-29';
 
 // ── Timing ──
 const TICK_MS            = 500;
-const PRICE_REFRESH_MS   = 3_000;
+const PRICE_REFRESH_MS   = 500;
 const MARKET_REFETCH_MS  = 60_000;
 const ENDGAME_SECS       = 10;       // force-close window before match end
 
