@@ -225,6 +225,7 @@ app.get('/', (_, res) => {
   <div class="stat"><div class="stat-label">Realized P&L</div><div class="stat-val" id="realized-pnl">—</div><div class="stat-sub">booked</div></div>
   <div class="stat"><div class="stat-label">Unrealized P&L</div><div class="stat-val" id="unrealized-pnl">—</div><div class="stat-sub">open positions</div></div>
   <div class="stat"><div class="stat-label">Cash (unallocated)</div><div class="stat-val c-gold" id="total-cash">—</div><div class="stat-sub" id="open-shares">— open shares</div></div>
+  <div class="stat"><div class="stat-label">Reserve (undrawn)</div><div class="stat-val c-gold" id="reserve-cap">—</div><div class="stat-sub">never-deployed $2000</div></div>
   <div class="stat"><div class="stat-label">Match Ends In</div><div class="stat-val c-yellow" id="secs-to-end">—</div><div class="stat-sub">seconds</div></div>
   <div class="stat"><div class="stat-label">Uptime</div><div class="stat-val" id="uptime">—</div><div class="stat-sub">hh:mm:ss</div></div>
 </div>
@@ -379,6 +380,7 @@ app.get('/', (_, res) => {
     unrelEl.textContent = sgn(s.totalUnrealizedPnl||0);
     unrelEl.className = 'stat-val '+pClass(s.totalUnrealizedPnl);
     document.getElementById('total-cash').textContent = '$'+(s.totalCash||0).toFixed(2);
+    document.getElementById('reserve-cap').textContent = '$'+(s.reserveCapital||0).toFixed(2);
     document.getElementById('open-shares').textContent = (s.totalOpenShares||0).toFixed(2)+' open shares';
     document.getElementById('secs-to-end').textContent = (s.secsToEnd!==null && s.secsToEnd!==undefined) ? s.secsToEnd+'s' : '—';
     document.getElementById('uptime').textContent = fmt(s.uptime||0);
