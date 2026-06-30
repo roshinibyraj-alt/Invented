@@ -777,7 +777,11 @@ async function processBlocks(price) {
 async function runEndgame() {
   if (endgameTriggered) return;
   endgameTriggered = true;
-  log(`🚨 ENDGAME — cancelling all resting orders, exiting all positions @ ${ENDGAME_EXIT_PRICE}`);
+  // Exit at the actual live price, not a fixed constant — if the traded side
+  // lost, price will be sitting near 0.01 and the position must close near
+  // worthless, not get marked at a fictitious 0.99 "win" price.
+  const exitPrice = currentNoPrice !== null ? currentNoPrice : ENDGAME_EXIT_PRICE;
+  log(`🚨 ENDGAME — cancelling all resting orders, exiting all positions @ ${exitPrice}`);
   for (const block of blocks) {
     for (const rung of block.rungs) {
       if (rung.restingOrderId) {
@@ -789,17 +793,17 @@ async function runEndgame() {
       if (rung.position) {
         const { shares, entryPrice, cost, tpOrderId } = rung.position;
         await cancelOrder(tpOrderId);
-        const order = await placeLimitSell(ENDGAME_EXIT_PRICE, shares);
-        const proceeds = round2(ENDGAME_EXIT_PRICE * shares);
+        const order = await placeLimitSell(exitPrice, shares);
+        const proceeds = round2(exitPrice * shares);
         const profit = round2(proceeds - cost);
         block.capital = round2(block.capital + proceeds);
         block.realizedPnl = round2(block.realizedPnl + profit);
-        log(`🏁 ENDGAME EXIT Block#${block.index} rung${rung.offsetIdx} SELL ${shares}sh @ ${ENDGAME_EXIT_PRICE} | entry=${entryPrice.toFixed(2)} | profit=$${profit.toFixed(2)} | orderId=${order.id || order.orderId || 'n/a'}`);
+        log(`🏁 ENDGAME EXIT Block#${block.index} rung${rung.offsetIdx} SELL ${shares}sh @ ${exitPrice.toFixed(2)} | entry=${entryPrice.toFixed(2)} | profit=$${profit.toFixed(2)} | orderId=${order.id || order.orderId || 'n/a'}`);
         trades.push({
           time: new Date().toISOString().slice(11, 19),
           block: block.index,
           side: 'SELL_ENDGAME',
-          price: ENDGAME_EXIT_PRICE,
+          price: exitPrice,
           shares,
           profit,
         });
