@@ -128,6 +128,9 @@ function freshBlock(def) {
     capital: BLOCK_SIZE,     // cash available to this block right now
     realizedPnl: 0,          // cumulative profit ever booked in this block's lineage
     active: false,
+    everActivated: false,     // true once this block has actually been armed/traded —
+                               // only blocks that were genuinely live can cascade their
+                               // capital upward; a pristine, never-visited block must not
     spent: false,             // true once this block has cascaded its capital away —
                                // it never gets a free re-seed again (see activateBlock)
     rungs: Array.from({ length: RUNGS_PER_BLOCK }, (_, i) => ({
@@ -605,6 +608,7 @@ async function activateBlock(block) {
     log(`🔄 Block#${block.index} [${block.lo.toFixed(2)}-${block.hi.toFixed(2)}] reactivated fresh at base $${BLOCK_SIZE.toFixed(2)}`);
   }
   block.active = true;
+  block.everActivated = true;
   for (const rung of block.rungs) {
     if (!rung.position && !rung.restingOrderId) {
       await armRung(block, rung);
@@ -734,9 +738,12 @@ async function processBlocks(price) {
     const isTarget = block.index === targetIdx;
 
     if (isTarget && !block.active) {
-      // Cascade money up from every lower block that's currently active/holding cash
+      // Cascade money up from every lower block that's currently active, or was
+      // genuinely traded before and still holds leftover cash. Blocks that were
+      // never activated keep their default $200 reserved and do NOT cascade —
+      // they only get pulled in once price actually visits them.
       for (const lower of blocks) {
-        if (lower.index < block.index && (lower.active || lower.capital > 0)) {
+        if (lower.index < block.index && (lower.active || (lower.everActivated && lower.capital > 0))) {
           await cascadeUp(lower, block);
         }
       }
