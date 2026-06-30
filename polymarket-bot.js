@@ -108,6 +108,7 @@ let drawMarket     = null;
 let currentNoPrice = null;
 let endgameTriggered = false;
 let eventInfo      = { title: null, slug: MATCH_EVENT_SLUG };
+let tradeSide      = 'No'; // generic: which outcome label we're trading (No/Yes/Up/Down/etc.)
 
 // Each block: { index, lo, hi, pivot, capital (cash, unallocated),
 //   active (bool), rungs: [ {offsetIdx, restingOrderId, restingPrice,
@@ -213,11 +214,17 @@ function parseMarketTokens(m) {
   }
 }
 
+// Return the token_id for a given outcome label (e.g. "No", "Yes", "Up", "Down") - generic
+function tokenIdForSide(market, side) {
+  const tokens = parseMarketTokens(market);
+  const want = (side || '').trim().toLowerCase();
+  const tok = tokens.find(t => (t.outcome || '').toLowerCase() === want);
+  return tok?.token_id || null;
+}
+
 // Return the NO token_id from a Gamma market, or null
 function noTokenIdFromMarket(m) {
-  const tokens = parseMarketTokens(m);
-  const noTok = tokens.find(t => (t.outcome || '').toLowerCase() === 'no');
-  return noTok?.token_id || null;
+  return tokenIdForSide(m, 'no');
 }
 
 function findDrawMarket(markets) {
@@ -257,6 +264,7 @@ async function loadMatch(slugInput) {
 
     drawMarket = draw;
     drawTokenId = tid;
+    tradeSide = 'No';
     eventInfo = { title: event.title || event.slug, slug };
     matchEndTime = sanitizeEndTime(event.endDate, draw);
     endgameTriggered = false;
@@ -272,6 +280,91 @@ async function loadMatch(slugInput) {
     return { ok: true, title: eventInfo.title, slug };
   } catch (e) {
     log(`❌ loadMatch error: ${e.message}`);
+    return { ok: false, error: e.message };
+  }
+}
+
+// ─────────────────────────────────────────
+//  GENERIC MARKET DISCOVERY & SELECTION
+//  Lets the dashboard search ANY Polymarket market (crypto up/down,
+//  generic Yes/No, etc.) — not just the soccer "Draw" sub-market —
+//  and lets the user pick which side (outcome label) to trade.
+// ─────────────────────────────────────────
+
+// Search Gamma's public search for events/markets matching a keyword
+// (e.g. "bitcoin up or down", "fed rate", "premier league").
+async function searchMarkets(query) {
+  if (!query || !query.trim()) return { ok: false, error: 'Missing search query' };
+  try {
+    const url = `${GAMMA}/public-search?q=${encodeURIComponent(query.trim())}&limit_per_type=15&events_status=active`;
+    const data = await getJSON(url);
+    const events = data.events || data.Events || [];
+    const results = [];
+
+    for (const ev of events) {
+      const markets = ev.markets || ev.Markets || [];
+      for (const m of markets) {
+        const tokens = parseMarketTokens(m);
+        if (!tokens.length || tokens.every(t => !t.token_id)) continue; // not tradable
+        if (m.closed === true || m.active === false) continue;
+        results.push({
+          eventSlug: ev.slug,
+          eventTitle: ev.title || ev.slug,
+          marketId: m.id,
+          question: m.question || qOf(m),
+          outcomes: tokens.map(t => t.outcome),
+          endDate: ev.endDate || m.endDate || null,
+        });
+      }
+    }
+    return { ok: true, results: results.slice(0, 40) };
+  } catch (e) {
+    log(`❌ searchMarkets error: ${e.message}`);
+    return { ok: false, error: e.message };
+  }
+}
+
+// Load any market by event slug + market id, trading the chosen outcome side.
+// Reuses the exact same shared state (drawMarket/drawTokenId/matchEndTime/etc.)
+// that the block-ladder engine already operates on — it's agnostic to what
+// the underlying market actually is.
+async function loadMarket({ eventSlug, marketId, side }) {
+  if (!eventSlug) return { ok: false, error: 'Missing eventSlug' };
+  if (!side) return { ok: false, error: 'Missing side (e.g. "Yes", "No", "Up", "Down")' };
+  try {
+    const event = await getJSON(`${GAMMA}/events/slug/${encodeURIComponent(eventSlug)}`);
+    if (!event || !event.id) return { ok: false, error: 'Event not found' };
+
+    const markets = event.markets || [];
+    let market = marketId ? markets.find(m => String(m.id) === String(marketId)) : null;
+    if (!market && markets.length === 1) market = markets[0];
+    if (!market) return { ok: false, error: 'Market not found in event — pass marketId from search results' };
+
+    const tid = tokenIdForSide(market, side);
+    if (!tid) {
+      const tokens = parseMarketTokens(market);
+      return { ok: false, error: `Side "${side}" not found. Available outcomes: ${tokens.map(t => t.outcome).join(', ')}` };
+    }
+
+    MATCH_EVENT_SLUG = eventSlug;
+    drawMarket = market;
+    drawTokenId = tid;
+    tradeSide = side;
+    eventInfo = { title: event.title || event.slug, slug: eventSlug };
+    matchEndTime = sanitizeEndTime(event.endDate, market);
+    endgameTriggered = false;
+
+    resetAllBlocks();
+    currentNoPrice = null;
+
+    log(`✅ Market loaded: ${eventInfo.title} — "${qOf(market)}" — trading "${side}"`);
+    log(`🎯 Token: ${tid}`);
+    if (matchEndTime) log(`⏰ Resolves (est.): ${new Date(matchEndTime).toISOString()}`);
+    else log(`⚠️  No reliable end time yet — endgame auto-exit disabled until confirmed`);
+
+    return { ok: true, title: eventInfo.title, slug: eventSlug, side, question: qOf(market) };
+  } catch (e) {
+    log(`❌ loadMarket error: ${e.message}`);
     return { ok: false, error: e.message };
   }
 }
@@ -318,7 +411,9 @@ async function refreshMatchEndTime() {
     if (!event) return;
 
     const markets = event.markets || [];
-    const draw = findDrawMarket(markets) || drawMarket;
+    const draw = (drawMarket && markets.find(m => String(m.id) === String(drawMarket.id)))
+              || findDrawMarket(markets)
+              || drawMarket;
 
     // Corroborating hard signal: the draw market itself has actually closed.
     if (draw && draw.closed === true && !endgameTriggered) {
@@ -681,6 +776,8 @@ function buildState() {
     dryRun: DRY_RUN,
     eventSlug: MATCH_EVENT_SLUG,
     eventTitle: eventInfo.title,
+    question: drawMarket ? qOf(drawMarket) : null,
+    tradeSide,
     noPrice: price,
     totalCapital: TOTAL_CAPITAL,
     totalCash,
@@ -765,4 +862,4 @@ async function init(privateKey, emit, slogFn) {
   mainLoop().catch(e => log(`❌ Fatal: ${e.message}`));
 }
 
-module.exports = { init, searchMatch };
+module.exports = { init, searchMatch, searchMarkets, loadMarket };
