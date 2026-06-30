@@ -26,6 +26,28 @@ app.post('/api/search-match', async (req, res) => {
   }
 });
 
+app.get('/api/search-markets', async (req, res) => {
+  const q = req.query.q;
+  if (!q) return res.status(400).json({ ok: false, error: 'Missing q' });
+  try {
+    const result = await bot.searchMarkets(q);
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.post('/api/load-market', async (req, res) => {
+  const { eventSlug, marketId, side } = req.body || {};
+  if (!eventSlug || !side) return res.status(400).json({ ok: false, error: 'Missing eventSlug or side' });
+  try {
+    const result = await bot.loadMarket({ eventSlug, marketId, side });
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 app.get('/', (_, res) => {
   res.send(`<!DOCTYPE html>
 <html lang="en">
@@ -154,6 +176,19 @@ app.get('/', (_, res) => {
     .c-yellow { color: var(--yellow) !important; }
     .c-gold   { color: var(--gold) !important; }
     .c-purple { color: var(--purple) !important; }
+
+    .market-card {
+      background: var(--bg2); border: 1px solid var(--border); border-radius: 8px;
+      padding: 8px 12px; margin-bottom: 6px;
+    }
+    .market-card-q { font-size: 11px; color: var(--text); margin-bottom: 6px; }
+    .market-card-event { font-size: 9px; color: var(--muted); margin-bottom: 6px; }
+    .side-btn {
+      background: var(--bg3); border: 1px solid var(--border); color: var(--cyan);
+      padding: 4px 10px; border-radius: 6px; font-size: 10px; font-family: inherit;
+      cursor: pointer; margin-right: 6px; margin-bottom: 4px;
+    }
+    .side-btn:hover { background: var(--cyan); color: #001018; }
   </style>
 </head>
 <body>
@@ -176,6 +211,13 @@ app.get('/', (_, res) => {
 </div>
 <div class="search-status" id="search-status"></div>
 
+<div class="search-bar" style="margin-top:6px">
+  <input id="market-q" type="text" placeholder="Or search ANY market — e.g. 'bitcoin up or down', 'fed rate', 'premier league'…">
+  <button id="market-search-btn">Find Markets</button>
+</div>
+<div class="search-status" id="market-search-status"></div>
+<div id="market-results" style="padding:0 20px 6px"></div>
+
 <!-- Stats -->
 <div class="stats-row">
   <div class="stat"><div class="stat-label">Total Capital</div><div class="stat-val c-cyan" id="total-mark">—</div><div class="stat-sub">mark-to-market</div></div>
@@ -190,7 +232,8 @@ app.get('/', (_, res) => {
 <!-- Match bar -->
 <div class="match-bar">
   <div class="match-bar-item"><span class="match-bar-label">Event:</span><span class="match-bar-val" id="bar-title">—</span></div>
-  <div class="match-bar-item"><span class="match-bar-label">NO Price:</span><span class="match-bar-val" id="bar-price">—</span></div>
+  <div class="match-bar-item"><span class="match-bar-label">Side:</span><span class="match-bar-val" id="bar-side">—</span></div>
+  <div class="match-bar-item"><span class="match-bar-label">Price:</span><span class="match-bar-val" id="bar-price">—</span></div>
   <div class="match-bar-item"><span class="match-bar-label">Active Block:</span><span class="match-bar-val" id="bar-active-block">—</span></div>
   <div class="match-bar-item"><span class="match-bar-label">End Time:</span><span class="match-bar-val" id="bar-endtime">—</span></div>
   <div class="match-bar-item" id="endgame-flag" style="display:none"><span class="match-bar-val c-red">🚨 ENDGAME TRIGGERED</span></div>
@@ -255,6 +298,75 @@ app.get('/', (_, res) => {
     }
   });
 
+  async function runMarketSearch() {
+    const q = document.getElementById('market-q').value.trim();
+    const statusEl = document.getElementById('market-search-status');
+    const resultsEl = document.getElementById('market-results');
+    if (!q) return;
+    statusEl.textContent = 'Searching…';
+    statusEl.className = 'search-status';
+    resultsEl.innerHTML = '';
+    try {
+      const res = await fetch('/api/search-markets?q=' + encodeURIComponent(q));
+      const data = await res.json();
+      if (!data.ok) {
+        statusEl.textContent = '❌ ' + (data.error || 'Search failed');
+        statusEl.className = 'search-status err';
+        return;
+      }
+      if (!data.results || data.results.length === 0) {
+        statusEl.textContent = 'No tradable markets found for "' + q + '"';
+        statusEl.className = 'search-status';
+        return;
+      }
+      statusEl.textContent = data.results.length + ' market(s) found — pick a side to start trading it:';
+      statusEl.className = 'search-status ok';
+      resultsEl.innerHTML = data.results.map((m, i) => {
+        const sideBtns = m.outcomes.map(o =>
+          '<button class="side-btn" data-i="' + i + '" data-side="' + o + '">Trade ' + o + '</button>'
+        ).join('');
+        return '<div class="market-card">' +
+          '<div class="market-card-event">' + m.eventTitle + '</div>' +
+          '<div class="market-card-q">' + m.question + '</div>' +
+          sideBtns +
+          '</div>';
+      }).join('');
+
+      resultsEl.querySelectorAll('.side-btn').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const m = data.results[parseInt(btn.dataset.i, 10)];
+          const side = btn.dataset.side;
+          statusEl.textContent = 'Loading "' + m.question + '" — trading ' + side + '…';
+          statusEl.className = 'search-status';
+          try {
+            const r = await fetch('/api/load-market', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ eventSlug: m.eventSlug, marketId: m.marketId, side })
+            });
+            const d = await r.json();
+            if (d.ok) {
+              statusEl.textContent = '✅ Now trading ' + side + ' on: ' + d.question;
+              statusEl.className = 'search-status ok';
+              resultsEl.innerHTML = '';
+            } else {
+              statusEl.textContent = '❌ ' + (d.error || 'Failed to load market');
+              statusEl.className = 'search-status err';
+            }
+          } catch (e) {
+            statusEl.textContent = '❌ ' + e.message;
+            statusEl.className = 'search-status err';
+          }
+        });
+      });
+    } catch (e) {
+      statusEl.textContent = '❌ ' + e.message;
+      statusEl.className = 'search-status err';
+    }
+  }
+  document.getElementById('market-search-btn').addEventListener('click', runMarketSearch);
+  document.getElementById('market-q').addEventListener('keydown', e => { if (e.key === 'Enter') runMarketSearch(); });
+
   socket.on('state', s => {
     document.getElementById('total-mark').textContent = '$'+(s.totalMarkValue||0).toFixed(2);
     const pnlEl = document.getElementById('total-pnl');
@@ -273,6 +385,7 @@ app.get('/', (_, res) => {
     document.getElementById('price-tag').textContent = 'NO price '+(s.noPrice!==null ? s.noPrice.toFixed(3) : '—');
     document.getElementById('match-slug').textContent = s.eventTitle || s.eventSlug || '—';
     document.getElementById('bar-title').textContent = s.eventTitle || s.eventSlug || '—';
+    document.getElementById('bar-side').textContent = s.tradeSide || '—';
     document.getElementById('bar-price').textContent = s.noPrice!==null ? s.noPrice.toFixed(3) : '—';
     document.getElementById('bar-endtime').textContent = s.matchEndTime ? s.matchEndTime.slice(0,19).replace('T',' ')+'Z' : 'unknown';
     document.getElementById('endgame-flag').style.display = s.endgameTriggered ? '' : 'none';
