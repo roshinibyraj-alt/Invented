@@ -10,17 +10,17 @@
  *          Thesis: match does NOT end in a draw.
  *
  *  CAPITAL: $2000 total, hard-capped, tracked by a single shared
- *           RESERVE plus 10 price-blocks of up to $200 each:
- *           0.01-0.10, 0.10-0.20, ... 0.90-0.99
- *           Blocks start EMPTY. A block only ever receives cash by
- *           drawing it from the shared reserve (capped at $200/draw)
- *           or by a cascade transfer from another block. No code path
- *           ever creates capital out of nothing — reserve + sum(block
- *           cash) + sum(open position cost) == $2000 at all times.
- *           This means total realistic risk is always exactly $2000,
- *           never more, even across a choppy match that revisits the
- *           same blocks many times — late-match reactivations simply
- *           get a smaller draw (or $0) once the reserve runs dry.
+ *           RESERVE plus 10 price-blocks. AGGRESSIVE_FULL_DRAW=true means
+ *           whichever block price is currently in draws the ENTIRE
+ *           remaining reserve when activated (not capped at $200) — all
+ *           uncommitted capital concentrates at the current price. Blocks
+ *           start EMPTY. A block only ever receives cash by drawing it
+ *           from the shared reserve or by a cascade transfer from another
+ *           block. No code path ever creates capital out of nothing —
+ *           reserve + sum(block cash) + sum(open position cost) == $2000
+ *           at all times. Total realistic risk is always exactly $2000:
+ *           if the traded side loses, all of it can go to zero; there is
+ *           no floor and no stop loss anywhere in this strategy.
  *
  *  PER-BLOCK LOGIC (while live NO price sits inside a block's range):
  *   - pivot = block midpoint (e.g. 0.40-0.50 -> pivot 0.45)
@@ -80,11 +80,21 @@ const ENDGAME_SECS       = 10;       // force-close window before match end
 // ── Strategy constants ──
 const TOTAL_CAPITAL   = 2000;
 const NUM_BLOCKS      = 10;
-const BLOCK_SIZE       = TOTAL_CAPITAL / NUM_BLOCKS; // $200
-const RUNGS_PER_BLOCK  = 4;
-const RUNG_OFFSET      = 0.01;   // pivot - 0.01, -0.02, -0.03, -0.04
+const BLOCK_SIZE       = TOTAL_CAPITAL / NUM_BLOCKS; // $200 — reference size only now;
+                                                       // see AGGRESSIVE_FULL_DRAW below
+const RUNGS_PER_BLOCK  = 6;
+const RUNG_OFFSET      = 0.01;   // pivot - 0.01, -0.02, ... -0.06
 const TP_OFFSET        = 0.06;   // entry + 0.06
 const ENDGAME_EXIT_PRICE = 0.99;
+
+// ── AGGRESSIVE COMPOUNDING MODE ──
+// true  = whichever block price is currently sitting in draws the ENTIRE
+//         remaining reserve (not capped at $200/block). Capital concentrates
+//         hard behind wherever price is right now — bigger position sizes,
+//         faster compounding if the trend continues, and if the match ends
+//         with the traded side losing, the full $2000 goes down with it.
+// false = conservative $200/block draw (the old behavior).
+const AGGRESSIVE_FULL_DRAW = true;
 
 // ── Env ──
 const DRY_RUN = (process.env.DRY_RUN || 'true').toLowerCase() === 'true';
@@ -621,7 +631,7 @@ async function activateBlock(block) {
   const hasAnyPosition = block.rungs.some(r => r.position);
 
   if (block.capital <= 0 && !hasAnyPosition) {
-    const draw = round2(Math.min(BLOCK_SIZE, reserveCapital));
+    const draw = round2(AGGRESSIVE_FULL_DRAW ? reserveCapital : Math.min(BLOCK_SIZE, reserveCapital));
     if (draw > 0) {
       reserveCapital = round2(reserveCapital - draw);
       block.capital = draw;
@@ -888,6 +898,15 @@ function buildState() {
 
   return {
     dryRun: DRY_RUN,
+    strategy: {
+      aggressiveFullDraw: AGGRESSIVE_FULL_DRAW,
+      rungsPerBlock: RUNGS_PER_BLOCK,
+      rungOffset: RUNG_OFFSET,
+      tpOffset: TP_OFFSET,
+      numBlocks: NUM_BLOCKS,
+      cascadeMode: 'full-pool every time',
+      stopLoss: 'none',
+    },
     eventSlug: MATCH_EVENT_SLUG,
     eventTitle: eventInfo.title,
     question: drawMarket ? qOf(drawMarket) : null,
@@ -964,7 +983,7 @@ async function init(privateKey, emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
   log(`🚀 Draw-NO Block-Ladder Bot`);
-  log(`⚙️  $${TOTAL_CAPITAL} shared reserve | up to $${BLOCK_SIZE}/block draw, ${NUM_BLOCKS} blocks | ${RUNGS_PER_BLOCK} rungs/block | TP +${TP_OFFSET} (capped @0.99) | full-pool cascade`);
+  log(`⚙️  $${TOTAL_CAPITAL} shared reserve | ${AGGRESSIVE_FULL_DRAW ? 'AGGRESSIVE full-reserve draw per block' : `up to $${BLOCK_SIZE}/block draw`} | ${NUM_BLOCKS} blocks | ${RUNGS_PER_BLOCK} rungs/block | TP +${TP_OFFSET} (capped @0.99) | full-pool cascade`);
   log(`${DRY_RUN ? '⚠️  DRY RUN — simulated fills, real API for data/order calls' : '🔴 LIVE MODE — real money'}`);
 
   trader = new PolymarketTrader(privateKey);
