@@ -95,6 +95,14 @@ app.get('/', (_, res) => {
   .logs-wrap { background: #0d1420; border: 1px solid var(--border); border-radius: 10px; padding: 10px; max-height: 320px; overflow-y: auto; font-size: 10px; }
   .logs-wrap div { padding: 1px 0; }
   .empty { padding: 20px; text-align: center; color: var(--muted); font-size: 10px; }
+  .equity-wrap { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin: 0 20px 14px; }
+  .equity-hdr { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; }
+  .equity-hdr .title { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; }
+  .equity-hdr .val { font-size: 13px; }
+  .equity-svg { width: 100%; height: 90px; display: block; }
+  .spark-box { margin-top: 6px; }
+  .spark-box svg { width: 100%; height: 34px; display: block; }
+  .spark-label { font-size: 8px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-top: 4px; }
 </style>
 </head>
 <body>
@@ -120,6 +128,14 @@ app.get('/', (_, res) => {
     <div class="stat"><div class="stat-label">Win Rate</div><div class="stat-val" id="win-rate">—</div><div class="stat-sub" id="win-loss-sub">0W / 0L</div></div>
     <div class="stat"><div class="stat-label">Uptime</div><div class="stat-val" id="uptime">0s</div></div>
     <div class="stat"><div class="stat-label">Trading</div><div class="stat-val" id="trading-flag">—</div></div>
+  </div>
+
+  <div class="equity-wrap">
+    <div class="equity-hdr">
+      <div class="title">Portfolio Equity Curve</div>
+      <div class="val" id="equity-val">$2000.00</div>
+    </div>
+    <svg id="equity-chart" class="equity-svg" viewBox="0 0 600 90" preserveAspectRatio="none"></svg>
   </div>
 
   <div class="section">
@@ -150,6 +166,37 @@ app.get('/', (_, res) => {
   function pClass(n) { return (n || 0) >= 0 ? 'pnl-pos' : 'pnl-neg'; }
   function fmt(s) { const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), ss = s%60; return (h?h+'h ':'')+(m?m+'m ':'')+ss+'s'; }
   function fmtSecs(s) { if (s === null || s === undefined) return '—'; const m = Math.floor(s/60), ss = s%60; return m+'m '+String(ss).padStart(2,'0')+'s'; }
+
+  // Build an SVG polyline + fill path from an equity curve [{t,equity}],
+  // normalized into a viewBox of width x height. Color reflects whether
+  // the curve ended up from where it started.
+  function buildEquitySvg(points, width, height, startVal) {
+    if (!points || points.length < 2) {
+      return '<line x1="0" y1="'+(height/2)+'" x2="'+width+'" y2="'+(height/2)+'" stroke="#3a4a60" stroke-width="1" stroke-dasharray="3,3"/>';
+    }
+    const vals = points.map(p => p.equity);
+    let min = Math.min(...vals, startVal != null ? startVal : vals[0]);
+    let max = Math.max(...vals, startVal != null ? startVal : vals[0]);
+    if (max - min < 0.01) { max += 1; min -= 1; }
+    const n = points.length;
+    const coords = points.map((p, i) => {
+      const x = (i / (n - 1)) * width;
+      const y = height - ((p.equity - min) / (max - min)) * height;
+      return [x, y];
+    });
+    const up = vals[vals.length - 1] >= vals[0];
+    const color = up ? '#00c853' : '#ff4757';
+    const linePath = 'M' + coords.map(c => c[0].toFixed(1)+','+c[1].toFixed(1)).join(' L');
+    const fillPath = linePath + ' L' + width + ',' + height + ' L0,' + height + ' Z';
+    let baseline = '';
+    if (startVal != null) {
+      const by = height - ((startVal - min) / (max - min)) * height;
+      baseline = '<line x1="0" y1="'+by.toFixed(1)+'" x2="'+width+'" y2="'+by.toFixed(1)+'" stroke="#5a6b80" stroke-width="1" stroke-dasharray="2,3"/>';
+    }
+    return baseline +
+      '<path d="'+fillPath+'" fill="'+color+'22" stroke="none"/>' +
+      '<path d="'+linePath+'" fill="none" stroke="'+color+'" stroke-width="1.6"/>';
+  }
 
   document.getElementById('set-pairs-btn').addEventListener('click', async () => {
     const raw = document.getElementById('pairs-input').value.trim();
@@ -186,6 +233,11 @@ app.get('/', (_, res) => {
     tf.textContent = s.tradingEnabled ? 'ON' : 'PAUSED';
     tf.className = 'stat-val ' + (s.tradingEnabled ? 'pnl-pos' : 'pnl-neg');
 
+    const eqVal = document.getElementById('equity-val');
+    eqVal.textContent = '$'+(s.totalMarkValue||0).toFixed(2);
+    eqVal.className = 'val ' + pClass(s.totalPnl);
+    document.getElementById('equity-chart').innerHTML = buildEquitySvg(s.totalEquityCurve, 600, 90, s.totalCapital);
+
     const grid = document.getElementById('pair-grid');
     if (!s.pairStates || s.pairStates.length === 0) {
       grid.innerHTML = '<div class="empty">No pairs configured</div>';
@@ -198,19 +250,22 @@ app.get('/', (_, res) => {
         const posHtml = p.position ? (
           '<div class="pos-box"><span class="'+(p.position.side==='Up'?'side-up':'side-down')+'">'+p.position.side+'</span> '+
           p.position.shares.toFixed(2)+'sh @ '+p.position.entryPrice.toFixed(2)+' | cost $'+p.position.cost.toFixed(2)+
+          ' (conf '+(p.position.confMult||1).toFixed(2)+'x)'+
           ' | TP '+p.position.tpPrice.toFixed(2)+' / SL '+p.position.slPrice.toFixed(2)+
           (p.unrealizedPnl!==undefined ? (' | u/pnl <span class="'+pClass(p.unrealizedPnl)+'">'+sgn(p.unrealizedPnl)+'</span>') : '') +
           '</div>'
         ) : '<div class="pos-box">no open position</div>';
+        const eqCurve = buildEquitySvg(p.equityCurve, 280, 34, null);
         return '<div class="pair-card '+(p.position?'has-pos':'')+' '+(p.tradable?'':'untradable')+'">'+
           '<div class="pair-hdr"><div class="pair-sym">'+p.symbol+'</div><div class="pair-timer">'+(p.tradable?fmtSecs(p.secsToEnd):'loading…')+'</div></div>'+
           '<div class="pair-body">'+
             '<div class="pair-row"><span class="pair-key">Spot</span><span>'+(p.spot?p.spot.toFixed(4):'—')+'</span><span class="pair-key">Open</span><span>'+(p.openSpot?p.openSpot.toFixed(4):'—')+'</span></div>'+
             '<div class="pair-row"><span class="pair-key">Up ask/bid</span><span>'+(p.upAsk?.toFixed(2)||'—')+' / '+(p.upBid?.toFixed(2)||'—')+'</span></div>'+
             '<div class="pair-row"><span class="pair-key">Down ask/bid</span><span>'+(p.downAsk?.toFixed(2)||'—')+' / '+(p.downBid?.toFixed(2)||'—')+'</span></div>'+
-            '<div class="pair-row"><span class="pair-key">Bankroll</span><span>$'+p.bankroll.toFixed(2)+'</span><span class="pair-key">Step</span><span>'+p.martingaleStep+' (next $'+p.nextStake.toFixed(2)+')</span></div>'+
+            '<div class="pair-row"><span class="pair-key">Bankroll</span><span>$'+p.bankroll.toFixed(2)+'</span><span class="pair-key">Base stake</span><span>$'+p.baseStake.toFixed(2)+'</span></div>'+
             '<div class="pair-row"><span class="pair-key">Realized</span><span class="'+pClass(p.realizedPnl)+'">'+sgn(p.realizedPnl)+'</span><span class="pair-key">W/L</span><span>'+p.wins+'/'+p.losses+'</span></div>'+
             sigHtml + posHtml +
+            '<div class="spark-box"><svg viewBox="0 0 280 34" preserveAspectRatio="none">'+eqCurve+'</svg><div class="spark-label">Equity curve ($'+p.markValue.toFixed(2)+')</div></div>'+
           '</div></div>';
       }).join('');
     }
