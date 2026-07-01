@@ -707,7 +707,10 @@ async function checkRungTakeProfit(block, rung, price) {
 function blockMarkValue(block, price) {
   const gridPosValue = block.rungs.reduce((s, r) => r.position ? s + r.position.shares * price : s, 0);
   const convValue    = block.convShares * price;
-  return round2(block.gridCapital + gridPosValue + convValue);
+  // convCapital is the $60 not yet deployed (block never activated).
+  // It must be counted as cash here — without it, unvisited blocks'
+  // $60 disappears from totalMark, showing a phantom -$600 P&L loss.
+  return round2(block.gridCapital + block.convCapital + gridPosValue + convValue);
 }
 
 function blockOpenGridShares(block) {
@@ -947,7 +950,7 @@ function buildState() {
   const allInValue         = allInPosition && price !== null ? round2(allInPosition.shares * price) : 0;
   const allInValueWin      = allInPosition ? round2(allInPosition.shares * 1.00) : 0;
   const totalMark          = round2(
-    blocks.reduce((s, b) => s + (price !== null ? blockMarkValue(b, price) : b.gridCapital + b.convShares), 0) +
+    blocks.reduce((s, b) => s + (price !== null ? blockMarkValue(b, price) : b.gridCapital + b.convCapital), 0) +
     (allInPosition && price !== null ? round2(allInPosition.shares * price) : 0)
   );
 
