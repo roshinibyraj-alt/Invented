@@ -456,4 +456,4 @@ async function init(privateKey, emit, slogFn) {
   mainLoop().catch(e => log(`❌ Fatal: ${e.message}`));
 }
 
-module.exports = { init, searchMarkets, loadWindow };
+module.exports = { init, searchMatch, searchMarkets, loadMarket };
