@@ -176,6 +176,7 @@ app.get('/', (_, res) => {
     .c-yellow { color: var(--yellow) !important; }
     .c-gold   { color: var(--gold) !important; }
     .c-purple { color: var(--purple) !important; }
+    .c-orange { color: var(--orange) !important; }
 
     .market-card {
       background: var(--bg2); border: 1px solid var(--border); border-radius: 8px;
@@ -204,16 +205,10 @@ app.get('/', (_, res) => {
   </div>
 </div>
 
-<!-- Search -->
+<!-- Load / Search -->
 <div class="search-bar">
-  <input id="match-url" type="text" placeholder="Paste Polymarket match URL (e.g. https://polymarket.com/sports/world-cup/fifwc-ger-par-2026-06-29)">
-  <button id="search-btn">Load Match</button>
-</div>
-<div class="search-status" id="search-status"></div>
-
-<div class="search-bar" style="margin-top:6px">
-  <input id="market-q" type="text" placeholder="Or search ANY market — e.g. 'bitcoin up or down', 'fed rate', 'premier league'…">
-  <button id="market-search-btn">Find Markets</button>
+  <input id="market-q" type="text" placeholder="Paste a Polymarket match URL, or search any market — e.g. 'bitcoin up or down', 'fed rate'…">
+  <button id="market-search-btn">Find Market</button>
 </div>
 <div class="search-status" id="market-search-status"></div>
 <div id="market-results" style="padding:0 20px 6px"></div>
@@ -230,6 +225,15 @@ app.get('/', (_, res) => {
   <div class="stat"><div class="stat-label">Uptime</div><div class="stat-val" id="uptime">—</div><div class="stat-sub">hh:mm:ss</div></div>
 </div>
 
+<!-- Strategy panel -->
+<div class="match-bar" id="strategy-bar" style="border-color:#d97706aa">
+  <div class="match-bar-item"><span class="match-bar-label">Mode:</span><span class="match-bar-val c-orange" id="strat-mode">—</span></div>
+  <div class="match-bar-item"><span class="match-bar-label">Cascade:</span><span class="match-bar-val" id="strat-cascade">—</span></div>
+  <div class="match-bar-item"><span class="match-bar-label">Rungs/Block:</span><span class="match-bar-val" id="strat-rungs">—</span></div>
+  <div class="match-bar-item"><span class="match-bar-label">TP:</span><span class="match-bar-val" id="strat-tp">—</span></div>
+  <div class="match-bar-item"><span class="match-bar-label">Stop-loss:</span><span class="match-bar-val c-red" id="strat-sl">—</span></div>
+</div>
+
 <!-- Match bar -->
 <div class="match-bar">
   <div class="match-bar-item"><span class="match-bar-label">Event:</span><span class="match-bar-val" id="bar-title">—</span></div>
@@ -242,7 +246,7 @@ app.get('/', (_, res) => {
 
 <!-- Blocks -->
 <div class="section">
-  <div class="section-hdr">Price Blocks (10 x $200, real-time mark-to-market)</div>
+  <div class="section-hdr">Price Blocks (aggressive: full reserve follows current price, real-time mark-to-market)</div>
   <div class="block-grid" id="block-grid"><div class="empty">🔭 Loading blocks…</div></div>
 </div>
 
@@ -272,32 +276,6 @@ app.get('/', (_, res) => {
   }
   function sgn(v) { return (v>=0?'+':'')+(v||0).toFixed(2); }
   function pClass(v) { return v>=0?'c-green':'c-red'; }
-
-  document.getElementById('search-btn').addEventListener('click', async () => {
-    const url = document.getElementById('match-url').value.trim();
-    const statusEl = document.getElementById('search-status');
-    if (!url) return;
-    statusEl.textContent = 'Loading match…';
-    statusEl.className = 'search-status';
-    try {
-      const res = await fetch('/api/search-match', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url })
-      });
-      const data = await res.json();
-      if (data.ok) {
-        statusEl.textContent = '✅ Loaded: ' + (data.title || data.slug);
-        statusEl.className = 'search-status ok';
-      } else {
-        statusEl.textContent = '❌ ' + (data.error || 'Failed to load match');
-        statusEl.className = 'search-status err';
-      }
-    } catch (e) {
-      statusEl.textContent = '❌ ' + e.message;
-      statusEl.className = 'search-status err';
-    }
-  });
 
   async function runMarketSearch() {
     const q = document.getElementById('market-q').value.trim();
@@ -369,6 +347,12 @@ app.get('/', (_, res) => {
   document.getElementById('market-q').addEventListener('keydown', e => { if (e.key === 'Enter') runMarketSearch(); });
 
   socket.on('state', s => {
+    const st = s.strategy || {};
+    document.getElementById('strat-mode').textContent = st.aggressiveFullDraw ? '🔥 AGGRESSIVE (full reserve follows price)' : 'Conservative ($200/block)';
+    document.getElementById('strat-cascade').textContent = st.cascadeMode || '—';
+    document.getElementById('strat-rungs').textContent = (st.rungsPerBlock || '—') + ' @ ' + (st.rungOffset != null ? '-' + st.rungOffset.toFixed(2) : '—') + ' spacing';
+    document.getElementById('strat-tp').textContent = st.tpOffset != null ? '+' + st.tpOffset.toFixed(2) + ' (cap 0.99)' : '—';
+    document.getElementById('strat-sl').textContent = st.stopLoss || '—';
     document.getElementById('total-mark').textContent = '$'+(s.totalMarkValue||0).toFixed(2);
     const pnlEl = document.getElementById('total-pnl');
     pnlEl.textContent = sgn(s.totalPnl||0);
