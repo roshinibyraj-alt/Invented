@@ -40,17 +40,23 @@
  *      buy a coinflip with zero edge, and don't chase an already-priced-in
  *      near-certainty with no room left to profit)
  *
- *  RISK / MONEY MANAGEMENT (aggressive martingale — explicitly requested):
+ *  RISK / MONEY MANAGEMENT (fixed-fractional, confidence-weighted — no
+ *  martingale; sizing tracks bankroll and signal quality, never loss
+ *  history, so a losing streak never grows exposure):
  *    - $2000 demo capital split evenly across configured pairs into
  *      independent bankrolls (so one pair's drawdown can't cannibalize
  *      another pair's stake sizing)
- *    - base stake sized so a full max-length martingale run (double after
- *      every loss) still fits comfortably inside that pair's bankroll
- *    - on LOSS: stake doubles next window (capped at MAX_MARTINGALE_STEPS)
- *    - on WIN: stake resets to base
- *    - if the ladder maxes out AND loses again: ladder resets to base
- *      rather than continuing to grow unboundedly (ruin protection while
- *      still being aggressive within the configured bankroll)
+ *    - base stake = BASE_STAKE_FRACTION (default 4%) of that pair's
+ *      *current* bankroll — so stakes compound up automatically as a pair
+ *      wins, and shrink automatically as it draws down, with zero ladder
+ *      logic and zero "revenge sizing" after a loss
+ *    - confidence multiplier = |score| / Z_ENTRY_THRESHOLD, clamped to
+ *      [1.0, CONF_MAX_MULT] — a signal that just barely cleared the entry
+ *      bar gets the base stake; a much stronger signal gets sized up
+ *      (capped) because the edge behind it is larger, not because of what
+ *      happened on the last trade
+ *    - MAX_STAKE_FRACTION is an absolute backstop (never risk more than
+ *      this fraction of bankroll in one trade, regardless of confidence)
  *
  *  SL / TP (early-exit only — a binary market held to expiry already IS
  *  the take-profit/stop-loss event; these are about *voluntarily* locking
@@ -66,7 +72,9 @@
  *    - Anything neither TP'd nor SL'd rides to resolution, same as a real
  *      binary option
  *
- *  CAPITAL/PNL DISPLAY: real-time mark-to-market per pair and in total.
+ *  CAPITAL/PNL DISPLAY: real-time mark-to-market per pair and in total,
+ *  plus a running equity curve (bankroll + open-position mark, sampled on
+ *  every entry/exit) for each pair individually and for the portfolio.
  * ═══════════════════════════════════════════════════════════════
  */
 
@@ -91,19 +99,37 @@ const TOTAL_CAPITAL = Number(process.env.TOTAL_CAPITAL || 2000);
 const DEFAULT_PAIRS = (process.env.CRYPTO_PAIRS || 'BTC,ETH,SOL,XRP,DOGE')
   .split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
 
-const MARTINGALE_MULTIPLIER  = Number(process.env.MARTINGALE_MULTIPLIER || 2);
-const MAX_MARTINGALE_STEPS   = Number(process.env.MAX_MARTINGALE_STEPS || 5);
-const BASE_STAKE_DIVISOR     = Number(process.env.BASE_STAKE_DIVISOR || 40); // perPairCapital / this = base stake
-const MAX_STAKE_FRACTION     = Number(process.env.MAX_STAKE_FRACTION || 0.5); // never stake more than this fraction of remaining pair bankroll in one shot
+// Fixed-fractional + confidence-weighted sizing (replaces martingale).
+const BASE_STAKE_FRACTION    = Number(process.env.BASE_STAKE_FRACTION || 0.04); // base stake = this % of CURRENT bankroll
+const CONF_MAX_MULT          = Number(process.env.CONF_MAX_MULT || 2.5);        // cap on the confidence multiplier
+const MAX_STAKE_FRACTION     = Number(process.env.MAX_STAKE_FRACTION || 0.35);  // absolute backstop, regardless of confidence
+const EQUITY_POINTS_PER_PAIR = Number(process.env.EQUITY_POINTS_PER_PAIR || 300);
+const EQUITY_POINTS_TOTAL    = Number(process.env.EQUITY_POINTS_TOTAL || 500);
 
 const Z_ENTRY_THRESHOLD      = Number(process.env.Z_ENTRY_THRESHOLD || 1.2);
 const MIN_ENTRY_PRICE        = Number(process.env.MIN_ENTRY_PRICE || 0.52);
 const MAX_ENTRY_PRICE        = Number(process.env.MAX_ENTRY_PRICE || 0.88);
-const TP_OFFSET              = Number(process.env.TP_OFFSET || 0.12);
-const SL_OFFSET              = Number(process.env.SL_OFFSET || 0.20);
+// TP/SL were 0.12 / 0.20 — a 66% observed win rate on that ratio is still
+// only roughly breakeven (breakeven WR = SL/(TP+SL) = 62.5%), and live
+// results showed avg loss ran ~2x avg win, eating most of the edge from
+// win rate alone. Rebalanced to a much closer-to-symmetric ratio so the
+// same win rate converts into real positive expectancy (breakeven WR now
+// ~46%, i.e. ~20pts of margin instead of ~4pts).
+const TP_OFFSET              = Number(process.env.TP_OFFSET || 0.15);
+const SL_OFFSET              = Number(process.env.SL_OFFSET || 0.13);
 const MIN_ENTRY_ELAPSED_SEC  = Number(process.env.MIN_ENTRY_ELAPSED_SEC || 15);
 const MIN_ENTRY_REMAINING_SEC = Number(process.env.MIN_ENTRY_REMAINING_SEC || 30);
-const EXIT_SAFETY_BUFFER_SEC = Number(process.env.EXIT_SAFETY_BUFFER_SEC || 15);
+// Inside this many seconds of window close, a real SL sell into a thinning
+// book is unreliable, so the normal SL check stands down here.
+const EXIT_SAFETY_BUFFER_SEC = Number(process.env.EXIT_SAFETY_BUFFER_SEC || 8);
+// NEW: a gentler safeguard for that same late stretch. The two biggest
+// losses in the last live run were both positions that never touched SL
+// (bid stayed above the SL line the whole window) but flipped in the
+// final seconds and resolved as a total loss. Rather than leaving risk
+// management fully off in the closing seconds, de-risk any position that
+// isn't clearly winning (bid still below entry) by selling for whatever's
+// left, instead of gambling the full stake on a last-tick coin flip.
+const LATE_DERISK_SECS       = Number(process.env.LATE_DERISK_SECS || 20);
 const SLIPPAGE_BUFFER        = Number(process.env.SLIPPAGE_BUFFER || 0.01);
 const MIN_SHARES             = Number(process.env.MIN_SHARES || 5); // Polymarket order minimum
 
@@ -126,6 +152,7 @@ let perPairCapital = TOTAL_CAPITAL / Math.max(pairList.length, 1);
 let pairs = {}; // symbol -> pair state
 let lastSpotFetch = 0;
 let lastPolyPriceFetch = 0;
+let totalEquityCurve = []; // [{t(ms), equity}] portfolio-wide, sampled on every entry/exit
 
 // ─────────────────────────────────────────
 //  Logging
@@ -165,7 +192,6 @@ async function postJSON(url, body) {
 //  Pair state
 // ─────────────────────────────────────────
 function freshPairState(symbol) {
-  const baseStake = round2(perPairCapital / BASE_STAKE_DIVISOR);
   return {
     symbol,
     binanceSymbol: BINANCE_SYMBOL[symbol] || `${symbol}USDT`,
@@ -182,13 +208,12 @@ function freshPairState(symbol) {
     upAsk: null, upBid: null, downAsk: null, downBid: null,
     bankroll: perPairCapital, // cash available to this pair
     realizedPnl: 0,
-    martingaleStep: 0,
-    baseStake,
     wins: 0, losses: 0,
-    position: null,           // { side, tokenId, entryPrice, shares, cost, tpPrice, slPrice, orderId, openedAt }
+    position: null,           // { side, tokenId, entryPrice, shares, cost, tpPrice, slPrice, orderId, openedAt, confMult }
     resolvedThisWindow: true, // true until a window is actually loaded
     lastResult: null,         // 'WIN' | 'LOSS' | null
     lastSignal: null,
+    equityCurve: [{ t: Date.now(), equity: perPairCapital }], // [{t(ms), equity}]
   };
 }
 
@@ -196,6 +221,7 @@ function resetPairs() {
   perPairCapital = TOTAL_CAPITAL / Math.max(pairList.length, 1);
   pairs = {};
   for (const sym of pairList) pairs[sym] = freshPairState(sym);
+  totalEquityCurve = [{ t: Date.now(), equity: TOTAL_CAPITAL }];
 }
 resetPairs();
 
@@ -444,13 +470,36 @@ async function placeLimitSell(tokenId, price, shares) {
 }
 
 // ─────────────────────────────────────────
-//  Money management
+//  Money management — fixed-fractional bankroll % scaled by signal confidence
 // ─────────────────────────────────────────
-function stakeForPair(p) {
-  const step = Math.min(p.martingaleStep, MAX_MARTINGALE_STEPS - 1);
-  let stake = round2(p.baseStake * Math.pow(MARTINGALE_MULTIPLIER, step));
+function pairMarkValue(p) {
+  if (!p.position) return p.bankroll;
+  const price = p.position.side === 'Up' ? (p.upBid ?? p.position.entryPrice) : (p.downBid ?? p.position.entryPrice);
+  return round2(p.bankroll + p.position.shares * price);
+}
+
+function pushGlobalEquity() {
+  const total = round2(Object.values(pairs).reduce((s, p) => s + pairMarkValue(p), 0));
+  totalEquityCurve.push({ t: Date.now(), equity: total });
+  if (totalEquityCurve.length > EQUITY_POINTS_TOTAL) totalEquityCurve.shift();
+}
+
+// Call after any bankroll/position change (entry or exit) to sample both
+// this pair's equity curve and the portfolio-wide one.
+function recordEquity(p) {
+  p.equityCurve.push({ t: Date.now(), equity: pairMarkValue(p) });
+  if (p.equityCurve.length > EQUITY_POINTS_PER_PAIR) p.equityCurve.shift();
+  pushGlobalEquity();
+}
+
+// stake = (% of CURRENT bankroll) * (confidence multiplier from signal
+// strength). No reference to win/loss history anywhere — a losing trade
+// never makes the next one bigger.
+function stakeForPair(p, sig) {
+  const confMult = clamp(Math.abs(sig.score) / Z_ENTRY_THRESHOLD, 1, CONF_MAX_MULT);
+  let stake = round2(p.bankroll * BASE_STAKE_FRACTION * confMult);
   stake = Math.min(stake, round2(p.bankroll * MAX_STAKE_FRACTION));
-  return stake;
+  return { stake, confMult: round2(confMult) };
 }
 
 function registerTrade(p, entry) {
@@ -477,7 +526,7 @@ async function maybeEnter(p, elapsed, remaining) {
   if (ask == null) return;
   if (ask < MIN_ENTRY_PRICE || ask > MAX_ENTRY_PRICE) return;
 
-  const stake = stakeForPair(p);
+  const { stake, confMult } = stakeForPair(p, sig);
   if (stake < 1 || stake > p.bankroll) {
     log(`⏭️  ${p.symbol}: skip entry — insufficient bankroll ($${p.bankroll.toFixed(2)} left, need $${stake.toFixed(2)})`);
     return;
@@ -505,10 +554,11 @@ async function maybeEnter(p, elapsed, remaining) {
     slPrice: Math.max(round2(entryPrice - SL_OFFSET), 0.01),
     orderId: order.id || order.orderId || null,
     openedAt: Date.now(),
-    martingaleStepAtEntry: p.martingaleStep,
+    confMult,
   };
+  recordEquity(p);
 
-  log(`🎯 ${p.symbol} ENTRY ${side} ${shares}sh @ ${entryPrice.toFixed(2)} | cost=$${cost.toFixed(2)} | step=${p.martingaleStep} | z=${sig.z} score=${sig.score} | TP@${p.position.tpPrice.toFixed(2)} SL@${p.position.slPrice.toFixed(2)}`);
+  log(`🎯 ${p.symbol} ENTRY ${side} ${shares}sh @ ${entryPrice.toFixed(2)} | cost=$${cost.toFixed(2)} | conf=${confMult}x | z=${sig.z} score=${sig.score} | TP@${p.position.tpPrice.toFixed(2)} SL@${p.position.slPrice.toFixed(2)}`);
   registerTrade(p, { side: 'BUY', outcome: side, price: entryPrice, shares, cost });
 }
 
@@ -521,26 +571,19 @@ function applyResult(p, won, proceeds, reason) {
   p.bankroll = round2(p.bankroll + proceeds);
   p.realizedPnl = round2(p.realizedPnl + profit);
 
-  if (won) {
-    p.wins++;
-    p.martingaleStep = 0;
-    p.lastResult = 'WIN';
-  } else {
-    p.losses++;
-    p.lastResult = 'LOSS';
-    if (p.martingaleStep >= MAX_MARTINGALE_STEPS - 1) {
-      p.martingaleStep = 0; // ladder maxed out and lost again — reset rather than compound further
-      log(`🧯 ${p.symbol}: martingale ladder maxed & lost — resetting to base stake`);
-    } else {
-      p.martingaleStep++;
-    }
-  }
+  if (won) { p.wins++; p.lastResult = 'WIN'; }
+  else { p.losses++; p.lastResult = 'LOSS'; }
+  // No martingale step to update — next stake is simply BASE_STAKE_FRACTION
+  // of whatever the (now-updated) bankroll is, times the next signal's
+  // confidence. A loss shrinks the next stake naturally via the smaller
+  // bankroll; it never enlarges it.
 
   const icon = won ? '💰' : '💥';
   log(`${icon} ${p.symbol} ${reason} ${pos.side} ${pos.shares}sh entry=${pos.entryPrice.toFixed(2)} exit=$${(proceeds/pos.shares).toFixed(2)}/sh | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
   registerTrade(p, { side: 'SELL', outcome: pos.side, reason, price: round2(proceeds / pos.shares), shares: pos.shares, profit });
 
   p.position = null;
+  recordEquity(p);
 }
 
 async function manageOpenPosition(p, remaining) {
@@ -658,8 +701,7 @@ function buildState() {
       realizedPnl: p.realizedPnl,
       unrealizedPnl: unrealized,
       markValue,
-      martingaleStep: p.martingaleStep,
-      nextStake: stakeForPair(p),
+      baseStake: round2(p.bankroll * BASE_STAKE_FRACTION),
       wins: p.wins,
       losses: p.losses,
       lastResult: p.lastResult,
@@ -671,7 +713,9 @@ function buildState() {
         cost: p.position.cost,
         tpPrice: p.position.tpPrice,
         slPrice: p.position.slPrice,
+        confMult: p.position.confMult,
       } : null,
+      equityCurve: p.equityCurve,
     };
   });
 
@@ -697,8 +741,9 @@ function buildState() {
     winRate: (totalWins + totalLosses) > 0 ? round2((totalWins / (totalWins + totalLosses)) * 100) : null,
     uptime: Math.floor((Date.now() - startTime) / 1000),
     config: {
-      martingaleMultiplier: MARTINGALE_MULTIPLIER,
-      maxMartingaleSteps: MAX_MARTINGALE_STEPS,
+      baseStakeFraction: BASE_STAKE_FRACTION,
+      confMaxMultiplier: CONF_MAX_MULT,
+      maxStakeFraction: MAX_STAKE_FRACTION,
       zEntryThreshold: Z_ENTRY_THRESHOLD,
       minEntryPrice: MIN_ENTRY_PRICE,
       maxEntryPrice: MAX_ENTRY_PRICE,
@@ -706,6 +751,7 @@ function buildState() {
       slOffset: SL_OFFSET,
     },
     pairStates,
+    totalEquityCurve,
     logs: logs.slice(-100),
     trades: trades.slice(-80).reverse(),
   };
@@ -775,7 +821,7 @@ async function init(privateKey, emit, slogFn) {
   slog = slogFn;
   log(`🚀 5-Minute Crypto Up/Down Multi-Pair Bot`);
   log(`⚙️  $${TOTAL_CAPITAL} demo capital across ${pairList.length} pairs (${pairList.join(', ')}) → $${perPairCapital.toFixed(2)}/pair`);
-  log(`⚙️  martingale x${MARTINGALE_MULTIPLIER} up to ${MAX_MARTINGALE_STEPS} steps | z-entry≥${Z_ENTRY_THRESHOLD} | TP+${TP_OFFSET} SL-${SL_OFFSET}`);
+  log(`⚙️  sizing: ${(BASE_STAKE_FRACTION*100).toFixed(1)}% of bankroll × confidence (up to ${CONF_MAX_MULT}x), cap ${(MAX_STAKE_FRACTION*100).toFixed(0)}% | z-entry≥${Z_ENTRY_THRESHOLD} | TP+${TP_OFFSET} SL-${SL_OFFSET}`);
   log(`${DRY_RUN ? '⚠️  DRY RUN — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
   trader = new PolymarketTrader(privateKey);
