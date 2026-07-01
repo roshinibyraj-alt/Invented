@@ -408,7 +408,7 @@ app.get('/', (_, res) => {
         }).join('');
         return \`<div class="block-card \${b.active ? 'is-active' : ''}">
           <div class="block-hdr">
-            <div class="block-range">\${b.range}</div>
+            <div class="block-range">#\${b.index + 1} \${b.range}</div>
             <span class="\${b.active ? 'block-active-pill' : 'block-dormant-pill'}">\${b.active ? 'ACTIVE' : 'dormant'}</span>
           </div>
           <div class="block-body">
