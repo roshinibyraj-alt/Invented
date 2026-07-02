@@ -255,7 +255,7 @@ app.get('/', (_, res) => {
         const hasPos = (inv.pUp > 0) || (inv.pDown > 0) || (p.openCycles && p.openCycles.length > 0);
         const cyclesHtml = (p.openCycles && p.openCycles.length) ? (
           '<div class="signal-box">'+p.openCycles.map(c =>
-            '⏱ placed@'+c.placedAtElapsed+'s · Up['+c.upStatus+']@'+c.upPrice.toFixed(2)+' Down['+c.downStatus+']@'+c.downPrice.toFixed(2)+' · sweep in '+(c.secsToSweep!=null?c.secsToSweep+'s':'—')
+            '⏱ Up['+c.upStatus+']'+c.upShares+'sh@'+c.upPrice.toFixed(2)+' Down['+c.downStatus+']'+c.downShares+'sh@'+c.downPrice.toFixed(2)+' · cancel in '+c.secsLeft+'s'
           ).join('<br>')+'</div>'
         ) : '<div class="signal-box">no open cycle</div>';
         const lateHtml = (p.lateSell && (p.lateSell.up || p.lateSell.down)) ? (
