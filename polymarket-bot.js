@@ -188,6 +188,17 @@ function log(msg) {
   slog(line);
 }
 
+// Logs at most once every 10s per pair for a given repeating condition
+// (e.g. "still no price data") so persistent problems stay visible in the
+// dashboard without flooding the log on every single skipped cycle.
+function throttledLog(p, msg) {
+  const now = Date.now();
+  if (!p.lastSkipWarnAt || now - p.lastSkipWarnAt > 10_000) {
+    log(msg);
+    p.lastSkipWarnAt = now;
+  }
+}
+
 function round2(n) { return Math.round(n * 100) / 100; }
 function round5(n) { return Math.round(n * 100000) / 100000; }
 function clamp(n, lo, hi) { return Math.min(Math.max(n, lo), hi); }
@@ -230,6 +241,8 @@ function freshPairState(symbol) {
     openSpot: null,
     spotBuffer: [],
     upAsk: null, upBid: null, downAsk: null, downBid: null,
+    lastPriceWarnAt: 0,
+    lastSkipWarnAt: 0,
 
     bankroll: perPairCapital,
     realizedPnl: 0,
@@ -393,6 +406,7 @@ async function refreshPolyPrices() {
   }
   if (!requests.length) return;
 
+  let batchFailed = false;
   try {
     const data = await postJSON(`${CLOB}/prices`, requests);
     if (Array.isArray(data)) {
@@ -414,8 +428,32 @@ async function refreshPolyPrices() {
       }
     }
   } catch (e) {
-    for (const p of Object.values(pairs)) {
-      if (!p.tradable) continue;
+    batchFailed = true;
+    log(`⚠️  Batch price fetch failed (${e.message}) — falling back to per-token requests for all tradable pairs`);
+  }
+
+  // IMPORTANT: the batch endpoint can return HTTP 200 while silently
+  // omitting some of the requested token ids (no error, no exception —
+  // it just leaves that pair's ask/bid null forever, which looks like
+  // "not trading" with zero log output). So we don't only fall back on a
+  // hard exception — we also check, after every batch attempt, whether
+  // any tradable pair is still missing a price field and patch just that
+  // pair via the simpler per-token GET endpoint.
+  const needsFallback = Object.values(pairs).filter(p =>
+    p.tradable && p.upTokenId && p.downTokenId &&
+    (batchFailed || p.upAsk == null || p.upBid == null || p.downAsk == null || p.downBid == null)
+  );
+
+  if (needsFallback.length) {
+    if (!batchFailed) {
+      const now = Date.now();
+      const stillWarn = needsFallback.filter(p => !p.lastPriceWarnAt || now - p.lastPriceWarnAt > 10_000);
+      if (stillWarn.length) {
+        log(`⚠️  Batch price response missing data for: ${stillWarn.map(p => p.symbol).join(', ')} — falling back to per-token fetch for ${stillWarn.length === 1 ? 'it' : 'them'}`);
+        for (const p of stillWarn) p.lastPriceWarnAt = now;
+      }
+    }
+    await Promise.all(needsFallback.map(async (p) => {
       try {
         const [upAsk, upBid, downAsk, downBid] = await Promise.all([
           getJSON(`${CLOB}/price?token_id=${p.upTokenId}&side=BUY`).catch(() => null),
@@ -423,12 +461,12 @@ async function refreshPolyPrices() {
           getJSON(`${CLOB}/price?token_id=${p.downTokenId}&side=BUY`).catch(() => null),
           getJSON(`${CLOB}/price?token_id=${p.downTokenId}&side=SELL`).catch(() => null),
         ]);
-        if (upAsk) p.upAsk = parseFloat(upAsk.price || upAsk.mid || p.upAsk);
-        if (upBid) p.upBid = parseFloat(upBid.price || upBid.mid || p.upBid);
-        if (downAsk) p.downAsk = parseFloat(downAsk.price || downAsk.mid || p.downAsk);
-        if (downBid) p.downBid = parseFloat(downBid.price || downBid.mid || p.downBid);
+        if (upAsk) p.upAsk = parseFloat(upAsk.price ?? upAsk.mid ?? p.upAsk);
+        if (upBid) p.upBid = parseFloat(upBid.price ?? upBid.mid ?? p.upBid);
+        if (downAsk) p.downAsk = parseFloat(downAsk.price ?? downAsk.mid ?? p.downAsk);
+        if (downBid) p.downBid = parseFloat(downBid.price ?? downBid.mid ?? p.downBid);
       } catch (_) { /* leave stale values, try again next tick */ }
-    }
+    }));
   }
 
   function applyPolyPrice(tid, side, price) {
@@ -442,6 +480,8 @@ async function refreshPolyPrices() {
     }
   }
 }
+
+
 
 // ─────────────────────────────────────────
 //  Order helpers (real trader calls, gated by DRY_RUN)
@@ -547,10 +587,14 @@ async function maybeStartCycle(p, elapsed) {
 
   const upMid = midOf(p.upBid, p.upAsk);
   const downMid = midOf(p.downBid, p.downAsk);
-  if (upMid == null || downMid == null) return; // no book yet, skip this slot
+  if (upMid == null || downMid == null) {
+    throttledLog(p, `⏭️  ${p.symbol}: skip cycle #${idx} — no price data yet (upAsk=${p.upAsk ?? '—'} upBid=${p.upBid ?? '—'} downAsk=${p.downAsk ?? '—'} downBid=${p.downBid ?? '—'})`);
+    return;
+  }
 
   if (upMid < PRICE_BAND_MIN || upMid > PRICE_BAND_MAX || downMid < PRICE_BAND_MIN || downMid > PRICE_BAND_MAX) {
-    return; // outside the 0.25–0.75 band — sit this cycle out
+    throttledLog(p, `⏭️  ${p.symbol}: skip cycle #${idx} — mid outside [${PRICE_BAND_MIN},${PRICE_BAND_MAX}] band (up=${upMid.toFixed(2)} down=${downMid.toFixed(2)})`);
+    return;
   }
 
   const upPrice = clamp(round2(upMid - ENTRY_DISCOUNT), 0.01, 0.99);
