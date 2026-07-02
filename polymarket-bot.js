@@ -75,9 +75,9 @@
  *      logic and zero "revenge sizing" after a loss
  *    - confidence multiplier = |score| / Z_ENTRY_THRESHOLD, clamped to
  *      [1.0, CONF_MAX_MULT] — a signal that just barely cleared the entry
- *      bar gets the base stake; a much stronger signal gets sized up
- *      (capped) because the edge behind it is larger, not because of what
- *      happened on the last trade
+ *      bar gets the base stake; a stronger signal gets sized up (capped),
+ *      because the edge behind it is larger, not because of what happened
+ *      on the last trade
  *    - MAX_STAKE_FRACTION is an absolute backstop (never risk more than
  *      this fraction of bankroll in one trade, regardless of confidence)
  *
@@ -131,7 +131,7 @@ const DEFAULT_PAIRS = (process.env.CRYPTO_PAIRS || 'BTC,ETH')
 
 // Fixed-fractional + confidence-weighted sizing (replaces martingale).
 const BASE_STAKE_FRACTION    = Number(process.env.BASE_STAKE_FRACTION || 0.04); // base stake = this % of CURRENT bankroll
-const CONF_MAX_MULT          = Number(process.env.CONF_MAX_MULT || 2.5);        // cap on the confidence multiplier
+const CONF_MAX_MULT          = Number(process.env.CONF_MAX_MULT || 2.5);        // flat cap on the confidence multiplier (V2 behavior — no adaptive calibration)
 const MAX_STAKE_FRACTION     = Number(process.env.MAX_STAKE_FRACTION || 0.35);  // absolute backstop, regardless of confidence
 const EQUITY_POINTS_PER_PAIR = Number(process.env.EQUITY_POINTS_PER_PAIR || 300);
 const EQUITY_POINTS_TOTAL    = Number(process.env.EQUITY_POINTS_TOTAL || 500);
@@ -563,8 +563,8 @@ function recordEquity(p) {
 }
 
 // stake = (% of CURRENT bankroll) * (confidence multiplier from signal
-// strength). No reference to win/loss history anywhere — a losing trade
-// never makes the next one bigger.
+// strength, flat-capped at CONF_MAX_MULT). No reference to win/loss
+// history anywhere — a losing trade never makes the next one bigger.
 function stakeForPair(p, sig) {
   const confMult = clamp(Math.abs(sig.score) / Z_ENTRY_THRESHOLD, 1, CONF_MAX_MULT);
   let stake = round2(p.bankroll * BASE_STAKE_FRACTION * confMult);
