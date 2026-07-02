@@ -40,6 +40,29 @@
  *      buy a coinflip with zero edge, and don't chase an already-priced-in
  *      near-certainty with no room left to profit)
  *
+ *  ORDER EXECUTION & FEES (Polymarket Fee Structure V2, crypto category —
+ *  https://docs.polymarket.com/trading/fees): makers pay zero fees and
+ *  earn a 20% rebate on the fee value their filled liquidity generated;
+ *  only takers (market orders, or limit orders aggressive enough to cross
+ *  the spread and fill immediately) pay the fee. That distinction is about
+ *  behavior, not the order type's name, so:
+ *    - ENTRY is now a genuine resting (maker) limit order placed at the
+ *      current best bid — it does NOT cross the spread, so it may not
+ *      fill immediately, or at all. It waits up to ENTRY_FILL_TIMEOUT_SECS
+ *      for the market to trade down through it; if that doesn't happen it
+ *      cancels and the setup is skipped. This is the honest tradeoff of
+ *      avoiding taker fees on entries: some real edges get missed because
+ *      the passive price never gets hit.
+ *    - TP exit is also a resting maker order (sitting at the target price)
+ *      — when the bid reaches it, it fills at exactly that quoted price
+ *      (not whatever the aggressor's price was), zero fee, plus rebate.
+ *    - SL exit is a taker/market order on purpose — Polymarket has no
+ *      native stop order type, so a real stop-loss can only be executed by
+ *      actively firing an aggressive order the instant the price is
+ *      breached. It fills at the live bid and pays the taker fee.
+ *    - RESOLUTION (holding to expiry) is neither maker nor taker — it's
+ *      contract settlement, which Polymarket does not charge any fee on.
+ *
  *  RISK / MONEY MANAGEMENT (fixed-fractional, confidence-weighted — no
  *  martingale; sizing tracks bankroll and signal quality, never loss
  *  history, so a losing streak never grows exposure):
@@ -86,9 +109,16 @@ const CLOB    = 'https://clob.polymarket.com';
 const BINANCE = 'https://api.binance.com';
 
 // ── Timing ──
-const TICK_MS             = 1000;   // main decision loop
-const SPOT_REFRESH_MS     = 2000;   // Binance price poll
-const POLY_PRICE_REFRESH_MS = 2000; // CLOB price poll
+// Tightened now that we're down to 2 pairs (BTC, ETH) — total API call
+// volume is lower than the original 5-pair setup even at these faster
+// intervals, so this is well inside what Binance's public REST limits and
+// Polymarket's CLOB REST limits comfortably bear. Railway/GitHub aren't
+// actually in this loop at all — Railway just keeps the Node process
+// alive (no cold starts to worry about), and GitHub is source control,
+// not runtime — so the real ceiling here is the two external APIs.
+const TICK_MS             = 500;    // main decision loop
+const SPOT_REFRESH_MS     = 1000;   // Binance price poll
+const POLY_PRICE_REFRESH_MS = 1000; // CLOB price poll
 const WINDOW_SECS         = 300;    // 5 minutes
 const RESOLUTION_BUFFER_S = 8;      // wait this long past window close before finalizing outcome
 const SLUG_OFFSET_FALLBACKS = [0, -300, 300]; // handle brief indexing lag around the boundary
@@ -96,7 +126,7 @@ const SLUG_OFFSET_FALLBACKS = [0, -300, 300]; // handle brief indexing lag aroun
 // ── Env / config ──
 const DRY_RUN = (process.env.DRY_RUN || 'true').toLowerCase() === 'true';
 const TOTAL_CAPITAL = Number(process.env.TOTAL_CAPITAL || 2000);
-const DEFAULT_PAIRS = (process.env.CRYPTO_PAIRS || 'BTC,ETH,SOL,XRP,DOGE')
+const DEFAULT_PAIRS = (process.env.CRYPTO_PAIRS || 'BTC,ETH')
   .split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
 
 // Fixed-fractional + confidence-weighted sizing (replaces martingale).
@@ -130,8 +160,26 @@ const EXIT_SAFETY_BUFFER_SEC = Number(process.env.EXIT_SAFETY_BUFFER_SEC || 8);
 // isn't clearly winning (bid still below entry) by selling for whatever's
 // left, instead of gambling the full stake on a last-tick coin flip.
 const LATE_DERISK_SECS       = Number(process.env.LATE_DERISK_SECS || 20);
-const SLIPPAGE_BUFFER        = Number(process.env.SLIPPAGE_BUFFER || 0.01);
 const MIN_SHARES             = Number(process.env.MIN_SHARES || 5); // Polymarket order minimum
+
+// ── Fees & maker rebates (Polymarket Fee Structure V2, crypto category) ──
+// Source: https://docs.polymarket.com/trading/fees — fee = shares × feeRate
+// × price × (1-price). Only TAKER fills pay this; makers always pay zero.
+// Crypto category: taker fee rate 0.07, maker rebate 20% of the fee value
+// their filled liquidity generated (paid daily in pUSD in reality — this
+// bot credits it at fill time as the best available estimate of that
+// payout, which is a simplification: real-world timing is daily, not
+// per-trade). We deliberately do NOT model Polymarket's separate
+// Liquidity Rewards ("reward farming") program on top of this — that
+// program pays for resting *presence* via a pooled, competitively-shared
+// formula we have no visibility into (competing makers, live reward pool
+// size), so leaving it out is the conservative choice, not an oversight.
+const CRYPTO_TAKER_FEE_RATE  = Number(process.env.CRYPTO_TAKER_FEE_RATE || 0.07);
+const CRYPTO_MAKER_REBATE_SHARE = Number(process.env.CRYPTO_MAKER_REBATE_SHARE || 0.20);
+// How long a resting (maker) entry order waits for a genuine fill before
+// being cancelled. Real maker orders don't fill instantly — modeling that
+// fill uncertainty is the honest cost of avoiding taker fees on entries.
+const ENTRY_FILL_TIMEOUT_SECS = Number(process.env.ENTRY_FILL_TIMEOUT_SECS || 6);
 
 const BINANCE_SYMBOL = {
   BTC: 'BTCUSDT', ETH: 'ETHUSDT', SOL: 'SOLUSDT', XRP: 'XRPUSDT',
@@ -208,8 +256,11 @@ function freshPairState(symbol) {
     upAsk: null, upBid: null, downAsk: null, downBid: null,
     bankroll: perPairCapital, // cash available to this pair
     realizedPnl: 0,
+    feesPaid: 0,
+    rebatesEarned: 0,
     wins: 0, losses: 0,
-    position: null,           // { side, tokenId, entryPrice, shares, cost, tpPrice, slPrice, orderId, openedAt, confMult }
+    pendingEntry: null,       // { side, tokenId, limitPrice, stake, confMult, sig, expiresAt }
+    position: null,           // { side, tokenId, entryPrice, shares, cost, tpPrice, slPrice, orderId, openedAt, confMult, entryRebate }
     resolvedThisWindow: true, // true until a window is actually loaded
     lastResult: null,         // 'WIN' | 'LOSS' | null
     lastSignal: null,
@@ -468,6 +519,25 @@ async function placeLimitSell(tokenId, price, shares) {
   if (!DRY_RUN && trader) return await trader.limitSell(tokenId, shares, price);
   return { id: `dry-sell-${Date.now()}-${Math.random().toString(36).slice(2, 7)}` };
 }
+async function cancelOrder(orderId) {
+  if (!DRY_RUN && trader && orderId) {
+    try { await trader.cancelOrder(orderId); }
+    catch (e) { log(`⚠️  cancel failed: ${e.message}`); }
+  }
+}
+
+// ─────────────────────────────────────────
+//  Fees & maker rebates — Polymarket Fee Structure V2 (crypto)
+//  fee = shares × feeRate × price × (1 - price), taker-only, maker rebate
+//  is that same formula × the category's rebate share.
+// ─────────────────────────────────────────
+function round5(n) { return Math.round(n * 100000) / 100000; }
+function takerFee(shares, price) {
+  return round5(shares * CRYPTO_TAKER_FEE_RATE * price * (1 - price));
+}
+function makerRebate(shares, price) {
+  return round5(shares * CRYPTO_TAKER_FEE_RATE * price * (1 - price) * CRYPTO_MAKER_REBATE_SHARE);
+}
 
 // ─────────────────────────────────────────
 //  Money management — fixed-fractional bankroll % scaled by signal confidence
@@ -509,9 +579,9 @@ function registerTrade(p, entry) {
 }
 
 // ─────────────────────────────────────────
-//  Entry logic
+//  Entry logic — rests a genuine maker order, doesn't cross the spread
 // ─────────────────────────────────────────
-async function maybeEnter(p, elapsed, remaining) {
+async function queueEntry(p, elapsed, remaining) {
   if (!tradingEnabled) return;
   if (elapsed < MIN_ENTRY_ELAPSED_SEC || remaining < MIN_ENTRY_REMAINING_SEC) return;
 
@@ -523,6 +593,7 @@ async function maybeEnter(p, elapsed, remaining) {
 
   const side = sig.direction;
   const ask = side === 'Up' ? p.upAsk : p.downAsk;
+  const bid = side === 'Up' ? p.upBid : p.downBid;
   if (ask == null) return;
   if (ask < MIN_ENTRY_PRICE || ask > MAX_ENTRY_PRICE) return;
 
@@ -532,44 +603,84 @@ async function maybeEnter(p, elapsed, remaining) {
     return;
   }
 
-  const entryPrice = Math.min(round2(ask + SLIPPAGE_BUFFER), 0.99);
-  let shares = round2(stake / entryPrice);
-  if (shares < MIN_SHARES) {
-    shares = MIN_SHARES;
-  }
-  const cost = round2(entryPrice * shares);
-  if (cost > p.bankroll) return; // can't afford the min-size order right now
-
+  // Rest the buy AT the current best bid (or just under the ask if there's
+  // no visible bid) — a passive price that does not cross the spread, so
+  // this is a genuine maker order, not a marketable one.
+  const limitPrice = bid != null ? bid : Math.max(round2(ask - 0.01), 0.01);
   const tokenId = side === 'Up' ? p.upTokenId : p.downTokenId;
-  const order = await placeLimitBuy(tokenId, entryPrice, shares);
+  const estShares = Math.max(round2(stake / limitPrice), MIN_SHARES);
+  const order = await placeLimitBuy(tokenId, limitPrice, estShares);
 
-  p.bankroll = round2(p.bankroll - cost);
-  p.position = {
-    side,
-    tokenId,
-    entryPrice,
-    shares,
-    cost,
-    tpPrice: Math.min(round2(entryPrice + TP_OFFSET), 0.99),
-    slPrice: Math.max(round2(entryPrice - SL_OFFSET), 0.01),
+  p.pendingEntry = {
+    side, tokenId, limitPrice, stake, confMult, sig,
     orderId: order.id || order.orderId || null,
-    openedAt: Date.now(),
-    confMult,
+    placedAt: Date.now(),
+    expiresAt: Date.now() + ENTRY_FILL_TIMEOUT_SECS * 1000,
   };
-  recordEquity(p);
+  log(`📌 ${p.symbol} resting ${side} order @ ${limitPrice.toFixed(2)} (~$${stake.toFixed(2)}, conf=${confMult}x) — waiting up to ${ENTRY_FILL_TIMEOUT_SECS}s for a fill`);
+}
 
-  log(`🎯 ${p.symbol} ENTRY ${side} ${shares}sh @ ${entryPrice.toFixed(2)} | cost=$${cost.toFixed(2)} | conf=${confMult}x | z=${sig.z} score=${sig.score} | TP@${p.position.tpPrice.toFixed(2)} SL@${p.position.slPrice.toFixed(2)}`);
-  registerTrade(p, { side: 'BUY', outcome: side, price: entryPrice, shares, cost });
+// Checks whether the resting entry order got filled (market traded down
+// through our passive price) or should be cancelled (timed out unfilled).
+async function checkPendingEntry(p) {
+  const pe = p.pendingEntry;
+  if (!pe) return;
+  const ask = pe.side === 'Up' ? p.upAsk : p.downAsk;
+
+  if (ask != null && ask <= pe.limitPrice) {
+    // Filled as maker, at OUR quoted price (not the crossing price).
+    const execPrice = pe.limitPrice;
+    let shares = round2(pe.stake / execPrice);
+    if (shares < MIN_SHARES) shares = MIN_SHARES;
+    const notional = round2(execPrice * shares);
+    if (notional > p.bankroll) { p.pendingEntry = null; return; }
+
+    const rebate = makerRebate(shares, execPrice);
+    p.bankroll = round2(p.bankroll - notional + rebate);
+    p.realizedPnl = round2(p.realizedPnl + rebate); // rebate is realized income regardless of trade outcome
+    p.rebatesEarned = round2(p.rebatesEarned + rebate);
+
+    p.position = {
+      side: pe.side,
+      tokenId: pe.tokenId,
+      entryPrice: execPrice,
+      shares,
+      cost: notional,
+      tpPrice: Math.min(round2(execPrice + TP_OFFSET), 0.99),
+      slPrice: Math.max(round2(execPrice - SL_OFFSET), 0.01),
+      orderId: pe.orderId,
+      openedAt: Date.now(),
+      confMult: pe.confMult,
+      entryRebate: rebate,
+    };
+    p.pendingEntry = null;
+    recordEquity(p);
+
+    log(`🎯 ${p.symbol} ENTRY(maker) ${pe.side} ${shares}sh @ ${execPrice.toFixed(2)} | cost=$${notional.toFixed(2)} | rebate=+$${rebate.toFixed(4)} | conf=${pe.confMult}x | z=${pe.sig.z} score=${pe.sig.score} | TP@${p.position.tpPrice.toFixed(2)} SL@${p.position.slPrice.toFixed(2)}`);
+    registerTrade(p, { side: 'BUY', outcome: pe.side, price: execPrice, shares, cost: notional, rebate });
+    return;
+  }
+
+  if (Date.now() >= pe.expiresAt) {
+    await cancelOrder(pe.orderId);
+    log(`⏭️  ${p.symbol}: resting ${pe.side} order @ ${pe.limitPrice.toFixed(2)} unfilled after ${ENTRY_FILL_TIMEOUT_SECS}s — cancelled, setup skipped`);
+    p.pendingEntry = null;
+  }
 }
 
 // ─────────────────────────────────────────
 //  Position management (SL/TP + resolution)
 // ─────────────────────────────────────────
-function applyResult(p, won, proceeds, reason) {
+// proceeds passed in is always the RAW execution notional (execPrice ×
+// shares) with no fee/rebate applied — applyResult nets those uniformly.
+function applyResult(p, won, proceeds, reason, { fee = 0, rebate = 0 } = {}) {
   const pos = p.position;
-  const profit = round2(proceeds - pos.cost);
-  p.bankroll = round2(p.bankroll + proceeds);
+  const net = round2(proceeds - fee + rebate);
+  p.bankroll = round2(p.bankroll + net);
+  const profit = round2(net - pos.cost);
   p.realizedPnl = round2(p.realizedPnl + profit);
+  p.feesPaid = round2(p.feesPaid + fee);
+  p.rebatesEarned = round2(p.rebatesEarned + rebate);
 
   if (won) { p.wins++; p.lastResult = 'WIN'; }
   else { p.losses++; p.lastResult = 'LOSS'; }
@@ -579,8 +690,9 @@ function applyResult(p, won, proceeds, reason) {
   // bankroll; it never enlarges it.
 
   const icon = won ? '💰' : '💥';
-  log(`${icon} ${p.symbol} ${reason} ${pos.side} ${pos.shares}sh entry=${pos.entryPrice.toFixed(2)} exit=$${(proceeds/pos.shares).toFixed(2)}/sh | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
-  registerTrade(p, { side: 'SELL', outcome: pos.side, reason, price: round2(proceeds / pos.shares), shares: pos.shares, profit });
+  const costTag = fee > 0 ? ` fee=-$${fee.toFixed(4)}` : (rebate > 0 ? ` rebate=+$${rebate.toFixed(4)}` : '');
+  log(`${icon} ${p.symbol} ${reason} ${pos.side} ${pos.shares}sh entry=${pos.entryPrice.toFixed(2)} exit=$${(proceeds/pos.shares).toFixed(2)}/sh${costTag} | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
+  registerTrade(p, { side: 'SELL', outcome: pos.side, reason, price: round2(proceeds / pos.shares), shares: pos.shares, profit, fee, rebate });
 
   p.position = null;
   recordEquity(p);
@@ -593,15 +705,24 @@ async function manageOpenPosition(p, remaining) {
   if (bid == null) return;
 
   if (bid >= pos.tpPrice) {
-    const order = await placeLimitSell(pos.tokenId, bid, pos.shares);
-    const proceeds = round2(bid * pos.shares);
-    applyResult(p, true, proceeds, 'TP');
+    // Resting maker sell at our own quoted TP price — fills AT that price
+    // (not the higher observed bid), zero fee, plus maker rebate.
+    const execPrice = pos.tpPrice;
+    const order = await placeLimitSell(pos.tokenId, execPrice, pos.shares);
+    const proceeds = round2(execPrice * pos.shares);
+    const rebate = makerRebate(pos.shares, execPrice);
+    applyResult(p, true, proceeds, 'TP', { fee: 0, rebate });
     return;
   }
   if (bid <= pos.slPrice && remaining > EXIT_SAFETY_BUFFER_SEC) {
-    const order = await placeLimitSell(pos.tokenId, bid, pos.shares);
-    const proceeds = round2(bid * pos.shares);
-    applyResult(p, false, proceeds, 'SL');
+    // Aggressive taker sell at the live bid — Polymarket has no native
+    // stop order, so a real SL can only be fired as a market/taker order
+    // the instant the level is breached. Pays the crypto taker fee.
+    const execPrice = bid;
+    const order = await placeLimitSell(pos.tokenId, execPrice, pos.shares);
+    const proceeds = round2(execPrice * pos.shares);
+    const fee = takerFee(pos.shares, execPrice);
+    applyResult(p, false, proceeds, 'SL', { fee, rebate: 0 });
     return;
   }
 }
@@ -669,11 +790,14 @@ async function processPair(p) {
 
   if (p.position) {
     await manageOpenPosition(p, remaining);
+  } else if (p.pendingEntry) {
+    await checkPendingEntry(p);
   } else if (!p.resolvedThisWindow) {
-    await maybeEnter(p, elapsed, remaining);
+    await queueEntry(p, elapsed, remaining);
   }
 
   if (remaining <= -RESOLUTION_BUFFER_S && !p.resolvedThisWindow) {
+    if (p.pendingEntry) { await cancelOrder(p.pendingEntry.orderId); p.pendingEntry = null; }
     await resolvePairWindow(p);
   }
 }
@@ -702,10 +826,18 @@ function buildState() {
       unrealizedPnl: unrealized,
       markValue,
       baseStake: round2(p.bankroll * BASE_STAKE_FRACTION),
+      feesPaid: p.feesPaid,
+      rebatesEarned: p.rebatesEarned,
       wins: p.wins,
       losses: p.losses,
       lastResult: p.lastResult,
       signal: p.lastSignal,
+      pendingEntry: p.pendingEntry ? {
+        side: p.pendingEntry.side,
+        limitPrice: p.pendingEntry.limitPrice,
+        stake: p.pendingEntry.stake,
+        secsLeft: Math.max(0, Math.round((p.pendingEntry.expiresAt - Date.now()) / 1000)),
+      } : null,
       position: p.position ? {
         side: p.position.side,
         entryPrice: p.position.entryPrice,
@@ -725,6 +857,8 @@ function buildState() {
   const totalUnrealized = round2(pairStates.reduce((s, p) => s + p.unrealizedPnl, 0));
   const totalWins = pairStates.reduce((s, p) => s + p.wins, 0);
   const totalLosses = pairStates.reduce((s, p) => s + p.losses, 0);
+  const totalFeesPaid = round2(pairStates.reduce((s, p) => s + p.feesPaid, 0));
+  const totalRebatesEarned = round2(pairStates.reduce((s, p) => s + p.rebatesEarned, 0));
 
   return {
     dryRun: DRY_RUN,
@@ -738,6 +872,8 @@ function buildState() {
     totalUnrealizedPnl: totalUnrealized,
     totalPnl: round2(totalMark - TOTAL_CAPITAL),
     totalWins, totalLosses,
+    totalFeesPaid,
+    totalRebatesEarned,
     winRate: (totalWins + totalLosses) > 0 ? round2((totalWins / (totalWins + totalLosses)) * 100) : null,
     uptime: Math.floor((Date.now() - startTime) / 1000),
     config: {
@@ -749,6 +885,9 @@ function buildState() {
       maxEntryPrice: MAX_ENTRY_PRICE,
       tpOffset: TP_OFFSET,
       slOffset: SL_OFFSET,
+      cryptoTakerFeeRate: CRYPTO_TAKER_FEE_RATE,
+      cryptoMakerRebateShare: CRYPTO_MAKER_REBATE_SHARE,
+      entryFillTimeoutSecs: ENTRY_FILL_TIMEOUT_SECS,
     },
     pairStates,
     totalEquityCurve,
@@ -822,6 +961,7 @@ async function init(privateKey, emit, slogFn) {
   log(`🚀 5-Minute Crypto Up/Down Multi-Pair Bot`);
   log(`⚙️  $${TOTAL_CAPITAL} demo capital across ${pairList.length} pairs (${pairList.join(', ')}) → $${perPairCapital.toFixed(2)}/pair`);
   log(`⚙️  sizing: ${(BASE_STAKE_FRACTION*100).toFixed(1)}% of bankroll × confidence (up to ${CONF_MAX_MULT}x), cap ${(MAX_STAKE_FRACTION*100).toFixed(0)}% | z-entry≥${Z_ENTRY_THRESHOLD} | TP+${TP_OFFSET} SL-${SL_OFFSET}`);
+  log(`⚙️  fees: entry/TP maker (0 fee, +${(CRYPTO_MAKER_REBATE_SHARE*100).toFixed(0)}% rebate) | SL taker (crypto fee rate ${CRYPTO_TAKER_FEE_RATE}) | entry fill timeout ${ENTRY_FILL_TIMEOUT_SECS}s`);
   log(`${DRY_RUN ? '⚠️  DRY RUN — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
   trader = new PolymarketTrader(privateKey);
