@@ -29,17 +29,20 @@
  *  side actually wins. See the accompanying deep-dive on how merge works.
  *
  *  ORDER LIFECYCLE PER 10s CYCLE:
- *    - t+0s:  place both limit orders (Up + Down, 50 shares each)
- *    - polled every 500ms from placement onward; either leg can fill any
- *      time and simply keeps resting on the book if it doesn't
- *    - every 10s a NEW cycle fires regardless of whether earlier cycles
- *      have filled yet — cycles stack independently, so several pairs of
- *      resting orders can be open on the book at once
- *    - at 280s of elapsed window time, ANY leg (from any cycle) still
- *      unfilled is cancelled in one sweep — this is the only cancellation
- *      point, there is no per-cycle timeout
- *    - unfilled orders never touch the bankroll — capital is only ever
- *      debited at the moment a leg actually fills (see fillLeg())
+ *    - t+0s:  place both limit orders (Up + Down, sized per the rebalance
+ *             rule below)
+ *    - t+0s → t+9s: polled every 500ms; either leg can fill any time
+ *    - t+9s:  any leg still unfilled is cancelled — capital is never
+ *             touched for an unfilled leg, only debited on actual fill
+ *    - t+10s: next cycle fires, independent of whether the previous one
+ *             fully filled, partially filled, or cancelled outright
+ *
+ *  IMBALANCE REBALANCING: if a prior cycle left the bot holding more of
+ *  one side than the other (e.g. Up filled but Down got cancelled), the
+ *  next cycle sizes the LAGGING side's order at 50 + the current gap,
+ *  while the leading side stays at the standard 50. A fill on the
+ *  lagging side then closes the gap back to equal Up/Down inventory,
+ *  which immediately triggers a merge.
  *
  *  FILTERS / GATES:
  *    - Only trade while BOTH the Up ask and the Down ask are inside
@@ -98,7 +101,7 @@ const DEFAULT_PAIRS = (process.env.CRYPTO_PAIRS || 'BTC,ETH,SOL')
 const ORDER_SHARES           = Number(process.env.ORDER_SHARES || 50);   // fixed shares per leg, per cycle
 const ORDER_PRICE_OFFSET     = Number(process.env.ORDER_PRICE_OFFSET || 0.04); // below mid, both sides
 const CYCLE_INTERVAL_SECS    = Number(process.env.CYCLE_INTERVAL_SECS || 10);  // new order-pair every N seconds
-const CANCEL_AT_ELAPSED_SECS = Number(process.env.CANCEL_AT_ELAPSED_SECS || 280); // single global sweep: cancel ALL still-pending legs once window elapsed reaches this
+const CANCEL_AFTER_SECS      = Number(process.env.CANCEL_AFTER_SECS || 9);     // cancel unfilled leg N seconds after its own entry
 const TRADE_CUTOFF_SECS      = Number(process.env.TRADE_CUTOFF_SECS || 240);   // stop starting new cycles after 4 min
 const PRICE_BAND_MIN         = Number(process.env.PRICE_BAND_MIN || 0.25);
 const PRICE_BAND_MAX         = Number(process.env.PRICE_BAND_MAX || 0.75);
@@ -204,7 +207,7 @@ function freshPairState(symbol) {
     resolutionWins: 0,
     resolutionLosses: 0,
 
-    cycles: [],           // active order-pair cycles: {id, placedAt, placedAtElapsed, up:{...}, down:{...}} — cancelled only by the global sweep at CANCEL_AT_ELAPSED_SECS
+    cycles: [],           // active order-pair cycles: {id, placedAt, placedAtElapsed, cancelAt, up:{...}, down:{...}} — each leg cancelled independently CANCEL_AFTER_SECS after its own entry
     lastCycleBucket: -1,  // which 10s bucket (elapsed/CYCLE_INTERVAL_SECS) last spawned a cycle
     lateSell: { up: null, down: null }, // resting 0.99 sell orders placed after the 4-min cutoff
 
@@ -496,6 +499,19 @@ function computeLimitPrice(ask, bid) {
 // ─────────────────────────────────────────
 //  Cycle engine — place / poll / cancel the two-sided limit orders
 // ─────────────────────────────────────────
+// Sizes the next cycle's two legs. Standard is ORDER_SHARES on each side;
+// if prior cycles left an Up/Down inventory imbalance, the LAGGING side
+// gets topped up by the size of the gap so a fill there closes it back
+// to equal inventory (which immediately triggers a merge).
+function rebalancedOrderSizes(p) {
+  const imbalance = round2(p.pUp - p.pDown); // >0: Up ahead (Down lagging); <0: Down ahead (Up lagging)
+  let upShares = ORDER_SHARES;
+  let downShares = ORDER_SHARES;
+  if (imbalance > 0) downShares = round2(ORDER_SHARES + imbalance);
+  else if (imbalance < 0) upShares = round2(ORDER_SHARES + Math.abs(imbalance));
+  return { upShares, downShares, imbalance };
+}
+
 async function maybeStartCycle(p, elapsed) {
   if (!tradingEnabled) return;
   if (elapsed < 0 || elapsed >= TRADE_CUTOFF_SECS) return;
@@ -513,25 +529,31 @@ async function maybeStartCycle(p, elapsed) {
   const downLimit = computeLimitPrice(p.downAsk, p.downBid);
   if (upLimit == null || downLimit == null) return;
 
-  const notionalNeeded = round2((upLimit + downLimit) * ORDER_SHARES);
+  const { upShares, downShares, imbalance } = rebalancedOrderSizes(p);
+
+  const notionalNeeded = round2(upLimit * upShares + downLimit * downShares);
   if (notionalNeeded > p.bankroll) {
     log(`⏭️  ${p.symbol}: skip cycle — insufficient bankroll ($${p.bankroll.toFixed(2)} < $${notionalNeeded.toFixed(2)} needed)`);
     return;
   }
 
-  const upOrder = await placeLimitBuy(p.upTokenId, upLimit, ORDER_SHARES);
-  const downOrder = await placeLimitBuy(p.downTokenId, downLimit, ORDER_SHARES);
+  const upOrder = await placeLimitBuy(p.upTokenId, upLimit, upShares);
+  const downOrder = await placeLimitBuy(p.downTokenId, downLimit, downShares);
   const now = Date.now();
 
   p.cycles.push({
     id: `${p.symbol}-${now}`,
     placedAt: now,
     placedAtElapsed: elapsed,
-    up: { orderId: upOrder.id || upOrder.orderId || null, limitPrice: upLimit, shares: ORDER_SHARES, status: 'pending' },
-    down: { orderId: downOrder.id || downOrder.orderId || null, limitPrice: downLimit, shares: ORDER_SHARES, status: 'pending' },
+    cancelAt: now + CANCEL_AFTER_SECS * 1000,
+    up: { orderId: upOrder.id || upOrder.orderId || null, limitPrice: upLimit, shares: upShares, status: 'pending' },
+    down: { orderId: downOrder.id || downOrder.orderId || null, limitPrice: downLimit, shares: downShares, status: 'pending' },
   });
 
-  log(`📌 ${p.symbol} cycle @${Math.floor(elapsed)}s → Up ${ORDER_SHARES}sh@${upLimit.toFixed(2)} | Down ${ORDER_SHARES}sh@${downLimit.toFixed(2)} | rests until ${CANCEL_AT_ELAPSED_SECS}s global sweep (no capital held while unfilled)`);
+  const rebalanceNote = imbalance !== 0
+    ? ` | rebalancing gap of ${Math.abs(imbalance)} toward ${imbalance > 0 ? 'Down' : 'Up'}`
+    : '';
+  log(`📌 ${p.symbol} cycle @${Math.floor(elapsed)}s → Up ${upShares}sh@${upLimit.toFixed(2)} | Down ${downShares}sh@${downLimit.toFixed(2)} | cancel in ${CANCEL_AFTER_SECS}s${rebalanceNote}`);
 }
 
 async function fillLeg(p, cycle, legName) {
@@ -553,8 +575,7 @@ async function fillLeg(p, cycle, legName) {
   registerTrade(p, { side: 'BUY', outcome: label, price: leg.limitPrice, shares: leg.shares, cost: notional, rebate });
 }
 
-async function processCycles(p, elapsed) {
-  const globalCancel = elapsed >= CANCEL_AT_ELAPSED_SECS;
+async function processCycles(p) {
   for (const cycle of p.cycles) {
     for (const legName of ['up', 'down']) {
       const leg = cycle[legName];
@@ -563,10 +584,10 @@ async function processCycles(p, elapsed) {
 
       if (ask != null && ask <= leg.limitPrice) {
         await fillLeg(p, cycle, legName);
-      } else if (globalCancel) {
+      } else if (Date.now() >= cycle.cancelAt) {
         await cancelOrder(leg.orderId);
         leg.status = 'cancelled';
-        log(`🚫 ${p.symbol} cancel ${legName === 'up' ? 'Up' : 'Down'}@${leg.limitPrice.toFixed(2)} — unfilled at ${CANCEL_AT_ELAPSED_SECS}s sweep (no capital was held for it)`);
+        log(`🚫 ${p.symbol} cancel ${legName === 'up' ? 'Up' : 'Down'}@${leg.limitPrice.toFixed(2)} — unfilled after ${CANCEL_AFTER_SECS}s (no capital was held for it)`);
       }
     }
   }
@@ -738,7 +759,7 @@ async function processPair(p) {
   const elapsed = nowSec() - p.windowStart;
   const remaining = p.windowEnd - nowSec();
 
-  await processCycles(p, elapsed); // poll fills every tick (500ms); cancel sweep only once elapsed >= CANCEL_AT_ELAPSED_SECS
+  await processCycles(p);      // poll fills / cancel timeouts (every tick = every 500ms)
   attemptMerges(p);            // merge any matched Up+Down inventory immediately
   await maybeStartCycle(p, elapsed); // spawn a new order-pair every 10s, only in first 4 min
   await manageLateWindow(p, elapsed); // past 4 min: rest 0.99 sells on leftovers
@@ -779,10 +800,9 @@ function buildState() {
       lastResult: p.lastResult,
       inventory: { pUp: p.pUp, pDown: p.pDown },
       openCycles: p.cycles.map(c => ({
-        upStatus: c.up.status, upPrice: c.up.limitPrice,
-        downStatus: c.down.status, downPrice: c.down.limitPrice,
-        placedAtElapsed: Math.floor(c.placedAtElapsed ?? 0),
-        secsToSweep: p.windowStart != null ? Math.max(0, Math.round(CANCEL_AT_ELAPSED_SECS - (nowSec() - p.windowStart))) : null,
+        upStatus: c.up.status, upPrice: c.up.limitPrice, upShares: c.up.shares,
+        downStatus: c.down.status, downPrice: c.down.limitPrice, downShares: c.down.shares,
+        secsLeft: Math.max(0, Math.round((c.cancelAt - Date.now()) / 1000)),
       })),
       lateSell: {
         up: p.lateSell.up ? { shares: p.lateSell.up.shares, price: p.lateSell.up.price } : null,
@@ -825,7 +845,7 @@ function buildState() {
       orderShares: ORDER_SHARES,
       orderPriceOffset: ORDER_PRICE_OFFSET,
       cycleIntervalSecs: CYCLE_INTERVAL_SECS,
-      cancelAtElapsedSecs: CANCEL_AT_ELAPSED_SECS,
+      cancelAfterSecs: CANCEL_AFTER_SECS,
       tradeCutoffSecs: TRADE_CUTOFF_SECS,
       priceBandMin: PRICE_BAND_MIN,
       priceBandMax: PRICE_BAND_MAX,
@@ -904,7 +924,7 @@ async function init(privateKey, emit, slogFn) {
   slog = slogFn;
   log(`🚀 5-Minute Crypto Up/Down Merge-Arb Bot`);
   log(`⚙️  $${TOTAL_CAPITAL} demo capital across ${pairList.length} pairs (${pairList.join(', ')}) → $${perPairCapital.toFixed(2)}/pair`);
-  log(`⚙️  ${ORDER_SHARES}sh Up + ${ORDER_SHARES}sh Down every ${CYCLE_INTERVAL_SECS}s @ mid-${ORDER_PRICE_OFFSET} | rests until global cancel sweep @ ${CANCEL_AT_ELAPSED_SECS}s (no capital held while unfilled) | band [${PRICE_BAND_MIN}-${PRICE_BAND_MAX}] | new cycles stop @ ${TRADE_CUTOFF_SECS}s | late sell @ ${LATE_SELL_PRICE}`);
+  log(`⚙️  ${ORDER_SHARES}sh Up + ${ORDER_SHARES}sh Down every ${CYCLE_INTERVAL_SECS}s @ mid-${ORDER_PRICE_OFFSET} | cancel unfilled @ ${CANCEL_AFTER_SECS}s (no capital held while unfilled) | lagging side tops up to close prior imbalance | band [${PRICE_BAND_MIN}-${PRICE_BAND_MAX}] | new cycles stop @ ${TRADE_CUTOFF_SECS}s | late sell @ ${LATE_SELL_PRICE}`);
   log(`⚙️  fees: maker legs 0 fee +${(CRYPTO_MAKER_REBATE_SHARE*100).toFixed(0)}% rebate (crypto taker rate ${CRYPTO_TAKER_FEE_RATE}) | merge is fee-free on-chain`);
   log(`${DRY_RUN ? '⚠️  DRY RUN — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
