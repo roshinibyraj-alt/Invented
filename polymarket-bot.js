@@ -137,17 +137,17 @@ const EQUITY_POINTS_PER_PAIR = Number(process.env.EQUITY_POINTS_PER_PAIR || 300)
 const EQUITY_POINTS_TOTAL    = Number(process.env.EQUITY_POINTS_TOTAL || 500);
 
 const Z_ENTRY_THRESHOLD      = Number(process.env.Z_ENTRY_THRESHOLD || 1.2);
-const MIN_ENTRY_PRICE        = Number(process.env.MIN_ENTRY_PRICE || 0.52);
-const MAX_ENTRY_PRICE        = Number(process.env.MAX_ENTRY_PRICE || 0.88);
+const MIN_ENTRY_PRICE        = Number(process.env.MIN_ENTRY_PRICE || 0.60);
+const MAX_ENTRY_PRICE        = Number(process.env.MAX_ENTRY_PRICE || 0.69);
 // TP/SL were 0.12 / 0.20 — a 66% observed win rate on that ratio is still
 // only roughly breakeven (breakeven WR = SL/(TP+SL) = 62.5%), and live
 // results showed avg loss ran ~2x avg win, eating most of the edge from
 // win rate alone. Rebalanced to a much closer-to-symmetric ratio so the
 // same win rate converts into real positive expectancy (breakeven WR now
 // ~46%, i.e. ~20pts of margin instead of ~4pts).
-const TP_OFFSET              = Number(process.env.TP_OFFSET || 0.15);
+const TP_OFFSET              = Number(process.env.TP_OFFSET || 0.30);
 const SL_OFFSET              = Number(process.env.SL_OFFSET || 0.13);
-const MIN_ENTRY_ELAPSED_SEC  = Number(process.env.MIN_ENTRY_ELAPSED_SEC || 15);
+const MIN_ENTRY_ELAPSED_SEC  = Number(process.env.MIN_ENTRY_ELAPSED_SEC || 60);
 const MIN_ENTRY_REMAINING_SEC = Number(process.env.MIN_ENTRY_REMAINING_SEC || 30);
 // Inside this many seconds of window close, a real SL sell into a thinning
 // book is unreliable, so the normal SL check stands down here.
