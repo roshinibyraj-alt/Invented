@@ -39,7 +39,7 @@ app.get('/', (_, res) => {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>🔀 5m Crypto Merge-Arb Bot</title>
+<title>⏱️ 5m Crypto Up/Down Bot</title>
 <style>
   :root {
     --bg: #ffffff; --bg2: #f5f7fa; --bg3: #edf0f4; --border: #d0d7e2;
@@ -107,7 +107,7 @@ app.get('/', (_, res) => {
 </head>
 <body>
   <div class="header">
-    <div class="logo">🔀 <span>5M</span> MERGE-ARB BOT</div>
+    <div class="logo">⏱️ <span>5M</span> UP/DOWN BOT</div>
     <div id="mode-badge" class="mode-badge ${DRY_RUN ? 'mode-dry' : 'mode-live'}">${DRY_RUN ? 'DRY RUN' : '🔴 LIVE'}</div>
   </div>
 
@@ -127,8 +127,7 @@ app.get('/', (_, res) => {
     <div class="stat"><div class="stat-label">Bankroll</div><div class="stat-val" id="total-bankroll">$0.00</div></div>
     <div class="stat"><div class="stat-label">Fees Paid</div><div class="stat-val pnl-neg" id="total-fees">$0.00</div></div>
     <div class="stat"><div class="stat-label">Rebates Earned</div><div class="stat-val pnl-pos" id="total-rebates">$0.00</div></div>
-    <div class="stat"><div class="stat-label">Merges</div><div class="stat-val" id="total-merges">0</div><div class="stat-sub" id="merge-shares-sub">0 sh merged</div></div>
-    <div class="stat"><div class="stat-label">Resolutions</div><div class="stat-val" id="res-rate">—</div><div class="stat-sub" id="res-wl-sub">0W / 0L</div></div>
+    <div class="stat"><div class="stat-label">Win Rate</div><div class="stat-val" id="win-rate">—</div><div class="stat-sub" id="win-loss-sub">0W / 0L</div></div>
     <div class="stat"><div class="stat-label">Uptime</div><div class="stat-val" id="uptime">0s</div></div>
     <div class="stat"><div class="stat-label">Trading</div><div class="stat-val" id="trading-flag">—</div></div>
   </div>
@@ -231,11 +230,8 @@ app.get('/', (_, res) => {
     document.getElementById('total-bankroll').textContent = '$'+(s.totalBankroll||0).toFixed(2);
     document.getElementById('total-fees').textContent = '$'+(s.totalFeesPaid||0).toFixed(4);
     document.getElementById('total-rebates').textContent = '$'+(s.totalRebatesEarned||0).toFixed(4);
-    document.getElementById('total-merges').textContent = s.totalMerges||0;
-    document.getElementById('merge-shares-sub').textContent = (s.totalMergedShares||0).toFixed(0)+' sh merged';
-    const resTotal = (s.totalResolutionWins||0)+(s.totalResolutionLosses||0);
-    document.getElementById('res-rate').textContent = resTotal ? Math.round(100*(s.totalResolutionWins||0)/resTotal)+'%' : '—';
-    document.getElementById('res-wl-sub').textContent = (s.totalResolutionWins||0)+'W / '+(s.totalResolutionLosses||0)+'L';
+    document.getElementById('win-rate').textContent = (s.winRate!==null && s.winRate!==undefined) ? s.winRate+'%' : '—';
+    document.getElementById('win-loss-sub').textContent = (s.totalWins||0)+'W / '+(s.totalLosses||0)+'L';
     document.getElementById('uptime').textContent = fmt(s.uptime||0);
     const tf = document.getElementById('trading-flag');
     tf.textContent = s.tradingEnabled ? 'ON' : 'PAUSED';
@@ -251,35 +247,32 @@ app.get('/', (_, res) => {
       grid.innerHTML = '<div class="empty">No pairs configured</div>';
     } else {
       grid.innerHTML = s.pairStates.map(p => {
-        const inv = p.inventory || {pUp:0, pDown:0};
-        const hasPos = (inv.pUp > 0) || (inv.pDown > 0) || (p.openCycles && p.openCycles.length > 0);
-        const cyclesHtml = (p.openCycles && p.openCycles.length) ? (
-          '<div class="signal-box">'+p.openCycles.map(c =>
-            '⏱ Up['+c.upStatus+']'+c.upShares+'sh@'+c.upPrice.toFixed(2)+' Down['+c.downStatus+']'+c.downShares+'sh@'+c.downPrice.toFixed(2)+' · cancel in '+c.secsLeft+'s'
-          ).join('<br>')+'</div>'
-        ) : '<div class="signal-box">no open cycle</div>';
-        const lateHtml = (p.lateSell && (p.lateSell.up || p.lateSell.down)) ? (
-          '<div class="pos-box">🏁 late sell — '+
-          (p.lateSell.up ? ('<span class="side-up">Up</span> '+p.lateSell.up.shares.toFixed(0)+'sh@'+p.lateSell.up.price.toFixed(2)+' ') : '')+
-          (p.lateSell.down ? ('<span class="side-down">Down</span> '+p.lateSell.down.shares.toFixed(0)+'sh@'+p.lateSell.down.price.toFixed(2)) : '')+
-          '</div>'
-        ) : '';
-        const posHtml = hasPos ? (
-          '<div class="pos-box">Inventory: <span class="side-up">Up</span> '+inv.pUp.toFixed(0)+'sh &nbsp; <span class="side-down">Down</span> '+inv.pDown.toFixed(0)+'sh'+
+        const sig = p.signal;
+        const sigHtml = sig ? (
+          '<div class="signal-box">Δopen '+sig.openDeltaPct.toFixed(3)+'% | mom15s '+sig.shortMomPct.toFixed(3)+'% | vol '+sig.vol.toFixed(3)+'% | z '+sig.z.toFixed(2)+' | score '+sig.score.toFixed(2)+' | bias <span class="'+(sig.direction==='Up'?'side-up':'side-down')+'">'+sig.direction+'</span></div>'
+        ) : '<div class="signal-box">warming up…</div>';
+        const posHtml = p.position ? (
+          '<div class="pos-box"><span class="'+(p.position.side==='Up'?'side-up':'side-down')+'">'+p.position.side+'</span> '+
+          p.position.shares.toFixed(2)+'sh @ '+p.position.entryPrice.toFixed(2)+' | cost $'+p.position.cost.toFixed(2)+
+          ' (conf '+(p.position.confMult||1).toFixed(2)+'x)'+
+          ' | TP '+p.position.tpPrice.toFixed(2)+' / SL '+p.position.slPrice.toFixed(2)+
           (p.unrealizedPnl!==undefined ? (' | u/pnl <span class="'+pClass(p.unrealizedPnl)+'">'+sgn(p.unrealizedPnl)+'</span>') : '') +
-          '</div>' + lateHtml
-        ) : '<div class="pos-box">no inventory</div>';
+          '</div>'
+        ) : (p.pendingEntry ? (
+          '<div class="pos-box">📌 resting <span class="'+(p.pendingEntry.side==='Up'?'side-up':'side-down')+'">'+p.pendingEntry.side+'</span> @ '+p.pendingEntry.limitPrice.toFixed(2)+
+          ' (~$'+p.pendingEntry.stake.toFixed(2)+') | '+p.pendingEntry.secsLeft+'s left to fill</div>'
+        ) : '<div class="pos-box">no open position</div>');
         const eqCurve = buildEquitySvg(p.equityCurve, 280, 34, null);
-        return '<div class="pair-card '+(hasPos?'has-pos':'')+' '+(p.tradable?'':'untradable')+'">'+
+        return '<div class="pair-card '+(p.position?'has-pos':'')+' '+(p.tradable?'':'untradable')+'">'+
           '<div class="pair-hdr"><div class="pair-sym">'+p.symbol+'</div><div class="pair-timer">'+(p.tradable?fmtSecs(p.secsToEnd):'loading…')+'</div></div>'+
           '<div class="pair-body">'+
             '<div class="pair-row"><span class="pair-key">Spot</span><span>'+(p.spot?p.spot.toFixed(4):'—')+'</span><span class="pair-key">Open</span><span>'+(p.openSpot?p.openSpot.toFixed(4):'—')+'</span></div>'+
             '<div class="pair-row"><span class="pair-key">Up ask/bid</span><span>'+(p.upAsk?.toFixed(2)||'—')+' / '+(p.upBid?.toFixed(2)||'—')+'</span></div>'+
             '<div class="pair-row"><span class="pair-key">Down ask/bid</span><span>'+(p.downAsk?.toFixed(2)||'—')+' / '+(p.downBid?.toFixed(2)||'—')+'</span></div>'+
-            '<div class="pair-row"><span class="pair-key">Bankroll</span><span>$'+p.bankroll.toFixed(2)+'</span><span class="pair-key">Merges</span><span>'+p.mergesCount+' ('+p.mergedShares.toFixed(0)+'sh)</span></div>'+
-            '<div class="pair-row"><span class="pair-key">Realized</span><span class="'+pClass(p.realizedPnl)+'">'+sgn(p.realizedPnl)+'</span><span class="pair-key">Resolutions</span><span>'+p.resolutionWins+'W/'+p.resolutionLosses+'L</span></div>'+
+            '<div class="pair-row"><span class="pair-key">Bankroll</span><span>$'+p.bankroll.toFixed(2)+'</span><span class="pair-key">Base stake</span><span>$'+p.baseStake.toFixed(2)+'</span></div>'+
+            '<div class="pair-row"><span class="pair-key">Realized</span><span class="'+pClass(p.realizedPnl)+'">'+sgn(p.realizedPnl)+'</span><span class="pair-key">W/L</span><span>'+p.wins+'/'+p.losses+'</span></div>'+
             '<div class="pair-row"><span class="pair-key">Fees paid</span><span class="pnl-neg">-$'+(p.feesPaid||0).toFixed(4)+'</span><span class="pair-key">Rebates</span><span class="pnl-pos">+$'+(p.rebatesEarned||0).toFixed(4)+'</span></div>'+
-            cyclesHtml + posHtml +
+            sigHtml + posHtml +
             '<div class="spark-box"><svg viewBox="0 0 280 34" preserveAspectRatio="none">'+eqCurve+'</svg><div class="spark-label">Equity curve ($'+p.markValue.toFixed(2)+')</div></div>'+
           '</div></div>';
       }).join('');
@@ -290,10 +283,10 @@ app.get('/', (_, res) => {
       tb.innerHTML = s.trades.map(t => {
         const pnlStr = (t.profit !== undefined) ? sgn(t.profit) : '—';
         const pnlCls = (t.profit !== undefined) ? pClass(t.profit) : '';
-        const sideColor = t.side === 'BUY' ? '#ffd740' : (t.side === 'MERGE' ? '#7c3aed' : (t.side === 'RESOLVE' ? (t.profit>=0?'#00e676':'#ff4757') : '#00d4ff'));
+        const sideColor = t.side === 'BUY' ? '#ffd740' : (t.reason === 'SL' ? '#ff4757' : (t.reason==='TP'?'#00e676':'#00d4ff'));
         return '<tr><td>'+t.time+'</td><td>'+t.symbol+'</td>'+
           '<td style="color:'+sideColor+'">'+t.side+(t.outcome?(' '+t.outcome):'')+'</td>'+
-          '<td>'+(t.side||'—')+'</td>'+
+          '<td>'+(t.reason||'—')+'</td>'+
           '<td>'+(t.price||0).toFixed(3)+'</td>'+
           '<td>'+(t.shares||0).toFixed(2)+'</td>'+
           '<td class="'+pnlCls+'">'+pnlStr+'</td></tr>';
@@ -307,10 +300,9 @@ app.get('/', (_, res) => {
       logEl.innerHTML = s.logs.map(l => {
         const col = l.includes('❌')||l.includes('💥') ? '#ff4757'
                   : l.includes('💰')||l.includes('✅') ? '#00e676'
-                  : l.includes('🔀') ? '#7c3aed'
-                  : l.includes('📌')||l.includes('🏁') ? '#ffd740'
+                  : l.includes('🎯')||l.includes('🧯') ? '#ffd740'
                   : l.includes('🔭')||l.includes('⏰') ? '#00d4ff'
-                  : l.includes('🚫')||l.includes('⚠️') ? '#ff9f0a'
+                  : l.includes('⚠️') ? '#ff9f0a'
                   : '#4a6080';
         return '<div style="color:'+col+'">'+l+'</div>';
       }).join('');
