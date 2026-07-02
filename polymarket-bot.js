@@ -39,10 +39,16 @@
  *
  *  IMBALANCE REBALANCING: if a prior cycle left the bot holding more of
  *  one side than the other (e.g. Up filled but Down got cancelled), the
- *  next cycle sizes the LAGGING side's order at 50 + the current gap,
- *  while the leading side stays at the standard 50. A fill on the
- *  lagging side then closes the gap back to equal Up/Down inventory,
- *  which immediately triggers a merge.
+ *  next cycle CONSIDERS sizing the LAGGING side's order at 50 + the gap
+ *  (capped at MAX_TOPUP_SHARES) so a fill there closes the gap and
+ *  triggers a merge. Critically, the top-up only happens if it would
+ *  still merge profitably: (avg cost of the side already held) + (the
+ *  lagging leg's quoted price) must stay at least MIN_MERGE_MARGIN below
+ *  $1. If the market has trended and that math no longer works, the bot
+ *  quotes the lagging side at the standard 50 instead of forcing an
+ *  oversized, likely-losing fill — the gap either closes later at a
+ *  better price, or the leftover rides to the 0.99 late-sell / normal
+ *  resolution like any other unmatched inventory.
  *
  *  FILTERS / GATES:
  *    - Only trade while BOTH the Up ask and the Down ask are inside
@@ -106,6 +112,8 @@ const TRADE_CUTOFF_SECS      = Number(process.env.TRADE_CUTOFF_SECS || 240);   /
 const PRICE_BAND_MIN         = Number(process.env.PRICE_BAND_MIN || 0.25);
 const PRICE_BAND_MAX         = Number(process.env.PRICE_BAND_MAX || 0.75);
 const LATE_SELL_PRICE        = Number(process.env.LATE_SELL_PRICE || 0.99);
+const MAX_TOPUP_SHARES       = Number(process.env.MAX_TOPUP_SHARES || 100);  // cap on extra shares added to a lagging leg in one cycle
+const MIN_MERGE_MARGIN       = Number(process.env.MIN_MERGE_MARGIN || 0.01); // required cushion below $1 before topping up the lagging side
 const MIN_SHARES             = Number(process.env.MIN_SHARES || 5); // Polymarket order minimum
 const EQUITY_POINTS_PER_PAIR = Number(process.env.EQUITY_POINTS_PER_PAIR || 300);
 const EQUITY_POINTS_TOTAL    = Number(process.env.EQUITY_POINTS_TOTAL || 500);
@@ -499,17 +507,52 @@ function computeLimitPrice(ask, bid) {
 // ─────────────────────────────────────────
 //  Cycle engine — place / poll / cancel the two-sided limit orders
 // ─────────────────────────────────────────
-// Sizes the next cycle's two legs. Standard is ORDER_SHARES on each side;
-// if prior cycles left an Up/Down inventory imbalance, the LAGGING side
-// gets topped up by the size of the gap so a fill there closes it back
-// to equal inventory (which immediately triggers a merge).
-function rebalancedOrderSizes(p) {
+// Sizes the next cycle's two legs. Standard is ORDER_SHARES on each side.
+// If prior cycles left an Up/Down inventory imbalance, we CONSIDER topping
+// up the lagging side to close it — but only if doing so still merges
+// profitably against the AVERAGE COST of the side we already hold, not
+// just today's quote. This is the fix for the "chasing a trend" failure
+// mode: blindly topping up the lagging side at whatever price prevails
+// right now can merge cheap old inventory against an expensive new fill
+// for a combined cost > $1 — a guaranteed loss on that merge. Instead:
+//   projectedBlend = (avg cost of side already held) + (lagging leg's limit price)
+//   only top up if projectedBlend <= 1 - MIN_MERGE_MARGIN
+// If it's not profitable, we still quote the lagging side at the
+// standard size (so the gap CAN close opportunistically if price moves
+// back in our favor later) but we don't force a big, expensive fill to
+// close it right now. The top-up itself is also capped at
+// MAX_TOPUP_SHARES so one gap never turns into one oversized bet.
+function rebalancedOrderSizes(p, upLimit, downLimit) {
   const imbalance = round2(p.pUp - p.pDown); // >0: Up ahead (Down lagging); <0: Down ahead (Up lagging)
   let upShares = ORDER_SHARES;
   let downShares = ORDER_SHARES;
-  if (imbalance > 0) downShares = round2(ORDER_SHARES + imbalance);
-  else if (imbalance < 0) upShares = round2(ORDER_SHARES + Math.abs(imbalance));
-  return { upShares, downShares, imbalance };
+  let toppedUp = false;
+  let declinedReason = null;
+
+  if (imbalance > 0 && p.pUp > 0) {
+    // Down is lagging; Up is the side we already hold
+    const upAvgCost = round4(p.pUpCost / p.pUp);
+    const projectedBlend = round4(upAvgCost + downLimit);
+    if (projectedBlend <= round4(1 - MIN_MERGE_MARGIN)) {
+      const gap = Math.min(imbalance, MAX_TOPUP_SHARES);
+      downShares = round2(ORDER_SHARES + gap);
+      toppedUp = true;
+    } else {
+      declinedReason = `held Up avg $${upAvgCost.toFixed(4)} + Down quote $${downLimit.toFixed(2)} = $${projectedBlend.toFixed(4)} > $${(1 - MIN_MERGE_MARGIN).toFixed(2)} cap`;
+    }
+  } else if (imbalance < 0 && p.pDown > 0) {
+    const downAvgCost = round4(p.pDownCost / p.pDown);
+    const projectedBlend = round4(downAvgCost + upLimit);
+    if (projectedBlend <= round4(1 - MIN_MERGE_MARGIN)) {
+      const gap = Math.min(Math.abs(imbalance), MAX_TOPUP_SHARES);
+      upShares = round2(ORDER_SHARES + gap);
+      toppedUp = true;
+    } else {
+      declinedReason = `held Down avg $${downAvgCost.toFixed(4)} + Up quote $${upLimit.toFixed(2)} = $${projectedBlend.toFixed(4)} > $${(1 - MIN_MERGE_MARGIN).toFixed(2)} cap`;
+    }
+  }
+
+  return { upShares, downShares, imbalance, toppedUp, declinedReason };
 }
 
 async function maybeStartCycle(p, elapsed) {
@@ -529,7 +572,7 @@ async function maybeStartCycle(p, elapsed) {
   const downLimit = computeLimitPrice(p.downAsk, p.downBid);
   if (upLimit == null || downLimit == null) return;
 
-  const { upShares, downShares, imbalance } = rebalancedOrderSizes(p);
+  const { upShares, downShares, imbalance, toppedUp, declinedReason } = rebalancedOrderSizes(p, upLimit, downLimit);
 
   const notionalNeeded = round2(upLimit * upShares + downLimit * downShares);
   if (notionalNeeded > p.bankroll) {
@@ -550,9 +593,12 @@ async function maybeStartCycle(p, elapsed) {
     down: { orderId: downOrder.id || downOrder.orderId || null, limitPrice: downLimit, shares: downShares, status: 'pending' },
   });
 
-  const rebalanceNote = imbalance !== 0
-    ? ` | rebalancing gap of ${Math.abs(imbalance)} toward ${imbalance > 0 ? 'Down' : 'Up'}`
-    : '';
+  let rebalanceNote = '';
+  if (toppedUp) {
+    rebalanceNote = ` | rebalancing gap of ${Math.abs(imbalance)} toward ${imbalance > 0 ? 'Down' : 'Up'}`;
+  } else if (imbalance !== 0 && declinedReason) {
+    rebalanceNote = ` | gap of ${Math.abs(imbalance)} toward ${imbalance > 0 ? 'Down' : 'Up'} NOT topped up (${declinedReason}) — standard size only`;
+  }
   log(`📌 ${p.symbol} cycle @${Math.floor(elapsed)}s → Up ${upShares}sh@${upLimit.toFixed(2)} | Down ${downShares}sh@${downLimit.toFixed(2)} | cancel in ${CANCEL_AFTER_SECS}s${rebalanceNote}`);
 }
 
@@ -850,6 +896,8 @@ function buildState() {
       priceBandMin: PRICE_BAND_MIN,
       priceBandMax: PRICE_BAND_MAX,
       lateSellPrice: LATE_SELL_PRICE,
+      maxTopupShares: MAX_TOPUP_SHARES,
+      minMergeMargin: MIN_MERGE_MARGIN,
       cryptoTakerFeeRate: CRYPTO_TAKER_FEE_RATE,
       cryptoMakerRebateShare: CRYPTO_MAKER_REBATE_SHARE,
     },
@@ -924,7 +972,7 @@ async function init(privateKey, emit, slogFn) {
   slog = slogFn;
   log(`🚀 5-Minute Crypto Up/Down Merge-Arb Bot`);
   log(`⚙️  $${TOTAL_CAPITAL} demo capital across ${pairList.length} pairs (${pairList.join(', ')}) → $${perPairCapital.toFixed(2)}/pair`);
-  log(`⚙️  ${ORDER_SHARES}sh Up + ${ORDER_SHARES}sh Down every ${CYCLE_INTERVAL_SECS}s @ mid-${ORDER_PRICE_OFFSET} | cancel unfilled @ ${CANCEL_AFTER_SECS}s (no capital held while unfilled) | lagging side tops up to close prior imbalance | band [${PRICE_BAND_MIN}-${PRICE_BAND_MAX}] | new cycles stop @ ${TRADE_CUTOFF_SECS}s | late sell @ ${LATE_SELL_PRICE}`);
+  log(`⚙️  ${ORDER_SHARES}sh Up + ${ORDER_SHARES}sh Down every ${CYCLE_INTERVAL_SECS}s @ mid-${ORDER_PRICE_OFFSET} | cancel unfilled @ ${CANCEL_AFTER_SECS}s (no capital held while unfilled) | lagging side tops up (cap ${MAX_TOPUP_SHARES}sh) only if held-avg + quote stays ≥$${MIN_MERGE_MARGIN} below $1 | band [${PRICE_BAND_MIN}-${PRICE_BAND_MAX}] | new cycles stop @ ${TRADE_CUTOFF_SECS}s | late sell @ ${LATE_SELL_PRICE}`);
   log(`⚙️  fees: maker legs 0 fee +${(CRYPTO_MAKER_REBATE_SHARE*100).toFixed(0)}% rebate (crypto taker rate ${CRYPTO_TAKER_FEE_RATE}) | merge is fee-free on-chain`);
   log(`${DRY_RUN ? '⚠️  DRY RUN — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
