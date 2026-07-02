@@ -2,131 +2,85 @@
 
 /**
  * ═══════════════════════════════════════════════════════════════
- *  POLYMARKET 5-MINUTE CRYPTO UP/DOWN — MERGE ARBITRAGE BOT
+ *  POLYMARKET 5-MINUTE CRYPTO UP/DOWN — MAKER MERGE-ARB BOT
  * ═══════════════════════════════════════════════════════════════
  *
- *  MARKETS: BTC / ETH / SOL "<asset>-updown-5m-<unixWindowStart>"
- *  events. Each event has one market, two outcomes ("Up"/"Down").
- *  Slug math: window_ts = now - (now % 300); slug = `${asset}-updown-5m-${window_ts}`.
+ *  MARKETS: same deterministic 5-minute BTC/ETH/SOL Up/Down events as
+ *  before — "<asset>-updown-5m-<unixWindowStart>". "Up" pays $1 if the
+ *  asset's close price >= its open ("Price to Beat"), else "Down" pays $1.
  *
- *  ── STRATEGY: complementary-pair merge arbitrage, not directional ──
- *  Every Up token + Down token pair is a "complete set" that the
- *  Polymarket CTF contract will always let you convert into exactly
- *  $1 of collateral before resolution (mergePositions), regardless
- *  of what happens to the market price. So instead of betting on
- *  which side wins, this bot tries to acquire one Up share and one
- *  Down share for LESS than $1 combined, then merges them for a
- *  guaranteed, resolution-independent $1 — the loss/gain is locked
- *  in the moment both legs fill, not at window close.
+ *  STRATEGY (completely replaces the old momentum/z-score/TP-SL logic):
+ *  This is a merge-arbitrage / two-sided market-making strategy, not a
+ *  directional bet. Every 10 seconds, while inside the trading window,
+ *  the bot rests TWO limit buy orders simultaneously:
+ *    - BUY 50 Up shares   @ (mid of Up book)   - 0.04
+ *    - BUY 50 Down shares @ (mid of Down book) - 0.04
+ *  Both are genuine maker orders sitting inside the spread — they do not
+ *  cross, so they may or may not fill. The bot polls every 500ms to see
+ *  if either side has traded down into its resting price.
  *
- *  PER PAIR, EVERY 10 SECONDS (while inside the trading window):
- *    1. Read live mid price on each side: mid = (bid+ask)/2.
- *    2. Only proceed if BOTH mids sit inside [0.25, 0.75] — this
- *       avoids one-sided/near-resolved books where there's no real
- *       edge left and fills are unlikely anyway.
- *    3. Place TWO resting (maker) limit BUY orders, 50 shares each:
- *         Up   limit price = round(upMid   - 0.04, 2)
- *         Down limit price = round(downMid - 0.04, 2)
- *       Neither crosses the spread, so neither is a taker order.
- *    4. Poll every 500ms for fills on both legs.
- *    5. At the 9-second mark (T+9s from cycle start), cancel
- *       whatever hasn't filled. The next cycle starts at T+10s
- *       regardless of how this one resolved — cycles are strictly
- *       sequential, never overlapping.
- *    6. Whenever the bot's running Up-share and Down-share inventory
- *       for a window becomes equal on both sides (could be same
- *       cycle, could be spread across several cycles), it merges the
- *       matched amount into pUSD immediately via mergePositions.
+ *  THE EDGE — MERGE: Polymarket's CTF contract lets you burn 1 Up share
+ *  + 1 Down share for the SAME condition and redeem exactly $1 of
+ *  collateral, at any time before resolution, via mergePositions() —
+ *  regardless of where the market is currently pricing either side. So
+ *  whenever this bot ends up holding equal Up and Down share counts, it
+ *  merges them immediately for a guaranteed $1/pair, locking in the gap
+ *  between what was paid for the pair and $1 with zero exposure to which
+ *  side actually wins. See the accompanying deep-dive on how merge works.
  *
- *  WINDOW GATING:
- *    - New cycles only start during the first 4 minutes (240s) of
- *      the 5-minute window — the last 60s are left clear of new risk.
- *    - After the 4-minute mark, any inventory that never found its
- *      match (couldn't be merged) gets a resting limit SELL at 0.99.
- *      If that doesn't fill before the window closes, it's simply
- *      let ride to Polymarket's own on-chain resolution (winning
- *      side redeems $1/share, losing side is worth $0).
+ *  ORDER LIFECYCLE PER 10s CYCLE:
+ *    - t+0s:  place both limit orders (Up + Down, 50 shares each)
+ *    - t+0s → t+9s: polled every 500ms; either leg can fill any time
+ *    - t+9s:  any leg still unfilled is cancelled
+ *    - t+10s: next cycle fires, independent of whether the previous one
+ *             fully filled, partially filled, or cancelled outright
  *
- *  MERGE MECHANICS (docs.polymarket.com/concepts/positions-tokens):
- *    Every Up/Down pair in existence is backed 1:1 by $1 of collateral
- *    locked in the Gnosis Conditional Token Framework (CTF) contract
- *    the moment it was split into being. mergePositions() burns 1 Up
- *    + 1 Down token from the caller and releases that $1 straight
- *    back — this is a contract guarantee, not a market trade, so it
- *    works at ANY price and needs no counterparty. It cannot be done
- *    after the market resolves (post-resolution you redeem the
- *    winning side instead). The only cost is Polygon gas (fractions
- *    of a cent) — Polymarket does not charge a trading fee on merges.
- *    That is exactly why this strategy works: paying < $1 combined
- *    for one Up + one Down share is a locked-in, resolution-agnostic
- *    profit the instant both legs are matched and merged.
+ *  FILTERS / GATES:
+ *    - Only trade while BOTH the Up ask and the Down ask are inside
+ *      [0.25, 0.75] — refuse to quote a lopsided/near-resolved book.
+ *    - Only start NEW cycles during the first 4 minutes (240s) of the
+ *      5-minute window — the last 60s is left clean for wind-down.
  *
- *    In DRY_RUN this is pure bookkeeping (instant, as requested). In
- *    live mode this bot calls mergePositions() directly on the CTF
- *    contract the moment a match is found — not through the CLOB —
- *    so it isn't waiting on order-book depth or a counterparty, and
- *    fires within the same 500ms tick that created the match. It's
- *    routed through Polymarket's Builder Relayer (the same one
- *    trader.js already uses to derive the deposit wallet) so it
- *    executes as the wallet actually holding the tokens and stays
- *    gasless.
+ *  LEFTOVER SHARES (unequal fills — e.g. Up filled but Down didn't):
+ *    - These sit unmerged, accumulating across cycles, and get merged
+ *      the moment the opposite side catches up to an equal count.
+ *    - Anything still unmatched once the 4-minute mark passes gets a
+ *      resting limit SELL at 0.99 (still a maker order). If that never
+ *      fills before window close, it simply rides to Polymarket's own
+ *      on-chain resolution/redemption — same as holding a normal
+ *      position to expiry.
  *
- *  FEES & MAKER REBATES (Polymarket Fee Structure V2, crypto category
- *  — docs.polymarket.com/trading/fees, current as of March 30, 2026):
- *    fee = shares × feeRate × price × (1 - price)   [taker only]
- *    Crypto category taker fee rate: 0.07 (peaks at 1.75% per-contract
- *    fee-of-price at the p=0.50 midpoint, shrinks toward 0 near $0.01
- *    / $0.99). Makers ALWAYS pay $0 in fees, and additionally earn a
- *    rebate = fee-that-would-have-applied × 20% (crypto's maker rebate
- *    share; most other categories are 25%), credited at fill time.
- *    Every entry leg here is a genuine resting maker order (priced
- *    below the live mid, doesn't cross the book), so every fill is
- *    0 fee + rebate. The 0.99 leftover cleanup sell is also a resting
- *    maker order for the same reason. Only a market/taker order would
- *    ever pay the 0.07 fee — this bot never places one.
+ *  FEES (Polymarket Fee Structure V2, crypto category —
+ *  https://docs.polymarket.com/trading/fees, https://help.polymarket.com):
+ *  fee = shares × 0.07 × price × (1-price) — charged ONLY to takers, zero
+ *  at the extremes (near $0.01/$0.99), peaking (~1.8% of notional) at
+ *  $0.50, symmetric around $0.50. Makers pay $0 and additionally earn a
+ *  20% rebate (crypto category's share) of the fee value their filled
+ *  liquidity generated. Every order this strategy places is a passive
+ *  resting order below/above the current market, so in practice it should
+ *  always land on the zero-fee + rebate side of that split — there is no
+ *  intentional taker leg anywhere in this strategy. Merging itself is
+ *  entirely fee-free on-chain (Polygon gas only, not modeled here).
  *
- *  CAPITAL: $2000 demo capital split evenly across the configured
- *  pairs (BTC/ETH/SOL by default) into independent bankrolls, so one
- *  pair's exposure can't starve another's.
+ *  CAPITAL: $2000 demo capital split evenly across configured pairs
+ *  (BTC/ETH/SOL by default) into independent bankrolls.
  * ═══════════════════════════════════════════════════════════════
  */
 
 const PolymarketTrader = require('./polymarket-trader');
-const { RelayClient } = require('@polymarket/builder-relayer-client');
-const { encodeFunctionData } = require('viem');
 
 // ── API endpoints ──
 const GAMMA   = 'https://gamma-api.polymarket.com';
 const CLOB    = 'https://clob.polymarket.com';
 const BINANCE = 'https://api.binance.com';
-const RELAYER_HOST = 'https://relayer-v2.polymarket.com';
-
-// ── CTF contract (Polygon mainnet) — used for the direct on-chain merge ──
-// docs.polymarket.com/developers/CTF/merge. Same addresses used by
-// Polymarket's own example scripts and the official Go/relayer SDKs
-// (cross-checked against the CTF contract's verified ABI on PolygonScan).
-const CTF_CONTRACT    = '0x4D97DCd97eC945f40cF65F87097ACe5EA0476045';
-const USDC_E_CONTRACT = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
-const ZERO_BYTES32    = '0x' + '0'.repeat(64);
-const CTF_MERGE_ABI = [{
-  type: 'function', name: 'mergePositions', stateMutability: 'nonpayable',
-  inputs: [
-    { name: 'collateralToken', type: 'address' },
-    { name: 'parentCollectionId', type: 'bytes32' },
-    { name: 'conditionId', type: 'bytes32' },
-    { name: 'partition', type: 'uint256[]' },
-    { name: 'amount', type: 'uint256' },
-  ],
-  outputs: [],
-}];
 
 // ── Timing ──
-const TICK_MS                = 500;   // main loop AND fill-check cadence (per spec: check every 500ms)
-const SPOT_REFRESH_MS        = 2000;  // Binance price poll (only used for display + resolution fallback now)
-const POLY_PRICE_REFRESH_MS  = 500;   // CLOB up/down ask & bid poll — needs to be fast, fills are checked off this
-const WINDOW_SECS            = 300;   // 5 minutes
-const RESOLUTION_BUFFER_S    = 8;     // wait this long past window close before finalizing outcome
-const SLUG_OFFSET_FALLBACKS  = [0, -300, 300]; // handle brief indexing lag around the boundary
+const TICK_MS             = 500;    // main decision loop — also our fill-check cadence
+const SPOT_REFRESH_MS     = 1000;   // Binance price poll
+const POLY_PRICE_REFRESH_MS = 1000; // CLOB price poll
+const WINDOW_SECS         = 300;    // 5 minutes
+const RESOLUTION_BUFFER_S = 8;      // wait this long past window close before finalizing outcome
+const SLUG_OFFSET_FALLBACKS = [0, -300, 300]; // handle brief indexing lag around the boundary
 
 // ── Env / config ──
 const DRY_RUN = (process.env.DRY_RUN || 'true').toLowerCase() === 'true';
@@ -134,26 +88,25 @@ const TOTAL_CAPITAL = Number(process.env.TOTAL_CAPITAL || 2000);
 const DEFAULT_PAIRS = (process.env.CRYPTO_PAIRS || 'BTC,ETH,SOL')
   .split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
 
-// ── Strategy parameters (per user spec) ──
-const CYCLE_INTERVAL_SEC     = Number(process.env.CYCLE_INTERVAL_SEC || 10);   // new cycle cadence
-const CYCLE_CANCEL_OFFSET_SEC = Number(process.env.CYCLE_CANCEL_OFFSET_SEC || 9); // cancel unfilled leg at T+9s
-const ORDER_SIZE_SHARES      = Number(process.env.ORDER_SIZE_SHARES || 50);    // fixed size, each leg, each cycle
-const ENTRY_DISCOUNT         = Number(process.env.ENTRY_DISCOUNT || 0.04);     // limit = mid - 0.04
+// ── Strategy config (merge-arb) ──
+const ORDER_SHARES           = Number(process.env.ORDER_SHARES || 50);   // fixed shares per leg, per cycle
+const ORDER_PRICE_OFFSET     = Number(process.env.ORDER_PRICE_OFFSET || 0.04); // below mid, both sides
+const CYCLE_INTERVAL_SECS    = Number(process.env.CYCLE_INTERVAL_SECS || 10);  // new order-pair every N seconds
+const CANCEL_AFTER_SECS      = Number(process.env.CANCEL_AFTER_SECS || 9);     // cancel unfilled leg N seconds after entry
+const TRADE_CUTOFF_SECS      = Number(process.env.TRADE_CUTOFF_SECS || 240);   // stop starting new cycles after 4 min
 const PRICE_BAND_MIN         = Number(process.env.PRICE_BAND_MIN || 0.25);
 const PRICE_BAND_MAX         = Number(process.env.PRICE_BAND_MAX || 0.75);
-const TRADING_CUTOFF_SEC     = Number(process.env.TRADING_CUTOFF_SEC || 240);  // stop new cycles after 4 minutes
-const LEFTOVER_SELL_PRICE    = Number(process.env.LEFTOVER_SELL_PRICE || 0.99);
+const LATE_SELL_PRICE        = Number(process.env.LATE_SELL_PRICE || 0.99);
+const MIN_SHARES             = Number(process.env.MIN_SHARES || 5); // Polymarket order minimum
 const EQUITY_POINTS_PER_PAIR = Number(process.env.EQUITY_POINTS_PER_PAIR || 300);
 const EQUITY_POINTS_TOTAL    = Number(process.env.EQUITY_POINTS_TOTAL || 500);
 
 // ── Fees & maker rebates (Polymarket Fee Structure V2, crypto category) ──
 // fee = shares × feeRate × price × (1-price). Only TAKER fills pay this;
-// makers always pay zero. Crypto: taker fee rate 0.07, maker rebate 20%
-// of the fee value the maker's filled liquidity generated. Every order
-// this bot places is a resting maker order, so in practice this bot only
-// ever earns rebates and never pays this fee — the constant is kept and
-// applied generically so the accounting is correct if that ever changes.
-const CRYPTO_TAKER_FEE_RATE     = Number(process.env.CRYPTO_TAKER_FEE_RATE || 0.07);
+// makers always pay zero. This strategy never intentionally takes, so
+// these functions exist mainly for the (rare) case a fill crosses the
+// spread unexpectedly, and for the maker-rebate calc on every real fill.
+const CRYPTO_TAKER_FEE_RATE  = Number(process.env.CRYPTO_TAKER_FEE_RATE || 0.07);
 const CRYPTO_MAKER_REBATE_SHARE = Number(process.env.CRYPTO_MAKER_REBATE_SHARE || 0.20);
 
 const BINANCE_SYMBOL = {
@@ -166,7 +119,6 @@ const BINANCE_SYMBOL = {
 let emitFn   = () => {};
 let slog     = () => {};
 let trader   = null;
-let relayClient = null; // built in init(), used only for the on-chain mergePositions call
 let startTime = Date.now();
 let logs     = [];
 let trades   = [];
@@ -176,7 +128,7 @@ let perPairCapital = TOTAL_CAPITAL / Math.max(pairList.length, 1);
 let pairs = {}; // symbol -> pair state
 let lastSpotFetch = 0;
 let lastPolyPriceFetch = 0;
-let totalEquityCurve = [];
+let totalEquityCurve = []; // [{t(ms), equity}] portfolio-wide, sampled on every entry/exit
 
 // ─────────────────────────────────────────
 //  Logging
@@ -188,18 +140,8 @@ function log(msg) {
   slog(line);
 }
 
-// Logs at most once every 10s per pair for a given repeating condition
-// (e.g. "still no price data") so persistent problems stay visible in the
-// dashboard without flooding the log on every single skipped cycle.
-function throttledLog(p, msg) {
-  const now = Date.now();
-  if (!p.lastSkipWarnAt || now - p.lastSkipWarnAt > 10_000) {
-    log(msg);
-    p.lastSkipWarnAt = now;
-  }
-}
-
 function round2(n) { return Math.round(n * 100) / 100; }
+function round4(n) { return Math.round(n * 10000) / 10000; }
 function round5(n) { return Math.round(n * 100000) / 100000; }
 function clamp(n, lo, hi) { return Math.min(Math.max(n, lo), hi); }
 function nowSec() { return Date.now() / 1000; }
@@ -208,7 +150,7 @@ function nowSec() { return Date.now() / 1000; }
 //  HTTP helpers
 // ─────────────────────────────────────────
 async function getJSON(url) {
-  const res = await fetch(url, { headers: { 'User-Agent': 'polymarket-merge-arb-bot/1.0' } });
+  const res = await fetch(url, { headers: { 'User-Agent': 'polymarket-5m-bot/2.0' } });
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${url}`);
   return res.json();
 }
@@ -216,7 +158,7 @@ async function getJSON(url) {
 async function postJSON(url, body) {
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'User-Agent': 'polymarket-merge-arb-bot/1.0' },
+    headers: { 'Content-Type': 'application/json', 'User-Agent': 'polymarket-5m-bot/2.0' },
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${url}`);
@@ -238,32 +180,30 @@ function freshPairState(symbol) {
     conditionId: null,
     upTokenId: null,
     downTokenId: null,
-    openSpot: null,
     spotBuffer: [],
+    openSpot: null,
     upAsk: null, upBid: null, downAsk: null, downBid: null,
-    lastPriceWarnAt: 0,
-    lastSkipWarnAt: 0,
 
     bankroll: perPairCapital,
     realizedPnl: 0,
     feesPaid: 0,
     rebatesEarned: 0,
-    wins: 0, losses: 0,
-    lastResult: null,
 
-    // cycle bookkeeping (this window)
-    lastCycleIndex: -1,
-    cycle: null,          // { idx, startedAt, cancelAt, up:{orderId,price,shares,filled}, down:{...} }
-    cyclesRun: 0, cyclesFilledBoth: 0, cyclesFilledOne: 0, cyclesFilledNone: 0,
+    // unmatched (unmerged) share inventory, with running cost basis
+    pUp: 0, pUpCost: 0,
+    pDown: 0, pDownCost: 0,
 
-    // unmerged inventory (this window)
-    upShares: 0, downShares: 0, upCostSum: 0, downCostSum: 0,
-    mergedPairsTotal: 0, mergedProfitTotal: 0,
+    mergesCount: 0,
+    mergedShares: 0,
+    resolutionWins: 0,
+    resolutionLosses: 0,
 
-    // post-cutoff cleanup
-    sellOrder: null,       // { side, tokenId, price, shares, orderId, placedAt }
+    cycles: [],           // active order-pair cycles: {id, placedAt, cancelAt, up:{...}, down:{...}}
+    lastCycleBucket: -1,  // which 10s bucket (elapsed/CYCLE_INTERVAL_SECS) last spawned a cycle
+    lateSell: { up: null, down: null }, // resting 0.99 sell orders placed after the 4-min cutoff
 
     resolvedThisWindow: true,
+    lastResult: null,
     equityCurve: [{ t: Date.now(), equity: perPairCapital }],
   };
 }
@@ -285,9 +225,11 @@ function currentWindowStart(tsSec = nowSec()) {
 function slugFor(symbol, windowStartSec) {
   return `${symbol.toLowerCase()}-updown-5m-${windowStartSec}`;
 }
+
 function qOf(m) {
   return (m.question || m.groupItemTitle || m.title || '').toLowerCase();
 }
+
 function parseMarketTokens(m) {
   try {
     const outcomes = typeof m.outcomes === 'string' ? JSON.parse(m.outcomes) : (m.outcomes || []);
@@ -297,6 +239,7 @@ function parseMarketTokens(m) {
     return [];
   }
 }
+
 function tokenIdForSide(market, side) {
   const tokens = parseMarketTokens(market);
   const want = (side || '').trim().toLowerCase();
@@ -314,17 +257,22 @@ async function fetchEventForWindow(symbol, windowStart) {
       if (event && event.id && Array.isArray(event.markets) && event.markets.length) {
         return { event, windowStart: ws, slug };
       }
-    } catch (_) { /* not indexed yet — try next offset */ }
+    } catch (_) {
+      // not indexed yet / doesn't exist — try next offset
+    }
   }
   return null;
 }
 
 async function loadPairWindow(p) {
   const ws = currentWindowStart();
-  if (p.windowStart === ws && p.upTokenId) return;
+  if (p.windowStart === ws && p.upTokenId) return; // already loaded & current
 
   const found = await fetchEventForWindow(p.symbol, ws);
-  if (!found) { p.tradable = false; return; }
+  if (!found) {
+    p.tradable = false;
+    return; // will retry next tick
+  }
   const { event, windowStart, slug } = found;
   const market = event.markets.find(m => {
     const q = qOf(m);
@@ -355,20 +303,20 @@ async function loadPairWindow(p) {
     p.spotBuffer = [];
     p.openSpot = null;
 
-    // fresh per-window cycle/inventory state
-    p.lastCycleIndex = -1;
-    p.cycle = null;
-    p.cyclesRun = 0; p.cyclesFilledBoth = 0; p.cyclesFilledOne = 0; p.cyclesFilledNone = 0;
-    p.upShares = 0; p.downShares = 0; p.upCostSum = 0; p.downCostSum = 0;
-    p.mergedPairsTotal = 0; p.mergedProfitTotal = 0;
-    p.sellOrder = null;
+    // fresh window — clear all strategy bookkeeping (resolvePairWindow
+    // already should have zeroed these, this is a defensive reset)
+    p.cycles = [];
+    p.lastCycleBucket = -1;
+    p.pUp = 0; p.pUpCost = 0;
+    p.pDown = 0; p.pDownCost = 0;
+    p.lateSell = { up: null, down: null };
 
-    log(`🔭 ${p.symbol} window loaded: ${slug} | ends ${new Date(p.windowEnd * 1000).toISOString().slice(11, 19)}Z`);
+    log(`🔭 ${p.symbol} window loaded: ${slug} | ends ${new Date(p.windowEnd * 1000).toISOString().slice(11,19)}Z`);
   }
 }
 
 // ─────────────────────────────────────────
-//  Spot price feed (display + resolution fallback only — no longer drives entries)
+//  Spot price feed (Binance REST — public, no auth)
 // ─────────────────────────────────────────
 async function refreshSpotPrices() {
   const symbols = [...new Set(Object.values(pairs).map(p => p.binanceSymbol))];
@@ -393,7 +341,7 @@ async function refreshSpotPrices() {
 }
 
 // ─────────────────────────────────────────
-//  Polymarket CLOB price feed (Up/Down ask+bid — drives cycle pricing & fills)
+//  Polymarket CLOB price feed
 // ─────────────────────────────────────────
 async function refreshPolyPrices() {
   const requests = [];
@@ -406,7 +354,17 @@ async function refreshPolyPrices() {
   }
   if (!requests.length) return;
 
-  let batchFailed = false;
+  function applyPolyPrice(tid, side, price) {
+    if (!Number.isFinite(price)) return;
+    for (const p of Object.values(pairs)) {
+      if (p.upTokenId === tid) {
+        if (side === 'BUY') p.upAsk = price; else if (side === 'SELL') p.upBid = price;
+      } else if (p.downTokenId === tid) {
+        if (side === 'BUY') p.downAsk = price; else if (side === 'SELL') p.downBid = price;
+      }
+    }
+  }
+
   try {
     const data = await postJSON(`${CLOB}/prices`, requests);
     if (Array.isArray(data)) {
@@ -428,32 +386,8 @@ async function refreshPolyPrices() {
       }
     }
   } catch (e) {
-    batchFailed = true;
-    log(`⚠️  Batch price fetch failed (${e.message}) — falling back to per-token requests for all tradable pairs`);
-  }
-
-  // IMPORTANT: the batch endpoint can return HTTP 200 while silently
-  // omitting some of the requested token ids (no error, no exception —
-  // it just leaves that pair's ask/bid null forever, which looks like
-  // "not trading" with zero log output). So we don't only fall back on a
-  // hard exception — we also check, after every batch attempt, whether
-  // any tradable pair is still missing a price field and patch just that
-  // pair via the simpler per-token GET endpoint.
-  const needsFallback = Object.values(pairs).filter(p =>
-    p.tradable && p.upTokenId && p.downTokenId &&
-    (batchFailed || p.upAsk == null || p.upBid == null || p.downAsk == null || p.downBid == null)
-  );
-
-  if (needsFallback.length) {
-    if (!batchFailed) {
-      const now = Date.now();
-      const stillWarn = needsFallback.filter(p => !p.lastPriceWarnAt || now - p.lastPriceWarnAt > 10_000);
-      if (stillWarn.length) {
-        log(`⚠️  Batch price response missing data for: ${stillWarn.map(p => p.symbol).join(', ')} — falling back to per-token fetch for ${stillWarn.length === 1 ? 'it' : 'them'}`);
-        for (const p of stillWarn) p.lastPriceWarnAt = now;
-      }
-    }
-    await Promise.all(needsFallback.map(async (p) => {
+    for (const p of Object.values(pairs)) {
+      if (!p.tradable) continue;
       try {
         const [upAsk, upBid, downAsk, downBid] = await Promise.all([
           getJSON(`${CLOB}/price?token_id=${p.upTokenId}&side=BUY`).catch(() => null),
@@ -461,39 +395,24 @@ async function refreshPolyPrices() {
           getJSON(`${CLOB}/price?token_id=${p.downTokenId}&side=BUY`).catch(() => null),
           getJSON(`${CLOB}/price?token_id=${p.downTokenId}&side=SELL`).catch(() => null),
         ]);
-        if (upAsk) p.upAsk = parseFloat(upAsk.price ?? upAsk.mid ?? p.upAsk);
-        if (upBid) p.upBid = parseFloat(upBid.price ?? upBid.mid ?? p.upBid);
-        if (downAsk) p.downAsk = parseFloat(downAsk.price ?? downAsk.mid ?? p.downAsk);
-        if (downBid) p.downBid = parseFloat(downBid.price ?? downBid.mid ?? p.downBid);
+        if (upAsk) p.upAsk = parseFloat(upAsk.price || upAsk.mid || p.upAsk);
+        if (upBid) p.upBid = parseFloat(upBid.price || upBid.mid || p.upBid);
+        if (downAsk) p.downAsk = parseFloat(downAsk.price || downAsk.mid || p.downAsk);
+        if (downBid) p.downBid = parseFloat(downBid.price || downBid.mid || p.downBid);
       } catch (_) { /* leave stale values, try again next tick */ }
-    }));
-  }
-
-  function applyPolyPrice(tid, side, price) {
-    if (!Number.isFinite(price)) return;
-    for (const p of Object.values(pairs)) {
-      if (p.upTokenId === tid) {
-        if (side === 'BUY') p.upAsk = price; else if (side === 'SELL') p.upBid = price;
-      } else if (p.downTokenId === tid) {
-        if (side === 'BUY') p.downAsk = price; else if (side === 'SELL') p.downBid = price;
-      }
     }
   }
 }
 
-
-
 // ─────────────────────────────────────────
 //  Order helpers (real trader calls, gated by DRY_RUN)
 // ─────────────────────────────────────────
-// placeGtcOrder rests a real maker limit order (Good-Til-Cancelled) — this
-// is trader.js's actual method name/signature (tokenId, 'BUY'|'SELL', price, size).
 async function placeLimitBuy(tokenId, price, shares) {
-  if (!DRY_RUN && trader) return await trader.placeGtcOrder(tokenId, 'BUY', price, shares);
+  if (!DRY_RUN && trader) return await trader.limitBuy(tokenId, shares, price);
   return { id: `dry-buy-${Date.now()}-${Math.random().toString(36).slice(2, 7)}` };
 }
 async function placeLimitSell(tokenId, price, shares) {
-  if (!DRY_RUN && trader) return await trader.placeGtcOrder(tokenId, 'SELL', price, shares);
+  if (!DRY_RUN && trader) return await trader.limitSell(tokenId, shares, price);
   return { id: `dry-sell-${Date.now()}-${Math.random().toString(36).slice(2, 7)}` };
 }
 async function cancelOrder(orderId) {
@@ -502,39 +421,25 @@ async function cancelOrder(orderId) {
     catch (e) { log(`⚠️  cancel failed: ${e.message}`); }
   }
 }
-
-// ─────────────────────────────────────────
-//  On-chain merge — CTF mergePositions(), called directly (not via the CLOB)
-//  so it works immediately regardless of order-book depth. Routed through
-//  Polymarket's Builder Relayer (same one trader.js already uses to derive
-//  the deposit wallet) so it executes as the wallet that actually holds the
-//  position tokens, and stays gasless. This never touches polymarket-trader.js.
-// ─────────────────────────────────────────
-async function performMerge(p, shares) {
-  if (DRY_RUN || !trader) return; // dry run: merge is instant bookkeeping only, already handled by the caller
-  if (!relayClient) { log(`⚠️  ${p.symbol}: relay client not ready — merge deferred, will retry next tick`); throw new Error('relay not ready'); }
-  if (!p.conditionId) { log(`⚠️  ${p.symbol}: missing conditionId — cannot merge, will retry next tick`); throw new Error('no conditionId'); }
-
-  const amount = BigInt(Math.round(shares * 1_000_000)); // USDC.e has 6 decimals; CTF outcome-token units mirror the collateral
-  const data = encodeFunctionData({
-    abi: CTF_MERGE_ABI,
-    functionName: 'mergePositions',
-    args: [USDC_E_CONTRACT, ZERO_BYTES32, p.conditionId, [1n, 2n], amount],
-  });
-
-  try {
-    const response = await relayClient.execute([{ to: CTF_CONTRACT, data, value: '0' }], `Merge ${shares}sh ${p.symbol}`);
-    const result = await response.wait();
-    if (!result) throw new Error('relay execute() returned no result');
-    log(`⛓️  ${p.symbol}: on-chain merge tx confirmed${result.transactionHash ? ' (' + result.transactionHash.slice(0, 12) + '…)' : ''}`);
-  } catch (e) {
-    log(`⚠️  ${p.symbol}: on-chain merge failed: ${e.message} — inventory still tracked, will retry, and will fall back to 0.99 sell / resolution if it never clears. NOTE: trader.js derives a "deposit wallet" (the newer Polymarket wallet flow) — if this keeps failing, the deposit-wallet flow may need its own dedicated relayer method instead of the standard execute() used here; test with a small amount first.`);
-    throw e;
+// Wraps the on-chain CTF mergePositions() call (burns 1 Up + 1 Down per
+// unit, mints 1 collateral unit each). Falls back to a no-op with a
+// warning if the trader module doesn't implement it yet — the bot's own
+// bankroll/PnL accounting still reflects the merge either way, but in
+// LIVE mode you need this wired to an actual mergePositions() call
+// (see /mnt/skills or trader.js) for the shares to really be redeemed.
+async function mergePositions(p, shares) {
+  if (!DRY_RUN && trader) {
+    if (typeof trader.mergePositions === 'function') {
+      try { return await trader.mergePositions(p.conditionId, shares); }
+      catch (e) { log(`⚠️  ${p.symbol}: on-chain mergePositions() call failed: ${e.message}`); }
+    } else {
+      log(`⚠️  ${p.symbol}: trader.mergePositions() not implemented — merge accounted internally only, no on-chain call made`);
+    }
   }
 }
 
 // ─────────────────────────────────────────
-//  Fees & maker rebates
+//  Fees & maker rebates — Polymarket Fee Structure V2 (crypto)
 // ─────────────────────────────────────────
 function takerFee(shares, price) {
   return round5(shares * CRYPTO_TAKER_FEE_RATE * price * (1 - price));
@@ -544,12 +449,12 @@ function makerRebate(shares, price) {
 }
 
 // ─────────────────────────────────────────
-//  Equity tracking
+//  Mark-to-market / equity
 // ─────────────────────────────────────────
 function pairMarkValue(p) {
-  const upMark = p.upShares * (p.upBid ?? (p.upShares > 0 ? (p.upCostSum / p.upShares) : 0));
-  const downMark = p.downShares * (p.downBid ?? (p.downShares > 0 ? (p.downCostSum / p.downShares) : 0));
-  return round2(p.bankroll + upMark + downMark);
+  const upMark = (p.upBid ?? (p.pUp > 0 ? p.pUpCost / p.pUp : 0));
+  const downMark = (p.downBid ?? (p.pDown > 0 ? p.pDownCost / p.pDown : 0));
+  return round2(p.bankroll + p.pUp * upMark + p.pDown * downMark);
 }
 function pushGlobalEquity() {
   const total = round2(Object.values(pairs).reduce((s, p) => s + pairMarkValue(p), 0));
@@ -569,174 +474,179 @@ function registerTrade(p, entry) {
 }
 
 // ─────────────────────────────────────────
-//  Cycle engine — 2 resting maker orders every 10s, cancel stragglers at 9s
+//  Filters / pricing
 // ─────────────────────────────────────────
-function midOf(bid, ask) {
-  if (bid == null || ask == null) return null;
-  return (bid + ask) / 2;
+function priceBandOk(p) {
+  return p.upAsk != null && p.downAsk != null &&
+    p.upAsk >= PRICE_BAND_MIN && p.upAsk <= PRICE_BAND_MAX &&
+    p.downAsk >= PRICE_BAND_MIN && p.downAsk <= PRICE_BAND_MAX;
+}
+function computeLimitPrice(ask, bid) {
+  if (ask == null) return null;
+  const mid = bid != null ? (ask + bid) / 2 : ask;
+  return clamp(round2(mid - ORDER_PRICE_OFFSET), 0.01, 0.99);
 }
 
+// ─────────────────────────────────────────
+//  Cycle engine — place / poll / cancel the two-sided limit orders
+// ─────────────────────────────────────────
 async function maybeStartCycle(p, elapsed) {
   if (!tradingEnabled) return;
-  if (p.cycle) return; // strictly sequential — never overlap cycles
-  if (elapsed >= TRADING_CUTOFF_SEC) return; // only trade through minute 4
+  if (elapsed < 0 || elapsed >= TRADE_CUTOFF_SECS) return;
 
-  const idx = Math.floor(elapsed / CYCLE_INTERVAL_SEC);
-  if (idx <= p.lastCycleIndex) return;
-  p.lastCycleIndex = idx;
+  const bucket = Math.floor(elapsed / CYCLE_INTERVAL_SECS);
+  if (bucket === p.lastCycleBucket) return; // this 10s slot already fired
+  p.lastCycleBucket = bucket;
 
-  const upMid = midOf(p.upBid, p.upAsk);
-  const downMid = midOf(p.downBid, p.downAsk);
-  if (upMid == null || downMid == null) {
-    throttledLog(p, `⏭️  ${p.symbol}: skip cycle #${idx} — no price data yet (upAsk=${p.upAsk ?? '—'} upBid=${p.upBid ?? '—'} downAsk=${p.downAsk ?? '—'} downBid=${p.downBid ?? '—'})`);
+  if (!priceBandOk(p)) {
+    log(`⏭️  ${p.symbol}: skip cycle @${Math.floor(elapsed)}s — price outside 0.25-0.75 (up=${p.upAsk} down=${p.downAsk})`);
     return;
   }
 
-  if (upMid < PRICE_BAND_MIN || upMid > PRICE_BAND_MAX || downMid < PRICE_BAND_MIN || downMid > PRICE_BAND_MAX) {
-    throttledLog(p, `⏭️  ${p.symbol}: skip cycle #${idx} — mid outside [${PRICE_BAND_MIN},${PRICE_BAND_MAX}] band (up=${upMid.toFixed(2)} down=${downMid.toFixed(2)})`);
+  const upLimit = computeLimitPrice(p.upAsk, p.upBid);
+  const downLimit = computeLimitPrice(p.downAsk, p.downBid);
+  if (upLimit == null || downLimit == null) return;
+
+  const notionalNeeded = round2((upLimit + downLimit) * ORDER_SHARES);
+  if (notionalNeeded > p.bankroll) {
+    log(`⏭️  ${p.symbol}: skip cycle — insufficient bankroll ($${p.bankroll.toFixed(2)} < $${notionalNeeded.toFixed(2)} needed)`);
     return;
   }
 
-  const upPrice = clamp(round2(upMid - ENTRY_DISCOUNT), 0.01, 0.99);
-  const downPrice = clamp(round2(downMid - ENTRY_DISCOUNT), 0.01, 0.99);
-  const neededCash = round2(ORDER_SIZE_SHARES * upPrice + ORDER_SIZE_SHARES * downPrice);
-  if (neededCash > p.bankroll) {
-    log(`⏭️  ${p.symbol}: skip cycle #${idx} — insufficient bankroll ($${p.bankroll.toFixed(2)} left, need ~$${neededCash.toFixed(2)})`);
-    return;
-  }
-
-  const [upOrder, downOrder] = await Promise.all([
-    placeLimitBuy(p.upTokenId, upPrice, ORDER_SIZE_SHARES),
-    placeLimitBuy(p.downTokenId, downPrice, ORDER_SIZE_SHARES),
-  ]);
-
+  const upOrder = await placeLimitBuy(p.upTokenId, upLimit, ORDER_SHARES);
+  const downOrder = await placeLimitBuy(p.downTokenId, downLimit, ORDER_SHARES);
   const now = Date.now();
-  p.cycle = {
-    idx,
-    startedAt: now,
-    cancelAt: now + CYCLE_CANCEL_OFFSET_SEC * 1000,
-    up: { orderId: upOrder.id || upOrder.orderId || null, price: upPrice, shares: ORDER_SIZE_SHARES, filled: false },
-    down: { orderId: downOrder.id || downOrder.orderId || null, price: downPrice, shares: ORDER_SIZE_SHARES, filled: false },
-  };
-  p.cyclesRun++;
-  log(`📌 ${p.symbol} cycle #${idx}: Up@${upPrice.toFixed(2)} (mid ${upMid.toFixed(2)}) + Down@${downPrice.toFixed(2)} (mid ${downMid.toFixed(2)}) × ${ORDER_SIZE_SHARES}sh each — cancel unfilled @ T+${CYCLE_CANCEL_OFFSET_SEC}s`);
+
+  p.cycles.push({
+    id: `${p.symbol}-${now}`,
+    placedAt: now,
+    cancelAt: now + CANCEL_AFTER_SECS * 1000,
+    up: { orderId: upOrder.id || upOrder.orderId || null, limitPrice: upLimit, shares: ORDER_SHARES, status: 'pending' },
+    down: { orderId: downOrder.id || downOrder.orderId || null, limitPrice: downLimit, shares: ORDER_SHARES, status: 'pending' },
+  });
+
+  log(`📌 ${p.symbol} cycle @${Math.floor(elapsed)}s → Up ${ORDER_SHARES}sh@${upLimit.toFixed(2)} | Down ${ORDER_SHARES}sh@${downLimit.toFixed(2)} | cancel in ${CANCEL_AFTER_SECS}s`);
 }
 
-function fillLeg(p, side, leg) {
-  leg.filled = true;
-  const notional = round2(leg.price * leg.shares);
-  const rebate = makerRebate(leg.shares, leg.price);
+async function fillLeg(p, cycle, legName) {
+  const leg = cycle[legName];
+  const notional = round2(leg.limitPrice * leg.shares);
+  if (notional > p.bankroll) { leg.status = 'skipped'; return; }
+
+  const rebate = makerRebate(leg.shares, leg.limitPrice);
   p.bankroll = round2(p.bankroll - notional + rebate);
-  p.realizedPnl = round2(p.realizedPnl + rebate);
   p.rebatesEarned = round2(p.rebatesEarned + rebate);
+  p.realizedPnl = round2(p.realizedPnl + rebate); // rebate is realized income regardless of eventual outcome
+  leg.status = 'filled';
 
-  if (side === 'Up') {
-    p.upShares = round2(p.upShares + leg.shares);
-    p.upCostSum = round2(p.upCostSum + notional);
-  } else {
-    p.downShares = round2(p.downShares + leg.shares);
-    p.downCostSum = round2(p.downCostSum + notional);
-  }
+  const label = legName === 'up' ? 'Up' : 'Down';
+  if (legName === 'up') { p.pUp = round2(p.pUp + leg.shares); p.pUpCost = round2(p.pUpCost + notional); }
+  else { p.pDown = round2(p.pDown + leg.shares); p.pDownCost = round2(p.pDownCost + notional); }
 
-  log(`🎯 ${p.symbol} FILLED(maker) ${side} ${leg.shares}sh @ ${leg.price.toFixed(2)} | cost=$${notional.toFixed(2)} | rebate=+$${rebate.toFixed(4)}`);
-  registerTrade(p, { side: 'BUY', outcome: side, reason: 'CYCLE_FILL', price: leg.price, shares: leg.shares, cost: notional, rebate });
+  log(`✅ ${p.symbol} FILL ${label} ${leg.shares}sh@${leg.limitPrice.toFixed(2)} | cost=$${notional.toFixed(2)} rebate=+$${rebate.toFixed(4)} | held Up=${p.pUp} Down=${p.pDown}`);
+  registerTrade(p, { side: 'BUY', outcome: label, price: leg.limitPrice, shares: leg.shares, cost: notional, rebate });
 }
 
-async function tryMerge(p) {
-  const mergeable = round2(Math.min(p.upShares, p.downShares));
-  if (mergeable <= 0) return;
+async function processCycles(p) {
+  for (const cycle of p.cycles) {
+    for (const legName of ['up', 'down']) {
+      const leg = cycle[legName];
+      if (leg.status !== 'pending') continue;
+      const ask = legName === 'up' ? p.upAsk : p.downAsk;
 
-  const avgUpCost = p.upShares > 0 ? p.upCostSum / p.upShares : 0;
-  const avgDownCost = p.downShares > 0 ? p.downCostSum / p.downShares : 0;
-  const cost = round2(mergeable * (avgUpCost + avgDownCost));
-  const proceeds = round2(mergeable * 1.0);
-
-  try {
-    await performMerge(p, mergeable);
-  } catch (_) {
-    return; // merge failed live — leave inventory intact, try again next tick
+      if (ask != null && ask <= leg.limitPrice) {
+        await fillLeg(p, cycle, legName);
+      } else if (Date.now() >= cycle.cancelAt) {
+        await cancelOrder(leg.orderId);
+        leg.status = 'cancelled';
+        log(`🚫 ${p.symbol} cancel ${legName === 'up' ? 'Up' : 'Down'}@${leg.limitPrice.toFixed(2)} — unfilled after ${CANCEL_AFTER_SECS}s`);
+      }
+    }
   }
-
-  p.upShares = round2(p.upShares - mergeable);
-  p.downShares = round2(p.downShares - mergeable);
-  p.upCostSum = round2(p.upCostSum - mergeable * avgUpCost);
-  p.downCostSum = round2(p.downCostSum - mergeable * avgDownCost);
-
-  const profit = round2(proceeds - cost);
-  p.bankroll = round2(p.bankroll + proceeds);
-  p.realizedPnl = round2(p.realizedPnl + profit);
-  p.mergedPairsTotal = round2(p.mergedPairsTotal + mergeable);
-  p.mergedProfitTotal = round2(p.mergedProfitTotal + profit);
-
-  const icon = profit >= 0 ? '💰' : '💥';
-  log(`${icon} ${p.symbol} MERGE ${mergeable}sh Up+Down → $${proceeds.toFixed(2)} pUSD | cost=$${cost.toFixed(2)} | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
-  registerTrade(p, { side: 'MERGE', outcome: 'Up+Down', reason: 'MERGE', price: 1.00, shares: mergeable, cost, profit });
-  recordEquity(p);
+  // drop cycles where both legs have resolved (filled/cancelled/skipped)
+  p.cycles = p.cycles.filter(c => c.up.status === 'pending' || c.down.status === 'pending');
 }
 
-async function checkCycle(p) {
-  const c = p.cycle;
-  if (!c) return;
+// ─────────────────────────────────────────
+//  Merge engine — the core edge. See deep-dive: burns 1 Up + 1 Down for
+//  $1 of collateral, unconditionally, any time before resolution.
+// ─────────────────────────────────────────
+function attemptMerges(p) {
+  while (p.pUp > 0 && p.pDown > 0) {
+    const amt = round2(Math.min(p.pUp, p.pDown));
+    if (amt <= 0) break;
 
-  if (!c.up.filled && p.upAsk != null && p.upAsk <= c.up.price) fillLeg(p, 'Up', c.up);
-  if (!c.down.filled && p.downAsk != null && p.downAsk <= c.down.price) fillLeg(p, 'Down', c.down);
-  if (c.up.filled || c.down.filled) await tryMerge(p);
+    const upCostShare = p.pUp > 0 ? round2((p.pUpCost / p.pUp) * amt) : 0;
+    const downCostShare = p.pDown > 0 ? round2((p.pDownCost / p.pDown) * amt) : 0;
+    const totalCost = round2(upCostShare + downCostShare);
+    const proceeds = round2(amt * 1); // mergePositions() redeems exactly $1 per Up+Down unit
+    const profit = round2(proceeds - totalCost);
 
-  if (Date.now() >= c.cancelAt) {
-    if (!c.up.filled) { await cancelOrder(c.up.orderId); log(`⏭️  ${p.symbol} cycle #${c.idx}: Up leg unfilled @ ${c.up.price.toFixed(2)} — cancelled`); }
-    if (!c.down.filled) { await cancelOrder(c.down.orderId); log(`⏭️  ${p.symbol} cycle #${c.idx}: Down leg unfilled @ ${c.down.price.toFixed(2)} — cancelled`); }
+    p.pUp = round2(p.pUp - amt);
+    p.pUpCost = round2(p.pUpCost - upCostShare);
+    p.pDown = round2(p.pDown - amt);
+    p.pDownCost = round2(p.pDownCost - downCostShare);
 
-    if (c.up.filled && c.down.filled) p.cyclesFilledBoth++;
-    else if (c.up.filled || c.down.filled) p.cyclesFilledOne++;
-    else p.cyclesFilledNone++;
+    p.bankroll = round2(p.bankroll + proceeds);
+    p.realizedPnl = round2(p.realizedPnl + profit);
+    p.mergesCount++;
+    p.mergedShares = round2(p.mergedShares + amt);
 
-    p.cycle = null;
+    mergePositions(p, amt); // fire-and-forget on-chain call in LIVE mode
+
+    log(`🔀 ${p.symbol} MERGE ${amt}sh Up+Down → $${proceeds.toFixed(2)} | cost=$${totalCost.toFixed(2)} pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
+    registerTrade(p, { side: 'MERGE', outcome: 'Up+Down', price: 1, shares: amt, profit });
     recordEquity(p);
   }
 }
 
 // ─────────────────────────────────────────
-//  Post-cutoff cleanup — sell any unmatched leftover at 0.99, else resolve
+//  Post-4-minute wind-down: rest a 0.99 sell on any leftover single-side
+//  inventory; anything that doesn't fill just rides to resolution.
 // ─────────────────────────────────────────
-async function manageLeftover(p) {
-  if (p.cycle) return; // let the in-flight cycle finish/cancel first
+async function manageLateWindow(p, elapsed) {
+  if (elapsed < TRADE_CUTOFF_SECS) return;
 
-  const side = p.upShares > 0 ? 'Up' : (p.downShares > 0 ? 'Down' : null);
-  if (!side) return;
+  for (const side of ['up', 'down']) {
+    const heldKey = side === 'up' ? 'pUp' : 'pDown';
+    const costKey = side === 'up' ? 'pUpCost' : 'pDownCost';
+    const tokenId = side === 'up' ? p.upTokenId : p.downTokenId;
+    const bid = side === 'up' ? p.upBid : p.downBid;
+    const label = side === 'up' ? 'Up' : 'Down';
+    let late = p.lateSell[side];
 
-  if (p.sellOrder) {
-    const bid = p.sellOrder.side === 'Up' ? p.upBid : p.downBid;
-    if (bid != null && bid >= p.sellOrder.price) {
-      const shares = p.sellOrder.shares;
-      const proceeds = round2(p.sellOrder.price * shares);
-      const rebate = makerRebate(shares, p.sellOrder.price);
-      const costSum = p.sellOrder.side === 'Up' ? p.upCostSum : p.downCostSum;
-      const profit = round2(proceeds + rebate - costSum);
+    if (!late && p[heldKey] > 0) {
+      const shares = p[heldKey];
+      const order = await placeLimitSell(tokenId, LATE_SELL_PRICE, shares);
+      p.lateSell[side] = { orderId: order.id || order.orderId || null, shares, price: LATE_SELL_PRICE };
+      log(`🏁 ${p.symbol} 4-min cutoff — resting ${label} sell ${shares}sh@${LATE_SELL_PRICE} (falls back to resolution if unfilled)`);
+      continue;
+    }
+
+    late = p.lateSell[side];
+    if (late && bid != null && bid >= late.price) {
+      const proceeds = round2(late.price * late.shares);
+      const rebate = makerRebate(late.shares, late.price);
+      const costBasis = p[costKey];
+      const profit = round2(proceeds + rebate - costBasis);
 
       p.bankroll = round2(p.bankroll + proceeds + rebate);
       p.realizedPnl = round2(p.realizedPnl + profit);
       p.rebatesEarned = round2(p.rebatesEarned + rebate);
-      if (p.sellOrder.side === 'Up') { p.upShares = 0; p.upCostSum = 0; } else { p.downShares = 0; p.downCostSum = 0; }
-      if (profit >= 0) { p.wins++; p.lastResult = 'WIN'; } else { p.losses++; p.lastResult = 'LOSS'; }
+      p[heldKey] = 0; p[costKey] = 0;
+      p.lateSell[side] = null;
 
-      const icon = profit >= 0 ? '💰' : '💥';
-      log(`${icon} ${p.symbol} LEFTOVER SELL(maker) ${p.sellOrder.side} ${shares}sh @ ${p.sellOrder.price.toFixed(2)} | rebate=+$${rebate.toFixed(4)} | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
-      registerTrade(p, { side: 'SELL', outcome: p.sellOrder.side, reason: 'LEFTOVER_SELL', price: p.sellOrder.price, shares, profit, rebate });
-      p.sellOrder = null;
+      log(`💰 ${p.symbol} late sell ${label} filled ${late.shares}sh@${late.price} | rebate=+$${rebate.toFixed(4)} pnl=$${profit.toFixed(2)}`);
+      registerTrade(p, { side: 'SELL', outcome: label, price: late.price, shares: late.shares, profit, rebate });
       recordEquity(p);
     }
-    return;
   }
-
-  const tokenId = side === 'Up' ? p.upTokenId : p.downTokenId;
-  const shares = side === 'Up' ? p.upShares : p.downShares;
-  const order = await placeLimitSell(tokenId, LEFTOVER_SELL_PRICE, shares);
-  p.sellOrder = { side, tokenId, price: LEFTOVER_SELL_PRICE, shares, orderId: order.id || order.orderId || null, placedAt: Date.now() };
-  log(`📌 ${p.symbol}: past minute 4 with ${shares}sh unmatched ${side} — resting cleanup sell @ ${LEFTOVER_SELL_PRICE.toFixed(2)}`);
 }
 
 // ─────────────────────────────────────────
-//  Resolution — winning side redeemed at $1/share, losing side at $0
+//  Resolution — anything never merged and never sold at 0.99 settles via
+//  Polymarket's own on-chain outcome (heuristic fallback: live spot vs
+//  window-open spot, same rule the market itself resolves by).
 // ─────────────────────────────────────────
 async function determineWinningSide(p) {
   try {
@@ -761,37 +671,47 @@ async function resolvePairWindow(p) {
   if (p.resolvedThisWindow) return;
   p.resolvedThisWindow = true;
 
-  if (p.cycle) {
-    if (!p.cycle.up.filled) await cancelOrder(p.cycle.up.orderId);
-    if (!p.cycle.down.filled) await cancelOrder(p.cycle.down.orderId);
-    p.cycle = null;
+  // cancel any still-open cycle legs and late-sell orders before settling
+  for (const cycle of p.cycles) {
+    if (cycle.up.status === 'pending') { await cancelOrder(cycle.up.orderId); cycle.up.status = 'cancelled'; }
+    if (cycle.down.status === 'pending') { await cancelOrder(cycle.down.orderId); cycle.down.status = 'cancelled'; }
   }
-  if (p.sellOrder) { await cancelOrder(p.sellOrder.orderId); p.sellOrder = null; }
+  p.cycles = [];
+  for (const side of ['up', 'down']) {
+    const late = p.lateSell[side];
+    if (late) { await cancelOrder(late.orderId); p.lateSell[side] = null; }
+  }
 
-  if (p.upShares <= 0 && p.downShares <= 0) return; // everything already merged / sold off
+  if (p.pUp <= 0 && p.pDown <= 0) return;
 
   const winner = await determineWinningSide(p);
   if (winner === null) {
-    log(`⚠️  ${p.symbol}: could not determine window outcome — leaving remaining inventory tracked at last mark`);
+    log(`⚠️  ${p.symbol}: could not determine outcome — leftover Up=${p.pUp} Down=${p.pDown} left tracked at last mark`);
     return;
   }
 
-  const side = p.upShares > 0 ? 'Up' : 'Down';
-  const shares = side === 'Up' ? p.upShares : p.downShares;
-  const costSum = side === 'Up' ? p.upCostSum : p.downCostSum;
-  const won = winner === side;
-  const proceeds = won ? round2(shares * 1) : 0;
-  const profit = round2(proceeds - costSum);
-
-  p.bankroll = round2(p.bankroll + proceeds);
-  p.realizedPnl = round2(p.realizedPnl + profit);
-  if (won) { p.wins++; p.lastResult = 'WIN'; } else { p.losses++; p.lastResult = 'LOSS'; }
-
-  const icon = won ? '💰' : '💥';
-  log(`${icon} ${p.symbol} RESOLUTION ${side} ${shares}sh → ${won ? '$1.00/sh' : '$0.00/sh'} | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
-  registerTrade(p, { side: 'RESOLVE', outcome: side, reason: 'RESOLUTION', price: won ? 1 : 0, shares, profit });
-
-  p.upShares = 0; p.downShares = 0; p.upCostSum = 0; p.downCostSum = 0;
+  if (p.pUp > 0) {
+    const won = winner === 'Up';
+    const proceeds = won ? round2(p.pUp * 1) : 0;
+    const profit = round2(proceeds - p.pUpCost);
+    p.bankroll = round2(p.bankroll + proceeds);
+    p.realizedPnl = round2(p.realizedPnl + profit);
+    if (won) p.resolutionWins++; else p.resolutionLosses++;
+    log(`${won ? '💰' : '💥'} ${p.symbol} RESOLUTION Up ${p.pUp}sh → ${won ? 'WIN' : 'LOSS'} | pnl=$${profit.toFixed(2)}`);
+    registerTrade(p, { side: 'RESOLVE', outcome: 'Up', price: won ? 1 : 0, shares: p.pUp, profit });
+    p.pUp = 0; p.pUpCost = 0;
+  }
+  if (p.pDown > 0) {
+    const won = winner === 'Down';
+    const proceeds = won ? round2(p.pDown * 1) : 0;
+    const profit = round2(proceeds - p.pDownCost);
+    p.bankroll = round2(p.bankroll + proceeds);
+    p.realizedPnl = round2(p.realizedPnl + profit);
+    if (won) p.resolutionWins++; else p.resolutionLosses++;
+    log(`${won ? '💰' : '💥'} ${p.symbol} RESOLUTION Down ${p.pDown}sh → ${won ? 'WIN' : 'LOSS'} | pnl=$${profit.toFixed(2)}`);
+    registerTrade(p, { side: 'RESOLVE', outcome: 'Down', price: won ? 1 : 0, shares: p.pDown, profit });
+    p.pDown = 0; p.pDownCost = 0;
+  }
   recordEquity(p);
 }
 
@@ -801,7 +721,9 @@ async function resolvePairWindow(p) {
 async function processPair(p) {
   const ws = currentWindowStart();
   if (p.windowStart === null || ws !== p.windowStart) {
-    if (p.windowStart !== null && !p.resolvedThisWindow) await resolvePairWindow(p);
+    if (p.windowStart !== null && !p.resolvedThisWindow) {
+      await resolvePairWindow(p);
+    }
     await loadPairWindow(p);
   }
   if (!p.tradable) return;
@@ -809,12 +731,10 @@ async function processPair(p) {
   const elapsed = nowSec() - p.windowStart;
   const remaining = p.windowEnd - nowSec();
 
-  await checkCycle(p);
-  if (elapsed < TRADING_CUTOFF_SEC) {
-    await maybeStartCycle(p, elapsed);
-  } else {
-    await manageLeftover(p);
-  }
+  await processCycles(p);      // poll fills / cancel timeouts (every tick = every 500ms)
+  attemptMerges(p);            // merge any matched Up+Down inventory immediately
+  await maybeStartCycle(p, elapsed); // spawn a new order-pair every 10s, only in first 4 min
+  await manageLateWindow(p, elapsed); // past 4 min: rest 0.99 sells on leftovers
 
   if (remaining <= -RESOLUTION_BUFFER_S && !p.resolvedThisWindow) {
     await resolvePairWindow(p);
@@ -828,8 +748,7 @@ function buildState() {
   const pairStates = Object.values(pairs).map(p => {
     const spot = p.spotBuffer.length ? p.spotBuffer[p.spotBuffer.length - 1].price : null;
     const markValue = pairMarkValue(p);
-    const unrealized = round2(markValue - p.bankroll
-      - 0); // inventory mark minus its own cost is implicit in markValue vs bankroll; kept simple/consistent with equity curve
+    const unrealized = round2(markValue - p.bankroll - 0); // inventory mark above cash
 
     return {
       symbol: p.symbol,
@@ -837,31 +756,30 @@ function buildState() {
       slug: p.slug,
       windowEnd: p.windowEnd,
       secsToEnd: p.windowEnd ? Math.max(0, Math.floor(p.windowEnd - nowSec())) : null,
-      secsToCutoff: (p.windowStart != null) ? Math.max(0, Math.floor(TRADING_CUTOFF_SEC - (nowSec() - p.windowStart))) : null,
       openSpot: p.openSpot,
       spot,
       upAsk: p.upAsk, upBid: p.upBid, downAsk: p.downAsk, downBid: p.downBid,
       bankroll: p.bankroll,
       realizedPnl: p.realizedPnl,
+      unrealizedPnl: unrealized,
       markValue,
       feesPaid: p.feesPaid,
       rebatesEarned: p.rebatesEarned,
-      wins: p.wins,
-      losses: p.losses,
+      mergesCount: p.mergesCount,
+      mergedShares: p.mergedShares,
+      resolutionWins: p.resolutionWins,
+      resolutionLosses: p.resolutionLosses,
       lastResult: p.lastResult,
-      cyclesRun: p.cyclesRun,
-      cyclesFilledBoth: p.cyclesFilledBoth,
-      cyclesFilledOne: p.cyclesFilledOne,
-      cyclesFilledNone: p.cyclesFilledNone,
-      upShares: p.upShares, downShares: p.downShares,
-      mergedPairsTotal: p.mergedPairsTotal, mergedProfitTotal: p.mergedProfitTotal,
-      cycle: p.cycle ? {
-        idx: p.cycle.idx,
-        upPrice: p.cycle.up.price, upFilled: p.cycle.up.filled,
-        downPrice: p.cycle.down.price, downFilled: p.cycle.down.filled,
-        secsToCancel: Math.max(0, Math.round((p.cycle.cancelAt - Date.now()) / 1000)),
-      } : null,
-      sellOrder: p.sellOrder ? { side: p.sellOrder.side, price: p.sellOrder.price, shares: p.sellOrder.shares } : null,
+      inventory: { pUp: p.pUp, pDown: p.pDown },
+      openCycles: p.cycles.map(c => ({
+        upStatus: c.up.status, upPrice: c.up.limitPrice,
+        downStatus: c.down.status, downPrice: c.down.limitPrice,
+        secsLeft: Math.max(0, Math.round((c.cancelAt - Date.now()) / 1000)),
+      })),
+      lateSell: {
+        up: p.lateSell.up ? { shares: p.lateSell.up.shares, price: p.lateSell.up.price } : null,
+        down: p.lateSell.down ? { shares: p.lateSell.down.shares, price: p.lateSell.down.price } : null,
+      },
       equityCurve: p.equityCurve,
     };
   });
@@ -869,12 +787,13 @@ function buildState() {
   const totalBankroll = round2(pairStates.reduce((s, p) => s + p.bankroll, 0));
   const totalMark = round2(pairStates.reduce((s, p) => s + p.markValue, 0));
   const totalRealized = round2(pairStates.reduce((s, p) => s + p.realizedPnl, 0));
-  const totalWins = pairStates.reduce((s, p) => s + p.wins, 0);
-  const totalLosses = pairStates.reduce((s, p) => s + p.losses, 0);
+  const totalUnrealized = round2(pairStates.reduce((s, p) => s + p.unrealizedPnl, 0));
+  const totalMerges = pairStates.reduce((s, p) => s + p.mergesCount, 0);
+  const totalMergedShares = round2(pairStates.reduce((s, p) => s + p.mergedShares, 0));
   const totalFeesPaid = round2(pairStates.reduce((s, p) => s + p.feesPaid, 0));
   const totalRebatesEarned = round2(pairStates.reduce((s, p) => s + p.rebatesEarned, 0));
-  const totalMergedPairs = round2(pairStates.reduce((s, p) => s + p.mergedPairsTotal, 0));
-  const totalMergedProfit = round2(pairStates.reduce((s, p) => s + p.mergedProfitTotal, 0));
+  const totalResWins = pairStates.reduce((s, p) => s + p.resolutionWins, 0);
+  const totalResLosses = pairStates.reduce((s, p) => s + p.resolutionLosses, 0);
 
   return {
     dryRun: DRY_RUN,
@@ -885,24 +804,24 @@ function buildState() {
     totalBankroll,
     totalMarkValue: totalMark,
     totalRealizedPnl: totalRealized,
-    totalUnrealizedPnl: round2(totalMark - totalBankroll - totalRealized + totalRealized), // markValue already includes unrealized; kept for compatibility
+    totalUnrealizedPnl: totalUnrealized,
     totalPnl: round2(totalMark - TOTAL_CAPITAL),
-    totalWins, totalLosses,
+    totalMerges,
+    totalMergedShares,
+    totalResolutionWins: totalResWins,
+    totalResolutionLosses: totalResLosses,
     totalFeesPaid,
     totalRebatesEarned,
-    totalMergedPairs,
-    totalMergedProfit,
-    winRate: (totalWins + totalLosses) > 0 ? round2((totalWins / (totalWins + totalLosses)) * 100) : null,
     uptime: Math.floor((Date.now() - startTime) / 1000),
     config: {
-      cycleIntervalSec: CYCLE_INTERVAL_SEC,
-      cycleCancelOffsetSec: CYCLE_CANCEL_OFFSET_SEC,
-      orderSizeShares: ORDER_SIZE_SHARES,
-      entryDiscount: ENTRY_DISCOUNT,
+      orderShares: ORDER_SHARES,
+      orderPriceOffset: ORDER_PRICE_OFFSET,
+      cycleIntervalSecs: CYCLE_INTERVAL_SECS,
+      cancelAfterSecs: CANCEL_AFTER_SECS,
+      tradeCutoffSecs: TRADE_CUTOFF_SECS,
       priceBandMin: PRICE_BAND_MIN,
       priceBandMax: PRICE_BAND_MAX,
-      tradingCutoffSec: TRADING_CUTOFF_SEC,
-      leftoverSellPrice: LEFTOVER_SELL_PRICE,
+      lateSellPrice: LATE_SELL_PRICE,
       cryptoTakerFeeRate: CRYPTO_TAKER_FEE_RATE,
       cryptoMakerRebateShare: CRYPTO_MAKER_REBATE_SHARE,
     },
@@ -956,7 +875,7 @@ function setPairs(list) {
 
 function pauseTrading() {
   tradingEnabled = false;
-  log('⏸️  Trading paused (existing cycles/merges/leftover-sells/resolution still managed)');
+  log('⏸️  Trading paused (no new cycles — open orders/inventory still managed for cancel/merge/resolution)');
   return { ok: true };
 }
 function resumeTrading() {
@@ -975,28 +894,14 @@ function getStatus() {
 async function init(privateKey, emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
-  log(`🚀 5-Minute Crypto Up/Down MERGE ARBITRAGE Bot`);
+  log(`🚀 5-Minute Crypto Up/Down Merge-Arb Bot`);
   log(`⚙️  $${TOTAL_CAPITAL} demo capital across ${pairList.length} pairs (${pairList.join(', ')}) → $${perPairCapital.toFixed(2)}/pair`);
-  log(`⚙️  every ${CYCLE_INTERVAL_SEC}s: 2× ${ORDER_SIZE_SHARES}sh maker limit buys at mid-${ENTRY_DISCOUNT.toFixed(2)} on Up & Down | cancel unfilled @ T+${CYCLE_CANCEL_OFFSET_SEC}s | band [${PRICE_BAND_MIN},${PRICE_BAND_MAX}] | trade only through minute ${(TRADING_CUTOFF_SEC/60).toFixed(0)} of 5`);
-  log(`⚙️  merge matched Up+Down shares → $1 pUSD instantly (fee-free, gas only) | leftover past cutoff → limit sell @ ${LEFTOVER_SELL_PRICE} or resolution`);
-  log(`⚙️  fees: all entries & cleanup sells are resting maker orders → $0 fee + rebate (crypto ${(CRYPTO_MAKER_REBATE_SHARE*100).toFixed(0)}% of taker-fee-rate ${CRYPTO_TAKER_FEE_RATE})`);
+  log(`⚙️  ${ORDER_SHARES}sh Up + ${ORDER_SHARES}sh Down every ${CYCLE_INTERVAL_SECS}s @ mid-${ORDER_PRICE_OFFSET} | cancel unfilled @ ${CANCEL_AFTER_SECS}s | band [${PRICE_BAND_MIN}-${PRICE_BAND_MAX}] | new cycles stop @ ${TRADE_CUTOFF_SECS}s | late sell @ ${LATE_SELL_PRICE}`);
+  log(`⚙️  fees: maker legs 0 fee +${(CRYPTO_MAKER_REBATE_SHARE*100).toFixed(0)}% rebate (crypto taker rate ${CRYPTO_TAKER_FEE_RATE}) | merge is fee-free on-chain`);
   log(`${DRY_RUN ? '⚠️  DRY RUN — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
   trader = new PolymarketTrader(privateKey);
   await trader.authenticate();
-
-  if (!DRY_RUN) {
-    try {
-      // Reuses the exact same authenticated viem wallet client trader.js
-      // already built (and already proved works, since it signed the auth
-      // flow) — same construction pattern trader.js uses internally to
-      // derive the deposit wallet. This never modifies polymarket-trader.js.
-      relayClient = new RelayClient(RELAYER_HOST, 137, trader._walletClient);
-      log(`⛓️  Relay client ready for on-chain merges (wallet: ${trader.depositWallet || trader.address})`);
-    } catch (e) {
-      log(`⚠️  Could not init relay client — merges will fail live until this is fixed: ${e.message}`);
-    }
-  }
 
   await refreshSpotPrices();
   lastSpotFetch = Date.now();
