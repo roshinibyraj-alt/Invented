@@ -125,6 +125,8 @@ app.get('/', (_, res) => {
     <div class="stat"><div class="stat-label">Realized</div><div class="stat-val" id="realized-pnl">$0.00</div></div>
     <div class="stat"><div class="stat-label">Unrealized</div><div class="stat-val" id="unrealized-pnl">$0.00</div></div>
     <div class="stat"><div class="stat-label">Bankroll</div><div class="stat-val" id="total-bankroll">$0.00</div></div>
+    <div class="stat"><div class="stat-label">Fees Paid</div><div class="stat-val pnl-neg" id="total-fees">$0.00</div></div>
+    <div class="stat"><div class="stat-label">Rebates Earned</div><div class="stat-val pnl-pos" id="total-rebates">$0.00</div></div>
     <div class="stat"><div class="stat-label">Win Rate</div><div class="stat-val" id="win-rate">—</div><div class="stat-sub" id="win-loss-sub">0W / 0L</div></div>
     <div class="stat"><div class="stat-label">Uptime</div><div class="stat-val" id="uptime">0s</div></div>
     <div class="stat"><div class="stat-label">Trading</div><div class="stat-val" id="trading-flag">—</div></div>
@@ -226,6 +228,8 @@ app.get('/', (_, res) => {
     const unrelEl = document.getElementById('unrealized-pnl');
     unrelEl.textContent = sgn(s.totalUnrealizedPnl); unrelEl.className = 'stat-val ' + pClass(s.totalUnrealizedPnl);
     document.getElementById('total-bankroll').textContent = '$'+(s.totalBankroll||0).toFixed(2);
+    document.getElementById('total-fees').textContent = '$'+(s.totalFeesPaid||0).toFixed(4);
+    document.getElementById('total-rebates').textContent = '$'+(s.totalRebatesEarned||0).toFixed(4);
     document.getElementById('win-rate').textContent = (s.winRate!==null && s.winRate!==undefined) ? s.winRate+'%' : '—';
     document.getElementById('win-loss-sub').textContent = (s.totalWins||0)+'W / '+(s.totalLosses||0)+'L';
     document.getElementById('uptime').textContent = fmt(s.uptime||0);
@@ -254,7 +258,10 @@ app.get('/', (_, res) => {
           ' | TP '+p.position.tpPrice.toFixed(2)+' / SL '+p.position.slPrice.toFixed(2)+
           (p.unrealizedPnl!==undefined ? (' | u/pnl <span class="'+pClass(p.unrealizedPnl)+'">'+sgn(p.unrealizedPnl)+'</span>') : '') +
           '</div>'
-        ) : '<div class="pos-box">no open position</div>';
+        ) : (p.pendingEntry ? (
+          '<div class="pos-box">📌 resting <span class="'+(p.pendingEntry.side==='Up'?'side-up':'side-down')+'">'+p.pendingEntry.side+'</span> @ '+p.pendingEntry.limitPrice.toFixed(2)+
+          ' (~$'+p.pendingEntry.stake.toFixed(2)+') | '+p.pendingEntry.secsLeft+'s left to fill</div>'
+        ) : '<div class="pos-box">no open position</div>');
         const eqCurve = buildEquitySvg(p.equityCurve, 280, 34, null);
         return '<div class="pair-card '+(p.position?'has-pos':'')+' '+(p.tradable?'':'untradable')+'">'+
           '<div class="pair-hdr"><div class="pair-sym">'+p.symbol+'</div><div class="pair-timer">'+(p.tradable?fmtSecs(p.secsToEnd):'loading…')+'</div></div>'+
@@ -264,6 +271,7 @@ app.get('/', (_, res) => {
             '<div class="pair-row"><span class="pair-key">Down ask/bid</span><span>'+(p.downAsk?.toFixed(2)||'—')+' / '+(p.downBid?.toFixed(2)||'—')+'</span></div>'+
             '<div class="pair-row"><span class="pair-key">Bankroll</span><span>$'+p.bankroll.toFixed(2)+'</span><span class="pair-key">Base stake</span><span>$'+p.baseStake.toFixed(2)+'</span></div>'+
             '<div class="pair-row"><span class="pair-key">Realized</span><span class="'+pClass(p.realizedPnl)+'">'+sgn(p.realizedPnl)+'</span><span class="pair-key">W/L</span><span>'+p.wins+'/'+p.losses+'</span></div>'+
+            '<div class="pair-row"><span class="pair-key">Fees paid</span><span class="pnl-neg">-$'+(p.feesPaid||0).toFixed(4)+'</span><span class="pair-key">Rebates</span><span class="pnl-pos">+$'+(p.rebatesEarned||0).toFixed(4)+'</span></div>'+
             sigHtml + posHtml +
             '<div class="spark-box"><svg viewBox="0 0 280 34" preserveAspectRatio="none">'+eqCurve+'</svg><div class="spark-label">Equity curve ($'+p.markValue.toFixed(2)+')</div></div>'+
           '</div></div>';
