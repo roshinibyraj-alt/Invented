@@ -71,6 +71,7 @@ const PHASE1_END_S      = Number(process.env.PHASE1_END_S || 120);   // last Pha
 const PHASE2_START_S    = Number(process.env.PHASE2_START_S || 135);
 const PHASE2_END_S      = Number(process.env.PHASE2_END_S || 255);   // last Phase 2 tick (9th tick)
 const TP_SUBMIT_AT_S    = Number(process.env.TP_SUBMIT_AT_S || 280);
+const LADDER_PRICE_OFFSET = Number(process.env.LADDER_PRICE_OFFSET || 0.05); // resting buy = side's current mid minus this
 
 // ── Env / config ──
 const DRY_RUN = (process.env.DRY_RUN || 'true').toLowerCase() === 'true';
@@ -405,14 +406,17 @@ async function maybeFireLadderTick(p) {
     return;
   }
 
-  let side, price;
+  let side, refMid;
   if (next.phase === 1) {
     // cheapest side, fresh each tick
-    if (upMid <= downMid) { side = 'Up'; price = upMid; } else { side = 'Down'; price = downMid; }
+    if (upMid <= downMid) { side = 'Up'; refMid = upMid; } else { side = 'Down'; refMid = downMid; }
   } else {
     // expensive side, fresh each tick
-    if (upMid >= downMid) { side = 'Up'; price = upMid; } else { side = 'Down'; price = downMid; }
+    if (upMid >= downMid) { side = 'Up'; refMid = upMid; } else { side = 'Down'; refMid = downMid; }
   }
+  // Rest the order LADDER_PRICE_OFFSET below that side's current mid, not at the mid itself.
+  // It only counts as filled once the ask actually trades down through this price (checkLadderFills).
+  const price = Math.max(0.01, round2(refMid - LADDER_PRICE_OFFSET));
 
   const shares = compoundedShares(p, next.base);
   const cost = round2(price * shares);
@@ -432,7 +436,7 @@ async function maybeFireLadderTick(p) {
     state: 'resting',
     placedAt: Date.now(),
   });
-  log(`🪜 ${p.symbol} P${next.phase} tick#${p.nextTickIndex}/${LADDER_SCHEDULE.length} @ t=${next.time}s: resting buy ${shares}sh @ ${price.toFixed(2)} on ${side} (${next.phase === 1 ? 'cheapest' : 'expensive'})`);
+  log(`🪜 ${p.symbol} P${next.phase} tick#${p.nextTickIndex}/${LADDER_SCHEDULE.length} @ t=${next.time}s: resting buy ${shares}sh @ ${price.toFixed(2)} on ${side} (${next.phase === 1 ? 'cheapest' : 'expensive'}, mid was ${refMid.toFixed(2)}, -${LADDER_PRICE_OFFSET})`);
 }
 
 // ─────────────────────────────────────────
@@ -665,6 +669,7 @@ function buildState() {
       phase2StartS: PHASE2_START_S,
       phase2EndS: PHASE2_END_S,
       tpSubmitAtS: TP_SUBMIT_AT_S,
+      ladderPriceOffset: LADDER_PRICE_OFFSET,
       phase1BaseShares: PHASE1_BASE_SHARES,
       phase2BaseShares: PHASE2_BASE_SHARES,
       tpPrice: TP_PRICE,
@@ -735,6 +740,7 @@ async function init(privateKey, emit, slogFn) {
   log(`🚀 5-Minute BTC Up/Down — Two-Phase Ladder Bot`);
   log(`⚙️  $${TOTAL_CAPITAL} demo capital across ${pairList.length} pairs (${pairList.join(', ')}) → $${perPairCapital.toFixed(2)}/pair`);
   log(`⚙️  Phase 1: every ${LADDER_INTERVAL_S}s from t=0..${PHASE1_END_S}s, cheapest side, ${PHASE1_BASE_SHARES}sh base | Phase 2: t=${PHASE2_START_S}..${PHASE2_END_S}s, expensive side, ${PHASE2_BASE_SHARES}sh base`);
+  log(`⚙️  Entry price = chosen side's current mid minus $${LADDER_PRICE_OFFSET} (confirmed filled only once ask trades through that price)`);
   log(`⚙️  TP submitted @t=${TP_SUBMIT_AT_S}s at ${TP_PRICE} for all filled shares per side | unfilled TP settles via resolution at window close`);
   log(`⚙️  Compounding: shares = base × (1 + realizedPnl/startingCapital) | all orders are maker (rebate ${(CRYPTO_MAKER_REBATE_SHARE*100).toFixed(0)}% of crypto taker-fee rate ${CRYPTO_TAKER_FEE_RATE})`);
   log(`${DRY_RUN ? '⚠️  DRY RUN — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
