@@ -73,7 +73,6 @@ const CRYPTO_MAKER_REBATE_SHARE = 0.20; // 20% of taker fee rebated
 // ── Env / mode ──
 const DRY_RUN = (process.env.DRY_RUN || 'true').toLowerCase() === 'true';
 const TOTAL_CAPITAL = Number(process.env.TOTAL_CAPITAL || 2000);
-const SIMULATE = DRY_RUN && (process.env.SIMULATE || 'false').toLowerCase() === 'true';
 const DEFAULT_PAIRS = (process.env.CRYPTO_PAIRS || 'BTC')
   .split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
 
@@ -244,28 +243,7 @@ async function loadPairWindow(p) {
   if (p.windowStart === ws && p.upTokenId) return;
 
   const found = await fetchEventForWindow(p.symbol, ws);
-  if (!found) {
-    if (SIMULATE) {
-      // Create synthetic window for simulation
-      p.windowStart = ws;
-      p.windowEnd = ws + WINDOW_SECS;
-      p.slug = `${p.symbol.toLowerCase()}-updown-5m-${ws}`;
-      p.eventTitle = `Simulated ${p.symbol} Up/Down`;
-      p.conditionId = `sim-${ws}`;
-      p.upTokenId = `sim-up-${ws}`;
-      p.downTokenId = `sim-down-${ws}`;
-      p.tradable = true;
-      p.resolvedThisWindow = false;
-      p.orders = [];
-      p.nextOrderIx = 0;
-      p.tpPlaced = false;
-      p.scaleFactor = Math.max(0.1, p.bankroll / p.baseCapital);
-      log(`🔭 ${p.symbol} SIM window loaded: ${p.slug} | ends ${new Date(p.windowEnd * 1000).toISOString().slice(11, 19)}Z | scale=${p.scaleFactor.toFixed(2)}x`);
-      return;
-    }
-    p.tradable = false;
-    return;
-  }
+  if (!found) { p.tradable = false; return; }
   const { event, windowStart, slug } = found;
   const market = event.markets.find(m => { const q = qOf(m); return q.includes('up') || q.includes('down'); }) || event.markets[0];
 
@@ -350,25 +328,7 @@ async function refreshPolyPrices() {
     }
   }
   
-  // Simulation mode: if still no prices after all fallbacks, generate fake data
-  if (SIMULATE) {
-    const t = Date.now() / 1000;
-    for (const p of Object.values(pairs)) {
-      if (!p.tradable) continue;
-      if (p.upAsk != null && p.upBid != null) continue; // has real data
-      const phase = p.windowStart ? ((nowSec() - p.windowStart) < 135 ? 1 : 2) : 1;
-      const drift = Math.sin(t * 0.05) * 0.05 + Math.sin(t * 0.13) * 0.03;
-      // Simulate prices: Up and Down oscillate around 0.50
-      // In phase 1, make Up slightly cheaper; in phase 2, flip
-      const bias = phase === 1 ? -0.02 : 0.02;
-      const upMid = 0.48 + drift + bias;
-      const downMid = 0.52 - drift - bias;
-      p.upAsk = upMid + 0.02;
-      p.upBid = upMid - 0.02;
-      p.downAsk = downMid + 0.02;
-      p.downBid = downMid - 0.02;
-    }
-  }
+
 }
 
 // ── Equity tracking ──
