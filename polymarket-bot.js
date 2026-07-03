@@ -83,13 +83,11 @@
  *
  *  SL / TP (early-exit only — a binary market held to expiry already IS
  *  the take-profit/stop-loss event; these are about *voluntarily* locking
- *  in an outcome before expiry when the live order book lets us). Both are
- *  now FIXED absolute prices, not offsets from entry:
- *    - TP: sell if the held token's bid rises to FIXED_TP_PRICE (0.99) —
- *      locks a win essentially at full value rather than risking a
- *      last-second reversal
- *    - SL: sell if the held token's bid falls to FIXED_SL_PRICE (0.50) AND
- *      there's still enough time left for an exit to matter — cuts a
+ *  in an outcome before expiry when the live order book lets us):
+ *    - TP: sell if the held token's bid rises to entry + TP_OFFSET —
+ *      locks a win early rather than risking a last-second reversal
+ *    - SL: sell if the held token's bid falls to the FIXED_SL_PRICE (0.50)
+ *      AND there's still enough time left for an exit to matter — cuts a
  *      clearly-wrong bet rather than riding it to a total loss. Inside
  *      the final EXIT_SAFETY_BUFFER seconds we stop SL-selling (a forced
  *      sale into a thin book seconds before close is worse than just
@@ -128,7 +126,7 @@ const SLUG_OFFSET_FALLBACKS = [0, -300, 300]; // handle brief indexing lag aroun
 // ── Env / config ──
 const DRY_RUN = (process.env.DRY_RUN || 'true').toLowerCase() === 'true';
 const TOTAL_CAPITAL = Number(process.env.TOTAL_CAPITAL || 2000);
-const DEFAULT_PAIRS = (process.env.CRYPTO_PAIRS || 'BTC,ETH')
+const DEFAULT_PAIRS = (process.env.CRYPTO_PAIRS || 'BTC')
   .split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
 
 // Fixed-fractional + confidence-weighted sizing (replaces martingale).
@@ -148,7 +146,10 @@ const MAX_ENTRY_PRICE        = Number(process.env.MAX_ENTRY_PRICE || 0.88);
 // ranges ~0.15 (entry near 0.65) to ~0.38 (entry near MAX_ENTRY_PRICE),
 // and TP distance ranges ~0.11 to ~0.34 the same way — worth knowing since
 // it's no longer a flat, symmetric offset like before.
-const FIXED_TP_PRICE         = Number(process.env.FIXED_TP_PRICE || 0.99);
+// TP reverted back to entry-relative (as it was before the fixed-0.99
+// change) — target is entry + TP_OFFSET, capped at 0.99. SL stays FIXED
+// at FIXED_SL_PRICE regardless of entry, per the prior change.
+const TP_OFFSET              = Number(process.env.TP_OFFSET || 0.23);
 const FIXED_SL_PRICE         = Number(process.env.FIXED_SL_PRICE || 0.50);
 // First-entry wait raised from 15s → 90s (1.5 minutes) on request — the
 // signal now gets a full 1.5 minutes of this window's own price action
@@ -652,7 +653,7 @@ async function checkPendingEntry(p) {
       entryPrice: execPrice,
       shares,
       cost: notional,
-      tpPrice: FIXED_TP_PRICE,
+      tpPrice: Math.min(round2(execPrice + TP_OFFSET), 0.99),
       slPrice: FIXED_SL_PRICE,
       orderId: pe.orderId,
       openedAt: Date.now(),
@@ -889,7 +890,7 @@ function buildState() {
       zEntryThreshold: Z_ENTRY_THRESHOLD,
       minEntryPrice: MIN_ENTRY_PRICE,
       maxEntryPrice: MAX_ENTRY_PRICE,
-      fixedTpPrice: FIXED_TP_PRICE,
+      tpOffset: TP_OFFSET,
       fixedSlPrice: FIXED_SL_PRICE,
       cryptoTakerFeeRate: CRYPTO_TAKER_FEE_RATE,
       cryptoMakerRebateShare: CRYPTO_MAKER_REBATE_SHARE,
@@ -966,7 +967,7 @@ async function init(privateKey, emit, slogFn) {
   slog = slogFn;
   log(`🚀 5-Minute Crypto Up/Down Multi-Pair Bot`);
   log(`⚙️  $${TOTAL_CAPITAL} demo capital across ${pairList.length} pairs (${pairList.join(', ')}) → $${perPairCapital.toFixed(2)}/pair`);
-  log(`⚙️  sizing: ${(BASE_STAKE_FRACTION*100).toFixed(1)}% of bankroll × confidence (up to ${CONF_MAX_MULT}x), cap ${(MAX_STAKE_FRACTION*100).toFixed(0)}% | z-entry≥${Z_ENTRY_THRESHOLD} | entry∈[${MIN_ENTRY_PRICE},${MAX_ENTRY_PRICE}] | TP@${FIXED_TP_PRICE} SL@${FIXED_SL_PRICE} (fixed)`);
+  log(`⚙️  sizing: ${(BASE_STAKE_FRACTION*100).toFixed(1)}% of bankroll × confidence (up to ${CONF_MAX_MULT}x), cap ${(MAX_STAKE_FRACTION*100).toFixed(0)}% | z-entry≥${Z_ENTRY_THRESHOLD} | entry∈[${MIN_ENTRY_PRICE},${MAX_ENTRY_PRICE}] | TP+${TP_OFFSET} (from entry) SL@${FIXED_SL_PRICE} (fixed)`);
   log(`⚙️  fees: entry/TP maker (0 fee, +${(CRYPTO_MAKER_REBATE_SHARE*100).toFixed(0)}% rebate) | SL taker (crypto fee rate ${CRYPTO_TAKER_FEE_RATE}) | entry fill timeout ${ENTRY_FILL_TIMEOUT_SECS}s`);
   log(`${DRY_RUN ? '⚠️  DRY RUN — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
