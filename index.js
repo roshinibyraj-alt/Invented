@@ -135,7 +135,7 @@ app.get('/', (_, res) => {
   <div class="equity-wrap">
     <div class="equity-hdr">
       <div class="title">Portfolio Equity Curve</div>
-      <div class="val" id="equity-val">$2000.00</div>
+      <div class="val" id="equity-val">$500.00</div>
     </div>
     <svg id="equity-chart" class="equity-svg" viewBox="0 0 600 90" preserveAspectRatio="none"></svg>
   </div>
@@ -248,22 +248,27 @@ app.get('/', (_, res) => {
     } else {
       grid.innerHTML = s.pairStates.map(p => {
         const sideCls = p.pickedSide === 'Up' ? 'side-up' : (p.pickedSide === 'Down' ? 'side-down' : '');
+        const entryPx = (s.config?.entryPrice||0.6);
         const pickedHtml = p.pickedSide
           ? '<div class="signal-box">picked side: <span class="'+sideCls+'">'+p.pickedSide+'</span></div>'
-          : '<div class="signal-box">watching for a side above '+(s.config?.sidePickThreshold||0.6)+'…</div>';
-        const levelsHtml = (p.levels || []).map(l => {
-          let stateHtml;
-          if (l.position) {
-            stateHtml = 'holding '+l.position.shares.toFixed(2)+'sh @ '+l.position.entryPrice.toFixed(2)+' (cost $'+l.position.cost.toFixed(2)+')';
-          } else if (l.filled) {
-            stateHtml = 'closed';
-          } else {
-            stateHtml = 'armed @ '+l.triggerPrice.toFixed(2)+' ('+l.shares+'sh)';
-          }
-          return '<div class="pair-row"><span class="pair-key '+sideCls+'">L'+(l.index+1)+' ('+l.triggerPrice.toFixed(2)+')</span><span style="flex:1;text-align:right">'+stateHtml+'</span></div>';
-        }).join('');
+          : '<div class="signal-box">watching for a side to touch '+entryPx+'…</div>';
+
+        let posHtml;
+        if (p.position) {
+          posHtml = '<div class="pair-row"><span class="pair-key '+sideCls+'">'+p.position.type.toUpperCase()+' holding</span><span style="flex:1;text-align:right">'+p.position.shares+'sh @ '+p.position.entryPrice.toFixed(2)+' (cost $'+p.position.cost.toFixed(2)+')</span></div>';
+        } else if (p.baseOrder) {
+          posHtml = '<div class="pair-row"><span class="pair-key">BASE armed</span><span style="flex:1;text-align:right">'+p.baseOrder.shares+'sh @ '+entryPx.toFixed(2)+' (resting)</span></div>';
+        } else {
+          posHtml = '<div class="pair-row"><span class="pair-key">No position</span></div>';
+        }
+        const flipHtml = p.flipOrder
+          ? '<div class="pair-row"><span class="pair-key">FLIP armed</span><span style="flex:1;text-align:right">'+p.flipOrder.shares+'sh @ '+entryPx.toFixed(2)+' (target $'+p.flipOrder.targetRecovery.toFixed(2)+')</span></div>'
+          : '';
+        const recoveryHtml = '<div class="pair-row"><span class="pair-key">Carried loss</span><span class="'+(p.cumulativeLoss>0?'pnl-neg':'')+'">$'+p.cumulativeLoss.toFixed(2)+'</span><span class="pair-key">Flip chain</span><span>'+p.flipChainCount+'/'+p.maxFlipChain+'</span></div>'+
+          (p.forcedResets > 0 ? '<div class="pair-row"><span class="pair-key">Forced resets</span><span>'+p.forcedResets+'</span></div>' : '');
+
         const eqCurve = buildEquitySvg(p.equityCurve, 280, 34, null);
-        const hasPos = (p.levels || []).some(l => l.position);
+        const hasPos = !!p.position;
         return '<div class="pair-card '+(hasPos?'has-pos':'')+' '+(p.tradable?'':'untradable')+'">'+
           '<div class="pair-hdr"><div class="pair-sym">'+p.symbol+'</div><div class="pair-timer">'+(p.tradable?fmtSecs(p.secsToEnd):'loading…')+'</div></div>'+
           '<div class="pair-body">'+
@@ -273,7 +278,7 @@ app.get('/', (_, res) => {
             '<div class="pair-row"><span class="pair-key">Realized</span><span class="'+pClass(p.realizedPnl)+'">'+sgn(p.realizedPnl)+'</span><span class="pair-key">Unrealized</span><span class="'+pClass(p.unrealizedPnl)+'">'+sgn(p.unrealizedPnl)+'</span></div>'+
             '<div class="pair-row"><span class="pair-key">Fees paid</span><span class="pnl-neg">-$'+(p.feesPaid||0).toFixed(4)+'</span><span class="pair-key">Rebates</span><span class="pnl-pos">+$'+(p.rebatesEarned||0).toFixed(4)+'</span></div>'+
             pickedHtml +
-            '<div class="pos-box">'+levelsHtml+'</div>'+
+            '<div class="pos-box">'+posHtml+flipHtml+recoveryHtml+'</div>'+
             '<div class="spark-box"><svg viewBox="0 0 280 34" preserveAspectRatio="none">'+eqCurve+'</svg><div class="spark-label">Equity curve ($'+p.markValue.toFixed(2)+')</div></div>'+
           '</div></div>';
       }).join('');
@@ -284,7 +289,7 @@ app.get('/', (_, res) => {
       tb.innerHTML = s.trades.map(t => {
         const pnlStr = (t.profit !== undefined) ? sgn(t.profit) : '—';
         const pnlCls = (t.profit !== undefined) ? pClass(t.profit) : '';
-        const sideColor = t.side === 'BUY' ? '#ffd740' : (t.reason === 'SL' ? '#ff4757' : (t.reason==='TP'?'#00e676':'#00d4ff'));
+        const sideColor = t.side === 'BUY' ? '#ffd740' : (t.reason === 'FLIP_FORCE_SELL' ? '#ff4757' : (t.reason==='TP'?'#00e676':'#00d4ff'));
         return '<tr><td>'+t.time+'</td><td>'+t.symbol+'</td>'+
           '<td style="color:'+sideColor+'">'+t.side+(t.outcome?(' '+t.outcome):'')+'</td>'+
           '<td>'+(t.reason||'—')+'</td>'+
@@ -323,7 +328,7 @@ if (!PK) { console.error('❌ PRIVATE_KEY env var missing'); process.exit(1); }
 
 console.log(`⏱️ 5-Minute Crypto Up/Down Multi-Pair Bot`);
 console.log(`🚦 DRY_RUN=${DRY_RUN}`);
-if (DRY_RUN) console.log('⚠️  DRY RUN — demo $2000 capital, simulated fills, real API for data/orders');
+if (DRY_RUN) console.log('⚠️  DRY RUN — demo $500 capital, simulated fills, real API for data/orders');
 else         console.log('🔴 LIVE MODE — real money');
 
 server.listen(PORT, '0.0.0.0', () => {
