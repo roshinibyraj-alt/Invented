@@ -247,21 +247,23 @@ app.get('/', (_, res) => {
       grid.innerHTML = '<div class="empty">No pairs configured</div>';
     } else {
       grid.innerHTML = s.pairStates.map(p => {
-        const unitsHtml = (p.units || []).map(u => {
-          const sideCls = u.side === 'Up' ? 'side-up' : 'side-down';
+        const sideCls = p.pickedSide === 'Up' ? 'side-up' : (p.pickedSide === 'Down' ? 'side-down' : '');
+        const pickedHtml = p.pickedSide
+          ? '<div class="signal-box">picked side: <span class="'+sideCls+'">'+p.pickedSide+'</span></div>'
+          : '<div class="signal-box">watching for a side above '+(s.config?.sidePickThreshold||0.6)+'…</div>';
+        const levelsHtml = (p.levels || []).map(l => {
           let stateHtml;
-          if (u.position) {
-            stateHtml = 'holding '+u.position.shares.toFixed(2)+'sh @ '+u.position.entryPrice.toFixed(2)+' (cost $'+u.position.cost.toFixed(2)+') → TP '+u.position.tpPrice.toFixed(2);
-          } else if (u.restingOrder) {
-            stateHtml = 'resting buy '+u.restingOrder.shares.toFixed(2)+'sh @ '+u.restingOrder.price.toFixed(2)+' → TP '+u.restingOrder.tpPrice.toFixed(2);
+          if (l.position) {
+            stateHtml = 'holding '+l.position.shares.toFixed(2)+'sh @ '+l.position.entryPrice.toFixed(2)+' (cost $'+l.position.cost.toFixed(2)+')';
+          } else if (l.filled) {
+            stateHtml = 'closed';
           } else {
-            stateHtml = 'idle';
+            stateHtml = 'armed @ '+l.triggerPrice.toFixed(2)+' ('+l.shares+'sh)';
           }
-          return '<div class="pair-row"><span class="pair-key '+sideCls+'">'+u.label+'</span><span style="flex:1;text-align:right">'+stateHtml+'</span></div>'+
-                 '<div class="pair-row" style="margin-top:-3px"><span class="spark-label">cycles: '+u.cyclesCompleted+'</span></div>';
+          return '<div class="pair-row"><span class="pair-key '+sideCls+'">L'+(l.index+1)+' ('+l.triggerPrice.toFixed(2)+')</span><span style="flex:1;text-align:right">'+stateHtml+'</span></div>';
         }).join('');
         const eqCurve = buildEquitySvg(p.equityCurve, 280, 34, null);
-        const hasPos = (p.units || []).some(u => u.position);
+        const hasPos = (p.levels || []).some(l => l.position);
         return '<div class="pair-card '+(hasPos?'has-pos':'')+' '+(p.tradable?'':'untradable')+'">'+
           '<div class="pair-hdr"><div class="pair-sym">'+p.symbol+'</div><div class="pair-timer">'+(p.tradable?fmtSecs(p.secsToEnd):'loading…')+'</div></div>'+
           '<div class="pair-body">'+
@@ -270,7 +272,8 @@ app.get('/', (_, res) => {
             '<div class="pair-row"><span class="pair-key">Bankroll</span><span>$'+p.bankroll.toFixed(2)+'</span><span class="pair-key">W/L</span><span>'+p.wins+'/'+p.losses+'</span></div>'+
             '<div class="pair-row"><span class="pair-key">Realized</span><span class="'+pClass(p.realizedPnl)+'">'+sgn(p.realizedPnl)+'</span><span class="pair-key">Unrealized</span><span class="'+pClass(p.unrealizedPnl)+'">'+sgn(p.unrealizedPnl)+'</span></div>'+
             '<div class="pair-row"><span class="pair-key">Fees paid</span><span class="pnl-neg">-$'+(p.feesPaid||0).toFixed(4)+'</span><span class="pair-key">Rebates</span><span class="pnl-pos">+$'+(p.rebatesEarned||0).toFixed(4)+'</span></div>'+
-            '<div class="pos-box">'+unitsHtml+'</div>'+
+            pickedHtml +
+            '<div class="pos-box">'+levelsHtml+'</div>'+
             '<div class="spark-box"><svg viewBox="0 0 280 34" preserveAspectRatio="none">'+eqCurve+'</svg><div class="spark-label">Equity curve ($'+p.markValue.toFixed(2)+')</div></div>'+
           '</div></div>';
       }).join('');
