@@ -11,8 +11,10 @@
  *  PER WINDOW:
  *    1. After SIDE_PICK_ELAPSED_SEC into the window, watch both Up and
  *       Down. Whichever side's ask first reaches ENTRY_PRICE (0.60) gets
- *       a genuine RESTING LIMIT BUY at 0.60 for BASE_SHARES (10) — a
- *       passive maker order, not a taker cross. It only "fills" (in this
+ *       a genuine RESTING LIMIT BUY at 0.60, sized at BASE_SIZE_PCT
+ *       (1.2%) of current bankroll — so the base size compounds up after
+ *       every win instead of staying fixed. It's a passive maker order,
+ *       not a taker cross. It only "fills" (in this
  *       simulation/paper model) once the ask actually trades back down
  *       to <= 0.60 — if price gaps straight through 0.60 without pausing
  *       there, the order sits unfilled until price revisits that level.
@@ -81,7 +83,8 @@ const DEFAULT_PAIRS = (process.env.CRYPTO_PAIRS || 'BTC')
 const SIDE_PICK_ELAPSED_SEC = Number(process.env.SIDE_PICK_ELAPSED_SEC || 120); // wait this long into the window before watching for a side to pick
 const ENTRY_PRICE = Number(process.env.ENTRY_PRICE || 0.60); // both base and flip entries rest here
 const TP_PRICE = Number(process.env.TP_PRICE || 0.99);
-const BASE_SHARES = Number(process.env.BASE_SHARES || 10);
+const BASE_SIZE_PCT = Number(process.env.BASE_SIZE_PCT || 0.012); // base entry = this % of current bankroll — compounds after each win
+const MIN_BASE_SHARES = Number(process.env.MIN_BASE_SHARES || 1);
 const PROFIT_TARGET = Number(process.env.PROFIT_TARGET || 5); // flat $ target baked into every flip's sizing
 const MAX_FLIPS_PER_WINDOW = Number(process.env.MAX_FLIPS_PER_WINDOW || 1);
 const MAX_FLIP_CHAIN = Number(process.env.MAX_FLIP_CHAIN || 7); // total flips allowed across the whole carry-over chain before a forced reset
@@ -342,6 +345,10 @@ function oppositeSide(side) { return side === 'Up' ? 'Down' : 'Up'; }
 function sideAsk(p, side) { return side === 'Up' ? p.upAsk : p.downAsk; }
 function sideBid(p, side) { return side === 'Up' ? p.upBid : p.downBid; }
 function sideTokenId(p, side) { return side === 'Up' ? p.upTokenId : p.downTokenId; }
+function computeBaseShares(p) {
+  const dollarSize = p.bankroll * BASE_SIZE_PCT;
+  return Math.max(MIN_BASE_SHARES, Math.round(dollarSize / ENTRY_PRICE));
+}
 
 // ─────────────────────────────────────────
 //  Equity tracking
@@ -379,7 +386,7 @@ function resetRecovery(p, reason) {
   p.flipChainCount = 0;
   if (reason === 'forced') {
     p.forcedResets += 1;
-    log(`♻️  ${p.symbol} FORCED RESET — ${MAX_FLIP_CHAIN} flips reached with no win. Recovery target & flip chain cleared (no win credited); back to plain ${BASE_SHARES}sh base next opportunity.`);
+    log(`♻️  ${p.symbol} FORCED RESET — ${MAX_FLIP_CHAIN} flips reached with no win. Recovery target & flip chain cleared (no win credited); back to a plain ${(BASE_SIZE_PCT*100).toFixed(1)}%-of-bankroll base next opportunity.`);
   } else {
     log(`🏁 ${p.symbol} recovery reset — win recorded, cumulative loss & flip chain cleared.`);
   }
@@ -397,11 +404,12 @@ async function tryPlaceBaseOrder(p, elapsed, remaining) {
   else if (p.downAsk != null && p.downAsk >= ENTRY_PRICE) side = 'Down';
   if (!side) return;
 
+  const shares = computeBaseShares(p);
   const tokenId = sideTokenId(p, side);
-  const order = await placeLimitBuy(tokenId, ENTRY_PRICE, BASE_SHARES);
+  const order = await placeLimitBuy(tokenId, ENTRY_PRICE, shares);
   p.pickedSide = side;
-  p.baseOrder = { side, shares: BASE_SHARES, orderId: order.id || order.orderId || null };
-  log(`🔭 ${p.symbol} ${side} touched ${ENTRY_PRICE.toFixed(2)} — resting BASE limit buy ${BASE_SHARES}sh @ ${ENTRY_PRICE.toFixed(2)}`);
+  p.baseOrder = { side, shares, orderId: order.id || order.orderId || null };
+  log(`🔭 ${p.symbol} ${side} touched ${ENTRY_PRICE.toFixed(2)} — resting BASE limit buy ${shares}sh (${(BASE_SIZE_PCT*100).toFixed(1)}% of $${p.bankroll.toFixed(2)}) @ ${ENTRY_PRICE.toFixed(2)}`);
 }
 
 // ─────────────────────────────────────────
@@ -689,7 +697,7 @@ function buildState() {
       sidePickElapsedSec: SIDE_PICK_ELAPSED_SEC,
       entryPrice: ENTRY_PRICE,
       tpPrice: TP_PRICE,
-      baseShares: BASE_SHARES,
+      baseSizePct: BASE_SIZE_PCT,
       profitTarget: PROFIT_TARGET,
       maxFlipsPerWindow: MAX_FLIPS_PER_WINDOW,
       maxFlipChain: MAX_FLIP_CHAIN,
@@ -759,7 +767,7 @@ async function init(privateKey, emit, slogFn) {
   slog = slogFn;
   log(`🚀 5-Minute Crypto Up/Down — Single-Entry Flip-Recovery Bot`);
   log(`⚙️  $${TOTAL_CAPITAL} demo capital across ${pairList.length} pairs (${pairList.join(', ')}) → $${perPairCapital.toFixed(2)}/pair`);
-  log(`⚙️  entry ${ENTRY_PRICE} (resting limit, base ${BASE_SHARES}sh) after ${SIDE_PICK_ELAPSED_SEC}s | TP@${TP_PRICE} | profit target $${PROFIT_TARGET}/win | ${MAX_FLIPS_PER_WINDOW} flip/window, ${MAX_FLIP_CHAIN} flips/chain before forced reset`);
+  log(`⚙️  entry ${ENTRY_PRICE} (resting limit, base ${(BASE_SIZE_PCT*100).toFixed(1)}% of bankroll — compounds after each win) after ${SIDE_PICK_ELAPSED_SEC}s | TP@${TP_PRICE} | profit target $${PROFIT_TARGET}/win | ${MAX_FLIPS_PER_WINDOW} flip/window, ${MAX_FLIP_CHAIN} flips/chain before forced reset`);
   log(`⚙️  fees: base/flip entries + TP maker (rebate ${(CRYPTO_MAKER_REBATE_SHARE*100).toFixed(0)}%) | force-sell on flip taker (crypto rate ${CRYPTO_TAKER_FEE_RATE})`);
   log(`${DRY_RUN ? '⚠️  DRY RUN — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
