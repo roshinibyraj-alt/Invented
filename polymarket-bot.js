@@ -83,10 +83,12 @@
  *
  *  SL / TP (early-exit only — a binary market held to expiry already IS
  *  the take-profit/stop-loss event; these are about *voluntarily* locking
- *  in an outcome before expiry when the live order book lets us):
- *    - TP: sell if the held token's bid rises to entry + TP_OFFSET —
- *      locks a win early rather than risking a last-second reversal
- *    - SL: sell if the held token's bid falls to entry - SL_OFFSET AND
+ *  in an outcome before expiry when the live order book lets us). Both are
+ *  now FIXED absolute prices, not offsets from entry:
+ *    - TP: sell if the held token's bid rises to FIXED_TP_PRICE (0.99) —
+ *      locks a win essentially at full value rather than risking a
+ *      last-second reversal
+ *    - SL: sell if the held token's bid falls to FIXED_SL_PRICE (0.50) AND
  *      there's still enough time left for an exit to matter — cuts a
  *      clearly-wrong bet rather than riding it to a total loss. Inside
  *      the final EXIT_SAFETY_BUFFER seconds we stop SL-selling (a forced
@@ -137,21 +139,17 @@ const EQUITY_POINTS_PER_PAIR = Number(process.env.EQUITY_POINTS_PER_PAIR || 300)
 const EQUITY_POINTS_TOTAL    = Number(process.env.EQUITY_POINTS_TOTAL || 500);
 
 const Z_ENTRY_THRESHOLD      = Number(process.env.Z_ENTRY_THRESHOLD || 1.2);
-const MIN_ENTRY_PRICE        = Number(process.env.MIN_ENTRY_PRICE || 0.52);
+const MIN_ENTRY_PRICE        = Number(process.env.MIN_ENTRY_PRICE || 0.65);
 const MAX_ENTRY_PRICE        = Number(process.env.MAX_ENTRY_PRICE || 0.88);
-// TP/SL were 0.12 / 0.20 — a 66% observed win rate on that ratio is still
-// only roughly breakeven (breakeven WR = SL/(TP+SL) = 62.5%), and live
-// results showed avg loss ran ~2x avg win, eating most of the edge from
-// win rate alone. Rebalanced to a much closer-to-symmetric ratio so the
-// same win rate converts into real positive expectancy (breakeven WR now
-// ~46%, i.e. ~20pts of margin instead of ~4pts).
-// TP raised again from 0.15 → 0.23 (+0.08) on request; SL left at 0.13.
-// Breakeven WR at 0.23/0.13 is now SL/(TP+SL) = 36.1% — a wider cushion,
-// but each win needs a bigger favorable move to actually reach target
-// before either SL triggers or the window runs out, so expect TP to
-// trigger less often per trade even though it's worth more when it does.
-const TP_OFFSET              = Number(process.env.TP_OFFSET || 0.23);
-const SL_OFFSET              = Number(process.env.SL_OFFSET || 0.13);
+// TP/SL switched from entry-relative offsets to FIXED absolute prices —
+// every position now targets the same TP/SL price regardless of where it
+// entered (previously entry ± offset). With MIN_ENTRY_PRICE now 0.65, the
+// distance to each fixed level still varies by entry price: SL distance
+// ranges ~0.15 (entry near 0.65) to ~0.38 (entry near MAX_ENTRY_PRICE),
+// and TP distance ranges ~0.11 to ~0.34 the same way — worth knowing since
+// it's no longer a flat, symmetric offset like before.
+const FIXED_TP_PRICE         = Number(process.env.FIXED_TP_PRICE || 0.99);
+const FIXED_SL_PRICE         = Number(process.env.FIXED_SL_PRICE || 0.50);
 // First-entry wait raised from 15s → 90s (1.5 minutes) on request — the
 // signal now gets a full 1.5 minutes of this window's own price action
 // before it's allowed to fire a first entry, instead of just 15s.
@@ -654,8 +652,8 @@ async function checkPendingEntry(p) {
       entryPrice: execPrice,
       shares,
       cost: notional,
-      tpPrice: Math.min(round2(execPrice + TP_OFFSET), 0.99),
-      slPrice: Math.max(round2(execPrice - SL_OFFSET), 0.01),
+      tpPrice: FIXED_TP_PRICE,
+      slPrice: FIXED_SL_PRICE,
       orderId: pe.orderId,
       openedAt: Date.now(),
       confMult: pe.confMult,
@@ -891,8 +889,8 @@ function buildState() {
       zEntryThreshold: Z_ENTRY_THRESHOLD,
       minEntryPrice: MIN_ENTRY_PRICE,
       maxEntryPrice: MAX_ENTRY_PRICE,
-      tpOffset: TP_OFFSET,
-      slOffset: SL_OFFSET,
+      fixedTpPrice: FIXED_TP_PRICE,
+      fixedSlPrice: FIXED_SL_PRICE,
       cryptoTakerFeeRate: CRYPTO_TAKER_FEE_RATE,
       cryptoMakerRebateShare: CRYPTO_MAKER_REBATE_SHARE,
       entryFillTimeoutSecs: ENTRY_FILL_TIMEOUT_SECS,
@@ -968,7 +966,7 @@ async function init(privateKey, emit, slogFn) {
   slog = slogFn;
   log(`🚀 5-Minute Crypto Up/Down Multi-Pair Bot`);
   log(`⚙️  $${TOTAL_CAPITAL} demo capital across ${pairList.length} pairs (${pairList.join(', ')}) → $${perPairCapital.toFixed(2)}/pair`);
-  log(`⚙️  sizing: ${(BASE_STAKE_FRACTION*100).toFixed(1)}% of bankroll × confidence (up to ${CONF_MAX_MULT}x), cap ${(MAX_STAKE_FRACTION*100).toFixed(0)}% | z-entry≥${Z_ENTRY_THRESHOLD} | TP+${TP_OFFSET} SL-${SL_OFFSET}`);
+  log(`⚙️  sizing: ${(BASE_STAKE_FRACTION*100).toFixed(1)}% of bankroll × confidence (up to ${CONF_MAX_MULT}x), cap ${(MAX_STAKE_FRACTION*100).toFixed(0)}% | z-entry≥${Z_ENTRY_THRESHOLD} | entry∈[${MIN_ENTRY_PRICE},${MAX_ENTRY_PRICE}] | TP@${FIXED_TP_PRICE} SL@${FIXED_SL_PRICE} (fixed)`);
   log(`⚙️  fees: entry/TP maker (0 fee, +${(CRYPTO_MAKER_REBATE_SHARE*100).toFixed(0)}% rebate) | SL taker (crypto fee rate ${CRYPTO_TAKER_FEE_RATE}) | entry fill timeout ${ENTRY_FILL_TIMEOUT_SECS}s`);
   log(`${DRY_RUN ? '⚠️  DRY RUN — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
