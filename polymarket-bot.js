@@ -2,63 +2,59 @@
 
 /**
  * ═══════════════════════════════════════════════════════════════
- *  POLYMARKET 5-MINUTE CRYPTO UP/DOWN — BREAKOUT PYRAMID BOT
+ *  POLYMARKET 5-MINUTE CRYPTO UP/DOWN — SINGLE-ENTRY FLIP-RECOVERY BOT
  * ═══════════════════════════════════════════════════════════════
  *
- *  The grid-ladder strategy (buy both sides low, TP+0.10, re-compound)
- *  was not profitable and has been removed completely — no trace of it
- *  remains. This is a different strategy from scratch: no market-making,
- *  no both-sides trading. It picks ONE side per window and pyramids into
- *  it as it keeps confirming strength.
+ *  Complete rewrite — the 4-level breakout pyramid is gone, no trace
+ *  remains. New strategy, from scratch:
  *
  *  PER WINDOW:
- *    1. Wait until 2 minutes (120s) into the window. From then on, watch
- *       both Up and Down. The first side whose price trades above 0.60
- *       gets picked for the rest of that window (Up and Down can't both
- *       be above 0.60 at once, since they sum to ~1 — so this is a clean,
- *       unambiguous pick). Once picked, the bot commits to that side for
- *       the rest of the window; it does not re-evaluate or switch sides.
- *    2. That side has 4 fixed price levels: 0.60 / 0.70 / 0.80 / 0.90.
- *       Size doubles at each level: 50 / 100 / 200 / 400 shares.
- *    3. IMPORTANT EXECUTION DETAIL: Polymarket has no native "buy stop"
- *       order (confirmed earlier in this project — it has no stop orders
- *       at all). "Buy more as price rises through each level" can only be
- *       done by actively watching price every tick and firing an
- *       aggressive/marketable (taker) buy the instant a level is crossed
- *       — a resting limit buy placed above the current price would just
- *       cross the spread and fill immediately at today's price, not wait
- *       for that level to actually be reached. So all 4 entries here are
- *       taker fills, priced at whatever the live ask is the moment the
- *       threshold is crossed (which can be past the nominal level if
- *       price gapped, e.g. a jump straight from 0.58 to 0.85 fires every
- *       level it passed on the same tick, each at that same live price —
- *       an honest consequence of tick-based polling, not a bug).
- *       Levels only fire in order — level N only arms once level N-1 has
- *       filled.
- *    4. Every filled level gets its own fixed SL (0.40) and fixed TP
- *       (0.99), independent of its entry price:
- *         - SL is also a taker order (same reason — no native stop),
- *           fired the instant the bid drops to/through 0.40. Same
- *           EXIT_SAFETY_BUFFER guard as before: no SL selling in the
- *           final seconds of the window, a forced sale into a thinning
- *           book that close to resolution is worse than just letting it
- *           resolve.
- *         - TP is a genuine resting (maker) limit sell at 0.99 — fee free
- *           plus rebate, since it's a passive order actually waiting to
- *           be hit.
- *         - Anything neither TP'd nor SL'd by window close rides to the
- *           real resolution result, exactly as before.
- *    5. One default I added that wasn't specified: no NEW level fires (or
- *       resting TP orders placed) inside the final ENTRY_CUTOFF_REMAINING
- *       seconds of the window, mirroring the same reasoning as the SL
- *       exit-safety buffer — an entry with no runway left to manage isn't
- *       worth taking. Flagged here since it's my addition, not yours;
- *       remove by setting ENTRY_CUTOFF_REMAINING_SEC to 0 if unwanted.
+ *    1. After SIDE_PICK_ELAPSED_SEC into the window, watch both Up and
+ *       Down. Whichever side's ask first reaches ENTRY_PRICE (0.60) gets
+ *       a genuine RESTING LIMIT BUY at 0.60 for BASE_SHARES (10) — a
+ *       passive maker order, not a taker cross. It only "fills" (in this
+ *       simulation/paper model) once the ask actually trades back down
+ *       to <= 0.60 — if price gaps straight through 0.60 without pausing
+ *       there, the order sits unfilled until price revisits that level.
+ *    2. Once filled, a resting TP limit sell is armed at 0.99 (maker).
+ *       We now also watch the OPPOSITE side. If it reaches 0.60 too
+ *       (meaning our side is now very likely losing, since Up+Down≈1),
+ *       that's a FLIP trigger — capped at MAX_FLIPS_PER_WINDOW (1) per
+ *       window:
+ *         - Estimate the current position's loss (cost minus its shares
+ *           marked at the current bid).
+ *         - Flip size = ceil((carried cumulativeLoss + this loss estimate
+ *           + PROFIT_TARGET $5) / (0.99 − 0.60)) shares, so that if the
+ *           flip fills and later hits TP at 0.99, it recovers every
+ *           dollar lost so far AND nets the flat $5 target.
+ *         - That size is rested as a limit buy at 0.60 on the opposite
+ *           side. Once THAT order is confirmed filled, the original
+ *           losing position is immediately force-sold (a marketable
+ *           taker sell at the current bid) to close it out.
+ *    3. Only one flip per window. If that flip doesn't hit TP and instead
+ *       loses at window resolution, its loss is added to cumulativeLoss
+ *       and carried into the NEXT window's flip-sizing math — the bot
+ *       keeps trying (fresh 10-share base entry each window, sized flip
+ *       if triggered) until a position actually wins. Any win (TP or a
+ *       correct resolution) resets cumulativeLoss and the flip-chain
+ *       counter to zero.
+ *    4. The flip chain is capped at MAX_FLIP_CHAIN (7) total flips across
+ *       however many windows it takes. If 7 flips pass with no win, the
+ *       bot force-resets cumulativeLoss and the chain counter to zero
+ *       (logged distinctly from a real win) and starts clean next window
+ *       — per explicit instruction, this is NOT a hard stop.
+ *    5. No new base entry or flip fires inside the final
+ *       ENTRY_CUTOFF_REMAINING_SEC seconds of a window (no runway left
+ *       to manage it). Any position never TP'd rides to the real
+ *       resolution, exactly as before.
  *
- *  FEES: Polymarket Fee Structure V2 (crypto: taker fee = shares × 0.07 ×
- *  price × (1-price), maker rebate = that × 20%). All 4 entries and every
- *  SL here are taker (pay the fee); TP is maker (fee-free + rebate);
- *  resolution settlement is always fee-free.
+ *  FEES: entries (base + flip) are genuine resting maker orders now, so
+ *  they earn the maker rebate on fill (no taker fee). TP is maker too.
+ *  The force-sell that closes a position right after a flip fills is a
+ *  marketable taker sell, so it pays the taker fee. Resolution settlement
+ *  is always fee-free. (Polymarket Fee Structure V2, crypto category:
+ *  taker fee = shares × 0.07 × price × (1-price), maker rebate = 20% of
+ *  that same amount.)
  * ═══════════════════════════════════════════════════════════════
  */
 
@@ -77,20 +73,19 @@ const SLUG_OFFSET_FALLBACKS = [0, -300, 300];
 
 // ── Env / config ──
 const DRY_RUN = (process.env.DRY_RUN || 'true').toLowerCase() === 'true';
-const TOTAL_CAPITAL = Number(process.env.TOTAL_CAPITAL || 2000);
+const TOTAL_CAPITAL = Number(process.env.TOTAL_CAPITAL || 500);
 const DEFAULT_PAIRS = (process.env.CRYPTO_PAIRS || 'BTC')
   .split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
 
-// ── Breakout pyramid parameters ──
+// ── Single-entry flip-recovery parameters ──
 const SIDE_PICK_ELAPSED_SEC = Number(process.env.SIDE_PICK_ELAPSED_SEC || 120); // wait this long into the window before watching for a side to pick
-const SIDE_PICK_THRESHOLD   = Number(process.env.SIDE_PICK_THRESHOLD || 0.60); // side is picked once its price trades above this
-const LEVEL_PRICES  = (process.env.LEVEL_PRICES ? process.env.LEVEL_PRICES.split(',').map(Number) : [0.60, 0.70, 0.80, 0.90]);
-const LEVEL_BASE_SHARES = Number(process.env.LEVEL_BASE_SHARES || 50); // doubles at every level: 50/100/200/400
-const FIXED_SL_PRICE = Number(process.env.FIXED_SL_PRICE || 0.40);
-const FIXED_TP_PRICE = Number(process.env.FIXED_TP_PRICE || 0.99);
-const EXIT_SAFETY_BUFFER_SEC = Number(process.env.EXIT_SAFETY_BUFFER_SEC || 15); // no SL selling this close to window close
-const ENTRY_CUTOFF_REMAINING_SEC = Number(process.env.ENTRY_CUTOFF_REMAINING_SEC || 15); // no NEW level fires this close to window close (added default, see header)
-const MIN_SHARES = Number(process.env.MIN_SHARES || 5);
+const ENTRY_PRICE = Number(process.env.ENTRY_PRICE || 0.60); // both base and flip entries rest here
+const TP_PRICE = Number(process.env.TP_PRICE || 0.99);
+const BASE_SHARES = Number(process.env.BASE_SHARES || 10);
+const PROFIT_TARGET = Number(process.env.PROFIT_TARGET || 5); // flat $ target baked into every flip's sizing
+const MAX_FLIPS_PER_WINDOW = Number(process.env.MAX_FLIPS_PER_WINDOW || 1);
+const MAX_FLIP_CHAIN = Number(process.env.MAX_FLIP_CHAIN || 7); // total flips allowed across the whole carry-over chain before a forced reset
+const ENTRY_CUTOFF_REMAINING_SEC = Number(process.env.ENTRY_CUTOFF_REMAINING_SEC || 15); // no NEW base/flip entries this close to window close
 
 // ── Fees & maker rebates (Polymarket Fee Structure V2, crypto category) ──
 const CRYPTO_TAKER_FEE_RATE     = Number(process.env.CRYPTO_TAKER_FEE_RATE || 0.07);
@@ -121,14 +116,14 @@ function round5(n) { return Math.round(n * 100000) / 100000; }
 function nowSec() { return Date.now() / 1000; }
 
 async function getJSON(url) {
-  const res = await fetch(url, { headers: { 'User-Agent': 'polymarket-breakout-bot/1.0' } });
+  const res = await fetch(url, { headers: { 'User-Agent': 'polymarket-flip-bot/1.0' } });
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${url}`);
   return res.json();
 }
 async function postJSON(url, body) {
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'User-Agent': 'polymarket-breakout-bot/1.0' },
+    headers: { 'Content-Type': 'application/json', 'User-Agent': 'polymarket-flip-bot/1.0' },
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${url}`);
@@ -160,19 +155,8 @@ function makerRebate(shares, price) {
 }
 
 // ─────────────────────────────────────────
-//  Pair / level state
+//  Pair state
 // ─────────────────────────────────────────
-function freshLevel(index, triggerPrice) {
-  return {
-    index,                                   // 0-3
-    triggerPrice,                            // 0.60 / 0.70 / 0.80 / 0.90
-    shares: LEVEL_BASE_SHARES * Math.pow(2, index), // 50 / 100 / 200 / 400
-    filled: false,
-    position: null,       // { entryPrice, shares, cost, tpOrderId, openedAt }
-    tpRestingOrderId: null,
-  };
-}
-
 function freshPairState(symbol) {
   return {
     symbol,
@@ -185,14 +169,25 @@ function freshPairState(symbol) {
     upTokenId: null,
     downTokenId: null,
     upAsk: null, upBid: null, downAsk: null, downBid: null,
-    pickedSide: null,     // null | 'Up' | 'Down' — locked for the rest of the window once set
-    levels: LEVEL_PRICES.map((p, i) => freshLevel(i, p)),
+
+    // per-window trade state (reset every new window)
+    pickedSide: null,           // side of the current/most recent order this window
+    baseOrder: null,            // { side, shares, orderId } — pending resting buy @ ENTRY_PRICE
+    flipOrder: null,            // { side, shares, orderId, targetRecovery, lossEstimate } — pending resting flip buy
+    position: null,             // { type:'base'|'flip', side, entryPrice, shares, cost, tpOrderId }
+    flipsThisWindow: 0,
+    resolvedThisWindow: true,
+
+    // persistent recovery state — carries across windows, reset only on a win or forced 7-flip reset
+    cumulativeLoss: 0,
+    flipChainCount: 0,
+    forcedResets: 0,
+
     bankroll: perPairCapital,
     realizedPnl: 0,
     feesPaid: 0,
     rebatesEarned: 0,
     wins: 0, losses: 0,
-    resolvedThisWindow: true,
     equityCurve: [{ t: Date.now(), equity: perPairCapital }],
   };
 }
@@ -268,8 +263,14 @@ async function loadPairWindow(p) {
   p.downTokenId = downId;
   p.tradable = true;
   p.resolvedThisWindow = false;
+
+  // Reset per-window trade state only — cumulativeLoss / flipChainCount / bankroll / stats persist.
   p.pickedSide = null;
-  p.levels = LEVEL_PRICES.map((pr, i) => freshLevel(i, pr));
+  p.baseOrder = null;
+  p.flipOrder = null;
+  p.position = null;
+  p.flipsThisWindow = 0;
+
   log(`🔭 ${p.symbol} window loaded: ${slug} | ends ${new Date(p.windowEnd * 1000).toISOString().slice(11,19)}Z`);
 }
 
@@ -335,20 +336,24 @@ async function refreshPolyPrices() {
 }
 
 // ─────────────────────────────────────────
+//  Side helpers
+// ─────────────────────────────────────────
+function oppositeSide(side) { return side === 'Up' ? 'Down' : 'Up'; }
+function sideAsk(p, side) { return side === 'Up' ? p.upAsk : p.downAsk; }
+function sideBid(p, side) { return side === 'Up' ? p.upBid : p.downBid; }
+function sideTokenId(p, side) { return side === 'Up' ? p.upTokenId : p.downTokenId; }
+
+// ─────────────────────────────────────────
 //  Equity tracking
 // ─────────────────────────────────────────
-function pairAskBid(p) {
-  return p.pickedSide === 'Up' ? { ask: p.upAsk, bid: p.upBid } : { ask: p.downAsk, bid: p.downBid };
-}
-function levelMarkValue(p, level) {
-  if (!level.position) return 0;
-  const { bid } = pairAskBid(p);
-  const price = bid ?? level.position.entryPrice;
-  return round2(level.position.shares * price);
+function positionMarkValue(p) {
+  if (!p.position) return 0;
+  const bid = sideBid(p, p.position.side);
+  const price = bid ?? p.position.entryPrice;
+  return round2(p.position.shares * price);
 }
 function pairMarkValue(p) {
-  const held = p.levels.reduce((s, l) => s + levelMarkValue(p, l), 0);
-  return round2(p.bankroll + held);
+  return round2(p.bankroll + positionMarkValue(p));
 }
 function pushGlobalEquity() {
   const total = round2(Object.values(pairs).reduce((s, p) => s + pairMarkValue(p), 0));
@@ -367,109 +372,168 @@ function registerTrade(p, entry) {
 }
 
 // ─────────────────────────────────────────
-//  Side selection
+//  Recovery bookkeeping
 // ─────────────────────────────────────────
-function maybePickSide(p, elapsed, remaining) {
-  if (p.pickedSide || elapsed < SIDE_PICK_ELAPSED_SEC || remaining < ENTRY_CUTOFF_REMAINING_SEC) return;
-  if (p.upAsk != null && p.upAsk > SIDE_PICK_THRESHOLD) {
-    p.pickedSide = 'Up';
-  } else if (p.downAsk != null && p.downAsk > SIDE_PICK_THRESHOLD) {
-    p.pickedSide = 'Down';
-  }
-  if (p.pickedSide) {
-    log(`🎯 ${p.symbol} picked ${p.pickedSide} (${(p.pickedSide === 'Up' ? p.upAsk : p.downAsk).toFixed(2)} > ${SIDE_PICK_THRESHOLD}) — arming 4-level pyramid`);
+function resetRecovery(p, reason) {
+  p.cumulativeLoss = 0;
+  p.flipChainCount = 0;
+  if (reason === 'forced') {
+    p.forcedResets += 1;
+    log(`♻️  ${p.symbol} FORCED RESET — ${MAX_FLIP_CHAIN} flips reached with no win. Recovery target & flip chain cleared (no win credited); back to plain ${BASE_SHARES}sh base next opportunity.`);
+  } else {
+    log(`🏁 ${p.symbol} recovery reset — win recorded, cumulative loss & flip chain cleared.`);
   }
 }
 
 // ─────────────────────────────────────────
-//  Level entries — taker fills, fired reactively as price crosses each level
+//  Step 1: place the base entry
 // ─────────────────────────────────────────
-async function fireLevelEntry(p, level, execPrice) {
-  const tokenId = p.pickedSide === 'Up' ? p.upTokenId : p.downTokenId;
-  const cost = round2(execPrice * level.shares);
-  if (cost > p.bankroll) {
-    log(`⏭️  ${p.symbol} level${level.index} (${level.triggerPrice}): skip — insufficient bankroll ($${p.bankroll.toFixed(2)} < $${cost.toFixed(2)})`);
-    return;
-  }
-  const order = await placeLimitBuy(tokenId, execPrice, level.shares); // marketable/taker — see header note
-  const fee = takerFee(level.shares, execPrice);
-  p.bankroll = round2(p.bankroll - cost - fee);
-  p.feesPaid = round2(p.feesPaid + fee);
-  p.realizedPnl = round2(p.realizedPnl - fee); // fee is a realized cost the instant it's paid
+async function tryPlaceBaseOrder(p, elapsed, remaining) {
+  if (p.pickedSide || p.baseOrder || p.position) return;
+  if (elapsed < SIDE_PICK_ELAPSED_SEC || remaining < ENTRY_CUTOFF_REMAINING_SEC) return;
 
-  level.filled = true;
-  level.position = { entryPrice: execPrice, shares: level.shares, cost, openedAt: Date.now() };
+  let side = null;
+  if (p.upAsk != null && p.upAsk >= ENTRY_PRICE) side = 'Up';
+  else if (p.downAsk != null && p.downAsk >= ENTRY_PRICE) side = 'Down';
+  if (!side) return;
+
+  const tokenId = sideTokenId(p, side);
+  const order = await placeLimitBuy(tokenId, ENTRY_PRICE, BASE_SHARES);
+  p.pickedSide = side;
+  p.baseOrder = { side, shares: BASE_SHARES, orderId: order.id || order.orderId || null };
+  log(`🔭 ${p.symbol} ${side} touched ${ENTRY_PRICE.toFixed(2)} — resting BASE limit buy ${BASE_SHARES}sh @ ${ENTRY_PRICE.toFixed(2)}`);
+}
+
+// ─────────────────────────────────────────
+//  Step 2: check base order fill
+// ─────────────────────────────────────────
+async function checkBaseOrderFill(p) {
+  if (!p.baseOrder) return;
+  const ask = sideAsk(p, p.baseOrder.side);
+  if (ask == null || ask > ENTRY_PRICE) return; // not touched yet, still resting
+
+  const shares = p.baseOrder.shares;
+  const cost = round2(shares * ENTRY_PRICE);
+  const rebate = makerRebate(shares, ENTRY_PRICE);
+  p.bankroll = round2(p.bankroll - cost + rebate);
+  p.rebatesEarned = round2(p.rebatesEarned + rebate);
+
+  const tokenId = sideTokenId(p, p.baseOrder.side);
+  const tpOrder = await placeLimitSell(tokenId, TP_PRICE, shares);
+  p.position = { type: 'base', side: p.baseOrder.side, entryPrice: ENTRY_PRICE, shares, cost, tpOrderId: tpOrder.id || tpOrder.orderId || null };
+
+  log(`✅ ${p.symbol} BASE filled ${shares}sh ${p.baseOrder.side} @ ${ENTRY_PRICE.toFixed(2)} | cost=$${cost.toFixed(2)} rebate=+$${rebate.toFixed(4)} | TP armed @ ${TP_PRICE}`);
+  registerTrade(p, { side: 'BUY', outcome: p.baseOrder.side, reason: 'BASE', price: ENTRY_PRICE, shares, cost, rebate });
+  p.baseOrder = null;
   recordEquity(p);
-  log(`🎯 ${p.symbol} level${level.index} (trigger ${level.triggerPrice}) BUY ${level.shares}sh @ ${execPrice.toFixed(2)} | cost=$${cost.toFixed(2)} fee=-$${fee.toFixed(4)}`);
-  registerTrade(p, { level: level.index, side: 'BUY', outcome: p.pickedSide, price: execPrice, shares: level.shares, cost, fee });
-
-  // Rest a TP sell at the fixed target immediately.
-  const tpOrder = await placeLimitSell(tokenId, FIXED_TP_PRICE, level.shares);
-  level.tpRestingOrderId = tpOrder.id || tpOrder.orderId || null;
 }
 
-async function processLevels(p, remaining) {
-  if (!p.pickedSide) return;
-  const ask = p.pickedSide === 'Up' ? p.upAsk : p.downAsk;
-  const bid = p.pickedSide === 'Up' ? p.upBid : p.downBid;
+// ─────────────────────────────────────────
+//  Step 3: watch for a flip trigger and size it
+// ─────────────────────────────────────────
+async function tryTriggerFlip(p, remaining) {
+  if (!p.position || p.flipOrder) return;
+  if (p.flipsThisWindow >= MAX_FLIPS_PER_WINDOW) return;
+  if (p.flipChainCount >= MAX_FLIP_CHAIN) return; // safety net; forced reset should already have cleared this
+  if (remaining < ENTRY_CUTOFF_REMAINING_SEC) return;
 
-  // Fire levels in order — level N only arms once level N-1 has filled.
-  // Cascades within the same tick if price gapped past multiple levels.
-  if (ask != null && remaining >= ENTRY_CUTOFF_REMAINING_SEC) {
-    for (const level of p.levels) {
-      if (level.filled) continue;
-      if (level.index > 0 && !p.levels[level.index - 1].filled) break; // must fill in order
-      if (ask >= level.triggerPrice) {
-        await fireLevelEntry(p, level, ask);
-      } else {
-        break; // this level (and anything above it) hasn't triggered yet
-      }
+  const oppSide = oppositeSide(p.position.side);
+  const oppAsk = sideAsk(p, oppSide);
+  if (oppAsk == null || oppAsk < ENTRY_PRICE) return;
+
+  const posBid = sideBid(p, p.position.side);
+  const markPrice = posBid != null ? posBid : p.position.entryPrice;
+  const lossEstimate = Math.max(0, round2(p.position.cost - p.position.shares * markPrice));
+  const target = round2(p.cumulativeLoss + lossEstimate + PROFIT_TARGET);
+
+  let flipShares = Math.max(1, Math.ceil(target / (TP_PRICE - ENTRY_PRICE)));
+  let cost = round2(flipShares * ENTRY_PRICE);
+
+  if (cost > p.bankroll) {
+    const affordable = Math.floor((p.bankroll * 0.98) / ENTRY_PRICE);
+    if (affordable < 1) {
+      log(`⚠️  ${p.symbol} flip trigger hit but bankroll $${p.bankroll.toFixed(2)} can't cover any shares — skipping flip, current position rides to resolution`);
+      return;
     }
+    log(`⚠️  ${p.symbol} flip sized ${flipShares}sh ($${cost.toFixed(2)}) exceeds bankroll $${p.bankroll.toFixed(2)} — capping to ${affordable}sh (full recovery target not covered)`);
+    flipShares = affordable;
+    cost = round2(flipShares * ENTRY_PRICE);
   }
 
-  // Manage every filled level's SL / TP independently.
-  if (bid == null) return;
-  const tokenId = p.pickedSide === 'Up' ? p.upTokenId : p.downTokenId;
-  for (const level of p.levels) {
-    if (!level.filled || !level.position) continue;
-    const pos = level.position;
+  const tokenId = sideTokenId(p, oppSide);
+  const order = await placeLimitBuy(tokenId, ENTRY_PRICE, flipShares);
+  p.flipOrder = { side: oppSide, shares: flipShares, orderId: order.id || order.orderId || null, targetRecovery: target, lossEstimate };
+  log(`🔄 ${p.symbol} FLIP triggered — ${oppSide} touched ${ENTRY_PRICE.toFixed(2)}. Resting flip limit buy ${flipShares}sh @ ${ENTRY_PRICE.toFixed(2)} (covers carried $${p.cumulativeLoss.toFixed(2)} + est. loss $${lossEstimate.toFixed(2)} + $${PROFIT_TARGET} target)`);
+}
 
-    if (bid >= FIXED_TP_PRICE) {
-      // Maker fill — our resting sell at FIXED_TP_PRICE actually got hit.
-      const proceeds = round2(FIXED_TP_PRICE * pos.shares);
-      const rebate = makerRebate(pos.shares, FIXED_TP_PRICE);
-      const net = round2(proceeds + rebate);
-      p.bankroll = round2(p.bankroll + net);
-      const profit = round2(net - pos.cost);
-      p.realizedPnl = round2(p.realizedPnl + profit);
-      p.rebatesEarned = round2(p.rebatesEarned + rebate);
-      p.wins++;
-      log(`💰 ${p.symbol} level${level.index} TP filled ${pos.shares}sh @ ${FIXED_TP_PRICE} | rebate=+$${rebate.toFixed(4)} | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
-      registerTrade(p, { level: level.index, side: 'SELL', outcome: p.pickedSide, reason: 'TP', price: FIXED_TP_PRICE, shares: pos.shares, profit, rebate });
-      level.position = null;
-      level.tpRestingOrderId = null;
-      recordEquity(p);
-      continue;
-    }
+// ─────────────────────────────────────────
+//  Step 4: flip fill → force-sell the old position, open the new one
+// ─────────────────────────────────────────
+async function checkFlipOrderFill(p) {
+  if (!p.flipOrder) return;
+  const ask = sideAsk(p, p.flipOrder.side);
+  if (ask == null || ask > ENTRY_PRICE) return; // not touched yet, still resting
 
-    if (bid <= FIXED_SL_PRICE && remaining > EXIT_SAFETY_BUFFER_SEC) {
-      await cancelOrder(level.tpRestingOrderId); // pull the resting TP first
-      const order = await placeLimitSell(tokenId, bid, pos.shares); // taker — see header note
-      const fee = takerFee(pos.shares, bid);
-      const proceeds = round2(bid * pos.shares);
-      const net = round2(proceeds - fee);
-      p.bankroll = round2(p.bankroll + net);
-      const profit = round2(net - pos.cost);
-      p.realizedPnl = round2(p.realizedPnl + profit);
-      p.feesPaid = round2(p.feesPaid + fee);
-      p.losses++;
-      log(`💥 ${p.symbol} level${level.index} SL filled ${pos.shares}sh @ ${bid.toFixed(2)} | fee=-$${fee.toFixed(4)} | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
-      registerTrade(p, { level: level.index, side: 'SELL', outcome: p.pickedSide, reason: 'SL', price: bid, shares: pos.shares, profit, fee });
-      level.position = null;
-      level.tpRestingOrderId = null;
-      recordEquity(p);
-    }
-  }
+  // Confirmed filled — force-sell the previous position immediately (marketable/taker).
+  const prevPos = p.position;
+  const tokenId = sideTokenId(p, prevPos.side);
+  const bid = sideBid(p, prevPos.side) ?? 0;
+  await placeLimitSell(tokenId, bid, prevPos.shares); // marketable/taker — crosses the spread at the live bid
+  const fee = takerFee(prevPos.shares, bid);
+  const proceeds = round2(bid * prevPos.shares);
+  const net = round2(proceeds - fee);
+  p.bankroll = round2(p.bankroll + net);
+  const lossOnPrev = round2(prevPos.cost - net);
+  p.realizedPnl = round2(p.realizedPnl - lossOnPrev);
+  p.feesPaid = round2(p.feesPaid + fee);
+  await cancelOrder(prevPos.tpOrderId);
+
+  log(`⚡ ${p.symbol} FORCE-SOLD prior ${prevPos.side} ${prevPos.shares}sh @ ${bid.toFixed(2)} | fee=-$${fee.toFixed(4)} | realized loss=$${lossOnPrev.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
+  registerTrade(p, { side: 'SELL', outcome: prevPos.side, reason: 'FLIP_FORCE_SELL', price: bid, shares: prevPos.shares, profit: -lossOnPrev, fee });
+
+  // Open the flip position.
+  const shares = p.flipOrder.shares;
+  const cost = round2(shares * ENTRY_PRICE);
+  const rebate = makerRebate(shares, ENTRY_PRICE);
+  p.bankroll = round2(p.bankroll - cost + rebate);
+  p.rebatesEarned = round2(p.rebatesEarned + rebate);
+
+  const flipTokenId = sideTokenId(p, p.flipOrder.side);
+  const tpOrder = await placeLimitSell(flipTokenId, TP_PRICE, shares);
+  p.position = { type: 'flip', side: p.flipOrder.side, entryPrice: ENTRY_PRICE, shares, cost, tpOrderId: tpOrder.id || tpOrder.orderId || null };
+  p.flipChainCount += 1;
+  p.flipsThisWindow += 1;
+  p.pickedSide = p.flipOrder.side;
+
+  log(`✅ ${p.symbol} FLIP filled ${shares}sh ${p.flipOrder.side} @ ${ENTRY_PRICE.toFixed(2)} | cost=$${cost.toFixed(2)} rebate=+$${rebate.toFixed(4)} | TP armed @ ${TP_PRICE} | flip ${p.flipChainCount}/${MAX_FLIP_CHAIN} in chain`);
+  registerTrade(p, { side: 'BUY', outcome: p.flipOrder.side, reason: 'FLIP', price: ENTRY_PRICE, shares, cost, rebate });
+  p.flipOrder = null;
+  recordEquity(p);
+}
+
+// ─────────────────────────────────────────
+//  Step 5: TP fill on whatever's currently open (base or flip)
+// ─────────────────────────────────────────
+async function checkTpFill(p) {
+  if (!p.position) return;
+  const bid = sideBid(p, p.position.side);
+  if (bid == null || bid < TP_PRICE) return;
+
+  const pos = p.position;
+  const proceeds = round2(TP_PRICE * pos.shares);
+  const rebate = makerRebate(pos.shares, TP_PRICE);
+  const net = round2(proceeds + rebate);
+  p.bankroll = round2(p.bankroll + net);
+  const profit = round2(net - pos.cost);
+  p.realizedPnl = round2(p.realizedPnl + profit);
+  p.rebatesEarned = round2(p.rebatesEarned + rebate);
+  p.wins++;
+
+  log(`💰 ${p.symbol} ${pos.type.toUpperCase()} TP filled ${pos.shares}sh ${pos.side} @ ${TP_PRICE} | rebate=+$${rebate.toFixed(4)} | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
+  registerTrade(p, { side: 'SELL', outcome: pos.side, reason: 'TP', price: TP_PRICE, shares: pos.shares, profit, rebate });
+  resetRecovery(p, 'win');
+  p.position = null;
+  recordEquity(p);
 }
 
 // ─────────────────────────────────────────
@@ -496,25 +560,42 @@ async function resolvePairWindow(p) {
   if (p.resolvedThisWindow) return;
   p.resolvedThisWindow = true;
 
-  const openLevels = p.levels.filter(l => l.position);
-  if (!openLevels.length) return;
+  // Cancel any resting orders that never got touched this window.
+  if (p.baseOrder) {
+    log(`⏱️  ${p.symbol} BASE order never touched — cancelling`);
+    await cancelOrder(p.baseOrder.orderId);
+    p.baseOrder = null;
+  }
+  if (p.flipOrder) {
+    log(`⏱️  ${p.symbol} FLIP order never touched — cancelling`);
+    await cancelOrder(p.flipOrder.orderId);
+    p.flipOrder = null;
+  }
+
+  if (!p.position) { recordEquity(p); return; }
 
   const winner = await determineWinningSide(p);
-  for (const level of openLevels) {
-    await cancelOrder(level.tpRestingOrderId);
-    const pos = level.position;
-    const won = winner === p.pickedSide;
-    const proceeds = won ? round2(pos.shares * 1) : 0;
-    const profit = round2(proceeds - pos.cost);
-    p.bankroll = round2(p.bankroll + proceeds);
-    p.realizedPnl = round2(p.realizedPnl + profit);
-    if (won) p.wins++; else p.losses++;
-    const icon = won ? '💰' : '💥';
-    log(`${icon} ${p.symbol} level${level.index} RESOLUTION ${p.pickedSide} ${pos.shares}sh entry=${pos.entryPrice.toFixed(2)} exit=$${won ? '1.00' : '0.00'}/sh | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
-    registerTrade(p, { level: level.index, side: 'SELL', outcome: p.pickedSide, reason: 'RESOLUTION', price: won ? 1 : 0, shares: pos.shares, profit });
-    level.position = null;
-    level.tpRestingOrderId = null;
+  const pos = p.position;
+  const won = winner === pos.side;
+  const proceeds = won ? round2(pos.shares * 1) : 0;
+  const profit = round2(proceeds - pos.cost);
+  p.bankroll = round2(p.bankroll + proceeds);
+  p.realizedPnl = round2(p.realizedPnl + profit);
+
+  if (won) {
+    p.wins++;
+    log(`💰 ${p.symbol} ${pos.type.toUpperCase()} RESOLUTION WIN ${pos.side} ${pos.shares}sh entry=${pos.entryPrice.toFixed(2)} | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
+    registerTrade(p, { side: 'SELL', outcome: pos.side, reason: 'RESOLUTION', price: 1, shares: pos.shares, profit });
+    resetRecovery(p, 'win');
+  } else {
+    p.losses++;
+    const loss = round2(pos.cost - proceeds);
+    p.cumulativeLoss = round2(p.cumulativeLoss + loss);
+    log(`💥 ${p.symbol} ${pos.type.toUpperCase()} RESOLUTION LOSS ${pos.side} ${pos.shares}sh entry=${pos.entryPrice.toFixed(2)} | pnl=$${profit.toFixed(2)} | carried loss now $${p.cumulativeLoss.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
+    registerTrade(p, { side: 'SELL', outcome: pos.side, reason: 'RESOLUTION', price: 0, shares: pos.shares, profit });
+    if (p.flipChainCount >= MAX_FLIP_CHAIN) resetRecovery(p, 'forced');
   }
+  p.position = null;
   recordEquity(p);
 }
 
@@ -533,8 +614,11 @@ async function processPair(p) {
   const remaining = p.windowEnd - nowSec();
 
   if (tradingEnabled) {
-    maybePickSide(p, elapsed, remaining);
-    await processLevels(p, remaining);
+    await tryPlaceBaseOrder(p, elapsed, remaining);
+    await checkBaseOrderFill(p);
+    await tryTriggerFlip(p, remaining);
+    await checkFlipOrderFill(p);
+    await checkTpFill(p);
   }
 
   if (remaining <= -RESOLUTION_BUFFER_S && !p.resolvedThisWindow) {
@@ -547,7 +631,7 @@ async function processPair(p) {
 // ─────────────────────────────────────────
 function buildState() {
   const pairStates = Object.values(pairs).map(p => {
-    const unrealized = round2(p.levels.reduce((s, l) => s + (l.position ? levelMarkValue(p, l) - l.position.cost : 0), 0));
+    const unrealized = round2(p.position ? positionMarkValue(p) - p.position.cost : 0);
     const markValue = pairMarkValue(p);
     return {
       symbol: p.symbol,
@@ -565,13 +649,13 @@ function buildState() {
       rebatesEarned: p.rebatesEarned,
       wins: p.wins,
       losses: p.losses,
-      levels: p.levels.map(l => ({
-        index: l.index,
-        triggerPrice: l.triggerPrice,
-        shares: l.shares,
-        filled: l.filled,
-        position: l.position ? { entryPrice: l.position.entryPrice, shares: l.position.shares, cost: l.position.cost } : null,
-      })),
+      cumulativeLoss: p.cumulativeLoss,
+      flipChainCount: p.flipChainCount,
+      maxFlipChain: MAX_FLIP_CHAIN,
+      forcedResets: p.forcedResets,
+      baseOrder: p.baseOrder ? { side: p.baseOrder.side, shares: p.baseOrder.shares } : null,
+      flipOrder: p.flipOrder ? { side: p.flipOrder.side, shares: p.flipOrder.shares, targetRecovery: p.flipOrder.targetRecovery } : null,
+      position: p.position ? { type: p.position.type, side: p.position.side, entryPrice: p.position.entryPrice, shares: p.position.shares, cost: p.position.cost } : null,
       equityCurve: p.equityCurve,
     };
   });
@@ -603,11 +687,12 @@ function buildState() {
     uptime: Math.floor((Date.now() - startTime) / 1000),
     config: {
       sidePickElapsedSec: SIDE_PICK_ELAPSED_SEC,
-      sidePickThreshold: SIDE_PICK_THRESHOLD,
-      levelPrices: LEVEL_PRICES,
-      levelBaseShares: LEVEL_BASE_SHARES,
-      fixedSlPrice: FIXED_SL_PRICE,
-      fixedTpPrice: FIXED_TP_PRICE,
+      entryPrice: ENTRY_PRICE,
+      tpPrice: TP_PRICE,
+      baseShares: BASE_SHARES,
+      profitTarget: PROFIT_TARGET,
+      maxFlipsPerWindow: MAX_FLIPS_PER_WINDOW,
+      maxFlipChain: MAX_FLIP_CHAIN,
       cryptoTakerFeeRate: CRYPTO_TAKER_FEE_RATE,
       cryptoMakerRebateShare: CRYPTO_MAKER_REBATE_SHARE,
     },
@@ -656,7 +741,7 @@ function setPairs(list) {
 }
 function pauseTrading() {
   tradingEnabled = false;
-  log('⏸️  Trading paused (open positions still managed for SL/TP/resolution)');
+  log('⏸️  Trading paused (open positions/orders still managed for TP/flip/resolution)');
   return { ok: true };
 }
 function resumeTrading() {
@@ -672,10 +757,10 @@ function getStatus() { return { ok: true, ...buildState() }; }
 async function init(privateKey, emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
-  log(`🚀 5-Minute Crypto Up/Down — Breakout Pyramid Bot`);
+  log(`🚀 5-Minute Crypto Up/Down — Single-Entry Flip-Recovery Bot`);
   log(`⚙️  $${TOTAL_CAPITAL} demo capital across ${pairList.length} pairs (${pairList.join(', ')}) → $${perPairCapital.toFixed(2)}/pair`);
-  log(`⚙️  pick side >${SIDE_PICK_THRESHOLD} after ${SIDE_PICK_ELAPSED_SEC}s | levels ${LEVEL_PRICES.join('/')} @ shares ${LEVEL_PRICES.map((_,i)=>LEVEL_BASE_SHARES*Math.pow(2,i)).join('/')} | SL@${FIXED_SL_PRICE} TP@${FIXED_TP_PRICE}`);
-  log(`⚙️  fees: entries+SL taker (crypto rate ${CRYPTO_TAKER_FEE_RATE}) | TP maker (0 fee, +${(CRYPTO_MAKER_REBATE_SHARE*100).toFixed(0)}% rebate)`);
+  log(`⚙️  entry ${ENTRY_PRICE} (resting limit, base ${BASE_SHARES}sh) after ${SIDE_PICK_ELAPSED_SEC}s | TP@${TP_PRICE} | profit target $${PROFIT_TARGET}/win | ${MAX_FLIPS_PER_WINDOW} flip/window, ${MAX_FLIP_CHAIN} flips/chain before forced reset`);
+  log(`⚙️  fees: base/flip entries + TP maker (rebate ${(CRYPTO_MAKER_REBATE_SHARE*100).toFixed(0)}%) | force-sell on flip taker (crypto rate ${CRYPTO_TAKER_FEE_RATE})`);
   log(`${DRY_RUN ? '⚠️  DRY RUN — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
   trader = new PolymarketTrader(privateKey);
