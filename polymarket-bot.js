@@ -494,9 +494,10 @@ async function checkFlipOrderFill(p) {
   const lossOnPrev = round2(prevPos.cost - net);
   p.realizedPnl = round2(p.realizedPnl - lossOnPrev);
   p.feesPaid = round2(p.feesPaid + fee);
+  p.cumulativeLoss = round2(p.cumulativeLoss + Math.max(0, lossOnPrev)); // must be recovered by this (or a future) flip too — was previously dropped here
   await cancelOrder(prevPos.tpOrderId);
 
-  log(`⚡ ${p.symbol} FORCE-SOLD prior ${prevPos.side} ${prevPos.shares}sh @ ${bid.toFixed(2)} | fee=-$${fee.toFixed(4)} | realized loss=$${lossOnPrev.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
+  log(`⚡ ${p.symbol} FORCE-SOLD prior ${prevPos.side} ${prevPos.shares}sh @ ${bid.toFixed(2)} | fee=-$${fee.toFixed(4)} | realized loss=$${lossOnPrev.toFixed(2)} | cumulative loss now $${p.cumulativeLoss.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
   registerTrade(p, { side: 'SELL', outcome: prevPos.side, reason: 'FLIP_FORCE_SELL', price: bid, shares: prevPos.shares, profit: -lossOnPrev, fee });
 
   // Open the flip position.
