@@ -292,7 +292,6 @@ app.get('/', (_, res) => {
           '</div></div>';
       }).join('');
     }
-    }
 
     const tb = document.getElementById('trade-body');
     if (s.trades && s.trades.length > 0) {
