@@ -247,32 +247,30 @@ app.get('/', (_, res) => {
       grid.innerHTML = '<div class="empty">No pairs configured</div>';
     } else {
       grid.innerHTML = s.pairStates.map(p => {
-        const sig = p.signal;
-        const sigHtml = sig ? (
-          '<div class="signal-box">Δopen '+sig.openDeltaPct.toFixed(3)+'% | mom15s '+sig.shortMomPct.toFixed(3)+'% | vol '+sig.vol.toFixed(3)+'% | z '+sig.z.toFixed(2)+' | score '+sig.score.toFixed(2)+' | bias <span class="'+(sig.direction==='Up'?'side-up':'side-down')+'">'+sig.direction+'</span></div>'
-        ) : '<div class="signal-box">warming up…</div>';
-        const posHtml = p.position ? (
-          '<div class="pos-box"><span class="'+(p.position.side==='Up'?'side-up':'side-down')+'">'+p.position.side+'</span> '+
-          p.position.shares.toFixed(2)+'sh @ '+p.position.entryPrice.toFixed(2)+' | cost $'+p.position.cost.toFixed(2)+
-          ' (conf '+(p.position.confMult||1).toFixed(2)+'x)'+
-          ' | TP '+p.position.tpPrice.toFixed(2)+' / SL '+p.position.slPrice.toFixed(2)+
-          (p.unrealizedPnl!==undefined ? (' | u/pnl <span class="'+pClass(p.unrealizedPnl)+'">'+sgn(p.unrealizedPnl)+'</span>') : '') +
-          '</div>'
-        ) : (p.pendingEntry ? (
-          '<div class="pos-box">📌 resting <span class="'+(p.pendingEntry.side==='Up'?'side-up':'side-down')+'">'+p.pendingEntry.side+'</span> @ '+p.pendingEntry.limitPrice.toFixed(2)+
-          ' (~$'+p.pendingEntry.stake.toFixed(2)+') | '+p.pendingEntry.secsLeft+'s left to fill</div>'
-        ) : '<div class="pos-box">no open position</div>');
+        const unitsHtml = (p.units || []).map(u => {
+          const sideCls = u.side === 'Up' ? 'side-up' : 'side-down';
+          let stateHtml;
+          if (u.position) {
+            stateHtml = 'holding '+u.position.shares.toFixed(2)+'sh @ '+u.position.entryPrice.toFixed(2)+' (cost $'+u.position.cost.toFixed(2)+') → TP '+u.position.tpPrice.toFixed(2);
+          } else if (u.restingOrder) {
+            stateHtml = 'resting buy '+u.restingOrder.shares.toFixed(2)+'sh @ '+u.restingOrder.price.toFixed(2)+' → TP '+u.restingOrder.tpPrice.toFixed(2);
+          } else {
+            stateHtml = 'idle';
+          }
+          return '<div class="pair-row"><span class="pair-key '+sideCls+'">'+u.label+'</span><span style="flex:1;text-align:right">'+stateHtml+'</span></div>'+
+                 '<div class="pair-row" style="margin-top:-3px"><span class="spark-label">cycles: '+u.cyclesCompleted+'</span></div>';
+        }).join('');
         const eqCurve = buildEquitySvg(p.equityCurve, 280, 34, null);
-        return '<div class="pair-card '+(p.position?'has-pos':'')+' '+(p.tradable?'':'untradable')+'">'+
+        const hasPos = (p.units || []).some(u => u.position);
+        return '<div class="pair-card '+(hasPos?'has-pos':'')+' '+(p.tradable?'':'untradable')+'">'+
           '<div class="pair-hdr"><div class="pair-sym">'+p.symbol+'</div><div class="pair-timer">'+(p.tradable?fmtSecs(p.secsToEnd):'loading…')+'</div></div>'+
           '<div class="pair-body">'+
-            '<div class="pair-row"><span class="pair-key">Spot</span><span>'+(p.spot?p.spot.toFixed(4):'—')+'</span><span class="pair-key">Open</span><span>'+(p.openSpot?p.openSpot.toFixed(4):'—')+'</span></div>'+
             '<div class="pair-row"><span class="pair-key">Up ask/bid</span><span>'+(p.upAsk?.toFixed(2)||'—')+' / '+(p.upBid?.toFixed(2)||'—')+'</span></div>'+
             '<div class="pair-row"><span class="pair-key">Down ask/bid</span><span>'+(p.downAsk?.toFixed(2)||'—')+' / '+(p.downBid?.toFixed(2)||'—')+'</span></div>'+
-            '<div class="pair-row"><span class="pair-key">Bankroll</span><span>$'+p.bankroll.toFixed(2)+'</span><span class="pair-key">Base stake</span><span>$'+p.baseStake.toFixed(2)+'</span></div>'+
-            '<div class="pair-row"><span class="pair-key">Realized</span><span class="'+pClass(p.realizedPnl)+'">'+sgn(p.realizedPnl)+'</span><span class="pair-key">W/L</span><span>'+p.wins+'/'+p.losses+'</span></div>'+
+            '<div class="pair-row"><span class="pair-key">Bankroll</span><span>$'+p.bankroll.toFixed(2)+'</span><span class="pair-key">W/L</span><span>'+p.wins+'/'+p.losses+'</span></div>'+
+            '<div class="pair-row"><span class="pair-key">Realized</span><span class="'+pClass(p.realizedPnl)+'">'+sgn(p.realizedPnl)+'</span><span class="pair-key">Unrealized</span><span class="'+pClass(p.unrealizedPnl)+'">'+sgn(p.unrealizedPnl)+'</span></div>'+
             '<div class="pair-row"><span class="pair-key">Fees paid</span><span class="pnl-neg">-$'+(p.feesPaid||0).toFixed(4)+'</span><span class="pair-key">Rebates</span><span class="pnl-pos">+$'+(p.rebatesEarned||0).toFixed(4)+'</span></div>'+
-            sigHtml + posHtml +
+            '<div class="pos-box">'+unitsHtml+'</div>'+
             '<div class="spark-box"><svg viewBox="0 0 280 34" preserveAspectRatio="none">'+eqCurve+'</svg><div class="spark-label">Equity curve ($'+p.markValue.toFixed(2)+')</div></div>'+
           '</div></div>';
       }).join('');
