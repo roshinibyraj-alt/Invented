@@ -71,6 +71,16 @@ const SWEEP_SECS        = Number(process.env.SWEEP_SECS || 285);        // cance
 const FINAL_SELL_PRICE  = Number(process.env.FINAL_SELL_PRICE || 0.99);
 const FIXED_SHARES      = Number(process.env.FIXED_SHARES || 50);
 
+// Time-based buy trigger: every BUY_INTERVAL_SECS, place a fresh maker limit
+// BUY at (mid - BUY_OFFSET) on each side, REGARDLESS of whether that side's
+// previously placed buy(s) are filled or still resting. Buys stack freely —
+// multiple resting buys can exist on the same side at once. This runs
+// alongside (not instead of) the existing "place next buy immediately on
+// fill" behavior. All other filters (entry cutoff, bankroll cap, sizing,
+// sweep) still apply unchanged.
+const BUY_INTERVAL_SECS = Number(process.env.BUY_INTERVAL_SECS || 15);
+const BUY_INTERVAL_MS   = BUY_INTERVAL_SECS * 1000;
+
 // After this many seconds elapsed, if a side's current mid price is above
 // the threshold, that side's buy orders size up instead of using FIXED_SHARES.
 const HIGH_PRICE_AFTER_SECS = Number(process.env.HIGH_PRICE_AFTER_SECS || 150);
@@ -148,8 +158,10 @@ function makerRebate(shares, price) {
 // ─────────────────────────────────────────
 function freshSideState() {
   return {
-    restingBuy: null,     // { orderId, price, shares, cost, placedAt }
-    positions: [],        // { entryPrice, shares, cost, exit: { kind:'TP'|'FINAL', price, orderId, status } }
+    restingBuys: [],       // [{ orderId, price, shares, cost, placedAt }] — can stack, no longer capped at 1
+    positions: [],         // { entryPrice, shares, cost, exit: { kind:'TP'|'FINAL', price, orderId, status } }
+    lastBuyPlacedAt: null, // ms epoch of the most recent buy placement (timer- or fill-triggered)
+    buysPlacedThisWindow: 0,
   };
 }
 
@@ -375,15 +387,23 @@ function midPrice(ask, bid) {
 function reservedCashFor(p) {
   let total = 0;
   for (const side of ['Up', 'Down']) {
-    const rb = p.sides[side].restingBuy;
-    if (rb) total += rb.cost;
+    for (const rb of p.sides[side].restingBuys) total += rb.cost;
   }
   return round2(total);
 }
 
-async function maybePlaceBuy(p, side, elapsed) {
+// Places a fresh maker limit BUY on this side at (mid - BUY_OFFSET).
+// Called from two triggers, both of which stack freely (no "already have
+// one resting" guard anymore):
+//   'FILL-CHASE' — immediately after a resting buy on this side fills
+//   'TIMER'      — every BUY_INTERVAL_SECS, regardless of fill state
+// All existing filters remain in force: entry cutoff, bankroll cap, and
+// the elapsed-time / high-price share up-sizing rule.
+async function placeBuyOrder(p, side, elapsed, trigger) {
   const s = p.sides[side];
-  if (s.restingBuy) return; // already have one resting on this side
+  // Reset the timer cadence on every attempt (success or skip) so the next
+  // TIMER-triggered buy is always ~BUY_INTERVAL_SECS after this one.
+  s.lastBuyPlacedAt = Date.now();
 
   const ask = side === 'Up' ? p.upAsk : p.downAsk;
   const bid = side === 'Up' ? p.upBid : p.downBid;
@@ -396,18 +416,20 @@ async function maybePlaceBuy(p, side, elapsed) {
   const cost = round2(price * shares);
 
   if (round2(reservedCashFor(p) + cost) > p.bankroll) {
-    log(`⏭️  ${p.symbol} ${side}: skip new buy — insufficient bankroll ($${p.bankroll.toFixed(2)}, need $${cost.toFixed(2)})`);
+    log(`⏭️  ${p.symbol} ${side}: [${trigger}] skip new buy — insufficient bankroll ($${p.bankroll.toFixed(2)}, need $${cost.toFixed(2)}, already reserved $${reservedCashFor(p).toFixed(2)})`);
     return;
   }
 
   const tokenId = side === 'Up' ? p.upTokenId : p.downTokenId;
   const order = await placeLimitBuy(tokenId, price, shares);
-  s.restingBuy = {
+  const rb = {
     orderId: order.id || order.orderId || null,
     price, shares, cost,
     placedAt: Date.now(),
   };
-  log(`📥 ${p.symbol} ${side}: resting BUY ${shares}sh @ ${price.toFixed(2)} (mid ${mid.toFixed(2)} − ${BUY_OFFSET})${sizedUp ? ` [SIZED UP: mid > ${HIGH_PRICE_THRESHOLD} after ${HIGH_PRICE_AFTER_SECS}s]` : ''}`);
+  s.restingBuys.push(rb);
+  s.buysPlacedThisWindow++;
+  log(`📥 ${p.symbol} ${side}: [${trigger}] resting BUY ${shares}sh @ ${price.toFixed(2)} (mid ${mid.toFixed(2)} − ${BUY_OFFSET}) | ${s.restingBuys.length} resting buy(s) now open on this side${sizedUp ? ` [SIZED UP: mid > ${HIGH_PRICE_THRESHOLD} after ${HIGH_PRICE_AFTER_SECS}s]` : ''}`);
 }
 
 // ─────────────────────────────────────────
@@ -415,32 +437,43 @@ async function maybePlaceBuy(p, side, elapsed) {
 // ─────────────────────────────────────────
 async function checkBuyFill(p, side, elapsed) {
   const s = p.sides[side];
-  const rb = s.restingBuy;
-  if (!rb) return;
+  if (!s.restingBuys.length) return;
   const ask = side === 'Up' ? p.upAsk : p.downAsk;
-  if (ask == null || ask > rb.price) return; // fills once ask trades down to/through our resting bid
+  if (ask == null) return;
 
-  const rebate = makerRebate(rb.shares, rb.price);
-  p.bankroll = round2(p.bankroll - rb.cost + rebate);
-  p.realizedPnl = round2(p.realizedPnl + rebate);
-  p.rebatesEarned = round2(p.rebatesEarned + rebate);
-  s.restingBuy = null;
+  // Split into filled vs still-resting. Multiple stacked buys can fill on
+  // the same tick since the timer trigger allows several to be open at once.
+  const stillResting = [];
+  const filled = [];
+  for (const rb of s.restingBuys) {
+    if (ask <= rb.price) filled.push(rb); else stillResting.push(rb);
+  }
+  s.restingBuys = stillResting;
+  if (!filled.length) return;
 
   const tokenId = side === 'Up' ? p.upTokenId : p.downTokenId;
-  const tpPrice = round2(rb.price + TP_OFFSET);
-  const tpOrder = await placeLimitSell(tokenId, tpPrice, rb.shares);
-  const position = {
-    entryPrice: rb.price, shares: rb.shares, cost: rb.cost,
-    exit: { kind: 'TP', price: tpPrice, orderId: tpOrder.id || tpOrder.orderId || null, status: 'resting' },
-  };
-  s.positions.push(position);
+  for (const rb of filled) {
+    const rebate = makerRebate(rb.shares, rb.price);
+    p.bankroll = round2(p.bankroll - rb.cost + rebate);
+    p.realizedPnl = round2(p.realizedPnl + rebate);
+    p.rebatesEarned = round2(p.rebatesEarned + rebate);
 
-  log(`🎯 ${p.symbol} ${side} BUY filled ${rb.shares}sh @ ${rb.price.toFixed(2)} | cost=$${rb.cost.toFixed(2)} | rebate=+$${rebate.toFixed(4)} | TP resting @ ${tpPrice.toFixed(2)}`);
-  registerTrade(p, { side: 'BUY', outcome: side, reason: 'ENTRY', price: rb.price, shares: rb.shares, cost: rb.cost, rebate });
-  recordEquity(p);
+    const tpPrice = round2(rb.price + TP_OFFSET);
+    const tpOrder = await placeLimitSell(tokenId, tpPrice, rb.shares);
+    const position = {
+      entryPrice: rb.price, shares: rb.shares, cost: rb.cost,
+      exit: { kind: 'TP', price: tpPrice, orderId: tpOrder.id || tpOrder.orderId || null, status: 'resting' },
+    };
+    s.positions.push(position);
 
-  // Immediately queue this side's next buy, if we're still allowed to enter.
-  if (elapsed < ENTRY_CUTOFF_SECS) await maybePlaceBuy(p, side, elapsed);
+    log(`🎯 ${p.symbol} ${side} BUY filled ${rb.shares}sh @ ${rb.price.toFixed(2)} | cost=$${rb.cost.toFixed(2)} | rebate=+$${rebate.toFixed(4)} | TP resting @ ${tpPrice.toFixed(2)}`);
+    registerTrade(p, { side: 'BUY', outcome: side, reason: 'ENTRY', price: rb.price, shares: rb.shares, cost: rb.cost, rebate });
+    recordEquity(p);
+
+    // Immediately queue this side's next buy on fill (existing behavior),
+    // on top of whatever the 15s timer is doing independently.
+    if (elapsed < ENTRY_CUTOFF_SECS) await placeBuyOrder(p, side, elapsed, 'FILL-CHASE');
+  }
 }
 
 // ─────────────────────────────────────────
@@ -484,10 +517,11 @@ async function maybeSweep(p, elapsed) {
   for (const side of ['Up', 'Down']) {
     const s = p.sides[side];
 
-    if (s.restingBuy) {
-      await cancelOrder(s.restingBuy.orderId);
-      log(`🛑 ${p.symbol} ${side}: unfilled buy ${s.restingBuy.shares}sh @ ${s.restingBuy.price.toFixed(2)} cancelled at ${SWEEP_SECS}s`);
-      s.restingBuy = null;
+    if (s.restingBuys.length) {
+      const totalShares = s.restingBuys.reduce((a, rb) => a + rb.shares, 0);
+      for (const rb of s.restingBuys) await cancelOrder(rb.orderId);
+      log(`🛑 ${p.symbol} ${side}: ${s.restingBuys.length} unfilled buy(s) totaling ${totalShares}sh cancelled at ${SWEEP_SECS}s`);
+      s.restingBuys = [];
     }
 
     let sweepShares = 0, sweepCost = 0;
@@ -541,10 +575,10 @@ async function resolvePairWindow(p) {
 
   for (const side of ['Up', 'Down']) {
     const s = p.sides[side];
-    if (s.restingBuy) {
-      await cancelOrder(s.restingBuy.orderId);
-      log(`🛑 ${p.symbol} ${side}: unfilled buy cancelled at window close`);
-      s.restingBuy = null;
+    if (s.restingBuys.length) {
+      for (const rb of s.restingBuys) await cancelOrder(rb.orderId);
+      log(`🛑 ${p.symbol} ${side}: ${s.restingBuys.length} unfilled buy(s) cancelled at window close`);
+      s.restingBuys = [];
     }
     for (const pos of s.positions) {
       if (pos.exit.status === 'resting') {
@@ -594,7 +628,12 @@ async function processPair(p) {
   for (const side of ['Up', 'Down']) {
     await checkBuyFill(p, side, elapsed);
     await checkExitFills(p, side);
-    if (elapsed < ENTRY_CUTOFF_SECS) await maybePlaceBuy(p, side, elapsed);
+
+    if (elapsed < ENTRY_CUTOFF_SECS) {
+      const s = p.sides[side];
+      const timerDue = s.lastBuyPlacedAt == null || (Date.now() - s.lastBuyPlacedAt) >= BUY_INTERVAL_MS;
+      if (timerDue) await placeBuyOrder(p, side, elapsed, 'TIMER');
+    }
   }
 
   await maybeSweep(p, elapsed);
@@ -611,14 +650,33 @@ async function processPair(p) {
 function sideSummary(p, side) {
   const s = p.sides[side];
   const openPositions = s.positions.filter(pos => pos.exit.status === 'resting');
-  const pendingTp = openPositions.filter(pos => pos.exit.kind === 'TP').length;
-  const pendingFinal = openPositions.filter(pos => pos.exit.kind === 'FINAL').length;
+  const pendingTp = openPositions.filter(pos => pos.exit.kind === 'TP');
+  const pendingFinal = openPositions.filter(pos => pos.exit.kind === 'FINAL');
+
+  const restingBuys = s.restingBuys
+    .slice()
+    .sort((a, b) => b.placedAt - a.placedAt)
+    .map(rb => ({ price: rb.price, shares: rb.shares, cost: rb.cost, ageSecs: Math.floor((Date.now() - rb.placedAt) / 1000) }));
+  const restingBuyShares = round2(s.restingBuys.reduce((a, rb) => a + rb.shares, 0));
+  const restingBuyCost = round2(s.restingBuys.reduce((a, rb) => a + rb.cost, 0));
+
+  const nextBuyInSecs = s.lastBuyPlacedAt != null
+    ? Math.max(0, Math.ceil((BUY_INTERVAL_MS - (Date.now() - s.lastBuyPlacedAt)) / 1000))
+    : 0;
+
   return {
-    restingBuy: s.restingBuy ? { price: s.restingBuy.price, shares: s.restingBuy.shares } : null,
+    restingBuys,               // full list: every currently-open stacked buy on this side
+    restingBuyCount: restingBuys.length,
+    restingBuyShares,
+    restingBuyCost,
+    nextBuyInSecs,             // countdown to the next 15s TIMER-triggered buy
+    buysPlacedThisWindow: s.buysPlacedThisWindow,
     heldShares: sideHeldShares(s),
     heldCost: sideHeldCost(s),
-    pendingTp,
-    pendingFinal,
+    pendingTp: pendingTp.length,
+    pendingFinal: pendingFinal.length,
+    pendingTpDetail: pendingTp.map(pos => ({ price: pos.exit.price, shares: pos.shares })),
+    pendingFinalDetail: pendingFinal.map(pos => ({ price: pos.exit.price, shares: pos.shares })),
   };
 }
 
@@ -680,6 +738,7 @@ function buildState() {
     config: {
       buyOffset: BUY_OFFSET,
       tpOffset: TP_OFFSET,
+      buyIntervalSecs: BUY_INTERVAL_SECS,
       entryCutoffSecs: ENTRY_CUTOFF_SECS,
       sweepSecs: SWEEP_SECS,
       finalSellPrice: FINAL_SELL_PRICE,
@@ -754,6 +813,7 @@ async function init(privateKey, emit, slogFn) {
   log(`🚀 5-Minute BTC Up/Down — Independent Side Scalper`);
   log(`⚙️  $${TOTAL_CAPITAL} demo capital across ${pairList.length} pair(s) (${pairList.join(', ')}) → $${perPairCapital.toFixed(2)}/pair`);
   log(`⚙️  Each side independently: buy @ mid − ${BUY_OFFSET}, TP @ entry + ${TP_OFFSET}, ${FIXED_SHARES}sh/order, stacks freely`);
+  log(`⚙️  TIMER: every ${BUY_INTERVAL_SECS}s a fresh buy is placed on each side at mid − ${BUY_OFFSET} regardless of prior fill state (stacks on top of FILL-CHASE buys)`);
   log(`⚙️  After ${HIGH_PRICE_AFTER_SECS}s: if a side's mid > ${HIGH_PRICE_THRESHOLD}, that side's buy size increases to ${HIGH_PRICE_SHARES}sh`);
   log(`⚙️  No new entries after ${ENTRY_CUTOFF_SECS}s | at ${SWEEP_SECS}s: cancel unfilled buys/TPs, roll remainder into one @ ${FINAL_SELL_PRICE} sell per side`);
   log(`⚙️  Unfilled ${FINAL_SELL_PRICE} sell at window close → resolves to actual outcome`);
