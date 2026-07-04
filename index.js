@@ -253,7 +253,7 @@ app.get('/', (_, res) => {
           if (!d || d.shares <= 0) return '';
           const sideCls = side === 'Up' ? 'side-up' : 'side-down';
           const avg = d.shares > 0 ? (d.cost / d.shares) : 0;
-          const tpTag = d.tpState === 'filled' ? 'TP hit' : (d.tpState === 'resting' ? 'TP@'+s.config.tpPrice+' resting' : 'not yet at TP');
+          const tpTag = d.exitReason === 'tp' ? 'TP hit' : d.exitReason === 'stoploss' ? '🧯 stop-loss exit' : (d.tpState === 'resting' ? 'TP@'+s.config.tpPrice+' resting' : 'not yet at TP');
           return '<div class="pair-row"><span class="'+sideCls+'">'+side+'</span><span>'+d.shares.toFixed(2)+'sh @ avg '+avg.toFixed(3)+' (cost $'+d.cost.toFixed(2)+') — '+tpTag+'</span></div>';
         };
         const posHtml = (pos.Up.shares > 0 || pos.Down.shares > 0)
