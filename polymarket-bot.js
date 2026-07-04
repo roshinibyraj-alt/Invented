@@ -107,16 +107,16 @@ const MAX_CONCURRENT_PER_SIDE = Number(process.env.MAX_CONCURRENT_PER_SIDE || 2)
 
 // ── Sizing ──
 const BASE_SHARES = Number(process.env.BASE_SHARES || 12);
-const MIN_SHARES  = Number(process.env.MIN_SHARES || 2);
+const MIN_SHARES  = Number(process.env.MIN_SHARES || 6);
 const MAX_SHARES  = Number(process.env.MAX_SHARES || 60);
 
 // ── Time-decaying exit targets (all scaled by timeFrac = how early in the entry window the trade opened) ──
 const BASE_TP_GAIN = Number(process.env.BASE_TP_GAIN || 0.20); // early-window target above entry
-const MIN_TP_GAIN  = Number(process.env.MIN_TP_GAIN || 0.12);  // late-window floor target
-const BASE_SL_DIST = Number(process.env.BASE_SL_DIST || 0.08); // early-window stop distance below entry
+const MIN_TP_GAIN  = Number(process.env.MIN_TP_GAIN || 0.70);  // late-window floor target
+const BASE_SL_DIST = Number(process.env.BASE_SL_DIST || 0.40); // early-window stop distance below entry
 const MIN_SL_DIST  = Number(process.env.MIN_SL_DIST || 0.10);  // late-window floor stop distance
 const BASE_HOLD_S  = Number(process.env.BASE_HOLD_S || 90);    // early-window patience
-const MIN_HOLD_S   = Number(process.env.MIN_HOLD_S || 20);     // late-window patience
+const MIN_HOLD_S   = Number(process.env.MIN_HOLD_S || 90);     // late-window patience
 const TP_PRICE_CAP = Number(process.env.TP_PRICE_CAP || 0.97); // never rest a TP above this
 
 // ── Fees & maker rebates (Polymarket Fee Structure V2, crypto category) ──
