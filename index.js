@@ -21,7 +21,7 @@ app.get('/api/status', (_, res) => {
 
 app.post('/api/set-pairs', (req, res) => {
   const { pairs } = req.body || {};
-  if (!Array.isArray(pairs) || !pairs.length) return res.status(400).json({ ok: false, error: 'Missing pairs array, e.g. ["BTC","ETH","SOL"]' });
+  if (!Array.isArray(pairs) || !pairs.length) return res.status(400).json({ ok: false, error: 'Missing pairs array, e.g. ["BTC","ETH","SOL","XRP"]' });
   try { res.json(bot.setPairs(pairs)); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
@@ -39,7 +39,7 @@ app.get('/', (_, res) => {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>⏱️ 5m Crypto Up/Down Bot</title>
+<title>σ 5m Crypto Up/Down Bot</title>
 <style>
   :root {
     --bg: #ffffff; --bg2: #f5f7fa; --bg3: #edf0f4; --border: #d0d7e2;
@@ -54,6 +54,8 @@ app.get('/', (_, res) => {
   .mode-badge { padding: 4px 14px; border-radius: 20px; font-size: 11px; font-weight: bold; }
   .mode-dry { background: #ffd74022; color: var(--yellow); border: 1px solid var(--yellow); }
   .mode-live { background: #ff475722; color: var(--red); border: 1px solid var(--red); animation: pulse 2s infinite; }
+  .mode-info { background: #0099cc22; color: var(--cyan); border: 1px solid var(--cyan); }
+  .mode-halt { background: #e8304a22; color: var(--red); border: 1px solid var(--red); }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
   .toolbar { display: flex; gap: 8px; padding: 14px 20px 0; flex-wrap: wrap; align-items: center; }
   .toolbar input { flex: 1; min-width: 220px; background: var(--bg2); border: 1px solid var(--border); color: var(--text); padding: 10px 14px; border-radius: 8px; font-family: inherit; font-size: 12px; }
@@ -72,10 +74,11 @@ app.get('/', (_, res) => {
   .section { padding: 0 20px 16px; }
   .section-hdr { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 2px; padding: 8px 0; display: flex; align-items: center; gap: 8px; }
   .section-hdr::after { content:''; flex:1; height:1px; background: var(--border); }
-  .pair-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 10px; }
+  .pair-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(310px, 1fr)); gap: 10px; }
   .pair-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
   .pair-card.has-pos { border-color: var(--cyan); box-shadow: 0 0 0 1px #00d4ff22; }
-  .pair-card.untradable { opacity: .55; }
+  .pair-card.untradable { opacity: .5; }
+  .pair-card.cooling { border-color: var(--yellow); }
   .pair-hdr { background: #0d1d30; padding: 8px 12px; display: flex; justify-content: space-between; align-items: center; }
   .pair-sym { font-size: 13px; font-weight: bold; color: #ddd; }
   .pair-timer { font-size: 10px; color: var(--cyan); }
@@ -84,8 +87,11 @@ app.get('/', (_, res) => {
   .pair-key { color: var(--muted); }
   .side-up { color: var(--green); }
   .side-down { color: var(--red); }
+  .edge-pos { color: var(--green); }
+  .edge-neg { color: var(--muted); }
   .pos-box { margin-top: 6px; border-top: 1px solid var(--border); padding-top: 6px; font-size: 9px; }
   .signal-box { margin-top: 6px; font-size: 9px; color: #8aa; }
+  .cooldown-box { margin-top: 6px; font-size: 9px; color: var(--yellow); }
   .bottom-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 0 20px 20px; }
   @media (max-width: 800px) { .bottom-grid { grid-template-columns: 1fr; } }
   .tbl-wrap { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; max-height: 320px; overflow-y: auto; }
@@ -107,13 +113,14 @@ app.get('/', (_, res) => {
 </head>
 <body>
   <div class="header">
-    <div class="logo">⏱️ <span>5M</span> UP/DOWN BOT</div>
+    <div class="logo">σ <span>5M</span> UP/DOWN BOT</div>
     <div id="mode-badge" class="mode-badge ${DRY_RUN ? 'mode-dry' : 'mode-live'}">${DRY_RUN ? 'DRY RUN' : '🔴 LIVE'}</div>
-    <div id="experiment-badge" class="mode-badge mode-dry">CHASE (baseline)</div>
+    <div id="strategy-badge" class="mode-badge mode-info">VOL-MODEL EDGE</div>
+    <div id="risk-badge" class="mode-badge mode-info" style="display:none;">DAILY LIMIT HIT</div>
   </div>
 
   <div class="toolbar">
-    <input id="pairs-input" placeholder="BTC,ETH,SOL,XRP,DOGE" />
+    <input id="pairs-input" placeholder="BTC,ETH,SOL,XRP,DOGE,LTC,BNB,LINK,AVAX,ADA" />
     <button id="set-pairs-btn">Set Pairs</button>
     <button id="pause-btn" class="pause">Pause</button>
     <button id="resume-btn" class="resume">Resume</button>
@@ -125,33 +132,31 @@ app.get('/', (_, res) => {
     <div class="stat"><div class="stat-label">Total P&amp;L</div><div class="stat-val" id="total-pnl">$0.00</div></div>
     <div class="stat"><div class="stat-label">Realized</div><div class="stat-val" id="realized-pnl">$0.00</div></div>
     <div class="stat"><div class="stat-label">Unrealized</div><div class="stat-val" id="unrealized-pnl">$0.00</div></div>
+    <div class="stat"><div class="stat-label">Today's P&amp;L</div><div class="stat-val" id="daily-pnl">$0.00</div></div>
     <div class="stat"><div class="stat-label">Bankroll</div><div class="stat-val" id="total-bankroll">$0.00</div></div>
-    <div class="stat"><div class="stat-label">Fees Paid</div><div class="stat-val pnl-neg" id="total-fees">$0.00</div></div>
-    <div class="stat"><div class="stat-label">Rebates Earned</div><div class="stat-val pnl-pos" id="total-rebates">$0.00</div></div>
+    <div class="stat"><div class="stat-label">Fees Paid</div><div class="stat-val" id="total-fees">$0.0000</div></div>
+    <div class="stat"><div class="stat-label">Rebates</div><div class="stat-val" id="total-rebates">$0.0000</div></div>
     <div class="stat"><div class="stat-label">Win Rate</div><div class="stat-val" id="win-rate">—</div><div class="stat-sub" id="win-loss-sub">0W / 0L</div></div>
     <div class="stat"><div class="stat-label">Uptime</div><div class="stat-val" id="uptime">0s</div></div>
-    <div class="stat"><div class="stat-label">Trading</div><div class="stat-val" id="trading-flag">—</div></div>
+    <div class="stat"><div class="stat-label">Trading</div><div class="stat-val" id="trading-flag">ON</div></div>
   </div>
 
   <div class="equity-wrap">
-    <div class="equity-hdr">
-      <div class="title">Portfolio Equity Curve</div>
-      <div class="val" id="equity-val">$2000.00</div>
-    </div>
-    <svg id="equity-chart" class="equity-svg" viewBox="0 0 600 90" preserveAspectRatio="none"></svg>
+    <div class="equity-hdr"><div class="title">Total Equity Curve</div><div class="val" id="equity-val">$0.00</div></div>
+    <svg class="equity-svg" id="equity-chart" viewBox="0 0 600 90" preserveAspectRatio="none"></svg>
   </div>
 
   <div class="section">
     <div class="section-hdr">Pairs</div>
-    <div class="pair-grid" id="pair-grid"><div class="empty">Loading…</div></div>
+    <div id="pair-grid" class="pair-grid"></div>
   </div>
 
   <div class="bottom-grid">
     <div>
-      <div class="section-hdr">Trades</div>
+      <div class="section-hdr">Recent Trades</div>
       <div class="tbl-wrap">
         <table class="tbl">
-          <thead><tr><th>Time</th><th>Pair</th><th>Side</th><th>Reason</th><th>Price</th><th>Shares</th><th>P&amp;L</th></tr></thead>
+          <thead><tr><th>Time</th><th>Sym</th><th>Side</th><th>Reason</th><th>Price</th><th>Shares</th><th>P&amp;L</th></tr></thead>
           <tbody id="trade-body"><tr><td colspan="7" class="empty">No trades yet</td></tr></tbody>
         </table>
       </div>
@@ -167,38 +172,28 @@ app.get('/', (_, res) => {
   const socket = io();
   function sgn(n) { n = n || 0; return (n >= 0 ? '+$' : '-$') + Math.abs(n).toFixed(2); }
   function pClass(n) { return (n || 0) >= 0 ? 'pnl-pos' : 'pnl-neg'; }
-  function fmt(s) { const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), ss = s%60; return (h?h+'h ':'')+(m?m+'m ':'')+ss+'s'; }
-  function fmtSecs(s) { if (s === null || s === undefined) return '—'; const m = Math.floor(s/60), ss = s%60; return m+'m '+String(ss).padStart(2,'0')+'s'; }
+  function fmt(s) { const h=Math.floor(s/3600), m=Math.floor((s%3600)/60), ss=s%60; return (h?h+'h ':'')+(m?m+'m ':'')+ss+'s'; }
+  function fmtSecs(s) { const m=Math.floor(s/60), ss=String(s%60).padStart(2,'0'); return m+':'+ss; }
+  function pct(n) { return n==null ? '—' : (n*100).toFixed(1)+'%'; }
 
-  // Build an SVG polyline + fill path from an equity curve [{t,equity}],
-  // normalized into a viewBox of width x height. Color reflects whether
-  // the curve ended up from where it started.
-  function buildEquitySvg(points, width, height, startVal) {
-    if (!points || points.length < 2) {
-      return '<line x1="0" y1="'+(height/2)+'" x2="'+width+'" y2="'+(height/2)+'" stroke="#3a4a60" stroke-width="1" stroke-dasharray="3,3"/>';
-    }
-    const vals = points.map(p => p.equity);
-    let min = Math.min(...vals, startVal != null ? startVal : vals[0]);
-    let max = Math.max(...vals, startVal != null ? startVal : vals[0]);
-    if (max - min < 0.01) { max += 1; min -= 1; }
-    const n = points.length;
-    const coords = points.map((p, i) => {
-      const x = (i / (n - 1)) * width;
-      const y = height - ((p.equity - min) / (max - min)) * height;
-      return [x, y];
-    });
-    const up = vals[vals.length - 1] >= vals[0];
-    const color = up ? '#00c853' : '#ff4757';
-    const linePath = 'M' + coords.map(c => c[0].toFixed(1)+','+c[1].toFixed(1)).join(' L');
-    const fillPath = linePath + ' L' + width + ',' + height + ' L0,' + height + ' Z';
+  function buildEquitySvg(curve, w, h, capitalBaseline) {
+    if (!curve || curve.length < 2) return '';
+    const vals = curve.map(c => c.equity);
+    const min = Math.min(...vals, capitalBaseline || vals[0]);
+    const max = Math.max(...vals, capitalBaseline || vals[0]);
+    const range = (max - min) || 1;
+    const stepX = w / (curve.length - 1);
+    const pts = vals.map((v,i) => [i*stepX, h - ((v-min)/range)*h]);
+    const path = pts.map((p,i) => (i===0?'M':'L')+p[0].toFixed(1)+','+p[1].toFixed(1)).join(' ');
+    const last = vals[vals.length-1];
+    const base = capitalBaseline != null ? capitalBaseline : vals[0];
+    const color = last >= base ? '#00e676' : '#ff4757';
     let baseline = '';
-    if (startVal != null) {
-      const by = height - ((startVal - min) / (max - min)) * height;
-      baseline = '<line x1="0" y1="'+by.toFixed(1)+'" x2="'+width+'" y2="'+by.toFixed(1)+'" stroke="#5a6b80" stroke-width="1" stroke-dasharray="2,3"/>';
+    if (capitalBaseline != null) {
+      const y = h - ((capitalBaseline-min)/range)*h;
+      baseline = '<line x1="0" y1="'+y.toFixed(1)+'" x2="'+w+'" y2="'+y.toFixed(1)+'" stroke="#7a8fa855" stroke-dasharray="3,3" />';
     }
-    return baseline +
-      '<path d="'+fillPath+'" fill="'+color+'22" stroke="none"/>' +
-      '<path d="'+linePath+'" fill="none" stroke="'+color+'" stroke-width="1.6"/>';
+    return baseline + '<path d="'+path+'" fill="none" stroke="'+color+'" stroke-width="1.5" />';
   }
 
   document.getElementById('set-pairs-btn').addEventListener('click', async () => {
@@ -228,6 +223,8 @@ app.get('/', (_, res) => {
     relEl.textContent = sgn(s.totalRealizedPnl); relEl.className = 'stat-val ' + pClass(s.totalRealizedPnl);
     const unrelEl = document.getElementById('unrealized-pnl');
     unrelEl.textContent = sgn(s.totalUnrealizedPnl); unrelEl.className = 'stat-val ' + pClass(s.totalUnrealizedPnl);
+    const dailyEl = document.getElementById('daily-pnl');
+    dailyEl.textContent = sgn(s.dailyPnl); dailyEl.className = 'stat-val ' + pClass(s.dailyPnl);
     document.getElementById('total-bankroll').textContent = '$'+(s.totalBankroll||0).toFixed(2);
     document.getElementById('total-fees').textContent = '$'+(s.totalFeesPaid||0).toFixed(4);
     document.getElementById('total-rebates').textContent = '$'+(s.totalRebatesEarned||0).toFixed(4);
@@ -237,6 +234,7 @@ app.get('/', (_, res) => {
     const tf = document.getElementById('trading-flag');
     tf.textContent = s.tradingEnabled ? 'ON' : 'PAUSED';
     tf.className = 'stat-val ' + (s.tradingEnabled ? 'pnl-pos' : 'pnl-neg');
+    document.getElementById('risk-badge').style.display = s.dailyLimitHit ? '' : 'none';
 
     const eqVal = document.getElementById('equity-val');
     eqVal.textContent = '$'+(s.totalMarkValue||0).toFixed(2);
@@ -244,8 +242,6 @@ app.get('/', (_, res) => {
     document.getElementById('equity-chart').innerHTML = buildEquitySvg(s.totalEquityCurve, 600, 90, s.totalCapital);
 
     const grid = document.getElementById('pair-grid');
-    const modeVal = document.getElementById('experiment-badge');
-    if (modeVal) { modeVal.textContent = s.mode === 'FADE' ? 'FADE (reversed)' : 'CHASE (baseline)'; modeVal.className = 'mode-badge ' + (s.mode === 'FADE' ? 'mode-live' : 'mode-dry'); }
     if (!s.pairStates || s.pairStates.length === 0) {
       grid.innerHTML = '<div class="empty">No pairs configured</div>';
     } else {
@@ -253,23 +249,26 @@ app.get('/', (_, res) => {
         const pos = p.position;
         const sideCls = pos ? (pos.side === 'Up' ? 'side-up' : 'side-down') : '';
         const posHtml = pos
-          ? '<div class="pos-box">['+pos.mode.toUpperCase()+'] spike was on <span class="'+(pos.spikeSide==='Up'?'side-up':'side-down')+'">'+pos.spikeSide+'</span> → bought <span class="'+sideCls+'">'+pos.side+'</span> '+
-            pos.shares.toFixed(2)+'sh @ '+pos.entryPrice.toFixed(2)+' (cost $'+pos.cost.toFixed(2)+')'+
-            ' | TP '+pos.tpPrice.toFixed(2)+' / SL '+pos.slPrice.toFixed(2)+
+          ? '<div class="pos-box">Holding <span class="'+sideCls+'">'+pos.side+'</span> '+pos.shares.toFixed(2)+'sh @ '+pos.entryPrice.toFixed(2)+
+            ' (cost $'+pos.cost.toFixed(2)+') | entry model '+pct(pos.entryModelProb)+' → live '+pct(pos.liveModelProb)+
+            '<br/>TP '+pos.tpPrice.toFixed(2)+' / SL '+pos.slPrice.toFixed(2)+
             (p.unrealizedPnl!==undefined ? (' | u/pnl <span class="'+pClass(p.unrealizedPnl)+'">'+sgn(p.unrealizedPnl)+'</span>') : '') +
             '</div>'
-          : '<div class="pos-box">watching for a '+(s.config?.spikeThreshold||0.05)+' spike over '+(s.config?.spikeLookbackSecs||20)+'s…</div>';
+          : '<div class="signal-box">model Up '+pct(p.modelProbUp)+' vs ask '+(p.upAsk?.toFixed(2)||'—')+' | model Down '+pct(p.modelProbDown)+' vs ask '+(p.downAsk?.toFixed(2)||'—')+'</div>';
+        const coolHtml = p.cooldownSecs > 0 ? '<div class="cooldown-box">🧯 cooling down '+fmtSecs(p.cooldownSecs)+'</div>' : '';
         const eqCurve = buildEquitySvg(p.equityCurve, 280, 34, null);
         const hasPos = !!pos;
-        return '<div class="pair-card '+(hasPos?'has-pos':'')+' '+(p.tradable?'':'untradable')+'">'+
-          '<div class="pair-hdr"><div class="pair-sym">'+p.symbol+'</div><div class="pair-timer">'+(p.tradable?fmtSecs(p.secsToEnd):'loading…')+'</div></div>'+
+        return '<div class="pair-card '+(hasPos?'has-pos':'')+' '+(p.tradable?'':'untradable')+' '+(p.cooldownSecs>0?'cooling':'')+'">'+
+          '<div class="pair-hdr"><div class="pair-sym">'+p.symbol+'</div><div class="pair-timer">'+(p.tradable?fmtSecs(p.secsToEnd):'no market')+'</div></div>'+
           '<div class="pair-body">'+
+            '<div class="pair-row"><span class="pair-key">Spot / Open</span><span>'+(p.spotPrice?.toFixed(2)||'—')+' / '+(p.openSpotPrice?.toFixed(2)||'—')+'</span></div>'+
+            '<div class="pair-row"><span class="pair-key">σ (1m)</span><span>'+(p.sigmaPerMin!=null?(p.sigmaPerMin*100).toFixed(3)+'%':'—')+'</span></div>'+
             '<div class="pair-row"><span class="pair-key">Up ask/bid</span><span>'+(p.upAsk?.toFixed(2)||'—')+' / '+(p.upBid?.toFixed(2)||'—')+'</span></div>'+
             '<div class="pair-row"><span class="pair-key">Down ask/bid</span><span>'+(p.downAsk?.toFixed(2)||'—')+' / '+(p.downBid?.toFixed(2)||'—')+'</span></div>'+
             '<div class="pair-row"><span class="pair-key">Bankroll</span><span>$'+p.bankroll.toFixed(2)+'</span><span class="pair-key">W/L</span><span>'+p.wins+'/'+p.losses+'</span></div>'+
             '<div class="pair-row"><span class="pair-key">Realized</span><span class="'+pClass(p.realizedPnl)+'">'+sgn(p.realizedPnl)+'</span><span class="pair-key">Unrealized</span><span class="'+pClass(p.unrealizedPnl)+'">'+sgn(p.unrealizedPnl)+'</span></div>'+
             '<div class="pair-row"><span class="pair-key">Fees paid</span><span class="pnl-neg">-$'+(p.feesPaid||0).toFixed(4)+'</span><span class="pair-key">Rebates</span><span class="pnl-pos">+$'+(p.rebatesEarned||0).toFixed(4)+'</span></div>'+
-            posHtml +
+            posHtml + coolHtml +
             '<div class="spark-box"><svg viewBox="0 0 280 34" preserveAspectRatio="none">'+eqCurve+'</svg><div class="spark-label">Equity curve ($'+p.markValue.toFixed(2)+')</div></div>'+
           '</div></div>';
       }).join('');
@@ -280,7 +279,7 @@ app.get('/', (_, res) => {
       tb.innerHTML = s.trades.map(t => {
         const pnlStr = (t.profit !== undefined) ? sgn(t.profit) : '—';
         const pnlCls = (t.profit !== undefined) ? pClass(t.profit) : '';
-        const sideColor = t.side === 'BUY' ? '#ffd740' : (t.reason === 'SL' ? '#ff4757' : (t.reason==='TP'?'#00e676':'#00d4ff'));
+        const sideColor = t.side === 'BUY' ? '#ffd740' : (t.reason === 'SL' || t.reason === 'MODEL_INVALIDATED' ? '#ff4757' : (t.reason==='TP'||t.reason==='MODEL_TP'?'#00e676':'#00d4ff'));
         return '<tr><td>'+t.time+'</td><td>'+t.symbol+'</td>'+
           '<td style="color:'+sideColor+'">'+t.side+(t.outcome?(' '+t.outcome):'')+'</td>'+
           '<td>'+(t.reason||'—')+'</td>'+
@@ -299,7 +298,7 @@ app.get('/', (_, res) => {
                   : l.includes('💰')||l.includes('✅') ? '#00e676'
                   : l.includes('🎯')||l.includes('🧯') ? '#ffd740'
                   : l.includes('🔭')||l.includes('⏰') ? '#00d4ff'
-                  : l.includes('⚠️') ? '#ff9f0a'
+                  : l.includes('⚠️')||l.includes('🛑') ? '#ff9f0a'
                   : '#4a6080';
         return '<div style="color:'+col+'">'+l+'</div>';
       }).join('');
@@ -317,9 +316,9 @@ const slog = (line) => { console.log(line); io.emit('log', line); };
 const PK = process.env.PRIVATE_KEY;
 if (!PK) { console.error('❌ PRIVATE_KEY env var missing'); process.exit(1); }
 
-console.log(`⏱️ 5-Minute Crypto Up/Down Multi-Pair Bot`);
+console.log(`σ 5-Minute Crypto Up/Down Multi-Pair Bot — Volatility-Model Edge Strategy`);
 console.log(`🚦 DRY_RUN=${DRY_RUN}`);
-if (DRY_RUN) console.log('⚠️  DRY RUN — demo $2000 capital, simulated fills, real API for data/orders');
+if (DRY_RUN) console.log('⚠️  DRY RUN — demo capital, simulated fills, real API for data/orders');
 else         console.log('🔴 LIVE MODE — real money');
 
 server.listen(PORT, '0.0.0.0', () => {
