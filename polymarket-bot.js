@@ -1,181 +1,99 @@
 'use strict';
 
 /**
- * ═══════════════════════════════════════════════════════════════════════
- *  POLYMARKET 5-MINUTE CRYPTO UP/DOWN — VOLATILITY-MODEL EDGE BOT
- * ═══════════════════════════════════════════════════════════════════════
+ * ═══════════════════════════════════════════════════════════════
+ *  POLYMARKET 5-MINUTE BTC UP/DOWN — INDEPENDENT SIDE SCALPER
+ * ═══════════════════════════════════════════════════════════════
  *
- *  THE MARKET
- *  Every 5 minutes Polymarket opens a fresh "<SYM> Up or Down" market per
- *  crypto pair (slug: `<sym>-updown-5m-<unix_window_start>`), e.g.
- *  https://polymarket.com/event/btc-updown-5m-1782897900. It resolves Up
- *  if the reference price is higher at the close of the window than at
- *  the open, Down otherwise. Up + Down prices always sum to ~$1 — it's a
- *  binary option on a 5-minute return. Polymarket's true resolution
- *  reference is a low-latency Chainlink price stream that isn't publicly
- *  queryable without a paid/HMAC-signed feed, so this bot uses live spot
- *  prices from Binance (primary) / Coinbase (fallback) as a close public
- *  proxy for "the price to beat" and for the current price.
+ *  Up and Down run as two completely independent strategies within
+ *  the same 5-minute window. Nothing about Up's fills/prices affects
+ *  Down's orders or vice versa.
  *
- *  WHY NOT TRADE THE POLYMARKET PRICE ITSELF (lesson from earlier testing)
- *  A prior version of this project tested "chase the side whose own
- *  Polymarket price just spiked" and found it lost money (43% win rate) —
- *  because the market's own price is reflexive: by the time it has moved,
- *  the move is already paid for. Fading that same reflexive spike did
- *  better, confirming the self-referential price is a bad edge source
- *  either way you look at only it.
+ *  PER SIDE, PER WINDOW (elapsed 0s → 280s):
+ *    - If this side has no resting (unfilled) buy order right now,
+ *      and we're still before the 280s entry cutoff, place ONE maker
+ *      limit BUY at (current mid price − 0.05) for a fixed 50 shares.
+ *    - The order is placed once and left resting untouched at that
+ *      price — it is NOT re-pegged if the market moves away from it.
+ *    - When that buy fills: immediately rest a maker limit SELL (TP)
+ *      at (entry price + 0.05) for that position, AND immediately
+ *      place this side's next resting buy at the then-current mid
+ *      price − 0.05 (if still before 280s). Positions stack freely —
+ *      several TPs can be pending on the same side at once while a
+ *      fresh buy is also resting.
  *
- *  THIS BOT'S EDGE: an independent fair-value model
- *  Treat each Up/Down market as a binary option on a driftless Brownian
- *  motion of the underlying crypto price. Given:
- *    O  = spot price at window open (proxy for "price to beat")
- *    S  = current spot price
- *    σ  = realized volatility of the pair (stdev of 1-minute log returns,
- *         from a rolling 1-hour lookback, refreshed every minute)
- *    T  = seconds remaining in the window
- *  the model probability that price finishes above O is:
- *    P(Up) = Φ( ln(S/O) / (σ_per_sec · √T) )
- *  (standard result for P(driftless GBM ends above a level) — for a
- *  5-minute horizon, ignoring risk-free drift is a fine approximation).
+ *  AT 280s: stop placing new buy orders on both sides. Whatever is
+ *  currently resting (an unfilled buy, or pending TPs) is left alone
+ *  until 285s.
  *
- *  We compare this model probability to Polymarket's own implied price
- *  (which IS a probability, since these are $1-payout binary shares) and
- *  only trade when the model disagrees with the market by more than a
- *  minimum edge, after accounting for spread and fees. This means the
- *  bot is testing a real, falsifiable thesis (crypto spot momentum info
- *  not yet reflected in the Polymarket order book) rather than pattern-
- *  matching the derivative's own noise.
+ *  AT 285s (per side): cancel that side's still-unfilled resting buy
+ *  (if any) and cancel every still-unfilled TP on that side, then —
+ *  if that side is left holding any shares — roll them into ONE
+ *  aggregate maker limit SELL at 0.99 for the combined size.
  *
- *  FILTERS ON TOP OF THE EDGE
- *   - Don't enter in the first MIN_ENTRY_ELAPSED_SECS of a window (too
- *     little post-open price action to trust the vol estimate).
- *   - Don't open new risk in the last LATE_ENTRY_CUTOFF_SECS (no time to
- *     manage the trade).
- *   - Skip if the quoted spread is too wide (illiquid, can't get a fair
- *     fill) or if price is at an extreme (<6¢ / >90¢ — poor risk/reward
- *     and fee drag dominates at the edges).
- *   - One trade per pair per window (keeps risk & bookkeeping simple and
- *     avoids compounding a single bad read into multiple entries).
+ *  RESOLUTION: if the 0.99 sell (or, in an edge case, any earlier
+ *  order) still hasn't filled by window end, whatever shares remain
+ *  resolve against Polymarket's actual outcome (unchanged logic).
  *
- *  SIZING: fractional Kelly
- *  For a binary bet costing `price` with model win probability `q`, the
- *  Kelly-optimal bankroll fraction is f* = (q - price) / (1 - price). We
- *  size at a fraction of Kelly (KELLY_MULTIPLIER, default 0.30) and cap
- *  at MAX_RISK_PCT_PER_TRADE of that pair's bankroll — full Kelly is far
- *  too aggressive for a noisy, mis-estimated probability model.
+ *  SIZING: fixed 50 shares per buy order, both sides, always — no
+ *  compounding, no bankroll-based scaling.
  *
- *  EXITS: layered TP/SL
- *   1. Price take-profit — resting maker sell (genuine 0-fee + rebate).
- *   2. Price stop-loss — taker sell if it moves hard against us.
- *   3. Model-invalidation stop — if live model probability for our side
- *      falls below MODEL_INVALIDATION_PROB, the real-world thesis broke
- *      down; exit even if the price hasn't hit the SL yet.
- *   4. Model take-profit — if model probability gets very high AND we're
- *      already ahead on price, lock the gain rather than hold for a
- *      symmetric TP that may not arrive before resolution.
- *   5. Safety buffer — inside the last EXIT_SAFETY_BUFFER_SEC we stop
- *      trying to exit (thin book near resolution) and just let the
- *      position resolve for $1/$0.
- *
- *  RISK MANAGEMENT
- *   - Daily loss limit (% of total capital) auto-pauses all trading.
- *   - Per-pair consecutive-loss cooldown pauses just that pair for a
- *     while, in case its regime (liquidity, vol regime) has changed.
- *
- *  PAIRS: "use every 5-minute pair available"
- *  Rather than hardcode which symbols currently have a live 5m market,
- *  we scan a broad candidate list every window boundary via the Gamma
- *  API. Symbols without a live market just sit "untradable" (one cheap
- *  lookup every 5 minutes) — whichever ones Polymarket actually has open
- *  light up automatically.
- * ═══════════════════════════════════════════════════════════════════════
+ *  FEES: every buy, every TP sell, and the 285s 0.99 sell are all
+ *  genuine maker orders (fee-free + rebate, Fee Structure V2). There
+ *  is no taker order anywhere in this strategy.
+ * ═══════════════════════════════════════════════════════════════
  */
 
 const PolymarketTrader = require('./polymarket-trader');
 
-const GAMMA             = 'https://gamma-api.polymarket.com';
-const CLOB               = 'https://clob.polymarket.com';
-const BINANCE            = 'https://api.binance.com';
-const COINBASE_SPOT      = 'https://api.coinbase.com';
-const COINBASE_EXCHANGE  = 'https://api.exchange.coinbase.com';
+// ── API endpoints ──
+const GAMMA = 'https://gamma-api.polymarket.com';
+const CLOB  = 'https://clob.polymarket.com';
 
+// ── Timing ──
 const TICK_MS               = 500;
 const POLY_PRICE_REFRESH_MS = 1000;
-const SPOT_PRICE_REFRESH_MS = Number(process.env.SPOT_PRICE_REFRESH_MS || 2000);
-const VOL_REFRESH_MS        = Number(process.env.VOL_REFRESH_MS || 60000);
 const WINDOW_SECS           = 300;
 const RESOLUTION_BUFFER_S   = 8;
 const SLUG_OFFSET_FALLBACKS = [0, -300, 300];
 
+// ── Env / config ──
 const DRY_RUN = (process.env.DRY_RUN || 'true').toLowerCase() === 'true';
 const TOTAL_CAPITAL = Number(process.env.TOTAL_CAPITAL || 2000);
-
-// Broad candidate list — anything without a live 5m market just stays
-// "untradable" at near-zero cost. Override with CRYPTO_PAIRS env if you
-// want a fixed subset instead of auto-discovery across all of these.
-const DEFAULT_CANDIDATES = 'BTC,ETH,SOL,XRP,DOGE,LTC,BNB,LINK,AVAX,ADA';
-const RAW_PAIRS = (process.env.CRYPTO_PAIRS || DEFAULT_CANDIDATES)
+const DEFAULT_PAIRS = (process.env.CRYPTO_PAIRS || 'BTC')
   .split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
 
-// Symbol → external spot-price source mapping. A symbol with no mapping
-// has no independent fair-value model, so it's excluded up front.
-const BINANCE_MAP = {
-  BTC: 'BTCUSDT', ETH: 'ETHUSDT', SOL: 'SOLUSDT', XRP: 'XRPUSDT', DOGE: 'DOGEUSDT',
-  LTC: 'LTCUSDT', BNB: 'BNBUSDT', LINK: 'LINKUSDT', AVAX: 'AVAXUSDT', ADA: 'ADAUSDT',
-  MATIC: 'MATICUSDT', ARB: 'ARBUSDT', SUI: 'SUIUSDT', APT: 'APTUSDT',
-};
-const COINBASE_MAP = {
-  BTC: 'BTC-USD', ETH: 'ETH-USD', SOL: 'SOL-USD', XRP: 'XRP-USD', DOGE: 'DOGE-USD',
-  LTC: 'LTC-USD', LINK: 'LINK-USD', AVAX: 'AVAX-USD', ADA: 'ADA-USD',
-  MATIC: 'MATIC-USD', ARB: 'ARB-USD', SUI: 'SUI-USD', APT: 'APT-USD',
-};
-function eligibleSymbol(sym) { return !!BINANCE_MAP[sym]; }
+// ── Independent-side scalper parameters ──
+const BUY_OFFSET       = Number(process.env.BUY_OFFSET || 0.05);   // entry = current mid - this
+const TP_OFFSET         = Number(process.env.TP_OFFSET || 0.05);    // TP = entry + this
+const ENTRY_CUTOFF_SECS = Number(process.env.ENTRY_CUTOFF_SECS || 280); // no new buys after this
+const SWEEP_SECS        = Number(process.env.SWEEP_SECS || 285);        // cancel unfilled + rest final sell
+const FINAL_SELL_PRICE  = Number(process.env.FINAL_SELL_PRICE || 0.99);
+const FIXED_SHARES      = Number(process.env.FIXED_SHARES || 50);
 
-// ── Strategy parameters (all overridable via env) ──
-const MIN_ENTRY_ELAPSED_SECS  = Number(process.env.MIN_ENTRY_ELAPSED_SECS || 40);
-const LATE_ENTRY_CUTOFF_SECS  = Number(process.env.LATE_ENTRY_CUTOFF_SECS || 25);
-const EXIT_SAFETY_BUFFER_SEC  = Number(process.env.EXIT_SAFETY_BUFFER_SEC || 12);
-const EDGE_THRESHOLD          = Number(process.env.EDGE_THRESHOLD || 0.06);
-const MIN_ENTRY_PRICE         = Number(process.env.MIN_ENTRY_PRICE || 0.06);
-const MAX_ENTRY_PRICE         = Number(process.env.MAX_ENTRY_PRICE || 0.90);
-const MAX_SPREAD              = Number(process.env.MAX_SPREAD || 0.08);
-const VOL_LOOKBACK_CANDLES    = Number(process.env.VOL_LOOKBACK_CANDLES || 60);
-const MIN_SIGMA_PER_MIN       = Number(process.env.MIN_SIGMA_PER_MIN || 0.0004);
-const MODEL_INVALIDATION_PROB = Number(process.env.MODEL_INVALIDATION_PROB || 0.40);
-const MODEL_TAKEPROFIT_PROB   = Number(process.env.MODEL_TAKEPROFIT_PROB || 0.94);
-const TP_OFFSET                = Number(process.env.TP_OFFSET || 0.15);
-const SL_OFFSET                = Number(process.env.SL_OFFSET || 0.09);
-const KELLY_MULTIPLIER         = Number(process.env.KELLY_MULTIPLIER || 0.30);
-const MAX_RISK_PCT_PER_TRADE   = Number(process.env.MAX_RISK_PCT_PER_TRADE || 0.06);
-const MIN_TRADE_USD            = Number(process.env.MIN_TRADE_USD || 2);
-const MIN_SHARES               = Number(process.env.MIN_SHARES || 5);
-const MAX_SHARES_PER_TRADE     = Number(process.env.MAX_SHARES_PER_TRADE || 500);
-const DAILY_LOSS_LIMIT_PCT     = Number(process.env.DAILY_LOSS_LIMIT_PCT || 0.20);
-const CONSECUTIVE_LOSS_LIMIT   = Number(process.env.CONSECUTIVE_LOSS_LIMIT || 3);
-const LOSS_COOLDOWN_MS         = Number(process.env.LOSS_COOLDOWN_MS || 15 * 60 * 1000);
-const MAX_CONCURRENT_POSITIONS = Number(process.env.MAX_CONCURRENT_POSITIONS || 0); // 0 = unlimited
+// After this many seconds elapsed, if a side's current mid price is above
+// the threshold, that side's buy orders size up instead of using FIXED_SHARES.
+const HIGH_PRICE_AFTER_SECS = Number(process.env.HIGH_PRICE_AFTER_SECS || 150);
+const HIGH_PRICE_THRESHOLD  = Number(process.env.HIGH_PRICE_THRESHOLD || 0.60);
+const HIGH_PRICE_SHARES     = Number(process.env.HIGH_PRICE_SHARES || 100);
 
+// ── Fees & maker rebates (Polymarket Fee Structure V2, crypto category) ──
 const CRYPTO_TAKER_FEE_RATE     = Number(process.env.CRYPTO_TAKER_FEE_RATE || 0.07);
 const CRYPTO_MAKER_REBATE_SHARE = Number(process.env.CRYPTO_MAKER_REBATE_SHARE || 0.20);
 
-// ── Module state ──
-let emitFn = () => {};
-let slog = () => {};
-let trader = null;
+// ── State ──
+let emitFn    = () => {};
+let slog      = () => {};
+let trader    = null;
 let startTime = Date.now();
-let logs = [];
-let trades = [];
+let logs      = [];
+let trades    = [];
 let tradingEnabled = true;
-let pairList = RAW_PAIRS.filter(eligibleSymbol);
+let pairList = [...DEFAULT_PAIRS];
 let perPairCapital = TOTAL_CAPITAL / Math.max(pairList.length, 1);
 let pairs = {};
-let spotPrices = {};   // { SYMBOL: latestSpotPrice }
-let sigmaMap = {};     // { SYMBOL: stdev of 1m log returns }
 let lastPolyPriceFetch = 0;
 let totalEquityCurve = [];
-let dailyPnl = 0;
-let dailyDayStart = currentUtcDayStart();
-let dailyLimitHit = false;
 
 function log(msg) {
   const line = `[${new Date().toISOString().slice(11, 19)}] ${msg}`;
@@ -184,25 +102,26 @@ function log(msg) {
   slog(line);
 }
 function round2(n) { return Math.round(n * 100) / 100; }
-function round4(n) { return Math.round(n * 10000) / 10000; }
 function nowSec() { return Date.now() / 1000; }
-function currentUtcDayStart() { const d = new Date(); d.setUTCHours(0, 0, 0, 0); return d.getTime(); }
 
 async function getJSON(url) {
-  const res = await fetch(url, { headers: { 'User-Agent': 'polymarket-vol-edge-bot/1.0' } });
+  const res = await fetch(url, { headers: { 'User-Agent': 'polymarket-side-scalper/1.0' } });
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${url}`);
   return res.json();
 }
 async function postJSON(url, body) {
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'User-Agent': 'polymarket-vol-edge-bot/1.0' },
+    headers: { 'Content-Type': 'application/json', 'User-Agent': 'polymarket-side-scalper/1.0' },
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${url}`);
   return res.json();
 }
 
+// ─────────────────────────────────────────
+//  Order helpers
+// ─────────────────────────────────────────
 async function placeLimitBuy(tokenId, price, shares) {
   if (!DRY_RUN && trader) return await trader.limitBuy(tokenId, shares, price);
   return { id: `dry-buy-${Date.now()}-${Math.random().toString(36).slice(2, 7)}` };
@@ -217,30 +136,51 @@ async function cancelOrder(orderId) {
     catch (e) { log(`⚠️  cancel failed: ${e.message}`); }
   }
 }
-function takerFee(shares, price) { return Math.round(shares * CRYPTO_TAKER_FEE_RATE * price * (1 - price) * 100000) / 100000; }
-function makerRebate(shares, price) { return Math.round(shares * CRYPTO_TAKER_FEE_RATE * price * (1 - price) * CRYPTO_MAKER_REBATE_SHARE * 100000) / 100000; }
+function takerFee(shares, price) {
+  return round2(shares * CRYPTO_TAKER_FEE_RATE * price * (1 - price));
+}
+function makerRebate(shares, price) {
+  return round2(shares * CRYPTO_TAKER_FEE_RATE * price * (1 - price) * CRYPTO_MAKER_REBATE_SHARE);
+}
 
 // ─────────────────────────────────────────
-//  Per-pair state
+//  Pair state
 // ─────────────────────────────────────────
+function freshSideState() {
+  return {
+    restingBuy: null,     // { orderId, price, shares, cost, placedAt }
+    positions: [],        // { entryPrice, shares, cost, exit: { kind:'TP'|'FINAL', price, orderId, status } }
+  };
+}
+
 function freshPairState(symbol) {
   return {
     symbol,
     tradable: false,
-    windowStart: null, windowEnd: null, slug: null, conditionId: null,
-    upTokenId: null, downTokenId: null,
+    windowStart: null,
+    windowEnd: null,
+    slug: null,
+    eventTitle: null,
+    conditionId: null,
+    upTokenId: null,
+    downTokenId: null,
     upAsk: null, upBid: null, downAsk: null, downBid: null,
-    openSpotPrice: null,
-    entryDone: false,
-    position: null,       // { side, entryPrice, shares, cost, entryModelProb, openSpot, tpPrice, slPrice, tpOrderId, openedAt }
-    liveModelProb: null,
+
     bankroll: perPairCapital,
-    realizedPnl: 0, feesPaid: 0, rebatesEarned: 0,
-    wins: 0, losses: 0, consecutiveLosses: 0, cooldownUntil: 0,
+    realizedPnl: 0,
+    feesPaid: 0,
+    rebatesEarned: 0,
+    wins: 0, losses: 0,
+
+    // per-window trading state (reset in loadPairWindow)
+    sweepDone: false,
+    sides: { Up: freshSideState(), Down: freshSideState() },
+
     resolvedThisWindow: true,
     equityCurve: [{ t: Date.now(), equity: perPairCapital }],
   };
 }
+
 function resetPairs() {
   perPairCapital = TOTAL_CAPITAL / Math.max(pairList.length, 1);
   pairs = {};
@@ -250,10 +190,14 @@ function resetPairs() {
 resetPairs();
 
 // ─────────────────────────────────────────
-//  Gamma / CLOB market discovery & pricing
+//  Slug / window math
 // ─────────────────────────────────────────
-function currentWindowStart(tsSec = nowSec()) { return Math.floor(tsSec / WINDOW_SECS) * WINDOW_SECS; }
-function slugFor(symbol, windowStartSec) { return `${symbol.toLowerCase()}-updown-5m-${windowStartSec}`; }
+function currentWindowStart(tsSec = nowSec()) {
+  return Math.floor(tsSec / WINDOW_SECS) * WINDOW_SECS;
+}
+function slugFor(symbol, windowStartSec) {
+  return `${symbol.toLowerCase()}-updown-5m-${windowStartSec}`;
+}
 function qOf(m) { return (m.question || m.groupItemTitle || m.title || '').toLowerCase(); }
 function parseMarketTokens(m) {
   try {
@@ -275,36 +219,51 @@ async function fetchEventForWindow(symbol, windowStart) {
     const slug = slugFor(symbol, ws);
     try {
       const event = await getJSON(`${GAMMA}/events/slug/${encodeURIComponent(slug)}`);
-      if (event && event.id && Array.isArray(event.markets) && event.markets.length) return { event, windowStart: ws, slug };
-    } catch (_) {}
+      if (event && event.id && Array.isArray(event.markets) && event.markets.length) {
+        return { event, windowStart: ws, slug };
+      }
+    } catch (_) { /* not indexed yet */ }
   }
   return null;
 }
+
 async function loadPairWindow(p) {
   const ws = currentWindowStart();
   if (p.windowStart === ws && p.upTokenId) return;
+
   const found = await fetchEventForWindow(p.symbol, ws);
   if (!found) { p.tradable = false; return; }
   const { event, windowStart, slug } = found;
   const market = event.markets.find(m => { const q = qOf(m); return q.includes('up') || q.includes('down'); }) || event.markets[0];
+
   const upId = tokenIdForSide(market, 'up');
   const downId = tokenIdForSide(market, 'down');
-  if (!upId || !downId) { log(`⚠️  ${p.symbol}: window loaded but Up/Down token ids missing`); p.tradable = false; return; }
+  if (!upId || !downId) {
+    log(`⚠️  ${p.symbol}: window loaded but Up/Down token ids missing`);
+    p.tradable = false;
+    return;
+  }
 
   p.windowStart = windowStart;
   p.windowEnd = windowStart + WINDOW_SECS;
   p.slug = slug;
+  p.eventTitle = event.title || event.slug;
   p.conditionId = market.conditionId || null;
   p.upTokenId = upId;
   p.downTokenId = downId;
   p.tradable = true;
   p.resolvedThisWindow = false;
-  p.entryDone = false;
-  p.openSpotPrice = null;
-  p.liveModelProb = null;
-  log(`🔭 ${p.symbol} window loaded: ${slug} | ends ${new Date(p.windowEnd * 1000).toISOString().slice(11, 19)}Z`);
+
+  // reset per-window trading state
+  p.sweepDone = false;
+  p.sides = { Up: freshSideState(), Down: freshSideState() };
+
+  log(`🔭 ${p.symbol} window loaded: ${slug} | ends ${new Date(p.windowEnd * 1000).toISOString().slice(11,19)}Z`);
 }
 
+// ─────────────────────────────────────────
+//  Price feed
+// ─────────────────────────────────────────
 async function refreshPolyPrices() {
   const requests = [];
   for (const p of Object.values(pairs)) {
@@ -315,6 +274,7 @@ async function refreshPolyPrices() {
     requests.push({ token_id: p.downTokenId, side: 'SELL' });
   }
   if (!requests.length) return;
+
   function applyPolyPrice(tid, side, price) {
     if (!Number.isFinite(price)) return;
     for (const p of Object.values(pairs)) {
@@ -322,6 +282,7 @@ async function refreshPolyPrices() {
       else if (p.downTokenId === tid) { if (side === 'BUY') p.downAsk = price; else if (side === 'SELL') p.downBid = price; }
     }
   }
+
   try {
     const data = await postJSON(`${CLOB}/prices`, requests);
     if (Array.isArray(data)) {
@@ -356,110 +317,35 @@ async function refreshPolyPrices() {
         if (upBid) p.upBid = parseFloat(upBid.price || upBid.mid || p.upBid);
         if (downAsk) p.downAsk = parseFloat(downAsk.price || downAsk.mid || p.downAsk);
         if (downBid) p.downBid = parseFloat(downBid.price || downBid.mid || p.downBid);
-      } catch (_) {}
+      } catch (_) { /* stale values, retry next tick */ }
     }
   }
 }
 
 // ─────────────────────────────────────────
-//  External spot price + volatility (Binance primary, Coinbase fallback)
+//  Equity tracking
 // ─────────────────────────────────────────
-async function fetchBinanceSpotBatch(symbols) {
-  const list = symbols.map(s => BINANCE_MAP[s]).filter(Boolean);
-  if (!list.length) return {};
-  const url = `${BINANCE}/api/v3/ticker/price?symbols=${encodeURIComponent(JSON.stringify(list))}`;
-  const data = await getJSON(url);
-  const rev = {}; for (const [k, v] of Object.entries(BINANCE_MAP)) rev[v] = k;
-  const out = {};
-  for (const row of data) { const sym = rev[row.symbol]; if (sym) out[sym] = parseFloat(row.price); }
-  return out;
+function sideHeldShares(sideState) {
+  return sideState.positions.reduce((s, pos) => s + pos.shares, 0);
 }
-async function fetchCoinbaseSpotOne(symbol) {
-  const pair = COINBASE_MAP[symbol];
-  if (!pair) return null;
-  const data = await getJSON(`${COINBASE_SPOT}/v2/prices/${pair}/spot`);
-  const amt = parseFloat(data?.data?.amount);
-  return Number.isFinite(amt) ? amt : null;
+function sideHeldCost(sideState) {
+  return sideState.positions.reduce((s, pos) => s + pos.cost, 0);
 }
-async function refreshSpotPrices(symbols) {
-  try {
-    const batch = await fetchBinanceSpotBatch(symbols);
-    for (const [sym, px] of Object.entries(batch)) if (Number.isFinite(px)) spotPrices[sym] = px;
-  } catch (e) {
-    log(`⚠️  Binance spot fetch failed (${e.message}) — falling back to Coinbase`);
+function positionsMarkValue(p) {
+  let total = 0;
+  for (const side of ['Up', 'Down']) {
+    const shares = sideHeldShares(p.sides[side]);
+    if (shares <= 0) continue;
+    const bid = side === 'Up' ? p.upBid : p.downBid;
+    const cost = sideHeldCost(p.sides[side]);
+    const price = bid ?? (cost / shares);
+    total += shares * price;
   }
-  const missing = symbols.filter(s => !Number.isFinite(spotPrices[s]) && COINBASE_MAP[s]);
-  for (const sym of missing) {
-    try { const px = await fetchCoinbaseSpotOne(sym); if (px) spotPrices[sym] = px; } catch (_) {}
-  }
+  return round2(total);
 }
-async function fetchKlinesBinance(symbol) {
-  const bsym = BINANCE_MAP[symbol];
-  if (!bsym) return null;
-  const data = await getJSON(`${BINANCE}/api/v3/klines?symbol=${bsym}&interval=1m&limit=${VOL_LOOKBACK_CANDLES}`);
-  return data.map(row => parseFloat(row[4]));
+function pairMarkValue(p) {
+  return round2(p.bankroll + positionsMarkValue(p));
 }
-async function fetchKlinesCoinbase(symbol) {
-  const pair = COINBASE_MAP[symbol];
-  if (!pair) return null;
-  const data = await getJSON(`${COINBASE_EXCHANGE}/products/${pair}/candles?granularity=60`);
-  return data.slice(0, VOL_LOOKBACK_CANDLES).reverse().map(row => row[4]);
-}
-function stdev(arr) {
-  const n = arr.length; if (n < 2) return 0;
-  const mean = arr.reduce((a, b) => a + b, 0) / n;
-  const variance = arr.reduce((a, b) => a + (b - mean) * (b - mean), 0) / (n - 1);
-  return Math.sqrt(variance);
-}
-function sigmaFromCloses(closes) {
-  if (!closes || closes.length < 5) return null;
-  const rets = [];
-  for (let i = 1; i < closes.length; i++) {
-    if (closes[i - 1] > 0 && closes[i] > 0) rets.push(Math.log(closes[i] / closes[i - 1]));
-  }
-  return rets.length >= 4 ? stdev(rets) : null;
-}
-async function refreshVolatility(symbol) {
-  try {
-    const s = sigmaFromCloses(await fetchKlinesBinance(symbol));
-    if (s != null) { sigmaMap[symbol] = Math.max(s, MIN_SIGMA_PER_MIN); return; }
-  } catch (_) {}
-  try {
-    const s = sigmaFromCloses(await fetchKlinesCoinbase(symbol));
-    if (s != null) sigmaMap[symbol] = Math.max(s, MIN_SIGMA_PER_MIN);
-  } catch (_) {}
-}
-
-// ─────────────────────────────────────────
-//  Fair-value model: driftless Brownian bridge → P(finish above open)
-// ─────────────────────────────────────────
-function erf(x) {
-  const sign = x < 0 ? -1 : 1; x = Math.abs(x);
-  const a1 = 0.254829592, a2 = -0.284496736, a3 = 1.421413741, a4 = -1.453152027, a5 = 1.061405429, pc = 0.3275911;
-  const t = 1 / (1 + pc * x);
-  const y = 1 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * Math.exp(-x * x);
-  return sign * y;
-}
-function normalCDF(z) { return 0.5 * (1 + erf(z / Math.SQRT2)); }
-function modelProbUp(openPx, curPx, sigmaPerMin, secsRemaining) {
-  if (!openPx || !curPx || !sigmaPerMin || secsRemaining == null) return 0.5;
-  if (secsRemaining <= 0) return curPx >= openPx ? 0.999 : 0.001;
-  const sigmaPerSec = sigmaPerMin / Math.sqrt(60);
-  const sigmaT = sigmaPerSec * Math.sqrt(secsRemaining);
-  if (sigmaT < 1e-6) return curPx >= openPx ? 0.999 : 0.001;
-  const z = Math.log(curPx / openPx) / sigmaT;
-  return Math.min(0.999, Math.max(0.001, normalCDF(z)));
-}
-
-// ─────────────────────────────────────────
-//  Bookkeeping helpers
-// ─────────────────────────────────────────
-function positionMarkValue(p) {
-  if (!p.position) return 0;
-  const bid = p.position.side === 'Up' ? p.upBid : p.downBid;
-  return round2(p.position.shares * (bid ?? p.position.entryPrice));
-}
-function pairMarkValue(p) { return round2(p.bankroll + positionMarkValue(p)); }
 function pushGlobalEquity() {
   const total = round2(Object.values(pairs).reduce((s, p) => s + pairMarkValue(p), 0));
   totalEquityCurve.push({ t: Date.now(), equity: total });
@@ -475,183 +361,162 @@ function registerTrade(p, entry) {
   trades.push(rec);
   if (trades.length > 300) trades.shift();
 }
-function checkDailyReset() {
-  const ds = currentUtcDayStart();
-  if (ds !== dailyDayStart) { dailyDayStart = ds; dailyPnl = 0; dailyLimitHit = false; log('🌅 New UTC day — daily loss counter reset'); }
+
+// ─────────────────────────────────────────
+//  Buy-order placement (independent per side)
+// ─────────────────────────────────────────
+function midPrice(ask, bid) {
+  if (ask != null && bid != null) return round2((ask + bid) / 2);
+  if (ask != null) return round2(ask);
+  if (bid != null) return round2(bid);
+  return null;
 }
-function addDailyPnl(x) {
-  dailyPnl = round2(dailyPnl + x);
-  if (!dailyLimitHit && dailyPnl <= -Math.abs(DAILY_LOSS_LIMIT_PCT * TOTAL_CAPITAL)) {
-    dailyLimitHit = true; tradingEnabled = false;
-    log(`🛑 Daily loss limit hit ($${dailyPnl.toFixed(2)}) — trading auto-paused. Resume manually or wait for next UTC day.`);
+
+function reservedCashFor(p) {
+  let total = 0;
+  for (const side of ['Up', 'Down']) {
+    const rb = p.sides[side].restingBuy;
+    if (rb) total += rb.cost;
   }
-}
-function countOpenPositions() { return Object.values(pairs).filter(p => p.position).length; }
-
-// ─────────────────────────────────────────
-//  Entry — model edge vs Polymarket implied price
-// ─────────────────────────────────────────
-function pairSpread(p, side) {
-  if (side === 'Up') return (p.upAsk != null && p.upBid != null) ? round4(p.upAsk - p.upBid) : Infinity;
-  return (p.downAsk != null && p.downBid != null) ? round4(p.downAsk - p.downBid) : Infinity;
-}
-function kellySize(edge, price, bankroll) {
-  if (edge <= 0 || price <= 0 || price >= 1) return 0;
-  const fStar = edge / (1 - price);
-  const frac = Math.max(0, Math.min(1, fStar * KELLY_MULTIPLIER));
-  const cappedFrac = Math.min(frac, MAX_RISK_PCT_PER_TRADE);
-  return round2(bankroll * cappedFrac);
+  return round2(total);
 }
 
-async function maybeEnter(p) {
-  if (p.position || p.entryDone) return;
-  if (!tradingEnabled || dailyLimitHit) return;
-  if (Date.now() < p.cooldownUntil) return;
-  if (MAX_CONCURRENT_POSITIONS > 0 && countOpenPositions() >= MAX_CONCURRENT_POSITIONS) return;
-  if (p.openSpotPrice == null || spotPrices[p.symbol] == null || sigmaMap[p.symbol] == null) return;
+async function maybePlaceBuy(p, side, elapsed) {
+  const s = p.sides[side];
+  if (s.restingBuy) return; // already have one resting on this side
 
-  const remaining = p.windowEnd - nowSec();
-  const elapsed = WINDOW_SECS - remaining;
-  if (elapsed < MIN_ENTRY_ELAPSED_SECS) return;
-  if (remaining < LATE_ENTRY_CUTOFF_SECS) { p.entryDone = true; return; }
-  if (p.upAsk == null || p.downAsk == null) return;
+  const ask = side === 'Up' ? p.upAsk : p.downAsk;
+  const bid = side === 'Up' ? p.upBid : p.downBid;
+  const mid = midPrice(ask, bid);
+  if (mid == null) return;
 
-  const cur = spotPrices[p.symbol];
-  const sigma = sigmaMap[p.symbol];
-  const qUp = modelProbUp(p.openSpotPrice, cur, sigma, remaining);
-  const qDown = 1 - qUp;
-  p.liveModelProb = null;
+  const sizedUp = elapsed >= HIGH_PRICE_AFTER_SECS && mid > HIGH_PRICE_THRESHOLD;
+  const shares = sizedUp ? HIGH_PRICE_SHARES : FIXED_SHARES;
+  const price = round2(Math.max(0.01, mid - BUY_OFFSET));
+  const cost = round2(price * shares);
 
-  const edgeUp = round4(qUp - p.upAsk);
-  const edgeDown = round4(qDown - p.downAsk);
-
-  let side = null, ask = null, edge = null, q = null;
-  if (edgeUp >= EDGE_THRESHOLD && edgeUp >= edgeDown) { side = 'Up'; ask = p.upAsk; edge = edgeUp; q = qUp; }
-  else if (edgeDown >= EDGE_THRESHOLD) { side = 'Down'; ask = p.downAsk; edge = edgeDown; q = qDown; }
-  if (!side) return;
-  if (ask < MIN_ENTRY_PRICE || ask > MAX_ENTRY_PRICE) return;
-  if (pairSpread(p, side) > MAX_SPREAD) return;
-
-  const targetCost = Math.max(MIN_TRADE_USD, kellySize(edge, ask, p.bankroll));
-  let shares = round2(targetCost / ask);
-  shares = Math.max(MIN_SHARES, Math.min(MAX_SHARES_PER_TRADE, shares));
-  const cost = round2(ask * shares);
-  if (cost < 1 || cost > p.bankroll) return; // below marketable min or insufficient bankroll — retry next tick
+  if (round2(reservedCashFor(p) + cost) > p.bankroll) {
+    log(`⏭️  ${p.symbol} ${side}: skip new buy — insufficient bankroll ($${p.bankroll.toFixed(2)}, need $${cost.toFixed(2)})`);
+    return;
+  }
 
   const tokenId = side === 'Up' ? p.upTokenId : p.downTokenId;
-  await placeLimitBuy(tokenId, ask, shares);
-  const fee = takerFee(shares, ask);
-  p.bankroll = round2(p.bankroll - cost - fee);
-  p.feesPaid = round2(p.feesPaid + fee);
-  p.realizedPnl = round2(p.realizedPnl - fee);
-  addDailyPnl(-fee);
-
-  p.position = {
-    side, entryPrice: ask, shares, cost,
-    entryModelProb: q, openSpot: p.openSpotPrice,
-    tpPrice: Math.min(round2(ask + TP_OFFSET), 0.98),
-    slPrice: Math.max(round2(ask - SL_OFFSET), 0.02),
-    tpOrderId: null, openedAt: Date.now(),
+  const order = await placeLimitBuy(tokenId, price, shares);
+  s.restingBuy = {
+    orderId: order.id || order.orderId || null,
+    price, shares, cost,
+    placedAt: Date.now(),
   };
-  p.entryDone = true;
-
-  const tpOrder = await placeLimitSell(tokenId, p.position.tpPrice, shares);
-  p.position.tpOrderId = tpOrder.id || tpOrder.orderId || null;
-  recordEquity(p);
-  log(`🎯 ${p.symbol} edge=${(edge * 100).toFixed(1)}% model=${(q * 100).toFixed(1)}% ask=${ask.toFixed(2)} → bought ${side} ${shares}sh | cost=$${cost.toFixed(2)} | TP@${p.position.tpPrice.toFixed(2)} SL@${p.position.slPrice.toFixed(2)}`);
-  registerTrade(p, { side: 'BUY', outcome: side, price: ask, shares, cost, fee, modelProb: q, edge });
+  log(`📥 ${p.symbol} ${side}: resting BUY ${shares}sh @ ${price.toFixed(2)} (mid ${mid.toFixed(2)} − ${BUY_OFFSET})${sizedUp ? ` [SIZED UP: mid > ${HIGH_PRICE_THRESHOLD} after ${HIGH_PRICE_AFTER_SECS}s]` : ''}`);
 }
 
 // ─────────────────────────────────────────
-//  Position management — layered exits
+//  Buy fill checking — on fill: open TP + immediately queue next buy
 // ─────────────────────────────────────────
-async function closeAtLoss(p, pos, bid, reason) {
-  const fee = takerFee(pos.shares, bid);
-  const proceeds = round2(bid * pos.shares);
-  const net = round2(proceeds - fee);
-  p.bankroll = round2(p.bankroll + net);
-  const profit = round2(net - pos.cost);
-  p.realizedPnl = round2(p.realizedPnl + profit);
-  p.feesPaid = round2(p.feesPaid + fee);
-  p.losses++; p.consecutiveLosses++;
-  addDailyPnl(profit);
-  if (p.consecutiveLosses >= CONSECUTIVE_LOSS_LIMIT) {
-    p.cooldownUntil = Date.now() + LOSS_COOLDOWN_MS;
-    log(`🧯 ${p.symbol} ${p.consecutiveLosses} losses in a row — cooling down ${Math.round(LOSS_COOLDOWN_MS / 60000)}m`);
-  }
-  log(`💥 ${p.symbol} ${reason} ${pos.shares}sh @ ${bid.toFixed(2)} | fee=-$${fee.toFixed(4)} | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
-  registerTrade(p, { side: 'SELL', outcome: pos.side, reason, price: bid, shares: pos.shares, profit, fee });
-  p.position = null;
+async function checkBuyFill(p, side, elapsed) {
+  const s = p.sides[side];
+  const rb = s.restingBuy;
+  if (!rb) return;
+  const ask = side === 'Up' ? p.upAsk : p.downAsk;
+  if (ask == null || ask > rb.price) return; // fills once ask trades down to/through our resting bid
+
+  const rebate = makerRebate(rb.shares, rb.price);
+  p.bankroll = round2(p.bankroll - rb.cost + rebate);
+  p.realizedPnl = round2(p.realizedPnl + rebate);
+  p.rebatesEarned = round2(p.rebatesEarned + rebate);
+  s.restingBuy = null;
+
+  const tokenId = side === 'Up' ? p.upTokenId : p.downTokenId;
+  const tpPrice = round2(rb.price + TP_OFFSET);
+  const tpOrder = await placeLimitSell(tokenId, tpPrice, rb.shares);
+  const position = {
+    entryPrice: rb.price, shares: rb.shares, cost: rb.cost,
+    exit: { kind: 'TP', price: tpPrice, orderId: tpOrder.id || tpOrder.orderId || null, status: 'resting' },
+  };
+  s.positions.push(position);
+
+  log(`🎯 ${p.symbol} ${side} BUY filled ${rb.shares}sh @ ${rb.price.toFixed(2)} | cost=$${rb.cost.toFixed(2)} | rebate=+$${rebate.toFixed(4)} | TP resting @ ${tpPrice.toFixed(2)}`);
+  registerTrade(p, { side: 'BUY', outcome: side, reason: 'ENTRY', price: rb.price, shares: rb.shares, cost: rb.cost, rebate });
   recordEquity(p);
+
+  // Immediately queue this side's next buy, if we're still allowed to enter.
+  if (elapsed < ENTRY_CUTOFF_SECS) await maybePlaceBuy(p, side, elapsed);
 }
 
-async function manageOpenPosition(p, remaining) {
-  const pos = p.position;
-  if (!pos) return;
-  const bid = pos.side === 'Up' ? p.upBid : p.downBid;
+// ─────────────────────────────────────────
+//  Exit-order fill checking (TP or the 285s FINAL 0.99 sell)
+// ─────────────────────────────────────────
+async function checkExitFills(p, side) {
+  const s = p.sides[side];
+  const bid = side === 'Up' ? p.upBid : p.downBid;
   if (bid == null) return;
-  if (remaining <= EXIT_SAFETY_BUFFER_SEC) return; // too close to resolution — ride it out, resolvePairWindow settles it
 
-  if (bid >= pos.tpPrice) {
-    const rebate = makerRebate(pos.shares, pos.tpPrice);
-    const proceeds = round2(pos.tpPrice * pos.shares);
+  const stillOpen = [];
+  for (const pos of s.positions) {
+    if (pos.exit.status !== 'resting' || bid < pos.exit.price) { stillOpen.push(pos); continue; }
+
+    const proceeds = round2(pos.exit.price * pos.shares);
+    const rebate = makerRebate(pos.shares, pos.exit.price);
     const net = round2(proceeds + rebate);
     p.bankroll = round2(p.bankroll + net);
     const profit = round2(net - pos.cost);
     p.realizedPnl = round2(p.realizedPnl + profit);
     p.rebatesEarned = round2(p.rebatesEarned + rebate);
-    p.wins++; p.consecutiveLosses = 0;
-    addDailyPnl(profit);
-    log(`💰 ${p.symbol} TP filled ${pos.shares}sh @ ${pos.tpPrice.toFixed(2)} | rebate=+$${rebate.toFixed(4)} | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
-    registerTrade(p, { side: 'SELL', outcome: pos.side, reason: 'TP', price: pos.tpPrice, shares: pos.shares, profit, rebate });
-    p.position = null; recordEquity(p);
-    return;
+    if (profit >= 0) p.wins++; else p.losses++;
+    pos.exit.status = 'filled';
+
+    const icon = pos.exit.kind === 'TP' ? '💰' : '✅';
+    log(`${icon} ${p.symbol} ${side} ${pos.exit.kind} filled ${pos.shares}sh @ ${pos.exit.price.toFixed(2)} (entry ${pos.entryPrice.toFixed(2)}) | rebate=+$${rebate.toFixed(4)} | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
+    registerTrade(p, { side: 'SELL', outcome: side, reason: pos.exit.kind, price: pos.exit.price, shares: pos.shares, profit, rebate });
+    recordEquity(p);
+    // filled position dropped — not pushed back into stillOpen
   }
+  s.positions = stillOpen;
+}
 
-  if (bid <= pos.slPrice) {
-    const tokenId = pos.side === 'Up' ? p.upTokenId : p.downTokenId;
-    await cancelOrder(pos.tpOrderId);
-    await placeLimitSell(tokenId, bid, pos.shares);
-    await closeAtLoss(p, pos, bid, 'SL');
-    return;
-  }
+// ─────────────────────────────────────────
+//  285s sweep: cancel unfilled buys + unfilled TPs, roll remainder into 0.99 sell
+// ─────────────────────────────────────────
+async function maybeSweep(p, elapsed) {
+  if (p.sweepDone || elapsed < SWEEP_SECS) return;
+  p.sweepDone = true;
 
-  const cur = spotPrices[p.symbol];
-  const sigma = sigmaMap[p.symbol];
-  if (cur == null || sigma == null) return;
-  const qUp = modelProbUp(pos.openSpot, cur, sigma, remaining);
-  const qSide = pos.side === 'Up' ? qUp : 1 - qUp;
-  p.liveModelProb = qSide;
+  for (const side of ['Up', 'Down']) {
+    const s = p.sides[side];
 
-  if (qSide < MODEL_INVALIDATION_PROB) {
-    const tokenId = pos.side === 'Up' ? p.upTokenId : p.downTokenId;
-    await cancelOrder(pos.tpOrderId);
-    await placeLimitSell(tokenId, bid, pos.shares);
-    await closeAtLoss(p, pos, bid, 'MODEL_INVALIDATED');
-    return;
-  }
+    if (s.restingBuy) {
+      await cancelOrder(s.restingBuy.orderId);
+      log(`🛑 ${p.symbol} ${side}: unfilled buy ${s.restingBuy.shares}sh @ ${s.restingBuy.price.toFixed(2)} cancelled at ${SWEEP_SECS}s`);
+      s.restingBuy = null;
+    }
 
-  if (qSide > MODEL_TAKEPROFIT_PROB && bid > pos.entryPrice * 1.05) {
-    const tokenId = pos.side === 'Up' ? p.upTokenId : p.downTokenId;
-    await cancelOrder(pos.tpOrderId);
-    await placeLimitSell(tokenId, bid, pos.shares);
-    const fee = takerFee(pos.shares, bid);
-    const proceeds = round2(bid * pos.shares);
-    const net = round2(proceeds - fee);
-    p.bankroll = round2(p.bankroll + net);
-    const profit = round2(net - pos.cost);
-    p.realizedPnl = round2(p.realizedPnl + profit);
-    p.feesPaid = round2(p.feesPaid + fee);
-    p.wins++; p.consecutiveLosses = 0;
-    addDailyPnl(profit);
-    log(`✅ ${p.symbol} early model-TP (${(qSide * 100).toFixed(1)}%) ${pos.shares}sh @ ${bid.toFixed(2)} | pnl=$${profit.toFixed(2)}`);
-    registerTrade(p, { side: 'SELL', outcome: pos.side, reason: 'MODEL_TP', price: bid, shares: pos.shares, profit, fee });
-    p.position = null; recordEquity(p);
+    let sweepShares = 0, sweepCost = 0;
+    const kept = [];
+    for (const pos of s.positions) {
+      if (pos.exit.status === 'resting') {
+        await cancelOrder(pos.exit.orderId);
+        sweepShares += pos.shares;
+        sweepCost = round2(sweepCost + pos.cost);
+      } else {
+        kept.push(pos); // already filled/closed, shouldn't normally happen here
+      }
+    }
+    s.positions = kept;
+
+    if (sweepShares > 0) {
+      const tokenId = side === 'Up' ? p.upTokenId : p.downTokenId;
+      const order = await placeLimitSell(tokenId, FINAL_SELL_PRICE, sweepShares);
+      s.positions.push({
+        entryPrice: round2(sweepCost / sweepShares), shares: sweepShares, cost: sweepCost,
+        exit: { kind: 'FINAL', price: FINAL_SELL_PRICE, orderId: order.id || order.orderId || null, status: 'resting' },
+      });
+      log(`🎯 ${p.symbol} ${side}: cancelled ${sweepShares}sh of pending TPs, resting FINAL SELL @ ${FINAL_SELL_PRICE} for combined ${sweepShares}sh`);
+    }
   }
 }
 
 // ─────────────────────────────────────────
-//  Resolution
+//  Window resolution
 // ─────────────────────────────────────────
 async function determineWinningSide(p) {
   try {
@@ -665,40 +530,55 @@ async function determineWinningSide(p) {
       const winner = (outcomes[bestI] || '').trim();
       if (winner) return winner.charAt(0).toUpperCase() + winner.slice(1).toLowerCase();
     }
-  } catch (_) {}
+  } catch (_) { /* fall through */ }
   if (p.upBid != null && p.downBid != null) return p.upBid >= p.downBid ? 'Up' : 'Down';
   return null;
 }
+
 async function resolvePairWindow(p) {
   if (p.resolvedThisWindow) return;
   p.resolvedThisWindow = true;
-  const pos = p.position;
-  if (!pos) return;
-  await cancelOrder(pos.tpOrderId);
-  const winner = await determineWinningSide(p);
-  const won = winner === pos.side;
-  const proceeds = won ? round2(pos.shares * 1) : 0;
-  const profit = round2(proceeds - pos.cost);
-  p.bankroll = round2(p.bankroll + proceeds);
-  p.realizedPnl = round2(p.realizedPnl + profit);
-  if (won) { p.wins++; p.consecutiveLosses = 0; }
-  else {
-    p.losses++; p.consecutiveLosses++;
-    if (p.consecutiveLosses >= CONSECUTIVE_LOSS_LIMIT) {
-      p.cooldownUntil = Date.now() + LOSS_COOLDOWN_MS;
-      log(`🧯 ${p.symbol} ${p.consecutiveLosses} losses in a row — cooling down ${Math.round(LOSS_COOLDOWN_MS / 60000)}m`);
+
+  for (const side of ['Up', 'Down']) {
+    const s = p.sides[side];
+    if (s.restingBuy) {
+      await cancelOrder(s.restingBuy.orderId);
+      log(`🛑 ${p.symbol} ${side}: unfilled buy cancelled at window close`);
+      s.restingBuy = null;
+    }
+    for (const pos of s.positions) {
+      if (pos.exit.status === 'resting') {
+        await cancelOrder(pos.exit.orderId);
+        log(`🛑 ${p.symbol} ${side}: unfilled ${pos.exit.kind} cancelled at window close — resolving instead`);
+      }
     }
   }
-  addDailyPnl(profit);
-  const icon = won ? '💰' : '💥';
-  log(`${icon} ${p.symbol} RESOLUTION ${pos.side} ${pos.shares}sh entry=${pos.entryPrice.toFixed(2)} exit=$${won ? '1.00' : '0.00'}/sh | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
-  registerTrade(p, { side: 'SELL', outcome: pos.side, reason: 'RESOLUTION', price: won ? 1 : 0, shares: pos.shares, profit });
-  p.position = null;
+
+  const anyPosition = ['Up', 'Down'].some(s => sideHeldShares(p.sides[s]) > 0);
+  if (!anyPosition) return;
+
+  const winner = await determineWinningSide(p);
+  for (const side of ['Up', 'Down']) {
+    const s = p.sides[side];
+    const shares = sideHeldShares(s);
+    if (shares <= 0) continue;
+    const cost = sideHeldCost(s);
+    const won = winner === side;
+    const proceeds = won ? round2(shares * 1) : 0;
+    const profit = round2(proceeds - cost);
+    p.bankroll = round2(p.bankroll + proceeds);
+    p.realizedPnl = round2(p.realizedPnl + profit);
+    if (won) p.wins++; else p.losses++;
+    const icon = won ? '💰' : '💥';
+    log(`${icon} ${p.symbol} RESOLUTION ${side} ${shares}sh cost=$${cost.toFixed(2)} exit=$${won ? '1.00' : '0.00'}/sh | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
+    registerTrade(p, { side: 'SELL', outcome: side, reason: 'RESOLUTION', price: won ? 1 : 0, shares, profit });
+    s.positions = [];
+  }
   recordEquity(p);
 }
 
 // ─────────────────────────────────────────
-//  Per-tick pair processing
+//  Main per-pair tick
 // ─────────────────────────────────────────
 async function processPair(p) {
   const ws = currentWindowStart();
@@ -707,74 +587,113 @@ async function processPair(p) {
     await loadPairWindow(p);
   }
   if (!p.tradable) return;
+  if (!tradingEnabled) return;
 
-  const remaining = p.windowEnd - nowSec();
+  const elapsed = nowSec() - p.windowStart;
 
-  if (p.openSpotPrice == null && spotPrices[p.symbol] != null) {
-    p.openSpotPrice = spotPrices[p.symbol];
-    log(`🔭 ${p.symbol} window ${p.slug} open spot ≈ $${p.openSpotPrice} (proxy for price-to-beat)`);
+  for (const side of ['Up', 'Down']) {
+    await checkBuyFill(p, side, elapsed);
+    await checkExitFills(p, side);
+    if (elapsed < ENTRY_CUTOFF_SECS) await maybePlaceBuy(p, side, elapsed);
   }
 
-  if (p.position) await manageOpenPosition(p, remaining);
-  else if (tradingEnabled && !dailyLimitHit) await maybeEnter(p);
+  await maybeSweep(p, elapsed);
 
-  if (remaining <= -RESOLUTION_BUFFER_S && !p.resolvedThisWindow) await resolvePairWindow(p);
+  const remaining = p.windowEnd - nowSec();
+  if (remaining <= -RESOLUTION_BUFFER_S && !p.resolvedThisWindow) {
+    await resolvePairWindow(p);
+  }
 }
 
 // ─────────────────────────────────────────
-//  Dashboard state
+//  UI state
 // ─────────────────────────────────────────
+function sideSummary(p, side) {
+  const s = p.sides[side];
+  const openPositions = s.positions.filter(pos => pos.exit.status === 'resting');
+  const pendingTp = openPositions.filter(pos => pos.exit.kind === 'TP').length;
+  const pendingFinal = openPositions.filter(pos => pos.exit.kind === 'FINAL').length;
+  return {
+    restingBuy: s.restingBuy ? { price: s.restingBuy.price, shares: s.restingBuy.shares } : null,
+    heldShares: sideHeldShares(s),
+    heldCost: sideHeldCost(s),
+    pendingTp,
+    pendingFinal,
+  };
+}
+
 function buildState() {
   const pairStates = Object.values(pairs).map(p => {
-    const unrealized = round2(p.position ? positionMarkValue(p) - p.position.cost : 0);
+    const unrealized = round2(positionsMarkValue(p) - (sideHeldCost(p.sides.Up) + sideHeldCost(p.sides.Down)));
     const markValue = pairMarkValue(p);
-    const cur = spotPrices[p.symbol] ?? null;
-    const sigma = sigmaMap[p.symbol] ?? null;
-    const remaining = p.windowEnd ? Math.max(0, p.windowEnd - nowSec()) : null;
-    let qUp = null;
-    if (p.openSpotPrice != null && cur != null && sigma != null && remaining != null) {
-      qUp = round4(modelProbUp(p.openSpotPrice, cur, sigma, remaining));
+    const elapsed = p.windowStart != null ? Math.max(0, nowSec() - p.windowStart) : null;
+    let phase = '—';
+    if (p.tradable && elapsed != null) {
+      phase = elapsed >= SWEEP_SECS ? 'SWEPT/RESOLVE' : (elapsed >= ENTRY_CUTOFF_SECS ? 'NO NEW ENTRIES' : 'ENTRIES OPEN');
     }
     return {
-      symbol: p.symbol, tradable: p.tradable, slug: p.slug, windowEnd: p.windowEnd,
+      symbol: p.symbol,
+      tradable: p.tradable,
+      slug: p.slug,
+      windowEnd: p.windowEnd,
       secsToEnd: p.windowEnd ? Math.max(0, Math.floor(p.windowEnd - nowSec())) : null,
       upAsk: p.upAsk, upBid: p.upBid, downAsk: p.downAsk, downBid: p.downBid,
-      openSpotPrice: p.openSpotPrice, spotPrice: cur, sigmaPerMin: sigma,
-      modelProbUp: qUp, modelProbDown: qUp != null ? round4(1 - qUp) : null,
-      cooldownSecs: p.cooldownUntil > Date.now() ? Math.ceil((p.cooldownUntil - Date.now()) / 1000) : 0,
-      bankroll: p.bankroll, realizedPnl: p.realizedPnl, unrealizedPnl: unrealized, markValue,
-      feesPaid: p.feesPaid, rebatesEarned: p.rebatesEarned, wins: p.wins, losses: p.losses,
-      consecutiveLosses: p.consecutiveLosses,
-      position: p.position ? {
-        side: p.position.side, entryPrice: p.position.entryPrice, shares: p.position.shares, cost: p.position.cost,
-        tpPrice: p.position.tpPrice, slPrice: p.position.slPrice,
-        entryModelProb: p.position.entryModelProb, liveModelProb: p.liveModelProb,
-      } : null,
+      phase,
+      bankroll: p.bankroll,
+      realizedPnl: p.realizedPnl,
+      unrealizedPnl: unrealized,
+      markValue,
+      feesPaid: p.feesPaid,
+      rebatesEarned: p.rebatesEarned,
+      wins: p.wins,
+      losses: p.losses,
+      sides: { Up: sideSummary(p, 'Up'), Down: sideSummary(p, 'Down') },
       equityCurve: p.equityCurve,
     };
   });
+
   const totalBankroll = round2(pairStates.reduce((s, p) => s + p.bankroll, 0));
   const totalMark = round2(pairStates.reduce((s, p) => s + p.markValue, 0));
   const totalRealized = round2(pairStates.reduce((s, p) => s + p.realizedPnl, 0));
   const totalUnrealized = round2(pairStates.reduce((s, p) => s + p.unrealizedPnl, 0));
   const totalWins = pairStates.reduce((s, p) => s + p.wins, 0);
   const totalLosses = pairStates.reduce((s, p) => s + p.losses, 0);
+  const totalFeesPaid = round2(pairStates.reduce((s, p) => s + p.feesPaid, 0));
+  const totalRebatesEarned = round2(pairStates.reduce((s, p) => s + p.rebatesEarned, 0));
+
   return {
-    dryRun: DRY_RUN, tradingEnabled, dailyLimitHit, dailyPnl,
-    pairs: pairList, strategy: 'Volatility-Model Edge (σ-edge)',
-    totalCapital: TOTAL_CAPITAL, perPairCapital, totalBankroll, totalMarkValue: totalMark,
-    totalRealizedPnl: totalRealized, totalUnrealizedPnl: totalUnrealized, totalPnl: round2(totalMark - TOTAL_CAPITAL),
-    totalWins, totalLosses, totalFeesPaid: round2(pairStates.reduce((s, p) => s + p.feesPaid, 0)),
-    totalRebatesEarned: round2(pairStates.reduce((s, p) => s + p.rebatesEarned, 0)),
+    dryRun: DRY_RUN,
+    tradingEnabled,
+    pairs: pairList,
+    totalCapital: TOTAL_CAPITAL,
+    perPairCapital,
+    totalBankroll,
+    totalMarkValue: totalMark,
+    totalRealizedPnl: totalRealized,
+    totalUnrealizedPnl: totalUnrealized,
+    totalPnl: round2(totalMark - TOTAL_CAPITAL),
+    totalWins, totalLosses,
+    totalFeesPaid,
+    totalRebatesEarned,
     winRate: (totalWins + totalLosses) > 0 ? round2((totalWins / (totalWins + totalLosses)) * 100) : null,
     uptime: Math.floor((Date.now() - startTime) / 1000),
     config: {
-      edgeThreshold: EDGE_THRESHOLD, minEntryElapsedSecs: MIN_ENTRY_ELAPSED_SECS, lateEntryCutoffSecs: LATE_ENTRY_CUTOFF_SECS,
-      tpOffset: TP_OFFSET, slOffset: SL_OFFSET, kellyMultiplier: KELLY_MULTIPLIER, maxRiskPct: MAX_RISK_PCT_PER_TRADE,
-      dailyLossLimitPct: DAILY_LOSS_LIMIT_PCT, consecutiveLossLimit: CONSECUTIVE_LOSS_LIMIT,
-      modelInvalidationProb: MODEL_INVALIDATION_PROB, modelTakeProfitProb: MODEL_TAKEPROFIT_PROB,
+      buyOffset: BUY_OFFSET,
+      tpOffset: TP_OFFSET,
+      entryCutoffSecs: ENTRY_CUTOFF_SECS,
+      sweepSecs: SWEEP_SECS,
+      finalSellPrice: FINAL_SELL_PRICE,
+      fixedShares: FIXED_SHARES,
+      highPriceAfterSecs: HIGH_PRICE_AFTER_SECS,
+      highPriceThreshold: HIGH_PRICE_THRESHOLD,
+      highPriceShares: HIGH_PRICE_SHARES,
+      cryptoTakerFeeRate: CRYPTO_TAKER_FEE_RATE,
+      cryptoMakerRebateShare: CRYPTO_MAKER_REBATE_SHARE,
     },
-    pairStates, totalEquityCurve, logs: logs.slice(-100), trades: trades.slice(-80).reverse(),
+    pairStates,
+    totalEquityCurve,
+    logs: logs.slice(-100),
+    trades: trades.slice(-80).reverse(),
   };
 }
 
@@ -785,56 +704,65 @@ let loopRunning = false;
 async function mainLoop() {
   if (loopRunning) return;
   loopRunning = true;
-  let lastSpot = 0;
-  const lastVolAt = {};
   while (true) {
     try {
-      checkDailyReset();
       const now = Date.now();
-      if (now - lastPolyPriceFetch >= POLY_PRICE_REFRESH_MS) { lastPolyPriceFetch = now; await refreshPolyPrices(); }
-      const activeSymbols = Object.values(pairs).filter(p => p.tradable).map(p => p.symbol);
-      const spotSymbols = activeSymbols.length ? activeSymbols : pairList;
-      if (now - lastSpot >= SPOT_PRICE_REFRESH_MS) { lastSpot = now; await refreshSpotPrices(spotSymbols); }
-      for (const sym of pairList) {
-        if (!lastVolAt[sym] || now - lastVolAt[sym] >= VOL_REFRESH_MS) {
-          lastVolAt[sym] = now;
-          refreshVolatility(sym).catch(() => {});
-        }
+      if (now - lastPolyPriceFetch >= POLY_PRICE_REFRESH_MS) {
+        lastPolyPriceFetch = now;
+        await refreshPolyPrices();
       }
       for (const p of Object.values(pairs)) {
         try { await processPair(p); } catch (e) { log(`⚠️  ${p.symbol} tick error: ${e.message}`); }
       }
       emitFn('state', buildState());
-    } catch (e) { log(`⚠️  Loop error: ${e.message}`); }
+    } catch (e) {
+      log(`⚠️  Loop error: ${e.message}`);
+    }
     await new Promise(r => setTimeout(r, TICK_MS));
   }
 }
 
+// ─────────────────────────────────────────
+//  Public controls
+// ─────────────────────────────────────────
 function setPairs(list) {
-  const clean = (list || []).map(s => s.trim().toUpperCase()).filter(Boolean).filter(eligibleSymbol);
-  if (!clean.length) return { ok: false, error: 'No eligible symbols — each pair needs a Binance/Coinbase spot mapping for the volatility model' };
+  const clean = (list || []).map(s => s.trim().toUpperCase()).filter(Boolean);
+  if (!clean.length) return { ok: false, error: 'Empty pair list' };
   pairList = [...new Set(clean)];
   resetPairs();
   log(`⚙️  Pairs updated: ${pairList.join(', ')} | $${perPairCapital.toFixed(2)} per pair`);
   return { ok: true, pairs: pairList, perPairCapital };
 }
-function pauseTrading() { tradingEnabled = false; log('⏸️  Trading paused'); return { ok: true }; }
-function resumeTrading() { tradingEnabled = true; dailyLimitHit = false; log('▶️  Trading resumed'); return { ok: true }; }
+function pauseTrading() {
+  tradingEnabled = false;
+  log('⏸️  Trading paused (open/pending orders still managed for fills/TP/resolution)');
+  return { ok: true };
+}
+function resumeTrading() {
+  tradingEnabled = true;
+  log('▶️  Trading resumed');
+  return { ok: true };
+}
 function getStatus() { return { ok: true, ...buildState() }; }
 
+// ─────────────────────────────────────────
+//  Init
+// ─────────────────────────────────────────
 async function init(privateKey, emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
-  log('🚀 Volatility-Model Edge Bot — pricing each 5m Up/Down market as a binary option against a Brownian-bridge fair-value model driven by real exchange spot prices (Binance primary, Coinbase fallback), independent of Polymarket\'s own reflexive price.');
-  log(`⚙️  $${TOTAL_CAPITAL} capital across ${pairList.length} candidate pairs (${pairList.join(', ')}) → $${perPairCapital.toFixed(2)}/pair — pairs with no live 5m market simply stay idle`);
-  log(`⚙️  entry: edge≥${EDGE_THRESHOLD}, price∈[${MIN_ENTRY_PRICE},${MAX_ENTRY_PRICE}], spread≤${MAX_SPREAD}, elapsed≥${MIN_ENTRY_ELAPSED_SECS}s, remaining≥${LATE_ENTRY_CUTOFF_SECS}s, 1 trade/pair/window`);
-  log(`⚙️  sizing: fractional Kelly ×${KELLY_MULTIPLIER}, capped ${(MAX_RISK_PCT_PER_TRADE * 100).toFixed(0)}% bankroll/trade`);
-  log(`⚙️  exits: price TP+${TP_OFFSET}/SL-${SL_OFFSET}, model-invalidation stop <${MODEL_INVALIDATION_PROB}, model take-profit >${MODEL_TAKEPROFIT_PROB}, safety buffer ${EXIT_SAFETY_BUFFER_SEC}s`);
-  log(`⚙️  risk: daily loss limit ${(DAILY_LOSS_LIMIT_PCT * 100).toFixed(0)}% of capital | ${CONSECUTIVE_LOSS_LIMIT}-loss cooldown/pair (${Math.round(LOSS_COOLDOWN_MS / 60000)}m)`);
-  log(`${DRY_RUN ? '⚠️  DRY RUN — simulated fills, real market/price data' : '🔴 LIVE MODE — real money'}`);
+  log(`🚀 5-Minute BTC Up/Down — Independent Side Scalper`);
+  log(`⚙️  $${TOTAL_CAPITAL} demo capital across ${pairList.length} pair(s) (${pairList.join(', ')}) → $${perPairCapital.toFixed(2)}/pair`);
+  log(`⚙️  Each side independently: buy @ mid − ${BUY_OFFSET}, TP @ entry + ${TP_OFFSET}, ${FIXED_SHARES}sh/order, stacks freely`);
+  log(`⚙️  After ${HIGH_PRICE_AFTER_SECS}s: if a side's mid > ${HIGH_PRICE_THRESHOLD}, that side's buy size increases to ${HIGH_PRICE_SHARES}sh`);
+  log(`⚙️  No new entries after ${ENTRY_CUTOFF_SECS}s | at ${SWEEP_SECS}s: cancel unfilled buys/TPs, roll remainder into one @ ${FINAL_SELL_PRICE} sell per side`);
+  log(`⚙️  Unfilled ${FINAL_SELL_PRICE} sell at window close → resolves to actual outcome`);
+  log(`⚙️  fees: all buys + TP + final sell are maker (0 fee, +${(CRYPTO_MAKER_REBATE_SHARE*100).toFixed(0)}% rebate) | no taker orders in this strategy`);
+  log(`${DRY_RUN ? '⚠️  DRY RUN — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
   trader = new PolymarketTrader(privateKey);
   await trader.authenticate();
+
   mainLoop().catch(e => log(`❌ Fatal: ${e.message}`));
 }
 
