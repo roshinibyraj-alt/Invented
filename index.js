@@ -109,6 +109,7 @@ app.get('/', (_, res) => {
   <div class="header">
     <div class="logo">⏱️ <span>5M</span> UP/DOWN BOT</div>
     <div id="mode-badge" class="mode-badge ${DRY_RUN ? 'mode-dry' : 'mode-live'}">${DRY_RUN ? 'DRY RUN' : '🔴 LIVE'}</div>
+    <div id="experiment-badge" class="mode-badge mode-dry">CHASE (baseline)</div>
   </div>
 
   <div class="toolbar">
@@ -243,43 +244,31 @@ app.get('/', (_, res) => {
     document.getElementById('equity-chart').innerHTML = buildEquitySvg(s.totalEquityCurve, 600, 90, s.totalCapital);
 
     const grid = document.getElementById('pair-grid');
+    const modeVal = document.getElementById('experiment-badge');
+    if (modeVal) { modeVal.textContent = s.mode === 'FADE' ? 'FADE (reversed)' : 'CHASE (baseline)'; modeVal.className = 'mode-badge ' + (s.mode === 'FADE' ? 'mode-live' : 'mode-dry'); }
     if (!s.pairStates || s.pairStates.length === 0) {
       grid.innerHTML = '<div class="empty">No pairs configured</div>';
     } else {
       grid.innerHTML = s.pairStates.map(p => {
-        const pos = p.positions || { Up: {shares:0,cost:0,tpState:'none'}, Down: {shares:0,cost:0,tpState:'none'} };
-        const posLine = (side) => {
-          const d = pos[side];
-          if (!d || d.shares <= 0) return '';
-          const sideCls = side === 'Up' ? 'side-up' : 'side-down';
-          const avg = d.shares > 0 ? (d.cost / d.shares) : 0;
-          const tpTag = d.exitReason === 'tp' ? 'TP hit'
-            : d.exitReason === 'stoploss_maker' ? '🧯 stop-loss (maker) hit'
-            : d.exitReason === 'stoploss_taker' ? '🧯 stop-loss (taker fallback)'
-            : d.slState === 'resting' ? '🧯 stop-loss resting @'+ (d.slPrice != null ? d.slPrice.toFixed(2) : '—')
-            : (d.tpState === 'resting' ? 'TP@'+s.config.tpPrice+' resting' : 'not yet at TP');
-          return '<div class="pair-row"><span class="'+sideCls+'">'+side+'</span><span>'+d.shares.toFixed(2)+'sh @ avg '+avg.toFixed(3)+' (cost $'+d.cost.toFixed(2)+') — '+tpTag+'</span></div>';
-        };
-        const posHtml = (pos.Up.shares > 0 || pos.Down.shares > 0)
-          ? '<div class="pos-box">' + posLine('Up') + posLine('Down') + '</div>'
-          : '<div class="pos-box">no filled shares yet this window</div>';
-        const restingHtml = (p.restingOrders && p.restingOrders.length)
-          ? '<div class="pair-row"><span class="pair-key">🪜 resting ladder buys</span><span style="flex:1;text-align:right">'+
-              p.restingOrders.map(o => o.shares.toFixed(0)+'sh@'+o.price.toFixed(2)+'('+o.side[0]+')').join(', ') +
-            '</span></div>'
-          : '';
+        const pos = p.position;
+        const sideCls = pos ? (pos.side === 'Up' ? 'side-up' : 'side-down') : '';
+        const posHtml = pos
+          ? '<div class="pos-box">['+pos.mode.toUpperCase()+'] spike was on <span class="'+(pos.spikeSide==='Up'?'side-up':'side-down')+'">'+pos.spikeSide+'</span> → bought <span class="'+sideCls+'">'+pos.side+'</span> '+
+            pos.shares.toFixed(2)+'sh @ '+pos.entryPrice.toFixed(2)+' (cost $'+pos.cost.toFixed(2)+')'+
+            ' | TP '+pos.tpPrice.toFixed(2)+' / SL '+pos.slPrice.toFixed(2)+
+            (p.unrealizedPnl!==undefined ? (' | u/pnl <span class="'+pClass(p.unrealizedPnl)+'">'+sgn(p.unrealizedPnl)+'</span>') : '') +
+            '</div>'
+          : '<div class="pos-box">watching for a '+(s.config?.spikeThreshold||0.05)+' spike over '+(s.config?.spikeLookbackSecs||20)+'s…</div>';
         const eqCurve = buildEquitySvg(p.equityCurve, 280, 34, null);
-        const hasPos = !!(pos.Up.shares > 0 || pos.Down.shares > 0);
+        const hasPos = !!pos;
         return '<div class="pair-card '+(hasPos?'has-pos':'')+' '+(p.tradable?'':'untradable')+'">'+
           '<div class="pair-hdr"><div class="pair-sym">'+p.symbol+'</div><div class="pair-timer">'+(p.tradable?fmtSecs(p.secsToEnd):'loading…')+'</div></div>'+
           '<div class="pair-body">'+
             '<div class="pair-row"><span class="pair-key">Up ask/bid</span><span>'+(p.upAsk?.toFixed(2)||'—')+' / '+(p.upBid?.toFixed(2)||'—')+'</span></div>'+
             '<div class="pair-row"><span class="pair-key">Down ask/bid</span><span>'+(p.downAsk?.toFixed(2)||'—')+' / '+(p.downBid?.toFixed(2)||'—')+'</span></div>'+
-            '<div class="pair-row"><span class="pair-key">Phase</span><span>'+(p.phaseLabel||'—')+'</span><span class="pair-key">Ticks</span><span>'+p.ticksFired+'/'+p.ticksTotal+'</span></div>'+
             '<div class="pair-row"><span class="pair-key">Bankroll</span><span>$'+p.bankroll.toFixed(2)+'</span><span class="pair-key">W/L</span><span>'+p.wins+'/'+p.losses+'</span></div>'+
             '<div class="pair-row"><span class="pair-key">Realized</span><span class="'+pClass(p.realizedPnl)+'">'+sgn(p.realizedPnl)+'</span><span class="pair-key">Unrealized</span><span class="'+pClass(p.unrealizedPnl)+'">'+sgn(p.unrealizedPnl)+'</span></div>'+
-            '<div class="pair-row"><span class="pair-key">Rebates</span><span class="pnl-pos">+$'+(p.rebatesEarned||0).toFixed(4)+'</span><span class="pair-key">Compounding</span><span>x'+(p.compoundMultiplier||1).toFixed(2)+'</span></div>'+
-            restingHtml +
+            '<div class="pair-row"><span class="pair-key">Fees paid</span><span class="pnl-neg">-$'+(p.feesPaid||0).toFixed(4)+'</span><span class="pair-key">Rebates</span><span class="pnl-pos">+$'+(p.rebatesEarned||0).toFixed(4)+'</span></div>'+
             posHtml +
             '<div class="spark-box"><svg viewBox="0 0 280 34" preserveAspectRatio="none">'+eqCurve+'</svg><div class="spark-label">Equity curve ($'+p.markValue.toFixed(2)+')</div></div>'+
           '</div></div>';
