@@ -78,7 +78,17 @@ app.get('/', (_, res) => {
   .side-box.up .side-title { color: var(--green); }
   .side-box.down .side-title { color: var(--red); }
   .side-box .side-row { font-size: 9px; color: var(--muted); display: flex; justify-content: space-between; margin-bottom: 2px; }
-  .side-box .side-row span:last-child { color: var(--text); }
+  .side-box .side-row span:last-child { color: var(--text); text-align: right; }
+  .side-box .side-timer { font-size: 9px; color: var(--purple); text-align: right; margin-top: 2px; }
+  .buy-list { margin-top: 4px; max-height: 90px; overflow-y: auto; border-top: 1px dashed var(--border); padding-top: 3px; }
+  .buy-list .buy-row { font-size: 8.5px; color: var(--muted); display: flex; justify-content: space-between; padding: 1px 0; }
+  .buy-list .buy-row span:last-child { color: var(--text); }
+  .config-wrap { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin: 0 20px 14px; }
+  .config-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; margin-top: 6px; }
+  .cfg-item { background: var(--bg3); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; }
+  .cfg-item .cfg-label { font-size: 8px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+  .cfg-item .cfg-val { font-size: 12px; color: var(--gold); }
+  .badge-count { display: inline-block; background: var(--purple); color: #fff; border-radius: 8px; padding: 0 6px; font-size: 9px; margin-left: 4px; }
   .bottom-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 0 20px 20px; }
   .tbl-wrap { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; max-height: 320px; overflow-y: auto; }
   .tbl { width: 100%; border-collapse: collapse; }
@@ -120,6 +130,11 @@ app.get('/', (_, res) => {
       <div class="val" id="equity-val">$0.00</div>
     </div>
     <svg id="equity-chart" class="equity-svg" viewBox="0 0 600 90" preserveAspectRatio="none"></svg>
+  </div>
+
+  <div class="config-wrap">
+    <div class="equity-hdr"><div class="title">Live Strategy Config</div></div>
+    <div class="config-grid" id="config-grid"></div>
   </div>
 
   <div class="section">
@@ -174,12 +189,23 @@ app.get('/', (_, res) => {
 
   function sideBox(label, cls, s) {
     if (!s) s = {};
-    const rb = s.restingBuy ? (s.restingBuy.shares+'sh @ '+s.restingBuy.price.toFixed(2)) : '—';
+    const buys = s.restingBuys || [];
+    const buyListHtml = buys.length
+      ? '<div class="buy-list">'+buys.map(b => '<div class="buy-row"><span>'+b.ageSecs+'s ago</span><span>'+b.shares+'sh @ '+b.price.toFixed(2)+'</span></div>').join('')+'</div>'
+      : '';
+    const tpDetail = (s.pendingTpDetail||[]);
+    const tpListHtml = tpDetail.length
+      ? '<div class="buy-list">'+tpDetail.map(t => '<div class="buy-row"><span>TP</span><span>'+t.shares+'sh @ '+t.price.toFixed(2)+'</span></div>').join('')+'</div>'
+      : '';
     return '<div class="side-box '+cls+'">'+
       '<div class="side-title">'+label+'</div>'+
-      '<div class="side-row"><span>Resting Buy</span><span>'+rb+'</span></div>'+
+      '<div class="side-row"><span>Resting Buys</span><span>'+(s.restingBuyCount||0)+' order(s), '+(s.restingBuyShares||0).toFixed(0)+'sh ($'+(s.restingBuyCost||0).toFixed(2)+')</span></div>'+
+      buyListHtml+
       '<div class="side-row"><span>Held Shares</span><span>'+(s.heldShares||0).toFixed(0)+'sh ($'+(s.heldCost||0).toFixed(2)+')</span></div>'+
       '<div class="side-row"><span>Pending TP / Final</span><span>'+(s.pendingTp||0)+' / '+(s.pendingFinal||0)+'</span></div>'+
+      tpListHtml+
+      '<div class="side-row"><span>Buys Placed (window)</span><span>'+(s.buysPlacedThisWindow||0)+'</span></div>'+
+      '<div class="side-timer">⏱ next timer buy in '+(s.nextBuyInSecs!=null?s.nextBuyInSecs+'s':'—')+'</div>'+
     '</div>';
   }
 
@@ -202,6 +228,26 @@ app.get('/', (_, res) => {
     eqVal.className = 'val ' + pClass(s.totalPnl);
     document.getElementById('equity-chart').innerHTML = buildEquitySvg(s.totalEquityCurve, 600, 90, s.totalCapital);
 
+    const cfg = s.config || {};
+    const cfgGrid = document.getElementById('config-grid');
+    if (cfgGrid) {
+      const items = [
+        ['Buy Offset', '−'+(cfg.buyOffset??'—')],
+        ['TP Offset', '+'+(cfg.tpOffset??'—')],
+        ['Buy Timer', (cfg.buyIntervalSecs??'—')+'s'],
+        ['Entry Cutoff', (cfg.entryCutoffSecs??'—')+'s'],
+        ['Sweep At', (cfg.sweepSecs??'—')+'s'],
+        ['Final Sell Px', cfg.finalSellPrice??'—'],
+        ['Base Shares', (cfg.fixedShares??'—')+'sh'],
+        ['Sizeup After', (cfg.highPriceAfterSecs??'—')+'s'],
+        ['Sizeup Threshold', '>'+(cfg.highPriceThreshold??'—')],
+        ['Sizeup Shares', (cfg.highPriceShares??'—')+'sh'],
+        ['Taker Fee Rate', ((cfg.cryptoTakerFeeRate||0)*100).toFixed(0)+'%'],
+        ['Maker Rebate Share', ((cfg.cryptoMakerRebateShare||0)*100).toFixed(0)+'%'],
+      ];
+      cfgGrid.innerHTML = items.map(([label,val]) => '<div class="cfg-item"><div class="cfg-label">'+label+'</div><div class="cfg-val">'+val+'</div></div>').join('');
+    }
+
     const grid = document.getElementById('pair-grid');
     if (!s.pairStates || s.pairStates.length === 0) {
       grid.innerHTML = '<div class="empty">No Asset Data</div>';
@@ -212,6 +258,10 @@ app.get('/', (_, res) => {
           '<div class="pair-body">'+
             '<div class="pair-row"><span class="pair-key">Up Ask/Bid</span><span>'+(p.upAsk?.toFixed(2)||'—')+' / '+(p.upBid?.toFixed(2)||'—')+'</span></div>'+
             '<div class="pair-row"><span class="pair-key">Down Ask/Bid</span><span>'+(p.downAsk?.toFixed(2)||'—')+' / '+(p.downBid?.toFixed(2)||'—')+'</span></div>'+
+            '<div class="pair-row"><span class="pair-key">Bankroll</span><span>$'+(p.bankroll||0).toFixed(2)+'</span></div>'+
+            '<div class="pair-row"><span class="pair-key">Mark Value</span><span>$'+(p.markValue||0).toFixed(2)+'</span></div>'+
+            '<div class="pair-row"><span class="pair-key">Realized / Unrealized P&amp;L</span><span class="'+pClass(p.realizedPnl)+'">'+sgn(p.realizedPnl)+'</span> / <span class="'+pClass(p.unrealizedPnl)+'">'+sgn(p.unrealizedPnl)+'</span></div>'+
+            '<div class="pair-row"><span class="pair-key">Fees / Rebates</span><span>$'+(p.feesPaid||0).toFixed(4)+' / $'+(p.rebatesEarned||0).toFixed(4)+'</span></div>'+
             '<div class="pair-row"><span class="pair-key">Session Performance</span><span>Wins: '+p.wins+' / Losses: '+p.losses+'</span></div>'+
             '<div class="side-grid">'+sideBox('UP','up',p.sides?.Up)+sideBox('DOWN','down',p.sides?.Down)+'</div>'+
           '</div></div>';
