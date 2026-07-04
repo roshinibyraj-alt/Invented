@@ -247,36 +247,36 @@ app.get('/', (_, res) => {
       grid.innerHTML = '<div class="empty">No pairs configured</div>';
     } else {
       grid.innerHTML = s.pairStates.map(p => {
-        const pos = p.positions || { Up: {shares:0,cost:0,tpState:'none'}, Down: {shares:0,cost:0,tpState:'none'} };
-        const posLine = (side) => {
-          const d = pos[side];
-          if (!d || d.shares <= 0) return '';
-          const sideCls = side === 'Up' ? 'side-up' : 'side-down';
-          const avg = d.shares > 0 ? (d.cost / d.shares) : 0;
-          const tpTag = d.exitReason === 'tp' ? 'TP hit' : d.exitReason === 'stoploss' ? '🧯 stop-loss exit' : (d.tpState === 'resting' ? 'TP@'+s.config.tpPrice+' resting' : 'not yet at TP');
-          return '<div class="pair-row"><span class="'+sideCls+'">'+side+'</span><span>'+d.shares.toFixed(2)+'sh @ avg '+avg.toFixed(3)+' (cost $'+d.cost.toFixed(2)+') — '+tpTag+'</span></div>';
+        const openTrades = p.openTrades || [];
+        const restingEntries = p.restingEntries || [];
+        const zFmt = (z) => z === null || z === undefined ? '—' : z.toFixed(2);
+        const tradeLine = (t) => {
+          const sideCls = t.side === 'Up' ? 'side-up' : 'side-down';
+          const tpTag = t.tpState === 'resting' ? 'TP@'+t.tpPrice.toFixed(2) : t.tpState;
+          return '<div class="pair-row"><span class="'+sideCls+'">#'+t.id+' '+t.side+'</span><span>'+t.shares.toFixed(1)+'sh @ '+t.entryPrice.toFixed(2)+' — '+tpTag+' / SL '+t.slPrice.toFixed(2)+' / '+t.secsLeftToHold+'s left</span></div>';
         };
-        const posHtml = (pos.Up.shares > 0 || pos.Down.shares > 0)
-          ? '<div class="pos-box">' + posLine('Up') + posLine('Down') + '</div>'
-          : '<div class="pos-box">no filled shares yet this window</div>';
-        const restingHtml = (p.restingOrders && p.restingOrders.length)
-          ? '<div class="pair-row"><span class="pair-key">🪜 resting ladder buys</span><span style="flex:1;text-align:right">'+
-              p.restingOrders.map(o => o.shares.toFixed(0)+'sh@'+o.price.toFixed(2)+'('+o.side[0]+')').join(', ') +
+        const openHtml = openTrades.length
+          ? '<div class="pos-box">' + openTrades.map(tradeLine).join('') + '</div>'
+          : '<div class="pos-box">no open trades this window</div>';
+        const restingHtml = restingEntries.length
+          ? '<div class="pair-row"><span class="pair-key">🌀 resting fade entries</span><span style="flex:1;text-align:right">'+
+              restingEntries.map(o => '#'+o.id+' '+o.shares.toFixed(1)+'sh@'+o.entryPrice.toFixed(2)+'('+o.side[0]+')').join(', ') +
             '</span></div>'
           : '';
         const eqCurve = buildEquitySvg(p.equityCurve, 280, 34, null);
-        const hasPos = !!(pos.Up.shares > 0 || pos.Down.shares > 0);
+        const hasPos = openTrades.length > 0;
         return '<div class="pair-card '+(hasPos?'has-pos':'')+' '+(p.tradable?'':'untradable')+'">'+
           '<div class="pair-hdr"><div class="pair-sym">'+p.symbol+'</div><div class="pair-timer">'+(p.tradable?fmtSecs(p.secsToEnd):'loading…')+'</div></div>'+
           '<div class="pair-body">'+
             '<div class="pair-row"><span class="pair-key">Up ask/bid</span><span>'+(p.upAsk?.toFixed(2)||'—')+' / '+(p.upBid?.toFixed(2)||'—')+'</span></div>'+
             '<div class="pair-row"><span class="pair-key">Down ask/bid</span><span>'+(p.downAsk?.toFixed(2)||'—')+' / '+(p.downBid?.toFixed(2)||'—')+'</span></div>'+
-            '<div class="pair-row"><span class="pair-key">Phase</span><span>'+(p.phaseLabel||'—')+'</span><span class="pair-key">Ticks</span><span>'+p.ticksFired+'/'+p.ticksTotal+'</span></div>'+
-            '<div class="pair-row"><span class="pair-key">Bankroll</span><span>$'+p.bankroll.toFixed(2)+'</span><span class="pair-key">W/L</span><span>'+p.wins+'/'+p.losses+'</span></div>'+
+            '<div class="pair-row"><span class="pair-key">z(Up)</span><span>'+zFmt(p.upZ)+'</span><span class="pair-key">z(Down)</span><span>'+zFmt(p.downZ)+'</span></div>'+
+            '<div class="pair-row"><span class="pair-key">Samples</span><span>'+(p.sampleCount||0)+'</span><span class="pair-key">W/L</span><span>'+p.wins+'/'+p.losses+'</span></div>'+
+            '<div class="pair-row"><span class="pair-key">Bankroll</span><span>$'+p.bankroll.toFixed(2)+'</span><span class="pair-key">Compounding</span><span>x'+(p.compoundMultiplier||1).toFixed(2)+'</span></div>'+
             '<div class="pair-row"><span class="pair-key">Realized</span><span class="'+pClass(p.realizedPnl)+'">'+sgn(p.realizedPnl)+'</span><span class="pair-key">Unrealized</span><span class="'+pClass(p.unrealizedPnl)+'">'+sgn(p.unrealizedPnl)+'</span></div>'+
-            '<div class="pair-row"><span class="pair-key">Rebates</span><span class="pnl-pos">+$'+(p.rebatesEarned||0).toFixed(4)+'</span><span class="pair-key">Compounding</span><span>x'+(p.compoundMultiplier||1).toFixed(2)+'</span></div>'+
+            '<div class="pair-row"><span class="pair-key">Rebates</span><span class="pnl-pos">+$'+(p.rebatesEarned||0).toFixed(4)+'</span><span class="pair-key">Fees</span><span class="pnl-neg">-$'+(p.feesPaid||0).toFixed(4)+'</span></div>'+
             restingHtml +
-            posHtml +
+            openHtml +
             '<div class="spark-box"><svg viewBox="0 0 280 34" preserveAspectRatio="none">'+eqCurve+'</svg><div class="spark-label">Equity curve ($'+p.markValue.toFixed(2)+')</div></div>'+
           '</div></div>';
       }).join('');
