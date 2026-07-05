@@ -81,6 +81,19 @@ const FIXED_SHARES      = Number(process.env.FIXED_SHARES || 50);
 const BUY_INTERVAL_SECS = Number(process.env.BUY_INTERVAL_SECS || 15);
 const BUY_INTERVAL_MS   = BUY_INTERVAL_SECS * 1000;
 
+// Exposure caps — bounds how far the stacking (timer + fill-chase combined)
+// is allowed to pile up on ONE side before that side's outcome is known.
+// This is what actually protects capital: an uncapped pile that resolves
+// against you loses its FULL cost basis at window close (binary outcome).
+//   MAX_RESTING_BUYS_PER_SIDE — hard cap on simultaneous unfilled buys.
+//   MAX_SIDE_EXPOSURE_PCT     — cap on (resting buys + held positions) cost
+//                               on one side, as a fraction of that pair's
+//                               starting capital (a fixed reference point,
+//                               not the fluctuating live bankroll, so the
+//                               cap doesn't shrink as you spend).
+const MAX_RESTING_BUYS_PER_SIDE = Number(process.env.MAX_RESTING_BUYS_PER_SIDE || 4);
+const MAX_SIDE_EXPOSURE_PCT     = Number(process.env.MAX_SIDE_EXPOSURE_PCT || 0.25);
+
 // After this many seconds elapsed, if a side's current mid price is above
 // the threshold, that side's buy orders size up instead of using FIXED_SHARES.
 const HIGH_PRICE_AFTER_SECS = Number(process.env.HIGH_PRICE_AFTER_SECS || 150);
@@ -391,6 +404,15 @@ function reservedCashFor(p) {
   }
   return round2(total);
 }
+function reservedCashForSide(p, side) {
+  return round2(p.sides[side].restingBuys.reduce((sum, rb) => sum + rb.cost, 0));
+}
+function sideExposureCap(p) {
+  return round2(perPairCapital * MAX_SIDE_EXPOSURE_PCT);
+}
+function sideExposureNow(p, side) {
+  return round2(reservedCashForSide(p, side) + sideHeldCost(p.sides[side]));
+}
 
 // Places a fresh maker limit BUY on this side at (mid - BUY_OFFSET).
 // Called from two triggers, both of which stack freely (no "already have
@@ -405,6 +427,11 @@ async function placeBuyOrder(p, side, elapsed, trigger) {
   // TIMER-triggered buy is always ~BUY_INTERVAL_SECS after this one.
   s.lastBuyPlacedAt = Date.now();
 
+  if (s.restingBuys.length >= MAX_RESTING_BUYS_PER_SIDE) {
+    log(`⏭️  ${p.symbol} ${side}: [${trigger}] skip new buy — at max stacked orders (${s.restingBuys.length}/${MAX_RESTING_BUYS_PER_SIDE})`);
+    return;
+  }
+
   const ask = side === 'Up' ? p.upAsk : p.downAsk;
   const bid = side === 'Up' ? p.upBid : p.downBid;
   const mid = midPrice(ask, bid);
@@ -414,6 +441,13 @@ async function placeBuyOrder(p, side, elapsed, trigger) {
   const shares = sizedUp ? HIGH_PRICE_SHARES : FIXED_SHARES;
   const price = round2(Math.max(0.01, mid - BUY_OFFSET));
   const cost = round2(price * shares);
+
+  const cap = sideExposureCap(p);
+  const exposureNow = sideExposureNow(p, side);
+  if (round2(exposureNow + cost) > cap) {
+    log(`⏭️  ${p.symbol} ${side}: [${trigger}] skip new buy — at max side exposure ($${exposureNow.toFixed(2)}/$${cap.toFixed(2)}, ${MAX_SIDE_EXPOSURE_PCT*100}% of pair capital)`);
+    return;
+  }
 
   if (round2(reservedCashFor(p) + cost) > p.bankroll) {
     log(`⏭️  ${p.symbol} ${side}: [${trigger}] skip new buy — insufficient bankroll ($${p.bankroll.toFixed(2)}, need $${cost.toFixed(2)}, already reserved $${reservedCashFor(p).toFixed(2)})`);
@@ -429,7 +463,7 @@ async function placeBuyOrder(p, side, elapsed, trigger) {
   };
   s.restingBuys.push(rb);
   s.buysPlacedThisWindow++;
-  log(`📥 ${p.symbol} ${side}: [${trigger}] resting BUY ${shares}sh @ ${price.toFixed(2)} (mid ${mid.toFixed(2)} − ${BUY_OFFSET}) | ${s.restingBuys.length} resting buy(s) now open on this side${sizedUp ? ` [SIZED UP: mid > ${HIGH_PRICE_THRESHOLD} after ${HIGH_PRICE_AFTER_SECS}s]` : ''}`);
+  log(`📥 ${p.symbol} ${side}: [${trigger}] resting BUY ${shares}sh @ ${price.toFixed(2)} (mid ${mid.toFixed(2)} − ${BUY_OFFSET}) | ${s.restingBuys.length}/${MAX_RESTING_BUYS_PER_SIDE} resting, exposure $${round2(exposureNow+cost).toFixed(2)}/$${cap.toFixed(2)}${sizedUp ? ` [SIZED UP: mid > ${HIGH_PRICE_THRESHOLD} after ${HIGH_PRICE_AFTER_SECS}s]` : ''}`);
 }
 
 // ─────────────────────────────────────────
@@ -664,11 +698,18 @@ function sideSummary(p, side) {
     ? Math.max(0, Math.ceil((BUY_INTERVAL_MS - (Date.now() - s.lastBuyPlacedAt)) / 1000))
     : 0;
 
+  const exposureNow = sideExposureNow(p, side);
+  const exposureCap = sideExposureCap(p);
+
   return {
     restingBuys,               // full list: every currently-open stacked buy on this side
     restingBuyCount: restingBuys.length,
     restingBuyShares,
     restingBuyCost,
+    maxRestingBuys: MAX_RESTING_BUYS_PER_SIDE,
+    exposureNow,
+    exposureCap,
+    exposurePct: exposureCap > 0 ? round2((exposureNow / exposureCap) * 100) : 0,
     nextBuyInSecs,             // countdown to the next 15s TIMER-triggered buy
     buysPlacedThisWindow: s.buysPlacedThisWindow,
     heldShares: sideHeldShares(s),
@@ -739,6 +780,8 @@ function buildState() {
       buyOffset: BUY_OFFSET,
       tpOffset: TP_OFFSET,
       buyIntervalSecs: BUY_INTERVAL_SECS,
+      maxRestingBuysPerSide: MAX_RESTING_BUYS_PER_SIDE,
+      maxSideExposurePct: MAX_SIDE_EXPOSURE_PCT,
       entryCutoffSecs: ENTRY_CUTOFF_SECS,
       sweepSecs: SWEEP_SECS,
       finalSellPrice: FINAL_SELL_PRICE,
@@ -814,6 +857,7 @@ async function init(privateKey, emit, slogFn) {
   log(`⚙️  $${TOTAL_CAPITAL} demo capital across ${pairList.length} pair(s) (${pairList.join(', ')}) → $${perPairCapital.toFixed(2)}/pair`);
   log(`⚙️  Each side independently: buy @ mid − ${BUY_OFFSET}, TP @ entry + ${TP_OFFSET}, ${FIXED_SHARES}sh/order, stacks freely`);
   log(`⚙️  TIMER: every ${BUY_INTERVAL_SECS}s a fresh buy is placed on each side at mid − ${BUY_OFFSET} regardless of prior fill state (stacks on top of FILL-CHASE buys)`);
+  log(`⚙️  RISK CAP: max ${MAX_RESTING_BUYS_PER_SIDE} resting buys/side, and combined resting+held cost per side capped at ${(MAX_SIDE_EXPOSURE_PCT*100).toFixed(0)}% of that pair's starting capital`);
   log(`⚙️  After ${HIGH_PRICE_AFTER_SECS}s: if a side's mid > ${HIGH_PRICE_THRESHOLD}, that side's buy size increases to ${HIGH_PRICE_SHARES}sh`);
   log(`⚙️  No new entries after ${ENTRY_CUTOFF_SECS}s | at ${SWEEP_SECS}s: cancel unfilled buys/TPs, roll remainder into one @ ${FINAL_SELL_PRICE} sell per side`);
   log(`⚙️  Unfilled ${FINAL_SELL_PRICE} sell at window close → resolves to actual outcome`);
