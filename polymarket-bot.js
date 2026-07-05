@@ -341,6 +341,19 @@ async function loadPairWindow(p) {
   p.tradable = true;
   p.resolvedThisWindow = false;
 
+  // Critical: upAsk/upBid/downAsk/downBid are last-known prices for the
+  // OLD window's tokenIds. refreshPolyPrices() only refreshes them once a
+  // second on its own schedule — if we don't clear them here, the brand
+  // new (all-'pending') ladder above gets evaluated on this very tick
+  // against stale prices from the just-ended window. If that window's
+  // losing side had crashed toward $0 right before resolving, that stale
+  // near-zero value satisfies "ask ≤ rung price" for every rung at once,
+  // instantly and incorrectly "filling" the entire fresh ladder before a
+  // single real quote for the new market has ever been fetched.
+  // checkLadderBuyFills/checkLadderTpFills already safely no-op on null,
+  // so nulling here just makes them wait for the next real price tick.
+  p.upAsk = null; p.upBid = null; p.downAsk = null; p.downBid = null;
+
   // reset per-window trading state — safe now: anything still open from the
   // prior window was just resolved above, if there was a prior window at all.
   p.ladderGen++;
