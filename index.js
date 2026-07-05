@@ -33,7 +33,7 @@ app.get('/', (_, res) => {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>⚡ BTC Independent Side Scalper</title>
+<title>⚡ BTC Ladder Scalper</title>
 <style>
   :root {
     --bg: #ffffff; --bg2: #f5f7fa; --bg3: #edf0f4; --border: #d0d7e2;
@@ -111,7 +111,7 @@ app.get('/', (_, res) => {
 </head>
 <body>
   <div class="header">
-    <div class="logo">⚡ <span>BTC INDEPENDENT</span> SIDE SCALPER</div>
+    <div class="logo">⚡ <span>BTC LADDER</span> SCALPER</div>
     <div id="mode-badge" class="mode-badge ${DRY_RUN ? 'mode-dry' : 'mode-live'}">${DRY_RUN ? 'DRY RUN' : '🔴 LIVE'}</div>
   </div>
 
@@ -192,29 +192,36 @@ app.get('/', (_, res) => {
     return '<path d="'+fillPath+'" fill="'+color+'22" stroke="none"/>' + '<path d="'+linePath+'" fill="none" stroke="'+color+'" stroke-width="1.6"/>';
   }
 
+  function rungBadge(status) {
+    switch (status) {
+      case 'pending':   return { text: 'WAIT',  cls: '' };
+      case 'resting':   return { text: 'OPEN',  cls: 'pnl-pos' };
+      case 'filled':    return { text: 'HELD→TP', cls: '' };
+      case 'done':      return { text: 'TP ✓',  cls: 'pnl-pos' };
+      case 'cancelled': return { text: 'PAUSED', cls: 'pnl-neg' };
+      case 'resolved':  return { text: 'SETTLED', cls: '' };
+      default:          return { text: status || '—', cls: '' };
+    }
+  }
+
   function sideBox(label, cls, s) {
     if (!s) s = {};
-    const buys = s.restingBuys || [];
-    const buyListHtml = buys.length
-      ? '<div class="buy-list">'+buys.map(b => '<div class="buy-row"><span>'+b.ageSecs+'s ago</span><span>'+b.shares+'sh @ '+b.price.toFixed(2)+'</span></div>').join('')+'</div>'
+    const ladder = s.ladder || [];
+    const ladderHtml = ladder.length
+      ? '<div class="buy-list">'+ladder.map(r => {
+          const b = rungBadge(r.status);
+          const detail = r.status === 'filled' || r.status === 'done'
+            ? r.shares+'sh → tp '+(r.tpPrice!=null?r.tpPrice.toFixed(2):'—')
+            : (r.status === 'resting' ? r.shares+'sh resting' : '');
+          return '<div class="buy-row"><span>'+r.price.toFixed(2)+'</span><span class="'+b.cls+'">'+b.text+(detail?' — '+detail:'')+'</span></div>';
+        }).join('')+'</div>'
       : '';
-    const tpDetail = (s.pendingTpDetail||[]);
-    const tpListHtml = tpDetail.length
-      ? '<div class="buy-list">'+tpDetail.map(t => '<div class="buy-row"><span>TP</span><span>'+t.shares+'sh @ '+t.price.toFixed(2)+'</span></div>').join('')+'</div>'
-      : '';
-    const pct = s.exposurePct || 0;
-    const barCls = pct >= 100 ? 'exposure-full' : pct >= 70 ? 'exposure-warn' : 'exposure-ok';
     return '<div class="side-box '+cls+'">'+
       '<div class="side-title">'+label+'</div>'+
-      '<div class="side-row"><span>Resting Buys</span><span>'+(s.restingBuyCount||0)+'/'+(s.maxRestingBuys||'—')+' order(s), '+(s.restingBuyShares||0).toFixed(0)+'sh</span></div>'+
-      buyListHtml+
-      '<div class="side-row"><span>Side Exposure</span><span>$'+(s.exposureNow||0).toFixed(2)+' / $'+(s.exposureCap||0).toFixed(2)+' ('+pct.toFixed(0)+'%)</span></div>'+
-      '<div class="exposure-bar-wrap"><div class="exposure-bar '+barCls+'" style="width:'+Math.min(100,pct)+'%"></div></div>'+
-      '<div class="side-row"><span>Held Shares</span><span>'+(s.heldShares||0).toFixed(0)+'sh ($'+(s.heldCost||0).toFixed(2)+')</span></div>'+
-      '<div class="side-row"><span>Pending TP / Final</span><span>'+(s.pendingTp||0)+' / '+(s.pendingFinal||0)+'</span></div>'+
-      tpListHtml+
-      '<div class="side-row"><span>Buys Placed (window)</span><span>'+(s.buysPlacedThisWindow||0)+'</span></div>'+
-      '<div class="side-timer">⏱ next timer buy in '+(s.nextBuyInSecs!=null?s.nextBuyInSecs+'s':'—')+'</div>'+
+      '<div class="side-row"><span>Ladder</span><span>'+(s.pendingCount||0)+' wait / '+(s.restingCount||0)+' open / '+(s.openCount||0)+' held / '+(s.doneCount||0)+' tp✓ / '+(s.cancelledCount||0)+' paused</span></div>'+
+      ladderHtml+
+      '<div class="side-row"><span>Held (awaiting TP)</span><span>'+(s.heldShares||0).toFixed(0)+'sh ($'+(s.heldCost||0).toFixed(2)+')</span></div>'+
+      '<div class="side-row"><span>Resting Buy Cost</span><span>$'+(s.restingCost||0).toFixed(2)+'</span></div>'+
     '</div>';
   }
 
@@ -241,18 +248,12 @@ app.get('/', (_, res) => {
     const cfgGrid = document.getElementById('config-grid');
     if (cfgGrid) {
       const items = [
-        ['Buy Offset', '−'+(cfg.buyOffset??'—')],
-        ['TP Offset', '+'+(cfg.tpOffset??'—')],
-        ['Buy Timer', (cfg.buyIntervalSecs??'—')+'s'],
-        ['Max Stacked Buys', (cfg.maxRestingBuysPerSide??'—')+'/side'],
-        ['Max Side Exposure', ((cfg.maxSideExposurePct||0)*100).toFixed(0)+'% of pair cap'],
+        ['Ladder Range', (cfg.ladderMin!=null?cfg.ladderMin.toFixed(2):'—')+'–'+(cfg.ladderMax!=null?cfg.ladderMax.toFixed(2):'—')],
+        ['Ladder Step', cfg.ladderStep??'—'],
+        ['Rungs', (cfg.ladderPrices?cfg.ladderPrices.length:'—')],
+        ['TP Price (fixed)', cfg.tpPrice??'—'],
+        ['Shares / Rung', (cfg.fixedShares??'—')+'sh'],
         ['Entry Cutoff', (cfg.entryCutoffSecs??'—')+'s'],
-        ['Sweep At', (cfg.sweepSecs??'—')+'s'],
-        ['Final Sell Px', cfg.finalSellPrice??'—'],
-        ['Base Shares', (cfg.fixedShares??'—')+'sh'],
-        ['Sizeup After', (cfg.highPriceAfterSecs??'—')+'s'],
-        ['Sizeup Threshold', '>'+(cfg.highPriceThreshold??'—')],
-        ['Sizeup Shares', (cfg.highPriceShares??'—')+'sh'],
         ['Taker Fee Rate', ((cfg.cryptoTakerFeeRate||0)*100).toFixed(0)+'%'],
         ['Maker Rebate Share', ((cfg.cryptoMakerRebateShare||0)*100).toFixed(0)+'%'],
       ];
