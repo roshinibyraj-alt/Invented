@@ -154,8 +154,16 @@ function makerRebate(shares, price) {
 // ─────────────────────────────────────────
 //  Pair state
 // ─────────────────────────────────────────
-function freshSideState() {
+function freshSideState(gen) {
   return {
+    // Tags which "generation" (window) this ladder belongs to. Bumped every
+    // time a pair's sides are rebuilt (new window, or post-resolution
+    // clear). checkLadderBuyFills/checkLadderTpFills/tickLadder all verify
+    // this against p.ladderGen before touching a rung — this makes it
+    // structurally impossible (not just "shouldn't happen by status logic")
+    // for a stale ladder to ever be traded against a different window's
+    // live prices/tokenId, even if some future code path forgets to reset.
+    gen,
     // One entry per ladder price, built fresh every window. Each rung's
     // status is a one-way progression (except 'cancelled' can be reached
     // from either 'pending' or 'resting'):
@@ -221,8 +229,12 @@ function freshPairState(symbol) {
     rebatesEarned: 0,
     wins: 0, losses: 0,
 
+    // Bumped every time `sides` is rebuilt. See freshSideState()'s `gen`
+    // field for why this exists.
+    ladderGen: 0,
+
     // per-window trading state (reset in loadPairWindow)
-    sides: { Up: freshSideState(), Down: freshSideState() },
+    sides: { Up: freshSideState(0), Down: freshSideState(0) },
 
     // lifetime, NEVER reset — per-ladder-price edge tracking
     rungStats: freshRungStats(),
@@ -322,7 +334,8 @@ async function loadPairWindow(p) {
 
   // reset per-window trading state — safe now: anything still open from the
   // prior window was just resolved above, if there was a prior window at all.
-  p.sides = { Up: freshSideState(), Down: freshSideState() };
+  p.ladderGen++;
+  p.sides = { Up: freshSideState(p.ladderGen), Down: freshSideState(p.ladderGen) };
 
   log(`🔭 ${p.symbol} window loaded: ${slug} | ends ${new Date(p.windowEnd * 1000).toISOString().slice(11,19)}Z`);
 }
@@ -451,6 +464,10 @@ function reservedCashFor(p) {
 // alone — they ride their TP all the way to window resolution.
 async function tickLadder(p, side, elapsed) {
   const s = p.sides[side];
+  if (s.gen !== p.ladderGen) {
+    log(`❌ ${p.symbol} ${side}: stale ladder generation (${s.gen} vs ${p.ladderGen}) — refusing to place/cancel entries. This should never happen; please report.`);
+    return;
+  }
 
   if (elapsed >= ENTRY_CUTOFF_SECS) {
     if (s.cutoffDone) return;
@@ -489,6 +506,10 @@ async function tickLadder(p, side, elapsed) {
 // ─────────────────────────────────────────
 async function checkLadderBuyFills(p, side) {
   const s = p.sides[side];
+  if (s.gen !== p.ladderGen) {
+    log(`❌ ${p.symbol} ${side}: stale ladder generation (${s.gen} vs ${p.ladderGen}) — refusing to process fills. This should never happen; please report.`);
+    return;
+  }
   const ask = side === 'Up' ? p.upAsk : p.downAsk;
   if (ask == null) return;
   const tokenId = side === 'Up' ? p.upTokenId : p.downTokenId;
@@ -518,6 +539,10 @@ async function checkLadderBuyFills(p, side) {
 // ─────────────────────────────────────────
 async function checkLadderTpFills(p, side) {
   const s = p.sides[side];
+  if (s.gen !== p.ladderGen) {
+    log(`❌ ${p.symbol} ${side}: stale ladder generation (${s.gen} vs ${p.ladderGen}) — refusing to process TP fills. This should never happen; please report.`);
+    return;
+  }
   const bid = side === 'Up' ? p.upBid : p.downBid;
   if (bid == null) return;
 
@@ -622,7 +647,8 @@ async function resolvePairWindow(p) {
     // Resetting here means there's a clean, empty ladder the whole time
     // we're waiting to attach to the next window, with no gap where old
     // positions can leak forward.
-    p.sides = { Up: freshSideState(), Down: freshSideState() };
+    p.ladderGen++;
+    p.sides = { Up: freshSideState(p.ladderGen), Down: freshSideState(p.ladderGen) };
     p.tradable = false;
   } catch (e) {
     log(`❌ ${p.symbol}: resolvePairWindow error — ${e.message}. Will retry next tick; no positions marked resolved yet.`);
