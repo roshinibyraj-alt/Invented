@@ -64,6 +64,13 @@ app.get('/', (_, res) => {
   .section-hdr { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 2px; padding: 8px 0; display: flex; align-items: center; gap: 8px; }
   .section-hdr::after { content:''; flex:1; height:1px; background: var(--border); }
   .pair-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 10px; }
+  .edge-wrap { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; overflow-x: auto; }
+  .edge-table { width: 100%; border-collapse: collapse; font-size: 12px; white-space: nowrap; }
+  .edge-table th { text-align: right; color: var(--muted); font-weight: 500; padding: 4px 8px; border-bottom: 1px solid var(--border); }
+  .edge-table th:first-child, .edge-table td:first-child { text-align: left; }
+  .edge-table td { text-align: right; padding: 4px 8px; border-bottom: 1px solid var(--border); }
+  .edge-table tbody tr:last-child td { border-bottom: none; }
+  .edge-note { font-size: 11px; color: var(--muted); margin-top: 8px; line-height: 1.5; }
   .pair-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
   .pair-hdr { background: #0d1d30; padding: 8px 12px; display: flex; justify-content: space-between; align-items: center; }
   .pair-sym { font-size: 13px; font-weight: bold; color: #ddd; }
@@ -156,9 +163,26 @@ app.get('/', (_, res) => {
   </div>
 
   <div class="section">
+    <div class="section-hdr">Edge by Ladder Price (lifetime, both sides combined)</div>
+    <div class="edge-wrap">
+      <table class="edge-table">
+        <thead>
+          <tr>
+            <th>Price</th><th>Fills</th><th>Open</th><th>TP Wins</th><th>Res. Wins</th><th>Res. Losses</th>
+            <th>Win Rate</th><th>Avg P&amp;L/Fill</th><th>Total P&amp;L</th><th>ROI %</th>
+          </tr>
+        </thead>
+        <tbody id="edge-tbody"></tbody>
+      </table>
+      <div class="edge-note">Win Rate = (TP bounces + outright resolution wins) ÷ fills with a known outcome. ROI % = total P&amp;L ÷ total $ risked at that price. A real edge shows up as consistently positive ROI at a given price across a large sample — a handful of fills proves nothing either way.</div>
+    </div>
+  </div>
+
+  <div class="section">
     <div class="section-hdr">Active Metric Matrix</div>
     <div class="pair-grid" id="pair-grid"><div class="empty">Loading Live Asset Configurations...</div></div>
   </div>
+
 
   <div class="bottom-grid">
     <div>
@@ -296,6 +320,30 @@ app.get('/', (_, res) => {
         ['Maker Rebate Share', ((cfg.cryptoMakerRebateShare||0)*100).toFixed(0)+'%'],
       ];
       cfgGrid.innerHTML = items.map(([label,val]) => '<div class="cfg-item"><div class="cfg-label">'+label+'</div><div class="cfg-val">'+val+'</div></div>').join('');
+    }
+
+    const edgeBody = document.getElementById('edge-tbody');
+    if (s.rungStats && s.rungStats.length) {
+      edgeBody.innerHTML = s.rungStats.map(r => {
+        const fills = r.fills || 0;
+        const wrCls = r.winRate == null ? '' : (r.winRate >= 50 ? 'pnl-pos' : 'pnl-neg');
+        const pnlCls = pClass(r.totalPnl);
+        const roiCls = pClass(r.roiPct);
+        return '<tr>'+
+          '<td>'+r.price.toFixed(2)+'</td>'+
+          '<td>'+fills+'</td>'+
+          '<td>'+(r.openCount||0)+'</td>'+
+          '<td>'+(r.tpWins||0)+'</td>'+
+          '<td>'+(r.resolvedWins||0)+'</td>'+
+          '<td>'+(r.resolvedLosses||0)+'</td>'+
+          '<td class="'+wrCls+'">'+(r.winRate!=null?r.winRate.toFixed(1)+'%':'—')+'</td>'+
+          '<td class="'+pnlCls+'">'+(r.avgPnlPerFill!=null?sgn(r.avgPnlPerFill):'—')+'</td>'+
+          '<td class="'+pnlCls+'">'+sgn(r.totalPnl||0)+'</td>'+
+          '<td class="'+roiCls+'">'+(r.roiPct!=null?pctStr(r.roiPct):'—')+'</td>'+
+        '</tr>';
+      }).join('');
+    } else {
+      edgeBody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--muted);">No fills yet</td></tr>';
     }
 
     const grid = document.getElementById('pair-grid');
