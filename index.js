@@ -120,13 +120,26 @@ app.get('/', (_, res) => {
     <button id="resume-btn" class="resume">Resume</button>
   </div>
 
+  <div class="section-hdr" style="padding:14px 20px 0;">Capital &amp; P&amp;L</div>
   <div class="stats-row">
-    <div class="stat"><div class="stat-label">Total Asset Value</div><div class="stat-val" id="total-mark">$0.00</div></div>
+    <div class="stat"><div class="stat-label">Demo Capital (Start)</div><div class="stat-val" id="total-capital">$0.00</div></div>
+    <div class="stat"><div class="stat-label">Current Equity</div><div class="stat-val" id="total-mark">$0.00</div></div>
     <div class="stat"><div class="stat-label">Total Net P&amp;L</div><div class="stat-val" id="total-pnl">$0.00</div></div>
-    <div class="stat"><div class="stat-label">Account Bankroll</div><div class="stat-val" id="total-bankroll">$0.00</div></div>
-    <div class="stat"><div class="stat-label">Rebates Received</div><div class="stat-val pnl-pos" id="total-rebates">$0.00</div></div>
+    <div class="stat"><div class="stat-label">Return %</div><div class="stat-val" id="total-pnl-pct">0.00%</div></div>
+    <div class="stat"><div class="stat-label">Realized P&amp;L</div><div class="stat-val" id="total-realized">$0.00</div></div>
+    <div class="stat"><div class="stat-label">Unrealized P&amp;L</div><div class="stat-val" id="total-unrealized">$0.00</div></div>
+    <div class="stat"><div class="stat-label">Cash Bankroll</div><div class="stat-val" id="total-bankroll">$0.00</div></div>
+    <div class="stat"><div class="stat-label">Reserved in Orders</div><div class="stat-val" id="total-reserved">$0.00</div></div>
+  </div>
+  <div class="stats-row">
+    <div class="stat"><div class="stat-label">Win Rate</div><div class="stat-val" id="total-winrate">—</div></div>
+    <div class="stat"><div class="stat-label">Wins / Losses</div><div class="stat-val" id="total-wl">0 / 0</div></div>
+    <div class="stat"><div class="stat-label">Closed Trades</div><div class="stat-val" id="total-trades">0</div></div>
+    <div class="stat"><div class="stat-label">Rebates Earned</div><div class="stat-val pnl-pos" id="total-rebates">$0.00</div></div>
+    <div class="stat"><div class="stat-label">Fees Paid</div><div class="stat-val" id="total-fees">$0.00</div></div>
     <div class="stat"><div class="stat-label">System State</div><div class="stat-val" id="trading-flag">—</div></div>
     <div class="stat"><div class="stat-label">Uptime</div><div class="stat-val" id="uptime">0s</div></div>
+    <div class="stat"><div class="stat-label">Mode</div><div class="stat-val" id="mode-stat">—</div></div>
   </div>
 
   <div class="equity-wrap">
@@ -228,19 +241,44 @@ app.get('/', (_, res) => {
   document.getElementById('pause-btn').addEventListener('click', async () => { await fetch('/api/pause', { method: 'POST' }); });
   document.getElementById('resume-btn').addEventListener('click', async () => { await fetch('/api/resume', { method: 'POST' }); });
 
+  function pctStr(n) { n = n || 0; return (n >= 0 ? '+' : '') + n.toFixed(2) + '%'; }
+  function round2ish(n) { return Math.round((n||0) * 100) / 100; }
+
   socket.on('state', s => {
+    const totalCapital = s.totalCapital || 0;
+    const totalReserved = (s.pairStates || []).reduce((sum, p) => {
+      const up = p.sides?.Up?.restingCost || 0;
+      const down = p.sides?.Down?.restingCost || 0;
+      return sum + up + down;
+    }, 0);
+    const pnlPct = totalCapital > 0 ? (s.totalPnl / totalCapital) * 100 : 0;
+
+    document.getElementById('total-capital').textContent = '$'+totalCapital.toFixed(2);
     document.getElementById('total-mark').textContent = '$'+(s.totalMarkValue||0).toFixed(2);
     const pnlEl = document.getElementById('total-pnl');
     pnlEl.textContent = sgn(s.totalPnl); pnlEl.className = 'stat-val ' + pClass(s.totalPnl);
+    const pnlPctEl = document.getElementById('total-pnl-pct');
+    pnlPctEl.textContent = pctStr(pnlPct); pnlPctEl.className = 'stat-val ' + pClass(pnlPct);
+    const realEl = document.getElementById('total-realized');
+    realEl.textContent = sgn(s.totalRealizedPnl); realEl.className = 'stat-val ' + pClass(s.totalRealizedPnl);
+    const unrealEl = document.getElementById('total-unrealized');
+    unrealEl.textContent = sgn(s.totalUnrealizedPnl); unrealEl.className = 'stat-val ' + pClass(s.totalUnrealizedPnl);
     document.getElementById('total-bankroll').textContent = '$'+(s.totalBankroll||0).toFixed(2);
+    document.getElementById('total-reserved').textContent = '$'+totalReserved.toFixed(2);
+
+    document.getElementById('total-winrate').textContent = s.winRate!=null ? s.winRate.toFixed(1)+'%' : '—';
+    document.getElementById('total-wl').textContent = (s.totalWins||0)+' / '+(s.totalLosses||0);
+    document.getElementById('total-trades').textContent = (s.totalWins||0)+(s.totalLosses||0);
     document.getElementById('total-rebates').textContent = '$'+(s.totalRebatesEarned||0).toFixed(4);
+    document.getElementById('total-fees').textContent = '$'+(s.totalFeesPaid||0).toFixed(4);
     document.getElementById('uptime').textContent = fmt(s.uptime||0);
+    document.getElementById('mode-stat').textContent = s.dryRun ? 'DRY RUN' : 'LIVE';
     const tf = document.getElementById('trading-flag');
     tf.textContent = s.tradingEnabled ? 'ACTIVE' : 'PAUSED';
     tf.className = 'stat-val ' + (s.tradingEnabled ? 'pnl-pos' : 'pnl-neg');
 
     const eqVal = document.getElementById('equity-val');
-    eqVal.textContent = '$'+(s.totalMarkValue||0).toFixed(2);
+    eqVal.textContent = '$'+(s.totalMarkValue||0).toFixed(2)+' ('+pctStr(pnlPct)+')';
     eqVal.className = 'val ' + pClass(s.totalPnl);
     document.getElementById('equity-chart').innerHTML = buildEquitySvg(s.totalEquityCurve, 600, 90, s.totalCapital);
 
@@ -265,16 +303,24 @@ app.get('/', (_, res) => {
       grid.innerHTML = '<div class="empty">No Asset Data</div>';
     } else {
       grid.innerHTML = s.pairStates.map(p => {
+        const startCap = s.perPairCapital || 0;
+        const pPnl = round2ish((p.markValue||0) - startCap);
+        const pPnlPct = startCap > 0 ? (pPnl / startCap) * 100 : 0;
+        const pReserved = (p.sides?.Up?.restingCost||0) + (p.sides?.Down?.restingCost||0);
+        const pTrades = (p.wins||0) + (p.losses||0);
+        const pWinRate = pTrades > 0 ? ((p.wins||0) / pTrades * 100) : null;
         return '<div class="pair-card">'+
           '<div class="pair-hdr"><div class="pair-sym">'+p.symbol+' (5M Market)</div><div style="display:flex;gap:8px;align-items:center;"><div class="pair-phase">'+p.phase+'</div><div class="pair-timer">'+fmtSecs(p.secsToEnd)+'</div></div></div>'+
           '<div class="pair-body">'+
             '<div class="pair-row"><span class="pair-key">Up Ask/Bid</span><span>'+(p.upAsk?.toFixed(2)||'—')+' / '+(p.upBid?.toFixed(2)||'—')+'</span></div>'+
             '<div class="pair-row"><span class="pair-key">Down Ask/Bid</span><span>'+(p.downAsk?.toFixed(2)||'—')+' / '+(p.downBid?.toFixed(2)||'—')+'</span></div>'+
-            '<div class="pair-row"><span class="pair-key">Bankroll</span><span>$'+(p.bankroll||0).toFixed(2)+'</span></div>'+
-            '<div class="pair-row"><span class="pair-key">Mark Value</span><span>$'+(p.markValue||0).toFixed(2)+'</span></div>'+
-            '<div class="pair-row"><span class="pair-key">Realized / Unrealized P&amp;L</span><span class="'+pClass(p.realizedPnl)+'">'+sgn(p.realizedPnl)+'</span> / <span class="'+pClass(p.unrealizedPnl)+'">'+sgn(p.unrealizedPnl)+'</span></div>'+
+            '<div class="pair-row"><span class="pair-key">Starting Capital</span><span>$'+startCap.toFixed(2)+'</span></div>'+
+            '<div class="pair-row"><span class="pair-key">Current Equity</span><span>$'+(p.markValue||0).toFixed(2)+'</span></div>'+
+            '<div class="pair-row"><span class="pair-key">P&amp;L ($ / %)</span><span class="'+pClass(pPnl)+'">'+sgn(pPnl)+' ('+pctStr(pPnlPct)+')</span></div>'+
+            '<div class="pair-row"><span class="pair-key">Realized / Unrealized</span><span class="'+pClass(p.realizedPnl)+'">'+sgn(p.realizedPnl)+'</span> / <span class="'+pClass(p.unrealizedPnl)+'">'+sgn(p.unrealizedPnl)+'</span></div>'+
+            '<div class="pair-row"><span class="pair-key">Cash / Reserved</span><span>$'+(p.bankroll||0).toFixed(2)+' / $'+pReserved.toFixed(2)+'</span></div>'+
             '<div class="pair-row"><span class="pair-key">Fees / Rebates</span><span>$'+(p.feesPaid||0).toFixed(4)+' / $'+(p.rebatesEarned||0).toFixed(4)+'</span></div>'+
-            '<div class="pair-row"><span class="pair-key">Session Performance</span><span>Wins: '+p.wins+' / Losses: '+p.losses+'</span></div>'+
+            '<div class="pair-row"><span class="pair-key">Win Rate</span><span>'+(pWinRate!=null?pWinRate.toFixed(0)+'%':'—')+' ('+p.wins+'W / '+p.losses+'L)</span></div>'+
             '<div class="side-grid">'+sideBox('UP','up',p.sides?.Up)+sideBox('DOWN','down',p.sides?.Down)+'</div>'+
           '</div></div>';
       }).join('');
