@@ -89,6 +89,11 @@ app.get('/', (_, res) => {
   .cfg-item .cfg-label { font-size: 8px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
   .cfg-item .cfg-val { font-size: 12px; color: var(--gold); }
   .badge-count { display: inline-block; background: var(--purple); color: #fff; border-radius: 8px; padding: 0 6px; font-size: 9px; margin-left: 4px; }
+  .exposure-bar-wrap { margin-top: 4px; height: 6px; background: var(--bg3); border-radius: 4px; overflow: hidden; }
+  .exposure-bar { height: 100%; border-radius: 4px; transition: width .3s; }
+  .exposure-ok { background: var(--green); }
+  .exposure-warn { background: var(--yellow); }
+  .exposure-full { background: var(--red); }
   .bottom-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 0 20px 20px; }
   .tbl-wrap { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; max-height: 320px; overflow-y: auto; }
   .tbl { width: 100%; border-collapse: collapse; }
@@ -197,10 +202,14 @@ app.get('/', (_, res) => {
     const tpListHtml = tpDetail.length
       ? '<div class="buy-list">'+tpDetail.map(t => '<div class="buy-row"><span>TP</span><span>'+t.shares+'sh @ '+t.price.toFixed(2)+'</span></div>').join('')+'</div>'
       : '';
+    const pct = s.exposurePct || 0;
+    const barCls = pct >= 100 ? 'exposure-full' : pct >= 70 ? 'exposure-warn' : 'exposure-ok';
     return '<div class="side-box '+cls+'">'+
       '<div class="side-title">'+label+'</div>'+
-      '<div class="side-row"><span>Resting Buys</span><span>'+(s.restingBuyCount||0)+' order(s), '+(s.restingBuyShares||0).toFixed(0)+'sh ($'+(s.restingBuyCost||0).toFixed(2)+')</span></div>'+
+      '<div class="side-row"><span>Resting Buys</span><span>'+(s.restingBuyCount||0)+'/'+(s.maxRestingBuys||'—')+' order(s), '+(s.restingBuyShares||0).toFixed(0)+'sh</span></div>'+
       buyListHtml+
+      '<div class="side-row"><span>Side Exposure</span><span>$'+(s.exposureNow||0).toFixed(2)+' / $'+(s.exposureCap||0).toFixed(2)+' ('+pct.toFixed(0)+'%)</span></div>'+
+      '<div class="exposure-bar-wrap"><div class="exposure-bar '+barCls+'" style="width:'+Math.min(100,pct)+'%"></div></div>'+
       '<div class="side-row"><span>Held Shares</span><span>'+(s.heldShares||0).toFixed(0)+'sh ($'+(s.heldCost||0).toFixed(2)+')</span></div>'+
       '<div class="side-row"><span>Pending TP / Final</span><span>'+(s.pendingTp||0)+' / '+(s.pendingFinal||0)+'</span></div>'+
       tpListHtml+
@@ -235,6 +244,8 @@ app.get('/', (_, res) => {
         ['Buy Offset', '−'+(cfg.buyOffset??'—')],
         ['TP Offset', '+'+(cfg.tpOffset??'—')],
         ['Buy Timer', (cfg.buyIntervalSecs??'—')+'s'],
+        ['Max Stacked Buys', (cfg.maxRestingBuysPerSide??'—')+'/side'],
+        ['Max Side Exposure', ((cfg.maxSideExposurePct||0)*100).toFixed(0)+'% of pair cap'],
         ['Entry Cutoff', (cfg.entryCutoffSecs??'—')+'s'],
         ['Sweep At', (cfg.sweepSecs??'—')+'s'],
         ['Final Sell Px', cfg.finalSellPrice??'—'],
