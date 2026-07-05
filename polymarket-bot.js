@@ -611,6 +611,19 @@ async function resolvePairWindow(p) {
     // into the catch below and resolvedThisWindow stays false, so the very
     // next tick retries resolution instead of silently losing the position.
     p.resolvedThisWindow = true;
+
+    // Clear the ladder the instant resolution finishes — do NOT wait for
+    // loadPairWindow() to (maybe) find the next window's market first.
+    // Previously the ladder was only reset once the new window's event was
+    // successfully fetched from Gamma; if that fetch failed or wasn't
+    // indexed yet (common right at the window boundary), the just-resolved
+    // rungs — and their stale, already-expired windowEnd countdown — kept
+    // rendering in the dashboard as if they belonged to the live window.
+    // Resetting here means there's a clean, empty ladder the whole time
+    // we're waiting to attach to the next window, with no gap where old
+    // positions can leak forward.
+    p.sides = { Up: freshSideState(), Down: freshSideState() };
+    p.tradable = false;
   } catch (e) {
     log(`❌ ${p.symbol}: resolvePairWindow error — ${e.message}. Will retry next tick; no positions marked resolved yet.`);
   } finally {
