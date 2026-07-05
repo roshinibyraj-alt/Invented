@@ -301,6 +301,15 @@ async function loadPairWindow(p) {
   // pair just now becoming tradable again after a gap). Resolve first, always.
   if (p.upTokenId && !p.resolvedThisWindow) {
     await resolvePairWindow(p);
+    // Do NOT just trust that the call above finished the job. If it
+    // returned without actually completing (any error inside it — caught
+    // internally so this function never throws — leaves resolvedThisWindow
+    // false), we must NOT proceed to fetch the next window / reset sides.
+    // Bail out and retry entirely on the next tick instead.
+    if (!p.resolvedThisWindow) {
+      log(`⏳ ${p.symbol}: resolution not yet confirmed complete — deferring window load, will retry next tick instead of touching the ladder.`);
+      return;
+    }
   }
 
   // Only the very first load for this pair (process just started, nothing to
@@ -663,7 +672,10 @@ async function resolvePairWindow(p) {
 async function processPair(p) {
   const ws = currentWindowStart();
   if (p.windowStart === null || ws !== p.windowStart) {
-    if (p.windowStart !== null && !p.resolvedThisWindow) await resolvePairWindow(p);
+    if (p.windowStart !== null && !p.resolvedThisWindow) {
+      await resolvePairWindow(p);
+      if (!p.resolvedThisWindow) return; // not actually resolved yet — don't touch window state, retry next tick
+    }
     await loadPairWindow(p);
   }
   if (!p.tradable) return;
