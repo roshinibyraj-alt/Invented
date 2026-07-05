@@ -172,6 +172,36 @@ function freshSideState() {
   };
 }
 
+function freshRungStats() {
+  const stats = {};
+  for (const price of LADDER_PRICES) {
+    stats[price.toFixed(2)] = { fills: 0, tpWins: 0, resolvedWins: 0, resolvedLosses: 0, totalCost: 0, totalPnl: 0 };
+  }
+  return stats;
+}
+
+function recordRungFill(p, price, cost, entryRebate) {
+  const r = p.rungStats[price.toFixed(2)];
+  if (!r) return;
+  r.fills++;
+  r.totalCost = round2(r.totalCost + cost);
+  r.totalPnl = round2(r.totalPnl + (entryRebate || 0));
+}
+
+// Records the outcome of one closed rung (win via TP bounce, win via
+// resolution without ever bouncing, or loss via resolution) into this pair's
+// lifetime-persistent per-price-level edge stats. Never reset on window
+// rollover — this is what answers "is there an actual edge at this price".
+function recordRungOutcome(p, price, outcome, cost, pnl) {
+  const key = price.toFixed(2);
+  const r = p.rungStats[key];
+  if (!r) return;
+  if (outcome === 'tp') r.tpWins++;
+  else if (outcome === 'resolved-win') r.resolvedWins++;
+  else if (outcome === 'resolved-loss') r.resolvedLosses++;
+  r.totalPnl = round2(r.totalPnl + pnl);
+}
+
 function freshPairState(symbol) {
   return {
     symbol,
@@ -194,7 +224,11 @@ function freshPairState(symbol) {
     // per-window trading state (reset in loadPairWindow)
     sides: { Up: freshSideState(), Down: freshSideState() },
 
+    // lifetime, NEVER reset — per-ladder-price edge tracking
+    rungStats: freshRungStats(),
+
     resolvedThisWindow: true,
+    resolving: false,
     equityCurve: [{ t: Date.now(), equity: perPairCapital }],
   };
 }
@@ -230,8 +264,8 @@ function tokenIdForSide(market, side) {
   const tok = tokens.find(t => (t.outcome || '').toLowerCase() === want);
   return tok?.token_id || null;
 }
-async function fetchEventForWindow(symbol, windowStart) {
-  for (const offset of SLUG_OFFSET_FALLBACKS) {
+async function fetchEventForWindow(symbol, windowStart, offsets = SLUG_OFFSET_FALLBACKS) {
+  for (const offset of offsets) {
     const ws = windowStart + offset;
     if (ws + WINDOW_SECS <= nowSec()) continue;
     const slug = slugFor(symbol, ws);
@@ -249,7 +283,21 @@ async function loadPairWindow(p) {
   const ws = currentWindowStart();
   if (p.windowStart === ws && p.upTokenId) return;
 
-  const found = await fetchEventForWindow(p.symbol, ws);
+  // Hard safety net: NEVER wipe this pair's per-window ladder state while any
+  // rung is still 'filled' (bought, TP not yet hit) — no matter which code
+  // path got us here (normal rollover, a fallback slug re-match, or this
+  // pair just now becoming tradable again after a gap). Resolve first, always.
+  if (p.upTokenId && !p.resolvedThisWindow) {
+    await resolvePairWindow(p);
+  }
+
+  // Only the very first load for this pair (process just started, nothing to
+  // lose) is allowed to search neighboring windows. A normal rollover must
+  // match the exact expected next window (offset 0) — if it isn't indexed by
+  // Polymarket yet, we simply stay non-tradable for a tick or two rather than
+  // risk re-attaching to the window we just resolved and closed out.
+  const isBootstrap = p.windowStart === null;
+  const found = await fetchEventForWindow(p.symbol, ws, isBootstrap ? SLUG_OFFSET_FALLBACKS : [0]);
   if (!found) { p.tradable = false; return; }
   const { event, windowStart, slug } = found;
   const market = event.markets.find(m => { const q = qOf(m); return q.includes('up') || q.includes('down'); }) || event.markets[0];
@@ -272,7 +320,8 @@ async function loadPairWindow(p) {
   p.tradable = true;
   p.resolvedThisWindow = false;
 
-  // reset per-window trading state
+  // reset per-window trading state — safe now: anything still open from the
+  // prior window was just resolved above, if there was a prior window at all.
   p.sides = { Up: freshSideState(), Down: freshSideState() };
 
   log(`🔭 ${p.symbol} window loaded: ${slug} | ends ${new Date(p.windowEnd * 1000).toISOString().slice(11,19)}Z`);
@@ -456,6 +505,7 @@ async function checkLadderBuyFills(p, side) {
     const tpOrder = await placeLimitSell(tokenId, TP_PRICE, rung.shares);
     rung.tp = { price: TP_PRICE, orderId: tpOrder.id || tpOrder.orderId || null, status: 'resting' };
     rung.status = 'filled';
+    recordRungFill(p, rung.price, rung.cost, rebate);
 
     log(`🎯 ${p.symbol} ${side} ladder BUY filled ${rung.shares}sh @ ${rung.price.toFixed(2)} | cost=$${rung.cost.toFixed(2)} | rebate=+$${rebate.toFixed(4)} | TP resting @ ${TP_PRICE.toFixed(2)} | rung ${rung.price.toFixed(2)} retired for this window`);
     registerTrade(p, { side: 'BUY', outcome: side, reason: 'ENTRY', price: rung.price, shares: rung.shares, cost: rung.cost, rebate });
@@ -485,6 +535,7 @@ async function checkLadderTpFills(p, side) {
     p.wins++;
     rung.tp.status = 'filled';
     rung.status = 'done';
+    recordRungOutcome(p, rung.price, 'tp', rung.cost, profit);
 
     log(`💰 ${p.symbol} ${side} ladder TP filled ${rung.shares}sh @ ${rung.tp.price.toFixed(2)} (entry ${rung.price.toFixed(2)}) | rebate=+$${rebate.toFixed(4)} | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)} | rung ${rung.price.toFixed(2)} done — paused for rest of window`);
     registerTrade(p, { side: 'SELL', outcome: side, reason: 'TP', price: rung.tp.price, shares: rung.shares, profit, rebate });
@@ -513,46 +564,58 @@ async function determineWinningSide(p) {
 }
 
 async function resolvePairWindow(p) {
-  if (p.resolvedThisWindow) return;
-  p.resolvedThisWindow = true;
-
-  // Safety net only — the 280s cutoff should already have cleared these,
-  // but if a window ends unexpectedly early, don't leave dangling orders.
-  for (const side of ['Up', 'Down']) {
-    const s = p.sides[side];
-    for (const rung of s.ladder) {
-      if (rung.status === 'resting') { await cancelOrder(rung.orderId); rung.status = 'cancelled'; log(`🛑 ${p.symbol} ${side}: unfilled ladder BUY @ ${rung.price.toFixed(2)} cancelled at window close`); }
-      else if (rung.status === 'pending') { rung.status = 'cancelled'; }
-    }
-  }
-
-  const anyOpen = ['Up', 'Down'].some(side => p.sides[side].ladder.some(r => r.status === 'filled'));
-  if (!anyOpen) return;
-
-  const winner = await determineWinningSide(p);
-  for (const side of ['Up', 'Down']) {
-    const s = p.sides[side];
-    for (const rung of s.ladder) {
-      if (rung.status !== 'filled') continue;
-
-      if (rung.tp && rung.tp.status === 'resting') {
-        await cancelOrder(rung.tp.orderId);
-        log(`🛑 ${p.symbol} ${side}: unfilled TP @ ${rung.tp.price.toFixed(2)} (ladder ${rung.price.toFixed(2)}) cancelled at window close — resolving instead`);
+  if (p.resolvedThisWindow || p.resolving) return;
+  p.resolving = true;
+  try {
+    // Safety net only — the 280s cutoff should already have cleared these,
+    // but if a window ends unexpectedly early, don't leave dangling orders.
+    for (const side of ['Up', 'Down']) {
+      const s = p.sides[side];
+      for (const rung of s.ladder) {
+        if (rung.status === 'resting') { await cancelOrder(rung.orderId); rung.status = 'cancelled'; log(`🛑 ${p.symbol} ${side}: unfilled ladder BUY @ ${rung.price.toFixed(2)} cancelled at window close`); }
+        else if (rung.status === 'pending') { rung.status = 'cancelled'; }
       }
-
-      const won = winner === side;
-      const proceeds = won ? round2(rung.shares * 1) : 0;
-      const profit = round2(proceeds - rung.cost);
-      p.bankroll = round2(p.bankroll + proceeds);
-      p.realizedPnl = round2(p.realizedPnl + profit);
-      if (won) p.wins++; else p.losses++;
-      const icon = won ? '💰' : '💥';
-      log(`${icon} ${p.symbol} RESOLUTION ${side} ladder@${rung.price.toFixed(2)} ${rung.shares}sh cost=$${rung.cost.toFixed(2)} exit=$${won ? '1.00' : '0.00'}/sh | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
-      registerTrade(p, { side: 'SELL', outcome: side, reason: 'RESOLUTION', price: won ? 1 : 0, shares: rung.shares, profit });
-      rung.status = 'resolved';
     }
+
+    const anyOpen = ['Up', 'Down'].some(side => p.sides[side].ladder.some(r => r.status === 'filled'));
+    if (anyOpen) {
+      const winner = await determineWinningSide(p);
+      for (const side of ['Up', 'Down']) {
+        const s = p.sides[side];
+        for (const rung of s.ladder) {
+          if (rung.status !== 'filled') continue;
+
+          if (rung.tp && rung.tp.status === 'resting') {
+            await cancelOrder(rung.tp.orderId);
+            log(`🛑 ${p.symbol} ${side}: unfilled TP @ ${rung.tp.price.toFixed(2)} (ladder ${rung.price.toFixed(2)}) cancelled at window close — resolving instead`);
+          }
+
+          const won = winner === side;
+          const proceeds = won ? round2(rung.shares * 1) : 0;
+          const profit = round2(proceeds - rung.cost);
+          p.bankroll = round2(p.bankroll + proceeds);
+          p.realizedPnl = round2(p.realizedPnl + profit);
+          if (won) p.wins++; else p.losses++;
+          const icon = won ? '💰' : '💥';
+          log(`${icon} ${p.symbol} RESOLUTION ${side} ladder@${rung.price.toFixed(2)} ${rung.shares}sh cost=$${rung.cost.toFixed(2)} exit=$${won ? '1.00' : '0.00'}/sh | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
+          registerTrade(p, { side: 'SELL', outcome: side, reason: 'RESOLUTION', price: won ? 1 : 0, shares: rung.shares, profit });
+          rung.status = 'resolved';
+          recordRungOutcome(p, rung.price, won ? 'resolved-win' : 'resolved-loss', rung.cost, profit);
+        }
+      }
+      recordEquity(p);
+    }
+
+    // Only mark this window fully resolved once every open rung above has
+    // actually been settled — if anything threw partway through, we fall
+    // into the catch below and resolvedThisWindow stays false, so the very
+    // next tick retries resolution instead of silently losing the position.
+    p.resolvedThisWindow = true;
+  } catch (e) {
+    log(`❌ ${p.symbol}: resolvePairWindow error — ${e.message}. Will retry next tick; no positions marked resolved yet.`);
+  } finally {
+    p.resolving = false;
   }
-  recordEquity(p);
 }
 
 // ─────────────────────────────────────────
@@ -609,6 +672,51 @@ function sideSummary(p, side) {
     heldCost: sideHeldCost(s),
     cutoffDone: !!s.cutoffDone,
   };
+}
+
+// Combines every pair's lifetime per-price-level stats into one table, sorted
+// high-to-low price. This is the actual "is there an edge" answer: for each
+// rung price, how many times it filled, what fraction of those eventually
+// won (via TP bounce or outright resolution) vs lost outright at $0, and the
+// realized dollar expectancy per fill and per dollar risked at that price.
+function aggregateRungStats() {
+  const agg = {};
+  for (const price of LADDER_PRICES) {
+    agg[price.toFixed(2)] = { price, fills: 0, tpWins: 0, resolvedWins: 0, resolvedLosses: 0, totalCost: 0, totalPnl: 0 };
+  }
+  for (const p of Object.values(pairs)) {
+    for (const price of LADDER_PRICES) {
+      const key = price.toFixed(2);
+      const rs = p.rungStats[key];
+      if (!rs) continue;
+      const a = agg[key];
+      a.fills += rs.fills;
+      a.tpWins += rs.tpWins;
+      a.resolvedWins += rs.resolvedWins;
+      a.resolvedLosses += rs.resolvedLosses;
+      a.totalCost = round2(a.totalCost + rs.totalCost);
+      a.totalPnl = round2(a.totalPnl + rs.totalPnl);
+    }
+  }
+  return Object.values(agg)
+    .map(r => {
+      const closed = r.tpWins + r.resolvedWins + r.resolvedLosses; // fills with a known final outcome
+      const wins = r.tpWins + r.resolvedWins;
+      return {
+        price: r.price,
+        fills: r.fills,
+        openCount: Math.max(0, r.fills - closed), // still holding, outcome not yet known
+        tpWins: r.tpWins,
+        resolvedWins: r.resolvedWins,
+        resolvedLosses: r.resolvedLosses,
+        winRate: closed > 0 ? round2((wins / closed) * 100) : null,
+        totalCost: r.totalCost,
+        totalPnl: r.totalPnl,
+        avgPnlPerFill: r.fills > 0 ? round2(r.totalPnl / r.fills) : null,
+        roiPct: r.totalCost > 0 ? round2((r.totalPnl / r.totalCost) * 100) : null,
+      };
+    })
+    .sort((a, b) => b.price - a.price);
 }
 
 function buildState() {
@@ -679,6 +787,7 @@ function buildState() {
     },
     pairStates,
     totalEquityCurve,
+    rungStats: aggregateRungStats(),
     logs: logs.slice(-100),
     trades: trades.slice(-80).reverse(),
   };
