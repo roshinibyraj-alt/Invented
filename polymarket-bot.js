@@ -454,7 +454,7 @@ async function checkLadderBuyFills(p, side) {
     p.rebatesEarned = round2(p.rebatesEarned + rebate);
 
     const tpOrder = await placeLimitSell(tokenId, TP_PRICE, rung.shares);
-    rung.tp = { orderId: tpOrder.id || tpOrder.orderId || null, status: 'resting' };
+    rung.tp = { price: TP_PRICE, orderId: tpOrder.id || tpOrder.orderId || null, status: 'resting' };
     rung.status = 'filled';
 
     log(`🎯 ${p.symbol} ${side} ladder BUY filled ${rung.shares}sh @ ${rung.price.toFixed(2)} | cost=$${rung.cost.toFixed(2)} | rebate=+$${rebate.toFixed(4)} | TP resting @ ${TP_PRICE.toFixed(2)} | rung ${rung.price.toFixed(2)} retired for this window`);
