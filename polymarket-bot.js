@@ -2,29 +2,27 @@
 
 /**
  * ═══════════════════════════════════════════════════════════════
- *  POLYMARKET 5-MINUTE BTC UP/DOWN — 0.80 BREAKOUT + FLIP-RECOVERY CHAIN
+ *  POLYMARKET 5-MINUTE BTC UP/DOWN — 0.90 BREAKOUT → 0.80 ENTRY + FLIP-RECOVERY CHAIN
  * ═══════════════════════════════════════════════════════════════
  *
  *  Per window (WINDOW_SECS = 300s), each pair independently:
  *
- *  WAIT (0s → WAIT_SECS, default 240s): do nothing. No monitoring,
- *  no orders.
- *
- *  MONITOR (WAIT_SECS → window end): watch both sides' live price.
- *  The instant EITHER side's price rises above ENTRY_TRIGGER_PRICE
- *  (0.80), place ONE resting maker limit BUY at ENTRY_TRIGGER_PRICE
- *  on that side. Only one trigger per window — whichever side
- *  crosses first wins; the other side is ignored for the rest of
- *  the window. If price never crosses 0.80, no trade this window
- *  and the recovery chain is untouched.
+ *  MONITOR (from window open): watch both sides' live price. The
+ *  instant EITHER side's price hits BREAKOUT_TRIGGER_PRICE (0.90),
+ *  place ONE resting maker limit BUY at ENTRY_ORDER_PRICE (0.80) on
+ *  that side — below the trigger, hoping price retraces to fill.
+ *  Only one trigger per window — whichever side hits 0.90 first
+ *  wins; the other side is ignored for the rest of the window. If
+ *  price never hits 0.90, no trade this window and the recovery
+ *  chain is untouched.
  *
  *  ENTRY SIZING (computed at trigger time):
  *    - Chain level 0 (base): shares = (BASE_PCT_OF_BANKROLL × current
- *      live bankroll) / ENTRY_TRIGGER_PRICE.
+ *      live bankroll) / ENTRY_ORDER_PRICE.
  *    - Chain level 1 or 2 (recovery): target profit = cumulative
  *      chain loss so far + RECOVERY_PROFIT_ADD ($10). Shares sized
  *      so that hitting TP_PRICE (0.99) exactly nets that target
- *      profit: shares = target profit / (TP_PRICE − ENTRY_TRIGGER_PRICE).
+ *      profit: shares = target profit / (TP_PRICE − ENTRY_ORDER_PRICE).
  *
  *  ON FILL: rest a maker TP sell at TP_PRICE (0.99). Simultaneously
  *  monitor the position's bid — if it falls to SL_PRICE (0.40)
@@ -76,8 +74,8 @@ const DEFAULT_PAIRS = (process.env.CRYPTO_PAIRS || 'BTC')
   .split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
 
 // ── Breakout + flip-recovery strategy parameters ──
-const WAIT_SECS              = Number(process.env.WAIT_SECS || 240);          // do nothing until this many secs into window
-const ENTRY_TRIGGER_PRICE    = Number(process.env.ENTRY_TRIGGER_PRICE || 0.80); // trigger + resting buy price
+const BREAKOUT_TRIGGER_PRICE = Number(process.env.BREAKOUT_TRIGGER_PRICE || 0.90); // price that must be hit to arm the entry
+const ENTRY_ORDER_PRICE      = Number(process.env.ENTRY_ORDER_PRICE || 0.80);      // resting maker buy price once triggered
 const SL_PRICE               = Number(process.env.SL_PRICE || 0.40);          // force-sell (taker) trigger
 const TP_PRICE               = Number(process.env.TP_PRICE || 0.99);          // resting maker take-profit
 const BASE_PCT_OF_BANKROLL   = Number(process.env.BASE_PCT_OF_BANKROLL || 0.01); // 1% of live bankroll, base sizing only
@@ -361,48 +359,48 @@ function registerTrade(p, entry) {
 // ─────────────────────────────────────────
 function computeEntrySizing(p) {
   if (p.chainLevel === 0) {
-    const shares = round2((BASE_PCT_OF_BANKROLL * p.bankroll) / ENTRY_TRIGGER_PRICE);
+    const shares = round2((BASE_PCT_OF_BANKROLL * p.bankroll) / ENTRY_ORDER_PRICE);
     return { shares, targetProfit: null };
   }
   const targetProfit = round2(p.cumulativeLoss + RECOVERY_PROFIT_ADD);
-  const shares = round2(targetProfit / (TP_PRICE - ENTRY_TRIGGER_PRICE));
+  const shares = round2(targetProfit / (TP_PRICE - ENTRY_ORDER_PRICE));
   return { shares, targetProfit };
 }
 
 // ─────────────────────────────────────────
-//  Monitor phase: watch for the 0.80 breakout trigger
+//  Monitor: watch for the 0.90 breakout trigger from window start
 // ─────────────────────────────────────────
 async function maybeTriggerEntry(p) {
   for (const side of ['Up', 'Down']) {
     const ask = side === 'Up' ? p.upAsk : p.downAsk;
     const bid = side === 'Up' ? p.upBid : p.downBid;
     const price = ask ?? bid;
-    if (price == null || price <= ENTRY_TRIGGER_PRICE) continue;
+    if (price == null || price < BREAKOUT_TRIGGER_PRICE) continue;
 
     let { shares, targetProfit } = computeEntrySizing(p);
-    let cost = round2(shares * ENTRY_TRIGGER_PRICE);
+    let cost = round2(shares * ENTRY_ORDER_PRICE);
 
     if (shares <= 0 || cost <= 0) {
-      log(`⏭️  ${p.symbol} ${side}: breakout above ${ENTRY_TRIGGER_PRICE.toFixed(2)} (${price.toFixed(2)}) but computed size is zero — skipped`);
+      log(`⏭️  ${p.symbol} ${side}: hit ${BREAKOUT_TRIGGER_PRICE.toFixed(2)} (${price.toFixed(2)}) but computed size is zero — skipped`);
       return;
     }
     if (cost > p.bankroll) {
       log(`⚠️  ${p.symbol} ${side}: recovery size $${cost.toFixed(2)} exceeds bankroll $${p.bankroll.toFixed(2)} — capping to available cash (target profit will undershoot)`);
       cost = p.bankroll;
-      shares = round2(cost / ENTRY_TRIGGER_PRICE);
+      shares = round2(cost / ENTRY_ORDER_PRICE);
       if (shares <= 0) { log(`⏭️  ${p.symbol} ${side}: no bankroll left — skipped`); return; }
     }
 
     const tokenId = side === 'Up' ? p.upTokenId : p.downTokenId;
-    const order = await placeLimitBuy(tokenId, ENTRY_TRIGGER_PRICE, shares);
+    const order = await placeLimitBuy(tokenId, ENTRY_ORDER_PRICE, shares);
     p.entryOrder = {
       orderId: order.id || order.orderId || null,
-      side, price: ENTRY_TRIGGER_PRICE, shares, cost,
+      side, price: ENTRY_ORDER_PRICE, shares, cost,
       chainLevelAtEntry: p.chainLevel, targetProfit,
       placedAt: Date.now(),
     };
     const lvlTxt = p.chainLevel > 0 ? ` [RECOVERY L${p.chainLevel}, target profit $${targetProfit.toFixed(2)}]` : ' [BASE]';
-    log(`🎯 ${p.symbol} ${side}: price ${price.toFixed(2)} crossed ${ENTRY_TRIGGER_PRICE.toFixed(2)} — resting BUY ${shares.toFixed(2)}sh @ ${ENTRY_TRIGGER_PRICE.toFixed(2)}${lvlTxt}`);
+    log(`🎯 ${p.symbol} ${side}: price ${price.toFixed(2)} hit ${BREAKOUT_TRIGGER_PRICE.toFixed(2)} — resting BUY ${shares.toFixed(2)}sh @ ${ENTRY_ORDER_PRICE.toFixed(2)}${lvlTxt}`);
     return; // one trigger per window — first side wins, other side ignored
   }
 }
@@ -587,12 +585,10 @@ async function processPair(p) {
   if (!p.tradable) return;
   if (!tradingEnabled) return;
 
-  const elapsed = nowSec() - p.windowStart;
-
   await checkEntryOrderFill(p);
   await checkPositionExits(p);
 
-  if (elapsed >= WAIT_SECS && !p.entryOrder && !p.position && !p.windowOutcome) {
+  if (!p.entryOrder && !p.position && !p.windowOutcome) {
     await maybeTriggerEntry(p);
   }
 
@@ -616,7 +612,6 @@ function buildState() {
     if (p.tradable && elapsed != null) {
       if (p.position) phase = 'IN POSITION';
       else if (p.entryOrder) phase = 'ENTRY PENDING';
-      else if (elapsed < WAIT_SECS) phase = 'WAITING';
       else phase = 'MONITORING';
     }
 
@@ -628,7 +623,6 @@ function buildState() {
       windowEnd: p.windowEnd,
       elapsedSecs: elapsed != null ? Math.floor(elapsed) : null,
       secsToEnd: p.windowEnd ? Math.max(0, Math.floor(p.windowEnd - nowSec())) : null,
-      secsToMonitor: elapsed != null ? Math.max(0, Math.round(WAIT_SECS - elapsed)) : null,
       upAsk: p.upAsk, upBid: p.upBid, downAsk: p.downAsk, downBid: p.downBid,
       phase,
       bankroll: p.bankroll,
@@ -683,8 +677,8 @@ function buildState() {
     winRate: (totalWins + totalLosses) > 0 ? round2((totalWins / (totalWins + totalLosses)) * 100) : null,
     uptime: Math.floor((Date.now() - startTime) / 1000),
     config: {
-      waitSecs: WAIT_SECS,
-      entryTriggerPrice: ENTRY_TRIGGER_PRICE,
+      breakoutTriggerPrice: BREAKOUT_TRIGGER_PRICE,
+      entryOrderPrice: ENTRY_ORDER_PRICE,
       slPrice: SL_PRICE,
       tpPrice: TP_PRICE,
       basePctOfBankroll: BASE_PCT_OF_BANKROLL,
@@ -754,9 +748,9 @@ function getStatus() { return { ok: true, ...buildState() }; }
 async function init(privateKey, emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
-  log(`🚀 5-Minute BTC Up/Down — 0.80 Breakout + Flip-Recovery Chain`);
+  log(`🚀 5-Minute BTC Up/Down — 0.90 Breakout → 0.80 Entry + Flip-Recovery Chain`);
   log(`⚙️  $${TOTAL_CAPITAL} demo capital across ${pairList.length} pair(s) (${pairList.join(', ')}) → $${perPairCapital.toFixed(2)}/pair`);
-  log(`⚙️  Wait ${WAIT_SECS}s, then monitor both sides. First side to cross ${ENTRY_TRIGGER_PRICE.toFixed(2)} gets a resting BUY @ ${ENTRY_TRIGGER_PRICE.toFixed(2)}`);
+  log(`⚙️  Monitor both sides from window open. First side to hit ${BREAKOUT_TRIGGER_PRICE.toFixed(2)} gets a resting BUY @ ${ENTRY_ORDER_PRICE.toFixed(2)}`);
   log(`⚙️  Base size = ${(BASE_PCT_OF_BANKROLL * 100).toFixed(1)}% of live bankroll | TP resting @ ${TP_PRICE.toFixed(2)} | SL forced (taker) @ ${SL_PRICE.toFixed(2)}`);
   log(`⚙️  On SL/loss: next window sizes to recover cumulative loss + $${RECOVERY_PROFIT_ADD.toFixed(2)} at TP. Max ${MAX_CHAIN_LEVEL} recovery attempts, then reset to base`);
   log(`⚙️  If neither TP nor SL fires by window end, position resolves to actual outcome and still feeds the chain`);
