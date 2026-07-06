@@ -24,12 +24,23 @@
  *  counter-bet-origin), two things happen:
  *    1. A TP sell is rested at (entry price + TP_OFFSET) for that
  *       fill — TPs are always allowed, even past the entry cutoff.
- *    2. If still before ENTRY_CUTOFF_SECS, a counter-bet buy is
+ *    2. If still before FLATTEN_SECS, a counter-bet buy is
  *       immediately placed on the OPPOSITE side at (that side's mid
  *       − BUY_OFFSET), same entry-zone check, same 8s expiry rule.
  *       Because both sides run the identical pattern, a counter-bet
  *       that itself fills triggers a counter-bet back — this can
  *       ping-pong between sides.
+ *
+ *  AT 200s (FLATTEN_SECS) — HARD STOP: no more trades at all this
+ *  window, on either side. Every resting buy (ticker or counter) and
+ *  every resting TP is cancelled, and any shares still held are
+ *  cashed out immediately at the current bid (a real taker sell,
+ *  crossing the book, not a resting maker order) so the pair goes
+ *  flat right away and stays flat for the rest of the window. Runs
+ *  once per window; nothing further happens until the next window
+ *  loads. This fires well before ENTRY_CUTOFF_SECS/SWEEP_SECS below,
+ *  which are effectively no-ops now since there's nothing left for
+ *  them to act on by the time they'd run.
  *
  *  AT 280s (ENTRY_CUTOFF_SECS): no more NEW buy placements (neither
  *  ticker nor counter-bet) on either side. Existing resting orders
@@ -41,11 +52,13 @@
  *  limit SELL at 0.99 for the combined size.
  *
  *  RESOLUTION: if the 0.99 sell (or anything else) still hasn't
- *  filled by window end, whatever shares remain resolve against
- *  Polymarket's actual outcome (unchanged logic).
+ *  filled by RESOLUTION_BUFFER_S (8s) after window end, whatever
+ *  shares remain resolve against Polymarket's actual outcome.
  *
- *  FEES: every buy, every TP sell, and the 285s 0.99 sell are all
- *  genuine maker orders (fee-free + rebate, Fee Structure V2).
+ *  FEES: every ticker/counter buy and every TP sell are genuine maker
+ *  orders (fee-free + rebate, Fee Structure V2). The FLATTEN_SECS
+ *  cash-out is the one exception — it crosses the book on purpose to
+ *  guarantee an immediate flat, so it pays the taker fee.
  * ═══════════════════════════════════════════════════════════════
  */
 
@@ -79,6 +92,13 @@ const ENTRY_CUTOFF_SECS      = Number(process.env.ENTRY_CUTOFF_SECS || 280);    
 const SWEEP_SECS             = Number(process.env.SWEEP_SECS || 285);           // cancel unfilled + rest final sell
 const FINAL_SELL_PRICE       = Number(process.env.FINAL_SELL_PRICE || 0.99);
 const FIXED_SHARES           = Number(process.env.FIXED_SHARES || 50);
+
+// Hard stop, earlier than ENTRY_CUTOFF_SECS/SWEEP_SECS: at this many seconds
+// elapsed, ALL trading stops for the window — no more ticker or counter-bet
+// buys — and any resting buys/TPs are cancelled and any held shares are
+// cashed out immediately (taker sell at current bid) so the book goes flat
+// and stays flat until the next window loads.
+const FLATTEN_SECS           = Number(process.env.FLATTEN_SECS || 200);
 
 // ── Fees & maker rebates (Polymarket Fee Structure V2, crypto category) ──
 const CRYPTO_TAKER_FEE_RATE     = Number(process.env.CRYPTO_TAKER_FEE_RATE || 0.07);
@@ -133,6 +153,12 @@ async function placeLimitSell(tokenId, price, shares) {
   if (!DRY_RUN && trader) return await trader.limitSell(tokenId, shares, price);
   return { id: `dry-sell-${Date.now()}-${Math.random().toString(36).slice(2, 7)}` };
 }
+async function placeMarketSell(tokenId, price, shares) {
+  // Used only by the FLATTEN_SECS cash-out: crosses the book at the current
+  // bid to close immediately (taker), rather than resting above it like a TP.
+  if (!DRY_RUN && trader) return await trader.limitSell(tokenId, shares, price);
+  return { id: `dry-flatten-${Date.now()}-${Math.random().toString(36).slice(2, 7)}` };
+}
 async function cancelOrder(orderId) {
   if (!DRY_RUN && trader && orderId) {
     try { await trader.cancelOrder(orderId); }
@@ -180,6 +206,7 @@ function freshPairState(symbol) {
     wins: 0, losses: 0,
 
     // per-window trading state (reset in loadPairWindow)
+    flattenDone: false,
     sweepDone: false,
     sides: { Up: freshSideState(), Down: freshSideState() },
 
@@ -262,6 +289,7 @@ async function loadPairWindow(p) {
   p.resolvedThisWindow = false;
 
   // reset per-window trading state
+  p.flattenDone = false;
   p.sweepDone = false;
   p.sides = { Up: freshSideState(), Down: freshSideState() };
 
@@ -420,7 +448,7 @@ async function placeBuyOrder(p, side, elapsed, kind) {
 }
 
 async function maybeFireBuyTick(p, side, elapsed) {
-  if (elapsed >= ENTRY_CUTOFF_SECS) return;
+  if (elapsed >= FLATTEN_SECS) return;
   const s = p.sides[side];
   const nextAt = s.buyTicksFired * BUY_TICK_INTERVAL_SECS;
   if (elapsed < nextAt) return;
@@ -464,7 +492,7 @@ async function checkBuyFillsAndExpiry(p, side, elapsed) {
       registerTrade(p, { side: 'BUY', outcome: side, reason: `ENTRY-${order.kind}`, price: order.price, shares: order.shares, cost: order.cost, rebate });
       recordEquity(p);
 
-      if (elapsed < ENTRY_CUTOFF_SECS) {
+      if (elapsed < FLATTEN_SECS) {
         await placeBuyOrder(p, oppositeSide(side), elapsed, 'COUNTER');
       }
       continue; // filled order dropped, not pushed back
@@ -513,6 +541,63 @@ async function checkExitFills(p, side) {
     // filled position dropped — not pushed back into stillOpen
   }
   s.positions = stillOpen;
+}
+
+// ─────────────────────────────────────────
+//  FLATTEN_SECS hard stop (default 200s): no more trades this window at all —
+//  cancel every resting buy and every resting TP, and cash out any held
+//  shares immediately (taker sell at current bid) so the pair is flat and
+//  stays flat until the next window loads. Runs once per window.
+// ─────────────────────────────────────────
+async function maybeFlatten(p, elapsed) {
+  if (p.flattenDone || elapsed < FLATTEN_SECS) return;
+  p.flattenDone = true;
+
+  for (const side of ['Up', 'Down']) {
+    const s = p.sides[side];
+
+    if (s.buyOrders.length) {
+      for (const order of s.buyOrders) {
+        await cancelOrder(order.orderId);
+        log(`🛑 ${p.symbol} ${side}: unfilled ${order.kind} buy ${order.shares}sh @ ${order.price.toFixed(2)} cancelled — FLATTEN at ${FLATTEN_SECS}s`);
+      }
+      s.buyOrders = [];
+    }
+
+    if (!s.positions.length) continue;
+
+    const bid = side === 'Up' ? p.upBid : p.downBid;
+    const tokenId = side === 'Up' ? p.upTokenId : p.downTokenId;
+
+    for (const pos of s.positions) {
+      if (pos.exit.status === 'resting') await cancelOrder(pos.exit.orderId);
+
+      const haveQuote = bid != null;
+      const exitPrice = haveQuote ? bid : round2(pos.cost / pos.shares);
+      if (!haveQuote) {
+        log(`⚠️  ${p.symbol} ${side}: no live bid at FLATTEN — closing ${pos.shares}sh at cost basis ${exitPrice.toFixed(2)} (breakeven)`);
+      } else {
+        await placeMarketSell(tokenId, exitPrice, pos.shares);
+      }
+
+      const proceeds = round2(exitPrice * pos.shares);
+      const fee = haveQuote ? takerFee(pos.shares, exitPrice) : 0;
+      const net = round2(proceeds - fee);
+      p.bankroll = round2(p.bankroll + net);
+      const profit = round2(net - pos.cost);
+      p.realizedPnl = round2(p.realizedPnl + profit);
+      p.feesPaid = round2(p.feesPaid + fee);
+      s.realizedPnl = round2(s.realizedPnl + profit);
+      if (profit >= 0) { p.wins++; s.wins++; } else { p.losses++; s.losses++; }
+
+      log(`🏳️  ${p.symbol} ${side}: FLATTEN cashed out ${pos.shares}sh @ ${exitPrice.toFixed(2)} (entry ${pos.entryPrice.toFixed(2)}) | fee=-$${fee.toFixed(4)} | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
+      registerTrade(p, { side: 'SELL', outcome: side, reason: 'FLATTEN', price: exitPrice, shares: pos.shares, profit, fee });
+    }
+    s.positions = [];
+  }
+
+  recordEquity(p);
+  log(`🏳️  ${p.symbol}: FLATTENED at ${FLATTEN_SECS}s — no more trades this window, flat until next window`);
 }
 
 // ─────────────────────────────────────────
@@ -653,13 +738,14 @@ async function processPair(p) {
     await maybeFireBuyTick(p, side, elapsed);
   }
 
+  await maybeFlatten(p, elapsed);
   await maybeSweep(p, elapsed);
 }
 
 // ─────────────────────────────────────────
 //  UI state — full detail per side for dashboard observation
 // ─────────────────────────────────────────
-const MAX_TICKS = Math.max(1, Math.ceil(ENTRY_CUTOFF_SECS / BUY_TICK_INTERVAL_SECS));
+const MAX_TICKS = Math.max(1, Math.ceil(FLATTEN_SECS / BUY_TICK_INTERVAL_SECS));
 
 function sideSummary(p, side, elapsed) {
   const s = p.sides[side];
@@ -678,7 +764,7 @@ function sideSummary(p, side, elapsed) {
     .filter(pos => pos.exit.status === 'resting' && pos.exit.kind === 'FINAL')
     .map(pos => ({ shares: pos.shares, price: pos.exit.price }));
 
-  const entriesOpen = elapsed != null && elapsed < ENTRY_CUTOFF_SECS;
+  const entriesOpen = elapsed != null && elapsed < FLATTEN_SECS;
   const nextTickInSecs = entriesOpen
     ? Math.max(0, Math.round((s.buyTicksFired * BUY_TICK_INTERVAL_SECS) - elapsed))
     : null;
@@ -708,7 +794,10 @@ function buildState() {
     const elapsed = p.windowStart != null ? Math.max(0, nowSec() - p.windowStart) : null;
     let phase = '—';
     if (p.tradable && elapsed != null) {
-      phase = elapsed >= SWEEP_SECS ? 'SWEPT / RESOLVING' : (elapsed >= ENTRY_CUTOFF_SECS ? 'NO NEW ENTRIES' : 'ENTRIES OPEN');
+      phase = elapsed >= SWEEP_SECS ? 'SWEPT / RESOLVING'
+        : elapsed >= FLATTEN_SECS ? 'FLAT'
+        : elapsed >= ENTRY_CUTOFF_SECS ? 'NO NEW ENTRIES'
+        : 'ENTRIES OPEN';
     }
     return {
       symbol: p.symbol,
@@ -769,6 +858,7 @@ function buildState() {
       sweepSecs: SWEEP_SECS,
       finalSellPrice: FINAL_SELL_PRICE,
       fixedShares: FIXED_SHARES,
+      flattenSecs: FLATTEN_SECS,
       cryptoTakerFeeRate: CRYPTO_TAKER_FEE_RATE,
       cryptoMakerRebateShare: CRYPTO_MAKER_REBATE_SHARE,
     },
@@ -838,6 +928,7 @@ async function init(privateKey, emit, slogFn) {
   log(`⚙️  Each side independently, every ${BUY_TICK_INTERVAL_SECS}s: new buy @ mid − ${BUY_OFFSET}, ${FIXED_SHARES}sh, only if mid in [${ENTRY_ZONE_MIN}-${ENTRY_ZONE_MAX}]`);
   log(`⚙️  Unfilled buys cancelled after ${CANCEL_TIMEOUT_SECS}s | any fill rests a TP @ entry + ${TP_OFFSET} and fires a counter-bet on the opposite side`);
   log(`⚙️  No new entries after ${ENTRY_CUTOFF_SECS}s | at ${SWEEP_SECS}s: cancel unfilled buys/TPs, roll remainder into one @ ${FINAL_SELL_PRICE} sell per side`);
+  log(`⚙️  HARD STOP at ${FLATTEN_SECS}s: no more trades this window — cancel all resting buys/TPs and cash out any held shares immediately, flat until next window`);
   log(`⚙️  Unfilled ${FINAL_SELL_PRICE} sell at window close → resolves to actual outcome`);
   log(`⚙️  fees: all buys + TP + final sell are maker (0 fee, +${(CRYPTO_MAKER_REBATE_SHARE*100).toFixed(0)}% rebate) | no taker orders in this strategy`);
   log(`${DRY_RUN ? '⚠️  DRY RUN — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
