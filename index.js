@@ -114,6 +114,26 @@ app.get('/', (_, res) => {
   .equity-hdr .title { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; }
   .equity-hdr .val { font-size: 13px; }
   .equity-svg { width: 100%; height: 90px; display: block; }
+  .session-banner { margin: 14px 20px 0; border-radius: 12px; padding: 14px 18px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; border: 1px solid var(--border); }
+  .session-banner.weekend { background: linear-gradient(135deg,#e6f7ff,#d9f1ff); border-color: #0099cc55; }
+  .session-banner.weekday { background: linear-gradient(135deg,#f3ecff,#ece0ff); border-color: #7c3aed55; }
+  .session-left { display: flex; align-items: center; gap: 12px; }
+  .session-icon { font-size: 26px; line-height: 1; }
+  .session-title { font-size: 14px; font-weight: bold; letter-spacing: .5px; }
+  .session-title.weekend { color: var(--cyan); }
+  .session-title.weekday { color: var(--purple); }
+  .session-sub { font-size: 10px; color: var(--muted); margin-top: 3px; font-weight: normal; }
+  .session-right { text-align: right; }
+  .session-countdown-label { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; }
+  .session-countdown { font-size: 20px; font-weight: bold; font-variant-numeric: tabular-nums; }
+  .session-countdown.weekend { color: var(--cyan); }
+  .session-countdown.weekday { color: var(--purple); }
+  .pair-mode-chip { font-size: 8px; padding: 2px 7px; border-radius: 10px; font-weight: bold; letter-spacing: .5px; }
+  .pair-mode-chip.weekend { background: #0099cc33; color: var(--cyan); }
+  .pair-mode-chip.weekday { background: #7c3aed33; color: var(--purple); }
+  .side-box.inactive { opacity: .5; display: flex; align-items: center; justify-content: center; text-align: center; min-height: 78px; }
+  .side-box.inactive .side-inactive-msg { font-size: 10px; color: var(--muted); line-height: 1.7; letter-spacing: .3px; }
+  .side-box.inactive .side-inactive-msg .small { font-size: 8.5px; display: block; }
 </style>
 </head>
 <body>
@@ -125,6 +145,20 @@ app.get('/', (_, res) => {
   <div class="toolbar">
     <button id="pause-btn" class="pause">Pause</button>
     <button id="resume-btn" class="resume">Resume</button>
+  </div>
+
+  <div class="session-banner weekend" id="session-banner">
+    <div class="session-left">
+      <div class="session-icon" id="session-icon">📅</div>
+      <div>
+        <div class="session-title weekend" id="session-title">Loading schedule…</div>
+        <div class="session-sub" id="session-sub">&nbsp;</div>
+      </div>
+    </div>
+    <div class="session-right">
+      <div class="session-countdown-label" id="session-countdown-label">—</div>
+      <div class="session-countdown weekend" id="session-countdown">—:—:—</div>
+    </div>
   </div>
 
   <div class="section-hdr" style="padding:14px 20px 0;">Capital &amp; P&amp;L</div>
@@ -241,8 +275,13 @@ app.get('/', (_, res) => {
     }
   }
 
-  function sideBox(label, cls, s) {
+  function sideBox(label, cls, s, isActive) {
     if (!s) s = {};
+    if (isActive === false) {
+      return '<div class="side-box '+cls+' inactive">'+
+        '<div class="side-inactive-msg">'+label+' — FILTERED OUT<span class="small">Inactive this window</span></div>'+
+      '</div>';
+    }
     const ladder = s.ladder || [];
     const ladderHtml = ladder.length
       ? '<div class="buy-list">'+ladder.map(r => {
@@ -268,6 +307,38 @@ app.get('/', (_, res) => {
   function pctStr(n) { n = n || 0; return (n >= 0 ? '+' : '') + n.toFixed(2) + '%'; }
   function round2ish(n) { return Math.round((n||0) * 100) / 100; }
 
+  // ── Session banner (weekend vs weekday-filter) ──
+  let schedule = null;      // { mode, nextBoundaryMs } — refreshed from each 'state' event, ticked locally every second
+  let configCache = {};     // last-seen s.config, so renderSession() can show the right TP prices between socket events
+  function fmtCountdown(ms) {
+    if (ms == null || ms < 0) ms = 0;
+    const totalSec = Math.floor(ms / 1000);
+    const d = Math.floor(totalSec / 86400);
+    const h = Math.floor((totalSec % 86400) / 3600);
+    const m = Math.floor((totalSec % 3600) / 60);
+    const sec = totalSec % 60;
+    if (d > 0) return d+'d '+String(h).padStart(2,'0')+'h '+String(m).padStart(2,'0')+'m';
+    return String(h).padStart(2,'0')+':'+String(m).padStart(2,'0')+':'+String(sec).padStart(2,'0');
+  }
+  function renderSession() {
+    if (!schedule) return;
+    const isWeekend = schedule.mode === 'weekend';
+    const banner = document.getElementById('session-banner');
+    const title = document.getElementById('session-title');
+    const countdown = document.getElementById('session-countdown');
+    banner.className = 'session-banner ' + (isWeekend ? 'weekend' : 'weekday');
+    title.className = 'session-title ' + (isWeekend ? 'weekend' : 'weekday');
+    countdown.className = 'session-countdown ' + (isWeekend ? 'weekend' : 'weekday');
+    document.getElementById('session-icon').textContent = isWeekend ? '📅' : '🎯';
+    title.textContent = isWeekend ? 'WEEKEND — FULL LADDER' : 'WEEKDAY — DIRECTIONAL FILTER';
+    document.getElementById('session-sub').textContent = isWeekend
+      ? 'Both sides trade normally, TP $'+(configCache.tpPrice!=null?configCache.tpPrice.toFixed(2):'0.70')
+      : "Only the previous window's winning side trades next window, TP $"+(configCache.weekdayFilterTpPrice!=null?configCache.weekdayFilterTpPrice.toFixed(2):'0.99');
+    document.getElementById('session-countdown-label').textContent = isWeekend ? 'Weekday filter resumes in' : 'Weekend mode resumes in';
+    countdown.textContent = fmtCountdown(schedule.nextBoundaryMs - Date.now());
+  }
+  setInterval(renderSession, 1000);
+
   socket.on('state', s => {
     const totalCapital = s.totalCapital || 0;
     const totalReserved = (s.pairStates || []).reduce((sum, p) => {
@@ -276,6 +347,10 @@ app.get('/', (_, res) => {
       return sum + up + down;
     }, 0);
     const pnlPct = totalCapital > 0 ? (s.totalPnl / totalCapital) * 100 : 0;
+
+    schedule = s.schedule || schedule;
+    configCache = s.config || configCache;
+    renderSession();
 
     document.getElementById('total-capital').textContent = '$'+totalCapital.toFixed(2);
     document.getElementById('total-mark').textContent = '$'+(s.totalMarkValue||0).toFixed(2);
@@ -313,7 +388,8 @@ app.get('/', (_, res) => {
         ['Ladder Range', (cfg.ladderMin!=null?cfg.ladderMin.toFixed(2):'—')+'–'+(cfg.ladderMax!=null?cfg.ladderMax.toFixed(2):'—')],
         ['Ladder Step', cfg.ladderStep??'—'],
         ['Rungs', (cfg.ladderPrices?cfg.ladderPrices.length:'—')],
-        ['TP Price (fixed)', cfg.tpPrice??'—'],
+        ['TP (weekend)', cfg.tpPrice??'—'],
+        ['TP (weekday filter)', cfg.weekdayFilterTpPrice??'—'],
         ['Shares / Rung', (cfg.fixedShares??'—')+'sh'],
         ['Entry Cutoff', (cfg.entryCutoffSecs??'—')+'s'],
         ['Taker Fee Rate', ((cfg.cryptoTakerFeeRate||0)*100).toFixed(0)+'%'],
@@ -358,7 +434,7 @@ app.get('/', (_, res) => {
         const pTrades = (p.wins||0) + (p.losses||0);
         const pWinRate = pTrades > 0 ? ((p.wins||0) / pTrades * 100) : null;
         return '<div class="pair-card">'+
-          '<div class="pair-hdr"><div class="pair-sym">'+p.symbol+' (5M Market)</div><div style="display:flex;gap:8px;align-items:center;"><div class="pair-phase">'+p.phase+'</div><div class="pair-timer">'+fmtSecs(p.secsToEnd)+'</div></div></div>'+
+          '<div class="pair-hdr"><div class="pair-sym">'+p.symbol+' (5M Market)</div><div style="display:flex;gap:6px;align-items:center;"><div class="pair-mode-chip '+(p.mode==='weekend'?'weekend':'weekday')+'">'+(p.mode==='weekend'?'WEEKEND':'FILTER')+'</div><div class="pair-phase">'+p.phase+'</div><div class="pair-timer">'+fmtSecs(p.secsToEnd)+'</div></div></div>'+
           '<div class="pair-body">'+
             '<div class="pair-row"><span class="pair-key">Up Ask/Bid</span><span>'+(p.upAsk?.toFixed(2)||'—')+' / '+(p.upBid?.toFixed(2)||'—')+'</span></div>'+
             '<div class="pair-row"><span class="pair-key">Down Ask/Bid</span><span>'+(p.downAsk?.toFixed(2)||'—')+' / '+(p.downBid?.toFixed(2)||'—')+'</span></div>'+
@@ -369,7 +445,9 @@ app.get('/', (_, res) => {
             '<div class="pair-row"><span class="pair-key">Cash / Reserved</span><span>$'+(p.bankroll||0).toFixed(2)+' / $'+pReserved.toFixed(2)+'</span></div>'+
             '<div class="pair-row"><span class="pair-key">Fees / Rebates</span><span>$'+(p.feesPaid||0).toFixed(4)+' / $'+(p.rebatesEarned||0).toFixed(4)+'</span></div>'+
             '<div class="pair-row"><span class="pair-key">Win Rate</span><span>'+(pWinRate!=null?pWinRate.toFixed(0)+'%':'—')+' ('+p.wins+'W / '+p.losses+'L)</span></div>'+
-            '<div class="side-grid">'+sideBox('UP','up',p.sides?.Up)+sideBox('DOWN','down',p.sides?.Down)+'</div>'+
+            '<div class="pair-row"><span class="pair-key">Active Side / TP</span><span>'+(p.activeSides&&p.activeSides.length?p.activeSides.join(' + '):'NONE — sitting out')+' @ $'+(p.tpPrice!=null?p.tpPrice.toFixed(2):'—')+'</span></div>'+
+            '<div class="pair-row"><span class="pair-key">Last Window Winner</span><span>'+(p.lastWinnerSide||'—')+'</span></div>'+
+            '<div class="side-grid">'+sideBox('UP','up',p.sides?.Up, !p.activeSides || p.activeSides.includes('Up'))+sideBox('DOWN','down',p.sides?.Down, !p.activeSides || p.activeSides.includes('Down'))+'</div>'+
           '</div></div>';
       }).join('');
     }
