@@ -2,18 +2,19 @@
 
 /**
  * ═══════════════════════════════════════════════════════════════
- *  POLYMARKET 5-MINUTE BTC UP/DOWN — TIME DECAY OVERREVERSION
+ *  POLYMARKET 5-MINUTE BTC UP/DOWN — TIME DECAY MOMENTUM CONTINUATION
  * ═══════════════════════════════════════════════════════════════
  *
- *  DETECT overreactions: if a side's mid price deviates > threshold
- *  from 0.50 early in window → buy the OPPOSITE cheap side.
+ *  DETECT momentum: if a side's mid price deviates > threshold
+ *  from 0.50 early in window → BUY that SIDE (momentum continuation
+ *  toward 1.00).
  *
  *  TIME DECAY makes everything size/TP/SL proportional to
  *  timeRemaining / totalWindow:
- *    • More time left → bigger position, wider TP target, wider SL
- *    • Less time left → smaller position, tighter TP, tighter SL
+ *    • More time left → bigger position, higher TP, wider SL
+ *    • Less time left → smaller position, lower TP, tighter SL
  *
- *  Max 5 overreversion trades per window per pair.
+ *  Max 5 momentum trades per window per pair.
  *  All orders are maker limit (fee-free + rebate).
  * ═══════════════════════════════════════════════════════════════
  */
@@ -112,7 +113,7 @@ function computeMid(ask, bid) {
 function freshTradeEntry() {
   return {
     id: `t${Date.now()}-${(Math.random() * 1e6).toFixed(0)}`,
-    side: null,          // 'Up' or 'Down' — which side we BOUGHT
+    side: null,          // 'Up' or 'Down' — the momentum side we BOUGHT
     entryPrice: null,
     shares: 0,
     cost: 0,
@@ -320,7 +321,7 @@ function registerTrade(p, entry) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  TIME DECAY OVERREVERSION STRATEGY
+//  TIME DECAY MOMENTUM CONTINUATION STRATEGY
 // ═══════════════════════════════════════════════════════════════
 
 /**
@@ -386,31 +387,29 @@ function calcReversionSize(deviation) {
  * Early → TP near 0.50, SL wider.
  * Late → TP closer to entry, SL tighter.
  */
-function calcTpSl(entryPrice) {
+function calcMomentumTpSl(entryPrice) {
   const pair = Object.values(pairs)[0];
   const tf = pair ? timeDecayFactor(pair) : 0.5;
 
-  // WIDER TP/SL for Polymarket 5m binary windows.
-  // In these markets prices swing 15-25¢ in seconds and the
-  // bid/ask spread is typically 3-8¢.  Tight TP/SL gets eaten
-  // by normal noise.
+  // MOMENTUM TP/SL: buy the side moving away from 0.50,
+  // expecting continuation toward 1.00.
   //
-  // TP: capture 70-100% of the reversion toward 0.50.
-  //   tf=1.0 (early): entry + (0.50-entry)*1.0 = 0.50 (full reversion)
-  //   tf=0.2 (late):  entry + (0.50-entry)*0.76 ≈ 0.45 (still generous)
+  // TP: capture 40-85% of remaining distance to 1.00.
+  //   tf=1.0 (early): entry + (1.00-entry)*0.85 — target 0.95 for entry 0.70
+  //   tf=0.2 (late):  entry + (1.00-entry)*0.44 — target 0.83 for entry 0.70
   //
-  // SL: keep 41-65% of entry price (35-59% max loss).
-  //   tf=1.0 (early): entry * 0.65 — 10-20¢ buffer (wide, avoids noise)
-  //   tf=0.2 (late):  entry * 0.41 — 12-18¢ buffer (tighter but still safe)
-  const reversionDist = Math.max(0, TP_TARGET_PRICE - entryPrice);
-  const tpCapture = 0.70 + 0.30 * tf;
-  const tpPrice = round5(Math.min(0.50, entryPrice + reversionDist * tpCapture));
+  // SL: protect against reversion toward 0.50.
+  //   tf=1.0 (early): keep 50% of entry — 35¢ buffer for entry 0.70
+  //   tf=0.2 (late):  keep 75% of entry — 17.5¢ buffer for entry 0.70
+  const continuationDist = 1.00 - entryPrice;
+  const tpCapture = 0.40 + 0.45 * tf;
+  const tpPrice = round5(entryPrice + continuationDist * tpCapture);
 
-  const slKeepFraction = 0.35 + 0.30 * tf;
+  const slKeepFraction = 0.50 + 0.25 * tf;
   const slPrice = round5(entryPrice * slKeepFraction);
 
   return {
-    tpPrice: Math.max(entryPrice + 0.005, Math.min(0.50, tpPrice)),
+    tpPrice: Math.max(entryPrice + 0.005, Math.min(0.995, tpPrice)),
     slPrice: Math.max(0.005, slPrice),
   };
 }
@@ -614,7 +613,7 @@ async function resolvePairWindow(p) {
   if (p.resolvedThisWindow) return;
   p.resolvedThisWindow = true;
 
-  await resolveOverreversionTrades(p);
+  await resolveMomentumTrades(p);
 
   // Resolve still-held positions
   const unresolved = p.reversionTrades.filter(t =>
@@ -668,9 +667,9 @@ async function processPair(p) {
     const tickSlot = Math.floor(elapsed / CHECK_INTERVAL_S);
     if (tickSlot > p.lastCheckTick) {
       p.lastCheckTick = tickSlot;
-      const signal = detectOverreaction(p);
+      const signal = detectMomentumSignal(p);
       if (signal) {
-        await tryPlaceReversionTrade(p, signal);
+        await tryPlaceMomentumTrade(p, signal);
       }
     }
   }
@@ -828,10 +827,10 @@ function getStatus() { return { ok: true, ...buildState() }; }
 async function init(privateKey, emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
-  log(`🚀 5-Minute BTC Up/Down — Time Decay Overreversion`);
+  log(`🚀 5-Minute BTC Up/Down — Time Decay Momentum`);
   log(`⚙️  $${TOTAL_CAPITAL} capital | ${pairList.join(', ')} | max ${MAX_TRADES_PER_WINDOW} trades/window`);
-  log(`⚙️  Every ${CHECK_INTERVAL_S}s: detect overreaction > ${OVERREACTION_THRESHOLD} from 0.50 → buy cheap side | base ${BASE_SHARES}sh`);
-  log(`⚙️  Time decay: position size × tf | TP target = entry + (0.50-entry)×tf | SL tightens with tf`);
+  log(`⚙️  Every ${CHECK_INTERVAL_S}s: detect momentum > ${OVERREACTION_THRESHOLD} from 0.50 → buy momentum side | base ${BASE_SHARES}sh`);
+  log(`⚙️  Time decay: position size × tf | TP = entry + (1.00-entry)×(0.40+0.45×tf) | SL = entry×(0.50+0.25×tf)`);
   log(`${DRY_RUN ? '⚠️  DRY RUN — simulated fills' : '🔴 LIVE MODE — real money'}`);
 
   trader = new PolymarketTrader(privateKey);
