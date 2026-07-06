@@ -75,7 +75,6 @@ app.get('/', (_, res) => {
   .pair-sym { font-size: 13px; font-weight: bold; color: #ddd; }
   .pair-timer { font-size: 10px; color: var(--cyan); }
   .pair-phase { font-size: 9px; padding: 2px 8px; border-radius: 10px; }
-  .phase-wait { background: #7a8fa833; color: var(--muted); }
   .phase-monitor { background: #e6a80033; color: var(--yellow); }
   .phase-pending { background: #7c3aed33; color: var(--purple); }
   .phase-position { background: #00a85433; color: var(--green); }
@@ -247,9 +246,8 @@ app.get('/', (_, res) => {
     if (!configRendered && s.config) {
       const c = s.config;
       const rows = [
-        ['Wait Period', c.waitSecs+'s'],
-        ['Entry Trigger', '>'+c.entryTriggerPrice.toFixed(2)],
-        ['Entry Price', c.entryTriggerPrice.toFixed(2)],
+        ['Breakout Trigger', '≥'+c.breakoutTriggerPrice.toFixed(2)],
+        ['Entry Order Price', c.entryOrderPrice.toFixed(2)],
         ['Take Profit', c.tpPrice.toFixed(2)],
         ['Stop Loss (forced)', c.slPrice.toFixed(2)],
         ['Base Size', (c.basePctOfBankroll*100).toFixed(1)+'% of bankroll'],
@@ -274,8 +272,8 @@ app.get('/', (_, res) => {
       grid.innerHTML = '<div class="empty">No Asset Data</div>';
     } else {
       grid.innerHTML = s.pairStates.map(p => {
-        const phaseCls = p.phase === 'WAITING' ? 'phase-wait' : (p.phase === 'MONITORING' ? 'phase-monitor' : (p.phase === 'ENTRY PENDING' ? 'phase-pending' : 'phase-position'));
-        const phaseTimer = p.phase === 'WAITING' ? fmtSecs(p.secsToMonitor)+' to monitor' : fmtSecs(p.secsToEnd)+' left';
+        const phaseCls = p.phase === 'MONITORING' ? 'phase-monitor' : (p.phase === 'ENTRY PENDING' ? 'phase-pending' : 'phase-position');
+        const phaseTimer = fmtSecs(p.secsToEnd)+' left';
         return '<div class="pair-card">'+
           '<div class="pair-hdr"><div class="pair-sym">'+p.symbol+' (5M Market)</div><div style="display:flex;gap:8px;align-items:center;"><div class="pair-phase '+phaseCls+'">'+p.phase+'</div><div class="pair-timer">'+phaseTimer+'</div></div></div>'+
           '<div class="pair-body">'+
