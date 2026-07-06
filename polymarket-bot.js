@@ -2,48 +2,51 @@
 
 /**
  * ═══════════════════════════════════════════════════════════════
- *  POLYMARKET 5-MINUTE BTC UP/DOWN — FIXED-PRICE LADDER SCALPER
+ *  POLYMARKET 5-MINUTE BTC UP/DOWN — TICKER + COUNTER-BET SCALPER
  * ═══════════════════════════════════════════════════════════════
  *
- *  Up and Down each run their own completely independent ladder
- *  within the same 5-minute window. Nothing about Up's fills/prices
- *  affects Down's orders or vice versa.
+ *  Up and Down each independently run the SAME pattern:
  *
- *  THE LADDER (per side, built fresh at the start of every window):
- *    Fixed, absolute price rungs — NOT relative to the live mid
- *    price — from 0.05 up to 0.50 in 0.05 steps:
- *      0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50
- *    Each rung is a maker limit BUY for a fixed size (default 50
- *    shares). All rungs a side can afford are placed up front and
- *    left resting untouched — they are never re-pegged.
+ *  TICKER (every BUY_TICK_INTERVAL_SECS = 10s), per side:
+ *    - If the side's current mid price is inside the entry zone
+ *      (ENTRY_ZONE_MIN–ENTRY_ZONE_MAX, i.e. 0.20–0.80), place a new
+ *      maker limit BUY at (mid − BUY_OFFSET). Outside the zone, skip
+ *      this tick (still counts as fired, tries again next tick).
+ *    - Fires every 10s regardless of any earlier orders' status —
+ *      orders can stack/overlap freely.
+ *    - Sized FIXED_SHARES, or HIGH_PRICE_SHARES once elapsed ≥
+ *      HIGH_PRICE_AFTER_SECS and mid > HIGH_PRICE_THRESHOLD.
  *
- *  ONE-SHOT RUNGS: each price level trades at most once per window.
- *    - Once a rung's buy fills, that exact price is retired for the
- *      rest of the window — it is never re-armed even if price comes
- *      back to it.
- *    - The instant a rung's buy fills, a maker limit SELL (TP) is
- *      rested at the fixed take-profit price of 0.70 for that lot.
- *    - If that TP later fills, the rung is fully done (paused) for
- *      the rest of the window.
+ *  EXPIRY: any resting buy (ticker- or counter-bet-placed) that
+ *  hasn't filled within CANCEL_TIMEOUT_SECS (8s) of being placed is
+ *  cancelled.
  *
- *  AT 280s (ENTRY_CUTOFF_SECS): stop entries for good, per side —
- *    - Any rung that never got placed (was skipped for bankroll
- *      reasons) is marked paused — it will not be placed later in
- *      this window.
- *    - Any rung still resting unfilled is cancelled and paused.
- *    - Rungs that already filled and are sitting on a resting TP are
- *      left completely alone — no sweep, no early exit.
+ *  FILL → COUNTER-BET: the instant ANY buy fills (ticker-origin or
+ *  counter-bet-origin), two things happen:
+ *    1. A TP sell is rested at (entry price + TP_OFFSET) for that
+ *       fill — TPs are always allowed, even past the entry cutoff.
+ *    2. If still before ENTRY_CUTOFF_SECS, a counter-bet buy is
+ *       immediately placed on the OPPOSITE side at (that side's mid
+ *       − BUY_OFFSET), same entry-zone check, same 8s expiry rule.
+ *       Because both sides run the identical pattern, a counter-bet
+ *       that itself fills triggers a counter-bet back — this can
+ *       ping-pong between sides.
  *
- *  RESOLUTION (window close): any TP still unfilled at window end is
- *  cancelled and that position resolves against Polymarket's actual
- *  outcome — $1/share if that side won, $0/share if it lost.
+ *  AT 280s (ENTRY_CUTOFF_SECS): no more NEW buy placements (neither
+ *  ticker nor counter-bet) on either side. Existing resting orders
+ *  and open TPs are left alone until 285s.
  *
- *  SIZING: fixed shares per rung, both sides, always — no
- *  compounding, no bankroll-based up-sizing.
+ *  AT 285s (SWEEP_SECS), per side: cancel that side's still-unfilled
+ *  resting buys and every still-unfilled TP, then — if that side is
+ *  left holding any shares — roll them into ONE aggregate maker
+ *  limit SELL at 0.99 for the combined size.
  *
- *  FEES: every buy and every TP sell are genuine maker orders
- *  (fee-free + rebate, Fee Structure V2). There is no taker order
- *  anywhere in this strategy.
+ *  RESOLUTION: if the 0.99 sell (or anything else) still hasn't
+ *  filled by window end, whatever shares remain resolve against
+ *  Polymarket's actual outcome (unchanged logic).
+ *
+ *  FEES: every buy, every TP sell, and the 285s 0.99 sell are all
+ *  genuine maker orders (fee-free + rebate, Fee Structure V2).
  * ═══════════════════════════════════════════════════════════════
  */
 
@@ -66,117 +69,23 @@ const TOTAL_CAPITAL = Number(process.env.TOTAL_CAPITAL || 2000);
 const DEFAULT_PAIRS = (process.env.CRYPTO_PAIRS || 'BTC')
   .split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
 
-// ── Ladder scalper parameters ──
-const LADDER_MIN        = Number(process.env.LADDER_MIN || 0.05);   // lowest rung price
-const LADDER_MAX        = Number(process.env.LADDER_MAX || 0.50);   // highest rung price
-const LADDER_STEP       = Number(process.env.LADDER_STEP || 0.05);  // distance between rungs
-const TP_PRICE          = Number(process.env.TP_PRICE || 0.70);     // fixed TP for every rung, weekend mode
-const WEEKDAY_FILTER_TP_PRICE = Number(process.env.WEEKDAY_FILTER_TP_PRICE || 0.99); // TP for the directional-filter side, weekday mode
-const FIXED_SHARES      = Number(process.env.FIXED_SHARES || 50);   // shares per rung
-const ENTRY_CUTOFF_SECS = Number(process.env.ENTRY_CUTOFF_SECS || 280); // cancel/pause unfilled rungs after this
+// ── Ticker + counter-bet strategy parameters ──
+const BUY_OFFSET             = Number(process.env.BUY_OFFSET || 0.05);   // entry = current mid - this
+const TP_OFFSET              = Number(process.env.TP_OFFSET || 0.05);    // TP = entry + this
+const BUY_TICK_INTERVAL_SECS = Number(process.env.BUY_TICK_INTERVAL_SECS || 10); // new ticker buy every N seconds, per side
+const CANCEL_TIMEOUT_SECS    = Number(process.env.CANCEL_TIMEOUT_SECS || 8);     // cancel any resting buy unfilled this long
+const ENTRY_ZONE_MIN         = Number(process.env.ENTRY_ZONE_MIN || 0.20);
+const ENTRY_ZONE_MAX         = Number(process.env.ENTRY_ZONE_MAX || 0.80);
+const ENTRY_CUTOFF_SECS      = Number(process.env.ENTRY_CUTOFF_SECS || 280);     // no new buys (ticker or counter) after this
+const SWEEP_SECS             = Number(process.env.SWEEP_SECS || 285);           // cancel unfilled + rest final sell
+const FINAL_SELL_PRICE       = Number(process.env.FINAL_SELL_PRICE || 0.99);
+const FIXED_SHARES           = Number(process.env.FIXED_SHARES || 50);
 
-// Builds the fixed absolute-price ladder once, ascending, e.g.
-// [0.05, 0.10, 0.15, ..., 0.45, 0.50]. These are NOT relative to mid
-// price — every window gets the exact same grid of rungs per side.
-function buildLadderPrices() {
-  const prices = [];
-  const steps = Math.round((LADDER_MAX - LADDER_MIN) / LADDER_STEP);
-  for (let i = 0; i <= steps; i++) prices.push(Math.round((LADDER_MIN + i * LADDER_STEP) * 100) / 100);
-  return prices;
-}
-const LADDER_PRICES = buildLadderPrices();
-
-// ─────────────────────────────────────────
-//  Weekend trading window: Friday 5:00 PM Sydney → Sunday 5:00 PM ET
-//  Outside this window, the bot runs in "weekday directional filter" mode
-//  instead (see loadPairWindow / resolvePairWindow).
-// ─────────────────────────────────────────
-
-// How far ahead of UTC `timeZone` is, in minutes, at the instant `utcMs`
-// (positive east of UTC, e.g. Sydney ≈ +600 or +660 depending on DST).
-function getTzOffsetMinutes(utcMs, timeZone) {
-  const dtf = new Intl.DateTimeFormat('en-US', {
-    timeZone, hourCycle: 'h23',
-    year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', second: '2-digit',
-  });
-  const map = {};
-  for (const part of dtf.formatToParts(new Date(utcMs))) map[part.type] = part.value;
-  const asUtc = Date.UTC(+map.year, +map.month - 1, +map.day, +map.hour, +map.minute, +map.second);
-  return (asUtc - utcMs) / 60000;
-}
-
-// Converts a wall-clock time as observed IN `timeZone` (e.g. "5:00 PM in
-// Sydney") to the actual UTC instant it represents — correctly handles
-// AEST/AEDT, EST/EDT, etc. via a couple of iterations to converge near DST
-// transitions.
-function zonedWallTimeToUtcMs(year, month, day, hour, minute, timeZone) {
-  const literal = Date.UTC(year, month - 1, day, hour, minute, 0);
-  let guess = literal;
-  for (let i = 0; i < 3; i++) {
-    guess = literal - getTzOffsetMinutes(guess, timeZone) * 60000;
-  }
-  return guess;
-}
-
-function getZonedDateParts(utcMs, timeZone) {
-  const dtf = new Intl.DateTimeFormat('en-US', {
-    timeZone, year: 'numeric', month: '2-digit', day: '2-digit', weekday: 'long',
-  });
-  const map = {};
-  for (const part of dtf.formatToParts(new Date(utcMs))) map[part.type] = part.value;
-  return { year: +map.year, month: +map.month, day: +map.day, weekday: map.weekday };
-}
-const ISO_WEEKDAY = { Monday: 1, Tuesday: 2, Wednesday: 3, Thursday: 4, Friday: 5, Saturday: 6, Sunday: 7 };
-
-// True from Friday 5:00 PM Sydney time through Sunday 5:00 PM Eastern Time
-// (inclusive), false otherwise. Computed fresh each call so it correctly
-// tracks both the weekly recurrence and DST changes in either zone.
-function isWeekendTradingMode(nowMs = Date.now()) {
-  const syd = getZonedDateParts(nowMs, 'Australia/Sydney');
-  const daysSinceFriday = (ISO_WEEKDAY[syd.weekday] - 5 + 7) % 7; // 0=Fri,1=Sat,2=Sun,...,6=Thu
-
-  // Pure calendar-day arithmetic on a UTC-noon anchor — never trips over DST
-  // the way subtracting real wall-clock milliseconds could.
-  const sydNoonAnchor = Date.UTC(syd.year, syd.month - 1, syd.day, 12, 0, 0);
-  const fridayAnchor = new Date(sydNoonAnchor - daysSinceFriday * 86400000);
-  const fy = fridayAnchor.getUTCFullYear(), fm = fridayAnchor.getUTCMonth() + 1, fd = fridayAnchor.getUTCDate();
-  const weekendStartUtc = zonedWallTimeToUtcMs(fy, fm, fd, 17, 0, 'Australia/Sydney');
-
-  const sundayAnchor = new Date(Date.UTC(fy, fm - 1, fd, 12, 0, 0) + 2 * 86400000);
-  const sy = sundayAnchor.getUTCFullYear(), sm = sundayAnchor.getUTCMonth() + 1, sd = sundayAnchor.getUTCDate();
-  const weekendEndUtc = zonedWallTimeToUtcMs(sy, sm, sd, 17, 0, 'America/New_York');
-
-  return nowMs >= weekendStartUtc && nowMs <= weekendEndUtc;
-}
-
-// For the dashboard: current mode plus the exact instant the NEXT transition
-// happens (weekend→weekday or weekday→weekend), so the UI can run a live
-// countdown without re-deriving any timezone/DST math itself.
-function getScheduleInfo(nowMs = Date.now()) {
-  const syd = getZonedDateParts(nowMs, 'Australia/Sydney');
-  const daysSinceFriday = (ISO_WEEKDAY[syd.weekday] - 5 + 7) % 7;
-  const sydNoonAnchor = Date.UTC(syd.year, syd.month - 1, syd.day, 12, 0, 0);
-  const fridayAnchor = new Date(sydNoonAnchor - daysSinceFriday * 86400000);
-  let fy = fridayAnchor.getUTCFullYear(), fm = fridayAnchor.getUTCMonth() + 1, fd = fridayAnchor.getUTCDate();
-  let weekendStartUtc = zonedWallTimeToUtcMs(fy, fm, fd, 17, 0, 'Australia/Sydney');
-  const sundayAnchor = new Date(Date.UTC(fy, fm - 1, fd, 12, 0, 0) + 2 * 86400000);
-  const sy = sundayAnchor.getUTCFullYear(), sm = sundayAnchor.getUTCMonth() + 1, sd = sundayAnchor.getUTCDate();
-  const weekendEndUtc = zonedWallTimeToUtcMs(sy, sm, sd, 17, 0, 'America/New_York');
-
-  if (nowMs >= weekendStartUtc && nowMs <= weekendEndUtc) {
-    return { mode: 'weekend', nextBoundaryMs: weekendEndUtc };
-  }
-  // Weekday mode: if this anchor's whole weekend is already behind us, the
-  // next relevant Friday is 7 days after it; otherwise this anchor's Friday
-  // (still ahead of us) is the one we're counting down to.
-  if (nowMs > weekendEndUtc) {
-    const nextFridayAnchor = new Date(Date.UTC(fy, fm - 1, fd, 12, 0, 0) + 7 * 86400000);
-    fy = nextFridayAnchor.getUTCFullYear(); fm = nextFridayAnchor.getUTCMonth() + 1; fd = nextFridayAnchor.getUTCDate();
-    weekendStartUtc = zonedWallTimeToUtcMs(fy, fm, fd, 17, 0, 'Australia/Sydney');
-  }
-  return { mode: 'weekday-filter', nextBoundaryMs: weekendStartUtc };
-}
+// After this many seconds elapsed, if a side's current mid price is above
+// the threshold, that side's NEXT buy (ticker or counter) sizes up.
+const HIGH_PRICE_AFTER_SECS = Number(process.env.HIGH_PRICE_AFTER_SECS || 150);
+const HIGH_PRICE_THRESHOLD  = Number(process.env.HIGH_PRICE_THRESHOLD || 0.60);
+const HIGH_PRICE_SHARES     = Number(process.env.HIGH_PRICE_SHARES || 100);
 
 // ── Fees & maker rebates (Polymarket Fee Structure V2, crypto category) ──
 const CRYPTO_TAKER_FEE_RATE     = Number(process.env.CRYPTO_TAKER_FEE_RATE || 0.07);
@@ -206,14 +115,14 @@ function round2(n) { return Math.round(n * 100) / 100; }
 function nowSec() { return Date.now() / 1000; }
 
 async function getJSON(url) {
-  const res = await fetch(url, { headers: { 'User-Agent': 'polymarket-side-scalper/1.0' } });
+  const res = await fetch(url, { headers: { 'User-Agent': 'polymarket-counterbet-scalper/1.0' } });
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${url}`);
   return res.json();
 }
 async function postJSON(url, body) {
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'User-Agent': 'polymarket-side-scalper/1.0' },
+    headers: { 'Content-Type': 'application/json', 'User-Agent': 'polymarket-counterbet-scalper/1.0' },
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${url}`);
@@ -247,60 +156,15 @@ function makerRebate(shares, price) {
 // ─────────────────────────────────────────
 //  Pair state
 // ─────────────────────────────────────────
-function freshSideState(gen) {
+function freshSideState() {
   return {
-    // Tags which "generation" (window) this ladder belongs to. Bumped every
-    // time a pair's sides are rebuilt (new window, or post-resolution
-    // clear). checkLadderBuyFills/checkLadderTpFills/tickLadder all verify
-    // this against p.ladderGen before touching a rung — this makes it
-    // structurally impossible (not just "shouldn't happen by status logic")
-    // for a stale ladder to ever be traded against a different window's
-    // live prices/tokenId, even if some future code path forgets to reset.
-    gen,
-    // One entry per ladder price, built fresh every window. Each rung's
-    // status is a one-way progression (except 'cancelled' can be reached
-    // from either 'pending' or 'resting'):
-    //   pending    → never yet placed (bankroll not available, or not yet tried)
-    //   resting    → maker BUY live on the book, unfilled
-    //   filled     → BUY filled, TP resting @ TP_PRICE, position open
-    //   done       → TP filled — rung fully closed, retired for the window
-    //   cancelled  → paused at the 280s cutoff (never traded again this window)
-    //   resolved   → still holding at window close, settled at actual outcome
-    ladder: LADDER_PRICES.map(price => ({
-      price, status: 'pending', orderId: null, shares: 0, cost: 0, placedAt: null, tp: null,
-    })),
-    cutoffDone: false,
+    buyOrders: [],        // { orderId, price, shares, cost, sizedUp, kind:'TICKER'|'COUNTER', placedAt } (RESTING only)
+    positions: [],         // { entryPrice, shares, cost, exit: { kind:'TP'|'FINAL', price, orderId, status }, openedAt }
+    buyTicksFired: 0,
+    wins: 0, losses: 0,
+    realizedPnl: 0,
+    rebatesEarned: 0,
   };
-}
-
-function freshRungStats() {
-  const stats = {};
-  for (const price of LADDER_PRICES) {
-    stats[price.toFixed(2)] = { fills: 0, tpWins: 0, resolvedWins: 0, resolvedLosses: 0, totalCost: 0, totalPnl: 0 };
-  }
-  return stats;
-}
-
-function recordRungFill(p, price, cost, entryRebate) {
-  const r = p.rungStats[price.toFixed(2)];
-  if (!r) return;
-  r.fills++;
-  r.totalCost = round2(r.totalCost + cost);
-  r.totalPnl = round2(r.totalPnl + (entryRebate || 0));
-}
-
-// Records the outcome of one closed rung (win via TP bounce, win via
-// resolution without ever bouncing, or loss via resolution) into this pair's
-// lifetime-persistent per-price-level edge stats. Never reset on window
-// rollover — this is what answers "is there an actual edge at this price".
-function recordRungOutcome(p, price, outcome, cost, pnl) {
-  const key = price.toFixed(2);
-  const r = p.rungStats[key];
-  if (!r) return;
-  if (outcome === 'tp') r.tpWins++;
-  else if (outcome === 'resolved-win') r.resolvedWins++;
-  else if (outcome === 'resolved-loss') r.resolvedLosses++;
-  r.totalPnl = round2(r.totalPnl + pnl);
 }
 
 function freshPairState(symbol) {
@@ -322,31 +186,11 @@ function freshPairState(symbol) {
     rebatesEarned: 0,
     wins: 0, losses: 0,
 
-    // Which side won the MOST RECENTLY RESOLVED window (set in
-    // resolvePairWindow, used by loadPairWindow to drive the weekday
-    // directional filter). Never reset on rollover — deliberately persists
-    // across windows until we learn a new winner.
-    lastWinnerSide: null,
-    // Set fresh every window in loadPairWindow: 'weekend' (both sides, TP
-    // 0.70) or 'weekday-filter' (only lastWinnerSide's ladder active, TP
-    // 0.99). activeSides/tpPrice are what tickLadder/checkLadderBuyFills
-    // actually consult.
-    mode: null,
-    activeSides: ['Up', 'Down'],
-    tpPrice: TP_PRICE,
-
-    // Bumped every time `sides` is rebuilt. See freshSideState()'s `gen`
-    // field for why this exists.
-    ladderGen: 0,
-
     // per-window trading state (reset in loadPairWindow)
-    sides: { Up: freshSideState(0), Down: freshSideState(0) },
-
-    // lifetime, NEVER reset — per-ladder-price edge tracking
-    rungStats: freshRungStats(),
+    sweepDone: false,
+    sides: { Up: freshSideState(), Down: freshSideState() },
 
     resolvedThisWindow: true,
-    resolving: false,
     equityCurve: [{ t: Date.now(), equity: perPairCapital }],
   };
 }
@@ -382,8 +226,8 @@ function tokenIdForSide(market, side) {
   const tok = tokens.find(t => (t.outcome || '').toLowerCase() === want);
   return tok?.token_id || null;
 }
-async function fetchEventForWindow(symbol, windowStart, offsets = SLUG_OFFSET_FALLBACKS) {
-  for (const offset of offsets) {
+async function fetchEventForWindow(symbol, windowStart) {
+  for (const offset of SLUG_OFFSET_FALLBACKS) {
     const ws = windowStart + offset;
     if (ws + WINDOW_SECS <= nowSec()) continue;
     const slug = slugFor(symbol, ws);
@@ -401,30 +245,7 @@ async function loadPairWindow(p) {
   const ws = currentWindowStart();
   if (p.windowStart === ws && p.upTokenId) return;
 
-  // Hard safety net: NEVER wipe this pair's per-window ladder state while any
-  // rung is still 'filled' (bought, TP not yet hit) — no matter which code
-  // path got us here (normal rollover, a fallback slug re-match, or this
-  // pair just now becoming tradable again after a gap). Resolve first, always.
-  if (p.upTokenId && !p.resolvedThisWindow) {
-    await resolvePairWindow(p);
-    // Do NOT just trust that the call above finished the job. If it
-    // returned without actually completing (any error inside it — caught
-    // internally so this function never throws — leaves resolvedThisWindow
-    // false), we must NOT proceed to fetch the next window / reset sides.
-    // Bail out and retry entirely on the next tick instead.
-    if (!p.resolvedThisWindow) {
-      log(`⏳ ${p.symbol}: resolution not yet confirmed complete — deferring window load, will retry next tick instead of touching the ladder.`);
-      return;
-    }
-  }
-
-  // Only the very first load for this pair (process just started, nothing to
-  // lose) is allowed to search neighboring windows. A normal rollover must
-  // match the exact expected next window (offset 0) — if it isn't indexed by
-  // Polymarket yet, we simply stay non-tradable for a tick or two rather than
-  // risk re-attaching to the window we just resolved and closed out.
-  const isBootstrap = p.windowStart === null;
-  const found = await fetchEventForWindow(p.symbol, ws, isBootstrap ? SLUG_OFFSET_FALLBACKS : [0]);
+  const found = await fetchEventForWindow(p.symbol, ws);
   if (!found) { p.tradable = false; return; }
   const { event, windowStart, slug } = found;
   const market = event.markets.find(m => { const q = qOf(m); return q.includes('up') || q.includes('down'); }) || event.markets[0];
@@ -447,42 +268,11 @@ async function loadPairWindow(p) {
   p.tradable = true;
   p.resolvedThisWindow = false;
 
-  // Critical: upAsk/upBid/downAsk/downBid are last-known prices for the
-  // OLD window's tokenIds. refreshPolyPrices() only refreshes them once a
-  // second on its own schedule — if we don't clear them here, the brand
-  // new (all-'pending') ladder above gets evaluated on this very tick
-  // against stale prices from the just-ended window. If that window's
-  // losing side had crashed toward $0 right before resolving, that stale
-  // near-zero value satisfies "ask ≤ rung price" for every rung at once,
-  // instantly and incorrectly "filling" the entire fresh ladder before a
-  // single real quote for the new market has ever been fetched.
-  // checkLadderBuyFills/checkLadderTpFills already safely no-op on null,
-  // so nulling here just makes them wait for the next real price tick.
-  p.upAsk = null; p.upBid = null; p.downAsk = null; p.downBid = null;
+  // reset per-window trading state
+  p.sweepDone = false;
+  p.sides = { Up: freshSideState(), Down: freshSideState() };
 
-  // Decide THIS window's trading mode. Weekend (Fri 5pm Sydney → Sun 5pm
-  // ET): trade both sides normally, TP 0.70. Otherwise (weekday): only the
-  // side that won the most recently resolved window gets a ladder at all
-  // this window, with TP pushed out to 0.99 — a momentum-following filter
-  // rather than the weekend's symmetric scalp. If we don't yet know a
-  // winner (e.g. very first window ever), sit this window out entirely
-  // rather than guess.
-  if (isWeekendTradingMode()) {
-    p.mode = 'weekend';
-    p.activeSides = ['Up', 'Down'];
-    p.tpPrice = TP_PRICE;
-  } else {
-    p.mode = 'weekday-filter';
-    p.activeSides = (p.lastWinnerSide === 'Up' || p.lastWinnerSide === 'Down') ? [p.lastWinnerSide] : [];
-    p.tpPrice = WEEKDAY_FILTER_TP_PRICE;
-  }
-
-  // reset per-window trading state — safe now: anything still open from the
-  // prior window was just resolved above, if there was a prior window at all.
-  p.ladderGen++;
-  p.sides = { Up: freshSideState(p.ladderGen), Down: freshSideState(p.ladderGen) };
-
-  log(`🔭 ${p.symbol} window loaded: ${slug} | ends ${new Date(p.windowEnd * 1000).toISOString().slice(11,19)}Z | mode=${p.mode} | active=${p.activeSides.join('+') || 'NONE (sitting out — no known last winner)'} | TP=${p.tpPrice.toFixed(2)}`);
+  log(`🔭 ${p.symbol} window loaded: ${slug} | ends ${new Date(p.windowEnd * 1000).toISOString().slice(11,19)}Z`);
 }
 
 // ─────────────────────────────────────────
@@ -550,10 +340,13 @@ async function refreshPolyPrices() {
 //  Equity tracking
 // ─────────────────────────────────────────
 function sideHeldShares(sideState) {
-  return sideState.ladder.filter(r => r.status === 'filled').reduce((s, r) => s + r.shares, 0);
+  return sideState.positions.reduce((s, pos) => s + pos.shares, 0);
 }
 function sideHeldCost(sideState) {
-  return sideState.ladder.filter(r => r.status === 'filled').reduce((s, r) => s + r.cost, 0);
+  return sideState.positions.reduce((s, pos) => s + pos.cost, 0);
+}
+function sideRestingBuyCost(sideState) {
+  return round2(sideState.buyOrders.reduce((s, o) => s + o.cost, 0));
 }
 function positionsMarkValue(p) {
   let total = 0;
@@ -587,130 +380,190 @@ function registerTrade(p, entry) {
 }
 
 // ─────────────────────────────────────────
-//  Buy-order placement (independent per side)
+//  Buy placement (ticker-origin or counter-bet-origin — same mechanics)
 // ─────────────────────────────────────────
+function midPrice(ask, bid) {
+  if (ask != null && bid != null) return round2((ask + bid) / 2);
+  if (ask != null) return round2(ask);
+  if (bid != null) return round2(bid);
+  return null;
+}
 function reservedCashFor(p) {
-  let total = 0;
-  for (const side of ['Up', 'Down']) {
-    for (const rung of p.sides[side].ladder) if (rung.status === 'resting') total += rung.cost;
-  }
-  return round2(total);
+  return round2(sideRestingBuyCost(p.sides.Up) + sideRestingBuyCost(p.sides.Down));
 }
 
-// Before the 280s cutoff: try to place every rung still in 'pending' status
-// (one maker limit BUY per rung, at that rung's fixed price — never
-// re-pegged to mid). A rung that can't be afforded right now is left
-// 'pending' and retried on later ticks, up until the cutoff.
-//
-// At/after the 280s cutoff (run once per side, guarded by cutoffDone):
-//   - any rung still 'pending' (never placed) → marked 'cancelled' (paused)
-//   - any rung still 'resting' (unfilled) → order cancelled → 'cancelled'
-// Rungs already 'filled' (holding shares, TP resting) are left completely
-// alone — they ride their TP all the way to window resolution.
-async function tickLadder(p, side, elapsed) {
-  const s = p.sides[side];
-  if (s.gen !== p.ladderGen) {
-    log(`❌ ${p.symbol} ${side}: stale ladder generation (${s.gen} vs ${p.ladderGen}) — refusing to place/cancel entries. This should never happen; please report.`);
-    return;
-  }
-  if (!p.activeSides.includes(side)) return; // filtered out this window (weekday directional filter, or sitting out with no known last winner)
-
-  if (elapsed >= ENTRY_CUTOFF_SECS) {
-    if (s.cutoffDone) return;
-    s.cutoffDone = true;
-    let pausedPending = 0, cancelledResting = 0;
-    for (const rung of s.ladder) {
-      if (rung.status === 'pending') { rung.status = 'cancelled'; pausedPending++; }
-      else if (rung.status === 'resting') { await cancelOrder(rung.orderId); rung.status = 'cancelled'; cancelledResting++; }
-    }
-    if (pausedPending || cancelledResting) {
-      log(`🛑 ${p.symbol} ${side}: entry cutoff @ ${ENTRY_CUTOFF_SECS}s — cancelled ${cancelledResting} resting rung(s), paused ${pausedPending} unplaced rung(s). Open TP position(s) left resting to window close.`);
-    }
-    return;
-  }
-
-  const tokenId = side === 'Up' ? p.upTokenId : p.downTokenId;
-  for (const rung of s.ladder) {
-    if (rung.status !== 'pending') continue;
-
-    const cost = round2(rung.price * FIXED_SHARES);
-    const reserved = reservedCashFor(p);
-    if (round2(reserved + cost) > p.bankroll) continue; // retry next tick
-
-    const order = await placeLimitBuy(tokenId, rung.price, FIXED_SHARES);
-    rung.orderId = order.id || order.orderId || null;
-    rung.shares = FIXED_SHARES;
-    rung.cost = cost;
-    rung.placedAt = Date.now();
-    rung.status = 'resting';
-    log(`📥 ${p.symbol} ${side}: ladder BUY resting ${FIXED_SHARES}sh @ ${rung.price.toFixed(2)}`);
-  }
-}
-
-// ─────────────────────────────────────────
-//  Ladder buy-fill checking — on fill: rest TP @ TP_PRICE, rung → 'filled'
-// ─────────────────────────────────────────
-async function checkLadderBuyFills(p, side) {
-  const s = p.sides[side];
-  if (s.gen !== p.ladderGen) {
-    log(`❌ ${p.symbol} ${side}: stale ladder generation (${s.gen} vs ${p.ladderGen}) — refusing to process fills. This should never happen; please report.`);
-    return;
-  }
+async function placeBuyOrder(p, side, elapsed, kind) {
   const ask = side === 'Up' ? p.upAsk : p.downAsk;
-  if (ask == null) return;
-  const tokenId = side === 'Up' ? p.upTokenId : p.downTokenId;
-
-  for (const rung of s.ladder) {
-    if (rung.status !== 'resting') continue;
-    if (ask > rung.price) continue; // not filled yet
-
-    const rebate = makerRebate(rung.shares, rung.price);
-    p.bankroll = round2(p.bankroll - rung.cost + rebate);
-    p.realizedPnl = round2(p.realizedPnl + rebate);
-    p.rebatesEarned = round2(p.rebatesEarned + rebate);
-
-    const tpOrder = await placeLimitSell(tokenId, p.tpPrice, rung.shares);
-    rung.tp = { price: p.tpPrice, orderId: tpOrder.id || tpOrder.orderId || null, status: 'resting' };
-    rung.status = 'filled';
-    recordRungFill(p, rung.price, rung.cost, rebate);
-
-    log(`🎯 ${p.symbol} ${side} ladder BUY filled ${rung.shares}sh @ ${rung.price.toFixed(2)} | cost=$${rung.cost.toFixed(2)} | rebate=+$${rebate.toFixed(4)} | TP resting @ ${p.tpPrice.toFixed(2)} | rung ${rung.price.toFixed(2)} retired for this window`);
-    registerTrade(p, { side: 'BUY', outcome: side, reason: 'ENTRY', price: rung.price, shares: rung.shares, cost: rung.cost, rebate });
-    recordEquity(p);
+  const bid = side === 'Up' ? p.upBid : p.downBid;
+  const mid = midPrice(ask, bid);
+  if (mid == null) {
+    log(`⏭️  ${p.symbol} ${side}: ${kind} buy skipped — no quotes yet`);
+    return;
   }
+  if (mid < ENTRY_ZONE_MIN || mid > ENTRY_ZONE_MAX) {
+    log(`⏭️  ${p.symbol} ${side}: ${kind} buy skipped — mid ${mid.toFixed(2)} outside entry zone [${ENTRY_ZONE_MIN.toFixed(2)}-${ENTRY_ZONE_MAX.toFixed(2)}]`);
+    return;
+  }
+
+  const sizedUp = elapsed >= HIGH_PRICE_AFTER_SECS && mid > HIGH_PRICE_THRESHOLD;
+  const shares = sizedUp ? HIGH_PRICE_SHARES : FIXED_SHARES;
+  const price = round2(Math.max(0.01, mid - BUY_OFFSET));
+  const cost = round2(price * shares);
+
+  if (round2(reservedCashFor(p) + cost) > p.bankroll) {
+    log(`⏭️  ${p.symbol} ${side}: skip ${kind} buy — insufficient bankroll ($${p.bankroll.toFixed(2)}, need $${cost.toFixed(2)})`);
+    return;
+  }
+
+  const s = p.sides[side];
+  const tokenId = side === 'Up' ? p.upTokenId : p.downTokenId;
+  const order = await placeLimitBuy(tokenId, price, shares);
+  s.buyOrders.push({
+    orderId: order.id || order.orderId || null,
+    price, shares, cost, sizedUp, kind,
+    placedAt: Date.now(),
+  });
+  const tag = kind === 'COUNTER' ? '🔁 COUNTER-BET' : '📥 TICKER';
+  log(`${tag} ${p.symbol} ${side}: resting BUY ${shares}sh @ ${price.toFixed(2)} (mid ${mid.toFixed(2)} − ${BUY_OFFSET})${sizedUp ? ` [SIZED UP]` : ''}`);
+}
+
+async function maybeFireBuyTick(p, side, elapsed) {
+  if (elapsed >= ENTRY_CUTOFF_SECS) return;
+  const s = p.sides[side];
+  const nextAt = s.buyTicksFired * BUY_TICK_INTERVAL_SECS;
+  if (elapsed < nextAt) return;
+  s.buyTicksFired++;
+  await placeBuyOrder(p, side, elapsed, 'TICKER');
+}
+
+function oppositeSide(side) { return side === 'Up' ? 'Down' : 'Up'; }
+
+// ─────────────────────────────────────────
+//  Buy fill / expiry checking. A fill: opens TP + (if before cutoff)
+//  fires a counter-bet on the opposite side. An expiry (unfilled for
+//  CANCEL_TIMEOUT_SECS): cancels the order, no further action.
+// ─────────────────────────────────────────
+async function checkBuyFillsAndExpiry(p, side, elapsed) {
+  const s = p.sides[side];
+  if (!s.buyOrders.length) return;
+  const ask = side === 'Up' ? p.upAsk : p.downAsk;
+
+  const stillResting = [];
+  for (const order of s.buyOrders) {
+    const filled = ask != null && ask <= order.price;
+    if (filled) {
+      const rebate = makerRebate(order.shares, order.price);
+      p.bankroll = round2(p.bankroll - order.cost + rebate);
+      p.realizedPnl = round2(p.realizedPnl + rebate);
+      p.rebatesEarned = round2(p.rebatesEarned + rebate);
+      s.realizedPnl = round2(s.realizedPnl + rebate);
+      s.rebatesEarned = round2(s.rebatesEarned + rebate);
+
+      const tokenId = side === 'Up' ? p.upTokenId : p.downTokenId;
+      const tpPrice = round2(order.price + TP_OFFSET);
+      const tpOrder = await placeLimitSell(tokenId, tpPrice, order.shares);
+      s.positions.push({
+        entryPrice: order.price, shares: order.shares, cost: order.cost,
+        exit: { kind: 'TP', price: tpPrice, orderId: tpOrder.id || tpOrder.orderId || null, status: 'resting' },
+        openedAt: Date.now(),
+      });
+
+      log(`🎯 ${p.symbol} ${side} ${order.kind} BUY filled ${order.shares}sh @ ${order.price.toFixed(2)} | cost=$${order.cost.toFixed(2)} | rebate=+$${rebate.toFixed(4)} | TP resting @ ${tpPrice.toFixed(2)}`);
+      registerTrade(p, { side: 'BUY', outcome: side, reason: `ENTRY-${order.kind}`, price: order.price, shares: order.shares, cost: order.cost, rebate });
+      recordEquity(p);
+
+      if (elapsed < ENTRY_CUTOFF_SECS) {
+        await placeBuyOrder(p, oppositeSide(side), elapsed, 'COUNTER');
+      }
+      continue; // filled order dropped, not pushed back
+    }
+
+    const ageSecs = (Date.now() - order.placedAt) / 1000;
+    if (ageSecs >= CANCEL_TIMEOUT_SECS) {
+      await cancelOrder(order.orderId);
+      log(`🛑 ${p.symbol} ${side}: ${order.kind} buy ${order.shares}sh @ ${order.price.toFixed(2)} unfilled after ${CANCEL_TIMEOUT_SECS}s — cancelled`);
+      continue; // expired, dropped
+    }
+
+    stillResting.push(order);
+  }
+  s.buyOrders = stillResting;
 }
 
 // ─────────────────────────────────────────
-//  Ladder TP-fill checking — on fill: rung → 'done', permanently retired
+//  Exit-order fill checking (TP or the 285s FINAL 0.99 sell)
 // ─────────────────────────────────────────
-async function checkLadderTpFills(p, side) {
+async function checkExitFills(p, side) {
   const s = p.sides[side];
-  if (s.gen !== p.ladderGen) {
-    log(`❌ ${p.symbol} ${side}: stale ladder generation (${s.gen} vs ${p.ladderGen}) — refusing to process TP fills. This should never happen; please report.`);
-    return;
-  }
   const bid = side === 'Up' ? p.upBid : p.downBid;
   if (bid == null) return;
 
-  for (const rung of s.ladder) {
-    if (rung.status !== 'filled' || !rung.tp || rung.tp.status !== 'resting') continue;
-    if (bid < rung.tp.price) continue; // TP not filled yet
+  const stillOpen = [];
+  for (const pos of s.positions) {
+    if (pos.exit.status !== 'resting' || bid < pos.exit.price) { stillOpen.push(pos); continue; }
 
-    const proceeds = round2(rung.tp.price * rung.shares);
-    const rebate = makerRebate(rung.shares, rung.tp.price);
+    const proceeds = round2(pos.exit.price * pos.shares);
+    const rebate = makerRebate(pos.shares, pos.exit.price);
     const net = round2(proceeds + rebate);
     p.bankroll = round2(p.bankroll + net);
-    const profit = round2(net - rung.cost);
+    const profit = round2(net - pos.cost);
     p.realizedPnl = round2(p.realizedPnl + profit);
     p.rebatesEarned = round2(p.rebatesEarned + rebate);
-    p.wins++;
-    rung.tp.status = 'filled';
-    rung.status = 'done';
-    recordRungOutcome(p, rung.price, 'tp', rung.cost, profit);
+    s.realizedPnl = round2(s.realizedPnl + profit);
+    s.rebatesEarned = round2(s.rebatesEarned + rebate);
+    if (profit >= 0) { p.wins++; s.wins++; } else { p.losses++; s.losses++; }
+    pos.exit.status = 'filled';
 
-    log(`💰 ${p.symbol} ${side} ladder TP filled ${rung.shares}sh @ ${rung.tp.price.toFixed(2)} (entry ${rung.price.toFixed(2)}) | rebate=+$${rebate.toFixed(4)} | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)} | rung ${rung.price.toFixed(2)} done — paused for rest of window`);
-    registerTrade(p, { side: 'SELL', outcome: side, reason: 'TP', price: rung.tp.price, shares: rung.shares, profit, rebate });
+    const icon = pos.exit.kind === 'TP' ? '💰' : '✅';
+    log(`${icon} ${p.symbol} ${side} ${pos.exit.kind} filled ${pos.shares}sh @ ${pos.exit.price.toFixed(2)} (entry ${pos.entryPrice.toFixed(2)}) | rebate=+$${rebate.toFixed(4)} | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
+    registerTrade(p, { side: 'SELL', outcome: side, reason: pos.exit.kind, price: pos.exit.price, shares: pos.shares, profit, rebate });
     recordEquity(p);
+    // filled position dropped — not pushed back into stillOpen
+  }
+  s.positions = stillOpen;
+}
+
+// ─────────────────────────────────────────
+//  285s sweep: cancel unfilled buys + unfilled TPs, roll remainder into 0.99 sell
+// ─────────────────────────────────────────
+async function maybeSweep(p, elapsed) {
+  if (p.sweepDone || elapsed < SWEEP_SECS) return;
+  p.sweepDone = true;
+
+  for (const side of ['Up', 'Down']) {
+    const s = p.sides[side];
+
+    if (s.buyOrders.length) {
+      for (const order of s.buyOrders) {
+        await cancelOrder(order.orderId);
+        log(`🛑 ${p.symbol} ${side}: unfilled ${order.kind} buy ${order.shares}sh @ ${order.price.toFixed(2)} cancelled at ${SWEEP_SECS}s`);
+      }
+      s.buyOrders = [];
+    }
+
+    let sweepShares = 0, sweepCost = 0;
+    const kept = [];
+    for (const pos of s.positions) {
+      if (pos.exit.status === 'resting') {
+        await cancelOrder(pos.exit.orderId);
+        sweepShares += pos.shares;
+        sweepCost = round2(sweepCost + pos.cost);
+      } else {
+        kept.push(pos); // already filled/closed, shouldn't normally happen here
+      }
+    }
+    s.positions = kept;
+
+    if (sweepShares > 0) {
+      const tokenId = side === 'Up' ? p.upTokenId : p.downTokenId;
+      const order = await placeLimitSell(tokenId, FINAL_SELL_PRICE, sweepShares);
+      s.positions.push({
+        entryPrice: round2(sweepCost / sweepShares), shares: sweepShares, cost: sweepCost,
+        exit: { kind: 'FINAL', price: FINAL_SELL_PRICE, orderId: order.id || order.orderId || null, status: 'resting' },
+        openedAt: Date.now(),
+      });
+      log(`🎯 ${p.symbol} ${side}: cancelled ${sweepShares}sh of pending TPs, resting FINAL SELL @ ${FINAL_SELL_PRICE} for combined ${sweepShares}sh`);
+    }
   }
 }
 
@@ -735,82 +588,46 @@ async function determineWinningSide(p) {
 }
 
 async function resolvePairWindow(p) {
-  if (p.resolvedThisWindow || p.resolving) return;
-  p.resolving = true;
-  try {
-    // Safety net only — the 280s cutoff should already have cleared these,
-    // but if a window ends unexpectedly early, don't leave dangling orders.
-    for (const side of ['Up', 'Down']) {
-      const s = p.sides[side];
-      for (const rung of s.ladder) {
-        if (rung.status === 'resting') { await cancelOrder(rung.orderId); rung.status = 'cancelled'; log(`🛑 ${p.symbol} ${side}: unfilled ladder BUY @ ${rung.price.toFixed(2)} cancelled at window close`); }
-        else if (rung.status === 'pending') { rung.status = 'cancelled'; }
+  if (p.resolvedThisWindow) return;
+  p.resolvedThisWindow = true;
+
+  for (const side of ['Up', 'Down']) {
+    const s = p.sides[side];
+    for (const order of s.buyOrders) {
+      await cancelOrder(order.orderId);
+      log(`🛑 ${p.symbol} ${side}: unfilled ${order.kind} buy ${order.shares}sh cancelled at window close`);
+    }
+    s.buyOrders = [];
+    for (const pos of s.positions) {
+      if (pos.exit.status === 'resting') {
+        await cancelOrder(pos.exit.orderId);
+        log(`🛑 ${p.symbol} ${side}: unfilled ${pos.exit.kind} cancelled at window close — resolving instead`);
       }
     }
-
-    const anyOpen = ['Up', 'Down'].some(side => p.sides[side].ladder.some(r => r.status === 'filled'));
-
-    // Always determine the winner at window close — not just when there
-    // are open positions to settle. loadPairWindow's weekday directional
-    // filter needs to know who won THIS window to pick next window's
-    // active side, regardless of whether anything was open here.
-    const winner = await determineWinningSide(p);
-    if (winner) {
-      p.lastWinnerSide = winner;
-      log(`🧭 ${p.symbol}: window closed ${winner} — weekday mode will target ${winner} next window @ TP ${WEEKDAY_FILTER_TP_PRICE.toFixed(2)}`);
-    }
-
-    if (anyOpen) {
-      for (const side of ['Up', 'Down']) {
-        const s = p.sides[side];
-        for (const rung of s.ladder) {
-          if (rung.status !== 'filled') continue;
-
-          if (rung.tp && rung.tp.status === 'resting') {
-            await cancelOrder(rung.tp.orderId);
-            log(`🛑 ${p.symbol} ${side}: unfilled TP @ ${rung.tp.price.toFixed(2)} (ladder ${rung.price.toFixed(2)}) cancelled at window close — resolving instead`);
-          }
-
-          const won = winner === side;
-          const proceeds = won ? round2(rung.shares * 1) : 0;
-          const profit = round2(proceeds - rung.cost);
-          p.bankroll = round2(p.bankroll + proceeds);
-          p.realizedPnl = round2(p.realizedPnl + profit);
-          if (won) p.wins++; else p.losses++;
-          const icon = won ? '💰' : '💥';
-          log(`${icon} ${p.symbol} RESOLUTION ${side} ladder@${rung.price.toFixed(2)} ${rung.shares}sh cost=$${rung.cost.toFixed(2)} exit=$${won ? '1.00' : '0.00'}/sh | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
-          registerTrade(p, { side: 'SELL', outcome: side, reason: 'RESOLUTION', price: won ? 1 : 0, shares: rung.shares, profit });
-          rung.status = 'resolved';
-          recordRungOutcome(p, rung.price, won ? 'resolved-win' : 'resolved-loss', rung.cost, profit);
-        }
-      }
-      recordEquity(p);
-    }
-
-    // Only mark this window fully resolved once every open rung above has
-    // actually been settled — if anything threw partway through, we fall
-    // into the catch below and resolvedThisWindow stays false, so the very
-    // next tick retries resolution instead of silently losing the position.
-    p.resolvedThisWindow = true;
-
-    // Clear the ladder the instant resolution finishes — do NOT wait for
-    // loadPairWindow() to (maybe) find the next window's market first.
-    // Previously the ladder was only reset once the new window's event was
-    // successfully fetched from Gamma; if that fetch failed or wasn't
-    // indexed yet (common right at the window boundary), the just-resolved
-    // rungs — and their stale, already-expired windowEnd countdown — kept
-    // rendering in the dashboard as if they belonged to the live window.
-    // Resetting here means there's a clean, empty ladder the whole time
-    // we're waiting to attach to the next window, with no gap where old
-    // positions can leak forward.
-    p.ladderGen++;
-    p.sides = { Up: freshSideState(p.ladderGen), Down: freshSideState(p.ladderGen) };
-    p.tradable = false;
-  } catch (e) {
-    log(`❌ ${p.symbol}: resolvePairWindow error — ${e.message}. Will retry next tick; no positions marked resolved yet.`);
-  } finally {
-    p.resolving = false;
   }
+
+  const anyPosition = ['Up', 'Down'].some(s => sideHeldShares(p.sides[s]) > 0);
+  if (!anyPosition) return;
+
+  const winner = await determineWinningSide(p);
+  for (const side of ['Up', 'Down']) {
+    const s = p.sides[side];
+    const shares = sideHeldShares(s);
+    if (shares <= 0) continue;
+    const cost = sideHeldCost(s);
+    const won = winner === side;
+    const proceeds = won ? round2(shares * 1) : 0;
+    const profit = round2(proceeds - cost);
+    p.bankroll = round2(p.bankroll + proceeds);
+    p.realizedPnl = round2(p.realizedPnl + profit);
+    s.realizedPnl = round2(s.realizedPnl + profit);
+    if (won) { p.wins++; s.wins++; } else { p.losses++; s.losses++; }
+    const icon = won ? '💰' : '💥';
+    log(`${icon} ${p.symbol} RESOLUTION ${side} ${shares}sh cost=$${cost.toFixed(2)} exit=$${won ? '1.00' : '0.00'}/sh | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
+    registerTrade(p, { side: 'SELL', outcome: side, reason: 'RESOLUTION', price: won ? 1 : 0, shares, profit });
+    s.positions = [];
+  }
+  recordEquity(p);
 }
 
 // ─────────────────────────────────────────
@@ -819,10 +636,7 @@ async function resolvePairWindow(p) {
 async function processPair(p) {
   const ws = currentWindowStart();
   if (p.windowStart === null || ws !== p.windowStart) {
-    if (p.windowStart !== null && !p.resolvedThisWindow) {
-      await resolvePairWindow(p);
-      if (!p.resolvedThisWindow) return; // not actually resolved yet — don't touch window state, retry next tick
-    }
+    if (p.windowStart !== null && !p.resolvedThisWindow) await resolvePairWindow(p);
     await loadPairWindow(p);
   }
   if (!p.tradable) return;
@@ -831,10 +645,12 @@ async function processPair(p) {
   const elapsed = nowSec() - p.windowStart;
 
   for (const side of ['Up', 'Down']) {
-    await checkLadderBuyFills(p, side);
-    await checkLadderTpFills(p, side);
-    await tickLadder(p, side, elapsed); // places pending rungs pre-280s, pauses/cancels at 280s
+    await checkBuyFillsAndExpiry(p, side, elapsed);
+    await checkExitFills(p, side);
+    await maybeFireBuyTick(p, side, elapsed);
   }
+
+  await maybeSweep(p, elapsed);
 
   const remaining = p.windowEnd - nowSec();
   if (remaining <= -RESOLUTION_BUFFER_S && !p.resolvedThisWindow) {
@@ -843,78 +659,48 @@ async function processPair(p) {
 }
 
 // ─────────────────────────────────────────
-//  UI state
+//  UI state — full detail per side for dashboard observation
 // ─────────────────────────────────────────
-function sideSummary(p, side) {
+const MAX_TICKS = Math.max(1, Math.ceil(ENTRY_CUTOFF_SECS / BUY_TICK_INTERVAL_SECS));
+
+function sideSummary(p, side, elapsed) {
   const s = p.sides[side];
-  const ladder = s.ladder.slice().sort((a, b) => b.price - a.price).map(r => ({
-    price: r.price, status: r.status, shares: r.shares, cost: r.cost,
-    tpPrice: r.tp ? r.tp.price : null, tpStatus: r.tp ? r.tp.status : null,
-  }));
+  const restingBuys = s.buyOrders
+    .slice()
+    .sort((a, b) => a.placedAt - b.placedAt)
+    .map(o => ({
+      price: o.price, shares: o.shares, cost: o.cost, sizedUp: !!o.sizedUp, kind: o.kind,
+      ageSecs: Math.floor((Date.now() - o.placedAt) / 1000),
+      expiresInSecs: Math.max(0, Math.round(CANCEL_TIMEOUT_SECS - (Date.now() - o.placedAt) / 1000)),
+    }));
+  const openTps = s.positions
+    .filter(pos => pos.exit.status === 'resting' && pos.exit.kind === 'TP')
+    .map(pos => ({ entryPrice: pos.entryPrice, shares: pos.shares, tpPrice: pos.exit.price }));
+  const openFinals = s.positions
+    .filter(pos => pos.exit.status === 'resting' && pos.exit.kind === 'FINAL')
+    .map(pos => ({ shares: pos.shares, price: pos.exit.price }));
 
-  const pendingCount   = s.ladder.filter(r => r.status === 'pending').length;
-  const restingCount   = s.ladder.filter(r => r.status === 'resting').length;
-  const openCount      = s.ladder.filter(r => r.status === 'filled').length;   // holding, TP resting
-  const doneCount      = s.ladder.filter(r => r.status === 'done').length;     // TP hit — retired
-  const cancelledCount = s.ladder.filter(r => r.status === 'cancelled').length; // paused at cutoff
-  const resolvedCount  = s.ladder.filter(r => r.status === 'resolved').length; // settled at window close
-
-  const restingCost = round2(s.ladder.filter(r => r.status === 'resting').reduce((a, r) => a + r.cost, 0));
+  const entriesOpen = elapsed != null && elapsed < ENTRY_CUTOFF_SECS;
+  const nextTickInSecs = entriesOpen
+    ? Math.max(0, Math.round((s.buyTicksFired * BUY_TICK_INTERVAL_SECS) - elapsed))
+    : null;
 
   return {
-    ladder,
-    ladderSize: s.ladder.length,
-    pendingCount, restingCount, openCount, doneCount, cancelledCount, resolvedCount,
-    restingCost,
+    restingBuys,
+    restingBuyCount: restingBuys.length,
+    restingBuyCost: sideRestingBuyCost(s),
     heldShares: sideHeldShares(s),
     heldCost: sideHeldCost(s),
-    cutoffDone: !!s.cutoffDone,
+    openTps,
+    openFinals,
+    buyTicksFired: s.buyTicksFired,
+    maxTicks: MAX_TICKS,
+    nextTickInSecs,
+    wins: s.wins,
+    losses: s.losses,
+    realizedPnl: s.realizedPnl,
+    rebatesEarned: s.rebatesEarned,
   };
-}
-
-// Combines every pair's lifetime per-price-level stats into one table, sorted
-// high-to-low price. This is the actual "is there an edge" answer: for each
-// rung price, how many times it filled, what fraction of those eventually
-// won (via TP bounce or outright resolution) vs lost outright at $0, and the
-// realized dollar expectancy per fill and per dollar risked at that price.
-function aggregateRungStats() {
-  const agg = {};
-  for (const price of LADDER_PRICES) {
-    agg[price.toFixed(2)] = { price, fills: 0, tpWins: 0, resolvedWins: 0, resolvedLosses: 0, totalCost: 0, totalPnl: 0 };
-  }
-  for (const p of Object.values(pairs)) {
-    for (const price of LADDER_PRICES) {
-      const key = price.toFixed(2);
-      const rs = p.rungStats[key];
-      if (!rs) continue;
-      const a = agg[key];
-      a.fills += rs.fills;
-      a.tpWins += rs.tpWins;
-      a.resolvedWins += rs.resolvedWins;
-      a.resolvedLosses += rs.resolvedLosses;
-      a.totalCost = round2(a.totalCost + rs.totalCost);
-      a.totalPnl = round2(a.totalPnl + rs.totalPnl);
-    }
-  }
-  return Object.values(agg)
-    .map(r => {
-      const closed = r.tpWins + r.resolvedWins + r.resolvedLosses; // fills with a known final outcome
-      const wins = r.tpWins + r.resolvedWins;
-      return {
-        price: r.price,
-        fills: r.fills,
-        openCount: Math.max(0, r.fills - closed), // still holding, outcome not yet known
-        tpWins: r.tpWins,
-        resolvedWins: r.resolvedWins,
-        resolvedLosses: r.resolvedLosses,
-        winRate: closed > 0 ? round2((wins / closed) * 100) : null,
-        totalCost: r.totalCost,
-        totalPnl: r.totalPnl,
-        avgPnlPerFill: r.fills > 0 ? round2(r.totalPnl / r.fills) : null,
-        roiPct: r.totalCost > 0 ? round2((r.totalPnl / r.totalCost) * 100) : null,
-      };
-    })
-    .sort((a, b) => b.price - a.price);
 }
 
 function buildState() {
@@ -924,20 +710,18 @@ function buildState() {
     const elapsed = p.windowStart != null ? Math.max(0, nowSec() - p.windowStart) : null;
     let phase = '—';
     if (p.tradable && elapsed != null) {
-      phase = elapsed >= ENTRY_CUTOFF_SECS ? 'CUTOFF/HOLDING' : 'LADDER OPEN';
+      phase = elapsed >= SWEEP_SECS ? 'SWEPT / RESOLVING' : (elapsed >= ENTRY_CUTOFF_SECS ? 'NO NEW ENTRIES' : 'ENTRIES OPEN');
     }
     return {
       symbol: p.symbol,
       tradable: p.tradable,
       slug: p.slug,
+      eventTitle: p.eventTitle,
       windowEnd: p.windowEnd,
+      elapsedSecs: elapsed != null ? Math.floor(elapsed) : null,
       secsToEnd: p.windowEnd ? Math.max(0, Math.floor(p.windowEnd - nowSec())) : null,
       upAsk: p.upAsk, upBid: p.upBid, downAsk: p.downAsk, downBid: p.downBid,
       phase,
-      mode: p.mode,
-      activeSides: p.activeSides,
-      tpPrice: p.tpPrice,
-      lastWinnerSide: p.lastWinnerSide,
       bankroll: p.bankroll,
       realizedPnl: p.realizedPnl,
       unrealizedPnl: unrealized,
@@ -946,7 +730,7 @@ function buildState() {
       rebatesEarned: p.rebatesEarned,
       wins: p.wins,
       losses: p.losses,
-      sides: { Up: sideSummary(p, 'Up'), Down: sideSummary(p, 'Down') },
+      sides: { Up: sideSummary(p, 'Up', elapsed), Down: sideSummary(p, 'Down', elapsed) },
       equityCurve: p.equityCurve,
     };
   });
@@ -977,23 +761,26 @@ function buildState() {
     winRate: (totalWins + totalLosses) > 0 ? round2((totalWins / (totalWins + totalLosses)) * 100) : null,
     uptime: Math.floor((Date.now() - startTime) / 1000),
     config: {
-      ladderMin: LADDER_MIN,
-      ladderMax: LADDER_MAX,
-      ladderStep: LADDER_STEP,
-      ladderPrices: LADDER_PRICES,
-      tpPrice: TP_PRICE,
-      weekdayFilterTpPrice: WEEKDAY_FILTER_TP_PRICE,
-      fixedShares: FIXED_SHARES,
+      buyOffset: BUY_OFFSET,
+      tpOffset: TP_OFFSET,
+      buyTickIntervalSecs: BUY_TICK_INTERVAL_SECS,
+      cancelTimeoutSecs: CANCEL_TIMEOUT_SECS,
+      entryZoneMin: ENTRY_ZONE_MIN,
+      entryZoneMax: ENTRY_ZONE_MAX,
       entryCutoffSecs: ENTRY_CUTOFF_SECS,
+      sweepSecs: SWEEP_SECS,
+      finalSellPrice: FINAL_SELL_PRICE,
+      fixedShares: FIXED_SHARES,
+      highPriceAfterSecs: HIGH_PRICE_AFTER_SECS,
+      highPriceThreshold: HIGH_PRICE_THRESHOLD,
+      highPriceShares: HIGH_PRICE_SHARES,
       cryptoTakerFeeRate: CRYPTO_TAKER_FEE_RATE,
       cryptoMakerRebateShare: CRYPTO_MAKER_REBATE_SHARE,
     },
-    schedule: getScheduleInfo(),
     pairStates,
     totalEquityCurve,
-    rungStats: aggregateRungStats(),
-    logs: logs.slice(-100),
-    trades: trades.slice(-80).reverse(),
+    logs: logs.slice(-120),
+    trades: trades.slice(-100).reverse(),
   };
 }
 
@@ -1051,14 +838,14 @@ function getStatus() { return { ok: true, ...buildState() }; }
 async function init(privateKey, emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
-  log(`🚀 5-Minute BTC Up/Down — Fixed-Price Ladder Scalper`);
+  log(`🚀 5-Minute BTC Up/Down — Ticker + Counter-Bet Scalper`);
   log(`⚙️  $${TOTAL_CAPITAL} demo capital across ${pairList.length} pair(s) (${pairList.join(', ')}) → $${perPairCapital.toFixed(2)}/pair`);
-  log(`⚙️  Ladder (per side, both Up & Down): ${LADDER_PRICES.map(p => p.toFixed(2)).join(', ')} — ${FIXED_SHARES}sh per rung, fixed absolute prices, never re-pegged`);
-  log(`⚙️  Each rung trades once per window: BUY fills → TP rests @ ${TP_PRICE.toFixed(2)} → if TP fills, rung is done and paused for the rest of the window`);
-  log(`⚙️  At ${ENTRY_CUTOFF_SECS}s: any unplaced or unfilled rung is cancelled and paused for the rest of the window. Open TP positions ride untouched to window close.`);
-  log(`⚙️  Unfilled TP at window close → resolves to actual outcome ($1/sh win, $0/sh loss)`);
-  log(`⚙️  Schedule: WEEKEND (Fri 5:00pm Sydney → Sun 5:00pm ET) trades both sides, TP ${TP_PRICE.toFixed(2)}. Outside that window: weekday directional filter — only the side that won the previous window trades, TP ${WEEKDAY_FILTER_TP_PRICE.toFixed(2)}.`);
-  log(`⚙️  fees: all buys + TP sells are maker (0 fee, +${(CRYPTO_MAKER_REBATE_SHARE*100).toFixed(0)}% rebate) | no taker orders in this strategy`);
+  log(`⚙️  Each side independently, every ${BUY_TICK_INTERVAL_SECS}s: new buy @ mid − ${BUY_OFFSET}, ${FIXED_SHARES}sh, only if mid in [${ENTRY_ZONE_MIN}-${ENTRY_ZONE_MAX}]`);
+  log(`⚙️  Unfilled buys cancelled after ${CANCEL_TIMEOUT_SECS}s | any fill rests a TP @ entry + ${TP_OFFSET} and fires a counter-bet on the opposite side`);
+  log(`⚙️  After ${HIGH_PRICE_AFTER_SECS}s: if a side's mid > ${HIGH_PRICE_THRESHOLD}, that side's next buy sizes up to ${HIGH_PRICE_SHARES}sh`);
+  log(`⚙️  No new entries after ${ENTRY_CUTOFF_SECS}s | at ${SWEEP_SECS}s: cancel unfilled buys/TPs, roll remainder into one @ ${FINAL_SELL_PRICE} sell per side`);
+  log(`⚙️  Unfilled ${FINAL_SELL_PRICE} sell at window close → resolves to actual outcome`);
+  log(`⚙️  fees: all buys + TP + final sell are maker (0 fee, +${(CRYPTO_MAKER_REBATE_SHARE*100).toFixed(0)}% rebate) | no taker orders in this strategy`);
   log(`${DRY_RUN ? '⚠️  DRY RUN — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
   trader = new PolymarketTrader(privateKey);
