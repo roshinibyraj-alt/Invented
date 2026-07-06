@@ -14,8 +14,7 @@
  *      this tick (still counts as fired, tries again next tick).
  *    - Fires every 10s regardless of any earlier orders' status —
  *      orders can stack/overlap freely.
- *    - Sized FIXED_SHARES, or HIGH_PRICE_SHARES once elapsed ≥
- *      HIGH_PRICE_AFTER_SECS and mid > HIGH_PRICE_THRESHOLD.
+ *    - Always sized FIXED_SHARES.
  *
  *  EXPIRY: any resting buy (ticker- or counter-bet-placed) that
  *  hasn't filled within CANCEL_TIMEOUT_SECS (8s) of being placed is
@@ -80,12 +79,6 @@ const ENTRY_CUTOFF_SECS      = Number(process.env.ENTRY_CUTOFF_SECS || 280);    
 const SWEEP_SECS             = Number(process.env.SWEEP_SECS || 285);           // cancel unfilled + rest final sell
 const FINAL_SELL_PRICE       = Number(process.env.FINAL_SELL_PRICE || 0.99);
 const FIXED_SHARES           = Number(process.env.FIXED_SHARES || 50);
-
-// After this many seconds elapsed, if a side's current mid price is above
-// the threshold, that side's NEXT buy (ticker or counter) sizes up.
-const HIGH_PRICE_AFTER_SECS = Number(process.env.HIGH_PRICE_AFTER_SECS || 150);
-const HIGH_PRICE_THRESHOLD  = Number(process.env.HIGH_PRICE_THRESHOLD || 0.60);
-const HIGH_PRICE_SHARES     = Number(process.env.HIGH_PRICE_SHARES || 100);
 
 // ── Fees & maker rebates (Polymarket Fee Structure V2, crypto category) ──
 const CRYPTO_TAKER_FEE_RATE     = Number(process.env.CRYPTO_TAKER_FEE_RATE || 0.07);
@@ -158,7 +151,7 @@ function makerRebate(shares, price) {
 // ─────────────────────────────────────────
 function freshSideState() {
   return {
-    buyOrders: [],        // { orderId, price, shares, cost, sizedUp, kind:'TICKER'|'COUNTER', placedAt } (RESTING only)
+    buyOrders: [],        // { orderId, price, shares, cost, kind:'TICKER'|'COUNTER', placedAt } (RESTING only)
     positions: [],         // { entryPrice, shares, cost, exit: { kind:'TP'|'FINAL', price, orderId, status }, openedAt }
     buyTicksFired: 0,
     wins: 0, losses: 0,
@@ -405,8 +398,7 @@ async function placeBuyOrder(p, side, elapsed, kind) {
     return;
   }
 
-  const sizedUp = elapsed >= HIGH_PRICE_AFTER_SECS && mid > HIGH_PRICE_THRESHOLD;
-  const shares = sizedUp ? HIGH_PRICE_SHARES : FIXED_SHARES;
+  const shares = FIXED_SHARES;
   const price = round2(Math.max(0.01, mid - BUY_OFFSET));
   const cost = round2(price * shares);
 
@@ -420,11 +412,11 @@ async function placeBuyOrder(p, side, elapsed, kind) {
   const order = await placeLimitBuy(tokenId, price, shares);
   s.buyOrders.push({
     orderId: order.id || order.orderId || null,
-    price, shares, cost, sizedUp, kind,
+    price, shares, cost, kind,
     placedAt: Date.now(),
   });
   const tag = kind === 'COUNTER' ? '🔁 COUNTER-BET' : '📥 TICKER';
-  log(`${tag} ${p.symbol} ${side}: resting BUY ${shares}sh @ ${price.toFixed(2)} (mid ${mid.toFixed(2)} − ${BUY_OFFSET})${sizedUp ? ` [SIZED UP]` : ''}`);
+  log(`${tag} ${p.symbol} ${side}: resting BUY ${shares}sh @ ${price.toFixed(2)} (mid ${mid.toFixed(2)} − ${BUY_OFFSET})`);
 }
 
 async function maybeFireBuyTick(p, side, elapsed) {
@@ -634,9 +626,20 @@ async function resolvePairWindow(p) {
 //  Main per-pair tick
 // ─────────────────────────────────────────
 async function processPair(p) {
+  // Give the old window's FINAL sell up to RESOLUTION_BUFFER_S extra seconds
+  // to fill before we force-resolve and roll over to the next window. This
+  // must run BEFORE the rollover check below, otherwise ws !== p.windowStart
+  // fires the instant the clock crosses the boundary and resolves the window
+  // immediately, starving the buffer down to 0s.
+  if (p.windowStart !== null && !p.resolvedThisWindow) {
+    const remainingOld = p.windowEnd - nowSec();
+    if (remainingOld <= -RESOLUTION_BUFFER_S) {
+      await resolvePairWindow(p);
+    }
+  }
+
   const ws = currentWindowStart();
-  if (p.windowStart === null || ws !== p.windowStart) {
-    if (p.windowStart !== null && !p.resolvedThisWindow) await resolvePairWindow(p);
+  if (p.windowStart === null || (ws !== p.windowStart && p.resolvedThisWindow)) {
     await loadPairWindow(p);
   }
   if (!p.tradable) return;
@@ -651,11 +654,6 @@ async function processPair(p) {
   }
 
   await maybeSweep(p, elapsed);
-
-  const remaining = p.windowEnd - nowSec();
-  if (remaining <= -RESOLUTION_BUFFER_S && !p.resolvedThisWindow) {
-    await resolvePairWindow(p);
-  }
 }
 
 // ─────────────────────────────────────────
@@ -669,7 +667,7 @@ function sideSummary(p, side, elapsed) {
     .slice()
     .sort((a, b) => a.placedAt - b.placedAt)
     .map(o => ({
-      price: o.price, shares: o.shares, cost: o.cost, sizedUp: !!o.sizedUp, kind: o.kind,
+      price: o.price, shares: o.shares, cost: o.cost, kind: o.kind,
       ageSecs: Math.floor((Date.now() - o.placedAt) / 1000),
       expiresInSecs: Math.max(0, Math.round(CANCEL_TIMEOUT_SECS - (Date.now() - o.placedAt) / 1000)),
     }));
@@ -771,9 +769,6 @@ function buildState() {
       sweepSecs: SWEEP_SECS,
       finalSellPrice: FINAL_SELL_PRICE,
       fixedShares: FIXED_SHARES,
-      highPriceAfterSecs: HIGH_PRICE_AFTER_SECS,
-      highPriceThreshold: HIGH_PRICE_THRESHOLD,
-      highPriceShares: HIGH_PRICE_SHARES,
       cryptoTakerFeeRate: CRYPTO_TAKER_FEE_RATE,
       cryptoMakerRebateShare: CRYPTO_MAKER_REBATE_SHARE,
     },
@@ -842,7 +837,6 @@ async function init(privateKey, emit, slogFn) {
   log(`⚙️  $${TOTAL_CAPITAL} demo capital across ${pairList.length} pair(s) (${pairList.join(', ')}) → $${perPairCapital.toFixed(2)}/pair`);
   log(`⚙️  Each side independently, every ${BUY_TICK_INTERVAL_SECS}s: new buy @ mid − ${BUY_OFFSET}, ${FIXED_SHARES}sh, only if mid in [${ENTRY_ZONE_MIN}-${ENTRY_ZONE_MAX}]`);
   log(`⚙️  Unfilled buys cancelled after ${CANCEL_TIMEOUT_SECS}s | any fill rests a TP @ entry + ${TP_OFFSET} and fires a counter-bet on the opposite side`);
-  log(`⚙️  After ${HIGH_PRICE_AFTER_SECS}s: if a side's mid > ${HIGH_PRICE_THRESHOLD}, that side's next buy sizes up to ${HIGH_PRICE_SHARES}sh`);
   log(`⚙️  No new entries after ${ENTRY_CUTOFF_SECS}s | at ${SWEEP_SECS}s: cancel unfilled buys/TPs, roll remainder into one @ ${FINAL_SELL_PRICE} sell per side`);
   log(`⚙️  Unfilled ${FINAL_SELL_PRICE} sell at window close → resolves to actual outcome`);
   log(`⚙️  fees: all buys + TP + final sell are maker (0 fee, +${(CRYPTO_MAKER_REBATE_SHARE*100).toFixed(0)}% rebate) | no taker orders in this strategy`);
