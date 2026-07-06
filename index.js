@@ -30,7 +30,7 @@ app.get('/', (_, res) => {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>⏱️ BTC Time Decay Overreversion</title>
+<title>⏱️ BTC Time Decay Momentum</title>
 <style>
   :root {
     --bg: #ffffff; --bg2: #f5f7fa; --bg3: #edf0f4; --border: #d0d7e2;
@@ -109,7 +109,7 @@ app.get('/', (_, res) => {
 </head>
 <body>
   <div class="header">
-    <div class="logo">⏱️ Time<span>Decay</span></div>
+    <div class="logo">⏱️ Momentum<span>Continuation</span></div>
     <div class="mode-badge" id="mode-badge">loading…</div>
   </div>
   <div class="toolbar">
@@ -138,7 +138,7 @@ app.get('/', (_, res) => {
   </div>
 
   <div class="section">
-    <div class="section-hdr">Overreversion Trades</div>
+    <div class="section-hdr">Momentum Trades</div>
     <div class="pair-grid" id="pair-grid"><div class="empty">Loading…</div></div>
   </div>
 
@@ -249,7 +249,7 @@ app.get('/', (_, res) => {
           tradeHtml = '<div style="color:var(--muted);font-size:9px;padding:4px;">All trades closed</div>';
         }
         if (p.tradesPlaced === 0 && p.tradable && elapsed > 10) {
-          tradeHtml = '<div style="color:var(--muted);font-size:9px;padding:4px;">Waiting for overreaction…</div>';
+          tradeHtml = '<div style="color:var(--muted);font-size:9px;padding:4px;">Waiting for momentum…</div>';
         }
 
         return '<div class="pair-card '+(hasTrades?'has-trades':'')+'">'+
