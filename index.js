@@ -33,7 +33,7 @@ app.get('/', (_, res) => {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>🔁 BTC Ticker + Counter-Bet Scalper</title>
+<title>🎯 BTC Breakout + Flip-Recovery Bot</title>
 <style>
   :root {
     --bg: #ffffff; --bg2: #f5f7fa; --bg3: #edf0f4; --border: #d0d7e2;
@@ -75,10 +75,10 @@ app.get('/', (_, res) => {
   .pair-sym { font-size: 13px; font-weight: bold; color: #ddd; }
   .pair-timer { font-size: 10px; color: var(--cyan); }
   .pair-phase { font-size: 9px; padding: 2px 8px; border-radius: 10px; }
-  .phase-open { background: #00a85433; color: var(--green); }
-  .phase-closed { background: #e6a80033; color: var(--yellow); }
-  .phase-flat { background: #7c3aed33; color: var(--purple); }
-  .phase-sweep { background: #e8304a33; color: var(--red); }
+  .phase-wait { background: #7a8fa833; color: var(--muted); }
+  .phase-monitor { background: #e6a80033; color: var(--yellow); }
+  .phase-pending { background: #7c3aed33; color: var(--purple); }
+  .phase-position { background: #00a85433; color: var(--green); }
   .pair-body { padding: 10px 12px; }
   .pair-row { display: flex; justify-content: space-between; margin-bottom: 4px; font-size: 10px; }
   .pair-key { color: var(--muted); }
@@ -96,6 +96,7 @@ app.get('/', (_, res) => {
   .order-line { font-size: 9px; display: flex; justify-content: space-between; padding: 1px 0; }
   .order-line .tag-ticker { color: var(--cyan); }
   .order-line .tag-counter { color: var(--purple); }
+  .order-line .sizedup { color: var(--gold); }
   .order-line .expiry { color: var(--red); }
   .order-empty { font-size: 9px; color: var(--muted); font-style: italic; }
   .pnl-mini { font-size: 9px; }
@@ -117,7 +118,7 @@ app.get('/', (_, res) => {
 </head>
 <body>
   <div class="header">
-    <div class="logo">🔁 <span>BTC TICKER + COUNTER-BET</span> SCALPER</div>
+    <div class="logo">🎯 <span>BTC BREAKOUT</span> + FLIP-RECOVERY</div>
     <div id="mode-badge" class="mode-badge ${DRY_RUN ? 'mode-dry' : 'mode-live'}">${DRY_RUN ? 'DRY RUN' : '🔴 LIVE'}</div>
   </div>
 
@@ -199,33 +200,30 @@ app.get('/', (_, res) => {
     return '<path d="'+fillPath+'" fill="'+color+'22" stroke="none"/>' + '<path d="'+linePath+'" fill="none" stroke="'+color+'" stroke-width="1.6"/>';
   }
 
-  function buyOrderList(orders) {
-    if (!orders || orders.length === 0) return '<div class="order-empty">none resting</div>';
-    return orders.map(o => {
-      const tagCls = o.kind === 'COUNTER' ? 'tag-counter' : 'tag-ticker';
-      const tagTxt = o.kind === 'COUNTER' ? '🔁CTR' : '📥TICK';
-      return '<div class="order-line"><span><span class="'+tagCls+'">'+tagTxt+'</span> '+o.price.toFixed(2)+' × '+o.shares.toFixed(0)+'sh</span><span class="expiry">expires '+o.expiresInSecs+'s</span></div>';
-    }).join('');
+  function positionBox(p) {
+    const eo = p.entryOrder, pos = p.position;
+    let title = 'No Position';
+    let rows = '<div class="order-empty">waiting for a breakout trigger</div>';
+    if (eo) {
+      title = eo.side + ' — entry pending';
+      rows = '<div class="side-row"><span>Resting Buy</span><span>'+eo.shares.toFixed(2)+'sh @ '+eo.price.toFixed(2)+' ($'+eo.cost.toFixed(2)+')</span></div>'+
+        (eo.chainLevelAtEntry > 0 ? '<div class="side-row"><span>Recovery Target</span><span>+$'+eo.targetProfit.toFixed(2)+'</span></div>' : '<div class="side-row"><span>Sizing</span><span>base (1% bankroll)</span></div>');
+    } else if (pos) {
+      title = pos.side + ' — in position';
+      rows = '<div class="side-row"><span>Entry / Shares</span><span>'+pos.entryPrice.toFixed(2)+' × '+pos.shares.toFixed(2)+'sh ($'+pos.cost.toFixed(2)+')</span></div>'+
+        '<div class="side-row"><span>TP / SL</span><span>'+pos.tpPrice.toFixed(2)+' / '+pos.slPrice.toFixed(2)+'</span></div>'+
+        (pos.chainLevelAtEntry > 0 ? '<div class="side-row"><span>Recovery Target</span><span>+$'+pos.targetProfit.toFixed(2)+'</span></div>' : '');
+    }
+    return '<div class="side-box up"><div class="side-title"><span>Position</span><span class="tick-badge">'+title+'</span></div>'+rows+'</div>';
   }
 
-  function tpOrderList(orders) {
-    if (!orders || orders.length === 0) return '<div class="order-empty">none resting</div>';
-    return orders.map(o => {
-      return '<div class="order-line"><span>'+o.entryPrice.toFixed(2)+' → '+o.tpPrice.toFixed(2)+'</span><span>'+o.shares.toFixed(0)+'sh</span></div>';
-    }).join('');
-  }
-
-  function sideBox(label, cls, s) {
-    if (!s) s = {};
-    const tickTxt = s.nextTickInSecs != null ? ('next ticker buy in '+s.nextTickInSecs+'s') : 'entries closed';
-    return '<div class="side-box '+cls+'">'+
-      '<div class="side-title"><span>'+label+'</span><span class="tick-badge">tick '+(s.buyTicksFired||0)+'/'+(s.maxTicks||'—')+' · '+tickTxt+'</span></div>'+
-      '<div class="side-row"><span>Held Position</span><span>'+(s.heldShares||0).toFixed(0)+'sh ($'+(s.heldCost||0).toFixed(2)+')</span></div>'+
-      '<div class="side-row"><span>Resting Buys</span><span>'+(s.restingBuyCount||0)+' ($'+(s.restingBuyCost||0).toFixed(2)+' reserved)</span></div>'+
-      '<div class="side-row"><span>Pending TP / Final</span><span>'+((s.openTps||[]).length)+' / '+((s.openFinals||[]).length)+'</span></div>'+
-      '<div class="side-row pnl-mini"><span>Side W/L · P&amp;L</span><span class="'+pClass(s.realizedPnl)+'">'+(s.wins||0)+'W/'+(s.losses||0)+'L · '+sgn(s.realizedPnl)+'</span></div>'+
-      '<div class="order-list"><div class="order-list-title">Resting Buy Orders (📥 ticker / 🔁 counter-bet)</div>'+buyOrderList(s.restingBuys)+'</div>'+
-      '<div class="order-list"><div class="order-list-title">Pending TP Sells</div>'+tpOrderList(s.openTps)+'</div>'+
+  function chainBox(p) {
+    const lvlTxt = p.chainLevel === 0 ? 'BASE' : 'RECOVERY L'+p.chainLevel+'/'+ (p.chainLevel + 1);
+    return '<div class="side-box down"><div class="side-title"><span>Recovery Chain</span><span class="tick-badge">'+lvlTxt+'</span></div>'+
+      '<div class="side-row"><span>Cumulative Loss</span><span>$'+(p.cumulativeLoss||0).toFixed(2)+'</span></div>'+
+      '<div class="side-row"><span>Next Target Profit</span><span>'+(p.nextRecoveryTarget!=null ? '+$'+p.nextRecoveryTarget.toFixed(2) : '—')+'</span></div>'+
+      '<div class="side-row pnl-mini"><span>W/L · P&amp;L</span><span class="'+pClass(p.realizedPnl)+'">'+(p.wins||0)+'W/'+(p.losses||0)+'L · '+sgn(p.realizedPnl)+'</span></div>'+
+      (p.windowOutcome ? '<div class="side-row"><span>Last Outcome</span><span>'+p.windowOutcome+'</span></div>' : '')+
     '</div>';
   }
 
@@ -249,17 +247,16 @@ app.get('/', (_, res) => {
     if (!configRendered && s.config) {
       const c = s.config;
       const rows = [
-        ['Buy Offset', '-'+c.buyOffset.toFixed(2)],
-        ['TP Offset', '+'+c.tpOffset.toFixed(2)],
-        ['Buy Tick', c.buyTickIntervalSecs+'s'],
-        ['Cancel Timeout', c.cancelTimeoutSecs+'s'],
-        ['Entry Zone', c.entryZoneMin.toFixed(2)+' – '+c.entryZoneMax.toFixed(2)],
-        ['Fixed Shares', c.fixedShares+'sh'],
-        ['Flatten At', c.flattenSecs+'s'],
-        ['Entry Cutoff', c.entryCutoffSecs+'s'],
-        ['Sweep At', c.sweepSecs+'s'],
-        ['Final Sell Price', c.finalSellPrice.toFixed(2)],
+        ['Wait Period', c.waitSecs+'s'],
+        ['Entry Trigger', '>'+c.entryTriggerPrice.toFixed(2)],
+        ['Entry Price', c.entryTriggerPrice.toFixed(2)],
+        ['Take Profit', c.tpPrice.toFixed(2)],
+        ['Stop Loss (forced)', c.slPrice.toFixed(2)],
+        ['Base Size', (c.basePctOfBankroll*100).toFixed(1)+'% of bankroll'],
+        ['Recovery Add-On', '+$'+c.recoveryProfitAdd.toFixed(2)],
+        ['Max Recovery Attempts', c.maxChainLevel],
         ['Maker Rebate', (c.cryptoMakerRebateShare*100).toFixed(0)+'% of fee'],
+        ['Taker Fee Rate', (c.cryptoTakerFeeRate*100).toFixed(0)+'%'],
       ];
       document.getElementById('config-grid').innerHTML = rows.map(r =>
         '<div class="config-item"><span>'+r[0]+'</span><span>'+r[1]+'</span></div>'
@@ -277,15 +274,16 @@ app.get('/', (_, res) => {
       grid.innerHTML = '<div class="empty">No Asset Data</div>';
     } else {
       grid.innerHTML = s.pairStates.map(p => {
-        const phaseCls = p.phase === 'ENTRIES OPEN' ? 'phase-open' : (p.phase === 'NO NEW ENTRIES' ? 'phase-closed' : (p.phase === 'FLAT' ? 'phase-flat' : 'phase-sweep'));
+        const phaseCls = p.phase === 'WAITING' ? 'phase-wait' : (p.phase === 'MONITORING' ? 'phase-monitor' : (p.phase === 'ENTRY PENDING' ? 'phase-pending' : 'phase-position'));
+        const phaseTimer = p.phase === 'WAITING' ? fmtSecs(p.secsToMonitor)+' to monitor' : fmtSecs(p.secsToEnd)+' left';
         return '<div class="pair-card">'+
-          '<div class="pair-hdr"><div class="pair-sym">'+p.symbol+' (5M Market)</div><div style="display:flex;gap:8px;align-items:center;"><div class="pair-phase '+phaseCls+'">'+p.phase+'</div><div class="pair-timer">'+fmtSecs(p.secsToEnd)+' left</div></div></div>'+
+          '<div class="pair-hdr"><div class="pair-sym">'+p.symbol+' (5M Market)</div><div style="display:flex;gap:8px;align-items:center;"><div class="pair-phase '+phaseCls+'">'+p.phase+'</div><div class="pair-timer">'+phaseTimer+'</div></div></div>'+
           '<div class="pair-body">'+
             '<div class="pair-row"><span class="pair-key">Up Ask/Bid</span><span>'+(p.upAsk?.toFixed(2)||'—')+' / '+(p.upBid?.toFixed(2)||'—')+'</span></div>'+
             '<div class="pair-row"><span class="pair-key">Down Ask/Bid</span><span>'+(p.downAsk?.toFixed(2)||'—')+' / '+(p.downBid?.toFixed(2)||'—')+'</span></div>'+
             '<div class="pair-row"><span class="pair-key">Bankroll</span><span>$'+(p.bankroll||0).toFixed(2)+'</span></div>'+
             '<div class="pair-row"><span class="pair-key">Realized / Unrealized P&amp;L</span><span class="'+pClass(p.realizedPnl)+'">'+sgn(p.realizedPnl)+' / <span class="'+pClass(p.unrealizedPnl)+'">'+sgn(p.unrealizedPnl)+'</span></span></div>'+
-            '<div class="side-grid">'+sideBox('UP','up',p.sides?.Up)+sideBox('DOWN','down',p.sides?.Down)+'</div>'+
+            '<div class="side-grid">'+positionBox(p)+chainBox(p)+'</div>'+
           '</div></div>';
       }).join('');
     }
