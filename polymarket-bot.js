@@ -70,7 +70,8 @@ const DEFAULT_PAIRS = (process.env.CRYPTO_PAIRS || 'BTC')
 const LADDER_MIN        = Number(process.env.LADDER_MIN || 0.05);   // lowest rung price
 const LADDER_MAX        = Number(process.env.LADDER_MAX || 0.50);   // highest rung price
 const LADDER_STEP       = Number(process.env.LADDER_STEP || 0.05);  // distance between rungs
-const TP_PRICE          = Number(process.env.TP_PRICE || 0.70);     // fixed TP for every rung, every side
+const TP_PRICE          = Number(process.env.TP_PRICE || 0.70);     // fixed TP for every rung, weekend mode
+const WEEKDAY_FILTER_TP_PRICE = Number(process.env.WEEKDAY_FILTER_TP_PRICE || 0.99); // TP for the directional-filter side, weekday mode
 const FIXED_SHARES      = Number(process.env.FIXED_SHARES || 50);   // shares per rung
 const ENTRY_CUTOFF_SECS = Number(process.env.ENTRY_CUTOFF_SECS || 280); // cancel/pause unfilled rungs after this
 
@@ -84,6 +85,98 @@ function buildLadderPrices() {
   return prices;
 }
 const LADDER_PRICES = buildLadderPrices();
+
+// ─────────────────────────────────────────
+//  Weekend trading window: Friday 5:00 PM Sydney → Sunday 5:00 PM ET
+//  Outside this window, the bot runs in "weekday directional filter" mode
+//  instead (see loadPairWindow / resolvePairWindow).
+// ─────────────────────────────────────────
+
+// How far ahead of UTC `timeZone` is, in minutes, at the instant `utcMs`
+// (positive east of UTC, e.g. Sydney ≈ +600 or +660 depending on DST).
+function getTzOffsetMinutes(utcMs, timeZone) {
+  const dtf = new Intl.DateTimeFormat('en-US', {
+    timeZone, hourCycle: 'h23',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  });
+  const map = {};
+  for (const part of dtf.formatToParts(new Date(utcMs))) map[part.type] = part.value;
+  const asUtc = Date.UTC(+map.year, +map.month - 1, +map.day, +map.hour, +map.minute, +map.second);
+  return (asUtc - utcMs) / 60000;
+}
+
+// Converts a wall-clock time as observed IN `timeZone` (e.g. "5:00 PM in
+// Sydney") to the actual UTC instant it represents — correctly handles
+// AEST/AEDT, EST/EDT, etc. via a couple of iterations to converge near DST
+// transitions.
+function zonedWallTimeToUtcMs(year, month, day, hour, minute, timeZone) {
+  const literal = Date.UTC(year, month - 1, day, hour, minute, 0);
+  let guess = literal;
+  for (let i = 0; i < 3; i++) {
+    guess = literal - getTzOffsetMinutes(guess, timeZone) * 60000;
+  }
+  return guess;
+}
+
+function getZonedDateParts(utcMs, timeZone) {
+  const dtf = new Intl.DateTimeFormat('en-US', {
+    timeZone, year: 'numeric', month: '2-digit', day: '2-digit', weekday: 'long',
+  });
+  const map = {};
+  for (const part of dtf.formatToParts(new Date(utcMs))) map[part.type] = part.value;
+  return { year: +map.year, month: +map.month, day: +map.day, weekday: map.weekday };
+}
+const ISO_WEEKDAY = { Monday: 1, Tuesday: 2, Wednesday: 3, Thursday: 4, Friday: 5, Saturday: 6, Sunday: 7 };
+
+// True from Friday 5:00 PM Sydney time through Sunday 5:00 PM Eastern Time
+// (inclusive), false otherwise. Computed fresh each call so it correctly
+// tracks both the weekly recurrence and DST changes in either zone.
+function isWeekendTradingMode(nowMs = Date.now()) {
+  const syd = getZonedDateParts(nowMs, 'Australia/Sydney');
+  const daysSinceFriday = (ISO_WEEKDAY[syd.weekday] - 5 + 7) % 7; // 0=Fri,1=Sat,2=Sun,...,6=Thu
+
+  // Pure calendar-day arithmetic on a UTC-noon anchor — never trips over DST
+  // the way subtracting real wall-clock milliseconds could.
+  const sydNoonAnchor = Date.UTC(syd.year, syd.month - 1, syd.day, 12, 0, 0);
+  const fridayAnchor = new Date(sydNoonAnchor - daysSinceFriday * 86400000);
+  const fy = fridayAnchor.getUTCFullYear(), fm = fridayAnchor.getUTCMonth() + 1, fd = fridayAnchor.getUTCDate();
+  const weekendStartUtc = zonedWallTimeToUtcMs(fy, fm, fd, 17, 0, 'Australia/Sydney');
+
+  const sundayAnchor = new Date(Date.UTC(fy, fm - 1, fd, 12, 0, 0) + 2 * 86400000);
+  const sy = sundayAnchor.getUTCFullYear(), sm = sundayAnchor.getUTCMonth() + 1, sd = sundayAnchor.getUTCDate();
+  const weekendEndUtc = zonedWallTimeToUtcMs(sy, sm, sd, 17, 0, 'America/New_York');
+
+  return nowMs >= weekendStartUtc && nowMs <= weekendEndUtc;
+}
+
+// For the dashboard: current mode plus the exact instant the NEXT transition
+// happens (weekend→weekday or weekday→weekend), so the UI can run a live
+// countdown without re-deriving any timezone/DST math itself.
+function getScheduleInfo(nowMs = Date.now()) {
+  const syd = getZonedDateParts(nowMs, 'Australia/Sydney');
+  const daysSinceFriday = (ISO_WEEKDAY[syd.weekday] - 5 + 7) % 7;
+  const sydNoonAnchor = Date.UTC(syd.year, syd.month - 1, syd.day, 12, 0, 0);
+  const fridayAnchor = new Date(sydNoonAnchor - daysSinceFriday * 86400000);
+  let fy = fridayAnchor.getUTCFullYear(), fm = fridayAnchor.getUTCMonth() + 1, fd = fridayAnchor.getUTCDate();
+  let weekendStartUtc = zonedWallTimeToUtcMs(fy, fm, fd, 17, 0, 'Australia/Sydney');
+  const sundayAnchor = new Date(Date.UTC(fy, fm - 1, fd, 12, 0, 0) + 2 * 86400000);
+  const sy = sundayAnchor.getUTCFullYear(), sm = sundayAnchor.getUTCMonth() + 1, sd = sundayAnchor.getUTCDate();
+  const weekendEndUtc = zonedWallTimeToUtcMs(sy, sm, sd, 17, 0, 'America/New_York');
+
+  if (nowMs >= weekendStartUtc && nowMs <= weekendEndUtc) {
+    return { mode: 'weekend', nextBoundaryMs: weekendEndUtc };
+  }
+  // Weekday mode: if this anchor's whole weekend is already behind us, the
+  // next relevant Friday is 7 days after it; otherwise this anchor's Friday
+  // (still ahead of us) is the one we're counting down to.
+  if (nowMs > weekendEndUtc) {
+    const nextFridayAnchor = new Date(Date.UTC(fy, fm - 1, fd, 12, 0, 0) + 7 * 86400000);
+    fy = nextFridayAnchor.getUTCFullYear(); fm = nextFridayAnchor.getUTCMonth() + 1; fd = nextFridayAnchor.getUTCDate();
+    weekendStartUtc = zonedWallTimeToUtcMs(fy, fm, fd, 17, 0, 'Australia/Sydney');
+  }
+  return { mode: 'weekday-filter', nextBoundaryMs: weekendStartUtc };
+}
 
 // ── Fees & maker rebates (Polymarket Fee Structure V2, crypto category) ──
 const CRYPTO_TAKER_FEE_RATE     = Number(process.env.CRYPTO_TAKER_FEE_RATE || 0.07);
@@ -229,6 +322,19 @@ function freshPairState(symbol) {
     rebatesEarned: 0,
     wins: 0, losses: 0,
 
+    // Which side won the MOST RECENTLY RESOLVED window (set in
+    // resolvePairWindow, used by loadPairWindow to drive the weekday
+    // directional filter). Never reset on rollover — deliberately persists
+    // across windows until we learn a new winner.
+    lastWinnerSide: null,
+    // Set fresh every window in loadPairWindow: 'weekend' (both sides, TP
+    // 0.70) or 'weekday-filter' (only lastWinnerSide's ladder active, TP
+    // 0.99). activeSides/tpPrice are what tickLadder/checkLadderBuyFills
+    // actually consult.
+    mode: null,
+    activeSides: ['Up', 'Down'],
+    tpPrice: TP_PRICE,
+
     // Bumped every time `sides` is rebuilt. See freshSideState()'s `gen`
     // field for why this exists.
     ladderGen: 0,
@@ -354,12 +460,29 @@ async function loadPairWindow(p) {
   // so nulling here just makes them wait for the next real price tick.
   p.upAsk = null; p.upBid = null; p.downAsk = null; p.downBid = null;
 
+  // Decide THIS window's trading mode. Weekend (Fri 5pm Sydney → Sun 5pm
+  // ET): trade both sides normally, TP 0.70. Otherwise (weekday): only the
+  // side that won the most recently resolved window gets a ladder at all
+  // this window, with TP pushed out to 0.99 — a momentum-following filter
+  // rather than the weekend's symmetric scalp. If we don't yet know a
+  // winner (e.g. very first window ever), sit this window out entirely
+  // rather than guess.
+  if (isWeekendTradingMode()) {
+    p.mode = 'weekend';
+    p.activeSides = ['Up', 'Down'];
+    p.tpPrice = TP_PRICE;
+  } else {
+    p.mode = 'weekday-filter';
+    p.activeSides = (p.lastWinnerSide === 'Up' || p.lastWinnerSide === 'Down') ? [p.lastWinnerSide] : [];
+    p.tpPrice = WEEKDAY_FILTER_TP_PRICE;
+  }
+
   // reset per-window trading state — safe now: anything still open from the
   // prior window was just resolved above, if there was a prior window at all.
   p.ladderGen++;
   p.sides = { Up: freshSideState(p.ladderGen), Down: freshSideState(p.ladderGen) };
 
-  log(`🔭 ${p.symbol} window loaded: ${slug} | ends ${new Date(p.windowEnd * 1000).toISOString().slice(11,19)}Z`);
+  log(`🔭 ${p.symbol} window loaded: ${slug} | ends ${new Date(p.windowEnd * 1000).toISOString().slice(11,19)}Z | mode=${p.mode} | active=${p.activeSides.join('+') || 'NONE (sitting out — no known last winner)'} | TP=${p.tpPrice.toFixed(2)}`);
 }
 
 // ─────────────────────────────────────────
@@ -490,6 +613,7 @@ async function tickLadder(p, side, elapsed) {
     log(`❌ ${p.symbol} ${side}: stale ladder generation (${s.gen} vs ${p.ladderGen}) — refusing to place/cancel entries. This should never happen; please report.`);
     return;
   }
+  if (!p.activeSides.includes(side)) return; // filtered out this window (weekday directional filter, or sitting out with no known last winner)
 
   if (elapsed >= ENTRY_CUTOFF_SECS) {
     if (s.cutoffDone) return;
@@ -545,12 +669,12 @@ async function checkLadderBuyFills(p, side) {
     p.realizedPnl = round2(p.realizedPnl + rebate);
     p.rebatesEarned = round2(p.rebatesEarned + rebate);
 
-    const tpOrder = await placeLimitSell(tokenId, TP_PRICE, rung.shares);
-    rung.tp = { price: TP_PRICE, orderId: tpOrder.id || tpOrder.orderId || null, status: 'resting' };
+    const tpOrder = await placeLimitSell(tokenId, p.tpPrice, rung.shares);
+    rung.tp = { price: p.tpPrice, orderId: tpOrder.id || tpOrder.orderId || null, status: 'resting' };
     rung.status = 'filled';
     recordRungFill(p, rung.price, rung.cost, rebate);
 
-    log(`🎯 ${p.symbol} ${side} ladder BUY filled ${rung.shares}sh @ ${rung.price.toFixed(2)} | cost=$${rung.cost.toFixed(2)} | rebate=+$${rebate.toFixed(4)} | TP resting @ ${TP_PRICE.toFixed(2)} | rung ${rung.price.toFixed(2)} retired for this window`);
+    log(`🎯 ${p.symbol} ${side} ladder BUY filled ${rung.shares}sh @ ${rung.price.toFixed(2)} | cost=$${rung.cost.toFixed(2)} | rebate=+$${rebate.toFixed(4)} | TP resting @ ${p.tpPrice.toFixed(2)} | rung ${rung.price.toFixed(2)} retired for this window`);
     registerTrade(p, { side: 'BUY', outcome: side, reason: 'ENTRY', price: rung.price, shares: rung.shares, cost: rung.cost, rebate });
     recordEquity(p);
   }
@@ -625,8 +749,18 @@ async function resolvePairWindow(p) {
     }
 
     const anyOpen = ['Up', 'Down'].some(side => p.sides[side].ladder.some(r => r.status === 'filled'));
+
+    // Always determine the winner at window close — not just when there
+    // are open positions to settle. loadPairWindow's weekday directional
+    // filter needs to know who won THIS window to pick next window's
+    // active side, regardless of whether anything was open here.
+    const winner = await determineWinningSide(p);
+    if (winner) {
+      p.lastWinnerSide = winner;
+      log(`🧭 ${p.symbol}: window closed ${winner} — weekday mode will target ${winner} next window @ TP ${WEEKDAY_FILTER_TP_PRICE.toFixed(2)}`);
+    }
+
     if (anyOpen) {
-      const winner = await determineWinningSide(p);
       for (const side of ['Up', 'Down']) {
         const s = p.sides[side];
         for (const rung of s.ladder) {
@@ -800,6 +934,10 @@ function buildState() {
       secsToEnd: p.windowEnd ? Math.max(0, Math.floor(p.windowEnd - nowSec())) : null,
       upAsk: p.upAsk, upBid: p.upBid, downAsk: p.downAsk, downBid: p.downBid,
       phase,
+      mode: p.mode,
+      activeSides: p.activeSides,
+      tpPrice: p.tpPrice,
+      lastWinnerSide: p.lastWinnerSide,
       bankroll: p.bankroll,
       realizedPnl: p.realizedPnl,
       unrealizedPnl: unrealized,
@@ -844,11 +982,13 @@ function buildState() {
       ladderStep: LADDER_STEP,
       ladderPrices: LADDER_PRICES,
       tpPrice: TP_PRICE,
+      weekdayFilterTpPrice: WEEKDAY_FILTER_TP_PRICE,
       fixedShares: FIXED_SHARES,
       entryCutoffSecs: ENTRY_CUTOFF_SECS,
       cryptoTakerFeeRate: CRYPTO_TAKER_FEE_RATE,
       cryptoMakerRebateShare: CRYPTO_MAKER_REBATE_SHARE,
     },
+    schedule: getScheduleInfo(),
     pairStates,
     totalEquityCurve,
     rungStats: aggregateRungStats(),
@@ -917,6 +1057,7 @@ async function init(privateKey, emit, slogFn) {
   log(`⚙️  Each rung trades once per window: BUY fills → TP rests @ ${TP_PRICE.toFixed(2)} → if TP fills, rung is done and paused for the rest of the window`);
   log(`⚙️  At ${ENTRY_CUTOFF_SECS}s: any unplaced or unfilled rung is cancelled and paused for the rest of the window. Open TP positions ride untouched to window close.`);
   log(`⚙️  Unfilled TP at window close → resolves to actual outcome ($1/sh win, $0/sh loss)`);
+  log(`⚙️  Schedule: WEEKEND (Fri 5:00pm Sydney → Sun 5:00pm ET) trades both sides, TP ${TP_PRICE.toFixed(2)}. Outside that window: weekday directional filter — only the side that won the previous window trades, TP ${WEEKDAY_FILTER_TP_PRICE.toFixed(2)}.`);
   log(`⚙️  fees: all buys + TP sells are maker (0 fee, +${(CRYPTO_MAKER_REBATE_SHARE*100).toFixed(0)}% rebate) | no taker orders in this strategy`);
   log(`${DRY_RUN ? '⚠️  DRY RUN — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
