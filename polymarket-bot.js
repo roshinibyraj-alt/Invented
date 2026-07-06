@@ -390,19 +390,29 @@ function calcTpSl(entryPrice) {
   const pair = Object.values(pairs)[0];
   const tf = pair ? timeDecayFactor(pair) : 0.5;
 
-  // TP: target partial or full reversion toward 0.50
-  //   tf=1.0 (early): target = entry + (0.50 - entry) = 0.50 (full reversion)
-  //   tf=0.2 (late):  target = entry + (0.50 - entry) * 0.2 (small reversion)
-  const reversionDist = TP_TARGET_PRICE - entryPrice; // positive for cheap side (< 0.50)
-  const tpPrice = round5(entryPrice + reversionDist * tf);
+  // WIDER TP/SL for Polymarket 5m binary windows.
+  // In these markets prices swing 15-25¢ in seconds and the
+  // bid/ask spread is typically 3-8¢.  Tight TP/SL gets eaten
+  // by normal noise.
+  //
+  // TP: capture 70-100% of the reversion toward 0.50.
+  //   tf=1.0 (early): entry + (0.50-entry)*1.0 = 0.50 (full reversion)
+  //   tf=0.2 (late):  entry + (0.50-entry)*0.76 ≈ 0.45 (still generous)
+  //
+  // SL: keep 41-65% of entry price (35-59% max loss).
+  //   tf=1.0 (early): entry * 0.65 — 10-20¢ buffer (wide, avoids noise)
+  //   tf=0.2 (late):  entry * 0.41 — 12-18¢ buffer (tighter but still safe)
+  const reversionDist = Math.max(0, TP_TARGET_PRICE - entryPrice);
+  const tpCapture = 0.70 + 0.30 * tf;
+  const tpPrice = round5(Math.min(0.50, entryPrice + reversionDist * tpCapture));
 
-  // SL: tighter as time runs out
-  //   tf=1.0 (early): SL = entry * (1 - 0.45) = 0.55*entry (wider loss)
-  //   tf=0.2 (late):  SL = entry * (1 - 0.15) = 0.85*entry (tighter loss)
-  const slMultiplier = 0.15 + 0.30 * tf; // 0.15 to 0.45
-  const slPrice = round5(entryPrice * (1 - slMultiplier));
+  const slKeepFraction = 0.35 + 0.30 * tf;
+  const slPrice = round5(entryPrice * slKeepFraction);
 
-  return { tpPrice: Math.max(entryPrice + 0.001, tpPrice), slPrice: Math.max(0.001, slPrice) };
+  return {
+    tpPrice: Math.max(entryPrice + 0.005, Math.min(0.50, tpPrice)),
+    slPrice: Math.max(0.005, slPrice),
+  };
 }
 
 /**
