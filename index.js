@@ -77,6 +77,7 @@ app.get('/', (_, res) => {
   .pair-phase { font-size: 9px; padding: 2px 8px; border-radius: 10px; }
   .phase-open { background: #00a85433; color: var(--green); }
   .phase-closed { background: #e6a80033; color: var(--yellow); }
+  .phase-flat { background: #7c3aed33; color: var(--purple); }
   .phase-sweep { background: #e8304a33; color: var(--red); }
   .pair-body { padding: 10px 12px; }
   .pair-row { display: flex; justify-content: space-between; margin-bottom: 4px; font-size: 10px; }
@@ -254,6 +255,7 @@ app.get('/', (_, res) => {
         ['Cancel Timeout', c.cancelTimeoutSecs+'s'],
         ['Entry Zone', c.entryZoneMin.toFixed(2)+' – '+c.entryZoneMax.toFixed(2)],
         ['Fixed Shares', c.fixedShares+'sh'],
+        ['Flatten At', c.flattenSecs+'s'],
         ['Entry Cutoff', c.entryCutoffSecs+'s'],
         ['Sweep At', c.sweepSecs+'s'],
         ['Final Sell Price', c.finalSellPrice.toFixed(2)],
@@ -275,7 +277,7 @@ app.get('/', (_, res) => {
       grid.innerHTML = '<div class="empty">No Asset Data</div>';
     } else {
       grid.innerHTML = s.pairStates.map(p => {
-        const phaseCls = p.phase === 'ENTRIES OPEN' ? 'phase-open' : (p.phase === 'NO NEW ENTRIES' ? 'phase-closed' : 'phase-sweep');
+        const phaseCls = p.phase === 'ENTRIES OPEN' ? 'phase-open' : (p.phase === 'NO NEW ENTRIES' ? 'phase-closed' : (p.phase === 'FLAT' ? 'phase-flat' : 'phase-sweep'));
         return '<div class="pair-card">'+
           '<div class="pair-hdr"><div class="pair-sym">'+p.symbol+' (5M Market)</div><div style="display:flex;gap:8px;align-items:center;"><div class="pair-phase '+phaseCls+'">'+p.phase+'</div><div class="pair-timer">'+fmtSecs(p.secsToEnd)+' left</div></div></div>'+
           '<div class="pair-body">'+
