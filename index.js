@@ -95,7 +95,6 @@ app.get('/', (_, res) => {
   .order-line { font-size: 9px; display: flex; justify-content: space-between; padding: 1px 0; }
   .order-line .tag-ticker { color: var(--cyan); }
   .order-line .tag-counter { color: var(--purple); }
-  .order-line .sizedup { color: var(--gold); }
   .order-line .expiry { color: var(--red); }
   .order-empty { font-size: 9px; color: var(--muted); font-style: italic; }
   .pnl-mini { font-size: 9px; }
@@ -204,8 +203,7 @@ app.get('/', (_, res) => {
     return orders.map(o => {
       const tagCls = o.kind === 'COUNTER' ? 'tag-counter' : 'tag-ticker';
       const tagTxt = o.kind === 'COUNTER' ? '🔁CTR' : '📥TICK';
-      const sizedTxt = o.sizedUp ? '<span class="sizedup"> [SIZED]</span>' : '';
-      return '<div class="order-line"><span><span class="'+tagCls+'">'+tagTxt+'</span> '+o.price.toFixed(2)+' × '+o.shares.toFixed(0)+'sh'+sizedTxt+'</span><span class="expiry">expires '+o.expiresInSecs+'s</span></div>';
+      return '<div class="order-line"><span><span class="'+tagCls+'">'+tagTxt+'</span> '+o.price.toFixed(2)+' × '+o.shares.toFixed(0)+'sh</span><span class="expiry">expires '+o.expiresInSecs+'s</span></div>';
     }).join('');
   }
 
@@ -256,9 +254,6 @@ app.get('/', (_, res) => {
         ['Cancel Timeout', c.cancelTimeoutSecs+'s'],
         ['Entry Zone', c.entryZoneMin.toFixed(2)+' – '+c.entryZoneMax.toFixed(2)],
         ['Fixed Shares', c.fixedShares+'sh'],
-        ['Size-Up After', c.highPriceAfterSecs+'s'],
-        ['Size-Up If Mid >', c.highPriceThreshold.toFixed(2)],
-        ['Size-Up Shares', c.highPriceShares+'sh'],
         ['Entry Cutoff', c.entryCutoffSecs+'s'],
         ['Sweep At', c.sweepSecs+'s'],
         ['Final Sell Price', c.finalSellPrice.toFixed(2)],
