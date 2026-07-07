@@ -2,7 +2,7 @@
 
 /**
  * ═══════════════════════════════════════════════════════════════
- *  POLYMARKET 5-MINUTE BTC UP/DOWN — OVERREACTION FADE + TIME-DECAY SCALPER
+ *  POLYMARKET 5-MINUTE BTC UP/DOWN — MOMENTUM THRESHOLD + TIME-DECAY SCALPER
  * ═══════════════════════════════════════════════════════════════
  *
  *  CORE IDEA — "time decay":
@@ -10,14 +10,13 @@
  *    a value that grows from 0 (window just opened) to 1 (window
  *    about to close). The less time remains, the higher the decay.
  *
- *  SIGNAL — "overreaction fade":
- *    Each side's mid price is sampled continuously. If a side spikes
- *    to >= SPIKE_THRESHOLD (0.70) within the last SPIKE_LOOKBACK_SECS
- *    (60s) — i.e. it moved there FAST — that is treated as an
- *    overreaction (too much conviction, too early, priced in too
- *    fast). The bot fades it: it buys the OPPOSITE side, which is
- *    sitting at roughly (1 - spike price) ≈ 0.30, betting on mean
- *    reversion back toward 0.50.
+ *  SIGNAL — "momentum threshold":
+ *    Each side's mid price is sampled continuously. The bot ONLY
+ *    trades a side once that side's OWN price is >= SPIKE_THRESHOLD
+ *    (0.55) — i.e. it buys the side that is currently leading, not
+ *    the opposite one. Once a side is bought, it re-arms only after
+ *    dropping back below (threshold - SPIKE_RESET_MARGIN), so a
+ *    single crossing fires once rather than every tick it stays high.
  *
  *  SIZING BY DECAY:
  *    Bigger decay (later in the window, closer to close) => bigger
@@ -26,12 +25,12 @@
  *
  *  TP / SL BY DECAY:
  *    Early in the window (low decay) there's lots of time left for
- *    the reversion to play out, so TP/SL sit wide. Late in the window
+ *    the price to swing, so TP/SL sit wide. Late in the window
  *    (high decay) there's little time left, so TP/SL are pulled in
  *    tight — offset(decay) = BASE - (BASE - MIN) * decay.
  *
  *  TRADE CAP:
- *    At most MAX_TRADES_PER_WINDOW (5) new fade entries per pair,
+ *    At most MAX_TRADES_PER_WINDOW (5) new entries per pair,
  *    per window, across both sides combined.
  *
  *  EXITS:
@@ -67,12 +66,11 @@ const TOTAL_CAPITAL = Number(process.env.TOTAL_CAPITAL || 2000);
 const DEFAULT_PAIRS = (process.env.CRYPTO_PAIRS || 'BTC')
   .split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
 
-// ── Overreaction-fade signal ──
-const SPIKE_LOOKBACK_SECS = Number(process.env.SPIKE_LOOKBACK_SECS || 60);   // "in 1 minute"
-const SPIKE_THRESHOLD     = Number(process.env.SPIKE_THRESHOLD || 0.70);     // side price that counts as "overreacted"
+// ── Momentum-threshold signal ──
+const SPIKE_THRESHOLD     = Number(process.env.SPIKE_THRESHOLD || 0.55);     // bot only trades a side once its price is >= this
 const SPIKE_RESET_MARGIN  = Number(process.env.SPIKE_RESET_MARGIN || 0.10);  // must fall back below (threshold - margin) to re-arm
 const MAX_TRADES_PER_WINDOW = Number(process.env.MAX_TRADES_PER_WINDOW || 5);
-const ENTRY_CUTOFF_SECS   = Number(process.env.ENTRY_CUTOFF_SECS || 280);    // no new fade entries after this
+const ENTRY_CUTOFF_SECS   = Number(process.env.ENTRY_CUTOFF_SECS || 280);    // no new entries after this
 const SWEEP_SECS          = Number(process.env.SWEEP_SECS || 285);          // cancel resting TPs, roll into final sell
 const FINAL_SELL_PRICE    = Number(process.env.FINAL_SELL_PRICE || 0.99);
 
@@ -116,14 +114,14 @@ function nowSec() { return Date.now() / 1000; }
 function clamp(n, lo, hi) { return Math.max(lo, Math.min(hi, n)); }
 
 async function getJSON(url) {
-  const res = await fetch(url, { headers: { 'User-Agent': 'polymarket-decay-fade-scalper/1.0' } });
+  const res = await fetch(url, { headers: { 'User-Agent': 'polymarket-decay-momentum-scalper/1.0' } });
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${url}`);
   return res.json();
 }
 async function postJSON(url, body) {
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'User-Agent': 'polymarket-decay-fade-scalper/1.0' },
+    headers: { 'Content-Type': 'application/json', 'User-Agent': 'polymarket-decay-momentum-scalper/1.0' },
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${url}`);
@@ -170,8 +168,7 @@ function slOffsetForDecay(decay) { return round2(BASE_SL_OFFSET - (BASE_SL_OFFSE
 // ─────────────────────────────────────────
 function freshSideState() {
   return {
-    priceHistory: [],   // [{ t: ms, price: mid }] pruned to SPIKE_LOOKBACK_SECS
-    armed: true,        // true = eligible to fire a fresh spike signal
+    armed: true,        // true = eligible to fire a fresh threshold-cross entry
     positions: [],      // { entryPrice, shares, cost, slPrice, decay, exit:{kind:'TP'|'FINAL', price, orderId, status}, openedAt }
     wins: 0, losses: 0,
     realizedPnl: 0,
@@ -397,44 +394,27 @@ function midPrice(ask, bid) {
   if (bid != null) return round2(bid);
   return null;
 }
-function oppositeSide(side) { return side === 'Up' ? 'Down' : 'Up'; }
 
 // ─────────────────────────────────────────
-//  Spike (overreaction) tracking
+//  Momentum entry — buys the SAME side that crossed above the
+//  threshold (the leading side), sized and TP/SL'd by time decay.
 // ─────────────────────────────────────────
-function recordPriceHistory(p, side) {
-  const s = p.sides[side];
+async function fireMomentumEntry(p, side, crossMid, elapsed) {
   const ask = side === 'Up' ? p.upAsk : p.downAsk;
-  const bid = side === 'Up' ? p.upBid : p.downBid;
-  const mid = midPrice(ask, bid);
-  if (mid == null) return;
-  const now = Date.now();
-  s.priceHistory.push({ t: now, price: mid });
-  const cutoff = now - SPIKE_LOOKBACK_SECS * 1000;
-  while (s.priceHistory.length > 1 && s.priceHistory[0].t < cutoff) s.priceHistory.shift();
-}
-
-// ─────────────────────────────────────────
-//  Fade entry — buys the OPPOSITE side of a detected overreaction,
-//  sized and TP/SL'd by time decay.
-// ─────────────────────────────────────────
-async function fireFadeEntry(p, spikedSide, spikeMid, elapsed) {
-  const fadeSide = oppositeSide(spikedSide);
-  const ask = fadeSide === 'Up' ? p.upAsk : p.downAsk;
   if (ask == null) {
-    log(`⏭️  ${p.symbol}: ${spikedSide} overreacted to ${spikeMid.toFixed(2)} but no quote on ${fadeSide} yet — skipped fade`);
+    log(`⏭️  ${p.symbol}: ${side} crossed ${crossMid.toFixed(2)} but no quote yet — skipped entry`);
     return;
   }
 
   const decay = decayFactor(elapsed);
   const shares = sharesForDecay(decay);
-  const price = round2(ask); // cross the spread — this is a time-sensitive reversion play, not a passive maker order
+  const price = round2(ask); // cross the spread — this is a time-sensitive momentum entry, not a passive maker order
   const cost = round2(price * shares);
   const fee = takerFee(shares, price);
   const totalCost = round2(cost + fee);
 
   if (totalCost > p.bankroll) {
-    log(`⏭️  ${p.symbol} ${fadeSide}: skip fade entry — insufficient bankroll ($${p.bankroll.toFixed(2)}, need $${totalCost.toFixed(2)})`);
+    log(`⏭️  ${p.symbol} ${side}: skip entry — insufficient bankroll ($${p.bankroll.toFixed(2)}, need $${totalCost.toFixed(2)})`);
     return;
   }
 
@@ -443,8 +423,8 @@ async function fireFadeEntry(p, spikedSide, spikeMid, elapsed) {
   const tpPrice = round2(clamp(price + tpOffset, 0.01, 0.99));
   const slPrice = round2(clamp(price - slOffset, 0.01, 0.99));
 
-  const s = p.sides[fadeSide];
-  const tokenId = fadeSide === 'Up' ? p.upTokenId : p.downTokenId;
+  const s = p.sides[side];
+  const tokenId = side === 'Up' ? p.upTokenId : p.downTokenId;
 
   p.bankroll = round2(p.bankroll - totalCost);
   p.feesPaid = round2(p.feesPaid + fee);
@@ -458,17 +438,18 @@ async function fireFadeEntry(p, spikedSide, spikeMid, elapsed) {
     openedAt: Date.now(),
   });
 
-  log(`⚡ ${p.symbol} ${spikedSide} overreacted to ${spikeMid.toFixed(2)} in <${SPIKE_LOOKBACK_SECS}s — FADE buy ${fadeSide} ${shares}sh @ ${price.toFixed(2)} | decay=${decay.toFixed(2)} | TP ${tpPrice.toFixed(2)} / SL ${slPrice.toFixed(2)} | trade ${p.tradesThisWindow}/${MAX_TRADES_PER_WINDOW}`);
-  registerTrade(p, { side: 'BUY', outcome: fadeSide, reason: 'FADE-ENTRY', price, shares, cost: totalCost, fee });
+  log(`⚡ ${p.symbol} ${side} crossed ${crossMid.toFixed(2)} (>= ${SPIKE_THRESHOLD.toFixed(2)}) — BUY ${side} ${shares}sh @ ${price.toFixed(2)} | decay=${decay.toFixed(2)} | TP ${tpPrice.toFixed(2)} / SL ${slPrice.toFixed(2)} | trade ${p.tradesThisWindow}/${MAX_TRADES_PER_WINDOW}`);
+  registerTrade(p, { side: 'BUY', outcome: side, reason: 'ENTRY', price, shares, cost: totalCost, fee });
   recordEquity(p);
 }
 
 // ─────────────────────────────────────────
-//  Spike detection — runs per side; a spike on `side` fades into the
-//  opposite side. Re-arms only once price falls back below
-//  (threshold - reset margin), so one overreaction fires once.
+//  Threshold detection — runs per side; only trades a side once its
+//  own price is above SPIKE_THRESHOLD (0.55). Re-arms only once price
+//  falls back below (threshold - reset margin), so one crossing fires
+//  once, not on every tick it stays high.
 // ─────────────────────────────────────────
-async function maybeDetectOverreactionAndFade(p, side, elapsed) {
+async function maybeDetectAndTrade(p, side, elapsed) {
   const s = p.sides[side];
   const ask = side === 'Up' ? p.upAsk : p.downAsk;
   const bid = side === 'Up' ? p.upBid : p.downBid;
@@ -476,23 +457,16 @@ async function maybeDetectOverreactionAndFade(p, side, elapsed) {
   if (mid == null) return;
 
   if (!s.armed && mid < SPIKE_THRESHOLD - SPIKE_RESET_MARGIN) {
-    s.armed = true; // reset — a fresh spike on this side can fire again
+    s.armed = true; // reset — a fresh crossing on this side can fire again
   }
 
   if (!s.armed) return;
-  if (mid < SPIKE_THRESHOLD) return;
+  if (mid < SPIKE_THRESHOLD) return; // only trade a side once it is above 0.55
   if (elapsed >= ENTRY_CUTOFF_SECS) return;
   if (p.tradesThisWindow >= MAX_TRADES_PER_WINDOW) return;
 
-  // Confirm this is a FAST move: the oldest sample still inside the
-  // lookback window must have been below the threshold, proving the
-  // crossing happened within the last SPIKE_LOOKBACK_SECS, not just
-  // a price that's been sitting high for a while.
-  const oldest = s.priceHistory[0];
-  if (!oldest || oldest.price >= SPIKE_THRESHOLD) return;
-
   s.armed = false; // consume this signal
-  await fireFadeEntry(p, side, mid, elapsed);
+  await fireMomentumEntry(p, side, mid, elapsed);
 }
 
 // ─────────────────────────────────────────
@@ -662,9 +636,8 @@ async function processPair(p) {
 
   const elapsed = nowSec() - p.windowStart;
 
-  for (const side of ['Up', 'Down']) recordPriceHistory(p, side);
   for (const side of ['Up', 'Down']) await checkPositionExits(p, side);
-  for (const side of ['Up', 'Down']) await maybeDetectOverreactionAndFade(p, side, elapsed);
+  for (const side of ['Up', 'Down']) await maybeDetectAndTrade(p, side, elapsed);
 
   await maybeSweep(p, elapsed);
 
@@ -770,7 +743,6 @@ function buildState() {
     winRate: (totalWins + totalLosses) > 0 ? round2((totalWins / (totalWins + totalLosses)) * 100) : null,
     uptime: Math.floor((Date.now() - startTime) / 1000),
     config: {
-      spikeLookbackSecs: SPIKE_LOOKBACK_SECS,
       spikeThreshold: SPIKE_THRESHOLD,
       spikeResetMargin: SPIKE_RESET_MARGIN,
       maxTradesPerWindow: MAX_TRADES_PER_WINDOW,
@@ -849,10 +821,10 @@ async function init(privateKey, emit, slogFn) {
   slog = slogFn;
   log(`🚀 5-Minute BTC Up/Down — Overreaction Fade + Time-Decay Scalper`);
   log(`⚙️  $${TOTAL_CAPITAL} demo capital across ${pairList.length} pair(s) (${pairList.join(', ')}) → $${perPairCapital.toFixed(2)}/pair`);
-  log(`⚙️  Signal: a side reaching >= ${SPIKE_THRESHOLD} within ${SPIKE_LOOKBACK_SECS}s = overreaction → fade by buying the opposite side`);
+  log(`⚙️  Signal: a side is only traded once its own price is >= ${SPIKE_THRESHOLD} — buys the leading side, not the opposite`);
   log(`⚙️  Sizing by time decay: ${BASE_SHARES}sh at window-open, scaling up to ${Math.min(MAX_SHARES_CAP, Math.round(BASE_SHARES*(1+DECAY_SIZE_MULT)))}sh near window close`);
   log(`⚙️  TP/SL tighten with decay: TP ${BASE_TP_OFFSET}→${MIN_TP_OFFSET}, SL ${BASE_SL_OFFSET}→${MIN_SL_OFFSET} (wide early, tight late)`);
-  log(`⚙️  Max ${MAX_TRADES_PER_WINDOW} new fade entries per pair per window | no new entries after ${ENTRY_CUTOFF_SECS}s`);
+  log(`⚙️  Max ${MAX_TRADES_PER_WINDOW} new entries per pair per window | no new entries after ${ENTRY_CUTOFF_SECS}s`);
   log(`⚙️  At ${SWEEP_SECS}s: cancel unfilled TPs, roll remainder into one @ ${FINAL_SELL_PRICE} sell per side`);
   log(`⚙️  Unfilled ${FINAL_SELL_PRICE} sell at window close → resolves to actual outcome`);
   log(`${DRY_RUN ? '⚠️  DRY RUN — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
