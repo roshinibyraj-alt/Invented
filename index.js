@@ -33,7 +33,7 @@ app.get('/', (_, res) => {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>📊 Independent Up/Down Dip-Buy Grid</title>
+<title>📊 Independent Up/Down Cross-TP Straddle</title>
 <style>
   :root {
     --bg: #ffffff; --bg2: #f5f7fa; --bg3: #edf0f4; --border: #d0d7e2;
@@ -117,7 +117,7 @@ app.get('/', (_, res) => {
 </head>
 <body>
   <div class="header">
-    <div class="logo">📊 <span>INDEPENDENT UP/DOWN DIP-BUY</span> GRID</div>
+    <div class="logo">📊 <span>INDEPENDENT UP/DOWN CROSS-TP</span> STRADDLE</div>
     <div id="mode-badge" class="mode-badge ${DRY_RUN ? 'mode-dry' : 'mode-live'}">${DRY_RUN ? 'DRY RUN' : '🔴 LIVE'}</div>
   </div>
 
@@ -199,15 +199,18 @@ app.get('/', (_, res) => {
     return '<path d="'+fillPath+'" fill="'+color+'22" stroke="none"/>' + '<path d="'+linePath+'" fill="none" stroke="'+color+'" stroke-width="1.6"/>';
   }
 
-  function levelList(levels) {
-    if (!levels || levels.length === 0) return '<div class="order-empty">no levels</div>';
-    return levels.map(lv => {
-      if (lv.position) {
-        return '<div class="order-line"><span><span class="tag-ticker">L'+lv.id+' OPEN</span> '+lv.position.entryPrice.toFixed(2)+' → TP '+lv.tpPrice.toFixed(2)+'</span><span>'+lv.position.shares.toFixed(0)+'sh</span></div>';
-      }
-      const statusTxt = lv.entriesFired >= lv.maxEntries ? 'done (' + lv.entriesFired + '/' + lv.maxEntries + ')' : (lv.armed ? 'armed' : 'locked (no re-entry)');
-      return '<div class="order-line"><span><span class="tag-counter">L'+lv.id+'</span> buy@'+lv.buyPrice.toFixed(2)+' → TP '+lv.tpPrice.toFixed(2)+' · '+statusTxt+'</span><span>'+lv.entriesFired+'/'+lv.maxEntries+' fired</span></div>';
-    }).join('');
+  function tranchesList(s) {
+    if (s.hasPosition) {
+      if (!s.tranches || s.tranches.length === 0) return '<div class="order-empty">no resting TPs</div>';
+      return s.tranches.map(tr => {
+        const tag = tr.id === 'X' ? '<span class="sizedup">CROSS-TP</span>' : '<span class="tag-ticker">TP'+tr.id+'</span>';
+        return '<div class="order-line"><span>'+tag+' entry '+s.entryPrice.toFixed(2)+' → '+tr.price.toFixed(2)+'</span><span>'+tr.shares.toFixed(0)+'sh</span></div>';
+      }).join('');
+    }
+    if (s.entryFired) return '<div class="order-empty">closed (no re-entry)</div>';
+    const statusTxt = s.armed ? ('resting buy @ '+s.buyPrice.toFixed(2)) : 'buy cancelled (cutoff)';
+    const crossTxt = s.forcedCross ? ' · will open @ cross-TP' : '';
+    return '<div class="order-line"><span><span class="tag-counter">BUY</span> '+statusTxt+crossTxt+'</span><span>—</span></div>';
   }
 
   function sideBox(label, cls, s) {
@@ -216,7 +219,7 @@ app.get('/', (_, res) => {
       '<div class="side-title"><span>'+label+'</span></div>'+
       '<div class="side-row"><span>Held Position</span><span>'+(s.heldShares||0).toFixed(0)+'sh ($'+(s.heldCost||0).toFixed(2)+')</span></div>'+
       '<div class="side-row pnl-mini"><span>Side W/L · P&amp;L</span><span class="'+pClass(s.realizedPnl)+'">'+(s.wins||0)+'W/'+(s.losses||0)+'L · '+sgn(s.realizedPnl)+'</span></div>'+
-      '<div class="order-list"><div class="order-list-title">Grid Levels</div>'+levelList(s.levels)+'</div>'+
+      '<div class="order-list"><div class="order-list-title">Entry / TP</div>'+tranchesList(s)+'</div>'+
     '</div>';
   }
 
@@ -240,11 +243,12 @@ app.get('/', (_, res) => {
     if (!configRendered && s.config) {
       const c = s.config;
       const rows = [
-        ['Level A', 'buy '+c.levels[0].buyPrice.toFixed(2)+' → TP '+c.levels[0].tpPrice.toFixed(2)],
-        ['Level B', 'buy '+c.levels[1].buyPrice.toFixed(2)+' → TP '+c.levels[1].tpPrice.toFixed(2)],
-        ['Hard SL', c.hardSlPrice.toFixed(2)+' (all positions, side-wide)'],
-        ['Max Entries / Level', c.maxEntriesPerLevel+' (1 + '+(c.maxEntriesPerLevel-1)+' re-entry)'],
-        ['Base Shares', c.baseShares+'sh per fill'],
+        ['Entry', 'buy '+c.entryShares+'sh @ '+c.buyPrice.toFixed(2)+' (both sides, immediately)'],
+        ['TP1', c.tp1Shares+'sh @ '+c.tp1Price.toFixed(2)],
+        ['TP2', c.tp2Shares+'sh @ '+c.tp2Price.toFixed(2)],
+        ['Cross-TP', c.crossTpPrice.toFixed(2)+' (forced on other side once a TP fires)'],
+        ['Stop-Loss', 'none'],
+        ['Re-Entry', 'none (single-shot per side per window)'],
         ['Entry Cutoff', c.entryCutoffSecs+'s'],
         ['Sweep At', c.sweepSecs+'s'],
         ['Final Sell Price', c.finalSellPrice.toFixed(2)],
