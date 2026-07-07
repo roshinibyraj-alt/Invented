@@ -17,11 +17,14 @@
  *    (280s) — only one entry ever fires per window.
  *
  *  EXIT:
- *    Fixed, symmetric TP/SL around the entry price — TP +0.07,
- *    SL -0.07 (roughly 1:1 risk/reward). TP rests as a maker limit
- *    sell; SL is monitored every tick and executed immediately
- *    (taker) the instant the bid trades through it, to actually cap
- *    the loss rather than hope for a fill.
+ *    TP/SL are DELIBERATELY ASYMMETRIC: TP +0.15, SL -0.10. Entry and
+ *    SL both cross the spread (taker fee each time); TP is a resting
+ *    maker fill (earns a rebate instead). A naive symmetric 0.07/0.07
+ *    looked "fair" but wasn't — after fees the real R:R came out near
+ *    0.5:1, needing ~65% win rate just to break even (verified by
+ *    simulation). These widened, skewed values bring the realized
+ *    R:R to roughly 1:1 across the entry zone, so a plain coin-flip
+ *    win rate is enough to break even.
  *
  *  CLOSE-OUT:
  *    At SWEEP_SECS (285s), any still-open position (never hit TP or
@@ -73,8 +76,14 @@ const SWEEP_SECS        = Number(process.env.SWEEP_SECS || 285);       // force-
 const FINAL_SELL_PRICE  = Number(process.env.FINAL_SELL_PRICE || 0.99);
 
 // ── Fixed TP / SL ──
-const TP_OFFSET = Number(process.env.TP_OFFSET || 0.07);
-const SL_OFFSET = Number(process.env.SL_OFFSET || 0.07);
+// Widened + asymmetric on purpose: entry and SL are both taker fills (fee
+// each time) while TP is a maker fill (earns a rebate instead). A naive
+// symmetric 0.07/0.07 looks fair but is NOT after fees — simulation showed
+// a real R:R of ~0.5:1, needing a ~65% win rate just to break even. These
+// values were chosen so the realized (post-fee) R:R comes out close to
+// 1:1 across the whole entry zone (verified 0.50-0.90 -> ~1.0-1.2:1).
+const TP_OFFSET = Number(process.env.TP_OFFSET || 0.15);
+const SL_OFFSET = Number(process.env.SL_OFFSET || 0.10);
 
 // ── Bounded recovery sizing (persists across windows, per pair) ──
 const BASE_SHARES         = Number(process.env.BASE_SHARES || 30);
@@ -794,7 +803,7 @@ async function init(privateKey, emit, slogFn) {
   log(`🚀 5-Minute BTC Up/Down — Momentum-Leader Entry + Bounded Recovery Sizing`);
   log(`⚙️  $${TOTAL_CAPITAL} demo capital across ${pairList.length} pair(s) (${pairList.join(', ')}) → $${perPairCapital.toFixed(2)}/pair`);
   log(`⚙️  One entry per window: after ${ENTRY_DELAY_SECS}s, buy whichever side leads (higher bid) if its ask is in [${ENTRY_ZONE_MIN.toFixed(2)}-${ENTRY_ZONE_MAX.toFixed(2)}]`);
-  log(`⚙️  Fixed TP +${TP_OFFSET} / SL -${SL_OFFSET} around entry`);
+  log(`⚙️  TP +${TP_OFFSET} / SL -${SL_OFFSET} around entry — deliberately asymmetric so real (post-fee) R:R lands near 1:1, not the naive nominal ratio`);
   log(`⚙️  Recovery sizing: ${BASE_SHARES}sh base, x${RECOVERY_STEP_MULT} per consecutive loss, capped at ${MAX_RECOVERY_STEPS} steps (max ${sharesForStep(MAX_RECOVERY_STEPS)}sh) — any win resets to base. Persists across windows.`);
   log(`⚙️  At ${SWEEP_SECS}s: cancel unfilled TP, roll remainder into one @ ${FINAL_SELL_PRICE} sell per side | unfilled at close resolves to actual outcome`);
   log(`${DRY_RUN ? '⚠️  DRY RUN — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
