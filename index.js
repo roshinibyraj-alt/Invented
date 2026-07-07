@@ -33,7 +33,7 @@ app.get('/', (_, res) => {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>⚡ Momentum Threshold + Time-Decay Scalper</title>
+<title>♻️ Momentum-Leader + Recovery Sizing Scalper</title>
 <style>
   :root {
     --bg: #ffffff; --bg2: #f5f7fa; --bg3: #edf0f4; --border: #d0d7e2;
@@ -117,7 +117,7 @@ app.get('/', (_, res) => {
 </head>
 <body>
   <div class="header">
-    <div class="logo">⚡ <span>MOMENTUM THRESHOLD + TIME-DECAY</span> SCALPER</div>
+    <div class="logo">♻️ <span>MOMENTUM-LEADER + RECOVERY SIZING</span> SCALPER</div>
     <div id="mode-badge" class="mode-badge ${DRY_RUN ? 'mode-dry' : 'mode-live'}">${DRY_RUN ? 'DRY RUN' : '🔴 LIVE'}</div>
   </div>
 
@@ -212,10 +212,8 @@ app.get('/', (_, res) => {
 
   function sideBox(label, cls, s) {
     if (!s) s = {};
-    const armedTxt = s.armed ? 'armed (buys once ≥ '+(s.spikeThreshold!=null?s.spikeThreshold.toFixed(2):'—')+')' : 'cooling down after entry';
-    const midTxt = s.mid != null ? s.mid.toFixed(2) : '—';
     return '<div class="side-box '+cls+'">'+
-      '<div class="side-title"><span>'+label+'</span><span class="tick-badge">mid '+midTxt+' · '+armedTxt+'</span></div>'+
+      '<div class="side-title"><span>'+label+'</span></div>'+
       '<div class="side-row"><span>Held Position</span><span>'+(s.heldShares||0).toFixed(0)+'sh ($'+(s.heldCost||0).toFixed(2)+')</span></div>'+
       '<div class="side-row pnl-mini"><span>Side W/L · P&amp;L</span><span class="'+pClass(s.realizedPnl)+'">'+(s.wins||0)+'W/'+(s.losses||0)+'L · '+sgn(s.realizedPnl)+'</span></div>'+
       '<div class="order-list"><div class="order-list-title">Open Positions (⚡ entry / 🎯 final sweep sell)</div>'+positionList(s.openPositions)+'</div>'+
@@ -242,16 +240,14 @@ app.get('/', (_, res) => {
     if (!configRendered && s.config) {
       const c = s.config;
       const rows = [
-        ['Entry Threshold', '≥ '+c.spikeThreshold.toFixed(2)],
-        ['Spike Lookback', c.spikeLookbackSecs+'s'],
-        ['Re-arm Margin', '-'+c.spikeResetMargin.toFixed(2)],
-        ['Max Trades/Window', c.maxTradesPerWindow],
-        ['Base Shares (decay=0)', c.baseShares+'sh'],
-        ['Decay Size Mult', 'x'+(1+c.decaySizeMult).toFixed(2)+' @ decay=1'],
-        ['Max Shares Cap', c.maxSharesCap+'sh'],
-        ['TP Offset', c.baseTpOffset.toFixed(2)+' → '+c.minTpOffset.toFixed(2)],
-        ['SL Offset', c.baseSlOffset.toFixed(2)+' → '+c.minSlOffset.toFixed(2)],
+        ['Entry Delay', c.entryDelaySecs+'s'],
+        ['Entry Zone', c.entryZoneMin.toFixed(2)+' – '+c.entryZoneMax.toFixed(2)],
         ['Entry Cutoff', c.entryCutoffSecs+'s'],
+        ['TP / SL Offset', '+'+c.tpOffset.toFixed(2)+' / -'+c.slOffset.toFixed(2)],
+        ['Base Shares', c.baseShares+'sh'],
+        ['Recovery Step Mult', 'x'+c.recoveryStepMult.toFixed(2)+' per loss'],
+        ['Max Recovery Steps', c.maxRecoverySteps],
+        ['Max Shares Cap', c.maxSharesCap+'sh'],
         ['Sweep At', c.sweepSecs+'s'],
         ['Final Sell Price', c.finalSellPrice.toFixed(2)],
         ['Maker Rebate', (c.cryptoMakerRebateShare*100).toFixed(0)+'% of fee'],
@@ -272,15 +268,14 @@ app.get('/', (_, res) => {
       grid.innerHTML = '<div class="empty">No Asset Data</div>';
     } else {
       grid.innerHTML = s.pairStates.map(p => {
-        const phaseCls = p.phase === 'ENTRIES OPEN' ? 'phase-open' : (p.phase === 'NO NEW ENTRIES' ? 'phase-closed' : 'phase-sweep');
-        const decayTxt = p.decay != null ? (p.decay*100).toFixed(0)+'%' : '—';
+        const phaseCls = p.phase === 'WAITING FOR ENTRY' ? 'phase-open' : (p.phase === 'TRADED THIS WINDOW' || p.phase === 'NO NEW ENTRIES' ? 'phase-closed' : 'phase-sweep');
         return '<div class="pair-card">'+
           '<div class="pair-hdr"><div class="pair-sym">'+p.symbol+' (5M Market)</div><div style="display:flex;gap:8px;align-items:center;"><div class="pair-phase '+phaseCls+'">'+p.phase+'</div><div class="pair-timer">'+fmtSecs(p.secsToEnd)+' left</div></div></div>'+
           '<div class="pair-body">'+
             '<div class="pair-row"><span class="pair-key">Up Ask/Bid</span><span>'+(p.upAsk?.toFixed(2)||'—')+' / '+(p.upBid?.toFixed(2)||'—')+'</span></div>'+
             '<div class="pair-row"><span class="pair-key">Down Ask/Bid</span><span>'+(p.downAsk?.toFixed(2)||'—')+' / '+(p.downBid?.toFixed(2)||'—')+'</span></div>'+
             '<div class="pair-row"><span class="pair-key">Bankroll</span><span>$'+(p.bankroll||0).toFixed(2)+'</span></div>'+
-            '<div class="pair-row"><span class="pair-key">Time Decay · Trades</span><span>'+decayTxt+' · '+(p.tradesThisWindow||0)+'/'+(p.maxTradesPerWindow||'—')+'</span></div>'+
+            '<div class="pair-row"><span class="pair-key">Recovery Step · Next Size</span><span>'+(p.recoveryStep||0)+'/'+(p.maxRecoverySteps||'—')+' · '+(p.nextTradeShares||0).toFixed(0)+'sh</span></div>'+
             '<div class="pair-row"><span class="pair-key">Realized / Unrealized P&amp;L</span><span class="'+pClass(p.realizedPnl)+'">'+sgn(p.realizedPnl)+' / <span class="'+pClass(p.unrealizedPnl)+'">'+sgn(p.unrealizedPnl)+'</span></span></div>'+
             '<div class="side-grid">'+sideBox('UP','up',p.sides?.Up)+sideBox('DOWN','down',p.sides?.Down)+'</div>'+
           '</div></div>';
