@@ -2,32 +2,35 @@
 
 /**
  * ═══════════════════════════════════════════════════════════════
- *  POLYMARKET 5-MINUTE BTC UP/DOWN — INDEPENDENT DIP-BUY GRID
+ *  POLYMARKET 5-MINUTE BTC UP/DOWN — INDEPENDENT CROSS-TP STRADDLE
  * ═══════════════════════════════════════════════════════════════
  *
- *  Up and Down are traded as two completely independent grids —
- *  neither side knows or cares what the other is doing.
+ *  Up and Down are traded as two completely independent positions —
+ *  neither side knows or cares what the other is doing, until one
+ *  side's TP fires (see CROSS-TP below).
  *
- *  Each side runs TWO fixed-price levels:
- *    Level A: buy @ 0.35 → TP @ 0.65
- *    Level B: buy @ 0.25 → TP @ 0.75
+ *  Each side places ONE resting limit buy immediately when the window
+ *  opens:
+ *    Buy 100 shares @ 0.49 (single-shot — no re-entry, no re-arm).
  *
- *  HARD STOP-LOSS: 0.10, shared by every open position on a side.
- *  If the bid ever trades down to 0.10, every open position on that
- *  side is closed immediately (market/taker) — this is the only
- *  non-limit order type in the whole bot.
+ *  Once that buy fills, TWO resting limit TP sells go up on that side:
+ *    TP1: 50 shares @ 0.70
+ *    TP2: 50 shares @ 0.80
  *
- *  RE-ENTRY: after a level's TP fills, that level re-arms and its
- *  resting buy order goes back up — but only ONCE (max 2 fires per
- *  level per window: the original entry + 1 re-entry). A level that
- *  gets stopped out via the hard SL does NOT re-arm — re-entry is
- *  earned by winning, not by losing. Everything resets fresh each
- *  new 5-minute window.
+ *  NO STOP-LOSS of any kind — a filled position rides its TP orders
+ *  (or the window-close resolution) with no protective exit.
+ *
+ *  CROSS-TP: the instant either TP tranche fills on one side (first
+ *  time only, per window), the OTHER side's TP orders are cancelled
+ *  and replaced with a single resting sell for all of that side's
+ *  remaining shares @ 0.99. If the other side hasn't filled its buy
+ *  yet, it is flagged so that whenever it does fill, it goes straight
+ *  to a single 100-share TP @ 0.99 instead of the normal 0.70/0.80
+ *  split.
  *
  *  ORDER TYPES: every buy and every TP sell is a genuine resting
- *  LIMIT order (maker — earns a rebate on fill). The hard SL is the
- *  only order that crosses the spread (taker) — it has to, since a
- *  stop needs to guarantee the exit rather than wait for a fill.
+ *  LIMIT order (maker — earns a rebate on fill). There is no taker
+ *  order in this strategy since there is no stop-loss.
  *
  *  CLOSE-OUT: at SWEEP_SECS (285s) any still-unfilled resting buys
  *  are cancelled, and any open positions still waiting on their TP
@@ -55,16 +58,16 @@ const TOTAL_CAPITAL = Number(process.env.TOTAL_CAPITAL || 2000);
 const DEFAULT_PAIRS = (process.env.CRYPTO_PAIRS || 'BTC')
   .split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
 
-// ── Grid levels (fixed absolute prices, identical on Up and Down) ──
-const LEVELS = [
-  { id: 'A', buyPrice: Number(process.env.LEVEL_A_BUY || 0.35), tpPrice: Number(process.env.LEVEL_A_TP || 0.65) },
-  { id: 'B', buyPrice: Number(process.env.LEVEL_B_BUY || 0.25), tpPrice: Number(process.env.LEVEL_B_TP || 0.75) },
-];
-const HARD_SL_PRICE       = Number(process.env.HARD_SL_PRICE || 0.10); // shared hard stop, all positions on a side
-const MAX_ENTRIES_PER_LEVEL = Number(process.env.MAX_ENTRIES_PER_LEVEL || 2); // original + 1 re-entry
-const BASE_SHARES         = Number(process.env.BASE_SHARES || 30); // fixed size per fill
+// ── Entry / TP config (identical on Up and Down, fully independent) ──
+const BUY_PRICE     = Number(process.env.BUY_PRICE || 0.49);   // resting limit buy, placed immediately on window open
+const ENTRY_SHARES  = Number(process.env.ENTRY_SHARES || 100); // single-shot fill, no re-entry
+const TP1_PRICE     = Number(process.env.TP1_PRICE || 0.70);
+const TP1_SHARES    = Number(process.env.TP1_SHARES || 50);
+const TP2_PRICE     = Number(process.env.TP2_PRICE || 0.80);
+const TP2_SHARES    = Number(process.env.TP2_SHARES || 50);
+const CROSS_TP_PRICE = Number(process.env.CROSS_TP_PRICE || 0.99); // other side's forced TP once one side's TP fires
 
-const ENTRY_CUTOFF_SECS = Number(process.env.ENTRY_CUTOFF_SECS || 280); // stop arming/filling new entries after this
+const ENTRY_CUTOFF_SECS = Number(process.env.ENTRY_CUTOFF_SECS || 280); // cancel unfilled resting buy after this
 const SWEEP_SECS        = Number(process.env.SWEEP_SECS || 285);
 const FINAL_SELL_PRICE  = Number(process.env.FINAL_SELL_PRICE || 0.99);
 
@@ -144,19 +147,16 @@ function makerRebate(shares, price) {
 // ─────────────────────────────────────────
 //  Pair state
 // ─────────────────────────────────────────
-function freshLevelState(level) {
-  return {
-    id: level.id,
-    buyPrice: level.buyPrice,
-    tpPrice: level.tpPrice,
-    armed: true,       // eligible to fill a fresh buy right now
-    entriesFired: 0,   // count of fills this window (max MAX_ENTRIES_PER_LEVEL)
-    position: null,    // { entryPrice, shares, cost, tpOrderId, openedAt } | null
-  };
-}
 function freshSideState() {
   return {
-    levels: LEVELS.map(freshLevelState),
+    buyPrice: BUY_PRICE,
+    buyOrderId: null,  // resting buy order id, placed immediately on window load
+    armed: true,       // resting buy still live (not yet filled/cancelled)
+    entryFired: false, // filled this window — single-shot, no re-entry
+    position: null,    // { entryPrice, shares, cost, costPerShare, tranches: [{id, price, shares, orderId}], openedAt } | null
+    forcedCross: false, // set once either side's TP has fired — forces this side's TP to CROSS_TP_PRICE
+    tpEverHit: false,   // whether THIS side's own TP has fired this window (triggers forcing the OTHER side)
+    sweepPosition: null,
     wins: 0, losses: 0,
     realizedPnl: 0,
     rebatesEarned: 0,
@@ -264,11 +264,22 @@ async function loadPairWindow(p) {
   p.tradable = true;
   p.resolvedThisWindow = false;
 
-  // fresh grid every window
+  // fresh position state every window
   p.sweepDone = false;
   p.sides = { Up: freshSideState(), Down: freshSideState() };
 
-  log(`🔭 ${p.symbol} window loaded: ${slug} | ends ${new Date(p.windowEnd * 1000).toISOString().slice(11,19)}Z | grid armed: A(${LEVELS[0].buyPrice}→${LEVELS[0].tpPrice}) B(${LEVELS[1].buyPrice}→${LEVELS[1].tpPrice}) | hard SL ${HARD_SL_PRICE}`);
+  // place resting limit buys immediately, on both sides, simultaneously
+  for (const side of ['Up', 'Down']) {
+    const tokenId = side === 'Up' ? upId : downId;
+    try {
+      const order = await placeLimitBuy(tokenId, BUY_PRICE, ENTRY_SHARES);
+      p.sides[side].buyOrderId = order.id || order.orderId || null;
+    } catch (e) {
+      log(`⚠️  ${p.symbol} ${side}: failed to place initial resting buy @ ${BUY_PRICE}: ${e.message}`);
+    }
+  }
+
+  log(`🔭 ${p.symbol} window loaded: ${slug} | ends ${new Date(p.windowEnd * 1000).toISOString().slice(11,19)}Z | resting buys placed @ ${BUY_PRICE} for ${ENTRY_SHARES}sh each side | TP ${TP1_PRICE}(${TP1_SHARES}sh)/${TP2_PRICE}(${TP2_SHARES}sh) | cross-TP ${CROSS_TP_PRICE} | no SL`);
 }
 
 // ─────────────────────────────────────────
@@ -336,10 +347,12 @@ async function refreshPolyPrices() {
 //  Equity tracking
 // ─────────────────────────────────────────
 function sideHeldShares(sideState) {
-  return sideState.levels.reduce((s, lv) => s + (lv.position ? lv.position.shares : 0), 0);
+  if (!sideState.position) return 0;
+  return sideState.position.tranches.reduce((s, tr) => s + tr.shares, 0);
 }
 function sideHeldCost(sideState) {
-  return sideState.levels.reduce((s, lv) => s + (lv.position ? lv.position.cost : 0), 0);
+  if (!sideState.position) return 0;
+  return round2(sideState.position.tranches.reduce((s, tr) => s + sideState.position.costPerShare * tr.shares, 0));
 }
 function positionsMarkValue(p) {
   let total = 0;
@@ -373,119 +386,146 @@ function registerTrade(p, entry) {
 }
 
 // ─────────────────────────────────────────
-//  Per-level: fill the resting buy once ask reaches the level price
+//  Per-side: fill the resting buy (placed immediately at window open)
+//  once the ask reaches BUY_PRICE. Single-shot — no re-entry.
 // ─────────────────────────────────────────
-async function maybeFillLevelBuy(p, side, level, elapsed) {
-  if (!level.armed || level.position) return;
-  if (level.entriesFired >= MAX_ENTRIES_PER_LEVEL) return;
-  if (elapsed >= ENTRY_CUTOFF_SECS) return;
+async function maybeFillSideBuy(p, side, elapsed) {
+  const s = p.sides[side];
+  if (!s.armed || s.entryFired || s.position) return;
+
+  if (elapsed >= ENTRY_CUTOFF_SECS) {
+    // cutoff reached with no fill — cancel the resting buy
+    if (s.buyOrderId) await cancelOrder(s.buyOrderId);
+    s.buyOrderId = null;
+    s.armed = false;
+    return;
+  }
 
   const ask = side === 'Up' ? p.upAsk : p.downAsk;
-  if (ask == null || ask > level.buyPrice) return; // resting limit buy not reached yet
+  if (ask == null || ask > BUY_PRICE) return; // resting limit buy not reached yet
 
-  const shares = BASE_SHARES;
-  const price = level.buyPrice; // limit buy fills at the resting limit price
+  const shares = ENTRY_SHARES;
+  const price = BUY_PRICE; // limit buy fills at the resting limit price
   const entryRebate = makerRebate(shares, price); // maker fill — earns a rebate
   const cost = round2(price * shares - entryRebate);
 
   if (cost > p.bankroll) {
-    log(`⏭️  ${p.symbol} ${side} L${level.id}: skip fill — insufficient bankroll ($${p.bankroll.toFixed(2)}, need $${cost.toFixed(2)})`);
+    log(`⏭️  ${p.symbol} ${side}: skip fill — insufficient bankroll ($${p.bankroll.toFixed(2)}, need $${cost.toFixed(2)})`);
     return;
   }
 
-  const s = p.sides[side];
   const tokenId = side === 'Up' ? p.upTokenId : p.downTokenId;
 
   p.bankroll = round2(p.bankroll - cost);
   p.rebatesEarned = round2(p.rebatesEarned + entryRebate);
   s.rebatesEarned = round2(s.rebatesEarned + entryRebate);
-  level.entriesFired++;
-  level.armed = false;
+  s.entryFired = true;
+  s.armed = false;
+  s.buyOrderId = null; // filled
 
-  await placeLimitBuy(tokenId, price, shares);
-  const tpOrder = await placeLimitSell(tokenId, level.tpPrice, shares);
-  level.position = {
+  // if the opposite side already fired its TP before this buy filled,
+  // go straight to a single forced TP @ CROSS_TP_PRICE for all shares
+  const tranchePlan = s.forcedCross
+    ? [{ id: 'X', price: CROSS_TP_PRICE, shares }]
+    : [{ id: '1', price: TP1_PRICE, shares: TP1_SHARES }, { id: '2', price: TP2_PRICE, shares: TP2_SHARES }];
+
+  const tranches = [];
+  for (const trPlan of tranchePlan) {
+    const order = await placeLimitSell(tokenId, trPlan.price, trPlan.shares);
+    tranches.push({ id: trPlan.id, price: trPlan.price, shares: trPlan.shares, orderId: order.id || order.orderId || null });
+  }
+
+  s.position = {
     entryPrice: price, shares, cost,
-    tpOrderId: tpOrder.id || tpOrder.orderId || null,
+    costPerShare: round2(cost / shares),
+    tranches,
     openedAt: Date.now(),
   };
 
-  log(`📥 ${p.symbol} ${side} L${level.id}: BUY filled ${shares}sh @ ${price.toFixed(2)} (limit) | rebate=+$${entryRebate.toFixed(4)} | resting TP @ ${level.tpPrice.toFixed(2)} | fire ${level.entriesFired}/${MAX_ENTRIES_PER_LEVEL}`);
-  registerTrade(p, { side: 'BUY', outcome: side, reason: `ENTRY-${level.id}`, price, shares, cost });
+  const tpTxt = tranches.map(t => `${t.shares}sh@${t.price.toFixed(2)}`).join(' + ');
+  log(`📥 ${p.symbol} ${side}: BUY filled ${shares}sh @ ${price.toFixed(2)} (limit) | rebate=+$${entryRebate.toFixed(4)} | resting TP: ${tpTxt}`);
+  registerTrade(p, { side: 'BUY', outcome: side, reason: 'ENTRY', price, shares, cost });
   recordEquity(p);
 }
 
 // ─────────────────────────────────────────
-//  Per-level: TP fill (limit/maker) — closes the position and re-arms
-//  the level (up to MAX_ENTRIES_PER_LEVEL) for another cycle.
+//  Cross-TP: fires once (per window, per side) the FIRST time either
+//  of a side's own TP tranches fills. Cancels the opposite side's
+//  resting TP order(s) and replaces them with a single resting sell
+//  for all its remaining shares @ CROSS_TP_PRICE. If the opposite
+//  side hasn't filled its buy yet, it's flagged so its TP goes
+//  straight to CROSS_TP_PRICE (single 100sh tranche) once it fills.
 // ─────────────────────────────────────────
-async function maybeFillLevelTP(p, side, level) {
-  if (!level.position) return;
-  const bid = side === 'Up' ? p.upBid : p.downBid;
-  if (bid == null || bid < level.tpPrice) return;
-
-  const pos = level.position;
-  const proceeds = round2(level.tpPrice * pos.shares);
-  const rebate = makerRebate(pos.shares, level.tpPrice);
-  const net = round2(proceeds + rebate);
-  const profit = round2(net - pos.cost);
-
+async function forceCrossTp(p, side) {
   const s = p.sides[side];
-  p.bankroll = round2(p.bankroll + net);
-  p.realizedPnl = round2(p.realizedPnl + profit);
-  p.rebatesEarned = round2(p.rebatesEarned + rebate);
-  s.realizedPnl = round2(s.realizedPnl + profit);
-  s.rebatesEarned = round2(s.rebatesEarned + rebate);
-  p.wins++; s.wins++;
+  if (s.forcedCross) return;
+  s.forcedCross = true;
 
-  log(`💰 ${p.symbol} ${side} L${level.id}: TP filled ${pos.shares}sh @ ${level.tpPrice.toFixed(2)} (limit) | rebate=+$${rebate.toFixed(4)} | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
-  registerTrade(p, { side: 'SELL', outcome: side, reason: `TP-${level.id}`, price: level.tpPrice, shares: pos.shares, profit, rebate });
-
-  level.position = null;
-  if (level.entriesFired < MAX_ENTRIES_PER_LEVEL) {
-    level.armed = true; // re-entry earned by winning
-    log(`🔁 ${p.symbol} ${side} L${level.id}: re-armed for re-entry (${level.entriesFired}/${MAX_ENTRIES_PER_LEVEL} used)`);
+  if (s.position && s.position.tranches.length) {
+    const tokenId = side === 'Up' ? p.upTokenId : p.downTokenId;
+    let remainingShares = 0;
+    for (const tr of s.position.tranches) {
+      await cancelOrder(tr.orderId);
+      remainingShares = round2(remainingShares + tr.shares);
+    }
+    const order = await placeLimitSell(tokenId, CROSS_TP_PRICE, remainingShares);
+    s.position.tranches = [{ id: 'X', price: CROSS_TP_PRICE, shares: remainingShares, orderId: order.id || order.orderId || null }];
+    log(`🔁 ${p.symbol} ${side}: opposite side's TP hit — re-pricing remaining ${remainingShares}sh TP to ${CROSS_TP_PRICE.toFixed(2)}`);
   } else {
-    log(`🔒 ${p.symbol} ${side} L${level.id}: max entries reached — done for this window`);
+    log(`🔁 ${p.symbol} ${side}: opposite side's TP hit — flagged for forced ${CROSS_TP_PRICE.toFixed(2)} TP once its buy fills`);
   }
-  recordEquity(p);
 }
 
 // ─────────────────────────────────────────
-//  Hard SL — shared by every open position on a side. Market/taker
-//  fill; does NOT re-arm the level (re-entry is earned by TP, not SL).
+//  Per-side: TP tranche fills (limit/maker). Closes out tranches as
+//  the bid reaches their price — no re-entry once fully closed. The
+//  first tranche fill this window also forces the opposite side's TP
+//  to CROSS_TP_PRICE.
 // ─────────────────────────────────────────
-async function maybeHardStopSide(p, side) {
+async function maybeFillSideTP(p, side) {
   const s = p.sides[side];
+  if (!s.position || !s.position.tranches.length) return;
   const bid = side === 'Up' ? p.upBid : p.downBid;
-  if (bid == null || bid > HARD_SL_PRICE) return;
+  if (bid == null) return;
 
-  const tokenId = side === 'Up' ? p.upTokenId : p.downTokenId;
-  for (const level of s.levels) {
-    if (!level.position) continue;
-    const pos = level.position;
+  const pos = s.position;
+  let anyFilled = false;
 
-    await cancelOrder(pos.tpOrderId);
-    await marketSell(tokenId, pos.shares); // only non-limit order in the bot
-    const fee = takerFee(pos.shares, bid);
-    const net = round2(bid * pos.shares - fee);
-    const profit = round2(net - pos.cost);
+  for (let i = pos.tranches.length - 1; i >= 0; i--) {
+    const tr = pos.tranches[i];
+    if (bid < tr.price) continue;
+
+    const proceeds = round2(tr.price * tr.shares);
+    const rebate = makerRebate(tr.shares, tr.price);
+    const net = round2(proceeds + rebate);
+    const shareCost = round2(pos.costPerShare * tr.shares);
+    const profit = round2(net - shareCost);
 
     p.bankroll = round2(p.bankroll + net);
-    p.feesPaid = round2(p.feesPaid + fee);
     p.realizedPnl = round2(p.realizedPnl + profit);
-    s.feesPaid = round2(s.feesPaid + fee);
+    p.rebatesEarned = round2(p.rebatesEarned + rebate);
     s.realizedPnl = round2(s.realizedPnl + profit);
-    p.losses++; s.losses++;
+    s.rebatesEarned = round2(s.rebatesEarned + rebate);
+    if (profit >= 0) { p.wins++; s.wins++; } else { p.losses++; s.losses++; }
 
-    log(`🛑 ${p.symbol} ${side} L${level.id}: HARD SL @ ${bid.toFixed(2)} (entry ${pos.entryPrice.toFixed(2)}, trigger ${HARD_SL_PRICE.toFixed(2)}) | ${pos.shares}sh | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
-    registerTrade(p, { side: 'SELL', outcome: side, reason: `SL-${level.id}`, price: bid, shares: pos.shares, profit, fee });
+    log(`💰 ${p.symbol} ${side} TP-${tr.id}: filled ${tr.shares}sh @ ${tr.price.toFixed(2)} (limit) | rebate=+$${rebate.toFixed(4)} | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
+    registerTrade(p, { side: 'SELL', outcome: side, reason: `TP-${tr.id}`, price: tr.price, shares: tr.shares, profit, rebate });
 
-    level.position = null;
-    level.armed = false; // no re-entry after a loss
-    log(`🔒 ${p.symbol} ${side} L${level.id}: stopped out — no re-entry this window`);
+    pos.tranches.splice(i, 1);
+    anyFilled = true;
+
+    if (!s.tpEverHit) {
+      s.tpEverHit = true;
+      const otherSide = side === 'Up' ? 'Down' : 'Up';
+      await forceCrossTp(p, otherSide);
+    }
   }
-  recordEquity(p);
+
+  if (anyFilled && pos.tranches.length === 0) {
+    s.position = null; // fully closed — done for this window, no re-entry
+    log(`🔒 ${p.symbol} ${side}: position fully closed — done for this window`);
+  }
+  if (anyFilled) recordEquity(p);
 }
 
 // ─────────────────────────────────────────
@@ -498,16 +538,21 @@ async function maybeSweep(p, elapsed) {
 
   for (const side of ['Up', 'Down']) {
     const s = p.sides[side];
-    let sweepShares = 0, sweepCost = 0;
+    s.armed = false; // no more new entries this window
 
-    for (const level of s.levels) {
-      level.armed = false; // no more new entries this window
-      if (level.position) {
-        await cancelOrder(level.position.tpOrderId);
-        sweepShares += level.position.shares;
-        sweepCost = round2(sweepCost + level.position.cost);
-        level.position = null;
+    if (s.buyOrderId) {
+      await cancelOrder(s.buyOrderId);
+      s.buyOrderId = null;
+    }
+
+    let sweepShares = 0, sweepCost = 0;
+    if (s.position && s.position.tranches.length) {
+      for (const tr of s.position.tranches) {
+        await cancelOrder(tr.orderId);
+        sweepShares = round2(sweepShares + tr.shares);
+        sweepCost = round2(sweepCost + s.position.costPerShare * tr.shares);
       }
+      s.position = null;
     }
 
     if (sweepShares > 0) {
@@ -573,11 +618,14 @@ async function resolvePairWindow(p) {
 
   for (const side of ['Up', 'Down']) {
     const s = p.sides[side];
-    for (const level of s.levels) {
-      if (level.position) {
-        await cancelOrder(level.position.tpOrderId);
-        log(`🛑 ${p.symbol} ${side} L${level.id}: unfilled TP cancelled at window close — resolving instead`);
-      }
+    if (s.buyOrderId) {
+      await cancelOrder(s.buyOrderId);
+      s.buyOrderId = null;
+      log(`🛑 ${p.symbol} ${side}: unfilled resting BUY cancelled at window close`);
+    }
+    if (s.position && s.position.tranches.length) {
+      for (const tr of s.position.tranches) await cancelOrder(tr.orderId);
+      log(`🛑 ${p.symbol} ${side}: unfilled TP(s) cancelled at window close — resolving instead`);
     }
     if (s.sweepPosition && s.sweepPosition.status === 'resting') {
       await cancelOrder(s.sweepPosition.tpOrderId);
@@ -589,10 +637,14 @@ async function resolvePairWindow(p) {
   const heldCost = { Up: 0, Down: 0 };
   for (const side of ['Up', 'Down']) {
     const s = p.sides[side];
-    for (const level of s.levels) {
-      if (level.position) { heldShares[side] += level.position.shares; heldCost[side] = round2(heldCost[side] + level.position.cost); level.position = null; }
+    if (s.position && s.position.tranches.length) {
+      for (const tr of s.position.tranches) {
+        heldShares[side] = round2(heldShares[side] + tr.shares);
+        heldCost[side] = round2(heldCost[side] + s.position.costPerShare * tr.shares);
+      }
+      s.position = null;
     }
-    if (s.sweepPosition) { heldShares[side] += s.sweepPosition.shares; heldCost[side] = round2(heldCost[side] + s.sweepPosition.cost); s.sweepPosition = null; }
+    if (s.sweepPosition) { heldShares[side] = round2(heldShares[side] + s.sweepPosition.shares); heldCost[side] = round2(heldCost[side] + s.sweepPosition.cost); s.sweepPosition = null; }
   }
 
   if (heldShares.Up <= 0 && heldShares.Down <= 0) return;
@@ -632,12 +684,8 @@ async function processPair(p) {
   const elapsed = nowSec() - p.windowStart;
 
   for (const side of ['Up', 'Down']) {
-    await maybeHardStopSide(p, side); // check hard SL first — it overrides everything
-    const s = p.sides[side];
-    for (const level of s.levels) {
-      await maybeFillLevelTP(p, side, level);
-      await maybeFillLevelBuy(p, side, level, elapsed);
-    }
+    await maybeFillSideTP(p, side);   // check TP fills first (can trigger cross-TP on the other side)
+    await maybeFillSideBuy(p, side, elapsed);
     await checkSweepFill(p, side);
   }
 
@@ -654,13 +702,15 @@ async function processPair(p) {
 // ─────────────────────────────────────────
 function sideSummary(p, side) {
   const s = p.sides[side];
-  const levels = s.levels.map(lv => ({
-    id: lv.id, buyPrice: lv.buyPrice, tpPrice: lv.tpPrice,
-    armed: lv.armed, entriesFired: lv.entriesFired, maxEntries: MAX_ENTRIES_PER_LEVEL,
-    position: lv.position ? { entryPrice: lv.position.entryPrice, shares: lv.position.shares, cost: lv.position.cost } : null,
-  }));
+  const tranches = s.position ? s.position.tranches.map(tr => ({ id: tr.id, price: tr.price, shares: tr.shares })) : [];
   return {
-    levels,
+    buyPrice: s.buyPrice,
+    armed: s.armed,
+    entryFired: s.entryFired,
+    forcedCross: s.forcedCross,
+    hasPosition: !!s.position,
+    entryPrice: s.position ? s.position.entryPrice : null,
+    tranches,
     heldShares: sideHeldShares(s) + (s.sweepPosition ? s.sweepPosition.shares : 0),
     heldCost: sideHeldCost(s) + (s.sweepPosition ? s.sweepPosition.cost : 0),
     wins: s.wins,
@@ -729,10 +779,13 @@ function buildState() {
     winRate: (totalWins + totalLosses) > 0 ? round2((totalWins / (totalWins + totalLosses)) * 100) : null,
     uptime: Math.floor((Date.now() - startTime) / 1000),
     config: {
-      levels: LEVELS,
-      hardSlPrice: HARD_SL_PRICE,
-      maxEntriesPerLevel: MAX_ENTRIES_PER_LEVEL,
-      baseShares: BASE_SHARES,
+      buyPrice: BUY_PRICE,
+      entryShares: ENTRY_SHARES,
+      tp1Price: TP1_PRICE,
+      tp1Shares: TP1_SHARES,
+      tp2Price: TP2_PRICE,
+      tp2Shares: TP2_SHARES,
+      crossTpPrice: CROSS_TP_PRICE,
       entryCutoffSecs: ENTRY_CUTOFF_SECS,
       sweepSecs: SWEEP_SECS,
       finalSellPrice: FINAL_SELL_PRICE,
@@ -799,12 +852,12 @@ function getStatus() { return { ok: true, ...buildState() }; }
 async function init(privateKey, emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
-  log(`🚀 5-Minute BTC Up/Down — Independent Dip-Buy Grid (Up & Down fully separate)`);
+  log(`🚀 5-Minute BTC Up/Down — Independent Cross-TP Straddle (Up & Down fully separate until a TP fires)`);
   log(`⚙️  $${TOTAL_CAPITAL} demo capital across ${pairList.length} pair(s) (${pairList.join(', ')}) → $${perPairCapital.toFixed(2)}/pair`);
-  log(`⚙️  Level A: buy @ ${LEVELS[0].buyPrice} → TP @ ${LEVELS[0].tpPrice} | Level B: buy @ ${LEVELS[1].buyPrice} → TP @ ${LEVELS[1].tpPrice} | ${BASE_SHARES}sh per fill`);
-  log(`⚙️  Hard SL @ ${HARD_SL_PRICE} — shared stop for every open position on a side, market/taker exit (only non-limit order in the bot)`);
-  log(`⚙️  Re-entry: up to ${MAX_ENTRIES_PER_LEVEL - 1} re-entry after a TP hit re-arms the level; a stop-out does NOT re-arm`);
-  log(`⚙️  All buys and TPs are resting limit orders (maker, earn rebate); only the hard SL crosses the spread`);
+  log(`⚙️  Entry: buy ${ENTRY_SHARES}sh @ ${BUY_PRICE} immediately on both sides, single-shot (no re-entry)`);
+  log(`⚙️  TP: ${TP1_SHARES}sh @ ${TP1_PRICE} + ${TP2_SHARES}sh @ ${TP2_PRICE} | No stop-loss`);
+  log(`⚙️  Cross-TP: first TP fill on either side forces the OTHER side's remaining shares to a single TP @ ${CROSS_TP_PRICE}`);
+  log(`⚙️  All buys and TPs are resting limit orders (maker, earn rebate) — no taker orders in this strategy`);
   log(`⚙️  At ${SWEEP_SECS}s: cancel unfilled resting orders, roll open positions into one @ ${FINAL_SELL_PRICE} sell per side | unfilled at close resolves to actual outcome`);
   log(`${DRY_RUN ? '⚠️  DRY RUN — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
