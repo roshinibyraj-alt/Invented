@@ -33,7 +33,7 @@ app.get('/', (_, res) => {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>♻️ Momentum-Leader + Recovery Sizing Scalper</title>
+<title>📊 Independent Up/Down Dip-Buy Grid</title>
 <style>
   :root {
     --bg: #ffffff; --bg2: #f5f7fa; --bg3: #edf0f4; --border: #d0d7e2;
@@ -117,7 +117,7 @@ app.get('/', (_, res) => {
 </head>
 <body>
   <div class="header">
-    <div class="logo">♻️ <span>MOMENTUM-LEADER + RECOVERY SIZING</span> SCALPER</div>
+    <div class="logo">📊 <span>INDEPENDENT UP/DOWN DIP-BUY</span> GRID</div>
     <div id="mode-badge" class="mode-badge ${DRY_RUN ? 'mode-dry' : 'mode-live'}">${DRY_RUN ? 'DRY RUN' : '🔴 LIVE'}</div>
   </div>
 
@@ -199,14 +199,14 @@ app.get('/', (_, res) => {
     return '<path d="'+fillPath+'" fill="'+color+'22" stroke="none"/>' + '<path d="'+linePath+'" fill="none" stroke="'+color+'" stroke-width="1.6"/>';
   }
 
-  function positionList(positions) {
-    if (!positions || positions.length === 0) return '<div class="order-empty">none open</div>';
-    return positions.map(o => {
-      const tagCls = o.kind === 'FINAL' ? 'tag-counter' : 'tag-ticker';
-      const tagTxt = o.kind === 'FINAL' ? '🎯FIN' : '⚡BUY';
-      const slTxt = o.slPrice != null ? (' · SL '+o.slPrice.toFixed(2)) : '';
-      const tpTxt = o.tpPrice != null ? (' → TP '+o.tpPrice.toFixed(2)) : '';
-      return '<div class="order-line"><span><span class="'+tagCls+'">'+tagTxt+'</span> '+o.entryPrice.toFixed(2)+tpTxt+slTxt+'</span><span>'+o.shares.toFixed(0)+'sh</span></div>';
+  function levelList(levels) {
+    if (!levels || levels.length === 0) return '<div class="order-empty">no levels</div>';
+    return levels.map(lv => {
+      if (lv.position) {
+        return '<div class="order-line"><span><span class="tag-ticker">L'+lv.id+' OPEN</span> '+lv.position.entryPrice.toFixed(2)+' → TP '+lv.tpPrice.toFixed(2)+'</span><span>'+lv.position.shares.toFixed(0)+'sh</span></div>';
+      }
+      const statusTxt = lv.entriesFired >= lv.maxEntries ? 'done (' + lv.entriesFired + '/' + lv.maxEntries + ')' : (lv.armed ? 'armed' : 'locked (no re-entry)');
+      return '<div class="order-line"><span><span class="tag-counter">L'+lv.id+'</span> buy@'+lv.buyPrice.toFixed(2)+' → TP '+lv.tpPrice.toFixed(2)+' · '+statusTxt+'</span><span>'+lv.entriesFired+'/'+lv.maxEntries+' fired</span></div>';
     }).join('');
   }
 
@@ -216,7 +216,7 @@ app.get('/', (_, res) => {
       '<div class="side-title"><span>'+label+'</span></div>'+
       '<div class="side-row"><span>Held Position</span><span>'+(s.heldShares||0).toFixed(0)+'sh ($'+(s.heldCost||0).toFixed(2)+')</span></div>'+
       '<div class="side-row pnl-mini"><span>Side W/L · P&amp;L</span><span class="'+pClass(s.realizedPnl)+'">'+(s.wins||0)+'W/'+(s.losses||0)+'L · '+sgn(s.realizedPnl)+'</span></div>'+
-      '<div class="order-list"><div class="order-list-title">Open Positions (⚡ entry / 🎯 final sweep sell)</div>'+positionList(s.openPositions)+'</div>'+
+      '<div class="order-list"><div class="order-list-title">Grid Levels</div>'+levelList(s.levels)+'</div>'+
     '</div>';
   }
 
@@ -240,14 +240,12 @@ app.get('/', (_, res) => {
     if (!configRendered && s.config) {
       const c = s.config;
       const rows = [
-        ['Entry Delay', c.entryDelaySecs+'s'],
-        ['Entry Zone', c.entryZoneMin.toFixed(2)+' – '+c.entryZoneMax.toFixed(2)],
+        ['Level A', 'buy '+c.levels[0].buyPrice.toFixed(2)+' → TP '+c.levels[0].tpPrice.toFixed(2)],
+        ['Level B', 'buy '+c.levels[1].buyPrice.toFixed(2)+' → TP '+c.levels[1].tpPrice.toFixed(2)],
+        ['Hard SL', c.hardSlPrice.toFixed(2)+' (all positions, side-wide)'],
+        ['Max Entries / Level', c.maxEntriesPerLevel+' (1 + '+(c.maxEntriesPerLevel-1)+' re-entry)'],
+        ['Base Shares', c.baseShares+'sh per fill'],
         ['Entry Cutoff', c.entryCutoffSecs+'s'],
-        ['TP / SL Offset', '+'+c.tpOffset.toFixed(2)+' / -'+c.slOffset.toFixed(2)],
-        ['Base Shares', c.baseShares+'sh'],
-        ['Recovery Step Mult', 'x'+c.recoveryStepMult.toFixed(2)+' per loss'],
-        ['Max Recovery Steps', c.maxRecoverySteps],
-        ['Max Shares Cap', c.maxSharesCap+'sh'],
         ['Sweep At', c.sweepSecs+'s'],
         ['Final Sell Price', c.finalSellPrice.toFixed(2)],
         ['Maker Rebate', (c.cryptoMakerRebateShare*100).toFixed(0)+'% of fee'],
@@ -268,14 +266,13 @@ app.get('/', (_, res) => {
       grid.innerHTML = '<div class="empty">No Asset Data</div>';
     } else {
       grid.innerHTML = s.pairStates.map(p => {
-        const phaseCls = p.phase === 'WAITING FOR ENTRY' ? 'phase-open' : (p.phase === 'TRADED THIS WINDOW' || p.phase === 'NO NEW ENTRIES' ? 'phase-closed' : 'phase-sweep');
+        const phaseCls = p.phase === 'GRID ARMED' ? 'phase-open' : (p.phase === 'NO NEW ENTRIES' ? 'phase-closed' : 'phase-sweep');
         return '<div class="pair-card">'+
           '<div class="pair-hdr"><div class="pair-sym">'+p.symbol+' (5M Market)</div><div style="display:flex;gap:8px;align-items:center;"><div class="pair-phase '+phaseCls+'">'+p.phase+'</div><div class="pair-timer">'+fmtSecs(p.secsToEnd)+' left</div></div></div>'+
           '<div class="pair-body">'+
             '<div class="pair-row"><span class="pair-key">Up Ask/Bid</span><span>'+(p.upAsk?.toFixed(2)||'—')+' / '+(p.upBid?.toFixed(2)||'—')+'</span></div>'+
             '<div class="pair-row"><span class="pair-key">Down Ask/Bid</span><span>'+(p.downAsk?.toFixed(2)||'—')+' / '+(p.downBid?.toFixed(2)||'—')+'</span></div>'+
             '<div class="pair-row"><span class="pair-key">Bankroll</span><span>$'+(p.bankroll||0).toFixed(2)+'</span></div>'+
-            '<div class="pair-row"><span class="pair-key">Recovery Step · Next Size</span><span>'+(p.recoveryStep||0)+'/'+(p.maxRecoverySteps||'—')+' · '+(p.nextTradeShares||0).toFixed(0)+'sh</span></div>'+
             '<div class="pair-row"><span class="pair-key">Realized / Unrealized P&amp;L</span><span class="'+pClass(p.realizedPnl)+'">'+sgn(p.realizedPnl)+' / <span class="'+pClass(p.unrealizedPnl)+'">'+sgn(p.unrealizedPnl)+'</span></span></div>'+
             '<div class="side-grid">'+sideBox('UP','up',p.sides?.Up)+sideBox('DOWN','down',p.sides?.Down)+'</div>'+
           '</div></div>';
