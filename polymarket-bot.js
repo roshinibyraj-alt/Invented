@@ -763,7 +763,7 @@ function buildState() {
     totalCapital: TOTAL_CAPITAL, perPairCapital,
     totalBankroll, totalMarkValue: totalMark,
     totalRealizedPnl: totalRealized,
-    totalPnl: round2(totalMark - TOTAL_CAPITAL),
+    totalPnl: round2(totalMark > 0 ? totalMark - TOTAL_CAPITAL : 0),
     totalWins, totalLosses,
     totalRebatesEarned,
     winRate: (totalWins + totalLosses) > 0 ? round2((totalWins / (totalWins + totalLosses)) * 100) : null,
@@ -835,6 +835,10 @@ async function init(privateKey, emit, slogFn) {
   log(`⚙️  Every ${CHECK_INTERVAL_S}s: detect overreaction > ${OVERREACTION_THRESHOLD} from 0.50 → buy OPPOSITE side (mean reversion) | base ${BASE_SHARES}sh`);
   log(`⚙️  Time decay: position × tf | TP = entry+(0.50-entry)×(0.40+0.30×tf) | SL = entry×(0.30+0.20×tf)`);
   log(`${DRY_RUN ? '⚠️  DRY RUN — simulated fills' : '🔴 LIVE MODE — real money'}`);
+
+  // Initialize pair states
+  resetPairs();
+  log(`✅ Pairs initialized: ${pairList.join(', ')}`);
 
   trader = new PolymarketTrader(privateKey);
   await trader.authenticate();
