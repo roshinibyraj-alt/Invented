@@ -2,19 +2,19 @@
 
 /**
  * ═══════════════════════════════════════════════════════════════
- *  POLYMARKET 5-MINUTE BTC UP/DOWN — TIME DECAY MOMENTUM CONTINUATION
+ *  POLYMARKET 5-MINUTE BTC UP/DOWN — TIME DECAY MEAN REVERSION
  * ═══════════════════════════════════════════════════════════════
  *
- *  DETECT momentum: if a side's mid price deviates > threshold
- *  from 0.50 early in window → BUY that SIDE (momentum continuation
- *  toward 1.00).
+ *  DETECT overreaction: if a side's mid price deviates > threshold
+ *  from 0.50 early in window → BUY the OPPOSITE side (mean reversion
+ *  toward 0.50).
  *
  *  TIME DECAY makes everything size/TP/SL proportional to
  *  timeRemaining / totalWindow:
- *    • More time left → bigger position, higher TP, wider SL
- *    • Less time left → smaller position, lower TP, tighter SL
+ *    • More time left → bigger position, wider TP, wider SL
+ *    • Less time left → smaller position, tighter TP, tighter SL
  *
- *  Max 5 momentum trades per window per pair.
+ *  Max 5 mean reversion trades per window per pair.
  *  All orders are maker limit (fee-free + rebate).
  * ═══════════════════════════════════════════════════════════════
  */
@@ -33,12 +33,12 @@ const RESOLUTION_BUFFER_S   = 8;
 const SLUG_OFFSET_FALLBACKS = [0, -300, 300];
 
 // ── Strategy params ──
-const CHECK_INTERVAL_S         = Number(process.env.CHECK_INTERVAL_S || 10);
-const OVERREACTION_THRESHOLD   = Number(process.env.OVERREACTION_THRESHOLD || 0.12);
-const BASE_SHARES              = Number(process.env.BASE_SHARES || 20);
-const MAX_TRADES_PER_WINDOW    = Number(process.env.MAX_TRADES || 5);
-const TP_TARGET_PRICE          = Number(process.env.TP_TARGET || 0.50);
-const SL_BASE_FRACTION         = Number(process.env.SL_BASE_FRACTION || 0.50);
+const CHECK_INTERVAL_S        = Number(process.env.CHECK_INTERVAL_S || 10);
+const OVERREACTION_THRESHOLD  = Number(process.env.OVERREACTION_THRESHOLD || 0.04);
+const BASE_SHARES             = Number(process.env.BASE_SHARES || 25);
+const MAX_TRADES_PER_WINDOW   = Number(process.env.MAX_TRADES || 5);
+const TP_REVERSION_FACTOR     = Number(process.env.TP_FACTOR || 0.7);
+const SL_PROTECTION_FACTOR    = Number(process.env.SL_FACTOR || 0.5);
 
 // ── Fees ──
 const CRYPTO_TAKER_FEE_RATE    = 0.07;
@@ -113,85 +113,81 @@ function computeMid(ask, bid) {
 function freshTradeEntry() {
   return {
     id: `t${Date.now()}-${(Math.random() * 1e6).toFixed(0)}`,
-    side: null,          // 'Up' or 'Down' — the momentum side we BOUGHT
+    side: null,             // 'Up' or 'Down' — the CHEAP side we bought
+    overreactedSide: null,  // 'Up' or 'Down' — the side that overreacted
     entryPrice: null,
     shares: 0,
     cost: 0,
-    tpPrice: null,       // sell price for TP (above entry)
-    slPrice: null,       // sell price for SL (below entry)
+    tpPrice: null,
+    slPrice: null,
     placedAt: null,
     filledAt: null,
     buyOrderId: null,
     tpOrderId: null,
     slOrderId: null,
-    state: 'idle',       // idle → resting → filled → tp-sl-placed → tp-filled|sl-filled|resolved
+    state: 'pending',       // pending → resting → filled → tp-filled|sl-filled|resolved
     profit: null,
-    rebate: null,
     timeFactorAtEntry: 0,
     deviationAtEntry: 0,
-    tpFilledAt: null,
-    slFilledAt: null,
+    outcome: null,
+    reason: null,
+    rebateEarned: 0,
   };
 }
 
 function freshPairState(symbol) {
   return {
-    symbol, tradable: false,
-    windowStart: null, windowEnd: null,
-    slug: null, eventTitle: null, conditionId: null,
+    symbol,
+    slug: null,
+    conditionId: null,
     upTokenId: null, downTokenId: null,
     upAsk: null, upBid: null, downAsk: null, downBid: null,
-    // Overreversion trades
-    reversionTrades: [],   // active trade entries
-    lastCheckTick: 0,      // last CHECK_INTERVAL_S we processed
-    resolvedThisWindow: true,
+    windowStart: null,
+    windowEnd: null,
+    tradable: false,
+    resolvedThisWindow: false,
     bankroll: perPairCapital,
-    realizedPnl: 0, feesPaid: 0, rebatesEarned: 0,
+    realizedPnl: 0,
+    rebatesEarned: 0,
     wins: 0, losses: 0,
-    equityCurve: [{ t: Date.now(), equity: perPairCapital }],
+    reversionTrades: [],
+    lastCheckTick: -1,
+    equityCurve: [],
   };
 }
 
 function resetPairs() {
-  perPairCapital = TOTAL_CAPITAL / Math.max(pairList.length, 1);
   pairs = {};
   for (const sym of pairList) pairs[sym] = freshPairState(sym);
-  totalEquityCurve = [{ t: Date.now(), equity: TOTAL_CAPITAL }];
 }
-resetPairs();
 
 // ── Window slug / market lookup ──
 function currentWindowStart(tsSec = nowSec()) {
   return Math.floor(tsSec / WINDOW_SECS) * WINDOW_SECS;
 }
 function slugFor(symbol, windowStartSec) {
-  return `${symbol.toLowerCase()}-updown-5m-${windowStartSec}`;
+  return `${symbol.toLowerCase()}-${windowStartSec}`;
 }
 function qOf(m) { return (m.question || m.groupItemTitle || m.title || '').toLowerCase(); }
 function parseMarketTokens(m) {
-  try {
-    const outcomes = typeof m.outcomes === 'string' ? JSON.parse(m.outcomes) : (m.outcomes || []);
-    const tokenIds = typeof m.clobTokenIds === 'string' ? JSON.parse(m.clobTokenIds) : (m.clobTokenIds || []);
-    return outcomes.map((outcome, i) => ({ outcome, token_id: tokenIds[i] || null }));
-  } catch (_) { return []; }
+  const outcomes = typeof m.outcomes === 'string' ? JSON.parse(m.outcomes) : (m.outcomes || []);
+  const tokenIds = typeof m.clobTokenIds === 'string' ? JSON.parse(m.clobTokenIds) : (m.clobTokenIds || []);
+  return outcomes.map((o, i) => ({ outcome: o.trim(), tokenId: tokenIds[i] }));
 }
 function tokenIdForSide(market, side) {
   const tokens = parseMarketTokens(market);
   const want = (side || '').trim().toLowerCase();
   const tok = tokens.find(t => (t.outcome || '').toLowerCase() === want);
-  return tok?.token_id || null;
+  return tok ? tok.tokenId : (market.clobTokenIds || '') || (tokens[0] || {}).tokenId;
 }
 
 async function fetchEventForWindow(symbol, windowStart) {
   for (const offset of SLUG_OFFSET_FALLBACKS) {
     const ws = windowStart + offset;
-    if (ws + WINDOW_SECS <= nowSec()) continue;
     const slug = slugFor(symbol, ws);
     try {
       const event = await getJSON(`${GAMMA}/events/slug/${encodeURIComponent(slug)}`);
-      if (event && event.id && Array.isArray(event.markets) && event.markets.length) {
-        return { event, windowStart: ws, slug };
-      }
+      if (event && event.markets && event.markets.length > 0) return { event, windowStart: ws, slug };
     } catch (_) {}
   }
   return null;
@@ -199,63 +195,61 @@ async function fetchEventForWindow(symbol, windowStart) {
 
 async function loadPairWindow(p) {
   const ws = currentWindowStart();
-  if (p.windowStart === ws && p.upTokenId) return;
+  if (p.windowStart !== null && ws === p.windowStart) return;
+
   const found = await fetchEventForWindow(p.symbol, ws);
-  if (!found) { p.tradable = false; return; }
+  if (!found) {
+    p.tradable = false;
+    log(`⚠️  ${p.symbol}: no event found for window ${ws}`);
+    return;
+  }
   const { event, windowStart, slug } = found;
   const market = (event.markets || []).find(m => { const q = qOf(m); return q.includes('up') || q.includes('down'); }) || event.markets[0];
   const upId = tokenIdForSide(market, 'up');
   const downId = tokenIdForSide(market, 'down');
-  if (!upId || !downId) {
-    log(`⚠️  ${p.symbol}: window loaded but Up/Down token ids missing`);
-    p.tradable = false;
-    return;
-  }
-  p.windowStart = windowStart;
-  p.windowEnd = windowStart + WINDOW_SECS;
+
+  // Carry over unfinished trades from previous window
+  const carryOver = p.reversionTrades.filter(t =>
+    t.state === 'resting' || t.state === 'filled' || t.state === 'tp-sl-placed' ||
+    t.state === 'tp-resting' || t.state === 'sl-resting'
+  );
+
   p.slug = slug;
-  p.eventTitle = event.title || event.slug;
-  p.conditionId = market.conditionId || null;
+  p.conditionId = market.conditionId || event.conditionId || null;
   p.upTokenId = upId;
   p.downTokenId = downId;
+  p.windowStart = windowStart;
+  p.windowEnd = windowStart + WINDOW_SECS;
   p.tradable = true;
   p.resolvedThisWindow = false;
-  // Clear previous window's trades
-  const carryOver = p.reversionTrades.filter(t =>
-    t.state === 'tp-resting' || t.state === 'tp-sl-placed' || t.state === 'filled' || t.state === 'resting'
-  );
-  if (carryOver.length > 0) {
-    log(`⚠️  ${p.symbol}: ${carryOver.length} trade(s) carried over from previous window`);
-    for (const t of carryOver) {
-      if (t.buyOrderId) await cancelOrder(t.buyOrderId);
-      if (t.tpOrderId) await cancelOrder(t.tpOrderId);
-      if (t.slOrderId) await cancelOrder(t.slOrderId);
-      t.state = 'cancelled';
-    }
-  }
-  p.reversionTrades = [];
-  p.lastCheckTick = 0;
-  log(`🔭 ${p.symbol} new window: ${slug} | ends ${new Date(p.windowEnd * 1000).toISOString().slice(11, 19)}Z`);
+  p.lastCheckTick = -1;
+  p.reversionTrades = carryOver;
+
+  log(`📡 ${p.symbol}: window ${windowStart} → ${windowStart + WINDOW_SECS}`);
 }
 
 // ── Price refresh ──
 async function refreshPolyPrices() {
   const requests = [];
   for (const p of Object.values(pairs)) {
-    if (!p.tradable || !p.upTokenId || !p.downTokenId) continue;
-    requests.push({ token_id: p.upTokenId, side: 'BUY' });
-    requests.push({ token_id: p.upTokenId, side: 'SELL' });
-    requests.push({ token_id: p.downTokenId, side: 'BUY' });
-    requests.push({ token_id: p.downTokenId, side: 'SELL' });
+    if (p.upTokenId) requests.push({ token_id: p.upTokenId, side: 'BUY' });
+    if (p.upTokenId) requests.push({ token_id: p.upTokenId, side: 'SELL' });
+    if (p.downTokenId) requests.push({ token_id: p.downTokenId, side: 'BUY' });
+    if (p.downTokenId) requests.push({ token_id: p.downTokenId, side: 'SELL' });
   }
-  if (!requests.length) return;
+  if (requests.length === 0) return;
+
   function apply(tid, side, price) {
-    if (!Number.isFinite(price)) return;
+    if (price == null || isNaN(price)) return;
     for (const p of Object.values(pairs)) {
-      if (p.upTokenId === tid) { if (side === 'BUY') p.upAsk = price; else if (side === 'SELL') p.upBid = price; }
-      else if (p.downTokenId === tid) { if (side === 'BUY') p.downAsk = price; else if (side === 'SELL') p.downBid = price; }
+      const isUp = p.upTokenId === tid;
+      const isDown = p.downTokenId === tid;
+      if (!isUp && !isDown) continue;
+      if (side === 'SELL') { if (isUp) p.upAsk = price; if (isDown) p.downAsk = price; }
+      if (side === 'BUY')  { if (isUp) p.upBid = price; if (isDown) p.downBid = price; }
     }
   }
+
   try {
     const data = await postJSON(`${CLOB}/prices`, requests);
     if (Array.isArray(data)) {
@@ -263,32 +257,25 @@ async function refreshPolyPrices() {
         const tid = row.token_id || row.asset_id || row.tokenId;
         const side = (row.side || '').toUpperCase();
         const price = parseFloat(row.price || row.mid);
-        if (!tid || !Number.isFinite(price)) continue;
-        apply(tid, side, price);
-      }
-    } else if (data && typeof data === 'object') {
-      for (const [tid, val] of Object.entries(data)) {
-        if (val && typeof val === 'object') {
-          if (val.BUY != null) apply(tid, 'BUY', parseFloat(val.BUY));
-          if (val.SELL != null) apply(tid, 'SELL', parseFloat(val.SELL));
-        }
+        if (tid && side && !isNaN(price)) apply(tid, side, price);
       }
     }
-  } catch (_) {
-    // Fallback: individual price fetches
+  } catch (e) {
+    // Fallback: fetch individually
     for (const p of Object.values(pairs)) {
-      if (!p.tradable || !p.upTokenId || !p.downTokenId) continue;
       try {
-        const [upAsk, upBid, downAsk, downBid] = await Promise.all([
-          getJSON(`${CLOB}/price?token_id=${p.upTokenId}&side=BUY`).catch(() => null),
-          getJSON(`${CLOB}/price?token_id=${p.upTokenId}&side=SELL`).catch(() => null),
-          getJSON(`${CLOB}/price?token_id=${p.downTokenId}&side=BUY`).catch(() => null),
-          getJSON(`${CLOB}/price?token_id=${p.downTokenId}&side=SELL`).catch(() => null),
-        ]);
-        if (upAsk) p.upAsk = parseFloat(upAsk.price || upAsk.mid || p.upAsk);
-        if (upBid) p.upBid = parseFloat(upBid.price || upBid.mid || p.upBid);
-        if (downAsk) p.downAsk = parseFloat(downAsk.price || downAsk.mid || p.downAsk);
-        if (downBid) p.downBid = parseFloat(downBid.price || downBid.mid || p.downBid);
+        if (p.upTokenId) {
+          const [upAsk, upBid, downAsk, downBid] = await Promise.all([
+            getJSON(`${CLOB}/price?token_id=${p.upTokenId}&side=SELL`).then(r => parseFloat(r.price)).catch(() => null),
+            getJSON(`${CLOB}/price?token_id=${p.upTokenId}&side=BUY`).then(r => parseFloat(r.price)).catch(() => null),
+            getJSON(`${CLOB}/price?token_id=${p.downTokenId}&side=SELL`).then(r => parseFloat(r.price)).catch(() => null),
+            getJSON(`${CLOB}/price?token_id=${p.downTokenId}&side=BUY`).then(r => parseFloat(r.price)).catch(() => null),
+          ]);
+          if (upAsk != null) p.upAsk = upAsk;
+          if (upBid != null) p.upBid = upBid;
+          if (downAsk != null) p.downAsk = downAsk;
+          if (downBid != null) p.downBid = downBid;
+        }
       } catch (_) {}
     }
   }
@@ -321,12 +308,12 @@ function registerTrade(p, entry) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  TIME DECAY MOMENTUM CONTINUATION STRATEGY
+//  TIME DECAY MEAN REVERSION STRATEGY
 // ═══════════════════════════════════════════════════════════════
 
 /**
- * Time decay factor: 1.0 at window open → 0.0 at window close.
- * Controls position sizing, TP targets, and SL tightness.
+ * Time decay factor: 1.0 at window open → 0.05 near window close.
+ * Higher = more time remaining = bigger positions, wider TP/SL.
  */
 function timeDecayFactor(p) {
   if (!p.windowStart) return 0;
@@ -335,10 +322,12 @@ function timeDecayFactor(p) {
 }
 
 /**
- * Detect overreaction: is either side's mid price too far from 0.50?
- * Returns { cheapSide, cheapPrice, deviation } or null.
+ * Detect overreaction: is either side's mid price pushing away from 0.50?
+ * Returns { overreactedSide, cheapSide, cheapPrice, deviation, spread } or null.
+ *
+ * We BUY the CHEAP side expecting mean reversion back toward 0.50.
  */
-function detectOverreaction(p) {
+function detectOverreactionSignal(p) {
   const upMid = computeMid(p.upAsk, p.upBid);
   const downMid = computeMid(p.downAsk, p.downBid);
   if (upMid == null || downMid == null) return null;
@@ -346,76 +335,85 @@ function detectOverreaction(p) {
   const upDev = Math.abs(upMid - 0.50);
   const downDev = Math.abs(downMid - 0.50);
 
-  // At least one side must be overreacted
+  // At least one side must have overreacted
   if (upDev < OVERREACTION_THRESHOLD && downDev < OVERREACTION_THRESHOLD) return null;
 
-  // Ensure the deviation is meaningful — the spread between sides
+  // Ensure the spread between sides is meaningful
   const spread = Math.abs(upMid - downMid);
   if (spread < OVERREACTION_THRESHOLD * 1.5) return null;
 
-  // Cheap side = lower price; expensive side = higher price.
-  // (UP/DOWN mids always straddle ~0.50, so compare directly.
-  //  Using price order avoids IEEE 754 precision bugs when
-  //  the two sides have equal deviation e.g. 0.70 vs 0.30.)
-  if (upMid <= downMid) {
-    // UP is cheaper → buy UP
-    return { cheapSide: 'Up', cheapPrice: upMid, expensiveSide: 'Down', expensivePrice: downMid, deviation: round5(0.50 - upMid) };
+  // Determine which side overreacted and which is cheap
+  if (upMid > downMid) {
+    // UP is overreacted (expensive), DOWN is cheap — buy DOWN
+    return {
+      overreactedSide: 'Up',
+      cheapSide: 'Down',
+      cheapPrice: downMid,
+      deviation: round5(upMid - 0.50),
+      spread: round5(spread),
+    };
   } else {
-    // DOWN is cheaper → buy DOWN
-    return { cheapSide: 'Down', cheapPrice: downMid, expensiveSide: 'Up', expensivePrice: upMid, deviation: round5(0.50 - downMid) };
+    // DOWN is overreacted (expensive), UP is cheap — buy UP
+    return {
+      overreactedSide: 'Down',
+      cheapSide: 'Up',
+      cheapPrice: upMid,
+      deviation: round5(downMid - 0.50),
+      spread: round5(spread),
+    };
   }
 }
 
 /**
  * Calculate position size based on time decay.
- * Earlier window + bigger deviation → more shares.
+ * More time remaining + bigger deviation → more shares.
  */
 function calcReversionSize(deviation) {
   const pair = Object.values(pairs)[0];
   if (!pair) return BASE_SHARES;
   const tf = timeDecayFactor(pair);
-  // deviationFactor: how extreme is the cheap side (0.0-1.0)
   const deviationFactor = Math.min(1.0, deviation / 0.50);
-  // timeFactor: scales from max at t=0 to min at t=300
-  const timeFactor = 0.2 + 0.8 * tf; // 0.2 to 1.0
+  const timeFactor = 0.3 + 0.7 * tf; // 0.3 to 1.0
   const size = Math.round(BASE_SHARES * timeFactor * (0.5 + 0.5 * deviationFactor));
   return Math.max(1, size);
 }
 
 /**
- * Calculate TP and SL prices based on time decay.
- * Early → TP near 0.50, SL wider.
- * Late → TP closer to entry, SL tighter.
+ * Calculate TP and SL for mean reversion.
+ *
+ * We bought the CHEAP side (< 0.50), expecting reversion toward 0.50.
+ * TP: sell as price reverts toward 0.50. More time → closer to target.
+ * SL: protect if price keeps diverging. More time → wider stop.
  */
-function calcMomentumTpSl(entryPrice) {
+function calcReversionTpSl(entryPrice) {
   const pair = Object.values(pairs)[0];
   const tf = pair ? timeDecayFactor(pair) : 0.5;
 
-  // MOMENTUM TP/SL: buy the side moving away from 0.50,
-  // expecting continuation toward 1.00.
-  //
-  // TP: capture 40-85% of remaining distance to 1.00.
-  //   tf=1.0 (early): entry + (1.00-entry)*0.85 — target 0.95 for entry 0.70
-  //   tf=0.2 (late):  entry + (1.00-entry)*0.44 — target 0.83 for entry 0.70
-  //
-  // SL: protect against reversion toward 0.50.
-  //   tf=1.0 (early): keep 50% of entry — 35¢ buffer for entry 0.70
-  //   tf=0.2 (late):  keep 75% of entry — 17.5¢ buffer for entry 0.70
-  const continuationDist = 1.00 - entryPrice;
-  const tpCapture = 0.40 + 0.45 * tf;
-  const tpPrice = round5(entryPrice + continuationDist * tpCapture);
+  // Distance from entry to 0.50 (always positive since we bought below 0.50)
+  const reversionDist = 0.50 - entryPrice;
 
-  const slKeepFraction = 0.50 + 0.25 * tf;
-  const slPrice = round5(entryPrice * slKeepFraction);
+  // TP: capture 40-70% of reversion distance toward 0.50
+  // Early (tf=1.0): TP = entry + reversionDist * 0.70
+  // Late  (tf=0.05): TP = entry + reversionDist * 0.415
+  const tpCapture = 0.40 + 0.30 * tf;
+  let tpPrice = round5(entryPrice + reversionDist * tpCapture);
 
-  return {
-    tpPrice: Math.max(entryPrice + 0.005, Math.min(0.995, tpPrice)),
-    slPrice: Math.max(0.005, slPrice),
-  };
+  // SL: allow entry * (0.3 + 0.2 * tf) room against us
+  // Early (tf=1.0): keep 50% of entry → wide stop at 50% below
+  // Late  (tf=0.05): keep 69% of entry → tight stop at 31% below
+  const slFraction = 0.3 + 0.2 * tf;
+  let slPrice = round5(entryPrice * (1 - slFraction));
+
+  // Bounds
+  tpPrice = Math.max(entryPrice + 0.003, Math.min(0.995, tpPrice));
+  slPrice = Math.max(0.003, slPrice);
+
+  return { tpPrice, slPrice };
 }
 
 /**
- * Try to place one overreversion trade.
+ * Try to place one mean reversion trade.
+ * Buys the CHEAP side when the other side overreacts.
  */
 async function tryPlaceReversionTrade(p, signal) {
   if (!tradingEnabled) return;
@@ -437,17 +435,21 @@ async function tryPlaceReversionTrade(p, signal) {
 
   const tf = timeDecayFactor(p);
   const shares = calcReversionSize(signal.deviation);
-  const cost = round2(signal.cheapPrice * shares);
-  const { tpPrice, slPrice } = calcTpSl(signal.cheapPrice);
 
-  const expiry = signal.cheapSide === 'Up' ? p.upTokenId : p.downTokenId;
-  if (!expiry) return;
+  // Buy cheap side at mid price (maker limit order)
+  const buyPrice = signal.cheapPrice;
+  const cost = round2(buyPrice * shares);
+  const { tpPrice, slPrice } = calcReversionTpSl(buyPrice);
 
-  const orderResult = await placeLimitBuy(expiry, signal.cheapPrice, shares);
+  const tokenId = signal.cheapSide === 'Up' ? p.upTokenId : p.downTokenId;
+  if (!tokenId) return;
+
+  const orderResult = await placeLimitBuy(tokenId, buyPrice, shares);
 
   const trade = freshTradeEntry();
   trade.side = signal.cheapSide;
-  trade.entryPrice = signal.cheapPrice;
+  trade.overreactedSide = signal.overreactedSide;
+  trade.entryPrice = buyPrice;
   trade.shares = shares;
   trade.cost = cost;
   trade.tpPrice = tpPrice;
@@ -460,11 +462,13 @@ async function tryPlaceReversionTrade(p, signal) {
 
   p.reversionTrades.push(trade);
 
-  const emoji = signal.cheapSide === 'Up' ? '🟢' : '🔴';
-  log(`${emoji} ${p.symbol} OVERREVERSION: buy ${signal.cheapSide} ${shares}sh @ ${signal.cheapPrice.toFixed(4)} ` +
-    `(dev=${signal.deviation.toFixed(3)}, tf=${tf.toFixed(2)}) TP=${tpPrice.toFixed(4)} SL=${slPrice.toFixed(4)} ` +
+  log(`🔄 ${p.symbol} REVERSION: buy ${signal.cheapSide} ${shares}sh @ ${buyPrice.toFixed(4)} ` +
+    `(overreacted=${signal.overreactedSide}, dev=${signal.deviation.toFixed(3)}, tf=${tf.toFixed(2)}) ` +
+    `TP=${tpPrice.toFixed(4)} SL=${slPrice.toFixed(4)} ` +
     `[trade ${activeTrades.length + 1}/${MAX_TRADES_PER_WINDOW}]`);
 }
+
+// ── Order management ──
 
 /**
  * Check fills on resting buy orders → on fill, place TP + SL sells.
@@ -473,7 +477,7 @@ async function manageTpSl(p) {
   for (const t of p.reversionTrades) {
     if (t.state !== 'resting') continue;
 
-    // Check if our buy filled
+    // Check if our limit buy filled (ask crossed down to/through our entry price)
     const ask = t.side === 'Up' ? p.upAsk : p.downAsk;
     if (ask == null || ask > t.entryPrice) continue;
 
@@ -491,20 +495,18 @@ async function manageTpSl(p) {
     const tokenId = t.side === 'Up' ? p.upTokenId : p.downTokenId;
     if (!tokenId) continue;
 
-    // Place TP sell
     const tpOrder = await placeLimitSell(tokenId, t.tpPrice, t.shares);
     t.tpOrderId = tpOrder.id || tpOrder.orderId || null;
 
-    // Place SL sell
     const slOrder = await placeLimitSell(tokenId, t.slPrice, t.shares);
     t.slOrderId = slOrder.id || slOrder.orderId || null;
 
     t.state = 'tp-sl-placed';
-    log(`🧯 ${p.symbol} TP/SL placed: TP sell @ ${t.tpPrice.toFixed(4)}, SL sell @ ${t.slPrice.toFixed(4)} on ${t.side}`);
+    log(`🧯 ${p.symbol} TP/SL placed: sell TP @ ${t.tpPrice.toFixed(4)} / SL @ ${t.slPrice.toFixed(4)} on ${t.side}`);
 
     registerTrade(p, {
       side: 'BUY', outcome: t.side, price: t.entryPrice, shares: t.shares,
-      cost: t.cost, rebate, reason: 'OVERREVERSION',
+      cost: t.cost, rebate, reason: 'REVERSION',
     });
     recordEquity(p);
   }
@@ -532,7 +534,6 @@ async function checkTpSlFills(p) {
         t.state = 'tp-filled';
         t.tpFilledAt = Date.now();
         t.profit = profit;
-        // Cancel SL
         await cancelOrder(t.slOrderId);
         log(`💰 ${p.symbol} TP FILLED ${t.shares}sh ${t.side} @ ${t.tpPrice.toFixed(4)} | pnl=$${profit.toFixed(2)}`);
         registerTrade(p, {
@@ -559,7 +560,6 @@ async function checkTpSlFills(p) {
         t.state = 'sl-filled';
         t.slFilledAt = Date.now();
         t.profit = profit;
-        // Cancel TP
         await cancelOrder(t.tpOrderId);
         log(`🛑 ${p.symbol} SL FILLED ${t.shares}sh ${t.side} @ ${t.slPrice.toFixed(4)} | pnl=$${profit.toFixed(2)}`);
         registerTrade(p, {
@@ -573,19 +573,20 @@ async function checkTpSlFills(p) {
   }
 }
 
+// ── Window resolution ──
+
 /**
- * Cancel unfilled TP/SL orders at window end, let resolution handle rest.
+ * Cancel unfilled orders at window end before resolution.
  */
-async function resolveOverreversionTrades(p) {
+async function cancelRemainingOrders(p) {
   for (const t of p.reversionTrades) {
     if (t.state === 'resting') {
       await cancelOrder(t.buyOrderId);
-      log(`🛑 ${p.symbol}: overreversion buy on ${t.side} @ ${t.entryPrice.toFixed(4)} never filled — cancelled`);
+      log(`🛑 ${p.symbol}: buy on ${t.side} @ ${t.entryPrice.toFixed(4)} never filled — cancelled`);
       t.state = 'cancelled';
       continue;
     }
     if (t.state === 'tp-sl-placed') {
-      // Cancel TP and SL, position goes to resolution
       await cancelOrder(t.tpOrderId);
       await cancelOrder(t.slOrderId);
     }
@@ -613,9 +614,9 @@ async function resolvePairWindow(p) {
   if (p.resolvedThisWindow) return;
   p.resolvedThisWindow = true;
 
-  await resolveMomentumTrades(p);
+  await cancelRemainingOrders(p);
 
-  // Resolve still-held positions
+  // Resolve still-held positions to 0 or 1 after market closes
   const unresolved = p.reversionTrades.filter(t =>
     t.state === 'filled' || t.state === 'tp-sl-placed' || t.state === 'tp-resting' || t.state === 'sl-resting'
   );
@@ -667,9 +668,9 @@ async function processPair(p) {
     const tickSlot = Math.floor(elapsed / CHECK_INTERVAL_S);
     if (tickSlot > p.lastCheckTick) {
       p.lastCheckTick = tickSlot;
-      const signal = detectMomentumSignal(p);
+      const signal = detectOverreactionSignal(p);
       if (signal) {
-        await tryPlaceMomentumTrade(p, signal);
+        await tryPlaceReversionTrade(p, signal);
       }
     }
   }
@@ -722,10 +723,10 @@ function buildState() {
       tradesSlFilled: slFilled,
       tradesResolved: resolved,
       maxTrades: MAX_TRADES_PER_WINDOW,
-      // Detailed trade info for dashboard
       activeTrades: activeTrades.map(t => ({
         id: t.id,
         side: t.side,
+        overreactedSide: t.overreactedSide,
         entryPrice: t.entryPrice,
         shares: t.shares,
         tpPrice: t.tpPrice,
@@ -736,7 +737,9 @@ function buildState() {
         profit: t.profit,
       })),
       allTrades: p.reversionTrades.map(t => ({
-        side: t.side, entryPrice: t.entryPrice, shares: t.shares,
+        side: t.side,
+        overreactedSide: t.overreactedSide,
+        entryPrice: t.entryPrice, shares: t.shares,
         tpPrice: t.tpPrice, slPrice: t.slPrice,
         state: t.state, profit: t.profit,
         timeFactorAtEntry: t.timeFactorAtEntry,
@@ -770,8 +773,8 @@ function buildState() {
       overreactionThreshold: OVERREACTION_THRESHOLD,
       baseShares: BASE_SHARES,
       maxTrades: MAX_TRADES_PER_WINDOW,
-      tpTarget: TP_TARGET_PRICE,
-      slBaseFraction: SL_BASE_FRACTION,
+      tpFactor: TP_REVERSION_FACTOR,
+      slFactor: SL_PROTECTION_FACTOR,
     },
     pairStates, totalEquityCurve,
     logs: logs.slice(-100),
@@ -827,10 +830,10 @@ function getStatus() { return { ok: true, ...buildState() }; }
 async function init(privateKey, emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
-  log(`🚀 5-Minute BTC Up/Down — Time Decay Momentum`);
+  log(`🚀 5-Minute BTC Up/Down — Time Decay Mean Reversion`);
   log(`⚙️  $${TOTAL_CAPITAL} capital | ${pairList.join(', ')} | max ${MAX_TRADES_PER_WINDOW} trades/window`);
-  log(`⚙️  Every ${CHECK_INTERVAL_S}s: detect momentum > ${OVERREACTION_THRESHOLD} from 0.50 → buy momentum side | base ${BASE_SHARES}sh`);
-  log(`⚙️  Time decay: position size × tf | TP = entry + (1.00-entry)×(0.40+0.45×tf) | SL = entry×(0.50+0.25×tf)`);
+  log(`⚙️  Every ${CHECK_INTERVAL_S}s: detect overreaction > ${OVERREACTION_THRESHOLD} from 0.50 → buy OPPOSITE side (mean reversion) | base ${BASE_SHARES}sh`);
+  log(`⚙️  Time decay: position × tf | TP = entry+(0.50-entry)×(0.40+0.30×tf) | SL = entry×(0.30+0.20×tf)`);
   log(`${DRY_RUN ? '⚠️  DRY RUN — simulated fills' : '🔴 LIVE MODE — real money'}`);
 
   trader = new PolymarketTrader(privateKey);
