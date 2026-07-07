@@ -33,7 +33,7 @@ app.get('/', (_, res) => {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>⚡ Overreaction Fade + Time-Decay Scalper</title>
+<title>⚡ Momentum Threshold + Time-Decay Scalper</title>
 <style>
   :root {
     --bg: #ffffff; --bg2: #f5f7fa; --bg3: #edf0f4; --border: #d0d7e2;
@@ -117,7 +117,7 @@ app.get('/', (_, res) => {
 </head>
 <body>
   <div class="header">
-    <div class="logo">⚡ <span>OVERREACTION FADE + TIME-DECAY</span> SCALPER</div>
+    <div class="logo">⚡ <span>MOMENTUM THRESHOLD + TIME-DECAY</span> SCALPER</div>
     <div id="mode-badge" class="mode-badge ${DRY_RUN ? 'mode-dry' : 'mode-live'}">${DRY_RUN ? 'DRY RUN' : '🔴 LIVE'}</div>
   </div>
 
@@ -203,7 +203,7 @@ app.get('/', (_, res) => {
     if (!positions || positions.length === 0) return '<div class="order-empty">none open</div>';
     return positions.map(o => {
       const tagCls = o.kind === 'FINAL' ? 'tag-counter' : 'tag-ticker';
-      const tagTxt = o.kind === 'FINAL' ? '🎯FIN' : '⚡FADE';
+      const tagTxt = o.kind === 'FINAL' ? '🎯FIN' : '⚡BUY';
       const slTxt = o.slPrice != null ? (' · SL '+o.slPrice.toFixed(2)) : '';
       const tpTxt = o.tpPrice != null ? (' → TP '+o.tpPrice.toFixed(2)) : '';
       return '<div class="order-line"><span><span class="'+tagCls+'">'+tagTxt+'</span> '+o.entryPrice.toFixed(2)+tpTxt+slTxt+'</span><span>'+o.shares.toFixed(0)+'sh</span></div>';
@@ -212,13 +212,13 @@ app.get('/', (_, res) => {
 
   function sideBox(label, cls, s) {
     if (!s) s = {};
-    const armedTxt = s.armed ? 'armed (watching for spike ≥ '+(s.spikeThreshold!=null?s.spikeThreshold.toFixed(2):'—')+')' : 'cooling down after fade';
+    const armedTxt = s.armed ? 'armed (buys once ≥ '+(s.spikeThreshold!=null?s.spikeThreshold.toFixed(2):'—')+')' : 'cooling down after entry';
     const midTxt = s.mid != null ? s.mid.toFixed(2) : '—';
     return '<div class="side-box '+cls+'">'+
       '<div class="side-title"><span>'+label+'</span><span class="tick-badge">mid '+midTxt+' · '+armedTxt+'</span></div>'+
       '<div class="side-row"><span>Held Position</span><span>'+(s.heldShares||0).toFixed(0)+'sh ($'+(s.heldCost||0).toFixed(2)+')</span></div>'+
       '<div class="side-row pnl-mini"><span>Side W/L · P&amp;L</span><span class="'+pClass(s.realizedPnl)+'">'+(s.wins||0)+'W/'+(s.losses||0)+'L · '+sgn(s.realizedPnl)+'</span></div>'+
-      '<div class="order-list"><div class="order-list-title">Open Positions (⚡ fade entry / 🎯 final sweep sell)</div>'+positionList(s.openPositions)+'</div>'+
+      '<div class="order-list"><div class="order-list-title">Open Positions (⚡ entry / 🎯 final sweep sell)</div>'+positionList(s.openPositions)+'</div>'+
     '</div>';
   }
 
@@ -242,7 +242,7 @@ app.get('/', (_, res) => {
     if (!configRendered && s.config) {
       const c = s.config;
       const rows = [
-        ['Spike Threshold', c.spikeThreshold.toFixed(2)],
+        ['Entry Threshold', '≥ '+c.spikeThreshold.toFixed(2)],
         ['Spike Lookback', c.spikeLookbackSecs+'s'],
         ['Re-arm Margin', '-'+c.spikeResetMargin.toFixed(2)],
         ['Max Trades/Window', c.maxTradesPerWindow],
