@@ -2,48 +2,46 @@
 
 /**
  * ═══════════════════════════════════════════════════════════════
- *  POLYMARKET 5-MINUTE BTC UP/DOWN — MOMENTUM THRESHOLD + TIME-DECAY SCALPER
+ *  POLYMARKET 5-MINUTE BTC UP/DOWN — MOMENTUM-LEADER ENTRY
+ *  WITH BOUNDED RECOVERY SIZING
  * ═══════════════════════════════════════════════════════════════
  *
- *  CORE IDEA — "time decay":
- *    Every window lasts WINDOW_SECS (300s). decay = elapsed / 300,
- *    a value that grows from 0 (window just opened) to 1 (window
- *    about to close). The less time remains, the higher the decay.
+ *  ENTRY — one shot per window, per pair:
+ *    Wait ENTRY_DELAY_SECS (45s) for the window to settle out of
+ *    open noise. Then look at which side currently has the higher
+ *    bid — that's the "leader" — and buy it, PROVIDED its ask sits
+ *    in a sane [ENTRY_ZONE_MIN, ENTRY_ZONE_MAX] = [0.50, 0.90] band.
+ *    Below 0.50 it isn't really leading; above 0.90 the reward left
+ *    on the table no longer justifies the risk. If the zone isn't
+ *    met yet, the bot keeps checking every tick until ENTRY_CUTOFF_SECS
+ *    (280s) — only one entry ever fires per window.
  *
- *  SIGNAL — "momentum threshold":
- *    Each side's mid price is sampled continuously. The bot ONLY
- *    trades a side once that side's OWN price is >= SPIKE_THRESHOLD
- *    (0.55) — i.e. it buys the side that is currently leading, not
- *    the opposite one. Once a side is bought, it re-arms only after
- *    dropping back below (threshold - SPIKE_RESET_MARGIN), so a
- *    single crossing fires once rather than every tick it stays high.
- *
- *  SIZING BY DECAY:
- *    Bigger decay (later in the window, closer to close) => bigger
- *    position size. shares = BASE_SHARES * (1 + DECAY_SIZE_MULT * decay),
- *    capped at MAX_SHARES_CAP.
- *
- *  TP / SL BY DECAY:
- *    Early in the window (low decay) there's lots of time left for
- *    the price to swing, so TP/SL sit wide. Late in the window
- *    (high decay) there's little time left, so TP/SL are pulled in
- *    tight — offset(decay) = BASE - (BASE - MIN) * decay.
- *
- *  TRADE CAP:
- *    At most MAX_TRADES_PER_WINDOW (5) new entries per pair,
- *    per window, across both sides combined.
- *
- *  EXITS:
- *    - TP: resting maker limit sell at entry + tpOffset(decay).
- *    - SL: monitored every tick; if bid <= entry - slOffset(decay),
- *      immediately sell at the current bid (taker) to cut the loss.
+ *  EXIT:
+ *    Fixed, symmetric TP/SL around the entry price — TP +0.07,
+ *    SL -0.07 (roughly 1:1 risk/reward). TP rests as a maker limit
+ *    sell; SL is monitored every tick and executed immediately
+ *    (taker) the instant the bid trades through it, to actually cap
+ *    the loss rather than hope for a fill.
  *
  *  CLOSE-OUT:
- *    No new entries after ENTRY_CUTOFF_SECS (280s). At SWEEP_SECS
- *    (285s): cancel any still-resting TPs and roll all remaining
- *    held shares per side into one aggregate maker sell @ 0.99.
- *    Anything still unfilled at window end resolves against the
- *    actual Polymarket outcome.
+ *    At SWEEP_SECS (285s), any still-open position (never hit TP or
+ *    SL) is force-flattened into one maker sell @ 0.99. Anything
+ *    still unfilled at window end resolves against the real outcome.
+ *
+ *  RECOVERY SIZING — the actual point of this bot:
+ *    Each pair keeps a `recoveryStep` counter that PERSISTS across
+ *    windows (this is what makes it a recovery system rather than a
+ *    fresh coin flip every 5 minutes).
+ *      - shares(step) = BASE_SHARES * RECOVERY_STEP_MULT^step,
+ *        capped at MAX_RECOVERY_STEPS steps and MAX_SHARES_CAP shares.
+ *      - Any LOSING close (SL, losing sweep, or losing resolution)
+ *        increments the step by 1 (capped — it does not grow forever).
+ *      - Any WINNING close (TP, winning sweep, or winning resolution)
+ *        immediately resets the step back to 0.
+ *    With BASE_SHARES=30 and mult=1.3, sizes run 30 → 39 → 51 → 66 →
+ *    86 across the 4 allowed steps — enough to claw back part of a
+ *    losing streak on the next win, without ever compounding into a
+ *    true martingale blow-up. One win anywhere wipes the streak.
  * ═══════════════════════════════════════════════════════════════
  */
 
@@ -66,24 +64,23 @@ const TOTAL_CAPITAL = Number(process.env.TOTAL_CAPITAL || 2000);
 const DEFAULT_PAIRS = (process.env.CRYPTO_PAIRS || 'BTC')
   .split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
 
-// ── Momentum-threshold signal ──
-const SPIKE_THRESHOLD     = Number(process.env.SPIKE_THRESHOLD || 0.55);     // bot only trades a side once its price is >= this
-const SPIKE_RESET_MARGIN  = Number(process.env.SPIKE_RESET_MARGIN || 0.10);  // must fall back below (threshold - margin) to re-arm
-const MAX_TRADES_PER_WINDOW = Number(process.env.MAX_TRADES_PER_WINDOW || 5);
-const ENTRY_CUTOFF_SECS   = Number(process.env.ENTRY_CUTOFF_SECS || 280);    // no new entries after this
-const SWEEP_SECS          = Number(process.env.SWEEP_SECS || 285);          // cancel resting TPs, roll into final sell
-const FINAL_SELL_PRICE    = Number(process.env.FINAL_SELL_PRICE || 0.99);
+// ── Entry ──
+const ENTRY_DELAY_SECS  = Number(process.env.ENTRY_DELAY_SECS || 45);   // let the window settle before evaluating
+const ENTRY_ZONE_MIN    = Number(process.env.ENTRY_ZONE_MIN || 0.50);   // leader must be at least this to count as "leading"
+const ENTRY_ZONE_MAX    = Number(process.env.ENTRY_ZONE_MAX || 0.90);   // above this, reward no longer justifies risk
+const ENTRY_CUTOFF_SECS = Number(process.env.ENTRY_CUTOFF_SECS || 280); // stop looking for the one entry after this
+const SWEEP_SECS        = Number(process.env.SWEEP_SECS || 285);       // force-flatten anything still open
+const FINAL_SELL_PRICE  = Number(process.env.FINAL_SELL_PRICE || 0.99);
 
-// ── Time-decay position sizing ──
-const BASE_SHARES      = Number(process.env.BASE_SHARES || 40);   // size at decay = 0 (window just opened)
-const DECAY_SIZE_MULT  = Number(process.env.DECAY_SIZE_MULT || 1.5); // extra size fraction added at decay = 1
-const MAX_SHARES_CAP   = Number(process.env.MAX_SHARES_CAP || 150);
+// ── Fixed TP / SL ──
+const TP_OFFSET = Number(process.env.TP_OFFSET || 0.07);
+const SL_OFFSET = Number(process.env.SL_OFFSET || 0.07);
 
-// ── Time-decay TP / SL (tighten as decay grows) ──
-const BASE_TP_OFFSET = Number(process.env.BASE_TP_OFFSET || 0.12); // TP distance at decay = 0
-const MIN_TP_OFFSET  = Number(process.env.MIN_TP_OFFSET || 0.04);  // TP distance at decay = 1
-const BASE_SL_OFFSET = Number(process.env.BASE_SL_OFFSET || 0.10); // SL distance at decay = 0
-const MIN_SL_OFFSET  = Number(process.env.MIN_SL_OFFSET || 0.03);  // SL distance at decay = 1
+// ── Bounded recovery sizing (persists across windows, per pair) ──
+const BASE_SHARES         = Number(process.env.BASE_SHARES || 30);
+const RECOVERY_STEP_MULT  = Number(process.env.RECOVERY_STEP_MULT || 1.3);
+const MAX_RECOVERY_STEPS  = Number(process.env.MAX_RECOVERY_STEPS || 4);
+const MAX_SHARES_CAP      = Number(process.env.MAX_SHARES_CAP || 120);
 
 // ── Fees & maker rebates (Polymarket Fee Structure V2, crypto category) ──
 const CRYPTO_TAKER_FEE_RATE     = Number(process.env.CRYPTO_TAKER_FEE_RATE || 0.07);
@@ -114,14 +111,14 @@ function nowSec() { return Date.now() / 1000; }
 function clamp(n, lo, hi) { return Math.max(lo, Math.min(hi, n)); }
 
 async function getJSON(url) {
-  const res = await fetch(url, { headers: { 'User-Agent': 'polymarket-decay-momentum-scalper/1.0' } });
+  const res = await fetch(url, { headers: { 'User-Agent': 'polymarket-recovery-scalper/1.0' } });
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${url}`);
   return res.json();
 }
 async function postJSON(url, body) {
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'User-Agent': 'polymarket-decay-momentum-scalper/1.0' },
+    headers: { 'Content-Type': 'application/json', 'User-Agent': 'polymarket-recovery-scalper/1.0' },
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${url}`);
@@ -153,23 +150,29 @@ function makerRebate(shares, price) {
 }
 
 // ─────────────────────────────────────────
-//  Time-decay helpers
+//  Bounded recovery sizing
 // ─────────────────────────────────────────
-function decayFactor(elapsed) { return clamp(elapsed / WINDOW_SECS, 0, 1); }
-function sharesForDecay(decay) {
-  const raw = BASE_SHARES * (1 + DECAY_SIZE_MULT * decay);
+function sharesForStep(step) {
+  const raw = BASE_SHARES * Math.pow(RECOVERY_STEP_MULT, step);
   return Math.min(MAX_SHARES_CAP, round2(raw));
 }
-function tpOffsetForDecay(decay) { return round2(BASE_TP_OFFSET - (BASE_TP_OFFSET - MIN_TP_OFFSET) * decay); }
-function slOffsetForDecay(decay) { return round2(BASE_SL_OFFSET - (BASE_SL_OFFSET - MIN_SL_OFFSET) * decay); }
+function applyRecoveryOutcome(p, profit) {
+  if (profit >= 0) {
+    if (p.recoveryStep !== 0) log(`♻️  ${p.symbol}: win — recovery step reset to 0 (was ${p.recoveryStep})`);
+    p.recoveryStep = 0;
+  } else {
+    const before = p.recoveryStep;
+    p.recoveryStep = Math.min(MAX_RECOVERY_STEPS, p.recoveryStep + 1);
+    log(`♻️  ${p.symbol}: loss — recovery step ${before} → ${p.recoveryStep} (next size ${sharesForStep(p.recoveryStep)}sh)`);
+  }
+}
 
 // ─────────────────────────────────────────
 //  Pair state
 // ─────────────────────────────────────────
 function freshSideState() {
   return {
-    armed: true,        // true = eligible to fire a fresh threshold-cross entry
-    positions: [],      // { entryPrice, shares, cost, slPrice, decay, exit:{kind:'TP'|'FINAL', price, orderId, status}, openedAt }
+    positions: [], // { entryPrice, shares, cost, slPrice, exit:{kind:'TP'|'FINAL', price, orderId, status}, openedAt }
     wins: 0, losses: 0,
     realizedPnl: 0,
     rebatesEarned: 0,
@@ -196,9 +199,11 @@ function freshPairState(symbol) {
     rebatesEarned: 0,
     wins: 0, losses: 0,
 
+    recoveryStep: 0, // persists ACROSS windows — this is the recovery system's memory
+
     // per-window trading state (reset in loadPairWindow)
     sweepDone: false,
-    tradesThisWindow: 0,
+    tradedThisWindow: false,
     sides: { Up: freshSideState(), Down: freshSideState() },
 
     resolvedThisWindow: true,
@@ -279,12 +284,12 @@ async function loadPairWindow(p) {
   p.tradable = true;
   p.resolvedThisWindow = false;
 
-  // reset per-window trading state
+  // reset per-window trading state (recoveryStep is NOT reset — it persists across windows)
   p.sweepDone = false;
-  p.tradesThisWindow = 0;
+  p.tradedThisWindow = false;
   p.sides = { Up: freshSideState(), Down: freshSideState() };
 
-  log(`🔭 ${p.symbol} window loaded: ${slug} | ends ${new Date(p.windowEnd * 1000).toISOString().slice(11,19)}Z`);
+  log(`🔭 ${p.symbol} window loaded: ${slug} | ends ${new Date(p.windowEnd * 1000).toISOString().slice(11,19)}Z | recovery step ${p.recoveryStep} (next size ${sharesForStep(p.recoveryStep)}sh)`);
 }
 
 // ─────────────────────────────────────────
@@ -396,32 +401,33 @@ function midPrice(ask, bid) {
 }
 
 // ─────────────────────────────────────────
-//  Momentum entry — buys the SAME side that crossed above the
-//  threshold (the leading side), sized and TP/SL'd by time decay.
+//  Entry — one shot per window: buy whichever side is leading
+//  (higher bid), sized by the pair's current recovery step.
 // ─────────────────────────────────────────
-async function fireMomentumEntry(p, side, crossMid, elapsed) {
-  const ask = side === 'Up' ? p.upAsk : p.downAsk;
-  if (ask == null) {
-    log(`⏭️  ${p.symbol}: ${side} crossed ${crossMid.toFixed(2)} but no quote yet — skipped entry`);
-    return;
-  }
+async function maybeFireEntry(p, elapsed) {
+  if (p.tradedThisWindow) return;
+  if (elapsed < ENTRY_DELAY_SECS || elapsed >= ENTRY_CUTOFF_SECS) return;
+  if (p.upBid == null || p.downBid == null) return;
 
-  const decay = decayFactor(elapsed);
-  const shares = sharesForDecay(decay);
-  const price = round2(ask); // cross the spread — this is a time-sensitive momentum entry, not a passive maker order
+  const side = p.upBid >= p.downBid ? 'Up' : 'Down';
+  const ask = side === 'Up' ? p.upAsk : p.downAsk;
+  if (ask == null) return;
+  if (ask < ENTRY_ZONE_MIN || ask > ENTRY_ZONE_MAX) return; // keep checking next tick — price may move into zone
+
+  const shares = sharesForStep(p.recoveryStep);
+  const price = round2(ask); // cross the spread — this is a one-shot directional entry, not a passive maker order
   const cost = round2(price * shares);
   const fee = takerFee(shares, price);
   const totalCost = round2(cost + fee);
 
   if (totalCost > p.bankroll) {
     log(`⏭️  ${p.symbol} ${side}: skip entry — insufficient bankroll ($${p.bankroll.toFixed(2)}, need $${totalCost.toFixed(2)})`);
+    p.tradedThisWindow = true; // don't keep retrying this window if bankroll can't cover it
     return;
   }
 
-  const tpOffset = tpOffsetForDecay(decay);
-  const slOffset = slOffsetForDecay(decay);
-  const tpPrice = round2(clamp(price + tpOffset, 0.01, 0.99));
-  const slPrice = round2(clamp(price - slOffset, 0.01, 0.99));
+  const tpPrice = round2(clamp(price + TP_OFFSET, 0.01, 0.99));
+  const slPrice = round2(clamp(price - SL_OFFSET, 0.01, 0.99));
 
   const s = p.sides[side];
   const tokenId = side === 'Up' ? p.upTokenId : p.downTokenId;
@@ -429,49 +435,22 @@ async function fireMomentumEntry(p, side, crossMid, elapsed) {
   p.bankroll = round2(p.bankroll - totalCost);
   p.feesPaid = round2(p.feesPaid + fee);
   s.feesPaid = round2(s.feesPaid + fee);
-  p.tradesThisWindow++;
+  p.tradedThisWindow = true;
 
   const tpOrder = await placeLimitSell(tokenId, tpPrice, shares);
   s.positions.push({
-    entryPrice: price, shares, cost: totalCost, slPrice, decay,
+    entryPrice: price, shares, cost: totalCost, slPrice,
     exit: { kind: 'TP', price: tpPrice, orderId: tpOrder.id || tpOrder.orderId || null, status: 'resting' },
     openedAt: Date.now(),
   });
 
-  log(`⚡ ${p.symbol} ${side} crossed ${crossMid.toFixed(2)} (>= ${SPIKE_THRESHOLD.toFixed(2)}) — BUY ${side} ${shares}sh @ ${price.toFixed(2)} | decay=${decay.toFixed(2)} | TP ${tpPrice.toFixed(2)} / SL ${slPrice.toFixed(2)} | trade ${p.tradesThisWindow}/${MAX_TRADES_PER_WINDOW}`);
+  log(`🎯 ${p.symbol}: ${side} leading (bid ${(side==='Up'?p.upBid:p.downBid).toFixed(2)}) — BUY ${shares}sh @ ${price.toFixed(2)} [recovery step ${p.recoveryStep}] | TP ${tpPrice.toFixed(2)} / SL ${slPrice.toFixed(2)}`);
   registerTrade(p, { side: 'BUY', outcome: side, reason: 'ENTRY', price, shares, cost: totalCost, fee });
   recordEquity(p);
 }
 
 // ─────────────────────────────────────────
-//  Threshold detection — runs per side; only trades a side once its
-//  own price is above SPIKE_THRESHOLD (0.55). Re-arms only once price
-//  falls back below (threshold - reset margin), so one crossing fires
-//  once, not on every tick it stays high.
-// ─────────────────────────────────────────
-async function maybeDetectAndTrade(p, side, elapsed) {
-  const s = p.sides[side];
-  const ask = side === 'Up' ? p.upAsk : p.downAsk;
-  const bid = side === 'Up' ? p.upBid : p.downBid;
-  const mid = midPrice(ask, bid);
-  if (mid == null) return;
-
-  if (!s.armed && mid < SPIKE_THRESHOLD - SPIKE_RESET_MARGIN) {
-    s.armed = true; // reset — a fresh crossing on this side can fire again
-  }
-
-  if (!s.armed) return;
-  if (mid < SPIKE_THRESHOLD) return; // only trade a side once it is above 0.55
-  if (elapsed >= ENTRY_CUTOFF_SECS) return;
-  if (p.tradesThisWindow >= MAX_TRADES_PER_WINDOW) return;
-
-  s.armed = false; // consume this signal
-  await fireMomentumEntry(p, side, mid, elapsed);
-}
-
-// ─────────────────────────────────────────
-//  Position exit checking — TP (resting maker) or SL (immediate,
-//  triggered once the bid falls through the decay-scaled stop level).
+//  Position exit checking — TP (resting maker) or SL (immediate taker)
 // ─────────────────────────────────────────
 async function checkPositionExits(p, side) {
   const s = p.sides[side];
@@ -484,7 +463,6 @@ async function checkPositionExits(p, side) {
     if (pos.exit.status !== 'resting') { stillOpen.push(pos); continue; }
 
     if (pos.exit.kind === 'TP' && bid <= pos.slPrice) {
-      // Stop-loss breached before TP — cancel the resting TP and exit now (taker)
       await cancelOrder(pos.exit.orderId);
       const proceeds = round2(bid * pos.shares);
       const fee = takerFee(pos.shares, bid);
@@ -500,8 +478,9 @@ async function checkPositionExits(p, side) {
 
       log(`🛑 ${p.symbol} ${side} SL hit @ ${bid.toFixed(2)} (entry ${pos.entryPrice.toFixed(2)}, stop ${pos.slPrice.toFixed(2)}) | ${pos.shares}sh | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
       registerTrade(p, { side: 'SELL', outcome: side, reason: 'SL', price: bid, shares: pos.shares, profit, fee });
+      applyRecoveryOutcome(p, profit);
       recordEquity(p);
-      continue; // closed, dropped
+      continue;
     }
 
     if (pos.exit.kind === 'TP' && bid >= pos.exit.price) {
@@ -519,8 +498,9 @@ async function checkPositionExits(p, side) {
 
       log(`💰 ${p.symbol} ${side} TP filled ${pos.shares}sh @ ${pos.exit.price.toFixed(2)} (entry ${pos.entryPrice.toFixed(2)}) | rebate=+$${rebate.toFixed(4)} | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
       registerTrade(p, { side: 'SELL', outcome: side, reason: 'TP', price: pos.exit.price, shares: pos.shares, profit, rebate });
+      applyRecoveryOutcome(p, profit);
       recordEquity(p);
-      continue; // closed, dropped
+      continue;
     }
 
     stillOpen.push(pos);
@@ -529,7 +509,7 @@ async function checkPositionExits(p, side) {
 }
 
 // ─────────────────────────────────────────
-//  285s sweep: cancel unfilled TPs, roll remainder into 0.99 sell
+//  285s sweep: cancel unfilled TP, roll remainder into 0.99 sell
 // ─────────────────────────────────────────
 async function maybeSweep(p, elapsed) {
   if (p.sweepDone || elapsed < SWEEP_SECS) return;
@@ -555,11 +535,11 @@ async function maybeSweep(p, elapsed) {
       const tokenId = side === 'Up' ? p.upTokenId : p.downTokenId;
       const order = await placeLimitSell(tokenId, FINAL_SELL_PRICE, sweepShares);
       s.positions.push({
-        entryPrice: round2(sweepCost / sweepShares), shares: sweepShares, cost: sweepCost, slPrice: 0, decay: 1,
+        entryPrice: round2(sweepCost / sweepShares), shares: sweepShares, cost: sweepCost, slPrice: 0,
         exit: { kind: 'FINAL', price: FINAL_SELL_PRICE, orderId: order.id || order.orderId || null, status: 'resting' },
         openedAt: Date.now(),
       });
-      log(`🎯 ${p.symbol} ${side}: cancelled pending TPs, resting FINAL SELL @ ${FINAL_SELL_PRICE} for combined ${sweepShares}sh`);
+      log(`🎯 ${p.symbol} ${side}: cancelled pending TP, resting FINAL SELL @ ${FINAL_SELL_PRICE} for ${sweepShares}sh`);
     }
   }
 }
@@ -617,6 +597,7 @@ async function resolvePairWindow(p) {
     const icon = won ? '💰' : '💥';
     log(`${icon} ${p.symbol} RESOLUTION ${side} ${shares}sh cost=$${cost.toFixed(2)} exit=$${won ? '1.00' : '0.00'}/sh | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
     registerTrade(p, { side: 'SELL', outcome: side, reason: 'RESOLUTION', price: won ? 1 : 0, shares, profit });
+    applyRecoveryOutcome(p, profit);
     s.positions = [];
   }
   recordEquity(p);
@@ -637,7 +618,7 @@ async function processPair(p) {
   const elapsed = nowSec() - p.windowStart;
 
   for (const side of ['Up', 'Down']) await checkPositionExits(p, side);
-  for (const side of ['Up', 'Down']) await maybeDetectAndTrade(p, side, elapsed);
+  await maybeFireEntry(p, elapsed);
 
   await maybeSweep(p, elapsed);
 
@@ -650,7 +631,7 @@ async function processPair(p) {
 // ─────────────────────────────────────────
 //  UI state — full detail per side for dashboard observation
 // ─────────────────────────────────────────
-function sideSummary(p, side, elapsed) {
+function sideSummary(p, side) {
   const s = p.sides[side];
   const openPositions = s.positions
     .filter(pos => pos.exit.status === 'resting')
@@ -659,20 +640,12 @@ function sideSummary(p, side, elapsed) {
       tpPrice: pos.exit.kind === 'TP' ? pos.exit.price : null,
       slPrice: pos.slPrice || null,
       kind: pos.exit.kind,
-      decay: pos.decay,
     }));
-
-  const ask = side === 'Up' ? p.upAsk : p.downAsk;
-  const bid = side === 'Up' ? p.upBid : p.downBid;
-  const mid = midPrice(ask, bid);
 
   return {
     openPositions,
     heldShares: sideHeldShares(s),
     heldCost: sideHeldCost(s),
-    armed: s.armed,
-    mid,
-    spikeThreshold: SPIKE_THRESHOLD,
     wins: s.wins,
     losses: s.losses,
     realizedPnl: s.realizedPnl,
@@ -686,10 +659,9 @@ function buildState() {
     const unrealized = round2(positionsMarkValue(p) - (sideHeldCost(p.sides.Up) + sideHeldCost(p.sides.Down)));
     const markValue = pairMarkValue(p);
     const elapsed = p.windowStart != null ? Math.max(0, nowSec() - p.windowStart) : null;
-    const decay = elapsed != null ? decayFactor(elapsed) : null;
     let phase = '—';
     if (p.tradable && elapsed != null) {
-      phase = elapsed >= SWEEP_SECS ? 'SWEPT / RESOLVING' : (elapsed >= ENTRY_CUTOFF_SECS ? 'NO NEW ENTRIES' : 'ENTRIES OPEN');
+      phase = elapsed >= SWEEP_SECS ? 'SWEPT / RESOLVING' : (elapsed >= ENTRY_CUTOFF_SECS ? 'NO NEW ENTRIES' : (p.tradedThisWindow ? 'TRADED THIS WINDOW' : 'WAITING FOR ENTRY'));
     }
     return {
       symbol: p.symbol,
@@ -699,7 +671,6 @@ function buildState() {
       windowEnd: p.windowEnd,
       elapsedSecs: elapsed != null ? Math.floor(elapsed) : null,
       secsToEnd: p.windowEnd ? Math.max(0, Math.floor(p.windowEnd - nowSec())) : null,
-      decay,
       upAsk: p.upAsk, upBid: p.upBid, downAsk: p.downAsk, downBid: p.downBid,
       phase,
       bankroll: p.bankroll,
@@ -710,9 +681,11 @@ function buildState() {
       rebatesEarned: p.rebatesEarned,
       wins: p.wins,
       losses: p.losses,
-      tradesThisWindow: p.tradesThisWindow,
-      maxTradesPerWindow: MAX_TRADES_PER_WINDOW,
-      sides: { Up: sideSummary(p, 'Up', elapsed), Down: sideSummary(p, 'Down', elapsed) },
+      recoveryStep: p.recoveryStep,
+      maxRecoverySteps: MAX_RECOVERY_STEPS,
+      nextTradeShares: sharesForStep(p.recoveryStep),
+      tradedThisWindow: p.tradedThisWindow,
+      sides: { Up: sideSummary(p, 'Up'), Down: sideSummary(p, 'Down') },
       equityCurve: p.equityCurve,
     };
   });
@@ -743,19 +716,18 @@ function buildState() {
     winRate: (totalWins + totalLosses) > 0 ? round2((totalWins / (totalWins + totalLosses)) * 100) : null,
     uptime: Math.floor((Date.now() - startTime) / 1000),
     config: {
-      spikeThreshold: SPIKE_THRESHOLD,
-      spikeResetMargin: SPIKE_RESET_MARGIN,
-      maxTradesPerWindow: MAX_TRADES_PER_WINDOW,
-      baseShares: BASE_SHARES,
-      decaySizeMult: DECAY_SIZE_MULT,
-      maxSharesCap: MAX_SHARES_CAP,
-      baseTpOffset: BASE_TP_OFFSET,
-      minTpOffset: MIN_TP_OFFSET,
-      baseSlOffset: BASE_SL_OFFSET,
-      minSlOffset: MIN_SL_OFFSET,
+      entryDelaySecs: ENTRY_DELAY_SECS,
+      entryZoneMin: ENTRY_ZONE_MIN,
+      entryZoneMax: ENTRY_ZONE_MAX,
       entryCutoffSecs: ENTRY_CUTOFF_SECS,
       sweepSecs: SWEEP_SECS,
       finalSellPrice: FINAL_SELL_PRICE,
+      tpOffset: TP_OFFSET,
+      slOffset: SL_OFFSET,
+      baseShares: BASE_SHARES,
+      recoveryStepMult: RECOVERY_STEP_MULT,
+      maxRecoverySteps: MAX_RECOVERY_STEPS,
+      maxSharesCap: MAX_SHARES_CAP,
       cryptoMakerRebateShare: CRYPTO_MAKER_REBATE_SHARE,
     },
     pairStates,
@@ -819,14 +791,12 @@ function getStatus() { return { ok: true, ...buildState() }; }
 async function init(privateKey, emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
-  log(`🚀 5-Minute BTC Up/Down — Overreaction Fade + Time-Decay Scalper`);
+  log(`🚀 5-Minute BTC Up/Down — Momentum-Leader Entry + Bounded Recovery Sizing`);
   log(`⚙️  $${TOTAL_CAPITAL} demo capital across ${pairList.length} pair(s) (${pairList.join(', ')}) → $${perPairCapital.toFixed(2)}/pair`);
-  log(`⚙️  Signal: a side is only traded once its own price is >= ${SPIKE_THRESHOLD} — buys the leading side, not the opposite`);
-  log(`⚙️  Sizing by time decay: ${BASE_SHARES}sh at window-open, scaling up to ${Math.min(MAX_SHARES_CAP, Math.round(BASE_SHARES*(1+DECAY_SIZE_MULT)))}sh near window close`);
-  log(`⚙️  TP/SL tighten with decay: TP ${BASE_TP_OFFSET}→${MIN_TP_OFFSET}, SL ${BASE_SL_OFFSET}→${MIN_SL_OFFSET} (wide early, tight late)`);
-  log(`⚙️  Max ${MAX_TRADES_PER_WINDOW} new entries per pair per window | no new entries after ${ENTRY_CUTOFF_SECS}s`);
-  log(`⚙️  At ${SWEEP_SECS}s: cancel unfilled TPs, roll remainder into one @ ${FINAL_SELL_PRICE} sell per side`);
-  log(`⚙️  Unfilled ${FINAL_SELL_PRICE} sell at window close → resolves to actual outcome`);
+  log(`⚙️  One entry per window: after ${ENTRY_DELAY_SECS}s, buy whichever side leads (higher bid) if its ask is in [${ENTRY_ZONE_MIN.toFixed(2)}-${ENTRY_ZONE_MAX.toFixed(2)}]`);
+  log(`⚙️  Fixed TP +${TP_OFFSET} / SL -${SL_OFFSET} around entry`);
+  log(`⚙️  Recovery sizing: ${BASE_SHARES}sh base, x${RECOVERY_STEP_MULT} per consecutive loss, capped at ${MAX_RECOVERY_STEPS} steps (max ${sharesForStep(MAX_RECOVERY_STEPS)}sh) — any win resets to base. Persists across windows.`);
+  log(`⚙️  At ${SWEEP_SECS}s: cancel unfilled TP, roll remainder into one @ ${FINAL_SELL_PRICE} sell per side | unfilled at close resolves to actual outcome`);
   log(`${DRY_RUN ? '⚠️  DRY RUN — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
   trader = new PolymarketTrader(privateKey);
