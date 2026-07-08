@@ -76,6 +76,7 @@ const TP_OFFSET       = Number(process.env.TP_OFFSET || 0.03);     // TP = entry
 const RUNG_NOTIONAL  = Number(process.env.RUNG_NOTIONAL || 50);   // fixed $ per rung, regardless of shares
 
 const SWEEP_SECS = Number(process.env.SWEEP_SECS || 285); // ladder stays fully live until this point; unfilled buys cancelled here
+const ENTRY_GRACE_SECS = Number(process.env.ENTRY_GRACE_SECS || 5); // ignore fills in the first few seconds — book is often empty/junk right at window open
 
 // ── Fees & maker rebates (Polymarket Fee Structure V2, crypto category) ──
 const CRYPTO_TAKER_FEE_RATE     = Number(process.env.CRYPTO_TAKER_FEE_RATE || 0.07);
@@ -250,6 +251,8 @@ async function fetchEventForWindow(symbol, windowStart) {
     try {
       const event = await getJSON(`${GAMMA}/events/slug/${encodeURIComponent(slug)}`);
       if (event && event.id && Array.isArray(event.markets) && event.markets.length) {
+        const market = event.markets.find(m => { const q = qOf(m); return q.includes('up') || q.includes('down'); }) || event.markets[0];
+        if (market && market.closed === true) continue; // never trade a market that's already settled
         return { event, windowStart: ws, slug };
       }
     } catch (_) { /* not indexed yet */ }
@@ -421,6 +424,7 @@ async function maybeFillSideBuys(p, side, elapsed) {
   for (const rung of s.rungs) {
     if (!rung.armed || rung.filled) continue;
     if (elapsed >= SWEEP_SECS) continue; // sweep handles cancellation
+    if (elapsed < ENTRY_GRACE_SECS) continue; // ignore the first few seconds — book may still be empty/junk
     if (ask == null || ask > rung.buyPrice) continue; // not reached yet
 
     const shares = round2(RUNG_NOTIONAL / rung.buyPrice);
@@ -703,6 +707,7 @@ function buildState() {
       rungNotional: RUNG_NOTIONAL,
       stopLoss: 'none',
       sweepSecs: SWEEP_SECS,
+      entryGraceSecs: ENTRY_GRACE_SECS,
       cryptoMakerRebateShare: CRYPTO_MAKER_REBATE_SHARE,
     },
     pairStates,
@@ -773,6 +778,7 @@ async function init(privateKey, emit, slogFn) {
   log(`⚙️  Each rung single-shot: one resting buy, one resting TP @ entry+${TP_OFFSET.toFixed(2)}, no re-entry once filled`);
   log(`⚙️  All buys and TPs are resting limit orders (maker, earn rebate) — no taker orders in this strategy`);
   log(`⚙️  At ${SWEEP_SECS}s: cancel still-unfilled rung buys only | filled rungs ride untouched to window resolution (win $1/lose $0)`);
+  log(`⚙️  First ${ENTRY_GRACE_SECS}s of every window: no rung fills accepted (avoids trading against an empty/junk opening book)`);
   log(`${DRY_RUN ? '⚠️  DRY RUN — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
   trader = new PolymarketTrader(privateKey);
