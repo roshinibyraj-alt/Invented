@@ -2,54 +2,56 @@
 
 /**
  * ═══════════════════════════════════════════════════════════════
- *  POLYMARKET 5-MINUTE CRYPTO UP/DOWN — DUAL-SIDE DIP LADDER BOT
+ *  POLYMARKET 5-MINUTE CRYPTO UP/DOWN — DUAL-SIDE MOMENTUM BREAKOUT LADDER
  * ═══════════════════════════════════════════════════════════════
  *
- *  Every prior strategy (chase/fade research, flip recovery, breakout
- *  pyramid, grid ladder, the original momentum bot) has been removed
- *  completely. This is a different strategy from scratch, run
- *  identically and independently on Up and Down at the same time.
+ *  This is a deliberate logical REVERSAL of the prior "dip ladder"
+ *  strategy, which bought weakness (price falling) with no stop-loss
+ *  and lost consistently. Every point below is the mirror image of
+ *  that design, run identically and independently on Up and Down.
  *
  *  PER WINDOW, per side (Up and Down each get their own full ladder,
  *  fully independent):
- *    - 9 fixed price levels, spaced 0.10 apart, from 0.90 down to 0.10:
- *      0.90 / 0.80 / 0.70 / 0.60 / 0.50 / 0.40 / 0.30 / 0.20 / 0.10.
- *    - UNLIKE a static ladder, levels are NOT all placed at window open.
- *      Instead each level only gets a resting (maker) buy order placed
- *      once it's "activated": whenever price sits at level L, the ladder
- *      activates L plus the next 2 levels below it (3 total) — e.g.
- *      price at 0.80 activates 0.80/0.70/0.60. As price keeps falling
- *      and new levels come into range, MORE levels activate — the active
- *      set only ever grows, already-activated resting orders are never
- *      cancelled just because price moved past them. Near the bottom of
- *      the ladder fewer than 3 new levels may be left to activate (down
- *      to just the 0.10 floor), so the count naturally varies.
- *    - Sizing is FIXED DOLLARS, not fixed shares: $50 committed per
- *      level regardless of price, so share count varies by level
- *      (e.g. $50/0.80 ≈ 62.5sh vs $50/0.10 = 500sh — deeper levels get
- *      more shares for the same capital).
- *    - TP is a relative offset now, not one shared fixed price: each
- *      level's own entry + 0.05 (a fill at 0.60 targets 0.65; a fill at
- *      0.10 targets 0.15).
- *    - Each level is one-shot per window: once filled, it does NOT
- *      re-arm or get bought again this window. Next window every level
- *      resets fresh (unactivated) on both sides.
- *    - NO STOP LOSS (explicitly confirmed, unchanged from before) — a
- *      filled position that never reaches its TP simply rides to the
- *      real window resolution, winning $1 or losing to $0.
+ *    - 9 fixed price levels, spaced 0.10 apart, from 0.10 up to 0.90:
+ *      0.10 / 0.20 / 0.30 / 0.40 / 0.50 / 0.60 / 0.70 / 0.80 / 0.90.
+ *    - REVERSED ACTIVATION: instead of arming levels as price falls
+ *      into them, levels arm as price RISES through them — buying
+ *      strength/confirmation instead of buying weakness. Whenever
+ *      price reaches level L, the ladder activates L plus the next 2
+ *      levels ABOVE it (3 total) — e.g. price reaching 0.60 activates
+ *      0.60/0.70/0.80. The active set only ever grows; already-armed
+ *      levels are never cancelled just because price moved past them.
+ *    - REVERSED SIZING: instead of fixed dollars (biggest share count
+ *      on the cheapest, least-confirmed levels), dollars committed
+ *      SCALE UP with price: dollars(level) = GRID_DOLLARS_BASE *
+ *      (price / LADDER_TOP). A fill at 0.80 commits ~4x the capital of
+ *      a fill at 0.20. The logic: the higher the price, the more the
+ *      market has already confirmed that direction, so more conviction
+ *      capital goes there — the opposite of loading up on longshots.
+ *    - TP is still a relative offset, entry + 0.05, since this is a
+ *      trend-continuation bet and a further push up is still the win
+ *      condition (a fill at 0.60 targets 0.65).
+ *    - NEW — STOP LOSS: each position also gets a stop at entry - 0.06
+ *      (SL_OFFSET). If the "breakout" fails and price reverses back
+ *      down through the stop, the position is sold at a small, bounded
+ *      loss instead of riding unmanaged to zero. This is the single
+ *      biggest structural reversal versus the prior bot.
+ *    - Each level is one-shot per window: once filled (and exited via
+ *      TP or SL), it does NOT re-arm this window. Next window every
+ *      level resets fresh (unactivated) on both sides.
  *
  *  WINDOW CLOSE: any activated-but-unfilled resting buy is cancelled —
  *  no capital was ever committed to it, so no P&L impact. Any filled
- *  level still waiting on its TP rides to resolution; that resting TP
- *  order is cancelled first (settlement is automatic on-chain
- *  redemption, not a market order).
+ *  level still waiting on TP/SL rides to resolution as a last resort;
+ *  its resting TP/SL orders are cancelled first (settlement is
+ *  automatic on-chain redemption, not a market order).
  *
- *  FEES: every order in this strategy is a genuine resting maker order —
- *  every activated ladder buy AND every TP sell. With no SL and no other
- *  forced/aggressive exit anywhere in the design, this strategy never
- *  places a single taker order. Per Polymarket Fee Structure V2, that
- *  means it never pays a trading fee at all — only ever earns the 20%
- *  maker rebate on fills, or settles resolution fee-free.
+ *  FEES: ladder buys and TP sells are genuine resting maker orders and
+ *  earn the 20% maker rebate. The new stop-loss sell is the one
+ *  deliberately AGGRESSIVE (taker) order in this design — cutting a
+ *  losing position needs to execute promptly rather than hope for a
+ *  passive fill, so it pays the taker fee per Polymarket Fee Structure
+ *  V2 in exchange for actually getting out.
  * ═══════════════════════════════════════════════════════════════
  */
 
@@ -72,21 +74,28 @@ const DEFAULT_PAIRS = (process.env.CRYPTO_PAIRS || 'BTC')
 
 function round2(n) { return Math.round(n * 100) / 100; }
 
-// ── Dual-side dip ladder parameters ──
+// ── Dual-side momentum breakout ladder parameters ──
 const LADDER_TOP    = Number(process.env.LADDER_TOP || 0.90);   // highest buy level
 const LADDER_BOTTOM = Number(process.env.LADDER_BOTTOM || 0.10); // lowest buy level
 const LADDER_STEP   = Number(process.env.LADDER_STEP || 0.10);
-const GRID_DOLLARS  = Number(process.env.GRID_DOLLARS || 50);   // fixed $ per level, every level, both sides — shares vary by price
+const GRID_DOLLARS_BASE = Number(process.env.GRID_DOLLARS_BASE || 50); // $ at the TOP level; scales down proportionally for lower levels
 const TP_OFFSET     = Number(process.env.TP_OFFSET || 0.05);    // relative to each level's own entry price
-const ACTIVATE_LOOKAHEAD = Number(process.env.ACTIVATE_LOOKAHEAD || 3); // current level + this many below get activated
+const SL_OFFSET      = Number(process.env.SL_OFFSET || 0.06);   // NEW: stop-loss offset below entry — the core reversal vs. the old no-SL design
+const ACTIVATE_LOOKAHEAD = Number(process.env.ACTIVATE_LOOKAHEAD || 3); // current level + this many ABOVE get activated as price rises
 const MIN_SHARES = Number(process.env.MIN_SHARES || 5);
 
 function buildLevelPrices() {
   const levels = [];
-  for (let p = LADDER_TOP; p >= LADDER_BOTTOM - 1e-9; p = round2(p - LADDER_STEP)) levels.push(round2(p));
+  for (let p = LADDER_BOTTOM; p <= LADDER_TOP + 1e-9; p = round2(p + LADDER_STEP)) levels.push(round2(p));
   return levels;
 }
-const LEVEL_PRICES = buildLevelPrices(); // [0.90, 0.80, ..., 0.10], descending
+const LEVEL_PRICES = buildLevelPrices(); // [0.10, 0.20, ..., 0.90], ascending
+
+// Dollars committed at a given level: scales UP with price/confidence,
+// the mirror of the old bot's flat-dollar (biggest-shares-on-longshots) sizing.
+function dollarsForLevel(price) {
+  return round2(GRID_DOLLARS_BASE * (price / LADDER_TOP));
+}
 
 const CRYPTO_TAKER_FEE_RATE     = Number(process.env.CRYPTO_TAKER_FEE_RATE || 0.07);
 const CRYPTO_MAKER_REBATE_SHARE = Number(process.env.CRYPTO_MAKER_REBATE_SHARE || 0.20);
@@ -154,6 +163,8 @@ function freshLevels() {
   for (const side of ['Up', 'Down']) {
     for (const price of LEVEL_PRICES) {
       levels.push({ side, price, activated: false, orderId: null, filled: false, position: null, tpOrderId: null });
+      // position, when set, also carries slPrice (entry - SL_OFFSET); no separate resting SL order is
+      // placed on the book (SL is monitored and fired as an aggressive sell — see processLevel).
     }
   }
   return levels;
@@ -217,15 +228,20 @@ async function fetchEventForWindow(symbol, windowStart) {
 }
 
 // Activates (places a resting buy for) whichever levels newly come into
-// range on a given side: the highest level at-or-below current ask, plus
-// the next ACTIVATE_LOOKAHEAD-1 levels below it. Already-activated levels
-// are skipped — the active set only ever grows.
+// range on a given side: the highest level at-or-below current ask (the
+// rung price has just climbed through), plus the next ACTIVATE_LOOKAHEAD-1
+// levels ABOVE it — arming the ladder ahead of continued upward momentum.
+// Already-activated levels are skipped — the active set only ever grows.
 async function maybeActivateLevels(p, side) {
   const ask = side === 'Up' ? p.upAsk : p.downAsk;
   if (ask == null) return;
 
-  let frontierIdx = LEVEL_PRICES.findIndex(lv => lv <= ask);
-  if (frontierIdx === -1) frontierIdx = LEVEL_PRICES.length - 1; // price below the whole ladder — just the floor level
+  // LEVEL_PRICES is ascending. Find the highest level already reached (<= ask);
+  // that's the frontier rung just confirmed by price. Fall back to the floor
+  // if price hasn't reached even the lowest level yet.
+  let frontierIdx = -1;
+  for (let i = 0; i < LEVEL_PRICES.length; i++) if (LEVEL_PRICES[i] <= ask) frontierIdx = i;
+  if (frontierIdx === -1) frontierIdx = 0; // price below the whole ladder — nothing confirmed yet, watch the floor
 
   const tokenId = side === 'Up' ? p.upTokenId : p.downTokenId;
   for (let i = frontierIdx; i < Math.min(frontierIdx + ACTIVATE_LOOKAHEAD, LEVEL_PRICES.length); i++) {
@@ -233,12 +249,13 @@ async function maybeActivateLevels(p, side) {
     const level = p.levels.find(l => l.side === side && l.price === price);
     if (!level || level.activated) continue;
 
-    const shares = Math.max(round2(GRID_DOLLARS / price), MIN_SHARES);
+    const dollars = dollarsForLevel(price);
+    const shares = Math.max(round2(dollars / price), MIN_SHARES);
     const order = await placeLimitBuy(tokenId, price, shares);
     level.activated = true;
     level.shares = shares;
     level.orderId = order.id || order.orderId || null;
-    log(`📌 ${p.symbol} ${side}@${price.toFixed(2)} activated: resting buy ${shares.toFixed(2)}sh (~$${GRID_DOLLARS})`);
+    log(`📌 ${p.symbol} ${side}@${price.toFixed(2)} activated: resting buy ${shares.toFixed(2)}sh (~$${dollars.toFixed(2)})`);
   }
 }
 
@@ -362,7 +379,10 @@ async function processLevel(p, level) {
   const bid = level.side === 'Up' ? p.upBid : p.downBid;
 
   if (!level.filled) {
-    if (ask == null || ask > level.price) return; // resting buy hasn't been reached yet
+    // REVERSED: the old ladder filled once price fell TO or BELOW the level
+    // (buying weakness). This one fills once price has risen TO or ABOVE the
+    // level (buying confirmed strength) — so it triggers on ask >= price.
+    if (ask == null || ask < level.price) return; // breakout hasn't been confirmed yet
     const shares = level.shares;
     const cost = round2(level.price * shares);
     if (cost > p.bankroll) {
@@ -375,21 +395,43 @@ async function processLevel(p, level) {
     p.realizedPnl = round2(p.realizedPnl + rebate);
     p.rebatesEarned = round2(p.rebatesEarned + rebate);
     level.filled = true;
-    const tpPrice = round2(level.price + TP_OFFSET);
-    level.position = { entryPrice: level.price, shares, cost, tpPrice, openedAt: Date.now() };
+    const tpPrice = round2(Math.min(level.price + TP_OFFSET, 0.99));
+    const slPrice = round2(Math.max(level.price - SL_OFFSET, 0.01)); // NEW: bounded downside, unlike the old no-SL design
+    level.position = { entryPrice: level.price, shares, cost, tpPrice, slPrice, openedAt: Date.now() };
 
     const tokenId = level.side === 'Up' ? p.upTokenId : p.downTokenId;
     const tpOrder = await placeLimitSell(tokenId, tpPrice, shares);
     level.tpOrderId = tpOrder.id || tpOrder.orderId || null;
     recordEquity(p);
-    log(`🎯 ${p.symbol} ${level.side}@${level.price.toFixed(2)} BUY filled ${shares.toFixed(2)}sh | cost=$${cost.toFixed(2)} | rebate=+$${rebate.toFixed(4)} | TP resting @ ${tpPrice.toFixed(2)}`);
+    log(`🎯 ${p.symbol} ${level.side}@${level.price.toFixed(2)} BUY filled ${shares.toFixed(2)}sh | cost=$${cost.toFixed(2)} | rebate=+$${rebate.toFixed(4)} | TP @ ${tpPrice.toFixed(2)} | SL @ ${slPrice.toFixed(2)}`);
     registerTrade(p, { side: 'BUY', outcome: level.side, level: level.price, price: level.price, shares, cost, rebate });
     return;
   }
 
   if (level.position) {
-    if (bid == null || bid < level.position.tpPrice) return;
     const pos = level.position;
+
+    // Stop-loss check first: if price has reversed back down through the
+    // stop, exit now at the bid (an aggressive/taker sell — see header note)
+    // rather than let the position ride unmanaged toward zero.
+    if (bid != null && bid <= pos.slPrice) {
+      await cancelOrder(level.tpOrderId); // pull the resting TP, we're exiting via SL instead
+      const exitPrice = bid;
+      const proceeds = round2(exitPrice * pos.shares);
+      const net = proceeds; // taker order — no maker rebate, and this strategy accepts the taker fee here deliberately
+      p.bankroll = round2(p.bankroll + net);
+      const profit = round2(net - pos.cost);
+      p.realizedPnl = round2(p.realizedPnl + profit);
+      p.losses++;
+      log(`🧯 ${p.symbol} ${level.side}@${level.price.toFixed(2)} SL hit ${pos.shares.toFixed(2)}sh @ ${exitPrice.toFixed(2)} | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
+      registerTrade(p, { side: 'SELL', outcome: level.side, level: level.price, reason: 'SL', price: exitPrice, shares: pos.shares, profit });
+      level.position = null; // one-shot — this level does not re-arm this window
+      level.tpOrderId = null;
+      recordEquity(p);
+      return;
+    }
+
+    if (bid == null || bid < pos.tpPrice) return;
     const proceeds = round2(pos.tpPrice * pos.shares);
     const rebate = makerRebate(pos.shares, pos.tpPrice);
     const net = round2(proceeds + rebate);
@@ -525,7 +567,7 @@ function buildState() {
     totalRebatesEarned: round2(pairStates.reduce((s, p) => s + p.rebatesEarned, 0)),
     winRate: (totalWins + totalLosses) > 0 ? round2((totalWins / (totalWins + totalLosses)) * 100) : null,
     uptime: Math.floor((Date.now() - startTime) / 1000),
-    config: { levelPrices: LEVEL_PRICES, gridDollars: GRID_DOLLARS, tpOffset: TP_OFFSET, activateLookahead: ACTIVATE_LOOKAHEAD, cryptoTakerFeeRate: CRYPTO_TAKER_FEE_RATE, cryptoMakerRebateShare: CRYPTO_MAKER_REBATE_SHARE },
+    config: { levelPrices: LEVEL_PRICES, gridDollarsBase: GRID_DOLLARS_BASE, tpOffset: TP_OFFSET, slOffset: SL_OFFSET, activateLookahead: ACTIVATE_LOOKAHEAD, cryptoTakerFeeRate: CRYPTO_TAKER_FEE_RATE, cryptoMakerRebateShare: CRYPTO_MAKER_REBATE_SHARE },
     pairStates, totalEquityCurve, logs: logs.slice(-100), trades: trades.slice(-80).reverse(),
   };
 }
@@ -560,10 +602,10 @@ function getStatus() { return { ok: true, ...buildState() }; }
 async function init(privateKey, emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
-  log(`🚀 Dual-Side Dip Ladder Bot`);
+  log(`🚀 Dual-Side Momentum Breakout Ladder Bot (reversal of the dip-ladder strategy)`);
   log(`⚙️  $${TOTAL_CAPITAL} demo capital across ${pairList.length} pairs (${pairList.join(', ')}) → $${perPairCapital.toFixed(2)}/pair`);
-  log(`⚙️  ladder: ${LEVEL_PRICES.join('/')} ($${GRID_DOLLARS}/level regardless of shares, both sides, one-shot per window) | activates ${ACTIVATE_LOOKAHEAD} levels ahead as price falls | TP entry+${TP_OFFSET} | no SL — rides to resolution`);
-  log(`⚙️  fees: every order is maker (0 fee, +${(CRYPTO_MAKER_REBATE_SHARE*100).toFixed(0)}% rebate) — no taker orders exist in this strategy`);
+  log(`⚙️  ladder: ${LEVEL_PRICES.join('/')} ($ scales up to $${GRID_DOLLARS_BASE} with price, both sides, one-shot per window) | activates ${ACTIVATE_LOOKAHEAD} levels ahead as price rises | TP entry+${TP_OFFSET} | SL entry-${SL_OFFSET}`);
+  log(`⚙️  fees: ladder buys + TP sells are maker (+${(CRYPTO_MAKER_REBATE_SHARE*100).toFixed(0)}% rebate); SL exits are a deliberate taker order to guarantee the cut`);
   log(`${DRY_RUN ? '⚠️  DRY RUN — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
   trader = new PolymarketTrader(privateKey);
