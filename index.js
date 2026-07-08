@@ -255,6 +255,7 @@ app.get('/', (_, res) => {
         ['Size / Rung', '$'+c.rungNotional.toFixed(2)+' fixed notional (shares = $/price)'],
         ['Stop-Loss', c.stopLoss],
         ['Sweep At', c.sweepSecs+'s (cancels unfilled buys only)'],
+        ['Entry Grace', 'first '+c.entryGraceSecs+'s of window ignored (thin/junk book)'],
         ['After Sweep', 'filled rungs ride untouched to resolution'],
         ['Maker Rebate', (c.cryptoMakerRebateShare*100).toFixed(0)+'% of fee'],
       ];
