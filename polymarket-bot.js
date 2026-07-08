@@ -2,50 +2,60 @@
 
 /**
  * ═══════════════════════════════════════════════════════════════
- *  POLYMARKET 5-MINUTE BTC UP/DOWN — FIXED LADDER GRID (INDEPENDENT UP/DOWN)
+ *  POLYMARKET 5-MINUTE BTC UP/DOWN — MOMENTUM RE-ENTRY LADDER
  * ═══════════════════════════════════════════════════════════════
  *
  *  Up and Down are traded as two completely independent ladders —
- *  neither side knows or cares what the other is doing. No cross-TP,
- *  no cross-side triggers of any kind.
+ *  no cross-side logic of any kind.
  *
- *  Each side has a FIXED ladder of resting limit buys, placed the
- *  instant the window opens, at 0.05 price steps:
+ *  This is a MOMENTUM/CONTINUATION ladder (the reverse of the old
+ *  dip-buying grid): 9 fixed trigger levels, ascending, every $0.05
+ *  from 0.53 to 0.93:
  *
- *      0.45 → TP 0.48        0.25 → TP 0.28        0.10 → TP 0.13
- *      0.40 → TP 0.43        0.20 → TP 0.23        0.05 → TP 0.08
- *      0.35 → TP 0.38        0.15 → TP 0.18
- *      0.30 → TP 0.33
+ *      0.53 → TP 0.56        0.73 → TP 0.76        0.93 → TP 0.96
+ *      0.58 → TP 0.61        0.78 → TP 0.81
+ *      0.63 → TP 0.66        0.83 → TP 0.86
+ *      0.68 → TP 0.71        0.88 → TP 0.91
  *
- *  (TP = entry + 0.03, always.)
+ *  (TP = actual entry price + 0.03, always.)
  *
- *  Each rung is single-shot: ONE resting buy per rung per window.
- *  Once a rung's buy fills, a resting TP sell for that rung's shares
- *  goes up immediately. If it fills, that rung is done for the
- *  window — no re-arm, no re-entry at that price level.
+ *  REALISTIC ORDER PLACEMENT: Polymarket won't usefully hold a
+ *  resting order far from the live market. So instead of pre-
+ *  placing all 9 orders at window open, each rung stays idle until
+ *  price actually rises up into its trigger level. Only THEN does
+ *  the bot place a single resting limit buy, priced ONE CENT BELOW
+ *  the live ask at that moment (a realistic near-touch maker order,
+ *  not a fixed grid price). That order then waits — like any real
+ *  resting order — for the ask to actually dip back down to it.
+ *  This also means a fresh entry can never fill in the same tick
+ *  it's placed (price would have to immediately reverse a full
+ *  cent), which kills the old "instant phantom fill" problem.
  *
- *  SIZING: every rung risks a FIXED $50 notional, not fixed shares.
- *  shares = $50 / entry price. So a side can have up to 9 independent
- *  $50 positions live at once if price sweeps the whole ladder in a
- *  single window (up to $450 exposure per side).
+ *  RE-ENTRY: once a rung's TP fills, that rung goes back to idle
+ *  and can trigger a brand-new entry if price revisits its level —
+ *  unlimited times per window, per rung.
  *
- *  NO STOP-LOSS of any kind. A filled rung rides its TP order (or
- *  window-close resolution) with no protective exit.
+ *  HARD STOP-LOSS at 0.45 (absolute price, not relative to entry),
+ *  shared across the whole side. If the bid drops to or through
+ *  0.45, EVERY currently-open rung on that side is flattened at
+ *  once (taker exit, guaranteed fill, pays taker fee — no rebate).
+ *  Any still-pending (unfilled) resting orders on that side are
+ *  cancelled at the same time, since they'd now be stale. The side
+ *  is NOT disabled afterward — every rung goes back to idle and can
+ *  re-arm and re-enter normally if price climbs back above 0.53.
  *
- *  LADDER LIFETIME: all 9 rungs stay live (able to fill) for the
- *  entire window up until the 285s sweep mark. At the sweep, any
- *  STILL-UNFILLED resting buys are cancelled — no new fills after
- *  that. Rungs that already filled and are waiting on their TP are
- *  left completely alone at the sweep (no forced exit) — they ride
- *  all the way to window resolution, same as the no-SL philosophy.
+ *  SIZING: every entry is a FIXED 50 shares (not fixed dollars) —
+ *  cost = 50 × entry price, so it varies with price level.
  *
- *  CLOSE-OUT / RESOLUTION: at window end, any rungs still holding
- *  shares (filled buy, TP never hit) resolve against the real
- *  outcome — $1/share if that side won, $0 if it lost.
+ *  LADDER LIFETIME: rungs can trigger brand-new entries any time
+ *  before the 285s sweep. At the sweep, any still-pending
+ *  (unfilled) orders are cancelled — no new entries after that.
+ *  Rungs already holding a position keep their TP (and the hard SL)
+ *  live all the way to window resolution.
  *
- *  ORDER TYPES: every buy and every TP sell is a genuine resting
- *  LIMIT order (maker — earns a rebate on fill). There is no taker
- *  order anywhere in this strategy.
+ *  CLOSE-OUT: at window end, any rung still holding shares (filled,
+ *  TP never hit, SL never hit) resolves against the real outcome —
+ *  $1/share if that side won, $0 if it lost.
  * ═══════════════════════════════════════════════════════════════
  */
 
@@ -69,28 +79,29 @@ const DEFAULT_PAIRS = (process.env.CRYPTO_PAIRS || 'BTC')
   .split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
 
 // ── Ladder config (identical on Up and Down, fully independent) ──
-const LADDER_TOP     = Number(process.env.LADDER_TOP || 0.45);   // highest rung entry price
-const LADDER_BOTTOM  = Number(process.env.LADDER_BOTTOM || 0.05); // lowest rung entry price
-const LADDER_STEP    = Number(process.env.LADDER_STEP || 0.05);   // price step between rungs
-const TP_OFFSET       = Number(process.env.TP_OFFSET || 0.03);     // TP = entry + this
-const RUNG_NOTIONAL  = Number(process.env.RUNG_NOTIONAL || 50);   // fixed $ per rung, regardless of shares
+const LADDER_BOTTOM  = Number(process.env.LADDER_BOTTOM || 0.53);  // lowest trigger level
+const LADDER_TOP     = Number(process.env.LADDER_TOP || 0.93);     // highest trigger level
+const LADDER_STEP    = Number(process.env.LADDER_STEP || 0.05);    // step between rungs
+const TP_OFFSET       = Number(process.env.TP_OFFSET || 0.03);      // TP = actual fill price + this
+const BASE_SHARES    = Number(process.env.BASE_SHARES || 50);      // fixed shares per entry (not fixed $)
+const ENTRY_OFFSET   = Number(process.env.ENTRY_OFFSET || 0.01);   // resting buy placed this far below live ask
+const HARD_SL_PRICE  = Number(process.env.HARD_SL_PRICE || 0.45);  // absolute price — flattens whole side
 
-const SWEEP_SECS = Number(process.env.SWEEP_SECS || 285); // ladder stays fully live until this point; unfilled buys cancelled here
-const ENTRY_GRACE_SECS = Number(process.env.ENTRY_GRACE_SECS || 5); // ignore fills in the first few seconds — book is often empty/junk right at window open
+const SWEEP_SECS = Number(process.env.SWEEP_SECS || 285); // no new entries triggered after this
+const ENTRY_GRACE_SECS = Number(process.env.ENTRY_GRACE_SECS || 5); // ignore triggers in the first few seconds — book may still be thin/junk
 
 // ── Fees & maker rebates (Polymarket Fee Structure V2, crypto category) ──
 const CRYPTO_TAKER_FEE_RATE     = Number(process.env.CRYPTO_TAKER_FEE_RATE || 0.07);
 const CRYPTO_MAKER_REBATE_SHARE = Number(process.env.CRYPTO_MAKER_REBATE_SHARE || 0.20);
 
-// ── Build the fixed ladder levels once ──
+// ── Build the fixed ladder trigger levels once ──
 function buildLadderLevels() {
   const levels = [];
-  const topCents = Math.round(LADDER_TOP * 100);
-  const botCents = Math.round(LADDER_BOTTOM * 100);
-  const stepCents = Math.round(LADDER_STEP * 100);
-  for (let c = topCents; c >= botCents; c -= stepCents) {
-    const buyPrice = round2(c / 100);
-    levels.push({ id: levels.length + 1, buyPrice, tpPrice: round2(buyPrice + TP_OFFSET) });
+  const botC = Math.round(LADDER_BOTTOM * 100);
+  const topC = Math.round(LADDER_TOP * 100);
+  const stepC = Math.round(LADDER_STEP * 100);
+  for (let c = botC; c <= topC; c += stepC) {
+    levels.push({ id: levels.length + 1, triggerPrice: round2(c / 100) });
   }
   return levels;
 }
@@ -146,6 +157,10 @@ async function placeLimitSell(tokenId, price, shares) {
   if (!DRY_RUN && trader) return await trader.limitSell(tokenId, shares, price);
   return { id: `dry-sell-${Date.now()}-${Math.random().toString(36).slice(2, 7)}` };
 }
+async function placeMarketSell(tokenId, shares) {
+  if (!DRY_RUN && trader) return await trader.marketSell(tokenId, shares);
+  return { id: `dry-msell-${Date.now()}-${Math.random().toString(36).slice(2, 7)}` };
+}
 async function cancelOrder(orderId) {
   if (!DRY_RUN && trader && orderId) {
     try { await trader.cancelOrder(orderId); }
@@ -166,18 +181,21 @@ function freshSideState() {
   return {
     rungs: LADDER_LEVELS.map(lvl => ({
       id: lvl.id,
-      buyPrice: lvl.buyPrice,
-      tpPrice: lvl.tpPrice,
+      triggerPrice: lvl.triggerPrice,
+      status: 'idle',            // 'idle' | 'pending' | 'holding'
       buyOrderId: null,
-      armed: true,           // resting buy still live (not yet filled/cancelled)
-      filled: false,         // this rung's buy has filled — single-shot, no re-entry
+      pendingOrderPrice: null,   // the actual resting limit price once placed
+      entryPrice: null,
+      tpPrice: null,
       shares: 0,
       cost: 0,
-      costPerShare: 0,
       tpOrderId: null,
-      tpFilled: false,
+      fillsCount: 0,             // how many times this rung has completed a full buy→TP cycle
       insufficientLogged: false,
     })),
+    entries: 0,
+    tpHits: 0,
+    slHits: 0,
     wins: 0, losses: 0,
     realizedPnl: 0,
     rebatesEarned: 0,
@@ -287,26 +305,12 @@ async function loadPairWindow(p) {
   p.tradable = true;
   p.resolvedThisWindow = false;
 
-  // fresh ladder state every window
+  // fresh ladder state every window — all rungs idle, nothing pre-placed
   p.sweepDone = false;
   p.sides = { Up: freshSideState(), Down: freshSideState() };
 
-  // place all 9 resting limit buys per side, immediately, simultaneously
-  for (const side of ['Up', 'Down']) {
-    const tokenId = side === 'Up' ? upId : downId;
-    for (const rung of p.sides[side].rungs) {
-      const shares = round2(RUNG_NOTIONAL / rung.buyPrice);
-      try {
-        const order = await placeLimitBuy(tokenId, rung.buyPrice, shares);
-        rung.buyOrderId = order.id || order.orderId || null;
-      } catch (e) {
-        log(`⚠️  ${p.symbol} ${side} rung#${rung.id}: failed to place resting buy @ ${rung.buyPrice}: ${e.message}`);
-      }
-    }
-  }
-
-  const ladderTxt = LADDER_LEVELS.map(l => `${l.buyPrice.toFixed(2)}→${l.tpPrice.toFixed(2)}`).join(', ');
-  log(`🔭 ${p.symbol} window loaded: ${slug} | ends ${new Date(p.windowEnd * 1000).toISOString().slice(11,19)}Z | ladder armed both sides: ${ladderTxt} | $${RUNG_NOTIONAL}/rung | no SL`);
+  const triggersTxt = LADDER_LEVELS.map(l => `${l.triggerPrice.toFixed(2)}→${round2(l.triggerPrice + TP_OFFSET).toFixed(2)}`).join(', ');
+  log(`🔭 ${p.symbol} window loaded: ${slug} | ends ${new Date(p.windowEnd * 1000).toISOString().slice(11,19)}Z | ladder triggers armed both sides: ${triggersTxt} | ${BASE_SHARES}sh/entry | hard SL ${HARD_SL_PRICE.toFixed(2)}`);
 }
 
 // ─────────────────────────────────────────
@@ -374,10 +378,10 @@ async function refreshPolyPrices() {
 //  Equity tracking — real-time mark-to-market including unrealized P&L
 // ─────────────────────────────────────────
 function sideHeldShares(sideState) {
-  return round2(sideState.rungs.reduce((s, r) => s + (r.filled && !r.tpFilled ? r.shares : 0), 0));
+  return round2(sideState.rungs.reduce((s, r) => s + (r.status === 'holding' ? r.shares : 0), 0));
 }
 function sideHeldCost(sideState) {
-  return round2(sideState.rungs.reduce((s, r) => s + (r.filled && !r.tpFilled ? r.cost : 0), 0));
+  return round2(sideState.rungs.reduce((s, r) => s + (r.status === 'holding' ? r.cost : 0), 0));
 }
 function positionsMarkValue(p) {
   let total = 0;
@@ -411,61 +415,58 @@ function registerTrade(p, entry) {
 }
 
 // ─────────────────────────────────────────
-//  Per-side: fill each ladder rung's resting buy once the ask reaches
-//  that rung's price. Single-shot per rung — no re-entry once filled.
-//  Ladder stays fully live until the sweep at SWEEP_SECS.
+//  Hard stop-loss: absolute price, shared by the whole side. If bid
+//  drops to/through HARD_SL_PRICE, flatten every holding rung at
+//  once (taker exit) and cancel any pending unfilled orders (stale).
+//  Rungs go back to idle — NOT disabled — so they can re-arm and
+//  re-enter normally if price recovers back above the ladder.
 // ─────────────────────────────────────────
-async function maybeFillSideBuys(p, side, elapsed) {
+async function maybeHardStopLoss(p, side) {
   const s = p.sides[side];
-  const ask = side === 'Up' ? p.upAsk : p.downAsk;
+  const bid = side === 'Up' ? p.upBid : p.downBid;
   const tokenId = side === 'Up' ? p.upTokenId : p.downTokenId;
-  let anyFilled = false;
+  if (bid == null || bid > HARD_SL_PRICE) return;
 
+  let flattenedAny = false;
   for (const rung of s.rungs) {
-    if (!rung.armed || rung.filled) continue;
-    if (elapsed >= SWEEP_SECS) continue; // sweep handles cancellation
-    if (elapsed < ENTRY_GRACE_SECS) continue; // ignore the first few seconds — book may still be empty/junk
-    if (ask == null || ask > rung.buyPrice) continue; // not reached yet
-
-    const shares = round2(RUNG_NOTIONAL / rung.buyPrice);
-    const price = rung.buyPrice; // limit buy fills at the resting limit price
-    const entryRebate = makerRebate(shares, price);
-    const cost = round2(price * shares - entryRebate);
-
-    if (cost > p.bankroll) {
-      if (!rung.insufficientLogged) {
-        log(`⏭️  ${p.symbol} ${side} rung#${rung.id}@${rung.buyPrice.toFixed(2)}: skip fill — insufficient bankroll ($${p.bankroll.toFixed(2)}, need $${cost.toFixed(2)})`);
-        rung.insufficientLogged = true;
-      }
+    if (rung.status === 'pending') {
+      if (rung.buyOrderId) await cancelOrder(rung.buyOrderId);
+      rung.status = 'idle';
+      rung.buyOrderId = null;
+      rung.pendingOrderPrice = null;
       continue;
     }
+    if (rung.status !== 'holding') continue;
 
-    p.bankroll = round2(p.bankroll - cost);
-    p.rebatesEarned = round2(p.rebatesEarned + entryRebate);
-    s.rebatesEarned = round2(s.rebatesEarned + entryRebate);
+    if (rung.tpOrderId) await cancelOrder(rung.tpOrderId);
+    const fee = takerFee(rung.shares, bid);
+    const proceeds = round2(bid * rung.shares - fee);
+    const profit = round2(proceeds - rung.cost);
 
-    rung.filled = true;
-    rung.armed = false;
-    rung.buyOrderId = null; // filled
-    rung.shares = shares;
-    rung.cost = cost;
-    rung.costPerShare = round2(cost / shares);
+    p.bankroll = round2(p.bankroll + proceeds);
+    p.realizedPnl = round2(p.realizedPnl + profit);
+    p.feesPaid = round2(p.feesPaid + fee);
+    s.realizedPnl = round2(s.realizedPnl + profit);
+    s.feesPaid = round2(s.feesPaid + fee);
+    s.slHits++;
+    if (profit >= 0) { p.wins++; s.wins++; } else { p.losses++; s.losses++; }
 
-    const order = await placeLimitSell(tokenId, rung.tpPrice, shares);
-    rung.tpOrderId = order.id || order.orderId || null;
+    log(`🛑 ${p.symbol} ${side} rung#${rung.id}: HARD SL @ ${bid.toFixed(2)} (taker, fee=$${fee.toFixed(4)}) — sold ${rung.shares.toFixed(2)}sh entry ${rung.entryPrice.toFixed(2)} | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
+    registerTrade(p, { side: 'SELL', outcome: side, reason: `SL-${rung.id}`, price: bid, shares: rung.shares, profit, fee });
 
-    log(`📥 ${p.symbol} ${side} rung#${rung.id}: BUY filled ${shares.toFixed(2)}sh @ ${price.toFixed(2)} (limit) | rebate=+$${entryRebate.toFixed(4)} | resting TP ${rung.tpPrice.toFixed(2)}`);
-    registerTrade(p, { side: 'BUY', outcome: side, reason: `RUNG-${rung.id}`, price, shares, cost });
-    anyFilled = true;
+    rung.status = 'idle';
+    rung.tpOrderId = null;
+    rung.entryPrice = null; rung.tpPrice = null;
+    rung.shares = 0; rung.cost = 0;
+    flattenedAny = true;
   }
-
-  if (anyFilled) recordEquity(p);
+  if (flattenedAny) recordEquity(p);
 }
 
 // ─────────────────────────────────────────
-//  Per-side: TP fills (limit/maker) per rung. Each rung closes
-//  independently once the bid reaches its own TP price — no re-entry
-//  once closed.
+//  TP checks: any holding rung whose bid has reached its TP price
+//  closes (maker sell, earns rebate) and goes back to idle — free to
+//  trigger a brand new entry if price revisits its level.
 // ─────────────────────────────────────────
 async function maybeFillSideTPs(p, side) {
   const s = p.sides[side];
@@ -474,8 +475,7 @@ async function maybeFillSideTPs(p, side) {
   let anyFilled = false;
 
   for (const rung of s.rungs) {
-    if (!rung.filled || rung.tpFilled) continue;
-    if (bid < rung.tpPrice) continue;
+    if (rung.status !== 'holding' || bid < rung.tpPrice) continue;
 
     const proceeds = round2(rung.tpPrice * rung.shares);
     const rebate = makerRebate(rung.shares, rung.tpPrice);
@@ -487,13 +487,17 @@ async function maybeFillSideTPs(p, side) {
     p.rebatesEarned = round2(p.rebatesEarned + rebate);
     s.realizedPnl = round2(s.realizedPnl + profit);
     s.rebatesEarned = round2(s.rebatesEarned + rebate);
+    s.tpHits++;
     if (profit >= 0) { p.wins++; s.wins++; } else { p.losses++; s.losses++; }
 
-    rung.tpFilled = true;
-    rung.tpOrderId = null;
-
-    log(`💰 ${p.symbol} ${side} rung#${rung.id}: TP filled ${rung.shares.toFixed(2)}sh @ ${rung.tpPrice.toFixed(2)} (limit) | rebate=+$${rebate.toFixed(4)} | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
+    log(`💰 ${p.symbol} ${side} rung#${rung.id}: TP filled ${rung.shares.toFixed(2)}sh @ ${rung.tpPrice.toFixed(2)} (limit, entry ${rung.entryPrice.toFixed(2)}) | rebate=+$${rebate.toFixed(4)} | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)} | cycle #${rung.fillsCount + 1} on this rung`);
     registerTrade(p, { side: 'SELL', outcome: side, reason: `TP-${rung.id}`, price: rung.tpPrice, shares: rung.shares, profit, rebate });
+
+    rung.fillsCount++;
+    rung.status = 'idle';
+    rung.tpOrderId = null;
+    rung.entryPrice = null; rung.tpPrice = null;
+    rung.shares = 0; rung.cost = 0;
     anyFilled = true;
   }
 
@@ -501,9 +505,93 @@ async function maybeFillSideTPs(p, side) {
 }
 
 // ─────────────────────────────────────────
-//  285s sweep: cancel any STILL-UNFILLED resting buys. Rungs that
-//  already filled and are waiting on their TP are left completely
-//  alone — they ride to window resolution (no forced exit, no SL).
+//  Fill pending resting buys: a rung in 'pending' status has a
+//  resting limit order sitting at pendingOrderPrice (= ask at the
+//  moment it was triggered, minus ENTRY_OFFSET). It fills only when
+//  the ask actually dips back down to or through that fixed price —
+//  never in the same tick it was placed.
+// ─────────────────────────────────────────
+async function maybeFillPendingOrders(p, side) {
+  const s = p.sides[side];
+  const ask = side === 'Up' ? p.upAsk : p.downAsk;
+  const tokenId = side === 'Up' ? p.upTokenId : p.downTokenId;
+  if (ask == null) return;
+  let anyFilled = false;
+
+  for (const rung of s.rungs) {
+    if (rung.status !== 'pending') continue;
+    if (ask > rung.pendingOrderPrice) continue;
+
+    const shares = BASE_SHARES;
+    const price = rung.pendingOrderPrice;
+    const rebate = makerRebate(shares, price);
+    const cost = round2(price * shares - rebate);
+
+    if (cost > p.bankroll) {
+      if (!rung.insufficientLogged) {
+        log(`⏭️  ${p.symbol} ${side} rung#${rung.id}: skip fill — insufficient bankroll ($${p.bankroll.toFixed(2)}, need $${cost.toFixed(2)})`);
+        rung.insufficientLogged = true;
+      }
+      continue;
+    }
+
+    p.bankroll = round2(p.bankroll - cost);
+    p.rebatesEarned = round2(p.rebatesEarned + rebate);
+    s.rebatesEarned = round2(s.rebatesEarned + rebate);
+    s.entries++;
+
+    rung.status = 'holding';
+    rung.buyOrderId = null;
+    rung.entryPrice = price;
+    rung.tpPrice = round2(price + TP_OFFSET);
+    rung.shares = shares;
+    rung.cost = cost;
+    rung.insufficientLogged = false;
+
+    const order = await placeLimitSell(tokenId, rung.tpPrice, shares);
+    rung.tpOrderId = order.id || order.orderId || null;
+
+    log(`📥 ${p.symbol} ${side} rung#${rung.id}: BUY filled ${shares.toFixed(2)}sh @ ${price.toFixed(2)} (resting limit) | rebate=+$${rebate.toFixed(4)} | resting TP ${rung.tpPrice.toFixed(2)}`);
+    registerTrade(p, { side: 'BUY', outcome: side, reason: `ENTRY-${rung.id}`, price, shares, cost });
+    anyFilled = true;
+  }
+
+  if (anyFilled) recordEquity(p);
+}
+
+// ─────────────────────────────────────────
+//  Trigger new entries: an idle rung whose trigger level has been
+//  reached (ask >= triggerPrice) gets a fresh resting buy PLACED
+//  (not filled) at ask - ENTRY_OFFSET. Only before the sweep.
+// ─────────────────────────────────────────
+async function maybeTriggerNewEntries(p, side, elapsed) {
+  if (elapsed < ENTRY_GRACE_SECS || elapsed >= SWEEP_SECS) return;
+  const s = p.sides[side];
+  const ask = side === 'Up' ? p.upAsk : p.downAsk;
+  const tokenId = side === 'Up' ? p.upTokenId : p.downTokenId;
+  if (ask == null) return;
+
+  for (const rung of s.rungs) {
+    if (rung.status !== 'idle') continue;
+    if (ask < rung.triggerPrice) continue;
+
+    const orderPrice = round2(ask - ENTRY_OFFSET);
+    try {
+      const order = await placeLimitBuy(tokenId, orderPrice, BASE_SHARES);
+      rung.buyOrderId = order.id || order.orderId || null;
+      rung.pendingOrderPrice = orderPrice;
+      rung.status = 'pending';
+      log(`🎯 ${p.symbol} ${side} rung#${rung.id}: trigger ${rung.triggerPrice.toFixed(2)} reached (ask ${ask.toFixed(2)}) — resting buy placed @ ${orderPrice.toFixed(2)}`);
+    } catch (e) {
+      log(`⚠️  ${p.symbol} ${side} rung#${rung.id}: failed to place resting buy: ${e.message}`);
+    }
+  }
+}
+
+// ─────────────────────────────────────────
+//  285s sweep: cancel any STILL-PENDING (unfilled) resting buys.
+//  Rungs already holding a position keep their TP and hard SL live
+//  all the way to window resolution — untouched by the sweep.
 // ─────────────────────────────────────────
 async function maybeSweep(p, elapsed) {
   if (p.sweepDone || elapsed < SWEEP_SECS) return;
@@ -513,15 +601,16 @@ async function maybeSweep(p, elapsed) {
     const s = p.sides[side];
     let cancelledCount = 0;
     for (const rung of s.rungs) {
-      if (rung.armed && !rung.filled) {
+      if (rung.status === 'pending') {
         if (rung.buyOrderId) await cancelOrder(rung.buyOrderId);
         rung.buyOrderId = null;
-        rung.armed = false;
+        rung.pendingOrderPrice = null;
+        rung.status = 'idle';
         cancelledCount++;
       }
     }
-    const openRungs = s.rungs.filter(r => r.filled && !r.tpFilled).length;
-    log(`🧹 ${p.symbol} ${side}: sweep @ ${SWEEP_SECS}s — cancelled ${cancelledCount} unfilled rung buy(s), ${openRungs} filled rung(s) left riding to resolution (no forced exit)`);
+    const holding = s.rungs.filter(r => r.status === 'holding').length;
+    log(`🧹 ${p.symbol} ${side}: sweep @ ${SWEEP_SECS}s — cancelled ${cancelledCount} pending rung order(s), ${holding} holding rung(s) left riding to resolution (TP + hard SL still live)`);
   }
 }
 
@@ -555,12 +644,12 @@ async function resolvePairWindow(p) {
   for (const side of ['Up', 'Down']) {
     const s = p.sides[side];
     for (const rung of s.rungs) {
-      if (rung.armed && !rung.filled && rung.buyOrderId) {
+      if (rung.status === 'pending' && rung.buyOrderId) {
         await cancelOrder(rung.buyOrderId);
         rung.buyOrderId = null;
-        rung.armed = false;
+        rung.status = 'idle';
       }
-      if (rung.filled && !rung.tpFilled) {
+      if (rung.status === 'holding') {
         if (rung.tpOrderId) await cancelOrder(rung.tpOrderId);
         heldShares[side] = round2(heldShares[side] + rung.shares);
         heldCost[side] = round2(heldCost[side] + rung.cost);
@@ -606,8 +695,10 @@ async function processPair(p) {
   const elapsed = nowSec() - p.windowStart;
 
   for (const side of ['Up', 'Down']) {
+    await maybeHardStopLoss(p, side);
     await maybeFillSideTPs(p, side);
-    await maybeFillSideBuys(p, side, elapsed);
+    await maybeFillPendingOrders(p, side);
+    await maybeTriggerNewEntries(p, side, elapsed);
   }
 
   await maybeSweep(p, elapsed);
@@ -625,17 +716,21 @@ function sideSummary(p, side) {
   const s = p.sides[side];
   const rungs = s.rungs.map(r => ({
     id: r.id,
-    buyPrice: r.buyPrice,
+    triggerPrice: r.triggerPrice,
+    status: r.status,
+    pendingOrderPrice: r.pendingOrderPrice,
+    entryPrice: r.entryPrice,
     tpPrice: r.tpPrice,
-    armed: r.armed,
-    filled: r.filled,
-    tpFilled: r.tpFilled,
     shares: r.shares,
+    fillsCount: r.fillsCount,
   }));
   return {
     rungs,
     heldShares: sideHeldShares(s),
     heldCost: sideHeldCost(s),
+    entries: s.entries,
+    tpHits: s.tpHits,
+    slHits: s.slHits,
     wins: s.wins,
     losses: s.losses,
     realizedPnl: s.realizedPnl,
@@ -651,7 +746,7 @@ function buildState() {
     const elapsed = p.windowStart != null ? Math.max(0, nowSec() - p.windowStart) : null;
     let phase = '—';
     if (p.tradable && elapsed != null) {
-      phase = elapsed >= SWEEP_SECS ? 'SWEPT / RESOLVING' : 'LADDER ARMED';
+      phase = elapsed >= SWEEP_SECS ? 'SWEPT / RESOLVING' : (elapsed < ENTRY_GRACE_SECS ? 'GRACE PERIOD' : 'LADDER ARMED');
     }
     return {
       symbol: p.symbol,
@@ -702,10 +797,12 @@ function buildState() {
     winRate: (totalWins + totalLosses) > 0 ? round2((totalWins / (totalWins + totalLosses)) * 100) : null,
     uptime: Math.floor((Date.now() - startTime) / 1000),
     config: {
-      ladderLevels: LADDER_LEVELS,
+      ladderLevels: LADDER_LEVELS.map(l => ({ triggerPrice: l.triggerPrice, tpPrice: round2(l.triggerPrice + TP_OFFSET) })),
       tpOffset: TP_OFFSET,
-      rungNotional: RUNG_NOTIONAL,
-      stopLoss: 'none',
+      baseShares: BASE_SHARES,
+      entryOffset: ENTRY_OFFSET,
+      hardSlPrice: HARD_SL_PRICE,
+      reEntry: true,
       sweepSecs: SWEEP_SECS,
       entryGraceSecs: ENTRY_GRACE_SECS,
       cryptoMakerRebateShare: CRYPTO_MAKER_REBATE_SHARE,
@@ -755,7 +852,7 @@ function setPairs(list) {
 }
 function pauseTrading() {
   tradingEnabled = false;
-  log('⏸️  Trading paused (open rungs still managed for TP/sweep/resolution)');
+  log('⏸️  Trading paused (open rungs still managed for TP/SL/sweep/resolution)');
   return { ok: true };
 }
 function resumeTrading() {
@@ -771,14 +868,15 @@ function getStatus() { return { ok: true, ...buildState() }; }
 async function init(privateKey, emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
-  const ladderTxt = LADDER_LEVELS.map(l => `${l.buyPrice.toFixed(2)}→${l.tpPrice.toFixed(2)}`).join(', ');
-  log(`🚀 5-Minute BTC Up/Down — Fixed Ladder Grid (Up & Down fully independent, no cross-side triggers)`);
+  const triggersTxt = LADDER_LEVELS.map(l => `${l.triggerPrice.toFixed(2)}→${round2(l.triggerPrice + TP_OFFSET).toFixed(2)}`).join(', ');
+  log(`🚀 5-Minute BTC Up/Down — Momentum Re-Entry Ladder (Up & Down fully independent)`);
   log(`⚙️  $${TOTAL_CAPITAL} demo capital across ${pairList.length} pair(s) (${pairList.join(', ')}) → $${perPairCapital.toFixed(2)}/pair`);
-  log(`⚙️  Ladder (both sides, independent): ${ladderTxt} | $${RUNG_NOTIONAL} fixed notional per rung | No stop-loss`);
-  log(`⚙️  Each rung single-shot: one resting buy, one resting TP @ entry+${TP_OFFSET.toFixed(2)}, no re-entry once filled`);
-  log(`⚙️  All buys and TPs are resting limit orders (maker, earn rebate) — no taker orders in this strategy`);
-  log(`⚙️  At ${SWEEP_SECS}s: cancel still-unfilled rung buys only | filled rungs ride untouched to window resolution (win $1/lose $0)`);
-  log(`⚙️  First ${ENTRY_GRACE_SECS}s of every window: no rung fills accepted (avoids trading against an empty/junk opening book)`);
+  log(`⚙️  Ladder triggers (both sides, independent): ${triggersTxt} | ${BASE_SHARES} fixed shares per entry | hard SL @ ${HARD_SL_PRICE.toFixed(2)}`);
+  log(`⚙️  Entries are dynamic: resting buy placed at (ask − ${ENTRY_OFFSET.toFixed(2)}) only once a rung's trigger is reached — never pre-placed`);
+  log(`⚙️  Unlimited re-entry per rung: after TP, a rung goes idle and can trigger again if price revisits its level`);
+  log(`⚙️  Hard SL @ ${HARD_SL_PRICE.toFixed(2)} flattens ALL open rungs on a side at once (taker exit) — side can still re-arm afterward if price recovers`);
+  log(`⚙️  At ${SWEEP_SECS}s: cancel still-pending rung orders only | holding rungs ride untouched to resolution (TP + hard SL stay live)`);
+  log(`⚙️  First ${ENTRY_GRACE_SECS}s of every window: no new triggers accepted (avoids trading against an empty/junk opening book)`);
   log(`${DRY_RUN ? '⚠️  DRY RUN — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
   trader = new PolymarketTrader(privateKey);
