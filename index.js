@@ -3,7 +3,7 @@
 const express    = require('express');
 const http       = require('http');
 const { Server } = require('socket.io');
-const bot        = require('./polymarket-bot');
+const bot        = require('./polymarket-bot-momentum');
 
 const app    = express();
 const server = http.createServer(app);
@@ -39,7 +39,7 @@ app.get('/', (_, res) => {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>⏱️ 5m Crypto Up/Down Bot</title>
+<title>⏱️ 5m Crypto Up/Down Bot — Momentum Breakout</title>
 <style>
   :root {
     --bg: #ffffff; --bg2: #f5f7fa; --bg3: #edf0f4; --border: #d0d7e2;
@@ -109,7 +109,7 @@ app.get('/', (_, res) => {
   <div class="header">
     <div class="logo">⏱️ <span>5M</span> UP/DOWN BOT</div>
     <div id="mode-badge" class="mode-badge ${DRY_RUN ? 'mode-dry' : 'mode-live'}">${DRY_RUN ? 'DRY RUN' : '🔴 LIVE'}</div>
-    <div id="experiment-badge" class="mode-badge mode-dry">CHASE (baseline)</div>
+    <div id="experiment-badge" class="mode-badge mode-dry">MOMENTUM BREAKOUT (reversal)</div>
   </div>
 
   <div class="toolbar">
