@@ -201,14 +201,16 @@ app.get('/', (_, res) => {
 
   function rungLine(r) {
     const tpTxt = r.tpPrice != null ? r.tpPrice.toFixed(2) : (r.triggerPrice + 0.03).toFixed(2);
-    const cycles = r.fillsCount ? ' · '+r.fillsCount+'x done' : '';
     if (r.status === 'holding') {
-      return '<div class="order-line"><span><span class="tag-ticker">HOLD</span> #'+r.id+' entry '+r.entryPrice.toFixed(2)+' → TP '+tpTxt+cycles+'</span><span>'+(r.shares||0).toFixed(0)+'sh</span></div>';
+      return '<div class="order-line"><span><span class="tag-ticker">HOLD</span> #'+r.id+' entry '+r.entryPrice.toFixed(2)+' → TP '+tpTxt+'</span><span>'+(r.shares||0).toFixed(0)+'sh</span></div>';
     }
     if (r.status === 'pending') {
       return '<div class="order-line"><span><span class="tag-counter">BUY</span> #'+r.id+' resting @ '+r.pendingOrderPrice.toFixed(2)+' (trigger '+r.triggerPrice.toFixed(2)+')</span><span>—</span></div>';
     }
-    return '<div class="order-line"><span class="order-empty">#'+r.id+' idle, trigger @ '+r.triggerPrice.toFixed(2)+cycles+'</span><span>—</span></div>';
+    if (r.status === 'closed') {
+      return '<div class="order-line"><span class="order-empty">#'+r.id+' closed (TP\\'d, no re-entry)</span><span>—</span></div>';
+    }
+    return '<div class="order-line"><span class="order-empty">#'+r.id+' idle, trigger @ '+r.triggerPrice.toFixed(2)+'</span><span>—</span></div>';
   }
 
   function rungsList(s) {
@@ -223,7 +225,7 @@ app.get('/', (_, res) => {
       '<div class="side-row"><span>Held (open rungs)</span><span>'+(s.heldShares||0).toFixed(0)+'sh ($'+(s.heldCost||0).toFixed(2)+')</span></div>'+
       '<div class="side-row"><span>Entries · TP hits</span><span>'+(s.entries||0)+' · '+(s.tpHits||0)+'</span></div>'+
       '<div class="side-row pnl-mini"><span>Side W/L · P&amp;L</span><span class="'+pClass(s.realizedPnl)+'">'+(s.wins||0)+'W/'+(s.losses||0)+'L · '+sgn(s.realizedPnl)+'</span></div>'+
-      '<div class="order-list"><div class="order-list-title">Ladder ('+((s.rungs||[]).length)+' rungs, re-entry on, no SL)</div>'+rungsList(s)+'</div>'+
+      '<div class="order-list"><div class="order-list-title">Ladder ('+((s.rungs||[]).length)+' rungs, single-shot, no SL)</div>'+rungsList(s)+'</div>'+
     '</div>';
   }
 
@@ -256,7 +258,8 @@ app.get('/', (_, res) => {
         ['Size / Entry', c.baseShares+' fixed shares (cost = shares × price)'],
         ['Entry Placement', 'resting buy @ ask − '+c.entryOffset.toFixed(2)+' once trigger reached'],
         ['Stop-Loss', c.stopLoss],
-        ['Re-Entry', c.reEntry ? 'on — idle rung re-arms after every TP' : 'off'],
+        ['Re-Entry', c.reEntry ? 'on — idle rung re-arms after every TP' : 'off — single-shot per rung per window'],
+        ['Parallel', 'all rungs top-to-bottom watched every tick, both sides fully in parallel'],
         ['Sweep At', c.sweepSecs+'s (cancels pending orders only)'],
         ['Entry Grace', 'first '+c.entryGraceSecs+'s of window ignored (thin/junk book)'],
         ['After Sweep', 'holding rungs ride untouched to resolution, no forced exit'],
