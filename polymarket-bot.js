@@ -61,7 +61,8 @@ const CLOB  = 'https://clob.polymarket.com';
 const TICK_MS               = 500;
 const POLY_PRICE_REFRESH_MS = 1000;
 const WINDOW_SECS           = 300;
-const RESOLUTION_BUFFER_S   = 8;
+const RESOLUTION_BUFFER_S   = 8;  // no longer used for triggering resolution (see EARLY_CUTOFF_SECS) — left defined in case anything else needs it
+const EARLY_CUTOFF_SECS     = Number(process.env.EARLY_CUTOFF_SECS || 2); // force-resolve this many seconds BEFORE the nominal window end (298s), so nothing carries into the next window
 const SLUG_OFFSET_FALLBACKS = [0, -300, 300];
 
 const DRY_RUN = (process.env.DRY_RUN || 'true').toLowerCase() === 'true';
@@ -466,6 +467,20 @@ async function processPair(p) {
   }
   if (!p.tradable || !tradingEnabled) return;
 
+  // Hard cutoff: finish and clear everything at WINDOW_SECS - EARLY_CUTOFF_SECS
+  // (298s by default) instead of waiting for the boundary-crossing detection,
+  // which depends on real time actually ticking into the next window AND that
+  // window's market already being indexed — a gap where the old ladder's
+  // state could still be sitting there when the new window starts loading.
+  // Once resolved, nothing further runs for this pair until the next window
+  // actually loads — a cancelled/closed level must not get re-processed and
+  // re-armed in the couple of seconds still left on the clock.
+  const elapsed = nowSec() - p.windowStart;
+  if (elapsed >= WINDOW_SECS - EARLY_CUTOFF_SECS && !p.resolvedThisWindow) {
+    await resolvePairWindow(p);
+  }
+  if (p.resolvedThisWindow) return;
+
   await maybeActivateLevels(p, 'Up');
   await maybeActivateLevels(p, 'Down');
 
@@ -473,9 +488,6 @@ async function processPair(p) {
     try { await processLevel(p, level); }
     catch (e) { log(`⚠️  ${p.symbol} ${level.side}@${level.price} error: ${e.message}`); }
   }
-
-  const remaining = p.windowEnd - nowSec();
-  if (remaining <= -RESOLUTION_BUFFER_S && !p.resolvedThisWindow) await resolvePairWindow(p);
 }
 
 // ─────────────────────────────────────────
