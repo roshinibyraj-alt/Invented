@@ -33,7 +33,7 @@ app.get('/', (_, res) => {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>📊 Momentum Re-Entry Ladder — Independent Up/Down</title>
+<title>📊 Wide Momentum Ladder — Independent Up/Down</title>
 <style>
   :root {
     --bg: #ffffff; --bg2: #f5f7fa; --bg3: #edf0f4; --border: #d0d7e2;
@@ -117,7 +117,7 @@ app.get('/', (_, res) => {
 </head>
 <body>
   <div class="header">
-    <div class="logo">📊 <span>MOMENTUM RE-ENTRY LADDER</span> — INDEPENDENT UP/DOWN</div>
+    <div class="logo">📊 <span>WIDE MOMENTUM LADDER</span> — INDEPENDENT UP/DOWN</div>
     <div id="mode-badge" class="mode-badge ${DRY_RUN ? 'mode-dry' : 'mode-live'}">${DRY_RUN ? 'DRY RUN' : '🔴 LIVE'}</div>
   </div>
 
@@ -221,9 +221,9 @@ app.get('/', (_, res) => {
     return '<div class="side-box '+cls+'">'+
       '<div class="side-title"><span>'+label+'</span></div>'+
       '<div class="side-row"><span>Held (open rungs)</span><span>'+(s.heldShares||0).toFixed(0)+'sh ($'+(s.heldCost||0).toFixed(2)+')</span></div>'+
-      '<div class="side-row"><span>Entries · TP · SL</span><span>'+(s.entries||0)+' · '+(s.tpHits||0)+' · '+(s.slHits||0)+'</span></div>'+
+      '<div class="side-row"><span>Entries · TP hits</span><span>'+(s.entries||0)+' · '+(s.tpHits||0)+'</span></div>'+
       '<div class="side-row pnl-mini"><span>Side W/L · P&amp;L</span><span class="'+pClass(s.realizedPnl)+'">'+(s.wins||0)+'W/'+(s.losses||0)+'L · '+sgn(s.realizedPnl)+'</span></div>'+
-      '<div class="order-list"><div class="order-list-title">Ladder (9 rungs, re-entry on)</div>'+rungsList(s)+'</div>'+
+      '<div class="order-list"><div class="order-list-title">Ladder ('+((s.rungs||[]).length)+' rungs, re-entry on, no SL)</div>'+rungsList(s)+'</div>'+
     '</div>';
   }
 
@@ -246,18 +246,20 @@ app.get('/', (_, res) => {
 
     if (!configRendered && s.config) {
       const c = s.config;
-      const ladderTxt = (c.ladderLevels||[]).map(l => l.triggerPrice.toFixed(2)+'→'+l.tpPrice.toFixed(2)).join(', ');
+      const upTxt = (c.upLevels||[]).map(l => l.triggerPrice.toFixed(2)).join(', ');
+      const downTxt = (c.downLevels||[]).map(l => l.triggerPrice.toFixed(2)).join(', ');
       const rows = [
-        ['Ladder (both sides, independent)', ladderTxt],
-        ['Rungs', (c.ladderLevels||[]).length + ' triggers, unlimited re-entry each'],
+        ['Up triggers', upTxt],
+        ['Down triggers', downTxt + ' ($'+c.sideOffset.toFixed(2)+' cheaper than Up, every level)'],
+        ['Rungs / side', (c.upLevels||[]).length + ' triggers, unlimited re-entry each'],
         ['TP Offset', 'entry + '+c.tpOffset.toFixed(2)],
         ['Size / Entry', c.baseShares+' fixed shares (cost = shares × price)'],
         ['Entry Placement', 'resting buy @ ask − '+c.entryOffset.toFixed(2)+' once trigger reached'],
-        ['Hard Stop-Loss', c.hardSlPrice.toFixed(2)+' (flattens whole side, taker exit)'],
-        ['Re-Entry', c.reEntry ? 'on — idle rung re-arms after TP or SL' : 'off'],
+        ['Stop-Loss', c.stopLoss],
+        ['Re-Entry', c.reEntry ? 'on — idle rung re-arms after every TP' : 'off'],
         ['Sweep At', c.sweepSecs+'s (cancels pending orders only)'],
         ['Entry Grace', 'first '+c.entryGraceSecs+'s of window ignored (thin/junk book)'],
-        ['After Sweep', 'holding rungs ride untouched — TP & hard SL stay live'],
+        ['After Sweep', 'holding rungs ride untouched to resolution, no forced exit'],
         ['Maker Rebate', (c.cryptoMakerRebateShare*100).toFixed(0)+'% of fee'],
       ];
       document.getElementById('config-grid').innerHTML = rows.map(r =>
