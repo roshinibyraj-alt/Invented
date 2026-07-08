@@ -29,9 +29,9 @@
  *  price. That order waits for the ask to actually dip back to it,
  *  so a fresh entry can never fill in the same tick it's placed.
  *
- *  RE-ENTRY: once a rung's TP fills, it goes back to idle and can
- *  trigger a brand-new entry if price revisits its level —
- *  unlimited times per window, per rung.
+ *  NO RE-ENTRY: once a rung's TP fills (or the window closes on a
+ *  still-holding rung), that rung is done for the window — single-
+ *  shot on both legs, buy and TP, just like the very first version.
  *
  *  NO STOP-LOSS of any kind. A filled rung rides its TP order (or
  *  window-close resolution) with no protective exit.
@@ -173,7 +173,7 @@ function freshSideState(side) {
     rungs: SIDE_LEVELS[side].map(lvl => ({
       id: lvl.id,
       triggerPrice: lvl.triggerPrice,
-      status: 'idle',            // 'idle' | 'pending' | 'holding'
+      status: 'idle',            // 'idle' | 'pending' | 'holding' | 'closed' (single-shot — closed after TP, no re-entry)
       buyOrderId: null,
       pendingOrderPrice: null,
       entryPrice: null,
@@ -406,8 +406,9 @@ function registerTrade(p, entry) {
 
 // ─────────────────────────────────────────
 //  TP checks: any holding rung whose bid has reached its TP price
-//  closes (maker sell, earns rebate) and goes back to idle — free to
-//  trigger a brand new entry if price revisits its level. No SL.
+//  closes (maker sell, earns rebate). NO RE-ENTRY — once a rung has
+//  fired and taken its TP, it's done for the window (single-shot,
+//  same as its buy side).
 // ─────────────────────────────────────────
 async function maybeFillSideTPs(p, side) {
   const s = p.sides[side];
@@ -431,11 +432,11 @@ async function maybeFillSideTPs(p, side) {
     s.tpHits++;
     if (profit >= 0) { p.wins++; s.wins++; } else { p.losses++; s.losses++; }
 
-    log(`💰 ${p.symbol} ${side} rung#${rung.id}: TP filled ${rung.shares.toFixed(2)}sh @ ${rung.tpPrice.toFixed(2)} (limit, entry ${rung.entryPrice.toFixed(2)}) | rebate=+$${rebate.toFixed(4)} | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)} | cycle #${rung.fillsCount + 1} on this rung`);
+    log(`💰 ${p.symbol} ${side} rung#${rung.id}: TP filled ${rung.shares.toFixed(2)}sh @ ${rung.tpPrice.toFixed(2)} (limit, entry ${rung.entryPrice.toFixed(2)}) | rebate=+$${rebate.toFixed(4)} | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)} | rung closed (no re-entry)`);
     registerTrade(p, { side: 'SELL', outcome: side, reason: `TP-${rung.id}`, price: rung.tpPrice, shares: rung.shares, profit, rebate });
 
     rung.fillsCount++;
-    rung.status = 'idle';
+    rung.status = 'closed';
     rung.tpOrderId = null;
     rung.entryPrice = null; rung.tpPrice = null;
     rung.shares = 0; rung.cost = 0;
@@ -741,7 +742,7 @@ function buildState() {
       baseShares: BASE_SHARES,
       entryOffset: ENTRY_OFFSET,
       stopLoss: 'none',
-      reEntry: true,
+      reEntry: false,
       sweepSecs: SWEEP_SECS,
       entryGraceSecs: ENTRY_GRACE_SECS,
       cryptoMakerRebateShare: CRYPTO_MAKER_REBATE_SHARE,
@@ -815,7 +816,8 @@ async function init(privateKey, emit, slogFn) {
   log(`⚙️  Down triggers (${SIDE_LEVELS.Down.length}, $${SIDE_OFFSET.toFixed(2)} cheaper than Up at every level): ${downTxt}`);
   log(`⚙️  ${BASE_SHARES} fixed shares per entry | TP = entry + ${TP_OFFSET.toFixed(2)} | NO stop-loss`);
   log(`⚙️  Entries are dynamic: resting buy placed at (ask − ${ENTRY_OFFSET.toFixed(2)}) only once a rung's trigger is reached — never pre-placed`);
-  log(`⚙️  Unlimited re-entry per rung: after TP, a rung goes idle and can trigger again if price revisits its level`);
+  log(`⚙️  No re-entry: every rung is single-shot — one buy, one TP, then closed for the rest of the window`);
+  log(`⚙️  All 18 rungs per side are watched in parallel, top to bottom, every tick — Up and Down trade fully in parallel too`);
   log(`⚙️  At ${SWEEP_SECS}s: cancel still-pending rung orders only | holding rungs ride untouched to resolution (no SL, no forced exit)`);
   log(`⚙️  First ${ENTRY_GRACE_SECS}s of every window: no new triggers accepted (avoids trading against an empty/junk opening book)`);
   log(`${DRY_RUN ? '⚠️  DRY RUN — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
