@@ -33,7 +33,7 @@ app.get('/', (_, res) => {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>📊 Fixed Ladder Grid — Independent Up/Down</title>
+<title>📊 Momentum Re-Entry Ladder — Independent Up/Down</title>
 <style>
   :root {
     --bg: #ffffff; --bg2: #f5f7fa; --bg3: #edf0f4; --border: #d0d7e2;
@@ -117,7 +117,7 @@ app.get('/', (_, res) => {
 </head>
 <body>
   <div class="header">
-    <div class="logo">📊 <span>FIXED LADDER GRID</span> — INDEPENDENT UP/DOWN</div>
+    <div class="logo">📊 <span>MOMENTUM RE-ENTRY LADDER</span> — INDEPENDENT UP/DOWN</div>
     <div id="mode-badge" class="mode-badge ${DRY_RUN ? 'mode-dry' : 'mode-live'}">${DRY_RUN ? 'DRY RUN' : '🔴 LIVE'}</div>
   </div>
 
@@ -200,17 +200,15 @@ app.get('/', (_, res) => {
   }
 
   function rungLine(r) {
-    const rangeTxt = r.buyPrice.toFixed(2)+' → '+r.tpPrice.toFixed(2);
-    if (r.tpFilled) {
-      return '<div class="order-line"><span class="order-empty">#'+r.id+' '+rangeTxt+' · TP filled (closed)</span><span>'+ (r.shares||0).toFixed(2) +'sh</span></div>';
+    const tpTxt = r.tpPrice != null ? r.tpPrice.toFixed(2) : (r.triggerPrice + 0.03).toFixed(2);
+    const cycles = r.fillsCount ? ' · '+r.fillsCount+'x done' : '';
+    if (r.status === 'holding') {
+      return '<div class="order-line"><span><span class="tag-ticker">HOLD</span> #'+r.id+' entry '+r.entryPrice.toFixed(2)+' → TP '+tpTxt+cycles+'</span><span>'+(r.shares||0).toFixed(0)+'sh</span></div>';
     }
-    if (r.filled) {
-      return '<div class="order-line"><span><span class="tag-ticker">HOLD</span> #'+r.id+' '+rangeTxt+' · resting TP</span><span>'+(r.shares||0).toFixed(2)+'sh</span></div>';
+    if (r.status === 'pending') {
+      return '<div class="order-line"><span><span class="tag-counter">BUY</span> #'+r.id+' resting @ '+r.pendingOrderPrice.toFixed(2)+' (trigger '+r.triggerPrice.toFixed(2)+')</span><span>—</span></div>';
     }
-    if (r.armed) {
-      return '<div class="order-line"><span><span class="tag-counter">BUY</span> #'+r.id+' resting @ '+r.buyPrice.toFixed(2)+' (TP '+r.tpPrice.toFixed(2)+')</span><span>—</span></div>';
-    }
-    return '<div class="order-line"><span class="order-empty">#'+r.id+' '+rangeTxt+' · unfilled, cancelled (swept)</span><span>—</span></div>';
+    return '<div class="order-line"><span class="order-empty">#'+r.id+' idle, trigger @ '+r.triggerPrice.toFixed(2)+cycles+'</span><span>—</span></div>';
   }
 
   function rungsList(s) {
@@ -222,9 +220,10 @@ app.get('/', (_, res) => {
     if (!s) s = {};
     return '<div class="side-box '+cls+'">'+
       '<div class="side-title"><span>'+label+'</span></div>'+
-      '<div class="side-row"><span>Held (open rungs)</span><span>'+(s.heldShares||0).toFixed(2)+'sh ($'+(s.heldCost||0).toFixed(2)+')</span></div>'+
+      '<div class="side-row"><span>Held (open rungs)</span><span>'+(s.heldShares||0).toFixed(0)+'sh ($'+(s.heldCost||0).toFixed(2)+')</span></div>'+
+      '<div class="side-row"><span>Entries · TP · SL</span><span>'+(s.entries||0)+' · '+(s.tpHits||0)+' · '+(s.slHits||0)+'</span></div>'+
       '<div class="side-row pnl-mini"><span>Side W/L · P&amp;L</span><span class="'+pClass(s.realizedPnl)+'">'+(s.wins||0)+'W/'+(s.losses||0)+'L · '+sgn(s.realizedPnl)+'</span></div>'+
-      '<div class="order-list"><div class="order-list-title">Ladder (9 rungs)</div>'+rungsList(s)+'</div>'+
+      '<div class="order-list"><div class="order-list-title">Ladder (9 rungs, re-entry on)</div>'+rungsList(s)+'</div>'+
     '</div>';
   }
 
@@ -247,16 +246,18 @@ app.get('/', (_, res) => {
 
     if (!configRendered && s.config) {
       const c = s.config;
-      const ladderTxt = (c.ladderLevels||[]).map(l => l.buyPrice.toFixed(2)+'→'+l.tpPrice.toFixed(2)).join(', ');
+      const ladderTxt = (c.ladderLevels||[]).map(l => l.triggerPrice.toFixed(2)+'→'+l.tpPrice.toFixed(2)).join(', ');
       const rows = [
         ['Ladder (both sides, independent)', ladderTxt],
-        ['Rungs', (c.ladderLevels||[]).length + ' fixed levels, one buy each, no re-entry'],
+        ['Rungs', (c.ladderLevels||[]).length + ' triggers, unlimited re-entry each'],
         ['TP Offset', 'entry + '+c.tpOffset.toFixed(2)],
-        ['Size / Rung', '$'+c.rungNotional.toFixed(2)+' fixed notional (shares = $/price)'],
-        ['Stop-Loss', c.stopLoss],
-        ['Sweep At', c.sweepSecs+'s (cancels unfilled buys only)'],
+        ['Size / Entry', c.baseShares+' fixed shares (cost = shares × price)'],
+        ['Entry Placement', 'resting buy @ ask − '+c.entryOffset.toFixed(2)+' once trigger reached'],
+        ['Hard Stop-Loss', c.hardSlPrice.toFixed(2)+' (flattens whole side, taker exit)'],
+        ['Re-Entry', c.reEntry ? 'on — idle rung re-arms after TP or SL' : 'off'],
+        ['Sweep At', c.sweepSecs+'s (cancels pending orders only)'],
         ['Entry Grace', 'first '+c.entryGraceSecs+'s of window ignored (thin/junk book)'],
-        ['After Sweep', 'filled rungs ride untouched to resolution'],
+        ['After Sweep', 'holding rungs ride untouched — TP & hard SL stay live'],
         ['Maker Rebate', (c.cryptoMakerRebateShare*100).toFixed(0)+'% of fee'],
       ];
       document.getElementById('config-grid').innerHTML = rows.map(r =>
@@ -275,7 +276,7 @@ app.get('/', (_, res) => {
       grid.innerHTML = '<div class="empty">No Asset Data</div>';
     } else {
       grid.innerHTML = s.pairStates.map(p => {
-        const phaseCls = p.phase === 'LADDER ARMED' ? 'phase-open' : (p.phase === 'SWEPT / RESOLVING' ? 'phase-sweep' : 'phase-closed');
+        const phaseCls = p.phase === 'LADDER ARMED' ? 'phase-open' : (p.phase === 'SWEPT / RESOLVING' ? 'phase-sweep' : (p.phase === 'GRACE PERIOD' ? 'phase-sweep' : 'phase-closed'));
         return '<div class="pair-card">'+
           '<div class="pair-hdr"><div class="pair-sym">'+p.symbol+' (5M Market)</div><div style="display:flex;gap:8px;align-items:center;"><div class="pair-phase '+phaseCls+'">'+p.phase+'</div><div class="pair-timer">'+fmtSecs(p.secsToEnd)+' left</div></div></div>'+
           '<div class="pair-body">'+
