@@ -253,7 +253,7 @@ app.get('/', (_, res) => {
         const levelRow = l => {
           const stateHtml = l.position
             ? 'holding '+l.position.shares.toFixed(2)+'sh (cost $'+l.position.cost.toFixed(2)+') → TP '+l.position.tpPrice.toFixed(2)+' / SL '+l.position.slPrice.toFixed(2)
-            : (l.filled ? 'closed' : 'waiting for cross');
+            : (l.filled ? 'closed' : (l.broken ? 'broken — resting, awaiting retest' : 'waiting for break'));
           return '<div class="pair-row" style="font-size:9px"><span class="pair-key">'+l.price.toFixed(2)+'</span><span style="flex:1;text-align:right">'+stateHtml+'</span></div>';
         };
         const ladderHtml =
