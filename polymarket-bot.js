@@ -2,56 +2,50 @@
 
 /**
  * ═══════════════════════════════════════════════════════════════
- *  POLYMARKET 5-MINUTE CRYPTO UP/DOWN — DUAL-SIDE MOMENTUM BREAKOUT LADDER
+ *  POLYMARKET 5-MINUTE CRYPTO UP/DOWN — DUAL-SIDE BREAKOUT-RETEST LADDER
  * ═══════════════════════════════════════════════════════════════
  *
- *  This is a deliberate logical REVERSAL of the prior "dip ladder"
- *  strategy, which bought weakness (price falling) with no stop-loss
- *  and lost consistently. Every point below is the mirror image of
- *  that design, run identically and independently on Up and Down.
+ *  Every order in this strategy is a genuine LIMIT order — nothing crosses
+ *  the spread to chase a price. That constraint shapes the whole design:
  *
  *  PER WINDOW, per side (Up and Down each get their own full ladder,
  *  fully independent):
- *    - 9 fixed price levels, spaced 0.10 apart, from 0.10 up to 0.90:
- *      0.10 / 0.20 / 0.30 / 0.40 / 0.50 / 0.60 / 0.70 / 0.80 / 0.90.
- *    - REVERSED ACTIVATION: instead of arming levels as price falls
- *      into them, levels arm as price RISES through them — buying
- *      strength/confirmation instead of buying weakness. Whenever
- *      price reaches level L, the ladder activates L plus the next 2
- *      levels ABOVE it (3 total) — e.g. price reaching 0.60 activates
- *      0.60/0.70/0.80. The active set only ever grows; already-armed
- *      levels are never cancelled just because price moved past them.
- *    - REVERSED SIZING: instead of fixed dollars (biggest share count
- *      on the cheapest, least-confirmed levels), dollars committed
- *      SCALE UP with price: dollars(level) = GRID_DOLLARS_BASE *
- *      (price / LADDER_TOP). A fill at 0.80 commits ~4x the capital of
- *      a fill at 0.20. The logic: the higher the price, the more the
- *      market has already confirmed that direction, so more conviction
- *      capital goes there — the opposite of loading up on longshots.
- *    - TP is still a relative offset, entry + 0.05, since this is a
- *      trend-continuation bet and a further push up is still the win
- *      condition (a fill at 0.60 targets 0.65).
- *    - NEW — STOP LOSS: each position also gets a stop at entry - 0.06
- *      (SL_OFFSET). If the "breakout" fails and price reverses back
- *      down through the stop, the position is sold at a small, bounded
- *      loss instead of riding unmanaged to zero. This is the single
- *      biggest structural reversal versus the prior bot.
- *    - Each level is one-shot per window: once filled (and exited via
- *      TP or SL), it does NOT re-arm this window. Next window every
- *      level resets fresh (unactivated) on both sides.
+ *    - 9 fixed grid prices, spaced 0.10 apart, from 0.10 up to 0.90.
+ *    - BREAK: as price rises and trades through a grid for the first time
+ *      this window (including via a gap — if price jumps from 0.38 to 0.53
+ *      in one tick, both 0.40 and 0.50 count as broken), the bot places a
+ *      genuine resting limit BUY at that grid's own price. A window that
+ *      simply opens above some grids does NOT break them — only a real
+ *      crossing during this window counts.
+ *    - RETEST: a resting limit buy below the current price does not fill
+ *      immediately — it just sits on the book. It only actually matches
+ *      once the ask comes back down to (or through) that price, i.e. once
+ *      price retests the level it just broke. This is deliberate: buying
+ *      a confirmed retest is more robust than chasing the initial spike,
+ *      which can be a fakeout. If price never retests a broken grid before
+ *      the window ends, that resting buy is simply cancelled — no cost.
+ *    - SIZING: dollars committed scale UP with grid price — a retest fill
+ *      at 0.80 commits ~4x the capital of one at 0.20, since a higher grid
+ *      represents more confirmed conviction.
+ *    - TP: entry + 0.05, placed as a genuine resting limit sell above the
+ *      market — also a passive order, waiting to be hit on continuation.
+ *    - SL: entry - 0.06. This is the one order in the design that's priced
+ *      to be immediately marketable (at the current bid) rather than
+ *      passive — a stop needs to fire the moment it's triggered, not wait
+ *      around for a bounce back up to its price. It's still a limit order
+ *      technically, just an aggressive one.
+ *    - Each level is one-shot per window: once broken, retested, filled,
+ *      and closed (TP or SL), it does not re-arm. Next window every level
+ *      resets fresh (unbroken) on both sides.
  *
- *  WINDOW CLOSE: any activated-but-unfilled resting buy is cancelled —
- *  no capital was ever committed to it, so no P&L impact. Any filled
- *  level still waiting on TP/SL rides to resolution as a last resort;
- *  its resting TP/SL orders are cancelled first (settlement is
- *  automatic on-chain redemption, not a market order).
+ *  WINDOW CLOSE: any broken-but-never-retested resting buy is cancelled —
+ *  it never touched cash, so no P&L impact. Any filled level still waiting
+ *  on TP/SL rides to actual resolution as a last resort; its resting TP
+ *  order is cancelled first (settlement is automatic on-chain redemption).
  *
- *  FEES: ladder buys and TP sells are genuine resting maker orders and
- *  earn the 20% maker rebate. The new stop-loss sell is the one
- *  deliberately AGGRESSIVE (taker) order in this design — cutting a
- *  losing position needs to execute promptly rather than hope for a
- *  passive fill, so it pays the taker fee per Polymarket Fee Structure
- *  V2 in exchange for actually getting out.
+ *  FEES: grid buys (on retest) and TP sells are genuine resting maker
+ *  orders and earn the 20% maker rebate. The SL exit is the one
+ *  deliberately marketable/taker order in this design.
  * ═══════════════════════════════════════════════════════════════
  */
 
@@ -136,10 +130,11 @@ async function postJSON(url, body) {
   return res.json();
 }
 
-// Used as a MARKETABLE buy now — called only once a level has actually been
-// crossed, priced at the current ask so it fills immediately rather than
-// resting on the book (see fillLevelAtMarket).
-async function placeMarketableBuy(tokenId, price, shares) {
+// A genuine resting (passive/maker) limit buy — placed at the grid's own
+// price once that grid has been broken through, then left on the book to
+// wait for a retest. It only actually matches later, when the market ask
+// comes back down to this price (see confirmFillsIfRetested).
+async function placeLimitBuy(tokenId, price, shares) {
   if (!DRY_RUN && trader) return await trader.limitBuy(tokenId, shares, price);
   return { id: `dry-buy-${Date.now()}-${Math.random().toString(36).slice(2, 7)}` };
 }
@@ -167,11 +162,13 @@ function freshLevels() {
   const levels = [];
   for (const side of ['Up', 'Down']) {
     for (const price of LEVEL_PRICES) {
-      levels.push({ side, price, filled: false, position: null, tpOrderId: null });
-      // position, when set, also carries slPrice (entry - SL_OFFSET); no separate resting SL order is
-      // placed on the book (SL is monitored and fired as an aggressive sell — see processLevel).
-      // Entries are no longer pre-placed resting orders either — see maybeTriggerLevels: a level only
-      // fires once price has genuinely crossed it, filling at the market price available at that moment.
+      levels.push({ side, price, broken: false, buyOrderId: null, filled: false, position: null, tpOrderId: null });
+      // broken: price has traded through this grid at least once this window, and a genuine
+      //   resting limit buy has been placed AT the grid's own price, waiting for a retest.
+      // filled: that resting buy has actually been matched (ask retraced back down to/through it).
+      // position, when set, also carries slPrice (entry - SL_OFFSET). The SL exit is a limit
+      //   order too, but priced to be immediately marketable (see processLevel) rather than a
+      //   passive rest-and-wait order, since a stop needs to fire promptly once triggered.
     }
   }
   return levels;
@@ -184,7 +181,7 @@ function freshPairState(symbol) {
     windowStart: null, windowEnd: null, slug: null, eventTitle: null, conditionId: null,
     upTokenId: null, downTokenId: null,
     upAsk: null, upBid: null, downAsk: null, downBid: null,
-    lastUpAsk: null, lastDownAsk: null, // baseline for detecting genuine upward crossings (incl. gaps) — see maybeTriggerLevels
+    lastUpAsk: null, lastDownAsk: null, // baseline for detecting genuine upward crossings (incl. gaps) — see maybeBreakLevels
     levels: freshLevels(),
     bankroll: perPairCapital,
     realizedPnl: 0,
@@ -235,49 +232,27 @@ async function fetchEventForWindow(symbol, windowStart) {
   return null;
 }
 
-// Fires a real market fill for a level that price has just crossed (whether by
-// a smooth climb or a gap). There is no resting order placed in advance — this
-// executes an immediate marketable buy at the current ask, since that's the
-// only price actually available by the time we know the level was reached.
-async function fillLevelAtMarket(p, level, entryPrice) {
+// Places the resting buy the moment a grid is broken through. Sizing is
+// keyed off the grid's own price (not a market price, since we don't have
+// one yet for this order — it hasn't filled).
+async function breakLevel(p, level) {
   const tokenId = level.side === 'Up' ? p.upTokenId : p.downTokenId;
-  const dollars = dollarsForLevel(level.price); // sizing tier still keyed off the nominal level, not the real fill price
-  const shares = Math.max(round2(dollars / entryPrice), MIN_SHARES);
-  const notional = round2(entryPrice * shares);
-  const fee = takerFee(shares, entryPrice); // this is a marketable/taker buy — it pays the fee, no maker rebate
-  const totalCost = round2(notional + fee);
-  if (totalCost > p.bankroll) {
-    log(`⏭️  ${p.symbol} ${level.side}@${level.price.toFixed(2)}: skip fill — insufficient bankroll ($${p.bankroll.toFixed(2)} < $${totalCost.toFixed(2)})`);
-    level.filled = true; // don't keep retrying an unaffordable level all window
-    return;
-  }
-  p.bankroll = round2(p.bankroll - totalCost);
-  p.realizedPnl = round2(p.realizedPnl - fee);
-  p.feesPaid = round2(p.feesPaid + fee);
-  level.filled = true;
-  const buyOrder = await placeMarketableBuy(tokenId, entryPrice, shares);
-  const tpPrice = round2(Math.min(entryPrice + TP_OFFSET, 0.99));
-  const slPrice = round2(Math.max(entryPrice - SL_OFFSET, 0.01));
-  level.position = { entryPrice, shares, cost: totalCost, tpPrice, slPrice, buyOrderId: buyOrder.id || buyOrder.orderId || null, openedAt: Date.now() };
-
-  const tpOrder = await placeLimitSell(tokenId, tpPrice, shares); // resting above market — still a genuine maker order
-  level.tpOrderId = tpOrder.id || tpOrder.orderId || null;
-  recordEquity(p);
-  const gapNote = round2(entryPrice - level.price) > 0.001 ? ` (gapped from grid ${level.price.toFixed(2)})` : '';
-  log(`⚡ ${p.symbol} ${level.side}@${level.price.toFixed(2)} grid crossed → filled at market ${entryPrice.toFixed(2)}${gapNote} | ${shares.toFixed(2)}sh | cost=$${notional.toFixed(2)} | fee=-$${fee.toFixed(4)} | TP @ ${tpPrice.toFixed(2)} | SL @ ${slPrice.toFixed(2)}`);
-  registerTrade(p, { side: 'BUY', outcome: level.side, level: level.price, price: entryPrice, shares, cost: totalCost, fee });
+  const dollars = dollarsForLevel(level.price);
+  const shares = Math.max(round2(dollars / level.price), MIN_SHARES);
+  level.broken = true;
+  level.shares = shares;
+  const order = await placeLimitBuy(tokenId, level.price, shares);
+  level.buyOrderId = order.id || order.orderId || null;
+  log(`📌 ${p.symbol} ${level.side}@${level.price.toFixed(2)} grid broken — resting buy placed, waiting for retest (${shares.toFixed(2)}sh)`);
 }
 
-// Detects which levels have genuinely been crossed since the last tick — the
-// core fix for the fact that Polymarket's book won't let us pre-place resting
-// buys above the current price (they'd just cross the spread and fill
-// immediately at today's price, not wait for price to actually get there).
-// Only levels strictly between the previous ask and the new ask trigger, so a
-// window that simply *opens* above some levels does NOT fire them — only
-// price actually climbing through a level during this window counts. A gap
-// that jumps over multiple levels in one tick fires all of them, each filled
-// at the same current ask (the only price actually available).
-async function maybeTriggerLevels(p, side) {
+// Detects which levels have genuinely been broken through since the last
+// tick — including gaps, where a single tick jumps over several grids at
+// once. Every broken grid gets its own resting limit buy placed at its own
+// price; whether that buy is EVER hit is a separate question, checked each
+// tick in confirmFillIfRetested. A window that simply opens above some
+// grids does NOT break them — only a real crossing during this window does.
+async function maybeBreakLevels(p, side) {
   const ask = side === 'Up' ? p.upAsk : p.downAsk;
   if (ask == null) return;
   const lastKey = side === 'Up' ? 'lastUpAsk' : 'lastDownAsk';
@@ -288,11 +263,43 @@ async function maybeTriggerLevels(p, side) {
   if (ask <= prevAsk) return;  // this ladder only cares about upward crossings
 
   const candidates = p.levels
-    .filter(l => l.side === side && !l.filled && l.price > prevAsk && l.price <= ask)
+    .filter(l => l.side === side && !l.broken && l.price > prevAsk && l.price <= ask)
     .sort((a, b) => a.price - b.price);
   for (const level of candidates) {
-    await fillLevelAtMarket(p, level, ask);
+    await breakLevel(p, level);
   }
+}
+
+// Confirms a resting buy actually got matched: the ask has to have come back
+// down to (or through) the grid's own price. This is the "retest" — buying
+// strength, but only once it's been confirmed by a pullback to the level
+// that was broken, not by chasing the spike itself.
+async function confirmFillIfRetested(p, level) {
+  if (!level.broken || level.filled) return;
+  const ask = level.side === 'Up' ? p.upAsk : p.downAsk;
+  if (ask == null || ask > level.price) return; // hasn't come back down to retest yet
+
+  const shares = level.shares;
+  const cost = round2(level.price * shares);
+  if (cost > p.bankroll) {
+    log(`⏭️  ${p.symbol} ${level.side}@${level.price.toFixed(2)}: skip fill — insufficient bankroll ($${p.bankroll.toFixed(2)} < $${cost.toFixed(2)})`);
+    level.filled = true; // don't keep retrying an unaffordable level all window
+    return;
+  }
+  const rebate = makerRebate(shares, level.price); // genuine passive match — this is maker side
+  p.bankroll = round2(p.bankroll - cost + rebate);
+  p.realizedPnl = round2(p.realizedPnl + rebate);
+  p.rebatesEarned = round2(p.rebatesEarned + rebate);
+  level.filled = true;
+  const tokenId = level.side === 'Up' ? p.upTokenId : p.downTokenId;
+  const tpPrice = round2(Math.min(level.price + TP_OFFSET, 0.99));
+  const slPrice = round2(Math.max(level.price - SL_OFFSET, 0.01));
+  level.position = { entryPrice: level.price, shares, cost, tpPrice, slPrice, openedAt: Date.now() };
+  const tpOrder = await placeLimitSell(tokenId, tpPrice, shares); // resting above market — genuine maker order
+  level.tpOrderId = tpOrder.id || tpOrder.orderId || null;
+  recordEquity(p);
+  log(`🎯 ${p.symbol} ${level.side}@${level.price.toFixed(2)} retest confirmed — BUY filled ${shares.toFixed(2)}sh | cost=$${cost.toFixed(2)} | rebate=+$${rebate.toFixed(4)} | TP @ ${tpPrice.toFixed(2)} | SL @ ${slPrice.toFixed(2)}`);
+  registerTrade(p, { side: 'BUY', outcome: level.side, level: level.price, price: level.price, shares, cost, rebate });
 }
 
 async function loadPairWindow(p) {
@@ -412,13 +419,17 @@ function registerTrade(p, entry) {
 //  Per-level tick processing
 // ─────────────────────────────────────────
 async function processLevel(p, level) {
-  if (!level.filled || !level.position) return; // entries are handled in maybeTriggerLevels now
+  if (!level.filled) {
+    await confirmFillIfRetested(p, level);
+    return;
+  }
+  if (!level.position) return;
   const bid = level.side === 'Up' ? p.upBid : p.downBid;
   const pos = level.position;
 
-  // Stop-loss check first: if price has reversed back down through the
-  // stop, exit now at the bid (an aggressive/taker sell — see header note)
-  // rather than let the position ride unmanaged toward zero.
+  // Stop-loss: priced to be immediately marketable (at the current bid) so it
+  // actually executes now rather than waiting to be hit — unlike the entry
+  // and TP orders, which are genuinely passive and wait for a retest/rally.
   if (bid != null && bid <= pos.slPrice) {
     await cancelOrder(level.tpOrderId); // pull the resting TP, we're exiting via SL instead
     const exitPrice = bid;
@@ -482,9 +493,9 @@ async function resolvePairWindow(p) {
   if (hasOpenPosition) winner = await determineWinningSide(p);
 
   for (const level of p.levels) {
-    // No advance resting buys exist anymore (entries only fire once a grid is
-    // genuinely crossed, filled immediately) — so there's nothing to cancel
-    // for an unfilled level; it simply never triggered this window.
+    if (level.broken && !level.filled && level.buyOrderId) {
+      await cancelOrder(level.buyOrderId); // never touched cash — no P&L impact, just an unfilled resting order
+    }
     if (level.position) {
       await cancelOrder(level.tpOrderId);
       const pos = level.position;
@@ -528,8 +539,8 @@ async function processPair(p) {
   }
   if (p.resolvedThisWindow) return;
 
-  await maybeTriggerLevels(p, 'Up');
-  await maybeTriggerLevels(p, 'Down');
+  await maybeBreakLevels(p, 'Up');
+  await maybeBreakLevels(p, 'Down');
 
   for (const level of p.levels) {
     try { await processLevel(p, level); }
@@ -551,7 +562,7 @@ function buildState() {
       bankroll: p.bankroll, realizedPnl: p.realizedPnl, unrealizedPnl: unrealized, markValue,
       feesPaid: p.feesPaid, rebatesEarned: p.rebatesEarned, wins: p.wins, losses: p.losses,
       levels: p.levels.map(l => ({
-        side: l.side, price: l.price, filled: l.filled,
+        side: l.side, price: l.price, broken: l.broken, filled: l.filled,
         position: l.position ? { entryPrice: l.position.entryPrice, shares: l.position.shares, cost: l.position.cost, tpPrice: l.position.tpPrice, slPrice: l.position.slPrice } : null,
       })),
       equityCurve: p.equityCurve,
@@ -607,10 +618,10 @@ function getStatus() { return { ok: true, ...buildState() }; }
 async function init(privateKey, emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
-  log(`🚀 Dual-Side Momentum Breakout Ladder Bot (reversal of the dip-ladder strategy)`);
+  log(`🚀 Dual-Side Breakout-Retest Ladder Bot (limit orders only — no crossing the spread except SL)`);
   log(`⚙️  $${TOTAL_CAPITAL} demo capital across ${pairList.length} pairs (${pairList.join(', ')}) → $${perPairCapital.toFixed(2)}/pair`);
-  log(`⚙️  ladder: ${LEVEL_PRICES.join('/')} ($ scales up to $${GRID_DOLLARS_BASE} with price, both sides, one-shot per window) | fires at market when a grid is genuinely crossed (gap-aware) | TP entry+${TP_OFFSET} | SL entry-${SL_OFFSET}`);
-  log(`⚙️  fees: ladder buys + TP sells are maker (+${(CRYPTO_MAKER_REBATE_SHARE*100).toFixed(0)}% rebate); SL exits are a deliberate taker order to guarantee the cut`);
+  log(`⚙️  ladder: ${LEVEL_PRICES.join('/')} ($ scales up to $${GRID_DOLLARS_BASE} with price, both sides, one-shot per window) | resting buy placed at grid price on break, fills only on retest | TP entry+${TP_OFFSET} (resting) | SL entry-${SL_OFFSET} (marketable)`);
+  log(`⚙️  fees: grid buys + TP sells are maker (+${(CRYPTO_MAKER_REBATE_SHARE*100).toFixed(0)}% rebate); SL exits are the one deliberate taker order`);
   log(`${DRY_RUN ? '⚠️  DRY RUN — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
   trader = new PolymarketTrader(privateKey);
