@@ -252,8 +252,8 @@ app.get('/', (_, res) => {
         const downLevels = (p.levels || []).filter(l => l.side === 'Down');
         const levelRow = l => {
           const stateHtml = l.position
-            ? 'holding '+l.position.shares.toFixed(2)+'sh (cost $'+l.position.cost.toFixed(2)+') → TP '+l.position.tpPrice.toFixed(2)
-            : (l.filled ? 'closed' : (l.activated ? 'resting ('+(l.shares?l.shares.toFixed(2):'?')+'sh)' : 'inactive'));
+            ? 'holding '+l.position.shares.toFixed(2)+'sh (cost $'+l.position.cost.toFixed(2)+') → TP '+l.position.tpPrice.toFixed(2)+' / SL '+l.position.slPrice.toFixed(2)
+            : (l.filled ? 'closed' : 'waiting for cross');
           return '<div class="pair-row" style="font-size:9px"><span class="pair-key">'+l.price.toFixed(2)+'</span><span style="flex:1;text-align:right">'+stateHtml+'</span></div>';
         };
         const ladderHtml =
