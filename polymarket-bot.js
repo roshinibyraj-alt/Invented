@@ -81,7 +81,6 @@ const LADDER_STEP   = Number(process.env.LADDER_STEP || 0.10);
 const GRID_DOLLARS_BASE = Number(process.env.GRID_DOLLARS_BASE || 50); // $ at the TOP level; scales down proportionally for lower levels
 const TP_OFFSET     = Number(process.env.TP_OFFSET || 0.05);    // relative to each level's own entry price
 const SL_OFFSET      = Number(process.env.SL_OFFSET || 0.06);   // NEW: stop-loss offset below entry — the core reversal vs. the old no-SL design
-const ACTIVATE_LOOKAHEAD = Number(process.env.ACTIVATE_LOOKAHEAD || 3); // current level + this many ABOVE get activated as price rises
 const MIN_SHARES = Number(process.env.MIN_SHARES || 5);
 
 function buildLevelPrices() {
@@ -137,7 +136,10 @@ async function postJSON(url, body) {
   return res.json();
 }
 
-async function placeLimitBuy(tokenId, price, shares) {
+// Used as a MARKETABLE buy now — called only once a level has actually been
+// crossed, priced at the current ask so it fills immediately rather than
+// resting on the book (see fillLevelAtMarket).
+async function placeMarketableBuy(tokenId, price, shares) {
   if (!DRY_RUN && trader) return await trader.limitBuy(tokenId, shares, price);
   return { id: `dry-buy-${Date.now()}-${Math.random().toString(36).slice(2, 7)}` };
 }
@@ -154,6 +156,9 @@ async function cancelOrder(orderId) {
 function makerRebate(shares, price) {
   return round5(shares * CRYPTO_TAKER_FEE_RATE * price * (1 - price) * CRYPTO_MAKER_REBATE_SHARE);
 }
+function takerFee(shares, price) {
+  return round5(shares * CRYPTO_TAKER_FEE_RATE * price * (1 - price));
+}
 
 // ─────────────────────────────────────────
 //  Pair / level state
@@ -162,9 +167,11 @@ function freshLevels() {
   const levels = [];
   for (const side of ['Up', 'Down']) {
     for (const price of LEVEL_PRICES) {
-      levels.push({ side, price, activated: false, orderId: null, filled: false, position: null, tpOrderId: null });
+      levels.push({ side, price, filled: false, position: null, tpOrderId: null });
       // position, when set, also carries slPrice (entry - SL_OFFSET); no separate resting SL order is
       // placed on the book (SL is monitored and fired as an aggressive sell — see processLevel).
+      // Entries are no longer pre-placed resting orders either — see maybeTriggerLevels: a level only
+      // fires once price has genuinely crossed it, filling at the market price available at that moment.
     }
   }
   return levels;
@@ -177,6 +184,7 @@ function freshPairState(symbol) {
     windowStart: null, windowEnd: null, slug: null, eventTitle: null, conditionId: null,
     upTokenId: null, downTokenId: null,
     upAsk: null, upBid: null, downAsk: null, downBid: null,
+    lastUpAsk: null, lastDownAsk: null, // baseline for detecting genuine upward crossings (incl. gaps) — see maybeTriggerLevels
     levels: freshLevels(),
     bankroll: perPairCapital,
     realizedPnl: 0,
@@ -227,35 +235,63 @@ async function fetchEventForWindow(symbol, windowStart) {
   return null;
 }
 
-// Activates (places a resting buy for) whichever levels newly come into
-// range on a given side: the highest level at-or-below current ask (the
-// rung price has just climbed through), plus the next ACTIVATE_LOOKAHEAD-1
-// levels ABOVE it — arming the ladder ahead of continued upward momentum.
-// Already-activated levels are skipped — the active set only ever grows.
-async function maybeActivateLevels(p, side) {
+// Fires a real market fill for a level that price has just crossed (whether by
+// a smooth climb or a gap). There is no resting order placed in advance — this
+// executes an immediate marketable buy at the current ask, since that's the
+// only price actually available by the time we know the level was reached.
+async function fillLevelAtMarket(p, level, entryPrice) {
+  const tokenId = level.side === 'Up' ? p.upTokenId : p.downTokenId;
+  const dollars = dollarsForLevel(level.price); // sizing tier still keyed off the nominal level, not the real fill price
+  const shares = Math.max(round2(dollars / entryPrice), MIN_SHARES);
+  const notional = round2(entryPrice * shares);
+  const fee = takerFee(shares, entryPrice); // this is a marketable/taker buy — it pays the fee, no maker rebate
+  const totalCost = round2(notional + fee);
+  if (totalCost > p.bankroll) {
+    log(`⏭️  ${p.symbol} ${level.side}@${level.price.toFixed(2)}: skip fill — insufficient bankroll ($${p.bankroll.toFixed(2)} < $${totalCost.toFixed(2)})`);
+    level.filled = true; // don't keep retrying an unaffordable level all window
+    return;
+  }
+  p.bankroll = round2(p.bankroll - totalCost);
+  p.realizedPnl = round2(p.realizedPnl - fee);
+  p.feesPaid = round2(p.feesPaid + fee);
+  level.filled = true;
+  const buyOrder = await placeMarketableBuy(tokenId, entryPrice, shares);
+  const tpPrice = round2(Math.min(entryPrice + TP_OFFSET, 0.99));
+  const slPrice = round2(Math.max(entryPrice - SL_OFFSET, 0.01));
+  level.position = { entryPrice, shares, cost: totalCost, tpPrice, slPrice, buyOrderId: buyOrder.id || buyOrder.orderId || null, openedAt: Date.now() };
+
+  const tpOrder = await placeLimitSell(tokenId, tpPrice, shares); // resting above market — still a genuine maker order
+  level.tpOrderId = tpOrder.id || tpOrder.orderId || null;
+  recordEquity(p);
+  const gapNote = round2(entryPrice - level.price) > 0.001 ? ` (gapped from grid ${level.price.toFixed(2)})` : '';
+  log(`⚡ ${p.symbol} ${level.side}@${level.price.toFixed(2)} grid crossed → filled at market ${entryPrice.toFixed(2)}${gapNote} | ${shares.toFixed(2)}sh | cost=$${notional.toFixed(2)} | fee=-$${fee.toFixed(4)} | TP @ ${tpPrice.toFixed(2)} | SL @ ${slPrice.toFixed(2)}`);
+  registerTrade(p, { side: 'BUY', outcome: level.side, level: level.price, price: entryPrice, shares, cost: totalCost, fee });
+}
+
+// Detects which levels have genuinely been crossed since the last tick — the
+// core fix for the fact that Polymarket's book won't let us pre-place resting
+// buys above the current price (they'd just cross the spread and fill
+// immediately at today's price, not wait for price to actually get there).
+// Only levels strictly between the previous ask and the new ask trigger, so a
+// window that simply *opens* above some levels does NOT fire them — only
+// price actually climbing through a level during this window counts. A gap
+// that jumps over multiple levels in one tick fires all of them, each filled
+// at the same current ask (the only price actually available).
+async function maybeTriggerLevels(p, side) {
   const ask = side === 'Up' ? p.upAsk : p.downAsk;
   if (ask == null) return;
+  const lastKey = side === 'Up' ? 'lastUpAsk' : 'lastDownAsk';
+  const prevAsk = p[lastKey];
+  p[lastKey] = ask; // always advance the baseline for next tick
 
-  // LEVEL_PRICES is ascending. Find the highest level already reached (<= ask);
-  // that's the frontier rung just confirmed by price. Fall back to the floor
-  // if price hasn't reached even the lowest level yet.
-  let frontierIdx = -1;
-  for (let i = 0; i < LEVEL_PRICES.length; i++) if (LEVEL_PRICES[i] <= ask) frontierIdx = i;
-  if (frontierIdx === -1) frontierIdx = 0; // price below the whole ladder — nothing confirmed yet, watch the floor
+  if (prevAsk == null) return; // first observation this window — nothing to compare against yet
+  if (ask <= prevAsk) return;  // this ladder only cares about upward crossings
 
-  const tokenId = side === 'Up' ? p.upTokenId : p.downTokenId;
-  for (let i = frontierIdx; i < Math.min(frontierIdx + ACTIVATE_LOOKAHEAD, LEVEL_PRICES.length); i++) {
-    const price = LEVEL_PRICES[i];
-    const level = p.levels.find(l => l.side === side && l.price === price);
-    if (!level || level.activated) continue;
-
-    const dollars = dollarsForLevel(price);
-    const shares = Math.max(round2(dollars / price), MIN_SHARES);
-    const order = await placeLimitBuy(tokenId, price, shares);
-    level.activated = true;
-    level.shares = shares;
-    level.orderId = order.id || order.orderId || null;
-    log(`📌 ${p.symbol} ${side}@${price.toFixed(2)} activated: resting buy ${shares.toFixed(2)}sh (~$${dollars.toFixed(2)})`);
+  const candidates = p.levels
+    .filter(l => l.side === side && !l.filled && l.price > prevAsk && l.price <= ask)
+    .sort((a, b) => a.price - b.price);
+  for (const level of candidates) {
+    await fillLevelAtMarket(p, level, ask);
   }
 }
 
@@ -280,6 +316,8 @@ async function loadPairWindow(p) {
   p.tradable = true;
   p.resolvedThisWindow = false;
   p.levels = freshLevels();
+  p.lastUpAsk = null;
+  p.lastDownAsk = null; // fresh baseline — nothing has been "crossed" yet this window
   log(`🔭 ${p.symbol} window loaded: ${slug} | ends ${new Date(p.windowEnd * 1000).toISOString().slice(11,19)}Z`);
 }
 
@@ -374,78 +412,45 @@ function registerTrade(p, entry) {
 //  Per-level tick processing
 // ─────────────────────────────────────────
 async function processLevel(p, level) {
-  if (!level.activated) return; // no resting order exists yet — nothing to check
-  const ask = level.side === 'Up' ? p.upAsk : p.downAsk;
+  if (!level.filled || !level.position) return; // entries are handled in maybeTriggerLevels now
   const bid = level.side === 'Up' ? p.upBid : p.downBid;
+  const pos = level.position;
 
-  if (!level.filled) {
-    // REVERSED: the old ladder filled once price fell TO or BELOW the level
-    // (buying weakness). This one fills once price has risen TO or ABOVE the
-    // level (buying confirmed strength) — so it triggers on ask >= price.
-    if (ask == null || ask < level.price) return; // breakout hasn't been confirmed yet
-    const shares = level.shares;
-    const cost = round2(level.price * shares);
-    if (cost > p.bankroll) {
-      log(`⏭️  ${p.symbol} ${level.side}@${level.price}: skip fill — insufficient bankroll ($${p.bankroll.toFixed(2)} < $${cost.toFixed(2)})`);
-      level.filled = true; // don't keep retrying an unaffordable level all window
-      return;
-    }
-    const rebate = makerRebate(shares, level.price);
-    p.bankroll = round2(p.bankroll - cost + rebate);
-    p.realizedPnl = round2(p.realizedPnl + rebate);
-    p.rebatesEarned = round2(p.rebatesEarned + rebate);
-    level.filled = true;
-    const tpPrice = round2(Math.min(level.price + TP_OFFSET, 0.99));
-    const slPrice = round2(Math.max(level.price - SL_OFFSET, 0.01)); // NEW: bounded downside, unlike the old no-SL design
-    level.position = { entryPrice: level.price, shares, cost, tpPrice, slPrice, openedAt: Date.now() };
-
-    const tokenId = level.side === 'Up' ? p.upTokenId : p.downTokenId;
-    const tpOrder = await placeLimitSell(tokenId, tpPrice, shares);
-    level.tpOrderId = tpOrder.id || tpOrder.orderId || null;
-    recordEquity(p);
-    log(`🎯 ${p.symbol} ${level.side}@${level.price.toFixed(2)} BUY filled ${shares.toFixed(2)}sh | cost=$${cost.toFixed(2)} | rebate=+$${rebate.toFixed(4)} | TP @ ${tpPrice.toFixed(2)} | SL @ ${slPrice.toFixed(2)}`);
-    registerTrade(p, { side: 'BUY', outcome: level.side, level: level.price, price: level.price, shares, cost, rebate });
-    return;
-  }
-
-  if (level.position) {
-    const pos = level.position;
-
-    // Stop-loss check first: if price has reversed back down through the
-    // stop, exit now at the bid (an aggressive/taker sell — see header note)
-    // rather than let the position ride unmanaged toward zero.
-    if (bid != null && bid <= pos.slPrice) {
-      await cancelOrder(level.tpOrderId); // pull the resting TP, we're exiting via SL instead
-      const exitPrice = bid;
-      const proceeds = round2(exitPrice * pos.shares);
-      const net = proceeds; // taker order — no maker rebate, and this strategy accepts the taker fee here deliberately
-      p.bankroll = round2(p.bankroll + net);
-      const profit = round2(net - pos.cost);
-      p.realizedPnl = round2(p.realizedPnl + profit);
-      p.losses++;
-      log(`🧯 ${p.symbol} ${level.side}@${level.price.toFixed(2)} SL hit ${pos.shares.toFixed(2)}sh @ ${exitPrice.toFixed(2)} | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
-      registerTrade(p, { side: 'SELL', outcome: level.side, level: level.price, reason: 'SL', price: exitPrice, shares: pos.shares, profit });
-      level.position = null; // one-shot — this level does not re-arm this window
-      level.tpOrderId = null;
-      recordEquity(p);
-      return;
-    }
-
-    if (bid == null || bid < pos.tpPrice) return;
-    const proceeds = round2(pos.tpPrice * pos.shares);
-    const rebate = makerRebate(pos.shares, pos.tpPrice);
-    const net = round2(proceeds + rebate);
+  // Stop-loss check first: if price has reversed back down through the
+  // stop, exit now at the bid (an aggressive/taker sell — see header note)
+  // rather than let the position ride unmanaged toward zero.
+  if (bid != null && bid <= pos.slPrice) {
+    await cancelOrder(level.tpOrderId); // pull the resting TP, we're exiting via SL instead
+    const exitPrice = bid;
+    const fee = takerFee(pos.shares, exitPrice);
+    const net = round2(exitPrice * pos.shares - fee);
     p.bankroll = round2(p.bankroll + net);
     const profit = round2(net - pos.cost);
     p.realizedPnl = round2(p.realizedPnl + profit);
-    p.rebatesEarned = round2(p.rebatesEarned + rebate);
-    p.wins++;
-    log(`💰 ${p.symbol} ${level.side}@${level.price.toFixed(2)} TP filled ${pos.shares.toFixed(2)}sh @ ${pos.tpPrice.toFixed(2)} | rebate=+$${rebate.toFixed(4)} | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
-    registerTrade(p, { side: 'SELL', outcome: level.side, level: level.price, reason: 'TP', price: pos.tpPrice, shares: pos.shares, profit, rebate });
+    p.feesPaid = round2(p.feesPaid + fee);
+    p.losses++;
+    log(`🧯 ${p.symbol} ${level.side}@${level.price.toFixed(2)} SL hit ${pos.shares.toFixed(2)}sh @ ${exitPrice.toFixed(2)} | fee=-$${fee.toFixed(4)} | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
+    registerTrade(p, { side: 'SELL', outcome: level.side, level: level.price, reason: 'SL', price: exitPrice, shares: pos.shares, profit, fee });
     level.position = null; // one-shot — this level does not re-arm this window
     level.tpOrderId = null;
     recordEquity(p);
+    return;
   }
+
+  if (bid == null || bid < pos.tpPrice) return;
+  const proceeds = round2(pos.tpPrice * pos.shares);
+  const rebate = makerRebate(pos.shares, pos.tpPrice);
+  const net = round2(proceeds + rebate);
+  p.bankroll = round2(p.bankroll + net);
+  const profit = round2(net - pos.cost);
+  p.realizedPnl = round2(p.realizedPnl + profit);
+  p.rebatesEarned = round2(p.rebatesEarned + rebate);
+  p.wins++;
+  log(`💰 ${p.symbol} ${level.side}@${level.price.toFixed(2)} TP filled ${pos.shares.toFixed(2)}sh @ ${pos.tpPrice.toFixed(2)} | rebate=+$${rebate.toFixed(4)} | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
+  registerTrade(p, { side: 'SELL', outcome: level.side, level: level.price, reason: 'TP', price: pos.tpPrice, shares: pos.shares, profit, rebate });
+  level.position = null; // one-shot — this level does not re-arm this window
+  level.tpOrderId = null;
+  recordEquity(p);
 }
 
 // ─────────────────────────────────────────
@@ -477,9 +482,9 @@ async function resolvePairWindow(p) {
   if (hasOpenPosition) winner = await determineWinningSide(p);
 
   for (const level of p.levels) {
-    if (!level.filled && level.orderId) {
-      await cancelOrder(level.orderId); // never touched cash, no P&L impact
-    }
+    // No advance resting buys exist anymore (entries only fire once a grid is
+    // genuinely crossed, filled immediately) — so there's nothing to cancel
+    // for an unfilled level; it simply never triggered this window.
     if (level.position) {
       await cancelOrder(level.tpOrderId);
       const pos = level.position;
@@ -523,8 +528,8 @@ async function processPair(p) {
   }
   if (p.resolvedThisWindow) return;
 
-  await maybeActivateLevels(p, 'Up');
-  await maybeActivateLevels(p, 'Down');
+  await maybeTriggerLevels(p, 'Up');
+  await maybeTriggerLevels(p, 'Down');
 
   for (const level of p.levels) {
     try { await processLevel(p, level); }
@@ -546,8 +551,8 @@ function buildState() {
       bankroll: p.bankroll, realizedPnl: p.realizedPnl, unrealizedPnl: unrealized, markValue,
       feesPaid: p.feesPaid, rebatesEarned: p.rebatesEarned, wins: p.wins, losses: p.losses,
       levels: p.levels.map(l => ({
-        side: l.side, price: l.price, activated: l.activated, filled: l.filled, shares: l.shares || null,
-        position: l.position ? { entryPrice: l.position.entryPrice, shares: l.position.shares, cost: l.position.cost, tpPrice: l.position.tpPrice } : null,
+        side: l.side, price: l.price, filled: l.filled,
+        position: l.position ? { entryPrice: l.position.entryPrice, shares: l.position.shares, cost: l.position.cost, tpPrice: l.position.tpPrice, slPrice: l.position.slPrice } : null,
       })),
       equityCurve: p.equityCurve,
     };
@@ -567,7 +572,7 @@ function buildState() {
     totalRebatesEarned: round2(pairStates.reduce((s, p) => s + p.rebatesEarned, 0)),
     winRate: (totalWins + totalLosses) > 0 ? round2((totalWins / (totalWins + totalLosses)) * 100) : null,
     uptime: Math.floor((Date.now() - startTime) / 1000),
-    config: { levelPrices: LEVEL_PRICES, gridDollarsBase: GRID_DOLLARS_BASE, tpOffset: TP_OFFSET, slOffset: SL_OFFSET, activateLookahead: ACTIVATE_LOOKAHEAD, cryptoTakerFeeRate: CRYPTO_TAKER_FEE_RATE, cryptoMakerRebateShare: CRYPTO_MAKER_REBATE_SHARE },
+    config: { levelPrices: LEVEL_PRICES, gridDollarsBase: GRID_DOLLARS_BASE, tpOffset: TP_OFFSET, slOffset: SL_OFFSET, cryptoTakerFeeRate: CRYPTO_TAKER_FEE_RATE, cryptoMakerRebateShare: CRYPTO_MAKER_REBATE_SHARE },
     pairStates, totalEquityCurve, logs: logs.slice(-100), trades: trades.slice(-80).reverse(),
   };
 }
@@ -604,7 +609,7 @@ async function init(privateKey, emit, slogFn) {
   slog = slogFn;
   log(`🚀 Dual-Side Momentum Breakout Ladder Bot (reversal of the dip-ladder strategy)`);
   log(`⚙️  $${TOTAL_CAPITAL} demo capital across ${pairList.length} pairs (${pairList.join(', ')}) → $${perPairCapital.toFixed(2)}/pair`);
-  log(`⚙️  ladder: ${LEVEL_PRICES.join('/')} ($ scales up to $${GRID_DOLLARS_BASE} with price, both sides, one-shot per window) | activates ${ACTIVATE_LOOKAHEAD} levels ahead as price rises | TP entry+${TP_OFFSET} | SL entry-${SL_OFFSET}`);
+  log(`⚙️  ladder: ${LEVEL_PRICES.join('/')} ($ scales up to $${GRID_DOLLARS_BASE} with price, both sides, one-shot per window) | fires at market when a grid is genuinely crossed (gap-aware) | TP entry+${TP_OFFSET} | SL entry-${SL_OFFSET}`);
   log(`⚙️  fees: ladder buys + TP sells are maker (+${(CRYPTO_MAKER_REBATE_SHARE*100).toFixed(0)}% rebate); SL exits are a deliberate taker order to guarantee the cut`);
   log(`${DRY_RUN ? '⚠️  DRY RUN — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
