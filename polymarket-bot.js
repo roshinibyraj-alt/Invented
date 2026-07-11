@@ -2,56 +2,46 @@
 
 /**
  * ═══════════════════════════════════════════════════════════════
- *  POLYMARKET 5-MINUTE CRYPTO UP/DOWN — BTC PRICE-ACTION SIGNAL BOT
+ *  POLYMARKET 5-MINUTE CRYPTO UP/DOWN — BTC SIGNAL + MARTINGALE RECOVERY
  * ═══════════════════════════════════════════════════════════════
  *
- *  This throws out the whole grid/ladder approach. It no longer watches the
- *  Polymarket Up/Down token's own price at all for its trading DECISION —
- *  it only uses the token's ask/bid to know what price it would actually pay
- *  to enter, and to check whether the resting take-profit order has been hit.
- *  The actual direction call comes entirely from real BTC (or other crypto)
- *  spot price action, fetched from Binance.
+ *  Direction still comes entirely from real BTC (or other crypto) spot price
+ *  action, fetched from Binance — the Polymarket token's own ask/bid is only
+ *  used to know what price would actually be paid to enter, and to check the
+ *  resting take-profit order.
  *
  *  SIGNAL (majority vote, 2-of-3 required):
- *    Three reference points are compared against the current spot price:
- *      1. This window's own open price (the actual settlement reference —
- *         Up wins if spot is above this at window close, Down if below).
- *      2. The close of the most recently CLOSED 15-minute candle.
- *      3. The close of the most recently CLOSED 1-hour candle.
- *    Spot above a reference = an "Up" vote, below = a "Down" vote. 2 or 3
- *    votes agreeing = a valid signal. A 1-1 split (or all references still
- *    loading) = no trade.
+ *    Spot price is compared against three references: this window's own open
+ *    price, the most recently CLOSED 15-minute candle's close, and the most
+ *    recently CLOSED 1-hour candle's close. 2 or 3 agreeing votes = a valid
+ *    signal; a 1-1 split or missing data = no trade.
  *
- *  ENTRIES (two checkpoints per window):
- *    - Checkpoint 1, shortly after the window opens: if a signal is valid,
- *      open position 1 in that direction.
- *    - Checkpoint 2, mid-window: check the signal again. If checkpoint 1
- *      already holds a position and the signal still agrees, add position 2
- *      (pyramiding conviction — the same call reconfirmed by more data by
- *      this point in the window). If the signal has flipped, position 2 is
- *      skipped rather than opening something that fights position 1. If
- *      checkpoint 1 had no signal, checkpoint 2 can still be the first
- *      (and only) entry.
- *    Entries are placed as marketable buys (a limit order priced at the
- *      current ask, so it fills immediately) — this is a timed, signal-
- *      driven strategy, not a price-ladder strategy, so there's no reason
- *      to wait for a specific price; the position is wanted now, while the
- *      signal is fresh.
+ *  ENTRY: exactly ONE trade per window, at +15 seconds after the window
+ *    opens. If a signal is valid at that moment, enter immediately as a
+ *    marketable buy (limit priced at the current ask, so it fills now). No
+ *    second checkpoint, no pyramiding — one call, one bet, per window.
  *
- *  SIZING (scales with signal strength):
- *    - 2-of-3 agreement → base size.
- *    - 3-of-3 agreement → larger size (roughly 2x base).
- *    Each entry is sized independently using the strength observed AT THAT
- *    checkpoint, so position 2 can be a different size than position 1.
+ *  SIZING — MARTINGALE RECOVERY (no cap):
+ *    - Base case (last trade won, or this is the first trade): stake 1% of
+ *      the CURRENT bankroll.
+ *    - Recovery case (last trade lost): the outstanding cumulative loss is
+ *      tracked in p.martingaleLoss. This window's stake is sized so that a
+ *      win exactly recovers it, using THIS window's actual entry price:
+ *        shares = martingaleLoss / (1 - entryPrice)
+ *        stake  = shares * entryPrice
+ *      A win resets p.martingaleLoss to 0 (back to 1% base next window). A
+ *      loss adds this trade's full cost to p.martingaleLoss, so the next
+ *      window's recovery target grows. THERE IS NO CAP — a losing streak,
+ *      especially one where entries land at a high price (small 1-entryPrice
+ *      denominator), can escalate the required stake very quickly. This is
+ *      an explicit, accepted design choice, not an oversight.
  *
- *  EXIT: no stop-loss. Each entry gets a resting take-profit limit sell at
- *    0.99 — if the market is already near-certain of the outcome before the
- *    window ends, lock in the win rather than wait out settlement/oracle
- *    latency. If 0.99 is never reached, the position simply rides to actual
- *    window resolution: wins pay $1/share, losses pay $0.
+ *  EXIT: no stop-loss. A resting take-profit limit sell at 0.99 locks in a
+ *    win early if the market is already near-certain; otherwise the position
+ *    rides to actual window resolution (wins pay $1/share, losses pay $0).
  *
- *  FEES: entries are deliberately marketable (taker) since timing matters
- *    more than price here. The TP sell is a genuine resting maker order.
+ *  FEES: entries are deliberately marketable (taker). The TP sell is a
+ *    genuine resting maker order.
  * ═══════════════════════════════════════════════════════════════
  */
 
@@ -77,12 +67,10 @@ function round5(n) { return Math.round(n * 100000) / 100000; }
 function nowSec() { return Date.now() / 1000; }
 
 // ── Strategy parameters ──
-const CHECKPOINT_1_SECS = Number(process.env.CHECKPOINT_1_SECS || 15);  // seconds after window open
-const CHECKPOINT_2_SECS = Number(process.env.CHECKPOINT_2_SECS || 150); // seconds after window open (mid-window)
-const SIZE_BASE   = Number(process.env.SIZE_BASE || 50);   // dollars, 2-of-3 agreement
-const SIZE_STRONG = Number(process.env.SIZE_STRONG || 100); // dollars, 3-of-3 agreement
-const TP_PRICE    = Number(process.env.TP_PRICE || 0.99);
-const MIN_SHARES  = Number(process.env.MIN_SHARES || 5);
+const CHECKPOINT_SECS = Number(process.env.CHECKPOINT_SECS || 15); // seconds after window open — the one entry point
+const BASE_SIZE_PCT   = Number(process.env.BASE_SIZE_PCT || 0.01); // 1% of current bankroll, when not recovering
+const TP_PRICE        = Number(process.env.TP_PRICE || 0.99);
+const MIN_SHARES      = Number(process.env.MIN_SHARES || 5);
 
 const BTC_PRICE_REFRESH_MS  = Number(process.env.BTC_PRICE_REFRESH_MS || 3000);
 const BTC_CANDLE_REFRESH_MS = Number(process.env.BTC_CANDLE_REFRESH_MS || 20000);
@@ -213,9 +201,6 @@ function computeSignal(symbol, windowOpenPrice) {
   if (down >= 2 && down > up) return { side: 'Down', votes: down, total, spot: r.price };
   return null;
 }
-function sizeForSignal(signal) {
-  return signal.votes >= 3 ? SIZE_STRONG : SIZE_BASE;
-}
 
 // ─────────────────────────────────────────
 //  Pair state
@@ -228,8 +213,9 @@ function freshPairState(symbol) {
     upTokenId: null, downTokenId: null,
     upAsk: null, upBid: null, downAsk: null, downBid: null,
     windowOpenPrice: null,       // BTC (or symbol) spot price recorded when this window loaded
-    checkpoint1Done: false, checkpoint2Done: false,
-    entries: [],                // up to 2 per window — see attemptEntry
+    checkpointDone: false,
+    entry: null,                 // at most one entry per window now — see attemptEntry
+    martingaleLoss: 0,           // outstanding loss to recover — persists ACROSS windows until a win clears it
     bankroll: perPairCapital,
     realizedPnl: 0,
     feesPaid: 0,
@@ -303,10 +289,9 @@ async function loadPairWindow(p) {
   p.tradable = true;
   p.resolvedThisWindow = false;
   p.windowOpenPrice = r.price;
-  p.checkpoint1Done = false;
-  p.checkpoint2Done = false;
-  p.entries = [];
-  log(`🔭 ${p.symbol} window loaded: ${slug} | open=${r.price ?? '?'} | ends ${new Date(p.windowEnd * 1000).toISOString().slice(11,19)}Z`);
+  p.checkpointDone = false;
+  p.entry = null; // martingaleLoss is intentionally NOT reset here — it persists across windows until a win clears it
+  log(`🔭 ${p.symbol} window loaded: ${slug} | open=${r.price ?? '?'} | ends ${new Date(p.windowEnd * 1000).toISOString().slice(11,19)}Z${p.martingaleLoss > 0 ? ` | recovering $${p.martingaleLoss.toFixed(2)}` : ''}`);
 }
 
 // ─────────────────────────────────────────
@@ -371,14 +356,14 @@ async function refreshPolyPrices() {
 // ─────────────────────────────────────────
 //  Equity tracking
 // ─────────────────────────────────────────
-function entryMarkValue(p, entry) {
-  if (entry.closed) return 0;
-  const bid = entry.side === 'Up' ? p.upBid : p.downBid;
-  return round2(entry.shares * (bid ?? entry.entryPrice));
+function entryMarkValue(p) {
+  const e = p.entry;
+  if (!e || e.closed) return 0;
+  const bid = e.side === 'Up' ? p.upBid : p.downBid;
+  return round2(e.shares * (bid ?? e.entryPrice));
 }
 function pairMarkValue(p) {
-  const held = p.entries.reduce((s, e) => s + entryMarkValue(p, e), 0);
-  return round2(p.bankroll + held);
+  return round2(p.bankroll + entryMarkValue(p));
 }
 function pushGlobalEquity() {
   const total = round2(Object.values(pairs).reduce((s, p) => s + pairMarkValue(p), 0));
@@ -397,20 +382,35 @@ function registerTrade(p, entry) {
 }
 
 // ─────────────────────────────────────────
-//  Entries: checkpoint-driven, signal-based
+//  Entry: single checkpoint, martingale-sized
 // ─────────────────────────────────────────
-async function attemptEntry(p, checkpointNum, signal) {
+async function attemptEntry(p, signal) {
   const tokenId = signal.side === 'Up' ? p.upTokenId : p.downTokenId;
   const ask = signal.side === 'Up' ? p.upAsk : p.downAsk;
-  if (ask == null) { log(`⏭️  ${p.symbol} checkpoint${checkpointNum}: no ${signal.side} ask available, skipping`); return; }
+  if (ask == null) { log(`⏭️  ${p.symbol} checkpoint: no ${signal.side} ask available, skipping`); return; }
 
-  const dollars = sizeForSignal(signal);
+  let dollars, recovering = false;
+  if (p.martingaleLoss > 0) {
+    recovering = true;
+    const denom = round2(1 - ask);
+    if (denom <= 0.01) {
+      // Ask is essentially 1.00 — no meaningful payout per share left to recover with, skip rather
+      // than divide by near-zero and demand an absurd stake.
+      log(`⏭️  ${p.symbol} checkpoint: recovering $${p.martingaleLoss.toFixed(2)} but ${signal.side} ask=${ask.toFixed(2)} leaves almost no payout room, skipping`);
+      return;
+    }
+    const sharesNeeded = p.martingaleLoss / denom;
+    dollars = round2(sharesNeeded * ask);
+  } else {
+    dollars = round2(p.bankroll * BASE_SIZE_PCT);
+  }
+
   const shares = Math.max(round2(dollars / ask), MIN_SHARES);
   const notional = round2(ask * shares);
   const fee = takerFee(shares, ask); // deliberate marketable buy — timing matters more than price here
   const totalCost = round2(notional + fee);
   if (totalCost > p.bankroll) {
-    log(`⏭️  ${p.symbol} checkpoint${checkpointNum}: skip entry — insufficient bankroll ($${p.bankroll.toFixed(2)} < $${totalCost.toFixed(2)})`);
+    log(`⏭️  ${p.symbol} checkpoint: skip entry — insufficient bankroll ($${p.bankroll.toFixed(2)} < $${totalCost.toFixed(2)})`);
     return;
   }
 
@@ -421,44 +421,33 @@ async function attemptEntry(p, checkpointNum, signal) {
   const tpOrder = await placeLimitSell(tokenId, TP_PRICE, shares); // resting — waits for near-certainty, doesn't chase it
 
   const entry = {
-    checkpoint: checkpointNum, side: signal.side, entryPrice: ask, shares, cost: totalCost,
-    votes: signal.votes, total: signal.total, spot: signal.spot,
+    side: signal.side, entryPrice: ask, shares, cost: totalCost,
+    votes: signal.votes, total: signal.total, spot: signal.spot, recovering,
     tpPrice: TP_PRICE, tpOrderId: tpOrder.id || tpOrder.orderId || null, closed: false, openedAt: Date.now(),
   };
-  p.entries.push(entry);
+  p.entry = entry;
   recordEquity(p);
-  log(`🎯 ${p.symbol} checkpoint${checkpointNum} ${signal.side} entry ${shares.toFixed(2)}sh @ ${ask.toFixed(2)} (signal ${signal.votes}/${signal.total}, spot=${signal.spot}) | cost=$${totalCost.toFixed(2)} | fee=-$${fee.toFixed(4)} | TP @ ${TP_PRICE}`);
-  registerTrade(p, { side: 'BUY', outcome: signal.side, checkpoint: checkpointNum, price: ask, shares, cost: totalCost, fee, votes: signal.votes, total: signal.total });
+  const tag = recovering ? ` [RECOVERY of $${p.martingaleLoss.toFixed(2)}]` : '';
+  log(`🎯 ${p.symbol} checkpoint ${signal.side} entry ${shares.toFixed(2)}sh @ ${ask.toFixed(2)} (signal ${signal.votes}/${signal.total}, spot=${signal.spot})${tag} | cost=$${totalCost.toFixed(2)} | fee=-$${fee.toFixed(4)} | TP @ ${TP_PRICE}`);
+  registerTrade(p, { side: 'BUY', outcome: signal.side, price: ask, shares, cost: totalCost, fee, votes: signal.votes, total: signal.total, recovering });
 }
 
-async function maybeEnterAtCheckpoints(p) {
+async function maybeEnter(p) {
   const elapsed = nowSec() - p.windowStart;
-
-  if (!p.checkpoint1Done && elapsed >= CHECKPOINT_1_SECS) {
-    p.checkpoint1Done = true;
-    const signal = computeSignal(p.symbol, p.windowOpenPrice);
-    if (signal) await attemptEntry(p, 1, signal);
-    else log(`${p.symbol} checkpoint1: no majority signal, skipping`);
-  }
-
-  if (!p.checkpoint2Done && elapsed >= CHECKPOINT_2_SECS) {
-    p.checkpoint2Done = true;
-    const signal = computeSignal(p.symbol, p.windowOpenPrice);
-    const existing = p.entries.find(e => e.checkpoint === 1);
-    if (!signal) {
-      log(`${p.symbol} checkpoint2: no majority signal, skipping`);
-    } else if (existing && existing.side !== signal.side) {
-      log(`${p.symbol} checkpoint2: signal flipped to ${signal.side} (holding ${existing.side} from checkpoint1) — skipping to avoid conflicting positions`);
-    } else {
-      await attemptEntry(p, 2, signal);
-    }
-  }
+  if (p.checkpointDone || elapsed < CHECKPOINT_SECS) return;
+  p.checkpointDone = true;
+  const signal = computeSignal(p.symbol, p.windowOpenPrice);
+  if (signal) await attemptEntry(p, signal);
+  else log(`${p.symbol} checkpoint: no majority signal, skipping${p.martingaleLoss > 0 ? ` (still carrying $${p.martingaleLoss.toFixed(2)} to recover)` : ''}`);
 }
 
-// Checks whether an entry's resting TP (0.99) has been hit. No stop-loss —
-// if TP is never reached, the position simply rides to real resolution.
-async function processEntry(p, entry) {
-  if (entry.closed) return;
+// Checks whether the entry's resting TP (0.99) has been hit. No stop-loss —
+// if TP is never reached, the position simply rides to real resolution. A
+// win clears the martingale recovery target; only resolution losses (see
+// resolvePairWindow) add to it, since TP is by definition always a win.
+async function processEntry(p) {
+  const entry = p.entry;
+  if (!entry || entry.closed) return;
   const bid = entry.side === 'Up' ? p.upBid : p.downBid;
   if (bid == null || bid < entry.tpPrice) return;
 
@@ -471,8 +460,9 @@ async function processEntry(p, entry) {
   p.rebatesEarned = round2(p.rebatesEarned + rebate);
   p.wins++;
   entry.closed = true;
-  log(`💰 ${p.symbol} checkpoint${entry.checkpoint} ${entry.side} TP(${entry.tpPrice}) filled ${entry.shares.toFixed(2)}sh | rebate=+$${rebate.toFixed(4)} | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
-  registerTrade(p, { side: 'SELL', outcome: entry.side, checkpoint: entry.checkpoint, reason: 'TP', price: entry.tpPrice, shares: entry.shares, profit, rebate });
+  p.martingaleLoss = 0; // win — reset back to 1%-of-bankroll base next window
+  log(`💰 ${p.symbol} ${entry.side} TP(${entry.tpPrice}) filled ${entry.shares.toFixed(2)}sh | rebate=+$${rebate.toFixed(4)} | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
+  registerTrade(p, { side: 'SELL', outcome: entry.side, reason: 'TP', price: entry.tpPrice, shares: entry.shares, profit, rebate });
   entry.tpOrderId = null;
   recordEquity(p);
 }
@@ -501,23 +491,26 @@ async function resolvePairWindow(p) {
   if (p.resolvedThisWindow) return;
   p.resolvedThisWindow = true;
 
-  const hasOpenEntry = p.entries.some(e => !e.closed);
-  let winner = null;
-  if (hasOpenEntry) winner = await determineWinningSide(p);
-
-  for (const entry of p.entries) {
-    if (entry.closed) continue;
+  const entry = p.entry;
+  if (entry && !entry.closed) {
+    const winner = await determineWinningSide(p);
     await cancelOrder(entry.tpOrderId);
     const won = winner === entry.side;
     const proceeds = won ? round2(entry.shares * 1) : 0;
     const profit = round2(proceeds - entry.cost);
     p.bankroll = round2(p.bankroll + proceeds);
     p.realizedPnl = round2(p.realizedPnl + profit);
-    if (won) p.wins++; else p.losses++;
+    if (won) {
+      p.wins++;
+      p.martingaleLoss = 0; // win — reset back to 1%-of-bankroll base next window
+    } else {
+      p.losses++;
+      p.martingaleLoss = round2(p.martingaleLoss + entry.cost); // loss — grow the recovery target for next window
+    }
     entry.closed = true;
     const icon = won ? '💰' : '💥';
-    log(`${icon} ${p.symbol} checkpoint${entry.checkpoint} ${entry.side} RESOLUTION ${entry.shares}sh entry=${entry.entryPrice.toFixed(2)} exit=$${won ? '1.00' : '0.00'}/sh | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
-    registerTrade(p, { side: 'SELL', outcome: entry.side, checkpoint: entry.checkpoint, reason: 'RESOLUTION', price: won ? 1 : 0, shares: entry.shares, profit });
+    log(`${icon} ${p.symbol} ${entry.side} RESOLUTION ${entry.shares}sh entry=${entry.entryPrice.toFixed(2)} exit=$${won ? '1.00' : '0.00'}/sh | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}${!won ? ` | now recovering $${p.martingaleLoss.toFixed(2)}` : ''}`);
+    registerTrade(p, { side: 'SELL', outcome: entry.side, reason: 'RESOLUTION', price: won ? 1 : 0, shares: entry.shares, profit });
   }
   recordEquity(p);
 }
@@ -540,12 +533,9 @@ async function processPair(p) {
   if (p.resolvedThisWindow) return;
 
   await refreshCryptoRef(p.symbol);
-  await maybeEnterAtCheckpoints(p);
-
-  for (const entry of p.entries) {
-    try { await processEntry(p, entry); }
-    catch (e) { log(`⚠️  ${p.symbol} checkpoint${entry.checkpoint} entry error: ${e.message}`); }
-  }
+  await maybeEnter(p);
+  try { await processEntry(p); }
+  catch (e) { log(`⚠️  ${p.symbol} entry error: ${e.message}`); }
 }
 
 // ─────────────────────────────────────────
@@ -553,7 +543,7 @@ async function processPair(p) {
 // ─────────────────────────────────────────
 function buildState() {
   const pairStates = Object.values(pairs).map(p => {
-    const unrealized = round2(p.entries.reduce((s, e) => s + (entryMarkValue(p, e) - (e.closed ? 0 : e.cost)), 0));
+    const unrealized = round2(entryMarkValue(p) - (p.entry && !p.entry.closed ? p.entry.cost : 0));
     const markValue = pairMarkValue(p);
     const r = ensureRefs(p.symbol);
     return {
@@ -561,13 +551,14 @@ function buildState() {
       secsToEnd: p.windowEnd ? Math.max(0, Math.floor(p.windowEnd - nowSec())) : null,
       upAsk: p.upAsk, upBid: p.upBid, downAsk: p.downAsk, downBid: p.downBid,
       windowOpenPrice: p.windowOpenPrice, spotPrice: r.price, close15: r.close15, close1h: r.close1h,
-      checkpoint1Done: p.checkpoint1Done, checkpoint2Done: p.checkpoint2Done,
+      checkpointDone: p.checkpointDone, martingaleLoss: p.martingaleLoss,
       bankroll: p.bankroll, realizedPnl: p.realizedPnl, unrealizedPnl: unrealized, markValue,
       feesPaid: p.feesPaid, rebatesEarned: p.rebatesEarned, wins: p.wins, losses: p.losses,
-      entries: p.entries.map(e => ({
-        checkpoint: e.checkpoint, side: e.side, entryPrice: e.entryPrice, shares: e.shares,
-        cost: e.cost, votes: e.votes, total: e.total, tpPrice: e.tpPrice, closed: e.closed,
-      })),
+      entry: p.entry ? {
+        side: p.entry.side, entryPrice: p.entry.entryPrice, shares: p.entry.shares,
+        cost: p.entry.cost, votes: p.entry.votes, total: p.entry.total, tpPrice: p.entry.tpPrice,
+        closed: p.entry.closed, recovering: p.entry.recovering,
+      } : null,
       equityCurve: p.equityCurve,
     };
   });
@@ -587,8 +578,7 @@ function buildState() {
     winRate: (totalWins + totalLosses) > 0 ? round2((totalWins / (totalWins + totalLosses)) * 100) : null,
     uptime: Math.floor((Date.now() - startTime) / 1000),
     config: {
-      checkpoint1Secs: CHECKPOINT_1_SECS, checkpoint2Secs: CHECKPOINT_2_SECS,
-      sizeBase: SIZE_BASE, sizeStrong: SIZE_STRONG, tpPrice: TP_PRICE,
+      checkpointSecs: CHECKPOINT_SECS, baseSizePct: BASE_SIZE_PCT, tpPrice: TP_PRICE,
       cryptoTakerFeeRate: CRYPTO_TAKER_FEE_RATE, cryptoMakerRebateShare: CRYPTO_MAKER_REBATE_SHARE,
     },
     pairStates, totalEquityCurve, logs: logs.slice(-100), trades: trades.slice(-80).reverse(),
@@ -625,9 +615,9 @@ function getStatus() { return { ok: true, ...buildState() }; }
 async function init(privateKey, emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
-  log(`🚀 BTC Price-Action Signal Bot (majority vote: window-open / 15m close / 1h close)`);
+  log(`🚀 BTC Signal + Martingale Recovery Bot (majority vote: window-open / 15m close / 1h close)`);
   log(`⚙️  $${TOTAL_CAPITAL} demo capital across ${pairList.length} pairs (${pairList.join(', ')}) → $${perPairCapital.toFixed(2)}/pair`);
-  log(`⚙️  checkpoints: +${CHECKPOINT_1_SECS}s and +${CHECKPOINT_2_SECS}s into each window | size $${SIZE_BASE} (2-of-3) / $${SIZE_STRONG} (3-of-3) | TP @ ${TP_PRICE} | no SL — rides to resolution`);
+  log(`⚙️  one entry per window at +${CHECKPOINT_SECS}s | base size ${(BASE_SIZE_PCT*100).toFixed(0)}% of current bankroll | on a loss, next window's stake is sized to recover it at that window's entry price (NO CAP) | TP @ ${TP_PRICE} | no SL — rides to resolution`);
   log(`⚙️  fees: entries are marketable (taker); TP sells are resting (maker, +${(CRYPTO_MAKER_REBATE_SHARE*100).toFixed(0)}% rebate)`);
   log(`${DRY_RUN ? '⚠️  DRY RUN — simulated fills, real API for market/price/candle data' : '🔴 LIVE MODE — real money'}`);
 
