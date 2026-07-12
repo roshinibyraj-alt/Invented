@@ -44,6 +44,14 @@
  *    Each entry is sized independently using the strength observed AT THAT
  *    checkpoint, so position 2 can be a different size than position 1.
  *
+ *  MIN_ENTRY_PRICE FILTER (added after log analysis):
+ *    Entries are skipped if the ask is below MIN_ENTRY_PRICE (default 0.50).
+ *    Backtesting real logs showed sub-0.50 entries were a systematic net
+ *    loser regardless of checkpoint or signal strength — the market hadn't
+ *    caught up to the signal yet at that price, so there was no real edge,
+ *    and Polymarket's taker fee (∝ price*(1-price)) is also worst right
+ *    around 0.50. This filter was the single biggest lever found.
+ *
  *  EXIT: no stop-loss. Each entry gets a resting take-profit limit sell at
  *    0.99 — if the market is already near-certain of the outcome before the
  *    window ends, lock in the win rather than wait out settlement/oracle
@@ -83,6 +91,12 @@ const SHARES_BASE   = Number(process.env.SHARES_BASE || 100);   // fixed share c
 const SHARES_STRONG = Number(process.env.SHARES_STRONG || 200); // fixed share count, 3-of-3 agreement
 const TP_PRICE    = Number(process.env.TP_PRICE || 0.99);
 const MIN_SHARES  = Number(process.env.MIN_SHARES || 5);
+// Backtested against real logs: entries below this price were a systematic net
+// loser (both checkpoints, both signal strengths) — the market hadn't yet
+// confirmed the direction, so the signal had no real edge there, and taker
+// fees are also highest near 0.50 (fee ∝ price*(1-price)). Entries at or
+// above this price were the strategy's entire realized edge.
+const MIN_ENTRY_PRICE = Number(process.env.MIN_ENTRY_PRICE || 0.50);
 
 const BTC_PRICE_REFRESH_MS  = Number(process.env.BTC_PRICE_REFRESH_MS || 3000);
 const BTC_CANDLE_REFRESH_MS = Number(process.env.BTC_CANDLE_REFRESH_MS || 20000);
@@ -405,6 +419,10 @@ async function attemptEntry(p, checkpointNum, signal) {
   const tokenId = signal.side === 'Up' ? p.upTokenId : p.downTokenId;
   const ask = signal.side === 'Up' ? p.upAsk : p.downAsk;
   if (ask == null) { log(`⏭️  ${p.symbol} checkpoint${checkpointNum}: no ${signal.side} ask available, skipping`); return; }
+  if (ask < MIN_ENTRY_PRICE) {
+    log(`⏭️  ${p.symbol} checkpoint${checkpointNum}: ${signal.side} ask=${ask.toFixed(2)} below MIN_ENTRY_PRICE=${MIN_ENTRY_PRICE}, skipping (sub-floor entries were a net loser historically)`);
+    return;
+  }
 
   const shares = Math.max(sharesForSignal(signal), MIN_SHARES); // fixed share count — cost follows from price, not the reverse
   const notional = round2(ask * shares);
@@ -589,7 +607,7 @@ function buildState() {
     uptime: Math.floor((Date.now() - startTime) / 1000),
     config: {
       checkpoint1Secs: CHECKPOINT_1_SECS, checkpoint2Secs: CHECKPOINT_2_SECS,
-      sharesBase: SHARES_BASE, sharesStrong: SHARES_STRONG, tpPrice: TP_PRICE,
+      sharesBase: SHARES_BASE, sharesStrong: SHARES_STRONG, tpPrice: TP_PRICE, minEntryPrice: MIN_ENTRY_PRICE,
       cryptoTakerFeeRate: CRYPTO_TAKER_FEE_RATE, cryptoMakerRebateShare: CRYPTO_MAKER_REBATE_SHARE,
     },
     pairStates, totalEquityCurve, logs: logs.slice(-100), trades: trades.slice(-80).reverse(),
@@ -628,7 +646,7 @@ async function init(privateKey, emit, slogFn) {
   slog = slogFn;
   log(`🚀 BTC Price-Action Signal Bot (majority vote: window-open / 15m close / 1h close)`);
   log(`⚙️  $${TOTAL_CAPITAL} demo capital across ${pairList.length} pairs (${pairList.join(', ')}) → $${perPairCapital.toFixed(2)}/pair`);
-  log(`⚙️  checkpoints: +${CHECKPOINT_1_SECS}s and +${CHECKPOINT_2_SECS}s into each window | size ${SHARES_BASE}sh (2-of-3) / ${SHARES_STRONG}sh (3-of-3) — fixed share count, cost follows the ask | TP @ ${TP_PRICE} | no SL — rides to resolution`);
+  log(`⚙️  checkpoints: +${CHECKPOINT_1_SECS}s and +${CHECKPOINT_2_SECS}s into each window | size ${SHARES_BASE}sh (2-of-3) / ${SHARES_STRONG}sh (3-of-3) — fixed share count, cost follows the ask | min entry price ${MIN_ENTRY_PRICE} (backtested filter) | TP @ ${TP_PRICE} | no SL — rides to resolution`);
   log(`⚙️  fees: entries are marketable (taker); TP sells are resting (maker, +${(CRYPTO_MAKER_REBATE_SHARE*100).toFixed(0)}% rebate)`);
   log(`${DRY_RUN ? '⚠️  DRY RUN — simulated fills, real API for market/price/candle data' : '🔴 LIVE MODE — real money'}`);
 
