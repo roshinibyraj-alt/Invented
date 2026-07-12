@@ -32,11 +32,24 @@
  *      skipped rather than opening something that fights position 1. If
  *      checkpoint 1 had no signal, checkpoint 2 can still be the first
  *      (and only) entry.
- *    Entries are placed as marketable buys (a limit order priced at the
- *      current ask, so it fills immediately) — this is a timed, signal-
- *      driven strategy, not a price-ladder strategy, so there's no reason
- *      to wait for a specific price; the position is wanted now, while the
- *      signal is fresh.
+ *
+ *  EXECUTION — aggressive limit, escalating to market (NEW):
+ *    A checkpoint firing no longer places one marketable buy. Instead:
+ *      1. Quote a genuine (non-crossing) limit buy just inside the current
+ *         ask — as aggressive as possible while still resting, so it has
+ *         the best realistic chance of a passive/maker fill.
+ *      2. Wait up to 2 seconds. If the ask comes down to meet that quote,
+ *         it's filled — at the maker rebate, not the taker fee.
+ *      3. If not filled after 2s, cancel and re-quote at a fresh aggressive
+ *         price against the current market. Repeat up to 5 total attempts
+ *         (~10 seconds).
+ *      4. If the 5th attempt still hasn't filled, give up on saving the fee
+ *         and place a genuine marketable buy at the current ask — a
+ *         guaranteed fill, paying the taker fee, because getting the
+ *         position on is more important than the fee at that point.
+ *    This trades a small, bounded timing delay (at most ~10s) for a real
+ *    chance of avoiding the taker fee on each entry, while still guaranteeing
+ *    the position is eventually taken.
  *
  *  SIZING (scales with signal strength):
  *    - 2-of-3 agreement → base size.
@@ -44,22 +57,15 @@
  *    Each entry is sized independently using the strength observed AT THAT
  *    checkpoint, so position 2 can be a different size than position 1.
  *
- *  MIN_ENTRY_PRICE FILTER (added after log analysis):
- *    Entries are skipped if the ask is below MIN_ENTRY_PRICE (default 0.50).
- *    Backtesting real logs showed sub-0.50 entries were a systematic net
- *    loser regardless of checkpoint or signal strength — the market hadn't
- *    caught up to the signal yet at that price, so there was no real edge,
- *    and Polymarket's taker fee (∝ price*(1-price)) is also worst right
- *    around 0.50. This filter was the single biggest lever found.
- *
  *  EXIT: no stop-loss. Each entry gets a resting take-profit limit sell at
  *    0.99 — if the market is already near-certain of the outcome before the
  *    window ends, lock in the win rather than wait out settlement/oracle
  *    latency. If 0.99 is never reached, the position simply rides to actual
  *    window resolution: wins pay $1/share, losses pay $0.
  *
- *  FEES: entries are deliberately marketable (taker) since timing matters
- *    more than price here. The TP sell is a genuine resting maker order.
+ *  FEES: entries now try to be maker (passive/aggressive-limit) first, and
+ *    only fall back to taker if 5 requote attempts fail to fill. The TP
+ *    sell is always a genuine resting maker order.
  * ═══════════════════════════════════════════════════════════════
  */
 
@@ -91,12 +97,12 @@ const SHARES_BASE   = Number(process.env.SHARES_BASE || 100);   // fixed share c
 const SHARES_STRONG = Number(process.env.SHARES_STRONG || 200); // fixed share count, 3-of-3 agreement
 const TP_PRICE    = Number(process.env.TP_PRICE || 0.99);
 const MIN_SHARES  = Number(process.env.MIN_SHARES || 5);
-// Backtested against real logs: entries below this price were a systematic net
-// loser (both checkpoints, both signal strengths) — the market hadn't yet
-// confirmed the direction, so the signal had no real edge there, and taker
-// fees are also highest near 0.50 (fee ∝ price*(1-price)). Entries at or
-// above this price were the strategy's entire realized edge.
-const MIN_ENTRY_PRICE = Number(process.env.MIN_ENTRY_PRICE || 0.50);
+// Aggressive-limit-then-escalate execution: quote just inside the ask, wait,
+// re-quote against the moving market, and only cross the spread for real
+// (market fill) if every attempt fails to fill passively.
+const REQUOTE_INTERVAL_MS = Number(process.env.REQUOTE_INTERVAL_MS || 2000);
+const MAX_QUOTE_ATTEMPTS  = Number(process.env.MAX_QUOTE_ATTEMPTS || 5);
+const AGGRESSIVE_TICK     = Number(process.env.AGGRESSIVE_TICK || 0.01); // how close to the ask we quote without crossing it
 
 const BTC_PRICE_REFRESH_MS  = Number(process.env.BTC_PRICE_REFRESH_MS || 3000);
 const BTC_CANDLE_REFRESH_MS = Number(process.env.BTC_CANDLE_REFRESH_MS || 20000);
@@ -140,10 +146,16 @@ async function postJSON(url, body) {
   return res.json();
 }
 
-// A marketable buy — priced at the current ask so it fills now. This is a
-// timed, signal-driven entry, not a price-ladder one, so there's no reason
-// to wait for a resting order to be hit.
+// A marketable buy — priced at the current ask so it fills now. Used only
+// as the final escalation after passive requoting has failed 5 times.
 async function placeMarketableBuy(tokenId, price, shares) {
+  if (!DRY_RUN && trader) return await trader.limitBuy(tokenId, shares, price);
+  return { id: `dry-buy-${Date.now()}-${Math.random().toString(36).slice(2, 7)}` };
+}
+// A genuine resting (passive/maker) limit buy — the same underlying call,
+// just priced below the current ask so it doesn't cross the spread. Used
+// for the aggressive-quote attempts; it may or may not fill.
+async function placeLimitBuy(tokenId, price, shares) {
   if (!DRY_RUN && trader) return await trader.limitBuy(tokenId, shares, price);
   return { id: `dry-buy-${Date.now()}-${Math.random().toString(36).slice(2, 7)}` };
 }
@@ -245,7 +257,8 @@ function freshPairState(symbol) {
     upAsk: null, upBid: null, downAsk: null, downBid: null,
     windowOpenPrice: null,       // BTC (or symbol) spot price recorded when this window loaded
     checkpoint1Done: false, checkpoint2Done: false,
-    entries: [],                // up to 2 per window — see attemptEntry
+    entries: [],                // up to 2 per window — see finalizeEntry
+    pendingEntries: [],         // in-flight aggressive-quote attempts — see startEntryAttempt/processPendingEntries
     bankroll: perPairCapital,
     realizedPnl: 0,
     feesPaid: 0,
@@ -322,6 +335,7 @@ async function loadPairWindow(p) {
   p.checkpoint1Done = false;
   p.checkpoint2Done = false;
   p.entries = [];
+  p.pendingEntries = [];
   log(`🔭 ${p.symbol} window loaded: ${slug} | open=${r.price ?? '?'} | ends ${new Date(p.windowEnd * 1000).toISOString().slice(11,19)}Z`);
 }
 
@@ -413,41 +427,116 @@ function registerTrade(p, entry) {
 }
 
 // ─────────────────────────────────────────
-//  Entries: checkpoint-driven, signal-based
+//  Entries: checkpoint-driven, signal-based, aggressive-limit → escalate
 // ─────────────────────────────────────────
-async function attemptEntry(p, checkpointNum, signal) {
+
+// Quotes as close to the current ask as possible without crossing it — the
+// most aggressive price that's still a genuine passive/maker order.
+function computeAggressivePrice(ask, bid) {
+  const floor = bid != null ? bid : 0.01;
+  return round2(Math.max(floor, round2(ask - AGGRESSIVE_TICK)));
+}
+
+// Kicks off an entry attempt: places the first aggressive resting quote.
+// The rest of the attempt (checking for a fill, re-quoting, escalating to a
+// market order) happens in processPendingEntries on later ticks.
+async function startEntryAttempt(p, checkpointNum, signal) {
   const tokenId = signal.side === 'Up' ? p.upTokenId : p.downTokenId;
   const ask = signal.side === 'Up' ? p.upAsk : p.downAsk;
+  const bid = signal.side === 'Up' ? p.upBid : p.downBid;
   if (ask == null) { log(`⏭️  ${p.symbol} checkpoint${checkpointNum}: no ${signal.side} ask available, skipping`); return; }
-  if (ask < MIN_ENTRY_PRICE) {
-    log(`⏭️  ${p.symbol} checkpoint${checkpointNum}: ${signal.side} ask=${ask.toFixed(2)} below MIN_ENTRY_PRICE=${MIN_ENTRY_PRICE}, skipping (sub-floor entries were a net loser historically)`);
-    return;
-  }
 
   const shares = Math.max(sharesForSignal(signal), MIN_SHARES); // fixed share count — cost follows from price, not the reverse
-  const notional = round2(ask * shares);
-  const fee = takerFee(shares, ask); // deliberate marketable buy — timing matters more than price here
-  const totalCost = round2(notional + fee);
+  const quotePrice = computeAggressivePrice(ask, bid);
+  const order = await placeLimitBuy(tokenId, quotePrice, shares);
+  p.pendingEntries.push({
+    checkpointNum, side: signal.side, shares, votes: signal.votes, total: signal.total, spot: signal.spot,
+    attempt: 1, quotePrice, orderId: order.id || order.orderId || null, quotedAt: Date.now(),
+  });
+  log(`📌 ${p.symbol} checkpoint${checkpointNum} ${signal.side} quote #1 ${shares.toFixed(2)}sh @ ${quotePrice.toFixed(2)} (ask=${ask.toFixed(2)}, signal ${signal.votes}/${signal.total}) — resting, will re-quote every ${(REQUOTE_INTERVAL_MS/1000).toFixed(0)}s`);
+}
+
+// Turns a filled quote (or an escalated market fill) into a real open
+// position: deducts cost, applies fee or rebate depending on how it filled,
+// places the resting TP sell, and records the trade.
+async function finalizeEntry(p, pe, fillPrice, isMaker) {
+  const tokenId = pe.side === 'Up' ? p.upTokenId : p.downTokenId;
+  const notional = round2(fillPrice * pe.shares);
+  let totalCost, fee = 0, rebate = 0;
+  if (isMaker) {
+    rebate = makerRebate(pe.shares, fillPrice);
+    totalCost = round2(notional - rebate);
+  } else {
+    fee = takerFee(pe.shares, fillPrice);
+    totalCost = round2(notional + fee);
+  }
   if (totalCost > p.bankroll) {
-    log(`⏭️  ${p.symbol} checkpoint${checkpointNum}: skip entry — insufficient bankroll ($${p.bankroll.toFixed(2)} < $${totalCost.toFixed(2)})`);
+    log(`⏭️  ${p.symbol} checkpoint${pe.checkpointNum}: skip entry — insufficient bankroll ($${p.bankroll.toFixed(2)} < $${totalCost.toFixed(2)})`);
     return;
   }
 
   p.bankroll = round2(p.bankroll - totalCost);
-  p.realizedPnl = round2(p.realizedPnl - fee);
-  p.feesPaid = round2(p.feesPaid + fee);
-  await placeMarketableBuy(tokenId, ask, shares);
-  const tpOrder = await placeLimitSell(tokenId, TP_PRICE, shares); // resting — waits for near-certainty, doesn't chase it
+  if (isMaker) { p.realizedPnl = round2(p.realizedPnl + rebate); p.rebatesEarned = round2(p.rebatesEarned + rebate); }
+  else { p.realizedPnl = round2(p.realizedPnl - fee); p.feesPaid = round2(p.feesPaid + fee); }
 
+  const tpOrder = await placeLimitSell(tokenId, TP_PRICE, pe.shares); // resting — waits for near-certainty, doesn't chase it
   const entry = {
-    checkpoint: checkpointNum, side: signal.side, entryPrice: ask, shares, cost: totalCost,
-    votes: signal.votes, total: signal.total, spot: signal.spot,
+    checkpoint: pe.checkpointNum, side: pe.side, entryPrice: fillPrice, shares: pe.shares, cost: totalCost,
+    votes: pe.votes, total: pe.total, spot: pe.spot, filledVia: isMaker ? 'passive' : 'market', attempts: pe.attempt,
     tpPrice: TP_PRICE, tpOrderId: tpOrder.id || tpOrder.orderId || null, closed: false, openedAt: Date.now(),
   };
   p.entries.push(entry);
   recordEquity(p);
-  log(`🎯 ${p.symbol} checkpoint${checkpointNum} ${signal.side} entry ${shares.toFixed(2)}sh @ ${ask.toFixed(2)} (signal ${signal.votes}/${signal.total}, spot=${signal.spot}) | cost=$${totalCost.toFixed(2)} | fee=-$${fee.toFixed(4)} | TP @ ${TP_PRICE}`);
-  registerTrade(p, { side: 'BUY', outcome: signal.side, checkpoint: checkpointNum, price: ask, shares, cost: totalCost, fee, votes: signal.votes, total: signal.total });
+  const feeTag = isMaker ? `rebate=+$${rebate.toFixed(4)}` : `fee=-$${fee.toFixed(4)}`;
+  const viaTag = isMaker ? `passive fill (attempt ${pe.attempt})` : `ESCALATED TO MARKET after ${pe.attempt} failed quotes`;
+  log(`🎯 ${p.symbol} checkpoint${pe.checkpointNum} ${pe.side} entry ${pe.shares.toFixed(2)}sh @ ${fillPrice.toFixed(2)} — ${viaTag} | cost=$${totalCost.toFixed(2)} | ${feeTag} | TP @ ${TP_PRICE}`);
+  registerTrade(p, { side: 'BUY', outcome: pe.side, checkpoint: pe.checkpointNum, price: fillPrice, shares: pe.shares, cost: totalCost, fee, rebate, votes: pe.votes, total: pe.total, filledVia: entry.filledVia });
+}
+
+// Drives every in-flight quote forward: checks for a passive fill, and on
+// the 2-second mark either re-quotes (attempts 1-4) or escalates to a
+// guaranteed market fill (after attempt 5 fails).
+async function processPendingEntries(p) {
+  if (!p.pendingEntries.length) return;
+  const stillPending = [];
+  for (const pe of p.pendingEntries) {
+    const ask = pe.side === 'Up' ? p.upAsk : p.downAsk;
+    const bid = pe.side === 'Up' ? p.upBid : p.downBid;
+
+    // A passive fill: the ask has come down to (or through) our resting quote.
+    if (ask != null && ask <= pe.quotePrice) {
+      await finalizeEntry(p, pe, pe.quotePrice, true);
+      continue;
+    }
+
+    const waited = Date.now() - pe.quotedAt;
+    if (waited < REQUOTE_INTERVAL_MS) { stillPending.push(pe); continue; }
+
+    // 2 seconds passed with no fill — cancel this quote first.
+    await cancelOrder(pe.orderId);
+
+    if (pe.attempt >= MAX_QUOTE_ATTEMPTS) {
+      if (ask == null) {
+        log(`⏭️  ${p.symbol} checkpoint${pe.checkpointNum}: ${pe.side} exhausted ${MAX_QUOTE_ATTEMPTS} quote attempts and no ask is available to escalate to market — dropping this entry`);
+        continue;
+      }
+      await finalizeEntry(p, pe, ask, false); // guaranteed fill — timing wins over fee now
+      continue;
+    }
+
+    if (ask == null) { pe.quotedAt = Date.now(); stillPending.push(pe); continue; } // nothing to requote against yet, just keep waiting
+
+    const tokenId = pe.side === 'Up' ? p.upTokenId : p.downTokenId;
+    const newPrice = computeAggressivePrice(ask, bid);
+    const order = await placeLimitBuy(tokenId, newPrice, pe.shares);
+    pe.attempt += 1;
+    pe.quotePrice = newPrice;
+    pe.orderId = order.id || order.orderId || null;
+    pe.quotedAt = Date.now();
+    log(`🔁 ${p.symbol} checkpoint${pe.checkpointNum} ${pe.side} quote #${pe.attempt} ${pe.shares.toFixed(2)}sh @ ${newPrice.toFixed(2)} (ask=${ask.toFixed(2)}) — no fill yet, re-quoting`);
+    stillPending.push(pe);
+  }
+  p.pendingEntries = stillPending;
 }
 
 async function maybeEnterAtCheckpoints(p) {
@@ -456,20 +545,20 @@ async function maybeEnterAtCheckpoints(p) {
   if (!p.checkpoint1Done && elapsed >= CHECKPOINT_1_SECS) {
     p.checkpoint1Done = true;
     const signal = computeSignal(p.symbol, p.windowOpenPrice);
-    if (signal) await attemptEntry(p, 1, signal);
+    if (signal) await startEntryAttempt(p, 1, signal);
     else log(`${p.symbol} checkpoint1: no majority signal, skipping`);
   }
 
   if (!p.checkpoint2Done && elapsed >= CHECKPOINT_2_SECS) {
     p.checkpoint2Done = true;
     const signal = computeSignal(p.symbol, p.windowOpenPrice);
-    const existing = p.entries.find(e => e.checkpoint === 1);
+    const existing = p.entries.find(e => e.checkpoint === 1) || p.pendingEntries.find(pe => pe.checkpointNum === 1);
     if (!signal) {
       log(`${p.symbol} checkpoint2: no majority signal, skipping`);
     } else if (existing && existing.side !== signal.side) {
-      log(`${p.symbol} checkpoint2: signal flipped to ${signal.side} (holding ${existing.side} from checkpoint1) — skipping to avoid conflicting positions`);
+      log(`${p.symbol} checkpoint2: signal flipped to ${signal.side} (holding/quoting ${existing.side} from checkpoint1) — skipping to avoid conflicting positions`);
     } else {
-      await attemptEntry(p, 2, signal);
+      await startEntryAttempt(p, 2, signal);
     }
   }
 }
@@ -520,6 +609,12 @@ async function resolvePairWindow(p) {
   if (p.resolvedThisWindow) return;
   p.resolvedThisWindow = true;
 
+  // Safety net: any quote still in flight (shouldn't normally happen — worst
+  // case is ~10s of attempts, far inside the window) never touched cash, so
+  // just cancel it.
+  for (const pe of p.pendingEntries) await cancelOrder(pe.orderId);
+  p.pendingEntries = [];
+
   const hasOpenEntry = p.entries.some(e => !e.closed);
   let winner = null;
   if (hasOpenEntry) winner = await determineWinningSide(p);
@@ -560,6 +655,7 @@ async function processPair(p) {
 
   await refreshCryptoRef(p.symbol);
   await maybeEnterAtCheckpoints(p);
+  await processPendingEntries(p);
 
   for (const entry of p.entries) {
     try { await processEntry(p, entry); }
@@ -586,6 +682,10 @@ function buildState() {
       entries: p.entries.map(e => ({
         checkpoint: e.checkpoint, side: e.side, entryPrice: e.entryPrice, shares: e.shares,
         cost: e.cost, votes: e.votes, total: e.total, tpPrice: e.tpPrice, closed: e.closed,
+        filledVia: e.filledVia, attempts: e.attempts,
+      })),
+      pendingEntries: p.pendingEntries.map(pe => ({
+        checkpoint: pe.checkpointNum, side: pe.side, shares: pe.shares, quotePrice: pe.quotePrice, attempt: pe.attempt,
       })),
       equityCurve: p.equityCurve,
     };
@@ -607,7 +707,8 @@ function buildState() {
     uptime: Math.floor((Date.now() - startTime) / 1000),
     config: {
       checkpoint1Secs: CHECKPOINT_1_SECS, checkpoint2Secs: CHECKPOINT_2_SECS,
-      sharesBase: SHARES_BASE, sharesStrong: SHARES_STRONG, tpPrice: TP_PRICE, minEntryPrice: MIN_ENTRY_PRICE,
+      sharesBase: SHARES_BASE, sharesStrong: SHARES_STRONG, tpPrice: TP_PRICE,
+      requoteIntervalMs: REQUOTE_INTERVAL_MS, maxQuoteAttempts: MAX_QUOTE_ATTEMPTS, aggressiveTick: AGGRESSIVE_TICK,
       cryptoTakerFeeRate: CRYPTO_TAKER_FEE_RATE, cryptoMakerRebateShare: CRYPTO_MAKER_REBATE_SHARE,
     },
     pairStates, totalEquityCurve, logs: logs.slice(-100), trades: trades.slice(-80).reverse(),
@@ -646,8 +747,9 @@ async function init(privateKey, emit, slogFn) {
   slog = slogFn;
   log(`🚀 BTC Price-Action Signal Bot (majority vote: window-open / 15m close / 1h close)`);
   log(`⚙️  $${TOTAL_CAPITAL} demo capital across ${pairList.length} pairs (${pairList.join(', ')}) → $${perPairCapital.toFixed(2)}/pair`);
-  log(`⚙️  checkpoints: +${CHECKPOINT_1_SECS}s and +${CHECKPOINT_2_SECS}s into each window | size ${SHARES_BASE}sh (2-of-3) / ${SHARES_STRONG}sh (3-of-3) — fixed share count, cost follows the ask | min entry price ${MIN_ENTRY_PRICE} (backtested filter) | TP @ ${TP_PRICE} | no SL — rides to resolution`);
-  log(`⚙️  fees: entries are marketable (taker); TP sells are resting (maker, +${(CRYPTO_MAKER_REBATE_SHARE*100).toFixed(0)}% rebate)`);
+  log(`⚙️  checkpoints: +${CHECKPOINT_1_SECS}s and +${CHECKPOINT_2_SECS}s into each window | size ${SHARES_BASE}sh (2-of-3) / ${SHARES_STRONG}sh (3-of-3) — fixed share count, cost follows the ask | TP @ ${TP_PRICE} | no SL — rides to resolution`);
+  log(`⚙️  execution: quote aggressively ${AGGRESSIVE_TICK} inside the ask, re-quote every ${(REQUOTE_INTERVAL_MS/1000).toFixed(0)}s up to ${MAX_QUOTE_ATTEMPTS} attempts, then escalate to a guaranteed market fill`);
+  log(`⚙️  fees: passive/re-quoted fills earn the maker rebate (+${(CRYPTO_MAKER_REBATE_SHARE*100).toFixed(0)}%); only the final escalated fill (if all ${MAX_QUOTE_ATTEMPTS} quotes miss) pays the taker fee`);
   log(`${DRY_RUN ? '⚠️  DRY RUN — simulated fills, real API for market/price/candle data' : '🔴 LIVE MODE — real money'}`);
 
   trader = new PolymarketTrader(privateKey);
