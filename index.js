@@ -33,6 +33,12 @@ app.post('/api/resume', (_, res) => {
   try { res.json(bot.resumeTrading()); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
+app.post('/api/set-mode', (req, res) => {
+  const { live } = req.body || {};
+  if (typeof live !== 'boolean') return res.status(400).json({ ok: false, error: 'Missing boolean "live" field' });
+  try { res.json(bot.setMode(live)); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
 app.get('/', (_, res) => {
   res.send(`<!DOCTYPE html>
 <html lang="en">
@@ -60,6 +66,8 @@ app.get('/', (_, res) => {
   .toolbar button { background: var(--cyan); color: #001018; border: none; padding: 10px 16px; border-radius: 8px; font-weight: bold; cursor: pointer; font-family: inherit; font-size: 12px; }
   .toolbar button.pause { background: var(--yellow); }
   .toolbar button.resume { background: var(--green); color: #fff; }
+  .toolbar button.live-toggle { background: var(--red); color: #fff; }
+  .toolbar button.live-toggle.is-live { background: var(--muted); color: #fff; }
   .toolbar button:hover { opacity: .85; }
   .toolbar-status { padding: 6px 20px 0; font-size: 10px; color: var(--muted); min-height: 14px; }
   .stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; padding: 14px 20px; }
@@ -108,7 +116,7 @@ app.get('/', (_, res) => {
 <body>
   <div class="header">
     <div class="logo">⏱️ <span>5M</span> UP/DOWN BOT</div>
-    <div id="mode-badge" class="mode-badge ${DRY_RUN ? 'mode-dry' : 'mode-live'}">${DRY_RUN ? 'DRY RUN' : '🔴 LIVE'}</div>
+    <div id="mode-badge" class="mode-badge ${bot.getStatus().dryRun ? 'mode-dry' : 'mode-live'}">${bot.getStatus().dryRun ? 'DEMO' : '🔴 LIVE'}</div>
     <div id="experiment-badge" class="mode-badge mode-dry">BTC SIGNAL (2-of-3 majority)</div>
   </div>
 
@@ -117,6 +125,7 @@ app.get('/', (_, res) => {
     <button id="set-pairs-btn">Set Pairs</button>
     <button id="pause-btn" class="pause">Pause</button>
     <button id="resume-btn" class="resume">Resume</button>
+    <button id="mode-toggle-btn" class="live-toggle">Switch to LIVE</button>
   </div>
   <div id="toolbar-status" class="toolbar-status"></div>
 
@@ -219,8 +228,29 @@ app.get('/', (_, res) => {
   document.getElementById('resume-btn').addEventListener('click', async () => {
     await fetch('/api/resume', { method: 'POST' });
   });
+  document.getElementById('mode-toggle-btn').addEventListener('click', async () => {
+    const btn = document.getElementById('mode-toggle-btn');
+    const goingLive = btn.textContent.includes('LIVE');
+    const msg = goingLive
+      ? 'Switch to LIVE trading? This places real orders with real money.'
+      : 'Switch back to DEMO mode? New orders will be simulated again.';
+    if (!confirm(msg)) return;
+    const statusEl = document.getElementById('toolbar-status');
+    try {
+      const r = await fetch('/api/set-mode', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ live: goingLive }) });
+      const d = await r.json();
+      statusEl.textContent = d.ok ? ('✅ Now in ' + (d.dryRun ? 'DEMO' : 'LIVE') + ' mode') : ('❌ ' + (d.error||'failed'));
+    } catch (e) { statusEl.textContent = '❌ ' + e.message; }
+  });
 
   socket.on('state', s => {
+    const modeBadge = document.getElementById('mode-badge');
+    modeBadge.className = 'mode-badge ' + (s.dryRun ? 'mode-dry' : 'mode-live');
+    modeBadge.textContent = s.dryRun ? 'DEMO' : '🔴 LIVE';
+    const toggleBtn = document.getElementById('mode-toggle-btn');
+    toggleBtn.textContent = s.dryRun ? 'Switch to LIVE' : 'Switch to DEMO';
+    toggleBtn.className = 'live-toggle' + (s.dryRun ? '' : ' is-live');
+
     document.getElementById('total-mark').textContent = '$'+(s.totalMarkValue||0).toFixed(2);
     const pnlEl = document.getElementById('total-pnl');
     pnlEl.textContent = sgn(s.totalPnl); pnlEl.className = 'stat-val ' + pClass(s.totalPnl);
@@ -260,17 +290,14 @@ app.get('/', (_, res) => {
         const entryRow = e => {
           const stateHtml = e.closed
             ? 'closed'
-            : 'holding '+e.shares.toFixed(2)+'sh (cost $'+e.cost.toFixed(2)+') → TP '+e.tpPrice.toFixed(2);
-          const viaTag = e.filledVia ? ' ['+e.filledVia+(e.attempts?(' x'+e.attempts):'')+']' : '';
-          return '<div class="pair-row" style="font-size:9px"><span class="pair-key">cp'+e.checkpoint+' '+e.side+' @'+e.entryPrice.toFixed(2)+' ('+e.votes+'/'+e.total+')'+viaTag+'</span><span style="flex:1;text-align:right">'+stateHtml+'</span></div>';
+            : 'holding '+e.shares.toFixed(2)+'sh (cost $'+e.cost.toFixed(2)+') — rides to resolution';
+          return '<div class="pair-row" style="font-size:9px"><span class="pair-key">cp'+e.checkpoint+' '+e.side+' @'+e.entryPrice.toFixed(2)+' ('+e.votes+'/'+e.total+')</span><span style="flex:1;text-align:right">'+stateHtml+'</span></div>';
         };
-        const pendingRow = pe => '<div class="pair-row" style="font-size:9px;opacity:.85"><span class="pair-key">cp'+pe.checkpoint+' '+pe.side+' quoting @'+pe.quotePrice.toFixed(2)+'</span><span style="flex:1;text-align:right">attempt '+pe.attempt+'/5…</span></div>';
-        const entriesHtml =
-          ((p.entries && p.entries.length) ? '<div style="margin-top:4px">'+p.entries.map(entryRow).join('')+'</div>' : '') +
-          ((p.pendingEntries && p.pendingEntries.length) ? '<div style="margin-top:4px">'+p.pendingEntries.map(pendingRow).join('')+'</div>' : '') +
-          ((!p.entries || !p.entries.length) && (!p.pendingEntries || !p.pendingEntries.length) ? '<div class="pair-row" style="font-size:9px;opacity:.6">No entries yet this window</div>' : '');
+        const entriesHtml = (p.entries && p.entries.length)
+          ? '<div style="margin-top:4px">'+p.entries.map(entryRow).join('')+'</div>'
+          : '<div class="pair-row" style="font-size:9px;opacity:.6">No entries yet this window</div>';
         const eqCurve = buildEquitySvg(p.equityCurve, 280, 34, null);
-        const hasPos = (p.entries || []).some(e => !e.closed) || (p.pendingEntries || []).length > 0;
+        const hasPos = (p.entries || []).some(e => !e.closed);
         return '<div class="pair-card '+(hasPos?'has-pos':'')+' '+(p.tradable?'':'untradable')+'">'+
           '<div class="pair-hdr"><div class="pair-sym">'+p.symbol+'</div><div class="pair-timer">'+(p.tradable?fmtSecs(p.secsToEnd):'loading…')+'</div></div>'+
           '<div class="pair-body">'+
