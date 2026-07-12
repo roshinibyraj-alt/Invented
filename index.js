@@ -261,13 +261,16 @@ app.get('/', (_, res) => {
           const stateHtml = e.closed
             ? 'closed'
             : 'holding '+e.shares.toFixed(2)+'sh (cost $'+e.cost.toFixed(2)+') → TP '+e.tpPrice.toFixed(2);
-          return '<div class="pair-row" style="font-size:9px"><span class="pair-key">cp'+e.checkpoint+' '+e.side+' @'+e.entryPrice.toFixed(2)+' ('+e.votes+'/'+e.total+')</span><span style="flex:1;text-align:right">'+stateHtml+'</span></div>';
+          const viaTag = e.filledVia ? ' ['+e.filledVia+(e.attempts?(' x'+e.attempts):'')+']' : '';
+          return '<div class="pair-row" style="font-size:9px"><span class="pair-key">cp'+e.checkpoint+' '+e.side+' @'+e.entryPrice.toFixed(2)+' ('+e.votes+'/'+e.total+')'+viaTag+'</span><span style="flex:1;text-align:right">'+stateHtml+'</span></div>';
         };
-        const entriesHtml = (p.entries && p.entries.length)
-          ? '<div style="margin-top:4px">'+p.entries.map(entryRow).join('')+'</div>'
-          : '<div class="pair-row" style="font-size:9px;opacity:.6">No entries yet this window</div>';
+        const pendingRow = pe => '<div class="pair-row" style="font-size:9px;opacity:.85"><span class="pair-key">cp'+pe.checkpoint+' '+pe.side+' quoting @'+pe.quotePrice.toFixed(2)+'</span><span style="flex:1;text-align:right">attempt '+pe.attempt+'/5…</span></div>';
+        const entriesHtml =
+          ((p.entries && p.entries.length) ? '<div style="margin-top:4px">'+p.entries.map(entryRow).join('')+'</div>' : '') +
+          ((p.pendingEntries && p.pendingEntries.length) ? '<div style="margin-top:4px">'+p.pendingEntries.map(pendingRow).join('')+'</div>' : '') +
+          ((!p.entries || !p.entries.length) && (!p.pendingEntries || !p.pendingEntries.length) ? '<div class="pair-row" style="font-size:9px;opacity:.6">No entries yet this window</div>' : '');
         const eqCurve = buildEquitySvg(p.equityCurve, 280, 34, null);
-        const hasPos = (p.entries || []).some(e => !e.closed);
+        const hasPos = (p.entries || []).some(e => !e.closed) || (p.pendingEntries || []).length > 0;
         return '<div class="pair-card '+(hasPos?'has-pos':'')+' '+(p.tradable?'':'untradable')+'">'+
           '<div class="pair-hdr"><div class="pair-sym">'+p.symbol+'</div><div class="pair-timer">'+(p.tradable?fmtSecs(p.secsToEnd):'loading…')+'</div></div>'+
           '<div class="pair-body">'+
