@@ -480,7 +480,7 @@ async function resolvePairWindow(p) {
     windowProfit = round2(windowProfit + profit);
     const icon = won ? '💰' : '💥';
     log(`${icon} ${p.symbol} RESOLUTION [LEG1] winner=${winnerSide ?? '?'} | held ${pos.side} ${pos.shares}sh | proceeds=$${proceeds.toFixed(2)} (no fee) | cost=$${pos.cost.toFixed(2)} | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
-    registerTrade(p, { side: 'SELL', outcome: winnerSide, reason: 'LEG1-RESOLUTION', price: won ? 1 : 0, shares: pos.shares, proceeds, profit });
+    registerTrade(p, { side: 'SELL', outcome: pos.side, winner: winnerSide, reason: 'LEG1-RESOLUTION', price: won ? 1 : 0, shares: pos.shares, proceeds, profit });
     p.position1 = null;
   }
   if (p.position2) {
@@ -493,7 +493,7 @@ async function resolvePairWindow(p) {
     windowProfit = round2(windowProfit + profit);
     const icon = won ? '💰' : '💥';
     log(`${icon} ${p.symbol} RESOLUTION [LEG2] winner=${winnerSide ?? '?'} | held ${pos.side} ${pos.shares}sh | proceeds=$${proceeds.toFixed(2)} (no fee) | cost=$${pos.cost.toFixed(2)} | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
-    registerTrade(p, { side: 'SELL', outcome: winnerSide, reason: 'LEG2-RESOLUTION', price: won ? 1 : 0, shares: pos.shares, proceeds, profit });
+    registerTrade(p, { side: 'SELL', outcome: pos.side, winner: winnerSide, reason: 'LEG2-RESOLUTION', price: won ? 1 : 0, shares: pos.shares, proceeds, profit });
     p.position2 = null;
   }
   if (hasAnyPosition) {
