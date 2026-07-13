@@ -12,7 +12,7 @@
  *  QUOTING — every 10 seconds, both sides, fully independent:
  *    Starting at t=10s and every QUOTE_INTERVAL_SECS (10s) after that, up
  *    until QUOTE_STOP_SECS (200s), the bot places ONE NEW resting limit buy
- *    on Up AND one on Down, each priced QUOTE_OFFSET (0.05) BELOW that
+ *    on Up AND one on Down, each priced QUOTE_OFFSET (0.01) BELOW that
  *    side's current ask at that exact moment. Previous unfilled orders are
  *    NOT cancelled or replaced — they're simply left resting, so over the
  *    200 seconds a genuine ladder builds up on each side, trailing wherever
@@ -82,7 +82,7 @@ function nowSec() { return Date.now() / 1000; }
 // ── Strategy parameters ──
 const QUOTE_INTERVAL_SECS = Number(process.env.QUOTE_INTERVAL_SECS || 10); // requote cadence, both sides
 const QUOTE_STOP_SECS     = Number(process.env.QUOTE_STOP_SECS || 200);   // stop placing NEW quotes after this
-const QUOTE_OFFSET        = Number(process.env.QUOTE_OFFSET || 0.05);     // below current ask
+const QUOTE_OFFSET        = Number(process.env.QUOTE_OFFSET || 0.01);     // below current ask
 const SHARES_TIER_HIGH    = Number(process.env.SHARES_TIER_HIGH || 20);
 const SHARES_TIER_LOW     = Number(process.env.SHARES_TIER_LOW || 10);
 const SIZE_FLIP_SECS      = Number(process.env.SIZE_FLIP_SECS || 100); // when the price/size tiering inverts
