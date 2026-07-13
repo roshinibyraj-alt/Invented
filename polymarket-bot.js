@@ -27,34 +27,52 @@
  *    2 or 3 decisive votes agreeing = a valid signal. A 1-1 split, all
  *    references within the margin, or missing data = no trade.
  *
- *  ENTRIES (two checkpoints per window):
- *    - Checkpoint 1, shortly after the window opens: if a signal is valid,
- *      open position 1 in that direction.
- *    - Checkpoint 2, mid-window: check the signal again. If checkpoint 1
- *      already holds a position and the signal still agrees, add position 2
- *      (pyramiding conviction). If the signal has flipped, position 2 is
- *      skipped rather than opening something that fights position 1. If
- *      checkpoint 1 had no signal, checkpoint 2 can still be the first
- *      (and only) entry.
+ *  ENTRIES — recovery/rebalance style, confined to the first 3 minutes:
+ *    The 5-minute window splits into an ACTIVE phase (0-180s, all trading
+ *    happens here) and a QUIET phase (180-300s, no new orders — whatever
+ *    position exists just rides to resolution).
+ *    Within the active phase, the signal is re-checked at REBALANCE_
+ *    CHECKPOINTS_SECS (default 15/50/85/120/155 — ~35s apart). At each
+ *    checkpoint:
+ *      - No position yet (or currently flat — see below) and a signal is
+ *        valid → open/re-establish a directional tilt on the favored side,
+ *        sized by signal strength (SHARES_BASE/STRONG).
+ *      - Already tilted toward the favored side → hold, no action.
+ *      - Signal has FULLY FLIPPED relative to the currently larger side →
+ *        REBALANCE: buy just enough of the new favored side to bring share
+ *        counts back to equal (fully neutralize — since Up+Down are
+ *        complements, equal shares on both sides means the payout is
+ *        identical no matter which one wins, i.e. zero directional
+ *        exposure from that point). This is done with a BUY on the
+ *        complementary side, never a sell — so exits/hedges never need
+ *        their own resting sell order.
+ *    "Flat" (equal shares, including zero/zero) is treated the same as "no
+ *    position yet": the next checkpoint that finds a valid signal will open
+ *    a fresh tilt again. This means a full flip followed by the same new
+ *    signal persisting doesn't overshoot — it takes two checkpoints
+ *    (neutralize, then re-tilt) rather than one big compound move.
  *
- *  EXECUTION — single-shot limit order, quoted above the ask (NEW):
- *    A checkpoint firing places exactly ONE limit buy, priced slightly
- *    ABOVE the current ask. That's deliberately marketable — it fills
- *    essentially immediately, same as crossing the spread would, but it's
+ *  EXECUTION — single-shot limit order, quoted above the ask:
+ *    Both the initial tilt and every rebalance hedge use the same order
+ *    type: one limit buy priced slightly ABOVE the current ask. That's
+ *    deliberately marketable — it fills essentially immediately, but is
  *    still submitted as a limit order (Polymarket doesn't have a distinct
- *    "market order" type). There is NO retry, NO cancel, NO re-quoting: the
- *    bot places the order and moves on. If it somehow doesn't fill,
- *    Polymarket expires it with the market on its own — nothing left
- *    dangling for the bot to manage. This replaces the earlier requote/
- *    escalate design, which turned out to rely on inferring fill state from
- *    the public price feed rather than the exchange's own order status —
- *    unsafe with real money, since a missed "did it fill?" check could lead
- *    to placing a second order on top of a first that had already filled.
- *    One order, one decision, per checkpoint — nothing to desynchronize.
+ *    "market order" type). There is NO retry, NO cancel, NO re-quoting.
+ *    This matters MORE here than in a single-entry design: rebalancing
+ *    depends on the bot's bookkeeping of exactly how many shares of each
+ *    side it holds being correct. A genuinely passive (uncertain-fill)
+ *    limit order would make that bookkeeping unreliable — the bot wouldn't
+ *    know whether a prior hedge actually went through before deciding the
+ *    next one, which is exactly the "inferring fill state" trap that caused
+ *    the duplicate-order problem in an earlier version. Reliability of the
+ *    bot's own position tracking takes priority over saving the fee here.
  *
- *  SIZING (scales with signal strength):
- *    - 2-of-3 agreement → base size (SHARES_BASE).
- *    - 3-of-3 agreement → larger size (SHARES_STRONG, ~2x base).
+ *  SIZING:
+ *    - Fresh tilt (flat → directional): SHARES_BASE (2-of-3) or
+ *      SHARES_STRONG (3-of-3), same as before.
+ *    - Rebalance hedge: NOT signal-strength-based — sized exactly to the
+ *      current imbalance (abs(sharesUp - sharesDown)), enough to reach
+ *      equal shares and nothing more.
  *
  *  EXIT: there is none, on the bot's side. No take-profit order, no stop-
  *    loss — redemption of winning positions is handled entirely by a
@@ -95,8 +113,11 @@ function round5(n) { return Math.round(n * 100000) / 100000; }
 function nowSec() { return Date.now() / 1000; }
 
 // ── Strategy parameters ──
-const CHECKPOINT_1_SECS = Number(process.env.CHECKPOINT_1_SECS || 15);  // seconds after window open
-const CHECKPOINT_2_SECS = Number(process.env.CHECKPOINT_2_SECS || 150); // seconds after window open (mid-window)
+// Recovery/rebalance design: all trading confined to the ACTIVE phase; the
+// rest of the window is QUIET (no new orders, existing position just rides).
+const ACTIVE_PHASE_SECS = Number(process.env.ACTIVE_PHASE_SECS || 180); // 3 of the 5 minutes
+const REBALANCE_CHECKPOINTS_SECS = (process.env.REBALANCE_CHECKPOINTS_SECS || '15,50,85,120,155')
+  .split(',').map(s => Number(s.trim())).filter(n => Number.isFinite(n)).sort((a, b) => a - b);
 const SHARES_BASE   = Number(process.env.SHARES_BASE || 6);    // fixed share count, 2-of-3 agreement — cost varies with price, not the other way round
 const SHARES_STRONG = Number(process.env.SHARES_STRONG || 12); // fixed share count, 3-of-3 agreement (~2x base, same ratio as before)
 const MIN_SHARES  = Number(process.env.MIN_SHARES || 1);
@@ -262,8 +283,10 @@ function freshPairState(symbol) {
     upTokenId: null, downTokenId: null,
     upAsk: null, upBid: null, downAsk: null, downBid: null,
     windowOpenPrice: null,       // BTC (or symbol) spot price recorded when this window loaded
-    checkpoint1Done: false, checkpoint2Done: false,
-    entries: [],                // up to 2 per window — see attemptEntry
+    rebalancesDone: 0,           // how many REBALANCE_CHECKPOINTS_SECS have fired this window
+    netShares: { Up: 0, Down: 0 },  // cumulative shares bought this window, per side
+    netCost: { Up: 0, Down: 0 },    // cumulative $ spent this window, per side
+    windowClosed: false,            // true once this window's position has been resolved (paid out)
     bankroll: perPairCapital,
     realizedPnl: 0,
     feesPaid: 0,
@@ -337,9 +360,10 @@ async function loadPairWindow(p) {
   p.tradable = true;
   p.resolvedThisWindow = false;
   p.windowOpenPrice = r.price;
-  p.checkpoint1Done = false;
-  p.checkpoint2Done = false;
-  p.entries = [];
+  p.rebalancesDone = 0;
+  p.netShares = { Up: 0, Down: 0 };
+  p.netCost = { Up: 0, Down: 0 };
+  p.windowClosed = false;
   log(`🔭 ${p.symbol} window loaded: ${slug} | open=${r.price ?? '?'} | ends ${new Date(p.windowEnd * 1000).toISOString().slice(11,19)}Z`);
 }
 
@@ -405,14 +429,11 @@ async function refreshPolyPrices() {
 // ─────────────────────────────────────────
 //  Equity tracking
 // ─────────────────────────────────────────
-function entryMarkValue(p, entry) {
-  if (entry.closed) return 0;
-  const bid = entry.side === 'Up' ? p.upBid : p.downBid;
-  return round2(entry.shares * (bid ?? entry.entryPrice));
-}
 function pairMarkValue(p) {
-  const held = p.entries.reduce((s, e) => s + entryMarkValue(p, e), 0);
-  return round2(p.bankroll + held);
+  if (p.windowClosed || (p.netShares.Up === 0 && p.netShares.Down === 0)) return round2(p.bankroll);
+  const upVal = round2(p.netShares.Up * (p.upBid ?? (p.netCost.Up && p.netShares.Up ? p.netCost.Up / p.netShares.Up : 0)));
+  const downVal = round2(p.netShares.Down * (p.downBid ?? (p.netCost.Down && p.netShares.Down ? p.netCost.Down / p.netShares.Down : 0)));
+  return round2(p.bankroll + upVal + downVal);
 }
 function pushGlobalEquity() {
   const total = round2(Object.values(pairs).reduce((s, p) => s + pairMarkValue(p), 0));
@@ -431,64 +452,67 @@ function registerTrade(p, entry) {
 }
 
 // ─────────────────────────────────────────
-//  Entries: checkpoint-driven, signal-based, single-shot above-ask quote
+//  Entries: recovery/rebalance style, confined to the active phase
 // ─────────────────────────────────────────
 
-// Places exactly one entry: quoted above the current ask so it's
-// deliberately marketable. No retry, no cancel, no fill verification — the
-// bot's job ends the moment the order is placed. Bookkeeping assumes the
-// fill happens at the quoted price, which is realistic since a marketable
-// order should match essentially immediately.
-async function attemptEntry(p, checkpointNum, signal) {
-  const tokenId = signal.side === 'Up' ? p.upTokenId : p.downTokenId;
-  const ask = signal.side === 'Up' ? p.upAsk : p.downAsk;
-  if (ask == null) { log(`⏭️  ${p.symbol} checkpoint${checkpointNum}: no ${signal.side} ask available, skipping`); return; }
+// Places one buy on the given side. Quoted above the current ask so it's
+// deliberately marketable — no retry, no cancel, no fill verification.
+// Bookkeeping assumes the fill happens at the quoted price. Used for both
+// fresh directional tilts and rebalance hedges — same mechanics either way.
+async function buySide(p, side, shares, reason) {
+  const tokenId = side === 'Up' ? p.upTokenId : p.downTokenId;
+  const ask = side === 'Up' ? p.upAsk : p.downAsk;
+  if (ask == null) { log(`⏭️  ${p.symbol} ${reason}: no ${side} ask available, skipping`); return; }
+  if (shares <= 0) return;
 
-  const shares = Math.max(sharesForSignal(signal), MIN_SHARES); // fixed share count — cost follows from price, not the reverse
   const quotePrice = round2(ask + QUOTE_BUFFER); // above the ask — deliberately marketable, single shot
   const notional = round2(quotePrice * shares);
-  const fee = takerFee(shares, quotePrice); // marketable order — pays the taker fee, no rebate attempt here
+  const fee = takerFee(shares, quotePrice);
   const totalCost = round2(notional + fee);
   if (totalCost > p.bankroll) {
-    log(`⏭️  ${p.symbol} checkpoint${checkpointNum}: skip entry — insufficient bankroll ($${p.bankroll.toFixed(2)} < $${totalCost.toFixed(2)})`);
+    log(`⏭️  ${p.symbol} ${reason}: skip — insufficient bankroll ($${p.bankroll.toFixed(2)} < $${totalCost.toFixed(2)})`);
     return;
   }
 
-  await placeEntryBuy(tokenId, quotePrice, shares); // fire and forget — Polymarket expires it with the market if it never fills
+  await placeEntryBuy(tokenId, quotePrice, shares); // fire and forget
   p.bankroll = round2(p.bankroll - totalCost);
   p.realizedPnl = round2(p.realizedPnl - fee);
   p.feesPaid = round2(p.feesPaid + fee);
-  const entry = {
-    checkpoint: checkpointNum, side: signal.side, entryPrice: quotePrice, shares, cost: totalCost,
-    votes: signal.votes, total: signal.total, spot: signal.spot, closed: false, openedAt: Date.now(),
-  };
-  p.entries.push(entry);
+  p.netShares[side] = round2(p.netShares[side] + shares);
+  p.netCost[side] = round2(p.netCost[side] + totalCost);
   recordEquity(p);
-  log(`🎯 ${p.symbol} checkpoint${checkpointNum} ${signal.side} entry ${shares.toFixed(2)}sh @ ${quotePrice.toFixed(2)} (ask=${ask.toFixed(2)}, signal ${signal.votes}/${signal.total}) | cost=$${totalCost.toFixed(2)} | fee=-$${fee.toFixed(4)} — no TP/SL, rides to resolution (external claim script handles redemption)`);
-  registerTrade(p, { side: 'BUY', outcome: signal.side, checkpoint: checkpointNum, price: quotePrice, shares, cost: totalCost, fee, votes: signal.votes, total: signal.total });
+  log(`🎯 ${p.symbol} ${reason}: bought ${side} ${shares.toFixed(2)}sh @ ${quotePrice.toFixed(2)} | cost=$${totalCost.toFixed(2)} | fee=-$${fee.toFixed(4)} | net now Up=${p.netShares.Up.toFixed(2)}sh/Down=${p.netShares.Down.toFixed(2)}sh`);
+  registerTrade(p, { side: 'BUY', outcome: side, reason, price: quotePrice, shares, cost: totalCost, fee });
 }
 
-async function maybeEnterAtCheckpoints(p) {
-  const elapsed = nowSec() - p.windowStart;
+// One rebalance checkpoint: compare the currently larger side to the fresh
+// signal and act accordingly. "Flat" (equal shares, including 0/0) is
+// treated the same as "no position" — the next valid signal opens a fresh
+// tilt. A full flip only ever neutralizes back to flat; re-establishing a
+// new directional tilt happens on the FOLLOWING checkpoint if the flipped
+// signal still holds, so a flip-and-continue takes two steps, not one.
+async function runRebalanceCheck(p) {
+  const signal = computeSignal(p.symbol, p.windowOpenPrice);
+  if (!signal) { log(`${p.symbol} rebalance check: no majority signal, holding as-is`); return; }
 
-  if (!p.checkpoint1Done && elapsed >= CHECKPOINT_1_SECS) {
-    p.checkpoint1Done = true;
-    const signal = computeSignal(p.symbol, p.windowOpenPrice);
-    if (signal) await attemptEntry(p, 1, signal);
-    else log(`${p.symbol} checkpoint1: no majority signal, skipping`);
+  const upShares = p.netShares.Up, downShares = p.netShares.Down;
+  const currentSide = upShares === downShares ? null : (upShares > downShares ? 'Up' : 'Down');
+
+  if (currentSide === null) {
+    await buySide(p, signal.side, Math.max(sharesForSignal(signal), MIN_SHARES), 'tilt (flat → directional)');
+  } else if (currentSide === signal.side) {
+    log(`${p.symbol} rebalance check: already tilted ${currentSide}, signal agrees — holding`);
+  } else {
+    const hedgeShares = round2(Math.abs(upShares - downShares));
+    await buySide(p, signal.side, hedgeShares, `rebalance (flip ${currentSide}→${signal.side}, neutralizing)`);
   }
+}
 
-  if (!p.checkpoint2Done && elapsed >= CHECKPOINT_2_SECS) {
-    p.checkpoint2Done = true;
-    const signal = computeSignal(p.symbol, p.windowOpenPrice);
-    const existing = p.entries.find(e => e.checkpoint === 1);
-    if (!signal) {
-      log(`${p.symbol} checkpoint2: no majority signal, skipping`);
-    } else if (existing && existing.side !== signal.side) {
-      log(`${p.symbol} checkpoint2: signal flipped to ${signal.side} (holding ${existing.side} from checkpoint1) — skipping to avoid conflicting positions`);
-    } else {
-      await attemptEntry(p, 2, signal);
-    }
+async function maybeRebalance(p) {
+  const elapsed = nowSec() - p.windowStart;
+  while (p.rebalancesDone < REBALANCE_CHECKPOINTS_SECS.length && elapsed >= REBALANCE_CHECKPOINTS_SECS[p.rebalancesDone]) {
+    await runRebalanceCheck(p);
+    p.rebalancesDone++;
   }
 }
 
@@ -516,23 +540,23 @@ async function resolvePairWindow(p) {
   if (p.resolvedThisWindow) return;
   p.resolvedThisWindow = true;
 
-  const hasOpenEntry = p.entries.some(e => !e.closed);
+  const hasPosition = p.netShares.Up > 0 || p.netShares.Down > 0;
   let winner = null;
-  if (hasOpenEntry) winner = await determineWinningSide(p);
+  if (hasPosition) winner = await determineWinningSide(p);
 
-  for (const entry of p.entries) {
-    if (entry.closed) continue;
-    const won = winner === entry.side;
-    const proceeds = won ? round2(entry.shares * 1) : 0;
-    const profit = round2(proceeds - entry.cost);
+  if (hasPosition) {
+    const winShares = winner === 'Up' ? p.netShares.Up : (winner === 'Down' ? p.netShares.Down : 0);
+    const proceeds = round2(winShares * 1);
+    const totalCost = round2(p.netCost.Up + p.netCost.Down);
+    const profit = round2(proceeds - totalCost);
     p.bankroll = round2(p.bankroll + proceeds);
     p.realizedPnl = round2(p.realizedPnl + profit);
-    if (won) p.wins++; else p.losses++;
-    entry.closed = true;
-    const icon = won ? '💰' : '💥';
-    log(`${icon} ${p.symbol} checkpoint${entry.checkpoint} ${entry.side} RESOLUTION ${entry.shares}sh entry=${entry.entryPrice.toFixed(2)} exit=$${won ? '1.00' : '0.00'}/sh | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)} (dashboard bookkeeping only — real redemption is via the separate claim script)`);
-    registerTrade(p, { side: 'SELL', outcome: entry.side, checkpoint: entry.checkpoint, reason: 'RESOLUTION', price: won ? 1 : 0, shares: entry.shares, profit });
+    if (profit > 0) p.wins++; else p.losses++;
+    const icon = profit > 0 ? '💰' : '💥';
+    log(`${icon} ${p.symbol} RESOLUTION winner=${winner ?? '?'} | held Up=${p.netShares.Up.toFixed(2)}sh/Down=${p.netShares.Down.toFixed(2)}sh | proceeds=$${proceeds.toFixed(2)} | totalCost=$${totalCost.toFixed(2)} | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)} (dashboard bookkeeping only — real redemption is via the separate claim script)`);
+    registerTrade(p, { side: 'SELL', outcome: winner, reason: 'RESOLUTION', upShares: p.netShares.Up, downShares: p.netShares.Down, proceeds, profit });
   }
+  p.windowClosed = true;
   recordEquity(p);
 }
 
@@ -554,7 +578,9 @@ async function processPair(p) {
   if (p.resolvedThisWindow) return;
 
   await refreshCryptoRef(p.symbol);
-  await maybeEnterAtCheckpoints(p);
+  if (elapsed < ACTIVE_PHASE_SECS) {
+    await maybeRebalance(p);
+  }
 }
 
 // ─────────────────────────────────────────
@@ -562,21 +588,20 @@ async function processPair(p) {
 // ─────────────────────────────────────────
 function buildState() {
   const pairStates = Object.values(pairs).map(p => {
-    const unrealized = round2(p.entries.reduce((s, e) => s + (entryMarkValue(p, e) - (e.closed ? 0 : e.cost)), 0));
     const markValue = pairMarkValue(p);
+    const totalCost = round2(p.netCost.Up + p.netCost.Down);
+    const heldValue = round2(markValue - p.bankroll);
+    const unrealized = round2(heldValue - totalCost);
     const r = ensureRefs(p.symbol);
     return {
       symbol: p.symbol, tradable: p.tradable, slug: p.slug, windowEnd: p.windowEnd,
       secsToEnd: p.windowEnd ? Math.max(0, Math.floor(p.windowEnd - nowSec())) : null,
       upAsk: p.upAsk, upBid: p.upBid, downAsk: p.downAsk, downBid: p.downBid,
       windowOpenPrice: p.windowOpenPrice, spotPrice: r.price, close15: r.close15, close1h: r.close1h,
-      checkpoint1Done: p.checkpoint1Done, checkpoint2Done: p.checkpoint2Done,
+      rebalancesDone: p.rebalancesDone, rebalancesTotal: REBALANCE_CHECKPOINTS_SECS.length,
       bankroll: p.bankroll, realizedPnl: p.realizedPnl, unrealizedPnl: unrealized, markValue,
       feesPaid: p.feesPaid, rebatesEarned: p.rebatesEarned, wins: p.wins, losses: p.losses,
-      entries: p.entries.map(e => ({
-        checkpoint: e.checkpoint, side: e.side, entryPrice: e.entryPrice, shares: e.shares,
-        cost: e.cost, votes: e.votes, total: e.total, closed: e.closed,
-      })),
+      netShares: p.netShares, netCost: p.netCost,
       equityCurve: p.equityCurve,
     };
   });
@@ -596,7 +621,7 @@ function buildState() {
     winRate: (totalWins + totalLosses) > 0 ? round2((totalWins / (totalWins + totalLosses)) * 100) : null,
     uptime: Math.floor((Date.now() - startTime) / 1000),
     config: {
-      checkpoint1Secs: CHECKPOINT_1_SECS, checkpoint2Secs: CHECKPOINT_2_SECS,
+      activePhaseSecs: ACTIVE_PHASE_SECS, rebalanceCheckpointsSecs: REBALANCE_CHECKPOINTS_SECS,
       sharesBase: SHARES_BASE, sharesStrong: SHARES_STRONG, quoteBuffer: QUOTE_BUFFER,
       signalMarginBps: SIGNAL_MARGIN_BPS, confirmWindowMs: CONFIRM_WINDOW_MS,
       cryptoTakerFeeRate: CRYPTO_TAKER_FEE_RATE, cryptoMakerRebateShare: CRYPTO_MAKER_REBATE_SHARE,
@@ -647,11 +672,11 @@ function setMode(wantLive) {
 async function init(privateKey, emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
-  log(`🚀 BTC Price-Action Signal Bot (majority vote: window-open / 15m close / 1h close)`);
+  log(`🚀 BTC Price-Action Signal Bot — recovery/rebalance style (majority vote: window-open / 15m close / 1h close)`);
   log(`⚙️  $${TOTAL_CAPITAL} demo capital across ${pairList.length} pairs (${pairList.join(', ')}) → $${perPairCapital.toFixed(2)}/pair`);
-  log(`⚙️  checkpoints: +${CHECKPOINT_1_SECS}s and +${CHECKPOINT_2_SECS}s into each window | size ${SHARES_BASE}sh (2-of-3) / ${SHARES_STRONG}sh (3-of-3) | no TP/SL — rides to resolution, external claim script handles redemption`);
+  log(`⚙️  active phase 0-${ACTIVE_PHASE_SECS}s, rebalance checkpoints at +${REBALANCE_CHECKPOINTS_SECS.join('s/+')}s | tilt size ${SHARES_BASE}sh (2-of-3) / ${SHARES_STRONG}sh (3-of-3) | flip → fully neutralize via buying the complement | no TP/SL — rides to resolution, external claim script handles redemption`);
   log(`⚙️  signal quality: ${SIGNAL_MARGIN_BPS}bps minimum margin per reference | spot averaged over trailing ${(CONFIRM_WINDOW_MS/1000).toFixed(0)}s instead of a single tick`);
-  log(`⚙️  execution: single-shot limit buy quoted ${QUOTE_BUFFER} above the ask (deliberately marketable) | no retry, no cancel, no fill verification`);
+  log(`⚙️  execution: single-shot limit buy quoted ${QUOTE_BUFFER} above the ask (deliberately marketable) | no retry, no cancel — reliable fill bookkeeping matters here since rebalancing depends on knowing exact current holdings`);
   log(`⚙️  fees: entries pay the taker fee (marketable by design); no rebate is attempted`);
   log(`${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price/candle data' : '🔴 LIVE MODE — real money'}`);
 
