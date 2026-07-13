@@ -19,12 +19,6 @@ app.get('/api/status', (_, res) => {
   try { res.json(bot.getStatus()); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
-app.post('/api/set-pairs', (req, res) => {
-  const { pairs } = req.body || {};
-  if (!Array.isArray(pairs) || !pairs.length) return res.status(400).json({ ok: false, error: 'Missing pairs array, e.g. ["BTC","ETH","SOL"]' });
-  try { res.json(bot.setPairs(pairs)); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
-});
-
 app.post('/api/pause', (_, res) => {
   try { res.json(bot.pauseTrading()); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
@@ -45,7 +39,7 @@ app.get('/', (_, res) => {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>⏱️ 5m Crypto Up/Down Bot — BTC Price-Action Signal</title>
+<title>🎯 BTC 0.96 Breakout + Recovery Bot</title>
 <style>
   :root {
     --bg: #ffffff; --bg2: #f5f7fa; --bg3: #edf0f4; --border: #d0d7e2;
@@ -60,9 +54,10 @@ app.get('/', (_, res) => {
   .mode-badge { padding: 4px 14px; border-radius: 20px; font-size: 11px; font-weight: bold; }
   .mode-dry { background: #ffd74022; color: var(--yellow); border: 1px solid var(--yellow); }
   .mode-live { background: #ff475722; color: var(--red); border: 1px solid var(--red); animation: pulse 2s infinite; }
+  .mode-recovery { background: #7c3aed22; color: var(--purple); border: 1px solid var(--purple); }
+  .mode-base { background: #00a85422; color: var(--green); border: 1px solid var(--green); }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
   .toolbar { display: flex; gap: 8px; padding: 14px 20px 0; flex-wrap: wrap; align-items: center; }
-  .toolbar input { flex: 1; min-width: 220px; background: var(--bg2); border: 1px solid var(--border); color: var(--text); padding: 10px 14px; border-radius: 8px; font-family: inherit; font-size: 12px; }
   .toolbar button { background: var(--cyan); color: #001018; border: none; padding: 10px 16px; border-radius: 8px; font-weight: bold; cursor: pointer; font-family: inherit; font-size: 12px; }
   .toolbar button.pause { background: var(--yellow); }
   .toolbar button.resume { background: var(--green); color: #fff; }
@@ -80,20 +75,36 @@ app.get('/', (_, res) => {
   .section { padding: 0 20px 16px; }
   .section-hdr { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 2px; padding: 8px 0; display: flex; align-items: center; gap: 8px; }
   .section-hdr::after { content:''; flex:1; height:1px; background: var(--border); }
-  .pair-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 10px; }
-  .pair-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
-  .pair-card.has-pos { border-color: var(--cyan); box-shadow: 0 0 0 1px #00d4ff22; }
-  .pair-card.untradable { opacity: .55; }
-  .pair-hdr { background: #0d1d30; padding: 8px 12px; display: flex; justify-content: space-between; align-items: center; }
-  .pair-sym { font-size: 13px; font-weight: bold; color: #ddd; }
-  .pair-timer { font-size: 10px; color: var(--cyan); }
-  .pair-body { padding: 8px 12px; }
-  .pair-row { display: flex; justify-content: space-between; margin-bottom: 4px; font-size: 10px; }
-  .pair-key { color: var(--muted); }
+
+  .market-panel { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; margin: 0 20px 16px; }
+  .market-hdr { background: #0d1d30; padding: 10px 16px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
+  .market-sym { font-size: 16px; font-weight: bold; color: #ddd; }
+  .phase-badge { padding: 3px 12px; border-radius: 14px; font-size: 10px; text-transform: uppercase; letter-spacing: 1px; }
+  .phase-waiting { background: #7a8fa822; color: #aab8c9; border: 1px solid #7a8fa8; }
+  .phase-watching { background: #e6a80022; color: var(--yellow); border: 1px solid var(--yellow); animation: pulse 1.5s infinite; }
+  .phase-holding { background: #0099cc22; color: var(--cyan); border: 1px solid var(--cyan); }
+  .phase-closed { background: #4a608022; color: #8aa0bb; border: 1px solid #4a6080; }
+  .market-timer { font-size: 11px; color: var(--cyan); }
+  .market-body { padding: 14px 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 700px) { .market-body { grid-template-columns: 1fr; } }
+  .price-box { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+  .price-box-hdr { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
+  .price-row { display: flex; justify-content: space-between; margin-bottom: 4px; font-size: 11px; }
+  .price-key { color: var(--muted); }
   .side-up { color: var(--green); }
   .side-down { color: var(--red); }
-  .pos-box { margin-top: 6px; border-top: 1px solid var(--border); padding-top: 6px; font-size: 9px; }
-  .signal-box { margin-top: 6px; font-size: 9px; color: #8aa; }
+  .trigger-line { font-size: 9px; color: var(--gold); margin-top: 4px; }
+  .pos-box { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+  .pos-empty { color: var(--muted); font-size: 10px; text-align: center; padding: 10px 0; }
+  .pos-tag { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 9px; margin-left: 6px; }
+  .tag-base { background: #00a85422; color: var(--green); }
+  .tag-recovery { background: #7c3aed22; color: var(--purple); }
+  .sl-line { color: var(--red); font-size: 9px; margin-top: 4px; }
+
+  .recovery-panel { margin: 0 20px 16px; background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 16px; }
+  .recovery-panel.armed { border-color: var(--purple); box-shadow: 0 0 0 1px #7c3aed22; }
+  .recovery-row { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
+
   .bottom-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 0 20px 20px; }
   @media (max-width: 800px) { .bottom-grid { grid-template-columns: 1fr; } }
   .tbl-wrap { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; max-height: 320px; overflow-y: auto; }
@@ -108,21 +119,16 @@ app.get('/', (_, res) => {
   .equity-hdr .title { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; }
   .equity-hdr .val { font-size: 13px; }
   .equity-svg { width: 100%; height: 90px; display: block; }
-  .spark-box { margin-top: 6px; }
-  .spark-box svg { width: 100%; height: 34px; display: block; }
-  .spark-label { font-size: 8px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-top: 4px; }
 </style>
 </head>
 <body>
   <div class="header">
-    <div class="logo">⏱️ <span>5M</span> UP/DOWN BOT</div>
-    <div id="mode-badge" class="mode-badge ${bot.getStatus().dryRun ? 'mode-dry' : 'mode-live'}">${bot.getStatus().dryRun ? 'DEMO' : '🔴 LIVE'}</div>
-    <div id="experiment-badge" class="mode-badge mode-dry">BTC SIGNAL (2-of-3 majority)</div>
+    <div class="logo">🎯 <span>BTC</span> 0.96 BREAKOUT BOT</div>
+    <div id="mode-badge" class="mode-badge ${DRY_RUN ? 'mode-dry' : 'mode-live'}">${DRY_RUN ? 'DEMO' : '🔴 LIVE'}</div>
+    <div id="recovery-badge" class="mode-badge mode-base">BASE</div>
   </div>
 
   <div class="toolbar">
-    <input id="pairs-input" placeholder="BTC,ETH,SOL,XRP,DOGE" />
-    <button id="set-pairs-btn">Set Pairs</button>
     <button id="pause-btn" class="pause">Pause</button>
     <button id="resume-btn" class="resume">Resume</button>
     <button id="mode-toggle-btn" class="live-toggle">Switch to LIVE</button>
@@ -130,43 +136,40 @@ app.get('/', (_, res) => {
   <div id="toolbar-status" class="toolbar-status"></div>
 
   <div class="stats-row">
-    <div class="stat"><div class="stat-label">Total Mark Value</div><div class="stat-val" id="total-mark">$0.00</div></div>
+    <div class="stat"><div class="stat-label">Mark Value</div><div class="stat-val" id="total-mark">$0.00</div></div>
     <div class="stat"><div class="stat-label">Total P&amp;L</div><div class="stat-val" id="total-pnl">$0.00</div></div>
     <div class="stat"><div class="stat-label">Realized</div><div class="stat-val" id="realized-pnl">$0.00</div></div>
     <div class="stat"><div class="stat-label">Unrealized</div><div class="stat-val" id="unrealized-pnl">$0.00</div></div>
     <div class="stat"><div class="stat-label">Bankroll</div><div class="stat-val" id="total-bankroll">$0.00</div></div>
-    <div class="stat"><div class="stat-label">Fees Paid</div><div class="stat-val pnl-neg" id="total-fees">$0.00</div></div>
-    <div class="stat"><div class="stat-label">Rebates Earned</div><div class="stat-val pnl-pos" id="total-rebates">$0.00</div></div>
+    <div class="stat"><div class="stat-label">Fees Paid</div><div class="stat-val" id="total-fees">$0.00</div></div>
     <div class="stat"><div class="stat-label">Win Rate</div><div class="stat-val" id="win-rate">—</div><div class="stat-sub" id="win-loss-sub">0W / 0L</div></div>
+    <div class="stat"><div class="stat-label">Trading</div><div class="stat-val" id="trading-flag">ON</div></div>
     <div class="stat"><div class="stat-label">Uptime</div><div class="stat-val" id="uptime">0s</div></div>
-    <div class="stat"><div class="stat-label">Trading</div><div class="stat-val" id="trading-flag">—</div></div>
   </div>
 
   <div class="equity-wrap">
-    <div class="equity-hdr">
-      <div class="title">Portfolio Equity Curve</div>
-      <div class="val" id="equity-val">$2000.00</div>
-    </div>
-    <svg id="equity-chart" class="equity-svg" viewBox="0 0 600 90" preserveAspectRatio="none"></svg>
+    <div class="equity-hdr"><div class="title">Equity Curve</div><div class="val" id="equity-val">$0.00</div></div>
+    <div id="equity-chart"><svg class="equity-svg" viewBox="0 0 600 90" preserveAspectRatio="none"></svg></div>
   </div>
 
-  <div class="section">
-    <div class="section-hdr">Pairs</div>
-    <div class="pair-grid" id="pair-grid"><div class="empty">Loading…</div></div>
-  </div>
+  <div class="section"><div class="section-hdr">Market</div></div>
+  <div id="market-panel" class="market-panel"></div>
+
+  <div class="section"><div class="section-hdr">Recovery Status</div></div>
+  <div id="recovery-panel" class="recovery-panel"></div>
 
   <div class="bottom-grid">
     <div>
-      <div class="section-hdr">Trades</div>
+      <div class="section-hdr" style="padding:0 0 8px">Trades</div>
       <div class="tbl-wrap">
         <table class="tbl">
-          <thead><tr><th>Time</th><th>Pair</th><th>Side</th><th>Reason</th><th>Price</th><th>Shares</th><th>P&amp;L</th></tr></thead>
-          <tbody id="trade-body"><tr><td colspan="7" class="empty">No trades yet</td></tr></tbody>
+          <thead><tr><th>Time</th><th>Side</th><th>Reason</th><th>Price</th><th>Shares</th><th>P&amp;L</th></tr></thead>
+          <tbody id="trade-body"><tr><td colspan="6" class="empty">No trades yet</td></tr></tbody>
         </table>
       </div>
     </div>
     <div>
-      <div class="section-hdr">Logs</div>
+      <div class="section-hdr" style="padding:0 0 8px">Logs</div>
       <div class="logs-wrap" id="logs"></div>
     </div>
   </div>
@@ -174,68 +177,44 @@ app.get('/', (_, res) => {
 <script src="/socket.io/socket.io.js"></script>
 <script>
   const socket = io();
-  function sgn(n) { n = n || 0; return (n >= 0 ? '+$' : '-$') + Math.abs(n).toFixed(2); }
-  function pClass(n) { return (n || 0) >= 0 ? 'pnl-pos' : 'pnl-neg'; }
-  function fmt(s) { const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), ss = s%60; return (h?h+'h ':'')+(m?m+'m ':'')+ss+'s'; }
-  function fmtSecs(s) { if (s === null || s === undefined) return '—'; const m = Math.floor(s/60), ss = s%60; return m+'m '+String(ss).padStart(2,'0')+'s'; }
+  const statusEl = document.getElementById('toolbar-status');
+  const sgn = v => (v >= 0 ? '+$' : '-$') + Math.abs(v || 0).toFixed(2);
+  const pClass = v => (v >= 0 ? 'pnl-pos' : 'pnl-neg');
+  const fmt = s => { const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), sec = Math.floor(s%60); return (h?h+'h ':'')+(m?m+'m ':'')+sec+'s'; };
+  const fmtSecs = s => { const m = Math.floor(s/60), sec = s%60; return m+'m '+String(sec).padStart(2,'0')+'s'; };
 
-  // Build an SVG polyline + fill path from an equity curve [{t,equity}],
-  // normalized into a viewBox of width x height. Color reflects whether
-  // the curve ended up from where it started.
-  function buildEquitySvg(points, width, height, startVal) {
-    if (!points || points.length < 2) {
-      return '<line x1="0" y1="'+(height/2)+'" x2="'+width+'" y2="'+(height/2)+'" stroke="#3a4a60" stroke-width="1" stroke-dasharray="3,3"/>';
+  function buildEquitySvg(curve, w, h, capitalLine) {
+    if (!curve || curve.length < 2) return '';
+    const vals = curve.map(p => p.equity);
+    let min = Math.min(...vals), max = Math.max(...vals);
+    if (capitalLine != null) { min = Math.min(min, capitalLine); max = Math.max(max, capitalLine); }
+    const pad = (max - min) * 0.1 || 1;
+    min -= pad; max += pad;
+    const pts = curve.map((p, i) => {
+      const x = (i / (curve.length - 1)) * w;
+      const y = h - ((p.equity - min) / (max - min)) * h;
+      return x.toFixed(1) + ',' + y.toFixed(1);
+    }).join(' ');
+    const last = vals[vals.length - 1], first = vals[0];
+    const color = last >= first ? '#00a854' : '#e8304a';
+    let extra = '';
+    if (capitalLine != null) {
+      const y = h - ((capitalLine - min) / (max - min)) * h;
+      extra = '<line x1="0" y1="'+y.toFixed(1)+'" x2="'+w+'" y2="'+y.toFixed(1)+'" stroke="#7a8fa8" stroke-width="1" stroke-dasharray="3,3" />';
     }
-    const vals = points.map(p => p.equity);
-    let min = Math.min(...vals, startVal != null ? startVal : vals[0]);
-    let max = Math.max(...vals, startVal != null ? startVal : vals[0]);
-    if (max - min < 0.01) { max += 1; min -= 1; }
-    const n = points.length;
-    const coords = points.map((p, i) => {
-      const x = (i / (n - 1)) * width;
-      const y = height - ((p.equity - min) / (max - min)) * height;
-      return [x, y];
-    });
-    const up = vals[vals.length - 1] >= vals[0];
-    const color = up ? '#00c853' : '#ff4757';
-    const linePath = 'M' + coords.map(c => c[0].toFixed(1)+','+c[1].toFixed(1)).join(' L');
-    const fillPath = linePath + ' L' + width + ',' + height + ' L0,' + height + ' Z';
-    let baseline = '';
-    if (startVal != null) {
-      const by = height - ((startVal - min) / (max - min)) * height;
-      baseline = '<line x1="0" y1="'+by.toFixed(1)+'" x2="'+width+'" y2="'+by.toFixed(1)+'" stroke="#5a6b80" stroke-width="1" stroke-dasharray="2,3"/>';
-    }
-    return baseline +
-      '<path d="'+fillPath+'" fill="'+color+'22" stroke="none"/>' +
-      '<path d="'+linePath+'" fill="none" stroke="'+color+'" stroke-width="1.6"/>';
+    return extra + '<polyline points="'+pts+'" fill="none" stroke="'+color+'" stroke-width="2" />';
   }
 
-  document.getElementById('set-pairs-btn').addEventListener('click', async () => {
-    const raw = document.getElementById('pairs-input').value.trim();
-    if (!raw) return;
-    const pairs = raw.split(',').map(s => s.trim()).filter(Boolean);
-    const statusEl = document.getElementById('toolbar-status');
-    statusEl.textContent = 'Updating pairs…';
-    try {
-      const r = await fetch('/api/set-pairs', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ pairs }) });
-      const d = await r.json();
-      statusEl.textContent = d.ok ? ('✅ Now tracking: ' + d.pairs.join(', ') + ' ($'+d.perPairCapital.toFixed(2)+'/pair)') : ('❌ ' + (d.error||'failed'));
-    } catch (e) { statusEl.textContent = '❌ ' + e.message; }
-  });
   document.getElementById('pause-btn').addEventListener('click', async () => {
-    await fetch('/api/pause', { method: 'POST' });
+    try { const r = await fetch('/api/pause', { method: 'POST' }); const d = await r.json(); statusEl.textContent = d.ok ? '⏸️ Paused' : '❌ ' + (d.error||'failed'); } catch (e) { statusEl.textContent = '❌ ' + e.message; }
   });
   document.getElementById('resume-btn').addEventListener('click', async () => {
-    await fetch('/api/resume', { method: 'POST' });
+    try { const r = await fetch('/api/resume', { method: 'POST' }); const d = await r.json(); statusEl.textContent = d.ok ? '▶️ Resumed' : '❌ ' + (d.error||'failed'); } catch (e) { statusEl.textContent = '❌ ' + e.message; }
   });
   document.getElementById('mode-toggle-btn').addEventListener('click', async () => {
     const btn = document.getElementById('mode-toggle-btn');
     const goingLive = btn.textContent.includes('LIVE');
-    const msg = goingLive
-      ? 'Switch to LIVE trading? This places real orders with real money.'
-      : 'Switch back to DEMO mode? New orders will be simulated again.';
-    if (!confirm(msg)) return;
-    const statusEl = document.getElementById('toolbar-status');
+    if (goingLive && !confirm('Switch to LIVE mode? This will place real orders with real money.')) return;
     try {
       const r = await fetch('/api/set-mode', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ live: goingLive }) });
       const d = await r.json();
@@ -251,6 +230,15 @@ app.get('/', (_, res) => {
     toggleBtn.textContent = s.dryRun ? 'Switch to LIVE' : 'Switch to DEMO';
     toggleBtn.className = 'live-toggle' + (s.dryRun ? '' : ' is-live');
 
+    const recBadge = document.getElementById('recovery-badge');
+    if (s.recovery && s.recovery.armed) {
+      recBadge.className = 'mode-badge mode-recovery';
+      recBadge.textContent = 'RECOVERY ARMED (' + s.recovery.targetShares + 'sh)';
+    } else {
+      recBadge.className = 'mode-badge mode-base';
+      recBadge.textContent = 'BASE';
+    }
+
     document.getElementById('total-mark').textContent = '$'+(s.totalMarkValue||0).toFixed(2);
     const pnlEl = document.getElementById('total-pnl');
     pnlEl.textContent = sgn(s.totalPnl); pnlEl.className = 'stat-val ' + pClass(s.totalPnl);
@@ -260,7 +248,6 @@ app.get('/', (_, res) => {
     unrelEl.textContent = sgn(s.totalUnrealizedPnl); unrelEl.className = 'stat-val ' + pClass(s.totalUnrealizedPnl);
     document.getElementById('total-bankroll').textContent = '$'+(s.totalBankroll||0).toFixed(2);
     document.getElementById('total-fees').textContent = '$'+(s.totalFeesPaid||0).toFixed(4);
-    document.getElementById('total-rebates').textContent = '$'+(s.totalRebatesEarned||0).toFixed(4);
     document.getElementById('win-rate').textContent = (s.winRate!==null && s.winRate!==undefined) ? s.winRate+'%' : '—';
     document.getElementById('win-loss-sub').textContent = (s.totalWins||0)+'W / '+(s.totalLosses||0)+'L';
     document.getElementById('uptime').textContent = fmt(s.uptime||0);
@@ -271,43 +258,49 @@ app.get('/', (_, res) => {
     const eqVal = document.getElementById('equity-val');
     eqVal.textContent = '$'+(s.totalMarkValue||0).toFixed(2);
     eqVal.className = 'val ' + pClass(s.totalPnl);
-    document.getElementById('equity-chart').innerHTML = buildEquitySvg(s.totalEquityCurve, 600, 90, s.totalCapital);
+    document.getElementById('equity-chart').innerHTML = '<svg class="equity-svg" viewBox="0 0 600 90" preserveAspectRatio="none">'+buildEquitySvg(s.totalEquityCurve, 600, 90, s.totalCapital)+'</svg>';
 
-    const grid = document.getElementById('pair-grid');
-    if (!s.pairStates || s.pairStates.length === 0) {
-      grid.innerHTML = '<div class="empty">No pairs configured</div>';
+    const p = s.pairState;
+    const marketPanel = document.getElementById('market-panel');
+    if (!p) {
+      marketPanel.innerHTML = '<div class="empty">Loading market…</div>';
     } else {
-      grid.innerHTML = s.pairStates.map(p => {
-        const refRow = (label, val) => '<div class="pair-row" style="font-size:9px"><span class="pair-key">'+label+'</span><span>'+(val!=null?val:'—')+'</span></div>';
-        const refsHtml =
-          '<div style="margin-top:4px">'+
-            refRow('Spot', p.spotPrice!=null?p.spotPrice.toFixed(2):null) +
-            refRow('Window open', p.windowOpenPrice!=null?p.windowOpenPrice.toFixed(2):null) +
-            refRow('15m close', p.close15!=null?p.close15.toFixed(2):null) +
-            refRow('1h close', p.close1h!=null?p.close1h.toFixed(2):null) +
-            refRow('Rebalance checks', p.rebalancesDone+' / '+p.rebalancesTotal) +
-          '</div>';
-        const netHtml =
-          '<div style="margin-top:4px">'+
-            '<div class="pair-row" style="font-size:9px"><span class="pair-key side-up">Up held</span><span>'+p.netShares.Up.toFixed(2)+'sh (cost $'+p.netCost.Up.toFixed(2)+')</span></div>'+
-            '<div class="pair-row" style="font-size:9px"><span class="pair-key side-down">Down held</span><span>'+p.netShares.Down.toFixed(2)+'sh (cost $'+p.netCost.Down.toFixed(2)+')</span></div>'+
-            '<div class="pair-row" style="font-size:9px;opacity:.7"><span class="pair-key">Stance</span><span>'+(p.netShares.Up===p.netShares.Down?'flat':(p.netShares.Up>p.netShares.Down?'net Up':'net Down'))+' — rides to resolution</span></div>'+
-          '</div>';
-        const eqCurve = buildEquitySvg(p.equityCurve, 280, 34, null);
-        const hasPos = p.netShares.Up > 0 || p.netShares.Down > 0;
-        return '<div class="pair-card '+(hasPos?'has-pos':'')+' '+(p.tradable?'':'untradable')+'">'+
-          '<div class="pair-hdr"><div class="pair-sym">'+p.symbol+'</div><div class="pair-timer">'+(p.tradable?fmtSecs(p.secsToEnd):'loading…')+'</div></div>'+
-          '<div class="pair-body">'+
-            '<div class="pair-row"><span class="pair-key">Up ask/bid</span><span>'+(p.upAsk?.toFixed(2)||'—')+' / '+(p.upBid?.toFixed(2)||'—')+'</span></div>'+
-            '<div class="pair-row"><span class="pair-key">Down ask/bid</span><span>'+(p.downAsk?.toFixed(2)||'—')+' / '+(p.downBid?.toFixed(2)||'—')+'</span></div>'+
-            '<div class="pair-row"><span class="pair-key">Bankroll</span><span>$'+p.bankroll.toFixed(2)+'</span><span class="pair-key">W/L</span><span>'+p.wins+'/'+p.losses+'</span></div>'+
-            '<div class="pair-row"><span class="pair-key">Realized</span><span class="'+pClass(p.realizedPnl)+'">'+sgn(p.realizedPnl)+'</span><span class="pair-key">Unrealized</span><span class="'+pClass(p.unrealizedPnl)+'">'+sgn(p.unrealizedPnl)+'</span></div>'+
-            '<div class="pair-row"><span class="pair-key">Fees paid</span><span class="pnl-neg">-$'+(p.feesPaid||0).toFixed(4)+'</span><span class="pair-key">Rebates</span><span class="pnl-pos">+$'+(p.rebatesEarned||0).toFixed(4)+'</span></div>'+
-            refsHtml +
-            netHtml +
-            '<div class="spark-box"><svg viewBox="0 0 280 34" preserveAspectRatio="none">'+eqCurve+'</svg><div class="spark-label">Equity curve ($'+p.markValue.toFixed(2)+')</div></div>'+
-          '</div></div>';
-      }).join('');
+      const phaseLabel = { waiting: 'WAITING (' + (p.secsToWatch!=null ? fmtSecs(p.secsToWatch) + ' to watch phase' : '…') + ')', watching: 'WATCHING for 0.96', holding: 'HOLDING position', closed: 'WINDOW CLOSED' }[p.phase] || p.phase;
+      const posHtml = p.position
+        ? '<div class="pos-box">'+
+            '<div class="price-box-hdr">Open Position <span class="pos-tag '+(p.position.mode==='recovery'?'tag-recovery':'tag-base')+'">'+p.position.mode.toUpperCase()+'</span></div>'+
+            '<div class="price-row"><span class="price-key">Side</span><span class="'+(p.position.side==='Up'?'side-up':'side-down')+'">'+p.position.side+'</span></div>'+
+            '<div class="price-row"><span class="price-key">Shares</span><span>'+p.position.shares+'sh @ '+p.position.entryPrice.toFixed(2)+'</span></div>'+
+            '<div class="price-row"><span class="price-key">Cost</span><span>$'+p.position.cost.toFixed(2)+'</span></div>'+
+            '<div class="sl-line">Stop-loss armed at '+(s.config?s.config.slPrice.toFixed(2):'0.50')+'</div>'+
+          '</div>'
+        : '<div class="pos-box"><div class="pos-empty">No open position'+(p.phase==='watching'?' — watching for either side to hit '+(s.config?s.config.entryPrice.toFixed(2):'0.96'):'')+'</div></div>';
+      marketPanel.innerHTML =
+        '<div class="market-hdr">'+
+          '<div class="market-sym">'+p.symbol+'</div>'+
+          '<div class="phase-badge phase-'+p.phase+'">'+phaseLabel+'</div>'+
+          '<div class="market-timer">'+(p.tradable?fmtSecs(p.secsToEnd):'loading…')+' left in window</div>'+
+        '</div>'+
+        '<div class="market-body">'+
+          '<div class="price-box">'+
+            '<div class="price-box-hdr">Live Prices</div>'+
+            '<div class="price-row"><span class="price-key side-up">Up ask/bid</span><span>'+(p.upAsk?.toFixed(2)||'—')+' / '+(p.upBid?.toFixed(2)||'—')+'</span></div>'+
+            '<div class="price-row"><span class="price-key side-down">Down ask/bid</span><span>'+(p.downAsk?.toFixed(2)||'—')+' / '+(p.downBid?.toFixed(2)||'—')+'</span></div>'+
+            '<div class="trigger-line">Entry trigger: either ask ≥ '+(s.config?s.config.entryPrice.toFixed(2):'0.96')+'</div>'+
+          '</div>'+
+          posHtml+
+        '</div>';
+    }
+
+    const recPanel = document.getElementById('recovery-panel');
+    recPanel.className = 'recovery-panel' + (s.recovery && s.recovery.armed ? ' armed' : '');
+    if (s.recovery && s.recovery.armed) {
+      recPanel.innerHTML = '<div class="recovery-row">'+
+        '<div>🔁 Recovery armed for next entry — <b>'+s.recovery.targetShares+' shares</b> @ '+(s.config?s.config.entryPrice.toFixed(2):'0.96')+'</div>'+
+        '<div>Covering loss of <span class="pnl-neg">$'+s.recovery.lossToCover.toFixed(2)+'</span> + $'+s.recovery.extraProfit.toFixed(2)+' target profit</div>'+
+      '</div>';
+    } else {
+      recPanel.innerHTML = '<div class="recovery-row"><div>No recovery armed — next entry uses base size ('+(s.config?s.config.baseShares:6)+' shares)</div></div>';
     }
 
     const tb = document.getElementById('trade-body');
@@ -315,16 +308,16 @@ app.get('/', (_, res) => {
       tb.innerHTML = s.trades.map(t => {
         const pnlStr = (t.profit !== undefined) ? sgn(t.profit) : '—';
         const pnlCls = (t.profit !== undefined) ? pClass(t.profit) : '';
-        const sideColor = t.side === 'BUY' ? '#ffd740' : (t.reason === 'SL' ? '#ff4757' : (t.reason==='TP'?'#00e676':'#00d4ff'));
-        return '<tr><td>'+t.time+'</td><td>'+t.symbol+'</td>'+
+        const sideColor = t.side === 'BUY' ? '#ffd740' : (t.reason === 'SL' ? '#ff4757' : (t.reason==='RESOLUTION'?'#00e676':'#00d4ff'));
+        return '<tr><td>'+t.time+'</td>'+
           '<td style="color:'+sideColor+'">'+t.side+(t.outcome?(' '+t.outcome):'')+'</td>'+
           '<td>'+(t.reason||'—')+'</td>'+
           '<td>'+(t.price||0).toFixed(3)+'</td>'+
-          '<td>'+(t.shares||0).toFixed(2)+'</td>'+
+          '<td>'+(t.shares||0)+'</td>'+
           '<td class="'+pnlCls+'">'+pnlStr+'</td></tr>';
       }).join('');
     } else {
-      tb.innerHTML = '<tr><td colspan="7" class="empty">No trades yet</td></tr>';
+      tb.innerHTML = '<tr><td colspan="6" class="empty">No trades yet</td></tr>';
     }
 
     const logEl = document.getElementById('logs');
@@ -334,6 +327,7 @@ app.get('/', (_, res) => {
                   : l.includes('💰')||l.includes('✅') ? '#00e676'
                   : l.includes('🎯')||l.includes('🧯') ? '#ffd740'
                   : l.includes('🔭')||l.includes('⏰') ? '#00d4ff'
+                  : l.includes('🔁') ? '#7c3aed'
                   : l.includes('⚠️') ? '#ff9f0a'
                   : '#4a6080';
         return '<div style="color:'+col+'">'+l+'</div>';
@@ -352,9 +346,9 @@ const slog = (line) => { console.log(line); io.emit('log', line); };
 const PK = process.env.PRIVATE_KEY;
 if (!PK) { console.error('❌ PRIVATE_KEY env var missing'); process.exit(1); }
 
-console.log(`⏱️ 5-Minute Crypto Up/Down Multi-Pair Bot`);
+console.log(`🎯 BTC 0.96 Breakout + Recovery Bot`);
 console.log(`🚦 DRY_RUN=${DRY_RUN}`);
-if (DRY_RUN) console.log('⚠️  DRY RUN — demo $2000 capital, simulated fills, real API for data/orders');
+if (DRY_RUN) console.log('⚠️  DRY RUN — demo capital, simulated fills, real API for data/orders');
 else         console.log('🔴 LIVE MODE — real money');
 
 server.listen(PORT, '0.0.0.0', () => {
