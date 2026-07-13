@@ -285,19 +285,16 @@ app.get('/', (_, res) => {
             refRow('Window open', p.windowOpenPrice!=null?p.windowOpenPrice.toFixed(2):null) +
             refRow('15m close', p.close15!=null?p.close15.toFixed(2):null) +
             refRow('1h close', p.close1h!=null?p.close1h.toFixed(2):null) +
-            refRow('Checkpoints', (p.checkpoint1Done?'1✓':'1…')+' '+(p.checkpoint2Done?'2✓':'2…')) +
+            refRow('Rebalance checks', p.rebalancesDone+' / '+p.rebalancesTotal) +
           '</div>';
-        const entryRow = e => {
-          const stateHtml = e.closed
-            ? 'closed'
-            : 'holding '+e.shares.toFixed(2)+'sh (cost $'+e.cost.toFixed(2)+') — rides to resolution';
-          return '<div class="pair-row" style="font-size:9px"><span class="pair-key">cp'+e.checkpoint+' '+e.side+' @'+e.entryPrice.toFixed(2)+' ('+e.votes+'/'+e.total+')</span><span style="flex:1;text-align:right">'+stateHtml+'</span></div>';
-        };
-        const entriesHtml = (p.entries && p.entries.length)
-          ? '<div style="margin-top:4px">'+p.entries.map(entryRow).join('')+'</div>'
-          : '<div class="pair-row" style="font-size:9px;opacity:.6">No entries yet this window</div>';
+        const netHtml =
+          '<div style="margin-top:4px">'+
+            '<div class="pair-row" style="font-size:9px"><span class="pair-key side-up">Up held</span><span>'+p.netShares.Up.toFixed(2)+'sh (cost $'+p.netCost.Up.toFixed(2)+')</span></div>'+
+            '<div class="pair-row" style="font-size:9px"><span class="pair-key side-down">Down held</span><span>'+p.netShares.Down.toFixed(2)+'sh (cost $'+p.netCost.Down.toFixed(2)+')</span></div>'+
+            '<div class="pair-row" style="font-size:9px;opacity:.7"><span class="pair-key">Stance</span><span>'+(p.netShares.Up===p.netShares.Down?'flat':(p.netShares.Up>p.netShares.Down?'net Up':'net Down'))+' — rides to resolution</span></div>'+
+          '</div>';
         const eqCurve = buildEquitySvg(p.equityCurve, 280, 34, null);
-        const hasPos = (p.entries || []).some(e => !e.closed);
+        const hasPos = p.netShares.Up > 0 || p.netShares.Down > 0;
         return '<div class="pair-card '+(hasPos?'has-pos':'')+' '+(p.tradable?'':'untradable')+'">'+
           '<div class="pair-hdr"><div class="pair-sym">'+p.symbol+'</div><div class="pair-timer">'+(p.tradable?fmtSecs(p.secsToEnd):'loading…')+'</div></div>'+
           '<div class="pair-body">'+
@@ -307,7 +304,7 @@ app.get('/', (_, res) => {
             '<div class="pair-row"><span class="pair-key">Realized</span><span class="'+pClass(p.realizedPnl)+'">'+sgn(p.realizedPnl)+'</span><span class="pair-key">Unrealized</span><span class="'+pClass(p.unrealizedPnl)+'">'+sgn(p.unrealizedPnl)+'</span></div>'+
             '<div class="pair-row"><span class="pair-key">Fees paid</span><span class="pnl-neg">-$'+(p.feesPaid||0).toFixed(4)+'</span><span class="pair-key">Rebates</span><span class="pnl-pos">+$'+(p.rebatesEarned||0).toFixed(4)+'</span></div>'+
             refsHtml +
-            entriesHtml +
+            netHtml +
             '<div class="spark-box"><svg viewBox="0 0 280 34" preserveAspectRatio="none">'+eqCurve+'</svg><div class="spark-label">Equity curve ($'+p.markValue.toFixed(2)+')</div></div>'+
           '</div></div>';
       }).join('');
