@@ -2,63 +2,48 @@
 
 /**
  * ═══════════════════════════════════════════════════════════════
- *  POLYMARKET BTC 5-MINUTE UP/DOWN — DUAL-LEG 0.33 / 0.66 BOT
+ *  POLYMARKET BTC 5-MINUTE UP/DOWN — INDEPENDENT DUAL-SIDE
+ *  RESTING-BUY BOT WITH PER-SIDE MARTINGALE RECOVERY
  * ═══════════════════════════════════════════════════════════════
  *
- *  BTC-only, single market. Completely replaces the old 0.96-breakout +
- *  recovery model with a two-leg entry:
+ *  BTC-only, single market. One entry mechanic (no leg 2):
  *
  *  PER 5-MINUTE WINDOW:
- *    1. LEG 1 (as soon as the window opens):
- *       Place a resting limit BUY on BOTH sides (Up and Down) at
- *       LEG1_PRICE (default 0.33) for LEG1_SHARES (default 100) each.
- *       Whichever side fills first is the "cheap side" — the instant it
- *       fills, the resting order on the OTHER side is cancelled. Only one
- *       side of leg 1 is ever held.
+ *    At window open, place a resting limit BUY on Up AND a resting
+ *    limit BUY on Down, both at ORDER_PRICE (default 0.33). Unlike the
+ *    old dual-leg model, the two orders are completely INDEPENDENT —
+ *    one filling does NOT cancel the other. Each side rests until it
+ *    either fills (its ask drops to <= ORDER_PRICE) or the window ends
+ *    (in which case that side's unfilled resting order is simply
+ *    cancelled — no trade on that side this window).
  *
- *       If NEITHER side ever fills before the window ends, both resting
- *       orders are cancelled and the bot takes no trade at all that
- *       window (leg 2 requires leg 1 to have filled first).
+ *    It's possible for a window to produce: no fills, an Up fill only,
+ *    a Down fill only, or fills on BOTH sides.
  *
- *    2. WATCH (leg 2 arming):
- *       The bot waits until 3 minutes (LEG1_WATCH_SECS, default 180s)
- *       have elapsed since the window opened. (If leg 1 fills after the
- *       3-minute mark has already passed, leg-2 watching starts
- *       immediately at fill time instead of waiting further.)
+ *  SIZING — PER-SIDE MARTINGALE RECOVERY:
+ *    Up and Down each carry their OWN independent recovery state,
+ *    since they are independent bet streams:
+ *      - Normally trade BASE_SHARES.
+ *      - After 2 CONSECUTIVE LOSSES on that side, the size DOUBLES for
+ *        the next trade on that side (3rd trade = 2x).
+ *      - The doubled size stays in effect until the cumulative P&L of
+ *        that side's streak (starting from the first of the 2 losses)
+ *        returns to breakeven or better — i.e. the losses are fully
+ *        recovered — at which point size resets to BASE_SHARES.
+ *      - If the doubled size keeps losing, every further 2 CONSECUTIVE
+ *        losses doubles it again (2x -> 4x -> 8x -> ...) until it
+ *        recovers.
+ *      - A win while still in recovery (but not enough to fully clear
+ *        the streak P&L) resets the *consecutive*-loss counter but
+ *        keeps the current multiplier in place until full recovery.
  *
- *       Leg 2 is completely INDEPENDENT of which side leg 1 filled on —
- *       it watches BOTH sides' prices from here on, not just the side
- *       opposite leg 1.
- *
- *    3. LEG 2:
- *       From the 3-minute mark through window end, continuously monitor
- *       BOTH sides' ask prices. The FIRST side — Up or Down, regardless
- *       of which side leg 1 took, even if it's the very same side — whose
- *       ask goes above LEG2_PRICE (default 0.66) arms a resting limit BUY
- *       on that side at LEG2_PRICE for LEG2_SHARES (default 166). Just
- *       like a real limit order, crossing above LEG2_PRICE only PLACES
- *       the order — it doesn't fill until that side's ask actually comes
- *       back down to <= LEG2_PRICE. If it never comes back before window
- *       end, the resting order is cancelled unfilled. Only one leg-2
- *       attempt per window, and only if leg 1 filled.
+ *    This recovery state is PER SIDE and PERSISTS ACROSS WINDOWS (it is
+ *    not part of the per-window state that gets reset every 5 minutes).
  *
  *  HOLD / RESOLUTION:
- *    Both legs (if filled) simply ride to window resolution — there is no
- *    stop-loss and no take-profit order for either leg. A winning share
- *    pays $1, a losing share pays $0, exactly as resolved by Polymarket /
- *    this bot's own resolution bookkeeping (the same resolution
- *    determination is used for both legs, whether they land on the same
- *    outcome or opposite outcomes of the market).
- *
- *  EXECUTION:
- *    - Leg 1: two resting limit BUY orders placed at window open, priced
- *      exactly at LEG1_PRICE, on both outcomes. First fill wins; the
- *      other resting order is cancelled immediately.
- *    - Leg 2: a resting limit BUY at LEG2_PRICE, placed on whichever side
- *      (independent of leg 1) first crosses above LEG2_PRICE; it only
- *      actually fills once that side's ask returns to <= LEG2_PRICE. No
- *      retry/re-quote on a different side or price — if it's missed for
- *      that window, it's missed.
+ *    Any filled position(s) simply ride to window resolution — there is
+ *    no stop-loss and no take-profit. A winning share pays $1, a losing
+ *    share pays $0.
  *
  *  LIVE / DEMO: DRY_RUN is runtime-switchable via setMode(), independent
  *    of the pause/resume toggle.
@@ -84,11 +69,8 @@ function round2(n) { return Math.round(n * 100) / 100; }
 function nowSec() { return Date.now() / 1000; }
 
 // ── Strategy parameters ──
-const LEG1_PRICE       = Number(process.env.LEG1_PRICE || 0.33);   // resting buy price, both sides, at window open
-const LEG1_SHARES      = Number(process.env.LEG1_SHARES || 100);   // size per side for leg 1
-const LEG1_WATCH_SECS  = Number(process.env.LEG1_WATCH_SECS || 180); // 3 minutes — earliest leg 2 can be armed
-const LEG2_PRICE       = Number(process.env.LEG2_PRICE || 0.66);   // trigger + fill price for leg 2
-const LEG2_SHARES      = Number(process.env.LEG2_SHARES || 166);   // size for leg 2 (expensive side)
+const ORDER_PRICE  = Number(process.env.ORDER_PRICE || process.env.LEG1_PRICE || 0.33);   // resting buy price, both sides, at window open
+const BASE_SHARES  = Number(process.env.BASE_SHARES || process.env.LEG1_SHARES || 100);   // base size per side before any recovery doubling
 
 let emitFn = () => {};
 let slog = () => {};
@@ -107,23 +89,20 @@ function log(msg) {
 }
 
 async function getJSON(url) {
-  const res = await fetch(url, { headers: { 'User-Agent': 'polymarket-btc-dualleg-bot/1.0' } });
+  const res = await fetch(url, { headers: { 'User-Agent': 'polymarket-btc-indep-bot/1.0' } });
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${url}`);
   return res.json();
 }
 async function postJSON(url, body) {
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'User-Agent': 'polymarket-btc-dualleg-bot/1.0' },
+    headers: { 'Content-Type': 'application/json', 'User-Agent': 'polymarket-btc-indep-bot/1.0' },
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${url}`);
   return res.json();
 }
 
-// The two order actions this bot places: a limit BUY (used for both leg 1's
-// resting orders and leg 2's single-shot order), and a cancel (used to kill
-// the losing side of leg 1 the instant the other side fills).
 async function placeLimitBuy(tokenId, price, shares) {
   if (!DRY_RUN && trader) return await trader.limitBuy(tokenId, shares, price);
   return { id: `dry-buy-${Date.now()}-${Math.random().toString(36).slice(2, 7)}` };
@@ -132,10 +111,82 @@ async function cancelOrder(orderId) {
   if (!orderId) return null;
   if (!DRY_RUN && trader) {
     if (typeof trader.cancelOrder === 'function') return await trader.cancelOrder(orderId);
-    log('⚠️  trader.cancelOrder() is not implemented in polymarket-trader.js — the losing side of leg 1 was NOT actually cancelled on-chain. Add a cancelOrder(orderId) method mirroring limitBuy.');
+    log('⚠️  trader.cancelOrder() is not implemented in polymarket-trader.js — an unfilled resting order was NOT actually cancelled on-chain. Add a cancelOrder(orderId) method mirroring limitBuy.');
     return null;
   }
   return { ok: true };
+}
+
+// ─────────────────────────────────────────
+//  Per-side martingale recovery state — PERSISTS ACROSS WINDOWS
+// ─────────────────────────────────────────
+function freshRecoverySide() {
+  return {
+    multiplier: 1,     // current size multiplier (1, 2, 4, 8, ...)
+    lossStreak: 0,      // consecutive losses within the current streak
+    streakPnl: 0,        // cumulative pnl since the streak began (0 while flat)
+  };
+}
+let recovery = { Up: freshRecoverySide(), Down: freshRecoverySide() };
+
+function currentShares(side) {
+  return round2(BASE_SHARES * recovery[side].multiplier);
+}
+
+// Applies a resolved trade's profit to that side's recovery state and
+// returns a short description of what happened, for logging.
+function applyRecoveryResult(side, profit) {
+  const r = recovery[side];
+  const wasMultiplier = r.multiplier;
+  let note;
+
+  if (r.multiplier === 1 && r.lossStreak === 0) {
+    // Flat — no active streak yet.
+    if (profit < 0) {
+      r.lossStreak = 1;
+      r.streakPnl = profit;
+      note = `loss #1 of streak (streakPnl=$${r.streakPnl.toFixed(2)}) — size stays base`;
+    } else {
+      note = 'win at base size — no streak';
+    }
+  } else if (r.multiplier === 1 && r.lossStreak === 1) {
+    // One prior loss, still base size — this is the 2nd trade of a possible streak.
+    r.streakPnl = round2(r.streakPnl + profit);
+    if (profit < 0) {
+      r.lossStreak = 2;
+      r.multiplier = 2;
+      note = `2nd consecutive loss (streakPnl=$${r.streakPnl.toFixed(2)}) — DOUBLING to ${currentShares(side)}sh for next trade`;
+    } else {
+      r.lossStreak = 0;
+      r.streakPnl = 0;
+      note = 'win on 2nd trade — streak cleared, back to base';
+    }
+  } else {
+    // Actively recovering (multiplier > 1).
+    r.streakPnl = round2(r.streakPnl + profit);
+    if (r.streakPnl >= 0) {
+      r.multiplier = 1;
+      r.lossStreak = 0;
+      r.streakPnl = 0;
+      note = `RECOVERED — streak pnl back to $0+ — size reset to base (${currentShares(side)}sh)`;
+    } else if (profit < 0) {
+      r.lossStreak += 1;
+      if (r.lossStreak % 2 === 0) {
+        r.multiplier *= 2;
+        note = `${r.lossStreak} consecutive losses in recovery (streakPnl=$${r.streakPnl.toFixed(2)}) — DOUBLING AGAIN to ${currentShares(side)}sh`;
+      } else {
+        note = `loss in recovery (streakPnl=$${r.streakPnl.toFixed(2)}) — size stays ${currentShares(side)}sh, one more consecutive loss will double again`;
+      }
+    } else {
+      r.lossStreak = 0;
+      note = `win in recovery but not fully cleared (streakPnl=$${r.streakPnl.toFixed(2)}) — size stays ${currentShares(side)}sh, consecutive counter reset`;
+    }
+  }
+
+  if (r.multiplier !== wasMultiplier || note) {
+    log(`🎲 ${side} recovery — ${note}`);
+  }
+  return note;
 }
 
 // ─────────────────────────────────────────
@@ -148,19 +199,12 @@ function freshPairState() {
     windowStart: null, windowEnd: null, slug: null, eventTitle: null, conditionId: null,
     upTokenId: null, downTokenId: null,
     upAsk: null, upBid: null, downAsk: null, downBid: null,
-    phase: 'leg1_open', // leg1_open | leg1_filled | watching_leg2 | leg2_filled | no_leg2 | no_fill | closed
-    // leg 1 (both sides resting @ LEG1_PRICE until one fills)
-    leg1Placed: false,
-    leg1UpOrderId: null, leg1DownOrderId: null,
-    leg1FilledSide: null,   // 'Up' | 'Down' | null
-    expensiveSide: null,    // set once leg 2 arms — the side leg 2 targets (independent of leg 1's side)
-    position1: null,        // { side, shares, entryPrice, cost, mode: 'leg1', openedAt }
-    // leg 2 (resting limit @ LEG2_PRICE on the expensive side, armed once
-    // price first crosses above LEG2_PRICE, filled only if it comes back down)
-    leg2Armed: false,       // resting order has been placed
-    leg2OrderId: null,
-    leg2Done: false,        // true once we've either filled leg2 or given up trying this window
-    position2: null,        // { side, shares, entryPrice, cost, mode: 'leg2', openedAt }
+    phase: 'open', // open | partial | filled | no_fill | closed
+    ordersPlaced: false,
+    upOrderId: null, downOrderId: null,
+    upFilled: false, downFilled: false,
+    positionUp: null,   // { side, shares, entryPrice, cost, openedAt }
+    positionDown: null, // { side, shares, entryPrice, cost, openedAt }
     resolvedThisWindow: true,
     bankroll: TOTAL_CAPITAL,
     realizedPnl: 0,
@@ -223,17 +267,12 @@ async function loadPairWindow(p) {
   p.downTokenId = downId;
   p.tradable = true;
   p.resolvedThisWindow = false;
-  p.phase = 'leg1_open';
-  p.leg1Placed = false;
-  p.leg1UpOrderId = null; p.leg1DownOrderId = null;
-  p.leg1FilledSide = null;
-  p.expensiveSide = null;
-  p.position1 = null;
-  p.leg2Armed = false;
-  p.leg2OrderId = null;
-  p.leg2Done = false;
-  p.position2 = null;
-  log(`🔭 ${p.symbol} window loaded: ${slug} | ends ${new Date(p.windowEnd * 1000).toISOString().slice(11,19)}Z | leg1 will place resting buys on both sides @ ${LEG1_PRICE.toFixed(2)} for ${LEG1_SHARES}sh each`);
+  p.phase = 'open';
+  p.ordersPlaced = false;
+  p.upOrderId = null; p.downOrderId = null;
+  p.upFilled = false; p.downFilled = false;
+  p.positionUp = null; p.positionDown = null;
+  log(`🔭 ${p.symbol} window loaded: ${slug} | ends ${new Date(p.windowEnd * 1000).toISOString().slice(11,19)}Z | placing independent resting buys — Up ${currentShares('Up')}sh @ ${ORDER_PRICE.toFixed(2)}, Down ${currentShares('Down')}sh @ ${ORDER_PRICE.toFixed(2)}`);
 }
 
 // ─────────────────────────────────────────
@@ -293,13 +332,11 @@ async function refreshPolyPrices() {
 // ─────────────────────────────────────────
 function pairMarkValue(p) {
   let v = p.bankroll;
-  if (p.position1) {
-    const bid = p.position1.side === 'Up' ? p.upBid : p.downBid;
-    v += p.position1.shares * (bid != null ? bid : p.position1.entryPrice);
+  if (p.positionUp) {
+    v += p.positionUp.shares * (p.upBid != null ? p.upBid : p.positionUp.entryPrice);
   }
-  if (p.position2) {
-    const bid = p.position2.side === 'Up' ? p.upBid : p.downBid;
-    v += p.position2.shares * (bid != null ? bid : p.position2.entryPrice);
+  if (p.positionDown) {
+    v += p.positionDown.shares * (p.downBid != null ? p.downBid : p.positionDown.entryPrice);
   }
   return round2(v);
 }
@@ -320,116 +357,62 @@ function registerTrade(p, entry) {
 }
 
 // ─────────────────────────────────────────
-//  Leg 1: resting limit buys on both sides @ LEG1_PRICE, first fill wins
+//  Order placement — independent resting buys on both sides
 // ─────────────────────────────────────────
-async function placeLeg1Orders(p) {
-  const upOrder = await placeLimitBuy(p.upTokenId, LEG1_PRICE, LEG1_SHARES);
-  const downOrder = await placeLimitBuy(p.downTokenId, LEG1_PRICE, LEG1_SHARES);
-  p.leg1UpOrderId = upOrder?.id || null;
-  p.leg1DownOrderId = downOrder?.id || null;
-  p.leg1Placed = true;
-  p.phase = 'leg1_open';
-  log(`🎯 ${p.symbol} LEG1 — placed resting limit buys on BOTH sides @ ${LEG1_PRICE.toFixed(2)} for ${LEG1_SHARES}sh each (Up + Down) — whichever fills first wins, the other gets cancelled`);
+async function placeOpenOrders(p) {
+  const upShares = currentShares('Up');
+  const downShares = currentShares('Down');
+  const upOrder = await placeLimitBuy(p.upTokenId, ORDER_PRICE, upShares);
+  const downOrder = await placeLimitBuy(p.downTokenId, ORDER_PRICE, downShares);
+  p.upOrderId = upOrder?.id || null;
+  p.downOrderId = downOrder?.id || null;
+  p.ordersPlaced = true;
+  p.phase = 'open';
+  log(`🎯 ${p.symbol} — placed INDEPENDENT resting limit buys @ ${ORDER_PRICE.toFixed(2)}: Up ${upShares}sh (mult=${recovery.Up.multiplier}x) | Down ${downShares}sh (mult=${recovery.Down.multiplier}x) — either, both, or neither may fill`);
 }
 
-// A resting buy limit at LEG1_PRICE fills once the market's ask on that side
-// drops to (or below) LEG1_PRICE — that's the fill proxy this bot uses to
-// infer resting-order fills from the live price feed.
-async function checkLeg1Fill(p) {
-  let filledSide = null;
-  if (p.upAsk != null && p.upAsk <= LEG1_PRICE) filledSide = 'Up';
-  else if (p.downAsk != null && p.downAsk <= LEG1_PRICE) filledSide = 'Down';
-  if (!filledSide) return;
+// A resting buy limit at ORDER_PRICE fills once the market's ask on that
+// side drops to (or below) ORDER_PRICE — used as the fill proxy from the
+// live price feed. Up and Down are checked and filled fully independently.
+async function checkFills(p) {
+  if (!p.upFilled && p.upAsk != null && p.upAsk <= ORDER_PRICE) {
+    await tryFillSide(p, 'Up');
+  }
+  if (!p.downFilled && p.downAsk != null && p.downAsk <= ORDER_PRICE) {
+    await tryFillSide(p, 'Down');
+  }
+  updatePhase(p);
+}
 
-  const otherSide = filledSide === 'Up' ? 'Down' : 'Up';
-  const cancelId = filledSide === 'Up' ? p.leg1DownOrderId : p.leg1UpOrderId;
-  await cancelOrder(cancelId);
+async function tryFillSide(p, side) {
+  const shares = currentShares(side);
+  const price = ORDER_PRICE;
+  const cost = round2(price * shares);
 
-  const shares = LEG1_SHARES, price = LEG1_PRICE, cost = round2(price * shares);
   if (cost > p.bankroll) {
-    log(`⏭️  ${p.symbol} LEG1 fill detected on ${filledSide} but insufficient bankroll ($${p.bankroll.toFixed(2)} < $${cost.toFixed(2)}) — skipping the rest of this window`);
-    p.leg1FilledSide = filledSide;
-    p.leg2Done = true;
-    p.phase = 'no_fill';
+    log(`⏭️  ${p.symbol} ${side} fill detected but insufficient bankroll ($${p.bankroll.toFixed(2)} < $${cost.toFixed(2)}) — skipping ${side} this window`);
+    if (side === 'Up') p.upFilled = true; else p.downFilled = true;
     return;
   }
 
   p.bankroll = round2(p.bankroll - cost);
-  p.position1 = { side: filledSide, shares, entryPrice: price, cost, mode: 'leg1', openedAt: Date.now() };
-  p.leg1FilledSide = filledSide;
-  p.phase = 'leg1_filled';
-  // Note: leg 2's side is NOT assumed to be otherSide — it's determined
-  // independently once leg 2 arms, based on whichever side is actually
-  // trading above LEG2_PRICE at the time (see tryEnterLeg2). It may end up
-  // being the same side as leg 1, or the other one.
-  log(`✅ ${p.symbol} LEG1 FILLED — bought ${filledSide} (cheap side) ${shares}sh @ ${price.toFixed(2)} | cost=$${cost.toFixed(2)} | cancelled resting ${otherSide} order | leg 2 will independently watch BOTH sides for a price ≥ ${LEG2_PRICE.toFixed(2)} once armed`);
-  registerTrade(p, { side: 'BUY', outcome: filledSide, reason: 'LEG1-ENTRY', price, shares, cost, fee: 0 });
+  const position = { side, shares, entryPrice: price, cost, openedAt: Date.now() };
+  if (side === 'Up') { p.positionUp = position; p.upFilled = true; }
+  else { p.positionDown = position; p.downFilled = true; }
+
+  log(`✅ ${p.symbol} ${side} FILLED — bought ${shares}sh @ ${price.toFixed(2)} | cost=$${cost.toFixed(2)} (mult=${recovery[side].multiplier}x)`);
+  registerTrade(p, { side: 'BUY', outcome: side, reason: `${side.toUpperCase()}-ENTRY`, price, shares, cost, fee: 0 });
   recordEquity(p);
 }
 
-// ─────────────────────────────────────────
-//  Leg 2: resting limit buy @ LEG2_PRICE. Fully independent of which side
-//  leg 1 filled on — once armed (>= LEG1_WATCH_SECS elapsed AND leg 1
-//  filled), the bot watches BOTH sides' asks. The FIRST side (Up or Down —
-//  could be the same side leg 1 bought, or the other one) to cross above
-//  LEG2_PRICE is the one leg 2 targets; the resting limit order is placed
-//  on THAT side. As with leg 1, crossing above LEG2_PRICE only arms the
-//  order — it only actually fills once that side's ask comes back down to
-//  <= LEG2_PRICE. If price keeps running and never returns, the resting
-//  order is cancelled unfilled at window end — no leg 2 trade that window.
-// ─────────────────────────────────────────
-async function tryEnterLeg2(p) {
-  // Step 1 — arm: watch both sides independently; whichever crosses above
-  // LEG2_PRICE first becomes the leg 2 target side.
-  if (!p.leg2Armed) {
-    const upCrossed = p.upAsk != null && p.upAsk >= LEG2_PRICE;
-    const downCrossed = p.downAsk != null && p.downAsk >= LEG2_PRICE;
-    if (!upCrossed && !downCrossed) return; // neither side above threshold yet
-
-    // If both happen to cross on the same tick, target whichever is
-    // currently pricier (the more "expensive" of the two).
-    let side;
-    if (upCrossed && downCrossed) side = p.upAsk >= p.downAsk ? 'Up' : 'Down';
-    else side = upCrossed ? 'Up' : 'Down';
-
-    const tokenId = side === 'Up' ? p.upTokenId : p.downTokenId;
-    const order = await placeLimitBuy(tokenId, LEG2_PRICE, LEG2_SHARES);
-    p.leg2OrderId = order?.id || null;
-    p.leg2Armed = true;
-    p.expensiveSide = side;
-    const curAsk = side === 'Up' ? p.upAsk : p.downAsk;
-    log(`🎯 ${p.symbol} LEG2 ARMED — ${side} crossed above ${LEG2_PRICE.toFixed(2)} (currently ${curAsk.toFixed(2)}) — placed resting limit buy @ ${LEG2_PRICE.toFixed(2)} for ${LEG2_SHARES}sh, waiting for price to come back down to fill (independent of leg 1's ${p.leg1FilledSide} side)`);
-    // fall through — if ask happens to already be back at/below LEG2_PRICE
-    // on this same tick, check for fill immediately below.
-  }
-
-  // Step 2 — confirm fill: the resting buy only actually fills once the
-  // armed side's ask is at or below LEG2_PRICE. A one-way move that never
-  // comes back means this never fills.
-  const side = p.expensiveSide;
-  const ask = side === 'Up' ? p.upAsk : p.downAsk;
-  if (ask == null || ask > LEG2_PRICE) return; // still resting unfilled, keep waiting
-
-  const shares = LEG2_SHARES, price = LEG2_PRICE, cost = round2(price * shares);
-  if (cost > p.bankroll) {
-    await cancelOrder(p.leg2OrderId);
-    log(`⏭️  ${p.symbol} LEG2 would have filled but insufficient bankroll ($${p.bankroll.toFixed(2)} < $${cost.toFixed(2)}) — cancelled`);
-    p.leg2Done = true;
-    p.phase = 'no_leg2';
-    return;
-  }
-
-  p.bankroll = round2(p.bankroll - cost);
-  p.position2 = { side, shares, entryPrice: price, cost, mode: 'leg2', openedAt: Date.now() };
-  p.leg2Done = true;
-  p.phase = 'leg2_filled';
-  log(`✅ ${p.symbol} LEG2 FILLED — bought ${side} ${shares}sh @ ${price.toFixed(2)} | cost=$${cost.toFixed(2)} | now holding both legs to resolution (no SL/TP)`);
-  registerTrade(p, { side: 'BUY', outcome: side, reason: 'LEG2-ENTRY', price, shares, cost, fee: 0 });
-  recordEquity(p);
+function updatePhase(p) {
+  if (p.positionUp && p.positionDown) p.phase = 'filled';
+  else if (p.positionUp || p.positionDown) p.phase = 'partial';
+  else p.phase = 'open';
 }
 
 // ─────────────────────────────────────────
-//  Window resolution — both legs (if filled) resolve off the same outcome
+//  Window resolution
 // ─────────────────────────────────────────
 async function determineWinningSide(p) {
   try {
@@ -452,26 +435,22 @@ async function resolvePairWindow(p) {
   if (p.resolvedThisWindow) return;
   p.resolvedThisWindow = true;
 
-  // If leg 1 never filled, cancel both resting orders — no trade this window.
-  if (p.leg1Placed && !p.leg1FilledSide) {
-    await cancelOrder(p.leg1UpOrderId);
-    await cancelOrder(p.leg1DownOrderId);
-    log(`${p.symbol} window closed — LEG1 never filled (neither side reached ${LEG1_PRICE.toFixed(2)}) — no trade at all this window`);
-  } else if (p.position1 && !p.position2) {
-    if (p.leg2Armed) {
-      await cancelOrder(p.leg2OrderId);
-      log(`${p.symbol} window closing with only LEG1 filled — LEG2 was armed (${p.expensiveSide} crossed above ${LEG2_PRICE.toFixed(2)}) but price never came back down to fill it — resting order cancelled`);
-    } else {
-      log(`${p.symbol} window closing with only LEG1 filled — expensive side (${p.expensiveSide}) never crossed ${LEG2_PRICE.toFixed(2)}, so LEG2 was never armed`);
-    }
+  // Cancel any unfilled resting orders.
+  if (p.ordersPlaced && !p.upFilled) {
+    await cancelOrder(p.upOrderId);
+    log(`${p.symbol} window closed — Up never filled (never reached ${ORDER_PRICE.toFixed(2)}) — no Up trade this window`);
+  }
+  if (p.ordersPlaced && !p.downFilled) {
+    await cancelOrder(p.downOrderId);
+    log(`${p.symbol} window closed — Down never filled (never reached ${ORDER_PRICE.toFixed(2)}) — no Down trade this window`);
   }
 
-  const hasAnyPosition = !!(p.position1 || p.position2);
+  const hasAnyPosition = !!(p.positionUp || p.positionDown);
   const winnerSide = hasAnyPosition ? await determineWinningSide(p) : null;
   let windowProfit = 0;
 
-  if (p.position1) {
-    const pos = p.position1;
+  if (p.positionUp) {
+    const pos = p.positionUp;
     const won = winnerSide === pos.side;
     const proceeds = won ? round2(pos.shares * 1) : 0;
     const profit = round2(proceeds - pos.cost);
@@ -479,12 +458,14 @@ async function resolvePairWindow(p) {
     p.realizedPnl = round2(p.realizedPnl + profit);
     windowProfit = round2(windowProfit + profit);
     const icon = won ? '💰' : '💥';
-    log(`${icon} ${p.symbol} RESOLUTION [LEG1] winner=${winnerSide ?? '?'} | held ${pos.side} ${pos.shares}sh | proceeds=$${proceeds.toFixed(2)} (no fee) | cost=$${pos.cost.toFixed(2)} | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
-    registerTrade(p, { side: 'SELL', outcome: pos.side, winner: winnerSide, reason: 'LEG1-RESOLUTION', price: won ? 1 : 0, shares: pos.shares, proceeds, profit });
-    p.position1 = null;
+    log(`${icon} ${p.symbol} RESOLUTION [UP] winner=${winnerSide ?? '?'} | held Up ${pos.shares}sh | proceeds=$${proceeds.toFixed(2)} | cost=$${pos.cost.toFixed(2)} | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
+    registerTrade(p, { side: 'SELL', outcome: pos.side, winner: winnerSide, reason: 'UP-RESOLUTION', price: won ? 1 : 0, shares: pos.shares, proceeds, profit });
+    if (won) p.wins++; else p.losses++;
+    applyRecoveryResult('Up', profit);
+    p.positionUp = null;
   }
-  if (p.position2) {
-    const pos = p.position2;
+  if (p.positionDown) {
+    const pos = p.positionDown;
     const won = winnerSide === pos.side;
     const proceeds = won ? round2(pos.shares * 1) : 0;
     const profit = round2(proceeds - pos.cost);
@@ -492,13 +473,11 @@ async function resolvePairWindow(p) {
     p.realizedPnl = round2(p.realizedPnl + profit);
     windowProfit = round2(windowProfit + profit);
     const icon = won ? '💰' : '💥';
-    log(`${icon} ${p.symbol} RESOLUTION [LEG2] winner=${winnerSide ?? '?'} | held ${pos.side} ${pos.shares}sh | proceeds=$${proceeds.toFixed(2)} (no fee) | cost=$${pos.cost.toFixed(2)} | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
-    registerTrade(p, { side: 'SELL', outcome: pos.side, winner: winnerSide, reason: 'LEG2-RESOLUTION', price: won ? 1 : 0, shares: pos.shares, proceeds, profit });
-    p.position2 = null;
-  }
-  if (hasAnyPosition) {
-    if (windowProfit > 0) p.wins++;
-    else if (windowProfit < 0) p.losses++;
+    log(`${icon} ${p.symbol} RESOLUTION [DOWN] winner=${winnerSide ?? '?'} | held Down ${pos.shares}sh | proceeds=$${proceeds.toFixed(2)} | cost=$${pos.cost.toFixed(2)} | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
+    registerTrade(p, { side: 'SELL', outcome: pos.side, winner: winnerSide, reason: 'DOWN-RESOLUTION', price: won ? 1 : 0, shares: pos.shares, proceeds, profit });
+    if (won) p.wins++; else p.losses++;
+    applyRecoveryResult('Down', profit);
+    p.positionDown = null;
   }
   p.phase = 'closed';
   recordEquity(p);
@@ -521,30 +500,15 @@ async function processPair(p) {
   }
   if (p.resolvedThisWindow) return;
 
-  // Step 1 — leg 1 orders go out immediately at window open.
-  if (!p.leg1Placed) {
-    await placeLeg1Orders(p);
+  // Step 1 — independent resting orders go out immediately at window open.
+  if (!p.ordersPlaced) {
+    await placeOpenOrders(p);
     return;
   }
 
-  // Step 2 — waiting for one side of leg 1 to fill.
-  if (!p.leg1FilledSide) {
-    p.phase = 'leg1_open';
-    await checkLeg1Fill(p);
-    return;
-  }
-
-  // Step 3 — leg 1 is filled. Leg 2 only arms once >= 3 minutes have
-  // elapsed since window open (if leg 1 filled later than that, it's
-  // already armed the moment it fills).
-  if (elapsed < LEG1_WATCH_SECS) {
-    p.phase = 'leg1_filled';
-    return;
-  }
-
-  if (!p.leg2Done) {
-    p.phase = 'watching_leg2';
-    await tryEnterLeg2(p);
+  // Step 2 — check both sides independently for fills, every tick.
+  if (!p.upFilled || !p.downFilled) {
+    await checkFills(p);
   }
 }
 
@@ -554,17 +518,15 @@ async function processPair(p) {
 function buildState() {
   const markValue = pairMarkValue(pair);
   const heldValue = round2(markValue - pair.bankroll);
-  const costBasis = round2((pair.position1?.cost || 0) + (pair.position2?.cost || 0));
+  const costBasis = round2((pair.positionUp?.cost || 0) + (pair.positionDown?.cost || 0));
   const unrealized = round2(heldValue - costBasis);
   const pairState = {
     symbol: pair.symbol, tradable: pair.tradable, slug: pair.slug, windowEnd: pair.windowEnd,
     secsToEnd: pair.windowEnd ? Math.max(0, Math.floor(pair.windowEnd - nowSec())) : null,
-    secsToWatch: pair.windowStart ? Math.max(0, Math.floor(LEG1_WATCH_SECS - (nowSec() - pair.windowStart))) : null,
     phase: pair.phase,
     upAsk: pair.upAsk, upBid: pair.upBid, downAsk: pair.downAsk, downBid: pair.downBid,
-    leg1: pair.position1, leg2: pair.position2,
-    leg2Armed: pair.leg2Armed,
-    expensiveSide: pair.expensiveSide,
+    positionUp: pair.positionUp, positionDown: pair.positionDown,
+    upFilled: pair.upFilled, downFilled: pair.downFilled,
     bankroll: pair.bankroll, realizedPnl: pair.realizedPnl, unrealizedPnl: unrealized, markValue,
     feesPaid: pair.feesPaid, wins: pair.wins, losses: pair.losses,
     equityCurve: pair.equityCurve,
@@ -579,8 +541,11 @@ function buildState() {
     winRate: (totalWins + totalLosses) > 0 ? round2((totalWins / (totalWins + totalLosses)) * 100) : null,
     uptime: Math.floor((Date.now() - startTime) / 1000),
     config: {
-      leg1Price: LEG1_PRICE, leg1Shares: LEG1_SHARES, leg1WatchSecs: LEG1_WATCH_SECS,
-      leg2Price: LEG2_PRICE, leg2Shares: LEG2_SHARES,
+      orderPrice: ORDER_PRICE, baseShares: BASE_SHARES,
+    },
+    recovery: {
+      Up: { ...recovery.Up, currentShares: currentShares('Up') },
+      Down: { ...recovery.Down, currentShares: currentShares('Down') },
     },
     pairState, totalEquityCurve, logs: logs.slice(-100), trades: trades.slice(-80).reverse(),
   };
@@ -621,9 +586,8 @@ function setMode(wantLive) {
 async function init(privateKey, emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
-  log(`🚀 BTC Dual-Leg 0.33/0.66 Bot`);
-  log(`⚙️  $${TOTAL_CAPITAL} capital | LEG1: resting buys both sides @ ${LEG1_PRICE.toFixed(2)} for ${LEG1_SHARES}sh each at window open, first fill wins & cancels the other | LEG2: after ${LEG1_WATCH_SECS}s (${(LEG1_WATCH_SECS/60).toFixed(1)}m), independently watches BOTH sides — whichever side's ask first crosses above ${LEG2_PRICE.toFixed(2)} (regardless of which side leg1 took) arms a resting limit buy there @ ${LEG2_PRICE.toFixed(2)} for ${LEG2_SHARES}sh — it only actually fills if that side's price comes back down to ${LEG2_PRICE.toFixed(2)} or below, otherwise it's cancelled unfilled at window end | no SL/TP on either leg — both ride to resolution`);
-  log(`⚙️  if LEG1 never fills, no trade that window; if LEG1 fills but LEG2's trigger never hits, only LEG1 rides to resolution`);
+  log(`🚀 BTC Independent Dual-Side Bot`);
+  log(`⚙️  $${TOTAL_CAPITAL} capital | resting buys @ ${ORDER_PRICE.toFixed(2)} on Up AND Down independently at window open (no leg2, fills don't cancel each other) | base size ${BASE_SHARES}sh/side | per-side martingale: 2 consecutive losses -> double size on 3rd trade, stays doubled (doubling further every 2 more consecutive losses) until that side's streak P&L recovers to breakeven, then resets to base | no SL/TP — rides to resolution`);
   log(`${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
   trader = new PolymarketTrader(privateKey);
