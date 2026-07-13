@@ -257,8 +257,8 @@ app.get('/', (_, res) => {
         leg1_open: 'LEG1 OPEN — resting @ ' + leg1Price + ' both sides',
         leg1_filled: 'LEG1 FILLED — waiting for 3:00 mark (' + (p.secsToWatch!=null ? fmtSecs(p.secsToWatch) : '…') + ')',
         watching_leg2: p.leg2Armed
-          ? 'LEG2 ARMED @ ' + leg2Price + ' — waiting for ' + (p.expensiveSide||'?') + ' to come back down to fill'
-          : 'WATCHING for ' + (p.expensiveSide||'expensive side') + ' ≥ ' + leg2Price,
+          ? 'LEG2 ARMED on ' + (p.expensiveSide||'?') + ' @ ' + leg2Price + ' — waiting for price to come back down to fill'
+          : 'WATCHING both sides for ask ≥ ' + leg2Price,
         leg2_filled: 'BOTH LEGS FILLED — riding to resolution',
         no_leg2: 'LEG1 ONLY — leg2 trigger never hit',
         no_fill: 'NO FILL — skipped this window',
@@ -275,7 +275,7 @@ app.get('/', (_, res) => {
         : '<div class="pos-box"><div class="pos-empty">'+tagLabel+' not filled</div></div>';
 
       const posHtml = legBoxHtml(p.leg1, 'tag-leg1', 'Leg 1 (cheap side @ '+leg1Price+')') +
-                       legBoxHtml(p.leg2, 'tag-leg2', 'Leg 2 (expensive side @ '+leg2Price+')');
+                       legBoxHtml(p.leg2, 'tag-leg2', 'Leg 2 (@ '+leg2Price+', independent side)');
 
       marketPanel.innerHTML =
         '<div class="market-hdr">'+
@@ -289,7 +289,7 @@ app.get('/', (_, res) => {
             '<div class="price-row"><span class="price-key side-up">Up ask/bid</span><span>'+(p.upAsk?.toFixed(2)||'—')+' / '+(p.upBid?.toFixed(2)||'—')+'</span></div>'+
             '<div class="price-row"><span class="price-key side-down">Down ask/bid</span><span>'+(p.downAsk?.toFixed(2)||'—')+' / '+(p.downBid?.toFixed(2)||'—')+'</span></div>'+
             '<div class="trigger-line">Leg1: both sides resting @ '+leg1Price+' — first fill wins</div>'+
-            '<div class="trigger-line">Leg2: expensive side ('+(p.expensiveSide||'?')+') ask ≥ '+leg2Price+'</div>'+
+            '<div class="trigger-line">Leg2: '+(p.leg2Armed ? 'armed on '+(p.expensiveSide||'?') : 'watching BOTH sides (independent of leg1)')+' — ask ≥ '+leg2Price+'</div>'+
           '</div>'+
           posHtml+
         '</div>';
