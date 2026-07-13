@@ -272,6 +272,12 @@ async function loadPairWindow(p) {
   p.upOrderId = null; p.downOrderId = null;
   p.upFilled = false; p.downFilled = false;
   p.positionUp = null; p.positionDown = null;
+  // Clear out the previous window's last-seen prices — these belong to
+  // different token ids and must never be used to evaluate fills for the
+  // new window. checkFills() requires a non-null ask, so this forces it to
+  // wait for a fresh refreshPolyPrices() tick against the NEW token ids
+  // before any fill can be detected.
+  p.upAsk = null; p.upBid = null; p.downAsk = null; p.downBid = null;
   log(`🔭 ${p.symbol} window loaded: ${slug} | ends ${new Date(p.windowEnd * 1000).toISOString().slice(11,19)}Z | placing independent resting buys — Up ${currentShares('Up')}sh @ ${ORDER_PRICE.toFixed(2)}, Down ${currentShares('Down')}sh @ ${ORDER_PRICE.toFixed(2)}`);
 }
 
