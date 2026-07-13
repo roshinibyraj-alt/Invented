@@ -2,141 +2,90 @@
 
 /**
  * ═══════════════════════════════════════════════════════════════
- *  POLYMARKET 5-MINUTE CRYPTO UP/DOWN — BTC PRICE-ACTION SIGNAL BOT
+ *  POLYMARKET BTC 5-MINUTE UP/DOWN — 0.96 BREAKOUT + RECOVERY BOT
  * ═══════════════════════════════════════════════════════════════
  *
- *  This throws out the whole grid/ladder approach. It no longer watches the
- *  Polymarket Up/Down token's own price at all for its trading DECISION —
- *  it only uses the token's ask to know what price to quote at. The actual
- *  direction call comes entirely from real BTC (or other crypto) spot price
- *  action, fetched from Binance.
+ *  BTC-only, single market. Completely replaces the old candle-majority-vote
+ *  / rebalance-ladder strategy with a much simpler breakout + recovery model:
  *
- *  SIGNAL (majority vote, 2-of-3 required):
- *    Three reference points are compared against spot price: this window's
- *    own open price (the actual settlement reference — Up wins if spot is
- *    above this at window close, Down if below), the close of the most
- *    recently CLOSED 15-minute candle, and the close of the most recently
- *    CLOSED 1-hour candle.
- *      - MARGIN FILTER: a reference only counts as a decisive vote if spot
- *        clears it by at least SIGNAL_MARGIN_BPS (default 3bps). A
- *        borderline "just barely above/below" reading doesn't count either
- *        way — those are exactly the signals a short pullback erases first.
- *      - CONFIRMATION WINDOW: spot itself is the AVERAGE of samples taken
- *        over the last CONFIRM_WINDOW_MS (default 8s), not a single instant
- *        tick, so one noisy sample can't single-handedly decide a trade.
- *    2 or 3 decisive votes agreeing = a valid signal. A 1-1 split, all
- *    references within the margin, or missing data = no trade.
+ *  PER 5-MINUTE WINDOW:
+ *    1. WAIT — first WAIT_SECS (default 240s / 4 minutes) of every window:
+ *       no trading, just watching prices tick.
+ *    2. WATCH — from WAIT_SECS to window end: poll the Up and Down ask
+ *       prices every tick. The instant EITHER side's ask reaches
+ *       ENTRY_PRICE (default 0.96), immediately place a limit BUY for that
+ *       side at 0.96 for either BASE_SHARES (default 6) or, if a recovery is
+ *       currently armed, the larger RECOVERY shares count. Only one entry
+ *       per window — whichever side crosses 0.96 first.
+ *    3. HOLD — once filled, watch the held side's bid every tick:
+ *         - If bid drops to SL_PRICE (default 0.50) or below, fire a
+ *           marketable limit SELL at the current bid immediately (stop-loss).
+ *           No more trading for the rest of that window.
+ *         - Otherwise the position simply rides to window resolution — no
+ *           take-profit order is placed; a win pays $1/share, a loss pays $0,
+ *           exactly as resolved by Polymarket / this bot's own resolution
+ *           bookkeeping (redemption itself is handled by the separate claim
+ *           script, same as before).
  *
- *  ENTRIES — recovery/rebalance style, confined to the first 3 minutes:
- *    The 5-minute window splits into an ACTIVE phase (0-180s, all trading
- *    happens here) and a QUIET phase (180-300s, no new orders — whatever
- *    position exists just rides to resolution).
- *    Within the active phase, the signal is re-checked at REBALANCE_
- *    CHECKPOINTS_SECS (default 15/50/85/120/155 — ~35s apart). At each
- *    checkpoint:
- *      - No position yet (or currently flat — see below) and a signal is
- *        valid → open/re-establish a directional tilt on the favored side,
- *        sized by signal strength (SHARES_BASE/STRONG).
- *      - Already tilted toward the favored side → hold, no action.
- *      - Signal has FULLY FLIPPED relative to the currently larger side →
- *        REBALANCE: buy just enough of the new favored side to bring share
- *        counts back to equal (fully neutralize — since Up+Down are
- *        complements, equal shares on both sides means the payout is
- *        identical no matter which one wins, i.e. zero directional
- *        exposure from that point). This is done with a BUY on the
- *        complementary side, never a sell — so exits/hedges never need
- *        their own resting sell order.
- *    "Flat" (equal shares, including zero/zero) is treated the same as "no
- *    position yet": the next checkpoint that finds a valid signal will open
- *    a fresh tilt again. This means a full flip followed by the same new
- *    signal persisting doesn't overshoot — it takes two checkpoints
- *    (neutralize, then re-tilt) rather than one big compound move.
+ *  LOSS RECOVERY (one-shot, non-chaining):
+ *    Whenever a BASE trade loses (either stopped out at 0.50, or loses at
+ *    resolution), the bot computes the $ loss on that trade and arms a
+ *    RECOVERY for the very next window: the next entry is sized so that a
+ *    WIN at 0.96 nets back the prior loss plus a fixed extra profit
+ *    (RECOVERY_EXTRA_PROFIT, default $1), i.e.
+ *        recoveryShares = ceil((loss + extraProfit) / netProfitPerShare)
+ *    where netProfitPerShare is the (1 - 0.96) win payout per share minus
+ *    the estimated taker fee on that share.
  *
- *  EXECUTION — single-shot limit order, quoted above the ask:
- *    Both the initial tilt and every rebalance hedge use the same order
- *    type: one limit buy priced slightly ABOVE the current ask. That's
- *    deliberately marketable — it fills essentially immediately, but is
- *    still submitted as a limit order (Polymarket doesn't have a distinct
- *    "market order" type). There is NO retry, NO cancel, NO re-quoting.
- *    This matters MORE here than in a single-entry design: rebalancing
- *    depends on the bot's bookkeeping of exactly how many shares of each
- *    side it holds being correct. A genuinely passive (uncertain-fill)
- *    limit order would make that bookkeeping unreliable — the bot wouldn't
- *    know whether a prior hedge actually went through before deciding the
- *    next one, which is exactly the "inferring fill state" trap that caused
- *    the duplicate-order problem in an earlier version. Reliability of the
- *    bot's own position tracking takes priority over saving the fee here.
+ *    The recovery trade fires on the next window's first 0.96 cross, same
+ *    WAIT → WATCH → HOLD mechanics as any other trade. If it WINS, the loss
+ *    is recovered and the bot returns to BASE sizing. If it ALSO loses (SL
+ *    or resolution), recovery does NOT chain again — the bot unconditionally
+ *    returns to BASE_SHARES on the following window, and that new loss is
+ *    simply absorbed (not re-armed).
  *
- *  SIZING:
- *    - Fresh tilt (flat → directional): SHARES_BASE (2-of-3) or
- *      SHARES_STRONG (3-of-3), same as before.
- *    - Rebalance hedge: NOT signal-strength-based — sized exactly to the
- *      current imbalance (abs(sharesUp - sharesDown)), enough to reach
- *      equal shares and nothing more.
+ *  EXECUTION:
+ *    - Entry: single-shot limit BUY priced exactly at ENTRY_PRICE. No
+ *      retry/re-quote — if the market moves before it fills, it's missed
+ *      for that window (there's still 60s+ of window left in most cases,
+ *      but the design deliberately doesn't chase).
+ *    - Stop-loss exit: single-shot limit SELL priced at the current bid
+ *      (marketable) the moment bid <= SL_PRICE, so it's not a resting order
+ *      sitting exactly at 0.50 that Polymarket has to match — the bot
+ *      actively detects the breach and fires the sell itself.
  *
- *  EXIT: there is none, on the bot's side. No take-profit order, no stop-
- *    loss — redemption of winning positions is handled entirely by a
- *    separate, independent auto-claim script working off actual on-chain
- *    resolution. This bot's own bookkeeping still simulates window
- *    resolution (via the public Gamma API) purely to keep the dashboard's
- *    P&L/win-rate figures meaningful; it does not place any exit order.
- *
- *  FEES: since entries are deliberately quoted above the ask (marketable),
- *    they're expected to pay the taker fee — there's no attempt to earn a
- *    maker rebate in this design anymore. Reliability over fee-optimization.
- *
- *  LIVE / DEMO: DRY_RUN is a runtime-switchable flag (see setMode), not a
- *    fixed startup constant — the dashboard has a one-click toggle plus an
- *    independent pause button.
+ *  LIVE / DEMO: DRY_RUN is runtime-switchable via setMode(), independent of
+ *    the pause/resume toggle, same as before.
  * ═══════════════════════════════════════════════════════════════
  */
 
 const PolymarketTrader = require('./polymarket-trader');
 
-const GAMMA    = 'https://gamma-api.polymarket.com';
-const CLOB     = 'https://clob.polymarket.com';
-const BINANCE  = 'https://api.binance.com/api/v3';
+const GAMMA   = 'https://gamma-api.polymarket.com';
+const CLOB    = 'https://clob.polymarket.com';
 
 const TICK_MS               = 500;
 const POLY_PRICE_REFRESH_MS = 1000;
 const WINDOW_SECS           = 300;
-const EARLY_CUTOFF_SECS     = Number(process.env.EARLY_CUTOFF_SECS || 2); // force-resolve this many seconds BEFORE the nominal window end (298s)
+const EARLY_CUTOFF_SECS     = Number(process.env.EARLY_CUTOFF_SECS || 2); // force-resolve this many seconds BEFORE the nominal window end
 const SLUG_OFFSET_FALLBACKS = [0, -300, 300];
+const SYMBOL                = 'BTC'; // single-market bot
 
 let DRY_RUN = (process.env.DRY_RUN || 'true').toLowerCase() === 'true'; // runtime-switchable — see setMode
 const TOTAL_CAPITAL = Number(process.env.TOTAL_CAPITAL || 2000);
-const DEFAULT_PAIRS = (process.env.CRYPTO_PAIRS || 'BTC')
-  .split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
 
 function round2(n) { return Math.round(n * 100) / 100; }
 function round5(n) { return Math.round(n * 100000) / 100000; }
 function nowSec() { return Date.now() / 1000; }
 
 // ── Strategy parameters ──
-// Recovery/rebalance design: all trading confined to the ACTIVE phase; the
-// rest of the window is QUIET (no new orders, existing position just rides).
-const ACTIVE_PHASE_SECS = Number(process.env.ACTIVE_PHASE_SECS || 180); // 3 of the 5 minutes
-const REBALANCE_CHECKPOINTS_SECS = (process.env.REBALANCE_CHECKPOINTS_SECS || '15,50,85,120,155')
-  .split(',').map(s => Number(s.trim())).filter(n => Number.isFinite(n)).sort((a, b) => a - b);
-const SHARES_BASE   = Number(process.env.SHARES_BASE || 6);    // fixed share count, 2-of-3 agreement — cost varies with price, not the other way round
-const SHARES_STRONG = Number(process.env.SHARES_STRONG || 12); // fixed share count, 3-of-3 agreement (~2x base, same ratio as before)
-const MIN_SHARES  = Number(process.env.MIN_SHARES || 1);
-// Single-shot execution: quote this far ABOVE the current ask so the order
-// is deliberately marketable and fills immediately — no retry, no cancel.
-const QUOTE_BUFFER = Number(process.env.QUOTE_BUFFER || 0.01);
+const WAIT_SECS               = Number(process.env.WAIT_SECS || 240);      // 4 minutes of no trading after window opens
+const ENTRY_PRICE             = Number(process.env.ENTRY_PRICE || 0.96);   // trigger + fill price for entry
+const SL_PRICE                = Number(process.env.SL_PRICE || 0.50);      // stop-loss trigger price
+const BASE_SHARES             = Number(process.env.BASE_SHARES || 6);      // default entry size
+const RECOVERY_EXTRA_PROFIT   = Number(process.env.RECOVERY_EXTRA_PROFIT || 1); // $ profit target beyond just breaking even on the prior loss
 
-const BTC_PRICE_REFRESH_MS  = Number(process.env.BTC_PRICE_REFRESH_MS || 3000);
-const BTC_CANDLE_REFRESH_MS = Number(process.env.BTC_CANDLE_REFRESH_MS || 20000);
-// #2: a reference only counts as a decisive vote if spot is at least this far
-// from it (in basis points of spot price) — filters out borderline, noise-
-// driven signals right at a boundary that are the most pullback-prone.
-const SIGNAL_MARGIN_BPS = Number(process.env.SIGNAL_MARGIN_BPS || 3); // 3bps of ~$64k BTC ≈ $19
-// #3: use the AVERAGE spot price over this trailing window instead of a
-// single instantaneous tick, so one noisy sample can't decide a trade.
-const CONFIRM_WINDOW_MS = Number(process.env.CONFIRM_WINDOW_MS || 8000);
-
-const CRYPTO_TAKER_FEE_RATE     = Number(process.env.CRYPTO_TAKER_FEE_RATE || 0.07);
-const CRYPTO_MAKER_REBATE_SHARE = Number(process.env.CRYPTO_MAKER_REBATE_SHARE || 0.20);
+const CRYPTO_TAKER_FEE_RATE = Number(process.env.CRYPTO_TAKER_FEE_RATE || 0.07);
 
 let emitFn = () => {};
 let slog = () => {};
@@ -145,12 +94,12 @@ let startTime = Date.now();
 let logs = [];
 let trades = [];
 let tradingEnabled = true;
-let pairList = [...DEFAULT_PAIRS];
-let perPairCapital = TOTAL_CAPITAL / Math.max(pairList.length, 1);
-let pairs = {};
-let lastPolyPriceFetch = 0;
 let totalEquityCurve = [];
-let cryptoRefs = {}; // per-symbol Binance reference data — see refreshCryptoRef
+
+// ── Recovery state (single market, so this is global rather than per-pair) ──
+let recoveryMode = false;
+let recoveryTargetShares = 0;
+let recoveryLossToCover = 0;
 
 function log(msg) {
   const line = `[${new Date().toISOString().slice(11, 19)}] ${msg}`;
@@ -160,149 +109,97 @@ function log(msg) {
 }
 
 async function getJSON(url) {
-  const res = await fetch(url, { headers: { 'User-Agent': 'polymarket-btc-signal-bot/1.0' } });
+  const res = await fetch(url, { headers: { 'User-Agent': 'polymarket-btc-breakout-bot/1.0' } });
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${url}`);
   return res.json();
 }
 async function postJSON(url, body) {
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'User-Agent': 'polymarket-btc-signal-bot/1.0' },
+    headers: { 'Content-Type': 'application/json', 'User-Agent': 'polymarket-btc-breakout-bot/1.0' },
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${url}`);
   return res.json();
 }
 
-// The only order type this bot places: a limit buy priced above the current
-// ask, so it's deliberately marketable and fills immediately. One shot, no
-// retry, no cancel — if it somehow doesn't fill, Polymarket expires it with
-// the market on its own.
+// The two order types this bot places: a limit BUY at exactly ENTRY_PRICE
+// for entries, and a limit SELL at the current bid for stop-loss exits (so
+// it's deliberately marketable). Both are single-shot — no retry, no cancel.
 async function placeEntryBuy(tokenId, price, shares) {
   if (!DRY_RUN && trader) return await trader.limitBuy(tokenId, shares, price);
   return { id: `dry-buy-${Date.now()}-${Math.random().toString(36).slice(2, 7)}` };
+}
+async function placeExitSell(tokenId, price, shares) {
+  if (!DRY_RUN && trader) {
+    if (typeof trader.limitSell === 'function') return await trader.limitSell(tokenId, shares, price);
+    log('⚠️  trader.limitSell() is not implemented in polymarket-trader.js — stop-loss exit was NOT actually placed on-chain. Add a limitSell(tokenId, shares, price) method mirroring limitBuy.');
+    return null;
+  }
+  return { id: `dry-sell-${Date.now()}-${Math.random().toString(36).slice(2, 7)}` };
 }
 function takerFee(shares, price) {
   return round5(shares * CRYPTO_TAKER_FEE_RATE * price * (1 - price));
 }
 
 // ─────────────────────────────────────────
-//  BTC (or other crypto) spot price + candle reference data
+//  Recovery sizing
 // ─────────────────────────────────────────
-function ensureRefs(symbol) {
-  if (!cryptoRefs[symbol]) cryptoRefs[symbol] = { price: null, priceHistory: [], close15: null, close1h: null, lastPriceFetch: 0, lastCandleFetch: 0 };
-  return cryptoRefs[symbol];
+// Net $ profit per share if a fresh entry at ENTRY_PRICE wins (pays $1).
+// Entries are limit orders (fee-free / rebate-eligible) and resolution
+// settlement itself is also fee-free, so this is simply the raw payout
+// margin. Fees only apply on a stop-loss exit (see checkStopLoss), which is
+// a deliberately marketable/taker sell.
+function netProfitPerShareAtEntry() {
+  return (1 - ENTRY_PRICE);
+}
+function computeRecoveryShares(lossAmount) {
+  const npps = netProfitPerShareAtEntry();
+  if (npps <= 0) return BASE_SHARES; // degenerate config guard
+  const needed = (lossAmount + RECOVERY_EXTRA_PROFIT) / npps;
+  return Math.max(BASE_SHARES, Math.ceil(needed));
 }
 
-// Averages spot price samples from the last CONFIRM_WINDOW_MS instead of
-// using the single latest tick — smooths out a single noisy/spiky sample
-// that would otherwise decide a trade on its own (see docblock #3).
-function confirmedPrice(symbol) {
-  const r = ensureRefs(symbol);
-  if (!r.priceHistory.length) return r.price;
-  const sum = r.priceHistory.reduce((s, x) => s + x.price, 0);
-  return sum / r.priceHistory.length;
-}
-
-// Returns the close of the most recently CLOSED candle for the given
-// interval — i.e. it explicitly skips the currently-forming candle, which
-// Binance's klines endpoint always includes as the last row.
-async function fetchClosedCandleClose(binanceSymbol, interval) {
-  const data = await getJSON(`${BINANCE}/klines?symbol=${binanceSymbol}&interval=${interval}&limit=2`);
-  const now = Date.now();
-  for (let i = data.length - 1; i >= 0; i--) {
-    if (data[i][6] < now) return parseFloat(data[i][4]); // [6]=closeTime, [4]=close
+// Called once per closed trade (SL or resolution). Arms/disarms recovery.
+function handlePositionClosed(p, profit, wasRecoveryTrade) {
+  if (profit < 0) {
+    const lossAmount = round2(Math.abs(profit));
+    if (wasRecoveryTrade) {
+      recoveryMode = false; recoveryTargetShares = 0; recoveryLossToCover = 0;
+      log(`⚠️  ${p.symbol} recovery trade ALSO lost $${lossAmount.toFixed(2)} — no re-chaining, returning to BASE (${BASE_SHARES}sh) next window`);
+    } else {
+      recoveryLossToCover = lossAmount;
+      recoveryTargetShares = computeRecoveryShares(lossAmount);
+      recoveryMode = true;
+      log(`🔁 ${p.symbol} base trade lost $${lossAmount.toFixed(2)} — arming RECOVERY: ${recoveryTargetShares}sh @ ${ENTRY_PRICE.toFixed(2)} next window (target +$${RECOVERY_EXTRA_PROFIT.toFixed(2)} beyond breakeven)`);
+    }
+  } else {
+    if (wasRecoveryTrade) log(`✅ ${p.symbol} recovery trade WON +$${profit.toFixed(2)} — loss recovered, back to BASE`);
+    recoveryMode = false; recoveryTargetShares = 0; recoveryLossToCover = 0;
   }
-  return null;
-}
-
-async function refreshCryptoRef(symbol) {
-  const r = ensureRefs(symbol);
-  const now = Date.now();
-  const binanceSymbol = `${symbol}USDT`;
-  if (now - r.lastPriceFetch >= BTC_PRICE_REFRESH_MS) {
-    r.lastPriceFetch = now;
-    try {
-      const d = await getJSON(`${BINANCE}/ticker/price?symbol=${binanceSymbol}`);
-      r.price = parseFloat(d.price);
-      r.priceHistory.push({ t: now, price: r.price });
-      const cutoff = now - CONFIRM_WINDOW_MS;
-      r.priceHistory = r.priceHistory.filter(s => s.t >= cutoff);
-    } catch (e) { log(`⚠️  ${symbol} spot price fetch failed: ${e.message}`); }
-  }
-  if (now - r.lastCandleFetch >= BTC_CANDLE_REFRESH_MS) {
-    r.lastCandleFetch = now;
-    try {
-      const [c15, c1h] = await Promise.all([
-        fetchClosedCandleClose(binanceSymbol, '15m'),
-        fetchClosedCandleClose(binanceSymbol, '1h'),
-      ]);
-      if (c15 != null) r.close15 = c15;
-      if (c1h != null) r.close1h = c1h;
-    } catch (e) { log(`⚠️  ${symbol} candle fetch failed: ${e.message}`); }
-  }
-}
-
-// Majority vote (2-of-3) across window-open, 15m close, 1h close — now using
-// a smoothed spot price (#3) and requiring each reference to be cleared by a
-// minimum margin to count as decisive (#2). Both changes target the same
-// failure mode: a borderline, single-tick signal that a short-term pullback
-// immediately erases.
-function computeSignal(symbol, windowOpenPrice) {
-  const r = ensureRefs(symbol);
-  if (r.price == null) return null;
-  const spot = confirmedPrice(symbol);
-  const margin = spot * (SIGNAL_MARGIN_BPS / 10000);
-  const refs = [windowOpenPrice, r.close15, r.close1h];
-  let up = 0, down = 0, total = 0;
-  for (const ref of refs) {
-    if (ref == null) continue;
-    const diff = spot - ref;
-    if (Math.abs(diff) < margin) continue; // too close to call — not a decisive vote, doesn't count either way
-    total++;
-    if (diff > 0) up++; else down++;
-  }
-  if (up >= 2 && up > down) return { side: 'Up', votes: up, total, spot: round2(spot) };
-  if (down >= 2 && down > up) return { side: 'Down', votes: down, total, spot: round2(spot) };
-  return null;
-}
-// Fixed SHARE count by signal strength — cost follows from whatever the
-// current ask is, rather than sizing to a target dollar amount.
-function sharesForSignal(signal) {
-  return signal.votes >= 3 ? SHARES_STRONG : SHARES_BASE;
 }
 
 // ─────────────────────────────────────────
-//  Pair state
+//  Market state (single BTC pair)
 // ─────────────────────────────────────────
-function freshPairState(symbol) {
+function freshPairState() {
   return {
-    symbol,
+    symbol: SYMBOL,
     tradable: false,
     windowStart: null, windowEnd: null, slug: null, eventTitle: null, conditionId: null,
     upTokenId: null, downTokenId: null,
     upAsk: null, upBid: null, downAsk: null, downBid: null,
-    windowOpenPrice: null,       // BTC (or symbol) spot price recorded when this window loaded
-    rebalancesDone: 0,           // how many REBALANCE_CHECKPOINTS_SECS have fired this window
-    netShares: { Up: 0, Down: 0 },  // cumulative shares bought this window, per side
-    netCost: { Up: 0, Down: 0 },    // cumulative $ spent this window, per side
-    windowClosed: false,            // true once this window's position has been resolved (paid out)
-    bankroll: perPairCapital,
+    phase: 'waiting', // waiting | watching | holding | closed
+    position: null,   // { side, shares, entryPrice, cost, fee, mode: 'base'|'recovery', openedAt }
+    resolvedThisWindow: true,
+    bankroll: TOTAL_CAPITAL,
     realizedPnl: 0,
     feesPaid: 0,
-    rebatesEarned: 0,
     wins: 0, losses: 0,
-    resolvedThisWindow: true,
-    equityCurve: [{ t: Date.now(), equity: perPairCapital }],
+    equityCurve: [{ t: Date.now(), equity: TOTAL_CAPITAL }],
   };
 }
-function resetPairs() {
-  perPairCapital = TOTAL_CAPITAL / Math.max(pairList.length, 1);
-  pairs = {};
-  for (const sym of pairList) pairs[sym] = freshPairState(sym);
-  totalEquityCurve = [{ t: Date.now(), equity: TOTAL_CAPITAL }];
-}
-resetPairs();
+let pair = freshPairState();
 
 // ─────────────────────────────────────────
 //  Slug / window math (unchanged market-discovery plumbing)
@@ -347,9 +244,6 @@ async function loadPairWindow(p) {
   const downId = tokenIdForSide(market, 'down');
   if (!upId || !downId) { log(`⚠️  ${p.symbol}: window loaded but Up/Down token ids missing`); p.tradable = false; return; }
 
-  await refreshCryptoRef(p.symbol); // make sure we have a fresh spot price to record as this window's open
-  const r = ensureRefs(p.symbol);
-
   p.windowStart = windowStart;
   p.windowEnd = windowStart + WINDOW_SECS;
   p.slug = slug;
@@ -359,33 +253,26 @@ async function loadPairWindow(p) {
   p.downTokenId = downId;
   p.tradable = true;
   p.resolvedThisWindow = false;
-  p.windowOpenPrice = r.price;
-  p.rebalancesDone = 0;
-  p.netShares = { Up: 0, Down: 0 };
-  p.netCost = { Up: 0, Down: 0 };
-  p.windowClosed = false;
-  log(`🔭 ${p.symbol} window loaded: ${slug} | open=${r.price ?? '?'} | ends ${new Date(p.windowEnd * 1000).toISOString().slice(11,19)}Z`);
+  p.phase = 'waiting';
+  p.position = null;
+  log(`🔭 ${p.symbol} window loaded: ${slug} | ends ${new Date(p.windowEnd * 1000).toISOString().slice(11,19)}Z | ${recoveryMode ? `RECOVERY armed (${recoveryTargetShares}sh, covering $${recoveryLossToCover.toFixed(2)})` : `base sizing (${BASE_SHARES}sh)`}`);
 }
 
 // ─────────────────────────────────────────
-//  Polymarket price feed (unchanged plumbing)
+//  Polymarket price feed (unchanged plumbing, single pair)
 // ─────────────────────────────────────────
 async function refreshPolyPrices() {
-  const requests = [];
-  for (const p of Object.values(pairs)) {
-    if (!p.tradable || !p.upTokenId || !p.downTokenId) continue;
-    requests.push({ token_id: p.upTokenId, side: 'BUY' });
-    requests.push({ token_id: p.upTokenId, side: 'SELL' });
-    requests.push({ token_id: p.downTokenId, side: 'BUY' });
-    requests.push({ token_id: p.downTokenId, side: 'SELL' });
-  }
-  if (!requests.length) return;
+  if (!pair.tradable || !pair.upTokenId || !pair.downTokenId) return;
+  const requests = [
+    { token_id: pair.upTokenId, side: 'BUY' },
+    { token_id: pair.upTokenId, side: 'SELL' },
+    { token_id: pair.downTokenId, side: 'BUY' },
+    { token_id: pair.downTokenId, side: 'SELL' },
+  ];
   function applyPolyPrice(tid, side, price) {
     if (!Number.isFinite(price)) return;
-    for (const p of Object.values(pairs)) {
-      if (p.upTokenId === tid) { if (side === 'BUY') p.upAsk = price; else if (side === 'SELL') p.upBid = price; }
-      else if (p.downTokenId === tid) { if (side === 'BUY') p.downAsk = price; else if (side === 'SELL') p.downBid = price; }
-    }
+    if (pair.upTokenId === tid) { if (side === 'BUY') pair.upAsk = price; else if (side === 'SELL') pair.upBid = price; }
+    else if (pair.downTokenId === tid) { if (side === 'BUY') pair.downAsk = price; else if (side === 'SELL') pair.downBid = price; }
   }
   try {
     const data = await postJSON(`${CLOB}/prices`, requests);
@@ -408,21 +295,18 @@ async function refreshPolyPrices() {
       }
     }
   } catch (e) {
-    for (const p of Object.values(pairs)) {
-      if (!p.tradable) continue;
-      try {
-        const [upAsk, upBid, downAsk, downBid] = await Promise.all([
-          getJSON(`${CLOB}/price?token_id=${p.upTokenId}&side=BUY`).catch(() => null),
-          getJSON(`${CLOB}/price?token_id=${p.upTokenId}&side=SELL`).catch(() => null),
-          getJSON(`${CLOB}/price?token_id=${p.downTokenId}&side=BUY`).catch(() => null),
-          getJSON(`${CLOB}/price?token_id=${p.downTokenId}&side=SELL`).catch(() => null),
-        ]);
-        if (upAsk) p.upAsk = parseFloat(upAsk.price || upAsk.mid || p.upAsk);
-        if (upBid) p.upBid = parseFloat(upBid.price || upBid.mid || p.upBid);
-        if (downAsk) p.downAsk = parseFloat(downAsk.price || downAsk.mid || p.downAsk);
-        if (downBid) p.downBid = parseFloat(downBid.price || downBid.mid || p.downBid);
-      } catch (_) {}
-    }
+    try {
+      const [upAsk, upBid, downAsk, downBid] = await Promise.all([
+        getJSON(`${CLOB}/price?token_id=${pair.upTokenId}&side=BUY`).catch(() => null),
+        getJSON(`${CLOB}/price?token_id=${pair.upTokenId}&side=SELL`).catch(() => null),
+        getJSON(`${CLOB}/price?token_id=${pair.downTokenId}&side=BUY`).catch(() => null),
+        getJSON(`${CLOB}/price?token_id=${pair.downTokenId}&side=SELL`).catch(() => null),
+      ]);
+      if (upAsk) pair.upAsk = parseFloat(upAsk.price || upAsk.mid || pair.upAsk);
+      if (upBid) pair.upBid = parseFloat(upBid.price || upBid.mid || pair.upBid);
+      if (downAsk) pair.downAsk = parseFloat(downAsk.price || downAsk.mid || pair.downAsk);
+      if (downBid) pair.downBid = parseFloat(downBid.price || downBid.mid || pair.downBid);
+    } catch (_) {}
   }
 }
 
@@ -430,13 +314,13 @@ async function refreshPolyPrices() {
 //  Equity tracking
 // ─────────────────────────────────────────
 function pairMarkValue(p) {
-  if (p.windowClosed || (p.netShares.Up === 0 && p.netShares.Down === 0)) return round2(p.bankroll);
-  const upVal = round2(p.netShares.Up * (p.upBid ?? (p.netCost.Up && p.netShares.Up ? p.netCost.Up / p.netShares.Up : 0)));
-  const downVal = round2(p.netShares.Down * (p.downBid ?? (p.netCost.Down && p.netShares.Down ? p.netCost.Down / p.netShares.Down : 0)));
-  return round2(p.bankroll + upVal + downVal);
+  if (!p.position) return round2(p.bankroll);
+  const bid = p.position.side === 'Up' ? p.upBid : p.downBid;
+  const px = bid != null ? bid : p.position.entryPrice;
+  return round2(p.bankroll + p.position.shares * px);
 }
 function pushGlobalEquity() {
-  const total = round2(Object.values(pairs).reduce((s, p) => s + pairMarkValue(p), 0));
+  const total = pairMarkValue(pair);
   totalEquityCurve.push({ t: Date.now(), equity: total });
   if (totalEquityCurve.length > 500) totalEquityCurve.shift();
 }
@@ -452,72 +336,70 @@ function registerTrade(p, entry) {
 }
 
 // ─────────────────────────────────────────
-//  Entries: recovery/rebalance style, confined to the active phase
+//  Entry: fires the instant either side's ask crosses ENTRY_PRICE
 // ─────────────────────────────────────────
+async function tryEnterPosition(p) {
+  let side = null;
+  if (p.upAsk != null && p.upAsk >= ENTRY_PRICE) side = 'Up';
+  else if (p.downAsk != null && p.downAsk >= ENTRY_PRICE) side = 'Down';
+  if (!side) return;
 
-// Places one buy on the given side. Quoted above the current ask so it's
-// deliberately marketable — no retry, no cancel, no fill verification.
-// Bookkeeping assumes the fill happens at the quoted price. Used for both
-// fresh directional tilts and rebalance hedges — same mechanics either way.
-async function buySide(p, side, shares, reason) {
-  const tokenId = side === 'Up' ? p.upTokenId : p.downTokenId;
-  const ask = side === 'Up' ? p.upAsk : p.downAsk;
-  if (ask == null) { log(`⏭️  ${p.symbol} ${reason}: no ${side} ask available, skipping`); return; }
+  const shares = recoveryMode ? recoveryTargetShares : BASE_SHARES;
   if (shares <= 0) return;
-
-  const quotePrice = round2(ask + QUOTE_BUFFER); // above the ask — deliberately marketable, single shot
-  const notional = round2(quotePrice * shares);
-  const fee = takerFee(shares, quotePrice);
-  const totalCost = round2(notional + fee);
+  const tokenId = side === 'Up' ? p.upTokenId : p.downTokenId;
+  const price = ENTRY_PRICE;
+  // Entry is a limit order — fee-free (rebate-eligible side of the book),
+  // unlike the stop-loss exit which is a deliberately marketable taker sell.
+  const totalCost = round2(price * shares);
   if (totalCost > p.bankroll) {
-    log(`⏭️  ${p.symbol} ${reason}: skip — insufficient bankroll ($${p.bankroll.toFixed(2)} < $${totalCost.toFixed(2)})`);
+    log(`⏭️  ${p.symbol} entry skipped — insufficient bankroll ($${p.bankroll.toFixed(2)} < $${totalCost.toFixed(2)})`);
     return;
   }
 
-  await placeEntryBuy(tokenId, quotePrice, shares); // fire and forget
+  await placeEntryBuy(tokenId, price, shares); // fire and forget, single-shot
   p.bankroll = round2(p.bankroll - totalCost);
-  p.realizedPnl = round2(p.realizedPnl - fee);
-  p.feesPaid = round2(p.feesPaid + fee);
-  p.netShares[side] = round2(p.netShares[side] + shares);
-  p.netCost[side] = round2(p.netCost[side] + totalCost);
+  const mode = recoveryMode ? 'recovery' : 'base';
+  p.position = { side, shares, entryPrice: price, cost: totalCost, fee: 0, mode, openedAt: Date.now() };
+  const modeTag = mode === 'recovery' ? `RECOVERY (covering $${recoveryLossToCover.toFixed(2)})` : 'BASE';
+  log(`🎯 ${p.symbol} ENTRY [${modeTag}] bought ${side} ${shares}sh @ ${price.toFixed(2)} | cost=$${totalCost.toFixed(2)} (no fee — limit entry)`);
+  registerTrade(p, { side: 'BUY', outcome: side, reason: mode === 'recovery' ? 'ENTRY-RECOVERY' : 'ENTRY-BASE', price, shares, cost: totalCost, fee: 0 });
   recordEquity(p);
-  log(`🎯 ${p.symbol} ${reason}: bought ${side} ${shares.toFixed(2)}sh @ ${quotePrice.toFixed(2)} | cost=$${totalCost.toFixed(2)} | fee=-$${fee.toFixed(4)} | net now Up=${p.netShares.Up.toFixed(2)}sh/Down=${p.netShares.Down.toFixed(2)}sh`);
-  registerTrade(p, { side: 'BUY', outcome: side, reason, price: quotePrice, shares, cost: totalCost, fee });
-}
-
-// One rebalance checkpoint: compare the currently larger side to the fresh
-// signal and act accordingly. "Flat" (equal shares, including 0/0) is
-// treated the same as "no position" — the next valid signal opens a fresh
-// tilt. A full flip only ever neutralizes back to flat; re-establishing a
-// new directional tilt happens on the FOLLOWING checkpoint if the flipped
-// signal still holds, so a flip-and-continue takes two steps, not one.
-async function runRebalanceCheck(p) {
-  const signal = computeSignal(p.symbol, p.windowOpenPrice);
-  if (!signal) { log(`${p.symbol} rebalance check: no majority signal, holding as-is`); return; }
-
-  const upShares = p.netShares.Up, downShares = p.netShares.Down;
-  const currentSide = upShares === downShares ? null : (upShares > downShares ? 'Up' : 'Down');
-
-  if (currentSide === null) {
-    await buySide(p, signal.side, Math.max(sharesForSignal(signal), MIN_SHARES), 'tilt (flat → directional)');
-  } else if (currentSide === signal.side) {
-    log(`${p.symbol} rebalance check: already tilted ${currentSide}, signal agrees — holding`);
-  } else {
-    const hedgeShares = round2(Math.abs(upShares - downShares));
-    await buySide(p, signal.side, hedgeShares, `rebalance (flip ${currentSide}→${signal.side}, neutralizing)`);
-  }
-}
-
-async function maybeRebalance(p) {
-  const elapsed = nowSec() - p.windowStart;
-  while (p.rebalancesDone < REBALANCE_CHECKPOINTS_SECS.length && elapsed >= REBALANCE_CHECKPOINTS_SECS[p.rebalancesDone]) {
-    await runRebalanceCheck(p);
-    p.rebalancesDone++;
-  }
 }
 
 // ─────────────────────────────────────────
-//  Window resolution
+//  Stop-loss: fires the instant held side's bid drops to SL_PRICE or below
+// ─────────────────────────────────────────
+async function checkStopLoss(p) {
+  const pos = p.position;
+  if (!pos) return;
+  const bid = pos.side === 'Up' ? p.upBid : p.downBid;
+  if (bid == null || bid > SL_PRICE) return;
+
+  const sellPrice = bid; // marketable — sell at the actual current bid to guarantee the fill
+  const tokenId = pos.side === 'Up' ? p.upTokenId : p.downTokenId;
+  await placeExitSell(tokenId, sellPrice, pos.shares);
+
+  const proceeds = round2(sellPrice * pos.shares);
+  const fee = takerFee(pos.shares, sellPrice);
+  const netProceeds = round2(proceeds - fee);
+  const profit = round2(netProceeds - pos.cost);
+
+  p.bankroll = round2(p.bankroll + netProceeds);
+  p.feesPaid = round2(p.feesPaid + fee);
+  p.realizedPnl = round2(p.realizedPnl + profit);
+  p.losses++;
+  log(`🧯 ${p.symbol} STOP-LOSS [${pos.mode.toUpperCase()}] sold ${pos.shares}sh ${pos.side} @ ${sellPrice.toFixed(2)} | proceeds=$${netProceeds.toFixed(2)} (fee=-$${fee.toFixed(4)}, taker) | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
+  registerTrade(p, { side: 'SELL', outcome: pos.side, reason: 'SL', price: sellPrice, shares: pos.shares, proceeds: netProceeds, profit });
+
+  handlePositionClosed(p, profit, pos.mode === 'recovery');
+  p.position = null;
+  p.resolvedThisWindow = true; // one shot per window — no re-entry after SL
+  p.phase = 'closed';
+  recordEquity(p);
+}
+
+// ─────────────────────────────────────────
+//  Window resolution (position rode to close without hitting SL)
 // ─────────────────────────────────────────
 async function determineWinningSide(p) {
   try {
@@ -540,28 +422,29 @@ async function resolvePairWindow(p) {
   if (p.resolvedThisWindow) return;
   p.resolvedThisWindow = true;
 
-  const hasPosition = p.netShares.Up > 0 || p.netShares.Down > 0;
-  let winner = null;
-  if (hasPosition) winner = await determineWinningSide(p);
-
-  if (hasPosition) {
-    const winShares = winner === 'Up' ? p.netShares.Up : (winner === 'Down' ? p.netShares.Down : 0);
-    const proceeds = round2(winShares * 1);
-    const totalCost = round2(p.netCost.Up + p.netCost.Down);
-    const profit = round2(proceeds - totalCost);
+  const pos = p.position;
+  if (pos) {
+    const winnerSide = await determineWinningSide(p);
+    const won = winnerSide === pos.side;
+    const proceeds = won ? round2(pos.shares * 1) : 0;
+    const profit = round2(proceeds - pos.cost);
     p.bankroll = round2(p.bankroll + proceeds);
     p.realizedPnl = round2(p.realizedPnl + profit);
-    if (profit > 0) p.wins++; else p.losses++;
-    const icon = profit > 0 ? '💰' : '💥';
-    log(`${icon} ${p.symbol} RESOLUTION winner=${winner ?? '?'} | held Up=${p.netShares.Up.toFixed(2)}sh/Down=${p.netShares.Down.toFixed(2)}sh | proceeds=$${proceeds.toFixed(2)} | totalCost=$${totalCost.toFixed(2)} | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)} (dashboard bookkeeping only — real redemption is via the separate claim script)`);
-    registerTrade(p, { side: 'SELL', outcome: winner, reason: 'RESOLUTION', upShares: p.netShares.Up, downShares: p.netShares.Down, proceeds, profit });
+    if (won) p.wins++; else p.losses++;
+    const icon = won ? '💰' : '💥';
+    log(`${icon} ${p.symbol} RESOLUTION [${pos.mode.toUpperCase()}] winner=${winnerSide ?? '?'} | held ${pos.side} ${pos.shares}sh | proceeds=$${proceeds.toFixed(2)} (no fee) | cost=$${pos.cost.toFixed(2)} | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
+    registerTrade(p, { side: 'SELL', outcome: winnerSide, reason: 'RESOLUTION', price: won ? 1 : 0, shares: pos.shares, proceeds, profit });
+    handlePositionClosed(p, profit, pos.mode === 'recovery');
+    p.position = null;
+  } else {
+    log(`${p.symbol} window closed — no trade this window (0.96 never hit after the wait phase)`);
   }
-  p.windowClosed = true;
+  p.phase = 'closed';
   recordEquity(p);
 }
 
 // ─────────────────────────────────────────
-//  Main per-pair tick
+//  Main per-window tick
 // ─────────────────────────────────────────
 async function processPair(p) {
   const ws = currentWindowStart();
@@ -577,9 +460,17 @@ async function processPair(p) {
   }
   if (p.resolvedThisWindow) return;
 
-  await refreshCryptoRef(p.symbol);
-  if (elapsed < ACTIVE_PHASE_SECS) {
-    await maybeRebalance(p);
+  if (elapsed < WAIT_SECS) {
+    p.phase = 'waiting';
+    return;
+  }
+
+  if (!p.position) {
+    p.phase = 'watching';
+    await tryEnterPosition(p);
+  } else {
+    p.phase = 'holding';
+    await checkStopLoss(p);
   }
 }
 
@@ -587,46 +478,36 @@ async function processPair(p) {
 //  UI state
 // ─────────────────────────────────────────
 function buildState() {
-  const pairStates = Object.values(pairs).map(p => {
-    const markValue = pairMarkValue(p);
-    const totalCost = round2(p.netCost.Up + p.netCost.Down);
-    const heldValue = round2(markValue - p.bankroll);
-    const unrealized = round2(heldValue - totalCost);
-    const r = ensureRefs(p.symbol);
-    return {
-      symbol: p.symbol, tradable: p.tradable, slug: p.slug, windowEnd: p.windowEnd,
-      secsToEnd: p.windowEnd ? Math.max(0, Math.floor(p.windowEnd - nowSec())) : null,
-      upAsk: p.upAsk, upBid: p.upBid, downAsk: p.downAsk, downBid: p.downBid,
-      windowOpenPrice: p.windowOpenPrice, spotPrice: r.price, close15: r.close15, close1h: r.close1h,
-      rebalancesDone: p.rebalancesDone, rebalancesTotal: REBALANCE_CHECKPOINTS_SECS.length,
-      bankroll: p.bankroll, realizedPnl: p.realizedPnl, unrealizedPnl: unrealized, markValue,
-      feesPaid: p.feesPaid, rebatesEarned: p.rebatesEarned, wins: p.wins, losses: p.losses,
-      netShares: p.netShares, netCost: p.netCost,
-      equityCurve: p.equityCurve,
-    };
-  });
-  const totalBankroll = round2(pairStates.reduce((s, p) => s + p.bankroll, 0));
-  const totalMark = round2(pairStates.reduce((s, p) => s + p.markValue, 0));
-  const totalRealized = round2(pairStates.reduce((s, p) => s + p.realizedPnl, 0));
-  const totalUnrealized = round2(pairStates.reduce((s, p) => s + p.unrealizedPnl, 0));
-  const totalWins = pairStates.reduce((s, p) => s + p.wins, 0);
-  const totalLosses = pairStates.reduce((s, p) => s + p.losses, 0);
+  const markValue = pairMarkValue(pair);
+  const heldValue = round2(markValue - pair.bankroll);
+  const unrealized = pair.position ? round2(heldValue - pair.position.cost) : 0;
+  const pairState = {
+    symbol: pair.symbol, tradable: pair.tradable, slug: pair.slug, windowEnd: pair.windowEnd,
+    secsToEnd: pair.windowEnd ? Math.max(0, Math.floor(pair.windowEnd - nowSec())) : null,
+    secsToWatch: pair.windowStart ? Math.max(0, Math.floor(WAIT_SECS - (nowSec() - pair.windowStart))) : null,
+    phase: pair.phase,
+    upAsk: pair.upAsk, upBid: pair.upBid, downAsk: pair.downAsk, downBid: pair.downBid,
+    position: pair.position,
+    bankroll: pair.bankroll, realizedPnl: pair.realizedPnl, unrealizedPnl: unrealized, markValue,
+    feesPaid: pair.feesPaid, wins: pair.wins, losses: pair.losses,
+    equityCurve: pair.equityCurve,
+  };
+  const totalWins = pair.wins, totalLosses = pair.losses;
   return {
-    dryRun: DRY_RUN, tradingEnabled, pairs: pairList,
-    totalCapital: TOTAL_CAPITAL, perPairCapital, totalBankroll, totalMarkValue: totalMark,
-    totalRealizedPnl: totalRealized, totalUnrealizedPnl: totalUnrealized, totalPnl: round2(totalMark - TOTAL_CAPITAL),
+    dryRun: DRY_RUN, tradingEnabled,
+    totalCapital: TOTAL_CAPITAL, totalBankroll: pair.bankroll, totalMarkValue: markValue,
+    totalRealizedPnl: pair.realizedPnl, totalUnrealizedPnl: unrealized, totalPnl: round2(markValue - TOTAL_CAPITAL),
     totalWins, totalLosses,
-    totalFeesPaid: round2(pairStates.reduce((s, p) => s + p.feesPaid, 0)),
-    totalRebatesEarned: round2(pairStates.reduce((s, p) => s + p.rebatesEarned, 0)),
+    totalFeesPaid: pair.feesPaid,
     winRate: (totalWins + totalLosses) > 0 ? round2((totalWins / (totalWins + totalLosses)) * 100) : null,
     uptime: Math.floor((Date.now() - startTime) / 1000),
+    recovery: { armed: recoveryMode, targetShares: recoveryTargetShares, lossToCover: recoveryLossToCover, extraProfit: RECOVERY_EXTRA_PROFIT },
     config: {
-      activePhaseSecs: ACTIVE_PHASE_SECS, rebalanceCheckpointsSecs: REBALANCE_CHECKPOINTS_SECS,
-      sharesBase: SHARES_BASE, sharesStrong: SHARES_STRONG, quoteBuffer: QUOTE_BUFFER,
-      signalMarginBps: SIGNAL_MARGIN_BPS, confirmWindowMs: CONFIRM_WINDOW_MS,
-      cryptoTakerFeeRate: CRYPTO_TAKER_FEE_RATE, cryptoMakerRebateShare: CRYPTO_MAKER_REBATE_SHARE,
+      waitSecs: WAIT_SECS, entryPrice: ENTRY_PRICE, slPrice: SL_PRICE,
+      baseShares: BASE_SHARES, recoveryExtraProfit: RECOVERY_EXTRA_PROFIT,
+      cryptoTakerFeeRate: CRYPTO_TAKER_FEE_RATE,
     },
-    pairStates, totalEquityCurve, logs: logs.slice(-100), trades: trades.slice(-80).reverse(),
+    pairState, totalEquityCurve, logs: logs.slice(-100), trades: trades.slice(-80).reverse(),
   };
 }
 
@@ -634,32 +515,25 @@ let loopRunning = false;
 async function mainLoop() {
   if (loopRunning) return;
   loopRunning = true;
+  let lastPolyPriceFetch = 0;
   while (true) {
     try {
       const now = Date.now();
       if (now - lastPolyPriceFetch >= POLY_PRICE_REFRESH_MS) { lastPolyPriceFetch = now; await refreshPolyPrices(); }
-      for (const p of Object.values(pairs)) { try { await processPair(p); } catch (e) { log(`⚠️  ${p.symbol} tick error: ${e.message}`); } }
+      try { await processPair(pair); } catch (e) { log(`⚠️  ${pair.symbol} tick error: ${e.message}`); }
       emitFn('state', buildState());
     } catch (e) { log(`⚠️  Loop error: ${e.message}`); }
     await new Promise(r => setTimeout(r, TICK_MS));
   }
 }
 
-function setPairs(list) {
-  const clean = (list || []).map(s => s.trim().toUpperCase()).filter(Boolean);
-  if (!clean.length) return { ok: false, error: 'Empty pair list' };
-  pairList = [...new Set(clean)];
-  resetPairs();
-  log(`⚙️  Pairs updated: ${pairList.join(', ')} | $${perPairCapital.toFixed(2)} per pair`);
-  return { ok: true, pairs: pairList, perPairCapital };
-}
-function pauseTrading() { tradingEnabled = false; log('⏸️  Trading paused (existing positions still tracked for resolution bookkeeping)'); return { ok: true }; }
+function pauseTrading() { tradingEnabled = false; log('⏸️  Trading paused (existing position still tracked for resolution bookkeeping)'); return { ok: true }; }
 function resumeTrading() { tradingEnabled = true; log('▶️  Trading resumed'); return { ok: true }; }
 function getStatus() { return { ok: true, ...buildState() }; }
 
-// Runtime live/demo switch — DRY_RUN is no longer fixed at startup. Existing
-// open positions are left alone (they just keep being tracked for dashboard
-// bookkeeping); only NEW orders placed after the switch use the new mode.
+// Runtime live/demo switch — DRY_RUN is no longer fixed at startup. An
+// existing open position is left alone (still tracked for bookkeeping);
+// only NEW orders placed after the switch use the new mode.
 function setMode(wantLive) {
   const was = DRY_RUN;
   DRY_RUN = !wantLive;
@@ -672,17 +546,15 @@ function setMode(wantLive) {
 async function init(privateKey, emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
-  log(`🚀 BTC Price-Action Signal Bot — recovery/rebalance style (majority vote: window-open / 15m close / 1h close)`);
-  log(`⚙️  $${TOTAL_CAPITAL} demo capital across ${pairList.length} pairs (${pairList.join(', ')}) → $${perPairCapital.toFixed(2)}/pair`);
-  log(`⚙️  active phase 0-${ACTIVE_PHASE_SECS}s, rebalance checkpoints at +${REBALANCE_CHECKPOINTS_SECS.join('s/+')}s | tilt size ${SHARES_BASE}sh (2-of-3) / ${SHARES_STRONG}sh (3-of-3) | flip → fully neutralize via buying the complement | no TP/SL — rides to resolution, external claim script handles redemption`);
-  log(`⚙️  signal quality: ${SIGNAL_MARGIN_BPS}bps minimum margin per reference | spot averaged over trailing ${(CONFIRM_WINDOW_MS/1000).toFixed(0)}s instead of a single tick`);
-  log(`⚙️  execution: single-shot limit buy quoted ${QUOTE_BUFFER} above the ask (deliberately marketable) | no retry, no cancel — reliable fill bookkeeping matters here since rebalancing depends on knowing exact current holdings`);
-  log(`⚙️  fees: entries pay the taker fee (marketable by design); no rebate is attempted`);
-  log(`${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price/candle data' : '🔴 LIVE MODE — real money'}`);
+  log(`🚀 BTC 0.96 Breakout + Recovery Bot`);
+  log(`⚙️  $${TOTAL_CAPITAL} capital | wait ${WAIT_SECS}s (${(WAIT_SECS/60).toFixed(1)}m) then watch for either side to hit ${ENTRY_PRICE.toFixed(2)} | base size ${BASE_SHARES}sh | SL at ${SL_PRICE.toFixed(2)} (bot-monitored, marketable exit) | no TP order — rides to resolution`);
+  log(`⚙️  fees: entries (limit) and resolution settlement are fee-free; only a stop-loss exit (marketable taker sell) pays the taker fee`);
+  log(`⚙️  recovery: on a base loss, next window sizes to cover the loss + $${RECOVERY_EXTRA_PROFIT.toFixed(2)} extra; one-shot only — a losing recovery does NOT re-chain, returns to base`);
+  log(`${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
   trader = new PolymarketTrader(privateKey);
   await trader.authenticate();
   mainLoop().catch(e => log(`❌ Fatal: ${e.message}`));
 }
 
-module.exports = { init, setPairs, pauseTrading, resumeTrading, setMode, getStatus, buildState };
+module.exports = { init, pauseTrading, resumeTrading, setMode, getStatus, buildState };
