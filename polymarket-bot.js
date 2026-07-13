@@ -17,9 +17,12 @@
  *    Filled positions ride to resolution (win=$1/share, lose=$0).
  *
  *  SIZING:
- *    At the time each order is placed:
- *      - mid < 0.50 → 20 shares
+ *    Before 100s into window:
+ *      - mid < 0.50 → 20 shares (cheap side loaded)
  *      - mid >= 0.50 → 10 shares
+ *    After 100s into window (flipped):
+ *      - mid > 0.50 → 20 shares (expensive side loaded)
+ *      - mid <= 0.50 → 10 shares
  *    Both Up and Down evaluated independently each tick.
  *
  *  LIVE / DEMO: DRY_RUN is runtime-switchable via setMode().
@@ -297,7 +300,8 @@ async function placePeriodicOrders(p) {
 
     const mid = round2((ask + bid) / 2);
     const limitPrice = round2(mid + PRICE_OFFSET);
-    const shares = mid < 0.50 ? 20 : 10;
+    const elapsed = nowSec() - p.windowStart;
+    const shares = elapsed < 100 ? (mid < 0.50 ? 20 : 10) : (mid > 0.50 ? 20 : 10);
 
     if (limitPrice <= 0) continue;
 
@@ -527,7 +531,7 @@ async function init(privateKey, emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
   log(`🚀 BTC Periodic Resting Limit Buy Bot`);
-  log(`⚙️  $${TOTAL_CAPITAL} capital | every ${ORDER_TICK_SECS}s place resting buy at mid${PRICE_OFFSET} until ${ORDER_CUTOFF_SECS}s | size: 20sh if mid<0.50, 10sh if mid>=0.50 | Up/Down independent | fill when ask walks to limit price | ride to resolution`);
+  log(`&#x1F680; $${TOTAL_CAPITAL} capital | every ${ORDER_TICK_SECS}s place resting buy at mid${PRICE_OFFSET} until ${ORDER_CUTOFF_SECS}s | size: <100s: 20sh if mid<0.50/10sh if mid>=0.50 | >100s: 20sh if mid>0.50/10sh if mid<=0.50 | Up/Down independent | fill when ask walks to limit price | ride to resolution`);
   log(`${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
   trader = new PolymarketTrader(privateKey);
