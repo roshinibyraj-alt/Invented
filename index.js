@@ -256,7 +256,9 @@ app.get('/', (_, res) => {
       const phaseLabel = {
         leg1_open: 'LEG1 OPEN — resting @ ' + leg1Price + ' both sides',
         leg1_filled: 'LEG1 FILLED — waiting for 3:00 mark (' + (p.secsToWatch!=null ? fmtSecs(p.secsToWatch) : '…') + ')',
-        watching_leg2: 'WATCHING for ' + (p.expensiveSide||'expensive side') + ' ≥ ' + leg2Price,
+        watching_leg2: p.leg2Armed
+          ? 'LEG2 ARMED @ ' + leg2Price + ' — waiting for ' + (p.expensiveSide||'?') + ' to come back down to fill'
+          : 'WATCHING for ' + (p.expensiveSide||'expensive side') + ' ≥ ' + leg2Price,
         leg2_filled: 'BOTH LEGS FILLED — riding to resolution',
         no_leg2: 'LEG1 ONLY — leg2 trigger never hit',
         no_fill: 'NO FILL — skipped this window',
