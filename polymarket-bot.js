@@ -146,7 +146,10 @@ function freshPairState() {
     leg1FilledSide: null,   // 'Up' | 'Down' | null
     expensiveSide: null,    // the side opposite leg1FilledSide, once known
     position1: null,        // { side, shares, entryPrice, cost, mode: 'leg1', openedAt }
-    // leg 2 (single-shot @ LEG2_PRICE on the expensive side)
+    // leg 2 (resting limit @ LEG2_PRICE on the expensive side, armed once
+    // price first crosses above LEG2_PRICE, filled only if it comes back down)
+    leg2Armed: false,       // resting order has been placed
+    leg2OrderId: null,
     leg2Done: false,        // true once we've either filled leg2 or given up trying this window
     position2: null,        // { side, shares, entryPrice, cost, mode: 'leg2', openedAt }
     resolvedThisWindow: true,
@@ -217,6 +220,8 @@ async function loadPairWindow(p) {
   p.leg1FilledSide = null;
   p.expensiveSide = null;
   p.position1 = null;
+  p.leg2Armed = false;
+  p.leg2OrderId = null;
   p.leg2Done = false;
   p.position2 = null;
   log(`🔭 ${p.symbol} window loaded: ${slug} | ends ${new Date(p.windowEnd * 1000).toISOString().slice(11,19)}Z | leg1 will place resting buys on both sides @ ${LEG1_PRICE.toFixed(2)} for ${LEG1_SHARES}sh each`);
@@ -351,31 +356,52 @@ async function checkLeg1Fill(p) {
 }
 
 // ─────────────────────────────────────────
-//  Leg 2: single-shot limit buy on the expensive side @ LEG2_PRICE, once
-//  armed (>= LEG1_WATCH_SECS elapsed AND leg 1 filled). Fires the instant
-//  the expensive side's ask crosses above LEG2_PRICE, any time from the
-//  3-minute mark through window end.
+//  Leg 2: resting limit buy on the expensive side @ LEG2_PRICE. Once armed
+//  (>= LEG1_WATCH_SECS elapsed AND leg 1 filled), the bot watches the
+//  expensive side's ask. The FIRST time it crosses above LEG2_PRICE, the
+//  resting limit order is placed (armed) — same as a real limit order, this
+//  does NOT fill immediately just because price is trading above 0.66; it
+//  only fills once the ask actually comes back down to <= LEG2_PRICE. If
+//  price keeps running up and never returns to 0.66 before window end, the
+//  resting order is cancelled unfilled — no leg 2 trade that window.
 // ─────────────────────────────────────────
 async function tryEnterLeg2(p) {
   const side = p.expensiveSide;
   const ask = side === 'Up' ? p.upAsk : p.downAsk;
-  if (ask == null || ask < LEG2_PRICE) return;
+  if (ask == null) return;
+
+  // Step 1 — arm: place the resting order the first time price crosses above
+  // LEG2_PRICE. This only happens once per window.
+  if (!p.leg2Armed) {
+    if (ask < LEG2_PRICE) return; // hasn't crossed yet, keep watching
+    const tokenId = side === 'Up' ? p.upTokenId : p.downTokenId;
+    const order = await placeLimitBuy(tokenId, LEG2_PRICE, LEG2_SHARES);
+    p.leg2OrderId = order?.id || null;
+    p.leg2Armed = true;
+    log(`🎯 ${p.symbol} LEG2 ARMED — ${side} (expensive side) crossed above ${LEG2_PRICE.toFixed(2)} (currently ${ask.toFixed(2)}) — placed resting limit buy @ ${LEG2_PRICE.toFixed(2)} for ${LEG2_SHARES}sh, waiting for price to come back down to fill`);
+    // fall through — if ask happens to already be back at/below LEG2_PRICE
+    // on this same tick, check for fill immediately below.
+  }
+
+  // Step 2 — confirm fill: the resting buy only actually fills once the ask
+  // is at or below LEG2_PRICE (someone willing to sell at our resting bid).
+  // A one-way move that never comes back means this never fills.
+  if (ask > LEG2_PRICE) return; // still resting unfilled, keep waiting
 
   const shares = LEG2_SHARES, price = LEG2_PRICE, cost = round2(price * shares);
   if (cost > p.bankroll) {
-    log(`⏭️  ${p.symbol} LEG2 skipped — insufficient bankroll ($${p.bankroll.toFixed(2)} < $${cost.toFixed(2)})`);
+    await cancelOrder(p.leg2OrderId);
+    log(`⏭️  ${p.symbol} LEG2 would have filled but insufficient bankroll ($${p.bankroll.toFixed(2)} < $${cost.toFixed(2)}) — cancelled`);
     p.leg2Done = true;
     p.phase = 'no_leg2';
     return;
   }
 
-  const tokenId = side === 'Up' ? p.upTokenId : p.downTokenId;
-  await placeLimitBuy(tokenId, price, shares);
   p.bankroll = round2(p.bankroll - cost);
   p.position2 = { side, shares, entryPrice: price, cost, mode: 'leg2', openedAt: Date.now() };
   p.leg2Done = true;
   p.phase = 'leg2_filled';
-  log(`🎯 ${p.symbol} LEG2 FILLED — bought ${side} (expensive side) ${shares}sh @ ${price.toFixed(2)} | cost=$${cost.toFixed(2)} | now holding both legs to resolution (no SL/TP)`);
+  log(`✅ ${p.symbol} LEG2 FILLED — bought ${side} (expensive side) ${shares}sh @ ${price.toFixed(2)} | cost=$${cost.toFixed(2)} | now holding both legs to resolution (no SL/TP)`);
   registerTrade(p, { side: 'BUY', outcome: side, reason: 'LEG2-ENTRY', price, shares, cost, fee: 0 });
   recordEquity(p);
 }
@@ -410,7 +436,12 @@ async function resolvePairWindow(p) {
     await cancelOrder(p.leg1DownOrderId);
     log(`${p.symbol} window closed — LEG1 never filled (neither side reached ${LEG1_PRICE.toFixed(2)}) — no trade at all this window`);
   } else if (p.position1 && !p.position2) {
-    log(`${p.symbol} window closing with only LEG1 filled — expensive side (${p.expensiveSide}) never crossed ${LEG2_PRICE.toFixed(2)}, so LEG2 was never taken`);
+    if (p.leg2Armed) {
+      await cancelOrder(p.leg2OrderId);
+      log(`${p.symbol} window closing with only LEG1 filled — LEG2 was armed (${p.expensiveSide} crossed above ${LEG2_PRICE.toFixed(2)}) but price never came back down to fill it — resting order cancelled`);
+    } else {
+      log(`${p.symbol} window closing with only LEG1 filled — expensive side (${p.expensiveSide}) never crossed ${LEG2_PRICE.toFixed(2)}, so LEG2 was never armed`);
+    }
   }
 
   const hasAnyPosition = !!(p.position1 || p.position2);
@@ -510,6 +541,7 @@ function buildState() {
     phase: pair.phase,
     upAsk: pair.upAsk, upBid: pair.upBid, downAsk: pair.downAsk, downBid: pair.downBid,
     leg1: pair.position1, leg2: pair.position2,
+    leg2Armed: pair.leg2Armed,
     expensiveSide: pair.expensiveSide,
     bankroll: pair.bankroll, realizedPnl: pair.realizedPnl, unrealizedPnl: unrealized, markValue,
     feesPaid: pair.feesPaid, wins: pair.wins, losses: pair.losses,
@@ -568,7 +600,7 @@ async function init(privateKey, emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
   log(`🚀 BTC Dual-Leg 0.33/0.66 Bot`);
-  log(`⚙️  $${TOTAL_CAPITAL} capital | LEG1: resting buys both sides @ ${LEG1_PRICE.toFixed(2)} for ${LEG1_SHARES}sh each at window open, first fill wins & cancels the other | LEG2: after ${LEG1_WATCH_SECS}s (${(LEG1_WATCH_SECS/60).toFixed(1)}m), buy the expensive side @ ${LEG2_PRICE.toFixed(2)} for ${LEG2_SHARES}sh the instant its ask crosses above ${LEG2_PRICE.toFixed(2)} | no SL/TP on either leg — both ride to resolution`);
+  log(`⚙️  $${TOTAL_CAPITAL} capital | LEG1: resting buys both sides @ ${LEG1_PRICE.toFixed(2)} for ${LEG1_SHARES}sh each at window open, first fill wins & cancels the other | LEG2: after ${LEG1_WATCH_SECS}s (${(LEG1_WATCH_SECS/60).toFixed(1)}m), the instant the expensive side's ask first crosses above ${LEG2_PRICE.toFixed(2)} a resting limit buy is placed there @ ${LEG2_PRICE.toFixed(2)} for ${LEG2_SHARES}sh — it only actually fills if price comes back down to ${LEG2_PRICE.toFixed(2)} or below, otherwise it's cancelled unfilled at window end | no SL/TP on either leg — both ride to resolution`);
   log(`⚙️  if LEG1 never fills, no trade that window; if LEG1 fills but LEG2's trigger never hits, only LEG1 rides to resolution`);
   log(`${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
