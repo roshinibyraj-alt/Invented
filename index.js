@@ -39,7 +39,7 @@ app.get('/', (_, res) => {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>🎯 BTC Dual-Leg 0.33/0.66 Bot</title>
+<title>🎯 BTC Independent Dual-Side Bot</title>
 <style>
   :root {
     --bg: #ffffff; --bg2: #f5f7fa; --bg3: #edf0f4; --border: #d0d7e2;
@@ -77,16 +77,21 @@ app.get('/', (_, res) => {
   .section-hdr::after { content:''; flex:1; height:1px; background: var(--border); }
 
   .market-panel { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; margin: 0 20px 16px; }
-  .market-hdr { background: #0d1d30; padding: 10px 16px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
-  .market-sym { font-size: 16px; font-weight: bold; color: #ddd; }
+  .market-hdr { background: var(--bg3); border-bottom: 1px solid var(--border); padding: 10px 16px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
+  .market-sym { font-size: 16px; font-weight: bold; color: var(--text); }
   .phase-badge { padding: 3px 12px; border-radius: 14px; font-size: 10px; text-transform: uppercase; letter-spacing: 1px; }
-  .phase-leg1_open { background: #7a8fa822; color: #aab8c9; border: 1px solid #7a8fa8; animation: pulse 1.5s infinite; }
-  .phase-leg1_filled { background: #0099cc22; color: var(--cyan); border: 1px solid var(--cyan); }
-  .phase-watching_leg2 { background: #e6a80022; color: var(--yellow); border: 1px solid var(--yellow); animation: pulse 1.5s infinite; }
-  .phase-leg2_filled { background: #00a85422; color: var(--green); border: 1px solid var(--green); }
-  .phase-no_leg2 { background: #4a608022; color: #8aa0bb; border: 1px solid #4a6080; }
+  .phase-open { background: #7a8fa822; color: #aab8c9; border: 1px solid #7a8fa8; animation: pulse 1.5s infinite; }
+  .phase-partial { background: #e6a80022; color: var(--yellow); border: 1px solid var(--yellow); animation: pulse 1.5s infinite; }
+  .phase-filled { background: #00a85422; color: var(--green); border: 1px solid var(--green); }
   .phase-no_fill { background: #4a608022; color: #8aa0bb; border: 1px solid #4a6080; }
   .phase-closed { background: #4a608022; color: #8aa0bb; border: 1px solid #4a6080; }
+  .recovery-row { display: flex; gap: 10px; margin: 0 20px 14px; flex-wrap: wrap; }
+  .recovery-box { flex: 1; min-width: 200px; background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px; }
+  .recovery-box.up { border-left: 3px solid var(--green); }
+  .recovery-box.down { border-left: 3px solid var(--red); }
+  .recovery-hdr { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
+  .mult-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 10px; margin-left: 6px; background: #7c3aed22; color: var(--purple); }
+  .mult-badge.base { background: #4a608022; color: #8aa0bb; }
   .market-timer { font-size: 11px; color: var(--cyan); }
   .market-body { padding: 14px 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
   @media (max-width: 700px) { .market-body { grid-template-columns: 1fr; } }
@@ -100,8 +105,8 @@ app.get('/', (_, res) => {
   .pos-box { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
   .pos-empty { color: var(--muted); font-size: 10px; text-align: center; padding: 10px 0; }
   .pos-tag { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 9px; margin-left: 6px; }
-  .tag-leg1 { background: #0099cc22; color: var(--cyan); }
-  .tag-leg2 { background: #7c3aed22; color: var(--purple); }
+  .tag-up { background: #0099cc22; color: var(--cyan); }
+  .tag-down { background: #7c3aed22; color: var(--purple); }
   .no-leg-line { color: var(--muted); font-size: 9px; margin-top: 4px; }
 
   .bottom-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 0 20px 20px; }
@@ -110,7 +115,7 @@ app.get('/', (_, res) => {
   .tbl { width: 100%; border-collapse: collapse; }
   .tbl th { background: var(--bg3); color: var(--muted); padding: 6px 8px; text-align: left; font-size: 9px; text-transform: uppercase; letter-spacing: 1px; position: sticky; top: 0; }
   .tbl td { padding: 5px 8px; border-bottom: 1px solid var(--border); font-size: 10px; }
-  .logs-wrap { background: #0d1420; border: 1px solid var(--border); border-radius: 10px; padding: 10px; max-height: 320px; overflow-y: auto; font-size: 10px; }
+  .logs-wrap { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 10px; max-height: 320px; overflow-y: auto; font-size: 10px; }
   .logs-wrap div { padding: 1px 0; }
   .empty { padding: 20px; text-align: center; color: var(--muted); font-size: 10px; }
   .equity-wrap { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin: 0 20px 14px; }
@@ -122,7 +127,7 @@ app.get('/', (_, res) => {
 </head>
 <body>
   <div class="header">
-    <div class="logo">🎯 <span>BTC</span> DUAL-LEG 0.33/0.66</div>
+    <div class="logo">🎯 <span>BTC</span> INDEPENDENT DUAL-SIDE</div>
     <div id="mode-badge" class="mode-badge ${DRY_RUN ? 'mode-dry' : 'mode-live'}">${DRY_RUN ? 'DEMO' : '🔴 LIVE'}</div>
   </div>
 
@@ -149,6 +154,9 @@ app.get('/', (_, res) => {
     <div class="equity-hdr"><div class="title">Equity Curve</div><div class="val" id="equity-val">$0.00</div></div>
     <div id="equity-chart"><svg class="equity-svg" viewBox="0 0 600 90" preserveAspectRatio="none"></svg></div>
   </div>
+
+  <div class="section"><div class="section-hdr">Per-Side Recovery State</div></div>
+  <div id="recovery-row" class="recovery-row"></div>
 
   <div class="section"><div class="section-hdr">Market</div></div>
   <div id="market-panel" class="market-panel"></div>
@@ -246,36 +254,47 @@ app.get('/', (_, res) => {
     eqVal.className = 'val ' + pClass(s.totalPnl);
     document.getElementById('equity-chart').innerHTML = '<svg class="equity-svg" viewBox="0 0 600 90" preserveAspectRatio="none">'+buildEquitySvg(s.totalEquityCurve, 600, 90, s.totalCapital)+'</svg>';
 
+    const rec = s.recovery || {};
+    const recRow = document.getElementById('recovery-row');
+    if (recRow) {
+      const recBox = (side, cls) => {
+        const r = rec[side] || { multiplier: 1, lossStreak: 0, streakPnl: 0, currentShares: '—' };
+        const badgeCls = r.multiplier > 1 ? 'mult-badge' : 'mult-badge base';
+        return '<div class="recovery-box '+cls+'">'+
+          '<div class="recovery-hdr">'+side+' <span class="'+badgeCls+'">'+r.multiplier+'x</span></div>'+
+          '<div class="price-row"><span class="price-key">Next size</span><span>'+r.currentShares+'sh</span></div>'+
+          '<div class="price-row"><span class="price-key">Loss streak</span><span>'+r.lossStreak+'</span></div>'+
+          '<div class="price-row"><span class="price-key">Streak P&amp;L</span><span class="'+pClass(r.streakPnl)+'">'+sgn(r.streakPnl)+'</span></div>'+
+        '</div>';
+      };
+      recRow.innerHTML = recBox('Up', 'up') + recBox('Down', 'down');
+    }
+
     const p = s.pairState;
     const marketPanel = document.getElementById('market-panel');
     if (!p) {
       marketPanel.innerHTML = '<div class="empty">Loading market…</div>';
     } else {
-      const leg1Price = s.config ? s.config.leg1Price.toFixed(2) : '0.33';
-      const leg2Price = s.config ? s.config.leg2Price.toFixed(2) : '0.66';
+      const orderPrice = s.config ? s.config.orderPrice.toFixed(2) : '0.33';
       const phaseLabel = {
-        leg1_open: 'LEG1 OPEN — resting @ ' + leg1Price + ' both sides',
-        leg1_filled: 'LEG1 FILLED — waiting for 3:00 mark (' + (p.secsToWatch!=null ? fmtSecs(p.secsToWatch) : '…') + ')',
-        watching_leg2: p.leg2Armed
-          ? 'LEG2 ARMED on ' + (p.expensiveSide||'?') + ' @ ' + leg2Price + ' — waiting for price to come back down to fill'
-          : 'WATCHING both sides for ask ≥ ' + leg2Price,
-        leg2_filled: 'BOTH LEGS FILLED — riding to resolution',
-        no_leg2: 'LEG1 ONLY — leg2 trigger never hit',
+        open: 'OPEN — resting independently @ ' + orderPrice + ' on both Up and Down',
+        partial: (p.upFilled ? 'Up filled' : 'Up still resting') + ', ' + (p.downFilled ? 'Down filled' : 'Down still resting'),
+        filled: 'BOTH SIDES FILLED — riding to resolution',
         no_fill: 'NO FILL — skipped this window',
         closed: 'WINDOW CLOSED',
       }[p.phase] || p.phase;
 
-      const legBoxHtml = (leg, tagClass, tagLabel) => leg
+      const posBoxHtml = (pos, tagClass, tagLabel, filled) => pos
         ? '<div class="pos-box">'+
-            '<div class="price-box-hdr">'+tagLabel+' <span class="pos-tag '+tagClass+'">'+leg.side.toUpperCase()+'</span></div>'+
-            '<div class="price-row"><span class="price-key">Side</span><span class="'+(leg.side==='Up'?'side-up':'side-down')+'">'+leg.side+'</span></div>'+
-            '<div class="price-row"><span class="price-key">Shares</span><span>'+leg.shares+'sh @ '+leg.entryPrice.toFixed(2)+'</span></div>'+
-            '<div class="price-row"><span class="price-key">Cost</span><span>$'+leg.cost.toFixed(2)+'</span></div>'+
+            '<div class="price-box-hdr">'+tagLabel+' <span class="pos-tag '+tagClass+'">'+pos.side.toUpperCase()+'</span></div>'+
+            '<div class="price-row"><span class="price-key">Side</span><span class="'+(pos.side==='Up'?'side-up':'side-down')+'">'+pos.side+'</span></div>'+
+            '<div class="price-row"><span class="price-key">Shares</span><span>'+pos.shares+'sh @ '+pos.entryPrice.toFixed(2)+'</span></div>'+
+            '<div class="price-row"><span class="price-key">Cost</span><span>$'+pos.cost.toFixed(2)+'</span></div>'+
           '</div>'
-        : '<div class="pos-box"><div class="pos-empty">'+tagLabel+' not filled</div></div>';
+        : '<div class="pos-box"><div class="pos-empty">'+tagLabel+(filled?' — no fill':' — resting')+'</div></div>';
 
-      const posHtml = legBoxHtml(p.leg1, 'tag-leg1', 'Leg 1 (cheap side @ '+leg1Price+')') +
-                       legBoxHtml(p.leg2, 'tag-leg2', 'Leg 2 (@ '+leg2Price+', independent side)');
+      const posHtml = posBoxHtml(p.positionUp, 'tag-up', 'Up', p.upFilled) +
+                       posBoxHtml(p.positionDown, 'tag-down', 'Down', p.downFilled);
 
       marketPanel.innerHTML =
         '<div class="market-hdr">'+
@@ -288,8 +307,7 @@ app.get('/', (_, res) => {
             '<div class="price-box-hdr">Live Prices</div>'+
             '<div class="price-row"><span class="price-key side-up">Up ask/bid</span><span>'+(p.upAsk?.toFixed(2)||'—')+' / '+(p.upBid?.toFixed(2)||'—')+'</span></div>'+
             '<div class="price-row"><span class="price-key side-down">Down ask/bid</span><span>'+(p.downAsk?.toFixed(2)||'—')+' / '+(p.downBid?.toFixed(2)||'—')+'</span></div>'+
-            '<div class="trigger-line">Leg1: both sides resting @ '+leg1Price+' — first fill wins</div>'+
-            '<div class="trigger-line">Leg2: '+(p.leg2Armed ? 'armed on '+(p.expensiveSide||'?') : 'watching BOTH sides (independent of leg1)')+' — ask ≥ '+leg2Price+'</div>'+
+            '<div class="trigger-line">Up and Down rest independently @ '+orderPrice+' — either, both, or neither can fill</div>'+
           '</div>'+
           posHtml+
         '</div>';
@@ -300,7 +318,7 @@ app.get('/', (_, res) => {
       tb.innerHTML = s.trades.map(t => {
         const pnlStr = (t.profit !== undefined) ? sgn(t.profit) : '—';
         const pnlCls = (t.profit !== undefined) ? pClass(t.profit) : '';
-        const sideColor = t.side === 'BUY' ? '#ffd740' : ((t.reason||'').includes('RESOLUTION') ? (t.profit >= 0 ? '#00e676' : '#ff4757') : '#00d4ff');
+        const sideColor = t.side === 'BUY' ? '#b8860b' : ((t.reason||'').includes('RESOLUTION') ? (t.profit >= 0 ? '#00a854' : '#e8304a') : '#0099cc');
         return '<tr><td>'+t.time+'</td>'+
           '<td style="color:'+sideColor+'">'+t.side+(t.outcome?(' '+t.outcome):'')+'</td>'+
           '<td>'+(t.reason||'—')+'</td>'+
@@ -315,12 +333,12 @@ app.get('/', (_, res) => {
     const logEl = document.getElementById('logs');
     if (s.logs && s.logs.length > 0) {
       logEl.innerHTML = s.logs.map(l => {
-        const col = l.includes('❌')||l.includes('💥') ? '#ff4757'
-                  : l.includes('💰')||l.includes('✅') ? '#00e676'
-                  : l.includes('🎯') ? '#ffd740'
-                  : l.includes('🔭')||l.includes('⏰') ? '#00d4ff'
-                  : l.includes('⚠️') ? '#ff9f0a'
-                  : '#4a6080';
+        const col = l.includes('❌')||l.includes('💥') ? '#e8304a'
+                  : l.includes('💰')||l.includes('✅') ? '#00a854'
+                  : l.includes('🎯') ? '#b8860b'
+                  : l.includes('🔭')||l.includes('⏰') ? '#0099cc'
+                  : l.includes('⚠️') ? '#cc7a00'
+                  : '#2f3f57';
         return '<div style="color:'+col+'">'+l+'</div>';
       }).join('');
       logEl.scrollTop = logEl.scrollHeight;
@@ -337,7 +355,7 @@ const slog = (line) => { console.log(line); io.emit('log', line); };
 const PK = process.env.PRIVATE_KEY;
 if (!PK) { console.error('❌ PRIVATE_KEY env var missing'); process.exit(1); }
 
-console.log(`🎯 BTC Dual-Leg 0.33/0.66 Bot`);
+console.log(`🎯 BTC Independent Dual-Side Bot`);
 console.log(`🚦 DRY_RUN=${DRY_RUN}`);
 if (DRY_RUN) console.log('⚠️  DRY RUN — demo capital, simulated fills, real API for data/orders');
 else         console.log('🔴 LIVE MODE — real money');
