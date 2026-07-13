@@ -39,7 +39,7 @@ app.get('/', (_, res) => {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>🎯 BTC 0.96 Breakout + Recovery Bot</title>
+<title>🎯 BTC Dual-Leg 0.33/0.66 Bot</title>
 <style>
   :root {
     --bg: #ffffff; --bg2: #f5f7fa; --bg3: #edf0f4; --border: #d0d7e2;
@@ -80,9 +80,12 @@ app.get('/', (_, res) => {
   .market-hdr { background: #0d1d30; padding: 10px 16px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
   .market-sym { font-size: 16px; font-weight: bold; color: #ddd; }
   .phase-badge { padding: 3px 12px; border-radius: 14px; font-size: 10px; text-transform: uppercase; letter-spacing: 1px; }
-  .phase-waiting { background: #7a8fa822; color: #aab8c9; border: 1px solid #7a8fa8; }
-  .phase-watching { background: #e6a80022; color: var(--yellow); border: 1px solid var(--yellow); animation: pulse 1.5s infinite; }
-  .phase-holding { background: #0099cc22; color: var(--cyan); border: 1px solid var(--cyan); }
+  .phase-leg1_open { background: #7a8fa822; color: #aab8c9; border: 1px solid #7a8fa8; animation: pulse 1.5s infinite; }
+  .phase-leg1_filled { background: #0099cc22; color: var(--cyan); border: 1px solid var(--cyan); }
+  .phase-watching_leg2 { background: #e6a80022; color: var(--yellow); border: 1px solid var(--yellow); animation: pulse 1.5s infinite; }
+  .phase-leg2_filled { background: #00a85422; color: var(--green); border: 1px solid var(--green); }
+  .phase-no_leg2 { background: #4a608022; color: #8aa0bb; border: 1px solid #4a6080; }
+  .phase-no_fill { background: #4a608022; color: #8aa0bb; border: 1px solid #4a6080; }
   .phase-closed { background: #4a608022; color: #8aa0bb; border: 1px solid #4a6080; }
   .market-timer { font-size: 11px; color: var(--cyan); }
   .market-body { padding: 14px 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
@@ -97,13 +100,9 @@ app.get('/', (_, res) => {
   .pos-box { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
   .pos-empty { color: var(--muted); font-size: 10px; text-align: center; padding: 10px 0; }
   .pos-tag { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 9px; margin-left: 6px; }
-  .tag-base { background: #00a85422; color: var(--green); }
-  .tag-recovery { background: #7c3aed22; color: var(--purple); }
-  .sl-line { color: var(--red); font-size: 9px; margin-top: 4px; }
-
-  .recovery-panel { margin: 0 20px 16px; background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 16px; }
-  .recovery-panel.armed { border-color: var(--purple); box-shadow: 0 0 0 1px #7c3aed22; }
-  .recovery-row { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
+  .tag-leg1 { background: #0099cc22; color: var(--cyan); }
+  .tag-leg2 { background: #7c3aed22; color: var(--purple); }
+  .no-leg-line { color: var(--muted); font-size: 9px; margin-top: 4px; }
 
   .bottom-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 0 20px 20px; }
   @media (max-width: 800px) { .bottom-grid { grid-template-columns: 1fr; } }
@@ -123,9 +122,8 @@ app.get('/', (_, res) => {
 </head>
 <body>
   <div class="header">
-    <div class="logo">🎯 <span>BTC</span> 0.96 BREAKOUT BOT</div>
+    <div class="logo">🎯 <span>BTC</span> DUAL-LEG 0.33/0.66</div>
     <div id="mode-badge" class="mode-badge ${DRY_RUN ? 'mode-dry' : 'mode-live'}">${DRY_RUN ? 'DEMO' : '🔴 LIVE'}</div>
-    <div id="recovery-badge" class="mode-badge mode-base">BASE</div>
   </div>
 
   <div class="toolbar">
@@ -154,9 +152,6 @@ app.get('/', (_, res) => {
 
   <div class="section"><div class="section-hdr">Market</div></div>
   <div id="market-panel" class="market-panel"></div>
-
-  <div class="section"><div class="section-hdr">Recovery Status</div></div>
-  <div id="recovery-panel" class="recovery-panel"></div>
 
   <div class="bottom-grid">
     <div>
@@ -230,15 +225,6 @@ app.get('/', (_, res) => {
     toggleBtn.textContent = s.dryRun ? 'Switch to LIVE' : 'Switch to DEMO';
     toggleBtn.className = 'live-toggle' + (s.dryRun ? '' : ' is-live');
 
-    const recBadge = document.getElementById('recovery-badge');
-    if (s.recovery && s.recovery.armed) {
-      recBadge.className = 'mode-badge mode-recovery';
-      recBadge.textContent = 'RECOVERY ARMED (' + s.recovery.targetShares + 'sh)';
-    } else {
-      recBadge.className = 'mode-badge mode-base';
-      recBadge.textContent = 'BASE';
-    }
-
     document.getElementById('total-mark').textContent = '$'+(s.totalMarkValue||0).toFixed(2);
     const pnlEl = document.getElementById('total-pnl');
     pnlEl.textContent = sgn(s.totalPnl); pnlEl.className = 'stat-val ' + pClass(s.totalPnl);
@@ -265,16 +251,30 @@ app.get('/', (_, res) => {
     if (!p) {
       marketPanel.innerHTML = '<div class="empty">Loading market…</div>';
     } else {
-      const phaseLabel = { waiting: 'WAITING (' + (p.secsToWatch!=null ? fmtSecs(p.secsToWatch) + ' to watch phase' : '…') + ')', watching: 'WATCHING for 0.96', holding: 'HOLDING position', closed: 'WINDOW CLOSED' }[p.phase] || p.phase;
-      const posHtml = p.position
+      const leg1Price = s.config ? s.config.leg1Price.toFixed(2) : '0.33';
+      const leg2Price = s.config ? s.config.leg2Price.toFixed(2) : '0.66';
+      const phaseLabel = {
+        leg1_open: 'LEG1 OPEN — resting @ ' + leg1Price + ' both sides',
+        leg1_filled: 'LEG1 FILLED — waiting for 3:00 mark (' + (p.secsToWatch!=null ? fmtSecs(p.secsToWatch) : '…') + ')',
+        watching_leg2: 'WATCHING for ' + (p.expensiveSide||'expensive side') + ' ≥ ' + leg2Price,
+        leg2_filled: 'BOTH LEGS FILLED — riding to resolution',
+        no_leg2: 'LEG1 ONLY — leg2 trigger never hit',
+        no_fill: 'NO FILL — skipped this window',
+        closed: 'WINDOW CLOSED',
+      }[p.phase] || p.phase;
+
+      const legBoxHtml = (leg, tagClass, tagLabel) => leg
         ? '<div class="pos-box">'+
-            '<div class="price-box-hdr">Open Position <span class="pos-tag '+(p.position.mode==='recovery'?'tag-recovery':'tag-base')+'">'+p.position.mode.toUpperCase()+'</span></div>'+
-            '<div class="price-row"><span class="price-key">Side</span><span class="'+(p.position.side==='Up'?'side-up':'side-down')+'">'+p.position.side+'</span></div>'+
-            '<div class="price-row"><span class="price-key">Shares</span><span>'+p.position.shares+'sh @ '+p.position.entryPrice.toFixed(2)+'</span></div>'+
-            '<div class="price-row"><span class="price-key">Cost</span><span>$'+p.position.cost.toFixed(2)+'</span></div>'+
-            '<div class="sl-line">Stop-loss armed at '+(s.config?s.config.slPrice.toFixed(2):'0.50')+'</div>'+
+            '<div class="price-box-hdr">'+tagLabel+' <span class="pos-tag '+tagClass+'">'+leg.side.toUpperCase()+'</span></div>'+
+            '<div class="price-row"><span class="price-key">Side</span><span class="'+(leg.side==='Up'?'side-up':'side-down')+'">'+leg.side+'</span></div>'+
+            '<div class="price-row"><span class="price-key">Shares</span><span>'+leg.shares+'sh @ '+leg.entryPrice.toFixed(2)+'</span></div>'+
+            '<div class="price-row"><span class="price-key">Cost</span><span>$'+leg.cost.toFixed(2)+'</span></div>'+
           '</div>'
-        : '<div class="pos-box"><div class="pos-empty">No open position'+(p.phase==='watching'?' — watching for either side to hit '+(s.config?s.config.entryPrice.toFixed(2):'0.96'):'')+'</div></div>';
+        : '<div class="pos-box"><div class="pos-empty">'+tagLabel+' not filled</div></div>';
+
+      const posHtml = legBoxHtml(p.leg1, 'tag-leg1', 'Leg 1 (cheap side @ '+leg1Price+')') +
+                       legBoxHtml(p.leg2, 'tag-leg2', 'Leg 2 (expensive side @ '+leg2Price+')');
+
       marketPanel.innerHTML =
         '<div class="market-hdr">'+
           '<div class="market-sym">'+p.symbol+'</div>'+
@@ -286,21 +286,11 @@ app.get('/', (_, res) => {
             '<div class="price-box-hdr">Live Prices</div>'+
             '<div class="price-row"><span class="price-key side-up">Up ask/bid</span><span>'+(p.upAsk?.toFixed(2)||'—')+' / '+(p.upBid?.toFixed(2)||'—')+'</span></div>'+
             '<div class="price-row"><span class="price-key side-down">Down ask/bid</span><span>'+(p.downAsk?.toFixed(2)||'—')+' / '+(p.downBid?.toFixed(2)||'—')+'</span></div>'+
-            '<div class="trigger-line">Entry trigger: either ask ≥ '+(s.config?s.config.entryPrice.toFixed(2):'0.96')+'</div>'+
+            '<div class="trigger-line">Leg1: both sides resting @ '+leg1Price+' — first fill wins</div>'+
+            '<div class="trigger-line">Leg2: expensive side ('+(p.expensiveSide||'?')+') ask ≥ '+leg2Price+'</div>'+
           '</div>'+
           posHtml+
         '</div>';
-    }
-
-    const recPanel = document.getElementById('recovery-panel');
-    recPanel.className = 'recovery-panel' + (s.recovery && s.recovery.armed ? ' armed' : '');
-    if (s.recovery && s.recovery.armed) {
-      recPanel.innerHTML = '<div class="recovery-row">'+
-        '<div>🔁 Recovery armed for next entry — <b>'+s.recovery.targetShares+' shares</b> @ '+(s.config?s.config.entryPrice.toFixed(2):'0.96')+'</div>'+
-        '<div>Covering loss of <span class="pnl-neg">$'+s.recovery.lossToCover.toFixed(2)+'</span> + $'+s.recovery.extraProfit.toFixed(2)+' target profit</div>'+
-      '</div>';
-    } else {
-      recPanel.innerHTML = '<div class="recovery-row"><div>No recovery armed — next entry uses base size ('+(s.config?s.config.baseShares:6)+' shares)</div></div>';
     }
 
     const tb = document.getElementById('trade-body');
@@ -308,7 +298,7 @@ app.get('/', (_, res) => {
       tb.innerHTML = s.trades.map(t => {
         const pnlStr = (t.profit !== undefined) ? sgn(t.profit) : '—';
         const pnlCls = (t.profit !== undefined) ? pClass(t.profit) : '';
-        const sideColor = t.side === 'BUY' ? '#ffd740' : (t.reason === 'SL' ? '#ff4757' : (t.reason==='RESOLUTION'?'#00e676':'#00d4ff'));
+        const sideColor = t.side === 'BUY' ? '#ffd740' : ((t.reason||'').includes('RESOLUTION') ? (t.profit >= 0 ? '#00e676' : '#ff4757') : '#00d4ff');
         return '<tr><td>'+t.time+'</td>'+
           '<td style="color:'+sideColor+'">'+t.side+(t.outcome?(' '+t.outcome):'')+'</td>'+
           '<td>'+(t.reason||'—')+'</td>'+
@@ -325,9 +315,8 @@ app.get('/', (_, res) => {
       logEl.innerHTML = s.logs.map(l => {
         const col = l.includes('❌')||l.includes('💥') ? '#ff4757'
                   : l.includes('💰')||l.includes('✅') ? '#00e676'
-                  : l.includes('🎯')||l.includes('🧯') ? '#ffd740'
+                  : l.includes('🎯') ? '#ffd740'
                   : l.includes('🔭')||l.includes('⏰') ? '#00d4ff'
-                  : l.includes('🔁') ? '#7c3aed'
                   : l.includes('⚠️') ? '#ff9f0a'
                   : '#4a6080';
         return '<div style="color:'+col+'">'+l+'</div>';
@@ -346,7 +335,7 @@ const slog = (line) => { console.log(line); io.emit('log', line); };
 const PK = process.env.PRIVATE_KEY;
 if (!PK) { console.error('❌ PRIVATE_KEY env var missing'); process.exit(1); }
 
-console.log(`🎯 BTC 0.96 Breakout + Recovery Bot`);
+console.log(`🎯 BTC Dual-Leg 0.33/0.66 Bot`);
 console.log(`🚦 DRY_RUN=${DRY_RUN}`);
 if (DRY_RUN) console.log('⚠️  DRY RUN — demo capital, simulated fills, real API for data/orders');
 else         console.log('🔴 LIVE MODE — real money');
