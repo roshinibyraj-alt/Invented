@@ -164,6 +164,7 @@ app.get('/', (_, res) => {
     Last update: <span id="last-update">—</span>
   </div>
 
+<script src="/socket.io/socket.io.js"></script>
 <script>
 const socket = io();
 let isLive = false;
@@ -265,7 +266,7 @@ socket.on('state', s => {
       '<span class="label" style="margin-left:12px">Order Interval:</span><span class="value">'+cfg.orderTickSecs+'s</span>'+
       '<span class="label" style="margin-left:12px">Cutoff:</span><span class="value">'+cfg.orderCutoffSecs+'s</span>'+
       '<span class="label" style="margin-left:12px">Window:</span><span class="value">300s</span></div>'+
-      '<div class="config-row"><span class="label">Sizing:</span><span class="value">20sh if mid&lt;0.50, 10sh if mid≥0.50</span></div>';
+      '<div class="config-row"><span class="label">Sizing:</span><span class="value">Before 100s: 20sh if mid&lt;0.50/10sh if mid&ge;0.50 | After 100s: 20sh if mid>0.50/10sh if mid&le;0.50</span></div>';
   }
 
   const tb = document.getElementById('trade-body');
