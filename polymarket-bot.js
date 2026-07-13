@@ -2,51 +2,27 @@
 
 /**
  * ═══════════════════════════════════════════════════════════════
- *  POLYMARKET BTC 5-MINUTE UP/DOWN — INDEPENDENT DUAL-SIDE
- *  RESTING-BUY BOT WITH PER-SIDE MARTINGALE RECOVERY
+ *  POLYMARKET BTC 5-MINUTE UP/DOWN — PERIODIC RESTING LIMIT BUY
+ *  Every 10 seconds place resting limit buys at mid - 0.05
+ *  Fill when price walks to that level. Up/Down independent.
  * ═══════════════════════════════════════════════════════════════
  *
- *  BTC-only, single market. One entry mechanic (no leg 2):
- *
  *  PER 5-MINUTE WINDOW:
- *    At window open, place a resting limit BUY on Up AND a resting
- *    limit BUY on Down, both at ORDER_PRICE (default 0.33). Unlike the
- *    old dual-leg model, the two orders are completely INDEPENDENT —
- *    one filling does NOT cancel the other. Each side rests until it
- *    either fills (its ask drops to <= ORDER_PRICE) or the window ends
- *    (in which case that side's unfilled resting order is simply
- *    cancelled — no trade on that side this window).
+ *    Every 10 seconds (t=0, 10, 20, ... 200) place a resting limit
+ *    BUY on Up AND Down independently at currentMid - 0.05.
+ *    Multiple orders stack — each is independent.
  *
- *    It's possible for a window to produce: no fills, an Up fill only,
- *    a Down fill only, or fills on BOTH sides.
+ *    Fill is confirmed when the ask drops to <= the limit price.
+ *    Unfilled orders are cancelled at window end.
+ *    Filled positions ride to resolution (win=$1/share, lose=$0).
  *
- *  SIZING — PER-SIDE MARTINGALE RECOVERY:
- *    Up and Down each carry their OWN independent recovery state,
- *    since they are independent bet streams:
- *      - Normally trade BASE_SHARES.
- *      - After 2 CONSECUTIVE LOSSES on that side, the size DOUBLES for
- *        the next trade on that side (3rd trade = 2x).
- *      - The doubled size stays in effect until the cumulative P&L of
- *        that side's streak (starting from the first of the 2 losses)
- *        returns to breakeven or better — i.e. the losses are fully
- *        recovered — at which point size resets to BASE_SHARES.
- *      - If the doubled size keeps losing, every further 2 CONSECUTIVE
- *        losses doubles it again (2x -> 4x -> 8x -> ...) until it
- *        recovers.
- *      - A win while still in recovery (but not enough to fully clear
- *        the streak P&L) resets the *consecutive*-loss counter but
- *        keeps the current multiplier in place until full recovery.
+ *  SIZING:
+ *    At the time each order is placed:
+ *      - mid < 0.50 → 20 shares
+ *      - mid >= 0.50 → 10 shares
+ *    Both Up and Down evaluated independently each tick.
  *
- *    This recovery state is PER SIDE and PERSISTS ACROSS WINDOWS (it is
- *    not part of the per-window state that gets reset every 5 minutes).
- *
- *  HOLD / RESOLUTION:
- *    Any filled position(s) simply ride to window resolution — there is
- *    no stop-loss and no take-profit. A winning share pays $1, a losing
- *    share pays $0.
- *
- *  LIVE / DEMO: DRY_RUN is runtime-switchable via setMode(), independent
- *    of the pause/resume toggle.
+ *  LIVE / DEMO: DRY_RUN is runtime-switchable via setMode().
  * ═══════════════════════════════════════════════════════════════
  */
 
@@ -58,19 +34,20 @@ const CLOB    = 'https://clob.polymarket.com';
 const TICK_MS               = 500;
 const POLY_PRICE_REFRESH_MS = 1000;
 const WINDOW_SECS           = 300;
-const EARLY_CUTOFF_SECS     = Number(process.env.EARLY_CUTOFF_SECS || 2); // force-resolve this many seconds BEFORE the nominal window end
+const EARLY_CUTOFF_SECS     = Number(process.env.EARLY_CUTOFF_SECS || 2);
 const SLUG_OFFSET_FALLBACKS = [0, -300, 300];
-const SYMBOL                = 'BTC'; // single-market bot
+const SYMBOL                = 'BTC';
 
-let DRY_RUN = (process.env.DRY_RUN || 'true').toLowerCase() === 'true'; // runtime-switchable — see setMode
+let DRY_RUN = (process.env.DRY_RUN || 'true').toLowerCase() === 'true';
 const TOTAL_CAPITAL = Number(process.env.TOTAL_CAPITAL || 2000);
 
 function round2(n) { return Math.round(n * 100) / 100; }
 function nowSec() { return Date.now() / 1000; }
 
 // ── Strategy parameters ──
-const ORDER_PRICE  = Number(process.env.ORDER_PRICE || process.env.LEG1_PRICE || 0.33);   // resting buy price, both sides, at window open
-const BASE_SHARES  = Number(process.env.BASE_SHARES || process.env.LEG1_SHARES || 100);   // base size per side before any recovery doubling
+const PRICE_OFFSET      = -0.05;   // limit price = mid + this offset
+const ORDER_TICK_SECS   = 10;      // place new orders every N seconds
+const ORDER_CUTOFF_SECS = 200;     // stop placing new orders after this many seconds
 
 let emitFn = () => {};
 let slog = () => {};
@@ -111,82 +88,27 @@ async function cancelOrder(orderId) {
   if (!orderId) return null;
   if (!DRY_RUN && trader) {
     if (typeof trader.cancelOrder === 'function') return await trader.cancelOrder(orderId);
-    log('⚠️  trader.cancelOrder() is not implemented in polymarket-trader.js — an unfilled resting order was NOT actually cancelled on-chain. Add a cancelOrder(orderId) method mirroring limitBuy.');
+    log('⚠️  trader.cancelOrder() not implemented — unfilled resting order NOT cancelled on-chain');
     return null;
   }
   return { ok: true };
 }
 
 // ─────────────────────────────────────────
-//  Per-side martingale recovery state — PERSISTS ACROSS WINDOWS
+//  Per-order state factory
 // ─────────────────────────────────────────
-function freshRecoverySide() {
+function freshOrder(side, limitPrice, shares, orderId) {
   return {
-    multiplier: 1,     // current size multiplier (1, 2, 4, 8, ...)
-    lossStreak: 0,      // consecutive losses within the current streak
-    streakPnl: 0,        // cumulative pnl since the streak began (0 while flat)
+    id: `ord-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    side,           // 'Up' or 'Down'
+    limitPrice,
+    shares,
+    state: 'resting',  // resting | filled | cancelled
+    orderId: orderId || null,
+    fillPrice: null,
+    cost: 0,
+    placedAtSec: 0,
   };
-}
-let recovery = { Up: freshRecoverySide(), Down: freshRecoverySide() };
-
-function currentShares(side) {
-  return round2(BASE_SHARES * recovery[side].multiplier);
-}
-
-// Applies a resolved trade's profit to that side's recovery state and
-// returns a short description of what happened, for logging.
-function applyRecoveryResult(side, profit) {
-  const r = recovery[side];
-  const wasMultiplier = r.multiplier;
-  let note;
-
-  if (r.multiplier === 1 && r.lossStreak === 0) {
-    // Flat — no active streak yet.
-    if (profit < 0) {
-      r.lossStreak = 1;
-      r.streakPnl = profit;
-      note = `loss #1 of streak (streakPnl=$${r.streakPnl.toFixed(2)}) — size stays base`;
-    } else {
-      note = 'win at base size — no streak';
-    }
-  } else if (r.multiplier === 1 && r.lossStreak === 1) {
-    // One prior loss, still base size — this is the 2nd trade of a possible streak.
-    r.streakPnl = round2(r.streakPnl + profit);
-    if (profit < 0) {
-      r.lossStreak = 2;
-      r.multiplier = 2;
-      note = `2nd consecutive loss (streakPnl=$${r.streakPnl.toFixed(2)}) — DOUBLING to ${currentShares(side)}sh for next trade`;
-    } else {
-      r.lossStreak = 0;
-      r.streakPnl = 0;
-      note = 'win on 2nd trade — streak cleared, back to base';
-    }
-  } else {
-    // Actively recovering (multiplier > 1).
-    r.streakPnl = round2(r.streakPnl + profit);
-    if (r.streakPnl >= 0) {
-      r.multiplier = 1;
-      r.lossStreak = 0;
-      r.streakPnl = 0;
-      note = `RECOVERED — streak pnl back to $0+ — size reset to base (${currentShares(side)}sh)`;
-    } else if (profit < 0) {
-      r.lossStreak += 1;
-      if (r.lossStreak % 2 === 0) {
-        r.multiplier *= 2;
-        note = `${r.lossStreak} consecutive losses in recovery (streakPnl=$${r.streakPnl.toFixed(2)}) — DOUBLING AGAIN to ${currentShares(side)}sh`;
-      } else {
-        note = `loss in recovery (streakPnl=$${r.streakPnl.toFixed(2)}) — size stays ${currentShares(side)}sh, one more consecutive loss will double again`;
-      }
-    } else {
-      r.lossStreak = 0;
-      note = `win in recovery but not fully cleared (streakPnl=$${r.streakPnl.toFixed(2)}) — size stays ${currentShares(side)}sh, consecutive counter reset`;
-    }
-  }
-
-  if (r.multiplier !== wasMultiplier || note) {
-    log(`🎲 ${side} recovery — ${note}`);
-  }
-  return note;
 }
 
 // ─────────────────────────────────────────
@@ -199,24 +121,22 @@ function freshPairState() {
     windowStart: null, windowEnd: null, slug: null, eventTitle: null, conditionId: null,
     upTokenId: null, downTokenId: null,
     upAsk: null, upBid: null, downAsk: null, downBid: null,
-    phase: 'open', // open | partial | filled | no_fill | closed
-    ordersPlaced: false,
-    upOrderId: null, downOrderId: null,
-    upFilled: false, downFilled: false,
-    positionUp: null,   // { side, shares, entryPrice, cost, openedAt }
-    positionDown: null, // { side, shares, entryPrice, cost, openedAt }
-    resolvedThisWindow: true,
+    // Strategy
+    orders: [],           // all orders this window (resting + filled + cancelled)
+    lastOrderTickSec: -1, // elapsed seconds when last order batch was placed
+    // Capital
     bankroll: TOTAL_CAPITAL,
     realizedPnl: 0,
     feesPaid: 0,
     wins: 0, losses: 0,
     equityCurve: [{ t: Date.now(), equity: TOTAL_CAPITAL }],
+    resolvedThisWindow: true,
   };
 }
 let pair = freshPairState();
 
 // ─────────────────────────────────────────
-//  Slug / window math (unchanged market-discovery plumbing)
+//  Slug / window math (UNCHANGED)
 // ─────────────────────────────────────────
 function currentWindowStart(tsSec = nowSec()) { return Math.floor(tsSec / WINDOW_SECS) * WINDOW_SECS; }
 function slugFor(symbol, windowStartSec) { return `${symbol.toLowerCase()}-updown-5m-${windowStartSec}`; }
@@ -267,22 +187,14 @@ async function loadPairWindow(p) {
   p.downTokenId = downId;
   p.tradable = true;
   p.resolvedThisWindow = false;
-  p.phase = 'open';
-  p.ordersPlaced = false;
-  p.upOrderId = null; p.downOrderId = null;
-  p.upFilled = false; p.downFilled = false;
-  p.positionUp = null; p.positionDown = null;
-  // Clear out the previous window's last-seen prices — these belong to
-  // different token ids and must never be used to evaluate fills for the
-  // new window. checkFills() requires a non-null ask, so this forces it to
-  // wait for a fresh refreshPolyPrices() tick against the NEW token ids
-  // before any fill can be detected.
+  p.orders = [];
+  p.lastOrderTickSec = -1;
   p.upAsk = null; p.upBid = null; p.downAsk = null; p.downBid = null;
-  log(`🔭 ${p.symbol} window loaded: ${slug} | ends ${new Date(p.windowEnd * 1000).toISOString().slice(11,19)}Z | placing independent resting buys — Up ${currentShares('Up')}sh @ ${ORDER_PRICE.toFixed(2)}, Down ${currentShares('Down')}sh @ ${ORDER_PRICE.toFixed(2)}`);
+  log(`🔭 ${p.symbol} window loaded: ${slug} | ends ${new Date(p.windowEnd * 1000).toISOString().slice(11,19)}Z | periodic resting buys every ${ORDER_TICK_SECS}s until ${ORDER_CUTOFF_SECS}s | offset ${PRICE_OFFSET} from mid`);
 }
 
 // ─────────────────────────────────────────
-//  Polymarket price feed (unchanged plumbing, single pair)
+//  Polymarket price feed (UNCHANGED)
 // ─────────────────────────────────────────
 async function refreshPolyPrices() {
   if (!pair.tradable || !pair.upTokenId || !pair.downTokenId) return;
@@ -336,23 +248,33 @@ async function refreshPolyPrices() {
 // ─────────────────────────────────────────
 //  Equity tracking
 // ─────────────────────────────────────────
-function pairMarkValue(p) {
-  let v = p.bankroll;
-  if (p.positionUp) {
-    v += p.positionUp.shares * (p.upBid != null ? p.upBid : p.positionUp.entryPrice);
+function positionsMarkValue(p) {
+  let v = 0;
+  for (const o of p.orders) {
+    if (o.state === 'filled') {
+      const bid = o.side === 'Up' ? p.upBid : p.downBid;
+      v += o.shares * (bid != null ? bid : o.fillPrice);
+    }
   }
-  if (p.positionDown) {
-    v += p.positionDown.shares * (p.downBid != null ? p.downBid : p.positionDown.entryPrice);
+  return round2(v);
+}
+function filledCostBasis(p) {
+  let v = 0;
+  for (const o of p.orders) {
+    if (o.state === 'filled') v += o.cost;
   }
   return round2(v);
 }
 function pushGlobalEquity() {
-  const total = pairMarkValue(pair);
+  const mark = positionsMarkValue(pair);
+  const total = round2(pair.bankroll + mark);
   totalEquityCurve.push({ t: Date.now(), equity: total });
   if (totalEquityCurve.length > 500) totalEquityCurve.shift();
 }
 function recordEquity(p) {
-  p.equityCurve.push({ t: Date.now(), equity: pairMarkValue(p) });
+  const mark = positionsMarkValue(p);
+  const total = round2(p.bankroll + mark);
+  p.equityCurve.push({ t: Date.now(), equity: total });
   if (p.equityCurve.length > 300) p.equityCurve.shift();
   pushGlobalEquity();
 }
@@ -363,58 +285,71 @@ function registerTrade(p, entry) {
 }
 
 // ─────────────────────────────────────────
-//  Order placement — independent resting buys on both sides
+//  STRATEGY — Periodic resting limit buys
 // ─────────────────────────────────────────
-async function placeOpenOrders(p) {
-  const upShares = currentShares('Up');
-  const downShares = currentShares('Down');
-  const upOrder = await placeLimitBuy(p.upTokenId, ORDER_PRICE, upShares);
-  const downOrder = await placeLimitBuy(p.downTokenId, ORDER_PRICE, downShares);
-  p.upOrderId = upOrder?.id || null;
-  p.downOrderId = downOrder?.id || null;
-  p.ordersPlaced = true;
-  p.phase = 'open';
-  log(`🎯 ${p.symbol} — placed INDEPENDENT resting limit buys @ ${ORDER_PRICE.toFixed(2)}: Up ${upShares}sh (mult=${recovery.Up.multiplier}x) | Down ${downShares}sh (mult=${recovery.Down.multiplier}x) — either, both, or neither may fill`);
+
+// Place new resting limit buys on both sides at mid - 0.05
+async function placePeriodicOrders(p) {
+  for (const side of ['Up', 'Down']) {
+    const ask = side === 'Up' ? p.upAsk : p.downAsk;
+    const bid = side === 'Up' ? p.upBid : p.downBid;
+    if (ask == null || bid == null) continue;
+
+    const mid = round2((ask + bid) / 2);
+    const limitPrice = round2(mid + PRICE_OFFSET);
+    const shares = mid < 0.50 ? 20 : 10;
+
+    if (limitPrice <= 0) continue;
+
+    const tokenId = side === 'Up' ? p.upTokenId : p.downTokenId;
+    const res = await placeLimitBuy(tokenId, limitPrice, shares);
+
+    const order = freshOrder(side, limitPrice, shares, res?.id || null);
+    order.placedAtSec = nowSec() - p.windowStart;
+    p.orders.push(order);
+
+    log(`📍 ${side} resting buy: ${shares}sh @ ${limitPrice.toFixed(2)} (mid=${mid.toFixed(2)}, ask=${ask.toFixed(2)})`);
+  }
+  p.lastOrderTickSec = nowSec() - p.windowStart;
 }
 
-// A resting buy limit at ORDER_PRICE fills once the market's ask on that
-// side drops to (or below) ORDER_PRICE — used as the fill proxy from the
-// live price feed. Up and Down are checked and filled fully independently.
-async function checkFills(p) {
-  if (!p.upFilled && p.upAsk != null && p.upAsk <= ORDER_PRICE) {
-    await tryFillSide(p, 'Up');
+// Check all resting orders — fill when ask drops to limit price
+async function checkRestingFills(p) {
+  for (const order of p.orders) {
+    if (order.state !== 'resting') continue;
+
+    const ask = order.side === 'Up' ? p.upAsk : p.downAsk;
+    if (ask == null) continue;
+
+    if (ask <= order.limitPrice) {
+      const cost = round2(order.limitPrice * order.shares);
+      if (cost > p.bankroll) {
+        log(`⏭️  ${order.side} fill detected but insufficient bankroll ($${p.bankroll.toFixed(2)} < $${cost.toFixed(2)}) — cancelling`);
+        order.state = 'cancelled';
+        if (order.orderId) cancelOrder(order.orderId);
+        continue;
+      }
+
+      order.state = 'filled';
+      order.fillPrice = order.limitPrice;
+      order.cost = cost;
+      p.bankroll = round2(p.bankroll - cost);
+
+      log(`✅ ${order.side} FILLED: ${order.shares}sh @ ${order.fillPrice.toFixed(2)} | cost=$${cost.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
+      registerTrade(p, { side: 'BUY', outcome: order.side, reason: 'RESTING-FILL', price: order.fillPrice, shares: order.shares, cost, fee: 0 });
+      recordEquity(p);
+    }
   }
-  if (!p.downFilled && p.downAsk != null && p.downAsk <= ORDER_PRICE) {
-    await tryFillSide(p, 'Down');
-  }
-  updatePhase(p);
 }
 
-async function tryFillSide(p, side) {
-  const shares = currentShares(side);
-  const price = ORDER_PRICE;
-  const cost = round2(price * shares);
-
-  if (cost > p.bankroll) {
-    log(`⏭️  ${p.symbol} ${side} fill detected but insufficient bankroll ($${p.bankroll.toFixed(2)} < $${cost.toFixed(2)}) — skipping ${side} this window`);
-    if (side === 'Up') p.upFilled = true; else p.downFilled = true;
-    return;
+// Cancel all unfilled resting orders at window end
+async function cancelAllResting(p) {
+  for (const order of p.orders) {
+    if (order.state === 'resting') {
+      order.state = 'cancelled';
+      if (order.orderId) cancelOrder(order.orderId);
+    }
   }
-
-  p.bankroll = round2(p.bankroll - cost);
-  const position = { side, shares, entryPrice: price, cost, openedAt: Date.now() };
-  if (side === 'Up') { p.positionUp = position; p.upFilled = true; }
-  else { p.positionDown = position; p.downFilled = true; }
-
-  log(`✅ ${p.symbol} ${side} FILLED — bought ${shares}sh @ ${price.toFixed(2)} | cost=$${cost.toFixed(2)} (mult=${recovery[side].multiplier}x)`);
-  registerTrade(p, { side: 'BUY', outcome: side, reason: `${side.toUpperCase()}-ENTRY`, price, shares, cost, fee: 0 });
-  recordEquity(p);
-}
-
-function updatePhase(p) {
-  if (p.positionUp && p.positionDown) p.phase = 'filled';
-  else if (p.positionUp || p.positionDown) p.phase = 'partial';
-  else p.phase = 'open';
 }
 
 // ─────────────────────────────────────────
@@ -441,51 +376,30 @@ async function resolvePairWindow(p) {
   if (p.resolvedThisWindow) return;
   p.resolvedThisWindow = true;
 
-  // Cancel any unfilled resting orders.
-  if (p.ordersPlaced && !p.upFilled) {
-    await cancelOrder(p.upOrderId);
-    log(`${p.symbol} window closed — Up never filled (never reached ${ORDER_PRICE.toFixed(2)}) — no Up trade this window`);
-  }
-  if (p.ordersPlaced && !p.downFilled) {
-    await cancelOrder(p.downOrderId);
-    log(`${p.symbol} window closed — Down never filled (never reached ${ORDER_PRICE.toFixed(2)}) — no Down trade this window`);
-  }
+  // Cancel unfilled resting orders
+  await cancelAllResting(p);
 
-  const hasAnyPosition = !!(p.positionUp || p.positionDown);
-  const winnerSide = hasAnyPosition ? await determineWinningSide(p) : null;
+  const hasAnyFilled = p.orders.some(o => o.state === 'filled');
+  const winnerSide = hasAnyFilled ? await determineWinningSide(p) : null;
   let windowProfit = 0;
 
-  if (p.positionUp) {
-    const pos = p.positionUp;
-    const won = winnerSide === pos.side;
-    const proceeds = won ? round2(pos.shares * 1) : 0;
-    const profit = round2(proceeds - pos.cost);
+  for (const order of p.orders) {
+    if (order.state !== 'filled') continue;
+    const won = winnerSide === order.side;
+    const proceeds = won ? round2(order.shares * 1) : 0;
+    const profit = round2(proceeds - order.cost);
     p.bankroll = round2(p.bankroll + proceeds);
     p.realizedPnl = round2(p.realizedPnl + profit);
     windowProfit = round2(windowProfit + profit);
     const icon = won ? '💰' : '💥';
-    log(`${icon} ${p.symbol} RESOLUTION [UP] winner=${winnerSide ?? '?'} | held Up ${pos.shares}sh | proceeds=$${proceeds.toFixed(2)} | cost=$${pos.cost.toFixed(2)} | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
-    registerTrade(p, { side: 'SELL', outcome: pos.side, winner: winnerSide, reason: 'UP-RESOLUTION', price: won ? 1 : 0, shares: pos.shares, proceeds, profit });
+    log(`${icon} ${order.side} RESOLUTION ${won ? 'WON' : 'LOST'} | ${order.shares}sh @ ${order.fillPrice.toFixed(2)} | proceeds=$${proceeds.toFixed(2)} | cost=$${order.cost.toFixed(2)} | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
+    registerTrade(p, { side: 'SELL', outcome: order.side, winner: winnerSide, reason: 'RESOLUTION', price: won ? 1 : 0, shares: order.shares, proceeds, profit });
     if (won) p.wins++; else p.losses++;
-    applyRecoveryResult('Up', profit);
-    p.positionUp = null;
   }
-  if (p.positionDown) {
-    const pos = p.positionDown;
-    const won = winnerSide === pos.side;
-    const proceeds = won ? round2(pos.shares * 1) : 0;
-    const profit = round2(proceeds - pos.cost);
-    p.bankroll = round2(p.bankroll + proceeds);
-    p.realizedPnl = round2(p.realizedPnl + profit);
-    windowProfit = round2(windowProfit + profit);
-    const icon = won ? '💰' : '💥';
-    log(`${icon} ${p.symbol} RESOLUTION [DOWN] winner=${winnerSide ?? '?'} | held Down ${pos.shares}sh | proceeds=$${proceeds.toFixed(2)} | cost=$${pos.cost.toFixed(2)} | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)}`);
-    registerTrade(p, { side: 'SELL', outcome: pos.side, winner: winnerSide, reason: 'DOWN-RESOLUTION', price: won ? 1 : 0, shares: pos.shares, proceeds, profit });
-    if (won) p.wins++; else p.losses++;
-    applyRecoveryResult('Down', profit);
-    p.positionDown = null;
-  }
-  p.phase = 'closed';
+
+  const filledCount = p.orders.filter(o => o.state === 'filled').length;
+  const cancelledCount = p.orders.filter(o => o.state === 'cancelled').length;
+  log(`📊 Window closed | filled=${filledCount} cancelled=${cancelledCount} | window P&L=${windowProfit >= 0 ? '+' : ''}$${windowProfit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)} | total realized=$${p.realizedPnl.toFixed(2)}`);
   recordEquity(p);
 }
 
@@ -501,57 +415,80 @@ async function processPair(p) {
   if (!p.tradable || !tradingEnabled) return;
 
   const elapsed = nowSec() - p.windowStart;
+
+  // Resolve at window end
   if (elapsed >= WINDOW_SECS - EARLY_CUTOFF_SECS && !p.resolvedThisWindow) {
     await resolvePairWindow(p);
   }
   if (p.resolvedThisWindow) return;
 
-  // Step 1 — independent resting orders go out immediately at window open.
-  if (!p.ordersPlaced) {
-    await placeOpenOrders(p);
-    return;
+  // Place new resting orders every ORDER_TICK_SECS until ORDER_CUTOFF_SECS
+  if (elapsed <= ORDER_CUTOFF_SECS) {
+    const shouldPlace = p.orders.length === 0 || (elapsed - p.lastOrderTickSec >= ORDER_TICK_SECS);
+    if (shouldPlace) {
+      await placePeriodicOrders(p);
+    }
   }
 
-  // Step 2 — check both sides independently for fills, every tick.
-  if (!p.upFilled || !p.downFilled) {
-    await checkFills(p);
-  }
+  // Check fills on all resting orders
+  await checkRestingFills(p);
 }
 
 // ─────────────────────────────────────────
 //  UI state
 // ─────────────────────────────────────────
 function buildState() {
-  const markValue = pairMarkValue(pair);
-  const heldValue = round2(markValue - pair.bankroll);
-  const costBasis = round2((pair.positionUp?.cost || 0) + (pair.positionDown?.cost || 0));
-  const unrealized = round2(heldValue - costBasis);
+  const mark = positionsMarkValue(pair);
+  const totalEquity = round2(pair.bankroll + mark);
+  const costBasis = filledCostBasis(pair);
+  const unrealized = round2(mark - costBasis);
+
+  const restingOrders = pair.orders.filter(o => o.state === 'resting');
+  const filledOrders = pair.orders.filter(o => o.state === 'filled');
+  const cancelledOrders = pair.orders.filter(o => o.state === 'cancelled');
+
+  const upMid = (pair.upAsk != null && pair.upBid != null) ? round2((pair.upAsk + pair.upBid) / 2) : null;
+  const downMid = (pair.downAsk != null && pair.downBid != null) ? round2((pair.downAsk + pair.downBid) / 2) : null;
+
+  // Current phase
+  let phase = 'loading';
+  if (pair.tradable && !pair.resolvedThisWindow) {
+    const elapsed = nowSec() - pair.windowStart;
+    if (elapsed <= ORDER_CUTOFF_SECS) phase = 'placing';
+    else phase = 'holding';
+  } else if (pair.resolvedThisWindow && pair.windowStart) {
+    phase = 'closed';
+  }
+
   const pairState = {
     symbol: pair.symbol, tradable: pair.tradable, slug: pair.slug, windowEnd: pair.windowEnd,
     secsToEnd: pair.windowEnd ? Math.max(0, Math.floor(pair.windowEnd - nowSec())) : null,
-    phase: pair.phase,
+    phase,
     upAsk: pair.upAsk, upBid: pair.upBid, downAsk: pair.downAsk, downBid: pair.downBid,
-    positionUp: pair.positionUp, positionDown: pair.positionDown,
-    upFilled: pair.upFilled, downFilled: pair.downFilled,
-    bankroll: pair.bankroll, realizedPnl: pair.realizedPnl, unrealizedPnl: unrealized, markValue,
-    feesPaid: pair.feesPaid, wins: pair.wins, losses: pair.losses,
+    upMid, downMid,
+    orders: pair.orders.map(o => ({
+      side: o.side, limitPrice: o.limitPrice, shares: o.shares, state: o.state,
+      fillPrice: o.fillPrice, cost: o.cost, placedAtSec: Math.round(o.placedAtSec),
+    })),
+    restingCount: restingOrders.length,
+    filledCount: filledOrders.length,
+    cancelledCount: cancelledOrders.length,
+    bankroll: pair.bankroll, realizedPnl: pair.realizedPnl, unrealizedPnl: unrealized,
+    markValue: totalEquity, feesPaid: pair.feesPaid, wins: pair.wins, losses: pair.losses,
     equityCurve: pair.equityCurve,
   };
+
   const totalWins = pair.wins, totalLosses = pair.losses;
   return {
     dryRun: DRY_RUN, tradingEnabled,
-    totalCapital: TOTAL_CAPITAL, totalBankroll: pair.bankroll, totalMarkValue: markValue,
-    totalRealizedPnl: pair.realizedPnl, totalUnrealizedPnl: unrealized, totalPnl: round2(markValue - TOTAL_CAPITAL),
+    totalCapital: TOTAL_CAPITAL, totalBankroll: pair.bankroll, totalMarkValue: totalEquity,
+    totalRealizedPnl: pair.realizedPnl, totalUnrealizedPnl: unrealized, totalPnl: round2(totalEquity - TOTAL_CAPITAL),
     totalWins, totalLosses,
     totalFeesPaid: pair.feesPaid,
     winRate: (totalWins + totalLosses) > 0 ? round2((totalWins / (totalWins + totalLosses)) * 100) : null,
     uptime: Math.floor((Date.now() - startTime) / 1000),
     config: {
-      orderPrice: ORDER_PRICE, baseShares: BASE_SHARES,
-    },
-    recovery: {
-      Up: { ...recovery.Up, currentShares: currentShares('Up') },
-      Down: { ...recovery.Down, currentShares: currentShares('Down') },
+      priceOffset: PRICE_OFFSET, orderTickSecs: ORDER_TICK_SECS, orderCutoffSecs: ORDER_CUTOFF_SECS,
     },
     pairState, totalEquityCurve, logs: logs.slice(-100), trades: trades.slice(-80).reverse(),
   };
@@ -573,13 +510,10 @@ async function mainLoop() {
   }
 }
 
-function pauseTrading() { tradingEnabled = false; log('⏸️  Trading paused (existing positions still tracked for resolution bookkeeping)'); return { ok: true }; }
+function pauseTrading() { tradingEnabled = false; log('⏸️  Trading paused (existing resting orders still tracked)'); return { ok: true }; }
 function resumeTrading() { tradingEnabled = true; log('▶️  Trading resumed'); return { ok: true }; }
 function getStatus() { return { ok: true, ...buildState() }; }
 
-// Runtime live/demo switch — DRY_RUN is no longer fixed at startup. An
-// existing open position is left alone (still tracked for bookkeeping);
-// only NEW orders placed after the switch use the new mode.
 function setMode(wantLive) {
   const was = DRY_RUN;
   DRY_RUN = !wantLive;
@@ -592,8 +526,8 @@ function setMode(wantLive) {
 async function init(privateKey, emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
-  log(`🚀 BTC Independent Dual-Side Bot`);
-  log(`⚙️  $${TOTAL_CAPITAL} capital | resting buys @ ${ORDER_PRICE.toFixed(2)} on Up AND Down independently at window open (no leg2, fills don't cancel each other) | base size ${BASE_SHARES}sh/side | per-side martingale: 2 consecutive losses -> double size on 3rd trade, stays doubled (doubling further every 2 more consecutive losses) until that side's streak P&L recovers to breakeven, then resets to base | no SL/TP — rides to resolution`);
+  log(`🚀 BTC Periodic Resting Limit Buy Bot`);
+  log(`⚙️  $${TOTAL_CAPITAL} capital | every ${ORDER_TICK_SECS}s place resting buy at mid${PRICE_OFFSET} until ${ORDER_CUTOFF_SECS}s | size: 20sh if mid<0.50, 10sh if mid>=0.50 | Up/Down independent | fill when ask walks to limit price | ride to resolution`);
   log(`${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
   trader = new PolymarketTrader(privateKey);
