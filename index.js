@@ -45,7 +45,7 @@ app.get('/', (_, res) => {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>⏱️ 5m Crypto Up/Down Bot — Pure Martingale Streak</title>
+<title>⏱️ Crypto Up/Down Bot — 1h Reversal → 15m → 5m Nested</title>
 <style>
   :root {
     --bg: #ffffff; --bg2: #f5f7fa; --bg3: #edf0f4; --border: #d0d7e2;
@@ -115,9 +115,9 @@ app.get('/', (_, res) => {
 </head>
 <body>
   <div class="header">
-    <div class="logo">⏱️ <span>5M</span> UP/DOWN BOT</div>
+    <div class="logo">⏱️ <span>1H→15m→5m</span> UP/DOWN BOT</div>
     <div id="mode-badge" class="mode-badge ${bot.getStatus().dryRun ? 'mode-dry' : 'mode-live'}">${bot.getStatus().dryRun ? 'DEMO' : '🔴 LIVE'}</div>
-    <div id="experiment-badge" class="mode-badge mode-dry">PURE MARTINGALE (win-stay / lose-flip)</div>
+    <div id="experiment-badge" class="mode-badge mode-dry">1H REVERSAL + FIXED 50sh ENTRIES &lt;0.40</div>
   </div>
 
   <div class="toolbar">
@@ -136,7 +136,6 @@ app.get('/', (_, res) => {
     <div class="stat"><div class="stat-label">Unrealized</div><div class="stat-val" id="unrealized-pnl">$0.00</div></div>
     <div class="stat"><div class="stat-label">Bankroll</div><div class="stat-val" id="total-bankroll">$0.00</div></div>
     <div class="stat"><div class="stat-label">Fees Paid</div><div class="stat-val pnl-neg" id="total-fees">$0.00</div></div>
-    <div class="stat"><div class="stat-label">Rebates Earned</div><div class="stat-val pnl-pos" id="total-rebates">$0.00</div></div>
     <div class="stat"><div class="stat-label">Win Rate</div><div class="stat-val" id="win-rate">—</div><div class="stat-sub" id="win-loss-sub">0W / 0L</div></div>
     <div class="stat"><div class="stat-label">Uptime</div><div class="stat-val" id="uptime">0s</div></div>
     <div class="stat"><div class="stat-label">Trading</div><div class="stat-val" id="trading-flag">—</div></div>
@@ -260,7 +259,6 @@ app.get('/', (_, res) => {
     unrelEl.textContent = sgn(s.totalUnrealizedPnl); unrelEl.className = 'stat-val ' + pClass(s.totalUnrealizedPnl);
     document.getElementById('total-bankroll').textContent = '$'+(s.totalBankroll||0).toFixed(2);
     document.getElementById('total-fees').textContent = '$'+(s.totalFeesPaid||0).toFixed(4);
-    document.getElementById('total-rebates').textContent = '$'+(s.totalRebatesEarned||0).toFixed(4);
     document.getElementById('win-rate').textContent = (s.winRate!==null && s.winRate!==undefined) ? s.winRate+'%' : '—';
     document.getElementById('win-loss-sub').textContent = (s.totalWins||0)+'W / '+(s.totalLosses||0)+'L';
     document.getElementById('uptime').textContent = fmt(s.uptime||0);
@@ -278,36 +276,44 @@ app.get('/', (_, res) => {
       grid.innerHTML = '<div class="empty">No pairs configured</div>';
     } else {
       grid.innerHTML = s.pairStates.map(p => {
-        const refRow = (label, val) => '<div class="pair-row" style="font-size:9px"><span class="pair-key">'+label+'</span><span>'+(val!=null?val:'—')+'</span></div>';
-        const refsHtml =
-          '<div style="margin-top:4px">'+
-            refRow('Next bet', p.nextSide) +
-            refRow('Next stake', p.nextStakeDollars!=null?('$'+p.nextStakeDollars.toFixed(2)+' (martingale)'):'base (0.25% of bankroll)') +
-            refRow('Current loss streak', String(p.streakLosses)) +
-            refRow('This window', p.entryDone?'entry placed':'pending (t=150s)') +
-          '</div>';
-        const entryHtml = p.entry
-          ? (() => {
-              const e = p.entry;
-              const stateHtml = e.closed
-                ? 'closed'
-                : 'holding '+e.shares.toFixed(2)+'sh (cost $'+e.cost.toFixed(2)+') — rides to resolution';
-              const tag = e.isMartingale ? ' [martingale]' : ' [base]';
-              return '<div style="margin-top:4px"><div class="pair-row" style="font-size:9px"><span class="pair-key">'+e.side+' @'+e.entryPrice.toFixed(2)+' stake=$'+e.stakeDollars.toFixed(2)+tag+'</span><span style="flex:1;text-align:right">'+stateHtml+'</span></div></div>';
-            })()
-          : '<div class="pair-row" style="font-size:9px;opacity:.6">No entry yet this window</div>';
+        const sideClass = sd => sd === 'Up' ? 'side-up' : (sd === 'Down' ? 'side-down' : '');
+        const signalHtml = p.signal
+          ? '<div class="pair-row" style="font-size:9px"><span class="pair-key">Hour signal</span><span class="'+sideClass(p.direction1h)+'">'+p.signal.toUpperCase()+' → 1h '+p.direction1h+'</span></div>'
+          : '<div class="pair-row" style="font-size:9px;opacity:.6">No pattern this hour — sitting out</div>';
+
+        const windowStatus = w => {
+          if (w.resolved) return w.entry ? (w.won ? '💰 won' : '💥 lost') : 'no fill';
+          if (w.entryDone && w.entry) return 'holding '+w.entry.shares+'sh @'+w.entry.entryPrice.toFixed(2);
+          if (w.entrySkipped) return 'skipped';
+          if (!w.tradable) return 'loading…';
+          return 'watching '+fmtSecs(w.secsToEnd);
+        };
+        const winRow = w => '<div class="pair-row" style="font-size:9px">'+
+          '<span class="pair-key">'+w.tf+' <span class="'+sideClass(w.side)+'">'+w.side+'</span></span>'+
+          '<span style="flex:1;text-align:right">'+windowStatus(w)+'</span></div>';
+
+        const w1h = (p.windows||[]).filter(w => w.tf === '1h');
+        const w15 = (p.windows||[]).filter(w => w.tf === '15m');
+        const w5  = (p.windows||[]).filter(w => w.tf === '5m');
+        const windowsHtml = (p.windows && p.windows.length)
+          ? '<div style="margin-top:4px;max-height:160px;overflow-y:auto">'+
+              w1h.map(winRow).join('') +
+              w15.map(winRow).join('') +
+              w5.map(winRow).join('') +
+            '</div>'
+          : '<div class="pair-row" style="font-size:9px;opacity:.6">No windows this hour</div>';
+
         const eqCurve = buildEquitySvg(p.equityCurve, 280, 34, null);
-        const hasPos = !!(p.entry && !p.entry.closed);
-        return '<div class="pair-card '+(hasPos?'has-pos':'')+' '+(p.tradable?'':'untradable')+'">'+
-          '<div class="pair-hdr"><div class="pair-sym">'+p.symbol+'</div><div class="pair-timer">'+(p.tradable?fmtSecs(p.secsToEnd):'loading…')+'</div></div>'+
+        const hasPos = (p.windows || []).some(w => w.entryDone && !w.resolved);
+        const anyTradable = (p.windows || []).some(w => w.tradable);
+        return '<div class="pair-card '+(hasPos?'has-pos':'')+' '+(anyTradable?'':'untradable')+'">'+
+          '<div class="pair-hdr"><div class="pair-sym">'+p.symbol+'</div><div class="pair-timer">'+(p.hourStart?new Date(p.hourStart*1000).toISOString().slice(11,16)+'Z hour':'loading…')+'</div></div>'+
           '<div class="pair-body">'+
-            '<div class="pair-row"><span class="pair-key">Up ask/bid</span><span>'+(p.upAsk?.toFixed(2)||'—')+' / '+(p.upBid?.toFixed(2)||'—')+'</span></div>'+
-            '<div class="pair-row"><span class="pair-key">Down ask/bid</span><span>'+(p.downAsk?.toFixed(2)||'—')+' / '+(p.downBid?.toFixed(2)||'—')+'</span></div>'+
+            signalHtml +
             '<div class="pair-row"><span class="pair-key">Bankroll</span><span>$'+p.bankroll.toFixed(2)+'</span><span class="pair-key">W/L</span><span>'+p.wins+'/'+p.losses+'</span></div>'+
             '<div class="pair-row"><span class="pair-key">Realized</span><span class="'+pClass(p.realizedPnl)+'">'+sgn(p.realizedPnl)+'</span><span class="pair-key">Unrealized</span><span class="'+pClass(p.unrealizedPnl)+'">'+sgn(p.unrealizedPnl)+'</span></div>'+
-            '<div class="pair-row"><span class="pair-key">Fees paid</span><span class="pnl-neg">-$'+(p.feesPaid||0).toFixed(4)+'</span><span class="pair-key">Rebates</span><span class="pnl-pos">+$'+(p.rebatesEarned||0).toFixed(4)+'</span></div>'+
-            refsHtml +
-            entryHtml +
+            '<div class="pair-row"><span class="pair-key">Fees paid</span><span class="pnl-neg">-$'+(p.feesPaid||0).toFixed(4)+'</span></div>'+
+            windowsHtml +
             '<div class="spark-box"><svg viewBox="0 0 280 34" preserveAspectRatio="none">'+eqCurve+'</svg><div class="spark-label">Equity curve ($'+p.markValue.toFixed(2)+')</div></div>'+
           '</div></div>';
       }).join('');
