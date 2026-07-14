@@ -25,18 +25,20 @@
  *    between the two checkpoints, they could differ — each just acts on
  *    whatever the comparison shows at its own moment, no special handling).
  *
- *  SIZING — full-pool compounding, split evenly across the two checkpoints:
- *    There is no fixed base stake. The pair's own bankroll IS the pool. At
- *    the start of each window, the current bankroll is snapshotted
+ *  SIZING — pool compounding within a 15-minute period, split evenly across
+ *  the two checkpoints, based off a fixed base bet:
+ *    Base bet is $50/checkpoint ($100 active pool per pair). At the start of
+ *    each window, the current active pool (bankroll) is snapshotted
  *    (windowPool); each of the two checkpoints stakes HALF of that snapshot
  *    (not the live/shrinking bankroll — a stable, well-defined split of the
  *    window's starting pool). After the window resolves, whatever bankroll
  *    results — win or loss — becomes next window's pool automatically, since
- *    the snapshot is just "the current bankroll" at that later point. This
- *    is intentionally uncapped, full reinvestment: a single total loss (both
- *    entries wrong) can take the pool to (near) zero, and there is nothing
- *    left to compound from that point on. That's an accepted, foreseeable
- *    consequence of "regardless of win or loss," not an oversight.
+ *    the snapshot is just "the current bankroll" at that later point. Every
+ *    RESET_INTERVAL_SECS (15 minutes = 3 windows), whatever the active pool
+ *    has grown or shrunk to gets banked into that pair's idle reserve (still
+ *    counted in total capital/equity), and the active pool restarts at the
+ *    $100 base — so compounding resets every 15 minutes instead of running
+ *    away uncapped or grinding toward zero indefinitely.
  *
  *  EXECUTION — single-shot limit order, quoted above the ask:
  *    Same as the earlier design this restores: one limit buy priced
@@ -69,6 +71,15 @@ let DRY_RUN = (process.env.DRY_RUN || 'true').toLowerCase() === 'true'; // runti
 const TOTAL_CAPITAL = Number(process.env.TOTAL_CAPITAL || 2000);
 const DEFAULT_PAIRS = (process.env.CRYPTO_PAIRS || 'BTC')
   .split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
+
+// Base bet: each checkpoint stakes half the active pool, so a $50 base bet
+// means a $100 active pool per pair. The active pool compounds window to
+// window as before, but gets banked back down to this base every
+// RESET_INTERVAL_SECS — realized P&L moves into the pair's idle reserve
+// (still counted in totalCapital/equity), and the active pool restarts at
+// the base so compounding can't run away indefinitely.
+const BASE_BET_SIZE       = Number(process.env.BASE_BET_SIZE || 50);
+const RESET_INTERVAL_SECS = Number(process.env.RESET_INTERVAL_SECS || 900); // 15 minutes = 3 windows
 
 function round2(n) { return Math.round(n * 100) / 100; }
 function round5(n) { return Math.round(n * 100000) / 100000; }
@@ -169,17 +180,22 @@ function computeMomentumSignal(symbol) {
 // ─────────────────────────────────────────
 //  Pair state
 // ─────────────────────────────────────────
+const basePairPool = round2(BASE_BET_SIZE * 2); // active pool per pair — half staked at each checkpoint = BASE_BET_SIZE
+
 function freshPairState(symbol) {
+  const reserve = round2(Math.max(perPairCapital - basePairPool, 0)); // rest of this pair's capital allocation, idle until a reset banks P&L into it
   return {
     symbol,
     tradable: false,
     windowStart: null, windowEnd: null, slug: null, eventTitle: null, conditionId: null,
     upTokenId: null, downTokenId: null,
     upAsk: null, upBid: null, downAsk: null, downBid: null,
-    windowPool: perPairCapital,   // snapshot of bankroll at window load — the amount being compounded
+    windowPool: basePairPool,   // snapshot of bankroll at window load — the amount being compounded
     checkpoint1Done: false, checkpoint2Done: false,
     entries: [],                  // up to 2 per window
-    bankroll: perPairCapital,     // IS the pool — carries forward automatically, win or loss
+    bankroll: basePairPool,     // IS the pool — carries forward automatically, win or loss, until the next 15-min reset
+    reserve,                     // idle capital, not staked — absorbs banked P&L on reset, still counted in equity
+    lastResetWindowStart: null,  // guards against resetting more than once per 15-min block
     realizedPnl: 0,
     feesPaid: 0,
     rebatesEarned: 0,
@@ -248,6 +264,13 @@ async function loadPairWindow(p) {
   p.downTokenId = downId;
   p.tradable = true;
   p.resolvedThisWindow = false;
+  if (windowStart % RESET_INTERVAL_SECS === 0 && p.lastResetWindowStart !== windowStart) {
+    const delta = round2(p.bankroll - basePairPool); // this period's P&L on the active pool
+    p.reserve = round2(p.reserve + delta);
+    p.bankroll = basePairPool;
+    p.lastResetWindowStart = windowStart;
+    log(`🔁 ${p.symbol} 15-min reset: active pool banked $${delta >= 0 ? '+' : ''}${delta.toFixed(2)} to reserve (now $${p.reserve.toFixed(2)}) | active pool back to base $${basePairPool.toFixed(2)}`);
+  }
   p.windowPool = p.bankroll; // snapshot NOW — this is what compounds into this window's two entries
   p.checkpoint1Done = false;
   p.checkpoint2Done = false;
@@ -324,7 +347,7 @@ function entryMarkValue(p, entry) {
 }
 function pairMarkValue(p) {
   const held = p.entries.reduce((s, e) => s + entryMarkValue(p, e), 0);
-  return round2(p.bankroll + held);
+  return round2(p.reserve + p.bankroll + held);
 }
 function pushGlobalEquity() {
   const total = round2(Object.values(pairs).reduce((s, p) => s + pairMarkValue(p), 0));
@@ -548,10 +571,10 @@ async function init(privateKey, emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
   log(`🚀 15m Momentum + Compounding Pool Bot`);
-  log(`⚙️  $${TOTAL_CAPITAL} demo capital across ${pairList.length} pairs (${pairList.join(', ')}) → $${perPairCapital.toFixed(2)}/pair starting pool`);
+  log(`⚙️  $${TOTAL_CAPITAL} demo capital across ${pairList.length} pairs (${pairList.join(', ')}) → $${perPairCapital.toFixed(2)}/pair allocation, $${basePairPool.toFixed(2)}/pair active pool ($${BASE_BET_SIZE.toFixed(2)} base bet per checkpoint)`);
   log(`⚙️  signal: latest CLOSED 15m candle vs the one before it — above → buy Up, below → buy Down, equal → no trade`);
   log(`⚙️  checkpoints: +${CHECKPOINT_1_SECS}s and +${CHECKPOINT_2_SECS}s, same direction both times | stake = half the window's starting pool, each time`);
-  log(`⚙️  compounding: pool = current bankroll, snapshotted fresh each window — win or loss, whatever results carries forward automatically (uncapped, no floor)`);
+  log(`⚙️  compounding: pool = current bankroll, snapshotted fresh each window — win or loss, whatever results carries forward automatically | resets to the $${basePairPool.toFixed(2)} base pool every ${RESET_INTERVAL_SECS / 60} minutes, banking P&L into reserve`);
   log(`⚙️  execution: single-shot limit buy quoted ${QUOTE_BUFFER} above the ask (marketable) | no retry, no cancel | no TP/SL — rides to resolution, external claim script handles redemption`);
   log(`${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price/candle data' : '🔴 LIVE MODE — real money'}`);
 
