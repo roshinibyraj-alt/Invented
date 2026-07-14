@@ -70,8 +70,8 @@ const TOTAL_CAPITAL = Number(process.env.TOTAL_CAPITAL || 2000);
 const DEFAULT_PAIRS = (process.env.CRYPTO_PAIRS || 'BTC')
   .split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
 
-function round2(n) { return Math.round(n * 10) / 100; }
-function round5(n) { return Math.round(n * 10000) / 100000; }
+function round2(n) { return Math.round(n * 10) / 10; }
+function round5(n) { return Math.round(n * 10000) / 10000; }
 function nowSec() { return Date.now() / 100; }
 
 // ── Strategy parameters ──
