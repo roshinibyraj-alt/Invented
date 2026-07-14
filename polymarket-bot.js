@@ -52,12 +52,11 @@
  *  SLUGS: the 5m/15m Polymarket markets use predictable epoch-based
  *  slugs (`{symbol}-updown-{tf}-{epoch}`) — same scheme the previous
  *  version of this bot already relied on successfully. The 1-HOUR
- *  market uses a DIFFERENT, Eastern-Time, human-readable slug (e.g.
- *  "bitcoin-up-or-down-march-6-12am-et") that has historically drifted
- *  (with/without year). This bot makes a best-effort guess at that
- *  slug and logs a warning if it can't find the hour's market — if
- *  that happens, check the real slug on polymarket.com and adjust
- *  SYMBOL_FULL_NAME / buildHourlySlugCandidates() below.
+ *  market uses a DIFFERENT, confirmed Eastern-Time slug format, e.g.
+ *  "bitcoin-up-or-down-july-14-2026-7pm-et" (verified directly against
+ *  polymarket.com) — full coin name, month, day, YEAR, hour+am/pm, "-et".
+ *  No guessing, no fallback variants: this is the one format built and
+ *  used for every 1h lookup.
  *
  *  LIVE / DEMO: DRY_RUN is runtime-switchable (see setMode).
  * ═══════════════════════════════════════════════════════════════
@@ -270,7 +269,11 @@ async function fetchEventForWindow(symbol, tf, windowStart) {
   return null;
 }
 
-// 1h: Eastern-Time, human-readable slug — best effort, see header notes.
+// 1h: confirmed live format is Eastern-Time, WITH year, e.g.
+// "bitcoin-up-or-down-july-14-2026-7pm-et" for the hour beginning 7PM ET
+// on July 14, 2026 (verified directly against polymarket.com). No guessing,
+// no fallback variants — this is the one format Polymarket currently issues
+// for current/future hourly windows.
 function etHourParts(windowStartSec) {
   const d = new Date(windowStartSec * 1000);
   const fmt = new Intl.DateTimeFormat('en-US', {
@@ -285,24 +288,19 @@ function etHourParts(windowStartSec) {
   const dayPeriod = (parts.find(p => p.type === 'dayPeriod')?.value || '').toLowerCase();
   return { month, day, year, hourLabel: `${hourNum}${dayPeriod}` };
 }
-function buildHourlySlugCandidates(symbol, windowStart) {
+function buildHourlySlug(symbol, windowStart) {
   const name = SYMBOL_FULL_NAME[symbol] || symbol.toLowerCase();
   const { month, day, year, hourLabel } = etHourParts(windowStart);
-  return [
-    `${name}-up-or-down-${month}-${day}-${hourLabel}-et`,
-    `${name}-up-or-down-${month}-${day}-${year}-${hourLabel}-et`,
-    `${symbol.toLowerCase()}-updown-1h-${windowStart}`, // long-shot fallback in case format changes
-  ];
+  return `${name}-up-or-down-${month}-${day}-${year}-${hourLabel}-et`;
 }
 async function fetchHourlyEvent(symbol, windowStart) {
-  for (const slug of buildHourlySlugCandidates(symbol, windowStart)) {
-    try {
-      const event = await getJSON(`${GAMMA}/events/slug/${encodeURIComponent(slug)}`);
-      if (event && event.id && Array.isArray(event.markets) && event.markets.length) {
-        return { event, market: pickMarket(event), slug };
-      }
-    } catch (_) {}
-  }
+  const slug = buildHourlySlug(symbol, windowStart);
+  try {
+    const event = await getJSON(`${GAMMA}/events/slug/${encodeURIComponent(slug)}`);
+    if (event && event.id && Array.isArray(event.markets) && event.markets.length) {
+      return { event, market: pickMarket(event), slug };
+    }
+  } catch (_) {}
   return null;
 }
 
@@ -313,7 +311,7 @@ async function tryLoadWindow(s, w) {
   if (!found) {
     if (w.tf === '1h' && !s.hourlySlugWarned && nowSec() - w.windowStart > 30) {
       s.hourlySlugWarned = true;
-      log(`⚠️  ${s.symbol}: couldn't locate the 1h market via guessed slug (tried ET-based candidates). 1h entry for this hour may be skipped — see header notes in polymarket-bot.js if this persists.`);
+      log(`⚠️  ${s.symbol}: 1h market not found at slug "${buildHourlySlug(s.symbol, w.windowStart)}" — 1h entry for this hour will be skipped. If this persists, check the real slug on polymarket.com and update SYMBOL_FULL_NAME / buildHourlySlug().`);
     }
     return;
   }
