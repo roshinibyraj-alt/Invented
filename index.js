@@ -45,7 +45,7 @@ app.get('/', (_, res) => {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>⏱️ 5m Crypto Up/Down Bot — 15m Momentum + Compounding</title>
+<title>⏱️ 5m Crypto Up/Down Bot — Pure Martingale Streak</title>
 <style>
   :root {
     --bg: #ffffff; --bg2: #f5f7fa; --bg3: #edf0f4; --border: #d0d7e2;
@@ -117,7 +117,7 @@ app.get('/', (_, res) => {
   <div class="header">
     <div class="logo">⏱️ <span>5M</span> UP/DOWN BOT</div>
     <div id="mode-badge" class="mode-badge ${bot.getStatus().dryRun ? 'mode-dry' : 'mode-live'}">${bot.getStatus().dryRun ? 'DEMO' : '🔴 LIVE'}</div>
-    <div id="experiment-badge" class="mode-badge mode-dry">15m MOMENTUM + FULL COMPOUNDING</div>
+    <div id="experiment-badge" class="mode-badge mode-dry">PURE MARTINGALE (win-stay / lose-flip)</div>
   </div>
 
   <div class="toolbar">
@@ -281,22 +281,23 @@ app.get('/', (_, res) => {
         const refRow = (label, val) => '<div class="pair-row" style="font-size:9px"><span class="pair-key">'+label+'</span><span>'+(val!=null?val:'—')+'</span></div>';
         const refsHtml =
           '<div style="margin-top:4px">'+
-            refRow('15m latest close', p.latestClose!=null?p.latestClose.toFixed(2):null) +
-            refRow('15m prev close', p.prevClose!=null?p.prevClose.toFixed(2):null) +
-            refRow('Window pool', '$'+p.windowPool.toFixed(2)) +
-            refRow('Checkpoints', (p.checkpoint1Done?'1✓':'1…')+' '+(p.checkpoint2Done?'2✓':'2…')) +
+            refRow('Next bet', p.nextSide) +
+            refRow('Next stake', p.nextStakeDollars!=null?('$'+p.nextStakeDollars.toFixed(2)+' (martingale)'):'base (0.25% of bankroll)') +
+            refRow('Current loss streak', String(p.streakLosses)) +
+            refRow('This window', p.entryDone?'entry placed':'pending (t=150s)') +
           '</div>';
-        const entryRow = e => {
-          const stateHtml = e.closed
-            ? 'closed'
-            : 'holding '+e.shares.toFixed(2)+'sh (cost $'+e.cost.toFixed(2)+') — rides to resolution';
-          return '<div class="pair-row" style="font-size:9px"><span class="pair-key">cp'+e.checkpoint+' '+e.side+' @'+e.entryPrice.toFixed(2)+'</span><span style="flex:1;text-align:right">'+stateHtml+'</span></div>';
-        };
-        const entriesHtml = (p.entries && p.entries.length)
-          ? '<div style="margin-top:4px">'+p.entries.map(entryRow).join('')+'</div>'
-          : '<div class="pair-row" style="font-size:9px;opacity:.6">No entries yet this window</div>';
+        const entryHtml = p.entry
+          ? (() => {
+              const e = p.entry;
+              const stateHtml = e.closed
+                ? 'closed'
+                : 'holding '+e.shares.toFixed(2)+'sh (cost $'+e.cost.toFixed(2)+') — rides to resolution';
+              const tag = e.isMartingale ? ' [martingale]' : ' [base]';
+              return '<div style="margin-top:4px"><div class="pair-row" style="font-size:9px"><span class="pair-key">'+e.side+' @'+e.entryPrice.toFixed(2)+' stake=$'+e.stakeDollars.toFixed(2)+tag+'</span><span style="flex:1;text-align:right">'+stateHtml+'</span></div></div>';
+            })()
+          : '<div class="pair-row" style="font-size:9px;opacity:.6">No entry yet this window</div>';
         const eqCurve = buildEquitySvg(p.equityCurve, 280, 34, null);
-        const hasPos = (p.entries || []).some(e => !e.closed);
+        const hasPos = !!(p.entry && !p.entry.closed);
         return '<div class="pair-card '+(hasPos?'has-pos':'')+' '+(p.tradable?'':'untradable')+'">'+
           '<div class="pair-hdr"><div class="pair-sym">'+p.symbol+'</div><div class="pair-timer">'+(p.tradable?fmtSecs(p.secsToEnd):'loading…')+'</div></div>'+
           '<div class="pair-body">'+
@@ -306,7 +307,7 @@ app.get('/', (_, res) => {
             '<div class="pair-row"><span class="pair-key">Realized</span><span class="'+pClass(p.realizedPnl)+'">'+sgn(p.realizedPnl)+'</span><span class="pair-key">Unrealized</span><span class="'+pClass(p.unrealizedPnl)+'">'+sgn(p.unrealizedPnl)+'</span></div>'+
             '<div class="pair-row"><span class="pair-key">Fees paid</span><span class="pnl-neg">-$'+(p.feesPaid||0).toFixed(4)+'</span><span class="pair-key">Rebates</span><span class="pnl-pos">+$'+(p.rebatesEarned||0).toFixed(4)+'</span></div>'+
             refsHtml +
-            entriesHtml +
+            entryHtml +
             '<div class="spark-box"><svg viewBox="0 0 280 34" preserveAspectRatio="none">'+eqCurve+'</svg><div class="spark-label">Equity curve ($'+p.markValue.toFixed(2)+')</div></div>'+
           '</div></div>';
       }).join('');
