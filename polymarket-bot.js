@@ -2,59 +2,76 @@
 
 /**
  * ═══════════════════════════════════════════════════════════════
- *  POLYMARKET 5-MINUTE CRYPTO UP/DOWN — PURE MARTINGALE STREAK BOT
+ *  POLYMARKET CRYPTO UP/DOWN — 1H REVERSAL → 15m → 5m NESTED PLAYBOOK
  * ═══════════════════════════════════════════════════════════════
  *
- *  Complete rewrite. No signals, no external price data for the DECISION —
- *  Polymarket's own ask is only used to know what price to quote at when
- *  placing the order, never to decide direction. Direction and size are
- *  purely a function of the bot's own last result.
+ *  SIGNAL — the most recently CLOSED 1-hour Binance candle, evaluated
+ *  once at the top of every hour and then LOCKED for that whole hour:
  *
- *  ENTRY: exactly ONE entry per window, at t=150s (mid-window). No earlier
- *    checkpoint, no second entry.
+ *    NORMAL  (bullish reversal): the just-closed 1h candle is green
+ *      (close > its own open) OR its close is above the previous 1h
+ *      candle's close — AND it was preceded by 3+ consecutive RED 1h
+ *      candles.
+ *        → 1h market entry side: Up
+ *        → the hour's four 15m windows trade: Down, Down, Up, Up
  *
- *  DIRECTION — win stays, loss flips:
- *    - The very first entry ever placed is Up (hardcoded starting point).
- *    - If the last bet WON, the next window's bet is the SAME side again.
- *    - If the last bet LOST, the next window's bet FLIPS to the other side.
- *    This is a pure streak-following rule — it has no opinion about the
- *    market at all, only about its own last outcome.
+ *    MIRROR  (bearish reversal): the just-closed 1h candle is red OR
+ *      its close is below the previous close — AND it was preceded by
+ *      3+ consecutive GREEN 1h candles.
+ *        → 1h market entry side: Down
+ *        → the hour's four 15m windows trade: Up, Up, Down, Down
  *
- *  SIZING — pure martingale, base resets on a win:
- *    - After a WIN, the next bet's stake resets to BASE_PCT (0.25%) of the
- *      CURRENT bankroll at that moment (so the base itself slowly grows or
- *      shrinks as bankroll compounds over time).
- *    - After a LOSS, the next bet's stake is simply DOUBLE the dollar
- *      amount just staked. No formula, no recovery target — pure doubling.
- *    - This is uncapped by design: a long losing streak grows the stake
- *      geometrically with no ceiling. That's the explicit, accepted
- *      behavior of "pure martingale," not an oversight.
+ *    Neither condition met → sit out the entire hour, no trades at any
+ *    timeframe.
  *
- *  EXECUTION: single-shot limit buy quoted QUOTE_BUFFER above the current
- *    ask (deliberately marketable) — no retry, no cancel, no fill
- *    verification.
+ *  NESTING — each 15m window is itself treated like a mini reference
+ *  candle for its three 5m sub-windows:
+ *    - 15m window side = Down → its 5m windows trade: Down, Up, Up
+ *    - 15m window side = Up   → its 5m windows trade: Up, Down, Down
  *
- *  EXIT: none. No TP, no SL. The position rides to actual window
- *    resolution; a separate, independent auto-claim script handles real
- *    redemption. This bot's own bookkeeping still simulates resolution
- *    (via the public Gamma API) purely to keep the dashboard's P&L figures
- *    meaningful, and to know whether to reset or double next time.
+ *  1H MARKET ITSELF — one entry attempt, watching from the 29-minute
+ *  mark of the hour to the end of the hour, side = the hour's signal
+ *  direction.
  *
- *  LIVE / DEMO: DRY_RUN is runtime-switchable (see setMode) — dashboard has
- *    a one-click toggle plus an independent pause button.
+ *  ENTRY TRIGGER (identical at every timeframe) — a fixed-size market
+ *  buy of FIXED_SHARES (50) shares fires the FIRST time the ask for
+ *  the assigned side drops below ENTRY_THRESHOLD (0.40) at any point
+ *  while that window is being watched. One-shot per window: once it
+ *  fires (or the window ends without ever going below 0.40), that
+ *  window is done — no more attempts.
+ *
+ *  SIZING — fixed 50 shares on every single entry, at every timeframe.
+ *  No compounding, no pool, no bankroll-based scaling.
+ *
+ *  EXIT: none. No TP, no SL. Positions ride to actual window
+ *  resolution; a separate, independent auto-claim script handles real
+ *  redemption. This bot's own bookkeeping still simulates resolution
+ *  (via the public Gamma API) purely to keep the dashboard's P&L
+ *  figures meaningful.
+ *
+ *  SLUGS: the 5m/15m Polymarket markets use predictable epoch-based
+ *  slugs (`{symbol}-updown-{tf}-{epoch}`) — same scheme the previous
+ *  version of this bot already relied on successfully. The 1-HOUR
+ *  market uses a DIFFERENT, Eastern-Time, human-readable slug (e.g.
+ *  "bitcoin-up-or-down-march-6-12am-et") that has historically drifted
+ *  (with/without year). This bot makes a best-effort guess at that
+ *  slug and logs a warning if it can't find the hour's market — if
+ *  that happens, check the real slug on polymarket.com and adjust
+ *  SYMBOL_FULL_NAME / buildHourlySlugCandidates() below.
+ *
+ *  LIVE / DEMO: DRY_RUN is runtime-switchable (see setMode).
  * ═══════════════════════════════════════════════════════════════
  */
 
 const PolymarketTrader = require('./polymarket-trader');
 
-const GAMMA = 'https://gamma-api.polymarket.com';
-const CLOB  = 'https://clob.polymarket.com';
+const GAMMA   = 'https://gamma-api.polymarket.com';
+const CLOB    = 'https://clob.polymarket.com';
+const BINANCE = 'https://api.binance.com/api/v3';
 
 const TICK_MS               = 500;
 const POLY_PRICE_REFRESH_MS = 1000;
-const WINDOW_SECS           = 300;
-const EARLY_CUTOFF_SECS     = Number(process.env.EARLY_CUTOFF_SECS || 2); // force-resolve this many seconds BEFORE the nominal window end (298s)
-const SLUG_OFFSET_FALLBACKS = [0, -300, 300];
+const EARLY_CUTOFF_SECS     = Number(process.env.EARLY_CUTOFF_SECS || 2); // stop watching / start resolving this many secs before nominal window end
 
 let DRY_RUN = (process.env.DRY_RUN || 'true').toLowerCase() === 'true'; // runtime-switchable — see setMode
 const TOTAL_CAPITAL = Number(process.env.TOTAL_CAPITAL || 2000);
@@ -66,13 +83,23 @@ function round5(n) { return Math.round(n * 100000) / 100000; }
 function nowSec() { return Date.now() / 1000; }
 
 // ── Strategy parameters ──
-const ENTRY_SECS  = Number(process.env.ENTRY_SECS || 150); // the one and only checkpoint
-const BASE_PCT    = Number(process.env.BASE_PCT || 0.0025); // 0.25% of current bankroll — recomputed fresh after every win
-const MIN_SHARES  = Number(process.env.MIN_SHARES || 1);
-const QUOTE_BUFFER = Number(process.env.QUOTE_BUFFER || 0.01); // above the ask — deliberately marketable, single shot
+const ENTRY_THRESHOLD      = Number(process.env.ENTRY_THRESHOLD || 0.40); // buy trigger: ask must fall below this
+const FIXED_SHARES         = Number(process.env.FIXED_SHARES || 50);      // fixed size, every single entry
+const QUOTE_BUFFER         = Number(process.env.QUOTE_BUFFER || 0.01);    // small buffer above ask so the "market" buy actually fills
+const WATCH_1H_AFTER_SECS  = Number(process.env.WATCH_1H_AFTER_SECS || 29 * 60); // 1h market: only start watching at +29min
+const REQUIRED_STREAK      = Number(process.env.REQUIRED_STREAK || 3);   // 3+ consecutive opposite-color candles required
 
-const CRYPTO_TAKER_FEE_RATE     = Number(process.env.CRYPTO_TAKER_FEE_RATE || 0.07);
-const CRYPTO_MAKER_REBATE_SHARE = Number(process.env.CRYPTO_MAKER_REBATE_SHARE || 0.20);
+const CRYPTO_TAKER_FEE_RATE = Number(process.env.CRYPTO_TAKER_FEE_RATE || 0.07);
+
+const TIMEFRAMES = { '1h': 3600, '15m': 900, '5m': 300 };
+const PATTERN_15M = { normal: ['Down', 'Down', 'Up', 'Up'], mirror: ['Up', 'Up', 'Down', 'Down'] };
+function fiveMinPattern(parentSide) { return parentSide === 'Down' ? ['Down', 'Up', 'Up'] : ['Up', 'Down', 'Down']; }
+
+// Best-effort mapping for the 1h market's human-readable slug. Extend as needed.
+const SYMBOL_FULL_NAME = {
+  BTC: 'bitcoin', ETH: 'ethereum', SOL: 'solana', XRP: 'xrp', DOGE: 'dogecoin',
+  LTC: 'litecoin', ADA: 'cardano', AVAX: 'avalanche', LINK: 'chainlink', BNB: 'bnb',
+};
 
 let emitFn = () => {};
 let slog = () => {};
@@ -86,6 +113,7 @@ let perPairCapital = TOTAL_CAPITAL / Math.max(pairList.length, 1);
 let pairs = {};
 let lastPolyPriceFetch = 0;
 let totalEquityCurve = [];
+let tokenAskMap = {}; // tokenId -> current BUY (ask) price
 
 function log(msg) {
   const line = `[${new Date().toISOString().slice(11, 19)}] ${msg}`;
@@ -95,22 +123,21 @@ function log(msg) {
 }
 
 async function getJSON(url) {
-  const res = await fetch(url, { headers: { 'User-Agent': 'polymarket-martingale-streak-bot/1.0' } });
+  const res = await fetch(url, { headers: { 'User-Agent': 'polymarket-1h-reversal-bot/1.0' } });
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${url}`);
   return res.json();
 }
 async function postJSON(url, body) {
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'User-Agent': 'polymarket-martingale-streak-bot/1.0' },
+    headers: { 'Content-Type': 'application/json', 'User-Agent': 'polymarket-1h-reversal-bot/1.0' },
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${url}`);
   return res.json();
 }
 
-// A marketable buy — priced above the current ask so it fills now. Single
-// shot: no retry, no cancel, no fill verification.
+// A marketable buy — priced a hair above the current ask so it fills now.
 async function placeEntryBuy(tokenId, price, shares) {
   if (!DRY_RUN && trader) return await trader.limitBuy(tokenId, shares, price);
   return { id: `dry-buy-${Date.now()}-${Math.random().toString(36).slice(2, 7)}` };
@@ -120,27 +147,66 @@ function takerFee(shares, price) {
 }
 
 // ─────────────────────────────────────────
+//  1-hour reversal signal
+// ─────────────────────────────────────────
+function candleColor(c) {
+  const o = parseFloat(c[1]), cl = parseFloat(c[4]);
+  return cl > o ? 'green' : (cl < o ? 'red' : 'flat');
+}
+
+// Fetches the closed 1h candles for `symbol`, evaluates the reversal
+// pattern, and returns { signal: 'normal'|'mirror', direction1h, lastClose,
+// prevClose, streak } or null if no pattern fires this hour.
+async function computeHourSignal(symbol) {
+  const binanceSymbol = `${symbol}USDT`;
+  const now = Date.now();
+  const data = await getJSON(`${BINANCE}/klines?symbol=${binanceSymbol}&interval=1h&limit=12`);
+  const closed = data.filter(c => c[6] < now); // [6] = closeTime
+  if (closed.length < REQUIRED_STREAK + 1) return null;
+
+  const last = closed[closed.length - 1];      // most recently closed 1h candle (the reference)
+  const prev = closed[closed.length - 2];
+  const lastColor = candleColor(last);
+  const lastClose = parseFloat(last[4]);
+  const prevClose = parseFloat(prev[4]);
+
+  function streakBefore(color) {
+    let count = 0;
+    for (let i = closed.length - 2; i >= 0; i--) {
+      if (candleColor(closed[i]) === color) count++; else break;
+    }
+    return count;
+  }
+
+  const bullish = lastColor === 'green' || lastClose > prevClose;
+  const bearish = lastColor === 'red' || lastClose < prevClose;
+
+  if (bullish) {
+    const streak = streakBefore('red');
+    if (streak >= REQUIRED_STREAK) return { signal: 'normal', direction1h: 'Up', lastClose, prevClose, streak };
+  }
+  if (bearish) {
+    const streak = streakBefore('green');
+    if (streak >= REQUIRED_STREAK) return { signal: 'mirror', direction1h: 'Down', lastClose, prevClose, streak };
+  }
+  return null;
+}
+
+// ─────────────────────────────────────────
 //  Pair state
 // ─────────────────────────────────────────
 function freshPairState(symbol) {
   return {
     symbol,
-    tradable: false,
-    windowStart: null, windowEnd: null, slug: null, eventTitle: null, conditionId: null,
-    upTokenId: null, downTokenId: null,
-    upAsk: null, upBid: null, downAsk: null, downBid: null,
-    entryDone: false,
-    entry: null,                  // at most one per window
-    // Streak state — persists ACROSS windows, NOT reset per-window:
-    nextSide: 'Up',                // first-ever bet is Up
-    nextStakeDollars: null,        // null = "compute fresh base (0.25% of bankroll)" — set on init and after every win
-    streakLosses: 0,               // just for dashboard visibility — how many consecutive losses right now
     bankroll: perPairCapital,
     realizedPnl: 0,
     feesPaid: 0,
-    rebatesEarned: 0,
     wins: 0, losses: 0,
-    resolvedThisWindow: true,
+    hourStart: null,
+    signal: null,        // 'normal' | 'mirror' | null (locked for the hour)
+    direction1h: null,
+    hourlySlugWarned: false,
+    windows: [],          // flat list of window trackers: 1h(1) + 15m(4) + 5m(12) per hour
     equityCurve: [{ t: Date.now(), equity: perPairCapital }],
   };
 }
@@ -152,11 +218,24 @@ function resetPairs() {
 }
 resetPairs();
 
+function windowStartFor(tf, tsSec = nowSec()) { const secs = TIMEFRAMES[tf]; return Math.floor(tsSec / secs) * secs; }
+
+function buildWindow(symbol, tf, windowStart, side) {
+  const secs = TIMEFRAMES[tf];
+  return {
+    id: `${symbol}-${tf}-${windowStart}`,
+    tf, windowStart, windowEnd: windowStart + secs, side,
+    slug: null, conditionId: null, upTokenId: null, downTokenId: null,
+    loaded: false, tradable: false,
+    watchStart: tf === '1h' ? windowStart + WATCH_1H_AFTER_SECS : windowStart,
+    entryDone: false, entry: null, entrySkipped: false,
+    resolved: false, resolvedAt: null, won: null,
+  };
+}
+
 // ─────────────────────────────────────────
-//  Slug / window math (unchanged market-discovery plumbing)
+//  Market discovery
 // ─────────────────────────────────────────
-function currentWindowStart(tsSec = nowSec()) { return Math.floor(tsSec / WINDOW_SECS) * WINDOW_SECS; }
-function slugFor(symbol, windowStartSec) { return `${symbol.toLowerCase()}-updown-5m-${windowStartSec}`; }
 function qOf(m) { return (m.question || m.groupItemTitle || m.title || '').toLowerCase(); }
 function parseMarketTokens(m) {
   try {
@@ -171,98 +250,121 @@ function tokenIdForSide(market, side) {
   const tok = tokens.find(t => (t.outcome || '').toLowerCase() === want);
   return tok?.token_id || null;
 }
-async function fetchEventForWindow(symbol, windowStart) {
-  for (const offset of SLUG_OFFSET_FALLBACKS) {
-    const ws = windowStart + offset;
-    if (ws + WINDOW_SECS <= nowSec()) continue;
-    const slug = slugFor(symbol, ws);
+function pickMarket(event) {
+  return (event.markets || []).find(m => { const q = qOf(m); return q.includes('up') || q.includes('down'); }) || (event.markets || [])[0];
+}
+
+// 5m / 15m: predictable epoch-based slugs, same scheme the prior version used.
+async function fetchEventForWindow(symbol, tf, windowStart) {
+  const secs = TIMEFRAMES[tf];
+  for (const offsetMult of [0, -1, 1]) {
+    const ws = windowStart + offsetMult * secs;
+    const slug = `${symbol.toLowerCase()}-updown-${tf}-${ws}`;
     try {
       const event = await getJSON(`${GAMMA}/events/slug/${encodeURIComponent(slug)}`);
-      if (event && event.id && Array.isArray(event.markets) && event.markets.length) return { event, windowStart: ws, slug };
+      if (event && event.id && Array.isArray(event.markets) && event.markets.length) {
+        return { event, market: pickMarket(event), slug };
+      }
     } catch (_) {}
   }
   return null;
 }
 
-async function loadPairWindow(p) {
-  const ws = currentWindowStart();
-  if (p.windowStart === ws && p.upTokenId) return;
-  const found = await fetchEventForWindow(p.symbol, ws);
-  if (!found) { p.tradable = false; return; }
-  const { event, windowStart, slug } = found;
-  const market = event.markets.find(m => { const q = qOf(m); return q.includes('up') || q.includes('down'); }) || event.markets[0];
+// 1h: Eastern-Time, human-readable slug — best effort, see header notes.
+function etHourParts(windowStartSec) {
+  const d = new Date(windowStartSec * 1000);
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York', month: 'long', day: 'numeric', year: 'numeric', hour: 'numeric', hour12: true,
+  });
+  const parts = fmt.formatToParts(d);
+  const get = t => parts.find(p => p.type === t)?.value || '';
+  const month = get('month').toLowerCase();
+  const day = get('day');
+  const year = get('year');
+  const hourNum = get('hour').toLowerCase();
+  const dayPeriod = (parts.find(p => p.type === 'dayPeriod')?.value || '').toLowerCase();
+  return { month, day, year, hourLabel: `${hourNum}${dayPeriod}` };
+}
+function buildHourlySlugCandidates(symbol, windowStart) {
+  const name = SYMBOL_FULL_NAME[symbol] || symbol.toLowerCase();
+  const { month, day, year, hourLabel } = etHourParts(windowStart);
+  return [
+    `${name}-up-or-down-${month}-${day}-${hourLabel}-et`,
+    `${name}-up-or-down-${month}-${day}-${year}-${hourLabel}-et`,
+    `${symbol.toLowerCase()}-updown-1h-${windowStart}`, // long-shot fallback in case format changes
+  ];
+}
+async function fetchHourlyEvent(symbol, windowStart) {
+  for (const slug of buildHourlySlugCandidates(symbol, windowStart)) {
+    try {
+      const event = await getJSON(`${GAMMA}/events/slug/${encodeURIComponent(slug)}`);
+      if (event && event.id && Array.isArray(event.markets) && event.markets.length) {
+        return { event, market: pickMarket(event), slug };
+      }
+    } catch (_) {}
+  }
+  return null;
+}
+
+async function tryLoadWindow(s, w) {
+  const found = w.tf === '1h'
+    ? await fetchHourlyEvent(s.symbol, w.windowStart)
+    : await fetchEventForWindow(s.symbol, w.tf, w.windowStart);
+  if (!found) {
+    if (w.tf === '1h' && !s.hourlySlugWarned && nowSec() - w.windowStart > 30) {
+      s.hourlySlugWarned = true;
+      log(`⚠️  ${s.symbol}: couldn't locate the 1h market via guessed slug (tried ET-based candidates). 1h entry for this hour may be skipped — see header notes in polymarket-bot.js if this persists.`);
+    }
+    return;
+  }
+  const { event, market, slug } = found;
   const upId = tokenIdForSide(market, 'up');
   const downId = tokenIdForSide(market, 'down');
-  if (!upId || !downId) { log(`⚠️  ${p.symbol}: window loaded but Up/Down token ids missing`); p.tradable = false; return; }
-
-  p.windowStart = windowStart;
-  p.windowEnd = windowStart + WINDOW_SECS;
-  p.slug = slug;
-  p.eventTitle = event.title || event.slug;
-  p.conditionId = market.conditionId || null;
-  p.upTokenId = upId;
-  p.downTokenId = downId;
-  p.tradable = true;
-  p.resolvedThisWindow = false;
-  p.entryDone = false;
-  p.entry = null;
-  log(`🔭 ${p.symbol} window loaded: ${slug} | next bet: ${p.nextSide}${p.nextStakeDollars != null ? ` @ $${p.nextStakeDollars.toFixed(2)} (martingale)` : ' @ base (0.25% of bankroll)'} | ends ${new Date(p.windowEnd * 1000).toISOString().slice(11,19)}Z`);
+  if (!upId || !downId) return;
+  w.slug = slug;
+  w.conditionId = market.conditionId || null;
+  w.upTokenId = upId;
+  w.downTokenId = downId;
+  w.loaded = true;
+  w.tradable = true;
 }
 
 // ─────────────────────────────────────────
-//  Polymarket price feed (unchanged plumbing)
+//  Polymarket price feed
 // ─────────────────────────────────────────
-async function refreshPolyPrices() {
-  const requests = [];
-  for (const p of Object.values(pairs)) {
-    if (!p.tradable || !p.upTokenId || !p.downTokenId) continue;
-    requests.push({ token_id: p.upTokenId, side: 'BUY' });
-    requests.push({ token_id: p.upTokenId, side: 'SELL' });
-    requests.push({ token_id: p.downTokenId, side: 'BUY' });
-    requests.push({ token_id: p.downTokenId, side: 'SELL' });
-  }
-  if (!requests.length) return;
-  function applyPolyPrice(tid, side, price) {
-    if (!Number.isFinite(price)) return;
-    for (const p of Object.values(pairs)) {
-      if (p.upTokenId === tid) { if (side === 'BUY') p.upAsk = price; else if (side === 'SELL') p.upBid = price; }
-      else if (p.downTokenId === tid) { if (side === 'BUY') p.downAsk = price; else if (side === 'SELL') p.downBid = price; }
+async function refreshAllPrices() {
+  const tokenSet = new Set();
+  for (const s of Object.values(pairs)) {
+    for (const w of s.windows) {
+      if (w.resolved || !w.loaded) continue;
+      if (w.upTokenId) tokenSet.add(w.upTokenId);
+      if (w.downTokenId) tokenSet.add(w.downTokenId);
     }
   }
+  if (!tokenSet.size) return;
+  const requests = [...tokenSet].map(tid => ({ token_id: tid, side: 'BUY' }));
   try {
     const data = await postJSON(`${CLOB}/prices`, requests);
     if (Array.isArray(data)) {
       for (const row of data) {
         const tid = row.token_id || row.asset_id || row.tokenId;
-        const side = (row.side || '').toUpperCase();
         const price = parseFloat(row.price);
-        if (!tid || !Number.isFinite(price)) continue;
-        applyPolyPrice(tid, side, price);
+        if (tid && Number.isFinite(price)) tokenAskMap[tid] = price;
       }
     } else if (data && typeof data === 'object') {
       for (const [tid, val] of Object.entries(data)) {
         if (val && typeof val === 'object') {
-          if (val.BUY != null) applyPolyPrice(tid, 'BUY', parseFloat(val.BUY));
-          if (val.SELL != null) applyPolyPrice(tid, 'SELL', parseFloat(val.SELL));
-          if (val.buy != null) applyPolyPrice(tid, 'BUY', parseFloat(val.buy));
-          if (val.sell != null) applyPolyPrice(tid, 'SELL', parseFloat(val.sell));
+          const p = val.BUY != null ? val.BUY : (val.buy != null ? val.buy : null);
+          if (p != null) tokenAskMap[tid] = parseFloat(p);
         }
       }
     }
   } catch (e) {
-    for (const p of Object.values(pairs)) {
-      if (!p.tradable) continue;
+    for (const tid of tokenSet) {
       try {
-        const [upAsk, upBid, downAsk, downBid] = await Promise.all([
-          getJSON(`${CLOB}/price?token_id=${p.upTokenId}&side=BUY`).catch(() => null),
-          getJSON(`${CLOB}/price?token_id=${p.upTokenId}&side=SELL`).catch(() => null),
-          getJSON(`${CLOB}/price?token_id=${p.downTokenId}&side=BUY`).catch(() => null),
-          getJSON(`${CLOB}/price?token_id=${p.downTokenId}&side=SELL`).catch(() => null),
-        ]);
-        if (upAsk) p.upAsk = parseFloat(upAsk.price || upAsk.mid || p.upAsk);
-        if (upBid) p.upBid = parseFloat(upBid.price || upBid.mid || p.upBid);
-        if (downAsk) p.downAsk = parseFloat(downAsk.price || downAsk.mid || p.downAsk);
-        if (downBid) p.downBid = parseFloat(downBid.price || downBid.mid || p.downBid);
+        const r = await getJSON(`${CLOB}/price?token_id=${tid}&side=BUY`);
+        const p = parseFloat(r.price || r.mid);
+        if (Number.isFinite(p)) tokenAskMap[tid] = p;
       } catch (_) {}
     }
   }
@@ -271,81 +373,109 @@ async function refreshPolyPrices() {
 // ─────────────────────────────────────────
 //  Equity tracking
 // ─────────────────────────────────────────
-function pairMarkValue(p) {
-  if (!p.entry || p.entry.closed) return round2(p.bankroll);
-  const bid = p.entry.side === 'Up' ? p.upBid : p.downBid;
-  const held = round2(p.entry.shares * (bid ?? p.entry.entryPrice));
-  return round2(p.bankroll + held);
+function windowMarkValue(w) {
+  if (!w.entryDone || !w.entry || w.resolved) return 0;
+  const tid = w.entry.side === 'Up' ? w.upTokenId : w.downTokenId;
+  const px = tokenAskMap[tid];
+  return round2(w.entry.shares * (px ?? w.entry.entryPrice));
+}
+function pairMarkValue(s) {
+  const held = s.windows.reduce((sum, w) => sum + windowMarkValue(w), 0);
+  return round2(s.bankroll + held);
 }
 function pushGlobalEquity() {
-  const total = round2(Object.values(pairs).reduce((s, p) => s + pairMarkValue(p), 0));
+  const total = round2(Object.values(pairs).reduce((sum, s) => sum + pairMarkValue(s), 0));
   totalEquityCurve.push({ t: Date.now(), equity: total });
   if (totalEquityCurve.length > 500) totalEquityCurve.shift();
 }
-function recordEquity(p) {
-  p.equityCurve.push({ t: Date.now(), equity: pairMarkValue(p) });
-  if (p.equityCurve.length > 300) p.equityCurve.shift();
+function recordEquity(s) {
+  s.equityCurve.push({ t: Date.now(), equity: pairMarkValue(s) });
+  if (s.equityCurve.length > 300) s.equityCurve.shift();
   pushGlobalEquity();
 }
-function registerTrade(p, entry) {
-  const rec = { time: new Date().toISOString().slice(11, 19), symbol: p.symbol, ...entry };
+function registerTrade(s, entry) {
+  const rec = { time: new Date().toISOString().slice(11, 19), symbol: s.symbol, ...entry };
   trades.push(rec);
   if (trades.length > 300) trades.shift();
 }
 
 // ─────────────────────────────────────────
-//  Entry: one per window, streak-driven direction and sizing
+//  Hour transition — compute signal, build the whole hour's window tree
 // ─────────────────────────────────────────
-async function attemptEntry(p) {
-  const side = p.nextSide;
-  const tokenId = side === 'Up' ? p.upTokenId : p.downTokenId;
-  const ask = side === 'Up' ? p.upAsk : p.downAsk;
-  if (ask == null) { log(`⏭️  ${p.symbol}: no ${side} ask available, skipping this window's entry entirely`); return; }
+async function startNewHour(s, hourStart) {
+  s.hourStart = hourStart;
+  s.signal = null;
+  s.direction1h = null;
+  s.hourlySlugWarned = false;
 
-  const stakeDollars = p.nextStakeDollars != null ? p.nextStakeDollars : round2(p.bankroll * BASE_PCT);
-  if (stakeDollars < 0.05) {
-    log(`⏭️  ${p.symbol}: stake too small ($${stakeDollars.toFixed(2)}), skipping`);
+  let sig = null;
+  try { sig = await computeHourSignal(s.symbol); }
+  catch (e) { log(`⚠️  ${s.symbol} 1h candle fetch failed: ${e.message}`); }
+
+  if (!sig) {
+    log(`🕐 ${s.symbol} hour ${new Date(hourStart * 1000).toISOString().slice(0, 13)}:00Z — no 3+ streak reversal pattern, sitting out this hour`);
     return;
   }
-  const quotePrice = round2(ask + QUOTE_BUFFER);
-  const shares = Math.max(round2(stakeDollars / quotePrice), MIN_SHARES);
+
+  s.signal = sig.signal;
+  s.direction1h = sig.direction1h;
+  const sides15 = PATTERN_15M[sig.signal];
+  log(`🕐 ${s.symbol} hour ${new Date(hourStart * 1000).toISOString().slice(0, 13)}:00Z — ${sig.signal.toUpperCase()} signal (close ${sig.lastClose} vs prev ${sig.prevClose}, streak ${sig.streak}) → 1h entry ${sig.direction1h} @+${Math.round(WATCH_1H_AFTER_SECS / 60)}m | 15m plan: ${sides15.join(', ')}`);
+
+  const w1h = buildWindow(s.symbol, '1h', hourStart, sig.direction1h);
+  s.windows.push(w1h);
+
+  for (let i = 0; i < 4; i++) {
+    const ws15 = hourStart + i * TIMEFRAMES['15m'];
+    const side15 = sides15[i];
+    s.windows.push(buildWindow(s.symbol, '15m', ws15, side15));
+    const sides5 = fiveMinPattern(side15);
+    for (let j = 0; j < 3; j++) {
+      const ws5 = ws15 + j * TIMEFRAMES['5m'];
+      s.windows.push(buildWindow(s.symbol, '5m', ws5, sides5[j]));
+    }
+  }
+}
+
+// ─────────────────────────────────────────
+//  Entry — fixed 50 shares, fires once ask < ENTRY_THRESHOLD
+// ─────────────────────────────────────────
+async function maybeEnterWindow(s, w) {
+  const tokenId = w.side === 'Up' ? w.upTokenId : w.downTokenId;
+  const ask = tokenAskMap[tokenId];
+  if (ask == null || ask >= ENTRY_THRESHOLD) return;
+
+  const quotePrice = round2(Math.min(ask + QUOTE_BUFFER, 0.99));
+  const shares = FIXED_SHARES;
   const notional = round2(quotePrice * shares);
   const fee = takerFee(shares, quotePrice);
   const totalCost = round2(notional + fee);
-  if (totalCost > p.bankroll) {
-    log(`⏭️  ${p.symbol}: skip entry — insufficient bankroll ($${p.bankroll.toFixed(2)} < $${totalCost.toFixed(2)})`);
+
+  if (totalCost > s.bankroll) {
+    log(`⏭️  ${s.symbol} ${w.tf} [${w.id}]: skip entry — bankroll $${s.bankroll.toFixed(2)} < $${totalCost.toFixed(2)}`);
+    w.entryDone = true;
+    w.entrySkipped = true;
     return;
   }
 
   await placeEntryBuy(tokenId, quotePrice, shares);
-  p.bankroll = round2(p.bankroll - totalCost);
-  p.realizedPnl = round2(p.realizedPnl - fee);
-  p.feesPaid = round2(p.feesPaid + fee);
-  const entry = {
-    side, entryPrice: quotePrice, shares, cost: totalCost, stakeDollars,
-    isMartingale: p.nextStakeDollars != null, closed: false, openedAt: Date.now(),
-  };
-  p.entry = entry;
-  recordEquity(p);
-  const tag = entry.isMartingale ? ` [martingale, streak=${p.streakLosses} losses]` : ' [base, 0.25% of bankroll]';
-  log(`🎯 ${p.symbol} ${side} entry ${shares.toFixed(2)}sh @ ${quotePrice.toFixed(2)} | stake=$${stakeDollars.toFixed(2)}${tag} | cost=$${totalCost.toFixed(2)} | fee=-$${fee.toFixed(4)}`);
-  registerTrade(p, { side: 'BUY', outcome: side, price: quotePrice, shares, cost: totalCost, fee, stakeDollars, isMartingale: entry.isMartingale });
-}
-
-async function maybeEnter(p) {
-  const elapsed = nowSec() - p.windowStart;
-  if (p.entryDone || elapsed < ENTRY_SECS) return;
-  p.entryDone = true;
-  await attemptEntry(p);
+  s.bankroll = round2(s.bankroll - totalCost);
+  s.realizedPnl = round2(s.realizedPnl - fee);
+  s.feesPaid = round2(s.feesPaid + fee);
+  w.entryDone = true;
+  w.entry = { side: w.side, entryPrice: quotePrice, shares, cost: totalCost };
+  recordEquity(s);
+  log(`🎯 ${s.symbol} ${w.tf} [${new Date(w.windowStart * 1000).toISOString().slice(11, 16)}Z] ${w.side} MARKET BUY ${shares}sh @ ${quotePrice.toFixed(2)} (ask ${ask.toFixed(2)} < ${ENTRY_THRESHOLD}) | cost=$${totalCost.toFixed(2)} | fee=-$${fee.toFixed(4)}`);
+  registerTrade(s, { side: 'BUY', outcome: w.side, tf: w.tf, reason: 'ENTRY', price: quotePrice, shares, cost: totalCost, fee });
 }
 
 // ─────────────────────────────────────────
-//  Window resolution
+//  Resolution (dashboard bookkeeping only — real redemption is external)
 // ─────────────────────────────────────────
-async function determineWinningSide(p) {
+async function determineWinningSideForWindow(w) {
   try {
-    const event = await getJSON(`${GAMMA}/events/slug/${encodeURIComponent(p.slug)}`);
-    const market = (event.markets || []).find(m => m.conditionId === p.conditionId) || (event.markets || [])[0];
+    const event = await getJSON(`${GAMMA}/events/slug/${encodeURIComponent(w.slug)}`);
+    const market = (event.markets || []).find(m => m.conditionId === w.conditionId) || (event.markets || [])[0];
     if (market && market.closed === true && market.outcomePrices) {
       const prices = typeof market.outcomePrices === 'string' ? JSON.parse(market.outcomePrices) : market.outcomePrices;
       const outcomes = typeof market.outcomes === 'string' ? JSON.parse(market.outcomes) : market.outcomes;
@@ -355,104 +485,103 @@ async function determineWinningSide(p) {
       if (winner) return winner.charAt(0).toUpperCase() + winner.slice(1).toLowerCase();
     }
   } catch (_) {}
-  if (p.upBid != null && p.downBid != null) return p.upBid >= p.downBid ? 'Up' : 'Down';
+  const upAsk = tokenAskMap[w.upTokenId], downAsk = tokenAskMap[w.downTokenId];
+  if (upAsk != null && downAsk != null) return upAsk >= downAsk ? 'Up' : 'Down';
   return null;
 }
 
-function flipSide(side) { return side === 'Up' ? 'Down' : 'Up'; }
+async function resolveWindow(s, w) {
+  w.resolved = true;
+  w.resolvedAt = Date.now();
+  if (!w.entryDone || !w.entry) return;
 
-async function resolvePairWindow(p) {
-  if (p.resolvedThisWindow) return;
-  p.resolvedThisWindow = true;
+  const winner = await determineWinningSideForWindow(w);
+  const won = winner === w.entry.side;
+  const proceeds = won ? round2(w.entry.shares * 1) : 0;
+  const profit = round2(proceeds - w.entry.cost);
+  s.bankroll = round2(s.bankroll + proceeds);
+  s.realizedPnl = round2(s.realizedPnl + profit);
+  if (won) s.wins++; else s.losses++;
+  w.won = won;
 
-  const entry = p.entry;
-  if (entry && !entry.closed) {
-    const winner = await determineWinningSide(p);
-    const won = winner === entry.side;
-    const proceeds = won ? round2(entry.shares * 1) : 0;
-    const profit = round2(proceeds - entry.cost);
-    p.bankroll = round2(p.bankroll + proceeds);
-    p.realizedPnl = round2(p.realizedPnl + profit);
-    entry.closed = true;
-
-    if (won) {
-      p.wins++;
-      p.streakLosses = 0;
-      p.nextSide = entry.side;       // stay
-      p.nextStakeDollars = null;     // reset — recompute 0.25% of new bankroll next time
-    } else {
-      p.losses++;
-      p.streakLosses++;
-      p.nextSide = flipSide(entry.side); // flip
-      p.nextStakeDollars = round2(entry.stakeDollars * 2); // pure double, no cap
-    }
-
-    const icon = won ? '💰' : '💥';
-    log(`${icon} ${p.symbol} ${entry.side} RESOLUTION ${entry.shares}sh entry=${entry.entryPrice.toFixed(2)} exit=$${won ? '1.00' : '0.00'}/sh | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)} | next: ${p.nextSide} @ ${p.nextStakeDollars != null ? '$'+p.nextStakeDollars.toFixed(2)+' (martingale)' : 'base'} (dashboard bookkeeping only — real redemption is via the separate claim script)`);
-    registerTrade(p, { side: 'SELL', outcome: entry.side, reason: 'RESOLUTION', price: won ? 1 : 0, shares: entry.shares, profit });
-  }
-  recordEquity(p);
+  const icon = won ? '💰' : '💥';
+  log(`${icon} ${s.symbol} ${w.tf} [${new Date(w.windowStart * 1000).toISOString().slice(11, 16)}Z] ${w.entry.side} RESOLUTION ${w.entry.shares}sh entry=${w.entry.entryPrice.toFixed(2)} exit=$${won ? '1.00' : '0.00'} | pnl=$${profit.toFixed(2)} | bankroll=$${s.bankroll.toFixed(2)}`);
+  registerTrade(s, { side: 'SELL', outcome: w.entry.side, tf: w.tf, reason: 'RESOLUTION', price: won ? 1 : 0, shares: w.entry.shares, profit });
+  recordEquity(s);
 }
 
 // ─────────────────────────────────────────
-//  Main per-pair tick
+//  Main per-symbol tick
 // ─────────────────────────────────────────
-async function processPair(p) {
-  const ws = currentWindowStart();
-  if (p.windowStart === null || ws !== p.windowStart) {
-    if (p.windowStart !== null && !p.resolvedThisWindow) await resolvePairWindow(p);
-    await loadPairWindow(p);
-  }
-  if (!p.tradable || !tradingEnabled) return;
+async function processSymbol(s) {
+  const hourStart = windowStartFor('1h');
+  if (s.hourStart !== hourStart) await startNewHour(s, hourStart);
+  if (!tradingEnabled) return;
 
-  const elapsed = nowSec() - p.windowStart;
-  if (elapsed >= WINDOW_SECS - EARLY_CUTOFF_SECS && !p.resolvedThisWindow) {
-    await resolvePairWindow(p);
-  }
-  if (p.resolvedThisWindow) return;
+  const t = nowSec();
+  for (const w of s.windows) {
+    if (w.resolved) continue;
+    if (!w.loaded) { await tryLoadWindow(s, w); if (!w.loaded) continue; }
 
-  await maybeEnter(p);
+    if (!w.entryDone && t >= w.watchStart && t < w.windowEnd - EARLY_CUTOFF_SECS) {
+      await maybeEnterWindow(s, w);
+    }
+    if (t >= w.windowEnd - EARLY_CUTOFF_SECS) {
+      await resolveWindow(s, w);
+    }
+  }
+
+  // prune old resolved windows so the list doesn't grow forever
+  const cutoffMs = Date.now() - 15 * 60 * 1000;
+  s.windows = s.windows.filter(w => !w.resolved || w.resolvedAt > cutoffMs);
 }
 
 // ─────────────────────────────────────────
 //  UI state
 // ─────────────────────────────────────────
 function buildState() {
-  const pairStates = Object.values(pairs).map(p => {
-    const markValue = pairMarkValue(p);
-    const unrealized = p.entry && !p.entry.closed ? round2(markValue - p.bankroll - p.entry.cost) : 0;
+  const pairStates = Object.values(pairs).map(s => {
+    const markValue = pairMarkValue(s);
     return {
-      symbol: p.symbol, tradable: p.tradable, slug: p.slug, windowEnd: p.windowEnd,
-      secsToEnd: p.windowEnd ? Math.max(0, Math.floor(p.windowEnd - nowSec())) : null,
-      upAsk: p.upAsk, upBid: p.upBid, downAsk: p.downAsk, downBid: p.downBid,
-      entryDone: p.entryDone, nextSide: p.nextSide, nextStakeDollars: p.nextStakeDollars, streakLosses: p.streakLosses,
-      bankroll: p.bankroll, realizedPnl: p.realizedPnl, unrealizedPnl: unrealized, markValue,
-      feesPaid: p.feesPaid, rebatesEarned: p.rebatesEarned, wins: p.wins, losses: p.losses,
-      entry: p.entry ? {
-        side: p.entry.side, entryPrice: p.entry.entryPrice, shares: p.entry.shares,
-        cost: p.entry.cost, stakeDollars: p.entry.stakeDollars, isMartingale: p.entry.isMartingale, closed: p.entry.closed,
-      } : null,
-      equityCurve: p.equityCurve,
+      symbol: s.symbol,
+      bankroll: s.bankroll,
+      realizedPnl: s.realizedPnl,
+      unrealizedPnl: round2(markValue - s.bankroll),
+      markValue,
+      feesPaid: s.feesPaid,
+      wins: s.wins, losses: s.losses,
+      hourStart: s.hourStart,
+      signal: s.signal,
+      direction1h: s.direction1h,
+      windows: s.windows.map(w => ({
+        id: w.id, tf: w.tf, side: w.side,
+        windowStart: w.windowStart, windowEnd: w.windowEnd,
+        secsToEnd: Math.max(0, Math.floor(w.windowEnd - nowSec())),
+        watchStart: w.watchStart,
+        tradable: w.tradable, entryDone: w.entryDone, entrySkipped: w.entrySkipped,
+        entry: w.entry, resolved: w.resolved, won: w.won,
+      })),
+      equityCurve: s.equityCurve,
     };
   });
-  const totalBankroll = round2(pairStates.reduce((s, p) => s + p.bankroll, 0));
-  const totalMark = round2(pairStates.reduce((s, p) => s + p.markValue, 0));
-  const totalRealized = round2(pairStates.reduce((s, p) => s + p.realizedPnl, 0));
-  const totalUnrealized = round2(pairStates.reduce((s, p) => s + p.unrealizedPnl, 0));
-  const totalWins = pairStates.reduce((s, p) => s + p.wins, 0);
-  const totalLosses = pairStates.reduce((s, p) => s + p.losses, 0);
+  const totalBankroll = round2(pairStates.reduce((sum, p) => sum + p.bankroll, 0));
+  const totalMark = round2(pairStates.reduce((sum, p) => sum + p.markValue, 0));
+  const totalRealized = round2(pairStates.reduce((sum, p) => sum + p.realizedPnl, 0));
+  const totalUnrealized = round2(pairStates.reduce((sum, p) => sum + p.unrealizedPnl, 0));
+  const totalWins = pairStates.reduce((sum, p) => sum + p.wins, 0);
+  const totalLosses = pairStates.reduce((sum, p) => sum + p.losses, 0);
   return {
     dryRun: DRY_RUN, tradingEnabled, pairs: pairList,
     totalCapital: TOTAL_CAPITAL, perPairCapital, totalBankroll, totalMarkValue: totalMark,
     totalRealizedPnl: totalRealized, totalUnrealizedPnl: totalUnrealized, totalPnl: round2(totalMark - TOTAL_CAPITAL),
     totalWins, totalLosses,
-    totalFeesPaid: round2(pairStates.reduce((s, p) => s + p.feesPaid, 0)),
-    totalRebatesEarned: round2(pairStates.reduce((s, p) => s + p.rebatesEarned, 0)),
+    totalFeesPaid: round2(pairStates.reduce((sum, p) => sum + p.feesPaid, 0)),
     winRate: (totalWins + totalLosses) > 0 ? round2((totalWins / (totalWins + totalLosses)) * 100) : null,
     uptime: Math.floor((Date.now() - startTime) / 1000),
     config: {
-      entrySecs: ENTRY_SECS, basePct: BASE_PCT, quoteBuffer: QUOTE_BUFFER,
-      cryptoTakerFeeRate: CRYPTO_TAKER_FEE_RATE, cryptoMakerRebateShare: CRYPTO_MAKER_REBATE_SHARE,
+      entryThreshold: ENTRY_THRESHOLD, fixedShares: FIXED_SHARES, quoteBuffer: QUOTE_BUFFER,
+      watch1hAfterSecs: WATCH_1H_AFTER_SECS, requiredStreak: REQUIRED_STREAK,
+      cryptoTakerFeeRate: CRYPTO_TAKER_FEE_RATE,
     },
     pairStates, totalEquityCurve, logs: logs.slice(-100), trades: trades.slice(-80).reverse(),
   };
@@ -465,8 +594,8 @@ async function mainLoop() {
   while (true) {
     try {
       const now = Date.now();
-      if (now - lastPolyPriceFetch >= POLY_PRICE_REFRESH_MS) { lastPolyPriceFetch = now; await refreshPolyPrices(); }
-      for (const p of Object.values(pairs)) { try { await processPair(p); } catch (e) { log(`⚠️  ${p.symbol} tick error: ${e.message}`); } }
+      if (now - lastPolyPriceFetch >= POLY_PRICE_REFRESH_MS) { lastPolyPriceFetch = now; await refreshAllPrices(); }
+      for (const s of Object.values(pairs)) { try { await processSymbol(s); } catch (e) { log(`⚠️  ${s.symbol} tick error: ${e.message}`); } }
       emitFn('state', buildState());
     } catch (e) { log(`⚠️  Loop error: ${e.message}`); }
     await new Promise(r => setTimeout(r, TICK_MS));
@@ -478,7 +607,7 @@ function setPairs(list) {
   if (!clean.length) return { ok: false, error: 'Empty pair list' };
   pairList = [...new Set(clean)];
   resetPairs();
-  log(`⚙️  Pairs updated: ${pairList.join(', ')} | $${perPairCapital.toFixed(2)} per pair`);
+  log(`⚙️  Pairs updated: ${pairList.join(', ')} | $${perPairCapital.toFixed(2)} per pair (bookkeeping only — sizing is fixed at ${FIXED_SHARES} shares/entry)`);
   return { ok: true, pairs: pairList, perPairCapital };
 }
 function pauseTrading() { tradingEnabled = false; log('⏸️  Trading paused (existing positions still tracked for resolution bookkeeping)'); return { ok: true }; }
@@ -497,11 +626,13 @@ function setMode(wantLive) {
 async function init(privateKey, emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
-  log(`🚀 Pure Martingale Streak Bot (no signals, no external price data)`);
-  log(`⚙️  $${TOTAL_CAPITAL} demo capital across ${pairList.length} pairs (${pairList.join(', ')}) → $${perPairCapital.toFixed(2)}/pair`);
-  log(`⚙️  one entry per window at t=${ENTRY_SECS}s | first-ever bet: Up | win → same side + reset to ${(BASE_PCT*100).toFixed(2)}% of bankroll | loss → flip side + double the stake (uncapped)`);
-  log(`⚙️  execution: single-shot limit buy quoted ${QUOTE_BUFFER} above the ask (marketable) | no retry, no cancel | no TP/SL — rides to resolution, external claim script handles redemption`);
-  log(`${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
+  log(`🚀 1h Reversal → 15m → 5m Nested Playbook Bot`);
+  log(`⚙️  $${TOTAL_CAPITAL} demo capital across ${pairList.length} pairs (${pairList.join(', ')}) → $${perPairCapital.toFixed(2)}/pair bookkeeping bankroll`);
+  log(`⚙️  1h signal: closed 1h candle green OR close>prev, after ${REQUIRED_STREAK}+ consecutive reds → NORMAL (1h buy Up, 15m Down/Down/Up/Up). Mirror case → MIRROR (1h buy Down, 15m Up/Up/Down/Down). Locked for the whole hour.`);
+  log(`⚙️  15m→5m nesting: Down 15m window → 5m Down/Up/Up | Up 15m window → 5m Up/Down/Down`);
+  log(`⚙️  entries: fixed ${FIXED_SHARES} shares, market buy the FIRST time ask drops below ${ENTRY_THRESHOLD}, one-shot per window | 1h market only watched from +${Math.round(WATCH_1H_AFTER_SECS / 60)}min`);
+  log(`⚙️  no TP/SL — rides to resolution, external claim script handles real redemption`);
+  log(`${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price/candle data' : '🔴 LIVE MODE — real money'}`);
 
   trader = new PolymarketTrader(privateKey);
   await trader.authenticate();
