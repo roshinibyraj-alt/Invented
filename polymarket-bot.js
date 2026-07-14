@@ -66,7 +66,7 @@ const EARLY_CUTOFF_SECS     = Number(process.env.EARLY_CUTOFF_SECS || 2); // for
 const SLUG_OFFSET_FALLBACKS = [0, -300, 300];
 
 let DRY_RUN = (process.env.DRY_RUN || 'true').toLowerCase() === 'true'; // runtime-switchable — see setMode
-const TOTAL_CAPITAL = Number(process.env.TOTAL_CAPITAL || 2000);
+const TOTAL_CAPITAL = Number(process.env.TOTAL_CAPITAL || 200000);
 const DEFAULT_PAIRS = (process.env.CRYPTO_PAIRS || 'BTC')
   .split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
 
