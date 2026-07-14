@@ -31,15 +31,14 @@
  *    uncertain — a missed or late fill on one side doesn't corrupt any
  *    calculation on the other.
  *
- *  SIZING — time-and-price tiered, flips after the halfway point:
- *    Before t=100s:
- *      - quoted-from price < 0.50 → 20 shares
- *      - quoted-from price >= 0.50 → 10 shares
- *    At/after t=100s, the rule INVERTS:
- *      - quoted-from price >= 0.50 → 20 shares
- *      - quoted-from price < 0.50 → 10 shares
- *    ("quoted-from price" = the ask at the moment that specific quote was
- *    placed, not the fill price — sizing is decided once, at quote time.)
+ *  SIZING/ELIGIBILITY — phase-gated, one side per checkpoint:
+ *    Before PHASE_SPLIT_SECS (130s): only the CHEAP side (ask < 0.50) gets
+ *    quoted, sized SHARES_CHEAP_PHASE (10). The expensive side is skipped
+ *    that checkpoint (not an error — just sits it out).
+ *    At/after PHASE_SPLIT_SECS: only the EXPENSIVE side (ask >= 0.50) gets
+ *    quoted, sized SHARES_EXPENSIVE_PHASE (20). The cheap side is skipped.
+ *    Since Up and Down are roughly complementary, in practice this means
+ *    exactly one side gets a new quote each checkpoint, not both.
  *
  *  EXIT: none. No TP, no SL. Whatever fills accumulate on each side just
  *    ride to actual window resolution — a separate, independent auto-claim
@@ -83,9 +82,9 @@ function nowSec() { return Date.now() / 1000; }
 const QUOTE_INTERVAL_SECS = Number(process.env.QUOTE_INTERVAL_SECS || 10); // requote cadence, both sides
 const QUOTE_STOP_SECS     = Number(process.env.QUOTE_STOP_SECS || 200);   // stop placing NEW quotes after this
 const QUOTE_OFFSET        = Number(process.env.QUOTE_OFFSET || 0.01);     // below current ask
-const SHARES_TIER_HIGH    = Number(process.env.SHARES_TIER_HIGH || 20);
-const SHARES_TIER_LOW     = Number(process.env.SHARES_TIER_LOW || 10);
-const SIZE_FLIP_SECS      = Number(process.env.SIZE_FLIP_SECS || 100); // when the price/size tiering inverts
+const PHASE_SPLIT_SECS       = Number(process.env.PHASE_SPLIT_SECS || 130); // before this: cheap side only. at/after: expensive side only.
+const SHARES_CHEAP_PHASE     = Number(process.env.SHARES_CHEAP_PHASE || 10);
+const SHARES_EXPENSIVE_PHASE = Number(process.env.SHARES_EXPENSIVE_PHASE || 20);
 const MIN_SHARES          = Number(process.env.MIN_SHARES || 1);
 
 const CRYPTO_TAKER_FEE_RATE     = Number(process.env.CRYPTO_TAKER_FEE_RATE || 0.07);
@@ -140,14 +139,17 @@ function makerRebate(shares, price) {
   return round5(shares * CRYPTO_TAKER_FEE_RATE * price * (1 - price) * CRYPTO_MAKER_REBATE_SHARE);
 }
 
-// Time-and-price tiered sizing — the rule INVERTS after SIZE_FLIP_SECS.
-// "price" here is the ask at the moment the quote is placed, not the fill.
+// Phase-gated eligibility — only ONE side qualifies per checkpoint (usually),
+// since Up/Down are roughly complementary. Before PHASE_SPLIT_SECS, only the
+// CHEAP side (ask<0.50) is quoted, sized SHARES_CHEAP_PHASE. At/after
+// PHASE_SPLIT_SECS, only the EXPENSIVE side (ask>=0.50) is quoted, sized
+// SHARES_EXPENSIVE_PHASE. Returns null if this side doesn't qualify this
+// round — that side is simply skipped for this checkpoint, not an error.
 function sharesForQuote(price, elapsedSecs) {
-  const cheap = price < 0.50;
-  if (elapsedSecs < SIZE_FLIP_SECS) {
-    return cheap ? SHARES_TIER_HIGH : SHARES_TIER_LOW;
+  if (elapsedSecs < PHASE_SPLIT_SECS) {
+    return price < 0.50 ? SHARES_CHEAP_PHASE : null;
   }
-  return cheap ? SHARES_TIER_LOW : SHARES_TIER_HIGH;
+  return price >= 0.50 ? SHARES_EXPENSIVE_PHASE : null;
 }
 
 // ─────────────────────────────────────────
@@ -336,12 +338,13 @@ function registerTrade(p, entry) {
 async function placeDipQuote(p, side, elapsedSecs) {
   const ask = side === 'Up' ? p.upAsk : p.downAsk;
   if (ask == null) { log(`⏭️  ${p.symbol} ${side}: no ask available, skipping this quote`); return; }
+  const shares = sharesForQuote(ask, elapsedSecs);
+  if (shares == null) return; // this side isn't the cheap/expensive one for the current phase — just sit this checkpoint out, not an error
   const tokenId = side === 'Up' ? p.upTokenId : p.downTokenId;
   const quotePrice = round2(Math.max(0.01, ask - QUOTE_OFFSET));
-  const shares = Math.max(sharesForQuote(ask, elapsedSecs), MIN_SHARES);
 
-  const order = await placeRestingBuy(tokenId, quotePrice, shares);
-  p.pendingOrders[side].push({ price: quotePrice, shares, orderId: order.id || order.orderId || null, placedAt: Date.now() });
+  const order = await placeRestingBuy(tokenId, quotePrice, Math.max(shares, MIN_SHARES));
+  p.pendingOrders[side].push({ price: quotePrice, shares: Math.max(shares, MIN_SHARES), orderId: order.id || order.orderId || null, placedAt: Date.now() });
   log(`📌 ${p.symbol} ${side} resting buy ${shares}sh @ ${quotePrice.toFixed(2)} (ask=${ask.toFixed(2)}) — waiting for price to walk down to it`);
 }
 
@@ -448,11 +451,15 @@ async function processPair(p) {
   }
   if (p.resolvedThisWindow) return;
 
-  // New quotes only inside the active quoting phase (0-200s)...
-  if (elapsed <= QUOTE_STOP_SECS) {
-    await maybeQuoteBothSides(p);
-  }
-  // ...but fill-checking runs the WHOLE window, since resting orders placed
+  // New quotes only inside the active quoting phase — maybeQuoteBothSides
+  // itself is the sole gate (bounded by QUOTE_CHECKPOINTS_SECS.length), so
+  // there's no separate elapsed<=QUOTE_STOP_SECS check here: that used to
+  // race against tick granularity and strand the very last checkpoint
+  // (t=200s) in ~92% of windows, since by the time a tick observed
+  // elapsed>=200 it had almost always already ticked past 200 too, failing
+  // a redundant outer bound. The inner while-loop's own bounds are enough.
+  await maybeQuoteBothSides(p);
+  // ...fill-checking runs the WHOLE window, since resting orders placed
   // earlier can still be walked down to and filled during the quiet phase.
   await checkFills(p, 'Up');
   await checkFills(p, 'Down');
@@ -496,7 +503,7 @@ function buildState() {
     uptime: Math.floor((Date.now() - startTime) / 1000),
     config: {
       quoteIntervalSecs: QUOTE_INTERVAL_SECS, quoteStopSecs: QUOTE_STOP_SECS, quoteOffset: QUOTE_OFFSET,
-      sharesTierHigh: SHARES_TIER_HIGH, sharesTierLow: SHARES_TIER_LOW, sizeFlipSecs: SIZE_FLIP_SECS,
+      sharesCheapPhase: SHARES_CHEAP_PHASE, sharesExpensivePhase: SHARES_EXPENSIVE_PHASE, phaseSplitSecs: PHASE_SPLIT_SECS,
       cryptoTakerFeeRate: CRYPTO_TAKER_FEE_RATE, cryptoMakerRebateShare: CRYPTO_MAKER_REBATE_SHARE,
     },
     pairStates, totalEquityCurve, logs: logs.slice(-100), trades: trades.slice(-80).reverse(),
@@ -548,7 +555,7 @@ async function init(privateKey, emit, slogFn) {
   log(`🚀 Independent Dip-Ladder Bot (no directional signal — Up and Down quoted independently)`);
   log(`⚙️  $${TOTAL_CAPITAL} demo capital across ${pairList.length} pairs (${pairList.join(', ')}) → $${perPairCapital.toFixed(2)}/pair`);
   log(`⚙️  quoting: every ${QUOTE_INTERVAL_SECS}s from t=${QUOTE_INTERVAL_SECS}s to t=${QUOTE_STOP_SECS}s (${QUOTE_CHECKPOINTS_SECS.length} checkpoints) | resting buy at ask-${QUOTE_OFFSET} on BOTH sides each time, never cancelled/replaced`);
-  log(`⚙️  sizing: before ${SIZE_FLIP_SECS}s → ${SHARES_TIER_HIGH}sh if price<0.50 else ${SHARES_TIER_LOW}sh | at/after ${SIZE_FLIP_SECS}s → inverted (${SHARES_TIER_HIGH}sh if price>=0.50 else ${SHARES_TIER_LOW}sh)`);
+  log(`⚙️  sizing: before ${PHASE_SPLIT_SECS}s → cheap side only (ask<0.50), ${SHARES_CHEAP_PHASE}sh | at/after ${PHASE_SPLIT_SECS}s → expensive side only (ask>=0.50), ${SHARES_EXPENSIVE_PHASE}sh | non-qualifying side sits that checkpoint out`);
   log(`⚙️  fills: genuinely passive — only confirmed once ask walks down to the resting order's price | no TP/SL, rides to resolution, external claim script handles redemption`);
   log(`⚙️  fees: every fill is a maker fill (+${(CRYPTO_MAKER_REBATE_SHARE*100).toFixed(0)}% rebate) — no marketable orders in this design`);
   log(`${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
