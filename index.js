@@ -145,7 +145,7 @@ app.get('/', (_, res) => {
   <div class="equity-wrap">
     <div class="equity-hdr">
       <div class="title">Portfolio Equity Curve</div>
-      <div class="val" id="equity-val">$2000.00</div>
+      <div class="val" id="equity-val">$100.00</div>
     </div>
     <svg id="equity-chart" class="equity-svg" viewBox="0 0 600 90" preserveAspectRatio="none"></svg>
   </div>
@@ -356,7 +356,7 @@ if (!PK) { console.error('❌ PRIVATE_KEY env var missing'); process.exit(1); }
 
 console.log(`⏱️ 5-Minute Crypto Up/Down Multi-Pair Bot`);
 console.log(`🚦 DRY_RUN=${DRY_RUN}`);
-if (DRY_RUN) console.log('⚠️  DRY RUN — demo $2000 capital, simulated fills, real API for data/orders');
+if (DRY_RUN) console.log('⚠️  DRY RUN — demo $100 capital, simulated fills, real API for data/orders');
 else         console.log('🔴 LIVE MODE — real money');
 
 server.listen(PORT, '0.0.0.0', () => {
