@@ -2,53 +2,43 @@
 
 /**
  * ═══════════════════════════════════════════════════════════════
- *  POLYMARKET 5-MINUTE CRYPTO UP/DOWN — 15M MOMENTUM + COMPOUNDING POOL
+ *  POLYMARKET 5-MINUTE CRYPTO UP/DOWN — PURE MARTINGALE STREAK BOT
  * ═══════════════════════════════════════════════════════════════
  *
- *  Restores the earlier two-checkpoint structure, but with a much simpler
- *  signal and a real compounding mechanic in place of fixed sizing.
+ *  Complete rewrite. No signals, no external price data for the DECISION —
+ *  Polymarket's own ask is only used to know what price to quote at when
+ *  placing the order, never to decide direction. Direction and size are
+ *  purely a function of the bot's own last result.
  *
- *  SIGNAL — 15-minute candle momentum only:
- *    Compare the most recently CLOSED 15-minute candle's close to the one
- *    before it (candle N vs candle N-1), fetched from Binance.
- *      - N closed ABOVE N-1  → assume the next 15m candle closes higher too
- *        → buy Up.
- *      - N closed BELOW N-1  → assume the next 15m candle closes lower too
- *        → buy Down.
- *      - Equal → no trade this window.
- *    No window-open reference, no 1h candle, no majority vote — just this
- *    one comparison, re-evaluated fresh at each checkpoint.
+ *  ENTRY: exactly ONE entry per window, at t=150s (mid-window). No earlier
+ *    checkpoint, no second entry.
  *
- *  ENTRIES — exactly two per window, same direction both times:
- *    Checkpoint 1 at t=15s, checkpoint 2 at t=150s. Both independently
- *    recompute the signal above (in the rare case a new 15m candle closes
- *    between the two checkpoints, they could differ — each just acts on
- *    whatever the comparison shows at its own moment, no special handling).
+ *  DIRECTION — win stays, loss flips:
+ *    - The very first entry ever placed is Up (hardcoded starting point).
+ *    - If the last bet WON, the next window's bet is the SAME side again.
+ *    - If the last bet LOST, the next window's bet FLIPS to the other side.
+ *    This is a pure streak-following rule — it has no opinion about the
+ *    market at all, only about its own last outcome.
  *
- *  SIZING — pool compounding within a 15-minute period, split evenly across
- *  the two checkpoints, based off a fixed base bet:
- *    Base bet is $50/checkpoint ($100 active pool per pair). At the start of
- *    each window, the current active pool (bankroll) is snapshotted
- *    (windowPool); each of the two checkpoints stakes HALF of that snapshot
- *    (not the live/shrinking bankroll — a stable, well-defined split of the
- *    window's starting pool). After the window resolves, whatever bankroll
- *    results — win or loss — becomes next window's pool automatically, since
- *    the snapshot is just "the current bankroll" at that later point. Every
- *    RESET_INTERVAL_SECS (15 minutes = 3 windows), whatever the active pool
- *    has grown or shrunk to gets banked into that pair's idle reserve (still
- *    counted in total capital/equity), and the active pool restarts at the
- *    $100 base — so compounding resets every 15 minutes instead of running
- *    away uncapped or grinding toward zero indefinitely.
+ *  SIZING — pure martingale, base resets on a win:
+ *    - After a WIN, the next bet's stake resets to BASE_PCT (0.25%) of the
+ *      CURRENT bankroll at that moment (so the base itself slowly grows or
+ *      shrinks as bankroll compounds over time).
+ *    - After a LOSS, the next bet's stake is simply DOUBLE the dollar
+ *      amount just staked. No formula, no recovery target — pure doubling.
+ *    - This is uncapped by design: a long losing streak grows the stake
+ *      geometrically with no ceiling. That's the explicit, accepted
+ *      behavior of "pure martingale," not an oversight.
  *
- *  EXECUTION — single-shot limit order, quoted above the ask:
- *    Same as the earlier design this restores: one limit buy priced
- *    QUOTE_BUFFER above the current ask (deliberately marketable), no
- *    retry, no cancel, no fill verification.
+ *  EXECUTION: single-shot limit buy quoted QUOTE_BUFFER above the current
+ *    ask (deliberately marketable) — no retry, no cancel, no fill
+ *    verification.
  *
- *  EXIT: none. No TP, no SL. Positions ride to actual window resolution; a
- *    separate, independent auto-claim script handles real redemption. This
- *    bot's own bookkeeping still simulates resolution (via the public Gamma
- *    API) purely to keep the dashboard's P&L figures meaningful.
+ *  EXIT: none. No TP, no SL. The position rides to actual window
+ *    resolution; a separate, independent auto-claim script handles real
+ *    redemption. This bot's own bookkeeping still simulates resolution
+ *    (via the public Gamma API) purely to keep the dashboard's P&L figures
+ *    meaningful, and to know whether to reset or double next time.
  *
  *  LIVE / DEMO: DRY_RUN is runtime-switchable (see setMode) — dashboard has
  *    a one-click toggle plus an independent pause button.
@@ -57,9 +47,8 @@
 
 const PolymarketTrader = require('./polymarket-trader');
 
-const GAMMA   = 'https://gamma-api.polymarket.com';
-const CLOB    = 'https://clob.polymarket.com';
-const BINANCE = 'https://api.binance.com/api/v3';
+const GAMMA = 'https://gamma-api.polymarket.com';
+const CLOB  = 'https://clob.polymarket.com';
 
 const TICK_MS               = 500;
 const POLY_PRICE_REFRESH_MS = 1000;
@@ -72,25 +61,15 @@ const TOTAL_CAPITAL = Number(process.env.TOTAL_CAPITAL || 2000);
 const DEFAULT_PAIRS = (process.env.CRYPTO_PAIRS || 'BTC')
   .split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
 
-// Base bet: each checkpoint stakes half the active pool, so a $50 base bet
-// means a $100 active pool per pair. The active pool compounds window to
-// window as before, but gets banked back down to this base every
-// RESET_INTERVAL_SECS — realized P&L moves into the pair's idle reserve
-// (still counted in totalCapital/equity), and the active pool restarts at
-// the base so compounding can't run away indefinitely.
-const BASE_BET_SIZE       = Number(process.env.BASE_BET_SIZE || 50);
-const RESET_INTERVAL_SECS = Number(process.env.RESET_INTERVAL_SECS || 900); // 15 minutes = 3 windows
-
 function round2(n) { return Math.round(n * 100) / 100; }
 function round5(n) { return Math.round(n * 100000) / 100000; }
 function nowSec() { return Date.now() / 1000; }
 
 // ── Strategy parameters ──
-const CHECKPOINT_1_SECS = Number(process.env.CHECKPOINT_1_SECS || 15);
-const CHECKPOINT_2_SECS = Number(process.env.CHECKPOINT_2_SECS || 150);
+const ENTRY_SECS  = Number(process.env.ENTRY_SECS || 150); // the one and only checkpoint
+const BASE_PCT    = Number(process.env.BASE_PCT || 0.0025); // 0.25% of current bankroll — recomputed fresh after every win
 const MIN_SHARES  = Number(process.env.MIN_SHARES || 1);
 const QUOTE_BUFFER = Number(process.env.QUOTE_BUFFER || 0.01); // above the ask — deliberately marketable, single shot
-const CANDLE_REFRESH_MS = Number(process.env.CANDLE_REFRESH_MS || 20000);
 
 const CRYPTO_TAKER_FEE_RATE     = Number(process.env.CRYPTO_TAKER_FEE_RATE || 0.07);
 const CRYPTO_MAKER_REBATE_SHARE = Number(process.env.CRYPTO_MAKER_REBATE_SHARE || 0.20);
@@ -107,7 +86,6 @@ let perPairCapital = TOTAL_CAPITAL / Math.max(pairList.length, 1);
 let pairs = {};
 let lastPolyPriceFetch = 0;
 let totalEquityCurve = [];
-let candleRefs = {}; // per-symbol: { latestClose, prevClose, lastFetch }
 
 function log(msg) {
   const line = `[${new Date().toISOString().slice(11, 19)}] ${msg}`;
@@ -117,14 +95,14 @@ function log(msg) {
 }
 
 async function getJSON(url) {
-  const res = await fetch(url, { headers: { 'User-Agent': 'polymarket-15m-momentum-bot/1.0' } });
+  const res = await fetch(url, { headers: { 'User-Agent': 'polymarket-martingale-streak-bot/1.0' } });
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${url}`);
   return res.json();
 }
 async function postJSON(url, body) {
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'User-Agent': 'polymarket-15m-momentum-bot/1.0' },
+    headers: { 'Content-Type': 'application/json', 'User-Agent': 'polymarket-martingale-streak-bot/1.0' },
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${url}`);
@@ -142,60 +120,22 @@ function takerFee(shares, price) {
 }
 
 // ─────────────────────────────────────────
-//  15-minute candle momentum signal
-// ─────────────────────────────────────────
-function ensureCandleRef(symbol) {
-  if (!candleRefs[symbol]) candleRefs[symbol] = { latestClose: null, prevClose: null, lastFetch: 0 };
-  return candleRefs[symbol];
-}
-
-// Fetches the two most recently CLOSED 15m candles (skipping the currently
-// forming one) and stores their closes for comparison.
-async function refreshCandleRef(symbol) {
-  const r = ensureCandleRef(symbol);
-  const now = Date.now();
-  if (now - r.lastFetch < CANDLE_REFRESH_MS) return;
-  r.lastFetch = now;
-  try {
-    const binanceSymbol = `${symbol}USDT`;
-    const data = await getJSON(`${BINANCE}/klines?symbol=${binanceSymbol}&interval=15m&limit=3`);
-    const closed = data.filter(c => c[6] < now); // [6] = closeTime
-    if (closed.length >= 2) {
-      const lastTwo = closed.slice(-2);
-      r.prevClose = parseFloat(lastTwo[0][4]);
-      r.latestClose = parseFloat(lastTwo[1][4]);
-    }
-  } catch (e) { log(`⚠️  ${symbol} 15m candle fetch failed: ${e.message}`); }
-}
-
-// Returns { side, latestClose, prevClose } or null (equal or missing data).
-function computeMomentumSignal(symbol) {
-  const r = ensureCandleRef(symbol);
-  if (r.latestClose == null || r.prevClose == null) return null;
-  if (r.latestClose > r.prevClose) return { side: 'Up', latestClose: r.latestClose, prevClose: r.prevClose };
-  if (r.latestClose < r.prevClose) return { side: 'Down', latestClose: r.latestClose, prevClose: r.prevClose };
-  return null; // equal — no trade
-}
-
-// ─────────────────────────────────────────
 //  Pair state
 // ─────────────────────────────────────────
-const basePairPool = round2(BASE_BET_SIZE * 2); // active pool per pair — half staked at each checkpoint = BASE_BET_SIZE
-
 function freshPairState(symbol) {
-  const reserve = round2(Math.max(perPairCapital - basePairPool, 0)); // rest of this pair's capital allocation, idle until a reset banks P&L into it
   return {
     symbol,
     tradable: false,
     windowStart: null, windowEnd: null, slug: null, eventTitle: null, conditionId: null,
     upTokenId: null, downTokenId: null,
     upAsk: null, upBid: null, downAsk: null, downBid: null,
-    windowPool: basePairPool,   // snapshot of bankroll at window load — the amount being compounded
-    checkpoint1Done: false, checkpoint2Done: false,
-    entries: [],                  // up to 2 per window
-    bankroll: basePairPool,     // IS the pool — carries forward automatically, win or loss, until the next 15-min reset
-    reserve,                     // idle capital, not staked — absorbs banked P&L on reset, still counted in equity
-    lastResetWindowStart: null,  // guards against resetting more than once per 15-min block
+    entryDone: false,
+    entry: null,                  // at most one per window
+    // Streak state — persists ACROSS windows, NOT reset per-window:
+    nextSide: 'Up',                // first-ever bet is Up
+    nextStakeDollars: null,        // null = "compute fresh base (0.25% of bankroll)" — set on init and after every win
+    streakLosses: 0,               // just for dashboard visibility — how many consecutive losses right now
+    bankroll: perPairCapital,
     realizedPnl: 0,
     feesPaid: 0,
     rebatesEarned: 0,
@@ -264,18 +204,9 @@ async function loadPairWindow(p) {
   p.downTokenId = downId;
   p.tradable = true;
   p.resolvedThisWindow = false;
-  if (windowStart % RESET_INTERVAL_SECS === 0 && p.lastResetWindowStart !== windowStart) {
-    const delta = round2(p.bankroll - basePairPool); // this period's P&L on the active pool
-    p.reserve = round2(p.reserve + delta);
-    p.bankroll = basePairPool;
-    p.lastResetWindowStart = windowStart;
-    log(`🔁 ${p.symbol} 15-min reset: active pool banked $${delta >= 0 ? '+' : ''}${delta.toFixed(2)} to reserve (now $${p.reserve.toFixed(2)}) | active pool back to base $${basePairPool.toFixed(2)}`);
-  }
-  p.windowPool = p.bankroll; // snapshot NOW — this is what compounds into this window's two entries
-  p.checkpoint1Done = false;
-  p.checkpoint2Done = false;
-  p.entries = [];
-  log(`🔭 ${p.symbol} window loaded: ${slug} | pool=$${p.windowPool.toFixed(2)} | ends ${new Date(p.windowEnd * 1000).toISOString().slice(11,19)}Z`);
+  p.entryDone = false;
+  p.entry = null;
+  log(`🔭 ${p.symbol} window loaded: ${slug} | next bet: ${p.nextSide}${p.nextStakeDollars != null ? ` @ $${p.nextStakeDollars.toFixed(2)} (martingale)` : ' @ base (0.25% of bankroll)'} | ends ${new Date(p.windowEnd * 1000).toISOString().slice(11,19)}Z`);
 }
 
 // ─────────────────────────────────────────
@@ -340,14 +271,11 @@ async function refreshPolyPrices() {
 // ─────────────────────────────────────────
 //  Equity tracking
 // ─────────────────────────────────────────
-function entryMarkValue(p, entry) {
-  if (entry.closed) return 0;
-  const bid = entry.side === 'Up' ? p.upBid : p.downBid;
-  return round2(entry.shares * (bid ?? entry.entryPrice));
-}
 function pairMarkValue(p) {
-  const held = p.entries.reduce((s, e) => s + entryMarkValue(p, e), 0);
-  return round2(p.reserve + p.bankroll + held);
+  if (!p.entry || p.entry.closed) return round2(p.bankroll);
+  const bid = p.entry.side === 'Up' ? p.upBid : p.downBid;
+  const held = round2(p.entry.shares * (bid ?? p.entry.entryPrice));
+  return round2(p.bankroll + held);
 }
 function pushGlobalEquity() {
   const total = round2(Object.values(pairs).reduce((s, p) => s + pairMarkValue(p), 0));
@@ -366,25 +294,26 @@ function registerTrade(p, entry) {
 }
 
 // ─────────────────────────────────────────
-//  Entries: two checkpoints, pool-split compounding
+//  Entry: one per window, streak-driven direction and sizing
 // ─────────────────────────────────────────
-async function attemptEntry(p, checkpointNum, signal) {
-  const dollars = round2(p.windowPool / 2); // half the window's starting pool, per checkpoint
-  if (dollars < 0.05) {
-    log(`⏭️  ${p.symbol} checkpoint${checkpointNum}: pool depleted ($${p.windowPool.toFixed(2)}), skipping`);
+async function attemptEntry(p) {
+  const side = p.nextSide;
+  const tokenId = side === 'Up' ? p.upTokenId : p.downTokenId;
+  const ask = side === 'Up' ? p.upAsk : p.downAsk;
+  if (ask == null) { log(`⏭️  ${p.symbol}: no ${side} ask available, skipping this window's entry entirely`); return; }
+
+  const stakeDollars = p.nextStakeDollars != null ? p.nextStakeDollars : round2(p.bankroll * BASE_PCT);
+  if (stakeDollars < 0.05) {
+    log(`⏭️  ${p.symbol}: stake too small ($${stakeDollars.toFixed(2)}), skipping`);
     return;
   }
-  const tokenId = signal.side === 'Up' ? p.upTokenId : p.downTokenId;
-  const ask = signal.side === 'Up' ? p.upAsk : p.downAsk;
-  if (ask == null) { log(`⏭️  ${p.symbol} checkpoint${checkpointNum}: no ${signal.side} ask available, skipping`); return; }
-
   const quotePrice = round2(ask + QUOTE_BUFFER);
-  const shares = Math.max(round2(dollars / quotePrice), MIN_SHARES);
+  const shares = Math.max(round2(stakeDollars / quotePrice), MIN_SHARES);
   const notional = round2(quotePrice * shares);
   const fee = takerFee(shares, quotePrice);
   const totalCost = round2(notional + fee);
   if (totalCost > p.bankroll) {
-    log(`⏭️  ${p.symbol} checkpoint${checkpointNum}: skip entry — insufficient bankroll ($${p.bankroll.toFixed(2)} < $${totalCost.toFixed(2)})`);
+    log(`⏭️  ${p.symbol}: skip entry — insufficient bankroll ($${p.bankroll.toFixed(2)} < $${totalCost.toFixed(2)})`);
     return;
   }
 
@@ -393,31 +322,21 @@ async function attemptEntry(p, checkpointNum, signal) {
   p.realizedPnl = round2(p.realizedPnl - fee);
   p.feesPaid = round2(p.feesPaid + fee);
   const entry = {
-    checkpoint: checkpointNum, side: signal.side, entryPrice: quotePrice, shares, cost: totalCost,
-    latestClose: signal.latestClose, prevClose: signal.prevClose, closed: false, openedAt: Date.now(),
+    side, entryPrice: quotePrice, shares, cost: totalCost, stakeDollars,
+    isMartingale: p.nextStakeDollars != null, closed: false, openedAt: Date.now(),
   };
-  p.entries.push(entry);
+  p.entry = entry;
   recordEquity(p);
-  log(`🎯 ${p.symbol} checkpoint${checkpointNum} ${signal.side} entry ${shares.toFixed(2)}sh @ ${quotePrice.toFixed(2)} (15m close ${signal.latestClose} vs prev ${signal.prevClose}) | stake=$${dollars.toFixed(2)} (half of $${p.windowPool.toFixed(2)} pool) | cost=$${totalCost.toFixed(2)} | fee=-$${fee.toFixed(4)}`);
-  registerTrade(p, { side: 'BUY', outcome: signal.side, checkpoint: checkpointNum, price: quotePrice, shares, cost: totalCost, fee });
+  const tag = entry.isMartingale ? ` [martingale, streak=${p.streakLosses} losses]` : ' [base, 0.25% of bankroll]';
+  log(`🎯 ${p.symbol} ${side} entry ${shares.toFixed(2)}sh @ ${quotePrice.toFixed(2)} | stake=$${stakeDollars.toFixed(2)}${tag} | cost=$${totalCost.toFixed(2)} | fee=-$${fee.toFixed(4)}`);
+  registerTrade(p, { side: 'BUY', outcome: side, price: quotePrice, shares, cost: totalCost, fee, stakeDollars, isMartingale: entry.isMartingale });
 }
 
-async function maybeEnterAtCheckpoints(p) {
+async function maybeEnter(p) {
   const elapsed = nowSec() - p.windowStart;
-
-  if (!p.checkpoint1Done && elapsed >= CHECKPOINT_1_SECS) {
-    p.checkpoint1Done = true;
-    const signal = computeMomentumSignal(p.symbol);
-    if (signal) await attemptEntry(p, 1, signal);
-    else log(`${p.symbol} checkpoint1: 15m candle closes equal (or no data) — no trade`);
-  }
-
-  if (!p.checkpoint2Done && elapsed >= CHECKPOINT_2_SECS) {
-    p.checkpoint2Done = true;
-    const signal = computeMomentumSignal(p.symbol);
-    if (signal) await attemptEntry(p, 2, signal);
-    else log(`${p.symbol} checkpoint2: 15m candle closes equal (or no data) — no trade`);
-  }
+  if (p.entryDone || elapsed < ENTRY_SECS) return;
+  p.entryDone = true;
+  await attemptEntry(p);
 }
 
 // ─────────────────────────────────────────
@@ -440,26 +359,37 @@ async function determineWinningSide(p) {
   return null;
 }
 
+function flipSide(side) { return side === 'Up' ? 'Down' : 'Up'; }
+
 async function resolvePairWindow(p) {
   if (p.resolvedThisWindow) return;
   p.resolvedThisWindow = true;
 
-  const hasOpenEntry = p.entries.some(e => !e.closed);
-  let winner = null;
-  if (hasOpenEntry) winner = await determineWinningSide(p);
-
-  for (const entry of p.entries) {
-    if (entry.closed) continue;
+  const entry = p.entry;
+  if (entry && !entry.closed) {
+    const winner = await determineWinningSide(p);
     const won = winner === entry.side;
     const proceeds = won ? round2(entry.shares * 1) : 0;
     const profit = round2(proceeds - entry.cost);
-    p.bankroll = round2(p.bankroll + proceeds); // this IS next window's pool, automatically
+    p.bankroll = round2(p.bankroll + proceeds);
     p.realizedPnl = round2(p.realizedPnl + profit);
-    if (won) p.wins++; else p.losses++;
     entry.closed = true;
+
+    if (won) {
+      p.wins++;
+      p.streakLosses = 0;
+      p.nextSide = entry.side;       // stay
+      p.nextStakeDollars = null;     // reset — recompute 0.25% of new bankroll next time
+    } else {
+      p.losses++;
+      p.streakLosses++;
+      p.nextSide = flipSide(entry.side); // flip
+      p.nextStakeDollars = round2(entry.stakeDollars * 2); // pure double, no cap
+    }
+
     const icon = won ? '💰' : '💥';
-    log(`${icon} ${p.symbol} checkpoint${entry.checkpoint} ${entry.side} RESOLUTION ${entry.shares}sh entry=${entry.entryPrice.toFixed(2)} exit=$${won ? '1.00' : '0.00'}/sh | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)} (this becomes next window's pool) — dashboard bookkeeping only, real redemption is via the separate claim script`);
-    registerTrade(p, { side: 'SELL', outcome: entry.side, checkpoint: entry.checkpoint, reason: 'RESOLUTION', price: won ? 1 : 0, shares: entry.shares, profit });
+    log(`${icon} ${p.symbol} ${entry.side} RESOLUTION ${entry.shares}sh entry=${entry.entryPrice.toFixed(2)} exit=$${won ? '1.00' : '0.00'}/sh | pnl=$${profit.toFixed(2)} | bankroll=$${p.bankroll.toFixed(2)} | next: ${p.nextSide} @ ${p.nextStakeDollars != null ? '$'+p.nextStakeDollars.toFixed(2)+' (martingale)' : 'base'} (dashboard bookkeeping only — real redemption is via the separate claim script)`);
+    registerTrade(p, { side: 'SELL', outcome: entry.side, reason: 'RESOLUTION', price: won ? 1 : 0, shares: entry.shares, profit });
   }
   recordEquity(p);
 }
@@ -481,8 +411,7 @@ async function processPair(p) {
   }
   if (p.resolvedThisWindow) return;
 
-  await refreshCandleRef(p.symbol);
-  await maybeEnterAtCheckpoints(p);
+  await maybeEnter(p);
 }
 
 // ─────────────────────────────────────────
@@ -490,21 +419,19 @@ async function processPair(p) {
 // ─────────────────────────────────────────
 function buildState() {
   const pairStates = Object.values(pairs).map(p => {
-    const unrealized = round2(p.entries.reduce((s, e) => s + (entryMarkValue(p, e) - (e.closed ? 0 : e.cost)), 0));
     const markValue = pairMarkValue(p);
-    const r = ensureCandleRef(p.symbol);
+    const unrealized = p.entry && !p.entry.closed ? round2(markValue - p.bankroll - p.entry.cost) : 0;
     return {
       symbol: p.symbol, tradable: p.tradable, slug: p.slug, windowEnd: p.windowEnd,
       secsToEnd: p.windowEnd ? Math.max(0, Math.floor(p.windowEnd - nowSec())) : null,
       upAsk: p.upAsk, upBid: p.upBid, downAsk: p.downAsk, downBid: p.downBid,
-      latestClose: r.latestClose, prevClose: r.prevClose, windowPool: p.windowPool,
-      checkpoint1Done: p.checkpoint1Done, checkpoint2Done: p.checkpoint2Done,
+      entryDone: p.entryDone, nextSide: p.nextSide, nextStakeDollars: p.nextStakeDollars, streakLosses: p.streakLosses,
       bankroll: p.bankroll, realizedPnl: p.realizedPnl, unrealizedPnl: unrealized, markValue,
       feesPaid: p.feesPaid, rebatesEarned: p.rebatesEarned, wins: p.wins, losses: p.losses,
-      entries: p.entries.map(e => ({
-        checkpoint: e.checkpoint, side: e.side, entryPrice: e.entryPrice, shares: e.shares,
-        cost: e.cost, closed: e.closed,
-      })),
+      entry: p.entry ? {
+        side: p.entry.side, entryPrice: p.entry.entryPrice, shares: p.entry.shares,
+        cost: p.entry.cost, stakeDollars: p.entry.stakeDollars, isMartingale: p.entry.isMartingale, closed: p.entry.closed,
+      } : null,
       equityCurve: p.equityCurve,
     };
   });
@@ -524,7 +451,7 @@ function buildState() {
     winRate: (totalWins + totalLosses) > 0 ? round2((totalWins / (totalWins + totalLosses)) * 100) : null,
     uptime: Math.floor((Date.now() - startTime) / 1000),
     config: {
-      checkpoint1Secs: CHECKPOINT_1_SECS, checkpoint2Secs: CHECKPOINT_2_SECS, quoteBuffer: QUOTE_BUFFER,
+      entrySecs: ENTRY_SECS, basePct: BASE_PCT, quoteBuffer: QUOTE_BUFFER,
       cryptoTakerFeeRate: CRYPTO_TAKER_FEE_RATE, cryptoMakerRebateShare: CRYPTO_MAKER_REBATE_SHARE,
     },
     pairStates, totalEquityCurve, logs: logs.slice(-100), trades: trades.slice(-80).reverse(),
@@ -570,13 +497,11 @@ function setMode(wantLive) {
 async function init(privateKey, emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
-  log(`🚀 15m Momentum + Compounding Pool Bot`);
-  log(`⚙️  $${TOTAL_CAPITAL} demo capital across ${pairList.length} pairs (${pairList.join(', ')}) → $${perPairCapital.toFixed(2)}/pair allocation, $${basePairPool.toFixed(2)}/pair active pool ($${BASE_BET_SIZE.toFixed(2)} base bet per checkpoint)`);
-  log(`⚙️  signal: latest CLOSED 15m candle vs the one before it — above → buy Up, below → buy Down, equal → no trade`);
-  log(`⚙️  checkpoints: +${CHECKPOINT_1_SECS}s and +${CHECKPOINT_2_SECS}s, same direction both times | stake = half the window's starting pool, each time`);
-  log(`⚙️  compounding: pool = current bankroll, snapshotted fresh each window — win or loss, whatever results carries forward automatically | resets to the $${basePairPool.toFixed(2)} base pool every ${RESET_INTERVAL_SECS / 60} minutes, banking P&L into reserve`);
+  log(`🚀 Pure Martingale Streak Bot (no signals, no external price data)`);
+  log(`⚙️  $${TOTAL_CAPITAL} demo capital across ${pairList.length} pairs (${pairList.join(', ')}) → $${perPairCapital.toFixed(2)}/pair`);
+  log(`⚙️  one entry per window at t=${ENTRY_SECS}s | first-ever bet: Up | win → same side + reset to ${(BASE_PCT*100).toFixed(2)}% of bankroll | loss → flip side + double the stake (uncapped)`);
   log(`⚙️  execution: single-shot limit buy quoted ${QUOTE_BUFFER} above the ask (marketable) | no retry, no cancel | no TP/SL — rides to resolution, external claim script handles redemption`);
-  log(`${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price/candle data' : '🔴 LIVE MODE — real money'}`);
+  log(`${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
   trader = new PolymarketTrader(privateKey);
   await trader.authenticate();
