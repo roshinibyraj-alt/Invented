@@ -2,36 +2,41 @@
 
 /**
  * ═══════════════════════════════════════════════════════════════
- *  POLYMARKET CRYPTO UP/DOWN — 1H REVERSAL → 15m → 5m NESTED PLAYBOOK
+ *  POLYMARKET CRYPTO UP/DOWN — DECOUPLED 1H → 15m → 5m CANDLE-COLOR PLAYBOOK
  * ═══════════════════════════════════════════════════════════════
  *
- *  SIGNAL — the most recently CLOSED 1-hour Binance candle, evaluated
- *  once at the top of every hour and then LOCKED for that whole hour:
+ *  Every layer looks ONLY at its own immediate parent timeframe's most
+ *  recently CLOSED Binance candle — plain red/green, no streak or
+ *  reversal condition, no sitting out. Each layer is evaluated
+ *  independently; a 5m window's side depends on the real 15m candle
+ *  that just closed, NOT on whatever side its parent 15m block was
+ *  assigned.
  *
- *    NORMAL  (bullish reversal): the just-closed 1h candle is green
- *      (close > its own open) OR its close is above the previous 1h
- *      candle's close — AND it was preceded by 3+ consecutive RED 1h
- *      candles.
- *        → 1h market entry side: Up
- *        → the hour's four 15m windows trade: Down, Down, Up, Up
+ *  LAYER A — 1-hour candle → the hour's four 15m blocks:
+ *  evaluated once at the top of every hour, using the most recently
+ *  CLOSED 1h candle, and LOCKED for that whole hour:
  *
- *    MIRROR  (bearish reversal): the just-closed 1h candle is red OR
- *      its close is below the previous close — AND it was preceded by
- *      3+ consecutive GREEN 1h candles.
- *        → 1h market entry side: Down
- *        → the hour's four 15m windows trade: Up, Up, Down, Down
+ *    1h candle closed RED   → block 1 (min 0–15)  = Up
+ *                              block 2 (min 15–30) = Up
+ *                              block 3 (min 30–45) = Down
+ *                              block 4 (min 45–60) = Down
+ *    1h candle closed GREEN → opposite: blocks 1–2 = Down, blocks 3–4 = Up
  *
- *    Neither condition met → sit out the entire hour, no trades at any
- *    timeframe.
+ *  1H MARKET ITSELF — one direct entry attempt on the hourly market,
+ *  watched from the 29-minute mark to the end of the hour. Side is a
+ *  plain continuation of the same closed 1h candle (independent of the
+ *  15m plan above): closed RED → Down, closed GREEN → Up.
  *
- *  NESTING — each 15m window is itself treated like a mini reference
- *  candle for its three 5m sub-windows:
- *    - 15m window side = Down → its 5m windows trade: Down, Up, Up
- *    - 15m window side = Up   → its 5m windows trade: Up, Down, Down
+ *  LAYER B — 15-minute candle → that block's three 5m windows:
+ *  evaluated independently at the start of each 15m block, using the
+ *  most recently CLOSED 15m candle (the 15 minutes immediately before
+ *  that block begins):
  *
- *  1H MARKET ITSELF — one entry attempt, watching from the 29-minute
- *  mark of the hour to the end of the hour, side = the hour's signal
- *  direction.
+ *    15m candle closed RED   → window 1 = Up,   windows 2–3 = Down
+ *    15m candle closed GREEN → opposite: window 1 = Down, windows 2–3 = Up
+ *
+ *  A closed candle with close == open is folded into "green" for
+ *  simplicity (no separate flat case).
  *
  *  ENTRY TRIGGER (identical at every timeframe) — a fixed-size market
  *  buy of FIXED_SHARES (50) shares fires the FIRST time the ask for
@@ -86,13 +91,16 @@ const ENTRY_THRESHOLD      = Number(process.env.ENTRY_THRESHOLD || 0.40); // buy
 const FIXED_SHARES         = Number(process.env.FIXED_SHARES || 50);      // fixed size, every single entry
 const QUOTE_BUFFER         = Number(process.env.QUOTE_BUFFER || 0.01);    // small buffer above ask so the "market" buy actually fills
 const WATCH_1H_AFTER_SECS  = Number(process.env.WATCH_1H_AFTER_SECS || 29 * 60); // 1h market: only start watching at +29min
-const REQUIRED_STREAK      = Number(process.env.REQUIRED_STREAK || 3);   // 3+ consecutive opposite-color candles required
 
 const CRYPTO_TAKER_FEE_RATE = Number(process.env.CRYPTO_TAKER_FEE_RATE || 0.07);
 
 const TIMEFRAMES = { '1h': 3600, '15m': 900, '5m': 300 };
-const PATTERN_15M = { normal: ['Down', 'Down', 'Up', 'Up'], mirror: ['Up', 'Up', 'Down', 'Down'] };
-function fiveMinPattern(parentSide) { return parentSide === 'Down' ? ['Down', 'Up', 'Up'] : ['Up', 'Down', 'Down']; }
+// Layer A: 1h candle color -> that hour's four 15m block sides
+const SIDES_15M_BY_1H_COLOR = { red: ['Up', 'Up', 'Down', 'Down'], green: ['Down', 'Down', 'Up', 'Up'] };
+// 1h market itself: plain continuation of the same closed 1h candle
+const SIDE_1H_BY_1H_COLOR = { red: 'Down', green: 'Up' };
+// Layer B: 15m candle color -> that block's three 5m window sides
+const SIDES_5M_BY_15M_COLOR = { red: ['Up', 'Down', 'Down'], green: ['Down', 'Up', 'Up'] };
 
 // Best-effort mapping for the 1h market's human-readable slug. Extend as needed.
 const SYMBOL_FULL_NAME = {
@@ -148,47 +156,22 @@ function takerFee(shares, price) {
 // ─────────────────────────────────────────
 //  1-hour reversal signal
 // ─────────────────────────────────────────
+// close == open is folded into 'green' — no separate flat case.
 function candleColor(c) {
   const o = parseFloat(c[1]), cl = parseFloat(c[4]);
-  return cl > o ? 'green' : (cl < o ? 'red' : 'flat');
+  return cl < o ? 'red' : 'green';
 }
 
-// Fetches the closed 1h candles for `symbol`, evaluates the reversal
-// pattern, and returns { signal: 'normal'|'mirror', direction1h, lastClose,
-// prevClose, streak } or null if no pattern fires this hour.
-async function computeHourSignal(symbol) {
+// Fetches the most recently CLOSED Binance candle for `symbol` at the given
+// interval ('1h' or '15m') and returns its color ('red'|'green'), or null if
+// no closed candle is available yet (caller should retry).
+async function fetchLastClosedColor(symbol, interval) {
   const binanceSymbol = `${symbol}USDT`;
   const now = Date.now();
-  const data = await getJSON(`${BINANCE}/klines?symbol=${binanceSymbol}&interval=1h&limit=12`);
+  const data = await getJSON(`${BINANCE}/klines?symbol=${binanceSymbol}&interval=${interval}&limit=3`);
   const closed = data.filter(c => c[6] < now); // [6] = closeTime
-  if (closed.length < REQUIRED_STREAK + 1) return null;
-
-  const last = closed[closed.length - 1];      // most recently closed 1h candle (the reference)
-  const prev = closed[closed.length - 2];
-  const lastColor = candleColor(last);
-  const lastClose = parseFloat(last[4]);
-  const prevClose = parseFloat(prev[4]);
-
-  function streakBefore(color) {
-    let count = 0;
-    for (let i = closed.length - 2; i >= 0; i--) {
-      if (candleColor(closed[i]) === color) count++; else break;
-    }
-    return count;
-  }
-
-  const bullish = lastColor === 'green' || lastClose > prevClose;
-  const bearish = lastColor === 'red' || lastClose < prevClose;
-
-  if (bullish) {
-    const streak = streakBefore('red');
-    if (streak >= REQUIRED_STREAK) return { signal: 'normal', direction1h: 'Up', lastClose, prevClose, streak };
-  }
-  if (bearish) {
-    const streak = streakBefore('green');
-    if (streak >= REQUIRED_STREAK) return { signal: 'mirror', direction1h: 'Down', lastClose, prevClose, streak };
-  }
-  return null;
+  if (!closed.length) return null;
+  return candleColor(closed[closed.length - 1]);
 }
 
 // ─────────────────────────────────────────
@@ -202,9 +185,10 @@ function freshPairState(symbol) {
     feesPaid: 0,
     wins: 0, losses: 0,
     hourStart: null,
-    signal: null,        // 'normal' | 'mirror' | null (locked for the hour)
+    hourColor: null,     // 'red' | 'green' — the closed 1h candle that decided this hour's plan
     direction1h: null,
     hourlySlugWarned: false,
+    hourColorWarned: false,
     windows: [],          // flat list of window trackers: 1h(1) + 15m(4) + 5m(12) per hour
     equityCurve: [{ t: Date.now(), equity: perPairCapital }],
   };
@@ -229,6 +213,10 @@ function buildWindow(symbol, tf, windowStart, side) {
     watchStart: tf === '1h' ? windowStart + WATCH_1H_AFTER_SECS : windowStart,
     entryDone: false, entry: null, entrySkipped: false,
     resolved: false, resolvedAt: null, won: null,
+    // only meaningful for tf === '15m': has its own 3x 5m children been built yet?
+    subBuilt: tf !== '15m' ? null : false,
+    subBuildWarned: false,
+    refColor: null, // the closed candle color that decided this window's side (for the UI)
   };
 }
 
@@ -400,39 +388,77 @@ function registerTrade(s, entry) {
 // ─────────────────────────────────────────
 //  Hour transition — compute signal, build the whole hour's window tree
 // ─────────────────────────────────────────
+// Layer A: decides the whole hour's plan from the most recently closed 1h
+// candle. No streak/reversal condition — always fires. Only commits
+// s.hourStart on success, so a fetch failure retries every tick instead of
+// silently sitting the hour out.
 async function startNewHour(s, hourStart) {
-  s.hourStart = hourStart;
-  s.signal = null;
-  s.direction1h = null;
-  s.hourlySlugWarned = false;
-
-  let sig = null;
-  try { sig = await computeHourSignal(s.symbol); }
+  let color = null;
+  try { color = await fetchLastClosedColor(s.symbol, '1h'); }
   catch (e) { log(`⚠️  ${s.symbol} 1h candle fetch failed: ${e.message}`); }
 
-  if (!sig) {
-    log(`🕐 ${s.symbol} hour ${new Date(hourStart * 1000).toISOString().slice(0, 13)}:00Z — no 3+ streak reversal pattern, sitting out this hour`);
-    return;
+  if (!color) {
+    if (!s.hourColorWarned) {
+      s.hourColorWarned = true;
+      log(`⚠️  ${s.symbol}: could not fetch closed 1h candle yet for hour ${new Date(hourStart * 1000).toISOString().slice(0, 13)}:00Z — retrying`);
+    }
+    return; // s.hourStart stays behind; we'll retry this same hour next tick
   }
 
-  s.signal = sig.signal;
-  s.direction1h = sig.direction1h;
-  const sides15 = PATTERN_15M[sig.signal];
-  log(`🕐 ${s.symbol} hour ${new Date(hourStart * 1000).toISOString().slice(0, 13)}:00Z — ${sig.signal.toUpperCase()} signal (close ${sig.lastClose} vs prev ${sig.prevClose}, streak ${sig.streak}) → 1h entry ${sig.direction1h} @+${Math.round(WATCH_1H_AFTER_SECS / 60)}m | 15m plan: ${sides15.join(', ')}`);
+  s.hourStart = hourStart;
+  s.hourColor = color;
+  s.hourColorWarned = false;
+  s.hourlySlugWarned = false;
 
-  const w1h = buildWindow(s.symbol, '1h', hourStart, sig.direction1h);
+  const direction1h = SIDE_1H_BY_1H_COLOR[color];
+  const sides15 = SIDES_15M_BY_1H_COLOR[color];
+  s.direction1h = direction1h;
+
+  log(`🕐 ${s.symbol} hour ${new Date(hourStart * 1000).toISOString().slice(0, 13)}:00Z — last closed 1h candle ${color.toUpperCase()} → 1h market ${direction1h} @+${Math.round(WATCH_1H_AFTER_SECS / 60)}m | 15m plan: ${sides15.join(', ')}`);
+
+  const w1h = buildWindow(s.symbol, '1h', hourStart, direction1h);
+  w1h.refColor = color;
   s.windows.push(w1h);
 
   for (let i = 0; i < 4; i++) {
     const ws15 = hourStart + i * TIMEFRAMES['15m'];
-    const side15 = sides15[i];
-    s.windows.push(buildWindow(s.symbol, '15m', ws15, side15));
-    const sides5 = fiveMinPattern(side15);
-    for (let j = 0; j < 3; j++) {
-      const ws5 = ws15 + j * TIMEFRAMES['5m'];
-      s.windows.push(buildWindow(s.symbol, '5m', ws5, sides5[j]));
-    }
+    const w15 = buildWindow(s.symbol, '15m', ws15, sides15[i]);
+    w15.refColor = color;
+    s.windows.push(w15);
   }
+}
+
+// Layer B: independent of Layer A. Right as each 15m block begins, fetch the
+// 15m candle that JUST closed (the 15 minutes immediately before this block)
+// and build that block's three 5m windows from ITS color — not from the
+// side assigned to the parent 15m block. Retries every tick until it
+// succeeds (no sitting out).
+async function maybeBuildFiveMinWindows(s, w15) {
+  if (w15.subBuilt) return;
+  if (nowSec() < w15.windowStart) return;
+
+  let color = null;
+  try { color = await fetchLastClosedColor(s.symbol, '15m'); }
+  catch (e) { log(`⚠️  ${s.symbol} 15m candle fetch failed: ${e.message}`); }
+
+  if (!color) {
+    if (!w15.subBuildWarned) {
+      w15.subBuildWarned = true;
+      log(`⚠️  ${s.symbol} 15m [${new Date(w15.windowStart * 1000).toISOString().slice(11, 16)}Z]: could not fetch closed 15m candle yet — retrying`);
+    }
+    return;
+  }
+
+  const sides5 = SIDES_5M_BY_15M_COLOR[color];
+  log(`🕐 ${s.symbol} 15m block [${new Date(w15.windowStart * 1000).toISOString().slice(11, 16)}Z] — last closed 15m candle ${color.toUpperCase()} → 5m plan: ${sides5.join(', ')}`);
+
+  for (let j = 0; j < 3; j++) {
+    const ws5 = w15.windowStart + j * TIMEFRAMES['5m'];
+    const w5 = buildWindow(s.symbol, '5m', ws5, sides5[j]);
+    w5.refColor = color;
+    s.windows.push(w5);
+  }
+  w15.subBuilt = true;
 }
 
 // ─────────────────────────────────────────
@@ -516,6 +542,12 @@ async function processSymbol(s) {
   if (s.hourStart !== hourStart) await startNewHour(s, hourStart);
   if (!tradingEnabled) return;
 
+  // Layer B: build each 15m block's 5m children independently, right as
+  // that block begins, from that block's own just-closed 15m candle.
+  for (const w15 of s.windows) {
+    if (w15.tf === '15m' && !w15.subBuilt) await maybeBuildFiveMinWindows(s, w15);
+  }
+
   const t = nowSec();
   for (const w of s.windows) {
     if (w.resolved) continue;
@@ -549,7 +581,7 @@ function buildState() {
       feesPaid: s.feesPaid,
       wins: s.wins, losses: s.losses,
       hourStart: s.hourStart,
-      signal: s.signal,
+      hourColor: s.hourColor,
       direction1h: s.direction1h,
       windows: s.windows.map(w => ({
         id: w.id, tf: w.tf, side: w.side,
@@ -578,7 +610,7 @@ function buildState() {
     uptime: Math.floor((Date.now() - startTime) / 1000),
     config: {
       entryThreshold: ENTRY_THRESHOLD, fixedShares: FIXED_SHARES, quoteBuffer: QUOTE_BUFFER,
-      watch1hAfterSecs: WATCH_1H_AFTER_SECS, requiredStreak: REQUIRED_STREAK,
+      watch1hAfterSecs: WATCH_1H_AFTER_SECS,
       cryptoTakerFeeRate: CRYPTO_TAKER_FEE_RATE,
     },
     pairStates, totalEquityCurve, logs: logs.slice(-100), trades: trades.slice(-80).reverse(),
@@ -624,10 +656,10 @@ function setMode(wantLive) {
 async function init(privateKey, emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
-  log(`🚀 1h Reversal → 15m → 5m Nested Playbook Bot`);
+  log(`🚀 Decoupled 1h → 15m → 5m Candle-Color Playbook Bot`);
   log(`⚙️  $${TOTAL_CAPITAL} demo capital across ${pairList.length} pairs (${pairList.join(', ')}) → $${perPairCapital.toFixed(2)}/pair bookkeeping bankroll`);
-  log(`⚙️  1h signal: closed 1h candle green OR close>prev, after ${REQUIRED_STREAK}+ consecutive reds → NORMAL (1h buy Up, 15m Down/Down/Up/Up). Mirror case → MIRROR (1h buy Down, 15m Up/Up/Down/Down). Locked for the whole hour.`);
-  log(`⚙️  15m→5m nesting: Down 15m window → 5m Down/Up/Up | Up 15m window → 5m Up/Down/Down`);
+  log(`⚙️  Layer A: closed 1h candle RED → 15m blocks Up,Up,Down,Down (1h market Down). GREEN → Down,Down,Up,Up (1h market Up). Always fires, locked for the whole hour.`);
+  log(`⚙️  Layer B: each 15m block's own just-closed 15m candle (independent of its assigned side) — RED → 5m Up,Down,Down. GREEN → 5m Down,Up,Up. Always fires.`);
   log(`⚙️  entries: fixed ${FIXED_SHARES} shares, market buy the FIRST time ask drops below ${ENTRY_THRESHOLD}, one-shot per window | 1h market only watched from +${Math.round(WATCH_1H_AFTER_SECS / 60)}min`);
   log(`⚙️  no TP/SL — rides to resolution, external claim script handles real redemption`);
   log(`${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price/candle data' : '🔴 LIVE MODE — real money'}`);
