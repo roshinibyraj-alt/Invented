@@ -45,7 +45,7 @@ app.get('/', (_, res) => {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>⏱️ Crypto Up/Down Bot — 1h Reversal → 15m → 5m Nested</title>
+<title>⏱️ Crypto Up/Down Bot — 1h → 15m → 5m Decoupled Candle-Color</title>
 <style>
   :root {
     --bg: #ffffff; --bg2: #f5f7fa; --bg3: #edf0f4; --border: #d0d7e2;
@@ -117,7 +117,7 @@ app.get('/', (_, res) => {
   <div class="header">
     <div class="logo">⏱️ <span>1H→15m→5m</span> UP/DOWN BOT</div>
     <div id="mode-badge" class="mode-badge ${bot.getStatus().dryRun ? 'mode-dry' : 'mode-live'}">${bot.getStatus().dryRun ? 'DEMO' : '🔴 LIVE'}</div>
-    <div id="experiment-badge" class="mode-badge mode-dry">1H REVERSAL + FIXED 50sh ENTRIES &lt;0.40</div>
+    <div id="experiment-badge" class="mode-badge mode-dry">DECOUPLED CANDLE-COLOR + FIXED 50sh ENTRIES &lt;0.40</div>
   </div>
 
   <div class="toolbar">
@@ -277,9 +277,9 @@ app.get('/', (_, res) => {
     } else {
       grid.innerHTML = s.pairStates.map(p => {
         const sideClass = sd => sd === 'Up' ? 'side-up' : (sd === 'Down' ? 'side-down' : '');
-        const signalHtml = p.signal
-          ? '<div class="pair-row" style="font-size:9px"><span class="pair-key">Hour signal</span><span class="'+sideClass(p.direction1h)+'">'+p.signal.toUpperCase()+' → 1h '+p.direction1h+'</span></div>'
-          : '<div class="pair-row" style="font-size:9px;opacity:.6">No pattern this hour — sitting out</div>';
+        const signalHtml = p.hourColor
+          ? '<div class="pair-row" style="font-size:9px"><span class="pair-key">1h candle</span><span class="'+sideClass(p.direction1h)+'">'+p.hourColor.toUpperCase()+' → 1h '+p.direction1h+'</span></div>'
+          : '<div class="pair-row" style="font-size:9px;opacity:.6">Waiting on closed 1h candle…</div>';
 
         const windowStatus = w => {
           if (w.resolved) return w.entry ? (w.won ? '💰 won' : '💥 lost') : 'no fill';
