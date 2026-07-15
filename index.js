@@ -134,7 +134,7 @@ app.get('/', (_, res) => {
   <div class="header">
     <div class="logo">⏱️ <span>1H→15m→5m</span> UP/DOWN BOT</div>
     <div id="mode-badge" class="mode-badge ${bot.getStatus().dryRun ? 'mode-dry' : 'mode-live'}">${bot.getStatus().dryRun ? 'DEMO' : '🔴 LIVE'}</div>
-    <div id="experiment-badge" class="mode-badge mode-dry">DECOUPLED CANDLE-COLOR + FIXED 50sh ENTRIES &lt;0.40</div>
+    <div id="experiment-badge" class="mode-badge mode-dry">DECOUPLED CANDLE-COLOR + FIXED $50 FIRED-DELAY ENTRIES</div>
   </div>
 
   <div class="toolbar">
@@ -310,7 +310,8 @@ app.get('/', (_, res) => {
           if (w.entrySkipped) return 'skipped';
           if (!w.tradable) return 'loading…';
           if ((w.secsToStart||0) > 0) return 'starts '+fmtSecs(w.secsToStart);
-          return fmtSecs(w.secsToEnd)+' left';
+          if ((w.secsToFire||0) > 0) return '🔥 fires in '+fmtSecs(w.secsToFire);
+          return 'firing…';
         };
         const winRow = (w, sub) => '<div class="win-row'+(sub?' sub':'')+(isLive(w)?' live':'')+'">'+
           '<span class="win-tf">'+w.tf+'</span>'+
