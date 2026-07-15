@@ -23,9 +23,9 @@
  *    1h candle closed GREEN → opposite: blocks 1–2 = Down, blocks 3–4 = Up
  *
  *  1H MARKET ITSELF — one direct entry attempt on the hourly market,
- *  watched from the 29-minute mark to the end of the hour. Side is a
- *  plain continuation of the same closed 1h candle (independent of the
- *  15m plan above): closed RED → Down, closed GREEN → Up.
+ *  firing 30 minutes into the hour. Side is a plain continuation of the
+ *  same closed 1h candle (independent of the 15m plan above): closed
+ *  RED → Down, closed GREEN → Up.
  *
  *  LAYER B — 15-minute candle → that block's three 5m windows:
  *  evaluated independently at the start of each 15m block, using the
@@ -38,15 +38,14 @@
  *  A closed candle with close == open is folded into "green" for
  *  simplicity (no separate flat case).
  *
- *  ENTRY TRIGGER (identical at every timeframe) — a fixed-size market
- *  buy of FIXED_SHARES (50) shares fires the FIRST time the ask for
- *  the assigned side drops below ENTRY_THRESHOLD (0.40) at any point
- *  while that window is being watched. One-shot per window: once it
- *  fires (or the window ends without ever going below 0.40), that
- *  window is done — no more attempts.
- *
- *  SIZING — fixed 50 shares on every single entry, at every timeframe.
- *  No compounding, no pool, no bankroll-based scaling.
+ *  ENTRY TRIGGER — every window fires exactly once, at a fixed delay after
+ *  it opens, regardless of price:
+ *    5m window  → fires 1 minute  after it opens
+ *    15m window → fires 7 minutes after it opens
+ *    1h window  → fires 30 minutes after it opens
+ *  Sizing is a fixed $50 notional per entry (shares = $50 / entry price
+ *  at the moment it fires). One-shot per window: once it fires, that
+ *  window is done — no more attempts, no price condition either way.
  *
  *  EXIT: none. No TP, no SL. Positions ride to actual window
  *  resolution; a separate, independent auto-claim script handles real
@@ -87,10 +86,12 @@ function round5(n) { return Math.round(n * 100000) / 100000; }
 function nowSec() { return Date.now() / 1000; }
 
 // ── Strategy parameters ──
-const ENTRY_THRESHOLD      = Number(process.env.ENTRY_THRESHOLD || 0.40); // buy trigger: ask must fall below this
-const FIXED_SHARES         = Number(process.env.FIXED_SHARES || 50);      // fixed size, every single entry
+const FIRE_DELAY_5M_SECS   = Number(process.env.FIRE_DELAY_5M_SECS || 60);       // 5m window: fire this many secs after it opens, regardless of price
+const FIRE_DELAY_15M_SECS  = Number(process.env.FIRE_DELAY_15M_SECS || 7 * 60);  // 15m window: fire this many secs after it opens, regardless of price
+const FIRE_DELAY_1H_SECS   = Number(process.env.FIRE_DELAY_1H_SECS || 30 * 60);  // 1h window: fire this many secs after it opens, regardless of price
+const FIRE_DELAY_SECS      = { '5m': FIRE_DELAY_5M_SECS, '15m': FIRE_DELAY_15M_SECS, '1h': FIRE_DELAY_1H_SECS };
+const FIXED_NOTIONAL_USD   = Number(process.env.FIXED_NOTIONAL_USD || 50);       // fixed $ notional, every single entry — shares = $/price
 const QUOTE_BUFFER         = Number(process.env.QUOTE_BUFFER || 0.01);    // small buffer above ask so the "market" buy actually fills
-const WATCH_1H_AFTER_SECS  = Number(process.env.WATCH_1H_AFTER_SECS || 29 * 60); // 1h market: only start watching at +29min
 
 const CRYPTO_TAKER_FEE_RATE = Number(process.env.CRYPTO_TAKER_FEE_RATE || 0.07);
 
@@ -210,8 +211,8 @@ function buildWindow(symbol, tf, windowStart, side) {
     tf, windowStart, windowEnd: windowStart + secs, side,
     slug: null, conditionId: null, upTokenId: null, downTokenId: null,
     loaded: false, tradable: false,
-    watchStart: tf === '1h' ? windowStart + WATCH_1H_AFTER_SECS : windowStart,
-    entryDone: false, entry: null, entrySkipped: false,
+    fireAt: windowStart + FIRE_DELAY_SECS[tf],
+    entryDone: false, entry: null, entrySkipped: false, fireWarned: false,
     resolved: false, resolvedAt: null, won: null,
     // only meaningful for tf === '15m': has its own 3x 5m children been built yet?
     subBuilt: tf !== '15m' ? null : false,
@@ -414,7 +415,7 @@ async function startNewHour(s, hourStart) {
   const sides15 = SIDES_15M_BY_1H_COLOR[color];
   s.direction1h = direction1h;
 
-  log(`🕐 ${s.symbol} hour ${new Date(hourStart * 1000).toISOString().slice(0, 13)}:00Z — last closed 1h candle ${color.toUpperCase()} → 1h market ${direction1h} @+${Math.round(WATCH_1H_AFTER_SECS / 60)}m | 15m plan: ${sides15.join(', ')}`);
+  log(`🕐 ${s.symbol} hour ${new Date(hourStart * 1000).toISOString().slice(0, 13)}:00Z — last closed 1h candle ${color.toUpperCase()} → 1h market ${direction1h} @+${Math.round(FIRE_DELAY_1H_SECS / 60)}m | 15m plan: ${sides15.join(', ')}`);
 
   const w1h = buildWindow(s.symbol, '1h', hourStart, direction1h);
   w1h.refColor = color;
@@ -462,15 +463,18 @@ async function maybeBuildFiveMinWindows(s, w15) {
 }
 
 // ─────────────────────────────────────────
-//  Entry — fixed 50 shares, fires once ask < ENTRY_THRESHOLD
+//  Entry — fixed $ notional, fires unconditionally at fireAt regardless of price
 // ─────────────────────────────────────────
 async function maybeEnterWindow(s, w) {
   const tokenId = w.side === 'Up' ? w.upTokenId : w.downTokenId;
   const ask = tokenAskMap[tokenId];
-  if (ask == null || ask >= ENTRY_THRESHOLD) return;
+  if (ask == null) {
+    if (!w.fireWarned) { w.fireWarned = true; log(`⚠️  ${s.symbol} ${w.tf} [${w.id}]: fire time reached but no ask price yet — retrying`); }
+    return; // no price feed yet — keep retrying every tick until windowEnd cutoff
+  }
 
   const quotePrice = round2(Math.min(ask + QUOTE_BUFFER, 0.99));
-  const shares = FIXED_SHARES;
+  const shares = round2(FIXED_NOTIONAL_USD / quotePrice);
   const notional = round2(quotePrice * shares);
   const fee = takerFee(shares, quotePrice);
   const totalCost = round2(notional + fee);
@@ -489,7 +493,7 @@ async function maybeEnterWindow(s, w) {
   w.entryDone = true;
   w.entry = { side: w.side, entryPrice: quotePrice, shares, cost: totalCost };
   recordEquity(s);
-  log(`🎯 ${s.symbol} ${w.tf} [${new Date(w.windowStart * 1000).toISOString().slice(11, 16)}Z] ${w.side} MARKET BUY ${shares}sh @ ${quotePrice.toFixed(2)} (ask ${ask.toFixed(2)} < ${ENTRY_THRESHOLD}) | cost=$${totalCost.toFixed(2)} | fee=-$${fee.toFixed(4)}`);
+  log(`🎯 ${s.symbol} ${w.tf} [${new Date(w.windowStart * 1000).toISOString().slice(11, 16)}Z] ${w.side} MARKET BUY $${FIXED_NOTIONAL_USD} (${shares}sh @ ${quotePrice.toFixed(2)}) — fired +${Math.round((w.fireAt - w.windowStart) / 60)}m into window, ask was ${ask.toFixed(2)} | cost=$${totalCost.toFixed(2)} | fee=-$${fee.toFixed(4)}`);
   registerTrade(s, { side: 'BUY', outcome: w.side, tf: w.tf, reason: 'ENTRY', price: quotePrice, shares, cost: totalCost, fee });
 }
 
@@ -553,7 +557,7 @@ async function processSymbol(s) {
     if (w.resolved) continue;
     if (!w.loaded) { await tryLoadWindow(s, w); if (!w.loaded) continue; }
 
-    if (!w.entryDone && t >= w.watchStart && t < w.windowEnd - EARLY_CUTOFF_SECS) {
+    if (!w.entryDone && t >= w.fireAt && t < w.windowEnd - EARLY_CUTOFF_SECS) {
       await maybeEnterWindow(s, w);
     }
     if (t >= w.windowEnd - EARLY_CUTOFF_SECS) {
@@ -588,7 +592,8 @@ function buildState() {
         windowStart: w.windowStart, windowEnd: w.windowEnd,
         secsToEnd: Math.max(0, Math.floor(w.windowEnd - nowSec())),
         secsToStart: Math.max(0, Math.floor(w.windowStart - nowSec())),
-        watchStart: w.watchStart,
+        secsToFire: Math.floor(w.fireAt - nowSec()),
+        fireAt: w.fireAt,
         tradable: w.tradable, entryDone: w.entryDone, entrySkipped: w.entrySkipped,
         entry: w.entry, resolved: w.resolved, won: w.won,
         upAsk: w.upTokenId != null ? (tokenAskMap[w.upTokenId] ?? null) : null,
@@ -612,8 +617,8 @@ function buildState() {
     winRate: (totalWins + totalLosses) > 0 ? round2((totalWins / (totalWins + totalLosses)) * 100) : null,
     uptime: Math.floor((Date.now() - startTime) / 1000),
     config: {
-      entryThreshold: ENTRY_THRESHOLD, fixedShares: FIXED_SHARES, quoteBuffer: QUOTE_BUFFER,
-      watch1hAfterSecs: WATCH_1H_AFTER_SECS,
+      fixedNotionalUsd: FIXED_NOTIONAL_USD, quoteBuffer: QUOTE_BUFFER,
+      fireDelaySecs: FIRE_DELAY_SECS,
       cryptoTakerFeeRate: CRYPTO_TAKER_FEE_RATE,
     },
     pairStates, totalEquityCurve, logs: logs.slice(-100), trades: trades.slice(-80).reverse(),
@@ -640,7 +645,7 @@ function setPairs(list) {
   if (!clean.length) return { ok: false, error: 'Empty pair list' };
   pairList = [...new Set(clean)];
   resetPairs();
-  log(`⚙️  Pairs updated: ${pairList.join(', ')} | $${perPairCapital.toFixed(2)} per pair (bookkeeping only — sizing is fixed at ${FIXED_SHARES} shares/entry)`);
+  log(`⚙️  Pairs updated: ${pairList.join(', ')} | $${perPairCapital.toFixed(2)} per pair (bookkeeping only — sizing is fixed at $${FIXED_NOTIONAL_USD}/entry)`);
   return { ok: true, pairs: pairList, perPairCapital };
 }
 function pauseTrading() { tradingEnabled = false; log('⏸️  Trading paused (existing positions still tracked for resolution bookkeeping)'); return { ok: true }; }
@@ -663,7 +668,7 @@ async function init(privateKey, emit, slogFn) {
   log(`⚙️  $${TOTAL_CAPITAL} demo capital across ${pairList.length} pairs (${pairList.join(', ')}) → $${perPairCapital.toFixed(2)}/pair bookkeeping bankroll`);
   log(`⚙️  Layer A: closed 1h candle RED → 15m blocks Up,Up,Down,Down (1h market Down). GREEN → Down,Down,Up,Up (1h market Up). Always fires, locked for the whole hour.`);
   log(`⚙️  Layer B: each 15m block's own just-closed 15m candle (independent of its assigned side) — RED → 5m Up,Down,Down. GREEN → 5m Down,Up,Up. Always fires.`);
-  log(`⚙️  entries: fixed ${FIXED_SHARES} shares, market buy the FIRST time ask drops below ${ENTRY_THRESHOLD}, one-shot per window | 1h market only watched from +${Math.round(WATCH_1H_AFTER_SECS / 60)}min`);
+  log(`⚙️  entries: fixed $${FIXED_NOTIONAL_USD} notional, market buy fires unconditionally at a fixed delay into each window regardless of price — 5m@+${Math.round(FIRE_DELAY_5M_SECS/60)}m, 15m@+${Math.round(FIRE_DELAY_15M_SECS/60)}m, 1h@+${Math.round(FIRE_DELAY_1H_SECS/60)}m — one-shot per window`);
   log(`⚙️  no TP/SL — rides to resolution, external claim script handles real redemption`);
   log(`${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price/candle data' : '🔴 LIVE MODE — real money'}`);
 
