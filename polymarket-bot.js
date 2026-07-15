@@ -587,9 +587,12 @@ function buildState() {
         id: w.id, tf: w.tf, side: w.side,
         windowStart: w.windowStart, windowEnd: w.windowEnd,
         secsToEnd: Math.max(0, Math.floor(w.windowEnd - nowSec())),
+        secsToStart: Math.max(0, Math.floor(w.windowStart - nowSec())),
         watchStart: w.watchStart,
         tradable: w.tradable, entryDone: w.entryDone, entrySkipped: w.entrySkipped,
         entry: w.entry, resolved: w.resolved, won: w.won,
+        upAsk: w.upTokenId != null ? (tokenAskMap[w.upTokenId] ?? null) : null,
+        downAsk: w.downTokenId != null ? (tokenAskMap[w.downTokenId] ?? null) : null,
       })),
       equityCurve: s.equityCurve,
     };
