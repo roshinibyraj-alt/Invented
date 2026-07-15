@@ -94,6 +94,23 @@ app.get('/', (_, res) => {
   .side-down { color: var(--red); }
   .pos-box { margin-top: 6px; border-top: 1px solid var(--border); padding-top: 6px; font-size: 9px; }
   .signal-box { margin-top: 6px; font-size: 9px; color: #8aa; }
+  .next-box { margin-top: 6px; background: #0d1d3022; border: 1px dashed var(--cyan); border-radius: 6px; padding: 5px 8px; font-size: 9px; display: flex; justify-content: space-between; align-items: center; }
+  .next-box .lbl { color: var(--cyan); text-transform: uppercase; letter-spacing: 1px; font-size: 8px; }
+  .block { margin-top: 6px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .block-hdr { background: var(--bg3); padding: 4px 8px; display: flex; justify-content: space-between; font-size: 9px; }
+  .block-body { padding: 2px 8px 4px; }
+  .win-row { display: flex; align-items: center; gap: 6px; padding: 3px 0; font-size: 9px; border-bottom: 1px solid var(--border); }
+  .win-row:last-child { border-bottom: none; }
+  .win-row.sub { padding-left: 10px; opacity: .92; }
+  .win-row.live { background: #00d4ff11; border-radius: 4px; padding-left: 4px; animation: livepulse 1.6s infinite; }
+  @keyframes livepulse { 0%,100%{ box-shadow: 0 0 0 1px #00d4ff33 inset } 50%{ box-shadow: 0 0 0 1px #00d4ff88 inset } }
+  .win-tf { width: 26px; flex-shrink: 0; color: var(--muted); }
+  .win-side { width: 46px; flex-shrink: 0; font-weight: bold; }
+  .live-dot { color: var(--cyan); margin-right: 2px; }
+  .win-prices { display: flex; gap: 6px; font-size: 8px; flex-shrink: 0; }
+  .win-prices .p-up { color: var(--green); }
+  .win-prices .p-down { color: var(--red); }
+  .win-status { flex: 1; text-align: right; color: var(--muted); }
   .bottom-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 0 20px 20px; }
   @media (max-width: 800px) { .bottom-grid { grid-template-columns: 1fr; } }
   .tbl-wrap { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; max-height: 320px; overflow-y: auto; }
@@ -281,27 +298,46 @@ app.get('/', (_, res) => {
           ? '<div class="pair-row" style="font-size:9px"><span class="pair-key">1h candle</span><span class="'+sideClass(p.direction1h)+'">'+p.hourColor.toUpperCase()+' → 1h '+p.direction1h+'</span></div>'
           : '<div class="pair-row" style="font-size:9px;opacity:.6">Waiting on closed 1h candle…</div>';
 
+        const isLive = w => !w.resolved && (w.secsToStart||0) <= 0 && (w.secsToEnd||0) > 0;
+        const priceStr = w => {
+          const up = (w.upAsk != null) ? w.upAsk.toFixed(2) : '—';
+          const down = (w.downAsk != null) ? w.downAsk.toFixed(2) : '—';
+          return '<span class="win-prices"><span class="p-up">U '+up+'</span><span class="p-down">D '+down+'</span></span>';
+        };
         const windowStatus = w => {
           if (w.resolved) return w.entry ? (w.won ? '💰 won' : '💥 lost') : 'no fill';
-          if (w.entryDone && w.entry) return 'holding '+w.entry.shares+'sh @'+w.entry.entryPrice.toFixed(2);
+          if (w.entryDone && w.entry) return 'holding '+w.entry.shares+'sh@'+w.entry.entryPrice.toFixed(2);
           if (w.entrySkipped) return 'skipped';
           if (!w.tradable) return 'loading…';
-          return 'watching '+fmtSecs(w.secsToEnd);
+          if ((w.secsToStart||0) > 0) return 'starts '+fmtSecs(w.secsToStart);
+          return fmtSecs(w.secsToEnd)+' left';
         };
-        const winRow = w => '<div class="pair-row" style="font-size:9px">'+
-          '<span class="pair-key">'+w.tf+' <span class="'+sideClass(w.side)+'">'+w.side+'</span></span>'+
-          '<span style="flex:1;text-align:right">'+windowStatus(w)+'</span></div>';
+        const winRow = (w, sub) => '<div class="win-row'+(sub?' sub':'')+(isLive(w)?' live':'')+'">'+
+          '<span class="win-tf">'+w.tf+'</span>'+
+          '<span class="win-side '+sideClass(w.side)+'">'+(isLive(w)?'<span class="live-dot">●</span>':'')+w.side+'</span>'+
+          priceStr(w) +
+          '<span class="win-status">'+windowStatus(w)+'</span></div>';
 
         const w1h = (p.windows||[]).filter(w => w.tf === '1h');
-        const w15 = (p.windows||[]).filter(w => w.tf === '15m');
+        const w15 = (p.windows||[]).filter(w => w.tf === '15m').sort((a,b) => a.windowStart - b.windowStart);
         const w5  = (p.windows||[]).filter(w => w.tf === '5m');
+        const blocksHtml = w15.map(b => {
+          const children = w5.filter(c => c.windowStart >= b.windowStart && c.windowStart < b.windowEnd)
+                              .sort((a,c) => a.windowStart - c.windowStart);
+          const timeLbl = new Date(b.windowStart*1000).toISOString().slice(11,16)+'Z';
+          return '<div class="block">'+
+            '<div class="block-hdr"><span>'+timeLbl+' block</span><span class="'+sideClass(b.side)+'">'+b.side+'</span></div>'+
+            '<div class="block-body">'+ winRow(b, false) + children.map(c => winRow(c, true)).join('') + '</div>'+
+          '</div>';
+        }).join('');
         const windowsHtml = (p.windows && p.windows.length)
-          ? '<div style="margin-top:4px;max-height:160px;overflow-y:auto">'+
-              w1h.map(winRow).join('') +
-              w15.map(winRow).join('') +
-              w5.map(winRow).join('') +
-            '</div>'
+          ? '<div style="margin-top:4px;max-height:260px;overflow-y:auto">'+ w1h.map(w => winRow(w, false)).join('') + blocksHtml + '</div>'
           : '<div class="pair-row" style="font-size:9px;opacity:.6">No windows this hour</div>';
+
+        const upcoming = (p.windows||[]).filter(w => !w.resolved && (w.secsToStart||0) > 0).sort((a,b) => a.secsToStart - b.secsToStart)[0];
+        const nextHtml = upcoming
+          ? '<div class="next-box"><span class="lbl">Next</span><span>'+upcoming.tf+' <span class="'+sideClass(upcoming.side)+'">'+upcoming.side+'</span> in '+fmtSecs(upcoming.secsToStart)+'</span></div>'
+          : '';
 
         const eqCurve = buildEquitySvg(p.equityCurve, 280, 34, null);
         const hasPos = (p.windows || []).some(w => w.entryDone && !w.resolved);
@@ -310,6 +346,7 @@ app.get('/', (_, res) => {
           '<div class="pair-hdr"><div class="pair-sym">'+p.symbol+'</div><div class="pair-timer">'+(p.hourStart?new Date(p.hourStart*1000).toISOString().slice(11,16)+'Z hour':'loading…')+'</div></div>'+
           '<div class="pair-body">'+
             signalHtml +
+            nextHtml +
             '<div class="pair-row"><span class="pair-key">Bankroll</span><span>$'+p.bankroll.toFixed(2)+'</span><span class="pair-key">W/L</span><span>'+p.wins+'/'+p.losses+'</span></div>'+
             '<div class="pair-row"><span class="pair-key">Realized</span><span class="'+pClass(p.realizedPnl)+'">'+sgn(p.realizedPnl)+'</span><span class="pair-key">Unrealized</span><span class="'+pClass(p.unrealizedPnl)+'">'+sgn(p.unrealizedPnl)+'</span></div>'+
             '<div class="pair-row"><span class="pair-key">Fees paid</span><span class="pnl-neg">-$'+(p.feesPaid||0).toFixed(4)+'</span></div>'+
