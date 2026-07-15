@@ -45,7 +45,7 @@ app.get('/', (_, res) => {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>⏱️ Crypto Up/Down Bot — 1h → 15m → 5m Decoupled Candle-Color</title>
+<title>⏱️ Crypto Up/Down Bot — Dual Price-Action Straddles</title>
 <style>
   :root {
     --bg: #ffffff; --bg2: #f5f7fa; --bg3: #edf0f4; --border: #d0d7e2;
@@ -94,23 +94,24 @@ app.get('/', (_, res) => {
   .side-down { color: var(--red); }
   .pos-box { margin-top: 6px; border-top: 1px solid var(--border); padding-top: 6px; font-size: 9px; }
   .signal-box { margin-top: 6px; font-size: 9px; color: #8aa; }
-  .next-box { margin-top: 6px; background: #0d1d3022; border: 1px dashed var(--cyan); border-radius: 6px; padding: 5px 8px; font-size: 9px; display: flex; justify-content: space-between; align-items: center; }
-  .next-box .lbl { color: var(--cyan); text-transform: uppercase; letter-spacing: 1px; font-size: 8px; }
   .block { margin-top: 6px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
-  .block-hdr { background: var(--bg3); padding: 4px 8px; display: flex; justify-content: space-between; font-size: 9px; }
-  .block-body { padding: 2px 8px 4px; }
-  .win-row { display: flex; align-items: center; gap: 6px; padding: 3px 0; font-size: 9px; border-bottom: 1px solid var(--border); }
-  .win-row:last-child { border-bottom: none; }
-  .win-row.sub { padding-left: 10px; opacity: .92; }
-  .win-row.live { background: #00d4ff11; border-radius: 4px; padding-left: 4px; animation: livepulse 1.6s infinite; }
-  @keyframes livepulse { 0%,100%{ box-shadow: 0 0 0 1px #00d4ff33 inset } 50%{ box-shadow: 0 0 0 1px #00d4ff88 inset } }
-  .win-tf { width: 26px; flex-shrink: 0; color: var(--muted); }
-  .win-side { width: 46px; flex-shrink: 0; font-weight: bold; }
-  .live-dot { color: var(--cyan); margin-right: 2px; }
+  .block.live { border-color: var(--cyan); animation: livepulse 1.6s infinite; }
+  @keyframes livepulse { 0%,100%{ box-shadow: 0 0 0 1px #00d4ff33 } 50%{ box-shadow: 0 0 0 1px #00d4ff88 } }
+  .block-hdr { background: var(--bg3); padding: 4px 8px; display: flex; justify-content: space-between; align-items: center; font-size: 9px; }
+  .live-dot { color: var(--cyan); margin-right: 3px; }
   .win-prices { display: flex; gap: 6px; font-size: 8px; flex-shrink: 0; }
   .win-prices .p-up { color: var(--green); }
   .win-prices .p-down { color: var(--red); }
-  .win-status { flex: 1; text-align: right; color: var(--muted); }
+  .block-body { padding: 2px 8px 4px; }
+  .strat-row { display: flex; justify-content: space-between; align-items: center; gap: 6px; padding: 2px 0; font-size: 9px; border-bottom: 1px solid var(--border); }
+  .strat-row:last-child { border-bottom: none; }
+  .strat-row.sub { padding-left: 10px; opacity: .9; }
+  .strat-lbl { color: var(--muted); flex-shrink: 0; }
+  .leg-idle { color: var(--muted); }
+  .leg-open { color: var(--cyan); }
+  .leg-won { color: var(--green); }
+  .leg-lost { color: var(--red); }
+  .leg-skipped { color: var(--yellow); }
   .bottom-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 0 20px 20px; }
   @media (max-width: 800px) { .bottom-grid { grid-template-columns: 1fr; } }
   .tbl-wrap { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; max-height: 320px; overflow-y: auto; }
@@ -134,7 +135,7 @@ app.get('/', (_, res) => {
   <div class="header">
     <div class="logo">⏱️ <span>1H→15m→5m</span> UP/DOWN BOT</div>
     <div id="mode-badge" class="mode-badge ${bot.getStatus().dryRun ? 'mode-dry' : 'mode-live'}">${bot.getStatus().dryRun ? 'DEMO' : '🔴 LIVE'}</div>
-    <div id="experiment-badge" class="mode-badge mode-dry">DECOUPLED CANDLE-COLOR + FIXED $50 FIRED-DELAY ENTRIES</div>
+    <div id="experiment-badge" class="mode-badge mode-dry">S1: DIP@0.30 TP0.70/SL0.10 $50 · S2: SPIKE@0.70 SL0.30 $100</div>
   </div>
 
   <div class="toolbar">
@@ -293,61 +294,55 @@ app.get('/', (_, res) => {
       grid.innerHTML = '<div class="empty">No pairs configured</div>';
     } else {
       grid.innerHTML = s.pairStates.map(p => {
-        const sideClass = sd => sd === 'Up' ? 'side-up' : (sd === 'Down' ? 'side-down' : '');
-        const signalHtml = p.hourColor
-          ? '<div class="pair-row" style="font-size:9px"><span class="pair-key">1h candle</span><span class="'+sideClass(p.direction1h)+'">'+p.hourColor.toUpperCase()+' → 1h '+p.direction1h+'</span></div>'
-          : '<div class="pair-row" style="font-size:9px;opacity:.6">Waiting on closed 1h candle…</div>';
-
-        const isLive = w => !w.resolved && (w.secsToStart||0) <= 0 && (w.secsToEnd||0) > 0;
         const priceStr = w => {
           const up = (w.upAsk != null) ? w.upAsk.toFixed(2) : '—';
           const down = (w.downAsk != null) ? w.downAsk.toFixed(2) : '—';
           return '<span class="win-prices"><span class="p-up">U '+up+'</span><span class="p-down">D '+down+'</span></span>';
         };
-        const windowStatus = w => {
-          if (w.resolved) return w.entry ? (w.won ? '💰 won' : '💥 lost') : 'no fill';
-          if (w.entryDone && w.entry) return 'holding '+w.entry.shares+'sh@'+w.entry.entryPrice.toFixed(2);
-          if (w.entrySkipped) return 'skipped';
-          if (!w.tradable) return 'loading…';
-          if ((w.secsToStart||0) > 0) return 'starts '+fmtSecs(w.secsToStart);
-          if ((w.secsToFire||0) > 0) return '🔥 fires in '+fmtSecs(w.secsToFire);
-          return 'firing…';
+        const legClass = leg => {
+          if (leg.status === 'closed') return leg.won ? 'leg-won' : 'leg-lost';
+          if (leg.status === 'open') return 'leg-open';
+          if (leg.status === 'skipped') return 'leg-skipped';
+          return 'leg-idle';
         };
-        const winRow = (w, sub) => '<div class="win-row'+(sub?' sub':'')+(isLive(w)?' live':'')+'">'+
-          '<span class="win-tf">'+w.tf+'</span>'+
-          '<span class="win-side '+sideClass(w.side)+'">'+(isLive(w)?'<span class="live-dot">●</span>':'')+w.side+'</span>'+
-          priceStr(w) +
-          '<span class="win-status">'+windowStatus(w)+'</span></div>';
+        const legText = leg => {
+          if (leg.status === 'idle') return 'idle';
+          if (leg.status === 'skipped') return 'skipped (bankroll)';
+          if (leg.status === 'open') return 'open @'+leg.entryPrice.toFixed(2)+' ('+leg.shares+'sh)';
+          const icon = leg.won ? '💰' : '💥';
+          return icon+' '+leg.exitReason.toUpperCase()+' @'+leg.exitPrice.toFixed(2)+' '+sgn(leg.profit);
+        };
+        const isLive = w => !w.resolved && (w.secsToStart||0) <= 0 && (w.secsToEnd||0) > 0;
 
-        const w1h = (p.windows||[]).filter(w => w.tf === '1h');
+        const winBlock = w => {
+          const timeLbl = new Date(w.windowStart*1000).toISOString().slice(11,16)+'Z';
+          const live = isLive(w);
+          return '<div class="block'+(live?' live':'')+'">'+
+            '<div class="block-hdr"><span>'+(live?'<span class="live-dot">●</span>':'')+w.tf+' ['+timeLbl+'] '+fmtSecs(w.secsToEnd)+' left</span>'+priceStr(w)+'</div>'+
+            '<div class="block-body">'+
+              '<div class="strat-row"><span class="strat-lbl">S1 Up</span><span class="'+legClass(w.s1.up)+'">'+legText(w.s1.up)+'</span></div>'+
+              '<div class="strat-row"><span class="strat-lbl">S1 Down</span><span class="'+legClass(w.s1.down)+'">'+legText(w.s1.down)+'</span></div>'+
+              '<div class="strat-row"><span class="strat-lbl">S2</span><span class="'+(w.s2.triggered?'leg-open':'leg-idle')+'">'+(w.s2.triggered?'triggered':'watching for 0.70')+'</span></div>'+
+              (w.s2.triggered ? '<div class="strat-row sub"><span class="strat-lbl">S2 Up</span><span class="'+legClass(w.s2.up)+'">'+legText(w.s2.up)+'</span></div>'+
+                                '<div class="strat-row sub"><span class="strat-lbl">S2 Down</span><span class="'+legClass(w.s2.down)+'">'+legText(w.s2.down)+'</span></div>' : '') +
+            '</div></div>';
+        };
+
         const w15 = (p.windows||[]).filter(w => w.tf === '15m').sort((a,b) => a.windowStart - b.windowStart);
-        const w5  = (p.windows||[]).filter(w => w.tf === '5m');
-        const blocksHtml = w15.map(b => {
-          const children = w5.filter(c => c.windowStart >= b.windowStart && c.windowStart < b.windowEnd)
-                              .sort((a,c) => a.windowStart - c.windowStart);
-          const timeLbl = new Date(b.windowStart*1000).toISOString().slice(11,16)+'Z';
-          return '<div class="block">'+
-            '<div class="block-hdr"><span>'+timeLbl+' block</span><span class="'+sideClass(b.side)+'">'+b.side+'</span></div>'+
-            '<div class="block-body">'+ winRow(b, false) + children.map(c => winRow(c, true)).join('') + '</div>'+
-          '</div>';
-        }).join('');
+        const w5  = (p.windows||[]).filter(w => w.tf === '5m').sort((a,b) => a.windowStart - b.windowStart);
         const windowsHtml = (p.windows && p.windows.length)
-          ? '<div style="margin-top:4px;max-height:260px;overflow-y:auto">'+ w1h.map(w => winRow(w, false)).join('') + blocksHtml + '</div>'
-          : '<div class="pair-row" style="font-size:9px;opacity:.6">No windows this hour</div>';
+          ? '<div style="margin-top:4px;max-height:320px;overflow-y:auto">'+ w15.map(winBlock).join('') + w5.map(winBlock).join('') + '</div>'
+          : '<div class="pair-row" style="font-size:9px;opacity:.6">Loading windows…</div>';
 
-        const upcoming = (p.windows||[]).filter(w => !w.resolved && (w.secsToStart||0) > 0).sort((a,b) => a.secsToStart - b.secsToStart)[0];
-        const nextHtml = upcoming
-          ? '<div class="next-box"><span class="lbl">Next</span><span>'+upcoming.tf+' <span class="'+sideClass(upcoming.side)+'">'+upcoming.side+'</span> in '+fmtSecs(upcoming.secsToStart)+'</span></div>'
-          : '';
+        const soonest = (p.windows||[]).filter(w => !w.resolved).sort((a,b) => a.secsToEnd - b.secsToEnd)[0];
+        const timerLbl = soonest ? fmtSecs(soonest.secsToEnd)+' left' : 'loading…';
 
         const eqCurve = buildEquitySvg(p.equityCurve, 280, 34, null);
-        const hasPos = (p.windows || []).some(w => w.entryDone && !w.resolved);
+        const hasPos = (p.windows || []).some(w => ['s1','s2'].some(st => ['up','down'].some(sd => w[st][sd].status === 'open')));
         const anyTradable = (p.windows || []).some(w => w.tradable);
         return '<div class="pair-card '+(hasPos?'has-pos':'')+' '+(anyTradable?'':'untradable')+'">'+
-          '<div class="pair-hdr"><div class="pair-sym">'+p.symbol+'</div><div class="pair-timer">'+(p.hourStart?new Date(p.hourStart*1000).toISOString().slice(11,16)+'Z hour':'loading…')+'</div></div>'+
+          '<div class="pair-hdr"><div class="pair-sym">'+p.symbol+'</div><div class="pair-timer">'+timerLbl+'</div></div>'+
           '<div class="pair-body">'+
-            signalHtml +
-            nextHtml +
             '<div class="pair-row"><span class="pair-key">Bankroll</span><span>$'+p.bankroll.toFixed(2)+'</span><span class="pair-key">W/L</span><span>'+p.wins+'/'+p.losses+'</span></div>'+
             '<div class="pair-row"><span class="pair-key">Realized</span><span class="'+pClass(p.realizedPnl)+'">'+sgn(p.realizedPnl)+'</span><span class="pair-key">Unrealized</span><span class="'+pClass(p.unrealizedPnl)+'">'+sgn(p.unrealizedPnl)+'</span></div>'+
             '<div class="pair-row"><span class="pair-key">Fees paid</span><span class="pnl-neg">-$'+(p.feesPaid||0).toFixed(4)+'</span></div>'+
@@ -362,7 +357,7 @@ app.get('/', (_, res) => {
       tb.innerHTML = s.trades.map(t => {
         const pnlStr = (t.profit !== undefined) ? sgn(t.profit) : '—';
         const pnlCls = (t.profit !== undefined) ? pClass(t.profit) : '';
-        const sideColor = t.side === 'BUY' ? '#ffd740' : (t.reason === 'SL' ? '#ff4757' : (t.reason==='TP'?'#00e676':'#00d4ff'));
+        const sideColor = t.side === 'BUY' ? '#ffd740' : ((t.reason||'').includes('SL') ? '#ff4757' : ((t.reason||'').includes('TP') ? '#00e676' : '#00d4ff'));
         return '<tr><td>'+t.time+'</td><td>'+t.symbol+'</td>'+
           '<td style="color:'+sideColor+'">'+t.side+(t.outcome?(' '+t.outcome):'')+'</td>'+
           '<td>'+(t.reason||'—')+'</td>'+
