@@ -2,79 +2,62 @@
 
 /**
  * ═══════════════════════════════════════════════════════════════
- *  POLYMARKET CRYPTO UP/DOWN — DECOUPLED 1H → 15m → 5m CANDLE-COLOR PLAYBOOK
+ *  POLYMARKET CRYPTO UP/DOWN — DUAL PRICE-ACTION STRADDLE STRATEGIES
  * ═══════════════════════════════════════════════════════════════
  *
- *  Every layer looks ONLY at its own immediate parent timeframe's most
- *  recently CLOSED Binance candle — plain red/green, no streak or
- *  reversal condition, no sitting out. Each layer is evaluated
- *  independently; a 5m window's side depends on the real 15m candle
- *  that just closed, NOT on whatever side its parent 15m block was
- *  assigned.
+ *  Runs on 15m and 5m windows only (no 1h market). For every window,
+ *  BOTH the Up and Down outcome tokens are candidates — there is no
+ *  pre-assigned directional "side" anymore. Two independent strategies
+ *  watch every window at once:
  *
- *  LAYER A — 1-hour candle → the hour's four 15m blocks:
- *  evaluated once at the top of every hour, using the most recently
- *  CLOSED 1h candle, and LOCKED for that whole hour:
+ *  STRATEGY 1 — buy-the-dip straddle:
+ *    Each leg (Up, Down) independently places a limit buy at 0.30.
+ *    Once a leg fills: TP at 0.70, SL at 0.10. If neither TP nor SL is
+ *    hit before the window ends, it settles at actual resolution
+ *    (1.00 if that side won, 0.00 if it lost). Bet = $50 PER LEG (so
+ *    up to $100 total if both legs fill in the same window). Each leg
+ *    fires at most once per window — no repeat re-entry after it
+ *    closes.
  *
- *    1h candle closed RED   → block 1 (min 0–15)  = Up
- *                              block 2 (min 15–30) = Up
- *                              block 3 (min 30–45) = Down
- *                              block 4 (min 45–60) = Down
- *    1h candle closed GREEN → opposite: blocks 1–2 = Down, blocks 3–4 = Up
+ *  STRATEGY 2 — momentum-spike straddle:
+ *    Independent of Strategy 1. The first time EITHER side's ask
+ *    ticks to 0.70 or higher, immediately place a limit buy at 0.70 on
+ *    BOTH Up and Down (one-shot trigger per window). Each leg then
+ *    carries an SL at 0.30; there is no explicit TP — a leg that isn't
+ *    stopped out rides to actual resolution (1.00 or 0.00). Bet = $100
+ *    PER LEG (so $200 total once triggered, since both legs are bought
+ *    together).
  *
- *  1H MARKET ITSELF — one direct entry attempt on the hourly market,
- *  firing 30 minutes into the hour. Side is a plain continuation of the
- *  same closed 1h candle (independent of the 15m plan above): closed
- *  RED → Down, closed GREEN → Up.
+ *  Strategy 1 and Strategy 2 are fully independent and can both fire
+ *  in the same window (e.g. Strategy 1 fills the Up dip at 0.30, and
+ *  later the same window's price spike to 0.70 also triggers Strategy
+ *  2 buying both legs at 0.70).
  *
- *  LAYER B — 15-minute candle → that block's three 5m windows:
- *  evaluated independently at the start of each 15m block, using the
- *  most recently CLOSED 15m candle (the 15 minutes immediately before
- *  that block begins):
+ *  FEES: a taker fee (CRYPTO_TAKER_FEE_RATE) is charged on every entry
+ *  and on every TP/SL exit (a real order-book trade). Resolution
+ *  settlement (redemption) is not fee'd, matching how the rest of
+ *  this bot's bookkeeping treats final settlement.
  *
- *    15m candle closed RED   → window 1 = Up,   windows 2–3 = Down
- *    15m candle closed GREEN → opposite: window 1 = Down, windows 2–3 = Up
+ *  SLUGS: 5m/15m Polymarket markets use predictable epoch-based slugs
+ *  (`{symbol}-updown-{tf}-{epoch}`).
  *
- *  A closed candle with close == open is folded into "green" for
- *  simplicity (no separate flat case).
- *
- *  ENTRY TRIGGER — every window fires exactly once, at a fixed delay after
- *  it opens, regardless of price:
- *    5m window  → fires 1 minute  after it opens
- *    15m window → fires 7 minutes after it opens
- *    1h window  → fires 30 minutes after it opens
- *  Sizing is a fixed $50 notional per entry (shares = $50 / entry price
- *  at the moment it fires). One-shot per window: once it fires, that
- *  window is done — no more attempts, no price condition either way.
- *
- *  EXIT: none. No TP, no SL. Positions ride to actual window
- *  resolution; a separate, independent auto-claim script handles real
- *  redemption. This bot's own bookkeeping still simulates resolution
- *  (via the public Gamma API) purely to keep the dashboard's P&L
- *  figures meaningful.
- *
- *  SLUGS: the 5m/15m Polymarket markets use predictable epoch-based
- *  slugs (`{symbol}-updown-{tf}-{epoch}`) — same scheme the previous
- *  version of this bot already relied on successfully. The 1-HOUR
- *  market uses a DIFFERENT, confirmed Eastern-Time slug format, e.g.
- *  "bitcoin-up-or-down-july-14-2026-7pm-et" (verified directly against
- *  polymarket.com) — full coin name, month, day, YEAR, hour+am/pm, "-et".
- *  No guessing, no fallback variants: this is the one format built and
- *  used for every 1h lookup.
- *
- *  LIVE / DEMO: DRY_RUN is runtime-switchable (see setMode).
+ *  LIVE / DEMO: DRY_RUN is runtime-switchable (see setMode). In DEMO
+ *  mode all fills are simulated. In LIVE mode, entries route through
+ *  trader.limitBuy(); exits route through trader.limitSell() if that
+ *  method exists on the configured PolymarketTrader — if it doesn't,
+ *  exits are logged but NOT sent to the exchange (bookkeeping only),
+ *  since this bot was not given that class's source to verify against.
  * ═══════════════════════════════════════════════════════════════
  */
 
 const PolymarketTrader = require('./polymarket-trader');
 
-const GAMMA   = 'https://gamma-api.polymarket.com';
-const CLOB    = 'https://clob.polymarket.com';
-const BINANCE = 'https://api.binance.com/api/v3';
+const GAMMA = 'https://gamma-api.polymarket.com';
+const CLOB  = 'https://clob.polymarket.com';
 
 const TICK_MS               = 500;
 const POLY_PRICE_REFRESH_MS = 1000;
-const EARLY_CUTOFF_SECS     = Number(process.env.EARLY_CUTOFF_SECS || 2); // stop watching / start resolving this many secs before nominal window end
+const EARLY_CUTOFF_SECS     = Number(process.env.EARLY_CUTOFF_SECS || 2); // stop opening new positions / start resolving this many secs before nominal window end
 
 let DRY_RUN = (process.env.DRY_RUN || 'true').toLowerCase() === 'true'; // runtime-switchable — see setMode
 const TOTAL_CAPITAL = Number(process.env.TOTAL_CAPITAL || 2000);
@@ -86,28 +69,19 @@ function round5(n) { return Math.round(n * 100000) / 100000; }
 function nowSec() { return Date.now() / 1000; }
 
 // ── Strategy parameters ──
-const FIRE_DELAY_5M_SECS   = Number(process.env.FIRE_DELAY_5M_SECS || 60);       // 5m window: fire this many secs after it opens, regardless of price
-const FIRE_DELAY_15M_SECS  = Number(process.env.FIRE_DELAY_15M_SECS || 7 * 60);  // 15m window: fire this many secs after it opens, regardless of price
-const FIRE_DELAY_1H_SECS   = Number(process.env.FIRE_DELAY_1H_SECS || 30 * 60);  // 1h window: fire this many secs after it opens, regardless of price
-const FIRE_DELAY_SECS      = { '5m': FIRE_DELAY_5M_SECS, '15m': FIRE_DELAY_15M_SECS, '1h': FIRE_DELAY_1H_SECS };
-const FIXED_NOTIONAL_USD   = Number(process.env.FIXED_NOTIONAL_USD || 50);       // fixed $ notional, every single entry — shares = $/price
-const QUOTE_BUFFER         = Number(process.env.QUOTE_BUFFER || 0.01);    // small buffer above ask so the "market" buy actually fills
+const S1_BUY_PRICE = Number(process.env.S1_BUY_PRICE || 0.30);
+const S1_TP        = Number(process.env.S1_TP || 0.70);
+const S1_SL        = Number(process.env.S1_SL || 0.10);
+const S1_BET_USD   = Number(process.env.S1_BET_USD || 50);   // per leg
+
+const S2_TRIGGER   = Number(process.env.S2_TRIGGER || 0.70);
+const S2_BUY_PRICE = Number(process.env.S2_BUY_PRICE || 0.70);
+const S2_SL        = Number(process.env.S2_SL || 0.30);
+const S2_BET_USD   = Number(process.env.S2_BET_USD || 100);  // per leg
 
 const CRYPTO_TAKER_FEE_RATE = Number(process.env.CRYPTO_TAKER_FEE_RATE || 0.07);
 
-const TIMEFRAMES = { '1h': 3600, '15m': 900, '5m': 300 };
-// Layer A: 1h candle color -> that hour's four 15m block sides
-const SIDES_15M_BY_1H_COLOR = { red: ['Up', 'Up', 'Down', 'Down'], green: ['Down', 'Down', 'Up', 'Up'] };
-// 1h market itself: plain continuation of the same closed 1h candle
-const SIDE_1H_BY_1H_COLOR = { red: 'Down', green: 'Up' };
-// Layer B: 15m candle color -> that block's three 5m window sides
-const SIDES_5M_BY_15M_COLOR = { red: ['Up', 'Down', 'Down'], green: ['Down', 'Up', 'Up'] };
-
-// Best-effort mapping for the 1h market's human-readable slug. Extend as needed.
-const SYMBOL_FULL_NAME = {
-  BTC: 'bitcoin', ETH: 'ethereum', SOL: 'solana', XRP: 'xrp', DOGE: 'dogecoin',
-  LTC: 'litecoin', ADA: 'cardano', AVAX: 'avalanche', LINK: 'chainlink', BNB: 'bnb',
-};
+const TIMEFRAMES = { '15m': 900, '5m': 300 };
 
 let emitFn = () => {};
 let slog = () => {};
@@ -131,48 +105,34 @@ function log(msg) {
 }
 
 async function getJSON(url) {
-  const res = await fetch(url, { headers: { 'User-Agent': 'polymarket-1h-reversal-bot/1.0' } });
+  const res = await fetch(url, { headers: { 'User-Agent': 'polymarket-straddle-bot/1.0' } });
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${url}`);
   return res.json();
 }
 async function postJSON(url, body) {
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'User-Agent': 'polymarket-1h-reversal-bot/1.0' },
+    headers: { 'Content-Type': 'application/json', 'User-Agent': 'polymarket-straddle-bot/1.0' },
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${url}`);
   return res.json();
 }
 
-// A marketable buy — priced a hair above the current ask so it fills now.
 async function placeEntryBuy(tokenId, price, shares) {
   if (!DRY_RUN && trader) return await trader.limitBuy(tokenId, shares, price);
   return { id: `dry-buy-${Date.now()}-${Math.random().toString(36).slice(2, 7)}` };
 }
+async function placeExitSell(tokenId, price, shares) {
+  if (!DRY_RUN && trader) {
+    if (typeof trader.limitSell === 'function') return await trader.limitSell(tokenId, shares, price);
+    log(`⚠️  trader.limitSell() not available — exit recorded in bookkeeping only, NOT sent to the exchange`);
+    return null;
+  }
+  return { id: `dry-sell-${Date.now()}-${Math.random().toString(36).slice(2, 7)}` };
+}
 function takerFee(shares, price) {
   return round5(shares * CRYPTO_TAKER_FEE_RATE * price * (1 - price));
-}
-
-// ─────────────────────────────────────────
-//  1-hour reversal signal
-// ─────────────────────────────────────────
-// close == open is folded into 'green' — no separate flat case.
-function candleColor(c) {
-  const o = parseFloat(c[1]), cl = parseFloat(c[4]);
-  return cl < o ? 'red' : 'green';
-}
-
-// Fetches the most recently CLOSED Binance candle for `symbol` at the given
-// interval ('1h' or '15m') and returns its color ('red'|'green'), or null if
-// no closed candle is available yet (caller should retry).
-async function fetchLastClosedColor(symbol, interval) {
-  const binanceSymbol = `${symbol}USDT`;
-  const now = Date.now();
-  const data = await getJSON(`${BINANCE}/klines?symbol=${binanceSymbol}&interval=${interval}&limit=3`);
-  const closed = data.filter(c => c[6] < now); // [6] = closeTime
-  if (!closed.length) return null;
-  return candleColor(closed[closed.length - 1]);
 }
 
 // ─────────────────────────────────────────
@@ -185,12 +145,7 @@ function freshPairState(symbol) {
     realizedPnl: 0,
     feesPaid: 0,
     wins: 0, losses: 0,
-    hourStart: null,
-    hourColor: null,     // 'red' | 'green' — the closed 1h candle that decided this hour's plan
-    direction1h: null,
-    hourlySlugWarned: false,
-    hourColorWarned: false,
-    windows: [],          // flat list of window trackers: 1h(1) + 15m(4) + 5m(12) per hour
+    windows: [], // flat list of window trackers (15m + 5m, rolling)
     equityCurve: [{ t: Date.now(), equity: perPairCapital }],
   };
 }
@@ -204,21 +159,38 @@ resetPairs();
 
 function windowStartFor(tf, tsSec = nowSec()) { const secs = TIMEFRAMES[tf]; return Math.floor(tsSec / secs) * secs; }
 
-function buildWindow(symbol, tf, windowStart, side) {
+function freshLeg() {
+  return {
+    status: 'idle',       // idle -> open -> closed | skipped
+    entryPrice: null, shares: null, cost: null,
+    exitPrice: null, exitReason: null, // 'tp' | 'sl' | 'resolution'
+    profit: null, won: null,
+  };
+}
+function buildWindow(symbol, tf, windowStart) {
   const secs = TIMEFRAMES[tf];
   return {
     id: `${symbol}-${tf}-${windowStart}`,
-    tf, windowStart, windowEnd: windowStart + secs, side,
+    tf, windowStart, windowEnd: windowStart + secs,
     slug: null, conditionId: null, upTokenId: null, downTokenId: null,
     loaded: false, tradable: false,
-    fireAt: windowStart + FIRE_DELAY_SECS[tf],
-    entryDone: false, entry: null, entrySkipped: false, fireWarned: false,
-    resolved: false, resolvedAt: null, won: null,
-    // only meaningful for tf === '15m': has its own 3x 5m children been built yet?
-    subBuilt: tf !== '15m' ? null : false,
-    subBuildWarned: false,
-    refColor: null, // the closed candle color that decided this window's side (for the UI)
+    resolved: false, resolvedAt: null,
+    s1: { up: freshLeg(), down: freshLeg() },
+    s2: { triggered: false, up: freshLeg(), down: freshLeg() },
   };
+}
+
+// Makes sure a window tracker exists for the CURRENT 15m period and the
+// CURRENT 5m period. Called every tick — cheap no-op once both exist.
+function ensureCurrentWindows(s) {
+  for (const tf of ['15m', '5m']) {
+    const ws = windowStartFor(tf);
+    const id = `${s.symbol}-${tf}-${ws}`;
+    if (!s.windows.find(w => w.id === id)) {
+      s.windows.push(buildWindow(s.symbol, tf, ws));
+      log(`🆕 ${s.symbol} new ${tf} window [${new Date(ws * 1000).toISOString().slice(11, 16)}Z]`);
+    }
+  }
 }
 
 // ─────────────────────────────────────────
@@ -242,7 +214,7 @@ function pickMarket(event) {
   return (event.markets || []).find(m => { const q = qOf(m); return q.includes('up') || q.includes('down'); }) || (event.markets || [])[0];
 }
 
-// 5m / 15m: predictable epoch-based slugs, same scheme the prior version used.
+// 5m / 15m: predictable epoch-based slugs.
 async function fetchEventForWindow(symbol, tf, windowStart) {
   const secs = TIMEFRAMES[tf];
   for (const offsetMult of [0, -1, 1]) {
@@ -258,53 +230,10 @@ async function fetchEventForWindow(symbol, tf, windowStart) {
   return null;
 }
 
-// 1h: confirmed live format is Eastern-Time, WITH year, e.g.
-// "bitcoin-up-or-down-july-14-2026-7pm-et" for the hour beginning 7PM ET
-// on July 14, 2026 (verified directly against polymarket.com). No guessing,
-// no fallback variants — this is the one format Polymarket currently issues
-// for current/future hourly windows.
-function etHourParts(windowStartSec) {
-  const d = new Date(windowStartSec * 1000);
-  const fmt = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/New_York', month: 'long', day: 'numeric', year: 'numeric', hour: 'numeric', hour12: true,
-  });
-  const parts = fmt.formatToParts(d);
-  const get = t => parts.find(p => p.type === t)?.value || '';
-  const month = get('month').toLowerCase();
-  const day = get('day');
-  const year = get('year');
-  const hourNum = get('hour').toLowerCase();
-  const dayPeriod = (parts.find(p => p.type === 'dayPeriod')?.value || '').toLowerCase();
-  return { month, day, year, hourLabel: `${hourNum}${dayPeriod}` };
-}
-function buildHourlySlug(symbol, windowStart) {
-  const name = SYMBOL_FULL_NAME[symbol] || symbol.toLowerCase();
-  const { month, day, year, hourLabel } = etHourParts(windowStart);
-  return `${name}-up-or-down-${month}-${day}-${year}-${hourLabel}-et`;
-}
-async function fetchHourlyEvent(symbol, windowStart) {
-  const slug = buildHourlySlug(symbol, windowStart);
-  try {
-    const event = await getJSON(`${GAMMA}/events/slug/${encodeURIComponent(slug)}`);
-    if (event && event.id && Array.isArray(event.markets) && event.markets.length) {
-      return { event, market: pickMarket(event), slug };
-    }
-  } catch (_) {}
-  return null;
-}
-
 async function tryLoadWindow(s, w) {
-  const found = w.tf === '1h'
-    ? await fetchHourlyEvent(s.symbol, w.windowStart)
-    : await fetchEventForWindow(s.symbol, w.tf, w.windowStart);
-  if (!found) {
-    if (w.tf === '1h' && !s.hourlySlugWarned && nowSec() - w.windowStart > 30) {
-      s.hourlySlugWarned = true;
-      log(`⚠️  ${s.symbol}: 1h market not found at slug "${buildHourlySlug(s.symbol, w.windowStart)}" — 1h entry for this hour will be skipped. If this persists, check the real slug on polymarket.com and update SYMBOL_FULL_NAME / buildHourlySlug().`);
-    }
-    return;
-  }
-  const { event, market, slug } = found;
+  const found = await fetchEventForWindow(s.symbol, w.tf, w.windowStart);
+  if (!found) return;
+  const { market, slug } = found;
   const upId = tokenIdForSide(market, 'up');
   const downId = tokenIdForSide(market, 'down');
   if (!upId || !downId) return;
@@ -361,10 +290,18 @@ async function refreshAllPrices() {
 //  Equity tracking
 // ─────────────────────────────────────────
 function windowMarkValue(w) {
-  if (!w.entryDone || !w.entry || w.resolved) return 0;
-  const tid = w.entry.side === 'Up' ? w.upTokenId : w.downTokenId;
-  const px = tokenAskMap[tid];
-  return round2(w.entry.shares * (px ?? w.entry.entryPrice));
+  if (w.resolved) return 0;
+  let val = 0;
+  for (const stratName of ['s1', 's2']) {
+    for (const sideName of ['up', 'down']) {
+      const leg = w[stratName][sideName];
+      if (leg.status !== 'open') continue;
+      const tid = sideName === 'up' ? w.upTokenId : w.downTokenId;
+      const px = tokenAskMap[tid];
+      val += leg.shares * (px ?? leg.entryPrice);
+    }
+  }
+  return round2(val);
 }
 function pairMarkValue(s) {
   const held = s.windows.reduce((sum, w) => sum + windowMarkValue(w), 0);
@@ -387,118 +324,103 @@ function registerTrade(s, entry) {
 }
 
 // ─────────────────────────────────────────
-//  Hour transition — compute signal, build the whole hour's window tree
+//  Leg open/close — shared by both strategies
 // ─────────────────────────────────────────
-// Layer A: decides the whole hour's plan from the most recently closed 1h
-// candle. No streak/reversal condition — always fires. Only commits
-// s.hourStart on success, so a fetch failure retries every tick instead of
-// silently sitting the hour out.
-async function startNewHour(s, hourStart) {
-  let color = null;
-  try { color = await fetchLastClosedColor(s.symbol, '1h'); }
-  catch (e) { log(`⚠️  ${s.symbol} 1h candle fetch failed: ${e.message}`); }
+async function openLeg(s, w, stratName, sideName, leg, entryPrice, betUsd) {
+  const tokenId = sideName === 'up' ? w.upTokenId : w.downTokenId;
+  const shares = round2(betUsd / entryPrice);
+  const notional = round2(entryPrice * shares);
+  const fee = takerFee(shares, entryPrice);
+  const cost = round2(notional + fee);
 
-  if (!color) {
-    if (!s.hourColorWarned) {
-      s.hourColorWarned = true;
-      log(`⚠️  ${s.symbol}: could not fetch closed 1h candle yet for hour ${new Date(hourStart * 1000).toISOString().slice(0, 13)}:00Z — retrying`);
-    }
-    return; // s.hourStart stays behind; we'll retry this same hour next tick
-  }
-
-  s.hourStart = hourStart;
-  s.hourColor = color;
-  s.hourColorWarned = false;
-  s.hourlySlugWarned = false;
-
-  const direction1h = SIDE_1H_BY_1H_COLOR[color];
-  const sides15 = SIDES_15M_BY_1H_COLOR[color];
-  s.direction1h = direction1h;
-
-  log(`🕐 ${s.symbol} hour ${new Date(hourStart * 1000).toISOString().slice(0, 13)}:00Z — last closed 1h candle ${color.toUpperCase()} → 1h market ${direction1h} @+${Math.round(FIRE_DELAY_1H_SECS / 60)}m | 15m plan: ${sides15.join(', ')}`);
-
-  const w1h = buildWindow(s.symbol, '1h', hourStart, direction1h);
-  w1h.refColor = color;
-  s.windows.push(w1h);
-
-  for (let i = 0; i < 4; i++) {
-    const ws15 = hourStart + i * TIMEFRAMES['15m'];
-    const w15 = buildWindow(s.symbol, '15m', ws15, sides15[i]);
-    w15.refColor = color;
-    s.windows.push(w15);
-  }
-}
-
-// Layer B: independent of Layer A. Right as each 15m block begins, fetch the
-// 15m candle that JUST closed (the 15 minutes immediately before this block)
-// and build that block's three 5m windows from ITS color — not from the
-// side assigned to the parent 15m block. Retries every tick until it
-// succeeds (no sitting out).
-async function maybeBuildFiveMinWindows(s, w15) {
-  if (w15.subBuilt) return;
-  if (nowSec() < w15.windowStart) return;
-
-  let color = null;
-  try { color = await fetchLastClosedColor(s.symbol, '15m'); }
-  catch (e) { log(`⚠️  ${s.symbol} 15m candle fetch failed: ${e.message}`); }
-
-  if (!color) {
-    if (!w15.subBuildWarned) {
-      w15.subBuildWarned = true;
-      log(`⚠️  ${s.symbol} 15m [${new Date(w15.windowStart * 1000).toISOString().slice(11, 16)}Z]: could not fetch closed 15m candle yet — retrying`);
-    }
+  if (cost > s.bankroll) {
+    log(`⏭️  ${s.symbol} ${w.tf} [${w.id}] ${stratName.toUpperCase()} ${sideName.toUpperCase()}: skip entry — bankroll $${s.bankroll.toFixed(2)} < $${cost.toFixed(2)}`);
+    leg.status = 'skipped';
     return;
   }
 
-  const sides5 = SIDES_5M_BY_15M_COLOR[color];
-  log(`🕐 ${s.symbol} 15m block [${new Date(w15.windowStart * 1000).toISOString().slice(11, 16)}Z] — last closed 15m candle ${color.toUpperCase()} → 5m plan: ${sides5.join(', ')}`);
-
-  for (let j = 0; j < 3; j++) {
-    const ws5 = w15.windowStart + j * TIMEFRAMES['5m'];
-    const w5 = buildWindow(s.symbol, '5m', ws5, sides5[j]);
-    w5.refColor = color;
-    s.windows.push(w5);
-  }
-  w15.subBuilt = true;
-}
-
-// ─────────────────────────────────────────
-//  Entry — fixed $ notional, fires unconditionally at fireAt regardless of price
-// ─────────────────────────────────────────
-async function maybeEnterWindow(s, w) {
-  const tokenId = w.side === 'Up' ? w.upTokenId : w.downTokenId;
-  const ask = tokenAskMap[tokenId];
-  if (ask == null) {
-    if (!w.fireWarned) { w.fireWarned = true; log(`⚠️  ${s.symbol} ${w.tf} [${w.id}]: fire time reached but no ask price yet — retrying`); }
-    return; // no price feed yet — keep retrying every tick until windowEnd cutoff
-  }
-
-  const quotePrice = round2(Math.min(ask + QUOTE_BUFFER, 0.99));
-  const shares = round2(FIXED_NOTIONAL_USD / quotePrice);
-  const notional = round2(quotePrice * shares);
-  const fee = takerFee(shares, quotePrice);
-  const totalCost = round2(notional + fee);
-
-  if (totalCost > s.bankroll) {
-    log(`⏭️  ${s.symbol} ${w.tf} [${w.id}]: skip entry — bankroll $${s.bankroll.toFixed(2)} < $${totalCost.toFixed(2)}`);
-    w.entryDone = true;
-    w.entrySkipped = true;
-    return;
-  }
-
-  await placeEntryBuy(tokenId, quotePrice, shares);
-  s.bankroll = round2(s.bankroll - totalCost);
+  await placeEntryBuy(tokenId, entryPrice, shares);
+  s.bankroll = round2(s.bankroll - cost);
   s.realizedPnl = round2(s.realizedPnl - fee);
   s.feesPaid = round2(s.feesPaid + fee);
-  w.entryDone = true;
-  w.entry = { side: w.side, entryPrice: quotePrice, shares, cost: totalCost };
+  leg.status = 'open'; leg.entryPrice = entryPrice; leg.shares = shares; leg.cost = cost;
   recordEquity(s);
-  log(`🎯 ${s.symbol} ${w.tf} [${new Date(w.windowStart * 1000).toISOString().slice(11, 16)}Z] ${w.side} MARKET BUY $${FIXED_NOTIONAL_USD} (${shares}sh @ ${quotePrice.toFixed(2)}) — fired +${Math.round((w.fireAt - w.windowStart) / 60)}m into window, ask was ${ask.toFixed(2)} | cost=$${totalCost.toFixed(2)} | fee=-$${fee.toFixed(4)}`);
-  registerTrade(s, { side: 'BUY', outcome: w.side, tf: w.tf, reason: 'ENTRY', price: quotePrice, shares, cost: totalCost, fee });
+  log(`🎯 ${s.symbol} ${w.tf} [${new Date(w.windowStart * 1000).toISOString().slice(11, 16)}Z] ${stratName.toUpperCase()} ${sideName.toUpperCase()} LIMIT BUY $${betUsd} (${shares}sh @ ${entryPrice.toFixed(2)}) | cost=$${cost.toFixed(2)} | fee=-$${fee.toFixed(4)}`);
+  registerTrade(s, { side: 'BUY', outcome: sideName === 'up' ? 'Up' : 'Down', tf: w.tf, reason: `${stratName.toUpperCase()}_ENTRY`, price: entryPrice, shares, cost, fee });
+}
+
+async function closeLeg(s, w, stratName, sideName, leg, exitPrice, reason) {
+  const tokenId = sideName === 'up' ? w.upTokenId : w.downTokenId;
+  let fee = 0;
+  if (reason === 'tp' || reason === 'sl') {
+    await placeExitSell(tokenId, exitPrice, leg.shares);
+    fee = takerFee(leg.shares, exitPrice);
+  }
+  const proceeds = round2(leg.shares * exitPrice);
+  const netProceeds = round2(proceeds - fee);
+  const profit = round2(netProceeds - leg.cost);
+
+  s.bankroll = round2(s.bankroll + netProceeds);
+  s.realizedPnl = round2(s.realizedPnl + profit);
+  if (fee > 0) s.feesPaid = round2(s.feesPaid + fee);
+  const won = profit > 0;
+  if (won) s.wins++; else s.losses++;
+  leg.status = 'closed'; leg.exitPrice = exitPrice; leg.exitReason = reason; leg.profit = profit; leg.won = won;
+
+  const icon = won ? '💰' : '💥';
+  const reasonLabel = reason === 'tp' ? 'TP' : reason === 'sl' ? 'SL' : 'RESOLUTION';
+  log(`${icon} ${s.symbol} ${w.tf} [${new Date(w.windowStart * 1000).toISOString().slice(11, 16)}Z] ${stratName.toUpperCase()} ${sideName.toUpperCase()} ${reasonLabel} exit@${exitPrice.toFixed(2)} entry@${leg.entryPrice.toFixed(2)} ${leg.shares}sh | pnl=$${profit.toFixed(2)} | bankroll=$${s.bankroll.toFixed(2)}`);
+  registerTrade(s, { side: 'SELL', outcome: sideName === 'up' ? 'Up' : 'Down', tf: w.tf, reason: `${stratName.toUpperCase()}_${reasonLabel}`, price: exitPrice, shares: leg.shares, profit });
+  recordEquity(s);
 }
 
 // ─────────────────────────────────────────
-//  Resolution (dashboard bookkeeping only — real redemption is external)
+//  Strategy 1 — buy the dip @0.30, TP 0.70 / SL 0.10, per leg independently
+// ─────────────────────────────────────────
+async function maybeStrategy1(s, w, sideName) {
+  const leg = w.s1[sideName];
+  if (leg.status === 'closed' || leg.status === 'skipped') return;
+  const tokenId = sideName === 'up' ? w.upTokenId : w.downTokenId;
+  const ask = tokenAskMap[tokenId];
+  if (ask == null) return;
+
+  if (leg.status === 'idle') {
+    if (ask <= S1_BUY_PRICE) await openLeg(s, w, 's1', sideName, leg, S1_BUY_PRICE, S1_BET_USD);
+    return;
+  }
+  // leg.status === 'open'
+  if (ask >= S1_TP) await closeLeg(s, w, 's1', sideName, leg, S1_TP, 'tp');
+  else if (ask <= S1_SL) await closeLeg(s, w, 's1', sideName, leg, S1_SL, 'sl');
+}
+
+// ─────────────────────────────────────────
+//  Strategy 2 — momentum spike @0.70 triggers BOTH legs, SL 0.30, TP=resolution
+// ─────────────────────────────────────────
+async function maybeStrategy2(s, w) {
+  const s2 = w.s2;
+  if (!s2.triggered) {
+    const upAsk = tokenAskMap[w.upTokenId], downAsk = tokenAskMap[w.downTokenId];
+    if (upAsk == null || downAsk == null) return;
+    if (upAsk >= S2_TRIGGER || downAsk >= S2_TRIGGER) {
+      s2.triggered = true;
+      log(`⚡ ${s.symbol} ${w.tf} [${new Date(w.windowStart * 1000).toISOString().slice(11, 16)}Z] Strategy-2 triggered (up ${upAsk.toFixed(2)} / down ${downAsk.toFixed(2)}) → buying BOTH legs @${S2_BUY_PRICE.toFixed(2)}`);
+      await openLeg(s, w, 's2', 'up', s2.up, S2_BUY_PRICE, S2_BET_USD);
+      await openLeg(s, w, 's2', 'down', s2.down, S2_BUY_PRICE, S2_BET_USD);
+    }
+    return;
+  }
+  for (const sideName of ['up', 'down']) {
+    const leg = s2[sideName];
+    if (leg.status !== 'open') continue;
+    const tokenId = sideName === 'up' ? w.upTokenId : w.downTokenId;
+    const ask = tokenAskMap[tokenId];
+    if (ask == null) continue;
+    if (ask <= S2_SL) await closeLeg(s, w, 's2', sideName, leg, S2_SL, 'sl'); // no TP — rides to resolution otherwise
+  }
+}
+
+// ─────────────────────────────────────────
+//  Resolution — force-close any still-open legs at actual outcome
 // ─────────────────────────────────────────
 async function determineWinningSideForWindow(w) {
   try {
@@ -519,48 +441,41 @@ async function determineWinningSideForWindow(w) {
 }
 
 async function resolveWindow(s, w) {
+  const winner = await determineWinningSideForWindow(w); // 'Up' | 'Down' | null
+  for (const stratName of ['s1', 's2']) {
+    for (const sideName of ['up', 'down']) {
+      const leg = w[stratName][sideName];
+      if (leg.status !== 'open') continue;
+      const sideLabel = sideName === 'up' ? 'Up' : 'Down';
+      let exitPrice;
+      if (winner) exitPrice = (winner === sideLabel) ? 1 : 0;
+      else exitPrice = tokenAskMap[sideName === 'up' ? w.upTokenId : w.downTokenId] ?? leg.entryPrice;
+      await closeLeg(s, w, stratName, sideName, leg, exitPrice, 'resolution');
+    }
+  }
   w.resolved = true;
   w.resolvedAt = Date.now();
-  if (!w.entryDone || !w.entry) return;
-
-  const winner = await determineWinningSideForWindow(w);
-  const won = winner === w.entry.side;
-  const proceeds = won ? round2(w.entry.shares * 1) : 0;
-  const profit = round2(proceeds - w.entry.cost);
-  s.bankroll = round2(s.bankroll + proceeds);
-  s.realizedPnl = round2(s.realizedPnl + profit);
-  if (won) s.wins++; else s.losses++;
-  w.won = won;
-
-  const icon = won ? '💰' : '💥';
-  log(`${icon} ${s.symbol} ${w.tf} [${new Date(w.windowStart * 1000).toISOString().slice(11, 16)}Z] ${w.entry.side} RESOLUTION ${w.entry.shares}sh entry=${w.entry.entryPrice.toFixed(2)} exit=$${won ? '1.00' : '0.00'} | pnl=$${profit.toFixed(2)} | bankroll=$${s.bankroll.toFixed(2)}`);
-  registerTrade(s, { side: 'SELL', outcome: w.entry.side, tf: w.tf, reason: 'RESOLUTION', price: won ? 1 : 0, shares: w.entry.shares, profit });
-  recordEquity(s);
 }
 
 // ─────────────────────────────────────────
 //  Main per-symbol tick
 // ─────────────────────────────────────────
 async function processSymbol(s) {
-  const hourStart = windowStartFor('1h');
-  if (s.hourStart !== hourStart) await startNewHour(s, hourStart);
   if (!tradingEnabled) return;
-
-  // Layer B: build each 15m block's 5m children independently, right as
-  // that block begins, from that block's own just-closed 15m candle.
-  for (const w15 of s.windows) {
-    if (w15.tf === '15m' && !w15.subBuilt) await maybeBuildFiveMinWindows(s, w15);
-  }
+  ensureCurrentWindows(s);
 
   const t = nowSec();
   for (const w of s.windows) {
     if (w.resolved) continue;
     if (!w.loaded) { await tryLoadWindow(s, w); if (!w.loaded) continue; }
 
-    if (!w.entryDone && t >= w.fireAt && t < w.windowEnd - EARLY_CUTOFF_SECS) {
-      await maybeEnterWindow(s, w);
-    }
-    if (t >= w.windowEnd - EARLY_CUTOFF_SECS) {
+    const nearEnd = t >= w.windowEnd - EARLY_CUTOFF_SECS;
+
+    if (!nearEnd) {
+      await maybeStrategy1(s, w, 'up');
+      await maybeStrategy1(s, w, 'down');
+      await maybeStrategy2(s, w);
+    } else {
       await resolveWindow(s, w);
     }
   }
@@ -584,20 +499,15 @@ function buildState() {
       markValue,
       feesPaid: s.feesPaid,
       wins: s.wins, losses: s.losses,
-      hourStart: s.hourStart,
-      hourColor: s.hourColor,
-      direction1h: s.direction1h,
       windows: s.windows.map(w => ({
-        id: w.id, tf: w.tf, side: w.side,
+        id: w.id, tf: w.tf,
         windowStart: w.windowStart, windowEnd: w.windowEnd,
         secsToEnd: Math.max(0, Math.floor(w.windowEnd - nowSec())),
         secsToStart: Math.max(0, Math.floor(w.windowStart - nowSec())),
-        secsToFire: Math.floor(w.fireAt - nowSec()),
-        fireAt: w.fireAt,
-        tradable: w.tradable, entryDone: w.entryDone, entrySkipped: w.entrySkipped,
-        entry: w.entry, resolved: w.resolved, won: w.won,
+        tradable: w.tradable, resolved: w.resolved,
         upAsk: w.upTokenId != null ? (tokenAskMap[w.upTokenId] ?? null) : null,
         downAsk: w.downTokenId != null ? (tokenAskMap[w.downTokenId] ?? null) : null,
+        s1: w.s1, s2: w.s2,
       })),
       equityCurve: s.equityCurve,
     };
@@ -617,8 +527,8 @@ function buildState() {
     winRate: (totalWins + totalLosses) > 0 ? round2((totalWins / (totalWins + totalLosses)) * 100) : null,
     uptime: Math.floor((Date.now() - startTime) / 1000),
     config: {
-      fixedNotionalUsd: FIXED_NOTIONAL_USD, quoteBuffer: QUOTE_BUFFER,
-      fireDelaySecs: FIRE_DELAY_SECS,
+      strategy1: { buyPrice: S1_BUY_PRICE, tp: S1_TP, sl: S1_SL, betUsd: S1_BET_USD },
+      strategy2: { trigger: S2_TRIGGER, buyPrice: S2_BUY_PRICE, sl: S2_SL, betUsd: S2_BET_USD },
       cryptoTakerFeeRate: CRYPTO_TAKER_FEE_RATE,
     },
     pairStates, totalEquityCurve, logs: logs.slice(-100), trades: trades.slice(-80).reverse(),
@@ -645,7 +555,7 @@ function setPairs(list) {
   if (!clean.length) return { ok: false, error: 'Empty pair list' };
   pairList = [...new Set(clean)];
   resetPairs();
-  log(`⚙️  Pairs updated: ${pairList.join(', ')} | $${perPairCapital.toFixed(2)} per pair (bookkeeping only — sizing is fixed at $${FIXED_NOTIONAL_USD}/entry)`);
+  log(`⚙️  Pairs updated: ${pairList.join(', ')} | $${perPairCapital.toFixed(2)} per pair (bookkeeping only — S1 $${S1_BET_USD}/leg, S2 $${S2_BET_USD}/leg)`);
   return { ok: true, pairs: pairList, perPairCapital };
 }
 function pauseTrading() { tradingEnabled = false; log('⏸️  Trading paused (existing positions still tracked for resolution bookkeeping)'); return { ok: true }; }
@@ -664,13 +574,11 @@ function setMode(wantLive) {
 async function init(privateKey, emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
-  log(`🚀 Decoupled 1h → 15m → 5m Candle-Color Playbook Bot`);
+  log(`🚀 Dual Price-Action Straddle Bot (15m + 5m only)`);
   log(`⚙️  $${TOTAL_CAPITAL} demo capital across ${pairList.length} pairs (${pairList.join(', ')}) → $${perPairCapital.toFixed(2)}/pair bookkeeping bankroll`);
-  log(`⚙️  Layer A: closed 1h candle RED → 15m blocks Up,Up,Down,Down (1h market Down). GREEN → Down,Down,Up,Up (1h market Up). Always fires, locked for the whole hour.`);
-  log(`⚙️  Layer B: each 15m block's own just-closed 15m candle (independent of its assigned side) — RED → 5m Up,Down,Down. GREEN → 5m Down,Up,Up. Always fires.`);
-  log(`⚙️  entries: fixed $${FIXED_NOTIONAL_USD} notional, market buy fires unconditionally at a fixed delay into each window regardless of price — 5m@+${Math.round(FIRE_DELAY_5M_SECS/60)}m, 15m@+${Math.round(FIRE_DELAY_15M_SECS/60)}m, 1h@+${Math.round(FIRE_DELAY_1H_SECS/60)}m — one-shot per window`);
-  log(`⚙️  no TP/SL — rides to resolution, external claim script handles real redemption`);
-  log(`${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price/candle data' : '🔴 LIVE MODE — real money'}`);
+  log(`⚙️  Strategy 1: limit buy Up & Down independently @${S1_BUY_PRICE.toFixed(2)}, TP @${S1_TP.toFixed(2)} / SL @${S1_SL.toFixed(2)}, $${S1_BET_USD}/leg, one-shot per leg`);
+  log(`⚙️  Strategy 2: first tick to @${S2_TRIGGER.toFixed(2)} on either side → buy BOTH legs @${S2_BUY_PRICE.toFixed(2)}, SL @${S2_SL.toFixed(2)}, TP=resolution, $${S2_BET_USD}/leg, one-shot per window`);
+  log(`${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
   trader = new PolymarketTrader(privateKey);
   await trader.authenticate();
