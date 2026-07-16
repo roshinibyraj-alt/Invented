@@ -168,6 +168,7 @@ function freshMarketState() {
     },
     s2: {
       triggeredSide: { Up: false, Down: false }, // has this side's 0.70 trigger already fired this window
+      orders: { Up: null, Down: null },          // resting entry orders placed on trigger, pre-fill: {price, shares, orderId}
       positions: { Up: null, Down: null },       // filled positions: {shares, entryPrice, cost, closed}
     },
   };
@@ -383,30 +384,53 @@ async function s1ManagePosition(side) {
 // ─────────────────────────────────────────
 //  Strategy 2 — breakout confirmation, buy both sides at 0.70 ceiling
 // ─────────────────────────────────────────
+// Phase 1: detect breakout and arm a genuine resting limit buy at the
+// ceiling (0.70) for THAT side only. This does NOT fill anything — it only
+// flips triggeredSide[side] and opens a resting order, exactly like S1's
+// entries. Strictly side-isolated: Up's ask can never arm Down's order and
+// vice versa.
 async function s2CheckTrigger(side) {
   if (state.s2.triggeredSide[side]) return; // this side already fired this window — fully independent of the other side
+  if (state.s2.orders[side] || state.s2.positions[side]) return; // already armed/filled this window
   const ask = side === 'Up' ? state.upAsk : state.downAsk;
   if (ask == null || ask < S2_TRIGGER_PRICE) return;
 
   state.s2.triggeredSide[side] = true;
   const tokenId = side === 'Up' ? state.upTokenId : state.downTokenId;
-  const fillPrice = ask; // real ask, never worse than the ceiling
   const shares = Math.max(round2(S2_BET_DOLLARS / S2_ENTRY_PRICE), MIN_SHARES);
-  const rebate = makerRebate(shares, fillPrice);
-  const cost = round2(fillPrice * shares - rebate);
-  if (cost > bankroll) { log(`⏭️  S2 ${side}: trigger hit but insufficient bankroll, skipping`); return; }
+  const order = await placeRestingBuy(tokenId, S2_ENTRY_PRICE, shares);
+  state.s2.orders[side] = { price: S2_ENTRY_PRICE, shares, orderId: order.id || order.orderId || null };
+  log(`🔔 S2 ${side} TRIGGERED @ ask=${ask.toFixed(2)} (>= ${S2_TRIGGER_PRICE}) — resting buy armed ${shares.toFixed(2)}sh @ ceiling ${S2_ENTRY_PRICE} (independent of the other side; fills only when ${side} ask <= ${S2_ENTRY_PRICE})`);
+}
 
-  await placeRestingBuy(tokenId, S2_ENTRY_PRICE, shares);
+// Phase 2: the armed order actually fills once THIS side's own ask walks
+// back down to (or is already at/below) the ceiling — never at a price
+// worse than the ceiling, matching the fill semantics used everywhere else.
+async function s2CheckFills(side) {
+  const order = state.s2.orders[side];
+  if (!order || state.s2.positions[side]) return; // no armed order, or already filled
+  const ask = side === 'Up' ? state.upAsk : state.downAsk;
+  if (ask == null || ask > order.price) return; // still above ceiling — stays resting
+
+  const fillPrice = ask; // real ask, never worse than the ceiling
+  const rebate = makerRebate(order.shares, fillPrice);
+  const cost = round2(fillPrice * order.shares - rebate);
+  if (cost > bankroll) { log(`⏭️  S2 ${side}: would fill but bankroll insufficient, dropping`); state.s2.orders[side] = null; return; }
+
   bankroll = round2(bankroll - cost);
   realizedPnl = round2(realizedPnl + rebate);
   rebatesEarned = round2(rebatesEarned + rebate);
-  state.s2.positions[side] = { shares, entryPrice: fillPrice, cost, closed: false };
+  state.s2.positions[side] = { shares: order.shares, entryPrice: fillPrice, cost, closed: false };
   recordEquity();
-  log(`🔔 S2 ${side} TRIGGERED @ ask=${ask.toFixed(2)} (>= ${S2_TRIGGER_PRICE}) — bought ${shares.toFixed(2)}sh @ ${fillPrice.toFixed(2)} | cost=$${cost.toFixed(2)} | rebate=+$${rebate.toFixed(4)} | SL @ ${S2_SL_PRICE}, no TP — rides to resolution otherwise (independent of the other side)`);
-  registerTrade({ strategy: 2, side: 'BUY', outcome: side, price: fillPrice, shares, cost, rebate });
+  log(`💰 S2 ${side} FILLED ${order.shares.toFixed(2)}sh @ ${fillPrice.toFixed(2)} | cost=$${cost.toFixed(2)} | rebate=+$${rebate.toFixed(4)} | SL @ ${S2_SL_PRICE}, no TP — rides to resolution otherwise (independent of the other side)`);
+  registerTrade({ strategy: 2, side: 'BUY', outcome: side, price: fillPrice, shares: order.shares, cost, rebate });
 }
 
 async function s2ManagePosition(side) {
+  // Hard guard: SL logic for a side can only run if that side genuinely
+  // triggered AND has a filled position. This makes it structurally
+  // impossible for one side's price action to close out the other side.
+  if (!state.s2.triggeredSide[side]) return;
   const pos = state.s2.positions[side];
   if (!pos || pos.closed) return;
   const bid = side === 'Up' ? state.upBid : state.downBid;
@@ -455,6 +479,15 @@ async function resolveWindow() {
   let winner = null;
   if (anyOpen) winner = await determineWinningSide();
 
+  // Cancel any still-resting entry orders that never filled — they should
+  // not carry over or linger once the window is done.
+  for (const side of ['Up', 'Down']) {
+    const s1o = state.s1.orders[side];
+    if (s1o && !state.s1.positions[side]) await cancelOrder(s1o.orderId);
+    const s2o = state.s2.orders[side];
+    if (s2o && !state.s2.positions[side]) await cancelOrder(s2o.orderId);
+  }
+
   for (const [label, bucket] of [['S1', state.s1.positions], ['S2', state.s2.positions]]) {
     for (const side of ['Up', 'Down']) {
       const pos = bucket[side];
@@ -497,6 +530,7 @@ async function tick() {
     await s1CheckFills(side);
     await s1ManagePosition(side);
     await s2CheckTrigger(side);
+    await s2CheckFills(side);
     await s2ManagePosition(side);
   }
 }
@@ -527,9 +561,13 @@ function buildState() {
     s2: {
       triggered: state.s2.triggeredSide.Up || state.s2.triggeredSide.Down,
       triggeredSide: state.s2.triggeredSide,
+      orders: state.s2.orders,
       positions: state.s2.positions,
     },
     totalCapital: TOTAL_CAPITAL, bankroll, markValue: mv,
+    // capital == starting capital + realized P&L + unrealized P&L, i.e. the
+    // real-time account value — recomputed fresh every tick, never cached.
+    capital: mv,
     realizedPnl, unrealizedPnl, feesPaid, rebatesEarned, wins, losses,
     totalPnl: round2(mv - TOTAL_CAPITAL),
     winRate: (wins + losses) > 0 ? round2((wins / (wins + losses)) * 100) : null,
@@ -582,7 +620,7 @@ async function init(privateKey, emit, slogFn) {
   log(`🚀 Two-Strategy Limit Order Bot — BTC 5-minute windows only`);
   log(`⚙️  $${TOTAL_CAPITAL} capital`);
   log(`⚙️  Strategy 1: resting buy both sides @ ${S1_ENTRY_PRICE}, $${S1_BET_DOLLARS} each, once per window | TP @ ${S1_TP_PRICE} (resting) | SL @ ${S1_SL_PRICE} (marketable)`);
-  log(`⚙️  Strategy 2: EACH side independently — if that side's own ask reaches ${S2_TRIGGER_PRICE}, buy only that side @ ${S2_ENTRY_PRICE} ceiling, $${S2_BET_DOLLARS}, once per window | SL @ ${S2_SL_PRICE} (marketable) | no TP — rides to resolution`);
+  log(`⚙️  Strategy 2: EACH side independently — if that side's own ask reaches ${S2_TRIGGER_PRICE}, arm a resting buy @ ${S2_ENTRY_PRICE} ceiling for that side only, $${S2_BET_DOLLARS}, once per window (fills only when that side's ask <= ${S2_ENTRY_PRICE}) | SL @ ${S2_SL_PRICE} (marketable) | no TP — rides to resolution`);
   log(`⚙️  fill semantics: limit fills at the real current ask when ask<=ceiling, never worse than the ceiling price`);
   log(`${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
