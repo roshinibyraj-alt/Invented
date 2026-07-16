@@ -123,7 +123,7 @@ app.get('/', (_, res) => {
   <div class="header">
     <div class="logo">⏱️ <span>5M</span> UP/DOWN BOT</div>
     <div id="mode-badge" class="mode-badge ${bot.getStatus().dryRun ? 'mode-dry' : 'mode-live'}">${bot.getStatus().dryRun ? 'DEMO' : '🔴 LIVE'}</div>
-    <div id="experiment-badge" class="mode-badge mode-dry">S1 dip 0.30/TP0.70/SL0.10 + S2 breakout 0.70/SL0.30</div>
+    <div id="experiment-badge" class="mode-badge mode-dry">S1 dip 0.30 (no TP/SL) + S2 breakout 0.70/SL0.30 — first side to fill wins, other cancelled</div>
   </div>
 
   <div class="toolbar">
@@ -276,13 +276,13 @@ app.get('/', (_, res) => {
       };
       const s1Html =
         '<div class="pos-box">'+
-          '<div style="color:#8aa;margin-bottom:4px">[S1] STRATEGY 1 — dip @0.30, TP 0.70 / SL 0.10 ('+(s.s1.placed?'orders placed':'not yet placed')+')</div>'+
-          posRow('S1 Up', s.s1.positions.Up, ' — TP 0.70 / SL 0.10') +
-          posRow('S1 Down', s.s1.positions.Down, ' — TP 0.70 / SL 0.10') +
+          '<div style="color:#8aa;margin-bottom:4px">[S1] STRATEGY 1 — dip @0.30, no TP/SL, first side to fill wins ('+(s.s1.placed?'orders placed':'not yet placed')+')</div>'+
+          posRow('S1 Up', s.s1.positions.Up, ' — rides to resolution') +
+          posRow('S1 Down', s.s1.positions.Down, ' — rides to resolution') +
         '</div>';
       const s2Html =
         '<div class="pos-box">'+
-          '<div style="color:#8aa;margin-bottom:4px">[S2] STRATEGY 2 — breakout @0.70, SL 0.30, no TP (Up triggered: '+(s.s2.triggeredSide.Up?'yes':'no')+' | Down triggered: '+(s.s2.triggeredSide.Down?'yes':'no')+')</div>'+
+          '<div style="color:#8aa;margin-bottom:4px">[S2] STRATEGY 2 — breakout @0.70, SL 0.30, no TP, first side to fill wins (Up triggered: '+(s.s2.triggeredSide.Up?'yes':'no')+' | Down triggered: '+(s.s2.triggeredSide.Down?'yes':'no')+')</div>'+
           posRow('S2 Up', s.s2.positions.Up, ' — SL 0.30, rides to resolution') +
           posRow('S2 Down', s.s2.positions.Down, ' — SL 0.30, rides to resolution') +
         '</div>';
