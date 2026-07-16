@@ -294,9 +294,10 @@ app.get('/', (_, res) => {
     } else {
       grid.innerHTML = s.windows.map(w => {
         const hasPos = [w.strat1.up, w.strat1.down, w.strat2.up, w.strat2.down].some(x => x.state === 'filled' || x.state === 'holding_to_resolution');
-        const trigNote = w.strat2.triggered
-          ? '<div class="trig-note">⚡ triggered by '+w.strat2.triggerSide+' @ '+(w.strat2.triggerPrice!=null?w.strat2.triggerPrice.toFixed(2):'—')+'</div>'
-          : '<div class="trig-note" style="opacity:.6">watching for 0.70 tick…</div>';
+        const trigNoteFor = (label, side) => side.triggered
+          ? '<div class="trig-note">⚡ '+label+' triggered @ '+(side.triggerPrice!=null?side.triggerPrice.toFixed(2):'—')+'</div>'
+          : '<div class="trig-note" style="opacity:.6">'+label+' watching for 0.70 tick…</div>';
+        const trigNote = trigNoteFor('Up', w.strat2.up) + trigNoteFor('Down', w.strat2.down);
         const upP = w.upPrice || {}, downP = w.downPrice || {};
         return '<div class="win-card '+(hasPos?'has-pos':'')+' '+(w.tradable?'':'untradable')+' '+(w.resolved?'resolved':'')+'">'+
           '<div class="win-hdr"><div class="win-sym">'+w.id+'</div><div class="win-timer">'+(w.resolved?'resolved':(w.tradable?fmtSecs(w.secsToEnd):'loading…'))+'</div></div>'+
