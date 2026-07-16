@@ -58,9 +58,9 @@ const CLOB  = 'https://clob.polymarket.com';
 
 const TICK_MS               = 500;
 const POLY_PRICE_REFRESH_MS = 1000;
-const WINDOW_SECS           = 300;
+const WINDOW_SECS           = 900;
 const EARLY_CUTOFF_SECS     = Number(process.env.EARLY_CUTOFF_SECS || 2);
-const SLUG_OFFSET_FALLBACKS = [0, -300, 300];
+const SLUG_OFFSET_FALLBACKS = [0, -900, 900];
 const SYMBOL = 'BTC'; // this bot only ever trades BTC, per spec
 
 let DRY_RUN = (process.env.DRY_RUN || 'true').toLowerCase() === 'true'; // runtime-switchable — see setMode
@@ -77,7 +77,7 @@ const S1_ENTRY_DELAY_SECS = Number(process.env.S1_ENTRY_DELAY_SECS || 5); // wai
 
 const S2_TRIGGER_PRICE = Number(process.env.S2_TRIGGER_PRICE || 0.70);
 const S2_ENTRY_PRICE   = Number(process.env.S2_ENTRY_PRICE || 0.70);
-const S2_SL_PRICE      = Number(process.env.S2_SL_PRICE || 0.30);
+const S2_SL_PRICE      = Number(process.env.S2_SL_PRICE || 0.35);
 const S2_BET_DOLLARS   = Number(process.env.S2_BET_DOLLARS || 100);
 
 const MIN_SHARES = Number(process.env.MIN_SHARES || 1);
@@ -174,7 +174,7 @@ function freshMarketState() {
 //  Slug / window math (unchanged market-discovery plumbing)
 // ─────────────────────────────────────────
 function currentWindowStart(tsSec = nowSec()) { return Math.floor(tsSec / WINDOW_SECS) * WINDOW_SECS; }
-function slugFor(windowStartSec) { return `${SYMBOL.toLowerCase()}-updown-5m-${windowStartSec}`; }
+function slugFor(windowStartSec) { return `${SYMBOL.toLowerCase()}-updown-15m-${windowStartSec}`; }
 function qOf(m) { return (m.question || m.groupItemTitle || m.title || '').toLowerCase(); }
 function parseMarketTokens(m) {
   try {
@@ -601,7 +601,7 @@ function setMode(wantLive) {
 async function init(privateKey, emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
-  log(`🚀 Two-Strategy Limit Order Bot — BTC 5-minute windows only`);
+  log(`🚀 Two-Strategy Limit Order Bot — BTC 15-minute windows only`);
   log(`⚙️  $${TOTAL_CAPITAL} capital`);
   log(`⚙️  Strategy 1: waits ${S1_ENTRY_DELAY_SECS}s after window start, then rests buy both sides @ ${S1_ENTRY_PRICE}, $${S1_BET_DOLLARS} each, once per window | whichever side fills FIRST wins — the other side's order is cancelled | no TP/SL — rides to resolution`);
   log(`⚙️  Strategy 2: EACH side independently arms a resting buy @ ${S2_ENTRY_PRICE} ceiling once its own ask reaches ${S2_TRIGGER_PRICE}, $${S2_BET_DOLLARS} | whichever side fills FIRST wins — the other side's order is cancelled | SL @ ${S2_SL_PRICE} (marketable), no TP — rides to resolution otherwise`);
