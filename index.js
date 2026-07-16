@@ -92,6 +92,12 @@ app.get('/', (_, res) => {
   .pair-key { color: var(--muted); }
   .side-up { color: var(--green); }
   .side-down { color: var(--red); }
+  .price-row { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; padding: 6px 8px; background: #0d1d30; border-radius: 6px; }
+  .price-row .pair-key { font-size: 11px; letter-spacing: .5px; }
+  .price-big { font-size: 26px; font-weight: 900; line-height: 1; }
+  .price-big .bid { font-size: 15px; opacity: .75; margin-left: 6px; }
+  .price-big.up { color: var(--green); }
+  .price-big.down { color: var(--red); }
   .pos-box { margin-top: 6px; border-top: 1px solid var(--border); padding-top: 6px; font-size: 9px; }
   .signal-box { margin-top: 6px; font-size: 9px; color: #8aa; }
   .bottom-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 0 20px 20px; }
@@ -128,11 +134,11 @@ app.get('/', (_, res) => {
   <div id="toolbar-status" class="toolbar-status"></div>
 
   <div class="stats-row">
-    <div class="stat"><div class="stat-label">Total Mark Value</div><div class="stat-val" id="total-mark">$0.00</div></div>
+    <div class="stat" style="border-color:var(--cyan)"><div class="stat-label">Capital (real-time)</div><div class="stat-val" id="total-mark" style="font-size:24px">$0.00</div><div class="stat-sub">starting + realized + unrealized</div></div>
     <div class="stat"><div class="stat-label">Total P&amp;L</div><div class="stat-val" id="total-pnl">$0.00</div></div>
     <div class="stat"><div class="stat-label">Realized</div><div class="stat-val" id="realized-pnl">$0.00</div></div>
     <div class="stat"><div class="stat-label">Unrealized</div><div class="stat-val" id="unrealized-pnl">$0.00</div></div>
-    <div class="stat"><div class="stat-label">Bankroll</div><div class="stat-val" id="total-bankroll">$0.00</div></div>
+    <div class="stat"><div class="stat-label">Cash (uninvested)</div><div class="stat-val" id="total-bankroll">$0.00</div></div>
     <div class="stat"><div class="stat-label">Fees Paid</div><div class="stat-val pnl-neg" id="total-fees">$0.00</div></div>
     <div class="stat"><div class="stat-label">Rebates Earned</div><div class="stat-val pnl-pos" id="total-rebates">$0.00</div></div>
     <div class="stat"><div class="stat-label">Win Rate</div><div class="stat-val" id="win-rate">—</div><div class="stat-sub" id="win-loss-sub">0W / 0L</div></div>
@@ -158,8 +164,8 @@ app.get('/', (_, res) => {
       <div class="section-hdr">Trades</div>
       <div class="tbl-wrap">
         <table class="tbl">
-          <thead><tr><th>Time</th><th>Pair</th><th>Side</th><th>Reason</th><th>Price</th><th>Shares</th><th>P&amp;L</th></tr></thead>
-          <tbody id="trade-body"><tr><td colspan="7" class="empty">No trades yet</td></tr></tbody>
+          <thead><tr><th>Time</th><th>Strat</th><th>Pair</th><th>Side</th><th>Reason</th><th>Price</th><th>Shares</th><th>P&amp;L</th></tr></thead>
+          <tbody id="trade-body"><tr><td colspan="8" class="empty">No trades yet</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -270,23 +276,23 @@ app.get('/', (_, res) => {
       };
       const s1Html =
         '<div class="pos-box">'+
-          '<div style="color:#8aa;margin-bottom:4px">STRATEGY 1 — dip @0.30, TP 0.70 / SL 0.10 ('+(s.s1.placed?'orders placed':'not yet placed')+')</div>'+
-          posRow('Up', s.s1.positions.Up, ' — TP 0.70 / SL 0.10') +
-          posRow('Down', s.s1.positions.Down, ' — TP 0.70 / SL 0.10') +
+          '<div style="color:#8aa;margin-bottom:4px">[S1] STRATEGY 1 — dip @0.30, TP 0.70 / SL 0.10 ('+(s.s1.placed?'orders placed':'not yet placed')+')</div>'+
+          posRow('S1 Up', s.s1.positions.Up, ' — TP 0.70 / SL 0.10') +
+          posRow('S1 Down', s.s1.positions.Down, ' — TP 0.70 / SL 0.10') +
         '</div>';
       const s2Html =
         '<div class="pos-box">'+
-          '<div style="color:#8aa;margin-bottom:4px">STRATEGY 2 — breakout @0.70, SL 0.30, no TP (Up triggered: '+(s.s2.triggeredSide.Up?'yes':'no')+' | Down triggered: '+(s.s2.triggeredSide.Down?'yes':'no')+')</div>'+
-          posRow('Up', s.s2.positions.Up, ' — SL 0.30, rides to resolution') +
-          posRow('Down', s.s2.positions.Down, ' — SL 0.30, rides to resolution') +
+          '<div style="color:#8aa;margin-bottom:4px">[S2] STRATEGY 2 — breakout @0.70, SL 0.30, no TP (Up triggered: '+(s.s2.triggeredSide.Up?'yes':'no')+' | Down triggered: '+(s.s2.triggeredSide.Down?'yes':'no')+')</div>'+
+          posRow('S2 Up', s.s2.positions.Up, ' — SL 0.30, rides to resolution') +
+          posRow('S2 Down', s.s2.positions.Down, ' — SL 0.30, rides to resolution') +
         '</div>';
       const eqCurve = buildEquitySvg(s.equityCurve, 280, 34, null);
       const hasPos = ['Up','Down'].some(side => (s.s1.positions[side] && !s.s1.positions[side].closed) || (s.s2.positions[side] && !s.s2.positions[side].closed));
       grid.innerHTML = '<div class="pair-card '+(hasPos?'has-pos':'')+'">'+
         '<div class="pair-hdr"><div class="pair-sym">BTC</div><div class="pair-timer">'+fmtSecs(s.secsToEnd)+'</div></div>'+
         '<div class="pair-body">'+
-          '<div class="pair-row"><span class="pair-key">Up ask/bid</span><span>'+(s.upAsk?.toFixed(2)||'—')+' / '+(s.upBid?.toFixed(2)||'—')+'</span></div>'+
-          '<div class="pair-row"><span class="pair-key">Down ask/bid</span><span>'+(s.downAsk?.toFixed(2)||'—')+' / '+(s.downBid?.toFixed(2)||'—')+'</span></div>'+
+          '<div class="price-row"><span class="pair-key side-up">UP</span><span class="price-big up">'+(s.upAsk?.toFixed(2)||'—')+'<span class="bid">bid '+(s.upBid?.toFixed(2)||'—')+'</span></span></div>'+
+          '<div class="price-row"><span class="pair-key side-down">DOWN</span><span class="price-big down">'+(s.downAsk?.toFixed(2)||'—')+'<span class="bid">bid '+(s.downBid?.toFixed(2)||'—')+'</span></span></div>'+
           s1Html + s2Html +
           '<div class="spark-box"><svg viewBox="0 0 280 34" preserveAspectRatio="none">'+eqCurve+'</svg><div class="spark-label">Equity curve ($'+(s.markValue||0).toFixed(2)+')</div></div>'+
         '</div></div>';
@@ -298,7 +304,7 @@ app.get('/', (_, res) => {
         const pnlStr = (t.profit !== undefined) ? sgn(t.profit) : '—';
         const pnlCls = (t.profit !== undefined) ? pClass(t.profit) : '';
         const sideColor = t.side === 'BUY' ? '#ffd740' : (t.reason === 'SL' ? '#ff4757' : (t.reason==='TP'?'#00e676':'#00d4ff'));
-        return '<tr><td>'+t.time+'</td><td>'+t.symbol+'</td>'+
+        return '<tr><td>'+t.time+'</td><td style="font-weight:bold">S'+(t.strategy||'?')+'</td><td>'+t.symbol+'</td>'+
           '<td style="color:'+sideColor+'">'+t.side+(t.outcome?(' '+t.outcome):'')+'</td>'+
           '<td>'+(t.reason||'—')+'</td>'+
           '<td>'+(t.price||0).toFixed(3)+'</td>'+
@@ -306,7 +312,7 @@ app.get('/', (_, res) => {
           '<td class="'+pnlCls+'">'+pnlStr+'</td></tr>';
       }).join('');
     } else {
-      tb.innerHTML = '<tr><td colspan="7" class="empty">No trades yet</td></tr>';
+      tb.innerHTML = '<tr><td colspan="8" class="empty">No trades yet</td></tr>';
     }
 
     const logEl = document.getElementById('logs');
