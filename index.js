@@ -104,13 +104,28 @@ app.get('/', (_, res) => {
   .equity-hdr .val { font-size: 13px; }
   .equity-svg { width: 100%; height: 90px; display: block; }
   .config-strip { padding: 0 20px 10px; font-size: 9px; color: var(--muted); display: flex; gap: 18px; flex-wrap: wrap; }
+
+  .live-price-wrap { padding: 6px 20px 4px; }
+  .live-price-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  @media (max-width: 560px) { .live-price-row { grid-template-columns: 1fr; } }
+  .price-block { background: #0d1d30; border-radius: 12px; padding: 14px 18px; display: flex; align-items: center; justify-content: space-between; border: 1px solid var(--border); }
+  .price-block.up { border-color: #00a85466; box-shadow: 0 0 0 1px #00a85422; }
+  .price-block.down { border-color: #e8304a66; box-shadow: 0 0 0 1px #e8304a22; }
+  .price-label { font-size: 12px; letter-spacing: 2px; text-transform: uppercase; color: #cfe0f0; }
+  .price-label.up { color: var(--green); }
+  .price-label.down { color: var(--red); }
+  .price-big { font-size: 44px; font-weight: 900; line-height: 1; font-variant-numeric: tabular-nums; }
+  .price-big.up { color: var(--green); }
+  .price-big.down { color: var(--red); }
+  .price-sub { font-size: 10px; color: var(--muted); margin-top: 4px; text-align: right; }
+  .live-price-timer { text-align: center; font-size: 10px; color: var(--cyan); padding: 4px 0 0; }
 </style>
 </head>
 <body>
   <div class="header">
     <div class="logo">⏱️ <span>BTC 5m</span> DUAL LIMIT-ORDER BOT</div>
     <div id="mode-badge" class="mode-badge ${bot.getStatus().dryRun ? 'mode-dry' : 'mode-live'}">${bot.getStatus().dryRun ? 'DEMO' : '🔴 LIVE'}</div>
-    <div id="experiment-badge" class="mode-badge mode-dry">STRAT1 0.30→0.70/0.10 | STRAT2 0.70 TRIGGER→0.70/0.30</div>
+    <div id="experiment-badge" class="mode-badge mode-dry">STRAT1 resting 0.30→TP 0.70 | STRAT2 0.70 TRIGGER→resting 0.70 | resting orders only, no stop loss</div>
   </div>
 
   <div class="toolbar">
@@ -121,13 +136,33 @@ app.get('/', (_, res) => {
   <div id="toolbar-status" class="toolbar-status"></div>
   <div id="config-strip" class="config-strip"></div>
 
+  <div class="live-price-wrap">
+    <div class="live-price-row">
+      <div class="price-block up">
+        <div>
+          <div class="price-label up">BTC UP</div>
+          <div class="price-big up" id="price-up">—</div>
+        </div>
+        <div class="price-sub" id="price-up-sub">bid — / ask —</div>
+      </div>
+      <div class="price-block down">
+        <div>
+          <div class="price-label down">BTC DOWN</div>
+          <div class="price-big down" id="price-down">—</div>
+        </div>
+        <div class="price-sub" id="price-down-sub">bid — / ask —</div>
+      </div>
+    </div>
+    <div class="live-price-timer" id="price-window-info">waiting for window…</div>
+  </div>
+
   <div class="stats-row">
     <div class="stat"><div class="stat-label">Mark Value</div><div class="stat-val" id="total-mark">$0.00</div></div>
     <div class="stat"><div class="stat-label">Total P&amp;L</div><div class="stat-val" id="total-pnl">$0.00</div></div>
     <div class="stat"><div class="stat-label">Realized</div><div class="stat-val" id="realized-pnl">$0.00</div></div>
     <div class="stat"><div class="stat-label">Unrealized</div><div class="stat-val" id="unrealized-pnl">$0.00</div></div>
     <div class="stat"><div class="stat-label">Bankroll</div><div class="stat-val" id="total-bankroll">$0.00</div></div>
-    <div class="stat"><div class="stat-label">Fees Paid</div><div class="stat-val pnl-neg" id="total-fees">$0.00</div></div>
+    <div class="stat"><div class="stat-label">Rewards Earned</div><div class="stat-val pnl-pos" id="total-rewards">$0.00</div></div>
     <div class="stat"><div class="stat-label">Win Rate</div><div class="stat-val" id="win-rate">—</div><div class="stat-sub" id="win-loss-sub">0W / 0L</div></div>
     <div class="stat"><div class="stat-label">Uptime</div><div class="stat-val" id="uptime">0s</div></div>
     <div class="stat"><div class="stat-label">Trading</div><div class="stat-val" id="trading-flag">—</div></div>
@@ -151,8 +186,8 @@ app.get('/', (_, res) => {
       <div class="section-hdr">Trades</div>
       <div class="tbl-wrap">
         <table class="tbl">
-          <thead><tr><th>Time</th><th>Strat</th><th>Side</th><th>Reason</th><th>Price</th><th>Shares</th><th>P&amp;L</th></tr></thead>
-          <tbody id="trade-body"><tr><td colspan="7" class="empty">No trades yet</td></tr></tbody>
+          <thead><tr><th>Time</th><th>Strat</th><th>Side</th><th>Reason</th><th>Price</th><th>Shares</th><th>Reward</th><th>P&amp;L</th></tr></thead>
+          <tbody id="trade-body"><tr><td colspan="8" class="empty">No trades yet</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -229,7 +264,6 @@ app.get('/', (_, res) => {
       case 'resting':               stateHtml = 'resting order…'; break;
       case 'filled':                 stateHtml = 'holding '+(s.shares!=null?s.shares.toFixed(2):'—')+'sh @ '+(s.entryFillPrice!=null?s.entryFillPrice.toFixed(2):'—'); break;
       case 'tp_filled':             stateHtml = 'TP hit @ '+(s.exitPrice!=null?s.exitPrice.toFixed(2):'—')+' → '+sgn(s.pnl); break;
-      case 'sl_exit':                stateHtml = 'SL hit @ '+(s.exitPrice!=null?s.exitPrice.toFixed(2):'—')+' → '+sgn(s.pnl); break;
       case 'holding_to_resolution':  stateHtml = 'holding to resolution…'; break;
       case 'resolved':               stateHtml = (s.pnl>=0?'won':'lost')+' → '+sgn(s.pnl); break;
       case 'expired_unfilled':      stateHtml = 'never filled'; break;
@@ -250,8 +284,24 @@ app.get('/', (_, res) => {
     if (s.config) {
       const c1 = s.config.strat1, c2 = s.config.strat2;
       document.getElementById('config-strip').innerHTML =
-        '<span>Strat1: buy @'+c1.buyPrice+' · TP @'+c1.tpPrice+' · SL @'+c1.slPrice+' · $'+c1.bet+'/side</span>' +
-        '<span>Strat2: trigger @'+c2.triggerPrice+' · buy @'+c2.buyPrice+' · SL @'+c2.slPrice+' · $'+c2.bet+'/side</span>';
+        '<span>Strat1: resting buy @'+c1.buyPrice+' · TP @'+c1.tpPrice+' · no SL · $'+c1.bet+'/side</span>' +
+        '<span>Strat2: trigger @'+c2.triggerPrice+' · resting buy @'+c2.buyPrice+' · no SL · $'+c2.bet+'/side</span>';
+    }
+
+    if (s.livePrices) {
+      const lp = s.livePrices;
+      const fmtPx = v => (v == null ? '—' : '$'+v.toFixed(2));
+      document.getElementById('price-up').textContent = fmtPx(lp.up.mid);
+      document.getElementById('price-down').textContent = fmtPx(lp.down.mid);
+      document.getElementById('price-up-sub').textContent = 'bid '+fmtPx(lp.up.bid)+' / ask '+fmtPx(lp.up.ask);
+      document.getElementById('price-down-sub').textContent = 'bid '+fmtPx(lp.down.bid)+' / ask '+fmtPx(lp.down.ask);
+      document.getElementById('price-window-info').textContent = lp.windowId+' · '+fmtSecs(lp.secsToEnd)+' left';
+    } else {
+      document.getElementById('price-up').textContent = '—';
+      document.getElementById('price-down').textContent = '—';
+      document.getElementById('price-up-sub').textContent = 'bid — / ask —';
+      document.getElementById('price-down-sub').textContent = 'bid — / ask —';
+      document.getElementById('price-window-info').textContent = 'waiting for window…';
     }
 
     document.getElementById('total-mark').textContent = '$'+(s.markValue||0).toFixed(2);
@@ -262,7 +312,7 @@ app.get('/', (_, res) => {
     const unrelEl = document.getElementById('unrealized-pnl');
     unrelEl.textContent = sgn(s.unrealizedPnl); unrelEl.className = 'stat-val ' + pClass(s.unrealizedPnl);
     document.getElementById('total-bankroll').textContent = '$'+(s.bankroll||0).toFixed(2);
-    document.getElementById('total-fees').textContent = '$'+(s.feesPaid||0).toFixed(4);
+    document.getElementById('total-rewards').textContent = '$'+(s.rewardsEarned||0).toFixed(4);
     document.getElementById('win-rate').textContent = (s.winRate!==null && s.winRate!==undefined) ? s.winRate+'%' : '—';
     document.getElementById('win-loss-sub').textContent = (s.wins||0)+'W / '+(s.losses||0)+'L';
     document.getElementById('uptime').textContent = fmt(s.uptime||0);
@@ -287,10 +337,10 @@ app.get('/', (_, res) => {
         return '<div class="win-card '+(hasPos?'has-pos':'')+' '+(w.tradable?'':'untradable')+' '+(w.resolved?'resolved':'')+'">'+
           '<div class="win-hdr"><div class="win-sym">'+w.id+'</div><div class="win-timer">'+(w.resolved?'resolved':(w.tradable?fmtSecs(w.secsToEnd):'loading…'))+'</div></div>'+
           '<div class="win-body">'+
-            '<div class="strat-hdr">Strategy 1 — buy 0.30 / TP 0.70 / SL 0.10</div>'+
+            '<div class="strat-hdr">Strategy 1 — resting buy 0.30 / TP 0.70 / no SL (rides to resolution)</div>'+
             sideStatusHtml('Up', w.strat1.up) +
             sideStatusHtml('Down', w.strat1.down) +
-            '<div class="strat-hdr">Strategy 2 — trigger 0.70 / SL 0.30 / TP by resolution</div>'+
+            '<div class="strat-hdr">Strategy 2 — trigger 0.70 / resting buy 0.70 / no SL / rides to resolution</div>'+
             trigNote +
             sideStatusHtml('Up', w.strat2.up) +
             sideStatusHtml('Down', w.strat2.down) +
@@ -304,15 +354,17 @@ app.get('/', (_, res) => {
         const pnlStr = (t.profit !== undefined) ? sgn(t.profit) : '—';
         const pnlCls = (t.profit !== undefined) ? pClass(t.profit) : '';
         const sideColor = t.side === 'BUY' ? '#ffd740' : (t.reason === 'SL' ? '#ff4757' : (t.reason==='TP'?'#00e676':'#00d4ff'));
+        const rewardStr = (t.reward !== undefined) ? '+$'+t.reward.toFixed(4) : '—';
         return '<tr><td>'+t.time+'</td><td>S'+(t.strategy||'—')+'</td>'+
           '<td style="color:'+sideColor+'">'+t.side+(t.outcome?(' '+t.outcome):'')+'</td>'+
           '<td>'+(t.reason||'—')+'</td>'+
           '<td>'+(t.price||0).toFixed(3)+'</td>'+
           '<td>'+(t.shares||0).toFixed(2)+'</td>'+
+          '<td class="pnl-pos">'+rewardStr+'</td>'+
           '<td class="'+pnlCls+'">'+pnlStr+'</td></tr>';
       }).join('');
     } else {
-      tb.innerHTML = '<tr><td colspan="7" class="empty">No trades yet</td></tr>';
+      tb.innerHTML = '<tr><td colspan="8" class="empty">No trades yet</td></tr>';
     }
 
     const logEl = document.getElementById('logs');
