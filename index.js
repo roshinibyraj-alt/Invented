@@ -73,7 +73,7 @@ app.get('/', (_, res) => {
   .section { padding: 0 20px 16px; }
   .section-hdr { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 2px; padding: 8px 0; display: flex; align-items: center; gap: 8px; }
   .section-hdr::after { content:''; flex:1; height:1px; background: var(--border); }
-  .win-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 10px; }
+  .win-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 10px; }
   .win-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
   .win-card.has-pos { border-color: var(--cyan); box-shadow: 0 0 0 1px #00d4ff22; }
   .win-card.untradable { opacity: .55; }
@@ -81,6 +81,17 @@ app.get('/', (_, res) => {
   .win-hdr { background: #0d1d30; padding: 8px 12px; display: flex; justify-content: space-between; align-items: center; }
   .win-sym { font-size: 12px; font-weight: bold; color: #ddd; }
   .win-timer { font-size: 10px; color: var(--cyan); }
+  .price-row { display: flex; gap: 8px; padding: 10px 12px; background: #0a1522; }
+  .price-box { flex: 1; text-align: center; border-radius: 8px; padding: 8px 4px; }
+  .price-box.up-box { background: #00a85422; border: 1px solid #00a85455; }
+  .price-box.down-box { background: #e8304a22; border: 1px solid #e8304a55; }
+  .price-box-label { font-size: 9px; letter-spacing: 1px; text-transform: uppercase; margin-bottom: 2px; }
+  .price-box.up-box .price-box-label { color: var(--green); }
+  .price-box.down-box .price-box-label { color: var(--red); }
+  .price-box-val { font-size: 30px; font-weight: bold; line-height: 1; }
+  .price-box.up-box .price-box-val { color: #2fe08a; }
+  .price-box.down-box .price-box-val { color: #ff6b7d; }
+  .price-box-sub { font-size: 8px; color: var(--muted); margin-top: 3px; }
   .win-body { padding: 8px 12px; }
   .strat-hdr { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin: 8px 0 4px; border-top: 1px solid var(--border); padding-top: 6px; }
   .strat-hdr:first-child { margin-top: 0; border-top: none; padding-top: 0; }
@@ -88,6 +99,7 @@ app.get('/', (_, res) => {
   .side-up { color: var(--green); }
   .side-down { color: var(--red); }
   .side-key { color: var(--muted); }
+  .attempt-tag { font-size: 8px; color: #8aa; margin-left: 4px; }
   .trig-note { font-size: 9px; color: #8aa; margin-bottom: 4px; }
   .bottom-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 0 20px 20px; }
   @media (max-width: 800px) { .bottom-grid { grid-template-columns: 1fr; } }
@@ -104,28 +116,13 @@ app.get('/', (_, res) => {
   .equity-hdr .val { font-size: 13px; }
   .equity-svg { width: 100%; height: 90px; display: block; }
   .config-strip { padding: 0 20px 10px; font-size: 9px; color: var(--muted); display: flex; gap: 18px; flex-wrap: wrap; }
-
-  .live-price-wrap { padding: 6px 20px 4px; }
-  .live-price-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-  @media (max-width: 560px) { .live-price-row { grid-template-columns: 1fr; } }
-  .price-block { background: #0d1d30; border-radius: 12px; padding: 14px 18px; display: flex; align-items: center; justify-content: space-between; border: 1px solid var(--border); }
-  .price-block.up { border-color: #00a85466; box-shadow: 0 0 0 1px #00a85422; }
-  .price-block.down { border-color: #e8304a66; box-shadow: 0 0 0 1px #e8304a22; }
-  .price-label { font-size: 12px; letter-spacing: 2px; text-transform: uppercase; color: #cfe0f0; }
-  .price-label.up { color: var(--green); }
-  .price-label.down { color: var(--red); }
-  .price-big { font-size: 44px; font-weight: 900; line-height: 1; font-variant-numeric: tabular-nums; }
-  .price-big.up { color: var(--green); }
-  .price-big.down { color: var(--red); }
-  .price-sub { font-size: 10px; color: var(--muted); margin-top: 4px; text-align: right; }
-  .live-price-timer { text-align: center; font-size: 10px; color: var(--cyan); padding: 4px 0 0; }
 </style>
 </head>
 <body>
   <div class="header">
     <div class="logo">⏱️ <span>BTC 5m</span> DUAL LIMIT-ORDER BOT</div>
     <div id="mode-badge" class="mode-badge ${bot.getStatus().dryRun ? 'mode-dry' : 'mode-live'}">${bot.getStatus().dryRun ? 'DEMO' : '🔴 LIVE'}</div>
-    <div id="experiment-badge" class="mode-badge mode-dry">STRAT1 resting 0.30→TP 0.70 | STRAT2 0.70 TRIGGER→resting 0.70 | resting orders only, no stop loss</div>
+    <div id="experiment-badge" class="mode-badge mode-dry">RESTING ORDERS ONLY | MAKER REWARDS, NO FEES</div>
   </div>
 
   <div class="toolbar">
@@ -135,26 +132,6 @@ app.get('/', (_, res) => {
   </div>
   <div id="toolbar-status" class="toolbar-status"></div>
   <div id="config-strip" class="config-strip"></div>
-
-  <div class="live-price-wrap">
-    <div class="live-price-row">
-      <div class="price-block up">
-        <div>
-          <div class="price-label up">BTC UP</div>
-          <div class="price-big up" id="price-up">—</div>
-        </div>
-        <div class="price-sub" id="price-up-sub">bid — / ask —</div>
-      </div>
-      <div class="price-block down">
-        <div>
-          <div class="price-label down">BTC DOWN</div>
-          <div class="price-big down" id="price-down">—</div>
-        </div>
-        <div class="price-sub" id="price-down-sub">bid — / ask —</div>
-      </div>
-    </div>
-    <div class="live-price-timer" id="price-window-info">waiting for window…</div>
-  </div>
 
   <div class="stats-row">
     <div class="stat"><div class="stat-label">Mark Value</div><div class="stat-val" id="total-mark">$0.00</div></div>
@@ -186,7 +163,7 @@ app.get('/', (_, res) => {
       <div class="section-hdr">Trades</div>
       <div class="tbl-wrap">
         <table class="tbl">
-          <thead><tr><th>Time</th><th>Strat</th><th>Side</th><th>Reason</th><th>Price</th><th>Shares</th><th>Reward</th><th>P&amp;L</th></tr></thead>
+          <thead><tr><th>Time</th><th>Strat</th><th>Side</th><th>Reason</th><th>Price</th><th>Shares</th><th>P&amp;L</th><th>Reward</th></tr></thead>
           <tbody id="trade-body"><tr><td colspan="8" class="empty">No trades yet</td></tr></tbody>
         </table>
       </div>
@@ -204,8 +181,8 @@ app.get('/', (_, res) => {
   function pClass(n) { return (n || 0) >= 0 ? 'pnl-pos' : 'pnl-neg'; }
   function fmt(s) { const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), ss = s%60; return (h?h+'h ':'')+(m?m+'m ':'')+ss+'s'; }
   function fmtSecs(s) { if (s === null || s === undefined) return '—'; const m = Math.floor(s/60), ss = s%60; return m+'m '+String(ss).padStart(2,'0')+'s'; }
+  function fmtPrice(v) { return (v === null || v === undefined) ? '—' : v.toFixed(2); }
 
-  // Build an SVG polyline + fill path from an equity curve [{t,equity}],
   function buildEquitySvg(points, width, height, startVal) {
     if (!points || points.length < 2) {
       return '<line x1="0" y1="'+(height/2)+'" x2="'+width+'" y2="'+(height/2)+'" stroke="#3a4a60" stroke-width="1" stroke-dasharray="3,3"/>';
@@ -264,13 +241,15 @@ app.get('/', (_, res) => {
       case 'resting':               stateHtml = 'resting order…'; break;
       case 'filled':                 stateHtml = 'holding '+(s.shares!=null?s.shares.toFixed(2):'—')+'sh @ '+(s.entryFillPrice!=null?s.entryFillPrice.toFixed(2):'—'); break;
       case 'tp_filled':             stateHtml = 'TP hit @ '+(s.exitPrice!=null?s.exitPrice.toFixed(2):'—')+' → '+sgn(s.pnl); break;
+      case 'sl_exit':                stateHtml = 'SL hit @ '+(s.exitPrice!=null?s.exitPrice.toFixed(2):'—')+' → '+sgn(s.pnl); break;
       case 'holding_to_resolution':  stateHtml = 'holding to resolution…'; break;
       case 'resolved':               stateHtml = (s.pnl>=0?'won':'lost')+' → '+sgn(s.pnl); break;
       case 'expired_unfilled':      stateHtml = 'never filled'; break;
       default:                       stateHtml = s.state || '—';
     }
     const cls = (s.pnl != null) ? pClass(s.pnl) : '';
-    return '<div class="side-row"><span class="side-key '+sideLabelClass(label)+'">'+label+'</span><span class="'+cls+'">'+stateHtml+'</span></div>';
+    const attemptTag = (s.maxAttempts && s.maxAttempts > 1) ? '<span class="attempt-tag">('+s.attempt+'/'+s.maxAttempts+')</span>' : '';
+    return '<div class="side-row"><span class="side-key '+sideLabelClass(label)+'">'+label+attemptTag+'</span><span class="'+cls+'">'+stateHtml+'</span></div>';
   }
 
   socket.on('state', s => {
@@ -284,24 +263,8 @@ app.get('/', (_, res) => {
     if (s.config) {
       const c1 = s.config.strat1, c2 = s.config.strat2;
       document.getElementById('config-strip').innerHTML =
-        '<span>Strat1: resting buy @'+c1.buyPrice+' · TP @'+c1.tpPrice+' · no SL · $'+c1.bet+'/side</span>' +
-        '<span>Strat2: trigger @'+c2.triggerPrice+' · resting buy @'+c2.buyPrice+' · no SL · $'+c2.bet+'/side</span>';
-    }
-
-    if (s.livePrices) {
-      const lp = s.livePrices;
-      const fmtPx = v => (v == null ? '—' : '$'+v.toFixed(2));
-      document.getElementById('price-up').textContent = fmtPx(lp.up.mid);
-      document.getElementById('price-down').textContent = fmtPx(lp.down.mid);
-      document.getElementById('price-up-sub').textContent = 'bid '+fmtPx(lp.up.bid)+' / ask '+fmtPx(lp.up.ask);
-      document.getElementById('price-down-sub').textContent = 'bid '+fmtPx(lp.down.bid)+' / ask '+fmtPx(lp.down.ask);
-      document.getElementById('price-window-info').textContent = lp.windowId+' · '+fmtSecs(lp.secsToEnd)+' left';
-    } else {
-      document.getElementById('price-up').textContent = '—';
-      document.getElementById('price-down').textContent = '—';
-      document.getElementById('price-up-sub').textContent = 'bid — / ask —';
-      document.getElementById('price-down-sub').textContent = 'bid — / ask —';
-      document.getElementById('price-window-info').textContent = 'waiting for window…';
+        '<span>Strat1: buy @'+c1.buyPrice+' · TP @'+c1.tpPrice+' · SL @'+c1.slPrice+' · $'+c1.bet+'/side · rearm once after TP (max '+c1.maxAttempts+' attempts)</span>' +
+        '<span>Strat2: trigger @'+c2.triggerPrice+' · buy @'+c2.buyPrice+' · SL @'+c2.slPrice+' · $'+c2.bet+'/side · no TP, no rearm</span>';
     }
 
     document.getElementById('total-mark').textContent = '$'+(s.markValue||0).toFixed(2);
@@ -334,13 +297,18 @@ app.get('/', (_, res) => {
         const trigNote = w.strat2.triggered
           ? '<div class="trig-note">⚡ triggered by '+w.strat2.triggerSide+' @ '+(w.strat2.triggerPrice!=null?w.strat2.triggerPrice.toFixed(2):'—')+'</div>'
           : '<div class="trig-note" style="opacity:.6">watching for 0.70 tick…</div>';
+        const upP = w.upPrice || {}, downP = w.downPrice || {};
         return '<div class="win-card '+(hasPos?'has-pos':'')+' '+(w.tradable?'':'untradable')+' '+(w.resolved?'resolved':'')+'">'+
           '<div class="win-hdr"><div class="win-sym">'+w.id+'</div><div class="win-timer">'+(w.resolved?'resolved':(w.tradable?fmtSecs(w.secsToEnd):'loading…'))+'</div></div>'+
+          '<div class="price-row">'+
+            '<div class="price-box up-box"><div class="price-box-label">UP</div><div class="price-box-val">'+fmtPrice(upP.mid)+'</div><div class="price-box-sub">ask '+fmtPrice(upP.ask)+' / bid '+fmtPrice(upP.bid)+'</div></div>'+
+            '<div class="price-box down-box"><div class="price-box-label">DOWN</div><div class="price-box-val">'+fmtPrice(downP.mid)+'</div><div class="price-box-sub">ask '+fmtPrice(downP.ask)+' / bid '+fmtPrice(downP.bid)+'</div></div>'+
+          '</div>'+
           '<div class="win-body">'+
-            '<div class="strat-hdr">Strategy 1 — resting buy 0.30 / TP 0.70 / no SL (rides to resolution)</div>'+
+            '<div class="strat-hdr">Strategy 1 — buy 0.30 / TP 0.70 / SL 0.10 / rearm once after TP</div>'+
             sideStatusHtml('Up', w.strat1.up) +
             sideStatusHtml('Down', w.strat1.down) +
-            '<div class="strat-hdr">Strategy 2 — trigger 0.70 / resting buy 0.70 / no SL / rides to resolution</div>'+
+            '<div class="strat-hdr">Strategy 2 — trigger 0.70 / SL 0.40 / TP by resolution</div>'+
             trigNote +
             sideStatusHtml('Up', w.strat2.up) +
             sideStatusHtml('Down', w.strat2.down) +
@@ -354,14 +322,14 @@ app.get('/', (_, res) => {
         const pnlStr = (t.profit !== undefined) ? sgn(t.profit) : '—';
         const pnlCls = (t.profit !== undefined) ? pClass(t.profit) : '';
         const sideColor = t.side === 'BUY' ? '#ffd740' : (t.reason === 'SL' ? '#ff4757' : (t.reason==='TP'?'#00e676':'#00d4ff'));
-        const rewardStr = (t.reward !== undefined) ? '+$'+t.reward.toFixed(4) : '—';
-        return '<tr><td>'+t.time+'</td><td>S'+(t.strategy||'—')+'</td>'+
+        const rewardStr = t.reward ? '+$'+t.reward.toFixed(4) : '—';
+        return '<tr><td>'+t.time+'</td><td>S'+(t.strategy||'—')+(t.attempt?(' ('+t.attempt+')'):'')+'</td>'+
           '<td style="color:'+sideColor+'">'+t.side+(t.outcome?(' '+t.outcome):'')+'</td>'+
           '<td>'+(t.reason||'—')+'</td>'+
           '<td>'+(t.price||0).toFixed(3)+'</td>'+
           '<td>'+(t.shares||0).toFixed(2)+'</td>'+
-          '<td class="pnl-pos">'+rewardStr+'</td>'+
-          '<td class="'+pnlCls+'">'+pnlStr+'</td></tr>';
+          '<td class="'+pnlCls+'">'+pnlStr+'</td>'+
+          '<td class="pnl-pos">'+rewardStr+'</td></tr>';
       }).join('');
     } else {
       tb.innerHTML = '<tr><td colspan="8" class="empty">No trades yet</td></tr>';
@@ -372,7 +340,7 @@ app.get('/', (_, res) => {
       logEl.innerHTML = s.logs.map(l => {
         const col = l.includes('❌')||l.includes('💥') ? '#ff4757'
                   : l.includes('💰')||l.includes('✅') ? '#00e676'
-                  : l.includes('🎯')||l.includes('⚡') ? '#ffd740'
+                  : l.includes('🎯')||l.includes('⚡')||l.includes('🔁') ? '#ffd740'
                   : l.includes('🪟')||l.includes('⏳') ? '#00d4ff'
                   : l.includes('⚠️') ? '#ff9f0a'
                   : '#4a6080';
