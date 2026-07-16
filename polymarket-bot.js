@@ -6,47 +6,54 @@
  * ═══════════════════════════════════════════════════════════════
  *
  *  Only BTC. Only the 5-minute Up/Down market. No candles, no signals,
- *  no streaks — none of the prior hourly/15m/5m reversal logic remains.
+ *  no streaks.
  *
- *  Two independent strategies run every 5-minute window. EVERY order,
- *  on both sides of every strategy, is a RESTING GTC limit order — no
- *  market orders, no FOK immediate orders, anywhere in this bot. That
- *  means every fill is a maker fill.
+ *  STRATEGY 1 (mean-reversion, per side, up to 2 attempts):
+ *    - Window opens → resting limit buy @0.30 on Up and on Down
+ *      separately. $50 notional each (shares = $50 / 0.30).
+ *    - If a side fills: resting TP sell @0.70. If price falls to 0.10
+ *      first, cancel the TP and exit immediately with a market sell
+ *      (stop loss).
+ *    - REARM RULE: if (and only if) that attempt closes via TP, the
+ *      side gets exactly ONE more attempt — a fresh resting buy @0.30
+ *      with the same TP/SL rules. If the first attempt closes via SL,
+ *      or never fills at all, there is no rearm. Hard cap of 2 total
+ *      attempts per side per window regardless of how the second one
+ *      resolves.
  *
- *  STRATEGY 1 (mean-reversion entries, one-shot per side):
- *    - The instant a window opens, place a RESTING limit buy at 0.30
- *      for Up, and a separate resting limit buy at 0.30 for Down.
- *      $50 notional each (shares = $50 / 0.30).
- *    - If a side fills: place a resting TP limit sell at 0.70. If the
- *      TP never fills by window end, the position rides to actual
- *      market resolution (no stop loss — this bot carries no stop
- *      loss conditions anywhere).
- *    - If a side never fills by window end, its resting order is
- *      cancelled. No retry, no repeat — one attempt per side per window.
- *
- *  STRATEGY 2 (momentum-confirmation entries, one-shot per window):
+ *  STRATEGY 2 (momentum confirmation, one-shot per window, no rearm):
  *    - Watches both sides all window. The instant EITHER side's ask
- *      ticks to 0.70 or higher, place a RESTING limit buy at 0.70 for
- *      BOTH Up and Down. $100 notional each. No FOK/immediate entry.
- *    - No stop loss, no take-profit — once filled, a side rides to
- *      actual market resolution. Unfilled resting orders are cancelled
- *      at window close.
- *    - Fires once per window, even if 0.70 is touched again later.
+ *      ticks to 0.70+, place resting limit buys @0.70 on BOTH sides.
+ *      $100 notional each.
+ *    - Stop loss @0.40 (market sell exit). No take-profit order — a
+ *      side that isn't stopped out rides to actual market resolution.
+ *    - Fires once per window, never rearms.
  *
- *  Sizing is always a fixed dollar amount per side (not per-share).
- *  No compounding, no bankroll-based scaling.
+ *  ORDER TYPES: every ENTRY and every TP is a resting (GTC) limit
+ *  order — a maker order. The only marketable/taker action anywhere
+ *  in this bot is the stop-loss exit, which by definition needs to
+ *  get out immediately rather than rest and hope.
  *
- *  FEES & REWARDS: because every order here is a resting maker order,
- *  Polymarket charges $0 in trading fees. Instead, each maker fill earns
- *  a share of the taker's fee back as a daily reward (Polymarket's Maker
- *  Rebates Program — ~20% of the matched taker fee in Crypto markets,
- *  paid in pUSD/USDC). This bot models and tracks that reward on every
- *  fill instead of subtracting a fee.
+ *  FEES & REWARDS: per Polymarket's public docs, makers (resting limit
+ *  orders) pay ZERO trading fees. Instead they can earn a Maker Rebate
+ *  — a share (documented as roughly 15-25% for crypto markets) of the
+ *  taker fee the counterparty paid — paid out whenever a resting order
+ *  actually gets filled. This bot books an ESTIMATED rebate on every
+ *  maker fill (entries and TP fills) using Polymarket's published fee
+ *  formula (fee = shares × feeRate × price × (1-price), crypto
+ *  feeRate = 0.07) times an assumed rebate share. Stop-loss market
+ *  sells are taker actions — no rebate is booked for them, and (per
+ *  instruction) no fee cost is booked either, so bookkeeping is
+ *  slightly optimistic on SL exits versus a real live account.
+ *  Polymarket's separate Liquidity Rewards Program (paid just for
+ *  resting near the midpoint, whether filled or not) depends on
+ *  real-time, cross-trader order-book competition data that isn't
+ *  available via the public API, so it is NOT modeled here.
  *
- *  DRY_RUN is runtime-switchable (see setMode). In DRY_RUN, order fills
- *  are simulated from observed ask/bid prices; in LIVE mode, this uses
- *  the real trader (GTC resting orders, polling, cancellation) via
- *  polymarket-trader.js.
+ *  DRY_RUN is runtime-switchable (see setMode). In DRY_RUN, fills are
+ *  simulated from observed ask/bid; in LIVE mode this uses the real
+ *  trader (GTC resting orders, FOK market sells, polling, cancellation)
+ *  via polymarket-trader.js.
  * ═══════════════════════════════════════════════════════════════
  */
 
@@ -70,23 +77,20 @@ function round4(n) { return Math.round(n * 10000) / 10000; }
 function nowSec() { return Date.now() / 1000; }
 
 // ── Strategy parameters ──
-// No stop-loss parameters anywhere: all positions either take profit via a
-// resting TP order (Strategy 1) or ride to actual market resolution.
-const STRAT1_BUY_PRICE = Number(process.env.STRAT1_BUY_PRICE || 0.30);
-const STRAT1_TP_PRICE  = Number(process.env.STRAT1_TP_PRICE  || 0.70);
-const STRAT1_BET       = Number(process.env.STRAT1_BET       || 50);   // $ per side
+const STRAT1_BUY_PRICE   = Number(process.env.STRAT1_BUY_PRICE || 0.30);
+const STRAT1_TP_PRICE    = Number(process.env.STRAT1_TP_PRICE  || 0.70);
+const STRAT1_SL_PRICE    = Number(process.env.STRAT1_SL_PRICE  || 0.10);
+const STRAT1_BET         = Number(process.env.STRAT1_BET       || 50);   // $ per side
+const STRAT1_MAX_ATTEMPTS = Number(process.env.STRAT1_MAX_ATTEMPTS || 2); // rearm cap
 
 const STRAT2_TRIGGER_PRICE = Number(process.env.STRAT2_TRIGGER_PRICE || 0.70);
 const STRAT2_BUY_PRICE     = Number(process.env.STRAT2_BUY_PRICE     || 0.70);
+const STRAT2_SL_PRICE      = Number(process.env.STRAT2_SL_PRICE      || 0.40);
 const STRAT2_BET           = Number(process.env.STRAT2_BET           || 100); // $ per side
 
-// Polymarket Crypto-category taker fee rate, used only to MODEL the maker
-// reward we earn (we never pay this — we're always the maker/resting side).
-const CRYPTO_TAKER_FEE_RATE = Number(process.env.CRYPTO_TAKER_FEE_RATE || 0.07);
-// Polymarket's Maker Rebates Program pays makers back a share of the taker
-// fee matched against their fill. As of mid-2026 that share is ~20% for
-// Crypto markets (25% in most other categories). Paid daily in pUSD/USDC.
-const MAKER_REBATE_SHARE = Number(process.env.MAKER_REBATE_SHARE || 0.20);
+// Used only to ESTIMATE the maker rebate (see header notes) — not a cost, an income estimate.
+const CRYPTO_FEE_RATE_FOR_REBATE_CALC = Number(process.env.CRYPTO_FEE_RATE_FOR_REBATE_CALC || 0.07);
+const MAKER_REBATE_SHARE = Number(process.env.MAKER_REBATE_SHARE || 0.20); // Polymarket docs: ~15-25% for crypto
 
 let emitFn = () => {};
 let slog = () => {};
@@ -126,18 +130,13 @@ async function postJSON(url, body) {
   return res.json();
 }
 
-// Models the maker reward earned on a fill: Polymarket pays makers back a
-// share (MAKER_REBATE_SHARE) of the taker fee matched against their resting
-// order. We never pay this fee ourselves — we're always the resting side.
+// Estimated maker rebate for a resting-order fill (see header notes).
 function makerReward(shares, price) {
-  return round4(shares * CRYPTO_TAKER_FEE_RATE * price * (1 - price) * MAKER_REBATE_SHARE);
+  return round4(shares * CRYPTO_FEE_RATE_FOR_REBATE_CALC * price * (1 - price) * MAKER_REBATE_SHARE);
 }
 
 // ─────────────────────────────────────────
 //  Order helpers — real trader in LIVE, simulated in DRY_RUN
-//  Every order this bot places is a RESTING GTC limit order. No market
-//  orders, no FOK immediate orders — that's what keeps every fill a maker
-//  fill (zero fees, reward-eligible).
 // ─────────────────────────────────────────
 async function placeRestingBuy(tokenId, price, size) {
   if (DRY_RUN) return { id: `dry-buy-${Date.now()}-${Math.random().toString(36).slice(2, 7)}` };
@@ -150,6 +149,14 @@ async function placeRestingSell(tokenId, price, size) {
 async function cancelOrderSafe(orderId) {
   if (DRY_RUN || !orderId) return;
   try { await trader.cancelOrder(orderId); } catch (e) { log(`⚠️  cancel failed for ${orderId}: ${e.message}`); }
+}
+// Immediate market sell — the one taker action in this bot, used only for stop losses.
+async function marketSellNow(tokenId, shares) {
+  if (DRY_RUN) {
+    const bid = tokenPriceMap[tokenId]?.bid ?? tokenPriceMap[tokenId]?.ask ?? 0;
+    return { id: `dry-mkt-sell-${Date.now()}`, isFilled: true, avgPrice: bid };
+  }
+  return await trader.placeFokSell(tokenId, shares);
 }
 // Poll a resting order's status (LIVE only — DRY_RUN fills are simulated from price directly)
 async function checkOrderStatus(orderId) {
@@ -168,7 +175,7 @@ async function checkOrderStatus(orderId) {
 }
 
 // ─────────────────────────────────────────
-//  Market discovery — 5m BTC window (same epoch-slug scheme already proven to work)
+//  Market discovery — 5m BTC window (proven epoch-slug scheme)
 // ─────────────────────────────────────────
 function qOf(m) { return (m.question || m.groupItemTitle || m.title || '').toLowerCase(); }
 function parseMarketTokens(m) {
@@ -208,10 +215,11 @@ function windowStartFor(tsSec = nowSec()) { return Math.floor(tsSec / WINDOW_SEC
 // ─────────────────────────────────────────
 function freshSideState() {
   return {
-    state: 'idle', // idle -> resting -> filled -> tp_filled | holding_to_resolution | resolved | expired_unfilled
+    state: 'idle', // idle -> resting -> filled -> tp_filled | sl_exit | holding_to_resolution | resolved | expired_unfilled
     orderId: null, tpOrderId: null,
     entryFillPrice: null, exitPrice: null, exitReason: null,
-    shares: null, cost: null, pnl: null, reward: 0,
+    shares: null, cost: null, pnl: null,
+    attempt: 1, history: [],
   };
 }
 function buildWindow(windowStart) {
@@ -314,7 +322,7 @@ function registerTrade(entry) {
 }
 
 // ─────────────────────────────────────────
-//  Strategy 1 — resting 0.30 buy, TP 0.70, SL 0.10, one-shot per side
+//  Strategy 1 — resting 0.30 buy, TP 0.70, SL 0.10, rearm once after TP
 // ─────────────────────────────────────────
 async function processStrat1Side(w, sideName) {
   const s = w.strat1[sideName];
@@ -330,7 +338,7 @@ async function processStrat1Side(w, sideName) {
     s.orderId = resp.id;
     s.shares = shares;
     s.state = 'resting';
-    log(`📥 STRAT1 ${label} [${w.id}] resting buy ${shares}sh @ ${STRAT1_BUY_PRICE} ($${STRAT1_BET})`);
+    log(`📥 STRAT1 ${label} [${w.id}] attempt ${s.attempt}/${STRAT1_MAX_ATTEMPTS} — resting buy ${shares}sh @ ${STRAT1_BUY_PRICE} ($${STRAT1_BET})`);
     return;
   }
 
@@ -352,17 +360,16 @@ async function processStrat1Side(w, sideName) {
       bankroll = round2(bankroll - s.cost + reward);
       rewardsEarned = round2(rewardsEarned + reward);
       realizedPnl = round2(realizedPnl + reward);
-      s.reward = round2((s.reward || 0) + reward);
       s.state = 'filled';
       recordEquity();
-      log(`✅ STRAT1 ${label} [${w.id}] FILLED ${s.shares}sh @ ${fillPrice.toFixed(2)} | cost=$${s.cost.toFixed(2)} | reward=$${reward.toFixed(4)}`);
-      registerTrade({ side: 'BUY', outcome: label, strategy: 1, reason: 'ENTRY', price: fillPrice, shares: s.shares, cost: s.cost, reward });
+      log(`✅ STRAT1 ${label} [${w.id}] attempt ${s.attempt}/${STRAT1_MAX_ATTEMPTS} FILLED ${s.shares}sh @ ${fillPrice.toFixed(2)} | cost=$${s.cost.toFixed(2)} | reward≈+$${reward.toFixed(4)}`);
+      registerTrade({ side: 'BUY', outcome: label, strategy: 1, reason: 'ENTRY', price: fillPrice, shares: s.shares, cost: s.cost, reward, attempt: s.attempt });
       return;
     }
     if (windowClosing) {
       await cancelOrderSafe(s.orderId);
       s.state = 'expired_unfilled';
-      log(`⏹️  STRAT1 ${label} [${w.id}] window closing, unfilled resting order cancelled`);
+      log(`⏹️  STRAT1 ${label} [${w.id}] attempt ${s.attempt}/${STRAT1_MAX_ATTEMPTS} window closing, unfilled resting order cancelled`);
     }
     return;
   }
@@ -371,10 +378,9 @@ async function processStrat1Side(w, sideName) {
     if (!s.tpOrderId) {
       const resp = await placeRestingSell(tokenId, STRAT1_TP_PRICE, s.shares);
       s.tpOrderId = resp.id;
-      log(`🎯 STRAT1 ${label} [${w.id}] TP resting sell ${s.shares}sh @ ${STRAT1_TP_PRICE}`);
+      log(`🎯 STRAT1 ${label} [${w.id}] attempt ${s.attempt}/${STRAT1_MAX_ATTEMPTS} TP resting sell ${s.shares}sh @ ${STRAT1_TP_PRICE}`);
     }
 
-    // Check TP fill
     let tpFilled = false, tpPrice = STRAT1_TP_PRICE;
     if (DRY_RUN) {
       const bid = tokenPriceMap[tokenId]?.bid;
@@ -385,24 +391,60 @@ async function processStrat1Side(w, sideName) {
       if (st.avgPrice) tpPrice = st.avgPrice;
     }
     if (tpFilled) {
-      finalizeSideExit(w, s, label, 1, tpPrice);
+      finalizeStrat1Exit(w, s, label, tpPrice, 'TP');
       return;
     }
 
-    // No stop loss — if TP doesn't fill by window end, hold to resolution.
+    const bid = tokenPriceMap[tokenId]?.bid;
+    if (bid != null && bid <= STRAT1_SL_PRICE) {
+      await cancelOrderSafe(s.tpOrderId);
+      const resp = await marketSellNow(tokenId, s.shares);
+      const exitPrice = resp.avgPrice ?? bid;
+      finalizeStrat1Exit(w, s, label, exitPrice, 'SL');
+      return;
+    }
+
     if (windowClosing) {
       await cancelOrderSafe(s.tpOrderId);
       s.state = 'holding_to_resolution';
-      log(`⏳ STRAT1 ${label} [${w.id}] window closing, holding ${s.shares}sh to resolution`);
+      log(`⏳ STRAT1 ${label} [${w.id}] attempt ${s.attempt}/${STRAT1_MAX_ATTEMPTS} window closing, holding ${s.shares}sh to resolution`);
     }
   }
 }
 
+function finalizeStrat1Exit(w, s, label, exitPrice, reason) {
+  const proceeds = round2(s.shares * exitPrice);
+  const profit = round2(proceeds - s.cost);
+  // TP is a maker fill (resting sell) -> rebate. SL is a taker market-sell -> no rebate, no fee.
+  const reward = reason === 'TP' ? makerReward(s.shares, exitPrice) : 0;
+  bankroll = round2(bankroll + proceeds + reward);
+  realizedPnl = round2(realizedPnl + profit + reward);
+  if (reward) rewardsEarned = round2(rewardsEarned + reward);
+  if (profit >= 0) wins++; else losses++;
+
+  s.state = reason === 'TP' ? 'tp_filled' : 'sl_exit';
+  s.exitPrice = exitPrice;
+  s.exitReason = reason;
+  s.pnl = profit;
+  s.history.push({ attempt: s.attempt, entryFillPrice: s.entryFillPrice, exitPrice, reason, pnl: profit });
+
+  const icon = profit >= 0 ? '💰' : '💥';
+  log(`${icon} STRAT1 ${label} [${w.id}] attempt ${s.attempt}/${STRAT1_MAX_ATTEMPTS} ${reason} exit ${s.shares}sh @ ${exitPrice.toFixed(2)} | pnl=$${profit.toFixed(2)}${reward ? ` | reward≈+$${reward.toFixed(4)}` : ''} | bankroll=$${bankroll.toFixed(2)}`);
+  registerTrade({ side: 'SELL', outcome: label, strategy: 1, reason, price: exitPrice, shares: s.shares, profit, reward, attempt: s.attempt });
+
+  if (reason === 'TP' && s.attempt < STRAT1_MAX_ATTEMPTS) {
+    const nextAttempt = s.attempt + 1;
+    const history = s.history;
+    Object.assign(s, freshSideState());
+    s.attempt = nextAttempt;
+    s.history = history;
+    log(`🔁 STRAT1 ${label} [${w.id}] rearming after TP — attempt ${nextAttempt}/${STRAT1_MAX_ATTEMPTS}`);
+  }
+  recordEquity();
+}
+
 // ─────────────────────────────────────────
-//  Strategy 2 — reactive resting buy-both on momentum tick @ 0.70,
-//  no stop loss, no take profit. Once triggered, a resting limit buy is
-//  placed on both sides (never a market/FOK order) and any fill rides to
-//  actual market resolution.
+//  Strategy 2 — reactive 0.70 resting buy-both on momentum tick, SL 0.40, no TP, no rearm
 // ─────────────────────────────────────────
 async function processStrat2(w) {
   const t = nowSec();
@@ -421,23 +463,23 @@ async function processStrat2(w) {
     w.strat2.triggerSide = triggerSide;
     w.strat2.triggerPrice = triggerPrice;
     log(`⚡ STRAT2 [${w.id}] trigger: ${triggerSide} ticked to ${triggerPrice.toFixed(2)} — placing resting buys @ ${STRAT2_BUY_PRICE} on both sides`);
+  }
 
-    for (const [sideName, tokenId, label] of [['up', w.upTokenId, 'Up'], ['down', w.downTokenId, 'Down']]) {
-      const s = w.strat2[sideName];
+  if (!w.strat2.triggered) return;
+
+  for (const [sideName, tokenId, label] of [['up', w.upTokenId, 'Up'], ['down', w.downTokenId, 'Down']]) {
+    const s = w.strat2[sideName];
+
+    if (s.state === 'idle') {
+      if (windowClosing) { s.state = 'expired_unfilled'; continue; }
       const shares = round2(STRAT2_BET / STRAT2_BUY_PRICE);
       const resp = await placeRestingBuy(tokenId, STRAT2_BUY_PRICE, shares);
       s.orderId = resp.id;
       s.shares = shares;
       s.state = 'resting';
       log(`📥 STRAT2 ${label} [${w.id}] resting buy ${shares}sh @ ${STRAT2_BUY_PRICE} ($${STRAT2_BET})`);
+      continue;
     }
-    return;
-  }
-
-  // Already triggered — watch resting orders for fills, or hold filled
-  // positions to resolution (no TP, no SL, by design).
-  for (const [sideName, tokenId, label] of [['up', w.upTokenId, 'Up'], ['down', w.downTokenId, 'Down']]) {
-    const s = w.strat2[sideName];
 
     if (s.state === 'resting') {
       let filled = false, fillPrice = STRAT2_BUY_PRICE;
@@ -457,10 +499,9 @@ async function processStrat2(w) {
         bankroll = round2(bankroll - s.cost + reward);
         rewardsEarned = round2(rewardsEarned + reward);
         realizedPnl = round2(realizedPnl + reward);
-        s.reward = round2((s.reward || 0) + reward);
         s.state = 'filled';
         recordEquity();
-        log(`✅ STRAT2 ${label} [${w.id}] FILLED ${s.shares}sh @ ${fillPrice.toFixed(2)} | cost=$${s.cost.toFixed(2)} | reward=$${reward.toFixed(4)}`);
+        log(`✅ STRAT2 ${label} [${w.id}] FILLED ${s.shares}sh @ ${fillPrice.toFixed(2)} | cost=$${s.cost.toFixed(2)} | reward≈+$${reward.toFixed(4)}`);
         registerTrade({ side: 'BUY', outcome: label, strategy: 2, reason: 'ENTRY', price: fillPrice, shares: s.shares, cost: s.cost, reward });
       } else if (windowClosing) {
         await cancelOrderSafe(s.orderId);
@@ -470,33 +511,32 @@ async function processStrat2(w) {
       continue;
     }
 
-    if (s.state === 'filled' && windowClosing) {
-      s.state = 'holding_to_resolution';
-      log(`⏳ STRAT2 ${label} [${w.id}] window closing, holding ${s.shares}sh to resolution (no TP/SL by design)`);
+    if (s.state === 'filled') {
+      const bid = tokenPriceMap[tokenId]?.bid;
+      if (bid != null && bid <= STRAT2_SL_PRICE) {
+        const resp = await marketSellNow(tokenId, s.shares);
+        const exitPrice = resp.avgPrice ?? bid;
+        const proceeds = round2(s.shares * exitPrice);
+        const profit = round2(proceeds - s.cost);
+        bankroll = round2(bankroll + proceeds); // taker market-sell — no rebate, no fee
+        realizedPnl = round2(realizedPnl + profit);
+        if (profit >= 0) wins++; else losses++;
+        s.state = 'sl_exit';
+        s.exitPrice = exitPrice;
+        s.exitReason = 'SL';
+        s.pnl = profit;
+        recordEquity();
+        const icon = profit >= 0 ? '💰' : '💥';
+        log(`${icon} STRAT2 ${label} [${w.id}] SL exit ${s.shares}sh @ ${exitPrice.toFixed(2)} | pnl=$${profit.toFixed(2)} | bankroll=$${bankroll.toFixed(2)}`);
+        registerTrade({ side: 'SELL', outcome: label, strategy: 2, reason: 'SL', price: exitPrice, shares: s.shares, profit });
+        continue;
+      }
+      if (windowClosing) {
+        s.state = 'holding_to_resolution';
+        log(`⏳ STRAT2 ${label} [${w.id}] window closing, holding ${s.shares}sh to resolution (no TP by design)`);
+      }
     }
   }
-}
-
-// Only called for Strategy 1's TP exit — there is no stop loss anywhere in
-// this bot. The TP sell is itself a resting limit order, so it's a maker
-// fill too and earns a reward on top of the proceeds.
-function finalizeSideExit(w, s, label, strategyNum, exitPrice) {
-  const proceeds = round2(s.shares * exitPrice);
-  const reward = makerReward(s.shares, exitPrice);
-  const profit = round2(proceeds - s.cost + reward);
-  bankroll = round2(bankroll + proceeds + reward);
-  realizedPnl = round2(realizedPnl + profit);
-  rewardsEarned = round2(rewardsEarned + reward);
-  s.reward = round2((s.reward || 0) + reward);
-  if (profit >= 0) wins++; else losses++;
-  s.state = 'tp_filled';
-  s.exitPrice = exitPrice;
-  s.exitReason = 'TP';
-  s.pnl = profit;
-  recordEquity();
-  const icon = profit >= 0 ? '💰' : '💥';
-  log(`${icon} STRAT${strategyNum} ${label} [${w.id}] TP exit ${s.shares}sh @ ${exitPrice.toFixed(2)} | pnl=$${profit.toFixed(2)} | reward=$${reward.toFixed(4)} | bankroll=$${bankroll.toFixed(2)}`);
-  registerTrade({ side: 'SELL', outcome: label, strategy: strategyNum, reason: 'TP', price: exitPrice, shares: s.shares, profit, reward });
 }
 
 // ─────────────────────────────────────────
@@ -596,24 +636,22 @@ async function mainLoop() {
 function serializeSide(s) {
   return {
     state: s.state, entryFillPrice: s.entryFillPrice, exitPrice: s.exitPrice,
-    exitReason: s.exitReason, shares: s.shares, cost: s.cost, pnl: s.pnl, reward: s.reward || 0,
+    exitReason: s.exitReason, shares: s.shares, cost: s.cost, pnl: s.pnl,
+    attempt: s.attempt, maxAttempts: STRAT1_MAX_ATTEMPTS, history: s.history,
   };
 }
-
-// Picks the window the dashboard should show live prices for: the one
-// currently inside its 5-minute trading window, falling back to the most
-// recently loaded tradable window.
-function getActiveWindow() {
-  const t = nowSec();
-  let active = windows.find(w => w.tradable && !w.resolved && t >= w.windowStart && t < w.windowEnd);
-  if (!active) active = windows.filter(w => w.tradable).sort((a, b) => b.windowStart - a.windowStart)[0];
-  return active || null;
+function priceInfo(tokenId) {
+  const p = tokenPriceMap[tokenId] || {};
+  const ask = p.ask ?? null, bid = p.bid ?? null;
+  const mid = (ask != null && bid != null) ? round2((ask + bid) / 2) : (ask ?? bid ?? null);
+  return { ask, bid, mid };
 }
 function buildState() {
   const windowsOut = windows.map(w => ({
     id: w.id, windowStart: w.windowStart, windowEnd: w.windowEnd,
     secsToEnd: Math.max(0, Math.floor(w.windowEnd - nowSec())),
     tradable: w.tradable, resolved: w.resolved,
+    upPrice: priceInfo(w.upTokenId), downPrice: priceInfo(w.downTokenId),
     strat1: { up: serializeSide(w.strat1.up), down: serializeSide(w.strat1.down) },
     strat2: {
       triggered: w.strat2.triggered, triggerSide: w.strat2.triggerSide, triggerPrice: w.strat2.triggerPrice,
@@ -622,21 +660,6 @@ function buildState() {
   })).sort((a, b) => b.windowStart - a.windowStart);
 
   const mv = markValue();
-
-  const active = getActiveWindow();
-  let livePrices = null;
-  if (active) {
-    const up = tokenPriceMap[active.upTokenId] || {};
-    const down = tokenPriceMap[active.downTokenId] || {};
-    const mid = (a, b) => (a != null && b != null) ? round4((a + b) / 2) : (a ?? b ?? null);
-    livePrices = {
-      windowId: active.id,
-      secsToEnd: Math.max(0, Math.floor(active.windowEnd - nowSec())),
-      up: { ask: up.ask ?? null, bid: up.bid ?? null, mid: mid(up.ask, up.bid) },
-      down: { ask: down.ask ?? null, bid: down.bid ?? null, mid: mid(down.ask, down.bid) },
-    };
-  }
-
   return {
     dryRun: DRY_RUN, tradingEnabled, symbol: SYMBOL,
     totalCapital: TOTAL_CAPITAL, bankroll, markValue: mv,
@@ -645,12 +668,11 @@ function buildState() {
     winRate: (wins + losses) > 0 ? round2((wins / (wins + losses)) * 100) : null,
     uptime: Math.floor((Date.now() - startTime) / 1000),
     config: {
-      strat1: { buyPrice: STRAT1_BUY_PRICE, tpPrice: STRAT1_TP_PRICE, bet: STRAT1_BET },
-      strat2: { triggerPrice: STRAT2_TRIGGER_PRICE, buyPrice: STRAT2_BUY_PRICE, bet: STRAT2_BET },
+      strat1: { buyPrice: STRAT1_BUY_PRICE, tpPrice: STRAT1_TP_PRICE, slPrice: STRAT1_SL_PRICE, bet: STRAT1_BET, maxAttempts: STRAT1_MAX_ATTEMPTS },
+      strat2: { triggerPrice: STRAT2_TRIGGER_PRICE, buyPrice: STRAT2_BUY_PRICE, slPrice: STRAT2_SL_PRICE, bet: STRAT2_BET },
     },
-    livePrices,
     windows: windowsOut,
-    equityCurve, totalEquityCurve: equityCurve,
+    equityCurve,
     logs: logs.slice(-100), trades: trades.slice(-80).reverse(),
   };
 }
@@ -672,9 +694,9 @@ async function init(privateKey, emit, slogFn) {
   slog = slogFn;
   log(`🚀 BTC 5-Minute Dual Limit-Order Bot`);
   log(`⚙️  $${TOTAL_CAPITAL} bookkeeping bankroll`);
-  log(`⚙️  STRATEGY 1: resting buy both sides @ ${STRAT1_BUY_PRICE} ($${STRAT1_BET}/side), TP @ ${STRAT1_TP_PRICE}. No stop loss — unfilled TP rides to resolution. One-shot per side.`);
-  log(`⚙️  STRATEGY 2: on either side ticking to ${STRAT2_TRIGGER_PRICE}+, resting buy both sides @ ${STRAT2_BUY_PRICE} ($${STRAT2_BET}/side). No stop loss, no TP — rides to resolution. One-shot per window.`);
-  log(`⚙️  All orders are resting GTC limit orders (maker-only). $0 trading fees — every fill earns a maker reward (~${(MAKER_REBATE_SHARE * 100).toFixed(0)}% of the matched taker fee) instead.`);
+  log(`⚙️  STRATEGY 1: resting buy @ ${STRAT1_BUY_PRICE} ($${STRAT1_BET}/side), TP @ ${STRAT1_TP_PRICE}, SL @ ${STRAT1_SL_PRICE}. Rearms once (max ${STRAT1_MAX_ATTEMPTS} attempts/side) if — and only if — the prior attempt closed via TP.`);
+  log(`⚙️  STRATEGY 2: on either side ticking to ${STRAT2_TRIGGER_PRICE}+, resting buy @ ${STRAT2_BUY_PRICE} ($${STRAT2_BET}/side), SL @ ${STRAT2_SL_PRICE}, no TP (rides to resolution). One-shot per window, no rearm.`);
+  log(`⚙️  All entries/TPs are resting (maker) limit orders — zero fees, estimated maker rebate booked as reward on each fill. Stop losses are immediate market sells (taker, no fee/rebate booked).`);
   log(`${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
   trader = new PolymarketTrader(privateKey);
