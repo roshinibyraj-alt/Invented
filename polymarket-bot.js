@@ -2,52 +2,47 @@
 
 /**
  * ═══════════════════════════════════════════════════════════════
- *  POLYMARKET 5-MINUTE BTC UP/DOWN — TWO INDEPENDENT LIMIT STRATEGIES
+ *  POLYMARKET 15-MINUTE BTC UP/DOWN — INDEPENDENT LADDER STRATEGY
  * ═══════════════════════════════════════════════════════════════
  *
- *  Complete rewrite. No candles, no signals, no external price data at all.
- *  BTC only. Two independent strategies run every window, never
- *  interacting with each other, both pulling from the same bankroll.
+ *  Complete rewrite — replaces the old two-strategy (S1/S2) design.
+ *  Up and Down each run their OWN independent ladder — they never
+ *  interact, both just pull from the same bankroll.
  *
- *  FILL SEMANTICS (both strategies): a limit buy at price P fills the
- *  moment the current ask is AT OR BELOW P, and it fills at that REAL
- *  current ask — never at P itself unless the ask happens to equal it.
- *  This is how a real limit order works (you never pay worse than your
- *  ceiling), and it matters a lot for Strategy 2 below.
+ *  TRADEABLE BAND: a side's ladder only ever quotes prices inside
+ *    [LADDER_MIN, LADDER_MAX] = [0.15, 0.85]. Anything computed outside
+ *    that band is clamped to the nearest edge.
  *
- *  STRATEGY 1 — cheap dip on both sides, TP/SL:
- *    Once per window (placed as early as data allows), rest a limit buy on
- *    BOTH Up and Down at 0.30, $50 each. No repeat/replace if unfilled.
- *    Whichever side(s) actually fill get managed independently:
- *      - TP at 0.70: a genuine resting sell — passive, waits for bid to
- *        rise there.
- *      - SL at 0.10: an aggressive/marketable exit — fires immediately
- *        once bid drops there, since a stop needs to actually execute.
+ *  ENTRY: whenever a side's ladder has no resting order and no open
+ *    position, it posts a resting limit buy for LADDER_SHARES shares:
+ *      - First entry of the window: price = current ask - 0.10.
+ *      - Every entry after a completed cycle (re-entry): price = that
+ *        cycle's exit price - 0.10 — NOT the live price. This is what
+ *        makes it a ladder: each rung is anchored to the last rung's
+ *        realized exit, not to whatever the market is doing right now.
  *
- *  STRATEGY 2 — breakout confirmation, each side fully independent:
- *    Up and Down are tracked completely separately — this is NOT a paired
- *    hedge. The FIRST time a given side's own ask reaches 0.70 in a window
- *    (each side's trigger fires at most once per window, independent of
- *    the other side), place a limit buy at 0.70 for THAT side only, $100.
- *    Reaching 0.70 on Up has no effect on Down, and vice versa — either,
- *    both, or neither side can trigger in the same window.
- *      - SL at 0.30: aggressive/marketable exit, same as Strategy 1's SL.
- *      - No TP order. If SL doesn't trigger, the position simply rides to
- *        actual window resolution (real settlement pays $1 or $0).
+ *  TRAILING TP: once a position's peak price reaches entry + 0.20, a
+ *    trailing stop arms and trails 0.10 behind the peak from then on.
+ *    Exiting there is a marketable sell (guaranteed execution). If the
+ *    +0.20 arm level is never reached before the window ends, the
+ *    position simply rides to actual resolution ($1 or $0).
  *
- *  EXECUTION: entries are genuine passive limit orders (fill only
- *    confirmed when ask walks down to the specified ceiling). SL exits are
- *    deliberately marketable (priced to guarantee execution). TP (Strategy
- *    1 only) is a genuine resting sell.
+ *  RE-ENTRY: the moment a cycle closes via the trailing stop, the next
+ *    rung's entry price is set to (exit price - 0.10) and a new resting
+ *    buy is posted immediately (subject to the tradeable band clamp).
+ *    A single window can cycle through many rungs if price is choppy.
  *
- *  RESOLUTION: any position still open when the window ends (no TP/SL hit)
- *    rides to actual window resolution — this bot's own bookkeeping
- *    simulates that via the public Gamma API purely to keep the
- *    dashboard's P&L figures meaningful. A separate, independent auto-claim
- *    script handles real redemption.
+ *  FILL SEMANTICS: a limit buy at price P fills the moment the current
+ *    ask is AT OR BELOW P, at that REAL current ask — never worse than P.
  *
- *  LIVE / DEMO: DRY_RUN is runtime-switchable (see setMode) — dashboard has
- *    a one-click toggle plus an independent pause button.
+ *  RESOLUTION: any position still open when the window ends (trailing
+ *    stop never triggered) rides to actual window resolution — this
+ *    bot's own bookkeeping simulates that via the public Gamma API
+ *    purely to keep the dashboard's P&L figures meaningful. A separate,
+ *    independent auto-claim script handles real redemption.
+ *
+ *  LIVE / DEMO: DRY_RUN is runtime-switchable (see setMode) — dashboard
+ *    has a one-click toggle plus an independent pause button.
  * ═══════════════════════════════════════════════════════════════
  */
 
@@ -70,15 +65,17 @@ function round2(n) { return Math.round(n * 100) / 100; }
 function round5(n) { return Math.round(n * 100000) / 100000; }
 function nowSec() { return Date.now() / 1000; }
 
-// ── Strategy parameters ──
-const S1_ENTRY_PRICE = Number(process.env.S1_ENTRY_PRICE || 0.30);
-const S1_BET_DOLLARS = Number(process.env.S1_BET_DOLLARS || 50);
-const S1_ENTRY_DELAY_SECS = Number(process.env.S1_ENTRY_DELAY_SECS || 5); // wait this long after a window goes live before S1 places entries — lets the price feed settle on the new window's tokens
+// ── Ladder strategy parameters ──
+const LADDER_MIN            = Number(process.env.LADDER_MIN || 0.15);   // tradeable band floor
+const LADDER_MAX            = Number(process.env.LADDER_MAX || 0.85);   // tradeable band ceiling
+const LADDER_ENTRY_OFFSET   = Number(process.env.LADDER_ENTRY_OFFSET || 0.10);   // entry = reference price - this
+const LADDER_TP_ARM         = Number(process.env.LADDER_TP_ARM || 0.20);         // profit needed above entry to arm the trailing stop
+const LADDER_TP_TRAIL       = Number(process.env.LADDER_TP_TRAIL || 0.10);       // once armed, stop trails this far behind the peak
+const LADDER_REENTRY_OFFSET = Number(process.env.LADDER_REENTRY_OFFSET || 0.10); // next rung's entry = this cycle's exit price - this
+const LADDER_SHARES         = Number(process.env.LADDER_SHARES || 50);           // fixed shares per rung, every entry
+const LADDER_ENTRY_DELAY_SECS = Number(process.env.LADDER_ENTRY_DELAY_SECS || 5); // wait this long after a window goes live before the first entry — lets the price feed settle on the new window's tokens
 
-const S2_TRIGGER_PRICE = Number(process.env.S2_TRIGGER_PRICE || 0.70);
-const S2_ENTRY_PRICE   = Number(process.env.S2_ENTRY_PRICE || 0.70);
-const S2_SL_PRICE      = Number(process.env.S2_SL_PRICE || 0.35);
-const S2_BET_DOLLARS   = Number(process.env.S2_BET_DOLLARS || 100);
+function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
 
 const MIN_SHARES = Number(process.env.MIN_SHARES || 1);
 const CRYPTO_TAKER_FEE_RATE     = Number(process.env.CRYPTO_TAKER_FEE_RATE || 0.07);
@@ -120,14 +117,14 @@ async function postJSON(url, body) {
 }
 
 // Genuine resting (passive) limit buy — fills only when ask walks down to
-// meet it (or below). Used for Strategy 1's entries and Strategy 2's entries.
+// meet it (or below). Used for every ladder rung's entry.
 async function placeRestingBuy(tokenId, price, shares) {
   if (!DRY_RUN && trader) return await trader.limitBuy(tokenId, shares, price);
   return { id: `dry-buy-${Date.now()}-${Math.random().toString(36).slice(2, 7)}` };
 }
 // A deliberately marketable sell — priced at the current bid so it fills
-// now. Used for Strategy 2's SL exit, since a stop needs to actually
-// execute rather than wait passively.
+// now. Used for the ladder's trailing-stop exit, since a stop needs to
+// actually execute rather than wait passively.
 async function placeMarketableSell(tokenId, price, shares) {
   if (!DRY_RUN && trader) return await trader.limitSell(tokenId, shares, price);
   return { id: `dry-sell-${Date.now()}-${Math.random().toString(36).slice(2, 7)}` };
@@ -155,17 +152,19 @@ function freshMarketState() {
     upTokenId: null, downTokenId: null,
     upAsk: null, upBid: null, downAsk: null, downBid: null,
     resolvedThisWindow: true,
-    s1: {
-      placed: false, // one-time placement attempt done
-      filledSide: null, // once either side fills, the other side's order is cancelled — mutually exclusive per window
-      orders: { Up: null, Down: null },     // resting entry orders, pre-fill: {price, shares, orderId}
-      positions: { Up: null, Down: null },  // filled positions: {shares, entryPrice, cost, closed} — no TP/SL, rides to resolution
-    },
-    s2: {
-      triggeredSide: { Up: false, Down: false }, // has this side's 0.70 trigger already fired this window
-      filledSide: null, // once either side fills, the other side's order/trigger is cancelled — mutually exclusive per window
-      orders: { Up: null, Down: null },          // resting entry orders placed on trigger, pre-fill: {price, shares, orderId}
-      positions: { Up: null, Down: null },       // filled positions: {shares, entryPrice, cost, closed} — no SL, rides to resolution
+    ladder: {
+      Up: {
+        order: null,          // resting entry order, pre-fill: {price, shares, orderId}
+        position: null,       // open position: {shares, entryPrice, cost, peak, armed, closed}
+        nextEntryPrice: null, // null = derive first entry from live price; otherwise = last cycle's exit - 0.10
+        cycles: 0, cyclePnl: 0,
+      },
+      Down: {
+        order: null,
+        position: null,
+        nextEntryPrice: null,
+        cycles: 0, cyclePnl: 0,
+      },
     },
   };
 }
@@ -288,10 +287,8 @@ async function refreshPolyPrices() {
 function markValue() {
   let held = 0;
   for (const side of ['Up', 'Down']) {
-    const pos1 = state.s1.positions[side];
-    if (pos1 && !pos1.closed) held += pos1.shares * ((side === 'Up' ? state.upBid : state.downBid) ?? pos1.entryPrice);
-    const pos2 = state.s2.positions[side];
-    if (pos2 && !pos2.closed) held += pos2.shares * ((side === 'Up' ? state.upBid : state.downBid) ?? pos2.entryPrice);
+    const pos = state.ladder[side].position;
+    if (pos && !pos.closed) held += pos.shares * ((side === 'Up' ? state.upBid : state.downBid) ?? pos.entryPrice);
   }
   return round2(bankroll + held);
 }
@@ -305,122 +302,73 @@ function registerTrade(entry) {
 }
 
 // ─────────────────────────────────────────
-//  Strategy 1 — cheap dip, whichever side fills first, rides to resolution
+//  Ladder strategy — Up and Down each run their own independent ladder
 // ─────────────────────────────────────────
-async function s1PlaceEntries(elapsed) {
-  if (state.s1.placed) return;
-  if (elapsed < S1_ENTRY_DELAY_SECS) return; // let the price feed settle on this window's tokens first
-  const upAsk = state.upAsk, downAsk = state.downAsk;
-  if (upAsk == null || downAsk == null) return; // wait for valid price data before the one-time placement
-  state.s1.placed = true;
 
-  for (const side of ['Up', 'Down']) {
-    const tokenId = side === 'Up' ? state.upTokenId : state.downTokenId;
-    const shares = Math.max(round2(S1_BET_DOLLARS / S1_ENTRY_PRICE), MIN_SHARES);
-    const order = await placeRestingBuy(tokenId, S1_ENTRY_PRICE, shares);
-    state.s1.orders[side] = { price: S1_ENTRY_PRICE, shares, orderId: order.id || order.orderId || null };
-    log(`📌 S1 ${side} resting buy ${shares.toFixed(2)}sh @ ${S1_ENTRY_PRICE} placed (one-time, no repeat this window)`);
+// Post a new rung's resting entry buy, if this side currently has neither
+// an order nor an open position.
+async function ladderPlaceEntry(side, elapsed) {
+  const L = state.ladder[side];
+  if (L.order || L.position) return; // already have a rung working
+  if (elapsed < LADDER_ENTRY_DELAY_SECS) return; // let the price feed settle on this window's tokens first
+
+  let raw;
+  if (L.nextEntryPrice != null) {
+    raw = L.nextEntryPrice; // re-entry: anchored to the last cycle's exit, NOT the live price
+  } else {
+    const ask = side === 'Up' ? state.upAsk : state.downAsk;
+    if (ask == null) return; // wait for valid price data before the window's first entry
+    raw = ask - LADDER_ENTRY_OFFSET;
   }
-}
-
-async function s1CheckFills(side) {
-  if (state.s1.filledSide) return; // the other side already won this window — this side is void
-  const order = state.s1.orders[side];
-  if (!order || state.s1.positions[side]) return; // no order, or already filled
-  const ask = side === 'Up' ? state.upAsk : state.downAsk;
-  if (ask == null || ask > order.price) return; // hasn't walked down to meet it yet
-
-  const fillPrice = ask; // real ask, never worse than the order's ceiling
-  const rebate = makerRebate(order.shares, fillPrice);
-  const cost = round2(fillPrice * order.shares - rebate);
-  if (cost > bankroll) { log(`⏭️  S1 ${side}: would fill but bankroll insufficient, dropping`); state.s1.orders[side] = null; return; }
-
-  bankroll = round2(bankroll - cost);
-  realizedPnl = round2(realizedPnl + rebate);
-  rebatesEarned = round2(rebatesEarned + rebate);
-  state.s1.positions[side] = { shares: order.shares, entryPrice: fillPrice, cost, closed: false };
-  state.s1.filledSide = side;
-  recordEquity();
-  log(`💰 S1 ${side} FILLED ${order.shares.toFixed(2)}sh @ ${fillPrice.toFixed(2)} | cost=$${cost.toFixed(2)} | rebate=+$${rebate.toFixed(4)} | no TP/SL — rides to resolution`);
-  registerTrade({ strategy: 1, side: 'BUY', outcome: side, price: fillPrice, shares: order.shares, cost, rebate });
-
-  // This side won — void the other side's resting order for the rest of the window.
-  const other = side === 'Up' ? 'Down' : 'Up';
-  const otherOrder = state.s1.orders[other];
-  if (otherOrder && !state.s1.positions[other]) {
-    await cancelOrder(otherOrder.orderId);
-    state.s1.orders[other] = null;
-    log(`🚫 S1 ${other} order cancelled — ${side} filled first, S1 is mutually exclusive per window`);
-  }
-}
-
-// ─────────────────────────────────────────
-//  Strategy 2 — breakout confirmation, whichever side fills first, rides to resolution
-// ─────────────────────────────────────────
-// Phase 1: detect breakout and arm a genuine resting limit buy at the
-// ceiling (0.70) for THAT side only. This does NOT fill anything — it only
-// flips triggeredSide[side] and opens a resting order, exactly like S1's
-// entries. Strictly side-isolated: Up's ask can never arm Down's order and
-// vice versa.
-async function s2CheckTrigger(side) {
-  if (state.s2.filledSide) return; // the other side already won this window — this side is void
-  if (state.s2.triggeredSide[side]) return; // this side already fired this window — fully independent of the other side
-  if (state.s2.orders[side] || state.s2.positions[side]) return; // already armed/filled this window
-  const ask = side === 'Up' ? state.upAsk : state.downAsk;
-  if (ask == null || ask < S2_TRIGGER_PRICE) return;
-
-  state.s2.triggeredSide[side] = true;
+  const price = round2(clamp(raw, LADDER_MIN, LADDER_MAX));
   const tokenId = side === 'Up' ? state.upTokenId : state.downTokenId;
-  const shares = Math.max(round2(S2_BET_DOLLARS / S2_ENTRY_PRICE), MIN_SHARES);
-  const order = await placeRestingBuy(tokenId, S2_ENTRY_PRICE, shares);
-  state.s2.orders[side] = { price: S2_ENTRY_PRICE, shares, orderId: order.id || order.orderId || null };
-  log(`🔔 S2 ${side} TRIGGERED @ ask=${ask.toFixed(2)} (>= ${S2_TRIGGER_PRICE}) — resting buy armed ${shares.toFixed(2)}sh @ ceiling ${S2_ENTRY_PRICE} (fills only when ${side} ask <= ${S2_ENTRY_PRICE})`);
+  const order = await placeRestingBuy(tokenId, price, LADDER_SHARES);
+  L.order = { price, shares: LADDER_SHARES, orderId: order.id || order.orderId || null };
+  log(`📌 Ladder ${side} rung placed: resting buy ${LADDER_SHARES}sh @ ${price.toFixed(2)}${L.nextEntryPrice != null ? ' (re-entry)' : ' (first entry)'}`);
 }
 
-// Phase 2: the armed order actually fills once THIS side's own ask walks
-// back down to (or is already at/below) the ceiling — never at a price
-// worse than the ceiling, matching the fill semantics used everywhere else.
-async function s2CheckFills(side) {
-  if (state.s2.filledSide) return; // the other side already won this window — this side is void
-  const order = state.s2.orders[side];
-  if (!order || state.s2.positions[side]) return; // no armed order, or already filled
+// Fill the resting entry order once this side's own ask walks down to (or
+// is already at/below) its ceiling — never at a price worse than that ceiling.
+async function ladderCheckFill(side) {
+  const L = state.ladder[side];
+  if (!L.order || L.position) return;
   const ask = side === 'Up' ? state.upAsk : state.downAsk;
-  if (ask == null || ask > order.price) return; // still above ceiling — stays resting
+  if (ask == null || ask > L.order.price) return;
 
-  const fillPrice = ask; // real ask, never worse than the ceiling
-  const rebate = makerRebate(order.shares, fillPrice);
-  const cost = round2(fillPrice * order.shares - rebate);
-  if (cost > bankroll) { log(`⏭️  S2 ${side}: would fill but bankroll insufficient, dropping`); state.s2.orders[side] = null; return; }
+  const fillPrice = ask;
+  const rebate = makerRebate(L.order.shares, fillPrice);
+  const cost = round2(fillPrice * L.order.shares - rebate);
+  if (cost > bankroll) { log(`⏭️  Ladder ${side}: would fill but bankroll insufficient, dropping rung`); L.order = null; return; }
 
   bankroll = round2(bankroll - cost);
   realizedPnl = round2(realizedPnl + rebate);
   rebatesEarned = round2(rebatesEarned + rebate);
-  state.s2.positions[side] = { shares: order.shares, entryPrice: fillPrice, cost, closed: false };
-  state.s2.filledSide = side;
+  L.position = { shares: L.order.shares, entryPrice: fillPrice, cost, peak: fillPrice, armed: false, closed: false };
+  L.order = null;
   recordEquity();
-  log(`💰 S2 ${side} FILLED ${order.shares.toFixed(2)}sh @ ${fillPrice.toFixed(2)} | cost=$${cost.toFixed(2)} | rebate=+$${rebate.toFixed(4)} | SL @ ${S2_SL_PRICE}, no TP — rides to resolution otherwise`);
-  registerTrade({ strategy: 2, side: 'BUY', outcome: side, price: fillPrice, shares: order.shares, cost, rebate });
-
-  // This side won — void the other side's armed order (if any) for the rest of the window.
-  const other = side === 'Up' ? 'Down' : 'Up';
-  const otherOrder = state.s2.orders[other];
-  if (otherOrder && !state.s2.positions[other]) {
-    await cancelOrder(otherOrder.orderId);
-    state.s2.orders[other] = null;
-    log(`🚫 S2 ${other} order cancelled — ${side} filled first, S2 is mutually exclusive per window`);
-  }
+  log(`💰 Ladder ${side} FILLED ${L.position.shares}sh @ ${fillPrice.toFixed(2)} | cost=$${cost.toFixed(2)} | rebate=+$${rebate.toFixed(4)} | arms trailing stop at ${round2(fillPrice + LADDER_TP_ARM).toFixed(2)}, then trails ${LADDER_TP_TRAIL} behind peak`);
+  registerTrade({ strategy: 'Ladder', side: 'BUY', outcome: side, price: fillPrice, shares: L.position.shares, cost, rebate });
 }
 
-// SL only — no TP. Hard guard: this can only ever act on the side that is
-// both this window's triggeredSide AND this window's filledSide, so it is
-// structurally impossible for the untriggered/unfilled side to be touched.
-async function s2ManagePosition(side) {
-  if (!state.s2.triggeredSide[side]) return;
-  if (state.s2.filledSide !== side) return;
-  const pos = state.s2.positions[side];
+// Track the peak, arm the trailing stop once +0.20 profit is reached, then
+// trail 0.10 behind the peak and exit (marketable) if price falls to that
+// level. On exit, immediately queue the next rung's re-entry price.
+async function ladderManagePosition(side) {
+  const L = state.ladder[side];
+  const pos = L.position;
   if (!pos || pos.closed) return;
   const bid = side === 'Up' ? state.upBid : state.downBid;
-  if (bid == null || bid > S2_SL_PRICE) return;
+  if (bid == null) return;
+
+  if (bid > pos.peak) pos.peak = bid;
+  if (!pos.armed && pos.peak >= pos.entryPrice + LADDER_TP_ARM) {
+    pos.armed = true;
+    log(`🎯 Ladder ${side} trailing stop ARMED @ peak ${pos.peak.toFixed(2)} — now trailing ${LADDER_TP_TRAIL} behind peak`);
+  }
+  if (!pos.armed) return;
+
+  const stopPrice = round2(pos.peak - LADDER_TP_TRAIL);
+  if (bid > stopPrice) return; // still above the trailing stop
 
   const tokenId = side === 'Up' ? state.upTokenId : state.downTokenId;
   await placeMarketableSell(tokenId, bid, pos.shares);
@@ -430,11 +378,15 @@ async function s2ManagePosition(side) {
   const profit = round2(proceeds - pos.cost);
   realizedPnl = round2(realizedPnl + profit);
   feesPaid = round2(feesPaid + fee);
-  losses++;
+  if (profit >= 0) wins++; else losses++;
   pos.closed = true;
-  log(`🧯 S2 ${side} SL hit @ ${bid.toFixed(2)} | ${pos.shares.toFixed(2)}sh | fee=-$${fee.toFixed(4)} | pnl=$${profit.toFixed(2)} | bankroll=$${bankroll.toFixed(2)}`);
-  registerTrade({ strategy: 2, side: 'SELL', outcome: side, reason: 'SL', price: bid, shares: pos.shares, profit });
+  L.cycles++;
+  L.cyclePnl = round2(L.cyclePnl + profit);
+  L.nextEntryPrice = round2(clamp(bid - LADDER_REENTRY_OFFSET, LADDER_MIN, LADDER_MAX));
+  log(`🏁 Ladder ${side} cycle #${L.cycles} closed @ ${bid.toFixed(2)} (peak ${pos.peak.toFixed(2)}) | ${pos.shares}sh | fee=-$${fee.toFixed(4)} | pnl=$${profit.toFixed(2)} | bankroll=$${bankroll.toFixed(2)} | next rung @ ${L.nextEntryPrice.toFixed(2)}`);
+  registerTrade({ strategy: 'Ladder', side: 'SELL', outcome: side, reason: 'TRAIL', price: bid, shares: pos.shares, profit });
   recordEquity();
+  L.position = null; // clear so the next tick's ladderPlaceEntry posts the next rung
 }
 
 // ─────────────────────────────────────────
@@ -461,34 +413,30 @@ async function resolveWindow() {
   if (state.resolvedThisWindow) return;
   state.resolvedThisWindow = true;
 
-  const anyOpen = ['Up', 'Down'].some(s => (state.s1.positions[s] && !state.s1.positions[s].closed) || (state.s2.positions[s] && !state.s2.positions[s].closed));
+  const anyOpen = ['Up', 'Down'].some(s => state.ladder[s].position && !state.ladder[s].position.closed);
   let winner = null;
   if (anyOpen) winner = await determineWinningSide();
 
-  // Cancel any still-resting entry orders that never filled — they should
-  // not carry over or linger once the window is done.
+  // Cancel any still-resting entry order that never filled — it should not
+  // carry over or linger once the window is done.
   for (const side of ['Up', 'Down']) {
-    const s1o = state.s1.orders[side];
-    if (s1o && !state.s1.positions[side]) await cancelOrder(s1o.orderId);
-    const s2o = state.s2.orders[side];
-    if (s2o && !state.s2.positions[side]) await cancelOrder(s2o.orderId);
+    const L = state.ladder[side];
+    if (L.order) { await cancelOrder(L.order.orderId); L.order = null; }
   }
 
-  for (const [label, bucket] of [['S1', state.s1.positions], ['S2', state.s2.positions]]) {
-    for (const side of ['Up', 'Down']) {
-      const pos = bucket[side];
-      if (!pos || pos.closed) continue;
-      const won = winner === side;
-      const proceeds = won ? round2(pos.shares * 1) : 0;
-      const profit = round2(proceeds - pos.cost);
-      bankroll = round2(bankroll + proceeds);
-      realizedPnl = round2(realizedPnl + profit);
-      if (won) wins++; else losses++;
-      pos.closed = true;
-      const icon = won ? '💰' : '💥';
-      log(`${icon} ${label} ${side} RESOLUTION ${pos.shares.toFixed(2)}sh entry=${pos.entryPrice.toFixed(2)} exit=$${won ? '1.00' : '0.00'}/sh | pnl=$${profit.toFixed(2)} | bankroll=$${bankroll.toFixed(2)} (dashboard bookkeeping only — real redemption is via the separate claim script)`);
-      registerTrade({ strategy: label === 'S1' ? 1 : 2, side: 'SELL', outcome: side, reason: 'RESOLUTION', price: won ? 1 : 0, shares: pos.shares, profit });
-    }
+  for (const side of ['Up', 'Down']) {
+    const pos = state.ladder[side].position;
+    if (!pos || pos.closed) continue;
+    const won = winner === side;
+    const proceeds = won ? round2(pos.shares * 1) : 0;
+    const profit = round2(proceeds - pos.cost);
+    bankroll = round2(bankroll + proceeds);
+    realizedPnl = round2(realizedPnl + profit);
+    if (won) wins++; else losses++;
+    pos.closed = true;
+    const icon = won ? '💰' : '💥';
+    log(`${icon} Ladder ${side} RESOLUTION ${pos.shares}sh entry=${pos.entryPrice.toFixed(2)} exit=$${won ? '1.00' : '0.00'}/sh | pnl=$${profit.toFixed(2)} | bankroll=$${bankroll.toFixed(2)} (dashboard bookkeeping only — real redemption is via the separate claim script)`);
+    registerTrade({ strategy: 'Ladder', side: 'SELL', outcome: side, reason: 'RESOLUTION', price: won ? 1 : 0, shares: pos.shares, profit });
   }
   recordEquity();
 }
@@ -510,12 +458,10 @@ async function tick() {
   }
   if (state.resolvedThisWindow) return;
 
-  await s1PlaceEntries(elapsed);
   for (const side of ['Up', 'Down']) {
-    await s1CheckFills(side);
-    await s2CheckTrigger(side);
-    await s2CheckFills(side);
-    await s2ManagePosition(side);
+    await ladderPlaceEntry(side, elapsed);
+    await ladderCheckFill(side);
+    await ladderManagePosition(side);
   }
 }
 
@@ -527,8 +473,8 @@ function buildState() {
   const held = round2(mv - bankroll);
   const costBasis = round2(
     ['Up','Down'].reduce((s, side) => {
-      const p1 = state.s1.positions[side]; const p2 = state.s2.positions[side];
-      return s + (p1 && !p1.closed ? p1.cost : 0) + (p2 && !p2.closed ? p2.cost : 0);
+      const p = state.ladder[side].position;
+      return s + (p && !p.closed ? p.cost : 0);
     }, 0)
   );
   const unrealizedPnl = round2(held - costBasis);
@@ -537,16 +483,9 @@ function buildState() {
     tradable: state.tradable, slug: state.slug, windowEnd: state.windowEnd,
     secsToEnd: state.windowEnd ? Math.max(0, Math.floor(state.windowEnd - nowSec())) : null,
     upAsk: state.upAsk, upBid: state.upBid, downAsk: state.downAsk, downBid: state.downBid,
-    s1: {
-      placed: state.s1.placed,
-      orders: state.s1.orders,
-      positions: state.s1.positions,
-    },
-    s2: {
-      triggered: state.s2.triggeredSide.Up || state.s2.triggeredSide.Down,
-      triggeredSide: state.s2.triggeredSide,
-      orders: state.s2.orders,
-      positions: state.s2.positions,
+    ladder: {
+      Up: state.ladder.Up,
+      Down: state.ladder.Down,
     },
     totalCapital: TOTAL_CAPITAL, bankroll, markValue: mv,
     // capital == starting capital + realized P&L + unrealized P&L, i.e. the
@@ -557,8 +496,9 @@ function buildState() {
     winRate: (wins + losses) > 0 ? round2((wins / (wins + losses)) * 100) : null,
     uptime: Math.floor((Date.now() - startTime) / 1000),
     config: {
-      s1EntryPrice: S1_ENTRY_PRICE, s1BetDollars: S1_BET_DOLLARS,
-      s2TriggerPrice: S2_TRIGGER_PRICE, s2EntryPrice: S2_ENTRY_PRICE, s2SlPrice: S2_SL_PRICE, s2BetDollars: S2_BET_DOLLARS,
+      ladderMin: LADDER_MIN, ladderMax: LADDER_MAX, ladderEntryOffset: LADDER_ENTRY_OFFSET,
+      ladderTpArm: LADDER_TP_ARM, ladderTpTrail: LADDER_TP_TRAIL, ladderReentryOffset: LADDER_REENTRY_OFFSET,
+      ladderShares: LADDER_SHARES,
       cryptoTakerFeeRate: CRYPTO_TAKER_FEE_RATE, cryptoMakerRebateShare: CRYPTO_MAKER_REBATE_SHARE,
     },
     equityCurve, logs: logs.slice(-100), trades: trades.slice(-80).reverse(),
@@ -601,10 +541,9 @@ function setMode(wantLive) {
 async function init(privateKey, emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
-  log(`🚀 Two-Strategy Limit Order Bot — BTC 15-minute windows only`);
+  log(`🚀 Independent Ladder Bot — BTC 15-minute windows only`);
   log(`⚙️  $${TOTAL_CAPITAL} capital`);
-  log(`⚙️  Strategy 1: waits ${S1_ENTRY_DELAY_SECS}s after window start, then rests buy both sides @ ${S1_ENTRY_PRICE}, $${S1_BET_DOLLARS} each, once per window | whichever side fills FIRST wins — the other side's order is cancelled | no TP/SL — rides to resolution`);
-  log(`⚙️  Strategy 2: EACH side independently arms a resting buy @ ${S2_ENTRY_PRICE} ceiling once its own ask reaches ${S2_TRIGGER_PRICE}, $${S2_BET_DOLLARS} | whichever side fills FIRST wins — the other side's order is cancelled | SL @ ${S2_SL_PRICE} (marketable), no TP — rides to resolution otherwise`);
+  log(`⚙️  Ladder: Up and Down each run their OWN independent ladder, band [${LADDER_MIN}, ${LADDER_MAX}] | entry = reference - ${LADDER_ENTRY_OFFSET}, ${LADDER_SHARES}sh fixed per rung | trailing stop arms at +${LADDER_TP_ARM} profit, then trails ${LADDER_TP_TRAIL} behind peak | on exit, next rung re-enters at (exit - ${LADDER_REENTRY_OFFSET}) | unarmed positions ride to resolution | waits ${LADDER_ENTRY_DELAY_SECS}s after window start before the first entry`);
   log(`⚙️  fill semantics: limit fills at the real current ask when ask<=ceiling, never worse than the ceiling price`);
   log(`${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
