@@ -2,51 +2,40 @@
 
 /**
  * ═══════════════════════════════════════════════════════════════
- *  POLYMARKET CRYPTO UP/DOWN — DUAL PRICE-ACTION STRADDLE STRATEGIES
+ *  POLYMARKET BTC 5-MINUTE UP/DOWN — DUAL LIMIT-ORDER PLAYBOOK
  * ═══════════════════════════════════════════════════════════════
  *
- *  Runs on 15m and 5m windows only (no 1h market). For every window,
- *  BOTH the Up and Down outcome tokens are candidates — there is no
- *  pre-assigned directional "side" anymore. Two independent strategies
- *  watch every window at once:
+ *  Only BTC. Only the 5-minute Up/Down market. No candles, no signals,
+ *  no streaks — none of the prior hourly/15m/5m reversal logic remains.
  *
- *  STRATEGY 1 — buy-the-dip straddle:
- *    Each leg (Up, Down) independently places a limit buy at 0.30.
- *    Once a leg fills: TP at 0.70, SL at 0.10. If neither TP nor SL is
- *    hit before the window ends, it settles at actual resolution
- *    (1.00 if that side won, 0.00 if it lost). Bet = $50 PER LEG (so
- *    up to $100 total if both legs fill in the same window). Each leg
- *    fires at most once per window — no repeat re-entry after it
- *    closes.
+ *  Two independent strategies run every 5-minute window:
  *
- *  STRATEGY 2 — momentum-spike straddle:
- *    Independent of Strategy 1. The first time EITHER side's ask
- *    ticks to 0.70 or higher, immediately place a limit buy at 0.70 on
- *    BOTH Up and Down (one-shot trigger per window). Each leg then
- *    carries an SL at 0.30; there is no explicit TP — a leg that isn't
- *    stopped out rides to actual resolution (1.00 or 0.00). Bet = $100
- *    PER LEG (so $200 total once triggered, since both legs are bought
- *    together).
+ *  STRATEGY 1 (mean-reversion entries, one-shot per side):
+ *    - The instant a window opens, place a RESTING limit buy at 0.30
+ *      for Up, and a separate resting limit buy at 0.30 for Down.
+ *      $50 notional each (shares = $50 / 0.30).
+ *    - If a side fills: place a resting TP limit sell at 0.70. Watch
+ *      for price falling to 0.10 — if it does, cancel the TP and exit
+ *      immediately with a market sell (stop loss).
+ *    - If a side never fills by window end, its resting order is
+ *      cancelled. No retry, no repeat — one attempt per side per window.
  *
- *  Strategy 1 and Strategy 2 are fully independent and can both fire
- *  in the same window (e.g. Strategy 1 fills the Up dip at 0.30, and
- *  later the same window's price spike to 0.70 also triggers Strategy
- *  2 buying both legs at 0.70).
+ *  STRATEGY 2 (momentum-confirmation entries, one-shot per window):
+ *    - Watches both sides all window. The instant EITHER side's ask
+ *      ticks to 0.70 or higher, immediately attempt a limit buy at
+ *      0.70 for BOTH Up and Down. $100 notional each.
+ *    - Stop loss at 0.30 (market sell exit if price falls back to
+ *      0.30). No take-profit order — a side that isn't stopped out
+ *      rides to actual market resolution.
+ *    - Fires once per window, even if 0.70 is touched again later.
  *
- *  FEES: a taker fee (CRYPTO_TAKER_FEE_RATE) is charged on every entry
- *  and on every TP/SL exit (a real order-book trade). Resolution
- *  settlement (redemption) is not fee'd, matching how the rest of
- *  this bot's bookkeeping treats final settlement.
+ *  Sizing is always a fixed dollar amount per side (not per-share).
+ *  No compounding, no bankroll-based scaling.
  *
- *  SLUGS: 5m/15m Polymarket markets use predictable epoch-based slugs
- *  (`{symbol}-updown-{tf}-{epoch}`).
- *
- *  LIVE / DEMO: DRY_RUN is runtime-switchable (see setMode). In DEMO
- *  mode all fills are simulated. In LIVE mode, entries route through
- *  trader.limitBuy(); exits route through trader.limitSell() if that
- *  method exists on the configured PolymarketTrader — if it doesn't,
- *  exits are logged but NOT sent to the exchange (bookkeeping only),
- *  since this bot was not given that class's source to verify against.
+ *  DRY_RUN is runtime-switchable (see setMode). In DRY_RUN, order fills
+ *  are simulated from observed ask/bid prices; in LIVE mode, this uses
+ *  the real trader (GTC resting orders, FOK immediate orders, polling,
+ *  cancellation) via polymarket-trader.js.
  * ═══════════════════════════════════════════════════════════════
  */
 
@@ -55,33 +44,32 @@ const PolymarketTrader = require('./polymarket-trader');
 const GAMMA = 'https://gamma-api.polymarket.com';
 const CLOB  = 'https://clob.polymarket.com';
 
+const SYMBOL = 'BTC'; // hard-locked — this bot only ever trades BTC 5m
+
 const TICK_MS               = 500;
 const POLY_PRICE_REFRESH_MS = 1000;
-const EARLY_CUTOFF_SECS     = Number(process.env.EARLY_CUTOFF_SECS || 2); // stop opening new positions / start resolving this many secs before nominal window end
+const EARLY_CUTOFF_SECS     = Number(process.env.EARLY_CUTOFF_SECS || 2);
+const WINDOW_SECS           = 300; // 5 minutes
 
-let DRY_RUN = (process.env.DRY_RUN || 'true').toLowerCase() === 'true'; // runtime-switchable — see setMode
-const TOTAL_CAPITAL = Number(process.env.TOTAL_CAPITAL || 2000);
-const DEFAULT_PAIRS = (process.env.CRYPTO_PAIRS || 'BTC')
-  .split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
+let DRY_RUN = (process.env.DRY_RUN || 'true').toLowerCase() === 'true';
+const TOTAL_CAPITAL = Number(process.env.TOTAL_CAPITAL || 1000);
 
 function round2(n) { return Math.round(n * 100) / 100; }
-function round5(n) { return Math.round(n * 100000) / 100000; }
+function round4(n) { return Math.round(n * 10000) / 10000; }
 function nowSec() { return Date.now() / 1000; }
 
 // ── Strategy parameters ──
-const S1_BUY_PRICE = Number(process.env.S1_BUY_PRICE || 0.30);
-const S1_TP        = Number(process.env.S1_TP || 0.70);
-const S1_SL        = Number(process.env.S1_SL || 0.10);
-const S1_BET_USD   = Number(process.env.S1_BET_USD || 50);   // per leg
+const STRAT1_BUY_PRICE = Number(process.env.STRAT1_BUY_PRICE || 0.30);
+const STRAT1_TP_PRICE  = Number(process.env.STRAT1_TP_PRICE  || 0.70);
+const STRAT1_SL_PRICE  = Number(process.env.STRAT1_SL_PRICE  || 0.10);
+const STRAT1_BET       = Number(process.env.STRAT1_BET       || 50);   // $ per side
 
-const S2_TRIGGER   = Number(process.env.S2_TRIGGER || 0.70);
-const S2_BUY_PRICE = Number(process.env.S2_BUY_PRICE || 0.70);
-const S2_SL        = Number(process.env.S2_SL || 0.30);
-const S2_BET_USD   = Number(process.env.S2_BET_USD || 100);  // per leg
+const STRAT2_TRIGGER_PRICE = Number(process.env.STRAT2_TRIGGER_PRICE || 0.70);
+const STRAT2_BUY_PRICE     = Number(process.env.STRAT2_BUY_PRICE     || 0.70);
+const STRAT2_SL_PRICE      = Number(process.env.STRAT2_SL_PRICE      || 0.30);
+const STRAT2_BET           = Number(process.env.STRAT2_BET           || 100); // $ per side
 
 const CRYPTO_TAKER_FEE_RATE = Number(process.env.CRYPTO_TAKER_FEE_RATE || 0.07);
-
-const TIMEFRAMES = { '15m': 900, '5m': 300 };
 
 let emitFn = () => {};
 let slog = () => {};
@@ -90,12 +78,14 @@ let startTime = Date.now();
 let logs = [];
 let trades = [];
 let tradingEnabled = true;
-let pairList = [...DEFAULT_PAIRS];
-let perPairCapital = TOTAL_CAPITAL / Math.max(pairList.length, 1);
-let pairs = {};
+let bankroll = TOTAL_CAPITAL;
+let realizedPnl = 0;
+let feesPaid = 0;
+let wins = 0, losses = 0;
+let equityCurve = [{ t: Date.now(), equity: TOTAL_CAPITAL }];
+let windows = []; // flat list of 5m window trackers
+let tokenPriceMap = {}; // tokenId -> { ask, bid }
 let lastPolyPriceFetch = 0;
-let totalEquityCurve = [];
-let tokenAskMap = {}; // tokenId -> current BUY (ask) price
 
 function log(msg) {
   const line = `[${new Date().toISOString().slice(11, 19)}] ${msg}`;
@@ -105,96 +95,74 @@ function log(msg) {
 }
 
 async function getJSON(url) {
-  const res = await fetch(url, { headers: { 'User-Agent': 'polymarket-straddle-bot/1.0' } });
+  const res = await fetch(url, { headers: { 'User-Agent': 'polymarket-btc-5m-bot/1.0' } });
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${url}`);
   return res.json();
 }
 async function postJSON(url, body) {
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'User-Agent': 'polymarket-straddle-bot/1.0' },
+    headers: { 'Content-Type': 'application/json', 'User-Agent': 'polymarket-btc-5m-bot/1.0' },
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${url}`);
   return res.json();
 }
 
-async function placeEntryBuy(tokenId, price, shares) {
-  if (!DRY_RUN && trader) return await trader.limitBuy(tokenId, shares, price);
-  return { id: `dry-buy-${Date.now()}-${Math.random().toString(36).slice(2, 7)}` };
-}
-async function placeExitSell(tokenId, price, shares) {
-  if (!DRY_RUN && trader) {
-    if (typeof trader.limitSell === 'function') return await trader.limitSell(tokenId, shares, price);
-    log(`⚠️  trader.limitSell() not available — exit recorded in bookkeeping only, NOT sent to the exchange`);
-    return null;
-  }
-  return { id: `dry-sell-${Date.now()}-${Math.random().toString(36).slice(2, 7)}` };
-}
 function takerFee(shares, price) {
-  return round5(shares * CRYPTO_TAKER_FEE_RATE * price * (1 - price));
+  return round4(shares * CRYPTO_TAKER_FEE_RATE * price * (1 - price));
 }
 
 // ─────────────────────────────────────────
-//  Pair state
+//  Order helpers — real trader in LIVE, simulated in DRY_RUN
 // ─────────────────────────────────────────
-function freshPairState(symbol) {
-  return {
-    symbol,
-    bankroll: perPairCapital,
-    realizedPnl: 0,
-    feesPaid: 0,
-    wins: 0, losses: 0,
-    windows: [], // flat list of window trackers (15m + 5m, rolling)
-    equityCurve: [{ t: Date.now(), equity: perPairCapital }],
-  };
+async function placeRestingBuy(tokenId, price, size) {
+  if (DRY_RUN) return { id: `dry-buy-${Date.now()}-${Math.random().toString(36).slice(2, 7)}` };
+  return await trader.placeGtcOrder(tokenId, 'BUY', price, size);
 }
-function resetPairs() {
-  perPairCapital = TOTAL_CAPITAL / Math.max(pairList.length, 1);
-  pairs = {};
-  for (const sym of pairList) pairs[sym] = freshPairState(sym);
-  totalEquityCurve = [{ t: Date.now(), equity: TOTAL_CAPITAL }];
+async function placeRestingSell(tokenId, price, size) {
+  if (DRY_RUN) return { id: `dry-sell-${Date.now()}-${Math.random().toString(36).slice(2, 7)}` };
+  return await trader.placeGtcOrder(tokenId, 'SELL', price, size);
 }
-resetPairs();
-
-function windowStartFor(tf, tsSec = nowSec()) { const secs = TIMEFRAMES[tf]; return Math.floor(tsSec / secs) * secs; }
-
-function freshLeg() {
-  return {
-    status: 'idle',       // idle -> open -> closed | skipped
-    entryPrice: null, shares: null, cost: null,
-    exitPrice: null, exitReason: null, // 'tp' | 'sl' | 'resolution'
-    profit: null, won: null,
-  };
+async function cancelOrderSafe(orderId) {
+  if (DRY_RUN || !orderId) return;
+  try { await trader.cancelOrder(orderId); } catch (e) { log(`⚠️  cancel failed for ${orderId}: ${e.message}`); }
 }
-function buildWindow(symbol, tf, windowStart) {
-  const secs = TIMEFRAMES[tf];
-  return {
-    id: `${symbol}-${tf}-${windowStart}`,
-    tf, windowStart, windowEnd: windowStart + secs,
-    slug: null, conditionId: null, upTokenId: null, downTokenId: null,
-    loaded: false, tradable: false,
-    resolved: false, resolvedAt: null,
-    s1: { up: freshLeg(), down: freshLeg() },
-    s2: { triggered: false, up: freshLeg(), down: freshLeg() },
-  };
-}
-
-// Makes sure a window tracker exists for the CURRENT 15m period and the
-// CURRENT 5m period. Called every tick — cheap no-op once both exist.
-function ensureCurrentWindows(s) {
-  for (const tf of ['15m', '5m']) {
-    const ws = windowStartFor(tf);
-    const id = `${s.symbol}-${tf}-${ws}`;
-    if (!s.windows.find(w => w.id === id)) {
-      s.windows.push(buildWindow(s.symbol, tf, ws));
-      log(`🆕 ${s.symbol} new ${tf} window [${new Date(ws * 1000).toISOString().slice(11, 16)}Z]`);
-    }
+// Immediate fill-or-kill buy at an explicit price ceiling (used for Strategy 2's reactive entry)
+async function placeFokLimitBuy(tokenId, price, size) {
+  if (DRY_RUN) {
+    const ask = tokenPriceMap[tokenId]?.ask;
+    const filled = ask != null && ask <= price;
+    return { id: `dry-fok-${Date.now()}`, isFilled: filled, avgPrice: filled ? Math.min(price, ask) : null };
   }
+  return await trader.placeFokLimitOrder(tokenId, 'BUY', price, size);
+}
+// Immediate market sell (used for stop-losses)
+async function marketSellNow(tokenId, shares) {
+  if (DRY_RUN) {
+    const bid = tokenPriceMap[tokenId]?.bid ?? tokenPriceMap[tokenId]?.ask ?? 0;
+    return { id: `dry-mkt-sell-${Date.now()}`, isFilled: true, avgPrice: bid };
+  }
+  return await trader.placeFokSell(tokenId, shares);
+}
+// Poll a resting order's status (LIVE only — DRY_RUN fills are simulated from price directly)
+async function checkOrderStatus(orderId) {
+  if (DRY_RUN || !orderId) return { filled: false };
+  try {
+    const order = await trader.getOrder(orderId);
+    if (!order) return { filled: false };
+    const status = order.status || '';
+    const matchStatus = (order.match_status || order.matchStatus || '').toLowerCase();
+    const state = (order.state || '').toLowerCase();
+    const filled = status === 'FILLED' || matchStatus === 'filled' || state === 'filled';
+    const cancelled = status === 'CANCELLED' || matchStatus === 'cancelled';
+    const avgPrice = parseFloat(order.avg_fill_price || order.price || '0') || null;
+    return { filled, cancelled, avgPrice };
+  } catch (_) { return { filled: false }; }
 }
 
 // ─────────────────────────────────────────
-//  Market discovery
+//  Market discovery — 5m BTC window (same epoch-slug scheme already proven to work)
 // ─────────────────────────────────────────
 function qOf(m) { return (m.question || m.groupItemTitle || m.title || '').toLowerCase(); }
 function parseMarketTokens(m) {
@@ -213,13 +181,10 @@ function tokenIdForSide(market, side) {
 function pickMarket(event) {
   return (event.markets || []).find(m => { const q = qOf(m); return q.includes('up') || q.includes('down'); }) || (event.markets || [])[0];
 }
-
-// 5m / 15m: predictable epoch-based slugs.
-async function fetchEventForWindow(symbol, tf, windowStart) {
-  const secs = TIMEFRAMES[tf];
+async function fetchEventForWindow(windowStart) {
   for (const offsetMult of [0, -1, 1]) {
-    const ws = windowStart + offsetMult * secs;
-    const slug = `${symbol.toLowerCase()}-updown-${tf}-${ws}`;
+    const ws = windowStart + offsetMult * WINDOW_SECS;
+    const slug = `${SYMBOL.toLowerCase()}-updown-5m-${ws}`;
     try {
       const event = await getJSON(`${GAMMA}/events/slug/${encodeURIComponent(slug)}`);
       if (event && event.id && Array.isArray(event.markets) && event.markets.length) {
@@ -230,15 +195,38 @@ async function fetchEventForWindow(symbol, tf, windowStart) {
   return null;
 }
 
-async function tryLoadWindow(s, w) {
-  const found = await fetchEventForWindow(s.symbol, w.tf, w.windowStart);
+function windowStartFor(tsSec = nowSec()) { return Math.floor(tsSec / WINDOW_SECS) * WINDOW_SECS; }
+
+// ─────────────────────────────────────────
+//  Window construction
+// ─────────────────────────────────────────
+function freshSideState() {
+  return {
+    state: 'idle', // idle -> resting -> filled -> tp_filled | sl_exit | holding_to_resolution | resolved | expired_unfilled
+    orderId: null, tpOrderId: null,
+    entryFillPrice: null, exitPrice: null, exitReason: null,
+    shares: null, cost: null, pnl: null,
+  };
+}
+function buildWindow(windowStart) {
+  return {
+    id: `BTC-5m-${windowStart}`,
+    windowStart, windowEnd: windowStart + WINDOW_SECS,
+    slug: null, upTokenId: null, downTokenId: null,
+    loaded: false, tradable: false,
+    strat1: { up: freshSideState(), down: freshSideState() },
+    strat2: { triggered: false, triggerSide: null, triggerPrice: null, up: freshSideState(), down: freshSideState() },
+    resolved: false, resolvedAt: null,
+  };
+}
+async function tryLoadWindow(w) {
+  const found = await fetchEventForWindow(w.windowStart);
   if (!found) return;
   const { market, slug } = found;
   const upId = tokenIdForSide(market, 'up');
   const downId = tokenIdForSide(market, 'down');
   if (!upId || !downId) return;
   w.slug = slug;
-  w.conditionId = market.conditionId || null;
   w.upTokenId = upId;
   w.downTokenId = downId;
   w.loaded = true;
@@ -246,186 +234,259 @@ async function tryLoadWindow(s, w) {
 }
 
 // ─────────────────────────────────────────
-//  Polymarket price feed
+//  Price feed — both ask (BUY) and bid (SELL) for every tracked token
 // ─────────────────────────────────────────
 async function refreshAllPrices() {
   const tokenSet = new Set();
-  for (const s of Object.values(pairs)) {
-    for (const w of s.windows) {
-      if (w.resolved || !w.loaded) continue;
-      if (w.upTokenId) tokenSet.add(w.upTokenId);
-      if (w.downTokenId) tokenSet.add(w.downTokenId);
-    }
+  for (const w of windows) {
+    if (w.resolved || !w.loaded) continue;
+    tokenSet.add(w.upTokenId);
+    tokenSet.add(w.downTokenId);
   }
   if (!tokenSet.size) return;
-  const requests = [...tokenSet].map(tid => ({ token_id: tid, side: 'BUY' }));
+  const requests = [];
+  for (const tid of tokenSet) { requests.push({ token_id: tid, side: 'BUY' }); requests.push({ token_id: tid, side: 'SELL' }); }
   try {
     const data = await postJSON(`${CLOB}/prices`, requests);
     if (Array.isArray(data)) {
       for (const row of data) {
         const tid = row.token_id || row.asset_id || row.tokenId;
         const price = parseFloat(row.price);
-        if (tid && Number.isFinite(price)) tokenAskMap[tid] = price;
+        const side = (row.side || '').toUpperCase();
+        if (!tid || !Number.isFinite(price)) continue;
+        tokenPriceMap[tid] = tokenPriceMap[tid] || {};
+        if (side === 'SELL') tokenPriceMap[tid].bid = price; else tokenPriceMap[tid].ask = price;
       }
     } else if (data && typeof data === 'object') {
       for (const [tid, val] of Object.entries(data)) {
-        if (val && typeof val === 'object') {
-          const p = val.BUY != null ? val.BUY : (val.buy != null ? val.buy : null);
-          if (p != null) tokenAskMap[tid] = parseFloat(p);
-        }
+        if (!val || typeof val !== 'object') continue;
+        tokenPriceMap[tid] = tokenPriceMap[tid] || {};
+        if (val.BUY != null) tokenPriceMap[tid].ask = parseFloat(val.BUY);
+        if (val.buy != null) tokenPriceMap[tid].ask = parseFloat(val.buy);
+        if (val.SELL != null) tokenPriceMap[tid].bid = parseFloat(val.SELL);
+        if (val.sell != null) tokenPriceMap[tid].bid = parseFloat(val.sell);
       }
     }
   } catch (e) {
     for (const tid of tokenSet) {
       try {
-        const r = await getJSON(`${CLOB}/price?token_id=${tid}&side=BUY`);
-        const p = parseFloat(r.price || r.mid);
-        if (Number.isFinite(p)) tokenAskMap[tid] = p;
+        const [a, b] = await Promise.all([
+          getJSON(`${CLOB}/price?token_id=${tid}&side=BUY`),
+          getJSON(`${CLOB}/price?token_id=${tid}&side=SELL`),
+        ]);
+        tokenPriceMap[tid] = { ask: parseFloat(a.price || a.mid), bid: parseFloat(b.price || b.mid) };
       } catch (_) {}
     }
   }
 }
 
 // ─────────────────────────────────────────
-//  Equity tracking
+//  Equity / bookkeeping
 // ─────────────────────────────────────────
-function windowMarkValue(w) {
-  if (w.resolved) return 0;
-  let val = 0;
-  for (const stratName of ['s1', 's2']) {
-    for (const sideName of ['up', 'down']) {
-      const leg = w[stratName][sideName];
-      if (leg.status !== 'open') continue;
-      const tid = sideName === 'up' ? w.upTokenId : w.downTokenId;
-      const px = tokenAskMap[tid];
-      val += leg.shares * (px ?? leg.entryPrice);
-    }
+function sideMarkValue(sideState, tokenId) {
+  if (sideState.state !== 'filled' && sideState.state !== 'holding_to_resolution') return 0;
+  const bid = tokenPriceMap[tokenId]?.bid;
+  return round2(sideState.shares * (bid ?? sideState.entryFillPrice));
+}
+function markValue() {
+  let held = 0;
+  for (const w of windows) {
+    if (w.resolved) continue;
+    held += sideMarkValue(w.strat1.up, w.upTokenId) + sideMarkValue(w.strat1.down, w.downTokenId);
+    held += sideMarkValue(w.strat2.up, w.upTokenId) + sideMarkValue(w.strat2.down, w.downTokenId);
   }
-  return round2(val);
+  return round2(bankroll + held);
 }
-function pairMarkValue(s) {
-  const held = s.windows.reduce((sum, w) => sum + windowMarkValue(w), 0);
-  return round2(s.bankroll + held);
+function recordEquity() {
+  equityCurve.push({ t: Date.now(), equity: markValue() });
+  if (equityCurve.length > 500) equityCurve.shift();
 }
-function pushGlobalEquity() {
-  const total = round2(Object.values(pairs).reduce((sum, s) => sum + pairMarkValue(s), 0));
-  totalEquityCurve.push({ t: Date.now(), equity: total });
-  if (totalEquityCurve.length > 500) totalEquityCurve.shift();
-}
-function recordEquity(s) {
-  s.equityCurve.push({ t: Date.now(), equity: pairMarkValue(s) });
-  if (s.equityCurve.length > 300) s.equityCurve.shift();
-  pushGlobalEquity();
-}
-function registerTrade(s, entry) {
-  const rec = { time: new Date().toISOString().slice(11, 19), symbol: s.symbol, ...entry };
+function registerTrade(entry) {
+  const rec = { time: new Date().toISOString().slice(11, 19), symbol: SYMBOL, ...entry };
   trades.push(rec);
   if (trades.length > 300) trades.shift();
 }
 
 // ─────────────────────────────────────────
-//  Leg open/close — shared by both strategies
+//  Strategy 1 — resting 0.30 buy, TP 0.70, SL 0.10, one-shot per side
 // ─────────────────────────────────────────
-async function openLeg(s, w, stratName, sideName, leg, entryPrice, betUsd) {
+async function processStrat1Side(w, sideName) {
+  const s = w.strat1[sideName];
   const tokenId = sideName === 'up' ? w.upTokenId : w.downTokenId;
-  const shares = round2(betUsd / entryPrice);
-  const notional = round2(entryPrice * shares);
-  const fee = takerFee(shares, entryPrice);
-  const cost = round2(notional + fee);
+  const label = sideName === 'up' ? 'Up' : 'Down';
+  const t = nowSec();
+  const windowClosing = t >= w.windowEnd - EARLY_CUTOFF_SECS;
 
-  if (cost > s.bankroll) {
-    log(`⏭️  ${s.symbol} ${w.tf} [${w.id}] ${stratName.toUpperCase()} ${sideName.toUpperCase()}: skip entry — bankroll $${s.bankroll.toFixed(2)} < $${cost.toFixed(2)}`);
-    leg.status = 'skipped';
+  if (s.state === 'idle') {
+    if (windowClosing) { s.state = 'expired_unfilled'; return; }
+    const shares = round2(STRAT1_BET / STRAT1_BUY_PRICE);
+    const resp = await placeRestingBuy(tokenId, STRAT1_BUY_PRICE, shares);
+    s.orderId = resp.id;
+    s.shares = shares;
+    s.state = 'resting';
+    log(`📥 STRAT1 ${label} [${w.id}] resting buy ${shares}sh @ ${STRAT1_BUY_PRICE} ($${STRAT1_BET})`);
     return;
   }
 
-  await placeEntryBuy(tokenId, entryPrice, shares);
-  s.bankroll = round2(s.bankroll - cost);
-  s.realizedPnl = round2(s.realizedPnl - fee);
-  s.feesPaid = round2(s.feesPaid + fee);
-  leg.status = 'open'; leg.entryPrice = entryPrice; leg.shares = shares; leg.cost = cost;
-  recordEquity(s);
-  log(`🎯 ${s.symbol} ${w.tf} [${new Date(w.windowStart * 1000).toISOString().slice(11, 16)}Z] ${stratName.toUpperCase()} ${sideName.toUpperCase()} LIMIT BUY $${betUsd} (${shares}sh @ ${entryPrice.toFixed(2)}) | cost=$${cost.toFixed(2)} | fee=-$${fee.toFixed(4)}`);
-  registerTrade(s, { side: 'BUY', outcome: sideName === 'up' ? 'Up' : 'Down', tf: w.tf, reason: `${stratName.toUpperCase()}_ENTRY`, price: entryPrice, shares, cost, fee });
-}
-
-async function closeLeg(s, w, stratName, sideName, leg, exitPrice, reason) {
-  const tokenId = sideName === 'up' ? w.upTokenId : w.downTokenId;
-  let fee = 0;
-  if (reason === 'tp' || reason === 'sl') {
-    await placeExitSell(tokenId, exitPrice, leg.shares);
-    fee = takerFee(leg.shares, exitPrice);
-  }
-  const proceeds = round2(leg.shares * exitPrice);
-  const netProceeds = round2(proceeds - fee);
-  const profit = round2(netProceeds - leg.cost);
-
-  s.bankroll = round2(s.bankroll + netProceeds);
-  s.realizedPnl = round2(s.realizedPnl + profit);
-  if (fee > 0) s.feesPaid = round2(s.feesPaid + fee);
-  const won = profit > 0;
-  if (won) s.wins++; else s.losses++;
-  leg.status = 'closed'; leg.exitPrice = exitPrice; leg.exitReason = reason; leg.profit = profit; leg.won = won;
-
-  const icon = won ? '💰' : '💥';
-  const reasonLabel = reason === 'tp' ? 'TP' : reason === 'sl' ? 'SL' : 'RESOLUTION';
-  log(`${icon} ${s.symbol} ${w.tf} [${new Date(w.windowStart * 1000).toISOString().slice(11, 16)}Z] ${stratName.toUpperCase()} ${sideName.toUpperCase()} ${reasonLabel} exit@${exitPrice.toFixed(2)} entry@${leg.entryPrice.toFixed(2)} ${leg.shares}sh | pnl=$${profit.toFixed(2)} | bankroll=$${s.bankroll.toFixed(2)}`);
-  registerTrade(s, { side: 'SELL', outcome: sideName === 'up' ? 'Up' : 'Down', tf: w.tf, reason: `${stratName.toUpperCase()}_${reasonLabel}`, price: exitPrice, shares: leg.shares, profit });
-  recordEquity(s);
-}
-
-// ─────────────────────────────────────────
-//  Strategy 1 — buy the dip @0.30, TP 0.70 / SL 0.10, per leg independently
-// ─────────────────────────────────────────
-async function maybeStrategy1(s, w, sideName) {
-  const leg = w.s1[sideName];
-  if (leg.status === 'closed' || leg.status === 'skipped') return;
-  const tokenId = sideName === 'up' ? w.upTokenId : w.downTokenId;
-  const ask = tokenAskMap[tokenId];
-  if (ask == null) return;
-
-  if (leg.status === 'idle') {
-    if (ask <= S1_BUY_PRICE) await openLeg(s, w, 's1', sideName, leg, S1_BUY_PRICE, S1_BET_USD);
-    return;
-  }
-  // leg.status === 'open'
-  if (ask >= S1_TP) await closeLeg(s, w, 's1', sideName, leg, S1_TP, 'tp');
-  else if (ask <= S1_SL) await closeLeg(s, w, 's1', sideName, leg, S1_SL, 'sl');
-}
-
-// ─────────────────────────────────────────
-//  Strategy 2 — momentum spike @0.70 triggers BOTH legs, SL 0.30, TP=resolution
-// ─────────────────────────────────────────
-async function maybeStrategy2(s, w) {
-  const s2 = w.s2;
-  if (!s2.triggered) {
-    const upAsk = tokenAskMap[w.upTokenId], downAsk = tokenAskMap[w.downTokenId];
-    if (upAsk == null || downAsk == null) return;
-    if (upAsk >= S2_TRIGGER || downAsk >= S2_TRIGGER) {
-      s2.triggered = true;
-      log(`⚡ ${s.symbol} ${w.tf} [${new Date(w.windowStart * 1000).toISOString().slice(11, 16)}Z] Strategy-2 triggered (up ${upAsk.toFixed(2)} / down ${downAsk.toFixed(2)}) → buying BOTH legs @${S2_BUY_PRICE.toFixed(2)}`);
-      await openLeg(s, w, 's2', 'up', s2.up, S2_BUY_PRICE, S2_BET_USD);
-      await openLeg(s, w, 's2', 'down', s2.down, S2_BUY_PRICE, S2_BET_USD);
+  if (s.state === 'resting') {
+    let filled = false, fillPrice = STRAT1_BUY_PRICE;
+    if (DRY_RUN) {
+      const ask = tokenPriceMap[tokenId]?.ask;
+      filled = ask != null && ask <= STRAT1_BUY_PRICE;
+    } else {
+      const st = await checkOrderStatus(s.orderId);
+      if (st.cancelled) { s.state = 'expired_unfilled'; return; }
+      filled = st.filled;
+      if (st.avgPrice) fillPrice = st.avgPrice;
+    }
+    if (filled) {
+      s.entryFillPrice = fillPrice;
+      s.cost = round2(s.shares * fillPrice);
+      const fee = takerFee(s.shares, fillPrice);
+      bankroll = round2(bankroll - s.cost - fee);
+      feesPaid = round2(feesPaid + fee);
+      realizedPnl = round2(realizedPnl - fee);
+      s.state = 'filled';
+      recordEquity();
+      log(`✅ STRAT1 ${label} [${w.id}] FILLED ${s.shares}sh @ ${fillPrice.toFixed(2)} | cost=$${s.cost.toFixed(2)}`);
+      registerTrade({ side: 'BUY', outcome: label, strategy: 1, reason: 'ENTRY', price: fillPrice, shares: s.shares, cost: s.cost, fee });
+      return;
+    }
+    if (windowClosing) {
+      await cancelOrderSafe(s.orderId);
+      s.state = 'expired_unfilled';
+      log(`⏹️  STRAT1 ${label} [${w.id}] window closing, unfilled resting order cancelled`);
     }
     return;
   }
-  for (const sideName of ['up', 'down']) {
-    const leg = s2[sideName];
-    if (leg.status !== 'open') continue;
-    const tokenId = sideName === 'up' ? w.upTokenId : w.downTokenId;
-    const ask = tokenAskMap[tokenId];
-    if (ask == null) continue;
-    if (ask <= S2_SL) await closeLeg(s, w, 's2', sideName, leg, S2_SL, 'sl'); // no TP — rides to resolution otherwise
+
+  if (s.state === 'filled') {
+    if (!s.tpOrderId) {
+      const resp = await placeRestingSell(tokenId, STRAT1_TP_PRICE, s.shares);
+      s.tpOrderId = resp.id;
+      log(`🎯 STRAT1 ${label} [${w.id}] TP resting sell ${s.shares}sh @ ${STRAT1_TP_PRICE}`);
+    }
+
+    // Check TP fill
+    let tpFilled = false, tpPrice = STRAT1_TP_PRICE;
+    if (DRY_RUN) {
+      const bid = tokenPriceMap[tokenId]?.bid;
+      tpFilled = bid != null && bid >= STRAT1_TP_PRICE;
+    } else {
+      const st = await checkOrderStatus(s.tpOrderId);
+      tpFilled = st.filled;
+      if (st.avgPrice) tpPrice = st.avgPrice;
+    }
+    if (tpFilled) {
+      finalizeSideExit(w, s, label, 1, tpPrice, 'TP');
+      return;
+    }
+
+    // Check SL trigger
+    const bid = tokenPriceMap[tokenId]?.bid;
+    if (bid != null && bid <= STRAT1_SL_PRICE) {
+      await cancelOrderSafe(s.tpOrderId);
+      const resp = await marketSellNow(tokenId, s.shares);
+      const exitPrice = resp.avgPrice ?? bid;
+      finalizeSideExit(w, s, label, 1, exitPrice, 'SL');
+      return;
+    }
+
+    if (windowClosing) {
+      await cancelOrderSafe(s.tpOrderId);
+      s.state = 'holding_to_resolution';
+      log(`⏳ STRAT1 ${label} [${w.id}] window closing, holding ${s.shares}sh to resolution`);
+    }
   }
 }
 
 // ─────────────────────────────────────────
-//  Resolution — force-close any still-open legs at actual outcome
+//  Strategy 2 — reactive 0.70 buy-both on momentum tick, SL 0.30, no TP
 // ─────────────────────────────────────────
-async function determineWinningSideForWindow(w) {
+async function processStrat2(w) {
+  const t = nowSec();
+  const windowClosing = t >= w.windowEnd - EARLY_CUTOFF_SECS;
+
+  if (!w.strat2.triggered) {
+    if (windowClosing) return;
+    const upAsk = tokenPriceMap[w.upTokenId]?.ask;
+    const downAsk = tokenPriceMap[w.downTokenId]?.ask;
+    let triggerSide = null, triggerPrice = null;
+    if (upAsk != null && upAsk >= STRAT2_TRIGGER_PRICE) { triggerSide = 'Up'; triggerPrice = upAsk; }
+    else if (downAsk != null && downAsk >= STRAT2_TRIGGER_PRICE) { triggerSide = 'Down'; triggerPrice = downAsk; }
+    if (!triggerSide) return;
+
+    w.strat2.triggered = true;
+    w.strat2.triggerSide = triggerSide;
+    w.strat2.triggerPrice = triggerPrice;
+    log(`⚡ STRAT2 [${w.id}] trigger: ${triggerSide} ticked to ${triggerPrice.toFixed(2)} — buying both sides @ ${STRAT2_BUY_PRICE}`);
+
+    for (const [sideName, tokenId, label] of [['up', w.upTokenId, 'Up'], ['down', w.downTokenId, 'Down']]) {
+      const s = w.strat2[sideName];
+      const shares = round2(STRAT2_BET / STRAT2_BUY_PRICE);
+      const resp = await placeFokLimitBuy(tokenId, STRAT2_BUY_PRICE, shares);
+      if (resp.isFilled) {
+        const fillPrice = resp.avgPrice ?? STRAT2_BUY_PRICE;
+        s.entryFillPrice = fillPrice;
+        s.shares = shares;
+        s.cost = round2(shares * fillPrice);
+        const fee = takerFee(shares, fillPrice);
+        bankroll = round2(bankroll - s.cost - fee);
+        feesPaid = round2(feesPaid + fee);
+        realizedPnl = round2(realizedPnl - fee);
+        s.state = 'filled';
+        recordEquity();
+        log(`✅ STRAT2 ${label} [${w.id}] FILLED ${shares}sh @ ${fillPrice.toFixed(2)} | cost=$${s.cost.toFixed(2)}`);
+        registerTrade({ side: 'BUY', outcome: label, strategy: 2, reason: 'ENTRY', price: fillPrice, shares, cost: s.cost, fee });
+      } else {
+        s.state = 'expired_unfilled';
+        log(`⚠️  STRAT2 ${label} [${w.id}] buy at ${STRAT2_BUY_PRICE} did not fill — no retry`);
+      }
+    }
+    return;
+  }
+
+  // Already triggered — monitor open positions for SL, or hold to resolution
+  for (const [sideName, tokenId, label] of [['up', w.upTokenId, 'Up'], ['down', w.downTokenId, 'Down']]) {
+    const s = w.strat2[sideName];
+    if (s.state !== 'filled') continue;
+    const bid = tokenPriceMap[tokenId]?.bid;
+    if (bid != null && bid <= STRAT2_SL_PRICE) {
+      const resp = await marketSellNow(tokenId, s.shares);
+      const exitPrice = resp.avgPrice ?? bid;
+      finalizeSideExit(w, s, label, 2, exitPrice, 'SL');
+      continue;
+    }
+    if (windowClosing) {
+      s.state = 'holding_to_resolution';
+      log(`⏳ STRAT2 ${label} [${w.id}] window closing, holding ${s.shares}sh to resolution (no TP by design)`);
+    }
+  }
+}
+
+function finalizeSideExit(w, s, label, strategyNum, exitPrice, reason) {
+  const proceeds = round2(s.shares * exitPrice);
+  const profit = round2(proceeds - s.cost);
+  bankroll = round2(bankroll + proceeds);
+  realizedPnl = round2(realizedPnl + profit);
+  if (profit >= 0) wins++; else losses++;
+  s.state = reason === 'TP' ? 'tp_filled' : 'sl_exit';
+  s.exitPrice = exitPrice;
+  s.exitReason = reason;
+  s.pnl = profit;
+  recordEquity();
+  const icon = profit >= 0 ? '💰' : '💥';
+  log(`${icon} STRAT${strategyNum} ${label} [${w.id}] ${reason} exit ${s.shares}sh @ ${exitPrice.toFixed(2)} | pnl=$${profit.toFixed(2)} | bankroll=$${bankroll.toFixed(2)}`);
+  registerTrade({ side: 'SELL', outcome: label, strategy: strategyNum, reason, price: exitPrice, shares: s.shares, profit });
+}
+
+// ─────────────────────────────────────────
+//  Resolution — for positions still open ("holding_to_resolution") when the window ends
+// ─────────────────────────────────────────
+async function determineWinningSide(w) {
   try {
     const event = await getJSON(`${GAMMA}/events/slug/${encodeURIComponent(w.slug)}`);
-    const market = (event.markets || []).find(m => m.conditionId === w.conditionId) || (event.markets || [])[0];
+    const market = pickMarket(event);
     if (market && market.closed === true && market.outcomePrices) {
       const prices = typeof market.outcomePrices === 'string' ? JSON.parse(market.outcomePrices) : market.outcomePrices;
       const outcomes = typeof market.outcomes === 'string' ? JSON.parse(market.outcomes) : market.outcomes;
@@ -435,104 +496,61 @@ async function determineWinningSideForWindow(w) {
       if (winner) return winner.charAt(0).toUpperCase() + winner.slice(1).toLowerCase();
     }
   } catch (_) {}
-  const upAsk = tokenAskMap[w.upTokenId], downAsk = tokenAskMap[w.downTokenId];
-  if (upAsk != null && downAsk != null) return upAsk >= downAsk ? 'Up' : 'Down';
+  const upBid = tokenPriceMap[w.upTokenId]?.bid, downBid = tokenPriceMap[w.downTokenId]?.bid;
+  if (upBid != null && downBid != null) return upBid >= downBid ? 'Up' : 'Down';
   return null;
 }
-
-async function resolveWindow(s, w) {
-  const winner = await determineWinningSideForWindow(w); // 'Up' | 'Down' | null
-  for (const stratName of ['s1', 's2']) {
-    for (const sideName of ['up', 'down']) {
-      const leg = w[stratName][sideName];
-      if (leg.status !== 'open') continue;
-      const sideLabel = sideName === 'up' ? 'Up' : 'Down';
-      let exitPrice;
-      if (winner) exitPrice = (winner === sideLabel) ? 1 : 0;
-      else exitPrice = tokenAskMap[sideName === 'up' ? w.upTokenId : w.downTokenId] ?? leg.entryPrice;
-      await closeLeg(s, w, stratName, sideName, leg, exitPrice, 'resolution');
+async function resolveHoldingPositions(w) {
+  const winner = await determineWinningSide(w);
+  for (const [strategyNum, bucket] of [[1, w.strat1], [2, w.strat2]]) {
+    for (const [sideName, label] of [['up', 'Up'], ['down', 'Down']]) {
+      const s = bucket[sideName];
+      if (s.state !== 'holding_to_resolution') continue;
+      const won = winner === label;
+      const exitPrice = won ? 1 : 0;
+      const proceeds = won ? round2(s.shares * 1) : 0;
+      const profit = round2(proceeds - s.cost);
+      bankroll = round2(bankroll + proceeds);
+      realizedPnl = round2(realizedPnl + profit);
+      if (profit >= 0) wins++; else losses++;
+      s.state = 'resolved';
+      s.exitPrice = exitPrice;
+      s.exitReason = 'RESOLUTION';
+      s.pnl = profit;
+      const icon = won ? '💰' : '💥';
+      log(`${icon} STRAT${strategyNum} ${label} [${w.id}] RESOLUTION ${s.shares}sh entry=${s.entryFillPrice?.toFixed(2)} exit=$${won ? '1.00' : '0.00'} | pnl=$${profit.toFixed(2)} | bankroll=$${bankroll.toFixed(2)}`);
+      registerTrade({ side: 'SELL', outcome: label, strategy: strategyNum, reason: 'RESOLUTION', price: exitPrice, shares: s.shares, profit });
     }
   }
-  w.resolved = true;
-  w.resolvedAt = Date.now();
+  recordEquity();
 }
 
 // ─────────────────────────────────────────
-//  Main per-symbol tick
+//  Main tick
 // ─────────────────────────────────────────
-async function processSymbol(s) {
+async function ensureCurrentWindow() {
+  const ws = windowStartFor();
+  if (!windows.some(w => w.windowStart === ws)) {
+    const w = buildWindow(ws);
+    windows.push(w);
+    log(`🪟 New window [${w.id}] ${new Date(ws * 1000).toISOString().slice(11, 19)}Z → ${new Date(w.windowEnd * 1000).toISOString().slice(11, 19)}Z`);
+  }
+}
+async function processWindow(w) {
+  if (!w.loaded) { await tryLoadWindow(w); if (!w.loaded) return; }
   if (!tradingEnabled) return;
-  ensureCurrentWindows(s);
 
   const t = nowSec();
-  for (const w of s.windows) {
-    if (w.resolved) continue;
-    if (!w.loaded) { await tryLoadWindow(s, w); if (!w.loaded) continue; }
+  await processStrat1Side(w, 'up');
+  await processStrat1Side(w, 'down');
+  await processStrat2(w);
 
-    const nearEnd = t >= w.windowEnd - EARLY_CUTOFF_SECS;
-
-    if (!nearEnd) {
-      await maybeStrategy1(s, w, 'up');
-      await maybeStrategy1(s, w, 'down');
-      await maybeStrategy2(s, w);
-    } else {
-      await resolveWindow(s, w);
-    }
+  if (t >= w.windowEnd - EARLY_CUTOFF_SECS && !w.resolved) {
+    const anyHolding = [w.strat1.up, w.strat1.down, w.strat2.up, w.strat2.down].some(s => s.state === 'holding_to_resolution');
+    if (anyHolding) await resolveHoldingPositions(w);
+    w.resolved = true;
+    w.resolvedAt = Date.now();
   }
-
-  // prune old resolved windows so the list doesn't grow forever
-  const cutoffMs = Date.now() - 15 * 60 * 1000;
-  s.windows = s.windows.filter(w => !w.resolved || w.resolvedAt > cutoffMs);
-}
-
-// ─────────────────────────────────────────
-//  UI state
-// ─────────────────────────────────────────
-function buildState() {
-  const pairStates = Object.values(pairs).map(s => {
-    const markValue = pairMarkValue(s);
-    return {
-      symbol: s.symbol,
-      bankroll: s.bankroll,
-      realizedPnl: s.realizedPnl,
-      unrealizedPnl: round2(markValue - s.bankroll),
-      markValue,
-      feesPaid: s.feesPaid,
-      wins: s.wins, losses: s.losses,
-      windows: s.windows.map(w => ({
-        id: w.id, tf: w.tf,
-        windowStart: w.windowStart, windowEnd: w.windowEnd,
-        secsToEnd: Math.max(0, Math.floor(w.windowEnd - nowSec())),
-        secsToStart: Math.max(0, Math.floor(w.windowStart - nowSec())),
-        tradable: w.tradable, resolved: w.resolved,
-        upAsk: w.upTokenId != null ? (tokenAskMap[w.upTokenId] ?? null) : null,
-        downAsk: w.downTokenId != null ? (tokenAskMap[w.downTokenId] ?? null) : null,
-        s1: w.s1, s2: w.s2,
-      })),
-      equityCurve: s.equityCurve,
-    };
-  });
-  const totalBankroll = round2(pairStates.reduce((sum, p) => sum + p.bankroll, 0));
-  const totalMark = round2(pairStates.reduce((sum, p) => sum + p.markValue, 0));
-  const totalRealized = round2(pairStates.reduce((sum, p) => sum + p.realizedPnl, 0));
-  const totalUnrealized = round2(pairStates.reduce((sum, p) => sum + p.unrealizedPnl, 0));
-  const totalWins = pairStates.reduce((sum, p) => sum + p.wins, 0);
-  const totalLosses = pairStates.reduce((sum, p) => sum + p.losses, 0);
-  return {
-    dryRun: DRY_RUN, tradingEnabled, pairs: pairList,
-    totalCapital: TOTAL_CAPITAL, perPairCapital, totalBankroll, totalMarkValue: totalMark,
-    totalRealizedPnl: totalRealized, totalUnrealizedPnl: totalUnrealized, totalPnl: round2(totalMark - TOTAL_CAPITAL),
-    totalWins, totalLosses,
-    totalFeesPaid: round2(pairStates.reduce((sum, p) => sum + p.feesPaid, 0)),
-    winRate: (totalWins + totalLosses) > 0 ? round2((totalWins / (totalWins + totalLosses)) * 100) : null,
-    uptime: Math.floor((Date.now() - startTime) / 1000),
-    config: {
-      strategy1: { buyPrice: S1_BUY_PRICE, tp: S1_TP, sl: S1_SL, betUsd: S1_BET_USD },
-      strategy2: { trigger: S2_TRIGGER, buyPrice: S2_BUY_PRICE, sl: S2_SL, betUsd: S2_BET_USD },
-      cryptoTakerFeeRate: CRYPTO_TAKER_FEE_RATE,
-    },
-    pairStates, totalEquityCurve, logs: logs.slice(-100), trades: trades.slice(-80).reverse(),
-  };
 }
 
 let loopRunning = false;
@@ -541,43 +559,76 @@ async function mainLoop() {
   loopRunning = true;
   while (true) {
     try {
+      await ensureCurrentWindow();
       const now = Date.now();
       if (now - lastPolyPriceFetch >= POLY_PRICE_REFRESH_MS) { lastPolyPriceFetch = now; await refreshAllPrices(); }
-      for (const s of Object.values(pairs)) { try { await processSymbol(s); } catch (e) { log(`⚠️  ${s.symbol} tick error: ${e.message}`); } }
+      for (const w of windows) { if (!w.resolved) { try { await processWindow(w); } catch (e) { log(`⚠️  ${w.id} tick error: ${e.message}`); } } }
+      const cutoffMs = Date.now() - 15 * 60 * 1000;
+      windows = windows.filter(w => !w.resolved || w.resolvedAt > cutoffMs);
       emitFn('state', buildState());
     } catch (e) { log(`⚠️  Loop error: ${e.message}`); }
     await new Promise(r => setTimeout(r, TICK_MS));
   }
 }
 
-function setPairs(list) {
-  const clean = (list || []).map(s => s.trim().toUpperCase()).filter(Boolean);
-  if (!clean.length) return { ok: false, error: 'Empty pair list' };
-  pairList = [...new Set(clean)];
-  resetPairs();
-  log(`⚙️  Pairs updated: ${pairList.join(', ')} | $${perPairCapital.toFixed(2)} per pair (bookkeeping only — S1 $${S1_BET_USD}/leg, S2 $${S2_BET_USD}/leg)`);
-  return { ok: true, pairs: pairList, perPairCapital };
+// ─────────────────────────────────────────
+//  UI state
+// ─────────────────────────────────────────
+function serializeSide(s) {
+  return {
+    state: s.state, entryFillPrice: s.entryFillPrice, exitPrice: s.exitPrice,
+    exitReason: s.exitReason, shares: s.shares, cost: s.cost, pnl: s.pnl,
+  };
 }
+function buildState() {
+  const windowsOut = windows.map(w => ({
+    id: w.id, windowStart: w.windowStart, windowEnd: w.windowEnd,
+    secsToEnd: Math.max(0, Math.floor(w.windowEnd - nowSec())),
+    tradable: w.tradable, resolved: w.resolved,
+    strat1: { up: serializeSide(w.strat1.up), down: serializeSide(w.strat1.down) },
+    strat2: {
+      triggered: w.strat2.triggered, triggerSide: w.strat2.triggerSide, triggerPrice: w.strat2.triggerPrice,
+      up: serializeSide(w.strat2.up), down: serializeSide(w.strat2.down),
+    },
+  })).sort((a, b) => b.windowStart - a.windowStart);
+
+  const mv = markValue();
+  return {
+    dryRun: DRY_RUN, tradingEnabled, symbol: SYMBOL,
+    totalCapital: TOTAL_CAPITAL, bankroll, markValue: mv,
+    realizedPnl, unrealizedPnl: round2(mv - bankroll), totalPnl: round2(mv - TOTAL_CAPITAL),
+    feesPaid, wins, losses,
+    winRate: (wins + losses) > 0 ? round2((wins / (wins + losses)) * 100) : null,
+    uptime: Math.floor((Date.now() - startTime) / 1000),
+    config: {
+      strat1: { buyPrice: STRAT1_BUY_PRICE, tpPrice: STRAT1_TP_PRICE, slPrice: STRAT1_SL_PRICE, bet: STRAT1_BET },
+      strat2: { triggerPrice: STRAT2_TRIGGER_PRICE, buyPrice: STRAT2_BUY_PRICE, slPrice: STRAT2_SL_PRICE, bet: STRAT2_BET },
+    },
+    windows: windowsOut,
+    equityCurve, totalEquityCurve: equityCurve,
+    logs: logs.slice(-100), trades: trades.slice(-80).reverse(),
+  };
+}
+
 function pauseTrading() { tradingEnabled = false; log('⏸️  Trading paused (existing positions still tracked for resolution bookkeeping)'); return { ok: true }; }
 function resumeTrading() { tradingEnabled = true; log('▶️  Trading resumed'); return { ok: true }; }
 function getStatus() { return { ok: true, ...buildState() }; }
+function setPairs() { return { ok: true, pairs: [SYMBOL], note: 'This bot is BTC-only by design; pair selection has been removed.' }; }
 
 function setMode(wantLive) {
   const was = DRY_RUN;
   DRY_RUN = !wantLive;
-  if (was !== DRY_RUN) {
-    log(DRY_RUN ? '🟡 Switched to DEMO mode (simulated fills)' : '🔴 Switched to LIVE mode — real money, real orders');
-  }
+  if (was !== DRY_RUN) log(DRY_RUN ? '🟡 Switched to DEMO mode (simulated fills)' : '🔴 Switched to LIVE mode — real money, real orders');
   return { ok: true, dryRun: DRY_RUN };
 }
 
 async function init(privateKey, emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
-  log(`🚀 Dual Price-Action Straddle Bot (15m + 5m only)`);
-  log(`⚙️  $${TOTAL_CAPITAL} demo capital across ${pairList.length} pairs (${pairList.join(', ')}) → $${perPairCapital.toFixed(2)}/pair bookkeeping bankroll`);
-  log(`⚙️  Strategy 1: limit buy Up & Down independently @${S1_BUY_PRICE.toFixed(2)}, TP @${S1_TP.toFixed(2)} / SL @${S1_SL.toFixed(2)}, $${S1_BET_USD}/leg, one-shot per leg`);
-  log(`⚙️  Strategy 2: first tick to @${S2_TRIGGER.toFixed(2)} on either side → buy BOTH legs @${S2_BUY_PRICE.toFixed(2)}, SL @${S2_SL.toFixed(2)}, TP=resolution, $${S2_BET_USD}/leg, one-shot per window`);
+  log(`🚀 BTC 5-Minute Dual Limit-Order Bot`);
+  log(`⚙️  $${TOTAL_CAPITAL} bookkeeping bankroll`);
+  log(`⚙️  STRATEGY 1: resting buy both sides @ ${STRAT1_BUY_PRICE} ($${STRAT1_BET}/side), TP @ ${STRAT1_TP_PRICE}, SL @ ${STRAT1_SL_PRICE}. One-shot per side.`);
+  log(`⚙️  STRATEGY 2: on either side ticking to ${STRAT2_TRIGGER_PRICE}+, buy both sides @ ${STRAT2_BUY_PRICE} ($${STRAT2_BET}/side), SL @ ${STRAT2_SL_PRICE}, no TP (rides to resolution). One-shot per window.`);
   log(`${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
   trader = new PolymarketTrader(privateKey);
