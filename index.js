@@ -123,7 +123,7 @@ app.get('/', (_, res) => {
   <div class="header">
     <div class="logo">⏱️ <span>5M</span> UP/DOWN BOT</div>
     <div id="mode-badge" class="mode-badge ${bot.getStatus().dryRun ? 'mode-dry' : 'mode-live'}">${bot.getStatus().dryRun ? 'DEMO' : '🔴 LIVE'}</div>
-    <div id="experiment-badge" class="mode-badge mode-dry">S1 dip 0.30 (no TP/SL) + S2 breakout 0.70/SL0.30 — first side to fill wins, other cancelled</div>
+    <div id="experiment-badge" class="mode-badge mode-dry">Independent Up/Down ladders — band 0.15-0.85, trail +0.20/-0.10, re-entry -0.10</div>
   </div>
 
   <div class="toolbar">
@@ -269,31 +269,37 @@ app.get('/', (_, res) => {
     if (!s.tradable) {
       grid.innerHTML = '<div class="empty">Loading BTC market…</div>';
     } else {
-      const posRow = (label, pos, extra) => {
-        if (!pos) return '<div class="pair-row" style="font-size:9px;opacity:.6"><span class="pair-key">'+label+'</span><span>no position</span></div>';
-        const stateHtml = pos.closed ? 'closed' : ('holding '+pos.shares.toFixed(2)+'sh (cost $'+pos.cost.toFixed(2)+')'+(extra||''));
-        return '<div class="pair-row" style="font-size:9px"><span class="pair-key">'+label+' @'+pos.entryPrice.toFixed(2)+'</span><span style="flex:1;text-align:right">'+stateHtml+'</span></div>';
+      const ladderRow = (side) => {
+        const L = s.ladder[side];
+        const pos = L.position, order = L.order;
+        let line;
+        if (pos) {
+          const armLevel = (pos.entryPrice + s.config.ladderTpArm).toFixed(2);
+          const stopLevel = (pos.peak - s.config.ladderTpTrail).toFixed(2);
+          line = 'holding '+pos.shares+'sh @ '+pos.entryPrice.toFixed(2)+' | peak '+pos.peak.toFixed(2)+
+                 (pos.armed ? (' | ARMED, stop '+stopLevel) : (' | arms @ '+armLevel));
+        } else if (order) {
+          line = 'resting buy '+order.shares+'sh @ '+order.price.toFixed(2);
+        } else {
+          line = 'no rung active';
+        }
+        const nextLine = L.nextEntryPrice != null ? (' | next rung @ '+L.nextEntryPrice.toFixed(2)) : '';
+        return '<div class="pair-row" style="font-size:9px"><span class="pair-key">'+side+'</span><span style="flex:1;text-align:right">'+line+'</span></div>'+
+               '<div class="pair-row" style="font-size:9px;opacity:.7"><span class="pair-key">&nbsp;</span><span>cycles '+L.cycles+' | cyclePnl $'+L.cyclePnl.toFixed(2)+nextLine+'</span></div>';
       };
-      const s1Html =
+      const ladderHtml =
         '<div class="pos-box">'+
-          '<div style="color:#8aa;margin-bottom:4px">[S1] STRATEGY 1 — dip @0.30, no TP/SL, first side to fill wins ('+(s.s1.placed?'orders placed':'not yet placed')+')</div>'+
-          posRow('S1 Up', s.s1.positions.Up, ' — rides to resolution') +
-          posRow('S1 Down', s.s1.positions.Down, ' — rides to resolution') +
-        '</div>';
-      const s2Html =
-        '<div class="pos-box">'+
-          '<div style="color:#8aa;margin-bottom:4px">[S2] STRATEGY 2 — breakout @0.70, SL 0.30, no TP, first side to fill wins (Up triggered: '+(s.s2.triggeredSide.Up?'yes':'no')+' | Down triggered: '+(s.s2.triggeredSide.Down?'yes':'no')+')</div>'+
-          posRow('S2 Up', s.s2.positions.Up, ' — SL 0.30, rides to resolution') +
-          posRow('S2 Down', s.s2.positions.Down, ' — SL 0.30, rides to resolution') +
+          '<div style="color:#8aa;margin-bottom:4px">[LADDER] independent Up/Down ladders — band ['+s.config.ladderMin+', '+s.config.ladderMax+'], entry = ref - '+s.config.ladderEntryOffset+', '+s.config.ladderShares+'sh/rung, stop arms @ +'+s.config.ladderTpArm+' then trails '+s.config.ladderTpTrail+', re-entry @ exit - '+s.config.ladderReentryOffset+'</div>'+
+          ladderRow('Up') + ladderRow('Down') +
         '</div>';
       const eqCurve = buildEquitySvg(s.equityCurve, 280, 34, null);
-      const hasPos = ['Up','Down'].some(side => (s.s1.positions[side] && !s.s1.positions[side].closed) || (s.s2.positions[side] && !s.s2.positions[side].closed));
+      const hasPos = ['Up','Down'].some(side => s.ladder[side].position && !s.ladder[side].position.closed);
       grid.innerHTML = '<div class="pair-card '+(hasPos?'has-pos':'')+'">'+
         '<div class="pair-hdr"><div class="pair-sym">BTC</div><div class="pair-timer">'+fmtSecs(s.secsToEnd)+'</div></div>'+
         '<div class="pair-body">'+
           '<div class="price-row"><span class="pair-key side-up">UP</span><span class="price-big up">'+(s.upAsk?.toFixed(2)||'—')+'<span class="bid">bid '+(s.upBid?.toFixed(2)||'—')+'</span></span></div>'+
           '<div class="price-row"><span class="pair-key side-down">DOWN</span><span class="price-big down">'+(s.downAsk?.toFixed(2)||'—')+'<span class="bid">bid '+(s.downBid?.toFixed(2)||'—')+'</span></span></div>'+
-          s1Html + s2Html +
+          ladderHtml +
           '<div class="spark-box"><svg viewBox="0 0 280 34" preserveAspectRatio="none">'+eqCurve+'</svg><div class="spark-label">Equity curve ($'+(s.markValue||0).toFixed(2)+')</div></div>'+
         '</div></div>';
     }
@@ -304,7 +310,7 @@ app.get('/', (_, res) => {
         const pnlStr = (t.profit !== undefined) ? sgn(t.profit) : '—';
         const pnlCls = (t.profit !== undefined) ? pClass(t.profit) : '';
         const sideColor = t.side === 'BUY' ? '#ffd740' : (t.reason === 'SL' ? '#ff4757' : (t.reason==='TP'?'#00e676':'#00d4ff'));
-        return '<tr><td>'+t.time+'</td><td style="font-weight:bold">S'+(t.strategy||'?')+'</td><td>'+t.symbol+'</td>'+
+        return '<tr><td>'+t.time+'</td><td style="font-weight:bold">'+(t.strategy||'?')+'</td><td>'+t.symbol+'</td>'+
           '<td style="color:'+sideColor+'">'+t.side+(t.outcome?(' '+t.outcome):'')+'</td>'+
           '<td>'+(t.reason||'—')+'</td>'+
           '<td>'+(t.price||0).toFixed(3)+'</td>'+
