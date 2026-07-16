@@ -220,6 +220,7 @@ function freshSideState() {
     entryFillPrice: null, exitPrice: null, exitReason: null,
     shares: null, cost: null, pnl: null,
     attempt: 1, history: [],
+    triggered: false, triggerPrice: null, // used by Strategy 2 — each side arms independently
   };
 }
 function buildWindow(windowStart) {
@@ -229,7 +230,7 @@ function buildWindow(windowStart) {
     slug: null, upTokenId: null, downTokenId: null,
     loaded: false, tradable: false,
     strat1: { up: freshSideState(), down: freshSideState() },
-    strat2: { triggered: false, triggerSide: null, triggerPrice: null, up: freshSideState(), down: freshSideState() },
+    strat2: { up: freshSideState(), down: freshSideState() },
     resolved: false, resolvedAt: null,
   };
 }
@@ -444,99 +445,98 @@ function finalizeStrat1Exit(w, s, label, exitPrice, reason) {
 }
 
 // ─────────────────────────────────────────
-//  Strategy 2 — reactive 0.70 resting buy-both on momentum tick, SL 0.40, no TP, no rearm
+//  Strategy 2 — EACH side arms independently: only Up's own price ticking to
+//  0.70 places an Up buy; only Down's own price ticking to 0.70 places a
+//  Down buy. They are never triggered together. SL 0.40, no TP, no rearm.
 // ─────────────────────────────────────────
-async function processStrat2(w) {
+async function processStrat2Side(w, sideName) {
+  const s = w.strat2[sideName];
+  const tokenId = sideName === 'up' ? w.upTokenId : w.downTokenId;
+  const label = sideName === 'up' ? 'Up' : 'Down';
   const t = nowSec();
   const windowClosing = t >= w.windowEnd - EARLY_CUTOFF_SECS;
 
-  if (!w.strat2.triggered) {
-    if (windowClosing) return;
-    const upAsk = tokenPriceMap[w.upTokenId]?.ask;
-    const downAsk = tokenPriceMap[w.downTokenId]?.ask;
-    let triggerSide = null, triggerPrice = null;
-    if (upAsk != null && upAsk >= STRAT2_TRIGGER_PRICE) { triggerSide = 'Up'; triggerPrice = upAsk; }
-    else if (downAsk != null && downAsk >= STRAT2_TRIGGER_PRICE) { triggerSide = 'Down'; triggerPrice = downAsk; }
-    if (!triggerSide) return;
-
-    w.strat2.triggered = true;
-    w.strat2.triggerSide = triggerSide;
-    w.strat2.triggerPrice = triggerPrice;
-    log(`⚡ STRAT2 [${w.id}] trigger: ${triggerSide} ticked to ${triggerPrice.toFixed(2)} — placing resting buys @ ${STRAT2_BUY_PRICE} on both sides`);
+  if (!s.triggered) {
+    if (windowClosing) return; // never ticked to 0.70 this window — nothing to do
+    const ask = tokenPriceMap[tokenId]?.ask;
+    if (ask == null || ask < STRAT2_TRIGGER_PRICE) return;
+    s.triggered = true;
+    s.triggerPrice = ask;
+    log(`⚡ STRAT2 ${label} [${w.id}] triggered — ${label} ticked to ${ask.toFixed(2)}, placing resting buy @ ${STRAT2_BUY_PRICE}`);
   }
 
-  if (!w.strat2.triggered) return;
+  if (s.state === 'idle') {
+    if (windowClosing) { s.state = 'expired_unfilled'; return; }
+    const shares = round2(STRAT2_BET / STRAT2_BUY_PRICE);
+    const resp = await placeRestingBuy(tokenId, STRAT2_BUY_PRICE, shares);
+    s.orderId = resp.id;
+    s.shares = shares;
+    s.state = 'resting';
+    log(`📥 STRAT2 ${label} [${w.id}] resting buy ${shares}sh @ ${STRAT2_BUY_PRICE} ($${STRAT2_BET})`);
+    return;
+  }
 
-  for (const [sideName, tokenId, label] of [['up', w.upTokenId, 'Up'], ['down', w.downTokenId, 'Down']]) {
-    const s = w.strat2[sideName];
-
-    if (s.state === 'idle') {
-      if (windowClosing) { s.state = 'expired_unfilled'; continue; }
-      const shares = round2(STRAT2_BET / STRAT2_BUY_PRICE);
-      const resp = await placeRestingBuy(tokenId, STRAT2_BUY_PRICE, shares);
-      s.orderId = resp.id;
-      s.shares = shares;
-      s.state = 'resting';
-      log(`📥 STRAT2 ${label} [${w.id}] resting buy ${shares}sh @ ${STRAT2_BUY_PRICE} ($${STRAT2_BET})`);
-      continue;
+  if (s.state === 'resting') {
+    let filled = false, fillPrice = STRAT2_BUY_PRICE;
+    if (DRY_RUN) {
+      const ask = tokenPriceMap[tokenId]?.ask;
+      filled = ask != null && ask <= STRAT2_BUY_PRICE;
+    } else {
+      const st = await checkOrderStatus(s.orderId);
+      if (st.cancelled) { s.state = 'expired_unfilled'; return; }
+      filled = st.filled;
+      if (st.avgPrice) fillPrice = st.avgPrice;
     }
-
-    if (s.state === 'resting') {
-      let filled = false, fillPrice = STRAT2_BUY_PRICE;
-      if (DRY_RUN) {
-        const ask = tokenPriceMap[tokenId]?.ask;
-        filled = ask != null && ask <= STRAT2_BUY_PRICE;
-      } else {
-        const st = await checkOrderStatus(s.orderId);
-        if (st.cancelled) { s.state = 'expired_unfilled'; continue; }
-        filled = st.filled;
-        if (st.avgPrice) fillPrice = st.avgPrice;
-      }
-      if (filled) {
-        s.entryFillPrice = fillPrice;
-        s.cost = round2(s.shares * fillPrice);
-        const reward = makerReward(s.shares, fillPrice);
-        bankroll = round2(bankroll - s.cost + reward);
-        rewardsEarned = round2(rewardsEarned + reward);
-        realizedPnl = round2(realizedPnl + reward);
-        s.state = 'filled';
-        recordEquity();
-        log(`✅ STRAT2 ${label} [${w.id}] FILLED ${s.shares}sh @ ${fillPrice.toFixed(2)} | cost=$${s.cost.toFixed(2)} | reward≈+$${reward.toFixed(4)}`);
-        registerTrade({ side: 'BUY', outcome: label, strategy: 2, reason: 'ENTRY', price: fillPrice, shares: s.shares, cost: s.cost, reward });
-      } else if (windowClosing) {
-        await cancelOrderSafe(s.orderId);
-        s.state = 'expired_unfilled';
-        log(`⏹️  STRAT2 ${label} [${w.id}] window closing, unfilled resting order cancelled`);
-      }
-      continue;
+    if (filled) {
+      s.entryFillPrice = fillPrice;
+      s.cost = round2(s.shares * fillPrice);
+      const reward = makerReward(s.shares, fillPrice);
+      bankroll = round2(bankroll - s.cost + reward);
+      rewardsEarned = round2(rewardsEarned + reward);
+      realizedPnl = round2(realizedPnl + reward);
+      s.state = 'filled';
+      recordEquity();
+      log(`✅ STRAT2 ${label} [${w.id}] FILLED ${s.shares}sh @ ${fillPrice.toFixed(2)} | cost=$${s.cost.toFixed(2)} | reward≈+$${reward.toFixed(4)}`);
+      registerTrade({ side: 'BUY', outcome: label, strategy: 2, reason: 'ENTRY', price: fillPrice, shares: s.shares, cost: s.cost, reward });
+      return;
     }
+    if (windowClosing) {
+      await cancelOrderSafe(s.orderId);
+      s.state = 'expired_unfilled';
+      log(`⏹️  STRAT2 ${label} [${w.id}] window closing, unfilled resting order cancelled`);
+    }
+    return;
+  }
 
-    if (s.state === 'filled') {
-      const bid = tokenPriceMap[tokenId]?.bid;
-      if (bid != null && bid <= STRAT2_SL_PRICE) {
-        const resp = await marketSellNow(tokenId, s.shares);
-        const exitPrice = resp.avgPrice ?? bid;
-        const proceeds = round2(s.shares * exitPrice);
-        const profit = round2(proceeds - s.cost);
-        bankroll = round2(bankroll + proceeds); // taker market-sell — no rebate, no fee
-        realizedPnl = round2(realizedPnl + profit);
-        if (profit >= 0) wins++; else losses++;
-        s.state = 'sl_exit';
-        s.exitPrice = exitPrice;
-        s.exitReason = 'SL';
-        s.pnl = profit;
-        recordEquity();
-        const icon = profit >= 0 ? '💰' : '💥';
-        log(`${icon} STRAT2 ${label} [${w.id}] SL exit ${s.shares}sh @ ${exitPrice.toFixed(2)} | pnl=$${profit.toFixed(2)} | bankroll=$${bankroll.toFixed(2)}`);
-        registerTrade({ side: 'SELL', outcome: label, strategy: 2, reason: 'SL', price: exitPrice, shares: s.shares, profit });
-        continue;
-      }
-      if (windowClosing) {
-        s.state = 'holding_to_resolution';
-        log(`⏳ STRAT2 ${label} [${w.id}] window closing, holding ${s.shares}sh to resolution (no TP by design)`);
-      }
+  if (s.state === 'filled') {
+    const bid = tokenPriceMap[tokenId]?.bid;
+    if (bid != null && bid <= STRAT2_SL_PRICE) {
+      const resp = await marketSellNow(tokenId, s.shares);
+      const exitPrice = resp.avgPrice ?? bid;
+      const proceeds = round2(s.shares * exitPrice);
+      const profit = round2(proceeds - s.cost);
+      bankroll = round2(bankroll + proceeds); // taker market-sell — no rebate, no fee
+      realizedPnl = round2(realizedPnl + profit);
+      if (profit >= 0) wins++; else losses++;
+      s.state = 'sl_exit';
+      s.exitPrice = exitPrice;
+      s.exitReason = 'SL';
+      s.pnl = profit;
+      recordEquity();
+      const icon = profit >= 0 ? '💰' : '💥';
+      log(`${icon} STRAT2 ${label} [${w.id}] SL exit ${s.shares}sh @ ${exitPrice.toFixed(2)} | pnl=$${profit.toFixed(2)} | bankroll=$${bankroll.toFixed(2)}`);
+      registerTrade({ side: 'SELL', outcome: label, strategy: 2, reason: 'SL', price: exitPrice, shares: s.shares, profit });
+      return;
+    }
+    if (windowClosing) {
+      s.state = 'holding_to_resolution';
+      log(`⏳ STRAT2 ${label} [${w.id}] window closing, holding ${s.shares}sh to resolution (no TP by design)`);
     }
   }
+}
+async function processStrat2(w) {
+  await processStrat2Side(w, 'up');
+  await processStrat2Side(w, 'down');
 }
 
 // ─────────────────────────────────────────
@@ -654,7 +654,6 @@ function buildState() {
     upPrice: priceInfo(w.upTokenId), downPrice: priceInfo(w.downTokenId),
     strat1: { up: serializeSide(w.strat1.up), down: serializeSide(w.strat1.down) },
     strat2: {
-      triggered: w.strat2.triggered, triggerSide: w.strat2.triggerSide, triggerPrice: w.strat2.triggerPrice,
       up: serializeSide(w.strat2.up), down: serializeSide(w.strat2.down),
     },
   })).sort((a, b) => b.windowStart - a.windowStart);
@@ -695,7 +694,7 @@ async function init(privateKey, emit, slogFn) {
   log(`🚀 BTC 5-Minute Dual Limit-Order Bot`);
   log(`⚙️  $${TOTAL_CAPITAL} bookkeeping bankroll`);
   log(`⚙️  STRATEGY 1: resting buy @ ${STRAT1_BUY_PRICE} ($${STRAT1_BET}/side), TP @ ${STRAT1_TP_PRICE}, SL @ ${STRAT1_SL_PRICE}. Rearms once (max ${STRAT1_MAX_ATTEMPTS} attempts/side) if — and only if — the prior attempt closed via TP.`);
-  log(`⚙️  STRATEGY 2: on either side ticking to ${STRAT2_TRIGGER_PRICE}+, resting buy @ ${STRAT2_BUY_PRICE} ($${STRAT2_BET}/side), SL @ ${STRAT2_SL_PRICE}, no TP (rides to resolution). One-shot per window, no rearm.`);
+  log(`⚙️  STRATEGY 2: each side arms independently — Up only buys once Up's own price ticks to ${STRAT2_TRIGGER_PRICE}+, Down only buys once Down's own price ticks to ${STRAT2_TRIGGER_PRICE}+ (never triggered together). Resting buy @ ${STRAT2_BUY_PRICE} ($${STRAT2_BET}/side), SL @ ${STRAT2_SL_PRICE}, no TP (rides to resolution). One-shot per side, no rearm.`);
   log(`⚙️  All entries/TPs are resting (maker) limit orders — zero fees, estimated maker rebate booked as reward on each fill. Stop losses are immediate market sells (taker, no fee/rebate booked).`);
   log(`${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
