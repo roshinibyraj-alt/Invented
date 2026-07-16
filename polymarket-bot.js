@@ -73,6 +73,7 @@ function nowSec() { return Date.now() / 1000; }
 // ── Strategy parameters ──
 const S1_ENTRY_PRICE = Number(process.env.S1_ENTRY_PRICE || 0.30);
 const S1_BET_DOLLARS = Number(process.env.S1_BET_DOLLARS || 50);
+const S1_ENTRY_DELAY_SECS = Number(process.env.S1_ENTRY_DELAY_SECS || 5); // wait this long after a window goes live before S1 places entries — lets the price feed settle on the new window's tokens
 
 const S2_TRIGGER_PRICE = Number(process.env.S2_TRIGGER_PRICE || 0.70);
 const S2_ENTRY_PRICE   = Number(process.env.S2_ENTRY_PRICE || 0.70);
@@ -222,9 +223,14 @@ async function loadWindow() {
   fresh.downTokenId = downId;
   fresh.tradable = true;
   fresh.resolvedThisWindow = false;
-  fresh.upAsk = state.upAsk; fresh.upBid = state.upBid; fresh.downAsk = state.downAsk; fresh.downBid = state.downBid;
+  // Do NOT carry over upAsk/upBid/downAsk/downBid from the previous window —
+  // those prices belong to the OLD token IDs (often near 0/1 as that market
+  // just resolved) and must never be reused for the new tokens. Leaving
+  // these null forces s1PlaceEntries/s2CheckTrigger to wait for a genuine
+  // fresh quote on the new tokenIds before anything can trade.
   state = fresh;
   log(`🔭 BTC window loaded: ${slug} | ends ${new Date(state.windowEnd * 1000).toISOString().slice(11,19)}Z`);
+  await refreshPolyPrices(); // fetch real quotes for the new tokens immediately, don't wait for the 1s poll cycle
 }
 
 // ─────────────────────────────────────────
@@ -301,8 +307,9 @@ function registerTrade(entry) {
 // ─────────────────────────────────────────
 //  Strategy 1 — cheap dip, whichever side fills first, rides to resolution
 // ─────────────────────────────────────────
-async function s1PlaceEntries() {
+async function s1PlaceEntries(elapsed) {
   if (state.s1.placed) return;
+  if (elapsed < S1_ENTRY_DELAY_SECS) return; // let the price feed settle on this window's tokens first
   const upAsk = state.upAsk, downAsk = state.downAsk;
   if (upAsk == null || downAsk == null) return; // wait for valid price data before the one-time placement
   state.s1.placed = true;
@@ -503,7 +510,7 @@ async function tick() {
   }
   if (state.resolvedThisWindow) return;
 
-  await s1PlaceEntries();
+  await s1PlaceEntries(elapsed);
   for (const side of ['Up', 'Down']) {
     await s1CheckFills(side);
     await s2CheckTrigger(side);
@@ -596,7 +603,7 @@ async function init(privateKey, emit, slogFn) {
   slog = slogFn;
   log(`🚀 Two-Strategy Limit Order Bot — BTC 5-minute windows only`);
   log(`⚙️  $${TOTAL_CAPITAL} capital`);
-  log(`⚙️  Strategy 1: resting buy both sides @ ${S1_ENTRY_PRICE}, $${S1_BET_DOLLARS} each, once per window | whichever side fills FIRST wins — the other side's order is cancelled | no TP/SL — rides to resolution`);
+  log(`⚙️  Strategy 1: waits ${S1_ENTRY_DELAY_SECS}s after window start, then rests buy both sides @ ${S1_ENTRY_PRICE}, $${S1_BET_DOLLARS} each, once per window | whichever side fills FIRST wins — the other side's order is cancelled | no TP/SL — rides to resolution`);
   log(`⚙️  Strategy 2: EACH side independently arms a resting buy @ ${S2_ENTRY_PRICE} ceiling once its own ask reaches ${S2_TRIGGER_PRICE}, $${S2_BET_DOLLARS} | whichever side fills FIRST wins — the other side's order is cancelled | SL @ ${S2_SL_PRICE} (marketable), no TP — rides to resolution otherwise`);
   log(`⚙️  fill semantics: limit fills at the real current ask when ask<=ceiling, never worse than the ceiling price`);
   log(`${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
