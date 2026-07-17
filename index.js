@@ -262,9 +262,16 @@ app.get('/', (_, res) => {
 
     if (s.config) {
       const c1 = s.config.strat1, c2 = s.config.strat2;
+      let momentumHtml = '';
+      if (s.momentum) {
+        const m = s.momentum;
+        const mColor = m.pct >= m.epsilonPct ? '#00e676' : (m.pct <= -m.epsilonPct ? '#ff4757' : '#8aa');
+        momentumHtml = '<span>Momentum filter: '+(m.enabled?'ON':'off')+' · BTC spot '+m.lookbackSecs+'s Δ <b style="color:'+mColor+'">'+(m.pct>=0?'+':'')+m.pct.toFixed(3)+'%</b> (±'+m.epsilonPct+'% threshold)</span>';
+      }
       document.getElementById('config-strip').innerHTML =
         '<span>Strat1: buy @'+c1.buyPrice+' · TP @'+c1.tpPrice+' · SL @'+c1.slPrice+' · $'+c1.bet+'/side · rearm once after TP (max '+c1.maxAttempts+' attempts)</span>' +
-        '<span>Strat2: trigger/buy @'+c2.triggerPrice+' · TP @'+c2.tpPrice+' · SL @'+c2.slPrice+' · $'+c2.bet+'/side · rearm once after TP (max '+c2.maxAttempts+' attempts)</span>';
+        '<span>Strat2: trigger/buy @'+c2.triggerPrice+' · TP @'+c2.tpPrice+' · SL @'+c2.slPrice+' · $'+c2.bet+'/side · rearm once after TP (max '+c2.maxAttempts+' attempts)</span>' +
+        momentumHtml;
     }
 
     document.getElementById('total-mark').textContent = '$'+(s.markValue||0).toFixed(2);
