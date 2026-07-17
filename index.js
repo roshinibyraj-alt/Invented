@@ -19,6 +19,12 @@ app.get('/api/status', (_, res) => {
   try { res.json(bot.getStatus()); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
+app.post('/api/set-pairs', (req, res) => {
+  const { pairs } = req.body || {};
+  if (!Array.isArray(pairs) || !pairs.length) return res.status(400).json({ ok: false, error: 'Missing pairs array, e.g. ["BTC","ETH","SOL"]' });
+  try { res.json(bot.setPairs(pairs)); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
 app.post('/api/pause', (_, res) => {
   try { res.json(bot.pauseTrading()); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
@@ -39,7 +45,7 @@ app.get('/', (_, res) => {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>⏱️ BTC 5-Minute Dual Limit-Order Bot</title>
+<title>⏱️ BTC/ETH Combo Bot — 5m + 15m Cross-Pair</title>
 <style>
   :root {
     --bg: #ffffff; --bg2: #f5f7fa; --bg3: #edf0f4; --border: #d0d7e2;
@@ -56,6 +62,7 @@ app.get('/', (_, res) => {
   .mode-live { background: #ff475722; color: var(--red); border: 1px solid var(--red); animation: pulse 2s infinite; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
   .toolbar { display: flex; gap: 8px; padding: 14px 20px 0; flex-wrap: wrap; align-items: center; }
+  .toolbar input { flex: 1; min-width: 220px; background: var(--bg2); border: 1px solid var(--border); color: var(--text); padding: 10px 14px; border-radius: 8px; font-family: inherit; font-size: 12px; }
   .toolbar button { background: var(--cyan); color: #001018; border: none; padding: 10px 16px; border-radius: 8px; font-weight: bold; cursor: pointer; font-family: inherit; font-size: 12px; }
   .toolbar button.pause { background: var(--yellow); }
   .toolbar button.resume { background: var(--green); color: #fff; }
@@ -73,34 +80,20 @@ app.get('/', (_, res) => {
   .section { padding: 0 20px 16px; }
   .section-hdr { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 2px; padding: 8px 0; display: flex; align-items: center; gap: 8px; }
   .section-hdr::after { content:''; flex:1; height:1px; background: var(--border); }
-  .win-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 10px; }
-  .win-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
-  .win-card.has-pos { border-color: var(--cyan); box-shadow: 0 0 0 1px #00d4ff22; }
-  .win-card.untradable { opacity: .55; }
-  .win-card.resolved { opacity: .7; }
-  .win-hdr { background: #0d1d30; padding: 8px 12px; display: flex; justify-content: space-between; align-items: center; }
-  .win-sym { font-size: 12px; font-weight: bold; color: #ddd; }
-  .win-timer { font-size: 10px; color: var(--cyan); }
-  .price-row { display: flex; gap: 8px; padding: 10px 12px; background: #0a1522; }
-  .price-box { flex: 1; text-align: center; border-radius: 8px; padding: 8px 4px; }
-  .price-box.up-box { background: #00a85422; border: 1px solid #00a85455; }
-  .price-box.down-box { background: #e8304a22; border: 1px solid #e8304a55; }
-  .price-box-label { font-size: 9px; letter-spacing: 1px; text-transform: uppercase; margin-bottom: 2px; }
-  .price-box.up-box .price-box-label { color: var(--green); }
-  .price-box.down-box .price-box-label { color: var(--red); }
-  .price-box-val { font-size: 30px; font-weight: bold; line-height: 1; }
-  .price-box.up-box .price-box-val { color: #2fe08a; }
-  .price-box.down-box .price-box-val { color: #ff6b7d; }
-  .price-box-sub { font-size: 8px; color: var(--muted); margin-top: 3px; }
-  .win-body { padding: 8px 12px; }
-  .strat-hdr { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin: 8px 0 4px; border-top: 1px solid var(--border); padding-top: 6px; }
-  .strat-hdr:first-child { margin-top: 0; border-top: none; padding-top: 0; }
-  .side-row { display: flex; justify-content: space-between; margin-bottom: 3px; font-size: 10px; }
+  .pair-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 10px; }
+  .pair-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .pair-card.has-pos { border-color: var(--cyan); box-shadow: 0 0 0 1px #00d4ff22; }
+  .pair-card.untradable { opacity: .55; }
+  .pair-hdr { background: #0d1d30; padding: 8px 12px; display: flex; justify-content: space-between; align-items: center; }
+  .pair-sym { font-size: 13px; font-weight: bold; color: #ddd; }
+  .pair-timer { font-size: 10px; color: var(--cyan); }
+  .pair-body { padding: 8px 12px; }
+  .pair-row { display: flex; justify-content: space-between; margin-bottom: 4px; font-size: 10px; }
+  .pair-key { color: var(--muted); }
   .side-up { color: var(--green); }
   .side-down { color: var(--red); }
-  .side-key { color: var(--muted); }
-  .attempt-tag { font-size: 8px; color: #8aa; margin-left: 4px; }
-  .trig-note { font-size: 9px; color: #8aa; margin-bottom: 4px; }
+  .pos-box { margin-top: 6px; border-top: 1px solid var(--border); padding-top: 6px; font-size: 9px; }
+  .signal-box { margin-top: 6px; font-size: 9px; color: #8aa; }
   .bottom-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 0 20px 20px; }
   @media (max-width: 800px) { .bottom-grid { grid-template-columns: 1fr; } }
   .tbl-wrap { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; max-height: 320px; overflow-y: auto; }
@@ -115,14 +108,16 @@ app.get('/', (_, res) => {
   .equity-hdr .title { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; }
   .equity-hdr .val { font-size: 13px; }
   .equity-svg { width: 100%; height: 90px; display: block; }
-  .config-strip { padding: 0 20px 10px; font-size: 9px; color: var(--muted); display: flex; gap: 18px; flex-wrap: wrap; }
+  .spark-box { margin-top: 6px; }
+  .spark-box svg { width: 100%; height: 34px; display: block; }
+  .spark-label { font-size: 8px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-top: 4px; }
 </style>
 </head>
 <body>
   <div class="header">
-    <div class="logo">⏱️ <span>BTC 5m</span> DUAL LIMIT-ORDER BOT</div>
+    <div class="logo">⏱️ <span>BTC/ETH</span> COMBO BOT</div>
     <div id="mode-badge" class="mode-badge ${bot.getStatus().dryRun ? 'mode-dry' : 'mode-live'}">${bot.getStatus().dryRun ? 'DEMO' : '🔴 LIVE'}</div>
-    <div id="experiment-badge" class="mode-badge mode-dry">RESTING ORDERS ONLY | MAKER REWARDS, NO FEES</div>
+    <div id="experiment-badge" class="mode-badge mode-dry">Combo A: BTC-Up+ETH-Down | Combo B: BTC-Down+ETH-Up | sum &lt; 0.80 before 70% of window</div>
   </div>
 
   <div class="toolbar">
@@ -131,15 +126,14 @@ app.get('/', (_, res) => {
     <button id="mode-toggle-btn" class="live-toggle">Switch to LIVE</button>
   </div>
   <div id="toolbar-status" class="toolbar-status"></div>
-  <div id="config-strip" class="config-strip"></div>
 
   <div class="stats-row">
-    <div class="stat"><div class="stat-label">Mark Value</div><div class="stat-val" id="total-mark">$0.00</div></div>
+    <div class="stat"><div class="stat-label">Total Mark Value</div><div class="stat-val" id="total-mark">$0.00</div></div>
     <div class="stat"><div class="stat-label">Total P&amp;L</div><div class="stat-val" id="total-pnl">$0.00</div></div>
     <div class="stat"><div class="stat-label">Realized</div><div class="stat-val" id="realized-pnl">$0.00</div></div>
     <div class="stat"><div class="stat-label">Unrealized</div><div class="stat-val" id="unrealized-pnl">$0.00</div></div>
     <div class="stat"><div class="stat-label">Bankroll</div><div class="stat-val" id="total-bankroll">$0.00</div></div>
-    <div class="stat"><div class="stat-label">Rewards Earned</div><div class="stat-val pnl-pos" id="total-rewards">$0.00</div></div>
+    <div class="stat"><div class="stat-label">Fees Paid</div><div class="stat-val pnl-neg" id="total-fees">$0.00</div></div>
     <div class="stat"><div class="stat-label">Win Rate</div><div class="stat-val" id="win-rate">—</div><div class="stat-sub" id="win-loss-sub">0W / 0L</div></div>
     <div class="stat"><div class="stat-label">Uptime</div><div class="stat-val" id="uptime">0s</div></div>
     <div class="stat"><div class="stat-label">Trading</div><div class="stat-val" id="trading-flag">—</div></div>
@@ -147,15 +141,15 @@ app.get('/', (_, res) => {
 
   <div class="equity-wrap">
     <div class="equity-hdr">
-      <div class="title">Equity Curve</div>
-      <div class="val" id="equity-val">$0.00</div>
+      <div class="title">Portfolio Equity Curve</div>
+      <div class="val" id="equity-val">$2000.00</div>
     </div>
     <svg id="equity-chart" class="equity-svg" viewBox="0 0 600 90" preserveAspectRatio="none"></svg>
   </div>
 
   <div class="section">
-    <div class="section-hdr">5-Minute Windows</div>
-    <div class="win-grid" id="win-grid"><div class="empty">Loading…</div></div>
+    <div class="section-hdr">Instances</div>
+    <div class="pair-grid" id="pair-grid"><div class="empty">Loading…</div></div>
   </div>
 
   <div class="bottom-grid">
@@ -163,8 +157,8 @@ app.get('/', (_, res) => {
       <div class="section-hdr">Trades</div>
       <div class="tbl-wrap">
         <table class="tbl">
-          <thead><tr><th>Time</th><th>Strat</th><th>Side</th><th>Reason</th><th>Price</th><th>Shares</th><th>P&amp;L</th><th>Reward</th></tr></thead>
-          <tbody id="trade-body"><tr><td colspan="8" class="empty">No trades yet</td></tr></tbody>
+          <thead><tr><th>Time</th><th>Inst</th><th>Combo</th><th>Symbol/Side</th><th>Reason</th><th>Price</th><th>Shares</th><th>P&amp;L</th></tr></thead>
+          <tbody id="trade-body"><tr><td colspan="7" class="empty">No trades yet</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -181,8 +175,10 @@ app.get('/', (_, res) => {
   function pClass(n) { return (n || 0) >= 0 ? 'pnl-pos' : 'pnl-neg'; }
   function fmt(s) { const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), ss = s%60; return (h?h+'h ':'')+(m?m+'m ':'')+ss+'s'; }
   function fmtSecs(s) { if (s === null || s === undefined) return '—'; const m = Math.floor(s/60), ss = s%60; return m+'m '+String(ss).padStart(2,'0')+'s'; }
-  function fmtPrice(v) { return (v === null || v === undefined) ? '—' : v.toFixed(2); }
 
+  // Build an SVG polyline + fill path from an equity curve [{t,equity}],
+  // normalized into a viewBox of width x height. Color reflects whether
+  // the curve ended up from where it started.
   function buildEquitySvg(points, width, height, startVal) {
     if (!points || points.length < 2) {
       return '<line x1="0" y1="'+(height/2)+'" x2="'+width+'" y2="'+(height/2)+'" stroke="#3a4a60" stroke-width="1" stroke-dasharray="3,3"/>';
@@ -232,26 +228,6 @@ app.get('/', (_, res) => {
     } catch (e) { statusEl.textContent = '❌ ' + e.message; }
   });
 
-  function sideLabelClass(label) { return label === 'Up' ? 'side-up' : 'side-down'; }
-
-  function sideStatusHtml(label, s) {
-    let stateHtml;
-    switch (s.state) {
-      case 'idle':                 stateHtml = 'not placed yet'; break;
-      case 'resting':               stateHtml = 'resting order…'; break;
-      case 'filled':                 stateHtml = 'holding '+(s.shares!=null?s.shares.toFixed(2):'—')+'sh @ '+(s.entryFillPrice!=null?s.entryFillPrice.toFixed(2):'—'); break;
-      case 'tp_filled':             stateHtml = 'TP hit @ '+(s.exitPrice!=null?s.exitPrice.toFixed(2):'—')+' → '+sgn(s.pnl); break;
-      case 'sl_exit':                stateHtml = 'SL hit @ '+(s.exitPrice!=null?s.exitPrice.toFixed(2):'—')+' → '+sgn(s.pnl); break;
-      case 'holding_to_resolution':  stateHtml = 'holding to resolution…'; break;
-      case 'resolved':               stateHtml = (s.pnl>=0?'won':'lost')+' → '+sgn(s.pnl); break;
-      case 'expired_unfilled':      stateHtml = 'never filled'; break;
-      default:                       stateHtml = s.state || '—';
-    }
-    const cls = (s.pnl != null) ? pClass(s.pnl) : '';
-    const attemptTag = (s.maxAttempts && s.maxAttempts > 1) ? '<span class="attempt-tag">('+s.attempt+'/'+s.maxAttempts+')</span>' : '';
-    return '<div class="side-row"><span class="side-key '+sideLabelClass(label)+'">'+label+attemptTag+'</span><span class="'+cls+'">'+stateHtml+'</span></div>';
-  }
-
   socket.on('state', s => {
     const modeBadge = document.getElementById('mode-badge');
     modeBadge.className = 'mode-badge ' + (s.dryRun ? 'mode-dry' : 'mode-live');
@@ -259,20 +235,6 @@ app.get('/', (_, res) => {
     const toggleBtn = document.getElementById('mode-toggle-btn');
     toggleBtn.textContent = s.dryRun ? 'Switch to LIVE' : 'Switch to DEMO';
     toggleBtn.className = 'live-toggle' + (s.dryRun ? '' : ' is-live');
-
-    if (s.config) {
-      const c1 = s.config.strat1, c2 = s.config.strat2;
-      let momentumHtml = '';
-      if (s.momentum) {
-        const m = s.momentum;
-        const mColor = m.pct >= m.epsilonPct ? '#00e676' : (m.pct <= -m.epsilonPct ? '#ff4757' : '#8aa');
-        momentumHtml = '<span>Momentum filter: '+(m.enabled?'ON':'off')+' · BTC spot '+m.lookbackSecs+'s Δ <b style="color:'+mColor+'">'+(m.pct>=0?'+':'')+m.pct.toFixed(3)+'%</b> (±'+m.epsilonPct+'% threshold)</span>';
-      }
-      document.getElementById('config-strip').innerHTML =
-        '<span>Strat1: buy @'+c1.buyPrice+' · TP @'+c1.tpPrice+' · SL @'+c1.slPrice+' · $'+c1.bet+'/side · rearm once after TP (max '+c1.maxAttempts+' attempts)</span>' +
-        '<span>Strat2: trigger/buy @'+c2.triggerPrice+' · TP @'+c2.tpPrice+' · SL @'+c2.slPrice+' · $'+c2.bet+'/side · rearm once after TP (max '+c2.maxAttempts+' attempts)</span>' +
-        momentumHtml;
-    }
 
     document.getElementById('total-mark').textContent = '$'+(s.markValue||0).toFixed(2);
     const pnlEl = document.getElementById('total-pnl');
@@ -282,7 +244,7 @@ app.get('/', (_, res) => {
     const unrelEl = document.getElementById('unrealized-pnl');
     unrelEl.textContent = sgn(s.unrealizedPnl); unrelEl.className = 'stat-val ' + pClass(s.unrealizedPnl);
     document.getElementById('total-bankroll').textContent = '$'+(s.bankroll||0).toFixed(2);
-    document.getElementById('total-rewards').textContent = '$'+(s.rewardsEarned||0).toFixed(4);
+    document.getElementById('total-fees').textContent = '$'+(s.feesPaid||0).toFixed(4);
     document.getElementById('win-rate').textContent = (s.winRate!==null && s.winRate!==undefined) ? s.winRate+'%' : '—';
     document.getElementById('win-loss-sub').textContent = (s.wins||0)+'W / '+(s.losses||0)+'L';
     document.getElementById('uptime').textContent = fmt(s.uptime||0);
@@ -295,31 +257,36 @@ app.get('/', (_, res) => {
     eqVal.className = 'val ' + pClass(s.totalPnl);
     document.getElementById('equity-chart').innerHTML = buildEquitySvg(s.equityCurve, 600, 90, s.totalCapital);
 
-    const grid = document.getElementById('win-grid');
-    if (!s.windows || s.windows.length === 0) {
-      grid.innerHTML = '<div class="empty">Loading window…</div>';
+    const grid = document.getElementById('pair-grid');
+    if (!s.instances || !s.instances.length) {
+      grid.innerHTML = '<div class="empty">Loading instances…</div>';
     } else {
-      grid.innerHTML = s.windows.map(w => {
-        const hasPos = [w.strat1.up, w.strat1.down, w.strat2.up, w.strat2.down].some(x => x.state === 'filled' || x.state === 'holding_to_resolution');
-        const trigNoteFor = (label, side) => side.triggered
-          ? '<div class="trig-note">⚡ '+label+' triggered @ '+(side.triggerPrice!=null?side.triggerPrice.toFixed(2):'—')+'</div>'
-          : '<div class="trig-note" style="opacity:.6">'+label+' watching for 0.60 tick…</div>';
-        const trigNote = trigNoteFor('Up', w.strat2.up) + trigNoteFor('Down', w.strat2.down);
-        const upP = w.upPrice || {}, downP = w.downPrice || {};
-        return '<div class="win-card '+(hasPos?'has-pos':'')+' '+(w.tradable?'':'untradable')+' '+(w.resolved?'resolved':'')+'">'+
-          '<div class="win-hdr"><div class="win-sym">'+w.id+'</div><div class="win-timer">'+(w.resolved?'resolved':(w.tradable?fmtSecs(w.secsToEnd):'loading…'))+'</div></div>'+
-          '<div class="price-row">'+
-            '<div class="price-box up-box"><div class="price-box-label">UP</div><div class="price-box-val">'+fmtPrice(upP.mid)+'</div><div class="price-box-sub">ask '+fmtPrice(upP.ask)+' / bid '+fmtPrice(upP.bid)+'</div></div>'+
-            '<div class="price-box down-box"><div class="price-box-label">DOWN</div><div class="price-box-val">'+fmtPrice(downP.mid)+'</div><div class="price-box-sub">ask '+fmtPrice(downP.ask)+' / bid '+fmtPrice(downP.bid)+'</div></div>'+
-          '</div>'+
-          '<div class="win-body">'+
-            '<div class="strat-hdr">Strategy 1 — buy 0.30 / TP 0.70 / SL 0.10 / rearm once after TP</div>'+
-            sideStatusHtml('Up', w.strat1.up) +
-            sideStatusHtml('Down', w.strat1.down) +
-            '<div class="strat-hdr">Strategy 2 — trigger/buy 0.60 / TP 0.90 / SL 0.20 / rearm once after TP</div>'+
-            trigNote +
-            sideStatusHtml('Up', w.strat2.up) +
-            sideStatusHtml('Down', w.strat2.down) +
+      const legRow = (symbol, pos) => {
+        if (!pos) return '<div class="pair-row" style="font-size:9px;opacity:.6"><span class="pair-key">'+symbol+'</span><span>no fill</span></div>';
+        const stateHtml = pos.closed ? 'closed' : ('holding '+pos.shares+'sh (cost $'+pos.cost.toFixed(2)+')');
+        return '<div class="pair-row" style="font-size:9px"><span class="pair-key">'+symbol+' '+pos.side+' @'+pos.entryPrice.toFixed(2)+'</span><span style="flex:1;text-align:right">'+stateHtml+'</span></div>';
+      };
+      const comboBox = (combo) => {
+        const sumTxt = (combo.sum !== null && combo.sum !== undefined) ? combo.sum.toFixed(3) : '—';
+        const status = combo.triggered ? 'TRIGGERED' : 'watching';
+        return '<div class="pos-box">'+
+          '<div style="color:#8aa;margin-bottom:4px">'+combo.label+' — sum='+sumTxt+' ('+status+')</div>'+
+          legRow('BTC', combo.positions.BTC) +
+          legRow('ETH', combo.positions.ETH) +
+        '</div>';
+      };
+      grid.innerHTML = s.instances.map(inst => {
+        const hasPos = ['A','B'].some(k => inst.combos[k].positions.BTC && !inst.combos[k].positions.BTC.closed || inst.combos[k].positions.ETH && !inst.combos[k].positions.ETH.closed);
+        const cutoffTxt = inst.tradable ? (inst.secsToCutoff > 0 ? ('trigger window: '+fmtSecs(inst.secsToCutoff)+' left') : 'trigger window closed') : 'loading…';
+        return '<div class="pair-card '+(hasPos?'has-pos':'')+(inst.tradable?'':' untradable')+'">'+
+          '<div class="pair-hdr"><div class="pair-sym">'+inst.key+'</div><div class="pair-timer">'+fmtSecs(inst.secsToEnd)+'</div></div>'+
+          '<div class="pair-body">'+
+            '<div class="pair-row" style="opacity:.7"><span class="pair-key">'+cutoffTxt+'</span><span></span></div>'+
+            '<div class="pair-row"><span class="pair-key side-up">BTC Up ask/bid</span><span>'+(inst.markets.BTC.upAsk?.toFixed(2)||'—')+' / '+(inst.markets.BTC.upBid?.toFixed(2)||'—')+'</span></div>'+
+            '<div class="pair-row"><span class="pair-key side-down">BTC Down ask/bid</span><span>'+(inst.markets.BTC.downAsk?.toFixed(2)||'—')+' / '+(inst.markets.BTC.downBid?.toFixed(2)||'—')+'</span></div>'+
+            '<div class="pair-row"><span class="pair-key side-up">ETH Up ask/bid</span><span>'+(inst.markets.ETH.upAsk?.toFixed(2)||'—')+' / '+(inst.markets.ETH.upBid?.toFixed(2)||'—')+'</span></div>'+
+            '<div class="pair-row"><span class="pair-key side-down">ETH Down ask/bid</span><span>'+(inst.markets.ETH.downAsk?.toFixed(2)||'—')+' / '+(inst.markets.ETH.downBid?.toFixed(2)||'—')+'</span></div>'+
+            comboBox(inst.combos.A) + comboBox(inst.combos.B) +
           '</div></div>';
       }).join('');
     }
@@ -329,15 +296,13 @@ app.get('/', (_, res) => {
       tb.innerHTML = s.trades.map(t => {
         const pnlStr = (t.profit !== undefined) ? sgn(t.profit) : '—';
         const pnlCls = (t.profit !== undefined) ? pClass(t.profit) : '';
-        const sideColor = t.side === 'BUY' ? '#ffd740' : (t.reason === 'SL' ? '#ff4757' : (t.reason==='TP'?'#00e676':'#00d4ff'));
-        const rewardStr = t.reward ? '+$'+t.reward.toFixed(4) : '—';
-        return '<tr><td>'+t.time+'</td><td>S'+(t.strategy||'—')+(t.attempt?(' ('+t.attempt+')'):'')+'</td>'+
-          '<td style="color:'+sideColor+'">'+t.side+(t.outcome?(' '+t.outcome):'')+'</td>'+
-          '<td>'+(t.reason||'—')+'</td>'+
+        const sideColor = t.side === 'BUY' ? '#ffd740' : (t.reason==='RESOLUTION' ? '#00d4ff' : '#ff4757');
+        return '<tr><td>'+t.time+'</td><td>'+(t.instance||'—')+'</td><td>'+(t.combo||'—')+'</td>'+
+          '<td style="color:'+sideColor+'">'+(t.symbol||'')+' '+(t.outcome||'')+'</td>'+
+          '<td>'+(t.reason||'BUY')+'</td>'+
           '<td>'+(t.price||0).toFixed(3)+'</td>'+
-          '<td>'+(t.shares||0).toFixed(2)+'</td>'+
-          '<td class="'+pnlCls+'">'+pnlStr+'</td>'+
-          '<td class="pnl-pos">'+rewardStr+'</td></tr>';
+          '<td>'+(t.shares||0)+'</td>'+
+          '<td class="'+pnlCls+'">'+pnlStr+'</td></tr>';
       }).join('');
     } else {
       tb.innerHTML = '<tr><td colspan="8" class="empty">No trades yet</td></tr>';
@@ -348,8 +313,8 @@ app.get('/', (_, res) => {
       logEl.innerHTML = s.logs.map(l => {
         const col = l.includes('❌')||l.includes('💥') ? '#ff4757'
                   : l.includes('💰')||l.includes('✅') ? '#00e676'
-                  : l.includes('🎯')||l.includes('⚡')||l.includes('🔁') ? '#ffd740'
-                  : l.includes('🪟')||l.includes('⏳') ? '#00d4ff'
+                  : l.includes('🎯')||l.includes('🧯') ? '#ffd740'
+                  : l.includes('🔭')||l.includes('⏰') ? '#00d4ff'
                   : l.includes('⚠️') ? '#ff9f0a'
                   : '#4a6080';
         return '<div style="color:'+col+'">'+l+'</div>';
@@ -368,9 +333,9 @@ const slog = (line) => { console.log(line); io.emit('log', line); };
 const PK = process.env.PRIVATE_KEY;
 if (!PK) { console.error('❌ PRIVATE_KEY env var missing'); process.exit(1); }
 
-console.log(`⏱️ BTC 5-Minute Dual Limit-Order Bot`);
+console.log(`⏱️ 5-Minute BTC Up/Down Bot — Two Independent Limit Strategies`);
 console.log(`🚦 DRY_RUN=${DRY_RUN}`);
-if (DRY_RUN) console.log('⚠️  DRY RUN — simulated fills, real API for market/price data');
+if (DRY_RUN) console.log('⚠️  DRY RUN — demo $2000 capital, simulated fills, real API for data/orders');
 else         console.log('🔴 LIVE MODE — real money');
 
 server.listen(PORT, '0.0.0.0', () => {
