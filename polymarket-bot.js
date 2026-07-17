@@ -68,6 +68,7 @@ const PolymarketTrader = require('./polymarket-trader');
 
 const GAMMA = 'https://gamma-api.polymarket.com';
 const CLOB  = 'https://clob.polymarket.com';
+const BINANCE = 'https://api.binance.com/api/v3';
 
 const SYMBOL = 'BTC'; // hard-locked — this bot only ever trades BTC 5m
 
@@ -101,6 +102,15 @@ const STRAT2_BET           = Number(process.env.STRAT2_BET           || 100); //
 const CRYPTO_FEE_RATE_FOR_REBATE_CALC = Number(process.env.CRYPTO_FEE_RATE_FOR_REBATE_CALC || 0.07);
 const MAKER_REBATE_SHARE = Number(process.env.MAKER_REBATE_SHARE || 0.20); // Polymarket docs: ~15-25% for crypto
 
+// ── Momentum filter (HYPOTHESIS — not backtested, see header notes) ──
+// S1 uses it as a "falling-knife" guard: skip the dip-buy while spot is
+// trending hard against that side. S2 uses it as confirmation: require
+// spot to actually be moving with the side before buying the breakout.
+const MOMENTUM_FILTER_ENABLED = (process.env.MOMENTUM_FILTER_ENABLED || 'true').toLowerCase() === 'true';
+const MOMENTUM_LOOKBACK_SECS  = Number(process.env.MOMENTUM_LOOKBACK_SECS  || 90);   // how far back to measure spot % change
+const MOMENTUM_REFRESH_MS     = Number(process.env.MOMENTUM_REFRESH_MS     || 5000); // how often to re-fetch Binance klines
+const MOMENTUM_EPSILON_PCT    = Number(process.env.MOMENTUM_EPSILON_PCT    || 0.05); // % move over the lookback needed to count as a real trend
+
 let emitFn = () => {};
 let slog = () => {};
 let trader = null;
@@ -116,6 +126,8 @@ let equityCurve = [{ t: Date.now(), equity: TOTAL_CAPITAL }];
 let windows = []; // flat list of 5m window trackers
 let tokenPriceMap = {}; // tokenId -> { ask, bid }
 let lastPolyPriceFetch = 0;
+let momentumPct = 0;        // % change in BTC spot over the last MOMENTUM_LOOKBACK_SECS (+ve = uptrend, -ve = downtrend)
+let lastMomentumFetch = 0;
 
 function log(msg) {
   const line = `[${new Date().toISOString().slice(11, 19)}] ${msg}`;
@@ -142,6 +154,32 @@ async function postJSON(url, body) {
 // Estimated maker rebate for a resting-order fill (see header notes).
 function makerReward(shares, price) {
   return round4(shares * CRYPTO_FEE_RATE_FOR_REBATE_CALC * price * (1 - price) * MAKER_REBATE_SHARE);
+}
+
+// ─────────────────────────────────────────
+//  Momentum filter (HYPOTHESIS — see header notes; not backtested)
+// ─────────────────────────────────────────
+async function refreshMomentum() {
+  try {
+    const limit = Math.max(2, Math.ceil(MOMENTUM_LOOKBACK_SECS / 60) + 1);
+    const data = await getJSON(`${BINANCE}/klines?symbol=BTCUSDT&interval=1m&limit=${limit}`);
+    if (!Array.isArray(data) || data.length < 2) return;
+    const first = parseFloat(data[0][1]);           // open of the oldest candle in the lookback
+    const last = parseFloat(data[data.length - 1][4]); // close of the most recent candle
+    if (Number.isFinite(first) && first > 0 && Number.isFinite(last)) {
+      momentumPct = round4(((last - first) / first) * 100);
+    }
+  } catch (e) { log(`⚠️  momentum fetch failed: ${e.message}`); }
+}
+// S2 confirmation gate: does spot's own recent move actually support this side?
+function momentumFavors(label) {
+  if (!MOMENTUM_FILTER_ENABLED) return true;
+  return label === 'Up' ? momentumPct >= MOMENTUM_EPSILON_PCT : momentumPct <= -MOMENTUM_EPSILON_PCT;
+}
+// S1 falling-knife guard: is spot trending hard AGAINST this side right now?
+function momentumOpposes(label) {
+  if (!MOMENTUM_FILTER_ENABLED) return false;
+  return label === 'Up' ? momentumPct <= -MOMENTUM_EPSILON_PCT : momentumPct >= MOMENTUM_EPSILON_PCT;
 }
 
 // ─────────────────────────────────────────
@@ -343,6 +381,7 @@ async function processStrat1Side(w, sideName) {
 
   if (s.state === 'idle') {
     if (windowClosing) { s.state = 'expired_unfilled'; return; }
+    if (momentumOpposes(label)) return; // falling-knife guard — spot trending hard against this side, hold off and keep watching
     const shares = round2(STRAT1_BET / STRAT1_BUY_PRICE);
     const resp = await placeRestingBuy(tokenId, STRAT1_BUY_PRICE, shares);
     s.orderId = resp.id;
@@ -471,9 +510,10 @@ async function processStrat2Side(w, sideName) {
     if (windowClosing) return; // never ticked to 0.60 this window — nothing to do
     const ask = tokenPriceMap[tokenId]?.ask;
     if (ask == null || ask < STRAT2_TRIGGER_PRICE) return;
+    if (!momentumFavors(label)) return; // price ticked up but spot doesn't confirm yet — keep watching, don't chase alone
     s.triggered = true;
     s.triggerPrice = ask;
-    log(`⚡ STRAT2 ${label} [${w.id}] triggered — ${label} ticked to ${ask.toFixed(2)}, placing resting buy @ ${STRAT2_BUY_PRICE}`);
+    log(`⚡ STRAT2 ${label} [${w.id}] triggered — ${label} ticked to ${ask.toFixed(2)} with momentum confirmation (spot ${momentumPct >= 0 ? '+' : ''}${momentumPct.toFixed(3)}%), placing resting buy @ ${STRAT2_BUY_PRICE}`);
   }
 
   if (s.state === 'idle') {
@@ -675,6 +715,7 @@ async function mainLoop() {
       await ensureCurrentWindow();
       const now = Date.now();
       if (now - lastPolyPriceFetch >= POLY_PRICE_REFRESH_MS) { lastPolyPriceFetch = now; await refreshAllPrices(); }
+      if (now - lastMomentumFetch >= MOMENTUM_REFRESH_MS) { lastMomentumFetch = now; await refreshMomentum(); }
       for (const w of windows) { if (!w.resolved) { try { await processWindow(w); } catch (e) { log(`⚠️  ${w.id} tick error: ${e.message}`); } } }
       const cutoffMs = Date.now() - 15 * 60 * 1000;
       windows = windows.filter(w => !w.resolved || w.resolvedAt > cutoffMs);
@@ -720,6 +761,7 @@ function buildState() {
     rewardsEarned, wins, losses,
     winRate: (wins + losses) > 0 ? round2((wins / (wins + losses)) * 100) : null,
     uptime: Math.floor((Date.now() - startTime) / 1000),
+    momentum: { enabled: MOMENTUM_FILTER_ENABLED, pct: momentumPct, epsilonPct: MOMENTUM_EPSILON_PCT, lookbackSecs: MOMENTUM_LOOKBACK_SECS },
     config: {
       strat1: { buyPrice: STRAT1_BUY_PRICE, tpPrice: STRAT1_TP_PRICE, slPrice: STRAT1_SL_PRICE, bet: STRAT1_BET, maxAttempts: STRAT1_MAX_ATTEMPTS },
       strat2: { triggerPrice: STRAT2_TRIGGER_PRICE, buyPrice: STRAT2_BUY_PRICE, tpPrice: STRAT2_TP_PRICE, slPrice: STRAT2_SL_PRICE, bet: STRAT2_BET, maxAttempts: STRAT2_MAX_ATTEMPTS },
@@ -750,8 +792,10 @@ async function init(privateKey, emit, slogFn) {
   log(`⚙️  STRATEGY 1: resting buy @ ${STRAT1_BUY_PRICE} ($${STRAT1_BET}/side), TP @ ${STRAT1_TP_PRICE}, SL @ ${STRAT1_SL_PRICE}. Rearms once (max ${STRAT1_MAX_ATTEMPTS} attempts/side) if — and only if — the prior attempt closed via TP.`);
   log(`⚙️  STRATEGY 2: each side arms independently — Up only buys once Up's own price ticks to ${STRAT2_TRIGGER_PRICE}+, Down only buys once Down's own price ticks to ${STRAT2_TRIGGER_PRICE}+ (never triggered together). Resting buy @ ${STRAT2_BUY_PRICE} ($${STRAT2_BET}/side), TP @ ${STRAT2_TP_PRICE}, SL @ ${STRAT2_SL_PRICE}. Rearms once (max ${STRAT2_MAX_ATTEMPTS} attempts/side) if — and only if — the prior attempt closed via TP.`);
   log(`⚙️  All entries/TPs are resting (maker) limit orders — zero fees, estimated maker rebate booked as reward on each fill. Stop losses are immediate market sells (taker, no fee/rebate booked).`);
+  log(`⚙️  MOMENTUM FILTER (hypothesis, not backtested): ${MOMENTUM_FILTER_ENABLED ? 'ENABLED' : 'disabled'} — BTC spot ${MOMENTUM_LOOKBACK_SECS}s % change, epsilon ±${MOMENTUM_EPSILON_PCT}%. S1 skips its dip-buy while spot trends hard against that side; S2 requires spot to confirm direction before buying a triggered side.`);
   log(`${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
+  await refreshMomentum();
   trader = new PolymarketTrader(privateKey);
   await trader.authenticate();
   mainLoop().catch(e => log(`❌ Fatal: ${e.message}`));
