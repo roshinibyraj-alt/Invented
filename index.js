@@ -111,6 +111,18 @@ app.get('/', (_, res) => {
   .spark-box { margin-top: 6px; }
   .spark-box svg { width: 100%; height: 34px; display: block; }
   .spark-label { font-size: 8px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-top: 4px; }
+  .real-wrap { background: #241a08; border: 1px solid #6b4a12; border-radius: 10px; padding: 12px 14px; margin: 0 20px 14px; }
+  .real-wrap.disabled { opacity: .5; }
+  .real-hdr { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; flex-wrap: wrap; gap: 6px; }
+  .real-hdr .title { font-size: 10px; color: #ffb74d; text-transform: uppercase; letter-spacing: 1px; font-weight: 700; }
+  .real-hdr .wallet { font-size: 9px; color: #8a7350; font-family: ui-monospace, monospace; }
+  .real-stats { display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 8px; }
+  .real-stat .label { font-size: 8px; color: #8a7350; text-transform: uppercase; letter-spacing: .5px; }
+  .real-stat .val { font-size: 15px; font-weight: 700; color: #ffd180; }
+  .real-tbl { width: 100%; border-collapse: collapse; font-size: 10px; }
+  .real-tbl th { text-align: left; color: #8a7350; padding: 4px 6px; font-size: 9px; text-transform: uppercase; }
+  .real-tbl td { padding: 4px 6px; border-top: 1px solid #3a2a10; }
+  .real-error { color: #ff6b6b; font-size: 10px; }
 </style>
 </head>
 <body>
@@ -145,6 +157,14 @@ app.get('/', (_, res) => {
       <div class="val" id="equity-val">$2000.00</div>
     </div>
     <svg id="equity-chart" class="equity-svg" viewBox="0 0 600 90" preserveAspectRatio="none"></svg>
+  </div>
+
+  <div id="real-wrap" class="real-wrap disabled">
+    <div class="real-hdr">
+      <div class="title">🔴 Real Account (Polymarket, not bot bookkeeping)</div>
+      <div class="wallet" id="real-wallet">—</div>
+    </div>
+    <div id="real-body"><div class="empty" style="padding:4px 0">Only available in LIVE mode — demo mode shows simulated bankroll above, not a real wallet.</div></div>
   </div>
 
   <div class="section">
@@ -257,6 +277,38 @@ app.get('/', (_, res) => {
     eqVal.textContent = '$'+(s.markValue||0).toFixed(2);
     eqVal.className = 'val ' + pClass(s.totalPnl);
     document.getElementById('equity-chart').innerHTML = buildEquitySvg(s.equityCurve, 600, 90, s.totalCapital);
+
+    // ── Real account (live mode only) — actual Polymarket wallet, not bot bookkeeping ──
+    const real = s.real;
+    if (real) {
+      const wrap = document.getElementById('real-wrap');
+      const walletEl = document.getElementById('real-wallet');
+      const body = document.getElementById('real-body');
+      walletEl.textContent = real.wallet ? (real.wallet.slice(0,6)+'…'+real.wallet.slice(-4)) : '—';
+
+      if (!real.enabled) {
+        wrap.className = 'real-wrap disabled';
+        body.innerHTML = '<div class="empty" style="padding:4px 0">Only available in LIVE mode — demo mode shows simulated bankroll above, not a real wallet.</div>';
+      } else {
+        wrap.className = 'real-wrap';
+        let html = '<div class="real-stats">'+
+          '<div class="real-stat"><div class="label">Real USDC Balance</div><div class="val">'+(real.balance!==null?'$'+real.balance.toFixed(2):'loading…')+'</div></div>'+
+          '<div class="real-stat"><div class="label">Open Positions</div><div class="val">'+(real.positions?real.positions.length:0)+'</div></div>'+
+          '<div class="real-stat"><div class="label">Last Synced</div><div class="val" style="font-size:11px">'+(real.lastUpdated?new Date(real.lastUpdated).toLocaleTimeString():'—')+'</div></div>'+
+        '</div>';
+        if (real.error) {
+          html += '<div class="real-error">⚠️ '+real.error+'</div>';
+        }
+        if (real.positions && real.positions.length) {
+          html += '<table class="real-tbl"><thead><tr><th>Market</th><th>Outcome</th><th>Size</th><th>Avg Price</th><th>Cur Price</th><th>Value</th><th>Cash P&amp;L</th></tr></thead><tbody>'+
+            real.positions.map(p => '<tr><td>'+(p.title||p.slug||'—')+'</td><td>'+(p.outcome||'—')+'</td><td>'+(p.size||0).toFixed(2)+'</td><td>'+(p.avgPrice!=null?p.avgPrice.toFixed(3):'—')+'</td><td>'+(p.curPrice!=null?p.curPrice.toFixed(3):'—')+'</td><td>$'+(p.currentValue!=null?p.currentValue.toFixed(2):'—')+'</td><td class="'+pClass(p.cashPnl)+'">'+sgn(p.cashPnl||0)+'</td></tr>').join('') +
+            '</tbody></table>';
+        } else if (!real.error) {
+          html += '<div class="empty" style="padding:4px 0">No open positions on-chain right now.</div>';
+        }
+        body.innerHTML = html;
+      }
+    }
 
     const grid = document.getElementById('pair-grid');
     if (!s.instances || !s.instances.length) {
