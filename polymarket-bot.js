@@ -5,10 +5,10 @@
  *  POLYMARKET CROSS-PAIR COMBO BOT — BTC/ETH UP/DOWN, 5m + 15m
  * ═══════════════════════════════════════════════════════════════
  *
- *  Complete rewrite. Trades BTC and ETH Up/Down markets together as
- *  paired combos, run as TWO fully independent window instances — a
- *  5-minute instance and a 15-minute instance — both pulling from the
- *  same shared bankroll, never interacting with each other otherwise.
+ *  Trades BTC and ETH Up/Down markets together as paired combos, run
+ *  as TWO fully independent window instances — a 5-minute instance
+ *  and a 15-minute instance — both pulling from the same shared
+ *  bankroll, never interacting with each other otherwise.
  *
  *  COMBOS (per instance, each tracked independently):
  *    Combo A = BTC-Up  ask + ETH-Down ask
@@ -28,7 +28,7 @@
  *    resting limit orders — so both legs land together rather than
  *    risking a one-sided fill. Affordability (bankroll) is checked for
  *    the combined cost of both legs before either leg is sent.
- *    Size: 100 shares per leg, on both timeframes.
+ *    Size: 20 shares per leg, on both timeframes (real-trading sizing).
  *
  *  EXIT: none. No TP, no SL. Both legs simply ride to actual window
  *    resolution (real settlement pays $1 or $0/share). This bot's own
@@ -57,7 +57,9 @@ const INSTANCE_DEFS = [
   { key: '15m', windowSecs: 900 },
 ];
 
-let DRY_RUN = (process.env.DRY_RUN || 'true').toLowerCase() === 'true'; // runtime-switchable — see setMode
+// DRY_RUN defaults to true (demo) unless explicitly overridden. Flip via
+// setMode(true) / the dashboard toggle, or set DRY_RUN=false in the env.
+let DRY_RUN = (process.env.DRY_RUN || 'true').toLowerCase() === 'true';
 const TOTAL_CAPITAL = Number(process.env.TOTAL_CAPITAL || 2000);
 
 function round2(n) { return Math.round(n * 100) / 100; }
@@ -67,59 +69,9 @@ function nowSec() { return Date.now() / 1000; }
 // ── Strategy parameters ──
 const COMBO_THRESHOLD        = Number(process.env.COMBO_THRESHOLD || 0.80);
 const COMBO_TRIGGER_FRACTION = Number(process.env.COMBO_TRIGGER_FRACTION || 0.70); // cutoff as fraction of window length
-const COMBO_SHARES           = Number(process.env.COMBO_SHARES || 100); // per leg, both timeframes
+const COMBO_SHARES           = Number(process.env.COMBO_SHARES || 20); // per leg, both timeframes — real-trading size
 
 const CRYPTO_TAKER_FEE_RATE = Number(process.env.CRYPTO_TAKER_FEE_RATE || 0.07);
-
-// ═══════════════════════════════════════════════════════════════
-//  ORACLE-LAG STRATEGY — separate strategy, separate bankroll, same
-//  process/dashboard. Watches the last slice of each BTC 5m window;
-//  if the BTC-PERP Oracle price has clearly moved from its window-open
-//  reference but the winning side's ask hasn't caught up, buys it.
-//  Never opens a perp position — Oracle price is read-only signal data.
-//  Everything below prefixed OL_/ol* is fully independent of the combo
-//  bot's instances/bankroll/state above.
-// ═══════════════════════════════════════════════════════════════
-const PERPS = 'https://api.perpetuals.polymarket.com';
-const OL_SYMBOL             = 'BTC';
-const OL_WINDOW_SECS        = 300; // 5m only
-const OL_TOTAL_CAPITAL      = Number(process.env.OL_TOTAL_CAPITAL || 1000);
-const OL_STAKE_USD          = Number(process.env.OL_STAKE_USD || 50);
-const OL_LAG_WINDOW_FRACTION = Number(process.env.OL_LAG_WINDOW_FRACTION || 0.20);
-const OL_MOVE_THRESHOLD_PCT = Number(process.env.OL_MOVE_THRESHOLD_PCT || 0.0004);
-const OL_MAX_ENTRY_ASK      = Number(process.env.OL_MAX_ENTRY_ASK || 0.90);
-const OL_MIN_REMAINING_SECS = Number(process.env.OL_MIN_REMAINING_SECS || 3);
-const OL_ORACLE_REFRESH_MS  = 1000;
-const OL_BINARY_REFRESH_MS  = 1000;
-
-let olDryRun = (process.env.OL_DRY_RUN || process.env.DRY_RUN || 'true').toLowerCase() === 'true'; // independent live/demo toggle
-let olTradingEnabled = true;
-let olBankroll = OL_TOTAL_CAPITAL;
-let olRealizedPnl = 0, olFeesPaid = 0, olWins = 0, olLosses = 0;
-let olEquityCurve = [{ t: Date.now(), equity: OL_TOTAL_CAPITAL }];
-let olLogs = [];
-let olTrades = [];
-let olPerpInstrumentId = null;
-
-function freshOlState() {
-  return {
-    tradable: false,
-    windowStart: null, windowEnd: null,
-    resolvedThisWindow: true,
-    referencePrice: null, oraclePrice: null,
-    triggered: false,
-    market: { slug: null, conditionId: null, upTokenId: null, downTokenId: null, upAsk: null, upBid: null, downAsk: null, downBid: null },
-    position: null, // { side, shares, entryPrice, cost, closed }
-  };
-}
-let olState = freshOlState();
-
-function olLog(msg) {
-  const line = `[${new Date().toISOString().slice(11, 19)}] [oracle-lag] ${msg}`;
-  olLogs.push(line);
-  if (olLogs.length > 400) olLogs.shift();
-  slog(line);
-}
 
 let emitFn = () => {};
 let slog = () => {};
@@ -161,10 +113,19 @@ async function postJSON(url, body) {
   return res.json();
 }
 
-// Marketable buy — priced at the current ask so it fills now (taker).
+// Market buy — true FOK market order via trader.placeFokBuy (dollar-denominated,
+// fills immediately at best available price or kills entirely). Demo mode
+// simulates the same fill semantics at the observed ask so both modes behave
+// the same way, per your instruction that demo and live should both be market orders.
 async function placeMarketableBuy(tokenId, price, shares) {
-  if (!DRY_RUN && trader) return await trader.limitBuy(tokenId, shares, price);
-  return { id: `dry-buy-${Date.now()}-${Math.random().toString(36).slice(2, 7)}` };
+  const dollarAmount = round2(price * shares);
+  if (!DRY_RUN && trader) {
+    const resp = await trader.placeFokBuy(tokenId, dollarAmount);
+    const avgPrice = resp.avgPrice > 0 ? resp.avgPrice : price;
+    const filledShares = resp.isFilled ? round2(dollarAmount / avgPrice) : 0;
+    return { id: resp.id, filled: !!resp.isFilled, avgPrice, shares: filledShares };
+  }
+  return { id: `dry-buy-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, filled: true, avgPrice: price, shares };
 }
 function takerFee(shares, price) {
   return round5(shares * CRYPTO_TAKER_FEE_RATE * price * (1 - price));
@@ -411,11 +372,17 @@ async function checkComboTrigger(inst, comboKey) {
   combo.triggered = true; // lock in before awaiting, so a concurrent tick can't double-fire
 
   for (const leg of priced) {
-    await placeMarketableBuy(leg.tokenId, leg.ask, COMBO_SHARES);
-    bankroll = round2(bankroll - leg.cost);
-    feesPaid = round2(feesPaid + leg.fee);
-    combo.positions[leg.symbol] = { shares: COMBO_SHARES, entryPrice: leg.ask, cost: leg.cost, side: leg.side, closed: false };
-    registerTrade({ instance: inst.key, combo: comboKey, symbol: leg.symbol, side: 'BUY', outcome: leg.side, price: leg.ask, shares: COMBO_SHARES, cost: leg.cost, fee: leg.fee });
+    const fill = await placeMarketableBuy(leg.tokenId, leg.ask, COMBO_SHARES);
+    if (!fill.filled) {
+      log(`❌ [${inst.key}] Combo ${comboKey} ${leg.symbol} ${leg.side} market order did not fill — leg skipped. NOTE: if the other leg already filled, this window may now be one-sided (unhedged) — check the dashboard.`);
+      continue;
+    }
+    const actualShares = fill.shares > 0 ? fill.shares : COMBO_SHARES;
+    const actualCost = round2(actualShares * fill.avgPrice);
+    bankroll = round2(bankroll - actualCost);
+    feesPaid = round2(feesPaid + leg.fee); // fee is an internal estimate for dashboard bookkeeping; the exchange applies its own fee inside the FOK fill
+    combo.positions[leg.symbol] = { shares: actualShares, entryPrice: fill.avgPrice, cost: actualCost, side: leg.side, closed: false };
+    registerTrade({ instance: inst.key, combo: comboKey, symbol: leg.symbol, side: 'BUY', outcome: leg.side, price: fill.avgPrice, shares: actualShares, cost: actualCost, fee: leg.fee });
   }
   recordEquity();
   log(`🔔 [${inst.key}] Combo ${comboKey} (${COMBO_LABEL[comboKey]}) TRIGGERED @ sum=${sum.toFixed(3)} (< ${COMBO_THRESHOLD}) — bought ${COMBO_SHARES}sh each leg: BTC ${priced[0].side}@${priced[0].ask.toFixed(2)} / ETH ${priced[1].side}@${priced[1].ask.toFixed(2)} | total cost=$${totalCost.toFixed(2)} | no exit mgmt — rides to resolution`);
@@ -470,230 +437,6 @@ async function resolveInstanceWindow(inst) {
 }
 
 // ─────────────────────────────────────────
-//  ORACLE-LAG: perp Oracle price feed (read-only — never trades the perp)
-// ─────────────────────────────────────────
-async function olResolvePerpInstrumentId() {
-  const data = await getJSON(`${PERPS}/v1/info/instruments`);
-  const list = Array.isArray(data) ? data : (data.data || []);
-  const match = list.find(i => (i.symbol || '').toUpperCase() === `${OL_SYMBOL}-PERP`);
-  if (!match) throw new Error(`Could not find ${OL_SYMBOL}-PERP instrument on Perps API`);
-  return match.instrument_id ?? match.id;
-}
-async function olFetchOraclePrice() {
-  if (olPerpInstrumentId == null) return null;
-  try {
-    const data = await getJSON(`${PERPS}/v1/info/tickers?instrument_id=${olPerpInstrumentId}`);
-    const row = Array.isArray(data) ? data[0] : (data.data ? data.data[0] : data);
-    if (!row) return null;
-    const price = parseFloat(row.index_price ?? row.indexPrice);
-    return Number.isFinite(price) ? price : null;
-  } catch (e) {
-    olLog(`⚠️  Oracle price fetch failed: ${e.message}`);
-    return null;
-  }
-}
-
-// ─────────────────────────────────────────
-//  ORACLE-LAG: market loading + prices (reuses the combo bot's generic
-//  slug/window/token helpers above — currentWindowStart, slugFor,
-//  fetchEventForWindow, determineWinningSide — nothing combo-specific)
-// ─────────────────────────────────────────
-async function olLoadWindow() {
-  const ws = currentWindowStart(OL_WINDOW_SECS);
-  if (olState.windowStart === ws && olState.market.upTokenId) return;
-
-  const found = await fetchEventForWindow(OL_SYMBOL, OL_WINDOW_SECS, ws);
-  if (!found) { olState.tradable = false; return; }
-
-  const market = found.event.markets.find(m => { const q = qOf(m); return q.includes('up') || q.includes('down'); }) || found.event.markets[0];
-  const upId = tokenIdForSide(market, 'up');
-  const downId = tokenIdForSide(market, 'down');
-  if (!upId || !downId) { olLog('⚠️  window loaded but Up/Down token ids missing'); olState.tradable = false; return; }
-
-  const fresh = freshOlState();
-  fresh.windowStart = found.windowStart;
-  fresh.windowEnd = found.windowStart + OL_WINDOW_SECS;
-  fresh.market = { slug: found.slug, conditionId: market.conditionId || null, upTokenId: upId, downTokenId: downId, upAsk: null, upBid: null, downAsk: null, downBid: null };
-  fresh.tradable = true;
-  fresh.resolvedThisWindow = false;
-  Object.assign(olState, fresh);
-  olLog(`🔭 window loaded: ${fresh.market.slug} | ends ${new Date(fresh.windowEnd * 1000).toISOString().slice(11, 19)}Z | watch phase starts @ +${Math.round(OL_WINDOW_SECS * (1 - OL_LAG_WINDOW_FRACTION))}s`);
-}
-
-async function olRefreshBinaryPrices() {
-  if (!olState.tradable) return;
-  const m = olState.market;
-  const requests = [
-    { token_id: m.upTokenId, side: 'BUY' }, { token_id: m.upTokenId, side: 'SELL' },
-    { token_id: m.downTokenId, side: 'BUY' }, { token_id: m.downTokenId, side: 'SELL' },
-  ];
-  function apply(tid, side, price) {
-    if (!Number.isFinite(price)) return;
-    if (tid === m.upTokenId) { if (side === 'BUY') m.upAsk = price; else m.upBid = price; return; }
-    if (tid === m.downTokenId) { if (side === 'BUY') m.downAsk = price; else m.downBid = price; }
-  }
-  try {
-    const data = await postJSON(`${CLOB}/prices`, requests);
-    if (Array.isArray(data)) {
-      for (const row of data) {
-        const tid = row.token_id || row.asset_id || row.tokenId;
-        const side = (row.side || '').toUpperCase();
-        const price = parseFloat(row.price);
-        if (tid && Number.isFinite(price)) apply(tid, side, price);
-      }
-    } else if (data && typeof data === 'object') {
-      for (const [tid, val] of Object.entries(data)) {
-        if (val && typeof val === 'object') {
-          if (val.BUY != null) apply(tid, 'BUY', parseFloat(val.BUY));
-          if (val.SELL != null) apply(tid, 'SELL', parseFloat(val.SELL));
-          if (val.buy != null) apply(tid, 'BUY', parseFloat(val.buy));
-          if (val.sell != null) apply(tid, 'SELL', parseFloat(val.sell));
-        }
-      }
-    }
-  } catch (e) {
-    try {
-      const [upAsk, upBid, downAsk, downBid] = await Promise.all([
-        getJSON(`${CLOB}/price?token_id=${m.upTokenId}&side=BUY`).catch(() => null),
-        getJSON(`${CLOB}/price?token_id=${m.upTokenId}&side=SELL`).catch(() => null),
-        getJSON(`${CLOB}/price?token_id=${m.downTokenId}&side=BUY`).catch(() => null),
-        getJSON(`${CLOB}/price?token_id=${m.downTokenId}&side=SELL`).catch(() => null),
-      ]);
-      if (upAsk) m.upAsk = parseFloat(upAsk.price || upAsk.mid || m.upAsk);
-      if (upBid) m.upBid = parseFloat(upBid.price || upBid.mid || m.upBid);
-      if (downAsk) m.downAsk = parseFloat(downAsk.price || downAsk.mid || m.downAsk);
-      if (downBid) m.downBid = parseFloat(downBid.price || downBid.mid || m.downBid);
-    } catch (_) {}
-  }
-}
-
-function olMarkValue() {
-  let held = 0;
-  if (olState.position && !olState.position.closed) {
-    const bid = olState.position.side === 'Up' ? olState.market.upBid : olState.market.downBid;
-    held = olState.position.shares * (bid ?? olState.position.entryPrice);
-  }
-  return round2(olBankroll + held);
-}
-function olRecordEquity() {
-  olEquityCurve.push({ t: Date.now(), equity: olMarkValue() });
-  if (olEquityCurve.length > 500) olEquityCurve.shift();
-}
-function olRegisterTrade(entry) {
-  olTrades.push({ time: new Date().toISOString().slice(11, 19), ...entry });
-  if (olTrades.length > 300) olTrades.shift();
-}
-
-async function olCheckTrigger() {
-  if (olState.triggered || !olTradingEnabled) return;
-  if (olState.referencePrice == null || olState.oraclePrice == null) return;
-
-  const elapsed = nowSec() - olState.windowStart;
-  const remaining = olState.windowEnd - nowSec();
-  const lagWindowStart = OL_WINDOW_SECS * (1 - OL_LAG_WINDOW_FRACTION);
-  if (elapsed < lagWindowStart) return;
-  if (remaining < OL_MIN_REMAINING_SECS) return;
-
-  const move = (olState.oraclePrice - olState.referencePrice) / olState.referencePrice;
-  if (Math.abs(move) < OL_MOVE_THRESHOLD_PCT) return;
-
-  const direction = move > 0 ? 'Up' : 'Down';
-  const ask = direction === 'Up' ? olState.market.upAsk : olState.market.downAsk;
-  const tokenId = direction === 'Up' ? olState.market.upTokenId : olState.market.downTokenId;
-  if (ask == null || ask <= 0 || ask >= OL_MAX_ENTRY_ASK) return;
-
-  const shares = round2(OL_STAKE_USD / ask);
-  const fee = takerFee(shares, ask);
-  const cost = round2(shares * ask + fee);
-
-  olState.triggered = true; // one-shot per window, lock in before awaiting
-
-  if (cost > olBankroll) {
-    olLog(`⏭️  Signal fired (oracle move ${(move * 100).toFixed(3)}% → ${direction}, ask=${ask.toFixed(3)}) but insufficient bankroll ($${cost.toFixed(2)} needed) — skipping`);
-    return;
-  }
-
-  await placeOlMarketableBuy(tokenId, ask, shares);
-  olBankroll = round2(olBankroll - cost);
-  olFeesPaid = round2(olFeesPaid + fee);
-  olState.position = { side: direction, shares, entryPrice: ask, cost, closed: false };
-  olRegisterTrade({ side: 'BUY', outcome: direction, price: ask, shares, cost, fee, movePct: round5(move) });
-  olRecordEquity();
-  olLog(`🔔 TRIGGERED — oracle ${olState.oraclePrice.toFixed(2)} vs ref ${olState.referencePrice.toFixed(2)} (${(move * 100).toFixed(3)}% move, ${remaining.toFixed(1)}s left) → bought ${shares} ${direction} @ ${ask.toFixed(3)} | cost=$${cost.toFixed(2)} | rides to resolution`);
-}
-
-async function placeOlMarketableBuy(tokenId, price, shares) {
-  if (!olDryRun && trader) return await trader.limitBuy(tokenId, shares, price);
-  return { id: `dry-buy-${Date.now()}-${Math.random().toString(36).slice(2, 7)}` };
-}
-
-async function olResolveWindow() {
-  if (olState.resolvedThisWindow) return;
-  olState.resolvedThisWindow = true;
-
-  if (olState.position && !olState.position.closed) {
-    const winner = await determineWinningSide(olState.market.slug, olState.market.conditionId, olState.market.upBid, olState.market.downBid);
-    const pos = olState.position;
-    const won = winner === pos.side;
-    const proceeds = won ? round2(pos.shares * 1) : 0;
-    const profit = round2(proceeds - pos.cost);
-    olBankroll = round2(olBankroll + proceeds);
-    olRealizedPnl = round2(olRealizedPnl + profit);
-    if (won) olWins++; else olLosses++;
-    pos.closed = true;
-    const icon = won ? '💰' : '💥';
-    olLog(`${icon} RESOLUTION ${pos.side} ${pos.shares}sh entry=${pos.entryPrice.toFixed(3)} exit=$${won ? '1.00' : '0.00'}/sh | pnl=$${profit.toFixed(2)} | bankroll=$${olBankroll.toFixed(2)}`);
-    olRegisterTrade({ side: 'SELL', outcome: pos.side, reason: 'RESOLUTION', price: won ? 1 : 0, shares: pos.shares, profit });
-  }
-  olRecordEquity();
-}
-
-async function olTick() {
-  const ws = currentWindowStart(OL_WINDOW_SECS);
-  if (olState.windowStart === null || ws !== olState.windowStart) {
-    if (olState.windowStart !== null && !olState.resolvedThisWindow) await olResolveWindow();
-    await olLoadWindow();
-  }
-  if (!olState.tradable) return;
-
-  if (olState.referencePrice == null && olState.oraclePrice != null) {
-    olState.referencePrice = olState.oraclePrice;
-    olLog(`📍 reference price captured @ window open: $${olState.referencePrice.toFixed(2)}`);
-  }
-
-  const remaining = olState.windowEnd - nowSec();
-  if (remaining <= EARLY_CUTOFF_SECS && !olState.resolvedThisWindow) {
-    await olResolveWindow();
-  }
-  if (olState.resolvedThisWindow) return;
-
-  await olCheckTrigger();
-}
-
-function buildOlState() {
-  const mv = olMarkValue();
-  const remaining = olState.windowEnd ? Math.max(0, Math.floor(olState.windowEnd - nowSec())) : null;
-  const lagWindowStart = OL_WINDOW_SECS * (1 - OL_LAG_WINDOW_FRACTION);
-  const elapsed = olState.windowStart ? (nowSec() - olState.windowStart) : null;
-  const secsToLagWindow = (elapsed != null) ? Math.max(0, Math.round(lagWindowStart - elapsed)) : null;
-  const movePct = (olState.oraclePrice != null && olState.referencePrice != null) ? round5((olState.oraclePrice - olState.referencePrice) / olState.referencePrice) : null;
-
-  return {
-    dryRun: olDryRun, tradingEnabled: olTradingEnabled, symbol: OL_SYMBOL, windowSecs: OL_WINDOW_SECS,
-    tradable: olState.tradable, windowEnd: olState.windowEnd, secsToEnd: remaining, secsToLagWindow,
-    inWatchPhase: elapsed != null && elapsed >= lagWindowStart,
-    referencePrice: olState.referencePrice, oraclePrice: olState.oraclePrice, movePct,
-    triggered: olState.triggered, market: olState.market, position: olState.position,
-    totalCapital: OL_TOTAL_CAPITAL, bankroll: olBankroll, markValue: mv,
-    realizedPnl: olRealizedPnl, feesPaid: olFeesPaid, wins: olWins, losses: olLosses,
-    totalPnl: round2(mv - OL_TOTAL_CAPITAL),
-    winRate: (olWins + olLosses) > 0 ? round2((olWins / (olWins + olLosses)) * 100) : null,
-    config: { stakeUsd: OL_STAKE_USD, lagWindowFraction: OL_LAG_WINDOW_FRACTION, moveThresholdPct: OL_MOVE_THRESHOLD_PCT, maxEntryAsk: OL_MAX_ENTRY_ASK, minRemainingSecs: OL_MIN_REMAINING_SECS, cryptoTakerFeeRate: CRYPTO_TAKER_FEE_RATE },
-    equityCurve: olEquityCurve, logs: olLogs.slice(-100), trades: olTrades.slice(-80).reverse(),
-  };
-}
-
-// ─────────────────────────────────────────
 //  Main tick
 // ─────────────────────────────────────────
 async function instanceTick(inst) {
@@ -716,7 +459,6 @@ async function instanceTick(inst) {
 
 async function tick() {
   for (const inst of instances) await instanceTick(inst);
-  await olTick(); // separate strategy, separate state — does not touch instances/bankroll above
 }
 
 // ─────────────────────────────────────────
@@ -766,7 +508,6 @@ function buildState() {
       cryptoTakerFeeRate: CRYPTO_TAKER_FEE_RATE,
     },
     equityCurve, logs: logs.slice(-100), trades: trades.slice(-80).reverse(),
-    oracleLag: buildOlState(), // separate strategy, separate bankroll/state — see buildOlState()
   };
 }
 
@@ -774,21 +515,13 @@ let loopRunning = false;
 async function mainLoop() {
   if (loopRunning) return;
   loopRunning = true;
-  let lastPolyPriceFetch = 0, lastOlOracleFetch = 0, lastOlBinaryFetch = 0;
+  let lastPolyPriceFetch = 0;
   while (true) {
     try {
       const now = Date.now();
       if (now - lastPolyPriceFetch >= POLY_PRICE_REFRESH_MS) {
         lastPolyPriceFetch = now;
         await Promise.all(instances.map(refreshInstancePrices));
-      }
-      if (now - lastOlOracleFetch >= OL_ORACLE_REFRESH_MS) {
-        lastOlOracleFetch = now;
-        olState.oraclePrice = await olFetchOraclePrice();
-      }
-      if (now - lastOlBinaryFetch >= OL_BINARY_REFRESH_MS) {
-        lastOlBinaryFetch = now;
-        await olRefreshBinaryPrices();
       }
       await tick();
       emitFn('state', buildState());
@@ -814,16 +547,6 @@ function setMode(wantLive) {
   return { ok: true, dryRun: DRY_RUN };
 }
 
-// ── Oracle-Lag controls — fully independent of the combo bot's controls above ──
-function pauseOracleLag() { olTradingEnabled = false; olLog('⏸️  Trading paused'); return { ok: true }; }
-function resumeOracleLag() { olTradingEnabled = true; olLog('▶️  Trading resumed'); return { ok: true }; }
-function setOracleLagMode(wantLive) {
-  const was = olDryRun;
-  olDryRun = !wantLive;
-  if (was !== olDryRun) olLog(olDryRun ? '🟡 Switched to DEMO mode (simulated fills)' : '🔴 Switched to LIVE mode — real money, real orders');
-  return { ok: true, dryRun: olDryRun };
-}
-
 async function init(privateKey, emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
@@ -834,21 +557,9 @@ async function init(privateKey, emit, slogFn) {
   log(`⚙️  Execution: marketable buy both legs @ current ask, ${COMBO_SHARES}sh each, once per combo per window | no TP/SL — rides to resolution`);
   log(`${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
-  olLog(`🚀 Oracle-Lag Convergence strategy — BTC 5m Up/Down, separate $${OL_TOTAL_CAPITAL} bankroll, separate live/demo toggle`);
-  olLog(`⚙️  stake $${OL_STAKE_USD}/trigger | watch last ${Math.round(OL_LAG_WINDOW_FRACTION * 100)}% of window | move≥${(OL_MOVE_THRESHOLD_PCT * 100).toFixed(2)}% | entry ask<${OL_MAX_ENTRY_ASK} | signal: BTC-PERP Oracle price (read-only, no perp ever traded)`);
-  try {
-    olPerpInstrumentId = await olResolvePerpInstrumentId();
-    olLog(`✅ Resolved ${OL_SYMBOL}-PERP instrument_id=${olPerpInstrumentId} for Oracle price feed`);
-  } catch (e) {
-    olLog(`❌ Could not resolve ${OL_SYMBOL}-PERP instrument — Oracle signal will be unavailable: ${e.message}`);
-  }
-
   trader = new PolymarketTrader(privateKey);
   await trader.authenticate();
   mainLoop().catch(e => log(`❌ Fatal: ${e.message}`));
 }
 
-module.exports = {
-  init, setPairs, pauseTrading, resumeTrading, setMode, getStatus, buildState,
-  pauseOracleLag, resumeOracleLag, setOracleLagMode,
-};
+module.exports = { init, setPairs, pauseTrading, resumeTrading, setMode, getStatus, buildState };
