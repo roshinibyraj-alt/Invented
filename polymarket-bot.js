@@ -45,9 +45,11 @@ const PolymarketTrader = require('./polymarket-trader');
 
 const GAMMA = 'https://gamma-api.polymarket.com';
 const CLOB  = 'https://clob.polymarket.com';
+const DATA_API = 'https://data-api.polymarket.com'; // public, no-auth — real wallet balance/positions
 
 const TICK_MS               = 500;
 const POLY_PRICE_REFRESH_MS = 1000;
+const REAL_ACCOUNT_REFRESH_MS = 5000; // how often to pull real balance/positions in live mode
 const EARLY_CUTOFF_SECS     = Number(process.env.EARLY_CUTOFF_SECS || 2); // stop trading this close to window end, go to resolution
 const SLUG_OFFSET_FALLBACKS_FACTORY = (windowSecs) => [0, -windowSecs, windowSecs];
 
@@ -83,6 +85,14 @@ let tradingEnabled = true;
 let bankroll = TOTAL_CAPITAL;
 let realizedPnl = 0, feesPaid = 0, wins = 0, losses = 0;
 let equityCurve = [{ t: Date.now(), equity: TOTAL_CAPITAL }];
+
+// ── Real account state (live mode only) — actual wallet balance/positions
+// pulled from Polymarket itself, independent of the bot's internal simulated
+// bankroll/position bookkeeping used above for trade decisions. ──
+let realBalance = null;
+let realPositions = [];
+let realLastUpdated = null;
+let realFetchError = null;
 
 // Combo leg definitions: which symbol/side belongs to each combo.
 const COMBO_LEGS = {
@@ -299,6 +309,32 @@ async function refreshInstancePrices(inst) {
 }
 
 // ─────────────────────────────────────────
+//  Real account data (live mode only) — actual wallet, not bot bookkeeping
+// ─────────────────────────────────────────
+function tradingWalletAddress() {
+  if (!trader) return null;
+  return trader.depositWallet || trader.address || null; // depositWallet is the actual funder/proxy wallet that holds funds+positions on Polymarket
+}
+async function refreshRealAccount() {
+  if (DRY_RUN || !trader) { realFetchError = null; return; } // no real account to show in demo mode
+  const address = tradingWalletAddress();
+  if (!address) { realFetchError = 'No wallet address resolved yet'; return; }
+  try {
+    const [balance, positions] = await Promise.all([
+      trader.getBalance().catch(e => { throw new Error(`balance: ${e.message}`); }),
+      getJSON(`${DATA_API}/positions?user=${address}&sizeThreshold=0`).catch(e => { throw new Error(`positions: ${e.message}`); }),
+    ]);
+    realBalance = balance;
+    realPositions = Array.isArray(positions) ? positions.filter(p => Math.abs(p.size) > 0) : [];
+    realLastUpdated = Date.now();
+    realFetchError = null;
+  } catch (e) {
+    realFetchError = e.message;
+    log(`⚠️  Real account refresh failed: ${e.message}`);
+  }
+}
+
+// ─────────────────────────────────────────
 //  Equity tracking
 // ─────────────────────────────────────────
 function markValue() {
@@ -508,6 +544,14 @@ function buildState() {
       cryptoTakerFeeRate: CRYPTO_TAKER_FEE_RATE,
     },
     equityCurve, logs: logs.slice(-100), trades: trades.slice(-80).reverse(),
+    real: {
+      enabled: !DRY_RUN,
+      wallet: tradingWalletAddress(),
+      balance: realBalance,
+      positions: realPositions,
+      lastUpdated: realLastUpdated,
+      error: realFetchError,
+    },
   };
 }
 
@@ -515,13 +559,17 @@ let loopRunning = false;
 async function mainLoop() {
   if (loopRunning) return;
   loopRunning = true;
-  let lastPolyPriceFetch = 0;
+  let lastPolyPriceFetch = 0, lastRealAccountFetch = 0;
   while (true) {
     try {
       const now = Date.now();
       if (now - lastPolyPriceFetch >= POLY_PRICE_REFRESH_MS) {
         lastPolyPriceFetch = now;
         await Promise.all(instances.map(refreshInstancePrices));
+      }
+      if (now - lastRealAccountFetch >= REAL_ACCOUNT_REFRESH_MS) {
+        lastRealAccountFetch = now;
+        await refreshRealAccount();
       }
       await tick();
       emitFn('state', buildState());
@@ -543,6 +591,7 @@ function setMode(wantLive) {
   DRY_RUN = !wantLive;
   if (was !== DRY_RUN) {
     log(DRY_RUN ? '🟡 Switched to DEMO mode (simulated fills)' : '🔴 Switched to LIVE mode — real money, real orders');
+    if (!DRY_RUN) refreshRealAccount().catch(() => {}); // don't make the dashboard wait up to 5s to see real balance
   }
   return { ok: true, dryRun: DRY_RUN };
 }
