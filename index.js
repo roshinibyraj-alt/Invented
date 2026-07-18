@@ -39,19 +39,6 @@ app.post('/api/set-mode', (req, res) => {
   try { res.json(bot.setMode(live)); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
-// ── Oracle-Lag strategy controls — fully independent of the combo bot's controls above ──
-app.post('/api/oracle-lag/pause', (_, res) => {
-  try { res.json(bot.pauseOracleLag()); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
-});
-app.post('/api/oracle-lag/resume', (_, res) => {
-  try { res.json(bot.resumeOracleLag()); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
-});
-app.post('/api/oracle-lag/set-mode', (req, res) => {
-  const { live } = req.body || {};
-  if (typeof live !== 'boolean') return res.status(400).json({ ok: false, error: 'Missing boolean "live" field' });
-  try { res.json(bot.setOracleLagMode(live)); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
-});
-
 app.get('/', (_, res) => {
   res.send(`<!DOCTYPE html>
 <html lang="en">
@@ -124,10 +111,6 @@ app.get('/', (_, res) => {
   .spark-box { margin-top: 6px; }
   .spark-box svg { width: 100%; height: 34px; display: block; }
   .spark-label { font-size: 8px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-top: 4px; }
-  .ol-divider { height: 6px; background: linear-gradient(90deg, var(--purple), #7c3aed22); margin-top: 10px; }
-  .ol-header { background: linear-gradient(135deg,#f3edfc,#e9defa); border-bottom: 2px solid #7c3aed44; }
-  .ol-logo { color: var(--purple); }
-  .ol-logo span { color: #9333ea; }
 </style>
 </head>
 <body>
@@ -185,55 +168,6 @@ app.get('/', (_, res) => {
     </div>
   </div>
 
-  <!-- ═══════════════════════════════════════════════════════════
-       ORACLE-LAG STRATEGY — separate strategy, separate bankroll,
-       separate live/demo toggle, same dashboard. Visually set apart
-       with a purple divider/badges so it never reads as part of the
-       combo bot above.
-  ═══════════════════════════════════════════════════════════════ -->
-  <div class="ol-divider"></div>
-  <div class="header ol-header">
-    <div class="logo ol-logo">🔭 <span>ORACLE-LAG</span> STRATEGY — BTC 5m (separate bankroll)</div>
-    <div id="ol-mode-badge" class="mode-badge mode-dry">DEMO</div>
-  </div>
-  <div class="toolbar">
-    <button class="pause" id="ol-pause-btn">Pause</button>
-    <button class="resume" id="ol-resume-btn">Resume</button>
-    <button class="live-toggle" id="ol-mode-toggle-btn">Toggle Live/Demo</button>
-  </div>
-  <div class="toolbar-status">Signal: BTC-PERP Oracle price vs window-open reference, watched only in the last 20% of each window. No perp is ever traded — Oracle price is read-only signal data; only the binary Up/Down share is bought.</div>
-
-  <div class="stats-row">
-    <div class="stat"><div class="stat-label">Bankroll</div><div class="stat-val" id="ol-bankroll">$0.00</div></div>
-    <div class="stat"><div class="stat-label">Mark Value</div><div class="stat-val" id="ol-mark-value">$0.00</div></div>
-    <div class="stat"><div class="stat-label">Total P&amp;L</div><div class="stat-val" id="ol-total-pnl">$0.00</div></div>
-    <div class="stat"><div class="stat-label">Realized</div><div class="stat-val" id="ol-realized-pnl">$0.00</div></div>
-    <div class="stat"><div class="stat-label">Fees Paid</div><div class="stat-val pnl-neg" id="ol-fees-paid">$0.00</div></div>
-    <div class="stat"><div class="stat-label">Win Rate</div><div class="stat-val" id="ol-win-rate">—</div><div class="stat-sub" id="ol-win-loss-sub">0W / 0L</div></div>
-    <div class="stat"><div class="stat-label">Trading</div><div class="stat-val" id="ol-trading-flag">—</div></div>
-  </div>
-
-  <div class="section">
-    <div class="section-hdr">Live Signal</div>
-    <div id="ol-signal-card" class="pair-card" style="max-width:480px"><div class="pair-body"><div class="empty">Loading…</div></div></div>
-  </div>
-
-  <div class="bottom-grid">
-    <div>
-      <div class="section-hdr">Trades</div>
-      <div class="tbl-wrap">
-        <table class="tbl">
-          <thead><tr><th>Time</th><th>Side</th><th>Reason</th><th>Price</th><th>Shares</th><th>Move%</th><th>P&amp;L</th></tr></thead>
-          <tbody id="ol-trade-body"><tr><td colspan="7" class="empty">No trades yet</td></tr></tbody>
-        </table>
-      </div>
-    </div>
-    <div>
-      <div class="section-hdr">Logs</div>
-      <div class="logs-wrap" id="ol-logs"></div>
-    </div>
-  </div>
-
 <script src="/socket.io/socket.io.js"></script>
 <script>
   const socket = io();
@@ -278,17 +212,6 @@ app.get('/', (_, res) => {
   });
   document.getElementById('resume-btn').addEventListener('click', async () => {
     await fetch('/api/resume', { method: 'POST' });
-  });
-  document.getElementById('ol-pause-btn').addEventListener('click', async () => {
-    await fetch('/api/oracle-lag/pause', { method: 'POST' });
-  });
-  document.getElementById('ol-resume-btn').addEventListener('click', async () => {
-    await fetch('/api/oracle-lag/resume', { method: 'POST' });
-  });
-  document.getElementById('ol-mode-toggle-btn').addEventListener('click', async () => {
-    const cur = await (await fetch('/api/status')).json();
-    const curOlDry = cur.oracleLag ? cur.oracleLag.dryRun : true;
-    await fetch('/api/oracle-lag/set-mode', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ live: !!curOlDry }) });
   });
 
   document.getElementById('mode-toggle-btn').addEventListener('click', async () => {
@@ -398,81 +321,6 @@ app.get('/', (_, res) => {
         return '<div style="color:'+col+'">'+l+'</div>';
       }).join('');
       logEl.scrollTop = logEl.scrollHeight;
-    }
-
-    // ── Oracle-Lag strategy — separate bankroll/state, rendered independently ──
-    const ol = s.oracleLag;
-    if (ol) {
-      const olBadge = document.getElementById('ol-mode-badge');
-      olBadge.className = 'mode-badge ' + (ol.dryRun ? 'mode-dry' : 'mode-live');
-      olBadge.textContent = ol.dryRun ? 'DEMO' : '🔴 LIVE';
-
-      document.getElementById('ol-bankroll').textContent = '$'+(ol.bankroll||0).toFixed(2);
-      document.getElementById('ol-mark-value').textContent = '$'+(ol.markValue||0).toFixed(2);
-      document.getElementById('ol-total-pnl').textContent = sgn(ol.totalPnl);
-      document.getElementById('ol-total-pnl').className = 'stat-val ' + pClass(ol.totalPnl);
-      document.getElementById('ol-realized-pnl').textContent = sgn(ol.realizedPnl);
-      document.getElementById('ol-realized-pnl').className = 'stat-val ' + pClass(ol.realizedPnl);
-      document.getElementById('ol-fees-paid').textContent = '$'+(ol.feesPaid||0).toFixed(4);
-      document.getElementById('ol-win-rate').textContent = ol.winRate === null ? '—' : ol.winRate.toFixed(1)+'%';
-      document.getElementById('ol-win-loss-sub').textContent = ol.wins+'W / '+ol.losses+'L';
-      document.getElementById('ol-trading-flag').textContent = ol.tradingEnabled ? 'ON' : 'PAUSED';
-
-      const card = document.getElementById('ol-signal-card');
-      if (!ol.tradable) {
-        card.innerHTML = '<div class="pair-body"><div class="empty">Loading BTC 5m window…</div></div>';
-      } else {
-        const moveTxt = ol.movePct === null ? '—' : (ol.movePct*100).toFixed(3)+'%';
-        const dirHtml = ol.movePct === null ? '<span class="pair-key">no signal</span>' :
-          (ol.movePct > 0 ? '<span class="side-up">favors UP</span>' : '<span class="side-down">favors DOWN</span>');
-        const phaseTxt = ol.inWatchPhase ? 'WATCHING for entry' : ('watch phase in '+fmtSecs(ol.secsToLagWindow));
-        let posHtml = '<div class="pair-row" style="font-size:9px;opacity:.6"><span class="pair-key">Position</span><span>none this window'+(ol.triggered?' (fired, skipped/unaffordable)':'')+'</span></div>';
-        if (ol.position) {
-          posHtml = '<div class="pair-row" style="font-size:9px"><span class="pair-key">Position</span><span>'+ol.position.shares+'sh '+ol.position.side+' @'+ol.position.entryPrice.toFixed(3)+' ('+(ol.position.closed?'closed':'open, cost $'+ol.position.cost.toFixed(2))+')</span></div>';
-        }
-        card.className = 'pair-card' + (ol.position && !ol.position.closed ? ' has-pos' : '');
-        card.style.maxWidth = '480px';
-        card.innerHTML =
-          '<div class="pair-hdr"><div class="pair-sym">BTC 5m</div><div class="pair-timer">ends '+fmtSecs(ol.secsToEnd)+'</div></div>'+
-          '<div class="pair-body">'+
-            '<div class="pair-row" style="opacity:.7"><span class="pair-key">'+phaseTxt+'</span><span></span></div>'+
-            '<div class="pair-row"><span class="pair-key">Oracle price</span><span>'+(ol.oraclePrice?.toFixed(2)||'—')+'</span></div>'+
-            '<div class="pair-row"><span class="pair-key">Window-open reference</span><span>'+(ol.referencePrice?.toFixed(2)||'—')+'</span></div>'+
-            '<div class="pair-row"><span class="pair-key">Oracle move</span><span>'+moveTxt+' '+dirHtml+'</span></div>'+
-            '<div class="pair-row"><span class="pair-key side-up">Up ask/bid</span><span>'+(ol.market.upAsk?.toFixed(3)||'—')+' / '+(ol.market.upBid?.toFixed(3)||'—')+'</span></div>'+
-            '<div class="pair-row"><span class="pair-key side-down">Down ask/bid</span><span>'+(ol.market.downAsk?.toFixed(3)||'—')+' / '+(ol.market.downBid?.toFixed(3)||'—')+'</span></div>'+
-            posHtml +
-          '</div>';
-      }
-
-      const olTb = document.getElementById('ol-trade-body');
-      if (ol.trades && ol.trades.length) {
-        olTb.innerHTML = ol.trades.map(t => {
-          const pnlStr = (t.profit !== undefined) ? sgn(t.profit) : '—';
-          const pnlCls = (t.profit !== undefined) ? pClass(t.profit) : '';
-          const sideColor = t.side === 'BUY' ? '#ffd740' : '#00d4ff';
-          const moveTxt = (t.movePct !== undefined) ? (t.movePct*100).toFixed(3)+'%' : '—';
-          return '<tr><td>'+t.time+'</td><td style="color:'+sideColor+'">'+t.side+' '+(t.outcome||'')+'</td>'+
-            '<td>'+(t.reason||'ENTRY')+'</td><td>'+(t.price||0).toFixed(3)+'</td><td>'+(t.shares||0)+'</td>'+
-            '<td>'+moveTxt+'</td><td class="'+pnlCls+'">'+pnlStr+'</td></tr>';
-        }).join('');
-      } else {
-        olTb.innerHTML = '<tr><td colspan="7" class="empty">No trades yet</td></tr>';
-      }
-
-      const olLogEl = document.getElementById('ol-logs');
-      if (ol.logs && ol.logs.length > 0) {
-        olLogEl.innerHTML = ol.logs.map(l => {
-          const col = l.includes('❌')||l.includes('💥') ? '#ff4757'
-                    : l.includes('💰')||l.includes('✅') ? '#00e676'
-                    : l.includes('🔔') ? '#ffd740'
-                    : l.includes('🔭')||l.includes('📍') ? '#9333ea'
-                    : l.includes('⚠️') ? '#ff9f0a'
-                    : '#4a6080';
-          return '<div style="color:'+col+'">'+l+'</div>';
-        }).join('');
-        olLogEl.scrollTop = olLogEl.scrollHeight;
-      }
     }
   });
 </script>
