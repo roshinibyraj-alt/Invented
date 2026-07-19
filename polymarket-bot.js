@@ -71,7 +71,16 @@ function nowSec() { return Date.now() / 1000; }
 // ── Strategy parameters ──
 const COMBO_THRESHOLD        = Number(process.env.COMBO_THRESHOLD || 0.80);
 const COMBO_TRIGGER_FRACTION = Number(process.env.COMBO_TRIGGER_FRACTION || 0.70); // cutoff as fraction of window length
-const COMBO_SHARES           = Number(process.env.COMBO_SHARES || 20); // per leg, both timeframes — real-trading size
+const COMBO_SHARES           = Number(process.env.COMBO_SHARES || 10); // per leg, base size, both timeframes
+
+// ── Decorrelation boost: if a combo's two legs resolve as BOTH win or BOTH
+// lose (instead of the expected split — one wins, one loses, since the combo
+// bets BTC and ETH move opposite ways), that's flagged as a decorrelation
+// event for that instance. Its next BOOST_WINDOWS windows (any windows, even
+// ones where nothing triggers) size up to BOOST_SHARES, then drop back to
+// base. Tracked fully independently per instance (5m vs 15m). ──
+const BOOST_SHARES  = Number(process.env.BOOST_SHARES || 30);
+const BOOST_WINDOWS = Number(process.env.BOOST_WINDOWS || 3);
 
 const CRYPTO_TAKER_FEE_RATE = Number(process.env.CRYPTO_TAKER_FEE_RATE || 0.07);
 
@@ -175,7 +184,8 @@ function freshMarketSlot() {
 function freshComboSlot() {
   return {
     triggered: false, // one-shot per window
-    positions: { BTC: null, ETH: null }, // filled legs: {shares, entryPrice, cost, side, closed}
+    positions: { BTC: null, ETH: null }, // filled legs: {shares, entryPrice, cost, side, closed, won}
+    decorrelationChecked: false, // guards against re-classifying the same combo's result twice
   };
 }
 function freshInstanceState(def) {
@@ -188,6 +198,8 @@ function freshInstanceState(def) {
     resolvedThisWindow: true,
     markets: { BTC: freshMarketSlot(), ETH: freshMarketSlot() },
     combos: { A: freshComboSlot(), B: freshComboSlot() },
+    sharesThisWindow: COMBO_SHARES, // base unless a boost is active — set at window-load time
+    boostWindowsRemaining: 0, // survives across freshInstanceState resets — see loadInstanceWindow
   };
 }
 
@@ -256,6 +268,8 @@ async function loadInstanceWindow(inst) {
   const ethSlot = slotFrom(foundEth);
   if (!btcSlot || !ethSlot) { log(`⚠️  [${inst.key}] window loaded but Up/Down token ids missing`); inst.tradable = false; return; }
 
+  const carryBoostRemaining = inst.boostWindowsRemaining || 0; // must survive the freshInstanceState() reset below
+
   const fresh = freshInstanceState(INSTANCE_DEFS.find(d => d.key === inst.key));
   fresh.windowStart = foundBtc.windowStart;
   fresh.windowEnd = foundBtc.windowStart + inst.windowSecs;
@@ -263,8 +277,22 @@ async function loadInstanceWindow(inst) {
   fresh.markets.ETH = ethSlot;
   fresh.tradable = true;
   fresh.resolvedThisWindow = false;
+
+  // This window consumes one unit of any active boost countdown. Any 3
+  // subsequent windows count, whether or not a combo actually fires in them.
+  if (carryBoostRemaining > 0) {
+    fresh.sharesThisWindow = BOOST_SHARES;
+    fresh.boostWindowsRemaining = carryBoostRemaining - 1;
+  } else {
+    fresh.sharesThisWindow = COMBO_SHARES;
+    fresh.boostWindowsRemaining = 0;
+  }
+
   Object.assign(inst, fresh);
-  log(`🔭 [${inst.key}] window loaded: BTC=${btcSlot.slug} ETH=${ethSlot.slug} | ends ${new Date(fresh.windowEnd * 1000).toISOString().slice(11, 19)}Z | trigger cutoff=${fresh.cutoffSecs}s`);
+  const sizingNote = fresh.sharesThisWindow === BOOST_SHARES
+    ? ` | 🔥 BOOSTED sizing this window: ${fresh.sharesThisWindow}sh/leg (${fresh.boostWindowsRemaining} more boosted window${fresh.boostWindowsRemaining === 1 ? '' : 's'} after this one)`
+    : ` | base sizing this window: ${fresh.sharesThisWindow}sh/leg`;
+  log(`🔭 [${inst.key}] window loaded: BTC=${btcSlot.slug} ETH=${ethSlot.slug} | ends ${new Date(fresh.windowEnd * 1000).toISOString().slice(11, 19)}Z | trigger cutoff=${fresh.cutoffSecs}s${sizingNote}`);
 }
 
 // ─────────────────────────────────────────
@@ -416,6 +444,7 @@ async function checkComboTrigger(inst, comboKey) {
   const sum = comboAskSum(inst, comboKey);
   if (sum == null || sum >= COMBO_THRESHOLD) return;
 
+  const shares = inst.sharesThisWindow || COMBO_SHARES; // set once at window-load — base or boosted
   const legs = COMBO_LEGS[comboKey];
 
   // Price out both legs first, so we only commit if we can afford BOTH.
@@ -423,13 +452,13 @@ async function checkComboTrigger(inst, comboKey) {
     const m = inst.markets[leg.symbol];
     const ask = leg.side === 'Up' ? m.upAsk : m.downAsk;
     const tokenId = leg.side === 'Up' ? m.upTokenId : m.downTokenId;
-    const fee = takerFee(COMBO_SHARES, ask);
-    const cost = round2(ask * COMBO_SHARES + fee);
+    const fee = takerFee(shares, ask);
+    const cost = round2(ask * shares + fee);
     return { ...leg, ask, tokenId, fee, cost };
   });
   const totalCost = round2(priced.reduce((s, p) => s + p.cost, 0));
   if (totalCost > bankroll) {
-    log(`⏭️  [${inst.key}] Combo ${comboKey} (${COMBO_LABEL[comboKey]}) triggered @ sum=${sum.toFixed(3)} but insufficient bankroll ($${totalCost.toFixed(2)} needed), skipping`);
+    log(`⏭️  [${inst.key}] Combo ${comboKey} (${COMBO_LABEL[comboKey]}) triggered @ sum=${sum.toFixed(3)} but insufficient bankroll ($${totalCost.toFixed(2)} needed at ${shares}sh/leg), skipping`);
     combo.triggered = true; // still one-shot — don't keep re-checking a combo we can't afford
     return;
   }
@@ -437,17 +466,17 @@ async function checkComboTrigger(inst, comboKey) {
   combo.triggered = true; // lock in before awaiting, so a concurrent tick can't double-fire
 
   for (const leg of priced) {
-    const fill = await placeMarketableBuy(leg.tokenId, leg.ask, COMBO_SHARES);
+    const fill = await placeMarketableBuy(leg.tokenId, leg.ask, shares);
     if (!fill.filled) {
       log(`❌ [${inst.key}] Combo ${comboKey} ${leg.symbol} ${leg.side} market order did not fill — leg skipped. NOTE: if the other leg already filled, this window may now be one-sided (unhedged) — check the dashboard.`);
       continue;
     }
-    const actualShares = fill.shares > 0 ? fill.shares : COMBO_SHARES;
+    const actualShares = fill.shares > 0 ? fill.shares : shares;
     const actualCost = round2(actualShares * fill.avgPrice);
     bankroll = round2(bankroll - actualCost);
     feesPaid = round2(feesPaid + leg.fee); // fee is an internal estimate for dashboard bookkeeping; the exchange applies its own fee inside the FOK fill
     const tpPrice = Math.min(TP_MAX_PRICE, round2(fill.avgPrice * TP_MULTIPLIER));
-    const position = { shares: actualShares, entryPrice: fill.avgPrice, cost: actualCost, side: leg.side, closed: false, tpPrice, tpOrderId: null, tpFilled: false, closedReason: null };
+    const position = { shares: actualShares, entryPrice: fill.avgPrice, cost: actualCost, side: leg.side, closed: false, won: null, tpPrice, tpOrderId: null, tpFilled: false, closedReason: null };
     combo.positions[leg.symbol] = position;
     registerTrade({ instance: inst.key, combo: comboKey, symbol: leg.symbol, side: 'BUY', outcome: leg.side, price: fill.avgPrice, shares: actualShares, cost: actualCost, fee: leg.fee });
 
@@ -464,7 +493,52 @@ async function checkComboTrigger(inst, comboKey) {
     }
   }
   recordEquity();
-  log(`🔔 [${inst.key}] Combo ${comboKey} (${COMBO_LABEL[comboKey]}) TRIGGERED @ sum=${sum.toFixed(3)} (< ${COMBO_THRESHOLD}) — bought ${COMBO_SHARES}sh each leg: BTC ${priced[0].side}@${priced[0].ask.toFixed(2)} / ETH ${priced[1].side}@${priced[1].ask.toFixed(2)} | total cost=$${totalCost.toFixed(2)} | TP set per-leg @ ${Math.round(TP_MULTIPLIER * 100)}% of entry — untriggered TP rides to resolution`);
+  log(`🔔 [${inst.key}] Combo ${comboKey} (${COMBO_LABEL[comboKey]}) TRIGGERED @ sum=${sum.toFixed(3)} (< ${COMBO_THRESHOLD}) — bought ${shares}sh each leg${shares === BOOST_SHARES ? ' [BOOSTED]' : ''}: BTC ${priced[0].side}@${priced[0].ask.toFixed(2)} / ETH ${priced[1].side}@${priced[1].ask.toFixed(2)} | total cost=$${totalCost.toFixed(2)} | TP set per-leg @ ${Math.round(TP_MULTIPLIER * 100)}% of entry — untriggered TP rides to resolution`);
+}
+
+// ─────────────────────────────────────────
+//  Decorrelation boost — judged purely by the LIVE MARKET PRICE of both legs
+//  in the last seconds before the window closes, not by our own win/loss
+//  outcome or resolution. If both held sides are trending toward the SAME
+//  end (both near $0.00, or both near $1.00) instead of the expected split
+//  (one near $1, one near $0), that's decorrelation — e.g. combo bought
+//  BTC-Up + ETH-Down, and in the last second BOTH are sitting around 0.01:
+//  both are about to lose, meaning BTC and ETH actually moved the SAME
+//  direction as each other rather than diverging the way the combo bet.
+//  Checked once per combo per window, right before resolution begins, using
+//  whatever the freshest polled price is at that moment — completely
+//  independent of whether either leg already TP'd or how it later resolves.
+// ─────────────────────────────────────────
+const DECORRELATION_PRICE_THRESHOLD = Number(process.env.DECORRELATION_PRICE_THRESHOLD || 0.05);
+
+function checkComboDecorrelationByPrice(inst, comboKey) {
+  const combo = inst.combos[comboKey];
+  if (!combo.triggered || combo.decorrelationChecked) return; // only classify combos that actually fired this window, once each
+  combo.decorrelationChecked = true;
+
+  const legs = COMBO_LEGS[comboKey];
+  const prices = legs.map(leg => {
+    const m = inst.markets[leg.symbol];
+    const bid = leg.side === 'Up' ? m.upBid : m.downBid;
+    const ask = leg.side === 'Up' ? m.upAsk : m.downAsk;
+    return bid ?? ask ?? null; // prefer bid (realizable value); fall back to ask if bid is missing
+  });
+  if (prices.some(p => p == null)) {
+    log(`⚠️  [${inst.key}] Combo ${comboKey} could not classify decorrelation — missing last-second price data`);
+    return;
+  }
+
+  const [p1, p2] = prices;
+  const bothNearZero = p1 <= DECORRELATION_PRICE_THRESHOLD && p2 <= DECORRELATION_PRICE_THRESHOLD;
+  const bothNearOne  = p1 >= (1 - DECORRELATION_PRICE_THRESHOLD) && p2 >= (1 - DECORRELATION_PRICE_THRESHOLD);
+  const tag = `${legs[0].symbol}-${legs[0].side}=${p1.toFixed(3)} & ${legs[1].symbol}-${legs[1].side}=${p2.toFixed(3)}`;
+
+  if (bothNearZero || bothNearOne) {
+    inst.boostWindowsRemaining = BOOST_WINDOWS; // reset to a fresh 3, even if a boost was already active
+    log(`⚡ [${inst.key}] Combo ${comboKey} DECORRELATED — last-second prices ${tag}, both trending toward ${bothNearZero ? '0 (both about to lose)' : '1 (both about to win)'} — sizing boosts to ${BOOST_SHARES}sh/leg for the next ${BOOST_WINDOWS} windows`);
+  } else {
+    log(`↔️  [${inst.key}] Combo ${comboKey} split as expected — last-second prices ${tag} — sizing unaffected`);
+  }
 }
 
 // ─────────────────────────────────────────
@@ -479,6 +553,7 @@ function settleTp(inst, comboKey, symbol, pos) {
   realizedPnl = round2(realizedPnl + profit);
   wins++; // a TP fill is definitionally profitable (tpPrice > entryPrice)
   pos.closed = true;
+  pos.won = true;
   pos.tpFilled = true;
   pos.closedReason = 'TP';
   log(`🎯 [${inst.key}] Combo ${comboKey} ${symbol} ${pos.side} TP FILLED ${pos.shares}sh entry=${pos.entryPrice.toFixed(3)} tp=${pos.tpPrice.toFixed(3)} | pnl=$${profit.toFixed(2)} | bankroll=$${bankroll.toFixed(2)}`);
@@ -560,6 +635,7 @@ async function resolveInstanceWindow(inst) {
       realizedPnl = round2(realizedPnl + profit);
       if (won) wins++; else losses++;
       pos.closed = true;
+      pos.won = won;
       pos.closedReason = 'RESOLUTION';
       const icon = won ? '💰' : '💥';
       log(`${icon} [${inst.key}] Combo ${comboKey} ${symbol} ${pos.side} RESOLUTION ${pos.shares}sh entry=${pos.entryPrice.toFixed(2)} exit=$${won ? '1.00' : '0.00'}/sh | pnl=$${profit.toFixed(2)} | bankroll=$${bankroll.toFixed(2)} (dashboard bookkeeping only — real redemption is via the separate claim script)`);
@@ -584,6 +660,11 @@ async function instanceTick(inst) {
 
   const elapsed = nowSec() - inst.windowStart;
   if (elapsed >= inst.windowSecs - EARLY_CUTOFF_SECS && !inst.resolvedThisWindow) {
+    // Classify decorrelation using whatever the freshest polled price is
+    // right now — this is "the last second" before we hand off to
+    // resolution, and is independent of how resolution itself turns out.
+    checkComboDecorrelationByPrice(inst, 'A');
+    checkComboDecorrelationByPrice(inst, 'B');
     await resolveInstanceWindow(inst);
   }
   if (inst.resolvedThisWindow) return;
@@ -606,6 +687,8 @@ function buildInstanceState(inst) {
   return {
     key: inst.key, windowSecs: inst.windowSecs, cutoffSecs: inst.cutoffSecs,
     tradable: inst.tradable, windowEnd: inst.windowEnd, secsToEnd, secsToCutoff,
+    sharesThisWindow: inst.sharesThisWindow, boostWindowsRemaining: inst.boostWindowsRemaining,
+    isBoosted: inst.sharesThisWindow === BOOST_SHARES,
     markets: {
       BTC: { slug: inst.markets.BTC.slug, upAsk: inst.markets.BTC.upAsk, upBid: inst.markets.BTC.upBid, downAsk: inst.markets.BTC.downAsk, downBid: inst.markets.BTC.downBid },
       ETH: { slug: inst.markets.ETH.slug, upAsk: inst.markets.ETH.upAsk, upBid: inst.markets.ETH.upBid, downAsk: inst.markets.ETH.downAsk, downBid: inst.markets.ETH.downBid },
@@ -641,6 +724,7 @@ function buildState() {
     uptime: Math.floor((Date.now() - startTime) / 1000),
     config: {
       comboThreshold: COMBO_THRESHOLD, comboTriggerFraction: COMBO_TRIGGER_FRACTION, comboShares: COMBO_SHARES,
+      boostShares: BOOST_SHARES, boostWindows: BOOST_WINDOWS,
       tpMultiplier: TP_MULTIPLIER, tpMaxPrice: TP_MAX_PRICE,
       cryptoTakerFeeRate: CRYPTO_TAKER_FEE_RATE,
     },
@@ -703,8 +787,9 @@ async function init(privateKey, emit, slogFn) {
   log(`🚀 Cross-Pair Combo Bot — BTC/ETH Up/Down, 5m + 15m instances`);
   log(`⚙️  $${TOTAL_CAPITAL} capital (shared across both instances)`);
   log(`⚙️  Combo A = BTC-Up + ETH-Down | Combo B = BTC-Down + ETH-Up | trigger: combined ask < ${COMBO_THRESHOLD} before ${Math.round(COMBO_TRIGGER_FRACTION * 100)}% of window elapses`);
+  log(`⚙️  Sizing: base ${COMBO_SHARES}sh/leg | on decorrelation (a combo's both legs win, or both lose) → next ${BOOST_WINDOWS} windows for that instance boost to ${BOOST_SHARES}sh/leg, tracked independently per instance (5m/15m don't share the boost)`);
   log(`⚙️  5m instance: cutoff @ ${INSTANCE_DEFS[0].windowSecs * COMBO_TRIGGER_FRACTION}s | 15m instance: cutoff @ ${INSTANCE_DEFS[1].windowSecs * COMBO_TRIGGER_FRACTION}s`);
-  log(`⚙️  Execution: marketable buy both legs @ current ask, ${COMBO_SHARES}sh each, once per combo per window | per-leg TP @ ${Math.round(TP_MULTIPLIER * 100)}% of entry (capped ${TP_MAX_PRICE}) — untriggered TP still rides to resolution`);
+  log(`⚙️  Execution: marketable buy both legs @ current ask, base ${COMBO_SHARES}sh (boosted ${BOOST_SHARES}sh) each, once per combo per window | per-leg TP @ ${Math.round(TP_MULTIPLIER * 100)}% of entry (capped ${TP_MAX_PRICE}) — untriggered TP still rides to resolution`);
   log(`${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
   trader = new PolymarketTrader(privateKey);
