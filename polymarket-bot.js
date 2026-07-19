@@ -75,6 +75,13 @@ const COMBO_SHARES           = Number(process.env.COMBO_SHARES || 20); // per le
 
 const CRYPTO_TAKER_FEE_RATE = Number(process.env.CRYPTO_TAKER_FEE_RATE || 0.07);
 
+// ── Take-profit: each leg gets its own resting TP order at TP_MULTIPLIER
+// of its own entry price, capped at TP_MAX_PRICE (binary shares can't
+// realistically rest above this). Live mode places a real GTC sell order;
+// demo mode simulates the same exit by watching the live bid feed. ──
+const TP_MULTIPLIER = Number(process.env.TP_MULTIPLIER || 1.60);
+const TP_MAX_PRICE  = Number(process.env.TP_MAX_PRICE || 0.99);
+
 let emitFn = () => {};
 let slog = () => {};
 let trader = null;
@@ -93,6 +100,7 @@ let realBalance = null;
 let realPositions = [];
 let realLastUpdated = null;
 let realFetchError = null;
+let warnedNoDepositWallet = false;
 
 // Combo leg definitions: which symbol/side belongs to each combo.
 const COMBO_LEGS = {
@@ -139,6 +147,19 @@ async function placeMarketableBuy(tokenId, price, shares) {
 }
 function takerFee(shares, price) {
   return round5(shares * CRYPTO_TAKER_FEE_RATE * price * (1 - price));
+}
+
+// CLOB order rejections often carry the real reason in e.response.data / e.data /
+// e.body rather than e.message (which is frequently just "Request failed with
+// status code 400"). Pull whatever's actually there so failures are diagnosable
+// instead of showing a generic message.
+function describeOrderError(e) {
+  const parts = [e?.message || String(e)];
+  const extra = e?.response?.data ?? e?.data ?? e?.body ?? null;
+  if (extra) {
+    try { parts.push(typeof extra === 'string' ? extra : JSON.stringify(extra)); } catch (_) {}
+  }
+  return parts.join(' | ');
 }
 
 // ─────────────────────────────────────────
@@ -319,6 +340,14 @@ async function refreshRealAccount() {
   if (DRY_RUN || !trader) { realFetchError = null; return; } // no real account to show in demo mode
   const address = tradingWalletAddress();
   if (!address) { realFetchError = 'No wallet address resolved yet'; return; }
+  if (!trader.depositWallet && !warnedNoDepositWallet) {
+    // #1 cause of "bot can't find my position": if deposit wallet derivation
+    // failed during authenticate(), every lookup below silently queries the
+    // wrong (EOA) address instead of the actual Safe/proxy wallet Polymarket
+    // trades and holds positions through.
+    warnedNoDepositWallet = true;
+    log(`⚠️  WARNING: no depositWallet resolved — real account lookups are falling back to your EOA (${address}). If real positions/balance don't show up, THIS is almost certainly why — your actual funds/positions live at the deposit (proxy) wallet, not this address.`);
+  }
   try {
     const [balance, positions] = await Promise.all([
       trader.getBalance().catch(e => { throw new Error(`balance: ${e.message}`); }),
@@ -417,11 +446,70 @@ async function checkComboTrigger(inst, comboKey) {
     const actualCost = round2(actualShares * fill.avgPrice);
     bankroll = round2(bankroll - actualCost);
     feesPaid = round2(feesPaid + leg.fee); // fee is an internal estimate for dashboard bookkeeping; the exchange applies its own fee inside the FOK fill
-    combo.positions[leg.symbol] = { shares: actualShares, entryPrice: fill.avgPrice, cost: actualCost, side: leg.side, closed: false };
+    const tpPrice = Math.min(TP_MAX_PRICE, round2(fill.avgPrice * TP_MULTIPLIER));
+    const position = { shares: actualShares, entryPrice: fill.avgPrice, cost: actualCost, side: leg.side, closed: false, tpPrice, tpOrderId: null, tpFilled: false, closedReason: null };
+    combo.positions[leg.symbol] = position;
     registerTrade({ instance: inst.key, combo: comboKey, symbol: leg.symbol, side: 'BUY', outcome: leg.side, price: fill.avgPrice, shares: actualShares, cost: actualCost, fee: leg.fee });
+
+    if (!DRY_RUN && trader) {
+      try {
+        const gtc = await trader.placeGtcOrder(leg.tokenId, 'SELL', tpPrice, actualShares);
+        position.tpOrderId = gtc.id;
+        log(`🎯 [${inst.key}] Combo ${comboKey} ${leg.symbol} TP order placed: SELL ${actualShares}sh @ ${tpPrice.toFixed(3)} (${Math.round(TP_MULTIPLIER * 100)}% of entry ${fill.avgPrice.toFixed(3)})`);
+      } catch (e) {
+        log(`⚠️  [${inst.key}] Combo ${comboKey} ${leg.symbol} failed to place TP order (position still held, will resolve normally if TP never gets placed): ${describeOrderError(e)}`);
+      }
+    } else {
+      log(`🎯 [${inst.key}] Combo ${comboKey} ${leg.symbol} TP target set (demo, simulated against live bid): ${tpPrice.toFixed(3)} (${Math.round(TP_MULTIPLIER * 100)}% of entry ${fill.avgPrice.toFixed(3)})`);
+    }
   }
   recordEquity();
-  log(`🔔 [${inst.key}] Combo ${comboKey} (${COMBO_LABEL[comboKey]}) TRIGGERED @ sum=${sum.toFixed(3)} (< ${COMBO_THRESHOLD}) — bought ${COMBO_SHARES}sh each leg: BTC ${priced[0].side}@${priced[0].ask.toFixed(2)} / ETH ${priced[1].side}@${priced[1].ask.toFixed(2)} | total cost=$${totalCost.toFixed(2)} | no exit mgmt — rides to resolution`);
+  log(`🔔 [${inst.key}] Combo ${comboKey} (${COMBO_LABEL[comboKey]}) TRIGGERED @ sum=${sum.toFixed(3)} (< ${COMBO_THRESHOLD}) — bought ${COMBO_SHARES}sh each leg: BTC ${priced[0].side}@${priced[0].ask.toFixed(2)} / ETH ${priced[1].side}@${priced[1].ask.toFixed(2)} | total cost=$${totalCost.toFixed(2)} | TP set per-leg @ ${Math.round(TP_MULTIPLIER * 100)}% of entry — untriggered TP rides to resolution`);
+}
+
+// ─────────────────────────────────────────
+//  Take-profit monitoring — separate from window resolution. Live mode
+//  polls the real GTC order's status; demo mode simulates against the
+//  live bid feed we're already polling for the combo trigger.
+// ─────────────────────────────────────────
+function settleTp(inst, comboKey, symbol, pos) {
+  const proceeds = round2(pos.shares * pos.tpPrice);
+  const profit = round2(proceeds - pos.cost);
+  bankroll = round2(bankroll + proceeds);
+  realizedPnl = round2(realizedPnl + profit);
+  wins++; // a TP fill is definitionally profitable (tpPrice > entryPrice)
+  pos.closed = true;
+  pos.tpFilled = true;
+  pos.closedReason = 'TP';
+  log(`🎯 [${inst.key}] Combo ${comboKey} ${symbol} ${pos.side} TP FILLED ${pos.shares}sh entry=${pos.entryPrice.toFixed(3)} tp=${pos.tpPrice.toFixed(3)} | pnl=$${profit.toFixed(2)} | bankroll=$${bankroll.toFixed(2)}`);
+  registerTrade({ instance: inst.key, combo: comboKey, symbol, side: 'SELL', outcome: pos.side, reason: 'TP', price: pos.tpPrice, shares: pos.shares, profit });
+  recordEquity();
+}
+
+async function checkTpFills(inst) {
+  if (!inst.tradable) return;
+  for (const comboKey of ['A', 'B']) {
+    const combo = inst.combos[comboKey];
+    for (const symbol of SYMBOLS) {
+      const pos = combo.positions[symbol];
+      if (!pos || pos.closed || pos.tpFilled || !pos.tpPrice) continue;
+
+      if (!DRY_RUN && pos.tpOrderId && trader) {
+        try {
+          const order = await trader.getOrder(pos.tpOrderId);
+          const status = (order?.status || '').toUpperCase();
+          const matchStatus = (order?.match_status || order?.matchStatus || '').toLowerCase();
+          const state = (order?.state || '').toLowerCase();
+          const filled = status === 'FILLED' || matchStatus === 'filled' || state === 'filled';
+          if (filled) settleTp(inst, comboKey, symbol, pos);
+        } catch (_) { /* transient lookup failure — retry next tick */ }
+      } else if (DRY_RUN) {
+        const m = inst.markets[symbol];
+        const bid = pos.side === 'Up' ? m.upBid : m.downBid;
+        if (bid != null && bid >= pos.tpPrice) settleTp(inst, comboKey, symbol, pos);
+      }
+    }
+  }
 }
 
 // ─────────────────────────────────────────
@@ -457,6 +545,14 @@ async function resolveInstanceWindow(inst) {
     for (const comboKey of ['A', 'B']) {
       const pos = inst.combos[comboKey].positions[symbol];
       if (!pos || pos.closed) continue;
+      if (!DRY_RUN && pos.tpOrderId && trader) {
+        try {
+          await trader.cancelOrder(pos.tpOrderId);
+          log(`🚫 [${inst.key}] Combo ${comboKey} ${symbol} cancelled unfilled TP order before resolution`);
+        } catch (e) {
+          log(`⚠️  [${inst.key}] Combo ${comboKey} ${symbol} failed to cancel TP order (may already be gone/filled): ${describeOrderError(e)}`);
+        }
+      }
       const won = winner === pos.side;
       const proceeds = won ? round2(pos.shares * 1) : 0;
       const profit = round2(proceeds - pos.cost);
@@ -464,6 +560,7 @@ async function resolveInstanceWindow(inst) {
       realizedPnl = round2(realizedPnl + profit);
       if (won) wins++; else losses++;
       pos.closed = true;
+      pos.closedReason = 'RESOLUTION';
       const icon = won ? '💰' : '💥';
       log(`${icon} [${inst.key}] Combo ${comboKey} ${symbol} ${pos.side} RESOLUTION ${pos.shares}sh entry=${pos.entryPrice.toFixed(2)} exit=$${won ? '1.00' : '0.00'}/sh | pnl=$${profit.toFixed(2)} | bankroll=$${bankroll.toFixed(2)} (dashboard bookkeeping only — real redemption is via the separate claim script)`);
       registerTrade({ instance: inst.key, combo: comboKey, symbol, side: 'SELL', outcome: pos.side, reason: 'RESOLUTION', price: won ? 1 : 0, shares: pos.shares, profit });
@@ -481,13 +578,16 @@ async function instanceTick(inst) {
     if (inst.windowStart !== null && !inst.resolvedThisWindow) await resolveInstanceWindow(inst);
     await loadInstanceWindow(inst);
   }
-  if (!inst.tradable || !tradingEnabled) return;
+  if (!inst.tradable) return;
+
+  await checkTpFills(inst); // exit management runs regardless of pause state
 
   const elapsed = nowSec() - inst.windowStart;
   if (elapsed >= inst.windowSecs - EARLY_CUTOFF_SECS && !inst.resolvedThisWindow) {
     await resolveInstanceWindow(inst);
   }
   if (inst.resolvedThisWindow) return;
+  if (!tradingEnabled) return; // pause only blocks NEW entries, not exit management
 
   await checkComboTrigger(inst, 'A');
   await checkComboTrigger(inst, 'B');
@@ -541,6 +641,7 @@ function buildState() {
     uptime: Math.floor((Date.now() - startTime) / 1000),
     config: {
       comboThreshold: COMBO_THRESHOLD, comboTriggerFraction: COMBO_TRIGGER_FRACTION, comboShares: COMBO_SHARES,
+      tpMultiplier: TP_MULTIPLIER, tpMaxPrice: TP_MAX_PRICE,
       cryptoTakerFeeRate: CRYPTO_TAKER_FEE_RATE,
     },
     equityCurve, logs: logs.slice(-100), trades: trades.slice(-80).reverse(),
@@ -603,7 +704,7 @@ async function init(privateKey, emit, slogFn) {
   log(`⚙️  $${TOTAL_CAPITAL} capital (shared across both instances)`);
   log(`⚙️  Combo A = BTC-Up + ETH-Down | Combo B = BTC-Down + ETH-Up | trigger: combined ask < ${COMBO_THRESHOLD} before ${Math.round(COMBO_TRIGGER_FRACTION * 100)}% of window elapses`);
   log(`⚙️  5m instance: cutoff @ ${INSTANCE_DEFS[0].windowSecs * COMBO_TRIGGER_FRACTION}s | 15m instance: cutoff @ ${INSTANCE_DEFS[1].windowSecs * COMBO_TRIGGER_FRACTION}s`);
-  log(`⚙️  Execution: marketable buy both legs @ current ask, ${COMBO_SHARES}sh each, once per combo per window | no TP/SL — rides to resolution`);
+  log(`⚙️  Execution: marketable buy both legs @ current ask, ${COMBO_SHARES}sh each, once per combo per window | per-leg TP @ ${Math.round(TP_MULTIPLIER * 100)}% of entry (capped ${TP_MAX_PRICE}) — untriggered TP still rides to resolution`);
   log(`${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
   trader = new PolymarketTrader(privateKey);
