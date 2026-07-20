@@ -331,14 +331,14 @@ app.get('/', (_, res) => {
       grid.innerHTML = s.instances.map(inst => {
         const hasPos = ['A','B'].some(k => inst.combos[k].positions.BTC && !inst.combos[k].positions.BTC.closed || inst.combos[k].positions.ETH && !inst.combos[k].positions.ETH.closed);
         const cutoffTxt = inst.tradable ? (inst.secsToCutoff > 0 ? ('trigger window: '+fmtSecs(inst.secsToCutoff)+' left') : 'trigger window closed') : 'loading…';
-        const sizingTxt = inst.isBoosted
-          ? ('🔥 BOOSTED '+inst.sharesThisWindow+'sh/leg ('+inst.boostWindowsRemaining+' more window'+(inst.boostWindowsRemaining===1?'':'s')+' after this)')
+        const sizingTxt = inst.pendingBoostCombo
+          ? ('⚡ decorrelation follow-through queued: Combo '+inst.pendingBoostCombo+' ('+inst.pendingBoostLabel+') will buy unconditionally next window @ '+ (s.config?s.config.boostShares:50) +'sh/leg')
           : (inst.sharesThisWindow+'sh/leg (base)');
         return '<div class="pair-card '+(hasPos?'has-pos':'')+(inst.tradable?'':' untradable')+'">'+
           '<div class="pair-hdr"><div class="pair-sym">'+inst.key+'</div><div class="pair-timer">'+fmtSecs(inst.secsToEnd)+'</div></div>'+
           '<div class="pair-body">'+
             '<div class="pair-row" style="opacity:.7"><span class="pair-key">'+cutoffTxt+'</span><span></span></div>'+
-            '<div class="pair-row" style="'+(inst.isBoosted?'color:#ff9f0a;font-weight:600':'opacity:.7')+'"><span class="pair-key">sizing this window</span><span>'+sizingTxt+'</span></div>'+
+            '<div class="pair-row" style="'+(inst.pendingBoostCombo?'color:#ff9f0a;font-weight:600':'opacity:.7')+'"><span class="pair-key">sizing</span><span>'+sizingTxt+'</span></div>'+
             '<div class="pair-row"><span class="pair-key side-up">BTC Up ask/bid</span><span>'+(inst.markets.BTC.upAsk?.toFixed(2)||'—')+' / '+(inst.markets.BTC.upBid?.toFixed(2)||'—')+'</span></div>'+
             '<div class="pair-row"><span class="pair-key side-down">BTC Down ask/bid</span><span>'+(inst.markets.BTC.downAsk?.toFixed(2)||'—')+' / '+(inst.markets.BTC.downBid?.toFixed(2)||'—')+'</span></div>'+
             '<div class="pair-row"><span class="pair-key side-up">ETH Up ask/bid</span><span>'+(inst.markets.ETH.upAsk?.toFixed(2)||'—')+' / '+(inst.markets.ETH.upBid?.toFixed(2)||'—')+'</span></div>'+
@@ -371,6 +371,7 @@ app.get('/', (_, res) => {
         const col = l.includes('❌')||l.includes('💥') ? '#ff4757'
                   : l.includes('💰')||l.includes('✅') ? '#00e676'
                   : l.includes('🎯')||l.includes('🧯') ? '#ffd740'
+                  : l.includes('⚡') ? '#ff9f0a'
                   : l.includes('🔭')||l.includes('⏰') ? '#00d4ff'
                   : l.includes('⚠️') ? '#ff9f0a'
                   : '#4a6080';
