@@ -21,7 +21,7 @@ app.get('/api/status', (_, res) => {
 
 app.post('/api/set-pairs', (req, res) => {
   const { pairs } = req.body || {};
-  if (!Array.isArray(pairs) || !pairs.length) return res.status(400).json({ ok: false, error: 'Missing pairs array, e.g. ["BTC","ETH","SOL"]' });
+  if (!Array.isArray(pairs) || !pairs.length) return res.status(400).json({ ok: false, error: 'Missing pairs array, e.g. ["BTC","ETH"]' });
   try { res.json(bot.setPairs(pairs)); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
@@ -45,7 +45,7 @@ app.get('/', (_, res) => {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>⏱️ BTC/ETH Combo Bot — 5m + 15m Cross-Pair</title>
+<title>🪜 BTC/ETH Grid-Ladder Bot — 15m Up/Down</title>
 <style>
   :root {
     --bg: #ffffff; --bg2: #f5f7fa; --bg3: #edf0f4; --border: #d0d7e2;
@@ -62,7 +62,6 @@ app.get('/', (_, res) => {
   .mode-live { background: #ff475722; color: var(--red); border: 1px solid var(--red); animation: pulse 2s infinite; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
   .toolbar { display: flex; gap: 8px; padding: 14px 20px 0; flex-wrap: wrap; align-items: center; }
-  .toolbar input { flex: 1; min-width: 220px; background: var(--bg2); border: 1px solid var(--border); color: var(--text); padding: 10px 14px; border-radius: 8px; font-family: inherit; font-size: 12px; }
   .toolbar button { background: var(--cyan); color: #001018; border: none; padding: 10px 16px; border-radius: 8px; font-weight: bold; cursor: pointer; font-family: inherit; font-size: 12px; }
   .toolbar button.pause { background: var(--yellow); }
   .toolbar button.resume { background: var(--green); color: #fff; }
@@ -70,30 +69,37 @@ app.get('/', (_, res) => {
   .toolbar button.live-toggle.is-live { background: var(--muted); color: #fff; }
   .toolbar button:hover { opacity: .85; }
   .toolbar-status { padding: 6px 20px 0; font-size: 10px; color: var(--muted); min-height: 14px; }
+  .window-strip { padding: 10px 20px 0; font-size: 11px; color: var(--muted); }
+  .window-strip b { color: var(--cyan); }
   .stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; padding: 14px 20px; }
   .stat { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
   .stat-label { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
   .stat-val { font-size: 20px; font-weight: bold; color: #12202e; }
-  .stat-sub { font-size: 9px; color: var(--muted); margin-top: 3px; }
   .pnl-pos { color: var(--green) !important; }
   .pnl-neg { color: var(--red) !important; }
   .section { padding: 0 20px 16px; }
   .section-hdr { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 2px; padding: 8px 0; display: flex; align-items: center; gap: 8px; }
   .section-hdr::after { content:''; flex:1; height:1px; background: var(--border); }
-  .pair-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 10px; }
-  .pair-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
-  .pair-card.has-pos { border-color: var(--cyan); box-shadow: 0 0 0 1px #00d4ff22; }
-  .pair-card.untradable { opacity: .55; }
-  .pair-hdr { background: #0d1d30; padding: 8px 12px; display: flex; justify-content: space-between; align-items: center; }
-  .pair-sym { font-size: 13px; font-weight: bold; color: #ddd; }
-  .pair-timer { font-size: 10px; color: var(--cyan); }
-  .pair-body { padding: 8px 12px; }
-  .pair-row { display: flex; justify-content: space-between; margin-bottom: 4px; font-size: 10px; }
-  .pair-key { color: var(--muted); }
-  .side-up { color: var(--green); }
-  .side-down { color: var(--red); }
-  .pos-box { margin-top: 6px; border-top: 1px solid var(--border); padding-top: 6px; font-size: 9px; }
-  .signal-box { margin-top: 6px; font-size: 9px; color: #8aa; }
+  .ladder-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 10px; }
+  .ladder-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .ladder-card.has-pos { border-color: var(--cyan); box-shadow: 0 0 0 1px #00d4ff22; }
+  .ladder-card.untradable { opacity: .55; }
+  .ladder-hdr { background: #0d1d30; padding: 8px 12px; display: flex; justify-content: space-between; align-items: center; }
+  .ladder-sym { font-size: 13px; font-weight: bold; color: #ddd; }
+  .ladder-sym.up { color: #6fe08a; }
+  .ladder-sym.down { color: #ff8a8a; }
+  .ladder-price { font-size: 10px; color: var(--cyan); }
+  .ladder-body { padding: 6px 10px; max-height: 340px; overflow-y: auto; }
+  .ladder-summary { display: flex; justify-content: space-between; font-size: 9px; color: var(--muted); padding: 4px 2px 8px; border-bottom: 1px solid var(--border); margin-bottom: 4px; }
+  .level-row { display: grid; grid-template-columns: 44px 1fr 60px 28px; align-items: center; gap: 6px; padding: 3px 2px; font-size: 9.5px; border-bottom: 1px solid #ffffff00; }
+  .level-row.empty { opacity: .35; }
+  .level-row.resting { color: var(--yellow); }
+  .level-row.filled { color: var(--text); background: #00990911; border-radius: 4px; }
+  .level-row.tp-pending { color: var(--green); background: #00a85411; border-radius: 4px; }
+  .level-price { font-family: ui-monospace, monospace; }
+  .level-state { color: var(--muted); }
+  .level-tp { text-align: right; font-family: ui-monospace, monospace; }
+  .level-re { text-align: right; color: var(--purple); }
   .bottom-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 0 20px 20px; }
   @media (max-width: 800px) { .bottom-grid { grid-template-columns: 1fr; } }
   .tbl-wrap { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; max-height: 320px; overflow-y: auto; }
@@ -108,9 +114,6 @@ app.get('/', (_, res) => {
   .equity-hdr .title { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; }
   .equity-hdr .val { font-size: 13px; }
   .equity-svg { width: 100%; height: 90px; display: block; }
-  .spark-box { margin-top: 6px; }
-  .spark-box svg { width: 100%; height: 34px; display: block; }
-  .spark-label { font-size: 8px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-top: 4px; }
   .real-wrap { background: #241a08; border: 1px solid #6b4a12; border-radius: 10px; padding: 12px 14px; margin: 0 20px 14px; }
   .real-wrap.disabled { opacity: .5; }
   .real-hdr { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; flex-wrap: wrap; gap: 6px; }
@@ -120,70 +123,53 @@ app.get('/', (_, res) => {
   .real-stat .label { font-size: 8px; color: #8a7350; text-transform: uppercase; letter-spacing: .5px; }
   .real-stat .val { font-size: 15px; font-weight: 700; color: #ffd180; }
   .real-tbl { width: 100%; border-collapse: collapse; font-size: 10px; }
-  .real-tbl th { text-align: left; color: #8a7350; padding: 4px 6px; font-size: 9px; text-transform: uppercase; }
-  .real-tbl td { padding: 4px 6px; border-top: 1px solid #3a2a10; }
-  .real-error { color: #ff6b6b; font-size: 10px; }
+  .real-tbl th { color: #8a7350; text-align:left; padding: 4px 6px; font-size: 9px; text-transform: uppercase; }
+  .real-tbl td { padding: 4px 6px; border-bottom: 1px solid #3a2a10; }
+  .real-error { color: #ff8a65; font-size: 10px; margin-top: 6px; }
 </style>
 </head>
 <body>
   <div class="header">
-    <div class="logo">⏱️ <span>BTC/ETH</span> COMBO BOT</div>
-    <div id="mode-badge" class="mode-badge ${bot.getStatus().dryRun ? 'mode-dry' : 'mode-live'}">${bot.getStatus().dryRun ? 'DEMO' : '🔴 LIVE'}</div>
-    <div id="experiment-badge" class="mode-badge mode-dry">Combo A: BTC-Up+ETH-Down | Combo B: BTC-Down+ETH-Up | sum &lt; 0.80 before 70% of window</div>
+    <div class="logo">🪜 GRID<span>-LADDER</span> BOT — 15m Up/Down</div>
+    <div id="mode-badge" class="mode-badge mode-dry">DEMO</div>
   </div>
-
   <div class="toolbar">
-    <button id="pause-btn" class="pause">Pause</button>
-    <button id="resume-btn" class="resume">Resume</button>
-    <button id="mode-toggle-btn" class="live-toggle">Switch to LIVE</button>
+    <button id="pause-btn" class="pause">⏸️ Pause</button>
+    <button id="resume-btn" class="resume">▶️ Resume</button>
+    <button id="live-btn" class="live-toggle">🔴 Go LIVE</button>
   </div>
-  <div id="toolbar-status" class="toolbar-status"></div>
+  <div class="toolbar-status" id="toolbar-status"></div>
+  <div class="window-strip" id="window-strip"></div>
 
-  <div class="stats-row">
-    <div class="stat"><div class="stat-label">Total Mark Value</div><div class="stat-val" id="total-mark">$0.00</div></div>
-    <div class="stat"><div class="stat-label">Total P&amp;L</div><div class="stat-val" id="total-pnl">$0.00</div></div>
-    <div class="stat"><div class="stat-label">Realized</div><div class="stat-val" id="realized-pnl">$0.00</div></div>
-    <div class="stat"><div class="stat-label">Unrealized</div><div class="stat-val" id="unrealized-pnl">$0.00</div></div>
-    <div class="stat"><div class="stat-label">Bankroll</div><div class="stat-val" id="total-bankroll">$0.00</div></div>
-    <div class="stat"><div class="stat-label">Fees Paid</div><div class="stat-val pnl-neg" id="total-fees">$0.00</div></div>
-    <div class="stat"><div class="stat-label">Win Rate</div><div class="stat-val" id="win-rate">—</div><div class="stat-sub" id="win-loss-sub">0W / 0L</div></div>
-    <div class="stat"><div class="stat-label">Uptime</div><div class="stat-val" id="uptime">0s</div></div>
-    <div class="stat"><div class="stat-label">Trading</div><div class="stat-val" id="trading-flag">—</div></div>
-  </div>
+  <div class="stats-row" id="stats-row"></div>
 
   <div class="equity-wrap">
-    <div class="equity-hdr">
-      <div class="title">Portfolio Equity Curve</div>
-      <div class="val" id="equity-val">$2000.00</div>
-    </div>
-    <svg id="equity-chart" class="equity-svg" viewBox="0 0 600 90" preserveAspectRatio="none"></svg>
+    <div class="equity-hdr"><div class="title">Equity Curve</div><div class="val" id="equity-val">—</div></div>
+    <svg class="equity-svg" id="equity-svg"></svg>
   </div>
 
-  <div id="real-wrap" class="real-wrap disabled">
-    <div class="real-hdr">
-      <div class="title">🔴 Real Account (Polymarket, not bot bookkeeping)</div>
-      <div class="wallet" id="real-wallet">—</div>
-    </div>
-    <div id="real-body"><div class="empty" style="padding:4px 0">Only available in LIVE mode — demo mode shows simulated bankroll above, not a real wallet.</div></div>
+  <div class="real-wrap disabled" id="real-wrap">
+    <div class="real-hdr"><div class="title">🔴 Real On-Chain Wallet</div><div class="wallet" id="real-wallet">—</div></div>
+    <div id="real-body"></div>
   </div>
 
   <div class="section">
-    <div class="section-hdr">Instances</div>
-    <div class="pair-grid" id="pair-grid"><div class="empty">Loading…</div></div>
+    <div class="section-hdr">Grid Ladders (independent — BTC-Up / BTC-Down / ETH-Up / ETH-Down)</div>
+    <div class="ladder-grid" id="ladder-grid"></div>
   </div>
 
   <div class="bottom-grid">
-    <div>
-      <div class="section-hdr">Trades</div>
+    <div class="section">
+      <div class="section-hdr">Trade Log</div>
       <div class="tbl-wrap">
         <table class="tbl">
-          <thead><tr><th>Time</th><th>Inst</th><th>Combo</th><th>Symbol/Side</th><th>Reason</th><th>Price</th><th>Shares</th><th>P&amp;L</th></tr></thead>
-          <tbody id="trade-body"><tr><td colspan="7" class="empty">No trades yet</td></tr></tbody>
+          <thead><tr><th>Time</th><th>Ladder</th><th>Level</th><th>Reason</th><th>Price</th><th>Shares</th><th>P&amp;L</th></tr></thead>
+          <tbody id="trade-body"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
         </table>
       </div>
     </div>
-    <div>
-      <div class="section-hdr">Logs</div>
+    <div class="section">
+      <div class="section-hdr">System Log</div>
       <div class="logs-wrap" id="logs"></div>
     </div>
   </div>
@@ -191,187 +177,162 @@ app.get('/', (_, res) => {
 <script src="/socket.io/socket.io.js"></script>
 <script>
   const socket = io();
-  function sgn(n) { n = n || 0; return (n >= 0 ? '+$' : '-$') + Math.abs(n).toFixed(2); }
-  function pClass(n) { return (n || 0) >= 0 ? 'pnl-pos' : 'pnl-neg'; }
-  function fmt(s) { const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), ss = s%60; return (h?h+'h ':'')+(m?m+'m ':'')+ss+'s'; }
-  function fmtSecs(s) { if (s === null || s === undefined) return '—'; const m = Math.floor(s/60), ss = s%60; return m+'m '+String(ss).padStart(2,'0')+'s'; }
+  const $ = id => document.getElementById(id);
 
-  // Build an SVG polyline + fill path from an equity curve [{t,equity}],
-  // normalized into a viewBox of width x height. Color reflects whether
-  // the curve ended up from where it started.
-  function buildEquitySvg(points, width, height, startVal) {
-    if (!points || points.length < 2) {
-      return '<line x1="0" y1="'+(height/2)+'" x2="'+width+'" y2="'+(height/2)+'" stroke="#3a4a60" stroke-width="1" stroke-dasharray="3,3"/>';
-    }
-    const vals = points.map(p => p.equity);
-    let min = Math.min(...vals, startVal != null ? startVal : vals[0]);
-    let max = Math.max(...vals, startVal != null ? startVal : vals[0]);
-    if (max - min < 0.01) { max += 1; min -= 1; }
-    const n = points.length;
-    const coords = points.map((p, i) => {
-      const x = (i / (n - 1)) * width;
-      const y = height - ((p.equity - min) / (max - min)) * height;
-      return [x, y];
-    });
-    const up = vals[vals.length - 1] >= vals[0];
-    const color = up ? '#00c853' : '#ff4757';
-    const linePath = 'M' + coords.map(c => c[0].toFixed(1)+','+c[1].toFixed(1)).join(' L');
-    const fillPath = linePath + ' L' + width + ',' + height + ' L0,' + height + ' Z';
-    let baseline = '';
-    if (startVal != null) {
-      const by = height - ((startVal - min) / (max - min)) * height;
-      baseline = '<line x1="0" y1="'+by.toFixed(1)+'" x2="'+width+'" y2="'+by.toFixed(1)+'" stroke="#5a6b80" stroke-width="1" stroke-dasharray="2,3"/>';
-    }
-    return baseline +
-      '<path d="'+fillPath+'" fill="'+color+'22" stroke="none"/>' +
-      '<path d="'+linePath+'" fill="none" stroke="'+color+'" stroke-width="1.6"/>';
+  $('pause-btn').onclick = () => fetch('/api/pause', { method: 'POST' }).then(() => flash('Paused'));
+  $('resume-btn').onclick = () => fetch('/api/resume', { method: 'POST' }).then(() => flash('Resumed'));
+  $('live-btn').onclick = () => {
+    const wantLive = !$('live-btn').classList.contains('is-live');
+    if (wantLive && !confirm('Switch to LIVE mode? This will place REAL resting limit orders with REAL money.')) return;
+    fetch('/api/set-mode', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ live: wantLive }) })
+      .then(() => flash(wantLive ? 'Switched to LIVE' : 'Switched to DEMO'));
+  };
+  function flash(msg) { $('toolbar-status').textContent = msg; setTimeout(() => { $('toolbar-status').textContent = ''; }, 3000); }
+
+  function fmtSecs(s) {
+    if (s == null) return '—';
+    const m = Math.floor(s / 60), sec = Math.floor(s % 60);
+    return m + ':' + String(sec).padStart(2, '0');
+  }
+  function sgn(n) { return (n >= 0 ? '+' : '') + '$' + n.toFixed(2); }
+  function pClass(n) { return n > 0 ? 'pnl-pos' : (n < 0 ? 'pnl-neg' : ''); }
+
+  function drawEquity(curve) {
+    const svg = $('equity-svg');
+    if (!curve || curve.length < 2) { svg.innerHTML = ''; return; }
+    const w = svg.clientWidth || 600, h = 90;
+    const vals = curve.map(p => p.equity);
+    const min = Math.min(...vals), max = Math.max(...vals);
+    const range = (max - min) || 1;
+    const pts = curve.map((p, i) => {
+      const x = (i / (curve.length - 1)) * w;
+      const y = h - ((p.equity - min) / range) * (h - 10) - 5;
+      return x.toFixed(1) + ',' + y.toFixed(1);
+    }).join(' ');
+    const last = vals[vals.length - 1], first = vals[0];
+    const color = last >= first ? '#00a854' : '#e8304a';
+    svg.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
+    svg.innerHTML = '<polyline points="' + pts + '" fill="none" stroke="' + color + '" stroke-width="2"/>';
   }
 
-  document.getElementById('pause-btn').addEventListener('click', async () => {
-    await fetch('/api/pause', { method: 'POST' });
-  });
-  document.getElementById('resume-btn').addEventListener('click', async () => {
-    await fetch('/api/resume', { method: 'POST' });
-  });
+  socket.on('state', (s) => {
+    $('mode-badge').textContent = s.dryRun ? 'DEMO' : 'LIVE';
+    $('mode-badge').className = 'mode-badge ' + (s.dryRun ? 'mode-dry' : 'mode-live');
+    $('live-btn').classList.toggle('is-live', !s.dryRun);
+    $('live-btn').textContent = s.dryRun ? '🔴 Go LIVE' : '🟡 Back to DEMO';
+    $('pause-btn').style.display = s.tradingEnabled ? '' : 'none';
+    $('resume-btn').style.display = s.tradingEnabled ? 'none' : '';
 
-  document.getElementById('mode-toggle-btn').addEventListener('click', async () => {
-    const btn = document.getElementById('mode-toggle-btn');
-    const goingLive = btn.textContent.includes('LIVE');
-    const msg = goingLive
-      ? 'Switch to LIVE trading? This places real orders with real money.'
-      : 'Switch back to DEMO mode? New orders will be simulated again.';
-    if (!confirm(msg)) return;
-    const statusEl = document.getElementById('toolbar-status');
-    try {
-      const r = await fetch('/api/set-mode', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ live: goingLive }) });
-      const d = await r.json();
-      statusEl.textContent = d.ok ? ('✅ Now in ' + (d.dryRun ? 'DEMO' : 'LIVE') + ' mode') : ('❌ ' + (d.error||'failed'));
-    } catch (e) { statusEl.textContent = '❌ ' + e.message; }
-  });
+    $('window-strip').innerHTML = s.tradable
+      ? ('15m window ends in <b>' + fmtSecs(s.secsToEnd) + '</b> | BTC: ' + (s.markets.BTC.slug || '—') + ' | ETH: ' + (s.markets.ETH.slug || '—'))
+      : 'Loading window…';
 
-  socket.on('state', s => {
-    const modeBadge = document.getElementById('mode-badge');
-    modeBadge.className = 'mode-badge ' + (s.dryRun ? 'mode-dry' : 'mode-live');
-    modeBadge.textContent = s.dryRun ? 'DEMO' : '🔴 LIVE';
-    const toggleBtn = document.getElementById('mode-toggle-btn');
-    toggleBtn.textContent = s.dryRun ? 'Switch to LIVE' : 'Switch to DEMO';
-    toggleBtn.className = 'live-toggle' + (s.dryRun ? '' : ' is-live');
+    const stats = [
+      ['Bankroll', '$' + s.bankroll.toFixed(2), ''],
+      ['Mark Value', '$' + s.markValue.toFixed(2), ''],
+      ['Total P&amp;L', sgn(s.totalPnl), pClass(s.totalPnl)],
+      ['Realized P&amp;L', sgn(s.realizedPnl), pClass(s.realizedPnl)],
+      ['Unrealized P&amp;L', sgn(s.unrealizedPnl), pClass(s.unrealizedPnl)],
+      ['Win Rate', s.winRate != null ? s.winRate + '%' : '—', ''],
+      ['Wins / Losses', s.wins + ' / ' + s.losses, ''],
+      ['Fees Paid', '$' + s.feesPaid.toFixed(2), ''],
+    ];
+    $('stats-row').innerHTML = stats.map(([label, val, cls]) =>
+      '<div class="stat"><div class="stat-label">' + label + '</div><div class="stat-val ' + cls + '">' + val + '</div></div>'
+    ).join('');
 
-    document.getElementById('total-mark').textContent = '$'+(s.markValue||0).toFixed(2);
-    const pnlEl = document.getElementById('total-pnl');
-    pnlEl.textContent = sgn(s.totalPnl); pnlEl.className = 'stat-val ' + pClass(s.totalPnl);
-    const relEl = document.getElementById('realized-pnl');
-    relEl.textContent = sgn(s.realizedPnl); relEl.className = 'stat-val ' + pClass(s.realizedPnl);
-    const unrelEl = document.getElementById('unrealized-pnl');
-    unrelEl.textContent = sgn(s.unrealizedPnl); unrelEl.className = 'stat-val ' + pClass(s.unrealizedPnl);
-    document.getElementById('total-bankroll').textContent = '$'+(s.bankroll||0).toFixed(2);
-    document.getElementById('total-fees').textContent = '$'+(s.feesPaid||0).toFixed(4);
-    document.getElementById('win-rate').textContent = (s.winRate!==null && s.winRate!==undefined) ? s.winRate+'%' : '—';
-    document.getElementById('win-loss-sub').textContent = (s.wins||0)+'W / '+(s.losses||0)+'L';
-    document.getElementById('uptime').textContent = fmt(s.uptime||0);
-    const tf = document.getElementById('trading-flag');
-    tf.textContent = s.tradingEnabled ? 'ON' : 'PAUSED';
-    tf.className = 'stat-val ' + (s.tradingEnabled ? 'pnl-pos' : 'pnl-neg');
+    $('equity-val').textContent = '$' + s.markValue.toFixed(2);
+    $('equity-val').className = 'val ' + pClass(s.totalPnl);
+    drawEquity(s.equityCurve);
 
-    const eqVal = document.getElementById('equity-val');
-    eqVal.textContent = '$'+(s.markValue||0).toFixed(2);
-    eqVal.className = 'val ' + pClass(s.totalPnl);
-    document.getElementById('equity-chart').innerHTML = buildEquitySvg(s.equityCurve, 600, 90, s.totalCapital);
-
-    // ── Real account (live mode only) — actual Polymarket wallet, not bot bookkeeping ──
-    const real = s.real;
-    if (real) {
-      const wrap = document.getElementById('real-wrap');
-      const walletEl = document.getElementById('real-wallet');
-      const body = document.getElementById('real-body');
-      walletEl.textContent = real.wallet ? (real.wallet.slice(0,6)+'…'+real.wallet.slice(-4)) : '—';
-
-      if (!real.enabled) {
-        wrap.className = 'real-wrap disabled';
-        body.innerHTML = '<div class="empty" style="padding:4px 0">Only available in LIVE mode — demo mode shows simulated bankroll above, not a real wallet.</div>';
-      } else {
-        wrap.className = 'real-wrap';
-        let html = '<div class="real-stats">'+
-          '<div class="real-stat"><div class="label">Real USDC Balance</div><div class="val">'+(real.balance!==null?'$'+real.balance.toFixed(2):'loading…')+'</div></div>'+
-          '<div class="real-stat"><div class="label">Open Positions</div><div class="val">'+(real.positions?real.positions.length:0)+'</div></div>'+
-          '<div class="real-stat"><div class="label">Last Synced</div><div class="val" style="font-size:11px">'+(real.lastUpdated?new Date(real.lastUpdated).toLocaleTimeString():'—')+'</div></div>'+
-        '</div>';
-        if (real.error) {
-          html += '<div class="real-error">⚠️ '+real.error+'</div>';
-        }
-        if (real.positions && real.positions.length) {
-          html += '<table class="real-tbl"><thead><tr><th>Market</th><th>Outcome</th><th>Size</th><th>Avg Price</th><th>Cur Price</th><th>Value</th><th>Cash P&amp;L</th></tr></thead><tbody>'+
-            real.positions.map(p => '<tr><td>'+(p.title||p.slug||'—')+'</td><td>'+(p.outcome||'—')+'</td><td>'+(p.size||0).toFixed(2)+'</td><td>'+(p.avgPrice!=null?p.avgPrice.toFixed(3):'—')+'</td><td>'+(p.curPrice!=null?p.curPrice.toFixed(3):'—')+'</td><td>$'+(p.currentValue!=null?p.currentValue.toFixed(2):'—')+'</td><td class="'+pClass(p.cashPnl)+'">'+sgn(p.cashPnl||0)+'</td></tr>').join('') +
-            '</tbody></table>';
-        } else if (!real.error) {
-          html += '<div class="empty" style="padding:4px 0">No open positions on-chain right now.</div>';
-        }
-        body.innerHTML = html;
+    // Real wallet panel
+    const real = s.real || {};
+    const wrap = $('real-wrap');
+    const walletEl = $('real-wallet');
+    const body = $('real-body');
+    walletEl.textContent = real.wallet ? (real.wallet.slice(0,6)+'…'+real.wallet.slice(-4)) : '—';
+    if (!real.enabled) {
+      wrap.className = 'real-wrap disabled';
+      body.innerHTML = '<div class="empty" style="padding:4px 0">Only available in LIVE mode — demo mode shows simulated bankroll above, not a real wallet.</div>';
+    } else {
+      wrap.className = 'real-wrap';
+      let html = '<div class="real-stats">'+
+        '<div class="real-stat"><div class="label">Real USDC Balance</div><div class="val">'+(real.balance!==null?'$'+real.balance.toFixed(2):'loading…')+'</div></div>'+
+        '<div class="real-stat"><div class="label">Open Positions</div><div class="val">'+(real.positions?real.positions.length:0)+'</div></div>'+
+        '<div class="real-stat"><div class="label">Last Synced</div><div class="val" style="font-size:11px">'+(real.lastUpdated?new Date(real.lastUpdated).toLocaleTimeString():'—')+'</div></div>'+
+      '</div>';
+      if (real.error) html += '<div class="real-error">⚠️ '+real.error+'</div>';
+      if (real.positions && real.positions.length) {
+        html += '<table class="real-tbl"><thead><tr><th>Market</th><th>Outcome</th><th>Size</th><th>Avg Price</th><th>Cur Price</th><th>Value</th><th>Cash P&amp;L</th></tr></thead><tbody>'+
+          real.positions.map(p => '<tr><td>'+(p.title||p.slug||'—')+'</td><td>'+(p.outcome||'—')+'</td><td>'+(p.size||0).toFixed(2)+'</td><td>'+(p.avgPrice!=null?p.avgPrice.toFixed(3):'—')+'</td><td>'+(p.curPrice!=null?p.curPrice.toFixed(3):'—')+'</td><td>$'+(p.currentValue!=null?p.currentValue.toFixed(2):'—')+'</td><td class="'+pClass(p.cashPnl)+'">'+sgn(p.cashPnl||0)+'</td></tr>').join('') +
+          '</tbody></table>';
+      } else if (!real.error) {
+        html += '<div class="empty" style="padding:4px 0">No open positions on-chain right now.</div>';
       }
+      body.innerHTML = html;
     }
 
-    const grid = document.getElementById('pair-grid');
-    if (!s.instances || !s.instances.length) {
-      grid.innerHTML = '<div class="empty">Loading instances…</div>';
+    // Ladder cards
+    const grid = $('ladder-grid');
+    if (!s.ladders || !s.ladders.length) {
+      grid.innerHTML = '<div class="empty">Loading ladders…</div>';
     } else {
-      const legRow = (symbol, pos) => {
-        if (!pos) return '<div class="pair-row" style="font-size:9px;opacity:.6"><span class="pair-key">'+symbol+'</span><span>no fill</span></div>';
-        const stateHtml = pos.closed ? 'closed' : ('holding '+pos.shares+'sh (cost $'+pos.cost.toFixed(2)+')');
-        return '<div class="pair-row" style="font-size:9px"><span class="pair-key">'+symbol+' '+pos.side+' @'+pos.entryPrice.toFixed(2)+'</span><span style="flex:1;text-align:right">'+stateHtml+'</span></div>';
-      };
-      const comboBox = (combo) => {
-        const sumTxt = (combo.sum !== null && combo.sum !== undefined) ? combo.sum.toFixed(3) : '—';
-        const status = combo.triggered ? 'TRIGGERED' : 'watching';
-        return '<div class="pos-box">'+
-          '<div style="color:#8aa;margin-bottom:4px">'+combo.label+' — sum='+sumTxt+' ('+status+')</div>'+
-          legRow('BTC', combo.positions.BTC) +
-          legRow('ETH', combo.positions.ETH) +
-        '</div>';
-      };
-      grid.innerHTML = s.instances.map(inst => {
-        const hasPos = ['A','B'].some(k => inst.combos[k].positions.BTC && !inst.combos[k].positions.BTC.closed || inst.combos[k].positions.ETH && !inst.combos[k].positions.ETH.closed);
-        const cutoffTxt = inst.tradable ? (inst.secsToCutoff > 0 ? ('trigger window: '+fmtSecs(inst.secsToCutoff)+' left') : 'trigger window closed') : 'loading…';
-        const armed = inst.armedBoostCombo;
-        const sizingTxt = armed
-          ? ('🔥 ARMED — Combo '+armed+' buys '+s.config.boostShares+'sh/leg unconditionally at next window open')
-          : (inst.sharesThisWindow+'sh/leg (base)');
-        return '<div class="pair-card '+(hasPos?'has-pos':'')+(inst.tradable?'':' untradable')+'">'+
-          '<div class="pair-hdr"><div class="pair-sym">'+inst.key+'</div><div class="pair-timer">'+fmtSecs(inst.secsToEnd)+'</div></div>'+
-          '<div class="pair-body">'+
-            '<div class="pair-row" style="opacity:.7"><span class="pair-key">'+cutoffTxt+'</span><span></span></div>'+
-            '<div class="pair-row" style="'+(armed?'color:#ff9f0a;font-weight:600':'opacity:.7')+'"><span class="pair-key">sizing</span><span>'+sizingTxt+'</span></div>'+
-            '<div class="pair-row"><span class="pair-key side-up">BTC Up ask/bid</span><span>'+(inst.markets.BTC.upAsk?.toFixed(2)||'—')+' / '+(inst.markets.BTC.upBid?.toFixed(2)||'—')+'</span></div>'+
-            '<div class="pair-row"><span class="pair-key side-down">BTC Down ask/bid</span><span>'+(inst.markets.BTC.downAsk?.toFixed(2)||'—')+' / '+(inst.markets.BTC.downBid?.toFixed(2)||'—')+'</span></div>'+
-            '<div class="pair-row"><span class="pair-key side-up">ETH Up ask/bid</span><span>'+(inst.markets.ETH.upAsk?.toFixed(2)||'—')+' / '+(inst.markets.ETH.upBid?.toFixed(2)||'—')+'</span></div>'+
-            '<div class="pair-row"><span class="pair-key side-down">ETH Down ask/bid</span><span>'+(inst.markets.ETH.downAsk?.toFixed(2)||'—')+' / '+(inst.markets.ETH.downBid?.toFixed(2)||'—')+'</span></div>'+
-            comboBox(inst.combos.A) + comboBox(inst.combos.B) +
+      grid.innerHTML = s.ladders.map(l => {
+        const hasPos = l.levels.some(lv => lv.position && !lv.position.closed);
+        const openCount = l.levels.filter(lv => lv.position && !lv.position.closed).length;
+        const restingCount = l.levels.filter(lv => lv.entryPending).length;
+        const totalReentries = l.levels.reduce((a, lv) => a + (lv.reentries || 0), 0);
+        const sideCls = l.side === 'Up' ? 'up' : 'down';
+        const rows = l.levels.slice().reverse().map(lv => {
+          let rowCls = 'empty', stateTxt = 'idle';
+          if (lv.position && !lv.position.closed) {
+            rowCls = lv.position.tpPending ? 'tp-pending' : 'filled';
+            stateTxt = 'holding ' + lv.position.shares + 'sh @ ' + lv.position.entryPrice.toFixed(2);
+          } else if (lv.entryPending) {
+            rowCls = 'resting';
+            stateTxt = 'resting buy';
+          }
+          const tpTxt = lv.position ? ('TP ' + lv.position.tpPrice.toFixed(2)) : '';
+          return '<div class="level-row ' + rowCls + '">' +
+            '<div class="level-price">' + lv.level.toFixed(2) + '</div>' +
+            '<div class="level-state">' + stateTxt + '</div>' +
+            '<div class="level-tp">' + tpTxt + '</div>' +
+            '<div class="level-re">' + (lv.reentries > 0 ? 'x' + lv.reentries : '') + '</div>' +
+          '</div>';
+        }).join('');
+        return '<div class="ladder-card ' + (hasPos ? 'has-pos' : '') + (s.tradable ? '' : ' untradable') + '">' +
+          '<div class="ladder-hdr"><div class="ladder-sym ' + sideCls + '">' + l.key + '</div><div class="ladder-price">ask ' + (l.ask!=null?l.ask.toFixed(2):'—') + ' / bid ' + (l.bid!=null?l.bid.toFixed(2):'—') + '</div></div>' +
+          '<div class="ladder-body">' +
+            '<div class="ladder-summary"><span>' + openCount + ' open</span><span>' + restingCount + ' resting</span><span>' + totalReentries + ' re-entries</span></div>' +
+            rows +
           '</div></div>';
       }).join('');
     }
 
-    const tb = document.getElementById('trade-body');
+    // Trade log
+    const tb = $('trade-body');
     if (s.trades && s.trades.length > 0) {
       tb.innerHTML = s.trades.map(t => {
         const pnlStr = (t.profit !== undefined) ? sgn(t.profit) : '—';
         const pnlCls = (t.profit !== undefined) ? pClass(t.profit) : '';
-        const sideColor = t.side === 'BUY' ? '#ffd740' : (t.reason==='RESOLUTION' ? '#00d4ff' : '#ff4757');
-        return '<tr><td>'+t.time+'</td><td>'+(t.instance||'—')+'</td><td>'+(t.combo||'—')+'</td>'+
-          '<td style="color:'+sideColor+'">'+(t.symbol||'')+' '+(t.outcome||'')+'</td>'+
-          '<td>'+(t.reason||'BUY')+'</td>'+
-          '<td>'+(t.price||0).toFixed(3)+'</td>'+
-          '<td>'+(t.shares||0)+'</td>'+
-          '<td class="'+pnlCls+'">'+pnlStr+'</td></tr>';
+        const sideColor = t.reason === 'ENTRY' ? '#ffd740' : (t.reason === 'RESOLUTION' ? '#00d4ff' : '#00e676');
+        return '<tr><td>' + t.time + '</td><td style="color:' + sideColor + '">' + (t.ladder || '—') + '</td>' +
+          '<td>' + (t.level != null ? t.level.toFixed(2) : '—') + '</td>' +
+          '<td>' + (t.reason || '—') + '</td>' +
+          '<td>' + (t.price || 0).toFixed(3) + '</td>' +
+          '<td>' + (t.shares || 0) + '</td>' +
+          '<td class="' + pnlCls + '">' + pnlStr + '</td></tr>';
       }).join('');
     } else {
-      tb.innerHTML = '<tr><td colspan="8" class="empty">No trades yet</td></tr>';
+      tb.innerHTML = '<tr><td colspan="7" class="empty">No trades yet</td></tr>';
     }
 
-    const logEl = document.getElementById('logs');
+    // System log
+    const logEl = $('logs');
     if (s.logs && s.logs.length > 0) {
       logEl.innerHTML = s.logs.map(l => {
         const col = l.includes('❌')||l.includes('💥') ? '#ff4757'
                   : l.includes('💰')||l.includes('✅') ? '#00e676'
-                  : l.includes('🎯')||l.includes('🧯') ? '#ffd740'
                   : l.includes('🔭')||l.includes('⏰') ? '#00d4ff'
                   : l.includes('⚠️') ? '#ff9f0a'
                   : '#4a6080';
@@ -391,7 +352,7 @@ const slog = (line) => { console.log(line); io.emit('log', line); };
 const PK = process.env.PRIVATE_KEY;
 if (!PK) { console.error('❌ PRIVATE_KEY env var missing'); process.exit(1); }
 
-console.log(`⏱️ 5-Minute BTC Up/Down Bot — Two Independent Limit Strategies`);
+console.log('🪜 15-Minute BTC/ETH Grid-Ladder Bot — 4 Independent Up/Down Ladders');
 console.log(`🚦 DRY_RUN=${DRY_RUN}`);
 if (DRY_RUN) console.log('⚠️  DRY RUN — demo $2000 capital, simulated fills, real API for data/orders');
 else         console.log('🔴 LIVE MODE — real money');
