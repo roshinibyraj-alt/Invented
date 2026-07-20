@@ -27,11 +27,9 @@
  *  The 0.40 rung never gets a TP order — it simply holds until the
  *  window resolves ($1 win / $0 loss per share).
  *
- *  RE-ENTRY: the instant a rung's TP sell fills, that rung immediately
- *  re-arms a fresh resting buy at the same price — unlimited re-entries
- *  per window, but only ever one open position per rung at a time (never
- *  re-arms while still holding). The 0.40 rung has no TP event, so it
- *  only gets a fresh entry at the next window.
+ *  NO RE-ENTRY: once a rung's TP sell fills, that rung is done for the
+ *  window — it does not re-arm a fresh buy. Every rung (TP or no-TP) only
+ *  gets a fresh entry at the next window boundary.
  *
  *  SIZING: every entry is a fixed $50 notional (ENTRY_NOTIONAL), not a
  *  fixed share count — share count is computed per rung as $50 / rung
@@ -549,11 +547,10 @@ async function onTPFilled(ladder, slot, fillPrice, filledShares) {
   pos.tpPending = false;
 
   registerTrade({ ladder: ladder.key, symbol: ladder.symbol, side: 'SELL', outcome: ladder.side, reason: 'TP', price: fillPrice, shares, profit, rebate, level: slot.level });
-  log(`💰 [${ladder.key}] TP filled @ ${fillPrice.toFixed(2)} (rung ${slot.level.toFixed(2)}) — pnl=$${profit.toFixed(2)} (incl. rebate) | bankroll=$${bankroll.toFixed(2)} — re-arming rung`);
+  log(`💰 [${ladder.key}] TP filled @ ${fillPrice.toFixed(2)} (rung ${slot.level.toFixed(2)}) — pnl=$${profit.toFixed(2)} (incl. rebate) | bankroll=$${bankroll.toFixed(2)} — rung done for this window`);
 
   slot.position = null;
   recordEquity();
-  await armEntry(ladder, slot); // TP closed the position — this rung is free again, re-enter immediately
 }
 
 // Tick a single ladder in DRY_RUN: simulates fills purely from the live
@@ -880,7 +877,7 @@ async function init(privateKey, emit, slogFn) {
   log('⚙️  Ladders: BTC-Up | BTC-Down | ETH-Up | ETH-Down — independent, all can hold at once');
   log('⚙️  Rungs (same for every ladder): 0.40 -> no TP, rides to resolution | 0.30 -> TP 0.60 | 0.20 -> TP 0.50');
   log(`⚙️  Sizing: fixed $${ENTRY_NOTIONAL} notional per entry (shares = $${ENTRY_NOTIONAL}/rung price) | resting limit orders only (maker)`);
-  log(`⚙️  Re-entry: the instant a rung's TP fills, it re-arms immediately — unlimited re-entries per window, one open position per rung at a time`);
+  log(`⚙️  Re-entry: disabled — once a rung's TP fills, it stays closed for the rest of the window`);
   log(`⚙️  Maker rebates: Crypto category ≈ ${(MAKER_REBATE_SHARE * 100).toFixed(0)}% of taker-fee-equivalent (rate ${CRYPTO_TAKER_FEE_RATE}) — estimated per fill, real payouts are pooled daily by Polymarket`);
   log(`${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
