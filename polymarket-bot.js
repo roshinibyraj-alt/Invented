@@ -13,7 +13,7 @@
  *
  *  RUNGS: every ladder uses the same 3 fixed price rungs:
  *
- *    entry 0.40  ->  no TP, position rides to real settlement/resolution
+ *    entry 0.40  ->  TP @ 0.80
  *    entry 0.30  ->  TP @ 0.60
  *    entry 0.20  ->  TP @ 0.50
  *
@@ -24,8 +24,7 @@
  *
  *  TP: the moment a rung's buy fills, if that rung has a TP price a
  *  resting sell is placed there immediately (0.30->0.60, 0.20->0.50).
- *  The 0.40 rung never gets a TP order — it simply holds until the
- *  window resolves ($1 win / $0 loss per share).
+ *  All three rungs now get a TP order (0.40->0.80, 0.30->0.60, 0.20->0.50).
  *
  *  NO RE-ENTRY: once a rung's TP sell fills, that rung is done for the
  *  window — it does not re-arm a fresh buy. Every rung (TP or no-TP) only
@@ -114,7 +113,7 @@ const MAKER_REBATE_SHARE    = Number(process.env.MAKER_REBATE_SHARE || 0.20); //
 // The fixed 3-rung ladder — identical for every ladder (BTC-Up, BTC-Down,
 // ETH-Up, ETH-Down). tp: null means "no TP order — ride to resolution".
 const RUNG_DEFS = [
-  { level: 0.40, tp: null },
+  { level: 0.40, tp: 0.80 },
   { level: 0.30, tp: 0.60 },
   { level: 0.20, tp: 0.50 },
 ];
@@ -875,7 +874,7 @@ async function init(privateKey, emit, slogFn) {
   log('🚀 Resting-Limit Ladder Bot — BTC/ETH Up/Down, 5-minute windows only');
   log(`⚙️  $${TOTAL_CAPITAL} capital (shared across all 4 ladders)`);
   log('⚙️  Ladders: BTC-Up | BTC-Down | ETH-Up | ETH-Down — independent, all can hold at once');
-  log('⚙️  Rungs (same for every ladder): 0.40 -> no TP, rides to resolution | 0.30 -> TP 0.60 | 0.20 -> TP 0.50');
+  log('⚙️  Rungs (same for every ladder): 0.40 -> TP 0.80 | 0.30 -> TP 0.60 | 0.20 -> TP 0.50');
   log(`⚙️  Sizing: fixed $${ENTRY_NOTIONAL} notional per entry (shares = $${ENTRY_NOTIONAL}/rung price) | resting limit orders only (maker)`);
   log(`⚙️  Re-entry: disabled — once a rung's TP fills, it stays closed for the rest of the window`);
   log(`⚙️  Maker rebates: Crypto category ≈ ${(MAKER_REBATE_SHARE * 100).toFixed(0)}% of taker-fee-equivalent (rate ${CRYPTO_TAKER_FEE_RATE}) — estimated per fill, real payouts are pooled daily by Polymarket`);
