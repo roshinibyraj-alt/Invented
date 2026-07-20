@@ -2,16 +2,17 @@
 
 /**
  * ═══════════════════════════════════════════════════════════════
- *  POLYMARKET GRID-LADDER BOT — BTC-UP / ETH-DOWN, 15-MINUTE WINDOWS
+ *  POLYMARKET GRID-LADDER BOT — BTC/ETH UP/DOWN, 15-MINUTE WINDOWS
  * ═══════════════════════════════════════════════════════════════
  *
  *  Trades ONLY the 15-minute Up/Down windows for BTC and ETH.
- *  Exactly TWO independent grid ladders are active, sharing one
- *  bankroll but never otherwise interacting with each other. BTC-Down
- *  and ETH-Up are disabled entirely — only these two run, and they can
- *  both be live at the same time (they are not mutually exclusive):
+ *  FOUR independent grid ladders are active, sharing one bankroll but
+ *  never otherwise interacting with each other. All four can be live
+ *  at the same time:
  *
  *    BTC-Up    range 0.15 – 0.45
+ *    BTC-Down  range 0.15 – 0.45
+ *    ETH-Up    range 0.45 – 0.85
  *    ETH-Down  range 0.45 – 0.85
  *
  *  GRID: each ladder has fixed entry levels every 0.10 across its range.
@@ -100,11 +101,12 @@ const ENTRY_SHARES     = Number(process.env.ENTRY_SHARES || 50);      // fixed s
 const TAKER_FEE_RATE   = Number(process.env.TAKER_FEE_RATE || process.env.MAKER_FEE_RATE || 0); // market orders are taker fills
 const STARTUP_GRACE_SECS = Number(process.env.STARTUP_GRACE_SECS || 3); // how close to a window's start the bot is still allowed to jump in
 
-// Ladder definitions: ONLY BTC-Up and ETH-Down are traded. Both can be
-// active/holding positions at the same time — they are independent grids
-// sharing one bankroll, not a mutually-exclusive toggle.
+// Ladder definitions: all four ladders trade independently and can all be
+// live at the same time — no mutual exclusion, sharing one bankroll.
 const LADDER_DEFS = [
   { key: 'BTC-Up',   symbol: 'BTC', side: 'Up',   min: 0.15, max: 0.45 },
+  { key: 'BTC-Down', symbol: 'BTC', side: 'Down', min: 0.15, max: 0.45 },
+  { key: 'ETH-Up',   symbol: 'ETH', side: 'Up',   min: 0.45, max: 0.85 },
   { key: 'ETH-Down', symbol: 'ETH', side: 'Down', min: 0.45, max: 0.85 },
 ];
 
@@ -458,14 +460,16 @@ async function attemptEntry(ladder, slot) {
   try {
     const resp = await placeMarketBuy(tokenId, ENTRY_SHARES, ask);
     if (!resp || !resp.filled) return; // LIVE trader missing methods, call failed, or didn't fill — retry next tick
+    if (slot.position) return;         // safety net: this rung was somehow filled while we were awaiting — never stack a second position
     slot.entryOrderId = resp.id;
-    await onEntryFilled(ladder, slot, resp.avgPrice != null ? resp.avgPrice : ask, resp.filledShares || ENTRY_SHARES);
+    await onEntryFilled(ladder, slot, slot.level, resp.filledShares || ENTRY_SHARES); // rung price is fixed — always book the entry at the nominal rung level, not wherever ask happened to be
   } finally {
     slot.firing = false;
   }
 }
 
 async function onEntryFilled(ladder, slot, fillPrice, filledShares) {
+  if (slot.position) return; // never stack a second position on a rung that's already holding
   const shares = filledShares > 0 ? filledShares : ENTRY_SHARES;
   const cost = round2(shares * fillPrice);
   const fee = orderFee(shares, fillPrice);
@@ -737,8 +741,6 @@ function buildState() {
     config: {
       gridStep: GRID_STEP, tpOffset: TP_OFFSET, entryShares: ENTRY_SHARES,
       takerFeeRate: TAKER_FEE_RATE, orderType: 'market',
-      upRange: [LADDER_DEFS.find(d => d.side === 'Up')?.min, LADDER_DEFS.find(d => d.side === 'Up')?.max],
-      downRange: [LADDER_DEFS.find(d => d.side === 'Down')?.min, LADDER_DEFS.find(d => d.side === 'Down')?.max],
     },
     equityCurve, logs: logs.slice(-100), trades: trades.slice(-80).reverse(),
     real: {
@@ -797,8 +799,8 @@ async function init(privateKey, emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
   log('🚀 Grid-Ladder Bot — BTC-Up / ETH-Down, 15-minute windows only');
-  log(`⚙️  $${TOTAL_CAPITAL} capital (shared across both ladders)`);
-  log('⚙️  Ladders: BTC-Up [0.15-0.45] | ETH-Down [0.55-0.85] — independent, both can hold at once, BTC-Down/ETH-Up disabled');
+  log(`⚙️  $${TOTAL_CAPITAL} capital (shared across all 4 ladders)`);
+  log('⚙️  Ladders: BTC-Up [0.15-0.45] | BTC-Down [0.15-0.45] | ETH-Up [0.45-0.85] | ETH-Down [0.45-0.85] — independent, all can hold at once');
   log(`⚙️  Grid: entry every ${GRID_STEP.toFixed(2)} across each range, TP = entry + ${TP_OFFSET.toFixed(2)} per rung, no SL — unfilled TPs ride to resolution`);
   log(`⚙️  Re-entry: unlimited per rung, but only after that rung's current position closes via TP (never re-fires while holding)`);
   log(`⚙️  Sizing: fixed ${ENTRY_SHARES}sh per entry | market orders — fire the instant price reaches trigger, not resting limit orders`);
