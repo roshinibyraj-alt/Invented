@@ -2,42 +2,57 @@
 
 /**
  * ═══════════════════════════════════════════════════════════════
- *  POLYMARKET CROSS-PAIR COMBO BOT — BTC/ETH UP/DOWN, 5m + 15m
+ *  POLYMARKET GRID-LADDER BOT — BTC/ETH UP/DOWN, 15-MINUTE WINDOWS
  * ═══════════════════════════════════════════════════════════════
  *
- *  Trades BTC and ETH Up/Down markets together as paired combos, run
- *  as TWO fully independent window instances — a 5-minute instance
- *  and a 15-minute instance — both pulling from the same shared
- *  bankroll, never interacting with each other otherwise.
+ *  Trades ONLY the 15-minute Up/Down windows for BTC and ETH.
+ *  There are FOUR fully independent grid ladders, sharing one bankroll
+ *  but never otherwise interacting with each other:
  *
- *  COMBOS (per instance, each tracked independently):
- *    Combo A = BTC-Up  ask + ETH-Down ask
- *    Combo B = BTC-Down ask + ETH-Up  ask
+ *    BTC-Up    range 0.30 – 0.90
+ *    BTC-Down  range 0.25 – 0.85
+ *    ETH-Up    range 0.30 – 0.90
+ *    ETH-Down  range 0.25 – 0.85
  *
- *  TRIGGER (per combo, once per window, no repeat if missed):
- *    Watch the combined ask price from window start. If it drops below
- *    0.80 at any point before the cutoff, fire the combo:
- *      - 5m instance:  cutoff = 3.5 min  (210s of 300s window)
- *      - 15m instance: cutoff = 10.5 min (630s of 900s window)
- *    Cutoff is a fixed 70% of window length for both instances.
- *    If the cutoff passes without the combo dropping below 0.80, that
- *    combo simply does not trade this window.
+ *  GRID: each ladder has fixed entry levels every 0.05 across its range
+ *  (e.g. Up: 0.30, 0.35, 0.40 … 0.90). At window open, a resting limit
+ *  BUY order is placed at every level. As price drops to/through a
+ *  level, that level's order fills.
  *
- *  EXECUTION: once a combo fires, BOTH legs are bought immediately as
- *    marketable buys at the current ask (taker fee applies) — not
- *    resting limit orders — so both legs land together rather than
- *    risking a one-sided fill. Affordability (bankroll) is checked for
- *    the combined cost of both legs before either leg is sent.
- *    Size: 20 shares per leg, on both timeframes (real-trading sizing).
+ *  TP: every fill gets its own resting limit SELL at entry + 0.10.
+ *  When that TP fills, the slot is freed and IMMEDIATELY re-arms a
+ *  fresh resting buy at the same level — a level can re-enter many
+ *  times in the same window. Ladders are independent of one another.
  *
- *  EXIT: none. No TP, no SL. Both legs simply ride to actual window
- *    resolution (real settlement pays $1 or $0/share). This bot's own
- *    bookkeeping simulates that via the public Gamma API purely to
- *    keep the dashboard's P&L figures meaningful. A separate,
- *    independent auto-claim script handles real redemption.
+ *  NO STOP LOSS: anything still open (filled, TP not yet hit) when the
+ *  window ends simply rides to real settlement ($1 win / $0 loss per
+ *  share). A separate, independent auto-claim script handles real
+ *  on-chain redemption; this bot's bookkeeping just mirrors it via the
+ *  public Gamma API so the dashboard's P&L stays meaningful.
+ *
+ *  ORDER STYLE: resting limit orders (maker), not marketable/taker
+ *  orders. In DRY_RUN, fills are simulated locally against the live
+ *  polled ask/bid feed. In LIVE mode this calls out to the trader
+ *  module — see the "trader interface" note below.
  *
  *  LIVE / DEMO: DRY_RUN is runtime-switchable (see setMode) — dashboard
- *    has a one-click toggle plus an independent pause button.
+ *  has a one-click toggle plus an independent pause button.
+ * ═══════════════════════════════════════════════════════════════
+ *
+ *  TRADER INTERFACE (LIVE mode only) — this bot expects the following
+ *  methods on the PolymarketTrader instance. If your polymarket-trader.js
+ *  doesn't have them yet, LIVE grid trading will log a clear error and
+ *  skip the action rather than crash; DRY_RUN never touches these:
+ *
+ *    trader.placeLimitBuy(tokenId, price, size)
+ *      -> { id, filled, avgPrice, filledShares }   // filled=true if the
+ *         order was immediately marketable, false if it now rests
+ *    trader.placeLimitSell(tokenId, price, size)
+ *      -> same shape as placeLimitBuy
+ *    trader.getOrder(orderId)
+ *      -> { filled, avgPrice, filledShares }        // poll a resting order
+ *    trader.cancelOrder(orderId)
+ *      -> void / resolves when cancelled
  * ═══════════════════════════════════════════════════════════════
  */
 
@@ -47,17 +62,15 @@ const GAMMA = 'https://gamma-api.polymarket.com';
 const CLOB  = 'https://clob.polymarket.com';
 const DATA_API = 'https://data-api.polymarket.com'; // public, no-auth — real wallet balance/positions
 
-const TICK_MS               = 500;
-const POLY_PRICE_REFRESH_MS = 1000;
+const TICK_MS                 = 500;
+const POLY_PRICE_REFRESH_MS   = 1000;
 const REAL_ACCOUNT_REFRESH_MS = 5000; // how often to pull real balance/positions in live mode
-const EARLY_CUTOFF_SECS     = Number(process.env.EARLY_CUTOFF_SECS || 2); // stop trading this close to window end, go to resolution
+const ORDER_POLL_MS           = 2000; // how often to poll resting LIVE order fills
+const EARLY_CUTOFF_SECS       = Number(process.env.EARLY_CUTOFF_SECS || 2); // stop trading this close to window end, go to resolution
 const SLUG_OFFSET_FALLBACKS_FACTORY = (windowSecs) => [0, -windowSecs, windowSecs];
 
+const WINDOW_SECS = 900; // 15 minutes — the ONLY timeframe this bot trades
 const SYMBOLS = ['BTC', 'ETH'];
-const INSTANCE_DEFS = [
-  { key: '5m',  windowSecs: 300 },
-  { key: '15m', windowSecs: 900 },
-];
 
 // DRY_RUN defaults to true (demo) unless explicitly overridden. Flip via
 // setMode(true) / the dashboard toggle, or set DRY_RUN=false in the env.
@@ -69,18 +82,25 @@ function round5(n) { return Math.round(n * 100000) / 100000; }
 function nowSec() { return Date.now() / 1000; }
 
 // ── Strategy parameters ──
-const COMBO_THRESHOLD        = Number(process.env.COMBO_THRESHOLD || 0.80);
-const COMBO_TRIGGER_FRACTION = Number(process.env.COMBO_TRIGGER_FRACTION || 0.70); // cutoff as fraction of window length
-const COMBO_SHARES           = Number(process.env.COMBO_SHARES || 10); // per leg, base size, both timeframes
+const GRID_STEP      = Number(process.env.GRID_STEP || 0.05);
+const TP_OFFSET       = Number(process.env.TP_OFFSET || 0.10);
+const ENTRY_SHARES    = Number(process.env.ENTRY_SHARES || 50); // fixed size per individual grid entry
+const MAKER_FEE_RATE  = Number(process.env.MAKER_FEE_RATE || 0); // resting orders are maker fills — no taker fee by default
 
-// ── Decorrelation boost: on detecting a decorrelation (see
-// checkComboDecorrelationByPrice below), the OPPOSITE realized pairing gets
-// bought unconditionally — no threshold, no cutoff gating — the instant the
-// next window opens, at BOOST_SHARES per leg. One-shot, single window only,
-// then normal threshold-gated trading resumes at base COMBO_SHARES sizing.
-const BOOST_SHARES = Number(process.env.BOOST_SHARES || 50);
+// Ladder definitions: 4 fully independent grids sharing one bankroll.
+const LADDER_DEFS = [
+  { key: 'BTC-Up',   symbol: 'BTC', side: 'Up',   min: 0.30, max: 0.90 },
+  { key: 'BTC-Down', symbol: 'BTC', side: 'Down', min: 0.25, max: 0.85 },
+  { key: 'ETH-Up',   symbol: 'ETH', side: 'Up',   min: 0.30, max: 0.90 },
+  { key: 'ETH-Down', symbol: 'ETH', side: 'Down', min: 0.25, max: 0.85 },
+];
 
-const CRYPTO_TAKER_FEE_RATE = Number(process.env.CRYPTO_TAKER_FEE_RATE || 0.07);
+function buildLevels(min, max, step) {
+  const levels = [];
+  const n = Math.round((max - min) / step);
+  for (let i = 0; i <= n; i++) levels.push(round2(min + i * step));
+  return levels;
+}
 
 let emitFn = () => {};
 let slog = () => {};
@@ -92,6 +112,7 @@ let tradingEnabled = true;
 let bankroll = TOTAL_CAPITAL;
 let realizedPnl = 0, feesPaid = 0, wins = 0, losses = 0;
 let equityCurve = [{ t: Date.now(), equity: TOTAL_CAPITAL }];
+let warnedNoTraderLimitMethods = false;
 
 // ── Real account state (live mode only) — actual wallet balance/positions
 // pulled from Polymarket itself, independent of the bot's internal simulated
@@ -100,14 +121,6 @@ let realBalance = null;
 let realPositions = [];
 let realLastUpdated = null;
 let realFetchError = null;
-let warnedNoDepositWallet = false;
-
-// Combo leg definitions: which symbol/side belongs to each combo.
-const COMBO_LEGS = {
-  A: [ { symbol: 'BTC', side: 'Up' },   { symbol: 'ETH', side: 'Down' } ],
-  B: [ { symbol: 'BTC', side: 'Down' }, { symbol: 'ETH', side: 'Up' } ],
-};
-const COMBO_LABEL = { A: 'BTC Up + ETH Down', B: 'BTC Down + ETH Up' };
 
 function log(msg) {
   const line = `[${new Date().toISOString().slice(11, 19)}] ${msg}`;
@@ -117,42 +130,27 @@ function log(msg) {
 }
 
 async function getJSON(url) {
-  const res = await fetch(url, { headers: { 'User-Agent': 'polymarket-combo-bot/1.0' } });
+  const res = await fetch(url, { headers: { 'User-Agent': 'polymarket-grid-bot/1.0' } });
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${url}`);
   return res.json();
 }
 async function postJSON(url, body) {
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'User-Agent': 'polymarket-combo-bot/1.0' },
+    headers: { 'Content-Type': 'application/json', 'User-Agent': 'polymarket-grid-bot/1.0' },
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${url}`);
   return res.json();
 }
 
-// Market buy — true FOK market order via trader.placeFokBuy (dollar-denominated,
-// fills immediately at best available price or kills entirely). Demo mode
-// simulates the same fill semantics at the observed ask so both modes behave
-// the same way, per your instruction that demo and live should both be market orders.
-async function placeMarketableBuy(tokenId, price, shares) {
-  const dollarAmount = round2(price * shares);
-  if (!DRY_RUN && trader) {
-    const resp = await trader.placeFokBuy(tokenId, dollarAmount);
-    const avgPrice = resp.avgPrice > 0 ? resp.avgPrice : price;
-    const filledShares = resp.isFilled ? round2(dollarAmount / avgPrice) : 0;
-    return { id: resp.id, filled: !!resp.isFilled, avgPrice, shares: filledShares };
-  }
-  return { id: `dry-buy-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, filled: true, avgPrice: price, shares };
-}
-function takerFee(shares, price) {
-  return round5(shares * CRYPTO_TAKER_FEE_RATE * price * (1 - price));
+function makerFee(shares, price) {
+  return MAKER_FEE_RATE > 0 ? round5(shares * MAKER_FEE_RATE * price) : 0;
 }
 
 // CLOB order rejections often carry the real reason in e.response.data / e.data /
-// e.body rather than e.message (which is frequently just "Request failed with
-// status code 400"). Pull whatever's actually there so failures are diagnosable
-// instead of showing a generic message.
+// e.body rather than e.message. Pull whatever's actually there so failures are
+// diagnosable instead of showing a generic message.
 function describeOrderError(e) {
   const parts = [e?.message || String(e)];
   const extra = e?.response?.data ?? e?.data ?? e?.body ?? null;
@@ -162,8 +160,50 @@ function describeOrderError(e) {
   return parts.join(' | ');
 }
 
+function traderHasLimitMethods() {
+  const ok = trader && typeof trader.placeLimitBuy === 'function' && typeof trader.placeLimitSell === 'function';
+  if (!ok && !warnedNoTraderLimitMethods) {
+    warnedNoTraderLimitMethods = true;
+    log('❌ LIVE grid trading needs trader.placeLimitBuy / trader.placeLimitSell (and ideally getOrder / cancelOrder) on polymarket-trader.js — these are missing, so LIVE order actions will be skipped until added. DRY_RUN is unaffected.');
+  }
+  return ok;
+}
+
+// Resting limit BUY. DRY_RUN: purely bookkeeping, actual fill is detected by
+// price-crossing simulation in tickLadder. LIVE: places a real resting order.
+async function placeRestingBuy(tokenId, price, shares) {
+  if (!DRY_RUN) {
+    if (!traderHasLimitMethods()) return null;
+    try {
+      return await trader.placeLimitBuy(tokenId, price, shares);
+    } catch (e) {
+      log(`❌ placeLimitBuy failed: ${describeOrderError(e)}`);
+      return null;
+    }
+  }
+  return { id: `dry-buy-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, filled: false };
+}
+async function placeRestingSell(tokenId, price, shares) {
+  if (!DRY_RUN) {
+    if (!traderHasLimitMethods()) return null;
+    try {
+      return await trader.placeLimitSell(tokenId, price, shares);
+    } catch (e) {
+      log(`❌ placeLimitSell failed: ${describeOrderError(e)}`);
+      return null;
+    }
+  }
+  return { id: `dry-sell-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, filled: false };
+}
+async function cancelRestingOrder(orderId) {
+  if (!orderId || orderId.startsWith('dry-')) return;
+  if (!DRY_RUN && trader && typeof trader.cancelOrder === 'function') {
+    try { await trader.cancelOrder(orderId); } catch (e) { log(`⚠️  cancelOrder failed: ${describeOrderError(e)}`); }
+  }
+}
+
 // ─────────────────────────────────────────
-//  Per-instance market state
+//  Market state (BTC / ETH 15m window)
 // ─────────────────────────────────────────
 function freshMarketSlot() {
   return {
@@ -172,36 +212,43 @@ function freshMarketSlot() {
     upAsk: null, upBid: null, downAsk: null, downBid: null,
   };
 }
-function freshComboSlot() {
+
+function freshSlot(level) {
   return {
-    triggered: false, // one-shot per window
-    positions: { BTC: null, ETH: null }, // filled legs: {shares, entryPrice, cost, side, closed, won}
-    decorrelationChecked: false, // guards against re-classifying the same combo's result twice
+    level,
+    entryOrderId: null,
+    entryPending: false,   // a resting buy order is currently live at this level
+    position: null,        // { shares, entryPrice, cost, tpPrice, tpOrderId, tpPending, closed, won, closedReason }
+    reentries: 0,           // number of times this level has filled this window
   };
 }
-function freshInstanceState(def) {
+
+function freshLadder(def) {
   return {
-    key: def.key,
-    windowSecs: def.windowSecs,
-    cutoffSecs: Math.round(def.windowSecs * COMBO_TRIGGER_FRACTION),
+    key: def.key, symbol: def.symbol, side: def.side, min: def.min, max: def.max,
+    levels: buildLevels(def.min, def.max, GRID_STEP),
+    slots: Object.fromEntries(buildLevels(def.min, def.max, GRID_STEP).map(l => [String(l), freshSlot(l)])),
+  };
+}
+
+function freshWindowState() {
+  return {
+    windowSecs: WINDOW_SECS,
     tradable: false,
     windowStart: null, windowEnd: null,
     resolvedThisWindow: true,
     markets: { BTC: freshMarketSlot(), ETH: freshMarketSlot() },
-    combos: { A: freshComboSlot(), B: freshComboSlot() },
-    sharesThisWindow: COMBO_SHARES, // always base now — boost is a separate unconditional buy, not a size modifier on normal triggers
-    armedBoostCombo: null, // 'A' | 'B' | null — survives across freshInstanceState resets, see loadInstanceWindow
+    ladders: Object.fromEntries(LADDER_DEFS.map(d => [d.key, freshLadder(d)])),
   };
 }
 
-let instances = INSTANCE_DEFS.map(freshInstanceState);
+let win = freshWindowState();
 
 // ─────────────────────────────────────────
 //  Slug / window math
 // ─────────────────────────────────────────
 function currentWindowStart(windowSecs, tsSec = nowSec()) { return Math.floor(tsSec / windowSecs) * windowSecs; }
-function windowLabel(windowSecs) { return windowSecs === 300 ? '5m' : windowSecs === 900 ? '15m' : `${Math.round(windowSecs / 60)}m`; }
-function slugFor(symbol, windowSecs, windowStartSec) { return `${symbol.toLowerCase()}-updown-${windowLabel(windowSecs)}-${windowStartSec}`; }
+function slugFor(symbol, windowStartSec) { return `${symbol.toLowerCase()}-updown-15m-${windowStartSec}`; }
 function qOf(m) { return (m.question || m.groupItemTitle || m.title || '').toLowerCase(); }
 function parseMarketTokens(m) {
   try {
@@ -216,11 +263,11 @@ function tokenIdForSide(market, side) {
   const tok = tokens.find(t => (t.outcome || '').toLowerCase() === want);
   return tok?.token_id || null;
 }
-async function fetchEventForWindow(symbol, windowSecs, windowStart) {
-  for (const offset of SLUG_OFFSET_FALLBACKS_FACTORY(windowSecs)) {
+async function fetchEventForWindow(symbol, windowStart) {
+  for (const offset of SLUG_OFFSET_FALLBACKS_FACTORY(WINDOW_SECS)) {
     const ws = windowStart + offset;
-    if (ws + windowSecs <= nowSec()) continue;
-    const slug = slugFor(symbol, windowSecs, ws);
+    if (ws + WINDOW_SECS <= nowSec()) continue;
+    const slug = slugFor(symbol, ws);
     try {
       const event = await getJSON(`${GAMMA}/events/slug/${encodeURIComponent(slug)}`);
       if (event && event.id && Array.isArray(event.markets) && event.markets.length) return { event, windowStart: ws, slug };
@@ -229,18 +276,19 @@ async function fetchEventForWindow(symbol, windowSecs, windowStart) {
   return null;
 }
 
-async function loadInstanceWindow(inst) {
-  const ws = currentWindowStart(inst.windowSecs);
-  if (inst.windowStart === ws && inst.markets.BTC.upTokenId && inst.markets.ETH.upTokenId) return;
+// ─────────────────────────────────────────
+//  Window load — (re)builds market slots + arms all grid entry orders
+// ─────────────────────────────────────────
+async function loadWindow() {
+  const ws = currentWindowStart(WINDOW_SECS);
+  if (win.windowStart === ws && win.markets.BTC.upTokenId && win.markets.ETH.upTokenId) return;
 
   const [foundBtc, foundEth] = await Promise.all([
-    fetchEventForWindow('BTC', inst.windowSecs, ws),
-    fetchEventForWindow('ETH', inst.windowSecs, ws),
+    fetchEventForWindow('BTC', ws),
+    fetchEventForWindow('ETH', ws),
   ]);
-  if (!foundBtc || !foundEth) { inst.tradable = false; return; }
-
-  // Both symbols must agree on the actual window start we found (fallback offsets could disagree).
-  if (foundBtc.windowStart !== foundEth.windowStart) { inst.tradable = false; return; }
+  if (!foundBtc || !foundEth) { win.tradable = false; return; }
+  if (foundBtc.windowStart !== foundEth.windowStart) { win.tradable = false; return; }
 
   function slotFrom(found) {
     const market = found.event.markets.find(m => { const q = qOf(m); return q.includes('up') || q.includes('down'); }) || found.event.markets[0];
@@ -257,34 +305,36 @@ async function loadInstanceWindow(inst) {
   }
   const btcSlot = slotFrom(foundBtc);
   const ethSlot = slotFrom(foundEth);
-  if (!btcSlot || !ethSlot) { log(`⚠️  [${inst.key}] window loaded but Up/Down token ids missing`); inst.tradable = false; return; }
+  if (!btcSlot || !ethSlot) { log('⚠️  window loaded but Up/Down token ids missing'); win.tradable = false; return; }
 
-  const carryArmedBoost = inst.armedBoostCombo || null; // must survive the freshInstanceState() reset below
-
-  const fresh = freshInstanceState(INSTANCE_DEFS.find(d => d.key === inst.key));
+  const fresh = freshWindowState();
   fresh.windowStart = foundBtc.windowStart;
-  fresh.windowEnd = foundBtc.windowStart + inst.windowSecs;
+  fresh.windowEnd = foundBtc.windowStart + WINDOW_SECS;
   fresh.markets.BTC = btcSlot;
   fresh.markets.ETH = ethSlot;
   fresh.tradable = true;
   fresh.resolvedThisWindow = false;
 
-  Object.assign(inst, fresh);
-  log(`🔭 [${inst.key}] window loaded: BTC=${btcSlot.slug} ETH=${ethSlot.slug} | ends ${new Date(fresh.windowEnd * 1000).toISOString().slice(11, 19)}Z | trigger cutoff=${fresh.cutoffSecs}s`);
+  win = fresh;
+  log(`🔭 [15m] window loaded: BTC=${btcSlot.slug} ETH=${ethSlot.slug} | ends ${new Date(win.windowEnd * 1000).toISOString().slice(11, 19)}Z`);
 
-  if (carryArmedBoost) {
-    await fireBoostedCombo(inst, carryArmedBoost);
+  // Arm the full grid — a resting buy at every level of every ladder.
+  for (const def of LADDER_DEFS) {
+    const ladder = win.ladders[def.key];
+    for (const level of ladder.levels) {
+      await armEntry(ladder, ladder.slots[String(level)]);
+    }
   }
 }
 
 // ─────────────────────────────────────────
 //  Polymarket price feed
 // ─────────────────────────────────────────
-async function refreshInstancePrices(inst) {
-  if (!inst.tradable) return;
+async function refreshPrices() {
+  if (!win.tradable) return;
   const requests = [];
   for (const symbol of SYMBOLS) {
-    const m = inst.markets[symbol];
+    const m = win.markets[symbol];
     if (!m.upTokenId || !m.downTokenId) continue;
     requests.push({ token_id: m.upTokenId, side: 'BUY' }, { token_id: m.upTokenId, side: 'SELL' });
     requests.push({ token_id: m.downTokenId, side: 'BUY' }, { token_id: m.downTokenId, side: 'SELL' });
@@ -294,7 +344,7 @@ async function refreshInstancePrices(inst) {
   function apply(tid, side, price) {
     if (!Number.isFinite(price)) return;
     for (const symbol of SYMBOLS) {
-      const m = inst.markets[symbol];
+      const m = win.markets[symbol];
       if (tid === m.upTokenId) { if (side === 'BUY') m.upAsk = price; else m.upBid = price; return; }
       if (tid === m.downTokenId) { if (side === 'BUY') m.downAsk = price; else m.downBid = price; return; }
     }
@@ -321,7 +371,7 @@ async function refreshInstancePrices(inst) {
   } catch (e) {
     // Fallback: per-token price calls
     for (const symbol of SYMBOLS) {
-      const m = inst.markets[symbol];
+      const m = win.markets[symbol];
       if (!m.upTokenId || !m.downTokenId) continue;
       try {
         const [upAsk, upBid, downAsk, downBid] = await Promise.all([
@@ -330,241 +380,184 @@ async function refreshInstancePrices(inst) {
           getJSON(`${CLOB}/price?token_id=${m.downTokenId}&side=BUY`).catch(() => null),
           getJSON(`${CLOB}/price?token_id=${m.downTokenId}&side=SELL`).catch(() => null),
         ]);
-        if (upAsk) m.upAsk = parseFloat(upAsk.price || upAsk.mid || m.upAsk);
-        if (upBid) m.upBid = parseFloat(upBid.price || upBid.mid || m.upBid);
-        if (downAsk) m.downAsk = parseFloat(downAsk.price || downAsk.mid || m.downAsk);
-        if (downBid) m.downBid = parseFloat(downBid.price || downBid.mid || m.downBid);
+        if (upAsk?.price != null) m.upAsk = parseFloat(upAsk.price);
+        if (upBid?.price != null) m.upBid = parseFloat(upBid.price);
+        if (downAsk?.price != null) m.downAsk = parseFloat(downAsk.price);
+        if (downBid?.price != null) m.downBid = parseFloat(downBid.price);
       } catch (_) {}
     }
   }
 }
 
-// ─────────────────────────────────────────
-//  Real account data (live mode only) — actual wallet, not bot bookkeeping
-// ─────────────────────────────────────────
-function tradingWalletAddress() {
-  if (!trader) return null;
-  return trader.depositWallet || trader.address || null; // depositWallet is the actual funder/proxy wallet that holds funds+positions on Polymarket
+function tokenIdFor(ladder) {
+  const m = win.markets[ladder.symbol];
+  return ladder.side === 'Up' ? m.upTokenId : m.downTokenId;
 }
-async function refreshRealAccount() {
-  if (DRY_RUN || !trader) { realFetchError = null; return; } // no real account to show in demo mode
-  const address = tradingWalletAddress();
-  if (!address) { realFetchError = 'No wallet address resolved yet'; return; }
-  if (!trader.depositWallet && !warnedNoDepositWallet) {
-    // #1 cause of "bot can't find my position": if deposit wallet derivation
-    // failed during authenticate(), every lookup below silently queries the
-    // wrong (EOA) address instead of the actual Safe/proxy wallet Polymarket
-    // trades and holds positions through.
-    warnedNoDepositWallet = true;
-    log(`⚠️  WARNING: no depositWallet resolved — real account lookups are falling back to your EOA (${address}). If real positions/balance don't show up, THIS is almost certainly why — your actual funds/positions live at the deposit (proxy) wallet, not this address.`);
-  }
-  try {
-    const [balance, positions] = await Promise.all([
-      trader.getBalance().catch(e => { throw new Error(`balance: ${e.message}`); }),
-      getJSON(`${DATA_API}/positions?user=${address}&sizeThreshold=0`).catch(e => { throw new Error(`positions: ${e.message}`); }),
-    ]);
-    realBalance = balance;
-    realPositions = Array.isArray(positions) ? positions.filter(p => Math.abs(p.size) > 0) : [];
-    realLastUpdated = Date.now();
-    realFetchError = null;
-  } catch (e) {
-    realFetchError = e.message;
-    log(`⚠️  Real account refresh failed: ${e.message}`);
-  }
+function currentAsk(ladder) {
+  const m = win.markets[ladder.symbol];
+  return ladder.side === 'Up' ? m.upAsk : m.downAsk;
+}
+function currentBid(ladder) {
+  const m = win.markets[ladder.symbol];
+  return ladder.side === 'Up' ? m.upBid : m.downBid;
 }
 
 // ─────────────────────────────────────────
-//  Equity tracking
+//  Grid entry / TP management
 // ─────────────────────────────────────────
+function registerTrade(t) {
+  const trade = { time: new Date().toISOString().slice(11, 19), ...t };
+  trades.push(trade);
+  if (trades.length > 500) trades.shift();
+}
+function recordEquity() {
+  equityCurve.push({ t: Date.now(), equity: markValue() });
+  if (equityCurve.length > 1000) equityCurve.shift();
+}
 function markValue() {
   let held = 0;
-  for (const inst of instances) {
-    for (const comboKey of ['A', 'B']) {
-      const combo = inst.combos[comboKey];
-      for (const symbol of SYMBOLS) {
-        const pos = combo.positions[symbol];
-        if (!pos || pos.closed) continue;
-        const m = inst.markets[symbol];
-        const bid = pos.side === 'Up' ? m.upBid : m.downBid;
-        held += pos.shares * (bid ?? pos.entryPrice);
+  for (const def of LADDER_DEFS) {
+    const ladder = win.ladders[def.key];
+    for (const level of ladder.levels) {
+      const pos = ladder.slots[String(level)].position;
+      if (pos && !pos.closed) {
+        const bid = currentBid(ladder);
+        const px = bid != null ? bid : pos.entryPrice;
+        held += pos.shares * px;
       }
     }
   }
   return round2(bankroll + held);
 }
-function recordEquity() {
-  equityCurve.push({ t: Date.now(), equity: markValue() });
-  if (equityCurve.length > 500) equityCurve.shift();
-}
-function registerTrade(entry) {
-  trades.push({ time: new Date().toISOString().slice(11, 19), ...entry });
-  if (trades.length > 300) trades.shift();
+
+// Reserve check: don't arm an order we can't afford if it fills.
+function affordable(shares, price) {
+  return round2(shares * price) <= bankroll;
 }
 
-// ─────────────────────────────────────────
-//  Boosted entry — fired unconditionally at the very start of a window when
-//  the PREVIOUS window's decorrelation armed it. Skips the combined-ask
-//  threshold and cutoff timing entirely; buys both legs of the armed combo
-//  as marketable orders immediately, at BOOST_SHARES each. One-shot: sets
-//  combo.triggered so the normal threshold-based checkComboTrigger never
-//  double-fires this same combo later in the same window.
-// ─────────────────────────────────────────
-async function fireBoostedCombo(inst, comboKey) {
-  const combo = inst.combos[comboKey];
-  if (combo.triggered) return; // shouldn't happen on a freshly loaded window, but guard anyway
-  combo.triggered = true;
+async function armEntry(ladder, slot) {
+  if (!tradingEnabled) return;
+  if (slot.position) return;      // slot already holding a position
+  if (slot.entryPending) return;  // already resting
+  const tokenId = tokenIdFor(ladder);
+  if (!tokenId) return;
+  if (!affordable(ENTRY_SHARES, slot.level)) return; // skip silently — will retry next tick once bankroll frees up
 
-  // Prices haven't been polled yet for this brand-new window (that runs on
-  // its own timer) — fetch them now so the cost/fee estimate below is real,
-  // not a guess. The actual buy is still a market order regardless.
-  await refreshInstancePrices(inst);
+  const resp = await placeRestingBuy(tokenId, slot.level, ENTRY_SHARES);
+  if (!resp) return; // LIVE trader missing methods, or the call failed — already logged
+  slot.entryOrderId = resp.id;
+  slot.entryPending = true;
 
-  const legs = COMBO_LEGS[comboKey];
-  const priced = legs.map(leg => {
-    const m = inst.markets[leg.symbol];
-    const ask = (leg.side === 'Up' ? m.upAsk : m.downAsk) ?? 0.5; // fallback only if a quote genuinely isn't available yet
-    const tokenId = leg.side === 'Up' ? m.upTokenId : m.downTokenId;
-    const fee = takerFee(BOOST_SHARES, ask);
-    const cost = round2(ask * BOOST_SHARES + fee);
-    return { ...leg, ask, tokenId, fee, cost };
-  });
-  const totalCost = round2(priced.reduce((s, p) => s + p.cost, 0));
-  if (totalCost > bankroll) {
-    log(`⏭️  [${inst.key}] BOOSTED Combo ${comboKey} (${COMBO_LABEL[comboKey]}) armed but insufficient bankroll ($${totalCost.toFixed(2)} needed at ${BOOST_SHARES}sh/leg) — skipped this window`);
-    return;
+  if (resp.filled) {
+    // Immediately marketable — handle the fill right away.
+    await onEntryFilled(ladder, slot, resp.avgPrice || slot.level, resp.filledShares || ENTRY_SHARES);
   }
+}
 
-  log(`🔥 [${inst.key}] BOOSTED ENTRY — Combo ${comboKey} (${COMBO_LABEL[comboKey]}) firing unconditionally at window open (no threshold/cutoff gating), ${BOOST_SHARES}sh each leg`);
+async function onEntryFilled(ladder, slot, fillPrice, filledShares) {
+  const shares = filledShares > 0 ? filledShares : ENTRY_SHARES;
+  const cost = round2(shares * fillPrice);
+  const fee = makerFee(shares, fillPrice);
+  bankroll = round2(bankroll - cost);
+  feesPaid = round2(feesPaid + fee);
 
-  for (const leg of priced) {
-    const fill = await placeMarketableBuy(leg.tokenId, leg.ask, BOOST_SHARES);
-    if (!fill.filled) {
-      log(`❌ [${inst.key}] BOOSTED Combo ${comboKey} ${leg.symbol} ${leg.side} market order did not fill — leg skipped. NOTE: if the other leg already filled, this window may now be one-sided (unhedged) — check the dashboard.`);
-      continue;
+  const tpPrice = round2(slot.level + TP_OFFSET);
+  slot.entryPending = false;
+  slot.entryOrderId = null;
+  slot.reentries += 1;
+  slot.position = {
+    shares, entryPrice: fillPrice, cost, tpPrice,
+    tpOrderId: null, tpPending: false,
+    closed: false, won: null, closedReason: null,
+  };
+
+  registerTrade({ ladder: ladder.key, symbol: ladder.symbol, side: 'BUY', outcome: ladder.side, reason: 'ENTRY', price: fillPrice, shares, cost, fee, level: slot.level, reentry: slot.reentries });
+  log(`✅ [${ladder.key}] entry filled @ ${fillPrice.toFixed(2)} (level ${slot.level.toFixed(2)}) — ${shares}sh, TP armed @ ${tpPrice.toFixed(2)} (re-entry #${slot.reentries})`);
+
+  // Arm the TP immediately.
+  const tokenId = tokenIdFor(ladder);
+  const tpResp = await placeRestingSell(tokenId, tpPrice, shares);
+  if (tpResp) {
+    slot.position.tpOrderId = tpResp.id;
+    slot.position.tpPending = true;
+    if (tpResp.filled) {
+      await onTPFilled(ladder, slot, tpResp.avgPrice || tpPrice, tpResp.filledShares || shares);
     }
-    const actualShares = fill.shares > 0 ? fill.shares : BOOST_SHARES;
-    const actualCost = round2(actualShares * fill.avgPrice);
-    bankroll = round2(bankroll - actualCost);
-    feesPaid = round2(feesPaid + leg.fee);
-    const position = { shares: actualShares, entryPrice: fill.avgPrice, cost: actualCost, side: leg.side, closed: false, won: null, closedReason: null, boosted: true };
-    combo.positions[leg.symbol] = position;
-    registerTrade({ instance: inst.key, combo: comboKey, symbol: leg.symbol, side: 'BUY', outcome: leg.side, price: fill.avgPrice, shares: actualShares, cost: actualCost, fee: leg.fee, boosted: true });
-    log(`✅ [${inst.key}] BOOSTED Combo ${comboKey} ${leg.symbol} ${leg.side} filled ${actualShares}sh @ ${fill.avgPrice.toFixed(3)} — rides to resolution`);
   }
   recordEquity();
 }
 
-// ─────────────────────────────────────────
-//  Combo trigger + execution
-// ─────────────────────────────────────────
-function comboAskSum(inst, comboKey) {
-  const legs = COMBO_LEGS[comboKey];
-  let sum = 0;
-  for (const leg of legs) {
-    const m = inst.markets[leg.symbol];
-    const ask = leg.side === 'Up' ? m.upAsk : m.downAsk;
-    if (ask == null) return null;
-    sum += ask;
-  }
-  return sum;
+async function onTPFilled(ladder, slot, fillPrice, filledShares) {
+  const pos = slot.position;
+  if (!pos || pos.closed) return;
+  const shares = filledShares > 0 ? filledShares : pos.shares;
+  const proceeds = round2(shares * fillPrice);
+  const fee = makerFee(shares, fillPrice);
+  const profit = round2(proceeds - pos.cost - fee);
+
+  bankroll = round2(bankroll + proceeds);
+  realizedPnl = round2(realizedPnl + profit);
+  feesPaid = round2(feesPaid + fee);
+  wins++;
+  pos.closed = true;
+  pos.won = true;
+  pos.closedReason = 'TP';
+  pos.tpPending = false;
+
+  registerTrade({ ladder: ladder.key, symbol: ladder.symbol, side: 'SELL', outcome: ladder.side, reason: 'TP', price: fillPrice, shares, profit, level: slot.level });
+  log(`💰 [${ladder.key}] TP hit @ ${fillPrice.toFixed(2)} (level ${slot.level.toFixed(2)}) — pnl=$${profit.toFixed(2)} | bankroll=$${bankroll.toFixed(2)} — re-arming level`);
+
+  slot.position = null;
+  recordEquity();
+  await armEntry(ladder, slot); // re-enter — grid levels can refill many times per window
 }
 
-async function checkComboTrigger(inst, comboKey) {
-  const combo = inst.combos[comboKey];
-  if (combo.triggered) return;
-
-  const elapsed = nowSec() - inst.windowStart;
-  if (elapsed >= inst.cutoffSecs) return; // past cutoff — this combo just doesn't trade this window
-
-  const sum = comboAskSum(inst, comboKey);
-  if (sum == null || sum >= COMBO_THRESHOLD) return;
-
-  const shares = COMBO_SHARES; // normal triggers always use base size — boost is a separate, unconditional buy (see fireBoostedCombo)
-  const legs = COMBO_LEGS[comboKey];
-
-  // Price out both legs first, so we only commit if we can afford BOTH.
-  const priced = legs.map(leg => {
-    const m = inst.markets[leg.symbol];
-    const ask = leg.side === 'Up' ? m.upAsk : m.downAsk;
-    const tokenId = leg.side === 'Up' ? m.upTokenId : m.downTokenId;
-    const fee = takerFee(shares, ask);
-    const cost = round2(ask * shares + fee);
-    return { ...leg, ask, tokenId, fee, cost };
-  });
-  const totalCost = round2(priced.reduce((s, p) => s + p.cost, 0));
-  if (totalCost > bankroll) {
-    log(`⏭️  [${inst.key}] Combo ${comboKey} (${COMBO_LABEL[comboKey]}) triggered @ sum=${sum.toFixed(3)} but insufficient bankroll ($${totalCost.toFixed(2)} needed at ${shares}sh/leg), skipping`);
-    combo.triggered = true; // still one-shot — don't keep re-checking a combo we can't afford
-    return;
-  }
-
-  combo.triggered = true; // lock in before awaiting, so a concurrent tick can't double-fire
-
-  for (const leg of priced) {
-    const fill = await placeMarketableBuy(leg.tokenId, leg.ask, shares);
-    if (!fill.filled) {
-      log(`❌ [${inst.key}] Combo ${comboKey} ${leg.symbol} ${leg.side} market order did not fill — leg skipped. NOTE: if the other leg already filled, this window may now be one-sided (unhedged) — check the dashboard.`);
+// Tick a single ladder: DRY_RUN simulates fills purely from the live price
+// feed (ask crossing the entry level, bid crossing the TP level). LIVE
+// relies on real order fills detected via the polling loop below, but we
+// still opportunistically check here in case a resp came back filled=true
+// synchronously (handled in armEntry / onEntryFilled already).
+function tickLadderDryRun(ladder) {
+  const ask = currentAsk(ladder);
+  const bid = currentBid(ladder);
+  for (const level of ladder.levels) {
+    const slot = ladder.slots[String(level)];
+    const pos = slot.position;
+    if (pos && !pos.closed && pos.tpPending) {
+      if (bid != null && bid >= pos.tpPrice) {
+        onTPFilled(ladder, slot, pos.tpPrice, pos.shares).catch(e => log(`⚠️  TP fill error: ${e.message}`));
+      }
       continue;
     }
-    const actualShares = fill.shares > 0 ? fill.shares : shares;
-    const actualCost = round2(actualShares * fill.avgPrice);
-    bankroll = round2(bankroll - actualCost);
-    feesPaid = round2(feesPaid + leg.fee); // fee is an internal estimate for dashboard bookkeeping; the exchange applies its own fee inside the FOK fill
-    const position = { shares: actualShares, entryPrice: fill.avgPrice, cost: actualCost, side: leg.side, closed: false, won: null, closedReason: null };
-    combo.positions[leg.symbol] = position;
-    registerTrade({ instance: inst.key, combo: comboKey, symbol: leg.symbol, side: 'BUY', outcome: leg.side, price: fill.avgPrice, shares: actualShares, cost: actualCost, fee: leg.fee });
+    if (!pos && slot.entryPending && ask != null && ask <= level) {
+      onEntryFilled(ladder, slot, level, ENTRY_SHARES).catch(e => log(`⚠️  entry fill error: ${e.message}`));
+    }
   }
-  recordEquity();
-  log(`🔔 [${inst.key}] Combo ${comboKey} (${COMBO_LABEL[comboKey]}) TRIGGERED @ sum=${sum.toFixed(3)} (< ${COMBO_THRESHOLD}) — bought ${shares}sh each leg: BTC ${priced[0].side}@${priced[0].ask.toFixed(2)} / ETH ${priced[1].side}@${priced[1].ask.toFixed(2)} | total cost=$${totalCost.toFixed(2)} | no exit management — rides to resolution`);
 }
 
 // ─────────────────────────────────────────
-//  Decorrelation boost — judged purely by the LIVE MARKET PRICE of both legs
-//  in the last seconds before the window closes, not by our own win/loss
-//  outcome or resolution. If both held sides are trending toward the SAME
-//  end (both near $0.00, or both near $1.00) instead of the expected split
-//  (one near $1, one near $0), that's decorrelation — e.g. combo bought
-//  BTC-Up + ETH-Down, and in the last second BOTH are sitting around 0.01:
-//  both are about to lose, meaning BTC and ETH actually moved the SAME
-//  direction as each other rather than diverging the way the combo bet.
-//  Checked once per combo per window, right before resolution begins, using
-//  whatever the freshest polled price is at that moment — completely
-//  independent of whether either leg already TP'd or how it later resolves.
+//  LIVE order-fill polling
 // ─────────────────────────────────────────
-const DECORRELATION_PRICE_THRESHOLD = Number(process.env.DECORRELATION_PRICE_THRESHOLD || 0.05);
-
-function checkComboDecorrelationByPrice(inst, comboKey) {
-  const combo = inst.combos[comboKey];
-  if (!combo.triggered || combo.decorrelationChecked) return; // only classify combos that actually fired this window, once each
-  combo.decorrelationChecked = true;
-
-  const legs = COMBO_LEGS[comboKey];
-  const prices = legs.map(leg => {
-    const m = inst.markets[leg.symbol];
-    const bid = leg.side === 'Up' ? m.upBid : m.downBid;
-    const ask = leg.side === 'Up' ? m.upAsk : m.downAsk;
-    return bid ?? ask ?? null; // prefer bid (realizable value); fall back to ask if bid is missing
-  });
-  if (prices.some(p => p == null)) {
-    log(`⚠️  [${inst.key}] Combo ${comboKey} could not classify decorrelation — missing last-second price data`);
-    return;
-  }
-
-  const [p1, p2] = prices;
-  const bothNearZero = p1 <= DECORRELATION_PRICE_THRESHOLD && p2 <= DECORRELATION_PRICE_THRESHOLD;
-  const bothNearOne  = p1 >= (1 - DECORRELATION_PRICE_THRESHOLD) && p2 >= (1 - DECORRELATION_PRICE_THRESHOLD);
-  const tag = `${legs[0].symbol}-${legs[0].side}=${p1.toFixed(3)} & ${legs[1].symbol}-${legs[1].side}=${p2.toFixed(3)}`;
-
-  if (bothNearZero || bothNearOne) {
-    // bothNearOne means THIS combo's own pairing was realized (both legs won).
-    // bothNearZero means the OPPOSITE pairing was realized (both legs lost —
-    // e.g. Combo A's BTC-Up+ETH-Down both losing means BTC actually went
-    // down and ETH actually went up, which is exactly Combo B's pairing).
-    const realizedCombo = bothNearOne ? comboKey : (comboKey === 'A' ? 'B' : 'A');
-    inst.armedBoostCombo = realizedCombo; // overwrites any previous arm — always the freshest signal
-    log(`⚡ [${inst.key}] Combo ${comboKey} DECORRELATED — last-second prices ${tag}, both trending toward ${bothNearZero ? '0 (both about to lose)' : '1 (both about to win)'} — realized pairing was Combo ${realizedCombo} (${COMBO_LABEL[realizedCombo]}) — arming ${BOOST_SHARES}sh unconditional buy at next window's open`);
-  } else {
-    log(`↔️  [${inst.key}] Combo ${comboKey} split as expected — last-second prices ${tag} — no boost armed`);
+async function pollLiveOrders() {
+  if (DRY_RUN || !trader || typeof trader.getOrder !== 'function') return;
+  for (const def of LADDER_DEFS) {
+    const ladder = win.ladders[def.key];
+    for (const level of ladder.levels) {
+      const slot = ladder.slots[String(level)];
+      if (slot.entryPending && slot.entryOrderId) {
+        try {
+          const st = await trader.getOrder(slot.entryOrderId);
+          if (st && st.filled) await onEntryFilled(ladder, slot, st.avgPrice || level, st.filledShares || ENTRY_SHARES);
+        } catch (e) { log(`⚠️  getOrder (entry) failed: ${describeOrderError(e)}`); }
+      }
+      const pos = slot.position;
+      if (pos && !pos.closed && pos.tpPending && pos.tpOrderId) {
+        try {
+          const st = await trader.getOrder(pos.tpOrderId);
+          if (st && st.filled) await onTPFilled(ladder, slot, st.avgPrice || pos.tpPrice, st.filledShares || pos.shares);
+        } catch (e) { log(`⚠️  getOrder (tp) failed: ${describeOrderError(e)}`); }
+      }
+    }
   }
 }
 
@@ -588,20 +581,44 @@ async function determineWinningSide(slug, conditionId, fallbackUpBid, fallbackDo
   return null;
 }
 
-async function resolveInstanceWindow(inst) {
-  if (inst.resolvedThisWindow) return;
-  inst.resolvedThisWindow = true;
+async function resolveWindow() {
+  if (win.resolvedThisWindow) return;
+  win.resolvedThisWindow = true;
 
+  const winners = {}; // symbol -> 'Up' | 'Down' | null
   for (const symbol of SYMBOLS) {
-    const m = inst.markets[symbol];
-    const anyOpen = ['A', 'B'].some(k => { const p = inst.combos[k].positions[symbol]; return p && !p.closed; });
-    if (!anyOpen) continue;
-    const winner = await determineWinningSide(m.slug, m.conditionId, m.upBid, m.downBid);
+    const m = win.markets[symbol];
+    const anyOpenOrPending = LADDER_DEFS.filter(d => d.symbol === symbol).some(d => {
+      const ladder = win.ladders[d.key];
+      return ladder.levels.some(l => {
+        const slot = ladder.slots[String(l)];
+        return slot.entryPending || (slot.position && !slot.position.closed);
+      });
+    });
+    if (!anyOpenOrPending) continue;
+    winners[symbol] = await determineWinningSide(m.slug, m.conditionId, m.upBid, m.downBid);
+  }
 
-    for (const comboKey of ['A', 'B']) {
-      const pos = inst.combos[comboKey].positions[symbol];
+  for (const def of LADDER_DEFS) {
+    const ladder = win.ladders[def.key];
+    const winner = winners[def.symbol];
+    for (const level of ladder.levels) {
+      const slot = ladder.slots[String(level)];
+
+      // Cancel any still-resting entry order — window's over, no new fills wanted.
+      if (slot.entryPending) {
+        await cancelRestingOrder(slot.entryOrderId);
+        slot.entryPending = false;
+        slot.entryOrderId = null;
+      }
+
+      const pos = slot.position;
       if (!pos || pos.closed) continue;
-      const won = winner === pos.side;
+
+      // Cancel the resting TP too — real settlement will pay out directly.
+      if (pos.tpPending) await cancelRestingOrder(pos.tpOrderId);
+
+      const won = winner === ladder.side;
       const proceeds = won ? round2(pos.shares * 1) : 0;
       const profit = round2(proceeds - pos.cost);
       bankroll = round2(bankroll + proceeds);
@@ -611,8 +628,8 @@ async function resolveInstanceWindow(inst) {
       pos.won = won;
       pos.closedReason = 'RESOLUTION';
       const icon = won ? '💰' : '💥';
-      log(`${icon} [${inst.key}] Combo ${comboKey} ${symbol} ${pos.side} RESOLUTION ${pos.shares}sh entry=${pos.entryPrice.toFixed(2)} exit=$${won ? '1.00' : '0.00'}/sh | pnl=$${profit.toFixed(2)} | bankroll=$${bankroll.toFixed(2)} (dashboard bookkeeping only — real redemption is via the separate claim script)`);
-      registerTrade({ instance: inst.key, combo: comboKey, symbol, side: 'SELL', outcome: pos.side, reason: 'RESOLUTION', price: won ? 1 : 0, shares: pos.shares, profit });
+      log(`${icon} [${ladder.key}] level ${level.toFixed(2)} RESOLUTION ${pos.shares}sh entry=${pos.entryPrice.toFixed(2)} exit=$${won ? '1.00' : '0.00'}/sh | pnl=$${profit.toFixed(2)} | bankroll=$${bankroll.toFixed(2)} (dashboard bookkeeping only — real redemption is via the separate claim script)`);
+      registerTrade({ ladder: ladder.key, symbol: ladder.symbol, side: 'SELL', outcome: ladder.side, reason: 'RESOLUTION', price: won ? 1 : 0, shares: pos.shares, profit, level });
     }
   }
   recordEquity();
@@ -621,81 +638,123 @@ async function resolveInstanceWindow(inst) {
 // ─────────────────────────────────────────
 //  Main tick
 // ─────────────────────────────────────────
-async function instanceTick(inst) {
-  const ws = currentWindowStart(inst.windowSecs);
-  if (inst.windowStart === null || ws !== inst.windowStart) {
-    if (inst.windowStart !== null && !inst.resolvedThisWindow) await resolveInstanceWindow(inst);
-    await loadInstanceWindow(inst);
+async function tick() {
+  const ws = currentWindowStart(WINDOW_SECS);
+  if (win.windowStart === null || ws !== win.windowStart) {
+    if (win.windowStart !== null && !win.resolvedThisWindow) await resolveWindow();
+    await loadWindow();
   }
-  if (!inst.tradable) return;
+  if (!win.tradable) return;
 
-  const elapsed = nowSec() - inst.windowStart;
-  if (elapsed >= inst.windowSecs - EARLY_CUTOFF_SECS && !inst.resolvedThisWindow) {
-    // Classify decorrelation using whatever the freshest polled price is
-    // right now — this is "the last second" before we hand off to
-    // resolution, and is independent of how resolution itself turns out.
-    checkComboDecorrelationByPrice(inst, 'A');
-    checkComboDecorrelationByPrice(inst, 'B');
-    await resolveInstanceWindow(inst);
+  const elapsed = nowSec() - win.windowStart;
+  if (elapsed >= WINDOW_SECS - EARLY_CUTOFF_SECS && !win.resolvedThisWindow) {
+    await resolveWindow();
   }
-  if (inst.resolvedThisWindow) return;
-  if (!tradingEnabled) return; // pause only blocks NEW entries, not exit management
+  if (win.resolvedThisWindow) return;
 
-  await checkComboTrigger(inst, 'A');
-  await checkComboTrigger(inst, 'B');
+  if (DRY_RUN) {
+    for (const def of LADDER_DEFS) tickLadderDryRun(win.ladders[def.key]);
+  }
+  // In LIVE mode fills are detected via pollLiveOrders() in mainLoop.
+
+  if (!tradingEnabled) return; // pause only blocks NEW arm attempts, not exit/TP management
+  for (const def of LADDER_DEFS) {
+    const ladder = win.ladders[def.key];
+    for (const level of ladder.levels) {
+      await armEntry(ladder, ladder.slots[String(level)]);
+    }
+  }
 }
 
-async function tick() {
-  for (const inst of instances) await instanceTick(inst);
+// ─────────────────────────────────────────
+//  Real account state (live mode)
+// ─────────────────────────────────────────
+function tradingWalletAddress() {
+  try { return trader?.getAddress ? trader.getAddress() : (trader?.address || null); } catch (_) { return null; }
+}
+
+async function refreshRealAccount() {
+  if (DRY_RUN) { realBalance = null; realPositions = []; realFetchError = null; return; }
+  const wallet = tradingWalletAddress();
+  if (!wallet) { realFetchError = 'No trading wallet address available yet'; return; }
+  try {
+    const [balResp, posResp] = await Promise.all([
+      getJSON(`${DATA_API}/balance?address=${wallet}`).catch(() => null),
+      getJSON(`${DATA_API}/positions?user=${wallet}`).catch(() => []),
+    ]);
+    if (balResp && balResp.balance != null) realBalance = parseFloat(balResp.balance);
+    if (Array.isArray(posResp)) {
+      realPositions = posResp.map(p => ({
+        title: p.title || p.slug, outcome: p.outcome, size: parseFloat(p.size || 0),
+        avgPrice: p.avgPrice != null ? parseFloat(p.avgPrice) : null,
+        curPrice: p.curPrice != null ? parseFloat(p.curPrice) : null,
+        currentValue: p.currentValue != null ? parseFloat(p.currentValue) : null,
+        cashPnl: p.cashPnl != null ? parseFloat(p.cashPnl) : null,
+      }));
+    }
+    realFetchError = null;
+    realLastUpdated = Date.now();
+  } catch (e) {
+    realFetchError = e.message;
+  }
 }
 
 // ─────────────────────────────────────────
 //  UI state
 // ─────────────────────────────────────────
-function buildInstanceState(inst) {
-  const secsToEnd = inst.windowEnd ? Math.max(0, Math.floor(inst.windowEnd - nowSec())) : null;
-  const secsToCutoff = inst.windowStart != null ? Math.max(0, Math.floor((inst.windowStart + inst.cutoffSecs) - nowSec())) : null;
+function buildLadderState(ladder) {
   return {
-    key: inst.key, windowSecs: inst.windowSecs, cutoffSecs: inst.cutoffSecs,
-    tradable: inst.tradable, windowEnd: inst.windowEnd, secsToEnd, secsToCutoff,
-    sharesThisWindow: inst.sharesThisWindow, armedBoostCombo: inst.armedBoostCombo,
-    markets: {
-      BTC: { slug: inst.markets.BTC.slug, upAsk: inst.markets.BTC.upAsk, upBid: inst.markets.BTC.upBid, downAsk: inst.markets.BTC.downAsk, downBid: inst.markets.BTC.downBid },
-      ETH: { slug: inst.markets.ETH.slug, upAsk: inst.markets.ETH.upAsk, upBid: inst.markets.ETH.upBid, downAsk: inst.markets.ETH.downAsk, downBid: inst.markets.ETH.downBid },
-    },
-    combos: {
-      A: { label: COMBO_LABEL.A, triggered: inst.combos.A.triggered, sum: comboAskSum(inst, 'A'), positions: inst.combos.A.positions },
-      B: { label: COMBO_LABEL.B, triggered: inst.combos.B.triggered, sum: comboAskSum(inst, 'B'), positions: inst.combos.B.positions },
-    },
+    key: ladder.key, symbol: ladder.symbol, side: ladder.side, min: ladder.min, max: ladder.max,
+    ask: currentAsk(ladder), bid: currentBid(ladder),
+    levels: ladder.levels.map(level => {
+      const slot = ladder.slots[String(level)];
+      const pos = slot.position;
+      return {
+        level,
+        entryPending: slot.entryPending,
+        reentries: slot.reentries,
+        position: pos ? {
+          shares: pos.shares, entryPrice: pos.entryPrice, cost: pos.cost,
+          tpPrice: pos.tpPrice, tpPending: pos.tpPending, closed: pos.closed,
+        } : null,
+      };
+    }),
   };
 }
 
 function buildState() {
   const mv = markValue();
   let costBasis = 0;
-  for (const inst of instances) {
-    for (const comboKey of ['A', 'B']) {
-      for (const symbol of SYMBOLS) {
-        const pos = inst.combos[comboKey].positions[symbol];
-        if (pos && !pos.closed) costBasis += pos.cost;
-      }
+  for (const def of LADDER_DEFS) {
+    const ladder = win.ladders[def.key];
+    for (const level of ladder.levels) {
+      const pos = ladder.slots[String(level)].position;
+      if (pos && !pos.closed) costBasis += pos.cost;
     }
   }
   costBasis = round2(costBasis);
   const held = round2(mv - bankroll);
   const unrealizedPnl = round2(held - costBasis);
+
+  const secsToEnd = win.windowEnd ? Math.max(0, Math.floor(win.windowEnd - nowSec())) : null;
+
   return {
     dryRun: DRY_RUN, tradingEnabled, symbols: SYMBOLS,
-    instances: instances.map(buildInstanceState),
+    windowSecs: WINDOW_SECS, tradable: win.tradable, windowEnd: win.windowEnd, secsToEnd,
+    markets: {
+      BTC: { slug: win.markets.BTC.slug, upAsk: win.markets.BTC.upAsk, upBid: win.markets.BTC.upBid, downAsk: win.markets.BTC.downAsk, downBid: win.markets.BTC.downBid },
+      ETH: { slug: win.markets.ETH.slug, upAsk: win.markets.ETH.upAsk, upBid: win.markets.ETH.upBid, downAsk: win.markets.ETH.downAsk, downBid: win.markets.ETH.downBid },
+    },
+    ladders: LADDER_DEFS.map(d => buildLadderState(win.ladders[d.key])),
     totalCapital: TOTAL_CAPITAL, bankroll, markValue: mv,
     realizedPnl, unrealizedPnl, feesPaid, wins, losses,
     totalPnl: round2(mv - TOTAL_CAPITAL),
     winRate: (wins + losses) > 0 ? round2((wins / (wins + losses)) * 100) : null,
     uptime: Math.floor((Date.now() - startTime) / 1000),
     config: {
-      comboThreshold: COMBO_THRESHOLD, comboTriggerFraction: COMBO_TRIGGER_FRACTION, comboShares: COMBO_SHARES,
-      boostShares: BOOST_SHARES,
-      cryptoTakerFeeRate: CRYPTO_TAKER_FEE_RATE,
+      gridStep: GRID_STEP, tpOffset: TP_OFFSET, entryShares: ENTRY_SHARES,
+      makerFeeRate: MAKER_FEE_RATE,
+      upRange: [0.30, 0.90], downRange: [0.25, 0.85],
     },
     equityCurve, logs: logs.slice(-100), trades: trades.slice(-80).reverse(),
     real: {
@@ -713,17 +772,21 @@ let loopRunning = false;
 async function mainLoop() {
   if (loopRunning) return;
   loopRunning = true;
-  let lastPolyPriceFetch = 0, lastRealAccountFetch = 0;
+  let lastPolyPriceFetch = 0, lastRealAccountFetch = 0, lastOrderPoll = 0;
   while (true) {
     try {
       const now = Date.now();
       if (now - lastPolyPriceFetch >= POLY_PRICE_REFRESH_MS) {
         lastPolyPriceFetch = now;
-        await Promise.all(instances.map(refreshInstancePrices));
+        await refreshPrices();
       }
       if (now - lastRealAccountFetch >= REAL_ACCOUNT_REFRESH_MS) {
         lastRealAccountFetch = now;
         await refreshRealAccount();
+      }
+      if (!DRY_RUN && now - lastOrderPoll >= ORDER_POLL_MS) {
+        lastOrderPoll = now;
+        await pollLiveOrders();
       }
       await tick();
       emitFn('state', buildState());
@@ -733,10 +796,10 @@ async function mainLoop() {
 }
 
 function setPairs(_list) {
-  // This bot always trades BTC+ETH combos on 5m and 15m — retained as a no-op for API compatibility with the dashboard.
-  return { ok: true, symbols: SYMBOLS, instances: INSTANCE_DEFS.map(d => d.key) };
+  // This bot always trades BTC+ETH grid ladders on the 15m window — retained as a no-op for API compatibility with the dashboard.
+  return { ok: true, symbols: SYMBOLS, ladders: LADDER_DEFS.map(d => d.key) };
 }
-function pauseTrading() { tradingEnabled = false; log('⏸️  Trading paused (existing positions still tracked for resolution bookkeeping)'); return { ok: true }; }
+function pauseTrading() { tradingEnabled = false; log('⏸️  Trading paused (open positions/TPs still managed; no new grid entries armed)'); return { ok: true }; }
 function resumeTrading() { tradingEnabled = true; log('▶️  Trading resumed'); return { ok: true }; }
 function getStatus() { return { ok: true, ...buildState() }; }
 
@@ -744,7 +807,7 @@ function setMode(wantLive) {
   const was = DRY_RUN;
   DRY_RUN = !wantLive;
   if (was !== DRY_RUN) {
-    log(DRY_RUN ? '🟡 Switched to DEMO mode (simulated fills)' : '🔴 Switched to LIVE mode — real money, real orders');
+    log(DRY_RUN ? '🟡 Switched to DEMO mode (simulated fills)' : '🔴 Switched to LIVE mode — real money, real resting orders');
     if (!DRY_RUN) refreshRealAccount().catch(() => {}); // don't make the dashboard wait up to 5s to see real balance
   }
   return { ok: true, dryRun: DRY_RUN };
@@ -753,12 +816,11 @@ function setMode(wantLive) {
 async function init(privateKey, emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
-  log(`🚀 Cross-Pair Combo Bot — BTC/ETH Up/Down, 5m + 15m instances`);
-  log(`⚙️  $${TOTAL_CAPITAL} capital (shared across both instances)`);
-  log(`⚙️  Combo A = BTC-Up + ETH-Down | Combo B = BTC-Down + ETH-Up | trigger: combined ask < ${COMBO_THRESHOLD} before ${Math.round(COMBO_TRIGGER_FRACTION * 100)}% of window elapses`);
-  log(`⚙️  Sizing: base ${COMBO_SHARES}sh/leg | on decorrelation (last-second price shows a combo's both legs trending the same way) → the OPPOSITE realized pairing buys unconditionally at ${BOOST_SHARES}sh/leg the instant the next window opens, one-shot, then back to base | tracked independently per instance (5m/15m don't share the arm)`);
-  log(`⚙️  5m instance: cutoff @ ${INSTANCE_DEFS[0].windowSecs * COMBO_TRIGGER_FRACTION}s | 15m instance: cutoff @ ${INSTANCE_DEFS[1].windowSecs * COMBO_TRIGGER_FRACTION}s`);
-  log(`⚙️  Execution: marketable buy both legs @ current ask, base ${COMBO_SHARES}sh (boosted ${BOOST_SHARES}sh) each, once per combo per window | no exit management — every position rides to resolution`);
+  log('🚀 Grid-Ladder Bot — BTC/ETH Up/Down, 15-minute windows only');
+  log(`⚙️  $${TOTAL_CAPITAL} capital (shared across all 4 ladders)`);
+  log('⚙️  Ladders: BTC-Up [0.30-0.90] | BTC-Down [0.25-0.85] | ETH-Up [0.30-0.90] | ETH-Down [0.25-0.85] — fully independent');
+  log(`⚙️  Grid: entry every ${GRID_STEP.toFixed(2)} across each range, TP = entry + ${TP_OFFSET.toFixed(2)}, no SL — unfilled TPs ride to resolution`);
+  log(`⚙️  Sizing: fixed ${ENTRY_SHARES}sh per entry | resting limit orders (maker) | levels re-arm immediately after a TP fills — unlimited re-entries per window`);
   log(`${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
   trader = new PolymarketTrader(privateKey);
