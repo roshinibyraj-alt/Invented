@@ -73,24 +73,14 @@ const COMBO_THRESHOLD        = Number(process.env.COMBO_THRESHOLD || 0.80);
 const COMBO_TRIGGER_FRACTION = Number(process.env.COMBO_TRIGGER_FRACTION || 0.70); // cutoff as fraction of window length
 const COMBO_SHARES           = Number(process.env.COMBO_SHARES || 10); // per leg, base size, both timeframes
 
-// ── Decorrelation follow-through boost: at the last-second check before
-// resolution, classify a fired combo by its legs' live prices. Both legs
-// trending to ~1 (both about to win) means the REALIZED pairing matches this
-// SAME combo. Both legs trending to ~0 (both about to lose) means the
-// REALIZED pairing was actually the OPPOSITE combo. Whichever matches gets
-// queued and bought unconditionally — both legs, DECORRELATION_BOOST_SHARES
-// each, no threshold check — the instant the NEXT window opens. One-shot,
-// then clears. Tracked independently per instance (5m vs 15m). ──
-const DECORRELATION_BOOST_SHARES = Number(process.env.DECORRELATION_BOOST_SHARES || 50); // per leg, one-shot follow-through buy
+// ── Decorrelation boost: on detecting a decorrelation (see
+// checkComboDecorrelationByPrice below), the OPPOSITE realized pairing gets
+// bought unconditionally — no threshold, no cutoff gating — the instant the
+// next window opens, at BOOST_SHARES per leg. One-shot, single window only,
+// then normal threshold-gated trading resumes at base COMBO_SHARES sizing.
+const BOOST_SHARES = Number(process.env.BOOST_SHARES || 50);
 
 const CRYPTO_TAKER_FEE_RATE = Number(process.env.CRYPTO_TAKER_FEE_RATE || 0.07);
-
-// ── Take-profit: each leg gets its own resting TP order at TP_MULTIPLIER
-// of its own entry price, capped at TP_MAX_PRICE (binary shares can't
-// realistically rest above this). Live mode places a real GTC sell order;
-// demo mode simulates the same exit by watching the live bid feed. ──
-const TP_MULTIPLIER = Number(process.env.TP_MULTIPLIER || 1.60);
-const TP_MAX_PRICE  = Number(process.env.TP_MAX_PRICE || 0.99);
 
 let emitFn = () => {};
 let slog = () => {};
@@ -199,7 +189,8 @@ function freshInstanceState(def) {
     resolvedThisWindow: true,
     markets: { BTC: freshMarketSlot(), ETH: freshMarketSlot() },
     combos: { A: freshComboSlot(), B: freshComboSlot() },
-    pendingBoostCombo: null, // 'A' | 'B' | null — set by decorrelation check, consumed once at the next window's open. Survives across freshInstanceState resets — see loadInstanceWindow.
+    sharesThisWindow: COMBO_SHARES, // always base now — boost is a separate unconditional buy, not a size modifier on normal triggers
+    armedBoostCombo: null, // 'A' | 'B' | null — survives across freshInstanceState resets, see loadInstanceWindow
   };
 }
 
@@ -268,7 +259,7 @@ async function loadInstanceWindow(inst) {
   const ethSlot = slotFrom(foundEth);
   if (!btcSlot || !ethSlot) { log(`⚠️  [${inst.key}] window loaded but Up/Down token ids missing`); inst.tradable = false; return; }
 
-  const carryPendingBoostCombo = inst.pendingBoostCombo || null; // must survive the freshInstanceState() reset below
+  const carryArmedBoost = inst.armedBoostCombo || null; // must survive the freshInstanceState() reset below
 
   const fresh = freshInstanceState(INSTANCE_DEFS.find(d => d.key === inst.key));
   fresh.windowStart = foundBtc.windowStart;
@@ -277,13 +268,13 @@ async function loadInstanceWindow(inst) {
   fresh.markets.ETH = ethSlot;
   fresh.tradable = true;
   fresh.resolvedThisWindow = false;
-  fresh.pendingBoostCombo = carryPendingBoostCombo; // consumed by fireForcedBoostIfPending() once prices are available this window
 
   Object.assign(inst, fresh);
-  const sizingNote = carryPendingBoostCombo
-    ? ` | ⚡ decorrelation follow-through queued: Combo ${carryPendingBoostCombo} will be bought unconditionally @ ${DECORRELATION_BOOST_SHARES}sh/leg as soon as prices load`
-    : ` | sizing this window: ${COMBO_SHARES}sh/leg (base)`;
-  log(`🔭 [${inst.key}] window loaded: BTC=${btcSlot.slug} ETH=${ethSlot.slug} | ends ${new Date(fresh.windowEnd * 1000).toISOString().slice(11, 19)}Z | trigger cutoff=${fresh.cutoffSecs}s${sizingNote}`);
+  log(`🔭 [${inst.key}] window loaded: BTC=${btcSlot.slug} ETH=${ethSlot.slug} | ends ${new Date(fresh.windowEnd * 1000).toISOString().slice(11, 19)}Z | trigger cutoff=${fresh.cutoffSecs}s`);
+
+  if (carryArmedBoost) {
+    await fireBoostedCombo(inst, carryArmedBoost);
+  }
 }
 
 // ─────────────────────────────────────────
@@ -411,6 +402,59 @@ function registerTrade(entry) {
 }
 
 // ─────────────────────────────────────────
+//  Boosted entry — fired unconditionally at the very start of a window when
+//  the PREVIOUS window's decorrelation armed it. Skips the combined-ask
+//  threshold and cutoff timing entirely; buys both legs of the armed combo
+//  as marketable orders immediately, at BOOST_SHARES each. One-shot: sets
+//  combo.triggered so the normal threshold-based checkComboTrigger never
+//  double-fires this same combo later in the same window.
+// ─────────────────────────────────────────
+async function fireBoostedCombo(inst, comboKey) {
+  const combo = inst.combos[comboKey];
+  if (combo.triggered) return; // shouldn't happen on a freshly loaded window, but guard anyway
+  combo.triggered = true;
+
+  // Prices haven't been polled yet for this brand-new window (that runs on
+  // its own timer) — fetch them now so the cost/fee estimate below is real,
+  // not a guess. The actual buy is still a market order regardless.
+  await refreshInstancePrices(inst);
+
+  const legs = COMBO_LEGS[comboKey];
+  const priced = legs.map(leg => {
+    const m = inst.markets[leg.symbol];
+    const ask = (leg.side === 'Up' ? m.upAsk : m.downAsk) ?? 0.5; // fallback only if a quote genuinely isn't available yet
+    const tokenId = leg.side === 'Up' ? m.upTokenId : m.downTokenId;
+    const fee = takerFee(BOOST_SHARES, ask);
+    const cost = round2(ask * BOOST_SHARES + fee);
+    return { ...leg, ask, tokenId, fee, cost };
+  });
+  const totalCost = round2(priced.reduce((s, p) => s + p.cost, 0));
+  if (totalCost > bankroll) {
+    log(`⏭️  [${inst.key}] BOOSTED Combo ${comboKey} (${COMBO_LABEL[comboKey]}) armed but insufficient bankroll ($${totalCost.toFixed(2)} needed at ${BOOST_SHARES}sh/leg) — skipped this window`);
+    return;
+  }
+
+  log(`🔥 [${inst.key}] BOOSTED ENTRY — Combo ${comboKey} (${COMBO_LABEL[comboKey]}) firing unconditionally at window open (no threshold/cutoff gating), ${BOOST_SHARES}sh each leg`);
+
+  for (const leg of priced) {
+    const fill = await placeMarketableBuy(leg.tokenId, leg.ask, BOOST_SHARES);
+    if (!fill.filled) {
+      log(`❌ [${inst.key}] BOOSTED Combo ${comboKey} ${leg.symbol} ${leg.side} market order did not fill — leg skipped. NOTE: if the other leg already filled, this window may now be one-sided (unhedged) — check the dashboard.`);
+      continue;
+    }
+    const actualShares = fill.shares > 0 ? fill.shares : BOOST_SHARES;
+    const actualCost = round2(actualShares * fill.avgPrice);
+    bankroll = round2(bankroll - actualCost);
+    feesPaid = round2(feesPaid + leg.fee);
+    const position = { shares: actualShares, entryPrice: fill.avgPrice, cost: actualCost, side: leg.side, closed: false, won: null, closedReason: null, boosted: true };
+    combo.positions[leg.symbol] = position;
+    registerTrade({ instance: inst.key, combo: comboKey, symbol: leg.symbol, side: 'BUY', outcome: leg.side, price: fill.avgPrice, shares: actualShares, cost: actualCost, fee: leg.fee, boosted: true });
+    log(`✅ [${inst.key}] BOOSTED Combo ${comboKey} ${leg.symbol} ${leg.side} filled ${actualShares}sh @ ${fill.avgPrice.toFixed(3)} — rides to resolution`);
+  }
+  recordEquity();
+}
+
+// ─────────────────────────────────────────
 //  Combo trigger + execution
 // ─────────────────────────────────────────
 function comboAskSum(inst, comboKey) {
@@ -435,7 +479,7 @@ async function checkComboTrigger(inst, comboKey) {
   const sum = comboAskSum(inst, comboKey);
   if (sum == null || sum >= COMBO_THRESHOLD) return;
 
-  const shares = COMBO_SHARES; // base sizing — the decorrelation boost is a separate, unconditional buy handled by fireForcedBoostIfPending
+  const shares = COMBO_SHARES; // normal triggers always use base size — boost is a separate, unconditional buy (see fireBoostedCombo)
   const legs = COMBO_LEGS[comboKey];
 
   // Price out both legs first, so we only commit if we can afford BOTH.
@@ -466,29 +510,16 @@ async function checkComboTrigger(inst, comboKey) {
     const actualCost = round2(actualShares * fill.avgPrice);
     bankroll = round2(bankroll - actualCost);
     feesPaid = round2(feesPaid + leg.fee); // fee is an internal estimate for dashboard bookkeeping; the exchange applies its own fee inside the FOK fill
-    const tpPrice = Math.min(TP_MAX_PRICE, round2(fill.avgPrice * TP_MULTIPLIER));
-    const position = { shares: actualShares, entryPrice: fill.avgPrice, cost: actualCost, side: leg.side, closed: false, won: null, tpPrice, tpOrderId: null, tpFilled: false, closedReason: null };
+    const position = { shares: actualShares, entryPrice: fill.avgPrice, cost: actualCost, side: leg.side, closed: false, won: null, closedReason: null };
     combo.positions[leg.symbol] = position;
     registerTrade({ instance: inst.key, combo: comboKey, symbol: leg.symbol, side: 'BUY', outcome: leg.side, price: fill.avgPrice, shares: actualShares, cost: actualCost, fee: leg.fee });
-
-    if (!DRY_RUN && trader) {
-      try {
-        const gtc = await trader.placeGtcOrder(leg.tokenId, 'SELL', tpPrice, actualShares);
-        position.tpOrderId = gtc.id;
-        log(`🎯 [${inst.key}] Combo ${comboKey} ${leg.symbol} TP order placed: SELL ${actualShares}sh @ ${tpPrice.toFixed(3)} (${Math.round(TP_MULTIPLIER * 100)}% of entry ${fill.avgPrice.toFixed(3)})`);
-      } catch (e) {
-        log(`⚠️  [${inst.key}] Combo ${comboKey} ${leg.symbol} failed to place TP order (position still held, will resolve normally if TP never gets placed): ${describeOrderError(e)}`);
-      }
-    } else {
-      log(`🎯 [${inst.key}] Combo ${comboKey} ${leg.symbol} TP target set (demo, simulated against live bid): ${tpPrice.toFixed(3)} (${Math.round(TP_MULTIPLIER * 100)}% of entry ${fill.avgPrice.toFixed(3)})`);
-    }
   }
   recordEquity();
-  log(`🔔 [${inst.key}] Combo ${comboKey} (${COMBO_LABEL[comboKey]}) TRIGGERED @ sum=${sum.toFixed(3)} (< ${COMBO_THRESHOLD}) — bought ${shares}sh each leg: BTC ${priced[0].side}@${priced[0].ask.toFixed(2)} / ETH ${priced[1].side}@${priced[1].ask.toFixed(2)} | total cost=$${totalCost.toFixed(2)} | TP set per-leg @ ${Math.round(TP_MULTIPLIER * 100)}% of entry — untriggered TP rides to resolution`);
+  log(`🔔 [${inst.key}] Combo ${comboKey} (${COMBO_LABEL[comboKey]}) TRIGGERED @ sum=${sum.toFixed(3)} (< ${COMBO_THRESHOLD}) — bought ${shares}sh each leg: BTC ${priced[0].side}@${priced[0].ask.toFixed(2)} / ETH ${priced[1].side}@${priced[1].ask.toFixed(2)} | total cost=$${totalCost.toFixed(2)} | no exit management — rides to resolution`);
 }
 
 // ─────────────────────────────────────────
-//  Decorrelation classification — judged purely by the LIVE MARKET PRICE of both legs
+//  Decorrelation boost — judged purely by the LIVE MARKET PRICE of both legs
 //  in the last seconds before the window closes, not by our own win/loss
 //  outcome or resolution. If both held sides are trending toward the SAME
 //  end (both near $0.00, or both near $1.00) instead of the expected split
@@ -525,128 +556,15 @@ function checkComboDecorrelationByPrice(inst, comboKey) {
   const tag = `${legs[0].symbol}-${legs[0].side}=${p1.toFixed(3)} & ${legs[1].symbol}-${legs[1].side}=${p2.toFixed(3)}`;
 
   if (bothNearZero || bothNearOne) {
-    // Both win → realized pairing IS this combo's own legs. Both lose →
-    // realized pairing was actually the OTHER combo's legs (BTC and ETH
-    // moved the way that combo bets, not this one).
+    // bothNearOne means THIS combo's own pairing was realized (both legs won).
+    // bothNearZero means the OPPOSITE pairing was realized (both legs lost —
+    // e.g. Combo A's BTC-Up+ETH-Down both losing means BTC actually went
+    // down and ETH actually went up, which is exactly Combo B's pairing).
     const realizedCombo = bothNearOne ? comboKey : (comboKey === 'A' ? 'B' : 'A');
-    inst.pendingBoostCombo = realizedCombo; // one-shot — overwrites any still-pending queue from earlier this same tick
-    log(`⚡ [${inst.key}] Combo ${comboKey} DECORRELATED — last-second prices ${tag}, both trending toward ${bothNearZero ? '0 (both about to lose)' : '1 (both about to win)'} — realized pairing = Combo ${realizedCombo} (${COMBO_LABEL[realizedCombo]}), queued to buy unconditionally @ ${DECORRELATION_BOOST_SHARES}sh/leg the instant the next window opens`);
+    inst.armedBoostCombo = realizedCombo; // overwrites any previous arm — always the freshest signal
+    log(`⚡ [${inst.key}] Combo ${comboKey} DECORRELATED — last-second prices ${tag}, both trending toward ${bothNearZero ? '0 (both about to lose)' : '1 (both about to win)'} — realized pairing was Combo ${realizedCombo} (${COMBO_LABEL[realizedCombo]}) — arming ${BOOST_SHARES}sh unconditional buy at next window's open`);
   } else {
-    log(`↔️  [${inst.key}] Combo ${comboKey} split as expected — last-second prices ${tag} — no follow-through boost queued`);
-  }
-}
-
-// ─────────────────────────────────────────
-//  Decorrelation follow-through — the one-shot unconditional buy queued by
-//  checkComboDecorrelationByPrice above. Fires as soon as the NEXT window
-//  has loaded AND has live ask prices for both legs — no COMBO_THRESHOLD
-//  check, no cutoff, bypasses the normal trigger path entirely. Marks the
-//  combo triggered so the normal threshold-based check doesn't also fire it.
-// ─────────────────────────────────────────
-async function fireForcedBoostIfPending(inst) {
-  const comboKey = inst.pendingBoostCombo;
-  if (!comboKey || !inst.tradable) return;
-  const combo = inst.combos[comboKey];
-  if (combo.triggered) { inst.pendingBoostCombo = null; return; } // shouldn't happen on a fresh window, but guard against double-fire
-
-  const legs = COMBO_LEGS[comboKey];
-  const priced = legs.map(leg => {
-    const m = inst.markets[leg.symbol];
-    const ask = leg.side === 'Up' ? m.upAsk : m.downAsk;
-    const tokenId = leg.side === 'Up' ? m.upTokenId : m.downTokenId;
-    return { ...leg, ask, tokenId };
-  });
-  if (priced.some(p => p.ask == null)) return; // prices not populated yet this tick — retry next tick, still "as soon as window opens"
-
-  const shares = DECORRELATION_BOOST_SHARES;
-  const costed = priced.map(p => {
-    const fee = takerFee(shares, p.ask);
-    return { ...p, fee, cost: round2(p.ask * shares + fee) };
-  });
-  const totalCost = round2(costed.reduce((s, p) => s + p.cost, 0));
-
-  inst.pendingBoostCombo = null; // one-shot — consumed regardless of what happens below
-
-  if (totalCost > bankroll) {
-    log(`⏭️  [${inst.key}] Decorrelation follow-through on Combo ${comboKey} skipped — insufficient bankroll ($${totalCost.toFixed(2)} needed at ${shares}sh/leg)`);
-    return;
-  }
-  combo.triggered = true; // lock so the normal threshold trigger doesn't also fire this combo this window
-
-  for (const leg of costed) {
-    const fill = await placeMarketableBuy(leg.tokenId, leg.ask, shares);
-    if (!fill.filled) {
-      log(`❌ [${inst.key}] Decorrelation follow-through ${leg.symbol} ${leg.side} market order did not fill — leg skipped.`);
-      continue;
-    }
-    const actualShares = fill.shares > 0 ? fill.shares : shares;
-    const actualCost = round2(actualShares * fill.avgPrice);
-    bankroll = round2(bankroll - actualCost);
-    feesPaid = round2(feesPaid + leg.fee);
-    const tpPrice = Math.min(TP_MAX_PRICE, round2(fill.avgPrice * TP_MULTIPLIER));
-    const position = { shares: actualShares, entryPrice: fill.avgPrice, cost: actualCost, side: leg.side, closed: false, won: null, tpPrice, tpOrderId: null, tpFilled: false, closedReason: null };
-    combo.positions[leg.symbol] = position;
-    registerTrade({ instance: inst.key, combo: comboKey, symbol: leg.symbol, side: 'BUY', outcome: leg.side, price: fill.avgPrice, shares: actualShares, cost: actualCost, fee: leg.fee, reason: 'DECORR_BOOST' });
-
-    if (!DRY_RUN && trader) {
-      try {
-        const gtc = await trader.placeGtcOrder(leg.tokenId, 'SELL', tpPrice, actualShares);
-        position.tpOrderId = gtc.id;
-        log(`🎯 [${inst.key}] Decorrelation follow-through ${leg.symbol} TP order placed: SELL ${actualShares}sh @ ${tpPrice.toFixed(3)}`);
-      } catch (e) {
-        log(`⚠️  [${inst.key}] Decorrelation follow-through ${leg.symbol} failed to place TP order (position still held): ${describeOrderError(e)}`);
-      }
-    } else {
-      log(`🎯 [${inst.key}] Decorrelation follow-through ${leg.symbol} TP target set (demo): ${tpPrice.toFixed(3)}`);
-    }
-  }
-  recordEquity();
-  log(`⚡🔔 [${inst.key}] DECORRELATION FOLLOW-THROUGH — unconditional buy Combo ${comboKey} (${COMBO_LABEL[comboKey]}) @ window open, ${shares}sh/leg, no threshold check: BTC ${costed[0].side}@${costed[0].ask.toFixed(2)} / ETH ${costed[1].side}@${costed[1].ask.toFixed(2)} | total cost=$${totalCost.toFixed(2)}`);
-}
-
-// ─────────────────────────────────────────
-//  Take-profit monitoring — separate from window resolution. Live mode
-//  polls the real GTC order's status; demo mode simulates against the
-//  live bid feed we're already polling for the combo trigger.
-// ─────────────────────────────────────────
-function settleTp(inst, comboKey, symbol, pos) {
-  const proceeds = round2(pos.shares * pos.tpPrice);
-  const profit = round2(proceeds - pos.cost);
-  bankroll = round2(bankroll + proceeds);
-  realizedPnl = round2(realizedPnl + profit);
-  wins++; // a TP fill is definitionally profitable (tpPrice > entryPrice)
-  pos.closed = true;
-  pos.won = true;
-  pos.tpFilled = true;
-  pos.closedReason = 'TP';
-  log(`🎯 [${inst.key}] Combo ${comboKey} ${symbol} ${pos.side} TP FILLED ${pos.shares}sh entry=${pos.entryPrice.toFixed(3)} tp=${pos.tpPrice.toFixed(3)} | pnl=$${profit.toFixed(2)} | bankroll=$${bankroll.toFixed(2)}`);
-  registerTrade({ instance: inst.key, combo: comboKey, symbol, side: 'SELL', outcome: pos.side, reason: 'TP', price: pos.tpPrice, shares: pos.shares, profit });
-  recordEquity();
-}
-
-async function checkTpFills(inst) {
-  if (!inst.tradable) return;
-  for (const comboKey of ['A', 'B']) {
-    const combo = inst.combos[comboKey];
-    for (const symbol of SYMBOLS) {
-      const pos = combo.positions[symbol];
-      if (!pos || pos.closed || pos.tpFilled || !pos.tpPrice) continue;
-
-      if (!DRY_RUN && pos.tpOrderId && trader) {
-        try {
-          const order = await trader.getOrder(pos.tpOrderId);
-          const status = (order?.status || '').toUpperCase();
-          const matchStatus = (order?.match_status || order?.matchStatus || '').toLowerCase();
-          const state = (order?.state || '').toLowerCase();
-          const filled = status === 'FILLED' || matchStatus === 'filled' || state === 'filled';
-          if (filled) settleTp(inst, comboKey, symbol, pos);
-        } catch (_) { /* transient lookup failure — retry next tick */ }
-      } else if (DRY_RUN) {
-        const m = inst.markets[symbol];
-        const bid = pos.side === 'Up' ? m.upBid : m.downBid;
-        if (bid != null && bid >= pos.tpPrice) settleTp(inst, comboKey, symbol, pos);
-      }
-    }
+    log(`↔️  [${inst.key}] Combo ${comboKey} split as expected — last-second prices ${tag} — no boost armed`);
   }
 }
 
@@ -683,14 +601,6 @@ async function resolveInstanceWindow(inst) {
     for (const comboKey of ['A', 'B']) {
       const pos = inst.combos[comboKey].positions[symbol];
       if (!pos || pos.closed) continue;
-      if (!DRY_RUN && pos.tpOrderId && trader) {
-        try {
-          await trader.cancelOrder(pos.tpOrderId);
-          log(`🚫 [${inst.key}] Combo ${comboKey} ${symbol} cancelled unfilled TP order before resolution`);
-        } catch (e) {
-          log(`⚠️  [${inst.key}] Combo ${comboKey} ${symbol} failed to cancel TP order (may already be gone/filled): ${describeOrderError(e)}`);
-        }
-      }
       const won = winner === pos.side;
       const proceeds = won ? round2(pos.shares * 1) : 0;
       const profit = round2(proceeds - pos.cost);
@@ -719,8 +629,6 @@ async function instanceTick(inst) {
   }
   if (!inst.tradable) return;
 
-  await checkTpFills(inst); // exit management runs regardless of pause state
-
   const elapsed = nowSec() - inst.windowStart;
   if (elapsed >= inst.windowSecs - EARLY_CUTOFF_SECS && !inst.resolvedThisWindow) {
     // Classify decorrelation using whatever the freshest polled price is
@@ -733,7 +641,6 @@ async function instanceTick(inst) {
   if (inst.resolvedThisWindow) return;
   if (!tradingEnabled) return; // pause only blocks NEW entries, not exit management
 
-  await fireForcedBoostIfPending(inst); // one-shot unconditional follow-through buy, if a prior window's decorrelation queued one
   await checkComboTrigger(inst, 'A');
   await checkComboTrigger(inst, 'B');
 }
@@ -751,8 +658,7 @@ function buildInstanceState(inst) {
   return {
     key: inst.key, windowSecs: inst.windowSecs, cutoffSecs: inst.cutoffSecs,
     tradable: inst.tradable, windowEnd: inst.windowEnd, secsToEnd, secsToCutoff,
-    sharesThisWindow: COMBO_SHARES, pendingBoostCombo: inst.pendingBoostCombo,
-    pendingBoostLabel: inst.pendingBoostCombo ? COMBO_LABEL[inst.pendingBoostCombo] : null,
+    sharesThisWindow: inst.sharesThisWindow, armedBoostCombo: inst.armedBoostCombo,
     markets: {
       BTC: { slug: inst.markets.BTC.slug, upAsk: inst.markets.BTC.upAsk, upBid: inst.markets.BTC.upBid, downAsk: inst.markets.BTC.downAsk, downBid: inst.markets.BTC.downBid },
       ETH: { slug: inst.markets.ETH.slug, upAsk: inst.markets.ETH.upAsk, upBid: inst.markets.ETH.upBid, downAsk: inst.markets.ETH.downAsk, downBid: inst.markets.ETH.downBid },
@@ -788,8 +694,7 @@ function buildState() {
     uptime: Math.floor((Date.now() - startTime) / 1000),
     config: {
       comboThreshold: COMBO_THRESHOLD, comboTriggerFraction: COMBO_TRIGGER_FRACTION, comboShares: COMBO_SHARES,
-      boostShares: DECORRELATION_BOOST_SHARES,
-      tpMultiplier: TP_MULTIPLIER, tpMaxPrice: TP_MAX_PRICE,
+      boostShares: BOOST_SHARES,
       cryptoTakerFeeRate: CRYPTO_TAKER_FEE_RATE,
     },
     equityCurve, logs: logs.slice(-100), trades: trades.slice(-80).reverse(),
@@ -851,9 +756,9 @@ async function init(privateKey, emit, slogFn) {
   log(`🚀 Cross-Pair Combo Bot — BTC/ETH Up/Down, 5m + 15m instances`);
   log(`⚙️  $${TOTAL_CAPITAL} capital (shared across both instances)`);
   log(`⚙️  Combo A = BTC-Up + ETH-Down | Combo B = BTC-Down + ETH-Up | trigger: combined ask < ${COMBO_THRESHOLD} before ${Math.round(COMBO_TRIGGER_FRACTION * 100)}% of window elapses`);
-  log(`⚙️  Sizing: base ${COMBO_SHARES}sh/leg | on decorrelation (a combo's both legs win, or both lose), the realized pairing is bought unconditionally next window @ ${DECORRELATION_BOOST_SHARES}sh/leg, no threshold check, one-shot — tracked independently per instance (5m/15m don't share it)`);
+  log(`⚙️  Sizing: base ${COMBO_SHARES}sh/leg | on decorrelation (last-second price shows a combo's both legs trending the same way) → the OPPOSITE realized pairing buys unconditionally at ${BOOST_SHARES}sh/leg the instant the next window opens, one-shot, then back to base | tracked independently per instance (5m/15m don't share the arm)`);
   log(`⚙️  5m instance: cutoff @ ${INSTANCE_DEFS[0].windowSecs * COMBO_TRIGGER_FRACTION}s | 15m instance: cutoff @ ${INSTANCE_DEFS[1].windowSecs * COMBO_TRIGGER_FRACTION}s`);
-  log(`⚙️  Execution: marketable buy both legs @ current ask, ${COMBO_SHARES}sh/leg (or ${DECORRELATION_BOOST_SHARES}sh/leg for a decorrelation follow-through), once per combo per window | per-leg TP @ ${Math.round(TP_MULTIPLIER * 100)}% of entry (capped ${TP_MAX_PRICE}) — untriggered TP still rides to resolution`);
+  log(`⚙️  Execution: marketable buy both legs @ current ask, base ${COMBO_SHARES}sh (boosted ${BOOST_SHARES}sh) each, once per combo per window | no exit management — every position rides to resolution`);
   log(`${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
   trader = new PolymarketTrader(privateKey);
