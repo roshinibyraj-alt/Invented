@@ -73,14 +73,15 @@ const COMBO_THRESHOLD        = Number(process.env.COMBO_THRESHOLD || 0.80);
 const COMBO_TRIGGER_FRACTION = Number(process.env.COMBO_TRIGGER_FRACTION || 0.70); // cutoff as fraction of window length
 const COMBO_SHARES           = Number(process.env.COMBO_SHARES || 10); // per leg, base size, both timeframes
 
-// ── Decorrelation boost: if a combo's two legs resolve as BOTH win or BOTH
-// lose (instead of the expected split — one wins, one loses, since the combo
-// bets BTC and ETH move opposite ways), that's flagged as a decorrelation
-// event for that instance. Its next BOOST_WINDOWS windows (any windows, even
-// ones where nothing triggers) size up to BOOST_SHARES, then drop back to
-// base. Tracked fully independently per instance (5m vs 15m). ──
-const BOOST_SHARES  = Number(process.env.BOOST_SHARES || 30);
-const BOOST_WINDOWS = Number(process.env.BOOST_WINDOWS || 3);
+// ── Decorrelation follow-through boost: at the last-second check before
+// resolution, classify a fired combo by its legs' live prices. Both legs
+// trending to ~1 (both about to win) means the REALIZED pairing matches this
+// SAME combo. Both legs trending to ~0 (both about to lose) means the
+// REALIZED pairing was actually the OPPOSITE combo. Whichever matches gets
+// queued and bought unconditionally — both legs, DECORRELATION_BOOST_SHARES
+// each, no threshold check — the instant the NEXT window opens. One-shot,
+// then clears. Tracked independently per instance (5m vs 15m). ──
+const DECORRELATION_BOOST_SHARES = Number(process.env.DECORRELATION_BOOST_SHARES || 50); // per leg, one-shot follow-through buy
 
 const CRYPTO_TAKER_FEE_RATE = Number(process.env.CRYPTO_TAKER_FEE_RATE || 0.07);
 
@@ -198,8 +199,7 @@ function freshInstanceState(def) {
     resolvedThisWindow: true,
     markets: { BTC: freshMarketSlot(), ETH: freshMarketSlot() },
     combos: { A: freshComboSlot(), B: freshComboSlot() },
-    sharesThisWindow: COMBO_SHARES, // base unless a boost is active — set at window-load time
-    boostWindowsRemaining: 0, // survives across freshInstanceState resets — see loadInstanceWindow
+    pendingBoostCombo: null, // 'A' | 'B' | null — set by decorrelation check, consumed once at the next window's open. Survives across freshInstanceState resets — see loadInstanceWindow.
   };
 }
 
@@ -268,7 +268,7 @@ async function loadInstanceWindow(inst) {
   const ethSlot = slotFrom(foundEth);
   if (!btcSlot || !ethSlot) { log(`⚠️  [${inst.key}] window loaded but Up/Down token ids missing`); inst.tradable = false; return; }
 
-  const carryBoostRemaining = inst.boostWindowsRemaining || 0; // must survive the freshInstanceState() reset below
+  const carryPendingBoostCombo = inst.pendingBoostCombo || null; // must survive the freshInstanceState() reset below
 
   const fresh = freshInstanceState(INSTANCE_DEFS.find(d => d.key === inst.key));
   fresh.windowStart = foundBtc.windowStart;
@@ -277,21 +277,12 @@ async function loadInstanceWindow(inst) {
   fresh.markets.ETH = ethSlot;
   fresh.tradable = true;
   fresh.resolvedThisWindow = false;
-
-  // This window consumes one unit of any active boost countdown. Any 3
-  // subsequent windows count, whether or not a combo actually fires in them.
-  if (carryBoostRemaining > 0) {
-    fresh.sharesThisWindow = BOOST_SHARES;
-    fresh.boostWindowsRemaining = carryBoostRemaining - 1;
-  } else {
-    fresh.sharesThisWindow = COMBO_SHARES;
-    fresh.boostWindowsRemaining = 0;
-  }
+  fresh.pendingBoostCombo = carryPendingBoostCombo; // consumed by fireForcedBoostIfPending() once prices are available this window
 
   Object.assign(inst, fresh);
-  const sizingNote = fresh.sharesThisWindow === BOOST_SHARES
-    ? ` | 🔥 BOOSTED sizing this window: ${fresh.sharesThisWindow}sh/leg (${fresh.boostWindowsRemaining} more boosted window${fresh.boostWindowsRemaining === 1 ? '' : 's'} after this one)`
-    : ` | base sizing this window: ${fresh.sharesThisWindow}sh/leg`;
+  const sizingNote = carryPendingBoostCombo
+    ? ` | ⚡ decorrelation follow-through queued: Combo ${carryPendingBoostCombo} will be bought unconditionally @ ${DECORRELATION_BOOST_SHARES}sh/leg as soon as prices load`
+    : ` | sizing this window: ${COMBO_SHARES}sh/leg (base)`;
   log(`🔭 [${inst.key}] window loaded: BTC=${btcSlot.slug} ETH=${ethSlot.slug} | ends ${new Date(fresh.windowEnd * 1000).toISOString().slice(11, 19)}Z | trigger cutoff=${fresh.cutoffSecs}s${sizingNote}`);
 }
 
@@ -444,7 +435,7 @@ async function checkComboTrigger(inst, comboKey) {
   const sum = comboAskSum(inst, comboKey);
   if (sum == null || sum >= COMBO_THRESHOLD) return;
 
-  const shares = inst.sharesThisWindow || COMBO_SHARES; // set once at window-load — base or boosted
+  const shares = COMBO_SHARES; // base sizing — the decorrelation boost is a separate, unconditional buy handled by fireForcedBoostIfPending
   const legs = COMBO_LEGS[comboKey];
 
   // Price out both legs first, so we only commit if we can afford BOTH.
@@ -493,11 +484,11 @@ async function checkComboTrigger(inst, comboKey) {
     }
   }
   recordEquity();
-  log(`🔔 [${inst.key}] Combo ${comboKey} (${COMBO_LABEL[comboKey]}) TRIGGERED @ sum=${sum.toFixed(3)} (< ${COMBO_THRESHOLD}) — bought ${shares}sh each leg${shares === BOOST_SHARES ? ' [BOOSTED]' : ''}: BTC ${priced[0].side}@${priced[0].ask.toFixed(2)} / ETH ${priced[1].side}@${priced[1].ask.toFixed(2)} | total cost=$${totalCost.toFixed(2)} | TP set per-leg @ ${Math.round(TP_MULTIPLIER * 100)}% of entry — untriggered TP rides to resolution`);
+  log(`🔔 [${inst.key}] Combo ${comboKey} (${COMBO_LABEL[comboKey]}) TRIGGERED @ sum=${sum.toFixed(3)} (< ${COMBO_THRESHOLD}) — bought ${shares}sh each leg: BTC ${priced[0].side}@${priced[0].ask.toFixed(2)} / ETH ${priced[1].side}@${priced[1].ask.toFixed(2)} | total cost=$${totalCost.toFixed(2)} | TP set per-leg @ ${Math.round(TP_MULTIPLIER * 100)}% of entry — untriggered TP rides to resolution`);
 }
 
 // ─────────────────────────────────────────
-//  Decorrelation boost — judged purely by the LIVE MARKET PRICE of both legs
+//  Decorrelation classification — judged purely by the LIVE MARKET PRICE of both legs
 //  in the last seconds before the window closes, not by our own win/loss
 //  outcome or resolution. If both held sides are trending toward the SAME
 //  end (both near $0.00, or both near $1.00) instead of the expected split
@@ -534,11 +525,83 @@ function checkComboDecorrelationByPrice(inst, comboKey) {
   const tag = `${legs[0].symbol}-${legs[0].side}=${p1.toFixed(3)} & ${legs[1].symbol}-${legs[1].side}=${p2.toFixed(3)}`;
 
   if (bothNearZero || bothNearOne) {
-    inst.boostWindowsRemaining = BOOST_WINDOWS; // reset to a fresh 3, even if a boost was already active
-    log(`⚡ [${inst.key}] Combo ${comboKey} DECORRELATED — last-second prices ${tag}, both trending toward ${bothNearZero ? '0 (both about to lose)' : '1 (both about to win)'} — sizing boosts to ${BOOST_SHARES}sh/leg for the next ${BOOST_WINDOWS} windows`);
+    // Both win → realized pairing IS this combo's own legs. Both lose →
+    // realized pairing was actually the OTHER combo's legs (BTC and ETH
+    // moved the way that combo bets, not this one).
+    const realizedCombo = bothNearOne ? comboKey : (comboKey === 'A' ? 'B' : 'A');
+    inst.pendingBoostCombo = realizedCombo; // one-shot — overwrites any still-pending queue from earlier this same tick
+    log(`⚡ [${inst.key}] Combo ${comboKey} DECORRELATED — last-second prices ${tag}, both trending toward ${bothNearZero ? '0 (both about to lose)' : '1 (both about to win)'} — realized pairing = Combo ${realizedCombo} (${COMBO_LABEL[realizedCombo]}), queued to buy unconditionally @ ${DECORRELATION_BOOST_SHARES}sh/leg the instant the next window opens`);
   } else {
-    log(`↔️  [${inst.key}] Combo ${comboKey} split as expected — last-second prices ${tag} — sizing unaffected`);
+    log(`↔️  [${inst.key}] Combo ${comboKey} split as expected — last-second prices ${tag} — no follow-through boost queued`);
   }
+}
+
+// ─────────────────────────────────────────
+//  Decorrelation follow-through — the one-shot unconditional buy queued by
+//  checkComboDecorrelationByPrice above. Fires as soon as the NEXT window
+//  has loaded AND has live ask prices for both legs — no COMBO_THRESHOLD
+//  check, no cutoff, bypasses the normal trigger path entirely. Marks the
+//  combo triggered so the normal threshold-based check doesn't also fire it.
+// ─────────────────────────────────────────
+async function fireForcedBoostIfPending(inst) {
+  const comboKey = inst.pendingBoostCombo;
+  if (!comboKey || !inst.tradable) return;
+  const combo = inst.combos[comboKey];
+  if (combo.triggered) { inst.pendingBoostCombo = null; return; } // shouldn't happen on a fresh window, but guard against double-fire
+
+  const legs = COMBO_LEGS[comboKey];
+  const priced = legs.map(leg => {
+    const m = inst.markets[leg.symbol];
+    const ask = leg.side === 'Up' ? m.upAsk : m.downAsk;
+    const tokenId = leg.side === 'Up' ? m.upTokenId : m.downTokenId;
+    return { ...leg, ask, tokenId };
+  });
+  if (priced.some(p => p.ask == null)) return; // prices not populated yet this tick — retry next tick, still "as soon as window opens"
+
+  const shares = DECORRELATION_BOOST_SHARES;
+  const costed = priced.map(p => {
+    const fee = takerFee(shares, p.ask);
+    return { ...p, fee, cost: round2(p.ask * shares + fee) };
+  });
+  const totalCost = round2(costed.reduce((s, p) => s + p.cost, 0));
+
+  inst.pendingBoostCombo = null; // one-shot — consumed regardless of what happens below
+
+  if (totalCost > bankroll) {
+    log(`⏭️  [${inst.key}] Decorrelation follow-through on Combo ${comboKey} skipped — insufficient bankroll ($${totalCost.toFixed(2)} needed at ${shares}sh/leg)`);
+    return;
+  }
+  combo.triggered = true; // lock so the normal threshold trigger doesn't also fire this combo this window
+
+  for (const leg of costed) {
+    const fill = await placeMarketableBuy(leg.tokenId, leg.ask, shares);
+    if (!fill.filled) {
+      log(`❌ [${inst.key}] Decorrelation follow-through ${leg.symbol} ${leg.side} market order did not fill — leg skipped.`);
+      continue;
+    }
+    const actualShares = fill.shares > 0 ? fill.shares : shares;
+    const actualCost = round2(actualShares * fill.avgPrice);
+    bankroll = round2(bankroll - actualCost);
+    feesPaid = round2(feesPaid + leg.fee);
+    const tpPrice = Math.min(TP_MAX_PRICE, round2(fill.avgPrice * TP_MULTIPLIER));
+    const position = { shares: actualShares, entryPrice: fill.avgPrice, cost: actualCost, side: leg.side, closed: false, won: null, tpPrice, tpOrderId: null, tpFilled: false, closedReason: null };
+    combo.positions[leg.symbol] = position;
+    registerTrade({ instance: inst.key, combo: comboKey, symbol: leg.symbol, side: 'BUY', outcome: leg.side, price: fill.avgPrice, shares: actualShares, cost: actualCost, fee: leg.fee, reason: 'DECORR_BOOST' });
+
+    if (!DRY_RUN && trader) {
+      try {
+        const gtc = await trader.placeGtcOrder(leg.tokenId, 'SELL', tpPrice, actualShares);
+        position.tpOrderId = gtc.id;
+        log(`🎯 [${inst.key}] Decorrelation follow-through ${leg.symbol} TP order placed: SELL ${actualShares}sh @ ${tpPrice.toFixed(3)}`);
+      } catch (e) {
+        log(`⚠️  [${inst.key}] Decorrelation follow-through ${leg.symbol} failed to place TP order (position still held): ${describeOrderError(e)}`);
+      }
+    } else {
+      log(`🎯 [${inst.key}] Decorrelation follow-through ${leg.symbol} TP target set (demo): ${tpPrice.toFixed(3)}`);
+    }
+  }
+  recordEquity();
+  log(`⚡🔔 [${inst.key}] DECORRELATION FOLLOW-THROUGH — unconditional buy Combo ${comboKey} (${COMBO_LABEL[comboKey]}) @ window open, ${shares}sh/leg, no threshold check: BTC ${costed[0].side}@${costed[0].ask.toFixed(2)} / ETH ${costed[1].side}@${costed[1].ask.toFixed(2)} | total cost=$${totalCost.toFixed(2)}`);
 }
 
 // ─────────────────────────────────────────
@@ -670,6 +733,7 @@ async function instanceTick(inst) {
   if (inst.resolvedThisWindow) return;
   if (!tradingEnabled) return; // pause only blocks NEW entries, not exit management
 
+  await fireForcedBoostIfPending(inst); // one-shot unconditional follow-through buy, if a prior window's decorrelation queued one
   await checkComboTrigger(inst, 'A');
   await checkComboTrigger(inst, 'B');
 }
@@ -687,8 +751,8 @@ function buildInstanceState(inst) {
   return {
     key: inst.key, windowSecs: inst.windowSecs, cutoffSecs: inst.cutoffSecs,
     tradable: inst.tradable, windowEnd: inst.windowEnd, secsToEnd, secsToCutoff,
-    sharesThisWindow: inst.sharesThisWindow, boostWindowsRemaining: inst.boostWindowsRemaining,
-    isBoosted: inst.sharesThisWindow === BOOST_SHARES,
+    sharesThisWindow: COMBO_SHARES, pendingBoostCombo: inst.pendingBoostCombo,
+    pendingBoostLabel: inst.pendingBoostCombo ? COMBO_LABEL[inst.pendingBoostCombo] : null,
     markets: {
       BTC: { slug: inst.markets.BTC.slug, upAsk: inst.markets.BTC.upAsk, upBid: inst.markets.BTC.upBid, downAsk: inst.markets.BTC.downAsk, downBid: inst.markets.BTC.downBid },
       ETH: { slug: inst.markets.ETH.slug, upAsk: inst.markets.ETH.upAsk, upBid: inst.markets.ETH.upBid, downAsk: inst.markets.ETH.downAsk, downBid: inst.markets.ETH.downBid },
@@ -724,7 +788,7 @@ function buildState() {
     uptime: Math.floor((Date.now() - startTime) / 1000),
     config: {
       comboThreshold: COMBO_THRESHOLD, comboTriggerFraction: COMBO_TRIGGER_FRACTION, comboShares: COMBO_SHARES,
-      boostShares: BOOST_SHARES, boostWindows: BOOST_WINDOWS,
+      boostShares: DECORRELATION_BOOST_SHARES,
       tpMultiplier: TP_MULTIPLIER, tpMaxPrice: TP_MAX_PRICE,
       cryptoTakerFeeRate: CRYPTO_TAKER_FEE_RATE,
     },
@@ -787,9 +851,9 @@ async function init(privateKey, emit, slogFn) {
   log(`🚀 Cross-Pair Combo Bot — BTC/ETH Up/Down, 5m + 15m instances`);
   log(`⚙️  $${TOTAL_CAPITAL} capital (shared across both instances)`);
   log(`⚙️  Combo A = BTC-Up + ETH-Down | Combo B = BTC-Down + ETH-Up | trigger: combined ask < ${COMBO_THRESHOLD} before ${Math.round(COMBO_TRIGGER_FRACTION * 100)}% of window elapses`);
-  log(`⚙️  Sizing: base ${COMBO_SHARES}sh/leg | on decorrelation (a combo's both legs win, or both lose) → next ${BOOST_WINDOWS} windows for that instance boost to ${BOOST_SHARES}sh/leg, tracked independently per instance (5m/15m don't share the boost)`);
+  log(`⚙️  Sizing: base ${COMBO_SHARES}sh/leg | on decorrelation (a combo's both legs win, or both lose), the realized pairing is bought unconditionally next window @ ${DECORRELATION_BOOST_SHARES}sh/leg, no threshold check, one-shot — tracked independently per instance (5m/15m don't share it)`);
   log(`⚙️  5m instance: cutoff @ ${INSTANCE_DEFS[0].windowSecs * COMBO_TRIGGER_FRACTION}s | 15m instance: cutoff @ ${INSTANCE_DEFS[1].windowSecs * COMBO_TRIGGER_FRACTION}s`);
-  log(`⚙️  Execution: marketable buy both legs @ current ask, base ${COMBO_SHARES}sh (boosted ${BOOST_SHARES}sh) each, once per combo per window | per-leg TP @ ${Math.round(TP_MULTIPLIER * 100)}% of entry (capped ${TP_MAX_PRICE}) — untriggered TP still rides to resolution`);
+  log(`⚙️  Execution: marketable buy both legs @ current ask, ${COMBO_SHARES}sh/leg (or ${DECORRELATION_BOOST_SHARES}sh/leg for a decorrelation follow-through), once per combo per window | per-leg TP @ ${Math.round(TP_MULTIPLIER * 100)}% of entry (capped ${TP_MAX_PRICE}) — untriggered TP still rides to resolution`);
   log(`${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
   trader = new PolymarketTrader(privateKey);
