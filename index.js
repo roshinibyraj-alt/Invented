@@ -45,7 +45,7 @@ app.get('/', (_, res) => {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>🪜 BTC/ETH Grid-Ladder Bot — 15m Up/Down</title>
+<title>🪜 BTC-Up/ETH-Down Grid-Ladder Bot — 15m</title>
 <style>
   :root {
     --bg: #ffffff; --bg2: #f5f7fa; --bg3: #edf0f4; --border: #d0d7e2;
@@ -130,7 +130,7 @@ app.get('/', (_, res) => {
 </head>
 <body>
   <div class="header">
-    <div class="logo">🪜 GRID<span>-LADDER</span> BOT — 15m Up/Down</div>
+    <div class="logo">🪜 GRID<span>-LADDER</span> BOT — BTC-Up/ETH-Down 15m</div>
     <div id="mode-badge" class="mode-badge mode-dry">DEMO</div>
   </div>
   <div class="toolbar">
@@ -154,7 +154,7 @@ app.get('/', (_, res) => {
   </div>
 
   <div class="section">
-    <div class="section-hdr">Grid Ladders (independent — BTC-Up / BTC-Down / ETH-Up / ETH-Down)</div>
+    <div class="section-hdr">Grid Ladders (independent — BTC-Up / ETH-Down only, one entry per rung)</div>
     <div class="ladder-grid" id="ladder-grid"></div>
   </div>
 
