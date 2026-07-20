@@ -45,7 +45,7 @@ app.get('/', (_, res) => {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>🪜 BTC/ETH Grid-Ladder Bot — 15m Up/Down</title>
+<title>🪜 BTC/ETH Ladder Bot — 5m Up/Down</title>
 <style>
   :root {
     --bg: #ffffff; --bg2: #f5f7fa; --bg3: #edf0f4; --border: #d0d7e2;
@@ -130,7 +130,7 @@ app.get('/', (_, res) => {
 </head>
 <body>
   <div class="header">
-    <div class="logo">🪜 GRID<span>-LADDER</span> BOT — 15m Up/Down</div>
+    <div class="logo">🪜 GRID<span>-LADDER</span> BOT — 5m Up/Down</div>
     <div id="mode-badge" class="mode-badge mode-dry">DEMO</div>
   </div>
   <div class="toolbar">
@@ -183,7 +183,7 @@ app.get('/', (_, res) => {
   $('resume-btn').onclick = () => fetch('/api/resume', { method: 'POST' }).then(() => flash('Resumed'));
   $('live-btn').onclick = () => {
     const wantLive = !$('live-btn').classList.contains('is-live');
-    if (wantLive && !confirm('Switch to LIVE mode? This will place REAL market orders with REAL money.')) return;
+    if (wantLive && !confirm('Switch to LIVE mode? This will place REAL resting limit orders with REAL money.')) return;
     fetch('/api/set-mode', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ live: wantLive }) })
       .then(() => flash(wantLive ? 'Switched to LIVE' : 'Switched to DEMO'));
   };
@@ -224,7 +224,7 @@ app.get('/', (_, res) => {
     $('resume-btn').style.display = s.tradingEnabled ? 'none' : '';
 
     $('window-strip').innerHTML = s.tradable
-      ? ('15m window ends in <b>' + fmtSecs(s.secsToEnd) + '</b> | BTC: ' + (s.markets.BTC.slug || '—') + ' | ETH: ' + (s.markets.ETH.slug || '—'))
+      ? ('5m window ends in <b>' + fmtSecs(s.secsToEnd) + '</b> | BTC: ' + (s.markets.BTC.slug || '—') + ' | ETH: ' + (s.markets.ETH.slug || '—'))
       : 'Loading window…';
 
     const stats = [
@@ -235,7 +235,7 @@ app.get('/', (_, res) => {
       ['Unrealized P&amp;L', sgn(s.unrealizedPnl), pClass(s.unrealizedPnl)],
       ['Win Rate', s.winRate != null ? s.winRate + '%' : '—', ''],
       ['Wins / Losses', s.wins + ' / ' + s.losses, ''],
-      ['Fees Paid', '$' + s.feesPaid.toFixed(2), ''],
+      ['Rebates Earned', '$' + s.rebatesEarned.toFixed(4), 'pnl-pos'],
     ];
     $('stats-row').innerHTML = stats.map(([label, val, cls]) =>
       '<div class="stat"><div class="stat-label">' + label + '</div><div class="stat-val ' + cls + '">' + val + '</div></div>'
@@ -292,7 +292,7 @@ app.get('/', (_, res) => {
             rowCls = 'watching';
             stateTxt = 'watching for trigger';
           }
-          const tpTxt = lv.position ? ('TP ' + lv.position.tpPrice.toFixed(2)) : '';
+          const tpTxt = lv.position ? (lv.position.tpPrice != null ? ('TP ' + lv.position.tpPrice.toFixed(2)) : 'to resolution') : '';
           return '<div class="level-row ' + rowCls + '">' +
             '<div class="level-price">' + lv.level.toFixed(2) + '</div>' +
             '<div class="level-state">' + stateTxt + '</div>' +
@@ -352,7 +352,7 @@ const slog = (line) => { console.log(line); io.emit('log', line); };
 const PK = process.env.PRIVATE_KEY;
 if (!PK) { console.error('❌ PRIVATE_KEY env var missing'); process.exit(1); }
 
-console.log('🪜 15-Minute BTC/ETH Grid-Ladder Bot — 4 Independent Up/Down Ladders');
+console.log('🪜 5-Minute BTC/ETH Ladder Bot — 4 Independent Up/Down Ladders (resting limit orders + maker rebates)');
 console.log(`🚦 DRY_RUN=${DRY_RUN}`);
 if (DRY_RUN) console.log('⚠️  DRY RUN — demo $2000 capital, simulated fills, real API for data/orders');
 else         console.log('🔴 LIVE MODE — real money');
