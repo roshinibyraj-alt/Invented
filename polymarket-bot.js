@@ -12,26 +12,27 @@
  *  both be live at the same time (they are not mutually exclusive):
  *
  *    BTC-Up    range 0.15 – 0.45
- *    ETH-Down  range 0.55 – 0.85
+ *    ETH-Down  range 0.45 – 0.85
  *
  *  GRID: each ladder has fixed entry levels every 0.10 across its range.
  *  Nothing is placed at window open. Instead, every tick the bot checks
  *  the live ask against each rung; the instant ask <= rung, a market BUY
  *  fires for that rung right away.
  *
- *  ONE ENTRY PER RUNG: unlike a classic grid, a level does NOT re-arm
- *  after it fills. Once a rung has taken its single entry for the
- *  window, it stays closed for the rest of that window — no repeat
- *  fills, no re-firing.
+ *  RE-ENTRY: a rung is only eligible to fire again after its previous
+ *  position has closed via TP. While a rung is holding (position open,
+ *  TP not yet hit), it will NOT re-fire even if price revisits the rung.
+ *  The moment that position's TP sells, the rung is free again and will
+ *  fire a fresh entry the next time ask <= rung — unlimited re-entries
+ *  per window, just never while already holding.
  *
- *  EXIT: there is no per-rung/individual take-profit. Every filled rung
- *  is watched against one shared FINAL_TP_PRICE (0.99); the instant bid
- *  >= 0.99, a market SELL fires for that rung's shares. Anything not
- *  sold at 0.99 by the time the window ends simply rides to real
- *  settlement ($1 win / $0 loss per share). A separate, independent
- *  auto-claim script handles real on-chain redemption; this bot's
- *  bookkeeping just mirrors it via the public Gamma API so the
- *  dashboard's P&L stays meaningful.
+ *  EXIT: each fill gets its own TP — entry price + 0.20 (TP_OFFSET) —
+ *  not a shared target. The instant bid >= that rung's TP price, a
+ *  market SELL fires for that rung's shares. Anything not sold by the
+ *  time the window ends simply rides to real settlement ($1 win / $0
+ *  loss per share). A separate, independent auto-claim script handles
+ *  real on-chain redemption; this bot's bookkeeping just mirrors it via
+ *  the public Gamma API so the dashboard's P&L stays meaningful.
  *
  *  NO MID-WINDOW STARTS: if the bot is started (or restarted) partway
  *  through a live 15-minute window, it will NOT arm a partial grid for
@@ -42,12 +43,13 @@
  *  sits on the book in advance. Each tick, the bot watches the live ask/bid
  *  for every rung; the moment price actually reaches a rung (ask <= rung
  *  level) it fires a single market BUY for that rung, right then — same
- *  for the exit (bid >= FINAL_TP_PRICE fires a market SELL). This trades
- *  a little slippage risk for a much higher chance of actually getting
- *  filled once price gets there, vs. a resting limit order that may never
- *  get filled. In DRY_RUN, fills are simulated at the live polled ask/bid
- *  the instant the trigger condition is met. In LIVE mode this calls out
- *  to the trader module — see the "trader interface" note below.
+ *  for the exit (bid >= that rung's own TP price fires a market SELL). This
+ *  trades a little slippage risk for a much higher chance of actually
+ *  getting filled once price gets there, vs. a resting limit order that
+ *  may never get filled. In DRY_RUN, fills are simulated at the live
+ *  polled ask/bid the instant the trigger condition is met. In LIVE mode
+ *  this calls out to the trader module — see the "trader interface" note
+ *  below.
  *
  *  LIVE / DEMO: DRY_RUN is runtime-switchable (see setMode) — dashboard
  *  has a one-click toggle plus an independent pause button.
@@ -93,7 +95,7 @@ function nowSec() { return Date.now() / 1000; }
 
 // ── Strategy parameters ──
 const GRID_STEP        = Number(process.env.GRID_STEP || 0.10);       // rungs 0.10 apart -> 0.15/0.25/0.35/0.45
-const FINAL_TP_PRICE   = Number(process.env.FINAL_TP_PRICE || 0.99);  // single shared exit target for every fill (no per-rung TP anymore)
+const TP_OFFSET        = Number(process.env.TP_OFFSET || 0.20);       // each rung's TP = its own entry price + this offset
 const ENTRY_SHARES     = Number(process.env.ENTRY_SHARES || 50);      // fixed size per individual grid entry
 const TAKER_FEE_RATE   = Number(process.env.TAKER_FEE_RATE || process.env.MAKER_FEE_RATE || 0); // market orders are taker fills
 const STARTUP_GRACE_SECS = Number(process.env.STARTUP_GRACE_SECS || 3); // how close to a window's start the bot is still allowed to jump in
@@ -103,7 +105,7 @@ const STARTUP_GRACE_SECS = Number(process.env.STARTUP_GRACE_SECS || 3); // how c
 // sharing one bankroll, not a mutually-exclusive toggle.
 const LADDER_DEFS = [
   { key: 'BTC-Up',   symbol: 'BTC', side: 'Up',   min: 0.15, max: 0.45 },
-  { key: 'ETH-Down', symbol: 'ETH', side: 'Down', min: 0.55, max: 0.85 },
+  { key: 'ETH-Down', symbol: 'ETH', side: 'Down', min: 0.45, max: 0.85 },
 ];
 
 function buildLevels(min, max, step) {
@@ -225,8 +227,7 @@ function freshSlot(level) {
     entryOrderId: null,
     firing: false,          // transient lock while a market buy call is in flight for this rung
     position: null,         // { shares, entryPrice, cost, tpPrice, tpOrderId, tpPending, exiting, closed, won, closedReason }
-    reentries: 0,           // 0 or 1 — this rung takes at most ONE entry per window, it never re-fires after filling
-    everFilled: false,      // once true, this rung is done for the window — will never fire an entry again
+    reentries: 0,           // how many times this rung has filled this window — unlimited, but only ever one at a time
   };
 }
 
@@ -445,8 +446,7 @@ function affordable(shares, price) {
 // for every rung that hasn't fired yet this window.
 async function attemptEntry(ladder, slot) {
   if (!tradingEnabled) return;
-  if (slot.everFilled) return;    // one entry per rung per window — never fire again
-  if (slot.position) return;      // already holding
+  if (slot.position) return;      // already holding — only eligible again once this position's TP closes it
   if (slot.firing) return;        // a buy call is already in flight for this rung
   const ask = currentAsk(ladder);
   if (ask == null || ask > slot.level) return; // price hasn't reached this rung yet
@@ -472,28 +472,28 @@ async function onEntryFilled(ladder, slot, fillPrice, filledShares) {
   bankroll = round2(bankroll - cost);
   feesPaid = round2(feesPaid + fee);
 
+  const tpPrice = round2(fillPrice + TP_OFFSET);
   slot.entryOrderId = null;
   slot.reentries += 1;
-  slot.everFilled = true; // this rung is done taking entries for the rest of the window
   slot.position = {
-    shares, entryPrice: fillPrice, cost, tpPrice: FINAL_TP_PRICE,
+    shares, entryPrice: fillPrice, cost, tpPrice,
     tpOrderId: null, tpPending: true, exiting: false,
     closed: false, won: null, closedReason: null,
   };
 
   registerTrade({ ladder: ladder.key, symbol: ladder.symbol, side: 'BUY', outcome: ladder.side, reason: 'ENTRY', price: fillPrice, shares, cost, fee, level: slot.level, reentry: slot.reentries });
-  log(`✅ [${ladder.key}] market buy filled @ ${fillPrice.toFixed(2)} (rung ${slot.level.toFixed(2)}) — ${shares}sh, watching for final TP @ ${FINAL_TP_PRICE.toFixed(2)} — rung is now closed for the rest of this window`);
+  log(`✅ [${ladder.key}] market buy filled @ ${fillPrice.toFixed(2)} (rung ${slot.level.toFixed(2)}) — ${shares}sh, watching for TP @ ${tpPrice.toFixed(2)} (entry+${TP_OFFSET.toFixed(2)}) — re-entry #${slot.reentries}`);
   recordEquity();
 }
 
-// Fires a market SELL the instant bid reaches FINAL_TP_PRICE. Checked every
-// tick for every rung currently holding an open position.
+// Fires a market SELL the instant bid reaches this position's own TP price
+// (entry + TP_OFFSET). Checked every tick for every rung currently holding.
 async function attemptExit(ladder, slot) {
   const pos = slot.position;
   if (!pos || pos.closed || !pos.tpPending) return;
   if (pos.exiting) return; // a sell call is already in flight for this position
   const bid = currentBid(ladder);
-  if (bid == null || bid < pos.tpPrice) return; // price hasn't reached the final TP yet
+  if (bid == null || bid < pos.tpPrice) return; // price hasn't reached this rung's TP yet
 
   pos.exiting = true;
   try {
@@ -501,13 +501,13 @@ async function attemptExit(ladder, slot) {
     const resp = await placeMarketSell(tokenId, pos.shares, bid);
     if (!resp || !resp.filled) return; // LIVE trader missing methods, call failed, or didn't fill — retry next tick
     pos.tpOrderId = resp.id;
-    await onFinalTPFilled(ladder, slot, resp.avgPrice != null ? resp.avgPrice : bid, resp.filledShares || pos.shares);
+    await onTPFilled(ladder, slot, resp.avgPrice != null ? resp.avgPrice : bid, resp.filledShares || pos.shares);
   } finally {
     if (slot.position) slot.position.exiting = false;
   }
 }
 
-async function onFinalTPFilled(ladder, slot, fillPrice, filledShares) {
+async function onTPFilled(ladder, slot, fillPrice, filledShares) {
   const pos = slot.position;
   if (!pos || pos.closed) return;
   const shares = filledShares > 0 ? filledShares : pos.shares;
@@ -525,12 +525,12 @@ async function onFinalTPFilled(ladder, slot, fillPrice, filledShares) {
   pos.tpPending = false;
 
   registerTrade({ ladder: ladder.key, symbol: ladder.symbol, side: 'SELL', outcome: ladder.side, reason: 'TP', price: fillPrice, shares, profit, level: slot.level });
-  log(`💰 [${ladder.key}] final TP market sell filled @ ${fillPrice.toFixed(2)} (rung ${slot.level.toFixed(2)}) — pnl=$${profit.toFixed(2)} | bankroll=$${bankroll.toFixed(2)} — rung stays closed for the rest of this window (one entry per rung)`);
+  log(`💰 [${ladder.key}] TP market sell filled @ ${fillPrice.toFixed(2)} (rung ${slot.level.toFixed(2)}) — pnl=$${profit.toFixed(2)} | bankroll=$${bankroll.toFixed(2)} — rung is free again, will re-enter next time ask reaches it`);
 
   slot.position = null;
   recordEquity();
-  // NOTE: no re-fire here — one entry per rung per window. The rung stays
-  // closed (slot.everFilled stays true) until the next window resets it.
+  // Rung is now free — attemptEntry will fire again as soon as ask reaches
+  // this rung. Unlimited re-entries per window, just never while holding.
 }
 
 // One evaluation pass per ladder per tick — checks exits first (works even
@@ -694,7 +694,7 @@ function buildLadderState(ladder) {
       const pos = slot.position;
       return {
         level,
-        entryPending: !slot.everFilled && !pos, // still watching, eligible to fire an entry
+        entryPending: !pos, // still watching, eligible to fire an entry
         reentries: slot.reentries,
         position: pos ? {
           shares: pos.shares, entryPrice: pos.entryPrice, cost: pos.cost,
@@ -735,8 +735,8 @@ function buildState() {
     winRate: (wins + losses) > 0 ? round2((wins / (wins + losses)) * 100) : null,
     uptime: Math.floor((Date.now() - startTime) / 1000),
     config: {
-      gridStep: GRID_STEP, finalTpPrice: FINAL_TP_PRICE, entryShares: ENTRY_SHARES,
-      takerFeeRate: TAKER_FEE_RATE, oneEntryPerRung: true, orderType: 'market',
+      gridStep: GRID_STEP, tpOffset: TP_OFFSET, entryShares: ENTRY_SHARES,
+      takerFeeRate: TAKER_FEE_RATE, orderType: 'market',
       upRange: [LADDER_DEFS.find(d => d.side === 'Up')?.min, LADDER_DEFS.find(d => d.side === 'Up')?.max],
       downRange: [LADDER_DEFS.find(d => d.side === 'Down')?.min, LADDER_DEFS.find(d => d.side === 'Down')?.max],
     },
@@ -799,7 +799,8 @@ async function init(privateKey, emit, slogFn) {
   log('🚀 Grid-Ladder Bot — BTC-Up / ETH-Down, 15-minute windows only');
   log(`⚙️  $${TOTAL_CAPITAL} capital (shared across both ladders)`);
   log('⚙️  Ladders: BTC-Up [0.15-0.45] | ETH-Down [0.55-0.85] — independent, both can hold at once, BTC-Down/ETH-Up disabled');
-  log(`⚙️  Grid: entry every ${GRID_STEP.toFixed(2)} across each range, one entry per rung (no re-arm) | shared final TP @ ${FINAL_TP_PRICE.toFixed(2)}, no SL — unfilled TPs ride to resolution`);
+  log(`⚙️  Grid: entry every ${GRID_STEP.toFixed(2)} across each range, TP = entry + ${TP_OFFSET.toFixed(2)} per rung, no SL — unfilled TPs ride to resolution`);
+  log(`⚙️  Re-entry: unlimited per rung, but only after that rung's current position closes via TP (never re-fires while holding)`);
   log(`⚙️  Sizing: fixed ${ENTRY_SHARES}sh per entry | market orders — fire the instant price reaches trigger, not resting limit orders`);
   log(`${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
