@@ -93,7 +93,7 @@ app.get('/', (_, res) => {
   .ladder-summary { display: flex; justify-content: space-between; font-size: 9px; color: var(--muted); padding: 4px 2px 8px; border-bottom: 1px solid var(--border); margin-bottom: 4px; }
   .level-row { display: grid; grid-template-columns: 44px 1fr 60px 28px; align-items: center; gap: 6px; padding: 3px 2px; font-size: 9.5px; border-bottom: 1px solid #ffffff00; }
   .level-row.empty { opacity: .35; }
-  .level-row.resting { color: var(--yellow); }
+  .level-row.watching { color: var(--yellow); }
   .level-row.filled { color: var(--text); background: #00990911; border-radius: 4px; }
   .level-row.tp-pending { color: var(--green); background: #00a85411; border-radius: 4px; }
   .level-price { font-family: ui-monospace, monospace; }
@@ -183,7 +183,7 @@ app.get('/', (_, res) => {
   $('resume-btn').onclick = () => fetch('/api/resume', { method: 'POST' }).then(() => flash('Resumed'));
   $('live-btn').onclick = () => {
     const wantLive = !$('live-btn').classList.contains('is-live');
-    if (wantLive && !confirm('Switch to LIVE mode? This will place REAL resting limit orders with REAL money.')) return;
+    if (wantLive && !confirm('Switch to LIVE mode? This will place REAL market orders with REAL money.')) return;
     fetch('/api/set-mode', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ live: wantLive }) })
       .then(() => flash(wantLive ? 'Switched to LIVE' : 'Switched to DEMO'));
   };
@@ -280,7 +280,7 @@ app.get('/', (_, res) => {
       grid.innerHTML = s.ladders.map(l => {
         const hasPos = l.levels.some(lv => lv.position && !lv.position.closed);
         const openCount = l.levels.filter(lv => lv.position && !lv.position.closed).length;
-        const restingCount = l.levels.filter(lv => lv.entryPending).length;
+        const watchingCount = l.levels.filter(lv => lv.entryPending).length;
         const totalReentries = l.levels.reduce((a, lv) => a + (lv.reentries || 0), 0);
         const sideCls = l.side === 'Up' ? 'up' : 'down';
         const rows = l.levels.slice().reverse().map(lv => {
@@ -289,8 +289,8 @@ app.get('/', (_, res) => {
             rowCls = lv.position.tpPending ? 'tp-pending' : 'filled';
             stateTxt = 'holding ' + lv.position.shares + 'sh @ ' + lv.position.entryPrice.toFixed(2);
           } else if (lv.entryPending) {
-            rowCls = 'resting';
-            stateTxt = 'resting buy';
+            rowCls = 'watching';
+            stateTxt = 'watching for trigger';
           }
           const tpTxt = lv.position ? ('TP ' + lv.position.tpPrice.toFixed(2)) : '';
           return '<div class="level-row ' + rowCls + '">' +
@@ -303,7 +303,7 @@ app.get('/', (_, res) => {
         return '<div class="ladder-card ' + (hasPos ? 'has-pos' : '') + (s.tradable ? '' : ' untradable') + '">' +
           '<div class="ladder-hdr"><div class="ladder-sym ' + sideCls + '">' + l.key + '</div><div class="ladder-price">ask ' + (l.ask!=null?l.ask.toFixed(2):'—') + ' / bid ' + (l.bid!=null?l.bid.toFixed(2):'—') + '</div></div>' +
           '<div class="ladder-body">' +
-            '<div class="ladder-summary"><span>' + openCount + ' open</span><span>' + restingCount + ' resting</span><span>' + totalReentries + ' re-entries</span></div>' +
+            '<div class="ladder-summary"><span>' + openCount + ' open</span><span>' + watchingCount + ' watching</span><span>' + totalReentries + ' filled</span></div>' +
             rows +
           '</div></div>';
       }).join('');
