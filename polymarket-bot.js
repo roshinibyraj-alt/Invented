@@ -2,33 +2,40 @@
 
 /**
  * ═══════════════════════════════════════════════════════════════
- *  POLYMARKET GRID-LADDER BOT — BTC/ETH UP/DOWN, 15-MINUTE WINDOWS
+ *  POLYMARKET GRID-LADDER BOT — BTC-UP / ETH-DOWN, 15-MINUTE WINDOWS
  * ═══════════════════════════════════════════════════════════════
  *
  *  Trades ONLY the 15-minute Up/Down windows for BTC and ETH.
- *  There are FOUR fully independent grid ladders, sharing one bankroll
- *  but never otherwise interacting with each other:
+ *  Exactly TWO independent grid ladders are active, sharing one
+ *  bankroll but never otherwise interacting with each other. BTC-Down
+ *  and ETH-Up are disabled entirely — only these two run, and they can
+ *  both be live at the same time (they are not mutually exclusive):
  *
- *    BTC-Up    range 0.30 – 0.90
- *    BTC-Down  range 0.25 – 0.85
- *    ETH-Up    range 0.30 – 0.90
- *    ETH-Down  range 0.25 – 0.85
+ *    BTC-Up    range 0.15 – 0.45
+ *    ETH-Down  range 0.15 – 0.45
  *
- *  GRID: each ladder has fixed entry levels every 0.05 across its range
- *  (e.g. Up: 0.30, 0.35, 0.40 … 0.90). At window open, a resting limit
- *  BUY order is placed at every level. As price drops to/through a
- *  level, that level's order fills.
+ *  GRID: each ladder has fixed entry levels every 0.10 across its range
+ *  (0.15, 0.25, 0.35, 0.45). At window open, a resting limit BUY order
+ *  is placed at every level. As price drops to/through a level, that
+ *  level's order fills.
  *
- *  TP: every fill gets its own resting limit SELL at entry + 0.10.
- *  When that TP fills, the slot is freed and IMMEDIATELY re-arms a
- *  fresh resting buy at the same level — a level can re-enter many
- *  times in the same window. Ladders are independent of one another.
+ *  ONE ENTRY PER RUNG: unlike a classic grid, a level does NOT re-arm
+ *  after it fills. Once a rung has taken its single entry for the
+ *  window, it stays closed for the rest of that window — no repeat
+ *  fills, no immediate re-arming.
  *
- *  NO STOP LOSS: anything still open (filled, TP not yet hit) when the
+ *  EXIT: there is no per-rung/individual take-profit anymore. Every
+ *  filled rung instead gets a resting limit SELL at a single shared
+ *  FINAL_TP_PRICE (0.99). Anything not sold at 0.99 by the time the
  *  window ends simply rides to real settlement ($1 win / $0 loss per
  *  share). A separate, independent auto-claim script handles real
  *  on-chain redemption; this bot's bookkeeping just mirrors it via the
  *  public Gamma API so the dashboard's P&L stays meaningful.
+ *
+ *  NO MID-WINDOW STARTS: if the bot is started (or restarted) partway
+ *  through a live 15-minute window, it will NOT arm a partial grid for
+ *  the window already in progress. It sits out and waits for the next
+ *  window boundary so every grid it trades gets the full window.
  *
  *  ORDER STYLE: resting limit orders (maker), not marketable/taker
  *  orders. In DRY_RUN, fills are simulated locally against the live
@@ -82,17 +89,18 @@ function round5(n) { return Math.round(n * 100000) / 100000; }
 function nowSec() { return Date.now() / 1000; }
 
 // ── Strategy parameters ──
-const GRID_STEP      = Number(process.env.GRID_STEP || 0.05);
-const TP_OFFSET       = Number(process.env.TP_OFFSET || 0.10);
-const ENTRY_SHARES    = Number(process.env.ENTRY_SHARES || 50); // fixed size per individual grid entry
-const MAKER_FEE_RATE  = Number(process.env.MAKER_FEE_RATE || 0); // resting orders are maker fills — no taker fee by default
+const GRID_STEP        = Number(process.env.GRID_STEP || 0.10);       // rungs 0.10 apart -> 0.15/0.25/0.35/0.45
+const FINAL_TP_PRICE   = Number(process.env.FINAL_TP_PRICE || 0.99);  // single shared exit target for every fill (no per-rung TP anymore)
+const ENTRY_SHARES     = Number(process.env.ENTRY_SHARES || 50);      // fixed size per individual grid entry
+const MAKER_FEE_RATE   = Number(process.env.MAKER_FEE_RATE || 0);     // resting orders are maker fills — no taker fee by default
+const STARTUP_GRACE_SECS = Number(process.env.STARTUP_GRACE_SECS || 3); // how close to a window's start the bot is still allowed to jump in
 
-// Ladder definitions: 4 fully independent grids sharing one bankroll.
+// Ladder definitions: ONLY BTC-Up and ETH-Down are traded. Both can be
+// active/holding positions at the same time — they are independent grids
+// sharing one bankroll, not a mutually-exclusive toggle.
 const LADDER_DEFS = [
-  { key: 'BTC-Up',   symbol: 'BTC', side: 'Up',   min: 0.30, max: 0.90 },
-  { key: 'BTC-Down', symbol: 'BTC', side: 'Down', min: 0.25, max: 0.85 },
-  { key: 'ETH-Up',   symbol: 'ETH', side: 'Up',   min: 0.30, max: 0.90 },
-  { key: 'ETH-Down', symbol: 'ETH', side: 'Down', min: 0.25, max: 0.85 },
+  { key: 'BTC-Up',   symbol: 'BTC', side: 'Up',   min: 0.15, max: 0.45 },
+  { key: 'ETH-Down', symbol: 'ETH', side: 'Down', min: 0.15, max: 0.45 },
 ];
 
 function buildLevels(min, max, step) {
@@ -219,7 +227,8 @@ function freshSlot(level) {
     entryOrderId: null,
     entryPending: false,   // a resting buy order is currently live at this level
     position: null,        // { shares, entryPrice, cost, tpPrice, tpOrderId, tpPending, closed, won, closedReason }
-    reentries: 0,           // number of times this level has filled this window
+    reentries: 0,           // 0 or 1 — this rung takes at most ONE entry per window, it never re-arms after filling
+    everFilled: false,      // once true, this rung is done for the window — armEntry will refuse to re-arm it
   };
 }
 
@@ -243,6 +252,11 @@ function freshWindowState() {
 }
 
 let win = freshWindowState();
+
+// If set, the bot deliberately sits out the window that was already in
+// progress at startup (so it never arms a partial/mid-window grid). It
+// stays null once the bot has synced up with a window from its start.
+let skipUntilWindowStart = null;
 
 // ─────────────────────────────────────────
 //  Slug / window math
@@ -437,6 +451,7 @@ function affordable(shares, price) {
 
 async function armEntry(ladder, slot) {
   if (!tradingEnabled) return;
+  if (slot.everFilled) return;    // one entry per rung per window — never re-arm a rung that already filled
   if (slot.position) return;      // slot already holding a position
   if (slot.entryPending) return;  // already resting
   const tokenId = tokenIdFor(ladder);
@@ -461,10 +476,11 @@ async function onEntryFilled(ladder, slot, fillPrice, filledShares) {
   bankroll = round2(bankroll - cost);
   feesPaid = round2(feesPaid + fee);
 
-  const tpPrice = round2(slot.level + TP_OFFSET);
+  const tpPrice = FINAL_TP_PRICE; // shared final exit target — no more per-rung individual TP
   slot.entryPending = false;
   slot.entryOrderId = null;
   slot.reentries += 1;
+  slot.everFilled = true; // this rung is done taking entries for the rest of the window
   slot.position = {
     shares, entryPrice: fillPrice, cost, tpPrice,
     tpOrderId: null, tpPending: false,
@@ -472,22 +488,22 @@ async function onEntryFilled(ladder, slot, fillPrice, filledShares) {
   };
 
   registerTrade({ ladder: ladder.key, symbol: ladder.symbol, side: 'BUY', outcome: ladder.side, reason: 'ENTRY', price: fillPrice, shares, cost, fee, level: slot.level, reentry: slot.reentries });
-  log(`✅ [${ladder.key}] entry filled @ ${fillPrice.toFixed(2)} (level ${slot.level.toFixed(2)}) — ${shares}sh, TP armed @ ${tpPrice.toFixed(2)} (re-entry #${slot.reentries})`);
+  log(`✅ [${ladder.key}] entry filled @ ${fillPrice.toFixed(2)} (level ${slot.level.toFixed(2)}) — ${shares}sh, final TP armed @ ${tpPrice.toFixed(2)} — rung is now closed for the rest of this window`);
 
-  // Arm the TP immediately.
+  // Arm the shared final-TP sell immediately.
   const tokenId = tokenIdFor(ladder);
   const tpResp = await placeRestingSell(tokenId, tpPrice, shares);
   if (tpResp) {
     slot.position.tpOrderId = tpResp.id;
     slot.position.tpPending = true;
     if (tpResp.filled) {
-      await onTPFilled(ladder, slot, tpResp.avgPrice || tpPrice, tpResp.filledShares || shares);
+      await onFinalTPFilled(ladder, slot, tpResp.avgPrice || tpPrice, tpResp.filledShares || shares);
     }
   }
   recordEquity();
 }
 
-async function onTPFilled(ladder, slot, fillPrice, filledShares) {
+async function onFinalTPFilled(ladder, slot, fillPrice, filledShares) {
   const pos = slot.position;
   if (!pos || pos.closed) return;
   const shares = filledShares > 0 ? filledShares : pos.shares;
@@ -505,11 +521,12 @@ async function onTPFilled(ladder, slot, fillPrice, filledShares) {
   pos.tpPending = false;
 
   registerTrade({ ladder: ladder.key, symbol: ladder.symbol, side: 'SELL', outcome: ladder.side, reason: 'TP', price: fillPrice, shares, profit, level: slot.level });
-  log(`💰 [${ladder.key}] TP hit @ ${fillPrice.toFixed(2)} (level ${slot.level.toFixed(2)}) — pnl=$${profit.toFixed(2)} | bankroll=$${bankroll.toFixed(2)} — re-arming level`);
+  log(`💰 [${ladder.key}] final TP hit @ ${fillPrice.toFixed(2)} (level ${slot.level.toFixed(2)}) — pnl=$${profit.toFixed(2)} | bankroll=$${bankroll.toFixed(2)} — rung stays closed for the rest of this window (one entry per rung)`);
 
   slot.position = null;
   recordEquity();
-  await armEntry(ladder, slot); // re-enter — grid levels can refill many times per window
+  // NOTE: no re-arm here — one entry per rung per window. The rung stays
+  // closed (slot.everFilled stays true) until the next window resets it.
 }
 
 // Tick a single ladder: DRY_RUN simulates fills purely from the live price
@@ -525,7 +542,7 @@ function tickLadderDryRun(ladder) {
     const pos = slot.position;
     if (pos && !pos.closed && pos.tpPending) {
       if (bid != null && bid >= pos.tpPrice) {
-        onTPFilled(ladder, slot, pos.tpPrice, pos.shares).catch(e => log(`⚠️  TP fill error: ${e.message}`));
+        onFinalTPFilled(ladder, slot, pos.tpPrice, pos.shares).catch(e => log(`⚠️  TP fill error: ${e.message}`));
       }
       continue;
     }
@@ -554,7 +571,7 @@ async function pollLiveOrders() {
       if (pos && !pos.closed && pos.tpPending && pos.tpOrderId) {
         try {
           const st = await trader.getOrder(pos.tpOrderId);
-          if (st && st.filled) await onTPFilled(ladder, slot, st.avgPrice || pos.tpPrice, st.filledShares || pos.shares);
+          if (st && st.filled) await onFinalTPFilled(ladder, slot, st.avgPrice || pos.tpPrice, st.filledShares || pos.shares);
         } catch (e) { log(`⚠️  getOrder (tp) failed: ${describeOrderError(e)}`); }
       }
     }
@@ -642,6 +659,22 @@ async function tick() {
   const ws = currentWindowStart(WINDOW_SECS);
   if (win.windowStart === null || ws !== win.windowStart) {
     if (win.windowStart !== null && !win.resolvedThisWindow) await resolveWindow();
+
+    if (skipUntilWindowStart !== null) {
+      if (ws <= skipUntilWindowStart) {
+        // Still the same (or an earlier/stale) window we deliberately sat
+        // out at startup — stay untradable, don't call loadWindow/arm anything.
+        win = freshWindowState();
+        win.windowStart = ws;
+        win.windowEnd = ws + WINDOW_SECS;
+        win.tradable = false;
+        win.resolvedThisWindow = true;
+        return;
+      }
+      log('⏰ Next window boundary reached — resuming normal trading');
+      skipUntilWindowStart = null;
+    }
+
     await loadWindow();
   }
   if (!win.tradable) return;
@@ -752,9 +785,10 @@ function buildState() {
     winRate: (wins + losses) > 0 ? round2((wins / (wins + losses)) * 100) : null,
     uptime: Math.floor((Date.now() - startTime) / 1000),
     config: {
-      gridStep: GRID_STEP, tpOffset: TP_OFFSET, entryShares: ENTRY_SHARES,
-      makerFeeRate: MAKER_FEE_RATE,
-      upRange: [0.30, 0.90], downRange: [0.25, 0.85],
+      gridStep: GRID_STEP, finalTpPrice: FINAL_TP_PRICE, entryShares: ENTRY_SHARES,
+      makerFeeRate: MAKER_FEE_RATE, oneEntryPerRung: true,
+      upRange: [LADDER_DEFS.find(d => d.side === 'Up')?.min, LADDER_DEFS.find(d => d.side === 'Up')?.max],
+      downRange: [LADDER_DEFS.find(d => d.side === 'Down')?.min, LADDER_DEFS.find(d => d.side === 'Down')?.max],
     },
     equityCurve, logs: logs.slice(-100), trades: trades.slice(-80).reverse(),
     real: {
@@ -816,12 +850,19 @@ function setMode(wantLive) {
 async function init(privateKey, emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
-  log('🚀 Grid-Ladder Bot — BTC/ETH Up/Down, 15-minute windows only');
-  log(`⚙️  $${TOTAL_CAPITAL} capital (shared across all 4 ladders)`);
-  log('⚙️  Ladders: BTC-Up [0.30-0.90] | BTC-Down [0.25-0.85] | ETH-Up [0.30-0.90] | ETH-Down [0.25-0.85] — fully independent');
-  log(`⚙️  Grid: entry every ${GRID_STEP.toFixed(2)} across each range, TP = entry + ${TP_OFFSET.toFixed(2)}, no SL — unfilled TPs ride to resolution`);
-  log(`⚙️  Sizing: fixed ${ENTRY_SHARES}sh per entry | resting limit orders (maker) | levels re-arm immediately after a TP fills — unlimited re-entries per window`);
+  log('🚀 Grid-Ladder Bot — BTC-Up / ETH-Down, 15-minute windows only');
+  log(`⚙️  $${TOTAL_CAPITAL} capital (shared across both ladders)`);
+  log('⚙️  Ladders: BTC-Up [0.15-0.45] | ETH-Down [0.15-0.45] — independent, both can hold at once, BTC-Down/ETH-Up disabled');
+  log(`⚙️  Grid: entry every ${GRID_STEP.toFixed(2)} across each range, one entry per rung (no re-arm) | shared final TP @ ${FINAL_TP_PRICE.toFixed(2)}, no SL — unfilled TPs ride to resolution`);
+  log(`⚙️  Sizing: fixed ${ENTRY_SHARES}sh per entry | resting limit orders (maker)`);
   log(`${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
+
+  const ws0 = currentWindowStart(WINDOW_SECS);
+  const elapsed0 = nowSec() - ws0;
+  if (elapsed0 > STARTUP_GRACE_SECS) {
+    skipUntilWindowStart = ws0;
+    log(`⏳ Started ${elapsed0.toFixed(0)}s into an in-progress ${WINDOW_SECS}s window — sitting this one out, will arm the grid fresh at the next window boundary`);
+  }
 
   trader = new PolymarketTrader(privateKey);
   await trader.authenticate();
