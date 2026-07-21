@@ -298,6 +298,76 @@ async function discoverMarket(m) {
 }
 
 // ─────────────────────────────────────────
+//  URL lookup — paste any Polymarket match URL (or bare slug) and get
+//  back the sport, the market, and BOTH outcomes with live prices, so
+//  the dashboard can add the match with one click, no guessing.
+// ─────────────────────────────────────────
+function extractSlugFromInput(input) {
+  const raw = (input || '').trim();
+  if (!raw) return { slug: null, pathParts: [] };
+  const noQueryOrHash = raw.split('?')[0].split('#')[0];
+  const parts = noQueryOrHash.split('/').map(p => p.trim()).filter(Boolean);
+  if (!parts.length) return { slug: null, pathParts: [] };
+  return { slug: parts[parts.length - 1], pathParts: parts };
+}
+function detectSportFromPath(pathParts, slug) {
+  const hay = `${pathParts.join(' ')} ${slug || ''}`.toLowerCase();
+  const tennisHints = ['atp', 'wta', 'itf', 'tennis', 'wimbledon', 'roland-garros', 'us-open-tennis', 'australian-open'];
+  const cricketHints = ['cricket', 'crint', 'ipl', 'bbl', 'psl', 'cpl', 't20', 't10', 'odi', 'the-hundred', 'test-cricket'];
+  if (tennisHints.some(h => hay.includes(h))) return 'tennis';
+  if (cricketHints.some(h => hay.includes(h))) return 'cricket';
+  return null;
+}
+
+async function lookupMatchByUrl(input) {
+  const { slug, pathParts } = extractSlugFromInput(input);
+  if (!slug) {
+    return { ok: false, error: 'Could not read a match slug out of that — paste the full match page URL, e.g. https://polymarket.com/sports/atp/atp-baez-kecmano-2026-07-20' };
+  }
+  const sport = detectSportFromPath(pathParts, slug);
+  if (!sport) {
+    return { ok: false, error: `Could not tell whether "${slug}" is cricket or tennis from that URL — this engine only supports those two sports right now. If it IS one of those, use the manual Token ID field below instead.` };
+  }
+  try {
+    const event = await getJSON(`${GAMMA}/events/slug/${encodeURIComponent(slug)}`);
+    if (!event || !event.id) return { ok: false, error: `No Polymarket event found for slug "${slug}" — double check the URL.` };
+
+    const mk = pickPrimaryMarket(event);
+    if (!mk) return { ok: false, error: `Found the event "${event.title || slug}" but it has no usable market inside it.` };
+
+    const tokens = parseMarketTokens(mk);
+    if (!tokens.length || tokens.some(t => !t.token_id)) {
+      return { ok: false, error: `Found the market "${mk.question || mk.groupItemTitle || slug}" but couldn't read its outcome tokens — it may not be live/tradeable yet.` };
+    }
+
+    const outcomes = await Promise.all(tokens.map(async t => {
+      const [ask, bid] = await Promise.all([
+        getJSON(`${CLOB}/price?token_id=${t.token_id}&side=BUY`).catch(() => null),
+        getJSON(`${CLOB}/price?token_id=${t.token_id}&side=SELL`).catch(() => null),
+      ]);
+      return {
+        outcome: t.outcome,
+        tokenId: t.token_id,
+        ask: ask?.price != null ? parseFloat(ask.price) : null,
+        bid: bid?.price != null ? parseFloat(bid.price) : null,
+      };
+    }));
+
+    return {
+      ok: true,
+      sport,
+      eventSlug: slug,
+      eventTitle: event.title || event.slug,
+      marketQuestion: mk.groupItemTitle || mk.question || mk.slug,
+      conditionId: mk.conditionId || null,
+      outcomes,
+    };
+  } catch (e) {
+    return { ok: false, error: `Lookup failed: ${e.message}` };
+  }
+}
+
+// ─────────────────────────────────────────
 //  Price feed
 // ─────────────────────────────────────────
 async function refreshPrice(m) {
@@ -731,4 +801,5 @@ module.exports = {
   addMatch, removeMatch, pauseMatch, resumeMatch,
   pauseAll, resumeAll, pauseTrading, resumeTrading,
   setMode, getStatus, buildState,
+  lookupMatchByUrl,
 };
