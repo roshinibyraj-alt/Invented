@@ -118,6 +118,17 @@ const VOL_Z_SCALE          = Number(process.env.VOL_Z_SCALE          || 1.5);  /
 const REVERSAL_CONFIDENCE  = Number(process.env.REVERSAL_CONFIDENCE  || 0.45); // opposing confidence needed to trigger a stop-exit
 const TIME_DECAY_SECS      = Number(process.env.TIME_DECAY_SECS      || 90);   // last N seconds: tighten TPs
 const MIN_EXIT_LEAD_SECS   = Number(process.env.MIN_EXIT_LEAD_SECS   || 15);   // don't bother stop-exiting this close to window end
+// CONTRARIAN_MODE: live demo data (n=23 resolutions) showed the plain
+// momentum-continuation signal winning only 5/23 at resolution (p≈0.005
+// vs a fair coin) — i.e. these 5m windows appear to mean-revert relative
+// to window-open, not continue. Defaulting this ON inverts the signal
+// (bets against the recent move) until more data says otherwise. Set
+// CONTRARIAN_MODE=false to go back to plain momentum-continuation.
+const CONTRARIAN_MODE      = (process.env.CONTRARIAN_MODE || 'true').toLowerCase() === 'true';
+// RIDE has no TP — it's all-or-nothing at resolution, the tier the reversal
+// data above was measuring. MID/DEEP are the proven earner (TP harvesting).
+// Size RIDE down relative to them until CONTRARIAN_MODE is validated further.
+const SLOT_SIZE_MULTIPLIER = { ride: Number(process.env.RIDE_SIZE_MULT || 0.6), mid: 1.0, deep: 1.0 };
 const STARTUP_GRACE_SECS   = Number(process.env.STARTUP_GRACE_SECS  || 3);
 
 const BASE_NOTIONAL        = Number(process.env.BASE_NOTIONAL       || 25);   // sizing baseline; scaled 0.4x-1.6x by confidence
@@ -308,9 +319,11 @@ function computeSignal(symbol) {
   const z = ret / denom;
   const confidence = clamp(Math.abs(z), 0, 1);
   const side = ret === 0 ? null : (ret > 0 ? 'Up' : 'Down');
-  const signedConfidence = side === 'Up' ? confidence : (side === 'Down' ? -confidence : 0);
+  let signedConfidence = side === 'Up' ? confidence : (side === 'Down' ? -confidence : 0);
+  if (CONTRARIAN_MODE) signedConfidence = -signedConfidence; // bet against the recent move, not with it
+  const effectiveSide = CONTRARIAN_MODE ? (side === 'Up' ? 'Down' : (side === 'Down' ? 'Up' : null)) : side;
   const modelProbUp = clamp(0.5 + signedConfidence * MAX_MODEL_EDGE, 0.05, 0.95);
-  return { ret, vol, z, confidence, side, modelProbUp };
+  return { ret, vol, z, confidence, side: effectiveSide, modelProbUp };
 }
 
 // ─────────────────────────────────────────
@@ -435,8 +448,8 @@ function sideExposure(side) {
   return round2(total);
 }
 
-function sizeForEntry(ladder, confidence, level) {
-  const raw = clamp(BASE_NOTIONAL * (0.4 + 1.2 * confidence), MIN_NOTIONAL, MAX_NOTIONAL);
+function sizeForEntry(ladder, confidence, level, kind) {
+  const raw = clamp(BASE_NOTIONAL * (0.4 + 1.2 * confidence), MIN_NOTIONAL, MAX_NOTIONAL) * (SLOT_SIZE_MULTIPLIER[kind] || 1);
   const used = sideExposure(ladder.side);
   const room = MAX_DIRECTIONAL_EXPOSURE - used;
   if (room <= 0) return 0;
@@ -492,7 +505,7 @@ async function maybeArmSlot(ladder, slot) {
   if (!def || def.level == null || def.level <= 0 || def.level >= 0.98) return;
   if (def.level >= ask) return; // would cross the spread — not a resting/maker order
 
-  const notional = sizeForEntry(ladder, confidence, def.level);
+  const notional = sizeForEntry(ladder, confidence, def.level, slot.kind);
   if (notional <= 0) {
     ladder.reason = 'directional exposure cap reached';
     return;
@@ -599,9 +612,11 @@ async function retuneTakeProfits() {
   }
 }
 
-// Reversal stop on RIDE-tier (no fixed TP) positions: if momentum flips hard
-// against the held side, cross the spread and sell now rather than ride to
-// a probable $0 at resolution.
+// Reversal stop: if momentum flips hard against a held side, cross the
+// spread and sell now rather than ride to a probable $0 at resolution.
+// Covers ALL tiers — RIDE (which never had a TP order) and MID/DEEP (whose
+// resting TP may simply never fill before the window ends, leaving them
+// just as exposed to resolution risk as RIDE).
 async function checkReversalStops() {
   if (!win.tradable || win.windowEnd == null) return;
   const secsLeft = win.windowEnd - nowSec();
@@ -609,20 +624,27 @@ async function checkReversalStops() {
 
   for (const def of LADDER_DEFS) {
     const ladder = win.ladders[def.key];
-    const slot = ladder.slots.ride;
-    const pos = slot.position;
-    if (!pos || pos.closed || pos.tpPending) continue;
     const sig = computeSignal(ladder.symbol);
     const opposing = sig.side && sig.side !== ladder.side ? sig.confidence : 0;
-    if (opposing >= REVERSAL_CONFIDENCE) {
+    if (opposing < REVERSAL_CONFIDENCE) continue;
+
+    for (const kind of SLOT_KINDS) {
+      const slot = ladder.slots[kind];
+      const pos = slot.position;
+      if (!pos || pos.closed) continue;
       const bid = currentBid(ladder);
       if (bid == null || bid <= 0.01) continue;
+      // Already at/above the fixed TP? Let the TP fill naturally instead of
+      // paying an unnecessary taker fee to exit a position that's winning anyway.
+      if (slot.tpTarget != null && bid >= (slot.effectiveTp ?? slot.tpTarget)) continue;
+
+      if (pos.tpPending && pos.tpOrderId) await cancelRestingOrder(pos.tpOrderId); // clear the resting TP before crossing the spread
       const tokenId = tokenIdFor(ladder);
       const resp = await placeRestingSell(tokenId, bid, pos.shares); // aggressive: prices at current bid, expected to cross/fill fast
       if (resp) {
         pos.tpOrderId = resp.id;
         pos.tpPending = true;
-        log(`🛑 [${ladder.key}/ride] momentum reversal (opposing conf ${opposing.toFixed(2)}) — cutting position @ ~${bid.toFixed(2)}, forfeiting maker rebate`);
+        log(`🛑 [${ladder.key}/${kind}] momentum reversal (opposing conf ${opposing.toFixed(2)}) — cutting position @ ~${bid.toFixed(2)}, forfeiting maker rebate`);
         if (DRY_RUN || resp.filled) await onExitFilled(ladder, slot, resp.avgPrice || bid, resp.filledShares || pos.shares, 'STOP');
       }
     }
@@ -928,9 +950,9 @@ async function init(privateKey, emit, slogFn) {
   emitFn = emit; slog = slogFn;
   log('🚀 Momentum-Confirmed Adaptive Ladder Bot — BTC/ETH Up/Down, 5-minute windows only');
   log(`⚙️  $${TOTAL_CAPITAL} capital (shared) | base notional $${BASE_NOTIONAL} (0.4x-1.6x by confidence) | directional exposure cap $${MAX_DIRECTIONAL_EXPOSURE}/side`);
-  log(`⚙️  Signal: Binance spot momentum since window-open, vol-normalized → confidence + model probability. Ladders only arm when edge ≥ ${MIN_EDGE} and confidence ≥ ${MIN_CONFIDENCE}`);
-  log(`⚙️  Rungs are dynamic (RIDE/MID/DEEP scaled off live model probability), not fixed prices`);
-  log(`⚙️  Exits: fixed TP on MID/DEEP, time-decay TP tightening in final ${TIME_DECAY_SECS}s, reversal stop-exit on RIDE tier if opposing confidence ≥ ${REVERSAL_CONFIDENCE}`);
+  log(`⚙️  Signal: Binance spot momentum since window-open, vol-normalized → confidence + model probability${CONTRARIAN_MODE ? ' — CONTRARIAN_MODE ON: betting against the recent move (demo data showed plain momentum losing 5/23 at resolution, p≈0.005)' : ' — plain momentum-continuation'}. Ladders only arm when edge ≥ ${MIN_EDGE} and confidence ≥ ${MIN_CONFIDENCE}`);
+  log(`⚙️  Rungs are dynamic (RIDE/MID/DEEP scaled off live model probability), not fixed prices | RIDE sized at ${SLOT_SIZE_MULTIPLIER.ride}x vs MID/DEEP`);
+  log(`⚙️  Exits: fixed TP on MID/DEEP, time-decay TP tightening in final ${TIME_DECAY_SECS}s, reversal stop-exit on ALL tiers if opposing confidence ≥ ${REVERSAL_CONFIDENCE}`);
   log(`${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
   await refreshSpot(); // warm up the spot feed before the first window loads
