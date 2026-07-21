@@ -14,8 +14,15 @@
  *  condition ID for resolution detection).
  *
  *  STRATEGY (identical for every match, cricket or tennis):
- *   - GRID: exactly 2 resting-buy rungs active at a time, $0.05 apart.
- *     Anchored off the live ask price P: near = P-0.05, far = P-0.10.
+ *   - INITIAL ENTRY: on add, the near rung's first buy is priced AT the
+ *     live ask (crosses the spread, fills immediately) instead of resting
+ *     below the market. The far rung starts completely dormant — it is
+ *     NOT armed and is skipped by the 2-min stale rearm — until that
+ *     initial entry actually fills. Only then does far activate, anchored
+ *     at (initial fill price - 0.05). This is a one-time bootstrap per
+ *     match; every rung's behavior afterward is identical to before.
+ *   - GRID: exactly 2 resting-buy rungs active at a time, $0.05 apart
+ *     once both are live.
  *   - TP: each rung's TP = its own entry price + 0.10.
  *   - TRAILING RE-ENTRY: the instant a rung's TP fills, that SAME rung
  *     re-arms at old_entry + 0.05 (its own history) — it climbs 0.05
@@ -148,6 +155,7 @@ function newMatch({ id, sport, label, tokenId, conditionId, eventSlug, outcomeLa
     realizedPnl: 0, rebatesEarned: 0, wins: 0, losses: 0,
     equityCurve: [{ t: Date.now(), equity: cap }],
     rungs: [freshRung('near'), freshRung('far')],
+    initialGridActivated: false, // 'far' rung stays inactive until the initial (near) entry actually fills
     logs: [],
     trades: [],
     lastPriceFetch: 0, lastStatusFetch: 0, lastOrderPoll: 0, lastRearm: Date.now(),
@@ -382,20 +390,23 @@ async function refreshPrice(m) {
   } catch (_) {}
 }
 
-// Establishes the initial anchors for both rungs off the live ask, once.
+// Seeds ONLY the initial (near) entry, priced AT the live ask so it crosses
+// the spread and fills right away. The far rung stays fully dormant
+// (nextEntryPrice = null, so armRungs/rearmStaleRungs both skip it) until
+// that initial entry actually fills — see the activation block in
+// onEntryFilled, which anchors far at (initial fill price - GRID_INTERVAL).
 function tryEstablishInitialGrid(m) {
   if (m.market.status !== 'awaiting-price') return;
   if (m.market.ask == null) return;
-  const near = round2(m.market.ask - GRID_INTERVAL);
-  const far = round2(m.market.ask - 2 * GRID_INTERVAL);
-  if (far < MIN_ENTRY_PRICE || near > MAX_ENTRY_PRICE) {
-    // Price too extreme to place a workable 2-rung grid below it right now — keep waiting.
+  const initialPrice = round2(m.market.ask);
+  if (initialPrice < MIN_ENTRY_PRICE || initialPrice > MAX_ENTRY_PRICE) {
+    // Price too extreme to place a workable initial entry right now (its TP would be unreachable) — keep waiting.
     return;
   }
-  m.rungs[0].nextEntryPrice = near; // near rung
-  m.rungs[1].nextEntryPrice = far;  // far rung
+  m.rungs[0].nextEntryPrice = initialPrice; // near rung — the initial entry
+  m.rungs[1].nextEntryPrice = null;         // far rung — inactive until initial entry fills
   m.market.status = 'trading';
-  log(m, `🎯 initial grid anchored off live ask ${m.market.ask.toFixed(2)} — near rung @ ${near.toFixed(2)} (TP ${round2(near + TP_OFFSET).toFixed(2)}), far rung @ ${far.toFixed(2)} (TP ${round2(far + TP_OFFSET).toFixed(2)})`);
+  log(m, `🎯 initial entry queued at live ask ${initialPrice.toFixed(2)} (crosses the spread to fill immediately, TP ${round2(initialPrice + TP_OFFSET).toFixed(2)}) — 2nd grid rung stays dormant until this fills`);
 }
 
 // ─────────────────────────────────────────
@@ -445,6 +456,22 @@ async function onEntryFilled(m, r, fillPrice, filledShares) {
 
   registerTrade(m, { rung: r.id, side: 'BUY', reason: 'ENTRY', price: fillPrice, shares, cost, rebate, fill: r.fills });
   log(m, `✅ [${r.id}] resting buy filled @ ${fillPrice.toFixed(2)} — ${shares.toFixed(2)}sh ($${cost.toFixed(2)}) | +$${rebate.toFixed(5)} maker rebate (est.) | TP armed @ ${tpPrice.toFixed(2)} — fill #${r.fills}`);
+
+  // First-ever fill in this match activates the dormant far rung, anchored
+  // off this REAL fill price (not the pre-trade ask) — one-time only.
+  if (!m.initialGridActivated) {
+    m.initialGridActivated = true;
+    const far = m.rungs.find(x => x.id === 'far');
+    if (far && far !== r && !far.position) {
+      const farPrice = round2(fillPrice - GRID_INTERVAL);
+      if (farPrice >= MIN_ENTRY_PRICE) {
+        far.nextEntryPrice = farPrice;
+        log(m, `🔓 [far] 2nd grid rung activated — next entry ${farPrice.toFixed(2)} (initial fill ${fillPrice.toFixed(2)} − ${GRID_INTERVAL.toFixed(2)})`);
+      } else {
+        log(m, `🔓 [far] 2nd grid rung would activate below the minimum entry floor (${farPrice.toFixed(2)} < ${MIN_ENTRY_PRICE}) — stays dormant until a stale rearm brings it into range`);
+      }
+    }
+  }
 
   const tpResp = await placeRestingSell(m, m.market.tokenId, tpPrice, shares);
   if (tpResp) {
@@ -541,6 +568,7 @@ async function rearmStaleRungs(m) {
   for (let i = 0; i < m.rungs.length; i++) {
     const r = m.rungs[i];
     if (r.position && !r.position.closed) continue; // never disturb an open position or its TP
+    if (r.id === 'far' && !m.initialGridActivated) continue; // far stays dormant until the initial entry fills — don't wake it off a timer
 
     // Cancel any stale resting entry order that hasn't filled in this window.
     if (r.entryPending && r.entryOrderId) {
