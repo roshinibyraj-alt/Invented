@@ -45,7 +45,7 @@ app.get('/', (_, res) => {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>🪜 BTC/ETH Ladder Bot — 5m Up/Down</title>
+<title>📡 BTC/ETH MCAL Bot — 5m Up/Down</title>
 <style>
   :root {
     --bg: #ffffff; --bg2: #f5f7fa; --bg3: #edf0f4; --border: #d0d7e2;
@@ -91,7 +91,7 @@ app.get('/', (_, res) => {
   .ladder-price { font-size: 10px; color: var(--cyan); }
   .ladder-body { padding: 6px 10px; max-height: 340px; overflow-y: auto; }
   .ladder-summary { display: flex; justify-content: space-between; font-size: 9px; color: var(--muted); padding: 4px 2px 8px; border-bottom: 1px solid var(--border); margin-bottom: 4px; }
-  .level-row { display: grid; grid-template-columns: 44px 1fr 60px 28px; align-items: center; gap: 6px; padding: 3px 2px; font-size: 9.5px; border-bottom: 1px solid #ffffff00; }
+  .level-row { display: grid; grid-template-columns: 70px 1fr 90px 28px; align-items: center; gap: 6px; padding: 3px 2px; font-size: 9.5px; border-bottom: 1px solid #ffffff00; }
   .level-row.empty { opacity: .35; }
   .level-row.watching { color: var(--yellow); }
   .level-row.filled { color: var(--text); background: #00990911; border-radius: 4px; }
@@ -130,7 +130,7 @@ app.get('/', (_, res) => {
 </head>
 <body>
   <div class="header">
-    <div class="logo">🪜 GRID<span>-LADDER</span> BOT — 5m Up/Down</div>
+    <div class="logo">📡 MCAL<span>-ADAPTIVE</span> BOT — 5m Up/Down</div>
     <div id="mode-badge" class="mode-badge mode-dry">DEMO</div>
   </div>
   <div class="toolbar">
@@ -154,7 +154,7 @@ app.get('/', (_, res) => {
   </div>
 
   <div class="section">
-    <div class="section-hdr">Grid Ladders (independent — BTC-Up / BTC-Down / ETH-Up / ETH-Down)</div>
+    <div class="section-hdr">Adaptive Ladders (signal-gated — a side only trades when momentum + edge agree)</div>
     <div class="ladder-grid" id="ladder-grid"></div>
   </div>
 
@@ -223,8 +223,12 @@ app.get('/', (_, res) => {
     $('pause-btn').style.display = s.tradingEnabled ? '' : 'none';
     $('resume-btn').style.display = s.tradingEnabled ? 'none' : '';
 
+    const spotTxt = s.spot ? (
+      ' | BTC spot ' + (s.spot.BTC!=null?s.spot.BTC.toFixed(1):'—') + (s.spot.BTCOpen!=null?(' (open '+s.spot.BTCOpen.toFixed(1)+')'):'') +
+      ' | ETH spot ' + (s.spot.ETH!=null?s.spot.ETH.toFixed(1):'—') + (s.spot.ETHOpen!=null?(' (open '+s.spot.ETHOpen.toFixed(1)+')'):'')
+    ) : '';
     $('window-strip').innerHTML = s.tradable
-      ? ('5m window ends in <b>' + fmtSecs(s.secsToEnd) + '</b> | BTC: ' + (s.markets.BTC.slug || '—') + ' | ETH: ' + (s.markets.ETH.slug || '—'))
+      ? ('5m window ends in <b>' + fmtSecs(s.secsToEnd) + '</b> | BTC: ' + (s.markets.BTC.slug || '—') + ' | ETH: ' + (s.markets.ETH.slug || '—') + spotTxt)
       : 'Loading window…';
 
     const stats = [
@@ -236,6 +240,9 @@ app.get('/', (_, res) => {
       ['Win Rate', s.winRate != null ? s.winRate + '%' : '—', ''],
       ['Wins / Losses', s.wins + ' / ' + s.losses, ''],
       ['Rebates Earned', '$' + s.rebatesEarned.toFixed(4), 'pnl-pos'],
+      ['Fees Paid (stops)', '$' + (s.feesPaid||0).toFixed(4), s.feesPaid ? 'pnl-neg' : ''],
+      ['Up Exposure', '$' + s.exposure.Up.toFixed(2) + ' / $' + s.exposure.cap, ''],
+      ['Down Exposure', '$' + s.exposure.Down.toFixed(2) + ' / $' + s.exposure.cap, ''],
     ];
     $('stats-row').innerHTML = stats.map(([label, val, cls]) =>
       '<div class="stat"><div class="stat-label">' + label + '</div><div class="stat-val ' + cls + '">' + val + '</div></div>'
@@ -283,27 +290,37 @@ app.get('/', (_, res) => {
         const watchingCount = l.levels.filter(lv => lv.entryPending).length;
         const totalReentries = l.levels.reduce((a, lv) => a + (lv.reentries || 0), 0);
         const sideCls = l.side === 'Up' ? 'up' : 'down';
+        const sig = l.signal || {};
         const rows = l.levels.slice().reverse().map(lv => {
           let rowCls = 'empty', stateTxt = 'idle';
           if (lv.position && !lv.position.closed) {
             rowCls = lv.position.tpPending ? 'tp-pending' : 'filled';
-            stateTxt = 'holding ' + lv.position.shares + 'sh @ ' + lv.position.entryPrice.toFixed(2);
+            stateTxt = 'holding ' + lv.position.shares.toFixed(2) + 'sh @ ' + lv.position.entryPrice.toFixed(2);
           } else if (lv.entryPending) {
             rowCls = 'watching';
             stateTxt = 'watching for trigger';
           }
-          const tpTxt = lv.position ? (lv.position.tpPrice != null ? ('TP ' + lv.position.tpPrice.toFixed(2)) : 'to resolution') : '';
+          const tpVal = lv.position ? lv.position.tpPrice : lv.effectiveTp;
+          const tpTxt = (lv.kind === 'ride') ? (lv.position ? 'rides (stop-armed)' : 'no TP — rides') : (tpVal != null ? ('TP ' + tpVal.toFixed(2)) : '—');
+          const priceTxt = lv.level != null ? lv.level.toFixed(2) : '—';
           return '<div class="level-row ' + rowCls + '">' +
-            '<div class="level-price">' + lv.level.toFixed(2) + '</div>' +
+            '<div class="level-price">' + lv.kind.toUpperCase() + ' ' + priceTxt + '</div>' +
             '<div class="level-state">' + stateTxt + '</div>' +
             '<div class="level-tp">' + tpTxt + '</div>' +
             '<div class="level-re">' + (lv.reentries > 0 ? 'x' + lv.reentries : '') + '</div>' +
           '</div>';
         }).join('');
+        const signalTxt = '<div class="level-row" style="grid-template-columns:1fr" title="' + (l.reason||'') + '">' +
+          '<div class="level-state" style="color:' + (l.active ? '#00a854' : '#7a8fa8') + '">' +
+            (l.active ? '● ACTIVE' : '○ idle') + ' — model ' + (sig.modelProb!=null?sig.modelProb.toFixed(2):'—') +
+            ' | edge ' + (sig.edge!=null?(sig.edge>=0?'+':'')+sig.edge.toFixed(2):'—') +
+            ' | conf ' + (sig.confidence!=null?sig.confidence.toFixed(2):'—') +
+          '</div></div>';
         return '<div class="ladder-card ' + (hasPos ? 'has-pos' : '') + (s.tradable ? '' : ' untradable') + '">' +
           '<div class="ladder-hdr"><div class="ladder-sym ' + sideCls + '">' + l.key + '</div><div class="ladder-price">ask ' + (l.ask!=null?l.ask.toFixed(2):'—') + ' / bid ' + (l.bid!=null?l.bid.toFixed(2):'—') + '</div></div>' +
           '<div class="ladder-body">' +
             '<div class="ladder-summary"><span>' + openCount + ' open</span><span>' + watchingCount + ' watching</span><span>' + totalReentries + ' filled</span></div>' +
+            signalTxt +
             rows +
           '</div></div>';
       }).join('');
