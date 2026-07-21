@@ -20,6 +20,13 @@ app.get('/api/sports/status', (_, res) => {
   try { res.json(sportsBot.getStatus()); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
+app.post('/api/sports/lookup', async (req, res) => {
+  const { url } = req.body || {};
+  if (!url || !String(url).trim()) return res.status(400).json({ ok: false, error: 'Missing "url" field' });
+  try { res.json(await sportsBot.lookupMatchByUrl(url)); }
+  catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
 app.post('/api/sports/add', (req, res) => {
   const { sport, label, tokenId, conditionId, eventSlug, outcomeLabel, capital } = req.body || {};
   try { res.json(sportsBot.addMatch({ sport, label, tokenId, conditionId, eventSlug, outcomeLabel, capital })); }
@@ -143,7 +150,21 @@ app.get('/', (_, res) => {
   <div class="toolbar-status" id="toolbar-status"></div>
 
   <div class="section">
-    <div class="section-hdr">Add a Cricket or Tennis Match</div>
+    <div class="section-hdr">Add by Match URL</div>
+    <div class="add-match-form" id="lookup-form" style="grid-template-columns: 1fr 140px;">
+      <div class="field">
+        <label>Polymarket match URL</label>
+        <input id="f-url" placeholder="https://polymarket.com/sports/atp/atp-baez-kecmano-2026-07-20">
+      </div>
+      <button id="lookup-btn" type="button" style="grid-column:auto;">🔎 Look Up</button>
+      <div class="hint">Paste any cricket or tennis match page URL. This finds the event, the moneyline market, and shows live ask/bid for both sides — pick one to add it (uses its exact Token ID + Condition ID, the most reliable path).</div>
+      <div class="add-match-status" id="lookup-status"></div>
+      <div id="lookup-results" style="grid-column:1/-1;"></div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-hdr">Add Manually (Token ID / Event Slug)</div>
     <form class="add-match-form" id="add-match-form">
       <div class="field">
         <label>Sport</label>
@@ -239,6 +260,55 @@ app.get('/', (_, res) => {
       })
       .catch(e => { statusEl.textContent = '❌ ' + e.message; statusEl.className = 'add-match-status err'; });
   });
+
+  function fmtPx(n) { return n == null ? '—' : n.toFixed(3); }
+
+  function renderLookupResult(r) {
+    if (!r.ok) return '<div class="add-match-status err">❌ ' + r.error + '</div>';
+    const rows = r.outcomes.map(o => {
+      const payload = {
+        sport: r.sport,
+        label: r.eventTitle + ' — ' + o.outcome,
+        tokenId: o.tokenId,
+        conditionId: r.conditionId || undefined,
+      };
+      return '<div class="level-row" style="grid-template-columns: 1fr 80px 80px 90px;">' +
+        '<div class="level-price">' + o.outcome + '</div>' +
+        '<div class="level-state">ask ' + fmtPx(o.ask) + '</div>' +
+        '<div class="level-state">bid ' + fmtPx(o.bid) + '</div>' +
+        '<div><button type="button" onclick=\\'addFromLookup(' + JSON.stringify(payload).replace(/'/g, "&#39;") + ')\\'>➕ Add this side</button></div>' +
+      '</div>';
+    }).join('');
+    return '<div class="add-match-status ok">✅ Found: ' + r.eventTitle + ' | ' + r.marketQuestion + ' (' + r.sport + ')</div>' + rows;
+  }
+
+  function addFromLookup(payload) {
+    const statusEl = $('lookup-status');
+    statusEl.textContent = 'Adding…'; statusEl.className = 'add-match-status';
+    fetch('/api/sports/add', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
+      .then(r => r.json())
+      .then(res => {
+        statusEl.textContent = res.ok ? ('✅ Match added (id: ' + res.id + ')') : ('❌ ' + res.error);
+        statusEl.className = 'add-match-status ' + (res.ok ? 'ok' : 'err');
+      })
+      .catch(e => { statusEl.textContent = '❌ ' + e.message; statusEl.className = 'add-match-status err'; });
+  }
+
+  $('lookup-btn').onclick = () => {
+    const url = $('f-url').value.trim();
+    const statusEl = $('lookup-status');
+    const resultsEl = $('lookup-results');
+    resultsEl.innerHTML = '';
+    if (!url) { statusEl.textContent = '❌ Paste a match URL first'; statusEl.className = 'add-match-status err'; return; }
+    statusEl.textContent = 'Looking up…'; statusEl.className = 'add-match-status';
+    fetch('/api/sports/lookup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }) })
+      .then(r => r.json())
+      .then(res => {
+        statusEl.textContent = '';
+        resultsEl.innerHTML = renderLookupResult(res);
+      })
+      .catch(e => { statusEl.textContent = '❌ ' + e.message; statusEl.className = 'add-match-status err'; });
+  };
 
   function matchAction(id, action) {
     fetch('/api/sports/' + encodeURIComponent(id) + '/' + action, { method: 'POST' });
