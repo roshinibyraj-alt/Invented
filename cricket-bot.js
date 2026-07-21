@@ -2,18 +2,18 @@
 
 /**
  * ═══════════════════════════════════════════════════════════════
- *  SPORTS TRAILING-GRID LADDER ENGINE — Cricket & Tennis, multi-match
+ *  SPORTS TRAILING-GRID LADDER ENGINE — Cricket, Tennis & Crypto, multi-match
  * ═══════════════════════════════════════════════════════════════
  *
  *  This engine replaces the old single-event cricket-bot.js and the
  *  crypto (BTC/ETH) ladder bot entirely. It runs the SAME trailing-grid
- *  ladder strategy — independently — against any number of cricket or
- *  tennis matches at once. Matches are added at startup (from env, for
- *  back-compat) or at any time from the dashboard by supplying the
- *  Polymarket market IDs (a token ID to trade, ideally with its
- *  condition ID for resolution detection).
+ *  ladder strategy — independently — against any number of cricket,
+ *  tennis matches, or crypto Up/Down markets at once. Matches are added
+ *  at startup (from env, for back-compat) or at any time from the
+ *  dashboard by supplying the Polymarket market IDs (a token ID to
+ *  trade, ideally with its condition ID for resolution detection).
  *
- *  STRATEGY (identical for every match, cricket or tennis):
+ *  STRATEGY (identical for every match, cricket, tennis, or crypto):
  *   - INITIAL ENTRY: on add, the near rung's first buy is priced AT the
  *     live ask (crosses the spread, fills immediately) instead of resting
  *     below the market. The far rung starts completely dormant — it is
@@ -135,7 +135,7 @@ function newMatch({ id, sport, label, tokenId, conditionId, eventSlug, outcomeLa
   const cap = Number(capital) > 0 ? Number(capital) : DEFAULT_CAPITAL;
   return {
     id,
-    sport,                       // 'cricket' | 'tennis'
+    sport,                       // 'cricket' | 'tennis' | 'crypto'
     label: label || id,
     outcomeLabel: outcomeLabel || null,
     eventSlug: eventSlug || null,
@@ -322,8 +322,10 @@ function detectSportFromPath(pathParts, slug) {
   const hay = `${pathParts.join(' ')} ${slug || ''}`.toLowerCase();
   const tennisHints = ['atp', 'wta', 'itf', 'tennis', 'wimbledon', 'roland-garros', 'us-open-tennis', 'australian-open'];
   const cricketHints = ['cricket', 'crint', 'ipl', 'bbl', 'psl', 'cpl', 't20', 't10', 'odi', 'the-hundred', 'test-cricket'];
+  const cryptoHints = ['updown', 'up-or-down', 'btc-', 'eth-', 'sol-', 'xrp-', 'crypto'];
   if (tennisHints.some(h => hay.includes(h))) return 'tennis';
   if (cricketHints.some(h => hay.includes(h))) return 'cricket';
+  if (cryptoHints.some(h => hay.includes(h))) return 'crypto';
   return null;
 }
 
@@ -334,7 +336,7 @@ async function lookupMatchByUrl(input) {
   }
   const sport = detectSportFromPath(pathParts, slug);
   if (!sport) {
-    return { ok: false, error: `Could not tell whether "${slug}" is cricket or tennis from that URL — this engine only supports those two sports right now. If it IS one of those, use the manual Token ID field below instead.` };
+    return { ok: false, error: `Could not tell whether "${slug}" is cricket, tennis, or a crypto Up/Down market from that URL — this engine only supports those right now. If it IS one of those, use the manual Token ID field below instead.` };
   }
   try {
     const event = await getJSON(`${GAMMA}/events/slug/${encodeURIComponent(slug)}`);
@@ -746,7 +748,8 @@ function buildState() {
 // ─────────────────────────────────────────
 function addMatch(opts) {
   const { sport, label, tokenId, conditionId, eventSlug, outcomeLabel, capital } = opts || {};
-  if (sport !== 'cricket' && sport !== 'tennis') return { ok: false, error: 'sport must be "cricket" or "tennis"' };
+  const VALID_SPORTS = ['cricket', 'tennis', 'crypto'];
+  if (!VALID_SPORTS.includes(sport)) return { ok: false, error: `sport must be one of: ${VALID_SPORTS.join(', ')}` };
   if (!tokenId && !eventSlug) return { ok: false, error: 'Provide a tokenId (recommended) or an eventSlug + outcomeLabel to add a match.' };
   if (!tokenId && eventSlug && !outcomeLabel) return { ok: false, error: 'When adding by eventSlug (no tokenId), an outcomeLabel is required (e.g. "Nepal", "Djokovic") so the bot knows which side to back.' };
 
@@ -800,7 +803,7 @@ function resumeTrading() { return resumeAll(); }
 async function init(privateKey, emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
-  slog('[sports] 🏟️  Sports Trailing-Grid Ladder Engine — cricket & tennis, multi-match');
+  slog('[sports] 🏟️  Sports Trailing-Grid Ladder Engine — cricket, tennis & crypto Up/Down, multi-match');
   slog(`[sports] ⚙️  Default capital per match: $${DEFAULT_CAPITAL} (compounding) | Grid: 2 rungs, $${GRID_INTERVAL.toFixed(2)} apart, TP = entry + $${TP_OFFSET.toFixed(2)}`);
   slog(`[sports] ⚙️  Idle/unfilled rungs re-anchor to the live price every ${Math.round(REARM_INTERVAL_MS / 60000)} min so the ladder never stalls`);
   slog(`[sports] ${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
