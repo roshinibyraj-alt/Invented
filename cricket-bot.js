@@ -36,9 +36,12 @@
  *     idle/unfilled entry rungs get refreshed. This keeps the ladder
  *     "following" the live price instead of stalling.
  *   - SIZING / COMPOUNDING: each match starts with its own capital
- *     (default $200, configurable per match) and compounds — profit is
- *     reinvested. Each arming pass, notional = current match bankroll / 2,
- *     snapshotted once so simultaneous arms split 50/50.
+ *     (default $200, configurable per match) and fully compounds — every
+ *     arming pass, notional = current free bankroll / (number of rungs
+ *     arming right now). The common case is one rung arming alone (a TP
+ *     just freed it up), so it gets 100% of the freed cash, profit
+ *     included. If both rungs happen to arm in the same pass, they split
+ *     the free bankroll evenly between them so neither over-commits.
  *   - ORDER STYLE: resting limit orders only (maker) — eligible for
  *     Polymarket's Sports-category Maker Rebates Program (25% share,
  *     0.03 taker-fee-equivalent rate). Real payouts are pooled daily
@@ -126,6 +129,7 @@ function freshRung(id) {
     maxedOut: false,      // true once its TP would exceed 0.99 — stops (re-)arming
     entryOrderId: null,
     entryPending: false,
+    pendingShares: null, // shares actually committed to the current resting entry order — the source of truth for fill sizing
     fills: 0,
     position: null, // { shares, entryPrice, cost, tpPrice, tpOrderId, tpPending, closed, won, closedReason }
   };
@@ -420,7 +424,12 @@ async function armRungs(m) {
   if (!m.tradingEnabled || m.market.status !== 'trading') return;
   const eligible = m.rungs.filter(r => !r.position && !r.entryPending && !r.maxedOut && r.nextEntryPrice != null);
   if (!eligible.length) return;
-  const notionalEach = round2(m.bankroll / 2); // snapshot once — simultaneous arms split cleanly
+  // Full reinvestment: whichever rung(s) are actually arming right now split
+  // the ENTIRE free bankroll between them. If only one rung is arming (the
+  // common case — one TP just freed it up), it gets 100% of the free cash,
+  // not a flat half. If both happen to arm in the same pass, they split it
+  // evenly so neither over-commits against the other's pending order.
+  const notionalEach = round2(m.bankroll / eligible.length); // snapshot once — simultaneous arms split cleanly
   for (const r of eligible) {
     await armRung(m, r, notionalEach);
   }
@@ -438,12 +447,13 @@ async function armRung(m, r, notional) {
   if (!resp) return;
   r.entryOrderId = resp.id;
   r.entryPending = true;
+  r.pendingShares = shares; // the size actually committed to this resting order — fill paths must use THIS, not re-derive from a bankroll snapshot taken later
   if (resp.filled) await onEntryFilled(m, r, price, resp.filledShares || shares);
 }
 
 async function onEntryFilled(m, r, fillPrice, filledShares) {
   if (r.position) return; // never stack a second position on this rung
-  const shares = filledShares > 0 ? filledShares : round2((m.bankroll / 2) / fillPrice);
+  const shares = filledShares > 0 ? filledShares : (r.pendingShares > 0 ? r.pendingShares : round2(m.bankroll / fillPrice));
   const cost = round2(shares * fillPrice);
   const rebate = estimateMakerRebate(shares, fillPrice);
 
@@ -453,6 +463,7 @@ async function onEntryFilled(m, r, fillPrice, filledShares) {
   const tpPrice = round2(fillPrice + TP_OFFSET);
   r.entryPending = false;
   r.entryOrderId = null;
+  r.pendingShares = null;
   r.fills += 1;
   r.position = { shares, entryPrice: fillPrice, cost, tpPrice, tpOrderId: null, tpPending: false, closed: false, won: null, closedReason: null };
 
@@ -528,8 +539,8 @@ function tickDryRun(m) {
       continue;
     }
     if (!pos && r.entryPending && ask != null && r.nextEntryPrice != null && ask <= r.nextEntryPrice) {
-      const notionalEach = round2(m.bankroll / 2);
-      onEntryFilled(m, r, r.nextEntryPrice, round2(notionalEach / r.nextEntryPrice)).catch(e => log(m, `⚠️  entry fill error: ${e.message}`));
+      const shares = r.pendingShares > 0 ? r.pendingShares : round2(m.bankroll / r.nextEntryPrice);
+      onEntryFilled(m, r, r.nextEntryPrice, shares).catch(e => log(m, `⚠️  entry fill error: ${e.message}`));
     }
   }
 }
@@ -541,7 +552,7 @@ async function pollLiveOrders(m) {
     if (r.entryPending && r.entryOrderId) {
       try {
         const st = await trader.getOrder(r.entryOrderId);
-        if (st && st.filled) await onEntryFilled(m, r, r.nextEntryPrice, st.filledShares || round2((m.bankroll / 2) / r.nextEntryPrice));
+        if (st && st.filled) await onEntryFilled(m, r, r.nextEntryPrice, st.filledShares || r.pendingShares || round2(m.bankroll / r.nextEntryPrice));
       } catch (e) { log(m, `⚠️  getOrder (entry) failed: ${describeOrderError(e)}`); }
     }
     const pos = r.position;
@@ -577,6 +588,7 @@ async function rearmStaleRungs(m) {
       await cancelRestingOrder(m, r.entryOrderId);
       r.entryPending = false;
       r.entryOrderId = null;
+      r.pendingShares = null;
     }
 
     const spacing = (i + 1) * GRID_INTERVAL; // near = 1x below ask, far = 2x below ask
@@ -637,6 +649,7 @@ async function resolveMatch(m, won) {
       await cancelRestingOrder(m, r.entryOrderId);
       r.entryPending = false;
       r.entryOrderId = null;
+      r.pendingShares = null;
     }
     const pos = r.position;
     if (!pos || pos.closed) continue;
