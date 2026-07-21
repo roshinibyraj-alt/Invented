@@ -15,7 +15,7 @@ app.use(express.json());
 
 app.get('/healthz', (_, res) => res.sendStatus(200));
 
-// ── Sports ladder API (cricket + tennis, multi-match) ──
+// ── Sports ladder API (cricket + tennis + crypto Up/Down, multi-match) ──
 app.get('/api/sports/status', (_, res) => {
   try { res.json(sportsBot.getStatus()); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
@@ -113,6 +113,7 @@ app.get('/', (_, res) => {
   .match-tag { font-size: 9px; padding: 2px 8px; border-radius: 10px; margin-left: 8px; text-transform: uppercase; }
   .tag-cricket { background: #00996922; color: #4ade80; border: 1px solid #4ade8055; }
   .tag-tennis { background: #f59e0b22; color: #fbbf24; border: 1px solid #fbbf2455; }
+  .tag-crypto { background: #8b5cf622; color: #c4b5fd; border: 1px solid #c4b5fd55; }
   .match-price { font-size: 10px; color: var(--cyan); }
   .match-status-strip { padding: 8px 14px 0; font-size: 10px; color: var(--muted); }
   .match-body { padding: 10px 14px; }
@@ -157,7 +158,8 @@ app.get('/', (_, res) => {
         <input id="f-url" placeholder="https://polymarket.com/sports/atp/atp-baez-kecmano-2026-07-20">
       </div>
       <button id="lookup-btn" type="button" style="grid-column:auto;">🔎 Look Up</button>
-      <div class="hint">Paste any cricket or tennis match page URL. This finds the event, the moneyline market, and shows live ask/bid for both sides — pick one to add it (uses its exact Token ID + Condition ID, the most reliable path).</div>
+      <div class="hint">Paste any cricket, tennis, or crypto Up/Down (BTC/ETH/SOL/XRP 5m/15m) match page URL. This finds the event, the primary market, and shows live ask/bid for both sides — pick one to add it (uses its exact Token ID + Condition ID, the most reliable path).</div>
+      <div class="hint" style="color:#c4b5fd;">Note on crypto Up/Down markets: each window (e.g. btc-updown-15m-...) resolves in minutes and is a one-shot slug — the bot trades it like any match until it resolves, but does <b>not</b> currently auto-roll into the next window on its own.</div>
       <div class="add-match-status" id="lookup-status"></div>
       <div id="lookup-results" style="grid-column:1/-1;"></div>
     </div>
@@ -168,7 +170,7 @@ app.get('/', (_, res) => {
     <form class="add-match-form" id="add-match-form">
       <div class="field">
         <label>Sport</label>
-        <select id="f-sport"><option value="cricket">Cricket</option><option value="tennis">Tennis</option></select>
+        <select id="f-sport"><option value="cricket">Cricket</option><option value="tennis">Tennis</option><option value="crypto">Crypto (Up/Down)</option></select>
       </div>
       <div class="field">
         <label>Label (optional)</label>
@@ -333,7 +335,7 @@ app.get('/', (_, res) => {
     const st = m.market.status;
     const hasPos = m.rungs.some(r => r.position && !r.position.closed);
     const cardCls = 'match-card' + (hasPos ? ' has-pos' : '') + (st === 'resolved' ? ' resolved' : '');
-    const tagCls = m.sport === 'cricket' ? 'tag-cricket' : 'tag-tennis';
+    const tagCls = m.sport === 'cricket' ? 'tag-cricket' : (m.sport === 'tennis' ? 'tag-tennis' : 'tag-crypto');
     const statusTxt = (STATUS_TXT[st] || st) + (st === 'resolved' ? (' — ' + (m.market.resolvedWinner || 'unknown')) : '') +
       (m.market.marketQuestion ? (' | ' + m.market.marketQuestion) : '');
 
