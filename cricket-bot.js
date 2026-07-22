@@ -84,7 +84,9 @@ const TICK_MS            = 500;
 const PRICE_REFRESH_MS   = 1000;
 const STATUS_REFRESH_MS  = 5000;        // how often to poll Gamma for match/market resolution
 const ORDER_POLL_MS      = 2000;        // how often to poll resting LIVE order fills
-const REARM_INTERVAL_MS  = Number(process.env.SPORTS_REARM_INTERVAL_MS || 2 * 60 * 1000); // idle/unfilled rungs re-anchor to the live price this often (default 2 min)
+const REARM_INTERVAL_MS  = Number(process.env.SPORTS_REARM_INTERVAL_MS || 2 * 60 * 1000); // fallback default (2 min) when a match doesn't specify its own — see m.rearmIntervalMs
+const MIN_REARM_MS = 2 * 1000;   // dashboard floor: 2 seconds
+const MAX_REARM_MS = 5 * 60 * 1000; // dashboard ceiling: 5 minutes
 
 const SIDE_CANDIDATES_DEFAULT = []; // populated per-match from outcomeLabel
 
@@ -135,8 +137,11 @@ function freshRung(id) {
   };
 }
 
-function newMatch({ id, sport, label, tokenId, conditionId, eventSlug, outcomeLabel, capital }) {
+function newMatch({ id, sport, label, tokenId, conditionId, eventSlug, outcomeLabel, capital, rearmSeconds }) {
   const cap = Number(capital) > 0 ? Number(capital) : DEFAULT_CAPITAL;
+  const rearmMs = Number(rearmSeconds) > 0
+    ? Math.min(MAX_REARM_MS, Math.max(MIN_REARM_MS, Math.round(Number(rearmSeconds) * 1000)))
+    : REARM_INTERVAL_MS;
   return {
     id,
     sport,                       // 'cricket' | 'tennis' | 'crypto'
@@ -160,6 +165,7 @@ function newMatch({ id, sport, label, tokenId, conditionId, eventSlug, outcomeLa
     equityCurve: [{ t: Date.now(), equity: cap }],
     rungs: [freshRung('near'), freshRung('far')],
     initialGridActivated: false, // 'far' rung stays inactive until the initial (near) entry actually fills
+    rearmIntervalMs: rearmMs,    // per-match self-healing interval — set at add-time, 2s-5min, defaults to REARM_INTERVAL_MS
     logs: [],
     trades: [],
     lastPriceFetch: 0, lastStatusFetch: 0, lastOrderPoll: 0, lastRearm: Date.now(),
@@ -566,16 +572,19 @@ async function pollLiveOrders(m) {
 }
 
 // ─────────────────────────────────────────
-//  2-minute stale rearm — re-anchor idle/unfilled rungs to the LIVE
-//  price so the ladder follows the market instead of stalling.
-//  Rungs that already hold a position (waiting on their TP) are never
-//  touched here — only idle / still-resting entry rungs.
+//  Idle/unfilled-rung self-healing rearm — re-anchor to the LIVE price so
+//  the ladder follows the market instead of stalling. Interval is
+//  per-match (m.rearmIntervalMs, 2s-5min, set at add-time via the
+//  dashboard; falls back to REARM_INTERVAL_MS if unspecified). Rungs that
+//  already hold a position (waiting on their TP) are never touched here
+//  — only idle / still-resting entry rungs.
 // ─────────────────────────────────────────
 async function rearmStaleRungs(m) {
   if (m.market.status !== 'trading') return;
   if (m.market.ask == null) return;
   const now = Date.now();
-  if (now - m.lastRearm < REARM_INTERVAL_MS) return;
+  const intervalMs = m.rearmIntervalMs > 0 ? m.rearmIntervalMs : REARM_INTERVAL_MS;
+  if (now - m.lastRearm < intervalMs) return;
   m.lastRearm = now;
 
   for (let i = 0; i < m.rungs.length; i++) {
@@ -734,6 +743,7 @@ function buildMatchState(m) {
     capital: m.capital, bankroll: m.bankroll, markValue: mv,
     realizedPnl: m.realizedPnl, unrealizedPnl, rebatesEarned: m.rebatesEarned, wins: m.wins, losses: m.losses,
     totalPnl: round2(mv - m.capital),
+    rearmIntervalMs: m.rearmIntervalMs,
     equityCurve: m.equityCurve, logs: m.logs.slice(-60),
     createdAt: m.createdAt,
   };
@@ -750,8 +760,8 @@ function buildState() {
     config: {
       gridInterval: GRID_INTERVAL, tpOffset: TP_OFFSET,
       makerRebateShare: SPORTS_MAKER_REBATE_SHARE, sportsTakerFeeRate: SPORTS_TAKER_FEE_RATE,
-      rearmIntervalMs: REARM_INTERVAL_MS,
-      orderType: 'resting-limit', reentryMode: 'trailing + 2-min stale rearm',
+      rearmIntervalMsDefault: REARM_INTERVAL_MS, rearmIntervalMsMin: MIN_REARM_MS, rearmIntervalMsMax: MAX_REARM_MS,
+      orderType: 'resting-limit', reentryMode: 'trailing + configurable stale rearm (per match)',
     },
   };
 }
@@ -760,17 +770,21 @@ function buildState() {
 //  Controls
 // ─────────────────────────────────────────
 function addMatch(opts) {
-  const { sport, label, tokenId, conditionId, eventSlug, outcomeLabel, capital } = opts || {};
+  const { sport, label, tokenId, conditionId, eventSlug, outcomeLabel, capital, rearmSeconds } = opts || {};
   const VALID_SPORTS = ['cricket', 'tennis', 'crypto'];
   if (!VALID_SPORTS.includes(sport)) return { ok: false, error: `sport must be one of: ${VALID_SPORTS.join(', ')}` };
   if (!tokenId && !eventSlug) return { ok: false, error: 'Provide a tokenId (recommended) or an eventSlug + outcomeLabel to add a match.' };
   if (!tokenId && eventSlug && !outcomeLabel) return { ok: false, error: 'When adding by eventSlug (no tokenId), an outcomeLabel is required (e.g. "Nepal", "Djokovic") so the bot knows which side to back.' };
+  if (rearmSeconds != null && (isNaN(Number(rearmSeconds)) || Number(rearmSeconds) <= 0)) {
+    return { ok: false, error: 'rearmSeconds must be a positive number of seconds' };
+  }
 
   const id = `${sport}-${nextMatchSeq++}-${Date.now().toString(36)}`;
-  const m = newMatch({ id, sport, label, tokenId, conditionId, eventSlug, outcomeLabel, capital });
+  const m = newMatch({ id, sport, label, tokenId, conditionId, eventSlug, outcomeLabel, capital, rearmSeconds });
   matches.set(id, m);
 
-  log(m, `➕ Match added — ${sport} | "${m.label}" | ${tokenId ? `token ${tokenId}${conditionId ? ` (condition ${conditionId})` : ' (no condition ID — resolution won\'t auto-detect; add one or pause/remove manually when it ends)'}` : `discovering via slug "${eventSlug}", backing "${outcomeLabel}"`} | capital $${m.capital.toFixed(2)}`);
+  const rearmSecEffective = Math.round(m.rearmIntervalMs / 1000);
+  log(m, `➕ Match added — ${sport} | "${m.label}" | ${tokenId ? `token ${tokenId}${conditionId ? ` (condition ${conditionId})` : ' (no condition ID — resolution won\'t auto-detect; add one or pause/remove manually when it ends)'}` : `discovering via slug "${eventSlug}", backing "${outcomeLabel}"`} | capital $${m.capital.toFixed(2)} | self-healing every ${rearmSecEffective}s`);
 
   return { ok: true, id };
 }
@@ -818,7 +832,7 @@ async function init(privateKey, emit, slogFn) {
   slog = slogFn;
   slog('[sports] 🏟️  Sports Trailing-Grid Ladder Engine — cricket, tennis & crypto Up/Down, multi-match');
   slog(`[sports] ⚙️  Default capital per match: $${DEFAULT_CAPITAL} (compounding) | Grid: 2 rungs, $${GRID_INTERVAL.toFixed(2)} apart, TP = entry + $${TP_OFFSET.toFixed(2)}`);
-  slog(`[sports] ⚙️  Idle/unfilled rungs re-anchor to the live price every ${Math.round(REARM_INTERVAL_MS / 60000)} min so the ladder never stalls`);
+  slog(`[sports] ⚙️  Idle/unfilled rungs self-heal every ${Math.round(REARM_INTERVAL_MS / 1000)}s by default (2s-${Math.round(MAX_REARM_MS / 60000)}min, configurable per match from the dashboard)`);
   slog(`[sports] ${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
   trader = new PolymarketTrader(privateKey);
