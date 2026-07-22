@@ -93,11 +93,13 @@ const SIDE_CANDIDATES_DEFAULT = []; // populated per-match from outcomeLabel
 let DRY_RUN = (process.env.SPORTS_DRY_RUN || process.env.DRY_RUN || 'true').toLowerCase() === 'true';
 const DEFAULT_CAPITAL = Number(process.env.SPORTS_DEFAULT_CAPITAL || 200);
 
-// ── Strategy parameters (shared across every match) ──
+// ── Strategy parameters (fallback defaults — each match can override its own via the dashboard, see m.tpOffset/m.gridInterval) ──
 const GRID_INTERVAL = Number(process.env.SPORTS_GRID_INTERVAL || 0.05); // spacing between rungs AND the trailing step after each TP
 const TP_OFFSET     = Number(process.env.SPORTS_TP_OFFSET || 0.10);     // every rung's TP = its own entry + this
-const MAX_ENTRY_PRICE = 0.89; // a rung won't (re-)arm past this — its TP (entry+0.10) would exceed 0.99, an unreachable sell price
 const MIN_ENTRY_PRICE = 0.02; // sanity floor so we never try to rest a buy at ~$0
+const MIN_TP_OFFSET = 0.02;   // dashboard floor — below this, fees/spread eat too much of each cycle
+const MAX_TP_OFFSET = 0.50;   // dashboard ceiling — sanity cap
+const MIN_GRID_INTERVAL = 0.01; // dashboard floor
 
 // Sports-category maker-rebate parameters (docs.polymarket.com/market-makers/maker-rebates).
 const SPORTS_TAKER_FEE_RATE = Number(process.env.SPORTS_TAKER_FEE_RATE || 0.03);
@@ -137,11 +139,17 @@ function freshRung(id) {
   };
 }
 
-function newMatch({ id, sport, label, tokenId, conditionId, eventSlug, outcomeLabel, capital, rearmSeconds }) {
+function newMatch({ id, sport, label, tokenId, conditionId, eventSlug, outcomeLabel, capital, rearmSeconds, tpOffset, gridInterval }) {
   const cap = Number(capital) > 0 ? Number(capital) : DEFAULT_CAPITAL;
   const rearmMs = Number(rearmSeconds) > 0
     ? Math.min(MAX_REARM_MS, Math.max(MIN_REARM_MS, Math.round(Number(rearmSeconds) * 1000)))
     : REARM_INTERVAL_MS;
+  const tpOff = Number(tpOffset) > 0
+    ? round2(Math.min(MAX_TP_OFFSET, Math.max(MIN_TP_OFFSET, Number(tpOffset))))
+    : TP_OFFSET;
+  const gridInt = Number(gridInterval) > 0
+    ? round2(Math.max(MIN_GRID_INTERVAL, Number(gridInterval)))
+    : GRID_INTERVAL;
   return {
     id,
     sport,                       // 'cricket' | 'tennis' | 'crypto'
@@ -166,6 +174,8 @@ function newMatch({ id, sport, label, tokenId, conditionId, eventSlug, outcomeLa
     rungs: [freshRung('near'), freshRung('far')],
     initialGridActivated: false, // 'far' rung stays inactive until the initial (near) entry actually fills
     rearmIntervalMs: rearmMs,    // per-match self-healing interval — set at add-time, 2s-5min, defaults to REARM_INTERVAL_MS
+    tpOffset: tpOff,             // per-match TP = own entry + this. Defaults to TP_OFFSET. Smaller = faster, more frequent (smaller) compounding cycles.
+    gridInterval: gridInt,       // per-match rung spacing AND trailing re-entry step. Must stay < tpOffset (enforced in addMatch).
     logs: [],
     trades: [],
     lastPriceFetch: 0, lastStatusFetch: 0, lastOrderPoll: 0, lastRearm: Date.now(),
@@ -411,14 +421,15 @@ function tryEstablishInitialGrid(m) {
   if (m.market.status !== 'awaiting-price') return;
   if (m.market.ask == null) return;
   const initialPrice = round2(m.market.ask);
-  if (initialPrice < MIN_ENTRY_PRICE || initialPrice > MAX_ENTRY_PRICE) {
+  const maxEntry = round2(0.99 - m.tpOffset);
+  if (initialPrice < MIN_ENTRY_PRICE || initialPrice > maxEntry) {
     // Price too extreme to place a workable initial entry right now (its TP would be unreachable) — keep waiting.
     return;
   }
   m.rungs[0].nextEntryPrice = initialPrice; // near rung — the initial entry
   m.rungs[1].nextEntryPrice = null;         // far rung — inactive until initial entry fills
   m.market.status = 'trading';
-  log(m, `🎯 initial entry queued at live ask ${initialPrice.toFixed(2)} (crosses the spread to fill immediately, TP ${round2(initialPrice + TP_OFFSET).toFixed(2)}) — 2nd grid rung stays dormant until this fills`);
+  log(m, `🎯 initial entry queued at live ask ${initialPrice.toFixed(2)} (crosses the spread to fill immediately, TP ${round2(initialPrice + m.tpOffset).toFixed(2)}) — 2nd grid rung stays dormant until this fills`);
 }
 
 // ─────────────────────────────────────────
@@ -444,7 +455,8 @@ async function armRungs(m) {
 async function armRung(m, r, notional) {
   if (r.position || r.entryPending || r.maxedOut) return;
   const price = r.nextEntryPrice;
-  if (price == null || price < MIN_ENTRY_PRICE || price > MAX_ENTRY_PRICE) return;
+  const maxEntry = round2(0.99 - m.tpOffset);
+  if (price == null || price < MIN_ENTRY_PRICE || price > maxEntry) return;
   if (notional <= 0) return;
   const shares = round2(notional / price);
   if (!affordable(m, shares, price)) return; // will retry next tick once bankroll frees up
@@ -466,7 +478,7 @@ async function onEntryFilled(m, r, fillPrice, filledShares) {
   m.bankroll = round2(m.bankroll - cost + rebate);
   m.rebatesEarned = round2(m.rebatesEarned + rebate);
 
-  const tpPrice = round2(fillPrice + TP_OFFSET);
+  const tpPrice = round2(fillPrice + m.tpOffset);
   r.entryPending = false;
   r.entryOrderId = null;
   r.pendingShares = null;
@@ -482,10 +494,10 @@ async function onEntryFilled(m, r, fillPrice, filledShares) {
     m.initialGridActivated = true;
     const far = m.rungs.find(x => x.id === 'far');
     if (far && far !== r && !far.position) {
-      const farPrice = round2(fillPrice - GRID_INTERVAL);
+      const farPrice = round2(fillPrice - m.gridInterval);
       if (farPrice >= MIN_ENTRY_PRICE) {
         far.nextEntryPrice = farPrice;
-        log(m, `🔓 [far] 2nd grid rung activated — next entry ${farPrice.toFixed(2)} (initial fill ${fillPrice.toFixed(2)} − ${GRID_INTERVAL.toFixed(2)})`);
+        log(m, `🔓 [far] 2nd grid rung activated — next entry ${farPrice.toFixed(2)} (initial fill ${fillPrice.toFixed(2)} − ${m.gridInterval.toFixed(2)})`);
       } else {
         log(m, `🔓 [far] 2nd grid rung would activate below the minimum entry floor (${farPrice.toFixed(2)} < ${MIN_ENTRY_PRICE}) — stays dormant until a stale rearm brings it into range`);
       }
@@ -519,12 +531,12 @@ async function onTPFilled(m, r, fillPrice, filledShares) {
   log(m, `💰 [${r.id}] TP filled @ ${fillPrice.toFixed(2)} — pnl=$${profit.toFixed(2)} (incl. rebate) | bankroll=$${m.bankroll.toFixed(2)} — trailing this rung up`);
 
   r.position = null;
-  // Trail this rung up by GRID_INTERVAL, based on its OWN old entry — not the live price.
-  const nextPrice = round2(pos.entryPrice + GRID_INTERVAL);
-  if (round2(nextPrice + TP_OFFSET) > 0.99) {
+  // Trail this rung up by its own gridInterval, based on its OWN old entry — not the live price.
+  const nextPrice = round2(pos.entryPrice + m.gridInterval);
+  if (round2(nextPrice + m.tpOffset) > 0.99) {
     r.maxedOut = true;
     r.nextEntryPrice = nextPrice;
-    log(m, `🛑 [${r.id}] next entry would be ${nextPrice.toFixed(2)} (TP ${round2(nextPrice + TP_OFFSET).toFixed(2)} > 0.99) — this rung has maxed out for now, no further re-entries until a stale rearm brings it back in range`);
+    log(m, `🛑 [${r.id}] next entry would be ${nextPrice.toFixed(2)} (TP ${round2(nextPrice + m.tpOffset).toFixed(2)} > 0.99) — this rung has maxed out for now, no further re-entries until a stale rearm brings it back in range`);
   } else {
     r.nextEntryPrice = nextPrice;
   }
@@ -600,9 +612,9 @@ async function rearmStaleRungs(m) {
       r.pendingShares = null;
     }
 
-    const spacing = (i + 1) * GRID_INTERVAL; // near = 1x below ask, far = 2x below ask
+    const spacing = (i + 1) * m.gridInterval; // near = 1x below ask, far = 2x below ask
     const fresh = round2(m.market.ask - spacing);
-    const willBeMaxed = fresh < MIN_ENTRY_PRICE || round2(fresh + TP_OFFSET) > 0.99;
+    const willBeMaxed = fresh < MIN_ENTRY_PRICE || round2(fresh + m.tpOffset) > 0.99;
     const prevEntry = r.nextEntryPrice;
     r.nextEntryPrice = fresh;
     r.maxedOut = willBeMaxed;
@@ -743,7 +755,7 @@ function buildMatchState(m) {
     capital: m.capital, bankroll: m.bankroll, markValue: mv,
     realizedPnl: m.realizedPnl, unrealizedPnl, rebatesEarned: m.rebatesEarned, wins: m.wins, losses: m.losses,
     totalPnl: round2(mv - m.capital),
-    rearmIntervalMs: m.rearmIntervalMs,
+    rearmIntervalMs: m.rearmIntervalMs, tpOffset: m.tpOffset, gridInterval: m.gridInterval,
     equityCurve: m.equityCurve, logs: m.logs.slice(-60),
     createdAt: m.createdAt,
   };
@@ -758,7 +770,8 @@ function buildState() {
     matches: list,
     trades: allTrades.slice(0, 100),
     config: {
-      gridInterval: GRID_INTERVAL, tpOffset: TP_OFFSET,
+      gridIntervalDefault: GRID_INTERVAL, tpOffsetDefault: TP_OFFSET,
+      tpOffsetMin: MIN_TP_OFFSET, tpOffsetMax: MAX_TP_OFFSET, gridIntervalMin: MIN_GRID_INTERVAL,
       makerRebateShare: SPORTS_MAKER_REBATE_SHARE, sportsTakerFeeRate: SPORTS_TAKER_FEE_RATE,
       rearmIntervalMsDefault: REARM_INTERVAL_MS, rearmIntervalMsMin: MIN_REARM_MS, rearmIntervalMsMax: MAX_REARM_MS,
       orderType: 'resting-limit', reentryMode: 'trailing + configurable stale rearm (per match)',
@@ -770,7 +783,7 @@ function buildState() {
 //  Controls
 // ─────────────────────────────────────────
 function addMatch(opts) {
-  const { sport, label, tokenId, conditionId, eventSlug, outcomeLabel, capital, rearmSeconds } = opts || {};
+  const { sport, label, tokenId, conditionId, eventSlug, outcomeLabel, capital, rearmSeconds, tpOffset, gridInterval } = opts || {};
   const VALID_SPORTS = ['cricket', 'tennis', 'crypto'];
   if (!VALID_SPORTS.includes(sport)) return { ok: false, error: `sport must be one of: ${VALID_SPORTS.join(', ')}` };
   if (!tokenId && !eventSlug) return { ok: false, error: 'Provide a tokenId (recommended) or an eventSlug + outcomeLabel to add a match.' };
@@ -778,13 +791,24 @@ function addMatch(opts) {
   if (rearmSeconds != null && (isNaN(Number(rearmSeconds)) || Number(rearmSeconds) <= 0)) {
     return { ok: false, error: 'rearmSeconds must be a positive number of seconds' };
   }
+  if (tpOffset != null && (isNaN(Number(tpOffset)) || Number(tpOffset) < MIN_TP_OFFSET || Number(tpOffset) > MAX_TP_OFFSET)) {
+    return { ok: false, error: `tpOffset must be between ${MIN_TP_OFFSET} and ${MAX_TP_OFFSET}` };
+  }
+  if (gridInterval != null && (isNaN(Number(gridInterval)) || Number(gridInterval) < MIN_GRID_INTERVAL)) {
+    return { ok: false, error: `gridInterval must be at least ${MIN_GRID_INTERVAL}` };
+  }
+  const effTpOffset = tpOffset != null ? Number(tpOffset) : TP_OFFSET;
+  const effGridInterval = gridInterval != null ? Number(gridInterval) : GRID_INTERVAL;
+  if (effGridInterval >= effTpOffset) {
+    return { ok: false, error: `gridInterval (${effGridInterval}) must be smaller than tpOffset (${effTpOffset}) — otherwise re-entry would happen at or above the price this rung just sold at` };
+  }
 
   const id = `${sport}-${nextMatchSeq++}-${Date.now().toString(36)}`;
-  const m = newMatch({ id, sport, label, tokenId, conditionId, eventSlug, outcomeLabel, capital, rearmSeconds });
+  const m = newMatch({ id, sport, label, tokenId, conditionId, eventSlug, outcomeLabel, capital, rearmSeconds, tpOffset, gridInterval });
   matches.set(id, m);
 
   const rearmSecEffective = Math.round(m.rearmIntervalMs / 1000);
-  log(m, `➕ Match added — ${sport} | "${m.label}" | ${tokenId ? `token ${tokenId}${conditionId ? ` (condition ${conditionId})` : ' (no condition ID — resolution won\'t auto-detect; add one or pause/remove manually when it ends)'}` : `discovering via slug "${eventSlug}", backing "${outcomeLabel}"`} | capital $${m.capital.toFixed(2)} | self-healing every ${rearmSecEffective}s`);
+  log(m, `➕ Match added — ${sport} | "${m.label}" | ${tokenId ? `token ${tokenId}${conditionId ? ` (condition ${conditionId})` : ' (no condition ID — resolution won\'t auto-detect; add one or pause/remove manually when it ends)'}` : `discovering via slug "${eventSlug}", backing "${outcomeLabel}"`} | capital $${m.capital.toFixed(2)} | grid $${m.gridInterval.toFixed(2)} apart, TP +$${m.tpOffset.toFixed(2)} | self-healing every ${rearmSecEffective}s`);
 
   return { ok: true, id };
 }
@@ -831,7 +855,7 @@ async function init(privateKey, emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
   slog('[sports] 🏟️  Sports Trailing-Grid Ladder Engine — cricket, tennis & crypto Up/Down, multi-match');
-  slog(`[sports] ⚙️  Default capital per match: $${DEFAULT_CAPITAL} (compounding) | Grid: 2 rungs, $${GRID_INTERVAL.toFixed(2)} apart, TP = entry + $${TP_OFFSET.toFixed(2)}`);
+  slog(`[sports] ⚙️  Default capital per match: $${DEFAULT_CAPITAL} (compounding) | Default grid: 2 rungs, $${GRID_INTERVAL.toFixed(2)} apart, TP = entry + $${TP_OFFSET.toFixed(2)} — both overridable per match from the dashboard`);
   slog(`[sports] ⚙️  Idle/unfilled rungs self-heal every ${Math.round(REARM_INTERVAL_MS / 1000)}s by default (2s-${Math.round(MAX_REARM_MS / 60000)}min, configurable per match from the dashboard)`);
   slog(`[sports] ${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
