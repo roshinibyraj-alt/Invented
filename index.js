@@ -3,56 +3,31 @@
 const express    = require('express');
 const http       = require('http');
 const { Server } = require('socket.io');
-const sportsBot  = require('./cricket-bot');
+const btc5mBot   = require('./cricket-bot');
 
 const app    = express();
 const server = http.createServer(app);
 const io     = new Server(server);
 const PORT   = process.env.PORT || 8080;
-const DRY_RUN = (process.env.SPORTS_DRY_RUN || process.env.DRY_RUN || 'true').toLowerCase() === 'true';
 
 app.use(express.json());
 
 app.get('/healthz', (_, res) => res.sendStatus(200));
 
-// ── Sports ladder API (cricket + tennis + crypto Up/Down, multi-match) ──
-app.get('/api/sports/status', (_, res) => {
-  try { res.json(sportsBot.getStatus()); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+// ── BTC 5-minute auto-schedule engine API (single automatic engine, no manual match management) ──
+app.get('/api/btc5m/status', (_, res) => {
+  try { res.json(btc5mBot.buildState()); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
-
-app.post('/api/sports/lookup', async (req, res) => {
-  const { url } = req.body || {};
-  if (!url || !String(url).trim()) return res.status(400).json({ ok: false, error: 'Missing "url" field' });
-  try { res.json(await sportsBot.lookupMatchByUrl(url)); }
-  catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+app.post('/api/btc5m/pause', (_, res) => {
+  try { res.json(btc5mBot.pauseTrading()); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
-
-app.post('/api/sports/add', (req, res) => {
-  const { sport, label, tokenId, conditionId, eventSlug, outcomeLabel, capital, rearmSeconds, tpOffset, gridInterval } = req.body || {};
-  try { res.json(sportsBot.addMatch({ sport, label, tokenId, conditionId, eventSlug, outcomeLabel, capital, rearmSeconds, tpOffset, gridInterval })); }
-  catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+app.post('/api/btc5m/resume', (_, res) => {
+  try { res.json(btc5mBot.resumeTrading()); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
-
-app.post('/api/sports/:id/remove', (req, res) => {
-  try { res.json(sportsBot.removeMatch(req.params.id)); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
-});
-app.post('/api/sports/:id/pause', (req, res) => {
-  try { res.json(sportsBot.pauseMatch(req.params.id)); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
-});
-app.post('/api/sports/:id/resume', (req, res) => {
-  try { res.json(sportsBot.resumeMatch(req.params.id)); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
-});
-
-app.post('/api/sports/pause-all', (_, res) => {
-  try { res.json(sportsBot.pauseAll()); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
-});
-app.post('/api/sports/resume-all', (_, res) => {
-  try { res.json(sportsBot.resumeAll()); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
-});
-app.post('/api/sports/set-mode', (req, res) => {
+app.post('/api/btc5m/set-mode', (req, res) => {
   const { live } = req.body || {};
   if (typeof live !== 'boolean') return res.status(400).json({ ok: false, error: 'Missing boolean "live" field' });
-  try { res.json(sportsBot.setMode(live)); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  try { res.json(btc5mBot.setMode(live)); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
 app.get('/', (_, res) => {
@@ -61,7 +36,7 @@ app.get('/', (_, res) => {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>🏟️ Sports Ladder Bot — Cricket &amp; Tennis</title>
+<title>🪙 BTC 5-Min Auto Bot</title>
 <style>
   :root {
     --bg: #ffffff; --bg2: #f5f7fa; --bg3: #edf0f4; --border: #d0d7e2;
@@ -83,10 +58,9 @@ app.get('/', (_, res) => {
   .toolbar button.resume { background: var(--green); color: #fff; }
   .toolbar button.live-toggle { background: var(--red); color: #fff; }
   .toolbar button.live-toggle.is-live { background: var(--muted); color: #fff; }
-  .toolbar button.remove { background: var(--red); color: #fff; }
   .toolbar button:hover { opacity: .85; }
   .toolbar-status { padding: 6px 20px 0; font-size: 10px; color: var(--muted); min-height: 14px; }
-  .stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; padding: 10px 0; }
+  .stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; padding: 10px 20px; }
   .stat { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; }
   .stat-label { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
   .stat-val { font-size: 17px; font-weight: bold; color: #12202e; }
@@ -95,385 +69,192 @@ app.get('/', (_, res) => {
   .section { padding: 0 20px 16px; }
   .section-hdr { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 2px; padding: 8px 0; display: flex; align-items: center; gap: 8px; }
   .section-hdr::after { content:''; flex:1; height:1px; background: var(--border); }
-  .add-match-form { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 14px; margin: 0 20px 16px; display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; align-items: end; }
-  .add-match-form .field { display: flex; flex-direction: column; gap: 4px; }
-  .add-match-form label { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
-  .add-match-form input, .add-match-form select { font-family: inherit; font-size: 11px; padding: 7px 8px; border-radius: 6px; border: 1px solid var(--border); background: #fff; color: var(--text); font-weight: bold; }
-  .add-match-form .hint { grid-column: 1 / -1; font-size: 9px; color: var(--muted); font-weight: normal; }
-  .add-match-form button { grid-column: 1 / -1; background: var(--green); color: #fff; border: none; padding: 10px; border-radius: 8px; font-weight: bold; cursor: pointer; font-family: inherit; }
-  .add-match-status { grid-column: 1 / -1; font-size: 10px; }
-  .add-match-status.err { color: var(--red); }
-  .add-match-status.ok { color: var(--green); }
-  .matches-wrap { display: flex; flex-direction: column; gap: 14px; padding: 0 20px 16px; }
-  .match-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
-  .match-card.has-pos { border-color: var(--cyan); box-shadow: 0 0 0 1px #00d4ff22; }
-  .match-card.resolved { opacity: .6; }
-  .match-hdr { background: #0d1d30; padding: 10px 14px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
-  .match-title { font-size: 13px; font-weight: bold; color: #ddd; }
-  .match-tag { font-size: 9px; padding: 2px 8px; border-radius: 10px; margin-left: 8px; text-transform: uppercase; }
-  .tag-cricket { background: #00996922; color: #4ade80; border: 1px solid #4ade8055; }
-  .tag-tennis { background: #f59e0b22; color: #fbbf24; border: 1px solid #fbbf2455; }
-  .tag-crypto { background: #8b5cf622; color: #c4b5fd; border: 1px solid #c4b5fd55; }
-  .match-price { font-size: 10px; color: var(--cyan); }
-  .match-status-strip { padding: 8px 14px 0; font-size: 10px; color: var(--muted); }
-  .match-body { padding: 10px 14px; }
-  .level-row { display: grid; grid-template-columns: 44px 1fr 90px 28px; align-items: center; gap: 6px; padding: 3px 2px; font-size: 9.5px; border-bottom: 1px solid #ffffff00; }
-  .level-row.empty { opacity: .55; }
-  .level-row.watching { color: var(--yellow); }
-  .level-row.filled { color: var(--text); background: #00990911; border-radius: 4px; }
-  .level-row.tp-pending { color: var(--green); background: #00a85411; border-radius: 4px; }
-  .level-price { font-family: ui-monospace, monospace; }
-  .level-state { color: var(--muted); }
-  .level-tp { text-align: right; font-family: ui-monospace, monospace; }
-  .level-re { text-align: right; color: var(--purple); }
-  .match-toolbar { display: flex; gap: 6px; padding: 8px 14px 12px; flex-wrap: wrap; }
-  .match-toolbar button { font-size: 10px; padding: 6px 10px; }
-  .match-log { background: #0d1420; border-top: 1px solid var(--border); padding: 8px 12px; max-height: 110px; overflow-y: auto; font-size: 9.5px; }
-  .match-log div { padding: 1px 0; }
+  .window-card { background: var(--bg2); border: 2px solid var(--cyan); border-radius: 12px; overflow: hidden; margin: 0 20px 16px; }
+  .window-hdr { background: #0d1d30; padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
+  .window-title { font-size: 14px; font-weight: bold; color: #ddd; }
+  .window-status { font-size: 10px; padding: 3px 10px; border-radius: 10px; text-transform: uppercase; }
+  .st-discovering { background: #e6a80022; color: var(--yellow); border: 1px solid var(--yellow); }
+  .st-trading { background: #00a85422; color: var(--green); border: 1px solid var(--green); }
+  .st-resolved { background: #7a8fa822; color: var(--muted); border: 1px solid var(--muted); }
+  .window-body { padding: 12px 16px; }
+  .price-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
+  .price-box { background: #fff; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; text-align: center; }
+  .price-box .side-label { font-size: 9px; color: var(--muted); text-transform: uppercase; }
+  .price-box .side-price { font-size: 16px; margin: 2px 0; }
+  .price-box.up .side-price { color: var(--green); }
+  .price-box.down .side-price { color: var(--red); }
+  .price-box .side-sub { font-size: 9px; color: var(--muted); }
+  .schedule-row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+  .sched-step { flex: 1; min-width: 110px; background: #fff; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; text-align: center; font-size: 9.5px; }
+  .sched-step.done { border-color: var(--green); background: #00a85411; }
+  .sched-step.active { border-color: var(--yellow); background: #e6a80022; animation: pulse 1.5s infinite; }
+  .sched-step .sched-time { color: var(--muted); font-size: 9px; }
+  .sched-step .sched-action { font-weight: bold; margin: 3px 0; }
+  .pos-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .pos-box { background: #fff; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 10px; }
+  .pos-box .pos-label { color: var(--muted); font-size: 9px; text-transform: uppercase; margin-bottom: 4px; }
   .bottom-grid { display: grid; grid-template-columns: 1fr; gap: 16px; padding: 0 20px 20px; }
   .tbl-wrap { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; max-height: 320px; overflow-y: auto; }
   .tbl { width: 100%; border-collapse: collapse; }
   .tbl th { background: var(--bg3); color: var(--muted); padding: 6px 8px; text-align: left; font-size: 9px; text-transform: uppercase; letter-spacing: 1px; position: sticky; top: 0; }
   .tbl td { padding: 5px 8px; border-bottom: 1px solid var(--border); font-size: 10px; }
   .empty { padding: 20px; text-align: center; color: var(--muted); font-size: 10px; }
+  .log-panel { background: #0d1420; color: #cfe8ff; border-radius: 10px; padding: 10px 12px; max-height: 220px; overflow-y: auto; font-size: 9.5px; margin: 0 20px 20px; }
+  .log-panel div { padding: 1px 0; }
 </style>
 </head>
 <body>
   <div class="header">
-    <div class="logo">🏟️ SPORTS <span>LADDER</span> BOT — Cricket &amp; Tennis</div>
+    <div class="logo">🪙 BTC <span>5-MIN</span> AUTO BOT</div>
     <div id="mode-badge" class="mode-badge mode-dry">DEMO</div>
   </div>
+
   <div class="toolbar">
-    <button id="pause-all-btn" class="pause">⏸️ Pause All</button>
-    <button id="resume-all-btn" class="resume">▶️ Resume All</button>
-    <button id="live-btn" class="live-toggle">🔴 Go LIVE</button>
+    <button id="pause-btn" class="pause">⏸️ Pause Trading</button>
+    <button id="resume-btn" class="resume">▶️ Resume Trading</button>
+    <button id="live-btn" class="live-toggle">🔴 Switch to LIVE</button>
   </div>
   <div class="toolbar-status" id="toolbar-status"></div>
 
-  <div class="section">
-    <div class="section-hdr">Add by Match URL</div>
-    <div class="add-match-form" id="lookup-form" style="grid-template-columns: 1fr 110px 110px 130px 140px;">
-      <div class="field">
-        <label>Polymarket match URL</label>
-        <input id="f-url" placeholder="https://polymarket.com/sports/atp/atp-baez-kecmano-2026-07-20">
-      </div>
-      <div class="field">
-        <label>TP offset ($)</label>
-        <input id="f-tp-lookup" type="number" min="0.02" max="0.50" step="0.01" value="0.10" title="Each rung's TP = its own entry + this. Smaller = faster, more frequent, smaller-profit cycles.">
-      </div>
-      <div class="field">
-        <label>Grid spacing ($)</label>
-        <input id="f-grid-lookup" type="number" min="0.01" step="0.01" value="0.05" title="Rung spacing AND trailing re-entry step. Must be smaller than TP offset.">
-      </div>
-      <div class="field">
-        <label>Self-healing (sec)</label>
-        <input id="f-rearm-lookup" type="number" min="2" max="300" step="1" value="120" title="How often an idle/unfilled rung re-anchors to the live price. Range: 2 sec - 300 sec (5 min).">
-      </div>
-      <button id="lookup-btn" type="button" style="grid-column:auto;">🔎 Look Up</button>
-      <div class="hint">Paste any cricket, tennis, or crypto Up/Down (BTC/ETH/SOL/XRP 5m/15m) match page URL. This finds the event, the primary market, and shows live ask/bid for both sides — pick one to add it (uses its exact Token ID + Condition ID, the most reliable path).</div>
-      <div class="hint" style="color:#c4b5fd;">Note on crypto Up/Down markets: each window (e.g. btc-updown-15m-...) resolves in minutes and is a one-shot slug — the bot trades it like any match until it resolves, but does <b>not</b> currently auto-roll into the next window on its own.</div>
-      <div class="hint" style="color:#fbbf24;">Grid spacing must stay smaller than TP offset (it's the trailing re-entry gap below TP) — the bot rejects the add otherwise.</div>
-      <div class="add-match-status" id="lookup-status"></div>
-      <div id="lookup-results" style="grid-column:1/-1;"></div>
-    </div>
-  </div>
+  <div class="stats-row" id="stats-row"></div>
 
   <div class="section">
-    <div class="section-hdr">Add Manually (Token ID / Event Slug)</div>
-    <form class="add-match-form" id="add-match-form">
-      <div class="field">
-        <label>Sport</label>
-        <select id="f-sport"><option value="cricket">Cricket</option><option value="tennis">Tennis</option><option value="crypto">Crypto (Up/Down)</option></select>
-      </div>
-      <div class="field">
-        <label>Label (optional)</label>
-        <input id="f-label" placeholder="e.g. Djokovic vs Alcaraz">
-      </div>
-      <div class="field">
-        <label>Token ID (recommended)</label>
-        <input id="f-token" placeholder="CLOB token ID to trade">
-      </div>
-      <div class="field">
-        <label>Condition ID (for auto-resolution)</label>
-        <input id="f-condition" placeholder="optional but recommended">
-      </div>
-      <div class="field">
-        <label>OR Event Slug</label>
-        <input id="f-slug" placeholder="if no Token ID">
-      </div>
-      <div class="field">
-        <label>Outcome to back</label>
-        <input id="f-outcome" placeholder="e.g. Nepal, Djokovic (needed with slug)">
-      </div>
-      <div class="field">
-        <label>Starting Capital ($)</label>
-        <input id="f-capital" type="number" placeholder="200">
-      </div>
-      <div class="field">
-        <label>TP offset ($)</label>
-        <input id="f-tp" type="number" min="0.02" max="0.50" step="0.01" value="0.10" title="Each rung's TP = its own entry + this. Smaller = faster, more frequent, smaller-profit cycles.">
-      </div>
-      <div class="field">
-        <label>Grid spacing ($)</label>
-        <input id="f-grid" type="number" min="0.01" step="0.01" value="0.05" title="Rung spacing AND trailing re-entry step. Must be smaller than TP offset.">
-      </div>
-      <div class="field">
-        <label>Self-healing (sec)</label>
-        <input id="f-rearm" type="number" min="2" max="300" step="1" value="120" title="How often an idle/unfilled rung re-anchors to the live price. Range: 2 sec - 300 sec (5 min).">
-      </div>
-      <div class="hint">Provide a <b>Token ID</b> directly (most reliable), ideally with its <b>Condition ID</b> so the bot can detect when the match resolves. Or provide an <b>Event Slug</b> + the <b>Outcome</b> you want to back and the bot will find the matching market/token itself — double-check the log line after adding before trusting it with real money. Every match added here runs the same trailing-grid ladder strategy — 2 rungs at the spacing you set, TP = entry + your offset, trailing re-entry, and self-healing on the interval you set (2 sec - 5 min). Grid spacing must stay smaller than TP offset.</div>
-      <div class="add-match-status" id="add-match-status"></div>
-      <button type="submit">➕ Add Match</button>
-    </form>
+    <div class="section-hdr">Current Window</div>
   </div>
-
-  <div class="section">
-    <div class="section-hdr">Active Matches</div>
-    <div class="matches-wrap" id="matches-wrap"><div class="empty">Loading…</div></div>
-  </div>
+  <div class="window-card" id="window-card"><div class="empty">Loading…</div></div>
 
   <div class="bottom-grid">
-    <div class="section">
-      <div class="section-hdr">All Trades (every match)</div>
+    <div>
+      <div class="section-hdr" style="padding:0 0 8px;">Window History</div>
       <div class="tbl-wrap">
         <table class="tbl">
-          <thead><tr><th>Time</th><th>Match</th><th>Sport</th><th>Rung</th><th>Reason</th><th>Price</th><th>Shares</th><th>P&amp;L</th></tr></thead>
-          <tbody id="trade-body"><tr><td colspan="8" class="empty">Loading…</td></tr></tbody>
+          <thead><tr><th>Window</th><th>Winner</th><th>Up sh/cost</th><th>Down sh/cost</th><th>Payout</th><th>Fees</th><th>P&amp;L</th></tr></thead>
+          <tbody id="history-body"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+    <div>
+      <div class="section-hdr" style="padding:0 0 8px;">Recent Trades</div>
+      <div class="tbl-wrap">
+        <table class="tbl">
+          <thead><tr><th>Time</th><th>Window</th><th>Step</th><th>Side</th><th>Price</th><th>Shares</th><th>Cost/Fee</th></tr></thead>
+          <tbody id="trade-body"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
         </table>
       </div>
     </div>
   </div>
+
+  <div class="section-hdr" style="margin:0 20px;">Live Log</div>
+  <div class="log-panel" id="log-panel"><div class="empty">Loading…</div></div>
 
 <script src="/socket.io/socket.io.js"></script>
 <script>
   const socket = io();
   const $ = id => document.getElementById(id);
 
-  $('pause-all-btn').onclick = () => fetch('/api/sports/pause-all', { method: 'POST' }).then(() => flash('All matches paused'));
-  $('resume-all-btn').onclick = () => fetch('/api/sports/resume-all', { method: 'POST' }).then(() => flash('All matches resumed'));
+  $('pause-btn').onclick = () => fetch('/api/btc5m/pause', { method: 'POST' }).then(() => flash('Trading paused'));
+  $('resume-btn').onclick = () => fetch('/api/btc5m/resume', { method: 'POST' }).then(() => flash('Trading resumed'));
   $('live-btn').onclick = () => {
     const wantLive = !$('live-btn').classList.contains('is-live');
-    if (wantLive && !confirm('Switch to LIVE mode? This will place REAL resting limit orders with REAL money for every match.')) return;
-    fetch('/api/sports/set-mode', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ live: wantLive }) })
+    if (wantLive && !confirm('Switch to LIVE mode? This will place REAL crossing-the-spread buys with REAL money every window, on the fixed schedule (50/10/30/90 shares).')) return;
+    fetch('/api/btc5m/set-mode', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ live: wantLive }) })
       .then(() => flash(wantLive ? 'Switched to LIVE' : 'Switched to DEMO'));
   };
   function flash(msg) { $('toolbar-status').textContent = msg; setTimeout(() => { $('toolbar-status').textContent = ''; }, 3000); }
 
-  $('add-match-form').addEventListener('submit', (e) => {
-    e.preventDefault();
-    const statusEl = $('add-match-status');
-    const tpVal = $('f-tp').value ? Math.min(0.50, Math.max(0.02, Number($('f-tp').value))) : undefined;
-    const gridVal = $('f-grid').value ? Math.max(0.01, Number($('f-grid').value)) : undefined;
-    if (tpVal != null && gridVal != null && gridVal >= tpVal) {
-      statusEl.textContent = '❌ Grid spacing (' + gridVal + ') must be smaller than TP offset (' + tpVal + ')';
-      statusEl.className = 'add-match-status err';
-      return;
-    }
-    const body = {
-      sport: $('f-sport').value,
-      label: $('f-label').value || undefined,
-      tokenId: $('f-token').value || undefined,
-      conditionId: $('f-condition').value || undefined,
-      eventSlug: $('f-slug').value || undefined,
-      outcomeLabel: $('f-outcome').value || undefined,
-      capital: $('f-capital').value ? Number($('f-capital').value) : undefined,
-      rearmSeconds: $('f-rearm').value ? Math.min(300, Math.max(2, Number($('f-rearm').value))) : undefined,
-      tpOffset: tpVal, gridInterval: gridVal,
-    };
-    statusEl.textContent = 'Adding…'; statusEl.className = 'add-match-status';
-    fetch('/api/sports/add', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-      .then(r => r.json())
-      .then(res => {
-        if (res.ok) {
-          statusEl.textContent = '✅ Match added (id: ' + res.id + ')';
-          statusEl.className = 'add-match-status ok';
-          $('add-match-form').reset();
-          $('f-sport').value = body.sport;
-        } else {
-          statusEl.textContent = '❌ ' + res.error;
-          statusEl.className = 'add-match-status err';
-        }
-      })
-      .catch(e => { statusEl.textContent = '❌ ' + e.message; statusEl.className = 'add-match-status err'; });
-  });
-
   function fmtPx(n) { return n == null ? '—' : n.toFixed(3); }
-
-  function renderLookupResult(r) {
-    if (!r.ok) return '<div class="add-match-status err">❌ ' + r.error + '</div>';
-    const rows = r.outcomes.map(o => {
-      const payload = {
-        sport: r.sport,
-        label: r.eventTitle + ' — ' + o.outcome,
-        tokenId: o.tokenId,
-        conditionId: r.conditionId || undefined,
-      };
-      return '<div class="level-row" style="grid-template-columns: 1fr 80px 80px 90px;">' +
-        '<div class="level-price">' + o.outcome + '</div>' +
-        '<div class="level-state">ask ' + fmtPx(o.ask) + '</div>' +
-        '<div class="level-state">bid ' + fmtPx(o.bid) + '</div>' +
-        '<div><button type="button" onclick=\\'addFromLookup(' + JSON.stringify(payload).replace(/'/g, "&#39;") + ')\\'>➕ Add this side</button></div>' +
-      '</div>';
-    }).join('');
-    return '<div class="add-match-status ok">✅ Found: ' + r.eventTitle + ' | ' + r.marketQuestion + ' (' + r.sport + ')</div>' + rows;
-  }
-
-  function addFromLookup(payload) {
-    const statusEl = $('lookup-status');
-    const rearmVal = $('f-rearm-lookup').value ? Math.min(300, Math.max(2, Number($('f-rearm-lookup').value))) : undefined;
-    const tpVal = $('f-tp-lookup').value ? Math.min(0.50, Math.max(0.02, Number($('f-tp-lookup').value))) : undefined;
-    const gridVal = $('f-grid-lookup').value ? Math.max(0.01, Number($('f-grid-lookup').value)) : undefined;
-    if (tpVal != null && gridVal != null && gridVal >= tpVal) {
-      statusEl.textContent = '❌ Grid spacing (' + gridVal + ') must be smaller than TP offset (' + tpVal + ')';
-      statusEl.className = 'add-match-status err';
-      return;
-    }
-    const fullPayload = { ...payload, rearmSeconds: rearmVal, tpOffset: tpVal, gridInterval: gridVal };
-    statusEl.textContent = 'Adding…'; statusEl.className = 'add-match-status';
-    fetch('/api/sports/add', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(fullPayload) })
-      .then(r => r.json())
-      .then(res => {
-        statusEl.textContent = res.ok ? ('✅ Match added (id: ' + res.id + ')') : ('❌ ' + res.error);
-        statusEl.className = 'add-match-status ' + (res.ok ? 'ok' : 'err');
-      })
-      .catch(e => { statusEl.textContent = '❌ ' + e.message; statusEl.className = 'add-match-status err'; });
-  }
-
-  $('lookup-btn').onclick = () => {
-    const url = $('f-url').value.trim();
-    const statusEl = $('lookup-status');
-    const resultsEl = $('lookup-results');
-    resultsEl.innerHTML = '';
-    if (!url) { statusEl.textContent = '❌ Paste a match URL first'; statusEl.className = 'add-match-status err'; return; }
-    statusEl.textContent = 'Looking up…'; statusEl.className = 'add-match-status';
-    fetch('/api/sports/lookup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }) })
-      .then(r => r.json())
-      .then(res => {
-        statusEl.textContent = '';
-        resultsEl.innerHTML = renderLookupResult(res);
-      })
-      .catch(e => { statusEl.textContent = '❌ ' + e.message; statusEl.className = 'add-match-status err'; });
-  };
-
-  function matchAction(id, action) {
-    fetch('/api/sports/' + encodeURIComponent(id) + '/' + action, { method: 'POST' });
-  }
-  function removeMatch(id) {
-    if (!confirm('Remove this match from the dashboard? Any already-resting orders are left as-is.')) return;
-    matchAction(id, 'remove');
-  }
-
-  function sgn(n) { return (n >= 0 ? '+' : '') + '$' + n.toFixed(2); }
+  function fmt2(n) { return (n == null ? 0 : n).toFixed(2); }
   function pClass(n) { return n > 0 ? 'pnl-pos' : (n < 0 ? 'pnl-neg' : ''); }
+  function sgn(n) { return (n >= 0 ? '+$' : '-$') + Math.abs(n).toFixed(2); }
+  function mmss(sec) { sec = Math.max(0, Math.floor(sec)); const m = Math.floor(sec / 60); const s = sec % 60; return m + ':' + String(s).padStart(2, '0'); }
 
-  const STATUS_TXT = {
-    discovering: 'Finding the market…',
-    'awaiting-price': 'Market found, waiting for a live price to anchor the grid…',
-    trading: 'Trading',
-    resolved: 'Match resolved',
-    error: 'Could not lock onto the market — check the log below',
-  };
-
-  function renderMatchCard(m) {
-    const st = m.market.status;
-    const hasPos = m.rungs.some(r => r.position && !r.position.closed);
-    const cardCls = 'match-card' + (hasPos ? ' has-pos' : '') + (st === 'resolved' ? ' resolved' : '');
-    const tagCls = m.sport === 'cricket' ? 'tag-cricket' : (m.sport === 'tennis' ? 'tag-tennis' : 'tag-crypto');
-    const statusTxt = (STATUS_TXT[st] || st) + (st === 'resolved' ? (' — ' + (m.market.resolvedWinner || 'unknown')) : '') +
-      (m.market.marketQuestion ? (' | ' + m.market.marketQuestion) : '');
-
-    const rows = m.rungs.map(r => {
-      let rowCls = 'empty', stateTxt = 'idle';
-      if (r.position && !r.position.closed) {
-        rowCls = r.position.tpPending ? 'tp-pending' : 'filled';
-        stateTxt = 'holding ' + r.position.shares.toFixed(2) + 'sh @ ' + r.position.entryPrice.toFixed(2);
-      } else if (r.maxedOut) {
-        stateTxt = 'maxed out for now';
-      } else if (r.entryPending) {
-        rowCls = 'watching';
-        stateTxt = 'watching for trigger';
-      }
-      const tpTxt = r.position ? ('TP ' + r.position.tpPrice.toFixed(2)) : (r.nextEntryPrice != null ? 'next entry ' + r.nextEntryPrice.toFixed(2) : '—');
-      return '<div class="level-row ' + rowCls + '">' +
-        '<div class="level-price">' + r.id + '</div>' +
-        '<div class="level-state">' + stateTxt + '</div>' +
-        '<div class="level-tp">' + tpTxt + '</div>' +
-        '<div class="level-re">' + (r.fills > 0 ? 'x' + r.fills : '') + '</div>' +
-      '</div>';
-    }).join('');
-
+  function renderStats(s) {
     const stats = [
-      ['Bankroll', '$' + m.bankroll.toFixed(2), ''],
-      ['Mark Value', '$' + m.markValue.toFixed(2), pClass(m.totalPnl)],
-      ['Total P&amp;L', sgn(m.totalPnl), pClass(m.totalPnl)],
-      ['Wins / Losses', m.wins + ' / ' + m.losses, ''],
-      ['Rebates', '$' + m.rebatesEarned.toFixed(4), 'pnl-pos'],
-      ['Grid / TP', '$' + m.gridInterval.toFixed(2) + ' / +$' + m.tpOffset.toFixed(2), ''],
-      ['Self-heal', Math.round((m.rearmIntervalMs || 0) / 1000) + 's', ''],
+      ['Bankroll', '$' + fmt2(s.bankroll), ''],
+      ['Realized P&amp;L', sgn(s.realizedPnl), pClass(s.realizedPnl)],
+      ['Fees Paid', '$' + (s.feesPaid || 0).toFixed(4), ''],
+      ['Wins / Losses', s.wins + ' / ' + s.losses, ''],
+      ['Pending Resolution', s.pendingResolutionCount || 0, ''],
     ];
-    const statsHtml = stats.map(([label, val, cls]) =>
+    $('stats-row').innerHTML = stats.map(([label, val, cls]) =>
       '<div class="stat"><div class="stat-label">' + label + '</div><div class="stat-val ' + cls + '">' + val + '</div></div>'
     ).join('');
-
-    const logHtml = (m.logs || []).slice(-8).map(l => {
-      const col = l.includes('❌')||l.includes('💥')||l.includes('🛑') ? '#ff4757'
-                : l.includes('💰')||l.includes('✅')||l.includes('🎯') ? '#00e676'
-                : l.includes('🔁') ? '#00d4ff'
-                : l.includes('⚠️') ? '#ff9f0a'
-                : '#4a6080';
-      return '<div style="color:'+col+'">'+l+'</div>';
-    }).join('');
-
-    return '<div class="' + cardCls + '" data-id="' + m.id + '">' +
-      '<div class="match-hdr">' +
-        '<div><span class="match-title">' + m.label + '</span><span class="match-tag ' + tagCls + '">' + m.sport + '</span></div>' +
-        '<div class="match-price">ask ' + (m.market.ask != null ? m.market.ask.toFixed(2) : '—') + ' / bid ' + (m.market.bid != null ? m.market.bid.toFixed(2) : '—') + '</div>' +
-      '</div>' +
-      '<div class="match-status-strip">' + statusTxt + '</div>' +
-      '<div class="match-body">' +
-        '<div class="stats-row">' + statsHtml + '</div>' +
-        rows +
-      '</div>' +
-      '<div class="match-toolbar">' +
-        '<button class="pause" onclick="matchAction(\\'' + m.id + '\\',\\'pause\\')">⏸️ Pause</button>' +
-        '<button class="resume" onclick="matchAction(\\'' + m.id + '\\',\\'resume\\')">▶️ Resume</button>' +
-        '<button class="remove" onclick="removeMatch(\\'' + m.id + '\\')">🗑️ Remove</button>' +
-      '</div>' +
-      '<div class="match-log">' + (logHtml || '<div style="color:#4a6080">No log lines yet…</div>') + '</div>' +
-    '</div>';
   }
 
-  socket.on('sportsState', (s) => {
-    $('mode-badge').textContent = s.dryRun ? 'DEMO' : 'LIVE';
+  function renderWindow(s) {
+    const w = s.window;
+    if (!w) { $('window-card').innerHTML = '<div class="empty">No window yet…</div>'; return; }
+    const statusCls = w.status === 'trading' ? 'st-trading' : (w.status === 'resolved' ? 'st-resolved' : 'st-discovering');
+    const remaining = s.windowSeconds - w.elapsedSec;
+
+    const priceRow =
+      '<div class="price-row">' +
+        '<div class="price-box up"><div class="side-label">Up</div><div class="side-price">' + fmtPx(w.upAsk) + '</div><div class="side-sub">bid ' + fmtPx(w.upBid) + '</div></div>' +
+        '<div class="price-box down"><div class="side-label">Down</div><div class="side-price">' + fmtPx(w.downAsk) + '</div><div class="side-sub">bid ' + fmtPx(w.downBid) + '</div></div>' +
+      '</div>';
+
+    const schedRow = '<div class="schedule-row">' + s.schedule.map(step => {
+      const done = w.scheduleDone && w.scheduleDone[step.key];
+      const active = !done && w.elapsedSec >= step.atSec - 5 && w.elapsedSec < step.atSec + 15;
+      const cls = done ? 'done' : (active ? 'active' : '');
+      return '<div class="sched-step ' + cls + '"><div class="sched-time">t+' + step.atSec + 's</div><div class="sched-action">' + step.side.toUpperCase() + ' ' + step.shares + 'sh</div><div>' + (done ? '✅ done' : (active ? '⏳ now' : 'pending')) + '</div></div>';
+    }).join('') + '</div>';
+
+    const posRow =
+      '<div class="pos-row">' +
+        '<div class="pos-box"><div class="pos-label">Up position</div>' + (w.positions.up.shares > 0 ? w.positions.up.shares.toFixed(2) + 'sh · $' + w.positions.up.cost.toFixed(2) + ' cost' : '—') + '</div>' +
+        '<div class="pos-box"><div class="pos-label">Down position</div>' + (w.positions.down.shares > 0 ? w.positions.down.shares.toFixed(2) + 'sh · $' + w.positions.down.cost.toFixed(2) + ' cost' : '—') + '</div>' +
+      '</div>';
+
+    $('window-card').innerHTML =
+      '<div class="window-hdr"><div class="window-title">' + w.slug + '</div><div class="window-status ' + statusCls + '">' + w.status + (w.status === 'trading' ? ' · ' + mmss(remaining) + ' left' : '') + '</div></div>' +
+      '<div class="window-body">' + priceRow + schedRow + posRow + '</div>';
+  }
+
+  function renderHistory(list) {
+    if (!list || !list.length) { $('history-body').innerHTML = '<tr><td colspan="7" class="empty">No resolved windows yet</td></tr>'; return; }
+    $('history-body').innerHTML = list.map(h =>
+      '<tr><td>' + h.slug.replace('btc-updown-5m-', '') + '</td>' +
+      '<td>' + h.winningSide.toUpperCase() + '</td>' +
+      '<td>' + h.upShares.toFixed(2) + ' / $' + h.upCost.toFixed(2) + '</td>' +
+      '<td>' + h.downShares.toFixed(2) + ' / $' + h.downCost.toFixed(2) + '</td>' +
+      '<td>$' + h.payout.toFixed(2) + '</td>' +
+      '<td>$' + h.totalFees.toFixed(4) + '</td>' +
+      '<td class="' + pClass(h.pnl) + '">' + sgn(h.pnl) + '</td></tr>'
+    ).join('');
+  }
+
+  function renderTrades(list) {
+    if (!list || !list.length) { $('trade-body').innerHTML = '<tr><td colspan="7" class="empty">No trades yet</td></tr>'; return; }
+    $('trade-body').innerHTML = list.map(t =>
+      '<tr><td>' + t.time + '</td>' +
+      '<td>' + (t.slug || '').replace('btc-updown-5m-', '') + '</td>' +
+      '<td>' + (t.step || '') + '</td>' +
+      '<td>' + (t.side || '').toUpperCase() + '</td>' +
+      '<td>' + (t.price != null ? t.price.toFixed(3) : '—') + '</td>' +
+      '<td>' + (t.shares != null ? t.shares.toFixed(2) : '—') + '</td>' +
+      '<td>' + (t.cost != null ? '$' + t.cost.toFixed(2) + (t.fee ? ' +$' + t.fee.toFixed(4) : '') : (t.pnl != null ? sgn(t.pnl) : '—')) + '</td></tr>'
+    ).join('');
+  }
+
+  function renderLogs(list) {
+    if (!list || !list.length) { $('log-panel').innerHTML = '<div class="empty">No logs yet</div>'; return; }
+    $('log-panel').innerHTML = list.map(l => '<div>' + l.replace(/</g, '&lt;') + '</div>').join('');
+  }
+
+  socket.on('btc5mState', (s) => {
     $('mode-badge').className = 'mode-badge ' + (s.dryRun ? 'mode-dry' : 'mode-live');
+    $('mode-badge').textContent = s.dryRun ? 'DEMO' : 'LIVE';
     $('live-btn').classList.toggle('is-live', !s.dryRun);
-    $('live-btn').textContent = s.dryRun ? '🔴 Go LIVE' : '🟡 Back to DEMO';
+    $('live-btn').textContent = s.dryRun ? '🔴 Switch to LIVE' : '⚠️ Switch to DEMO';
 
-    const wrap = $('matches-wrap');
-    if (!s.matches || !s.matches.length) {
-      wrap.innerHTML = '<div class="empty">No matches yet — add one above.</div>';
-    } else {
-      wrap.innerHTML = s.matches.map(renderMatchCard).join('');
-    }
-
-    const tb = $('trade-body');
-    if (s.trades && s.trades.length > 0) {
-      tb.innerHTML = s.trades.map(t => {
-        const pnlStr = (t.profit !== undefined) ? sgn(t.profit) : '—';
-        const pnlCls = (t.profit !== undefined) ? pClass(t.profit) : '';
-        const sideColor = t.reason === 'ENTRY' ? '#ffd740' : (t.reason === 'RESOLUTION' ? '#00d4ff' : '#00e676');
-        return '<tr><td>' + t.time + '</td><td style="color:' + sideColor + '">' + (t.match || '—') + '</td>' +
-          '<td>' + (t.sport || '—') + '</td>' +
-          '<td>' + (t.rung || '—') + '</td>' +
-          '<td>' + (t.reason || '—') + '</td>' +
-          '<td>' + (t.price || 0).toFixed(3) + '</td>' +
-          '<td>' + (t.shares || 0).toFixed(2) + '</td>' +
-          '<td class="' + pnlCls + '">' + pnlStr + '</td></tr>';
-      }).join('');
-    } else {
-      tb.innerHTML = '<tr><td colspan="8" class="empty">No trades yet</td></tr>';
-    }
+    renderStats(s);
+    renderWindow(s);
+    renderHistory(s.history);
+    renderTrades(s.trades);
+    renderLogs(s.logs);
   });
+
 </script>
 </body>
 </html>`);
@@ -485,15 +266,12 @@ const slog = (line) => { console.log(line); io.emit('log', line); };
 const PK = process.env.PRIVATE_KEY;
 if (!PK) { console.error('❌ PRIVATE_KEY env var missing'); process.exit(1); }
 
-console.log('🏟️  Sports Ladder Bot — Cricket & Tennis (resting limit orders + maker rebates, multi-match)');
-console.log(`🚦 DRY_RUN=${DRY_RUN}`);
-if (DRY_RUN) console.log('⚠️  DRY RUN — demo capital per match, simulated fills, real API for data/orders');
-else         console.log('🔴 LIVE MODE — real money');
+console.log('🪙 BTC 5-Minute Auto-Schedule Bot (fixed schedule, crossing-the-spread buys, fully automatic)');
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`🌐 Dashboard: http://0.0.0.0:${PORT}`);
-  sportsBot.init(PK, emit, slog).catch(e => {
-    console.error('❌ Sports bot init failed:', e.message);
+  btc5mBot.init(PK, emit, slog).catch(e => {
+    console.error('❌ BTC 5m bot init failed:', e.message);
     process.exit(1);
   });
 });
