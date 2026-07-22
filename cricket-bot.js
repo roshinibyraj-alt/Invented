@@ -2,45 +2,65 @@
 
 /**
  * ═══════════════════════════════════════════════════════════════
- *  BTC 5-MINUTE AUTO-SCHEDULE ENGINE (single automatic engine)
+ *  BTC + ETH 5-MINUTE GAP-MONITORING TRADING ENGINE
  * ═══════════════════════════════════════════════════════════════
  *
- *  Full replacement of the old cricket/tennis/crypto trailing-grid
- *  ladder bot. This engine trades ONLY Polymarket's BTC "Up or Down"
- *  5-minute markets (slug pattern btc-updown-5m-{unix_ts}), fully
- *  automatically — no manual "add a match" step. It computes the
- *  current window deterministically from the clock
- *  (windowTs = floor(now/300)*300), discovers that window's market on
- *  Gamma, trades it on a fixed time schedule, then rolls into the next
- *  window the instant the current 5-minute boundary passes — forever.
+ *  Trades Polymarket's BTC and ETH "Up or Down" 5-minute markets
+ *  TOGETHER. Each 5-minute window is split into 5 monitoring
+ *  periods:
+ *      Period 1: t+0:00 – 1:00
+ *      Period 2: t+1:00 – 2:00
+ *      Period 3: t+2:00 – 3:00
+ *      Period 4: t+3:00 – 4:00
+ *      Period 5: t+4:00 – 4:30   (half-length)
+ *  (t+4:30 – 5:00 is not monitored; positions just ride to settlement.)
  *
- *  SCHEDULE (relative to each window's start, repeats every window):
- *    t+60s  (1 min elapsed)  buy the CHEAP side  — 50 shares
- *    t+120s (2 min elapsed)  buy the EXPENSIVE side — 10 shares
- *    t+180s (3 min elapsed)  buy the EXPENSIVE side — 30 shares
- *    t+240s (4 min elapsed)  buy the EXPENSIVE side — 90 shares
- *  "Cheap"/"expensive" = whichever of Up/Down has the lower/higher live
- *  ask price, re-checked FRESH and independently at each of these 4
- *  moments — the side is not fixed for the window, it can differ at
- *  every step. Each buy crosses the spread (priced at the live ask) so
- *  it fills immediately, like a market order. Share counts are FIXED,
- *  not scaled to bankroll — there is no bankroll-proportional sizing
- *  or compounding in this strategy, by design.
+ *  Within EVERY period, two pairs are watched continuously (checked
+ *  every price refresh tick, not at one fixed instant):
+ *      Up-pair:   BTC-Up ask  vs  ETH-Up ask
+ *      Down-pair: BTC-Down ask vs ETH-Down ask
+ *  The instant either pair's gap (|btcAsk - ethAsk|) reaches or
+ *  exceeds 0.20, the engine immediately buys 50 shares of whichever
+ *  side of that pair is cheaper. Example: BTC-up 0.50, ETH-up 0.30 ->
+ *  gap 0.20 -> buy 50sh ETH-up right away, no waiting for the period
+ *  to end.
+ *
+ *  Each pair can fire AT MOST ONCE per period — once it triggers, it
+ *  goes quiet (latched) for the rest of that period even if the gap
+ *  stays wide, and re-arms fresh at the start of the next period. If
+ *  a pair never reaches the 0.20 gap during its period, no trade
+ *  happens for that pair that period (not retried later).
+ *  Up-pair and Down-pair are fully independent, so up to 2 buys
+ *  (100 shares total) can happen in a single period if both cross
+ *  threshold.
+ *
+ *  BOTH markets share ONE bankroll ($2000 demo starting capital by
+ *  default). Share size is fixed at 50 — no bankroll-proportional
+ *  sizing or compounding.
  *
  *  NO EXIT LOGIC: whatever is bought is held to settlement. There is
  *  no take-profit, no stop-loss, no selling before resolution. Every
- *  window's positions get marked to $1/share (winning side) or $0/share
- *  (losing side) once Polymarket resolves it, via Gamma's
- *  `closed` + `outcomePrices` fields (same detection style as before).
+ *  position is marked to $1/share (winning side) or $0/share (losing
+ *  side) once Polymarket resolves that asset's window, via Gamma's
+ *  `closed` + `outcomePrices` fields.
  *
- *  Because resolution can lag a few seconds past the 5-minute mark, a
- *  window that rolls over before it's confirmed resolved is moved to a
- *  background "pending resolution" queue and polled there independently
- *  — this never blocks the next window's schedule from starting on time.
+ *  BTC and ETH windows for the same 5-minute slot resolve
+ *  INDEPENDENTLY of each other (different underlying markets), so
+ *  each is tracked and resolved on its own timeline even though they
+ *  share the same window clock and monitoring periods.
+ *
+ *  STARTUP: if the bot is started mid-window, it will NOT jump into
+ *  that window's monitoring partway through. It waits, doing
+ *  nothing, until the next fresh 5-minute boundary before trading
+ *  begins.
+ *
+ *  REAL-TIME P&L: bankroll (cash), realized P&L (from settled
+ *  windows) and unrealized P&L (mark-to-market on open positions,
+ *  using live bid prices) are all recomputed and broadcast every
+ *  tick — not just at settlement.
  *
  *  FEES: every buy here crosses the spread (a taker fill), so a taker
- *  fee is estimated and deducted at buy time — there is no maker rebate
- *  in this strategy (unlike the old resting-order ladder).
+ *  fee is estimated and deducted at buy time.
  *
  *  TRADER INTERFACE (LIVE mode only):
  *    trader.placeLimitBuy(tokenId, price, size) -> { id, filled, avgPrice, filledShares }
@@ -59,20 +79,30 @@ const DISCOVERY_RETRY_MS  = 2000;   // how often to retry finding a not-yet-list
 const RESOLUTION_POLL_MS  = 3000;   // how often to poll pending (past) windows for resolution
 const WINDOW_SECONDS      = 300;    // 5 minutes
 
-// The fixed time-triggered schedule. "side" is re-evaluated fresh at the
-// moment each step fires — see runSchedule(). Never retried if skipped.
-const SCHEDULE = [
-  { key: 'min1', atSec: 60,  side: 'cheap',     shares: 50 },
-  { key: 'min2', atSec: 120, side: 'expensive', shares: 10 },
-  { key: 'min3', atSec: 180, side: 'expensive', shares: 30 },
-  { key: 'min4', atSec: 240, side: 'expensive', shares: 90 },
+// The two markets we trade every window.
+const ASSETS = [
+  { key: 'btc', label: 'BTC', slugPrefix: 'btc-updown-5m-' },
+  { key: 'eth', label: 'ETH', slugPrefix: 'eth-updown-5m-' },
 ];
 
+// The 5 monitoring periods within each window (relative seconds).
+const PERIODS = [
+  { key: 'min1',   startSec: 0,   endSec: 60 },
+  { key: 'min2',   startSec: 60,  endSec: 120 },
+  { key: 'min3',   startSec: 120, endSec: 180 },
+  { key: 'min4',   startSec: 180, endSec: 240 },
+  { key: 'min4_5', startSec: 240, endSec: 270 }, // half-length final period
+];
+const PAIRS = ['up', 'down']; // Up-pair (BTC-up vs ETH-up), Down-pair (BTC-down vs ETH-down)
+
+const GAP_THRESHOLD    = Number(process.env.BTC5M_GAP_THRESHOLD || 0.20); // 20-cent gap trigger
+const SHARES_PER_TRIGGER = Number(process.env.BTC5M_TRIGGER_SHARES || 50);
+
 let DRY_RUN = (process.env.BTC5M_DRY_RUN || process.env.SPORTS_DRY_RUN || process.env.DRY_RUN || 'true').toLowerCase() === 'true';
-const STARTING_CAPITAL = Number(process.env.BTC5M_CAPITAL || 500);
-// Observed live fee schedule for BTC updown markets is taker-only, rate ~0.07 (see feeSchedule on the Gamma market object).
+const STARTING_CAPITAL = Number(process.env.BTC5M_CAPITAL || 2000);
+// Observed live fee schedule for updown markets is taker-only, rate ~0.07 (see feeSchedule on the Gamma market object).
 const TAKER_FEE_RATE = Number(process.env.BTC5M_TAKER_FEE_RATE || 0.07);
-const MAX_PENDING_RESOLUTIONS = 20; // safety cap on the background resolution queue
+const MAX_PENDING_RESOLUTIONS = 40; // safety cap on the background resolution queue (2 assets/window now)
 
 function round2(n) { return Math.round(n * 100) / 100; }
 function estimateTakerFee(shares, price) {
@@ -89,19 +119,21 @@ let tradeSeq = 0;
 
 const engine = {
   tradingEnabled: true,
-  bankroll: STARTING_CAPITAL,
-  capital: STARTING_CAPITAL,
+  bankroll: STARTING_CAPITAL,   // live cash balance (cost+fees deducted at buy, payout added at resolution)
+  capital: STARTING_CAPITAL,    // fixed reference to starting capital, never changes
   realizedPnl: 0,
   feesPaid: 0,
   wins: 0, losses: 0,
-  window: null,   // current active window being scheduled
-  pending: [],    // past windows awaiting resolution confirmation (background queue)
-  history: [],    // resolved windows, most recent first, capped
+  cycle: null,          // current window pair being monitored ({ windowTs, assets: { btc, eth }, triggers })
+  pending: [],           // past asset-windows awaiting resolution confirmation (background queue)
+  history: [],           // resolved asset-windows, most recent first, capped
   logs: [],
   trades: [],
   equityCurve: [{ t: Date.now(), equity: STARTING_CAPITAL }],
   lastPriceFetch: 0,
   lastResolutionPoll: 0,
+  waitingForBoundary: true,   // true until we cross a fresh 5-min boundary after startup
+  boundaryWindowTs: null,     // the (mid-progress) window we refuse to trade, seen at startup
 };
 
 // ─────────────────────────────────────────
@@ -111,7 +143,7 @@ function log(msg) {
   const line = `[${new Date().toISOString().slice(11, 19)}] ${msg}`;
   engine.logs.push(line);
   if (engine.logs.length > 500) engine.logs.shift();
-  slog(`[btc5m] ${line}`);
+  slog(`[updown5m] ${line}`);
 }
 function registerTrade(t) {
   const trade = { seq: ++tradeSeq, time: new Date().toISOString().slice(11, 19), ...t };
@@ -119,7 +151,7 @@ function registerTrade(t) {
   if (engine.trades.length > 300) engine.trades.shift();
 }
 function recordEquity() {
-  engine.equityCurve.push({ t: Date.now(), equity: engine.bankroll });
+  engine.equityCurve.push({ t: Date.now(), equity: round2(engine.bankroll + openPositionsMTM()) });
   if (engine.equityCurve.length > 1000) engine.equityCurve.shift();
 }
 
@@ -127,7 +159,7 @@ function recordEquity() {
 //  HTTP / order helpers
 // ─────────────────────────────────────────
 async function getJSON(url) {
-  const res = await fetch(url, { headers: { 'User-Agent': 'polymarket-btc5m-bot/1.0' } });
+  const res = await fetch(url, { headers: { 'User-Agent': 'polymarket-updown5m-bot/1.0' } });
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${url}`);
   return res.json();
 }
@@ -141,7 +173,7 @@ function traderHasLimitMethod() {
   const ok = trader && typeof trader.placeLimitBuy === 'function';
   if (!ok && !warnedNoTraderMethod) {
     warnedNoTraderMethod = true;
-    slog('[btc5m] ❌ LIVE trading needs trader.placeLimitBuy (and ideally getOrder) on polymarket-trader.js — LIVE buys will be skipped until added. DRY_RUN is unaffected.');
+    slog('[updown5m] ❌ LIVE trading needs trader.placeLimitBuy (and ideally getOrder) on polymarket-trader.js — LIVE buys will be skipped until added. DRY_RUN is unaffected.');
   }
   return ok;
 }
@@ -168,25 +200,51 @@ function parseMarketTokens(mk) {
 // ─────────────────────────────────────────
 function currentWindowTs(nowSec) { return Math.floor(nowSec / WINDOW_SECONDS) * WINDOW_SECONDS; }
 
-function freshWindow(windowTs) {
+function freshAssetWindow(assetDef, windowTs) {
   return {
+    asset: assetDef.key,
+    label: assetDef.label,
     windowTs,
-    slug: `btc-updown-5m-${windowTs}`,
+    slug: `${assetDef.slugPrefix}${windowTs}`,
     closeAt: (windowTs + WINDOW_SECONDS) * 1000,
     status: 'discovering', // 'discovering' | 'trading' | 'resolved'
     conditionId: null,
     upTokenId: null, downTokenId: null,
     upAsk: null, downAsk: null, upBid: null, downBid: null,
-    scheduleDone: {},
     positions: { up: { shares: 0, cost: 0, fee: 0 }, down: { shares: 0, cost: 0, fee: 0 } },
     lastDiscoveryAttempt: 0,
     createdAt: Date.now(),
   };
 }
 
-async function discoverWindow(w) {
+function freshTriggers() {
+  const t = {};
+  for (const period of PERIODS) {
+    t[period.key] = {
+      up:   { done: false, boughtAsset: null, gap: null, ts: null },
+      down: { done: false, boughtAsset: null, gap: null, ts: null },
+    };
+  }
+  return t;
+}
+
+function freshCycle(windowTs) {
+  return {
+    windowTs,
+    closeAt: (windowTs + WINDOW_SECONDS) * 1000,
+    assets: {
+      btc: freshAssetWindow(ASSETS[0], windowTs),
+      eth: freshAssetWindow(ASSETS[1], windowTs),
+    },
+    triggers: freshTriggers(),
+    lastPeriodKey: null,
+    createdAt: Date.now(),
+  };
+}
+
+async function discoverAssetWindow(aw) {
   try {
-    const events = await getJSON(`${GAMMA}/events?slug=${encodeURIComponent(w.slug)}`);
+    const events = await getJSON(`${GAMMA}/events?slug=${encodeURIComponent(aw.slug)}`);
     const event = Array.isArray(events) ? events[0] : null;
     if (!event) return; // not listed yet on Gamma — will retry
     const mk = (event.markets || [])[0];
@@ -195,42 +253,42 @@ async function discoverWindow(w) {
     const up = tokens.find(t => /up/i.test(t.outcome));
     const down = tokens.find(t => /down/i.test(t.outcome));
     if (!up || !down || !up.token_id || !down.token_id) return; // not tradeable yet
-    w.conditionId = mk.conditionId || null;
-    w.upTokenId = up.token_id;
-    w.downTokenId = down.token_id;
-    w.status = 'trading';
-    log(`🎯 window ${w.slug} discovered — Up ${String(up.token_id).slice(0, 10)}… / Down ${String(down.token_id).slice(0, 10)}…`);
+    aw.conditionId = mk.conditionId || null;
+    aw.upTokenId = up.token_id;
+    aw.downTokenId = down.token_id;
+    aw.status = 'trading';
+    log(`🎯 ${aw.label} window ${aw.slug} discovered — Up ${String(up.token_id).slice(0, 10)}… / Down ${String(down.token_id).slice(0, 10)}…`);
   } catch (e) {
-    log(`⚠️  discoverWindow(${w.slug}) failed: ${e.message}`);
+    log(`⚠️  discoverAssetWindow(${aw.slug}) failed: ${e.message}`);
   }
 }
 
-async function refreshWindowPrices(w) {
-  if (!w.upTokenId || !w.downTokenId) return;
+async function refreshAssetPrices(aw) {
+  if (!aw.upTokenId || !aw.downTokenId) return;
   try {
     const [upAsk, upBid, downAsk, downBid] = await Promise.all([
-      getJSON(`${CLOB}/price?token_id=${w.upTokenId}&side=BUY`).catch(() => null),
-      getJSON(`${CLOB}/price?token_id=${w.upTokenId}&side=SELL`).catch(() => null),
-      getJSON(`${CLOB}/price?token_id=${w.downTokenId}&side=BUY`).catch(() => null),
-      getJSON(`${CLOB}/price?token_id=${w.downTokenId}&side=SELL`).catch(() => null),
+      getJSON(`${CLOB}/price?token_id=${aw.upTokenId}&side=BUY`).catch(() => null),
+      getJSON(`${CLOB}/price?token_id=${aw.upTokenId}&side=SELL`).catch(() => null),
+      getJSON(`${CLOB}/price?token_id=${aw.downTokenId}&side=BUY`).catch(() => null),
+      getJSON(`${CLOB}/price?token_id=${aw.downTokenId}&side=SELL`).catch(() => null),
     ]);
-    if (upAsk?.price != null) w.upAsk = parseFloat(upAsk.price);
-    if (upBid?.price != null) w.upBid = parseFloat(upBid.price);
-    if (downAsk?.price != null) w.downAsk = parseFloat(downAsk.price);
-    if (downBid?.price != null) w.downBid = parseFloat(downBid.price);
+    if (upAsk?.price != null) aw.upAsk = parseFloat(upAsk.price);
+    if (upBid?.price != null) aw.upBid = parseFloat(upBid.price);
+    if (downAsk?.price != null) aw.downAsk = parseFloat(downAsk.price);
+    if (downBid?.price != null) aw.downBid = parseFloat(downBid.price);
   } catch (_) {}
 }
 
 function affordable(shares, price) { return round2(shares * price) <= engine.bankroll; }
 
-async function executeBuy(w, side, shares, stepLabel) {
-  const tokenId = side === 'up' ? w.upTokenId : w.downTokenId;
-  const ask = side === 'up' ? w.upAsk : w.downAsk;
-  if (!tokenId || ask == null) { log(`⚠️  [${w.slug}] ${stepLabel}: no live ask for ${side.toUpperCase()} yet — skipping this step (not retried)`); return; }
-  if (!affordable(shares, ask)) { log(`⚠️  [${w.slug}] ${stepLabel}: insufficient bankroll ($${engine.bankroll.toFixed(2)}) for ${shares}sh ${side.toUpperCase()} @ ${ask.toFixed(2)} — skipping this step (not retried)`); return; }
+async function executeBuy(aw, side, shares, stepLabel) {
+  const tokenId = side === 'up' ? aw.upTokenId : aw.downTokenId;
+  const ask = side === 'up' ? aw.upAsk : aw.downAsk;
+  if (!tokenId || ask == null) { log(`⚠️  [${aw.slug}] ${stepLabel}: no live ask for ${side.toUpperCase()} yet — skipping this trigger`); return; }
+  if (!affordable(shares, ask)) { log(`⚠️  [${aw.slug}] ${stepLabel}: insufficient bankroll ($${engine.bankroll.toFixed(2)}) for ${shares}sh ${side.toUpperCase()} @ ${ask.toFixed(2)} — skipping this trigger`); return; }
 
   const resp = await placeAggressiveBuy(tokenId, ask, shares);
-  if (!resp) { log(`❌ [${w.slug}] ${stepLabel}: order placement failed for ${side.toUpperCase()}`); return; }
+  if (!resp) { log(`❌ [${aw.slug}] ${stepLabel}: order placement failed for ${side.toUpperCase()}`); return; }
 
   let filled = resp.filled, fillPrice = resp.avgPrice || ask, filledShares = resp.filledShares || shares;
   if (!filled && !DRY_RUN && resp.id && trader && typeof trader.getOrder === 'function') {
@@ -241,7 +299,7 @@ async function executeBuy(w, side, shares, stepLabel) {
     } catch (_) {}
   }
   if (!filled) {
-    log(`⏳ [${w.slug}] ${stepLabel}: ${shares}sh ${side.toUpperCase()} @ ${ask.toFixed(2)} placed but unconfirmed — not tracked as a position, not retried this window`);
+    log(`⏳ [${aw.slug}] ${stepLabel}: ${shares}sh ${side.toUpperCase()} @ ${ask.toFixed(2)} placed but unconfirmed — not tracked as a position, not retried`);
     return;
   }
 
@@ -250,69 +308,135 @@ async function executeBuy(w, side, shares, stepLabel) {
   engine.bankroll = round2(engine.bankroll - cost - fee);
   engine.feesPaid = round2(engine.feesPaid + fee);
 
-  const pos = w.positions[side];
+  const pos = aw.positions[side];
   pos.shares = round2(pos.shares + filledShares);
   pos.cost = round2(pos.cost + cost);
   pos.fee = round2(pos.fee + fee);
 
-  registerTrade({ slug: w.slug, step: stepLabel, side, price: fillPrice, shares: filledShares, cost, fee });
-  log(`✅ [${w.slug}] ${stepLabel}: bought ${filledShares}sh ${side.toUpperCase()} @ ${fillPrice.toFixed(2)} ($${cost.toFixed(2)} + $${fee.toFixed(4)} fee) | bankroll=$${engine.bankroll.toFixed(2)}`);
+  registerTrade({ slug: aw.slug, asset: aw.asset, step: stepLabel, side, price: fillPrice, shares: filledShares, cost, fee });
+  log(`✅ [${aw.slug}] ${stepLabel}: bought ${filledShares}sh ${aw.label}-${side.toUpperCase()} @ ${fillPrice.toFixed(2)} ($${cost.toFixed(2)} + $${fee.toFixed(4)} fee) | bankroll=$${engine.bankroll.toFixed(2)}`);
   recordEquity();
 }
 
-async function runSchedule(w) {
-  if (w.status !== 'trading') return;
-  const elapsedSec = Math.floor(Date.now() / 1000) - w.windowTs;
-  for (const step of SCHEDULE) {
-    if (w.scheduleDone[step.key]) continue;
-    if (elapsedSec < step.atSec) continue;
-    w.scheduleDone[step.key] = true; // mark attempted regardless of outcome — this step never fires again this window
-    if (!engine.tradingEnabled) { log(`⏸️  [${w.slug}] ${step.key} (t+${step.atSec}s): trading paused, step skipped`); continue; }
+// Find which monitoring period (if any) the current elapsed time falls in.
+function periodForElapsed(elapsedSec) {
+  return PERIODS.find(p => elapsedSec >= p.startSec && elapsedSec < p.endSec) || null;
+}
 
-    let side = null;
-    if (w.upAsk != null && w.downAsk != null) {
-      if (w.upAsk === w.downAsk) { side = 'up'; log(`ℹ️  [${w.slug}] ${step.key}: Up/Down tied at ${w.upAsk.toFixed(2)} — defaulting to UP`); }
-      else side = step.side === 'cheap' ? (w.upAsk < w.downAsk ? 'up' : 'down') : (w.upAsk > w.downAsk ? 'up' : 'down');
+// Called every tick while a cycle is trading. Continuously watches both
+// pairs; the instant a pair's gap reaches GAP_THRESHOLD it fires a single
+// buy for that pair and latches until the next period.
+async function monitorAndTrigger(cycle) {
+  const elapsedSec = Math.floor(Date.now() / 1000) - cycle.windowTs;
+  const period = periodForElapsed(elapsedSec);
+
+  // Log once when a period ends without ever triggering a pair.
+  if (period && period.key !== cycle.lastPeriodKey) {
+    if (cycle.lastPeriodKey) {
+      const prevTrig = cycle.triggers[cycle.lastPeriodKey];
+      for (const pair of PAIRS) {
+        if (prevTrig && !prevTrig[pair].done) log(`ℹ️  ${cycle.lastPeriodKey}: ${pair}-pair gap never reached ${GAP_THRESHOLD.toFixed(2)} — no trade that period`);
+      }
     }
-    if (!side) { log(`⚠️  [${w.slug}] ${step.key}: prices unavailable — cannot determine ${step.side} side, skipping (not retried)`); continue; }
+    cycle.lastPeriodKey = period.key;
+  }
+  if (!period) return; // outside all monitoring periods (t+4:30 to t+5:00) — just hold
 
-    await executeBuy(w, side, step.shares, `${step.key} t+${step.atSec}s (${step.side})`);
+  const trig = cycle.triggers[period.key];
+  for (const pair of PAIRS) {
+    if (trig[pair].done) continue;
+    const btcAsk = cycle.assets.btc[pair === 'up' ? 'upAsk' : 'downAsk'];
+    const ethAsk = cycle.assets.eth[pair === 'up' ? 'upAsk' : 'downAsk'];
+    if (btcAsk == null || ethAsk == null) continue; // no live prices yet, keep watching this period
+    const gap = round2(btcAsk - ethAsk);
+    if (Math.abs(gap) < GAP_THRESHOLD) continue; // threshold not hit yet, keep watching
+
+    const cheaperAsset = gap > 0 ? 'eth' : 'btc'; // btcAsk > ethAsk -> ETH is cheaper
+    trig[pair].done = true;
+    trig[pair].boughtAsset = cheaperAsset;
+    trig[pair].gap = gap;
+    trig[pair].ts = Date.now();
+
+    if (!engine.tradingEnabled) {
+      log(`⏸️  ${period.key} ${pair}-pair: gap ${gap.toFixed(2)} (BTC=${btcAsk.toFixed(2)} ETH=${ethAsk.toFixed(2)}) hit threshold but trading is paused — skipped`);
+      continue;
+    }
+    log(`🔎 ${period.key} ${pair}-pair: BTC=${btcAsk.toFixed(2)} ETH=${ethAsk.toFixed(2)} gap=${gap.toFixed(2)} ≥ ${GAP_THRESHOLD.toFixed(2)} → buy ${cheaperAsset.toUpperCase()}-${pair.toUpperCase()}`);
+    await executeBuy(cycle.assets[cheaperAsset], pair, SHARES_PER_TRIGGER, `${period.key} ${pair}-pair gap ${gap.toFixed(2)}`);
   }
 }
 
 // ─────────────────────────────────────────
-//  Resolution (background queue — never blocks the live schedule)
+//  Mark-to-market (unrealized P&L)
 // ─────────────────────────────────────────
-async function checkWindowResolution(w) {
+function markPrice(aw, side) {
+  const bid = side === 'up' ? aw.upBid : aw.downBid;
+  const ask = side === 'up' ? aw.upAsk : aw.downAsk;
+  if (bid != null) return bid;
+  if (ask != null) return ask;
+  return null; // no live price at all — fall back to cost basis (0 unrealized) for this leg
+}
+function unrealizedForAssetWindow(aw) {
+  if (aw.status === 'resolved') return 0;
+  let u = 0;
+  for (const side of ['up', 'down']) {
+    const pos = aw.positions[side];
+    if (pos.shares <= 0) continue;
+    const mp = markPrice(aw, side);
+    const mark = mp != null ? mp : (pos.cost / pos.shares);
+    u += round2(pos.shares * mark - pos.cost);
+  }
+  return u;
+}
+function openCostForAssetWindow(aw) {
+  if (aw.status === 'resolved') return 0;
+  return round2(aw.positions.up.cost + aw.positions.down.cost);
+}
+function allTrackedAssetWindows() {
+  const list = [...engine.pending];
+  if (engine.cycle) list.push(engine.cycle.assets.btc, engine.cycle.assets.eth);
+  return list;
+}
+function totalUnrealizedPnl() {
+  return round2(allTrackedAssetWindows().reduce((sum, aw) => sum + unrealizedForAssetWindow(aw), 0));
+}
+function openPositionsMTM() {
+  return round2(allTrackedAssetWindows().reduce((sum, aw) => sum + openCostForAssetWindow(aw) + unrealizedForAssetWindow(aw), 0));
+}
+
+// ─────────────────────────────────────────
+//  Resolution (background queue — never blocks the live monitoring)
+// ─────────────────────────────────────────
+async function checkAssetResolution(aw) {
   try {
     let mk = null;
-    if (w.conditionId) {
-      const arr = await getJSON(`${GAMMA}/markets?condition_ids=${encodeURIComponent(w.conditionId)}`);
+    if (aw.conditionId) {
+      const arr = await getJSON(`${GAMMA}/markets?condition_ids=${encodeURIComponent(aw.conditionId)}`);
       mk = Array.isArray(arr) ? arr[0] : null;
     }
     if (!mk) {
-      const events = await getJSON(`${GAMMA}/events?slug=${encodeURIComponent(w.slug)}`);
+      const events = await getJSON(`${GAMMA}/events?slug=${encodeURIComponent(aw.slug)}`);
       const event = Array.isArray(events) ? events[0] : null;
       mk = event ? (event.markets || [])[0] : null;
     }
     if (!mk || mk.closed !== true || !mk.outcomePrices) return false;
     const prices = typeof mk.outcomePrices === 'string' ? JSON.parse(mk.outcomePrices) : mk.outcomePrices;
     const tokens = parseMarketTokens(mk);
-    const upIdx = tokens.findIndex(t => String(t.token_id) === String(w.upTokenId));
-    const downIdx = tokens.findIndex(t => String(t.token_id) === String(w.downTokenId));
+    const upIdx = tokens.findIndex(t => String(t.token_id) === String(aw.upTokenId));
+    const downIdx = tokens.findIndex(t => String(t.token_id) === String(aw.downTokenId));
     if (upIdx < 0 || downIdx < 0 || prices[upIdx] == null) return false;
-    resolveWindow(w, parseFloat(prices[upIdx]) >= 0.5 ? 'up' : 'down');
+    resolveAssetWindow(aw, parseFloat(prices[upIdx]) >= 0.5 ? 'up' : 'down');
     return true;
   } catch (e) {
-    log(`⚠️  checkWindowResolution(${w.slug}) failed: ${e.message}`);
+    log(`⚠️  checkAssetResolution(${aw.slug}) failed: ${e.message}`);
     return false;
   }
 }
 
-function resolveWindow(w, winningSide) {
-  w.status = 'resolved';
-  const winPos = w.positions[winningSide];
-  const losePos = w.positions[winningSide === 'up' ? 'down' : 'up'];
+function resolveAssetWindow(aw, winningSide) {
+  aw.status = 'resolved';
+  const winPos = aw.positions[winningSide];
+  const losePos = aw.positions[winningSide === 'up' ? 'down' : 'up'];
   const payout = round2(winPos.shares * 1);
   const totalCost = round2(winPos.cost + losePos.cost);
   const totalFees = round2(winPos.fee + losePos.fee);
@@ -323,16 +447,16 @@ function resolveWindow(w, winningSide) {
   if (pnl >= 0) engine.wins++; else engine.losses++;
 
   engine.history.unshift({
-    slug: w.slug, windowTs: w.windowTs, winningSide,
-    upShares: w.positions.up.shares, upCost: w.positions.up.cost,
-    downShares: w.positions.down.shares, downCost: w.positions.down.cost,
+    slug: aw.slug, asset: aw.asset, label: aw.label, windowTs: aw.windowTs, winningSide,
+    upShares: aw.positions.up.shares, upCost: aw.positions.up.cost,
+    downShares: aw.positions.down.shares, downCost: aw.positions.down.cost,
     payout, totalCost, totalFees, pnl,
     resolvedAt: Date.now(),
   });
   if (engine.history.length > 200) engine.history.pop();
 
-  registerTrade({ slug: w.slug, step: 'RESOLUTION', side: winningSide, shares: winPos.shares, price: 1, pnl });
-  log(`🏁 [${w.slug}] resolved — ${winningSide.toUpperCase()} won | payout $${payout.toFixed(2)} | cost $${totalCost.toFixed(2)} | fees $${totalFees.toFixed(4)} | pnl $${pnl.toFixed(2)} | bankroll $${engine.bankroll.toFixed(2)}`);
+  registerTrade({ slug: aw.slug, asset: aw.asset, step: 'RESOLUTION', side: winningSide, shares: winPos.shares, price: 1, pnl });
+  log(`🏁 [${aw.slug}] resolved — ${aw.label}-${winningSide.toUpperCase()} won | payout $${payout.toFixed(2)} | cost $${totalCost.toFixed(2)} | fees $${totalFees.toFixed(4)} | pnl $${pnl.toFixed(2)} | bankroll $${engine.bankroll.toFixed(2)}`);
   recordEquity();
 }
 
@@ -349,42 +473,67 @@ async function mainLoop() {
       const nowSec = Math.floor(now / 1000);
       const windowTs = currentWindowTs(nowSec);
 
-      if (!engine.window || engine.window.windowTs !== windowTs) {
-        if (engine.window && engine.window.status !== 'resolved') {
-          engine.pending.push(engine.window);
-          if (engine.pending.length > MAX_PENDING_RESOLUTIONS) {
-            const dropped = engine.pending.shift();
-            log(`⚠️  dropped stale pending window ${dropped.slug} from the resolution queue (too many pending) — its win/loss won't be tallied, but its cost/fees were already applied to bankroll at buy time`);
-          }
+      // ── Startup guard: never join a window that's already in progress ──
+      if (engine.waitingForBoundary) {
+        if (engine.boundaryWindowTs === null) {
+          engine.boundaryWindowTs = windowTs;
+          const remaining = WINDOW_SECONDS - (nowSec - windowTs);
+          log(`⏳ started mid-window — will NOT trade the in-progress window (ends in ${remaining}s); waiting for the next fresh 5-minute boundary`);
         }
-        engine.window = freshWindow(windowTs);
-        log(`🆕 new window ${engine.window.slug} — discovering market…`);
+        if (windowTs === engine.boundaryWindowTs) {
+          emitFn('btc5mState', buildState());
+          await new Promise(res => setTimeout(res, TICK_MS));
+          continue;
+        }
+        engine.waitingForBoundary = false;
+        log('🚦 new window boundary reached — trading starts now');
       }
 
-      const w = engine.window;
-      if (w.status === 'discovering' && now - w.lastDiscoveryAttempt >= DISCOVERY_RETRY_MS) {
-        w.lastDiscoveryAttempt = now;
-        await discoverWindow(w);
+      if (!engine.cycle || engine.cycle.windowTs !== windowTs) {
+        if (engine.cycle) {
+          for (const assetDef of ASSETS) {
+            const aw = engine.cycle.assets[assetDef.key];
+            if (aw.status !== 'resolved') {
+              engine.pending.push(aw);
+              if (engine.pending.length > MAX_PENDING_RESOLUTIONS) {
+                const dropped = engine.pending.shift();
+                log(`⚠️  dropped stale pending window ${dropped.slug} from the resolution queue (too many pending) — its win/loss won't be tallied, but its cost/fees were already applied to bankroll at buy time`);
+              }
+            }
+          }
+        }
+        engine.cycle = freshCycle(windowTs);
+        log(`🆕 new window t=${windowTs} — discovering BTC + ETH markets…`);
       }
-      if (w.upTokenId && now - engine.lastPriceFetch >= PRICE_REFRESH_MS) {
+
+      const cycle = engine.cycle;
+      for (const assetDef of ASSETS) {
+        const aw = cycle.assets[assetDef.key];
+        if (aw.status === 'discovering' && now - aw.lastDiscoveryAttempt >= DISCOVERY_RETRY_MS) {
+          aw.lastDiscoveryAttempt = now;
+          await discoverAssetWindow(aw);
+        }
+      }
+      if (now - engine.lastPriceFetch >= PRICE_REFRESH_MS) {
         engine.lastPriceFetch = now;
-        await refreshWindowPrices(w);
+        const toRefresh = [cycle.assets.btc, cycle.assets.eth, ...engine.pending];
+        await Promise.all(toRefresh.map(aw => refreshAssetPrices(aw)));
       }
-      await runSchedule(w);
+      await monitorAndTrigger(cycle);
 
       if (engine.pending.length && now - engine.lastResolutionPoll >= RESOLUTION_POLL_MS) {
         engine.lastResolutionPoll = now;
         const stillPending = [];
-        for (const pw of engine.pending) {
-          const done = await checkWindowResolution(pw);
-          if (!done) stillPending.push(pw);
+        for (const aw of engine.pending) {
+          const done = await checkAssetResolution(aw);
+          if (!done) stillPending.push(aw);
         }
         engine.pending = stillPending;
       }
 
       emitFn('btc5mState', buildState());
     } catch (e) {
-      slog(`[btc5m] ⚠️  Loop error: ${e.message}`);
+      slog(`[updown5m] ⚠️  Loop error: ${e.message}`);
     }
     await new Promise(res => setTimeout(res, TICK_MS));
   }
@@ -393,26 +542,42 @@ async function mainLoop() {
 // ─────────────────────────────────────────
 //  UI state / controls
 // ─────────────────────────────────────────
+function assetSummary(aw) {
+  return {
+    asset: aw.asset, label: aw.label, slug: aw.slug, windowTs: aw.windowTs, closeAt: aw.closeAt, status: aw.status,
+    upAsk: aw.upAsk, downAsk: aw.downAsk, upBid: aw.upBid, downBid: aw.downBid,
+    positions: aw.positions,
+    unrealizedPnl: unrealizedForAssetWindow(aw),
+  };
+}
+
 function buildState() {
-  const w = engine.window;
+  const cycle = engine.cycle;
+  const unrealizedPnl = totalUnrealizedPnl();
+  const equity = round2(engine.bankroll + openPositionsMTM());
   return {
     dryRun: DRY_RUN,
     tradingEnabled: engine.tradingEnabled,
+    waitingForBoundary: engine.waitingForBoundary,
     bankroll: engine.bankroll, capital: engine.capital,
-    realizedPnl: engine.realizedPnl, feesPaid: engine.feesPaid,
+    realizedPnl: engine.realizedPnl, unrealizedPnl, equity,
+    feesPaid: engine.feesPaid,
     wins: engine.wins, losses: engine.losses,
-    window: w ? {
-      slug: w.slug, windowTs: w.windowTs, closeAt: w.closeAt, status: w.status,
-      elapsedSec: Math.max(0, Math.min(WINDOW_SECONDS, Math.floor(Date.now() / 1000) - w.windowTs)),
-      upAsk: w.upAsk, downAsk: w.downAsk, upBid: w.upBid, downBid: w.downBid,
-      scheduleDone: w.scheduleDone, positions: w.positions,
+    window: cycle ? {
+      windowTs: cycle.windowTs, closeAt: cycle.closeAt,
+      elapsedSec: Math.max(0, Math.min(WINDOW_SECONDS, Math.floor(Date.now() / 1000) - cycle.windowTs)),
+      triggers: cycle.triggers,
+      assets: { btc: assetSummary(cycle.assets.btc), eth: assetSummary(cycle.assets.eth) },
     } : null,
     pendingResolutionCount: engine.pending.length,
+    pending: engine.pending.map(assetSummary),
     history: engine.history.slice(0, 50),
     trades: engine.trades.slice(-100).slice().reverse(),
     equityCurve: engine.equityCurve,
     logs: engine.logs.slice(-80),
-    schedule: SCHEDULE,
+    periods: PERIODS,
+    gapThreshold: GAP_THRESHOLD,
+    triggerShares: SHARES_PER_TRIGGER,
     windowSeconds: WINDOW_SECONDS,
   };
 }
@@ -420,7 +585,7 @@ function getStatus() { return buildState(); } // back-compat alias, some callers
 
 function pauseTrading() {
   engine.tradingEnabled = false;
-  log('⏸️  Trading paused — scheduled buys will be skipped from now on; open positions still tracked to resolution, and window discovery/rollover keeps running');
+  log('⏸️  Trading paused — gap triggers will be skipped from now on; open positions still tracked to resolution, and window discovery/rollover keeps running');
   return { ok: true };
 }
 function resumeTrading() {
@@ -437,15 +602,15 @@ function setMode(live) {
 async function init(privateKey, emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
-  slog('[btc5m] 🪙 BTC 5-Minute Auto-Schedule Engine — fully automatic, no manual match management');
-  slog('[btc5m] ⚙️  Schedule per window: t+60s buy CHEAP 50sh | t+120s buy EXPENSIVE 10sh | t+180s buy EXPENSIVE 30sh | t+240s buy EXPENSIVE 90sh (side re-checked fresh each time)');
-  slog(`[btc5m] ⚙️  Starting bankroll $${STARTING_CAPITAL} | fixed share counts, no compounding | positions held to settlement, no TP/exit logic | new window auto-discovered every 5 min forever`);
-  slog(`[btc5m] ${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
+  slog('[updown5m] 🪙 BTC + ETH 5-Minute Gap-Monitoring Engine — fully automatic, no manual match management');
+  slog(`[updown5m] ⚙️  5 monitoring periods per window (0-1,1-2,2-3,3-4,4-4:30min). Each period, Up-pair (BTC-up vs ETH-up) and Down-pair (BTC-down vs ETH-down) are watched continuously; the instant either gap reaches ${GAP_THRESHOLD.toFixed(2)}, buy ${SHARES_PER_TRIGGER}sh of the cheaper side (once per pair per period).`);
+  slog(`[updown5m] ⚙️  Starting bankroll $${STARTING_CAPITAL} (shared across BTC+ETH) | fixed ${SHARES_PER_TRIGGER}sh per trigger, no compounding | positions held to settlement, no TP/exit logic | never trades a window it joins mid-way through`);
+  slog(`[updown5m] ${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
   trader = new PolymarketTrader(privateKey);
   await trader.authenticate();
 
-  mainLoop().catch(e => slog(`[btc5m] ❌ Fatal: ${e.message}`));
+  mainLoop().catch(e => slog(`[updown5m] ❌ Fatal: ${e.message}`));
 }
 
 module.exports = {
