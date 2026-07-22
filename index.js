@@ -28,8 +28,8 @@ app.post('/api/sports/lookup', async (req, res) => {
 });
 
 app.post('/api/sports/add', (req, res) => {
-  const { sport, label, tokenId, conditionId, eventSlug, outcomeLabel, capital, rearmSeconds } = req.body || {};
-  try { res.json(sportsBot.addMatch({ sport, label, tokenId, conditionId, eventSlug, outcomeLabel, capital, rearmSeconds })); }
+  const { sport, label, tokenId, conditionId, eventSlug, outcomeLabel, capital, rearmSeconds, tpOffset, gridInterval } = req.body || {};
+  try { res.json(sportsBot.addMatch({ sport, label, tokenId, conditionId, eventSlug, outcomeLabel, capital, rearmSeconds, tpOffset, gridInterval })); }
   catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
@@ -152,10 +152,18 @@ app.get('/', (_, res) => {
 
   <div class="section">
     <div class="section-hdr">Add by Match URL</div>
-    <div class="add-match-form" id="lookup-form" style="grid-template-columns: 1fr 130px 140px;">
+    <div class="add-match-form" id="lookup-form" style="grid-template-columns: 1fr 110px 110px 130px 140px;">
       <div class="field">
         <label>Polymarket match URL</label>
         <input id="f-url" placeholder="https://polymarket.com/sports/atp/atp-baez-kecmano-2026-07-20">
+      </div>
+      <div class="field">
+        <label>TP offset ($)</label>
+        <input id="f-tp-lookup" type="number" min="0.02" max="0.50" step="0.01" value="0.10" title="Each rung's TP = its own entry + this. Smaller = faster, more frequent, smaller-profit cycles.">
+      </div>
+      <div class="field">
+        <label>Grid spacing ($)</label>
+        <input id="f-grid-lookup" type="number" min="0.01" step="0.01" value="0.05" title="Rung spacing AND trailing re-entry step. Must be smaller than TP offset.">
       </div>
       <div class="field">
         <label>Self-healing (sec)</label>
@@ -164,6 +172,7 @@ app.get('/', (_, res) => {
       <button id="lookup-btn" type="button" style="grid-column:auto;">🔎 Look Up</button>
       <div class="hint">Paste any cricket, tennis, or crypto Up/Down (BTC/ETH/SOL/XRP 5m/15m) match page URL. This finds the event, the primary market, and shows live ask/bid for both sides — pick one to add it (uses its exact Token ID + Condition ID, the most reliable path).</div>
       <div class="hint" style="color:#c4b5fd;">Note on crypto Up/Down markets: each window (e.g. btc-updown-15m-...) resolves in minutes and is a one-shot slug — the bot trades it like any match until it resolves, but does <b>not</b> currently auto-roll into the next window on its own.</div>
+      <div class="hint" style="color:#fbbf24;">Grid spacing must stay smaller than TP offset (it's the trailing re-entry gap below TP) — the bot rejects the add otherwise.</div>
       <div class="add-match-status" id="lookup-status"></div>
       <div id="lookup-results" style="grid-column:1/-1;"></div>
     </div>
@@ -201,10 +210,18 @@ app.get('/', (_, res) => {
         <input id="f-capital" type="number" placeholder="200">
       </div>
       <div class="field">
+        <label>TP offset ($)</label>
+        <input id="f-tp" type="number" min="0.02" max="0.50" step="0.01" value="0.10" title="Each rung's TP = its own entry + this. Smaller = faster, more frequent, smaller-profit cycles.">
+      </div>
+      <div class="field">
+        <label>Grid spacing ($)</label>
+        <input id="f-grid" type="number" min="0.01" step="0.01" value="0.05" title="Rung spacing AND trailing re-entry step. Must be smaller than TP offset.">
+      </div>
+      <div class="field">
         <label>Self-healing (sec)</label>
         <input id="f-rearm" type="number" min="2" max="300" step="1" value="120" title="How often an idle/unfilled rung re-anchors to the live price. Range: 2 sec - 300 sec (5 min).">
       </div>
-      <div class="hint">Provide a <b>Token ID</b> directly (most reliable), ideally with its <b>Condition ID</b> so the bot can detect when the match resolves. Or provide an <b>Event Slug</b> + the <b>Outcome</b> you want to back and the bot will find the matching market/token itself — double-check the log line after adding before trusting it with real money. Every match added here runs the exact same trailing-grid ladder strategy (2 rungs, $0.05 apart, TP = entry + $0.10, trailing re-entry, and a self-healing rearm to the live price on the interval you set above, 2 sec - 5 min).</div>
+      <div class="hint">Provide a <b>Token ID</b> directly (most reliable), ideally with its <b>Condition ID</b> so the bot can detect when the match resolves. Or provide an <b>Event Slug</b> + the <b>Outcome</b> you want to back and the bot will find the matching market/token itself — double-check the log line after adding before trusting it with real money. Every match added here runs the same trailing-grid ladder strategy — 2 rungs at the spacing you set, TP = entry + your offset, trailing re-entry, and self-healing on the interval you set (2 sec - 5 min). Grid spacing must stay smaller than TP offset.</div>
       <div class="add-match-status" id="add-match-status"></div>
       <button type="submit">➕ Add Match</button>
     </form>
@@ -244,6 +261,14 @@ app.get('/', (_, res) => {
 
   $('add-match-form').addEventListener('submit', (e) => {
     e.preventDefault();
+    const statusEl = $('add-match-status');
+    const tpVal = $('f-tp').value ? Math.min(0.50, Math.max(0.02, Number($('f-tp').value))) : undefined;
+    const gridVal = $('f-grid').value ? Math.max(0.01, Number($('f-grid').value)) : undefined;
+    if (tpVal != null && gridVal != null && gridVal >= tpVal) {
+      statusEl.textContent = '❌ Grid spacing (' + gridVal + ') must be smaller than TP offset (' + tpVal + ')';
+      statusEl.className = 'add-match-status err';
+      return;
+    }
     const body = {
       sport: $('f-sport').value,
       label: $('f-label').value || undefined,
@@ -253,8 +278,8 @@ app.get('/', (_, res) => {
       outcomeLabel: $('f-outcome').value || undefined,
       capital: $('f-capital').value ? Number($('f-capital').value) : undefined,
       rearmSeconds: $('f-rearm').value ? Math.min(300, Math.max(2, Number($('f-rearm').value))) : undefined,
+      tpOffset: tpVal, gridInterval: gridVal,
     };
-    const statusEl = $('add-match-status');
     statusEl.textContent = 'Adding…'; statusEl.className = 'add-match-status';
     fetch('/api/sports/add', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
       .then(r => r.json())
@@ -296,7 +321,14 @@ app.get('/', (_, res) => {
   function addFromLookup(payload) {
     const statusEl = $('lookup-status');
     const rearmVal = $('f-rearm-lookup').value ? Math.min(300, Math.max(2, Number($('f-rearm-lookup').value))) : undefined;
-    const fullPayload = { ...payload, rearmSeconds: rearmVal };
+    const tpVal = $('f-tp-lookup').value ? Math.min(0.50, Math.max(0.02, Number($('f-tp-lookup').value))) : undefined;
+    const gridVal = $('f-grid-lookup').value ? Math.max(0.01, Number($('f-grid-lookup').value)) : undefined;
+    if (tpVal != null && gridVal != null && gridVal >= tpVal) {
+      statusEl.textContent = '❌ Grid spacing (' + gridVal + ') must be smaller than TP offset (' + tpVal + ')';
+      statusEl.className = 'add-match-status err';
+      return;
+    }
+    const fullPayload = { ...payload, rearmSeconds: rearmVal, tpOffset: tpVal, gridInterval: gridVal };
     statusEl.textContent = 'Adding…'; statusEl.className = 'add-match-status';
     fetch('/api/sports/add', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(fullPayload) })
       .then(r => r.json())
@@ -376,6 +408,7 @@ app.get('/', (_, res) => {
       ['Total P&amp;L', sgn(m.totalPnl), pClass(m.totalPnl)],
       ['Wins / Losses', m.wins + ' / ' + m.losses, ''],
       ['Rebates', '$' + m.rebatesEarned.toFixed(4), 'pnl-pos'],
+      ['Grid / TP', '$' + m.gridInterval.toFixed(2) + ' / +$' + m.tpOffset.toFixed(2), ''],
       ['Self-heal', Math.round((m.rearmIntervalMs || 0) / 1000) + 's', ''],
     ];
     const statsHtml = stats.map(([label, val, cls]) =>
