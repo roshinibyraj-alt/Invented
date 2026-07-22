@@ -138,7 +138,7 @@ app.get('/', (_, res) => {
   <div class="assets-grid" id="assets-grid"><div class="empty">Loading…</div></div>
 
   <div class="section">
-    <div class="section-hdr">Monitoring Periods (gap ≥ threshold → buy cheaper side)</div>
+    <div class="section-hdr">Monitoring Periods (combined price ≤ 0.80 + one leg > 0.50 → buy cheaper side)</div>
   </div>
   <div class="periods-wrap" id="periods-wrap"><div class="empty">Loading…</div></div>
 
@@ -175,7 +175,7 @@ app.get('/', (_, res) => {
   $('resume-btn').onclick = () => fetch('/api/btc5m/resume', { method: 'POST' }).then(() => flash('Trading resumed'));
   $('live-btn').onclick = () => {
     const wantLive = !$('live-btn').classList.contains('is-live');
-    if (wantLive && !confirm('Switch to LIVE mode? This will place REAL crossing-the-spread buys with REAL money whenever the BTC/ETH gap trigger fires (50 shares per pair per period).')) return;
+    if (wantLive && !confirm('Switch to LIVE mode? This will place REAL crossing-the-spread buys with REAL money whenever a BTC+ETH pair\\'s combined price drops to 0.80 or below with one leg above 0.50 (50 shares per pair per period).')) return;
     fetch('/api/btc5m/set-mode', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ live: wantLive }) })
       .then(() => flash(wantLive ? 'Switched to LIVE' : 'Switched to DEMO'));
   };
@@ -235,7 +235,7 @@ app.get('/', (_, res) => {
       const pairLine = (pairName) => {
         const t = trig[pairName] || {};
         let cls = 'waiting', label = 'watching…';
-        if (t.done && t.boughtAsset) { cls = 'fired'; label = 'BUY ' + t.boughtAsset.toUpperCase() + ' (gap ' + (t.gap != null ? t.gap.toFixed(2) : '?') + ')'; }
+        if (t.done && t.boughtAsset) { cls = 'fired'; label = 'BUY ' + t.boughtAsset.toUpperCase() + ' (sum ' + (t.sum != null ? t.sum.toFixed(2) : '?') + ', gap ' + (t.gap != null ? t.gap.toFixed(2) : '?') + ')'; }
         else if (t.done) { cls = 'waiting'; label = 'paused, skipped'; }
         else if (!active && w.elapsedSec >= p.endSec) { cls = 'none'; label = 'no trigger'; }
         return '<div class="pair-line"><span class="pair-tag">' + pairName.toUpperCase() + '-pair</span><span class="pair-result ' + cls + '">' + label + '</span></div>';
