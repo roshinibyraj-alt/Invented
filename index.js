@@ -28,8 +28,8 @@ app.post('/api/sports/lookup', async (req, res) => {
 });
 
 app.post('/api/sports/add', (req, res) => {
-  const { sport, label, tokenId, conditionId, eventSlug, outcomeLabel, capital } = req.body || {};
-  try { res.json(sportsBot.addMatch({ sport, label, tokenId, conditionId, eventSlug, outcomeLabel, capital })); }
+  const { sport, label, tokenId, conditionId, eventSlug, outcomeLabel, capital, rearmSeconds } = req.body || {};
+  try { res.json(sportsBot.addMatch({ sport, label, tokenId, conditionId, eventSlug, outcomeLabel, capital, rearmSeconds })); }
   catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
@@ -152,10 +152,14 @@ app.get('/', (_, res) => {
 
   <div class="section">
     <div class="section-hdr">Add by Match URL</div>
-    <div class="add-match-form" id="lookup-form" style="grid-template-columns: 1fr 140px;">
+    <div class="add-match-form" id="lookup-form" style="grid-template-columns: 1fr 130px 140px;">
       <div class="field">
         <label>Polymarket match URL</label>
         <input id="f-url" placeholder="https://polymarket.com/sports/atp/atp-baez-kecmano-2026-07-20">
+      </div>
+      <div class="field">
+        <label>Self-healing (sec)</label>
+        <input id="f-rearm-lookup" type="number" min="2" max="300" step="1" value="120" title="How often an idle/unfilled rung re-anchors to the live price. Range: 2 sec - 300 sec (5 min).">
       </div>
       <button id="lookup-btn" type="button" style="grid-column:auto;">🔎 Look Up</button>
       <div class="hint">Paste any cricket, tennis, or crypto Up/Down (BTC/ETH/SOL/XRP 5m/15m) match page URL. This finds the event, the primary market, and shows live ask/bid for both sides — pick one to add it (uses its exact Token ID + Condition ID, the most reliable path).</div>
@@ -196,7 +200,11 @@ app.get('/', (_, res) => {
         <label>Starting Capital ($)</label>
         <input id="f-capital" type="number" placeholder="200">
       </div>
-      <div class="hint">Provide a <b>Token ID</b> directly (most reliable), ideally with its <b>Condition ID</b> so the bot can detect when the match resolves. Or provide an <b>Event Slug</b> + the <b>Outcome</b> you want to back and the bot will find the matching market/token itself — double-check the log line after adding before trusting it with real money. Every match added here runs the exact same trailing-grid ladder strategy (2 rungs, $0.05 apart, TP = entry + $0.10, trailing re-entry, and a 2-minute stale rearm to the live price).</div>
+      <div class="field">
+        <label>Self-healing (sec)</label>
+        <input id="f-rearm" type="number" min="2" max="300" step="1" value="120" title="How often an idle/unfilled rung re-anchors to the live price. Range: 2 sec - 300 sec (5 min).">
+      </div>
+      <div class="hint">Provide a <b>Token ID</b> directly (most reliable), ideally with its <b>Condition ID</b> so the bot can detect when the match resolves. Or provide an <b>Event Slug</b> + the <b>Outcome</b> you want to back and the bot will find the matching market/token itself — double-check the log line after adding before trusting it with real money. Every match added here runs the exact same trailing-grid ladder strategy (2 rungs, $0.05 apart, TP = entry + $0.10, trailing re-entry, and a self-healing rearm to the live price on the interval you set above, 2 sec - 5 min).</div>
       <div class="add-match-status" id="add-match-status"></div>
       <button type="submit">➕ Add Match</button>
     </form>
@@ -244,6 +252,7 @@ app.get('/', (_, res) => {
       eventSlug: $('f-slug').value || undefined,
       outcomeLabel: $('f-outcome').value || undefined,
       capital: $('f-capital').value ? Number($('f-capital').value) : undefined,
+      rearmSeconds: $('f-rearm').value ? Math.min(300, Math.max(2, Number($('f-rearm').value))) : undefined,
     };
     const statusEl = $('add-match-status');
     statusEl.textContent = 'Adding…'; statusEl.className = 'add-match-status';
@@ -286,8 +295,10 @@ app.get('/', (_, res) => {
 
   function addFromLookup(payload) {
     const statusEl = $('lookup-status');
+    const rearmVal = $('f-rearm-lookup').value ? Math.min(300, Math.max(2, Number($('f-rearm-lookup').value))) : undefined;
+    const fullPayload = { ...payload, rearmSeconds: rearmVal };
     statusEl.textContent = 'Adding…'; statusEl.className = 'add-match-status';
-    fetch('/api/sports/add', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
+    fetch('/api/sports/add', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(fullPayload) })
       .then(r => r.json())
       .then(res => {
         statusEl.textContent = res.ok ? ('✅ Match added (id: ' + res.id + ')') : ('❌ ' + res.error);
@@ -365,6 +376,7 @@ app.get('/', (_, res) => {
       ['Total P&amp;L', sgn(m.totalPnl), pClass(m.totalPnl)],
       ['Wins / Losses', m.wins + ' / ' + m.losses, ''],
       ['Rebates', '$' + m.rebatesEarned.toFixed(4), 'pnl-pos'],
+      ['Self-heal', Math.round((m.rearmIntervalMs || 0) / 1000) + 's', ''],
     ];
     const statsHtml = stats.map(([label, val, cls]) =>
       '<div class="stat"><div class="stat-label">' + label + '</div><div class="stat-val ' + cls + '">' + val + '</div></div>'
