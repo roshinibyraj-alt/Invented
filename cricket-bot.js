@@ -355,7 +355,7 @@ async function monitorAndTrigger(cycle) {
     const sum = round2(btcAsk + ethAsk);
     const gap = round2(1 - sum);
     if (gap < GAP_THRESHOLD) continue; // combined price not discounted enough yet, keep watching
-    if (btcAsk <= 0.5 && ethAsk <= 0.5) continue; // need at least one leg priced above 0.50 to fire
+    if (btcAsk <= 0.7 && ethAsk <= 0.7) continue; // need at least one leg priced above 0.70 to fire
 
     const cheaperAsset = btcAsk <= ethAsk ? 'btc' : 'eth';
     trig[pair].done = true;
@@ -368,7 +368,7 @@ async function monitorAndTrigger(cycle) {
       log(`⏸️  ${period.key} ${pair}-pair: BTC=${btcAsk.toFixed(2)} ETH=${ethAsk.toFixed(2)} sum=${sum.toFixed(2)} gap=${gap.toFixed(2)} hit threshold but trading is paused — skipped`);
       continue;
     }
-    log(`🔎 ${period.key} ${pair}-pair: BTC=${btcAsk.toFixed(2)} ETH=${ethAsk.toFixed(2)} sum=${sum.toFixed(2)} gap=${gap.toFixed(2)} ≥ ${GAP_THRESHOLD.toFixed(2)} (one leg > 0.50) → buy ${cheaperAsset.toUpperCase()}-${pair.toUpperCase()}`);
+    log(`🔎 ${period.key} ${pair}-pair: BTC=${btcAsk.toFixed(2)} ETH=${ethAsk.toFixed(2)} sum=${sum.toFixed(2)} gap=${gap.toFixed(2)} ≥ ${GAP_THRESHOLD.toFixed(2)} (one leg > 0.70) → buy ${cheaperAsset.toUpperCase()}-${pair.toUpperCase()}`);
     await executeBuy(cycle.assets[cheaperAsset], pair, SHARES_PER_TRIGGER, `${period.key} ${pair}-pair gap ${gap.toFixed(2)}`);
   }
 }
@@ -610,7 +610,7 @@ async function init(privateKey, emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
   slog('[updown5m] 🪙 BTC + ETH 5-Minute Gap-Monitoring Engine — fully automatic, no manual match management');
-  slog(`[updown5m] ⚙️  5 monitoring periods per window (0-1,1-2,2-3,3-4,4-4:30min). Each period, Up-pair (BTC-up + ETH-up) and Down-pair (BTC-down + ETH-down) are watched continuously; the instant a pair's combined price drops to ${(1 - GAP_THRESHOLD).toFixed(2)} or below (gap ${GAP_THRESHOLD.toFixed(2)}) AND at least one leg is above 0.50, buy ${SHARES_PER_TRIGGER}sh of the cheaper leg (once per pair per period).`);
+  slog(`[updown5m] ⚙️  5 monitoring periods per window (0-1,1-2,2-3,3-4,4-4:30min). Each period, Up-pair (BTC-up + ETH-up) and Down-pair (BTC-down + ETH-down) are watched continuously; the instant a pair's combined price drops to ${(1 - GAP_THRESHOLD).toFixed(2)} or below (gap ${GAP_THRESHOLD.toFixed(2)}) AND at least one leg is above 0.70, buy ${SHARES_PER_TRIGGER}sh of the cheaper leg (once per pair per period).`);
   slog(`[updown5m] ⚙️  Starting bankroll $${STARTING_CAPITAL} (shared across BTC+ETH) | fixed ${SHARES_PER_TRIGGER}sh per trigger, no compounding | positions held to settlement, no TP/exit logic | never trades a window it joins mid-way through`);
   slog(`[updown5m] ${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
