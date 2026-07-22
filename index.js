@@ -95,16 +95,19 @@ app.get('/', (_, res) => {
   .pos-box { background: #fff; border: 1px solid var(--border); border-radius: 8px; padding: 7px 9px; font-size: 9.5px; }
   .pos-box .pos-label { color: var(--muted); font-size: 9px; text-transform: uppercase; margin-bottom: 4px; }
   .asset-unrl { margin-top: 8px; font-size: 10px; text-align: right; }
-  .periods-wrap { margin: 0 20px 16px; }
-  .period-row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
-  .period-card { flex: 1; min-width: 160px; background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 9.5px; }
-  .period-card.active { border-color: var(--yellow); background: #e6a80011; }
-  .period-time { color: var(--muted); font-size: 9px; margin-bottom: 4px; }
-  .pair-line { display: flex; justify-content: space-between; align-items: center; padding: 2px 0; }
-  .pair-tag { color: var(--muted); }
-  .pair-result.fired { color: var(--green); }
-  .pair-result.waiting { color: var(--muted); }
-  .pair-result.none { color: var(--red); }
+  .entries-wrap { margin: 0 20px 16px; }
+  .entry-row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+  .entry-card { flex: 1; min-width: 200px; background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; font-size: 10px; }
+  .entry-card.armed { border-color: var(--green); background: #00a85411; }
+  .entry-card.locked { border-color: var(--muted); background: #7a8fa811; }
+  .entry-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+  .entry-tag { color: var(--text); font-weight: bold; font-size: 11px; }
+  .entry-badge { font-size: 9px; padding: 2px 8px; border-radius: 10px; text-transform: uppercase; }
+  .entry-badge.armed { background: #00a85422; color: var(--green); border: 1px solid var(--green); }
+  .entry-badge.locked { background: #7a8fa822; color: var(--muted); border: 1px solid var(--muted); }
+  .entry-badge.locked-bought { background: #7a8fa822; color: var(--gold); border: 1px solid var(--gold); }
+  .entry-detail { color: var(--muted); }
+  .entry-detail .bought { color: var(--green); font-weight: bold; }
   .bottom-grid { display: grid; grid-template-columns: 1fr; gap: 16px; padding: 0 20px 20px; }
   .tbl-wrap { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; max-height: 320px; overflow-y: auto; }
   .tbl { width: 100%; border-collapse: collapse; }
@@ -138,9 +141,9 @@ app.get('/', (_, res) => {
   <div class="assets-grid" id="assets-grid"><div class="empty">Loading…</div></div>
 
   <div class="section">
-    <div class="section-hdr">Monitoring Periods (combined price ≤ 0.80 + one leg > 0.50 → buy cheaper side)</div>
+    <div class="section-hdr">Window Entry Status (combined price ≤ 0.80 + one leg &gt; 0.70 → buy cheaper side · first side to fire locks, other side stays open)</div>
   </div>
-  <div class="periods-wrap" id="periods-wrap"><div class="empty">Loading…</div></div>
+  <div class="entries-wrap" id="entries-wrap"><div class="empty">Loading…</div></div>
 
   <div class="bottom-grid">
     <div>
@@ -175,7 +178,7 @@ app.get('/', (_, res) => {
   $('resume-btn').onclick = () => fetch('/api/btc5m/resume', { method: 'POST' }).then(() => flash('Trading resumed'));
   $('live-btn').onclick = () => {
     const wantLive = !$('live-btn').classList.contains('is-live');
-    if (wantLive && !confirm('Switch to LIVE mode? This will place REAL crossing-the-spread buys with REAL money whenever a BTC+ETH pair\\'s combined price drops to 0.80 or below with one leg above 0.50 (50 shares per pair per period).')) return;
+    if (wantLive && !confirm('Switch to LIVE mode? This will place REAL crossing-the-spread buys with REAL money whenever a BTC+ETH pair\\'s combined price drops to 0.80 or below with one leg above 0.70 (50 shares per pair per window — first side to fire locks, the other side stays open for one more entry).')) return;
     fetch('/api/btc5m/set-mode', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ live: wantLive }) })
       .then(() => flash(wantLive ? 'Switched to LIVE' : 'Switched to DEMO'));
   };
@@ -222,27 +225,38 @@ app.get('/', (_, res) => {
     '</div>';
   }
 
+  function entryTime(ts) { return ts ? new Date(ts).toLocaleTimeString() : ''; }
+
   function renderWindow(s) {
     const w = s.window;
-    if (!w) { $('assets-grid').innerHTML = '<div class="empty">No window yet…</div>'; $('window-meta').textContent = ''; return; }
+    if (!w) { $('assets-grid').innerHTML = '<div class="empty">No window yet…</div>'; $('window-meta').textContent = ''; $('entries-wrap').innerHTML = ''; return; }
     const remaining = s.windowSeconds - w.elapsedSec;
     $('window-meta').textContent = 'Window t=' + w.windowTs + ' · elapsed ' + mmss(w.elapsedSec) + ' / ' + mmss(s.windowSeconds) + ' · ' + mmss(remaining) + ' left';
     $('assets-grid').innerHTML = assetCard(w.assets.btc, '') + assetCard(w.assets.eth, 'eth');
 
-    const periodsHtml = s.periods.map(p => {
-      const active = w.elapsedSec >= p.startSec && w.elapsedSec < p.endSec;
-      const trig = w.triggers[p.key] || { up: {}, down: {} };
-      const pairLine = (pairName) => {
-        const t = trig[pairName] || {};
-        let cls = 'waiting', label = 'watching…';
-        if (t.done && t.boughtAsset) { cls = 'fired'; label = 'BUY ' + t.boughtAsset.toUpperCase() + ' (sum ' + (t.sum != null ? t.sum.toFixed(2) : '?') + ', gap ' + (t.gap != null ? t.gap.toFixed(2) : '?') + ')'; }
-        else if (t.done) { cls = 'waiting'; label = 'paused, skipped'; }
-        else if (!active && w.elapsedSec >= p.endSec) { cls = 'none'; label = 'no trigger'; }
-        return '<div class="pair-line"><span class="pair-tag">' + pairName.toUpperCase() + '-pair</span><span class="pair-result ' + cls + '">' + label + '</span></div>';
-      };
-      return '<div class="period-card' + (active ? ' active' : '') + '"><div class="period-time">t+' + mmss(p.startSec) + '–' + mmss(p.endSec) + (active ? ' · ACTIVE' : '') + '</div>' + pairLine('up') + pairLine('down') + '</div>';
-    }).join('');
-    $('periods-wrap').innerHTML = '<div class="period-row">' + periodsHtml + '</div>';
+    const entries = w.entries || { up: {}, down: {} };
+    const entryCard = (pairName) => {
+      const e = entries[pairName] || {};
+      const isLocked = !!e.done;
+      const cardCls = isLocked ? 'locked' : 'armed';
+      let badgeCls, badgeLabel, detailHtml;
+      if (isLocked && e.boughtAsset) {
+        badgeCls = 'locked-bought'; badgeLabel = '🔒 LOCKED · BOUGHT';
+        detailHtml = 'Bought <span class="bought">' + e.boughtAsset.toUpperCase() + '-' + pairName.toUpperCase() + '</span> at ' + entryTime(e.ts) +
+          ' — sum ' + (e.sum != null ? e.sum.toFixed(2) : '?') + ', gap ' + (e.gap != null ? e.gap.toFixed(2) : '?');
+      } else if (isLocked) {
+        badgeCls = 'locked'; badgeLabel = '🔒 LOCKED · SKIPPED';
+        detailHtml = 'Condition hit but trading was paused at the time — no re-fire this window.';
+      } else {
+        badgeCls = 'armed'; badgeLabel = '🟢 ARMED';
+        detailHtml = 'Watching continuously — will buy the cheaper leg the instant the gap and price conditions are met.';
+      }
+      return '<div class="entry-card ' + cardCls + '">' +
+        '<div class="entry-head"><span class="entry-tag">' + pairName.toUpperCase() + '-pair</span><span class="entry-badge ' + badgeCls + '">' + badgeLabel + '</span></div>' +
+        '<div class="entry-detail">' + detailHtml + '</div>' +
+      '</div>';
+    };
+    $('entries-wrap').innerHTML = '<div class="entry-row">' + entryCard('up') + entryCard('down') + '</div>';
   }
 
   function renderHistory(list) {
