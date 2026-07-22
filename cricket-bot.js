@@ -6,36 +6,27 @@
  * ═══════════════════════════════════════════════════════════════
  *
  *  Trades Polymarket's BTC and ETH "Up or Down" 5-minute markets
- *  TOGETHER. Each 5-minute window is split into 5 monitoring
- *  periods:
- *      Period 1: t+0:00 – 1:00
- *      Period 2: t+1:00 – 2:00
- *      Period 3: t+2:00 – 3:00
- *      Period 4: t+3:00 – 4:00
- *      Period 5: t+4:00 – 4:30   (half-length)
- *  (t+4:30 – 5:00 is not monitored; positions just ride to settlement.)
- *
- *  Within EVERY period, two pairs are watched continuously (checked
- *  every price refresh tick, not at one fixed instant):
+ *  TOGETHER, monitoring the FULL window continuously (t+0:00 to
+ *  t+5:00) — there are no monitoring periods or minute buckets. Two
+ *  pairs are watched every price-refresh tick for the entire window:
  *      Up-pair:   BTC-Up ask  +  ETH-Up ask
  *      Down-pair: BTC-Down ask + ETH-Down ask
  *  For each pair: sum = btcAsk + ethAsk, gap = 1.00 - sum. The
  *  instant gap reaches or exceeds 0.20 (i.e. the combined price of
  *  the two legs drops to 0.80 or below) AND at least one of the two
- *  legs is priced above 0.50, the engine immediately buys 50 shares
- *  of whichever of the two legs is cheaper. Example: BTC-up 0.55,
- *  ETH-up 0.20 -> sum 0.75 -> gap 0.25 >= 0.20, and BTC-up (0.55) is
- *  above 0.50 -> buy 50sh ETH-up (the cheaper leg) right away, no
- *  waiting for the period to end. If gap >= 0.20 but NEITHER leg is
- *  above 0.50, it does NOT fire.
+ *  legs is priced above 0.70, the engine immediately buys 50 shares
+ *  of whichever of the two legs is cheaper. If gap >= 0.20 but
+ *  NEITHER leg is above 0.70, it does NOT fire.
  *
- *  Each pair can fire AT MOST ONCE per period — once it triggers, it
- *  goes quiet (latched) for the rest of that period even if the
- *  condition stays true, and re-arms fresh at the start of the next
- *  period. If a pair never meets the condition during its period, no
- *  trade happens for that pair that period (not retried later).
- *  Up-pair and Down-pair are fully independent, so up to 2 buys
- *  (100 shares total) can happen in a single period if both qualify.
+ *  ONE-SIDE-FIRST, THEN THE OTHER: each pair (Up, Down) can fire AT
+ *  MOST ONCE per window — once a pair fires it's LOCKED for the rest
+ *  of that window (no re-arming). Whichever side (Up or Down) meets
+ *  the condition first is free to fire; after that, only the
+ *  opposite side remains armed for the rest of the window. So a
+ *  window can produce at most 2 buys total (one Up, one Down), and
+ *  never two buys on the same side. If a pair never meets the
+ *  condition during the window, no trade happens for that pair that
+ *  window (not retried later).
  *
  *  BOTH markets share ONE bankroll ($2000 demo starting capital by
  *  default). Share size is fixed at 50 — no bankroll-proportional
@@ -88,14 +79,6 @@ const ASSETS = [
   { key: 'eth', label: 'ETH', slugPrefix: 'eth-updown-5m-' },
 ];
 
-// The 5 monitoring periods within each window (relative seconds).
-const PERIODS = [
-  { key: 'min1',   startSec: 0,   endSec: 60 },
-  { key: 'min2',   startSec: 60,  endSec: 120 },
-  { key: 'min3',   startSec: 120, endSec: 180 },
-  { key: 'min4',   startSec: 180, endSec: 240 },
-  { key: 'min4_5', startSec: 240, endSec: 270 }, // half-length final period
-];
 const PAIRS = ['up', 'down']; // Up-pair (BTC-up vs ETH-up), Down-pair (BTC-down vs ETH-down)
 
 const GAP_THRESHOLD    = Number(process.env.BTC5M_GAP_THRESHOLD || 0.20); // 20-cent gap trigger
@@ -127,7 +110,7 @@ const engine = {
   realizedPnl: 0,
   feesPaid: 0,
   wins: 0, losses: 0,
-  cycle: null,          // current window pair being monitored ({ windowTs, assets: { btc, eth }, triggers })
+  cycle: null,          // current window pair being monitored ({ windowTs, assets: { btc, eth }, entries })
   pending: [],           // past asset-windows awaiting resolution confirmation (background queue)
   history: [],           // resolved asset-windows, most recent first, capped
   logs: [],
@@ -220,15 +203,14 @@ function freshAssetWindow(assetDef, windowTs) {
   };
 }
 
-function freshTriggers() {
-  const t = {};
-  for (const period of PERIODS) {
-    t[period.key] = {
-      up:   { done: false, boughtAsset: null, gap: null, ts: null },
-      down: { done: false, boughtAsset: null, gap: null, ts: null },
-    };
-  }
-  return t;
+// One entry slot per pair, valid for the WHOLE window (no periods). Each
+// pair can fire at most once per window; once one side fires, only the
+// opposite side remains armed for the rest of the window.
+function freshEntries() {
+  return {
+    up:   { done: false, boughtAsset: null, gap: null, sum: null, ts: null },
+    down: { done: false, boughtAsset: null, gap: null, sum: null, ts: null },
+  };
 }
 
 function freshCycle(windowTs) {
@@ -239,8 +221,7 @@ function freshCycle(windowTs) {
       btc: freshAssetWindow(ASSETS[0], windowTs),
       eth: freshAssetWindow(ASSETS[1], windowTs),
     },
-    triggers: freshTriggers(),
-    lastPeriodKey: null,
+    entries: freshEntries(),
     createdAt: Date.now(),
   };
 }
@@ -321,36 +302,24 @@ async function executeBuy(aw, side, shares, stepLabel) {
   recordEquity();
 }
 
-// Find which monitoring period (if any) the current elapsed time falls in.
-function periodForElapsed(elapsedSec) {
-  return PERIODS.find(p => elapsedSec >= p.startSec && elapsedSec < p.endSec) || null;
-}
-
 // Called every tick while a cycle is trading. Continuously watches both
-// pairs; the instant a pair's gap reaches GAP_THRESHOLD it fires a single
-// buy for that pair and latches until the next period.
+// pairs for the ENTIRE window (no periods). The instant a pair's gap
+// reaches GAP_THRESHOLD (with one leg > 0.70) it fires a single buy for
+// that pair and LOCKS for the rest of the window — it will not fire
+// again. The other pair stays armed and can still fire once, whenever
+// its own condition is met (before or after the first side, in any
+// order). Once both pairs have fired, the window is done triggering.
 async function monitorAndTrigger(cycle) {
   const elapsedSec = Math.floor(Date.now() / 1000) - cycle.windowTs;
-  const period = periodForElapsed(elapsedSec);
+  if (elapsedSec < 0 || elapsedSec >= WINDOW_SECONDS) return; // outside the window — just hold
 
-  // Log once when a period ends without ever triggering a pair.
-  if (period && period.key !== cycle.lastPeriodKey) {
-    if (cycle.lastPeriodKey) {
-      const prevTrig = cycle.triggers[cycle.lastPeriodKey];
-      for (const pair of PAIRS) {
-        if (prevTrig && !prevTrig[pair].done) log(`ℹ️  ${cycle.lastPeriodKey}: ${pair}-pair gap never reached ${GAP_THRESHOLD.toFixed(2)} — no trade that period`);
-      }
-    }
-    cycle.lastPeriodKey = period.key;
-  }
-  if (!period) return; // outside all monitoring periods (t+4:30 to t+5:00) — just hold
-
-  const trig = cycle.triggers[period.key];
+  const entries = cycle.entries;
   for (const pair of PAIRS) {
-    if (trig[pair].done) continue;
+    if (entries[pair].done) continue; // this side already fired this window — locked, skip
+
     const btcAsk = cycle.assets.btc[pair === 'up' ? 'upAsk' : 'downAsk'];
     const ethAsk = cycle.assets.eth[pair === 'up' ? 'upAsk' : 'downAsk'];
-    if (btcAsk == null || ethAsk == null) continue; // no live prices yet, keep watching this period
+    if (btcAsk == null || ethAsk == null) continue; // no live prices yet, keep watching
 
     const sum = round2(btcAsk + ethAsk);
     const gap = round2(1 - sum);
@@ -358,18 +327,21 @@ async function monitorAndTrigger(cycle) {
     if (btcAsk <= 0.7 && ethAsk <= 0.7) continue; // need at least one leg priced above 0.70 to fire
 
     const cheaperAsset = btcAsk <= ethAsk ? 'btc' : 'eth';
-    trig[pair].done = true;
-    trig[pair].boughtAsset = cheaperAsset;
-    trig[pair].gap = gap;
-    trig[pair].sum = sum;
-    trig[pair].ts = Date.now();
+    entries[pair].done = true;
+    entries[pair].boughtAsset = cheaperAsset;
+    entries[pair].gap = gap;
+    entries[pair].sum = sum;
+    entries[pair].ts = Date.now();
+
+    const otherPair = pair === 'up' ? 'down' : 'up';
+    const otherStatus = entries[otherPair].done ? `${otherPair}-pair already locked too — window done triggering` : `${otherPair}-pair remains armed as the only side that can still fire this window`;
 
     if (!engine.tradingEnabled) {
-      log(`⏸️  ${period.key} ${pair}-pair: BTC=${btcAsk.toFixed(2)} ETH=${ethAsk.toFixed(2)} sum=${sum.toFixed(2)} gap=${gap.toFixed(2)} hit threshold but trading is paused — skipped`);
+      log(`⏸️  ${pair}-pair: BTC=${btcAsk.toFixed(2)} ETH=${ethAsk.toFixed(2)} sum=${sum.toFixed(2)} gap=${gap.toFixed(2)} hit threshold but trading is paused — skipped (${otherStatus})`);
       continue;
     }
-    log(`🔎 ${period.key} ${pair}-pair: BTC=${btcAsk.toFixed(2)} ETH=${ethAsk.toFixed(2)} sum=${sum.toFixed(2)} gap=${gap.toFixed(2)} ≥ ${GAP_THRESHOLD.toFixed(2)} (one leg > 0.70) → buy ${cheaperAsset.toUpperCase()}-${pair.toUpperCase()}`);
-    await executeBuy(cycle.assets[cheaperAsset], pair, SHARES_PER_TRIGGER, `${period.key} ${pair}-pair gap ${gap.toFixed(2)}`);
+    log(`🔎 ${pair}-pair: BTC=${btcAsk.toFixed(2)} ETH=${ethAsk.toFixed(2)} sum=${sum.toFixed(2)} gap=${gap.toFixed(2)} ≥ ${GAP_THRESHOLD.toFixed(2)} (one leg > 0.70) → buy ${cheaperAsset.toUpperCase()}-${pair.toUpperCase()} | ${otherStatus}`);
+    await executeBuy(cycle.assets[cheaperAsset], pair, SHARES_PER_TRIGGER, `${pair}-pair gap ${gap.toFixed(2)}`);
   }
 }
 
@@ -508,6 +480,9 @@ async function mainLoop() {
               }
             }
           }
+          for (const pair of PAIRS) {
+            if (!engine.cycle.entries[pair].done) log(`ℹ️  window t=${engine.cycle.windowTs} closed: ${pair}-pair gap never reached ${GAP_THRESHOLD.toFixed(2)} with a qualifying leg — no trade that window`);
+          }
         }
         engine.cycle = freshCycle(windowTs);
         log(`🆕 new window t=${windowTs} — discovering BTC + ETH markets…`);
@@ -573,7 +548,7 @@ function buildState() {
     window: cycle ? {
       windowTs: cycle.windowTs, closeAt: cycle.closeAt,
       elapsedSec: Math.max(0, Math.min(WINDOW_SECONDS, Math.floor(Date.now() / 1000) - cycle.windowTs)),
-      triggers: cycle.triggers,
+      entries: cycle.entries,
       assets: { btc: assetSummary(cycle.assets.btc), eth: assetSummary(cycle.assets.eth) },
     } : null,
     pendingResolutionCount: engine.pending.length,
@@ -582,7 +557,6 @@ function buildState() {
     trades: engine.trades.slice(-100).slice().reverse(),
     equityCurve: engine.equityCurve,
     logs: engine.logs.slice(-80),
-    periods: PERIODS,
     gapThreshold: GAP_THRESHOLD,
     triggerShares: SHARES_PER_TRIGGER,
     windowSeconds: WINDOW_SECONDS,
@@ -610,7 +584,7 @@ async function init(privateKey, emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
   slog('[updown5m] 🪙 BTC + ETH 5-Minute Gap-Monitoring Engine — fully automatic, no manual match management');
-  slog(`[updown5m] ⚙️  5 monitoring periods per window (0-1,1-2,2-3,3-4,4-4:30min). Each period, Up-pair (BTC-up + ETH-up) and Down-pair (BTC-down + ETH-down) are watched continuously; the instant a pair's combined price drops to ${(1 - GAP_THRESHOLD).toFixed(2)} or below (gap ${GAP_THRESHOLD.toFixed(2)}) AND at least one leg is above 0.70, buy ${SHARES_PER_TRIGGER}sh of the cheaper leg (once per pair per period).`);
+  slog(`[updown5m] ⚙️  No monitoring periods — Up-pair (BTC-up + ETH-up) and Down-pair (BTC-down + ETH-down) are watched continuously across the ENTIRE window; the instant a pair's combined price drops to ${(1 - GAP_THRESHOLD).toFixed(2)} or below (gap ${GAP_THRESHOLD.toFixed(2)}) AND at least one leg is above 0.70, buy ${SHARES_PER_TRIGGER}sh of the cheaper leg. Each side (up/down) fires at most once per window; once one side fires, only the opposite side stays armed for the rest of that window.`);
   slog(`[updown5m] ⚙️  Starting bankroll $${STARTING_CAPITAL} (shared across BTC+ETH) | fixed ${SHARES_PER_TRIGGER}sh per trigger, no compounding | positions held to settlement, no TP/exit logic | never trades a window it joins mid-way through`);
   slog(`[updown5m] ${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
