@@ -26,21 +26,26 @@
  *  orders are cancelled and no win/loss is recorded for that rung
  *  that window.
  *
- *  MARTINGALE (per rung, per asset, independent counters):
- *    Rung 0.10: after 7 consecutive losses -> double shares once, then
- *               plateau at that size until a win.
- *    Rung 0.20: after 4 consecutive losses -> double shares once, then
- *               plateau until a win.
- *    Rung 0.33: after 2 consecutive losses -> double shares once, then
- *               plateau until a win.
+ *  MARTINGALE (per rung, per asset, independent counters, compounding):
+ *    Rung 0.10: every additional 7 consecutive losses -> double shares again
+ *               (loss 7 -> x2, loss 14 -> x4, loss 21 -> x8, ...).
+ *    Rung 0.20: every additional 4 consecutive losses -> double shares again.
+ *    Rung 0.33: every additional 2 consecutive losses -> double shares again.
  *    Any win -> counter and share size reset to BASE_SHARES.
- *    Uncapped — doubling is not limited to N stages.
+ *    Uncapped — doubling can compound indefinitely.
  *
- *  RESOLUTION: primarily via Polymarket Gamma's `closed` +
- *  `outcomePrices` fields. If Gamma hasn't confirmed official
- *  resolution within RESOLUTION_FALLBACK_MS after the window's close
- *  time, the engine falls back to determining the winner itself from
- *  the last known live price for each side.
+ *  RESOLUTION: three tiers, fastest available wins:
+ *    1. Official — Polymarket Gamma's `closed` + `outcomePrices` fields.
+ *    2. High-confidence live price — if either side's live price crosses
+ *       HIGH_CONF_PRICE (default 0.90), that side is treated as the
+ *       de-facto winner immediately, without waiting on official
+ *       confirmation. Checked continuously while trading and on every
+ *       resolution poll afterward, so this usually resolves within
+ *       seconds of the window closing (these 5-min crypto markets
+ *       almost always trade to a near-certain extreme well before close).
+ *    3. Live-price fallback — if neither of the above has resolved the
+ *       window within RESOLUTION_FALLBACK_MS after close, use whichever
+ *       side has the higher live price.
  *
  *  BTC and ETH windows for the same 5-minute slot resolve
  *  INDEPENDENTLY of each other.
@@ -51,6 +56,14 @@
  *
  *  FEES: resting limit orders are treated as maker fills — $0 fee by
  *  default (RUNG_MAKER_FEE_RATE env var to override).
+ *
+ *  MAKER REBATES (estimated only): Polymarket's Maker Rebates Program pays
+ *  makers a share of taker fees, settled daily on-chain in USDC — it is
+ *  NOT reflected in the CLOB position P&L and can't be fetched via public
+ *  API, so the dashboard shows an UPPER-BOUND estimate per fill using the
+ *  Crypto category's published formula (fee_equivalent = shares * 0.07 *
+ *  price * (1-price), rebate = fee_equivalent * 20%), assuming your order
+ *  was the only maker liquidity taken. Real payouts are likely lower.
  *
  *  TRADER INTERFACE:
  *    trader.placeLimitBuy(tokenId, price, size) -> { id, filled, avgPrice, filledShares }
@@ -76,8 +89,8 @@ const ASSETS = [
   { key: 'eth', label: 'ETH', slugPrefix: 'eth-updown-5m-' },
 ];
 
-// The three independent rungs. lossThreshold = consecutive losses needed
-// before this rung doubles its share size (once, then plateaus).
+// The three independent rungs. lossThreshold = how many consecutive losses
+// it takes to double the share size again (compounding every N further losses).
 const RUNGS = [
   { key: 'r10', price: 0.10, label: '0.10', lossThreshold: 7 },
   { key: 'r20', price: 0.20, label: '0.20', lossThreshold: 4 },
@@ -92,10 +105,34 @@ const STARTING_CAPITAL = Number(process.env.BTC5M_CAPITAL || 2000);
 const MAKER_FEE_RATE = Number(process.env.RUNG_MAKER_FEE_RATE || 0);
 const MAX_PENDING_RESOLUTIONS = 40;
 
+// Polymarket Maker Rebates Program (docs.polymarket.com/market-makers/maker-rebates) —
+// BTC/ETH 5-minute markets fall under the "Crypto" category:
+//   taker fee rate = 0.07, maker fee rate = 0 (makers pay nothing — matches MAKER_FEE_RATE default),
+//   maker rebate share = 20% of the crypto category's taker-fee pool, distributed "fee-curve weighted":
+//     fee_equivalent = shares * feeRate * price * (1 - price)
+//     your_rebate    = (your_fee_equivalent / total_fee_equivalent_in_that_market) * rebate_pool
+// We can't see the market-wide pool or other makers' volume via public endpoints, so we track
+// an UPPER-BOUND estimate: fee_equivalent * rebate_share, i.e. "what you'd earn if your resting
+// liquidity were the only maker liquidity taken in that market." Real payouts (paid daily in USDC
+// on-chain) will be <= this estimate, often well below it in markets with competing makers.
+const REBATE_FEE_RATE = Number(process.env.RUNG_REBATE_FEE_RATE || 0.07);   // Crypto category taker-fee rate
+const REBATE_SHARE     = Number(process.env.RUNG_REBATE_SHARE || 0.20);     // Crypto category maker-rebate share
+// If price crosses this threshold (or its complement) in the live book, treat that side as the
+// de-facto winner immediately instead of waiting for RESOLUTION_FALLBACK_MS — these 5-min crypto
+// up/down markets almost always trade to a near-certain extreme well before official close.
+const HIGH_CONF_PRICE = Number(process.env.RESOLUTION_HIGH_CONF_PRICE || 0.90);
+
 function round2(n) { return Math.round(n * 100) / 100; }
+function round4(n) { return Math.round(n * 10000) / 10000; }
 function estimateFee(shares, price) {
   if (MAKER_FEE_RATE <= 0) return 0;
   return round2(shares * MAKER_FEE_RATE * price * (1 - price));
+}
+// Upper-bound estimate of the maker rebate earned on a single fill. See note above — real
+// on-chain payout depends on total maker volume in that market and may be lower.
+function estimateRebate(shares, price) {
+  const feeEquivalent = shares * REBATE_FEE_RATE * price * (1 - price);
+  return round4(feeEquivalent * REBATE_SHARE);
 }
 
 let emitFn = () => {};
@@ -107,7 +144,12 @@ let tradeSeq = 0;
 
 function freshRungState() {
   const s = {};
-  for (const r of RUNGS) s[r.key] = { consecutiveLosses: 0, currentShares: BASE_SHARES, hasDoubled: false };
+  for (const r of RUNGS) s[r.key] = { consecutiveLosses: 0, currentShares: BASE_SHARES, doubleCount: 0 };
+  return s;
+}
+function freshRebateState() {
+  const s = {};
+  for (const r of RUNGS) s[r.key] = 0;
   return s;
 }
 
@@ -129,6 +171,8 @@ const engine = {
   waitingForBoundary: true,
   boundaryWindowTs: null,
   rungState: { btc: freshRungState(), eth: freshRungState() }, // martingale state, persists across windows
+  estimatedRebateUsd: 0,   // upper-bound estimate, accrues on every maker fill (see estimateRebate)
+  rebateByRung: { btc: freshRebateState(), eth: freshRebateState() },
 };
 
 // ─────────────────────────────────────────
@@ -209,7 +253,7 @@ function parseMarketTokens(mk) {
 function currentWindowTs(nowSec) { return Math.floor(nowSec / WINDOW_SECONDS) * WINDOW_SECONDS; }
 
 function freshRungLeg(price) {
-  return { orderId: null, placed: false, filled: false, cancelled: false, price, shares: 0, fillPrice: null, cost: 0, fee: 0 };
+  return { orderId: null, placed: false, filled: false, cancelled: false, price, shares: 0, fillPrice: null, cost: 0, fee: 0, rebate: 0 };
 }
 function freshRungPosition(rungDef) {
   return {
@@ -240,6 +284,9 @@ function freshAssetWindow(assetDef, windowTs) {
     ordersPlaced: false,
     lastDiscoveryAttempt: 0,
     createdAt: Date.now(),
+    highConfSide: null,   // set once either side's live price crosses HIGH_CONF_PRICE
+    highConfPrice: null,
+    highConfAt: null,
   };
 }
 
@@ -294,6 +341,20 @@ async function refreshAssetPrices(aw) {
 
 function affordable(shares, price) { return round2(shares * price) <= engine.bankroll; }
 
+// If either side's live price has crossed HIGH_CONF_PRICE (default 0.90), lock in that side as
+// the de-facto winner so resolution doesn't have to wait for RESOLUTION_FALLBACK_MS. Once set,
+// a side is "sticky" for this window — it won't be un-set by a later price wobble.
+function updateHighConfidence(aw) {
+  if (aw.highConfSide) return;
+  const upP = aw.upBid != null ? aw.upBid : aw.upAsk;
+  const downP = aw.downBid != null ? aw.downBid : aw.downAsk;
+  if (upP != null && upP >= HIGH_CONF_PRICE) {
+    aw.highConfSide = 'up'; aw.highConfPrice = upP; aw.highConfAt = Date.now();
+  } else if (downP != null && downP >= HIGH_CONF_PRICE) {
+    aw.highConfSide = 'down'; aw.highConfPrice = downP; aw.highConfAt = Date.now();
+  }
+}
+
 // ─────────────────────────────────────────
 //  Rung order placement / fill / cancel
 // ─────────────────────────────────────────
@@ -337,16 +398,20 @@ async function onRungFill(aw, rungDef, side, fillPrice, filledShares) {
 
   const fee = estimateFee(filledShares, fillPrice);
   const cost = round2(filledShares * fillPrice);
+  const rebate = estimateRebate(filledShares, fillPrice);
   engine.bankroll = round2(engine.bankroll - cost - fee);
   engine.feesPaid = round2(engine.feesPaid + fee);
+  engine.estimatedRebateUsd = round4(engine.estimatedRebateUsd + rebate);
+  engine.rebateByRung[aw.asset][rungDef.key] = round4(engine.rebateByRung[aw.asset][rungDef.key] + rebate);
 
   leg.filled = true;
   leg.fillPrice = fillPrice;
   leg.cost = cost;
   leg.fee = fee;
   leg.shares = filledShares;
+  leg.rebate = rebate;
 
-  registerTrade({ slug: aw.slug, asset: aw.asset, step: `${rungDef.label} rung fill`, side, price: fillPrice, shares: filledShares, cost, fee });
+  registerTrade({ slug: aw.slug, asset: aw.asset, step: `${rungDef.label} rung fill`, side, price: fillPrice, shares: filledShares, cost, fee, rebate });
 
   if (rp.status === 'filled') {
     // rare race: both sides filled essentially simultaneously — keep both positions,
@@ -358,7 +423,7 @@ async function onRungFill(aw, rungDef, side, fillPrice, filledShares) {
 
   rp.status = 'filled';
   rp.filledSide = side;
-  log(`✅ [${aw.slug}] ${rungDef.label} rung: ${side.toUpperCase()} filled ${filledShares}sh @ ${fillPrice.toFixed(2)} ($${cost.toFixed(2)}+$${fee.toFixed(4)} fee) — cancelling opposite side | bankroll=$${engine.bankroll.toFixed(2)}`);
+  log(`✅ [${aw.slug}] ${rungDef.label} rung: ${side.toUpperCase()} filled ${filledShares}sh @ ${fillPrice.toFixed(2)} ($${cost.toFixed(2)}+$${fee.toFixed(4)} fee, ~$${rebate.toFixed(4)} est. rebate) — cancelling opposite side | bankroll=$${engine.bankroll.toFixed(2)}`);
   recordEquity();
 
   const otherSide = side === 'up' ? 'down' : 'up';
@@ -503,6 +568,16 @@ async function checkAssetResolution(aw) {
     log(`⚠️  checkAssetResolution(${aw.slug}) failed: ${e.message}`);
   }
 
+  // Fast path: don't wait for the 60s fallback if the market has already traded to a
+  // near-certain extreme (>= HIGH_CONF_PRICE on either side). Checked every resolution poll
+  // (every RESOLUTION_POLL_MS), so this typically resolves within a few seconds of window close.
+  updateHighConfidence(aw);
+  if (aw.highConfSide) {
+    log(`⚡ [${aw.slug}] live price hit ${aw.highConfPrice.toFixed(3)} on ${aw.highConfSide.toUpperCase()} (>= ${HIGH_CONF_PRICE}) — resolving now instead of waiting for the ${Math.round(RESOLUTION_FALLBACK_MS / 1000)}s fallback`);
+    resolveAssetWindow(aw, aw.highConfSide, 'high-confidence-price');
+    return true;
+  }
+
   if (Date.now() - aw.closeAt >= RESOLUTION_FALLBACK_MS) {
     const upPrice = markPrice(aw, 'up');
     const downPrice = markPrice(aw, 'down');
@@ -550,15 +625,17 @@ function resolveAssetWindow(aw, winningSide, method) {
       engine.wins++;
       rState.consecutiveLosses = 0;
       rState.currentShares = BASE_SHARES;
-      rState.hasDoubled = false;
+      rState.doubleCount = 0;
       log(`🏆 [${aw.slug}] ${aw.label}-${r.label} rung WIN — held ${boughtSideLabel}, winner ${winningSide.toUpperCase()} | payout $${totalPayout.toFixed(2)} pnl $${pnl.toFixed(2)} | counter reset → next size ${BASE_SHARES}sh`);
     } else {
       engine.losses++;
       rState.consecutiveLosses++;
-      if (!rState.hasDoubled && rState.consecutiveLosses >= r.lossThreshold) {
+      // Compounding: every additional lossThreshold consecutive losses doubles
+      // the size again (loss 7 -> x2, loss 14 -> x4, loss 21 -> x8, ...). Uncapped.
+      if (rState.consecutiveLosses % r.lossThreshold === 0) {
         rState.currentShares = round2(rState.currentShares * 2);
-        rState.hasDoubled = true;
-        log(`📉 [${aw.slug}] ${aw.label}-${r.label} rung LOSS #${rState.consecutiveLosses} (threshold ${r.lossThreshold}) — DOUBLING size → ${rState.currentShares}sh, plateau until next win`);
+        rState.doubleCount++;
+        log(`📉 [${aw.slug}] ${aw.label}-${r.label} rung LOSS #${rState.consecutiveLosses} (multiple of ${r.lossThreshold}) — DOUBLING AGAIN → ${rState.currentShares}sh (x${Math.pow(2, rState.doubleCount)} base) | pnl $${pnl.toFixed(2)}`);
       } else {
         log(`📉 [${aw.slug}] ${aw.label}-${r.label} rung LOSS #${rState.consecutiveLosses} — size stays ${rState.currentShares}sh | pnl $${pnl.toFixed(2)}`);
       }
@@ -577,7 +654,9 @@ function resolveAssetWindow(aw, winningSide, method) {
     if (engine.history.length > 300) engine.history.pop();
   }
 
-  const methodTag = method === 'price-fallback' ? '📡 LIVE-PRICE FALLBACK' : '✅ OFFICIAL';
+  const methodTag = method === 'high-confidence-price' ? `⚡ HIGH-CONFIDENCE PRICE (>=${HIGH_CONF_PRICE})`
+    : method === 'price-fallback' ? '📡 LIVE-PRICE FALLBACK'
+    : '✅ OFFICIAL';
   log(`🏁 [${aw.slug}] ${aw.label} window resolved (${methodTag}) — winner ${winningSide.toUpperCase()} | bankroll $${engine.bankroll.toFixed(2)}`);
   recordEquity();
 }
@@ -615,12 +694,17 @@ async function mainLoop() {
           for (const assetDef of ASSETS) {
             const aw = engine.cycle.assets[assetDef.key];
             await closeUnfilledRungs(aw);
-            if (aw.status !== 'resolved' && assetHasAnyFilledRung(aw)) {
-              engine.pending.push(aw);
-              if (engine.pending.length > MAX_PENDING_RESOLUTIONS) {
-                const dropped = engine.pending.shift();
-                log(`⚠️  dropped stale pending window ${dropped.slug} from the resolution queue (too many pending)`);
-              }
+            if (aw.status === 'resolved' || !assetHasAnyFilledRung(aw)) continue;
+            updateHighConfidence(aw);
+            if (aw.highConfSide) {
+              log(`⚡ [${aw.slug}] live price already at ${aw.highConfPrice.toFixed(3)} on ${aw.highConfSide.toUpperCase()} at window close — resolving immediately instead of queueing`);
+              resolveAssetWindow(aw, aw.highConfSide, 'high-confidence-price');
+              continue;
+            }
+            engine.pending.push(aw);
+            if (engine.pending.length > MAX_PENDING_RESOLUTIONS) {
+              const dropped = engine.pending.shift();
+              log(`⚠️  dropped stale pending window ${dropped.slug} from the resolution queue (too many pending)`);
             }
           }
         }
@@ -643,6 +727,7 @@ async function mainLoop() {
         engine.lastPriceFetch = now;
         const toRefresh = [cycle.assets.btc, cycle.assets.eth, ...engine.pending];
         await Promise.all(toRefresh.map(aw => refreshAssetPrices(aw)));
+        toRefresh.forEach(updateHighConfidence);
       }
 
       if (engine.tradingEnabled) {
@@ -678,9 +763,10 @@ function rungSummary(aw, rungDef) {
     key: rungDef.key, label: rungDef.label, price: rungDef.price,
     status: rp.status, filledSide: rp.filledSide, resolved: rp.resolved, pnl: rp.pnl,
     orderShares: rp.shares,
-    up: { placed: rp.up.placed, filled: rp.up.filled, cancelled: rp.up.cancelled, price: rp.up.price, shares: rp.up.shares, fillPrice: rp.up.fillPrice },
-    down: { placed: rp.down.placed, filled: rp.down.filled, cancelled: rp.down.cancelled, price: rp.down.price, shares: rp.down.shares, fillPrice: rp.down.fillPrice },
-    martingale: { consecutiveLosses: rState.consecutiveLosses, currentShares: rState.currentShares, hasDoubled: rState.hasDoubled, lossThreshold: rungDef.lossThreshold },
+    up: { placed: rp.up.placed, filled: rp.up.filled, cancelled: rp.up.cancelled, price: rp.up.price, shares: rp.up.shares, fillPrice: rp.up.fillPrice, rebate: rp.up.rebate },
+    down: { placed: rp.down.placed, filled: rp.down.filled, cancelled: rp.down.cancelled, price: rp.down.price, shares: rp.down.shares, fillPrice: rp.down.fillPrice, rebate: rp.down.rebate },
+    martingale: { consecutiveLosses: rState.consecutiveLosses, currentShares: rState.currentShares, doubleCount: rState.doubleCount, lossThreshold: rungDef.lossThreshold },
+    estimatedRebate: engine.rebateByRung[aw.asset][rungDef.key],
   };
 }
 function assetSummary(aw) {
@@ -689,6 +775,7 @@ function assetSummary(aw) {
     upAsk: aw.upAsk, downAsk: aw.downAsk, upBid: aw.upBid, downBid: aw.downBid,
     rungs: RUNGS.map(r => rungSummary(aw, r)),
     unrealizedPnl: unrealizedForAssetWindow(aw),
+    highConfSide: aw.highConfSide, highConfPrice: aw.highConfPrice,
   };
 }
 
@@ -703,6 +790,9 @@ function buildState() {
     bankroll: engine.bankroll, capital: engine.capital,
     realizedPnl: engine.realizedPnl, unrealizedPnl, equity,
     feesPaid: engine.feesPaid,
+    estimatedRebateUsd: engine.estimatedRebateUsd,
+    rebateByRung: engine.rebateByRung,
+    rebateNote: `Upper-bound estimate (Crypto category: ${REBATE_FEE_RATE} fee rate × ${REBATE_SHARE * 100}% maker share, assumes your resting order is the only maker liquidity taken) — real on-chain USDC payout, settled daily, is likely lower where other makers are competing in the same market.`,
     wins: engine.wins, losses: engine.losses,
     window: cycle ? {
       windowTs: cycle.windowTs, closeAt: cycle.closeAt,
@@ -743,7 +833,9 @@ async function init(privateKey, emit, slogFn) {
   slog = slogFn;
   slog('[rungbot] 🪙 BTC + ETH 5-Minute Rung Martingale Engine — fully automatic');
   slog(`[rungbot] ⚙️  Each window: 6 resting limit buys per asset — Up+Down @ 0.10/0.20/0.33, ${BASE_SHARES}sh each. First side of a rung to fill cancels the opposite side of that rung; position held to settlement.`);
-  slog('[rungbot] ⚙️  Martingale (independent per rung per asset): 0.10 rung doubles after 7 consecutive losses, 0.20 rung after 4, 0.33 rung after 2 — doubles ONCE then plateaus until a win, uncapped. Any win resets to base size.');
+  slog('[rungbot] ⚙️  Martingale (independent per rung per asset, compounding): 0.10 rung doubles every 7 consecutive losses, 0.20 rung every 4, 0.33 rung every 2 — keeps doubling every additional threshold hit, uncapped. Any win resets to base size.');
+  slog(`[rungbot] ⚙️  Resolution: official Gamma > high-confidence live price (>=${HIGH_CONF_PRICE}, resolves within seconds) > ${Math.round(RESOLUTION_FALLBACK_MS / 1000)}s live-price fallback.`);
+  slog(`[rungbot] ⚙️  Tracking an UPPER-BOUND estimated maker rebate per fill (Crypto category: fee rate ${REBATE_FEE_RATE}, maker share ${REBATE_SHARE * 100}%) — real on-chain USDC payouts settle daily and may be lower.`);
   slog(`[rungbot] ⚙️  Starting bankroll $${STARTING_CAPITAL} (shared across BTC+ETH) | maker fee rate ${MAKER_FEE_RATE} | never trades a window it joins mid-way through`);
   slog(`[rungbot] ${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
