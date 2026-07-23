@@ -141,7 +141,7 @@ app.get('/', (_, res) => {
   <div class="assets-grid" id="assets-grid"><div class="empty">Loading…</div></div>
 
   <div class="section">
-    <div class="section-hdr">Window Entry Status (either leg &gt; 0.70 → buy the cheaper leg · no combined-price requirement · first side to fire locks, other side stays open)</div>
+    <div class="section-hdr">Window Entry Status (either leg &gt; 0.70 → buy the cheaper leg · ONE fire per window total · first side to fire locks the whole window · no entries after 4:30 elapsed · martingale sizing)</div>
   </div>
   <div class="entries-wrap" id="entries-wrap"><div class="empty">Loading…</div></div>
 
@@ -178,7 +178,7 @@ app.get('/', (_, res) => {
   $('resume-btn').onclick = () => fetch('/api/btc5m/resume', { method: 'POST' }).then(() => flash('Trading resumed'));
   $('live-btn').onclick = () => {
     const wantLive = !$('live-btn').classList.contains('is-live');
-    if (wantLive && !confirm('Switch to LIVE mode? This will place REAL crossing-the-spread buys with REAL money whenever either leg of a BTC+ETH pair prices above 0.70, buying the cheaper leg (50 shares per pair per window — first side to fire locks, the other side stays open for one more entry). No combined-price requirement.')) return;
+    if (wantLive && !confirm('Switch to LIVE mode? This will place REAL crossing-the-spread buys with REAL money whenever either leg of a BTC+ETH pair prices above 0.70, buying the cheaper leg — ONE fire total per window (first side to fire locks the whole window, no entries after 4.5 minutes). Share size follows a martingale sequence: doubles after each consecutive triggered-window loss (up to 5 steps, then resets), and resets to base size on any win.')) return;
     fetch('/api/btc5m/set-mode', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ live: wantLive }) })
       .then(() => flash(wantLive ? 'Switched to LIVE' : 'Switched to DEMO'));
   };
@@ -199,6 +199,8 @@ app.get('/', (_, res) => {
       ['Fees Paid', '$' + (s.feesPaid || 0).toFixed(4), ''],
       ['Wins / Losses', s.wins + ' / ' + s.losses, ''],
       ['Pending Resolution', s.pendingResolutionCount || 0, ''],
+      ['Martingale Streak', (s.martingale ? s.martingale.lossStreak + ' / ' + s.martingale.maxSteps : '0 / 5'), (s.martingale && s.martingale.lossStreak > 0 ? 'pnl-neg' : '')],
+      ['Next Trigger Size', (s.martingale ? s.martingale.nextShares + 'sh' : '—') + (s.martingale && s.martingale.multiplier > 1 ? ' (x' + s.martingale.multiplier + ')' : ''), ''],
     ];
     $('stats-row').innerHTML = stats.map(([label, val, cls]) =>
       '<div class="stat"><div class="stat-label">' + label + '</div><div class="stat-val ' + cls + '">' + val + '</div></div>'
@@ -235,21 +237,26 @@ app.get('/', (_, res) => {
     $('assets-grid').innerHTML = assetCard(w.assets.btc, '') + assetCard(w.assets.eth, 'eth');
 
     const entries = w.entries || { up: {}, down: {} };
+    const pastCutoff = w.elapsedSec >= (s.entryCutoffSeconds || 270);
     const entryCard = (pairName) => {
       const e = entries[pairName] || {};
-      const isLocked = !!e.done;
+      const isLocked = !!e.done || !!w.fired || pastCutoff;
       const cardCls = isLocked ? 'locked' : 'armed';
       let badgeCls, badgeLabel, detailHtml;
-      if (isLocked && e.boughtAsset) {
+      if (e.boughtAsset) {
         badgeCls = 'locked-bought'; badgeLabel = '🔒 LOCKED · BOUGHT';
-        detailHtml = 'Bought <span class="bought">' + e.boughtAsset.toUpperCase() + '-' + pairName.toUpperCase() + '</span> at ' + entryTime(e.ts) +
-          ' — one leg priced above 0.70 (sum was ' + (e.sum != null ? e.sum.toFixed(2) : '?') + ' at the time, for context)';
-      } else if (isLocked) {
-        badgeCls = 'locked'; badgeLabel = '🔒 LOCKED · SKIPPED';
-        detailHtml = 'Condition hit but trading was paused at the time — no re-fire this window.';
+        detailHtml = 'Bought <span class="bought">' + e.boughtAsset.toUpperCase() + '-' + pairName.toUpperCase() + '</span> — the window\'s ONE fire — at ' + entryTime(e.ts) +
+          (w.firedShares != null ? ' (' + w.firedShares + 'sh' + (s.martingale && s.martingale.multiplier > 1 ? ', martingale x' + s.martingale.multiplier : ', base size') + ')' : '') +
+          ' — one leg priced above 0.70 (sum was ' + (e.sum != null ? e.sum.toFixed(2) : '?') + ' at the time, for context). Other pair is locked out for the rest of this window.';
+      } else if (w.fired) {
+        badgeCls = 'locked'; badgeLabel = '🔒 LOCKED · MISSED';
+        detailHtml = 'The window\'s one fire already went to the ' + w.firedPair + '-pair — this side gets no turn this window.';
+      } else if (pastCutoff) {
+        badgeCls = 'locked'; badgeLabel = '🔒 LOCKED · CUTOFF';
+        detailHtml = 'Past the 4.5-minute entry cutoff (' + mmss(s.entryCutoffSeconds || 270) + ') with no fire — no entries taken for the rest of this window.';
       } else {
         badgeCls = 'armed'; badgeLabel = '🟢 ARMED';
-        detailHtml = 'Watching continuously — will buy the cheaper leg the instant either leg prices above 0.70.';
+        detailHtml = 'Watching — will buy the cheaper leg the instant either leg prices above 0.70 (before the 4.5min cutoff), taking the window\'s one and only fire.';
       }
       return '<div class="entry-card ' + cardCls + '">' +
         '<div class="entry-head"><span class="entry-tag">' + pairName.toUpperCase() + '-pair</span><span class="entry-badge ' + badgeCls + '">' + badgeLabel + '</span></div>' +
