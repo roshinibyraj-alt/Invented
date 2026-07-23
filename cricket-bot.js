@@ -37,8 +37,17 @@
  *  NO EXIT LOGIC: whatever is bought is held to settlement. There is
  *  no take-profit, no stop-loss, no selling before resolution. Every
  *  position is marked to $1/share (winning side) or $0/share (losing
- *  side) once Polymarket resolves that asset's window, via Gamma's
- *  `closed` + `outcomePrices` fields.
+ *  side) once resolved.
+ *
+ *  RESOLUTION: primarily via Polymarket Gamma's `closed` +
+ *  `outcomePrices` fields (the official settlement). If Gamma hasn't
+ *  confirmed official resolution within RESOLUTION_FALLBACK_MS (default
+ *  60s) after the window's close time, the engine falls back to
+ *  determining the winner itself from the last known live price for
+ *  each side (these binary markets converge to ~1.00 for the winner
+ *  and ~0.00 for the loser by expiry) — this prevents windows from
+ *  sitting in "pending resolution" forever if Gamma is slow or never
+ *  flips the flag for a given short-lived 5m market.
  *
  *  BTC and ETH windows for the same 5-minute slot resolve
  *  INDEPENDENTLY of each other (different underlying markets), so
@@ -73,6 +82,7 @@ const TICK_MS             = 500;
 const PRICE_REFRESH_MS    = 1000;
 const DISCOVERY_RETRY_MS  = 2000;   // how often to retry finding a not-yet-listed window's market
 const RESOLUTION_POLL_MS  = 3000;   // how often to poll pending (past) windows for resolution
+const RESOLUTION_FALLBACK_MS = Number(process.env.BTC5M_RESOLUTION_FALLBACK_MS || 60000); // if Gamma hasn't confirmed official resolution (closed+outcomePrices) this long after the window closed, fall back to determining the winner from the last known live price
 const WINDOW_SECONDS      = 300;    // 5 minutes
 
 // The two markets we trade every window.
@@ -401,21 +411,43 @@ async function checkAssetResolution(aw) {
       const event = Array.isArray(events) ? events[0] : null;
       mk = event ? (event.markets || [])[0] : null;
     }
-    if (!mk || mk.closed !== true || !mk.outcomePrices) return false;
-    const prices = typeof mk.outcomePrices === 'string' ? JSON.parse(mk.outcomePrices) : mk.outcomePrices;
-    const tokens = parseMarketTokens(mk);
-    const upIdx = tokens.findIndex(t => String(t.token_id) === String(aw.upTokenId));
-    const downIdx = tokens.findIndex(t => String(t.token_id) === String(aw.downTokenId));
-    if (upIdx < 0 || downIdx < 0 || prices[upIdx] == null) return false;
-    resolveAssetWindow(aw, parseFloat(prices[upIdx]) >= 0.5 ? 'up' : 'down');
-    return true;
+    if (mk && mk.closed === true && mk.outcomePrices) {
+      const prices = typeof mk.outcomePrices === 'string' ? JSON.parse(mk.outcomePrices) : mk.outcomePrices;
+      const tokens = parseMarketTokens(mk);
+      const upIdx = tokens.findIndex(t => String(t.token_id) === String(aw.upTokenId));
+      const downIdx = tokens.findIndex(t => String(t.token_id) === String(aw.downTokenId));
+      if (upIdx >= 0 && downIdx >= 0 && prices[upIdx] != null) {
+        resolveAssetWindow(aw, parseFloat(prices[upIdx]) >= 0.5 ? 'up' : 'down', 'official');
+        return true;
+      }
+    }
   } catch (e) {
     log(`⚠️  checkAssetResolution(${aw.slug}) failed: ${e.message}`);
-    return false;
   }
+
+  // Fallback: Polymarket's Gamma API doesn't always flip closed+outcomePrices
+  // promptly (or at all) for these short-lived 5m markets, which left windows
+  // pending forever. If the grace period has elapsed since the window closed,
+  // determine the winner ourselves from the last known live price instead —
+  // these binary markets converge to ~1.00 for the winning side and ~0.00 for
+  // the losing side by expiry, so whichever side's last price is higher wins.
+  if (Date.now() - aw.closeAt >= RESOLUTION_FALLBACK_MS) {
+    const upPrice = markPrice(aw, 'up');
+    const downPrice = markPrice(aw, 'down');
+    if (upPrice != null || downPrice != null) {
+      let winningSide;
+      if (upPrice != null && downPrice != null) winningSide = upPrice >= downPrice ? 'up' : 'down';
+      else if (upPrice != null) winningSide = upPrice >= 0.5 ? 'up' : 'down';
+      else winningSide = downPrice >= 0.5 ? 'down' : 'up';
+      log(`⌛ [${aw.slug}] Gamma hasn't confirmed official resolution ${Math.round((Date.now() - aw.closeAt) / 1000)}s after close — resolving from last live price instead (up=${upPrice != null ? upPrice.toFixed(3) : '?'}, down=${downPrice != null ? downPrice.toFixed(3) : '?'})`);
+      resolveAssetWindow(aw, winningSide, 'price-fallback');
+      return true;
+    }
+  }
+  return false;
 }
 
-function resolveAssetWindow(aw, winningSide) {
+function resolveAssetWindow(aw, winningSide, method) {
   aw.status = 'resolved';
   const winPos = aw.positions[winningSide];
   const losePos = aw.positions[winningSide === 'up' ? 'down' : 'up'];
@@ -433,12 +465,14 @@ function resolveAssetWindow(aw, winningSide) {
     upShares: aw.positions.up.shares, upCost: aw.positions.up.cost,
     downShares: aw.positions.down.shares, downCost: aw.positions.down.cost,
     payout, totalCost, totalFees, pnl,
+    resolutionMethod: method,
     resolvedAt: Date.now(),
   });
   if (engine.history.length > 200) engine.history.pop();
 
   registerTrade({ slug: aw.slug, asset: aw.asset, step: 'RESOLUTION', side: winningSide, shares: winPos.shares, price: 1, pnl });
-  log(`🏁 [${aw.slug}] resolved — ${aw.label}-${winningSide.toUpperCase()} won | payout $${payout.toFixed(2)} | cost $${totalCost.toFixed(2)} | fees $${totalFees.toFixed(4)} | pnl $${pnl.toFixed(2)} | bankroll $${engine.bankroll.toFixed(2)}`);
+  const methodTag = method === 'price-fallback' ? '📡 LIVE-PRICE FALLBACK' : '✅ OFFICIAL';
+  log(`🏁 [${aw.slug}] resolved (${methodTag}) — ${aw.label}-${winningSide.toUpperCase()} won | payout $${payout.toFixed(2)} | cost $${totalCost.toFixed(2)} | fees $${totalFees.toFixed(4)} | pnl $${pnl.toFixed(2)} | bankroll $${engine.bankroll.toFixed(2)}`);
   recordEquity();
 }
 
