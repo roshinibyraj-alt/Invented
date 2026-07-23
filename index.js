@@ -3,7 +3,7 @@
 const express    = require('express');
 const http       = require('http');
 const { Server } = require('socket.io');
-const updown5mBot = require('./cricket-bot');
+const rungBot     = require('./cricket-bot');
 
 const app    = express();
 const server = http.createServer(app);
@@ -14,20 +14,20 @@ app.use(express.json());
 
 app.get('/healthz', (_, res) => res.sendStatus(200));
 
-// ── BTC+ETH gap-monitoring engine API (single automatic engine, no manual match management) ──
+// ── BTC+ETH rung martingale engine API ──
 app.get('/api/btc5m/status', (_, res) => {
-  try { res.json(updown5mBot.buildState()); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  try { res.json(rungBot.buildState()); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 app.post('/api/btc5m/pause', (_, res) => {
-  try { res.json(updown5mBot.pauseTrading()); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  try { res.json(rungBot.pauseTrading()); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 app.post('/api/btc5m/resume', (_, res) => {
-  try { res.json(updown5mBot.resumeTrading()); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  try { res.json(rungBot.resumeTrading()); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 app.post('/api/btc5m/set-mode', (req, res) => {
   const { live } = req.body || {};
   if (typeof live !== 'boolean') return res.status(400).json({ ok: false, error: 'Missing boolean "live" field' });
-  try { res.json(updown5mBot.setMode(live)); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  try { res.json(rungBot.setMode(live)); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
 app.get('/', (_, res) => {
@@ -36,7 +36,7 @@ app.get('/', (_, res) => {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>🪙 BTC/ETH Gap Bot</title>
+<title>🪙 BTC/ETH Rung Bot</title>
 <style>
   :root {
     --bg: #ffffff; --bg2: #f5f7fa; --bg3: #edf0f4; --border: #d0d7e2;
@@ -74,7 +74,7 @@ app.get('/', (_, res) => {
   .section-hdr::after { content:''; flex:1; height:1px; background: var(--border); }
   .window-meta { margin: 0 20px 10px; font-size: 10px; color: var(--muted); }
   .assets-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin: 0 20px 16px; }
-  @media (max-width: 700px) { .assets-grid { grid-template-columns: 1fr; } }
+  @media (max-width: 760px) { .assets-grid { grid-template-columns: 1fr; } }
   .asset-card { background: var(--bg2); border: 2px solid var(--cyan); border-radius: 12px; overflow: hidden; }
   .asset-card.eth { border-color: var(--eth); }
   .asset-hdr { background: #0d1d30; padding: 10px 14px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px; }
@@ -91,23 +91,25 @@ app.get('/', (_, res) => {
   .price-box.up .side-price { color: var(--green); }
   .price-box.down .side-price { color: var(--red); }
   .price-box .side-sub { font-size: 9px; color: var(--muted); }
-  .pos-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-  .pos-box { background: #fff; border: 1px solid var(--border); border-radius: 8px; padding: 7px 9px; font-size: 9.5px; }
-  .pos-box .pos-label { color: var(--muted); font-size: 9px; text-transform: uppercase; margin-bottom: 4px; }
-  .asset-unrl { margin-top: 8px; font-size: 10px; text-align: right; }
-  .entries-wrap { margin: 0 20px 16px; }
-  .entry-row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
-  .entry-card { flex: 1; min-width: 200px; background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; font-size: 10px; }
-  .entry-card.armed { border-color: var(--green); background: #00a85411; }
-  .entry-card.locked { border-color: var(--muted); background: #7a8fa811; }
-  .entry-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
-  .entry-tag { color: var(--text); font-weight: bold; font-size: 11px; }
-  .entry-badge { font-size: 9px; padding: 2px 8px; border-radius: 10px; text-transform: uppercase; }
-  .entry-badge.armed { background: #00a85422; color: var(--green); border: 1px solid var(--green); }
-  .entry-badge.locked { background: #7a8fa822; color: var(--muted); border: 1px solid var(--muted); }
-  .entry-badge.locked-bought { background: #7a8fa822; color: var(--gold); border: 1px solid var(--gold); }
-  .entry-detail { color: var(--muted); }
-  .entry-detail .bought { color: var(--green); font-weight: bold; }
+  .rung-card { background: #fff; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; font-size: 10px; }
+  .rung-card.status-armed { border-color: var(--cyan); }
+  .rung-card.status-filled { border-color: var(--gold); background: #b8860b0d; }
+  .rung-card.status-closed { border-color: var(--muted); background: #7a8fa80d; }
+  .rung-card.status-idle { border-color: var(--border); }
+  .rung-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+  .rung-tag { font-size: 11.5px; font-weight: bold; }
+  .rung-badge { font-size: 8.5px; padding: 2px 7px; border-radius: 9px; text-transform: uppercase; }
+  .rb-idle { background: #7a8fa822; color: var(--muted); border: 1px solid var(--muted); }
+  .rb-armed { background: #0099cc22; color: var(--cyan); border: 1px solid var(--cyan); }
+  .rb-filled { background: #b8860b22; color: var(--gold); border: 1px solid var(--gold); }
+  .rb-closed { background: #7a8fa822; color: var(--muted); border: 1px solid var(--muted); }
+  .rung-legs { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 6px; }
+  .leg { padding: 4px 6px; border-radius: 6px; background: var(--bg3); text-align: center; font-size: 9.5px; }
+  .leg.leg-filled { background: #00a85422; color: var(--green); font-weight: bold; }
+  .leg.leg-cancelled { background: #7a8fa822; color: var(--muted); text-decoration: line-through; }
+  .rung-meta { color: var(--muted); font-size: 9px; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px; }
+  .rung-meta .hot { color: var(--red); font-weight: bold; }
+  .asset-unrl { margin-top: 4px; font-size: 10px; text-align: right; }
   .bottom-grid { display: grid; grid-template-columns: 1fr; gap: 16px; padding: 0 20px 20px; }
   .tbl-wrap { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; max-height: 320px; overflow-y: auto; }
   .tbl { width: 100%; border-collapse: collapse; }
@@ -120,7 +122,7 @@ app.get('/', (_, res) => {
 </head>
 <body>
   <div class="header">
-    <div class="logo">🪙 <span>BTC</span>/<span class="eth">ETH</span> GAP BOT</div>
+    <div class="logo">🪙 <span>BTC</span>/<span class="eth">ETH</span> RUNG BOT</div>
     <div id="mode-badge" class="mode-badge mode-dry">DEMO</div>
   </div>
 
@@ -135,22 +137,17 @@ app.get('/', (_, res) => {
   <div class="stats-row" id="stats-row"></div>
 
   <div class="section">
-    <div class="section-hdr">Current Window</div>
+    <div class="section-hdr">Current Window — Rungs (0.10 / 0.20 / 0.33, independent Up+Down resting limit buys)</div>
   </div>
   <div class="window-meta" id="window-meta"></div>
   <div class="assets-grid" id="assets-grid"><div class="empty">Loading…</div></div>
 
-  <div class="section">
-    <div class="section-hdr">Window Entry Status (either leg &gt; 0.70 → buy the cheaper leg · ONE entry per window total, no entries after t+4:30)</div>
-  </div>
-  <div class="entries-wrap" id="entries-wrap"><div class="empty">Loading…</div></div>
-
   <div class="bottom-grid">
     <div>
-      <div class="section-hdr" style="padding:0 0 8px;">Window History</div>
+      <div class="section-hdr" style="padding:0 0 8px;">Rung History (resolved)</div>
       <div class="tbl-wrap">
         <table class="tbl">
-          <thead><tr><th>Asset</th><th>Window</th><th>Winner</th><th>Up sh/cost</th><th>Down sh/cost</th><th>Payout</th><th>Fees</th><th>P&amp;L</th><th>Resolved via</th></tr></thead>
+          <thead><tr><th>Asset</th><th>Window</th><th>Rung</th><th>Held</th><th>Winner</th><th>Sh/Cost</th><th>Payout</th><th>P&amp;L</th><th>Next size</th></tr></thead>
           <tbody id="history-body"><tr><td colspan="9" class="empty">Loading…</td></tr></tbody>
         </table>
       </div>
@@ -159,7 +156,7 @@ app.get('/', (_, res) => {
       <div class="section-hdr" style="padding:0 0 8px;">Recent Trades</div>
       <div class="tbl-wrap">
         <table class="tbl">
-          <thead><tr><th>Time</th><th>Asset</th><th>Window</th><th>Step</th><th>Side</th><th>Price</th><th>Shares</th><th>Cost/Fee</th></tr></thead>
+          <thead><tr><th>Time</th><th>Asset</th><th>Window</th><th>Step</th><th>Side</th><th>Price</th><th>Shares</th><th>Cost/Fee/PnL</th></tr></thead>
           <tbody id="trade-body"><tr><td colspan="8" class="empty">Loading…</td></tr></tbody>
         </table>
       </div>
@@ -178,7 +175,7 @@ app.get('/', (_, res) => {
   $('resume-btn').onclick = () => fetch('/api/btc5m/resume', { method: 'POST' }).then(() => flash('Trading resumed'));
   $('live-btn').onclick = () => {
     const wantLive = !$('live-btn').classList.contains('is-live');
-    if (wantLive && !confirm('Switch to LIVE mode? This will place REAL crossing-the-spread buys with REAL money whenever either leg of a BTC+ETH pair prices above 0.70, buying the cheaper leg — ONE entry per window total (no entries after t+4:30). Trade size uses MARTINGALE sizing: it doubles after each loss (up to 5x in a row) and resets on a win.')) return;
+    if (wantLive && !confirm('Switch to LIVE mode? This will place REAL resting limit buy orders with REAL money at 0.10/0.20/0.33 on both Up and Down for BTC and ETH every window, with martingale sizing on repeated losses.')) return;
     fetch('/api/btc5m/set-mode', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ live: wantLive }) })
       .then(() => flash(wantLive ? 'Switched to LIVE' : 'Switched to DEMO'));
   };
@@ -197,14 +194,32 @@ app.get('/', (_, res) => {
       ['Realized P&amp;L', sgn(s.realizedPnl), pClass(s.realizedPnl)],
       ['Unrealized P&amp;L', sgn(s.unrealizedPnl), pClass(s.unrealizedPnl)],
       ['Fees Paid', '$' + (s.feesPaid || 0).toFixed(4), ''],
-      ['Wins / Losses', s.wins + ' / ' + s.losses, ''],
-      ['Martingale Level', s.martingaleLevel + ' / ' + s.maxMartingaleLevel, s.martingaleLevel > 0 ? 'pnl-neg' : ''],
-      ['Next Trade Size', (s.currentTradeShares || 0) + 'sh', ''],
+      ['Rung Wins / Losses', s.wins + ' / ' + s.losses, ''],
       ['Pending Resolution', s.pendingResolutionCount || 0, ''],
     ];
     $('stats-row').innerHTML = stats.map(([label, val, cls]) =>
       '<div class="stat"><div class="stat-label">' + label + '</div><div class="stat-val ' + cls + '">' + val + '</div></div>'
     ).join('');
+  }
+
+  function legHtml(leg, sideLabel) {
+    const cls = leg.filled ? 'leg-filled' : (leg.cancelled ? 'leg-cancelled' : '');
+    const detail = leg.filled ? ('FILLED @' + fmtPx(leg.fillPrice)) : (leg.cancelled ? 'cancelled' : ('resting @' + fmtPx(leg.price)));
+    return '<div class="leg ' + cls + '">' + sideLabel + ' ' + leg.shares + 'sh<br>' + detail + '</div>';
+  }
+
+  function rungCard(r) {
+    const badgeMap = { idle: ['rb-idle', '⏳ IDLE'], armed: ['rb-armed', '🟢 ARMED'], filled: ['rb-filled', '🔒 FILLED · ' + (r.filledSide || '').toUpperCase()], closed: ['rb-closed', '⌛ CLOSED · NO FILL'] };
+    const [badgeCls, badgeLabel] = badgeMap[r.status] || ['rb-idle', r.status];
+    const m = r.martingale;
+    const hot = m.hasDoubled ? '<span class="hot">DOUBLED</span>' : '';
+    const pnlLine = (r.resolved && r.pnl != null) ? ('<div class="' + pClass(r.pnl) + '" style="text-align:right;">rung pnl ' + sgn(r.pnl) + '</div>') : '';
+    return '<div class="rung-card status-' + r.status + '">' +
+      '<div class="rung-head"><span class="rung-tag">Rung ' + r.label + '</span><span class="rung-badge ' + badgeCls + '">' + badgeLabel + '</span></div>' +
+      '<div class="rung-legs">' + legHtml(r.up, 'UP') + legHtml(r.down, 'DOWN') + '</div>' +
+      '<div class="rung-meta"><span>size ' + m.currentShares + 'sh ' + hot + '</span><span>consec.loss ' + m.consecutiveLosses + '/' + m.lossThreshold + '</span></div>' +
+      pnlLine +
+    '</div>';
   }
 
   function assetCard(a, cls) {
@@ -215,70 +230,34 @@ app.get('/', (_, res) => {
         '<div class="price-box up"><div class="side-label">Up</div><div class="side-price">' + fmtPx(a.upAsk) + '</div><div class="side-sub">bid ' + fmtPx(a.upBid) + '</div></div>' +
         '<div class="price-box down"><div class="side-label">Down</div><div class="side-price">' + fmtPx(a.downAsk) + '</div><div class="side-sub">bid ' + fmtPx(a.downBid) + '</div></div>' +
       '</div>';
-    const posRow =
-      '<div class="pos-row">' +
-        '<div class="pos-box"><div class="pos-label">Up position</div>' + (a.positions.up.shares > 0 ? a.positions.up.shares.toFixed(2) + 'sh · $' + a.positions.up.cost.toFixed(2) + ' cost' : '—') + '</div>' +
-        '<div class="pos-box"><div class="pos-label">Down position</div>' + (a.positions.down.shares > 0 ? a.positions.down.shares.toFixed(2) + 'sh · $' + a.positions.down.cost.toFixed(2) + ' cost' : '—') + '</div>' +
-      '</div>';
+    const rungsHtml = (a.rungs || []).map(rungCard).join('');
     const unrl = '<div class="asset-unrl ' + pClass(a.unrealizedPnl) + '">Unrealized: ' + sgn(a.unrealizedPnl) + '</div>';
     return '<div class="asset-card ' + cls + '">' +
       '<div class="asset-hdr"><div class="asset-title">' + a.label + '</div><div class="asset-status ' + statusCls + '">' + a.status + '</div></div>' +
-      '<div class="asset-body">' + priceRow + posRow + unrl + '</div>' +
+      '<div class="asset-body">' + priceRow + rungsHtml + unrl + '</div>' +
     '</div>';
   }
 
-  function entryTime(ts) { return ts ? new Date(ts).toLocaleTimeString() : ''; }
-
   function renderWindow(s) {
     const w = s.window;
-    if (!w) { $('assets-grid').innerHTML = '<div class="empty">No window yet…</div>'; $('window-meta').textContent = ''; $('entries-wrap').innerHTML = ''; return; }
+    if (!w) { $('assets-grid').innerHTML = '<div class="empty">No window yet…</div>'; $('window-meta').textContent = ''; return; }
     const remaining = s.windowSeconds - w.elapsedSec;
     $('window-meta').textContent = 'Window t=' + w.windowTs + ' · elapsed ' + mmss(w.elapsedSec) + ' / ' + mmss(s.windowSeconds) + ' · ' + mmss(remaining) + ' left';
     $('assets-grid').innerHTML = assetCard(w.assets.btc, '') + assetCard(w.assets.eth, 'eth');
-
-    const entries = w.entries || { up: {}, down: {} };
-    const cutoffPassed = w.elapsedSec >= (s.entryCutoffSec || 270);
-    const entryCard = (pairName) => {
-      const e = entries[pairName] || {};
-      const isLocked = !!e.done;
-      let cardCls, badgeCls, badgeLabel, detailHtml;
-      if (isLocked && e.boughtAsset) {
-        cardCls = 'locked'; badgeCls = 'locked-bought'; badgeLabel = '🔒 LOCKED · BOUGHT';
-        detailHtml = 'Bought <span class="bought">' + e.boughtAsset.toUpperCase() + '-' + pairName.toUpperCase() + '</span> at ' + entryTime(e.ts) +
-          ' — this was the window\'s one entry (sum was ' + (e.sum != null ? e.sum.toFixed(2) : '?') + ' at the time, for context)';
-      } else if (isLocked && e.skipReason === 'window-limit') {
-        cardCls = 'locked'; badgeCls = 'locked'; badgeLabel = '🔒 LOCKED · WINDOW LIMIT';
-        detailHtml = 'The window\'s one entry already went to the other pair — only one trade fires per window.';
-      } else if (isLocked && e.skipReason === 'paused') {
-        cardCls = 'locked'; badgeCls = 'locked'; badgeLabel = '🔒 LOCKED · SKIPPED (PAUSED)';
-        detailHtml = 'Condition hit but trading was paused at the time — that used up the window\'s one entry anyway.';
-      } else if (cutoffPassed) {
-        cardCls = 'locked'; badgeCls = 'locked'; badgeLabel = '🔒 CUTOFF PASSED';
-        detailHtml = 'Past t+4:30 — no new entries can fire for the rest of this window.';
-      } else {
-        cardCls = 'armed'; badgeCls = 'armed'; badgeLabel = '🟢 ARMED';
-        detailHtml = 'Watching — will buy the cheaper leg the instant either leg prices above 0.70 (whichever pair gets there first takes the window\'s one entry).';
-      }
-      return '<div class="entry-card ' + cardCls + '">' +
-        '<div class="entry-head"><span class="entry-tag">' + pairName.toUpperCase() + '-pair</span><span class="entry-badge ' + badgeCls + '">' + badgeLabel + '</span></div>' +
-        '<div class="entry-detail">' + detailHtml + '</div>' +
-      '</div>';
-    };
-    $('entries-wrap').innerHTML = '<div class="entry-row">' + entryCard('up') + entryCard('down') + '</div>';
   }
 
   function renderHistory(list) {
-    if (!list || !list.length) { $('history-body').innerHTML = '<tr><td colspan="9" class="empty">No resolved windows yet</td></tr>'; return; }
+    if (!list || !list.length) { $('history-body').innerHTML = '<tr><td colspan="9" class="empty">No resolved rungs yet</td></tr>'; return; }
     $('history-body').innerHTML = list.map(h =>
       '<tr><td>' + (h.label || h.asset || '').toUpperCase() + '</td>' +
       '<td>' + h.slug.replace(/^(btc|eth)-updown-5m-/, '') + '</td>' +
+      '<td>' + h.rung + '</td>' +
+      '<td>' + h.boughtSide + '</td>' +
       '<td>' + h.winningSide.toUpperCase() + '</td>' +
-      '<td>' + h.upShares.toFixed(2) + ' / $' + h.upCost.toFixed(2) + '</td>' +
-      '<td>' + h.downShares.toFixed(2) + ' / $' + h.downCost.toFixed(2) + '</td>' +
+      '<td>' + h.shares.toFixed(2) + ' / $' + h.cost.toFixed(2) + '</td>' +
       '<td>$' + h.payout.toFixed(2) + '</td>' +
-      '<td>$' + h.totalFees.toFixed(4) + '</td>' +
       '<td class="' + pClass(h.pnl) + '">' + sgn(h.pnl) + '</td>' +
-      '<td>' + (h.resolutionMethod === 'price-fallback' ? '📡 live price' : '✅ official') + '</td></tr>'
+      '<td>' + h.currentSharesAfter + 'sh (L' + h.consecutiveLossesAfter + ')</td></tr>'
     ).join('');
   }
 
@@ -301,57 +280,22 @@ app.get('/', (_, res) => {
     $('log-panel').innerHTML = list.map(l => '<div>' + l.replace(/</g, '&lt;') + '</div>').join('');
   }
 
-  function showRenderError(where, err) {
-    console.error('[dashboard render error]', where, err);
-    const banner = $('boundary-banner');
-    banner.style.display = 'block';
-    banner.style.background = '#e8304a22';
-    banner.style.borderColor = 'var(--red)';
-    banner.style.color = '#7a0010';
-    banner.textContent = '⚠️ Dashboard render error in ' + where + ': ' + (err && err.message ? err.message : err) + ' — screenshot this and send it over.';
-  }
-  function safe(where, fn) { try { fn(); } catch (err) { showRenderError(where, err); } }
-
-  socket.on('connect', () => { $('toolbar-status').textContent = '🟢 connected'; setTimeout(() => { $('toolbar-status').textContent = ''; }, 2000); });
-  socket.on('connect_error', (err) => { console.error('[socket connect_error]', err); $('toolbar-status').textContent = '🔴 socket connect_error: ' + err.message; });
-  socket.on('disconnect', (reason) => { console.warn('[socket disconnect]', reason); $('toolbar-status').textContent = '🔴 disconnected: ' + reason; });
-
   socket.on('btc5mState', (s) => {
-    safe('mode/live badges', () => {
-      $('mode-badge').className = 'mode-badge ' + (s.dryRun ? 'mode-dry' : 'mode-live');
-      $('mode-badge').textContent = s.dryRun ? 'DEMO' : 'LIVE';
-      $('live-btn').classList.toggle('is-live', !s.dryRun);
-      $('live-btn').textContent = s.dryRun ? '🔴 Switch to LIVE' : '⚠️ Switch to DEMO';
-    });
+    $('mode-badge').className = 'mode-badge ' + (s.dryRun ? 'mode-dry' : 'mode-live');
+    $('mode-badge').textContent = s.dryRun ? 'DEMO' : 'LIVE';
+    $('live-btn').classList.toggle('is-live', !s.dryRun);
+    $('live-btn').textContent = s.dryRun ? '🔴 Switch to LIVE' : '⚠️ Switch to DEMO';
 
-    safe('boundary banner', () => {
-      const banner = $('boundary-banner');
-      if (s.waitingForBoundary) {
-        banner.style.display = 'block'; banner.style.background = ''; banner.style.borderColor = ''; banner.style.color = '';
-        banner.textContent = '⏳ Started mid-window — waiting for the next fresh 5-minute boundary before trading begins (no mid-window entries).';
-      } else if (banner.style.borderColor !== 'var(--red)') {
-        banner.style.display = 'none';
-      }
-    });
+    const banner = $('boundary-banner');
+    if (s.waitingForBoundary) { banner.style.display = 'block'; banner.textContent = '⏳ Started mid-window — waiting for the next fresh 5-minute boundary before trading begins (no mid-window entries).'; }
+    else banner.style.display = 'none';
 
-    safe('stats', () => renderStats(s));
-    safe('window', () => renderWindow(s));
-    safe('history', () => renderHistory(s.history));
-    safe('trades', () => renderTrades(s.trades));
-    safe('logs', () => renderLogs(s.logs));
+    renderStats(s);
+    renderWindow(s);
+    renderHistory(s.history);
+    renderTrades(s.trades);
+    renderLogs(s.logs);
   });
-
-  window.addEventListener('error', (e) => showRenderError('uncaught script error', e.error || e.message));
-
-  let gotFirstState = false;
-  socket.on('btc5mState', () => { gotFirstState = true; });
-  setTimeout(() => {
-    if (!gotFirstState) {
-      const banner = $('boundary-banner');
-      banner.style.display = 'block'; banner.style.background = '#e8304a22'; banner.style.borderColor = 'var(--red)'; banner.style.color = '#7a0010';
-      banner.textContent = '⚠️ No data received from the server after 10s (socket connected: ' + socket.connected + '). The bot server may be down, or the socket connection is being blocked.';
-    }
-  }, 10000);
 
 </script>
 </body>
@@ -364,11 +308,11 @@ const slog = (line) => { console.log(line); io.emit('log', line); };
 const PK = process.env.PRIVATE_KEY;
 if (!PK) { console.error('❌ PRIVATE_KEY env var missing'); process.exit(1); }
 
-console.log('🪙 BTC + ETH 5-Minute Gap-Monitoring Bot (continuous threshold trigger, fully automatic)');
+console.log('🪙 BTC + ETH 5-Minute Rung Martingale Bot (0.10/0.20/0.33, both sides, per-rung per-asset martingale)');
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`🌐 Dashboard: http://0.0.0.0:${PORT}`);
-  updown5mBot.init(PK, emit, slog).catch(e => {
+  rungBot.init(PK, emit, slog).catch(e => {
     console.error('❌ Bot init failed:', e.message);
     process.exit(1);
   });
