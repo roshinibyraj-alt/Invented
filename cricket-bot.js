@@ -20,29 +20,30 @@
  *  cheaper leg). Combined sum/gap are still computed and shown on
  *  the dashboard for context, but play no role in the trigger.
  *
- *  ONE FIRE PER WINDOW: only ONE buy total happens per window. Both
- *  the Up-pair and Down-pair are watched continuously, but whichever
- *  side meets the condition FIRST fires the window's single trade and
- *  immediately LOCKS THE ENTIRE WINDOW — the other pair does not get
- *  a turn afterward, no matter what its price does. No entries are
- *  taken at all after ENTRY_CUTOFF_SECONDS (4.5 minutes) into the
- *  window, even if a pair's condition is met after that point. If
- *  neither pair meets the condition before the cutoff, no trade
- *  happens for that window at all (not retried later).
+ *  ONE FIRE PER WINDOW: at most ONE trade, total, per window. Whichever
+ *  pair (Up or Down) meets the condition FIRST fires the window's single
+ *  buy; the instant that happens the ENTIRE window is LOCKED — the other
+ *  pair will not fire even if it also qualifies (same tick or later). If
+ *  neither pair ever meets the condition, no trade happens that window.
  *
- *  MARTINGALE SIZING: share size starts at SHARES_PER_TRIGGER (base).
- *  If a triggered window's trade LOSES, the next TRIGGERED window
- *  doubles the share size; consecutive triggered-window losses keep
- *  doubling, up to MAX_MARTINGALE_STEPS (default 5) consecutive
- *  doublings, after which the sequence resets back to base size. Any
- *  WIN resets the sequence back to base size immediately. Windows
- *  that never fire (no trade taken) are skipped entirely for this
- *  purpose — they neither advance nor reset the martingale sequence,
- *  since only actual triggered trades count as a step.
+ *  ENTRY CUTOFF: no NEW entries are armed after ENTRY_CUTOFF_SEC (4.5
+ *  minutes / 270s) into the window. If neither pair has fired by then, the
+ *  window closes with no trade for the rest of its time. Any position
+ *  already taken before the cutoff is simply held to settlement as usual.
+ *
+ *  MARTINGALE SIZING: trade size starts at SHARES_PER_TRIGGER (base). After
+ *  a triggered window LOSES, the next triggered window's size DOUBLES; this
+ *  can keep doubling for up to MAX_MARTINGALE_STEP (default 5) consecutive
+ *  losing triggered windows, after which it resets back to base rather than
+ *  doubling further. A WIN on a triggered window resets the size back to
+ *  base immediately. Windows that never trigger a trade (condition never
+ *  met, or past the entry cutoff) are SKIPPED for this purpose — they
+ *  neither advance nor reset the martingale step.
  *
  *  BOTH markets share ONE bankroll ($2000 demo starting capital by
- *  default). Share size is fixed at SHARES_PER_TRIGGER (before
- *  martingale multiplication) — no bankroll-proportional sizing.
+ *  default) and ONE martingale step (since only one trade fires per
+ *  window, across BTC+ETH combined) — no other bankroll-proportional
+ *  sizing or compounding.
  *
  *  NO EXIT LOGIC: whatever is bought is held to settlement. There is
  *  no take-profit, no stop-loss, no selling before resolution. Every
@@ -105,9 +106,9 @@ const PAIRS = ['up', 'down']; // Up-pair (BTC-up vs ETH-up), Down-pair (BTC-down
 
 const GAP_THRESHOLD    = Number(process.env.BTC5M_GAP_THRESHOLD || 0.20); // informational only — no longer gates the trigger
 const LEG_PRICE_THRESHOLD = Number(process.env.BTC5M_LEG_PRICE_THRESHOLD || 0.70); // trigger fires when either leg's ask exceeds this
-const SHARES_PER_TRIGGER = Number(process.env.BTC5M_TRIGGER_SHARES || 50); // base share size — the martingale sequence multiplies this
-const ENTRY_CUTOFF_SECONDS = Number(process.env.BTC5M_ENTRY_CUTOFF_SECONDS || 270); // 4.5 minutes — no new entries fired after this point in the window
-const MAX_MARTINGALE_STEPS = Number(process.env.BTC5M_MAX_MARTINGALE_STEPS || 5); // cap on consecutive doublings before the sequence resets to base size
+const SHARES_PER_TRIGGER = Number(process.env.BTC5M_TRIGGER_SHARES || 50); // BASE size (martingale step 0)
+const ENTRY_CUTOFF_SEC = Number(process.env.BTC5M_ENTRY_CUTOFF_SEC || 270); // 4.5 minutes — no NEW entries after this many seconds into the window
+const MAX_MARTINGALE_STEP = Number(process.env.BTC5M_MAX_MARTINGALE_STEP || 5); // cap on consecutive doublings after a loss
 
 let DRY_RUN = (process.env.BTC5M_DRY_RUN || process.env.SPORTS_DRY_RUN || process.env.DRY_RUN || 'true').toLowerCase() === 'true';
 const STARTING_CAPITAL = Number(process.env.BTC5M_CAPITAL || 2000);
@@ -135,7 +136,8 @@ const engine = {
   realizedPnl: 0,
   feesPaid: 0,
   wins: 0, losses: 0,
-  cycle: null,          // current window pair being monitored ({ windowTs, assets: { btc, eth }, entries })
+  cycle: null,          // current window pair being monitored ({ windowTs, assets: { btc, eth }, trigger })
+  martingale: { step: 0 }, // consecutive-loss doubling state, shared across BTC+ETH (only one trade fires per window now)
   pending: [],           // past asset-windows awaiting resolution confirmation (background queue)
   history: [],           // resolved asset-windows, most recent first, capped
   logs: [],
@@ -145,14 +147,7 @@ const engine = {
   lastResolutionPoll: 0,
   waitingForBoundary: true,   // true until we cross a fresh 5-min boundary after startup
   boundaryWindowTs: null,     // the (mid-progress) window we refuse to trade, seen at startup
-  martingale: { lossStreak: 0 }, // consecutive TRIGGERED-window losses (0..MAX_MARTINGALE_STEPS); untriggered windows don't touch this
 };
-
-// Shares to use for the NEXT triggered window, given the current martingale streak.
-function currentMartingaleShares() {
-  const multiplier = Math.pow(2, engine.martingale.lossStreak);
-  return Math.round(SHARES_PER_TRIGGER * multiplier);
-}
 
 // ─────────────────────────────────────────
 //  Logging / bookkeeping
@@ -171,6 +166,31 @@ function registerTrade(t) {
 function recordEquity() {
   engine.equityCurve.push({ t: Date.now(), equity: round2(engine.bankroll + openPositionsMTM()) });
   if (engine.equityCurve.length > 1000) engine.equityCurve.shift();
+}
+
+// ─────────────────────────────────────────
+//  Martingale sizing (consecutive-loss doubling)
+// ─────────────────────────────────────────
+// step 0 = base size. Each loss on a TRIGGERED window bumps the step by one
+// (up to MAX_MARTINGALE_STEP), doubling the size used on the next triggered
+// window. A win resets the step back to 0. Windows that never trigger a
+// trade (condition never met, or past the entry cutoff) are skipped
+// entirely — they don't advance or reset the step.
+function currentTriggerShares() {
+  return SHARES_PER_TRIGGER * Math.pow(2, engine.martingale.step);
+}
+function updateMartingaleFromResult(won) {
+  const prev = engine.martingale.step;
+  if (won) {
+    engine.martingale.step = 0;
+    if (prev !== 0) log(`🎲 Martingale: WIN — step ${prev} → 0, next trigger back to base ${SHARES_PER_TRIGGER}sh`);
+  } else if (prev >= MAX_MARTINGALE_STEP) {
+    engine.martingale.step = 0;
+    log(`🎲 Martingale: LOSS at max step ${prev} (cap ${MAX_MARTINGALE_STEP}) — resetting to base ${SHARES_PER_TRIGGER}sh rather than doubling further`);
+  } else {
+    engine.martingale.step = prev + 1;
+    log(`🎲 Martingale: LOSS — step ${prev} → ${engine.martingale.step}, next trigger size ${currentTriggerShares()}sh`);
+  }
 }
 
 // ─────────────────────────────────────────
@@ -232,19 +252,15 @@ function freshAssetWindow(assetDef, windowTs) {
     positions: { up: { shares: 0, cost: 0, fee: 0 }, down: { shares: 0, cost: 0, fee: 0 } },
     lastDiscoveryAttempt: 0,
     createdAt: Date.now(),
-    isMartingaleTrade: false, // set true on the one asset-window that actually received this cycle's single fire — used to advance/reset the martingale sequence on resolution
   };
 }
 
-// One entry slot per pair, valid for the WHOLE window (no periods). Only ONE
-// pair total may fire per window — whichever meets the condition first fires
-// the window's single trade; cycle.fired then locks BOTH pairs for the rest
-// of the window.
-function freshEntries() {
-  return {
-    up:   { done: false, boughtAsset: null, gap: null, sum: null, ts: null },
-    down: { done: false, boughtAsset: null, gap: null, sum: null, ts: null },
-  };
+// ONE trigger slot for the WHOLE window (not one per pair). Whichever pair
+// (up or down) meets the condition FIRST fires the window's single trade;
+// the instant that happens, the ENTIRE window is locked — the other pair
+// will not fire even if it also qualifies later (or on the same tick).
+function freshTrigger() {
+  return { done: false, pair: null, asset: null, shares: null, gap: null, sum: null, ts: null };
 }
 
 function freshCycle(windowTs) {
@@ -255,10 +271,7 @@ function freshCycle(windowTs) {
       btc: freshAssetWindow(ASSETS[0], windowTs),
       eth: freshAssetWindow(ASSETS[1], windowTs),
     },
-    entries: freshEntries(),
-    fired: false,       // true once ANY pair has fired this window — locks the whole window, no second fire
-    firedPair: null,     // 'up' | 'down' — which pair fired (informational)
-    firedShares: null,   // share size used for this window's one trade (post-martingale)
+    trigger: freshTrigger(),
     createdAt: Date.now(),
   };
 }
@@ -305,11 +318,11 @@ function affordable(shares, price) { return round2(shares * price) <= engine.ban
 async function executeBuy(aw, side, shares, stepLabel) {
   const tokenId = side === 'up' ? aw.upTokenId : aw.downTokenId;
   const ask = side === 'up' ? aw.upAsk : aw.downAsk;
-  if (!tokenId || ask == null) { log(`⚠️  [${aw.slug}] ${stepLabel}: no live ask for ${side.toUpperCase()} yet — skipping this trigger`); return false; }
-  if (!affordable(shares, ask)) { log(`⚠️  [${aw.slug}] ${stepLabel}: insufficient bankroll ($${engine.bankroll.toFixed(2)}) for ${shares}sh ${side.toUpperCase()} @ ${ask.toFixed(2)} — skipping this trigger`); return false; }
+  if (!tokenId || ask == null) { log(`⚠️  [${aw.slug}] ${stepLabel}: no live ask for ${side.toUpperCase()} yet — skipping this trigger`); return; }
+  if (!affordable(shares, ask)) { log(`⚠️  [${aw.slug}] ${stepLabel}: insufficient bankroll ($${engine.bankroll.toFixed(2)}) for ${shares}sh ${side.toUpperCase()} @ ${ask.toFixed(2)} — skipping this trigger`); return; }
 
   const resp = await placeAggressiveBuy(tokenId, ask, shares);
-  if (!resp) { log(`❌ [${aw.slug}] ${stepLabel}: order placement failed for ${side.toUpperCase()}`); return false; }
+  if (!resp) { log(`❌ [${aw.slug}] ${stepLabel}: order placement failed for ${side.toUpperCase()}`); return; }
 
   let filled = resp.filled, fillPrice = resp.avgPrice || ask, filledShares = resp.filledShares || shares;
   if (!filled && !DRY_RUN && resp.id && trader && typeof trader.getOrder === 'function') {
@@ -321,7 +334,7 @@ async function executeBuy(aw, side, shares, stepLabel) {
   }
   if (!filled) {
     log(`⏳ [${aw.slug}] ${stepLabel}: ${shares}sh ${side.toUpperCase()} @ ${ask.toFixed(2)} placed but unconfirmed — not tracked as a position, not retried`);
-    return false;
+    return;
   }
 
   const cost = round2(filledShares * fillPrice);
@@ -337,27 +350,36 @@ async function executeBuy(aw, side, shares, stepLabel) {
   registerTrade({ slug: aw.slug, asset: aw.asset, step: stepLabel, side, price: fillPrice, shares: filledShares, cost, fee });
   log(`✅ [${aw.slug}] ${stepLabel}: bought ${filledShares}sh ${aw.label}-${side.toUpperCase()} @ ${fillPrice.toFixed(2)} ($${cost.toFixed(2)} + $${fee.toFixed(4)} fee) | bankroll=$${engine.bankroll.toFixed(2)}`);
   recordEquity();
-  return true;
 }
 
-// Called every tick while a cycle is trading. Watches both pairs (Up, Down)
-// for the window, but only ONE fire total is allowed per window: whichever
-// pair meets the condition FIRST fires the window's single buy of the
-// CHEAPER leg and immediately locks BOTH pairs for the rest of the window
-// (cycle.fired) — the other pair does not get a turn afterward. No entries
-// are taken at all once ENTRY_CUTOFF_SECONDS has elapsed in the window,
-// even if a pair's condition is met after that point. Share size for the
-// fire comes from the current martingale sequence (doubles after each
-// consecutive TRIGGERED-window loss, capped at MAX_MARTINGALE_STEPS, reset
-// to base on any win).
+// Called every tick while a cycle is trading. Watches BOTH pairs (up/down)
+// for AT MOST ONE fire, TOTAL, per window:
+//   - Only one entry per window: the instant EITHER pair meets the
+//     condition (either leg's ask > LEG_PRICE_THRESHOLD), it fires a single
+//     buy of the cheaper leg and the trigger is marked done — the whole
+//     window is then locked; the other pair will NOT fire this window even
+//     if it also qualifies (same tick or later).
+//   - No entries after ENTRY_CUTOFF_SEC (4.5 min) into the window — once
+//     that much of the window has elapsed, we stop arming new entries for
+//     the rest of the window (any position already taken is simply held).
+//   - Trigger size follows the martingale step: base size normally, doubled
+//     after each consecutive loss on a triggered window (see
+//     updateMartingaleFromResult), reset to base after a win.
 async function monitorAndTrigger(cycle) {
   const elapsedSec = Math.floor(Date.now() / 1000) - cycle.windowTs;
   if (elapsedSec < 0 || elapsedSec >= WINDOW_SECONDS) return; // outside the window — just hold
-  if (cycle.fired) return; // window already used its one allowed fire — fully locked, nothing left to check
 
-  if (elapsedSec >= ENTRY_CUTOFF_SECONDS) return; // past the 4.5-minute entry cutoff — no new entries this window, even if a condition is met now
+  const trigger = cycle.trigger;
+  if (trigger.done) return; // window already fired its one and only trade — locked, nothing more to do
 
-  const entries = cycle.entries;
+  if (elapsedSec >= ENTRY_CUTOFF_SEC) {
+    if (!trigger.cutoffLogged) {
+      trigger.cutoffLogged = true;
+      log(`⏱️  window t=${cycle.windowTs}: reached ${ENTRY_CUTOFF_SEC}s (${(ENTRY_CUTOFF_SEC / 60).toFixed(1)}min) with no trigger — no new entries for the rest of this window`);
+    }
+    return; // past the entry cutoff — no new entries this window
+  }
+
   for (const pair of PAIRS) {
     const btcAsk = cycle.assets.btc[pair === 'up' ? 'upAsk' : 'downAsk'];
     const ethAsk = cycle.assets.eth[pair === 'up' ? 'upAsk' : 'downAsk'];
@@ -368,30 +390,23 @@ async function monitorAndTrigger(cycle) {
     const sum = round2(btcAsk + ethAsk); // informational only, no longer gates the trigger
     const gap = round2(1 - sum);
     const cheaperAsset = btcAsk <= ethAsk ? 'btc' : 'eth';
+    const shares = currentTriggerShares();
 
-    // This pair meets the condition first — it takes the window's ONE fire and locks everything else out.
-    cycle.fired = true;
-    cycle.firedPair = pair;
-    entries[pair].done = true;
-    entries[pair].boughtAsset = cheaperAsset;
-    entries[pair].gap = gap;
-    entries[pair].sum = sum;
-    entries[pair].ts = Date.now();
-    const otherPair = pair === 'up' ? 'down' : 'up';
-    entries[otherPair].done = true; // window-wide lock — the other pair never gets a turn this window
+    trigger.done = true;
+    trigger.pair = pair;
+    trigger.asset = cheaperAsset;
+    trigger.shares = shares;
+    trigger.gap = gap;
+    trigger.sum = sum;
+    trigger.ts = Date.now();
 
     if (!engine.tradingEnabled) {
-      log(`⏸️  ${pair}-pair: BTC=${btcAsk.toFixed(2)} ETH=${ethAsk.toFixed(2)} (sum=${sum.toFixed(2)}) one leg > ${LEG_PRICE_THRESHOLD.toFixed(2)} but trading is paused — window's one fire skipped (locked for the rest of the window)`);
+      log(`⏸️  ${pair}-pair: BTC=${btcAsk.toFixed(2)} ETH=${ethAsk.toFixed(2)} (sum=${sum.toFixed(2)}) one leg > ${LEG_PRICE_THRESHOLD.toFixed(2)} but trading is paused — window's one entry skipped (locked, no re-fire)`);
       return;
     }
-
-    const shares = currentMartingaleShares();
-    const streakNote = engine.martingale.lossStreak > 0 ? ` | martingale x${Math.pow(2, engine.martingale.lossStreak)} (${engine.martingale.lossStreak} consecutive loss${engine.martingale.lossStreak === 1 ? '' : 'es'})` : ' | base size';
-    cycle.firedShares = shares;
-    log(`🔎 ${pair}-pair: BTC=${btcAsk.toFixed(2)} ETH=${ethAsk.toFixed(2)} (sum=${sum.toFixed(2)}) one leg > ${LEG_PRICE_THRESHOLD.toFixed(2)} → buy ${cheaperAsset.toUpperCase()}-${pair.toUpperCase()} (cheaper leg), ${shares}sh${streakNote} | window locked — ${otherPair}-pair will not fire this window`);
-    const bought = await executeBuy(cycle.assets[cheaperAsset], pair, shares, `${pair}-pair leg>${LEG_PRICE_THRESHOLD.toFixed(2)}`);
-    if (bought) cycle.assets[cheaperAsset].isMartingaleTrade = true; // mark so resolution can advance/reset the martingale sequence off this specific trade
-    return; // window's one fire is spent either way — nothing more to check this tick or this window
+    log(`🔎 ${pair}-pair: BTC=${btcAsk.toFixed(2)} ETH=${ethAsk.toFixed(2)} (sum=${sum.toFixed(2)}) one leg > ${LEG_PRICE_THRESHOLD.toFixed(2)} → buy ${cheaperAsset.toUpperCase()}-${pair.toUpperCase()} (cheaper leg), ${shares}sh (martingale step ${engine.martingale.step}) | window's one entry for this cycle — locked now`);
+    await executeBuy(cycle.assets[cheaperAsset], pair, shares, `${pair}-pair leg>${LEG_PRICE_THRESHOLD.toFixed(2)}`);
+    return; // only one fire per window, total — don't check the other pair
   }
 }
 
@@ -497,6 +512,17 @@ function resolveAssetWindow(aw, winningSide, method) {
   engine.realizedPnl = round2(engine.realizedPnl + pnl);
   if (pnl >= 0) engine.wins++; else engine.losses++;
 
+  // Martingale: only one trade fires per window (total), so at most one of
+  // up/down has shares > 0 on this asset-window. If this asset-window is
+  // the one that actually held our trade, feed its win/loss into the
+  // martingale step. Untriggered asset-windows (no shares either side)
+  // leave the step untouched — they're skipped, exactly as intended.
+  if (winPos.shares > 0) {
+    updateMartingaleFromResult(true);
+  } else if (losePos.shares > 0) {
+    updateMartingaleFromResult(false);
+  }
+
   engine.history.unshift({
     slug: aw.slug, asset: aw.asset, label: aw.label, windowTs: aw.windowTs, winningSide,
     upShares: aw.positions.up.shares, upCost: aw.positions.up.cost,
@@ -510,25 +536,6 @@ function resolveAssetWindow(aw, winningSide, method) {
   registerTrade({ slug: aw.slug, asset: aw.asset, step: 'RESOLUTION', side: winningSide, shares: winPos.shares, price: 1, pnl });
   const methodTag = method === 'price-fallback' ? '📡 LIVE-PRICE FALLBACK' : '✅ OFFICIAL';
   log(`🏁 [${aw.slug}] resolved (${methodTag}) — ${aw.label}-${winningSide.toUpperCase()} won | payout $${payout.toFixed(2)} | cost $${totalCost.toFixed(2)} | fees $${totalFees.toFixed(4)} | pnl $${pnl.toFixed(2)} | bankroll $${engine.bankroll.toFixed(2)}`);
-
-  // Martingale progression — only the ONE asset-window that actually took
-  // this cycle's single fire drives it. Untriggered windows never set
-  // isMartingaleTrade, so they're skipped entirely (no advance, no reset).
-  if (aw.isMartingaleTrade) {
-    if (pnl >= 0) {
-      if (engine.martingale.lossStreak > 0) log(`♻️  [${aw.slug}] martingale reset — win after ${engine.martingale.lossStreak} consecutive triggered loss(es), next triggered window returns to base ${SHARES_PER_TRIGGER}sh`);
-      engine.martingale.lossStreak = 0;
-    } else {
-      engine.martingale.lossStreak++;
-      if (engine.martingale.lossStreak > MAX_MARTINGALE_STEPS) {
-        log(`⚠️  [${aw.slug}] martingale cap reached (${MAX_MARTINGALE_STEPS} consecutive triggered losses) — resetting to base ${SHARES_PER_TRIGGER}sh`);
-        engine.martingale.lossStreak = 0;
-      } else {
-        log(`📉 [${aw.slug}] triggered loss #${engine.martingale.lossStreak} in martingale sequence — next triggered window buys ${currentMartingaleShares()}sh (x${Math.pow(2, engine.martingale.lossStreak)} base)`);
-      }
-    }
-  }
-
   recordEquity();
 }
 
@@ -573,10 +580,8 @@ async function mainLoop() {
               }
             }
           }
-          if (!engine.cycle.fired) {
-            log(`ℹ️  window t=${engine.cycle.windowTs} closed: neither pair ever priced a leg above ${LEG_PRICE_THRESHOLD.toFixed(2)} before the ${ENTRY_CUTOFF_SECONDS}s cutoff — no trade that window (skipped for martingale, streak stays at ${engine.martingale.lossStreak})`);
-          } else {
-            log(`ℹ️  window t=${engine.cycle.windowTs} closed: ${engine.cycle.firedPair}-pair fired this window's one trade${engine.cycle.firedShares != null ? ` (${engine.cycle.firedShares}sh)` : ''} — window locked, no second fire`);
+          if (!engine.cycle.trigger.done) {
+            log(`ℹ️  window t=${engine.cycle.windowTs} closed: no trade triggered (neither pair ever priced a leg above ${LEG_PRICE_THRESHOLD.toFixed(2)} within the ${ENTRY_CUTOFF_SEC}s entry window) — skipped, martingale step unchanged (${engine.martingale.step})`);
           }
         }
         engine.cycle = freshCycle(windowTs);
@@ -628,6 +633,18 @@ function assetSummary(aw) {
   };
 }
 
+// Legacy-shaped { up, down } view of the window's single trigger, for
+// frontend compatibility — only the fired pair (if any) shows as done.
+function entriesViewFromTrigger(trigger) {
+  const view = { up: { done: false }, down: { done: false } };
+  if (trigger.done && trigger.pair) {
+    view[trigger.pair] = {
+      done: true, boughtAsset: trigger.asset, gap: trigger.gap, sum: trigger.sum, ts: trigger.ts, shares: trigger.shares,
+    };
+  }
+  return view;
+}
+
 function buildState() {
   const cycle = engine.cycle;
   const unrealizedPnl = totalUnrealizedPnl();
@@ -640,11 +657,14 @@ function buildState() {
     realizedPnl: engine.realizedPnl, unrealizedPnl, equity,
     feesPaid: engine.feesPaid,
     wins: engine.wins, losses: engine.losses,
+    martingaleStep: engine.martingale.step,
+    nextTriggerShares: currentTriggerShares(),
     window: cycle ? {
       windowTs: cycle.windowTs, closeAt: cycle.closeAt,
       elapsedSec: Math.max(0, Math.min(WINDOW_SECONDS, Math.floor(Date.now() / 1000) - cycle.windowTs)),
-      entries: cycle.entries,
-      fired: cycle.fired, firedPair: cycle.firedPair, firedShares: cycle.firedShares,
+      entryCutoffSec: ENTRY_CUTOFF_SEC,
+      trigger: cycle.trigger,
+      entries: entriesViewFromTrigger(cycle.trigger), // back-compat shape for existing dashboard
       assets: { btc: assetSummary(cycle.assets.btc), eth: assetSummary(cycle.assets.eth) },
     } : null,
     pendingResolutionCount: engine.pending.length,
@@ -656,14 +676,8 @@ function buildState() {
     gapThreshold: GAP_THRESHOLD,
     legPriceThreshold: LEG_PRICE_THRESHOLD,
     triggerShares: SHARES_PER_TRIGGER,
+    maxMartingaleStep: MAX_MARTINGALE_STEP,
     windowSeconds: WINDOW_SECONDS,
-    entryCutoffSeconds: ENTRY_CUTOFF_SECONDS,
-    martingale: {
-      lossStreak: engine.martingale.lossStreak,
-      maxSteps: MAX_MARTINGALE_STEPS,
-      nextShares: currentMartingaleShares(),
-      multiplier: Math.pow(2, engine.martingale.lossStreak),
-    },
   };
 }
 function getStatus() { return buildState(); } // back-compat alias, some callers may still use this name
@@ -688,8 +702,8 @@ async function init(privateKey, emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
   slog('[updown5m] 🪙 BTC + ETH 5-Minute Gap-Monitoring Engine — fully automatic, no manual match management');
-  slog(`[updown5m] ⚙️  No monitoring periods, no combined-price requirement — Up-pair (BTC-up + ETH-up) and Down-pair (BTC-down + ETH-down) are watched continuously; the instant EITHER leg of a pair prices above ${LEG_PRICE_THRESHOLD.toFixed(2)} (and only before the ${ENTRY_CUTOFF_SECONDS}s / 4.5min entry cutoff), buy the CHEAPER leg — ONE fire total per window, whichever pair gets there first; the window is then locked and the other pair never gets a turn.`);
-  slog(`[updown5m] ⚙️  Starting bankroll $${STARTING_CAPITAL} (shared across BTC+ETH) | base ${SHARES_PER_TRIGGER}sh per trigger, MARTINGALE: doubles after each consecutive triggered-window loss up to ${MAX_MARTINGALE_STEPS} steps then resets to base; any win resets immediately; untriggered windows are skipped and don't affect the sequence | positions held to settlement, no TP/exit logic | never trades a window it joins mid-way through`);
+  slog(`[updown5m] ⚙️  No monitoring periods, no combined-price requirement — Up-pair (BTC-up + ETH-up) and Down-pair (BTC-down + ETH-down) are watched from window start until the ${ENTRY_CUTOFF_SEC}s (${(ENTRY_CUTOFF_SEC / 60).toFixed(1)}min) entry cutoff; the instant EITHER leg of EITHER pair prices above ${LEG_PRICE_THRESHOLD.toFixed(2)}, buy the CHEAPER leg — ONE trade total per window, whichever pair fires first, then the whole window locks (no re-fire, no second pair).`);
+  slog(`[updown5m] ⚙️  Starting bankroll $${STARTING_CAPITAL} (shared across BTC+ETH) | base ${SHARES_PER_TRIGGER}sh per trigger, MARTINGALE doubling after each loss on a triggered window (up to ${MAX_MARTINGALE_STEP} consecutive doublings, then reset to base), reset to base on a win, untriggered windows skipped/ignored for the martingale | positions held to settlement, no TP/exit logic | never trades a window it joins mid-way through`);
   slog(`[updown5m] ${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
   trader = new PolymarketTrader(privateKey);
