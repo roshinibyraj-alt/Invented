@@ -2,82 +2,60 @@
 
 /**
  * ═══════════════════════════════════════════════════════════════
- *  BTC + ETH 5-MINUTE GAP-MONITORING TRADING ENGINE
+ *  BTC + ETH 5-MINUTE RUNG MARTINGALE ENGINE
  * ═══════════════════════════════════════════════════════════════
  *
- *  Trades Polymarket's BTC and ETH "Up or Down" 5-minute markets
- *  TOGETHER, monitoring the FULL window continuously (t+0:00 to
- *  t+5:00) — there are no monitoring periods or minute buckets. Two
- *  pairs are watched every price-refresh tick for the entire window:
- *      Up-pair:   BTC-Up ask  +  ETH-Up ask
- *      Down-pair: BTC-Down ask + ETH-Down ask
- *  For each pair: the instant EITHER leg's ask price rises above 0.70,
- *  the engine immediately buys shares of whichever of the two legs
- *  is CHEAPER (the presumed value side) — see MARTINGALE SIZING below
- *  for how many shares. There is NO combined-price / gap requirement
- *  — a single expensive leg is enough to fire, regardless of what the
- *  other leg costs. Combined sum/gap are still computed and shown on
- *  the dashboard for context, but play no role in the trigger.
+ *  Trades Polymarket's BTC and ETH "Up or Down" 5-minute markets.
+ *  For EACH asset independently, the instant a window's market goes
+ *  live, the engine places SIX resting limit BUY orders (not
+ *  aggressive/crossing-the-spread — real resting limit orders):
  *
- *  ONLY ONE ENTRY PER WINDOW: unlike a per-pair latch, only ONE trade
- *  total fires per window. Whichever pair (Up or Down) meets the
- *  condition FIRST gets the window's one entry; the moment it fires,
- *  the OTHER pair is locked out too, even if its own condition is met
- *  afterward. A window produces at most 1 buy, never 2.
+ *      Rung 0.10:  buy Up @ 0.10   +   buy Down @ 0.10
+ *      Rung 0.20:  buy Up @ 0.20   +   buy Down @ 0.20
+ *      Rung 0.33:  buy Up @ 0.33   +   buy Down @ 0.33
  *
- *  NO ENTRIES AFTER T+4:30: once ENTRY_CUTOFF_SEC (270s / 4:30) of the
- *  5-minute window has elapsed, no new entry can fire even if the
- *  price condition is met — any open position just rides to
- *  settlement as normal.
+ *  Each rung is fully independent of the other rungs, and BTC/ETH
+ *  are independent of each other — 6 separate martingale tracks:
+ *  BTC-0.10, BTC-0.20, BTC-0.33, ETH-0.10, ETH-0.20, ETH-0.33.
  *
- *  MARTINGALE SIZING: base trade size is SHARES_PER_TRIGGER. After a
- *  losing trade, the NEXT window's trade size doubles; after another
- *  loss, it doubles again — up to MAX_MARTINGALE_LEVEL (default 5)
- *  consecutive doublings (32x base), where it plateaus until a win.
- *  Any win resets the size straight back to base. Windows where NO
- *  trade fired at all are skipped entirely for martingale purposes —
- *  they neither advance nor reset the level.
+ *  FILL / CANCEL: the instant one side of a rung fills, the engine
+ *  cancels the still-resting order on the OTHER side of that SAME
+ *  rung (e.g. BTC-Up-0.10 fills -> cancel BTC-Down-0.10). The filled
+ *  position is held to settlement — no take-profit, no stop-loss.
+ *  If neither side of a rung fills before the window closes, both
+ *  orders are cancelled and no win/loss is recorded for that rung
+ *  that window.
  *
- *  BOTH markets share ONE bankroll ($2000 demo starting capital by
- *  default). Trade size is the martingale size above — no bankroll-
- *  proportional sizing or compounding beyond the martingale rule.
- *
- *  NO EXIT LOGIC: whatever is bought is held to settlement. There is
- *  no take-profit, no stop-loss, no selling before resolution. Every
- *  position is marked to $1/share (winning side) or $0/share (losing
- *  side) once resolved.
+ *  MARTINGALE (per rung, per asset, independent counters):
+ *    Rung 0.10: after 7 consecutive losses -> double shares once, then
+ *               plateau at that size until a win.
+ *    Rung 0.20: after 4 consecutive losses -> double shares once, then
+ *               plateau until a win.
+ *    Rung 0.33: after 2 consecutive losses -> double shares once, then
+ *               plateau until a win.
+ *    Any win -> counter and share size reset to BASE_SHARES.
+ *    Uncapped — doubling is not limited to N stages.
  *
  *  RESOLUTION: primarily via Polymarket Gamma's `closed` +
- *  `outcomePrices` fields (the official settlement). If Gamma hasn't
- *  confirmed official resolution within RESOLUTION_FALLBACK_MS (default
- *  60s) after the window's close time, the engine falls back to
- *  determining the winner itself from the last known live price for
- *  each side (these binary markets converge to ~1.00 for the winner
- *  and ~0.00 for the loser by expiry) — this prevents windows from
- *  sitting in "pending resolution" forever if Gamma is slow or never
- *  flips the flag for a given short-lived 5m market.
+ *  `outcomePrices` fields. If Gamma hasn't confirmed official
+ *  resolution within RESOLUTION_FALLBACK_MS after the window's close
+ *  time, the engine falls back to determining the winner itself from
+ *  the last known live price for each side.
  *
  *  BTC and ETH windows for the same 5-minute slot resolve
- *  INDEPENDENTLY of each other (different underlying markets), so
- *  each is tracked and resolved on its own timeline even though they
- *  share the same window clock and monitoring periods.
+ *  INDEPENDENTLY of each other.
  *
  *  STARTUP: if the bot is started mid-window, it will NOT jump into
- *  that window's monitoring partway through. It waits, doing
- *  nothing, until the next fresh 5-minute boundary before trading
- *  begins.
+ *  that window partway through — it waits for the next fresh
+ *  5-minute boundary before placing any orders.
  *
- *  REAL-TIME P&L: bankroll (cash), realized P&L (from settled
- *  windows) and unrealized P&L (mark-to-market on open positions,
- *  using live bid prices) are all recomputed and broadcast every
- *  tick — not just at settlement.
+ *  FEES: resting limit orders are treated as maker fills — $0 fee by
+ *  default (RUNG_MAKER_FEE_RATE env var to override).
  *
- *  FEES: every buy here crosses the spread (a taker fill), so a taker
- *  fee is estimated and deducted at buy time.
- *
- *  TRADER INTERFACE (LIVE mode only):
+ *  TRADER INTERFACE:
  *    trader.placeLimitBuy(tokenId, price, size) -> { id, filled, avgPrice, filledShares }
  *    trader.getOrder(orderId)                   -> { filled, avgPrice, filledShares }
+ *    trader.cancelOrder(orderId)                -> (optional, needed for LIVE cancels)
  * ═══════════════════════════════════════════════════════════════
  */
 
@@ -88,77 +66,69 @@ const CLOB  = 'https://clob.polymarket.com';
 
 const TICK_MS             = 500;
 const PRICE_REFRESH_MS    = 1000;
-const DISCOVERY_RETRY_MS  = 2000;   // how often to retry finding a not-yet-listed window's market
-const RESOLUTION_POLL_MS  = 3000;   // how often to poll pending (past) windows for resolution
-const RESOLUTION_FALLBACK_MS = Number(process.env.BTC5M_RESOLUTION_FALLBACK_MS || 60000); // if Gamma hasn't confirmed official resolution (closed+outcomePrices) this long after the window closed, fall back to determining the winner from the last known live price
-const WINDOW_SECONDS      = 300;    // 5 minutes
+const DISCOVERY_RETRY_MS  = 2000;
+const RESOLUTION_POLL_MS  = 3000;
+const RESOLUTION_FALLBACK_MS = Number(process.env.BTC5M_RESOLUTION_FALLBACK_MS || 60000);
+const WINDOW_SECONDS      = 300; // 5 minutes
 
-// The two markets we trade every window.
 const ASSETS = [
   { key: 'btc', label: 'BTC', slugPrefix: 'btc-updown-5m-' },
   { key: 'eth', label: 'ETH', slugPrefix: 'eth-updown-5m-' },
 ];
 
-const PAIRS = ['up', 'down']; // Up-pair (BTC-up vs ETH-up), Down-pair (BTC-down vs ETH-down)
+// The three independent rungs. lossThreshold = consecutive losses needed
+// before this rung doubles its share size (once, then plateaus).
+const RUNGS = [
+  { key: 'r10', price: 0.10, label: '0.10', lossThreshold: 7 },
+  { key: 'r20', price: 0.20, label: '0.20', lossThreshold: 4 },
+  { key: 'r33', price: 0.33, label: '0.33', lossThreshold: 2 },
+];
 
-const GAP_THRESHOLD    = Number(process.env.BTC5M_GAP_THRESHOLD || 0.20); // informational only — no longer gates the trigger
-const LEG_PRICE_THRESHOLD = Number(process.env.BTC5M_LEG_PRICE_THRESHOLD || 0.70); // trigger fires when either leg's ask exceeds this
-const SHARES_PER_TRIGGER = Number(process.env.BTC5M_TRIGGER_SHARES || 50); // base size — actual trade size is this × the martingale multiplier
-const ENTRY_CUTOFF_SEC = Number(process.env.BTC5M_ENTRY_CUTOFF_SEC || 270); // 4:30 — no new entries fire after this point in the window; open positions just ride to settlement
-const MAX_MARTINGALE_LEVEL = Number(process.env.BTC5M_MARTINGALE_MAX_LEVEL || 5); // cap on consecutive size-doublings after a loss
+const BASE_SHARES = Number(process.env.RUNG_BASE_SHARES || 100);
 
 let DRY_RUN = (process.env.BTC5M_DRY_RUN || process.env.SPORTS_DRY_RUN || process.env.DRY_RUN || 'true').toLowerCase() === 'true';
 const STARTING_CAPITAL = Number(process.env.BTC5M_CAPITAL || 2000);
-// Observed live fee schedule for updown markets is taker-only, rate ~0.07 (see feeSchedule on the Gamma market object).
-const TAKER_FEE_RATE = Number(process.env.BTC5M_TAKER_FEE_RATE || 0.07);
-const MAX_PENDING_RESOLUTIONS = 40; // safety cap on the background resolution queue (2 assets/window now)
+// Resting limit orders are maker fills by default -> $0 fee unless overridden.
+const MAKER_FEE_RATE = Number(process.env.RUNG_MAKER_FEE_RATE || 0);
+const MAX_PENDING_RESOLUTIONS = 40;
 
 function round2(n) { return Math.round(n * 100) / 100; }
-function estimateTakerFee(shares, price) {
-  // Standard prediction-market fee shape: fee scales with size and with
-  // how close price is to $0.50 (max uncertainty = max fee base).
-  return round2(shares * TAKER_FEE_RATE * price * (1 - price));
-}
-// Current trade size: base size doubled once per consecutive loss, capped at
-// MAX_MARTINGALE_LEVEL doublings (e.g. level 5 -> 32x base). Windows where
-// nothing fired don't move the level at all — see updateMartingaleOnResult.
-function currentMartingaleShares() { return SHARES_PER_TRIGGER * Math.pow(2, engine.martingaleLevel); }
-function updateMartingaleOnResult(pnl) {
-  if (pnl >= 0) {
-    if (engine.martingaleLevel !== 0) log(`🎲 martingale reset to base size (${SHARES_PER_TRIGGER}sh) — that trade won`);
-    engine.martingaleLevel = 0;
-  } else {
-    const prev = engine.martingaleLevel;
-    engine.martingaleLevel = Math.min(engine.martingaleLevel + 1, MAX_MARTINGALE_LEVEL);
-    if (engine.martingaleLevel > prev) log(`🎲 martingale level up to ${engine.martingaleLevel}/${MAX_MARTINGALE_LEVEL} (lost that trade) — next trade size ${currentMartingaleShares()}sh`);
-    else log(`🎲 martingale already at max level ${MAX_MARTINGALE_LEVEL}/${MAX_MARTINGALE_LEVEL} (lost again) — size stays at ${currentMartingaleShares()}sh`);
-  }
+function estimateFee(shares, price) {
+  if (MAKER_FEE_RATE <= 0) return 0;
+  return round2(shares * MAKER_FEE_RATE * price * (1 - price));
 }
 
 let emitFn = () => {};
 let slog = () => {};
 let trader = null;
-let warnedNoTraderMethod = false;
+let warnedNoLimitMethod = false;
+let warnedNoCancelMethod = false;
 let tradeSeq = 0;
+
+function freshRungState() {
+  const s = {};
+  for (const r of RUNGS) s[r.key] = { consecutiveLosses: 0, currentShares: BASE_SHARES, hasDoubled: false };
+  return s;
+}
 
 const engine = {
   tradingEnabled: true,
-  bankroll: STARTING_CAPITAL,   // live cash balance (cost+fees deducted at buy, payout added at resolution)
-  capital: STARTING_CAPITAL,    // fixed reference to starting capital, never changes
+  bankroll: STARTING_CAPITAL,
+  capital: STARTING_CAPITAL,
   realizedPnl: 0,
   feesPaid: 0,
   wins: 0, losses: 0,
-  martingaleLevel: 0,    // 0 = base size; increments by 1 (doubling size) after each loss, capped at MAX_MARTINGALE_LEVEL; resets to 0 on a win; unaffected by windows where nothing fired
-  cycle: null,          // current window pair being monitored ({ windowTs, assets: { btc, eth }, entries })
-  pending: [],           // past asset-windows awaiting resolution confirmation (background queue)
-  history: [],           // resolved asset-windows, most recent first, capped
+  cycle: null,
+  pending: [],
+  history: [],   // resolved rung outcomes, most recent first
   logs: [],
   trades: [],
   equityCurve: [{ t: Date.now(), equity: STARTING_CAPITAL }],
   lastPriceFetch: 0,
   lastResolutionPoll: 0,
-  waitingForBoundary: true,   // true until we cross a fresh 5-min boundary after startup
-  boundaryWindowTs: null,     // the (mid-progress) window we refuse to trade, seen at startup
+  waitingForBoundary: true,
+  boundaryWindowTs: null,
+  rungState: { btc: freshRungState(), eth: freshRungState() }, // martingale state, persists across windows
 };
 
 // ─────────────────────────────────────────
@@ -168,7 +138,7 @@ function log(msg) {
   const line = `[${new Date().toISOString().slice(11, 19)}] ${msg}`;
   engine.logs.push(line);
   if (engine.logs.length > 500) engine.logs.shift();
-  slog(`[updown5m] ${line}`);
+  slog(`[rungbot] ${line}`);
 }
 function registerTrade(t) {
   const trade = { seq: ++tradeSeq, time: new Date().toISOString().slice(11, 19), ...t };
@@ -184,7 +154,7 @@ function recordEquity() {
 //  HTTP / order helpers
 // ─────────────────────────────────────────
 async function getJSON(url) {
-  const res = await fetch(url, { headers: { 'User-Agent': 'polymarket-updown5m-bot/1.0' } });
+  const res = await fetch(url, { headers: { 'User-Agent': 'polymarket-rungbot/1.0' } });
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${url}`);
   return res.json();
 }
@@ -196,20 +166,33 @@ function describeOrderError(e) {
 }
 function traderHasLimitMethod() {
   const ok = trader && typeof trader.placeLimitBuy === 'function';
-  if (!ok && !warnedNoTraderMethod) {
-    warnedNoTraderMethod = true;
-    slog('[updown5m] ❌ LIVE trading needs trader.placeLimitBuy (and ideally getOrder) on polymarket-trader.js — LIVE buys will be skipped until added. DRY_RUN is unaffected.');
+  if (!ok && !warnedNoLimitMethod) {
+    warnedNoLimitMethod = true;
+    slog('[rungbot] ❌ LIVE trading needs trader.placeLimitBuy (and ideally getOrder/cancelOrder) on polymarket-trader.js — LIVE order placement will be skipped until added. DRY_RUN is unaffected.');
   }
   return ok;
 }
-async function placeAggressiveBuy(tokenId, price, shares) {
+async function placeRestingLimitBuy(tokenId, price, shares) {
   if (!DRY_RUN) {
     if (!traderHasLimitMethod()) return null;
     try { return await trader.placeLimitBuy(tokenId, price, shares); }
     catch (e) { log(`❌ placeLimitBuy failed: ${describeOrderError(e)}`); return null; }
   }
-  // DRY_RUN: priced exactly at the live ask, so a real book would match it immediately — simulate an instant fill.
-  return { id: `dry-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, filled: true, avgPrice: price, filledShares: shares };
+  // DRY_RUN: simulate a resting order — it does NOT fill immediately here;
+  // checkRungFills() decides fills tick-by-tick once the live ask reaches price.
+  return { id: `dry-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, filled: false, avgPrice: price, filledShares: shares };
+}
+async function cancelResting(orderId) {
+  if (!orderId) return;
+  if (!DRY_RUN) {
+    if (trader && typeof trader.cancelOrder === 'function') {
+      try { await trader.cancelOrder(orderId); }
+      catch (e) { log(`⚠️  cancelOrder(${orderId}) failed: ${describeOrderError(e)}`); }
+    } else if (!warnedNoCancelMethod) {
+      warnedNoCancelMethod = true;
+      slog('[rungbot] ❌ trader.cancelOrder is not implemented on polymarket-trader.js — resting opposite-side limit orders will NOT be cancelled on-exchange in LIVE mode (they are marked cancelled internally and ignored, but may still be live on the book). Please add trader.cancelOrder(orderId).');
+    }
+  }
 }
 
 function parseMarketTokens(mk) {
@@ -225,7 +208,24 @@ function parseMarketTokens(mk) {
 // ─────────────────────────────────────────
 function currentWindowTs(nowSec) { return Math.floor(nowSec / WINDOW_SECONDS) * WINDOW_SECONDS; }
 
+function freshRungLeg(price) {
+  return { orderId: null, placed: false, filled: false, cancelled: false, price, shares: 0, fillPrice: null, cost: 0, fee: 0 };
+}
+function freshRungPosition(rungDef) {
+  return {
+    key: rungDef.key, price: rungDef.price, label: rungDef.label,
+    shares: null,          // size snapshotted from rungState at order-placement time
+    status: 'idle',        // idle -> armed -> filled | closed
+    filledSide: null,
+    up: freshRungLeg(rungDef.price),
+    down: freshRungLeg(rungDef.price),
+    resolved: false,
+    pnl: null,
+  };
+}
 function freshAssetWindow(assetDef, windowTs) {
+  const rungs = {};
+  for (const r of RUNGS) rungs[r.key] = freshRungPosition(r);
   return {
     asset: assetDef.key,
     label: assetDef.label,
@@ -236,19 +236,10 @@ function freshAssetWindow(assetDef, windowTs) {
     conditionId: null,
     upTokenId: null, downTokenId: null,
     upAsk: null, downAsk: null, upBid: null, downBid: null,
-    positions: { up: { shares: 0, cost: 0, fee: 0 }, down: { shares: 0, cost: 0, fee: 0 } },
+    rungs,
+    ordersPlaced: false,
     lastDiscoveryAttempt: 0,
     createdAt: Date.now(),
-  };
-}
-
-// One entry slot per pair, valid for the WHOLE window (no periods). Only ONE
-// pair total can fire per window; once either fires, the other is locked
-// out too (skipReason 'window-limit') even if its own condition is met.
-function freshEntries() {
-  return {
-    up:   { done: false, boughtAsset: null, gap: null, sum: null, ts: null, skipReason: null },
-    down: { done: false, boughtAsset: null, gap: null, sum: null, ts: null, skipReason: null },
   };
 }
 
@@ -260,8 +251,6 @@ function freshCycle(windowTs) {
       btc: freshAssetWindow(ASSETS[0], windowTs),
       eth: freshAssetWindow(ASSETS[1], windowTs),
     },
-    entries: freshEntries(),
-    entryFired: false, // true once ANY pair has fired this window — only one entry allowed per window total
     createdAt: Date.now(),
   };
 }
@@ -270,13 +259,13 @@ async function discoverAssetWindow(aw) {
   try {
     const events = await getJSON(`${GAMMA}/events?slug=${encodeURIComponent(aw.slug)}`);
     const event = Array.isArray(events) ? events[0] : null;
-    if (!event) return; // not listed yet on Gamma — will retry
+    if (!event) return;
     const mk = (event.markets || [])[0];
     if (!mk) return;
     const tokens = parseMarketTokens(mk);
     const up = tokens.find(t => /up/i.test(t.outcome));
     const down = tokens.find(t => /down/i.test(t.outcome));
-    if (!up || !down || !up.token_id || !down.token_id) return; // not tradeable yet
+    if (!up || !down || !up.token_id || !down.token_id) return;
     aw.conditionId = mk.conditionId || null;
     aw.upTokenId = up.token_id;
     aw.downTokenId = down.token_id;
@@ -305,89 +294,129 @@ async function refreshAssetPrices(aw) {
 
 function affordable(shares, price) { return round2(shares * price) <= engine.bankroll; }
 
-async function executeBuy(aw, side, shares, stepLabel) {
-  const tokenId = side === 'up' ? aw.upTokenId : aw.downTokenId;
-  const ask = side === 'up' ? aw.upAsk : aw.downAsk;
-  if (!tokenId || ask == null) { log(`⚠️  [${aw.slug}] ${stepLabel}: no live ask for ${side.toUpperCase()} yet — skipping this trigger`); return; }
-  if (!affordable(shares, ask)) { log(`⚠️  [${aw.slug}] ${stepLabel}: insufficient bankroll ($${engine.bankroll.toFixed(2)}) for ${shares}sh ${side.toUpperCase()} @ ${ask.toFixed(2)} — skipping this trigger`); return; }
+// ─────────────────────────────────────────
+//  Rung order placement / fill / cancel
+// ─────────────────────────────────────────
+async function placeRungOrders(aw) {
+  if (aw.ordersPlaced || !aw.upTokenId || !aw.downTokenId) return;
+  aw.ordersPlaced = true;
+  for (const r of RUNGS) {
+    const rp = aw.rungs[r.key];
+    const sizeState = engine.rungState[aw.asset][r.key];
+    const shares = sizeState.currentShares;
+    rp.shares = shares;
+    rp.up.shares = shares;
+    rp.down.shares = shares;
 
-  const resp = await placeAggressiveBuy(tokenId, ask, shares);
-  if (!resp) { log(`❌ [${aw.slug}] ${stepLabel}: order placement failed for ${side.toUpperCase()}`); return; }
+    const upResp = await placeRestingLimitBuy(aw.upTokenId, r.price, shares);
+    rp.up.orderId = upResp ? upResp.id : null;
+    rp.up.placed = !!upResp;
 
-  let filled = resp.filled, fillPrice = resp.avgPrice || ask, filledShares = resp.filledShares || shares;
-  if (!filled && !DRY_RUN && resp.id && trader && typeof trader.getOrder === 'function') {
-    // one immediate re-check — it's priced to cross the book, so it should already have matched
-    try {
-      const st = await trader.getOrder(resp.id);
-      if (st && st.filled) { filled = true; fillPrice = st.avgPrice || ask; filledShares = st.filledShares || shares; }
-    } catch (_) {}
+    const downResp = await placeRestingLimitBuy(aw.downTokenId, r.price, shares);
+    rp.down.orderId = downResp ? downResp.id : null;
+    rp.down.placed = !!downResp;
+
+    rp.status = 'armed';
+    log(`📌 [${aw.slug}] ${r.label} rung armed — resting buy ${shares}sh UP@${r.price.toFixed(2)} + ${shares}sh DOWN@${r.price.toFixed(2)} (consec.losses=${sizeState.consecutiveLosses})`);
+
+    // an immediately-marketable LIVE order can come back already filled
+    if (upResp && upResp.filled) await onRungFill(aw, r, 'up', upResp.avgPrice || r.price, upResp.filledShares || shares);
+    if (downResp && downResp.filled && aw.rungs[r.key].status !== 'filled') await onRungFill(aw, r, 'down', downResp.avgPrice || r.price, downResp.filledShares || shares);
   }
-  if (!filled) {
-    log(`⏳ [${aw.slug}] ${stepLabel}: ${shares}sh ${side.toUpperCase()} @ ${ask.toFixed(2)} placed but unconfirmed — not tracked as a position, not retried`);
+}
+
+async function onRungFill(aw, rungDef, side, fillPrice, filledShares) {
+  const rp = aw.rungs[rungDef.key];
+  const leg = rp[side];
+  if (leg.filled || leg.cancelled) return; // already handled
+
+  if (DRY_RUN && !affordable(filledShares, fillPrice)) {
+    log(`⚠️  [${aw.slug}] ${rungDef.label} rung ${side.toUpperCase()}: insufficient bankroll ($${engine.bankroll.toFixed(2)}) to simulate fill — skipping this fill`);
     return;
   }
 
+  const fee = estimateFee(filledShares, fillPrice);
   const cost = round2(filledShares * fillPrice);
-  const fee = estimateTakerFee(filledShares, fillPrice);
   engine.bankroll = round2(engine.bankroll - cost - fee);
   engine.feesPaid = round2(engine.feesPaid + fee);
 
-  const pos = aw.positions[side];
-  pos.shares = round2(pos.shares + filledShares);
-  pos.cost = round2(pos.cost + cost);
-  pos.fee = round2(pos.fee + fee);
+  leg.filled = true;
+  leg.fillPrice = fillPrice;
+  leg.cost = cost;
+  leg.fee = fee;
+  leg.shares = filledShares;
 
-  registerTrade({ slug: aw.slug, asset: aw.asset, step: stepLabel, side, price: fillPrice, shares: filledShares, cost, fee });
-  log(`✅ [${aw.slug}] ${stepLabel}: bought ${filledShares}sh ${aw.label}-${side.toUpperCase()} @ ${fillPrice.toFixed(2)} ($${cost.toFixed(2)} + $${fee.toFixed(4)} fee) | bankroll=$${engine.bankroll.toFixed(2)}`);
+  registerTrade({ slug: aw.slug, asset: aw.asset, step: `${rungDef.label} rung fill`, side, price: fillPrice, shares: filledShares, cost, fee });
+
+  if (rp.status === 'filled') {
+    // rare race: both sides filled essentially simultaneously — keep both positions,
+    // they'll net out at resolution (one wins, one loses).
+    log(`⚠️  [${aw.slug}] ${rungDef.label} rung: ${side.toUpperCase()} ALSO filled after ${rp.filledSide.toUpperCase()} (race) — keeping both positions, no cancel needed`);
+    recordEquity();
+    return;
+  }
+
+  rp.status = 'filled';
+  rp.filledSide = side;
+  log(`✅ [${aw.slug}] ${rungDef.label} rung: ${side.toUpperCase()} filled ${filledShares}sh @ ${fillPrice.toFixed(2)} ($${cost.toFixed(2)}+$${fee.toFixed(4)} fee) — cancelling opposite side | bankroll=$${engine.bankroll.toFixed(2)}`);
   recordEquity();
+
+  const otherSide = side === 'up' ? 'down' : 'up';
+  const other = rp[otherSide];
+  if (!other.filled && !other.cancelled && other.orderId) {
+    await cancelResting(other.orderId);
+    other.cancelled = true;
+    log(`🚫 [${aw.slug}] ${rungDef.label} rung: cancelled ${otherSide.toUpperCase()} resting order (opposite side of filled ${side.toUpperCase()})`);
+  }
 }
 
-// Called every tick while a cycle is trading. Watches both pairs across the
-// window, but only up to the ENTRY_CUTOFF_SEC mark (4:30) — no new entries
-// after that, positions just ride to settlement. Only ONE pair total can
-// fire per window: the instant EITHER leg of EITHER pair prices above
-// LEG_PRICE_THRESHOLD, it fires a single buy of the cheaper leg for that
-// pair, at the current martingale trade size, and the window is DONE
-// triggering — the other pair is locked out too, even if its own condition
-// is met afterward.
-async function monitorAndTrigger(cycle) {
-  const elapsedSec = Math.floor(Date.now() / 1000) - cycle.windowTs;
-  if (elapsedSec < 0 || elapsedSec >= ENTRY_CUTOFF_SEC) return; // outside the window, or past the 4:30 no-new-entries cutoff — just hold
-  if (cycle.entryFired) return; // only one entry allowed per window — already used
+// Called every tick while a window is trading — checks all armed rungs for fills.
+async function checkRungFills(aw) {
+  if (aw.status !== 'trading' || !aw.ordersPlaced) return;
+  for (const r of RUNGS) {
+    const rp = aw.rungs[r.key];
+    if (rp.status !== 'armed') continue;
 
-  const entries = cycle.entries;
-  for (const pair of PAIRS) {
-    if (entries[pair].done) continue; // shouldn't happen pre-fire, but guard anyway
-
-    const btcAsk = cycle.assets.btc[pair === 'up' ? 'upAsk' : 'downAsk'];
-    const ethAsk = cycle.assets.eth[pair === 'up' ? 'upAsk' : 'downAsk'];
-    if (btcAsk == null || ethAsk == null) continue; // no live prices yet, keep watching
-
-    if (btcAsk <= LEG_PRICE_THRESHOLD && ethAsk <= LEG_PRICE_THRESHOLD) continue; // neither leg expensive enough yet, keep watching
-
-    const sum = round2(btcAsk + ethAsk); // informational only, no longer gates the trigger
-    const gap = round2(1 - sum);
-    const cheaperAsset = btcAsk <= ethAsk ? 'btc' : 'eth';
-    const shares = currentMartingaleShares();
-
-    entries[pair].done = true;
-    entries[pair].boughtAsset = cheaperAsset;
-    entries[pair].gap = gap;
-    entries[pair].sum = sum;
-    entries[pair].ts = Date.now();
-    cycle.entryFired = true; // window's one shot is used — lock the other pair out too
-    const otherPair = pair === 'up' ? 'down' : 'up';
-    entries[otherPair].done = true;
-    entries[otherPair].skipReason = 'window-limit';
-
-    if (!engine.tradingEnabled) {
-      entries[pair].skipReason = 'paused';
-      log(`⏸️  ${pair}-pair: BTC=${btcAsk.toFixed(2)} ETH=${ethAsk.toFixed(2)} (sum=${sum.toFixed(2)}) one leg > ${LEG_PRICE_THRESHOLD.toFixed(2)} but trading is paused — skipped (only-one-entry-per-window used up, ${otherPair}-pair now locked too)`);
-      break;
+    if (!rp.up.filled && !rp.up.cancelled) {
+      if (DRY_RUN) {
+        if (aw.upAsk != null && aw.upAsk <= r.price) await onRungFill(aw, r, 'up', r.price, rp.up.shares);
+      } else if (rp.up.orderId) {
+        try {
+          const st = await trader.getOrder(rp.up.orderId);
+          if (st && st.filled) await onRungFill(aw, r, 'up', st.avgPrice || r.price, st.filledShares || rp.up.shares);
+        } catch (_) {}
+      }
     }
-    log(`🔎 ${pair}-pair: BTC=${btcAsk.toFixed(2)} ETH=${ethAsk.toFixed(2)} (sum=${sum.toFixed(2)}) one leg > ${LEG_PRICE_THRESHOLD.toFixed(2)} → buy ${cheaperAsset.toUpperCase()}-${pair.toUpperCase()} (cheaper leg) @ martingale level ${engine.martingaleLevel}/${MAX_MARTINGALE_LEVEL} = ${shares}sh | this was the window's one entry — ${otherPair}-pair now locked too`);
-    await executeBuy(cycle.assets[cheaperAsset], pair, shares, `${pair}-pair leg>${LEG_PRICE_THRESHOLD.toFixed(2)} (martingale L${engine.martingaleLevel})`);
-    break; // only one entry per window
+    if (rp.status === 'filled') continue;
+
+    if (!rp.down.filled && !rp.down.cancelled) {
+      if (DRY_RUN) {
+        if (aw.downAsk != null && aw.downAsk <= r.price) await onRungFill(aw, r, 'down', r.price, rp.down.shares);
+      } else if (rp.down.orderId) {
+        try {
+          const st = await trader.getOrder(rp.down.orderId);
+          if (st && st.filled) await onRungFill(aw, r, 'down', st.avgPrice || r.price, st.filledShares || rp.down.shares);
+        } catch (_) {}
+      }
+    }
+  }
+}
+
+// Called when a window rolls over — any rung that never filled gets both
+// resting orders cancelled; no win/loss recorded for it.
+async function closeUnfilledRungs(aw) {
+  for (const r of RUNGS) {
+    const rp = aw.rungs[r.key];
+    if (rp.status !== 'armed') continue;
+    for (const side of ['up', 'down']) {
+      const leg = rp[side];
+      if (!leg.filled && !leg.cancelled && leg.orderId) {
+        await cancelResting(leg.orderId);
+        leg.cancelled = true;
+      }
+    }
+    rp.status = 'closed';
+    log(`⌛ [${aw.slug}] ${r.label} rung: window closed with neither side filled — both orders cancelled, no trade`);
   }
 }
 
@@ -399,23 +428,35 @@ function markPrice(aw, side) {
   const ask = side === 'up' ? aw.upAsk : aw.downAsk;
   if (bid != null) return bid;
   if (ask != null) return ask;
-  return null; // no live price at all — fall back to cost basis (0 unrealized) for this leg
+  return null;
+}
+function unrealizedForRung(aw, rp) {
+  if (rp.resolved) return 0;
+  let u = 0;
+  for (const side of ['up', 'down']) {
+    const leg = rp[side];
+    if (!leg.filled || leg.shares <= 0) continue;
+    const mp = markPrice(aw, side);
+    const mark = mp != null ? mp : (leg.cost / leg.shares);
+    u += round2(leg.shares * mark - leg.cost);
+  }
+  return u;
 }
 function unrealizedForAssetWindow(aw) {
   if (aw.status === 'resolved') return 0;
   let u = 0;
-  for (const side of ['up', 'down']) {
-    const pos = aw.positions[side];
-    if (pos.shares <= 0) continue;
-    const mp = markPrice(aw, side);
-    const mark = mp != null ? mp : (pos.cost / pos.shares);
-    u += round2(pos.shares * mark - pos.cost);
-  }
-  return u;
+  for (const r of RUNGS) u += unrealizedForRung(aw, aw.rungs[r.key]);
+  return round2(u);
 }
 function openCostForAssetWindow(aw) {
   if (aw.status === 'resolved') return 0;
-  return round2(aw.positions.up.cost + aw.positions.down.cost);
+  let c = 0;
+  for (const r of RUNGS) {
+    const rp = aw.rungs[r.key];
+    if (rp.resolved) continue;
+    for (const side of ['up', 'down']) if (rp[side].filled) c += rp[side].cost;
+  }
+  return round2(c);
 }
 function allTrackedAssetWindows() {
   const list = [...engine.pending];
@@ -430,8 +471,12 @@ function openPositionsMTM() {
 }
 
 // ─────────────────────────────────────────
-//  Resolution (background queue — never blocks the live monitoring)
+//  Resolution (background queue — never blocks live monitoring)
 // ─────────────────────────────────────────
+function assetHasAnyFilledRung(aw) {
+  return RUNGS.some(r => aw.rungs[r.key].status === 'filled' || aw.rungs[r.key].filledSide);
+}
+
 async function checkAssetResolution(aw) {
   try {
     let mk = null;
@@ -458,12 +503,6 @@ async function checkAssetResolution(aw) {
     log(`⚠️  checkAssetResolution(${aw.slug}) failed: ${e.message}`);
   }
 
-  // Fallback: Polymarket's Gamma API doesn't always flip closed+outcomePrices
-  // promptly (or at all) for these short-lived 5m markets, which left windows
-  // pending forever. If the grace period has elapsed since the window closed,
-  // determine the winner ourselves from the last known live price instead —
-  // these binary markets converge to ~1.00 for the winning side and ~0.00 for
-  // the losing side by expiry, so whichever side's last price is higher wins.
   if (Date.now() - aw.closeAt >= RESOLUTION_FALLBACK_MS) {
     const upPrice = markPrice(aw, 'up');
     const downPrice = markPrice(aw, 'down');
@@ -482,42 +521,64 @@ async function checkAssetResolution(aw) {
 
 function resolveAssetWindow(aw, winningSide, method) {
   aw.status = 'resolved';
-  const winPos = aw.positions[winningSide];
-  const losePos = aw.positions[winningSide === 'up' ? 'down' : 'up'];
-  const totalCost = round2(winPos.cost + losePos.cost);
 
-  if (totalCost <= 0) {
-    // Nothing was ever bought on THIS asset this window (the window's one
-    // entry, if any, went to the other asset/side instead) — close it out
-    // quietly. No P&L impact, no win/loss tally, no martingale update, and
-    // it's not shown in Window History since there was no trade to report.
-    log(`⚪ [${aw.slug}] resolved — no position was taken on ${aw.label} this window (the window's entry, if any, went to the other side/asset)`);
-    recordEquity();
-    return;
+  for (const r of RUNGS) {
+    const rp = aw.rungs[r.key];
+    if (rp.status !== 'filled' || rp.resolved) continue;
+
+    const legs = ['up', 'down'].filter(side => rp[side].filled).map(side => ({ side, leg: rp[side] }));
+    if (!legs.length) { rp.resolved = true; continue; }
+
+    let totalPayout = 0, totalCost = 0, totalFee = 0;
+    for (const { side, leg } of legs) {
+      const payout = side === winningSide ? round2(leg.shares * 1) : 0;
+      totalPayout += payout; totalCost += leg.cost; totalFee += leg.fee;
+    }
+    totalPayout = round2(totalPayout); totalCost = round2(totalCost); totalFee = round2(totalFee);
+    const pnl = round2(totalPayout - totalCost);
+
+    engine.bankroll = round2(engine.bankroll + totalPayout);
+    engine.realizedPnl = round2(engine.realizedPnl + pnl);
+    rp.resolved = true;
+    rp.pnl = pnl;
+
+    const rState = engine.rungState[aw.asset][r.key];
+    const isWin = legs.length === 1 ? legs[0].side === winningSide : pnl >= 0;
+    const boughtSideLabel = legs.map(l => l.side).join('+').toUpperCase();
+
+    if (isWin) {
+      engine.wins++;
+      rState.consecutiveLosses = 0;
+      rState.currentShares = BASE_SHARES;
+      rState.hasDoubled = false;
+      log(`🏆 [${aw.slug}] ${aw.label}-${r.label} rung WIN — held ${boughtSideLabel}, winner ${winningSide.toUpperCase()} | payout $${totalPayout.toFixed(2)} pnl $${pnl.toFixed(2)} | counter reset → next size ${BASE_SHARES}sh`);
+    } else {
+      engine.losses++;
+      rState.consecutiveLosses++;
+      if (!rState.hasDoubled && rState.consecutiveLosses >= r.lossThreshold) {
+        rState.currentShares = round2(rState.currentShares * 2);
+        rState.hasDoubled = true;
+        log(`📉 [${aw.slug}] ${aw.label}-${r.label} rung LOSS #${rState.consecutiveLosses} (threshold ${r.lossThreshold}) — DOUBLING size → ${rState.currentShares}sh, plateau until next win`);
+      } else {
+        log(`📉 [${aw.slug}] ${aw.label}-${r.label} rung LOSS #${rState.consecutiveLosses} — size stays ${rState.currentShares}sh | pnl $${pnl.toFixed(2)}`);
+      }
+    }
+
+    registerTrade({ slug: aw.slug, asset: aw.asset, step: `${r.label} rung RESOLUTION`, side: boughtSideLabel, shares: legs.reduce((s, l) => s + l.leg.shares, 0), price: 1, pnl });
+
+    engine.history.unshift({
+      slug: aw.slug, asset: aw.asset, label: aw.label, windowTs: aw.windowTs,
+      rung: r.label, boughtSide: boughtSideLabel, winningSide,
+      shares: legs.reduce((s, l) => s + l.leg.shares, 0),
+      cost: totalCost, fee: totalFee, payout: totalPayout, pnl,
+      consecutiveLossesAfter: rState.consecutiveLosses, currentSharesAfter: rState.currentShares,
+      resolutionMethod: method, resolvedAt: Date.now(),
+    });
+    if (engine.history.length > 300) engine.history.pop();
   }
 
-  const payout = round2(winPos.shares * 1);
-  const totalFees = round2(winPos.fee + losePos.fee);
-  const pnl = round2(payout - totalCost); // fees were already deducted from bankroll at buy time — don't double-count them here
-
-  engine.bankroll = round2(engine.bankroll + payout);
-  engine.realizedPnl = round2(engine.realizedPnl + pnl);
-  if (pnl >= 0) engine.wins++; else engine.losses++;
-
-  engine.history.unshift({
-    slug: aw.slug, asset: aw.asset, label: aw.label, windowTs: aw.windowTs, winningSide,
-    upShares: aw.positions.up.shares, upCost: aw.positions.up.cost,
-    downShares: aw.positions.down.shares, downCost: aw.positions.down.cost,
-    payout, totalCost, totalFees, pnl,
-    resolutionMethod: method,
-    resolvedAt: Date.now(),
-  });
-  if (engine.history.length > 200) engine.history.pop();
-
-  registerTrade({ slug: aw.slug, asset: aw.asset, step: 'RESOLUTION', side: winningSide, shares: winPos.shares, price: 1, pnl });
   const methodTag = method === 'price-fallback' ? '📡 LIVE-PRICE FALLBACK' : '✅ OFFICIAL';
-  log(`🏁 [${aw.slug}] resolved (${methodTag}) — ${aw.label}-${winningSide.toUpperCase()} won | payout $${payout.toFixed(2)} | cost $${totalCost.toFixed(2)} | fees $${totalFees.toFixed(4)} | pnl $${pnl.toFixed(2)} | bankroll $${engine.bankroll.toFixed(2)}`);
-  updateMartingaleOnResult(pnl);
+  log(`🏁 [${aw.slug}] ${aw.label} window resolved (${methodTag}) — winner ${winningSide.toUpperCase()} | bankroll $${engine.bankroll.toFixed(2)}`);
   recordEquity();
 }
 
@@ -534,7 +595,6 @@ async function mainLoop() {
       const nowSec = Math.floor(now / 1000);
       const windowTs = currentWindowTs(nowSec);
 
-      // ── Startup guard: never join a window that's already in progress ──
       if (engine.waitingForBoundary) {
         if (engine.boundaryWindowTs === null) {
           engine.boundaryWindowTs = windowTs;
@@ -554,15 +614,15 @@ async function mainLoop() {
         if (engine.cycle) {
           for (const assetDef of ASSETS) {
             const aw = engine.cycle.assets[assetDef.key];
-            if (aw.status !== 'resolved') {
+            await closeUnfilledRungs(aw);
+            if (aw.status !== 'resolved' && assetHasAnyFilledRung(aw)) {
               engine.pending.push(aw);
               if (engine.pending.length > MAX_PENDING_RESOLUTIONS) {
                 const dropped = engine.pending.shift();
-                log(`⚠️  dropped stale pending window ${dropped.slug} from the resolution queue (too many pending) — its win/loss won't be tallied, but its cost/fees were already applied to bankroll at buy time`);
+                log(`⚠️  dropped stale pending window ${dropped.slug} from the resolution queue (too many pending)`);
               }
             }
           }
-          if (!engine.cycle.entryFired) log(`ℹ️  window t=${engine.cycle.windowTs} closed: no trade fired — neither pair's leg ever priced above ${LEG_PRICE_THRESHOLD.toFixed(2)} before the ${(ENTRY_CUTOFF_SEC / 60).toFixed(1)}min cutoff (skipped for martingale — level stays at ${engine.martingaleLevel}/${MAX_MARTINGALE_LEVEL})`);
         }
         engine.cycle = freshCycle(windowTs);
         log(`🆕 new window t=${windowTs} — discovering BTC + ETH markets…`);
@@ -575,13 +635,20 @@ async function mainLoop() {
           aw.lastDiscoveryAttempt = now;
           await discoverAssetWindow(aw);
         }
+        if (aw.status === 'trading' && !aw.ordersPlaced && engine.tradingEnabled) {
+          await placeRungOrders(aw);
+        }
       }
       if (now - engine.lastPriceFetch >= PRICE_REFRESH_MS) {
         engine.lastPriceFetch = now;
         const toRefresh = [cycle.assets.btc, cycle.assets.eth, ...engine.pending];
         await Promise.all(toRefresh.map(aw => refreshAssetPrices(aw)));
       }
-      await monitorAndTrigger(cycle);
+
+      if (engine.tradingEnabled) {
+        await checkRungFills(cycle.assets.btc);
+        await checkRungFills(cycle.assets.eth);
+      }
 
       if (engine.pending.length && now - engine.lastResolutionPoll >= RESOLUTION_POLL_MS) {
         engine.lastResolutionPoll = now;
@@ -595,7 +662,7 @@ async function mainLoop() {
 
       emitFn('btc5mState', buildState());
     } catch (e) {
-      slog(`[updown5m] ⚠️  Loop error: ${e.message}`);
+      slog(`[rungbot] ⚠️  Loop error: ${e.message}`);
     }
     await new Promise(res => setTimeout(res, TICK_MS));
   }
@@ -604,11 +671,23 @@ async function mainLoop() {
 // ─────────────────────────────────────────
 //  UI state / controls
 // ─────────────────────────────────────────
+function rungSummary(aw, rungDef) {
+  const rp = aw.rungs[rungDef.key];
+  const rState = engine.rungState[aw.asset][rungDef.key];
+  return {
+    key: rungDef.key, label: rungDef.label, price: rungDef.price,
+    status: rp.status, filledSide: rp.filledSide, resolved: rp.resolved, pnl: rp.pnl,
+    orderShares: rp.shares,
+    up: { placed: rp.up.placed, filled: rp.up.filled, cancelled: rp.up.cancelled, price: rp.up.price, shares: rp.up.shares, fillPrice: rp.up.fillPrice },
+    down: { placed: rp.down.placed, filled: rp.down.filled, cancelled: rp.down.cancelled, price: rp.down.price, shares: rp.down.shares, fillPrice: rp.down.fillPrice },
+    martingale: { consecutiveLosses: rState.consecutiveLosses, currentShares: rState.currentShares, hasDoubled: rState.hasDoubled, lossThreshold: rungDef.lossThreshold },
+  };
+}
 function assetSummary(aw) {
   return {
     asset: aw.asset, label: aw.label, slug: aw.slug, windowTs: aw.windowTs, closeAt: aw.closeAt, status: aw.status,
     upAsk: aw.upAsk, downAsk: aw.downAsk, upBid: aw.upBid, downBid: aw.downBid,
-    positions: aw.positions,
+    rungs: RUNGS.map(r => rungSummary(aw, r)),
     unrealizedPnl: unrealizedForAssetWindow(aw),
   };
 }
@@ -625,34 +704,27 @@ function buildState() {
     realizedPnl: engine.realizedPnl, unrealizedPnl, equity,
     feesPaid: engine.feesPaid,
     wins: engine.wins, losses: engine.losses,
-    martingaleLevel: engine.martingaleLevel,
-    maxMartingaleLevel: MAX_MARTINGALE_LEVEL,
-    currentTradeShares: currentMartingaleShares(),
     window: cycle ? {
       windowTs: cycle.windowTs, closeAt: cycle.closeAt,
       elapsedSec: Math.max(0, Math.min(WINDOW_SECONDS, Math.floor(Date.now() / 1000) - cycle.windowTs)),
-      entries: cycle.entries,
-      entryFired: cycle.entryFired,
       assets: { btc: assetSummary(cycle.assets.btc), eth: assetSummary(cycle.assets.eth) },
     } : null,
     pendingResolutionCount: engine.pending.length,
     pending: engine.pending.map(assetSummary),
-    history: engine.history.slice(0, 50),
+    history: engine.history.slice(0, 60),
     trades: engine.trades.slice(-100).slice().reverse(),
     equityCurve: engine.equityCurve,
     logs: engine.logs.slice(-80),
-    gapThreshold: GAP_THRESHOLD,
-    legPriceThreshold: LEG_PRICE_THRESHOLD,
-    triggerShares: SHARES_PER_TRIGGER,
+    rungs: RUNGS.map(r => ({ key: r.key, label: r.label, price: r.price, lossThreshold: r.lossThreshold })),
+    baseShares: BASE_SHARES,
     windowSeconds: WINDOW_SECONDS,
-    entryCutoffSec: ENTRY_CUTOFF_SEC,
   };
 }
-function getStatus() { return buildState(); } // back-compat alias, some callers may still use this name
+function getStatus() { return buildState(); }
 
 function pauseTrading() {
   engine.tradingEnabled = false;
-  log('⏸️  Trading paused — gap triggers will be skipped from now on; open positions still tracked to resolution, and window discovery/rollover keeps running');
+  log('⏸️  Trading paused — no new rung orders will be placed; open positions still tracked to resolution, window discovery/rollover keeps running');
   return { ok: true };
 }
 function resumeTrading() {
@@ -669,16 +741,16 @@ function setMode(live) {
 async function init(privateKey, emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
-  slog('[updown5m] 🪙 BTC + ETH 5-Minute Gap-Monitoring Engine — fully automatic, no manual match management');
-  slog(`[updown5m] ⚙️  No monitoring periods, no combined-price requirement — Up-pair (BTC-up + ETH-up) and Down-pair (BTC-down + ETH-down) are watched from t+0:00 up to t+${(ENTRY_CUTOFF_SEC / 60).toFixed(1)}min; the instant EITHER leg of EITHER pair prices above ${LEG_PRICE_THRESHOLD.toFixed(2)}, buy the CHEAPER leg. Only ONE entry fires per window total — whichever pair meets the condition first takes the window's one shot and locks the other pair out too. No entries at all after t+${(ENTRY_CUTOFF_SEC / 60).toFixed(1)}min.`);
-  slog(`[updown5m] ⚙️  MARTINGALE: base size ${SHARES_PER_TRIGGER}sh, doubles after each loss up to ${MAX_MARTINGALE_LEVEL} consecutive doublings (${SHARES_PER_TRIGGER * Math.pow(2, MAX_MARTINGALE_LEVEL)}sh max), resets to base on any win. Windows with no trade fired at all don't move the martingale level. Current level ${engine.martingaleLevel}/${MAX_MARTINGALE_LEVEL} = ${currentMartingaleShares()}sh next trade.`);
-  slog(`[updown5m] ⚙️  Starting bankroll $${STARTING_CAPITAL} (shared across BTC+ETH) | positions held to settlement, no TP/exit logic | never trades a window it joins mid-way through`);
-  slog(`[updown5m] ${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
+  slog('[rungbot] 🪙 BTC + ETH 5-Minute Rung Martingale Engine — fully automatic');
+  slog(`[rungbot] ⚙️  Each window: 6 resting limit buys per asset — Up+Down @ 0.10/0.20/0.33, ${BASE_SHARES}sh each. First side of a rung to fill cancels the opposite side of that rung; position held to settlement.`);
+  slog('[rungbot] ⚙️  Martingale (independent per rung per asset): 0.10 rung doubles after 7 consecutive losses, 0.20 rung after 4, 0.33 rung after 2 — doubles ONCE then plateaus until a win, uncapped. Any win resets to base size.');
+  slog(`[rungbot] ⚙️  Starting bankroll $${STARTING_CAPITAL} (shared across BTC+ETH) | maker fee rate ${MAKER_FEE_RATE} | never trades a window it joins mid-way through`);
+  slog(`[rungbot] ${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
   trader = new PolymarketTrader(privateKey);
   await trader.authenticate();
 
-  mainLoop().catch(e => slog(`[updown5m] ❌ Fatal: ${e.message}`));
+  mainLoop().catch(e => slog(`[rungbot] ❌ Fatal: ${e.message}`));
 }
 
 module.exports = {
