@@ -301,22 +301,57 @@ app.get('/', (_, res) => {
     $('log-panel').innerHTML = list.map(l => '<div>' + l.replace(/</g, '&lt;') + '</div>').join('');
   }
 
-  socket.on('btc5mState', (s) => {
-    $('mode-badge').className = 'mode-badge ' + (s.dryRun ? 'mode-dry' : 'mode-live');
-    $('mode-badge').textContent = s.dryRun ? 'DEMO' : 'LIVE';
-    $('live-btn').classList.toggle('is-live', !s.dryRun);
-    $('live-btn').textContent = s.dryRun ? '🔴 Switch to LIVE' : '⚠️ Switch to DEMO';
-
+  function showRenderError(where, err) {
+    console.error('[dashboard render error]', where, err);
     const banner = $('boundary-banner');
-    if (s.waitingForBoundary) { banner.style.display = 'block'; banner.textContent = '⏳ Started mid-window — waiting for the next fresh 5-minute boundary before trading begins (no mid-window entries).'; }
-    else banner.style.display = 'none';
+    banner.style.display = 'block';
+    banner.style.background = '#e8304a22';
+    banner.style.borderColor = 'var(--red)';
+    banner.style.color = '#7a0010';
+    banner.textContent = '⚠️ Dashboard render error in ' + where + ': ' + (err && err.message ? err.message : err) + ' — screenshot this and send it over.';
+  }
+  function safe(where, fn) { try { fn(); } catch (err) { showRenderError(where, err); } }
 
-    renderStats(s);
-    renderWindow(s);
-    renderHistory(s.history);
-    renderTrades(s.trades);
-    renderLogs(s.logs);
+  socket.on('connect', () => { $('toolbar-status').textContent = '🟢 connected'; setTimeout(() => { $('toolbar-status').textContent = ''; }, 2000); });
+  socket.on('connect_error', (err) => { console.error('[socket connect_error]', err); $('toolbar-status').textContent = '🔴 socket connect_error: ' + err.message; });
+  socket.on('disconnect', (reason) => { console.warn('[socket disconnect]', reason); $('toolbar-status').textContent = '🔴 disconnected: ' + reason; });
+
+  socket.on('btc5mState', (s) => {
+    safe('mode/live badges', () => {
+      $('mode-badge').className = 'mode-badge ' + (s.dryRun ? 'mode-dry' : 'mode-live');
+      $('mode-badge').textContent = s.dryRun ? 'DEMO' : 'LIVE';
+      $('live-btn').classList.toggle('is-live', !s.dryRun);
+      $('live-btn').textContent = s.dryRun ? '🔴 Switch to LIVE' : '⚠️ Switch to DEMO';
+    });
+
+    safe('boundary banner', () => {
+      const banner = $('boundary-banner');
+      if (s.waitingForBoundary) {
+        banner.style.display = 'block'; banner.style.background = ''; banner.style.borderColor = ''; banner.style.color = '';
+        banner.textContent = '⏳ Started mid-window — waiting for the next fresh 5-minute boundary before trading begins (no mid-window entries).';
+      } else if (banner.style.borderColor !== 'var(--red)') {
+        banner.style.display = 'none';
+      }
+    });
+
+    safe('stats', () => renderStats(s));
+    safe('window', () => renderWindow(s));
+    safe('history', () => renderHistory(s.history));
+    safe('trades', () => renderTrades(s.trades));
+    safe('logs', () => renderLogs(s.logs));
   });
+
+  window.addEventListener('error', (e) => showRenderError('uncaught script error', e.error || e.message));
+
+  let gotFirstState = false;
+  socket.on('btc5mState', () => { gotFirstState = true; });
+  setTimeout(() => {
+    if (!gotFirstState) {
+      const banner = $('boundary-banner');
+      banner.style.display = 'block'; banner.style.background = '#e8304a22'; banner.style.borderColor = 'var(--red)'; banner.style.color = '#7a0010';
+      banner.textContent = '⚠️ No data received from the server after 10s (socket connected: ' + socket.connected + '). The bot server may be down, or the socket connection is being blocked.';
+    }
+  }, 10000);
 
 </script>
 </body>
