@@ -14,7 +14,7 @@ app.use(express.json());
 
 app.get('/healthz', (_, res) => res.sendStatus(200));
 
-// ── BTC+ETH rung martingale engine API ──
+// ── BTC+ETH rung engine API (flat sizing) ──
 app.get('/api/btc5m/status', (_, res) => {
   try { res.json(rungBot.buildState()); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
@@ -180,7 +180,7 @@ app.get('/', (_, res) => {
   $('resume-btn').onclick = () => fetch('/api/btc5m/resume', { method: 'POST' }).then(() => flash('Trading resumed'));
   $('live-btn').onclick = () => {
     const wantLive = !$('live-btn').classList.contains('is-live');
-    if (wantLive && !confirm('Switch to LIVE mode? This will place REAL resting limit buy orders with REAL money at 0.10/0.20/0.33 on both Up and Down for BTC and ETH every window, with martingale sizing on repeated losses.')) return;
+    if (wantLive && !confirm('Switch to LIVE mode? This will place REAL resting limit buy orders with REAL money at 0.10/0.20/0.33 on both Up and Down for BTC and ETH every window, using fixed flat share sizes (no martingale).')) return;
     fetch('/api/btc5m/set-mode', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ live: wantLive }) })
       .then(() => flash(wantLive ? 'Switched to LIVE' : 'Switched to DEMO'));
   };
@@ -217,14 +217,13 @@ app.get('/', (_, res) => {
   function rungCard(r) {
     const badgeMap = { idle: ['rb-idle', '⏳ IDLE'], armed: ['rb-armed', '🟢 ARMED'], filled: ['rb-filled', '🔒 FILLED · ' + (r.filledSide || '').toUpperCase()], closed: ['rb-closed', '⌛ CLOSED · NO FILL'] };
     const [badgeCls, badgeLabel] = badgeMap[r.status] || ['rb-idle', r.status];
-    const m = r.martingale;
-    const hot = m.doubleCount > 0 ? ('<span class="hot">x' + Math.pow(2, m.doubleCount) + '</span>') : '';
+    const m = r.sizing;
     const pnlLine = (r.resolved && r.pnl != null) ? ('<div class="' + pClass(r.pnl) + '" style="text-align:right;">rung pnl ' + sgn(r.pnl) + '</div>') : '';
     const rebateLine = '<div class="rebate-line">cumulative est. rebate: $' + (r.estimatedRebate || 0).toFixed(4) + '</div>';
     return '<div class="rung-card status-' + r.status + '">' +
       '<div class="rung-head"><span class="rung-tag">Rung ' + r.label + '</span><span class="rung-badge ' + badgeCls + '">' + badgeLabel + '</span></div>' +
       '<div class="rung-legs">' + legHtml(r.up, 'UP') + legHtml(r.down, 'DOWN') + '</div>' +
-      '<div class="rung-meta"><span>size ' + m.currentShares + 'sh ' + hot + '</span><span>consec.loss ' + m.consecutiveLosses + '/' + m.lossThreshold + '</span></div>' +
+      '<div class="rung-meta"><span>size ' + m.currentShares + 'sh (flat)</span><span>consec.loss ' + m.consecutiveLosses + '</span></div>' +
       rebateLine +
       pnlLine +
     '</div>';
@@ -321,7 +320,7 @@ const slog = (line) => { console.log(line); io.emit('log', line); };
 const PK = process.env.PRIVATE_KEY;
 if (!PK) { console.error('❌ PRIVATE_KEY env var missing'); process.exit(1); }
 
-console.log('🪙 BTC + ETH 5-Minute Rung Martingale Bot (0.10/0.20/0.33, both sides, per-rung per-asset martingale)');
+console.log('🪙 BTC + ETH 5-Minute Rung Bot (0.10/0.20 @ 100sh, 0.33 @ 200sh, both sides, flat sizing — no martingale)');
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`🌐 Dashboard: http://0.0.0.0:${PORT}`);
