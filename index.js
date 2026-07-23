@@ -150,8 +150,8 @@ app.get('/', (_, res) => {
       <div class="section-hdr" style="padding:0 0 8px;">Window History</div>
       <div class="tbl-wrap">
         <table class="tbl">
-          <thead><tr><th>Asset</th><th>Window</th><th>Winner</th><th>Up sh/cost</th><th>Down sh/cost</th><th>Payout</th><th>Fees</th><th>P&amp;L</th></tr></thead>
-          <tbody id="history-body"><tr><td colspan="8" class="empty">Loading…</td></tr></tbody>
+          <thead><tr><th>Asset</th><th>Window</th><th>Winner</th><th>Up sh/cost</th><th>Down sh/cost</th><th>Payout</th><th>Fees</th><th>P&amp;L</th><th>Resolved via</th></tr></thead>
+          <tbody id="history-body"><tr><td colspan="9" class="empty">Loading…</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -260,7 +260,7 @@ app.get('/', (_, res) => {
   }
 
   function renderHistory(list) {
-    if (!list || !list.length) { $('history-body').innerHTML = '<tr><td colspan="8" class="empty">No resolved windows yet</td></tr>'; return; }
+    if (!list || !list.length) { $('history-body').innerHTML = '<tr><td colspan="9" class="empty">No resolved windows yet</td></tr>'; return; }
     $('history-body').innerHTML = list.map(h =>
       '<tr><td>' + (h.label || h.asset || '').toUpperCase() + '</td>' +
       '<td>' + h.slug.replace(/^(btc|eth)-updown-5m-/, '') + '</td>' +
@@ -269,7 +269,8 @@ app.get('/', (_, res) => {
       '<td>' + h.downShares.toFixed(2) + ' / $' + h.downCost.toFixed(2) + '</td>' +
       '<td>$' + h.payout.toFixed(2) + '</td>' +
       '<td>$' + h.totalFees.toFixed(4) + '</td>' +
-      '<td class="' + pClass(h.pnl) + '">' + sgn(h.pnl) + '</td></tr>'
+      '<td class="' + pClass(h.pnl) + '">' + sgn(h.pnl) + '</td>' +
+      '<td>' + (h.resolutionMethod === 'price-fallback' ? '📡 live price' : '✅ official') + '</td></tr>'
     ).join('');
   }
 
