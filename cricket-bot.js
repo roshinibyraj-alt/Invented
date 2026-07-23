@@ -11,12 +11,14 @@
  *  pairs are watched every price-refresh tick for the entire window:
  *      Up-pair:   BTC-Up ask  +  ETH-Up ask
  *      Down-pair: BTC-Down ask + ETH-Down ask
- *  For each pair: sum = btcAsk + ethAsk, gap = 1.00 - sum. The
- *  instant gap reaches or exceeds 0.20 (i.e. the combined price of
- *  the two legs drops to 0.80 or below) AND at least one of the two
- *  legs is priced above 0.70, the engine immediately buys 50 shares
- *  of whichever of the two legs is cheaper. If gap >= 0.20 but
- *  NEITHER leg is above 0.70, it does NOT fire.
+ *  For each pair: the instant EITHER leg's ask price rises above 0.70,
+ *  the engine immediately buys 50 shares of whichever of the two legs
+ *  is CHEAPER (the presumed value side). There is NO combined-price
+ *  / gap requirement anymore — a single expensive leg is enough to
+ *  fire, regardless of what the other leg costs. Example: BTC-down
+ *  0.82, ETH-down 0.60 -> BTC-down > 0.70 -> buy 50sh ETH-down (the
+ *  cheaper leg). Combined sum/gap are still computed and shown on
+ *  the dashboard for context, but play no role in the trigger.
  *
  *  ONE-SIDE-FIRST, THEN THE OTHER: each pair (Up, Down) can fire AT
  *  MOST ONCE per window — once a pair fires it's LOCKED for the rest
@@ -81,7 +83,8 @@ const ASSETS = [
 
 const PAIRS = ['up', 'down']; // Up-pair (BTC-up vs ETH-up), Down-pair (BTC-down vs ETH-down)
 
-const GAP_THRESHOLD    = Number(process.env.BTC5M_GAP_THRESHOLD || 0.20); // 20-cent gap trigger
+const GAP_THRESHOLD    = Number(process.env.BTC5M_GAP_THRESHOLD || 0.20); // informational only — no longer gates the trigger
+const LEG_PRICE_THRESHOLD = Number(process.env.BTC5M_LEG_PRICE_THRESHOLD || 0.70); // trigger fires when either leg's ask exceeds this
 const SHARES_PER_TRIGGER = Number(process.env.BTC5M_TRIGGER_SHARES || 50);
 
 let DRY_RUN = (process.env.BTC5M_DRY_RUN || process.env.SPORTS_DRY_RUN || process.env.DRY_RUN || 'true').toLowerCase() === 'true';
@@ -303,12 +306,13 @@ async function executeBuy(aw, side, shares, stepLabel) {
 }
 
 // Called every tick while a cycle is trading. Continuously watches both
-// pairs for the ENTIRE window (no periods). The instant a pair's gap
-// reaches GAP_THRESHOLD (with one leg > 0.70) it fires a single buy for
-// that pair and LOCKS for the rest of the window — it will not fire
-// again. The other pair stays armed and can still fire once, whenever
-// its own condition is met (before or after the first side, in any
-// order). Once both pairs have fired, the window is done triggering.
+// pairs for the ENTIRE window (no periods, no combined-sum requirement).
+// The instant EITHER leg of a pair prices above LEG_PRICE_THRESHOLD, it
+// fires a single buy of the CHEAPER leg for that pair and LOCKS for the
+// rest of the window — it will not fire again. The other pair stays
+// armed and can still fire once, whenever its own condition is met
+// (before or after the first side, in any order). Once both pairs have
+// fired, the window is done triggering.
 async function monitorAndTrigger(cycle) {
   const elapsedSec = Math.floor(Date.now() / 1000) - cycle.windowTs;
   if (elapsedSec < 0 || elapsedSec >= WINDOW_SECONDS) return; // outside the window — just hold
@@ -321,11 +325,10 @@ async function monitorAndTrigger(cycle) {
     const ethAsk = cycle.assets.eth[pair === 'up' ? 'upAsk' : 'downAsk'];
     if (btcAsk == null || ethAsk == null) continue; // no live prices yet, keep watching
 
-    const sum = round2(btcAsk + ethAsk);
-    const gap = round2(1 - sum);
-    if (gap < GAP_THRESHOLD) continue; // combined price not discounted enough yet, keep watching
-    if (btcAsk <= 0.7 && ethAsk <= 0.7) continue; // need at least one leg priced above 0.70 to fire
+    if (btcAsk <= LEG_PRICE_THRESHOLD && ethAsk <= LEG_PRICE_THRESHOLD) continue; // neither leg expensive enough yet, keep watching
 
+    const sum = round2(btcAsk + ethAsk); // informational only, no longer gates the trigger
+    const gap = round2(1 - sum);
     const cheaperAsset = btcAsk <= ethAsk ? 'btc' : 'eth';
     entries[pair].done = true;
     entries[pair].boughtAsset = cheaperAsset;
@@ -337,11 +340,11 @@ async function monitorAndTrigger(cycle) {
     const otherStatus = entries[otherPair].done ? `${otherPair}-pair already locked too — window done triggering` : `${otherPair}-pair remains armed as the only side that can still fire this window`;
 
     if (!engine.tradingEnabled) {
-      log(`⏸️  ${pair}-pair: BTC=${btcAsk.toFixed(2)} ETH=${ethAsk.toFixed(2)} sum=${sum.toFixed(2)} gap=${gap.toFixed(2)} hit threshold but trading is paused — skipped (${otherStatus})`);
+      log(`⏸️  ${pair}-pair: BTC=${btcAsk.toFixed(2)} ETH=${ethAsk.toFixed(2)} (sum=${sum.toFixed(2)}) one leg > ${LEG_PRICE_THRESHOLD.toFixed(2)} but trading is paused — skipped (${otherStatus})`);
       continue;
     }
-    log(`🔎 ${pair}-pair: BTC=${btcAsk.toFixed(2)} ETH=${ethAsk.toFixed(2)} sum=${sum.toFixed(2)} gap=${gap.toFixed(2)} ≥ ${GAP_THRESHOLD.toFixed(2)} (one leg > 0.70) → buy ${cheaperAsset.toUpperCase()}-${pair.toUpperCase()} | ${otherStatus}`);
-    await executeBuy(cycle.assets[cheaperAsset], pair, SHARES_PER_TRIGGER, `${pair}-pair gap ${gap.toFixed(2)}`);
+    log(`🔎 ${pair}-pair: BTC=${btcAsk.toFixed(2)} ETH=${ethAsk.toFixed(2)} (sum=${sum.toFixed(2)}) one leg > ${LEG_PRICE_THRESHOLD.toFixed(2)} → buy ${cheaperAsset.toUpperCase()}-${pair.toUpperCase()} (cheaper leg) | ${otherStatus}`);
+    await executeBuy(cycle.assets[cheaperAsset], pair, SHARES_PER_TRIGGER, `${pair}-pair leg>${LEG_PRICE_THRESHOLD.toFixed(2)}`);
   }
 }
 
@@ -481,7 +484,7 @@ async function mainLoop() {
             }
           }
           for (const pair of PAIRS) {
-            if (!engine.cycle.entries[pair].done) log(`ℹ️  window t=${engine.cycle.windowTs} closed: ${pair}-pair gap never reached ${GAP_THRESHOLD.toFixed(2)} with a qualifying leg — no trade that window`);
+            if (!engine.cycle.entries[pair].done) log(`ℹ️  window t=${engine.cycle.windowTs} closed: ${pair}-pair — neither leg ever priced above ${LEG_PRICE_THRESHOLD.toFixed(2)} — no trade that window`);
           }
         }
         engine.cycle = freshCycle(windowTs);
@@ -558,6 +561,7 @@ function buildState() {
     equityCurve: engine.equityCurve,
     logs: engine.logs.slice(-80),
     gapThreshold: GAP_THRESHOLD,
+    legPriceThreshold: LEG_PRICE_THRESHOLD,
     triggerShares: SHARES_PER_TRIGGER,
     windowSeconds: WINDOW_SECONDS,
   };
@@ -584,7 +588,7 @@ async function init(privateKey, emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
   slog('[updown5m] 🪙 BTC + ETH 5-Minute Gap-Monitoring Engine — fully automatic, no manual match management');
-  slog(`[updown5m] ⚙️  No monitoring periods — Up-pair (BTC-up + ETH-up) and Down-pair (BTC-down + ETH-down) are watched continuously across the ENTIRE window; the instant a pair's combined price drops to ${(1 - GAP_THRESHOLD).toFixed(2)} or below (gap ${GAP_THRESHOLD.toFixed(2)}) AND at least one leg is above 0.70, buy ${SHARES_PER_TRIGGER}sh of the cheaper leg. Each side (up/down) fires at most once per window; once one side fires, only the opposite side stays armed for the rest of that window.`);
+  slog(`[updown5m] ⚙️  No monitoring periods, no combined-price requirement — Up-pair (BTC-up + ETH-up) and Down-pair (BTC-down + ETH-down) are watched continuously across the ENTIRE window; the instant EITHER leg of a pair prices above ${LEG_PRICE_THRESHOLD.toFixed(2)}, buy ${SHARES_PER_TRIGGER}sh of the CHEAPER leg. Each side (up/down) fires at most once per window; once one side fires, only the opposite side stays armed for the rest of that window.`);
   slog(`[updown5m] ⚙️  Starting bankroll $${STARTING_CAPITAL} (shared across BTC+ETH) | fixed ${SHARES_PER_TRIGGER}sh per trigger, no compounding | positions held to settlement, no TP/exit logic | never trades a window it joins mid-way through`);
   slog(`[updown5m] ${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
