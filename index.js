@@ -141,7 +141,7 @@ app.get('/', (_, res) => {
   <div class="assets-grid" id="assets-grid"><div class="empty">Loading…</div></div>
 
   <div class="section">
-    <div class="section-hdr">Window Entry Status (combined price ≤ 0.80 + one leg &gt; 0.70 → buy cheaper side · first side to fire locks, other side stays open)</div>
+    <div class="section-hdr">Window Entry Status (either leg &gt; 0.70 → buy the cheaper leg · no combined-price requirement · first side to fire locks, other side stays open)</div>
   </div>
   <div class="entries-wrap" id="entries-wrap"><div class="empty">Loading…</div></div>
 
@@ -178,7 +178,7 @@ app.get('/', (_, res) => {
   $('resume-btn').onclick = () => fetch('/api/btc5m/resume', { method: 'POST' }).then(() => flash('Trading resumed'));
   $('live-btn').onclick = () => {
     const wantLive = !$('live-btn').classList.contains('is-live');
-    if (wantLive && !confirm('Switch to LIVE mode? This will place REAL crossing-the-spread buys with REAL money whenever a BTC+ETH pair\\'s combined price drops to 0.80 or below with one leg above 0.70 (50 shares per pair per window — first side to fire locks, the other side stays open for one more entry).')) return;
+    if (wantLive && !confirm('Switch to LIVE mode? This will place REAL crossing-the-spread buys with REAL money whenever either leg of a BTC+ETH pair prices above 0.70, buying the cheaper leg (50 shares per pair per window — first side to fire locks, the other side stays open for one more entry). No combined-price requirement.')) return;
     fetch('/api/btc5m/set-mode', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ live: wantLive }) })
       .then(() => flash(wantLive ? 'Switched to LIVE' : 'Switched to DEMO'));
   };
@@ -243,13 +243,13 @@ app.get('/', (_, res) => {
       if (isLocked && e.boughtAsset) {
         badgeCls = 'locked-bought'; badgeLabel = '🔒 LOCKED · BOUGHT';
         detailHtml = 'Bought <span class="bought">' + e.boughtAsset.toUpperCase() + '-' + pairName.toUpperCase() + '</span> at ' + entryTime(e.ts) +
-          ' — sum ' + (e.sum != null ? e.sum.toFixed(2) : '?') + ', gap ' + (e.gap != null ? e.gap.toFixed(2) : '?');
+          ' — one leg priced above 0.70 (sum was ' + (e.sum != null ? e.sum.toFixed(2) : '?') + ' at the time, for context)';
       } else if (isLocked) {
         badgeCls = 'locked'; badgeLabel = '🔒 LOCKED · SKIPPED';
         detailHtml = 'Condition hit but trading was paused at the time — no re-fire this window.';
       } else {
         badgeCls = 'armed'; badgeLabel = '🟢 ARMED';
-        detailHtml = 'Watching continuously — will buy the cheaper leg the instant the gap and price conditions are met.';
+        detailHtml = 'Watching continuously — will buy the cheaper leg the instant either leg prices above 0.70.';
       }
       return '<div class="entry-card ' + cardCls + '">' +
         '<div class="entry-head"><span class="entry-tag">' + pairName.toUpperCase() + '-pair</span><span class="entry-badge ' + badgeCls + '">' + badgeLabel + '</span></div>' +
