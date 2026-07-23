@@ -69,6 +69,8 @@ app.get('/', (_, res) => {
   .stat-val { font-size: 17px; font-weight: bold; color: #12202e; }
   .pnl-pos { color: var(--green) !important; }
   .pnl-neg { color: var(--red) !important; }
+  .tip { color: var(--gold); font-size: 9px; vertical-align: super; }
+  .rebate-note { margin: 0 20px 6px; font-size: 9px; color: var(--muted); line-height: 1.4; }
   .section { padding: 0 20px 16px; }
   .section-hdr { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 2px; padding: 8px 0; display: flex; align-items: center; gap: 8px; }
   .section-hdr::after { content:''; flex:1; height:1px; background: var(--border); }
@@ -109,6 +111,8 @@ app.get('/', (_, res) => {
   .leg.leg-cancelled { background: #7a8fa822; color: var(--muted); text-decoration: line-through; }
   .rung-meta { color: var(--muted); font-size: 9px; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px; }
   .rung-meta .hot { color: var(--red); font-weight: bold; }
+  .rebate-line { color: var(--gold); font-size: 8.5px; margin-top: 4px; text-align: right; }
+  .highconf-badge { font-size: 8.5px; padding: 2px 7px; border-radius: 9px; background: #e6a80022; color: var(--yellow); border: 1px solid var(--yellow); white-space: nowrap; }
   .asset-unrl { margin-top: 4px; font-size: 10px; text-align: right; }
   .bottom-grid { display: grid; grid-template-columns: 1fr; gap: 16px; padding: 0 20px 20px; }
   .tbl-wrap { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; max-height: 320px; overflow-y: auto; }
@@ -135,6 +139,7 @@ app.get('/', (_, res) => {
   <div id="boundary-banner" style="display:none;" class="boundary-banner"></div>
 
   <div class="stats-row" id="stats-row"></div>
+  <div class="rebate-note" id="rebate-note"></div>
 
   <div class="section">
     <div class="section-hdr">Current Window — Rungs (0.10 / 0.20 / 0.33, independent Up+Down resting limit buys)</div>
@@ -156,8 +161,8 @@ app.get('/', (_, res) => {
       <div class="section-hdr" style="padding:0 0 8px;">Recent Trades</div>
       <div class="tbl-wrap">
         <table class="tbl">
-          <thead><tr><th>Time</th><th>Asset</th><th>Window</th><th>Step</th><th>Side</th><th>Price</th><th>Shares</th><th>Cost/Fee/PnL</th></tr></thead>
-          <tbody id="trade-body"><tr><td colspan="8" class="empty">Loading…</td></tr></tbody>
+          <thead><tr><th>Time</th><th>Asset</th><th>Window</th><th>Step</th><th>Side</th><th>Price</th><th>Shares</th><th>Cost/Fee/PnL</th><th>Rebate</th></tr></thead>
+          <tbody id="trade-body"><tr><td colspan="9" class="empty">Loading…</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -194,6 +199,7 @@ app.get('/', (_, res) => {
       ['Realized P&amp;L', sgn(s.realizedPnl), pClass(s.realizedPnl)],
       ['Unrealized P&amp;L', sgn(s.unrealizedPnl), pClass(s.unrealizedPnl)],
       ['Fees Paid', '$' + (s.feesPaid || 0).toFixed(4), ''],
+      ['Est. Maker Rebate<span class="tip">†</span>', '$' + (s.estimatedRebateUsd || 0).toFixed(4), 'pnl-pos'],
       ['Rung Wins / Losses', s.wins + ' / ' + s.losses, ''],
       ['Pending Resolution', s.pendingResolutionCount || 0, ''],
     ];
@@ -212,12 +218,14 @@ app.get('/', (_, res) => {
     const badgeMap = { idle: ['rb-idle', '⏳ IDLE'], armed: ['rb-armed', '🟢 ARMED'], filled: ['rb-filled', '🔒 FILLED · ' + (r.filledSide || '').toUpperCase()], closed: ['rb-closed', '⌛ CLOSED · NO FILL'] };
     const [badgeCls, badgeLabel] = badgeMap[r.status] || ['rb-idle', r.status];
     const m = r.martingale;
-    const hot = m.hasDoubled ? '<span class="hot">DOUBLED</span>' : '';
+    const hot = m.doubleCount > 0 ? ('<span class="hot">x' + Math.pow(2, m.doubleCount) + '</span>') : '';
     const pnlLine = (r.resolved && r.pnl != null) ? ('<div class="' + pClass(r.pnl) + '" style="text-align:right;">rung pnl ' + sgn(r.pnl) + '</div>') : '';
+    const rebateLine = '<div class="rebate-line">cumulative est. rebate: $' + (r.estimatedRebate || 0).toFixed(4) + '</div>';
     return '<div class="rung-card status-' + r.status + '">' +
       '<div class="rung-head"><span class="rung-tag">Rung ' + r.label + '</span><span class="rung-badge ' + badgeCls + '">' + badgeLabel + '</span></div>' +
       '<div class="rung-legs">' + legHtml(r.up, 'UP') + legHtml(r.down, 'DOWN') + '</div>' +
       '<div class="rung-meta"><span>size ' + m.currentShares + 'sh ' + hot + '</span><span>consec.loss ' + m.consecutiveLosses + '/' + m.lossThreshold + '</span></div>' +
+      rebateLine +
       pnlLine +
     '</div>';
   }
@@ -225,6 +233,9 @@ app.get('/', (_, res) => {
   function assetCard(a, cls) {
     if (!a) return '<div class="asset-card ' + cls + '"><div class="empty">No data</div></div>';
     const statusCls = a.status === 'trading' ? 'st-trading' : (a.status === 'resolved' ? 'st-resolved' : 'st-discovering');
+    const highConfBadge = a.highConfSide
+      ? ('<span class="highconf-badge">⚡ ' + a.highConfSide.toUpperCase() + ' @ ' + fmtPx(a.highConfPrice) + '</span>')
+      : '';
     const priceRow =
       '<div class="price-row">' +
         '<div class="price-box up"><div class="side-label">Up</div><div class="side-price">' + fmtPx(a.upAsk) + '</div><div class="side-sub">bid ' + fmtPx(a.upBid) + '</div></div>' +
@@ -233,7 +244,7 @@ app.get('/', (_, res) => {
     const rungsHtml = (a.rungs || []).map(rungCard).join('');
     const unrl = '<div class="asset-unrl ' + pClass(a.unrealizedPnl) + '">Unrealized: ' + sgn(a.unrealizedPnl) + '</div>';
     return '<div class="asset-card ' + cls + '">' +
-      '<div class="asset-hdr"><div class="asset-title">' + a.label + '</div><div class="asset-status ' + statusCls + '">' + a.status + '</div></div>' +
+      '<div class="asset-hdr"><div class="asset-title">' + a.label + '</div><div style="display:flex;align-items:center;gap:6px;">' + highConfBadge + '<div class="asset-status ' + statusCls + '">' + a.status + '</div></div></div>' +
       '<div class="asset-body">' + priceRow + rungsHtml + unrl + '</div>' +
     '</div>';
   }
@@ -262,7 +273,7 @@ app.get('/', (_, res) => {
   }
 
   function renderTrades(list) {
-    if (!list || !list.length) { $('trade-body').innerHTML = '<tr><td colspan="8" class="empty">No trades yet</td></tr>'; return; }
+    if (!list || !list.length) { $('trade-body').innerHTML = '<tr><td colspan="9" class="empty">No trades yet</td></tr>'; return; }
     $('trade-body').innerHTML = list.map(t =>
       '<tr><td>' + t.time + '</td>' +
       '<td>' + (t.asset || '').toUpperCase() + '</td>' +
@@ -271,7 +282,8 @@ app.get('/', (_, res) => {
       '<td>' + (t.side || '').toUpperCase() + '</td>' +
       '<td>' + (t.price != null ? t.price.toFixed(3) : '—') + '</td>' +
       '<td>' + (t.shares != null ? t.shares.toFixed(2) : '—') + '</td>' +
-      '<td>' + (t.cost != null ? '$' + t.cost.toFixed(2) + (t.fee ? ' +$' + t.fee.toFixed(4) : '') : (t.pnl != null ? sgn(t.pnl) : '—')) + '</td></tr>'
+      '<td>' + (t.cost != null ? '$' + t.cost.toFixed(2) + (t.fee ? ' +$' + t.fee.toFixed(4) : '') : (t.pnl != null ? sgn(t.pnl) : '—')) + '</td>' +
+      '<td>' + (t.rebate != null ? '$' + t.rebate.toFixed(4) : '—') + '</td></tr>'
     ).join('');
   }
 
@@ -291,6 +303,7 @@ app.get('/', (_, res) => {
     else banner.style.display = 'none';
 
     renderStats(s);
+    $('rebate-note').textContent = s.rebateNote ? ('† ' + s.rebateNote) : '';
     renderWindow(s);
     renderHistory(s.history);
     renderTrades(s.trades);
