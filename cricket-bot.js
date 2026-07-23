@@ -2,7 +2,7 @@
 
 /**
  * ═══════════════════════════════════════════════════════════════
- *  BTC + ETH 5-MINUTE RUNG MARTINGALE ENGINE
+ *  BTC + ETH 5-MINUTE RUNG ENGINE (FLAT SIZING)
  * ═══════════════════════════════════════════════════════════════
  *
  *  Trades Polymarket's BTC and ETH "Up or Down" 5-minute markets.
@@ -10,12 +10,12 @@
  *  live, the engine places SIX resting limit BUY orders (not
  *  aggressive/crossing-the-spread — real resting limit orders):
  *
- *      Rung 0.10:  buy Up @ 0.10   +   buy Down @ 0.10
- *      Rung 0.20:  buy Up @ 0.20   +   buy Down @ 0.20
- *      Rung 0.33:  buy Up @ 0.33   +   buy Down @ 0.33
+ *      Rung 0.10:  buy Up @ 0.10   +   buy Down @ 0.10   (100 shares)
+ *      Rung 0.20:  buy Up @ 0.20   +   buy Down @ 0.20   (100 shares)
+ *      Rung 0.33:  buy Up @ 0.33   +   buy Down @ 0.33   (200 shares)
  *
  *  Each rung is fully independent of the other rungs, and BTC/ETH
- *  are independent of each other — 6 separate martingale tracks:
+ *  are independent of each other — 6 separate tracks:
  *  BTC-0.10, BTC-0.20, BTC-0.33, ETH-0.10, ETH-0.20, ETH-0.33.
  *
  *  FILL / CANCEL: the instant one side of a rung fills, the engine
@@ -26,13 +26,10 @@
  *  orders are cancelled and no win/loss is recorded for that rung
  *  that window.
  *
- *  MARTINGALE (per rung, per asset, independent counters, compounding):
- *    Rung 0.10: every additional 7 consecutive losses -> double shares again
- *               (loss 7 -> x2, loss 14 -> x4, loss 21 -> x8, ...).
- *    Rung 0.20: every additional 4 consecutive losses -> double shares again.
- *    Rung 0.33: every additional 2 consecutive losses -> double shares again.
- *    Any win -> counter and share size reset to BASE_SHARES.
- *    Uncapped — doubling can compound indefinitely.
+ *  SIZING: flat — no martingale. Each rung always trades its own fixed
+ *  baseShares every window, regardless of win/loss streaks. consecutiveLosses
+ *  is still tracked per rung purely as an informational streak counter for
+ *  logs/dashboard; it no longer affects share size.
  *
  *  RESOLUTION: three tiers, fastest available wins:
  *    1. Official — Polymarket Gamma's `closed` + `outcomePrices` fields.
@@ -89,14 +86,16 @@ const ASSETS = [
   { key: 'eth', label: 'ETH', slugPrefix: 'eth-updown-5m-' },
 ];
 
-// The three independent rungs. lossThreshold = how many consecutive losses
-// it takes to double the share size again (compounding every N further losses).
+// The three independent rungs. Flat sizing — no martingale/doubling.
+// Each rung trades a fixed share size every window, win or lose.
 const RUNGS = [
-  { key: 'r10', price: 0.10, label: '0.10', lossThreshold: 7 },
-  { key: 'r20', price: 0.20, label: '0.20', lossThreshold: 4 },
-  { key: 'r33', price: 0.33, label: '0.33', lossThreshold: 2 },
+  { key: 'r10', price: 0.10, label: '0.10', baseShares: Number(process.env.RUNG_R10_SHARES || process.env.RUNG_BASE_SHARES || 100) },
+  { key: 'r20', price: 0.20, label: '0.20', baseShares: Number(process.env.RUNG_R20_SHARES || process.env.RUNG_BASE_SHARES || 100) },
+  { key: 'r33', price: 0.33, label: '0.33', baseShares: Number(process.env.RUNG_R33_SHARES || 200) },
 ];
 
+// Kept for any external references (e.g. dry-run capital sizing) — no longer
+// used to size individual rungs, since each rung now has its own baseShares.
 const BASE_SHARES = Number(process.env.RUNG_BASE_SHARES || 100);
 
 let DRY_RUN = (process.env.BTC5M_DRY_RUN || process.env.SPORTS_DRY_RUN || process.env.DRY_RUN || 'true').toLowerCase() === 'true';
@@ -144,7 +143,7 @@ let tradeSeq = 0;
 
 function freshRungState() {
   const s = {};
-  for (const r of RUNGS) s[r.key] = { consecutiveLosses: 0, currentShares: BASE_SHARES, doubleCount: 0 };
+  for (const r of RUNGS) s[r.key] = { consecutiveLosses: 0, currentShares: r.baseShares };
   return s;
 }
 function freshRebateState() {
@@ -170,7 +169,7 @@ const engine = {
   lastResolutionPoll: 0,
   waitingForBoundary: true,
   boundaryWindowTs: null,
-  rungState: { btc: freshRungState(), eth: freshRungState() }, // martingale state, persists across windows
+  rungState: { btc: freshRungState(), eth: freshRungState() }, // flat sizing state, persists across windows
   estimatedRebateUsd: 0,   // upper-bound estimate, accrues on every maker fill (see estimateRebate)
   rebateByRung: { btc: freshRebateState(), eth: freshRebateState() },
 };
@@ -621,24 +620,16 @@ function resolveAssetWindow(aw, winningSide, method) {
     const isWin = legs.length === 1 ? legs[0].side === winningSide : pnl >= 0;
     const boughtSideLabel = legs.map(l => l.side).join('+').toUpperCase();
 
+    // Flat sizing — martingale removed. Size never changes; consecutiveLosses
+    // is kept only as an informational streak counter for the dashboard/logs.
     if (isWin) {
       engine.wins++;
       rState.consecutiveLosses = 0;
-      rState.currentShares = BASE_SHARES;
-      rState.doubleCount = 0;
-      log(`🏆 [${aw.slug}] ${aw.label}-${r.label} rung WIN — held ${boughtSideLabel}, winner ${winningSide.toUpperCase()} | payout $${totalPayout.toFixed(2)} pnl $${pnl.toFixed(2)} | counter reset → next size ${BASE_SHARES}sh`);
+      log(`🏆 [${aw.slug}] ${aw.label}-${r.label} rung WIN — held ${boughtSideLabel}, winner ${winningSide.toUpperCase()} | payout $${totalPayout.toFixed(2)} pnl $${pnl.toFixed(2)} | size stays ${rState.currentShares}sh`);
     } else {
       engine.losses++;
       rState.consecutiveLosses++;
-      // Compounding: every additional lossThreshold consecutive losses doubles
-      // the size again (loss 7 -> x2, loss 14 -> x4, loss 21 -> x8, ...). Uncapped.
-      if (rState.consecutiveLosses % r.lossThreshold === 0) {
-        rState.currentShares = round2(rState.currentShares * 2);
-        rState.doubleCount++;
-        log(`📉 [${aw.slug}] ${aw.label}-${r.label} rung LOSS #${rState.consecutiveLosses} (multiple of ${r.lossThreshold}) — DOUBLING AGAIN → ${rState.currentShares}sh (x${Math.pow(2, rState.doubleCount)} base) | pnl $${pnl.toFixed(2)}`);
-      } else {
-        log(`📉 [${aw.slug}] ${aw.label}-${r.label} rung LOSS #${rState.consecutiveLosses} — size stays ${rState.currentShares}sh | pnl $${pnl.toFixed(2)}`);
-      }
+      log(`📉 [${aw.slug}] ${aw.label}-${r.label} rung LOSS #${rState.consecutiveLosses} — size stays ${rState.currentShares}sh | pnl $${pnl.toFixed(2)}`);
     }
 
     registerTrade({ slug: aw.slug, asset: aw.asset, step: `${r.label} rung RESOLUTION`, side: boughtSideLabel, shares: legs.reduce((s, l) => s + l.leg.shares, 0), price: 1, pnl });
@@ -765,7 +756,7 @@ function rungSummary(aw, rungDef) {
     orderShares: rp.shares,
     up: { placed: rp.up.placed, filled: rp.up.filled, cancelled: rp.up.cancelled, price: rp.up.price, shares: rp.up.shares, fillPrice: rp.up.fillPrice, rebate: rp.up.rebate },
     down: { placed: rp.down.placed, filled: rp.down.filled, cancelled: rp.down.cancelled, price: rp.down.price, shares: rp.down.shares, fillPrice: rp.down.fillPrice, rebate: rp.down.rebate },
-    martingale: { consecutiveLosses: rState.consecutiveLosses, currentShares: rState.currentShares, doubleCount: rState.doubleCount, lossThreshold: rungDef.lossThreshold },
+    sizing: { consecutiveLosses: rState.consecutiveLosses, currentShares: rState.currentShares, baseShares: rungDef.baseShares },
     estimatedRebate: engine.rebateByRung[aw.asset][rungDef.key],
   };
 }
@@ -805,7 +796,7 @@ function buildState() {
     trades: engine.trades.slice(-100).slice().reverse(),
     equityCurve: engine.equityCurve,
     logs: engine.logs.slice(-80),
-    rungs: RUNGS.map(r => ({ key: r.key, label: r.label, price: r.price, lossThreshold: r.lossThreshold })),
+    rungs: RUNGS.map(r => ({ key: r.key, label: r.label, price: r.price, baseShares: r.baseShares })),
     baseShares: BASE_SHARES,
     windowSeconds: WINDOW_SECONDS,
   };
@@ -832,7 +823,7 @@ async function init(privateKey, emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
   slog('[rungbot] 🪙 BTC + ETH 5-Minute Rung Martingale Engine — fully automatic');
-  slog(`[rungbot] ⚙️  Each window: 6 resting limit buys per asset — Up+Down @ 0.10/0.20/0.33, ${BASE_SHARES}sh each. First side of a rung to fill cancels the opposite side of that rung; position held to settlement.`);
+  slog(`[rungbot] ⚙️  Each window: 6 resting limit buys per asset — Up+Down @ 0.10 (${RUNGS[0].baseShares}sh), 0.20 (${RUNGS[1].baseShares}sh), 0.33 (${RUNGS[2].baseShares}sh). Flat sizing, no martingale. First side of a rung to fill cancels the opposite side of that rung; position held to settlement.`);
   slog('[rungbot] ⚙️  Martingale (independent per rung per asset, compounding): 0.10 rung doubles every 7 consecutive losses, 0.20 rung every 4, 0.33 rung every 2 — keeps doubling every additional threshold hit, uncapped. Any win resets to base size.');
   slog(`[rungbot] ⚙️  Resolution: official Gamma > high-confidence live price (>=${HIGH_CONF_PRICE}, resolves within seconds) > ${Math.round(RESOLUTION_FALLBACK_MS / 1000)}s live-price fallback.`);
   slog(`[rungbot] ⚙️  Tracking an UPPER-BOUND estimated maker rebate per fill (Crypto category: fee rate ${REBATE_FEE_RATE}, maker share ${REBATE_SHARE * 100}%) — real on-chain USDC payouts settle daily and may be lower.`);
