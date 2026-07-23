@@ -3,7 +3,7 @@
 const express    = require('express');
 const http       = require('http');
 const { Server } = require('socket.io');
-const rungBot     = require('./cricket-bot');
+const hedgeBot    = require('./cricket-bot');
 
 const app    = express();
 const server = http.createServer(app);
@@ -14,20 +14,20 @@ app.use(express.json());
 
 app.get('/healthz', (_, res) => res.sendStatus(200));
 
-// ── BTC+ETH rung engine API (flat sizing) ──
-app.get('/api/btc5m/status', (_, res) => {
-  try { res.json(rungBot.buildState()); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+// ── BTC+ETH correlated hedge engine API ──
+app.get('/api/hedge/status', (_, res) => {
+  try { res.json(hedgeBot.buildState()); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
-app.post('/api/btc5m/pause', (_, res) => {
-  try { res.json(rungBot.pauseTrading()); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+app.post('/api/hedge/pause', (_, res) => {
+  try { res.json(hedgeBot.pauseTrading()); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
-app.post('/api/btc5m/resume', (_, res) => {
-  try { res.json(rungBot.resumeTrading()); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+app.post('/api/hedge/resume', (_, res) => {
+  try { res.json(hedgeBot.resumeTrading()); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
-app.post('/api/btc5m/set-mode', (req, res) => {
+app.post('/api/hedge/set-mode', (req, res) => {
   const { live } = req.body || {};
   if (typeof live !== 'boolean') return res.status(400).json({ ok: false, error: 'Missing boolean "live" field' });
-  try { res.json(rungBot.setMode(live)); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  try { res.json(hedgeBot.setMode(live)); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
 app.get('/', (_, res) => {
@@ -36,7 +36,7 @@ app.get('/', (_, res) => {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>🪙 BTC/ETH Rung Bot</title>
+<title>🪙 BTC/ETH Hedge Bot</title>
 <style>
   :root {
     --bg: #ffffff; --bg2: #f5f7fa; --bg3: #edf0f4; --border: #d0d7e2;
@@ -69,12 +69,9 @@ app.get('/', (_, res) => {
   .stat-val { font-size: 17px; font-weight: bold; color: #12202e; }
   .pnl-pos { color: var(--green) !important; }
   .pnl-neg { color: var(--red) !important; }
-  .tip { color: var(--gold); font-size: 9px; vertical-align: super; }
-  .rebate-note { margin: 0 20px 6px; font-size: 9px; color: var(--muted); line-height: 1.4; }
   .section { padding: 0 20px 16px; }
   .section-hdr { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 2px; padding: 8px 0; display: flex; align-items: center; gap: 8px; }
   .section-hdr::after { content:''; flex:1; height:1px; background: var(--border); }
-  .window-meta { margin: 0 20px 10px; font-size: 10px; color: var(--muted); }
   .assets-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin: 0 20px 16px; }
   @media (max-width: 760px) { .assets-grid { grid-template-columns: 1fr; } }
   .asset-card { background: var(--bg2); border: 2px solid var(--cyan); border-radius: 12px; overflow: hidden; }
@@ -82,36 +79,22 @@ app.get('/', (_, res) => {
   .asset-hdr { background: #0d1d30; padding: 10px 14px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px; }
   .asset-title { font-size: 13px; font-weight: bold; color: #ddd; }
   .asset-status { font-size: 9px; padding: 3px 9px; border-radius: 10px; text-transform: uppercase; }
-  .st-discovering { background: #e6a80022; color: var(--yellow); border: 1px solid var(--yellow); }
-  .st-trading { background: #00a85422; color: var(--green); border: 1px solid var(--green); }
+  .st-wait { background: #e6a80022; color: var(--yellow); border: 1px solid var(--yellow); }
+  .st-entered { background: #00a85422; color: var(--green); border: 1px solid var(--green); }
   .st-resolved { background: #7a8fa822; color: var(--muted); border: 1px solid var(--muted); }
+  .st-skipped { background: #e8304a22; color: var(--red); border: 1px solid var(--red); }
   .asset-body { padding: 10px 14px; }
-  .price-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 10px; }
-  .price-box { background: #fff; border: 1px solid var(--border); border-radius: 8px; padding: 7px 9px; text-align: center; }
-  .price-box .side-label { font-size: 9px; color: var(--muted); text-transform: uppercase; }
-  .price-box .side-price { font-size: 15px; margin: 2px 0; }
-  .price-box.up .side-price { color: var(--green); }
-  .price-box.down .side-price { color: var(--red); }
-  .price-box .side-sub { font-size: 9px; color: var(--muted); }
-  .rung-card { background: #fff; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; font-size: 10px; }
-  .rung-card.status-armed { border-color: var(--cyan); }
-  .rung-card.status-filled { border-color: var(--gold); background: #b8860b0d; }
-  .rung-card.status-closed { border-color: var(--muted); background: #7a8fa80d; }
-  .rung-card.status-idle { border-color: var(--border); }
-  .rung-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
-  .rung-tag { font-size: 11.5px; font-weight: bold; }
-  .rung-badge { font-size: 8.5px; padding: 2px 7px; border-radius: 9px; text-transform: uppercase; }
-  .rb-idle { background: #7a8fa822; color: var(--muted); border: 1px solid var(--muted); }
-  .rb-armed { background: #0099cc22; color: var(--cyan); border: 1px solid var(--cyan); }
-  .rb-filled { background: #b8860b22; color: var(--gold); border: 1px solid var(--gold); }
-  .rb-closed { background: #7a8fa822; color: var(--muted); border: 1px solid var(--muted); }
-  .rung-legs { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 6px; }
-  .leg { padding: 4px 6px; border-radius: 6px; background: var(--bg3); text-align: center; font-size: 9.5px; }
-  .leg.leg-filled { background: #00a85422; color: var(--green); font-weight: bold; }
-  .leg.leg-cancelled { background: #7a8fa822; color: var(--muted); text-decoration: line-through; }
-  .rung-meta { color: var(--muted); font-size: 9px; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px; }
-  .rung-meta .hot { color: var(--red); font-weight: bold; }
-  .rebate-line { color: var(--gold); font-size: 8.5px; margin-top: 4px; text-align: right; }
+  .leg-card { background: #fff; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; font-size: 10px; }
+  .leg-card.primary { border-color: var(--cyan); }
+  .leg-card.hedge { border-color: var(--gold); background: #b8860b0d; }
+  .leg-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+  .leg-tag { font-size: 11.5px; font-weight: bold; }
+  .leg-badge { font-size: 8.5px; padding: 2px 7px; border-radius: 9px; text-transform: uppercase; }
+  .leg-row { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 6px; }
+  .px { padding: 4px 6px; border-radius: 6px; background: var(--bg3); text-align: center; font-size: 9.5px; }
+  .leg-meta { color: var(--muted); font-size: 9px; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px; }
+  .corr-line { color: var(--purple); font-size: 9px; margin: 6px 0; text-align: center; }
+  .pnl-line { text-align: right; margin-top: 4px; }
   .highconf-badge { font-size: 8.5px; padding: 2px 7px; border-radius: 9px; background: #e6a80022; color: var(--yellow); border: 1px solid var(--yellow); white-space: nowrap; }
   .asset-unrl { margin-top: 4px; font-size: 10px; text-align: right; }
   .bottom-grid { display: grid; grid-template-columns: 1fr; gap: 16px; padding: 0 20px 20px; }
@@ -126,7 +109,7 @@ app.get('/', (_, res) => {
 </head>
 <body>
   <div class="header">
-    <div class="logo">🪙 <span>BTC</span>/<span class="eth">ETH</span> RUNG BOT</div>
+    <div class="logo">🪙 <span>BTC</span>/<span class="eth">ETH</span> HEDGE BOT</div>
     <div id="mode-badge" class="mode-badge mode-dry">DEMO</div>
   </div>
 
@@ -139,21 +122,19 @@ app.get('/', (_, res) => {
   <div id="boundary-banner" style="display:none;" class="boundary-banner"></div>
 
   <div class="stats-row" id="stats-row"></div>
-  <div class="rebate-note" id="rebate-note"></div>
 
   <div class="section">
-    <div class="section-hdr">Current Window — Rungs (0.10 / 0.20 / 0.33, independent Up+Down resting limit buys)</div>
+    <div class="section-hdr">Current Trades — 15m PRIMARY + last-5m HEDGE, entered together at the 10-minute mark</div>
   </div>
-  <div class="window-meta" id="window-meta"></div>
   <div class="assets-grid" id="assets-grid"><div class="empty">Loading…</div></div>
 
   <div class="bottom-grid">
     <div>
-      <div class="section-hdr" style="padding:0 0 8px;">Rung History (resolved)</div>
+      <div class="section-hdr" style="padding:0 0 8px;">Trade History (resolved)</div>
       <div class="tbl-wrap">
         <table class="tbl">
-          <thead><tr><th>Asset</th><th>Window</th><th>Rung</th><th>Held</th><th>Winner</th><th>Sh/Cost</th><th>Payout</th><th>P&amp;L</th><th>Next size</th></tr></thead>
-          <tbody id="history-body"><tr><td colspan="9" class="empty">Loading…</td></tr></tbody>
+          <thead><tr><th>Asset</th><th>Window</th><th>Primary</th><th>Hedge</th><th>Corr.</th><th>Primary PnL</th><th>Hedge PnL</th><th>Combined</th></tr></thead>
+          <tbody id="history-body"><tr><td colspan="8" class="empty">Loading…</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -161,8 +142,8 @@ app.get('/', (_, res) => {
       <div class="section-hdr" style="padding:0 0 8px;">Recent Trades</div>
       <div class="tbl-wrap">
         <table class="tbl">
-          <thead><tr><th>Time</th><th>Asset</th><th>Window</th><th>Step</th><th>Side</th><th>Price</th><th>Shares</th><th>Cost/Fee/PnL</th><th>Rebate</th></tr></thead>
-          <tbody id="trade-body"><tr><td colspan="9" class="empty">Loading…</td></tr></tbody>
+          <thead><tr><th>Time</th><th>Asset</th><th>Window</th><th>Step</th><th>Side</th><th>Price</th><th>Shares</th><th>Cost/Fee/PnL</th></tr></thead>
+          <tbody id="trade-body"><tr><td colspan="8" class="empty">Loading…</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -176,12 +157,12 @@ app.get('/', (_, res) => {
   const socket = io();
   const $ = id => document.getElementById(id);
 
-  $('pause-btn').onclick = () => fetch('/api/btc5m/pause', { method: 'POST' }).then(() => flash('Trading paused'));
-  $('resume-btn').onclick = () => fetch('/api/btc5m/resume', { method: 'POST' }).then(() => flash('Trading resumed'));
+  $('pause-btn').onclick = () => fetch('/api/hedge/pause', { method: 'POST' }).then(() => flash('Trading paused'));
+  $('resume-btn').onclick = () => fetch('/api/hedge/resume', { method: 'POST' }).then(() => flash('Trading resumed'));
   $('live-btn').onclick = () => {
     const wantLive = !$('live-btn').classList.contains('is-live');
-    if (wantLive && !confirm('Switch to LIVE mode? This will place REAL resting limit buy orders with REAL money at 0.10/0.20/0.33 on both Up and Down for BTC and ETH every window, using fixed flat share sizes (no martingale).')) return;
-    fetch('/api/btc5m/set-mode', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ live: wantLive }) })
+    if (wantLive && !confirm('Switch to LIVE mode? This will place REAL taker buy orders with REAL money on both the 15-min market and the last-5-min hedge market for BTC and ETH, every window.')) return;
+    fetch('/api/hedge/set-mode', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ live: wantLive }) })
       .then(() => flash(wantLive ? 'Switched to LIVE' : 'Switched to DEMO'));
   };
   function flash(msg) { $('toolbar-status').textContent = msg; setTimeout(() => { $('toolbar-status').textContent = ''; }, 3000); }
@@ -189,8 +170,7 @@ app.get('/', (_, res) => {
   function fmtPx(n) { return n == null ? '—' : n.toFixed(3); }
   function fmt2(n) { return (n == null ? 0 : n).toFixed(2); }
   function pClass(n) { return n > 0 ? 'pnl-pos' : (n < 0 ? 'pnl-neg' : ''); }
-  function sgn(n) { return (n >= 0 ? '+$' : '-$') + Math.abs(n).toFixed(2); }
-  function mmss(sec) { sec = Math.max(0, Math.floor(sec)); const m = Math.floor(sec / 60); const s = sec % 60; return m + ':' + String(s).padStart(2, '0'); }
+  function sgn(n) { return n == null ? '—' : (n >= 0 ? '+$' : '-$') + Math.abs(n).toFixed(2); }
 
   function renderStats(s) {
     const stats = [
@@ -199,90 +179,89 @@ app.get('/', (_, res) => {
       ['Realized P&amp;L', sgn(s.realizedPnl), pClass(s.realizedPnl)],
       ['Unrealized P&amp;L', sgn(s.unrealizedPnl), pClass(s.unrealizedPnl)],
       ['Fees Paid', '$' + (s.feesPaid || 0).toFixed(4), ''],
-      ['Est. Maker Rebate<span class="tip">†</span>', '$' + (s.estimatedRebateUsd || 0).toFixed(4), 'pnl-pos'],
-      ['Rung Wins / Losses', s.wins + ' / ' + s.losses, ''],
+      ['Combined Wins / Losses', s.wins + ' / ' + s.losses, ''],
       ['Pending Resolution', s.pendingResolutionCount || 0, ''],
+      ['Primary Size', s.primaryShares + 'sh', ''],
     ];
     $('stats-row').innerHTML = stats.map(([label, val, cls]) =>
       '<div class="stat"><div class="stat-label">' + label + '</div><div class="stat-val ' + cls + '">' + val + '</div></div>'
     ).join('');
   }
 
-  function legHtml(leg, sideLabel) {
-    const cls = leg.filled ? 'leg-filled' : (leg.cancelled ? 'leg-cancelled' : '');
-    const detail = leg.filled ? ('FILLED @' + fmtPx(leg.fillPrice)) : (leg.cancelled ? 'cancelled' : ('resting @' + fmtPx(leg.price)));
-    return '<div class="leg ' + cls + '">' + sideLabel + ' ' + leg.shares + 'sh<br>' + detail + '</div>';
+  function legBox(leg, side) {
+    if (!leg) return '<div class="px">—</div>';
+    const up = fmtPx(leg.upAsk), down = fmtPx(leg.downAsk);
+    const hc = leg.highConfSide ? ('<span class="highconf-badge">⚡ ' + leg.highConfSide.toUpperCase() + '</span>') : '';
+    return '<div class="px">Up ' + up + ' / Down ' + down + ' ' + hc + '</div>';
   }
 
-  function rungCard(r) {
-    const badgeMap = { idle: ['rb-idle', '⏳ IDLE'], armed: ['rb-armed', '🟢 ARMED'], filled: ['rb-filled', '🔒 FILLED · ' + (r.filledSide || '').toUpperCase()], closed: ['rb-closed', '⌛ CLOSED · NO FILL'] };
-    const [badgeCls, badgeLabel] = badgeMap[r.status] || ['rb-idle', r.status];
-    const m = r.sizing;
-    const pnlLine = (r.resolved && r.pnl != null) ? ('<div class="' + pClass(r.pnl) + '" style="text-align:right;">rung pnl ' + sgn(r.pnl) + '</div>') : '';
-    const rebateLine = '<div class="rebate-line">cumulative est. rebate: $' + (r.estimatedRebate || 0).toFixed(4) + '</div>';
-    return '<div class="rung-card status-' + r.status + '">' +
-      '<div class="rung-head"><span class="rung-tag">Rung ' + r.label + '</span><span class="rung-badge ' + badgeCls + '">' + badgeLabel + '</span></div>' +
-      '<div class="rung-legs">' + legHtml(r.up, 'UP') + legHtml(r.down, 'DOWN') + '</div>' +
-      '<div class="rung-meta"><span>size ' + m.currentShares + 'sh (flat)</span><span>consec.loss ' + m.consecutiveLosses + '</span></div>' +
-      rebateLine +
-      pnlLine +
-    '</div>';
+  function positionLine(pos) {
+    if (!pos || !pos.filled) return 'not filled';
+    return pos.shares + 'sh ' + (pos.side || '').toUpperCase() + ' @' + fmtPx(pos.entryPrice) + ' ($' + fmt2(pos.cost) + (pos.fee ? ' +$' + pos.fee.toFixed(4) + ' fee' : '') + ')';
   }
 
-  function assetCard(a, cls) {
-    if (!a) return '<div class="asset-card ' + cls + '"><div class="empty">No data</div></div>';
-    const statusCls = a.status === 'trading' ? 'st-trading' : (a.status === 'resolved' ? 'st-resolved' : 'st-discovering');
-    const highConfBadge = a.highConfSide
-      ? ('<span class="highconf-badge">⚡ ' + a.highConfSide.toUpperCase() + ' @ ' + fmtPx(a.highConfPrice) + '</span>')
+  function tradeCard(t) {
+    if (!t) return '<div class="empty">No data yet</div>';
+    const stateMap = { 'entered': ['st-entered', '🟢 ENTERED'], 'resolved': ['st-resolved', '⌛ RESOLVED'], 'skipped': ['st-skipped', '⛔ SKIPPED'] };
+    const [stCls, stLabel] = stateMap[t.state] || ['st-wait', t.state.replace(/-/g, ' ').toUpperCase()];
+    const corrLine = t.correlationFactor != null
+      ? '<div class="corr-line">divergence ' + t.divergence.toFixed(4) + ' · correlation ' + t.correlationFactor.toFixed(2) + '</div>'
       : '';
-    const priceRow =
-      '<div class="price-row">' +
-        '<div class="price-box up"><div class="side-label">Up</div><div class="side-price">' + fmtPx(a.upAsk) + '</div><div class="side-sub">bid ' + fmtPx(a.upBid) + '</div></div>' +
-        '<div class="price-box down"><div class="side-label">Down</div><div class="side-price">' + fmtPx(a.downAsk) + '</div><div class="side-sub">bid ' + fmtPx(a.downBid) + '</div></div>' +
-      '</div>';
-    const rungsHtml = (a.rungs || []).map(rungCard).join('');
-    const unrl = '<div class="asset-unrl ' + pClass(a.unrealizedPnl) + '">Unrealized: ' + sgn(a.unrealizedPnl) + '</div>';
+    const primaryPnlLine = (t.primary && t.primary.pnl != null) ? ('<div class="' + pClass(t.primary.pnl) + ' pnl-line">primary pnl ' + sgn(t.primary.pnl) + '</div>') : '';
+    const hedgePnlLine = (t.hedge && t.hedge.pnl != null) ? ('<div class="' + pClass(t.hedge.pnl) + ' pnl-line">hedge pnl ' + sgn(t.hedge.pnl) + '</div>') : '';
+    const combinedLine = t.combinedPnl != null ? ('<div class="' + pClass(t.combinedPnl) + ' pnl-line" style="font-size:12px;">combined ' + sgn(t.combinedPnl) + '</div>') : '';
+    return '<div class="leg-card primary">' +
+        '<div class="leg-head"><span class="leg-tag">15m PRIMARY — ' + (t.fifteen ? t.fifteen.slug.replace(/^(btc|eth)-updown-15m-/, '') : '…') + '</span><span class="leg-badge ' + stCls + '">' + stLabel + '</span></div>' +
+        legBox(t.fifteen) +
+        '<div class="leg-meta"><span>' + positionLine(t.primary) + '</span></div>' +
+        primaryPnlLine +
+      '</div>' +
+      '<div class="leg-card hedge">' +
+        '<div class="leg-head"><span class="leg-tag">5m HEDGE — ' + (t.five ? t.five.slug.replace(/^(btc|eth)-updown-5m-/, '') : 'awaiting 10-min mark') + '</span></div>' +
+        legBox(t.five) +
+        '<div class="leg-meta"><span>' + positionLine(t.hedge) + '</span></div>' +
+        hedgePnlLine +
+      '</div>' +
+      corrLine + combinedLine +
+      '<div class="asset-unrl ' + pClass(t.unrealizedPnl) + '">Unrealized: ' + sgn(t.unrealizedPnl) + '</div>';
+  }
+
+  function assetCard(t, label, cls) {
     return '<div class="asset-card ' + cls + '">' +
-      '<div class="asset-hdr"><div class="asset-title">' + a.label + '</div><div style="display:flex;align-items:center;gap:6px;">' + highConfBadge + '<div class="asset-status ' + statusCls + '">' + a.status + '</div></div></div>' +
-      '<div class="asset-body">' + priceRow + rungsHtml + unrl + '</div>' +
+      '<div class="asset-hdr"><div class="asset-title">' + label + '</div></div>' +
+      '<div class="asset-body">' + tradeCard(t) + '</div>' +
     '</div>';
   }
 
-  function renderWindow(s) {
-    const w = s.window;
-    if (!w) { $('assets-grid').innerHTML = '<div class="empty">No window yet…</div>'; $('window-meta').textContent = ''; return; }
-    const remaining = s.windowSeconds - w.elapsedSec;
-    $('window-meta').textContent = 'Window t=' + w.windowTs + ' · elapsed ' + mmss(w.elapsedSec) + ' / ' + mmss(s.windowSeconds) + ' · ' + mmss(remaining) + ' left';
-    $('assets-grid').innerHTML = assetCard(w.assets.btc, '') + assetCard(w.assets.eth, 'eth');
+  function renderCurrent(s) {
+    $('assets-grid').innerHTML = assetCard(s.current.btc, 'BTC', '') + assetCard(s.current.eth, 'ETH', 'eth');
   }
 
   function renderHistory(list) {
-    if (!list || !list.length) { $('history-body').innerHTML = '<tr><td colspan="9" class="empty">No resolved rungs yet</td></tr>'; return; }
+    if (!list || !list.length) { $('history-body').innerHTML = '<tr><td colspan="8" class="empty">No resolved trades yet</td></tr>'; return; }
     $('history-body').innerHTML = list.map(h =>
       '<tr><td>' + (h.label || h.asset || '').toUpperCase() + '</td>' +
-      '<td>' + h.slug.replace(/^(btc|eth)-updown-5m-/, '') + '</td>' +
-      '<td>' + h.rung + '</td>' +
-      '<td>' + h.boughtSide + '</td>' +
-      '<td>' + h.winningSide.toUpperCase() + '</td>' +
-      '<td>' + h.shares.toFixed(2) + ' / $' + h.cost.toFixed(2) + '</td>' +
-      '<td>$' + h.payout.toFixed(2) + '</td>' +
-      '<td class="' + pClass(h.pnl) + '">' + sgn(h.pnl) + '</td>' +
-      '<td>' + h.currentSharesAfter + 'sh (L' + h.consecutiveLossesAfter + ')</td></tr>'
+      '<td>' + h.fifteenSlug.replace(/^(btc|eth)-updown-15m-/, '') + '</td>' +
+      '<td>' + (h.primarySide || '').toUpperCase() + ' ' + h.primaryShares + 'sh (winner ' + (h.primaryWinner || '?').toUpperCase() + ')</td>' +
+      '<td>' + (h.hedgeSide || '').toUpperCase() + ' ' + h.hedgeShares + 'sh (winner ' + (h.hedgeWinner || '?').toUpperCase() + ')</td>' +
+      '<td>' + (h.correlationFactor != null ? h.correlationFactor.toFixed(2) : '—') + '</td>' +
+      '<td class="' + pClass(h.primaryPnl) + '">' + sgn(h.primaryPnl) + '</td>' +
+      '<td class="' + pClass(h.hedgePnl) + '">' + sgn(h.hedgePnl) + '</td>' +
+      '<td class="' + pClass(h.combinedPnl) + '">' + sgn(h.combinedPnl) + '</td></tr>'
     ).join('');
   }
 
   function renderTrades(list) {
-    if (!list || !list.length) { $('trade-body').innerHTML = '<tr><td colspan="9" class="empty">No trades yet</td></tr>'; return; }
+    if (!list || !list.length) { $('trade-body').innerHTML = '<tr><td colspan="8" class="empty">No trades yet</td></tr>'; return; }
     $('trade-body').innerHTML = list.map(t =>
       '<tr><td>' + t.time + '</td>' +
       '<td>' + (t.asset || '').toUpperCase() + '</td>' +
-      '<td>' + (t.slug || '').replace(/^(btc|eth)-updown-5m-/, '') + '</td>' +
+      '<td>' + (t.slug || '').replace(/^(btc|eth)-updown-(15m|5m)-/, '') + '</td>' +
       '<td>' + (t.step || '') + '</td>' +
       '<td>' + (t.side || '').toUpperCase() + '</td>' +
       '<td>' + (t.price != null ? t.price.toFixed(3) : '—') + '</td>' +
       '<td>' + (t.shares != null ? t.shares.toFixed(2) : '—') + '</td>' +
-      '<td>' + (t.cost != null ? '$' + t.cost.toFixed(2) + (t.fee ? ' +$' + t.fee.toFixed(4) : '') : (t.pnl != null ? sgn(t.pnl) : '—')) + '</td>' +
-      '<td>' + (t.rebate != null ? '$' + t.rebate.toFixed(4) : '—') + '</td></tr>'
+      '<td>' + (t.cost != null ? '$' + t.cost.toFixed(2) + (t.fee ? ' +$' + t.fee.toFixed(4) : '') : (t.pnl != null ? sgn(t.pnl) : '—')) + '</td></tr>'
     ).join('');
   }
 
@@ -291,19 +270,18 @@ app.get('/', (_, res) => {
     $('log-panel').innerHTML = list.map(l => '<div>' + l.replace(/</g, '&lt;') + '</div>').join('');
   }
 
-  socket.on('btc5mState', (s) => {
+  socket.on('hedgeState', (s) => {
     $('mode-badge').className = 'mode-badge ' + (s.dryRun ? 'mode-dry' : 'mode-live');
     $('mode-badge').textContent = s.dryRun ? 'DEMO' : 'LIVE';
     $('live-btn').classList.toggle('is-live', !s.dryRun);
     $('live-btn').textContent = s.dryRun ? '🔴 Switch to LIVE' : '⚠️ Switch to DEMO';
 
     const banner = $('boundary-banner');
-    if (s.waitingForBoundary) { banner.style.display = 'block'; banner.textContent = '⏳ Started mid-window — waiting for the next fresh 5-minute boundary before trading begins (no mid-window entries).'; }
+    if (s.waitingForBoundary) { banner.style.display = 'block'; banner.textContent = '⏳ Started mid-window — waiting for the next fresh 15-minute boundary before trading begins (no mid-window entries).'; }
     else banner.style.display = 'none';
 
     renderStats(s);
-    $('rebate-note').textContent = s.rebateNote ? ('† ' + s.rebateNote) : '';
-    renderWindow(s);
+    renderCurrent(s);
     renderHistory(s.history);
     renderTrades(s.trades);
     renderLogs(s.logs);
@@ -320,11 +298,11 @@ const slog = (line) => { console.log(line); io.emit('log', line); };
 const PK = process.env.PRIVATE_KEY;
 if (!PK) { console.error('❌ PRIVATE_KEY env var missing'); process.exit(1); }
 
-console.log('🪙 BTC + ETH 5-Minute Rung Bot (0.10/0.20 @ 100sh, 0.33 @ 200sh, both sides, flat sizing — no martingale)');
+console.log('🪙 BTC + ETH 15m/5m Correlated Hedge Bot — combined primary + hedge entry at the 10-minute mark, live-divergence sizing');
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`🌐 Dashboard: http://0.0.0.0:${PORT}`);
-  rungBot.init(PK, emit, slog).catch(e => {
+  hedgeBot.init(PK, emit, slog).catch(e => {
     console.error('❌ Bot init failed:', e.message);
     process.exit(1);
   });
