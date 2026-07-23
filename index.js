@@ -141,7 +141,7 @@ app.get('/', (_, res) => {
   <div class="assets-grid" id="assets-grid"><div class="empty">Loading…</div></div>
 
   <div class="section">
-    <div class="section-hdr">Window Entry Status (either leg &gt; 0.70 → buy the cheaper leg · no combined-price requirement · first side to fire locks, other side stays open)</div>
+    <div class="section-hdr">Window Entry Status (either leg &gt; 0.70 → buy the cheaper leg · ONE entry per window total, no entries after t+4:30)</div>
   </div>
   <div class="entries-wrap" id="entries-wrap"><div class="empty">Loading…</div></div>
 
@@ -178,7 +178,7 @@ app.get('/', (_, res) => {
   $('resume-btn').onclick = () => fetch('/api/btc5m/resume', { method: 'POST' }).then(() => flash('Trading resumed'));
   $('live-btn').onclick = () => {
     const wantLive = !$('live-btn').classList.contains('is-live');
-    if (wantLive && !confirm('Switch to LIVE mode? This will place REAL crossing-the-spread buys with REAL money whenever either leg of a BTC+ETH pair prices above 0.70, buying the cheaper leg (50 shares per pair per window — first side to fire locks, the other side stays open for one more entry). No combined-price requirement.')) return;
+    if (wantLive && !confirm('Switch to LIVE mode? This will place REAL crossing-the-spread buys with REAL money whenever either leg of a BTC+ETH pair prices above 0.70, buying the cheaper leg — ONE entry per window total (no entries after t+4:30). Trade size uses MARTINGALE sizing: it doubles after each loss (up to 5x in a row) and resets on a win.')) return;
     fetch('/api/btc5m/set-mode', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ live: wantLive }) })
       .then(() => flash(wantLive ? 'Switched to LIVE' : 'Switched to DEMO'));
   };
@@ -198,9 +198,9 @@ app.get('/', (_, res) => {
       ['Unrealized P&amp;L', sgn(s.unrealizedPnl), pClass(s.unrealizedPnl)],
       ['Fees Paid', '$' + (s.feesPaid || 0).toFixed(4), ''],
       ['Wins / Losses', s.wins + ' / ' + s.losses, ''],
+      ['Martingale Level', s.martingaleLevel + ' / ' + s.maxMartingaleLevel, s.martingaleLevel > 0 ? 'pnl-neg' : ''],
+      ['Next Trade Size', (s.currentTradeShares || 0) + 'sh', ''],
       ['Pending Resolution', s.pendingResolutionCount || 0, ''],
-      ['Martingale Step', (s.martingaleStep || 0) + ' / ' + (s.maxMartingaleStep || 5), ''],
-      ['Next Trigger Size', (s.nextTriggerShares != null ? s.nextTriggerShares : s.triggerShares) + ' sh', ''],
     ];
     $('stats-row').innerHTML = stats.map(([label, val, cls]) =>
       '<div class="stat"><div class="stat-label">' + label + '</div><div class="stat-val ' + cls + '">' + val + '</div></div>'
@@ -233,28 +233,31 @@ app.get('/', (_, res) => {
     const w = s.window;
     if (!w) { $('assets-grid').innerHTML = '<div class="empty">No window yet…</div>'; $('window-meta').textContent = ''; $('entries-wrap').innerHTML = ''; return; }
     const remaining = s.windowSeconds - w.elapsedSec;
-    const cutoffSec = w.entryCutoffSec || 270;
-    const cutoffNote = w.elapsedSec >= cutoffSec ? ' · ⏱️ past entry cutoff (' + mmss(cutoffSec) + ') — no new entries this window' : ' · entries close at ' + mmss(cutoffSec);
-    $('window-meta').textContent = 'Window t=' + w.windowTs + ' · elapsed ' + mmss(w.elapsedSec) + ' / ' + mmss(s.windowSeconds) + ' · ' + mmss(remaining) + ' left' + cutoffNote;
+    $('window-meta').textContent = 'Window t=' + w.windowTs + ' · elapsed ' + mmss(w.elapsedSec) + ' / ' + mmss(s.windowSeconds) + ' · ' + mmss(remaining) + ' left';
     $('assets-grid').innerHTML = assetCard(w.assets.btc, '') + assetCard(w.assets.eth, 'eth');
 
     const entries = w.entries || { up: {}, down: {} };
-    const windowFired = !!(w.trigger && w.trigger.done); // whole window locks after ONE trade, total
+    const cutoffPassed = w.elapsedSec >= (s.entryCutoffSec || 270);
     const entryCard = (pairName) => {
       const e = entries[pairName] || {};
-      const isThisPair = !!e.done;
-      const cardCls = windowFired ? 'locked' : 'armed';
-      let badgeCls, badgeLabel, detailHtml;
-      if (isThisPair && e.boughtAsset) {
-        badgeCls = 'locked-bought'; badgeLabel = '🔒 LOCKED · BOUGHT';
-        detailHtml = 'Bought <span class="bought">' + e.boughtAsset.toUpperCase() + '-' + pairName.toUpperCase() + '</span> ' + (e.shares != null ? e.shares + 'sh ' : '') + 'at ' + entryTime(e.ts) +
-          ' — one leg priced above 0.70 (sum was ' + (e.sum != null ? e.sum.toFixed(2) : '?') + ' at the time, for context). Window\'s one trade for this cycle — locked.';
-      } else if (windowFired) {
-        badgeCls = 'locked'; badgeLabel = '🔒 LOCKED · NOT USED';
-        detailHtml = 'The other pair fired first — only ONE trade total fires per window, so this pair never got a chance this cycle.';
+      const isLocked = !!e.done;
+      let cardCls, badgeCls, badgeLabel, detailHtml;
+      if (isLocked && e.boughtAsset) {
+        cardCls = 'locked'; badgeCls = 'locked-bought'; badgeLabel = '🔒 LOCKED · BOUGHT';
+        detailHtml = 'Bought <span class="bought">' + e.boughtAsset.toUpperCase() + '-' + pairName.toUpperCase() + '</span> at ' + entryTime(e.ts) +
+          ' — this was the window\'s one entry (sum was ' + (e.sum != null ? e.sum.toFixed(2) : '?') + ' at the time, for context)';
+      } else if (isLocked && e.skipReason === 'window-limit') {
+        cardCls = 'locked'; badgeCls = 'locked'; badgeLabel = '🔒 LOCKED · WINDOW LIMIT';
+        detailHtml = 'The window\'s one entry already went to the other pair — only one trade fires per window.';
+      } else if (isLocked && e.skipReason === 'paused') {
+        cardCls = 'locked'; badgeCls = 'locked'; badgeLabel = '🔒 LOCKED · SKIPPED (PAUSED)';
+        detailHtml = 'Condition hit but trading was paused at the time — that used up the window\'s one entry anyway.';
+      } else if (cutoffPassed) {
+        cardCls = 'locked'; badgeCls = 'locked'; badgeLabel = '🔒 CUTOFF PASSED';
+        detailHtml = 'Past t+4:30 — no new entries can fire for the rest of this window.';
       } else {
-        badgeCls = 'armed'; badgeLabel = '🟢 ARMED';
-        detailHtml = 'Watching — will buy the cheaper leg the instant either leg prices above 0.70 (before the entry cutoff).';
+        cardCls = 'armed'; badgeCls = 'armed'; badgeLabel = '🟢 ARMED';
+        detailHtml = 'Watching — will buy the cheaper leg the instant either leg prices above 0.70 (whichever pair gets there first takes the window\'s one entry).';
       }
       return '<div class="entry-card ' + cardCls + '">' +
         '<div class="entry-head"><span class="entry-tag">' + pairName.toUpperCase() + '-pair</span><span class="entry-badge ' + badgeCls + '">' + badgeLabel + '</span></div>' +
