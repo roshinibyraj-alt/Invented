@@ -2,70 +2,85 @@
 
 /**
  * ═══════════════════════════════════════════════════════════════
- *  BTC + ETH 5-MINUTE RUNG ENGINE (FLAT SIZING)
+ *  BTC + ETH 15-MIN / 5-MIN CORRELATED HEDGE ENGINE
  * ═══════════════════════════════════════════════════════════════
  *
- *  Trades Polymarket's BTC and ETH "Up or Down" 5-minute markets.
- *  For EACH asset independently, the instant a window's market goes
- *  live, the engine places SIX resting limit BUY orders (not
- *  aggressive/crossing-the-spread — real resting limit orders):
+ *  Replaces the old rung/martingale strategy entirely. For EACH asset
+ *  independently, every 15-minute Up/Down window gets ONE combined
+ *  trade: a primary leg on the 15-min market, hedged by an offsetting
+ *  leg on the LAST 5-minute segment inside that same 15-min window
+ *  (minutes 10-15 — the only 5-min window that closes at the exact
+ *  same instant as the 15-min window, so it's the most correlated
+ *  hedge available). Both legs are entered TOGETHER, at the moment
+ *  the last 5-min segment opens (10 minutes into the 15-min window).
  *
- *      Rung 0.10:  buy Up @ 0.10   +   buy Down @ 0.10   (100 shares)
- *      Rung 0.20:  buy Up @ 0.20   +   buy Down @ 0.20   (100 shares)
- *      Rung 0.33:  buy Up @ 0.33   +   buy Down @ 0.33   (200 shares)
+ *  THE 4 STEPS, EVERY TIME A COMBINED TRADE IS ENTERED:
  *
- *  Each rung is fully independent of the other rungs, and BTC/ETH
- *  are independent of each other — 6 separate tracks:
- *  BTC-0.10, BTC-0.20, BTC-0.33, ETH-0.10, ETH-0.20, ETH-0.33.
+ *  1. READ BEST PRICES — pull live best ask for Up and Down on both
+ *     the 15-min market and the last 5-min market.
  *
- *  FILL / CANCEL: the instant one side of a rung fills, the engine
- *  cancels the still-resting order on the OTHER side of that SAME
- *  rung (e.g. BTC-Up-0.10 fills -> cancel BTC-Down-0.10). The filled
- *  position is held to settlement — no take-profit, no stop-loss.
- *  If neither side of a rung fills before the window closes, both
- *  orders are cancelled and no win/loss is recorded for that rung
- *  that window.
+ *  2. CHECK DIVERGENCE / CORRELATION — compare the implied probability
+ *     of the hedge side between the two markets:
+ *       divergence = |15m_hedge_side_ask - 5m_hedge_side_ask|
+ *       correlationFactor = clamp(1 - divergence, CORR_FLOOR, CORR_CEIL)
+ *     Small divergence (markets agree) -> correlationFactor near 1
+ *     (full hedge). Large divergence (markets disagree) -> smaller
+ *     hedge, because the two windows are behaving less like the same
+ *     bet right now.
  *
- *  SIZING: flat — no martingale. Each rung always trades its own fixed
- *  baseShares every window, regardless of win/loss streaks. consecutiveLosses
- *  is still tracked per rung purely as an informational streak counter for
- *  logs/dashboard; it no longer affects share size.
+ *  3. SIZE OFF LIVE ASK — primary leg is a fixed base size. Hedge leg
+ *     is sized to commit the same dollar amount that's actually at
+ *     risk on the primary leg:
+ *       amountAtRisk    = primaryShares * primaryEntryPrice   (= cost
+ *                          basis = what you lose if primary resolves
+ *                          to zero)
+ *       rawHedgeShares  = amountAtRisk / hedgeSideAsk
+ *       hedgeShares     = rawHedgeShares * correlationFactor
+ *     This is a dollar-matched hedge, not a payout-matched one — it
+ *     commits comparable capital to the offsetting bet, scaled down
+ *     when the live data says the two markets are diverging.
  *
- *  RESOLUTION: three tiers, fastest available wins:
- *    1. Official — Polymarket Gamma's `closed` + `outcomePrices` fields.
- *    2. High-confidence live price — if either side's live price crosses
- *       HIGH_CONF_PRICE (default 0.90), that side is treated as the
- *       de-facto winner immediately, without waiting on official
- *       confirmation. Checked continuously while trading and on every
- *       resolution poll afterward, so this usually resolves within
- *       seconds of the window closing (these 5-min crypto markets
- *       almost always trade to a near-certain extreme well before close).
- *    3. Live-price fallback — if neither of the above has resolved the
- *       window within RESOLUTION_FALLBACK_MS after close, use whichever
- *       side has the higher live price.
+ *  4. ENTER BOTH LEGS TOGETHER — primary buy on the 15-min market and
+ *     hedge buy on the 5-min market are placed as one combined trade,
+ *     at the same tick.
  *
- *  BTC and ETH windows for the same 5-minute slot resolve
- *  INDEPENDENTLY of each other.
+ *  WHY THE LAST 5-MIN SEGMENT: 15-min windows are aligned to 900s
+ *  epoch boundaries; 5-min windows to 300s boundaries. Since 900 is
+ *  divisible by 300, the 5-min window starting 600s into a 15-min
+ *  window closes at EXACTLY the same instant as the 15-min window.
+ *  Earlier segments (0-5, 5-10) don't share that closing instant and
+ *  aren't used.
  *
- *  STARTUP: if the bot is started mid-window, it will NOT jump into
- *  that window partway through — it waits for the next fresh
- *  5-minute boundary before placing any orders.
+ *  IMPORTANT CAVEAT: the two markets reference different opening
+ *  prices (15-min window open vs. last-5-min segment open), so even
+ *  though they close simultaneously, they are NOT the same bet — this
+ *  is a correlated hedge, not a perfect one. correlationFactor is the
+ *  live proxy for how tightly they're tracking right now.
  *
- *  FEES: resting limit orders are treated as maker fills — $0 fee by
- *  default (RUNG_MAKER_FEE_RATE env var to override).
+ *  ENTRY STYLE: both legs are bought at the current best ask (taker
+ *  fills, not resting maker orders) so both legs can be guaranteed to
+ *  enter together at the same instant. Taker fees apply per
+ *  HEDGE_TAKER_FEE_RATE (default 0; set to Polymarket's published
+ *  crypto-category taker rate if you want realistic fee modeling).
  *
- *  MAKER REBATES (estimated only): Polymarket's Maker Rebates Program pays
- *  makers a share of taker fees, settled daily on-chain in USDC — it is
- *  NOT reflected in the CLOB position P&L and can't be fetched via public
- *  API, so the dashboard shows an UPPER-BOUND estimate per fill using the
- *  Crypto category's published formula (fee_equivalent = shares * 0.07 *
- *  price * (1-price), rebate = fee_equivalent * 20%), assuming your order
- *  was the only maker liquidity taken. Real payouts are likely lower.
+ *  RESOLUTION: each leg resolves independently, three tiers, fastest
+ *  available wins:
+ *    1. Official — Polymarket Gamma's `closed` + `outcomePrices`.
+ *    2. High-confidence live price — either side crossing HIGH_CONF_PRICE
+ *       (default 0.90) is treated as the de-facto winner immediately.
+ *    3. Live-price fallback — if neither resolves within
+ *       RESOLUTION_FALLBACK_MS after close, use whichever side has the
+ *       higher live price.
+ *  Combined trade P&L = primary leg P&L + hedge leg P&L, recorded once
+ *  BOTH legs have resolved.
+ *
+ *  STARTUP: if started mid-window, waits for the next fresh 15-minute
+ *  boundary before opening any trade — never joins a window partway
+ *  through.
  *
  *  TRADER INTERFACE:
  *    trader.placeLimitBuy(tokenId, price, size) -> { id, filled, avgPrice, filledShares }
  *    trader.getOrder(orderId)                   -> { filled, avgPrice, filledShares }
- *    trader.cancelOrder(orderId)                -> (optional, needed for LIVE cancels)
  * ═══════════════════════════════════════════════════════════════
  */
 
@@ -78,79 +93,52 @@ const TICK_MS             = 500;
 const PRICE_REFRESH_MS    = 1000;
 const DISCOVERY_RETRY_MS  = 2000;
 const RESOLUTION_POLL_MS  = 3000;
-const RESOLUTION_FALLBACK_MS = Number(process.env.BTC5M_RESOLUTION_FALLBACK_MS || 60000);
-const WINDOW_SECONDS      = 300; // 5 minutes
+const RESOLUTION_FALLBACK_MS = Number(process.env.HEDGE_RESOLUTION_FALLBACK_MS || 60000);
+
+const FIFTEEN_SECONDS = 900; // 15-minute window duration
+const FIVE_SECONDS    = 300; // 5-minute window duration
+// How far into the 15-min window the hedge leg's 5-min segment opens
+// (and where the combined trade is entered). 600s = the 10:00 mark,
+// i.e. the LAST 5-minute segment of the 15-minute window.
+const HEDGE_ENTRY_OFFSET_SECONDS = 600;
 
 const ASSETS = [
-  { key: 'btc', label: 'BTC', slugPrefix: 'btc-updown-5m-' },
-  { key: 'eth', label: 'ETH', slugPrefix: 'eth-updown-5m-' },
+  { key: 'btc', label: 'BTC', slugPrefix15: 'btc-updown-15m-', slugPrefix5: 'btc-updown-5m-' },
+  { key: 'eth', label: 'ETH', slugPrefix15: 'eth-updown-15m-', slugPrefix5: 'eth-updown-5m-' },
 ];
 
-// The three independent rungs. Flat sizing — no martingale/doubling.
-// Each rung trades a fixed share size every window, win or lose.
-const RUNGS = [
-  { key: 'r10', price: 0.10, label: '0.10', baseShares: Number(process.env.RUNG_R10_SHARES || process.env.RUNG_BASE_SHARES || 100) },
-  { key: 'r20', price: 0.20, label: '0.20', baseShares: Number(process.env.RUNG_R20_SHARES || process.env.RUNG_BASE_SHARES || 100) },
-  { key: 'r33', price: 0.33, label: '0.33', baseShares: Number(process.env.RUNG_R33_SHARES || 200) },
-];
+const PRIMARY_SHARES = Number(process.env.HEDGE_PRIMARY_SHARES || 100);
+// Correlation-factor bounds (Step 2). Floor keeps the hedge from
+// vanishing entirely when the two markets disagree a lot; ceiling caps
+// it at a full 1:1 dollar-matched hedge when they fully agree.
+const CORR_FLOOR = Number(process.env.HEDGE_CORR_FLOOR || 0.3);
+const CORR_CEIL  = Number(process.env.HEDGE_CORR_CEIL || 1.0);
 
-// Kept for any external references (e.g. dry-run capital sizing) — no longer
-// used to size individual rungs, since each rung now has its own baseShares.
-const BASE_SHARES = Number(process.env.RUNG_BASE_SHARES || 100);
-
-let DRY_RUN = (process.env.BTC5M_DRY_RUN || process.env.SPORTS_DRY_RUN || process.env.DRY_RUN || 'true').toLowerCase() === 'true';
-const STARTING_CAPITAL = Number(process.env.BTC5M_CAPITAL || 2000);
-// Resting limit orders are maker fills by default -> $0 fee unless overridden.
-const MAKER_FEE_RATE = Number(process.env.RUNG_MAKER_FEE_RATE || 0);
+let DRY_RUN = (process.env.HEDGE_DRY_RUN || process.env.SPORTS_DRY_RUN || process.env.DRY_RUN || 'true').toLowerCase() === 'true';
+const STARTING_CAPITAL = Number(process.env.HEDGE_CAPITAL || 2000);
+// Both legs are taker fills (bought at the live ask) — set this to
+// Polymarket's published crypto-category taker rate if you want
+// realistic fee modeling; 0 by default for clean demo P&L.
+const TAKER_FEE_RATE = Number(process.env.HEDGE_TAKER_FEE_RATE || 0);
 const MAX_PENDING_RESOLUTIONS = 40;
 
-// Polymarket Maker Rebates Program (docs.polymarket.com/market-makers/maker-rebates) —
-// BTC/ETH 5-minute markets fall under the "Crypto" category:
-//   taker fee rate = 0.07, maker fee rate = 0 (makers pay nothing — matches MAKER_FEE_RATE default),
-//   maker rebate share = 20% of the crypto category's taker-fee pool, distributed "fee-curve weighted":
-//     fee_equivalent = shares * feeRate * price * (1 - price)
-//     your_rebate    = (your_fee_equivalent / total_fee_equivalent_in_that_market) * rebate_pool
-// We can't see the market-wide pool or other makers' volume via public endpoints, so we track
-// an UPPER-BOUND estimate: fee_equivalent * rebate_share, i.e. "what you'd earn if your resting
-// liquidity were the only maker liquidity taken in that market." Real payouts (paid daily in USDC
-// on-chain) will be <= this estimate, often well below it in markets with competing makers.
-const REBATE_FEE_RATE = Number(process.env.RUNG_REBATE_FEE_RATE || 0.07);   // Crypto category taker-fee rate
-const REBATE_SHARE     = Number(process.env.RUNG_REBATE_SHARE || 0.20);     // Crypto category maker-rebate share
 // If price crosses this threshold (or its complement) in the live book, treat that side as the
-// de-facto winner immediately instead of waiting for RESOLUTION_FALLBACK_MS — these 5-min crypto
-// up/down markets almost always trade to a near-certain extreme well before official close.
+// de-facto winner immediately instead of waiting for RESOLUTION_FALLBACK_MS.
 const HIGH_CONF_PRICE = Number(process.env.RESOLUTION_HIGH_CONF_PRICE || 0.90);
 
 function round2(n) { return Math.round(n * 100) / 100; }
 function round4(n) { return Math.round(n * 10000) / 10000; }
+function clamp(n, lo, hi) { return Math.max(lo, Math.min(hi, n)); }
 function estimateFee(shares, price) {
-  if (MAKER_FEE_RATE <= 0) return 0;
-  return round2(shares * MAKER_FEE_RATE * price * (1 - price));
-}
-// Upper-bound estimate of the maker rebate earned on a single fill. See note above — real
-// on-chain payout depends on total maker volume in that market and may be lower.
-function estimateRebate(shares, price) {
-  const feeEquivalent = shares * REBATE_FEE_RATE * price * (1 - price);
-  return round4(feeEquivalent * REBATE_SHARE);
+  if (TAKER_FEE_RATE <= 0) return 0;
+  return round2(shares * TAKER_FEE_RATE * price * (1 - price));
 }
 
 let emitFn = () => {};
 let slog = () => {};
 let trader = null;
 let warnedNoLimitMethod = false;
-let warnedNoCancelMethod = false;
 let tradeSeq = 0;
-
-function freshRungState() {
-  const s = {};
-  for (const r of RUNGS) s[r.key] = { consecutiveLosses: 0, currentShares: r.baseShares };
-  return s;
-}
-function freshRebateState() {
-  const s = {};
-  for (const r of RUNGS) s[r.key] = 0;
-  return s;
-}
 
 const engine = {
   tradingEnabled: true,
@@ -159,9 +147,9 @@ const engine = {
   realizedPnl: 0,
   feesPaid: 0,
   wins: 0, losses: 0,
-  cycle: null,
-  pending: [],
-  history: [],   // resolved rung outcomes, most recent first
+  current: { btc: null, eth: null }, // active HedgeTrade per asset, not yet closed out
+  pending: [],                        // trades whose windows have closed, awaiting leg resolution
+  history: [],                        // resolved combined trades, most recent first
   logs: [],
   trades: [],
   equityCurve: [{ t: Date.now(), equity: STARTING_CAPITAL }],
@@ -169,9 +157,6 @@ const engine = {
   lastResolutionPoll: 0,
   waitingForBoundary: true,
   boundaryWindowTs: null,
-  rungState: { btc: freshRungState(), eth: freshRungState() }, // flat sizing state, persists across windows
-  estimatedRebateUsd: 0,   // upper-bound estimate, accrues on every maker fill (see estimateRebate)
-  rebateByRung: { btc: freshRebateState(), eth: freshRebateState() },
 };
 
 // ─────────────────────────────────────────
@@ -181,7 +166,7 @@ function log(msg) {
   const line = `[${new Date().toISOString().slice(11, 19)}] ${msg}`;
   engine.logs.push(line);
   if (engine.logs.length > 500) engine.logs.shift();
-  slog(`[rungbot] ${line}`);
+  slog(`[hedgebot] ${line}`);
 }
 function registerTrade(t) {
   const trade = { seq: ++tradeSeq, time: new Date().toISOString().slice(11, 19), ...t };
@@ -197,7 +182,7 @@ function recordEquity() {
 //  HTTP / order helpers
 // ─────────────────────────────────────────
 async function getJSON(url) {
-  const res = await fetch(url, { headers: { 'User-Agent': 'polymarket-rungbot/1.0' } });
+  const res = await fetch(url, { headers: { 'User-Agent': 'polymarket-hedgebot/1.0' } });
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${url}`);
   return res.json();
 }
@@ -211,31 +196,19 @@ function traderHasLimitMethod() {
   const ok = trader && typeof trader.placeLimitBuy === 'function';
   if (!ok && !warnedNoLimitMethod) {
     warnedNoLimitMethod = true;
-    slog('[rungbot] ❌ LIVE trading needs trader.placeLimitBuy (and ideally getOrder/cancelOrder) on polymarket-trader.js — LIVE order placement will be skipped until added. DRY_RUN is unaffected.');
+    slog('[hedgebot] ❌ LIVE trading needs trader.placeLimitBuy on polymarket-trader.js — LIVE order placement will be skipped until added. DRY_RUN is unaffected.');
   }
   return ok;
 }
-async function placeRestingLimitBuy(tokenId, price, shares) {
+// Buys at the current live ask (marketable / taker) so both legs of a combined
+// trade fill together at the same instant, instead of resting and waiting.
+async function placeTakerBuy(tokenId, price, shares) {
   if (!DRY_RUN) {
     if (!traderHasLimitMethod()) return null;
     try { return await trader.placeLimitBuy(tokenId, price, shares); }
     catch (e) { log(`❌ placeLimitBuy failed: ${describeOrderError(e)}`); return null; }
   }
-  // DRY_RUN: simulate a resting order — it does NOT fill immediately here;
-  // checkRungFills() decides fills tick-by-tick once the live ask reaches price.
-  return { id: `dry-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, filled: false, avgPrice: price, filledShares: shares };
-}
-async function cancelResting(orderId) {
-  if (!orderId) return;
-  if (!DRY_RUN) {
-    if (trader && typeof trader.cancelOrder === 'function') {
-      try { await trader.cancelOrder(orderId); }
-      catch (e) { log(`⚠️  cancelOrder(${orderId}) failed: ${describeOrderError(e)}`); }
-    } else if (!warnedNoCancelMethod) {
-      warnedNoCancelMethod = true;
-      slog('[rungbot] ❌ trader.cancelOrder is not implemented on polymarket-trader.js — resting opposite-side limit orders will NOT be cancelled on-exchange in LIVE mode (they are marked cancelled internally and ignored, but may still be live on the book). Please add trader.cancelOrder(orderId).');
-    }
-  }
+  return { id: `dry-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, filled: true, avgPrice: price, filledShares: shares };
 }
 
 function parseMarketTokens(mk) {
@@ -247,63 +220,27 @@ function parseMarketTokens(mk) {
 }
 
 // ─────────────────────────────────────────
-//  Window lifecycle
+//  Leg — one binary market (either the 15-min market or the last
+//  5-min segment inside it). Both use identical discovery / price /
+//  resolution logic, just different slugs and window durations.
 // ─────────────────────────────────────────
-function currentWindowTs(nowSec) { return Math.floor(nowSec / WINDOW_SECONDS) * WINDOW_SECONDS; }
-
-function freshRungLeg(price) {
-  return { orderId: null, placed: false, filled: false, cancelled: false, price, shares: 0, fillPrice: null, cost: 0, fee: 0, rebate: 0 };
-}
-function freshRungPosition(rungDef) {
+function freshLeg(slugPrefix, windowTs, windowSeconds) {
   return {
-    key: rungDef.key, price: rungDef.price, label: rungDef.label,
-    shares: null,          // size snapshotted from rungState at order-placement time
-    status: 'idle',        // idle -> armed -> filled | closed
-    filledSide: null,
-    up: freshRungLeg(rungDef.price),
-    down: freshRungLeg(rungDef.price),
-    resolved: false,
-    pnl: null,
-  };
-}
-function freshAssetWindow(assetDef, windowTs) {
-  const rungs = {};
-  for (const r of RUNGS) rungs[r.key] = freshRungPosition(r);
-  return {
-    asset: assetDef.key,
-    label: assetDef.label,
-    windowTs,
-    slug: `${assetDef.slugPrefix}${windowTs}`,
-    closeAt: (windowTs + WINDOW_SECONDS) * 1000,
-    status: 'discovering', // 'discovering' | 'trading' | 'resolved'
-    conditionId: null,
-    upTokenId: null, downTokenId: null,
+    slug: `${slugPrefix}${windowTs}`,
+    windowTs, windowSeconds,
+    closeAt: (windowTs + windowSeconds) * 1000,
+    conditionId: null, upTokenId: null, downTokenId: null,
     upAsk: null, downAsk: null, upBid: null, downBid: null,
-    rungs,
-    ordersPlaced: false,
+    discovered: false,
     lastDiscoveryAttempt: 0,
-    createdAt: Date.now(),
-    highConfSide: null,   // set once either side's live price crosses HIGH_CONF_PRICE
-    highConfPrice: null,
-    highConfAt: null,
+    highConfSide: null, highConfPrice: null,
+    resolved: false, winner: null, resolutionMethod: null,
   };
 }
 
-function freshCycle(windowTs) {
-  return {
-    windowTs,
-    closeAt: (windowTs + WINDOW_SECONDS) * 1000,
-    assets: {
-      btc: freshAssetWindow(ASSETS[0], windowTs),
-      eth: freshAssetWindow(ASSETS[1], windowTs),
-    },
-    createdAt: Date.now(),
-  };
-}
-
-async function discoverAssetWindow(aw) {
+async function discoverLeg(leg) {
   try {
-    const events = await getJSON(`${GAMMA}/events?slug=${encodeURIComponent(aw.slug)}`);
+    const events = await getJSON(`${GAMMA}/events?slug=${encodeURIComponent(leg.slug)}`);
     const event = Array.isArray(events) ? events[0] : null;
     if (!event) return;
     const mk = (event.markets || [])[0];
@@ -312,433 +249,369 @@ async function discoverAssetWindow(aw) {
     const up = tokens.find(t => /up/i.test(t.outcome));
     const down = tokens.find(t => /down/i.test(t.outcome));
     if (!up || !down || !up.token_id || !down.token_id) return;
-    aw.conditionId = mk.conditionId || null;
-    aw.upTokenId = up.token_id;
-    aw.downTokenId = down.token_id;
-    aw.status = 'trading';
-    log(`🎯 ${aw.label} window ${aw.slug} discovered — Up ${String(up.token_id).slice(0, 10)}… / Down ${String(down.token_id).slice(0, 10)}…`);
+    leg.conditionId = mk.conditionId || null;
+    leg.upTokenId = up.token_id;
+    leg.downTokenId = down.token_id;
+    leg.discovered = true;
+    log(`🎯 leg discovered ${leg.slug} — Up ${String(up.token_id).slice(0, 10)}… / Down ${String(down.token_id).slice(0, 10)}…`);
   } catch (e) {
-    log(`⚠️  discoverAssetWindow(${aw.slug}) failed: ${e.message}`);
+    log(`⚠️  discoverLeg(${leg.slug}) failed: ${e.message}`);
   }
 }
 
-async function refreshAssetPrices(aw) {
-  if (!aw.upTokenId || !aw.downTokenId) return;
+async function refreshLegPrices(leg) {
+  if (!leg.upTokenId || !leg.downTokenId) return;
   try {
     const [upAsk, upBid, downAsk, downBid] = await Promise.all([
-      getJSON(`${CLOB}/price?token_id=${aw.upTokenId}&side=BUY`).catch(() => null),
-      getJSON(`${CLOB}/price?token_id=${aw.upTokenId}&side=SELL`).catch(() => null),
-      getJSON(`${CLOB}/price?token_id=${aw.downTokenId}&side=BUY`).catch(() => null),
-      getJSON(`${CLOB}/price?token_id=${aw.downTokenId}&side=SELL`).catch(() => null),
+      getJSON(`${CLOB}/price?token_id=${leg.upTokenId}&side=BUY`).catch(() => null),
+      getJSON(`${CLOB}/price?token_id=${leg.upTokenId}&side=SELL`).catch(() => null),
+      getJSON(`${CLOB}/price?token_id=${leg.downTokenId}&side=BUY`).catch(() => null),
+      getJSON(`${CLOB}/price?token_id=${leg.downTokenId}&side=SELL`).catch(() => null),
     ]);
-    if (upAsk?.price != null) aw.upAsk = parseFloat(upAsk.price);
-    if (upBid?.price != null) aw.upBid = parseFloat(upBid.price);
-    if (downAsk?.price != null) aw.downAsk = parseFloat(downAsk.price);
-    if (downBid?.price != null) aw.downBid = parseFloat(downBid.price);
+    if (upAsk?.price != null) leg.upAsk = parseFloat(upAsk.price);
+    if (upBid?.price != null) leg.upBid = parseFloat(upBid.price);
+    if (downAsk?.price != null) leg.downAsk = parseFloat(downAsk.price);
+    if (downBid?.price != null) leg.downBid = parseFloat(downBid.price);
   } catch (_) {}
 }
 
-function affordable(shares, price) { return round2(shares * price) <= engine.bankroll; }
-
-// If either side's live price has crossed HIGH_CONF_PRICE (default 0.90), lock in that side as
-// the de-facto winner so resolution doesn't have to wait for RESOLUTION_FALLBACK_MS. Once set,
-// a side is "sticky" for this window — it won't be un-set by a later price wobble.
-function updateHighConfidence(aw) {
-  if (aw.highConfSide) return;
-  const upP = aw.upBid != null ? aw.upBid : aw.upAsk;
-  const downP = aw.downBid != null ? aw.downBid : aw.downAsk;
-  if (upP != null && upP >= HIGH_CONF_PRICE) {
-    aw.highConfSide = 'up'; aw.highConfPrice = upP; aw.highConfAt = Date.now();
-  } else if (downP != null && downP >= HIGH_CONF_PRICE) {
-    aw.highConfSide = 'down'; aw.highConfPrice = downP; aw.highConfAt = Date.now();
-  }
-}
-
-// ─────────────────────────────────────────
-//  Rung order placement / fill / cancel
-// ─────────────────────────────────────────
-async function placeRungOrders(aw) {
-  if (aw.ordersPlaced || !aw.upTokenId || !aw.downTokenId) return;
-  aw.ordersPlaced = true;
-  for (const r of RUNGS) {
-    const rp = aw.rungs[r.key];
-    const sizeState = engine.rungState[aw.asset][r.key];
-    const shares = sizeState.currentShares;
-    rp.shares = shares;
-    rp.up.shares = shares;
-    rp.down.shares = shares;
-
-    const upResp = await placeRestingLimitBuy(aw.upTokenId, r.price, shares);
-    rp.up.orderId = upResp ? upResp.id : null;
-    rp.up.placed = !!upResp;
-
-    const downResp = await placeRestingLimitBuy(aw.downTokenId, r.price, shares);
-    rp.down.orderId = downResp ? downResp.id : null;
-    rp.down.placed = !!downResp;
-
-    rp.status = 'armed';
-    log(`📌 [${aw.slug}] ${r.label} rung armed — resting buy ${shares}sh UP@${r.price.toFixed(2)} + ${shares}sh DOWN@${r.price.toFixed(2)} (consec.losses=${sizeState.consecutiveLosses})`);
-
-    // an immediately-marketable LIVE order can come back already filled
-    if (upResp && upResp.filled) await onRungFill(aw, r, 'up', upResp.avgPrice || r.price, upResp.filledShares || shares);
-    if (downResp && downResp.filled && aw.rungs[r.key].status !== 'filled') await onRungFill(aw, r, 'down', downResp.avgPrice || r.price, downResp.filledShares || shares);
-  }
-}
-
-async function onRungFill(aw, rungDef, side, fillPrice, filledShares) {
-  const rp = aw.rungs[rungDef.key];
-  const leg = rp[side];
-  if (leg.filled || leg.cancelled) return; // already handled
-
-  if (DRY_RUN && !affordable(filledShares, fillPrice)) {
-    log(`⚠️  [${aw.slug}] ${rungDef.label} rung ${side.toUpperCase()}: insufficient bankroll ($${engine.bankroll.toFixed(2)}) to simulate fill — skipping this fill`);
-    return;
-  }
-
-  const fee = estimateFee(filledShares, fillPrice);
-  const cost = round2(filledShares * fillPrice);
-  const rebate = estimateRebate(filledShares, fillPrice);
-  engine.bankroll = round2(engine.bankroll - cost - fee);
-  engine.feesPaid = round2(engine.feesPaid + fee);
-  engine.estimatedRebateUsd = round4(engine.estimatedRebateUsd + rebate);
-  engine.rebateByRung[aw.asset][rungDef.key] = round4(engine.rebateByRung[aw.asset][rungDef.key] + rebate);
-
-  leg.filled = true;
-  leg.fillPrice = fillPrice;
-  leg.cost = cost;
-  leg.fee = fee;
-  leg.shares = filledShares;
-  leg.rebate = rebate;
-
-  registerTrade({ slug: aw.slug, asset: aw.asset, step: `${rungDef.label} rung fill`, side, price: fillPrice, shares: filledShares, cost, fee, rebate });
-
-  if (rp.status === 'filled') {
-    // rare race: both sides filled essentially simultaneously — keep both positions,
-    // they'll net out at resolution (one wins, one loses).
-    log(`⚠️  [${aw.slug}] ${rungDef.label} rung: ${side.toUpperCase()} ALSO filled after ${rp.filledSide.toUpperCase()} (race) — keeping both positions, no cancel needed`);
-    recordEquity();
-    return;
-  }
-
-  rp.status = 'filled';
-  rp.filledSide = side;
-  log(`✅ [${aw.slug}] ${rungDef.label} rung: ${side.toUpperCase()} filled ${filledShares}sh @ ${fillPrice.toFixed(2)} ($${cost.toFixed(2)}+$${fee.toFixed(4)} fee, ~$${rebate.toFixed(4)} est. rebate) — cancelling opposite side | bankroll=$${engine.bankroll.toFixed(2)}`);
-  recordEquity();
-
-  const otherSide = side === 'up' ? 'down' : 'up';
-  const other = rp[otherSide];
-  if (!other.filled && !other.cancelled && other.orderId) {
-    await cancelResting(other.orderId);
-    other.cancelled = true;
-    log(`🚫 [${aw.slug}] ${rungDef.label} rung: cancelled ${otherSide.toUpperCase()} resting order (opposite side of filled ${side.toUpperCase()})`);
-  }
-}
-
-// Called every tick while a window is trading — checks all armed rungs for fills.
-async function checkRungFills(aw) {
-  if (aw.status !== 'trading' || !aw.ordersPlaced) return;
-  for (const r of RUNGS) {
-    const rp = aw.rungs[r.key];
-    if (rp.status !== 'armed') continue;
-
-    if (!rp.up.filled && !rp.up.cancelled) {
-      if (DRY_RUN) {
-        if (aw.upAsk != null && aw.upAsk <= r.price) await onRungFill(aw, r, 'up', r.price, rp.up.shares);
-      } else if (rp.up.orderId) {
-        try {
-          const st = await trader.getOrder(rp.up.orderId);
-          if (st && st.filled) await onRungFill(aw, r, 'up', st.avgPrice || r.price, st.filledShares || rp.up.shares);
-        } catch (_) {}
-      }
-    }
-    if (rp.status === 'filled') continue;
-
-    if (!rp.down.filled && !rp.down.cancelled) {
-      if (DRY_RUN) {
-        if (aw.downAsk != null && aw.downAsk <= r.price) await onRungFill(aw, r, 'down', r.price, rp.down.shares);
-      } else if (rp.down.orderId) {
-        try {
-          const st = await trader.getOrder(rp.down.orderId);
-          if (st && st.filled) await onRungFill(aw, r, 'down', st.avgPrice || r.price, st.filledShares || rp.down.shares);
-        } catch (_) {}
-      }
-    }
-  }
-}
-
-// Called when a window rolls over — any rung that never filled gets both
-// resting orders cancelled; no win/loss recorded for it.
-async function closeUnfilledRungs(aw) {
-  for (const r of RUNGS) {
-    const rp = aw.rungs[r.key];
-    if (rp.status !== 'armed') continue;
-    for (const side of ['up', 'down']) {
-      const leg = rp[side];
-      if (!leg.filled && !leg.cancelled && leg.orderId) {
-        await cancelResting(leg.orderId);
-        leg.cancelled = true;
-      }
-    }
-    rp.status = 'closed';
-    log(`⌛ [${aw.slug}] ${r.label} rung: window closed with neither side filled — both orders cancelled, no trade`);
-  }
-}
-
-// ─────────────────────────────────────────
-//  Mark-to-market (unrealized P&L)
-// ─────────────────────────────────────────
-function markPrice(aw, side) {
-  const bid = side === 'up' ? aw.upBid : aw.downBid;
-  const ask = side === 'up' ? aw.upAsk : aw.downAsk;
+function markPrice(leg, side) {
+  const bid = side === 'up' ? leg.upBid : leg.downBid;
+  const ask = side === 'up' ? leg.upAsk : leg.downAsk;
   if (bid != null) return bid;
   if (ask != null) return ask;
   return null;
 }
-function unrealizedForRung(aw, rp) {
-  if (rp.resolved) return 0;
-  let u = 0;
-  for (const side of ['up', 'down']) {
-    const leg = rp[side];
-    if (!leg.filled || leg.shares <= 0) continue;
-    const mp = markPrice(aw, side);
-    const mark = mp != null ? mp : (leg.cost / leg.shares);
-    u += round2(leg.shares * mark - leg.cost);
+
+function updateHighConfidence(leg) {
+  if (leg.highConfSide) return;
+  const upP = leg.upBid != null ? leg.upBid : leg.upAsk;
+  const downP = leg.downBid != null ? leg.downBid : leg.downAsk;
+  if (upP != null && upP >= HIGH_CONF_PRICE) {
+    leg.highConfSide = 'up'; leg.highConfPrice = upP;
+  } else if (downP != null && downP >= HIGH_CONF_PRICE) {
+    leg.highConfSide = 'down'; leg.highConfPrice = downP;
   }
-  return u;
-}
-function unrealizedForAssetWindow(aw) {
-  if (aw.status === 'resolved') return 0;
-  let u = 0;
-  for (const r of RUNGS) u += unrealizedForRung(aw, aw.rungs[r.key]);
-  return round2(u);
-}
-function openCostForAssetWindow(aw) {
-  if (aw.status === 'resolved') return 0;
-  let c = 0;
-  for (const r of RUNGS) {
-    const rp = aw.rungs[r.key];
-    if (rp.resolved) continue;
-    for (const side of ['up', 'down']) if (rp[side].filled) c += rp[side].cost;
-  }
-  return round2(c);
-}
-function allTrackedAssetWindows() {
-  const list = [...engine.pending];
-  if (engine.cycle) list.push(engine.cycle.assets.btc, engine.cycle.assets.eth);
-  return list;
-}
-function totalUnrealizedPnl() {
-  return round2(allTrackedAssetWindows().reduce((sum, aw) => sum + unrealizedForAssetWindow(aw), 0));
-}
-function openPositionsMTM() {
-  return round2(allTrackedAssetWindows().reduce((sum, aw) => sum + openCostForAssetWindow(aw) + unrealizedForAssetWindow(aw), 0));
 }
 
-// ─────────────────────────────────────────
-//  Resolution (background queue — never blocks live monitoring)
-// ─────────────────────────────────────────
-function assetHasAnyFilledRung(aw) {
-  return RUNGS.some(r => aw.rungs[r.key].status === 'filled' || aw.rungs[r.key].filledSide);
-}
-
-async function checkAssetResolution(aw) {
+// Three-tier resolution for a single leg. Returns true once resolved.
+async function resolveLegAttempt(leg) {
+  if (leg.resolved) return true;
   try {
     let mk = null;
-    if (aw.conditionId) {
-      const arr = await getJSON(`${GAMMA}/markets?condition_ids=${encodeURIComponent(aw.conditionId)}`);
+    if (leg.conditionId) {
+      const arr = await getJSON(`${GAMMA}/markets?condition_ids=${encodeURIComponent(leg.conditionId)}`);
       mk = Array.isArray(arr) ? arr[0] : null;
     }
     if (!mk) {
-      const events = await getJSON(`${GAMMA}/events?slug=${encodeURIComponent(aw.slug)}`);
+      const events = await getJSON(`${GAMMA}/events?slug=${encodeURIComponent(leg.slug)}`);
       const event = Array.isArray(events) ? events[0] : null;
       mk = event ? (event.markets || [])[0] : null;
     }
     if (mk && mk.closed === true && mk.outcomePrices) {
       const prices = typeof mk.outcomePrices === 'string' ? JSON.parse(mk.outcomePrices) : mk.outcomePrices;
       const tokens = parseMarketTokens(mk);
-      const upIdx = tokens.findIndex(t => String(t.token_id) === String(aw.upTokenId));
-      const downIdx = tokens.findIndex(t => String(t.token_id) === String(aw.downTokenId));
+      const upIdx = tokens.findIndex(t => String(t.token_id) === String(leg.upTokenId));
+      const downIdx = tokens.findIndex(t => String(t.token_id) === String(leg.downTokenId));
       if (upIdx >= 0 && downIdx >= 0 && prices[upIdx] != null) {
-        resolveAssetWindow(aw, parseFloat(prices[upIdx]) >= 0.5 ? 'up' : 'down', 'official');
+        leg.resolved = true;
+        leg.winner = parseFloat(prices[upIdx]) >= 0.5 ? 'up' : 'down';
+        leg.resolutionMethod = 'official';
+        log(`🏁 [${leg.slug}] resolved OFFICIAL — winner ${leg.winner.toUpperCase()}`);
         return true;
       }
     }
   } catch (e) {
-    log(`⚠️  checkAssetResolution(${aw.slug}) failed: ${e.message}`);
+    log(`⚠️  resolveLegAttempt(${leg.slug}) failed: ${e.message}`);
   }
 
-  // Fast path: don't wait for the 60s fallback if the market has already traded to a
-  // near-certain extreme (>= HIGH_CONF_PRICE on either side). Checked every resolution poll
-  // (every RESOLUTION_POLL_MS), so this typically resolves within a few seconds of window close.
-  updateHighConfidence(aw);
-  if (aw.highConfSide) {
-    log(`⚡ [${aw.slug}] live price hit ${aw.highConfPrice.toFixed(3)} on ${aw.highConfSide.toUpperCase()} (>= ${HIGH_CONF_PRICE}) — resolving now instead of waiting for the ${Math.round(RESOLUTION_FALLBACK_MS / 1000)}s fallback`);
-    resolveAssetWindow(aw, aw.highConfSide, 'high-confidence-price');
+  updateHighConfidence(leg);
+  if (leg.highConfSide) {
+    leg.resolved = true;
+    leg.winner = leg.highConfSide;
+    leg.resolutionMethod = 'high-confidence-price';
+    log(`⚡ [${leg.slug}] resolved HIGH-CONFIDENCE (${leg.highConfPrice.toFixed(3)}) — winner ${leg.winner.toUpperCase()}`);
     return true;
   }
 
-  if (Date.now() - aw.closeAt >= RESOLUTION_FALLBACK_MS) {
-    const upPrice = markPrice(aw, 'up');
-    const downPrice = markPrice(aw, 'down');
+  if (Date.now() - leg.closeAt >= RESOLUTION_FALLBACK_MS) {
+    const upPrice = markPrice(leg, 'up');
+    const downPrice = markPrice(leg, 'down');
     if (upPrice != null || downPrice != null) {
-      let winningSide;
-      if (upPrice != null && downPrice != null) winningSide = upPrice >= downPrice ? 'up' : 'down';
-      else if (upPrice != null) winningSide = upPrice >= 0.5 ? 'up' : 'down';
-      else winningSide = downPrice >= 0.5 ? 'down' : 'up';
-      log(`⌛ [${aw.slug}] Gamma hasn't confirmed official resolution ${Math.round((Date.now() - aw.closeAt) / 1000)}s after close — resolving from last live price instead (up=${upPrice != null ? upPrice.toFixed(3) : '?'}, down=${downPrice != null ? downPrice.toFixed(3) : '?'})`);
-      resolveAssetWindow(aw, winningSide, 'price-fallback');
+      let winner;
+      if (upPrice != null && downPrice != null) winner = upPrice >= downPrice ? 'up' : 'down';
+      else if (upPrice != null) winner = upPrice >= 0.5 ? 'up' : 'down';
+      else winner = downPrice >= 0.5 ? 'down' : 'up';
+      leg.resolved = true;
+      leg.winner = winner;
+      leg.resolutionMethod = 'price-fallback';
+      log(`⌛ [${leg.slug}] resolved PRICE-FALLBACK — winner ${winner.toUpperCase()}`);
       return true;
     }
   }
   return false;
 }
 
-function resolveAssetWindow(aw, winningSide, method) {
-  aw.status = 'resolved';
+// ─────────────────────────────────────────
+//  Combined trade — primary (15m) + hedge (last 5m segment)
+// ─────────────────────────────────────────
+function freshPosition() {
+  return { side: null, shares: 0, entryPrice: null, cost: 0, fee: 0, filled: false, pnl: null };
+}
+function freshTrade(assetDef, windowTs) {
+  return {
+    asset: assetDef.key, label: assetDef.label, windowTs,
+    closeAt: (windowTs + FIFTEEN_SECONDS) * 1000,
+    fifteen: freshLeg(assetDef.slugPrefix15, windowTs, FIFTEEN_SECONDS),
+    five: null, // created once we reach the hedge-entry offset
+    state: 'discovering-fifteen', // discovering-fifteen -> awaiting-hedge-window -> discovering-five -> entered -> pending-resolution -> resolved | skipped
+    primary: freshPosition(),
+    hedge: freshPosition(),
+    divergence: null,
+    correlationFactor: null,
+    combinedPnl: null,
+    createdAt: Date.now(),
+  };
+}
 
-  for (const r of RUNGS) {
-    const rp = aw.rungs[r.key];
-    if (rp.status !== 'filled' || rp.resolved) continue;
+function affordable(shares, price) { return round2(shares * price) <= engine.bankroll; }
 
-    const legs = ['up', 'down'].filter(side => rp[side].filled).map(side => ({ side, leg: rp[side] }));
-    if (!legs.length) { rp.resolved = true; continue; }
+// Steps 1-4: read prices, compute divergence/correlation, size, enter both legs together.
+async function executeCombinedEntry(trade) {
+  const f = trade.fifteen, v = trade.five;
+  if (f.upAsk == null || f.downAsk == null || v.upAsk == null || v.downAsk == null) return; // Step 1 not satisfied yet
 
-    let totalPayout = 0, totalCost = 0, totalFee = 0;
-    for (const { side, leg } of legs) {
-      const payout = side === winningSide ? round2(leg.shares * 1) : 0;
-      totalPayout += payout; totalCost += leg.cost; totalFee += leg.fee;
-    }
-    totalPayout = round2(totalPayout); totalCost = round2(totalCost); totalFee = round2(totalFee);
-    const pnl = round2(totalPayout - totalCost);
+  // Step 1: best asks already sitting on f/v from refreshLegPrices().
+  const primarySide = f.upAsk >= f.downAsk ? 'up' : 'down'; // market-favored side after first 10 minutes
+  const hedgeSide = primarySide === 'up' ? 'down' : 'up';
+  const primaryPrice = primarySide === 'up' ? f.upAsk : f.downAsk;
+  const primaryTokenId = primarySide === 'up' ? f.upTokenId : f.downTokenId;
+  const hedgePrice = hedgeSide === 'up' ? v.upAsk : v.downAsk;
+  const hedgeTokenId = hedgeSide === 'up' ? v.upTokenId : v.downTokenId;
 
-    engine.bankroll = round2(engine.bankroll + totalPayout);
-    engine.realizedPnl = round2(engine.realizedPnl + pnl);
-    rp.resolved = true;
-    rp.pnl = pnl;
+  // Step 2: divergence between the two markets' pricing of the hedge side, and the
+  // live correlation factor derived from it.
+  const fifteenHedgeProb = hedgeSide === 'up' ? f.upAsk : f.downAsk;
+  const fiveHedgeProb = hedgeSide === 'up' ? v.upAsk : v.downAsk;
+  const divergence = round4(Math.abs(fifteenHedgeProb - fiveHedgeProb));
+  const correlationFactor = round4(clamp(1 - divergence, CORR_FLOOR, CORR_CEIL));
 
-    const rState = engine.rungState[aw.asset][r.key];
-    const isWin = legs.length === 1 ? legs[0].side === winningSide : pnl >= 0;
-    const boughtSideLabel = legs.map(l => l.side).join('+').toUpperCase();
-
-    // Flat sizing — martingale removed. Size never changes; consecutiveLosses
-    // is kept only as an informational streak counter for the dashboard/logs.
-    if (isWin) {
-      engine.wins++;
-      rState.consecutiveLosses = 0;
-      log(`🏆 [${aw.slug}] ${aw.label}-${r.label} rung WIN — held ${boughtSideLabel}, winner ${winningSide.toUpperCase()} | payout $${totalPayout.toFixed(2)} pnl $${pnl.toFixed(2)} | size stays ${rState.currentShares}sh`);
-    } else {
-      engine.losses++;
-      rState.consecutiveLosses++;
-      log(`📉 [${aw.slug}] ${aw.label}-${r.label} rung LOSS #${rState.consecutiveLosses} — size stays ${rState.currentShares}sh | pnl $${pnl.toFixed(2)}`);
-    }
-
-    registerTrade({ slug: aw.slug, asset: aw.asset, step: `${r.label} rung RESOLUTION`, side: boughtSideLabel, shares: legs.reduce((s, l) => s + l.leg.shares, 0), price: 1, pnl });
-
-    engine.history.unshift({
-      slug: aw.slug, asset: aw.asset, label: aw.label, windowTs: aw.windowTs,
-      rung: r.label, boughtSide: boughtSideLabel, winningSide,
-      shares: legs.reduce((s, l) => s + l.leg.shares, 0),
-      cost: totalCost, fee: totalFee, payout: totalPayout, pnl,
-      consecutiveLossesAfter: rState.consecutiveLosses, currentSharesAfter: rState.currentShares,
-      resolutionMethod: method, resolvedAt: Date.now(),
-    });
-    if (engine.history.length > 300) engine.history.pop();
+  if (!affordable(PRIMARY_SHARES, primaryPrice)) {
+    trade.state = 'skipped';
+    log(`⛔ [${trade.label} ${f.slug}] skipped — insufficient bankroll for primary leg (${PRIMARY_SHARES}sh @ ${primaryPrice.toFixed(3)})`);
+    return;
   }
 
-  const methodTag = method === 'high-confidence-price' ? `⚡ HIGH-CONFIDENCE PRICE (>=${HIGH_CONF_PRICE})`
-    : method === 'price-fallback' ? '📡 LIVE-PRICE FALLBACK'
-    : '✅ OFFICIAL';
-  log(`🏁 [${aw.slug}] ${aw.label} window resolved (${methodTag}) — winner ${winningSide.toUpperCase()} | bankroll $${engine.bankroll.toFixed(2)}`);
+  // Step 3: size.
+  const amountAtRisk = round2(PRIMARY_SHARES * primaryPrice); // cost basis = max loss if primary resolves to zero
+  const rawHedgeShares = amountAtRisk / hedgePrice;
+  const hedgeShares = round2(rawHedgeShares * correlationFactor);
+
+  if (!affordable(hedgeShares, hedgePrice)) {
+    trade.state = 'skipped';
+    log(`⛔ [${trade.label} ${f.slug}] skipped — insufficient bankroll for hedge leg (${hedgeShares}sh @ ${hedgePrice.toFixed(3)})`);
+    return;
+  }
+
+  // Step 4: enter both legs together.
+  const primaryResp = await placeTakerBuy(primaryTokenId, primaryPrice, PRIMARY_SHARES);
+  const hedgeResp = await placeTakerBuy(hedgeTokenId, hedgePrice, hedgeShares);
+  if (!primaryResp?.filled || !hedgeResp?.filled) {
+    log(`⚠️  [${trade.label} ${f.slug}] combined entry incomplete — primary filled=${!!primaryResp?.filled}, hedge filled=${!!hedgeResp?.filled}`);
+  }
+
+  const pFillPrice = primaryResp?.avgPrice ?? primaryPrice;
+  const pShares = primaryResp?.filledShares ?? PRIMARY_SHARES;
+  const pCost = round2(pShares * pFillPrice);
+  const pFee = estimateFee(pShares, pFillPrice);
+
+  const hFillPrice = hedgeResp?.avgPrice ?? hedgePrice;
+  const hShares = hedgeResp?.filledShares ?? hedgeShares;
+  const hCost = round2(hShares * hFillPrice);
+  const hFee = estimateFee(hShares, hFillPrice);
+
+  engine.bankroll = round2(engine.bankroll - pCost - pFee - hCost - hFee);
+  engine.feesPaid = round2(engine.feesPaid + pFee + hFee);
+
+  trade.primary = { side: primarySide, shares: pShares, entryPrice: pFillPrice, cost: pCost, fee: pFee, filled: true, pnl: null };
+  trade.hedge = { side: hedgeSide, shares: hShares, entryPrice: hFillPrice, cost: hCost, fee: hFee, filled: true, pnl: null };
+  trade.divergence = divergence;
+  trade.correlationFactor = correlationFactor;
+  trade.state = 'entered';
+
+  registerTrade({ slug: f.slug, asset: trade.asset, step: '15m PRIMARY entry', side: primarySide, price: pFillPrice, shares: pShares, cost: pCost, fee: pFee });
+  registerTrade({ slug: v.slug, asset: trade.asset, step: '5m HEDGE entry', side: hedgeSide, price: hFillPrice, shares: hShares, cost: hCost, fee: hFee });
+
+  log(`✅ [${trade.label} ${f.slug}] combined trade entered — PRIMARY ${pShares}sh ${primarySide.toUpperCase()} @${pFillPrice.toFixed(3)} ($${pCost.toFixed(2)}) | HEDGE ${hShares}sh ${hedgeSide.toUpperCase()} @${hFillPrice.toFixed(3)} ($${hCost.toFixed(2)}) | divergence=${divergence.toFixed(4)} correlation=${correlationFactor.toFixed(2)} | bankroll=$${engine.bankroll.toFixed(2)}`);
   recordEquity();
+}
+
+function resolveTradeIfReady(trade) {
+  if (!trade.fifteen.resolved || !trade.five.resolved) return false;
+  if (trade.state !== 'entered' && trade.state !== 'pending-resolution') return true; // was skipped, nothing to settle
+
+  const primaryPayout = trade.primary.side === trade.fifteen.winner ? round2(trade.primary.shares * 1) : 0;
+  const primaryPnl = round2(primaryPayout - trade.primary.cost - trade.primary.fee);
+  trade.primary.pnl = primaryPnl;
+
+  const hedgePayout = trade.hedge.side === trade.five.winner ? round2(trade.hedge.shares * 1) : 0;
+  const hedgePnl = round2(hedgePayout - trade.hedge.cost - trade.hedge.fee);
+  trade.hedge.pnl = hedgePnl;
+
+  const combinedPnl = round2(primaryPnl + hedgePnl);
+  trade.combinedPnl = combinedPnl;
+  trade.state = 'resolved';
+
+  engine.bankroll = round2(engine.bankroll + primaryPayout + hedgePayout);
+  engine.realizedPnl = round2(engine.realizedPnl + combinedPnl);
+  if (combinedPnl >= 0) engine.wins++; else engine.losses++;
+
+  registerTrade({ slug: trade.fifteen.slug, asset: trade.asset, step: '15m PRIMARY resolution', side: trade.primary.side, price: 1, shares: trade.primary.shares, pnl: primaryPnl });
+  registerTrade({ slug: trade.five.slug, asset: trade.asset, step: '5m HEDGE resolution', side: trade.hedge.side, price: 1, shares: trade.hedge.shares, pnl: hedgePnl });
+
+  engine.history.unshift({
+    asset: trade.asset, label: trade.label, windowTs: trade.windowTs,
+    fifteenSlug: trade.fifteen.slug, fiveSlug: trade.five.slug,
+    primarySide: trade.primary.side, primaryShares: trade.primary.shares, primaryEntry: trade.primary.entryPrice, primaryWinner: trade.fifteen.winner, primaryPnl,
+    hedgeSide: trade.hedge.side, hedgeShares: trade.hedge.shares, hedgeEntry: trade.hedge.entryPrice, hedgeWinner: trade.five.winner, hedgePnl,
+    divergence: trade.divergence, correlationFactor: trade.correlationFactor,
+    combinedPnl, resolvedAt: Date.now(),
+  });
+  if (engine.history.length > 300) engine.history.pop();
+
+  log(`🏆 [${trade.label} ${trade.fifteen.slug}] combined trade resolved — primary ${sgn2(primaryPnl)} + hedge ${sgn2(hedgePnl)} = ${sgn2(combinedPnl)} | bankroll=$${engine.bankroll.toFixed(2)}`);
+  recordEquity();
+  return true;
+}
+function sgn2(n) { return (n >= 0 ? '+$' : '-$') + Math.abs(n).toFixed(2); }
+
+// ─────────────────────────────────────────
+//  Unrealized P&L helpers
+// ─────────────────────────────────────────
+function unrealizedForLeg(leg, position) {
+  if (!leg || leg.resolved || !position.filled || position.shares <= 0) return 0;
+  const mp = markPrice(leg, position.side);
+  const mark = mp != null ? mp : (position.cost / position.shares);
+  return round2(position.shares * mark - position.cost);
+}
+function unrealizedForTrade(trade) {
+  if (trade.state !== 'entered' && trade.state !== 'pending-resolution') return 0;
+  return round2(unrealizedForLeg(trade.fifteen, trade.primary) + unrealizedForLeg(trade.five, trade.hedge));
+}
+function openCostForTrade(trade) {
+  if (trade.state !== 'entered' && trade.state !== 'pending-resolution') return 0;
+  return round2(trade.primary.cost + trade.hedge.cost);
+}
+function allTrackedTrades() {
+  const list = [...engine.pending];
+  if (engine.current.btc) list.push(engine.current.btc);
+  if (engine.current.eth) list.push(engine.current.eth);
+  return list;
+}
+function totalUnrealizedPnl() {
+  return round2(allTrackedTrades().reduce((sum, t) => sum + unrealizedForTrade(t), 0));
+}
+function openPositionsMTM() {
+  return round2(allTrackedTrades().reduce((sum, t) => sum + openCostForTrade(t) + unrealizedForTrade(t), 0));
 }
 
 // ─────────────────────────────────────────
 //  Main loop
 // ─────────────────────────────────────────
-let loopRunning = false;
+function currentFifteenWindowTs(nowSec) { return Math.floor(nowSec / FIFTEEN_SECONDS) * FIFTEEN_SECONDS; }
+
+async function tickAsset(assetDef, now) {
+  const nowSec = Math.floor(now / 1000);
+  const windowTs = currentFifteenWindowTs(nowSec);
+  let trade = engine.current[assetDef.key];
+
+  // Roll over to a fresh 15-minute window.
+  if (!trade || trade.windowTs !== windowTs) {
+    if (trade && (trade.state === 'entered' || trade.state === 'pending-resolution')) {
+      trade.state = 'pending-resolution';
+      engine.pending.push(trade);
+      if (engine.pending.length > MAX_PENDING_RESOLUTIONS) {
+        const dropped = engine.pending.shift();
+        log(`⚠️  dropped stale pending trade ${dropped.fifteen.slug} from the resolution queue (too many pending)`);
+      }
+    }
+    if (windowTs < engine.boundaryWindowTs) return; // haven't reached the first fresh boundary yet
+    trade = freshTrade(assetDef, windowTs);
+    engine.current[assetDef.key] = trade;
+    log(`🆕 [${assetDef.label}] new 15m window t=${windowTs} — discovering primary market…`);
+  }
+
+  // Discover the 15-min (primary) market.
+  if (!trade.fifteen.discovered && now - trade.fifteen.lastDiscoveryAttempt >= DISCOVERY_RETRY_MS) {
+    trade.fifteen.lastDiscoveryAttempt = now;
+    await discoverLeg(trade.fifteen);
+  }
+
+  // Once we're at the 10-minute mark, create + discover the hedge (last 5-min segment) market.
+  const hedgeWindowTs = windowTs + HEDGE_ENTRY_OFFSET_SECONDS;
+  if (!trade.five && nowSec >= hedgeWindowTs) {
+    trade.five = freshLeg(assetDef.slugPrefix5, hedgeWindowTs, FIVE_SECONDS);
+    trade.state = 'discovering-five';
+    log(`🕐 [${assetDef.label}] entering hedge window — discovering last-5m segment market ${trade.five.slug}…`);
+  }
+  if (trade.five && !trade.five.discovered && now - trade.five.lastDiscoveryAttempt >= DISCOVERY_RETRY_MS) {
+    trade.five.lastDiscoveryAttempt = now;
+    await discoverLeg(trade.five);
+  }
+
+  // Once both legs are discovered and priced, enter the combined trade.
+  if (trade.five && trade.fifteen.discovered && trade.five.discovered && trade.state !== 'entered' && trade.state !== 'skipped' && engine.tradingEnabled) {
+    await refreshLegPrices(trade.fifteen);
+    await refreshLegPrices(trade.five);
+    await executeCombinedEntry(trade);
+  }
+}
+
 async function mainLoop() {
-  if (loopRunning) return;
-  loopRunning = true;
   while (true) {
     try {
       const now = Date.now();
       const nowSec = Math.floor(now / 1000);
-      const windowTs = currentWindowTs(nowSec);
 
       if (engine.waitingForBoundary) {
-        if (engine.boundaryWindowTs === null) {
-          engine.boundaryWindowTs = windowTs;
-          const remaining = WINDOW_SECONDS - (nowSec - windowTs);
-          log(`⏳ started mid-window — will NOT trade the in-progress window (ends in ${remaining}s); waiting for the next fresh 5-minute boundary`);
+        if (engine.boundaryWindowTs == null) {
+          engine.boundaryWindowTs = currentFifteenWindowTs(nowSec) + FIFTEEN_SECONDS;
+          log(`⏳ started mid-window — waiting for next fresh 15-minute boundary (t=${engine.boundaryWindowTs}) before trading begins`);
         }
-        if (windowTs === engine.boundaryWindowTs) {
-          emitFn('btc5mState', buildState());
-          await new Promise(res => setTimeout(res, TICK_MS));
-          continue;
+        if (nowSec >= engine.boundaryWindowTs) {
+          engine.waitingForBoundary = false;
+          log('🚦 new 15-minute boundary reached — trading starts now');
         }
-        engine.waitingForBoundary = false;
-        log('🚦 new window boundary reached — trading starts now');
       }
 
-      if (!engine.cycle || engine.cycle.windowTs !== windowTs) {
-        if (engine.cycle) {
-          for (const assetDef of ASSETS) {
-            const aw = engine.cycle.assets[assetDef.key];
-            await closeUnfilledRungs(aw);
-            if (aw.status === 'resolved' || !assetHasAnyFilledRung(aw)) continue;
-            updateHighConfidence(aw);
-            if (aw.highConfSide) {
-              log(`⚡ [${aw.slug}] live price already at ${aw.highConfPrice.toFixed(3)} on ${aw.highConfSide.toUpperCase()} at window close — resolving immediately instead of queueing`);
-              resolveAssetWindow(aw, aw.highConfSide, 'high-confidence-price');
-              continue;
-            }
-            engine.pending.push(aw);
-            if (engine.pending.length > MAX_PENDING_RESOLUTIONS) {
-              const dropped = engine.pending.shift();
-              log(`⚠️  dropped stale pending window ${dropped.slug} from the resolution queue (too many pending)`);
-            }
-          }
-        }
-        engine.cycle = freshCycle(windowTs);
-        log(`🆕 new window t=${windowTs} — discovering BTC + ETH markets…`);
+      if (!engine.waitingForBoundary) {
+        for (const assetDef of ASSETS) await tickAsset(assetDef, now);
       }
 
-      const cycle = engine.cycle;
-      for (const assetDef of ASSETS) {
-        const aw = cycle.assets[assetDef.key];
-        if (aw.status === 'discovering' && now - aw.lastDiscoveryAttempt >= DISCOVERY_RETRY_MS) {
-          aw.lastDiscoveryAttempt = now;
-          await discoverAssetWindow(aw);
-        }
-        if (aw.status === 'trading' && !aw.ordersPlaced && engine.tradingEnabled) {
-          await placeRungOrders(aw);
-        }
-      }
       if (now - engine.lastPriceFetch >= PRICE_REFRESH_MS) {
         engine.lastPriceFetch = now;
-        const toRefresh = [cycle.assets.btc, cycle.assets.eth, ...engine.pending];
-        await Promise.all(toRefresh.map(aw => refreshAssetPrices(aw)));
-        toRefresh.forEach(updateHighConfidence);
-      }
-
-      if (engine.tradingEnabled) {
-        await checkRungFills(cycle.assets.btc);
-        await checkRungFills(cycle.assets.eth);
+        const legs = [];
+        for (const t of allTrackedTrades()) { legs.push(t.fifteen); if (t.five) legs.push(t.five); }
+        await Promise.all(legs.map(refreshLegPrices));
+        legs.forEach(updateHighConfidence);
       }
 
       if (engine.pending.length && now - engine.lastResolutionPoll >= RESOLUTION_POLL_MS) {
         engine.lastResolutionPoll = now;
         const stillPending = [];
-        for (const aw of engine.pending) {
-          const done = await checkAssetResolution(aw);
-          if (!done) stillPending.push(aw);
+        for (const trade of engine.pending) {
+          if (!trade.fifteen.resolved) await resolveLegAttempt(trade.fifteen);
+          if (!trade.five) trade.five = { resolved: true, winner: null }; // never reached hedge entry — nothing to resolve there
+          else if (!trade.five.resolved) await resolveLegAttempt(trade.five);
+          const done = resolveTradeIfReady(trade);
+          if (!done) stillPending.push(trade);
         }
         engine.pending = stillPending;
       }
 
-      emitFn('btc5mState', buildState());
+      emitFn('hedgeState', buildState());
     } catch (e) {
-      slog(`[rungbot] ⚠️  Loop error: ${e.message}`);
+      slog(`[hedgebot] ⚠️  Loop error: ${e.message}`);
     }
     await new Promise(res => setTimeout(res, TICK_MS));
   }
@@ -747,31 +620,28 @@ async function mainLoop() {
 // ─────────────────────────────────────────
 //  UI state / controls
 // ─────────────────────────────────────────
-function rungSummary(aw, rungDef) {
-  const rp = aw.rungs[rungDef.key];
-  const rState = engine.rungState[aw.asset][rungDef.key];
+function legSummary(leg) {
+  if (!leg) return null;
   return {
-    key: rungDef.key, label: rungDef.label, price: rungDef.price,
-    status: rp.status, filledSide: rp.filledSide, resolved: rp.resolved, pnl: rp.pnl,
-    orderShares: rp.shares,
-    up: { placed: rp.up.placed, filled: rp.up.filled, cancelled: rp.up.cancelled, price: rp.up.price, shares: rp.up.shares, fillPrice: rp.up.fillPrice, rebate: rp.up.rebate },
-    down: { placed: rp.down.placed, filled: rp.down.filled, cancelled: rp.down.cancelled, price: rp.down.price, shares: rp.down.shares, fillPrice: rp.down.fillPrice, rebate: rp.down.rebate },
-    sizing: { consecutiveLosses: rState.consecutiveLosses, currentShares: rState.currentShares, baseShares: rungDef.baseShares },
-    estimatedRebate: engine.rebateByRung[aw.asset][rungDef.key],
+    slug: leg.slug, windowTs: leg.windowTs, closeAt: leg.closeAt,
+    discovered: leg.discovered, upAsk: leg.upAsk, downAsk: leg.downAsk, upBid: leg.upBid, downBid: leg.downBid,
+    highConfSide: leg.highConfSide, highConfPrice: leg.highConfPrice,
+    resolved: leg.resolved, winner: leg.winner, resolutionMethod: leg.resolutionMethod,
   };
 }
-function assetSummary(aw) {
+function tradeSummary(trade) {
+  if (!trade) return null;
   return {
-    asset: aw.asset, label: aw.label, slug: aw.slug, windowTs: aw.windowTs, closeAt: aw.closeAt, status: aw.status,
-    upAsk: aw.upAsk, downAsk: aw.downAsk, upBid: aw.upBid, downBid: aw.downBid,
-    rungs: RUNGS.map(r => rungSummary(aw, r)),
-    unrealizedPnl: unrealizedForAssetWindow(aw),
-    highConfSide: aw.highConfSide, highConfPrice: aw.highConfPrice,
+    asset: trade.asset, label: trade.label, windowTs: trade.windowTs, closeAt: trade.closeAt, state: trade.state,
+    fifteen: legSummary(trade.fifteen), five: legSummary(trade.five),
+    primary: trade.primary, hedge: trade.hedge,
+    divergence: trade.divergence, correlationFactor: trade.correlationFactor,
+    combinedPnl: trade.combinedPnl,
+    unrealizedPnl: unrealizedForTrade(trade),
   };
 }
 
 function buildState() {
-  const cycle = engine.cycle;
   const unrealizedPnl = totalUnrealizedPnl();
   const equity = round2(engine.bankroll + openPositionsMTM());
   return {
@@ -781,31 +651,24 @@ function buildState() {
     bankroll: engine.bankroll, capital: engine.capital,
     realizedPnl: engine.realizedPnl, unrealizedPnl, equity,
     feesPaid: engine.feesPaid,
-    estimatedRebateUsd: engine.estimatedRebateUsd,
-    rebateByRung: engine.rebateByRung,
-    rebateNote: `Upper-bound estimate (Crypto category: ${REBATE_FEE_RATE} fee rate × ${REBATE_SHARE * 100}% maker share, assumes your resting order is the only maker liquidity taken) — real on-chain USDC payout, settled daily, is likely lower where other makers are competing in the same market.`,
     wins: engine.wins, losses: engine.losses,
-    window: cycle ? {
-      windowTs: cycle.windowTs, closeAt: cycle.closeAt,
-      elapsedSec: Math.max(0, Math.min(WINDOW_SECONDS, Math.floor(Date.now() / 1000) - cycle.windowTs)),
-      assets: { btc: assetSummary(cycle.assets.btc), eth: assetSummary(cycle.assets.eth) },
-    } : null,
+    current: { btc: tradeSummary(engine.current.btc), eth: tradeSummary(engine.current.eth) },
     pendingResolutionCount: engine.pending.length,
-    pending: engine.pending.map(assetSummary),
+    pending: engine.pending.map(tradeSummary),
     history: engine.history.slice(0, 60),
     trades: engine.trades.slice(-100).slice().reverse(),
     equityCurve: engine.equityCurve,
     logs: engine.logs.slice(-80),
-    rungs: RUNGS.map(r => ({ key: r.key, label: r.label, price: r.price, baseShares: r.baseShares })),
-    baseShares: BASE_SHARES,
-    windowSeconds: WINDOW_SECONDS,
+    primaryShares: PRIMARY_SHARES,
+    corrFloor: CORR_FLOOR, corrCeil: CORR_CEIL,
+    fifteenSeconds: FIFTEEN_SECONDS, fiveSeconds: FIVE_SECONDS, hedgeEntryOffsetSeconds: HEDGE_ENTRY_OFFSET_SECONDS,
   };
 }
 function getStatus() { return buildState(); }
 
 function pauseTrading() {
   engine.tradingEnabled = false;
-  log('⏸️  Trading paused — no new rung orders will be placed; open positions still tracked to resolution, window discovery/rollover keeps running');
+  log('⏸️  Trading paused — no new combined trades will be entered; open positions still tracked to resolution, window discovery/rollover keeps running');
   return { ok: true };
 }
 function resumeTrading() {
@@ -822,18 +685,16 @@ function setMode(live) {
 async function init(privateKey, emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
-  slog('[rungbot] 🪙 BTC + ETH 5-Minute Rung Martingale Engine — fully automatic');
-  slog(`[rungbot] ⚙️  Each window: 6 resting limit buys per asset — Up+Down @ 0.10 (${RUNGS[0].baseShares}sh), 0.20 (${RUNGS[1].baseShares}sh), 0.33 (${RUNGS[2].baseShares}sh). Flat sizing, no martingale. First side of a rung to fill cancels the opposite side of that rung; position held to settlement.`);
-  slog('[rungbot] ⚙️  Martingale (independent per rung per asset, compounding): 0.10 rung doubles every 7 consecutive losses, 0.20 rung every 4, 0.33 rung every 2 — keeps doubling every additional threshold hit, uncapped. Any win resets to base size.');
-  slog(`[rungbot] ⚙️  Resolution: official Gamma > high-confidence live price (>=${HIGH_CONF_PRICE}, resolves within seconds) > ${Math.round(RESOLUTION_FALLBACK_MS / 1000)}s live-price fallback.`);
-  slog(`[rungbot] ⚙️  Tracking an UPPER-BOUND estimated maker rebate per fill (Crypto category: fee rate ${REBATE_FEE_RATE}, maker share ${REBATE_SHARE * 100}%) — real on-chain USDC payouts settle daily and may be lower.`);
-  slog(`[rungbot] ⚙️  Starting bankroll $${STARTING_CAPITAL} (shared across BTC+ETH) | maker fee rate ${MAKER_FEE_RATE} | never trades a window it joins mid-way through`);
-  slog(`[rungbot] ${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
+  slog('[hedgebot] 🪙 BTC + ETH 15m/5m Correlated Hedge Engine — fully automatic');
+  slog(`[hedgebot] ⚙️  Each 15-min window: buy ${PRIMARY_SHARES}sh of the market-favored side at the 10-minute mark, hedged by the opposite side on the last 5-min segment. Hedge size = (primary cost at risk / hedge ask) × live correlation factor (clamped ${CORR_FLOOR}-${CORR_CEIL}, derived from price divergence between the two markets).`);
+  slog(`[hedgebot] ⚙️  Resolution: official Gamma > high-confidence live price (>=${HIGH_CONF_PRICE}) > ${Math.round(RESOLUTION_FALLBACK_MS / 1000)}s live-price fallback — each leg resolves independently, combined P&L booked once both are done.`);
+  slog(`[hedgebot] ⚙️  Starting bankroll $${STARTING_CAPITAL} (shared across BTC+ETH) | taker fee rate ${TAKER_FEE_RATE} | never enters a window it joins mid-way through`);
+  slog(`[hedgebot] ${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
   trader = new PolymarketTrader(privateKey);
   await trader.authenticate();
 
-  mainLoop().catch(e => slog(`[rungbot] ❌ Fatal: ${e.message}`));
+  mainLoop().catch(e => slog(`[hedgebot] ❌ Fatal: ${e.message}`));
 }
 
 module.exports = {
