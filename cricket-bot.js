@@ -234,6 +234,7 @@ function freshLeg(slugPrefix, windowTs, windowSeconds) {
     discovered: false,
     lastDiscoveryAttempt: 0,
     highConfSide: null, highConfPrice: null,
+    highConfCandidateSide: null, highConfCandidateCount: 0,
     resolved: false, winner: null, resolutionMethod: null,
   };
 }
@@ -285,12 +286,29 @@ function markPrice(leg, side) {
 
 function updateHighConfidence(leg) {
   if (leg.highConfSide) return;
+  // Critical: never evaluate high-confidence before the window has actually
+  // closed. A mid-window price spike to >=HIGH_CONF_PRICE is normal noise,
+  // not a result — evaluating it early and freezing it was the bug that let
+  // a stale, pre-close reading get declared the winner even after price
+  // moved back the other way by the real close.
+  if (Date.now() < leg.closeAt) return;
   const upP = leg.upBid != null ? leg.upBid : leg.upAsk;
   const downP = leg.downBid != null ? leg.downBid : leg.downAsk;
-  if (upP != null && upP >= HIGH_CONF_PRICE) {
-    leg.highConfSide = 'up'; leg.highConfPrice = upP;
-  } else if (downP != null && downP >= HIGH_CONF_PRICE) {
-    leg.highConfSide = 'down'; leg.highConfPrice = downP;
+  let candidate = null, candidatePrice = null;
+  if (upP != null && upP >= HIGH_CONF_PRICE) { candidate = 'up'; candidatePrice = upP; }
+  else if (downP != null && downP >= HIGH_CONF_PRICE) { candidate = 'down'; candidatePrice = downP; }
+  if (!candidate) { leg.highConfCandidateSide = null; leg.highConfCandidateCount = 0; return; }
+  // Require the same side to read >=HIGH_CONF_PRICE on two separate post-close
+  // checks before locking it in, so a single noisy/stale tick can't decide it.
+  if (leg.highConfCandidateSide === candidate) {
+    leg.highConfCandidateCount = (leg.highConfCandidateCount || 0) + 1;
+  } else {
+    leg.highConfCandidateSide = candidate;
+    leg.highConfCandidateCount = 1;
+  }
+  if (leg.highConfCandidateCount >= 2) {
+    leg.highConfSide = candidate;
+    leg.highConfPrice = candidatePrice;
   }
 }
 
@@ -386,8 +404,22 @@ async function executeCombinedEntry(trade) {
   const hedgeSide = primarySide === 'up' ? 'down' : 'up';
   const primaryPrice = primarySide === 'up' ? f.upAsk : f.downAsk;
   const primaryTokenId = primarySide === 'up' ? f.upTokenId : f.downTokenId;
-  const hedgePrice = hedgeSide === 'up' ? v.upAsk : v.downAsk;
+  const hedgePriceRaw = hedgeSide === 'up' ? v.upAsk : v.downAsk;
   const hedgeTokenId = hedgeSide === 'up' ? v.upTokenId : v.downTokenId;
+
+  // Floor the hedge price at Polymarket's minimum tick (0.01) so a stale/zero
+  // quote can't blow up amountAtRisk / hedgePrice into an unbounded share
+  // count. At extreme entries (primary >= ~0.90) the hedge side is naturally
+  // very cheap, which already makes hedgeShares large (a cheap, high-multiple
+  // hedge is expected) — this floor only stops a genuine 0/near-0 quote from
+  // producing an literally unbounded order.
+  const MIN_HEDGE_PRICE = 0.01;
+  if (hedgePriceRaw < MIN_HEDGE_PRICE) {
+    trade.state = 'skipped';
+    log(`⛔ [${trade.label} ${f.slug}] skipped — hedge side ask ${hedgePriceRaw} is below the ${MIN_HEDGE_PRICE} floor (stale/illiquid quote), refusing to size off it`);
+    return;
+  }
+  const hedgePrice = hedgePriceRaw;
 
   // Step 2: divergence between the two markets' pricing of the hedge side, and the
   // live correlation factor derived from it.
@@ -593,7 +625,10 @@ async function mainLoop() {
         const legs = [];
         for (const t of allTrackedTrades()) { legs.push(t.fifteen); if (t.five) legs.push(t.five); }
         await Promise.all(legs.map(refreshLegPrices));
-        legs.forEach(updateHighConfidence);
+        // NOTE: high-confidence evaluation intentionally does NOT happen here.
+        // It only runs inside resolveLegAttempt (post-close, via the pending
+        // resolution poll below) so it can never lock in a winner based on a
+        // price read while the window is still open and trading.
       }
 
       if (engine.pending.length && now - engine.lastResolutionPoll >= RESOLUTION_POLL_MS) {
