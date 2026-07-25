@@ -105,7 +105,7 @@ const DISCOVERY_RETRY_MS  = 2000;
 // the real avgPrice from the exchange is used for accounting either way,
 // never this ceiling. If it doesn't fill, that's an acceptable outcome —
 // no retry, no resting order left behind to babysit.
-const SLIPPAGE_BUFFER = Number(process.env.HEDGE_SLIPPAGE_BUFFER || 0.03);
+const SLIPPAGE_BUFFER = Number(process.env.HEDGE_SLIPPAGE_BUFFER || 0.10);
 const RESOLUTION_POLL_MS  = 3000;
 const RESOLUTION_FALLBACK_MS = Number(process.env.HEDGE_RESOLUTION_FALLBACK_MS || 60000);
 
