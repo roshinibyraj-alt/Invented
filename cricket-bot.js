@@ -83,8 +83,8 @@
  *  through.
  *
  *  TRADER INTERFACE:
- *    trader.placeLimitBuy(tokenId, price, size) -> { id, filled, avgPrice, filledShares }
- *    trader.getOrder(orderId)                   -> { filled, avgPrice, filledShares }
+ *    trader.placeFokLimitOrder(tokenId, side, price, size) -> { id, isFilled, avgPrice, raw }
+ *    trader.reconcileToken(tokenId)                        -> { filledShares, avgPrice, orderId } | null
  * ═══════════════════════════════════════════════════════════════
  */
 
