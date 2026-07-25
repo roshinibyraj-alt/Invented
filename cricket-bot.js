@@ -210,7 +210,7 @@ function recordEquity() {
 //  HTTP / order helpers
 // ─────────────────────────────────────────
 async function getJSON(url) {
-  const res = await fetch(url, { headers: { 'User-Agent': 'polymarket-hedgebot/1.0' } });
+  const res = await fetch(url, { headers: { 'User-Agent': 'polymarket-hedgebot/1.0' }, signal: AbortSignal.timeout(8000) });
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${url}`);
   return res.json();
 }
@@ -243,7 +243,10 @@ async function placeTakerBuy(tokenId, quotedPrice, shares) {
     if (!traderHasOrderMethods()) return null;
     const limitPrice = Math.min(0.99, round2(quotedPrice + SLIPPAGE_BUFFER));
     try {
-      const resp = await trader.placeFokLimitOrder(tokenId, 'BUY', limitPrice, shares);
+      const resp = await Promise.race([
+        trader.placeFokLimitOrder(tokenId, 'BUY', limitPrice, shares),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('placeFokLimitOrder timed out after 15s')), 15000)),
+      ]);
       if (resp?.isFilled) {
         return { id: resp.id, filled: true, avgPrice: resp.avgPrice || limitPrice, filledShares: shares };
       }
