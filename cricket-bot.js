@@ -447,14 +447,13 @@ function freshTrade(assetDef, windowTs) {
   };
 }
 
-function affordable(shares, price) { return round2(shares * price) <= engine.bankroll; }
-
-// Steps 1-4: read prices, compute divergence/correlation, size, enter both legs together.
+// Steps 1-4: read prices, compute divergence/correlation, size, fire both legs
+// together — unconditionally and independently. Neither leg's fill status
+// gates the other; whichever fills, fills, and the bot just moves on.
 async function executeCombinedEntry(trade) {
   const f = trade.fifteen, v = trade.five;
-  if (f.upAsk == null || f.downAsk == null || v.upAsk == null || v.downAsk == null) return; // Step 1 not satisfied yet
+  if (f.upAsk == null || f.downAsk == null || v.upAsk == null || v.downAsk == null) return; // prices not loaded yet
 
-  // Step 1: best asks already sitting on f/v from refreshLegPrices().
   const primarySide = f.upAsk >= f.downAsk ? 'up' : 'down'; // market-favored side after first 10 minutes
   const hedgeSide = primarySide === 'up' ? 'down' : 'up';
   const primaryPrice = primarySide === 'up' ? f.upAsk : f.downAsk;
@@ -462,108 +461,66 @@ async function executeCombinedEntry(trade) {
   const hedgePriceRaw = hedgeSide === 'up' ? v.upAsk : v.downAsk;
   const hedgeTokenId = hedgeSide === 'up' ? v.upTokenId : v.downTokenId;
 
-  // Floor the hedge price at Polymarket's minimum tick (0.01) so a stale/zero
-  // quote can't blow up amountAtRisk / hedgePrice into an unbounded share
-  // count. At extreme entries (primary >= ~0.90) the hedge side is naturally
-  // very cheap, which already makes hedgeShares large (a cheap, high-multiple
-  // hedge is expected) — this floor only stops a genuine 0/near-0 quote from
-  // producing an literally unbounded order.
-  const MIN_HEDGE_PRICE = 0.01;
-  if (hedgePriceRaw < MIN_HEDGE_PRICE) {
-    trade.state = 'skipped';
-    log(`⛔ [${trade.label} ${f.slug}] skipped — hedge side ask ${hedgePriceRaw} is below the ${MIN_HEDGE_PRICE} floor (stale/illiquid quote), refusing to size off it`);
-    return;
-  }
-  const hedgePrice = hedgePriceRaw;
+  // Floor at Polymarket's minimum tick (0.01) — purely so the size math below
+  // can't divide by zero on a stale/zero quote. Not a trade filter.
+  const hedgePrice = Math.max(hedgePriceRaw, 0.01);
 
-  // Step 2: divergence between the two markets' pricing of the hedge side, and the
+  // Divergence between the two markets' pricing of the hedge side, and the
   // live correlation factor derived from it.
   const fifteenHedgeProb = hedgeSide === 'up' ? f.upAsk : f.downAsk;
   const fiveHedgeProb = hedgeSide === 'up' ? v.upAsk : v.downAsk;
   const divergence = round4(Math.abs(fifteenHedgeProb - fiveHedgeProb));
   const correlationFactor = round4(clamp(1 - divergence, CORR_FLOOR, CORR_CEIL));
 
-  if (!affordable(PRIMARY_SHARES, primaryPrice)) {
-    trade.state = 'skipped';
-    log(`⛔ [${trade.label} ${f.slug}] skipped — insufficient bankroll for primary leg (${PRIMARY_SHARES}sh @ ${primaryPrice.toFixed(3)})`);
-    return;
-  }
-
-  // Step 3: size.
   const amountAtRisk = round2(PRIMARY_SHARES * primaryPrice); // cost basis = max loss if primary resolves to zero
   const rawHedgeShares = amountAtRisk / hedgePrice;
-  const hedgeShares = round2(rawHedgeShares * correlationFactor);
+  // Floor at Polymarket's real 5-share minimum order size so the order isn't
+  // a guaranteed reject — not a strategy filter, just meeting the exchange's
+  // hard requirement.
+  const hedgeShares = Math.max(MIN_ORDER_SHARES, round2(rawHedgeShares * correlationFactor));
 
-  // Polymarket's live minimum order size on these crypto Up/Down markets is
-  // 5 shares (confirmed via Gamma: orderMinSize: 5) — an order under that is
-  // rejected outright. Check this BEFORE placing anything: if we bought the
-  // primary leg first and the hedge order then got rejected for being too
-  // small, we'd be left holding a naked, unhedged primary position exactly
-  // when low correlation said we needed the hedge most. Skip the whole
-  // combined trade instead — no primary without a viable hedge.
-  if (hedgeShares < MIN_ORDER_SHARES) {
-    trade.state = 'skipped';
-    log(`⛔ [${trade.label} ${f.slug}] skipped — computed hedge size ${hedgeShares}sh is below Polymarket's ${MIN_ORDER_SHARES}sh minimum order size; refusing to enter primary without a viable hedge`);
-    return;
-  }
-
-  if (!affordable(hedgeShares, hedgePrice)) {
-    trade.state = 'skipped';
-    log(`⛔ [${trade.label} ${f.slug}] skipped — insufficient bankroll for hedge leg (${hedgeShares}sh @ ${hedgePrice.toFixed(3)})`);
-    return;
-  }
-
-  // Step 4: enter both legs together.
-  const primaryResp = await placeTakerBuy(primaryTokenId, primaryPrice, PRIMARY_SHARES);
-
-  // Never invent a fill. A missing/failed response means nothing happened —
-  // don't attempt the hedge for a primary position that doesn't exist, and
-  // don't touch bankroll.
-  if (!primaryResp?.filled || !(primaryResp.filledShares > 0)) {
-    trade.state = 'skipped';
-    log(`⛔ [${trade.label} ${f.slug}] primary leg did not fill — combined trade aborted before attempting the hedge`);
-    return;
-  }
-
-  const pFillPrice = primaryResp.avgPrice;
-  const pShares = primaryResp.filledShares;
-  const pCost = round2(pShares * pFillPrice);
-  const pFee = estimateFee(pShares, pFillPrice);
-  engine.bankroll = round2(engine.bankroll - pCost - pFee);
-  engine.feesPaid = round2(engine.feesPaid + pFee);
-  trade.primary = { side: primarySide, shares: pShares, entryPrice: pFillPrice, cost: pCost, fee: pFee, filled: true, pnl: null };
-  registerTrade({ slug: f.slug, asset: trade.asset, step: '15m PRIMARY entry', side: primarySide, price: pFillPrice, shares: pShares, cost: pCost, fee: pFee });
-
-  const hedgeResp = await placeTakerBuy(hedgeTokenId, hedgePrice, hedgeShares);
-
-  if (!hedgeResp?.filled || !(hedgeResp.filledShares > 0)) {
-    // Primary is real and live; the hedge is not. Flag this loudly and
-    // distinctly instead of quietly recording it as a normal hedged trade —
-    // this position is currently naked and needs attention, not a shrug.
-    trade.divergence = divergence;
-    trade.correlationFactor = correlationFactor;
-    trade.state = 'entered-unhedged';
-    log(`🚨 [${trade.label} ${f.slug}] HEDGE LEG FAILED TO FILL — primary ${pShares}sh ${primarySide.toUpperCase()} @${pFillPrice.toFixed(3)} is live and UNHEDGED for this window | bankroll=$${engine.bankroll.toFixed(2)}`);
-    recordEquity();
-    return;
-  }
-
-  const hFillPrice = hedgeResp.avgPrice;
-  const hShares = hedgeResp.filledShares;
-  const hCost = round2(hShares * hFillPrice);
-  const hFee = estimateFee(hShares, hFillPrice);
-
-  engine.bankroll = round2(engine.bankroll - hCost - hFee);
-  engine.feesPaid = round2(engine.feesPaid + hFee);
-
-  trade.hedge = { side: hedgeSide, shares: hShares, entryPrice: hFillPrice, cost: hCost, fee: hFee, filled: true, pnl: null };
   trade.divergence = divergence;
   trade.correlationFactor = correlationFactor;
-  trade.state = 'entered';
 
-  registerTrade({ slug: v.slug, asset: trade.asset, step: '5m HEDGE entry', side: hedgeSide, price: hFillPrice, shares: hShares, cost: hCost, fee: hFee });
+  // Fire both legs together, independently.
+  const [primaryResp, hedgeResp] = await Promise.all([
+    placeTakerBuy(primaryTokenId, primaryPrice, PRIMARY_SHARES),
+    placeTakerBuy(hedgeTokenId, hedgePrice, hedgeShares),
+  ]);
 
-  log(`✅ [${trade.label} ${f.slug}] combined trade entered — PRIMARY ${pShares}sh ${primarySide.toUpperCase()} @${pFillPrice.toFixed(3)} ($${pCost.toFixed(2)}) | HEDGE ${hShares}sh ${hedgeSide.toUpperCase()} @${hFillPrice.toFixed(3)} ($${hCost.toFixed(2)}) | divergence=${divergence.toFixed(4)} correlation=${correlationFactor.toFixed(2)} | bankroll=$${engine.bankroll.toFixed(2)}`);
+  if (primaryResp?.filled && primaryResp.filledShares > 0) {
+    const pFillPrice = primaryResp.avgPrice;
+    const pShares = primaryResp.filledShares;
+    const pCost = round2(pShares * pFillPrice);
+    const pFee = estimateFee(pShares, pFillPrice);
+    engine.bankroll = round2(engine.bankroll - pCost - pFee);
+    engine.feesPaid = round2(engine.feesPaid + pFee);
+    trade.primary = { side: primarySide, shares: pShares, entryPrice: pFillPrice, cost: pCost, fee: pFee, filled: true, pnl: null };
+    registerTrade({ slug: f.slug, asset: trade.asset, step: '15m PRIMARY entry', side: primarySide, price: pFillPrice, shares: pShares, cost: pCost, fee: pFee });
+  }
+
+  if (hedgeResp?.filled && hedgeResp.filledShares > 0) {
+    const hFillPrice = hedgeResp.avgPrice;
+    const hShares = hedgeResp.filledShares;
+    const hCost = round2(hShares * hFillPrice);
+    const hFee = estimateFee(hShares, hFillPrice);
+    engine.bankroll = round2(engine.bankroll - hCost - hFee);
+    engine.feesPaid = round2(engine.feesPaid + hFee);
+    trade.hedge = { side: hedgeSide, shares: hShares, entryPrice: hFillPrice, cost: hCost, fee: hFee, filled: true, pnl: null };
+    registerTrade({ slug: v.slug, asset: trade.asset, step: '5m HEDGE entry', side: hedgeSide, price: hFillPrice, shares: hShares, cost: hCost, fee: hFee });
+  }
+
+  trade.state = 'entered'; // resolution logic settles whichever legs actually filled; unfilled legs default to 0 shares / 0 pnl
+
+  if (primaryResp?.filled && hedgeResp?.filled) {
+    log(`✅ [${trade.label} ${f.slug}] both legs filled — PRIMARY ${trade.primary.shares}sh ${primarySide.toUpperCase()} @${trade.primary.entryPrice.toFixed(3)} | HEDGE ${trade.hedge.shares}sh ${hedgeSide.toUpperCase()} @${trade.hedge.entryPrice.toFixed(3)} | bankroll=$${engine.bankroll.toFixed(2)}`);
+  } else if (primaryResp?.filled) {
+    log(`◻️  [${trade.label} ${f.slug}] primary filled, hedge didn't — moving on | bankroll=$${engine.bankroll.toFixed(2)}`);
+  } else if (hedgeResp?.filled) {
+    log(`◻️  [${trade.label} ${f.slug}] hedge filled, primary didn't — moving on | bankroll=$${engine.bankroll.toFixed(2)}`);
+  } else {
+    log(`◻️  [${trade.label} ${f.slug}] neither leg filled this round — moving on`);
+  }
   recordEquity();
 }
 
