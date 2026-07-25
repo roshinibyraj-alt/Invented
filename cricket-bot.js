@@ -57,10 +57,14 @@
  *  is a correlated hedge, not a perfect one. correlationFactor is the
  *  live proxy for how tightly they're tracking right now.
  *
- *  ENTRY STYLE: both legs are bought at the current best ask (taker
- *  fills, not resting maker orders) so both legs can be guaranteed to
- *  enter together at the same instant. Taker fees apply per
- *  HEDGE_TAKER_FEE_RATE (default 0; set to Polymarket's published
+ *  ENTRY STYLE: both legs are single-shot FOK (fill-or-kill) taker orders,
+ *  priced at the quoted ask plus a small slippage cushion (SLIPPAGE_BUFFER)
+ *  so they can walk a bit further into the book. FOK is atomic — it either
+ *  fully fills immediately or is killed outright, nothing in between and
+ *  nothing left resting afterward — so either outcome (filled or not) is a
+ *  final, unambiguous answer with no polling, cancelling, or retrying
+ *  needed. Taker fees apply per HEDGE_TAKER_FEE_RATE (default 0; set to
+ *  Polymarket's published
  *  crypto-category taker rate if you want realistic fee modeling).
  *
  *  RESOLUTION: each leg resolves independently, three tiers, fastest
@@ -92,13 +96,16 @@ const CLOB  = 'https://clob.polymarket.com';
 const TICK_MS             = 500;
 const PRICE_REFRESH_MS    = 1000;
 const DISCOVERY_RETRY_MS  = 2000;
-// How long we'll wait for a resting marketable order to actually confirm as
-// filled before giving up on it. FOK (instant fill-or-kill) was traded for
-// this because FOK gives up immediately if the full size isn't available
-// right that millisecond; resting + polling gives real time for a
-// counterparty to show up, which matters far more for fill rate than shaving
-// a few seconds off entry timing does.
-const ORDER_CONFIRM_TIMEOUT_MS = Number(process.env.HEDGE_ORDER_CONFIRM_TIMEOUT_MS || 10000);
+// FOK (fill-or-kill) taker order: a single shot at whatever liquidity is
+// immediately available. This buffer is added on top of the quoted ask so
+// the order can walk a bit further into the book instead of failing purely
+// because the top-of-book size was smaller than our order — it's slippage
+// tolerance, not a change to the pricing model (divergence/correlation math
+// still uses the quoted ask, not this padded execution price). If it fills,
+// the real avgPrice from the exchange is used for accounting either way,
+// never this ceiling. If it doesn't fill, that's an acceptable outcome —
+// no retry, no resting order left behind to babysit.
+const SLIPPAGE_BUFFER = Number(process.env.HEDGE_SLIPPAGE_BUFFER || 0.03);
 const RESOLUTION_POLL_MS  = 3000;
 const RESOLUTION_FALLBACK_MS = Number(process.env.HEDGE_RESOLUTION_FALLBACK_MS || 60000);
 
@@ -203,54 +210,46 @@ function describeOrderError(e) {
   return parts.join(' | ');
 }
 function traderHasOrderMethods() {
-  const ok = trader && typeof trader.placeGtcOrder === 'function' && typeof trader.waitForFill === 'function';
+  const ok = trader && typeof trader.placeFokLimitOrder === 'function';
   if (!ok && !warnedNoLimitMethod) {
     warnedNoLimitMethod = true;
-    slog('[hedgebot] ❌ LIVE trading needs trader.placeGtcOrder + trader.waitForFill on polymarket-trader.js — LIVE order placement will be skipped until added. DRY_RUN is unaffected.');
+    slog('[hedgebot] ❌ LIVE trading needs trader.placeFokLimitOrder on polymarket-trader.js — LIVE order placement will be skipped until added. DRY_RUN is unaffected.');
   }
   return ok;
 }
-// Buys at the current live ask (marketable — it crosses the spread against
-// resting sell orders, same as before) but now as a resting GTC order that
-// we poll for up to ORDER_CONFIRM_TIMEOUT_MS instead of an instant FOK
-// fill-or-kill. FOK gives up in the same millisecond if the full size isn't
-// immediately available; resting for a few seconds gives real liquidity a
-// chance to show up, which is what actually gets orders filled at this size.
-// Returns null ONLY for a genuine failure to even place the order — every
-// other outcome (filled, partially filled, timed out) comes back as an
-// explicit object so the caller never has to guess.
-async function placeTakerBuy(tokenId, price, shares) {
+// Single-shot FOK (fill-or-kill) taker order, priced with a slippage cushion
+// above the quoted ask so it has room to walk a bit further into the book.
+// FOK is atomic by design — it either fully fills right now or is killed
+// outright, nothing in between, and nothing left resting afterward. Combined
+// with Polymarket's documented behavior for these crypto Up/Down markets
+// (the API holds for the built-in taker delay and returns the FINAL result
+// synchronously), this one response is authoritative — no polling loop, no
+// cancel, no reconciliation needed for the normal case. Either outcome
+// (filled or not) is an acceptable, final answer — not filled just means no
+// trade happened, nothing left to clean up.
+async function placeTakerBuy(tokenId, quotedPrice, shares) {
   if (!DRY_RUN) {
     if (!traderHasOrderMethods()) return null;
-    let orderId = null;
+    const limitPrice = Math.min(0.99, round2(quotedPrice + SLIPPAGE_BUFFER));
     try {
-      const placed = await trader.placeGtcOrder(tokenId, 'BUY', price, shares);
-      orderId = placed?.id ?? null;
-      if (!orderId) { log(`❌ placeGtcOrder returned no order id for ${String(tokenId).slice(0, 10)}…`); return null; }
-      const result = await trader.waitForFill(orderId, ORDER_CONFIRM_TIMEOUT_MS);
-      if (result?.filled && result.filledSize > 0) {
-        return { id: orderId, filled: true, avgPrice: price, filledShares: result.filledSize };
+      const resp = await trader.placeFokLimitOrder(tokenId, 'BUY', limitPrice, shares);
+      if (resp?.isFilled) {
+        return { id: resp.id, filled: true, avgPrice: resp.avgPrice || limitPrice, filledShares: shares };
       }
-      // Not (fully) filled within the wait window — cancel whatever's left
-      // resting so it can't linger and surprise-fill later on its own, then
-      // report exactly what did or didn't happen. Never invent a number.
-      if (!result?.cancelled) { try { await trader.cancelOrder(orderId); } catch (_) {} }
-      const partial = result?.filledSize > 0 ? result.filledSize : 0;
-      log(`⏱️  order ${orderId.slice(0, 12)}… did not fully fill within ${ORDER_CONFIRM_TIMEOUT_MS}ms (filled ${partial}/${shares}) — cancelled remainder`);
-      return { id: orderId, filled: partial > 0, avgPrice: price, filledShares: partial };
+      log(`◻️  order for ${String(tokenId).slice(0, 10)}… not filled (FOK, limit ${limitPrice}) — no trade, nothing to clean up`);
+      return { id: resp?.id || null, filled: false, avgPrice: limitPrice, filledShares: 0 };
     } catch (e) {
       log(`❌ placeTakerBuy failed: ${describeOrderError(e)}`);
-      // Ambiguous failure (e.g. the confirm poll itself errored). If we did
-      // get an orderId before the error, check reality via the trader's own
-      // reconciliation instead of assuming either outcome.
-      if (orderId && typeof trader.reconcileToken === 'function') {
+      // Ambiguous failure (e.g. a genuine network/transport error, not a
+      // clean FOK rejection). Check reality once before reporting failure.
+      if (typeof trader.reconcileToken === 'function') {
         const reconciled = await trader.reconcileToken(tokenId).catch(() => null);
-        if (reconciled?.filledShares > 0) return { id: orderId, filled: true, avgPrice: reconciled.avgPrice || price, filledShares: reconciled.filledShares };
+        if (reconciled?.filledShares > 0) return { id: reconciled.orderId || null, filled: true, avgPrice: reconciled.avgPrice || limitPrice, filledShares: reconciled.filledShares };
       }
       return null;
     }
   }
-  return { id: `dry-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, filled: true, avgPrice: price, filledShares: shares };
+  return { id: `dry-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, filled: true, avgPrice: quotedPrice, filledShares: shares };
 }
 
 function parseMarketTokens(mk) {
