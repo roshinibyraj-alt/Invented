@@ -114,9 +114,8 @@ class PolymarketTrader {
     );
     const id        = resp?.orderID ?? resp?.id ?? null;
     const status    = resp?.status || (id ? 'UNKNOWN' : 'FAILED');
-    const statusLowerX = status.toLowerCase();
     const remaining = parseFloat(resp?.remaining_size ?? '999');
-    const isFilled  = statusLowerX === 'filled' || statusLowerX === 'matched' || (resp?.match_status || '').toLowerCase() === 'filled' || (resp?.match_status || '').toLowerCase() === 'matched' || remaining === 0;
+    const isFilled  = status === 'FILLED' || (resp?.match_status || '').toLowerCase() === 'filled' || remaining === 0;
     const avgPrice  = parseFloat(resp?.avg_fill_price || resp?.price || '0');
     if (id) this._log(`🏁 FOK BUY $${dollarAmount} → ${status} avg:${avgPrice} id:${id.slice(0,12)}…`);
     return { id, status, isFilled, avgPrice, raw: resp };
@@ -134,9 +133,8 @@ class PolymarketTrader {
     );
     const id        = resp?.orderID ?? resp?.id ?? null;
     const status    = resp?.status || (id ? 'UNKNOWN' : 'FAILED');
-    const statusLowerX = status.toLowerCase();
     const remaining = parseFloat(resp?.remaining_size ?? '999');
-    const isFilled  = statusLowerX === 'filled' || statusLowerX === 'matched' || (resp?.match_status || '').toLowerCase() === 'filled' || (resp?.match_status || '').toLowerCase() === 'matched' || remaining === 0;
+    const isFilled  = status === 'FILLED' || (resp?.match_status || '').toLowerCase() === 'filled' || remaining === 0;
     const avgPrice  = parseFloat(resp?.avg_fill_price || resp?.price || '0');
     if (id) this._log(`🏁 FOK SELL ${shares}sh → ${status} avg:${avgPrice} id:${id.slice(0,12)}…`);
     return { id, status, isFilled, avgPrice, raw: resp };
@@ -221,14 +219,11 @@ class PolymarketTrader {
       OrderType.FOK
     );
     const id = resp?.orderID ?? resp?.id ?? null;
-    const status = String(resp?.status ?? (id ? 'UNKNOWN' : 'FAILED'));
-    const statusLower = status.toLowerCase();
+    const status = resp?.status || (id ? 'UNKNOWN' : 'FAILED');
     const matchStatus = (resp?.match_status || '').toLowerCase();
-    const isFilled = statusLower === 'filled' || statusLower === 'matched' || matchStatus === 'filled' || matchStatus === 'matched' || (size > 0 && parseFloat(resp?.remaining_size || '999') === 0);
+    const isFilled = status === 'FILLED' || matchStatus === 'filled' || (size > 0 && parseFloat(resp?.remaining_size || '999') === 0);
     const avgPrice = parseFloat(resp?.avg_fill_price || resp?.price || price);
-    const errorDetail = resp?.error || resp?.errorMsg || resp?.message || null;
-    if (id) this._log(`🏁 FOK ${side} ${size}sh@${price} → ${status} avg:${avgPrice} id:${id.slice(0,12)}${errorDetail ? ` | reason: ${errorDetail}` : ''}`);
-    else this._log(`🏁 FOK ${side} ${size}sh@${price} → ${status} (no order id)${errorDetail ? ` | reason: ${errorDetail}` : ` | raw: ${JSON.stringify(resp).slice(0,200)}`}`);
+    if (id) this._log(`🏁 FOK ${side} ${size}sh@${price} → ${status} avg:${avgPrice} id:${id.slice(0,12)}`);
     return { id, status, isFilled, avgPrice, raw: resp };
   }
 
