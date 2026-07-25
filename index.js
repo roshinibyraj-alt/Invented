@@ -202,7 +202,7 @@ app.get('/', (_, res) => {
 
   function tradeCard(t) {
     if (!t) return '<div class="empty">No data yet</div>';
-    const stateMap = { 'entered': ['st-entered', '🟢 ENTERED'], 'resolved': ['st-resolved', '⌛ RESOLVED'], 'skipped': ['st-skipped', '⛔ SKIPPED'] };
+    const stateMap = { 'entered': ['st-entered', '🟢 ENTERED'], 'entered-unhedged': ['st-skipped', '🚨 UNHEDGED'], 'resolved': ['st-resolved', '⌛ RESOLVED'], 'skipped': ['st-skipped', '⛔ SKIPPED'] };
     const [stCls, stLabel] = stateMap[t.state] || ['st-wait', t.state.replace(/-/g, ' ').toUpperCase()];
     const corrLine = t.correlationFactor != null
       ? '<div class="corr-line">divergence ' + t.divergence.toFixed(4) + ' · correlation ' + t.correlationFactor.toFixed(2) + '</div>'
