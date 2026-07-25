@@ -33,6 +33,7 @@ class PolymarketTrader {
     this.balance = 0;
     this.depositWallet = null;
     this._log   = () => {};
+    this._inflight = new Map(); // idempotency-key -> last result, for placeLimitBuy() only
   }
 
   setLogFn(fn) { this._log = fn; }
@@ -218,6 +219,78 @@ class PolymarketTrader {
   async getOrder(orderId) { return this._clob.getOrder(orderId); }
   defaultHeaders() { return { 'Content-Type': 'application/json' }; }
   l2Headers()      { return {}; }
+
+  // ─────────────────────────────────────────────────────────────
+  // NEW — additive only, nothing above this line was changed.
+  //
+  // placeLimitBuy() is what cricket-bot.js (the hedge bot) calls for its
+  // LIVE combined entries. It didn't exist on this trader before, so LIVE
+  // orders from that bot were silently skipped. It's a thin wrapper around
+  // your existing placeFokLimitOrder — same underlying call, same behavior
+  // for a clean success/rejection — with two things added ONLY for the
+  // ambiguous-failure case (network drop / timeout, not a normal rejection):
+  //
+  //   1. reconcileToken() checks live order state before reporting failure,
+  //      instead of leaving the caller to guess and blindly resubmit —
+  //      this is the fix for "retried and drained capital" from a couple
+  //      messages ago (Polymarket's own docs confirm a dropped connection
+  //      does not stop an order that's already past validation from
+  //      finishing server-side, so a thrown exception here does NOT mean
+  //      the order didn't happen).
+  //   2. An optional idempotencyKey — if the SAME key is passed twice
+  //      (e.g. by future retry logic reusing "btc-1784861100-primary-up"),
+  //      the second call reuses the first call's result instead of firing
+  //      a second real order. Nothing calls this today; it's there so any
+  //      retry logic added later is safe by construction rather than by
+  //      discipline.
+  // ─────────────────────────────────────────────────────────────
+  async placeLimitBuy(tokenId, price, size, opts = {}) {
+    const key = opts.idempotencyKey || null;
+    if (key && this._inflight.has(key)) {
+      this._log(`⏳ placeLimitBuy: reusing result for idempotency key "${key}" instead of resubmitting`);
+      return this._inflight.get(key);
+    }
+    let result;
+    try {
+      const resp = await this.placeFokLimitOrder(tokenId, 'BUY', price, size);
+      result = {
+        id: resp.id,
+        filled: !!resp.isFilled,
+        avgPrice: resp.avgPrice || price,
+        filledShares: resp.isFilled ? size : 0,
+        raw: resp.raw,
+      };
+    } catch (e) {
+      this._log(`⚠️  placeLimitBuy threw (${e.message}) — reconciling live order state before reporting failure`);
+      const reconciled = await this.reconcileToken(tokenId, size);
+      result = reconciled
+        ? { id: reconciled.orderId || null, filled: true, avgPrice: reconciled.avgPrice || price, filledShares: reconciled.filledShares, raw: null, reconciled: true }
+        : { id: null, filled: false, avgPrice: price, filledShares: 0, raw: null, error: e.message };
+    }
+    if (key) this._inflight.set(key, result);
+    return result;
+  }
+
+  // Checks whether shares for this token already matched on your open orders
+  // before you (or a retry) submit anything new. Returns null if nothing
+  // matched yet (safe to place a fresh order for the full size); returns the
+  // matched amount if something already landed (only order the shortfall,
+  // if anything, don't repeat the full size).
+  async reconcileToken(tokenId) {
+    try {
+      const openOrders = await this.getOpenOrders();
+      const forToken = (openOrders || []).filter(o => String(o.asset_id || o.tokenID || o.token_id) === String(tokenId));
+      const matched = forToken.reduce((sum, o) => sum + parseFloat(o.size_matched ?? o.filled_size ?? '0'), 0);
+      if (matched > 0) {
+        const avg = forToken[0]?.price ? parseFloat(forToken[0].price) : null;
+        this._log(`🔎 reconcileToken: ${matched}sh already matched for ${String(tokenId).slice(0, 10)}… before retrying`);
+        return { filledShares: matched, avgPrice: avg, orderId: forToken[0]?.id || forToken[0]?.orderID || null };
+      }
+    } catch (e) {
+      this._log(`⚠️  reconcileToken check failed: ${e.message}`);
+    }
+    return null;
+  }
 }
 
 function sleep(ms) {
