@@ -92,6 +92,13 @@ const CLOB  = 'https://clob.polymarket.com';
 const TICK_MS             = 500;
 const PRICE_REFRESH_MS    = 1000;
 const DISCOVERY_RETRY_MS  = 2000;
+// How long we'll wait for a resting marketable order to actually confirm as
+// filled before giving up on it. FOK (instant fill-or-kill) was traded for
+// this because FOK gives up immediately if the full size isn't available
+// right that millisecond; resting + polling gives real time for a
+// counterparty to show up, which matters far more for fill rate than shaving
+// a few seconds off entry timing does.
+const ORDER_CONFIRM_TIMEOUT_MS = Number(process.env.HEDGE_ORDER_CONFIRM_TIMEOUT_MS || 10000);
 const RESOLUTION_POLL_MS  = 3000;
 const RESOLUTION_FALLBACK_MS = Number(process.env.HEDGE_RESOLUTION_FALLBACK_MS || 60000);
 
@@ -107,12 +114,15 @@ const ASSETS = [
   { key: 'eth', label: 'ETH', slugPrefix15: 'eth-updown-15m-', slugPrefix5: 'eth-updown-5m-' },
 ];
 
-const PRIMARY_SHARES = Number(process.env.HEDGE_PRIMARY_SHARES || 100);
+const PRIMARY_SHARES = Number(process.env.HEDGE_PRIMARY_SHARES || 15);
 // Correlation-factor bounds (Step 2). Floor keeps the hedge from
 // vanishing entirely when the two markets disagree a lot; ceiling caps
 // it at a full 1:1 dollar-matched hedge when they fully agree.
 const CORR_FLOOR = Number(process.env.HEDGE_CORR_FLOOR || 0.3);
 const CORR_CEIL  = Number(process.env.HEDGE_CORR_CEIL || 1.0);
+// Polymarket's live minimum order size on these crypto Up/Down markets
+// (confirmed via Gamma: orderMinSize: 5) — any order under this is rejected.
+const MIN_ORDER_SHARES = Number(process.env.HEDGE_MIN_ORDER_SHARES || 5);
 
 let DRY_RUN = (process.env.HEDGE_DRY_RUN || process.env.SPORTS_DRY_RUN || process.env.DRY_RUN || 'true').toLowerCase() === 'true';
 const STARTING_CAPITAL = Number(process.env.HEDGE_CAPITAL || 2000);
@@ -192,21 +202,53 @@ function describeOrderError(e) {
   if (extra) { try { parts.push(typeof extra === 'string' ? extra : JSON.stringify(extra)); } catch (_) {} }
   return parts.join(' | ');
 }
-function traderHasLimitMethod() {
-  const ok = trader && typeof trader.placeLimitBuy === 'function';
+function traderHasOrderMethods() {
+  const ok = trader && typeof trader.placeGtcOrder === 'function' && typeof trader.waitForFill === 'function';
   if (!ok && !warnedNoLimitMethod) {
     warnedNoLimitMethod = true;
-    slog('[hedgebot] ❌ LIVE trading needs trader.placeLimitBuy on polymarket-trader.js — LIVE order placement will be skipped until added. DRY_RUN is unaffected.');
+    slog('[hedgebot] ❌ LIVE trading needs trader.placeGtcOrder + trader.waitForFill on polymarket-trader.js — LIVE order placement will be skipped until added. DRY_RUN is unaffected.');
   }
   return ok;
 }
-// Buys at the current live ask (marketable / taker) so both legs of a combined
-// trade fill together at the same instant, instead of resting and waiting.
+// Buys at the current live ask (marketable — it crosses the spread against
+// resting sell orders, same as before) but now as a resting GTC order that
+// we poll for up to ORDER_CONFIRM_TIMEOUT_MS instead of an instant FOK
+// fill-or-kill. FOK gives up in the same millisecond if the full size isn't
+// immediately available; resting for a few seconds gives real liquidity a
+// chance to show up, which is what actually gets orders filled at this size.
+// Returns null ONLY for a genuine failure to even place the order — every
+// other outcome (filled, partially filled, timed out) comes back as an
+// explicit object so the caller never has to guess.
 async function placeTakerBuy(tokenId, price, shares) {
   if (!DRY_RUN) {
-    if (!traderHasLimitMethod()) return null;
-    try { return await trader.placeLimitBuy(tokenId, price, shares); }
-    catch (e) { log(`❌ placeLimitBuy failed: ${describeOrderError(e)}`); return null; }
+    if (!traderHasOrderMethods()) return null;
+    let orderId = null;
+    try {
+      const placed = await trader.placeGtcOrder(tokenId, 'BUY', price, shares);
+      orderId = placed?.id ?? null;
+      if (!orderId) { log(`❌ placeGtcOrder returned no order id for ${String(tokenId).slice(0, 10)}…`); return null; }
+      const result = await trader.waitForFill(orderId, ORDER_CONFIRM_TIMEOUT_MS);
+      if (result?.filled && result.filledSize > 0) {
+        return { id: orderId, filled: true, avgPrice: price, filledShares: result.filledSize };
+      }
+      // Not (fully) filled within the wait window — cancel whatever's left
+      // resting so it can't linger and surprise-fill later on its own, then
+      // report exactly what did or didn't happen. Never invent a number.
+      if (!result?.cancelled) { try { await trader.cancelOrder(orderId); } catch (_) {} }
+      const partial = result?.filledSize > 0 ? result.filledSize : 0;
+      log(`⏱️  order ${orderId.slice(0, 12)}… did not fully fill within ${ORDER_CONFIRM_TIMEOUT_MS}ms (filled ${partial}/${shares}) — cancelled remainder`);
+      return { id: orderId, filled: partial > 0, avgPrice: price, filledShares: partial };
+    } catch (e) {
+      log(`❌ placeTakerBuy failed: ${describeOrderError(e)}`);
+      // Ambiguous failure (e.g. the confirm poll itself errored). If we did
+      // get an orderId before the error, check reality via the trader's own
+      // reconciliation instead of assuming either outcome.
+      if (orderId && typeof trader.reconcileToken === 'function') {
+        const reconciled = await trader.reconcileToken(tokenId).catch(() => null);
+        if (reconciled?.filledShares > 0) return { id: orderId, filled: true, avgPrice: reconciled.avgPrice || price, filledShares: reconciled.filledShares };
+      }
+      return null;
+    }
   }
   return { id: `dry-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, filled: true, avgPrice: price, filledShares: shares };
 }
@@ -439,6 +481,19 @@ async function executeCombinedEntry(trade) {
   const rawHedgeShares = amountAtRisk / hedgePrice;
   const hedgeShares = round2(rawHedgeShares * correlationFactor);
 
+  // Polymarket's live minimum order size on these crypto Up/Down markets is
+  // 5 shares (confirmed via Gamma: orderMinSize: 5) — an order under that is
+  // rejected outright. Check this BEFORE placing anything: if we bought the
+  // primary leg first and the hedge order then got rejected for being too
+  // small, we'd be left holding a naked, unhedged primary position exactly
+  // when low correlation said we needed the hedge most. Skip the whole
+  // combined trade instead — no primary without a viable hedge.
+  if (hedgeShares < MIN_ORDER_SHARES) {
+    trade.state = 'skipped';
+    log(`⛔ [${trade.label} ${f.slug}] skipped — computed hedge size ${hedgeShares}sh is below Polymarket's ${MIN_ORDER_SHARES}sh minimum order size; refusing to enter primary without a viable hedge`);
+    return;
+  }
+
   if (!affordable(hedgeShares, hedgePrice)) {
     trade.state = 'skipped';
     log(`⛔ [${trade.label} ${f.slug}] skipped — insufficient bankroll for hedge leg (${hedgeShares}sh @ ${hedgePrice.toFixed(3)})`);
@@ -447,31 +502,52 @@ async function executeCombinedEntry(trade) {
 
   // Step 4: enter both legs together.
   const primaryResp = await placeTakerBuy(primaryTokenId, primaryPrice, PRIMARY_SHARES);
-  const hedgeResp = await placeTakerBuy(hedgeTokenId, hedgePrice, hedgeShares);
-  if (!primaryResp?.filled || !hedgeResp?.filled) {
-    log(`⚠️  [${trade.label} ${f.slug}] combined entry incomplete — primary filled=${!!primaryResp?.filled}, hedge filled=${!!hedgeResp?.filled}`);
+
+  // Never invent a fill. A missing/failed response means nothing happened —
+  // don't attempt the hedge for a primary position that doesn't exist, and
+  // don't touch bankroll.
+  if (!primaryResp?.filled || !(primaryResp.filledShares > 0)) {
+    trade.state = 'skipped';
+    log(`⛔ [${trade.label} ${f.slug}] primary leg did not fill — combined trade aborted before attempting the hedge`);
+    return;
   }
 
-  const pFillPrice = primaryResp?.avgPrice ?? primaryPrice;
-  const pShares = primaryResp?.filledShares ?? PRIMARY_SHARES;
+  const pFillPrice = primaryResp.avgPrice;
+  const pShares = primaryResp.filledShares;
   const pCost = round2(pShares * pFillPrice);
   const pFee = estimateFee(pShares, pFillPrice);
+  engine.bankroll = round2(engine.bankroll - pCost - pFee);
+  engine.feesPaid = round2(engine.feesPaid + pFee);
+  trade.primary = { side: primarySide, shares: pShares, entryPrice: pFillPrice, cost: pCost, fee: pFee, filled: true, pnl: null };
+  registerTrade({ slug: f.slug, asset: trade.asset, step: '15m PRIMARY entry', side: primarySide, price: pFillPrice, shares: pShares, cost: pCost, fee: pFee });
 
-  const hFillPrice = hedgeResp?.avgPrice ?? hedgePrice;
-  const hShares = hedgeResp?.filledShares ?? hedgeShares;
+  const hedgeResp = await placeTakerBuy(hedgeTokenId, hedgePrice, hedgeShares);
+
+  if (!hedgeResp?.filled || !(hedgeResp.filledShares > 0)) {
+    // Primary is real and live; the hedge is not. Flag this loudly and
+    // distinctly instead of quietly recording it as a normal hedged trade —
+    // this position is currently naked and needs attention, not a shrug.
+    trade.divergence = divergence;
+    trade.correlationFactor = correlationFactor;
+    trade.state = 'entered-unhedged';
+    log(`🚨 [${trade.label} ${f.slug}] HEDGE LEG FAILED TO FILL — primary ${pShares}sh ${primarySide.toUpperCase()} @${pFillPrice.toFixed(3)} is live and UNHEDGED for this window | bankroll=$${engine.bankroll.toFixed(2)}`);
+    recordEquity();
+    return;
+  }
+
+  const hFillPrice = hedgeResp.avgPrice;
+  const hShares = hedgeResp.filledShares;
   const hCost = round2(hShares * hFillPrice);
   const hFee = estimateFee(hShares, hFillPrice);
 
-  engine.bankroll = round2(engine.bankroll - pCost - pFee - hCost - hFee);
-  engine.feesPaid = round2(engine.feesPaid + pFee + hFee);
+  engine.bankroll = round2(engine.bankroll - hCost - hFee);
+  engine.feesPaid = round2(engine.feesPaid + hFee);
 
-  trade.primary = { side: primarySide, shares: pShares, entryPrice: pFillPrice, cost: pCost, fee: pFee, filled: true, pnl: null };
   trade.hedge = { side: hedgeSide, shares: hShares, entryPrice: hFillPrice, cost: hCost, fee: hFee, filled: true, pnl: null };
   trade.divergence = divergence;
   trade.correlationFactor = correlationFactor;
   trade.state = 'entered';
 
-  registerTrade({ slug: f.slug, asset: trade.asset, step: '15m PRIMARY entry', side: primarySide, price: pFillPrice, shares: pShares, cost: pCost, fee: pFee });
   registerTrade({ slug: v.slug, asset: trade.asset, step: '5m HEDGE entry', side: hedgeSide, price: hFillPrice, shares: hShares, cost: hCost, fee: hFee });
 
   log(`✅ [${trade.label} ${f.slug}] combined trade entered — PRIMARY ${pShares}sh ${primarySide.toUpperCase()} @${pFillPrice.toFixed(3)} ($${pCost.toFixed(2)}) | HEDGE ${hShares}sh ${hedgeSide.toUpperCase()} @${hFillPrice.toFixed(3)} ($${hCost.toFixed(2)}) | divergence=${divergence.toFixed(4)} correlation=${correlationFactor.toFixed(2)} | bankroll=$${engine.bankroll.toFixed(2)}`);
@@ -480,7 +556,7 @@ async function executeCombinedEntry(trade) {
 
 function resolveTradeIfReady(trade) {
   if (!trade.fifteen.resolved || !trade.five.resolved) return false;
-  if (trade.state !== 'entered' && trade.state !== 'pending-resolution') return true; // was skipped, nothing to settle
+  if (trade.state !== 'entered' && trade.state !== 'entered-unhedged' && trade.state !== 'pending-resolution') return true; // was skipped, nothing to settle
 
   const primaryPayout = trade.primary.side === trade.fifteen.winner ? round2(trade.primary.shares * 1) : 0;
   const primaryPnl = round2(primaryPayout - trade.primary.cost - trade.primary.fee);
@@ -527,11 +603,11 @@ function unrealizedForLeg(leg, position) {
   return round2(position.shares * mark - position.cost);
 }
 function unrealizedForTrade(trade) {
-  if (trade.state !== 'entered' && trade.state !== 'pending-resolution') return 0;
+  if (trade.state !== 'entered' && trade.state !== 'entered-unhedged' && trade.state !== 'pending-resolution') return 0;
   return round2(unrealizedForLeg(trade.fifteen, trade.primary) + unrealizedForLeg(trade.five, trade.hedge));
 }
 function openCostForTrade(trade) {
-  if (trade.state !== 'entered' && trade.state !== 'pending-resolution') return 0;
+  if (trade.state !== 'entered' && trade.state !== 'entered-unhedged' && trade.state !== 'pending-resolution') return 0;
   return round2(trade.primary.cost + trade.hedge.cost);
 }
 function allTrackedTrades() {
@@ -559,7 +635,7 @@ async function tickAsset(assetDef, now) {
 
   // Roll over to a fresh 15-minute window.
   if (!trade || trade.windowTs !== windowTs) {
-    if (trade && (trade.state === 'entered' || trade.state === 'pending-resolution')) {
+    if (trade && (trade.state === 'entered' || trade.state === 'entered-unhedged' || trade.state === 'pending-resolution')) {
       trade.state = 'pending-resolution';
       engine.pending.push(trade);
       if (engine.pending.length > MAX_PENDING_RESOLUTIONS) {
@@ -592,7 +668,7 @@ async function tickAsset(assetDef, now) {
   }
 
   // Once both legs are discovered and priced, enter the combined trade.
-  if (trade.five && trade.fifteen.discovered && trade.five.discovered && trade.state !== 'entered' && trade.state !== 'skipped' && engine.tradingEnabled) {
+  if (trade.five && trade.fifteen.discovered && trade.five.discovered && trade.state !== 'entered' && trade.state !== 'entered-unhedged' && trade.state !== 'skipped' && engine.tradingEnabled) {
     await refreshLegPrices(trade.fifteen);
     await refreshLegPrices(trade.five);
     await executeCombinedEntry(trade);
@@ -724,6 +800,9 @@ async function init(privateKey, emit, slogFn) {
   slog(`[hedgebot] ⚙️  Each 15-min window: buy ${PRIMARY_SHARES}sh of the market-favored side at the 10-minute mark, hedged by the opposite side on the last 5-min segment. Hedge size = (primary cost at risk / hedge ask) × live correlation factor (clamped ${CORR_FLOOR}-${CORR_CEIL}, derived from price divergence between the two markets).`);
   slog(`[hedgebot] ⚙️  Resolution: official Gamma > high-confidence live price (>=${HIGH_CONF_PRICE}) > ${Math.round(RESOLUTION_FALLBACK_MS / 1000)}s live-price fallback — each leg resolves independently, combined P&L booked once both are done.`);
   slog(`[hedgebot] ⚙️  Starting bankroll $${STARTING_CAPITAL} (shared across BTC+ETH) | taker fee rate ${TAKER_FEE_RATE} | never enters a window it joins mid-way through`);
+  if (PRIMARY_SHARES < MIN_ORDER_SHARES) {
+    slog(`[hedgebot] ⚠️  HEDGE_PRIMARY_SHARES (${PRIMARY_SHARES}) is below Polymarket's ${MIN_ORDER_SHARES}sh minimum order size — every primary order would be rejected. Raise it.`);
+  }
   slog(`[hedgebot] ${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
   trader = new PolymarketTrader(privateKey);
