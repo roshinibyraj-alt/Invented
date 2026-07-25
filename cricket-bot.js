@@ -111,10 +111,21 @@ const RESOLUTION_FALLBACK_MS = Number(process.env.HEDGE_RESOLUTION_FALLBACK_MS |
 
 const FIFTEEN_SECONDS = 900; // 15-minute window duration
 const FIVE_SECONDS    = 300; // 5-minute window duration
-// How far into the 15-min window the hedge leg's 5-min segment opens
-// (and where the combined trade is entered). 600s = the 10:00 mark,
-// i.e. the LAST 5-minute segment of the 15-minute window.
+// How far into the 15-min window the hedge leg's 5-min segment opens.
+// 600s = the 10:00 mark, i.e. the LAST 5-minute segment of the 15-minute
+// window. This must stay exactly 600 — it's a real Polymarket market epoch
+// (300s-aligned), not a tunable trigger time. Changing it breaks slug
+// resolution (the 5-min market simply won't exist at any other offset).
 const HEDGE_ENTRY_OFFSET_SECONDS = 600;
+// Extra delay AFTER the hedge window opens before the bot actually acts on
+// it (discovers the leg + fires the combined entry). Gives the market a
+// few seconds to build up liquidity right after the fresh 5-min segment
+// opens, instead of firing on the very first tick. Does not change the
+// market/slug used — only when the bot pulls the trigger on it. Since the
+// 5-min segment opens at the same instant as the 15-min window's 10:00
+// mark, this single delay pushes BOTH the primary (15m) and hedge (5m)
+// entry to the 10:05 mark together.
+const ENTRY_TRIGGER_DELAY_SECONDS = Number(process.env.HEDGE_ENTRY_TRIGGER_DELAY_SECONDS || 5);
 
 const ASSETS = [
   { key: 'btc', label: 'BTC', slugPrefix15: 'btc-updown-15m-', slugPrefix5: 'btc-updown-5m-' },
@@ -654,12 +665,16 @@ async function tickAsset(assetDef, now) {
     await discoverLeg(trade.fifteen);
   }
 
-  // Once we're at the 10-minute mark, create + discover the hedge (last 5-min segment) market.
+  // Once we're at the 10-minute mark (plus the trigger delay), create +
+  // discover the hedge (last 5-min segment) market. hedgeWindowTs stays the
+  // real 600s-aligned market epoch (used for the slug); triggerAt is when
+  // the bot actually acts on it.
   const hedgeWindowTs = windowTs + HEDGE_ENTRY_OFFSET_SECONDS;
-  if (!trade.five && nowSec >= hedgeWindowTs) {
+  const hedgeTriggerAt = hedgeWindowTs + ENTRY_TRIGGER_DELAY_SECONDS;
+  if (!trade.five && nowSec >= hedgeTriggerAt) {
     trade.five = freshLeg(assetDef.slugPrefix5, hedgeWindowTs, FIVE_SECONDS);
     trade.state = 'discovering-five';
-    log(`🕐 [${assetDef.label}] entering hedge window — discovering last-5m segment market ${trade.five.slug}…`);
+    log(`🕐 [${assetDef.label}] entering hedge window (+${ENTRY_TRIGGER_DELAY_SECONDS}s buffer) — discovering last-5m segment market ${trade.five.slug}…`);
   }
   if (trade.five && !trade.five.discovered && now - trade.five.lastDiscoveryAttempt >= DISCOVERY_RETRY_MS) {
     trade.five.lastDiscoveryAttempt = now;
@@ -772,6 +787,7 @@ function buildState() {
     primaryShares: PRIMARY_SHARES,
     corrFloor: CORR_FLOOR, corrCeil: CORR_CEIL,
     fifteenSeconds: FIFTEEN_SECONDS, fiveSeconds: FIVE_SECONDS, hedgeEntryOffsetSeconds: HEDGE_ENTRY_OFFSET_SECONDS,
+    entryTriggerDelaySeconds: ENTRY_TRIGGER_DELAY_SECONDS,
   };
 }
 function getStatus() { return buildState(); }
