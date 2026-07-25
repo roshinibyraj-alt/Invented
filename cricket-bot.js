@@ -1,838 +1,316 @@
 'use strict';
 
-/**
- * ═══════════════════════════════════════════════════════════════
- *  BTC + ETH 15-MIN / 5-MIN CORRELATED HEDGE ENGINE
- * ═══════════════════════════════════════════════════════════════
- *
- *  Replaces the old rung/martingale strategy entirely. For EACH asset
- *  independently, every 15-minute Up/Down window gets ONE combined
- *  trade: a primary leg on the 15-min market, hedged by an offsetting
- *  leg on the LAST 5-minute segment inside that same 15-min window
- *  (minutes 10-15 — the only 5-min window that closes at the exact
- *  same instant as the 15-min window, so it's the most correlated
- *  hedge available). Both legs are entered TOGETHER, at the moment
- *  the last 5-min segment opens (10 minutes into the 15-min window).
- *
- *  THE 4 STEPS, EVERY TIME A COMBINED TRADE IS ENTERED:
- *
- *  1. READ BEST PRICES — pull live best ask for Up and Down on both
- *     the 15-min market and the last 5-min market.
- *
- *  2. CHECK DIVERGENCE / CORRELATION — compare the implied probability
- *     of the hedge side between the two markets:
- *       divergence = |15m_hedge_side_ask - 5m_hedge_side_ask|
- *       correlationFactor = clamp(1 - divergence, CORR_FLOOR, CORR_CEIL)
- *     Small divergence (markets agree) -> correlationFactor near 1
- *     (full hedge). Large divergence (markets disagree) -> smaller
- *     hedge, because the two windows are behaving less like the same
- *     bet right now.
- *
- *  3. SIZE OFF LIVE ASK — primary leg is a fixed base size. Hedge leg
- *     is sized to commit the same dollar amount that's actually at
- *     risk on the primary leg:
- *       amountAtRisk    = primaryShares * primaryEntryPrice   (= cost
- *                          basis = what you lose if primary resolves
- *                          to zero)
- *       rawHedgeShares  = amountAtRisk / hedgeSideAsk
- *       hedgeShares     = rawHedgeShares * correlationFactor
- *     This is a dollar-matched hedge, not a payout-matched one — it
- *     commits comparable capital to the offsetting bet, scaled down
- *     when the live data says the two markets are diverging.
- *
- *  4. ENTER BOTH LEGS TOGETHER — primary buy on the 15-min market and
- *     hedge buy on the 5-min market are placed as one combined trade,
- *     at the same tick.
- *
- *  WHY THE LAST 5-MIN SEGMENT: 15-min windows are aligned to 900s
- *  epoch boundaries; 5-min windows to 300s boundaries. Since 900 is
- *  divisible by 300, the 5-min window starting 600s into a 15-min
- *  window closes at EXACTLY the same instant as the 15-min window.
- *  Earlier segments (0-5, 5-10) don't share that closing instant and
- *  aren't used.
- *
- *  IMPORTANT CAVEAT: the two markets reference different opening
- *  prices (15-min window open vs. last-5-min segment open), so even
- *  though they close simultaneously, they are NOT the same bet — this
- *  is a correlated hedge, not a perfect one. correlationFactor is the
- *  live proxy for how tightly they're tracking right now.
- *
- *  ENTRY STYLE: both legs are single-shot FOK (fill-or-kill) taker orders,
- *  priced at the quoted ask plus a small slippage cushion (SLIPPAGE_BUFFER)
- *  so they can walk a bit further into the book. FOK is atomic — it either
- *  fully fills immediately or is killed outright, nothing in between and
- *  nothing left resting afterward — so either outcome (filled or not) is a
- *  final, unambiguous answer with no polling, cancelling, or retrying
- *  needed. Taker fees apply per HEDGE_TAKER_FEE_RATE (default 0; set to
- *  Polymarket's published
- *  crypto-category taker rate if you want realistic fee modeling).
- *
- *  RESOLUTION: each leg resolves independently, three tiers, fastest
- *  available wins:
- *    1. Official — Polymarket Gamma's `closed` + `outcomePrices`.
- *    2. High-confidence live price — either side crossing HIGH_CONF_PRICE
- *       (default 0.90) is treated as the de-facto winner immediately.
- *    3. Live-price fallback — if neither resolves within
- *       RESOLUTION_FALLBACK_MS after close, use whichever side has the
- *       higher live price.
- *  Combined trade P&L = primary leg P&L + hedge leg P&L, recorded once
- *  BOTH legs have resolved.
- *
- *  STARTUP: if started mid-window, waits for the next fresh 15-minute
- *  boundary before opening any trade — never joins a window partway
- *  through.
- *
- *  TRADER INTERFACE:
- *    trader.placeFokLimitOrder(tokenId, side, price, size) -> { id, isFilled, avgPrice, raw }
- *    trader.reconcileToken(tokenId)                        -> { filledShares, avgPrice, orderId } | null
- * ═══════════════════════════════════════════════════════════════
- */
-
-const PolymarketTrader = require('./polymarket-trader');
-
-const GAMMA = 'https://gamma-api.polymarket.com';
-const CLOB  = 'https://clob.polymarket.com';
-
-const TICK_MS             = 500;
-const PRICE_REFRESH_MS    = 1000;
-const DISCOVERY_RETRY_MS  = 2000;
-// FOK (fill-or-kill) taker order: a single shot at whatever liquidity is
-// immediately available. This buffer is added on top of the quoted ask so
-// the order can walk a bit further into the book instead of failing purely
-// because the top-of-book size was smaller than our order — it's slippage
-// tolerance, not a change to the pricing model (divergence/correlation math
-// still uses the quoted ask, not this padded execution price). If it fills,
-// the real avgPrice from the exchange is used for accounting either way,
-// never this ceiling. If it doesn't fill, that's an acceptable outcome —
-// no retry, no resting order left behind to babysit.
-const SLIPPAGE_BUFFER = Number(process.env.HEDGE_SLIPPAGE_BUFFER || 0.10);
-const RESOLUTION_POLL_MS  = 3000;
-const RESOLUTION_FALLBACK_MS = Number(process.env.HEDGE_RESOLUTION_FALLBACK_MS || 60000);
-
-const FIFTEEN_SECONDS = 900; // 15-minute window duration
-const FIVE_SECONDS    = 300; // 5-minute window duration
-// How far into the 15-min window the hedge leg's 5-min segment opens.
-// 600s = the 10:00 mark, i.e. the LAST 5-minute segment of the 15-minute
-// window. This must stay exactly 600 — it's a real Polymarket market epoch
-// (300s-aligned), not a tunable trigger time. Changing it breaks slug
-// resolution (the 5-min market simply won't exist at any other offset).
-const HEDGE_ENTRY_OFFSET_SECONDS = 600;
-// Extra delay AFTER the hedge window opens before the bot actually acts on
-// it (discovers the leg + fires the combined entry). Gives the market a
-// few seconds to build up liquidity right after the fresh 5-min segment
-// opens, instead of firing on the very first tick. Does not change the
-// market/slug used — only when the bot pulls the trigger on it. Since the
-// 5-min segment opens at the same instant as the 15-min window's 10:00
-// mark, this single delay pushes BOTH the primary (15m) and hedge (5m)
-// entry to the 10:05 mark together.
-const ENTRY_TRIGGER_DELAY_SECONDS = Number(process.env.HEDGE_ENTRY_TRIGGER_DELAY_SECONDS || 5);
-
-const ASSETS = [
-  { key: 'btc', label: 'BTC', slugPrefix15: 'btc-updown-15m-', slugPrefix5: 'btc-updown-5m-' },
-  { key: 'eth', label: 'ETH', slugPrefix15: 'eth-updown-15m-', slugPrefix5: 'eth-updown-5m-' },
-];
-
-const PRIMARY_SHARES = Number(process.env.HEDGE_PRIMARY_SHARES || 15);
-// Correlation-factor bounds (Step 2). Floor keeps the hedge from
-// vanishing entirely when the two markets disagree a lot; ceiling caps
-// it at a full 1:1 dollar-matched hedge when they fully agree.
-const CORR_FLOOR = Number(process.env.HEDGE_CORR_FLOOR || 0.3);
-const CORR_CEIL  = Number(process.env.HEDGE_CORR_CEIL || 1.0);
-// Polymarket's live minimum order size on these crypto Up/Down markets
-// (confirmed via Gamma: orderMinSize: 5) — any order under this is rejected.
-const MIN_ORDER_SHARES = Number(process.env.HEDGE_MIN_ORDER_SHARES || 5);
-
-let DRY_RUN = (process.env.HEDGE_DRY_RUN || process.env.SPORTS_DRY_RUN || process.env.DRY_RUN || 'true').toLowerCase() === 'true';
-const STARTING_CAPITAL = Number(process.env.HEDGE_CAPITAL || 2000);
-// Both legs are taker fills (bought at the live ask) — set this to
-// Polymarket's published crypto-category taker rate if you want
-// realistic fee modeling; 0 by default for clean demo P&L.
-const TAKER_FEE_RATE = Number(process.env.HEDGE_TAKER_FEE_RATE || 0);
-const MAX_PENDING_RESOLUTIONS = 40;
-
-// If price crosses this threshold (or its complement) in the live book, treat that side as the
-// de-facto winner immediately instead of waiting for RESOLUTION_FALLBACK_MS.
-const HIGH_CONF_PRICE = Number(process.env.RESOLUTION_HIGH_CONF_PRICE || 0.90);
-
-function round2(n) { return Math.round(n * 100) / 100; }
-function round4(n) { return Math.round(n * 10000) / 10000; }
-function clamp(n, lo, hi) { return Math.max(lo, Math.min(hi, n)); }
-function estimateFee(shares, price) {
-  if (TAKER_FEE_RATE <= 0) return 0;
-  return round2(shares * TAKER_FEE_RATE * price * (1 - price));
-}
-
-let emitFn = () => {};
-let slog = () => {};
-let trader = null;
-let warnedNoLimitMethod = false;
-let tradeSeq = 0;
-
-const engine = {
-  tradingEnabled: true,
-  bankroll: STARTING_CAPITAL,
-  capital: STARTING_CAPITAL,
-  realizedPnl: 0,
-  feesPaid: 0,
-  wins: 0, losses: 0,
-  current: { btc: null, eth: null }, // active HedgeTrade per asset, not yet closed out
-  pending: [],                        // trades whose windows have closed, awaiting leg resolution
-  history: [],                        // resolved combined trades, most recent first
-  logs: [],
-  trades: [],
-  equityCurve: [{ t: Date.now(), equity: STARTING_CAPITAL }],
-  lastPriceFetch: 0,
-  lastResolutionPoll: 0,
-  waitingForBoundary: true,
-  boundaryWindowTs: null,
-};
-
-// ─────────────────────────────────────────
-//  Logging / bookkeeping
-// ─────────────────────────────────────────
-function log(msg) {
-  const line = `[${new Date().toISOString().slice(11, 19)}] ${msg}`;
-  engine.logs.push(line);
-  if (engine.logs.length > 500) engine.logs.shift();
-  slog(`[hedgebot] ${line}`);
-}
-function registerTrade(t) {
-  const trade = { seq: ++tradeSeq, time: new Date().toISOString().slice(11, 19), ...t };
-  engine.trades.push(trade);
-  if (engine.trades.length > 300) engine.trades.shift();
-}
-function recordEquity() {
-  engine.equityCurve.push({ t: Date.now(), equity: round2(engine.bankroll + openPositionsMTM()) });
-  if (engine.equityCurve.length > 1000) engine.equityCurve.shift();
-}
-
-// ─────────────────────────────────────────
-//  HTTP / order helpers
-// ─────────────────────────────────────────
-async function getJSON(url) {
-  const res = await fetch(url, { headers: { 'User-Agent': 'polymarket-hedgebot/1.0' }, signal: AbortSignal.timeout(8000) });
-  if (!res.ok) throw new Error(`HTTP ${res.status}: ${url}`);
-  return res.json();
-}
-function describeOrderError(e) {
-  const parts = [e?.message || String(e)];
-  const extra = e?.response?.data ?? e?.data ?? e?.body ?? null;
-  if (extra) { try { parts.push(typeof extra === 'string' ? extra : JSON.stringify(extra)); } catch (_) {} }
-  return parts.join(' | ');
-}
-function traderHasOrderMethods() {
-  const ok = trader && typeof trader.placeFokLimitOrder === 'function';
-  if (!ok && !warnedNoLimitMethod) {
-    warnedNoLimitMethod = true;
-    slog('[hedgebot] ❌ LIVE trading needs trader.placeFokLimitOrder on polymarket-trader.js — LIVE order placement will be skipped until added. DRY_RUN is unaffected.');
-  }
-  return ok;
-}
-// Single-shot FOK (fill-or-kill) taker order, priced with a slippage cushion
-// above the quoted ask so it has room to walk a bit further into the book.
-// FOK is atomic by design — it either fully fills right now or is killed
-// outright, nothing in between, and nothing left resting afterward. Combined
-// with Polymarket's documented behavior for these crypto Up/Down markets
-// (the API holds for the built-in taker delay and returns the FINAL result
-// synchronously), this one response is authoritative — no polling loop, no
-// cancel, no reconciliation needed for the normal case. Either outcome
-// (filled or not) is an acceptable, final answer — not filled just means no
-// trade happened, nothing left to clean up.
-async function placeTakerBuy(tokenId, quotedPrice, shares) {
-  if (!DRY_RUN) {
-    if (!traderHasOrderMethods()) return null;
-    const limitPrice = Math.min(0.99, round2(quotedPrice + SLIPPAGE_BUFFER));
-    try {
-      const resp = await Promise.race([
-        trader.placeFokLimitOrder(tokenId, 'BUY', limitPrice, shares),
-        new Promise((_, rej) => setTimeout(() => rej(new Error('placeFokLimitOrder timed out after 15s')), 15000)),
-      ]);
-      if (resp?.isFilled) {
-        return { id: resp.id, filled: true, avgPrice: resp.avgPrice || limitPrice, filledShares: shares };
-      }
-      log(`◻️  order for ${String(tokenId).slice(0, 10)}… not filled (FOK, limit ${limitPrice}, status:${resp?.status || 'unknown'}) — no trade, nothing to clean up`);
-      return { id: resp?.id || null, filled: false, avgPrice: limitPrice, filledShares: 0 };
-    } catch (e) {
-      log(`❌ placeTakerBuy failed: ${describeOrderError(e)}`);
-      // Ambiguous failure (e.g. a genuine network/transport error, not a
-      // clean FOK rejection). Check reality once before reporting failure.
-      if (typeof trader.reconcileToken === 'function') {
-        const reconciled = await trader.reconcileToken(tokenId).catch(() => null);
-        if (reconciled?.filledShares > 0) return { id: reconciled.orderId || null, filled: true, avgPrice: reconciled.avgPrice || limitPrice, filledShares: reconciled.filledShares };
-      }
-      return null;
-    }
-  }
-  return { id: `dry-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, filled: true, avgPrice: quotedPrice, filledShares: shares };
-}
-
-function parseMarketTokens(mk) {
+// ── Web Crypto API polyfill ──
+if (!globalThis.crypto || typeof globalThis.crypto.subtle === 'undefined') {
   try {
-    const outcomes = typeof mk.outcomes === 'string' ? JSON.parse(mk.outcomes) : (mk.outcomes || []);
-    const tokenIds = typeof mk.clobTokenIds === 'string' ? JSON.parse(mk.clobTokenIds) : (mk.clobTokenIds || []);
-    return outcomes.map((outcome, i) => ({ outcome, token_id: tokenIds[i] || null }));
-  } catch (_) { return []; }
-}
-
-// ─────────────────────────────────────────
-//  Leg — one binary market (either the 15-min market or the last
-//  5-min segment inside it). Both use identical discovery / price /
-//  resolution logic, just different slugs and window durations.
-// ─────────────────────────────────────────
-function freshLeg(slugPrefix, windowTs, windowSeconds) {
-  return {
-    slug: `${slugPrefix}${windowTs}`,
-    windowTs, windowSeconds,
-    closeAt: (windowTs + windowSeconds) * 1000,
-    conditionId: null, upTokenId: null, downTokenId: null,
-    upAsk: null, downAsk: null, upBid: null, downBid: null,
-    discovered: false,
-    lastDiscoveryAttempt: 0,
-    highConfSide: null, highConfPrice: null,
-    highConfCandidateSide: null, highConfCandidateCount: 0,
-    resolved: false, winner: null, resolutionMethod: null,
-  };
-}
-
-async function discoverLeg(leg) {
-  try {
-    const events = await getJSON(`${GAMMA}/events?slug=${encodeURIComponent(leg.slug)}`);
-    const event = Array.isArray(events) ? events[0] : null;
-    if (!event) return;
-    const mk = (event.markets || [])[0];
-    if (!mk) return;
-    const tokens = parseMarketTokens(mk);
-    const up = tokens.find(t => /up/i.test(t.outcome));
-    const down = tokens.find(t => /down/i.test(t.outcome));
-    if (!up || !down || !up.token_id || !down.token_id) return;
-    leg.conditionId = mk.conditionId || null;
-    leg.upTokenId = up.token_id;
-    leg.downTokenId = down.token_id;
-    leg.discovered = true;
-    log(`🎯 leg discovered ${leg.slug} — Up ${String(up.token_id).slice(0, 10)}… / Down ${String(down.token_id).slice(0, 10)}…`);
-  } catch (e) {
-    log(`⚠️  discoverLeg(${leg.slug}) failed: ${e.message}`);
-  }
-}
-
-async function refreshLegPrices(leg) {
-  if (!leg.upTokenId || !leg.downTokenId) return;
-  try {
-    const [upAsk, upBid, downAsk, downBid] = await Promise.all([
-      getJSON(`${CLOB}/price?token_id=${leg.upTokenId}&side=BUY`).catch(() => null),
-      getJSON(`${CLOB}/price?token_id=${leg.upTokenId}&side=SELL`).catch(() => null),
-      getJSON(`${CLOB}/price?token_id=${leg.downTokenId}&side=BUY`).catch(() => null),
-      getJSON(`${CLOB}/price?token_id=${leg.downTokenId}&side=SELL`).catch(() => null),
-    ]);
-    if (upAsk?.price != null) leg.upAsk = parseFloat(upAsk.price);
-    if (upBid?.price != null) leg.upBid = parseFloat(upBid.price);
-    if (downAsk?.price != null) leg.downAsk = parseFloat(downAsk.price);
-    if (downBid?.price != null) leg.downBid = parseFloat(downBid.price);
+    const { webcrypto } = require('node:crypto');
+    Object.defineProperty(globalThis, 'crypto', { value: webcrypto, writable: false, configurable: true });
   } catch (_) {}
 }
 
-function markPrice(leg, side) {
-  const bid = side === 'up' ? leg.upBid : leg.downBid;
-  const ask = side === 'up' ? leg.upAsk : leg.downAsk;
-  if (bid != null) return bid;
-  if (ask != null) return ask;
-  return null;
-}
+const { privateKeyToAccount } = require('viem/accounts');
+const { createWalletClient, http } = require('viem');
+const { polygon } = require('viem/chains');
+const {
+  ClobClient, AssetType, Side, OrderType
+} = require('@polymarket/clob-client-v2');
+const { RelayClient } = require('@polymarket/builder-relayer-client');
 
-function updateHighConfidence(leg) {
-  if (leg.highConfSide) return;
-  // Critical: never evaluate high-confidence before the window has actually
-  // closed. A mid-window price spike to >=HIGH_CONF_PRICE is normal noise,
-  // not a result — evaluating it early and freezing it was the bug that let
-  // a stale, pre-close reading get declared the winner even after price
-  // moved back the other way by the real close.
-  if (Date.now() < leg.closeAt) return;
-  const upP = leg.upBid != null ? leg.upBid : leg.upAsk;
-  const downP = leg.downBid != null ? leg.downBid : leg.downAsk;
-  let candidate = null, candidatePrice = null;
-  if (upP != null && upP >= HIGH_CONF_PRICE) { candidate = 'up'; candidatePrice = upP; }
-  else if (downP != null && downP >= HIGH_CONF_PRICE) { candidate = 'down'; candidatePrice = downP; }
-  if (!candidate) { leg.highConfCandidateSide = null; leg.highConfCandidateCount = 0; return; }
-  // Require the same side to read >=HIGH_CONF_PRICE on two separate post-close
-  // checks before locking it in, so a single noisy/stale tick can't decide it.
-  if (leg.highConfCandidateSide === candidate) {
-    leg.highConfCandidateCount = (leg.highConfCandidateCount || 0) + 1;
-  } else {
-    leg.highConfCandidateSide = candidate;
-    leg.highConfCandidateCount = 1;
-  }
-  if (leg.highConfCandidateCount >= 2) {
-    leg.highConfSide = candidate;
-    leg.highConfPrice = candidatePrice;
-  }
-}
+const CLOB_HOST = 'https://clob.polymarket.com';
+const CHAIN_ID = 137;
 
-// Three-tier resolution for a single leg. Returns true once resolved.
-async function resolveLegAttempt(leg) {
-  if (leg.resolved) return true;
-  try {
-    let mk = null;
-    if (leg.conditionId) {
-      const arr = await getJSON(`${GAMMA}/markets?condition_ids=${encodeURIComponent(leg.conditionId)}`);
-      mk = Array.isArray(arr) ? arr[0] : null;
-    }
-    if (!mk) {
-      const events = await getJSON(`${GAMMA}/events?slug=${encodeURIComponent(leg.slug)}`);
-      const event = Array.isArray(events) ? events[0] : null;
-      mk = event ? (event.markets || [])[0] : null;
-    }
-    if (mk && mk.closed === true && mk.outcomePrices) {
-      const prices = typeof mk.outcomePrices === 'string' ? JSON.parse(mk.outcomePrices) : mk.outcomePrices;
-      const tokens = parseMarketTokens(mk);
-      const upIdx = tokens.findIndex(t => String(t.token_id) === String(leg.upTokenId));
-      const downIdx = tokens.findIndex(t => String(t.token_id) === String(leg.downTokenId));
-      if (upIdx >= 0 && downIdx >= 0 && prices[upIdx] != null) {
-        leg.resolved = true;
-        leg.winner = parseFloat(prices[upIdx]) >= 0.5 ? 'up' : 'down';
-        leg.resolutionMethod = 'official';
-        log(`🏁 [${leg.slug}] resolved OFFICIAL — winner ${leg.winner.toUpperCase()}`);
-        return true;
-      }
-    }
-  } catch (e) {
-    log(`⚠️  resolveLegAttempt(${leg.slug}) failed: ${e.message}`);
+const ORDER_POLL_MS      = 200;
+const ORDER_POLL_TIMEOUT = 8000;
+
+class PolymarketTrader {
+  constructor(privateKey) {
+    const pk = privateKey.startsWith('0x') ? privateKey : `0x${privateKey}`;
+    this._account = privateKeyToAccount(pk);
+    this.address  = this._account.address;
+    this._walletClient = createWalletClient({ account: this._account, chain: polygon, transport: http() });
+    this._clob  = null;
+    this.apiKey = null;
+    this.balance = 0;
+    this.depositWallet = null;
+    this._log   = () => {};
+    this._inflight = new Map(); // idempotency-key -> last result, for placeLimitBuy() only
   }
 
-  updateHighConfidence(leg);
-  if (leg.highConfSide) {
-    leg.resolved = true;
-    leg.winner = leg.highConfSide;
-    leg.resolutionMethod = 'high-confidence-price';
-    log(`⚡ [${leg.slug}] resolved HIGH-CONFIDENCE (${leg.highConfPrice.toFixed(3)}) — winner ${leg.winner.toUpperCase()}`);
-    return true;
-  }
+  setLogFn(fn) { this._log = fn; }
 
-  if (Date.now() - leg.closeAt >= RESOLUTION_FALLBACK_MS) {
-    const upPrice = markPrice(leg, 'up');
-    const downPrice = markPrice(leg, 'down');
-    if (upPrice != null || downPrice != null) {
-      let winner;
-      if (upPrice != null && downPrice != null) winner = upPrice >= downPrice ? 'up' : 'down';
-      else if (upPrice != null) winner = upPrice >= 0.5 ? 'up' : 'down';
-      else winner = downPrice >= 0.5 ? 'down' : 'up';
-      leg.resolved = true;
-      leg.winner = winner;
-      leg.resolutionMethod = 'price-fallback';
-      log(`⌛ [${leg.slug}] resolved PRICE-FALLBACK — winner ${winner.toUpperCase()}`);
-      return true;
-    }
-  }
-  return false;
-}
-
-// ─────────────────────────────────────────
-//  Combined trade — primary (15m) + hedge (last 5m segment)
-// ─────────────────────────────────────────
-function freshPosition() {
-  return { side: null, shares: 0, entryPrice: null, cost: 0, fee: 0, filled: false, pnl: null };
-}
-function freshTrade(assetDef, windowTs) {
-  return {
-    asset: assetDef.key, label: assetDef.label, windowTs,
-    closeAt: (windowTs + FIFTEEN_SECONDS) * 1000,
-    fifteen: freshLeg(assetDef.slugPrefix15, windowTs, FIFTEEN_SECONDS),
-    five: null, // created once we reach the hedge-entry offset
-    state: 'discovering-fifteen', // discovering-fifteen -> awaiting-hedge-window -> discovering-five -> entered -> pending-resolution -> resolved | skipped
-    primary: freshPosition(),
-    hedge: freshPosition(),
-    divergence: null,
-    correlationFactor: null,
-    combinedPnl: null,
-    createdAt: Date.now(),
-  };
-}
-
-function affordable(shares, price) { return round2(shares * price) <= engine.bankroll; }
-
-// Steps 1-4: read prices, compute divergence/correlation, size, enter both legs together.
-async function executeCombinedEntry(trade) {
-  const f = trade.fifteen, v = trade.five;
-  if (f.upAsk == null || f.downAsk == null || v.upAsk == null || v.downAsk == null) return; // Step 1 not satisfied yet
-
-  // Step 1: best asks already sitting on f/v from refreshLegPrices().
-  const primarySide = f.upAsk >= f.downAsk ? 'up' : 'down'; // market-favored side after first 10 minutes
-  const hedgeSide = primarySide === 'up' ? 'down' : 'up';
-  const primaryPrice = primarySide === 'up' ? f.upAsk : f.downAsk;
-  const primaryTokenId = primarySide === 'up' ? f.upTokenId : f.downTokenId;
-  const hedgePriceRaw = hedgeSide === 'up' ? v.upAsk : v.downAsk;
-  const hedgeTokenId = hedgeSide === 'up' ? v.upTokenId : v.downTokenId;
-
-  // Floor the hedge price at Polymarket's minimum tick (0.01) so a stale/zero
-  // quote can't blow up amountAtRisk / hedgePrice into an unbounded share
-  // count. At extreme entries (primary >= ~0.90) the hedge side is naturally
-  // very cheap, which already makes hedgeShares large (a cheap, high-multiple
-  // hedge is expected) — this floor only stops a genuine 0/near-0 quote from
-  // producing an literally unbounded order.
-  const MIN_HEDGE_PRICE = 0.01;
-  if (hedgePriceRaw < MIN_HEDGE_PRICE) {
-    trade.state = 'skipped';
-    log(`⛔ [${trade.label} ${f.slug}] skipped — hedge side ask ${hedgePriceRaw} is below the ${MIN_HEDGE_PRICE} floor (stale/illiquid quote), refusing to size off it`);
-    return;
-  }
-  const hedgePrice = hedgePriceRaw;
-
-  // Step 2: divergence between the two markets' pricing of the hedge side, and the
-  // live correlation factor derived from it.
-  const fifteenHedgeProb = hedgeSide === 'up' ? f.upAsk : f.downAsk;
-  const fiveHedgeProb = hedgeSide === 'up' ? v.upAsk : v.downAsk;
-  const divergence = round4(Math.abs(fifteenHedgeProb - fiveHedgeProb));
-  const correlationFactor = round4(clamp(1 - divergence, CORR_FLOOR, CORR_CEIL));
-
-  if (!affordable(PRIMARY_SHARES, primaryPrice)) {
-    trade.state = 'skipped';
-    log(`⛔ [${trade.label} ${f.slug}] skipped — insufficient bankroll for primary leg (${PRIMARY_SHARES}sh @ ${primaryPrice.toFixed(3)})`);
-    return;
-  }
-
-  // Step 3: size.
-  const amountAtRisk = round2(PRIMARY_SHARES * primaryPrice); // cost basis = max loss if primary resolves to zero
-  const rawHedgeShares = amountAtRisk / hedgePrice;
-  const hedgeShares = round2(rawHedgeShares * correlationFactor);
-
-  // Polymarket's live minimum order size on these crypto Up/Down markets is
-  // 5 shares (confirmed via Gamma: orderMinSize: 5) — an order under that is
-  // rejected outright. Check this BEFORE placing anything: if we bought the
-  // primary leg first and the hedge order then got rejected for being too
-  // small, we'd be left holding a naked, unhedged primary position exactly
-  // when low correlation said we needed the hedge most. Skip the whole
-  // combined trade instead — no primary without a viable hedge.
-  if (hedgeShares < MIN_ORDER_SHARES) {
-    trade.state = 'skipped';
-    log(`⛔ [${trade.label} ${f.slug}] skipped — computed hedge size ${hedgeShares}sh is below Polymarket's ${MIN_ORDER_SHARES}sh minimum order size; refusing to enter primary without a viable hedge`);
-    return;
-  }
-
-  if (!affordable(hedgeShares, hedgePrice)) {
-    trade.state = 'skipped';
-    log(`⛔ [${trade.label} ${f.slug}] skipped — insufficient bankroll for hedge leg (${hedgeShares}sh @ ${hedgePrice.toFixed(3)})`);
-    return;
-  }
-
-  // Step 4: enter both legs together.
-  const primaryResp = await placeTakerBuy(primaryTokenId, primaryPrice, PRIMARY_SHARES);
-
-  // Never invent a fill. A missing/failed response means nothing happened —
-  // don't attempt the hedge for a primary position that doesn't exist, and
-  // don't touch bankroll.
-  if (!primaryResp?.filled || !(primaryResp.filledShares > 0)) {
-    trade.state = 'skipped';
-    log(`⛔ [${trade.label} ${f.slug}] primary leg did not fill — combined trade aborted before attempting the hedge`);
-    return;
-  }
-
-  const pFillPrice = primaryResp.avgPrice;
-  const pShares = primaryResp.filledShares;
-  const pCost = round2(pShares * pFillPrice);
-  const pFee = estimateFee(pShares, pFillPrice);
-  engine.bankroll = round2(engine.bankroll - pCost - pFee);
-  engine.feesPaid = round2(engine.feesPaid + pFee);
-  trade.primary = { side: primarySide, shares: pShares, entryPrice: pFillPrice, cost: pCost, fee: pFee, filled: true, pnl: null };
-  registerTrade({ slug: f.slug, asset: trade.asset, step: '15m PRIMARY entry', side: primarySide, price: pFillPrice, shares: pShares, cost: pCost, fee: pFee });
-
-  const hedgeResp = await placeTakerBuy(hedgeTokenId, hedgePrice, hedgeShares);
-
-  if (!hedgeResp?.filled || !(hedgeResp.filledShares > 0)) {
-    // Primary is real and live; the hedge is not. Flag this loudly and
-    // distinctly instead of quietly recording it as a normal hedged trade —
-    // this position is currently naked and needs attention, not a shrug.
-    trade.divergence = divergence;
-    trade.correlationFactor = correlationFactor;
-    trade.state = 'entered-unhedged';
-    log(`🚨 [${trade.label} ${f.slug}] HEDGE LEG FAILED TO FILL — primary ${pShares}sh ${primarySide.toUpperCase()} @${pFillPrice.toFixed(3)} is live and UNHEDGED for this window | bankroll=$${engine.bankroll.toFixed(2)}`);
-    recordEquity();
-    return;
-  }
-
-  const hFillPrice = hedgeResp.avgPrice;
-  const hShares = hedgeResp.filledShares;
-  const hCost = round2(hShares * hFillPrice);
-  const hFee = estimateFee(hShares, hFillPrice);
-
-  engine.bankroll = round2(engine.bankroll - hCost - hFee);
-  engine.feesPaid = round2(engine.feesPaid + hFee);
-
-  trade.hedge = { side: hedgeSide, shares: hShares, entryPrice: hFillPrice, cost: hCost, fee: hFee, filled: true, pnl: null };
-  trade.divergence = divergence;
-  trade.correlationFactor = correlationFactor;
-  trade.state = 'entered';
-
-  registerTrade({ slug: v.slug, asset: trade.asset, step: '5m HEDGE entry', side: hedgeSide, price: hFillPrice, shares: hShares, cost: hCost, fee: hFee });
-
-  log(`✅ [${trade.label} ${f.slug}] combined trade entered — PRIMARY ${pShares}sh ${primarySide.toUpperCase()} @${pFillPrice.toFixed(3)} ($${pCost.toFixed(2)}) | HEDGE ${hShares}sh ${hedgeSide.toUpperCase()} @${hFillPrice.toFixed(3)} ($${hCost.toFixed(2)}) | divergence=${divergence.toFixed(4)} correlation=${correlationFactor.toFixed(2)} | bankroll=$${engine.bankroll.toFixed(2)}`);
-  recordEquity();
-}
-
-function resolveTradeIfReady(trade) {
-  if (!trade.fifteen.resolved || !trade.five.resolved) return false;
-  if (trade.state !== 'entered' && trade.state !== 'entered-unhedged' && trade.state !== 'pending-resolution') return true; // was skipped, nothing to settle
-
-  const primaryPayout = trade.primary.side === trade.fifteen.winner ? round2(trade.primary.shares * 1) : 0;
-  const primaryPnl = round2(primaryPayout - trade.primary.cost - trade.primary.fee);
-  trade.primary.pnl = primaryPnl;
-
-  const hedgePayout = trade.hedge.side === trade.five.winner ? round2(trade.hedge.shares * 1) : 0;
-  const hedgePnl = round2(hedgePayout - trade.hedge.cost - trade.hedge.fee);
-  trade.hedge.pnl = hedgePnl;
-
-  const combinedPnl = round2(primaryPnl + hedgePnl);
-  trade.combinedPnl = combinedPnl;
-  trade.state = 'resolved';
-
-  engine.bankroll = round2(engine.bankroll + primaryPayout + hedgePayout);
-  engine.realizedPnl = round2(engine.realizedPnl + combinedPnl);
-  if (combinedPnl >= 0) engine.wins++; else engine.losses++;
-
-  registerTrade({ slug: trade.fifteen.slug, asset: trade.asset, step: '15m PRIMARY resolution', side: trade.primary.side, price: 1, shares: trade.primary.shares, pnl: primaryPnl });
-  registerTrade({ slug: trade.five.slug, asset: trade.asset, step: '5m HEDGE resolution', side: trade.hedge.side, price: 1, shares: trade.hedge.shares, pnl: hedgePnl });
-
-  engine.history.unshift({
-    asset: trade.asset, label: trade.label, windowTs: trade.windowTs,
-    fifteenSlug: trade.fifteen.slug, fiveSlug: trade.five.slug,
-    primarySide: trade.primary.side, primaryShares: trade.primary.shares, primaryEntry: trade.primary.entryPrice, primaryWinner: trade.fifteen.winner, primaryPnl,
-    hedgeSide: trade.hedge.side, hedgeShares: trade.hedge.shares, hedgeEntry: trade.hedge.entryPrice, hedgeWinner: trade.five.winner, hedgePnl,
-    divergence: trade.divergence, correlationFactor: trade.correlationFactor,
-    combinedPnl, resolvedAt: Date.now(),
-  });
-  if (engine.history.length > 300) engine.history.pop();
-
-  log(`🏆 [${trade.label} ${trade.fifteen.slug}] combined trade resolved — primary ${sgn2(primaryPnl)} + hedge ${sgn2(hedgePnl)} = ${sgn2(combinedPnl)} | bankroll=$${engine.bankroll.toFixed(2)}`);
-  recordEquity();
-  return true;
-}
-function sgn2(n) { return (n >= 0 ? '+$' : '-$') + Math.abs(n).toFixed(2); }
-
-// ─────────────────────────────────────────
-//  Unrealized P&L helpers
-// ─────────────────────────────────────────
-function unrealizedForLeg(leg, position) {
-  if (!leg || leg.resolved || !position.filled || position.shares <= 0) return 0;
-  const mp = markPrice(leg, position.side);
-  const mark = mp != null ? mp : (position.cost / position.shares);
-  return round2(position.shares * mark - position.cost);
-}
-function unrealizedForTrade(trade) {
-  if (trade.state !== 'entered' && trade.state !== 'entered-unhedged' && trade.state !== 'pending-resolution') return 0;
-  return round2(unrealizedForLeg(trade.fifteen, trade.primary) + unrealizedForLeg(trade.five, trade.hedge));
-}
-function openCostForTrade(trade) {
-  if (trade.state !== 'entered' && trade.state !== 'entered-unhedged' && trade.state !== 'pending-resolution') return 0;
-  return round2(trade.primary.cost + trade.hedge.cost);
-}
-function allTrackedTrades() {
-  const list = [...engine.pending];
-  if (engine.current.btc) list.push(engine.current.btc);
-  if (engine.current.eth) list.push(engine.current.eth);
-  return list;
-}
-function totalUnrealizedPnl() {
-  return round2(allTrackedTrades().reduce((sum, t) => sum + unrealizedForTrade(t), 0));
-}
-function openPositionsMTM() {
-  return round2(allTrackedTrades().reduce((sum, t) => sum + openCostForTrade(t) + unrealizedForTrade(t), 0));
-}
-
-// ─────────────────────────────────────────
-//  Main loop
-// ─────────────────────────────────────────
-function currentFifteenWindowTs(nowSec) { return Math.floor(nowSec / FIFTEEN_SECONDS) * FIFTEEN_SECONDS; }
-
-async function tickAsset(assetDef, now) {
-  const nowSec = Math.floor(now / 1000);
-  const windowTs = currentFifteenWindowTs(nowSec);
-  let trade = engine.current[assetDef.key];
-
-  // Roll over to a fresh 15-minute window.
-  if (!trade || trade.windowTs !== windowTs) {
-    if (trade && (trade.state === 'entered' || trade.state === 'entered-unhedged' || trade.state === 'pending-resolution')) {
-      trade.state = 'pending-resolution';
-      engine.pending.push(trade);
-      if (engine.pending.length > MAX_PENDING_RESOLUTIONS) {
-        const dropped = engine.pending.shift();
-        log(`⚠️  dropped stale pending trade ${dropped.fifteen.slug} from the resolution queue (too many pending)`);
-      }
-    }
-    if (windowTs < engine.boundaryWindowTs) return; // haven't reached the first fresh boundary yet
-    trade = freshTrade(assetDef, windowTs);
-    engine.current[assetDef.key] = trade;
-    log(`🆕 [${assetDef.label}] new 15m window t=${windowTs} — discovering primary market…`);
-  }
-
-  // Discover the 15-min (primary) market.
-  if (!trade.fifteen.discovered && now - trade.fifteen.lastDiscoveryAttempt >= DISCOVERY_RETRY_MS) {
-    trade.fifteen.lastDiscoveryAttempt = now;
-    await discoverLeg(trade.fifteen);
-  }
-
-  // Once we're at the 10-minute mark (plus the trigger delay), create +
-  // discover the hedge (last 5-min segment) market. hedgeWindowTs stays the
-  // real 600s-aligned market epoch (used for the slug); triggerAt is when
-  // the bot actually acts on it.
-  const hedgeWindowTs = windowTs + HEDGE_ENTRY_OFFSET_SECONDS;
-  const hedgeTriggerAt = hedgeWindowTs + ENTRY_TRIGGER_DELAY_SECONDS;
-  if (!trade.five && nowSec >= hedgeTriggerAt) {
-    trade.five = freshLeg(assetDef.slugPrefix5, hedgeWindowTs, FIVE_SECONDS);
-    trade.state = 'discovering-five';
-    log(`🕐 [${assetDef.label}] entering hedge window (+${ENTRY_TRIGGER_DELAY_SECONDS}s buffer) — discovering last-5m segment market ${trade.five.slug}…`);
-  }
-  if (trade.five && !trade.five.discovered && now - trade.five.lastDiscoveryAttempt >= DISCOVERY_RETRY_MS) {
-    trade.five.lastDiscoveryAttempt = now;
-    await discoverLeg(trade.five);
-  }
-
-  // Once both legs are discovered and priced, enter the combined trade.
-  if (trade.five && trade.fifteen.discovered && trade.five.discovered && trade.state !== 'entered' && trade.state !== 'entered-unhedged' && trade.state !== 'skipped' && engine.tradingEnabled) {
-    await refreshLegPrices(trade.fifteen);
-    await refreshLegPrices(trade.five);
-    await executeCombinedEntry(trade);
-  }
-}
-
-async function mainLoop() {
-  while (true) {
+  async authenticate() {
+    this._log('🔑 Authenticating...');
+    // Derive deposit wallet from EOA
     try {
-      const now = Date.now();
-      const nowSec = Math.floor(now / 1000);
-
-      if (engine.waitingForBoundary) {
-        if (engine.boundaryWindowTs == null) {
-          engine.boundaryWindowTs = currentFifteenWindowTs(nowSec) + FIFTEEN_SECONDS;
-          log(`⏳ started mid-window — waiting for next fresh 15-minute boundary (t=${engine.boundaryWindowTs}) before trading begins`);
-        }
-        if (nowSec >= engine.boundaryWindowTs) {
-          engine.waitingForBoundary = false;
-          log('🚦 new 15-minute boundary reached — trading starts now');
-        }
-      }
-
-      if (!engine.waitingForBoundary) {
-        for (const assetDef of ASSETS) await tickAsset(assetDef, now);
-      }
-
-      if (now - engine.lastPriceFetch >= PRICE_REFRESH_MS) {
-        engine.lastPriceFetch = now;
-        const legs = [];
-        for (const t of allTrackedTrades()) { legs.push(t.fifteen); if (t.five) legs.push(t.five); }
-        await Promise.all(legs.map(refreshLegPrices));
-        // NOTE: high-confidence evaluation intentionally does NOT happen here.
-        // It only runs inside resolveLegAttempt (post-close, via the pending
-        // resolution poll below) so it can never lock in a winner based on a
-        // price read while the window is still open and trading.
-      }
-
-      if (engine.pending.length && now - engine.lastResolutionPoll >= RESOLUTION_POLL_MS) {
-        engine.lastResolutionPoll = now;
-        const stillPending = [];
-        for (const trade of engine.pending) {
-          if (!trade.fifteen.resolved) await resolveLegAttempt(trade.fifteen);
-          if (!trade.five) trade.five = { resolved: true, winner: null }; // never reached hedge entry — nothing to resolve there
-          else if (!trade.five.resolved) await resolveLegAttempt(trade.five);
-          const done = resolveTradeIfReady(trade);
-          if (!done) stillPending.push(trade);
-        }
-        engine.pending = stillPending;
-      }
-
-      emitFn('hedgeState', buildState());
-    } catch (e) {
-      slog(`[hedgebot] ⚠️  Loop error: ${e.message}`);
+      const relayer = new RelayClient('https://relayer-v2.polymarket.com', CHAIN_ID, this._walletClient);
+      this.depositWallet = await relayer.deriveDepositWalletAddress();
+      this._log(`🏦 Deposit wallet: ${this.depositWallet}`);
+    } catch (_) {
+      this._log('⚠️ Could not derive deposit wallet, falling back to EOA');
     }
-    await new Promise(res => setTimeout(res, TICK_MS));
+    const tempClient = new ClobClient({
+      host: CLOB_HOST, chain: CHAIN_ID, signer: this._walletClient,
+    });
+    const creds = await tempClient.createOrDeriveApiKey();
+    this.apiKey = creds.key;
+    this._clob = new ClobClient({
+      host: CLOB_HOST, chain: CHAIN_ID, signer: this._walletClient, creds,
+      ...(this.depositWallet ? { signatureType: 3, funderAddress: this.depositWallet } : {}),
+    });
+    this._log(`✅ Auth OK: ${this.address}`);
+    return { apiKey: this.apiKey };
+  }
+
+  async approveAllowance(amount = null) {
+    try {
+      await this._clob.updateBalanceAllowance({ asset_type: AssetType.COLLATERAL });
+      const ba = await this._clob.getBalanceAllowance({ asset_type: AssetType.COLLATERAL });
+      const allowance = parseFloat(ba?.allowance ?? '0') / 1e6;
+      const bal = parseFloat(ba?.balance ?? '0') / 1e6;
+      this._log(`ℹ️  Allowance: $${allowance.toFixed(2)} | Balance: $${bal.toFixed(2)}`);
+      if (allowance <= 0) this._log('⚠️  Allowance is $0 — run approveAllowance to approve pUSD');
+      return allowance > 0;
+    } catch (e) {
+      this._log(`⚠️  Allowance check: ${e.message}`);
+      return false;
+    }
+  }
+
+  async getBalance() {
+    try {
+      const resp = await this._clob.getBalanceAllowance({ asset_type: AssetType.COLLATERAL });
+      if (resp?.error) return this.balance;
+      this.balance = parseFloat(resp?.balance ?? '0') / 1e6;
+      return this.balance;
+    } catch (_) { return this.balance; }
+  }
+
+  // ── GTC limit order (entry) ──
+  async placeGtcOrder(tokenId, side, price, size) {
+    const sideVal = side === 'BUY' ? Side.BUY : Side.SELL;
+    let tickSize = '0.01', negRisk = false;
+    try { tickSize = (await this._clob.getTickSize(tokenId)) ?? '0.01'; } catch (_) {}
+    try { negRisk  = (await this._clob.getNegRisk(tokenId))  ?? false;  } catch (_) {}
+    const resp = await this._clob.createAndPostOrder(
+      { tokenID: tokenId, price, size, side: sideVal },
+      { tickSize, negRisk },
+      OrderType.GTC
+    );
+    const id = resp?.orderID ?? resp?.id ?? null;
+    if (!id) throw new Error(`No orderID: ${JSON.stringify(resp).substring(0,100)}`);
+    this._log(`🔏 GTC ${side} ${size}sh@${price} id:${id}`);
+    return { id };
+  }
+
+  // ── FOK market BUY — amount is dollars ──
+  async placeFokBuy(tokenId, dollarAmount) {
+    let tickSize = '0.01', negRisk = false;
+    try { tickSize = (await this._clob.getTickSize(tokenId)) ?? '0.01'; } catch (_) {}
+    try { negRisk  = (await this._clob.getNegRisk(tokenId))  ?? false;  } catch (_) {}
+    const resp = await this._clob.createAndPostMarketOrder(
+      { tokenID: tokenId, amount: dollarAmount, side: Side.BUY, orderType: OrderType.FOK },
+      { tickSize, negRisk },
+      OrderType.FOK
+    );
+    const id        = resp?.orderID ?? resp?.id ?? null;
+    const status    = resp?.status || (id ? 'UNKNOWN' : 'FAILED');
+    const statusLowerX = status.toLowerCase();
+    const remaining = parseFloat(resp?.remaining_size ?? '999');
+    const isFilled  = statusLowerX === 'filled' || statusLowerX === 'matched' || (resp?.match_status || '').toLowerCase() === 'filled' || (resp?.match_status || '').toLowerCase() === 'matched' || remaining === 0;
+    const avgPrice  = parseFloat(resp?.avg_fill_price || resp?.price || '0');
+    if (id) this._log(`🏁 FOK BUY $${dollarAmount} → ${status} avg:${avgPrice} id:${id.slice(0,12)}…`);
+    return { id, status, isFilled, avgPrice, raw: resp };
+  }
+
+  // ── FOK market SELL — amount is number of shares ──
+  async placeFokSell(tokenId, shares) {
+    let tickSize = '0.01', negRisk = false;
+    try { tickSize = (await this._clob.getTickSize(tokenId)) ?? '0.01'; } catch (_) {}
+    try { negRisk  = (await this._clob.getNegRisk(tokenId))  ?? false;  } catch (_) {}
+    const resp = await this._clob.createAndPostMarketOrder(
+      { tokenID: tokenId, amount: shares, side: Side.SELL, orderType: OrderType.FOK },
+      { tickSize, negRisk },
+      OrderType.FOK
+    );
+    const id        = resp?.orderID ?? resp?.id ?? null;
+    const status    = resp?.status || (id ? 'UNKNOWN' : 'FAILED');
+    const statusLowerX = status.toLowerCase();
+    const remaining = parseFloat(resp?.remaining_size ?? '999');
+    const isFilled  = statusLowerX === 'filled' || statusLowerX === 'matched' || (resp?.match_status || '').toLowerCase() === 'filled' || (resp?.match_status || '').toLowerCase() === 'matched' || remaining === 0;
+    const avgPrice  = parseFloat(resp?.avg_fill_price || resp?.price || '0');
+    if (id) this._log(`🏁 FOK SELL ${shares}sh → ${status} avg:${avgPrice} id:${id.slice(0,12)}…`);
+    return { id, status, isFilled, avgPrice, raw: resp };
+  }
+
+  // ── Kept for backward compatibility ──
+  async placeFokOrder(tokenId, side, amount) {
+    if (side === 'BUY') return this.placeFokBuy(tokenId, amount);
+    return this.placeFokSell(tokenId, amount);
+  }
+
+  // ── Poll order until filled or timeout ──
+  // Reads size_matched on EVERY poll, not just when status is fully FILLED —
+  // a resting order sits at status LIVE while partially matching, and that
+  // partial progress was previously invisible: a timeout used to report
+  // "filled: false" with no size at all, discarding a real fill that had
+  // already happened on the exchange. Now every return path (full fill,
+  // cancelled, or timeout) carries the best-known filledSize.
+  async waitForFill(orderId, timeoutMs = ORDER_POLL_TIMEOUT) {
+    const deadline = Date.now() + timeoutMs;
+    let last = { size: 0, filledSize: 0, order: null };
+    while (Date.now() < deadline) {
+      try {
+        const order = await this._clob.getOrder(orderId);
+        if (order) {
+          const rawSize = order.original_size ?? order.size ?? '0';
+          const rawFilled = order.size_matched ?? order.filled_size ?? order.taker_amount ?? '0';
+          last = { size: parseFloat(rawSize), filledSize: parseFloat(rawFilled), order };
+          const status = order.status || '';
+          const matchStatus = (order.match_status || order.matchStatus || '').toLowerCase();
+          const state = (order.state || '').toLowerCase();
+          const fullyFilled = status === 'FILLED' || matchStatus === 'filled' || state === 'filled'
+            || (last.size > 0 && last.filledSize >= last.size);
+          if (fullyFilled) {
+            this._log(`✅ ORDER FILLED ${orderId.slice(0,12)}… size:${last.size} filled:${last.filledSize}`);
+            return { filled: true, size: last.size, filledSize: last.filledSize, order };
+          }
+          const cancelled = status === 'CANCELLED' || matchStatus === 'cancelled';
+          if (cancelled) {
+            // A cancelled order can still carry a real partial fill from
+            // before the cancel took effect — report it, never discard it.
+            if (last.filledSize > 0) this._log(`⚠️  ORDER CANCELLED WITH PARTIAL FILL ${orderId.slice(0,12)}… filled:${last.filledSize}/${last.size}`);
+            return { filled: last.filledSize > 0, cancelled: true, size: last.size, filledSize: last.filledSize, order };
+          }
+        }
+      } catch (_) {}
+      await sleep(ORDER_POLL_MS);
+    }
+    this._log(`⏰ ORDER TIMEOUT ${orderId.slice(0,12)}… last known filled:${last.filledSize}/${last.size}`);
+    return { filled: last.filledSize > 0, cancelled: false, timeout: true, size: last.size, filledSize: last.filledSize };
+  }
+
+  // ── Fetch order book ──
+  async getOrderBook(tokenId) {
+    try { return await this._clob.getOrderBook(tokenId); }
+    catch (_) { return null; }
+  }
+
+  // ── Get best bid/ask from order book ──
+  async getBestBidAsk(tokenId) {
+    try {
+      const book = await this._clob.getOrderBook(tokenId);
+      if (!book) return null;
+      const bids = book.bids || [];
+      const asks = book.asks || [];
+      const bestBid = bids.length > 0 ? parseFloat(bids[0]?.price || '0') : null;
+      const bestAsk = asks.length > 0 ? parseFloat(asks[0]?.price || '0') : null;
+      return { bestBid, bestAsk };
+    } catch (_) { return null; }
+  }
+
+
+  // ── FOK order with explicit price & size (no market price calc) ──
+  async placeFokLimitOrder(tokenId, side, price, size) {
+    const sideVal = side === 'BUY' ? Side.BUY : Side.SELL;
+    let tickSize = '0.01', negRisk = false;
+    try { tickSize = (await this._clob.getTickSize(tokenId)) ?? '0.01'; } catch (_) {}
+    try { negRisk  = (await this._clob.getNegRisk(tokenId))  ?? false;  } catch (_) {}
+    const resp = await this._clob.createAndPostOrder(
+      { tokenID: tokenId, price, size, side: sideVal },
+      { tickSize, negRisk },
+      OrderType.FOK
+    );
+    const id = resp?.orderID ?? resp?.id ?? null;
+    const status = resp?.status || (id ? 'UNKNOWN' : 'FAILED');
+    const statusLower = status.toLowerCase();
+    const matchStatus = (resp?.match_status || '').toLowerCase();
+    const isFilled = statusLower === 'filled' || statusLower === 'matched' || matchStatus === 'filled' || matchStatus === 'matched' || (size > 0 && parseFloat(resp?.remaining_size || '999') === 0);
+    const avgPrice = parseFloat(resp?.avg_fill_price || resp?.price || price);
+    if (id) this._log(`🏁 FOK ${side} ${size}sh@${price} → ${status} avg:${avgPrice} id:${id.slice(0,12)}`);
+    return { id, status, isFilled, avgPrice, raw: resp };
+  }
+
+  async getOpenOrders() { return this._clob.getOpenOrders(); }
+  async cancelOrder(orderId) { return this._clob.cancelOrder(orderId); }
+  async getOrder(orderId) { return this._clob.getOrder(orderId); }
+  defaultHeaders() { return { 'Content-Type': 'application/json' }; }
+  l2Headers()      { return {}; }
+
+  // ─────────────────────────────────────────────────────────────
+  // NEW — additive only, nothing above this line was changed.
+  //
+  // placeLimitBuy() is what cricket-bot.js (the hedge bot) calls for its
+  // LIVE combined entries. It didn't exist on this trader before, so LIVE
+  // orders from that bot were silently skipped. It's a thin wrapper around
+  // your existing placeFokLimitOrder — same underlying call, same behavior
+  // for a clean success/rejection — with two things added ONLY for the
+  // ambiguous-failure case (network drop / timeout, not a normal rejection):
+  //
+  //   1. reconcileToken() checks live order state before reporting failure,
+  //      instead of leaving the caller to guess and blindly resubmit —
+  //      this is the fix for "retried and drained capital" from a couple
+  //      messages ago (Polymarket's own docs confirm a dropped connection
+  //      does not stop an order that's already past validation from
+  //      finishing server-side, so a thrown exception here does NOT mean
+  //      the order didn't happen).
+  //   2. An optional idempotencyKey — if the SAME key is passed twice
+  //      (e.g. by future retry logic reusing "btc-1784861100-primary-up"),
+  //      the second call reuses the first call's result instead of firing
+  //      a second real order. Nothing calls this today; it's there so any
+  //      retry logic added later is safe by construction rather than by
+  //      discipline.
+  // ─────────────────────────────────────────────────────────────
+  async placeLimitBuy(tokenId, price, size, opts = {}) {
+    const key = opts.idempotencyKey || null;
+    if (key && this._inflight.has(key)) {
+      this._log(`⏳ placeLimitBuy: reusing result for idempotency key "${key}" instead of resubmitting`);
+      return this._inflight.get(key);
+    }
+    let result;
+    try {
+      const resp = await this.placeFokLimitOrder(tokenId, 'BUY', price, size);
+      result = {
+        id: resp.id,
+        filled: !!resp.isFilled,
+        avgPrice: resp.avgPrice || price,
+        filledShares: resp.isFilled ? size : 0,
+        raw: resp.raw,
+      };
+    } catch (e) {
+      this._log(`⚠️  placeLimitBuy threw (${e.message}) — reconciling live order state before reporting failure`);
+      const reconciled = await this.reconcileToken(tokenId, size);
+      result = reconciled
+        ? { id: reconciled.orderId || null, filled: true, avgPrice: reconciled.avgPrice || price, filledShares: reconciled.filledShares, raw: null, reconciled: true }
+        : { id: null, filled: false, avgPrice: price, filledShares: 0, raw: null, error: e.message };
+    }
+    if (key) this._inflight.set(key, result);
+    return result;
+  }
+
+  // Checks whether shares for this token already matched on your open orders
+  // before you (or a retry) submit anything new. Returns null if nothing
+  // matched yet (safe to place a fresh order for the full size); returns the
+  // matched amount if something already landed (only order the shortfall,
+  // if anything, don't repeat the full size).
+  async reconcileToken(tokenId) {
+    try {
+      const openOrders = await this.getOpenOrders();
+      const forToken = (openOrders || []).filter(o => String(o.asset_id || o.tokenID || o.token_id) === String(tokenId));
+      const matched = forToken.reduce((sum, o) => sum + parseFloat(o.size_matched ?? o.filled_size ?? '0'), 0);
+      if (matched > 0) {
+        const avg = forToken[0]?.price ? parseFloat(forToken[0].price) : null;
+        this._log(`🔎 reconcileToken: ${matched}sh already matched for ${String(tokenId).slice(0, 10)}… before retrying`);
+        return { filledShares: matched, avgPrice: avg, orderId: forToken[0]?.id || forToken[0]?.orderID || null };
+      }
+    } catch (e) {
+      this._log(`⚠️  reconcileToken check failed: ${e.message}`);
+    }
+    return null;
   }
 }
 
-// ─────────────────────────────────────────
-//  UI state / controls
-// ─────────────────────────────────────────
-function legSummary(leg) {
-  if (!leg) return null;
-  return {
-    slug: leg.slug, windowTs: leg.windowTs, closeAt: leg.closeAt,
-    discovered: leg.discovered, upAsk: leg.upAsk, downAsk: leg.downAsk, upBid: leg.upBid, downBid: leg.downBid,
-    highConfSide: leg.highConfSide, highConfPrice: leg.highConfPrice,
-    resolved: leg.resolved, winner: leg.winner, resolutionMethod: leg.resolutionMethod,
-  };
-}
-function tradeSummary(trade) {
-  if (!trade) return null;
-  return {
-    asset: trade.asset, label: trade.label, windowTs: trade.windowTs, closeAt: trade.closeAt, state: trade.state,
-    fifteen: legSummary(trade.fifteen), five: legSummary(trade.five),
-    primary: trade.primary, hedge: trade.hedge,
-    divergence: trade.divergence, correlationFactor: trade.correlationFactor,
-    combinedPnl: trade.combinedPnl,
-    unrealizedPnl: unrealizedForTrade(trade),
-  };
+function sleep(ms) {
+  return new Promise(r => setTimeout(r, ms));
 }
 
-function buildState() {
-  const unrealizedPnl = totalUnrealizedPnl();
-  const equity = round2(engine.bankroll + openPositionsMTM());
-  return {
-    dryRun: DRY_RUN,
-    tradingEnabled: engine.tradingEnabled,
-    waitingForBoundary: engine.waitingForBoundary,
-    bankroll: engine.bankroll, capital: engine.capital,
-    realizedPnl: engine.realizedPnl, unrealizedPnl, equity,
-    feesPaid: engine.feesPaid,
-    wins: engine.wins, losses: engine.losses,
-    current: { btc: tradeSummary(engine.current.btc), eth: tradeSummary(engine.current.eth) },
-    pendingResolutionCount: engine.pending.length,
-    pending: engine.pending.map(tradeSummary),
-    history: engine.history.slice(0, 60),
-    trades: engine.trades.slice(-100).slice().reverse(),
-    equityCurve: engine.equityCurve,
-    logs: engine.logs.slice(-80),
-    primaryShares: PRIMARY_SHARES,
-    corrFloor: CORR_FLOOR, corrCeil: CORR_CEIL,
-    fifteenSeconds: FIFTEEN_SECONDS, fiveSeconds: FIVE_SECONDS, hedgeEntryOffsetSeconds: HEDGE_ENTRY_OFFSET_SECONDS,
-    entryTriggerDelaySeconds: ENTRY_TRIGGER_DELAY_SECONDS,
-  };
-}
-function getStatus() { return buildState(); }
-
-function pauseTrading() {
-  engine.tradingEnabled = false;
-  log('⏸️  Trading paused — no new combined trades will be entered; open positions still tracked to resolution, window discovery/rollover keeps running');
-  return { ok: true };
-}
-function resumeTrading() {
-  engine.tradingEnabled = true;
-  log('▶️  Trading resumed');
-  return { ok: true };
-}
-function setMode(live) {
-  DRY_RUN = !live;
-  log(`⚙️  Switched to ${live ? '🔴 LIVE' : '⚠️  DEMO'} mode`);
-  return { ok: true, dryRun: DRY_RUN };
-}
-
-async function init(privateKey, emit, slogFn) {
-  emitFn = emit;
-  slog = slogFn;
-  slog('[hedgebot] 🪙 BTC + ETH 15m/5m Correlated Hedge Engine — fully automatic');
-  slog(`[hedgebot] ⚙️  Each 15-min window: buy ${PRIMARY_SHARES}sh of the market-favored side at the 10-minute mark, hedged by the opposite side on the last 5-min segment. Hedge size = (primary cost at risk / hedge ask) × live correlation factor (clamped ${CORR_FLOOR}-${CORR_CEIL}, derived from price divergence between the two markets).`);
-  slog(`[hedgebot] ⚙️  Resolution: official Gamma > high-confidence live price (>=${HIGH_CONF_PRICE}) > ${Math.round(RESOLUTION_FALLBACK_MS / 1000)}s live-price fallback — each leg resolves independently, combined P&L booked once both are done.`);
-  slog(`[hedgebot] ⚙️  Starting bankroll $${STARTING_CAPITAL} (shared across BTC+ETH) | taker fee rate ${TAKER_FEE_RATE} | never enters a window it joins mid-way through`);
-  if (PRIMARY_SHARES < MIN_ORDER_SHARES) {
-    slog(`[hedgebot] ⚠️  HEDGE_PRIMARY_SHARES (${PRIMARY_SHARES}) is below Polymarket's ${MIN_ORDER_SHARES}sh minimum order size — every primary order would be rejected. Raise it.`);
-  }
-  slog(`[hedgebot] ${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
-
-  trader = new PolymarketTrader(privateKey);
-  trader.setLogFn(slog);
-  await trader.authenticate();
-
-  mainLoop().catch(e => slog(`[hedgebot] ❌ Fatal: ${e.message}`));
-}
-
-module.exports = {
-  init,
-  pauseTrading, resumeTrading,
-  setMode,
-  getStatus, buildState,
-};
+module.exports = PolymarketTrader;
