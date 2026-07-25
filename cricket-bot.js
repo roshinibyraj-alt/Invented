@@ -105,27 +105,22 @@ const DISCOVERY_RETRY_MS  = 2000;
 // the real avgPrice from the exchange is used for accounting either way,
 // never this ceiling. If it doesn't fill, that's an acceptable outcome —
 // no retry, no resting order left behind to babysit.
-const SLIPPAGE_BUFFER = Number(process.env.HEDGE_SLIPPAGE_BUFFER || 0.10);
+const SLIPPAGE_BUFFER = Number(process.env.HEDGE_SLIPPAGE_BUFFER || 0.03);
+// Once both legs are discovered and priced, wait this long before actually
+// firing the combined entry — gives prices a moment to settle (especially
+// the 5-min leg, which was just discovered seconds ago) instead of trading
+// off the very first read. Prices keep refreshing normally during the wait,
+// so the entry uses whatever's freshest once the buffer elapses.
+const ENTRY_CALC_BUFFER_MS = Number(process.env.HEDGE_ENTRY_CALC_BUFFER_MS || 5000);
 const RESOLUTION_POLL_MS  = 3000;
 const RESOLUTION_FALLBACK_MS = Number(process.env.HEDGE_RESOLUTION_FALLBACK_MS || 60000);
 
 const FIFTEEN_SECONDS = 900; // 15-minute window duration
 const FIVE_SECONDS    = 300; // 5-minute window duration
-// How far into the 15-min window the hedge leg's 5-min segment opens.
-// 600s = the 10:00 mark, i.e. the LAST 5-minute segment of the 15-minute
-// window. This must stay exactly 600 — it's a real Polymarket market epoch
-// (300s-aligned), not a tunable trigger time. Changing it breaks slug
-// resolution (the 5-min market simply won't exist at any other offset).
+// How far into the 15-min window the hedge leg's 5-min segment opens
+// (and where the combined trade is entered). 600s = the 10:00 mark,
+// i.e. the LAST 5-minute segment of the 15-minute window.
 const HEDGE_ENTRY_OFFSET_SECONDS = 600;
-// Extra delay AFTER the hedge window opens before the bot actually acts on
-// it (discovers the leg + fires the combined entry). Gives the market a
-// few seconds to build up liquidity right after the fresh 5-min segment
-// opens, instead of firing on the very first tick. Does not change the
-// market/slug used — only when the bot pulls the trigger on it. Since the
-// 5-min segment opens at the same instant as the 15-min window's 10:00
-// mark, this single delay pushes BOTH the primary (15m) and hedge (5m)
-// entry to the 10:05 mark together.
-const ENTRY_TRIGGER_DELAY_SECONDS = Number(process.env.HEDGE_ENTRY_TRIGGER_DELAY_SECONDS || 5);
 
 const ASSETS = [
   { key: 'btc', label: 'BTC', slugPrefix15: 'btc-updown-15m-', slugPrefix5: 'btc-updown-5m-' },
@@ -210,7 +205,7 @@ function recordEquity() {
 //  HTTP / order helpers
 // ─────────────────────────────────────────
 async function getJSON(url) {
-  const res = await fetch(url, { headers: { 'User-Agent': 'polymarket-hedgebot/1.0' }, signal: AbortSignal.timeout(8000) });
+  const res = await fetch(url, { headers: { 'User-Agent': 'polymarket-hedgebot/1.0' } });
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${url}`);
   return res.json();
 }
@@ -243,14 +238,11 @@ async function placeTakerBuy(tokenId, quotedPrice, shares) {
     if (!traderHasOrderMethods()) return null;
     const limitPrice = Math.min(0.99, round2(quotedPrice + SLIPPAGE_BUFFER));
     try {
-      const resp = await Promise.race([
-        trader.placeFokLimitOrder(tokenId, 'BUY', limitPrice, shares),
-        new Promise((_, rej) => setTimeout(() => rej(new Error('placeFokLimitOrder timed out after 15s')), 15000)),
-      ]);
+      const resp = await trader.placeFokLimitOrder(tokenId, 'BUY', limitPrice, shares);
       if (resp?.isFilled) {
         return { id: resp.id, filled: true, avgPrice: resp.avgPrice || limitPrice, filledShares: shares };
       }
-      log(`◻️  order for ${String(tokenId).slice(0, 10)}… not filled (FOK, limit ${limitPrice}, status:${resp?.status || 'unknown'}) — no trade, nothing to clean up`);
+      log(`◻️  order for ${String(tokenId).slice(0, 10)}… not filled (FOK, limit ${limitPrice}) — no trade, nothing to clean up`);
       return { id: resp?.id || null, filled: false, avgPrice: limitPrice, filledShares: 0 };
     } catch (e) {
       log(`❌ placeTakerBuy failed: ${describeOrderError(e)}`);
@@ -444,89 +436,75 @@ function freshTrade(assetDef, windowTs) {
     correlationFactor: null,
     combinedPnl: null,
     createdAt: Date.now(),
+    readySince: null, // timestamp both legs first became discovered+priced, for the ENTRY_CALC_BUFFER_MS delay
   };
 }
 
-// Steps 1-4: read prices, compute divergence/correlation, size, fire both legs
-// together — unconditionally and independently. Neither leg's fill status
-// gates the other; whichever fills, fills, and the bot just moves on.
+// Steps 1-4: read prices, compute divergence/correlation, size, enter both legs together.
 async function executeCombinedEntry(trade) {
   const f = trade.fifteen, v = trade.five;
-  if (f.upAsk == null || f.downAsk == null || v.upAsk == null || v.downAsk == null) return; // prices not loaded yet
+  if (f.upAsk == null || f.downAsk == null || v.upAsk == null || v.downAsk == null) return; // need live prices to price the orders at all
 
+  // Step 1: best asks already sitting on f/v from refreshLegPrices().
   const primarySide = f.upAsk >= f.downAsk ? 'up' : 'down'; // market-favored side after first 10 minutes
   const hedgeSide = primarySide === 'up' ? 'down' : 'up';
   const primaryPrice = primarySide === 'up' ? f.upAsk : f.downAsk;
   const primaryTokenId = primarySide === 'up' ? f.upTokenId : f.downTokenId;
-  const hedgePriceRaw = hedgeSide === 'up' ? v.upAsk : v.downAsk;
+  const hedgePrice = hedgeSide === 'up' ? v.upAsk : v.downAsk;
   const hedgeTokenId = hedgeSide === 'up' ? v.upTokenId : v.downTokenId;
 
-  // Floor at Polymarket's minimum tick (0.01) — purely so the size math below
-  // can't divide by zero on a stale/zero quote. Not a trade filter.
-  const hedgePrice = Math.max(hedgePriceRaw, 0.01);
-
-  // Divergence between the two markets' pricing of the hedge side, and the
+  // Step 2: divergence between the two markets' pricing of the hedge side, and the
   // live correlation factor derived from it.
   const fifteenHedgeProb = hedgeSide === 'up' ? f.upAsk : f.downAsk;
   const fiveHedgeProb = hedgeSide === 'up' ? v.upAsk : v.downAsk;
   const divergence = round4(Math.abs(fifteenHedgeProb - fiveHedgeProb));
   const correlationFactor = round4(clamp(1 - divergence, CORR_FLOOR, CORR_CEIL));
 
+  // Step 3: size.
   const amountAtRisk = round2(PRIMARY_SHARES * primaryPrice); // cost basis = max loss if primary resolves to zero
-  const rawHedgeShares = amountAtRisk / hedgePrice;
-  // Floor at Polymarket's real 5-share minimum order size so the order isn't
-  // a guaranteed reject — not a strategy filter, just meeting the exchange's
-  // hard requirement.
-  const hedgeShares = Math.max(MIN_ORDER_SHARES, round2(rawHedgeShares * correlationFactor));
+  const hedgeShares = round2((amountAtRisk / hedgePrice) * correlationFactor);
 
   trade.divergence = divergence;
   trade.correlationFactor = correlationFactor;
+  trade.state = 'entered'; // one attempt per window, regardless of outcome — no retry this round
 
-  // Fire both legs together, independently.
+  // Step 4: fire both legs together, independently — no gating one on the
+  // other's outcome. Whatever fills, fills. Whatever doesn't, doesn't. If one
+  // side fills and the other doesn't, there's nothing to unwind or retry —
+  // record what actually happened and let it resolve normally next window.
   const [primaryResp, hedgeResp] = await Promise.all([
     placeTakerBuy(primaryTokenId, primaryPrice, PRIMARY_SHARES),
     placeTakerBuy(hedgeTokenId, hedgePrice, hedgeShares),
   ]);
 
-  if (primaryResp?.filled && primaryResp.filledShares > 0) {
-    const pFillPrice = primaryResp.avgPrice;
-    const pShares = primaryResp.filledShares;
-    const pCost = round2(pShares * pFillPrice);
-    const pFee = estimateFee(pShares, pFillPrice);
-    engine.bankroll = round2(engine.bankroll - pCost - pFee);
-    engine.feesPaid = round2(engine.feesPaid + pFee);
-    trade.primary = { side: primarySide, shares: pShares, entryPrice: pFillPrice, cost: pCost, fee: pFee, filled: true, pnl: null };
-    registerTrade({ slug: f.slug, asset: trade.asset, step: '15m PRIMARY entry', side: primarySide, price: pFillPrice, shares: pShares, cost: pCost, fee: pFee });
-  }
+  const pFilled = !!(primaryResp?.filled && primaryResp.filledShares > 0);
+  const pShares = pFilled ? primaryResp.filledShares : 0;
+  const pFillPrice = pFilled ? primaryResp.avgPrice : primaryPrice;
+  const pCost = round2(pShares * pFillPrice);
+  const pFee = estimateFee(pShares, pFillPrice);
 
-  if (hedgeResp?.filled && hedgeResp.filledShares > 0) {
-    const hFillPrice = hedgeResp.avgPrice;
-    const hShares = hedgeResp.filledShares;
-    const hCost = round2(hShares * hFillPrice);
-    const hFee = estimateFee(hShares, hFillPrice);
-    engine.bankroll = round2(engine.bankroll - hCost - hFee);
-    engine.feesPaid = round2(engine.feesPaid + hFee);
-    trade.hedge = { side: hedgeSide, shares: hShares, entryPrice: hFillPrice, cost: hCost, fee: hFee, filled: true, pnl: null };
-    registerTrade({ slug: v.slug, asset: trade.asset, step: '5m HEDGE entry', side: hedgeSide, price: hFillPrice, shares: hShares, cost: hCost, fee: hFee });
-  }
+  const hFilled = !!(hedgeResp?.filled && hedgeResp.filledShares > 0);
+  const hShares = hFilled ? hedgeResp.filledShares : 0;
+  const hFillPrice = hFilled ? hedgeResp.avgPrice : hedgePrice;
+  const hCost = round2(hShares * hFillPrice);
+  const hFee = estimateFee(hShares, hFillPrice);
 
-  trade.state = 'entered'; // resolution logic settles whichever legs actually filled; unfilled legs default to 0 shares / 0 pnl
+  engine.bankroll = round2(engine.bankroll - pCost - pFee - hCost - hFee);
+  engine.feesPaid = round2(engine.feesPaid + pFee + hFee);
 
-  if (primaryResp?.filled && hedgeResp?.filled) {
-    log(`✅ [${trade.label} ${f.slug}] both legs filled — PRIMARY ${trade.primary.shares}sh ${primarySide.toUpperCase()} @${trade.primary.entryPrice.toFixed(3)} | HEDGE ${trade.hedge.shares}sh ${hedgeSide.toUpperCase()} @${trade.hedge.entryPrice.toFixed(3)} | bankroll=$${engine.bankroll.toFixed(2)}`);
-  } else if (primaryResp?.filled) {
-    log(`◻️  [${trade.label} ${f.slug}] primary filled, hedge didn't — moving on | bankroll=$${engine.bankroll.toFixed(2)}`);
-  } else if (hedgeResp?.filled) {
-    log(`◻️  [${trade.label} ${f.slug}] hedge filled, primary didn't — moving on | bankroll=$${engine.bankroll.toFixed(2)}`);
-  } else {
-    log(`◻️  [${trade.label} ${f.slug}] neither leg filled this round — moving on`);
-  }
+  trade.primary = { side: primarySide, shares: pShares, entryPrice: pFillPrice, cost: pCost, fee: pFee, filled: pFilled, pnl: null };
+  trade.hedge = { side: hedgeSide, shares: hShares, entryPrice: hFillPrice, cost: hCost, fee: hFee, filled: hFilled, pnl: null };
+
+  if (pFilled) registerTrade({ slug: f.slug, asset: trade.asset, step: '15m PRIMARY entry', side: primarySide, price: pFillPrice, shares: pShares, cost: pCost, fee: pFee });
+  if (hFilled) registerTrade({ slug: v.slug, asset: trade.asset, step: '5m HEDGE entry', side: hedgeSide, price: hFillPrice, shares: hShares, cost: hCost, fee: hFee });
+
+  log(`[${trade.label} ${f.slug}] combined entry — PRIMARY ${pFilled ? pShares + 'sh filled @' + pFillPrice.toFixed(3) : 'not filled'} ${primarySide.toUpperCase()} | HEDGE ${hFilled ? hShares + 'sh filled @' + hFillPrice.toFixed(3) : 'not filled'} ${hedgeSide.toUpperCase()} | divergence=${divergence.toFixed(4)} correlation=${correlationFactor.toFixed(2)} | bankroll=$${engine.bankroll.toFixed(2)}`);
   recordEquity();
 }
 
 function resolveTradeIfReady(trade) {
   if (!trade.fifteen.resolved || !trade.five.resolved) return false;
-  if (trade.state !== 'entered' && trade.state !== 'entered-unhedged' && trade.state !== 'pending-resolution') return true; // was skipped, nothing to settle
+  if (trade.state !== 'entered' && trade.state !== 'pending-resolution') return true; // nothing entered, nothing to settle
 
   const primaryPayout = trade.primary.side === trade.fifteen.winner ? round2(trade.primary.shares * 1) : 0;
   const primaryPnl = round2(primaryPayout - trade.primary.cost - trade.primary.fee);
@@ -573,11 +551,11 @@ function unrealizedForLeg(leg, position) {
   return round2(position.shares * mark - position.cost);
 }
 function unrealizedForTrade(trade) {
-  if (trade.state !== 'entered' && trade.state !== 'entered-unhedged' && trade.state !== 'pending-resolution') return 0;
+  if (trade.state !== 'entered' && trade.state !== 'pending-resolution') return 0;
   return round2(unrealizedForLeg(trade.fifteen, trade.primary) + unrealizedForLeg(trade.five, trade.hedge));
 }
 function openCostForTrade(trade) {
-  if (trade.state !== 'entered' && trade.state !== 'entered-unhedged' && trade.state !== 'pending-resolution') return 0;
+  if (trade.state !== 'entered' && trade.state !== 'pending-resolution') return 0;
   return round2(trade.primary.cost + trade.hedge.cost);
 }
 function allTrackedTrades() {
@@ -605,7 +583,7 @@ async function tickAsset(assetDef, now) {
 
   // Roll over to a fresh 15-minute window.
   if (!trade || trade.windowTs !== windowTs) {
-    if (trade && (trade.state === 'entered' || trade.state === 'entered-unhedged' || trade.state === 'pending-resolution')) {
+    if (trade && (trade.state === 'entered' || trade.state === 'pending-resolution')) {
       trade.state = 'pending-resolution';
       engine.pending.push(trade);
       if (engine.pending.length > MAX_PENDING_RESOLUTIONS) {
@@ -625,27 +603,31 @@ async function tickAsset(assetDef, now) {
     await discoverLeg(trade.fifteen);
   }
 
-  // Once we're at the 10-minute mark (plus the trigger delay), create +
-  // discover the hedge (last 5-min segment) market. hedgeWindowTs stays the
-  // real 600s-aligned market epoch (used for the slug); triggerAt is when
-  // the bot actually acts on it.
+  // Once we're at the 10-minute mark, create + discover the hedge (last 5-min segment) market.
   const hedgeWindowTs = windowTs + HEDGE_ENTRY_OFFSET_SECONDS;
-  const hedgeTriggerAt = hedgeWindowTs + ENTRY_TRIGGER_DELAY_SECONDS;
-  if (!trade.five && nowSec >= hedgeTriggerAt) {
+  if (!trade.five && nowSec >= hedgeWindowTs) {
     trade.five = freshLeg(assetDef.slugPrefix5, hedgeWindowTs, FIVE_SECONDS);
     trade.state = 'discovering-five';
-    log(`🕐 [${assetDef.label}] entering hedge window (+${ENTRY_TRIGGER_DELAY_SECONDS}s buffer) — discovering last-5m segment market ${trade.five.slug}…`);
+    log(`🕐 [${assetDef.label}] entering hedge window — discovering last-5m segment market ${trade.five.slug}…`);
   }
   if (trade.five && !trade.five.discovered && now - trade.five.lastDiscoveryAttempt >= DISCOVERY_RETRY_MS) {
     trade.five.lastDiscoveryAttempt = now;
     await discoverLeg(trade.five);
   }
 
-  // Once both legs are discovered and priced, enter the combined trade.
-  if (trade.five && trade.fifteen.discovered && trade.five.discovered && trade.state !== 'entered' && trade.state !== 'entered-unhedged' && trade.state !== 'skipped' && engine.tradingEnabled) {
+  // Once both legs are discovered and priced, wait a short buffer before
+  // actually firing — refreshing prices each tick — so the entry uses a
+  // settled read instead of the very first instant the 5-min leg was found.
+  if (trade.five && trade.fifteen.discovered && trade.five.discovered && trade.state !== 'entered' && engine.tradingEnabled) {
     await refreshLegPrices(trade.fifteen);
     await refreshLegPrices(trade.five);
-    await executeCombinedEntry(trade);
+    if (trade.readySince == null) {
+      trade.readySince = now;
+      log(`⏳ [${assetDef.label}] both legs ready — waiting ${ENTRY_CALC_BUFFER_MS}ms before firing`);
+    }
+    if (now - trade.readySince >= ENTRY_CALC_BUFFER_MS) {
+      await executeCombinedEntry(trade);
+    }
   }
 }
 
@@ -747,7 +729,6 @@ function buildState() {
     primaryShares: PRIMARY_SHARES,
     corrFloor: CORR_FLOOR, corrCeil: CORR_CEIL,
     fifteenSeconds: FIFTEEN_SECONDS, fiveSeconds: FIVE_SECONDS, hedgeEntryOffsetSeconds: HEDGE_ENTRY_OFFSET_SECONDS,
-    entryTriggerDelaySeconds: ENTRY_TRIGGER_DELAY_SECONDS,
   };
 }
 function getStatus() { return buildState(); }
@@ -781,7 +762,6 @@ async function init(privateKey, emit, slogFn) {
   slog(`[hedgebot] ${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
   trader = new PolymarketTrader(privateKey);
-  trader.setLogFn(slog);
   await trader.authenticate();
 
   mainLoop().catch(e => slog(`[hedgebot] ❌ Fatal: ${e.message}`));
