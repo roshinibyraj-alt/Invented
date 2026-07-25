@@ -250,7 +250,7 @@ async function placeTakerBuy(tokenId, quotedPrice, shares) {
       if (resp?.isFilled) {
         return { id: resp.id, filled: true, avgPrice: resp.avgPrice || limitPrice, filledShares: shares };
       }
-      log(`◻️  order for ${String(tokenId).slice(0, 10)}… not filled (FOK, limit ${limitPrice}) — no trade, nothing to clean up`);
+      log(`◻️  order for ${String(tokenId).slice(0, 10)}… not filled (FOK, limit ${limitPrice}, status:${resp?.status || 'unknown'}) — no trade, nothing to clean up`);
       return { id: resp?.id || null, filled: false, avgPrice: limitPrice, filledShares: 0 };
     } catch (e) {
       log(`❌ placeTakerBuy failed: ${describeOrderError(e)}`);
@@ -824,6 +824,7 @@ async function init(privateKey, emit, slogFn) {
   slog(`[hedgebot] ${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
   trader = new PolymarketTrader(privateKey);
+  trader.setLogFn(slog);
   await trader.authenticate();
 
   mainLoop().catch(e => slog(`[hedgebot] ❌ Fatal: ${e.message}`));
