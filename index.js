@@ -133,8 +133,8 @@ app.get('/', (_, res) => {
       <div class="section-hdr" style="padding:0 0 8px;">Trade History (resolved)</div>
       <div class="tbl-wrap">
         <table class="tbl">
-          <thead><tr><th>Asset</th><th>Window</th><th>Primary</th><th>Hedge</th><th>Corr.</th><th>Primary PnL</th><th>Hedge PnL</th><th>Combined</th></tr></thead>
-          <tbody id="history-body"><tr><td colspan="8" class="empty">Loading…</td></tr></tbody>
+          <thead><tr><th>Asset</th><th>Window</th><th>Primary</th><th>Hedge</th><th>Corr.</th><th>Primary PnL</th><th>Hedge PnL</th><th>Combined (actual)</th><th>Combined (no stop-loss)</th></tr></thead>
+          <tbody id="history-body"><tr><td colspan="9" class="empty">Loading…</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -173,14 +173,18 @@ app.get('/', (_, res) => {
   function sgn(n) { return n == null ? '—' : (n >= 0 ? '+$' : '-$') + Math.abs(n).toFixed(2); }
 
   function renderStats(s) {
+    const slPending = s.shadowPendingCount ? (' <span style="opacity:.6">(' + s.shadowPendingCount + ' pending)</span>') : '';
     const stats = [
       ['Equity (MTM)', '$' + fmt2(s.equity), ''],
       ['Bankroll (cash)', '$' + fmt2(s.bankroll), ''],
-      ['Realized P&amp;L', sgn(s.realizedPnl), pClass(s.realizedPnl)],
+      ['Realized P&amp;L (actual)', sgn(s.realizedPnl), pClass(s.realizedPnl)],
+      ['Realized P&amp;L (no stop-loss)', sgn(s.realizedPnlNoStopLoss) + slPending, pClass(s.realizedPnlNoStopLoss)],
+      ['Stop-Loss Impact', sgn(s.stopLossImpact), pClass(s.stopLossImpact)],
       ['Unrealized P&amp;L', sgn(s.unrealizedPnl), pClass(s.unrealizedPnl)],
       ['Fees Paid', '$' + (s.feesPaid || 0).toFixed(4), ''],
       ['Combined Wins / Losses', s.wins + ' / ' + s.losses, ''],
       ['Pending Resolution', s.pendingResolutionCount || 0, ''],
+      ['Skipped (price &lt; ' + (s.primaryPriceMin != null ? s.primaryPriceMin.toFixed(2) : '—') + ')', s.skippedLowPrice || 0, ''],
       ['Primary Size', s.primaryShares + 'sh', ''],
     ];
     $('stats-row').innerHTML = stats.map(([label, val, cls]) =>
@@ -204,6 +208,10 @@ app.get('/', (_, res) => {
     if (!t) return '<div class="empty">No data yet</div>';
     const stateMap = { 'entered': ['st-entered', '🟢 ENTERED'], 'entered-unhedged': ['st-skipped', '🚨 UNHEDGED'], 'resolved': ['st-resolved', '⌛ RESOLVED'], 'skipped': ['st-skipped', '⛔ SKIPPED'] };
     const [stCls, stLabel] = stateMap[t.state] || ['st-wait', t.state.replace(/-/g, ' ').toUpperCase()];
+    if (t.state === 'skipped' && t.skipReason) {
+      return '<div class="leg-card"><div class="leg-head"><span class="leg-tag">' + (t.fifteen ? t.fifteen.slug.replace(/^(btc|eth)-updown-15m-/, '') : '…') + '</span><span class="leg-badge ' + stCls + '">' + stLabel + '</span></div>' +
+        '<div class="leg-meta"><span>' + t.skipReason + '</span></div></div>';
+    }
     const corrLine = t.correlationFactor != null
       ? '<div class="corr-line">divergence ' + t.divergence.toFixed(4) + ' · correlation ' + t.correlationFactor.toFixed(2) + '</div>'
       : '';
@@ -237,18 +245,23 @@ app.get('/', (_, res) => {
     $('assets-grid').innerHTML = assetCard(s.current.btc, 'BTC', '') + assetCard(s.current.eth, 'ETH', 'eth');
   }
 
+  function slBadge(stopped) { return stopped ? ' <span class="highconf-badge" style="background:#e8304a22;color:var(--red);border-color:var(--red);">🛑 SL</span>' : ''; }
   function renderHistory(list) {
-    if (!list || !list.length) { $('history-body').innerHTML = '<tr><td colspan="8" class="empty">No resolved trades yet</td></tr>'; return; }
-    $('history-body').innerHTML = list.map(h =>
-      '<tr><td>' + (h.label || h.asset || '').toUpperCase() + '</td>' +
+    if (!list || !list.length) { $('history-body').innerHTML = '<tr><td colspan="9" class="empty">No resolved trades yet</td></tr>'; return; }
+    $('history-body').innerHTML = list.map(h => {
+      const noSlKnown = h.noStopLossCombinedPnl != null;
+      const noSlCell = noSlKnown ? sgn(h.noStopLossCombinedPnl) : '<span style="opacity:.6">pending…</span>';
+      const noSlCls = noSlKnown ? pClass(h.noStopLossCombinedPnl) : '';
+      return '<tr><td>' + (h.label || h.asset || '').toUpperCase() + '</td>' +
       '<td>' + h.fifteenSlug.replace(/^(btc|eth)-updown-15m-/, '') + '</td>' +
-      '<td>' + (h.primarySide || '').toUpperCase() + ' ' + h.primaryShares + 'sh (winner ' + (h.primaryWinner || '?').toUpperCase() + ')</td>' +
-      '<td>' + (h.hedgeSide || '').toUpperCase() + ' ' + h.hedgeShares + 'sh (winner ' + (h.hedgeWinner || '?').toUpperCase() + ')</td>' +
+      '<td>' + (h.primarySide || '').toUpperCase() + ' ' + h.primaryShares + 'sh (winner ' + (h.primaryWinner || '?').toUpperCase() + ')' + slBadge(h.primaryStoppedOut) + '</td>' +
+      '<td>' + (h.hedgeSide || '').toUpperCase() + ' ' + h.hedgeShares + 'sh (winner ' + (h.hedgeWinner || '?').toUpperCase() + ')' + slBadge(h.hedgeStoppedOut) + '</td>' +
       '<td>' + (h.correlationFactor != null ? h.correlationFactor.toFixed(2) : '—') + '</td>' +
       '<td class="' + pClass(h.primaryPnl) + '">' + sgn(h.primaryPnl) + '</td>' +
       '<td class="' + pClass(h.hedgePnl) + '">' + sgn(h.hedgePnl) + '</td>' +
-      '<td class="' + pClass(h.combinedPnl) + '">' + sgn(h.combinedPnl) + '</td></tr>'
-    ).join('');
+      '<td class="' + pClass(h.combinedPnl) + '">' + sgn(h.combinedPnl) + '</td>' +
+      '<td class="' + noSlCls + '">' + noSlCell + '</td></tr>';
+    }).join('');
   }
 
   function renderTrades(list) {
@@ -277,7 +290,7 @@ app.get('/', (_, res) => {
     $('live-btn').textContent = s.dryRun ? '🔴 Switch to LIVE' : '⚠️ Switch to DEMO';
 
     const banner = $('boundary-banner');
-    if (s.waitingForBoundary) { banner.style.display = 'block'; banner.textContent = '⏳ Started mid-window — waiting for the next fresh 15-minute boundary before trading begins (no mid-window entries).'; }
+    if (s.waitingForBoundary) { banner.style.display = 'block'; banner.textContent = '⏳ Restarted past this window\'s hedge-entry mark — waiting for the next fresh 15-minute boundary before trading begins.'; }
     else banner.style.display = 'none';
 
     renderStats(s);
