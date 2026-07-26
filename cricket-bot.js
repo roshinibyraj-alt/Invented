@@ -57,14 +57,16 @@
  *  is a correlated hedge, not a perfect one. correlationFactor is the
  *  live proxy for how tightly they're tracking right now.
  *
- *  ENTRY STYLE: both legs are single-shot FOK (fill-or-kill) taker orders,
- *  priced at the quoted ask plus a small slippage cushion (SLIPPAGE_BUFFER)
- *  so they can walk a bit further into the book. FOK is atomic — it either
- *  fully fills immediately or is killed outright, nothing in between and
- *  nothing left resting afterward — so either outcome (filled or not) is a
- *  final, unambiguous answer with no polling, cancelling, or retrying
- *  needed. Taker fees apply per HEDGE_TAKER_FEE_RATE (default 0; set to
- *  Polymarket's published
+ *  ENTRY STYLE: both legs are true market orders (FOK, dollar-denominated) —
+ *  the target share count is converted to a dollar budget at the live quoted
+ *  price, and the exchange determines the actual execution price itself by
+ *  walking the book. There's no pre-computed price ceiling that can go stale
+ *  between reading the quote and the order reaching the matching engine.
+ *  FOK is atomic — it either fully fills immediately or is killed outright,
+ *  nothing in between and nothing left resting afterward — so either outcome
+ *  (filled or not) is a final, unambiguous answer with no polling,
+ *  cancelling, or retrying needed. Taker fees apply per HEDGE_TAKER_FEE_RATE
+ *  (default 0; set to Polymarket's published
  *  crypto-category taker rate if you want realistic fee modeling).
  *
  *  RESOLUTION: each leg resolves independently, three tiers, fastest
@@ -83,8 +85,8 @@
  *  through.
  *
  *  TRADER INTERFACE:
- *    trader.placeFokLimitOrder(tokenId, side, price, size) -> { id, isFilled, avgPrice, raw }
- *    trader.reconcileToken(tokenId)                        -> { filledShares, avgPrice, orderId } | null
+ *    trader.placeFokBuy(tokenId, dollarAmount) -> { id, isFilled, avgPrice, raw }
+ *    trader.reconcileToken(tokenId)            -> { filledShares, avgPrice, orderId } | null
  * ═══════════════════════════════════════════════════════════════
  */
 
@@ -105,7 +107,9 @@ const DISCOVERY_RETRY_MS  = 2000;
 // the real avgPrice from the exchange is used for accounting either way,
 // never this ceiling. If it doesn't fill, that's an acceptable outcome —
 // no retry, no resting order left behind to babysit.
-const SLIPPAGE_BUFFER = Number(process.env.HEDGE_SLIPPAGE_BUFFER || 0.03);
+// (Previously a fixed slippage cushion added to a limit price — removed.
+// True market orders below let the exchange determine execution price by
+// walking the book, so there's no ceiling to pre-compute or go stale.)
 // Once both legs are discovered and priced, wait this long before actually
 // firing the combined entry — gives prices a moment to settle (especially
 // the 5-min leg, which was just discovered seconds ago) instead of trading
@@ -216,41 +220,49 @@ function describeOrderError(e) {
   return parts.join(' | ');
 }
 function traderHasOrderMethods() {
-  const ok = trader && typeof trader.placeFokLimitOrder === 'function';
+  const ok = trader && typeof trader.placeFokBuy === 'function';
   if (!ok && !warnedNoLimitMethod) {
     warnedNoLimitMethod = true;
-    slog('[hedgebot] ❌ LIVE trading needs trader.placeFokLimitOrder on polymarket-trader.js — LIVE order placement will be skipped until added. DRY_RUN is unaffected.');
+    slog('[hedgebot] ❌ LIVE trading needs trader.placeFokBuy on polymarket-trader.js — LIVE order placement will be skipped until added. DRY_RUN is unaffected.');
   }
   return ok;
 }
-// Single-shot FOK (fill-or-kill) taker order, priced with a slippage cushion
-// above the quoted ask so it has room to walk a bit further into the book.
-// FOK is atomic by design — it either fully fills right now or is killed
-// outright, nothing in between, and nothing left resting afterward. Combined
-// with Polymarket's documented behavior for these crypto Up/Down markets
-// (the API holds for the built-in taker delay and returns the FINAL result
-// synchronously), this one response is authoritative — no polling loop, no
-// cancel, no reconciliation needed for the normal case. Either outcome
-// (filled or not) is an acceptable, final answer — not filled just means no
-// trade happened, nothing left to clean up.
+// True market order (dollar-denominated) instead of a limit-priced FOK. The
+// target share count is converted to a dollar budget at the live quoted
+// price, and the exchange itself determines the actual execution price by
+// walking the book — there's no price ceiling we pre-compute that can go
+// stale between reading the quote and the order reaching the matching
+// engine. That staleness (not liquidity) was the actual cause of orders
+// coming back "not filled": a limit-priced FOK requires the market to still
+// be at-or-below our guessed ceiling at the exact moment it matches, and the
+// two extra API round trips placeFokLimitOrder makes before submitting
+// (tick size + neg-risk lookups) were enough time for that ceiling to go
+// stale. A market order has no such ceiling to go stale — it fills at
+// whatever the real price is when it lands, full stop.
+// Tradeoff: since the order is sized in dollars, the actual filled share
+// count (dollarAmount / real avgPrice) can land slightly above or below the
+// requested `shares` if execution price differs from the quote — accepted
+// in exchange for not missing fills over a few cents of drift.
 async function placeTakerBuy(tokenId, quotedPrice, shares) {
   if (!DRY_RUN) {
     if (!traderHasOrderMethods()) return null;
-    const limitPrice = Math.min(0.99, round2(quotedPrice + SLIPPAGE_BUFFER));
+    const dollarAmount = round2(shares * quotedPrice);
+    if (!(dollarAmount > 0)) return { id: null, filled: false, avgPrice: quotedPrice, filledShares: 0 };
     try {
-      const resp = await trader.placeFokLimitOrder(tokenId, 'BUY', limitPrice, shares);
-      if (resp?.isFilled) {
-        return { id: resp.id, filled: true, avgPrice: resp.avgPrice || limitPrice, filledShares: shares };
+      const resp = await trader.placeFokBuy(tokenId, dollarAmount);
+      if (resp?.isFilled && resp.avgPrice > 0) {
+        const filledShares = round2(dollarAmount / resp.avgPrice);
+        return { id: resp.id, filled: true, avgPrice: resp.avgPrice, filledShares };
       }
-      log(`◻️  order for ${String(tokenId).slice(0, 10)}… not filled (FOK, limit ${limitPrice}) — no trade, nothing to clean up`);
-      return { id: resp?.id || null, filled: false, avgPrice: limitPrice, filledShares: 0 };
+      log(`◻️  market order for ${String(tokenId).slice(0, 10)}… not filled ($${dollarAmount} FOK) — no trade, nothing to clean up`);
+      return { id: resp?.id || null, filled: false, avgPrice: quotedPrice, filledShares: 0 };
     } catch (e) {
       log(`❌ placeTakerBuy failed: ${describeOrderError(e)}`);
       // Ambiguous failure (e.g. a genuine network/transport error, not a
       // clean FOK rejection). Check reality once before reporting failure.
       if (typeof trader.reconcileToken === 'function') {
         const reconciled = await trader.reconcileToken(tokenId).catch(() => null);
-        if (reconciled?.filledShares > 0) return { id: reconciled.orderId || null, filled: true, avgPrice: reconciled.avgPrice || limitPrice, filledShares: reconciled.filledShares };
+        if (reconciled?.filledShares > 0) return { id: reconciled.orderId || null, filled: true, avgPrice: reconciled.avgPrice || quotedPrice, filledShares: reconciled.filledShares };
       }
       return null;
     }
