@@ -87,9 +87,22 @@
  *  open. If the live bid on the held side drops to/below its threshold
  *  (STOP_LOSS_PRIMARY=0.40, STOP_LOSS_HEDGE=0.15 by default), that leg is
  *  sold immediately via a market order and its P&L is realized right then —
- *  it no longer waits for or participates in that market's resolution. The
- *  other leg is unaffected and continues normally. Once a window closes,
- *  stop-loss no longer applies; resolution takes over.
+ *  it no longer waits for or participates in that market's resolution for
+ *  real settlement. The other leg is unaffected and continues normally.
+ *  Once a window closes, stop-loss no longer applies; resolution takes over.
+ *
+ *  STOP-LOSS COMPARISON: for any leg that stops out, its underlying market
+ *  keeps getting resolved in the background purely to compute what its P&L
+ *  WOULD have been had it been held instead — this never affects real
+ *  bankroll/settlement, which already happened at the stop-loss sell. Once
+ *  known, it's rolled into engine.noStopRealizedPnl for dashboard comparison
+ *  against the real engine.realizedPnl.
+ *
+ *  ENTRY FILTER: the combined trade only fires if the primary side's price
+ *  is at or above PRIMARY_MIN_ENTRY_PRICE (0.70 by default) — below that,
+ *  the whole window is skipped, neither leg fires. One check per window,
+ *  same as everything else here — no retrying if price crosses the
+ *  threshold later in the window.
  *
  *  STARTUP: if started mid-window, waits for the next fresh 15-minute
  *  boundary before opening any trade — never joins a window partway
@@ -158,6 +171,11 @@ const MIN_ORDER_SHARES = Number(process.env.HEDGE_MIN_ORDER_SHARES || 5);
 // profiles — the hedge in particular can legitimately trade cheap early on
 // without that meaning the strategy failed, so its threshold sits lower.
 const STOP_LOSS_PRIMARY = Number(process.env.HEDGE_STOP_LOSS_PRIMARY || 0.40);
+// Entry filter: only fire the combined trade if the primary side's price is
+// at or above this — i.e. only take windows where the 15-min market already
+// shows strong conviction after the first 10 minutes. Below this, skip the
+// window entirely (neither leg fires).
+const PRIMARY_MIN_ENTRY_PRICE = Number(process.env.HEDGE_PRIMARY_MIN_ENTRY_PRICE || 0.70);
 const STOP_LOSS_HEDGE = Number(process.env.HEDGE_STOP_LOSS_HEDGE || 0.15);
 
 let DRY_RUN = (process.env.HEDGE_DRY_RUN || process.env.SPORTS_DRY_RUN || process.env.DRY_RUN || 'true').toLowerCase() === 'true';
@@ -196,6 +214,7 @@ const engine = {
   bankroll: STARTING_CAPITAL,
   capital: STARTING_CAPITAL,
   realizedPnl: 0,
+  noStopRealizedPnl: 0, // what realizedPnl would be if stop-loss never fired — for dashboard comparison
   feesPaid: 0,
   wins: 0, losses: 0,
   current: { btc: null, eth: null }, // active HedgeTrade per asset, not yet closed out
@@ -517,6 +536,10 @@ function freshTrade(assetDef, windowTs) {
     combinedPnl: null,
     createdAt: Date.now(),
     readySince: null, // timestamp both legs first became discovered+priced, for the ENTRY_CALC_BUFFER_MS delay
+    settled: false, // real money settlement done (bankroll credited, combinedPnl final) — independent of counterfactual tracking below
+    noStopPrimaryPnl: null, noStopHedgePnl: null, noStopCombinedPnl: null, // what P&L would have been without stop-loss
+    noStopCounted: false, // guards against double-counting into engine.noStopRealizedPnl
+    historyRef: null, // reference to this trade's pushed history entry, so counterfactual data can be filled in later if it arrives after settlement
   };
 }
 
@@ -532,6 +555,15 @@ async function executeCombinedEntry(trade) {
   const primaryTokenId = primarySide === 'up' ? f.upTokenId : f.downTokenId;
   const hedgePrice = hedgeSide === 'up' ? v.upAsk : v.downAsk;
   const hedgeTokenId = hedgeSide === 'up' ? v.upTokenId : v.downTokenId;
+
+  // Entry filter: only take windows where the 15-min market already shows
+  // strong conviction. Below this, skip the window entirely — neither leg
+  // fires, no state change beyond marking it skipped.
+  if (primaryPrice < PRIMARY_MIN_ENTRY_PRICE) {
+    trade.state = 'skipped';
+    log(`⛔ [${trade.label} ${f.slug}] skipped — primary price ${primaryPrice.toFixed(3)} below entry filter ${PRIMARY_MIN_ENTRY_PRICE}`);
+    return;
+  }
 
   // Step 2: divergence between the two markets' pricing of the hedge side, and the
   // live correlation factor derived from it.
@@ -640,55 +672,106 @@ async function checkStopLoss(trade) {
   }
 }
 
+function finalizeNoStopIfReady(trade) {
+  // Per leg: if it was never stopped out, its "no stop-loss" P&L IS its real
+  // P&L — nothing hypothetical to compute. If it WAS stopped out, we need
+  // its underlying market to have actually resolved before we know what
+  // would have happened had it been held instead.
+  if (trade.noStopPrimaryPnl == null) {
+    if (!trade.primary.closedEarly) {
+      trade.noStopPrimaryPnl = trade.primary.pnl;
+    } else if (trade.fifteen.resolved) {
+      const hypoPayout = trade.primary.side === trade.fifteen.winner ? round2(trade.primary.shares * 1) : 0;
+      trade.noStopPrimaryPnl = round2(hypoPayout - trade.primary.cost - trade.primary.fee);
+    }
+  }
+  if (trade.noStopHedgePnl == null) {
+    if (!trade.hedge.closedEarly) {
+      trade.noStopHedgePnl = trade.hedge.pnl;
+    } else if (trade.five.resolved) {
+      const hypoPayout = trade.hedge.side === trade.five.winner ? round2(trade.hedge.shares * 1) : 0;
+      trade.noStopHedgePnl = round2(hypoPayout - trade.hedge.cost - trade.hedge.fee);
+    }
+  }
+  if (trade.noStopPrimaryPnl != null && trade.noStopHedgePnl != null && !trade.noStopCounted) {
+    trade.noStopCombinedPnl = round2(trade.noStopPrimaryPnl + trade.noStopHedgePnl);
+    engine.noStopRealizedPnl = round2(engine.noStopRealizedPnl + trade.noStopCombinedPnl);
+    trade.noStopCounted = true;
+    if (trade.historyRef) {
+      trade.historyRef.noStopPrimaryPnl = trade.noStopPrimaryPnl;
+      trade.historyRef.noStopHedgePnl = trade.noStopHedgePnl;
+      trade.historyRef.noStopCombinedPnl = trade.noStopCombinedPnl;
+    }
+  }
+}
+
 function resolveTradeIfReady(trade) {
-  const primaryDone = trade.primary.closedEarly || trade.fifteen.resolved;
-  const hedgeDone = trade.hedge.closedEarly || trade.five.resolved;
-  if (!primaryDone || !hedgeDone) return false;
-  if (trade.state !== 'entered' && trade.state !== 'pending-resolution') return true; // nothing entered, nothing to settle
+  if (!trade.settled) {
+    if (trade.state !== 'entered' && trade.state !== 'pending-resolution') {
+      trade.settled = true; // nothing entered (e.g. skipped by the entry filter), nothing to settle
+    } else {
+      const primaryDone = trade.primary.closedEarly || trade.fifteen.resolved;
+      const hedgeDone = trade.hedge.closedEarly || trade.five.resolved;
+      if (primaryDone && hedgeDone) {
+        let primaryPnl;
+        if (trade.primary.closedEarly) {
+          primaryPnl = trade.primary.pnl; // already realized (and bankroll already credited) at stop-loss sell time
+        } else {
+          const primaryPayout = trade.primary.side === trade.fifteen.winner ? round2(trade.primary.shares * 1) : 0;
+          primaryPnl = round2(primaryPayout - trade.primary.cost - trade.primary.fee);
+          trade.primary.pnl = primaryPnl;
+          engine.bankroll = round2(engine.bankroll + primaryPayout);
+        }
 
-  let primaryPnl;
-  if (trade.primary.closedEarly) {
-    primaryPnl = trade.primary.pnl; // already realized (and bankroll already credited) at stop-loss sell time
-  } else {
-    const primaryPayout = trade.primary.side === trade.fifteen.winner ? round2(trade.primary.shares * 1) : 0;
-    primaryPnl = round2(primaryPayout - trade.primary.cost - trade.primary.fee);
-    trade.primary.pnl = primaryPnl;
-    engine.bankroll = round2(engine.bankroll + primaryPayout);
+        let hedgePnl;
+        if (trade.hedge.closedEarly) {
+          hedgePnl = trade.hedge.pnl;
+        } else {
+          const hedgePayout = trade.hedge.side === trade.five.winner ? round2(trade.hedge.shares * 1) : 0;
+          hedgePnl = round2(hedgePayout - trade.hedge.cost - trade.hedge.fee);
+          trade.hedge.pnl = hedgePnl;
+          engine.bankroll = round2(engine.bankroll + hedgePayout);
+        }
+
+        const combinedPnl = round2(primaryPnl + hedgePnl);
+        trade.combinedPnl = combinedPnl;
+        trade.state = 'resolved';
+        trade.settled = true;
+
+        engine.realizedPnl = round2(engine.realizedPnl + combinedPnl);
+        if (combinedPnl >= 0) engine.wins++; else engine.losses++;
+
+        registerTrade({ slug: trade.fifteen.slug, asset: trade.asset, step: '15m PRIMARY resolution', side: trade.primary.side, price: 1, shares: trade.primary.shares, pnl: primaryPnl });
+        registerTrade({ slug: trade.five.slug, asset: trade.asset, step: '5m HEDGE resolution', side: trade.hedge.side, price: 1, shares: trade.hedge.shares, pnl: hedgePnl });
+
+        const historyEntry = {
+          asset: trade.asset, label: trade.label, windowTs: trade.windowTs,
+          fifteenSlug: trade.fifteen.slug, fiveSlug: trade.five.slug,
+          primarySide: trade.primary.side, primaryShares: trade.primary.shares, primaryEntry: trade.primary.entryPrice, primaryWinner: trade.fifteen.winner, primaryPnl, primaryStoppedOut: trade.primary.closedEarly,
+          hedgeSide: trade.hedge.side, hedgeShares: trade.hedge.shares, hedgeEntry: trade.hedge.entryPrice, hedgeWinner: trade.five.winner, hedgePnl, hedgeStoppedOut: trade.hedge.closedEarly,
+          divergence: trade.divergence, correlationFactor: trade.correlationFactor,
+          combinedPnl, resolvedAt: Date.now(),
+          noStopPrimaryPnl: null, noStopHedgePnl: null, noStopCombinedPnl: null,
+        };
+        engine.history.unshift(historyEntry);
+        trade.historyRef = historyEntry;
+        if (engine.history.length > 300) engine.history.pop();
+
+        log(`🏆 [${trade.label} ${trade.fifteen.slug}] combined trade resolved — primary ${sgn2(primaryPnl)} + hedge ${sgn2(hedgePnl)} = ${sgn2(combinedPnl)} | bankroll=$${engine.bankroll.toFixed(2)}`);
+        recordEquity();
+      }
+    }
   }
 
-  let hedgePnl;
-  if (trade.hedge.closedEarly) {
-    hedgePnl = trade.hedge.pnl;
-  } else {
-    const hedgePayout = trade.hedge.side === trade.five.winner ? round2(trade.hedge.shares * 1) : 0;
-    hedgePnl = round2(hedgePayout - trade.hedge.cost - trade.hedge.fee);
-    trade.hedge.pnl = hedgePnl;
-    engine.bankroll = round2(engine.bankroll + hedgePayout);
-  }
+  finalizeNoStopIfReady(trade);
 
-  const combinedPnl = round2(primaryPnl + hedgePnl);
-  trade.combinedPnl = combinedPnl;
-  trade.state = 'resolved';
-
-  engine.realizedPnl = round2(engine.realizedPnl + combinedPnl);
-  if (combinedPnl >= 0) engine.wins++; else engine.losses++;
-
-  registerTrade({ slug: trade.fifteen.slug, asset: trade.asset, step: '15m PRIMARY resolution', side: trade.primary.side, price: 1, shares: trade.primary.shares, pnl: primaryPnl });
-  registerTrade({ slug: trade.five.slug, asset: trade.asset, step: '5m HEDGE resolution', side: trade.hedge.side, price: 1, shares: trade.hedge.shares, pnl: hedgePnl });
-
-  engine.history.unshift({
-    asset: trade.asset, label: trade.label, windowTs: trade.windowTs,
-    fifteenSlug: trade.fifteen.slug, fiveSlug: trade.five.slug,
-    primarySide: trade.primary.side, primaryShares: trade.primary.shares, primaryEntry: trade.primary.entryPrice, primaryWinner: trade.fifteen.winner, primaryPnl,
-    hedgeSide: trade.hedge.side, hedgeShares: trade.hedge.shares, hedgeEntry: trade.hedge.entryPrice, hedgeWinner: trade.five.winner, hedgePnl,
-    divergence: trade.divergence, correlationFactor: trade.correlationFactor,
-    combinedPnl, resolvedAt: Date.now(),
-  });
-  if (engine.history.length > 300) engine.history.pop();
-
-  log(`🏆 [${trade.label} ${trade.fifteen.slug}] combined trade resolved — primary ${sgn2(primaryPnl)} + hedge ${sgn2(hedgePnl)} = ${sgn2(combinedPnl)} | bankroll=$${engine.bankroll.toFixed(2)}`);
-  recordEquity();
-  return true;
+  if (!trade.settled) return false;
+  // Stay in the pending queue (still polling resolveLegAttempt each cycle)
+  // until any stopped-out leg's underlying market has also actually
+  // resolved, so the stop-loss comparison stats stay complete — even though
+  // real money settled already.
+  const needsCounterfactualWait = (trade.primary.closedEarly && !trade.fifteen.resolved) || (trade.hedge.closedEarly && !trade.five.resolved);
+  return !needsCounterfactualWait;
 }
 function sgn2(n) { return (n >= 0 ? '+$' : '-$') + Math.abs(n).toFixed(2); }
 
@@ -771,7 +854,7 @@ async function tickAsset(assetDef, now) {
   // Once both legs are discovered and priced, wait a short buffer before
   // actually firing — refreshing prices each tick — so the entry uses a
   // settled read instead of the very first instant the 5-min leg was found.
-  if (trade.five && trade.fifteen.discovered && trade.five.discovered && trade.state !== 'entered' && engine.tradingEnabled) {
+  if (trade.five && trade.fifteen.discovered && trade.five.discovered && trade.state !== 'entered' && trade.state !== 'skipped' && engine.tradingEnabled) {
     await refreshLegPrices(trade.fifteen);
     await refreshLegPrices(trade.five);
     if (trade.readySince == null) {
@@ -875,7 +958,8 @@ function buildState() {
     tradingEnabled: engine.tradingEnabled,
     waitingForBoundary: engine.waitingForBoundary,
     bankroll: engine.bankroll, capital: engine.capital,
-    realizedPnl: engine.realizedPnl, unrealizedPnl, equity,
+    realizedPnl: engine.realizedPnl, noStopRealizedPnl: engine.noStopRealizedPnl, unrealizedPnl, equity,
+    stopLossImpact: round2(engine.realizedPnl - engine.noStopRealizedPnl), // positive = stop-loss helped; negative = it cost you
     feesPaid: engine.feesPaid,
     wins: engine.wins, losses: engine.losses,
     current: { btc: tradeSummary(engine.current.btc), eth: tradeSummary(engine.current.eth) },
@@ -888,6 +972,8 @@ function buildState() {
     primaryShares: PRIMARY_SHARES,
     corrFloor: CORR_FLOOR, corrCeil: CORR_CEIL,
     fifteenSeconds: FIFTEEN_SECONDS, fiveSeconds: FIVE_SECONDS, hedgeEntryOffsetSeconds: HEDGE_ENTRY_OFFSET_SECONDS,
+    primaryMinEntryPrice: PRIMARY_MIN_ENTRY_PRICE,
+    stopLossPrimary: STOP_LOSS_PRIMARY, stopLossHedge: STOP_LOSS_HEDGE,
   };
 }
 function getStatus() { return buildState(); }
