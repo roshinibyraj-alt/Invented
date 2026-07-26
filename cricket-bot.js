@@ -91,14 +91,9 @@
  *  other leg is unaffected and continues normally. Once a window closes,
  *  stop-loss no longer applies; resolution takes over.
  *
- *  STARTUP / RESTART: on boot (including redeploys), the bot checks where
- *  "now" falls inside the current 15-minute window. If it's still before
- *  the 10-minute hedge-entry mark, there's a full trading opportunity left
- *  in that window, so the bot arms immediately and trades it normally —
- *  it does NOT wait for the next boundary. Only if it's past that mark
- *  (i.e. restarted inside the last 5 minutes, after the hedge leg would
- *  already be open) does it wait for the next fresh 15-minute boundary,
- *  since there's no correct way to enter this window's hedge leg anymore.
+ *  STARTUP: if started mid-window, waits for the next fresh 15-minute
+ *  boundary before opening any trade — never joins a window partway
+ *  through.
  *
  *  TRADER INTERFACE:
  *    trader.placeFokLimitOrder(tokenId, side, price, size) -> { id, isFilled, avgPrice, raw }
@@ -164,14 +159,6 @@ const MIN_ORDER_SHARES = Number(process.env.HEDGE_MIN_ORDER_SHARES || 5);
 // without that meaning the strategy failed, so its threshold sits lower.
 const STOP_LOSS_PRIMARY = Number(process.env.HEDGE_STOP_LOSS_PRIMARY || 0.40);
 const STOP_LOSS_HEDGE = Number(process.env.HEDGE_STOP_LOSS_HEDGE || 0.15);
-// Conviction filter: the primary (15-min) leg's market-favored side must be
-// trading at or above this price before the bot will enter ANYTHING for that
-// window — no primary, no hedge. A primary price near 0.50 means the market
-// has no real read on this window yet (close to a coinflip), so trading it
-// isn't a directional edge, just noise. Checked once at the 10-minute mark
-// (before the hedge leg is even discovered) and re-checked right before
-// firing, in case price drifted back down during the entry buffer wait.
-const PRIMARY_PRICE_MIN = Number(process.env.HEDGE_PRIMARY_PRICE_MIN || 0.70);
 
 let DRY_RUN = (process.env.HEDGE_DRY_RUN || process.env.SPORTS_DRY_RUN || process.env.DRY_RUN || 'true').toLowerCase() === 'true';
 const STARTING_CAPITAL = Number(process.env.HEDGE_CAPITAL || 2000);
@@ -203,7 +190,6 @@ let slog = () => {};
 let trader = null;
 let warnedNoLimitMethod = false;
 let tradeSeq = 0;
-let tradeUid = 0; // stable identity for a combined trade, used to match shadow (no-stop-loss) resolutions back to their history entry
 
 const engine = {
   tradingEnabled: true,
@@ -222,16 +208,6 @@ const engine = {
   lastResolutionPoll: 0,
   waitingForBoundary: true,
   boundaryWindowTs: null,
-  skippedLowPrice: 0, // windows skipped because primary price < PRIMARY_PRICE_MIN
-  // "No stop-loss" counterfactual tracking: what realized P&L WOULD have
-  // been if stop-loss were never applied and every leg was held to its real
-  // resolution instead of being sold early. For legs that never hit
-  // stop-loss, this equals the actual P&L. For legs that did stop out, the
-  // true outcome isn't known at stop-loss time, so it's filled in later once
-  // that leg's real winner is learned (see shadowLegs / lastShadowPoll).
-  realizedPnlNoStopLoss: 0,
-  shadowLegs: [],       // legs that closed early via stop-loss, still being tracked to their true resolution purely for the no-stop-loss counterfactual
-  lastShadowPoll: 0,
 };
 
 // ─────────────────────────────────────────
@@ -529,13 +505,11 @@ function freshPosition() {
 }
 function freshTrade(assetDef, windowTs) {
   return {
-    id: ++tradeUid,
     asset: assetDef.key, label: assetDef.label, windowTs,
     closeAt: (windowTs + FIFTEEN_SECONDS) * 1000,
     fifteen: freshLeg(assetDef.slugPrefix15, windowTs, FIFTEEN_SECONDS),
     five: null, // created once we reach the hedge-entry offset
     state: 'discovering-fifteen', // discovering-fifteen -> awaiting-hedge-window -> discovering-five -> entered -> pending-resolution -> resolved | skipped
-    skipReason: null,
     primary: freshPosition(),
     hedge: freshPosition(),
     divergence: null,
@@ -558,19 +532,6 @@ async function executeCombinedEntry(trade) {
   const primaryTokenId = primarySide === 'up' ? f.upTokenId : f.downTokenId;
   const hedgePrice = hedgeSide === 'up' ? v.upAsk : v.downAsk;
   const hedgeTokenId = hedgeSide === 'up' ? v.upTokenId : v.downTokenId;
-
-  // Conviction filter (authoritative, re-checked here with the freshest price
-  // right at fire time): only actually enter if the primary side still clears
-  // the minimum. Prices keep refreshing during the entry buffer wait, so it's
-  // possible to have passed the earlier check at the 10-min mark and drifted
-  // back down by now — if so, skip the whole window instead of firing.
-  if (primaryPrice < PRIMARY_PRICE_MIN) {
-    trade.state = 'skipped';
-    trade.skipReason = `primary ${primarySide.toUpperCase()} @ ${primaryPrice.toFixed(3)} below ${PRIMARY_PRICE_MIN} minimum (drifted down during entry buffer)`;
-    engine.skippedLowPrice++;
-    log(`⛔ [${trade.label} ${f.slug}] window SKIPPED at fire time — primary ${primarySide.toUpperCase()} @ ${primaryPrice.toFixed(3)} dropped below ${PRIMARY_PRICE_MIN} during the entry buffer, no trade this window`);
-    return;
-  }
 
   // Step 2: divergence between the two markets' pricing of the hedge side, and the
   // live correlation factor derived from it.
@@ -654,16 +615,6 @@ async function checkStopLoss(trade) {
         engine.feesPaid = round2(engine.feesPaid + sellFee);
         trade.primary.closedEarly = true;
         trade.primary.pnl = round2(proceeds - sellFee - trade.primary.cost - trade.primary.fee);
-        // Track this leg's true winner separately (purely for the "what if no
-        // stop-loss" dashboard number) — it no longer participates in the
-        // trade's own resolution, but we still want to know how it would
-        // have actually resolved.
-        engine.shadowLegs.push({
-          tradeId: trade.id, kind: 'primary', asset: trade.asset, label: trade.label, slug: trade.fifteen.slug,
-          leg: trade.fifteen, side: trade.primary.side, shares: trade.primary.shares,
-          cost: trade.primary.cost, fee: trade.primary.fee, actualPnl: trade.primary.pnl,
-        });
-        if (engine.shadowLegs.length > 200) engine.shadowLegs.shift();
         log(`🛑 [${trade.label} ${trade.fifteen.slug}] PRIMARY stop-loss @${bid.toFixed(3)} — sold ${resp.filledShares}sh, pnl ${sgn2(trade.primary.pnl)} | bankroll=$${engine.bankroll.toFixed(2)}`);
         recordEquity();
       }
@@ -682,12 +633,6 @@ async function checkStopLoss(trade) {
         engine.feesPaid = round2(engine.feesPaid + sellFee);
         trade.hedge.closedEarly = true;
         trade.hedge.pnl = round2(proceeds - sellFee - trade.hedge.cost - trade.hedge.fee);
-        engine.shadowLegs.push({
-          tradeId: trade.id, kind: 'hedge', asset: trade.asset, label: trade.label, slug: trade.five.slug,
-          leg: trade.five, side: trade.hedge.side, shares: trade.hedge.shares,
-          cost: trade.hedge.cost, fee: trade.hedge.fee, actualPnl: trade.hedge.pnl,
-        });
-        if (engine.shadowLegs.length > 200) engine.shadowLegs.shift();
         log(`🛑 [${trade.label} ${trade.five.slug}] HEDGE stop-loss @${bid.toFixed(3)} — sold ${resp.filledShares}sh, pnl ${sgn2(trade.hedge.pnl)} | bankroll=$${engine.bankroll.toFixed(2)}`);
         recordEquity();
       }
@@ -728,36 +673,16 @@ function resolveTradeIfReady(trade) {
   engine.realizedPnl = round2(engine.realizedPnl + combinedPnl);
   if (combinedPnl >= 0) engine.wins++; else engine.losses++;
 
-  // No-stop-loss counterfactual: legs that were NOT stopped out contribute
-  // their real (actual) pnl to the hypothetical total right away, since it's
-  // identical either way. Legs that WERE stopped out contribute nothing yet —
-  // their true "held to resolution" outcome isn't known at this point (that's
-  // the whole reason stop-loss exists), so it gets filled in later once the
-  // shadow poll learns the real winner (see shadowLegs / lastShadowPoll).
-  let noStopLossKnown = 0;
-  if (!trade.primary.closedEarly) noStopLossKnown += primaryPnl;
-  if (!trade.hedge.closedEarly) noStopLossKnown += hedgePnl;
-  engine.realizedPnlNoStopLoss = round2(engine.realizedPnlNoStopLoss + noStopLossKnown);
-
   registerTrade({ slug: trade.fifteen.slug, asset: trade.asset, step: '15m PRIMARY resolution', side: trade.primary.side, price: 1, shares: trade.primary.shares, pnl: primaryPnl });
   registerTrade({ slug: trade.five.slug, asset: trade.asset, step: '5m HEDGE resolution', side: trade.hedge.side, price: 1, shares: trade.hedge.shares, pnl: hedgePnl });
 
   engine.history.unshift({
-    id: trade.id,
     asset: trade.asset, label: trade.label, windowTs: trade.windowTs,
     fifteenSlug: trade.fifteen.slug, fiveSlug: trade.five.slug,
     primarySide: trade.primary.side, primaryShares: trade.primary.shares, primaryEntry: trade.primary.entryPrice, primaryWinner: trade.fifteen.winner, primaryPnl,
     hedgeSide: trade.hedge.side, hedgeShares: trade.hedge.shares, hedgeEntry: trade.hedge.entryPrice, hedgeWinner: trade.five.winner, hedgePnl,
     divergence: trade.divergence, correlationFactor: trade.correlationFactor,
     combinedPnl, resolvedAt: Date.now(),
-    // No-stop-loss counterfactual fields. null = still waiting on the shadow
-    // poll to learn that leg's true resolution (only happens if that leg
-    // actually stopped out); otherwise equal to the real pnl for that leg.
-    primaryStoppedOut: trade.primary.closedEarly,
-    hedgeStoppedOut: trade.hedge.closedEarly,
-    noStopLossPrimaryPnl: trade.primary.closedEarly ? null : primaryPnl,
-    noStopLossHedgePnl: trade.hedge.closedEarly ? null : hedgePnl,
-    noStopLossCombinedPnl: (trade.primary.closedEarly || trade.hedge.closedEarly) ? null : combinedPnl,
   });
   if (engine.history.length > 300) engine.history.pop();
 
@@ -831,27 +756,12 @@ async function tickAsset(assetDef, now) {
     await discoverLeg(trade.fifteen);
   }
 
-  // Once we're at the 10-minute mark, create + discover the hedge (last 5-min segment) market —
-  // but only if the primary side is actually showing enough conviction to be worth trading.
-  // Checked here (before the hedge leg is even discovered) so a low-conviction window is
-  // skipped immediately instead of after paying for a 5-min discovery + the entry buffer wait.
+  // Once we're at the 10-minute mark, create + discover the hedge (last 5-min segment) market.
   const hedgeWindowTs = windowTs + HEDGE_ENTRY_OFFSET_SECONDS;
-  if (!trade.five && trade.state !== 'skipped' && nowSec >= hedgeWindowTs) {
-    if (trade.fifteen.discovered && trade.fifteen.upAsk != null && trade.fifteen.downAsk != null) {
-      const primarySide = trade.fifteen.upAsk >= trade.fifteen.downAsk ? 'up' : 'down';
-      const primaryPrice = primarySide === 'up' ? trade.fifteen.upAsk : trade.fifteen.downAsk;
-      if (primaryPrice < PRIMARY_PRICE_MIN) {
-        trade.state = 'skipped';
-        trade.skipReason = `primary ${primarySide.toUpperCase()} @ ${primaryPrice.toFixed(3)} below ${PRIMARY_PRICE_MIN} minimum`;
-        engine.skippedLowPrice++;
-        log(`⛔ [${assetDef.label}] window SKIPPED — primary ${primarySide.toUpperCase()} @ ${primaryPrice.toFixed(3)} is below the ${PRIMARY_PRICE_MIN} conviction threshold, no hedge leg discovered, no trade this window`);
-      } else {
-        trade.five = freshLeg(assetDef.slugPrefix5, hedgeWindowTs, FIVE_SECONDS);
-        trade.state = 'discovering-five';
-        log(`🕐 [${assetDef.label}] entering hedge window — discovering last-5m segment market ${trade.five.slug}…`);
-      }
-    }
-    // else: primary leg not discovered/priced yet right at the 10-min mark — wait a tick and re-check.
+  if (!trade.five && nowSec >= hedgeWindowTs) {
+    trade.five = freshLeg(assetDef.slugPrefix5, hedgeWindowTs, FIVE_SECONDS);
+    trade.state = 'discovering-five';
+    log(`🕐 [${assetDef.label}] entering hedge window — discovering last-5m segment market ${trade.five.slug}…`);
   }
   if (trade.five && !trade.five.discovered && now - trade.five.lastDiscoveryAttempt >= DISCOVERY_RETRY_MS) {
     trade.five.lastDiscoveryAttempt = now;
@@ -861,7 +771,7 @@ async function tickAsset(assetDef, now) {
   // Once both legs are discovered and priced, wait a short buffer before
   // actually firing — refreshing prices each tick — so the entry uses a
   // settled read instead of the very first instant the 5-min leg was found.
-  if (trade.five && trade.fifteen.discovered && trade.five.discovered && trade.state !== 'entered' && trade.state !== 'skipped' && engine.tradingEnabled) {
+  if (trade.five && trade.fifteen.discovered && trade.five.discovered && trade.state !== 'entered' && engine.tradingEnabled) {
     await refreshLegPrices(trade.fifteen);
     await refreshLegPrices(trade.five);
     if (trade.readySince == null) {
@@ -925,35 +835,6 @@ async function mainLoop() {
         engine.pending = stillPending;
       }
 
-      // Shadow poll: keep chasing the true resolution of legs that stopped out
-      // early, purely to fill in the "no stop-loss" counterfactual P&L once
-      // their real winner becomes known. Doesn't touch bankroll/realizedPnl —
-      // those were already booked for real at stop-loss time.
-      if (engine.shadowLegs.length && now - engine.lastShadowPoll >= RESOLUTION_POLL_MS) {
-        engine.lastShadowPoll = now;
-        const stillShadow = [];
-        for (const entry of engine.shadowLegs) {
-          if (!entry.leg.resolved) await resolveLegAttempt(entry.leg);
-          if (entry.leg.resolved) {
-            const payout = entry.side === entry.leg.winner ? round2(entry.shares * 1) : 0;
-            const hypoPnl = round2(payout - entry.cost - entry.fee);
-            engine.realizedPnlNoStopLoss = round2(engine.realizedPnlNoStopLoss + hypoPnl);
-            const hist = engine.history.find(h => h.id === entry.tradeId);
-            if (hist) {
-              if (entry.kind === 'primary') hist.noStopLossPrimaryPnl = hypoPnl;
-              else hist.noStopLossHedgePnl = hypoPnl;
-              if (hist.noStopLossPrimaryPnl != null && hist.noStopLossHedgePnl != null) {
-                hist.noStopLossCombinedPnl = round2(hist.noStopLossPrimaryPnl + hist.noStopLossHedgePnl);
-              }
-            }
-            log(`📊 [${entry.label} ${entry.slug}] no-stop-loss check — ${entry.kind} would have ${sgn2(hypoPnl)} held to resolution vs ${sgn2(entry.actualPnl)} actually realized via stop-loss`);
-          } else {
-            stillShadow.push(entry);
-          }
-        }
-        engine.shadowLegs = stillShadow;
-      }
-
       emitFn('hedgeState', buildState());
     } catch (e) {
       slog(`[hedgebot] ⚠️  Loop error: ${e.message}`);
@@ -978,7 +859,6 @@ function tradeSummary(trade) {
   if (!trade) return null;
   return {
     asset: trade.asset, label: trade.label, windowTs: trade.windowTs, closeAt: trade.closeAt, state: trade.state,
-    skipReason: trade.skipReason || null,
     fifteen: legSummary(trade.fifteen), five: legSummary(trade.five),
     primary: trade.primary, hedge: trade.hedge,
     divergence: trade.divergence, correlationFactor: trade.correlationFactor,
@@ -990,24 +870,14 @@ function tradeSummary(trade) {
 function buildState() {
   const unrealizedPnl = totalUnrealizedPnl();
   const equity = round2(engine.bankroll + openPositionsMTM());
-  // No-stop-loss counterfactual: realizedPnlNoStopLoss already accounts for
-  // legs still awaiting shadow resolution (they simply haven't contributed
-  // yet), so it understates slightly until those resolve — shadowPendingCount
-  // tells the UI how many legs are still outstanding.
-  const stopLossImpact = round2(engine.realizedPnl - engine.realizedPnlNoStopLoss);
   return {
     dryRun: DRY_RUN,
     tradingEnabled: engine.tradingEnabled,
     waitingForBoundary: engine.waitingForBoundary,
     bankroll: engine.bankroll, capital: engine.capital,
     realizedPnl: engine.realizedPnl, unrealizedPnl, equity,
-    realizedPnlNoStopLoss: engine.realizedPnlNoStopLoss,
-    stopLossImpact, // positive = stop-loss saved money vs holding everything to resolution; negative = stop-loss cost money
-    shadowPendingCount: engine.shadowLegs.length,
     feesPaid: engine.feesPaid,
     wins: engine.wins, losses: engine.losses,
-    skippedLowPrice: engine.skippedLowPrice,
-    primaryPriceMin: PRIMARY_PRICE_MIN,
     current: { btc: tradeSummary(engine.current.btc), eth: tradeSummary(engine.current.eth) },
     pendingResolutionCount: engine.pending.length,
     pending: engine.pending.map(tradeSummary),
@@ -1043,34 +913,12 @@ async function init(privateKey, emit, slogFn) {
   slog = slogFn;
   slog('[hedgebot] 🪙 BTC + ETH 15m/5m Correlated Hedge Engine — fully automatic');
   slog(`[hedgebot] ⚙️  Each 15-min window: buy ${PRIMARY_SHARES}sh of the market-favored side at the 10-minute mark, hedged by the opposite side on the last 5-min segment. Hedge size = (primary cost at risk / hedge ask) × live correlation factor (clamped ${CORR_FLOOR}-${CORR_CEIL}, derived from price divergence between the two markets).`);
-  slog(`[hedgebot] ⚙️  Conviction filter: primary side must be >= ${PRIMARY_PRICE_MIN} to trade at all — windows below that are skipped entirely (no primary, no hedge).`);
   slog(`[hedgebot] ⚙️  Resolution: official Gamma > high-confidence live price (>=${HIGH_CONF_PRICE}) > ${Math.round(RESOLUTION_FALLBACK_MS / 1000)}s live-price fallback — each leg resolves independently, combined P&L booked once both are done.`);
   slog(`[hedgebot] ⚙️  Starting bankroll $${STARTING_CAPITAL} (shared across BTC+ETH) | taker fee rate ${TAKER_FEE_RATE} | never enters a window it joins mid-way through`);
   if (PRIMARY_SHARES < MIN_ORDER_SHARES) {
     slog(`[hedgebot] ⚠️  HEDGE_PRIMARY_SHARES (${PRIMARY_SHARES}) is below Polymarket's ${MIN_ORDER_SHARES}sh minimum order size — every primary order would be rejected. Raise it.`);
   }
   slog(`[hedgebot] ${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
-
-  // Startup / restart decision: don't blindly wait for the next 15-min
-  // boundary. If we're restarting before this window's 10-minute hedge-entry
-  // mark, there's still a full opportunity to trade it — arm immediately in
-  // the CURRENT window instead of throwing it away. Only wait for the next
-  // boundary if we're already past that mark (inside the last 5 minutes),
-  // since the hedge leg can't be entered correctly at that point.
-  {
-    const nowSec0 = Math.floor(Date.now() / 1000);
-    const curWindowTs = currentFifteenWindowTs(nowSec0);
-    const hedgeMark = curWindowTs + HEDGE_ENTRY_OFFSET_SECONDS;
-    if (nowSec0 < hedgeMark) {
-      engine.waitingForBoundary = false;
-      engine.boundaryWindowTs = curWindowTs;
-      log(`🚦 restarted mid-window at t=${curWindowTs} (before the ${Math.round(HEDGE_ENTRY_OFFSET_SECONDS / 60)}-min hedge mark) — arming in this window now, no wait for the next boundary`);
-    } else {
-      engine.waitingForBoundary = true;
-      engine.boundaryWindowTs = curWindowTs + FIFTEEN_SECONDS;
-      log(`⏳ restarted past this window's hedge mark (t=${curWindowTs}, mark was t=${hedgeMark}) — too late to enter this window's hedge leg, waiting for next boundary (t=${engine.boundaryWindowTs})`);
-    }
-  }
 
   trader = new PolymarketTrader(privateKey);
   await trader.authenticate();
