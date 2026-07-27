@@ -82,6 +82,17 @@
  *  exposed in buildState() for the dashboard so this can be watched
  *  live instead of inferred from logs after the fact.
  *
+ *  ── MIRROR SHIFT (added after further review) ──
+ *  After every window resolves, the losing side's whole parameter set —
+ *  check interval, base share size, AND its trailing adaptive-multiplier
+ *  history — swaps onto the winning side for the next window, while the
+ *  winner's set swaps onto the loser. Since exactly one side wins every
+ *  window, this fires after every single resolution, exactly mirrored
+ *  regardless of direction (UP lost -> DOWN inherits UP's set and vice
+ *  versa). This is based purely on the market outcome (leg.winner) —
+ *  whether the bot actually had a fill on either side that window is
+ *  irrelevant. See mirrorShiftConfig() and engine.sideConfig.
+ *
  *  RESOLUTION: unchanged, three tiers, fastest available wins:
  *    1. Official — Polymarket Gamma's `closed` + `outcomePrices`.
  *    2. High-confidence live price — either side crossing HIGH_CONF_PRICE
@@ -206,6 +217,14 @@ const engine = {
   boundaryWindowTs: null,
   // Rolling per-side settled-fill history for adaptive sizing (oldest first, capped at ADAPTIVE_LOOKBACK).
   sideStats: { up: [], down: [] },
+  // Mutable per-side parameter set (check interval, drop threshold, base
+  // share size). Starts matched to the UP_*/DOWN_* constants, but is
+  // swapped as a whole between sides after every window resolution — see
+  // mirrorShiftConfig().
+  sideConfig: {
+    up:   { intervalMs: UP_CHECK_INTERVAL_MS,   dropThreshold: UP_DROP_THRESHOLD,   baseShares: UP_BASE_SHARES },
+    down: { intervalMs: DOWN_CHECK_INTERVAL_MS, dropThreshold: DOWN_DROP_THRESHOLD, baseShares: DOWN_BASE_SHARES },
+  },
 };
 
 // ─────────────────────────────────────────
@@ -252,6 +271,29 @@ function sideRollingStats(side) {
   return { n: hist.length, winRate: round2(winRate), roi: round4(roi), multiplier };
 }
 function sideMultiplier(side) { return sideRollingStats(side).multiplier; }
+
+// ─────────────────────────────────────────
+//  Mirror shift — after every window resolves, the losing side's whole
+//  parameter set (check interval, drop threshold, base share size) AND its
+//  trailing adaptive-multiplier history swap onto the winning side for the
+//  next window, while the winner's set/history swap onto the loser. Since
+//  exactly one side wins each window, this fires after every resolution.
+//  The outcome is based purely on the market result (leg.winner) — whether
+//  the bot actually had fills on either side this window is irrelevant.
+// ─────────────────────────────────────────
+function mirrorShiftConfig(winnerSide) {
+  const loserSide = winnerSide === 'up' ? 'down' : 'up';
+
+  const tmpConfig = engine.sideConfig.up;
+  engine.sideConfig.up = engine.sideConfig.down;
+  engine.sideConfig.down = tmpConfig;
+
+  const tmpStats = engine.sideStats.up;
+  engine.sideStats.up = engine.sideStats.down;
+  engine.sideStats.down = tmpStats;
+
+  log(`🔀 ${loserSide.toUpperCase()} lost this window (winner ${winnerSide.toUpperCase()}) — mirrored for next window: UP now runs ${(engine.sideConfig.up.intervalMs / 1000)}s / ${engine.sideConfig.up.baseShares}sh base / ${sideMultiplier('up').toFixed(2)}x mult, DOWN now runs ${(engine.sideConfig.down.intervalMs / 1000)}s / ${engine.sideConfig.down.baseShares}sh base / ${sideMultiplier('down').toFixed(2)}x mult`);
+}
 
 // ─────────────────────────────────────────
 //  HTTP / order helpers
@@ -713,6 +755,7 @@ function settleTrade(trade) {
   if (engine.history.length > 300) engine.history.pop();
 
   log(`🏆 [${trade.label} ${leg.slug}] window resolved — winner ${leg.winner.toUpperCase()} (${leg.resolutionMethod}) — ${trade.upPositions.length} UP fill(s) [${sgn2(upPnl)}] + ${trade.downPositions.length} DOWN fill(s) [${sgn2(downPnl)}] = ${sgn2(combinedPnl)} | bankroll=$${engine.bankroll.toFixed(2)}`);
+  mirrorShiftConfig(leg.winner);
   recordEquity();
 }
 
@@ -755,8 +798,8 @@ async function tickBtc(now) {
   if (trade.state === 'trading') {
     // Run both independent dip-check loops while the window is still open.
     if (engine.tradingEnabled && now < trade.closeAt) {
-      await evaluateWatch(trade, trade.upWatch, 'up', UP_CHECK_INTERVAL_MS, UP_DROP_THRESHOLD, UP_BASE_SHARES, now);
-      await evaluateWatch(trade, trade.downWatch, 'down', DOWN_CHECK_INTERVAL_MS, DOWN_DROP_THRESHOLD, DOWN_BASE_SHARES, now);
+      await evaluateWatch(trade, trade.upWatch, 'up', engine.sideConfig.up.intervalMs, engine.sideConfig.up.dropThreshold, engine.sideConfig.up.baseShares, now);
+      await evaluateWatch(trade, trade.downWatch, 'down', engine.sideConfig.down.intervalMs, engine.sideConfig.down.dropThreshold, engine.sideConfig.down.baseShares, now);
     }
     // Fill confirmation runs regardless of tradingEnabled/closeAt — a
     // resting order already placed still needs to be watched for fills.
@@ -834,8 +877,8 @@ function tradeSummary(trade) {
   return {
     asset: trade.asset, label: trade.label, windowTs: trade.windowTs, closeAt: trade.closeAt, state: trade.state,
     leg: legSummary(trade.leg),
-    upWatch: watchSummary(trade.upWatch, UP_CHECK_INTERVAL_MS),
-    downWatch: watchSummary(trade.downWatch, DOWN_CHECK_INTERVAL_MS),
+    upWatch: watchSummary(trade.upWatch, engine.sideConfig.up.intervalMs),
+    downWatch: watchSummary(trade.downWatch, engine.sideConfig.down.intervalMs),
     upOrders: trade.upOrders, downOrders: trade.downOrders,
     upPositions: trade.upPositions, downPositions: trade.downPositions,
     combinedPnl: trade.combinedPnl,
@@ -864,14 +907,14 @@ function buildState() {
     equityCurve: engine.equityCurve,
     logs: engine.logs.slice(-80),
     windowSeconds: WINDOW_SECONDS,
-    upIntervalMs: UP_CHECK_INTERVAL_MS, upDropThreshold: UP_DROP_THRESHOLD, upBaseShares: UP_BASE_SHARES,
-    downIntervalMs: DOWN_CHECK_INTERVAL_MS, downDropThreshold: DOWN_DROP_THRESHOLD, downBaseShares: DOWN_BASE_SHARES,
+    upIntervalMs: engine.sideConfig.up.intervalMs, upDropThreshold: engine.sideConfig.up.dropThreshold, upBaseShares: engine.sideConfig.up.baseShares,
+    downIntervalMs: engine.sideConfig.down.intervalMs, downDropThreshold: engine.sideConfig.down.dropThreshold, downBaseShares: engine.sideConfig.down.baseShares,
     makerFeeRate: MAKER_FEE_RATE, makerRebateShare: MAKER_REBATE_SHARE,
     minEntryPrice: MIN_ENTRY_PRICE, maxFillsPerWindow: MAX_FILLS_PER_WINDOW,
     adaptiveSizingEnabled: ADAPTIVE_SIZING_ENABLED,
     sideStats: {
-      up: { ...sideRollingStats('up'), baseShares: UP_BASE_SHARES },
-      down: { ...sideRollingStats('down'), baseShares: DOWN_BASE_SHARES },
+      up: { ...sideRollingStats('up'), baseShares: engine.sideConfig.up.baseShares },
+      down: { ...sideRollingStats('down'), baseShares: engine.sideConfig.down.baseShares },
     },
   };
 }
@@ -902,6 +945,7 @@ async function init(privateKey, emit, slogFn) {
   slog(`[hedgebot] ⚙️  All orders are GTC resting limits (maker, 0% fee), not FOK — fills are confirmed once live price trades through the order's price.`);
   slog(`[hedgebot] ⚙️  Est. Maker Rebate: Crypto category pays back ${(MAKER_REBATE_SHARE * 100).toFixed(0)}% of shares×${CRYPTO_TAKER_FEE_RATE}×price×(1-price) per fill, per Polymarket's published fee-curve model — tracked separately from trading P&L.`);
   slog(`[hedgebot] ⚙️  Safeguards: min entry price $${MIN_ENTRY_PRICE.toFixed(2)} | max ${MAX_FILLS_PER_WINDOW} resting+filled orders per side per window | adaptive sizing ${ADAPTIVE_SIZING_ENABLED ? `ON (${ADAPTIVE_MIN_MULT}x-${ADAPTIVE_MAX_MULT}x off trailing ${ADAPTIVE_LOOKBACK}-fill ROI, neutral until ${ADAPTIVE_MIN_SAMPLE} fills)` : 'OFF'}.`);
+  slog(`[hedgebot] ⚙️  Mirror shift: after every window resolves, the losing side's interval/base-size/adaptive-multiplier set swaps onto the winning side (and vice versa) for the next window — based purely on the market outcome, not on whether either side had fills.`);
   slog(`[hedgebot] ⚙️  Resolution: official Gamma > high-confidence live price (>=${HIGH_CONF_PRICE}) > ${Math.round(RESOLUTION_FALLBACK_MS / 1000)}s live-price fallback.`);
   slog(`[hedgebot] ⚙️  Starting bankroll $${STARTING_CAPITAL} | never joins a window it starts mid-way through`);
   if (UP_BASE_SHARES < MIN_ORDER_SHARES || DOWN_BASE_SHARES < MIN_ORDER_SHARES) {
