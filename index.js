@@ -71,8 +71,20 @@ app.get('/', (_, res) => {
   .section { padding: 0 20px 16px; }
   .section-hdr { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 2px; padding: 8px 0; display: flex; align-items: center; gap: 8px; }
   .section-hdr::after { content:''; flex:1; height:1px; background: var(--border); }
+  .tuning-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin: 0 20px 16px; }
+  @media (max-width: 760px) { .tuning-grid, .watch-grid { grid-template-columns: 1fr; } }
+  .tuning-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px; font-size: 10.5px; }
+  .tuning-card .side-name { font-size: 12px; margin-bottom: 6px; }
+  .tuning-card.up .side-name { color: var(--cyan); }
+  .tuning-card.down .side-name { color: var(--down); }
+  .tuning-row { display: flex; justify-content: space-between; padding: 2px 0; }
+  .tuning-row span:last-child { color: #12202e; }
+  .mult-tag { padding: 1px 7px; border-radius: 8px; font-size: 9.5px; }
+  .mult-up { background: #00a85422; color: var(--green); }
+  .mult-down { background: #e8304a22; color: var(--red); }
+  .mult-neutral { background: var(--bg3); color: var(--muted); }
+  .safeguard-note { margin: 0 20px 16px; font-size: 9.5px; color: var(--muted); }
   .watch-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin: 0 20px 16px; }
-  @media (max-width: 760px) { .watch-grid { grid-template-columns: 1fr; } }
   .watch-card { background: var(--bg2); border: 2px solid var(--cyan); border-radius: 12px; overflow: hidden; }
   .watch-card.down { border-color: var(--down); }
   .watch-hdr { background: #0d1d30; padding: 10px 14px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px; }
@@ -81,9 +93,11 @@ app.get('/', (_, res) => {
   .watch-body { padding: 10px 14px; }
   .px { padding: 4px 6px; border-radius: 6px; background: var(--bg3); text-align: center; font-size: 9.5px; margin-bottom: 8px; }
   .fill-card { background: #fff; border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; margin-bottom: 6px; font-size: 10px; display: flex; justify-content: space-between; }
+  .fill-card.resting { border-style: dashed; border-color: var(--yellow); background: #e6a80008; }
+  .resting-badge { font-size: 8.5px; padding: 2px 7px; border-radius: 9px; background: #e6a80022; color: var(--yellow); border: 1px solid var(--yellow); white-space: nowrap; margin-left: 6px; }
   .fill-empty { color: var(--muted); font-size: 10px; padding: 4px 0; }
   .side-pnl { text-align: right; margin-top: 4px; font-size: 10.5px; }
-  .asset-unrl { margin-top: 8px; font-size: 10px; text-align: right; }
+  .cap-note { font-size: 9px; color: var(--muted); margin-top: 6px; text-align: right; }
   .bottom-grid { display: grid; grid-template-columns: 1fr; gap: 16px; padding: 0 20px 20px; }
   .tbl-wrap { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; max-height: 320px; overflow-y: auto; }
   .tbl { width: 100%; border-collapse: collapse; }
@@ -111,7 +125,13 @@ app.get('/', (_, res) => {
   <div class="stats-row" id="stats-row"></div>
 
   <div class="section">
-    <div class="section-hdr" id="strategy-hdr">Current Window — UP checks every 20s / DOWN checks every 40s, independently</div>
+    <div class="section-hdr">Adaptive Sizing (trailing ROI per side)</div>
+  </div>
+  <div class="tuning-grid" id="tuning-grid"><div class="empty">Loading…</div></div>
+  <div class="safeguard-note" id="safeguard-note"></div>
+
+  <div class="section">
+    <div class="section-hdr" id="strategy-hdr">Current Window — UP checks every 20s / DOWN checks every 40s, independently — resting GTC maker limit orders</div>
   </div>
   <div class="watch-grid" id="watch-grid"><div class="empty">Loading…</div></div>
 
@@ -120,8 +140,8 @@ app.get('/', (_, res) => {
       <div class="section-hdr" style="padding:0 0 8px;">Window History (resolved)</div>
       <div class="tbl-wrap">
         <table class="tbl">
-          <thead><tr><th>Window</th><th>Winner</th><th>Method</th><th>Up Fills</th><th>Up PnL</th><th>Down Fills</th><th>Down PnL</th><th>Combined</th></tr></thead>
-          <tbody id="history-body"><tr><td colspan="8" class="empty">Loading…</td></tr></tbody>
+          <thead><tr><th>Window</th><th>Winner</th><th>Method</th><th>Up Fills</th><th>Up PnL</th><th>Down Fills</th><th>Down PnL</th><th>Combined</th><th>Est. Rebate</th></tr></thead>
+          <tbody id="history-body"><tr><td colspan="9" class="empty">Loading…</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -129,7 +149,7 @@ app.get('/', (_, res) => {
       <div class="section-hdr" style="padding:0 0 8px;">Recent Trades</div>
       <div class="tbl-wrap">
         <table class="tbl">
-          <thead><tr><th>Time</th><th>Window</th><th>Step</th><th>Side</th><th>Price</th><th>Shares</th><th>Cost/Fee/PnL</th></tr></thead>
+          <thead><tr><th>Time</th><th>Window</th><th>Step</th><th>Side</th><th>Price</th><th>Shares</th><th>Cost/Rebate/PnL</th></tr></thead>
           <tbody id="trade-body"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
         </table>
       </div>
@@ -148,7 +168,7 @@ app.get('/', (_, res) => {
   $('resume-btn').onclick = () => fetch('/api/hedge/resume', { method: 'POST' }).then(() => flash('Trading resumed'));
   $('live-btn').onclick = () => {
     const wantLive = !$('live-btn').classList.contains('is-live');
-    if (wantLive && !confirm('Switch to LIVE mode? This will place REAL FOK limit buy orders with REAL money on the BTC 5-minute Up/Down market whenever a dip trigger fires.')) return;
+    if (wantLive && !confirm('Switch to LIVE mode? This will place REAL resting GTC limit buy orders with REAL money on the BTC 5-minute Up/Down market whenever a dip trigger fires.')) return;
     fetch('/api/hedge/set-mode', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ live: wantLive }) })
       .then(() => flash(wantLive ? 'Switched to LIVE' : 'Switched to DEMO'));
   };
@@ -156,9 +176,11 @@ app.get('/', (_, res) => {
 
   function fmtPx(n) { return n == null ? '—' : n.toFixed(3); }
   function fmt2(n) { return (n == null ? 0 : n).toFixed(2); }
+  function fmt4(n) { return (n == null ? 0 : n).toFixed(4); }
   function pClass(n) { return n > 0 ? 'pnl-pos' : (n < 0 ? 'pnl-neg' : ''); }
   function sgn(n) { return n == null ? '—' : (n >= 0 ? '+$' : '-$') + Math.abs(n).toFixed(2); }
   function fmtSecs(ms) { return ms == null ? '—' : Math.ceil(ms / 1000) + 's'; }
+  function pct(n) { return n == null ? '—' : (n * 100).toFixed(0) + '%'; }
 
   function renderStats(s) {
     const stats = [
@@ -166,7 +188,7 @@ app.get('/', (_, res) => {
       ['Bankroll (cash)', '$' + fmt2(s.bankroll), ''],
       ['Realized P&amp;L', sgn(s.realizedPnl), pClass(s.realizedPnl)],
       ['Unrealized P&amp;L', sgn(s.unrealizedPnl), pClass(s.unrealizedPnl)],
-      ['Fees Paid', '$' + (s.feesPaid || 0).toFixed(4), ''],
+      ['Est. Maker Rebates', '+$' + fmt4(s.estimatedRebates), 'pnl-pos'],
       ['Wins / Losses', s.wins + ' / ' + s.losses, ''],
       ['Pending Resolution', s.pendingResolutionCount || 0, ''],
     ];
@@ -175,26 +197,59 @@ app.get('/', (_, res) => {
     ).join('');
   }
 
+  function multTag(m) {
+    const cls = m > 1 ? 'mult-up' : (m < 1 ? 'mult-down' : 'mult-neutral');
+    return '<span class="mult-tag ' + cls + '">' + m.toFixed(2) + 'x</span>';
+  }
+
+  function tuningCard(side, stats, cls) {
+    if (!stats) return '';
+    const sizedShares = Math.round(stats.baseShares * stats.multiplier);
+    return '<div class="tuning-card ' + cls + '"><div class="side-name">' + side.toUpperCase() + '</div>' +
+      '<div class="tuning-row"><span>Trailing sample</span><span>' + stats.n + ' fill' + (stats.n === 1 ? '' : 's') + '</span></div>' +
+      '<div class="tuning-row"><span>Rolling win rate</span><span>' + pct(stats.winRate) + '</span></div>' +
+      '<div class="tuning-row"><span>Rolling ROI</span><span class="' + pClass(stats.roi) + '">' + (stats.roi == null ? '—' : (stats.roi >= 0 ? '+' : '') + (stats.roi * 100).toFixed(1) + '%') + '</span></div>' +
+      '<div class="tuning-row"><span>Size multiplier</span><span>' + multTag(stats.multiplier) + '</span></div>' +
+      '<div class="tuning-row"><span>Next order size</span><span>' + stats.baseShares + 'sh base → ' + sizedShares + 'sh</span></div>' +
+    '</div>';
+  }
+
+  function renderTuning(s) {
+    $('tuning-grid').innerHTML = tuningCard('up', s.sideStats && s.sideStats.up, 'up') + tuningCard('down', s.sideStats && s.sideStats.down, 'down');
+    $('safeguard-note').textContent = 'Min entry price $' + fmt2(s.minEntryPrice) + ' · max ' + s.maxFillsPerWindow + ' resting+filled orders per side per window · adaptive sizing ' + (s.adaptiveSizingEnabled ? 'ON' : 'OFF');
+  }
+
   function fillRow(p) {
-    return '<div class="fill-card"><span>' + p.shares.toFixed(2) + 'sh @' + fmtPx(p.entryPrice) + ' ($' + fmt2(p.cost) + (p.fee ? ' +$' + p.fee.toFixed(4) + ' fee' : '') + ')</span>' +
+    return '<div class="fill-card"><span>' + p.shares.toFixed(2) + 'sh @' + fmtPx(p.entryPrice) + ' ($' + fmt2(p.cost) + (p.rebate ? ' +$' + p.rebate.toFixed(4) + ' rebate' : '') + ')</span>' +
       '<span class="' + pClass(p.pnl) + '">' + (p.pnl == null ? 'open' : sgn(p.pnl)) + '</span></div>';
   }
 
-  function watchCard(t, side, cls) {
+  function orderRow(o) {
+    return '<div class="fill-card resting"><span>' + o.shares.toFixed(2) + 'sh @' + fmtPx(o.limitPrice) + '<span class="resting-badge">⏳ RESTING</span></span><span>—</span></div>';
+  }
+
+  function watchCard(t, side, cls, maxFills) {
     const watch = side === 'up' ? (t && t.upWatch) : (t && t.downWatch);
     const positions = side === 'up' ? (t && t.upPositions) : (t && t.downPositions);
+    const orders = side === 'up' ? (t && t.upOrders) : (t && t.downOrders);
+    const used = side === 'up' ? (t && t.upFillsUsed) : (t && t.downFillsUsed);
     const ask = t && t.leg ? (side === 'up' ? t.leg.upAsk : t.leg.downAsk) : null;
     const label = side.toUpperCase();
     const sub = watch
       ? 'prev check ' + fmtPx(watch.prevAsk) + ' · next check in ' + fmtSecs(watch.nextCheckInMs) + ' · ' + watch.checks + ' checks'
       : '—';
     const sidePnl = positions && positions.length ? positions.reduce((s, p) => s + (p.pnl || 0), 0) : null;
+    const rows = [
+      ...(orders || []).map(orderRow),
+      ...(positions || []).map(fillRow),
+    ];
     return '<div class="watch-card ' + cls + '">' +
       '<div class="watch-hdr"><div class="watch-title">' + label + '</div><div class="watch-sub">' + sub + '</div></div>' +
       '<div class="watch-body">' +
         '<div class="px">current ask ' + fmtPx(ask) + '</div>' +
-        (positions && positions.length ? positions.map(fillRow).join('') : '<div class="fill-empty">No fills yet this window</div>') +
+        (rows.length ? rows.join('') : '<div class="fill-empty">No orders yet this window</div>') +
         (sidePnl != null ? '<div class="side-pnl ' + pClass(sidePnl) + '">' + label + ' total ' + sgn(sidePnl) + '</div>' : '') +
+        '<div class="cap-note">' + (used != null ? used : 0) + ' / ' + maxFills + ' used this window</div>' +
       '</div>' +
     '</div>';
   }
@@ -202,12 +257,12 @@ app.get('/', (_, res) => {
   function renderCurrent(s) {
     const t = s.current.btc;
     if (!t) { $('watch-grid').innerHTML = '<div class="empty">No active window yet</div>'; return; }
-    $('watch-grid').innerHTML = watchCard(t, 'up', '') + watchCard(t, 'down', 'down');
-    $('strategy-hdr').textContent = 'Window ' + (t.leg ? t.leg.slug.replace(/^btc-updown-5m-/, '') : '…') + ' — state: ' + t.state + (t.unrealizedPnl != null ? ' — unrealized ' : '');
+    $('watch-grid').innerHTML = watchCard(t, 'up', '', s.maxFillsPerWindow) + watchCard(t, 'down', 'down', s.maxFillsPerWindow);
+    $('strategy-hdr').textContent = 'Window ' + (t.leg ? t.leg.slug.replace(/^btc-updown-5m-/, '') : '…') + ' — state: ' + t.state;
   }
 
   function renderHistory(list) {
-    if (!list || !list.length) { $('history-body').innerHTML = '<tr><td colspan="8" class="empty">No resolved windows yet</td></tr>'; return; }
+    if (!list || !list.length) { $('history-body').innerHTML = '<tr><td colspan="9" class="empty">No resolved windows yet</td></tr>'; return; }
     $('history-body').innerHTML = list.map(h =>
       '<tr><td>' + h.slug.replace(/^btc-updown-5m-/, '') + '</td>' +
       '<td>' + (h.winner || '?').toUpperCase() + '</td>' +
@@ -216,7 +271,8 @@ app.get('/', (_, res) => {
       '<td class="' + pClass(h.upPnl) + '">' + sgn(h.upPnl) + '</td>' +
       '<td>' + h.downFills + ' (' + h.downShares.toFixed(1) + 'sh)</td>' +
       '<td class="' + pClass(h.downPnl) + '">' + sgn(h.downPnl) + '</td>' +
-      '<td class="' + pClass(h.combinedPnl) + '">' + sgn(h.combinedPnl) + '</td></tr>'
+      '<td class="' + pClass(h.combinedPnl) + '">' + sgn(h.combinedPnl) + '</td>' +
+      '<td class="pnl-pos">+$' + fmt4(h.combinedRebate) + '</td></tr>'
     ).join('');
   }
 
@@ -229,7 +285,7 @@ app.get('/', (_, res) => {
       '<td>' + (t.side || '').toUpperCase() + '</td>' +
       '<td>' + (t.price != null ? t.price.toFixed(3) : '—') + '</td>' +
       '<td>' + (t.shares != null ? t.shares.toFixed(2) : '—') + '</td>' +
-      '<td>' + (t.cost != null ? '$' + t.cost.toFixed(2) + (t.fee ? ' +$' + t.fee.toFixed(4) : '') : (t.pnl != null ? sgn(t.pnl) : '—')) + '</td></tr>'
+      '<td>' + (t.cost != null ? '$' + t.cost.toFixed(2) + (t.rebate ? ' +$' + t.rebate.toFixed(4) + ' rebate' : '') : (t.pnl != null ? sgn(t.pnl) : '—')) + '</td></tr>'
     ).join('');
   }
 
@@ -249,6 +305,7 @@ app.get('/', (_, res) => {
     else banner.style.display = 'none';
 
     renderStats(s);
+    renderTuning(s);
     renderCurrent(s);
     renderHistory(s.history);
     renderTrades(s.trades);
@@ -266,7 +323,7 @@ const slog = (line) => { console.log(line); io.emit('log', line); };
 const PK = process.env.PRIVATE_KEY;
 if (!PK) { console.error('❌ PRIVATE_KEY env var missing'); process.exit(1); }
 
-console.log('🪙 BTC 5m Price-Dip Bot — independent UP(20s)/DOWN(40s) dip-triggered limit buys');
+console.log('🪙 BTC 5m Price-Dip Bot — resting GTC maker limit orders, adaptive sizing, independent UP(20s)/DOWN(40s) dip triggers');
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`🌐 Dashboard: http://0.0.0.0:${PORT}`);
