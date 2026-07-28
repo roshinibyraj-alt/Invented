@@ -56,7 +56,7 @@
  *
  *  TRADER INTERFACE (assumed — adjust method names in this file if your
  *  polymarket-trader.js differs):
- *    trader.placeLimitOrder(tokenId, 'BUY'|'SELL', price, size) -> { id, isFilled, avgPrice, raw }
+ *    trader.placeFokLimitOrder(tokenId, 'BUY'|'SELL', price, size) -> { id, isFilled, avgPrice, raw }
  *    trader.reconcileToken(tokenId)                             -> { filledShares, avgPrice, orderId } | null
  *    trader.cancelOrder(orderId)                                -> optional, best-effort
  *
@@ -84,8 +84,14 @@ const ASSET_KEY = 'btc';
 const ASSET_LABEL = 'BTC';
 
 // ── Two-bucket momentum strategy config ──
-const BUCKET_STARTING_CAPITAL = Number(process.env.HEDGE_BUCKET_CAPITAL || 1000);
+// BASE_BET_DOLLARS is the size of the FIRST wager placed from a bucket
+// (bucket balance ÷ BUCKET_DIVISOR). Set this one number to control it —
+// e.g. BASE_BET_DOLLARS=100 with the default divisor of 10 means each
+// bucket starts at $1000 and the first bet from it is $100. Later wagers
+// still scale with whatever that bucket's balance has grown/shrunk to.
+const BASE_BET_DOLLARS = Number(process.env.BASE_BET_DOLLARS || 100);
 const BUCKET_DIVISOR = Number(process.env.HEDGE_BUCKET_DIVISOR || 10);
+const BUCKET_STARTING_CAPITAL = Number(process.env.HEDGE_BUCKET_CAPITAL || (BASE_BET_DOLLARS * BUCKET_DIVISOR));
 
 // Polymarket's live minimum order size on these crypto Up/Down markets
 // (confirmed via Gamma: orderMinSize: 5) — any order under this is rejected.
@@ -163,10 +169,10 @@ function describeOrderError(e) {
   return parts.join(' | ');
 }
 function traderHasRestingOrderMethods() {
-  const ok = trader && typeof trader.placeLimitOrder === 'function';
+  const ok = trader && typeof trader.placeFokLimitOrder === 'function';
   if (!ok && !warnedNoRestingMethod) {
     warnedNoRestingMethod = true;
-    slog('[hedgebot] ❌ LIVE trading needs trader.placeLimitOrder(tokenId, side, price, size) on polymarket-trader.js — LIVE order placement will be skipped until added. DRY_RUN is unaffected.');
+    slog('[hedgebot] ❌ LIVE trading needs trader.placeFokLimitOrder(tokenId, side, price, size) on polymarket-trader.js — LIVE order placement will be skipped until added. DRY_RUN is unaffected.');
   }
   return ok;
 }
@@ -188,7 +194,7 @@ async function placeTakerBuy(tokenId, price, shares) {
   if (!DRY_RUN) {
     if (!traderHasRestingOrderMethods()) return null;
     try {
-      const resp = await trader.placeLimitOrder(tokenId, 'BUY', price, shares);
+      const resp = await trader.placeFokLimitOrder(tokenId, 'BUY', price, shares);
       if (resp?.isFilled) {
         return { id: resp.id || null, filledNow: true, avgPrice: resp.avgPrice || price, filledShares: shares };
       }
@@ -704,7 +710,7 @@ async function init(privateKey, emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
   slog('[hedgebot] 🪙 BTC 5-Minute Momentum Bucket Engine — fully automatic');
-  slog(`[hedgebot] ⚙️  Two buckets, $${BUCKET_STARTING_CAPITAL} each: UP and DOWN. Whichever side won the previous window is active next window; the other bucket is paused.`);
+  slog(`[hedgebot] ⚙️  Base bet: $${BASE_BET_DOLLARS} (first wager from a fresh bucket). Two buckets, $${BUCKET_STARTING_CAPITAL} each: UP and DOWN. Whichever side won the previous window is active next window; the other bucket is paused.`);
   slog(`[hedgebot] ⚙️  Sizing: active bucket's live balance ÷ ${BUCKET_DIVISOR} = this window's wager. Single market/taker buy at the current ask, held to resolution — no rungs, no take-profit.`);
   slog(`[hedgebot] ⚙️  On a win: wager + profit (full payout) moves OUT of the active bucket INTO the opposite bucket. On a loss: the wager is simply gone from the active bucket.`);
   slog(`[hedgebot] ⚙️  Bootstrap: the first tracked window has no prior winner, so no bet is placed — betting starts from the following window.`);
