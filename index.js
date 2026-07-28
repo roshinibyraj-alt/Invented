@@ -94,6 +94,7 @@ app.get('/', (_, res) => {
   .status-resting { background: #e6a80022; color: var(--yellow); border: 1px solid var(--yellow); }
   .status-open { background: #0099cc22; color: var(--cyan); border: 1px solid var(--cyan); }
   .status-idle { background: var(--bg3); color: var(--muted); border: 1px solid var(--border); }
+  .status-risk { background: #e8304a22; color: var(--red); border: 1px solid var(--red); }
   .side-pnl { text-align: right; margin-top: 4px; font-size: 10.5px; }
   .divider { border-top: 1px dashed var(--border); margin: 8px 0; }
   .safeguard-note { margin: 0 20px 16px; font-size: 9.5px; color: var(--muted); }
@@ -193,25 +194,54 @@ app.get('/', (_, res) => {
     return '<span class="side-badge ' + (side === 'up' ? 'side-up' : 'side-down') + '">' + side.toUpperCase() + '</span>';
   }
 
-  function rungRow(r) {
-    let rowClass = 'status-idle', badge = 'Not placed', pnlSpan = '';
+  // Mirrors the bot's own markPrice/leadingSide logic so the dashboard can
+  // flag open rungs on the trailing side — since UP/DOWN prices move as
+  // complements, a rung whose side isn't currently leading is unlikely to
+  // see its own take-profit hit and will most likely ride to resolution
+  // (paying $1/share if it still wins by close, $0 if not).
+  function markPrice(leg, side) {
+    const bid = side === 'up' ? leg.upBid : leg.downBid;
+    const ask = side === 'up' ? leg.upAsk : leg.downAsk;
+    return bid != null ? bid : (ask != null ? ask : null);
+  }
+  function leadingSide(leg) {
+    if (!leg) return null;
+    const u = markPrice(leg, 'up'), d = markPrice(leg, 'down');
+    if (u == null && d == null) return null;
+    if (u == null) return 'down';
+    if (d == null) return 'up';
+    return u >= d ? 'up' : 'down';
+  }
+
+  function rungRow(r, trailing) {
+    let rowClass = 'status-idle', badge = 'Not placed', pnlSpan = '', riskBadge = '';
     if (r.closed) {
       rowClass = 'closed-row';
       badge = r.exitMethod === 'take-profit' ? 'TP filled' : 'Resolved';
       pnlSpan = '<span class="' + pClass(r.pnl) + '">' + sgn(r.pnl) + '</span>';
     } else if (r.entryFilled) {
       rowClass = 'position-open';
-      badge = r.tpPending ? 'Open — TP resting' : 'Open';
+      if (r.noTakeProfit) {
+        // Bot has confirmed and cancelled/skipped TP for this rung — the
+        // opposite side's same rung already TP'd, so this one rides
+        // straight to resolution.
+        badge = 'Riding to resolution';
+        riskBadge = '<span class="rung-status-badge status-risk">⏭ opposite rung TP\u2019d — TP skipped</span>';
+      } else {
+        badge = r.tpPending ? 'Open — TP resting' : 'Open';
+        if (trailing) riskBadge = '<span class="rung-status-badge status-risk">⚠ trailing → likely resolution</span>';
+      }
     } else if (r.entryPending) {
       rowClass = 'resting-entry';
       badge = 'Entry resting';
     }
-    const statusClass = r.closed ? (r.pnl >= 0 ? 'status-open' : 'status-idle') : (r.entryFilled ? 'status-open' : (r.entryPending ? 'status-resting' : 'status-idle'));
+    const statusClass = r.closed ? (r.pnl >= 0 ? 'status-open' : 'status-idle') : (r.entryFilled ? (r.noTakeProfit ? 'status-risk' : 'status-open') : (r.entryPending ? 'status-resting' : 'status-idle'));
     return '<div class="rung-row ' + rowClass + '">' +
       '<span class="rung-id">#' + r.id + '</span>' +
       '<span class="rung-px">' + r.entryPrice.toFixed(2) + ' → ' + r.tpPrice.toFixed(2) + '</span>' +
       '<span class="rung-sh">' + r.shares + 'sh</span>' +
       '<span class="rung-status-badge ' + statusClass + '">' + badge + '</span>' +
+      riskBadge +
       pnlSpan +
     '</div>';
   }
@@ -220,9 +250,12 @@ app.get('/', (_, res) => {
     if (!ss) return '';
     const ask = leg ? (side === 'up' ? leg.upAsk : leg.downAsk) : null;
     const bid = leg ? (side === 'up' ? leg.upBid : leg.downBid) : null;
-    const rows = ss.rungs.map(rungRow).join('');
+    const leading = leadingSide(leg);
+    // Only show the price-based "trailing" guess for rungs where the bot
+    // hasn't already made an explicit noTakeProfit determination.
+    const rows = ss.rungs.map(r => rungRow(r, !r.noTakeProfit && leading != null && leading !== side)).join('');
     return '<div class="side-card ' + side + '-card">' +
-      '<div class="side-hdr"><div><div class="side-title">' + side.toUpperCase() + ' ladder</div>' +
+      '<div class="side-hdr"><div><div class="side-title">' + side.toUpperCase() + ' ladder' + (leading === side ? ' <span class="rung-status-badge status-open">leading</span>' : '') + '</div>' +
         '<div class="side-sub">' + ss.filledCount + '/' + ss.rungs.length + ' entries filled · ' + ss.closedCount + '/' + ss.rungs.length + ' closed</div></div>' + sideBadge(side) + '</div>' +
       '<div class="side-body">' +
         '<div class="px">ask ' + fmtPx(ask) + ' · bid ' + fmtPx(bid) + '</div>' +
