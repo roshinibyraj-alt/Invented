@@ -3,7 +3,7 @@
 const express    = require('express');
 const http       = require('http');
 const { Server } = require('socket.io');
-const dipBot      = require('./cricket-bot');
+const ladderBot   = require('./cricket-bot');
 
 const app    = express();
 const server = http.createServer(app);
@@ -15,18 +15,18 @@ app.use(express.json());
 app.get('/healthz', (_, res) => res.sendStatus(200));
 
 app.get('/api/hedge/status', (_, res) => {
-  try { res.json(dipBot.buildState()); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  try { res.json(ladderBot.buildState()); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 app.post('/api/hedge/pause', (_, res) => {
-  try { res.json(dipBot.pauseTrading()); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  try { res.json(ladderBot.pauseTrading()); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 app.post('/api/hedge/resume', (_, res) => {
-  try { res.json(dipBot.resumeTrading()); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  try { res.json(ladderBot.resumeTrading()); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 app.post('/api/hedge/set-mode', (req, res) => {
   const { live } = req.body || {};
   if (typeof live !== 'boolean') return res.status(400).json({ ok: false, error: 'Missing boolean "live" field' });
-  try { res.json(dipBot.setMode(live)); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  try { res.json(ladderBot.setMode(live)); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
 app.get('/', (_, res) => {
@@ -35,7 +35,7 @@ app.get('/', (_, res) => {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>🪙 BTC 5m Dip Bot</title>
+<title>🪙 BTC 5m Ladder Bot</title>
 <style>
   :root {
     --bg: #ffffff; --bg2: #f5f7fa; --bg3: #edf0f4; --border: #d0d7e2;
@@ -70,30 +70,32 @@ app.get('/', (_, res) => {
   .section { padding: 0 20px 16px; }
   .section-hdr { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 2px; padding: 8px 0; display: flex; align-items: center; gap: 8px; }
   .section-hdr::after { content:''; flex:1; height:1px; background: var(--border); }
-  .loop-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin: 0 20px 16px; }
-  @media (max-width: 760px) { .loop-grid { grid-template-columns: 1fr; } }
-  .loop-card { background: var(--bg2); border: 2px solid var(--border); border-radius: 12px; overflow: hidden; }
-  .loop-hdr { background: #0d1d30; padding: 10px 14px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px; }
-  .loop-title { font-size: 13px; font-weight: bold; color: #ddd; }
-  .loop-sub { font-size: 9px; color: #8fb; }
+  .ladder-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin: 0 20px 16px; }
+  @media (max-width: 760px) { .ladder-grid { grid-template-columns: 1fr; } }
+  .side-card { background: var(--bg2); border: 2px solid var(--border); border-radius: 12px; overflow: hidden; }
+  .side-card.up-card { border-color: #4fc3f766; }
+  .side-card.down-card { border-color: #b39ddb66; }
+  .side-hdr { background: #0d1d30; padding: 10px 14px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px; }
+  .side-title { font-size: 13px; font-weight: bold; color: #ddd; }
+  .side-sub { font-size: 9px; color: #8fb; }
   .side-badge { padding: 3px 10px; border-radius: 10px; font-size: 10px; font-weight: bold; }
   .side-up { background: #0099cc33; color: #4fc3f7; border: 1px solid #4fc3f7; }
   .side-down { background: #7c6cf033; color: #b39ddb; border: 1px solid #b39ddb; }
-  .loop-body { padding: 10px 14px; }
+  .side-body { padding: 10px 14px; }
   .px { padding: 4px 6px; border-radius: 6px; background: var(--bg3); text-align: center; font-size: 9.5px; margin-bottom: 8px; }
-  .fill-card { background: #fff; border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; margin-bottom: 6px; font-size: 10px; display: flex; justify-content: space-between; }
-  .fill-card.resting { border-style: dashed; border-color: var(--yellow); background: #e6a80008; }
-  .resting-badge { font-size: 8.5px; padding: 2px 7px; border-radius: 9px; background: #e6a80022; color: var(--yellow); border: 1px solid var(--yellow); white-space: nowrap; margin-left: 6px; }
-  .fill-empty { color: var(--muted); font-size: 10px; padding: 4px 0; }
+  .rung-row { background: #fff; border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; margin-bottom: 6px; font-size: 10px; display: flex; justify-content: space-between; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .rung-row.resting-entry { border-style: dashed; border-color: var(--yellow); background: #e6a80008; }
+  .rung-row.position-open { border-color: var(--cyan); background: #0099cc08; }
+  .rung-row.closed-row { opacity: .8; }
+  .rung-id { color: var(--muted); font-size: 9px; min-width: 20px; }
+  .rung-px { flex: 1; min-width: 90px; }
+  .rung-sh { color: var(--muted); font-size: 9.5px; }
+  .rung-status-badge { font-size: 8.5px; padding: 2px 7px; border-radius: 9px; white-space: nowrap; }
+  .status-resting { background: #e6a80022; color: var(--yellow); border: 1px solid var(--yellow); }
+  .status-open { background: #0099cc22; color: var(--cyan); border: 1px solid var(--cyan); }
+  .status-idle { background: var(--bg3); color: var(--muted); border: 1px solid var(--border); }
   .side-pnl { text-align: right; margin-top: 4px; font-size: 10.5px; }
-  .tuning-row { display: flex; justify-content: space-between; padding: 2px 0; font-size: 9.5px; }
-  .tuning-row span:last-child { color: #12202e; }
-  .mult-tag { padding: 1px 7px; border-radius: 8px; font-size: 9.5px; }
-  .mult-up { background: #00a85422; color: var(--green); }
-  .mult-down { background: #e8304a22; color: var(--red); }
-  .mult-neutral { background: var(--bg3); color: var(--muted); }
   .divider { border-top: 1px dashed var(--border); margin: 8px 0; }
-  .cap-note { font-size: 9px; color: var(--muted); margin-top: 6px; text-align: right; }
   .safeguard-note { margin: 0 20px 16px; font-size: 9.5px; color: var(--muted); }
   .bottom-grid { display: grid; grid-template-columns: 1fr; gap: 16px; padding: 0 20px 20px; }
   .tbl-wrap { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; max-height: 320px; overflow-y: auto; }
@@ -107,7 +109,7 @@ app.get('/', (_, res) => {
 </head>
 <body>
   <div class="header">
-    <div class="logo">🪙 <span>BTC</span> 5m DIP BOT</div>
+    <div class="logo">🪙 <span>BTC</span> 5m LADDER BOT</div>
     <div id="mode-badge" class="mode-badge mode-dry">DEMO</div>
   </div>
 
@@ -122,9 +124,9 @@ app.get('/', (_, res) => {
   <div class="stats-row" id="stats-row"></div>
 
   <div class="section">
-    <div class="section-hdr" id="strategy-hdr">Current Window — each loop trades whichever side it's currently assigned; the losing loop flips to the winner after each window</div>
+    <div class="section-hdr" id="strategy-hdr">Current Window — UP and DOWN each run an independent 4-rung ladder (no shared side, no switching)</div>
   </div>
-  <div class="loop-grid" id="loop-grid"><div class="empty">Loading…</div></div>
+  <div class="ladder-grid" id="ladder-grid"><div class="empty">Loading…</div></div>
   <div class="safeguard-note" id="safeguard-note"></div>
 
   <div class="bottom-grid">
@@ -132,8 +134,8 @@ app.get('/', (_, res) => {
       <div class="section-hdr" style="padding:0 0 8px;">Window History (resolved)</div>
       <div class="tbl-wrap">
         <table class="tbl">
-          <thead><tr><th>Window</th><th>Winner</th><th>Method</th><th>Loop A</th><th>A PnL</th><th>Loop B</th><th>B PnL</th><th>Combined</th><th>Est. Rebate</th></tr></thead>
-          <tbody id="history-body"><tr><td colspan="9" class="empty">Loading…</td></tr></tbody>
+          <thead><tr><th>Window</th><th>Winner</th><th>Method</th><th>UP</th><th>UP PnL</th><th>DOWN</th><th>DOWN PnL</th><th>Combined</th></tr></thead>
+          <tbody id="history-body"><tr><td colspan="8" class="empty">Loading…</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -160,7 +162,7 @@ app.get('/', (_, res) => {
   $('resume-btn').onclick = () => fetch('/api/hedge/resume', { method: 'POST' }).then(() => flash('Trading resumed'));
   $('live-btn').onclick = () => {
     const wantLive = !$('live-btn').classList.contains('is-live');
-    if (wantLive && !confirm('Switch to LIVE mode? This will place REAL resting GTC limit buy orders with REAL money on the BTC 5-minute Up/Down market whenever a dip trigger fires.')) return;
+    if (wantLive && !confirm('Switch to LIVE mode? This will place REAL resting GTC limit buy orders with REAL money on the BTC 5-minute Up/Down market ladders (4 rungs per side).')) return;
     fetch('/api/hedge/set-mode', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ live: wantLive }) })
       .then(() => flash(wantLive ? 'Switched to LIVE' : 'Switched to DEMO'));
   };
@@ -171,8 +173,6 @@ app.get('/', (_, res) => {
   function fmt4(n) { return (n == null ? 0 : n).toFixed(4); }
   function pClass(n) { return n > 0 ? 'pnl-pos' : (n < 0 ? 'pnl-neg' : ''); }
   function sgn(n) { return n == null ? '—' : (n >= 0 ? '+$' : '-$') + Math.abs(n).toFixed(2); }
-  function fmtSecs(ms) { return ms == null ? '—' : Math.ceil(ms / 1000) + 's'; }
-  function pct(n) { return n == null ? '—' : (n * 100).toFixed(0) + '%'; }
 
   function renderStats(s) {
     const stats = [
@@ -189,79 +189,83 @@ app.get('/', (_, res) => {
     ).join('');
   }
 
-  function multTag(m) {
-    const cls = m > 1 ? 'mult-up' : (m < 1 ? 'mult-down' : 'mult-neutral');
-    return '<span class="mult-tag ' + cls + '">' + m.toFixed(2) + 'x</span>';
-  }
   function sideBadge(side) {
     return '<span class="side-badge ' + (side === 'up' ? 'side-up' : 'side-down') + '">' + side.toUpperCase() + '</span>';
   }
 
-  function fillRow(p) {
-    return '<div class="fill-card"><span>' + p.shares.toFixed(2) + 'sh @' + fmtPx(p.entryPrice) + ' ($' + fmt2(p.cost) + (p.rebate ? ' +$' + p.rebate.toFixed(4) + ' rebate' : '') + ')</span>' +
-      '<span class="' + pClass(p.pnl) + '">' + (p.pnl == null ? 'open' : sgn(p.pnl)) + '</span></div>';
-  }
-  function orderRow(o) {
-    return '<div class="fill-card resting"><span>' + o.shares.toFixed(2) + 'sh @' + fmtPx(o.limitPrice) + '<span class="resting-badge">⏳ RESTING</span></span><span>—</span></div>';
+  function rungRow(r) {
+    let rowClass = 'status-idle', badge = 'Not placed', pnlSpan = '';
+    if (r.closed) {
+      rowClass = 'closed-row';
+      badge = r.exitMethod === 'take-profit' ? 'TP filled' : 'Resolved';
+      pnlSpan = '<span class="' + pClass(r.pnl) + '">' + sgn(r.pnl) + '</span>';
+    } else if (r.entryFilled) {
+      rowClass = 'position-open';
+      badge = r.tpPending ? 'Open — TP resting' : 'Open';
+    } else if (r.entryPending) {
+      rowClass = 'resting-entry';
+      badge = 'Entry resting';
+    }
+    const statusClass = r.closed ? (r.pnl >= 0 ? 'status-open' : 'status-idle') : (r.entryFilled ? 'status-open' : (r.entryPending ? 'status-resting' : 'status-idle'));
+    return '<div class="rung-row ' + rowClass + '">' +
+      '<span class="rung-id">#' + r.id + '</span>' +
+      '<span class="rung-px">' + r.entryPrice.toFixed(2) + ' → ' + r.tpPrice.toFixed(2) + '</span>' +
+      '<span class="rung-sh">' + r.shares + 'sh</span>' +
+      '<span class="rung-status-badge ' + statusClass + '">' + badge + '</span>' +
+      pnlSpan +
+    '</div>';
   }
 
-  function loopCard(loop, tuning, maxFills, currentAsk) {
-    if (!loop) return '';
-    const sub = loop.watch
-      ? 'prev check ' + fmtPx(loop.watch.prevAsk) + ' · next check in ' + fmtSecs(loop.watch.nextCheckInMs) + ' · ' + loop.watch.checks + ' checks'
-      : '—';
-    const rows = [...(loop.orders || []).map(orderRow), ...(loop.positions || []).map(fillRow)];
-    const sizedShares = tuning ? Math.round(tuning.baseShares * tuning.multiplier) : null;
-    return '<div class="loop-card">' +
-      '<div class="loop-hdr"><div><div class="loop-title">' + loop.label + '</div><div class="loop-sub">' + sub + '</div></div>' + sideBadge(loop.side) + '</div>' +
-      '<div class="loop-body">' +
-        (tuning ? (
-          '<div class="tuning-row"><span>Trailing sample</span><span>' + tuning.n + ' fill' + (tuning.n === 1 ? '' : 's') + '</span></div>' +
-          '<div class="tuning-row"><span>Rolling win rate</span><span>' + pct(tuning.winRate) + '</span></div>' +
-          '<div class="tuning-row"><span>Rolling ROI</span><span class="' + pClass(tuning.roi) + '">' + (tuning.roi == null ? '—' : (tuning.roi >= 0 ? '+' : '') + (tuning.roi * 100).toFixed(1) + '%') + '</span></div>' +
-          '<div class="tuning-row"><span>Size multiplier</span><span>' + multTag(tuning.multiplier) + ' → ' + sizedShares + 'sh next</span></div>' +
-          '<div class="divider"></div>'
-        ) : '') +
-        '<div class="px">current ask ' + fmtPx(currentAsk) + '</div>' +
-        (rows.length ? rows.join('') : '<div class="fill-empty">No orders yet this window</div>') +
-        (loop.pnl != null ? '<div class="side-pnl ' + pClass(loop.pnl) + '">Loop total ' + sgn(loop.pnl) + '</div>' : '') +
-        '<div class="cap-note">' + loop.fillsUsed + ' / ' + maxFills + ' used this window</div>' +
+  function sideCard(side, ss, leg) {
+    if (!ss) return '';
+    const ask = leg ? (side === 'up' ? leg.upAsk : leg.downAsk) : null;
+    const bid = leg ? (side === 'up' ? leg.upBid : leg.downBid) : null;
+    const rows = ss.rungs.map(rungRow).join('');
+    return '<div class="side-card ' + side + '-card">' +
+      '<div class="side-hdr"><div><div class="side-title">' + side.toUpperCase() + ' ladder</div>' +
+        '<div class="side-sub">' + ss.filledCount + '/' + ss.rungs.length + ' entries filled · ' + ss.closedCount + '/' + ss.rungs.length + ' closed</div></div>' + sideBadge(side) + '</div>' +
+      '<div class="side-body">' +
+        '<div class="px">ask ' + fmtPx(ask) + ' · bid ' + fmtPx(bid) + '</div>' +
+        rows +
+        '<div class="side-pnl ' + pClass(ss.realizedPnl) + '">Realized ' + sgn(ss.realizedPnl) + '</div>' +
       '</div>' +
     '</div>';
   }
 
   function renderCurrent(s) {
     const t = s.current.btc;
-    if (!t) { $('loop-grid').innerHTML = '<div class="empty">No active window yet</div>'; return; }
-    const legAsk = (side) => (t.leg ? (side === 'up' ? t.leg.upAsk : t.leg.downAsk) : null);
-    $('loop-grid').innerHTML =
-      loopCard(t.loops.A, s.loopStats && s.loopStats.A, s.maxFillsPerWindow, legAsk(t.loops.A.side)) +
-      loopCard(t.loops.B, s.loopStats && s.loopStats.B, s.maxFillsPerWindow, legAsk(t.loops.B.side));
-    $('strategy-hdr').textContent = 'Window ' + (t.leg ? t.leg.slug.replace(/^btc-updown-5m-/, '') : '…') + ' — state: ' + t.state;
+    if (!t) { $('ladder-grid').innerHTML = '<div class="empty">No active window yet</div>'; return; }
+    $('ladder-grid').innerHTML =
+      sideCard('up', t.sides.up, t.leg) +
+      sideCard('down', t.sides.down, t.leg);
+    const confBit = t.leg && t.leg.highConfSide ? ' · high-conf ' + t.leg.highConfSide.toUpperCase() + ' @' + fmtPx(t.leg.highConfPrice) : '';
+    $('strategy-hdr').textContent = 'Window ' + (t.leg ? t.leg.slug.replace(/^btc-updown-5m-/, '') : '…') + ' — state: ' + t.state + confBit;
   }
 
   function renderTuningNote(s) {
-    $('safeguard-note').textContent = 'Min entry price $' + fmt2(s.minEntryPrice) + ' · max ' + s.maxFillsPerWindow + ' resting+filled orders per loop per window · adaptive sizing ' + (s.adaptiveSizingEnabled ? 'ON' : 'OFF') + ' · a loop flips to whichever side just won whenever its own side loses';
+    const rungsTxt = (s.rungs || []).map(r => '#' + r.id + ' ' + r.price.toFixed(2) + '→' + r.tp.toFixed(2) + ' (' + r.shares + 'sh)').join(', ');
+    $('safeguard-note').textContent = 'Ladder rungs (both sides, independent): ' + rungsTxt + ' · GTC resting maker limits · unfilled entry cancelled at window close, unfilled TP rides to resolution';
   }
 
-  function loopHistCell(loop) {
-    if (!loop) return '—';
-    return loop.side.toUpperCase() + ' · ' + loop.fills + ' (' + loop.shares.toFixed(1) + 'sh)';
+  function sideHistCell(side) {
+    if (!side) return '—';
+    return side.fills + ' fill' + (side.fills === 1 ? '' : 's') + ' (' + side.shares.toFixed(1) + 'sh)';
   }
 
   function renderHistory(list) {
-    if (!list || !list.length) { $('history-body').innerHTML = '<tr><td colspan="9" class="empty">No resolved windows yet</td></tr>'; return; }
-    $('history-body').innerHTML = list.map(h =>
-      '<tr><td>' + h.slug.replace(/^btc-updown-5m-/, '') + '</td>' +
+    if (!list || !list.length) { $('history-body').innerHTML = '<tr><td colspan="8" class="empty">No resolved windows yet</td></tr>'; return; }
+    $('history-body').innerHTML = list.map(h => {
+      const upPnl = h.up ? (h.up.pnl + h.up.tpPnl) : null;
+      const downPnl = h.down ? (h.down.pnl + h.down.tpPnl) : null;
+      return '<tr><td>' + h.slug.replace(/^btc-updown-5m-/, '') + '</td>' +
       '<td>' + (h.winner || '?').toUpperCase() + '</td>' +
       '<td>' + (h.resolutionMethod || '—') + '</td>' +
-      '<td>' + loopHistCell(h.loopA) + '</td>' +
-      '<td class="' + pClass(h.loopA && h.loopA.pnl) + '">' + sgn(h.loopA && h.loopA.pnl) + '</td>' +
-      '<td>' + loopHistCell(h.loopB) + '</td>' +
-      '<td class="' + pClass(h.loopB && h.loopB.pnl) + '">' + sgn(h.loopB && h.loopB.pnl) + '</td>' +
-      '<td class="' + pClass(h.combinedPnl) + '">' + sgn(h.combinedPnl) + '</td>' +
-      '<td class="pnl-pos">+$' + fmt4(h.combinedRebate) + '</td></tr>'
-    ).join('');
+      '<td>' + sideHistCell(h.up) + '</td>' +
+      '<td class="' + pClass(upPnl) + '">' + sgn(upPnl) + '</td>' +
+      '<td>' + sideHistCell(h.down) + '</td>' +
+      '<td class="' + pClass(downPnl) + '">' + sgn(downPnl) + '</td>' +
+      '<td class="' + pClass(h.combinedPnl) + '">' + sgn(h.combinedPnl) + '</td></tr>';
+    }).join('');
   }
 
   function renderTrades(list) {
@@ -311,11 +315,11 @@ const slog = (line) => { console.log(line); io.emit('log', line); };
 const PK = process.env.PRIVATE_KEY;
 if (!PK) { console.error('❌ PRIVATE_KEY env var missing'); process.exit(1); }
 
-console.log('🪙 BTC 5m Price-Dip Bot — winner-chasing loops, resting GTC maker limit orders, adaptive sizing');
+console.log('🪙 BTC 5m Ladder Bot — independent UP/DOWN 4-rung ladders, resting GTC maker limit orders');
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`🌐 Dashboard: http://0.0.0.0:${PORT}`);
-  dipBot.init(PK, emit, slog).catch(e => {
+  ladderBot.init(PK, emit, slog).catch(e => {
     console.error('❌ Bot init failed:', e.message);
     process.exit(1);
   });
