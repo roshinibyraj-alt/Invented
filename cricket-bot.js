@@ -303,6 +303,29 @@ function updateHighConfidence(leg) {
   }
 }
 
+// FAST PATH: resolves a window the instant it closes, using the live price
+// already cached from the last ~1s of refreshLegPrices polling (i.e. the
+// final couple of seconds before window end) — no waiting on Polymarket's
+// official settlement or a multi-poll high-confidence streak. This is what
+// lets the NEXT window's active bucket be picked correctly, synchronously,
+// before that next window is even created — see tickBtc.
+async function attemptFastResolution(leg) {
+  if (leg.resolved) return true;
+  if (!leg.upTokenId || !leg.downTokenId) return false; // never discovered — nothing to sample
+  await refreshLegPrices(leg); // one last refresh right at close for the freshest possible read
+  const upP = markPrice(leg, 'up');
+  const downP = markPrice(leg, 'down');
+  if (upP == null && downP == null) return false;
+  leg.resolved = true;
+  leg.winner = (upP != null ? upP : 0) >= (downP != null ? downP : 0) ? 'up' : 'down';
+  leg.resolutionMethod = 'final-price';
+  log(`⚡ [${leg.slug}] resolved FINAL-PRICE at window close (up ${upP != null ? upP.toFixed(3) : '—'} / down ${downP != null ? downP.toFixed(3) : '—'}) — winner ${leg.winner.toUpperCase()}`);
+  return true;
+}
+
+// SLOW PATH (fallback only): used for the rare case a window couldn't be
+// fast-resolved at close (e.g. market discovery never completed in time).
+// Kept as a safety net via the async pending-resolution queue.
 async function resolveLegAttempt(leg) {
   if (leg.resolved) return true;
   try {
@@ -519,14 +542,28 @@ async function tickBtc(now) {
 
   if (!trade || trade.windowTs !== windowTs) {
     if (trade && !trade.settled) {
-      if (trade.activeSide && !trade.position) {
-        log(`⚠️  [${trade.label} ${trade.leg.slug}] window closed with ${trade.activeSide.toUpperCase()} bucket active but no bet got filled — bucket unaffected`);
-      }
-      trade.state = 'pending-resolution';
-      engine.pending.push(trade);
-      if (engine.pending.length > MAX_PENDING_RESOLUTIONS) {
-        const dropped = engine.pending.shift();
-        log(`⚠️  dropped stale pending window ${dropped.leg.slug} from the resolution queue (too many pending)`);
+      // Try to resolve THIS window right now, using the live price from the
+      // last couple of seconds before close — this must happen BEFORE the
+      // next window is created below, or the next window's active bucket
+      // will be picked using a stale (one-window-old) winner.
+      if (!trade.leg.resolved) await attemptFastResolution(trade.leg);
+      if (trade.leg.resolved && !trade.settled) {
+        settleTrade(trade); // updates engine.lastWinner synchronously, in time for freshTrade() below
+      } else {
+        // Fast path had no price to sample (e.g. market discovery never completed in
+        // time) — fall back to the async official/high-confidence/price-fallback queue.
+        // Note: in this rare case the *next* window may still start one window stale,
+        // since we can't know the winner yet.
+        if (trade.activeSide && !trade.position) {
+          log(`⚠️  [${trade.label} ${trade.leg.slug}] window closed with ${trade.activeSide.toUpperCase()} bucket active but no bet got filled — bucket unaffected`);
+        }
+        log(`⚠️  [${trade.label} ${trade.leg.slug}] couldn't fast-resolve at close (no price sample) — falling back to slower resolution; next window's active side may lag by one window this time`);
+        trade.state = 'pending-resolution';
+        engine.pending.push(trade);
+        if (engine.pending.length > MAX_PENDING_RESOLUTIONS) {
+          const dropped = engine.pending.shift();
+          log(`⚠️  dropped stale pending window ${dropped.leg.slug} from the resolution queue (too many pending)`);
+        }
       }
     }
     if (windowTs < engine.boundaryWindowTs) return;
@@ -671,7 +708,7 @@ async function init(privateKey, emit, slogFn) {
   slog(`[hedgebot] ⚙️  Sizing: active bucket's live balance ÷ ${BUCKET_DIVISOR} = this window's wager. Single market/taker buy at the current ask, held to resolution — no rungs, no take-profit.`);
   slog(`[hedgebot] ⚙️  On a win: wager + profit (full payout) moves OUT of the active bucket INTO the opposite bucket. On a loss: the wager is simply gone from the active bucket.`);
   slog(`[hedgebot] ⚙️  Bootstrap: the first tracked window has no prior winner, so no bet is placed — betting starts from the following window.`);
-  slog(`[hedgebot] ⚙️  Resolution: official Gamma > high-confidence live price (>=${HIGH_CONF_PRICE}) > ${Math.round(RESOLUTION_FALLBACK_MS / 1000)}s live-price fallback.`);
+  slog(`[hedgebot] ⚙️  Resolution: the live price right at window close (last couple of seconds) determines the winner immediately, so the next window's active bucket is never stale. Official Gamma / high-confidence / ${Math.round(RESOLUTION_FALLBACK_MS / 1000)}s price-fallback are kept only as a safety net for the rare case a market wasn't discovered in time.`);
   slog(`[hedgebot] ⚙️  Starting capital $${BUCKET_STARTING_CAPITAL * 2} total ($${BUCKET_STARTING_CAPITAL} per bucket) | never joins a window it starts mid-way through`);
   slog(`[hedgebot] ${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
