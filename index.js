@@ -60,6 +60,10 @@ app.get('/', (_, res) => {
   .toolbar button:hover { opacity: .85; }
   .toolbar-status { padding: 6px 20px 0; font-size: 10px; color: var(--muted); min-height: 14px; }
   .boundary-banner { margin: 10px 20px 0; padding: 10px 14px; background: #e6a80022; border: 1px solid var(--yellow); border-radius: 8px; font-size: 10.5px; color: #7a5c00; }
+  .causality-banner { margin: 10px 20px 0; padding: 10px 14px; border-radius: 8px; font-size: 11px; line-height: 1.5; }
+  .causality-ok { background: #00a85422; border: 1px solid var(--green); color: #0a5c34; }
+  .causality-bad { background: #e8304a22; border: 2px solid var(--red); color: #7a1020; }
+  .causality-idle { background: var(--bg3); border: 1px solid var(--border); color: var(--muted); }
   .stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; padding: 10px 20px; }
   .stat { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; }
   .stat-label { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
@@ -83,7 +87,9 @@ app.get('/', (_, res) => {
   .bucket-body { padding: 14px; text-align: center; }
   .bucket-balance { font-size: 26px; font-weight: bold; color: #12202e; }
   .bucket-wager { font-size: 10px; color: var(--muted); margin-top: 6px; }
+  .bucket-flow { font-size: 8.5px; color: var(--muted); margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border); font-weight: normal; }
   .current-window { margin: 0 20px 16px; background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 16px; font-size: 10.5px; }
+  .current-window .headline { font-size: 15px; margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px dashed var(--border); }
   .current-window .row { display: flex; justify-content: space-between; padding: 3px 0; }
   .current-window .row span:last-child { color: #12202e; }
   .status-pill { font-size: 9px; padding: 2px 8px; border-radius: 9px; }
@@ -113,10 +119,11 @@ app.get('/', (_, res) => {
   </div>
   <div class="toolbar-status" id="toolbar-status"></div>
   <div id="boundary-banner" style="display:none;" class="boundary-banner"></div>
+  <div id="causality-banner" style="display:none;" class="causality-banner"></div>
 
   <div class="stats-row" id="stats-row"></div>
 
-  <div class="section-hdr">Momentum Buckets — winner of the last window trades next window, loser's bucket is paused</div>
+  <div class="section-hdr">Momentum Buckets — the side that WON the last window trades this window; the other side's bucket is paused</div>
   <div class="bucket-grid" id="bucket-grid"><div class="empty">Loading…</div></div>
 
   <div class="section-hdr">Current Window</div>
@@ -182,6 +189,7 @@ app.get('/', (_, res) => {
   }
 
   function bucketCard(side, s) {
+    const opp = side === 'up' ? 'down' : 'up';
     const balance = s.buckets[side];
     const isActive = s.current.btc && s.current.btc.activeSide === side;
     const wager = balance / (s.bucketDivisor || 10);
@@ -192,6 +200,7 @@ app.get('/', (_, res) => {
       '<div class="bucket-body">' +
         '<div class="bucket-balance">$' + fmt2(balance) + '</div>' +
         '<div class="bucket-wager">' + (isActive ? 'wager this window: $' + fmt2(wager) : 'not trading this window') + '</div>' +
+        '<div class="bucket-flow">if ' + side.toUpperCase() + ' wins → payout moves to ' + opp.toUpperCase() + ' bucket &nbsp;|&nbsp; if ' + side.toUpperCase() + ' loses → wager is simply gone</div>' +
       '</div>' +
     '</div>';
   }
@@ -200,27 +209,57 @@ app.get('/', (_, res) => {
     $('bucket-grid').innerHTML = bucketCard('up', s) + bucketCard('down', s);
   }
 
+  function renderCausality(s) {
+    const el = $('causality-banner');
+    const t = s.current.btc;
+    if (!t) { el.style.display = 'none'; return; }
+    el.style.display = 'block';
+    if (!t.activeSide) {
+      el.className = 'causality-banner causality-idle';
+      el.innerHTML = 'ℹ️ Bootstrap window — no prior winner yet, so no bucket is active this window.';
+      return;
+    }
+    const expected = s.lastWinner;
+    const ok = expected === t.activeSide;
+    el.className = 'causality-banner ' + (ok ? 'causality-ok' : 'causality-bad');
+    el.innerHTML = ok
+      ? '✅ Last window\u2019s winner was <b>' + expected.toUpperCase() + '</b> → this window correctly trades the <b>' + t.activeSide.toUpperCase() + '</b> bucket.'
+      : '⚠️ MISMATCH — last window\u2019s winner was <b>' + (expected ? expected.toUpperCase() : '—') + '</b> but this window is trading <b>' + t.activeSide.toUpperCase() + '</b>. This shouldn\u2019t happen — check the Live Log below for why.';
+  }
+
   function renderCurrentWindow(s) {
     const t = s.current.btc;
     if (!t) { $('current-window').innerHTML = '<div class="empty">No active window yet</div>'; return; }
     const leg = t.leg;
-    let betLine;
+    let headline, betLine;
     if (!t.activeSide) {
-      betLine = '<span class="status-pill status-idle">bootstrap — no bet this window</span>';
+      headline = '⏳ Bootstrap window — no bet placed';
+      betLine = '<span class="status-pill status-idle">watching this window resolve to seed the momentum signal</span>';
     } else if (t.position) {
-      betLine = '<span class="status-pill status-open">' + t.activeSide.toUpperCase() + ' bought ' + t.position.shares.toFixed(2) + 'sh @' + fmtPx(t.position.entryPrice) + ' ($' + fmt2(t.position.cost) + ')</span>';
+      headline = (t.activeSide === 'up' ? '🔵' : '🟣') + ' Trading ' + t.activeSide.toUpperCase() + ' this window';
+      betLine = '<span class="status-pill status-open">bought ' + t.position.shares.toFixed(2) + 'sh @' + fmtPx(t.position.entryPrice) + ' ($' + fmt2(t.position.cost) + ')</span>';
     } else if (t.betPlaced) {
-      betLine = '<span class="status-pill status-idle">' + t.activeSide.toUpperCase() + ' bet skipped (' + (t.skipReason || 'no fill') + ')</span>';
+      headline = '⏸ ' + t.activeSide.toUpperCase() + ' bucket active, but no bet placed';
+      betLine = '<span class="status-pill status-idle">skipped — ' + (t.skipReason || 'no fill') + '</span>';
     } else {
-      betLine = '<span class="status-pill status-resting">' + t.activeSide.toUpperCase() + ' bet pending — waiting for price</span>';
+      headline = (t.activeSide === 'up' ? '🔵' : '🟣') + ' Trading ' + t.activeSide.toUpperCase() + ' this window';
+      betLine = '<span class="status-pill status-resting">bet pending — waiting for a price</span>';
     }
     $('current-window').innerHTML =
+      '<div class="headline">' + headline + '</div>' +
       '<div class="row"><span>Window</span><span>' + (leg ? leg.slug.replace(/^btc-updown-5m-/, '') : '…') + '</span></div>' +
       '<div class="row"><span>State</span><span>' + t.state + '</span></div>' +
-      '<div class="row"><span>Active side</span><span>' + (t.activeSide ? t.activeSide.toUpperCase() : 'none (bootstrap)') + '</span></div>' +
-      '<div class="row"><span>Bet</span>' + betLine + '</div>' +
+      '<div class="row"><span>Bet status</span>' + betLine + '</div>' +
       '<div class="row"><span>Live prices</span><span>UP ask ' + fmtPx(leg && leg.upAsk) + ' / bid ' + fmtPx(leg && leg.upBid) + ' · DOWN ask ' + fmtPx(leg && leg.downAsk) + ' / bid ' + fmtPx(leg && leg.downBid) + '</span></div>' +
       (t.position ? '<div class="row"><span>Unrealized P&amp;L</span><span class="' + pClass(t.unrealizedPnl) + '">' + sgn(t.unrealizedPnl) + '</span></div>' : '');
+  }
+
+  function methodLabel(m) {
+    if (m === 'final-price') return 'instant (final price)';
+    if (m === 'official') return 'official';
+    if (m === 'high-confidence-price') return 'high-confidence (slow)';
+    if (m === 'price-fallback') return 'fallback (slow)';
+    return m || '—';
   }
 
   function renderHistory(list) {
@@ -230,7 +269,7 @@ app.get('/', (_, res) => {
       const resultCell = h.win == null ? '—' : (h.win ? 'WON' : 'LOST');
       return '<tr><td>' + h.slug.replace(/^btc-updown-5m-/, '') + '</td>' +
       '<td>' + (h.winner || '?').toUpperCase() + '</td>' +
-      '<td>' + (h.resolutionMethod || '—') + '</td>' +
+      '<td>' + methodLabel(h.resolutionMethod) + '</td>' +
       '<td>' + betCell + '</td>' +
       '<td class="' + (h.win === true ? 'pnl-pos' : (h.win === false ? 'pnl-neg' : '')) + '">' + resultCell + '</td>' +
       '<td class="' + pClass(h.pnl) + '">' + sgn(h.pnl) + '</td>' +
@@ -269,6 +308,7 @@ app.get('/', (_, res) => {
 
     renderStats(s);
     renderBuckets(s);
+    renderCausality(s);
     renderCurrentWindow(s);
     renderHistory(s.history);
     renderTrades(s.trades);
