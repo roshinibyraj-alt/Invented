@@ -1,19 +1,19 @@
 {
-  "name": "grid-bot",
+  "name": "btc-5m-momentum-bucket-bot",
   "version": "1.0.0",
-  "private": true,
-  "description": "Polymarket BTC 5m grid trading bot — Railway deploy",
-  "main": "index.js",
+  "description": "BTC 5-minute Up/Down momentum bucket trading bot for Polymarket, with a live dashboard.",
+  "main": "server.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   },
   "dependencies": {
-    "@polymarket/builder-relayer-client": "latest",
-    "@polymarket/clob-client-v2": "latest",
-    "ethers": "^6.17.0",
-    "express": "^4.21.0",
-    "socket.io": "^4.7.0",
-    "viem": "latest",
-    "ws": "^8.18.0"
+    "express": "^4.19.2",
+    "socket.io": "^4.7.5",
+    "viem": "^2.21.0",
+    "@polymarket/clob-client-v2": "^1.1.0",
+    "@polymarket/builder-relayer-client": "^1.0.0"
   }
 }
