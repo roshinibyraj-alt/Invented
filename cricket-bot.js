@@ -406,6 +406,9 @@ function freshRungState(rungDef) {
     closed: false,         // true once TP fills or resolution has paid this rung out
     exitMethod: null,      // 'take-profit' | 'resolution'
     pnl: null,
+    noTakeProfit: false,   // set true once the opposite side's same-numbered rung TP's —
+                            // this side's move that far is very unlikely, so skip/cancel
+                            // its own TP and ride straight to resolution instead.
   };
 }
 function freshSideState() {
@@ -424,6 +427,8 @@ function freshTrade(windowTs) {
 }
 
 function tokenIdFor(leg, side) { return side === 'up' ? leg.upTokenId : leg.downTokenId; }
+function oppositeSide(side) { return side === 'up' ? 'down' : 'up'; }
+function rungById(trade, side, rungId) { return trade.sides[side].rungs.find(r => r.id === rungId); }
 
 // Place all 8 entry orders (4 rungs × 2 sides) once, as soon as the leg
 // is discovered and prices are available.
@@ -469,18 +474,23 @@ async function placeTakeProfitOrder(trade, side, rung) {
   const pos = rung.position;
   if (!tokenId || !pos) return;
 
+  if (rung.noTakeProfit) {
+    log(`⏭️  [${trade.label} ${leg.slug}] ${side.toUpperCase()} rung${rung.id} skipping take-profit — opposite side's rung${rung.id} already TP'd, this rung rides straight to resolution`);
+    return;
+  }
+
   const resp = await placeRestingLimitOrder(tokenId, 'SELL', rung.tpPrice, pos.shares);
   if (!resp) { log(`❌ [${trade.label} ${leg.slug}] ${side.toUpperCase()} rung${rung.id} take-profit order failed to place`); return; }
 
   if (resp.filledNow && resp.filledShares > 0) {
-    confirmTakeProfitFill(trade, side, rung, resp.avgPrice);
+    await confirmTakeProfitFill(trade, side, rung, resp.avgPrice);
     return;
   }
   rung.tpOrder = { id: resp.id, tokenId, limitPrice: rung.tpPrice, shares: pos.shares, placedAt: Date.now() };
   log(`🎯 [${trade.label} ${leg.slug}] ${side.toUpperCase()} rung${rung.id} take-profit resting — ${pos.shares}sh @${rung.tpPrice.toFixed(2)}`);
 }
 
-function confirmTakeProfitFill(trade, side, rung, exitPrice) {
+async function confirmTakeProfitFill(trade, side, rung, exitPrice) {
   const pos = rung.position;
   const proceeds = round2(pos.shares * exitPrice);
   const pnl = round2(proceeds - pos.cost);
@@ -497,6 +507,23 @@ function confirmTakeProfitFill(trade, side, rung, exitPrice) {
   registerTrade({ slug: trade.leg.slug, asset: trade.asset, step: `${side.toUpperCase()} rung${rung.id} take-profit fill`, side, price: exitPrice, shares: pos.shares, pnl });
   log(`💰 [${trade.label} ${trade.leg.slug}] ${side.toUpperCase()} rung${rung.id} TAKE-PROFIT FILLED — ${pos.shares}sh @${exitPrice.toFixed(3)} — ${sgn2(pnl)} | bankroll=$${engine.bankroll.toFixed(2)}`);
   recordEquity();
+
+  // UP/DOWN prices move as complements — if this rung's TP just hit, the
+  // opposite side moved far enough away that its same-numbered rung is very
+  // unlikely to reach its own TP this window. Flag it to skip/cancel TP and
+  // ride straight to resolution instead of tying up a resting sell order
+  // that will almost never fill.
+  const opp = rungById(trade, oppositeSide(side), rung.id);
+  if (opp && !opp.closed) {
+    opp.noTakeProfit = true;
+    if (opp.tpOrder) {
+      log(`⏭️  [${trade.label} ${trade.leg.slug}] ${oppositeSide(side).toUpperCase()} rung${opp.id} cancelling resting take-profit — ${side.toUpperCase()} rung${rung.id} just TP'd, this rung now rides straight to resolution`);
+      await cancelRestingOrder(opp.tpOrder.id);
+      opp.tpOrder = null;
+    } else if (opp.position) {
+      log(`⏭️  [${trade.label} ${trade.leg.slug}] ${oppositeSide(side).toUpperCase()} rung${opp.id} marked to ride straight to resolution — ${side.toUpperCase()} rung${rung.id} just TP'd`);
+    }
+  }
 }
 
 // Checks every resting entry order (fills when ask trades down to/through
@@ -535,12 +562,12 @@ async function checkLadderOrders(trade) {
         const crossed = bid >= order.limitPrice - 1e-9;
         if (crossed) {
           if (DRY_RUN) {
-            confirmTakeProfitFill(trade, side, rung, order.limitPrice);
+            await confirmTakeProfitFill(trade, side, rung, order.limitPrice);
           } else if (trader && typeof trader.reconcileToken === 'function') {
             try {
               const rec = await trader.reconcileToken(order.tokenId);
               if (rec && rec.filledShares > 0) {
-                confirmTakeProfitFill(trade, side, rung, rec.avgPrice || order.limitPrice);
+                await confirmTakeProfitFill(trade, side, rung, rec.avgPrice || order.limitPrice);
               }
             } catch (e) {
               log(`⚠️  reconcileToken(${order.tokenId}) failed: ${e.message}`);
@@ -776,6 +803,7 @@ function rungSummary(rung) {
     id: rung.id, entryPrice: rung.entryPrice, tpPrice: rung.tpPrice, shares: rung.shares,
     entryPending: !!rung.entryOrder, entryFilled: !!rung.position,
     tpPending: !!rung.tpOrder, closed: rung.closed, exitMethod: rung.exitMethod, pnl: rung.pnl,
+    noTakeProfit: !!rung.noTakeProfit,
   };
 }
 function sideSummary(trade, side) {
