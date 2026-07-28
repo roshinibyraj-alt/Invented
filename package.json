@@ -2,9 +2,9 @@
   "name": "btc-5m-momentum-bucket-bot",
   "version": "1.0.0",
   "description": "BTC 5-minute Up/Down momentum bucket trading bot for Polymarket, with a live dashboard.",
-  "main": "server.js",
+  "main": "index.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node index.js"
   },
   "engines": {
     "node": ">=18.0.0"
@@ -14,6 +14,6 @@
     "socket.io": "^4.7.5",
     "viem": "^2.21.0",
     "@polymarket/clob-client-v2": "^1.1.0",
-    "@polymarket/builder-relayer-client": "^1.0.0"
+    "@polymarket/builder-relayer-client": "^0.0.10"
   }
 }
