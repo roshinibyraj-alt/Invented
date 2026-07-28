@@ -3,7 +3,7 @@
 const express    = require('express');
 const http       = require('http');
 const { Server } = require('socket.io');
-const ladderBot   = require('./cricket-bot');
+const bucketBot   = require('./cricket-bot');
 
 const app    = express();
 const server = http.createServer(app);
@@ -15,18 +15,18 @@ app.use(express.json());
 app.get('/healthz', (_, res) => res.sendStatus(200));
 
 app.get('/api/hedge/status', (_, res) => {
-  try { res.json(ladderBot.buildState()); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  try { res.json(bucketBot.buildState()); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 app.post('/api/hedge/pause', (_, res) => {
-  try { res.json(ladderBot.pauseTrading()); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  try { res.json(bucketBot.pauseTrading()); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 app.post('/api/hedge/resume', (_, res) => {
-  try { res.json(ladderBot.resumeTrading()); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  try { res.json(bucketBot.resumeTrading()); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 app.post('/api/hedge/set-mode', (req, res) => {
   const { live } = req.body || {};
   if (typeof live !== 'boolean') return res.status(400).json({ ok: false, error: 'Missing boolean "live" field' });
-  try { res.json(ladderBot.setMode(live)); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  try { res.json(bucketBot.setMode(live)); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
 app.get('/', (_, res) => {
@@ -35,13 +35,12 @@ app.get('/', (_, res) => {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>🪙 BTC 5m Ladder Bot</title>
+<title>🪙 BTC 5m Momentum Bucket Bot</title>
 <style>
   :root {
     --bg: #ffffff; --bg2: #f5f7fa; --bg3: #edf0f4; --border: #d0d7e2;
     --text: #1a2535; --muted: #7a8fa8; --cyan: #0099cc; --green: #00a854;
-    --red: #e8304a; --yellow: #e6a800; --purple: #7c3aed; --gold: #b8860b;
-    --down: #7c6cf0;
+    --red: #e8304a; --yellow: #e6a800; --gold: #b8860b;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: 'Courier New', monospace; background: var(--bg); color: var(--text); font-size: 12px; min-height: 100vh; font-weight: bold; }
@@ -67,37 +66,30 @@ app.get('/', (_, res) => {
   .stat-val { font-size: 17px; font-weight: bold; color: #12202e; }
   .pnl-pos { color: var(--green) !important; }
   .pnl-neg { color: var(--red) !important; }
-  .section { padding: 0 20px 16px; }
-  .section-hdr { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 2px; padding: 8px 0; display: flex; align-items: center; gap: 8px; }
+  .section-hdr { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 2px; padding: 8px 20px; display: flex; align-items: center; gap: 8px; }
   .section-hdr::after { content:''; flex:1; height:1px; background: var(--border); }
-  .ladder-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin: 0 20px 16px; }
-  @media (max-width: 760px) { .ladder-grid { grid-template-columns: 1fr; } }
-  .side-card { background: var(--bg2); border: 2px solid var(--border); border-radius: 12px; overflow: hidden; }
-  .side-card.up-card { border-color: #4fc3f766; }
-  .side-card.down-card { border-color: #b39ddb66; }
-  .side-hdr { background: #0d1d30; padding: 10px 14px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px; }
-  .side-title { font-size: 13px; font-weight: bold; color: #ddd; }
-  .side-sub { font-size: 9px; color: #8fb; }
-  .side-badge { padding: 3px 10px; border-radius: 10px; font-size: 10px; font-weight: bold; }
-  .side-up { background: #0099cc33; color: #4fc3f7; border: 1px solid #4fc3f7; }
-  .side-down { background: #7c6cf033; color: #b39ddb; border: 1px solid #b39ddb; }
-  .side-body { padding: 10px 14px; }
-  .px { padding: 4px 6px; border-radius: 6px; background: var(--bg3); text-align: center; font-size: 9.5px; margin-bottom: 8px; }
-  .rung-row { background: #fff; border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; margin-bottom: 6px; font-size: 10px; display: flex; justify-content: space-between; align-items: center; gap: 6px; flex-wrap: wrap; }
-  .rung-row.resting-entry { border-style: dashed; border-color: var(--yellow); background: #e6a80008; }
-  .rung-row.position-open { border-color: var(--cyan); background: #0099cc08; }
-  .rung-row.closed-row { opacity: .8; }
-  .rung-id { color: var(--muted); font-size: 9px; min-width: 20px; }
-  .rung-px { flex: 1; min-width: 90px; }
-  .rung-sh { color: var(--muted); font-size: 9.5px; }
-  .rung-status-badge { font-size: 8.5px; padding: 2px 7px; border-radius: 9px; white-space: nowrap; }
-  .status-resting { background: #e6a80022; color: var(--yellow); border: 1px solid var(--yellow); }
+  .bucket-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin: 0 20px 16px; }
+  @media (max-width: 760px) { .bucket-grid { grid-template-columns: 1fr; } }
+  .bucket-card { background: var(--bg2); border: 2px solid var(--border); border-radius: 12px; overflow: hidden; }
+  .bucket-card.active { border-color: var(--cyan); box-shadow: 0 0 0 1px var(--cyan) inset; }
+  .bucket-card.up-card.active { border-color: #4fc3f7; }
+  .bucket-card.down-card.active { border-color: #b39ddb; }
+  .bucket-hdr { background: #0d1d30; padding: 10px 14px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px; }
+  .bucket-title { font-size: 13px; font-weight: bold; color: #ddd; }
+  .bucket-sub { font-size: 9px; color: #8fb; }
+  .bucket-badge { padding: 3px 10px; border-radius: 10px; font-size: 10px; font-weight: bold; }
+  .badge-active { background: #0099cc33; color: #4fc3f7; border: 1px solid #4fc3f7; }
+  .badge-paused { background: var(--bg3); color: var(--muted); border: 1px solid var(--border); }
+  .bucket-body { padding: 14px; text-align: center; }
+  .bucket-balance { font-size: 26px; font-weight: bold; color: #12202e; }
+  .bucket-wager { font-size: 10px; color: var(--muted); margin-top: 6px; }
+  .current-window { margin: 0 20px 16px; background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 16px; font-size: 10.5px; }
+  .current-window .row { display: flex; justify-content: space-between; padding: 3px 0; }
+  .current-window .row span:last-child { color: #12202e; }
+  .status-pill { font-size: 9px; padding: 2px 8px; border-radius: 9px; }
   .status-open { background: #0099cc22; color: var(--cyan); border: 1px solid var(--cyan); }
+  .status-resting { background: #e6a80022; color: var(--yellow); border: 1px solid var(--yellow); }
   .status-idle { background: var(--bg3); color: var(--muted); border: 1px solid var(--border); }
-  .status-risk { background: #e8304a22; color: var(--red); border: 1px solid var(--red); }
-  .side-pnl { text-align: right; margin-top: 4px; font-size: 10.5px; }
-  .divider { border-top: 1px dashed var(--border); margin: 8px 0; }
-  .safeguard-note { margin: 0 20px 16px; font-size: 9.5px; color: var(--muted); }
   .bottom-grid { display: grid; grid-template-columns: 1fr; gap: 16px; padding: 0 20px 20px; }
   .tbl-wrap { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; max-height: 320px; overflow-y: auto; }
   .tbl { width: 100%; border-collapse: collapse; }
@@ -110,7 +102,7 @@ app.get('/', (_, res) => {
 </head>
 <body>
   <div class="header">
-    <div class="logo">🪙 <span>BTC</span> 5m LADDER BOT</div>
+    <div class="logo">🪙 <span>BTC</span> 5m BUCKET BOT</div>
     <div id="mode-badge" class="mode-badge mode-dry">DEMO</div>
   </div>
 
@@ -124,27 +116,27 @@ app.get('/', (_, res) => {
 
   <div class="stats-row" id="stats-row"></div>
 
-  <div class="section">
-    <div class="section-hdr" id="strategy-hdr">Current Window — UP and DOWN each run an independent 4-rung ladder (no shared side, no switching)</div>
-  </div>
-  <div class="ladder-grid" id="ladder-grid"><div class="empty">Loading…</div></div>
-  <div class="safeguard-note" id="safeguard-note"></div>
+  <div class="section-hdr">Momentum Buckets — winner of the last window trades next window, loser's bucket is paused</div>
+  <div class="bucket-grid" id="bucket-grid"><div class="empty">Loading…</div></div>
+
+  <div class="section-hdr">Current Window</div>
+  <div class="current-window" id="current-window">Loading…</div>
 
   <div class="bottom-grid">
     <div>
-      <div class="section-hdr" style="padding:0 0 8px;">Window History (resolved)</div>
+      <div class="section-hdr" style="padding:0 0 8px; margin:0;">Window History (resolved)</div>
       <div class="tbl-wrap">
         <table class="tbl">
-          <thead><tr><th>Window</th><th>Winner</th><th>Method</th><th>UP</th><th>UP PnL</th><th>DOWN</th><th>DOWN PnL</th><th>Combined</th></tr></thead>
+          <thead><tr><th>Window</th><th>Winner</th><th>Method</th><th>Bet</th><th>Result</th><th>PnL</th><th>UP bucket</th><th>DOWN bucket</th></tr></thead>
           <tbody id="history-body"><tr><td colspan="8" class="empty">Loading…</td></tr></tbody>
         </table>
       </div>
     </div>
     <div>
-      <div class="section-hdr" style="padding:0 0 8px;">Recent Trades</div>
+      <div class="section-hdr" style="padding:0 0 8px; margin:0;">Recent Trades</div>
       <div class="tbl-wrap">
         <table class="tbl">
-          <thead><tr><th>Time</th><th>Window</th><th>Step</th><th>Side</th><th>Price</th><th>Shares</th><th>Cost/Rebate/PnL</th></tr></thead>
+          <thead><tr><th>Time</th><th>Window</th><th>Step</th><th>Side</th><th>Price</th><th>Shares</th><th>Cost/PnL</th></tr></thead>
           <tbody id="trade-body"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
         </table>
       </div>
@@ -163,7 +155,7 @@ app.get('/', (_, res) => {
   $('resume-btn').onclick = () => fetch('/api/hedge/resume', { method: 'POST' }).then(() => flash('Trading resumed'));
   $('live-btn').onclick = () => {
     const wantLive = !$('live-btn').classList.contains('is-live');
-    if (wantLive && !confirm('Switch to LIVE mode? This will place REAL resting GTC limit buy orders with REAL money on the BTC 5-minute Up/Down market ladders (4 rungs per side).')) return;
+    if (wantLive && !confirm('Switch to LIVE mode? This will place REAL market/taker buy orders with REAL money on the BTC 5-minute Up/Down market, sized from live bucket balances.')) return;
     fetch('/api/hedge/set-mode', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ live: wantLive }) })
       .then(() => flash(wantLive ? 'Switched to LIVE' : 'Switched to DEMO'));
   };
@@ -171,7 +163,6 @@ app.get('/', (_, res) => {
 
   function fmtPx(n) { return n == null ? '—' : n.toFixed(3); }
   function fmt2(n) { return (n == null ? 0 : n).toFixed(2); }
-  function fmt4(n) { return (n == null ? 0 : n).toFixed(4); }
   function pClass(n) { return n > 0 ? 'pnl-pos' : (n < 0 ? 'pnl-neg' : ''); }
   function sgn(n) { return n == null ? '—' : (n >= 0 ? '+$' : '-$') + Math.abs(n).toFixed(2); }
 
@@ -181,8 +172,8 @@ app.get('/', (_, res) => {
       ['Bankroll (cash)', '$' + fmt2(s.bankroll), ''],
       ['Realized P&amp;L', sgn(s.realizedPnl), pClass(s.realizedPnl)],
       ['Unrealized P&amp;L', sgn(s.unrealizedPnl), pClass(s.unrealizedPnl)],
-      ['Est. Maker Rebates', '+$' + fmt4(s.estimatedRebates), 'pnl-pos'],
       ['Wins / Losses', s.wins + ' / ' + s.losses, ''],
+      ['Last Winner', s.lastWinner ? s.lastWinner.toUpperCase() : '—', ''],
       ['Pending Resolution', s.pendingResolutionCount || 0, ''],
     ];
     $('stats-row').innerHTML = stats.map(([label, val, cls]) =>
@@ -190,114 +181,61 @@ app.get('/', (_, res) => {
     ).join('');
   }
 
-  function sideBadge(side) {
-    return '<span class="side-badge ' + (side === 'up' ? 'side-up' : 'side-down') + '">' + side.toUpperCase() + '</span>';
-  }
-
-  // Mirrors the bot's own markPrice/leadingSide logic so the dashboard can
-  // flag open rungs on the trailing side — since UP/DOWN prices move as
-  // complements, a rung whose side isn't currently leading is unlikely to
-  // see its own take-profit hit and will most likely ride to resolution
-  // (paying $1/share if it still wins by close, $0 if not).
-  function markPrice(leg, side) {
-    const bid = side === 'up' ? leg.upBid : leg.downBid;
-    const ask = side === 'up' ? leg.upAsk : leg.downAsk;
-    return bid != null ? bid : (ask != null ? ask : null);
-  }
-  function leadingSide(leg) {
-    if (!leg) return null;
-    const u = markPrice(leg, 'up'), d = markPrice(leg, 'down');
-    if (u == null && d == null) return null;
-    if (u == null) return 'down';
-    if (d == null) return 'up';
-    return u >= d ? 'up' : 'down';
-  }
-
-  function rungRow(r, trailing) {
-    let rowClass = 'status-idle', badge = 'Not placed', pnlSpan = '', riskBadge = '';
-    if (r.closed) {
-      rowClass = 'closed-row';
-      badge = r.exitMethod === 'take-profit' ? 'TP filled' : 'Resolved';
-      pnlSpan = '<span class="' + pClass(r.pnl) + '">' + sgn(r.pnl) + '</span>';
-    } else if (r.entryFilled) {
-      rowClass = 'position-open';
-      if (r.noTakeProfit) {
-        // Bot has confirmed and cancelled/skipped TP for this rung — the
-        // opposite side's same rung already TP'd, so this one rides
-        // straight to resolution.
-        badge = 'Riding to resolution';
-        riskBadge = '<span class="rung-status-badge status-risk">⏭ opposite rung TP\u2019d — TP skipped</span>';
-      } else {
-        badge = r.tpPending ? 'Open — TP resting' : 'Open';
-        if (trailing) riskBadge = '<span class="rung-status-badge status-risk">⚠ trailing → likely resolution</span>';
-      }
-    } else if (r.entryPending) {
-      rowClass = 'resting-entry';
-      badge = 'Entry resting';
-    }
-    const statusClass = r.closed ? (r.pnl >= 0 ? 'status-open' : 'status-idle') : (r.entryFilled ? (r.noTakeProfit ? 'status-risk' : 'status-open') : (r.entryPending ? 'status-resting' : 'status-idle'));
-    return '<div class="rung-row ' + rowClass + '">' +
-      '<span class="rung-id">#' + r.id + '</span>' +
-      '<span class="rung-px">' + r.entryPrice.toFixed(2) + ' → ' + r.tpPrice.toFixed(2) + '</span>' +
-      '<span class="rung-sh">' + r.shares + 'sh</span>' +
-      '<span class="rung-status-badge ' + statusClass + '">' + badge + '</span>' +
-      riskBadge +
-      pnlSpan +
-    '</div>';
-  }
-
-  function sideCard(side, ss, leg) {
-    if (!ss) return '';
-    const ask = leg ? (side === 'up' ? leg.upAsk : leg.downAsk) : null;
-    const bid = leg ? (side === 'up' ? leg.upBid : leg.downBid) : null;
-    const leading = leadingSide(leg);
-    // Only show the price-based "trailing" guess for rungs where the bot
-    // hasn't already made an explicit noTakeProfit determination.
-    const rows = ss.rungs.map(r => rungRow(r, !r.noTakeProfit && leading != null && leading !== side)).join('');
-    return '<div class="side-card ' + side + '-card">' +
-      '<div class="side-hdr"><div><div class="side-title">' + side.toUpperCase() + ' ladder' + (leading === side ? ' <span class="rung-status-badge status-open">leading</span>' : '') + '</div>' +
-        '<div class="side-sub">' + ss.filledCount + '/' + ss.rungs.length + ' entries filled · ' + ss.closedCount + '/' + ss.rungs.length + ' closed</div></div>' + sideBadge(side) + '</div>' +
-      '<div class="side-body">' +
-        '<div class="px">ask ' + fmtPx(ask) + ' · bid ' + fmtPx(bid) + '</div>' +
-        rows +
-        '<div class="side-pnl ' + pClass(ss.realizedPnl) + '">Realized ' + sgn(ss.realizedPnl) + '</div>' +
+  function bucketCard(side, s) {
+    const balance = s.buckets[side];
+    const isActive = s.current.btc && s.current.btc.activeSide === side;
+    const wager = balance / (s.bucketDivisor || 10);
+    return '<div class="bucket-card ' + side + '-card' + (isActive ? ' active' : '') + '">' +
+      '<div class="bucket-hdr"><div><div class="bucket-title">' + side.toUpperCase() + ' bucket</div>' +
+        '<div class="bucket-sub">started at $' + fmt2(s.bucketStartingCapital) + '</div></div>' +
+        '<span class="bucket-badge ' + (isActive ? 'badge-active' : 'badge-paused') + '">' + (isActive ? 'ACTIVE' : 'paused') + '</span></div>' +
+      '<div class="bucket-body">' +
+        '<div class="bucket-balance">$' + fmt2(balance) + '</div>' +
+        '<div class="bucket-wager">' + (isActive ? 'wager this window: $' + fmt2(wager) : 'not trading this window') + '</div>' +
       '</div>' +
     '</div>';
   }
 
-  function renderCurrent(s) {
+  function renderBuckets(s) {
+    $('bucket-grid').innerHTML = bucketCard('up', s) + bucketCard('down', s);
+  }
+
+  function renderCurrentWindow(s) {
     const t = s.current.btc;
-    if (!t) { $('ladder-grid').innerHTML = '<div class="empty">No active window yet</div>'; return; }
-    $('ladder-grid').innerHTML =
-      sideCard('up', t.sides.up, t.leg) +
-      sideCard('down', t.sides.down, t.leg);
-    const confBit = t.leg && t.leg.highConfSide ? ' · high-conf ' + t.leg.highConfSide.toUpperCase() + ' @' + fmtPx(t.leg.highConfPrice) : '';
-    $('strategy-hdr').textContent = 'Window ' + (t.leg ? t.leg.slug.replace(/^btc-updown-5m-/, '') : '…') + ' — state: ' + t.state + confBit;
-  }
-
-  function renderTuningNote(s) {
-    const rungsTxt = (s.rungs || []).map(r => '#' + r.id + ' ' + r.price.toFixed(2) + '→' + r.tp.toFixed(2) + ' (' + r.shares + 'sh)').join(', ');
-    $('safeguard-note').textContent = 'Ladder rungs (both sides, independent): ' + rungsTxt + ' · GTC resting maker limits · unfilled entry cancelled at window close, unfilled TP rides to resolution';
-  }
-
-  function sideHistCell(side) {
-    if (!side) return '—';
-    return side.fills + ' fill' + (side.fills === 1 ? '' : 's') + ' (' + side.shares.toFixed(1) + 'sh)';
+    if (!t) { $('current-window').innerHTML = '<div class="empty">No active window yet</div>'; return; }
+    const leg = t.leg;
+    let betLine;
+    if (!t.activeSide) {
+      betLine = '<span class="status-pill status-idle">bootstrap — no bet this window</span>';
+    } else if (t.position) {
+      betLine = '<span class="status-pill status-open">' + t.activeSide.toUpperCase() + ' bought ' + t.position.shares.toFixed(2) + 'sh @' + fmtPx(t.position.entryPrice) + ' ($' + fmt2(t.position.cost) + ')</span>';
+    } else if (t.betPlaced) {
+      betLine = '<span class="status-pill status-idle">' + t.activeSide.toUpperCase() + ' bet skipped (' + (t.skipReason || 'no fill') + ')</span>';
+    } else {
+      betLine = '<span class="status-pill status-resting">' + t.activeSide.toUpperCase() + ' bet pending — waiting for price</span>';
+    }
+    $('current-window').innerHTML =
+      '<div class="row"><span>Window</span><span>' + (leg ? leg.slug.replace(/^btc-updown-5m-/, '') : '…') + '</span></div>' +
+      '<div class="row"><span>State</span><span>' + t.state + '</span></div>' +
+      '<div class="row"><span>Active side</span><span>' + (t.activeSide ? t.activeSide.toUpperCase() : 'none (bootstrap)') + '</span></div>' +
+      '<div class="row"><span>Bet</span>' + betLine + '</div>' +
+      '<div class="row"><span>Live prices</span><span>UP ask ' + fmtPx(leg && leg.upAsk) + ' / bid ' + fmtPx(leg && leg.upBid) + ' · DOWN ask ' + fmtPx(leg && leg.downAsk) + ' / bid ' + fmtPx(leg && leg.downBid) + '</span></div>' +
+      (t.position ? '<div class="row"><span>Unrealized P&amp;L</span><span class="' + pClass(t.unrealizedPnl) + '">' + sgn(t.unrealizedPnl) + '</span></div>' : '');
   }
 
   function renderHistory(list) {
     if (!list || !list.length) { $('history-body').innerHTML = '<tr><td colspan="8" class="empty">No resolved windows yet</td></tr>'; return; }
     $('history-body').innerHTML = list.map(h => {
-      const upPnl = h.up ? (h.up.pnl + h.up.tpPnl) : null;
-      const downPnl = h.down ? (h.down.pnl + h.down.tpPnl) : null;
+      const betCell = !h.activeSide ? '—' : (h.betPlaced ? h.activeSide.toUpperCase() + ' ' + h.shares.toFixed(2) + 'sh @' + fmtPx(h.entryPrice) : h.activeSide.toUpperCase() + ' (skipped)');
+      const resultCell = h.win == null ? '—' : (h.win ? 'WON' : 'LOST');
       return '<tr><td>' + h.slug.replace(/^btc-updown-5m-/, '') + '</td>' +
       '<td>' + (h.winner || '?').toUpperCase() + '</td>' +
       '<td>' + (h.resolutionMethod || '—') + '</td>' +
-      '<td>' + sideHistCell(h.up) + '</td>' +
-      '<td class="' + pClass(upPnl) + '">' + sgn(upPnl) + '</td>' +
-      '<td>' + sideHistCell(h.down) + '</td>' +
-      '<td class="' + pClass(downPnl) + '">' + sgn(downPnl) + '</td>' +
-      '<td class="' + pClass(h.combinedPnl) + '">' + sgn(h.combinedPnl) + '</td></tr>';
+      '<td>' + betCell + '</td>' +
+      '<td class="' + (h.win === true ? 'pnl-pos' : (h.win === false ? 'pnl-neg' : '')) + '">' + resultCell + '</td>' +
+      '<td class="' + pClass(h.pnl) + '">' + sgn(h.pnl) + '</td>' +
+      '<td>$' + fmt2(h.bucketsAfter ? h.bucketsAfter.up : null) + '</td>' +
+      '<td>$' + fmt2(h.bucketsAfter ? h.bucketsAfter.down : null) + '</td></tr>';
     }).join('');
   }
 
@@ -310,7 +248,7 @@ app.get('/', (_, res) => {
       '<td>' + (t.side || '').toUpperCase() + '</td>' +
       '<td>' + (t.price != null ? t.price.toFixed(3) : '—') + '</td>' +
       '<td>' + (t.shares != null ? t.shares.toFixed(2) : '—') + '</td>' +
-      '<td>' + (t.cost != null ? '$' + t.cost.toFixed(2) + (t.rebate ? ' +$' + t.rebate.toFixed(4) + ' rebate' : '') : (t.pnl != null ? sgn(t.pnl) : '—')) + '</td></tr>'
+      '<td>' + (t.cost != null ? '$' + t.cost.toFixed(2) : (t.pnl != null ? sgn(t.pnl) : '—')) + '</td></tr>'
     ).join('');
   }
 
@@ -330,8 +268,8 @@ app.get('/', (_, res) => {
     else banner.style.display = 'none';
 
     renderStats(s);
-    renderCurrent(s);
-    renderTuningNote(s);
+    renderBuckets(s);
+    renderCurrentWindow(s);
     renderHistory(s.history);
     renderTrades(s.trades);
     renderLogs(s.logs);
@@ -348,11 +286,11 @@ const slog = (line) => { console.log(line); io.emit('log', line); };
 const PK = process.env.PRIVATE_KEY;
 if (!PK) { console.error('❌ PRIVATE_KEY env var missing'); process.exit(1); }
 
-console.log('🪙 BTC 5m Ladder Bot — independent UP/DOWN 4-rung ladders, resting GTC maker limit orders');
+console.log('🪙 BTC 5m Momentum Bucket Bot — two capital buckets, winner-of-last-window trades next, market/taker execution');
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`🌐 Dashboard: http://0.0.0.0:${PORT}`);
-  ladderBot.init(PK, emit, slog).catch(e => {
+  bucketBot.init(PK, emit, slog).catch(e => {
     console.error('❌ Bot init failed:', e.message);
     process.exit(1);
   });
