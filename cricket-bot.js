@@ -2,51 +2,43 @@
 
 /**
  * ═══════════════════════════════════════════════════════════════
- *  BTC 5-MINUTE "PRICE-DIP" ENGINE — WINNER-CHASING LOOPS
+ *  BTC 5-MINUTE "LAST-SECOND FLIP" ENGINE — ONE SIDE, TWO TIMERS
  * ═══════════════════════════════════════════════════════════════
  *
  *  Only BTC's 5-minute Up/Down market trades. ETH and BTC's 15-min
- *  market are not touched at all.
+ *  market are not touched.
  *
- *  ── TWO INDEPENDENT LOOPS, DYNAMIC SIDE ──
- *  There are two permanent trigger configs — Loop A (20s interval,
- *  10sh base size, 0.05 drop threshold) and Loop B (40s interval, 20sh
- *  base size, 0.05 drop threshold). These configs never change. What
- *  changes is which side of the market each loop is currently pointed
- *  at ("up" or "down") — that's tracked as the loop's currentSide and
- *  can flip between windows.
+ *  ── ONE SHARED SIDE, NOT TWO INDEPENDENT LOOPS ──
+ *  There is a single side (`engine.currentSide`, "up" or "down") for
+ *  the whole bot. Both timers below always trade that same side —
+ *  there is no separate per-loop side, no independent flip logic,
+ *  no adaptive sizing, no dip-threshold trigger. Only the interval
+ *  and share size from the two original configs survive:
+ *    - Timer A: fires every LOOP_A_INTERVAL_MS, buys LOOP_A_BASE_SHARES.
+ *    - Timer B: fires every LOOP_B_INTERVAL_MS, buys LOOP_B_BASE_SHARES.
+ *  Every fire is a flat-size resting GTC limit buy at the live ask on
+ *  the shared side — no dip check, no skip logic.
  *
- *  Loop A starts on UP, Loop B starts on DOWN (matching the original
- *  fixed assignment). After every window resolves, each loop
- *  independently checks: did MY current side match the window's
- *  winner?
- *    - Matched (won)   → keep trading the same side next window.
- *    - Didn't match     → flip to the side that just won, for the
- *      (lost)             next window.
- *  "Loss" is decided purely by side-vs-winner, regardless of whether
- *  the loop actually had any fills that window.
+ *  ── SIDE DETERMINATION: LAST SECOND OF THE WINDOW ──
+ *  Once, in the final second before a window closes (closeAt - 1000ms
+ *  up to closeAt), the bot reads live prices and treats whichever side
+ *  is currently ahead (higher bid/ask) as the "determined" side. That
+ *  becomes engine.currentSide for the NEXT window. This is a live-price
+ *  read, not the official resolution — it's what decides which way
+ *  to trade next, before the market has technically closed.
  *
- *  Because there's only one winner per window, a loop sitting on the
- *  losing side always flips to match the winner — so in practice both
- *  loops tend to converge onto whichever side is currently winning,
- *  and flip together once that side eventually loses. They still
- *  decide independently (each runs its own check); it's the binary
- *  outcome that pulls them toward agreement over time.
- *
- *  Everything else about a loop travels with it across a flip, not
- *  reset: its 20-fill rolling ROI history, its adaptive size
- *  multiplier, its own watch/timer state. A loop's history is its own
- *  running record regardless of which side produced each fill.
+ *  Official/high-confidence/fallback resolution (below) still runs
+ *  separately, after close, purely to settle P&L accurately. It does
+ *  not drive the side switch — the last-second read does.
  *
  *  ── ORDER TYPE: RESTING GTC LIMIT (MAKER), NOT FOK ──
- *  Every entry is placed as a GTC limit order at the ask price observed
- *  at trigger time — not fill-or-kill. It rests on the book until
- *  either price trades back down through that level (fills as a maker
- *  at its own resting price) or the window closes (expires unfilled).
+ *  Every entry is a GTC limit order at the ask price observed at fire
+ *  time. It rests until price trades back down through that level
+ *  (fills as maker) or the window closes (expires unfilled).
  *
  *  FILL CONFIRMATION: every tick, every resting order is checked
  *  against the freshest live ask on its side. Once price has crossed
- *  down to or through the order's limit price, that's the fill signal:
+ *  down to or through the order's limit price:
  *    - LIVE: trader.reconcileToken(tokenId) confirms the real fill.
  *    - DEMO: the crossing itself is treated as the fill.
  *
@@ -56,28 +48,13 @@
  *  rebate = fee_equivalent × 20%. Tracked separately from trading P&L.
  *  Source: docs.polymarket.com/market-makers/maker-rebates
  *
- *  ── SAFEGUARDS (added after reviewing a live demo session) ──
- *    1. ADAPTIVE SIZING — each loop's order size scales with its own
- *       trailing ROI (last ADAPTIVE_LOOKBACK settled fills, neutral 1x
- *       until ADAPTIVE_MIN_SAMPLE fills exist), clamped to
- *       [ADAPTIVE_MIN_MULT, ADAPTIVE_MAX_MULT].
- *    2. MIN_ENTRY_PRICE — skips firing when the ask is below this floor
- *       (default 0.08) — historically a ~5% win-rate zone.
- *    3. MAX_FILLS_PER_WINDOW — caps how many resting+filled orders one
- *       loop can accumulate in a single window.
- *  Rolling per-loop win-rate/ROI/multiplier/current-side are exposed in
- *  buildState() for the dashboard.
- *
- *  RESOLUTION: unchanged, three tiers, fastest available wins:
+ *  RESOLUTION (for settlement only): three tiers, fastest wins:
  *    1. Official — Polymarket Gamma's `closed` + `outcomePrices`.
  *    2. High-confidence live price — either side crossing HIGH_CONF_PRICE
  *       (default 0.90) is treated as the de-facto winner immediately.
  *    3. Live-price fallback — if neither resolves within
  *       RESOLUTION_FALLBACK_MS after close, use whichever side has the
  *       higher live price.
- *  Every filled position from both loops settles against the same
- *  single winner; the window's combined P&L is the sum of every filled
- *  position's individual P&L (rebates tracked separately).
  *
  *  STARTUP: if started mid-window, waits for the next fresh 5-minute
  *  boundary before opening any trade — never joins a window partway
@@ -107,27 +84,20 @@ const SLUG_PREFIX = 'btc-updown-5m-';
 const ASSET_KEY = 'btc';
 const ASSET_LABEL = 'BTC';
 
-// ── Loop A: every 20s, buy the currently-assigned side if its ask
-//    dropped >=0.05 since the previous 20s check. Starts on UP.
+// How close to window-close we take the live-price read that decides
+// next window's side (a 1000ms window ending exactly at close).
+const SIDE_DECISION_WINDOW_MS = Number(process.env.SIDE_DECISION_WINDOW_MS || 1000);
+
+// ── Timer A: fires every LOOP_A_INTERVAL_MS, flat LOOP_A_BASE_SHARES.
 const LOOP_A_INTERVAL_MS = Number(process.env.DIP_UP_INTERVAL_MS || 20000);
-const LOOP_A_DROP        = Number(process.env.DIP_UP_DROP || 0.05);
 const LOOP_A_BASE_SHARES = Number(process.env.DIP_UP_SHARES || 10);
-const LOOP_A_START_SIDE  = 'up';
 
-// ── Loop B: mirrors Loop A, but every 40s, base 20 shares. Starts on DOWN.
+// ── Timer B: fires every LOOP_B_INTERVAL_MS, flat LOOP_B_BASE_SHARES.
 const LOOP_B_INTERVAL_MS = Number(process.env.DIP_DOWN_INTERVAL_MS || 40000);
-const LOOP_B_DROP        = Number(process.env.DIP_DOWN_DROP || 0.05);
 const LOOP_B_BASE_SHARES = Number(process.env.DIP_DOWN_SHARES || 20);
-const LOOP_B_START_SIDE  = 'down';
 
-// ── Post-analysis safeguards ──
-const MIN_ENTRY_PRICE = Number(process.env.DIP_MIN_ENTRY_PRICE || 0.08);
-const MAX_FILLS_PER_WINDOW = Number(process.env.DIP_MAX_FILLS_PER_WINDOW || 4);
-const ADAPTIVE_SIZING_ENABLED = (process.env.DIP_ADAPTIVE_SIZING || 'true').toLowerCase() === 'true';
-const ADAPTIVE_LOOKBACK   = Number(process.env.DIP_ADAPTIVE_LOOKBACK || 20);
-const ADAPTIVE_MIN_SAMPLE = Number(process.env.DIP_ADAPTIVE_MIN_SAMPLE || 5);
-const ADAPTIVE_MIN_MULT   = Number(process.env.DIP_ADAPTIVE_MIN_MULT || 0.5);
-const ADAPTIVE_MAX_MULT   = Number(process.env.DIP_ADAPTIVE_MAX_MULT || 1.5);
+// Starting side for the very first window, before any last-second read exists.
+const START_SIDE = (process.env.DIP_START_SIDE || 'up').toLowerCase() === 'down' ? 'down' : 'up';
 
 // Polymarket's live minimum order size on these crypto Up/Down markets
 // (confirmed via Gamma: orderMinSize: 5) — any order under this is rejected.
@@ -144,7 +114,7 @@ const MAKER_REBATE_SHARE    = Number(process.env.HEDGE_MAKER_REBATE_SHARE || 0.2
 const MAX_PENDING_RESOLUTIONS = 40;
 
 // If price crosses this threshold (or its complement) in the live book, treat that side as the
-// de-facto winner immediately instead of waiting for RESOLUTION_FALLBACK_MS.
+// de-facto winner immediately instead of waiting for RESOLUTION_FALLBACK_MS. (Settlement only.)
 const HIGH_CONF_PRICE = Number(process.env.RESOLUTION_HIGH_CONF_PRICE || 0.90);
 
 function round2(n) { return Math.round(n * 100) / 100; }
@@ -155,7 +125,6 @@ function estimateMakerRebate(shares, price) {
   return round4(feeEquivalent * MAKER_REBATE_SHARE);
 }
 function sgn2(n) { return (n >= 0 ? '+$' : '-$') + Math.abs(n).toFixed(2); }
-function clamp(n, lo, hi) { return Math.max(lo, Math.min(hi, n)); }
 const otherSide = (s) => (s === 'up' ? 'down' : 'up');
 
 let emitFn = () => {};
@@ -164,10 +133,9 @@ let trader = null;
 let warnedNoRestingMethod = false;
 let tradeSeq = 0;
 
-// Loop identity/state lives at the engine level — it persists across
-// window boundaries (unlike per-window trade state), since a loop's
-// currentSide and rolling history are exactly what's supposed to carry
-// through a flip.
+// Loop identity (interval + share size only) lives at the engine level.
+// The SIDE lives at the engine level too, but as a single shared value —
+// not per-loop.
 const engine = {
   tradingEnabled: true,
   bankroll: STARTING_CAPITAL,
@@ -185,9 +153,10 @@ const engine = {
   lastResolutionPoll: 0,
   waitingForBoundary: true,
   boundaryWindowTs: null,
+  currentSide: START_SIDE,
   loops: {
-    A: { id: 'A', label: 'Loop A', intervalMs: LOOP_A_INTERVAL_MS, dropThreshold: LOOP_A_DROP, baseShares: LOOP_A_BASE_SHARES, currentSide: LOOP_A_START_SIDE, history: [] },
-    B: { id: 'B', label: 'Loop B', intervalMs: LOOP_B_INTERVAL_MS, dropThreshold: LOOP_B_DROP, baseShares: LOOP_B_BASE_SHARES, currentSide: LOOP_B_START_SIDE, history: [] },
+    A: { id: 'A', label: 'Loop A', intervalMs: LOOP_A_INTERVAL_MS, baseShares: LOOP_A_BASE_SHARES },
+    B: { id: 'B', label: 'Loop B', intervalMs: LOOP_B_INTERVAL_MS, baseShares: LOOP_B_BASE_SHARES },
   },
 };
 const LOOP_IDS = ['A', 'B'];
@@ -210,30 +179,6 @@ function recordEquity() {
   engine.equityCurve.push({ t: Date.now(), equity: round2(engine.bankroll + openPositionsMTM()) });
   if (engine.equityCurve.length > 1000) engine.equityCurve.shift();
 }
-
-// ─────────────────────────────────────────
-//  Adaptive sizing — per LOOP, not per side. A loop's rolling history
-//  belongs to it regardless of which side produced each fill, so it
-//  carries straight through a side-flip.
-// ─────────────────────────────────────────
-function recordLoopResult(loopId, pnl, cost, win) {
-  const hist = engine.loops[loopId].history;
-  hist.push({ pnl, cost, win });
-  if (hist.length > ADAPTIVE_LOOKBACK) hist.shift();
-}
-function loopRollingStats(loopId) {
-  const hist = engine.loops[loopId].history;
-  if (!hist.length) return { n: 0, winRate: null, roi: null, multiplier: 1 };
-  const totalCost = hist.reduce((s, h) => s + h.cost, 0);
-  const totalPnl = hist.reduce((s, h) => s + h.pnl, 0);
-  const winRate = hist.filter(h => h.win).length / hist.length;
-  const roi = totalCost > 0 ? totalPnl / totalCost : 0;
-  const multiplier = (ADAPTIVE_SIZING_ENABLED && hist.length >= ADAPTIVE_MIN_SAMPLE)
-    ? clamp(round2(1 + roi), ADAPTIVE_MIN_MULT, ADAPTIVE_MAX_MULT)
-    : 1;
-  return { n: hist.length, winRate: round2(winRate), roi: round4(roi), multiplier };
-}
-function loopMultiplier(loopId) { return loopRollingStats(loopId).multiplier; }
 
 // ─────────────────────────────────────────
 //  HTTP / order helpers
@@ -358,6 +303,17 @@ function markPrice(leg, side) {
   return null;
 }
 
+// Live-price "who's ahead right now" read — used both for the
+// last-second side decision and as one tier of settlement resolution.
+function leadingSide(leg) {
+  const upP = markPrice(leg, 'up');
+  const downP = markPrice(leg, 'down');
+  if (upP == null && downP == null) return null;
+  if (upP == null) return 'down';
+  if (downP == null) return 'up';
+  return upP >= downP ? 'up' : 'down';
+}
+
 function updateHighConfidence(leg) {
   if (leg.highConfSide) return;
   if (Date.now() < leg.closeAt) return;
@@ -419,13 +375,8 @@ async function resolveLegAttempt(leg) {
   }
 
   if (Date.now() - leg.closeAt >= RESOLUTION_FALLBACK_MS) {
-    const upPrice = markPrice(leg, 'up');
-    const downPrice = markPrice(leg, 'down');
-    if (upPrice != null || downPrice != null) {
-      let winner;
-      if (upPrice != null && downPrice != null) winner = upPrice >= downPrice ? 'up' : 'down';
-      else if (upPrice != null) winner = upPrice >= 0.5 ? 'up' : 'down';
-      else winner = downPrice >= 0.5 ? 'down' : 'up';
+    const winner = leadingSide(leg);
+    if (winner) {
       leg.resolved = true;
       leg.winner = winner;
       leg.resolutionMethod = 'price-fallback';
@@ -437,15 +388,15 @@ async function resolveLegAttempt(leg) {
 }
 
 // ─────────────────────────────────────────
-//  Trade — one 5-minute window, holding both loops' per-window state.
-//  Each loop's SIDE for this window is locked in from
-//  engine.loops[id].currentSide at the moment the window opens.
+//  Trade — one 5-minute window. Side is locked in for the whole
+//  window from engine.currentSide the moment the window opens, and
+//  both timers (A and B) trade that same side throughout.
 // ─────────────────────────────────────────
 function freshWatch() {
-  return { lastCheckTs: null, prevAsk: null, checks: 0 };
+  return { lastFireTs: null };
 }
-function freshLoopState(loopId) {
-  return { side: engine.loops[loopId].currentSide, watch: freshWatch(), orders: [], positions: [] };
+function freshLoopState() {
+  return { watch: freshWatch(), orders: [], positions: [] };
 }
 function freshTrade(windowTs) {
   return {
@@ -453,7 +404,9 @@ function freshTrade(windowTs) {
     closeAt: (windowTs + WINDOW_SECONDS) * 1000,
     leg: freshLeg(windowTs),
     state: 'discovering', // discovering -> trading -> pending-resolution -> resolved
-    loops: { A: freshLoopState('A'), B: freshLoopState('B') },
+    side: engine.currentSide, // shared by both timers this window
+    sideDecided: false, // whether the last-second side read has fired yet
+    loops: { A: freshLoopState(), B: freshLoopState() },
     combinedPnl: null,
     settled: false,
   };
@@ -495,51 +448,25 @@ async function fireEntry(trade, loopId, side, shares) {
   log(`🧾 [${trade.label} ${leg.slug}] ${loopLabel} (${side.toUpperCase()}) resting limit buy placed (GTC, maker) — ${shares}sh @${price.toFixed(3)} — watching for fill`);
 }
 
-// Evaluates one loop's rolling-interval dip check against whichever side
-// it's currently assigned to for this window.
-async function evaluateWatch(trade, loopId, now) {
+// Fires a flat-size buy on the trade's shared side every intervalMs —
+// no dip check, no threshold, no adaptive sizing.
+async function evaluateLoop(trade, loopId, now) {
   const cfg = engine.loops[loopId];
   const ls = trade.loops[loopId];
-  const leg = trade.leg;
-  const side = ls.side;
-  const currentAsk = side === 'up' ? leg.upAsk : leg.downAsk;
-  if (currentAsk == null) return;
+  const side = trade.side;
+  const ask = side === 'up' ? trade.leg.upAsk : trade.leg.downAsk;
+  if (ask == null) return;
 
   const watch = ls.watch;
-  if (watch.lastCheckTs == null) {
-    watch.lastCheckTs = now;
-    watch.prevAsk = currentAsk;
+  if (watch.lastFireTs == null) {
+    // Start the clock at window open; first fire happens one interval later.
+    watch.lastFireTs = now;
     return;
   }
-  if (now - watch.lastCheckTs < cfg.intervalMs) return;
+  if (now - watch.lastFireTs < cfg.intervalMs) return;
+  watch.lastFireTs = now;
 
-  const prevAsk = watch.prevAsk;
-  watch.lastCheckTs = now;
-  watch.prevAsk = currentAsk;
-  watch.checks++;
-  if (prevAsk == null) return;
-
-  const drop = round4(prevAsk - currentAsk);
-  if (drop < cfg.dropThreshold) return;
-
-  const label = `[${trade.label} ${leg.slug}] ${cfg.label} (${side.toUpperCase()})`;
-
-  if (currentAsk < MIN_ENTRY_PRICE) {
-    log(`🚫 ${label} dip trigger skipped — ask ${currentAsk.toFixed(3)} is below the $${MIN_ENTRY_PRICE.toFixed(2)} minimum entry floor`);
-    return;
-  }
-
-  const committed = ls.orders.length + ls.positions.length;
-  if (committed >= MAX_FILLS_PER_WINDOW) {
-    log(`🚫 ${label} dip trigger skipped — already at the ${MAX_FILLS_PER_WINDOW}-order cap for this loop this window`);
-    return;
-  }
-
-  const mult = loopMultiplier(loopId);
-  const shares = Math.max(MIN_ORDER_SHARES, Math.round(cfg.baseShares * mult));
-
-  log(`📉 ${label} ask dropped ${drop.toFixed(3)} (${prevAsk.toFixed(3)} → ${currentAsk.toFixed(3)}) — firing ${shares}sh resting limit buy (base ${cfg.baseShares}sh × ${mult.toFixed(2)} adaptive)`);
-  await fireEntry(trade, loopId, side, shares);
+  await fireEntry(trade, loopId, side, cfg.baseShares);
 }
 
 async function checkPendingOrders(trade) {
@@ -585,6 +512,31 @@ async function expireOpenOrders(trade) {
 }
 
 // ─────────────────────────────────────────
+//  Last-second side decision — once per window, in the final
+//  SIDE_DECISION_WINDOW_MS before close, read live prices and lock in
+//  whichever side is ahead as engine.currentSide for the NEXT window.
+// ─────────────────────────────────────────
+function maybeDecideNextSide(trade, now) {
+  if (trade.sideDecided) return;
+  if (now < trade.closeAt - SIDE_DECISION_WINDOW_MS) return;
+  if (now >= trade.closeAt) return; // missed the window this tick; settlement will still happen normally
+
+  const decided = leadingSide(trade.leg);
+  trade.sideDecided = true;
+  if (!decided) {
+    log(`⚠️  [${trade.label} ${trade.leg.slug}] last-second side read had no price data — keeping ${engine.currentSide.toUpperCase()} for next window`);
+    return;
+  }
+  const prev = engine.currentSide;
+  engine.currentSide = decided;
+  if (decided !== prev) {
+    log(`🔀 [${trade.label} ${trade.leg.slug}] last-second read: ${decided.toUpperCase()} ahead — switching to ${decided.toUpperCase()} for next window`);
+  } else {
+    log(`✅ [${trade.label} ${trade.leg.slug}] last-second read: ${decided.toUpperCase()} still ahead — staying on ${decided.toUpperCase()} for next window`);
+  }
+}
+
+// ─────────────────────────────────────────
 //  Unrealized P&L helpers
 // ─────────────────────────────────────────
 function allPositions(trade) { return [...trade.loops.A.positions, ...trade.loops.B.positions]; }
@@ -619,9 +571,9 @@ function openPositionsMTM() {
 }
 
 // ─────────────────────────────────────────
-//  Settlement — every filled position from both loops settles against
-//  the single window winner. Then each loop independently decides
-//  whether to flip sides for the next window.
+//  Settlement — every filled position from both timers settles against
+//  the single window winner. Side switching is NOT decided here
+//  (that already happened in the last-second read) — this is P&L only.
 // ─────────────────────────────────────────
 function settleTrade(trade) {
   const leg = trade.leg;
@@ -640,10 +592,9 @@ function settleTrade(trade) {
       combinedPnl = round2(combinedPnl + p.pnl);
       loopPnl = round2(loopPnl + p.pnl);
       loopRebate = round4(loopRebate + (p.rebate || 0));
-      recordLoopResult(loopId, p.pnl, p.cost, win);
     }
     perLoop[loopId] = {
-      side: ls.side,
+      side: trade.side,
       fills: ls.positions.length,
       shares: ls.positions.reduce((s, p) => s + p.shares, 0),
       pnl: loopPnl,
@@ -662,25 +613,14 @@ function settleTrade(trade) {
   engine.history.unshift({
     asset: trade.asset, label: trade.label, windowTs: trade.windowTs, slug: leg.slug,
     winner: leg.winner, resolutionMethod: leg.resolutionMethod,
+    tradedSide: trade.side,
     loopA: perLoop.A, loopB: perLoop.B,
     combinedPnl, combinedRebate: round4(perLoop.A.rebate + perLoop.B.rebate), resolvedAt: Date.now(),
   });
   if (engine.history.length > 300) engine.history.pop();
 
-  log(`🏆 [${trade.label} ${leg.slug}] window resolved — winner ${leg.winner.toUpperCase()} (${leg.resolutionMethod}) — Loop A(${perLoop.A.side.toUpperCase()}) ${perLoop.A.fills} fill(s) [${sgn2(perLoop.A.pnl)}] + Loop B(${perLoop.B.side.toUpperCase()}) ${perLoop.B.fills} fill(s) [${sgn2(perLoop.B.pnl)}] = ${sgn2(combinedPnl)} | bankroll=$${engine.bankroll.toFixed(2)}`);
+  log(`🏆 [${trade.label} ${leg.slug}] window resolved — traded ${trade.side.toUpperCase()}, winner ${leg.winner.toUpperCase()} (${leg.resolutionMethod}) — Loop A ${perLoop.A.fills} fill(s) [${sgn2(perLoop.A.pnl)}] + Loop B ${perLoop.B.fills} fill(s) [${sgn2(perLoop.B.pnl)}] = ${sgn2(combinedPnl)} | bankroll=$${engine.bankroll.toFixed(2)}`);
   recordEquity();
-
-  // Each loop independently decides whether to flip for the next window.
-  for (const loopId of LOOP_IDS) {
-    const cfg = engine.loops[loopId];
-    const tradedSide = trade.loops[loopId].side;
-    if (tradedSide !== leg.winner) {
-      log(`🔀 ${cfg.label} was trading ${tradedSide.toUpperCase()} — lost — switching to ${leg.winner.toUpperCase()} for the next window`);
-      cfg.currentSide = leg.winner;
-    } else {
-      log(`✅ ${cfg.label} was trading ${tradedSide.toUpperCase()} — won — staying on ${tradedSide.toUpperCase()} for the next window`);
-    }
-  }
 }
 
 // ─────────────────────────────────────────
@@ -695,6 +635,9 @@ async function tickBtc(now) {
 
   if (!trade || trade.windowTs !== windowTs) {
     if (trade) {
+      // Safety net: if the last-second window never got a price tick
+      // (e.g. a stall), decide now so the next window still has a side.
+      maybeDecideNextSide(trade, trade.closeAt);
       await expireOpenOrders(trade);
       if (allPositions(trade).length && !trade.settled) {
         trade.state = 'pending-resolution';
@@ -708,7 +651,7 @@ async function tickBtc(now) {
     if (windowTs < engine.boundaryWindowTs) return;
     trade = freshTrade(windowTs);
     engine.current.btc = trade;
-    log(`🆕 [BTC] new 5m window t=${windowTs} — discovering market… (Loop A → ${engine.loops.A.currentSide.toUpperCase()}, Loop B → ${engine.loops.B.currentSide.toUpperCase()})`);
+    log(`🆕 [BTC] new 5m window t=${windowTs} — discovering market… trading ${trade.side.toUpperCase()} (Loop A every ${LOOP_A_INTERVAL_MS / 1000}s ${LOOP_A_BASE_SHARES}sh, Loop B every ${LOOP_B_INTERVAL_MS / 1000}s ${LOOP_B_BASE_SHARES}sh)`);
   }
 
   if (!trade.leg.discovered && now - trade.leg.lastDiscoveryAttempt >= DISCOVERY_RETRY_MS) {
@@ -719,9 +662,10 @@ async function tickBtc(now) {
 
   if (trade.state === 'trading') {
     if (engine.tradingEnabled && now < trade.closeAt) {
-      await evaluateWatch(trade, 'A', now);
-      await evaluateWatch(trade, 'B', now);
+      await evaluateLoop(trade, 'A', now);
+      await evaluateLoop(trade, 'B', now);
     }
+    maybeDecideNextSide(trade, now);
     await checkPendingOrders(trade);
   }
 }
@@ -784,14 +728,14 @@ function legSummary(leg) {
 }
 function watchSummary(watch, intervalMs) {
   if (!watch) return null;
-  const nextCheckInMs = watch.lastCheckTs == null ? null : Math.max(0, intervalMs - (Date.now() - watch.lastCheckTs));
-  return { prevAsk: watch.prevAsk, checks: watch.checks, nextCheckInMs };
+  const nextFireInMs = watch.lastFireTs == null ? null : Math.max(0, intervalMs - (Date.now() - watch.lastFireTs));
+  return { nextFireInMs };
 }
 function loopStateSummary(trade, loopId) {
   const cfg = engine.loops[loopId];
   const ls = trade.loops[loopId];
   return {
-    id: loopId, label: cfg.label, side: ls.side,
+    id: loopId, label: cfg.label, side: trade.side, // mirrored from trade.side — kept for dashboard compatibility
     watch: watchSummary(ls.watch, cfg.intervalMs),
     orders: ls.orders, positions: ls.positions,
     fillsUsed: ls.orders.length + ls.positions.length,
@@ -802,6 +746,7 @@ function tradeSummary(trade) {
   if (!trade) return null;
   return {
     asset: trade.asset, label: trade.label, windowTs: trade.windowTs, closeAt: trade.closeAt, state: trade.state,
+    side: trade.side,
     leg: legSummary(trade.leg),
     loops: { A: loopStateSummary(trade, 'A'), B: loopStateSummary(trade, 'B') },
     combinedPnl: trade.combinedPnl,
@@ -820,6 +765,7 @@ function buildState() {
     realizedPnl: engine.realizedPnl, unrealizedPnl, equity,
     estimatedRebates: engine.estimatedRebates,
     wins: engine.wins, losses: engine.losses,
+    currentSide: engine.currentSide,
     current: { btc: tradeSummary(engine.current.btc) },
     pendingResolutionCount: engine.pending.length,
     pending: engine.pending.map(tradeSummary),
@@ -829,11 +775,12 @@ function buildState() {
     logs: engine.logs.slice(-80),
     windowSeconds: WINDOW_SECONDS,
     makerFeeRate: MAKER_FEE_RATE, makerRebateShare: MAKER_REBATE_SHARE,
-    minEntryPrice: MIN_ENTRY_PRICE, maxFillsPerWindow: MAX_FILLS_PER_WINDOW,
-    adaptiveSizingEnabled: ADAPTIVE_SIZING_ENABLED,
+    // loopStats kept for dashboard compatibility — no adaptive sizing anymore,
+    // so multiplier is always 1 and win-rate/ROI are not tracked per-loop.
+    maxFillsPerWindow: null,
     loopStats: {
-      A: { ...loopRollingStats('A'), baseShares: LOOP_A_BASE_SHARES, intervalMs: LOOP_A_INTERVAL_MS, dropThreshold: LOOP_A_DROP, currentSide: engine.loops.A.currentSide, label: engine.loops.A.label },
-      B: { ...loopRollingStats('B'), baseShares: LOOP_B_BASE_SHARES, intervalMs: LOOP_B_INTERVAL_MS, dropThreshold: LOOP_B_DROP, currentSide: engine.loops.B.currentSide, label: engine.loops.B.label },
+      A: { n: 0, winRate: null, roi: null, multiplier: 1, baseShares: LOOP_A_BASE_SHARES, intervalMs: LOOP_A_INTERVAL_MS, label: engine.loops.A.label },
+      B: { n: 0, winRate: null, roi: null, multiplier: 1, baseShares: LOOP_B_BASE_SHARES, intervalMs: LOOP_B_INTERVAL_MS, label: engine.loops.B.label },
     },
   };
 }
@@ -858,16 +805,15 @@ function setMode(live) {
 async function init(privateKey, emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
-  slog('[hedgebot] 🪙 BTC 5-Minute Price-Dip Engine (winner-chasing loops, resting maker limit orders) — fully automatic');
-  slog(`[hedgebot] ⚙️  Loop A: every ${LOOP_A_INTERVAL_MS / 1000}s, base ${LOOP_A_BASE_SHARES}sh, starts on UP. Loop B: every ${LOOP_B_INTERVAL_MS / 1000}s, base ${LOOP_B_BASE_SHARES}sh, starts on DOWN.`);
-  slog(`[hedgebot] ⚙️  Each loop independently flips to whichever side just won, whenever its own current side loses a window — otherwise stays put. Rolling ROI/multiplier history travels with the loop through a flip.`);
+  slog('[hedgebot] 🪙 BTC 5-Minute Last-Second-Flip Engine (single shared side, two flat-size interval timers) — fully automatic');
+  slog(`[hedgebot] ⚙️  Timer A: every ${LOOP_A_INTERVAL_MS / 1000}s, flat ${LOOP_A_BASE_SHARES}sh. Timer B: every ${LOOP_B_INTERVAL_MS / 1000}s, flat ${LOOP_B_BASE_SHARES}sh. Both always trade the same side.`);
+  slog(`[hedgebot] ⚙️  Side switch: once per window, in the final ${SIDE_DECISION_WINDOW_MS}ms before close, live price decides which side leads — that side is used for the next window. Starting side: ${engine.currentSide.toUpperCase()}.`);
   slog(`[hedgebot] ⚙️  All orders are GTC resting limits (maker, 0% fee), not FOK — fills are confirmed once live price trades through the order's price.`);
   slog(`[hedgebot] ⚙️  Est. Maker Rebate: Crypto category pays back ${(MAKER_REBATE_SHARE * 100).toFixed(0)}% of shares×${CRYPTO_TAKER_FEE_RATE}×price×(1-price) per fill — tracked separately from trading P&L.`);
-  slog(`[hedgebot] ⚙️  Safeguards: min entry price $${MIN_ENTRY_PRICE.toFixed(2)} | max ${MAX_FILLS_PER_WINDOW} resting+filled orders per loop per window | adaptive sizing ${ADAPTIVE_SIZING_ENABLED ? `ON (${ADAPTIVE_MIN_MULT}x-${ADAPTIVE_MAX_MULT}x off trailing ${ADAPTIVE_LOOKBACK}-fill ROI, neutral until ${ADAPTIVE_MIN_SAMPLE} fills)` : 'OFF'}.`);
-  slog(`[hedgebot] ⚙️  Resolution: official Gamma > high-confidence live price (>=${HIGH_CONF_PRICE}) > ${Math.round(RESOLUTION_FALLBACK_MS / 1000)}s live-price fallback.`);
+  slog(`[hedgebot] ⚙️  Resolution (settlement only): official Gamma > high-confidence live price (>=${HIGH_CONF_PRICE}) > ${Math.round(RESOLUTION_FALLBACK_MS / 1000)}s live-price fallback.`);
   slog(`[hedgebot] ⚙️  Starting bankroll $${STARTING_CAPITAL} | never joins a window it starts mid-way through`);
   if (LOOP_A_BASE_SHARES < MIN_ORDER_SHARES || LOOP_B_BASE_SHARES < MIN_ORDER_SHARES) {
-    slog(`[hedgebot] ⚠️  Loop base shares below Polymarket's ${MIN_ORDER_SHARES}sh minimum order size — those orders would be rejected. Raise them.`);
+    slog(`[hedgebot] ⚠️  Timer base shares below Polymarket's ${MIN_ORDER_SHARES}sh minimum order size — those orders would be rejected. Raise them.`);
   }
   slog(`[hedgebot] ${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
