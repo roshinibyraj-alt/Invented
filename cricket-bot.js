@@ -2,67 +2,47 @@
 
 /**
  * ═══════════════════════════════════════════════════════════════
- *  BTC 5-MINUTE LADDER ENGINE — INDEPENDENT UP / DOWN RUNG LADDERS
+ *  BTC 5-MINUTE MOMENTUM BUCKET ENGINE
  * ═══════════════════════════════════════════════════════════════
  *
  *  Only BTC's 5-minute Up/Down market trades. ETH and BTC's 15-min
  *  market are not touched.
  *
  *  ── STRATEGY ──
- *  UP and DOWN each run their own independent 4-rung ladder — there
- *  is no shared side, no timers, no dip logic, no switching. At the
- *  moment a window opens, both ladders place all 4 of their resting
- *  limit buy orders immediately:
+ *  Two independent capital buckets: UP_BUCKET and DOWN_BUCKET, each
+ *  starting at $1000.
  *
- *      Rung   Entry   Take-profit   Shares
- *      1      0.45    0.85          50
- *      2      0.35    0.75          73
- *      3      0.25    0.65          118
- *      4      0.15    0.55          232
+ *  Whichever side won the PREVIOUS window is "active" for the NEXT
+ *  window — its bucket trades, the other bucket is paused (no bet
+ *  placed from it at all that window). This is a pure momentum /
+ *  streak-following approach: keep betting the side that just won.
  *
- *  Shares are sized so that entry_price × take_profit_price × shares
- *  is constant across all 4 rungs (probability-weighted by entry
- *  price, payout-weighted by take-profit price) — rung 1's 50 shares
- *  at 0.45×0.85 sets that constant; the other three rungs solve for
- *  it. Since deeper rungs are less likely to fill and need a bigger
- *  move to reach their take-profit, they carry more shares.
+ *  SIZING: the active bucket's *current* balance ÷ 10 is the dollar
+ *  wager for that window. This is recalculated every window from
+ *  whatever the bucket's live balance is — not a fixed dollar amount.
  *
- *  ── ORDER LIFECYCLE PER RUNG ──
- *  1. Entry: resting GTC limit buy at the rung's entry price.
- *  2. On fill: a resting GTC limit sell is placed at that rung's
- *     take-profit price for the filled shares.
- *  3. If the take-profit sell fills before window close: profit is
- *     realized immediately (proceeds − cost), rung closed.
- *  4. If the window closes with the entry filled but take-profit not
- *     hit: the take-profit order is cancelled and the position rides
- *     to window resolution instead — pays $1/share if that rung's
- *     side wins, $0 if it loses.
- *  5. Any entry order still unfilled at window close is cancelled.
+ *  EXECUTION: a single market/taker buy, placed immediately at the
+ *  current ask price for the active side, sized to the wager amount
+ *  (wager ÷ ask price = shares). No resting orders, no take-profit,
+ *  no rungs — one shot per window, held to resolution.
  *
- *  UP's 4 rungs and DOWN's 4 rungs are entirely independent of each
- *  other — one side filling, TP'ing, or missing has no effect on the
- *  other side's rungs.
+ *  SETTLEMENT:
+ *    - WIN  (active side wins again): the wagered capital + the
+ *      profit from this trade (i.e. the full $1/share payout) moves
+ *      OUT of the active bucket and INTO the opposite bucket. The
+ *      winning bucket keeps shrinking (by exporting its winnings)
+ *      while the paused bucket grows, until the streak breaks.
+ *    - LOSS (active side loses): the wager is simply gone. The active
+ *      bucket's balance drops by the wager amount; nothing moves to
+ *      the other bucket.
+ *  Either way, whichever side actually won this window becomes the
+ *  active side for the next window.
  *
- *  ── ORDER TYPE: RESTING GTC LIMIT (MAKER), NOT FOK ──
- *  Every entry and take-profit order is a GTC limit order. It rests
- *  until price trades through its level (fills as maker) or gets
- *  cancelled at window close.
+ *  BOOTSTRAP: the very first tracked window has no prior winner, so
+ *  no bet is placed at all — the bot just watches it resolve, and
+ *  starts betting from the following window onward.
  *
- *  FILL CONFIRMATION: every tick, every resting order is checked
- *  against the freshest live price on its side. Buys fill when the
- *  ask trades down to/through the limit; take-profit sells fill when
- *  the bid trades up to/through the limit.
- *    - LIVE: trader.reconcileToken(tokenId) confirms the real fill.
- *    - DEMO: the crossing itself is treated as the fill.
- *
- *  FEES / REBATES: 0% maker fee on every fill. Filled entries earn an
- *  estimated Maker Rebate per Polymarket's published Crypto-category
- *  model: fee_equivalent = shares × 0.07 × price × (1-price); estimated
- *  rebate = fee_equivalent × 20%. Tracked separately from trading P&L.
- *  Source: docs.polymarket.com/market-makers/maker-rebates
- *
- *  RESOLUTION (only for rungs still open — entry filled, no TP — at
- *  window close): three tiers, fastest wins:
+ *  RESOLUTION (unchanged plumbing): three tiers, fastest wins:
  *    1. Official — Polymarket Gamma's `closed` + `outcomePrices`.
  *    2. High-confidence live price — either side crossing HIGH_CONF_PRICE
  *       (default 0.90) is treated as the de-facto winner immediately.
@@ -76,9 +56,14 @@
  *
  *  TRADER INTERFACE (assumed — adjust method names in this file if your
  *  polymarket-trader.js differs):
- *    trader.placeLimitOrder(tokenId, 'BUY'|'SELL', price, size) -> { id, isFilled, avgPrice, raw }   [GTC]
+ *    trader.placeLimitOrder(tokenId, 'BUY'|'SELL', price, size) -> { id, isFilled, avgPrice, raw }
  *    trader.reconcileToken(tokenId)                             -> { filledShares, avgPrice, orderId } | null
- *    trader.cancelOrder(orderId)                                 -> optional, best-effort at window close
+ *    trader.cancelOrder(orderId)                                -> optional, best-effort
+ *
+ *  NOTE: placeLimitOrder is priced right at the current ask to emulate
+ *  an immediate taker fill (this strategy wants market/taker execution,
+ *  not resting maker orders). If your trader library exposes a real
+ *  market/FOK order method, swap it in for stricter semantics.
  * ═══════════════════════════════════════════════════════════════
  */
 
@@ -98,51 +83,26 @@ const SLUG_PREFIX = 'btc-updown-5m-';
 const ASSET_KEY = 'btc';
 const ASSET_LABEL = 'BTC';
 
-// ── Ladder rungs — identical set used independently on both UP and DOWN.
-const LADDER_BASE_SHARES = Number(process.env.LADDER_BASE_SHARES || 50);
-const RUNG_DEFS = [
-  { id: 1, price: 0.45, tp: 0.85 },
-  { id: 2, price: 0.35, tp: 0.75 },
-  { id: 3, price: 0.25, tp: 0.65 },
-  { id: 4, price: 0.15, tp: 0.55 },
-];
-// Size each rung so entry_price × tp_price × shares stays constant —
-// rung 1 (base) fixes the constant at LADDER_BASE_SHARES.
-const EV_CONSTANT = LADDER_BASE_SHARES * RUNG_DEFS[0].price * RUNG_DEFS[0].tp;
-const RUNGS = RUNG_DEFS.map(r => ({
-  ...r,
-  shares: r.id === 1 ? LADDER_BASE_SHARES : Math.round(EV_CONSTANT / (r.price * r.tp)),
-}));
-const RUNG_IDS = RUNGS.map(r => r.id);
+// ── Two-bucket momentum strategy config ──
+const BUCKET_STARTING_CAPITAL = Number(process.env.HEDGE_BUCKET_CAPITAL || 1000);
+const BUCKET_DIVISOR = Number(process.env.HEDGE_BUCKET_DIVISOR || 10);
 
 // Polymarket's live minimum order size on these crypto Up/Down markets
 // (confirmed via Gamma: orderMinSize: 5) — any order under this is rejected.
 const MIN_ORDER_SHARES = Number(process.env.HEDGE_MIN_ORDER_SHARES || 5);
 
 let DRY_RUN = (process.env.HEDGE_DRY_RUN || process.env.SPORTS_DRY_RUN || process.env.DRY_RUN || 'true').toLowerCase() === 'true';
-const STARTING_CAPITAL = Number(process.env.HEDGE_CAPITAL || 2000);
-
-// ── Fees / Maker Rebates (Polymarket Crypto category, per published docs) ──
-const MAKER_FEE_RATE        = 0;
-const CRYPTO_TAKER_FEE_RATE = Number(process.env.HEDGE_TAKER_FEE_RATE || 0.07);
-const MAKER_REBATE_SHARE    = Number(process.env.HEDGE_MAKER_REBATE_SHARE || 0.20);
 
 const MAX_PENDING_RESOLUTIONS = 40;
 
 // If price crosses this threshold (or its complement) in the live book, treat that side as the
-// de-facto winner immediately instead of waiting for RESOLUTION_FALLBACK_MS. (Only affects rungs
-// still open at window close — filled entry, no take-profit hit.)
+// de-facto winner immediately instead of waiting for RESOLUTION_FALLBACK_MS.
 const HIGH_CONF_PRICE = Number(process.env.RESOLUTION_HIGH_CONF_PRICE || 0.90);
 
 function round2(n) { return Math.round(n * 100) / 100; }
-function round4(n) { return Math.round(n * 10000) / 10000; }
-function estimateMakerRebate(shares, price) {
-  if (MAKER_REBATE_SHARE <= 0) return 0;
-  const feeEquivalent = shares * CRYPTO_TAKER_FEE_RATE * price * (1 - price);
-  return round4(feeEquivalent * MAKER_REBATE_SHARE);
-}
 function sgn2(n) { return (n >= 0 ? '+$' : '-$') + Math.abs(n).toFixed(2); }
 const SIDES = ['up', 'down'];
+function oppositeSide(side) { return side === 'up' ? 'down' : 'up'; }
 
 let emitFn = () => {};
 let slog = () => {};
@@ -152,17 +112,16 @@ let tradeSeq = 0;
 
 const engine = {
   tradingEnabled: true,
-  bankroll: STARTING_CAPITAL,
-  capital: STARTING_CAPITAL,
+  buckets: { up: BUCKET_STARTING_CAPITAL, down: BUCKET_STARTING_CAPITAL },
+  lastWinner: null, // side that won the most recently settled window — determines next window's active side. null = bootstrap, no bet yet.
   realizedPnl: 0,
-  estimatedRebates: 0,
   wins: 0, losses: 0,
   current: { btc: null },
   pending: [],
   history: [],
   logs: [],
   trades: [],
-  equityCurve: [{ t: Date.now(), equity: STARTING_CAPITAL }],
+  equityCurve: [{ t: Date.now(), equity: BUCKET_STARTING_CAPITAL * 2 }],
   lastPriceFetch: 0,
   lastResolutionPoll: 0,
   waitingForBoundary: true,
@@ -184,9 +143,10 @@ function registerTrade(t) {
   if (engine.trades.length > 300) engine.trades.shift();
 }
 function recordEquity() {
-  engine.equityCurve.push({ t: Date.now(), equity: round2(engine.bankroll + openPositionsMTM()) });
+  engine.equityCurve.push({ t: Date.now(), equity: round2(bankrollTotal() + openPositionsMTM()) });
   if (engine.equityCurve.length > 1000) engine.equityCurve.shift();
 }
+function bankrollTotal() { return round2(engine.buckets.up + engine.buckets.down); }
 
 // ─────────────────────────────────────────
 //  HTTP / order helpers
@@ -206,38 +166,40 @@ function traderHasRestingOrderMethods() {
   const ok = trader && typeof trader.placeLimitOrder === 'function';
   if (!ok && !warnedNoRestingMethod) {
     warnedNoRestingMethod = true;
-    slog('[hedgebot] ❌ LIVE trading needs trader.placeLimitOrder(tokenId, side, price, size) [GTC] on polymarket-trader.js — LIVE order placement will be skipped until added. DRY_RUN is unaffected.');
+    slog('[hedgebot] ❌ LIVE trading needs trader.placeLimitOrder(tokenId, side, price, size) on polymarket-trader.js — LIVE order placement will be skipped until added. DRY_RUN is unaffected.');
   }
   return ok;
-}
-
-async function placeRestingLimitOrder(tokenId, orderSide, price, shares) {
-  if (!DRY_RUN) {
-    if (!traderHasRestingOrderMethods()) return null;
-    try {
-      const resp = await trader.placeLimitOrder(tokenId, orderSide, price, shares);
-      return {
-        id: resp?.id || null,
-        filledNow: !!resp?.isFilled,
-        avgPrice: resp?.avgPrice || price,
-        filledShares: resp?.isFilled ? shares : 0,
-      };
-    } catch (e) {
-      log(`❌ placeRestingLimitOrder(${orderSide}) failed: ${describeOrderError(e)}`);
-      return null;
-    }
-  }
-  return { id: `dry-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, filledNow: false, avgPrice: price, filledShares: 0 };
 }
 
 let warnedNoCancelMethod = false;
 async function cancelRestingOrder(orderId) {
   if (DRY_RUN || !orderId) return;
   if (!trader || typeof trader.cancelOrder !== 'function') {
-    if (!warnedNoCancelMethod) { warnedNoCancelMethod = true; slog('[hedgebot] ⚠️  trader.cancelOrder not implemented — expired resting orders will just be left for Polymarket to auto-cancel at market close.'); }
+    if (!warnedNoCancelMethod) { warnedNoCancelMethod = true; slog('[hedgebot] ⚠️  trader.cancelOrder not implemented — any non-immediate order will just be left for Polymarket to handle.'); }
     return;
   }
   try { await trader.cancelOrder(orderId); } catch (e) { log(`⚠️  cancelRestingOrder(${orderId}) failed: ${e.message}`); }
+}
+
+// Places a single marketable buy priced at the current ask, meant to fill
+// immediately as a taker. Not a resting order — if it doesn't fill right
+// away in LIVE mode, it's cancelled rather than left resting on the book.
+async function placeTakerBuy(tokenId, price, shares) {
+  if (!DRY_RUN) {
+    if (!traderHasRestingOrderMethods()) return null;
+    try {
+      const resp = await trader.placeLimitOrder(tokenId, 'BUY', price, shares);
+      if (resp?.isFilled) {
+        return { id: resp.id || null, filledNow: true, avgPrice: resp.avgPrice || price, filledShares: shares };
+      }
+      if (resp?.id) await cancelRestingOrder(resp.id);
+      return { id: null, filledNow: false, avgPrice: price, filledShares: 0 };
+    } catch (e) {
+      log(`❌ placeTakerBuy(${tokenId}) failed: ${describeOrderError(e)}`);
+      return null;
+    }
+  }
+  return { id: `dry-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, filledNow: true, avgPrice: price, filledShares: shares };
 }
 
 function parseMarketTokens(mk) {
@@ -250,6 +212,7 @@ function parseMarketTokens(mk) {
 
 // ─────────────────────────────────────────
 //  Leg — the one BTC 5-min Up/Down market for a given window.
+//  (Market-data plumbing — unchanged by strategy.)
 // ─────────────────────────────────────────
 function freshLeg(windowTs) {
   return {
@@ -393,246 +356,83 @@ async function resolveLegAttempt(leg) {
 }
 
 // ─────────────────────────────────────────
-//  Trade — one 5-minute window. Each side (up/down) has its own
-//  independent set of 4 ladder rungs.
+//  Trade — one 5-minute window. At most one bet: the active bucket's
+//  side, sized at bucket-balance ÷ BUCKET_DIVISOR, bought immediately
+//  at the current ask and held to resolution.
 // ─────────────────────────────────────────
-function freshRungState(rungDef) {
-  return {
-    id: rungDef.id, entryPrice: rungDef.price, tpPrice: rungDef.tp, shares: rungDef.shares,
-    entryOrder: null,      // { id, placedAt } while resting unfilled
-    entryPlaced: false,    // whether we've attempted to place it this window
-    position: null,        // set once entry fills: { shares, cost, rebate, entryPrice, ts, orderId }
-    tpOrder: null,         // { id, placedAt } while TP resting unfilled
-    closed: false,         // true once TP fills or resolution has paid this rung out
-    exitMethod: null,      // 'take-profit' | 'resolution'
-    pnl: null,
-    noTakeProfit: false,   // set true once the opposite side's same-numbered rung TP's —
-                            // this side's move that far is very unlikely, so skip/cancel
-                            // its own TP and ride straight to resolution instead.
-  };
-}
-function freshSideState() {
-  return { rungs: RUNGS.map(freshRungState) };
-}
+function tokenIdFor(leg, side) { return side === 'up' ? leg.upTokenId : leg.downTokenId; }
+
 function freshTrade(windowTs) {
   return {
     asset: ASSET_KEY, label: ASSET_LABEL, windowTs,
     closeAt: (windowTs + WINDOW_SECONDS) * 1000,
     leg: freshLeg(windowTs),
     state: 'discovering', // discovering -> trading -> pending-resolution -> resolved
-    sides: { up: freshSideState(), down: freshSideState() },
-    combinedPnl: null,
+    activeSide: engine.lastWinner, // side whose bucket is active this window; null = bootstrap, no bet
+    betPlaced: false,   // true once we've attempted (successfully or terminally) to place this window's bet
+    skipReason: null,   // set if activeSide is set but we never got a fill (no price, bucket too small, etc.)
+    position: null,     // { shares, cost, entryPrice, ts } once filled
+    pnl: null,          // realized pnl once resolved (null if no bet was placed)
     settled: false,
   };
 }
 
-function tokenIdFor(leg, side) { return side === 'up' ? leg.upTokenId : leg.downTokenId; }
-function oppositeSide(side) { return side === 'up' ? 'down' : 'up'; }
-function rungById(trade, side, rungId) { return trade.sides[side].rungs.find(r => r.id === rungId); }
-
-// Place all 8 entry orders (4 rungs × 2 sides) once, as soon as the leg
-// is discovered and prices are available.
-async function placeLadderEntries(trade) {
+// Attempts the window's single bet, once the active side's ask price is
+// available. Retries each tick until either it fills, the bucket/shares
+// come back too small to trade, or the window closes.
+async function placeBucketBet(trade) {
+  if (trade.betPlaced || !trade.activeSide) return;
   const leg = trade.leg;
-  for (const side of SIDES) {
-    const tokenId = tokenIdFor(leg, side);
-    if (!tokenId) continue;
-    const ss = trade.sides[side];
-    for (const rung of ss.rungs) {
-      if (rung.entryPlaced) continue;
-      rung.entryPlaced = true;
-      const resp = await placeRestingLimitOrder(tokenId, 'BUY', rung.entryPrice, rung.shares);
-      if (!resp) { log(`❌ [${trade.label} ${leg.slug}] ${side.toUpperCase()} rung${rung.id} entry order failed to place`); continue; }
-
-      if (resp.filledNow && resp.filledShares > 0) {
-        confirmEntryFill(trade, side, rung, { id: resp.id, side, tokenId, limitPrice: rung.entryPrice, shares: rung.shares }, resp.avgPrice, resp.filledShares);
-        continue;
-      }
-      rung.entryOrder = { id: resp.id, tokenId, limitPrice: rung.entryPrice, shares: rung.shares, placedAt: Date.now() };
-      log(`🧾 [${trade.label} ${leg.slug}] ${side.toUpperCase()} rung${rung.id} entry placed (GTC, maker) — ${rung.shares}sh @${rung.entryPrice.toFixed(2)} → TP ${rung.tpPrice.toFixed(2)}`);
-    }
-  }
-}
-
-function confirmEntryFill(trade, side, rung, order, avgPrice, filledShares) {
-  const cost = round2(filledShares * avgPrice);
-  const rebate = estimateMakerRebate(filledShares, avgPrice);
-  rung.position = { shares: filledShares, cost, rebate, entryPrice: avgPrice, ts: Date.now(), orderId: order.id };
-  rung.entryOrder = null;
-
-  engine.bankroll = round2(engine.bankroll - cost + rebate);
-  engine.estimatedRebates = round2(engine.estimatedRebates + rebate);
-
-  registerTrade({ slug: trade.leg.slug, asset: trade.asset, step: `${side.toUpperCase()} rung${rung.id} entry fill`, side, price: avgPrice, shares: filledShares, cost, rebate });
-  log(`✅ [${trade.label} ${trade.leg.slug}] ${side.toUpperCase()} rung${rung.id} entry FILLED — ${filledShares}sh @${avgPrice.toFixed(3)} ($${cost.toFixed(2)}, est. rebate +$${rebate.toFixed(4)}) | bankroll=$${engine.bankroll.toFixed(2)}`);
-  recordEquity();
-}
-
-async function placeTakeProfitOrder(trade, side, rung) {
-  const leg = trade.leg;
+  const side = trade.activeSide;
   const tokenId = tokenIdFor(leg, side);
-  const pos = rung.position;
-  if (!tokenId || !pos) return;
+  const ask = side === 'up' ? leg.upAsk : leg.downAsk;
+  if (!tokenId || ask == null) return; // wait for price to become available
 
-  if (rung.noTakeProfit) {
-    log(`⏭️  [${trade.label} ${leg.slug}] ${side.toUpperCase()} rung${rung.id} skipping take-profit — opposite side's rung${rung.id} already TP'd, this rung rides straight to resolution`);
+  const bucketBalance = engine.buckets[side];
+  const wagerDollars = round2(bucketBalance / BUCKET_DIVISOR);
+  if (wagerDollars <= 0) {
+    trade.betPlaced = true;
+    trade.skipReason = 'bucket empty';
+    log(`⚠️  [${trade.label} ${leg.slug}] ${side.toUpperCase()} bucket is $0 — no bet this window`);
     return;
   }
 
-  const resp = await placeRestingLimitOrder(tokenId, 'SELL', rung.tpPrice, pos.shares);
-  if (!resp) { log(`❌ [${trade.label} ${leg.slug}] ${side.toUpperCase()} rung${rung.id} take-profit order failed to place`); return; }
-
-  if (resp.filledNow && resp.filledShares > 0) {
-    await confirmTakeProfitFill(trade, side, rung, resp.avgPrice);
+  const shares = round2(wagerDollars / ask);
+  if (shares < MIN_ORDER_SHARES) {
+    trade.betPlaced = true;
+    trade.skipReason = 'below-min-shares';
+    log(`⚠️  [${trade.label} ${leg.slug}] ${side.toUpperCase()} wager $${wagerDollars.toFixed(2)} @${ask.toFixed(3)} = ${shares.toFixed(2)}sh, below Polymarket's ${MIN_ORDER_SHARES}sh minimum — no bet this window`);
     return;
   }
-  rung.tpOrder = { id: resp.id, tokenId, limitPrice: rung.tpPrice, shares: pos.shares, placedAt: Date.now() };
-  log(`🎯 [${trade.label} ${leg.slug}] ${side.toUpperCase()} rung${rung.id} take-profit resting — ${pos.shares}sh @${rung.tpPrice.toFixed(2)}`);
-}
 
-async function confirmTakeProfitFill(trade, side, rung, exitPrice) {
-  const pos = rung.position;
-  const proceeds = round2(pos.shares * exitPrice);
-  const pnl = round2(proceeds - pos.cost);
+  const resp = await placeTakerBuy(tokenId, ask, shares);
+  if (!resp) { log(`❌ [${trade.label} ${leg.slug}] ${side.toUpperCase()} bucket bet failed to place — will retry`); return; }
+  if (!resp.filledNow) { log(`⌛ [${trade.label} ${leg.slug}] ${side.toUpperCase()} bucket bet didn't fill immediately — will retry`); return; }
 
-  engine.bankroll = round2(engine.bankroll + proceeds);
-  engine.realizedPnl = round2(engine.realizedPnl + pnl);
-  if (pnl >= 0) engine.wins++; else engine.losses++;
+  trade.betPlaced = true;
+  const avgPrice = resp.avgPrice || ask;
+  const filledShares = resp.filledShares || shares;
+  const cost = round2(filledShares * avgPrice);
 
-  rung.closed = true;
-  rung.exitMethod = 'take-profit';
-  rung.pnl = pnl;
-  rung.tpOrder = null;
+  trade.position = { shares: filledShares, cost, entryPrice: avgPrice, ts: Date.now() };
+  engine.buckets[side] = round2(engine.buckets[side] - cost);
 
-  registerTrade({ slug: trade.leg.slug, asset: trade.asset, step: `${side.toUpperCase()} rung${rung.id} take-profit fill`, side, price: exitPrice, shares: pos.shares, pnl });
-  log(`💰 [${trade.label} ${trade.leg.slug}] ${side.toUpperCase()} rung${rung.id} TAKE-PROFIT FILLED — ${pos.shares}sh @${exitPrice.toFixed(3)} — ${sgn2(pnl)} | bankroll=$${engine.bankroll.toFixed(2)}`);
+  registerTrade({ slug: leg.slug, asset: trade.asset, step: `${side.toUpperCase()} bucket bet`, side, price: avgPrice, shares: filledShares, cost });
+  log(`✅ [${trade.label} ${leg.slug}] ${side.toUpperCase()} bucket bet placed — ${filledShares.toFixed(2)}sh @${avgPrice.toFixed(3)} ($${cost.toFixed(2)}) | ${side} bucket now $${engine.buckets[side].toFixed(2)} (${oppositeSide(side)} bucket paused at $${engine.buckets[oppositeSide(side)].toFixed(2)})`);
   recordEquity();
-
-  // UP/DOWN prices move as complements — if this rung's TP just hit, the
-  // opposite side moved far enough away that its same-numbered rung is very
-  // unlikely to reach its own TP this window. Flag it to skip/cancel TP and
-  // ride straight to resolution instead of tying up a resting sell order
-  // that will almost never fill.
-  const opp = rungById(trade, oppositeSide(side), rung.id);
-  if (opp && !opp.closed) {
-    opp.noTakeProfit = true;
-    if (opp.tpOrder) {
-      log(`⏭️  [${trade.label} ${trade.leg.slug}] ${oppositeSide(side).toUpperCase()} rung${opp.id} cancelling resting take-profit — ${side.toUpperCase()} rung${rung.id} just TP'd, this rung now rides straight to resolution`);
-      await cancelRestingOrder(opp.tpOrder.id);
-      opp.tpOrder = null;
-    } else if (opp.position) {
-      log(`⏭️  [${trade.label} ${trade.leg.slug}] ${oppositeSide(side).toUpperCase()} rung${opp.id} marked to ride straight to resolution — ${side.toUpperCase()} rung${rung.id} just TP'd`);
-    }
-  }
-}
-
-// Checks every resting entry order (fills when ask trades down to/through
-// limit) and every resting TP order (fills when bid trades up to/through
-// limit), across both sides' rungs.
-async function checkLadderOrders(trade) {
-  const leg = trade.leg;
-  for (const side of SIDES) {
-    const ask = side === 'up' ? leg.upAsk : leg.downAsk;
-    const bid = side === 'up' ? leg.upBid : leg.downBid;
-    for (const rung of trade.sides[side].rungs) {
-      // Entry fill check
-      if (rung.entryOrder && ask != null) {
-        const order = rung.entryOrder;
-        const crossed = ask <= order.limitPrice + 1e-9;
-        if (crossed) {
-          if (DRY_RUN) {
-            confirmEntryFill(trade, side, rung, order, order.limitPrice, order.shares);
-            await placeTakeProfitOrder(trade, side, rung);
-          } else if (trader && typeof trader.reconcileToken === 'function') {
-            try {
-              const rec = await trader.reconcileToken(order.tokenId);
-              if (rec && rec.filledShares > 0) {
-                confirmEntryFill(trade, side, rung, order, rec.avgPrice || order.limitPrice, rec.filledShares);
-                await placeTakeProfitOrder(trade, side, rung);
-              }
-            } catch (e) {
-              log(`⚠️  reconcileToken(${order.tokenId}) failed: ${e.message}`);
-            }
-          }
-        }
-      }
-      // Take-profit fill check
-      if (rung.tpOrder && bid != null) {
-        const order = rung.tpOrder;
-        const crossed = bid >= order.limitPrice - 1e-9;
-        if (crossed) {
-          if (DRY_RUN) {
-            await confirmTakeProfitFill(trade, side, rung, order.limitPrice);
-          } else if (trader && typeof trader.reconcileToken === 'function') {
-            try {
-              const rec = await trader.reconcileToken(order.tokenId);
-              if (rec && rec.filledShares > 0) {
-                await confirmTakeProfitFill(trade, side, rung, rec.avgPrice || order.limitPrice);
-              }
-            } catch (e) {
-              log(`⚠️  reconcileToken(${order.tokenId}) failed: ${e.message}`);
-            }
-          }
-        }
-      }
-    }
-  }
-}
-
-// At window close: cancel unfilled entry orders outright (never filled,
-// nothing to resolve). Cancel unfilled TP orders too, but the underlying
-// position (if entry filled) rides forward to resolution.
-async function expireLadderOrders(trade) {
-  for (const side of SIDES) {
-    for (const rung of trade.sides[side].rungs) {
-      if (rung.entryOrder) {
-        log(`⌛ [${trade.label} ${trade.leg.slug}] ${side.toUpperCase()} rung${rung.id} entry expired unfilled — ${rung.entryOrder.shares}sh @${rung.entryOrder.limitPrice.toFixed(2)}`);
-        await cancelRestingOrder(rung.entryOrder.id);
-        rung.entryOrder = null;
-      }
-      if (rung.tpOrder) {
-        log(`⌛ [${trade.label} ${trade.leg.slug}] ${side.toUpperCase()} rung${rung.id} take-profit unfilled at window close — carrying position to resolution`);
-        await cancelRestingOrder(rung.tpOrder.id);
-        rung.tpOrder = null;
-      }
-    }
-  }
-}
-
-function openRungs(trade) {
-  const out = [];
-  for (const side of SIDES) {
-    for (const rung of trade.sides[side].rungs) {
-      if (rung.position && !rung.closed) out.push({ side, rung });
-    }
-  }
-  return out;
-}
-function hasAnyPosition(trade) {
-  for (const side of SIDES) {
-    for (const rung of trade.sides[side].rungs) {
-      if (rung.position) return true;
-    }
-  }
-  return false;
 }
 
 // ─────────────────────────────────────────
-//  Unrealized P&L helpers (open rungs only — entry filled, not yet
-//  closed by take-profit or resolution)
+//  Unrealized P&L helpers (the one open position, if any, on a trade
+//  that's placed a bet but isn't resolved yet)
 // ─────────────────────────────────────────
 function unrealizedForTrade(trade) {
-  if (!trade || !trade.leg || trade.leg.resolved) return 0;
-  return round2(openRungs(trade).reduce((sum, { side, rung }) => {
-    const mp = markPrice(trade.leg, side);
-    const mark = mp != null ? mp : (rung.position.cost / rung.position.shares);
-    return sum + (rung.position.shares * mark - rung.position.cost);
-  }, 0));
+  if (!trade || !trade.position || trade.settled || (trade.leg && trade.leg.resolved)) return 0;
+  const mp = markPrice(trade.leg, trade.activeSide);
+  const mark = mp != null ? mp : (trade.position.cost / trade.position.shares);
+  return round2(trade.position.shares * mark - trade.position.cost);
 }
-function openCostForTrade(trade) {
-  if (!trade) return 0;
-  return round2(openRungs(trade).reduce((s, { rung }) => s + rung.position.cost, 0));
-}
+function openCostForTrade(trade) { return trade && trade.position ? trade.position.cost : 0; }
 function allTrackedTrades() {
   const list = [...engine.pending];
   if (engine.current.btc) list.push(engine.current.btc);
@@ -646,57 +446,64 @@ function openPositionsMTM() {
 }
 
 // ─────────────────────────────────────────
-//  Settlement — pays out any rung that got its entry filled but never
-//  hit take-profit: $1/share if that rung's side won, $0 if it lost.
-//  Take-profit exits were already realized live and are untouched here.
+//  Settlement
 // ─────────────────────────────────────────
 function settleTrade(trade) {
   const leg = trade.leg;
-  let resolutionPnl = 0;
-  const perSide = { up: { fills: 0, shares: 0, pnl: 0, tpPnl: 0 }, down: { fills: 0, shares: 0, pnl: 0, tpPnl: 0 } };
 
-  for (const side of SIDES) {
-    for (const rung of trade.sides[side].rungs) {
-      if (!rung.position) continue;
-      perSide[side].fills++;
-      perSide[side].shares += rung.position.shares;
-      if (rung.exitMethod === 'take-profit') {
-        perSide[side].tpPnl = round2(perSide[side].tpPnl + rung.pnl);
-        continue;
-      }
-      // Still open at window close — settle by resolution.
-      const win = side === leg.winner;
-      const payout = win ? round2(rung.position.shares * 1) : 0;
-      const pnl = round2(payout - rung.position.cost);
-      engine.bankroll = round2(engine.bankroll + payout);
-      resolutionPnl = round2(resolutionPnl + pnl);
-      rung.closed = true;
-      rung.exitMethod = 'resolution';
-      rung.pnl = pnl;
-      perSide[side].pnl = round2(perSide[side].pnl + pnl);
-      if (pnl >= 0) engine.wins++; else engine.losses++;
-    }
+  // Whoever actually won becomes the active side for the *next* window,
+  // regardless of whether we had a bet placed this window.
+  engine.lastWinner = leg.winner;
+
+  if (!trade.activeSide || !trade.position) {
+    trade.state = 'resolved';
+    trade.settled = true;
+    trade.pnl = 0;
+    const reason = !trade.activeSide ? 'bootstrap window — no prior winner yet' : `no bet placed (${trade.skipReason || 'no fill'})`;
+    registerTrade({ slug: leg.slug, asset: trade.asset, step: 'window resolution (no bet)', side: leg.winner, price: null, shares: 0, pnl: 0 });
+    engine.history.unshift({
+      asset: trade.asset, label: trade.label, windowTs: trade.windowTs, slug: leg.slug,
+      winner: leg.winner, resolutionMethod: leg.resolutionMethod,
+      activeSide: trade.activeSide, betPlaced: false, win: null, wager: 0, shares: 0, pnl: 0,
+      bucketsAfter: { up: engine.buckets.up, down: engine.buckets.down },
+      resolvedAt: Date.now(),
+    });
+    if (engine.history.length > 300) engine.history.pop();
+    log(`🏁 [${trade.label} ${leg.slug}] resolved — winner ${leg.winner.toUpperCase()} (${leg.resolutionMethod}) — ${reason} | ${leg.winner.toUpperCase()} bucket now active next window`);
+    recordEquity();
+    return;
   }
 
-  const tpPnl = round2(perSide.up.tpPnl + perSide.down.tpPnl);
-  const combinedPnl = round2(resolutionPnl + tpPnl);
+  const side = trade.activeSide;
+  const win = side === leg.winner;
+  const payout = win ? round2(trade.position.shares * 1) : 0;
+  const pnl = round2(payout - trade.position.cost);
 
-  trade.combinedPnl = combinedPnl;
+  if (win) {
+    const opp = oppositeSide(side);
+    engine.buckets[opp] = round2(engine.buckets[opp] + payout);
+  }
+  // Loss: the wager is already gone from the active bucket (debited at bet time) — nothing else happens.
+
+  engine.realizedPnl = round2(engine.realizedPnl + pnl);
+  if (win) engine.wins++; else engine.losses++;
+
+  trade.pnl = pnl;
   trade.state = 'resolved';
   trade.settled = true;
-  engine.realizedPnl = round2(engine.realizedPnl + resolutionPnl); // TP pnl was already added to realizedPnl at fill time
 
-  registerTrade({ slug: leg.slug, asset: trade.asset, step: 'window resolution', side: leg.winner, price: 1, shares: perSide.up.shares + perSide.down.shares, pnl: resolutionPnl });
+  registerTrade({ slug: leg.slug, asset: trade.asset, step: 'window resolution', side: leg.winner, price: 1, shares: trade.position.shares, pnl });
 
   engine.history.unshift({
     asset: trade.asset, label: trade.label, windowTs: trade.windowTs, slug: leg.slug,
     winner: leg.winner, resolutionMethod: leg.resolutionMethod,
-    up: perSide.up, down: perSide.down,
-    combinedPnl, resolvedAt: Date.now(),
+    activeSide: side, betPlaced: true, win, wager: trade.position.cost, shares: trade.position.shares, entryPrice: trade.position.entryPrice, pnl,
+    bucketsAfter: { up: engine.buckets.up, down: engine.buckets.down },
+    resolvedAt: Date.now(),
   });
   if (engine.history.length > 300) engine.history.pop();
 
-  log(`🏆 [${trade.label} ${leg.slug}] window resolved — winner ${leg.winner.toUpperCase()} (${leg.resolutionMethod}) — UP ${perSide.up.fills} fill(s) [${sgn2(round2(perSide.up.pnl + perSide.up.tpPnl))}] + DOWN ${perSide.down.fills} fill(s) [${sgn2(round2(perSide.down.pnl + perSide.down.tpPnl))}] = ${sgn2(combinedPnl)} | bankroll=$${engine.bankroll.toFixed(2)}`);
+  log(`🏆 [${trade.label} ${leg.slug}] resolved — winner ${leg.winner.toUpperCase()} (${leg.resolutionMethod}) — our ${side.toUpperCase()} bet ${win ? 'WON' : 'LOST'} ${sgn2(pnl)} | UP bucket $${engine.buckets.up.toFixed(2)} / DOWN bucket $${engine.buckets.down.toFixed(2)}`);
   recordEquity();
 }
 
@@ -711,21 +518,24 @@ async function tickBtc(now) {
   let trade = engine.current.btc;
 
   if (!trade || trade.windowTs !== windowTs) {
-    if (trade) {
-      await expireLadderOrders(trade);
-      if (hasAnyPosition(trade) && !trade.settled) {
-        trade.state = 'pending-resolution';
-        engine.pending.push(trade);
-        if (engine.pending.length > MAX_PENDING_RESOLUTIONS) {
-          const dropped = engine.pending.shift();
-          log(`⚠️  dropped stale pending window ${dropped.leg.slug} from the resolution queue (too many pending)`);
-        }
+    if (trade && !trade.settled) {
+      if (trade.activeSide && !trade.position) {
+        log(`⚠️  [${trade.label} ${trade.leg.slug}] window closed with ${trade.activeSide.toUpperCase()} bucket active but no bet got filled — bucket unaffected`);
+      }
+      trade.state = 'pending-resolution';
+      engine.pending.push(trade);
+      if (engine.pending.length > MAX_PENDING_RESOLUTIONS) {
+        const dropped = engine.pending.shift();
+        log(`⚠️  dropped stale pending window ${dropped.leg.slug} from the resolution queue (too many pending)`);
       }
     }
     if (windowTs < engine.boundaryWindowTs) return;
     trade = freshTrade(windowTs);
     engine.current.btc = trade;
-    log(`🆕 [BTC] new 5m window t=${windowTs} — discovering market… ladder ready on both sides (4 rungs each: ${RUNGS.map(r => `${r.price.toFixed(2)}→${r.tp.toFixed(2)}/${r.shares}sh`).join(', ')})`);
+    const activeMsg = trade.activeSide
+      ? `${trade.activeSide.toUpperCase()} bucket ACTIVE ($${engine.buckets[trade.activeSide].toFixed(2)} → wager $${(engine.buckets[trade.activeSide] / BUCKET_DIVISOR).toFixed(2)}), ${oppositeSide(trade.activeSide).toUpperCase()} bucket paused at $${engine.buckets[oppositeSide(trade.activeSide)].toFixed(2)}`
+      : 'no prior winner yet — bootstrap window, no bet will be placed';
+    log(`🆕 [BTC] new 5m window t=${windowTs} — discovering market… ${activeMsg}`);
   }
 
   if (!trade.leg.discovered && now - trade.leg.lastDiscoveryAttempt >= DISCOVERY_RETRY_MS) {
@@ -735,9 +545,8 @@ async function tickBtc(now) {
   }
 
   if (trade.state === 'trading') {
-    if (engine.tradingEnabled && now < trade.closeAt) {
-      await placeLadderEntries(trade);
-      await checkLadderOrders(trade);
+    if (engine.tradingEnabled && now < trade.closeAt && trade.activeSide && !trade.betPlaced) {
+      await placeBucketBet(trade);
     }
   }
 }
@@ -798,45 +607,33 @@ function legSummary(leg) {
     resolved: leg.resolved, winner: leg.winner, resolutionMethod: leg.resolutionMethod,
   };
 }
-function rungSummary(rung) {
-  return {
-    id: rung.id, entryPrice: rung.entryPrice, tpPrice: rung.tpPrice, shares: rung.shares,
-    entryPending: !!rung.entryOrder, entryFilled: !!rung.position,
-    tpPending: !!rung.tpOrder, closed: rung.closed, exitMethod: rung.exitMethod, pnl: rung.pnl,
-    noTakeProfit: !!rung.noTakeProfit,
-  };
-}
-function sideSummary(trade, side) {
-  const ss = trade.sides[side];
-  return {
-    side,
-    rungs: ss.rungs.map(rungSummary),
-    filledCount: ss.rungs.filter(r => r.position).length,
-    closedCount: ss.rungs.filter(r => r.closed).length,
-    realizedPnl: round2(ss.rungs.reduce((s, r) => s + (r.pnl || 0), 0)),
-  };
-}
 function tradeSummary(trade) {
   if (!trade) return null;
   return {
     asset: trade.asset, label: trade.label, windowTs: trade.windowTs, closeAt: trade.closeAt, state: trade.state,
     leg: legSummary(trade.leg),
-    sides: { up: sideSummary(trade, 'up'), down: sideSummary(trade, 'down') },
-    combinedPnl: trade.combinedPnl,
+    activeSide: trade.activeSide,
+    betPlaced: trade.betPlaced,
+    skipReason: trade.skipReason,
+    position: trade.position ? { shares: trade.position.shares, cost: trade.position.cost, entryPrice: trade.position.entryPrice } : null,
+    pnl: trade.pnl,
     unrealizedPnl: unrealizedForTrade(trade),
   };
 }
 
 function buildState() {
   const unrealizedPnl = totalUnrealizedPnl();
-  const equity = round2(engine.bankroll + openPositionsMTM());
+  const bankroll = bankrollTotal();
+  const equity = round2(bankroll + openPositionsMTM());
   return {
     dryRun: DRY_RUN,
     tradingEnabled: engine.tradingEnabled,
     waitingForBoundary: engine.waitingForBoundary,
-    bankroll: engine.bankroll, capital: engine.capital,
-    realizedPnl: engine.realizedPnl, unrealizedPnl, equity,
-    estimatedRebates: engine.estimatedRebates,
+    buckets: { up: engine.buckets.up, down: engine.buckets.down },
+    bucketStartingCapital: BUCKET_STARTING_CAPITAL,
+    bucketDivisor: BUCKET_DIVISOR,
+    lastWinner: engine.lastWinner,
+    bankroll, realizedPnl: engine.realizedPnl, unrealizedPnl, equity,
     wins: engine.wins, losses: engine.losses,
     current: { btc: tradeSummary(engine.current.btc) },
     pendingResolutionCount: engine.pending.length,
@@ -846,15 +643,13 @@ function buildState() {
     equityCurve: engine.equityCurve,
     logs: engine.logs.slice(-80),
     windowSeconds: WINDOW_SECONDS,
-    makerFeeRate: MAKER_FEE_RATE, makerRebateShare: MAKER_REBATE_SHARE,
-    rungs: RUNGS,
   };
 }
 function getStatus() { return buildState(); }
 
 function pauseTrading() {
   engine.tradingEnabled = false;
-  log('⏸️  Trading paused — no new ladder orders will be placed; already-resting orders and open positions still tracked to fill/resolution, window discovery/rollover keeps running');
+  log('⏸️  Trading paused — no new bucket bets will be placed; any already-filled position still tracked to resolution, window discovery/rollover keeps running');
   return { ok: true };
 }
 function resumeTrading() {
@@ -871,16 +666,13 @@ function setMode(live) {
 async function init(privateKey, emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
-  slog('[hedgebot] 🪙 BTC 5-Minute Ladder Engine (independent UP/DOWN, 4-rung buy-ladder + take-profit) — fully automatic');
-  slog(`[hedgebot] ⚙️  Rungs (both sides, independent): ${RUNGS.map(r => `#${r.id} entry ${r.price.toFixed(2)} → TP ${r.tp.toFixed(2)} (${r.shares}sh)`).join(' | ')}`);
-  slog(`[hedgebot] ⚙️  Sizing: entry_price × tp_price × shares held constant across rungs, anchored at rung 1 = ${LADDER_BASE_SHARES}sh.`);
-  slog(`[hedgebot] ⚙️  All orders are GTC resting limits (maker, 0% fee), not FOK. Entry fills trigger an immediate take-profit sell at that rung's TP price; if TP doesn't hit by window close, the position settles at resolution instead.`);
-  slog(`[hedgebot] ⚙️  Est. Maker Rebate: Crypto category pays back ${(MAKER_REBATE_SHARE * 100).toFixed(0)}% of shares×${CRYPTO_TAKER_FEE_RATE}×price×(1-price) per entry fill — tracked separately from trading P&L.`);
-  slog(`[hedgebot] ⚙️  Resolution (only for rungs still open at close): official Gamma > high-confidence live price (>=${HIGH_CONF_PRICE}) > ${Math.round(RESOLUTION_FALLBACK_MS / 1000)}s live-price fallback.`);
-  slog(`[hedgebot] ⚙️  Starting bankroll $${STARTING_CAPITAL} | never joins a window it starts mid-way through`);
-  if (RUNGS.some(r => r.shares < MIN_ORDER_SHARES)) {
-    slog(`[hedgebot] ⚠️  A rung's share size is below Polymarket's ${MIN_ORDER_SHARES}sh minimum order size — that order would be rejected.`);
-  }
+  slog('[hedgebot] 🪙 BTC 5-Minute Momentum Bucket Engine — fully automatic');
+  slog(`[hedgebot] ⚙️  Two buckets, $${BUCKET_STARTING_CAPITAL} each: UP and DOWN. Whichever side won the previous window is active next window; the other bucket is paused.`);
+  slog(`[hedgebot] ⚙️  Sizing: active bucket's live balance ÷ ${BUCKET_DIVISOR} = this window's wager. Single market/taker buy at the current ask, held to resolution — no rungs, no take-profit.`);
+  slog(`[hedgebot] ⚙️  On a win: wager + profit (full payout) moves OUT of the active bucket INTO the opposite bucket. On a loss: the wager is simply gone from the active bucket.`);
+  slog(`[hedgebot] ⚙️  Bootstrap: the first tracked window has no prior winner, so no bet is placed — betting starts from the following window.`);
+  slog(`[hedgebot] ⚙️  Resolution: official Gamma > high-confidence live price (>=${HIGH_CONF_PRICE}) > ${Math.round(RESOLUTION_FALLBACK_MS / 1000)}s live-price fallback.`);
+  slog(`[hedgebot] ⚙️  Starting capital $${BUCKET_STARTING_CAPITAL * 2} total ($${BUCKET_STARTING_CAPITAL} per bucket) | never joins a window it starts mid-way through`);
   slog(`[hedgebot] ${DRY_RUN ? '⚠️  DEMO MODE — simulated fills, real API for market/price data' : '🔴 LIVE MODE — real money'}`);
 
   trader = new PolymarketTrader(privateKey);
