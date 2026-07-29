@@ -18,7 +18,7 @@ app.get('/api/hedge/status', (_, res) => {
   try { res.json(bot.buildState()); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 app.post('/api/hedge/pause', (req, res) => {
-  const engine = (req.body && req.body.engine) || undefined; // 'm5' | 'm15' | undefined=both
+  const engine = (req.body && req.body.engine) || undefined;
   try { res.json(bot.pauseTrading(engine)); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 app.post('/api/hedge/resume', (req, res) => {
@@ -37,7 +37,7 @@ app.get('/', (_, res) => {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>🪙 BTC Fixed Rule Bot — 5m &amp; 15m</title>
+<title>🪙 BTC Price-Band Bot — 5m &amp; 15m</title>
 <style>
   :root {
     --bg: #ffffff; --bg2: #f5f7fa; --bg3: #edf0f4; --border: #d0d7e2;
@@ -47,7 +47,7 @@ app.get('/', (_, res) => {
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: 'Courier New', monospace; background: var(--bg); color: var(--text); font-size: 12px; min-height: 100vh; font-weight: bold; }
   .header { background: linear-gradient(135deg,#f0f4f8,#e4ecf5); border-bottom: 2px solid #0099cc44; padding: 14px 20px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
-  .logo { font-size: 19px; font-weight: bold; color: var(--gold); letter-spacing: .5px; }
+  .logo { font-size: 18px; font-weight: bold; color: var(--gold); letter-spacing: .5px; }
   .logo span { color: var(--cyan); }
   .mode-badge { padding: 4px 14px; border-radius: 20px; font-size: 11px; font-weight: bold; }
   .mode-dry { background: #ffd74022; color: var(--yellow); border: 1px solid var(--yellow); }
@@ -59,9 +59,8 @@ app.get('/', (_, res) => {
   .toolbar button.resume { background: var(--green); color: #fff; }
   .toolbar button.live-toggle { background: var(--red); color: #fff; }
   .toolbar button.live-toggle.is-live { background: var(--muted); color: #fff; }
-  .toolbar button:hover { opacity: .85; }
   .toolbar-note { padding: 6px 20px 0; font-size: 9.5px; color: var(--muted); }
-  .honesty-banner { margin: 10px 20px 0; padding: 10px 14px; background: #7c5cff14; border: 1px solid var(--purple); border-radius: 8px; font-size: 10px; line-height: 1.5; color: #4a3a99; }
+  .rule-banner { margin: 10px 20px 0; padding: 10px 14px; background: #7c5cff14; border: 1px solid var(--purple); border-radius: 8px; font-size: 10px; line-height: 1.5; color: #4a3a99; }
   .panels { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 14px 20px; }
   @media (max-width: 900px) { .panels { grid-template-columns: 1fr; } }
   .panel { background: var(--bg2); border: 2px solid var(--border); border-radius: 12px; overflow: hidden; }
@@ -74,13 +73,13 @@ app.get('/', (_, res) => {
   .stat-val { font-size: 14px; font-weight: bold; color: #12202e; }
   .pnl-pos { color: var(--green) !important; }
   .pnl-neg { color: var(--red) !important; }
-  .model-box { background: var(--bg); border: 1px dashed var(--border); border-radius: 8px; padding: 8px 10px; margin-bottom: 10px; font-size: 9.5px; }
+  .rule-box { background: var(--bg); border: 1px dashed var(--border); border-radius: 8px; padding: 8px 10px; margin-bottom: 10px; font-size: 9.5px; }
   .current-window { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; font-size: 10px; margin-bottom: 10px; }
   .current-window .headline { font-size: 12.5px; margin-bottom: 6px; padding-bottom: 6px; border-bottom: 1px dashed var(--border); }
   .current-window .row { display: flex; justify-content: space-between; padding: 2px 0; }
   .status-pill { font-size: 8.5px; padding: 2px 7px; border-radius: 9px; }
   .status-open { background: #0099cc22; color: var(--cyan); border: 1px solid var(--cyan); }
-  .status-resting { background: #e6a80022; color: var(--yellow); border: 1px solid var(--yellow); }
+  .status-watch { background: #e6a80022; color: var(--yellow); border: 1px solid var(--yellow); }
   .status-idle { background: var(--bg3); color: var(--muted); border: 1px solid var(--border); }
   .panel-buttons { display: flex; gap: 6px; margin-bottom: 10px; }
   .panel-buttons button { flex: 1; font-size: 9.5px; padding: 6px 4px; border-radius: 6px; border: none; cursor: pointer; font-family: inherit; font-weight: bold; }
@@ -97,7 +96,7 @@ app.get('/', (_, res) => {
 </head>
 <body>
   <div class="header">
-    <div class="logo">🪙 <span>BTC</span> FIXED RULE BOT — 5m &amp; 15m</div>
+    <div class="logo">🪙 <span>BTC</span> PRICE-BAND BOT — 5m &amp; 15m</div>
     <div id="mode-badge" class="mode-badge mode-dry">DEMO</div>
   </div>
 
@@ -108,8 +107,8 @@ app.get('/', (_, res) => {
   </div>
   <div class="toolbar-note">Each panel below also has its own pause/resume — the buttons above control both engines at once.</div>
 
-  <div class="honesty-banner">
-    ℹ️ This is a FIXED rule engine, not a learning model — every window uses the exact same point values for candlestick patterns and indicators (see signal-model.js). It never adapts based on results. Win rate here reflects how well this fixed ruleset performs on real conditions as they occur — it will not improve on its own over time.
+  <div class="rule-banner" id="rule-banner">
+    ℹ️ Simple mechanical rule, no indicators/patterns/learning: during a late-window check period, if the cheaper side's price falls in the target band, buy it immediately. This is a long-shot bet by design — buying a side priced $0.10-$0.20 means the market currently sees it as the less likely outcome.
   </div>
 
   <div class="panels">
@@ -129,31 +128,26 @@ app.get('/', (_, res) => {
   function sgn(n) { if (n == null) return '—'; return (n >= 0 ? '+$' : '-$') + Math.abs(n).toFixed(2); }
   function pClass(n) { if (n == null) return ''; return n > 0 ? 'pnl-pos' : (n < 0 ? 'pnl-neg' : ''); }
 
-  function methodLabel(m) {
-    if (m === 'final-price') return 'instant';
-    if (m === 'official') return 'official';
-    if (m === 'high-confidence-price') return 'high-conf';
-    if (m === 'price-fallback') return 'fallback';
-    return m || '—';
-  }
-
   function currentWindowHtml(s) {
     const t = s.current.btc;
     if (!t) return '<div class="empty">No active window yet</div>';
     const leg = t.leg;
     let headline, betLine;
-    if (!t.signalSide) {
-      headline = '⏸ No bet this window';
-      betLine = '<span class="status-pill status-idle">' + (t.skipReason || 'no signal') + ' (confidence ' + fmtPct(t.confidence) + ')</span>';
-    } else if (t.position) {
-      headline = (t.signalSide === 'up' ? '🔵' : '🟣') + ' Trading ' + t.signalSide.toUpperCase() + ' — confidence ' + fmtPct(t.confidence);
-      betLine = '<span class="status-pill status-open">bought ' + t.position.shares.toFixed(2) + 'sh @' + fmtPx(t.position.entryPrice) + ' ($' + fmt2(t.position.cost) + ')</span>';
+    if (t.position) {
+      headline = (t.side === 'up' ? '🔵' : '🟣') + ' Bought ' + t.side.toUpperCase() + ' (long-shot)';
+      betLine = '<span class="status-pill status-open">' + t.position.shares.toFixed(2) + 'sh @' + fmtPx(t.position.entryPrice) + ' ($' + fmt2(t.position.cost) + ')</span>';
     } else if (t.betPlaced) {
-      headline = '⏸ ' + t.signalSide.toUpperCase() + ' signal, but no bet placed';
+      headline = '⏸ Signal seen, but no bet placed';
       betLine = '<span class="status-pill status-idle">skipped — ' + (t.skipReason || 'no fill') + '</span>';
+    } else if (t.inCheckWindow) {
+      headline = '👀 In check window — watching for $' + s.priceLow + '-$' + s.priceHigh;
+      betLine = '<span class="status-pill status-watch">closes in ' + t.secondsToCheckEnd + 's</span>';
+    } else if (t.secondsToCheckStart > 0) {
+      headline = '⏳ Waiting for check window';
+      betLine = '<span class="status-pill status-idle">starts in ' + t.secondsToCheckStart + 's</span>';
     } else {
-      headline = (t.signalSide === 'up' ? '🔵' : '🟣') + ' Signal: ' + t.signalSide.toUpperCase() + ' — confidence ' + fmtPct(t.confidence);
-      betLine = '<span class="status-pill status-resting">bet pending — waiting for a price</span>';
+      headline = '⏹ Check window closed, no qualifying price this window';
+      betLine = '<span class="status-pill status-idle">no bet</span>';
     }
     return '<div class="current-window">' +
       '<div class="headline">' + headline + '</div>' +
@@ -166,24 +160,20 @@ app.get('/', (_, res) => {
   }
 
   function historyRowsHtml(list) {
-    if (!list || !list.length) return '<tr><td colspan="6" class="empty">No resolved windows yet</td></tr>';
+    if (!list || !list.length) return '<tr><td colspan="5" class="empty">No resolved windows yet</td></tr>';
     return list.slice(0, 25).map(h => {
       const betCell = !h.side ? '—' : (h.betPlaced ? h.side.toUpperCase() + ' @' + fmtPx(h.entryPrice) : h.side.toUpperCase() + ' (skip)');
       const resultCell = h.win == null ? '—' : (h.win ? 'WON' : 'LOST');
       return '<tr><td>' + h.slug.split('-').pop() + '</td>' +
       '<td>' + (h.winner || '?').toUpperCase() + '</td>' +
-      '<td>' + fmtPct(h.confidence) + '</td>' +
       '<td>' + betCell + '</td>' +
       '<td class="' + (h.win === true ? 'pnl-pos' : (h.win === false ? 'pnl-neg' : '')) + '">' + resultCell + '</td>' +
       '<td class="' + pClass(h.pnl) + '">' + sgn(h.pnl) + '</td></tr>';
     }).join('');
   }
 
-  function signalBoxHtml(t) {
-    if (!t || t.signalScore == null) return '<div class="model-box">📐 Fixed rule score: warming up (need more candle history)</div>';
-    const top = (t.signalBreakdown || []).slice(0, 5).map(w => w.name + ' (' + (w.contribution > 0 ? '+' : '') + w.contribution + ')').join(', ');
-    return '<div class="model-box">📐 Fixed rule score: ' + t.signalScore +
-      (top ? '<br>Top contributors this window: ' + top : '') + '</div>';
+  function ruleBoxHtml(s) {
+    return '<div class="rule-box">📐 Rule: check ' + s.checkStartSec + 's-' + s.checkEndSec + 's into each ' + s.windowSeconds + 's window · band $' + s.priceLow + '-$' + s.priceHigh + ' · bet $' + s.betDollars + ' flat</div>';
   }
 
   function panelHtml(key, title, s) {
@@ -203,12 +193,12 @@ app.get('/', (_, res) => {
           '<div class="stat"><div class="stat-label">Win Rate</div><div class="stat-val ' + pClass(winRate != null ? winRate - 0.5 : null) + '">' + fmtPct(winRate) + '</div></div>' +
           '<div class="stat"><div class="stat-label">Realized P&amp;L</div><div class="stat-val ' + pClass(s.realizedPnl) + '">' + sgn(s.realizedPnl) + '</div></div>' +
           '<div class="stat"><div class="stat-label">Wins / Losses</div><div class="stat-val">' + s.wins + ' / ' + s.losses + '</div></div>' +
-          '<div class="stat"><div class="stat-label">Skipped</div><div class="stat-val">' + s.skipped + '</div></div>' +
-          '<div class="stat"><div class="stat-label">BTC Price</div><div class="stat-val">$' + fmt2(s.latestBtcPrice) + '</div></div>' +
+          '<div class="stat"><div class="stat-label">No-Bet Windows</div><div class="stat-val">' + s.skipped + '</div></div>' +
+          '<div class="stat"><div class="stat-label">Equity</div><div class="stat-val">$' + fmt2(s.equity) + '</div></div>' +
         '</div>' +
-        signalBoxHtml(s.current.btc) +
+        ruleBoxHtml(s) +
         currentWindowHtml(s) +
-        '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Window</th><th>Result</th><th>Conf</th><th>Bet</th><th>W/L</th><th>PnL</th></tr></thead>' +
+        '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Window</th><th>Result</th><th>Bet</th><th>W/L</th><th>PnL</th></tr></thead>' +
         '<tbody>' + historyRowsHtml(s.history) + '</tbody></table></div>' +
       '</div>';
   }
@@ -264,7 +254,7 @@ const slog = (line) => { console.log(line); io.emit('log', line); };
 const PK = process.env.PRIVATE_KEY;
 if (!PK) { console.error('❌ PRIVATE_KEY env var missing'); process.exit(1); }
 
-console.log('🪙 BTC Signal-Model Bot — independent 5-minute and 15-minute engines, each with its own candle-pattern + indicator model, own bankroll, own win rate');
+console.log('🪙 BTC Price-Band Bot — simple mechanical rule, no indicators/patterns/learning, independent 5-minute and 15-minute engines');
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`🌐 Dashboard: http://0.0.0.0:${PORT}`);
