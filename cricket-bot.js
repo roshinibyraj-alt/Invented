@@ -1,10 +1,12 @@
 'use strict';
 
 /**
- * Manager module — instantiates TWO independent signal-model engines
+ * Manager module — instantiates TWO independent fixed-rule signal engines
  * (5-minute and 15-minute BTC Up/Down), each with its own $2000 demo
- * bankroll, own candle feed, own learned model, own win rate. Exposes a
- * combined API that index.js (the dashboard) talks to.
+ * bankroll, own candle feed, own win rate. NO learning/training — both
+ * engines use the same fixed point-scoring rules every time (see
+ * signal-model.js). Exposes a combined API that index.js (the dashboard)
+ * talks to.
  *
  * This file keeps the name `cricket-bot.js` only because index.js already
  * requires('./cricket-bot') — the actual logic now lives in
@@ -36,7 +38,7 @@ async function init(privateKey, emit, slogFn) {
     windowSeconds: 300,
     slugPrefix: 'btc-updown-5m-',
     binanceInterval: '5m',
-    modelStatePath: path.join(__dirname, 'model-state-5m.json'),
+    statsStatePath: process.env.STATS_STATE_PATH_5M || path.join(__dirname, 'stats-state-5m.json'),
     startingCapital: CAPITAL_5M,
     baseBetDollars: BASE_BET_5M,
     confidenceThreshold: CONFIDENCE_5M,
@@ -49,7 +51,7 @@ async function init(privateKey, emit, slogFn) {
     windowSeconds: 900,
     slugPrefix: 'btc-updown-15m-',
     binanceInterval: '15m',
-    modelStatePath: path.join(__dirname, 'model-state-15m.json'),
+    statsStatePath: process.env.STATS_STATE_PATH_15M || path.join(__dirname, 'stats-state-15m.json'),
     startingCapital: CAPITAL_15M,
     baseBetDollars: BASE_BET_15M,
     confidenceThreshold: CONFIDENCE_15M,
@@ -59,7 +61,7 @@ async function init(privateKey, emit, slogFn) {
 
   engines = { m5, m15 };
 
-  slogFn('[hedgebot] 🪙 Running TWO independent signal-model engines: BTC 5-minute and BTC 15-minute Up/Down — separate candle history, separate learned model, separate bankroll, separate win rate for each.');
+  slogFn('[hedgebot] 🪙 Running TWO independent FIXED RULE engines (no learning): BTC 5-minute and BTC 15-minute Up/Down — separate candle history, separate bankroll, separate win rate for each, but identical fixed scoring rules.');
 
   await Promise.all([m5.start(emit, slogFn), m15.start(emit, slogFn)]);
 }
