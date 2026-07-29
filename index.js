@@ -37,7 +37,7 @@ app.get('/', (_, res) => {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>🪙 BTC Signal-Model Bot — 5m &amp; 15m</title>
+<title>🪙 BTC Fixed Rule Bot — 5m &amp; 15m</title>
 <style>
   :root {
     --bg: #ffffff; --bg2: #f5f7fa; --bg3: #edf0f4; --border: #d0d7e2;
@@ -97,7 +97,7 @@ app.get('/', (_, res) => {
 </head>
 <body>
   <div class="header">
-    <div class="logo">🪙 <span>BTC</span> SIGNAL-MODEL BOT — 5m &amp; 15m</div>
+    <div class="logo">🪙 <span>BTC</span> FIXED RULE BOT — 5m &amp; 15m</div>
     <div id="mode-badge" class="mode-badge mode-dry">DEMO</div>
   </div>
 
@@ -109,7 +109,7 @@ app.get('/', (_, res) => {
   <div class="toolbar-note">Each panel below also has its own pause/resume — the buttons above control both engines at once.</div>
 
   <div class="honesty-banner">
-    ℹ️ Each engine's model starts with zero learned weights (a coin flip) and only takes one small learning step per resolved window. Win rate needs many dozens/hundreds of windows before it's a meaningful signal of real edge — early numbers here are not a reliable indicator either way.
+    ℹ️ This is a FIXED rule engine, not a learning model — every window uses the exact same point values for candlestick patterns and indicators (see signal-model.js). It never adapts based on results. Win rate here reflects how well this fixed ruleset performs on real conditions as they occur — it will not improve on its own over time.
   </div>
 
   <div class="panels">
@@ -179,12 +179,11 @@ app.get('/', (_, res) => {
     }).join('');
   }
 
-  function modelBoxHtml(m) {
-    if (!m) return '';
-    const top = (m.topWeights || []).slice(0, 4).map(w => w.feature + ' (' + w.weight + ')').join(', ');
-    return '<div class="model-box">🧠 Model: ' + m.updates + ' learning steps so far' +
-      (m.accuracy != null ? ' · running accuracy ' + fmtPct(m.accuracy) : '') +
-      (top ? '<br>Top weighted features: ' + top : '') + '</div>';
+  function signalBoxHtml(t) {
+    if (!t || t.signalScore == null) return '<div class="model-box">📐 Fixed rule score: warming up (need more candle history)</div>';
+    const top = (t.signalBreakdown || []).slice(0, 5).map(w => w.name + ' (' + (w.contribution > 0 ? '+' : '') + w.contribution + ')').join(', ');
+    return '<div class="model-box">📐 Fixed rule score: ' + t.signalScore +
+      (top ? '<br>Top contributors this window: ' + top : '') + '</div>';
   }
 
   function panelHtml(key, title, s) {
@@ -207,7 +206,7 @@ app.get('/', (_, res) => {
           '<div class="stat"><div class="stat-label">Skipped</div><div class="stat-val">' + s.skipped + '</div></div>' +
           '<div class="stat"><div class="stat-label">BTC Price</div><div class="stat-val">$' + fmt2(s.latestBtcPrice) + '</div></div>' +
         '</div>' +
-        modelBoxHtml(s.model) +
+        signalBoxHtml(s.current.btc) +
         currentWindowHtml(s) +
         '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Window</th><th>Result</th><th>Conf</th><th>Bet</th><th>W/L</th><th>PnL</th></tr></thead>' +
         '<tbody>' + historyRowsHtml(s.history) + '</tbody></table></div>' +
