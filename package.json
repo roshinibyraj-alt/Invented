@@ -1,7 +1,7 @@
 {
   "name": "btc-5m-momentum-bucket-bot",
   "version": "1.0.0",
-  "description": "BTC 5-minute Up/Down momentum bucket trading bot for Polymarket, with a live dashboard.",
+  "description": "BTC 5-minute and 15-minute Up/Down signal-model trading bot for Polymarket, with a live dashboard.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
