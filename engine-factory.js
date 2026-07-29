@@ -33,8 +33,9 @@
  * ═══════════════════════════════════════════════════════════════
  */
 
+const fs = require('fs');
 const { createCandleFeed } = require('./candles');
-const { buildFeatures, createSignalModel } = require('./signal-model');
+const { computeSignal } = require('./signal-model');
 
 const GAMMA = 'https://gamma-api.polymarket.com';
 const CLOB  = 'https://clob.polymarket.com';
@@ -53,7 +54,7 @@ function createEngine(cfg) {
     windowSeconds,
     slugPrefix,
     binanceInterval,
-    modelStatePath,
+    statsStatePath,
     startingCapital = 2000,
     baseBetDollars = 100,
     confidenceThreshold = 0.55,
@@ -66,7 +67,6 @@ function createEngine(cfg) {
   } = cfg;
 
   const candles = createCandleFeed({ interval: binanceInterval, maxCandles: 500, label });
-  const signalModel = createSignalModel({ statePath: modelStatePath });
 
   let DRY_RUN = dryRun;
   let emitFn = () => {};
@@ -75,23 +75,52 @@ function createEngine(cfg) {
   let warnedNoCancelMethod = false;
   let tradeSeq = 0;
 
+  function loadStats() {
+    if (!statsStatePath) return null;
+    try {
+      const raw = fs.readFileSync(statsStatePath, 'utf8');
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed.bankroll === 'number') return parsed;
+    } catch (_) {}
+    return null;
+  }
+  const savedStats = loadStats();
+
   const engine = {
     tradingEnabled: true,
-    bankroll: startingCapital,
-    realizedPnl: 0,
-    wins: 0, losses: 0, skipped: 0,
+    bankroll: savedStats ? savedStats.bankroll : startingCapital,
+    realizedPnl: savedStats ? savedStats.realizedPnl : 0,
+    wins: savedStats ? savedStats.wins : 0,
+    losses: savedStats ? savedStats.losses : 0,
+    skipped: savedStats ? savedStats.skipped : 0,
     current: { btc: null },
     pending: [],
-    history: [],
+    history: savedStats && Array.isArray(savedStats.history) ? savedStats.history : [],
     logs: [],
     trades: [],
-    equityCurve: [{ t: Date.now(), equity: startingCapital }],
+    equityCurve: savedStats && Array.isArray(savedStats.equityCurve) ? savedStats.equityCurve : [{ t: Date.now(), equity: startingCapital }],
     lastPriceFetch: 0,
     lastCandleRefresh: 0,
     lastResolutionPoll: 0,
     waitingForBoundary: true,
     boundaryWindowTs: null,
   };
+
+  function saveStats() {
+    if (!statsStatePath) return;
+    try {
+      fs.writeFileSync(statsStatePath, JSON.stringify({
+        bankroll: engine.bankroll,
+        realizedPnl: engine.realizedPnl,
+        wins: engine.wins,
+        losses: engine.losses,
+        skipped: engine.skipped,
+        history: engine.history.slice(0, 100),
+        equityCurve: engine.equityCurve.slice(-200),
+        savedAt: Date.now(),
+      }));
+    } catch (_) {}
+  }
 
   function log(msg) {
     const line = `[${new Date().toISOString().slice(11, 19)}] [${label}] ${msg}`;
@@ -107,6 +136,7 @@ function createEngine(cfg) {
   function recordEquity() {
     engine.equityCurve.push({ t: Date.now(), equity: round2(engine.bankroll + openPositionsMTM()) });
     if (engine.equityCurve.length > 1000) engine.equityCurve.shift();
+    saveStats();
   }
 
   async function getJSON(url) {
@@ -307,12 +337,12 @@ function createEngine(cfg) {
 
   function computeDecision() {
     const cnds = candles.getCandles();
-    const features = buildFeatures(cnds);
-    if (!features) return { side: null, probUp: 0.5, features: null, reason: 'warming-up (need more candle history)' };
-    const probUp = signalModel.predict(features);
-    if (probUp >= confidenceThreshold) return { side: 'up', probUp, features, reason: null };
-    if (1 - probUp >= confidenceThreshold) return { side: 'down', probUp, features, reason: null };
-    return { side: null, probUp, features, reason: 'confidence below threshold' };
+    const signal = computeSignal(cnds);
+    if (!signal) return { side: null, probUp: 0.5, signal: null, reason: 'warming-up (need more candle history)' };
+    const probUp = signal.confidence;
+    if (probUp >= confidenceThreshold) return { side: 'up', probUp, signal, reason: null };
+    if (1 - probUp >= confidenceThreshold) return { side: 'down', probUp, signal, reason: null };
+    return { side: null, probUp, signal, reason: 'confidence below threshold' };
   }
 
   function freshTrade(windowTs, decision) {
@@ -380,8 +410,7 @@ function createEngine(cfg) {
 
   function settleTrade(trade) {
     const leg = trade.leg;
-    const actualUp = leg.winner === 'up';
-    signalModel.learn(trade.decision.features, actualUp);
+    // Fixed rule engine — no learning step. Nothing here adapts based on outcomes.
 
     if (!trade.decision.side || !trade.position) {
       trade.state = 'resolved';
@@ -540,6 +569,8 @@ function createEngine(cfg) {
       leg: legSummary(trade.leg),
       signalSide: trade.decision.side,
       confidence: round2(trade.decision.probUp),
+      signalScore: trade.decision.signal ? trade.decision.signal.score : null,
+      signalBreakdown: trade.decision.signal ? trade.decision.signal.breakdown.slice(0, 8) : [],
       skipReason: trade.decision.side ? trade.skipReason : trade.decision.reason,
       betPlaced: trade.betPlaced,
       position: trade.position ? { shares: trade.position.shares, cost: trade.position.cost, entryPrice: trade.position.entryPrice } : null,
@@ -566,7 +597,6 @@ function createEngine(cfg) {
       winRate: totalDecided > 0 ? round2(engine.wins / totalDecided) : null,
       candleCount: candles.count(),
       latestBtcPrice: candles.latestClose(),
-      model: signalModel.modelInfo(),
       current: { btc: tradeSummary(engine.current.btc) },
       pendingResolutionCount: engine.pending.length,
       pending: engine.pending.map(tradeSummary),
@@ -596,8 +626,15 @@ function createEngine(cfg) {
   async function start(emit, slogFn) {
     emitFn = emit;
     slog = slogFn;
-    slog(`[hedgebot] 🪙 ${label} Signal-Model Engine - fully automatic`);
-    slog(`[hedgebot] ⚙️  [${label}] Every window: candlestick-pattern + technical-indicator model predicts P(up). Bets $${baseBetDollars} flat when confidence clears ${(confidenceThreshold * 100).toFixed(0)}%, otherwise sits out. Starting bankroll (scoreboard only): $${startingCapital}. ${DRY_RUN ? 'DEMO' : 'LIVE'} mode.`);
+    slog(`[hedgebot] 🪙 ${label} Fixed Rule Engine - fully automatic, NO learning/training`);
+    slog(`[hedgebot] ⚙️  [${label}] Every window: candlestick patterns + indicators get FIXED point values (see signal-model.js), summed into a score, converted to confidence. Bets $${baseBetDollars} flat when confidence clears ${(confidenceThreshold * 100).toFixed(0)}%, otherwise sits out. Starting bankroll (scoreboard only): $${startingCapital}. ${DRY_RUN ? 'DEMO' : 'LIVE'} mode.`);
+    if (savedStats) {
+      slog(`[hedgebot] 💾 [${label}] Restored saved stats from a previous run — bankroll $${engine.bankroll.toFixed(2)}, ${engine.wins}W/${engine.losses}L.`);
+    } else if (statsStatePath) {
+      slog(`[hedgebot] 💾 [${label}] No previous saved stats found — starting fresh at $${startingCapital}. Stats will now persist to ${statsStatePath}.`);
+    } else {
+      slog(`[hedgebot] ⚠️  [${label}] No statsStatePath configured — bankroll/wins/losses will reset on every restart.`);
+    }
     await candles.seed(slog);
     mainLoop().catch(e => slog(`[hedgebot] ❌ [${label}] Fatal: ${e.message}`));
   }
