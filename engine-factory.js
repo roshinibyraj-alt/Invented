@@ -2,40 +2,37 @@
 
 /**
  * ═══════════════════════════════════════════════════════════════
- *  BTC SIGNAL-MODEL ENGINE FACTORY  (replaces the old momentum-bucket strategy)
+ *  SIMPLE PRICE-BAND ENGINE  (no indicators, no patterns, no candles, no learning)
  * ═══════════════════════════════════════════════════════════════
  *
- *  Call createEngine(config) once per timeframe you want to trade
- *  independently (e.g. 5-minute and 15-minute) — each instance gets
- *  its own candle feed, its own learned model weights, its own
- *  bankroll, and its own win/loss stats.
+ *  Call createEngine(config) once per timeframe (5-minute, 15-minute).
  *
- *  STRATEGY (same for every timeframe, just different windowSeconds):
- *  Every window, a model looks at the recent history of real BTC candles
- *  (fetched live from Binance) and computes P(this window closes UP),
- *  using: all 20 standard candlestick patterns, RSI(14), Stochastic RSI,
- *  MACD histogram, ATR%, Bollinger %B, recent returns, volume z-score,
- *  SMA20/50 trend, same-direction candle streak length, and cyclically-
- *  encoded hour-of-day / day-of-week (session-effect hypothesis).
+ *  ── THE ENTIRE STRATEGY ──
+ *  For each window, watch the live Polymarket order book for the UP and
+ *  DOWN tokens. During a specific late-window time band, check whichever
+ *  side is currently cheaper. The FIRST moment that cheaper side's ask
+ *  price falls within [priceLow, priceHigh] (default $0.10-$0.20), buy
+ *  $betDollars worth of it immediately. One bet per window, max.
  *
- *  The model LEARNS ONLINE: one gradient-descent step per resolved
- *  window, toward whatever the market actually resolved to (whether or
- *  not a bet was placed). It starts at zero weights (a coin flip) and
- *  only has a chance to show real edge after many real results.
+ *  If the price never falls in that band during the check window, no
+ *  bet is placed that window — the bot just watches and moves on.
  *
- *  SIZING: flat $baseBetDollars per window - no compounding, no streak-
- *  chasing. ENTRY RULE: only bets when confidence clears
- *  confidenceThreshold on one side; otherwise sits the window out.
+ *  That is the whole decision rule. No candlestick patterns, no RSI/
+ *  MACD/etc, no historical price data, nothing that "learns." Same
+ *  mechanical check every window, forever.
  *
- *  EXECUTION: single market/taker buy at the current ask, held to
- *  resolution. RESOLUTION: live final-price at close, official Gamma
- *  settlement, or a time-based price fallback - fastest tier wins.
+ *  HONESTY NOTE: buying a side priced at $0.10-$0.20 very late in a
+ *  window means the market currently thinks that side has roughly a
+ *  10-20% chance of winning — you are deliberately taking the less
+ *  likely outcome at that snapshot, for a bigger payout if it hits.
+ *  This is a long-shot bet, not a "safe" one. Whether long-shots are
+ *  systematically under- or over-priced on Polymarket's crypto markets
+ *  isn't something this bot assumes either way — it's just a mechanical
+ *  rule, and the results over enough windows are the actual answer.
  * ═══════════════════════════════════════════════════════════════
  */
 
 const fs = require('fs');
-const { createCandleFeed } = require('./candles');
-const { computeSignal } = require('./signal-model');
 
 const GAMMA = 'https://gamma-api.polymarket.com';
 const CLOB  = 'https://clob.polymarket.com';
@@ -50,23 +47,25 @@ function sgn2(n) { return (n >= 0 ? '+$' : '-$') + Math.abs(n).toFixed(2); }
 
 function createEngine(cfg) {
   const {
-    label,
-    windowSeconds,
-    slugPrefix,
-    binanceInterval,
+    label,                        // 'BTC-5m' / 'BTC-15m'
+    windowSeconds,                 // 300 or 900
+    slugPrefix,                    // 'btc-updown-5m-' or 'btc-updown-15m-'
     statsStatePath,
     startingCapital = 2000,
-    baseBetDollars = 100,
-    confidenceThreshold = 0.55,
+    betDollars = 50,
+    priceLow = 0.10,
+    priceHigh = 0.20,
+    // Time band (seconds INTO the window) during which the price check runs.
+    // Defaults scale proportionally from the reference 5-minute rule
+    // (check between 240s-290s of a 300s window) unless overridden.
+    checkStartSec = Math.round(240 * (windowSeconds / 300)),
+    checkEndSec = Math.round(290 * (windowSeconds / 300)),
     minOrderShares = 5,
     highConfPrice = 0.90,
     resolutionFallbackMs = 60000,
-    candleRefreshMs = 15000,
     trader,
     dryRun = true,
   } = cfg;
-
-  const candles = createCandleFeed({ interval: binanceInterval, maxCandles: 500, label });
 
   let DRY_RUN = dryRun;
   let emitFn = () => {};
@@ -100,7 +99,6 @@ function createEngine(cfg) {
     trades: [],
     equityCurve: savedStats && Array.isArray(savedStats.equityCurve) ? savedStats.equityCurve : [{ t: Date.now(), equity: startingCapital }],
     lastPriceFetch: 0,
-    lastCandleRefresh: 0,
     lastResolutionPoll: 0,
     waitingForBoundary: true,
     boundaryWindowTs: null,
@@ -154,7 +152,7 @@ function createEngine(cfg) {
     const ok = trader && typeof trader.placeFokLimitOrder === 'function';
     if (!ok && !warnedNoRestingMethod) {
       warnedNoRestingMethod = true;
-      slog(`[hedgebot] ❌ [${label}] LIVE trading needs trader.placeFokLimitOrder(tokenId, side, price, size) - LIVE order placement will be skipped until added. DRY_RUN is unaffected.`);
+      slog(`[hedgebot] ❌ [${label}] LIVE trading needs trader.placeFokLimitOrder(tokenId, side, price, size) — LIVE order placement will be skipped until added. DRY_RUN is unaffected.`);
     }
     return ok;
   }
@@ -218,7 +216,7 @@ function createEngine(cfg) {
       leg.upTokenId = up.token_id;
       leg.downTokenId = down.token_id;
       leg.discovered = true;
-      log(`🎯 leg discovered ${leg.slug} - Up ${String(up.token_id).slice(0, 10)}... / Down ${String(down.token_id).slice(0, 10)}...`);
+      log(`🎯 leg discovered ${leg.slug} — Up ${String(up.token_id).slice(0, 10)}… / Down ${String(down.token_id).slice(0, 10)}…`);
     } catch (e) {
       log(`⚠️  discoverLeg(${leg.slug}) failed: ${e.message}`);
     }
@@ -279,7 +277,7 @@ function createEngine(cfg) {
     leg.resolved = true;
     leg.winner = (upP != null ? upP : 0) >= (downP != null ? downP : 0) ? 'up' : 'down';
     leg.resolutionMethod = 'final-price';
-    log(`⚡ [${leg.slug}] resolved FINAL-PRICE at window close (up ${upP != null ? upP.toFixed(3) : '-'} / down ${downP != null ? downP.toFixed(3) : '-'}) - winner ${leg.winner.toUpperCase()}`);
+    log(`⚡ [${leg.slug}] resolved FINAL-PRICE at window close (up ${upP != null ? upP.toFixed(3) : '—'} / down ${downP != null ? downP.toFixed(3) : '—'}) — winner ${leg.winner.toUpperCase()}`);
     return true;
   }
 
@@ -305,7 +303,7 @@ function createEngine(cfg) {
           leg.resolved = true;
           leg.winner = parseFloat(prices[upIdx]) >= 0.5 ? 'up' : 'down';
           leg.resolutionMethod = 'official';
-          log(`🏁 [${leg.slug}] resolved OFFICIAL - winner ${leg.winner.toUpperCase()}`);
+          log(`🏁 [${leg.slug}] resolved OFFICIAL — winner ${leg.winner.toUpperCase()}`);
           return true;
         }
       }
@@ -317,7 +315,7 @@ function createEngine(cfg) {
       leg.resolved = true;
       leg.winner = leg.highConfSide;
       leg.resolutionMethod = 'high-confidence-price';
-      log(`⚡ [${leg.slug}] resolved HIGH-CONFIDENCE (${leg.highConfPrice.toFixed(3)}) - winner ${leg.winner.toUpperCase()}`);
+      log(`⚡ [${leg.slug}] resolved HIGH-CONFIDENCE (${leg.highConfPrice.toFixed(3)}) — winner ${leg.winner.toUpperCase()}`);
       return true;
     }
     if (Date.now() - leg.closeAt >= resolutionFallbackMs) {
@@ -326,7 +324,7 @@ function createEngine(cfg) {
         leg.resolved = true;
         leg.winner = winner;
         leg.resolutionMethod = 'price-fallback';
-        log(`⌛ [${leg.slug}] resolved PRICE-FALLBACK - winner ${winner.toUpperCase()}`);
+        log(`⌛ [${leg.slug}] resolved PRICE-FALLBACK — winner ${winner.toUpperCase()}`);
         return true;
       }
     }
@@ -335,52 +333,58 @@ function createEngine(cfg) {
 
   function tokenIdFor(leg, side) { return side === 'up' ? leg.upTokenId : leg.downTokenId; }
 
-  function computeDecision() {
-    const cnds = candles.getCandles();
-    const signal = computeSignal(cnds);
-    if (!signal) return { side: null, probUp: 0.5, signal: null, reason: 'warming-up (need more candle history)' };
-    const probUp = signal.confidence;
-    if (probUp >= confidenceThreshold) return { side: 'up', probUp, signal, reason: null };
-    if (1 - probUp >= confidenceThreshold) return { side: 'down', probUp, signal, reason: null };
-    return { side: null, probUp, signal, reason: 'confidence below threshold' };
+  // ── THE ENTIRE STRATEGY LOGIC ──
+  function checkPriceBand(leg, elapsedSec) {
+    if (elapsedSec < checkStartSec || elapsedSec > checkEndSec) return null;
+    const upAsk = leg.upAsk, downAsk = leg.downAsk;
+    if (upAsk == null && downAsk == null) return null;
+    const cheapSide = (upAsk == null) ? 'down' : (downAsk == null ? 'up' : (upAsk <= downAsk ? 'up' : 'down'));
+    const cheapPrice = cheapSide === 'up' ? upAsk : downAsk;
+    if (cheapPrice == null) return null;
+    if (cheapPrice >= priceLow && cheapPrice <= priceHigh) {
+      return { side: cheapSide, price: cheapPrice };
+    }
+    return null;
   }
 
-  function freshTrade(windowTs, decision) {
+  function freshTrade(windowTs) {
     return {
       asset: 'btc', label, windowTs,
       closeAt: (windowTs + windowSeconds) * 1000,
       leg: freshLeg(windowTs),
       state: 'discovering',
-      decision,
+      side: null, entryPriceSeen: null,
       betPlaced: false,
-      skipReason: decision.side ? null : decision.reason,
+      skipReason: null,
       position: null,
       pnl: null,
       settled: false,
     };
   }
 
-  async function placeSignalBet(trade) {
-    if (trade.betPlaced || !trade.decision.side) return;
+  async function placeBandBet(trade, side, seenPrice) {
+    if (trade.betPlaced) return;
     const leg = trade.leg;
-    const side = trade.decision.side;
     const tokenId = tokenIdFor(leg, side);
     const ask = side === 'up' ? leg.upAsk : leg.downAsk;
     if (!tokenId || ask == null) return;
 
-    const shares = round2(baseBetDollars / ask);
+    const shares = round2(betDollars / ask);
     if (shares < minOrderShares) {
       trade.betPlaced = true;
+      trade.side = side;
       trade.skipReason = 'below-min-shares';
-      log(`⚠️  [${trade.leg.slug}] ${side.toUpperCase()} wager $${baseBetDollars.toFixed(2)} @${ask.toFixed(3)} = ${shares.toFixed(2)}sh, below ${minOrderShares}sh minimum - no bet this window`);
+      log(`⚠️  [${leg.slug}] ${side.toUpperCase()} @${ask.toFixed(3)} in band, but $${betDollars} = ${shares.toFixed(2)}sh, below ${minOrderShares}sh minimum — no bet`);
       return;
     }
 
     const resp = await placeTakerBuy(tokenId, ask, shares);
-    if (!resp) { log(`❌ [${leg.slug}] ${side.toUpperCase()} bet failed to place - will retry`); return; }
-    if (!resp.filledNow) { log(`⌛ [${leg.slug}] ${side.toUpperCase()} bet didn't fill immediately - will retry`); return; }
+    if (!resp) { log(`❌ [${leg.slug}] ${side.toUpperCase()} band bet failed to place — will retry while still in band`); return; }
+    if (!resp.filledNow) { log(`⌛ [${leg.slug}] ${side.toUpperCase()} band bet didn't fill immediately — will retry while still in band`); return; }
 
     trade.betPlaced = true;
+    trade.side = side;
+    trade.entryPriceSeen = seenPrice;
     const avgPrice = resp.avgPrice || ask;
     const filledShares = resp.filledShares || shares;
     const cost = round2(filledShares * avgPrice);
@@ -388,14 +392,14 @@ function createEngine(cfg) {
     trade.position = { shares: filledShares, cost, entryPrice: avgPrice, ts: Date.now() };
     engine.bankroll = round2(engine.bankroll - cost);
 
-    registerTrade({ slug: leg.slug, step: `${side.toUpperCase()} signal bet`, side, price: avgPrice, shares: filledShares, cost, confidence: round2(trade.decision.probUp) });
-    log(`✅ [${leg.slug}] ${side.toUpperCase()} bet placed (confidence ${(trade.decision.probUp * 100).toFixed(1)}%) - ${filledShares.toFixed(2)}sh @${avgPrice.toFixed(3)} ($${cost.toFixed(2)}) | bankroll $${engine.bankroll.toFixed(2)}`);
+    registerTrade({ slug: leg.slug, step: `${side.toUpperCase()} band bet`, side, price: avgPrice, shares: filledShares, cost });
+    log(`✅ [${leg.slug}] ${side.toUpperCase()} was cheapest at $${seenPrice.toFixed(3)} (in $${priceLow}-$${priceHigh} band) — bought ${filledShares.toFixed(2)}sh @${avgPrice.toFixed(3)} ($${cost.toFixed(2)}) | bankroll $${engine.bankroll.toFixed(2)}`);
     recordEquity();
   }
 
   function unrealizedForTrade(trade) {
     if (!trade || !trade.position || trade.settled || (trade.leg && trade.leg.resolved)) return 0;
-    const mp = markPrice(trade.leg, trade.decision.side);
+    const mp = markPrice(trade.leg, trade.side);
     const mark = mp != null ? mp : (trade.position.cost / trade.position.shares);
     return round2(trade.position.shares * mark - trade.position.cost);
   }
@@ -410,27 +414,26 @@ function createEngine(cfg) {
 
   function settleTrade(trade) {
     const leg = trade.leg;
-    // Fixed rule engine — no learning step. Nothing here adapts based on outcomes.
 
-    if (!trade.decision.side || !trade.position) {
+    if (!trade.side || !trade.position) {
       trade.state = 'resolved';
       trade.settled = true;
       trade.pnl = 0;
       engine.skipped++;
-      const reason = !trade.decision.side ? (trade.decision.reason || 'no signal') : `no bet placed (${trade.skipReason || 'no fill'})`;
+      const reason = !trade.side ? 'price never entered $' + priceLow + '-$' + priceHigh + ' band during check window' : `no bet placed (${trade.skipReason || 'no fill'})`;
       registerTrade({ slug: leg.slug, step: 'window resolution (no bet)', side: leg.winner, price: null, shares: 0, pnl: 0 });
       engine.history.unshift({
         windowTs: trade.windowTs, slug: leg.slug, winner: leg.winner, resolutionMethod: leg.resolutionMethod,
-        side: trade.decision.side, confidence: round2(trade.decision.probUp), betPlaced: false, win: null,
+        side: trade.side, betPlaced: false, win: null,
         wager: 0, shares: 0, pnl: 0, bankrollAfter: engine.bankroll, resolvedAt: Date.now(),
       });
       if (engine.history.length > 300) engine.history.pop();
-      log(`🏁 [${leg.slug}] resolved - winner ${leg.winner.toUpperCase()} (${leg.resolutionMethod}) - ${reason}`);
+      log(`🏁 [${leg.slug}] resolved — winner ${leg.winner.toUpperCase()} (${leg.resolutionMethod}) — ${reason}`);
       recordEquity();
       return;
     }
 
-    const side = trade.decision.side;
+    const side = trade.side;
     const win = side === leg.winner;
     const payout = win ? round2(trade.position.shares * 1) : 0;
     const pnl = round2(payout - trade.position.cost);
@@ -446,13 +449,13 @@ function createEngine(cfg) {
     registerTrade({ slug: leg.slug, step: 'window resolution', side: leg.winner, price: 1, shares: trade.position.shares, pnl });
     engine.history.unshift({
       windowTs: trade.windowTs, slug: leg.slug, winner: leg.winner, resolutionMethod: leg.resolutionMethod,
-      side, confidence: round2(trade.decision.probUp), betPlaced: true, win,
+      side, betPlaced: true, win,
       wager: trade.position.cost, shares: trade.position.shares, entryPrice: trade.position.entryPrice, pnl,
       bankrollAfter: engine.bankroll, resolvedAt: Date.now(),
     });
     if (engine.history.length > 300) engine.history.pop();
 
-    log(`🏆 [${leg.slug}] resolved - winner ${leg.winner.toUpperCase()} (${leg.resolutionMethod}) - our ${side.toUpperCase()} bet ${win ? 'WON' : 'LOST'} ${sgn2(pnl)} | bankroll $${engine.bankroll.toFixed(2)}`);
+    log(`🏆 [${leg.slug}] resolved — winner ${leg.winner.toUpperCase()} (${leg.resolutionMethod}) — our ${side.toUpperCase()} long-shot bet ${win ? 'WON' : 'LOST'} ${sgn2(pnl)} | bankroll $${engine.bankroll.toFixed(2)}`);
     recordEquity();
   }
 
@@ -469,10 +472,7 @@ function createEngine(cfg) {
         if (trade.leg.resolved && !trade.settled) {
           settleTrade(trade);
         } else {
-          if (trade.decision.side && !trade.position) {
-            log(`⚠️  [${trade.leg.slug}] window closed with a ${trade.decision.side.toUpperCase()} signal but no bet got filled - bankroll unaffected`);
-          }
-          log(`⚠️  [${trade.leg.slug}] couldn't fast-resolve at close - falling back to slower resolution`);
+          log(`⚠️  [${trade.leg.slug}] couldn't fast-resolve at close — falling back to slower resolution`);
           trade.state = 'pending-resolution';
           engine.pending.push(trade);
           if (engine.pending.length > 40) {
@@ -483,14 +483,9 @@ function createEngine(cfg) {
       }
       if (windowTs < engine.boundaryWindowTs) return;
 
-      await candles.refresh(log);
-      const decision = computeDecision();
-      trade = freshTrade(windowTs, decision);
+      trade = freshTrade(windowTs);
       engine.current.btc = trade;
-      const signalMsg = decision.side
-        ? `signal: ${decision.side.toUpperCase()} (confidence ${(decision.probUp * 100).toFixed(1)}%) -> will bet $${baseBetDollars}`
-        : `no bet this window (${decision.reason})`;
-      log(`🆕 new window t=${windowTs} - discovering market... ${signalMsg}`);
+      log(`🆕 new window t=${windowTs} — discovering market… will check for a cheap side ($${priceLow}-$${priceHigh}) between ${checkStartSec}s-${checkEndSec}s into this ${windowSeconds}s window`);
     }
 
     if (!trade.leg.discovered && now - trade.leg.lastDiscoveryAttempt >= DISCOVERY_RETRY_MS) {
@@ -499,10 +494,10 @@ function createEngine(cfg) {
       if (trade.leg.discovered) trade.state = 'trading';
     }
 
-    if (trade.state === 'trading') {
-      if (engine.tradingEnabled && now < trade.closeAt && trade.decision.side && !trade.betPlaced) {
-        await placeSignalBet(trade);
-      }
+    if (trade.state === 'trading' && engine.tradingEnabled && now < trade.closeAt && !trade.betPlaced) {
+      const elapsedSec = Math.floor((now - windowTs * 1000) / 1000);
+      const hit = checkPriceBand(trade.leg, elapsedSec);
+      if (hit) await placeBandBet(trade, hit.side, hit.price);
     }
   }
 
@@ -515,20 +510,16 @@ function createEngine(cfg) {
         if (engine.waitingForBoundary) {
           if (engine.boundaryWindowTs == null) {
             engine.boundaryWindowTs = currentWindowTs(nowSec) + windowSeconds;
-            log(`⏳ started mid-window - waiting for next fresh boundary (t=${engine.boundaryWindowTs}) before trading begins`);
+            log(`⏳ started mid-window — waiting for next fresh boundary (t=${engine.boundaryWindowTs}) before trading begins`);
           }
           if (nowSec >= engine.boundaryWindowTs) {
             engine.waitingForBoundary = false;
-            log('🚦 new boundary reached - trading starts now');
+            log('🚦 new boundary reached — trading starts now');
           }
         }
 
         if (!engine.waitingForBoundary) await tickBtc(now);
 
-        if (now - engine.lastCandleRefresh >= candleRefreshMs) {
-          engine.lastCandleRefresh = now;
-          await candles.refresh(log);
-        }
         if (now - engine.lastPriceFetch >= PRICE_REFRESH_MS) {
           engine.lastPriceFetch = now;
           const legs = allTrackedTrades().map(t => t.leg);
@@ -564,15 +555,16 @@ function createEngine(cfg) {
   }
   function tradeSummary(trade) {
     if (!trade) return null;
+    const elapsedSec = Math.max(0, Math.floor((Date.now() - trade.windowTs * 1000) / 1000));
     return {
       windowTs: trade.windowTs, closeAt: trade.closeAt, state: trade.state,
       leg: legSummary(trade.leg),
-      signalSide: trade.decision.side,
-      confidence: round2(trade.decision.probUp),
-      signalScore: trade.decision.signal ? trade.decision.signal.score : null,
-      signalBreakdown: trade.decision.signal ? trade.decision.signal.breakdown.slice(0, 8) : [],
-      skipReason: trade.decision.side ? trade.skipReason : trade.decision.reason,
+      side: trade.side,
       betPlaced: trade.betPlaced,
+      skipReason: trade.skipReason,
+      inCheckWindow: elapsedSec >= checkStartSec && elapsedSec <= checkEndSec,
+      secondsToCheckStart: Math.max(0, checkStartSec - elapsedSec),
+      secondsToCheckEnd: Math.max(0, checkEndSec - elapsedSec),
       position: trade.position ? { shares: trade.position.shares, cost: trade.position.cost, entryPrice: trade.position.entryPrice } : null,
       pnl: trade.pnl,
       unrealizedPnl: unrealizedForTrade(trade),
@@ -590,13 +582,10 @@ function createEngine(cfg) {
       waitingForBoundary: engine.waitingForBoundary,
       bankroll: engine.bankroll,
       startingCapital,
-      baseBetDollars,
-      confidenceThreshold,
+      betDollars, priceLow, priceHigh, checkStartSec, checkEndSec,
       realizedPnl: engine.realizedPnl, unrealizedPnl, equity,
       wins: engine.wins, losses: engine.losses, skipped: engine.skipped,
       winRate: totalDecided > 0 ? round2(engine.wins / totalDecided) : null,
-      candleCount: candles.count(),
-      latestBtcPrice: candles.latestClose(),
       current: { btc: tradeSummary(engine.current.btc) },
       pendingResolutionCount: engine.pending.length,
       pending: engine.pending.map(tradeSummary),
@@ -609,7 +598,7 @@ function createEngine(cfg) {
 
   function pauseTrading() {
     engine.tradingEnabled = false;
-    log('⏸️  Trading paused - no new bets will be placed; open positions still tracked to resolution');
+    log('⏸️  Trading paused — no new bets will be placed; open positions still tracked to resolution');
     return { ok: true };
   }
   function resumeTrading() {
@@ -626,16 +615,13 @@ function createEngine(cfg) {
   async function start(emit, slogFn) {
     emitFn = emit;
     slog = slogFn;
-    slog(`[hedgebot] 🪙 ${label} Fixed Rule Engine - fully automatic, NO learning/training`);
-    slog(`[hedgebot] ⚙️  [${label}] Every window: candlestick patterns + indicators get FIXED point values (see signal-model.js), summed into a score, converted to confidence. Bets $${baseBetDollars} flat when confidence clears ${(confidenceThreshold * 100).toFixed(0)}%, otherwise sits out. Starting bankroll (scoreboard only): $${startingCapital}. ${DRY_RUN ? 'DEMO' : 'LIVE'} mode.`);
+    slog(`[hedgebot] 🪙 ${label} Simple Price-Band Engine — no indicators, no patterns, no learning`);
+    slog(`[hedgebot] ⚙️  [${label}] Rule: between ${checkStartSec}s-${checkEndSec}s into each ${windowSeconds}s window, if the cheaper side's ask is $${priceLow}-$${priceHigh}, buy $${betDollars} of it immediately. One bet per window, max. Starting bankroll (scoreboard only): $${startingCapital}. ${DRY_RUN ? 'DEMO' : 'LIVE'} mode.`);
     if (savedStats) {
-      slog(`[hedgebot] 💾 [${label}] Restored saved stats from a previous run — bankroll $${engine.bankroll.toFixed(2)}, ${engine.wins}W/${engine.losses}L.`);
+      slog(`[hedgebot] 💾 [${label}] Restored saved stats — bankroll $${engine.bankroll.toFixed(2)}, ${engine.wins}W/${engine.losses}L.`);
     } else if (statsStatePath) {
-      slog(`[hedgebot] 💾 [${label}] No previous saved stats found — starting fresh at $${startingCapital}. Stats will now persist to ${statsStatePath}.`);
-    } else {
-      slog(`[hedgebot] ⚠️  [${label}] No statsStatePath configured — bankroll/wins/losses will reset on every restart.`);
+      slog(`[hedgebot] 💾 [${label}] No previous saved stats — starting fresh at $${startingCapital}.`);
     }
-    await candles.seed(slog);
     mainLoop().catch(e => slog(`[hedgebot] ❌ [${label}] Fatal: ${e.message}`));
   }
 
