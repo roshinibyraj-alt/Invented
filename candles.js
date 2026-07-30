@@ -29,7 +29,7 @@ function toCandle(k) {
 }
 
 function createCandleFeed({ interval, symbol = 'BTCUSDT', maxCandles = 500, label = interval }) {
-  let candles = []; // ascending by open time
+  let candles = [];
   let lastFetchOpenTime = null;
 
   async function fetchKlines(limit = 500) {
