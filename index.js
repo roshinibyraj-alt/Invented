@@ -37,7 +37,7 @@ app.get('/', (_, res) => {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>🪙 BTC Price-Band Bot — 5m &amp; 15m</title>
+<title>🪙 BTC Signal-Model Bot — 5m &amp; 15m</title>
 <style>
   :root {
     --bg: #ffffff; --bg2: #f5f7fa; --bg3: #edf0f4; --border: #d0d7e2;
@@ -47,7 +47,7 @@ app.get('/', (_, res) => {
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: 'Courier New', monospace; background: var(--bg); color: var(--text); font-size: 12px; min-height: 100vh; font-weight: bold; }
   .header { background: linear-gradient(135deg,#f0f4f8,#e4ecf5); border-bottom: 2px solid #0099cc44; padding: 14px 20px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
-  .logo { font-size: 18px; font-weight: bold; color: var(--gold); letter-spacing: .5px; }
+  .logo { font-size: 19px; font-weight: bold; color: var(--gold); letter-spacing: .5px; }
   .logo span { color: var(--cyan); }
   .mode-badge { padding: 4px 14px; border-radius: 20px; font-size: 11px; font-weight: bold; }
   .mode-dry { background: #ffd74022; color: var(--yellow); border: 1px solid var(--yellow); }
@@ -60,7 +60,7 @@ app.get('/', (_, res) => {
   .toolbar button.live-toggle { background: var(--red); color: #fff; }
   .toolbar button.live-toggle.is-live { background: var(--muted); color: #fff; }
   .toolbar-note { padding: 6px 20px 0; font-size: 9.5px; color: var(--muted); }
-  .rule-banner { margin: 10px 20px 0; padding: 10px 14px; background: #7c5cff14; border: 1px solid var(--purple); border-radius: 8px; font-size: 10px; line-height: 1.5; color: #4a3a99; }
+  .honesty-banner { margin: 10px 20px 0; padding: 10px 14px; background: #7c5cff14; border: 1px solid var(--purple); border-radius: 8px; font-size: 10px; line-height: 1.5; color: #4a3a99; }
   .panels { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 14px 20px; }
   @media (max-width: 900px) { .panels { grid-template-columns: 1fr; } }
   .panel { background: var(--bg2); border: 2px solid var(--border); border-radius: 12px; overflow: hidden; }
@@ -73,13 +73,13 @@ app.get('/', (_, res) => {
   .stat-val { font-size: 14px; font-weight: bold; color: #12202e; }
   .pnl-pos { color: var(--green) !important; }
   .pnl-neg { color: var(--red) !important; }
-  .rule-box { background: var(--bg); border: 1px dashed var(--border); border-radius: 8px; padding: 8px 10px; margin-bottom: 10px; font-size: 9.5px; }
+  .model-box { background: var(--bg); border: 1px dashed var(--border); border-radius: 8px; padding: 8px 10px; margin-bottom: 10px; font-size: 9.5px; }
   .current-window { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; font-size: 10px; margin-bottom: 10px; }
   .current-window .headline { font-size: 12.5px; margin-bottom: 6px; padding-bottom: 6px; border-bottom: 1px dashed var(--border); }
   .current-window .row { display: flex; justify-content: space-between; padding: 2px 0; }
   .status-pill { font-size: 8.5px; padding: 2px 7px; border-radius: 9px; }
   .status-open { background: #0099cc22; color: var(--cyan); border: 1px solid var(--cyan); }
-  .status-watch { background: #e6a80022; color: var(--yellow); border: 1px solid var(--yellow); }
+  .status-resting { background: #e6a80022; color: var(--yellow); border: 1px solid var(--yellow); }
   .status-idle { background: var(--bg3); color: var(--muted); border: 1px solid var(--border); }
   .panel-buttons { display: flex; gap: 6px; margin-bottom: 10px; }
   .panel-buttons button { flex: 1; font-size: 9.5px; padding: 6px 4px; border-radius: 6px; border: none; cursor: pointer; font-family: inherit; font-weight: bold; }
@@ -96,7 +96,7 @@ app.get('/', (_, res) => {
 </head>
 <body>
   <div class="header">
-    <div class="logo">🪙 <span>BTC</span> PRICE-BAND BOT — 5m &amp; 15m</div>
+    <div class="logo">🪙 <span>BTC</span> SIGNAL-MODEL BOT — 5m &amp; 15m</div>
     <div id="mode-badge" class="mode-badge mode-dry">DEMO</div>
   </div>
 
@@ -107,8 +107,8 @@ app.get('/', (_, res) => {
   </div>
   <div class="toolbar-note">Each panel below also has its own pause/resume — the buttons above control both engines at once.</div>
 
-  <div class="rule-banner" id="rule-banner">
-    ℹ️ Two independent mechanical rules per window, no indicators/patterns/learning: an EARLY bet with a take-profit exit, and a LATE hold-to-resolution bet. Both involve buying a side priced well under $0.50 — the market's less-likely outcome at that moment. Long-shot bets by design, not "safe" ones.
+  <div class="honesty-banner">
+    ℹ️ Each engine's model starts with zero learned weights (a coin flip) and only takes one small learning step per resolved window. Win rate needs many dozens/hundreds of windows before it's a meaningful signal of real edge — early numbers here are not a reliable indicator either way.
   </div>
 
   <div class="panels">
@@ -128,68 +128,54 @@ app.get('/', (_, res) => {
   function sgn(n) { if (n == null) return '—'; return (n >= 0 ? '+$' : '-$') + Math.abs(n).toFixed(2); }
   function pClass(n) { if (n == null) return ''; return n > 0 ? 'pnl-pos' : (n < 0 ? 'pnl-neg' : ''); }
 
-  function betLineHtml(bet, label) {
-    if (bet.position && !bet.closedEarly) {
-      return '<div class="row"><span>' + label + '</span><span class="status-pill status-open">' + bet.side.toUpperCase() + ' ' + bet.position.shares.toFixed(2) + 'sh @' + fmtPx(bet.position.entryPrice) + ' ($' + fmt2(bet.position.cost) + ')</span></div>';
-    }
-    if (bet.closedEarly) {
-      return '<div class="row"><span>' + label + '</span><span class="status-pill status-open">' + bet.side.toUpperCase() + ' — TP hit ' + sgn(bet.pnl) + '</span></div>';
-    }
-    if (bet.betPlaced) {
-      return '<div class="row"><span>' + label + '</span><span class="status-pill status-idle">' + (bet.side ? bet.side.toUpperCase() + ' skipped — ' : 'skipped — ') + (bet.skipReason || 'no fill') + '</span></div>';
-    }
-    return '<div class="row"><span>' + label + '</span><span class="status-pill status-watch">watching</span></div>';
-  }
-
   function currentWindowHtml(s) {
     const t = s.current.btc;
     if (!t) return '<div class="empty">No active window yet</div>';
     const leg = t.leg;
-    const earlyStatus = t.earlyInWindow ? ('early window · closes ' + t.secondsToEarlyEnd + 's') : (t.early.betPlaced ? 'early window done' : 'early window not started');
-    const lateStatus = t.lateInWindow ? ('late window · closes ' + t.secondsToLateEnd + 's') : (t.late.betPlaced ? 'late window done' : ('late window in ' + t.secondsToLateStart + 's'));
+    let headline, betLine;
+    if (!t.signalSide) {
+      headline = '⏸ No bet this window';
+      betLine = '<span class="status-pill status-idle">' + (t.skipReason || 'no signal') + ' (confidence ' + fmtPct(t.confidence) + ')</span>';
+    } else if (t.position) {
+      headline = (t.signalSide === 'up' ? '🔵' : '🟣') + ' Trading ' + t.signalSide.toUpperCase() + ' — confidence ' + fmtPct(t.confidence);
+      betLine = '<span class="status-pill status-open">bought ' + t.position.shares.toFixed(2) + 'sh @' + fmtPx(t.position.entryPrice) + ' ($' + fmt2(t.position.cost) + ')</span>';
+    } else if (t.betPlaced) {
+      headline = '⏸ ' + t.signalSide.toUpperCase() + ' signal, but no bet placed';
+      betLine = '<span class="status-pill status-idle">skipped — ' + (t.skipReason || 'no fill') + '</span>';
+    } else {
+      headline = (t.signalSide === 'up' ? '🔵' : '🟣') + ' Signal: ' + t.signalSide.toUpperCase() + ' — confidence ' + fmtPct(t.confidence);
+      betLine = '<span class="status-pill status-resting">bet pending — waiting for a price</span>';
+    }
     return '<div class="current-window">' +
-      '<div class="headline">' + leg.slug + '</div>' +
+      '<div class="headline">' + headline + '</div>' +
+      '<div class="row"><span>Window</span><span>' + (leg ? leg.slug : '…') + '</span></div>' +
       '<div class="row"><span>State</span><span>' + t.state + '</span></div>' +
+      '<div class="row"><span>Bet status</span>' + betLine + '</div>' +
       '<div class="row"><span>Live prices</span><span>UP ' + fmtPx(leg && leg.upAsk) + ' / DOWN ' + fmtPx(leg && leg.downAsk) + '</span></div>' +
-      betLineHtml(t.early, 'Early (' + earlyStatus + ')') +
-      betLineHtml(t.late, 'Late (' + lateStatus + ')') +
+      (t.position ? '<div class="row"><span>Unrealized P&amp;L</span><span class="' + pClass(t.unrealizedPnl) + '">' + sgn(t.unrealizedPnl) + '</span></div>' : '') +
     '</div>';
   }
 
   function historyRowsHtml(list) {
-    if (!list || !list.length) return '<tr><td colspan="8" class="empty">No resolved windows yet</td></tr>';
+    if (!list || !list.length) return '<tr><td colspan="6" class="empty">No resolved windows yet</td></tr>';
     return list.slice(0, 25).map(h => {
-      const resultCell = h.win == null ? '—' : (h.win ? (h.resolutionMethod === 'take-profit' ? 'TP' : 'WON') : 'LOST');
-      return '<tr>' +
-      '<td>' + h.slug.split('-').pop() + '</td>' +
-      '<td>' + (h.betType || '').toUpperCase() + '</td>' +
-      '<td>' + (h.side ? h.side.toUpperCase() : '—') + '</td>' +
-      '<td>' + (h.betPlaced ? fmtPx(h.entryPrice) : '—') + '</td>' +
-      '<td>' + (h.betPlaced ? h.shares.toFixed(2) : '—') + '</td>' +
-      '<td>' + (h.betPlaced ? '$' + fmt2(h.wager) : '—') + '</td>' +
+      const betCell = !h.side ? '—' : (h.betPlaced ? h.side.toUpperCase() + ' @' + fmtPx(h.entryPrice) : h.side.toUpperCase() + ' (skip)');
+      const resultCell = h.win == null ? '—' : (h.win ? 'WON' : 'LOST');
+      return '<tr><td>' + h.slug.split('-').pop() + '</td>' +
+      '<td>' + (h.winner || '?').toUpperCase() + '</td>' +
+      '<td>' + fmtPct(h.confidence) + '</td>' +
+      '<td>' + betCell + '</td>' +
       '<td class="' + (h.win === true ? 'pnl-pos' : (h.win === false ? 'pnl-neg' : '')) + '">' + resultCell + '</td>' +
       '<td class="' + pClass(h.pnl) + '">' + sgn(h.pnl) + '</td></tr>';
     }).join('');
   }
 
-  function ledgerRowsHtml(list) {
-    if (!list || !list.length) return '<tr><td colspan="6" class="empty">No trade actions yet</td></tr>';
-    return list.slice(0, 40).map(t => {
-      const amountCell = t.pnl != null ? '<span class="' + pClass(t.pnl) + '">' + sgn(t.pnl) + '</span>' : (t.cost != null ? '$' + fmt2(t.cost) : '—');
-      return '<tr>' +
-      '<td>' + t.time + '</td>' +
-      '<td>' + t.slug.split('-').pop() + '</td>' +
-      '<td>' + t.step + '</td>' +
-      '<td>' + (t.side ? t.side.toUpperCase() : '—') + '</td>' +
-      '<td>' + fmtPx(t.price) + '</td>' +
-      '<td>' + amountCell + '</td></tr>';
-    }).join('');
-  }
-
-  function ruleBoxHtml(s) {
-    return '<div class="rule-box">📐 EARLY: ' + s.earlyStartSec + 's-' + s.earlyEndSec + 's, price below $' + s.earlyPriceHigh + ', bet $' + s.betDollars + ', TP $' + s.takeProfitPrice +
-      '<br>📐 LATE: ' + s.lateStartSec + 's-' + s.lateEndSec + 's, band $' + s.latePriceLow + '-$' + s.latePriceHigh + ' (cheaper side), bet $' + s.betDollars + ', hold to resolution' +
-      (s.skipNextLateSignal ? '<br>🧊 Cooldown active — next genuine late-band signal will be skipped' : '') + '</div>';
+  function modelBoxHtml(m) {
+    if (!m) return '';
+    const top = (m.topWeights || []).slice(0, 4).map(w => w.feature + ' (' + w.weight + ')').join(', ');
+    return '<div class="model-box">🧠 Model: ' + m.updates + ' learning steps so far' +
+      (m.accuracy != null ? ' · running accuracy ' + fmtPct(m.accuracy) : '') +
+      (top ? '<br>Top weighted features: ' + top : '') + '</div>';
   }
 
   function panelHtml(key, title, s) {
@@ -209,17 +195,13 @@ app.get('/', (_, res) => {
           '<div class="stat"><div class="stat-label">Win Rate</div><div class="stat-val ' + pClass(winRate != null ? winRate - 0.5 : null) + '">' + fmtPct(winRate) + '</div></div>' +
           '<div class="stat"><div class="stat-label">Realized P&amp;L</div><div class="stat-val ' + pClass(s.realizedPnl) + '">' + sgn(s.realizedPnl) + '</div></div>' +
           '<div class="stat"><div class="stat-label">Wins / Losses</div><div class="stat-val">' + s.wins + ' / ' + s.losses + '</div></div>' +
-          '<div class="stat"><div class="stat-label">No-Bet Windows</div><div class="stat-val">' + s.skipped + '</div></div>' +
-          '<div class="stat"><div class="stat-label">Equity</div><div class="stat-val">$' + fmt2(s.equity) + '</div></div>' +
+          '<div class="stat"><div class="stat-label">Skipped</div><div class="stat-val">' + s.skipped + '</div></div>' +
+          '<div class="stat"><div class="stat-label">BTC Price</div><div class="stat-val">$' + fmt2(s.latestBtcPrice) + '</div></div>' +
         '</div>' +
-        ruleBoxHtml(s) +
+        modelBoxHtml(s.model) +
         currentWindowHtml(s) +
-        '<div style="font-size:9px;color:var(--muted);margin:8px 0 4px;">📋 RESOLVED WINDOWS</div>' +
-        '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Window</th><th>Rule</th><th>Side</th><th>Entry</th><th>Shares</th><th>Cost</th><th>Result</th><th>PnL</th></tr></thead>' +
+        '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Window</th><th>Result</th><th>Conf</th><th>Bet</th><th>W/L</th><th>PnL</th></tr></thead>' +
         '<tbody>' + historyRowsHtml(s.history) + '</tbody></table></div>' +
-        '<div style="font-size:9px;color:var(--muted);margin:10px 0 4px;">📋 FULL TRADE LEDGER (every action)</div>' +
-        '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Time</th><th>Window</th><th>Action</th><th>Side</th><th>Price</th><th>$</th></tr></thead>' +
-        '<tbody>' + ledgerRowsHtml(s.trades) + '</tbody></table></div>' +
       '</div>';
   }
 
@@ -274,7 +256,7 @@ const slog = (line) => { console.log(line); io.emit('log', line); };
 const PK = process.env.PRIVATE_KEY;
 if (!PK) { console.error('❌ PRIVATE_KEY env var missing'); process.exit(1); }
 
-console.log('🪙 BTC Price-Band Bot — simple mechanical rule, no indicators/patterns/learning, independent 5-minute and 15-minute engines');
+console.log('🪙 BTC Signal-Model Bot — independent 5-minute and 15-minute engines, each with its own candle-pattern + indicator model, own bankroll, own win rate');
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`🌐 Dashboard: http://0.0.0.0:${PORT}`);
