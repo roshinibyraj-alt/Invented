@@ -1,12 +1,14 @@
 'use strict';
 
 /**
- * Manager module — instantiates TWO independent SIMPLE price-band engines
- * (5-minute and 15-minute BTC Up/Down). No indicators, no patterns, no
- * candles, no learning — pure mechanical rule (see engine-factory.js).
+ * Manager module — instantiates TWO independent signal-model engines
+ * (5-minute and 15-minute BTC Up/Down), each with its own $2000 demo
+ * bankroll, own candle feed, own learned model, own win rate. Exposes a
+ * combined API that index.js (the dashboard) talks to.
  *
  * This file keeps the name `cricket-bot.js` only because index.js already
- * requires('./cricket-bot') — the actual logic lives in engine-factory.js.
+ * requires('./cricket-bot') — the actual logic lives in engine-factory.js
+ * / candles.js / signal-model.js / patterns.js.
  */
 
 const path = require('path');
@@ -17,26 +19,13 @@ const DRY_RUN = (process.env.HEDGE_DRY_RUN || process.env.SPORTS_DRY_RUN || proc
 
 const CAPITAL_5M = Number(process.env.CAPITAL_5M || process.env.STARTING_CAPITAL_5M || 2000);
 const CAPITAL_15M = Number(process.env.CAPITAL_15M || process.env.STARTING_CAPITAL_15M || 2000);
-const BET_DOLLARS = Number(process.env.BET_DOLLARS || 50);
-
-// Rule 1 - early take-profit bet. Reference (5m): 0s-60s, price below $0.35, TP $0.85.
-const EARLY_PRICE_HIGH = Number(process.env.EARLY_PRICE_HIGH || 0.35);
-const TAKE_PROFIT_PRICE = Number(process.env.TAKE_PROFIT_PRICE || 0.85);
-const EARLY_START_5M = Number(process.env.EARLY_START_SEC_5M || 0);
-const EARLY_END_5M = Number(process.env.EARLY_END_SEC_5M || 60);
-const EARLY_START_15M = Number(process.env.EARLY_START_SEC_15M || Math.round(0 * (900 / 300)));
-const EARLY_END_15M = Number(process.env.EARLY_END_SEC_15M || Math.round(60 * (900 / 300)));
-
-// Rule 2 - late hold-to-resolution bet. Reference (5m): 240s-290s, band $0.10-$0.20.
-const PRICE_LOW = Number(process.env.PRICE_LOW || 0.10);
-const PRICE_HIGH = Number(process.env.PRICE_HIGH || 0.20);
-const CHECK_START_5M = Number(process.env.CHECK_START_SEC_5M || 240);
-const CHECK_END_5M = Number(process.env.CHECK_END_SEC_5M || 290);
-const CHECK_START_15M = Number(process.env.CHECK_START_SEC_15M || Math.round(240 * (900 / 300)));
-const CHECK_END_15M = Number(process.env.CHECK_END_SEC_15M || Math.round(290 * (900 / 300)));
+const BASE_BET_5M = Number(process.env.BASE_BET_5M || 100);
+const BASE_BET_15M = Number(process.env.BASE_BET_15M || 100);
+const CONFIDENCE_5M = Number(process.env.CONFIDENCE_THRESHOLD_5M || process.env.CONFIDENCE_THRESHOLD || 0.55);
+const CONFIDENCE_15M = Number(process.env.CONFIDENCE_THRESHOLD_15M || process.env.CONFIDENCE_THRESHOLD || 0.55);
 
 let trader = null;
-let engines = null; // { m5, m15 }
+let engines = null;
 
 async function init(privateKey, emit, slogFn) {
   trader = new PolymarketTrader(privateKey);
@@ -46,17 +35,12 @@ async function init(privateKey, emit, slogFn) {
     label: 'BTC-5m',
     windowSeconds: 300,
     slugPrefix: 'btc-updown-5m-',
+    binanceInterval: '5m',
+    modelStatePath: process.env.MODEL_STATE_PATH_5M || path.join(__dirname, 'model-state-5m.json'),
     statsStatePath: process.env.STATS_STATE_PATH_5M || path.join(__dirname, 'stats-state-5m.json'),
     startingCapital: CAPITAL_5M,
-    betDollars: BET_DOLLARS,
-    earlyStartSec: EARLY_START_5M,
-    earlyEndSec: EARLY_END_5M,
-    earlyPriceHigh: EARLY_PRICE_HIGH,
-    takeProfitPrice: TAKE_PROFIT_PRICE,
-    lateStartSec: CHECK_START_5M,
-    lateEndSec: CHECK_END_5M,
-    latePriceLow: PRICE_LOW,
-    latePriceHigh: PRICE_HIGH,
+    baseBetDollars: BASE_BET_5M,
+    confidenceThreshold: CONFIDENCE_5M,
     trader,
     dryRun: DRY_RUN,
   });
@@ -65,24 +49,19 @@ async function init(privateKey, emit, slogFn) {
     label: 'BTC-15m',
     windowSeconds: 900,
     slugPrefix: 'btc-updown-15m-',
+    binanceInterval: '15m',
+    modelStatePath: process.env.MODEL_STATE_PATH_15M || path.join(__dirname, 'model-state-15m.json'),
     statsStatePath: process.env.STATS_STATE_PATH_15M || path.join(__dirname, 'stats-state-15m.json'),
     startingCapital: CAPITAL_15M,
-    betDollars: BET_DOLLARS,
-    earlyStartSec: EARLY_START_15M,
-    earlyEndSec: EARLY_END_15M,
-    earlyPriceHigh: EARLY_PRICE_HIGH,
-    takeProfitPrice: TAKE_PROFIT_PRICE,
-    lateStartSec: CHECK_START_15M,
-    lateEndSec: CHECK_END_15M,
-    latePriceLow: PRICE_LOW,
-    latePriceHigh: PRICE_HIGH,
+    baseBetDollars: BASE_BET_15M,
+    confidenceThreshold: CONFIDENCE_15M,
     trader,
     dryRun: DRY_RUN,
   });
 
   engines = { m5, m15 };
 
-  slogFn(`[hedgebot] 🪙 Running TWO independent SIMPLE price-band engines: BTC 5-minute and BTC 15-minute Up/Down. Each runs 2 rules — EARLY take-profit bet and LATE hold-to-resolution bet — with separate bankroll/win rate per timeframe. No indicators, no patterns, no learning.`);
+  slogFn('[hedgebot] 🪙 Running TWO independent signal-model engines: BTC 5-minute and BTC 15-minute Up/Down — separate candle history, separate learned model, separate bankroll, separate win rate for each.');
 
   await Promise.all([m5.start(emit, slogFn), m15.start(emit, slogFn)]);
 }
@@ -92,7 +71,6 @@ function requireEngines() {
   return engines;
 }
 
-/** engineKey: 'm5' | 'm15' | undefined (undefined = apply to both) */
 function pauseTrading(engineKey) {
   const { m5, m15 } = requireEngines();
   if (engineKey === 'm5') return m5.pauseTrading();
