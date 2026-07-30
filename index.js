@@ -108,7 +108,7 @@ app.get('/', (_, res) => {
   <div class="toolbar-note">Each panel below also has its own pause/resume — the buttons above control both engines at once.</div>
 
   <div class="rule-banner" id="rule-banner">
-    ℹ️ Simple mechanical rule, no indicators/patterns/learning: during a late-window check period, if the cheaper side's price falls in the target band, buy it immediately. This is a long-shot bet by design — buying a side priced $0.10-$0.20 means the market currently sees it as the less likely outcome.
+    ℹ️ Two independent mechanical rules per window, no indicators/patterns/learning: an EARLY bet with a take-profit exit, and a LATE hold-to-resolution bet. Both involve buying a side priced well under $0.50 — the market's less-likely outcome at that moment. Long-shot bets by design, not "safe" ones.
   </div>
 
   <div class="panels">
@@ -128,44 +128,41 @@ app.get('/', (_, res) => {
   function sgn(n) { if (n == null) return '—'; return (n >= 0 ? '+$' : '-$') + Math.abs(n).toFixed(2); }
   function pClass(n) { if (n == null) return ''; return n > 0 ? 'pnl-pos' : (n < 0 ? 'pnl-neg' : ''); }
 
+  function betLineHtml(bet, label) {
+    if (bet.position && !bet.closedEarly) {
+      return '<div class="row"><span>' + label + '</span><span class="status-pill status-open">' + bet.side.toUpperCase() + ' ' + bet.position.shares.toFixed(2) + 'sh @' + fmtPx(bet.position.entryPrice) + '</span></div>';
+    }
+    if (bet.closedEarly) {
+      return '<div class="row"><span>' + label + '</span><span class="status-pill status-open">' + bet.side.toUpperCase() + ' — TP hit ' + sgn(bet.pnl) + '</span></div>';
+    }
+    if (bet.betPlaced) {
+      return '<div class="row"><span>' + label + '</span><span class="status-pill status-idle">' + (bet.side ? bet.side.toUpperCase() + ' skipped — ' : 'skipped — ') + (bet.skipReason || 'no fill') + '</span></div>';
+    }
+    return '<div class="row"><span>' + label + '</span><span class="status-pill status-watch">watching</span></div>';
+  }
+
   function currentWindowHtml(s) {
     const t = s.current.btc;
     if (!t) return '<div class="empty">No active window yet</div>';
     const leg = t.leg;
-    let headline, betLine;
-    if (t.position) {
-      headline = (t.side === 'up' ? '🔵' : '🟣') + ' Bought ' + t.side.toUpperCase() + ' (long-shot)';
-      betLine = '<span class="status-pill status-open">' + t.position.shares.toFixed(2) + 'sh @' + fmtPx(t.position.entryPrice) + ' ($' + fmt2(t.position.cost) + ')</span>';
-    } else if (t.betPlaced) {
-      headline = '⏸ Signal seen, but no bet placed';
-      betLine = '<span class="status-pill status-idle">skipped — ' + (t.skipReason || 'no fill') + '</span>';
-    } else if (t.inCheckWindow) {
-      headline = '👀 In check window — watching for $' + s.priceLow + '-$' + s.priceHigh;
-      betLine = '<span class="status-pill status-watch">closes in ' + t.secondsToCheckEnd + 's</span>';
-    } else if (t.secondsToCheckStart > 0) {
-      headline = '⏳ Waiting for check window';
-      betLine = '<span class="status-pill status-idle">starts in ' + t.secondsToCheckStart + 's</span>';
-    } else {
-      headline = '⏹ Check window closed, no qualifying price this window';
-      betLine = '<span class="status-pill status-idle">no bet</span>';
-    }
+    const earlyStatus = t.earlyInWindow ? ('early window · closes ' + t.secondsToEarlyEnd + 's') : (t.early.betPlaced ? 'early window done' : 'early window not started');
+    const lateStatus = t.lateInWindow ? ('late window · closes ' + t.secondsToLateEnd + 's') : (t.late.betPlaced ? 'late window done' : ('late window in ' + t.secondsToLateStart + 's'));
     return '<div class="current-window">' +
-      '<div class="headline">' + headline + '</div>' +
-      '<div class="row"><span>Window</span><span>' + (leg ? leg.slug : '…') + '</span></div>' +
+      '<div class="headline">' + leg.slug + '</div>' +
       '<div class="row"><span>State</span><span>' + t.state + '</span></div>' +
-      '<div class="row"><span>Bet status</span>' + betLine + '</div>' +
       '<div class="row"><span>Live prices</span><span>UP ' + fmtPx(leg && leg.upAsk) + ' / DOWN ' + fmtPx(leg && leg.downAsk) + '</span></div>' +
-      (t.position ? '<div class="row"><span>Unrealized P&amp;L</span><span class="' + pClass(t.unrealizedPnl) + '">' + sgn(t.unrealizedPnl) + '</span></div>' : '') +
+      betLineHtml(t.early, 'Early (' + earlyStatus + ')') +
+      betLineHtml(t.late, 'Late (' + lateStatus + ')') +
     '</div>';
   }
 
   function historyRowsHtml(list) {
-    if (!list || !list.length) return '<tr><td colspan="5" class="empty">No resolved windows yet</td></tr>';
+    if (!list || !list.length) return '<tr><td colspan="6" class="empty">No resolved windows yet</td></tr>';
     return list.slice(0, 25).map(h => {
       const betCell = !h.side ? '—' : (h.betPlaced ? h.side.toUpperCase() + ' @' + fmtPx(h.entryPrice) : h.side.toUpperCase() + ' (skip)');
-      const resultCell = h.win == null ? '—' : (h.win ? 'WON' : 'LOST');
+      const resultCell = h.win == null ? '—' : (h.win ? (h.resolutionMethod === 'take-profit' ? 'TP' : 'WON') : 'LOST');
       return '<tr><td>' + h.slug.split('-').pop() + '</td>' +
-      '<td>' + (h.winner || '?').toUpperCase() + '</td>' +
+      '<td>' + (h.betType || '').toUpperCase() + '</td>' +
       '<td>' + betCell + '</td>' +
       '<td class="' + (h.win === true ? 'pnl-pos' : (h.win === false ? 'pnl-neg' : '')) + '">' + resultCell + '</td>' +
       '<td class="' + pClass(h.pnl) + '">' + sgn(h.pnl) + '</td></tr>';
@@ -173,7 +170,8 @@ app.get('/', (_, res) => {
   }
 
   function ruleBoxHtml(s) {
-    return '<div class="rule-box">📐 Rule: check ' + s.checkStartSec + 's-' + s.checkEndSec + 's into each ' + s.windowSeconds + 's window · band $' + s.priceLow + '-$' + s.priceHigh + ' · bet $' + s.betDollars + ' flat</div>';
+    return '<div class="rule-box">📐 EARLY: ' + s.earlyStartSec + 's-' + s.earlyEndSec + 's, band $' + s.earlyPriceLow + '-$' + s.earlyPriceHigh + ', bet $' + s.betDollars + ', TP $' + s.takeProfitPrice +
+      '<br>📐 LATE: ' + s.lateStartSec + 's-' + s.lateEndSec + 's, band $' + s.latePriceLow + '-$' + s.latePriceHigh + ' (cheaper side), bet $' + s.betDollars + ', hold to resolution</div>';
   }
 
   function panelHtml(key, title, s) {
@@ -198,7 +196,7 @@ app.get('/', (_, res) => {
         '</div>' +
         ruleBoxHtml(s) +
         currentWindowHtml(s) +
-        '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Window</th><th>Result</th><th>Bet</th><th>W/L</th><th>PnL</th></tr></thead>' +
+        '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Window</th><th>Rule</th><th>Bet</th><th>W/L</th><th>PnL</th></tr></thead>' +
         '<tbody>' + historyRowsHtml(s.history) + '</tbody></table></div>' +
       '</div>';
   }
