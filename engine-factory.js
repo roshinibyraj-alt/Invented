@@ -11,7 +11,7 @@
  *  RULE 1 — EARLY TAKE-PROFIT BET:
  *  Between earlyStartSec-earlyEndSec (default 0s-60s of a 300s window,
  *  scaled to 0s-180s for 900s), watch both sides. The FIRST moment
- *  either side's ask falls within [earlyPriceLow, earlyPriceHigh]
+ *  either side's ask falls at or below earlyPriceHigh
  *  (default $0.15-$0.25), buy $betDollars of it. From then on, watch
  *  that position's bid — the moment it reaches takeProfitPrice (default
  *  $0.85), sell immediately to lock in the profit, before the window
@@ -62,8 +62,7 @@ function createEngine(cfg) {
 
     earlyStartSec = 0,
     earlyEndSec = Math.round(60 * (windowSeconds / 300)),
-    earlyPriceLow = 0.15,
-    earlyPriceHigh = 0.25,
+    earlyPriceHigh = 0.35,
     takeProfitPrice = 0.85,
 
     lateStartSec = Math.round(240 * (windowSeconds / 300)),
@@ -113,6 +112,7 @@ function createEngine(cfg) {
     lastResolutionPoll: 0,
     waitingForBoundary: true,
     boundaryWindowTs: null,
+    skipNextLateSignal: false,
   };
 
   function saveStats() {
@@ -366,8 +366,8 @@ function createEngine(cfg) {
   function checkEarlyBand(leg, elapsedSec) {
     if (elapsedSec < earlyStartSec || elapsedSec > earlyEndSec) return null;
     const upAsk = leg.upAsk, downAsk = leg.downAsk;
-    const upHit = upAsk != null && upAsk >= earlyPriceLow && upAsk <= earlyPriceHigh;
-    const downHit = downAsk != null && downAsk >= earlyPriceLow && downAsk <= earlyPriceHigh;
+    const upHit = upAsk != null && upAsk <= earlyPriceHigh;
+    const downHit = downAsk != null && downAsk <= earlyPriceHigh;
     if (upHit && downHit) return upAsk <= downAsk ? { side: 'up', price: upAsk } : { side: 'down', price: downAsk };
     if (upHit) return { side: 'up', price: upAsk };
     if (downHit) return { side: 'down', price: downAsk };
@@ -515,6 +515,10 @@ function createEngine(cfg) {
     engine.realizedPnl = round2(engine.realizedPnl + pnl);
     if (win) engine.wins++; else engine.losses++;
     bet.pnl = pnl;
+    if (betKey === 'late' && win) {
+      engine.skipNextLateSignal = true;
+      log(`🧊 [${leg.slug}] (late) win recorded — next genuine late-band signal will be skipped (cooldown)`);
+    }
 
     registerTrade({ slug: leg.slug, step: `window resolution (${betKey})`, side: leg.winner, price: 1, shares: bet.position.shares, pnl });
     engine.history.unshift({
@@ -561,7 +565,7 @@ function createEngine(cfg) {
 
       trade = freshTrade(windowTs);
       engine.current.btc = trade;
-      log(`🆕 new window t=${windowTs} — discovering market… early band $${earlyPriceLow}-$${earlyPriceHigh} @ ${earlyStartSec}s-${earlyEndSec}s (TP $${takeProfitPrice}) · late band $${latePriceLow}-$${latePriceHigh} @ ${lateStartSec}s-${lateEndSec}s`);
+      log(`🆕 new window t=${windowTs} — discovering market… early band below $${earlyPriceHigh} @ ${earlyStartSec}s-${earlyEndSec}s (TP $${takeProfitPrice}) · late band $${latePriceLow}-$${latePriceHigh} @ ${lateStartSec}s-${lateEndSec}s${engine.skipNextLateSignal ? ' [next late signal on cooldown]' : ''}`);
     }
 
     if (!trade.leg.discovered && now - trade.leg.lastDiscoveryAttempt >= DISCOVERY_RETRY_MS) {
@@ -582,7 +586,17 @@ function createEngine(cfg) {
 
       if (!trade.late.betPlaced) {
         const hit = checkLateBand(trade.leg, elapsedSec);
-        if (hit) await placeBet(trade, 'late', hit.side, hit.price);
+        if (hit) {
+          if (engine.skipNextLateSignal) {
+            engine.skipNextLateSignal = false;
+            trade.late.betPlaced = true;
+            trade.late.side = hit.side;
+            trade.late.skipReason = 'cooldown-after-win';
+            log(`⏭️  [${trade.leg.slug}] (late) ${hit.side.toUpperCase()} @${hit.price.toFixed(3)} was a genuine signal, but skipped — cooldown after previous late-band win`);
+          } else {
+            await placeBet(trade, 'late', hit.side, hit.price);
+          }
+        }
       }
     }
   }
@@ -679,8 +693,9 @@ function createEngine(cfg) {
       bankroll: engine.bankroll,
       startingCapital,
       betDollars,
-      earlyStartSec, earlyEndSec, earlyPriceLow, earlyPriceHigh, takeProfitPrice,
+      earlyStartSec, earlyEndSec, earlyPriceHigh, takeProfitPrice,
       lateStartSec, lateEndSec, latePriceLow, latePriceHigh,
+      skipNextLateSignal: engine.skipNextLateSignal,
       realizedPnl: engine.realizedPnl, unrealizedPnl, equity,
       wins: engine.wins, losses: engine.losses, skipped: engine.skipped,
       winRate: totalDecided > 0 ? round2(engine.wins / totalDecided) : null,
@@ -714,8 +729,8 @@ function createEngine(cfg) {
     emitFn = emit;
     slog = slogFn;
     slog(`[hedgebot] 🪙 ${label} Simple Price-Band Engine (2 rules) — no indicators, no patterns, no learning`);
-    slog(`[hedgebot] ⚙️  [${label}] EARLY rule: ${earlyStartSec}s-${earlyEndSec}s, band $${earlyPriceLow}-$${earlyPriceHigh}, buy $${betDollars}, take-profit at $${takeProfitPrice}.`);
-    slog(`[hedgebot] ⚙️  [${label}] LATE rule: ${lateStartSec}s-${lateEndSec}s, band $${latePriceLow}-$${latePriceHigh} (cheaper side), buy $${betDollars}, hold to resolution.`);
+    slog(`[hedgebot] ⚙️  [${label}] EARLY rule: ${earlyStartSec}s-${earlyEndSec}s, price below $${earlyPriceHigh}, buy $${betDollars}, take-profit at $${takeProfitPrice}.`);
+    slog(`[hedgebot] ⚙️  [${label}] LATE rule: ${lateStartSec}s-${lateEndSec}s, band $${latePriceLow}-$${latePriceHigh} (cheaper side), buy $${betDollars}, hold to resolution. After a LATE win, the next genuine late-band signal is skipped once (cooldown).`);
     slog(`[hedgebot] ⚙️  [${label}] Starting bankroll (scoreboard only): $${startingCapital}. ${DRY_RUN ? 'DEMO' : 'LIVE'} mode.`);
     if (savedStats) {
       slog(`[hedgebot] 💾 [${label}] Restored saved stats — bankroll $${engine.bankroll.toFixed(2)}, ${engine.wins}W/${engine.losses}L.`);
