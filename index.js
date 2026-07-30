@@ -85,7 +85,7 @@ app.get('/', (_, res) => {
   .panel-buttons button { flex: 1; font-size: 9.5px; padding: 6px 4px; border-radius: 6px; border: none; cursor: pointer; font-family: inherit; font-weight: bold; }
   .panel-buttons .pause { background: var(--yellow); }
   .panel-buttons .resume { background: var(--green); color: #fff; }
-  .tbl-wrap { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; max-height: 220px; overflow-y: auto; }
+  .tbl-wrap { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; overflow: auto; max-height: 220px; }
   .tbl { width: 100%; border-collapse: collapse; }
   .tbl th { background: var(--bg3); color: var(--muted); padding: 5px 6px; text-align: left; font-size: 8px; text-transform: uppercase; position: sticky; top: 0; }
   .tbl td { padding: 4px 6px; border-bottom: 1px solid var(--border); font-size: 9px; }
@@ -130,7 +130,7 @@ app.get('/', (_, res) => {
 
   function betLineHtml(bet, label) {
     if (bet.position && !bet.closedEarly) {
-      return '<div class="row"><span>' + label + '</span><span class="status-pill status-open">' + bet.side.toUpperCase() + ' ' + bet.position.shares.toFixed(2) + 'sh @' + fmtPx(bet.position.entryPrice) + '</span></div>';
+      return '<div class="row"><span>' + label + '</span><span class="status-pill status-open">' + bet.side.toUpperCase() + ' ' + bet.position.shares.toFixed(2) + 'sh @' + fmtPx(bet.position.entryPrice) + ' ($' + fmt2(bet.position.cost) + ')</span></div>';
     }
     if (bet.closedEarly) {
       return '<div class="row"><span>' + label + '</span><span class="status-pill status-open">' + bet.side.toUpperCase() + ' — TP hit ' + sgn(bet.pnl) + '</span></div>';
@@ -157,21 +157,39 @@ app.get('/', (_, res) => {
   }
 
   function historyRowsHtml(list) {
-    if (!list || !list.length) return '<tr><td colspan="6" class="empty">No resolved windows yet</td></tr>';
+    if (!list || !list.length) return '<tr><td colspan="8" class="empty">No resolved windows yet</td></tr>';
     return list.slice(0, 25).map(h => {
-      const betCell = !h.side ? '—' : (h.betPlaced ? h.side.toUpperCase() + ' @' + fmtPx(h.entryPrice) : h.side.toUpperCase() + ' (skip)');
       const resultCell = h.win == null ? '—' : (h.win ? (h.resolutionMethod === 'take-profit' ? 'TP' : 'WON') : 'LOST');
-      return '<tr><td>' + h.slug.split('-').pop() + '</td>' +
+      return '<tr>' +
+      '<td>' + h.slug.split('-').pop() + '</td>' +
       '<td>' + (h.betType || '').toUpperCase() + '</td>' +
-      '<td>' + betCell + '</td>' +
+      '<td>' + (h.side ? h.side.toUpperCase() : '—') + '</td>' +
+      '<td>' + (h.betPlaced ? fmtPx(h.entryPrice) : '—') + '</td>' +
+      '<td>' + (h.betPlaced ? h.shares.toFixed(2) : '—') + '</td>' +
+      '<td>' + (h.betPlaced ? '$' + fmt2(h.wager) : '—') + '</td>' +
       '<td class="' + (h.win === true ? 'pnl-pos' : (h.win === false ? 'pnl-neg' : '')) + '">' + resultCell + '</td>' +
       '<td class="' + pClass(h.pnl) + '">' + sgn(h.pnl) + '</td></tr>';
     }).join('');
   }
 
+  function ledgerRowsHtml(list) {
+    if (!list || !list.length) return '<tr><td colspan="6" class="empty">No trade actions yet</td></tr>';
+    return list.slice(0, 40).map(t => {
+      const amountCell = t.pnl != null ? '<span class="' + pClass(t.pnl) + '">' + sgn(t.pnl) + '</span>' : (t.cost != null ? '$' + fmt2(t.cost) : '—');
+      return '<tr>' +
+      '<td>' + t.time + '</td>' +
+      '<td>' + t.slug.split('-').pop() + '</td>' +
+      '<td>' + t.step + '</td>' +
+      '<td>' + (t.side ? t.side.toUpperCase() : '—') + '</td>' +
+      '<td>' + fmtPx(t.price) + '</td>' +
+      '<td>' + amountCell + '</td></tr>';
+    }).join('');
+  }
+
   function ruleBoxHtml(s) {
-    return '<div class="rule-box">📐 EARLY: ' + s.earlyStartSec + 's-' + s.earlyEndSec + 's, band $' + s.earlyPriceLow + '-$' + s.earlyPriceHigh + ', bet $' + s.betDollars + ', TP $' + s.takeProfitPrice +
-      '<br>📐 LATE: ' + s.lateStartSec + 's-' + s.lateEndSec + 's, band $' + s.latePriceLow + '-$' + s.latePriceHigh + ' (cheaper side), bet $' + s.betDollars + ', hold to resolution</div>';
+    return '<div class="rule-box">📐 EARLY: ' + s.earlyStartSec + 's-' + s.earlyEndSec + 's, price below $' + s.earlyPriceHigh + ', bet $' + s.betDollars + ', TP $' + s.takeProfitPrice +
+      '<br>📐 LATE: ' + s.lateStartSec + 's-' + s.lateEndSec + 's, band $' + s.latePriceLow + '-$' + s.latePriceHigh + ' (cheaper side), bet $' + s.betDollars + ', hold to resolution' +
+      (s.skipNextLateSignal ? '<br>🧊 Cooldown active — next genuine late-band signal will be skipped' : '') + '</div>';
   }
 
   function panelHtml(key, title, s) {
@@ -196,8 +214,12 @@ app.get('/', (_, res) => {
         '</div>' +
         ruleBoxHtml(s) +
         currentWindowHtml(s) +
-        '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Window</th><th>Rule</th><th>Bet</th><th>W/L</th><th>PnL</th></tr></thead>' +
+        '<div style="font-size:9px;color:var(--muted);margin:8px 0 4px;">📋 RESOLVED WINDOWS</div>' +
+        '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Window</th><th>Rule</th><th>Side</th><th>Entry</th><th>Shares</th><th>Cost</th><th>Result</th><th>PnL</th></tr></thead>' +
         '<tbody>' + historyRowsHtml(s.history) + '</tbody></table></div>' +
+        '<div style="font-size:9px;color:var(--muted);margin:10px 0 4px;">📋 FULL TRADE LEDGER (every action)</div>' +
+        '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Time</th><th>Window</th><th>Action</th><th>Side</th><th>Price</th><th>$</th></tr></thead>' +
+        '<tbody>' + ledgerRowsHtml(s.trades) + '</tbody></table></div>' +
       '</div>';
   }
 
