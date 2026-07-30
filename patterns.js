@@ -37,16 +37,13 @@ function avgBody(candles, endIdx, window) {
 
 function detectPatterns(candles, avgWindow = 20) {
   const n = candles.length;
-  const out = {};
-  const zero = () => {
-    return {
-      pat_doji: 0, pat_hammer: 0, pat_inverted_hammer: 0, pat_hanging_man: 0,
-      pat_shooting_star: 0, pat_marubozu_bull: 0, pat_marubozu_bear: 0, pat_spinning_top: 0,
-      pat_bullish_engulfing: 0, pat_bearish_engulfing: 0, pat_bullish_harami: 0, pat_bearish_harami: 0,
-      pat_piercing_line: 0, pat_dark_cloud_cover: 0, pat_tweezer_top: 0, pat_tweezer_bottom: 0,
-      pat_morning_star: 0, pat_evening_star: 0, pat_three_white_soldiers: 0, pat_three_black_crows: 0,
-    };
-  };
+  const zero = () => ({
+    pat_doji: 0, pat_hammer: 0, pat_inverted_hammer: 0, pat_hanging_man: 0,
+    pat_shooting_star: 0, pat_marubozu_bull: 0, pat_marubozu_bear: 0, pat_spinning_top: 0,
+    pat_bullish_engulfing: 0, pat_bearish_engulfing: 0, pat_bullish_harami: 0, pat_bearish_harami: 0,
+    pat_piercing_line: 0, pat_dark_cloud_cover: 0, pat_tweezer_top: 0, pat_tweezer_bottom: 0,
+    pat_morning_star: 0, pat_evening_star: 0, pat_three_white_soldiers: 0, pat_three_black_crows: 0,
+  });
   if (n < 1) return zero();
 
   const i = n - 1;
@@ -55,12 +52,10 @@ function detectPatterns(candles, avgWindow = 20) {
   const prev = i >= 1 ? candles[i - 1] : null;
   const prev2 = i >= 2 ? candles[i - 2] : null;
   const ps = prev ? shape(prev) : null;
-  const p2s = prev2 ? shape(prev2) : null;
   const avgB = avgBody(candles, i, avgWindow) || s.body;
 
   const r = zero();
 
-  // --- Single-candle ---
   r.pat_doji = s.bodyPct < 0.1 ? 1 : 0;
   r.pat_hammer = (s.lower >= 2 * s.body && s.upperPct <= 0.15 && s.body > 0 && s.bodyPct < 0.4) ? 1 : 0;
   r.pat_inverted_hammer = (s.upper >= 2 * s.body && s.lowerPct <= 0.15 && s.body > 0 && s.bodyPct < 0.4) ? 1 : 0;
@@ -70,7 +65,6 @@ function detectPatterns(candles, avgWindow = 20) {
   r.pat_marubozu_bear = (c.open > c.close && s.upperPct <= 0.03 && s.lowerPct <= 0.03 && s.body >= 0.9 * s.range) ? 1 : 0;
   r.pat_spinning_top = (s.bodyPct < 0.3 && s.upperPct > 0.25 && s.lowerPct > 0.25) ? 1 : 0;
 
-  // --- Two-candle ---
   if (prev) {
     r.pat_bullish_engulfing = (prev.close < prev.open && c.close > c.open && c.open <= prev.close && c.close >= prev.open) ? 1 : 0;
     r.pat_bearish_engulfing = (prev.close > prev.open && c.open > c.close && c.open >= prev.close && c.close <= prev.open) ? 1 : 0;
@@ -82,7 +76,6 @@ function detectPatterns(candles, avgWindow = 20) {
     r.pat_tweezer_bottom = (prev.close < prev.open && c.close > c.open && Math.abs(c.low - prev.low) <= 0.05 * s.range) ? 1 : 0;
   }
 
-  // --- Three-candle ---
   if (prev && prev2) {
     r.pat_morning_star = (prev2.close < prev2.open && ps.body < 0.3 * avgB && c.close > c.open && c.close > (prev2.open + prev2.close) / 2) ? 1 : 0;
     r.pat_evening_star = (prev2.close > prev2.open && ps.body < 0.3 * avgB && c.open > c.close && c.close < (prev2.open + prev2.close) / 2) ? 1 : 0;
