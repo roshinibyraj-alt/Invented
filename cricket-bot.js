@@ -19,9 +19,8 @@ const CAPITAL_5M = Number(process.env.CAPITAL_5M || process.env.STARTING_CAPITAL
 const CAPITAL_15M = Number(process.env.CAPITAL_15M || process.env.STARTING_CAPITAL_15M || 2000);
 const BET_DOLLARS = Number(process.env.BET_DOLLARS || 50);
 
-// Rule 1 - early take-profit bet. Reference (5m): 0s-60s, band $0.15-$0.25, TP $0.85.
-const EARLY_PRICE_LOW = Number(process.env.EARLY_PRICE_LOW || 0.15);
-const EARLY_PRICE_HIGH = Number(process.env.EARLY_PRICE_HIGH || 0.25);
+// Rule 1 - early take-profit bet. Reference (5m): 0s-60s, price below $0.35, TP $0.85.
+const EARLY_PRICE_HIGH = Number(process.env.EARLY_PRICE_HIGH || 0.35);
 const TAKE_PROFIT_PRICE = Number(process.env.TAKE_PROFIT_PRICE || 0.85);
 const EARLY_START_5M = Number(process.env.EARLY_START_SEC_5M || 0);
 const EARLY_END_5M = Number(process.env.EARLY_END_SEC_5M || 60);
@@ -52,7 +51,6 @@ async function init(privateKey, emit, slogFn) {
     betDollars: BET_DOLLARS,
     earlyStartSec: EARLY_START_5M,
     earlyEndSec: EARLY_END_5M,
-    earlyPriceLow: EARLY_PRICE_LOW,
     earlyPriceHigh: EARLY_PRICE_HIGH,
     takeProfitPrice: TAKE_PROFIT_PRICE,
     lateStartSec: CHECK_START_5M,
@@ -72,7 +70,6 @@ async function init(privateKey, emit, slogFn) {
     betDollars: BET_DOLLARS,
     earlyStartSec: EARLY_START_15M,
     earlyEndSec: EARLY_END_15M,
-    earlyPriceLow: EARLY_PRICE_LOW,
     earlyPriceHigh: EARLY_PRICE_HIGH,
     takeProfitPrice: TAKE_PROFIT_PRICE,
     lateStartSec: CHECK_START_15M,
