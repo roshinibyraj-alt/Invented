@@ -18,11 +18,19 @@ const DRY_RUN = (process.env.HEDGE_DRY_RUN || process.env.SPORTS_DRY_RUN || proc
 const CAPITAL_5M = Number(process.env.CAPITAL_5M || process.env.STARTING_CAPITAL_5M || 2000);
 const CAPITAL_15M = Number(process.env.CAPITAL_15M || process.env.STARTING_CAPITAL_15M || 2000);
 const BET_DOLLARS = Number(process.env.BET_DOLLARS || 50);
+
+// Rule 1 - early take-profit bet. Reference (5m): 0s-60s, band $0.15-$0.25, TP $0.85.
+const EARLY_PRICE_LOW = Number(process.env.EARLY_PRICE_LOW || 0.15);
+const EARLY_PRICE_HIGH = Number(process.env.EARLY_PRICE_HIGH || 0.25);
+const TAKE_PROFIT_PRICE = Number(process.env.TAKE_PROFIT_PRICE || 0.85);
+const EARLY_START_5M = Number(process.env.EARLY_START_SEC_5M || 0);
+const EARLY_END_5M = Number(process.env.EARLY_END_SEC_5M || 60);
+const EARLY_START_15M = Number(process.env.EARLY_START_SEC_15M || Math.round(0 * (900 / 300)));
+const EARLY_END_15M = Number(process.env.EARLY_END_SEC_15M || Math.round(60 * (900 / 300)));
+
+// Rule 2 - late hold-to-resolution bet. Reference (5m): 240s-290s, band $0.10-$0.20.
 const PRICE_LOW = Number(process.env.PRICE_LOW || 0.10);
 const PRICE_HIGH = Number(process.env.PRICE_HIGH || 0.20);
-// Reference rule is defined for the 5-minute window: check between 240s-290s
-// of the 300s window. The 15-minute window scales this proportionally
-// (240/300=0.8 -> 720s, 290/300=0.9667 -> 870s) unless overridden.
 const CHECK_START_5M = Number(process.env.CHECK_START_SEC_5M || 240);
 const CHECK_END_5M = Number(process.env.CHECK_END_SEC_5M || 290);
 const CHECK_START_15M = Number(process.env.CHECK_START_SEC_15M || Math.round(240 * (900 / 300)));
@@ -42,10 +50,15 @@ async function init(privateKey, emit, slogFn) {
     statsStatePath: process.env.STATS_STATE_PATH_5M || path.join(__dirname, 'stats-state-5m.json'),
     startingCapital: CAPITAL_5M,
     betDollars: BET_DOLLARS,
-    priceLow: PRICE_LOW,
-    priceHigh: PRICE_HIGH,
-    checkStartSec: CHECK_START_5M,
-    checkEndSec: CHECK_END_5M,
+    earlyStartSec: EARLY_START_5M,
+    earlyEndSec: EARLY_END_5M,
+    earlyPriceLow: EARLY_PRICE_LOW,
+    earlyPriceHigh: EARLY_PRICE_HIGH,
+    takeProfitPrice: TAKE_PROFIT_PRICE,
+    lateStartSec: CHECK_START_5M,
+    lateEndSec: CHECK_END_5M,
+    latePriceLow: PRICE_LOW,
+    latePriceHigh: PRICE_HIGH,
     trader,
     dryRun: DRY_RUN,
   });
@@ -57,17 +70,22 @@ async function init(privateKey, emit, slogFn) {
     statsStatePath: process.env.STATS_STATE_PATH_15M || path.join(__dirname, 'stats-state-15m.json'),
     startingCapital: CAPITAL_15M,
     betDollars: BET_DOLLARS,
-    priceLow: PRICE_LOW,
-    priceHigh: PRICE_HIGH,
-    checkStartSec: CHECK_START_15M,
-    checkEndSec: CHECK_END_15M,
+    earlyStartSec: EARLY_START_15M,
+    earlyEndSec: EARLY_END_15M,
+    earlyPriceLow: EARLY_PRICE_LOW,
+    earlyPriceHigh: EARLY_PRICE_HIGH,
+    takeProfitPrice: TAKE_PROFIT_PRICE,
+    lateStartSec: CHECK_START_15M,
+    lateEndSec: CHECK_END_15M,
+    latePriceLow: PRICE_LOW,
+    latePriceHigh: PRICE_HIGH,
     trader,
     dryRun: DRY_RUN,
   });
 
   engines = { m5, m15 };
 
-  slogFn(`[hedgebot] 🪙 Running TWO independent SIMPLE price-band engines: BTC 5-minute (check ${CHECK_START_5M}s-${CHECK_END_5M}s) and BTC 15-minute (check ${CHECK_START_15M}s-${CHECK_END_15M}s) Up/Down — separate bankroll, separate win rate. No indicators, no patterns, no learning — same mechanical rule every window.`);
+  slogFn(`[hedgebot] 🪙 Running TWO independent SIMPLE price-band engines: BTC 5-minute and BTC 15-minute Up/Down. Each runs 2 rules — EARLY take-profit bet and LATE hold-to-resolution bet — with separate bankroll/win rate per timeframe. No indicators, no patterns, no learning.`);
 
   await Promise.all([m5.start(emit, slogFn), m15.start(emit, slogFn)]);
 }
