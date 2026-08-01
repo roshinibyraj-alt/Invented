@@ -22,8 +22,7 @@
  *  not a bet was placed). It starts at zero weights (a coin flip) and
  *  only has a chance to show real edge after many real results.
  *
- *  SIZING: scales with confidence - minBetDollars at the threshold edge, up
- *  to maxBetDollars at high confidence. ENTRY RULE: only bets when
+ *  SIZING: flat $baseBetDollars per window. ENTRY RULE: only bets when
  *  confidence clears confidenceThreshold on one side; otherwise sits
  *  the window out.
  *
@@ -59,11 +58,8 @@ function createEngine(cfg) {
     modelStatePath,
     statsStatePath,
     startingCapital = 2000,
+    baseBetDollars = 100,
     confidenceThreshold = 0.55,
-    minBetDollars = 20,
-    maxBetDollars = 100,
-    minConfidenceEdge = 0.02,
-    maxConfidenceEdge = 0.30,
     minOrderShares = 5,
     highConfPrice = 0.90,
     resolutionFallbackMs = 60000,
@@ -349,16 +345,7 @@ function createEngine(cfg) {
     const probUp = signalModel.predict(features);
     if (probUp >= confidenceThreshold) return { side: 'up', probUp, features, reason: null };
     if (1 - probUp >= confidenceThreshold) return { side: 'down', probUp, features, reason: null };
-    return { side: null, probUp, features, reason: 'confidence between 48%-52% (too close to a coin flip)' };
-  }
-
-  // Scales bet size by how far confidence is from 50%: right at the threshold
-  // edge (48%/52%) gets minBetDollars, at maxConfidenceEdge (default 80%/20%)
-  // or beyond gets the full maxBetDollars, linear in between.
-  function betSizeForConfidence(probUp) {
-    const edge = Math.abs(probUp - 0.5);
-    const t = Math.max(0, Math.min(1, (edge - minConfidenceEdge) / (maxConfidenceEdge - minConfidenceEdge)));
-    return round2(minBetDollars + (maxBetDollars - minBetDollars) * t);
+    return { side: null, probUp, features, reason: 'confidence below threshold' };
   }
 
   function freshTrade(windowTs, decision) {
@@ -384,12 +371,11 @@ function createEngine(cfg) {
     const ask = side === 'up' ? leg.upAsk : leg.downAsk;
     if (!tokenId || ask == null) return;
 
-    const wagerDollars = betSizeForConfidence(trade.decision.probUp);
-    const shares = round2(wagerDollars / ask);
+    const shares = round2(baseBetDollars / ask);
     if (shares < minOrderShares) {
       trade.betPlaced = true;
       trade.skipReason = 'below-min-shares';
-      log(`⚠️  [${trade.leg.slug}] ${side.toUpperCase()} wager $${wagerDollars.toFixed(2)} @${ask.toFixed(3)} = ${shares.toFixed(2)}sh, below ${minOrderShares}sh minimum — no bet this window`);
+      log(`⚠️  [${trade.leg.slug}] ${side.toUpperCase()} wager $${baseBetDollars.toFixed(2)} @${ask.toFixed(3)} = ${shares.toFixed(2)}sh, below ${minOrderShares}sh minimum — no bet this window`);
       return;
     }
 
@@ -506,7 +492,7 @@ function createEngine(cfg) {
       trade = freshTrade(windowTs, decision);
       engine.current.btc = trade;
       const signalMsg = decision.side
-        ? `signal: ${decision.side.toUpperCase()} (confidence ${(decision.probUp * 100).toFixed(1)}%) → will bet $${betSizeForConfidence(decision.probUp).toFixed(2)}`
+        ? `signal: ${decision.side.toUpperCase()} (confidence ${(decision.probUp * 100).toFixed(1)}%) → will bet $${baseBetDollars}`
         : `no bet this window (${decision.reason})`;
       log(`🆕 new window t=${windowTs} — discovering market… ${signalMsg}`);
     }
@@ -606,8 +592,8 @@ function createEngine(cfg) {
       waitingForBoundary: engine.waitingForBoundary,
       bankroll: engine.bankroll,
       startingCapital,
-            confidenceThreshold,
-      minBetDollars, maxBetDollars, minConfidenceEdge, maxConfidenceEdge,
+      baseBetDollars,
+      confidenceThreshold,
       realizedPnl: engine.realizedPnl, unrealizedPnl, equity,
       wins: engine.wins, losses: engine.losses, skipped: engine.skipped,
       winRate: totalDecided > 0 ? round2(engine.wins / totalDecided) : null,
@@ -644,8 +630,7 @@ function createEngine(cfg) {
     emitFn = emit;
     slog = slogFn;
     slog(`[hedgebot] 🪙 ${label} Signal-Model Engine — fully automatic`);
-    slog(`[hedgebot] ⚙️  [${label}] Every window: candlestick-pattern + technical-indicator model predicts P(up). Bets $${minBetDollars}-$${maxBetDollars} (scaled by confidence) whenever confidence is ≥${(confidenceThreshold * 100).toFixed(0)}% or ≤${((1 - confidenceThreshold) * 100).toFixed(0)}%, otherwise sits out. Starting bankroll (scoreboard only): $${startingCapital}. ${DRY_RUN ? 'DEMO' : 'LIVE'} mode.`);
-    slog(`[hedgebot] ⚙️  [${label}] Bet size scales with confidence: $${minBetDollars} right at the ${(confidenceThreshold * 100).toFixed(0)}% edge, up to $${maxBetDollars} at ${(maxConfidenceEdge * 100 + 50).toFixed(0)}%+ confidence or beyond.`);
+    slog(`[hedgebot] ⚙️  [${label}] Every window: candlestick-pattern + technical-indicator model predicts P(up). Bets $${baseBetDollars} flat when confidence clears ${(confidenceThreshold * 100).toFixed(0)}%, otherwise sits out. Starting bankroll (scoreboard only): $${startingCapital}. ${DRY_RUN ? 'DEMO' : 'LIVE'} mode.`);
     if (savedStats) {
       slog(`[hedgebot] 💾 [${label}] Restored saved stats from a previous run — bankroll $${engine.bankroll.toFixed(2)}, ${engine.wins}W/${engine.losses}L.`);
     } else if (statsStatePath) {
