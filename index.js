@@ -173,13 +173,12 @@ app.get('/', (_, res) => {
   function modelBoxHtml(m, s) {
     if (!m) return '';
     const top = (m.topWeights || []).slice(0, 4).map(w => w.feature + ' (' + w.weight + ')').join(', ');
-    const t = s.current.btc;
-    const atrLine = (t && t.atrPct != null)
-      ? '<br>Current ATR(14)%: ' + (t.atrPct * 100).toFixed(3) + '%' + (s.minAtrPct > 0 ? ' (floor ' + (s.minAtrPct * 100).toFixed(3) + '%' + (t.atrPct < s.minAtrPct ? ' — BELOW FLOOR, sitting out' : ' — OK') + ')' : ' (no floor set)')
+    const sizingLine = (s.minBetDollars != null)
+      ? '<br>Bet sizing: $' + s.minBetDollars + '-$' + s.maxBetDollars + ' (scales with confidence) · trades outside ' + ((1 - s.confidenceThreshold) * 100).toFixed(0) + '%-' + (s.confidenceThreshold * 100).toFixed(0) + '%, sits out inside it'
       : '';
     return '<div class="model-box">🧠 Model: ' + m.updates + ' learning steps so far' +
       (m.accuracy != null ? ' · running accuracy ' + fmtPct(m.accuracy) : '') +
-      (top ? '<br>Top weighted features: ' + top : '') + atrLine + '</div>';
+      (top ? '<br>Top weighted features: ' + top : '') + sizingLine + '</div>';
   }
 
   function panelHtml(key, title, s) {
