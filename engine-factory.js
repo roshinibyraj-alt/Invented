@@ -60,6 +60,7 @@ function createEngine(cfg) {
     startingCapital = 2000,
     baseBetDollars = 100,
     confidenceThreshold = 0.55,
+    minAtrPct = 0,
     minOrderShares = 5,
     highConfPrice = 0.90,
     resolutionFallbackMs = 60000,
@@ -341,11 +342,18 @@ function createEngine(cfg) {
   function computeDecision() {
     const cnds = candles.getCandles();
     const features = buildFeatures(cnds);
-    if (!features) return { side: null, probUp: 0.5, features: null, reason: 'warming-up (need more candle history)' };
+    if (!features) return { side: null, probUp: 0.5, features: null, atrPct: null, reason: 'warming-up (need more candle history)' };
+    const atrPct = features.atr_pct;
+    if (minAtrPct > 0 && atrPct != null && atrPct < minAtrPct) {
+      return {
+        side: null, probUp: signalModel.predict(features), features, atrPct,
+        reason: `low-volatility (ATR ${(atrPct * 100).toFixed(3)}% below floor ${(minAtrPct * 100).toFixed(3)}%) — sitting out regardless of confidence`,
+      };
+    }
     const probUp = signalModel.predict(features);
-    if (probUp >= confidenceThreshold) return { side: 'up', probUp, features, reason: null };
-    if (1 - probUp >= confidenceThreshold) return { side: 'down', probUp, features, reason: null };
-    return { side: null, probUp, features, reason: 'confidence below threshold' };
+    if (probUp >= confidenceThreshold) return { side: 'up', probUp, features, atrPct, reason: null };
+    if (1 - probUp >= confidenceThreshold) return { side: 'down', probUp, features, atrPct, reason: null };
+    return { side: null, probUp, features, atrPct, reason: 'confidence below threshold' };
   }
 
   function freshTrade(windowTs, decision) {
@@ -573,6 +581,7 @@ function createEngine(cfg) {
       leg: legSummary(trade.leg),
       signalSide: trade.decision.side,
       confidence: round2(trade.decision.probUp),
+      atrPct: trade.decision.atrPct,
       skipReason: trade.decision.side ? trade.skipReason : trade.decision.reason,
       betPlaced: trade.betPlaced,
       position: trade.position ? { shares: trade.position.shares, cost: trade.position.cost, entryPrice: trade.position.entryPrice } : null,
@@ -594,6 +603,7 @@ function createEngine(cfg) {
       startingCapital,
       baseBetDollars,
       confidenceThreshold,
+      minAtrPct,
       realizedPnl: engine.realizedPnl, unrealizedPnl, equity,
       wins: engine.wins, losses: engine.losses, skipped: engine.skipped,
       winRate: totalDecided > 0 ? round2(engine.wins / totalDecided) : null,
@@ -631,6 +641,11 @@ function createEngine(cfg) {
     slog = slogFn;
     slog(`[hedgebot] 🪙 ${label} Signal-Model Engine — fully automatic`);
     slog(`[hedgebot] ⚙️  [${label}] Every window: candlestick-pattern + technical-indicator model predicts P(up). Bets $${baseBetDollars} flat when confidence clears ${(confidenceThreshold * 100).toFixed(0)}%, otherwise sits out. Starting bankroll (scoreboard only): $${startingCapital}. ${DRY_RUN ? 'DEMO' : 'LIVE'} mode.`);
+    if (minAtrPct > 0) {
+      slog(`[hedgebot] ⚙️  [${label}] Volatility floor: sits out any window where ATR(14)% < ${(minAtrPct * 100).toFixed(3)}%, regardless of model confidence — added because confident-looking bets in very quiet markets tend to be noise, not signal.`);
+    } else {
+      slog(`[hedgebot] ⚙️  [${label}] No volatility floor set (MIN_ATR_PCT env var) — bot will bet on confidence alone even in very quiet markets.`);
+    }
     if (savedStats) {
       slog(`[hedgebot] 💾 [${label}] Restored saved stats from a previous run — bankroll $${engine.bankroll.toFixed(2)}, ${engine.wins}W/${engine.losses}L.`);
     } else if (statsStatePath) {
