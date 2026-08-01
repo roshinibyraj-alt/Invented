@@ -19,17 +19,17 @@ const DRY_RUN = (process.env.HEDGE_DRY_RUN || process.env.SPORTS_DRY_RUN || proc
 
 const CAPITAL_5M = Number(process.env.CAPITAL_5M || process.env.STARTING_CAPITAL_5M || 2000);
 const CAPITAL_15M = Number(process.env.CAPITAL_15M || process.env.STARTING_CAPITAL_15M || 2000);
-const BASE_BET_5M = Number(process.env.BASE_BET_5M || 100);
-const BASE_BET_15M = Number(process.env.BASE_BET_15M || 100);
-const CONFIDENCE_5M = Number(process.env.CONFIDENCE_THRESHOLD_5M || process.env.CONFIDENCE_THRESHOLD || 0.55);
-const CONFIDENCE_15M = Number(process.env.CONFIDENCE_THRESHOLD_15M || process.env.CONFIDENCE_THRESHOLD || 0.55);
-// Sits out any window where ATR(14)% is below this floor, regardless of confidence.
-// Lowered from the original calibration (0.0006/0.0009) so the bot trades in
-// somewhat quieter conditions than before - still filters the most extreme
-// dead-flat stretches (the observed bad stretch was ~0.00044/0.044%) but is
-// less strict than the first version of this filter.
-const MIN_ATR_PCT_5M = Number(process.env.MIN_ATR_PCT_5M || 0.0004);
-const MIN_ATR_PCT_15M = Number(process.env.MIN_ATR_PCT_15M || 0.0006);
+const CONFIDENCE_5M = Number(process.env.CONFIDENCE_THRESHOLD_5M || process.env.CONFIDENCE_THRESHOLD || 0.52);
+const CONFIDENCE_15M = Number(process.env.CONFIDENCE_THRESHOLD_15M || process.env.CONFIDENCE_THRESHOLD || 0.52);
+// Bet size scales with confidence: minBetDollars right at the threshold edge
+// (48%/52%), up to maxBetDollars at maxConfidenceEdge away from 50% (default
+// 30 points away, i.e. 80%/20%) or beyond.
+const MIN_BET_5M = Number(process.env.MIN_BET_5M || 20);
+const MAX_BET_5M = Number(process.env.MAX_BET_5M || 100);
+const MIN_BET_15M = Number(process.env.MIN_BET_15M || 20);
+const MAX_BET_15M = Number(process.env.MAX_BET_15M || 100);
+const MIN_CONFIDENCE_EDGE = Number(process.env.MIN_CONFIDENCE_EDGE || 0.02);
+const MAX_CONFIDENCE_EDGE = Number(process.env.MAX_CONFIDENCE_EDGE || 0.30);
 
 let trader = null;
 let engines = null;
@@ -46,9 +46,11 @@ async function init(privateKey, emit, slogFn) {
     modelStatePath: process.env.MODEL_STATE_PATH_5M || path.join(__dirname, 'model-state-5m.json'),
     statsStatePath: process.env.STATS_STATE_PATH_5M || path.join(__dirname, 'stats-state-5m.json'),
     startingCapital: CAPITAL_5M,
-    baseBetDollars: BASE_BET_5M,
     confidenceThreshold: CONFIDENCE_5M,
-    minAtrPct: MIN_ATR_PCT_5M,
+    minBetDollars: MIN_BET_5M,
+    maxBetDollars: MAX_BET_5M,
+    minConfidenceEdge: MIN_CONFIDENCE_EDGE,
+    maxConfidenceEdge: MAX_CONFIDENCE_EDGE,
     trader,
     dryRun: DRY_RUN,
   });
@@ -61,9 +63,11 @@ async function init(privateKey, emit, slogFn) {
     modelStatePath: process.env.MODEL_STATE_PATH_15M || path.join(__dirname, 'model-state-15m.json'),
     statsStatePath: process.env.STATS_STATE_PATH_15M || path.join(__dirname, 'stats-state-15m.json'),
     startingCapital: CAPITAL_15M,
-    baseBetDollars: BASE_BET_15M,
     confidenceThreshold: CONFIDENCE_15M,
-    minAtrPct: MIN_ATR_PCT_15M,
+    minBetDollars: MIN_BET_15M,
+    maxBetDollars: MAX_BET_15M,
+    minConfidenceEdge: MIN_CONFIDENCE_EDGE,
+    maxConfidenceEdge: MAX_CONFIDENCE_EDGE,
     trader,
     dryRun: DRY_RUN,
   });
