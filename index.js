@@ -85,7 +85,7 @@ app.get('/', (_, res) => {
   .panel-buttons button { flex: 1; font-size: 9.5px; padding: 6px 4px; border-radius: 6px; border: none; cursor: pointer; font-family: inherit; font-weight: bold; }
   .panel-buttons .pause { background: var(--yellow); }
   .panel-buttons .resume { background: var(--green); color: #fff; }
-  .tbl-wrap { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; overflow: auto; max-height: 220px; }
+  .tbl-wrap { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; max-height: 220px; overflow-y: auto; }
   .tbl { width: 100%; border-collapse: collapse; }
   .tbl th { background: var(--bg3); color: var(--muted); padding: 5px 6px; text-align: left; font-size: 8px; text-transform: uppercase; position: sticky; top: 0; }
   .tbl td { padding: 4px 6px; border-bottom: 1px solid var(--border); font-size: 9px; }
@@ -170,15 +170,12 @@ app.get('/', (_, res) => {
     }).join('');
   }
 
-  function modelBoxHtml(m, s) {
+  function modelBoxHtml(m) {
     if (!m) return '';
     const top = (m.topWeights || []).slice(0, 4).map(w => w.feature + ' (' + w.weight + ')').join(', ');
-    const sizingLine = (s.minBetDollars != null)
-      ? '<br>Bet sizing: $' + s.minBetDollars + '-$' + s.maxBetDollars + ' (scales with confidence) · trades outside ' + ((1 - s.confidenceThreshold) * 100).toFixed(0) + '%-' + (s.confidenceThreshold * 100).toFixed(0) + '%, sits out inside it'
-      : '';
     return '<div class="model-box">🧠 Model: ' + m.updates + ' learning steps so far' +
       (m.accuracy != null ? ' · running accuracy ' + fmtPct(m.accuracy) : '') +
-      (top ? '<br>Top weighted features: ' + top : '') + sizingLine + '</div>';
+      (top ? '<br>Top weighted features: ' + top : '') + '</div>';
   }
 
   function panelHtml(key, title, s) {
@@ -201,7 +198,7 @@ app.get('/', (_, res) => {
           '<div class="stat"><div class="stat-label">Skipped</div><div class="stat-val">' + s.skipped + '</div></div>' +
           '<div class="stat"><div class="stat-label">BTC Price</div><div class="stat-val">$' + fmt2(s.latestBtcPrice) + '</div></div>' +
         '</div>' +
-        modelBoxHtml(s.model, s) +
+        modelBoxHtml(s.model) +
         currentWindowHtml(s) +
         '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Window</th><th>Result</th><th>Conf</th><th>Bet</th><th>W/L</th><th>PnL</th></tr></thead>' +
         '<tbody>' + historyRowsHtml(s.history) + '</tbody></table></div>' +
