@@ -23,6 +23,11 @@ const BASE_BET_5M = Number(process.env.BASE_BET_5M || 100);
 const BASE_BET_15M = Number(process.env.BASE_BET_15M || 100);
 const CONFIDENCE_5M = Number(process.env.CONFIDENCE_THRESHOLD_5M || process.env.CONFIDENCE_THRESHOLD || 0.55);
 const CONFIDENCE_15M = Number(process.env.CONFIDENCE_THRESHOLD_15M || process.env.CONFIDENCE_THRESHOLD || 0.55);
+// Sits out any window where ATR(14)% is below this floor, regardless of confidence.
+// Default calibrated from an observed quiet-weekend stretch where ATR% sat around
+// 0.044% and win rate degraded - set to 0 to disable this filter entirely.
+const MIN_ATR_PCT_5M = Number(process.env.MIN_ATR_PCT_5M || 0.0006);
+const MIN_ATR_PCT_15M = Number(process.env.MIN_ATR_PCT_15M || 0.0009);
 
 let trader = null;
 let engines = null;
@@ -41,6 +46,7 @@ async function init(privateKey, emit, slogFn) {
     startingCapital: CAPITAL_5M,
     baseBetDollars: BASE_BET_5M,
     confidenceThreshold: CONFIDENCE_5M,
+    minAtrPct: MIN_ATR_PCT_5M,
     trader,
     dryRun: DRY_RUN,
   });
@@ -55,6 +61,7 @@ async function init(privateKey, emit, slogFn) {
     startingCapital: CAPITAL_15M,
     baseBetDollars: BASE_BET_15M,
     confidenceThreshold: CONFIDENCE_15M,
+    minAtrPct: MIN_ATR_PCT_15M,
     trader,
     dryRun: DRY_RUN,
   });
