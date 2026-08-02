@@ -178,9 +178,7 @@ function buildFeatures(candles) {
   };
 }
 
-function createSignalModel({ statePath, learningRate, l2Reg }) {
-  const LEARNING_RATE = learningRate != null ? learningRate : Number(process.env.MODEL_LEARNING_RATE || 0.15);
-  const L2_REG = l2Reg != null ? l2Reg : Number(process.env.MODEL_L2_REG || 0.001);
+function createSignalModel({ statePath, learningRate = 0.05, l2Reg = 0.0005 }) {
   function loadModel() {
     try {
       const raw = fs.readFileSync(statePath, 'utf8');
@@ -213,9 +211,9 @@ function createSignalModel({ statePath, learningRate, l2Reg }) {
     const grad = pred - (actualUp ? 1 : 0);
     for (const f of FEATURE_NAMES) {
       const x = features[f] || 0;
-      model.weights[f] -= LEARNING_RATE * (grad * x + L2_REG * model.weights[f]);
+      model.weights[f] -= learningRate * (grad * x + l2Reg * model.weights[f]);
     }
-    model.bias -= LEARNING_RATE * grad;
+    model.bias -= learningRate * grad;
     model.updates += 1;
     if ((pred >= 0.5) === !!actualUp) model.wins += 1; else model.losses += 1;
     saveModel();
