@@ -23,6 +23,8 @@ const BASE_BET_5M = Number(process.env.BASE_BET_5M || 100);
 const BASE_BET_15M = Number(process.env.BASE_BET_15M || 100);
 const CONFIDENCE_5M = Number(process.env.CONFIDENCE_THRESHOLD_5M || process.env.CONFIDENCE_THRESHOLD || 0.55);
 const CONFIDENCE_15M = Number(process.env.CONFIDENCE_THRESHOLD_15M || process.env.CONFIDENCE_THRESHOLD || 0.55);
+const REVERSAL_STREAK_THRESHOLD = Number(process.env.REVERSAL_STREAK_THRESHOLD || 3);
+const REVERSAL_FILTER_TIMEOUT = Number(process.env.REVERSAL_FILTER_TIMEOUT || 3);
 
 let trader = null;
 let engines = null;
@@ -41,6 +43,8 @@ async function init(privateKey, emit, slogFn) {
     startingCapital: CAPITAL_5M,
     baseBetDollars: BASE_BET_5M,
     confidenceThreshold: CONFIDENCE_5M,
+    reversalStreakThreshold: REVERSAL_STREAK_THRESHOLD,
+    reversalFilterTimeout: REVERSAL_FILTER_TIMEOUT,
     trader,
     dryRun: DRY_RUN,
   });
@@ -55,6 +59,8 @@ async function init(privateKey, emit, slogFn) {
     startingCapital: CAPITAL_15M,
     baseBetDollars: BASE_BET_15M,
     confidenceThreshold: CONFIDENCE_15M,
+    reversalStreakThreshold: REVERSAL_STREAK_THRESHOLD,
+    reversalFilterTimeout: REVERSAL_FILTER_TIMEOUT,
     trader,
     dryRun: DRY_RUN,
   });
