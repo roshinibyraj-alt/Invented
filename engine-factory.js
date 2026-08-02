@@ -60,6 +60,8 @@ function createEngine(cfg) {
     startingCapital = 2000,
     baseBetDollars = 100,
     confidenceThreshold = 0.55,
+    reversalStreakThreshold = 3,
+    reversalFilterTimeout = 3,
     minOrderShares = 5,
     highConfPrice = 0.90,
     resolutionFallbackMs = 60000,
@@ -107,6 +109,12 @@ function createEngine(cfg) {
     lastResolutionPoll: 0,
     waitingForBoundary: true,
     boundaryWindowTs: null,
+    // Streak-reversal filter: tracks consecutive wins on one side.
+    streakSide: null,       // 'up' | 'down' | null
+    streakCount: 0,
+    reversalFilterActive: false,   // true = waiting for an opposite-side signal
+    reversalFilterSide: null,      // the side that broke (skip this side while active)
+    reversalFilterSkipCount: 0,    // how many same-side signals have been skipped this activation
   };
 
   function saveStats() {
@@ -343,9 +351,31 @@ function createEngine(cfg) {
     const features = buildFeatures(cnds);
     if (!features) return { side: null, probUp: 0.5, features: null, reason: 'warming-up (need more candle history)' };
     const probUp = signalModel.predict(features);
-    if (probUp >= confidenceThreshold) return { side: 'up', probUp, features, reason: null };
-    if (1 - probUp >= confidenceThreshold) return { side: 'down', probUp, features, reason: null };
-    return { side: null, probUp, features, reason: 'confidence below threshold' };
+
+    let side = null, reason = 'confidence below threshold';
+    if (probUp >= confidenceThreshold) { side = 'up'; reason = null; }
+    else if (1 - probUp >= confidenceThreshold) { side = 'down'; reason = null; }
+
+    if (side && engine.reversalFilterActive) {
+      if (side === engine.reversalFilterSide) {
+        engine.reversalFilterSkipCount++;
+        if (engine.reversalFilterSkipCount >= reversalFilterTimeout) {
+          log(`⏱️  reversal filter TIMED OUT after ${engine.reversalFilterSkipCount} skipped ${engine.reversalFilterSide.toUpperCase()} windows — resuming normal betting`);
+          engine.reversalFilterActive = false;
+          engine.reversalFilterSide = null;
+          engine.reversalFilterSkipCount = 0;
+          return { side, probUp, features, reason: null };
+        }
+        return { side: null, probUp, features, reason: `reversal filter — waiting for a ${engine.reversalFilterSide === 'up' ? 'DOWN' : 'UP'} signal after 3+ ${engine.reversalFilterSide.toUpperCase()} wins broke (skip ${engine.reversalFilterSkipCount}/${reversalFilterTimeout})` };
+      }
+      // Opposite-side signal arrived — trade it, filter clears now.
+      engine.reversalFilterActive = false;
+      engine.reversalFilterSide = null;
+      engine.reversalFilterSkipCount = 0;
+      log(`✅ reversal filter cleared — ${side.toUpperCase()} signal opposite the broken streak, trading normally`);
+    }
+
+    return { side, probUp, features, reason };
   }
 
   function freshTrade(windowTs, decision) {
@@ -442,6 +472,20 @@ function createEngine(cfg) {
     engine.bankroll = round2(engine.bankroll + payout);
     engine.realizedPnl = round2(engine.realizedPnl + pnl);
     if (win) engine.wins++; else engine.losses++;
+
+    if (win) {
+      if (engine.streakSide === side) engine.streakCount++;
+      else { engine.streakSide = side; engine.streakCount = 1; }
+    } else {
+      if (engine.streakSide === side && engine.streakCount >= reversalStreakThreshold) {
+        engine.reversalFilterActive = true;
+        engine.reversalFilterSide = side;
+        engine.reversalFilterSkipCount = 0;
+        log(`🔀 reversal filter ACTIVATED — ${side.toUpperCase()} streak of ${engine.streakCount} wins just broke with a loss; skipping further ${side.toUpperCase()} signals until an opposite signal appears (or ${reversalFilterTimeout} skips, whichever comes first)`);
+      }
+      engine.streakSide = null;
+      engine.streakCount = 0;
+    }
 
     trade.pnl = pnl;
     trade.state = 'resolved';
@@ -594,6 +638,13 @@ function createEngine(cfg) {
       startingCapital,
       baseBetDollars,
       confidenceThreshold,
+      reversalStreakThreshold,
+      reversalFilterTimeout,
+      reversalFilterActive: engine.reversalFilterActive,
+      reversalFilterSide: engine.reversalFilterSide,
+      reversalFilterSkipCount: engine.reversalFilterSkipCount,
+      currentStreakSide: engine.streakSide,
+      currentStreakCount: engine.streakCount,
       realizedPnl: engine.realizedPnl, unrealizedPnl, equity,
       wins: engine.wins, losses: engine.losses, skipped: engine.skipped,
       winRate: totalDecided > 0 ? round2(engine.wins / totalDecided) : null,
@@ -631,6 +682,7 @@ function createEngine(cfg) {
     slog = slogFn;
     slog(`[hedgebot] 🪙 ${label} Signal-Model Engine — fully automatic`);
     slog(`[hedgebot] ⚙️  [${label}] Every window: candlestick-pattern + technical-indicator model predicts P(up). Bets $${baseBetDollars} flat when confidence clears ${(confidenceThreshold * 100).toFixed(0)}%, otherwise sits out. Starting bankroll (scoreboard only): $${startingCapital}. ${DRY_RUN ? 'DEMO' : 'LIVE'} mode.`);
+    slog(`[hedgebot] ⚙️  [${label}] Reversal filter: after ${reversalStreakThreshold}+ consecutive wins on one side break with a loss, skips further same-side signals and waits for the first opposite-side signal — or gives up and resumes normal betting after ${reversalFilterTimeout} skipped windows, whichever comes first.`);
     if (savedStats) {
       slog(`[hedgebot] 💾 [${label}] Restored saved stats from a previous run — bankroll $${engine.bankroll.toFixed(2)}, ${engine.wins}W/${engine.losses}L.`);
     } else if (statsStatePath) {
