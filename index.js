@@ -170,12 +170,15 @@ app.get('/', (_, res) => {
     }).join('');
   }
 
-  function modelBoxHtml(m) {
+  function modelBoxHtml(m, s) {
     if (!m) return '';
     const top = (m.topWeights || []).slice(0, 4).map(w => w.feature + ' (' + w.weight + ')').join(', ');
+    const filterLine = s.reversalFilterActive
+      ? '<br>🔀 Reversal filter ACTIVE — skipping ' + s.reversalFilterSide.toUpperCase() + ' signals, waiting for ' + (s.reversalFilterSide === 'up' ? 'DOWN' : 'UP') + ' (skip ' + s.reversalFilterSkipCount + '/' + s.reversalFilterTimeout + ' before auto-resume)'
+      : (s.currentStreakCount > 0 ? '<br>Current streak: ' + s.currentStreakCount + ' ' + (s.currentStreakSide || '').toUpperCase() + ' win(s) in a row' : '');
     return '<div class="model-box">🧠 Model: ' + m.updates + ' learning steps so far' +
       (m.accuracy != null ? ' · running accuracy ' + fmtPct(m.accuracy) : '') +
-      (top ? '<br>Top weighted features: ' + top : '') + '</div>';
+      (top ? '<br>Top weighted features: ' + top : '') + filterLine + '</div>';
   }
 
   function panelHtml(key, title, s) {
@@ -198,7 +201,7 @@ app.get('/', (_, res) => {
           '<div class="stat"><div class="stat-label">Skipped</div><div class="stat-val">' + s.skipped + '</div></div>' +
           '<div class="stat"><div class="stat-label">BTC Price</div><div class="stat-val">$' + fmt2(s.latestBtcPrice) + '</div></div>' +
         '</div>' +
-        modelBoxHtml(s.model) +
+        modelBoxHtml(s.model, s) +
         currentWindowHtml(s) +
         '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Window</th><th>Result</th><th>Conf</th><th>Bet</th><th>W/L</th><th>PnL</th></tr></thead>' +
         '<tbody>' + historyRowsHtml(s.history) + '</tbody></table></div>' +
