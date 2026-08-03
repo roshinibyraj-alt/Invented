@@ -144,7 +144,8 @@ app.get('/', (_, res) => {
       betLine = '<span class="status-pill status-idle">skipped — ' + (t.skipReason || 'no fill') + '</span>';
     } else {
       headline = (t.signalSide === 'up' ? '🔵' : '🟣') + ' Signal: ' + t.signalSide.toUpperCase() + ' — confidence ' + fmtPct(t.confidence);
-      betLine = '<span class="status-pill status-resting">bet pending — waiting for a price</span>';
+      const targetPrice = t.signalSide === 'up' ? (leg && leg.upAsk) : (leg && leg.downAsk);
+      betLine = '<span class="status-pill status-resting">waiting for $' + s.entryPriceThreshold + ' (now ' + fmtPx(targetPrice) + ') or ' + t.secondsToEntryTimeout + 's timeout</span>';
     }
     return '<div class="current-window">' +
       '<div class="headline">' + headline + '</div>' +
