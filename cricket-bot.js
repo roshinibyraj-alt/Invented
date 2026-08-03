@@ -24,6 +24,8 @@ const BASE_BET_15M = Number(process.env.BASE_BET_15M || 100);
 const CONFIDENCE_5M = Number(process.env.CONFIDENCE_THRESHOLD_5M || process.env.CONFIDENCE_THRESHOLD || 0.55);
 const CONFIDENCE_15M = Number(process.env.CONFIDENCE_THRESHOLD_15M || process.env.CONFIDENCE_THRESHOLD || 0.55);
 const FORCED_OPPOSITE_WINDOWS = Number(process.env.FORCED_OPPOSITE_WINDOWS || 2);
+const ENTRY_PRICE_THRESHOLD = Number(process.env.ENTRY_PRICE_THRESHOLD || 0.33);
+const ENTRY_WAIT_SEC = Number(process.env.ENTRY_WAIT_SEC || 60);
 
 let trader = null;
 let engines = null;
@@ -43,6 +45,8 @@ async function init(privateKey, emit, slogFn) {
     baseBetDollars: BASE_BET_5M,
     confidenceThreshold: CONFIDENCE_5M,
     forcedOppositeWindows: FORCED_OPPOSITE_WINDOWS,
+    entryPriceThreshold: ENTRY_PRICE_THRESHOLD,
+    entryWaitSec: ENTRY_WAIT_SEC,
     trader,
     dryRun: DRY_RUN,
   });
@@ -58,6 +62,8 @@ async function init(privateKey, emit, slogFn) {
     baseBetDollars: BASE_BET_15M,
     confidenceThreshold: CONFIDENCE_15M,
     forcedOppositeWindows: FORCED_OPPOSITE_WINDOWS,
+    entryPriceThreshold: ENTRY_PRICE_THRESHOLD,
+    entryWaitSec: ENTRY_WAIT_SEC,
     trader,
     dryRun: DRY_RUN,
   });
