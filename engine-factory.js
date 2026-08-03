@@ -62,6 +62,7 @@ function createEngine(cfg) {
     confidenceThreshold = 0.55,
     reversalStreakThreshold = 3,
     reversalFilterTimeout = 3,
+    postLossSkipWindows = 2,
     minOrderShares = 5,
     highConfPrice = 0.90,
     resolutionFallbackMs = 60000,
@@ -115,6 +116,7 @@ function createEngine(cfg) {
     reversalFilterActive: false,   // true = waiting for an opposite-side signal
     reversalFilterSide: null,      // the side that broke (skip this side while active)
     reversalFilterSkipCount: 0,    // how many same-side signals have been skipped this activation
+    postLossSkipRemaining: 0,      // counts down after ANY loss - forces a skip regardless of side/streak
   };
 
   function saveStats() {
@@ -356,6 +358,13 @@ function createEngine(cfg) {
     if (probUp >= confidenceThreshold) { side = 'up'; reason = null; }
     else if (1 - probUp >= confidenceThreshold) { side = 'down'; reason = null; }
 
+    if (engine.postLossSkipRemaining > 0) {
+      const remaining = engine.postLossSkipRemaining;
+      engine.postLossSkipRemaining--;
+      log(`🧊 post-loss cooldown — skipping this window (${remaining} of ${postLossSkipWindows} remaining)`);
+      return { side: null, probUp, features, reason: `post-loss cooldown (${remaining}/${postLossSkipWindows} remaining)` };
+    }
+
     if (side && engine.reversalFilterActive) {
       if (side === engine.reversalFilterSide) {
         engine.reversalFilterSkipCount++;
@@ -477,6 +486,9 @@ function createEngine(cfg) {
       if (engine.streakSide === side) engine.streakCount++;
       else { engine.streakSide = side; engine.streakCount = 1; }
     } else {
+      engine.postLossSkipRemaining = postLossSkipWindows;
+      log(`🧊 loss recorded — post-loss cooldown armed, next ${postLossSkipWindows} window(s) will be skipped regardless of signal`);
+
       if (engine.streakSide === side && engine.streakCount >= reversalStreakThreshold) {
         engine.reversalFilterActive = true;
         engine.reversalFilterSide = side;
@@ -643,6 +655,8 @@ function createEngine(cfg) {
       reversalFilterActive: engine.reversalFilterActive,
       reversalFilterSide: engine.reversalFilterSide,
       reversalFilterSkipCount: engine.reversalFilterSkipCount,
+      postLossSkipWindows,
+      postLossSkipRemaining: engine.postLossSkipRemaining,
       currentStreakSide: engine.streakSide,
       currentStreakCount: engine.streakCount,
       realizedPnl: engine.realizedPnl, unrealizedPnl, equity,
@@ -683,6 +697,7 @@ function createEngine(cfg) {
     slog(`[hedgebot] 🪙 ${label} Signal-Model Engine — fully automatic`);
     slog(`[hedgebot] ⚙️  [${label}] Every window: candlestick-pattern + technical-indicator model predicts P(up). Bets $${baseBetDollars} flat when confidence clears ${(confidenceThreshold * 100).toFixed(0)}%, otherwise sits out. Starting bankroll (scoreboard only): $${startingCapital}. ${DRY_RUN ? 'DEMO' : 'LIVE'} mode.`);
     slog(`[hedgebot] ⚙️  [${label}] Reversal filter: after ${reversalStreakThreshold}+ consecutive wins on one side break with a loss, skips further same-side signals and waits for the first opposite-side signal — or gives up and resumes normal betting after ${reversalFilterTimeout} skipped windows, whichever comes first.`);
+    slog(`[hedgebot] ⚙️  [${label}] Post-loss cooldown: after ANY loss (regardless of side or streak), skips the next ${postLossSkipWindows} window(s) unconditionally, then resumes normal betting.`);
     if (savedStats) {
       slog(`[hedgebot] 💾 [${label}] Restored saved stats from a previous run — bankroll $${engine.bankroll.toFixed(2)}, ${engine.wins}W/${engine.losses}L.`);
     } else if (statsStatePath) {
