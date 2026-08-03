@@ -173,15 +173,12 @@ app.get('/', (_, res) => {
   function modelBoxHtml(m, s) {
     if (!m) return '';
     const top = (m.topWeights || []).slice(0, 4).map(w => w.feature + ' (' + w.weight + ')').join(', ');
-    const cooldownLine = s.postLossSkipRemaining > 0
-      ? '<br>🧊 Post-loss cooldown — ' + s.postLossSkipRemaining + ' of ' + s.postLossSkipWindows + ' window(s) remaining before betting resumes'
+    const forcedLine = s.forcedRemaining > 0
+      ? '<br>🔁 Forced ' + (s.forcedSide || '').toUpperCase() + ' bet active — ' + s.forcedRemaining + ' of ' + s.forcedOppositeWindows + ' window(s) remaining (ignoring confidence)'
       : '';
-    const filterLine = s.reversalFilterActive
-      ? '<br>🔀 Reversal filter ACTIVE — skipping ' + s.reversalFilterSide.toUpperCase() + ' signals, waiting for ' + (s.reversalFilterSide === 'up' ? 'DOWN' : 'UP') + ' (skip ' + s.reversalFilterSkipCount + '/' + s.reversalFilterTimeout + ' before auto-resume)'
-      : (s.currentStreakCount > 0 ? '<br>Current streak: ' + s.currentStreakCount + ' ' + (s.currentStreakSide || '').toUpperCase() + ' win(s) in a row' : '');
     return '<div class="model-box">🧠 Model: ' + m.updates + ' learning steps so far' +
       (m.accuracy != null ? ' · running accuracy ' + fmtPct(m.accuracy) : '') +
-      (top ? '<br>Top weighted features: ' + top : '') + cooldownLine + filterLine + '</div>';
+      (top ? '<br>Top weighted features: ' + top : '') + forcedLine + '</div>';
   }
 
   function panelHtml(key, title, s) {
