@@ -25,6 +25,7 @@ const CONFIDENCE_5M = Number(process.env.CONFIDENCE_THRESHOLD_5M || process.env.
 const CONFIDENCE_15M = Number(process.env.CONFIDENCE_THRESHOLD_15M || process.env.CONFIDENCE_THRESHOLD || 0.55);
 const REVERSAL_STREAK_THRESHOLD = Number(process.env.REVERSAL_STREAK_THRESHOLD || 3);
 const REVERSAL_FILTER_TIMEOUT = Number(process.env.REVERSAL_FILTER_TIMEOUT || 3);
+const POST_LOSS_SKIP_WINDOWS = Number(process.env.POST_LOSS_SKIP_WINDOWS || 2);
 
 let trader = null;
 let engines = null;
@@ -45,6 +46,7 @@ async function init(privateKey, emit, slogFn) {
     confidenceThreshold: CONFIDENCE_5M,
     reversalStreakThreshold: REVERSAL_STREAK_THRESHOLD,
     reversalFilterTimeout: REVERSAL_FILTER_TIMEOUT,
+    postLossSkipWindows: POST_LOSS_SKIP_WINDOWS,
     trader,
     dryRun: DRY_RUN,
   });
@@ -61,6 +63,7 @@ async function init(privateKey, emit, slogFn) {
     confidenceThreshold: CONFIDENCE_15M,
     reversalStreakThreshold: REVERSAL_STREAK_THRESHOLD,
     reversalFilterTimeout: REVERSAL_FILTER_TIMEOUT,
+    postLossSkipWindows: POST_LOSS_SKIP_WINDOWS,
     trader,
     dryRun: DRY_RUN,
   });
