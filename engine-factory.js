@@ -61,6 +61,8 @@ function createEngine(cfg) {
     baseBetDollars = 100,
     confidenceThreshold = 0.55,
     forcedOppositeWindows = 2,
+    entryPriceThreshold = 0.33,
+    entryWaitSec = 60,
     minOrderShares = 5,
     highConfPrice = 0.90,
     resolutionFallbackMs = 60000,
@@ -513,7 +515,7 @@ function createEngine(cfg) {
       trade = freshTrade(windowTs, decision);
       engine.current.btc = trade;
       const signalMsg = decision.side
-        ? `signal: ${decision.side.toUpperCase()} (confidence ${(decision.probUp * 100).toFixed(1)}%) → will bet $${baseBetDollars}`
+        ? `signal: ${decision.side.toUpperCase()} (confidence ${(decision.probUp * 100).toFixed(1)}%) → will wait for $${entryPriceThreshold} or ${entryWaitSec}s, then bet $${baseBetDollars}`
         : `no bet this window (${decision.reason})`;
       log(`🆕 new window t=${windowTs} — discovering market… ${signalMsg}`);
     }
@@ -526,7 +528,16 @@ function createEngine(cfg) {
 
     if (trade.state === 'trading') {
       if (engine.tradingEnabled && now < trade.closeAt && trade.decision.side && !trade.betPlaced) {
-        await placeSignalBet(trade);
+        const elapsedSec = Math.floor((now - trade.windowTs * 1000) / 1000);
+        const ask = trade.decision.side === 'up' ? trade.leg.upAsk : trade.leg.downAsk;
+        const priceReady = ask != null && ask <= entryPriceThreshold;
+        const timeUp = elapsedSec >= entryWaitSec;
+        if (priceReady || timeUp) {
+          if (timeUp && !priceReady) {
+            log(`⏱️  [${trade.leg.slug}] entry price never reached $${entryPriceThreshold} within ${entryWaitSec}s — buying ${trade.decision.side.toUpperCase()} at market ($${ask != null ? ask.toFixed(3) : '—'})`);
+          }
+          await placeSignalBet(trade);
+        }
       }
     }
   }
@@ -589,6 +600,7 @@ function createEngine(cfg) {
   }
   function tradeSummary(trade) {
     if (!trade) return null;
+    const elapsedSec = Math.max(0, Math.floor((Date.now() - trade.windowTs * 1000) / 1000));
     return {
       windowTs: trade.windowTs, closeAt: trade.closeAt, state: trade.state,
       leg: legSummary(trade.leg),
@@ -596,6 +608,8 @@ function createEngine(cfg) {
       confidence: round2(trade.decision.probUp),
       skipReason: trade.decision.side ? trade.skipReason : trade.decision.reason,
       betPlaced: trade.betPlaced,
+      waitingForEntry: trade.decision.side && !trade.betPlaced,
+      secondsToEntryTimeout: Math.max(0, entryWaitSec - elapsedSec),
       position: trade.position ? { shares: trade.position.shares, cost: trade.position.cost, entryPrice: trade.position.entryPrice } : null,
       pnl: trade.pnl,
       unrealizedPnl: unrealizedForTrade(trade),
@@ -616,6 +630,7 @@ function createEngine(cfg) {
       baseBetDollars,
       confidenceThreshold,
       forcedOppositeWindows,
+      entryPriceThreshold, entryWaitSec,
       forcedSide: engine.forcedSide,
       forcedRemaining: engine.forcedRemaining,
       realizedPnl: engine.realizedPnl, unrealizedPnl, equity,
@@ -656,6 +671,7 @@ function createEngine(cfg) {
     slog(`[hedgebot] 🪙 ${label} Signal-Model Engine — fully automatic`);
     slog(`[hedgebot] ⚙️  [${label}] Every window: candlestick-pattern + technical-indicator model predicts P(up). Bets $${baseBetDollars} flat when confidence clears ${(confidenceThreshold * 100).toFixed(0)}%, otherwise sits out. Starting bankroll (scoreboard only): $${startingCapital}. ${DRY_RUN ? 'DEMO' : 'LIVE'} mode.`);
     slog(`[hedgebot] ⚙️  [${label}] After any loss: bets the OPPOSITE side for the next ${forcedOppositeWindows} window(s) regardless of confidence, then resumes normal confidence-based betting.`);
+    slog(`[hedgebot] ⚙️  [${label}] Entry timing: waits for the chosen side's price to reach $${entryPriceThreshold} within the first ${entryWaitSec}s of the window; if it never gets there, buys at market once ${entryWaitSec}s is up.`);
     if (savedStats) {
       slog(`[hedgebot] 💾 [${label}] Restored saved stats from a previous run — bankroll $${engine.bankroll.toFixed(2)}, ${engine.wins}W/${engine.losses}L.`);
     } else if (statsStatePath) {
