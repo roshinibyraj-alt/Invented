@@ -116,22 +116,12 @@ function createEngine(cfg) {
     // regardless of what the model's confidence says.
     forcedSide: null,       // 'up' | 'down' | null
     forcedRemaining: 0,
-    // Tiered loss-recovery sizing: index 0 = base ($50). 3 consecutive losses
-    // at a tier escalates to the next; that tier's own cumulative P&L hitting
-    // its target drops all the way back to tier 0.
-    tierIndex: 0,
-    tierConsecLosses: 0,
-    tierPnl: 0,
+    // Linear step sizing: +$50 after every loss, -$50 after every win, floored at baseBetDollars.
+    currentBet: baseBetDollars,
     totalFeesPaid: 0,
     totalRebatesEarned: 0,
     totalVolume: 0,
   };
-
-  const tierLadder = [
-    { bet: baseBetDollars, target: null },
-    { bet: baseBetDollars * 3, target: baseBetDollars * 3 },   // $150, recover +$150
-    { bet: baseBetDollars * 10, target: baseBetDollars * 10 }, // $500, recover +$500
-  ];
 
   // Polymarket taker fee: fee = shares * theta * price * (1-price). Crypto
   // category theta = 0.07 by default. Only takers pay (this bot is always a
@@ -143,7 +133,7 @@ function createEngine(cfg) {
     return shares * feeTheta * price * (1 - price);
   }
   function currentBetSize() {
-    return tierLadder[engine.tierIndex].bet;
+    return engine.currentBet;
   }
 
   function saveStats() {
@@ -443,11 +433,11 @@ function createEngine(cfg) {
     engine.totalRebatesEarned = round2(engine.totalRebatesEarned + rebate);
     engine.totalVolume = round2(engine.totalVolume + notional);
 
-    trade.position = { shares: filledShares, cost, notional, fee, rebate, netFee, entryPrice: avgPrice, ts: Date.now(), tierBet: wagerDollars, tierIndex: engine.tierIndex };
+    trade.position = { shares: filledShares, cost, notional, fee, rebate, netFee, entryPrice: avgPrice, ts: Date.now(), betSize: wagerDollars };
     engine.bankroll = round2(engine.bankroll - cost);
 
-    registerTrade({ slug: leg.slug, step: `${side.toUpperCase()} signal bet (tier ${engine.tierIndex}, $${wagerDollars})`, side, price: avgPrice, shares: filledShares, cost, confidence: round2(trade.decision.probUp) });
-    log(`✅ [${leg.slug}] ${side.toUpperCase()} bet placed (confidence ${(trade.decision.probUp * 100).toFixed(1)}%, tier ${engine.tierIndex} $${wagerDollars}) — ${filledShares.toFixed(2)}sh @${avgPrice.toFixed(3)} (notional $${notional.toFixed(2)} + fee $${netFee.toFixed(2)} = $${cost.toFixed(2)}) | bankroll $${engine.bankroll.toFixed(2)}`);
+    registerTrade({ slug: leg.slug, step: `${side.toUpperCase()} signal bet ($${wagerDollars})`, side, price: avgPrice, shares: filledShares, cost, confidence: round2(trade.decision.probUp) });
+    log(`✅ [${leg.slug}] ${side.toUpperCase()} bet placed (confidence ${(trade.decision.probUp * 100).toFixed(1)}%, $${wagerDollars}) — ${filledShares.toFixed(2)}sh @${avgPrice.toFixed(3)} (notional $${notional.toFixed(2)} + fee $${netFee.toFixed(2)} = $${cost.toFixed(2)}) | bankroll $${engine.bankroll.toFixed(2)}`);
     recordEquity();
   }
 
@@ -505,28 +495,18 @@ function createEngine(cfg) {
       log(`🔁 loss recorded on ${side.toUpperCase()} — forcing ${opposite.toUpperCase()} bets for the next ${forcedOppositeWindows} window(s), regardless of confidence`);
     }
 
-    // Tiered loss-recovery sizing (independent of the forced-opposite rule above).
-    if (engine.tierIndex > 0) engine.tierPnl = round2(engine.tierPnl + pnl);
+    // Linear step sizing (independent of the forced-opposite rule above):
+    // +$50 after every loss, -$50 after every win, floored at baseBetDollars.
+    const prevBet = engine.currentBet;
     if (win) {
-      engine.tierConsecLosses = 0;
-      if (engine.tierIndex > 0 && engine.tierPnl >= tierLadder[engine.tierIndex].target) {
-        log(`📉 tier ${engine.tierIndex} ($${tierLadder[engine.tierIndex].bet}) recovered +$${engine.tierPnl.toFixed(2)} (target $${tierLadder[engine.tierIndex].target}) — dropping back to tier 0 ($${tierLadder[0].bet})`);
-        engine.tierIndex = 0;
-        engine.tierPnl = 0;
-        engine.tierConsecLosses = 0;
-      }
+      engine.currentBet = Math.max(baseBetDollars, round2(engine.currentBet - 50));
     } else {
-      engine.tierConsecLosses++;
-      if (engine.tierConsecLosses >= 3 && engine.tierIndex + 1 < tierLadder.length) {
-        const nextTier = engine.tierIndex + 1;
-        log(`📈 3 consecutive losses at tier ${engine.tierIndex} ($${tierLadder[engine.tierIndex].bet}) — escalating to tier ${nextTier} ($${tierLadder[nextTier].bet}), needs +$${tierLadder[nextTier].target} to recover`);
-        engine.tierIndex = nextTier;
-        engine.tierConsecLosses = 0;
-        engine.tierPnl = 0;
-      } else if (engine.tierConsecLosses >= 3) {
-        log(`⚠️  3+ consecutive losses at the highest configured tier ($${tierLadder[engine.tierIndex].bet}) — no higher tier defined, staying here`);
-      }
+      engine.currentBet = round2(engine.currentBet + 50);
     }
+    if (engine.currentBet !== prevBet) {
+      log(`${win ? '📉' : '📈'} ${win ? 'win' : 'loss'} recorded — bet size ${win ? 'reduced' : 'increased'} $${prevBet} → $${engine.currentBet}`);
+    }
+
 
     trade.pnl = pnl;
     trade.state = 'resolved';
@@ -693,11 +673,8 @@ function createEngine(cfg) {
       confidenceThreshold,
       forcedOppositeWindows,
       entryPriceThreshold, entryWaitSec,
-      tierIndex: engine.tierIndex,
+      baseBetDollars,
       currentBetSize: currentBetSize(),
-      tierPnl: engine.tierPnl,
-      tierTarget: engine.tierIndex > 0 ? tierLadder[engine.tierIndex].target : null,
-      tierConsecLosses: engine.tierConsecLosses,
       totalFeesPaid: engine.totalFeesPaid,
       totalRebatesEarned: engine.totalRebatesEarned,
       totalVolume: engine.totalVolume,
@@ -743,7 +720,7 @@ function createEngine(cfg) {
     slog(`[hedgebot] ⚙️  [${label}] Every window: candlestick-pattern + technical-indicator model predicts P(up). Bets $${baseBetDollars} flat when confidence clears ${(confidenceThreshold * 100).toFixed(0)}%, otherwise sits out. Starting bankroll (scoreboard only): $${startingCapital}. ${DRY_RUN ? 'DEMO' : 'LIVE'} mode.`);
     slog(`[hedgebot] ⚙️  [${label}] After any loss: bets the OPPOSITE side for the next ${forcedOppositeWindows} window(s) regardless of confidence, then resumes normal confidence-based betting.`);
     slog(`[hedgebot] ⚙️  [${label}] Entry timing: waits for the chosen side's price to reach $${entryPriceThreshold} within the first ${entryWaitSec}s of the window; if it never gets there, buys at market once ${entryWaitSec}s is up.`);
-    slog(`[hedgebot] ⚙️  [${label}] Tiered sizing: base $${tierLadder[0].bet}. 3 consecutive losses at a tier escalates to the next ($${tierLadder[1] ? tierLadder[1].bet : '—'} then $${tierLadder[2] ? tierLadder[2].bet : '—'}); recovering +$${tierLadder[1] ? tierLadder[1].target : '—'} (or +$${tierLadder[2] ? tierLadder[2].target : '—'}) drops straight back to base.`);
+    slog(`[hedgebot] ⚙️  [${label}] Linear step sizing: base $${baseBetDollars}. Bet size increases $50 after every loss, decreases $50 after every win, floored at $${baseBetDollars}.`);
     slog(`[hedgebot] ⚙️  [${label}] Fees: Polymarket taker fee = shares × ${feeTheta} × price × (1-price) (crypto category), ${rebatePct > 0 ? (rebatePct * 100).toFixed(0) + '% rebate applied' : 'no rebate configured'}. Exact rebate tier isn't published by Polymarket — set REBATE_PCT once you know yours.`);
     if (savedStats) {
       slog(`[hedgebot] 💾 [${label}] Restored saved stats from a previous run — bankroll $${engine.bankroll.toFixed(2)}, ${engine.wins}W/${engine.losses}L.`);
