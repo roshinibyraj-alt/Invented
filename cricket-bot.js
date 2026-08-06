@@ -19,13 +19,19 @@ const DRY_RUN = (process.env.HEDGE_DRY_RUN || process.env.SPORTS_DRY_RUN || proc
 
 const CAPITAL_5M = Number(process.env.CAPITAL_5M || process.env.STARTING_CAPITAL_5M || 2000);
 const CAPITAL_15M = Number(process.env.CAPITAL_15M || process.env.STARTING_CAPITAL_15M || 2000);
-const BASE_BET_5M = Number(process.env.BASE_BET_5M || 100);
-const BASE_BET_15M = Number(process.env.BASE_BET_15M || 100);
+const BASE_BET_5M = Number(process.env.BASE_BET_5M || 50);
+const BASE_BET_15M = Number(process.env.BASE_BET_15M || 50);
 const CONFIDENCE_5M = Number(process.env.CONFIDENCE_THRESHOLD_5M || process.env.CONFIDENCE_THRESHOLD || 0.55);
 const CONFIDENCE_15M = Number(process.env.CONFIDENCE_THRESHOLD_15M || process.env.CONFIDENCE_THRESHOLD || 0.55);
 const FORCED_OPPOSITE_WINDOWS = Number(process.env.FORCED_OPPOSITE_WINDOWS || 2);
 const ENTRY_PRICE_THRESHOLD = Number(process.env.ENTRY_PRICE_THRESHOLD || 0.33);
-const ENTRY_WAIT_SEC = Number(process.env.ENTRY_WAIT_SEC || 60);
+// Entry wait is proportional to window length: 60s for 5m, 3x that (180s) for 15m.
+const ENTRY_WAIT_SEC_5M = Number(process.env.ENTRY_WAIT_SEC_5M || process.env.ENTRY_WAIT_SEC || 60);
+const ENTRY_WAIT_SEC_15M = Number(process.env.ENTRY_WAIT_SEC_15M || ENTRY_WAIT_SEC_5M * 3);
+// Polymarket taker fee: fee = shares * theta * price * (1-price). Crypto category theta = 0.07.
+const FEE_THETA = Number(process.env.FEE_THETA || 0.07);
+// Taker rebate is a flat approximation - Polymarket's exact tiered schedule isn't public.
+const REBATE_PCT = Number(process.env.REBATE_PCT || 0);
 
 let trader = null;
 let engines = null;
@@ -46,7 +52,9 @@ async function init(privateKey, emit, slogFn) {
     confidenceThreshold: CONFIDENCE_5M,
     forcedOppositeWindows: FORCED_OPPOSITE_WINDOWS,
     entryPriceThreshold: ENTRY_PRICE_THRESHOLD,
-    entryWaitSec: ENTRY_WAIT_SEC,
+    entryWaitSec: ENTRY_WAIT_SEC_5M,
+    feeTheta: FEE_THETA,
+    rebatePct: REBATE_PCT,
     trader,
     dryRun: DRY_RUN,
   });
@@ -63,7 +71,9 @@ async function init(privateKey, emit, slogFn) {
     confidenceThreshold: CONFIDENCE_15M,
     forcedOppositeWindows: FORCED_OPPOSITE_WINDOWS,
     entryPriceThreshold: ENTRY_PRICE_THRESHOLD,
-    entryWaitSec: ENTRY_WAIT_SEC,
+    entryWaitSec: ENTRY_WAIT_SEC_15M,
+    feeTheta: FEE_THETA,
+    rebatePct: REBATE_PCT,
     trader,
     dryRun: DRY_RUN,
   });
