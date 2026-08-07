@@ -177,7 +177,8 @@ app.get('/', (_, res) => {
     const forcedLine = s.forcedRemaining > 0
       ? '<br>🔁 Forced ' + (s.forcedSide || '').toUpperCase() + ' bet active — ' + s.forcedRemaining + ' of ' + s.forcedOppositeWindows + ' window(s) remaining (ignoring confidence)'
       : '';
-    const betSizeLine = '<br>Current bet size: $' + s.currentBetSize + (s.currentBetSize > s.baseBetDollars ? ' (base $' + s.baseBetDollars + ' + losses)' : ' (base)');
+    const betSizeLine = '<br>Current bet size: $' + s.currentBetSize + (s.currentBetSize > s.baseBetDollars ? ' (base $' + s.baseBetDollars + ' + losses)' : ' (base)') +
+      '<br>Profit-anchor reset at bankroll $' + fmt2(s.nextResetAt);
     const feeLine = '<br>Fees paid: $' + fmt2(s.totalFeesPaid) + (s.totalRebatesEarned > 0 ? ' (rebated $' + fmt2(s.totalRebatesEarned) + ')' : '') + ' on $' + fmt2(s.totalVolume) + ' volume';
     return '<div class="model-box">🧠 Model: ' + m.updates + ' learning steps so far' +
       (m.accuracy != null ? ' · running accuracy ' + fmtPct(m.accuracy) : '') +
