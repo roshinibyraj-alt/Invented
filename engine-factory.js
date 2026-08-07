@@ -117,7 +117,8 @@ function createEngine(cfg) {
     forcedSide: null,       // 'up' | 'down' | null
     forcedRemaining: 0,
     // Linear step sizing: +$50 after every loss, -$50 after every win, floored at baseBetDollars.
-    currentBet: baseBetDollars,
+    currentBet: savedStats && typeof savedStats.currentBet === 'number' ? savedStats.currentBet : baseBetDollars,
+    profitAnchor: savedStats && typeof savedStats.profitAnchor === 'number' ? savedStats.profitAnchor : startingCapital,
     totalFeesPaid: 0,
     totalRebatesEarned: 0,
     totalVolume: 0,
@@ -147,6 +148,8 @@ function createEngine(cfg) {
         skipped: engine.skipped,
         history: engine.history.slice(0, 100),
         equityCurve: engine.equityCurve.slice(-200),
+        currentBet: engine.currentBet,
+        profitAnchor: engine.profitAnchor,
         savedAt: Date.now(),
       }));
     } catch (_) {}
@@ -507,6 +510,19 @@ function createEngine(cfg) {
       log(`${win ? '📉' : '📈'} ${win ? 'win' : 'loss'} recorded — bet size ${win ? 'reduced' : 'increased'} $${prevBet} → $${engine.currentBet}`);
     }
 
+    // Profit-anchor reset: whenever bankroll climbs to (anchor + baseBetDollars)
+    // or beyond, snap the bet size straight back to the floor and re-anchor to
+    // the new bankroll - so the next reset threshold becomes bankroll+base again.
+    if (engine.bankroll >= engine.profitAnchor + baseBetDollars) {
+      const oldAnchor = engine.profitAnchor;
+      engine.profitAnchor = engine.bankroll;
+      if (engine.currentBet !== baseBetDollars) {
+        log(`💰 bankroll reached $${engine.bankroll.toFixed(2)} (anchor $${oldAnchor.toFixed(2)} + $${baseBetDollars}) — resetting bet size $${engine.currentBet} → $${baseBetDollars}, new anchor $${engine.bankroll.toFixed(2)}`);
+        engine.currentBet = baseBetDollars;
+      }
+    }
+
+
 
     trade.pnl = pnl;
     trade.state = 'resolved';
@@ -675,6 +691,8 @@ function createEngine(cfg) {
       entryPriceThreshold, entryWaitSec,
       baseBetDollars,
       currentBetSize: currentBetSize(),
+      profitAnchor: engine.profitAnchor,
+      nextResetAt: round2(engine.profitAnchor + baseBetDollars),
       totalFeesPaid: engine.totalFeesPaid,
       totalRebatesEarned: engine.totalRebatesEarned,
       totalVolume: engine.totalVolume,
@@ -721,6 +739,7 @@ function createEngine(cfg) {
     slog(`[hedgebot] ⚙️  [${label}] After any loss: bets the OPPOSITE side for the next ${forcedOppositeWindows} window(s) regardless of confidence, then resumes normal confidence-based betting.`);
     slog(`[hedgebot] ⚙️  [${label}] Entry timing: waits for the chosen side's price to reach $${entryPriceThreshold} within the first ${entryWaitSec}s of the window; if it never gets there, buys at market once ${entryWaitSec}s is up.`);
     slog(`[hedgebot] ⚙️  [${label}] Linear step sizing: base $${baseBetDollars}. Bet size increases $50 after every loss, decreases $50 after every win, floored at $${baseBetDollars}.`);
+    slog(`[hedgebot] ⚙️  [${label}] Profit-anchor reset: whenever bankroll reaches (anchor + $${baseBetDollars}), bet size snaps straight back to $${baseBetDollars} and the anchor re-pins to that new bankroll level. Starting anchor: $${engine.profitAnchor.toFixed(2)}.`);
     slog(`[hedgebot] ⚙️  [${label}] Fees: Polymarket taker fee = shares × ${feeTheta} × price × (1-price) (crypto category), ${rebatePct > 0 ? (rebatePct * 100).toFixed(0) + '% rebate applied' : 'no rebate configured'}. Exact rebate tier isn't published by Polymarket — set REBATE_PCT once you know yours.`);
     if (savedStats) {
       slog(`[hedgebot] 💾 [${label}] Restored saved stats from a previous run — bankroll $${engine.bankroll.toFixed(2)}, ${engine.wins}W/${engine.losses}L.`);
