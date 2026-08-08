@@ -16,8 +16,9 @@
  *  - If a 5m bet WINS: its profit (payout - cost) is rolled into the
  *    15m window it was opened under (buying more of those shares), but
  *    only while that 15m window is still open — never the next one.
- *  - If a 5m bet LOSES: the next TWO 5m windows are skipped (no bets),
- *    then betting resumes.
+ *  - 5m bets are NEVER skipped: every 15m open bets the 5m window in the
+ *    opposite direction, win or lose. A 5m loss just runs the 15m window
+ *    unhedged to resolution.
  *
  *  All buys are immediate taker orders placed as soon as the window's
  *  market is discovered. Dry-run mode simulates fills at the ask.
@@ -26,7 +27,6 @@
 
 const fs = require('fs');
 const { createCandleFeed } = require('./candles');
-const { predictNextDirection } = require('./three-candle-model');
 
 const GAMMA = 'https://gamma-api.polymarket.com';
 const CLOB  = 'https://clob.polymarket.com';
@@ -44,16 +44,6 @@ const DEFAULT_window5  = 300;
 
 function round2(n) { return Math.round(n * 100) / 100; }
 function sgn2(n) { return (n >= 0 ? '+$' : '-$') + Math.abs(n).toFixed(2); }
-
-/**
- * Pure 5m skip logic (exported for testing):
- * with `skipRemaining` windows still to skip, this window is skipped and
- * the counter decrements; otherwise the window is bet on.
- */
-function next5mWindowAction(skipRemaining) {
-  if (skipRemaining > 0) return { bet: false, skipRemaining: skipRemaining - 1 };
-  return { bet: true, skipRemaining: 0 };
-}
 
 function createEngine(cfg) {
   const {
@@ -107,10 +97,8 @@ function createEngine(cfg) {
     losses15: savedStats ? savedStats.losses15 : 0,
     wins5: savedStats ? savedStats.wins5 : 0,
     losses5: savedStats ? savedStats.losses5 : 0,
-    skipped5: savedStats ? savedStats.skipped5 : 0,
     direction: savedStats ? savedStats.direction : null,
     lastOutcome15: savedStats ? savedStats.lastOutcome15 : null,
-    skipRemaining: savedStats ? savedStats.skipRemaining : 0,
     history15: savedStats && Array.isArray(savedStats.history15) ? savedStats.history15 : [],
     history5: savedStats && Array.isArray(savedStats.history5) ? savedStats.history5 : [],
     trades15: [],
@@ -141,10 +129,8 @@ function createEngine(cfg) {
         realizedPnl5: engine.realizedPnl5,
         wins15: engine.wins15, losses15: engine.losses15,
         wins5: engine.wins5, losses5: engine.losses5,
-        skipped5: engine.skipped5,
         direction: engine.direction,
         lastOutcome15: engine.lastOutcome15,
-        skipRemaining: engine.skipRemaining,
         history15: engine.history15.slice(0, 100),
         history5: engine.history5.slice(0, 100),
         equityCurve: engine.equityCurve.slice(-200),
@@ -423,7 +409,6 @@ function createEngine(cfg) {
       leg: freshLeg(windowTs, window5, 'btc-updown-5m-'),
       parent15WindowTs: Math.floor(windowTs / window15) * window15,
       side,
-      skipped: false,
       position: null,
       state: 'discovering',
       betPlaced: false,
@@ -536,26 +521,9 @@ function createEngine(cfg) {
         engine.current.m5 = null;
         return;
       }
-      const action = next5mWindowAction(engine.skipRemaining);
-      engine.skipRemaining = action.skipRemaining;
       t = freshTrade5(windowTs);
-      t.skipped = !action.bet;
       engine.current.m5 = t;
-      if (t.skipped) {
-        // No bet -> nothing to resolve: settle immediately (winner unknown).
-        t.state = 'skipped';
-        t.settled = true;
-        engine.skipped5++;
-        engine.history5.unshift({
-          windowTs: t.windowTs, slug: t.leg.slug, winner: null, resolutionMethod: 'skipped',
-          side: null, skipped: true, win: null,
-          wager: 0, shares: 0, pnl: 0, bankrollAfter: engine.bankroll, resolvedAt: Date.now(),
-        });
-        if (engine.history5.length > 300) engine.history5.pop();
-        log(`⏭ 5m window t=${windowTs} SKIPPED (after 5m loss — ${engine.skipRemaining} more 5m windows to skip after this)`);
-      } else {
-        log(`🆕 5m window t=${windowTs} (15m open) — betting ${t.side.toUpperCase()} $${baseBet5m.toFixed(2)} (opposite of 15m ${engine.direction ? engine.direction.toUpperCase() : 'n/a'})`);
-      }
+      log(`🆕 5m window t=${windowTs} (15m open) — betting ${t.side.toUpperCase()} $${baseBet5m.toFixed(2)} (opposite of 15m ${engine.direction ? engine.direction.toUpperCase() : 'n/a'})`);
     }
 
     if (t && t.state === 'discovering' && now - t.leg.lastDiscoveryAttempt >= DISCOVERY_RETRY_MS) {
@@ -603,18 +571,17 @@ function createEngine(cfg) {
   async function settle5(t) {
     const leg = t.leg;
     const winner = leg.winner || '?';
-    if (t.skipped || !t.position) {
+    if (!t.position || !t.betPlaced) {
       t.state = 'resolved';
       t.settled = true;
       t.pnl = 0;
-      engine.skipped5++;
       engine.history5.unshift({
         windowTs: t.windowTs, slug: leg.slug, winner: leg.winner, resolutionMethod: leg.resolutionMethod,
-        side: t.skipped ? null : t.side, skipped: true, win: null,
+        side: t.side, skipped: false, win: null,
         wager: 0, shares: 0, pnl: 0, bankrollAfter: engine.bankroll, resolvedAt: Date.now(),
       });
       if (engine.history5.length > 300) engine.history5.pop();
-      log(`🏁 5m [${leg.slug}] resolved — winner ${winner.toUpperCase()} (${leg.resolutionMethod}) — ${t.skipped ? 'window was skipped (after 5m loss)' : 'no bet placed'}`);
+      log(`🏁 5m [${leg.slug}] resolved — winner ${winner.toUpperCase()} (${leg.resolutionMethod}) — no bet placed`);
       recordEquity();
       return;
     }
@@ -625,7 +592,7 @@ function createEngine(cfg) {
     engine.bankroll = round2(engine.bankroll + payout);
     engine.realizedPnl = round2(engine.realizedPnl + pnl);
     engine.realizedPnl5 = round2(engine.realizedPnl5 + pnl);
-    if (win) engine.wins5++; else { engine.losses5++; engine.skipRemaining = 2; }
+    if (win) engine.wins5++; else engine.losses5++;
     t.pnl = pnl;
     t.state = 'resolved';
     t.settled = true;
@@ -641,7 +608,7 @@ function createEngine(cfg) {
     if (win) {
       await roll5mProfitInto15m(pnl, t);
     } else {
-      log(`⏭ 5m loss — 15m is in favor, skipping the next two 5m windows (next two 15m opens)`);
+      log(`⏭ 5m loss — no roll; next 15m open will bet its 5m window again regardless`);
     }
     recordEquity();
   }
@@ -712,9 +679,6 @@ function createEngine(cfg) {
   }
 
   // ── dashboard state ───────────────────────────────────────────────
-  function refPred(feed) {
-    return predictNextDirection(feed.getCandles());
-  }
   function legSummary(leg) {
     if (!leg) return null;
     return {
@@ -736,14 +700,11 @@ function createEngine(cfg) {
   }
   function tradeSummary15(t) {
     if (!t) return null;
-    const pred = refPred(candles15);
     return {
       windowTs: t.windowTs, closeAt: t.closeAt, state: t.state,
       leg: legSummary(t.leg),
       signalSide: t.direction,
       signalNote: 'follows last 15m outcome',
-      confidence: round2(pred.confidence),
-      model: pred,
       betPlaced: t.betPlaced,
       skipReason: t.direction ? null : 'no direction',
       position: t.position ? { shares: t.position.shares, cost: t.position.cost, entryPrice: round2(t.position.cost / t.position.shares), buys: t.buys } : null,
@@ -753,16 +714,13 @@ function createEngine(cfg) {
   }
   function tradeSummary5(t) {
     if (!t) return null;
-    const pred = refPred(candles5);
     return {
       windowTs: t.windowTs, closeAt: t.closeAt, state: t.state,
       leg: legSummary(t.leg),
-      signalSide: t.skipped ? null : t.side,
+      signalSide: t.side,
       signalNote: 'opposite of 15m direction',
-      confidence: round2(pred.confidence),
-      model: pred,
       betPlaced: t.betPlaced,
-      skipReason: t.skipped ? `skipping after 5m loss — ${engine.skipRemaining} more after this` : (t.side ? null : 'no bet'),
+      skipReason: t.side ? null : 'no bet',
       position: t.position ? { shares: t.position.shares, cost: t.position.cost, entryPrice: round2(t.position.cost / t.position.shares) } : null,
       pnl: t.pnl,
       unrealizedPnl: unrealizedFor(t),
@@ -776,7 +734,6 @@ function createEngine(cfg) {
       bankroll: engine.bankroll,
       startingCapital,
       realizedPnlTotal: engine.realizedPnl,
-      skipRemaining: which === '5m' ? engine.skipRemaining : null,
       direction: engine.direction,
       totalFeesPaid: engine.totalFeesPaid,
       totalRebatesEarned: engine.totalRebatesEarned,
@@ -798,7 +755,6 @@ function createEngine(cfg) {
       winRate: totalDecided > 0 ? round2(engine.wins15 / totalDecided) : null,
       candleCount: candles15.count(),
       latestBtcPrice: candles15.latestClose(),
-      lastCandles: candles15.getCandles().slice(-3).map(k => ({ openTime: k.openTime, open: k.open, high: k.high, low: k.low, close: k.close, closeTime: k.closeTime, up: k.close >= k.open })),
       current: { btc: tradeSummary15(engine.current.m15) },
       pending: engine.pending15.map(tradeSummary15),
       history: engine.history15.slice(0, 60),
@@ -812,11 +768,10 @@ function createEngine(cfg) {
       label: 'BTC-5m', windowSeconds: window5,
       baseBetDollars: baseBet5m,
       realizedPnl: engine.realizedPnl5, unrealizedPnl: unrealizedFor(engine.current.m5), equity: round2(engine.bankroll + openPositionsMTM()),
-      wins: engine.wins5, losses: engine.losses5, skipped: engine.skipped5,
+      wins: engine.wins5, losses: engine.losses5, skipped: 0,
       winRate: totalDecided > 0 ? round2(engine.wins5 / totalDecided) : null,
       candleCount: candles5.count(),
       latestBtcPrice: candles5.latestClose(),
-      lastCandles: candles5.getCandles().slice(-3).map(k => ({ openTime: k.openTime, open: k.open, high: k.high, low: k.low, close: k.close, closeTime: k.closeTime, up: k.close >= k.open })),
       current: { btc: tradeSummary5(engine.current.m5) },
       pending: engine.pending5.map(tradeSummary5),
       history: engine.history5.slice(0, 60),
@@ -850,7 +805,7 @@ function createEngine(cfg) {
   async function start() {
     slog(`[hedgebot] 🪙 ${label} — 15m/5m hedge engine, fully automatic`);
     slog(`[hedgebot] ⚙️  Every 15m window: buy the 15m direction (follows the previous 15m outcome; first = UP) with $${baseBet15m.toFixed(2)}, immediately at open.`);
-    slog(`[hedgebot] ⚙️  At every 15m open, also buy that 5m window in the OPPOSITE direction with $${baseBet5m.toFixed(2)} (no 5m bets in between). 5m WIN → its profit (payout − cost) is rolled into the open 15m position. 5m LOSS → the next two 5m windows are skipped.`);
+    slog(`[hedgebot] ⚙️  At every 15m open, also buy that 5m window in the OPPOSITE direction with $${baseBet5m.toFixed(2)} (no 5m bets in between, never skipped). 5m WIN → its profit (payout − cost) is rolled into the open 15m position. 5m LOSS → no roll; the next 15m open bets its 5m window again.`);
     slog(`[hedgebot] ⚙️  One shared bankroll of $${engine.bankroll.toFixed(2)} across both markets.`);
     slog(`[hedgebot] ⚙️  Fees: Polymarket taker fee = shares × ${feeTheta} × price × (1-price) (crypto category), ${rebatePct > 0 ? (rebatePct * 100).toFixed(0) + '% rebate applied' : 'no rebate configured'}.`);
     if (savedStats) {
@@ -865,4 +820,4 @@ function createEngine(cfg) {
   return { start, pauseTrading, resumeTrading, setMode, buildState };
 }
 
-module.exports = { createEngine, next5mWindowAction };
+module.exports = { createEngine };

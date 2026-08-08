@@ -74,18 +74,6 @@ app.get('/', (_, res) => {
   .stat-val { font-size: 14px; font-weight: bold; color: #12202e; }
   .pnl-pos { color: var(--green) !important; }
   .pnl-neg { color: var(--red) !important; }
-  .model-box { background: var(--bg); border: 1px dashed var(--border); border-radius: 8px; padding: 8px 10px; margin-bottom: 10px; font-size: 9.5px; }
-  .candle-row { display: flex; gap: 8px; }
-  .candle-box { flex: 1; border-radius: 8px; padding: 8px 10px; border: 1px solid var(--border); background: var(--bg2); text-align: center; }
-  .candle-box.up { background: #00a85414; border-color: var(--green); }
-  .candle-box.down { background: #e8304a14; border-color: var(--red); }
-  .candle-num { font-size: 11px; font-weight: bold; margin-bottom: 4px; }
-  .candle-box.up .candle-num { color: var(--green); }
-  .candle-box.down .candle-num { color: var(--red); }
-  .candle-body { font-size: 10px; }
-  .candle-sub { font-size: 8px; color: var(--muted); margin-top: 2px; }
-  .candle-pred { margin-top: 8px; font-size: 10.5px; }
-  .candle-meta { margin-top: 3px; font-size: 8.5px; color: var(--muted); }
   .current-window { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; font-size: 10px; margin-bottom: 10px; }
   .current-window .headline { font-size: 12.5px; margin-bottom: 6px; padding-bottom: 6px; border-bottom: 1px dashed var(--border); }
   .current-window .row { display: flex; justify-content: space-between; padding: 2px 0; }
@@ -145,15 +133,15 @@ app.get('/', (_, res) => {
     let headline, betLine;
     if (!t.signalSide) {
       headline = '⏸ No bet this window';
-      betLine = '<span class="status-pill status-idle">' + (t.skipReason || 'no signal') + ' (confidence ' + fmtPct(t.confidence) + ')</span>';
+      betLine = '<span class="status-pill status-idle">' + (t.skipReason || 'no signal') + '</span>';
     } else if (t.position) {
-      headline = (t.signalSide === 'up' ? '🔵' : '🟣') + ' Trading ' + t.signalSide.toUpperCase() + ' — ' + (t.signalNote || '') + ' (3-candle ref ' + fmtPct(t.confidence) + ')';
+      headline = (t.signalSide === 'up' ? '🔵' : '🟣') + ' Trading ' + t.signalSide.toUpperCase() + ' — ' + (t.signalNote || '');
       betLine = '<span class="status-pill status-open">bought ' + t.position.shares.toFixed(2) + 'sh @' + fmtPx(t.position.entryPrice) + ' ($' + fmt2(t.position.cost) + ')</span>';
     } else if (t.betPlaced) {
       headline = '⏸ ' + t.signalSide.toUpperCase() + ' signal, but no bet placed';
       betLine = '<span class="status-pill status-idle">skipped — ' + (t.skipReason || 'no fill') + '</span>';
     } else {
-      headline = (t.signalSide === 'up' ? '🔵' : '🟣') + ' Signal: ' + t.signalSide.toUpperCase() + ' — ' + (t.signalNote || '') + ' (3-candle ref ' + fmtPct(t.confidence) + ')';
+      headline = (t.signalSide === 'up' ? '🔵' : '🟣') + ' Signal: ' + t.signalSide.toUpperCase() + ' — ' + (t.signalNote || '');
       const targetPrice = t.signalSide === 'up' ? (leg && leg.upAsk) : (leg && leg.downAsk);
       betLine = '<span class="status-pill status-resting">placing ' + t.signalSide.toUpperCase() + ' immediately at market' + (targetPrice != null ? ' — ask $' + fmtPx(targetPrice) : '') + '</span>';
     }
@@ -163,7 +151,6 @@ app.get('/', (_, res) => {
       '<div class="row"><span>State</span><span>' + t.state + '</span></div>' +
       '<div class="row"><span>Bet status</span>' + betLine + '</div>' +
       '<div class="row"><span>Live prices</span><span>UP ' + fmtPx(leg && leg.upAsk) + ' / DOWN ' + fmtPx(leg && leg.downAsk) + '</span></div>' +
-      (s.skipRemaining != null ? '<div class="row"><span>5m skip next</span><span>' + s.skipRemaining + ' window(s)</span></div>' : '') +
       (t.position ? '<div class="row"><span>Unrealized P&amp;L</span><span class="' + pClass(t.unrealizedPnl) + '">' + sgn(t.unrealizedPnl) + '</span></div>' : '') +
     '</div>';
   }
@@ -179,35 +166,6 @@ app.get('/', (_, res) => {
       '<td class="' + (h.win === true ? 'pnl-pos' : (h.win === false ? 'pnl-neg' : '')) + '">' + resultCell + '</td>' +
       '<td class="' + pClass(h.pnl) + '">' + sgn(h.pnl) + '</td></tr>';
     }).join('');
-  }
-
-  function candleModelHtml(s) {
-    const candles = s.lastCandles || [];
-    const t = s.current && s.current.btc;
-    const pred = t && t.model;
-    let candleRow;
-    if (!candles.length) {
-      candleRow = '<div class="candle-row"><div class="empty">Waiting for candles…</div></div>';
-    } else {
-      candleRow = '<div class="candle-row">' + candles.map((k, i) => {
-        const bull = k.up;
-        return '<div class="candle-box ' + (bull ? 'up' : 'down') + '">' +
-          '<div class="candle-num">' + (i + 1) + (bull ? ' ▲' : ' ▼') + '</div>' +
-          '<div class="candle-body">' + fmt2(k.open) + ' → ' + fmt2(k.close) + '</div>' +
-          '<div class="candle-sub">H ' + fmt2(k.high) + ' · L ' + fmt2(k.low) + '</div>' +
-        '</div>';
-      }).join('') + '</div>';
-    }
-    const predLine = pred && pred.side
-      ? '3-candle reference: <b>' + pred.side.toUpperCase() + '</b> — confidence ' + fmtPct(pred.confidence) + ' · score ' + pred.score +
-        (pred.sub ? ' (majority ' + pred.sub.majority + ' / momentum ' + pred.sub.momentum + ' / lastBody ' + pred.sub.lastBody + ')' : '')
-      : '3-candle reference: waiting for 3 closed candles';
-    const metaLine = 'Fixed bet: $' + fmt2(s.baseBetDollars) + ' per window' +
-      (s.totalFeesPaid > 0 ? ' · fees $' + fmt2(s.totalFeesPaid) + (s.totalRebatesEarned > 0 ? ' (rebate $' + fmt2(s.totalRebatesEarned) + ')' : '') : '');
-    return '<div class="model-box">' + candleRow +
-      '<div class="candle-pred">' + predLine + '</div>' +
-      '<div class="candle-meta">' + metaLine + '</div>' +
-    '</div>';
   }
 
   function panelHtml(key, title, s) {
@@ -228,7 +186,6 @@ app.get('/', (_, res) => {
           '<div class="stat"><div class="stat-label">Wins / Losses</div><div class="stat-val">' + s.wins + ' / ' + s.losses + '</div></div>' +
           '<div class="stat"><div class="stat-label">BTC Price</div><div class="stat-val">$' + fmt2(s.latestBtcPrice) + '</div></div>' +
         '</div>' +
-        candleModelHtml(s) +
         currentWindowHtml(s) +
         '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Window</th><th>Result</th><th>Bet</th><th>W/L</th><th>PnL</th></tr></thead>' +
         '<tbody>' + historyRowsHtml(s.history) + '</tbody></table></div>' +
