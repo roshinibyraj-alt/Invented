@@ -2,45 +2,29 @@
 
 /**
  * ═══════════════════════════════════════════════════════════════
- *  BTC SIGNAL-MODEL ENGINE FACTORY (learning version)
+ *  BTC 15m/5m HEDGE ENGINE (single combined strategy)
  * ═══════════════════════════════════════════════════════════════
  *
- *  Call createEngine(config) once per timeframe you want to trade
- *  independently (e.g. 5-minute and 15-minute) — each instance gets
- *  its own candle feed, its own learned model weights, its own
- *  bankroll, and its own win/loss stats.
+ *  One engine, one shared bankroll, two coupled markets:
  *
- *  STRATEGY (3-CANDLE RULE-BASED): every window bets the side picked by
- *  three-candle-model.js using ONLY the last 3 closed candles — a
- *  weighted vote of majority direction / net momentum / last-body
- *  strength. The predicted side is bet immediately on the window that
- *  opens as soon as those 3 candles have closed. Every window trades;
- *  nothing is ever skipped.
+ *  - Every 15m window: immediately buy the 15m direction with $150.
+ *    The 15m direction FOLLOWS the previous 15m resolved outcome
+ *    (previous UP -> UP, previous DOWN -> DOWN; first window = UP).
+ *  - Every 5m window: buy the OPPOSITE direction with $50
+ *    (15m UP -> 5m DOWN, 15m DOWN -> 5m UP).
+ *  - If a 5m bet WINS: its profit (payout - cost) is rolled into the
+ *    15m window it was opened under (buying more of those shares), but
+ *    only while that 15m window is still open — never the next one.
+ *  - If a 5m bet LOSES: the next TWO 5m windows are skipped (no bets),
+ *    then betting resumes.
  *
- *  The learned signal model (candlestick patterns, RSI, MACD, ATR,
- *  Bollinger, volume, SMA trend, streaks, time-of-day) still runs in
- *  the background — its prediction is shown on the dashboard and it
- *  keeps learning from every resolved window — but it never picks the
- *  side anymore.
- *
- *  ENTRY: IMMEDIATE — the position is taken as soon as the window's
- *  market is discovered. No entry-price wait, no timeout.
- *
- *  SIZING: linear step sizing stays — base $baseBetDollars per window,
- *  +$50 after a loss, -$50 after a win (floored at base), with the
- *  profit-anchor reset.
- *
- *  PERSISTENCE: model weights persist via signal-model.js's own
- *  statePath. Bankroll/wins/losses/history persist via statsStatePath
- *  here, so a plain restart (same deploy) loses nothing. A brand new
- *  Railway deploy still wipes both unless you attach a persistent
- *  volume and point the *_STATE_PATH env vars at it.
+ *  All buys are immediate taker orders placed as soon as the window's
+ *  market is discovered. Dry-run mode simulates fills at the ask.
  * ═══════════════════════════════════════════════════════════════
  */
 
 const fs = require('fs');
 const { createCandleFeed } = require('./candles');
-const { buildFeatures, createSignalModel } = require('./signal-model');
 const { predictNextDirection } = require('./three-candle-model');
 
 const GAMMA = 'https://gamma-api.polymarket.com';
@@ -50,43 +34,51 @@ const TICK_MS             = 500;
 const PRICE_REFRESH_MS    = 1000;
 const DISCOVERY_RETRY_MS  = 2000;
 const RESOLUTION_POLL_MS  = 3000;
+const MIN_ORDER_SHARES    = 5;
+const RESOLUTION_FALLBACK_MS = 60000;
+const HIGH_CONF_PRICE     = 0.90;
+
+const WINDOW_15M = 900;
+const WINDOW_5M  = 300;
 
 function round2(n) { return Math.round(n * 100) / 100; }
 function sgn2(n) { return (n >= 0 ? '+$' : '-$') + Math.abs(n).toFixed(2); }
 
+/**
+ * Pure 5m skip logic (exported for testing):
+ * with `skipRemaining` windows still to skip, this window is skipped and
+ * the counter decrements; otherwise the window is bet on.
+ */
+function next5mWindowAction(skipRemaining) {
+  if (skipRemaining > 0) return { bet: false, skipRemaining: skipRemaining - 1 };
+  return { bet: true, skipRemaining: 0 };
+}
+
 function createEngine(cfg) {
   const {
-    label,
-    windowSeconds,
-    slugPrefix,
-    binanceInterval,
-    modelStatePath,
-    statsStatePath,
-    startingCapital = 2000,
-    baseBetDollars = 50,
+    label = 'BTC-HEDGE',
+    startingCapital = 4000,
+    baseBet15m = 150,
+    baseBet5m = 50,
     feeTheta = 0.07,
     rebatePct = 0,
-    confidenceThreshold = 0.55,
-    forcedOppositeWindows = 2,
-    entryPriceThreshold = 0.33,
-    entryWaitSec = 60,
-    minOrderShares = 5,
-    highConfPrice = 0.90,
-    resolutionFallbackMs = 60000,
     candleRefreshMs = 15000,
     trader,
     dryRun = true,
+    startAtBoundary = true,
+    statsStatePath,
+    emit = () => {},
+    slog = () => {},
   } = cfg;
 
-  const candles = createCandleFeed({ interval: binanceInterval, maxCandles: 500, label });
-  const signalModel = createSignalModel({ statePath: modelStatePath });
+  const candles15 = createCandleFeed({ interval: '15m', maxCandles: 500, label: '15m' });
+  const candles5  = createCandleFeed({ interval: '5m', maxCandles: 500, label: '5m' });
 
   let DRY_RUN = dryRun;
-  let emitFn = () => {};
-  let slog = () => {};
   let warnedNoRestingMethod = false;
   let warnedNoCancelMethod = false;
-  let tradeSeq = 0;
+  let tradeSeq15 = 0;
+  let tradeSeq5 = 0;
 
   function loadStats() {
     if (!statsStatePath) return null;
@@ -103,44 +95,35 @@ function createEngine(cfg) {
     tradingEnabled: true,
     bankroll: savedStats ? savedStats.bankroll : startingCapital,
     realizedPnl: savedStats ? savedStats.realizedPnl : 0,
-    wins: savedStats ? savedStats.wins : 0,
-    losses: savedStats ? savedStats.losses : 0,
-    skipped: savedStats ? savedStats.skipped : 0,
-    current: { btc: null },
-    pending: [],
-    history: savedStats && Array.isArray(savedStats.history) ? savedStats.history : [],
+    realizedPnl15: savedStats ? savedStats.realizedPnl15 : 0,
+    realizedPnl5: savedStats ? savedStats.realizedPnl5 : 0,
+    wins15: savedStats ? savedStats.wins15 : 0,
+    losses15: savedStats ? savedStats.losses15 : 0,
+    wins5: savedStats ? savedStats.wins5 : 0,
+    losses5: savedStats ? savedStats.losses5 : 0,
+    skipped5: savedStats ? savedStats.skipped5 : 0,
+    direction: savedStats ? savedStats.direction : null,
+    lastOutcome15: savedStats ? savedStats.lastOutcome15 : null,
+    skipRemaining: savedStats ? savedStats.skipRemaining : 0,
+    history15: savedStats && Array.isArray(savedStats.history15) ? savedStats.history15 : [],
+    history5: savedStats && Array.isArray(savedStats.history5) ? savedStats.history5 : [],
+    trades15: [],
+    trades5: [],
     logs: [],
-    trades: [],
     equityCurve: savedStats && Array.isArray(savedStats.equityCurve) ? savedStats.equityCurve : [{ t: Date.now(), equity: startingCapital }],
+    current: { m15: null, m5: null },
+    pending15: [],
+    pending5: [],
     lastPriceFetch: 0,
     lastCandleRefresh: 0,
     lastResolutionPoll: 0,
     waitingForBoundary: true,
     boundaryWindowTs: null,
-    // After any loss, forces betting the opposite side for the next N windows,
-    // regardless of what the model's confidence says.
-    forcedSide: null,       // 'up' | 'down' | null
-    forcedRemaining: 0,
-    // Linear step sizing: +$50 after every loss, -$50 after every win, floored at baseBetDollars.
-    currentBet: savedStats && typeof savedStats.currentBet === 'number' ? savedStats.currentBet : baseBetDollars,
-    profitAnchor: savedStats && typeof savedStats.profitAnchor === 'number' ? savedStats.profitAnchor : startingCapital,
-    totalFeesPaid: 0,
-    totalRebatesEarned: 0,
-    totalVolume: 0,
+    totalFeesPaid: savedStats ? savedStats.totalFeesPaid || 0 : 0,
+    totalRebatesEarned: savedStats ? savedStats.totalRebatesEarned || 0 : 0,
+    totalVolume: savedStats ? savedStats.totalVolume || 0 : 0,
   };
-
-  // Polymarket taker fee: fee = shares * theta * price * (1-price). Crypto
-  // category theta = 0.07 by default. Only takers pay (this bot is always a
-  // taker via immediate FOK buys). Rebate is a flat configurable percentage
-  // of the fee - Polymarket's exact tiered rebate schedule isn't fully
-  // published, so this is a deliberately simple approximation, not a
-  // fabricated curve. Set rebatePct once you know your actual tier.
-  function computeFee(shares, price) {
-    return shares * feeTheta * price * (1 - price);
-  }
-  function currentBetSize() {
-    return engine.currentBet;
-  }
+  if (!startAtBoundary) engine.waitingForBoundary = false;
 
   function saveStats() {
     if (!statsStatePath) return;
@@ -148,28 +131,35 @@ function createEngine(cfg) {
       fs.writeFileSync(statsStatePath, JSON.stringify({
         bankroll: engine.bankroll,
         realizedPnl: engine.realizedPnl,
-        wins: engine.wins,
-        losses: engine.losses,
-        skipped: engine.skipped,
-        history: engine.history.slice(0, 100),
+        realizedPnl15: engine.realizedPnl15,
+        realizedPnl5: engine.realizedPnl5,
+        wins15: engine.wins15, losses15: engine.losses15,
+        wins5: engine.wins5, losses5: engine.losses5,
+        skipped5: engine.skipped5,
+        direction: engine.direction,
+        lastOutcome15: engine.lastOutcome15,
+        skipRemaining: engine.skipRemaining,
+        history15: engine.history15.slice(0, 100),
+        history5: engine.history5.slice(0, 100),
         equityCurve: engine.equityCurve.slice(-200),
-        currentBet: engine.currentBet,
-        profitAnchor: engine.profitAnchor,
+        totalFeesPaid: engine.totalFeesPaid,
+        totalRebatesEarned: engine.totalRebatesEarned,
+        totalVolume: engine.totalVolume,
         savedAt: Date.now(),
       }));
     } catch (_) {}
   }
 
   function log(msg) {
-    const line = `[${new Date().toISOString().slice(11, 19)}] [${label}] ${msg}`;
+    const line = `[${new Date().toISOString().slice(11, 19)}] ${msg}`;
     engine.logs.push(line);
     if (engine.logs.length > 500) engine.logs.shift();
     slog(`[hedgebot] ${line}`);
   }
-  function registerTrade(t) {
-    const trade = { seq: ++tradeSeq, time: new Date().toISOString().slice(11, 19), ...t };
-    engine.trades.push(trade);
-    if (engine.trades.length > 300) engine.trades.shift();
+  function registerTrade(list, seqRef, t) {
+    const trade = { seq: ++seqRef, time: new Date().toISOString().slice(11, 19), ...t };
+    list.push(trade);
+    if (list.length > 300) list.shift();
   }
   function recordEquity() {
     engine.equityCurve.push({ t: Date.now(), equity: round2(engine.bankroll + openPositionsMTM()) });
@@ -192,17 +182,17 @@ function createEngine(cfg) {
     const ok = trader && typeof trader.placeFokLimitOrder === 'function';
     if (!ok && !warnedNoRestingMethod) {
       warnedNoRestingMethod = true;
-      slog(`[hedgebot] ❌ [${label}] LIVE trading needs trader.placeFokLimitOrder(tokenId, side, price, size) - LIVE order placement will be skipped until added. DRY_RUN is unaffected.`);
+      slog(`[hedgebot] ❌ LIVE trading needs trader.placeFokLimitOrder(tokenId, side, price, size) - LIVE order placement will be skipped until added. DRY_RUN is unaffected.`);
     }
     return ok;
   }
   async function cancelRestingOrder(orderId) {
     if (DRY_RUN || !orderId) return;
     if (!trader || typeof trader.cancelOrder !== 'function') {
-      if (!warnedNoCancelMethod) { warnedNoCancelMethod = true; slog(`[hedgebot] ⚠️  [${label}] trader.cancelOrder not implemented.`); }
+      if (!warnedNoCancelMethod) { warnedNoCancelMethod = true; slog(`[hedgebot] ⚠️ trader.cancelOrder not implemented.`); }
       return;
     }
-    try { await trader.cancelOrder(orderId); } catch (e) { log(`⚠️  cancelRestingOrder(${orderId}) failed: ${e.message}`); }
+    try { await trader.cancelOrder(orderId); } catch (e) { log(`⚠️ cancelRestingOrder(${orderId}) failed: ${e.message}`); }
   }
   async function placeTakerBuy(tokenId, price, shares) {
     if (!DRY_RUN) {
@@ -220,6 +210,10 @@ function createEngine(cfg) {
     return { id: `dry-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, filledNow: true, avgPrice: price, filledShares: shares };
   }
 
+  // Polymarket taker fee: fee = shares * theta * price * (1-price).
+  function computeFee(shares, price) {
+    return shares * feeTheta * price * (1 - price);
+  }
   function parseMarketTokens(mk) {
     try {
       const outcomes = typeof mk.outcomes === 'string' ? JSON.parse(mk.outcomes) : (mk.outcomes || []);
@@ -228,7 +222,7 @@ function createEngine(cfg) {
     } catch (_) { return []; }
   }
 
-  function freshLeg(windowTs) {
+  function freshLeg(windowTs, windowSeconds, slugPrefix) {
     return {
       slug: `${slugPrefix}${windowTs}`,
       windowTs, windowSeconds,
@@ -258,7 +252,7 @@ function createEngine(cfg) {
       leg.discovered = true;
       log(`🎯 leg discovered ${leg.slug} — Up ${String(up.token_id).slice(0, 10)}… / Down ${String(down.token_id).slice(0, 10)}…`);
     } catch (e) {
-      log(`⚠️  discoverLeg(${leg.slug}) failed: ${e.message}`);
+      log(`⚠️ discoverLeg(${leg.slug}) failed: ${e.message}`);
     }
   }
 
@@ -299,8 +293,8 @@ function createEngine(cfg) {
     const upP = leg.upBid != null ? leg.upBid : leg.upAsk;
     const downP = leg.downBid != null ? leg.downBid : leg.downAsk;
     let candidate = null, candidatePrice = null;
-    if (upP != null && upP >= highConfPrice) { candidate = 'up'; candidatePrice = upP; }
-    else if (downP != null && downP >= highConfPrice) { candidate = 'down'; candidatePrice = downP; }
+    if (upP != null && upP >= HIGH_CONF_PRICE) { candidate = 'up'; candidatePrice = upP; }
+    else if (downP != null && downP >= HIGH_CONF_PRICE) { candidate = 'down'; candidatePrice = downP; }
     if (!candidate) { leg.highConfCandidateSide = null; leg.highConfCandidateCount = 0; return; }
     if (leg.highConfCandidateSide === candidate) leg.highConfCandidateCount = (leg.highConfCandidateCount || 0) + 1;
     else { leg.highConfCandidateSide = candidate; leg.highConfCandidateCount = 1; }
@@ -348,7 +342,7 @@ function createEngine(cfg) {
         }
       }
     } catch (e) {
-      log(`⚠️  resolveLegAttempt(${leg.slug}) failed: ${e.message}`);
+      log(`⚠️ resolveLegAttempt(${leg.slug}) failed: ${e.message}`);
     }
     updateHighConfidence(leg);
     if (leg.highConfSide) {
@@ -358,7 +352,7 @@ function createEngine(cfg) {
       log(`⚡ [${leg.slug}] resolved HIGH-CONFIDENCE (${leg.highConfPrice.toFixed(3)}) — winner ${leg.winner.toUpperCase()}`);
       return true;
     }
-    if (Date.now() - leg.closeAt >= resolutionFallbackMs) {
+    if (Date.now() - leg.closeAt >= RESOLUTION_FALLBACK_MS) {
       const winner = leadingSide(leg);
       if (winner) {
         leg.resolved = true;
@@ -372,233 +366,270 @@ function createEngine(cfg) {
   }
 
   function tokenIdFor(leg, side) { return side === 'up' ? leg.upTokenId : leg.downTokenId; }
+  function askFor(leg, side) { return side === 'up' ? leg.upAsk : leg.downAsk; }
 
-  // 3-CANDLE RULE-BASED side selection: the last 3 closed candles vote
-  // (majority direction / net momentum / last-body strength) and the
-  // winning side is bet immediately on the window opening right now.
-  // The learned model still runs and predicts (shown on the dashboard,
-  // keeps learning), but never picks.
-  function latestCandleCoversWindow(windowTs) {
-    const cnds = candles.getCandles();
-    if (!cnds.length) return false;
-    return cnds[cnds.length - 1].closeTime >= windowTs * 1000 - windowSeconds * 1000;
-  }
-  function computeDecision() {
-    const cnds = candles.getCandles();
-    const features = buildFeatures(cnds);
-    const probUp = features ? signalModel.predict(features) : 0.5;
-    const pred = predictNextDirection(cnds);
-    return { side: pred.side, probUp: pred.confidence, features, reason: pred.side ? null : pred.error, model: pred };
+  // Buy `dollars` worth of `side` on this leg at the ask (taker).
+  async function buyLegMarket(leg, side, dollars, what) {
+    const tokenId = tokenIdFor(leg, side);
+    const ask = askFor(leg, side);
+    if (!tokenId || ask == null) return { ok: false, reason: 'no-ask' };
+    const shares = round2(dollars / ask);
+    if (shares < MIN_ORDER_SHARES) return { ok: false, reason: `below-min-shares (${shares}sh)` };
+    const resp = await placeTakerBuy(tokenId, ask, shares);
+    if (!resp) return { ok: false, reason: 'place-failed' };
+    if (!resp.filledNow) return { ok: false, reason: 'not-filled' };
+    const avgPrice = resp.avgPrice || ask;
+    const filled = resp.filledShares || shares;
+    const notional = round2(filled * avgPrice);
+    const fee = computeFee(filled, avgPrice);
+    const rebate = round2(fee * rebatePct);
+    const netFee = round2(fee - rebate);
+    const cost = round2(notional + netFee);
+    engine.totalFeesPaid = round2(engine.totalFeesPaid + fee);
+    engine.totalRebatesEarned = round2(engine.totalRebatesEarned + rebate);
+    engine.totalVolume = round2(engine.totalVolume + notional);
+    engine.bankroll = round2(engine.bankroll - cost);
+    log(`${what} ${side.toUpperCase()} $${dollars.toFixed(2)} @${avgPrice.toFixed(3)} = ${filled}sh (cost $${cost.toFixed(2)})`);
+    return { ok: true, shares: filled, avgPrice, notional, fee, rebate, netFee, cost };
   }
 
-  function freshTrade(windowTs, decision) {
+  function freshTrade15(windowTs) {
+    const direction = engine.lastOutcome15 || 'up';
     return {
-      asset: 'btc', label, windowTs,
-      closeAt: (windowTs + windowSeconds) * 1000,
-      leg: freshLeg(windowTs),
-      state: 'discovering',
-      decision,
-      betPlaced: false,
-      skipReason: decision.side ? null : decision.reason,
+      windowTs,
+      closeAt: (windowTs + WINDOW_15M) * 1000,
+      leg: freshLeg(windowTs, WINDOW_15M, 'btc-updown-15m-'),
+      direction,
       position: null,
+      buys: [],
+      state: 'discovering',
+      betPlaced: false,
       pnl: null,
       settled: false,
     };
   }
 
-  async function placeSignalBet(trade) {
-    if (trade.betPlaced || !trade.decision.side) return;
-    const leg = trade.leg;
-    const side = trade.decision.side;
-    const tokenId = tokenIdFor(leg, side);
-    const ask = side === 'up' ? leg.upAsk : leg.downAsk;
-    if (!tokenId || ask == null) return;
+  function freshTrade5(windowTs) {
+    const side = engine.direction === 'up' ? 'down' : 'up';
+    return {
+      windowTs,
+      closeAt: (windowTs + WINDOW_5M) * 1000,
+      leg: freshLeg(windowTs, WINDOW_5M, 'btc-updown-5m-'),
+      parent15WindowTs: Math.floor(windowTs / WINDOW_15M) * WINDOW_15M,
+      side,
+      skipped: false,
+      position: null,
+      state: 'discovering',
+      betPlaced: false,
+      pnl: null,
+      settled: false,
+    };
+  }
 
-    const wagerDollars = currentBetSize();
-    const shares = round2(wagerDollars / ask);
-    if (shares < minOrderShares) {
-      trade.betPlaced = true;
-      trade.skipReason = 'below-min-shares';
-      log(`⚠️  [${trade.leg.slug}] ${side.toUpperCase()} wager $${wagerDollars.toFixed(2)} @${ask.toFixed(3)} = ${shares.toFixed(2)}sh, below ${minOrderShares}sh minimum — no bet this window`);
-      return;
+  // ── 15m window management ─────────────────────────────────────────
+  async function ensure15mTrade(now) {
+    const nowSec = Math.floor(now / 1000);
+    const windowTs = Math.floor(nowSec / WINDOW_15M) * WINDOW_15M;
+    let t = engine.current.m15;
+
+    if (!t || t.windowTs !== windowTs) {
+      if (t && !t.settled) {
+        if (!t.leg.resolved) await attemptFastResolution(t.leg);
+        if (t.leg.resolved && !t.settled) settle15(t);
+        else {
+          t.state = 'pending-resolution';
+          engine.pending15.push(t);
+          if (engine.pending15.length > 40) engine.pending15.shift();
+        }
+      }
+      engine.direction = engine.lastOutcome15 || 'up';
+      t = freshTrade15(windowTs);
+      engine.current.m15 = t;
+      log(`🆕 15m window t=${windowTs} — direction ${engine.direction.toUpperCase()} (follows last outcome ${engine.lastOutcome15 ? engine.lastOutcome15.toUpperCase() : '— first window'}) — buying $${baseBet15m.toFixed(2)} immediately`);
     }
 
-    const resp = await placeTakerBuy(tokenId, ask, shares);
-    if (!resp) { log(`❌ [${leg.slug}] ${side.toUpperCase()} bet failed to place — will retry`); return; }
-    if (!resp.filledNow) { log(`⌛ [${leg.slug}] ${side.toUpperCase()} bet didn't fill immediately — will retry`); return; }
-
-    trade.betPlaced = true;
-    const avgPrice = resp.avgPrice || ask;
-    const filledShares = resp.filledShares || shares;
-    const notional = round2(filledShares * avgPrice);
-    const fee = computeFee(filledShares, avgPrice);
-    const rebate = round2(fee * rebatePct);
-    const netFee = round2(fee - rebate);
-    const cost = round2(notional + netFee);
-
-    engine.totalFeesPaid = round2(engine.totalFeesPaid + fee);
-    engine.totalRebatesEarned = round2(engine.totalRebatesEarned + rebate);
-    engine.totalVolume = round2(engine.totalVolume + notional);
-
-    trade.position = { shares: filledShares, cost, notional, fee, rebate, netFee, entryPrice: avgPrice, ts: Date.now(), betSize: wagerDollars };
-    engine.bankroll = round2(engine.bankroll - cost);
-
-    registerTrade({ slug: leg.slug, step: `${side.toUpperCase()} signal bet ($${wagerDollars})`, side, price: avgPrice, shares: filledShares, cost, confidence: round2(trade.decision.probUp) });
-    log(`✅ [${leg.slug}] ${side.toUpperCase()} bet placed (confidence ${(trade.decision.probUp * 100).toFixed(1)}%, $${wagerDollars}) — ${filledShares.toFixed(2)}sh @${avgPrice.toFixed(3)} (notional $${notional.toFixed(2)} + fee $${netFee.toFixed(2)} = $${cost.toFixed(2)}) | bankroll $${engine.bankroll.toFixed(2)}`);
-    recordEquity();
+    if (t.state === 'discovering' && now - t.leg.lastDiscoveryAttempt >= DISCOVERY_RETRY_MS) {
+      t.leg.lastDiscoveryAttempt = now;
+      await discoverLeg(t.leg);
+      if (t.leg.discovered) t.state = 'trading';
+    }
+    if (t.state === 'trading' && engine.tradingEnabled && now < t.closeAt && !t.betPlaced) {
+      const res = await buyLegMarket(t.leg, t.direction, baseBet15m, '15m base');
+      if (res.ok) {
+        t.position = { shares: res.shares, cost: res.cost };
+        t.buys.push({ ts: now, dollars: baseBet15m, shares: res.shares, price: res.avgPrice, cost: res.cost });
+        t.betPlaced = true;
+      } else if (res.reason && res.reason !== 'no-ask') {
+        log(`⚠️ 15m ${t.direction.toUpperCase()} base buy skipped: ${res.reason}`);
+      }
+    }
   }
 
-  function unrealizedForTrade(trade) {
-    if (!trade || !trade.position || trade.settled || (trade.leg && trade.leg.resolved)) return 0;
-    const mp = markPrice(trade.leg, trade.decision.side);
-    const mark = mp != null ? mp : (trade.position.cost / trade.position.shares);
-    return round2(trade.position.shares * mark - trade.position.cost);
-  }
-  function openCostForTrade(trade) { return trade && trade.position ? trade.position.cost : 0; }
-  function allTrackedTrades() {
-    const list = [...engine.pending];
-    if (engine.current.btc) list.push(engine.current.btc);
-    return list;
-  }
-  function totalUnrealizedPnl() { return round2(allTrackedTrades().reduce((sum, t) => sum + unrealizedForTrade(t), 0)); }
-  function openPositionsMTM() { return round2(allTrackedTrades().reduce((sum, t) => sum + openCostForTrade(t) + unrealizedForTrade(t), 0)); }
-
-  function settleTrade(trade) {
-    const leg = trade.leg;
-    const actualUp = leg.winner === 'up';
-    signalModel.learn(trade.decision.features, actualUp);
-
-    if (!trade.decision.side || !trade.position) {
-      trade.state = 'resolved';
-      trade.settled = true;
-      trade.pnl = 0;
-      engine.skipped++;
-      const reason = !trade.decision.side ? (trade.decision.reason || 'no signal') : `no bet placed (${trade.skipReason || 'no fill'})`;
-      registerTrade({ slug: leg.slug, step: 'window resolution (no bet)', side: leg.winner, price: null, shares: 0, pnl: 0 });
-      engine.history.unshift({
-        windowTs: trade.windowTs, slug: leg.slug, winner: leg.winner, resolutionMethod: leg.resolutionMethod,
-        side: trade.decision.side, confidence: round2(trade.decision.probUp), betPlaced: false, win: null,
+  function settle15(t) {
+    const leg = t.leg;
+    const winner = leg.winner || '?';
+    if (!t.position || !t.betPlaced) {
+      t.state = 'resolved';
+      t.settled = true;
+      t.pnl = 0;
+      engine.lastOutcome15 = leg.winner || null;
+      engine.history15.unshift({
+        windowTs: t.windowTs, slug: leg.slug, winner: leg.winner, resolutionMethod: leg.resolutionMethod,
+        direction: t.direction, betPlaced: false, win: null,
         wager: 0, shares: 0, pnl: 0, bankrollAfter: engine.bankroll, resolvedAt: Date.now(),
       });
-      if (engine.history.length > 300) engine.history.pop();
-      log(`🏁 [${leg.slug}] resolved — winner ${leg.winner.toUpperCase()} (${leg.resolutionMethod}) — ${reason}`);
+      if (engine.history15.length > 300) engine.history15.pop();
+      log(`🏁 15m [${leg.slug}] resolved — winner ${winner.toUpperCase()} (${leg.resolutionMethod}) — no position held`);
       recordEquity();
       return;
     }
 
-    const side = trade.decision.side;
-    const win = side === leg.winner;
-    const payout = win ? round2(trade.position.shares * 1) : 0;
-    const pnl = round2(payout - trade.position.cost);
-
+    const win = t.direction === leg.winner;
+    const payout = win ? round2(t.position.shares * 1) : 0;
+    const pnl = round2(payout - t.position.cost);
     engine.bankroll = round2(engine.bankroll + payout);
     engine.realizedPnl = round2(engine.realizedPnl + pnl);
-    if (win) engine.wins++; else engine.losses++;
-
-    // Linear step sizing (independent of the forced-opposite rule above):
-    // +$50 after every loss, -$50 after every win, floored at baseBetDollars.
-    const prevBet = engine.currentBet;
-    if (win) {
-      engine.currentBet = Math.max(baseBetDollars, round2(engine.currentBet - 50));
-    } else {
-      engine.currentBet = round2(engine.currentBet + 50);
-    }
-    if (engine.currentBet !== prevBet) {
-      log(`${win ? '📉' : '📈'} ${win ? 'win' : 'loss'} recorded — bet size ${win ? 'reduced' : 'increased'} $${prevBet} → $${engine.currentBet}`);
-    }
-
-    // Profit-anchor reset: whenever bankroll climbs to (anchor + baseBetDollars)
-    // or beyond, snap the bet size straight back to the floor and re-anchor to
-    // the new bankroll - so the next reset threshold becomes bankroll+base again.
-    if (engine.bankroll >= engine.profitAnchor + baseBetDollars) {
-      const oldAnchor = engine.profitAnchor;
-      engine.profitAnchor = engine.bankroll;
-      if (engine.currentBet !== baseBetDollars) {
-        log(`💰 bankroll reached $${engine.bankroll.toFixed(2)} (anchor $${oldAnchor.toFixed(2)} + $${baseBetDollars}) — resetting bet size $${engine.currentBet} → $${baseBetDollars}, new anchor $${engine.bankroll.toFixed(2)}`);
-        engine.currentBet = baseBetDollars;
-      }
-    }
-
-
-
-    trade.pnl = pnl;
-    trade.state = 'resolved';
-    trade.settled = true;
-
-    registerTrade({ slug: leg.slug, step: 'window resolution', side: leg.winner, price: 1, shares: trade.position.shares, pnl });
-    engine.history.unshift({
-      windowTs: trade.windowTs, slug: leg.slug, winner: leg.winner, resolutionMethod: leg.resolutionMethod,
-      side, confidence: round2(trade.decision.probUp), betPlaced: true, win,
-      wager: trade.position.cost, shares: trade.position.shares, entryPrice: trade.position.entryPrice, pnl,
-      bankrollAfter: engine.bankroll, resolvedAt: Date.now(),
+    engine.realizedPnl15 = round2(engine.realizedPnl15 + pnl);
+    if (win) engine.wins15++; else engine.losses15++;
+    engine.lastOutcome15 = leg.winner;
+    t.pnl = pnl;
+    t.state = 'resolved';
+    t.settled = true;
+    engine.history15.unshift({
+      windowTs: t.windowTs, slug: leg.slug, winner: leg.winner, resolutionMethod: leg.resolutionMethod,
+      direction: t.direction, betPlaced: true, win,
+      wager: t.position.cost, shares: t.position.shares, entryPrice: round2(t.position.cost / t.position.shares),
+      pnl, bankrollAfter: engine.bankroll, resolvedAt: Date.now(),
     });
-    if (engine.history.length > 300) engine.history.pop();
-
-    log(`🏆 [${leg.slug}] resolved — winner ${leg.winner.toUpperCase()} (${leg.resolutionMethod}) — our ${side.toUpperCase()} bet ${win ? 'WON' : 'LOST'} ${sgn2(pnl)} | bankroll $${engine.bankroll.toFixed(2)}`);
+    if (engine.history15.length > 300) engine.history15.pop();
+    registerTrade(engine.trades15, tradeSeq15, { slug: leg.slug, side: leg.winner, shares: t.position.shares, pnl });
+    log(`🏆 15m [${leg.slug}] resolved — winner ${winner.toUpperCase()} (${leg.resolutionMethod}) — our ${t.direction.toUpperCase()} bet ${win ? 'WON' : 'LOST'} ${sgn2(pnl)} | next 15m starts ${winner.toUpperCase()}`);
     recordEquity();
   }
 
-  function currentWindowTs(nowSec) { return Math.floor(nowSec / windowSeconds) * windowSeconds; }
-
-  async function tickBtc(now) {
+  // ── 5m window management ──────────────────────────────────────────
+  async function ensure5mTrade(now) {
     const nowSec = Math.floor(now / 1000);
-    const windowTs = currentWindowTs(nowSec);
-    let trade = engine.current.btc;
+    const windowTs = Math.floor(nowSec / WINDOW_5M) * WINDOW_5M;
+    let t = engine.current.m5;
 
-    if (!trade || trade.windowTs !== windowTs) {
-      if (trade && !trade.settled) {
-        if (!trade.leg.resolved) await attemptFastResolution(trade.leg);
-        if (trade.leg.resolved && !trade.settled) {
-          settleTrade(trade);
-        } else {
-          if (trade.decision.side && !trade.position) {
-            log(`⚠️  [${trade.leg.slug}] window closed with a ${trade.decision.side.toUpperCase()} signal but no bet got filled — bankroll unaffected`);
-          }
-          log(`⚠️  [${trade.leg.slug}] couldn't fast-resolve at close — falling back to slower resolution`);
-          trade.state = 'pending-resolution';
-          engine.pending.push(trade);
-          if (engine.pending.length > 40) {
-            const dropped = engine.pending.shift();
-            log(`⚠️  dropped stale pending window ${dropped.leg.slug} from the resolution queue`);
-          }
+    if (!t || t.windowTs !== windowTs) {
+      if (t && !t.settled) {
+        if (!t.leg.resolved) await attemptFastResolution(t.leg);
+        if (t.leg.resolved && !t.settled) await settle5(t);
+        else {
+          t.state = 'pending-resolution';
+          engine.pending5.push(t);
+          if (engine.pending5.length > 40) engine.pending5.shift();
         }
       }
-      if (windowTs < engine.boundaryWindowTs) return;
-
-      // The 3-candle model needs the candle that just closed at this
-      // boundary — wait (briefly) for Binance to publish it if needed.
-      await candles.refresh(log);
-      for (let attempt = 0; attempt < 4 && !latestCandleCoversWindow(windowTs); attempt++) {
-        await new Promise(res => setTimeout(res, 1000));
-        await candles.refresh(log);
-      }
-
-      const decision = computeDecision();
-      trade = freshTrade(windowTs, decision);
-      engine.current.btc = trade;
-      const pred = decision.model;
-      const sideLabel = decision.side ? decision.side.toUpperCase() : 'NONE';
-      const detail = pred && pred.sub
-        ? `score ${pred.score} (majority ${pred.sub.majority} / momentum ${pred.sub.momentum} / lastBody ${pred.sub.lastBody})`
-        : (pred && pred.error) || 'no candles yet';
-      const signalMsg = `3-candle model: ${sideLabel} ${detail} — immediate entry at market open, bet $${baseBetDollars}, confidence ${(decision.probUp * 100).toFixed(1)}%`;
-      log(`🆕 new window t=${windowTs} — discovering market… ${signalMsg}`);
-    }
-
-    if (!trade.leg.discovered && now - trade.leg.lastDiscoveryAttempt >= DISCOVERY_RETRY_MS) {
-      trade.leg.lastDiscoveryAttempt = now;
-      await discoverLeg(trade.leg);
-      if (trade.leg.discovered) trade.state = 'trading';
-    }
-
-    if (trade.state === 'trading') {
-      // IMMEDIATE entry: as soon as the window's market is discovered and
-      // the chosen side has an ask, take the position right away — no wait,
-      // no price trigger. placeSignalBet() retries each tick until it can.
-      if (engine.tradingEnabled && now < trade.closeAt && trade.decision.side && !trade.betPlaced) {
-        await placeSignalBet(trade);
+      const action = next5mWindowAction(engine.skipRemaining);
+      engine.skipRemaining = action.skipRemaining;
+      t = freshTrade5(windowTs);
+      t.skipped = !action.bet;
+      engine.current.m5 = t;
+      if (t.skipped) {
+        t.state = 'skipped';
+        log(`⏭ 5m window t=${windowTs} SKIPPED (after 5m loss — ${engine.skipRemaining} more to skip after this)`);
+      } else {
+        log(`🆕 5m window t=${windowTs} — betting ${t.side.toUpperCase()} $${baseBet5m.toFixed(2)} (opposite of 15m ${engine.direction ? engine.direction.toUpperCase() : 'n/a'})`);
       }
     }
+
+    if (t.state === 'discovering' && now - t.leg.lastDiscoveryAttempt >= DISCOVERY_RETRY_MS) {
+      t.leg.lastDiscoveryAttempt = now;
+      await discoverLeg(t.leg);
+      if (t.leg.discovered) t.state = 'trading';
+    }
+    if (t.state === 'trading' && engine.tradingEnabled && now < t.closeAt && !t.betPlaced) {
+      const res = await buyLegMarket(t.leg, t.side, baseBet5m, '5m bet');
+      if (res.ok) {
+        t.position = { shares: res.shares, cost: res.cost };
+        t.betPlaced = true;
+      } else if (res.reason && res.reason !== 'no-ask') {
+        log(`⚠️ 5m ${t.side.toUpperCase()} buy skipped: ${res.reason}`);
+      }
+    }
+  }
+
+  async function roll5mProfitInto15m(profit, t5) {
+    if (profit <= 0) return;
+    // The profit belongs to the 15m window this 5m bet was opened under —
+    // never the NEXT 15m window. Each 15m window runs to resolution alone.
+    const t15 = t5 && t5.parent15WindowTs != null
+      ? [engine.current.m15, ...engine.pending15].find(t => t && t.windowTs === t5.parent15WindowTs)
+      : engine.current.m15;
+    if (!t15 || t15.settled || !t15.position || !t15.betPlaced) {
+      log(`💰 5m profit $${profit.toFixed(2)} — its 15m window has no open position to roll into; kept in bankroll`);
+      return;
+    }
+    if (Date.now() >= t15.closeAt) {
+      log(`💰 5m profit $${profit.toFixed(2)} — its 15m window already closed; kept in bankroll`);
+      return;
+    }
+    const res = await buyLegMarket(t15.leg, t15.direction, profit, '5m profit roll');
+    if (res.ok) {
+      t15.position.shares = round2(t15.position.shares + res.shares);
+      t15.position.cost = round2(t15.position.cost + res.cost);
+      t15.buys.push({ ts: Date.now(), dollars: profit, shares: res.shares, price: res.avgPrice, cost: res.cost });
+      log(`💰 rolled 5m profit $${profit.toFixed(2)} into 15m ${t15.direction.toUpperCase()} (+${res.shares}sh, +$${res.cost.toFixed(2)})`);
+    } else if (res.reason !== 'no-ask') {
+      log(`⚠️ could not roll 5m profit into 15m: ${res.reason}`);
+    }
+  }
+
+  async function settle5(t) {
+    const leg = t.leg;
+    const winner = leg.winner || '?';
+    if (t.skipped || !t.position) {
+      t.state = 'resolved';
+      t.settled = true;
+      t.pnl = 0;
+      engine.skipped5++;
+      engine.history5.unshift({
+        windowTs: t.windowTs, slug: leg.slug, winner: leg.winner, resolutionMethod: leg.resolutionMethod,
+        side: t.skipped ? null : t.side, skipped: true, win: null,
+        wager: 0, shares: 0, pnl: 0, bankrollAfter: engine.bankroll, resolvedAt: Date.now(),
+      });
+      if (engine.history5.length > 300) engine.history5.pop();
+      log(`🏁 5m [${leg.slug}] resolved — winner ${winner.toUpperCase()} (${leg.resolutionMethod}) — ${t.skipped ? 'window was skipped (after 5m loss)' : 'no bet placed'}`);
+      recordEquity();
+      return;
+    }
+
+    const win = t.side === leg.winner;
+    const payout = win ? round2(t.position.shares * 1) : 0;
+    const pnl = round2(payout - t.position.cost);
+    engine.bankroll = round2(engine.bankroll + payout);
+    engine.realizedPnl = round2(engine.realizedPnl + pnl);
+    engine.realizedPnl5 = round2(engine.realizedPnl5 + pnl);
+    if (win) engine.wins5++; else { engine.losses5++; engine.skipRemaining = 2; }
+    t.pnl = pnl;
+    t.state = 'resolved';
+    t.settled = true;
+    engine.history5.unshift({
+      windowTs: t.windowTs, slug: leg.slug, winner: leg.winner, resolutionMethod: leg.resolutionMethod,
+      side: t.side, skipped: false, win,
+      wager: t.position.cost, shares: t.position.shares, entryPrice: round2(t.position.cost / t.position.shares),
+      pnl, bankrollAfter: engine.bankroll, resolvedAt: Date.now(),
+    });
+    if (engine.history5.length > 300) engine.history5.pop();
+    registerTrade(engine.trades5, tradeSeq5, { slug: leg.slug, side: t.side, shares: t.position.shares, pnl });
+    log(`🏆 5m [${leg.slug}] resolved — winner ${winner.toUpperCase()} (${leg.resolutionMethod}) — our ${t.side.toUpperCase()} bet ${win ? 'WON' : 'LOST'} ${sgn2(pnl)}`);
+    if (win) {
+      await roll5mProfitInto15m(pnl, t);
+    } else {
+      log(`⏭ 5m loss — 15m is in favor, skipping the next 2 windows`);
+    }
+    recordEquity();
+  }
+
+  // ── loops ─────────────────────────────────────────────────────────
+  function allTrackedTrades() {
+    return [
+      engine.current.m15, engine.current.m5,
+      ...engine.pending15, ...engine.pending5,
+    ].filter(Boolean);
   }
 
   async function mainLoop() {
@@ -609,8 +640,8 @@ function createEngine(cfg) {
 
         if (engine.waitingForBoundary) {
           if (engine.boundaryWindowTs == null) {
-            engine.boundaryWindowTs = currentWindowTs(nowSec) + windowSeconds;
-            log(`⏳ started mid-window — waiting for next fresh boundary (t=${engine.boundaryWindowTs}) before trading begins`);
+            engine.boundaryWindowTs = Math.floor(nowSec / WINDOW_5M) * WINDOW_5M + WINDOW_5M;
+            log(`⏳ starting mid-window — waiting for next fresh boundary (t=${engine.boundaryWindowTs}) before trading begins`);
           }
           if (nowSec >= engine.boundaryWindowTs) {
             engine.waitingForBoundary = false;
@@ -618,36 +649,49 @@ function createEngine(cfg) {
           }
         }
 
-        if (!engine.waitingForBoundary) await tickBtc(now);
+        if (!engine.waitingForBoundary) {
+          await ensure15mTrade(now);
+          await ensure5mTrade(now);
+        }
 
         if (now - engine.lastCandleRefresh >= candleRefreshMs) {
           engine.lastCandleRefresh = now;
-          await candles.refresh(log);
+          await Promise.all([candles15.refresh(log), candles5.refresh(log)]);
         }
         if (now - engine.lastPriceFetch >= PRICE_REFRESH_MS) {
           engine.lastPriceFetch = now;
-          const legs = allTrackedTrades().map(t => t.leg);
-          await Promise.all(legs.map(refreshLegPrices));
+          await Promise.all(allTrackedTrades().map(t => refreshLegPrices(t.leg)));
         }
-        if (engine.pending.length && now - engine.lastResolutionPoll >= RESOLUTION_POLL_MS) {
+        if ((engine.pending15.length || engine.pending5.length) && now - engine.lastResolutionPoll >= RESOLUTION_POLL_MS) {
           engine.lastResolutionPoll = now;
-          const stillPending = [];
-          for (const trade of engine.pending) {
+          const still15 = [];
+          for (const trade of engine.pending15) {
             if (!trade.leg.resolved) await resolveLegAttempt(trade.leg);
-            if (trade.leg.resolved && !trade.settled) settleTrade(trade);
-            if (!trade.settled) stillPending.push(trade);
+            if (trade.leg.resolved && !trade.settled) settle15(trade);
+            if (!trade.settled) still15.push(trade);
           }
-          engine.pending = stillPending;
+          engine.pending15 = still15;
+          const still5 = [];
+          for (const trade of engine.pending5) {
+            if (!trade.leg.resolved) await resolveLegAttempt(trade.leg);
+            if (trade.leg.resolved && !trade.settled) await settle5(trade);
+            if (!trade.settled) still5.push(trade);
+          }
+          engine.pending5 = still5;
         }
 
-        emitFn(`hedgeState:${label}`, buildState());
+        emitState();
       } catch (e) {
-        slog(`[hedgebot] ⚠️  [${label}] Loop error: ${e.message}`);
+        slog(`[hedgebot] ⚠️ Loop error: ${e.message}`);
       }
       await new Promise(res => setTimeout(res, TICK_MS));
     }
   }
 
+  // ── dashboard state ───────────────────────────────────────────────
+  function refPred(feed) {
+    return predictNextDirection(feed.getCandles());
+  }
   function legSummary(leg) {
     if (!leg) return null;
     return {
@@ -657,70 +701,110 @@ function createEngine(cfg) {
       resolved: leg.resolved, winner: leg.winner, resolutionMethod: leg.resolutionMethod,
     };
   }
-  function tradeSummary(trade) {
-    if (!trade) return null;
-    const elapsedSec = Math.max(0, Math.floor((Date.now() - trade.windowTs * 1000) / 1000));
+  function unrealizedFor(t) {
+    if (!t || !t.position || !t.leg) return 0;
+    const side = t.direction || t.side;
+    const bid = markPrice(t.leg, side);
+    if (bid == null) return 0;
+    return round2(t.position.shares * bid - t.position.cost);
+  }
+  function openPositionsMTM() {
+    return round2(unrealizedFor(engine.current.m15) + unrealizedFor(engine.current.m5));
+  }
+  function tradeSummary15(t) {
+    if (!t) return null;
+    const pred = refPred(candles15);
     return {
-      windowTs: trade.windowTs, closeAt: trade.closeAt, state: trade.state,
-      leg: legSummary(trade.leg),
-      signalSide: trade.decision.side,
-      confidence: round2(trade.decision.probUp),
-      model: trade.decision.model,
-      skipReason: trade.decision.side ? trade.skipReason : trade.decision.reason,
-      betPlaced: trade.betPlaced,
-      waitingForEntry: trade.decision.side && !trade.betPlaced,
-      secondsToEntryTimeout: 0,
-      position: trade.position ? { shares: trade.position.shares, cost: trade.position.cost, entryPrice: trade.position.entryPrice } : null,
-      pnl: trade.pnl,
-      unrealizedPnl: unrealizedForTrade(trade),
+      windowTs: t.windowTs, closeAt: t.closeAt, state: t.state,
+      leg: legSummary(t.leg),
+      signalSide: t.direction,
+      signalNote: 'follows last 15m outcome',
+      confidence: round2(pred.confidence),
+      model: pred,
+      betPlaced: t.betPlaced,
+      skipReason: t.direction ? null : 'no direction',
+      position: t.position ? { shares: t.position.shares, cost: t.position.cost, entryPrice: round2(t.position.cost / t.position.shares), buys: t.buys } : null,
+      pnl: t.pnl,
+      unrealizedPnl: unrealizedFor(t),
     };
   }
-
-  function buildState() {
-    const unrealizedPnl = totalUnrealizedPnl();
-    const equity = round2(engine.bankroll + openPositionsMTM());
-    const totalDecided = engine.wins + engine.losses;
+  function tradeSummary5(t) {
+    if (!t) return null;
+    const pred = refPred(candles5);
     return {
-      label, windowSeconds,
+      windowTs: t.windowTs, closeAt: t.closeAt, state: t.state,
+      leg: legSummary(t.leg),
+      signalSide: t.skipped ? null : t.side,
+      signalNote: 'opposite of 15m direction',
+      confidence: round2(pred.confidence),
+      model: pred,
+      betPlaced: t.betPlaced,
+      skipReason: t.skipped ? `skipping after 5m loss — ${engine.skipRemaining} more after this` : (t.side ? null : 'no bet'),
+      position: t.position ? { shares: t.position.shares, cost: t.position.cost, entryPrice: round2(t.position.cost / t.position.shares) } : null,
+      pnl: t.pnl,
+      unrealizedPnl: unrealizedFor(t),
+    };
+  }
+  function baseState(which) {
+    return {
       dryRun: DRY_RUN,
       tradingEnabled: engine.tradingEnabled,
       waitingForBoundary: engine.waitingForBoundary,
       bankroll: engine.bankroll,
       startingCapital,
-      baseBetDollars,
-      confidenceThreshold,
-      forcedOppositeWindows,
-      entryPriceThreshold, entryWaitSec,
-      baseBetDollars,
-      currentBetSize: currentBetSize(),
-      profitAnchor: engine.profitAnchor,
-      nextResetAt: round2(engine.profitAnchor + baseBetDollars),
+      skipRemaining: which === '5m' ? engine.skipRemaining : null,
+      direction: engine.direction,
       totalFeesPaid: engine.totalFeesPaid,
       totalRebatesEarned: engine.totalRebatesEarned,
       totalVolume: engine.totalVolume,
       feeTheta, rebatePct,
-      forcedSide: engine.forcedSide,
-      forcedRemaining: engine.forcedRemaining,
-      realizedPnl: engine.realizedPnl, unrealizedPnl, equity,
-      wins: engine.wins, losses: engine.losses, skipped: engine.skipped,
-      winRate: totalDecided > 0 ? round2(engine.wins / totalDecided) : null,
-      candleCount: candles.count(),
-      latestBtcPrice: candles.latestClose(),
-      lastCandles: candles.getCandles().slice(-3).map(k => ({
-        openTime: k.openTime,
-        open: k.open, high: k.high, low: k.low, close: k.close,
-        closeTime: k.closeTime,
-        up: k.close >= k.open,
-      })),
-      model: signalModel.modelInfo(),
-      current: { btc: tradeSummary(engine.current.btc) },
-      pendingResolutionCount: engine.pending.length,
-      pending: engine.pending.map(tradeSummary),
-      history: engine.history.slice(0, 60),
-      trades: engine.trades.slice(-100).slice().reverse(),
-      equityCurve: engine.equityCurve,
       logs: engine.logs.slice(-80),
+      pendingResolutionCount: (which === '5m' ? engine.pending5 : engine.pending15).length,
+      equityCurve: engine.equityCurve,
     };
+  }
+  function buildState15() {
+    const totalDecided = engine.wins15 + engine.losses15;
+    return {
+      ...baseState('15m'),
+      label: 'BTC-15m', windowSeconds: WINDOW_15M,
+      baseBetDollars: baseBet15m,
+      realizedPnl: engine.realizedPnl15, unrealizedPnl: unrealizedFor(engine.current.m15), equity: round2(engine.bankroll + openPositionsMTM()),
+      wins: engine.wins15, losses: engine.losses15, skipped: 0,
+      winRate: totalDecided > 0 ? round2(engine.wins15 / totalDecided) : null,
+      candleCount: candles15.count(),
+      latestBtcPrice: candles15.latestClose(),
+      lastCandles: candles15.getCandles().slice(-3).map(k => ({ openTime: k.openTime, open: k.open, high: k.high, low: k.low, close: k.close, closeTime: k.closeTime, up: k.close >= k.open })),
+      current: { btc: tradeSummary15(engine.current.m15) },
+      pending: engine.pending15.map(tradeSummary15),
+      history: engine.history15.slice(0, 60),
+      trades: engine.trades15.slice(-100).slice().reverse(),
+    };
+  }
+  function buildState5() {
+    const totalDecided = engine.wins5 + engine.losses5;
+    return {
+      ...baseState('5m'),
+      label: 'BTC-5m', windowSeconds: WINDOW_5M,
+      baseBetDollars: baseBet5m,
+      realizedPnl: engine.realizedPnl5, unrealizedPnl: unrealizedFor(engine.current.m5), equity: round2(engine.bankroll + openPositionsMTM()),
+      wins: engine.wins5, losses: engine.losses5, skipped: engine.skipped5,
+      winRate: totalDecided > 0 ? round2(engine.wins5 / totalDecided) : null,
+      candleCount: candles5.count(),
+      latestBtcPrice: candles5.latestClose(),
+      lastCandles: candles5.getCandles().slice(-3).map(k => ({ openTime: k.openTime, open: k.open, high: k.high, low: k.low, close: k.close, closeTime: k.closeTime, up: k.close >= k.open })),
+      current: { btc: tradeSummary5(engine.current.m5) },
+      pending: engine.pending5.map(tradeSummary5),
+      history: engine.history5.slice(0, 60),
+      trades: engine.trades5.slice(-100).slice().reverse(),
+    };
+  }
+  function emitState() {
+    emit('hedgeState:BTC-15m', buildState15());
+    emit('hedgeState:BTC-5m', buildState5());
+  }
+  function buildState() {
+    return { m5: buildState5(), m15: buildState15() };
   }
 
   function pauseTrading() {
@@ -739,38 +823,22 @@ function createEngine(cfg) {
     return { ok: true, dryRun: DRY_RUN };
   }
 
-  async function start(emit, slogFn) {
-    emitFn = emit;
-    slog = slogFn;
-    slog(`[hedgebot] 🪙 ${label} Signal-Model Engine — fully automatic`);
-    slog(`[hedgebot] ⚙️  [${label}] Side selection: 3-CANDLE RULE-BASED — the last 3 closed candles vote (majority direction / net momentum / last-body strength) and the predicted side is bet immediately on the next window. Bets every window.`);
-    slog(`[hedgebot] ⚙️  [${label}] Entry timing: IMMEDIATE — position is taken as soon as the window's market is discovered. No wait, no price trigger.`);
-    slog(`[hedgebot] ⚙️  [${label}] Linear step sizing: base $${baseBetDollars}. Bet size increases $50 after every loss, decreases $50 after every win, floored at $${baseBetDollars}.`);
-    slog(`[hedgebot] ⚙️  [${label}] Profit-anchor reset: whenever bankroll reaches (anchor + $${baseBetDollars}), bet size snaps straight back to $${baseBetDollars} and the anchor re-pins to that new bankroll level. Starting anchor: $${engine.profitAnchor.toFixed(2)}.`);
-    slog(`[hedgebot] ⚙️  [${label}] Fees: Polymarket taker fee = shares × ${feeTheta} × price × (1-price) (crypto category), ${rebatePct > 0 ? (rebatePct * 100).toFixed(0) + '% rebate applied' : 'no rebate configured'}. Exact rebate tier isn't published by Polymarket — set REBATE_PCT once you know yours.`);
+  async function start() {
+    slog(`[hedgebot] 🪙 ${label} — 15m/5m hedge engine, fully automatic`);
+    slog(`[hedgebot] ⚙️  Every 15m window: buy the 15m direction (follows the previous 15m outcome; first = UP) with $${baseBet15m.toFixed(2)}, immediately at open.`);
+    slog(`[hedgebot] ⚙️  Every 5m window: buy the OPPOSITE direction with $${baseBet5m.toFixed(2)}. 5m WIN → its profit (payout − cost) is rolled into the open 15m position. 5m LOSS → the next two 5m windows are skipped.`);
+    slog(`[hedgebot] ⚙️  One shared bankroll of $${engine.bankroll.toFixed(2)} across both markets.`);
+    slog(`[hedgebot] ⚙️  Fees: Polymarket taker fee = shares × ${feeTheta} × price × (1-price) (crypto category), ${rebatePct > 0 ? (rebatePct * 100).toFixed(0) + '% rebate applied' : 'no rebate configured'}.`);
     if (savedStats) {
-      slog(`[hedgebot] 💾 [${label}] Restored saved stats from a previous run — bankroll $${engine.bankroll.toFixed(2)}, ${engine.wins}W/${engine.losses}L.`);
+      slog(`[hedgebot] 💾 Restored saved stats — bankroll $${engine.bankroll.toFixed(2)}, 15m ${engine.wins15}W/${engine.losses15}L, 5m ${engine.wins5}W/${engine.losses5}L.`);
     } else if (statsStatePath) {
-      slog(`[hedgebot] 💾 [${label}] No previous saved stats found — starting fresh at $${startingCapital}. Stats will now persist to ${statsStatePath}.`);
-    } else {
-      slog(`[hedgebot] ⚠️  [${label}] No statsStatePath configured — bankroll/wins/losses will reset on every restart.`);
+      slog(`[hedgebot] 💾 No previous saved stats — starting fresh at $${startingCapital}. Stats persist to ${statsStatePath}.`);
     }
-    await candles.seed(slog);
-    mainLoop().catch(e => slog(`[hedgebot] ❌ [${label}] Fatal: ${e.message}`));
+    await Promise.all([candles15.seed(slog), candles5.seed(slog)]);
+    mainLoop().catch(e => slog(`[hedgebot] ❌ Fatal: ${e.message}`));
   }
 
-  return { start, pauseTrading, resumeTrading, setMode, buildState, getStatus: buildState };
+  return { start, pauseTrading, resumeTrading, setMode, buildState };
 }
 
-// Pure helper (exported for testing): picks the next side from the
-// window history. History is newest-first; each entry carries the side
-// that window bet. Rule: always the OPPOSITE of the most recent side
-// (UP -> DOWN, DOWN -> UP — win or loss makes no difference). With no
-// history yet, the first window defaults to UP.
-function nextPatternSideFromHistory(history) {
-  const prev = (history || []).find((h) => h && h.side);
-  if (!prev || prev.side === 'down') return 'up';
-  return 'down';
-}
-
-module.exports = { createEngine, nextPatternSideFromHistory };
+module.exports = { createEngine, next5mWindowAction };

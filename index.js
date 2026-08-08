@@ -37,7 +37,7 @@ app.get('/', (_, res) => {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>🪙 BTC Signal-Model Bot — 5m &amp; 15m</title>
+<title>🪙 BTC Hedge Bot — 15m &amp; 5m</title>
 <style>
   :root {
     --bg: #ffffff; --bg2: #f5f7fa; --bg3: #edf0f4; --border: #d0d7e2;
@@ -106,7 +106,7 @@ app.get('/', (_, res) => {
 </head>
 <body>
   <div class="header">
-    <div class="logo">🪙 <span>BTC</span> SIGNAL-MODEL BOT — 5m &amp; 15m</div>
+    <div class="logo">🪙 <span>BTC</span> HEDGE BOT — 15m &amp; 5m</div>
     <div id="mode-badge" class="mode-badge mode-dry">DEMO</div>
   </div>
 
@@ -115,7 +115,7 @@ app.get('/', (_, res) => {
     <button id="resume-btn" class="resume">▶️ Resume Both</button>
     <button id="live-btn" class="live-toggle">🔴 Switch Both to LIVE</button>
   </div>
-  <div class="toolbar-note">Each panel below also has its own pause/resume — the buttons above control both engines at once.</div>
+  <div class="toolbar-note">Each panel below has its own pause/resume — the buttons above control the whole combined engine at once.</div>
 
   <div class="panels">
     <div class="panel" id="panel-m5"></div>
@@ -143,13 +143,13 @@ app.get('/', (_, res) => {
       headline = '⏸ No bet this window';
       betLine = '<span class="status-pill status-idle">' + (t.skipReason || 'no signal') + ' (confidence ' + fmtPct(t.confidence) + ')</span>';
     } else if (t.position) {
-      headline = (t.signalSide === 'up' ? '🔵' : '🟣') + ' Trading ' + t.signalSide.toUpperCase() + ' — confidence ' + fmtPct(t.confidence);
+      headline = (t.signalSide === 'up' ? '🔵' : '🟣') + ' Trading ' + t.signalSide.toUpperCase() + ' — ' + (t.signalNote || '') + ' (3-candle ref ' + fmtPct(t.confidence) + ')';
       betLine = '<span class="status-pill status-open">bought ' + t.position.shares.toFixed(2) + 'sh @' + fmtPx(t.position.entryPrice) + ' ($' + fmt2(t.position.cost) + ')</span>';
     } else if (t.betPlaced) {
       headline = '⏸ ' + t.signalSide.toUpperCase() + ' signal, but no bet placed';
       betLine = '<span class="status-pill status-idle">skipped — ' + (t.skipReason || 'no fill') + '</span>';
     } else {
-      headline = (t.signalSide === 'up' ? '🔵' : '🟣') + ' Next candle: ' + t.signalSide.toUpperCase() + ' — confidence ' + fmtPct(t.confidence);
+      headline = (t.signalSide === 'up' ? '🔵' : '🟣') + ' Signal: ' + t.signalSide.toUpperCase() + ' — ' + (t.signalNote || '') + ' (3-candle ref ' + fmtPct(t.confidence) + ')';
       const targetPrice = t.signalSide === 'up' ? (leg && leg.upAsk) : (leg && leg.downAsk);
       betLine = '<span class="status-pill status-resting">placing ' + t.signalSide.toUpperCase() + ' immediately at market' + (targetPrice != null ? ' — ask $' + fmtPx(targetPrice) : '') + '</span>';
     }
@@ -159,6 +159,7 @@ app.get('/', (_, res) => {
       '<div class="row"><span>State</span><span>' + t.state + '</span></div>' +
       '<div class="row"><span>Bet status</span>' + betLine + '</div>' +
       '<div class="row"><span>Live prices</span><span>UP ' + fmtPx(leg && leg.upAsk) + ' / DOWN ' + fmtPx(leg && leg.downAsk) + '</span></div>' +
+      (s.skipRemaining != null ? '<div class="row"><span>5m skip next</span><span>' + s.skipRemaining + ' window(s)</span></div>' : '') +
       (t.position ? '<div class="row"><span>Unrealized P&amp;L</span><span class="' + pClass(t.unrealizedPnl) + '">' + sgn(t.unrealizedPnl) + '</span></div>' : '') +
     '</div>';
   }
@@ -195,9 +196,9 @@ app.get('/', (_, res) => {
       }).join('') + '</div>';
     }
     const predLine = pred && pred.side
-      ? 'Next candle: <b>' + pred.side.toUpperCase() + '</b> — confidence ' + fmtPct(pred.confidence) + ' · score ' + pred.score +
+      ? '3-candle reference: <b>' + pred.side.toUpperCase() + '</b> — confidence ' + fmtPct(pred.confidence) + ' · score ' + pred.score +
         (pred.sub ? ' (majority ' + pred.sub.majority + ' / momentum ' + pred.sub.momentum + ' / lastBody ' + pred.sub.lastBody + ')' : '')
-      : 'Next candle: waiting for 3 closed candles';
+      : '3-candle reference: waiting for 3 closed candles';
     const metaLine = 'Bet size $' + s.currentBetSize + (s.currentBetSize > s.baseBetDollars ? ' (base $' + s.baseBetDollars + ' + losses)' : ' (base)') +
       ' · profit-anchor reset at $' + fmt2(s.nextResetAt) +
       (s.totalFeesPaid > 0 ? ' · fees $' + fmt2(s.totalFeesPaid) + (s.totalRebatesEarned > 0 ? ' (rebate $' + fmt2(s.totalRebatesEarned) + ')' : '') : '');
@@ -284,7 +285,7 @@ const slog = (line) => { console.log(line); io.emit('log', line); };
 const PK = process.env.PRIVATE_KEY;
 if (!PK) { console.error('❌ PRIVATE_KEY env var missing'); process.exit(1); }
 
-console.log('🪙 BTC Signal-Model Bot — independent 5-minute and 15-minute engines, each with its own candle-pattern + indicator model, own bankroll, own win rate');
+console.log('🪙 BTC Hedge Bot — combined 15m/5m strategy, single shared bankroll');
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`🌐 Dashboard: http://0.0.0.0:${PORT}`);

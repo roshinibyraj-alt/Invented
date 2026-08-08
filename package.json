@@ -1,7 +1,7 @@
 {
   "name": "btc-5m-momentum-bucket-bot",
   "version": "1.0.0",
-  "description": "BTC 5-minute and 15-minute Up/Down signal-model trading bot for Polymarket, with a live dashboard.",
+  "description": "BTC 15m/5m hedge bot for Polymarket Up/Down markets — shared bankroll, 5m profit rolls into 15m, live dashboard.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
