@@ -60,7 +60,6 @@ app.get('/', (_, res) => {
   .toolbar button.live-toggle { background: var(--red); color: #fff; }
   .toolbar button.live-toggle.is-live { background: var(--muted); color: #fff; }
   .toolbar-note { padding: 6px 20px 0; font-size: 9.5px; color: var(--muted); }
-  .honesty-banner { margin: 10px 20px 0; padding: 10px 14px; background: #7c5cff14; border: 1px solid var(--purple); border-radius: 8px; font-size: 10px; line-height: 1.5; color: #4a3a99; }
   .panels { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 14px 20px; }
   @media (max-width: 900px) { .panels { grid-template-columns: 1fr; } }
   .panel { background: var(--bg2); border: 2px solid var(--border); border-radius: 12px; overflow: hidden; }
@@ -74,6 +73,17 @@ app.get('/', (_, res) => {
   .pnl-pos { color: var(--green) !important; }
   .pnl-neg { color: var(--red) !important; }
   .model-box { background: var(--bg); border: 1px dashed var(--border); border-radius: 8px; padding: 8px 10px; margin-bottom: 10px; font-size: 9.5px; }
+  .candle-row { display: flex; gap: 8px; }
+  .candle-box { flex: 1; border-radius: 8px; padding: 8px 10px; border: 1px solid var(--border); background: var(--bg2); text-align: center; }
+  .candle-box.up { background: #00a85414; border-color: var(--green); }
+  .candle-box.down { background: #e8304a14; border-color: var(--red); }
+  .candle-num { font-size: 11px; font-weight: bold; margin-bottom: 4px; }
+  .candle-box.up .candle-num { color: var(--green); }
+  .candle-box.down .candle-num { color: var(--red); }
+  .candle-body { font-size: 10px; }
+  .candle-sub { font-size: 8px; color: var(--muted); margin-top: 2px; }
+  .candle-pred { margin-top: 8px; font-size: 10.5px; }
+  .candle-meta { margin-top: 3px; font-size: 8.5px; color: var(--muted); }
   .current-window { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; font-size: 10px; margin-bottom: 10px; }
   .current-window .headline { font-size: 12.5px; margin-bottom: 6px; padding-bottom: 6px; border-bottom: 1px dashed var(--border); }
   .current-window .row { display: flex; justify-content: space-between; padding: 2px 0; }
@@ -107,10 +117,6 @@ app.get('/', (_, res) => {
   </div>
   <div class="toolbar-note">Each panel below also has its own pause/resume — the buttons above control both engines at once.</div>
 
-  <div class="honesty-banner">
-    ℹ️ Each engine's model starts with zero learned weights (a coin flip) and only takes one small learning step per resolved window. Win rate needs many dozens/hundreds of windows before it's a meaningful signal of real edge — early numbers here are not a reliable indicator either way.
-  </div>
-
   <div class="panels">
     <div class="panel" id="panel-m5"></div>
     <div class="panel" id="panel-m15"></div>
@@ -143,7 +149,7 @@ app.get('/', (_, res) => {
       headline = '⏸ ' + t.signalSide.toUpperCase() + ' signal, but no bet placed';
       betLine = '<span class="status-pill status-idle">skipped — ' + (t.skipReason || 'no fill') + '</span>';
     } else {
-      headline = (t.signalSide === 'up' ? '🔵' : '🟣') + ' 3-candle model: ' + t.signalSide.toUpperCase() + ' — confidence ' + fmtPct(t.confidence);
+      headline = (t.signalSide === 'up' ? '🔵' : '🟣') + ' Next candle: ' + t.signalSide.toUpperCase() + ' — confidence ' + fmtPct(t.confidence);
       const targetPrice = t.signalSide === 'up' ? (leg && leg.upAsk) : (leg && leg.downAsk);
       betLine = '<span class="status-pill status-resting">placing ' + t.signalSide.toUpperCase() + ' immediately at market' + (targetPrice != null ? ' — ask $' + fmtPx(targetPrice) : '') + '</span>';
     }
@@ -171,16 +177,34 @@ app.get('/', (_, res) => {
     }).join('');
   }
 
-  function modelBoxHtml(m, s) {
-    if (!m) return '';
-    const top = (m.topWeights || []).slice(0, 4).map(w => w.feature + ' (' + w.weight + ')').join(', ');
-    const patternLine = '<br>🕯️ Side selection: last 3 closed candles (majority direction / momentum / last-body strength) — bet immediately on the next window';
-    const betSizeLine = '<br>Current bet size: $' + s.currentBetSize + (s.currentBetSize > s.baseBetDollars ? ' (base $' + s.baseBetDollars + ' + losses)' : ' (base)') +
-      '<br>Profit-anchor reset at bankroll $' + fmt2(s.nextResetAt);
-    const feeLine = '<br>Fees paid: $' + fmt2(s.totalFeesPaid) + (s.totalRebatesEarned > 0 ? ' (rebated $' + fmt2(s.totalRebatesEarned) + ')' : '') + ' on $' + fmt2(s.totalVolume) + ' volume';
-    return '<div class="model-box">🧠 Model: ' + m.updates + ' learning steps so far' +
-      (m.accuracy != null ? ' · running accuracy ' + fmtPct(m.accuracy) : '') +
-      (top ? '<br>Top weighted features: ' + top : '') + patternLine + betSizeLine + feeLine + '</div>';
+  function candleModelHtml(s) {
+    const candles = s.lastCandles || [];
+    const t = s.current && s.current.btc;
+    const pred = t && t.model;
+    let candleRow;
+    if (!candles.length) {
+      candleRow = '<div class="candle-row"><div class="empty">Waiting for candles…</div></div>';
+    } else {
+      candleRow = '<div class="candle-row">' + candles.map((k, i) => {
+        const bull = k.up;
+        return '<div class="candle-box ' + (bull ? 'up' : 'down') + '">' +
+          '<div class="candle-num">' + (i + 1) + (bull ? ' ▲' : ' ▼') + '</div>' +
+          '<div class="candle-body">' + fmt2(k.open) + ' → ' + fmt2(k.close) + '</div>' +
+          '<div class="candle-sub">H ' + fmt2(k.high) + ' · L ' + fmt2(k.low) + '</div>' +
+        '</div>';
+      }).join('') + '</div>';
+    }
+    const predLine = pred && pred.side
+      ? 'Next candle: <b>' + pred.side.toUpperCase() + '</b> — confidence ' + fmtPct(pred.confidence) + ' · score ' + pred.score +
+        (pred.sub ? ' (majority ' + pred.sub.majority + ' / momentum ' + pred.sub.momentum + ' / lastBody ' + pred.sub.lastBody + ')' : '')
+      : 'Next candle: waiting for 3 closed candles';
+    const metaLine = 'Bet size $' + s.currentBetSize + (s.currentBetSize > s.baseBetDollars ? ' (base $' + s.baseBetDollars + ' + losses)' : ' (base)') +
+      ' · profit-anchor reset at $' + fmt2(s.nextResetAt) +
+      (s.totalFeesPaid > 0 ? ' · fees $' + fmt2(s.totalFeesPaid) + (s.totalRebatesEarned > 0 ? ' (rebate $' + fmt2(s.totalRebatesEarned) + ')' : '') : '');
+    return '<div class="model-box">' + candleRow +
+      '<div class="candle-pred">' + predLine + '</div>' +
+      '<div class="candle-meta">' + metaLine + '</div>' +
+    '</div>';
   }
 
   function panelHtml(key, title, s) {
@@ -200,10 +224,9 @@ app.get('/', (_, res) => {
           '<div class="stat"><div class="stat-label">Win Rate</div><div class="stat-val ' + pClass(winRate != null ? winRate - 0.5 : null) + '">' + fmtPct(winRate) + '</div></div>' +
           '<div class="stat"><div class="stat-label">Realized P&amp;L</div><div class="stat-val ' + pClass(s.realizedPnl) + '">' + sgn(s.realizedPnl) + '</div></div>' +
           '<div class="stat"><div class="stat-label">Wins / Losses</div><div class="stat-val">' + s.wins + ' / ' + s.losses + '</div></div>' +
-          '<div class="stat"><div class="stat-label">Skipped</div><div class="stat-val">' + s.skipped + '</div></div>' +
           '<div class="stat"><div class="stat-label">BTC Price</div><div class="stat-val">$' + fmt2(s.latestBtcPrice) + '</div></div>' +
         '</div>' +
-        modelBoxHtml(s.model, s) +
+        candleModelHtml(s) +
         currentWindowHtml(s) +
         '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Window</th><th>Result</th><th>Conf</th><th>Bet</th><th>W/L</th><th>PnL</th></tr></thead>' +
         '<tbody>' + historyRowsHtml(s.history) + '</tbody></table></div>' +
