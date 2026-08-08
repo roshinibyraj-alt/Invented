@@ -143,7 +143,7 @@ app.get('/', (_, res) => {
       headline = '⏸ ' + t.signalSide.toUpperCase() + ' signal, but no bet placed';
       betLine = '<span class="status-pill status-idle">skipped — ' + (t.skipReason || 'no fill') + '</span>';
     } else {
-      headline = (t.signalSide === 'up' ? '🔵' : '🟣') + ' Pattern: ' + t.signalSide.toUpperCase() + ' (opposite of previous window) — model conf ' + fmtPct(t.confidence);
+      headline = (t.signalSide === 'up' ? '🔵' : '🟣') + ' 3-candle model: ' + t.signalSide.toUpperCase() + ' — confidence ' + fmtPct(t.confidence);
       const targetPrice = t.signalSide === 'up' ? (leg && leg.upAsk) : (leg && leg.downAsk);
       betLine = '<span class="status-pill status-resting">placing ' + t.signalSide.toUpperCase() + ' immediately at market' + (targetPrice != null ? ' — ask $' + fmtPx(targetPrice) : '') + '</span>';
     }
@@ -174,7 +174,7 @@ app.get('/', (_, res) => {
   function modelBoxHtml(m, s) {
     if (!m) return '';
     const top = (m.topWeights || []).slice(0, 4).map(w => w.feature + ' (' + w.weight + ')').join(', ');
-    const patternLine = '<br>🔄 Pattern: always bets the opposite of the previous window (UP→DOWN, DOWN→UP)';
+    const patternLine = '<br>🕯️ Side selection: last 3 closed candles (majority direction / momentum / last-body strength) — bet immediately on the next window';
     const betSizeLine = '<br>Current bet size: $' + s.currentBetSize + (s.currentBetSize > s.baseBetDollars ? ' (base $' + s.baseBetDollars + ' + losses)' : ' (base)') +
       '<br>Profit-anchor reset at bankroll $' + fmt2(s.nextResetAt);
     const feeLine = '<br>Fees paid: $' + fmt2(s.totalFeesPaid) + (s.totalRebatesEarned > 0 ? ' (rebated $' + fmt2(s.totalRebatesEarned) + ')' : '') + ' on $' + fmt2(s.totalVolume) + ' volume';

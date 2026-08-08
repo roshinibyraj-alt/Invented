@@ -10,12 +10,12 @@
  *  its own candle feed, its own learned model weights, its own
  *  bankroll, and its own win/loss stats.
  *
- *  STRATEGY (PATTERN-ONLY): every window bets the OPPOSITE side of the
- *  previous window — if the last window bet UP, this one bets DOWN; if
- *  it bet DOWN, this one bets UP. Win or loss, always the opposite
- *  (UP win -> DOWN, DOWN win -> UP, UP lost -> DOWN, DOWN lost -> UP).
- *  The very first window (no history yet) defaults to UP. Every window
- *  trades; nothing is ever skipped.
+ *  STRATEGY (3-CANDLE RULE-BASED): every window bets the side picked by
+ *  three-candle-model.js using ONLY the last 3 closed candles — a
+ *  weighted vote of majority direction / net momentum / last-body
+ *  strength. The predicted side is bet immediately on the window that
+ *  opens as soon as those 3 candles have closed. Every window trades;
+ *  nothing is ever skipped.
  *
  *  The learned signal model (candlestick patterns, RSI, MACD, ATR,
  *  Bollinger, volume, SMA trend, streaks, time-of-day) still runs in
@@ -41,6 +41,7 @@
 const fs = require('fs');
 const { createCandleFeed } = require('./candles');
 const { buildFeatures, createSignalModel } = require('./signal-model');
+const { predictNextDirection } = require('./three-candle-model');
 
 const GAMMA = 'https://gamma-api.polymarket.com';
 const CLOB  = 'https://clob.polymarket.com';
@@ -372,18 +373,22 @@ function createEngine(cfg) {
 
   function tokenIdFor(leg, side) { return side === 'up' ? leg.upTokenId : leg.downTokenId; }
 
-  // PATTERN-ONLY side selection: always bet the OPPOSITE of the last
-  // window's side (UP -> DOWN, DOWN -> UP — win or loss, no exceptions).
-  // The first window defaults to UP. The learned model still runs and
-  // predicts (shown on the dashboard, keeps learning), but never picks.
-  function patternSide() {
-    return nextPatternSideFromHistory(engine.history);
+  // 3-CANDLE RULE-BASED side selection: the last 3 closed candles vote
+  // (majority direction / net momentum / last-body strength) and the
+  // winning side is bet immediately on the window opening right now.
+  // The learned model still runs and predicts (shown on the dashboard,
+  // keeps learning), but never picks.
+  function latestCandleCoversWindow(windowTs) {
+    const cnds = candles.getCandles();
+    if (!cnds.length) return false;
+    return cnds[cnds.length - 1].closeTime >= windowTs * 1000 - windowSeconds * 1000;
   }
   function computeDecision() {
     const cnds = candles.getCandles();
     const features = buildFeatures(cnds);
     const probUp = features ? signalModel.predict(features) : 0.5;
-    return { side: patternSide(), probUp, features, reason: null };
+    const pred = predictNextDirection(cnds);
+    return { side: pred.side, probUp: pred.confidence, features, reason: pred.side ? null : pred.error, model: pred };
   }
 
   function freshTrade(windowTs, decision) {
@@ -560,11 +565,23 @@ function createEngine(cfg) {
       }
       if (windowTs < engine.boundaryWindowTs) return;
 
+      // The 3-candle model needs the candle that just closed at this
+      // boundary — wait (briefly) for Binance to publish it if needed.
       await candles.refresh(log);
+      for (let attempt = 0; attempt < 4 && !latestCandleCoversWindow(windowTs); attempt++) {
+        await new Promise(res => setTimeout(res, 1000));
+        await candles.refresh(log);
+      }
+
       const decision = computeDecision();
       trade = freshTrade(windowTs, decision);
       engine.current.btc = trade;
-      const signalMsg = `pattern: ${decision.side.toUpperCase()} (opposite of previous window) — immediate entry at market open, bet $${baseBetDollars} (model confidence ${(decision.probUp * 100).toFixed(1)}% for reference)`;
+      const pred = decision.model;
+      const sideLabel = decision.side ? decision.side.toUpperCase() : 'NONE';
+      const detail = pred && pred.sub
+        ? `score ${pred.score} (majority ${pred.sub.majority} / momentum ${pred.sub.momentum} / lastBody ${pred.sub.lastBody})`
+        : (pred && pred.error) || 'no candles yet';
+      const signalMsg = `3-candle model: ${sideLabel} ${detail} — immediate entry at market open, bet $${baseBetDollars}, confidence ${(decision.probUp * 100).toFixed(1)}%`;
       log(`🆕 new window t=${windowTs} — discovering market… ${signalMsg}`);
     }
 
@@ -719,7 +736,7 @@ function createEngine(cfg) {
     emitFn = emit;
     slog = slogFn;
     slog(`[hedgebot] 🪙 ${label} Signal-Model Engine — fully automatic`);
-    slog(`[hedgebot] ⚙️  [${label}] Side selection: PATTERN-ONLY alternation — if the previous window bet UP, bet DOWN; if it bet DOWN, bet UP (win or loss, always the opposite). First window defaults to UP. Bets every window.`);
+    slog(`[hedgebot] ⚙️  [${label}] Side selection: 3-CANDLE RULE-BASED — the last 3 closed candles vote (majority direction / net momentum / last-body strength) and the predicted side is bet immediately on the next window. Bets every window.`);
     slog(`[hedgebot] ⚙️  [${label}] Entry timing: IMMEDIATE — position is taken as soon as the window's market is discovered. No wait, no price trigger.`);
     slog(`[hedgebot] ⚙️  [${label}] Linear step sizing: base $${baseBetDollars}. Bet size increases $50 after every loss, decreases $50 after every win, floored at $${baseBetDollars}.`);
     slog(`[hedgebot] ⚙️  [${label}] Profit-anchor reset: whenever bankroll reaches (anchor + $${baseBetDollars}), bet size snaps straight back to $${baseBetDollars} and the anchor re-pins to that new bankroll level. Starting anchor: $${engine.profitAnchor.toFixed(2)}.`);
