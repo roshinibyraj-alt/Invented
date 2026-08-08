@@ -640,8 +640,9 @@ function createEngine(cfg) {
 
         if (engine.waitingForBoundary) {
           if (engine.boundaryWindowTs == null) {
-            engine.boundaryWindowTs = Math.floor(nowSec / WINDOW_5M) * WINDOW_5M + WINDOW_5M;
-            log(`⏳ starting mid-window — waiting for next fresh boundary (t=${engine.boundaryWindowTs}) before trading begins`);
+            const current15 = Math.floor(nowSec / WINDOW_15M) * WINDOW_15M;
+            engine.boundaryWindowTs = nowSec > current15 ? current15 + WINDOW_15M : current15;
+            log(`⏳ starting ${nowSec > current15 ? 'mid-window — waiting for the next 15m boundary' : 'on a fresh 15m boundary'} (t=${engine.boundaryWindowTs}) before trading begins`);
           }
           if (nowSec >= engine.boundaryWindowTs) {
             engine.waitingForBoundary = false;
@@ -752,6 +753,7 @@ function createEngine(cfg) {
       waitingForBoundary: engine.waitingForBoundary,
       bankroll: engine.bankroll,
       startingCapital,
+      realizedPnlTotal: engine.realizedPnl,
       skipRemaining: which === '5m' ? engine.skipRemaining : null,
       direction: engine.direction,
       totalFeesPaid: engine.totalFeesPaid,

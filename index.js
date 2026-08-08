@@ -67,6 +67,8 @@ app.get('/', (_, res) => {
   .panel-title { font-size: 14px; color: #ddd; }
   .panel-body { padding: 12px 14px; }
   .stats-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 10px; }
+  .shared-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; padding: 10px 20px 0; }
+  @media (max-width: 700px) { .shared-stats { grid-template-columns: repeat(2, 1fr); } }
   .stat { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 9px; }
   .stat-label { font-size: 8px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 4px; }
   .stat-val { font-size: 14px; font-weight: bold; color: #12202e; }
@@ -117,6 +119,8 @@ app.get('/', (_, res) => {
   </div>
   <div class="toolbar-note">Each panel below has its own pause/resume — the buttons above control the whole combined engine at once.</div>
 
+  <div class="shared-stats" id="shared-stats"></div>
+
   <div class="panels">
     <div class="panel" id="panel-m5"></div>
     <div class="panel" id="panel-m15"></div>
@@ -165,13 +169,12 @@ app.get('/', (_, res) => {
   }
 
   function historyRowsHtml(list) {
-    if (!list || !list.length) return '<tr><td colspan="6" class="empty">No resolved windows yet</td></tr>';
+    if (!list || !list.length) return '<tr><td colspan="5" class="empty">No resolved windows yet</td></tr>';
     return list.slice(0, 25).map(h => {
       const betCell = !h.side ? '—' : (h.betPlaced ? h.side.toUpperCase() + ' @' + fmtPx(h.entryPrice) : h.side.toUpperCase() + ' (skip)');
       const resultCell = h.win == null ? '—' : (h.win ? 'WON' : 'LOST');
       return '<tr><td>' + h.slug.split('-').pop() + '</td>' +
       '<td>' + (h.winner || '?').toUpperCase() + '</td>' +
-      '<td>' + fmtPct(h.confidence) + '</td>' +
       '<td>' + betCell + '</td>' +
       '<td class="' + (h.win === true ? 'pnl-pos' : (h.win === false ? 'pnl-neg' : '')) + '">' + resultCell + '</td>' +
       '<td class="' + pClass(h.pnl) + '">' + sgn(h.pnl) + '</td></tr>';
@@ -199,8 +202,7 @@ app.get('/', (_, res) => {
       ? '3-candle reference: <b>' + pred.side.toUpperCase() + '</b> — confidence ' + fmtPct(pred.confidence) + ' · score ' + pred.score +
         (pred.sub ? ' (majority ' + pred.sub.majority + ' / momentum ' + pred.sub.momentum + ' / lastBody ' + pred.sub.lastBody + ')' : '')
       : '3-candle reference: waiting for 3 closed candles';
-    const metaLine = 'Bet size $' + s.currentBetSize + (s.currentBetSize > s.baseBetDollars ? ' (base $' + s.baseBetDollars + ' + losses)' : ' (base)') +
-      ' · profit-anchor reset at $' + fmt2(s.nextResetAt) +
+    const metaLine = 'Fixed bet: $' + fmt2(s.baseBetDollars) + ' per window' +
       (s.totalFeesPaid > 0 ? ' · fees $' + fmt2(s.totalFeesPaid) + (s.totalRebatesEarned > 0 ? ' (rebate $' + fmt2(s.totalRebatesEarned) + ')' : '') : '');
     return '<div class="model-box">' + candleRow +
       '<div class="candle-pred">' + predLine + '</div>' +
@@ -221,7 +223,6 @@ app.get('/', (_, res) => {
           '<button class="resume" onclick="resumeOne(\\'' + key + '\\')">▶️ Resume</button>' +
         '</div>' +
         '<div class="stats-row">' +
-          '<div class="stat"><div class="stat-label">Bankroll</div><div class="stat-val">$' + fmt2(s.bankroll) + '</div></div>' +
           '<div class="stat"><div class="stat-label">Win Rate</div><div class="stat-val ' + pClass(winRate != null ? winRate - 0.5 : null) + '">' + fmtPct(winRate) + '</div></div>' +
           '<div class="stat"><div class="stat-label">Realized P&amp;L</div><div class="stat-val ' + pClass(s.realizedPnl) + '">' + sgn(s.realizedPnl) + '</div></div>' +
           '<div class="stat"><div class="stat-label">Wins / Losses</div><div class="stat-val">' + s.wins + ' / ' + s.losses + '</div></div>' +
@@ -229,14 +230,23 @@ app.get('/', (_, res) => {
         '</div>' +
         candleModelHtml(s) +
         currentWindowHtml(s) +
-        '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Window</th><th>Result</th><th>Conf</th><th>Bet</th><th>W/L</th><th>PnL</th></tr></thead>' +
+        '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Window</th><th>Result</th><th>Bet</th><th>W/L</th><th>PnL</th></tr></thead>' +
         '<tbody>' + historyRowsHtml(s.history) + '</tbody></table></div>' +
       '</div>';
   }
 
   let latest = { m5: null, m15: null };
 
+  function sharedStatsHtml(s) {
+    if (!s) return '';
+    return '<div class="stat"><div class="stat-label">Bankroll (shared)</div><div class="stat-val">$' + fmt2(s.bankroll) + '</div></div>' +
+      '<div class="stat"><div class="stat-label">Equity</div><div class="stat-val">$' + fmt2(s.equity) + '</div></div>' +
+      '<div class="stat"><div class="stat-label">Total Realized P&amp;L</div><div class="stat-val ' + pClass(s.realizedPnlTotal) + '">' + sgn(s.realizedPnlTotal) + '</div></div>' +
+      '<div class="stat"><div class="stat-label">Fees Paid</div><div class="stat-val">$' + fmt2(s.totalFeesPaid) + '</div></div>';
+  }
+
   function render() {
+    $('shared-stats').innerHTML = sharedStatsHtml(latest.m15 || latest.m5);
     $('panel-m5').innerHTML = panelHtml('m5', 'BTC 5-Minute', latest.m5);
     $('panel-m15').innerHTML = panelHtml('m15', 'BTC 15-Minute', latest.m15);
     const any = latest.m5 || latest.m15;
