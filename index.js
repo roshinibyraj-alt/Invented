@@ -143,9 +143,9 @@ app.get('/', (_, res) => {
       headline = '⏸ ' + t.signalSide.toUpperCase() + ' signal, but no bet placed';
       betLine = '<span class="status-pill status-idle">skipped — ' + (t.skipReason || 'no fill') + '</span>';
     } else {
-      headline = (t.signalSide === 'up' ? '🔵' : '🟣') + ' Signal: ' + t.signalSide.toUpperCase() + ' — confidence ' + fmtPct(t.confidence);
+      headline = (t.signalSide === 'up' ? '🔵' : '🟣') + ' Pattern: ' + t.signalSide.toUpperCase() + ' (opposite of previous window) — model conf ' + fmtPct(t.confidence);
       const targetPrice = t.signalSide === 'up' ? (leg && leg.upAsk) : (leg && leg.downAsk);
-      betLine = '<span class="status-pill status-resting">waiting for $' + s.entryPriceThreshold + ' (now ' + fmtPx(targetPrice) + ') or ' + t.secondsToEntryTimeout + 's timeout</span>';
+      betLine = '<span class="status-pill status-resting">placing ' + t.signalSide.toUpperCase() + ' immediately at market' + (targetPrice != null ? ' — ask $' + fmtPx(targetPrice) : '') + '</span>';
     }
     return '<div class="current-window">' +
       '<div class="headline">' + headline + '</div>' +
@@ -174,15 +174,13 @@ app.get('/', (_, res) => {
   function modelBoxHtml(m, s) {
     if (!m) return '';
     const top = (m.topWeights || []).slice(0, 4).map(w => w.feature + ' (' + w.weight + ')').join(', ');
-    const forcedLine = s.forcedRemaining > 0
-      ? '<br>🔁 Forced ' + (s.forcedSide || '').toUpperCase() + ' bet active — ' + s.forcedRemaining + ' of ' + s.forcedOppositeWindows + ' window(s) remaining (ignoring confidence)'
-      : '';
+    const patternLine = '<br>🔄 Pattern: always bets the opposite of the previous window (UP→DOWN, DOWN→UP)';
     const betSizeLine = '<br>Current bet size: $' + s.currentBetSize + (s.currentBetSize > s.baseBetDollars ? ' (base $' + s.baseBetDollars + ' + losses)' : ' (base)') +
       '<br>Profit-anchor reset at bankroll $' + fmt2(s.nextResetAt);
     const feeLine = '<br>Fees paid: $' + fmt2(s.totalFeesPaid) + (s.totalRebatesEarned > 0 ? ' (rebated $' + fmt2(s.totalRebatesEarned) + ')' : '') + ' on $' + fmt2(s.totalVolume) + ' volume';
     return '<div class="model-box">🧠 Model: ' + m.updates + ' learning steps so far' +
       (m.accuracy != null ? ' · running accuracy ' + fmtPct(m.accuracy) : '') +
-      (top ? '<br>Top weighted features: ' + top : '') + forcedLine + betSizeLine + feeLine + '</div>';
+      (top ? '<br>Top weighted features: ' + top : '') + patternLine + betSizeLine + feeLine + '</div>';
   }
 
   function panelHtml(key, title, s) {

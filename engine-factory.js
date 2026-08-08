@@ -10,21 +10,25 @@
  *  its own candle feed, its own learned model weights, its own
  *  bankroll, and its own win/loss stats.
  *
- *  STRATEGY: every window, a model looks at the recent history of real
- *  BTC candles (fetched live from Binance) and computes P(this window
- *  closes UP), using: all 20 standard candlestick patterns, RSI(14),
- *  Stochastic RSI, MACD histogram, ATR%, Bollinger %B, recent returns,
- *  volume z-score, SMA20/50 trend, same-direction candle streak length,
- *  and cyclically-encoded hour-of-day / day-of-week.
+ *  STRATEGY (PATTERN-ONLY): every window bets the OPPOSITE side of the
+ *  previous window — if the last window bet UP, this one bets DOWN; if
+ *  it bet DOWN, this one bets UP. Win or loss, always the opposite
+ *  (UP win -> DOWN, DOWN win -> UP, UP lost -> DOWN, DOWN lost -> UP).
+ *  The very first window (no history yet) defaults to UP. Every window
+ *  trades; nothing is ever skipped.
  *
- *  The model LEARNS ONLINE: one gradient-descent step per resolved
- *  window, toward whatever the market actually resolved to (whether or
- *  not a bet was placed). It starts at zero weights (a coin flip) and
- *  only has a chance to show real edge after many real results.
+ *  The learned signal model (candlestick patterns, RSI, MACD, ATR,
+ *  Bollinger, volume, SMA trend, streaks, time-of-day) still runs in
+ *  the background — its prediction is shown on the dashboard and it
+ *  keeps learning from every resolved window — but it never picks the
+ *  side anymore.
  *
- *  SIZING: flat $baseBetDollars per window. ENTRY RULE: only bets when
- *  confidence clears confidenceThreshold on one side; otherwise sits
- *  the window out.
+ *  ENTRY: IMMEDIATE — the position is taken as soon as the window's
+ *  market is discovered. No entry-price wait, no timeout.
+ *
+ *  SIZING: linear step sizing stays — base $baseBetDollars per window,
+ *  +$50 after a loss, -$50 after a win (floored at base), with the
+ *  profit-anchor reset.
  *
  *  PERSISTENCE: model weights persist via signal-model.js's own
  *  statePath. Bankroll/wins/losses/history persist via statsStatePath
@@ -368,23 +372,18 @@ function createEngine(cfg) {
 
   function tokenIdFor(leg, side) { return side === 'up' ? leg.upTokenId : leg.downTokenId; }
 
+  // PATTERN-ONLY side selection: always bet the OPPOSITE of the last
+  // window's side (UP -> DOWN, DOWN -> UP — win or loss, no exceptions).
+  // The first window defaults to UP. The learned model still runs and
+  // predicts (shown on the dashboard, keeps learning), but never picks.
+  function patternSide() {
+    return nextPatternSideFromHistory(engine.history);
+  }
   function computeDecision() {
     const cnds = candles.getCandles();
     const features = buildFeatures(cnds);
-    if (!features) return { side: null, probUp: 0.5, features: null, reason: 'warming-up (need more candle history)' };
-    const probUp = signalModel.predict(features);
-
-    if (engine.forcedRemaining > 0) {
-      const side = engine.forcedSide;
-      const remaining = engine.forcedRemaining;
-      engine.forcedRemaining--;
-      log(`🔁 forced opposite-side bet — betting ${side.toUpperCase()} regardless of confidence (${remaining} of ${forcedOppositeWindows} remaining after the loss)`);
-      return { side, probUp, features, reason: null, forced: true };
-    }
-
-    if (probUp >= confidenceThreshold) return { side: 'up', probUp, features, reason: null };
-    if (1 - probUp >= confidenceThreshold) return { side: 'down', probUp, features, reason: null };
-    return { side: null, probUp, features, reason: 'confidence below threshold' };
+    const probUp = features ? signalModel.predict(features) : 0.5;
+    return { side: patternSide(), probUp, features, reason: null };
   }
 
   function freshTrade(windowTs, decision) {
@@ -491,13 +490,6 @@ function createEngine(cfg) {
     engine.realizedPnl = round2(engine.realizedPnl + pnl);
     if (win) engine.wins++; else engine.losses++;
 
-    if (!win) {
-      const opposite = side === 'up' ? 'down' : 'up';
-      engine.forcedSide = opposite;
-      engine.forcedRemaining = forcedOppositeWindows;
-      log(`🔁 loss recorded on ${side.toUpperCase()} — forcing ${opposite.toUpperCase()} bets for the next ${forcedOppositeWindows} window(s), regardless of confidence`);
-    }
-
     // Linear step sizing (independent of the forced-opposite rule above):
     // +$50 after every loss, -$50 after every win, floored at baseBetDollars.
     const prevBet = engine.currentBet;
@@ -572,9 +564,7 @@ function createEngine(cfg) {
       const decision = computeDecision();
       trade = freshTrade(windowTs, decision);
       engine.current.btc = trade;
-      const signalMsg = decision.side
-        ? `signal: ${decision.side.toUpperCase()} (confidence ${(decision.probUp * 100).toFixed(1)}%) → will wait for $${entryPriceThreshold} or ${entryWaitSec}s, then bet $${baseBetDollars}`
-        : `no bet this window (${decision.reason})`;
+      const signalMsg = `pattern: ${decision.side.toUpperCase()} (opposite of previous window) — immediate entry at market open, bet $${baseBetDollars} (model confidence ${(decision.probUp * 100).toFixed(1)}% for reference)`;
       log(`🆕 new window t=${windowTs} — discovering market… ${signalMsg}`);
     }
 
@@ -585,17 +575,11 @@ function createEngine(cfg) {
     }
 
     if (trade.state === 'trading') {
+      // IMMEDIATE entry: as soon as the window's market is discovered and
+      // the chosen side has an ask, take the position right away — no wait,
+      // no price trigger. placeSignalBet() retries each tick until it can.
       if (engine.tradingEnabled && now < trade.closeAt && trade.decision.side && !trade.betPlaced) {
-        const elapsedSec = Math.floor((now - trade.windowTs * 1000) / 1000);
-        const ask = trade.decision.side === 'up' ? trade.leg.upAsk : trade.leg.downAsk;
-        const priceReady = ask != null && ask <= entryPriceThreshold;
-        const timeUp = elapsedSec >= entryWaitSec;
-        if (priceReady || timeUp) {
-          if (timeUp && !priceReady) {
-            log(`⏱️  [${trade.leg.slug}] entry price never reached $${entryPriceThreshold} within ${entryWaitSec}s — buying ${trade.decision.side.toUpperCase()} at market ($${ask != null ? ask.toFixed(3) : '—'})`);
-          }
-          await placeSignalBet(trade);
-        }
+        await placeSignalBet(trade);
       }
     }
   }
@@ -667,7 +651,7 @@ function createEngine(cfg) {
       skipReason: trade.decision.side ? trade.skipReason : trade.decision.reason,
       betPlaced: trade.betPlaced,
       waitingForEntry: trade.decision.side && !trade.betPlaced,
-      secondsToEntryTimeout: Math.max(0, entryWaitSec - elapsedSec),
+      secondsToEntryTimeout: 0,
       position: trade.position ? { shares: trade.position.shares, cost: trade.position.cost, entryPrice: trade.position.entryPrice } : null,
       pnl: trade.pnl,
       unrealizedPnl: unrealizedForTrade(trade),
@@ -735,9 +719,8 @@ function createEngine(cfg) {
     emitFn = emit;
     slog = slogFn;
     slog(`[hedgebot] 🪙 ${label} Signal-Model Engine — fully automatic`);
-    slog(`[hedgebot] ⚙️  [${label}] Every window: candlestick-pattern + technical-indicator model predicts P(up). Bets $${baseBetDollars} flat when confidence clears ${(confidenceThreshold * 100).toFixed(0)}%, otherwise sits out. Starting bankroll (scoreboard only): $${startingCapital}. ${DRY_RUN ? 'DEMO' : 'LIVE'} mode.`);
-    slog(`[hedgebot] ⚙️  [${label}] After any loss: bets the OPPOSITE side for the next ${forcedOppositeWindows} window(s) regardless of confidence, then resumes normal confidence-based betting.`);
-    slog(`[hedgebot] ⚙️  [${label}] Entry timing: waits for the chosen side's price to reach $${entryPriceThreshold} within the first ${entryWaitSec}s of the window; if it never gets there, buys at market once ${entryWaitSec}s is up.`);
+    slog(`[hedgebot] ⚙️  [${label}] Side selection: PATTERN-ONLY alternation — if the previous window bet UP, bet DOWN; if it bet DOWN, bet UP (win or loss, always the opposite). First window defaults to UP. Bets every window.`);
+    slog(`[hedgebot] ⚙️  [${label}] Entry timing: IMMEDIATE — position is taken as soon as the window's market is discovered. No wait, no price trigger.`);
     slog(`[hedgebot] ⚙️  [${label}] Linear step sizing: base $${baseBetDollars}. Bet size increases $50 after every loss, decreases $50 after every win, floored at $${baseBetDollars}.`);
     slog(`[hedgebot] ⚙️  [${label}] Profit-anchor reset: whenever bankroll reaches (anchor + $${baseBetDollars}), bet size snaps straight back to $${baseBetDollars} and the anchor re-pins to that new bankroll level. Starting anchor: $${engine.profitAnchor.toFixed(2)}.`);
     slog(`[hedgebot] ⚙️  [${label}] Fees: Polymarket taker fee = shares × ${feeTheta} × price × (1-price) (crypto category), ${rebatePct > 0 ? (rebatePct * 100).toFixed(0) + '% rebate applied' : 'no rebate configured'}. Exact rebate tier isn't published by Polymarket — set REBATE_PCT once you know yours.`);
@@ -755,4 +738,15 @@ function createEngine(cfg) {
   return { start, pauseTrading, resumeTrading, setMode, buildState, getStatus: buildState };
 }
 
-module.exports = { createEngine };
+// Pure helper (exported for testing): picks the next side from the
+// window history. History is newest-first; each entry carries the side
+// that window bet. Rule: always the OPPOSITE of the most recent side
+// (UP -> DOWN, DOWN -> UP — win or loss makes no difference). With no
+// history yet, the first window defaults to UP.
+function nextPatternSideFromHistory(history) {
+  const prev = (history || []).find((h) => h && h.side);
+  if (!prev || prev.side === 'down') return 'up';
+  return 'down';
+}
+
+module.exports = { createEngine, nextPatternSideFromHistory };
