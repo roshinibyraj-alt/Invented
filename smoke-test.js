@@ -5,18 +5,18 @@
  * over several 15m windows in fast-forward (15m = 18s, 5m = 6s) with a
  * stubbed Polymarket API whose outcomes are scripted per window.
  *
- * Script for the run:
- *   15m windows: T0 UP(wins) -> T0+18 UP(loses) -> T0+36 DOWN(loses) -> T0+54 UP(wins) -> T0+72 UP(wins)
+ * Script for the run (5m bets SAME direction as the 15m bet):
+ *   15m windows: T0 UP(wins) -> T0+18 UP(wins) -> T0+36 UP(loses) -> T0+54 DOWN(loses) -> T0+72 UP(wins)
  *   5m  windows (bets ONLY at 15m opens, NEVER skipped):
- *       T0    bet DOWN  -> winner DOWN  (WINS  -> profit rolls into 15m)
- *       T0+18 bet DOWN  -> winner UP    (LOSES -> no roll; no skip)
+ *       T0    bet UP    -> winner UP    (WINS  -> rolls into 15m UP, which also wins)
+ *       T0+18 bet UP    -> winner UP    (WINS  -> rolls into 15m UP, which also wins)
  *       T0+36 bet UP    -> winner DOWN  (LOSES -> no roll; no skip)
- *       T0+54 bet DOWN  -> winner DOWN  (WINS  -> profit rolls into 15m)
- *       T0+72 bet DOWN  -> winner DOWN  (WINS  -> profit rolls into 15m)
+ *       T0+54 bet DOWN  -> winner UP    (LOSES -> no roll; no skip)
+ *       T0+72 bet UP    -> winner UP    (WINS  -> rolls into 15m UP, which also wins)
  *
- * Verifies: 5m bets happen ONLY at 15m opens and are NEVER skipped,
- * roll after 5m win, 15m direction follows the previous 15m outcome,
- * and the shared bankroll accounting.
+ * Verifies: 5m bets happen ONLY at 15m opens, are NEVER skipped, are the
+ * SAME direction as the 15m bet, roll after a 5m win, 15m direction
+ * follows the previous 15m outcome, and the shared bankroll accounting.
  *
  * Usage: node smoke-test.js   (takes ~2 minutes)
  */
@@ -34,8 +34,8 @@ let T0 = Math.floor(Date.now() / 1000 / W15) * W15 + W15;
 if (Math.floor(Date.now() / 1000) >= T0 - 3) T0 += W15;
 
 const SCRIPT = {
-  '15': new Map([[T0, 'up'], [T0 + W15, 'down'], [T0 + 2 * W15, 'up'], [T0 + 3 * W15, 'up'], [T0 + 4 * W15, 'up']]),
-  '5': new Map([[T0, 'down'], [T0 + W15, 'up'], [T0 + 2 * W15, 'down'], [T0 + 3 * W15, 'down'], [T0 + 4 * W15, 'down']]),
+  '15': new Map([[T0, 'up'], [T0 + W15, 'up'], [T0 + 2 * W15, 'down'], [T0 + 3 * W15, 'up'], [T0 + 4 * W15, 'up']]),
+  '5': new Map([[T0, 'up'], [T0 + W15, 'up'], [T0 + 2 * W15, 'down'], [T0 + 3 * W15, 'up'], [T0 + 4 * W15, 'up']]),
 };
 function winnerFor(tf, ts) {
   const w = SCRIPT[tf] && SCRIPT[tf].get(ts);
@@ -118,7 +118,7 @@ global.fetch = async (url, opts) => {
   await engine.start();
 
   // run through T0 + 5 windows + settle margin
-  const endAt = (T0 + 5 * W15 + W5 + 3) * 1000;
+  const endAt = (T0 + 5 * W15 + 15) * 1000;
   while (Date.now() < endAt) await sleep(1000);
 
   const s15 = states.m15;
@@ -148,22 +148,27 @@ global.fetch = async (url, opts) => {
   check('5m windows occur at every 15m open (5 of 5)', m5wt.length >= 5 && m5wt.every(ts => ts % W15 === 0) && JSON.stringify(m5wt.slice(0, 5)) === JSON.stringify([T0, T0 + W15, T0 + 2 * W15, T0 + 3 * W15, T0 + 4 * W15]));
   check('no 5m window at intermediate boundaries', !m5wt.includes(T0 + W5) && !m5wt.includes(T0 + 2 * W5));
   check('no 5m window ever skipped', snap.m5Seq.every(x => x.side != null));
-  // 15m direction follows previous outcome: up, up, down, up, up
-  check('15m direction sequence', JSON.stringify(m15dir.slice(0, 5)) === JSON.stringify(['up', 'up', 'down', 'up', 'up']));
+  // 15m direction follows previous outcome: up, up, up, down, up
+  check('15m direction sequence', JSON.stringify(m15dir.slice(0, 5)) === JSON.stringify(['up', 'up', 'up', 'down', 'up']));
+  // 5m side is the SAME as the 15m direction (momentum add-on)
+  const sameSide = snap.m5Seq.slice(0, 5).every((x, i) => x.side === m15dir[i]);
+  check('5m side same as 15m direction', sameSide);
   // roll: 15m position grew past the $150 base (300 shares @0.5)
   check('5m win rolled into 15m (shares > base)', snap.max15Shares >= 380);
   // resolutions
   const h15new = h15.slice().reverse();
   check('15m W1 won (up)', h15new[0] && h15new[0].direction === 'up' && h15new[0].win === true);
-  check('15m W2 lost (up vs down)', h15new[1] && h15new[1].direction === 'up' && h15new[1].win === false);
-  check('15m W3 lost (down vs up)', h15new[2] && h15new[2].direction === 'down' && h15new[2].win === false);
+  check('15m W2 won (up)', h15new[1] && h15new[1].direction === 'up' && h15new[1].win === true);
+  check('15m W3 lost (up vs down)', h15new[2] && h15new[2].direction === 'up' && h15new[2].win === false);
+  check('15m W4 lost (down vs up)', h15new[3] && h15new[3].direction === 'down' && h15new[3].win === false);
+  check('15m W5 won (up)', h15new[4] && h15new[4].direction === 'up' && h15new[4].win === true);
   const h5new = h5.slice().reverse();
   const byTs = new Map(h5new.map(h => [h.windowTs, h]));
-  check('5m T0 won (down)', byTs.get(T0) && byTs.get(T0).win === true && byTs.get(T0).side === 'down' && byTs.get(T0).skipped === false);
-  check('5m T0+18 lost, still bet', byTs.get(T0 + W15) && byTs.get(T0 + W15).win === false && byTs.get(T0 + W15).side === 'down' && byTs.get(T0 + W15).skipped === false);
+  check('5m T0 won (up)', byTs.get(T0) && byTs.get(T0).win === true && byTs.get(T0).side === 'up' && byTs.get(T0).skipped === false);
+  check('5m T0+18 won (up)', byTs.get(T0 + W15) && byTs.get(T0 + W15).win === true && byTs.get(T0 + W15).side === 'up' && byTs.get(T0 + W15).skipped === false);
   check('5m T0+36 lost, still bet', byTs.get(T0 + 2 * W15) && byTs.get(T0 + 2 * W15).win === false && byTs.get(T0 + 2 * W15).side === 'up' && byTs.get(T0 + 2 * W15).skipped === false);
-  check('5m T0+54 won, still bet', byTs.get(T0 + 3 * W15) && byTs.get(T0 + 3 * W15).win === true && byTs.get(T0 + 3 * W15).side === 'down' && byTs.get(T0 + 3 * W15).skipped === false);
-  check('5m T0+72 won, still bet', byTs.get(T0 + 4 * W15) && byTs.get(T0 + 4 * W15).win === true && byTs.get(T0 + 4 * W15).side === 'down' && byTs.get(T0 + 4 * W15).skipped === false);
+  check('5m T0+54 lost, still bet', byTs.get(T0 + 3 * W15) && byTs.get(T0 + 3 * W15).win === false && byTs.get(T0 + 3 * W15).side === 'down' && byTs.get(T0 + 3 * W15).skipped === false);
+  check('5m T0+72 won (up)', byTs.get(T0 + 4 * W15) && byTs.get(T0 + 4 * W15).win === true && byTs.get(T0 + 4 * W15).side === 'up' && byTs.get(T0 + 4 * W15).skipped === false);
   check('5m history has 5 bets, 0 skips', h5new.length >= 5 && h5new.slice(0, 5).every(h => !h.skipped));
   // shared bankroll: bankroll = start + realized - open position cost
   const openCost = s15.current.btc && s15.current.btc.position ? s15.current.btc.position.cost : 0;
