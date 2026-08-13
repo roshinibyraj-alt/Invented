@@ -2,29 +2,30 @@
 
 /**
  * ═══════════════════════════════════════════════════════════════
- *  BTC 15m/5m HEDGE ENGINE (single combined strategy)
+ *  BTC 0.60 MARTINGALE ENGINE — 5m and 15m Up/Down windows
  * ═══════════════════════════════════════════════════════════════
  *
- *  One engine, one shared bankroll, two coupled markets:
+ *  COMPLETE replacement of the old momentum/hedge logic.
  *
- *  - Every 15m window: immediately buy the 15m direction with $150.
- *    The 15m direction FOLLOWS the previous 15m resolved outcome
- *    (previous UP -> UP, previous DOWN -> DOWN; first window = UP).
- *  - At every 15m window open, the 5m window that starts right then is
- *    also bought in the SAME direction as the 15m bet with $50 (15m UP ->
- *    5m UP, 15m DOWN -> 5m DOWN). No 5m bets on the intermediate windows.
- *  - If a 5m bet WINS: its profit (payout - cost) is rolled into the
- *    15m window it was opened under (buying more of those shares), but
- *    only while that 15m window is still open — never the next one.
- *    A same-direction 5m win means the first-5m move already agrees with
- *    the 15m bet, so the roll compounds winners instead of averaging into
- *    losers (backtested on live logs: 5m same-dir won 63% of windows and
- *    the 15m went on to win 77% of those).
- *  - 5m bets are NEVER skipped: every 15m open bets its 5m window again,
- *    win or lose. A 5m loss just means momentum didn't confirm yet.
+ *  New strategy, per window (5m and 15m windows are independent):
  *
- *  All buys are immediate taker orders placed as soon as the window's
- *  market is discovered. Dry-run mode simulates fills at the ask.
+ *  1. When a window opens, the bot does NOT bet immediately. It waits:
+ *        - 1 minute after a 5m window opens
+ *        - 3 minutes after a 15m window opens
+ *  2. After the wait it checks both sides' prices:
+ *        - if a side is priced >= 0.60, buy that side for $10 worth
+ *          of shares (the higher side wins a tie)
+ *        - if neither side is >= 0.60 yet, keep watching until one
+ *          side comes back to 0.60, then trigger the $10 entry
+ *  3. While the window is open, if the OPPOSITE side's price reaches
+ *     0.60, the bot flips: it buys that side with the next martingale
+ *     amount — $20, then $40, then $80 (max 3 flips).
+ *  4. All shares are held to resolution. Window PnL = payout of the
+ *     winning side's shares ($1.00 each) - total cost of every buy.
+ *  5. Every new window starts fresh with the $10 entry.
+ *
+ *  Dashboard: full equity curve, max drawdown, win rate, and the
+ *  number of windows that reached the 3rd martingale ($80).
  * ═══════════════════════════════════════════════════════════════
  */
 
@@ -34,28 +35,29 @@ const { createCandleFeed } = require('./candles');
 const GAMMA = 'https://gamma-api.polymarket.com';
 const CLOB  = 'https://clob.polymarket.com';
 
-const TICK_MS             = 500;
-const PRICE_REFRESH_MS    = 1000;
-const DISCOVERY_RETRY_MS  = 2000;
-const RESOLUTION_POLL_MS  = 3000;
-const MIN_ORDER_SHARES    = 5;
+const TICK_MS                = 500;
+const PRICE_REFRESH_MS       = 1000;
+const DISCOVERY_RETRY_MS     = 2000;
+const RESOLUTION_POLL_MS     = 3000;
+const MIN_ORDER_SHARES       = 1;
 const RESOLUTION_FALLBACK_MS = 60000;
-const HIGH_CONF_PRICE     = 0.90;
+const EQUITY_RECORD_MS       = 5000;
 
-const DEFAULT_window15 = 900;
-const DEFAULT_window5  = 300;
+const TRIGGER_PRICE = 0.60;
 
 function round2(n) { return Math.round(n * 100) / 100; }
 function sgn2(n) { return (n >= 0 ? '+$' : '-$') + Math.abs(n).toFixed(2); }
 
 function createEngine(cfg) {
   const {
-    label = 'BTC-HEDGE',
+    label = 'BTC-0.60-MART',
     startingCapital = 4000,
-    baseBet15m = 150,
-    baseBet5m = 50,
-    windowSeconds15 = DEFAULT_window15,
-    windowSeconds5 = DEFAULT_window5,
+    entryDollars = 10,
+    martingaleAmounts = [20, 40, 80],
+    waitSeconds5 = 60,
+    waitSeconds15 = 180,
+    windowSeconds15 = 900,
+    windowSeconds5 = 300,
     feeTheta = 0.07,
     rebatePct = 0,
     candleRefreshMs = 15000,
@@ -65,6 +67,8 @@ function createEngine(cfg) {
     statsStatePath,
     emit = () => {},
     slog = () => {},
+    nowFn = Date.now,
+    tickMs = TICK_MS,
   } = cfg;
 
   const candles15 = createCandleFeed({ interval: '15m', maxCandles: 500, label: '15m' });
@@ -72,12 +76,11 @@ function createEngine(cfg) {
 
   const window15 = windowSeconds15;
   const window5 = windowSeconds5;
+  const tradeSeq = { '5': 0, '15': 0 };
 
   let DRY_RUN = dryRun;
   let warnedNoRestingMethod = false;
   let warnedNoCancelMethod = false;
-  let tradeSeq15 = 0;
-  let tradeSeq5 = 0;
 
   function loadStats() {
     if (!statsStatePath) return null;
@@ -94,26 +97,28 @@ function createEngine(cfg) {
     tradingEnabled: true,
     bankroll: savedStats ? savedStats.bankroll : startingCapital,
     realizedPnl: savedStats ? savedStats.realizedPnl : 0,
-    realizedPnl15: savedStats ? savedStats.realizedPnl15 : 0,
     realizedPnl5: savedStats ? savedStats.realizedPnl5 : 0,
-    wins15: savedStats ? savedStats.wins15 : 0,
-    losses15: savedStats ? savedStats.losses15 : 0,
+    realizedPnl15: savedStats ? savedStats.realizedPnl15 : 0,
     wins5: savedStats ? savedStats.wins5 : 0,
     losses5: savedStats ? savedStats.losses5 : 0,
-    direction: savedStats ? savedStats.direction : null,
-    lastOutcome15: savedStats ? savedStats.lastOutcome15 : null,
-    history15: savedStats && Array.isArray(savedStats.history15) ? savedStats.history15 : [],
+    wins15: savedStats ? savedStats.wins15 : 0,
+    losses15: savedStats ? savedStats.losses15 : 0,
+    mart3Count5: savedStats ? savedStats.mart3Count5 || 0 : 0,
+    mart3Count15: savedStats ? savedStats.mart3Count15 || 0 : 0,
     history5: savedStats && Array.isArray(savedStats.history5) ? savedStats.history5 : [],
-    trades15: [],
+    history15: savedStats && Array.isArray(savedStats.history15) ? savedStats.history15 : [],
     trades5: [],
+    trades15: [],
     logs: [],
-    equityCurve: savedStats && Array.isArray(savedStats.equityCurve) ? savedStats.equityCurve : [{ t: Date.now(), equity: startingCapital }],
-    current: { m15: null, m5: null },
-    pending15: [],
-    pending5: [],
+    equityCurve: savedStats && Array.isArray(savedStats.equityCurve) && savedStats.equityCurve.length
+      ? savedStats.equityCurve
+      : [{ t: nowFn(), equity: startingCapital }],
+    current: { '5': null, '15': null },
+    pending: { '5': [], '15': [] },
     lastPriceFetch: 0,
     lastCandleRefresh: 0,
     lastResolutionPoll: 0,
+    lastEquityRecord: 0,
     waitingForBoundary: true,
     boundaryWindowTs: null,
     totalFeesPaid: savedStats ? savedStats.totalFeesPaid || 0 : 0,
@@ -128,44 +133,74 @@ function createEngine(cfg) {
       fs.writeFileSync(statsStatePath, JSON.stringify({
         bankroll: engine.bankroll,
         realizedPnl: engine.realizedPnl,
-        realizedPnl15: engine.realizedPnl15,
         realizedPnl5: engine.realizedPnl5,
-        wins15: engine.wins15, losses15: engine.losses15,
+        realizedPnl15: engine.realizedPnl15,
         wins5: engine.wins5, losses5: engine.losses5,
-        direction: engine.direction,
-        lastOutcome15: engine.lastOutcome15,
-        history15: engine.history15.slice(0, 100),
+        wins15: engine.wins15, losses15: engine.losses15,
+        mart3Count5: engine.mart3Count5, mart3Count15: engine.mart3Count15,
         history5: engine.history5.slice(0, 100),
-        equityCurve: engine.equityCurve.slice(-200),
+        history15: engine.history15.slice(0, 100),
+        equityCurve: engine.equityCurve.slice(-300),
         totalFeesPaid: engine.totalFeesPaid,
         totalRebatesEarned: engine.totalRebatesEarned,
         totalVolume: engine.totalVolume,
-        savedAt: Date.now(),
+        savedAt: nowFn(),
       }));
     } catch (_) {}
   }
 
   function log(msg) {
-    const line = `[${new Date().toISOString().slice(11, 19)}] ${msg}`;
+    const line = `[${new Date(nowFn()).toISOString().slice(11, 19)}] ${msg}`;
     engine.logs.push(line);
     if (engine.logs.length > 500) engine.logs.shift();
-    slog(`[hedgebot] ${line}`);
+    slog(`[${label.toLowerCase()}] ${line}`);
   }
-  function registerTrade(list, seqRef, t) {
-    const trade = { seq: ++seqRef, time: new Date().toISOString().slice(11, 19), ...t };
+  function registerTrade(tf, t) {
+    const trade = { seq: ++tradeSeq[tf], time: new Date().toISOString().slice(11, 19), ...t };
+    const list = tf === '5' ? engine.trades5 : engine.trades15;
     list.push(trade);
     if (list.length > 300) list.shift();
   }
+  function tfLabel(tf) { return tf === '5' ? '5m' : '15m'; }
+  function winSec(tf) { return tf === '5' ? window5 : window15; }
+  function waitSec(tf) { return tf === '5' ? waitSeconds5 : waitSeconds15; }
+
+  function totalCostOf(t) {
+    if (!t || !t.buys || !t.buys.length) return 0;
+    return round2(t.buys.reduce((s, b) => s + b.cost, 0));
+  }
+  function positionMTM(t) {
+    if (!t || !t.buys || !t.buys.length) return 0;
+    let val = 0;
+    for (const b of t.buys) {
+      const p = markPrice(t.leg, b.side);
+      if (p != null) val += b.shares * p;
+    }
+    return val;
+  }
+  function openPositionsMTM() {
+    return positionMTM(engine.current['5']) + positionMTM(engine.current['15']);
+  }
+  function unrealizedFor(t) {
+    if (!t || t.settled || !t.buys || !t.buys.length) return null;
+    return round2(positionMTM(t) - totalCostOf(t));
+  }
   function recordEquity() {
-    engine.equityCurve.push({ t: Date.now(), equity: round2(engine.bankroll + openPositionsMTM()) });
-    if (engine.equityCurve.length > 1000) engine.equityCurve.shift();
+    engine.equityCurve.push({ t: nowFn(), equity: round2(engine.bankroll + openPositionsMTM()) });
+    if (engine.equityCurve.length > 2000) engine.equityCurve.shift();
     saveStats();
   }
 
-  async function getJSON(url) {
-    const res = await fetch(url, { headers: { 'User-Agent': 'polymarket-hedgebot/1.0' } });
-    if (!res.ok) throw new Error(`HTTP ${res.status}: ${url}`);
-    return res.json();
+  async function getJSON(url, timeoutMs = 4000) {
+    const ctrl = new AbortController();
+    const to = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, { headers: { 'User-Agent': 'polymarket-martingale-bot/1.0' }, signal: ctrl.signal });
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${url}`);
+      return await res.json();
+    } finally {
+      clearTimeout(to);
+    }
   }
   function describeOrderError(e) {
     const parts = [e?.message || String(e)];
@@ -177,14 +212,14 @@ function createEngine(cfg) {
     const ok = trader && typeof trader.placeFokLimitOrder === 'function';
     if (!ok && !warnedNoRestingMethod) {
       warnedNoRestingMethod = true;
-      slog(`[hedgebot] ❌ LIVE trading needs trader.placeFokLimitOrder(tokenId, side, price, size) - LIVE order placement will be skipped until added. DRY_RUN is unaffected.`);
+      slog(`[${label.toLowerCase()}] ❌ LIVE trading needs trader.placeFokLimitOrder(tokenId, side, price, size) - LIVE order placement will be skipped until added. DRY_RUN is unaffected.`);
     }
     return ok;
   }
   async function cancelRestingOrder(orderId) {
     if (DRY_RUN || !orderId) return;
     if (!trader || typeof trader.cancelOrder !== 'function') {
-      if (!warnedNoCancelMethod) { warnedNoCancelMethod = true; slog(`[hedgebot] ⚠️ trader.cancelOrder not implemented.`); }
+      if (!warnedNoCancelMethod) { warnedNoCancelMethod = true; slog(`[${label.toLowerCase()}] ⚠️ trader.cancelOrder not implemented.`); }
       return;
     }
     try { await trader.cancelOrder(orderId); } catch (e) { log(`⚠️ cancelRestingOrder(${orderId}) failed: ${e.message}`); }
@@ -202,7 +237,7 @@ function createEngine(cfg) {
         return null;
       }
     }
-    return { id: `dry-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, filledNow: true, avgPrice: price, filledShares: shares };
+    return { id: `dry-${nowFn()}-${Math.random().toString(36).slice(2, 7)}`, filledNow: true, avgPrice: price, filledShares: shares };
   }
 
   // Polymarket taker fee: fee = shares * theta * price * (1-price).
@@ -225,7 +260,6 @@ function createEngine(cfg) {
       conditionId: null, upTokenId: null, downTokenId: null,
       upAsk: null, downAsk: null, upBid: null, downBid: null,
       discovered: false, lastDiscoveryAttempt: 0,
-      highConfSide: null, highConfPrice: null, highConfCandidateSide: null, highConfCandidateCount: 0,
       resolved: false, winner: null, resolutionMethod: null,
     };
   }
@@ -282,19 +316,6 @@ function createEngine(cfg) {
     if (downP == null) return 'up';
     return upP >= downP ? 'up' : 'down';
   }
-  function updateHighConfidence(leg) {
-    if (leg.highConfSide) return;
-    if (Date.now() < leg.closeAt) return;
-    const upP = leg.upBid != null ? leg.upBid : leg.upAsk;
-    const downP = leg.downBid != null ? leg.downBid : leg.downAsk;
-    let candidate = null, candidatePrice = null;
-    if (upP != null && upP >= HIGH_CONF_PRICE) { candidate = 'up'; candidatePrice = upP; }
-    else if (downP != null && downP >= HIGH_CONF_PRICE) { candidate = 'down'; candidatePrice = downP; }
-    if (!candidate) { leg.highConfCandidateSide = null; leg.highConfCandidateCount = 0; return; }
-    if (leg.highConfCandidateSide === candidate) leg.highConfCandidateCount = (leg.highConfCandidateCount || 0) + 1;
-    else { leg.highConfCandidateSide = candidate; leg.highConfCandidateCount = 1; }
-    if (leg.highConfCandidateCount >= 2) { leg.highConfSide = candidate; leg.highConfPrice = candidatePrice; }
-  }
 
   async function attemptFastResolution(leg) {
     if (leg.resolved) return true;
@@ -339,15 +360,7 @@ function createEngine(cfg) {
     } catch (e) {
       log(`⚠️ resolveLegAttempt(${leg.slug}) failed: ${e.message}`);
     }
-    updateHighConfidence(leg);
-    if (leg.highConfSide) {
-      leg.resolved = true;
-      leg.winner = leg.highConfSide;
-      leg.resolutionMethod = 'high-confidence-price';
-      log(`⚡ [${leg.slug}] resolved HIGH-CONFIDENCE (${leg.highConfPrice.toFixed(3)}) — winner ${leg.winner.toUpperCase()}`);
-      return true;
-    }
-    if (Date.now() - leg.closeAt >= RESOLUTION_FALLBACK_MS) {
+    if (nowFn() - leg.closeAt >= RESOLUTION_FALLBACK_MS) {
       const winner = leadingSide(leg);
       if (winner) {
         leg.resolved = true;
@@ -362,9 +375,24 @@ function createEngine(cfg) {
 
   function tokenIdFor(leg, side) { return side === 'up' ? leg.upTokenId : leg.downTokenId; }
   function askFor(leg, side) { return side === 'up' ? leg.upAsk : leg.downAsk; }
+  function bidFor(leg, side) { return side === 'up' ? leg.upBid : leg.downBid; }
 
-  // Buy `dollars` worth of `side` on this leg at the ask (taker).
-  async function buyLegMarket(leg, side, dollars, what) {
+  // Side to enter, if any side's price is at the trigger (0.60+).
+  function triggerSide(leg) {
+    const up = leg.upAsk != null ? leg.upAsk : leg.upBid;
+    const down = leg.downAsk != null ? leg.downAsk : leg.downBid;
+    if (up == null && down == null) return null;
+    const upOk = up != null && up >= TRIGGER_PRICE;
+    const downOk = down != null && down >= TRIGGER_PRICE;
+    if (upOk && !downOk) return 'up';
+    if (downOk && !upOk) return 'down';
+    if (upOk && downOk) return (up >= down ? 'up' : 'down');
+    return null;
+  }
+
+  // Buy `dollars` worth of `side` on this window's leg at the ask (taker).
+  async function buyLeg(t, side, dollars, what) {
+    const leg = t.leg;
     const tokenId = tokenIdFor(leg, side);
     const ask = askFor(leg, side);
     if (!tokenId || ask == null) return { ok: false, reason: 'no-ask' };
@@ -384,250 +412,279 @@ function createEngine(cfg) {
     engine.totalRebatesEarned = round2(engine.totalRebatesEarned + rebate);
     engine.totalVolume = round2(engine.totalVolume + notional);
     engine.bankroll = round2(engine.bankroll - cost);
-    log(`${what} ${side.toUpperCase()} $${dollars.toFixed(2)} @${avgPrice.toFixed(3)} = ${filled}sh (cost $${cost.toFixed(2)})`);
+    const buy = { level: t.buys.length, ts: nowFn(), dollars, side, price: avgPrice, shares: filled, cost };
+    t.buys.push(buy);
+    t.lastSide = side;
+    log(`${tfLabel(t.tf)} 🎯 ${what} #${buy.level + 1} — ${side.toUpperCase()} $${dollars.toFixed(2)} @${avgPrice.toFixed(3)} = ${filled.toFixed(2)}sh (cost $${cost.toFixed(2)})`);
     return { ok: true, shares: filled, avgPrice, notional, fee, rebate, netFee, cost };
   }
 
-  function freshTrade15(windowTs) {
-    const direction = engine.lastOutcome15 || 'up';
-    return {
-      windowTs,
-      closeAt: (windowTs + window15) * 1000,
-      leg: freshLeg(windowTs, window15, 'btc-updown-15m-'),
-      direction,
-      position: null,
-      buys: [],
-      state: 'discovering',
-      betPlaced: false,
-      pnl: null,
-      settled: false,
-    };
-  }
-
-  function freshTrade5(windowTs) {
-    const side = engine.direction; // SAME direction as the 15m bet
-    return {
-      windowTs,
-      closeAt: (windowTs + window5) * 1000,
-      leg: freshLeg(windowTs, window5, 'btc-updown-5m-'),
-      parent15WindowTs: Math.floor(windowTs / window15) * window15,
-      side,
-      position: null,
-      state: 'discovering',
-      betPlaced: false,
-      pnl: null,
-      settled: false,
-    };
-  }
-
-  // ── 15m window management ─────────────────────────────────────────
-  async function ensure15mTrade(now) {
-    const nowSec = Math.floor(now / 1000);
-    const windowTs = Math.floor(nowSec / window15) * window15;
-    let t = engine.current.m15;
-
-    if (!t || t.windowTs !== windowTs) {
-      if (t && !t.settled) {
-        if (!t.leg.resolved) await attemptFastResolution(t.leg);
-        if (t.leg.resolved && !t.settled) settle15(t);
-        else {
-          t.state = 'pending-resolution';
-          engine.pending15.push(t);
-          if (engine.pending15.length > 40) engine.pending15.shift();
-        }
-      }
-      engine.direction = engine.lastOutcome15 || 'up';
-      t = freshTrade15(windowTs);
-      engine.current.m15 = t;
-      log(`🆕 15m window t=${windowTs} — direction ${engine.direction.toUpperCase()} (follows last outcome ${engine.lastOutcome15 ? engine.lastOutcome15.toUpperCase() : '— first window'}) — buying $${baseBet15m.toFixed(2)} immediately`);
-    }
-
-    if (t.state === 'discovering' && now - t.leg.lastDiscoveryAttempt >= DISCOVERY_RETRY_MS) {
-      t.leg.lastDiscoveryAttempt = now;
-      await discoverLeg(t.leg);
-      if (t.leg.discovered) t.state = 'trading';
-    }
-    if (t.state === 'trading' && engine.tradingEnabled && now < t.closeAt && !t.betPlaced) {
-      const res = await buyLegMarket(t.leg, t.direction, baseBet15m, '15m base');
-      if (res.ok) {
-        t.position = { shares: res.shares, cost: res.cost };
-        t.buys.push({ ts: now, dollars: baseBet15m, shares: res.shares, price: res.avgPrice, cost: res.cost });
-        t.betPlaced = true;
-      } else if (res.reason && res.reason !== 'no-ask') {
-        log(`⚠️ 15m ${t.direction.toUpperCase()} base buy skipped: ${res.reason}`);
-      }
-    }
-  }
-
-  function settle15(t) {
-    const leg = t.leg;
-    const winner = leg.winner || '?';
-    if (!t.position || !t.betPlaced) {
-      t.state = 'resolved';
-      t.settled = true;
-      t.pnl = 0;
-      engine.lastOutcome15 = leg.winner || null;
-      engine.history15.unshift({
-        windowTs: t.windowTs, slug: leg.slug, winner: leg.winner, resolutionMethod: leg.resolutionMethod,
-        direction: t.direction, betPlaced: false, win: null,
-        wager: 0, shares: 0, pnl: 0, bankrollAfter: engine.bankroll, resolvedAt: Date.now(),
-      });
-      if (engine.history15.length > 300) engine.history15.pop();
-      log(`🏁 15m [${leg.slug}] resolved — winner ${winner.toUpperCase()} (${leg.resolutionMethod}) — no position held`);
-      recordEquity();
-      return;
-    }
-
-    const win = t.direction === leg.winner;
-    const payout = win ? round2(t.position.shares * 1) : 0;
-    const pnl = round2(payout - t.position.cost);
-    engine.bankroll = round2(engine.bankroll + payout);
-    engine.realizedPnl = round2(engine.realizedPnl + pnl);
-    engine.realizedPnl15 = round2(engine.realizedPnl15 + pnl);
-    if (win) engine.wins15++; else engine.losses15++;
-    engine.lastOutcome15 = leg.winner;
-    t.pnl = pnl;
-    t.state = 'resolved';
-    t.settled = true;
-    engine.history15.unshift({
-      windowTs: t.windowTs, slug: leg.slug, winner: leg.winner, resolutionMethod: leg.resolutionMethod,
-      direction: t.direction, betPlaced: true, win,
-      wager: t.position.cost, shares: t.position.shares, entryPrice: round2(t.position.cost / t.position.shares),
-      pnl, bankrollAfter: engine.bankroll, resolvedAt: Date.now(),
-    });
-    if (engine.history15.length > 300) engine.history15.pop();
-    registerTrade(engine.trades15, tradeSeq15, { slug: leg.slug, side: leg.winner, shares: t.position.shares, pnl });
-    log(`🏆 15m [${leg.slug}] resolved — winner ${winner.toUpperCase()} (${leg.resolutionMethod}) — our ${t.direction.toUpperCase()} bet ${win ? 'WON' : 'LOST'} ${sgn2(pnl)} | next 15m starts ${winner.toUpperCase()}`);
-    recordEquity();
-  }
-
-  // ── 5m window management ──────────────────────────────────────────
-  async function ensure5mTrade(now) {
-    const nowSec = Math.floor(now / 1000);
-    const windowTs = Math.floor(nowSec / window5) * window5;
-    // 5m bets happen only when a 15m window opens — never on the
-    // intermediate 5m windows inside a 15m period.
-    const is15mBoundary = windowTs % window15 === 0;
-    let t = engine.current.m5;
-
-    if (!t || t.windowTs !== windowTs) {
-      if (t && !t.settled) {
-        if (!t.leg.resolved) await attemptFastResolution(t.leg);
-        if (t.leg.resolved && !t.settled) await settle5(t);
-        else {
-          t.state = 'pending-resolution';
-          engine.pending5.push(t);
-          if (engine.pending5.length > 40) engine.pending5.shift();
-        }
-      }
-      if (!is15mBoundary) {
-        engine.current.m5 = null;
-        return;
-      }
-      t = freshTrade5(windowTs);
-      engine.current.m5 = t;
-      log(`🆕 5m window t=${windowTs} (15m open) — betting ${t.side.toUpperCase()} $${baseBet5m.toFixed(2)} (same direction as 15m ${engine.direction ? engine.direction.toUpperCase() : 'n/a'})`);
-    }
-
-    if (t && t.state === 'discovering' && now - t.leg.lastDiscoveryAttempt >= DISCOVERY_RETRY_MS) {
-      t.leg.lastDiscoveryAttempt = now;
-      await discoverLeg(t.leg);
-      if (t.leg.discovered) t.state = 'trading';
-    }
-    if (t && t.state === 'trading' && engine.tradingEnabled && now < t.closeAt && !t.betPlaced) {
-      const res = await buyLegMarket(t.leg, t.side, baseBet5m, '5m bet');
-      if (res.ok) {
-        t.position = { shares: res.shares, cost: res.cost };
-        t.betPlaced = true;
-      } else if (res.reason && res.reason !== 'no-ask') {
-        log(`⚠️ 5m ${t.side.toUpperCase()} buy skipped: ${res.reason}`);
-      }
-    }
-  }
-
-  async function roll5mProfitInto15m(profit, t5) {
-    if (profit <= 0) return;
-    // The profit belongs to the 15m window this 5m bet was opened under —
-    // never the NEXT 15m window. Each 15m window runs to resolution alone.
-    const t15 = t5 && t5.parent15WindowTs != null
-      ? [engine.current.m15, ...engine.pending15].find(t => t && t.windowTs === t5.parent15WindowTs)
-      : engine.current.m15;
-    if (!t15 || t15.settled || !t15.position || !t15.betPlaced) {
-      log(`💰 5m profit $${profit.toFixed(2)} — its 15m window has no open position to roll into; kept in bankroll`);
-      return;
-    }
-    if (Date.now() >= t15.closeAt) {
-      log(`💰 5m profit $${profit.toFixed(2)} — its 15m window already closed; kept in bankroll`);
-      return;
-    }
-    const res = await buyLegMarket(t15.leg, t15.direction, profit, '5m profit roll');
+  async function maybeEntry(t) {
+    if (t.buys.length) { t.phase = 'trading'; return; }
+    const side = triggerSide(t.leg);
+    if (!side) return; // still awaiting a 0.60+ side
+    const res = await buyLeg(t, side, entryDollars, 'entry');
     if (res.ok) {
-      t15.position.shares = round2(t15.position.shares + res.shares);
-      t15.position.cost = round2(t15.position.cost + res.cost);
-      t15.buys.push({ ts: Date.now(), dollars: profit, shares: res.shares, price: res.avgPrice, cost: res.cost });
-      log(`💰 rolled 5m profit $${profit.toFixed(2)} into 15m ${t15.direction.toUpperCase()} (+${res.shares}sh, +$${res.cost.toFixed(2)})`);
-    } else if (res.reason !== 'no-ask') {
-      log(`⚠️ could not roll 5m profit into 15m: ${res.reason}`);
+      t.phase = 'trading';
+      log(`${tfLabel(t.tf)} 🚦 entry triggered — bought ${side.toUpperCase()} $${entryDollars.toFixed(2)} at 0.60+`);
+    } else if (res.reason && res.reason !== 'no-ask') {
+      log(`⚠️ ${tfLabel(t.tf)} entry skipped: ${res.reason}`);
     }
   }
 
-  async function settle5(t) {
-    const leg = t.leg;
-    const winner = leg.winner || '?';
-    if (!t.position || !t.betPlaced) {
-      t.state = 'resolved';
-      t.settled = true;
-      t.pnl = 0;
-      engine.history5.unshift({
-        windowTs: t.windowTs, slug: leg.slug, winner: leg.winner, resolutionMethod: leg.resolutionMethod,
-        side: t.side, skipped: false, win: null,
-        wager: 0, shares: 0, pnl: 0, bankrollAfter: engine.bankroll, resolvedAt: Date.now(),
-      });
-      if (engine.history5.length > 300) engine.history5.pop();
-      log(`🏁 5m [${leg.slug}] resolved — winner ${winner.toUpperCase()} (${leg.resolutionMethod}) — no bet placed`);
-      recordEquity();
-      return;
+  async function maybeFlip(t) {
+    const level = t.buys.length; // next martingale leg index (1..3)
+    if (level <= 0 || level > martingaleAmounts.length) return;
+    if (!t.lastSide) return;
+    const opp = t.lastSide === 'up' ? 'down' : 'up';
+    const oppAsk = askFor(t.leg, opp);
+    if (oppAsk == null || oppAsk < TRIGGER_PRICE) return;
+    const dollars = martingaleAmounts[level - 1];
+    const res = await buyLeg(t, opp, dollars, `martingale ${level}`);
+    if (res.ok) {
+      if (level === martingaleAmounts.length) {
+        t.reachedLevel3 = true;
+        engine[`mart3Count${t.tf}`] = (engine[`mart3Count${t.tf}`] || 0) + 1;
+        log(`${tfLabel(t.tf)} ⚠️ 3RD MARTINGALE ($80) reached — this window is at max risk`);
+      }
+      log(`${tfLabel(t.tf)} 🔄 flipped to ${opp.toUpperCase()} with $${dollars.toFixed(2)}`);
+    } else if (res.reason && res.reason !== 'no-ask') {
+      log(`⚠️ ${tfLabel(t.tf)} martingale ${level} skipped: ${res.reason}`);
+    }
+  }
+
+  function freshTrade(tf, windowTs) {
+    const wsec = winSec(tf);
+    return {
+      tf,
+      windowTs,
+      closeAt: (windowTs + wsec) * 1000,
+      waitUntil: (windowTs + waitSec(tf)) * 1000,
+      waitSeconds: waitSec(tf),
+      leg: freshLeg(windowTs, wsec, `btc-updown-${tf}m-`),
+      phase: 'waiting',
+      buys: [],
+      lastSide: null,
+      reachedLevel3: false,
+      pnl: null,
+      win: null,
+      skipped: false,
+      settled: false,
+    };
+  }
+
+  async function ensureTrade(tf, now) {
+    const nowSec = Math.floor(now / 1000);
+    const wsec = winSec(tf);
+    const windowTs = Math.floor(nowSec / wsec) * wsec;
+    let t = engine.current[tf];
+
+    if (!t || t.windowTs !== windowTs) {
+      if (t && !t.settled) {
+        if (!t.leg.resolved) await attemptFastResolution(t.leg);
+        if (t.leg.resolved && !t.settled) settle(t);
+        else {
+          t.phase = 'pending-resolution';
+          engine.pending[tf].push(t);
+          if (engine.pending[tf].length > 40) engine.pending[tf].shift();
+        }
+      }
+      t = freshTrade(tf, windowTs);
+      engine.current[tf] = t;
+      log(`${tfLabel(tf)} 🆕 window t=${windowTs} opened — waiting ${waitSec(tf)}s before checking for a ${TRIGGER_PRICE.toFixed(2)}+ side`);
     }
 
-    const win = t.side === leg.winner;
-    const payout = win ? round2(t.position.shares * 1) : 0;
-    const pnl = round2(payout - t.position.cost);
+    if (t.phase === 'waiting' && now >= t.waitUntil) {
+      t.phase = 'awaiting-trigger';
+      log(`${tfLabel(tf)} ⏱ wait over (t=${t.windowTs}) — looking for a side at ${TRIGGER_PRICE.toFixed(2)}+`);
+    }
+
+    if (!t.leg.discovered && now - t.leg.lastDiscoveryAttempt >= DISCOVERY_RETRY_MS) {
+      t.leg.lastDiscoveryAttempt = now;
+      await discoverLeg(t.leg);
+    }
+    if (!t.leg.discovered || !engine.tradingEnabled || now >= t.closeAt || t.settled) return;
+
+    if (t.phase === 'awaiting-trigger') {
+      await maybeEntry(t);
+    } else if (t.phase === 'trading') {
+      await maybeFlip(t);
+    }
+  }
+
+  function settle(t) {
+    if (t.settled) return;
+    const tf = t.tf;
+    const leg = t.leg;
+    const winner = leg.winner || null;
+    const buys = t.buys;
+    const totalCost = totalCostOf(t);
+    let payout = 0;
+    if (winner) {
+      for (const b of buys) if (b.side === winner) payout = round2(payout + b.shares);
+    }
+    const pnl = round2(payout - totalCost);
     engine.bankroll = round2(engine.bankroll + payout);
     engine.realizedPnl = round2(engine.realizedPnl + pnl);
-    engine.realizedPnl5 = round2(engine.realizedPnl5 + pnl);
-    if (win) engine.wins5++; else engine.losses5++;
+    engine[`realizedPnl${tf}`] = round2(engine[`realizedPnl${tf}`] + pnl);
+
+    const betPlaced = buys.length > 0;
+    let win = null;
+    if (betPlaced && winner) {
+      win = pnl > 0;
+      engine[`wins${tf}`] = engine[`wins${tf}`] + (win ? 1 : 0);
+      engine[`losses${tf}`] = engine[`losses${tf}`] + (win ? 0 : 1);
+    }
     t.pnl = pnl;
-    t.state = 'resolved';
+    t.win = win;
+    t.winner = winner;
+    t.skipped = !betPlaced;
     t.settled = true;
-    engine.history5.unshift({
-      windowTs: t.windowTs, slug: leg.slug, winner: leg.winner, resolutionMethod: leg.resolutionMethod,
-      side: t.side, skipped: false, win,
-      wager: t.position.cost, shares: t.position.shares, entryPrice: round2(t.position.cost / t.position.shares),
-      pnl, bankrollAfter: engine.bankroll, resolvedAt: Date.now(),
+    t.phase = 'resolved';
+
+    engine[`history${tf}`].unshift({
+      tf,
+      windowTs: t.windowTs, slug: leg.slug, winner, resolutionMethod: leg.resolutionMethod,
+      entrySide: buys.length ? buys[0].side : null,
+      lastSide: t.lastSide,
+      legs: buys.map(b => ({ level: b.level, dollars: b.dollars, side: b.side, price: b.price, shares: b.shares, cost: b.cost, ts: b.ts })),
+      martingaleLevels: buys.length,
+      reachedLevel3: t.reachedLevel3,
+      betPlaced, skipped: !betPlaced, win,
+      wager: totalCost, payout, pnl, bankrollAfter: engine.bankroll, resolvedAt: nowFn(),
     });
-    if (engine.history5.length > 300) engine.history5.pop();
-    registerTrade(engine.trades5, tradeSeq5, { slug: leg.slug, side: t.side, shares: t.position.shares, pnl });
-    log(`🏆 5m [${leg.slug}] resolved — winner ${winner.toUpperCase()} (${leg.resolutionMethod}) — our ${t.side.toUpperCase()} bet ${win ? 'WON' : 'LOST'} ${sgn2(pnl)}`);
-    if (win) {
-      await roll5mProfitInto15m(pnl, t);
+    const hist = engine[`history${tf}`];
+    if (hist.length > 300) hist.pop();
+    registerTrade(tf, { slug: leg.slug, winner, legs: buys.length, pnl });
+
+    const summary = winner ? `winner ${winner.toUpperCase()}` : 'winner unknown';
+    if (!betPlaced) {
+      log(`🏁 ${tfLabel(tf)} [${leg.slug}] resolved (${leg.resolutionMethod || '?'}) — ${summary} — NO bet placed`);
     } else {
-      log(`⏭ 5m loss — 15m direction not confirmed yet; no roll; next 15m open bets its 5m window again`);
+      log(`🏁 ${tfLabel(tf)} [${leg.slug}] resolved — ${summary} — ${buys.length} leg(s), ${win ? 'WIN' : 'LOSS'} ${sgn2(pnl)} (cost $${totalCost.toFixed(2)}, payout $${payout.toFixed(2)})`);
     }
     recordEquity();
   }
 
-  // ── loops ─────────────────────────────────────────────────────────
+  function computeDrawdown(curve) {
+    let peak = -Infinity;
+    let peakT = null;
+    let maxPct = 0;
+    let maxDollars = 0;
+    let troughT = null;
+    for (const p of curve) {
+      if (p.equity > peak) { peak = p.equity; peakT = p.t; }
+      const dd = peak > 0 ? (peak - p.equity) / peak : 0;
+      if (dd > maxPct) { maxPct = dd; maxDollars = peak - p.equity; troughT = p.t; }
+    }
+    return { pct: round2(maxPct), dollars: round2(maxDollars), peakT, troughT };
+  }
+
+  // ── dashboard state ────────────────────────────────────────────
+  function legSummary(leg) {
+    return {
+      slug: leg.slug,
+      upAsk: leg.upAsk, downAsk: leg.downAsk,
+      upBid: leg.upBid, downBid: leg.downBid,
+      discovered: leg.discovered,
+      resolved: leg.resolved, winner: leg.winner, resolutionMethod: leg.resolutionMethod,
+    };
+  }
+  function tradeSummary(t) {
+    if (!t) return null;
+    return {
+      windowTs: t.windowTs, closeAt: t.closeAt, waitUntil: t.waitUntil,
+      phase: t.phase, waitSeconds: t.waitSeconds,
+      leg: legSummary(t.leg),
+      buys: t.buys,
+      lastSide: t.lastSide,
+      martingaleLevel: t.buys.length,
+      reachedLevel3: t.reachedLevel3,
+      totalCost: totalCostOf(t),
+      entryPrice: t.buys.length ? t.buys[0].price : null,
+      pnl: t.pnl, win: t.win, skipped: t.skipped,
+      unrealizedPnl: unrealizedFor(t),
+      countdownMs: t.phase === 'waiting' ? Math.max(0, t.waitUntil - nowFn()) : null,
+    };
+  }
+  function baseState() {
+    return {
+      dryRun: DRY_RUN,
+      tradingEnabled: engine.tradingEnabled,
+      waitingForBoundary: engine.waitingForBoundary,
+      bankroll: engine.bankroll,
+      startingCapital,
+      realizedPnlTotal: engine.realizedPnl,
+      totalFeesPaid: engine.totalFeesPaid,
+      totalRebatesEarned: engine.totalRebatesEarned,
+      totalVolume: engine.totalVolume,
+      feeTheta, rebatePct,
+      triggerPrice: TRIGGER_PRICE,
+      entryDollars,
+      martingaleAmounts,
+      logs: engine.logs.slice(-80),
+      boundaryWindowTs: engine.boundaryWindowTs,
+      equityCurve: engine.equityCurve,
+      maxDrawdown: computeDrawdown(engine.equityCurve),
+    };
+  }
+  function buildStateTf(tf) {
+    const decided = engine[`wins${tf}`] + engine[`losses${tf}`];
+    return {
+      ...baseState(),
+      label: tf === '5' ? 'BTC-5m' : 'BTC-15m',
+      windowSeconds: winSec(tf),
+      waitSeconds: waitSec(tf),
+      realizedPnl: engine[`realizedPnl${tf}`],
+      wins: engine[`wins${tf}`],
+      losses: engine[`losses${tf}`],
+      windowsDecided: decided,
+      windowsReached3rdMartingale: engine[`mart3Count${tf}`] || 0,
+      winRate: decided > 0 ? round2(engine[`wins${tf}`] / decided) : null,
+      equity: round2(engine.bankroll + openPositionsMTM()),
+      latestBtcPrice: tf === '5' ? candles5.latestClose() : candles15.latestClose(),
+      current: { btc: tradeSummary(engine.current[tf]) },
+      pending: engine.pending[tf].map(tradeSummary),
+      history: engine[`history${tf}`].slice(0, 60),
+      trades: engine[`trades${tf}`].slice(-100).slice().reverse(),
+      pendingResolutionCount: engine.pending[tf].length,
+    };
+  }
+  function emitState() {
+    emit('hedgeState:BTC-5m', buildStateTf('5'));
+    emit('hedgeState:BTC-15m', buildStateTf('15'));
+  }
+  function buildState() {
+    return { m5: buildStateTf('5'), m15: buildStateTf('15') };
+  }
+
+  function pauseTrading() {
+    engine.tradingEnabled = false;
+    log('⏸️  Trading paused — no new entries or flips; open positions still tracked to resolution');
+    return { ok: true };
+  }
+  function resumeTrading() {
+    engine.tradingEnabled = true;
+    log('▶️  Trading resumed');
+    return { ok: true };
+  }
+  function setMode(live) {
+    DRY_RUN = !live;
+    log(`⚙️  Switched to ${live ? '🔴 LIVE' : '⚠️  DEMO'} mode`);
+    return { ok: true, dryRun: DRY_RUN };
+  }
+
   function allTrackedTrades() {
     return [
-      engine.current.m15, engine.current.m5,
-      ...engine.pending15, ...engine.pending5,
+      engine.current['5'], engine.current['15'],
+      ...engine.pending['5'], ...engine.pending['15'],
     ].filter(Boolean);
   }
 
   async function mainLoop() {
     while (true) {
       try {
-        const now = Date.now();
+        const now = nowFn();
         const nowSec = Math.floor(now / 1000);
 
         if (engine.waitingForBoundary) {
@@ -643,181 +700,57 @@ function createEngine(cfg) {
         }
 
         if (!engine.waitingForBoundary) {
-          await ensure15mTrade(now);
-          await ensure5mTrade(now);
+          await ensureTrade('5', now);
+          await ensureTrade('15', now);
         }
 
         if (now - engine.lastCandleRefresh >= candleRefreshMs) {
           engine.lastCandleRefresh = now;
-          await Promise.all([candles15.refresh(log), candles5.refresh(log)]);
+          // display-only refresh — never block the trading loop on Binance
+          Promise.all([candles15.refresh(log), candles5.refresh(log)]).catch(() => {});
         }
         if (now - engine.lastPriceFetch >= PRICE_REFRESH_MS) {
           engine.lastPriceFetch = now;
           await Promise.all(allTrackedTrades().map(t => refreshLegPrices(t.leg)));
         }
-        if ((engine.pending15.length || engine.pending5.length) && now - engine.lastResolutionPoll >= RESOLUTION_POLL_MS) {
+        if ((engine.pending['5'].length || engine.pending['15'].length) && now - engine.lastResolutionPoll >= RESOLUTION_POLL_MS) {
           engine.lastResolutionPoll = now;
-          const still15 = [];
-          for (const trade of engine.pending15) {
-            if (!trade.leg.resolved) await resolveLegAttempt(trade.leg);
-            if (trade.leg.resolved && !trade.settled) settle15(trade);
-            if (!trade.settled) still15.push(trade);
+          for (const tf of ['15', '5']) {
+            const still = [];
+            for (const trade of engine.pending[tf]) {
+              if (!trade.leg.resolved) await resolveLegAttempt(trade.leg);
+              if (trade.leg.resolved && !trade.settled) settle(trade);
+              if (!trade.settled) still.push(trade);
+            }
+            engine.pending[tf] = still;
           }
-          engine.pending15 = still15;
-          const still5 = [];
-          for (const trade of engine.pending5) {
-            if (!trade.leg.resolved) await resolveLegAttempt(trade.leg);
-            if (trade.leg.resolved && !trade.settled) await settle5(trade);
-            if (!trade.settled) still5.push(trade);
-          }
-          engine.pending5 = still5;
+        }
+        if (now - engine.lastEquityRecord >= EQUITY_RECORD_MS) {
+          engine.lastEquityRecord = now;
+          recordEquity();
         }
 
         emitState();
       } catch (e) {
-        slog(`[hedgebot] ⚠️ Loop error: ${e.message}`);
+        slog(`[${label.toLowerCase()}] ⚠️ Loop error: ${e.message}`);
       }
-      await new Promise(res => setTimeout(res, TICK_MS));
+      await new Promise(res => setTimeout(res, tickMs));
     }
-  }
-
-  // ── dashboard state ───────────────────────────────────────────────
-  function legSummary(leg) {
-    if (!leg) return null;
-    return {
-      slug: leg.slug, windowTs: leg.windowTs, closeAt: leg.closeAt,
-      discovered: leg.discovered, upAsk: leg.upAsk, downAsk: leg.downAsk, upBid: leg.upBid, downBid: leg.downBid,
-      highConfSide: leg.highConfSide, highConfPrice: leg.highConfPrice,
-      resolved: leg.resolved, winner: leg.winner, resolutionMethod: leg.resolutionMethod,
-    };
-  }
-  function unrealizedFor(t) {
-    if (!t || !t.position || !t.leg) return 0;
-    const side = t.direction || t.side;
-    const bid = markPrice(t.leg, side);
-    if (bid == null) return 0;
-    return round2(t.position.shares * bid - t.position.cost);
-  }
-  function openPositionsMTM() {
-    return round2(unrealizedFor(engine.current.m15) + unrealizedFor(engine.current.m5));
-  }
-  function tradeSummary15(t) {
-    if (!t) return null;
-    return {
-      windowTs: t.windowTs, closeAt: t.closeAt, state: t.state,
-      leg: legSummary(t.leg),
-      signalSide: t.direction,
-      signalNote: 'follows last 15m outcome',
-      betPlaced: t.betPlaced,
-      skipReason: t.direction ? null : 'no direction',
-      position: t.position ? { shares: t.position.shares, cost: t.position.cost, entryPrice: round2(t.position.cost / t.position.shares), buys: t.buys } : null,
-      pnl: t.pnl,
-      unrealizedPnl: unrealizedFor(t),
-    };
-  }
-  function tradeSummary5(t) {
-    if (!t) return null;
-    return {
-      windowTs: t.windowTs, closeAt: t.closeAt, state: t.state,
-      leg: legSummary(t.leg),
-      signalSide: t.side,
-      signalNote: 'same direction as 15m',
-      betPlaced: t.betPlaced,
-      skipReason: t.side ? null : 'no bet',
-      position: t.position ? { shares: t.position.shares, cost: t.position.cost, entryPrice: round2(t.position.cost / t.position.shares) } : null,
-      pnl: t.pnl,
-      unrealizedPnl: unrealizedFor(t),
-    };
-  }
-  function baseState(which) {
-    return {
-      dryRun: DRY_RUN,
-      tradingEnabled: engine.tradingEnabled,
-      waitingForBoundary: engine.waitingForBoundary,
-      bankroll: engine.bankroll,
-      startingCapital,
-      realizedPnlTotal: engine.realizedPnl,
-      direction: engine.direction,
-      totalFeesPaid: engine.totalFeesPaid,
-      totalRebatesEarned: engine.totalRebatesEarned,
-      totalVolume: engine.totalVolume,
-      feeTheta, rebatePct,
-      logs: engine.logs.slice(-80),
-      pendingResolutionCount: (which === '5m' ? engine.pending5 : engine.pending15).length,
-      equityCurve: engine.equityCurve,
-    };
-  }
-  function buildState15() {
-    const totalDecided = engine.wins15 + engine.losses15;
-    return {
-      ...baseState('15m'),
-      label: 'BTC-15m', windowSeconds: window15,
-      baseBetDollars: baseBet15m,
-      realizedPnl: engine.realizedPnl15, unrealizedPnl: unrealizedFor(engine.current.m15), equity: round2(engine.bankroll + openPositionsMTM()),
-      wins: engine.wins15, losses: engine.losses15, skipped: 0,
-      winRate: totalDecided > 0 ? round2(engine.wins15 / totalDecided) : null,
-      candleCount: candles15.count(),
-      latestBtcPrice: candles15.latestClose(),
-      current: { btc: tradeSummary15(engine.current.m15) },
-      pending: engine.pending15.map(tradeSummary15),
-      history: engine.history15.slice(0, 60),
-      trades: engine.trades15.slice(-100).slice().reverse(),
-    };
-  }
-  function buildState5() {
-    const totalDecided = engine.wins5 + engine.losses5;
-    return {
-      ...baseState('5m'),
-      label: 'BTC-5m', windowSeconds: window5,
-      baseBetDollars: baseBet5m,
-      realizedPnl: engine.realizedPnl5, unrealizedPnl: unrealizedFor(engine.current.m5), equity: round2(engine.bankroll + openPositionsMTM()),
-      wins: engine.wins5, losses: engine.losses5, skipped: 0,
-      winRate: totalDecided > 0 ? round2(engine.wins5 / totalDecided) : null,
-      candleCount: candles5.count(),
-      latestBtcPrice: candles5.latestClose(),
-      current: { btc: tradeSummary5(engine.current.m5) },
-      pending: engine.pending5.map(tradeSummary5),
-      history: engine.history5.slice(0, 60),
-      trades: engine.trades5.slice(-100).slice().reverse(),
-    };
-  }
-  function emitState() {
-    emit('hedgeState:BTC-15m', buildState15());
-    emit('hedgeState:BTC-5m', buildState5());
-  }
-  function buildState() {
-    return { m5: buildState5(), m15: buildState15() };
-  }
-
-  function pauseTrading() {
-    engine.tradingEnabled = false;
-    log('⏸️  Trading paused — no new bets will be placed; open positions still tracked to resolution');
-    return { ok: true };
-  }
-  function resumeTrading() {
-    engine.tradingEnabled = true;
-    log('▶️  Trading resumed');
-    return { ok: true };
-  }
-  function setMode(live) {
-    DRY_RUN = !live;
-    log(`⚙️  Switched to ${live ? '🔴 LIVE' : '⚠️  DEMO'} mode`);
-    return { ok: true, dryRun: DRY_RUN };
   }
 
   async function start() {
-    slog(`[hedgebot] 🪙 ${label} — 15m/5m hedge engine, fully automatic`);
-    slog(`[hedgebot] ⚙️  Every 15m window: buy the 15m direction (follows the previous 15m outcome; first = UP) with $${baseBet15m.toFixed(2)}, immediately at open.`);
-    slog(`[hedgebot] ⚙️  At every 15m open, also buy that 5m window in the SAME direction with $${baseBet5m.toFixed(2)} (no 5m bets in between, never skipped). 5m WIN → its profit (payout − cost) is rolled into the open 15m position (momentum confirms the 15m). 5m LOSS → no roll; the next 15m open bets its 5m window again.`);
-    slog(`[hedgebot] ⚙️  One shared bankroll of $${engine.bankroll.toFixed(2)} across both markets.`);
-    slog(`[hedgebot] ⚙️  Fees: Polymarket taker fee = shares × ${feeTheta} × price × (1-price) (crypto category), ${rebatePct > 0 ? (rebatePct * 100).toFixed(0) + '% rebate applied' : 'no rebate configured'}.`);
+    slog(`[${label.toLowerCase()}] ⛏ ${label} — 0.60 martingale engine (5m & 15m), fully automatic`);
+    slog(`[${label.toLowerCase()}] ⚙️  Window rules: wait ${waitSeconds5}s (5m) / ${waitSeconds15}s (15m) after open, then buy the ${TRIGGER_PRICE.toFixed(2)}+ side for $${entryDollars.toFixed(2)}.`);
+    slog(`[${label.toLowerCase()}] ⚙️  Martingale flips: $${martingaleAmounts.join(' / ')} when the opposite side hits ${TRIGGER_PRICE.toFixed(2)} (max ${martingaleAmounts.length} flips). All shares held to resolution.`);
+    slog(`[${label.toLowerCase()}] ⚙️  One shared bankroll of $${engine.bankroll.toFixed(2)} across both timeframes.`);
+    slog(`[${label.toLowerCase()}] ⚙️  Fees: Polymarket taker fee = shares × ${feeTheta} × price × (1-price) (crypto category), ${rebatePct > 0 ? (rebatePct * 100).toFixed(0) + '% rebate applied' : 'no rebate configured'}.`);
     if (savedStats) {
-      slog(`[hedgebot] 💾 Restored saved stats — bankroll $${engine.bankroll.toFixed(2)}, 15m ${engine.wins15}W/${engine.losses15}L, 5m ${engine.wins5}W/${engine.losses5}L.`);
+      slog(`[${label.toLowerCase()}] 💾 Restored saved stats — bankroll $${engine.bankroll.toFixed(2)}, 5m ${engine.wins5}W/${engine.losses5}L, 15m ${engine.wins15}W/${engine.losses15}L, 3rd-martingale windows 5m:${engine.mart3Count5} 15m:${engine.mart3Count15}.`);
     } else if (statsStatePath) {
-      slog(`[hedgebot] 💾 No previous saved stats — starting fresh at $${startingCapital}. Stats persist to ${statsStatePath}.`);
+      slog(`[${label.toLowerCase()}] 💾 No previous saved stats — starting fresh at $${startingCapital}. Stats persist to ${statsStatePath}.`);
     }
     await Promise.all([candles15.seed(slog), candles5.seed(slog)]);
-    mainLoop().catch(e => slog(`[hedgebot] ❌ Fatal: ${e.message}`));
+    mainLoop().catch(e => slog(`[${label.toLowerCase()}] ❌ Fatal: ${e.message}`));
   }
 
   return { start, pauseTrading, resumeTrading, setMode, buildState };

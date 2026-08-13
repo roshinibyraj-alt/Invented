@@ -1,10 +1,11 @@
 {
-  "name": "btc-5m-momentum-bucket-bot",
-  "version": "1.0.0",
-  "description": "BTC 15m/5m hedge bot for Polymarket Up/Down markets — shared bankroll, 5m profit rolls into 15m, live dashboard.",
+  "name": "btc-060-martingale-bot",
+  "version": "2.0.0",
+  "description": "BTC 5m/15m Up/Down martingale bot for Polymarket — wait 1m/3m after open, buy the 0.60+ side for $10, flip $20/$40/$80 when the opposite side hits 0.60, with live equity/drawdown/win-rate dashboard.",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "test": "node smoke-test.js"
   },
   "engines": {
     "node": ">=18.0.0"

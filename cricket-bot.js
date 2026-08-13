@@ -1,13 +1,15 @@
 'use strict';
 
 /**
- * Manager module — instantiates ONE combined 15m/5m hedge engine
- * (single shared bankroll, coupled strategy). Exposes the API that
- * index.js (the dashboard) talks to.
+ * Manager module — instantiates ONE shared 0.60-martingale engine that
+ * trades both 5m and 15m Up/Down windows. Exposes the API that index.js
+ * (the dashboard) talks to.
  *
- * This file keeps the name `cricket-bot.js` only because index.js already
- * requires('./cricket-bot') — the actual logic lives in engine-factory.js
- * / candles.js / three-candle-model.js.
+ * Strategy (both timeframes, independent):
+ *   - wait 1m (5m) / 3m (15m) after a window opens
+ *   - buy the 0.60+ side for $10 worth of shares
+ *   - flip with $20 / $40 / $80 when the opposite side hits 0.60
+ *   - max 3 martingale flips per window
  */
 
 const path = require('path');
@@ -17,8 +19,11 @@ const { createEngine } = require('./engine-factory');
 const DRY_RUN = (process.env.HEDGE_DRY_RUN || process.env.SPORTS_DRY_RUN || process.env.DRY_RUN || 'true').toLowerCase() === 'true';
 
 const CAPITAL = Number(process.env.CAPITAL || process.env.STARTING_CAPITAL || 4000);
-const BASE_BET_15M = Number(process.env.BASE_BET_15M || 150);
-const BASE_BET_5M = Number(process.env.BASE_BET_5M || 50);
+const ENTRY_DOLLARS = Number(process.env.ENTRY_DOLLARS || 10);
+const MARTINGALE_AMOUNTS = (process.env.MARTINGALE_AMOUNTS || '20,40,80')
+  .split(',').map(v => Number(String(v).trim())).filter(Number.isFinite);
+const WAIT_SECONDS_5 = Number(process.env.WAIT_SECONDS_5 || 60);
+const WAIT_SECONDS_15 = Number(process.env.WAIT_SECONDS_15 || 180);
 const FEE_THETA = Number(process.env.FEE_THETA || 0.07);
 const REBATE_PCT = Number(process.env.REBATE_PCT || 0);
 
@@ -30,10 +35,12 @@ async function init(privateKey, emit, slogFn) {
   await trader.authenticate();
 
   engine = createEngine({
-    label: 'BTC-HEDGE',
+    label: 'BTC-0.60-MART',
     startingCapital: CAPITAL,
-    baseBet15m: BASE_BET_15M,
-    baseBet5m: BASE_BET_5M,
+    entryDollars: ENTRY_DOLLARS,
+    martingaleAmounts: MARTINGALE_AMOUNTS.length ? MARTINGALE_AMOUNTS : [20, 40, 80],
+    waitSeconds5: WAIT_SECONDS_5,
+    waitSeconds15: WAIT_SECONDS_15,
     feeTheta: FEE_THETA,
     rebatePct: REBATE_PCT,
     statsStatePath: process.env.STATS_STATE_PATH || path.join(__dirname, 'stats-state-hedge.json'),
@@ -50,7 +57,6 @@ function buildState() {
   return engine ? engine.buildState() : { m5: null, m15: null };
 }
 
-// Both panels map to the single combined engine.
 function pauseTrading() {
   return engine ? engine.pauseTrading() : { ok: false, error: 'not initialized' };
 }

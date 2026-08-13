@@ -1,51 +1,89 @@
 'use strict';
 
 /**
- * Deterministic smoke test — simulates the combined 15m/5m hedge engine
- * over several 15m windows in fast-forward (15m = 18s, 5m = 6s) with a
- * stubbed Polymarket API whose outcomes are scripted per window.
+ * Deterministic smoke test — drives the 0.60 martingale engine on a VIRTUAL
+ * clock (no wall-clock flakiness), with stubbed Binance (synthetic candles)
+ * and scripted Polymarket prices.
  *
- * Script for the run (5m bets SAME direction as the 15m bet):
- *   15m windows: T0 UP(wins) -> T0+18 UP(wins) -> T0+36 UP(loses) -> T0+54 DOWN(loses) -> T0+72 UP(wins)
- *   5m  windows (bets ONLY at 15m opens, NEVER skipped):
- *       T0    bet UP    -> winner UP    (WINS  -> rolls into 15m UP, which also wins)
- *       T0+18 bet UP    -> winner UP    (WINS  -> rolls into 15m UP, which also wins)
- *       T0+36 bet UP    -> winner DOWN  (LOSES -> no roll; no skip)
- *       T0+54 bet DOWN  -> winner UP    (LOSES -> no roll; no skip)
- *       T0+72 bet UP    -> winner UP    (WINS  -> rolls into 15m UP, which also wins)
+ * Simulated windows: 15m = 30s, 5m = 12s, waits 8s/4s.
  *
- * Verifies: 5m bets happen ONLY at 15m opens, are NEVER skipped, are the
- * SAME direction as the 15m bet, roll after a 5m win, 15m direction
- * follows the previous 15m outcome, and the shared bankroll accounting.
+ * Scripted window (index -> [entry, flips, winner]):
+ *   idx0: up  -> [down, up, down] -> winner up     (reaches 3rd martingale)
+ *   idx1: down -> [up]            -> winner up     (1 flip)
+ *   idx2: up  -> []               -> winner up     (no flip, entry wins)
+ *   idx3: down -> [up, down]      -> winner down   (2 flips)
+ *   idx4: up  -> []               -> winner down   (entry loses)
  *
- * Usage: node smoke-test.js   (takes ~2 minutes)
+ * Prices: 0.50 during the wait, the entry side at 0.62 after the wait,
+ * each flip side at 0.62 in 2s holds (other side 0.38), winner 1.0 /
+ * loser 0.01 after close.
+ *
+ * Verifies: no bet before the wait ends, $10 entry, martingale amounts
+ * $20/$40/$80 in order, flips alternate sides, 3rd-martingale counting,
+ * win/loss accounting, win rate, max drawdown, equity curve, and the
+ * shared bankroll math.
+ *
+ * Usage: node smoke-test.js   (takes ~15 seconds)
  */
 
 const { createEngine } = require('./engine-factory');
 
-const W15 = 18; // simulated 15m window (s)
-const W5 = 6;   // simulated 5m window (s)
-const realFetch = global.fetch;
+const W15 = 30;
+const W5 = 12;
+const WAIT15 = 8;
+const WAIT5 = 4;
+const FLIP_GAP_MS = 2000;
 
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-// Pick the boundary the engine will align to.
-let T0 = Math.floor(Date.now() / 1000 / W15) * W15 + W15;
-if (Math.floor(Date.now() / 1000) >= T0 - 3) T0 += W15;
+let virtualNow = Date.now(); // virtual clock, advanced by the test
+let T0 = 0;
 
-const SCRIPT = {
-  '15': new Map([[T0, 'up'], [T0 + W15, 'up'], [T0 + 2 * W15, 'down'], [T0 + 3 * W15, 'up'], [T0 + 4 * W15, 'up']]),
-  '5': new Map([[T0, 'up'], [T0 + W15, 'up'], [T0 + 2 * W15, 'down'], [T0 + 3 * W15, 'up'], [T0 + 4 * W15, 'up']]),
-};
-function winnerFor(tf, ts) {
-  const w = SCRIPT[tf] && SCRIPT[tf].get(ts);
-  return w || 'up';
+const SCRIPTS = [
+  { entry: 'up',   flips: ['down', 'up', 'down'], winner: 'up' },
+  { entry: 'down', flips: ['up'],                 winner: 'up' },
+  { entry: 'up',   flips: [],                     winner: 'up' },
+  { entry: 'down', flips: ['up', 'down'],         winner: 'down' },
+  { entry: 'up',   flips: [],                     winner: 'down' },
+];
+function scriptFor(tf, ts) {
+  const wsec = tf === '5' ? W5 : W15;
+  const idx = Math.round((ts - T0) / wsec);
+  const i = ((idx % SCRIPTS.length) + SCRIPTS.length) % SCRIPTS.length;
+  return SCRIPTS[i];
+}
+function highSideAt(tf, ts, now) {
+  const s = scriptFor(tf, ts);
+  const wsec = tf === '5' ? W5 : W15;
+  const waitMs = (ts + (tf === '5' ? WAIT5 : WAIT15)) * 1000;
+  const closeMs = (ts + wsec) * 1000;
+  if (now >= closeMs || now < waitMs) return null; // resolved or still waiting
+  let high = s.entry;
+  for (let i = 0; i < s.flips.length; i++) {
+    if (now >= waitMs + (i + 1) * FLIP_GAP_MS) high = s.flips[i];
+    else break;
+  }
+  return high;
 }
 
-// Stub: Binance passes through; Polymarket endpoints are scripted.
-global.fetch = async (url, opts) => {
+// Stub: Binance klines are synthetic (no network), Polymarket is scripted.
+global.fetch = async (url) => {
   const u = String(url);
-  if (u.includes('api.binance.com')) return realFetch(url, opts);
+
+  if (u.includes('api.binance.com')) {
+    const m = u.match(/interval=(\d+)m/);
+    const intervalSec = (m ? Number(m[1]) : 5) * 60;
+    const limit = u.includes('limit=500') ? 500 : 5;
+    const base = Math.floor(virtualNow / (intervalSec * 1000)) * (intervalSec * 1000);
+    const rows = [];
+    for (let i = 0; i < limit; i++) {
+      const closeTime = base - i * intervalSec * 1000;
+      const openTime = closeTime - intervalSec * 1000;
+      const o = 60000 + (i % 9) * 10;
+      rows.push([openTime, String(o), String(o + 25), String(o - 15), String(o + 10), '100', closeTime, '1', '1', '1', '1', '1']);
+    }
+    return new Response(JSON.stringify(rows), { status: 200 });
+  }
 
   if (u.includes('gamma-api.polymarket.com/events')) {
     const m = u.match(/slug=btc-updown-(\d+)m-(\d+)/);
@@ -59,7 +97,7 @@ global.fetch = async (url, opts) => {
     const m = u.match(/condition_ids=cond-(\d+)-(\d+)/);
     const tf = m ? (m[1] === '5' ? '5' : '15') : '15';
     const ts = m ? Number(m[2]) : T0;
-    const w = winnerFor(tf, ts);
+    const w = scriptFor(tf, ts).winner;
     return new Response(JSON.stringify([{
       conditionId: `cond-${tf}-${ts}`, closed: true,
       outcomes: '["Up","Down"]', clobTokenIds: `["u${tf}-${ts}","d${tf}-${ts}"]`,
@@ -71,12 +109,14 @@ global.fetch = async (url, opts) => {
     const m = u.match(/token_id=(u|d)(\d+)-(\d+)/);
     const tf = m ? (m[2] === '5' ? '5' : '15') : '15';
     const ts = m ? Number(m[3]) : T0;
-    const w = winnerFor(tf, ts);
-    const closeAt = ts * 1000 + (tf === '5' ? W5 : W15) * 1000;
+    const side = m && m[1] === 'u' ? 'up' : 'down';
+    const wsec = tf === '5' ? W5 : W15;
     let price = 0.5;
-    if (Date.now() >= closeAt) {
-      const isWinner = (m && m[1] === 'u') === (w === 'up');
-      price = isWinner ? 1.0 : 0.01;
+    if (virtualNow >= (ts + wsec) * 1000) {
+      price = scriptFor(tf, ts).winner === side ? 1.0 : 0.01;
+    } else {
+      const high = highSideAt(tf, ts, virtualNow);
+      if (high) price = side === high ? 0.62 : 0.38;
     }
     return new Response(JSON.stringify({ price: String(price) }), { status: 200 });
   }
@@ -85,97 +125,125 @@ global.fetch = async (url, opts) => {
 };
 
 (async () => {
-  const lines = [];
   const logs = [];
-  const snap = { max15Shares: 0, m15Seq: [], m5Seq: [], last5wt: null, last15wt: null };
-  const states = { m15: null, m5: null };
-
-  // wait until ~2s before the boundary, then start the engine
-  const waitMs = Math.max(0, (T0 - 2) * 1000 - Date.now());
-  if (waitMs > 0) await sleep(waitMs);
+  const states = { m5: null, m15: null };
 
   const engine = createEngine({
-    startingCapital: 4000, baseBet15m: 150, baseBet5m: 50,
-    windowSeconds15: W15, windowSeconds5: W5,
+    startingCapital: 4000,
+    entryDollars: 10,
+    martingaleAmounts: [20, 40, 80],
+    waitSeconds5: WAIT5,
+    waitSeconds15: WAIT15,
+    windowSeconds15: W15,
+    windowSeconds5: W5,
     dryRun: true,
+    nowFn: () => virtualNow,
+    tickMs: 1,
     emit: (ev, s) => {
       states[ev === 'hedgeState:BTC-15m' ? 'm15' : 'm5'] = s;
-      if (ev === 'hedgeState:BTC-15m') {
-        const t = s.current.btc;
-        if (t && t.betPlaced) snap.max15Shares = Math.max(snap.max15Shares, t.position.shares);
-        if (t && t.windowTs !== snap.last15wt) { snap.last15wt = t.windowTs; snap.m15Seq.push({ wt: t.windowTs, dir: t.signalSide }); }
-      } else {
-        const t = s.current.btc;
-        if (t && t.windowTs !== snap.last5wt) {
-          snap.last5wt = t.windowTs;
-          snap.m5Seq.push({ wt: t.windowTs, side: t.signalSide });
-        }
-      }
     },
-    slog: (l) => { logs.push(l); lines.push(l); },
+    slog: (l) => { logs.push(l); },
   });
 
   await engine.start();
 
-  // run through T0 + 5 windows + settle margin
-  const endAt = (T0 + 5 * W15 + 15) * 1000;
-  while (Date.now() < endAt) await sleep(1000);
+  // Learn the engine's aligned start boundary from its own state.
+  const deadline = Date.now() + 5000;
+  while ((!states.m5 || !states.m5.boundaryWindowTs) && Date.now() < deadline) {
+    await sleep(5);
+  }
+  if (!states.m5 || !states.m5.boundaryWindowTs) {
+    console.log('❌ engine never aligned to a boundary');
+    process.exit(1);
+  }
+  T0 = states.m5.boundaryWindowTs;
+  virtualNow = T0 * 1000;
+  console.log(`T0 (aligned boundary) = ${new Date(T0 * 1000).toISOString()}`);
+
+  // Drive the virtual clock forward in 500ms steps until 3x 15m windows settle.
+  const endAt = (T0 + 3 * W15 + 30) * 1000;
+  while (virtualNow < endAt) {
+    virtualNow += 500;
+    await sleep(1);
+  }
+  await sleep(50); // let the engine flush its last virtual steps
 
   const s15 = states.m15;
   const s5 = states.m5;
-  const h15 = s15.history; // newest first
-  const h5 = s5.history;
   const fmt = ts => new Date(ts * 1000).toISOString().slice(11, 19);
 
-  console.log('== 15m windows seen (direction) ==');
-  for (const x of snap.m15Seq) console.log(`  ${fmt(x.wt)} -> ${x.dir}`);
-  console.log('== 5m windows seen (only at 15m opens) ==');
-  for (const x of snap.m5Seq) console.log(`  ${fmt(x.wt)} -> ${x.side}`);
-  console.log('== resolved 15m ==');
-  for (const h of h15) console.log(`  ${fmt(h.windowTs)} dir ${h.direction} winner ${h.winner} win ${h.win} pnl $${h.pnl.toFixed(2)}`);
-  console.log('== resolved 5m ==');
-  for (const h of h5) console.log(`  ${fmt(h.windowTs)} side ${h.side || '—'} winner ${h.winner} skipped ${h.skipped} win ${h.win} pnl $${h.pnl.toFixed(2)}`);
-  console.log(`bankroll $${s15.bankroll.toFixed(2)} | totalPnl $${s15.realizedPnlTotal.toFixed(2)} (15m $${s15.realizedPnl.toFixed(2)} + 5m $${s5.realizedPnl.toFixed(2)}) | max 15m shares ${snap.max15Shares.toFixed(1)}`);
+  const sorted = list => (list || []).slice().sort((a, b) => a.windowTs - b.windowTs);
+  const h15 = sorted(s15.history);
+  const h5 = sorted(s5.history);
 
-  const m15wt = snap.m15Seq.map(x => x.wt);
-  const m15dir = snap.m15Seq.map(x => x.dir);
-  const m5wt = snap.m5Seq.map(x => x.wt);
+  console.log('== resolved 15m ==');
+  for (const h of h15) console.log(`  ${fmt(h.windowTs)} entry ${h.entrySide || '—'} legs [${(h.legs || []).map(l => '$' + l.dollars + l.side[0].toUpperCase()).join(' ')}] 3MG:${h.reachedLevel3 ? 'yes' : 'no'} winner ${h.winner} win ${h.win} pnl $${h.pnl.toFixed(2)}`);
+  console.log('== resolved 5m ==');
+  for (const h of h5) console.log(`  ${fmt(h.windowTs)} entry ${h.entrySide || '—'} legs [${(h.legs || []).map(l => '$' + l.dollars + l.side[0].toUpperCase()).join(' ')}] 3MG:${h.reachedLevel3 ? 'yes' : 'no'} winner ${h.winner} win ${h.win} pnl $${h.pnl.toFixed(2)}`);
+  console.log(`bankroll $${s15.bankroll.toFixed(2)} | totalPnl $${s15.realizedPnlTotal.toFixed(2)} | equityCurve ${s15.equityCurve.length} pts | maxDD ${(s15.maxDrawdown.pct * 100).toFixed(2)}% ($${s15.maxDrawdown.dollars.toFixed(2)})`);
+  console.log(`15m: ${s15.wins}W/${s15.losses}L (${s15.windowsDecided} decided, ${s15.windowsReached3rdMartingale} reached 3rd MG) | 5m: ${s5.wins}W/${s5.losses}L (${s5.windowsDecided} decided, ${s5.windowsReached3rdMartingale} reached 3rd MG)`);
 
   const checks = [];
   const check = (name, ok) => { checks.push([name, ok]); console.log((ok ? 'PASS ' : 'FAIL ') + name); };
 
-  // 5m bets at EVERY 15m open (T0, T0+18, ...) — never at T0+6/T0+12/... and NEVER skipped
-  check('5m windows occur at every 15m open (5 of 5)', m5wt.length >= 5 && m5wt.every(ts => ts % W15 === 0) && JSON.stringify(m5wt.slice(0, 5)) === JSON.stringify([T0, T0 + W15, T0 + 2 * W15, T0 + 3 * W15, T0 + 4 * W15]));
-  check('no 5m window at intermediate boundaries', !m5wt.includes(T0 + W5) && !m5wt.includes(T0 + 2 * W5));
-  check('no 5m window ever skipped', snap.m5Seq.every(x => x.side != null));
-  // 15m direction follows previous outcome: up, up, up, down, up
-  check('15m direction sequence', JSON.stringify(m15dir.slice(0, 5)) === JSON.stringify(['up', 'up', 'up', 'down', 'up']));
-  // 5m side is the SAME as the 15m direction (momentum add-on)
-  const sameSide = snap.m5Seq.slice(0, 5).every((x, i) => x.side === m15dir[i]);
-  check('5m side same as 15m direction', sameSide);
-  // roll: 15m position grew past the $150 base (300 shares @0.5)
-  check('5m win rolled into 15m (shares > base)', snap.max15Shares >= 380);
-  // resolutions
-  const h15new = h15.slice().reverse();
-  check('15m W1 won (up)', h15new[0] && h15new[0].direction === 'up' && h15new[0].win === true);
-  check('15m W2 won (up)', h15new[1] && h15new[1].direction === 'up' && h15new[1].win === true);
-  check('15m W3 lost (up vs down)', h15new[2] && h15new[2].direction === 'up' && h15new[2].win === false);
-  check('15m W4 lost (down vs up)', h15new[3] && h15new[3].direction === 'down' && h15new[3].win === false);
-  check('15m W5 won (up)', h15new[4] && h15new[4].direction === 'up' && h15new[4].win === true);
-  const h5new = h5.slice().reverse();
-  const byTs = new Map(h5new.map(h => [h.windowTs, h]));
-  check('5m T0 won (up)', byTs.get(T0) && byTs.get(T0).win === true && byTs.get(T0).side === 'up' && byTs.get(T0).skipped === false);
-  check('5m T0+18 won (up)', byTs.get(T0 + W15) && byTs.get(T0 + W15).win === true && byTs.get(T0 + W15).side === 'up' && byTs.get(T0 + W15).skipped === false);
-  check('5m T0+36 lost, still bet', byTs.get(T0 + 2 * W15) && byTs.get(T0 + 2 * W15).win === false && byTs.get(T0 + 2 * W15).side === 'up' && byTs.get(T0 + 2 * W15).skipped === false);
-  check('5m T0+54 lost, still bet', byTs.get(T0 + 3 * W15) && byTs.get(T0 + 3 * W15).win === false && byTs.get(T0 + 3 * W15).side === 'down' && byTs.get(T0 + 3 * W15).skipped === false);
-  check('5m T0+72 won (up)', byTs.get(T0 + 4 * W15) && byTs.get(T0 + 4 * W15).win === true && byTs.get(T0 + 4 * W15).side === 'up' && byTs.get(T0 + 4 * W15).skipped === false);
-  check('5m history has 5 bets, 0 skips', h5new.length >= 5 && h5new.slice(0, 5).every(h => !h.skipped));
-  // shared bankroll: bankroll = start + realized - open position cost
-  const openCost = s15.current.btc && s15.current.btc.position ? s15.current.btc.position.cost : 0;
+  const h15new = h15.slice(0, 3); // first three 15m windows resolve during the run
+  const first = h15new[0];
+  const second = h15new[1];
+  const third = h15new[2];
+
+  // 1) entry never happens before the wait ends
+  const waitFor = h => (h.windowTs + (h.tf === '5' ? WAIT5 : WAIT15)) * 1000;
+  const entryOnlyAfterWait = h15new.concat(h5).filter(h => h.legs && h.legs.length)
+    .every(h => h.legs[0].ts >= waitFor(h) - 500);
+  check('entries only happen after the wait window', entryOnlyAfterWait);
+
+  // 2) first 15m window: entry up $10, then $20/$40/$80 flips, reaches 3rd martingale
+  check('idx0 entry is UP $10', first && first.entrySide === 'up' && first.legs[0].dollars === 10);
+  check('idx0 martingale amounts 20/40/80', first && first.legs.length === 4 && JSON.stringify(first.legs.slice(1).map(l => l.dollars)) === JSON.stringify([20, 40, 80]));
+  check('idx0 legs alternate sides', first && first.legs.every((l, i) => i === 0 || l.side !== first.legs[i - 1].side));
+  check('idx0 reached 3rd martingale', first && first.reachedLevel3 === true);
+
+  // 3) flips happen on the side opposite the previous buy
+  const oppFlip = h15new.concat(h5).filter(h => h.legs && h.legs.length > 1)
+    .every(h => h.legs.slice(1).every((l, i) => l.side !== h.legs[i].side));
+  check('every flip is on the opposite side', oppFlip);
+
+  // 4) scripted outcomes: idx0 LOSS despite full ladder, idx1 WIN, idx2 WIN
+  check('idx0 full-ladder window is a net LOSS', first && first.win === false && first.pnl < 0);
+  check('idx1 window WIN (1 flip, down->up)', second && second.win === true && second.entrySide === 'down' && second.martingaleLevels === 2);
+  check('idx2 window WIN (no flip)', third && third.win === true && third.martingaleLevels === 1);
+
+  // 5) 3rd-martingale counters
+  check('15m 3rd-martingale counter >= 1', s15.windowsReached3rdMartingale >= 1);
+  check('5m 3rd-martingale counter >= 1', s5.windowsReached3rdMartingale >= 1);
+
+  // 6) win rate math
+  const expectRate15 = s15.windowsDecided > 0 ? round2(s15.wins / s15.windowsDecided) : null;
+  check('15m winRate consistent with wins/decided', s15.winRate === expectRate15 && s15.windowsDecided === s15.wins + s15.losses);
+
+  // 7) shared bankroll accounting: bankroll = start + realizedPnl - open cost
+  const openCost = (s15.current.btc ? s15.current.btc.totalCost : 0) + (s5.current.btc ? s5.current.btc.totalCost : 0);
   check('shared bankroll accounting consistent', Math.abs(s15.bankroll - (4000 + s15.realizedPnlTotal - openCost)) < 0.01);
-  check('total P&L = 15m + 5m', Math.abs(s15.realizedPnlTotal - (s15.realizedPnl + s5.realizedPnl)) < 0.01);
+
+  // 8) equity curve + max drawdown present
+  check('equity curve has multiple points', s15.equityCurve.length >= 3);
+  check('max drawdown >= 0', s15.maxDrawdown.pct >= 0 && s15.maxDrawdown.dollars >= 0);
+  check('max drawdown <= 100%', s15.maxDrawdown.pct <= 1);
+
+  // 9) no double bets per leg level, no skipped windows in this script
+  const noDup = h15new.concat(h5).filter(h => h.legs && h.legs.length)
+    .every(h => h.legs.every((l, i) => l.level === i));
+  check('leg levels are sequential (no double buys)', noDup);
+  check('no skipped windows in this script', h15new.concat(h5).every(h => h.skipped === false));
+
+  // 10) 5m results sanity: multiple settled windows, wins and losses both present
+  check('5m settled at least 6 windows', h5.length >= 6);
+  check('5m has both wins and losses', h5.some(h => h.win === true) && h5.some(h => h.win === false));
+  check('5m has a 3rd-martingale window', h5.some(h => h.reachedLevel3 === true));
 
   const allOk = checks.every(([, ok]) => ok);
   console.log(allOk ? '\n✅ SMOKE TEST PASSED' : '\n❌ SMOKE TEST FAILED');
   process.exit(allOk ? 0 : 1);
 })();
+
+function round2(n) { return Math.round(n * 100) / 100; }
