@@ -7,11 +7,12 @@
  *
  * Simulated windows: 15m = 30s, 5m = 12s, waits 8s/4s.
  *
- * Scripted window (index -> [entry, flips, winner]):
- *   idx0: up  -> [down, up, down] -> winner up     (reaches 3rd martingale)
- *   idx1: down -> [up]            -> winner up     (1 flip)
+ * Scripted window (index -> [touch schedule, winner]):
+ *   idx0: up  -> [down, up, down] -> winner up     (3 touches, but ONLY ONE
+ *                                                   flip allowed -> flip loses)
+ *   idx1: down -> [up]            -> winner up     (1 flip, wins)
  *   idx2: up  -> []               -> winner up     (no flip, entry wins)
- *   idx3: down -> [up, down]      -> winner down   (2 flips)
+ *   idx3: down -> [up]            -> winner down   (1 flip, loses)
  *   idx4: up  -> []               -> winner down   (entry loses)
  *
  * Prices: 0.50 during the wait, the entry side at 0.62 after the wait,
@@ -19,10 +20,10 @@
  * loser 0.01 after close. The losing side is SOLD ~0.5s after each flip
  * at the current bid (sellDelayMs=500 in this compressed-window test).
  *
- * Verifies: no bet before the wait ends, $10 entry, martingale amounts
- * $20/$40/$80 in order, flips alternate sides, 3rd-martingale counting,
- * win/loss accounting, win rate, max drawdown, equity curve, and the
- * shared bankroll math.
+ * Verifies: no bet before the wait ends, $50 entry, exactly ONE $100 flip
+ * (max-1-martingale cap even with repeated touches), flips alternate sides,
+ * max-martingale counting, win/loss accounting, win rate, max drawdown,
+ * equity curve, and the shared bankroll math.
  *
  * Usage: node smoke-test.js   (takes ~15 seconds)
  */
@@ -131,8 +132,8 @@ global.fetch = async (url) => {
 
   const engine = createEngine({
     startingCapital: 4000,
-    entryDollars: 10,
-    martingaleAmounts: [20, 40, 80],
+    entryDollars: 50,
+    martingaleAmounts: [100],
     waitSeconds5: WAIT5,
     waitSeconds15: WAIT15,
     sellDelayMs: 500,
@@ -181,11 +182,11 @@ global.fetch = async (url) => {
   const h5 = sorted(s5.history);
 
   console.log('== resolved 15m ==');
-  for (const h of h15) console.log(`  ${fmt(h.windowTs)} entry ${h.entrySide || '—'} legs [${(h.legs || []).map(l => '$' + l.dollars + l.side[0].toUpperCase()).join(' ')}] sells [${(h.sells || []).map(x => x.side[0].toUpperCase() + ' ' + x.shares + 'sh@' + x.price).join(' ')}] 3MG:${h.reachedLevel3 ? 'yes' : 'no'} winner ${h.winner} win ${h.win} pnl $${h.pnl.toFixed(2)} recovered $${(h.sellProceeds || 0).toFixed(2)}`);
+  for (const h of h15) console.log(`  ${fmt(h.windowTs)} entry ${h.entrySide || '—'} legs [${(h.legs || []).map(l => '$' + l.dollars + l.side[0].toUpperCase()).join(' ')}] sells [${(h.sells || []).map(x => x.side[0].toUpperCase() + ' ' + x.shares + 'sh@' + x.price).join(' ')}] maxMG:${h.reachedMaxMartingale ? 'yes' : 'no'} winner ${h.winner} win ${h.win} pnl $${h.pnl.toFixed(2)} recovered $${(h.sellProceeds || 0).toFixed(2)}`);
   console.log('== resolved 5m ==');
-  for (const h of h5) console.log(`  ${fmt(h.windowTs)} entry ${h.entrySide || '—'} legs [${(h.legs || []).map(l => '$' + l.dollars + l.side[0].toUpperCase()).join(' ')}] 3MG:${h.reachedLevel3 ? 'yes' : 'no'} winner ${h.winner} win ${h.win} pnl $${h.pnl.toFixed(2)}`);
+  for (const h of h5) console.log(`  ${fmt(h.windowTs)} entry ${h.entrySide || '—'} legs [${(h.legs || []).map(l => '$' + l.dollars + l.side[0].toUpperCase()).join(' ')}] maxMG:${h.reachedMaxMartingale ? 'yes' : 'no'} winner ${h.winner} win ${h.win} pnl $${h.pnl.toFixed(2)}`);
   console.log(`bankroll $${s15.bankroll.toFixed(2)} | totalPnl $${s15.realizedPnlTotal.toFixed(2)} | equityCurve ${s15.equityCurve.length} pts | maxDD ${(s15.maxDrawdown.pct * 100).toFixed(2)}% ($${s15.maxDrawdown.dollars.toFixed(2)})`);
-  console.log(`15m: ${s15.wins}W/${s15.losses}L (${s15.windowsDecided} decided, ${s15.windowsReached3rdMartingale} reached 3rd MG) | 5m: ${s5.wins}W/${s5.losses}L (${s5.windowsDecided} decided, ${s5.windowsReached3rdMartingale} reached 3rd MG)`);
+  console.log(`15m: ${s15.wins}W/${s15.losses}L (${s15.windowsDecided} decided, ${s15.windowsReachedMaxMartingale} reached max MG) | 5m: ${s5.wins}W/${s5.losses}L (${s5.windowsDecided} decided, ${s5.windowsReachedMaxMartingale} reached max MG)`);
 
   const checks = [];
   const check = (name, ok) => { checks.push([name, ok]); console.log((ok ? 'PASS ' : 'FAIL ') + name); };
@@ -201,25 +202,25 @@ global.fetch = async (url) => {
     .every(h => h.legs[0].ts >= waitFor(h) - 500);
   check('entries only happen after the wait window', entryOnlyAfterWait);
 
-  // 2) first 15m window: entry up $10, then $20/$40/$80 flips, reaches 3rd martingale
-  check('idx0 entry is UP $10', first && first.entrySide === 'up' && first.legs[0].dollars === 10);
-  check('idx0 martingale amounts 20/40/80', first && first.legs.length === 4 && JSON.stringify(first.legs.slice(1).map(l => l.dollars)) === JSON.stringify([20, 40, 80]));
+  // 2) first 15m window: $50 entry, exactly ONE $100 flip despite 3 touches
+  check('idx0 entry is UP $50', first && first.entrySide === 'up' && first.legs[0].dollars === 50);
+  check('idx0 places exactly ONE $100 flip (3 touches, max 1)', first && first.legs.length === 2 && first.legs[1].dollars === 100);
   check('idx0 legs alternate sides', first && first.legs.every((l, i) => i === 0 || l.side !== first.legs[i - 1].side));
-  check('idx0 reached 3rd martingale', first && first.reachedLevel3 === true);
+  check('idx0 reached max martingale (single flip)', first && first.reachedMaxMartingale === true);
 
   // 3) flips happen on the side opposite the previous buy
   const oppFlip = h15new.concat(h5).filter(h => h.legs && h.legs.length > 1)
     .every(h => h.legs.slice(1).every((l, i) => l.side !== h.legs[i].side));
   check('every flip is on the opposite side', oppFlip);
 
-  // 4) scripted outcomes: idx0 LOSS despite full ladder, idx1 WIN, idx2 WIN
-  check('idx0 full-ladder window is a net LOSS', first && first.win === false && first.pnl < 0);
-  check('idx1 window WIN (1 flip, down->up)', second && second.win === true && second.entrySide === 'down' && second.martingaleLevels === 2);
+  // 4) scripted outcomes: idx0 LOSS (flip side lost), idx1 WIN, idx2 WIN
+  check('idx0 flip window is a net LOSS (flip side lost)', first && first.win === false && first.pnl < 0);
+  check('idx1 $100 flip recovers the $50 entry (net WIN +36.62)', second && second.win === true && second.pnl > 0 && second.winner === 'up' && second.martingaleLevels === 2);
   check('idx2 window WIN (no flip)', third && third.win === true && third.martingaleLevels === 1);
 
-  // 5) 3rd-martingale counters
-  check('15m 3rd-martingale counter >= 1', s15.windowsReached3rdMartingale >= 1);
-  check('5m 3rd-martingale counter >= 1', s5.windowsReached3rdMartingale >= 1);
+  // 5) max-martingale counters
+  check('15m max-martingale counter >= 1', s15.windowsReachedMaxMartingale >= 1);
+  check('5m max-martingale counter >= 1', s5.windowsReachedMaxMartingale >= 1);
 
   // 6) win rate math
   const expectRate15 = s15.windowsDecided > 0 ? round2(s15.wins / s15.windowsDecided) : null;
@@ -254,7 +255,7 @@ global.fetch = async (url) => {
   // 11) 5m results sanity: multiple settled windows, wins and losses present
   check('5m settled at least 6 windows', h5.length >= 6);
   check('5m has both wins and losses', h5.some(h => h.win === true) && h5.some(h => h.win === false));
-  check('5m has a 3rd-martingale window', h5.some(h => h.reachedLevel3 === true));
+  check('5m has a max-martingale window', h5.some(h => h.reachedMaxMartingale === true));
 
   const allOk = checks.every(([, ok]) => ok);
   console.log(allOk ? '\n✅ SMOKE TEST PASSED' : '\n❌ SMOKE TEST FAILED');

@@ -12,25 +12,25 @@
  *  1. When a window opens, the bot does NOT bet immediately. It waits:
  *        - 1 minute after a 5m window opens
  *        - 3 minutes after a 15m window opens
- *  2. When the wait ends, the bot fires the $10 entry IMMEDIATELY on
+ *  2. When the wait ends, the bot fires the $50 entry IMMEDIATELY on
  *     the leading side (the higher-priced side) at WHATEVER the price
  *     is — no waiting for the price to come back to 0.60.
  *  3. While the window is open, the moment the OPPOSITE side's price
- *     reaches 0.50, the bot flips INSTANTLY: it buys that side with the
- *     next martingale amount — $20, then $40, then $80 (max 3 flips).
- *     About 2 seconds after each flip it CLOSES the losing side it just
- *     left, selling all of those shares at the current bid and
- *     recovering capital. NO flips after 280s into a 5m window or 870s
- *     into a 15m window.
+ *     reaches 0.50, the bot flips INSTANTLY: it buys that side with ONE
+ *     martingale flip of $100 (2x the $50 entry, max 1 flip per window).
+ *     About 2 seconds after the flip it CLOSES the losing side it just
+ *     left, selling all
+ *     of those shares at the current bid and recovering capital. NO
+ *     flips after 280s into a 5m window or 870s into a 15m window.
  *  4. At window end, whichever side's price is above 0.90 is declared
  *     the winner. Window PnL = payout of the FINAL held side's shares
  *     ($1.00 each) + proceeds from the losing-side sales - total cost
  *     of every buy.
- *  5. Every new window starts fresh with the $10 entry. 5m and 15m
+ *  5. Every new window starts fresh with the $50 entry. 5m and 15m
  *     trade completely independently with SEPARATE demo capital.
  *
  *  Dashboard: per-timeframe equity curves, max drawdown, win rate, and
- *  the number of windows that reached the 3rd martingale ($80).
+ *  the number of windows that reached the max martingale ($100 flip).
  * ═══════════════════════════════════════════════════════════════
  */
 
@@ -64,8 +64,9 @@ function createEngine(cfg) {
     flipCutoffSeconds5 = 280,
     flipCutoffSeconds15 = 870,
     sellDelayMs = 2000,
-    entryDollars = 10,
-    martingaleAmounts = [20, 40, 80],
+    entryDollars = 50,
+    martingaleAmounts = [100],
+    maxFlips = 1,
     waitSeconds5 = 60,
     waitSeconds15 = 180,
     windowSeconds15 = 900,
@@ -121,8 +122,8 @@ function createEngine(cfg) {
     losses5: savedStats ? savedStats.losses5 : 0,
     wins15: savedStats ? savedStats.wins15 : 0,
     losses15: savedStats ? savedStats.losses15 : 0,
-    mart3Count5: savedStats ? savedStats.mart3Count5 || 0 : 0,
-    mart3Count15: savedStats ? savedStats.mart3Count15 || 0 : 0,
+    maxMartCount5: savedStats ? (savedStats.maxMartCount5 || savedStats.mart3Count5 || 0) : 0,
+    maxMartCount15: savedStats ? (savedStats.maxMartCount15 || savedStats.mart3Count15 || 0) : 0,
     history5: savedStats && Array.isArray(savedStats.history5) ? savedStats.history5 : [],
     history15: savedStats && Array.isArray(savedStats.history15) ? savedStats.history15 : [],
     trades5: [],
@@ -159,7 +160,7 @@ function createEngine(cfg) {
         realizedPnl15: engine.realizedPnl15,
         wins5: engine.wins5, losses5: engine.losses5,
         wins15: engine.wins15, losses15: engine.losses15,
-        mart3Count5: engine.mart3Count5, mart3Count15: engine.mart3Count15,
+        maxMartCount5: engine.maxMartCount5, maxMartCount15: engine.maxMartCount15,
         history5: engine.history5.slice(0, 100),
         history15: engine.history15.slice(0, 100),
         equityCurve5: engine.equityCurve5.slice(-300),
@@ -540,8 +541,8 @@ function createEngine(cfg) {
   }
 
   async function maybeFlip(t) {
-    const level = t.buys.length; // next martingale leg index (1..3)
-    if (level <= 0 || level > martingaleAmounts.length) return;
+    const level = t.buys.length; // next martingale leg index (1..maxFlips)
+    if (level <= 0 || level > maxFlips) return;
     if (!t.lastSide) return;
     // No flips in the final stretch of the window: after 280s (5m) / 870s (15m).
     const cutoff = (t.windowTs + (t.tf === '5' ? flipCutoffSeconds5 : flipCutoffSeconds15)) * 1000;
@@ -558,10 +559,10 @@ function createEngine(cfg) {
     if (res.ok) {
       // Flip FIRST, then close that losing-side quantity ~2s later at the current bid.
       t.pendingSells.push({ side: prevSide, qty: prevQty, at: nowFn() + sellDelayMs });
-      if (level === martingaleAmounts.length) {
-        t.reachedLevel3 = true;
-        engine[`mart3Count${t.tf}`] = (engine[`mart3Count${t.tf}`] || 0) + 1;
-        log(`${tfLabel(t.tf)} ⚠️ 3RD MARTINGALE ($80) reached — this window is at max risk`);
+      if (level === maxFlips) {
+        t.reachedMax = true;
+        engine[`maxMartCount${t.tf}`] = (engine[`maxMartCount${t.tf}`] || 0) + 1;
+        log(`${tfLabel(t.tf)} ⚠️ MAX MARTINGALE ($${dollars.toFixed(2)}) reached — this window is at max risk`);
       }
       log(`${tfLabel(t.tf)} 🔄 flipped to ${opp.toUpperCase()} with $${dollars.toFixed(2)} @${res.avgPrice.toFixed(3)} (0.50+ instant)`);
     } else if (res.reason && res.reason !== 'no-ask') {
@@ -583,7 +584,7 @@ function createEngine(cfg) {
       sells: [],
       pendingSells: [],
       lastSide: null,
-      reachedLevel3: false,
+      reachedMax: false,
       pnl: null,
       win: null,
       skipped: false,
@@ -674,7 +675,7 @@ function createEngine(cfg) {
       sells: (t.sells || []).map(x => ({ side: x.side, ts: x.ts, shares: x.shares, price: x.price, proceeds: x.proceeds })),
       sellProceeds,
       martingaleLevels: buys.length,
-      reachedLevel3: t.reachedLevel3,
+      reachedMaxMartingale: t.reachedMax,
       betPlaced, skipped: !betPlaced, win,
       wager: totalCost, payout, pnl, bankrollAfter: engine[`bankroll${tf}`], resolvedAt: nowFn(),
     });
@@ -727,7 +728,7 @@ function createEngine(cfg) {
       sellProceeds: totalSellProceeds(t),
       lastSide: t.lastSide,
       martingaleLevel: t.buys.length,
-      reachedLevel3: t.reachedLevel3,
+      reachedMaxMartingale: t.reachedMax,
       totalCost: totalCostOf(t),
       entryPrice: t.buys.length ? t.buys[0].price : null,
       pnl: t.pnl, win: t.win, skipped: t.skipped,
@@ -753,6 +754,7 @@ function createEngine(cfg) {
       triggerSlip,
       entryDollars,
       martingaleAmounts,
+      maxFlips,
       flipCutoffSeconds5, flipCutoffSeconds15,
       sellDelayMs,
       logs: engine.logs.slice(-80),
@@ -776,7 +778,7 @@ function createEngine(cfg) {
       wins: engine[`wins${tf}`],
       losses: engine[`losses${tf}`],
       windowsDecided: decided,
-      windowsReached3rdMartingale: engine[`mart3Count${tf}`] || 0,
+      windowsReachedMaxMartingale: engine[`maxMartCount${tf}`] || 0,
       winRate: decided > 0 ? round2(engine[`wins${tf}`] / decided) : null,
       latestBtcPrice: tf === '5' ? candles5.latestClose() : candles15.latestClose(),
       current: { btc: tradeSummary(engine.current[tf]) },
@@ -883,11 +885,11 @@ function createEngine(cfg) {
       slog(`[${label.toLowerCase()}] ⚙️  Starting immediately — 5m/15m windows are independent; each window waits its own 1m/3m then fires the entry on the leading side at any price.`);
     }
     slog(`[${label.toLowerCase()}] ⚙️  Window rules: wait ${waitSeconds5}s (5m) / ${waitSeconds15}s (15m) after open, then fire the $${entryDollars.toFixed(2)} entry on the LEADING side at ANY price (no wait for 0.60).`);
-    slog(`[${label.toLowerCase()}] ⚙️  Martingale flips: $${martingaleAmounts.join(' / ')} fire INSTANTLY when the opposite side's price reaches ${FLIP_TRIGGER_PRICE.toFixed(2)}+ (max ${martingaleAmounts.length} flips). ~${(sellDelayMs / 1000).toFixed(0)}s after each flip the losing side is SOLD at the current bid to recover capital. NO flips after ${flipCutoffSeconds5}s (5m) / ${flipCutoffSeconds15}s (15m). The side above ${WINNER_PRICE.toFixed(2)} at window end is the winner.`);
+    slog(`[${label.toLowerCase()}] ⚙️  Martingale flip: $${martingaleAmounts.slice(0, maxFlips).join(' / ')} fires INSTANTLY when the opposite side's price reaches ${FLIP_TRIGGER_PRICE.toFixed(2)}+ (max ${maxFlips} flip${maxFlips === 1 ? '' : 's'} per window). ~${(sellDelayMs / 1000).toFixed(0)}s after the flip the losing side is SOLD at the current bid to recover capital. NO flips after ${flipCutoffSeconds5}s (5m) / ${flipCutoffSeconds15}s (15m). The side above ${WINNER_PRICE.toFixed(2)} at window end is the winner.`);
     slog(`[${label.toLowerCase()}] ⚙️  SEPARATE demo capital — 5m $${capital5.toFixed(2)}, 15m $${capital15.toFixed(2)} (no shared bankroll).`);
     slog(`[${label.toLowerCase()}] ⚙️  Fees: Polymarket taker fee = shares × ${feeTheta} × price × (1-price) (crypto category), ${rebatePct > 0 ? (rebatePct * 100).toFixed(0) + '% rebate applied' : 'no rebate configured'}.`);
     if (savedStats) {
-      slog(`[${label.toLowerCase()}] 💾 Restored saved stats — bankroll 5m $${engine.bankroll5.toFixed(2)} / 15m $${engine.bankroll15.toFixed(2)}, 5m ${engine.wins5}W/${engine.losses5}L, 15m ${engine.wins15}W/${engine.losses15}L, 3rd-martingale windows 5m:${engine.mart3Count5} 15m:${engine.mart3Count15}.`);
+      slog(`[${label.toLowerCase()}] 💾 Restored saved stats — bankroll 5m $${engine.bankroll5.toFixed(2)} / 15m $${engine.bankroll15.toFixed(2)}, 5m ${engine.wins5}W/${engine.losses5}L, 15m ${engine.wins15}W/${engine.losses15}L, max-martingale windows 5m:${engine.maxMartCount5} 15m:${engine.maxMartCount15}.`);
     } else if (statsStatePath) {
       slog(`[${label.toLowerCase()}] 💾 No previous saved stats — starting fresh at 5m $${capital5.toFixed(2)} / 15m $${capital15.toFixed(2)}. Stats persist to ${statsStatePath}.`);
     }

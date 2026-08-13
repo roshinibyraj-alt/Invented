@@ -5,13 +5,14 @@
  *
  * Rule 1 (binary payout):  $X worth of shares at price p  =>  shares = X / p.
  *                          Every winning share pays exactly $1.00 at resolution.
- *                          => a $10 entry at 0.60 = 16.67 shares, win pays $16.67
- *                             (net profit +$6.67 before the taker fee).
+ *                          => a $50 entry at 0.60 = 83.33 shares, win pays $83.33
+ *                             (net profit +$33.33 before the taker fee).
  *
- * Rule 2 (close the loser at flip): at each flip the bot BUYS the new side
- *                          first, then ~2s later SELLS the losing side it just
- *                          left at the current bid (recovering capital). Only
- *                          the FINAL side is held to resolution.
+ * Rule 2 (close the loser at flip): the bot allows ONLY ONE $100 flip (2x the
+ *                          $50 entry). It
+ *                          BUYS the new side first, then ~2s later SELLS the
+ *                          losing side it just left at the current bid
+ *                          (recovering capital). Only the FINAL side is held.
  *                          PnL = final payout (final side shares x $1)
  *                                + sell proceeds - cost of every buy incl. fee.
  *
@@ -34,7 +35,7 @@ let virtualNow = 0;
 let T0 = 0;
 
 // M1: lone UP entry, no flips, winner UP.
-// M2: full ladder UP/DOWN/UP/DOWN, winner DOWN (the $20 + $80 down shares win).
+// M2: UP $50 entry + ONE $100 flip DOWN (3 touches scripted, only 1 allowed), winner DOWN.
 function scheduleFor(ts) {
   if (ts === T0)         return { entry: 'up',   flips: [],                    winner: 'up' };
   return                  { entry: 'up',   flips: ['down', 'up', 'down'],      winner: 'down' };
@@ -120,7 +121,7 @@ function expectedCost(dollars, price) {
   virtualNow = Math.floor(Date.now() / (W5 * 1000)) * (W5 * 1000) + W5 * 1000;
 
   const engine = createEngine({
-    startingCapital: 4000, entryDollars: 10, martingaleAmounts: [20, 40, 80],
+    startingCapital: 4000, entryDollars: 50, martingaleAmounts: [100],
     waitSeconds5: WAIT5, waitSeconds15: 180, windowSeconds15: 900, windowSeconds5: W5,
     triggerSlip: 0.02, dryRun: true, startAtBoundary: false, tickMs: 1,
     nowFn: () => virtualNow,
@@ -143,43 +144,44 @@ function expectedCost(dollars, price) {
   const legLine = h => (h.legs || []).map(l => `${l.side.toUpperCase()} $${l.dollars} @${l.price.toFixed(2)} = ${l.shares.toFixed(2)}sh cost $${l.cost.toFixed(2)}`).join(' | ');
 
   console.log('\n== Polymarket math check ==');
-  console.log(`Rule 1 — $10 worth at 0.60 = ${round2(10 / 0.6).toFixed(2)} shares; win pays ${(10 / 0.6).toFixed(2)} x $1 = $${(10 / 0.6).toFixed(2)} (profit $${round2(10 / 0.6 - 10).toFixed(2)} before fee).`);
+  console.log(`Rule 1 — $50 worth at 0.60 = ${round2(50 / 0.6).toFixed(2)} shares; win pays ${(50 / 0.6).toFixed(2)} x $1 = $${(50 / 0.6).toFixed(2)} (profit $${round2(50 / 0.6 - 50).toFixed(2)} before fee).`);
   console.log(`         10 SHARES at 0.60 costs $6.00 and pays $10.00 (profit $4.00 before fee) — different sizing model.`);
   console.log(`Fee rule — crypto taker fee = shares x 0.07 x p x (1-p)  [docs.polymarket.com/trading/fees]`);
-  console.log(`   $10 @0.60: fee = 16.67 x 0.07 x 0.6 x 0.4 = $${expectedFee(16.67, 0.6).toFixed(2)} (docs table: 100sh@60c = $60 value -> $1.68 fee)`);
+  console.log(`   $50 @0.60: fee = 83.33 x 0.07 x 0.6 x 0.4 = $${expectedFee(83.33, 0.6).toFixed(2)} (docs table: 100sh@60c = $60 value -> $1.68 fee)`);
 
-  console.log('\n== M1: lone $10 UP entry, winner UP (no flips) ==');
+  console.log('\n== M1: lone $50 UP entry, winner UP (no flips) ==');
   console.log('  legs:', legLine(M1));
-  console.log(`  payout = ${M1.payout.toFixed(2)} (winning UP shares 16.39 x $1) | wager(cost) = ${M1.wager.toFixed(2)} | pnl = ${M1.pnl.toFixed(2)} | win=${M1.win}`);
+  console.log(`  payout = ${M1.payout.toFixed(2)} (winning UP shares 81.97 x $1) | wager(cost) = ${M1.wager.toFixed(2)} | pnl = ${M1.pnl.toFixed(2)} | win=${M1.win}`);
 
-  console.log('\n== M2: full ladder UP/DOWN/UP/DOWN with losing-side closes, winner DOWN ==');
+  console.log('\n== M2: UP $50 entry + ONE $100 flip DOWN (3 touches, 1 allowed), winner DOWN ==');
   console.log('  legs:', legLine(M2));
   console.log('  sells:', (M2.sells || []).map(x => `${x.side.toUpperCase()} ${x.shares.toFixed(2)}sh @${x.price.toFixed(2)} = $${x.proceeds.toFixed(2)}`).join(' | '));
   console.log(`  payout = ${M2.payout.toFixed(2)} (FINAL held DOWN ${M2.payout.toFixed(2)}sh x $1) | wager = ${M2.wager.toFixed(2)} | recovered = ${(M2.sellProceeds || 0).toFixed(2)} | pnl = ${M2.pnl.toFixed(2)} | win=${M2.win}`);
-  console.log(`  -> every side that was flipped away is sold at 0.40; only the FINAL DOWN $80 leg is held to resolution.`);
+  console.log(`  -> the flipped-away UP entry is sold at 0.40; only the FINAL DOWN $100 leg is held to resolution.`);
 
   const checks = [];
   const check = (name, ok) => { checks.push([name, ok]); console.log((ok ? 'PASS ' : 'FAIL ') + name); };
 
   // Rule 1: shares = dollars / price; winning share pays exactly $1
-  const e1 = expectedCost(10, 0.61);
-  check('M1: $10 @0.61 buys 16.39 shares', Math.abs(M1.legs[0].shares - e1.shares) < 0.01);
-  check('M1: payout = winning shares x $1 (16.39)', Math.abs(M1.payout - e1.shares) < 0.01);
-  check('M1: cost = notional + fee (10.00 + 0.27)', Math.abs(M1.wager - e1.cost) < 0.01 && Math.abs(e1.fee - 0.27) < 0.005);
+  const e1 = expectedCost(50, 0.61);
+  check('M1: $50 @0.61 buys 81.97 shares', Math.abs(M1.legs[0].shares - e1.shares) < 0.01);
+  check('M1: payout = winning shares x $1 (81.97)', Math.abs(M1.payout - e1.shares) < 0.01);
+  check('M1: cost = notional + fee (50.00 + 1.37)', Math.abs(M1.wager - e1.cost) < 0.01 && Math.abs(e1.fee - 1.37) < 0.005);
   check('M1: pnl = payout - wager', Math.abs(M1.pnl - (M1.payout - M1.wager)) < 0.01);
 
   // Rule 2: the losing side is CLOSED at each flip — only the final side is
   // held; pnl = final payout + sell proceeds - total buy cost.
-  check('M2: exactly 3 losing-side sells (U, D, U)', M2 && M2.sells.length === 3 && JSON.stringify(M2.sells.map(x => x.side)) === JSON.stringify(['up', 'down', 'up']));
-  check('M2: sells close the exact flipped-away quantities (16.39/32.79/65.57)', M2 && Math.abs(M2.sells[0].shares - 16.39) < 0.02 && Math.abs(M2.sells[1].shares - 32.79) < 0.02 && Math.abs(M2.sells[2].shares - 65.57) < 0.02);
-  check('M2: payout = FINAL held side shares x $1 (131.15)', M2 && Math.abs(M2.payout - 131.15) < 0.02);
-  check('M2: pnl accounts for ALL 4 legs cost (~154.09)', M2 && Math.abs(M2.wager - 154.09) < 0.02);
-  check('M2: pnl = payout + sellProceeds - wager (+21.04)', M2 && Math.abs(M2.pnl - (M2.payout + M2.sellProceeds - M2.wager)) < 0.01 && M2.pnl > 20.9 && M2.pnl < 21.2);
+  check('M2: exactly ONE $100 flip placed despite 3 touches (max 1)', M2 && M2.legs.length === 2 && M2.legs[1].dollars === 100 && M2.reachedMaxMartingale === true);
+  check('M2: exactly 1 losing-side sell (UP entry closed)', M2 && M2.sells.length === 1 && M2.sells[0].side === 'up');
+  check('M2: sell closes the exact flipped-away quantity (81.97)', M2 && Math.abs(M2.sells[0].shares - 81.97) < 0.02);
+  check('M2: payout = FINAL held side shares x $1 (163.93)', M2 && Math.abs(M2.payout - 163.93) < 0.02);
+  check('M2: pnl accounts for ALL buy costs (~154.10)', M2 && Math.abs(M2.wager - 154.10) < 0.02);
+  check('M2: pnl = payout + sellProceeds - wager (+41.24, flip recovers the entry)', M2 && Math.abs(M2.pnl - (M2.payout + M2.sellProceeds - M2.wager)) < 0.01 && M2.pnl > 41 && M2.pnl < 41.5);
 
   // What-if: winner UP -> the FINAL held side is DOWN, so UP pays nothing
   const upLosePnl = round2((M2.sellProceeds || 0) - M2.wager);
-  console.log(`\n  (what-if: same ladder resolves UP -> final DOWN leg expires, payout $0 + recovered $${(M2.sellProceeds || 0).toFixed(2)} - cost $${M2.wager.toFixed(2)} = pnl $${upLosePnl.toFixed(2)})`);
-  check('M2: what-if UP winner -> pnl -110.11 (final side lost, only sells recovered)', Math.abs(upLosePnl + 110.11) < 0.02);
+  console.log(`\n  (what-if: same window resolves UP -> final DOWN leg expires, payout $0 + recovered $${(M2.sellProceeds || 0).toFixed(2)} - cost $${M2.wager.toFixed(2)} = pnl $${upLosePnl.toFixed(2)})`);
+  check('M2: what-if UP winner -> pnl -122.69 (final side lost, only sells recovered)', Math.abs(upLosePnl + 122.69) < 0.02);
 
   const allOk = checks.every(([, ok]) => ok);
   console.log(allOk ? '\n✅ MATH CHECK PASSED — engine P&L matches Polymarket payout + fee rules' : '\n❌ MATH CHECK FAILED');

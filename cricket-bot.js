@@ -7,9 +7,9 @@
  *
  * Strategy (both timeframes, independent, SEPARATE demo capital):
  *   - wait 1m (5m) / 3m (15m) after a window opens
- *   - fire the $10 entry on the LEADING side at ANY price (no come-back wait)
- *   - flip with $20 / $40 / $80 INSTANTLY when the opposite side hits 0.50
- *   - max 3 martingale flips; no flips after 280s (5m) / 870s (15m)
+ *   - fire the $50 entry on the LEADING side at ANY price (no come-back wait)
+ *   - ONE flip of $100 (2x the $50 entry) INSTANTLY when the opposite side hits 0.50
+ *   - no flips after 280s (5m) / 870s (15m)
  *   - flip FIRST, then sell the losing side ~2s later at the current bid
  *   - side above 0.90 at window end is declared the winner
  */
@@ -25,8 +25,8 @@ const CAPITAL_5 = process.env.CAPITAL_5 ? Number(process.env.CAPITAL_5) : undefi
 const CAPITAL_15 = process.env.CAPITAL_15 ? Number(process.env.CAPITAL_15) : undefined;
 const FLIP_CUTOFF_SECONDS_5 = Number(process.env.FLIP_CUTOFF_SECONDS_5 || 280);
 const FLIP_CUTOFF_SECONDS_15 = Number(process.env.FLIP_CUTOFF_SECONDS_15 || 870);
-const ENTRY_DOLLARS = Number(process.env.ENTRY_DOLLARS || 10);
-const MARTINGALE_AMOUNTS = (process.env.MARTINGALE_AMOUNTS || '20,40,80')
+const ENTRY_DOLLARS = Number(process.env.ENTRY_DOLLARS || 50);
+const MARTINGALE_AMOUNTS = (process.env.MARTINGALE_AMOUNTS || '100')
   .split(',').map(v => Number(String(v).trim())).filter(Number.isFinite);
 const WAIT_SECONDS_5 = Number(process.env.WAIT_SECONDS_5 || 60);
 const WAIT_SECONDS_15 = Number(process.env.WAIT_SECONDS_15 || 180);
@@ -51,7 +51,7 @@ async function init(privateKey, emit, slogFn) {
     flipCutoffSeconds5: FLIP_CUTOFF_SECONDS_5,
     flipCutoffSeconds15: FLIP_CUTOFF_SECONDS_15,
     entryDollars: ENTRY_DOLLARS,
-    martingaleAmounts: MARTINGALE_AMOUNTS.length ? MARTINGALE_AMOUNTS : [20, 40, 80],
+    martingaleAmounts: MARTINGALE_AMOUNTS.length ? MARTINGALE_AMOUNTS : [100],
     waitSeconds5: WAIT_SECONDS_5,
     waitSeconds15: WAIT_SECONDS_15,
     triggerSlip: TRIGGER_SLIP,

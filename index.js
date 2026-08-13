@@ -119,7 +119,7 @@ app.get('/', (_, res) => {
     <button id="resume-btn" class="resume">▶️ Resume Trading</button>
     <button id="live-btn" class="live-toggle">🔴 Switch to LIVE</button>
   </div>
-  <div class="toolbar-note">Strategy: wait 1m (5m) / 3m (15m) after open → fire the $10 entry on the LEADING side at ANY price → flip $20 / $40 / $80 INSTANTLY when the opposite side reaches 0.50 (max 3; no flips after 280s / 870s). Flip FIRST, then sell the losing side ~2s later at the bid. 5m and 15m run on SEPARATE demo capital. At window end, the side above 0.90 wins.</div>
+  <div class="toolbar-note">Strategy: wait 1m (5m) / 3m (15m) after open → fire the $50 entry on the LEADING side at ANY price → ONE $100 flip INSTANTLY when the opposite side reaches 0.50 (no flips after 280s / 870s). Flip FIRST, then sell the losing side ~2s later at the bid. 5m and 15m run on SEPARATE demo capital. At window end, the side above 0.90 wins.</div>
   <div id="start-banner" class="start-banner" style="display:none;"></div>
 
   <div class="shared-stats" id="shared-stats"></div>
@@ -236,7 +236,7 @@ app.get('/', (_, res) => {
         '<td>' + fmtClock(h.windowTs) + '</td>' +
         '<td>' + entry + '</td>' +
         '<td>' + (h.martingaleLevels || 0) + '</td>' +
-        '<td>' + (h.reachedLevel3 ? '✓' : '—') + '</td>' +
+        '<td>' + (h.reachedMaxMartingale ? '✓' : '—') + '</td>' +
         '<td>' + (h.winner || '?').toUpperCase() + '</td>' +
         '<td class="' + (h.win === true ? 'pnl-pos' : (h.win === false ? 'pnl-neg' : '')) + '">' + (h.win == null ? '—' : (h.win ? 'WIN' : 'LOSS')) + '</td>' +
         '<td>-$' + fmt2(h.wager || 0) + '</td>' +
@@ -260,10 +260,10 @@ app.get('/', (_, res) => {
           stat('Realized P&amp;L', sgn(s.realizedPnl), pClass(s.realizedPnl)) +
           stat('Wins / Losses', s.wins + ' / ' + s.losses) +
           stat('Max Drawdown', fmtPct((s.maxDrawdown || {}).pct) + ' · ' + sgn(-((s.maxDrawdown || {}).dollars || 0)), pClass(-((s.maxDrawdown || {}).dollars || 0))) +
-          stat('Reached 3rd MG ($80)', s.windowsReached3rdMartingale) +
+          stat('Reached Max MG ($100)', s.windowsReachedMaxMartingale) +
         '</div>' +
         currentWindowHtml(s) +
-        '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Window</th><th>Entry</th><th>Legs</th><th>3rdMG</th><th>Winner</th><th>W/L</th><th>Cost</th><th>Payout</th><th>Sells (rec.)</th><th>PnL</th></tr></thead>' +'<tbody>' + historyRowsHtml(s.history) + '</tbody></table></div>' +
+        '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Window</th><th>Entry</th><th>Legs</th><th>MaxMG</th><th>Winner</th><th>W/L</th><th>Cost</th><th>Payout</th><th>Sells (rec.)</th><th>PnL</th></tr></thead>' +'<tbody>' + historyRowsHtml(s.history) + '</tbody></table></div>' +
       '</div>';
   }
 
@@ -295,7 +295,7 @@ app.get('/', (_, res) => {
     const decided = (a ? a.windowsDecided : 0) + (b ? b.windowsDecided : 0);
     const wins = (a ? a.wins : 0) + (b ? b.wins : 0);
     const winRate = decided > 0 ? wins / decided : null;
-    const m3 = (a ? a.windowsReached3rdMartingale : 0) + (b ? b.windowsReached3rdMartingale : 0);
+    const m3 = (a ? a.windowsReachedMaxMartingale : 0) + (b ? b.windowsReachedMaxMartingale : 0);
     const dd = drawdownOf(combinedCurve());
     const fees = (a ? a.totalFeesPaid : 0) + (b ? b.totalFeesPaid : 0);
     return stat('Total Bankroll (5m + 15m)', '$' + fmt2(bankroll)) +
@@ -303,7 +303,7 @@ app.get('/', (_, res) => {
       stat('Total Realized P&amp;L', sgn(rpnl), pClass(rpnl)) +
       stat('Win Rate', fmtPct(winRate)) +
       stat('Windows Decided', decided) +
-      stat('Reached 3rd Martingale', m3) +
+      stat('Reached Max Martingale', m3) +
       stat('Max Drawdown (combined)', fmtPct(dd.pct) + ' · ' + sgn(dd.dollars), pClass(-(dd.dollars || 0))) +
       stat('Fees Paid', '$' + fmt2(fees));
   }

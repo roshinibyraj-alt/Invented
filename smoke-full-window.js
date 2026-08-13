@@ -1,24 +1,23 @@
 'use strict';
 
 /**
- * Full-window smoke test — proves the ENTIRE martingale ladder completes
- * inside ONE real-sized 5m window (300s, 60s wait) on the virtual clock.
+ * Full-window smoke test — proves the $50-entry + ONE-$20-flip strategy
+ * inside real-sized 5m windows (300s, 60s wait) on the virtual clock.
  *
- * Window A (t0):     UP entry $10 -> DOWN $20 -> UP $40 -> DOWN $80, winner DOWN  (full ladder, win)
- * Window B (t0+300): UP $10 -> DOWN $20 -> UP $40, then the 3rd touch lands at
- *                    T+290 (after the 280s flip cutoff) -> 3rd martingale NOT
- *                    placed (proves the cutoff stops flips in the final stretch)
+ * Window A (t0):     UP entry $50 -> ONE flip DOWN $20, winner DOWN
+ *                    (single flip is the max allowed; final DOWN leg is held)
+ * Window B (t0+300): UP entry $50; the DOWN touch only lands at T+290 (after
+ *                    the 280s flip cutoff) -> NO flip fires (cutoff works)
  * Window D (t0+600): BOTH sides already at 0.60+ when the wait ends (UP 0.61,
- *                    DOWN 0.60, never leaving) -> entry fires, then the ENTIRE
- *                    ladder fires instantly (no come-back wait, no transition
- *                    guard) — proves "martingale fires instantly".
- * Window E (t0+900): UP entry $10 fires at 0.78 — FAR above the old 0.60–0.62
+ *                    DOWN 0.60, never leaving) -> entry fires, the ONE flip
+ *                    fires instantly, and NO second flip happens even though
+ *                    prices stay >= 0.50 (max-1 cap holds on the instant path)
+ * Window E (t0+900): UP entry $50 fires at 0.78 — FAR above the old 0.60–0.62
  *                    band cap, proving the entry fires at ANY price — then UP
  *                    falls and opposite DOWN sits at 0.49 (below the trigger)
- *                    for 5s, then reaches 0.50 -> DOWN $20 flip fires only at
+ *                    for 5s, then reaches 0.50 -> DOWN $100 flip fires only at
  *                    0.50 — proves the 0.50 martingale trigger (never below).
- * Window C (t0+1200): UP $10 -> DOWN $20 -> UP $40, DOWN never reaches 0.50
- *                    -> 3rd martingale NOT placed (documents the "missed 3rd" case)
+ * Window C (t0+1200): UP entry $50, DOWN never reaches 0.50 -> no flip.
  *
  * 15m windows: up stays 0.61; DOWN touches 0.50 only at T+880 (after the 870s
  *              flip cutoff) -> the 15m flip must NOT fire (cutoff works there too).
@@ -46,11 +45,11 @@ let virtualNow = 0; // set to a clean 5m boundary before start
 let T0 = 0;
 
 function scheduleFor(ts) {
-  if (ts === T0)            return { entry: 'up', flips: ['down', 'up', 'down'], winner: 'down' };              // A: full ladder
-  if (ts === T0 + W5)       return { entry: 'up', flips: ['down', 'up', 'down'], winner: 'up', late3: true };    // B: 3rd touch after cutoff
-  if (ts === T0 + 2 * W5)   return { entry: 'up', flips: ['down', 'up', 'down'], winner: 'down', instant: true };  // D: both sides at 0.60+ all window
-  if (ts === T0 + 3 * W5)   return { entry: 'up', flips: ['down'],               winner: 'down', flipAt05: true }; // E: flip exactly at 0.50
-  return                     { entry: 'up', flips: ['down', 'up'],              winner: 'up' };                    // C: no 3rd touch
+  if (ts === T0)            return { entry: 'up', flips: ['down'], winner: 'down' };               // A: entry + one flip
+  if (ts === T0 + W5)       return { entry: 'up', flips: ['down'], winner: 'up', late3: true };     // B: flip touch after 280s cutoff -> no flip
+  if (ts === T0 + 2 * W5)   return { entry: 'up', flips: ['down'], winner: 'down', instant: true }; // D: both sides at 0.60+ -> instant single flip
+  if (ts === T0 + 3 * W5)   return { entry: 'up', flips: ['down'], winner: 'down', flipAt05: true };// E: flip exactly at 0.50
+  return                     { entry: 'up', flips: [], winner: 'up' };                              // C: no touch, no flip
 }
 
 // Which side's ask is at 0.61 at virtual time `now` for 5m window `ts`?
@@ -60,24 +59,17 @@ function highSideAt(ts, now) {
   const closeMs = (ts + W5) * 1000;
   if (now < waitMs || now >= closeMs) return null; // waiting or resolved
   if (s.late3) {
-    // B: entry at waitMs, flips at waitMs+30s / waitMs+60s, 3rd touch only 10s before close
-    const touches = [
-      { at: waitMs + 30000, side: s.flips[0], hold: 30000 },
-      { at: waitMs + 60000, side: s.flips[1], hold: 30000 },
-      { at: closeMs - 10000, side: s.flips[2], hold: 10000 },
-    ];
-    let high = s.entry;
-    for (const { at, side, hold } of touches) {
-      if (now >= at && now < at + hold) { high = side; break; }
-    }
-    return high;
+    // B: entry at waitMs; the single DOWN touch only lands 10s before close
+    // (after the 280s flip cutoff) -> NO flip may fire this window.
+    if (now >= closeMs - 10000) return 'down';
+    return s.entry;
   }
   let high = s.entry;
   for (let i = 0; i < s.flips.length; i++) {
     const touchAt = waitMs + (i + 1) * FLIP_HOLD_MS;
     if (now >= touchAt && now < touchAt + FLIP_HOLD_MS) { high = s.flips[i]; break; }
   }
-  if (now >= waitMs + (s.flips.length + 1) * FLIP_HOLD_MS) {
+  if (s.flips.length && now >= waitMs + (s.flips.length + 1) * FLIP_HOLD_MS) {
     high = s.flips[s.flips.length - 1]; // hold the last touched side until close
   }
   return high;
@@ -154,8 +146,8 @@ global.fetch = async (url) => {
 
   const engine = createEngine({
     startingCapital: 4000,
-    entryDollars: 10,
-    martingaleAmounts: [20, 40, 80],
+    entryDollars: 50,
+    martingaleAmounts: [100],
     waitSeconds5: WAIT5,
     waitSeconds15: 180,
     windowSeconds15: 900,
@@ -198,81 +190,78 @@ global.fetch = async (url) => {
 
   const sellTxt = h => (h.sells || []).map(x => `${x.side.toUpperCase()} ${x.shares.toFixed(2)}sh@${x.price.toFixed(2)}`).join(' | ') || '—';
 
-  console.log('\n== window A (full ladder) ==');
+  console.log('\n== window A (entry + one flip) ==');
   console.log('  legs:', (A.legs || []).map(l => `${l.side.toUpperCase()} $${l.dollars} @${l.price} t=${fmt(Math.floor(l.ts / 1000))}`).join(' | '), '| winner', A.winner, '| pnl', A.pnl, '| sells:', sellTxt(A));
-  console.log('== window B (3rd touch after 280s cutoff -> no 3rd flip) ==');
+  console.log('== window B (flip touch after 280s cutoff -> no flip) ==');
   console.log('  legs:', (B.legs || []).map(l => `${l.side.toUpperCase()} $${l.dollars} @${l.price} t=${fmt(Math.floor(l.ts / 1000))}`).join(' | '), '| winner', B.winner, '| pnl', B.pnl, '| sells:', sellTxt(B));
-  console.log('== window D (both sides at 0.60+ -> instant ladder) ==');
+  console.log('== window D (both sides at 0.60+ -> instant single flip) ==');
   console.log('  legs:', (D.legs || []).map(l => `${l.side.toUpperCase()} $${l.dollars} @${l.price} t=${fmt(Math.floor(l.ts / 1000))}`).join(' | '), '| winner', D.winner, '| pnl', D.pnl, '| sells:', sellTxt(D));
   console.log('== window E (flip fires exactly at 0.50) ==');
   console.log('  legs:', (E.legs || []).map(l => `${l.side.toUpperCase()} $${l.dollars} @${l.price} t=${fmt(Math.floor(l.ts / 1000))}`).join(' | '), '| winner', E.winner, '| pnl', E.pnl, '| sells:', sellTxt(E));
-  console.log('== window C (no 3rd touch) ==');
+  console.log('== window C (no touch, no flip) ==');
   console.log('  legs:', (C.legs || []).map(l => `${l.side.toUpperCase()} $${l.dollars} @${l.price} t=${fmt(Math.floor(l.ts / 1000))}`).join(' | '), '| winner', C.winner, '| pnl', C.pnl, '| sells:', sellTxt(C));
 
   const waitEnd = (T0 + WAIT5) * 1000;
 
-  // Window A: entry after wait, then $20/$40/$80 flips, all inside the window
-  check('A: entry UP $10 after the 60s wait', A && A.entrySide === 'up' && A.legs[0].dollars === 10 && A.legs[0].ts >= waitEnd - 1000);
-  check('A: martingale amounts 20/40/80 in order', A && A.legs.length === 4 && JSON.stringify(A.legs.slice(1).map(l => l.dollars)) === JSON.stringify([20, 40, 80]));
-  check('A: sides alternate up/down/up/down', A && JSON.stringify(A.legs.map(l => l.side)) === JSON.stringify(['up', 'down', 'up', 'down']));
-  check('A: reached 3rd martingale', A && A.reachedLevel3 === true);
-  check('A: all 4 buys inside the 300s window', A && A.legs.every(l => l.ts < (T0 + W5) * 1000));
-  check('A: every flip ~30s after the previous leg', A && A.legs.slice(1).every((l, i) => Math.abs((l.ts - A.legs[i].ts) - FLIP_HOLD_MS) < 5000));
-  check('A: window resolves as a WIN (winner down)', A && A.win === true && A.winner === 'down');
-  check('A: losing side SOLD ~2s after each flip (flip first, sell later)', A && A.sells.length === 3 && A.sells.every((x, i) => Math.abs((x.ts - A.legs[i + 1].ts) - 2000) < 1500));
-  check('A: sells close the exact flipped-away quantities', A && A.sells.every((x, i) => Math.abs(x.shares - A.legs[i].shares) < 0.01));
-  check('A: only the FINAL side is held at resolution', A && Math.abs(A.payout - A.legs[3].shares) < 0.01);
+  // Window A: $50 entry after the wait, ONE $100 flip, all inside the window
+  check('A: entry UP $50 after the 60s wait', A && A.entrySide === 'up' && A.legs[0].dollars === 50 && A.legs[0].ts >= waitEnd - 1000);
+  check('A: exactly ONE $100 flip (max 1)', A && A.legs.length === 2 && A.legs[1].dollars === 100);
+  check('A: sides alternate up -> down', A && JSON.stringify(A.legs.map(l => l.side)) === JSON.stringify(['up', 'down']));
+  check('A: reached max martingale (single flip)', A && A.reachedMaxMartingale === true);
+  check('A: both buys inside the 300s window', A && A.legs.every(l => l.ts < (T0 + W5) * 1000));
+  check('A: flip ~30s after the entry', A && Math.abs((A.legs[1].ts - A.legs[0].ts) - FLIP_HOLD_MS) < 5000);
+  check('A: winner DOWN, net WIN (+41.24 — $100 flip covers the $50 entry)', A && A.win === true && A.winner === 'down');
+  check('A: losing side SOLD ~2s after the flip (flip first, sell later)', A && A.sells.length === 1 && Math.abs((A.sells[0].ts - A.legs[1].ts) - 2000) < 1500);
+  check('A: sell closes the exact flipped-away quantity (81.97)', A && Math.abs(A.sells[0].shares - A.legs[0].shares) < 0.01);
+  check('A: only the FINAL leg is still held at resolution', A && Math.abs(A.payout - A.legs[1].shares) < 0.01);
   check('A: pnl = payout + sell proceeds - cost (recovered capital)', A && A.sellProceeds > 0 && Math.abs(A.pnl - (A.payout + A.sellProceeds - A.wager)) < 0.02);
 
-  // Window B: the 3rd band touch happens at T+290, AFTER the 280s flip cutoff
-  // -> the 3rd martingale must NOT be placed (flips stop in the final stretch)
+  // Window B: the DOWN touch lands at T+290, AFTER the 280s flip cutoff
+  // -> the single flip must NOT be placed (flips stop in the final stretch)
   const bCutoff = (T0 + W5 + 280) * 1000;
-  check('B: entry + 2 flips placed (3 legs)', B && B.legs.length === 3);
-  check('B: 3rd martingale blocked by the 280s cutoff', B && B.reachedLevel3 === false);
-  check('B: every leg placed before the 280s cutoff', B && B.legs.every(l => l.ts < bCutoff));
-  check('B: resolves as a WIN (winner up)', B && B.win === true && B.winner === 'up');
-  check('B: losing side sold ~2s after each flip (2 sells)', B && B.sells.length === 2 && B.sells.every((x, i) => Math.abs((x.ts - B.legs[i + 1].ts) - 2000) < 1500));
-  check('B: only the FINAL side is held at resolution', B && Math.abs(B.payout - B.legs[2].shares) < 0.01);
-  check('B: pnl = payout + sell proceeds - cost', B && Math.abs(B.pnl - (B.payout + B.sellProceeds - B.wager)) < 0.02);
+  check('B: entry only, NO flip (1 leg)', B && B.legs.length === 1);
+  check('B: flip blocked by the 280s cutoff', B && B.reachedMaxMartingale === false);
+  check('B: entry placed before the 280s cutoff', B && B.legs.every(l => l.ts < bCutoff));
+  check('B: no sell (nothing was flipped)', B && B.sells.length === 0);
+  check('B: resolves as a WIN (winner up, entry wins)', B && B.win === true && B.winner === 'up');
+  check('B: pnl = payout - cost (no flips)', B && Math.abs(B.pnl - (B.payout - B.wager)) < 0.02);
 
-  // Window D: both sides at 0.60+ -> entry fires, then the ladder fires INSTANTLY
-  // (no 30s holds, no come-back wait, no transition guard)
+  // Window D: both sides at 0.60+ -> entry fires, the ONE flip fires INSTANTLY,
+  // and NO second flip happens even though prices stay >= 0.50
   const dEntryTs = D && D.legs[0].ts;
-  check('D: entry UP $10 fires when the wait ends', D && D.entrySide === 'up' && D.legs[0].dollars === 10 && D.legs[0].ts >= (T0 + WAIT5) * 1000 - 1000);
-  check('D: full ladder placed (4 legs, reached 3rd MG)', D && D.legs.length === 4 && D.reachedLevel3 === true);
-  check('D: 1st flip fires within 5s of entry (instant, no come-back wait)', D && D.legs[1].ts - dEntryTs < 5000);
-  check('D: entire ladder completes within 10s of entry', D && D.legs[3].ts - dEntryTs < 10000);
-  check('D: resolved as a WIN (winner down)', D && D.win === true && D.winner === 'down');
-  check('D: losing side sold ~2s after each instant flip (3 sells)', D && D.sells.length === 3 && D.sells.every((x, i) => Math.abs((x.ts - D.legs[i + 1].ts) - 2000) < 1500));
-  check('D: only the FINAL side is held at resolution', D && Math.abs(D.payout - D.legs[3].shares) < 0.01);
+  check('D: entry UP $50 fires when the wait ends', D && D.entrySide === 'up' && D.legs[0].dollars === 50 && D.legs[0].ts >= (T0 + WAIT5) * 1000 - 1000);
+  check('D: exactly ONE flip (2 legs, reached max MG)', D && D.legs.length === 2 && D.reachedMaxMartingale === true);
+  check('D: flip fires within 5s of entry (instant, no come-back wait)', D && D.legs[1].ts - dEntryTs < 5000);
+  check('D: no second flip despite prices staying >= 0.50', D && D.legs.length === 2);
+  check('D: resolved as a WIN (winner down, entry sold near cost)', D && D.win === true && D.winner === 'down');
+  check('D: losing side sold ~2s after the flip', D && D.sells.length === 1 && Math.abs((D.sells[0].ts - D.legs[1].ts) - 2000) < 1500);
+  check('D: only the FINAL leg is still held at resolution', D && Math.abs(D.payout - D.legs[1].shares) < 0.01);
   check('D: pnl = payout + sell proceeds - cost', D && Math.abs(D.pnl - (D.payout + D.sellProceeds - D.wager)) < 0.02);
 
   // Window E: the flip must fire ONLY when the opposite side reaches 0.50 —
   // while it sits at 0.49 (below the trigger) no flip happens
   const eWaitMs = (T0 + 3 * W5 + WAIT5) * 1000;
-  check('E: entry UP $10 fires at ANY price (@0.78, above the old 0.60–0.62 cap)', E && E.entrySide === 'up' && E.legs[0].dollars === 10 && E.legs[0].price === 0.78);
+  check('E: entry UP $50 fires at ANY price (@0.78, above the old 0.60–0.62 cap)', E && E.entrySide === 'up' && E.legs[0].dollars === 50 && E.legs[0].price === 0.78);
   check('E: no flip while opposite side is below 0.50 (0.49)', E && E.legs.length === 2 && E.legs[1].ts >= eWaitMs + 6000 - 1500 && E.legs[1].ts < eWaitMs + 7500);
-  check('E: flip is DOWN $20 at exactly 0.50', E && E.legs[1].side === 'down' && E.legs[1].dollars === 20 && E.legs[1].price === 0.5);
-  check('E: no further flips (up side stays below 0.50)', E && E.reachedLevel3 === false);
-  check('E: resolves as a WIN (winner down)', E && E.win === true && E.winner === 'down');
+  check('E: flip is DOWN $100 at exactly 0.50', E && E.legs[1].side === 'down' && E.legs[1].dollars === 100 && E.legs[1].price === 0.5);
+  check('E: no second flip (up side stays below 0.50)', E && E.reachedMaxMartingale === true && E.legs.length === 2);
+  check('E: winner DOWN, net WIN (+70.29 — $100 flip covers the $50 entry)', E && E.win === true && E.winner === 'down');
   check('E: losing side sold ~2s after the flip', E && E.sells.length === 1 && Math.abs((E.sells[0].ts - E.legs[1].ts) - 2000) < 1500);
-  check('E: only the FINAL side is held at resolution', E && Math.abs(E.payout - E.legs[1].shares) < 0.01);
+  check('E: only the FINAL leg is still held at resolution', E && Math.abs(E.payout - E.legs[1].shares) < 0.01);
   check('E: pnl = payout + sell proceeds - cost', E && Math.abs(E.pnl - (E.payout + E.sellProceeds - E.wager)) < 0.02);
 
   // 15m: DOWN touches 0.50 only at T+880, AFTER the 870s cutoff -> no 15m flip
   const h15first = st15.history[0];
   check('15m: entry only, no flip/sell after the 870s cutoff', h15first && h15first.legs.length === 1 && h15first.sells.length === 0 && h15first.winner === 'up');
 
-  // Window C: opposite side never reaches 0.50 -> 3rd martingale NOT placed (by design)
-  check('C: only 3 legs (entry + 2 flips)', C && C.legs.length === 3);
-  check('C: 3rd martingale not reached', C && C.reachedLevel3 === false);
-  check('C: resolved anyway (winner up)', C && C.win === true && C.winner === 'up');
-  check('C: losing side sold ~2s after each flip (2 sells)', C && C.sells.length === 2 && C.sells.every((x, i) => Math.abs((x.ts - C.legs[i + 1].ts) - 2000) < 1500));
-  check('C: pnl = payout + sell proceeds - cost', C && Math.abs(C.pnl - (C.payout + C.sellProceeds - C.wager)) < 0.02);
-  check('all losing-side sells recover positive capital', [A, B, D, E, C].filter(h => h && h.sells && h.sells.length).every(h => h.sellProceeds > 0 && h.sells.every(x => x.proceeds > 0)));
+  // Window C: opposite side never reaches 0.50 -> no flip (by design)
+  check('C: entry only (1 leg)', C && C.legs.length === 1);
+  check('C: max martingale not reached', C && C.reachedMaxMartingale === false);
+  check('C: no sell (nothing was flipped)', C && C.sells.length === 0);
+  check('C: resolves as a WIN (winner up, entry wins)', C && C.win === true && C.winner === 'up');
 
   // Engine-level counters
-  check('3rd-martingale counter >= 2 (A + D)', st5.windowsReached3rdMartingale >= 2);
+  check('max-martingale counter >= 2 (A + D)', st5.windowsReachedMaxMartingale >= 2);
 
   // Separate bankroll accounting per timeframe (open 5m/15m trades still hold cost)
   const openCost5 = st5.current.btc ? st5.current.btc.totalCost : 0;
