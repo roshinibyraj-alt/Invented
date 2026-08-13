@@ -5,11 +5,12 @@
  * trades both 5m and 15m Up/Down windows. Exposes the API that index.js
  * (the dashboard) talks to.
  *
- * Strategy (both timeframes, independent):
+ * Strategy (both timeframes, independent, SEPARATE demo capital):
  *   - wait 1m (5m) / 3m (15m) after a window opens
- *   - buy the 0.60+ side for $10 worth of shares
- *   - flip with $20 / $40 / $80 when the opposite side hits 0.60
- *   - max 3 martingale flips per window
+ *   - buy the side that comes back to 0.60-0.62 for $10 worth of shares
+ *   - flip with $20 / $40 / $80 INSTANTLY when the opposite side hits 0.50
+ *   - max 3 martingale flips; no flips after 280s (5m) / 870s (15m)
+ *   - side above 0.90 at window end is declared the winner
  */
 
 const path = require('path');
@@ -19,6 +20,10 @@ const { createEngine } = require('./engine-factory');
 const DRY_RUN = (process.env.HEDGE_DRY_RUN || process.env.SPORTS_DRY_RUN || process.env.DRY_RUN || 'true').toLowerCase() === 'true';
 
 const CAPITAL = Number(process.env.CAPITAL || process.env.STARTING_CAPITAL || 4000);
+const CAPITAL_5 = process.env.CAPITAL_5 ? Number(process.env.CAPITAL_5) : undefined;
+const CAPITAL_15 = process.env.CAPITAL_15 ? Number(process.env.CAPITAL_15) : undefined;
+const FLIP_CUTOFF_SECONDS_5 = Number(process.env.FLIP_CUTOFF_SECONDS_5 || 280);
+const FLIP_CUTOFF_SECONDS_15 = Number(process.env.FLIP_CUTOFF_SECONDS_15 || 870);
 const ENTRY_DOLLARS = Number(process.env.ENTRY_DOLLARS || 10);
 const MARTINGALE_AMOUNTS = (process.env.MARTINGALE_AMOUNTS || '20,40,80')
   .split(',').map(v => Number(String(v).trim())).filter(Number.isFinite);
@@ -39,6 +44,10 @@ async function init(privateKey, emit, slogFn) {
   engine = createEngine({
     label: 'BTC-0.60-MART',
     startingCapital: CAPITAL,
+    startingCapital5: CAPITAL_5,
+    startingCapital15: CAPITAL_15,
+    flipCutoffSeconds5: FLIP_CUTOFF_SECONDS_5,
+    flipCutoffSeconds15: FLIP_CUTOFF_SECONDS_15,
     entryDollars: ENTRY_DOLLARS,
     martingaleAmounts: MARTINGALE_AMOUNTS.length ? MARTINGALE_AMOUNTS : [20, 40, 80],
     waitSeconds5: WAIT_SECONDS_5,

@@ -119,7 +119,7 @@ app.get('/', (_, res) => {
     <button id="resume-btn" class="resume">▶️ Resume Trading</button>
     <button id="live-btn" class="live-toggle">🔴 Switch to LIVE</button>
   </div>
-  <div class="toolbar-note">Strategy: wait 1m (5m) / 3m (15m) after open → buy the side whose price comes back to the 0.60–0.62 band ($10) → flip $20 / $40 / $80 INSTANTLY when the opposite side reaches 0.60 (max 3; only the initial entry waits for the price to come back). All shares held to window resolution.</div>
+  <div class="toolbar-note">Strategy: wait 1m (5m) / 3m (15m) after open → buy the side whose price comes back to the 0.60–0.62 band ($10) → flip $20 / $40 / $80 INSTANTLY when the opposite side reaches 0.50 (max 3; no flips after 280s / 870s). 5m and 15m run on SEPARATE demo capital. At window end, the side above 0.90 wins. All shares held to resolution.</div>
   <div id="start-banner" class="start-banner" style="display:none;"></div>
 
   <div class="shared-stats" id="shared-stats"></div>
@@ -250,10 +250,12 @@ app.get('/', (_, res) => {
       '</div>' +
       '<div class="panel-body">' +
         '<div class="stats-row">' +
+          stat('Bankroll', '$' + fmt2(s.bankroll)) +
+          stat('Equity', '$' + fmt2(s.equity), pClass(s.equity - (s.startingCapital || 0))) +
           stat('Win Rate', fmtPct(s.winRate)) +
           stat('Realized P&amp;L', sgn(s.realizedPnl), pClass(s.realizedPnl)) +
           stat('Wins / Losses', s.wins + ' / ' + s.losses) +
-          stat('Windows Decided', s.windowsDecided) +
+          stat('Max Drawdown', fmtPct((s.maxDrawdown || {}).pct) + ' · ' + sgn(-((s.maxDrawdown || {}).dollars || 0)), pClass(-((s.maxDrawdown || {}).dollars || 0))) +
           stat('Reached 3rd MG ($80)', s.windowsReached3rdMartingale) +
         '</div>' +
         currentWindowHtml(s) +
@@ -261,24 +263,45 @@ app.get('/', (_, res) => {
       '</div>';
   }
 
+  function drawdownOf(curve) {
+    let peak = -Infinity; let maxPct = 0; let maxDollars = 0;
+    for (const p of curve) {
+      if (p.equity > peak) peak = p.equity;
+      const dd = peak > 0 ? (peak - p.equity) / peak : 0;
+      if (dd > maxPct) { maxPct = dd; maxDollars = peak - p.equity; }
+    }
+    return { pct: maxPct, dollars: maxDollars };
+  }
+  function combinedCurve() {
+    const a = latest.m15; const b = latest.m5;
+    const c15 = a && a.equityCurve; const c5 = b && b.equityCurve;
+    if (!c5 || !c15) return (c5 || c15 || []);
+    const n = Math.min(c5.length, c15.length);
+    const out = [];
+    for (let i = 0; i < n; i++) out.push({ t: c5[i].t, equity: Math.round((c5[i].equity + c15[i].equity) * 100) / 100 });
+    return out;
+  }
   function sharedStatsHtml() {
     const a = latest.m15;
     const b = latest.m5;
-    const s = a || b;
-    if (!s) return '';
+    if (!a && !b) return '';
+    const bankroll = (a ? a.bankroll : 0) + (b ? b.bankroll : 0);
+    const equity = (a ? a.equity : 0) + (b ? b.equity : 0);
+    const rpnl = (a ? a.realizedPnlTotal : 0) + (b ? b.realizedPnlTotal : 0);
     const decided = (a ? a.windowsDecided : 0) + (b ? b.windowsDecided : 0);
     const wins = (a ? a.wins : 0) + (b ? b.wins : 0);
     const winRate = decided > 0 ? wins / decided : null;
     const m3 = (a ? a.windowsReached3rdMartingale : 0) + (b ? b.windowsReached3rdMartingale : 0);
-    const dd = s.maxDrawdown || {};
-    return stat('Bankroll (shared)', '$' + fmt2(s.bankroll)) +
-      stat('Equity', '$' + fmt2(s.equity)) +
-      stat('Total Realized P&amp;L', sgn(s.realizedPnlTotal), pClass(s.realizedPnlTotal)) +
+    const dd = drawdownOf(combinedCurve());
+    const fees = (a ? a.totalFeesPaid : 0) + (b ? b.totalFeesPaid : 0);
+    return stat('Total Bankroll (5m + 15m)', '$' + fmt2(bankroll)) +
+      stat('Total Equity', '$' + fmt2(equity)) +
+      stat('Total Realized P&amp;L', sgn(rpnl), pClass(rpnl)) +
       stat('Win Rate', fmtPct(winRate)) +
       stat('Windows Decided', decided) +
       stat('Reached 3rd Martingale', m3) +
-      stat('Max Drawdown', fmtPct(dd.pct) + ' · ' + sgn(dd.dollars), pClass(-(dd.dollars || 0))) +
-      stat('Fees Paid', '$' + fmt2(s.totalFeesPaid));
+      stat('Max Drawdown (combined)', fmtPct(dd.pct) + ' · ' + sgn(dd.dollars), pClass(-(dd.dollars || 0))) +
+      stat('Fees Paid', '$' + fmt2(fees));
   }
 
   function drawEquityChart() {
@@ -291,78 +314,70 @@ app.get('/', (_, res) => {
     canvas.height = H * dpr;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, W, H);
-    const s = latest.m15 || latest.m5;
-    if (!s || !s.equityCurve || s.equityCurve.length < 2) {
+    const m5 = latest.m5;
+    const m15 = latest.m15;
+    const series = [
+      { label: '5m', st: m5, color: '#0099cc', fill: 'rgba(0,153,204,0.08)' },
+      { label: '15m', st: m15, color: '#ff9f43', fill: 'rgba(255,159,67,0.10)' },
+    ].filter(x => x.st && x.st.equityCurve && x.st.equityCurve.length >= 2);
+    if (!series.length) {
       ctx.fillStyle = '#7a8fa8';
       ctx.font = '10px monospace';
       ctx.fillText('Collecting equity data…', 14, 24);
       $('chart-meta').textContent = '';
       return;
     }
-    const curve = s.equityCurve;
-    const vals = curve.map(p => p.equity);
-    let min = Math.min.apply(null, vals);
-    let max = Math.max.apply(null, vals);
-    const start = s.startingCapital;
-    min = Math.min(min, start);
-    max = Math.max(max, start);
+    let min = Infinity; let max = -Infinity;
+    for (const x of series) {
+      for (const p of x.st.equityCurve) { if (p.equity < min) min = p.equity; if (p.equity > max) max = p.equity; }
+      min = Math.min(min, x.st.startingCapital); max = Math.max(max, x.st.startingCapital);
+    }
     const pad = 10;
-    const x = i => pad + (i / (curve.length - 1)) * (W - pad * 2);
-    const y = v => H - pad - ((v - min) / ((max - min) || 1)) * (H - pad * 2);
+    const xAt = (i, len) => pad + (i / (len - 1)) * (W - pad * 2);
+    const yAt = v => H - pad - ((v - min) / ((max - min) || 1)) * (H - pad * 2);
     ctx.strokeStyle = '#e3e8f0';
     ctx.lineWidth = 1;
     for (let g = 0; g <= 4; g++) {
       const gy = pad + (g / 4) * (H - pad * 2);
       ctx.beginPath(); ctx.moveTo(pad, gy); ctx.lineTo(W - pad, gy); ctx.stroke();
     }
-    ctx.strokeStyle = '#7a8fa8';
-    ctx.setLineDash([4, 3]);
-    ctx.beginPath();
-    const sy = y(start);
-    ctx.moveTo(pad, sy); ctx.lineTo(W - pad, sy);
-    ctx.stroke();
-    ctx.setLineDash([]);
-    ctx.beginPath();
-    ctx.moveTo(x(0), y(vals[0]));
-    for (let i = 1; i < curve.length; i++) ctx.lineTo(x(i), y(vals[i]));
-    ctx.strokeStyle = '#0099cc';
-    ctx.lineWidth = 2;
-    ctx.stroke();
-    ctx.lineTo(x(curve.length - 1), H - pad);
-    ctx.lineTo(x(0), H - pad);
-    ctx.closePath();
-    ctx.fillStyle = 'rgba(0,153,204,0.08)';
-    ctx.fill();
-    let peakIdx = 0;
-    let ddIdx = -1;
-    let ddPeakIdx = 0;
-    let maxDd = 0;
-    for (let i = 0; i < curve.length; i++) {
-      if (vals[i] > vals[peakIdx]) peakIdx = i;
-      const dd = vals[peakIdx] > 0 ? (vals[peakIdx] - vals[i]) / vals[peakIdx] : 0;
-      if (dd > maxDd) { maxDd = dd; ddIdx = i; ddPeakIdx = peakIdx; }
-    }
-    if (ddIdx > ddPeakIdx) {
-      ctx.fillStyle = 'rgba(232,48,74,0.10)';
+    const metas = [];
+    for (const x of series) {
+      const curve = x.st.equityCurve;
+      const vals = curve.map(p => p.equity);
+      // start line
+      ctx.strokeStyle = x.color;
+      ctx.globalAlpha = 0.5;
+      ctx.setLineDash([4, 3]);
       ctx.beginPath();
-      ctx.moveTo(x(ddPeakIdx), y(vals[ddPeakIdx]));
-      for (let i = ddPeakIdx + 1; i <= ddIdx; i++) ctx.lineTo(x(i), y(vals[ddPeakIdx]));
-      for (let i = ddIdx; i >= ddPeakIdx; i--) ctx.lineTo(x(i), y(vals[i]));
+      const sy = yAt(x.st.startingCapital);
+      ctx.moveTo(pad, sy); ctx.lineTo(W - pad, sy);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.globalAlpha = 1;
+      // line + fill
+      ctx.beginPath();
+      ctx.moveTo(xAt(0, curve.length), yAt(vals[0]));
+      for (let i = 1; i < curve.length; i++) ctx.lineTo(xAt(i, curve.length), yAt(vals[i]));
+      ctx.strokeStyle = x.color;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.lineTo(xAt(curve.length - 1, curve.length), H - pad);
+      ctx.lineTo(xAt(0, curve.length), H - pad);
       ctx.closePath();
+      ctx.fillStyle = x.fill;
       ctx.fill();
-      ctx.fillStyle = '#e8304a';
-      ctx.beginPath(); ctx.arc(x(ddIdx), y(vals[ddIdx]), 3, 0, Math.PI * 2); ctx.fill();
+      // end marker
+      ctx.fillStyle = x.color;
+      ctx.beginPath(); ctx.arc(xAt(curve.length - 1, curve.length), yAt(vals[curve.length - 1]), 3.5, 0, Math.PI * 2); ctx.fill();
+      const dd = x.st.maxDrawdown || {};
+      metas.push(x.label + ': $' + fmt2(x.st.startingCapital) + ' → $' + fmt2(vals[curve.length - 1]) + ' · DD ' + fmtPct(dd.pct) + ' (' + sgn(-(dd.dollars || 0)) + ')');
     }
-    ctx.fillStyle = '#00a854';
-    ctx.beginPath(); ctx.arc(x(peakIdx), y(vals[peakIdx]), 3, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = '#0099cc';
-    ctx.beginPath(); ctx.arc(x(curve.length - 1), y(vals[curve.length - 1]), 3.5, 0, Math.PI * 2); ctx.fill();
     ctx.font = '9px monospace';
     ctx.fillStyle = '#7a8fa8';
     ctx.fillText('$' + fmt2(max), 12, 14);
     ctx.fillText('$' + fmt2(min), 12, H - 4);
-    const meta = 'Peak $' + fmt2(vals[peakIdx]) + ' · Current $' + fmt2(vals[curve.length - 1]) + ' · Max DD $' + fmt2(s.maxDrawdown ? s.maxDrawdown.dollars : 0) + ' (' + fmtPct(s.maxDrawdown ? s.maxDrawdown.pct : 0) + ')';
-    $('chart-meta').textContent = meta;
+    $('chart-meta').textContent = metas.join('   |   ');
   }
 
   function render() {
@@ -430,7 +445,7 @@ const slog = (line) => { console.log(line); io.emit('log', line); };
 const PK = process.env.PRIVATE_KEY;
 if (!PK) { console.error('❌ PRIVATE_KEY env var missing'); process.exit(1); }
 
-console.log('⛏ BTC 0.60 Martingale Bot — 5m & 15m windows, shared bankroll');
+console.log('⛏ BTC 0.60 Martingale Bot — 5m & 15m windows, separate demo capital per timeframe');
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`🌐 Dashboard: http://0.0.0.0:${PORT}`);

@@ -5,14 +5,21 @@
  * inside ONE real-sized 5m window (300s, 60s wait) on the virtual clock.
  *
  * Window A (t0):     UP entry $10 -> DOWN $20 -> UP $40 -> DOWN $80, winner DOWN  (full ladder, win)
- * Window B (t0+300): UP $10 -> DOWN $20 -> UP $40 -> DOWN $80 with the 3rd band
- *                    touch only 10s before close -> still completes (edge timing)
+ * Window B (t0+300): UP $10 -> DOWN $20 -> UP $40, then the 3rd touch lands at
+ *                    T+290 (after the 280s flip cutoff) -> 3rd martingale NOT
+ *                    placed (proves the cutoff stops flips in the final stretch)
  * Window D (t0+600): BOTH sides already at 0.60+ when the wait ends (UP 0.61,
  *                    DOWN 0.60, never leaving) -> entry fires, then the ENTIRE
  *                    ladder fires instantly (no come-back wait, no transition
  *                    guard) — proves "martingale fires instantly".
- * Window C (t0+900): UP $10 -> DOWN $20 -> UP $40, DOWN never reaches 0.60
+ * Window E (t0+900): UP entry $10 at 0.61, opposite DOWN sits at 0.49 (below the
+ *                    trigger) for 5s, then reaches 0.50 -> DOWN $20 flip fires only
+ *                    at 0.50 — proves the 0.50 martingale trigger (never below).
+ * Window C (t0+1200): UP $10 -> DOWN $20 -> UP $40, DOWN never reaches 0.50
  *                    -> 3rd martingale NOT placed (documents the "missed 3rd" case)
+ *
+ * 15m windows: up stays 0.61; DOWN touches 0.50 only at T+880 (after the 870s
+ *              flip cutoff) -> the 15m flip must NOT fire (cutoff works there too).
  *
  * Band touches are 30s holds at ask 0.61 (inside the 0.60-0.62 band);
  * non-touched sides sit at 0.40, everything is 0.50 during the wait.
@@ -33,9 +40,10 @@ let T0 = 0;
 
 function scheduleFor(ts) {
   if (ts === T0)            return { entry: 'up', flips: ['down', 'up', 'down'], winner: 'down' };              // A: full ladder
-  if (ts === T0 + W5)       return { entry: 'up', flips: ['down', 'up', 'down'], winner: 'down', late3: true };  // B: 3rd touch at close
-  if (ts === T0 + 2 * W5)   return { entry: 'up', flips: ['down', 'up', 'down'], winner: 'down', instant: true }; // D: both sides at 0.60+ all window
-  return                     { entry: 'up', flips: ['down', 'up'],              winner: 'up' };                   // C: no 3rd touch
+  if (ts === T0 + W5)       return { entry: 'up', flips: ['down', 'up', 'down'], winner: 'up', late3: true };    // B: 3rd touch after cutoff
+  if (ts === T0 + 2 * W5)   return { entry: 'up', flips: ['down', 'up', 'down'], winner: 'down', instant: true };  // D: both sides at 0.60+ all window
+  if (ts === T0 + 3 * W5)   return { entry: 'up', flips: ['down'],               winner: 'down', flipAt05: true }; // E: flip exactly at 0.50
+  return                     { entry: 'up', flips: ['down', 'up'],              winner: 'up' };                    // C: no 3rd touch
 }
 
 // Which side's ask is at 0.61 at virtual time `now` for 5m window `ts`?
@@ -109,12 +117,20 @@ global.fetch = async (url) => {
         price = side === w ? 1.0 : 0.01;
       } else if (scheduleFor(ts).instant) {
         price = side === 'up' ? 0.61 : 0.60; // D: both sides already at 0.60+ when the wait ends
+      } else if (scheduleFor(ts).flipAt05) {
+        // E: up is 0.61 only for the entry, then falls; DOWN sits at 0.49 (below
+        // the 0.50 trigger) for 5s and only then reaches 0.50 -> flip must fire
+        const eWaitMs = (ts + WAIT5) * 1000;
+        if (virtualNow < eWaitMs + 1000) price = side === 'up' ? 0.61 : 0.40;
+        else if (virtualNow < eWaitMs + 6000) price = side === 'up' ? 0.40 : 0.49;
+        else price = side === 'up' ? 0.40 : 0.50;
       } else {
         const high = highSideAt(ts, virtualNow);
         if (high) price = side === high ? 0.61 : 0.40;
       }
     } else if (virtualNow >= (ts + 180) * 1000 && virtualNow < (ts + 900) * 1000) {
-      price = side === 'up' ? 0.61 : 0.40; // 15m benign: never flips, winner up
+      // up stays 0.61; DOWN touches 0.50 only after the 870s cutoff -> no flip
+      price = side === 'up' ? 0.61 : (virtualNow >= (ts + 880) * 1000 ? 0.50 : 0.40);
     }
     return new Response(JSON.stringify({ price: String(price) }), { status: 200 });
   }
@@ -151,7 +167,7 @@ global.fetch = async (url) => {
   console.log(`5m start window: ${new Date(T0 * 1000).toISOString()}`);
 
   // Drive virtual time through 3 full windows + settle margin.
-  const endAt = (T0 + 4 * W5 + 30) * 1000;
+  const endAt = (T0 + 5 * W5 + 30) * 1000;
   while (virtualNow < endAt) {
     virtualNow += 500;
     await sleep(1);
@@ -159,6 +175,7 @@ global.fetch = async (url) => {
   await sleep(50);
 
   const st5 = states['hedgeState:BTC-5m'];
+  const st15 = states['hedgeState:BTC-15m'];
   const byTs = new Map((st5.history || []).map(h => [h.windowTs, h]));
   const fmt = ts => new Date(ts * 1000).toISOString().slice(11, 19);
 
@@ -168,14 +185,17 @@ global.fetch = async (url) => {
   const A = byTs.get(T0);
   const B = byTs.get(T0 + W5);
   const D = byTs.get(T0 + 2 * W5);
-  const C = byTs.get(T0 + 3 * W5);
+  const E = byTs.get(T0 + 3 * W5);
+  const C = byTs.get(T0 + 4 * W5);
 
   console.log('\n== window A (full ladder) ==');
   console.log('  legs:', (A.legs || []).map(l => `${l.side.toUpperCase()} $${l.dollars} @${l.price} t=${fmt(Math.floor(l.ts / 1000))}`).join(' | '), '| winner', A.winner, '| pnl', A.pnl);
-  console.log('== window B (3rd touch 10s before close) ==');
+  console.log('== window B (3rd touch after 280s cutoff -> no 3rd flip) ==');
   console.log('  legs:', (B.legs || []).map(l => `${l.side.toUpperCase()} $${l.dollars} @${l.price} t=${fmt(Math.floor(l.ts / 1000))}`).join(' | '), '| winner', B.winner, '| pnl', B.pnl);
   console.log('== window D (both sides at 0.60+ -> instant ladder) ==');
   console.log('  legs:', (D.legs || []).map(l => `${l.side.toUpperCase()} $${l.dollars} @${l.price} t=${fmt(Math.floor(l.ts / 1000))}`).join(' | '), '| winner', D.winner, '| pnl', D.pnl);
+  console.log('== window E (flip fires exactly at 0.50) ==');
+  console.log('  legs:', (E.legs || []).map(l => `${l.side.toUpperCase()} $${l.dollars} @${l.price} t=${fmt(Math.floor(l.ts / 1000))}`).join(' | '), '| winner', E.winner, '| pnl', E.pnl);
   console.log('== window C (no 3rd touch) ==');
   console.log('  legs:', (C.legs || []).map(l => `${l.side.toUpperCase()} $${l.dollars} @${l.price} t=${fmt(Math.floor(l.ts / 1000))}`).join(' | '), '| winner', C.winner, '| pnl', C.pnl);
 
@@ -190,10 +210,13 @@ global.fetch = async (url) => {
   check('A: every flip ~30s after the previous leg', A && A.legs.slice(1).every((l, i) => Math.abs((l.ts - A.legs[i].ts) - FLIP_HOLD_MS) < 5000));
   check('A: window resolves as a WIN (winner down)', A && A.win === true && A.winner === 'down');
 
-  // Window B: 3rd touch at T+290 -> flip still lands before close
-  const bClose = (T0 + 2 * W5) * 1000;
-  check('B: full ladder placed too', B && B.legs.length === 4 && B.reachedLevel3 === true);
-  check('B: 3rd flip lands within 10s of close', B && B.legs[3].ts > bClose - 12000 && B.legs[3].ts < bClose);
+  // Window B: the 3rd band touch happens at T+290, AFTER the 280s flip cutoff
+  // -> the 3rd martingale must NOT be placed (flips stop in the final stretch)
+  const bCutoff = (T0 + W5 + 280) * 1000;
+  check('B: entry + 2 flips placed (3 legs)', B && B.legs.length === 3);
+  check('B: 3rd martingale blocked by the 280s cutoff', B && B.reachedLevel3 === false);
+  check('B: every leg placed before the 280s cutoff', B && B.legs.every(l => l.ts < bCutoff));
+  check('B: resolves as a WIN (winner up)', B && B.win === true && B.winner === 'up');
 
   // Window D: both sides at 0.60+ -> entry fires, then the ladder fires INSTANTLY
   // (no 30s holds, no come-back wait, no transition guard)
@@ -204,19 +227,33 @@ global.fetch = async (url) => {
   check('D: entire ladder completes within 10s of entry', D && D.legs[3].ts - dEntryTs < 10000);
   check('D: resolved as a WIN (winner down)', D && D.win === true && D.winner === 'down');
 
-  // Window C: opposite side never reaches 0.60 -> 3rd martingale NOT placed (by design)
+  // Window E: the flip must fire ONLY when the opposite side reaches 0.50 —
+  // while it sits at 0.49 (below the trigger) no flip happens
+  const eWaitMs = (T0 + 3 * W5 + WAIT5) * 1000;
+  check('E: entry UP $10 after the wait', E && E.entrySide === 'up' && E.legs[0].dollars === 10);
+  check('E: no flip while opposite side is below 0.50 (0.49)', E && E.legs.length === 2 && E.legs[1].ts >= eWaitMs + 6000 - 1500 && E.legs[1].ts < eWaitMs + 7500);
+  check('E: flip is DOWN $20 at exactly 0.50', E && E.legs[1].side === 'down' && E.legs[1].dollars === 20 && E.legs[1].price === 0.5);
+  check('E: no further flips (up side stays below 0.50)', E && E.reachedLevel3 === false);
+  check('E: resolves as a WIN (winner down)', E && E.win === true && E.winner === 'down');
+
+  // 15m: DOWN touches 0.50 only at T+880, AFTER the 870s cutoff -> no 15m flip
+  const h15first = st15.history[0];
+  check('15m: entry only, no flip after the 870s cutoff', h15first && h15first.legs.length === 1 && h15first.winner === 'up');
+
+  // Window C: opposite side never reaches 0.50 -> 3rd martingale NOT placed (by design)
   check('C: only 3 legs (entry + 2 flips)', C && C.legs.length === 3);
   check('C: 3rd martingale not reached', C && C.reachedLevel3 === false);
   check('C: resolved anyway (winner up)', C && C.win === true && C.winner === 'up');
 
   // Engine-level counters
-  check('3rd-martingale counter >= 3 (A + B + D)', st5.windowsReached3rdMartingale >= 3);
+  check('3rd-martingale counter >= 2 (A + D)', st5.windowsReached3rdMartingale >= 2);
 
-  // Shared bankroll accounting (both open 5m and 15m trades still hold cost)
-  const st15 = states['hedgeState:BTC-15m'];
-  const openCost = (st5.current.btc ? st5.current.btc.totalCost : 0)
-                 + (st15.current.btc ? st15.current.btc.totalCost : 0);
-  check('bankroll consistent', Math.abs(st5.bankroll - (4000 + st5.realizedPnlTotal - openCost)) < 0.01);
+  // Separate bankroll accounting per timeframe (open 5m/15m trades still hold cost)
+  const openCost5 = st5.current.btc ? st5.current.btc.totalCost : 0;
+  const openCost15 = st15.current.btc ? st15.current.btc.totalCost : 0;
+  check('5m bankroll consistent (start 2000)', Math.abs(st5.bankroll - (2000 + st5.realizedPnl - openCost5)) < 0.01);
+  check('15m bankroll consistent (start 2000)', Math.abs(st15.bankroll - (2000 + st15.realizedPnl - openCost15)) < 0.01);
+  check('bankrolls are separate (5m != 15m)', Math.abs(st5.bankroll - st15.bankroll) > 0.5);
 
   const allOk = checks.every(([, ok]) => ok);
   console.log(allOk ? '\n✅ FULL-WINDOW SMOKE TEST PASSED' : '\n❌ FULL-WINDOW SMOKE TEST FAILED');

@@ -223,9 +223,12 @@ global.fetch = async (url) => {
   const expectRate15 = s15.windowsDecided > 0 ? round2(s15.wins / s15.windowsDecided) : null;
   check('15m winRate consistent with wins/decided', s15.winRate === expectRate15 && s15.windowsDecided === s15.wins + s15.losses);
 
-  // 7) shared bankroll accounting: bankroll = start + realizedPnl - open cost
-  const openCost = (s15.current.btc ? s15.current.btc.totalCost : 0) + (s5.current.btc ? s5.current.btc.totalCost : 0);
-  check('shared bankroll accounting consistent', Math.abs(s15.bankroll - (4000 + s15.realizedPnlTotal - openCost)) < 0.01);
+  // 7) separate bankroll accounting per timeframe: bankroll = start + realizedPnl - open cost
+  const openCost15 = (s15.current.btc ? s15.current.btc.totalCost : 0);
+  const openCost5 = (s5.current.btc ? s5.current.btc.totalCost : 0);
+  check('15m bankroll accounting consistent', Math.abs(s15.bankroll - (2000 + s15.realizedPnl - openCost15)) < 0.01);
+  check('5m bankroll accounting consistent', Math.abs(s5.bankroll - (2000 + s5.realizedPnl - openCost5)) < 0.01);
+  check('timeframes keep separate bankrolls', Math.abs(s15.bankroll + s5.bankroll - (4000 + s15.realizedPnl + s5.realizedPnl - openCost15 - openCost5)) < 0.02);
 
   // 8) equity curve + max drawdown present
   check('equity curve has multiple points', s15.equityCurve.length >= 3);

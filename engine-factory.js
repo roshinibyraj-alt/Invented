@@ -19,16 +19,20 @@
  *        - otherwise keep watching until a side comes back into the
  *          band, then trigger the $10 entry — never chase at 0.70+
  *  3. While the window is open, the moment the OPPOSITE side's price
- *     reaches 0.60, the bot flips INSTANTLY: it buys that side with the
+ *     reaches 0.50, the bot flips INSTANTLY: it buys that side with the
  *     next martingale amount — $20, then $40, then $80 (max 3 flips).
- *     The wait-for-0.60 rule applies ONLY to the initial entry; flips
- *     never wait for the price to come back.
- *  4. All shares are held to resolution. Window PnL = payout of the
- *     winning side's shares ($1.00 each) - total cost of every buy.
- *  5. Every new window starts fresh with the $10 entry.
+ *     Flips never wait for the price to come back (that wait applies
+ *     ONLY to the initial entry), and NO flips after 280s into a 5m
+ *     window or 870s into a 15m window.
+ *  4. All shares are held to resolution. At window end, whichever
+ *     side's price is above 0.90 is declared the winner. Window PnL =
+ *     payout of the winning side's shares ($1.00 each) - total cost of
+ *     every buy.
+ *  5. Every new window starts fresh with the $10 entry. 5m and 15m
+ *     trade completely independently with SEPARATE demo capital.
  *
- *  Dashboard: full equity curve, max drawdown, win rate, and the
- *  number of windows that reached the 3rd martingale ($80).
+ *  Dashboard: per-timeframe equity curves, max drawdown, win rate, and
+ *  the number of windows that reached the 3rd martingale ($80).
  * ═══════════════════════════════════════════════════════════════
  */
 
@@ -46,7 +50,9 @@ const MIN_ORDER_SHARES       = 1;
 const RESOLUTION_FALLBACK_MS = 60000;
 const EQUITY_RECORD_MS       = 5000;
 
-const TRIGGER_PRICE = 0.60;
+const TRIGGER_PRICE      = 0.60; // entry: wait for the price to come back
+const FLIP_TRIGGER_PRICE = 0.50; // martingale: fire instantly at 0.50+
+const WINNER_PRICE       = 0.90; // resolution: side above 0.90 wins
 
 function round2(n) { return Math.round(n * 100) / 100; }
 function sgn2(n) { return (n > 0 ? '+$' : (n < 0 ? '-$' : '±$')) + Math.abs(n).toFixed(2); }
@@ -55,6 +61,10 @@ function createEngine(cfg) {
   const {
     label = 'BTC-0.60-MART',
     startingCapital = 4000,
+    startingCapital5,
+    startingCapital15,
+    flipCutoffSeconds5 = 280,
+    flipCutoffSeconds15 = 870,
     entryDollars = 10,
     martingaleAmounts = [20, 40, 80],
     waitSeconds5 = 60,
@@ -82,6 +92,10 @@ function createEngine(cfg) {
   const window5 = windowSeconds5;
   const tradeSeq = { '5': 0, '15': 0 };
 
+  // Separate demo capital per timeframe (default: split startingCapital evenly).
+  const capital5 = startingCapital5 != null ? round2(startingCapital5) : round2(startingCapital / 2);
+  const capital15 = startingCapital15 != null ? round2(startingCapital15) : round2(startingCapital - capital5);
+
   let DRY_RUN = dryRun;
   let warnedNoRestingMethod = false;
   let warnedNoCancelMethod = false;
@@ -91,7 +105,7 @@ function createEngine(cfg) {
     try {
       const raw = fs.readFileSync(statsStatePath, 'utf8');
       const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed.bankroll === 'number') return parsed;
+      if (parsed && (typeof parsed.bankroll5 === 'number' || typeof parsed.bankroll15 === 'number')) return parsed;
     } catch (_) {}
     return null;
   }
@@ -99,8 +113,8 @@ function createEngine(cfg) {
 
   const engine = {
     tradingEnabled: true,
-    bankroll: savedStats ? savedStats.bankroll : startingCapital,
-    realizedPnl: savedStats ? savedStats.realizedPnl : 0,
+    bankroll5: savedStats && typeof savedStats.bankroll5 === 'number' ? savedStats.bankroll5 : capital5,
+    bankroll15: savedStats && typeof savedStats.bankroll15 === 'number' ? savedStats.bankroll15 : capital15,
     realizedPnl5: savedStats ? savedStats.realizedPnl5 : 0,
     realizedPnl15: savedStats ? savedStats.realizedPnl15 : 0,
     wins5: savedStats ? savedStats.wins5 : 0,
@@ -114,9 +128,12 @@ function createEngine(cfg) {
     trades5: [],
     trades15: [],
     logs: [],
-    equityCurve: savedStats && Array.isArray(savedStats.equityCurve) && savedStats.equityCurve.length
-      ? savedStats.equityCurve
-      : [{ t: nowFn(), equity: startingCapital }],
+    equityCurve5: savedStats && Array.isArray(savedStats.equityCurve5) && savedStats.equityCurve5.length
+      ? savedStats.equityCurve5
+      : [{ t: nowFn(), equity: capital5 }],
+    equityCurve15: savedStats && Array.isArray(savedStats.equityCurve15) && savedStats.equityCurve15.length
+      ? savedStats.equityCurve15
+      : [{ t: nowFn(), equity: capital15 }],
     current: { '5': null, '15': null },
     pending: { '5': [], '15': [] },
     lastPriceFetch: 0,
@@ -135,8 +152,9 @@ function createEngine(cfg) {
     if (!statsStatePath) return;
     try {
       fs.writeFileSync(statsStatePath, JSON.stringify({
-        bankroll: engine.bankroll,
-        realizedPnl: engine.realizedPnl,
+        bankroll5: engine.bankroll5,
+        bankroll15: engine.bankroll15,
+        realizedPnl: round2(engine.realizedPnl5 + engine.realizedPnl15),
         realizedPnl5: engine.realizedPnl5,
         realizedPnl15: engine.realizedPnl15,
         wins5: engine.wins5, losses5: engine.losses5,
@@ -144,7 +162,8 @@ function createEngine(cfg) {
         mart3Count5: engine.mart3Count5, mart3Count15: engine.mart3Count15,
         history5: engine.history5.slice(0, 100),
         history15: engine.history15.slice(0, 100),
-        equityCurve: engine.equityCurve.slice(-300),
+        equityCurve5: engine.equityCurve5.slice(-300),
+        equityCurve15: engine.equityCurve15.slice(-300),
         totalFeesPaid: engine.totalFeesPaid,
         totalRebatesEarned: engine.totalRebatesEarned,
         totalVolume: engine.totalVolume,
@@ -182,16 +201,15 @@ function createEngine(cfg) {
     }
     return val;
   }
-  function openPositionsMTM() {
-    return positionMTM(engine.current['5']) + positionMTM(engine.current['15']);
-  }
   function unrealizedFor(t) {
     if (!t || t.settled || !t.buys || !t.buys.length) return null;
     return round2(positionMTM(t) - totalCostOf(t));
   }
   function recordEquity() {
-    engine.equityCurve.push({ t: nowFn(), equity: round2(engine.bankroll + openPositionsMTM()) });
-    if (engine.equityCurve.length > 2000) engine.equityCurve.shift();
+    engine.equityCurve5.push({ t: nowFn(), equity: round2(engine.bankroll5 + positionMTM(engine.current['5'])) });
+    engine.equityCurve15.push({ t: nowFn(), equity: round2(engine.bankroll15 + positionMTM(engine.current['15'])) });
+    if (engine.equityCurve5.length > 2000) engine.equityCurve5.shift();
+    if (engine.equityCurve15.length > 2000) engine.equityCurve15.shift();
     saveStats();
   }
 
@@ -328,11 +346,22 @@ function createEngine(cfg) {
     const upP = markPrice(leg, 'up');
     const downP = markPrice(leg, 'down');
     if (upP == null && downP == null) return false;
-    leg.resolved = true;
-    leg.winner = (upP != null ? upP : 0) >= (downP != null ? downP : 0) ? 'up' : 'down';
-    leg.resolutionMethod = 'final-price';
-    log(`⚡ [${leg.slug}] resolved FINAL-PRICE at window close (up ${upP != null ? upP.toFixed(3) : '—'} / down ${downP != null ? downP.toFixed(3) : '—'}) — winner ${leg.winner.toUpperCase()}`);
-    return true;
+    // At window end, whichever side's price is above 0.90 is declared the winner.
+    if (upP > WINNER_PRICE) {
+      leg.resolved = true;
+      leg.winner = 'up';
+      leg.resolutionMethod = 'final-price';
+      log(`⚡ [${leg.slug}] resolved FINAL-PRICE at window close (up ${upP.toFixed(3)} / down ${downP != null ? downP.toFixed(3) : '—'}) — winner UP (above ${WINNER_PRICE.toFixed(2)})`);
+      return true;
+    }
+    if (downP > WINNER_PRICE) {
+      leg.resolved = true;
+      leg.winner = 'down';
+      leg.resolutionMethod = 'final-price';
+      log(`⚡ [${leg.slug}] resolved FINAL-PRICE at window close (up ${upP != null ? upP.toFixed(3) : '—'} / down ${downP.toFixed(3)}) — winner DOWN (above ${WINNER_PRICE.toFixed(2)})`);
+      return true;
+    }
+    return false; // not decided yet — keep polling official/fallback resolution
   }
 
   async function resolveLegAttempt(leg) {
@@ -365,7 +394,12 @@ function createEngine(cfg) {
       log(`⚠️ resolveLegAttempt(${leg.slug}) failed: ${e.message}`);
     }
     if (nowFn() - leg.closeAt >= RESOLUTION_FALLBACK_MS) {
-      const winner = leadingSide(leg);
+      const upP = markPrice(leg, 'up');
+      const downP = markPrice(leg, 'down');
+      let winner = null;
+      if (upP != null && upP > WINNER_PRICE) winner = 'up';
+      else if (downP != null && downP > WINNER_PRICE) winner = 'down';
+      else winner = leadingSide(leg); // safety net if neither side crossed 0.90
       if (winner) {
         leg.resolved = true;
         leg.winner = winner;
@@ -428,7 +462,7 @@ function createEngine(cfg) {
     engine.totalFeesPaid = round2(engine.totalFeesPaid + fee);
     engine.totalRebatesEarned = round2(engine.totalRebatesEarned + rebate);
     engine.totalVolume = round2(engine.totalVolume + notional);
-    engine.bankroll = round2(engine.bankroll - cost);
+    engine[`bankroll${t.tf}`] = round2(engine[`bankroll${t.tf}`] - cost);
     const buy = { level: t.buys.length, ts: nowFn(), dollars, side, price: avgPrice, shares: filled, cost };
     t.buys.push(buy);
     t.lastSide = side;
@@ -454,12 +488,15 @@ function createEngine(cfg) {
     const level = t.buys.length; // next martingale leg index (1..3)
     if (level <= 0 || level > martingaleAmounts.length) return;
     if (!t.lastSide) return;
+    // No flips in the final stretch of the window: after 280s (5m) / 870s (15m).
+    const cutoff = (t.windowTs + (t.tf === '5' ? flipCutoffSeconds5 : flipCutoffSeconds15)) * 1000;
+    if (nowFn() >= cutoff) return;
     const opp = t.lastSide === 'up' ? 'down' : 'up';
     const oppAsk = askFor(t.leg, opp);
     // Martingale fires INSTANTLY as soon as the opposite side's price reaches
-    // 0.60 — no waiting for it to come back into the band (that wait applies
-    // ONLY to the initial entry) and no transition guard.
-    if (oppAsk == null || oppAsk < TRIGGER_PRICE) return;
+    // 0.50 — no waiting for it to come back (that wait applies ONLY to the
+    // initial entry) and no transition guard.
+    if (oppAsk == null || oppAsk < FLIP_TRIGGER_PRICE) return;
     const dollars = martingaleAmounts[level - 1];
     const res = await buyLeg(t, opp, dollars, `martingale ${level}`, { allowAboveBand: true });
     if (res.ok) {
@@ -468,7 +505,7 @@ function createEngine(cfg) {
         engine[`mart3Count${t.tf}`] = (engine[`mart3Count${t.tf}`] || 0) + 1;
         log(`${tfLabel(t.tf)} ⚠️ 3RD MARTINGALE ($80) reached — this window is at max risk`);
       }
-      log(`${tfLabel(t.tf)} 🔄 flipped to ${opp.toUpperCase()} with $${dollars.toFixed(2)} @${res.avgPrice.toFixed(3)} (0.60+ instant)`);
+      log(`${tfLabel(t.tf)} 🔄 flipped to ${opp.toUpperCase()} with $${dollars.toFixed(2)} @${res.avgPrice.toFixed(3)} (0.50+ instant)`);
     } else if (res.reason && res.reason !== 'no-ask') {
       log(`⚠️ ${tfLabel(t.tf)} martingale ${level} skipped: ${res.reason}`);
     }
@@ -546,8 +583,7 @@ function createEngine(cfg) {
       for (const b of buys) if (b.side === winner) payout = round2(payout + b.shares);
     }
     const pnl = round2(payout - totalCost);
-    engine.bankroll = round2(engine.bankroll + payout);
-    engine.realizedPnl = round2(engine.realizedPnl + pnl);
+    engine[`bankroll${tf}`] = round2(engine[`bankroll${tf}`] + payout);
     engine[`realizedPnl${tf}`] = round2(engine[`realizedPnl${tf}`] + pnl);
 
     const betPlaced = buys.length > 0;
@@ -573,7 +609,7 @@ function createEngine(cfg) {
       martingaleLevels: buys.length,
       reachedLevel3: t.reachedLevel3,
       betPlaced, skipped: !betPlaced, win,
-      wager: totalCost, payout, pnl, bankrollAfter: engine.bankroll, resolvedAt: nowFn(),
+      wager: totalCost, payout, pnl, bankrollAfter: engine[`bankroll${tf}`], resolvedAt: nowFn(),
     });
     const hist = engine[`history${tf}`];
     if (hist.length > 300) hist.pop();
@@ -634,37 +670,43 @@ function createEngine(cfg) {
       dryRun: DRY_RUN,
       tradingEnabled: engine.tradingEnabled,
       waitingForBoundary: engine.waitingForBoundary,
-      bankroll: engine.bankroll,
-      startingCapital,
-      realizedPnlTotal: engine.realizedPnl,
+      startingCapital5: capital5,
+      startingCapital15: capital15,
+      realizedPnlTotal: round2(engine.realizedPnl5 + engine.realizedPnl15),
       totalFeesPaid: engine.totalFeesPaid,
       totalRebatesEarned: engine.totalRebatesEarned,
       totalVolume: engine.totalVolume,
       feeTheta, rebatePct,
       triggerPrice: TRIGGER_PRICE,
+      flipTriggerPrice: FLIP_TRIGGER_PRICE,
+      winnerPrice: WINNER_PRICE,
       triggerSlip,
       entryDollars,
       martingaleAmounts,
+      flipCutoffSeconds5, flipCutoffSeconds15,
       logs: engine.logs.slice(-80),
       boundaryWindowTs: engine.boundaryWindowTs,
-      equityCurve: engine.equityCurve,
-      maxDrawdown: computeDrawdown(engine.equityCurve),
     };
   }
   function buildStateTf(tf) {
     const decided = engine[`wins${tf}`] + engine[`losses${tf}`];
+    const curve = engine[`equityCurve${tf}`];
     return {
       ...baseState(),
       label: tf === '5' ? 'BTC-5m' : 'BTC-15m',
       windowSeconds: winSec(tf),
       waitSeconds: waitSec(tf),
+      bankroll: engine[`bankroll${tf}`],
+      startingCapital: tf === '5' ? capital5 : capital15,
+      equity: round2(engine[`bankroll${tf}`] + positionMTM(engine.current[tf])),
+      equityCurve: curve,
+      maxDrawdown: computeDrawdown(curve),
       realizedPnl: engine[`realizedPnl${tf}`],
       wins: engine[`wins${tf}`],
       losses: engine[`losses${tf}`],
       windowsDecided: decided,
       windowsReached3rdMartingale: engine[`mart3Count${tf}`] || 0,
       winRate: decided > 0 ? round2(engine[`wins${tf}`] / decided) : null,
-      equity: round2(engine.bankroll + openPositionsMTM()),
       latestBtcPrice: tf === '5' ? candles5.latestClose() : candles15.latestClose(),
       current: { btc: tradeSummary(engine.current[tf]) },
       pending: engine.pending[tf].map(tradeSummary),
@@ -770,13 +812,13 @@ function createEngine(cfg) {
       slog(`[${label.toLowerCase()}] ⚙️  Starting immediately — 5m/15m windows are independent; each window waits its own 1m/3m then triggers on the 0.60 band.`);
     }
     slog(`[${label.toLowerCase()}] ⚙️  Window rules: wait ${waitSeconds5}s (5m) / ${waitSeconds15}s (15m) after open, then buy the side whose price is back in the ${TRIGGER_PRICE.toFixed(2)}–${(TRIGGER_PRICE + triggerSlip).toFixed(2)} band for $${entryDollars.toFixed(2)}.`);
-    slog(`[${label.toLowerCase()}] ⚙️  Martingale flips: $${martingaleAmounts.join(' / ')} fire INSTANTLY when the opposite side's price reaches ${TRIGGER_PRICE.toFixed(2)}+ (max ${martingaleAmounts.length} flips) — only the initial entry waits for the price to come back to the ${TRIGGER_PRICE.toFixed(2)} band. All shares held to resolution.`);
-    slog(`[${label.toLowerCase()}] ⚙️  One shared bankroll of $${engine.bankroll.toFixed(2)} across both timeframes.`);
+    slog(`[${label.toLowerCase()}] ⚙️  Martingale flips: $${martingaleAmounts.join(' / ')} fire INSTANTLY when the opposite side's price reaches ${FLIP_TRIGGER_PRICE.toFixed(2)}+ (max ${martingaleAmounts.length} flips) — only the initial entry waits for the price to come back to the ${TRIGGER_PRICE.toFixed(2)} band. NO flips after ${flipCutoffSeconds5}s (5m) / ${flipCutoffSeconds15}s (15m). All shares held to resolution; the side above ${WINNER_PRICE.toFixed(2)} at window end is the winner.`);
+    slog(`[${label.toLowerCase()}] ⚙️  SEPARATE demo capital — 5m $${capital5.toFixed(2)}, 15m $${capital15.toFixed(2)} (no shared bankroll).`);
     slog(`[${label.toLowerCase()}] ⚙️  Fees: Polymarket taker fee = shares × ${feeTheta} × price × (1-price) (crypto category), ${rebatePct > 0 ? (rebatePct * 100).toFixed(0) + '% rebate applied' : 'no rebate configured'}.`);
     if (savedStats) {
-      slog(`[${label.toLowerCase()}] 💾 Restored saved stats — bankroll $${engine.bankroll.toFixed(2)}, 5m ${engine.wins5}W/${engine.losses5}L, 15m ${engine.wins15}W/${engine.losses15}L, 3rd-martingale windows 5m:${engine.mart3Count5} 15m:${engine.mart3Count15}.`);
+      slog(`[${label.toLowerCase()}] 💾 Restored saved stats — bankroll 5m $${engine.bankroll5.toFixed(2)} / 15m $${engine.bankroll15.toFixed(2)}, 5m ${engine.wins5}W/${engine.losses5}L, 15m ${engine.wins15}W/${engine.losses15}L, 3rd-martingale windows 5m:${engine.mart3Count5} 15m:${engine.mart3Count15}.`);
     } else if (statsStatePath) {
-      slog(`[${label.toLowerCase()}] 💾 No previous saved stats — starting fresh at $${startingCapital}. Stats persist to ${statsStatePath}.`);
+      slog(`[${label.toLowerCase()}] 💾 No previous saved stats — starting fresh at 5m $${capital5.toFixed(2)} / 15m $${capital15.toFixed(2)}. Stats persist to ${statsStatePath}.`);
     }
     await Promise.all([candles15.seed(slog), candles5.seed(slog)]);
     mainLoop().catch(e => slog(`[${label.toLowerCase()}] ❌ Fatal: ${e.message}`));
