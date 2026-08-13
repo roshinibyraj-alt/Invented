@@ -18,10 +18,11 @@
  *          tie)
  *        - otherwise keep watching until a side comes back into the
  *          band, then trigger the $10 entry — never chase at 0.70+
- *  3. While the window is open, if the OPPOSITE side's price comes
- *     back into the 0.60 band (from outside it), the bot flips: it
- *     buys that side with the next martingale amount — $20, then $40,
- *     then $80 (max 3 flips).
+ *  3. While the window is open, the moment the OPPOSITE side's price
+ *     reaches 0.60, the bot flips INSTANTLY: it buys that side with the
+ *     next martingale amount — $20, then $40, then $80 (max 3 flips).
+ *     The wait-for-0.60 rule applies ONLY to the initial entry; flips
+ *     never wait for the price to come back.
  *  4. All shares are held to resolution. Window PnL = payout of the
  *     winning side's shares ($1.00 each) - total cost of every buy.
  *  5. Every new window starts fresh with the $10 entry.
@@ -380,9 +381,10 @@ function createEngine(cfg) {
   function askFor(leg, side) { return side === 'up' ? leg.upAsk : leg.downAsk; }
   function bidFor(leg, side) { return side === 'up' ? leg.upBid : leg.downBid; }
 
-  // A side only triggers when its price is back IN the 0.60 band
-  // (TRIGGER_PRICE .. TRIGGER_PRICE + triggerSlip) — the bot WAITS for the
-  // price to come back to 0.60 instead of chasing it at 0.70/0.80+.
+  // ENTRY trigger: a side only triggers when its price is back IN the
+  // 0.60 band (TRIGGER_PRICE .. TRIGGER_PRICE + triggerSlip) — the bot WAITS
+  // for the price to come back to 0.60 instead of chasing it at 0.70/0.80+.
+  // Martingale flips do NOT use this wait: they fire instantly at 0.60+.
   function inTriggerBand(ask) {
     return ask != null && ask >= TRIGGER_PRICE && ask <= TRIGGER_PRICE + triggerSlip;
   }
@@ -403,12 +405,14 @@ function createEngine(cfg) {
   }
 
   // Buy `dollars` worth of `side` on this window's leg at the ask (taker).
-  async function buyLeg(t, side, dollars, what) {
+  async function buyLeg(t, side, dollars, what, opts = {}) {
     const leg = t.leg;
     const tokenId = tokenIdFor(leg, side);
     const ask = askFor(leg, side);
     if (!tokenId || ask == null) return { ok: false, reason: 'no-ask' };
-    if (ask > TRIGGER_PRICE + triggerSlip) return { ok: false, reason: 'price-above-band' };
+    // The band cap applies to the ENTRY (wait for the price to come back to 0.60).
+    // Martingale flips fire instantly at 0.60+ and may fill above the band.
+    if (!opts.allowAboveBand && ask > TRIGGER_PRICE + triggerSlip) return { ok: false, reason: 'price-above-band' };
     const shares = round2(dollars / ask);
     if (shares < MIN_ORDER_SHARES) return { ok: false, reason: `below-min-shares (${shares}sh)` };
     const resp = await placeTakerBuy(tokenId, ask, shares);
@@ -452,27 +456,22 @@ function createEngine(cfg) {
     if (!t.lastSide) return;
     const opp = t.lastSide === 'up' ? 'down' : 'up';
     const oppAsk = askFor(t.leg, opp);
-    const inBand = inTriggerBand(oppAsk);
-    // Flip only when the opposite side COMES BACK into the 0.60 band
-    // (transition from outside) — never chase it at 0.65+ and never
-    // double-fire while it simply stays in band.
-    if (!inBand || t.lastInBand[opp]) {
-      updateBandState(t);
-      return;
-    }
+    // Martingale fires INSTANTLY as soon as the opposite side's price reaches
+    // 0.60 — no waiting for it to come back into the band (that wait applies
+    // ONLY to the initial entry) and no transition guard.
+    if (oppAsk == null || oppAsk < TRIGGER_PRICE) return;
     const dollars = martingaleAmounts[level - 1];
-    const res = await buyLeg(t, opp, dollars, `martingale ${level}`);
+    const res = await buyLeg(t, opp, dollars, `martingale ${level}`, { allowAboveBand: true });
     if (res.ok) {
       if (level === martingaleAmounts.length) {
         t.reachedLevel3 = true;
         engine[`mart3Count${t.tf}`] = (engine[`mart3Count${t.tf}`] || 0) + 1;
         log(`${tfLabel(t.tf)} ⚠️ 3RD MARTINGALE ($80) reached — this window is at max risk`);
       }
-      log(`${tfLabel(t.tf)} 🔄 flipped to ${opp.toUpperCase()} with $${dollars.toFixed(2)} @${res.avgPrice.toFixed(3)} (0.60 band)`);
-    } else if (res.reason && res.reason !== 'no-ask' && res.reason !== 'price-above-band') {
+      log(`${tfLabel(t.tf)} 🔄 flipped to ${opp.toUpperCase()} with $${dollars.toFixed(2)} @${res.avgPrice.toFixed(3)} (0.60+ instant)`);
+    } else if (res.reason && res.reason !== 'no-ask') {
       log(`⚠️ ${tfLabel(t.tf)} martingale ${level} skipped: ${res.reason}`);
     }
-    updateBandState(t);
   }
 
   function freshTrade(tf, windowTs) {
@@ -771,7 +770,7 @@ function createEngine(cfg) {
       slog(`[${label.toLowerCase()}] ⚙️  Starting immediately — 5m/15m windows are independent; each window waits its own 1m/3m then triggers on the 0.60 band.`);
     }
     slog(`[${label.toLowerCase()}] ⚙️  Window rules: wait ${waitSeconds5}s (5m) / ${waitSeconds15}s (15m) after open, then buy the side whose price is back in the ${TRIGGER_PRICE.toFixed(2)}–${(TRIGGER_PRICE + triggerSlip).toFixed(2)} band for $${entryDollars.toFixed(2)}.`);
-    slog(`[${label.toLowerCase()}] ⚙️  Martingale flips: $${martingaleAmounts.join(' / ')} when the opposite side comes back into the ${TRIGGER_PRICE.toFixed(2)}–${(TRIGGER_PRICE + triggerSlip).toFixed(2)} band (max ${martingaleAmounts.length} flips). All shares held to resolution.`);
+    slog(`[${label.toLowerCase()}] ⚙️  Martingale flips: $${martingaleAmounts.join(' / ')} fire INSTANTLY when the opposite side's price reaches ${TRIGGER_PRICE.toFixed(2)}+ (max ${martingaleAmounts.length} flips) — only the initial entry waits for the price to come back to the ${TRIGGER_PRICE.toFixed(2)} band. All shares held to resolution.`);
     slog(`[${label.toLowerCase()}] ⚙️  One shared bankroll of $${engine.bankroll.toFixed(2)} across both timeframes.`);
     slog(`[${label.toLowerCase()}] ⚙️  Fees: Polymarket taker fee = shares × ${feeTheta} × price × (1-price) (crypto category), ${rebatePct > 0 ? (rebatePct * 100).toFixed(0) + '% rebate applied' : 'no rebate configured'}.`);
     if (savedStats) {

@@ -7,7 +7,11 @@
  * Window A (t0):     UP entry $10 -> DOWN $20 -> UP $40 -> DOWN $80, winner DOWN  (full ladder, win)
  * Window B (t0+300): UP $10 -> DOWN $20 -> UP $40 -> DOWN $80 with the 3rd band
  *                    touch only 10s before close -> still completes (edge timing)
- * Window C (t0+600): UP $10 -> DOWN $20 -> UP $40, DOWN never re-enters the band
+ * Window D (t0+600): BOTH sides already at 0.60+ when the wait ends (UP 0.61,
+ *                    DOWN 0.60, never leaving) -> entry fires, then the ENTIRE
+ *                    ladder fires instantly (no come-back wait, no transition
+ *                    guard) — proves "martingale fires instantly".
+ * Window C (t0+900): UP $10 -> DOWN $20 -> UP $40, DOWN never reaches 0.60
  *                    -> 3rd martingale NOT placed (documents the "missed 3rd" case)
  *
  * Band touches are 30s holds at ask 0.61 (inside the 0.60-0.62 band);
@@ -28,9 +32,10 @@ let virtualNow = 0; // set to a clean 5m boundary before start
 let T0 = 0;
 
 function scheduleFor(ts) {
-  if (ts === T0)         return { entry: 'up',   flips: ['down', 'up', 'down'], winner: 'down' }; // A: full ladder
-  if (ts === T0 + W5)    return { entry: 'up',   flips: ['down', 'up', 'down'], winner: 'down', late3: true }; // B: 3rd touch at close
-  return                  { entry: 'up',   flips: ['down', 'up'],              winner: 'up' };    // C: no 3rd touch
+  if (ts === T0)            return { entry: 'up', flips: ['down', 'up', 'down'], winner: 'down' };              // A: full ladder
+  if (ts === T0 + W5)       return { entry: 'up', flips: ['down', 'up', 'down'], winner: 'down', late3: true };  // B: 3rd touch at close
+  if (ts === T0 + 2 * W5)   return { entry: 'up', flips: ['down', 'up', 'down'], winner: 'down', instant: true }; // D: both sides at 0.60+ all window
+  return                     { entry: 'up', flips: ['down', 'up'],              winner: 'up' };                   // C: no 3rd touch
 }
 
 // Which side's ask is at 0.61 at virtual time `now` for 5m window `ts`?
@@ -102,6 +107,8 @@ global.fetch = async (url) => {
         // resolved: winner pays 1.00, loser dust — fast resolution must pick the scripted winner
         const w = scheduleFor(ts).winner;
         price = side === w ? 1.0 : 0.01;
+      } else if (scheduleFor(ts).instant) {
+        price = side === 'up' ? 0.61 : 0.60; // D: both sides already at 0.60+ when the wait ends
       } else {
         const high = highSideAt(ts, virtualNow);
         if (high) price = side === high ? 0.61 : 0.40;
@@ -144,7 +151,7 @@ global.fetch = async (url) => {
   console.log(`5m start window: ${new Date(T0 * 1000).toISOString()}`);
 
   // Drive virtual time through 3 full windows + settle margin.
-  const endAt = (T0 + 3 * W5 + 30) * 1000;
+  const endAt = (T0 + 4 * W5 + 30) * 1000;
   while (virtualNow < endAt) {
     virtualNow += 500;
     await sleep(1);
@@ -160,12 +167,15 @@ global.fetch = async (url) => {
 
   const A = byTs.get(T0);
   const B = byTs.get(T0 + W5);
-  const C = byTs.get(T0 + 2 * W5);
+  const D = byTs.get(T0 + 2 * W5);
+  const C = byTs.get(T0 + 3 * W5);
 
   console.log('\n== window A (full ladder) ==');
   console.log('  legs:', (A.legs || []).map(l => `${l.side.toUpperCase()} $${l.dollars} @${l.price} t=${fmt(Math.floor(l.ts / 1000))}`).join(' | '), '| winner', A.winner, '| pnl', A.pnl);
   console.log('== window B (3rd touch 10s before close) ==');
   console.log('  legs:', (B.legs || []).map(l => `${l.side.toUpperCase()} $${l.dollars} @${l.price} t=${fmt(Math.floor(l.ts / 1000))}`).join(' | '), '| winner', B.winner, '| pnl', B.pnl);
+  console.log('== window D (both sides at 0.60+ -> instant ladder) ==');
+  console.log('  legs:', (D.legs || []).map(l => `${l.side.toUpperCase()} $${l.dollars} @${l.price} t=${fmt(Math.floor(l.ts / 1000))}`).join(' | '), '| winner', D.winner, '| pnl', D.pnl);
   console.log('== window C (no 3rd touch) ==');
   console.log('  legs:', (C.legs || []).map(l => `${l.side.toUpperCase()} $${l.dollars} @${l.price} t=${fmt(Math.floor(l.ts / 1000))}`).join(' | '), '| winner', C.winner, '| pnl', C.pnl);
 
@@ -185,13 +195,22 @@ global.fetch = async (url) => {
   check('B: full ladder placed too', B && B.legs.length === 4 && B.reachedLevel3 === true);
   check('B: 3rd flip lands within 10s of close', B && B.legs[3].ts > bClose - 12000 && B.legs[3].ts < bClose);
 
-  // Window C: no band touch -> 3rd martingale NOT placed (by design)
+  // Window D: both sides at 0.60+ -> entry fires, then the ladder fires INSTANTLY
+  // (no 30s holds, no come-back wait, no transition guard)
+  const dEntryTs = D && D.legs[0].ts;
+  check('D: entry UP $10 fires when the wait ends', D && D.entrySide === 'up' && D.legs[0].dollars === 10 && D.legs[0].ts >= (T0 + WAIT5) * 1000 - 1000);
+  check('D: full ladder placed (4 legs, reached 3rd MG)', D && D.legs.length === 4 && D.reachedLevel3 === true);
+  check('D: 1st flip fires within 5s of entry (instant, no come-back wait)', D && D.legs[1].ts - dEntryTs < 5000);
+  check('D: entire ladder completes within 10s of entry', D && D.legs[3].ts - dEntryTs < 10000);
+  check('D: resolved as a WIN (winner down)', D && D.win === true && D.winner === 'down');
+
+  // Window C: opposite side never reaches 0.60 -> 3rd martingale NOT placed (by design)
   check('C: only 3 legs (entry + 2 flips)', C && C.legs.length === 3);
   check('C: 3rd martingale not reached', C && C.reachedLevel3 === false);
   check('C: resolved anyway (winner up)', C && C.win === true && C.winner === 'up');
 
   // Engine-level counters
-  check('3rd-martingale counter >= 2 (A + B)', st5.windowsReached3rdMartingale >= 2);
+  check('3rd-martingale counter >= 3 (A + B + D)', st5.windowsReached3rdMartingale >= 3);
 
   // Shared bankroll accounting (both open 5m and 15m trades still hold cost)
   const st15 = states['hedgeState:BTC-15m'];

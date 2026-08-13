@@ -119,7 +119,7 @@ app.get('/', (_, res) => {
     <button id="resume-btn" class="resume">▶️ Resume Trading</button>
     <button id="live-btn" class="live-toggle">🔴 Switch to LIVE</button>
   </div>
-  <div class="toolbar-note">Strategy: wait 1m (5m) / 3m (15m) after open → buy the side whose price comes back to the 0.60–0.62 band ($10) → flip $20 / $40 / $80 when the opposite side comes back to the band (max 3). All shares held to window resolution.</div>
+  <div class="toolbar-note">Strategy: wait 1m (5m) / 3m (15m) after open → buy the side whose price comes back to the 0.60–0.62 band ($10) → flip $20 / $40 / $80 INSTANTLY when the opposite side reaches 0.60 (max 3; only the initial entry waits for the price to come back). All shares held to window resolution.</div>
   <div id="start-banner" class="start-banner" style="display:none;"></div>
 
   <div class="shared-stats" id="shared-stats"></div>
