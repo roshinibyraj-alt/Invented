@@ -44,7 +44,7 @@ const SCRIPTS = [
   { entry: 'down', flips: ['up'],                 winner: 'up' },
   { entry: 'up',   flips: [],                     winner: 'up' },
   { entry: 'down', flips: ['up', 'down'],         winner: 'down' },
-  { entry: 'up',   flips: [],                     winner: 'down' },
+  { entry: null,   flips: [],                     winner: 'down' }, // price never returns to the band -> NO BET
 ];
 function scriptFor(tf, ts) {
   const wsec = tf === '5' ? W5 : W15;
@@ -57,7 +57,7 @@ function highSideAt(tf, ts, now) {
   const wsec = tf === '5' ? W5 : W15;
   const waitMs = (ts + (tf === '5' ? WAIT5 : WAIT15)) * 1000;
   const closeMs = (ts + wsec) * 1000;
-  if (now >= closeMs || now < waitMs) return null; // resolved or still waiting
+  if (now >= closeMs || now < waitMs || s.entry === null) return null; // resolved, waiting, or no band side
   let high = s.entry;
   for (let i = 0; i < s.flips.length; i++) {
     if (now >= waitMs + (i + 1) * FLIP_GAP_MS) high = s.flips[i];
@@ -134,6 +134,7 @@ global.fetch = async (url) => {
     martingaleAmounts: [20, 40, 80],
     waitSeconds5: WAIT5,
     waitSeconds15: WAIT15,
+    triggerSlip: 0.02,
     windowSeconds15: W15,
     windowSeconds5: W5,
     dryRun: true,
@@ -230,15 +231,21 @@ global.fetch = async (url) => {
   check('max drawdown >= 0', s15.maxDrawdown.pct >= 0 && s15.maxDrawdown.dollars >= 0);
   check('max drawdown <= 100%', s15.maxDrawdown.pct <= 1);
 
-  // 9) no double bets per leg level, no skipped windows in this script
+  // 9) no double bets per leg level; skipped only where price never hit the band
   const noDup = h15new.concat(h5).filter(h => h.legs && h.legs.length)
     .every(h => h.legs.every((l, i) => l.level === i));
   check('leg levels are sequential (no double buys)', noDup);
-  check('no skipped windows in this script', h15new.concat(h5).every(h => h.skipped === false));
+  check('windows skipped only when no side hit the band', h5.filter(h => h.skipped === true).every(h => !h.legs || h.legs.length === 0));
 
-  // 10) 5m results sanity: multiple settled windows, wins and losses both present
+  // 10) never buy above the 0.60-0.62 band (no chasing at 0.70/0.80)
+  const maxEntryPx = Math.max.apply(null, h15new.concat(h5).filter(h => h.legs && h.legs.length)
+    .flatMap(h => h.legs).map(l => l.price));
+  check('no buy above the 0.62 band (max ' + maxEntryPx.toFixed(3) + ')', maxEntryPx <= 0.621);
+
+  // 11) 5m results sanity: multiple settled windows, wins/losses/skips present
   check('5m settled at least 6 windows', h5.length >= 6);
   check('5m has both wins and losses', h5.some(h => h.win === true) && h5.some(h => h.win === false));
+  check('5m has skipped (no-band) windows', h5.some(h => h.skipped === true));
   check('5m has a 3rd-martingale window', h5.some(h => h.reachedLevel3 === true));
 
   const allOk = checks.every(([, ok]) => ok);

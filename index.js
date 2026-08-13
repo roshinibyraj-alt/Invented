@@ -118,7 +118,7 @@ app.get('/', (_, res) => {
     <button id="resume-btn" class="resume">▶️ Resume Trading</button>
     <button id="live-btn" class="live-toggle">🔴 Switch to LIVE</button>
   </div>
-  <div class="toolbar-note">Strategy: wait 1m (5m) / 3m (15m) after open → buy the 0.60+ side $10 → flip $20 / $40 / $80 when the opposite side hits 0.60 (max 3). All shares held to window resolution.</div>
+  <div class="toolbar-note">Strategy: wait 1m (5m) / 3m (15m) after open → buy the side whose price comes back to the 0.60–0.62 band ($10) → flip $20 / $40 / $80 when the opposite side comes back to the band (max 3). All shares held to window resolution.</div>
 
   <div class="shared-stats" id="shared-stats"></div>
 
@@ -145,7 +145,7 @@ app.get('/', (_, res) => {
   function fmt2(n) { return (n == null || isNaN(n)) ? '—' : Number(n).toFixed(2); }
   function fmtPx(n) { return (n == null || isNaN(n)) ? '—' : Number(n).toFixed(3); }
   function fmtPct(n) { return (n == null || isNaN(n)) ? '—' : (Number(n) * 100).toFixed(1) + '%'; }
-  function sgn(n) { if (n == null || isNaN(n)) return '—'; return (n >= 0 ? '+$' : '-$') + Math.abs(n).toFixed(2); }
+  function sgn(n) { if (n == null || isNaN(n)) return '—'; return (n > 0 ? '+$' : (n < 0 ? '-$' : '±$')) + Math.abs(n).toFixed(2); }
   function pClass(n) { if (n == null || isNaN(n)) return ''; return n > 0 ? 'pnl-pos' : (n < 0 ? 'pnl-neg' : ''); }
   function fmtClock(ts) { if (!ts) return '—'; const d = new Date(ts * 1000); return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0') + ':' + String(d.getSeconds()).padStart(2, '0'); }
   function fmtCountdown(ms) { if (ms == null) return '—'; const s = Math.max(0, Math.ceil(ms / 1000)); const m = Math.floor(s / 60); const ss = s % 60; return m + ':' + String(ss).padStart(2, '0'); }
@@ -160,7 +160,7 @@ app.get('/', (_, res) => {
     if (t.settled) return { label: t.win === true ? 'WIN' : (t.win === false ? 'LOSS' : 'RESOLVED'), cls: t.win === true ? 'status-win' : (t.win === false ? 'status-loss' : 'status-idle') };
     switch (t.phase) {
       case 'waiting': return { label: 'WAITING ' + fmtCountdown(t.countdownMs), cls: 'status-wait' };
-      case 'awaiting-trigger': return { label: 'AWAITING 0.60+', cls: 'status-resting' };
+      case 'awaiting-trigger': return { label: 'AWAITING 0.60 BAND', cls: 'status-resting' };
       case 'trading': return { label: 'TRADING · MG ' + t.martingaleLevel, cls: 'status-open' };
       case 'pending-resolution': return { label: 'RESOLVING…', cls: 'status-resting' };
       default: return { label: String(t.phase).toUpperCase(), cls: 'status-idle' };
@@ -198,7 +198,7 @@ app.get('/', (_, res) => {
     if (t.skipped) headline = '⏸ No bet placed this window';
     else if (t.settled) headline = (t.win === true ? '🏆' : (t.win === false ? '💸' : '🏁')) + ' Window resolved — ' + (t.win == null ? 'no bet' : (t.win ? 'WIN' : 'LOSS')) + ' ' + sgn(t.pnl);
     else if (t.phase === 'waiting') headline = '⏳ Waiting ' + fmtCountdown(t.countdownMs) + ' — then check for a 0.60+ side';
-    else if (t.phase === 'awaiting-trigger') headline = '🎯 Waiting for either side to reach 0.60+';
+    else if (t.phase === 'awaiting-trigger') headline = '🎯 Waiting for a side to come back to 0.60–0.62';
     else headline = (t.lastSide === 'up' ? '🔵' : '🟣') + ' Trading ' + (t.lastSide || '?').toUpperCase() + ' — flipping if the opposite side hits 0.60';
     let html = '<div class="current-window">' +
       '<div class="headline">' + headline + '</div>' +
@@ -207,7 +207,7 @@ app.get('/', (_, res) => {
       '<div class="row"><span>Closes in</span><span>' + fmtCountdown(t.closeAt - Date.now()) + '</span></div>' +
       '<div class="row"><span>UP price (ask / bid)</span><span>' + fmtPx(leg.upAsk) + ' / ' + fmtPx(leg.upBid) + '</span></div>' +
       '<div class="row"><span>DOWN price (ask / bid)</span><span>' + fmtPx(leg.downAsk) + ' / ' + fmtPx(leg.downBid) + '</span></div>' +
-      '<div class="row"><span>Trigger target</span><span>0.60+ (higher side wins a tie)</span></div>' +
+      '<div class="row"><span>Trigger band</span><span>' + fmtPx(s.triggerPrice) + '–' + fmtPx(s.triggerPrice + (s.triggerSlip || 0.02)) + ' (wait for price to come back)</span></div>' +
       ladderHtml(s, t);
     if (hasBuys) {
       const lastBuy = t.buys[t.buys.length - 1];

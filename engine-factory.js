@@ -13,13 +13,15 @@
  *        - 1 minute after a 5m window opens
  *        - 3 minutes after a 15m window opens
  *  2. After the wait it checks both sides' prices:
- *        - if a side is priced >= 0.60, buy that side for $10 worth
- *          of shares (the higher side wins a tie)
- *        - if neither side is >= 0.60 yet, keep watching until one
- *          side comes back to 0.60, then trigger the $10 entry
- *  3. While the window is open, if the OPPOSITE side's price reaches
- *     0.60, the bot flips: it buys that side with the next martingale
- *     amount — $20, then $40, then $80 (max 3 flips).
+ *        - if a side's price is back IN the 0.60 band (0.60..0.62),
+ *          buy that side for $10 worth of shares (higher side wins a
+ *          tie)
+ *        - otherwise keep watching until a side comes back into the
+ *          band, then trigger the $10 entry — never chase at 0.70+
+ *  3. While the window is open, if the OPPOSITE side's price comes
+ *     back into the 0.60 band (from outside it), the bot flips: it
+ *     buys that side with the next martingale amount — $20, then $40,
+ *     then $80 (max 3 flips).
  *  4. All shares are held to resolution. Window PnL = payout of the
  *     winning side's shares ($1.00 each) - total cost of every buy.
  *  5. Every new window starts fresh with the $10 entry.
@@ -46,7 +48,7 @@ const EQUITY_RECORD_MS       = 5000;
 const TRIGGER_PRICE = 0.60;
 
 function round2(n) { return Math.round(n * 100) / 100; }
-function sgn2(n) { return (n >= 0 ? '+$' : '-$') + Math.abs(n).toFixed(2); }
+function sgn2(n) { return (n > 0 ? '+$' : (n < 0 ? '-$' : '±$')) + Math.abs(n).toFixed(2); }
 
 function createEngine(cfg) {
   const {
@@ -60,6 +62,7 @@ function createEngine(cfg) {
     windowSeconds5 = 300,
     feeTheta = 0.07,
     rebatePct = 0,
+    triggerSlip = 0.02,
     candleRefreshMs = 15000,
     trader,
     dryRun = true,
@@ -377,17 +380,26 @@ function createEngine(cfg) {
   function askFor(leg, side) { return side === 'up' ? leg.upAsk : leg.downAsk; }
   function bidFor(leg, side) { return side === 'up' ? leg.upBid : leg.downBid; }
 
-  // Side to enter, if any side's price is at the trigger (0.60+).
+  // A side only triggers when its price is back IN the 0.60 band
+  // (TRIGGER_PRICE .. TRIGGER_PRICE + triggerSlip) — the bot WAITS for the
+  // price to come back to 0.60 instead of chasing it at 0.70/0.80+.
+  function inTriggerBand(ask) {
+    return ask != null && ask >= TRIGGER_PRICE && ask <= TRIGGER_PRICE + triggerSlip;
+  }
   function triggerSide(leg) {
     const up = leg.upAsk != null ? leg.upAsk : leg.upBid;
     const down = leg.downAsk != null ? leg.downAsk : leg.downBid;
-    if (up == null && down == null) return null;
-    const upOk = up != null && up >= TRIGGER_PRICE;
-    const downOk = down != null && down >= TRIGGER_PRICE;
+    const upOk = inTriggerBand(up);
+    const downOk = inTriggerBand(down);
     if (upOk && !downOk) return 'up';
     if (downOk && !upOk) return 'down';
     if (upOk && downOk) return (up >= down ? 'up' : 'down');
     return null;
+  }
+  function updateBandState(t) {
+    const leg = t.leg;
+    t.lastInBand.up = inTriggerBand(leg.upAsk != null ? leg.upAsk : leg.upBid);
+    t.lastInBand.down = inTriggerBand(leg.downAsk != null ? leg.downAsk : leg.downBid);
   }
 
   // Buy `dollars` worth of `side` on this window's leg at the ask (taker).
@@ -396,6 +408,7 @@ function createEngine(cfg) {
     const tokenId = tokenIdFor(leg, side);
     const ask = askFor(leg, side);
     if (!tokenId || ask == null) return { ok: false, reason: 'no-ask' };
+    if (ask > TRIGGER_PRICE + triggerSlip) return { ok: false, reason: 'price-above-band' };
     const shares = round2(dollars / ask);
     if (shares < MIN_ORDER_SHARES) return { ok: false, reason: `below-min-shares (${shares}sh)` };
     const resp = await placeTakerBuy(tokenId, ask, shares);
@@ -421,13 +434,14 @@ function createEngine(cfg) {
 
   async function maybeEntry(t) {
     if (t.buys.length) { t.phase = 'trading'; return; }
+    updateBandState(t);
     const side = triggerSide(t.leg);
-    if (!side) return; // still awaiting a 0.60+ side
+    if (!side) return; // still waiting for a side to come back into the 0.60 band
     const res = await buyLeg(t, side, entryDollars, 'entry');
     if (res.ok) {
       t.phase = 'trading';
-      log(`${tfLabel(t.tf)} 🚦 entry triggered — bought ${side.toUpperCase()} $${entryDollars.toFixed(2)} at 0.60+`);
-    } else if (res.reason && res.reason !== 'no-ask') {
+      log(`${tfLabel(t.tf)} 🚦 entry triggered — bought ${side.toUpperCase()} $${entryDollars.toFixed(2)} @${res.avgPrice.toFixed(3)} (0.60 band)`);
+    } else if (res.reason && res.reason !== 'no-ask' && res.reason !== 'price-above-band') {
       log(`⚠️ ${tfLabel(t.tf)} entry skipped: ${res.reason}`);
     }
   }
@@ -438,7 +452,14 @@ function createEngine(cfg) {
     if (!t.lastSide) return;
     const opp = t.lastSide === 'up' ? 'down' : 'up';
     const oppAsk = askFor(t.leg, opp);
-    if (oppAsk == null || oppAsk < TRIGGER_PRICE) return;
+    const inBand = inTriggerBand(oppAsk);
+    // Flip only when the opposite side COMES BACK into the 0.60 band
+    // (transition from outside) — never chase it at 0.65+ and never
+    // double-fire while it simply stays in band.
+    if (!inBand || t.lastInBand[opp]) {
+      updateBandState(t);
+      return;
+    }
     const dollars = martingaleAmounts[level - 1];
     const res = await buyLeg(t, opp, dollars, `martingale ${level}`);
     if (res.ok) {
@@ -447,10 +468,11 @@ function createEngine(cfg) {
         engine[`mart3Count${t.tf}`] = (engine[`mart3Count${t.tf}`] || 0) + 1;
         log(`${tfLabel(t.tf)} ⚠️ 3RD MARTINGALE ($80) reached — this window is at max risk`);
       }
-      log(`${tfLabel(t.tf)} 🔄 flipped to ${opp.toUpperCase()} with $${dollars.toFixed(2)}`);
-    } else if (res.reason && res.reason !== 'no-ask') {
+      log(`${tfLabel(t.tf)} 🔄 flipped to ${opp.toUpperCase()} with $${dollars.toFixed(2)} @${res.avgPrice.toFixed(3)} (0.60 band)`);
+    } else if (res.reason && res.reason !== 'no-ask' && res.reason !== 'price-above-band') {
       log(`⚠️ ${tfLabel(t.tf)} martingale ${level} skipped: ${res.reason}`);
     }
+    updateBandState(t);
   }
 
   function freshTrade(tf, windowTs) {
@@ -465,6 +487,7 @@ function createEngine(cfg) {
       phase: 'waiting',
       buys: [],
       lastSide: null,
+      lastInBand: { up: false, down: false },
       reachedLevel3: false,
       pnl: null,
       win: null,
@@ -620,6 +643,7 @@ function createEngine(cfg) {
       totalVolume: engine.totalVolume,
       feeTheta, rebatePct,
       triggerPrice: TRIGGER_PRICE,
+      triggerSlip,
       entryDollars,
       martingaleAmounts,
       logs: engine.logs.slice(-80),
@@ -740,8 +764,8 @@ function createEngine(cfg) {
 
   async function start() {
     slog(`[${label.toLowerCase()}] ⛏ ${label} — 0.60 martingale engine (5m & 15m), fully automatic`);
-    slog(`[${label.toLowerCase()}] ⚙️  Window rules: wait ${waitSeconds5}s (5m) / ${waitSeconds15}s (15m) after open, then buy the ${TRIGGER_PRICE.toFixed(2)}+ side for $${entryDollars.toFixed(2)}.`);
-    slog(`[${label.toLowerCase()}] ⚙️  Martingale flips: $${martingaleAmounts.join(' / ')} when the opposite side hits ${TRIGGER_PRICE.toFixed(2)} (max ${martingaleAmounts.length} flips). All shares held to resolution.`);
+    slog(`[${label.toLowerCase()}] ⚙️  Window rules: wait ${waitSeconds5}s (5m) / ${waitSeconds15}s (15m) after open, then buy the side whose price is back in the ${TRIGGER_PRICE.toFixed(2)}–${(TRIGGER_PRICE + triggerSlip).toFixed(2)} band for $${entryDollars.toFixed(2)}.`);
+    slog(`[${label.toLowerCase()}] ⚙️  Martingale flips: $${martingaleAmounts.join(' / ')} when the opposite side comes back into the ${TRIGGER_PRICE.toFixed(2)}–${(TRIGGER_PRICE + triggerSlip).toFixed(2)} band (max ${martingaleAmounts.length} flips). All shares held to resolution.`);
     slog(`[${label.toLowerCase()}] ⚙️  One shared bankroll of $${engine.bankroll.toFixed(2)} across both timeframes.`);
     slog(`[${label.toLowerCase()}] ⚙️  Fees: Polymarket taker fee = shares × ${feeTheta} × price × (1-price) (crypto category), ${rebatePct > 0 ? (rebatePct * 100).toFixed(0) + '% rebate applied' : 'no rebate configured'}.`);
     if (savedStats) {
