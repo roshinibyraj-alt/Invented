@@ -16,7 +16,8 @@
  *
  * Prices: 0.50 during the wait, the entry side at 0.62 after the wait,
  * each flip side at 0.62 in 2s holds (other side 0.38), winner 1.0 /
- * loser 0.01 after close.
+ * loser 0.01 after close. The losing side is SOLD ~0.5s after each flip
+ * at the current bid (sellDelayMs=500 in this compressed-window test).
  *
  * Verifies: no bet before the wait ends, $10 entry, martingale amounts
  * $20/$40/$80 in order, flips alternate sides, 3rd-martingale counting,
@@ -44,7 +45,7 @@ const SCRIPTS = [
   { entry: 'down', flips: ['up'],                 winner: 'up' },
   { entry: 'up',   flips: [],                     winner: 'up' },
   { entry: 'down', flips: ['up', 'down'],         winner: 'down' },
-  { entry: null,   flips: [],                     winner: 'down' }, // price never returns to the band -> NO BET
+  { entry: 'up',   flips: [],                     winner: 'down' }, // entry fires on any price, loses
 ];
 function scriptFor(tf, ts) {
   const wsec = tf === '5' ? W5 : W15;
@@ -134,6 +135,7 @@ global.fetch = async (url) => {
     martingaleAmounts: [20, 40, 80],
     waitSeconds5: WAIT5,
     waitSeconds15: WAIT15,
+    sellDelayMs: 500,
     triggerSlip: 0.02,
     windowSeconds15: W15,
     windowSeconds5: W5,
@@ -179,7 +181,7 @@ global.fetch = async (url) => {
   const h5 = sorted(s5.history);
 
   console.log('== resolved 15m ==');
-  for (const h of h15) console.log(`  ${fmt(h.windowTs)} entry ${h.entrySide || '—'} legs [${(h.legs || []).map(l => '$' + l.dollars + l.side[0].toUpperCase()).join(' ')}] 3MG:${h.reachedLevel3 ? 'yes' : 'no'} winner ${h.winner} win ${h.win} pnl $${h.pnl.toFixed(2)}`);
+  for (const h of h15) console.log(`  ${fmt(h.windowTs)} entry ${h.entrySide || '—'} legs [${(h.legs || []).map(l => '$' + l.dollars + l.side[0].toUpperCase()).join(' ')}] sells [${(h.sells || []).map(x => x.side[0].toUpperCase() + ' ' + x.shares + 'sh@' + x.price).join(' ')}] 3MG:${h.reachedLevel3 ? 'yes' : 'no'} winner ${h.winner} win ${h.win} pnl $${h.pnl.toFixed(2)} recovered $${(h.sellProceeds || 0).toFixed(2)}`);
   console.log('== resolved 5m ==');
   for (const h of h5) console.log(`  ${fmt(h.windowTs)} entry ${h.entrySide || '—'} legs [${(h.legs || []).map(l => '$' + l.dollars + l.side[0].toUpperCase()).join(' ')}] 3MG:${h.reachedLevel3 ? 'yes' : 'no'} winner ${h.winner} win ${h.win} pnl $${h.pnl.toFixed(2)}`);
   console.log(`bankroll $${s15.bankroll.toFixed(2)} | totalPnl $${s15.realizedPnlTotal.toFixed(2)} | equityCurve ${s15.equityCurve.length} pts | maxDD ${(s15.maxDrawdown.pct * 100).toFixed(2)}% ($${s15.maxDrawdown.dollars.toFixed(2)})`);
@@ -235,21 +237,23 @@ global.fetch = async (url) => {
   check('max drawdown >= 0', s15.maxDrawdown.pct >= 0 && s15.maxDrawdown.dollars >= 0);
   check('max drawdown <= 100%', s15.maxDrawdown.pct <= 1);
 
-  // 9) no double bets per leg level; skipped only where price never hit the band
+  // 9) no double bets per leg level; every window with prices gets an entry
   const noDup = h15new.concat(h5).filter(h => h.legs && h.legs.length)
     .every(h => h.legs.every((l, i) => l.level === i));
   check('leg levels are sequential (no double buys)', noDup);
-  check('windows skipped only when no side hit the band', h5.filter(h => h.skipped === true).every(h => !h.legs || h.legs.length === 0));
+  check('no window is skipped (entry fires on any price)', h5.every(h => h.skipped === false && h.legs.length > 0));
 
-  // 10) never buy above the 0.60-0.62 band (no chasing at 0.70/0.80)
-  const maxEntryPx = Math.max.apply(null, h15new.concat(h5).filter(h => h.legs && h.legs.length)
-    .flatMap(h => h.legs).map(l => l.price));
-  check('no buy above the 0.62 band (max ' + maxEntryPx.toFixed(3) + ')', maxEntryPx <= 0.621);
+  // 10) losing side is closed at each flip: sells match the flipped-away sides
+  const sellsMatch = h15new.concat(h5).filter(h => h.legs && h.legs.length > 1)
+    .every(h => (h.sells || []).every((x, i) => x.side === h.legs[i].side));
+  check('every sell closes the side that was just flipped away', sellsMatch);
+  const recoverPositive = h15new.concat(h5).filter(h => (h.sellProceeds || 0) > 0)
+    .every(h => (h.sells || []).every(x => x.proceeds > 0));
+  check('losing-side sells recover positive capital', recoverPositive);
 
-  // 11) 5m results sanity: multiple settled windows, wins/losses/skips present
+  // 11) 5m results sanity: multiple settled windows, wins and losses present
   check('5m settled at least 6 windows', h5.length >= 6);
   check('5m has both wins and losses', h5.some(h => h.win === true) && h5.some(h => h.win === false));
-  check('5m has skipped (no-band) windows', h5.some(h => h.skipped === true));
   check('5m has a 3rd-martingale window', h5.some(h => h.reachedLevel3 === true));
 
   const allOk = checks.every(([, ok]) => ok);

@@ -7,9 +7,10 @@
  *
  * Strategy (both timeframes, independent, SEPARATE demo capital):
  *   - wait 1m (5m) / 3m (15m) after a window opens
- *   - buy the side that comes back to 0.60-0.62 for $10 worth of shares
+ *   - fire the $10 entry on the LEADING side at ANY price (no come-back wait)
  *   - flip with $20 / $40 / $80 INSTANTLY when the opposite side hits 0.50
  *   - max 3 martingale flips; no flips after 280s (5m) / 870s (15m)
+ *   - flip FIRST, then sell the losing side ~2s later at the current bid
  *   - side above 0.90 at window end is declared the winner
  */
 
@@ -30,6 +31,7 @@ const MARTINGALE_AMOUNTS = (process.env.MARTINGALE_AMOUNTS || '20,40,80')
 const WAIT_SECONDS_5 = Number(process.env.WAIT_SECONDS_5 || 60);
 const WAIT_SECONDS_15 = Number(process.env.WAIT_SECONDS_15 || 180);
 const TRIGGER_SLIP = Number(process.env.TRIGGER_SLIP || 0.02);
+const SELL_DELAY_MS = Number(process.env.SELL_DELAY_MS || 2000);
 const START_AT_BOUNDARY = (process.env.START_AT_BOUNDARY || 'false').toLowerCase() === 'true';
 const FEE_THETA = Number(process.env.FEE_THETA || 0.07);
 const REBATE_PCT = Number(process.env.REBATE_PCT || 0);
@@ -53,6 +55,7 @@ async function init(privateKey, emit, slogFn) {
     waitSeconds5: WAIT_SECONDS_5,
     waitSeconds15: WAIT_SECONDS_15,
     triggerSlip: TRIGGER_SLIP,
+    sellDelayMs: SELL_DELAY_MS,
     startAtBoundary: START_AT_BOUNDARY,
     feeTheta: FEE_THETA,
     rebatePct: REBATE_PCT,

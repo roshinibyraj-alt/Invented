@@ -119,7 +119,7 @@ app.get('/', (_, res) => {
     <button id="resume-btn" class="resume">▶️ Resume Trading</button>
     <button id="live-btn" class="live-toggle">🔴 Switch to LIVE</button>
   </div>
-  <div class="toolbar-note">Strategy: wait 1m (5m) / 3m (15m) after open → buy the side whose price comes back to the 0.60–0.62 band ($10) → flip $20 / $40 / $80 INSTANTLY when the opposite side reaches 0.50 (max 3; no flips after 280s / 870s). 5m and 15m run on SEPARATE demo capital. At window end, the side above 0.90 wins. All shares held to resolution.</div>
+  <div class="toolbar-note">Strategy: wait 1m (5m) / 3m (15m) after open → fire the $10 entry on the LEADING side at ANY price → flip $20 / $40 / $80 INSTANTLY when the opposite side reaches 0.50 (max 3; no flips after 280s / 870s). Flip FIRST, then sell the losing side ~2s later at the bid. 5m and 15m run on SEPARATE demo capital. At window end, the side above 0.90 wins.</div>
   <div id="start-banner" class="start-banner" style="display:none;"></div>
 
   <div class="shared-stats" id="shared-stats"></div>
@@ -162,7 +162,7 @@ app.get('/', (_, res) => {
     if (t.settled) return { label: t.win === true ? 'WIN' : (t.win === false ? 'LOSS' : 'RESOLVED'), cls: t.win === true ? 'status-win' : (t.win === false ? 'status-loss' : 'status-idle') };
     switch (t.phase) {
       case 'waiting': return { label: 'WAITING ' + fmtCountdown(t.countdownMs), cls: 'status-wait' };
-      case 'awaiting-trigger': return { label: 'AWAITING 0.60 BAND', cls: 'status-resting' };
+      case 'awaiting-trigger': return { label: 'FIRING ENTRY', cls: 'status-open' };
       case 'trading': return { label: 'TRADING · MG ' + t.martingaleLevel, cls: 'status-open' };
       case 'pending-resolution': return { label: 'RESOLVING…', cls: 'status-resting' };
       default: return { label: String(t.phase).toUpperCase(), cls: 'status-idle' };
@@ -179,7 +179,7 @@ app.get('/', (_, res) => {
       if (buy) cls += ' placed ' + (buy.side === 'up' ? 'up' : 'down');
       else if (t.buys && t.buys.length === i && (t.phase === 'trading' || t.phase === 'awaiting-trigger')) cls += ' active';
       const side = buy ? (buy.side === 'up' ? 'UP' : 'DOWN') : (t.buys && t.buys.length === i && t.phase === 'trading' ? '…' : '—');
-      const px = buy ? fmtPx(buy.price) : (t.buys && t.buys.length === i && t.phase === 'trading' ? 'watch 0.60' : '');
+      const px = buy ? fmtPx(buy.price) : (t.buys && t.buys.length === i && t.phase === 'trading' ? 'watch 0.50' : '');
       const tip = levels[i].tag + ' $' + levels[i].d + (buy ? ' — ' + buy.side.toUpperCase() + ' @' + fmtPx(buy.price) + ' = ' + fmt2(buy.shares) + 'sh' : '');
       html += '<div class="' + cls + '" title="' + tip + '">' +
         '<div class="lvl-tag">' + levels[i].tag + '</div>' +
@@ -199,9 +199,9 @@ app.get('/', (_, res) => {
     let headline;
     if (t.skipped) headline = '⏸ No bet placed this window';
     else if (t.settled) headline = (t.win === true ? '🏆' : (t.win === false ? '💸' : '🏁')) + ' Window resolved — ' + (t.win == null ? 'no bet' : (t.win ? 'WIN' : 'LOSS')) + ' ' + sgn(t.pnl);
-    else if (t.phase === 'waiting') headline = '⏳ Waiting ' + fmtCountdown(t.countdownMs) + ' — then check for a 0.60+ side';
-    else if (t.phase === 'awaiting-trigger') headline = '🎯 Waiting for a side to come back to 0.60–0.62';
-    else headline = (t.lastSide === 'up' ? '🔵' : '🟣') + ' Trading ' + (t.lastSide || '?').toUpperCase() + ' — flipping if the opposite side hits 0.60';
+    else if (t.phase === 'waiting') headline = '⏳ Waiting ' + fmtCountdown(t.countdownMs) + ' — then fire the $' + s.entryDollars + ' entry on the leading side (any price)';
+    else if (t.phase === 'awaiting-trigger') headline = '🎯 Firing the $' + s.entryDollars + ' entry on the leading side (any price)';
+    else headline = (t.lastSide === 'up' ? '🔵' : '🟣') + ' Trading ' + (t.lastSide || '?').toUpperCase() + ' — flipping if the opposite side hits 0.50';
     let html = '<div class="current-window">' +
       '<div class="headline">' + headline + '</div>' +
       '<div class="row"><span>Window</span><span>' + (leg.slug || '…') + '</span></div>' +
@@ -209,12 +209,14 @@ app.get('/', (_, res) => {
       '<div class="row"><span>Closes in</span><span>' + fmtCountdown(t.closeAt - Date.now()) + '</span></div>' +
       '<div class="row"><span>UP price (ask / bid)</span><span>' + fmtPx(leg.upAsk) + ' / ' + fmtPx(leg.upBid) + '</span></div>' +
       '<div class="row"><span>DOWN price (ask / bid)</span><span>' + fmtPx(leg.downAsk) + ' / ' + fmtPx(leg.downBid) + '</span></div>' +
-      '<div class="row"><span>Trigger band</span><span>' + fmtPx(s.triggerPrice) + '–' + fmtPx(s.triggerPrice + (s.triggerSlip || 0.02)) + ' (wait for price to come back)</span></div>' +
+      '<div class="row"><span>Flip trigger</span><span>opposite side ≥ ' + fmtPx(s.flipTriggerPrice || 0.5) + ' (instant) · entry: leading side @ any price</span></div>' +
       ladderHtml(s, t);
     if (hasBuys) {
       const lastBuy = t.buys[t.buys.length - 1];
       html += '<div class="row"><span>Current side / leg</span><span>' + lastBuy.side.toUpperCase() + ' — $' + fmt2(lastBuy.dollars) + ' @' + fmtPx(lastBuy.price) + ' (' + fmt2(lastBuy.shares) + 'sh)</span></div>' +
-        '<div class="row"><span>Total risked (cost)</span><span>$' + fmt2(t.totalCost) + '</span></div>';
+        '<div class="row"><span>Total risked (cost)</span><span>$' + fmt2(t.totalCost) + '</span></div>' +
+        '<div class="row"><span>Recovered (losing-side sells)</span><span>$' + fmt2(t.sellProceeds || 0) + '</span></div>' +
+        (t.pendingSells && t.pendingSells.length ? '<div class="row"><span>Pending sells</span><span>' + t.pendingSells.length + ' (' + t.pendingSells.map(x => x.side.slice(0, 1).toUpperCase()).join(', ') + ')</span></div>' : '');
       if (t.settled) {
         html += '<div class="row"><span>Final P&amp;L</span><span class="' + pClass(t.pnl) + '">' + sgn(t.pnl) + '</span></div>';
       } else {
@@ -225,11 +227,12 @@ app.get('/', (_, res) => {
   }
 
   function historyRowsHtml(list) {
-    if (!list || !list.length) return '<tr><td colspan="9" class="empty">No resolved windows yet</td></tr>';
+    if (!list || !list.length) return '<tr><td colspan="10" class="empty">No resolved windows yet</td></tr>';
     return list.slice(0, 25).map(function (h) {
       const legTxt = (h.legs || []).map(l => l.side.toUpperCase() + ' $' + l.dollars + ' @' + fmtPx(l.price) + ' = ' + fmt2(l.shares) + 'sh').join(' → ');
+      const sellTxt = (h.sells || []).map(x => x.side.toUpperCase() + ' ' + fmt2(x.shares) + 'sh@' + fmtPx(x.price)).join(', ') || 'none';
       const entry = h.entrySide ? h.entrySide.toUpperCase() + ' $' + (h.legs && h.legs[0] ? h.legs[0].dollars : '') : '—';
-      return '<tr title="' + legTxt + '">' +
+      return '<tr title="' + legTxt + ' | sells: ' + sellTxt + '">' +
         '<td>' + fmtClock(h.windowTs) + '</td>' +
         '<td>' + entry + '</td>' +
         '<td>' + (h.martingaleLevels || 0) + '</td>' +
@@ -238,6 +241,7 @@ app.get('/', (_, res) => {
         '<td class="' + (h.win === true ? 'pnl-pos' : (h.win === false ? 'pnl-neg' : '')) + '">' + (h.win == null ? '—' : (h.win ? 'WIN' : 'LOSS')) + '</td>' +
         '<td>-$' + fmt2(h.wager || 0) + '</td>' +
         '<td>+$' + fmt2(h.payout || 0) + '</td>' +
+        '<td>' + (h.sells ? h.sells.length : 0) + ' · $' + fmt2(h.sellProceeds || 0) + '</td>' +
         '<td class="' + pClass(h.pnl) + '">' + sgn(h.pnl) + '</td></tr>';
     }).join('');
   }
@@ -259,7 +263,7 @@ app.get('/', (_, res) => {
           stat('Reached 3rd MG ($80)', s.windowsReached3rdMartingale) +
         '</div>' +
         currentWindowHtml(s) +
-        '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Window</th><th>Entry</th><th>Legs</th><th>3rdMG</th><th>Winner</th><th>W/L</th><th>Cost</th><th>Payout</th><th>PnL</th></tr></thead>' +'<tbody>' + historyRowsHtml(s.history) + '</tbody></table></div>' +
+        '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Window</th><th>Entry</th><th>Legs</th><th>3rdMG</th><th>Winner</th><th>W/L</th><th>Cost</th><th>Payout</th><th>Sells (rec.)</th><th>PnL</th></tr></thead>' +'<tbody>' + historyRowsHtml(s.history) + '</tbody></table></div>' +
       '</div>';
   }
 

@@ -8,12 +8,12 @@
  *                          => a $10 entry at 0.60 = 16.67 shares, win pays $16.67
  *                             (net profit +$6.67 before the taker fee).
  *
- * Rule 2 (ladder accumulation): when the bot flips up/down/up/down it holds BOTH
- *                          sides. On resolution ALL accumulated winning-side
- *                          shares pay $1 each; ALL other shares expire worthless.
- *                          PnL = (sum of winning-side shares) - (cost of every
- *                          leg incl. taker fee). This is what "martingale, not
- *                          only the final bet" means in accounting terms.
+ * Rule 2 (close the loser at flip): at each flip the bot BUYS the new side
+ *                          first, then ~2s later SELLS the losing side it just
+ *                          left at the current bid (recovering capital). Only
+ *                          the FINAL side is held to resolution.
+ *                          PnL = final payout (final side shares x $1)
+ *                                + sell proceeds - cost of every buy incl. fee.
  *
  * Fee rule (Polymarket docs, crypto category): fee = shares * 0.07 * p * (1-p).
  *
@@ -152,14 +152,11 @@ function expectedCost(dollars, price) {
   console.log('  legs:', legLine(M1));
   console.log(`  payout = ${M1.payout.toFixed(2)} (winning UP shares 16.39 x $1) | wager(cost) = ${M1.wager.toFixed(2)} | pnl = ${M1.pnl.toFixed(2)} | win=${M1.win}`);
 
-  console.log('\n== M2: full ladder UP/DOWN/UP/DOWN, winner DOWN ==');
+  console.log('\n== M2: full ladder UP/DOWN/UP/DOWN with losing-side closes, winner DOWN ==');
   console.log('  legs:', legLine(M2));
-  const upShares = M2.legs.filter(l => l.side === 'up').reduce((s, l) => s + l.shares, 0);
-  const downShares = M2.legs.filter(l => l.side === 'down').reduce((s, l) => s + l.shares, 0);
-  console.log(`  accumulated UP shares   = ${upShares.toFixed(2)}  (expire worthless when DOWN wins)`);
-  console.log(`  accumulated DOWN shares = ${downShares.toFixed(2)}  (pay $1 each = $${downShares.toFixed(2)})`);
-  console.log(`  payout = ${M2.payout.toFixed(2)} | wager(cost) = ${M2.wager.toFixed(2)} | pnl = ${M2.pnl.toFixed(2)} | win=${M2.win}`);
-  console.log(`  -> the $80 final leg wins, but the window nets only +$${M2.pnl.toFixed(2)} because the $50 of UP shares expired worthless.`);
+  console.log('  sells:', (M2.sells || []).map(x => `${x.side.toUpperCase()} ${x.shares.toFixed(2)}sh @${x.price.toFixed(2)} = $${x.proceeds.toFixed(2)}`).join(' | '));
+  console.log(`  payout = ${M2.payout.toFixed(2)} (FINAL held DOWN ${M2.payout.toFixed(2)}sh x $1) | wager = ${M2.wager.toFixed(2)} | recovered = ${(M2.sellProceeds || 0).toFixed(2)} | pnl = ${M2.pnl.toFixed(2)} | win=${M2.win}`);
+  console.log(`  -> every side that was flipped away is sold at 0.40; only the FINAL DOWN $80 leg is held to resolution.`);
 
   const checks = [];
   const check = (name, ok) => { checks.push([name, ok]); console.log((ok ? 'PASS ' : 'FAIL ') + name); };
@@ -171,16 +168,18 @@ function expectedCost(dollars, price) {
   check('M1: cost = notional + fee (10.00 + 0.27)', Math.abs(M1.wager - e1.cost) < 0.01 && Math.abs(e1.fee - 0.27) < 0.005);
   check('M1: pnl = payout - wager', Math.abs(M1.pnl - (M1.payout - M1.wager)) < 0.01);
 
-  // Rule 2: ALL accumulated winning-side shares pay, not just the final bet
-  check('M2: payout = BOTH down legs ($20+$80) shares x $1', Math.abs(M2.payout - downShares) < 0.01 && Math.abs(M2.payout - 163.94) < 0.02);
-  check('M2: pnl accounts for ALL 4 legs cost (~154.09)', Math.abs(M2.wager - 154.09) < 0.02);
-  check('M2: pnl = payout - wager (+9.85)', Math.abs(M2.pnl - (M2.payout - M2.wager)) < 0.01 && M2.pnl > 9.8 && M2.pnl < 9.9);
+  // Rule 2: the losing side is CLOSED at each flip — only the final side is
+  // held; pnl = final payout + sell proceeds - total buy cost.
+  check('M2: exactly 3 losing-side sells (U, D, U)', M2 && M2.sells.length === 3 && JSON.stringify(M2.sells.map(x => x.side)) === JSON.stringify(['up', 'down', 'up']));
+  check('M2: sells close the exact flipped-away quantities (16.39/32.79/65.57)', M2 && Math.abs(M2.sells[0].shares - 16.39) < 0.02 && Math.abs(M2.sells[1].shares - 32.79) < 0.02 && Math.abs(M2.sells[2].shares - 65.57) < 0.02);
+  check('M2: payout = FINAL held side shares x $1 (131.15)', M2 && Math.abs(M2.payout - 131.15) < 0.02);
+  check('M2: pnl accounts for ALL 4 legs cost (~154.09)', M2 && Math.abs(M2.wager - 154.09) < 0.02);
+  check('M2: pnl = payout + sellProceeds - wager (+21.04)', M2 && Math.abs(M2.pnl - (M2.payout + M2.sellProceeds - M2.wager)) < 0.01 && M2.pnl > 20.9 && M2.pnl < 21.2);
 
-  // Cross-check: if the same ladder had resolved UP instead, the math says -72.13
-  const upLosePayout = upShares;
-  const upLosePnl = round2(upLosePayout - M2.wager);
-  console.log(`\n  (what-if: same ladder resolves UP -> payout $${upLosePayout.toFixed(2)} - cost $${M2.wager.toFixed(2)} = pnl $${upLosePnl.toFixed(2)})`);
-  check('M2: what-if UP winner -> pnl -72.13 (both up legs pay, both down legs expire)', Math.abs(upLosePnl + 72.13) < 0.02);
+  // What-if: winner UP -> the FINAL held side is DOWN, so UP pays nothing
+  const upLosePnl = round2((M2.sellProceeds || 0) - M2.wager);
+  console.log(`\n  (what-if: same ladder resolves UP -> final DOWN leg expires, payout $0 + recovered $${(M2.sellProceeds || 0).toFixed(2)} - cost $${M2.wager.toFixed(2)} = pnl $${upLosePnl.toFixed(2)})`);
+  check('M2: what-if UP winner -> pnl -110.11 (final side lost, only sells recovered)', Math.abs(upLosePnl + 110.11) < 0.02);
 
   const allOk = checks.every(([, ok]) => ok);
   console.log(allOk ? '\n✅ MATH CHECK PASSED — engine P&L matches Polymarket payout + fee rules' : '\n❌ MATH CHECK FAILED');
