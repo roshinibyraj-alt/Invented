@@ -6,7 +6,7 @@
  * (the dashboard) talks to.
  *
  * Strategy (both timeframes, independent, SEPARATE demo capital):
- *   - wait 1m (5m) / 3m (15m) after a window opens
+ *   - wait 2m (5m) / 6m (15m) after a window opens
  *   - fire the $50 entry on the LEADING side at ANY price (no come-back wait)
  *   - ONE flip of $100 (2x the $50 entry) INSTANTLY when the opposite side hits 0.50
  *   - no flips after 280s (5m) / 870s (15m)
@@ -28,8 +28,8 @@ const FLIP_CUTOFF_SECONDS_15 = Number(process.env.FLIP_CUTOFF_SECONDS_15 || 870)
 const ENTRY_DOLLARS = Number(process.env.ENTRY_DOLLARS || 50);
 const MARTINGALE_AMOUNTS = (process.env.MARTINGALE_AMOUNTS || '100')
   .split(',').map(v => Number(String(v).trim())).filter(Number.isFinite);
-const WAIT_SECONDS_5 = Number(process.env.WAIT_SECONDS_5 || 60);
-const WAIT_SECONDS_15 = Number(process.env.WAIT_SECONDS_15 || 180);
+const WAIT_SECONDS_5 = Number(process.env.WAIT_SECONDS_5 || 120);
+const WAIT_SECONDS_15 = Number(process.env.WAIT_SECONDS_15 || 360);
 const TRIGGER_SLIP = Number(process.env.TRIGGER_SLIP || 0.02);
 const SELL_DELAY_MS = Number(process.env.SELL_DELAY_MS || 2000);
 const START_AT_BOUNDARY = (process.env.START_AT_BOUNDARY || 'false').toLowerCase() === 'true';

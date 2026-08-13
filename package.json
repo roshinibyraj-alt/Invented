@@ -1,7 +1,7 @@
 {
   "name": "btc-060-martingale-bot",
   "version": "2.0.0",
-  "description": "BTC 5m/15m Up/Down martingale bot for Polymarket — wait 1m/3m after open, fire the $50 entry on the leading side at any price, ONE $100 flip instantly when the opposite side hits 0.50 (no flips after 280s/870s, losing side sold ~2s later), separate demo capital per timeframe, side above 0.90 wins, with live equity/drawdown/win-rate dashboard.",
+  "description": "BTC 5m/15m Up/Down martingale bot for Polymarket — wait 2m/6m after open, fire the $50 entry on the leading side at any price, ONE $100 flip instantly when the opposite side hits 0.50 (no flips after 280s/870s, losing side sold ~2s later), separate demo capital per timeframe, side above 0.90 wins, with live equity/drawdown/win-rate dashboard.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",

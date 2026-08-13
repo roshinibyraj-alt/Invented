@@ -10,8 +10,8 @@
  *  New strategy, per window (5m and 15m windows are independent):
  *
  *  1. When a window opens, the bot does NOT bet immediately. It waits:
- *        - 1 minute after a 5m window opens
- *        - 3 minutes after a 15m window opens
+ *        - 2 minutes after a 5m window opens
+ *        - 6 minutes after a 15m window opens (proportional 3x)
  *  2. When the wait ends, the bot fires the $50 entry IMMEDIATELY on
  *     the leading side (the higher-priced side) at WHATEVER the price
  *     is — no waiting for the price to come back to 0.60.
@@ -67,8 +67,8 @@ function createEngine(cfg) {
     entryDollars = 50,
     martingaleAmounts = [100],
     maxFlips = 1,
-    waitSeconds5 = 60,
-    waitSeconds15 = 180,
+    waitSeconds5 = 120,
+    waitSeconds15 = 360,
     windowSeconds15 = 900,
     windowSeconds5 = 300,
     feeTheta = 0.07,

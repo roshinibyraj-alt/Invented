@@ -119,7 +119,7 @@ app.get('/', (_, res) => {
     <button id="resume-btn" class="resume">▶️ Resume Trading</button>
     <button id="live-btn" class="live-toggle">🔴 Switch to LIVE</button>
   </div>
-  <div class="toolbar-note">Strategy: wait 1m (5m) / 3m (15m) after open → fire the $50 entry on the LEADING side at ANY price → ONE $100 flip INSTANTLY when the opposite side reaches 0.50 (no flips after 280s / 870s). Flip FIRST, then sell the losing side ~2s later at the bid. 5m and 15m run on SEPARATE demo capital. At window end, the side above 0.90 wins.</div>
+  <div class="toolbar-note">Strategy: wait 2m (5m) / 6m (15m) after open → fire the $50 entry on the LEADING side at ANY price → ONE $100 flip INSTANTLY when the opposite side reaches 0.50 (no flips after 280s / 870s). Flip FIRST, then sell the losing side ~2s later at the bid. 5m and 15m run on SEPARATE demo capital. At window end, the side above 0.90 wins.</div>
   <div id="start-banner" class="start-banner" style="display:none;"></div>
 
   <div class="shared-stats" id="shared-stats"></div>
@@ -394,8 +394,8 @@ app.get('/', (_, res) => {
       banner.style.display = 'none';
     }
     $('shared-stats').innerHTML = sharedStatsHtml();
-    $('panel-m5').innerHTML = panelHtml('m5', 'BTC 5-Minute — wait 1 min', latest.m5);
-    $('panel-m15').innerHTML = panelHtml('m15', 'BTC 15-Minute — wait 3 min', latest.m15);
+    $('panel-m5').innerHTML = panelHtml('m5', 'BTC 5-Minute — wait 2 min', latest.m5);
+    $('panel-m15').innerHTML = panelHtml('m15', 'BTC 15-Minute — wait 6 min', latest.m15);
     drawEquityChart();
     if (any) {
       const anyLive = (latest.m5 && !latest.m5.dryRun) || (latest.m15 && !latest.m15.dryRun);
