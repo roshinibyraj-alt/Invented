@@ -66,7 +66,7 @@ function createEngine(cfg) {
     candleRefreshMs = 15000,
     trader,
     dryRun = true,
-    startAtBoundary = true,
+    startAtBoundary = false,
     statsStatePath,
     emit = () => {},
     slog = () => {},
@@ -763,7 +763,13 @@ function createEngine(cfg) {
   }
 
   async function start() {
-    slog(`[${label.toLowerCase()}] ⛏ ${label} — 0.60 martingale engine (5m & 15m), fully automatic`);
+    if (startAtBoundary) {
+      slog(`[${label.toLowerCase()}] ⛏ ${label} — 0.60 martingale engine (5m & 15m), fully automatic`);
+      slog(`[${label.toLowerCase()}] ⚙️  startAtBoundary=true — trading begins at the next 15m boundary; until then no windows are opened.`);
+    } else {
+      slog(`[${label.toLowerCase()}] ⛏ ${label} — 0.60 martingale engine (5m & 15m), fully automatic`);
+      slog(`[${label.toLowerCase()}] ⚙️  Starting immediately — 5m/15m windows are independent; each window waits its own 1m/3m then triggers on the 0.60 band.`);
+    }
     slog(`[${label.toLowerCase()}] ⚙️  Window rules: wait ${waitSeconds5}s (5m) / ${waitSeconds15}s (15m) after open, then buy the side whose price is back in the ${TRIGGER_PRICE.toFixed(2)}–${(TRIGGER_PRICE + triggerSlip).toFixed(2)} band for $${entryDollars.toFixed(2)}.`);
     slog(`[${label.toLowerCase()}] ⚙️  Martingale flips: $${martingaleAmounts.join(' / ')} when the opposite side comes back into the ${TRIGGER_PRICE.toFixed(2)}–${(TRIGGER_PRICE + triggerSlip).toFixed(2)} band (max ${martingaleAmounts.length} flips). All shares held to resolution.`);
     slog(`[${label.toLowerCase()}] ⚙️  One shared bankroll of $${engine.bankroll.toFixed(2)} across both timeframes.`);

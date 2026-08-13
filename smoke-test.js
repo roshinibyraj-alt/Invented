@@ -138,6 +138,7 @@ global.fetch = async (url) => {
     windowSeconds15: W15,
     windowSeconds5: W5,
     dryRun: true,
+    startAtBoundary: true,
     nowFn: () => virtualNow,
     tickMs: 1,
     emit: (ev, s) => {

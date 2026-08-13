@@ -105,6 +105,7 @@ app.get('/', (_, res) => {
   .empty { padding: 16px; text-align: center; color: var(--muted); font-size: 9.5px; }
   .log-panel { background: #0d1420; color: #cfe8ff; border-radius: 10px; padding: 10px 12px; max-height: 240px; overflow-y: auto; font-size: 9.5px; margin: 0 20px 20px; }
   .log-panel div { padding: 1px 0; }
+  .start-banner { margin: 10px 20px 0; padding: 8px 14px; border-radius: 8px; font-size: 10.5px; background: #ffd74022; color: var(--yellow); border: 1px solid var(--yellow); }
 </style>
 </head>
 <body>
@@ -119,6 +120,7 @@ app.get('/', (_, res) => {
     <button id="live-btn" class="live-toggle">🔴 Switch to LIVE</button>
   </div>
   <div class="toolbar-note">Strategy: wait 1m (5m) / 3m (15m) after open → buy the side whose price comes back to the 0.60–0.62 band ($10) → flip $20 / $40 / $80 when the opposite side comes back to the band (max 3). All shares held to window resolution.</div>
+  <div id="start-banner" class="start-banner" style="display:none;"></div>
 
   <div class="shared-stats" id="shared-stats"></div>
 
@@ -363,11 +365,18 @@ app.get('/', (_, res) => {
   }
 
   function render() {
+    const any = latest.m5 || latest.m15;
+    const banner = $('start-banner');
+    if (any && any.waitingForBoundary && any.boundaryWindowTs) {
+      banner.style.display = 'block';
+      banner.textContent = '⏳ Starting at the next 15m boundary (' + fmtClock(any.boundaryWindowTs) + ' UTC) — no windows are open yet.';
+    } else {
+      banner.style.display = 'none';
+    }
     $('shared-stats').innerHTML = sharedStatsHtml();
     $('panel-m5').innerHTML = panelHtml('m5', 'BTC 5-Minute — wait 1 min', latest.m5);
     $('panel-m15').innerHTML = panelHtml('m15', 'BTC 15-Minute — wait 3 min', latest.m15);
     drawEquityChart();
-    const any = latest.m5 || latest.m15;
     if (any) {
       const anyLive = (latest.m5 && !latest.m5.dryRun) || (latest.m15 && !latest.m15.dryRun);
       $('mode-badge').className = 'mode-badge ' + (anyLive ? 'mode-live' : 'mode-dry');
@@ -399,6 +408,15 @@ app.get('/', (_, res) => {
   socket.on('log', (line) => { allLogs.push(line); if (allLogs.length > 300) allLogs.shift(); renderLogs(); });
 
   setInterval(render, 1000);
+  setInterval(async () => {
+    try {
+      const res = await fetch('/api/hedge/status');
+      const st = await res.json();
+      if (st && st.m5) latest.m5 = st.m5;
+      if (st && st.m15) latest.m15 = st.m15;
+      render();
+    } catch (_) {}
+  }, 10000);
   render();
 </script>
 </body>

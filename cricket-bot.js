@@ -25,6 +25,7 @@ const MARTINGALE_AMOUNTS = (process.env.MARTINGALE_AMOUNTS || '20,40,80')
 const WAIT_SECONDS_5 = Number(process.env.WAIT_SECONDS_5 || 60);
 const WAIT_SECONDS_15 = Number(process.env.WAIT_SECONDS_15 || 180);
 const TRIGGER_SLIP = Number(process.env.TRIGGER_SLIP || 0.02);
+const START_AT_BOUNDARY = (process.env.START_AT_BOUNDARY || 'false').toLowerCase() === 'true';
 const FEE_THETA = Number(process.env.FEE_THETA || 0.07);
 const REBATE_PCT = Number(process.env.REBATE_PCT || 0);
 
@@ -43,6 +44,7 @@ async function init(privateKey, emit, slogFn) {
     waitSeconds5: WAIT_SECONDS_5,
     waitSeconds15: WAIT_SECONDS_15,
     triggerSlip: TRIGGER_SLIP,
+    startAtBoundary: START_AT_BOUNDARY,
     feeTheta: FEE_THETA,
     rebatePct: REBATE_PCT,
     statsStatePath: process.env.STATS_STATE_PATH || path.join(__dirname, 'stats-state-hedge.json'),
