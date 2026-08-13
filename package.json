@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node index.js",
     "test": "node smoke-test.js",
-    "test:full": "node smoke-full-window.js"
+    "test:full": "node smoke-full-window.js",
+    "test:math": "node math-check.js"
   },
   "engines": {
     "node": ">=18.0.0"

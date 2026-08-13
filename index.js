@@ -225,9 +225,9 @@ app.get('/', (_, res) => {
   }
 
   function historyRowsHtml(list) {
-    if (!list || !list.length) return '<tr><td colspan="7" class="empty">No resolved windows yet</td></tr>';
+    if (!list || !list.length) return '<tr><td colspan="9" class="empty">No resolved windows yet</td></tr>';
     return list.slice(0, 25).map(function (h) {
-      const legTxt = (h.legs || []).map(l => l.side.toUpperCase() + ' $' + l.dollars + ' @' + fmtPx(l.price)).join(' → ');
+      const legTxt = (h.legs || []).map(l => l.side.toUpperCase() + ' $' + l.dollars + ' @' + fmtPx(l.price) + ' = ' + fmt2(l.shares) + 'sh').join(' → ');
       const entry = h.entrySide ? h.entrySide.toUpperCase() + ' $' + (h.legs && h.legs[0] ? h.legs[0].dollars : '') : '—';
       return '<tr title="' + legTxt + '">' +
         '<td>' + fmtClock(h.windowTs) + '</td>' +
@@ -236,6 +236,8 @@ app.get('/', (_, res) => {
         '<td>' + (h.reachedLevel3 ? '✓' : '—') + '</td>' +
         '<td>' + (h.winner || '?').toUpperCase() + '</td>' +
         '<td class="' + (h.win === true ? 'pnl-pos' : (h.win === false ? 'pnl-neg' : '')) + '">' + (h.win == null ? '—' : (h.win ? 'WIN' : 'LOSS')) + '</td>' +
+        '<td>-$' + fmt2(h.wager || 0) + '</td>' +
+        '<td>+$' + fmt2(h.payout || 0) + '</td>' +
         '<td class="' + pClass(h.pnl) + '">' + sgn(h.pnl) + '</td></tr>';
     }).join('');
   }
@@ -255,8 +257,7 @@ app.get('/', (_, res) => {
           stat('Reached 3rd MG ($80)', s.windowsReached3rdMartingale) +
         '</div>' +
         currentWindowHtml(s) +
-        '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Window</th><th>Entry</th><th>Legs</th><th>3rdMG</th><th>Winner</th><th>W/L</th><th>PnL</th></tr></thead>' +
-        '<tbody>' + historyRowsHtml(s.history) + '</tbody></table></div>' +
+        '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Window</th><th>Entry</th><th>Legs</th><th>3rdMG</th><th>Winner</th><th>W/L</th><th>Cost</th><th>Payout</th><th>PnL</th></tr></thead>' +'<tbody>' + historyRowsHtml(s.history) + '</tbody></table></div>' +
       '</div>';
   }
 
