@@ -1,78 +1,90 @@
 'use strict';
 
 /**
- * Full-window smoke test — proves the $50-entry + ONE-$20-flip strategy
- * inside real-sized 5m windows (300s, 60s wait) on the virtual clock.
+ * Full-window smoke test for the 0.60 pullback martingale engine.
+ * Real-sized 5m windows (300s, 60s wait) on a virtual clock.
  *
- * Window A (t0):     UP entry $50 -> ONE flip DOWN $20, winner DOWN
- *                    (single flip is the max allowed; final DOWN leg is held)
- * Window B (t0+300): UP entry $50; the DOWN touch only lands at T+290 (after
- *                    the 280s flip cutoff) -> NO flip fires (cutoff works)
- * Window D (t0+600): BOTH sides already at 0.60+ when the wait ends (UP 0.61,
- *                    DOWN 0.60, never leaving) -> entry fires, the ONE flip
- *                    fires instantly, and NO second flip happens even though
- *                    prices stay >= 0.50 (max-1 cap holds on the instant path)
- * Window E (t0+900): UP entry $50 fires at 0.78 — FAR above the old 0.60–0.62
- *                    band cap, proving the entry fires at ANY price — then UP
- *                    falls and opposite DOWN sits at 0.49 (below the trigger)
- *                    for 5s, then reaches 0.50 -> DOWN $100 flip fires only at
- *                    0.50 — proves the 0.50 martingale trigger (never below).
- * Window C (t0+1200): UP entry $50, DOWN never reaches 0.50 -> no flip.
+ * Window A (t0):     pullback entry UP, 1 stop loss + 1 martingale re-entry, win
+ * Window B (t0+300): no entry (side never reaches 0.60+)
+ * Window C (t0+600): pullback entry UP, 2 stop losses + 2 martingale re-entries, loss
+ * Window D (t0+900): pullback entry UP, no stop loss, win
+ * Window E (t0+1200): pullback entry UP, 1 stop loss + 1 martingale re-entry, loss
  *
- * 15m windows: up stays 0.61; DOWN touches 0.50 only at T+880 (after the 870s
- *              flip cutoff) -> the 15m flip must NOT fire (cutoff works there too).
+ * 15m window: pullback entry UP, 1 stop loss, no re-entry (reached max), loss
  *
- * Flips fire INSTANTLY at the opposite side reaching 0.50; ~2s later the
- * losing side that was just flipped away is SOLD at the bid (flip first, then
- * close the loser) — so only the FINAL side is still held at resolution and
- * window PnL = final-side payout + sell proceeds - total cost.
- *
- * Band touches are 30s holds at ask 0.61; non-touched sides sit at 0.40,
- * everything is 0.50 during the wait.
- *
- * Usage: node smoke-full-window.js   (virtual clock, ~4 seconds)
+ * Stop loss bid pattern: bid drops to 0.40 at stop time, recovers to 0.50 after 5s
+ * so the next martingale entry can fire. After max martingale is reached, bid stays low.
  */
 
 const { createEngine } = require('./engine-factory');
 
-const W5 = 300;
-const WAIT5 = 60;
-const FLIP_HOLD_MS = 30000;
-
+const W5 = 300, WAIT5 = 60;
+const W15 = 900, WAIT15 = 180;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+let virtualNow = 0, T0 = 0;
 
-let virtualNow = 0; // set to a clean 5m boundary before start
-let T0 = 0;
+// Stop loss times are in seconds AFTER the wait ends.
+// Each stop loss lasts 5s (bid=0.40), then recovers (bid=0.50).
+const SCHEDULE_5 = [
+  { offset: 0,    entry: 'up', highAfterMs: 70, gapMs: 3000, stopLosses: [90], winner: 'up' },         // A: 1 stop, win
+  { offset: 300,  entry: null, highAfterMs: null, gapMs: 3000, stopLosses: [], winner: 'up' },           // B: no entry
+  { offset: 600,  entry: 'up', highAfterMs: 70, gapMs: 3000, stopLosses: [90, 160], winner: 'down' },   // C: 2 stops, loss
+  { offset: 900,  entry: 'up', highAfterMs: 70, gapMs: 3000, stopLosses: [], winner: 'up' },            // D: no stop, win
+  { offset: 1200, entry: 'up', highAfterMs: 70, gapMs: 3000, stopLosses: [90], winner: 'down' },        // E: 1 stop, loss
+];
+const SCHEDULE_15 = [
+  { entry: 'up', highAfterMs: 200, gapMs: 3000, stopLosses: [300], winner: 'down' },
+];
 
-function scheduleFor(ts) {
-  if (ts === T0)            return { entry: 'up', flips: ['down'], winner: 'down' };               // A: entry + one flip
-  if (ts === T0 + W5)       return { entry: 'up', flips: ['down'], winner: 'up', late3: true };     // B: flip touch after 280s cutoff -> no flip
-  if (ts === T0 + 2 * W5)   return { entry: 'up', flips: ['down'], winner: 'down', instant: true }; // D: both sides at 0.60+ -> instant single flip
-  if (ts === T0 + 3 * W5)   return { entry: 'up', flips: ['down'], winner: 'down', flipAt05: true };// E: flip exactly at 0.50
-  return                     { entry: 'up', flips: [], winner: 'up' };                              // C: no touch, no flip
+const STOP_RECOVERY_S = 5; // bid recovers 5s after stop loss
+
+function schedLookup(list, ts) {
+  for (const s of list) if (s.offset !== undefined && ts === T0 + s.offset) return s;
+  // For lists without offsets (like 15m), return first entry for any ts
+  if (list.length === 1 && list[0].offset === undefined) return list[0];
+  return { entry: null, highAfterMs: null, gapMs: 3000, stopLosses: [], winner: 'up' };
 }
 
-// Which side's ask is at 0.61 at virtual time `now` for 5m window `ts`?
-function highSideAt(ts, now) {
-  const s = scheduleFor(ts);
-  const waitMs = (ts + WAIT5) * 1000;
-  const closeMs = (ts + W5) * 1000;
-  if (now < waitMs || now >= closeMs) return null; // waiting or resolved
-  if (s.late3) {
-    // B: entry at waitMs; the single DOWN touch only lands 10s before close
-    // (after the 280s flip cutoff) -> NO flip may fire this window.
-    if (now >= closeMs - 10000) return 'down';
-    return s.entry;
+function askForSide5(ts, offsetMs) {
+  const s = schedLookup(SCHEDULE_5, ts);
+  if (!s.entry || s.highAfterMs == null) return 0.50;
+  const highAt = WAIT5 * 1000 + s.highAfterMs * 1000;
+  if (offsetMs < highAt) return 0.55;
+  if (offsetMs < highAt + (s.gapMs || 3000)) return 0.62;
+  return 0.60;
+}
+
+function bidForSide5(ts, offsetMs) {
+  const s = schedLookup(SCHEDULE_5, ts);
+  if (!s.entry) return 0.50;
+  const waitMs = WAIT5 * 1000;
+  for (const sl of s.stopLosses) {
+    const slStart = waitMs + sl * 1000;
+    // Bid is 0.40 only at the exact stop loss moment (1 tick), then recovers.
+    // This models: position is sold at 0.40, then bid recovers for next entry.
+    if (offsetMs >= slStart && offsetMs < slStart + 500) return 0.40;
   }
-  let high = s.entry;
-  for (let i = 0; i < s.flips.length; i++) {
-    const touchAt = waitMs + (i + 1) * FLIP_HOLD_MS;
-    if (now >= touchAt && now < touchAt + FLIP_HOLD_MS) { high = s.flips[i]; break; }
+  return 0.50;
+}
+
+function askForSide15(ts, offsetMs) {
+  const s = schedLookup(SCHEDULE_15, ts);
+  if (!s.entry || s.highAfterMs == null) return 0.50;
+  const highAt = WAIT15 * 1000 + s.highAfterMs * 1000;
+  if (offsetMs < highAt) return 0.55;
+  if (offsetMs < highAt + (s.gapMs || 3000)) return 0.62;
+  return 0.60;
+}
+
+function bidForSide15(ts, offsetMs) {
+  const s = schedLookup(SCHEDULE_15, ts);
+  if (!s.entry) return 0.50;
+  const waitMs = WAIT15 * 1000;
+  for (const sl of s.stopLosses) {
+    const slStart = waitMs + sl * 1000;
+    if (offsetMs >= slStart && offsetMs < slStart + 500) return 0.40;
   }
-  if (s.flips.length && now >= waitMs + (s.flips.length + 1) * FLIP_HOLD_MS) {
-    high = s.flips[s.flips.length - 1]; // hold the last touched side until close
-  }
-  return high;
+  return 0.50;
 }
 
 global.fetch = async (url) => {
@@ -84,8 +96,9 @@ global.fetch = async (url) => {
     const base = Math.floor(virtualNow / (intervalSec * 1000)) * (intervalSec * 1000);
     const rows = [];
     for (let i = 0; i < limit; i++) {
-      const ct = base - i * intervalSec * 1000;
-      rows.push([ct - intervalSec * 1000, '60000', '60025', '59985', '60010', '100', ct, '1', '1', '1', '1', '1']);
+      const closeTime = base - i * intervalSec * 1000;
+      const openTime = closeTime - intervalSec * 1000;
+      rows.push([openTime, '60000', '60025', '59985', '60010', '100', closeTime, '1', '1', '1', '1', '1']);
     }
     return new Response(JSON.stringify(rows), { status: 200 });
   }
@@ -99,7 +112,7 @@ global.fetch = async (url) => {
     const m = u.match(/condition_ids=cond-(\d+)-(\d+)/);
     const tf = m ? (m[1] === '5' ? '5' : '15') : '15';
     const ts = m ? Number(m[2]) : T0;
-    const w = tf === '5' ? scheduleFor(ts).winner : 'up';
+    const w = tf === '5' ? schedLookup(SCHEDULE_5, ts).winner : schedLookup(SCHEDULE_15, ts).winner;
     return new Response(JSON.stringify([{ conditionId: `cond-${tf}-${ts}`, closed: true, outcomes: '["Up","Down"]', clobTokenIds: `["u${tf}-${ts}","d${tf}-${ts}"]`, outcomePrices: w === 'up' ? '[ "1.0", "0.0" ]' : '[ "0.0", "1.0" ]' }]), { status: 200 });
   }
   if (u.includes('clob.polymarket.com/price')) {
@@ -107,30 +120,21 @@ global.fetch = async (url) => {
     const tf = m ? (m[2] === '5' ? '5' : '15') : '15';
     const ts = m ? Number(m[3]) : T0;
     const side = m && m[1] === 'u' ? 'up' : 'down';
+    const wsec = tf === '5' ? W5 : W15;
+    const s = tf === '5' ? schedLookup(SCHEDULE_5, ts) : schedLookup(SCHEDULE_15, ts);
+    const urlSide = u.includes('side=SELL') ? 'SELL' : 'BUY';
     let price = 0.5;
-    if (tf === '5') {
-      const closeMs = (ts + W5) * 1000;
-      if (virtualNow >= closeMs) {
-        // resolved: winner pays 1.00, loser dust — fast resolution must pick the scripted winner
-        const w = scheduleFor(ts).winner;
-        price = side === w ? 1.0 : 0.01;
-      } else if (scheduleFor(ts).instant) {
-        price = side === 'up' ? 0.61 : 0.60; // D: both sides already at 0.60+ when the wait ends
-      } else if (scheduleFor(ts).flipAt05) {
-        // E: up is 0.78 (any price — far above the old 0.60–0.62 band cap) only
-        // for the entry, then falls; DOWN sits at 0.49 (below the 0.50 trigger)
-        // for 5s and only then reaches 0.50 -> flip must fire at 0.50
-        const eWaitMs = (ts + WAIT5) * 1000;
-        if (virtualNow < eWaitMs + 1000) price = side === 'up' ? 0.78 : 0.40;
-        else if (virtualNow < eWaitMs + 6000) price = side === 'up' ? 0.40 : 0.49;
-        else price = side === 'up' ? 0.40 : 0.50;
+    if (virtualNow >= (ts + wsec) * 1000) {
+      price = s.winner === side ? 1.0 : 0.01;
+    } else if (s.entry && side === s.entry) {
+      const offset = virtualNow - ts * 1000;
+      if (urlSide === 'BUY') {
+        price = tf === '5' ? askForSide5(ts, offset) : askForSide15(ts, offset);
       } else {
-        const high = highSideAt(ts, virtualNow);
-        if (high) price = side === high ? 0.61 : 0.40;
+        price = tf === '5' ? bidForSide5(ts, offset) : bidForSide15(ts, offset);
       }
-    } else if (virtualNow >= (ts + 180) * 1000 && virtualNow < (ts + 900) * 1000) {
-      // up stays 0.61; DOWN touches 0.50 only after the 870s cutoff -> no flip
-      price = side === 'up' ? 0.61 : (virtualNow >= (ts + 880) * 1000 ? 0.50 : 0.40);
+    } else if (s.entry && side !== s.entry) {
+      price = urlSide === 'BUY' ? 0.40 : 0.35;
     }
     return new Response(JSON.stringify({ price: String(price) }), { status: 200 });
   }
@@ -139,136 +143,79 @@ global.fetch = async (url) => {
 
 (async () => {
   const states = {};
-  const logs = [];
-
-  // Start on a clean 5m boundary so the first window is a full 300s window.
   virtualNow = Math.floor(Date.now() / (W5 * 1000)) * (W5 * 1000) + W5 * 1000;
-
   const engine = createEngine({
-    startingCapital: 4000,
-    entryDollars: 50,
-    martingaleAmounts: [100],
-    waitSeconds5: WAIT5,
-    waitSeconds15: 180,
-    windowSeconds15: 900,
-    windowSeconds5: W5,
-    triggerSlip: 0.02,
-    dryRun: true,
-    startAtBoundary: false,
-    tickMs: 1,
-    nowFn: () => virtualNow,
-    emit: (ev, s) => { states[ev] = s; },
-    slog: (l) => { logs.push(l); },
+    startingCapital: 4000, entryPrice: 0.60, stopLossPrice: 0.49,
+    entryDollars: 50, martingaleMultiplier: 1.5, maxMartingaleLevels: 3,
+    waitSeconds5: WAIT5, waitSeconds15: WAIT15, windowSeconds15: W15, windowSeconds5: W5,
+    dryRun: true, startAtBoundary: false, tickMs: 1, priceRefreshMs: 1,
+    nowFn: () => virtualNow, emit: (ev, s) => { states[ev] = s; }, slog: () => {},
   });
-
   await engine.start();
-  await sleep(30); // let the first tick open the current window
+  await sleep(30);
   T0 = states['hedgeState:BTC-5m'].current.btc.windowTs;
-  console.log(`5m start window: ${new Date(T0 * 1000).toISOString()}`);
 
-  // Drive virtual time through 3 full windows + settle margin.
   const endAt = (T0 + 5 * W5 + 30) * 1000;
-  while (virtualNow < endAt) {
-    virtualNow += 500;
-    await sleep(1);
-  }
+  while (virtualNow < endAt) { virtualNow += 500; await sleep(1); }
   await sleep(50);
 
   const st5 = states['hedgeState:BTC-5m'];
   const st15 = states['hedgeState:BTC-15m'];
-  const byTs = new Map((st5.history || []).map(h => [h.windowTs, h]));
-  const fmt = ts => new Date(ts * 1000).toISOString().slice(11, 19);
-
+  const byTs5 = new Map((st5.history || []).map(h => [h.windowTs, h]));
+  const byTs15 = new Map((st15.history || []).map(h => [h.windowTs, h]));
   const checks = [];
   const check = (name, ok) => { checks.push([name, ok]); console.log((ok ? 'PASS ' : 'FAIL ') + name); };
 
-  const A = byTs.get(T0);
-  const B = byTs.get(T0 + W5);
-  const D = byTs.get(T0 + 2 * W5);
-  const E = byTs.get(T0 + 3 * W5);
-  const C = byTs.get(T0 + 4 * W5);
+  const A = byTs5.get(T0);
+  const B = byTs5.get(T0 + W5);
+  const C = byTs5.get(T0 + 2 * W5);
+  const D = byTs5.get(T0 + 3 * W5);
+  const E = byTs5.get(T0 + 4 * W5);
+  const h15 = st15.history[0];
 
-  const sellTxt = h => (h.sells || []).map(x => `${x.side.toUpperCase()} ${x.shares.toFixed(2)}sh@${x.price.toFixed(2)}`).join(' | ') || '—';
+  const fmt = h => h ? `${h.betPlaced ? h.entrySide.toUpperCase() : 'NONE'} ${h.legs.length}legs sl:${h.stopLossCount} ${h.win === true ? 'WIN' : h.win === false ? 'LOSS' : '?'} $${h.pnl?.toFixed(2)}` : 'MISSING';
+  console.log(`A: ${fmt(A)}`);
+  console.log(`B: ${fmt(B)}`);
+  console.log(`C: ${fmt(C)}`);
+  console.log(`D: ${fmt(D)}`);
+  console.log(`E: ${fmt(E)}`);
+  console.log(`15m: ${fmt(h15)}`);
 
-  console.log('\n== window A (entry + one flip) ==');
-  console.log('  legs:', (A.legs || []).map(l => `${l.side.toUpperCase()} $${l.dollars} @${l.price} t=${fmt(Math.floor(l.ts / 1000))}`).join(' | '), '| winner', A.winner, '| pnl', A.pnl, '| sells:', sellTxt(A));
-  console.log('== window B (flip touch after 280s cutoff -> no flip) ==');
-  console.log('  legs:', (B.legs || []).map(l => `${l.side.toUpperCase()} $${l.dollars} @${l.price} t=${fmt(Math.floor(l.ts / 1000))}`).join(' | '), '| winner', B.winner, '| pnl', B.pnl, '| sells:', sellTxt(B));
-  console.log('== window D (both sides at 0.60+ -> instant single flip) ==');
-  console.log('  legs:', (D.legs || []).map(l => `${l.side.toUpperCase()} $${l.dollars} @${l.price} t=${fmt(Math.floor(l.ts / 1000))}`).join(' | '), '| winner', D.winner, '| pnl', D.pnl, '| sells:', sellTxt(D));
-  console.log('== window E (flip fires exactly at 0.50) ==');
-  console.log('  legs:', (E.legs || []).map(l => `${l.side.toUpperCase()} $${l.dollars} @${l.price} t=${fmt(Math.floor(l.ts / 1000))}`).join(' | '), '| winner', E.winner, '| pnl', E.pnl, '| sells:', sellTxt(E));
-  console.log('== window C (no touch, no flip) ==');
-  console.log('  legs:', (C.legs || []).map(l => `${l.side.toUpperCase()} $${l.dollars} @${l.price} t=${fmt(Math.floor(l.ts / 1000))}`).join(' | '), '| winner', C.winner, '| pnl', C.pnl, '| sells:', sellTxt(C));
+  // A: entry + 1 stop loss + 1 martingale re-entry, win
+  check('A: entry + martingale re-entry (2+ legs)', A && A.betPlaced && A.legs.length >= 2);
+  check('A: 1 stop loss', A && A.stopLossCount >= 1);
+  check('A: win', A && A.win === true);
+  check('A: pnl = payout + sellProceeds - wager', A && Math.abs(A.pnl - (A.payout + A.sellProceeds - A.wager)) < 0.02);
 
-  const waitEnd = (T0 + WAIT5) * 1000;
+  // B: no entry
+  check('B: no bet placed', B && !B.betPlaced);
 
-  // Window A: $50 entry after the wait, ONE $100 flip, all inside the window
-  check('A: entry UP $50 after the 60s wait', A && A.entrySide === 'up' && A.legs[0].dollars === 50 && A.legs[0].ts >= waitEnd - 1000);
-  check('A: exactly ONE $100 flip (max 1)', A && A.legs.length === 2 && A.legs[1].dollars === 100);
-  check('A: sides alternate up -> down', A && JSON.stringify(A.legs.map(l => l.side)) === JSON.stringify(['up', 'down']));
-  check('A: reached max martingale (single flip)', A && A.reachedMaxMartingale === true);
-  check('A: both buys inside the 300s window', A && A.legs.every(l => l.ts < (T0 + W5) * 1000));
-  check('A: flip ~30s after the entry', A && Math.abs((A.legs[1].ts - A.legs[0].ts) - FLIP_HOLD_MS) < 5000);
-  check('A: winner DOWN, net WIN (+41.24 — $100 flip covers the $50 entry)', A && A.win === true && A.winner === 'down');
-  check('A: losing side SOLD ~2s after the flip (flip first, sell later)', A && A.sells.length === 1 && Math.abs((A.sells[0].ts - A.legs[1].ts) - 2000) < 1500);
-  check('A: sell closes the exact flipped-away quantity (81.97)', A && Math.abs(A.sells[0].shares - A.legs[0].shares) < 0.01);
-  check('A: only the FINAL leg is still held at resolution', A && Math.abs(A.payout - A.legs[1].shares) < 0.01);
-  check('A: pnl = payout + sell proceeds - cost (recovered capital)', A && A.sellProceeds > 0 && Math.abs(A.pnl - (A.payout + A.sellProceeds - A.wager)) < 0.02);
+  // C: 2 stops + 2 martingale, loss
+  check('C: 2+ stops', C && C.stopLossCount >= 2);
+  check('C: loss', C && C.win === false);
 
-  // Window B: the DOWN touch lands at T+290, AFTER the 280s flip cutoff
-  // -> the single flip must NOT be placed (flips stop in the final stretch)
-  const bCutoff = (T0 + W5 + 280) * 1000;
-  check('B: entry only, NO flip (1 leg)', B && B.legs.length === 1);
-  check('B: flip blocked by the 280s cutoff', B && B.reachedMaxMartingale === false);
-  check('B: entry placed before the 280s cutoff', B && B.legs.every(l => l.ts < bCutoff));
-  check('B: no sell (nothing was flipped)', B && B.sells.length === 0);
-  check('B: resolves as a WIN (winner up, entry wins)', B && B.win === true && B.winner === 'up');
-  check('B: pnl = payout - cost (no flips)', B && Math.abs(B.pnl - (B.payout - B.wager)) < 0.02);
+  // D: entry, no stop, win
+  check('D: entry, no stop, win', D && D.betPlaced && D.stopLossCount === 0 && D.win === true);
 
-  // Window D: both sides at 0.60+ -> entry fires, the ONE flip fires INSTANTLY,
-  // and NO second flip happens even though prices stay >= 0.50
-  const dEntryTs = D && D.legs[0].ts;
-  check('D: entry UP $50 fires when the wait ends', D && D.entrySide === 'up' && D.legs[0].dollars === 50 && D.legs[0].ts >= (T0 + WAIT5) * 1000 - 1000);
-  check('D: exactly ONE flip (2 legs, reached max MG)', D && D.legs.length === 2 && D.reachedMaxMartingale === true);
-  check('D: flip fires within 5s of entry (instant, no come-back wait)', D && D.legs[1].ts - dEntryTs < 5000);
-  check('D: no second flip despite prices staying >= 0.50', D && D.legs.length === 2);
-  check('D: resolved as a WIN (winner down, entry sold near cost)', D && D.win === true && D.winner === 'down');
-  check('D: losing side sold ~2s after the flip', D && D.sells.length === 1 && Math.abs((D.sells[0].ts - D.legs[1].ts) - 2000) < 1500);
-  check('D: only the FINAL leg is still held at resolution', D && Math.abs(D.payout - D.legs[1].shares) < 0.01);
-  check('D: pnl = payout + sell proceeds - cost', D && Math.abs(D.pnl - (D.payout + D.sellProceeds - D.wager)) < 0.02);
+  // E: 1 stop, loss
+  check('E: 1 stop', E && E.stopLossCount >= 1);
+  check('E: loss', E && E.win === false);
 
-  // Window E: the flip must fire ONLY when the opposite side reaches 0.50 —
-  // while it sits at 0.49 (below the trigger) no flip happens
-  const eWaitMs = (T0 + 3 * W5 + WAIT5) * 1000;
-  check('E: entry UP $50 fires at ANY price (@0.78, above the old 0.60–0.62 cap)', E && E.entrySide === 'up' && E.legs[0].dollars === 50 && E.legs[0].price === 0.78);
-  check('E: no flip while opposite side is below 0.50 (0.49)', E && E.legs.length === 2 && E.legs[1].ts >= eWaitMs + 6000 - 1500 && E.legs[1].ts < eWaitMs + 7500);
-  check('E: flip is DOWN $100 at exactly 0.50', E && E.legs[1].side === 'down' && E.legs[1].dollars === 100 && E.legs[1].price === 0.5);
-  check('E: no second flip (up side stays below 0.50)', E && E.reachedMaxMartingale === true && E.legs.length === 2);
-  check('E: winner DOWN, net WIN (+70.29 — $100 flip covers the $50 entry)', E && E.win === true && E.winner === 'down');
-  check('E: losing side sold ~2s after the flip', E && E.sells.length === 1 && Math.abs((E.sells[0].ts - E.legs[1].ts) - 2000) < 1500);
-  check('E: only the FINAL leg is still held at resolution', E && Math.abs(E.payout - E.legs[1].shares) < 0.01);
-  check('E: pnl = payout + sell proceeds - cost', E && Math.abs(E.pnl - (E.payout + E.sellProceeds - E.wager)) < 0.02);
+  // 15m: entry + stop, loss
+  check('15m: entry + stop', h15 && h15.betPlaced && h15.stopLossCount >= 1);
+  check('15m: loss', h15 && h15.win === false);
 
-  // 15m: DOWN touches 0.50 only at T+880, AFTER the 870s cutoff -> no 15m flip
-  const h15first = st15.history[0];
-  check('15m: entry only, no flip/sell after the 870s cutoff', h15first && h15first.legs.length === 1 && h15first.sells.length === 0 && h15first.winner === 'up');
+  // Martingale scaling
+  const scales = (st5.history || []).filter(h => h.legs.length >= 3)
+    .every(h => h.legs[1].dollars > h.legs[0].dollars && h.legs[2].dollars > h.legs[1].dollars);
+  check('martingale amounts scale (1.5x)', scales);
 
-  // Window C: opposite side never reaches 0.50 -> no flip (by design)
-  check('C: entry only (1 leg)', C && C.legs.length === 1);
-  check('C: max martingale not reached', C && C.reachedMaxMartingale === false);
-  check('C: no sell (nothing was flipped)', C && C.sells.length === 0);
-  check('C: resolves as a WIN (winner up, entry wins)', C && C.win === true && C.winner === 'up');
-
-  // Engine-level counters
-  check('max-martingale counter >= 2 (A + D)', st5.windowsReachedMaxMartingale >= 2);
-
-  // Separate bankroll accounting per timeframe (open 5m/15m trades still hold cost)
+  // Bankroll accounting
   const openCost5 = st5.current.btc ? st5.current.btc.totalCost : 0;
   const openCost15 = st15.current.btc ? st15.current.btc.totalCost : 0;
-  check('5m bankroll consistent (start 2000)', Math.abs(st5.bankroll - (2000 + st5.realizedPnl - openCost5)) < 0.01);
-  check('15m bankroll consistent (start 2000)', Math.abs(st15.bankroll - (2000 + st15.realizedPnl - openCost15)) < 0.01);
-  check('bankrolls are separate (5m != 15m)', Math.abs(st5.bankroll - st15.bankroll) > 0.5);
+  check('5m bankroll consistent', Math.abs(st5.bankroll - (2000 + st5.realizedPnl - openCost5)) < 0.01);
+  check('15m bankroll consistent', Math.abs(st15.bankroll - (2000 + st15.realizedPnl - openCost15)) < 0.01);
+  check('bankrolls are separate', Math.abs(st5.bankroll - st15.bankroll) > 0.5);
 
   const allOk = checks.every(([, ok]) => ok);
   console.log(allOk ? '\n✅ FULL-WINDOW SMOKE TEST PASSED' : '\n❌ FULL-WINDOW SMOKE TEST FAILED');

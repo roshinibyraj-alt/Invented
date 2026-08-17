@@ -35,7 +35,7 @@ app.get('/', (_, res) => {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>⛏ BTC 0.60 Martingale — 5m &amp; 15m</title>
+<title>⛏ BTC 0.60 Pullback — 5m &amp; 15m</title>
 <style>
   :root {
     --bg: #ffffff; --bg2: #f5f7fa; --bg3: #edf0f4; --border: #d0d7e2;
@@ -60,7 +60,7 @@ app.get('/', (_, res) => {
   .toolbar-note { padding: 6px 20px 0; font-size: 9.5px; color: var(--muted); }
   .shared-stats { display: grid; grid-template-columns: repeat(8, 1fr); gap: 8px; padding: 12px 20px 0; }
   @media (max-width: 1100px) { .shared-stats { grid-template-columns: repeat(4, 1fr); } }
-  @media (max-width: 640px) { .shared-stats { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 640px) { .shared-stats { grid-template-columns: repeat(2, 1fr); gap: 6px; padding: 8px 12px 0; } }
   .stat { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 8px 9px; }
   .stat-label { font-size: 8px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 4px; }
   .stat-val { font-size: 13px; font-weight: bold; color: #12202e; }
@@ -71,7 +71,7 @@ app.get('/', (_, res) => {
   .chart-title { font-size: 13px; color: #ddd; }
   .chart-meta { font-size: 9px; color: var(--muted); }
   .equity-chart { display: block; width: 100%; height: 220px; background: #fff; }
-  .panels { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 14px 20px; }
+  .panels { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 14px 20px; } @media (max-width: 640px) { .panels { padding: 10px 12px; gap: 10px; } }
   @media (max-width: 900px) { .panels { grid-template-columns: 1fr; } }
   .panel { background: var(--bg2); border: 2px solid var(--border); border-radius: 12px; overflow: hidden; }
   .panel-hdr { background: #0d1d30; padding: 10px 14px; display: flex; justify-content: space-between; align-items: center; }
@@ -119,7 +119,7 @@ app.get('/', (_, res) => {
     <button id="resume-btn" class="resume">▶️ Resume Trading</button>
     <button id="live-btn" class="live-toggle">🔴 Switch to LIVE</button>
   </div>
-  <div class="toolbar-note">Strategy: wait 2m (5m) / 6m (15m) after open → fire the $50 entry on the LEADING side at ANY price → ONE $100 flip INSTANTLY when the opposite side reaches 0.50 (no flips after 280s / 870s). Flip FIRST, then sell the losing side ~2s later at the bid. 5m and 15m run on SEPARATE demo capital. At window end, the side above 0.90 wins.</div>
+  <div class="toolbar-note">Strategy: wait 1m (5m) / 3m (15m) → monitor for 0.60+ → buy on pullback to 0.60 → stop loss at 0.49 → 1.5x martingale re-entry on next 0.60+ (max 3 levels). 5m and 15m are SEPARATE. At window end, the side above 0.90 wins.</div>
   <div id="start-banner" class="start-banner" style="display:none;"></div>
 
   <div class="shared-stats" id="shared-stats"></div>
@@ -179,7 +179,7 @@ app.get('/', (_, res) => {
       if (buy) cls += ' placed ' + (buy.side === 'up' ? 'up' : 'down');
       else if (t.buys && t.buys.length === i && (t.phase === 'trading' || t.phase === 'awaiting-trigger')) cls += ' active';
       const side = buy ? (buy.side === 'up' ? 'UP' : 'DOWN') : (t.buys && t.buys.length === i && t.phase === 'trading' ? '…' : '—');
-      const px = buy ? fmtPx(buy.price) : (t.buys && t.buys.length === i && t.phase === 'trading' ? 'watch 0.50' : '');
+      const px = buy ? fmtPx(buy.price) : (t.buys && t.buys.length === i && t.phase === 'trading' ? 'holding' : '');
       const tip = levels[i].tag + ' $' + levels[i].d + (buy ? ' — ' + buy.side.toUpperCase() + ' @' + fmtPx(buy.price) + ' = ' + fmt2(buy.shares) + 'sh' : '');
       html += '<div class="' + cls + '" title="' + tip + '">' +
         '<div class="lvl-tag">' + levels[i].tag + '</div>' +
@@ -199,9 +199,9 @@ app.get('/', (_, res) => {
     let headline;
     if (t.skipped) headline = '⏸ No bet placed this window';
     else if (t.settled) headline = (t.win === true ? '🏆' : (t.win === false ? '💸' : '🏁')) + ' Window resolved — ' + (t.win == null ? 'no bet' : (t.win ? 'WIN' : 'LOSS')) + ' ' + sgn(t.pnl);
-    else if (t.phase === 'waiting') headline = '⏳ Waiting ' + fmtCountdown(t.countdownMs) + ' — then fire the $' + s.entryDollars + ' entry on the leading side (any price)';
-    else if (t.phase === 'awaiting-trigger') headline = '🎯 Firing the $' + s.entryDollars + ' entry on the leading side (any price)';
-    else headline = (t.lastSide === 'up' ? '🔵' : '🟣') + ' Trading ' + (t.lastSide || '?').toUpperCase() + ' — flipping if the opposite side hits 0.50';
+    else if (t.phase === 'waiting') headline = '⏳ Waiting ' + fmtCountdown(t.countdownMs) + ' — then monitor for 0.60+ entry';
+    else if (t.phase === 'awaiting-trigger') headline = '🎯 Monitoring for 0.60+ pullback entry';
+    else headline = (t.lastSide === 'up' ? '🔵' : '🟣') + ' Holding ' + (t.lastSide || '?').toUpperCase() + ' — stop loss at ' + (s.stopLossPrice || 0.49);
     let html = '<div class="current-window">' +
       '<div class="headline">' + headline + '</div>' +
       '<div class="row"><span>Window</span><span>' + (leg.slug || '…') + '</span></div>' +
@@ -209,7 +209,7 @@ app.get('/', (_, res) => {
       '<div class="row"><span>Closes in</span><span>' + fmtCountdown(t.closeAt - Date.now()) + '</span></div>' +
       '<div class="row"><span>UP price (ask / bid)</span><span>' + fmtPx(leg.upAsk) + ' / ' + fmtPx(leg.upBid) + '</span></div>' +
       '<div class="row"><span>DOWN price (ask / bid)</span><span>' + fmtPx(leg.downAsk) + ' / ' + fmtPx(leg.downBid) + '</span></div>' +
-      '<div class="row"><span>Flip trigger</span><span>opposite side ≥ ' + fmtPx(s.flipTriggerPrice || 0.5) + ' (instant) · entry: leading side @ any price</span></div>' +
+      '<div class="row"><span>Entry / Stop</span><span>buy at ' + fmtPx(s.entryPrice || 0.60) + ' (pullback for initial, instant for martingale) · stop loss at ' + fmtPx(s.stopLossPrice || 0.49) + '</span></div>' +
       ladderHtml(s, t);
     if (hasBuys) {
       const lastBuy = t.buys[t.buys.length - 1];

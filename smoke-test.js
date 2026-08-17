@@ -1,77 +1,56 @@
 'use strict';
 
 /**
- * Deterministic smoke test — drives the 0.60 martingale engine on a VIRTUAL
- * clock (no wall-clock flakiness), with stubbed Binance (synthetic candles)
- * and scripted Polymarket prices.
+ * Deterministic smoke test for the 0.60 pullback martingale engine.
  *
- * Simulated windows: 15m = 30s, 5m = 12s, waits 8s/4s.
- *
- * Scripted window (index -> [touch schedule, winner]):
- *   idx0: up  -> [down, up, down] -> winner up     (3 touches, but ONLY ONE
- *                                                   flip allowed -> flip loses)
- *   idx1: down -> [up]            -> winner up     (1 flip, wins)
- *   idx2: up  -> []               -> winner up     (no flip, entry wins)
- *   idx3: down -> [up]            -> winner down   (1 flip, loses)
- *   idx4: up  -> []               -> winner down   (entry loses)
- *
- * Prices: 0.50 during the wait, the entry side at 0.62 after the wait,
- * each flip side at 0.62 in 2s holds (other side 0.38), winner 1.0 /
- * loser 0.01 after close. The losing side is SOLD ~0.5s after each flip
- * at the current bid (sellDelayMs=500 in this compressed-window test).
- *
- * Verifies: no bet before the wait ends, $50 entry, exactly ONE $100 flip
- * (max-1-martingale cap even with repeated touches), flips alternate sides,
- * max-martingale counting, win/loss accounting, win rate, max drawdown,
- * equity curve, and the shared bankroll math.
- *
- * Usage: node smoke-test.js   (takes ~15 seconds)
+ * Compressed windows: 15m = 30s (wait 8s), 5m = 12s (wait 4s).
+ * Script indices are T0-independent: Math.floor(ts / wsec) % scripts.length.
  */
 
 const { createEngine } = require('./engine-factory');
 
-const W15 = 30;
-const W5 = 12;
-const WAIT15 = 8;
-const WAIT5 = 4;
-const FLIP_GAP_MS = 2000;
-
+const W15 = 30, W5 = 12, WAIT15 = 8, WAIT5 = 4;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+let virtualNow = Date.now(), T0 = 0;
 
-let virtualNow = Date.now(); // virtual clock, advanced by the test
-let T0 = 0;
-
-const SCRIPTS = [
-  { entry: 'up',   flips: ['down', 'up', 'down'], winner: 'up' },
-  { entry: 'down', flips: ['up'],                 winner: 'up' },
-  { entry: 'up',   flips: [],                     winner: 'up' },
-  { entry: 'down', flips: ['up', 'down'],         winner: 'down' },
-  { entry: 'up',   flips: [],                     winner: 'down' }, // entry fires on any price, loses
+// 15m scripts: cycle through entry/stoploss/win combos
+const SCRIPTS_15 = [
+  { entry: 'up', highAfterMs: 2, gapMs: 3000, stopLosses: [6.5], winner: 'down' },  // entry + stop loss → loss
+  { entry: null, highAfterMs: null, gapMs: 3000, stopLosses: [], winner: 'up' },     // no entry
+  { entry: 'up', highAfterMs: 2, gapMs: 3000, stopLosses: [], winner: 'up' },        // entry, no stop → win
 ];
+
+const SCRIPTS_5 = [
+  { entry: 'up', highAfterMs: 1, gapMs: 1500, stopLosses: [3.5, 5.5, 7], winner: 'down' },   // 3 stops, 3 marts → loss
+  { entry: 'up', highAfterMs: 1, gapMs: 1500, stopLosses: [], winner: 'up' },                   // no stop → win
+  { entry: null, highAfterMs: null, gapMs: 1500, stopLosses: [], winner: 'up' },                 // no entry
+  { entry: 'up', highAfterMs: 1, gapMs: 1500, stopLosses: [3.5], winner: 'up' },                 // 1 stop + 1 mart → win
+  { entry: 'up', highAfterMs: 1, gapMs: 1500, stopLosses: [3.5, 5.5], winner: 'down' },          // 2 stops → loss
+  { entry: 'up', highAfterMs: 1, gapMs: 1500, stopLosses: [3.5], winner: 'down' },                // 1 stop → loss
+  { entry: 'up', highAfterMs: 1, gapMs: 1500, stopLosses: [], winner: 'up' },                     // no stop → win
+  { entry: null, highAfterMs: null, gapMs: 1500, stopLosses: [], winner: 'up' },                  // no entry
+];
+
 function scriptFor(tf, ts) {
   const wsec = tf === '5' ? W5 : W15;
-  const idx = Math.round((ts - T0) / wsec);
-  const i = ((idx % SCRIPTS.length) + SCRIPTS.length) % SCRIPTS.length;
-  return SCRIPTS[i];
-}
-function highSideAt(tf, ts, now) {
-  const s = scriptFor(tf, ts);
-  const wsec = tf === '5' ? W5 : W15;
-  const waitMs = (ts + (tf === '5' ? WAIT5 : WAIT15)) * 1000;
-  const closeMs = (ts + wsec) * 1000;
-  if (now >= closeMs || now < waitMs || s.entry === null) return null; // resolved, waiting, or no band side
-  let high = s.entry;
-  for (let i = 0; i < s.flips.length; i++) {
-    if (now >= waitMs + (i + 1) * FLIP_GAP_MS) high = s.flips[i];
-    else break;
-  }
-  return high;
+  const idx = Math.floor(ts / wsec);
+  const scripts = tf === '5' ? SCRIPTS_5 : SCRIPTS_15;
+  return scripts[((idx % scripts.length) + scripts.length) % scripts.length];
 }
 
-// Stub: Binance klines are synthetic (no network), Polymarket is scripted.
+function entrySideAsk(ts, nowMs, tf) {
+  const s = scriptFor(tf, ts);
+  if (!s || !s.entry || s.highAfterMs == null) return 0.50;
+  const waitMs = (tf === '5' ? WAIT5 : WAIT15) * 1000;
+  const highAt = waitMs + s.highAfterMs * 1000;
+  const gapMs = s.gapMs || 3000;
+  if (nowMs < highAt) return 0.55;
+  if (nowMs < highAt + gapMs) return 0.62;
+  return 0.60;
+}
+
 global.fetch = async (url) => {
   const u = String(url);
-
   if (u.includes('api.binance.com')) {
     const m = u.match(/interval=(\d+)m/);
     const intervalSec = (m ? Number(m[1]) : 5) * 60;
@@ -86,15 +65,12 @@ global.fetch = async (url) => {
     }
     return new Response(JSON.stringify(rows), { status: 200 });
   }
-
   if (u.includes('gamma-api.polymarket.com/events')) {
     const m = u.match(/slug=btc-updown-(\d+)m-(\d+)/);
     const tf = m ? (m[1] === '5' ? '5' : '15') : '15';
     const ts = m ? Number(m[2]) : T0;
-    const cond = `cond-${tf}-${ts}`;
-    return new Response(JSON.stringify([{ markets: [{ conditionId: cond, outcomes: '["Up","Down"]', clobTokenIds: `["u${tf}-${ts}","d${tf}-${ts}"]` }] }]), { status: 200 });
+    return new Response(JSON.stringify([{ markets: [{ conditionId: `cond-${tf}-${ts}`, outcomes: '["Up","Down"]', clobTokenIds: `["u${tf}-${ts}","d${tf}-${ts}"]` }] }]), { status: 200 });
   }
-
   if (u.includes('gamma-api.polymarket.com/markets')) {
     const m = u.match(/condition_ids=cond-(\d+)-(\d+)/);
     const tf = m ? (m[1] === '5' ? '5' : '15') : '15';
@@ -106,160 +82,120 @@ global.fetch = async (url) => {
       outcomePrices: w === 'up' ? '[ "1.0", "0.0" ]' : '[ "0.0", "1.0" ]',
     }]), { status: 200 });
   }
-
   if (u.includes('clob.polymarket.com/price')) {
     const m = u.match(/token_id=(u|d)(\d+)-(\d+)/);
     const tf = m ? (m[2] === '5' ? '5' : '15') : '15';
     const ts = m ? Number(m[3]) : T0;
     const side = m && m[1] === 'u' ? 'up' : 'down';
     const wsec = tf === '5' ? W5 : W15;
+    const s = scriptFor(tf, ts);
+    const urlSide = u.includes('side=SELL') ? 'SELL' : 'BUY';
     let price = 0.5;
     if (virtualNow >= (ts + wsec) * 1000) {
-      price = scriptFor(tf, ts).winner === side ? 1.0 : 0.01;
-    } else {
-      const high = highSideAt(tf, ts, virtualNow);
-      if (high) price = side === high ? 0.62 : 0.38;
+      price = s.winner === side ? 1.0 : 0.01;
+    } else if (s.entry && side === s.entry) {
+      const offset = virtualNow - ts * 1000;
+      if (urlSide === 'BUY') {
+        price = entrySideAsk(ts, offset, tf);
+      } else {
+        const waitMs = (tf === '5' ? WAIT5 : WAIT15) * 1000;
+        let bid = 0.50;
+        for (const sl of s.stopLosses) { if (offset >= waitMs + sl * 1000) bid = 0.40; }
+        price = bid;
+      }
+    } else if (s.entry && side !== s.entry) {
+      price = urlSide === 'BUY' ? 0.40 : 0.35;
     }
     return new Response(JSON.stringify({ price: String(price) }), { status: 200 });
   }
-
   return new Response('{}', { status: 200 });
 };
 
 (async () => {
-  const logs = [];
-  const states = { m5: null, m15: null };
-
+  const states = {};
+  virtualNow = Math.floor(Date.now() / (W5 * 1000)) * (W5 * 1000) + W5 * 1000;
   const engine = createEngine({
-    startingCapital: 4000,
-    entryDollars: 50,
-    martingaleAmounts: [100],
-    waitSeconds5: WAIT5,
-    waitSeconds15: WAIT15,
-    sellDelayMs: 500,
-    triggerSlip: 0.02,
-    windowSeconds15: W15,
-    windowSeconds5: W5,
-    dryRun: true,
-    startAtBoundary: true,
-    nowFn: () => virtualNow,
-    tickMs: 1,
-    emit: (ev, s) => {
-      states[ev === 'hedgeState:BTC-15m' ? 'm15' : 'm5'] = s;
-    },
-    slog: (l) => { logs.push(l); },
+    startingCapital: 4000, entryPrice: 0.60, stopLossPrice: 0.49,
+    entryDollars: 50, martingaleMultiplier: 1.5, maxMartingaleLevels: 3,
+    waitSeconds5: WAIT5, waitSeconds15: WAIT15, windowSeconds15: W15, windowSeconds5: W5,
+    dryRun: true, startAtBoundary: false, tickMs: 1, priceRefreshMs: 1,
+    nowFn: () => virtualNow, emit: (ev, s) => { states[ev] = s; }, slog: () => {},
   });
-
   await engine.start();
+  await sleep(30);
+  T0 = states['hedgeState:BTC-5m'].current.btc.windowTs;
 
-  // Learn the engine's aligned start boundary from its own state.
-  const deadline = Date.now() + 5000;
-  while ((!states.m5 || !states.m5.boundaryWindowTs) && Date.now() < deadline) {
-    await sleep(5);
-  }
-  if (!states.m5 || !states.m5.boundaryWindowTs) {
-    console.log('❌ engine never aligned to a boundary');
-    process.exit(1);
-  }
-  T0 = states.m5.boundaryWindowTs;
-  virtualNow = T0 * 1000;
-  console.log(`T0 (aligned boundary) = ${new Date(T0 * 1000).toISOString()}`);
+  const endAt = (T0 + 8 * W5 + 30) * 1000;
+  while (virtualNow < endAt) { virtualNow += 100; await sleep(1); }
+  await sleep(50);
 
-  // Drive the virtual clock forward in 500ms steps until 3x 15m windows settle.
-  const endAt = (T0 + 3 * W15 + 30) * 1000;
-  while (virtualNow < endAt) {
-    virtualNow += 500;
-    await sleep(1);
-  }
-  await sleep(50); // let the engine flush its last virtual steps
-
-  const s15 = states.m15;
-  const s5 = states.m5;
-  const fmt = ts => new Date(ts * 1000).toISOString().slice(11, 19);
-
-  const sorted = list => (list || []).slice().sort((a, b) => a.windowTs - b.windowTs);
-  const h15 = sorted(s15.history);
-  const h5 = sorted(s5.history);
-
-  console.log('== resolved 15m ==');
-  for (const h of h15) console.log(`  ${fmt(h.windowTs)} entry ${h.entrySide || '—'} legs [${(h.legs || []).map(l => '$' + l.dollars + l.side[0].toUpperCase()).join(' ')}] sells [${(h.sells || []).map(x => x.side[0].toUpperCase() + ' ' + x.shares + 'sh@' + x.price).join(' ')}] maxMG:${h.reachedMaxMartingale ? 'yes' : 'no'} winner ${h.winner} win ${h.win} pnl $${h.pnl.toFixed(2)} recovered $${(h.sellProceeds || 0).toFixed(2)}`);
-  console.log('== resolved 5m ==');
-  for (const h of h5) console.log(`  ${fmt(h.windowTs)} entry ${h.entrySide || '—'} legs [${(h.legs || []).map(l => '$' + l.dollars + l.side[0].toUpperCase()).join(' ')}] maxMG:${h.reachedMaxMartingale ? 'yes' : 'no'} winner ${h.winner} win ${h.win} pnl $${h.pnl.toFixed(2)}`);
-  console.log(`bankroll $${s15.bankroll.toFixed(2)} | totalPnl $${s15.realizedPnlTotal.toFixed(2)} | equityCurve ${s15.equityCurve.length} pts | maxDD ${(s15.maxDrawdown.pct * 100).toFixed(2)}% ($${s15.maxDrawdown.dollars.toFixed(2)})`);
-  console.log(`15m: ${s15.wins}W/${s15.losses}L (${s15.windowsDecided} decided, ${s15.windowsReachedMaxMartingale} reached max MG) | 5m: ${s5.wins}W/${s5.losses}L (${s5.windowsDecided} decided, ${s5.windowsReachedMaxMartingale} reached max MG)`);
-
+  const st5 = states['hedgeState:BTC-5m'];
+  const st15 = states['hedgeState:BTC-15m'];
+  const round2 = n => Math.round(n * 100) / 100;
   const checks = [];
   const check = (name, ok) => { checks.push([name, ok]); console.log((ok ? 'PASS ' : 'FAIL ') + name); };
 
-  const h15new = h15.slice(0, 3); // first three 15m windows resolve during the run
-  const first = h15new[0];
-  const second = h15new[1];
-  const third = h15new[2];
+  const h5 = st5.history || [];
+  const h15 = st15.history || [];
 
-  // 1) entry never happens before the wait ends
-  const waitFor = h => (h.windowTs + (h.tf === '5' ? WAIT5 : WAIT15)) * 1000;
-  const entryOnlyAfterWait = h15new.concat(h5).filter(h => h.legs && h.legs.length)
-    .every(h => h.legs[0].ts >= waitFor(h) - 500);
-  check('entries only happen after the wait window', entryOnlyAfterWait);
+  // ── 15m: classify history by script type ──
+  const noEntry15 = h15.filter(h => !h.betPlaced);
+  const entryNoStop15 = h15.filter(h => h.betPlaced && h.stopLossCount === 0 && h.win === true);
+  const entryWithStop15 = h15.filter(h => h.betPlaced && h.stopLossCount >= 1);
 
-  // 2) first 15m window: $50 entry, exactly ONE $100 flip despite 3 touches
-  check('idx0 entry is UP $50', first && first.entrySide === 'up' && first.legs[0].dollars === 50);
-  check('idx0 places exactly ONE $100 flip (3 touches, max 1)', first && first.legs.length === 2 && first.legs[1].dollars === 100);
-  check('idx0 legs alternate sides', first && first.legs.every((l, i) => i === 0 || l.side !== first.legs[i - 1].side));
-  check('idx0 reached max martingale (single flip)', first && first.reachedMaxMartingale === true);
+  check('15m: has no-entry windows', noEntry15.length >= 1);
+  check('15m: has entry-with-stop-loss windows', entryWithStop15.length >= 1);
+  check('15m: has entry-no-stop-win windows', entryNoStop15.length >= 1);
+  check('15m: stop-loss entry loses', entryWithStop15.every(h => h.win === false));
+  check('15m: no-stop entry wins', entryNoStop15.every(h => h.win === true));
+  check('15m: entries happen after wait', h15.filter(h => h.betPlaced && h.legs.length)
+    .every(h => h.legs[0].ts >= (h.windowTs + WAIT15) * 1000 - 500));
 
-  // 3) flips happen on the side opposite the previous buy
-  const oppFlip = h15new.concat(h5).filter(h => h.legs && h.legs.length > 1)
-    .every(h => h.legs.slice(1).every((l, i) => l.side !== h.legs[i].side));
-  check('every flip is on the opposite side', oppFlip);
+  // ── 5m: classify by script type ──
+  const noEntry5 = h5.filter(h => !h.betPlaced);
+  const entryNoStopWin5 = h5.filter(h => h.betPlaced && h.stopLossCount === 0 && h.win === true);
+  const entryWithStop5 = h5.filter(h => h.betPlaced && h.stopLossCount >= 1);
+  const multiStop5 = h5.filter(h => h.stopLossCount >= 2);
+  const maxMart5 = h5.filter(h => h.reachedMaxMartingale === true);
 
-  // 4) scripted outcomes: idx0 LOSS (flip side lost), idx1 WIN, idx2 WIN
-  check('idx0 flip window is a net LOSS (flip side lost)', first && first.win === false && first.pnl < 0);
-  check('idx1 $100 flip recovers the $50 entry (net WIN +36.62)', second && second.win === true && second.pnl > 0 && second.winner === 'up' && second.martingaleLevels === 2);
-  check('idx2 window WIN (no flip)', third && third.win === true && third.martingaleLevels === 1);
+  check('5m: has no-entry windows', noEntry5.length >= 1);
+  check('5m: has entry-no-stop-win windows', entryNoStopWin5.length >= 1);
+  check('5m: has stop-loss windows', entryWithStop5.length >= 1);
+  check('5m: has multi-stop windows', multiStop5.length >= 1);
 
-  // 5) max-martingale counters
-  check('15m max-martingale counter >= 1', s15.windowsReachedMaxMartingale >= 1);
-  check('5m max-martingale counter >= 1', s5.windowsReachedMaxMartingale >= 1);
+  // Martingale amounts scale: each leg should be 1.5x the previous
+  const scalesCorrectly = h5.filter(h => h.legs.length >= 3).every(h => {
+    for (let i = 1; i < h.legs.length; i++) {
+      if (h.legs[i].dollars <= h.legs[i - 1].dollars) return false;
+    }
+    return true;
+  });
+  check('5m: martingale amounts scale (1.5x)', scalesCorrectly);
 
-  // 6) win rate math
-  const expectRate15 = s15.windowsDecided > 0 ? round2(s15.wins / s15.windowsDecided) : null;
-  check('15m winRate consistent with wins/decided', s15.winRate === expectRate15 && s15.windowsDecided === s15.wins + s15.losses);
+  // Stop-loss sells recover positive capital
+  const sellsCorrect = h5.concat(h15).filter(h => h.sells && h.sells.length > 0)
+    .every(h => h.sells.every(x => x.proceeds > 0));
+  check('stop-loss sells recover positive capital', sellsCorrect);
 
-  // 7) separate bankroll accounting per timeframe: bankroll = start + realizedPnl - open cost
-  const openCost15 = (s15.current.btc ? s15.current.btc.totalCost : 0);
-  const openCost5 = (s5.current.btc ? s5.current.btc.totalCost : 0);
-  check('15m bankroll accounting consistent', Math.abs(s15.bankroll - (2000 + s15.realizedPnl - openCost15)) < 0.01);
-  check('5m bankroll accounting consistent', Math.abs(s5.bankroll - (2000 + s5.realizedPnl - openCost5)) < 0.01);
-  check('timeframes keep separate bankrolls', Math.abs(s15.bankroll + s5.bankroll - (4000 + s15.realizedPnl + s5.realizedPnl - openCost15 - openCost5)) < 0.02);
+  // Max martingale counter
+  check('5m max-martingale counter >= 1', st5.windowsReachedMaxMartingale >= 1);
 
-  // 8) equity curve + max drawdown present
-  check('equity curve has multiple points', s15.equityCurve.length >= 3);
-  check('max drawdown >= 0', s15.maxDrawdown.pct >= 0 && s15.maxDrawdown.dollars >= 0);
-  check('max drawdown <= 100%', s15.maxDrawdown.pct <= 1);
+  // Win rate consistent
+  check('5m win rate consistent', st5.windowsDecided > 0 && st5.winRate === round2(st5.wins / st5.windowsDecided));
+  check('5m windowsDecided = wins + losses', st5.windowsDecided === st5.wins + st5.losses);
 
-  // 9) no double bets per leg level; every window with prices gets an entry
-  const noDup = h15new.concat(h5).filter(h => h.legs && h.legs.length)
-    .every(h => h.legs.every((l, i) => l.level === i));
-  check('leg levels are sequential (no double buys)', noDup);
-  check('no window is skipped (entry fires on any price)', h5.every(h => h.skipped === false && h.legs.length > 0));
+  // Separate bankroll accounting
+  const openCost5 = (st5.current.btc ? st5.current.btc.totalCost : 0);
+  const openCost15 = (st15.current.btc ? st15.current.btc.totalCost : 0);
+  check('5m bankroll consistent', Math.abs(st5.bankroll - (2000 + st5.realizedPnl - openCost5)) < 0.01);
+  check('15m bankroll consistent', Math.abs(st15.bankroll - (2000 + st15.realizedPnl - openCost15)) < 0.01);
 
-  // 10) losing side is closed at each flip: sells match the flipped-away sides
-  const sellsMatch = h15new.concat(h5).filter(h => h.legs && h.legs.length > 1)
-    .every(h => (h.sells || []).every((x, i) => x.side === h.legs[i].side));
-  check('every sell closes the side that was just flipped away', sellsMatch);
-  const recoverPositive = h15new.concat(h5).filter(h => (h.sellProceeds || 0) > 0)
-    .every(h => (h.sells || []).every(x => x.proceeds > 0));
-  check('losing-side sells recover positive capital', recoverPositive);
-
-  // 11) 5m results sanity: multiple settled windows, wins and losses present
-  check('5m settled at least 6 windows', h5.length >= 6);
-  check('5m has both wins and losses', h5.some(h => h.win === true) && h5.some(h => h.win === false));
-  check('5m has a max-martingale window', h5.some(h => h.reachedMaxMartingale === true));
+  // Equity curve + drawdown
+  check('equity curve has points', st15.equityCurve.length >= 3);
+  check('max drawdown >= 0', st15.maxDrawdown.pct >= 0);
+  check('max drawdown <= 100%', st15.maxDrawdown.pct <= 1);
 
   const allOk = checks.every(([, ok]) => ok);
   console.log(allOk ? '\n✅ SMOKE TEST PASSED' : '\n❌ SMOKE TEST FAILED');
   process.exit(allOk ? 0 : 1);
 })();
-
-function round2(n) { return Math.round(n * 100) / 100; }

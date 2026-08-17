@@ -23,15 +23,13 @@ const DRY_RUN = (process.env.HEDGE_DRY_RUN || process.env.SPORTS_DRY_RUN || proc
 const CAPITAL = Number(process.env.CAPITAL || process.env.STARTING_CAPITAL || 4000);
 const CAPITAL_5 = process.env.CAPITAL_5 ? Number(process.env.CAPITAL_5) : undefined;
 const CAPITAL_15 = process.env.CAPITAL_15 ? Number(process.env.CAPITAL_15) : undefined;
-const FLIP_CUTOFF_SECONDS_5 = Number(process.env.FLIP_CUTOFF_SECONDS_5 || 280);
-const FLIP_CUTOFF_SECONDS_15 = Number(process.env.FLIP_CUTOFF_SECONDS_15 || 870);
+const ENTRY_PRICE = Number(process.env.ENTRY_PRICE || 0.60);
+const STOP_LOSS_PRICE = Number(process.env.STOP_LOSS_PRICE || 0.49);
 const ENTRY_DOLLARS = Number(process.env.ENTRY_DOLLARS || 50);
-const MARTINGALE_AMOUNTS = (process.env.MARTINGALE_AMOUNTS || '100')
-  .split(',').map(v => Number(String(v).trim())).filter(Number.isFinite);
-const WAIT_SECONDS_5 = Number(process.env.WAIT_SECONDS_5 || 120);
-const WAIT_SECONDS_15 = Number(process.env.WAIT_SECONDS_15 || 360);
-const TRIGGER_SLIP = Number(process.env.TRIGGER_SLIP || 0.02);
-const SELL_DELAY_MS = Number(process.env.SELL_DELAY_MS || 2000);
+const MARTINGALE_MULTIPLIER = Number(process.env.MARTINGALE_MULTIPLIER || 1.5);
+const MAX_MARTINGALE_LEVELS = Number(process.env.MAX_MARTINGALE_LEVELS || 3);
+const WAIT_SECONDS_5 = Number(process.env.WAIT_SECONDS_5 || 60);
+const WAIT_SECONDS_15 = Number(process.env.WAIT_SECONDS_15 || 180);
 const START_AT_BOUNDARY = (process.env.START_AT_BOUNDARY || 'false').toLowerCase() === 'true';
 const FEE_THETA = Number(process.env.FEE_THETA || 0.07);
 const REBATE_PCT = Number(process.env.REBATE_PCT || 0);
@@ -48,14 +46,13 @@ async function init(privateKey, emit, slogFn) {
     startingCapital: CAPITAL,
     startingCapital5: CAPITAL_5,
     startingCapital15: CAPITAL_15,
-    flipCutoffSeconds5: FLIP_CUTOFF_SECONDS_5,
-    flipCutoffSeconds15: FLIP_CUTOFF_SECONDS_15,
+    entryPrice: ENTRY_PRICE,
+    stopLossPrice: STOP_LOSS_PRICE,
     entryDollars: ENTRY_DOLLARS,
-    martingaleAmounts: MARTINGALE_AMOUNTS.length ? MARTINGALE_AMOUNTS : [100],
+    martingaleMultiplier: MARTINGALE_MULTIPLIER,
+    maxMartingaleLevels: MAX_MARTINGALE_LEVELS,
     waitSeconds5: WAIT_SECONDS_5,
     waitSeconds15: WAIT_SECONDS_15,
-    triggerSlip: TRIGGER_SLIP,
-    sellDelayMs: SELL_DELAY_MS,
     startAtBoundary: START_AT_BOUNDARY,
     feeTheta: FEE_THETA,
     rebatePct: REBATE_PCT,
