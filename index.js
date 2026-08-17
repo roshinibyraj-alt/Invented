@@ -38,12 +38,12 @@ app.get('/', (_, res) => {
 <title>⛏ BTC 0.60 Pullback — 5m &amp; 15m</title>
 <style>
   :root {
-    --bg: #ffffff; --bg2: #f5f7fa; --bg3: #edf0f4; --border: #d0d7e2;
-    --text: #1a2535; --muted: #7a8fa8; --cyan: #0099cc; --green: #00a854;
-    --red: #e8304a; --yellow: #e6a800; --gold: #b8860b; --purple: #7c5cff;
+    --bg: #000000; --bg2: #0a0a0a; --bg3: #111111; --border: #333333;
+    --text: #ffffff; --muted: #888888; --cyan: #00ccff; --green: #00ff88;
+    --red: #ff4444; --yellow: #ffcc00; --gold: #ffaa00; --purple: #aa88ff;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: 'Courier New', monospace; background: var(--bg); color: var(--text); font-size: 12px; min-height: 100vh; font-weight: bold; }
+  body { font-family: 'Courier New', monospace; background: #000000; color: #ffffff; font-size: 12px; min-height: 100vh; font-weight: bold; }
   .header { background: linear-gradient(135deg,#0d1d30,#16283f); border-bottom: 3px solid var(--gold); padding: 14px 20px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
   .logo { font-size: 19px; font-weight: bold; color: #fff; letter-spacing: .5px; }
   .logo span { color: var(--cyan); }
@@ -63,14 +63,14 @@ app.get('/', (_, res) => {
   @media (max-width: 640px) { .shared-stats { grid-template-columns: repeat(2, 1fr); gap: 6px; padding: 8px 12px 0; } }
   .stat { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 8px 9px; }
   .stat-label { font-size: 8px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 4px; }
-  .stat-val { font-size: 13px; font-weight: bold; color: #12202e; }
+  .stat-val { font-size: 13px; font-weight: bold; color: #ffffff; }
   .pnl-pos { color: var(--green) !important; }
   .pnl-neg { color: var(--red) !important; }
   .chart-card { margin: 12px 20px 0; background: var(--bg2); border: 2px solid var(--border); border-radius: 12px; overflow: hidden; }
   .chart-hdr { background: #0d1d30; padding: 9px 14px; display: flex; justify-content: space-between; align-items: center; }
   .chart-title { font-size: 13px; color: #ddd; }
   .chart-meta { font-size: 9px; color: var(--muted); }
-  .equity-chart { display: block; width: 100%; height: 220px; background: #fff; }
+  .equity-chart { display: block; width: 100%; height: 220px; background: #000000; }
   .panels { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 14px 20px; } @media (max-width: 640px) { .panels { padding: 10px 12px; gap: 10px; } }
   @media (max-width: 900px) { .panels { grid-template-columns: 1fr; } }
   .panel { background: var(--bg2); border: 2px solid var(--border); border-radius: 12px; overflow: hidden; }
@@ -79,7 +79,7 @@ app.get('/', (_, res) => {
   .panel-body { padding: 12px 14px; }
   .stats-row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin-bottom: 10px; }
   @media (max-width: 560px) { .stats-row { grid-template-columns: repeat(2, 1fr); } }
-  .current-window { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; font-size: 10px; margin-bottom: 10px; }
+  .current-window { background: #0a0a0a; border: 1px solid #333333; border-radius: 8px; padding: 10px 12px; font-size: 10px; margin-bottom: 10px; }
   .current-window .headline { font-size: 12.5px; margin-bottom: 6px; padding-bottom: 6px; border-bottom: 1px dashed var(--border); }
   .current-window .row { display: flex; justify-content: space-between; padding: 2px 0; }
   .status-pill { font-size: 8.5px; padding: 2px 7px; border-radius: 9px; white-space: nowrap; }
@@ -90,7 +90,7 @@ app.get('/', (_, res) => {
   .status-loss { background: #e8304a22; color: var(--red); border: 1px solid var(--red); }
   .status-idle { background: var(--bg3); color: var(--muted); border: 1px solid var(--border); }
   .ladder { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin: 8px 0; }
-  .lvl { border: 1px dashed var(--border); border-radius: 8px; padding: 6px 4px; text-align: center; font-size: 8.5px; background: var(--bg2); }
+  .lvl { border: 1px dashed #333333; border-radius: 8px; padding: 6px 4px; text-align: center; font-size: 8.5px; background: #111111; }
   .lvl .lvl-tag { color: var(--muted); text-transform: uppercase; font-size: 7px; letter-spacing: .4px; }
   .lvl .lvl-amt { font-size: 11px; margin: 2px 0; }
   .lvl .lvl-side { font-size: 9px; min-height: 11px; }
@@ -103,7 +103,7 @@ app.get('/', (_, res) => {
   .tbl th { background: var(--bg3); color: var(--muted); padding: 5px 6px; text-align: left; font-size: 8px; text-transform: uppercase; position: sticky; top: 0; }
   .tbl td { padding: 4px 6px; border-bottom: 1px solid var(--border); font-size: 9px; }
   .empty { padding: 16px; text-align: center; color: var(--muted); font-size: 9.5px; }
-  .log-panel { background: #0d1420; color: #cfe8ff; border-radius: 10px; padding: 10px 12px; max-height: 240px; overflow-y: auto; font-size: 9.5px; margin: 0 20px 20px; }
+  .log-panel { margin: 14px 20px; background: #0a0a0a; border: 2px solid #333333; border-radius: 12px; padding: 12px 14px; max-height: 320px; overflow-y: auto; font-size: 10px; line-height: 1.5; color: #ffffff; font-weight: bold; }
   .log-panel div { padding: 1px 0; }
   .start-banner { margin: 10px 20px 0; padding: 8px 14px; border-radius: 8px; font-size: 10.5px; background: #ffd74022; color: var(--yellow); border: 1px solid var(--yellow); }
 </style>
@@ -325,7 +325,7 @@ app.get('/', (_, res) => {
       { label: '15m', st: m15, color: '#ff9f43', fill: 'rgba(255,159,67,0.10)' },
     ].filter(x => x.st && x.st.equityCurve && x.st.equityCurve.length >= 2);
     if (!series.length) {
-      ctx.fillStyle = '#7a8fa8';
+      ctx.fillStyle = '#888888';
       ctx.font = '10px monospace';
       ctx.fillText('Collecting equity data…', 14, 24);
       $('chart-meta').textContent = '';
@@ -339,7 +339,7 @@ app.get('/', (_, res) => {
     const pad = 10;
     const xAt = (i, len) => pad + (i / (len - 1)) * (W - pad * 2);
     const yAt = v => H - pad - ((v - min) / ((max - min) || 1)) * (H - pad * 2);
-    ctx.strokeStyle = '#e3e8f0';
+    ctx.strokeStyle = '#333333';
     ctx.lineWidth = 1;
     for (let g = 0; g <= 4; g++) {
       const gy = pad + (g / 4) * (H - pad * 2);
@@ -378,7 +378,7 @@ app.get('/', (_, res) => {
       metas.push(x.label + ': $' + fmt2(x.st.startingCapital) + ' → $' + fmt2(vals[curve.length - 1]) + ' · DD ' + fmtPct(dd.pct) + ' (' + sgn(-(dd.dollars || 0)) + ')');
     }
     ctx.font = '9px monospace';
-    ctx.fillStyle = '#7a8fa8';
+    ctx.fillStyle = '#888888';
     ctx.fillText('$' + fmt2(max), 12, 14);
     ctx.fillText('$' + fmt2(min), 12, H - 4);
     $('chart-meta').textContent = metas.join('   |   ');
@@ -419,7 +419,13 @@ app.get('/', (_, res) => {
   function renderLogs() {
     const el = $('log-panel');
     if (!allLogs.length) { el.innerHTML = '<div class="empty">No logs yet</div>'; return; }
-    el.innerHTML = allLogs.slice(-120).map(l => '<div>' + l.replace(/</g, '&lt;') + '</div>').join('');
+    el.innerHTML = allLogs.slice(-120).map(l => {
+      let cls = '';
+      if (l.includes('WIN')) cls = ' style="color:#00ff88"';
+      else if (l.includes('LOSS') || l.includes('STOP')) cls = ' style="color:#ff4444"';
+      else if (l.includes('P&L')) cls = ' style="color:#ffcc00"';
+      return '<div' + cls + '>' + l.replace(/</g, '&lt;') + '</div>';
+    }).join('');
     el.scrollTop = el.scrollHeight;
   }
 

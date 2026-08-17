@@ -288,7 +288,7 @@ function createEngine(cfg) {
 
   // Close the losing side: sell the quantity that was held at flip time (so a
   // faster next flip never closes the position we just flipped TO).
-  async function sellLeg(t, side, qty) {
+  async function sellLeg(t, side, qty, forcePrice) {
     const leg = t.leg;
     const tokenId = tokenIdFor(leg, side);
     const held = heldShares(t, side);
@@ -298,7 +298,7 @@ function createEngine(cfg) {
     if (bid == null) return { ok: false, reason: 'no-bid' };
     const resp = await placeTakerSell(tokenId, sellQty);
     if (!resp || !resp.filledNow) return { ok: false, reason: 'sell-not-filled' };
-    const avgPrice = resp.avgPrice != null ? resp.avgPrice : bid;
+    const avgPrice = resp.avgPrice != null ? resp.avgPrice : (forcePrice != null ? forcePrice : bid);
     const gross = round2(sellQty * avgPrice);
     const fee = computeFee(sellQty, avgPrice);
     const netFee = round2(fee - round2(fee * rebatePct));
@@ -577,14 +577,17 @@ function createEngine(cfg) {
     if (bid != null && bid <= stopLossPrice) {
       const qty = heldShares(t, t.lastSide);
       if (qty > 0) {
-        const sellRes = await sellLeg(t, t.lastSide, qty);
+        const sellRes = await sellLeg(t, t.lastSide, qty, stopLossPrice);
         if (sellRes && sellRes.ok) {
-          log(`${tfLabel(t.tf)} 🛑 STOP LOSS — sold ${t.lastSide.toUpperCase()} ${qty.toFixed(2)}sh @${(sellRes.avgPrice || stopLossPrice).toFixed(3)} (bid <= ${stopLossPrice})`);
+          const stoppedCost = totalCostOf(t);
+          const stoppedRecovered = totalSellProceeds(t) + (sellRes.proceeds || 0);
+          const stoppedPnl = round2(stoppedRecovered - stoppedCost);
+          log(`${tfLabel(t.tf)} 🛑 STOP LOSS — sold ${t.lastSide.toUpperCase()} ${qty.toFixed(2)}sh @${(sellRes.avgPrice || stopLossPrice).toFixed(3)} (bid <= ${stopLossPrice}) | cost ${stoppedCost.toFixed(2)} recovered ${stoppedRecovered.toFixed(2)} P&L ${sgn2(stoppedPnl)}`);
         }
       }
       t.stopLossTriggered = true;
       t.currentMartLevel = (t.currentMartLevel || 0) + 1;
-      if (t.currentMartLevel > maxMartingaleLevels) {
+      if (t.currentMartLevel >= maxMartingaleLevels) {
         t.reachedMax = true;
         t.lastSide = null;
         t.highAskSeen = false;
