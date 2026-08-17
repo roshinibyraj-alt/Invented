@@ -116,7 +116,7 @@ app.get('/', (_, res) => {
     <button id="resume-btn" class="resume">▶ Resume</button>
     <button id="live-btn" class="live-toggle">🔴 Go LIVE</button>
   </div>
-  <div class="note">Strategy: wait 1m(5m)/3m(15m) → watch 0.60+ → buy pullback to 0.60 → stop 0.49 → 1.5x MG re-entry (max 3). Separate windows.</div>
+  <div class="note">Strategy: wait 1m(5m)/3m(15m) → watch 0.60+ → fire at any price >= 0.60 → stop 0.49 → 1.5x MG re-entry (max 3). Separate windows.</div>
   <div id="start-banner" class="banner" style="display:none"></div>
   <div class="shared-stats" id="shared-stats"></div>
   <div class="chart-card">
@@ -183,7 +183,7 @@ function currentWindowHtml(s){
   if(t.skipped)hl='⏸ No bet';
   else if(t.settled)hl=(t.win===true?'🏆':'💸')+' '+(t.win?'WIN':'LOSS')+' '+sgn(t.pnl);
   else if(t.phase==='waiting')hl='⏳ '+fmtCountdown(t.countdownMs)+' → watch for 0.60+';
-  else if(t.phase==='awaiting-trigger')hl='🎯 Watching 0.60+ pullback';
+  else if(t.phase==='awaiting-trigger')hl='🎯 Watching 0.60+ entry';
   else hl=(t.lastSide==='up'?'🔵':'🟣')+' '+(t.lastSide||'?').toUpperCase()+' stop '+(s.stopLossPrice||0.49);
   var html='<div class="cw"><div class="hl">'+hl+'</div>'+
     '<div class="r"><span>Window</span><span>'+(leg.slug||'…')+'</span></div>'+
