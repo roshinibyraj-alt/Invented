@@ -332,6 +332,7 @@ var allLogs=[];
 function renderLogs(){
   var el=$('log-panel');
   if(!allLogs.length){el.innerHTML='<div class="empty">No logs yet</div>';return}
+  var wasAtBottom=el.scrollHeight-el.scrollTop-el.clientHeight<40;
   el.innerHTML=allLogs.slice(-120).map(function(l){
     var c='';
     if(l.indexOf('WIN')>=0)c=' style="color:#00ff88"';
@@ -339,7 +340,7 @@ function renderLogs(){
     else if(l.indexOf('P&L')>=0)c=' style="color:#ffcc00"';
     return'<div'+c+'>'+l.replace(/</g,'&lt;')+'</div>';
   }).join('');
-  el.scrollTop=el.scrollHeight;
+  if(wasAtBottom)el.scrollTop=el.scrollHeight;
 }
 
 socket.on('hedgeState:BTC-5m',function(s){latest.m5=s;render()});
