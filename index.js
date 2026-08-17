@@ -35,7 +35,7 @@ app.get('/', (_, res) => {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
-<title>⛏ BTC 0.60 Martingale — 5m &amp; 15m</title>
+<title>⛏ BTC 0.60 Martingale — 5m</title>
 <style>
   :root {
     --bg:#000; --bg2:#0a0a0a; --bg3:#111; --border:#333;
@@ -108,7 +108,7 @@ app.get('/', (_, res) => {
 </head>
 <body>
   <div class="header">
-    <div class="logo">⛏ <span>BTC</span> MARTINGALE 5m/15m</div>
+    <div class="logo">⛏ <span>BTC</span> MARTINGALE 5m</div>
     <div id="mode-badge" class="mode-badge mode-dry">DEMO</div>
   </div>
   <div class="toolbar">
@@ -116,7 +116,7 @@ app.get('/', (_, res) => {
     <button id="resume-btn" class="resume">▶ Resume</button>
     <button id="live-btn" class="live-toggle">🔴 Go LIVE</button>
   </div>
-  <div class="note">Strategy: wait 1m(5m)/3m(15m) → watch 0.60+ → fire at any price >= 0.60 → stop 0.49 → 1.5x MG re-entry (max 3). Separate windows.</div>
+  <div class="note">Strategy: wait 1m → watch 0.60+ → fire at any price >= 0.60 → stop 0.49 → 1.5x MG re-entry (max 3).</div>
   <div id="start-banner" class="banner" style="display:none"></div>
   <div class="shared-stats" id="shared-stats"></div>
   <div class="chart-card">
@@ -128,13 +128,12 @@ app.get('/', (_, res) => {
   </div>
   <div class="panels">
     <div class="panel" id="panel-m5"></div>
-    <div class="panel" id="panel-m15"></div>
   </div>
   <div class="log-panel" id="log-panel"><div class="empty">No logs yet</div></div>
 
 <script src="/socket.io/socket.io.js"></script>
 <script>
-const socket=io();let latest={m5:null,m15:null};
+const socket=io();let latest={m5:null};
 function $(id){return document.getElementById(id)}
 function fmt2(n){return(n==null||isNaN(n))?'—':Number(n).toFixed(2)}
 function fmtPx(n){return(n==null||isNaN(n))?'—':Number(n).toFixed(3)}
@@ -251,24 +250,20 @@ function drawdownOf(curve){
   return{pct:maxPct,dollars:maxDollars}
 }
 function combinedCurve(){
-  var a=latest.m15,b=latest.m5;
-  var c15=a&&a.equityCurve,c5=b&&b.equityCurve;
-  if(!c5||!c15)return(c5||c15||[]);
-  var n=Math.min(c5.length,c15.length),out=[];
-  for(var i=0;i<n;i++)out.push({t:c5[i].t,equity:Math.round((c5[i].equity+c15[i].equity)*100)/100});
-  return out;
+  var b=latest.m5;
+  return(b&&b.equityCurve)||[];
 }
 function sharedStatsHtml(){
-  var a=latest.m15,b=latest.m5;
-  if(!a&&!b)return'';
-  var bankroll=(a?a.bankroll:0)+(b?b.bankroll:0);
-  var equity=(a?a.equity:0)+(b?b.equity:0);
-  var rpnl=(a?a.realizedPnlTotal:0)+(b?b.realizedPnlTotal:0);
-  var decided=(a?a.windowsDecided:0)+(b?b.windowsDecided:0);
-  var wins=(a?a.wins:0)+(b?b.wins:0);
+  var b=latest.m5;
+  if(!b)return'';
+  var bankroll=b?b.bankroll:0;
+  var equity=b?b.equity:0;
+  var rpnl=b?b.realizedPnlTotal:0;
+  var decided=b?b.windowsDecided:0;
+  var wins=b?b.wins:0;
   var winRate=decided>0?wins/decided:null;
   var dd=drawdownOf(combinedCurve());
-  var fees=(a?a.totalFeesPaid:0)+(b?b.totalFeesPaid:0);
+  var fees=b?b.totalFeesPaid:0;
   return stat('Total Bank','$'+fmt2(bankroll))+
     stat('Total Equity','$'+fmt2(equity))+
     stat('Total P&L',sgn(rpnl),pClass(rpnl))+
@@ -283,8 +278,7 @@ function drawEquityChart(){
   var dpr=window.devicePixelRatio||1,W=canvas.clientWidth||800,H=canvas.clientHeight||180;
   canvas.width=W*dpr;canvas.height=H*dpr;ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,W,H);
   var series=[
-    {label:'5m',st:latest.m5,color:'#0099cc',fill:'rgba(0,153,204,0.08)'},
-    {label:'15m',st:latest.m15,color:'#ff9f43',fill:'rgba(255,159,67,0.10)'}
+    {label:'5m',st:latest.m5,color:'#0099cc',fill:'rgba(0,153,204,0.08)'}
   ].filter(function(x){return x.st&&x.st.equityCurve&&x.st.equityCurve.length>=2});
   if(!series.length){ctx.fillStyle='#888';ctx.font='10px monospace';ctx.fillText('Collecting data…',14,24);$('chart-meta').textContent='';return}
   var min=Infinity,max=-Infinity;
@@ -310,15 +304,15 @@ function drawEquityChart(){
 }
 
 function render(){
-  var any=latest.m5||latest.m15,banner=$('start-banner');
-  if(any&&any.waitingForBoundary&&any.boundaryWindowTs){banner.style.display='block';banner.textContent='⏳ Starting at '+fmtClock(any.boundaryWindowTs)+' UTC'}
+  var b=latest.m5,banner=$('start-banner');
+  if(b&&b.waitingForBoundary&&b.boundaryWindowTs){banner.style.display='block';banner.textContent='⏳ Starting at '+fmtClock(b.boundaryWindowTs)+' UTC'}
   else banner.style.display='none';
   $('shared-stats').innerHTML=sharedStatsHtml();
   $('panel-m5').innerHTML=panelHtml('m5','BTC 5m — wait 1m',latest.m5);
-  $('panel-m15').innerHTML=panelHtml('m15','BTC 15m — wait 3m',latest.m15);
+  
   drawEquityChart();
   if(any){
-    var live=(latest.m5&&!latest.m5.dryRun)||(latest.m15&&!latest.m15.dryRun);
+    var live=latest.m5&&!latest.m5.dryRun;
     $('mode-badge').className='mode-badge '+(live?'mode-live':'mode-dry');
     $('mode-badge').textContent=live?'LIVE':'DEMO';
     $('live-btn').classList.toggle('is-live',live);
@@ -329,7 +323,7 @@ function render(){
 $('pause-btn').onclick=function(){fetch('/api/hedge/pause',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})};
 $('resume-btn').onclick=function(){fetch('/api/hedge/resume',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})};
 $('live-btn').onclick=function(){
-  var live=(latest.m5&&!latest.m5.dryRun)||(latest.m15&&!latest.m15.dryRun),want=!live;
+  var live=latest.m5&&!latest.m5.dryRun,want=!live;
   if(want&&!confirm('Switch to LIVE mode?'))return;
   fetch('/api/hedge/set-mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({live:want})});
 };
@@ -349,13 +343,12 @@ function renderLogs(){
 }
 
 socket.on('hedgeState:BTC-5m',function(s){latest.m5=s;render()});
-socket.on('hedgeState:BTC-15m',function(s){latest.m15=s;render()});
 socket.on('log',function(line){allLogs.push(line);if(allLogs.length>300)allLogs.shift();renderLogs()});
 
 setInterval(render,1000);
 setInterval(async function(){
   try{var res=await fetch('/api/hedge/status'),st=await res.json();
-    if(st&&st.m5)latest.m5=st.m5;if(st&&st.m15)latest.m15=st.m15;render()
+    if(st&&st.m5)latest.m5=st.m5;render()
   }catch(e){}
 },10000);
 render();
@@ -371,7 +364,7 @@ const slog = (line) => { console.log(line); io.emit('log', line); };
 const PK = process.env.PRIVATE_KEY;
 if (!PK) { console.error('❌ PRIVATE_KEY env var missing'); process.exit(1); }
 
-console.log('⛏ BTC 0.60 Martingale Bot — 5m & 15m windows, separate demo capital per timeframe');
+console.log('⛏ BTC 0.60 Martingale Bot — 5m windows');
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`🌐 Dashboard: http://0.0.0.0:${PORT}`);

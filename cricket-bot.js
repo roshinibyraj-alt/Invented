@@ -1,16 +1,14 @@
 'use strict';
 
 /**
- * Manager module — instantiates ONE shared 0.60-martingale engine that
- * trades both 5m and 15m Up/Down windows. Exposes the API that index.js
- * (the dashboard) talks to.
+ * Manager module — instantiates ONE 0.60-martingale engine for BTC 5m
+ * Up/Down windows. Exposes the API that index.js (the dashboard) talks to.
  *
- * Strategy (both timeframes, independent, SEPARATE demo capital):
- *   - wait 2m (5m) / 6m (15m) after a window opens
- *   - fire the $50 entry on the LEADING side at ANY price (no come-back wait)
- *   - ONE flip of $100 (2x the $50 entry) INSTANTLY when the opposite side hits 0.50
- *   - no flips after 280s (5m) / 870s (15m)
- *   - flip FIRST, then sell the losing side ~2s later at the current bid
+ * Strategy:
+ *   - wait 1m after a 5m window opens
+ *   - fire the $50 entry at any price >= 0.60 on the leading side
+ *   - 1.5x martingale re-entry on next 0.60+ signal (max 3 levels)
+ *   - stop loss at 0.49 (force sell)
  *   - side above 0.90 at window end is declared the winner
  */
 
@@ -22,15 +20,12 @@ const DRY_RUN = (process.env.HEDGE_DRY_RUN || process.env.SPORTS_DRY_RUN || proc
 
 const CAPITAL = Number(process.env.CAPITAL || process.env.STARTING_CAPITAL || 4000);
 const CAPITAL_5 = process.env.CAPITAL_5 ? Number(process.env.CAPITAL_5) : undefined;
-const CAPITAL_15 = process.env.CAPITAL_15 ? Number(process.env.CAPITAL_15) : undefined;
 const ENTRY_PRICE = Number(process.env.ENTRY_PRICE || 0.60);
 const STOP_LOSS_PRICE = Number(process.env.STOP_LOSS_PRICE || 0.49);
 const ENTRY_DOLLARS = Number(process.env.ENTRY_DOLLARS || 50);
 const MARTINGALE_MULTIPLIER = Number(process.env.MARTINGALE_MULTIPLIER || 1.5);
 const MAX_MARTINGALE_LEVELS = Number(process.env.MAX_MARTINGALE_LEVELS || 3);
 const WAIT_SECONDS_5 = Number(process.env.WAIT_SECONDS_5 || 60);
-const WAIT_SECONDS_15 = Number(process.env.WAIT_SECONDS_15 || 180);
-const START_AT_BOUNDARY = (process.env.START_AT_BOUNDARY || 'false').toLowerCase() === 'true';
 const FEE_THETA = Number(process.env.FEE_THETA || 0.07);
 const REBATE_PCT = Number(process.env.REBATE_PCT || 0);
 
@@ -45,15 +40,12 @@ async function init(privateKey, emit, slogFn) {
     label: 'BTC-0.60-MART',
     startingCapital: CAPITAL,
     startingCapital5: CAPITAL_5,
-    startingCapital15: CAPITAL_15,
     entryPrice: ENTRY_PRICE,
     stopLossPrice: STOP_LOSS_PRICE,
     entryDollars: ENTRY_DOLLARS,
     martingaleMultiplier: MARTINGALE_MULTIPLIER,
     maxMartingaleLevels: MAX_MARTINGALE_LEVELS,
     waitSeconds5: WAIT_SECONDS_5,
-    waitSeconds15: WAIT_SECONDS_15,
-    startAtBoundary: START_AT_BOUNDARY,
     feeTheta: FEE_THETA,
     rebatePct: REBATE_PCT,
     statsStatePath: process.env.STATS_STATE_PATH || path.join(__dirname, 'stats-state-hedge.json'),
@@ -67,7 +59,7 @@ async function init(privateKey, emit, slogFn) {
 }
 
 function buildState() {
-  return engine ? engine.buildState() : { m5: null, m15: null };
+  return engine ? engine.buildState() : { m5: null };
 }
 
 function pauseTrading() {
