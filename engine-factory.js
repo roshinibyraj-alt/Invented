@@ -530,11 +530,11 @@ function createEngine(cfg) {
     const ask = askFor(t.leg, side);
 
     if (!inMart) {
-      // Initial entry: fire at any price >= entryPrice after wait time.
-      if (ask == null || ask < entryPrice) return;
+      // Initial entry: wait for price to pull back to ~entryPrice after wait time.
+      if (ask == null || ask < entryPrice - 0.02 || ask > entryPrice + 0.02) return;
     } else {
-      // Martingale: instant fire when any side reaches 0.60+.
-      if (ask == null || ask < entryPrice) return;
+      // Martingale: wait for price to pull back to ~entryPrice.
+      if (ask == null || ask < entryPrice - 0.02 || ask > entryPrice + 0.02) return;
     }
 
     const dollars = inMart ? round2(entryDollars * Math.pow(martingaleMultiplier, t.currentMartLevel)) : entryDollars;
@@ -549,7 +549,7 @@ function createEngine(cfg) {
         engine.maxMartCount = (engine.maxMartCount || 0) + 1;
         log(`${tfLabel()} 🎯 martingale #${t.currentMartLevel + 1} entry — ${side.toUpperCase()} $${dollars.toFixed(2)} @${res.avgPrice.toFixed(3)} (1.5x instant)`);
       } else {
-        log(`${tfLabel()} 🚦 entry — ${side.toUpperCase()} $${dollars.toFixed(2)} @${res.avgPrice.toFixed(3)} (any price >= ${entryPrice})`);
+        log(`${tfLabel()} 🚦 entry — ${side.toUpperCase()} $${dollars.toFixed(2)} @${res.avgPrice.toFixed(3)} (pulled to ~${entryPrice})`);
       }
     } else if (res.reason && res.reason !== 'no-ask') {
       log(`⚠️ ${tfLabel()} entry skipped: ${res.reason}`);
@@ -882,8 +882,8 @@ function createEngine(cfg) {
 
   async function start() {
     slog(`[${label.toLowerCase()}] ⛏ ${label} — BTC 5m martingale engine, fully automatic`);
-    slog(`[${label.toLowerCase()}] ⚙️  Wait ${waitSeconds5}s after window open, then fire at any price >= ${entryPrice}.`);
-    slog(`[${label.toLowerCase()}] ⚙️  Entry: buy at any price >= ${entryPrice} after the wait time. Stop loss at ${stopLossPrice} (force sell). Martingale: ${martingaleMultiplier}x re-entry (max ${maxMartingaleLevels} level). No new entries after 270s. Side above ${WINNER_PRICE.toFixed(2)} at window end wins.`);
+    slog(`[${label.toLowerCase()}] ⚙️  Wait ${waitSeconds5}s after window open, then fire when any side pulls to ~${entryPrice}.`);
+    slog(`[${label.toLowerCase()}] ⚙️  Entry: buy when price pulls to ~${entryPrice} after the wait time. Stop loss at ${stopLossPrice} (force sell). Martingale: ${martingaleMultiplier}x re-entry (max ${maxMartingaleLevels} level). No new entries after 270s. Side above ${WINNER_PRICE.toFixed(2)} at window end wins.`);
     slog(`[${label.toLowerCase()}] ⚙️  Capital: $${capital5.toFixed(2)}. Fees: ${rebatePct > 0 ? (rebatePct * 100).toFixed(0) + '% rebate' : 'no rebate'}.`);
     if (savedStats) {
       slog(`[${label.toLowerCase()}] 💾 Restored — bankroll $${engine.bankroll.toFixed(2)}, ${engine.wins}W/${engine.losses}L, max-mart: ${engine.maxMartCount}`);
