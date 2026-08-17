@@ -39,13 +39,13 @@ const { createCandleFeed } = require('./candles');
 const GAMMA = 'https://gamma-api.polymarket.com';
 const CLOB  = 'https://clob.polymarket.com';
 
-const TICK_MS                = 500;
-const PRICE_REFRESH_MS       = 1000;
-const DISCOVERY_RETRY_MS     = 2000;
-const RESOLUTION_POLL_MS     = 3000;
+const TICK_MS                = 100;
+const PRICE_REFRESH_MS       = 200;
+const DISCOVERY_RETRY_MS     = 500;
+const RESOLUTION_POLL_MS     = 1000;
 const MIN_ORDER_SHARES       = 1;
 const RESOLUTION_FALLBACK_MS = 60000;
-const EQUITY_RECORD_MS       = 5000;
+const EQUITY_RECORD_MS       = 1000;
 
 const TRIGGER_PRICE      = 0.60; // legacy entry reference (kept for state/UI)
 const FLIP_TRIGGER_PRICE = 0.50; // martingale: fire instantly at 0.50+
