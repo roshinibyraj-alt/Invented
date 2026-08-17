@@ -180,7 +180,7 @@ function createEngine(cfg) {
     slog(`[${label.toLowerCase()}] ${line}`);
   }
   function registerTrade(tf, t) {
-    const trade = { seq: ++tradeSeq[tf], time: new Date().toISOString().slice(11, 19), ...t };
+    const trade = { seq: ++tradeSeq[tf], time: new Date(nowFn()).toISOString().slice(11, 19), ...t };
     const list = tf === '5' ? engine.trades5 : engine.trades15;
     list.push(trade);
     if (list.length > 300) list.shift();
@@ -321,7 +321,12 @@ function createEngine(cfg) {
     t.pendingSells = t.pendingSells.filter(x => now < x.at);
     const totals = {};
     for (const x of due) totals[x.side] = round2((totals[x.side] || 0) + (x.qty || 0));
-    for (const side of Object.keys(totals)) await sellLeg(t, side, totals[side]);
+    for (const side of Object.keys(totals)) {
+      const result = await sellLeg(t, side, totals[side]);
+      if (!result || !result.ok) {
+        log(`⚠️ ${tfLabel(t.tf)} pending sell ${side.toUpperCase()} ${totals[side].toFixed(2)}sh failed (${result?.reason || 'unknown'}) — shares lost at window close`);
+      }
+    }
   }
 
   // Emergency close at window end: sell anything still pending (defensive).
@@ -330,7 +335,12 @@ function createEngine(cfg) {
     const totals = {};
     for (const x of t.pendingSells) totals[x.side] = round2((totals[x.side] || 0) + (x.qty || 0));
     t.pendingSells = [];
-    for (const side of Object.keys(totals)) await sellLeg(t, side, totals[side]);
+    for (const side of Object.keys(totals)) {
+      const result = await sellLeg(t, side, totals[side]);
+      if (!result || !result.ok) {
+        log(`⚠️ ${tfLabel(t.tf)} flush-sell ${side.toUpperCase()} ${totals[side].toFixed(2)}sh failed (${result?.reason || 'unknown'}) — shares expire worthless`);
+      }
+    }
   }
 
   // Polymarket taker fee: fee = shares * theta * price * (1-price).
@@ -606,7 +616,10 @@ function createEngine(cfg) {
         else {
           t.phase = 'pending-resolution';
           engine.pending[tf].push(t);
-          if (engine.pending[tf].length > 40) engine.pending[tf].shift();
+          if (engine.pending[tf].length > 40) {
+            const dropped = engine.pending[tf].shift();
+            log(`⚠️ ${tfLabel(tf)} dropped oldest pending trade [${dropped.leg.slug}] — pending queue exceeded 40; unresolved cost $${totalCostOf(dropped).toFixed(2)} may not settle`);
+          }
         }
       }
       t = freshTrade(tf, windowTs);

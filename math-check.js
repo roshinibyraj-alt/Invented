@@ -166,7 +166,7 @@ function expectedCost(dollars, price) {
   const e1 = expectedCost(50, 0.61);
   check('M1: $50 @0.61 buys 81.97 shares', Math.abs(M1.legs[0].shares - e1.shares) < 0.01);
   check('M1: payout = winning shares x $1 (81.97)', Math.abs(M1.payout - e1.shares) < 0.01);
-  check('M1: cost = notional + fee (50.00 + 1.37)', Math.abs(M1.wager - e1.cost) < 0.01 && Math.abs(e1.fee - 1.37) < 0.005);
+  check('M1: cost = notional + fee (50.00 + 1.37 = 51.37)', Math.abs(M1.wager - e1.cost) < 0.01 && Math.abs(e1.fee - 1.37) < 0.005);
   check('M1: pnl = payout - wager', Math.abs(M1.pnl - (M1.payout - M1.wager)) < 0.01);
 
   // Rule 2: the losing side is CLOSED at each flip — only the final side is
