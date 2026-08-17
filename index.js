@@ -29,6 +29,7 @@ app.post('/api/hedge/set-mode', (req, res) => {
   try { res.json(bot.setMode(live)); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
+app.get('/', (_, res) => {
   res.send(`<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -361,6 +362,7 @@ render();
 </script>
 </body>
 </html>`);
+});
 
 
 const emit = (event, data) => io.emit(event, data);
