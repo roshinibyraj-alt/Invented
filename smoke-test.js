@@ -99,7 +99,7 @@ global.fetch = async (url) => {
 (async () => {
   const states = {};
   virtualNow = Math.floor(Date.now() / (W5 * 1000)) * (W5 * 1000) + W5 * 1000;
-  const engine = createEngine({
+  const engine = createEngine({ label: 'BTC-5m',
     startingCapital: 4000, entryPrice: 0.60, stopLossPrice: 0.49,
     entryDollars: 50, martingaleMultiplier: 1.5, maxMartingaleLevels: 3,
     waitSeconds5: WAIT5, windowSeconds5: W5,

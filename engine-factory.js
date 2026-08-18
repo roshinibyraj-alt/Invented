@@ -798,7 +798,7 @@ function createEngine(cfg) {
     const curve = engine.equityCurve;
     return {
       ...baseState(),
-      label: 'BTC-5m',
+      label: label,
       windowSeconds: winSec(),
       waitSeconds: waitSec(),
       bankroll: engine.bankroll,
@@ -821,7 +821,7 @@ function createEngine(cfg) {
     };
   }
   function emitState() {
-    emit('hedgeState:BTC-5m', buildState());
+    emit('hedgeState:' + label, buildState());
   }
 
   function pauseTrading() {
