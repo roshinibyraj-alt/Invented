@@ -65,6 +65,7 @@ function createEngine(cfg) {
     martingaleMultiplier = 1.5,
     maxMartingaleLevels = 1,
     waitSeconds5 = 0,
+    windowType = '5m',
     windowSeconds5 = 300,
     feeTheta = 0.07,
     rebatePct = 0,
@@ -172,7 +173,7 @@ function createEngine(cfg) {
     list.push(trade);
     if (list.length > 300) list.shift();
   }
-  function tfLabel() { return '5m'; }
+  function tfLabel() { return windowType; }
   function winSec() { return window5; }
   function waitSec() { return waitSeconds5; }
 
@@ -529,8 +530,8 @@ function createEngine(cfg) {
       // Martingale: check BOTH sides, fire on whichever hits ~entryPrice first.
       const askUp = askFor(t.leg, 'up');
       const askDn = askFor(t.leg, 'down');
-      const upOk = askUp != null && askUp >= entryPrice - 0.02 && askUp <= entryPrice + 0.02;
-      const dnOk = askDn != null && askDn >= entryPrice - 0.02 && askDn <= entryPrice + 0.02;
+      const upOk = askUp != null && askUp >= entryPrice;
+      const dnOk = askDn != null && askDn >= entryPrice;
       if (upOk && dnOk) side = askUp <= askDn ? 'up' : 'down'; // both ready, pick cheaper
       else if (upOk) side = 'up';
       else if (dnOk) side = 'down';
@@ -544,7 +545,7 @@ function createEngine(cfg) {
 
     if (!inMart) {
       // Initial entry: wait for price to pull back to ~entryPrice after wait time.
-      if (ask == null || ask < entryPrice - 0.02 || ask > entryPrice + 0.02) return;
+      if (ask == null || ask < entryPrice) return;
     }
 
     const dollars = inMart ? round2(entryDollars * Math.pow(martingaleMultiplier, t.currentMartLevel)) : entryDollars;
@@ -604,7 +605,7 @@ function createEngine(cfg) {
       closeAt: (windowTs + wsec) * 1000,
       waitUntil: (windowTs + waitSec()) * 1000,
       waitSeconds: waitSec(),
-      leg: freshLeg(windowTs, wsec, `btc-updown-5m-`),
+      leg: freshLeg(windowTs, wsec, `btc-updown-${windowType}-`),
       phase: 'waiting',
       buys: [],
       sells: [],
@@ -862,7 +863,7 @@ function createEngine(cfg) {
           // display-only refresh — never block the trading loop on Binance
           candles5.refresh(log).catch(() => {});
         }
-        if (now - engine.lastPriceFetch >= priceRefreshMs) {
+        if (!wsConnected && now - engine.lastPriceFetch >= priceRefreshMs) {
           engine.lastPriceFetch = now;
           await Promise.all(allTrackedTrades().map(t => refreshLegPrices(t.leg)));
         }
@@ -903,7 +904,22 @@ function createEngine(cfg) {
     mainLoop().catch(e => slog(`[${label.toLowerCase()}] ❌ Fatal: ${e.message}`));
   }
 
-  return { start, pauseTrading, resumeTrading, setMode, buildState };
+  let wsConnected = false;
+  function setWsConnected(v) { wsConnected = v; }
+  function updateLegPrice(tokenId, prices) {
+    for (const t of allTrackedTrades()) {
+      if (t.leg.upTokenId === tokenId) {
+        if (prices.ask != null) t.leg.upAsk = prices.ask;
+        if (prices.bid != null) t.leg.upBid = prices.bid;
+      }
+      if (t.leg.downTokenId === tokenId) {
+        if (prices.ask != null) t.leg.downAsk = prices.ask;
+        if (prices.bid != null) t.leg.downBid = prices.bid;
+      }
+    }
+  }
+
+  return { start, pauseTrading, resumeTrading, setMode, buildState, updateLegPrice, setWsConnected };
 }
 
 module.exports = { createEngine };
