@@ -524,16 +524,26 @@ function createEngine(cfg) {
     const inMart = t.currentMartLevel > 0;
     if (t.buys.length && !inMart) { t.phase = 'trading'; return; }
     // Determine which side to monitor for entry.
-    let side = inMart ? (t.lastSide === 'up' ? 'down' : 'up') : leadingSide(t.leg);
-    if (!side) return;
+    let side;
+    if (inMart) {
+      // Martingale: check BOTH sides, fire on whichever hits ~entryPrice first.
+      const askUp = askFor(t.leg, 'up');
+      const askDn = askFor(t.leg, 'down');
+      const upOk = askUp != null && askUp >= entryPrice - 0.02 && askUp <= entryPrice + 0.02;
+      const dnOk = askDn != null && askDn >= entryPrice - 0.02 && askDn <= entryPrice + 0.02;
+      if (upOk && dnOk) side = askUp <= askDn ? 'up' : 'down'; // both ready, pick cheaper
+      else if (upOk) side = 'up';
+      else if (dnOk) side = 'down';
+      else return; // neither side at 0.60 yet
+    } else {
+      side = leadingSide(t.leg);
+      if (!side) return;
+    }
 
     const ask = askFor(t.leg, side);
 
     if (!inMart) {
       // Initial entry: wait for price to pull back to ~entryPrice after wait time.
-      if (ask == null || ask < entryPrice - 0.02 || ask > entryPrice + 0.02) return;
-    } else {
-      // Martingale: wait for price to pull back to ~entryPrice.
       if (ask == null || ask < entryPrice - 0.02 || ask > entryPrice + 0.02) return;
     }
 
@@ -565,7 +575,7 @@ function createEngine(cfg) {
         const sellRes = await sellLeg(t, t.lastSide, qty, stopLossPrice);
         if (sellRes && sellRes.ok) {
           const stoppedCost = totalCostOf(t);
-          const stoppedRecovered = totalSellProceeds(t) + (sellRes.proceeds || 0);
+          const stoppedRecovered = totalSellProceeds(t);
           const stoppedPnl = round2(stoppedRecovered - stoppedCost);
           log(`${tfLabel()} 🛑 STOP LOSS — sold ${t.lastSide.toUpperCase()} ${qty.toFixed(2)}sh @${(sellRes.avgPrice || stopLossPrice).toFixed(3)} (bid <= ${stopLossPrice}) | cost ${stoppedCost.toFixed(2)} recovered ${stoppedRecovered.toFixed(2)} P&L ${sgn2(stoppedPnl)}`);
         }
@@ -580,11 +590,10 @@ function createEngine(cfg) {
         log(`${tfLabel()} ⚠️ MAX MARTINGALE LEVELS (${maxMartingaleLevels}) reached — no more entries this window`);
         return;
       }
-      t.lastSide = null;
       t.highAskSeen = false;
       t.highSideAsk = null;
       t.phase = 'awaiting-trigger';
-      log(`${tfLabel()} 🔄 ready for martingale #${t.currentMartLevel + 1} — monitoring for ${entryPrice}+ entry`);
+      log(`${tfLabel()} 🔄 ready for martingale #${t.currentMartLevel + 1} — flip to ${t.lastSide === 'up' ? 'DOWN' : 'UP'} — monitoring for ${entryPrice}+ entry`);
     }
   }
 
