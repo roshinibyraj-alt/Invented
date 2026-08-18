@@ -25,7 +25,7 @@ const STOP_LOSS_PRICE = Number(process.env.STOP_LOSS_PRICE || 0.49);
 const ENTRY_DOLLARS = Number(process.env.ENTRY_DOLLARS || 50);
 const MARTINGALE_MULTIPLIER = Number(process.env.MARTINGALE_MULTIPLIER || 1.5);
 const MAX_MARTINGALE_LEVELS = Number(process.env.MAX_MARTINGALE_LEVELS || 1);
-const WAIT_SECONDS_5 = Number(process.env.WAIT_SECONDS_5 || 30);
+const WAIT_SECONDS_5 = Number(process.env.WAIT_SECONDS_5 || 0);
 const FEE_THETA = Number(process.env.FEE_THETA || 0.07);
 const REBATE_PCT = Number(process.env.REBATE_PCT || 0);
 
