@@ -572,7 +572,7 @@ function createEngine(cfg) {
       }
       t.stopLossTriggered = true;
       t.currentMartLevel = (t.currentMartLevel || 0) + 1;
-      if (t.currentMartLevel >= maxMartingaleLevels) {
+      if (t.currentMartLevel > maxMartingaleLevels) {
         t.reachedMax = true;
         t.lastSide = null;
         t.highAskSeen = false;
