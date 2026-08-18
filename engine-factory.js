@@ -64,7 +64,7 @@ function createEngine(cfg) {
     entryDollars = 50,
     martingaleMultiplier = 1.5,
     maxMartingaleLevels = 1,
-    waitSeconds5 = 0,
+    waitSeconds5 = 30,
     windowSeconds5 = 300,
     feeTheta = 0.07,
     rebatePct = 0,
@@ -882,7 +882,7 @@ function createEngine(cfg) {
 
   async function start() {
     slog(`[${label.toLowerCase()}] ⛏ ${label} — BTC 5m martingale engine, fully automatic`);
-    slog(`[${label.toLowerCase()}] ⚙️  No initial wait — monitor immediately, fire when any side pulls to ~${entryPrice}.`);
+    slog(`[${label.toLowerCase()}] ⚙️  Wait 30s after window open, fire when any side pulls to ~${entryPrice}.`);
     slog(`[${label.toLowerCase()}] ⚙️  Entry: buy when price pulls to ~${entryPrice} after the wait time. Stop loss at ${stopLossPrice} (force sell). Martingale: ${martingaleMultiplier}x re-entry (max ${maxMartingaleLevels} level). No new entries after 270s. Side above ${WINNER_PRICE.toFixed(2)} at window end wins.`);
     slog(`[${label.toLowerCase()}] ⚙️  Capital: $${capital5.toFixed(2)}. Fees: ${rebatePct > 0 ? (rebatePct * 100).toFixed(0) + '% rebate' : 'no rebate'}.`);
     if (savedStats) {
