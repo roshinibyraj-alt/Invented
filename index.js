@@ -17,10 +17,6 @@ const MARTINGALE_MULTIPLIER = Number(process.env.MARTINGALE_MULTIPLIER || 1.5);
 const MAX_MARTINGALE_LEVELS = Number(process.env.MAX_MARTINGALE_LEVELS || 1);
 const WAIT_SECONDS_5 = Number(process.env.WAIT_SECONDS_5 || 0);
 const WAIT_SECONDS_15 = Number(process.env.WAIT_SECONDS_15 || 0);
-const ENTRY_START_5 = Number(process.env.ENTRY_START_5 || 120);
-const ENTRY_END_5 = Number(process.env.ENTRY_END_5 || 15);
-const ENTRY_START_15 = Number(process.env.ENTRY_START_15 || 390);
-const ENTRY_END_15 = Number(process.env.ENTRY_END_15 || 30);
 const FEE_THETA = Number(process.env.FEE_THETA || 0.07);
 const REBATE_PCT = Number(process.env.REBATE_PCT || 0);
 
@@ -360,16 +356,16 @@ server.listen(PORT, '0.0.0.0', () => {
   (async () => {
     const trader = new PolymarketTrader(PK);
     await trader.authenticate();
-    const mkEngine = (label, type, cap, winSec, waitSec, statsPath, entryStart, entryEnd) => createEngine({
+    const mkEngine = (label, type, cap, winSec, waitSec, statsPath) => createEngine({
       label, windowType: type, startingCapital: cap, entryPrice: ENTRY_PRICE,
       stopLossPrice: STOP_LOSS_PRICE, entryDollars: ENTRY_DOLLARS,
       martingaleMultiplier: MARTINGALE_MULTIPLIER, maxMartingaleLevels: MAX_MARTINGALE_LEVELS,
-      waitSeconds5: waitSec, windowSeconds5: winSec, entryStartSec: entryStart, entryEndSec: entryEnd,
+      waitSeconds5: waitSec, windowSeconds5: winSec,
       feeTheta: FEE_THETA, rebatePct: REBATE_PCT,
       statsStatePath: statsPath, trader, dryRun: DRY_RUN, emit, slog,
     });
-    engine5 = mkEngine('BTC-5m', '5m', CAPITAL_5, 300, WAIT_SECONDS_5, process.env.STATS_STATE_PATH || path.join(__dirname, 'stats-5m.json'), ENTRY_START_5, ENTRY_END_5);
-    engine15 = mkEngine('BTC-15m', '15m', CAPITAL_15, 900, WAIT_SECONDS_15, process.env.STATS_STATE_PATH_15 || path.join(__dirname, 'stats-15m.json'), ENTRY_START_15, ENTRY_END_15);
+    engine5 = mkEngine('BTC-5m', '5m', CAPITAL_5, 300, WAIT_SECONDS_5, process.env.STATS_STATE_PATH || path.join(__dirname, 'stats-5m.json'));
+    engine15 = mkEngine('BTC-15m', '15m', CAPITAL_15, 900, WAIT_SECONDS_15, process.env.STATS_STATE_PATH_15 || path.join(__dirname, 'stats-15m.json'));
     await engine5.start();
     await engine15.start();
   })().catch(e => {
