@@ -11,7 +11,6 @@ class PriceStream {
     this.onDisconnect = opts.onDisconnect || (() => {});
     this.ws = null;
     this.connected = false;
-    this.reconnectDelay = 1000;
     this.subscriptions = new Map();
     this._closed = false;
     this._log = opts.log || (() => {});
@@ -22,14 +21,13 @@ class PriceStream {
     try {
       this.ws = new WebSocket(this.url);
     } catch (e) {
-      this._log(`⚠️ WebSocket connect failed: ${e.message}, retrying in ${this.reconnectDelay}ms`);
-      setTimeout(() => this.connect(), this.reconnectDelay);
+      this._log('🔌 WebSocket connect error: ' + e.message);
+      setTimeout(() => this.connect(), 100);
       return;
     }
     this.ws.on('open', () => {
       this.connected = true;
-      this.reconnectDelay = 1000;
-      this._log('🔌 WebSocket connected — real-time price streaming active');
+      this._log('🔌 WebSocket connected');
       this.onConnect();
       for (const [conditionId, tokenIds] of this.subscriptions) {
         this._sub(conditionId, tokenIds);
@@ -50,14 +48,10 @@ class PriceStream {
       } catch (_) {}
     });
     this.ws.on('close', () => {
-      const wasConnected = this.connected;
       this.connected = false;
-      if (wasConnected) this._log('🔌 WebSocket disconnected — falling back to REST polling');
+      this._log('🔌 WebSocket disconnected — reconnecting');
       this.onDisconnect();
-      if (!this._closed) {
-        setTimeout(() => this.connect(), this.reconnectDelay);
-        this.reconnectDelay = Math.min(this.reconnectDelay * 1.5, 15000);
-      }
+      if (!this._closed) setTimeout(() => this.connect(), 100);
     });
     this.ws.on('error', () => {});
   }

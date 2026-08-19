@@ -40,11 +40,9 @@ const GAMMA = 'https://gamma-api.polymarket.com';
 const CLOB  = 'https://clob.polymarket.com';
 
 const TICK_MS                = 100;
-const PRICE_REFRESH_MS       = 200;
 const DISCOVERY_RETRY_MS     = 500;
 const RESOLUTION_POLL_MS     = 1000;
 const MIN_ORDER_SHARES       = 1;
-const RESOLUTION_FALLBACK_MS = 60000;
 const EQUITY_RECORD_MS       = 1000;
 
 const TRIGGER_PRICE      = 0.60; // legacy entry reference (kept for state/UI)
@@ -70,7 +68,6 @@ function createEngine(cfg) {
     feeTheta = 0.07,
     rebatePct = 0,
     candleRefreshMs = 15000,
-    priceRefreshMs = PRICE_REFRESH_MS,
     trader,
     dryRun = true,
     statsStatePath,
@@ -132,7 +129,6 @@ function createEngine(cfg) {
       : [{ t: nowFn(), equity: capital5 }],
     current: null,
     pending: [],
-    lastPriceFetch: 0,
     lastCandleRefresh: 0,
     lastResolutionPoll: 0,
     lastEquityRecord: 0,
@@ -374,21 +370,6 @@ function createEngine(cfg) {
     }
   }
 
-  async function refreshLegPrices(leg) {
-    if (!leg.upTokenId || !leg.downTokenId) return;
-    try {
-      const [upAsk, upBid, downAsk, downBid] = await Promise.all([
-        getJSON(`${CLOB}/price?token_id=${leg.upTokenId}&side=BUY`).catch(() => null),
-        getJSON(`${CLOB}/price?token_id=${leg.upTokenId}&side=SELL`).catch(() => null),
-        getJSON(`${CLOB}/price?token_id=${leg.downTokenId}&side=BUY`).catch(() => null),
-        getJSON(`${CLOB}/price?token_id=${leg.downTokenId}&side=SELL`).catch(() => null),
-      ]);
-      if (upAsk?.price != null) leg.upAsk = parseFloat(upAsk.price);
-      if (upBid?.price != null) leg.upBid = parseFloat(upBid.price);
-      if (downAsk?.price != null) leg.downAsk = parseFloat(downAsk.price);
-      if (downBid?.price != null) leg.downBid = parseFloat(downBid.price);
-    } catch (_) {}
-  }
 
   function markPrice(leg, side) {
     const bid = side === 'up' ? leg.upBid : leg.downBid;
@@ -409,7 +390,6 @@ function createEngine(cfg) {
   async function attemptFastResolution(leg) {
     if (leg.resolved) return true;
     if (!leg.upTokenId || !leg.downTokenId) return false;
-    await refreshLegPrices(leg);
     const upP = markPrice(leg, 'up');
     const downP = markPrice(leg, 'down');
     if (upP == null && downP == null) return false;
@@ -428,7 +408,7 @@ function createEngine(cfg) {
       log(`⚡ [${leg.slug}] resolved FINAL-PRICE at window close (up ${upP != null ? upP.toFixed(3) : '—'} / down ${downP.toFixed(3)}) — winner DOWN (above ${WINNER_PRICE.toFixed(2)})`);
       return true;
     }
-    return false; // not decided yet — keep polling official/fallback resolution
+    return false;
   }
 
   async function resolveLegAttempt(leg) {
@@ -460,21 +440,7 @@ function createEngine(cfg) {
     } catch (e) {
       log(`⚠️ resolveLegAttempt(${leg.slug}) failed: ${e.message}`);
     }
-    if (nowFn() - leg.closeAt >= RESOLUTION_FALLBACK_MS) {
-      const upP = markPrice(leg, 'up');
-      const downP = markPrice(leg, 'down');
-      let winner = null;
-      if (upP != null && upP > WINNER_PRICE) winner = 'up';
-      else if (downP != null && downP > WINNER_PRICE) winner = 'down';
-      else winner = leadingSide(leg); // safety net if neither side crossed 0.90
-      if (winner) {
-        leg.resolved = true;
-        leg.winner = winner;
-        leg.resolutionMethod = 'price-fallback';
-        log(`⌛ [${leg.slug}] resolved PRICE-FALLBACK — winner ${winner.toUpperCase()}`);
-        return true;
-      }
-    }
+
     return false;
   }
 
@@ -652,7 +618,6 @@ function createEngine(cfg) {
       t.phase = 'awaiting-trigger';
       // The wait just ended — pull FRESH prices so the entry (and any instant
       // flip check) never fires on stale pre-wait 0.50/0.50 snapshots.
-      if (t.leg.discovered && t.leg.upTokenId) await refreshLegPrices(t.leg);
       log(`${tfLabel()} ⏱ wait over (t=${t.windowTs}) — monitoring for ${entryPrice}+ entry`);
     }
 
@@ -746,6 +711,8 @@ function createEngine(cfg) {
   function legSummary(leg) {
     return {
       slug: leg.slug,
+      conditionId: leg.conditionId,
+      upTokenId: leg.upTokenId, downTokenId: leg.downTokenId,
       upAsk: leg.upAsk, downAsk: leg.downAsk,
       upBid: leg.upBid, downBid: leg.downBid,
       discovered: leg.discovered,
@@ -863,10 +830,7 @@ function createEngine(cfg) {
           // display-only refresh — never block the trading loop on Binance
           candles5.refresh(log).catch(() => {});
         }
-        if (!wsConnected && now - engine.lastPriceFetch >= priceRefreshMs) {
-          engine.lastPriceFetch = now;
-          await Promise.all(allTrackedTrades().map(t => refreshLegPrices(t.leg)));
-        }
+
         if (engine.pending.length && now - engine.lastResolutionPoll >= RESOLUTION_POLL_MS) {
           engine.lastResolutionPoll = now;
           const still = [];
@@ -904,8 +868,6 @@ function createEngine(cfg) {
     mainLoop().catch(e => slog(`[${label.toLowerCase()}] ❌ Fatal: ${e.message}`));
   }
 
-  let wsConnected = false;
-  function setWsConnected(v) { wsConnected = v; }
   function updateLegPrice(tokenId, prices) {
     for (const t of allTrackedTrades()) {
       if (t.leg.upTokenId === tokenId) {
@@ -919,7 +881,7 @@ function createEngine(cfg) {
     }
   }
 
-  return { start, pauseTrading, resumeTrading, setMode, buildState, updateLegPrice, setWsConnected };
+  return { start, pauseTrading, resumeTrading, setMode, buildState, updateLegPrice };
 }
 
 module.exports = { createEngine };

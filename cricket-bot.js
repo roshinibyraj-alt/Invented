@@ -82,12 +82,8 @@ async function init(privateKey, emit, slogFn) {
       if (engine15) engine15.updateLegPrice(tokenId, prices);
     },
     onConnect: () => {
-      if (engine5) engine5.setWsConnected(true);
-      if (engine15) engine15.setWsConnected(true);
     },
     onDisconnect: () => {
-      if (engine5) engine5.setWsConnected(false);
-      if (engine15) engine15.setWsConnected(false);
     },
   });
   priceStream.connect();
