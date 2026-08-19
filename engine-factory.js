@@ -74,13 +74,15 @@ function createEngine(cfg) {
     nowFn = Date.now,
     tickMs = TICK_MS,
     priceRefreshMs = 100,
+    entryStartSec = 0,
+    entryEndSec = 0,
   } = cfg;
 
   const window5 = windowSeconds5;
   const scaleFactor = window5 / 300; // 1.0 for 5m, 3.0 for 15m
   const momentumHoldMs = Math.round(3000 * scaleFactor);
   const maxEntryPrice = 0.65;
-  const minSecondsLeft = Math.round(60 * scaleFactor);
+  const minSecondsLeft = entryEndSec > 0 ? entryEndSec : Math.round(60 * scaleFactor);
   const divergenceMin = 0.10;
   let tradeSeq = 0;
 
@@ -513,6 +515,12 @@ function createEngine(cfg) {
       return;
     }
 
+    // #6 Entry start gate: no entries in the first entryStartSec of the window.
+    const elapsed = now / 1000 - t.windowTs;
+    if (entryStartSec > 0 && elapsed < entryStartSec) {
+      return;
+    }
+
     // Determine which side to monitor for entry.
     let side;
     if (inMart) {
@@ -625,6 +633,7 @@ function createEngine(cfg) {
       closeAt: (windowTs + wsec) * 1000,
       waitUntil: (windowTs + waitSec()) * 1000,
       waitSeconds: waitSec(),
+      entryStartSec: entryStartSec,
       leg: freshLeg(windowTs, wsec, `btc-updown-${windowType}-`),
       phase: 'waiting',
       buys: [],
@@ -667,7 +676,7 @@ function createEngine(cfg) {
       }
       t = freshTrade(windowTs);
       engine.current = t;
-      log(`${tfLabel()} 🆕 window t=${windowTs} opened — waiting ${waitSec()}s before monitoring for ${entryPrice}+ entry`);
+      log(`${tfLabel()} 🆕 window t=${windowTs} opened — wait ${waitSec()}s | entries after ${entryStartSec}s, before last ${minSecondsLeft}s`);
     }
 
     if (t.phase === 'waiting' && now >= t.waitUntil) {
