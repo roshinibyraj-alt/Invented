@@ -351,46 +351,31 @@ function createEngine(cfg) {
 
   async function discoverLeg(leg) {
     try {
-      // Try primary slug, then ±windowSec neighbors (handles clock skew)
+      // Try primary slug, then ±windowSec neighbors for clock skew tolerance
       const candidates = [leg.slug];
       if (leg.windowSeconds) {
         const baseTs = leg.windowTs;
-        candidates.push(`${leg.slug.split('-').slice(0, -1).join('-')}-${baseTs - leg.windowSeconds}`);
-        candidates.push(`${leg.slug.split('-').slice(0, -1).join('-')}-${baseTs + leg.windowSeconds}`);
+        const prefix = leg.slug.split('-').slice(0, -1).join('-');
+        candidates.push(`${prefix}-${baseTs - leg.windowSeconds}`);
+        candidates.push(`${prefix}-${baseTs + leg.windowSeconds}`);
       }
       for (const slug of candidates) {
-        const mk = await getJSON(`${GAMMA}/markets?slug=${encodeURIComponent(slug)}`).catch(() => null);
-        if (mk && mk.clobTokenIds) {
-          const tokens = parseMarketTokens(mk);
-          const up = tokens.find(t => /up/i.test(t.outcome));
-          const down = tokens.find(t => /down/i.test(t.outcome));
-          if (!up || !down || !up.token_id || !down.token_id) continue;
-          leg.conditionId = mk.conditionId || null;
-          leg.upTokenId = up.token_id;
-          leg.downTokenId = down.token_id;
-          leg.slug = slug;
-          leg.discovered = true;
-          log(`🎯 leg discovered ${slug} — Up ${String(up.token_id).slice(0, 10)}… / Down ${String(down.token_id).slice(0, 10)}…`);
-          return;
-        }
-      }
-      // Fallback: try events endpoint for the primary slug
-      const events = await getJSON(`${GAMMA}/events?slug=${encodeURIComponent(leg.slug)}`);
-      const event = Array.isArray(events) ? events[0] : null;
-      if (event) {
+        const events = await getJSON(`${GAMMA}/events?slug=${encodeURIComponent(slug)}`).catch(() => null);
+        const event = Array.isArray(events) ? events[0] : null;
+        if (!event) continue;
         const mk = (event.markets || [])[0];
-        if (mk) {
-          const tokens = parseMarketTokens(mk);
-          const up = tokens.find(t => /up/i.test(t.outcome));
-          const down = tokens.find(t => /down/i.test(t.outcome));
-          if (up && down && up.token_id && down.token_id) {
-            leg.conditionId = mk.conditionId || null;
-            leg.upTokenId = up.token_id;
-            leg.downTokenId = down.token_id;
-            leg.discovered = true;
-            log(`🎯 leg discovered ${leg.slug} (via events) — Up ${String(up.token_id).slice(0, 10)}… / Down ${String(down.token_id).slice(0, 10)}…`);
-          }
-        }
+        if (!mk) continue;
+        const tokens = parseMarketTokens(mk);
+        const up = tokens.find(t => /up/i.test(t.outcome));
+        const down = tokens.find(t => /down/i.test(t.outcome));
+        if (!up || !down || !up.token_id || !down.token_id) continue;
+        leg.conditionId = mk.conditionId || null;
+        leg.upTokenId = up.token_id;
+        leg.downTokenId = down.token_id;
+        leg.slug = slug;
+        leg.discovered = true;
+        log(`🎯 leg discovered ${slug} — Up ${String(up.token_id).slice(0, 10)}… / Down ${String(down.token_id).slice(0, 10)}…`);
+        return;
       }
     } catch (e) {
       log(`⚠️ discoverLeg(${leg.slug}) failed: ${e.message}`);

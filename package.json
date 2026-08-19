@@ -1,15 +1,9 @@
 {
-  "name": "btc-060-martingale-bot",
-  "version": "2.0.0",
-  "description": "BTC 5m/15m Up/Down martingale bot for Polymarket",
+  "name": "btc-martingale-bot",
+  "version": "3.0.0",
   "main": "index.js",
-  "scripts": {
-    "start": "node index.js",
-    "test": "node smoke-test.js"
-  },
-  "engines": {
-    "node": ">=18.0.0"
-  },
+  "scripts": { "start": "node index.js" },
+  "engines": { "node": ">=18.0.0" },
   "dependencies": {
     "@polymarket/builder-relayer-client": "^0.0.10",
     "@polymarket/clob-client-v2": "^1.1.0",

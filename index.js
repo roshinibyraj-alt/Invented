@@ -1,9 +1,26 @@
 'use strict';
 
+const path = require('path');
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
-const bot = require('./cricket-bot');
+const PolymarketTrader = require('./polymarket-trader');
+const { createEngine } = require('./engine-factory');
+
+const DRY_RUN = (process.env.HEDGE_DRY_RUN || process.env.SPORTS_DRY_RUN || process.env.DRY_RUN || 'true').toLowerCase() === 'true';
+const CAPITAL_5 = Number(process.env.CAPITAL_5 || process.env.CAPITAL || 4000);
+const CAPITAL_15 = Number(process.env.CAPITAL_15 || 4000);
+const ENTRY_PRICE = Number(process.env.ENTRY_PRICE || 0.60);
+const STOP_LOSS_PRICE = Number(process.env.STOP_LOSS_PRICE || 0.49);
+const ENTRY_DOLLARS = Number(process.env.ENTRY_DOLLARS || 50);
+const MARTINGALE_MULTIPLIER = Number(process.env.MARTINGALE_MULTIPLIER || 1.5);
+const MAX_MARTINGALE_LEVELS = Number(process.env.MAX_MARTINGALE_LEVELS || 1);
+const WAIT_SECONDS_5 = Number(process.env.WAIT_SECONDS_5 || 0);
+const WAIT_SECONDS_15 = Number(process.env.WAIT_SECONDS_15 || 0);
+const FEE_THETA = Number(process.env.FEE_THETA || 0.07);
+const REBATE_PCT = Number(process.env.REBATE_PCT || 0);
+
+let engine5 = null, engine15 = null;
 
 const app = express();
 const server = http.createServer(app);
@@ -12,10 +29,13 @@ const PORT = process.env.PORT || 8080;
 
 app.use(express.json());
 app.get('/healthz', (_, r) => r.sendStatus(200));
-app.get('/api/hedge/status', (_, r) => { try { r.json(bot.buildState()); } catch (e) { r.status(500).json({ ok: false, error: e.message }); } });
-app.post('/api/hedge/pause', (_, r) => { try { r.json(bot.pauseTrading()); } catch (e) { r.status(500).json({ ok: false, error: e.message }); } });
-app.post('/api/hedge/resume', (_, r) => { try { r.json(bot.resumeTrading()); } catch (e) { r.status(500).json({ ok: false, error: e.message }); } });
-app.post('/api/hedge/set-mode', (req, r) => { const { live } = req.body || {}; if (typeof live !== 'boolean') return r.status(400).json({ ok: false, error: 'Missing "live" boolean' }); try { r.json(bot.setMode(live)); } catch (e) { r.status(500).json({ ok: false, error: e.message }); } });
+app.get('/api/hedge/status', (_, r) => {
+  try { r.json({ m5: engine5 ? engine5.buildState() : null, m15: engine15 ? engine15.buildState() : null }); }
+  catch (e) { r.status(500).json({ ok: false, error: e.message }); }
+});
+app.post('/api/hedge/pause', (_, r) => { try { if (engine5) engine5.pauseTrading(); if (engine15) engine15.pauseTrading(); r.json({ ok: true }); } catch (e) { r.status(500).json({ ok: false, error: e.message }); } });
+app.post('/api/hedge/resume', (_, r) => { try { if (engine5) engine5.resumeTrading(); if (engine15) engine15.resumeTrading(); r.json({ ok: true }); } catch (e) { r.status(500).json({ ok: false, error: e.message }); } });
+app.post('/api/hedge/set-mode', (req, r) => { const { live } = req.body || {}; if (typeof live !== 'boolean') return r.status(400).json({ ok: false, error: 'Missing "live" boolean' }); try { if (engine5) engine5.setMode(live); if (engine15) engine15.setMode(live); r.json({ ok: true }); } catch (e) { r.status(500).json({ ok: false, error: e.message }); } });
 
 const DASH = `<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
@@ -333,7 +353,21 @@ if (!PK) { console.error('❌ PRIVATE_KEY env var missing'); process.exit(1); }
 console.log('⛏ BTC Martingale Bot — 5m + 15m independent windows');
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`🌐 Dashboard: http://0.0.0.0:${PORT}`);
-  bot.init(PK, emit, slog).catch(e => {
+  (async () => {
+    const trader = new PolymarketTrader(PK);
+    await trader.authenticate();
+    const mkEngine = (label, type, cap, winSec, waitSec, statsPath) => createEngine({
+      label, windowType: type, startingCapital: cap, entryPrice: ENTRY_PRICE,
+      stopLossPrice: STOP_LOSS_PRICE, entryDollars: ENTRY_DOLLARS,
+      martingaleMultiplier: MARTINGALE_MULTIPLIER, maxMartingaleLevels: MAX_MARTINGALE_LEVELS,
+      waitSeconds5: waitSec, windowSeconds5: winSec, feeTheta: FEE_THETA, rebatePct: REBATE_PCT,
+      statsStatePath: statsPath, trader, dryRun: DRY_RUN, emit, slog,
+    });
+    engine5 = mkEngine('BTC-5m', '5m', CAPITAL_5, 300, WAIT_SECONDS_5, process.env.STATS_STATE_PATH || path.join(__dirname, 'stats-5m.json'));
+    engine15 = mkEngine('BTC-15m', '15m', CAPITAL_15, 900, WAIT_SECONDS_15, process.env.STATS_STATE_PATH_15 || path.join(__dirname, 'stats-15m.json'));
+    await engine5.start();
+    await engine15.start();
+  })().catch(e => {
     console.error('❌ Bot init failed:', e.message);
     process.exit(1);
   });
