@@ -46,6 +46,10 @@ const EQUITY_RECORD_MS       = 1000;
 const TRIGGER_PRICE      = 0.60; // legacy entry reference (kept for state/UI)
 const FLIP_TRIGGER_PRICE = 0.50; // martingale: fire instantly at 0.50+
 const WINNER_PRICE       = 0.90; // resolution: side above 0.90 wins
+const MOMENTUM_HOLD_MS  = 3000;  // price must stay >= entryPrice for 3s before entry
+const MAX_ENTRY_PRICE   = 0.65;  // never enter above this price
+const MIN_SECONDS_LEFT  = 60;    // don't enter if < 60s remain in window
+const DIVERGENCE_MIN    = 0.10;  // opposite side must be at least this far below entry side
 
 function round2(n) { return Math.round(n * 100) / 100; }
 function sgn2(n) { return (n > 0 ? '+$' : (n < 0 ? '-$' : '±$')) + Math.abs(n).toFixed(2); }
@@ -513,28 +517,66 @@ function createEngine(cfg) {
   async function maybeEntry(t) {
     const inMart = t.currentMartLevel > 0;
     if (t.buys.length && !inMart) { t.phase = 'trading'; return; }
+
+    // #5 Time-to-close guard: don't enter if window is about to end.
+    const now = nowFn();
+    const msLeft = t.closeAt - now;
+    if (msLeft < MIN_SECONDS_LEFT * 1000) {
+      if (!inMart) { t.skipped = true; t.phase = 'resolved'; }
+      return;
+    }
+
     // Determine which side to monitor for entry.
     let side;
     if (inMart) {
-      // Martingale: check BOTH sides, fire on whichever hits ~entryPrice first.
       const askUp = askFor(t.leg, 'up');
       const askDn = askFor(t.leg, 'down');
       const upOk = askUp != null && askUp >= entryPrice;
       const dnOk = askDn != null && askDn >= entryPrice;
-      if (upOk && dnOk) side = askUp <= askDn ? 'up' : 'down'; // both ready, pick cheaper
+      if (upOk && dnOk) side = askUp <= askDn ? 'up' : 'down';
       else if (upOk) side = 'up';
       else if (dnOk) side = 'down';
-      else return; // neither side at 0.60 yet
+      else return;
     } else {
       side = leadingSide(t.leg);
       if (!side) return;
     }
 
     const ask = askFor(t.leg, side);
+    const oppSide = side === 'up' ? 'down' : 'up';
+    const oppAsk = askFor(t.leg, oppSide);
 
     if (!inMart) {
-      // Initial entry: wait for price to pull back to ~entryPrice after wait time.
-      if (ask == null || ask < entryPrice) return;
+      // #2 Momentum confirmation: price must be >= entryPrice for MOMENTUM_HOLD_MS.
+      if (ask == null || ask < entryPrice) {
+        t.entryPriceAboveSince = 0;
+        return;
+      }
+      if (t.entryPriceAboveSince === 0) {
+        t.entryPriceAboveSince = now;
+        log(`${tfLabel()} ⏳ momentum hold started — ${side.toUpperCase()} @${ask.toFixed(3)} >= ${entryPrice}, waiting ${MOMENTUM_HOLD_MS / 1000}s`);
+        return;
+      }
+      if (now - t.entryPriceAboveSince < MOMENTUM_HOLD_MS) {
+        return; // still holding
+      }
+
+      // #4 Entry price cap: reject if ask is too high.
+      if (ask > MAX_ENTRY_PRICE) {
+        log(`${tfLabel()} ⛔ entry rejected — ${side.toUpperCase()} @${ask.toFixed(3)} above max ${MAX_ENTRY_PRICE}`);
+        t.entryPriceAboveSince = 0;
+        return;
+      }
+
+      // #3 Divergence check: opposite side must not be converging.
+      if (oppAsk != null) {
+        const gap = ask - oppAsk;
+        if (gap < DIVERGENCE_MIN) {
+          log(`${tfLabel()} ⛔ entry rejected — gap too narrow (${side.toUpperCase()} ${ask.toFixed(3)} vs ${oppSide.toUpperCase()} ${oppAsk.toFixed(3)} = ${gap.toFixed(3)} < ${DIVERGENCE_MIN})`);
+          t.entryPriceAboveSince = 0;
+          return;
+        }
+      }
     }
 
     const dollars = inMart ? round2(entryDollars * Math.pow(martingaleMultiplier, t.currentMartLevel)) : entryDollars;
@@ -544,12 +586,13 @@ function createEngine(cfg) {
       t.highAskSeen = false;
       t.highSideAsk = null;
       t.stopLossTriggered = false;
+      t.entryPriceAboveSince = 0;
       if (inMart) {
         t.lastSide = side;
         engine.maxMartCount = (engine.maxMartCount || 0) + 1;
         log(`${tfLabel()} 🎯 martingale #${t.currentMartLevel + 1} entry — ${side.toUpperCase()} $${dollars.toFixed(2)} @${res.avgPrice.toFixed(3)} (1.5x instant)`);
       } else {
-        log(`${tfLabel()} 🚦 entry — ${side.toUpperCase()} $${dollars.toFixed(2)} @${res.avgPrice.toFixed(3)} (pulled to ~${entryPrice})`);
+        log(`${tfLabel()} 🚦 entry — ${side.toUpperCase()} $${dollars.toFixed(2)} @${res.avgPrice.toFixed(3)} (held ${MOMENTUM_HOLD_MS / 1000}s above ${entryPrice})`);
       }
     } else if (res.reason && res.reason !== 'no-ask') {
       log(`⚠️ ${tfLabel()} entry skipped: ${res.reason}`);
@@ -610,6 +653,8 @@ function createEngine(cfg) {
       win: null,
       skipped: false,
       settled: false,
+      entryPriceAboveSince: 0,
+      prevOppositePrice: null,
     };
   }
 
@@ -757,6 +802,13 @@ function createEngine(cfg) {
   }
   function tradeSummary(t) {
     if (!t) return null;
+    const heldUp = heldShares(t, 'up');
+    const heldDown = heldShares(t, 'down');
+    const upMark = markPrice(t.leg, 'up');
+    const downMark = markPrice(t.leg, 'down');
+    const mtmUp = heldUp > 0 && upMark != null ? round2(heldUp * upMark) : 0;
+    const mtmDown = heldDown > 0 && downMark != null ? round2(heldDown * downMark) : 0;
+    const mtmTotal = round2(mtmUp + mtmDown);
     return {
       windowTs: t.windowTs, closeAt: t.closeAt, waitUntil: t.waitUntil,
       phase: t.phase, waitSeconds: t.waitSeconds,
@@ -772,7 +824,10 @@ function createEngine(cfg) {
       entryPrice: t.buys.length ? t.buys[0].price : null,
       pnl: t.pnl, win: t.win, skipped: t.skipped,
       unrealizedPnl: unrealizedFor(t),
+      heldUp, heldDown, mtmUp, mtmDown, mtmTotal,
+      upMark, downMark,
       countdownMs: t.phase === 'waiting' ? Math.max(0, t.waitUntil - nowFn()) : null,
+      secsLeft: Math.max(0, Math.floor((t.closeAt - nowFn()) / 1000)),
     };
   }
   function baseState() {
@@ -799,6 +854,14 @@ function createEngine(cfg) {
   function buildState() {
     const decided = engine.wins + engine.losses;
     const curve = engine.equityCurve;
+    const allOpen = allTrackedTrades();
+    const totalOutstandingCost = round2(allOpen.reduce((s, t) => s + totalCostOf(t), 0));
+    const totalMTM = round2(allOpen.reduce((s, t) => {
+      const hUp = heldShares(t, 'up'), hDown = heldShares(t, 'down');
+      const upP = markPrice(t.leg, 'up'), downP = markPrice(t.leg, 'down');
+      return s + (hUp > 0 && upP != null ? hUp * upP : 0) + (hDown > 0 && downP != null ? hDown * downP : 0);
+    }, 0));
+    const totalUnrealized = round2(totalMTM - totalOutstandingCost + round2(allOpen.reduce((s, t) => s + totalSellProceeds(t), 0)));
     return {
       ...baseState(),
       label: label,
@@ -806,10 +869,13 @@ function createEngine(cfg) {
       waitSeconds: waitSec(),
       bankroll: engine.bankroll,
       startingCapital: capital5,
-      equity: round2(engine.bankroll + positionMTM(engine.current)),
+      equity: round2(engine.bankroll + totalMTM),
       equityCurve: curve,
       maxDrawdown: computeDrawdown(curve),
       realizedPnl: engine.realizedPnl,
+      totalUnrealized,
+      totalMTM,
+      totalOutstandingCost,
       wins: engine.wins,
       losses: engine.losses,
       windowsDecided: decided,

@@ -121,10 +121,10 @@ function panelHtml(st,label){
   var h='';
   // Panel stats
   h+='<div class="p-stats">';
-  h+='<div class="ps"><div class="l">Capital</div><div class="v">$'+fmt2(st.startingCapital)+'</div></div>';
   h+='<div class="ps"><div class="l">Bankroll</div><div class="v">$'+fmt2(st.bankroll)+'</div></div>';
-  h+='<div class="ps"><div class="l">Equity</div><div class="v '+pC(st.realizedPnl)+'">$'+fmt2(st.equity)+'</div></div>';
-  h+='<div class="ps"><div class="l">P&L</div><div class="v '+pC(st.realizedPnl)+'">'+sgn(st.realizedPnl)+'</div></div>';
+  h+='<div class="ps"><div class="l">Equity</div><div class="v '+pC(st.equity-st.startingCapital)+'">$'+fmt2(st.equity)+'</div></div>';
+  h+='<div class="ps"><div class="l">Realized</div><div class="v '+pC(st.realizedPnl)+'">'+sgn(st.realizedPnl)+'</div></div>';
+  h+='<div class="ps"><div class="l">Unrealized</div><div class="v '+pC(st.totalUnrealized)+'">'+sgn(st.totalUnrealized)+'</div></div>';
   h+='</div>';
   h+='<div class="p-stats">';
   h+='<div class="ps"><div class="l">Wins</div><div class="v pos">'+(st.wins||0)+'</div></div>';
@@ -136,17 +136,32 @@ function panelHtml(st,label){
   // Current window
   var cur=st.current&&st.current.btc;
   if(cur&&cur.leg&&cur.leg.discovered){
-    // Live prices
+    // Live prices — large and prominent
     h+=priceHtml(cur.leg,label);
-    // Window info
-    h+='<div class="current-win">';
-    h+='<div class="cw-phase">'+(cur.phase||'').toUpperCase()+' — '+(cur.leg?cur.leg.slug:'')+'</div>';
-    h+='<div class="cw-row">';
-    h+='<div class="cw-item"><div class="lbl">Total Cost</div><div class="val">$'+fmt2(cur.totalCost)+'</div></div>';
-    h+='<div class="cw-item"><div class="lbl">Buys</div><div class="val">'+(cur.buys?cur.buys.length:0)+'</div></div>';
-    h+='<div class="cw-item"><div class="lbl">Mart Level</div><div class="val">'+(cur.martingaleLevel||0)+'</div></div>';
-    if(cur.pnl!=null)h+='<div class="cw-item"><div class="lbl">P&L</div><div class="val '+pC(cur.pnl)+'">'+sgn(cur.pnl)+'</div></div>';
-    h+='</div></div>';
+    // Floating position summary
+    if(cur.heldUp>0||cur.heldDown>0){
+      h+='<div class="current-win">';
+      h+='<div class="cw-phase">'+(cur.phase||'').toUpperCase()+' — '+(cur.secsLeft!=null?cur.secsLeft+'s left':'')+'</div>';
+      h+='<div class="cw-row">';
+      h+='<div class="cw-item"><div class="lbl">Total Cost</div><div class="val">$'+fmt2(cur.totalCost)+'</div></div>';
+      h+='<div class="cw-item"><div class="lbl">MTM Value</div><div class="val">'+(cur.mtmTotal!=null?'$'+fmt2(cur.mtmTotal):'--')+'</div></div>';
+      h+='<div class="cw-item"><div class="lbl">Unrealized</div><div class="val '+pC(cur.unrealizedPnl)+'">'+(cur.unrealizedPnl!=null?sgn(cur.unrealizedPnl):'--')+'</div></div>';
+      h+='<div class="cw-item"><div class="lbl">Buys</div><div class="val">'+(cur.buys?cur.buys.length:0)+'</div></div>';
+      h+='</div>';
+      h+='<div class="cw-row">';
+      if(cur.heldUp>0)h+='<div class="cw-item"><div class="lbl">UP Held</div><div class="val" style="color:#00ccff">'+cur.heldUp.toFixed(2)+'sh @'+fmt3(cur.upMark)+' = $'+fmt2(cur.mtmUp)+'</div></div>';
+      if(cur.heldDown>0)h+='<div class="cw-item"><div class="lbl">DN Held</div><div class="val" style="color:#aa88ff">'+cur.heldDown.toFixed(2)+'sh @'+fmt3(cur.downMark)+' = $'+fmt2(cur.mtmDown)+'</div></div>';
+      h+='</div></div>';
+    } else {
+      h+='<div class="current-win">';
+      h+='<div class="cw-phase">'+(cur.phase||'').toUpperCase()+' — '+(cur.secsLeft!=null?cur.secsLeft+'s left':'')+'</div>';
+      h+='<div class="cw-row">';
+      h+='<div class="cw-item"><div class="lbl">Total Cost</div><div class="val">$'+fmt2(cur.totalCost)+'</div></div>';
+      h+='<div class="cw-item"><div class="lbl">Buys</div><div class="val">'+(cur.buys?cur.buys.length:0)+'</div></div>';
+      h+='<div class="cw-item"><div class="lbl">Mart Level</div><div class="val">'+(cur.martingaleLevel||0)+'</div></div>';
+      if(cur.pnl!=null)h+='<div class="cw-item"><div class="lbl">P&L</div><div class="val '+pC(cur.pnl)+'">'+sgn(cur.pnl)+'</div></div>';
+      h+='</div></div>';
+    }
     // Trade cards
     if(cur.buys&&cur.buys.length){
       for(var i=0;i<cur.buys.length;i++){
@@ -252,12 +267,14 @@ function render(){
   var totalBankroll=(s5?s5.bankroll:0)+(s15?s15.bankroll:0);
   var totalW=(s5?s5.wins:0)+(s15?s15.wins:0);
   var totalL=(s5?s5.losses:0)+(s15?s15.losses:0);
+  var totalUnreal=(s5?s5.totalUnrealized:0)+(s15?s15.totalUnrealized:0);
+  var totalEquity=(s5?s5.equity:0)+(s15?s15.equity:0);
   var wr=totalW+totalL>0?((totalW/(totalW+totalL))*100).toFixed(1)+'%':'--';
   $('stats-row').innerHTML=[
-    '<div class="st"><div class="st-l">Bankroll</div><div class="st-v">$'+fmt2(totalBankroll)+'</div></div>',
-    '<div class="st"><div class="st-l">P&L</div><div class="st-v '+pC(totalPnl)+'">'+sgn(totalPnl)+'</div></div>',
-    '<div class="st"><div class="st-l">Wins/Losses</div><div class="st-v">'+totalW+'W/'+totalL+'L</div></div>',
-    '<div class="st"><div class="st-l">Win Rate</div><div class="st-v">'+wr+'</div></div>',
+    '<div class="st"><div class="st-l">Equity</div><div class="st-v '+pC(totalEquity-((s5?s5.startingCapital:0)+(s15?s15.startingCapital:0)))+'">$'+fmt2(totalEquity)+'</div></div>',
+    '<div class="st"><div class="st-l">Realized</div><div class="st-v '+pC(totalPnl)+'">'+sgn(totalPnl)+'</div></div>',
+    '<div class="st"><div class="st-l">Unrealized</div><div class="st-v '+pC(totalUnreal)+'">'+sgn(totalUnreal)+'</div></div>',
+    '<div class="st"><div class="st-l">W/L ('+wr+')</div><div class="st-v"><span class="pos">'+totalW+'W</span>/<span class="neg">'+totalL+'L</span></div></div>',
   ].join('');
   $('m5-body').innerHTML=panelHtml(s5,'5m');
   $('m5-badge').textContent=(s5?s5.wins+'W/'+s5.losses+'L':'--')+' | '+sgn(s5?s5.realizedPnl:0);
