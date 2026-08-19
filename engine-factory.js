@@ -34,8 +34,6 @@
  */
 
 const fs = require('fs');
-const { createCandleFeed } = require('./candles');
-
 const GAMMA = 'https://gamma-api.polymarket.com';
 const CLOB  = 'https://clob.polymarket.com';
 
@@ -67,7 +65,6 @@ function createEngine(cfg) {
     windowSeconds5 = 300,
     feeTheta = 0.07,
     rebatePct = 0,
-    candleRefreshMs = 15000,
     trader,
     dryRun = true,
     statsStatePath,
@@ -75,9 +72,8 @@ function createEngine(cfg) {
     slog = () => {},
     nowFn = Date.now,
     tickMs = TICK_MS,
+    priceRefreshMs = 100,
   } = cfg;
-
-  const candles5  = createCandleFeed({ interval: '5m', maxCandles: 500, label: '5m' });
 
   const window5 = windowSeconds5;
   let tradeSeq = 0;
@@ -129,8 +125,8 @@ function createEngine(cfg) {
       : [{ t: nowFn(), equity: capital5 }],
     current: null,
     pending: [],
-    lastCandleRefresh: 0,
     lastResolutionPoll: 0,
+    lastPriceFetch: 0,
     lastEquityRecord: 0,
     waitingForBoundary: true,
     boundaryWindowTs: null,
@@ -351,20 +347,47 @@ function createEngine(cfg) {
 
   async function discoverLeg(leg) {
     try {
+      // Try primary slug, then ±windowSec neighbors (handles clock skew)
+      const candidates = [leg.slug];
+      if (leg.windowSeconds) {
+        const baseTs = leg.windowTs;
+        candidates.push(`${leg.slug.split('-').slice(0, -1).join('-')}-${baseTs - leg.windowSeconds}`);
+        candidates.push(`${leg.slug.split('-').slice(0, -1).join('-')}-${baseTs + leg.windowSeconds}`);
+      }
+      for (const slug of candidates) {
+        const mk = await getJSON(`${GAMMA}/markets?slug=${encodeURIComponent(slug)}`).catch(() => null);
+        if (mk && mk.clobTokenIds) {
+          const tokens = parseMarketTokens(mk);
+          const up = tokens.find(t => /up/i.test(t.outcome));
+          const down = tokens.find(t => /down/i.test(t.outcome));
+          if (!up || !down || !up.token_id || !down.token_id) continue;
+          leg.conditionId = mk.conditionId || null;
+          leg.upTokenId = up.token_id;
+          leg.downTokenId = down.token_id;
+          leg.slug = slug;
+          leg.discovered = true;
+          log(`🎯 leg discovered ${slug} — Up ${String(up.token_id).slice(0, 10)}… / Down ${String(down.token_id).slice(0, 10)}…`);
+          return;
+        }
+      }
+      // Fallback: try events endpoint for the primary slug
       const events = await getJSON(`${GAMMA}/events?slug=${encodeURIComponent(leg.slug)}`);
       const event = Array.isArray(events) ? events[0] : null;
-      if (!event) return;
-      const mk = (event.markets || [])[0];
-      if (!mk) return;
-      const tokens = parseMarketTokens(mk);
-      const up = tokens.find(t => /up/i.test(t.outcome));
-      const down = tokens.find(t => /down/i.test(t.outcome));
-      if (!up || !down || !up.token_id || !down.token_id) return;
-      leg.conditionId = mk.conditionId || null;
-      leg.upTokenId = up.token_id;
-      leg.downTokenId = down.token_id;
-      leg.discovered = true;
-      log(`🎯 leg discovered ${leg.slug} — Up ${String(up.token_id).slice(0, 10)}… / Down ${String(down.token_id).slice(0, 10)}…`);
+      if (event) {
+        const mk = (event.markets || [])[0];
+        if (mk) {
+          const tokens = parseMarketTokens(mk);
+          const up = tokens.find(t => /up/i.test(t.outcome));
+          const down = tokens.find(t => /down/i.test(t.outcome));
+          if (up && down && up.token_id && down.token_id) {
+            leg.conditionId = mk.conditionId || null;
+            leg.upTokenId = up.token_id;
+            leg.downTokenId = down.token_id;
+            leg.discovered = true;
+            log(`🎯 leg discovered ${leg.slug} (via events) — Up ${String(up.token_id).slice(0, 10)}… / Down ${String(down.token_id).slice(0, 10)}…`);
+          }
+        }
+      }
     } catch (e) {
       log(`⚠️ discoverLeg(${leg.slug}) failed: ${e.message}`);
     }
@@ -560,6 +583,7 @@ function createEngine(cfg) {
       t.highAskSeen = false;
       t.highSideAsk = null;
       t.phase = 'awaiting-trigger';
+      if (t.leg.discovered && t.leg.upTokenId) await refreshLegPrices(t.leg);
       log(`${tfLabel()} 🔄 ready for martingale #${t.currentMartLevel + 1} — flip to ${t.lastSide === 'up' ? 'DOWN' : 'UP'} — monitoring for ${entryPrice}+ entry`);
     }
   }
@@ -708,6 +732,18 @@ function createEngine(cfg) {
   }
 
   // ── dashboard state ────────────────────────────────────────────
+  async function refreshLegPrices(leg) {
+    if (!leg.upTokenId || !leg.downTokenId) return;
+    try {
+      const [upMid, downMid] = await Promise.all([
+        getJSON(`${CLOB}/midpoint?token_id=${leg.upTokenId}`).catch(() => null),
+        getJSON(`${CLOB}/midpoint?token_id=${leg.downTokenId}`).catch(() => null),
+      ]);
+      if (upMid?.mid != null) { leg.upAsk = parseFloat(upMid.mid); leg.upBid = parseFloat(upMid.mid); }
+      if (downMid?.mid != null) { leg.downAsk = parseFloat(downMid.mid); leg.downBid = parseFloat(downMid.mid); }
+    } catch (_) {}
+  }
+
   function legSummary(leg) {
     return {
       slug: leg.slug,
@@ -779,7 +815,6 @@ function createEngine(cfg) {
       windowsDecided: decided,
       windowsReachedMaxMartingale: engine.maxMartCount || 0,
       winRate: decided > 0 ? round2(engine.wins / decided) : null,
-      latestBtcPrice: candles5.latestClose(),
       current: { btc: tradeSummary(engine.current) },
       pending: engine.pending.map(tradeSummary),
       history: engine.history.slice(0, 60),
@@ -825,11 +860,6 @@ function createEngine(cfg) {
           await ensureTrade(now);
         }
 
-        if (now - engine.lastCandleRefresh >= candleRefreshMs) {
-          engine.lastCandleRefresh = now;
-          // display-only refresh — never block the trading loop on Binance
-          candles5.refresh(log).catch(() => {});
-        }
 
         if (engine.pending.length && now - engine.lastResolutionPoll >= RESOLUTION_POLL_MS) {
           engine.lastResolutionPoll = now;
@@ -840,6 +870,10 @@ function createEngine(cfg) {
             if (!trade.settled) still.push(trade);
           }
           engine.pending = still;
+        }
+        if (now - engine.lastPriceFetch >= priceRefreshMs) {
+          engine.lastPriceFetch = now;
+          await Promise.all(allTrackedTrades().map(t => refreshLegPrices(t.leg)));
         }
         if (now - engine.lastEquityRecord >= EQUITY_RECORD_MS) {
           engine.lastEquityRecord = now;
@@ -864,24 +898,12 @@ function createEngine(cfg) {
     } else if (statsStatePath) {
       slog(`[${label.toLowerCase()}] 💾 Fresh start — $${capital5.toFixed(2)}. Stats persist to ${statsStatePath}.`);
     }
-    await candles5.seed(slog);
     mainLoop().catch(e => slog(`[${label.toLowerCase()}] ❌ Fatal: ${e.message}`));
   }
 
-  function updateLegPrice(tokenId, prices) {
-    for (const t of allTrackedTrades()) {
-      if (t.leg.upTokenId === tokenId) {
-        if (prices.ask != null) t.leg.upAsk = prices.ask;
-        if (prices.bid != null) t.leg.upBid = prices.bid;
-      }
-      if (t.leg.downTokenId === tokenId) {
-        if (prices.ask != null) t.leg.downAsk = prices.ask;
-        if (prices.bid != null) t.leg.downBid = prices.bid;
-      }
-    }
-  }
 
-  return { start, pauseTrading, resumeTrading, setMode, buildState, updateLegPrice };
+
+  return { start, pauseTrading, resumeTrading, setMode, buildState };
 }
 
 module.exports = { createEngine };

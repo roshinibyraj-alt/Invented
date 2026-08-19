@@ -6,6 +6,8 @@ const W5 = 12, WAIT5 = 4;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 let virtualNow = Date.now(), T0 = 0;
 
+// Scripts define: which side enters, when stop losses hit, who wins.
+// stopLosses are seconds AFTER the wait period ends.
 const SCRIPTS_5 = [
   { entry: 'up', highAfterMs: 1, gapMs: 1500, stopLosses: [3.5, 5.5, 7], winner: 'down' },
   { entry: 'up', highAfterMs: 1, gapMs: 1500, stopLosses: [], winner: 'up' },
@@ -22,71 +24,39 @@ function scriptFor(ts) {
   return SCRIPTS_5[((idx % SCRIPTS_5.length) + SCRIPTS_5.length) % SCRIPTS_5.length];
 }
 
-// Track ALL known token IDs so we can always feed prices
-const knownTokens = new Set();
-
-function tokenPrices(tokenId) {
-  const m = tokenId.match(/(u|d)5-(\d+)/);
-  if (!m) return { bid: 0.50, ask: 0.50 };
-  const ts = Number(m[2]), tokSide = m[1] === 'u' ? 'up' : 'down';
+// Midpoint for the entry side based on time into the window
+function entrySideMid(ts, offsetMs) {
   const s = scriptFor(ts);
-  let ask = 0.50, bid = 0.50;
-  if (virtualNow >= (ts + W5) * 1000) {
-    ask = bid = s.winner === tokSide ? 1.0 : 0.01;
-  } else if (s.entry && tokSide === s.entry) {
-    const offset = virtualNow - ts * 1000;
-    const waitMs = WAIT5 * 1000;
-    const highAt = waitMs + s.highAfterMs * 1000;
-    if (offset < highAt) ask = 0.55;
-    else if (offset < highAt + (s.gapMs || 3000)) ask = 0.62;
-    else ask = 0.60;
-    bid = 0.50;
-    for (const sl of s.stopLosses) { if (offset >= waitMs + sl * 1000) bid = 0.40; }
-  } else if (s.entry && tokSide !== s.entry) {
-    ask = 0.40; bid = 0.35;
-  }
-  return { bid, ask };
-}
-
-function feedAllPrices(engine, states) {
-  // Also scan state for any new token IDs
-  const st = states['hedgeState:BTC-5m'];
-  if (st) {
-    const all = [st.current?.btc, ...(st.pending || [])].filter(Boolean);
-    for (const t of all) {
-      if (t.leg && t.leg.discovered) {
-        if (t.leg.upTokenId) knownTokens.add(t.leg.upTokenId);
-        if (t.leg.downTokenId) knownTokens.add(t.leg.downTokenId);
-      }
-    }
-  }
-  // Feed ALL known tokens
-  for (const tok of knownTokens) {
-    engine.updateLegPrice(tok, tokenPrices(tok));
-  }
+  if (!s || !s.entry || s.highAfterMs == null) return 0.50;
+  const waitMs = WAIT5 * 1000;
+  const highAt = waitMs + s.highAfterMs * 1000;
+  if (offsetMs < highAt) return 0.55;
+  if (offsetMs < highAt + (s.gapMs || 3000)) return 0.62;
+  // After gap: price recovers to 0.62 (above entry threshold) for martingale re-entries
+  return 0.62;
 }
 
 global.fetch = async (url) => {
   const u = String(url);
-  if (u.includes('api.binance.com')) {
-    const limit = u.includes('limit=500') ? 500 : 5;
-    const intervalSec = 5 * 60;
-    const base = Math.floor(virtualNow / (intervalSec * 1000)) * (intervalSec * 1000);
-    const rows = [];
-    for (let i = 0; i < limit; i++) {
-      const closeTime = base - i * intervalSec * 1000;
-      const openTime = closeTime - intervalSec * 1000;
-      const o = 60000 + (i % 9) * 10;
-      rows.push([openTime, String(o), String(o + 25), String(o - 15), String(o + 10), '100', closeTime, '1', '1', '1', '1', '1']);
-    }
-    return new Response(JSON.stringify(rows), { status: 200 });
+
+  // Gamma markets lookup (used by discoverLeg)
+  if (u.includes('gamma-api.polymarket.com/markets') && !u.includes('condition_ids')) {
+    const m = u.match(/slug=btc-updown-5m-(\d+)/);
+    const ts = m ? Number(m[1]) : 0;
+    return new Response(JSON.stringify({
+      conditionId: `cond-5-${ts}`,
+      outcomes: '["Up","Down"]',
+      clobTokenIds: `["u5-${ts}","d5-${ts}"]`,
+    }), { status: 200 });
   }
+  // Gamma events fallback
   if (u.includes('gamma-api.polymarket.com/events')) {
     const m = u.match(/slug=btc-updown-5m-(\d+)/);
     const ts = m ? Number(m[1]) : T0;
     return new Response(JSON.stringify([{ markets: [{ conditionId: `cond-5-${ts}`, outcomes: '["Up","Down"]', clobTokenIds: `["u5-${ts}","d5-${ts}"]` }] }]), { status: 200 });
   }
-  if (u.includes('gamma-api.polymarket.com/markets')) {
+  // Gamma markets by condition_id (resolution check)
+  if (u.includes('gamma-api.polymarket.com/markets') && u.includes('condition_ids')) {
     const m = u.match(/condition_ids=cond-5-(\d+)/);
     const ts = m ? Number(m[1]) : T0;
     const w = scriptFor(ts).winner;
@@ -95,6 +65,33 @@ global.fetch = async (url) => {
       outcomes: '["Up","Down"]', clobTokenIds: `["u5-${ts}","d5-${ts}"]`,
       outcomePrices: w === 'up' ? '[ "1.0", "0.0" ]' : '[ "0.0", "1.0" ]',
     }]), { status: 200 });
+  }
+  // CLOB midpoint (primary price source)
+  if (u.includes('clob.polymarket.com/midpoint')) {
+    const m = u.match(/token_id=(u|d)5-(\d+)/);
+    const ts = m ? Number(m[2]) : T0;
+    const side = m && m[1] === 'u' ? 'up' : 'down';
+    const s = scriptFor(ts);
+    let mid = 0.50;
+    if (virtualNow >= (ts + W5) * 1000) {
+      // Window closed — resolve
+      mid = s.winner === side ? 1.0 : 0.01;
+    } else if (s.entry && side === s.entry) {
+      const offset = virtualNow - ts * 1000;
+      mid = entrySideMid(ts, offset);
+      // Stop loss: price crashes below 0.49 for 0.5s, then recovers
+      const waitMs = WAIT5 * 1000;
+      for (const sl of (s.stopLosses || [])) {
+        const slOffsetMs = waitMs + sl * 1000;
+        if (offset >= slOffsetMs && offset < slOffsetMs + 500) {
+          mid = 0.40; // price crashes — stop loss fires
+        }
+        // After 500ms of crash, price recovers to 0.62 for martingale re-entry
+      }
+    } else if (s.entry && side !== s.entry) {
+      mid = 0.40; // opposite side always low
+    }
+    return new Response(JSON.stringify({ mid: String(mid) }), { status: 200 });
   }
   return new Response('{}', { status: 200 });
 };
@@ -107,7 +104,7 @@ global.fetch = async (url) => {
     startingCapital: 4000, entryPrice: 0.60, stopLossPrice: 0.49,
     entryDollars: 50, martingaleMultiplier: 1.5, maxMartingaleLevels: 3,
     waitSeconds5: WAIT5, windowSeconds5: W5,
-    dryRun: true, tickMs: 1,
+    dryRun: true, tickMs: 1, priceRefreshMs: 1,
     nowFn: () => virtualNow, emit: (ev, s) => { states[ev] = s; }, slog: () => {},
   });
   await engine.start();
@@ -115,15 +112,8 @@ global.fetch = async (url) => {
   T0 = states['hedgeState:BTC-5m'].current.btc.windowTs;
 
   const endAt = (T0 + 8 * W5 + 30) * 1000;
-  while (virtualNow < endAt) {
-    virtualNow += 100;
-    feedAllPrices(engine, states);
-    await sleep(1);
-  }
-  feedAllPrices(engine, states);
-  await sleep(200);
-  feedAllPrices(engine, states);
-  await sleep(100);
+  while (virtualNow < endAt) { virtualNow += 100; await sleep(1); }
+  await sleep(50);
 
   const st5 = states['hedgeState:BTC-5m'];
   const round2 = n => Math.round(n * 100) / 100;
@@ -131,16 +121,10 @@ global.fetch = async (url) => {
   const check = (name, ok) => { checks.push([name, ok]); console.log((ok ? 'PASS ' : 'FAIL ') + name); };
 
   const h5 = st5.history || [];
-  console.log('Total windows decided:', st5.windowsDecided, 'History:', h5.length);
-  for (const h of h5) {
-    console.log('  ' + h.slug + ' bet=' + h.betPlaced + ' legs=' + h.legs.length + ' sl=' + h.stopLossCount + ' win=' + h.win + ' pnl=' + h.pnl);
-  }
-
   check('5m: has no-entry windows', h5.filter(h => !h.betPlaced).length >= 1);
   check('5m: has entry-no-stop-win windows', h5.filter(h => h.betPlaced && h.stopLossCount === 0 && h.win === true).length >= 1);
   check('5m: has stop-loss windows', h5.filter(h => h.betPlaced && h.stopLossCount >= 1).length >= 1);
   check('5m: has multi-stop windows', h5.filter(h => h.stopLossCount >= 2).length >= 1);
-
   const scalesCorrectly = h5.filter(h => h.legs.length >= 3).every(h => {
     for (let i = 1; i < h.legs.length; i++) { if (h.legs[i].dollars <= h.legs[i - 1].dollars) return false; }
     return true;

@@ -3,7 +3,6 @@
 const path = require('path');
 const PolymarketTrader = require('./polymarket-trader');
 const { createEngine } = require('./engine-factory');
-const { PriceStream } = require('./ws-prices');
 
 const DRY_RUN = (process.env.HEDGE_DRY_RUN || process.env.SPORTS_DRY_RUN || process.env.DRY_RUN || 'true').toLowerCase() === 'true';
 const CAPITAL_5 = Number(process.env.CAPITAL_5 || process.env.CAPITAL || 4000);
@@ -21,18 +20,10 @@ const REBATE_PCT = Number(process.env.REBATE_PCT || 0);
 let trader = null;
 let engine5 = null;
 let engine15 = null;
-let priceStream = null;
-
-function makeSlog(slogFn, label) {
-  return (line) => slogFn(line);
-}
 
 async function init(privateKey, emit, slogFn) {
   trader = new PolymarketTrader(privateKey);
   await trader.authenticate();
-
-  const slog5 = makeSlog(slogFn, '5m');
-  const slog15 = makeSlog(slogFn, '15m');
 
   engine5 = createEngine({
     label: 'BTC-5m',
@@ -48,10 +39,9 @@ async function init(privateKey, emit, slogFn) {
     feeTheta: FEE_THETA,
     rebatePct: REBATE_PCT,
     statsStatePath: process.env.STATS_STATE_PATH || path.join(__dirname, 'stats-5m.json'),
-    trader,
-    dryRun: DRY_RUN,
+    trader, dryRun: DRY_RUN,
     emit: (ev, data) => emit(ev, data),
-    slog: slog5,
+    slog: slogFn,
   });
 
   engine15 = createEngine({
@@ -68,42 +58,10 @@ async function init(privateKey, emit, slogFn) {
     feeTheta: FEE_THETA,
     rebatePct: REBATE_PCT,
     statsStatePath: process.env.STATS_STATE_PATH_15 || path.join(__dirname, 'stats-15m.json'),
-    trader,
-    dryRun: DRY_RUN,
+    trader, dryRun: DRY_RUN,
     emit: (ev, data) => emit(ev, data),
-    slog: slog15,
+    slog: slogFn,
   });
-
-  // WebSocket price streaming
-  priceStream = new PriceStream({
-    log: slogFn,
-    onBookUpdate: (tokenId, prices) => {
-      if (engine5) engine5.updateLegPrice(tokenId, prices);
-      if (engine15) engine15.updateLegPrice(tokenId, prices);
-    },
-    onConnect: () => {
-    },
-    onDisconnect: () => {
-    },
-  });
-  priceStream.connect();
-
-  // Auto-subscribe when legs are discovered
-  setInterval(() => {
-    if (!priceStream) return;
-    const subscribeEngine = (eng) => {
-      if (!eng) return;
-      const state = eng.buildState();
-      const trades = [state.current?.btc, ...(state.pending || [])].filter(Boolean);
-      for (const t of trades) {
-        if (t.discovered && t.conditionId && t.upTokenId && t.downTokenId) {
-          priceStream.subscribe(t.conditionId, [t.upTokenId, t.downTokenId]);
-        }
-      }
-    };
-    subscribeEngine(engine5);
-    subscribeEngine(engine15);
-  }, 2000);
 
   await engine5.start();
   await engine15.start();
