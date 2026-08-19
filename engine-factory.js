@@ -46,10 +46,7 @@ const EQUITY_RECORD_MS       = 1000;
 const TRIGGER_PRICE      = 0.60; // legacy entry reference (kept for state/UI)
 const FLIP_TRIGGER_PRICE = 0.50; // martingale: fire instantly at 0.50+
 const WINNER_PRICE       = 0.90; // resolution: side above 0.90 wins
-const MOMENTUM_HOLD_MS  = 3000;  // price must stay >= entryPrice for 3s before entry
-const MAX_ENTRY_PRICE   = 0.65;  // never enter above this price
-const MIN_SECONDS_LEFT  = 60;    // don't enter if < 60s remain in window
-const DIVERGENCE_MIN    = 0.10;  // opposite side must be at least this far below entry side
+// Base values for 5m window — scaled proportionally for 15m (3x)
 
 function round2(n) { return Math.round(n * 100) / 100; }
 function sgn2(n) { return (n > 0 ? '+$' : (n < 0 ? '-$' : '±$')) + Math.abs(n).toFixed(2); }
@@ -80,6 +77,11 @@ function createEngine(cfg) {
   } = cfg;
 
   const window5 = windowSeconds5;
+  const scaleFactor = window5 / 300; // 1.0 for 5m, 3.0 for 15m
+  const momentumHoldMs = Math.round(3000 * scaleFactor);
+  const maxEntryPrice = 0.65;
+  const minSecondsLeft = Math.round(60 * scaleFactor);
+  const divergenceMin = 0.10;
   let tradeSeq = 0;
 
   // Separate demo capital per timeframe (default: split startingCapital evenly).
@@ -506,7 +508,7 @@ function createEngine(cfg) {
     // #5 Time-to-close guard: don't enter if window is about to end.
     const now = nowFn();
     const msLeft = t.closeAt - now;
-    if (msLeft < MIN_SECONDS_LEFT * 1000) {
+    if (msLeft < minSecondsLeft * 1000) {
       if (!inMart) { t.skipped = true; t.phase = 'resolved'; }
       return;
     }
@@ -532,23 +534,23 @@ function createEngine(cfg) {
     const oppAsk = askFor(t.leg, oppSide);
 
     if (!inMart) {
-      // #2 Momentum confirmation: price must be >= entryPrice for MOMENTUM_HOLD_MS.
+      // #2 Momentum confirmation: price must be >= entryPrice for momentumHoldMs.
       if (ask == null || ask < entryPrice) {
         t.entryPriceAboveSince = 0;
         return;
       }
       if (t.entryPriceAboveSince === 0) {
         t.entryPriceAboveSince = now;
-        log(`${tfLabel()} ⏳ momentum hold started — ${side.toUpperCase()} @${ask.toFixed(3)} >= ${entryPrice}, waiting ${MOMENTUM_HOLD_MS / 1000}s`);
+        log(`${tfLabel()} ⏳ momentum hold started — ${side.toUpperCase()} @${ask.toFixed(3)} >= ${entryPrice}, waiting ${momentumHoldMs / 1000}s`);
         return;
       }
-      if (now - t.entryPriceAboveSince < MOMENTUM_HOLD_MS) {
+      if (now - t.entryPriceAboveSince < momentumHoldMs) {
         return; // still holding
       }
 
       // #4 Entry price cap: reject if ask is too high.
-      if (ask > MAX_ENTRY_PRICE) {
-        log(`${tfLabel()} ⛔ entry rejected — ${side.toUpperCase()} @${ask.toFixed(3)} above max ${MAX_ENTRY_PRICE}`);
+      if (ask > maxEntryPrice) {
+        log(`${tfLabel()} ⛔ entry rejected — ${side.toUpperCase()} @${ask.toFixed(3)} above max ${maxEntryPrice}`);
         t.entryPriceAboveSince = 0;
         return;
       }
@@ -556,8 +558,8 @@ function createEngine(cfg) {
       // #3 Divergence check: opposite side must not be converging.
       if (oppAsk != null) {
         const gap = ask - oppAsk;
-        if (gap < DIVERGENCE_MIN) {
-          log(`${tfLabel()} ⛔ entry rejected — gap too narrow (${side.toUpperCase()} ${ask.toFixed(3)} vs ${oppSide.toUpperCase()} ${oppAsk.toFixed(3)} = ${gap.toFixed(3)} < ${DIVERGENCE_MIN})`);
+        if (gap < divergenceMin) {
+          log(`${tfLabel()} ⛔ entry rejected — gap too narrow (${side.toUpperCase()} ${ask.toFixed(3)} vs ${oppSide.toUpperCase()} ${oppAsk.toFixed(3)} = ${gap.toFixed(3)} < ${divergenceMin})`);
           t.entryPriceAboveSince = 0;
           return;
         }
@@ -577,7 +579,7 @@ function createEngine(cfg) {
         engine.maxMartCount = (engine.maxMartCount || 0) + 1;
         log(`${tfLabel()} 🎯 martingale #${t.currentMartLevel + 1} entry — ${side.toUpperCase()} $${dollars.toFixed(2)} @${res.avgPrice.toFixed(3)} (1.5x instant)`);
       } else {
-        log(`${tfLabel()} 🚦 entry — ${side.toUpperCase()} $${dollars.toFixed(2)} @${res.avgPrice.toFixed(3)} (held ${MOMENTUM_HOLD_MS / 1000}s above ${entryPrice})`);
+        log(`${tfLabel()} 🚦 entry — ${side.toUpperCase()} $${dollars.toFixed(2)} @${res.avgPrice.toFixed(3)} (held ${momentumHoldMs / 1000}s above ${entryPrice})`);
       }
     } else if (res.reason && res.reason !== 'no-ask') {
       log(`⚠️ ${tfLabel()} entry skipped: ${res.reason}`);
