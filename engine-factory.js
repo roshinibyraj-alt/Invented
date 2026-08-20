@@ -49,6 +49,7 @@ function createEngine(cfg) {
     windowType = '5m',
     windowSeconds5 = 300,
     bucketIntervalSec = 20,
+    noTradeAfterSec = 180,
     sharesPerSide = 10,
     oppositeSideDiscount = 0.10,
     feeTheta = 0.07,
@@ -388,9 +389,8 @@ function createEngine(cfg) {
           engine.pending = still;
         }
 
-        // Create new bucket every interval
-        if (leg.discovered && nowSec < leg.closeAt / 1000) {
-          const elapsed = nowSec - windowTs;
+        const elapsed = nowSec - windowTs;
+        if (leg.discovered && nowSec < leg.closeAt / 1000 && elapsed < noTradeAfterSec) {
           if (elapsed - engine.lastBucketAt >= bucketIntervalSec) {
             engine.lastBucketAt = elapsed;
             createBucket(leg, now);

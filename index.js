@@ -276,15 +276,15 @@ server.listen(PORT, '0.0.0.0', () => {
   (async () => {
     const trader = new PolymarketTrader(PK);
     await trader.authenticate();
-    const mkEngine = (label, type, cap, winSec, interval, statsPath) => createEngine({
+    const mkEngine = (label, type, cap, winSec, interval, noTradeAfter, statsPath) => createEngine({
       label, windowType: type, startingCapital: cap,
-      windowSeconds5: winSec, bucketIntervalSec: interval,
+      windowSeconds5: winSec, bucketIntervalSec: interval, noTradeAfterSec: noTradeAfter,
       sharesPerSide: SHARES_PER_SIDE, oppositeSideDiscount: OPPOSITE_DISCOUNT,
       feeTheta: FEE_THETA,
       statsStatePath: statsPath, trader, dryRun: DRY_RUN, emit, slog,
     });
-    engine5 = mkEngine('BTC-5m', '5m', CAPITAL_5, 300, BUCKET_INTERVAL_5, process.env.STATS_STATE_PATH || path.join(__dirname, 'stats-5m.json'));
-    engine15 = mkEngine('BTC-15m', '15m', CAPITAL_15, 900, BUCKET_INTERVAL_15, process.env.STATS_STATE_PATH_15 || path.join(__dirname, 'stats-15m.json'));
+    engine5 = mkEngine('BTC-5m', '5m', CAPITAL_5, 300, BUCKET_INTERVAL_5, 180, process.env.STATS_STATE_PATH || path.join(__dirname, 'stats-5m.json'));
+    engine15 = mkEngine('BTC-15m', '15m', CAPITAL_15, 900, BUCKET_INTERVAL_15, 600, process.env.STATS_STATE_PATH_15 || path.join(__dirname, 'stats-15m.json'));
     await engine5.start();
     await engine15.start();
   })().catch(e => {
