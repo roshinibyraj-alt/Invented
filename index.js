@@ -61,6 +61,8 @@ body{font-family:'Courier New',monospace;background:#000;color:#fff;font-size:12
 .st-v{font-size:13px;font-weight:bold;color:#fff}
 .pos{color:#00ff88!important}.neg{color:#ff4444!important}
 .panel{margin:8px 14px 0;background:#0a0a0a;border:2px solid #333;border-radius:10px;overflow:hidden}
+.duo{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:8px 14px 0}
+@media(max-width:700px){.duo{grid-template-columns:1fr}}
 @media(max-width:600px){.panel{margin:6px 10px 0}}
 .p-hd{background:#0d1d30;padding:8px 12px;display:flex;justify-content:space-between;align-items:center}
 .p-title{font-size:14px;font-weight:bold;color:#fff}
@@ -112,10 +114,14 @@ body{font-family:'Courier New',monospace;background:#000;color:#fff;font-size:12
 <div class="btns"><button onclick="fetch('/api/hedge/pause',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})" class="pause">Pause</button><button onclick="fetch('/api/hedge/resume',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})" class="resume">Resume</button></div>
 <div class="stats-row" id="stats-row"></div>
 <div class="chart-box"><canvas id="eq-chart"></canvas></div>
-<div class="panel" id="panel-m5"><div class="p-hd"><div class="p-title">5 Minute Windows</div><div class="p-badge" id="m5-badge">--</div></div><div class="p-body" id="m5-body"></div></div>
-<div class="panel" id="panel-m15"><div class="p-hd"><div class="p-title">15 Minute Windows</div><div class="p-badge" id="m15-badge">--</div></div><div class="p-body" id="m15-body"></div></div>
+<div class="duo">
+<div class="panel" id="panel-m5"><div class="p-hd"><div class="p-title">5m Regular</div><div class="p-badge" id="m5-badge">--</div></div><div class="p-body" id="m5-body"></div></div>
 <div class="panel" id="panel-m5s" style="border-color:#ffaa00"><div class="p-hd"><div class="p-title">5m Skip <span style="font-size:9px;color:#ffaa00">SKIP 1ST</span></div><div class="p-badge" id="m5s-badge">--</div></div><div class="p-body" id="m5s-body"></div></div>
+</div>
+<div class="duo">
+<div class="panel" id="panel-m15"><div class="p-hd"><div class="p-title">15m Regular</div><div class="p-badge" id="m15-badge">--</div></div><div class="p-body" id="m15-body"></div></div>
 <div class="panel" id="panel-m15s" style="border-color:#ffaa00"><div class="p-hd"><div class="p-title">15m Skip <span style="font-size:9px;color:#ffaa00">SKIP 1ST</span></div><div class="p-badge" id="m15s-badge">--</div></div><div class="p-body" id="m15s-body"></div></div>
+</div>
 <div class="log-box" id="log-box"></div>
 <script src="/socket.io/socket.io.js"></script>
 <script>
