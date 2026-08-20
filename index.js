@@ -20,7 +20,7 @@ const WAIT_SECONDS_15 = Number(process.env.WAIT_SECONDS_15 || 0);
 const FEE_THETA = Number(process.env.FEE_THETA || 0.07);
 const REBATE_PCT = Number(process.env.REBATE_PCT || 0);
 
-let engine5 = null, engine5s = null, engine15 = null, engine15s = null;
+let engine5 = null, engine15 = null;
 
 const app = express();
 const server = http.createServer(app);
@@ -30,12 +30,12 @@ const PORT = process.env.PORT || 8080;
 app.use(express.json());
 app.get('/healthz', (_, r) => r.sendStatus(200));
 app.get('/api/hedge/status', (_, r) => {
-  try { r.json({ m5: engine5 ? engine5.buildState() : null, m5s: engine5s ? engine5s.buildState() : null, m15: engine15 ? engine15.buildState() : null, m15s: engine15s ? engine15s.buildState() : null }); }
+  try { r.json({ m5: engine5 ? engine5.buildState() : null, m15: engine15 ? engine15.buildState() : null }); }
   catch (e) { r.status(500).json({ ok: false, error: e.message }); }
 });
-app.post('/api/hedge/pause', (_, r) => { try { if (engine5) engine5.pauseTrading(); if (engine5s) engine5s.pauseTrading(); if (engine15) engine15.pauseTrading(); if (engine15s) engine15s.pauseTrading(); r.json({ ok: true }); } catch (e) { r.status(500).json({ ok: false, error: e.message }); } });
-app.post('/api/hedge/resume', (_, r) => { try { if (engine5) engine5.resumeTrading(); if (engine5s) engine5s.resumeTrading(); if (engine15) engine15.resumeTrading(); if (engine15s) engine15s.resumeTrading(); r.json({ ok: true }); } catch (e) { r.status(500).json({ ok: false, error: e.message }); } });
-app.post('/api/hedge/set-mode', (req, r) => { const { live } = req.body || {}; if (typeof live !== 'boolean') return r.status(400).json({ ok: false, error: 'Missing "live" boolean' }); try { if (engine5) engine5.setMode(live); if (engine5s) engine5s.setMode(live); if (engine15) engine15.setMode(live); if (engine15s) engine15s.setMode(live); r.json({ ok: true }); } catch (e) { r.status(500).json({ ok: false, error: e.message }); } });
+app.post('/api/hedge/pause', (_, r) => { try { if (engine5) engine5.pauseTrading(); if (engine15) engine15.pauseTrading(); r.json({ ok: true }); } catch (e) { r.status(500).json({ ok: false, error: e.message }); } });
+app.post('/api/hedge/resume', (_, r) => { try { if (engine5) engine5.resumeTrading(); if (engine15) engine15.resumeTrading(); r.json({ ok: true }); } catch (e) { r.status(500).json({ ok: false, error: e.message }); } });
+app.post('/api/hedge/set-mode', (req, r) => { const { live } = req.body || {}; if (typeof live !== 'boolean') return r.status(400).json({ ok: false, error: 'Missing "live" boolean' }); try { if (engine5) engine5.setMode(live); if (engine15) engine15.setMode(live); r.json({ ok: true }); } catch (e) { r.status(500).json({ ok: false, error: e.message }); } });
 
 const DASH = `<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
@@ -61,8 +61,6 @@ body{font-family:'Courier New',monospace;background:#000;color:#fff;font-size:12
 .st-v{font-size:13px;font-weight:bold;color:#fff}
 .pos{color:#00ff88!important}.neg{color:#ff4444!important}
 .panel{margin:8px 14px 0;background:#0a0a0a;border:2px solid #333;border-radius:10px;overflow:hidden}
-.duo{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:8px 14px 0}
-@media(max-width:700px){.duo{grid-template-columns:1fr}}
 @media(max-width:600px){.panel{margin:6px 10px 0}}
 .p-hd{background:#0d1d30;padding:8px 12px;display:flex;justify-content:space-between;align-items:center}
 .p-title{font-size:14px;font-weight:bold;color:#fff}
@@ -114,14 +112,8 @@ body{font-family:'Courier New',monospace;background:#000;color:#fff;font-size:12
 <div class="btns"><button onclick="fetch('/api/hedge/pause',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})" class="pause">Pause</button><button onclick="fetch('/api/hedge/resume',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})" class="resume">Resume</button></div>
 <div class="stats-row" id="stats-row"></div>
 <div class="chart-box"><canvas id="eq-chart"></canvas></div>
-<div class="duo">
-<div class="panel" id="panel-m5"><div class="p-hd"><div class="p-title">5m Regular</div><div class="p-badge" id="m5-badge">--</div></div><div class="p-body" id="m5-body"></div></div>
-<div class="panel" id="panel-m5s" style="border-color:#ffaa00"><div class="p-hd"><div class="p-title">5m Skip <span style="font-size:9px;color:#ffaa00">SKIP 1ST</span></div><div class="p-badge" id="m5s-badge">--</div></div><div class="p-body" id="m5s-body"></div></div>
-</div>
-<div class="duo">
-<div class="panel" id="panel-m15"><div class="p-hd"><div class="p-title">15m Regular</div><div class="p-badge" id="m15-badge">--</div></div><div class="p-body" id="m15-body"></div></div>
-<div class="panel" id="panel-m15s" style="border-color:#ffaa00"><div class="p-hd"><div class="p-title">15m Skip <span style="font-size:9px;color:#ffaa00">SKIP 1ST</span></div><div class="p-badge" id="m15s-badge">--</div></div><div class="p-body" id="m15s-body"></div></div>
-</div>
+<div class="panel" id="panel-m5"><div class="p-hd"><div class="p-title">5 Minute Windows</div><div class="p-badge" id="m5-badge">--</div></div><div class="p-body" id="m5-body"></div></div>
+<div class="panel" id="panel-m15"><div class="p-hd"><div class="p-title">15 Minute Windows</div><div class="p-badge" id="m15-badge">--</div></div><div class="p-body" id="m15-body"></div></div>
 <div class="log-box" id="log-box"></div>
 <script src="/socket.io/socket.io.js"></script>
 <script>
@@ -291,13 +283,12 @@ function drawChart(){
 function render(){
   var s5=latest.m5,s15=latest.m15;
   // Stats
-  var s5s=latest.m5s,s15s=latest.m15s;
-  var totalPnl=(s5?s5.realizedPnl:0)+(s15?s15.realizedPnl:0)+(s5s?s5s.realizedPnl:0)+(s15s?s15s.realizedPnl:0);
-  var totalBankroll=(s5?s5.bankroll:0)+(s15?s15.bankroll:0)+(s5s?s5s.bankroll:0)+(s15s?s15s.bankroll:0);
-  var totalW=(s5?s5.wins:0)+(s15?s15.wins:0)+(s5s?s5s.wins:0)+(s15s?s15s.wins:0);
-  var totalL=(s5?s5.losses:0)+(s15?s15.losses:0)+(s5s?s5s.losses:0)+(s15s?s15s.losses:0);
-  var totalUnreal=(s5?s5.totalUnrealized:0)+(s15?s15.totalUnrealized:0)+(s5s?s5s.totalUnrealized:0)+(s15s?s15s.totalUnrealized:0);
-  var totalEquity=(s5?s5.equity:0)+(s15?s15.equity:0)+(s5s?s5s.equity:0)+(s15s?s15s.equity:0);
+  var totalPnl=(s5?s5.realizedPnl:0)+(s15?s15.realizedPnl:0);
+  var totalBankroll=(s5?s5.bankroll:0)+(s15?s15.bankroll:0);
+  var totalW=(s5?s5.wins:0)+(s15?s15.wins:0);
+  var totalL=(s5?s5.losses:0)+(s15?s15.losses:0);
+  var totalUnreal=(s5?s5.totalUnrealized:0)+(s15?s15.totalUnrealized:0);
+  var totalEquity=(s5?s5.equity:0)+(s15?s15.equity:0);
   var wr=totalW+totalL>0?((totalW/(totalW+totalL))*100).toFixed(1)+'%':'--';
   $('stats-row').innerHTML=[
     '<div class="st"><div class="st-l">Equity</div><div class="st-v '+pC(totalEquity-((s5?s5.startingCapital:0)+(s15?s15.startingCapital:0)))+'">$'+fmt2(totalEquity)+'</div></div>',
@@ -309,11 +300,7 @@ function render(){
   $('m5-badge').textContent=(s5?s5.wins+'W/'+s5.losses+'L':'--')+' | '+sgn(s5?s5.realizedPnl:0);
   $('m15-body').innerHTML=panelHtml(s15,'15m');
   $('m15-badge').textContent=(s15?s15.wins+'W/'+s15.losses+'L':'--')+' | '+sgn(s15?s15.realizedPnl:0);
-  $('m5s-body').innerHTML=panelHtml(s5s,'5m-S');
-  $('m5s-badge').textContent=(s5s?s5s.wins+'W/'+s5s.losses+'L':'--')+' | '+sgn(s5s?s5s.realizedPnl:0);
-  $('m15s-body').innerHTML=panelHtml(s15s,'15m-S');
-  $('m15s-badge').textContent=(s15s?s15s.wins+'W/'+s15s.losses+'L':'--')+' | '+sgn(s15s?s15s.realizedPnl:0);
-  var live=(s5&&!s5.dryRun)||(s15&&!s15.dryRun)||(s5s&&!s5s.dryRun)||(s15s&&!s15s.dryRun);
+  var live=(s5&&!s5.dryRun)||(s15&&!s15.dryRun);
   $('mode-badge').className='badge '+(live?'badge-live':'badge-dem');
   $('mode-badge').textContent=live?'LIVE':'DEMO';
   drawChart();
@@ -336,16 +323,12 @@ function renderLogs(){
 
 socket.on('hedgeState:BTC-5m',function(s){latest.m5=s;render()});
 socket.on('hedgeState:BTC-15m',function(s){latest.m15=s;render()});
-socket.on('hedgeState:BTC-5m-Skip',function(s){latest.m5s=s;render()});
-socket.on('hedgeState:BTC-15m-Skip',function(s){latest.m15s=s;render()});
 socket.on('log',function(line){allLogs.push(line);if(allLogs.length>500)allLogs.shift();renderLogs()});
 
 // Also load logs from state on initial render
 function loadLogsFromState(){
   if(latest.m5&&latest.m5.logs){latest.m5.logs.forEach(function(l){if(allLogs.indexOf(l)<0)allLogs.push(l)})}
   if(latest.m15&&latest.m15.logs){latest.m15.logs.forEach(function(l){if(allLogs.indexOf(l)<0)allLogs.push(l)})}
-  if(latest.m5s&&latest.m5s.logs){latest.m5s.logs.forEach(function(l){if(allLogs.indexOf(l)<0)allLogs.push(l)})}
-  if(latest.m15s&&latest.m15s.logs){latest.m15s.logs.forEach(function(l){if(allLogs.indexOf(l)<0)allLogs.push(l)})}
   renderLogs();
 }
 socket.on('connect',function(){loadLogsFromState()});
@@ -353,7 +336,7 @@ socket.on('connect',function(){loadLogsFromState()});
 setInterval(render,1000);
 setInterval(async function(){
   try{var res=await fetch('/api/hedge/status'),st=await res.json();
-    if(st.m5)latest.m5=st.m5;if(st.m5)latest.m5=st.m5;if(st.m5s)latest.m5s=st.m5s;if(st.m15)latest.m15=st.m15;if(st.m15s)latest.m15s=st.m15s;render();loadLogsFromState();
+    if(st.m5)latest.m5=st.m5;if(st.m15)latest.m15=st.m15;render();loadLogsFromState();
   }catch(e){}
 },10000);
 render();
@@ -373,24 +356,18 @@ server.listen(PORT, '0.0.0.0', () => {
   (async () => {
     const trader = new PolymarketTrader(PK);
     await trader.authenticate();
-    const mkEngine = (label, type, cap, winSec, waitSec, statsPath, skipFirst = false) => createEngine({
+    const mkEngine = (label, type, cap, winSec, waitSec, statsPath) => createEngine({
       label, windowType: type, startingCapital: cap, entryPrice: ENTRY_PRICE,
       stopLossPrice: STOP_LOSS_PRICE, entryDollars: ENTRY_DOLLARS,
       martingaleMultiplier: MARTINGALE_MULTIPLIER, maxMartingaleLevels: MAX_MARTINGALE_LEVELS,
       waitSeconds5: waitSec, windowSeconds5: winSec,
       feeTheta: FEE_THETA, rebatePct: REBATE_PCT,
       statsStatePath: statsPath, trader, dryRun: DRY_RUN, emit, slog,
-      skipFirst,
     });
-    // 5m engines share capital, 15m engines share capital
-    engine5 = mkEngine('BTC-5m', '5m', CAPITAL_5, 300, WAIT_SECONDS_5, process.env.STATS_STATE_PATH || path.join(__dirname, 'stats-5m.json'), false);
-    engine5s = mkEngine('BTC-5m-Skip', '5m', CAPITAL_5, 300, WAIT_SECONDS_5, path.join(__dirname, 'stats-5m-skip.json'), true);
-    engine15 = mkEngine('BTC-15m', '15m', CAPITAL_15, 900, WAIT_SECONDS_15, process.env.STATS_STATE_PATH_15 || path.join(__dirname, 'stats-15m.json'), false);
-    engine15s = mkEngine('BTC-15m-Skip', '15m', CAPITAL_15, 900, WAIT_SECONDS_15, path.join(__dirname, 'stats-15m-skip.json'), true);
+    engine5 = mkEngine('BTC-5m', '5m', CAPITAL_5, 300, WAIT_SECONDS_5, process.env.STATS_STATE_PATH || path.join(__dirname, 'stats-5m.json'));
+    engine15 = mkEngine('BTC-15m', '15m', CAPITAL_15, 900, WAIT_SECONDS_15, process.env.STATS_STATE_PATH_15 || path.join(__dirname, 'stats-15m.json'));
     await engine5.start();
-    await engine5s.start();
     await engine15.start();
-    await engine15s.start();
   })().catch(e => {
     console.error('❌ Bot init failed:', e.message);
     process.exit(1);

@@ -74,7 +74,6 @@ function createEngine(cfg) {
     nowFn = Date.now,
     tickMs = TICK_MS,
     priceRefreshMs = 100,
-    skipFirst = false,
   } = cfg;
 
   const window5 = windowSeconds5;
@@ -535,26 +534,6 @@ function createEngine(cfg) {
     const oppSide = side === 'up' ? 'down' : 'up';
     const oppAsk = askFor(t.leg, oppSide);
 
-    // Skip-first filter: skip the first signal, wait for price to reset before next.
-    if (skipFirst && !inMart) {
-      if (!t.firstEntrySkipped) {
-        t.firstEntrySkipped = true;
-        t.waitingForReset = true;
-        t.entryPriceAboveSince = 0;
-        log(`${tfLabel()} ⏭️ SKIP FIRST SIGNAL — ${side.toUpperCase()} @${ask.toFixed(3)} (waiting for price to reset below ${entryPrice})`);
-        return;
-      }
-      if (t.waitingForReset) {
-        if (ask >= entryPrice) {
-          return; // still above — keep waiting for price to drop
-        }
-        t.waitingForReset = false;
-        t.entryPriceAboveSince = now - momentumHoldMs - 1; // skip momentum — fire immediately
-        log(`${tfLabel()} ✅ PRICE RESET below ${entryPrice} — firing immediately on next signal`);
-        return;
-      }
-    }
-
     if (!inMart) {
       // #2 Momentum confirmation: price must be >= entryPrice for momentumHoldMs.
       if (ask == null || ask < entryPrice) {
@@ -664,8 +643,6 @@ function createEngine(cfg) {
       settled: false,
       entryPriceAboveSince: 0,
       prevOppositePrice: null,
-      firstEntrySkipped: false,
-      waitingForReset: false,
     };
   }
 
@@ -822,7 +799,7 @@ function createEngine(cfg) {
     const mtmTotal = round2(mtmUp + mtmDown);
     return {
       windowTs: t.windowTs, closeAt: t.closeAt, waitUntil: t.waitUntil,
-      phase: t.phase, waitSeconds: t.waitSeconds, skipFirst: skipFirst, firstEntrySkipped: t.firstEntrySkipped || false,
+      phase: t.phase, waitSeconds: t.waitSeconds,
       leg: legSummary(t.leg),
       buys: t.buys,
       sells: t.sells,
