@@ -109,8 +109,6 @@ function createEngine(cfg) {
           parsed.equityCurve = parsed.equityCurve5 || [];
           parsed.trades = parsed.trades5 || [];
         }
-        if (typeof parsed.observationMode === 'undefined') parsed.observationMode = false;
-        if (typeof parsed.observedCount === 'undefined') parsed.observedCount = 0;
         return parsed;
       }
     } catch (_) {}
@@ -138,9 +136,6 @@ function createEngine(cfg) {
     lastEquityRecord: 0,
     waitingForBoundary: true,
     boundaryWindowTs: null,
-    observationMode: false,
-    observationWindowTs: null,
-    observedCount: 0,
     totalFeesPaid: savedStats ? savedStats.totalFeesPaid || 0 : 0,
     totalRebatesEarned: savedStats ? savedStats.totalRebatesEarned || 0 : 0,
     totalVolume: savedStats ? savedStats.totalVolume || 0 : 0,
@@ -159,9 +154,6 @@ function createEngine(cfg) {
         totalFeesPaid: engine.totalFeesPaid,
         totalRebatesEarned: engine.totalRebatesEarned,
         totalVolume: engine.totalVolume,
-        observationMode: engine.observationMode,
-        observationWindowTs: engine.observationWindowTs,
-        observedCount: engine.observedCount,
         savedAt: nowFn(),
       }));
     } catch (_) {}
@@ -676,12 +668,7 @@ function createEngine(cfg) {
       }
       t = freshTrade(windowTs);
       engine.current = t;
-      if (engine.observationMode) {
-        t.observationWindow = true;
-        log(`${tfLabel()} 👁 OBSERVING window t=${windowTs} (observed #${engine.observedCount + 1}) — no trades`);
-      } else {
-        log(`${tfLabel()} 🆕 window t=${windowTs} opened — waiting ${waitSec()}s before monitoring for ${entryPrice}+ entry`);
-      }
+      log(`${tfLabel()} 🆕 window t=${windowTs} opened — waiting ${waitSec()}s before monitoring for ${entryPrice}+ entry`);
     }
 
     if (t.phase === 'waiting' && now >= t.waitUntil) {
@@ -698,12 +685,7 @@ function createEngine(cfg) {
     if (!t.leg.discovered || !engine.tradingEnabled || now >= t.closeAt || t.settled) return;
 
     const secsIntoWindow = (now - t.windowTs * 1000) / 1000;
-    let noNewEntry = false;
-
-    // During observation mode, skip all trading — just watch for simulated outcome
-    if (engine.observationMode && t.observationWindow) {
-      noNewEntry = true;
-    }
+    const noNewEntry = false;
 
     if (t.phase === 'awaiting-trigger' && !noNewEntry) {
       await maybeEntry(t);
@@ -734,14 +716,6 @@ function createEngine(cfg) {
       win = pnl > 0;
       engine.wins = engine.wins + (win ? 1 : 0);
       engine.losses = engine.losses + (win ? 0 : 1);
-      // After a loss, enter observation mode — watch future windows without trading
-      // until the bot confirms it would have won, then reactivate.
-      if (!win && betPlaced) {
-        engine.observationMode = true;
-        engine.observationWindowTs = t.windowTs;
-        engine.observedCount = 0;
-        log(`${tfLabel()} 👁 OBSERVATION MODE activated — will watch future windows until simulated WIN`);
-      }
     }
     t.pnl = pnl;
     t.win = win;
@@ -768,26 +742,6 @@ function createEngine(cfg) {
     registerTrade('5', { slug: leg.slug, winner, legs: buys.length, sells: (t.sells || []).length, recovered: sellProceeds, pnl });
 
     const summary = winner ? `winner ${winner.toUpperCase()}` : 'winner unknown';
-    // If this was an observation window, check if we would have won
-    if (t.observationWindow && engine.observationMode) {
-      engine.observedCount = (engine.observedCount || 0) + 1;
-      // Simulate: did the leading side win?
-      let simulatedEntrySide = null;
-      const upP = markPrice(t.leg, 'up');
-      const downP = markPrice(t.leg, 'down');
-      if (upP != null && downP != null) {
-        simulatedEntrySide = upP >= downP ? 'up' : 'down';
-      }
-      const wouldHaveWon = winner && simulatedEntrySide === winner;
-      if (wouldHaveWon) {
-        engine.observationMode = false;
-        log(`${tfLabel()} 👁 OBSERVATION COMPLETE — simulated entry ${simulatedEntrySide.toUpperCase()} would have WON against ${winner.toUpperCase()} → reactivating after ${engine.observedCount} observed windows`);
-        engine.observedCount = 0;
-      } else {
-        log(`${tfLabel()} 👁 still observing — simulated entry ${simulatedEntrySide || '?'} vs winner ${winner ? winner.toUpperCase() : '?'} (observed #${engine.observedCount})`);
-      }
-    }
-
     if (!betPlaced) {
       log(`🏁 ${tfLabel()} [${leg.slug}] resolved (${leg.resolutionMethod || '?'}) — ${summary} — NO bet placed`);
     } else {
@@ -920,9 +874,6 @@ function createEngine(cfg) {
       history: engine.history.slice(0, 60),
       trades: engine.trades.slice(-100).slice().reverse(),
       pendingResolutionCount: engine.pending.length,
-      observationMode: engine.observationMode,
-      observationWindowTs: engine.observationWindowTs,
-      observedCount: engine.observedCount || 0,
     };
   }
   function emitState() {
@@ -993,9 +944,8 @@ function createEngine(cfg) {
 
   async function start() {
     slog(`[${label.toLowerCase()}] ⛏ ${label} — BTC 5m martingale engine, fully automatic`);
-    slog(`[${label.toLowerCase()}] ⚙️  Wait ${waitSec()}s after window open, fire when any side pulls to ~${entryPrice}.`);
-    slog(`[${label.toLowerCase()}] ⚙️  Entry: buy when price pulls to ~${entryPrice} after the wait time. Stop loss at ${stopLossPrice}. Martingale: ${martingaleMultiplier}x (max ${maxMartingaleLevels}). Side above ${WINNER_PRICE.toFixed(2)} wins.`);
-    slog(`[${label.toLowerCase()}] ⚙️  Observation mode: after a loss, watches future windows (no trades) until simulated WIN → reactivates.`);
+    slog(`[${label.toLowerCase()}] ⚙️  Wait 30s after window open, fire when any side pulls to ~${entryPrice}.`);
+    slog(`[${label.toLowerCase()}] ⚙️  Entry: buy when price pulls to ~${entryPrice} after the wait time. Stop loss at ${stopLossPrice} (force sell). Martingale: ${martingaleMultiplier}x re-entry (max ${maxMartingaleLevels} level). Side above ${WINNER_PRICE.toFixed(2)} at window end wins.`);
     slog(`[${label.toLowerCase()}] ⚙️  Capital: $${capital5.toFixed(2)}. Fees: ${rebatePct > 0 ? (rebatePct * 100).toFixed(0) + '% rebate' : 'no rebate'}.`);
     if (savedStats) {
       slog(`[${label.toLowerCase()}] 💾 Restored — bankroll $${engine.bankroll.toFixed(2)}, ${engine.wins}W/${engine.losses}L, max-mart: ${engine.maxMartCount}`);

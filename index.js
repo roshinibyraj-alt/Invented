@@ -99,7 +99,6 @@ body{font-family:'Courier New',monospace;background:#000;color:#fff;font-size:12
 .h-win{background:#00ff8822;color:#00ff88}
 .h-loss{background:#ff444422;color:#ff4444}
 .h-skip{background:#88888822;color:#888}
-.obs-badge{background:rgba(255,170,0,.15);color:#ffaa00;border:1px solid #ffaa00;padding:4px 10px;border-radius:6px;font-size:11px;font-weight:bold;margin-bottom:8px;text-align:center}
 .h-pnl{font-size:11px;font-weight:bold}
 .log-box{margin:8px 14px 0;background:#0a0a0a;border:1px solid #333;border-radius:8px;padding:8px 10px;max-height:200px;overflow-y:auto;font-size:9px;line-height:1.4;white-space:nowrap;-webkit-overflow-scrolling:touch}
 @media(max-width:600px){.log-box{margin:6px 10px 0}}
@@ -153,11 +152,6 @@ function panelHtml(st,label){
   h+='<div class="ps"><div class="l">Win Rate</div><div class="v">'+(st.winRate!=null?st.winRate+'%':'--')+'</div></div>';
   h+='<div class="ps"><div class="l">Max Mart</div><div class="v">'+(st.windowsReachedMaxMartingale||0)+'</div></div>';
   h+='</div>';
-
-  // Observation mode badge
-  if(st.observationMode){
-    h+='<div class="obs-badge">👁 OBSERVATION MODE — watching window #'+(st.observedCount||0)+' (no trades until simulated WIN)</div>';
-  }
 
   // Current window
   var cur=st.current&&st.current.btc;
@@ -322,7 +316,6 @@ function renderLogs(){
     else if(l.indexOf('P&L')>=0||l.indexOf('$')>=0)c=' style="color:#ffcc00"';
     else if(l.indexOf('🔌')>=0||l.indexOf('WebSocket')>=0)c=' style="color:#00ccff"';
     else if(l.indexOf('🎯')>=0||l.indexOf('ENTRY')>=0)c=' style="color:#00ff88"';
-    else if(l.indexOf('👁')>=0||l.indexOf('OBSERVATION')>=0)c=' style="color:#ffaa00"';
     return'<div'+c+'>'+l.replace(/</g,'&lt;')+'</div>';
   }).join('');
   if(wasAtBottom)el.scrollTop=el.scrollHeight;
