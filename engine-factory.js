@@ -549,8 +549,8 @@ function createEngine(cfg) {
           return; // still above — keep waiting for price to drop
         }
         t.waitingForReset = false;
-        t.entryPriceAboveSince = 0;
-        log(`${tfLabel()} ✅ PRICE RESET below ${entryPrice} — now monitoring for next signal`);
+        t.entryPriceAboveSince = now - momentumHoldMs - 1; // skip momentum — fire immediately
+        log(`${tfLabel()} ✅ PRICE RESET below ${entryPrice} — firing immediately on next signal`);
         return;
       }
     }
