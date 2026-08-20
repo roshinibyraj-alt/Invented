@@ -29,7 +29,7 @@ app.get('/api/hedge/status', (_, r) => {
   try { r.json({ m5: engine5 ? engine5.buildState() : null, m15: engine15 ? engine15.buildState() : null }); }
   catch (e) { r.status(500).json({ ok: false, error: e.message }); }
 });
-app.post('/api/hedge/pause', (_, r) => { try { if (engine5) engine5.pauseTrading(); if (engine15) engine5.pauseTrading(); r.json({ ok: true }); } catch (e) { r.status(500).json({ ok: false, error: e.message }); } });
+app.post('/api/hedge/pause', (_, r) => { try { if (engine5) engine5.pauseTrading(); if (engine15) engine15.pauseTrading(); r.json({ ok: true }); } catch (e) { r.status(500).json({ ok: false, error: e.message }); } });
 app.post('/api/hedge/resume', (_, r) => { try { if (engine5) engine5.resumeTrading(); if (engine15) engine15.resumeTrading(); r.json({ ok: true }); } catch (e) { r.status(500).json({ ok: false, error: e.message }); } });
 app.post('/api/hedge/set-mode', (req, r) => { const { live } = req.body || {}; if (typeof live !== 'boolean') return r.status(400).json({ ok: false, error: 'Missing "live"' }); try { if (engine5) engine5.setMode(live); if (engine15) engine15.setMode(live); r.json({ ok: true }); } catch (e) { r.status(500).json({ ok: false, error: e.message }); } });
 
@@ -272,7 +272,7 @@ if (!PK) { console.error('❌ PRIVATE_KEY env var missing'); process.exit(1); }
 
 console.log('⛏ BTC Bucket Limit Bot — 5m + 15m independent windows');
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(\`🌐 Dashboard: http://0.0.0.0:\${PORT}\`);
+  console.log('🌐 Dashboard: http://0.0.0.0:' + PORT);
   (async () => {
     const trader = new PolymarketTrader(PK);
     await trader.authenticate();
