@@ -74,6 +74,7 @@ function createEngine(cfg) {
     nowFn = Date.now,
     tickMs = TICK_MS,
     priceRefreshMs = 100,
+    skipFirst = false,
   } = cfg;
 
   const window5 = windowSeconds5;
@@ -567,6 +568,13 @@ function createEngine(cfg) {
       }
     }
 
+    // Skip-first filter: skip the first signal in the window, trade from second onward.
+    if (skipFirst && !inMart && !t.firstEntrySkipped) {
+      t.firstEntrySkipped = true;
+      log(`${tfLabel()} ⏭️ SKIP FIRST SIGNAL — ${side.toUpperCase()} @${ask.toFixed(3)} (waiting for next opportunity)`);
+      return;
+    }
+
     const dollars = inMart ? round2(entryDollars * Math.pow(martingaleMultiplier, t.currentMartLevel)) : entryDollars;
     const res = await buyLeg(t, side, dollars, inMart ? `martingale ${t.currentMartLevel + 1}` : 'entry');
     if (res.ok) {
@@ -643,6 +651,7 @@ function createEngine(cfg) {
       settled: false,
       entryPriceAboveSince: 0,
       prevOppositePrice: null,
+      firstEntrySkipped: false,
     };
   }
 
@@ -799,7 +808,7 @@ function createEngine(cfg) {
     const mtmTotal = round2(mtmUp + mtmDown);
     return {
       windowTs: t.windowTs, closeAt: t.closeAt, waitUntil: t.waitUntil,
-      phase: t.phase, waitSeconds: t.waitSeconds,
+      phase: t.phase, waitSeconds: t.waitSeconds, skipFirst: skipFirst, firstEntrySkipped: t.firstEntrySkipped || false,
       leg: legSummary(t.leg),
       buys: t.buys,
       sells: t.sells,
