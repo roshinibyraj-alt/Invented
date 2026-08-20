@@ -535,6 +535,26 @@ function createEngine(cfg) {
     const oppSide = side === 'up' ? 'down' : 'up';
     const oppAsk = askFor(t.leg, oppSide);
 
+    // Skip-first filter: skip the first signal, wait for price to reset before next.
+    if (skipFirst && !inMart) {
+      if (!t.firstEntrySkipped) {
+        t.firstEntrySkipped = true;
+        t.waitingForReset = true;
+        t.entryPriceAboveSince = 0;
+        log(`${tfLabel()} ⏭️ SKIP FIRST SIGNAL — ${side.toUpperCase()} @${ask.toFixed(3)} (waiting for price to reset below ${entryPrice})`);
+        return;
+      }
+      if (t.waitingForReset) {
+        if (ask >= entryPrice) {
+          return; // still above — keep waiting for price to drop
+        }
+        t.waitingForReset = false;
+        t.entryPriceAboveSince = 0;
+        log(`${tfLabel()} ✅ PRICE RESET below ${entryPrice} — now monitoring for next signal`);
+        return;
+      }
+    }
+
     if (!inMart) {
       // #2 Momentum confirmation: price must be >= entryPrice for momentumHoldMs.
       if (ask == null || ask < entryPrice) {
@@ -566,27 +586,6 @@ function createEngine(cfg) {
           return;
         }
       }
-    }
-
-    // Skip-first filter: skip the first signal, wait for price to reset before next.
-    if (skipFirst && !inMart && !t.firstEntrySkipped) {
-      t.firstEntrySkipped = true;
-      t.waitingForReset = true;
-      t.entryPriceAboveSince = 0;
-      log(`${tfLabel()} ⏭️ SKIP FIRST SIGNAL — ${side.toUpperCase()} @${ask.toFixed(3)} (waiting for price to reset below ${entryPrice})`);
-      return;
-    }
-
-    // After skip: require price to drop below entryPrice first (true reset)
-    if (skipFirst && !inMart && t.waitingForReset) {
-      if (ask >= entryPrice) {
-        t.entryPriceAboveSince = 0; // keep resetting until price drops
-        return;
-      }
-      t.waitingForReset = false;
-      t.entryPriceAboveSince = 0;
-      log(`${tfLabel()} ✅ PRICE RESET below ${entryPrice} — now monitoring for next signal`);
-      return;
     }
 
     const dollars = inMart ? round2(entryDollars * Math.pow(martingaleMultiplier, t.currentMartLevel)) : entryDollars;
