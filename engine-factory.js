@@ -568,10 +568,24 @@ function createEngine(cfg) {
       }
     }
 
-    // Skip-first filter: skip the first signal in the window, trade from second onward.
+    // Skip-first filter: skip the first signal, wait for price to reset before next.
     if (skipFirst && !inMart && !t.firstEntrySkipped) {
       t.firstEntrySkipped = true;
-      log(`${tfLabel()} ⏭️ SKIP FIRST SIGNAL — ${side.toUpperCase()} @${ask.toFixed(3)} (waiting for next opportunity)`);
+      t.waitingForReset = true;
+      t.entryPriceAboveSince = 0;
+      log(`${tfLabel()} ⏭️ SKIP FIRST SIGNAL — ${side.toUpperCase()} @${ask.toFixed(3)} (waiting for price to reset below ${entryPrice})`);
+      return;
+    }
+
+    // After skip: require price to drop below entryPrice first (true reset)
+    if (skipFirst && !inMart && t.waitingForReset) {
+      if (ask >= entryPrice) {
+        t.entryPriceAboveSince = 0; // keep resetting until price drops
+        return;
+      }
+      t.waitingForReset = false;
+      t.entryPriceAboveSince = 0;
+      log(`${tfLabel()} ✅ PRICE RESET below ${entryPrice} — now monitoring for next signal`);
       return;
     }
 
@@ -652,6 +666,7 @@ function createEngine(cfg) {
       entryPriceAboveSince: 0,
       prevOppositePrice: null,
       firstEntrySkipped: false,
+      waitingForReset: false,
     };
   }
 
