@@ -11,8 +11,8 @@ const DRY_RUN = (process.env.DRY_RUN || 'true').toLowerCase() === 'true';
 const CAPITAL_HIGH = Number(process.env.CAPITAL_HIGH || 4000);
 const CAPITAL_LOW = Number(process.env.CAPITAL_LOW || 4000);
 const SHARES_PER_TRADE = Number(process.env.SHARES_PER_TRADE || 100);
-const TRAIL_DISTANCE = Number(process.env.TRAIL_DISTANCE || 0.05);
-const TAKE_PROFIT_DISTANCE = Number(process.env.TAKE_PROFIT_DISTANCE || 0.10);
+const TRAIL_DISTANCE = Number(process.env.TRAIL_DISTANCE || 0.10);
+const TAKE_PROFIT_DISTANCE = Number(process.env.TAKE_PROFIT_DISTANCE || 0.15);
 const STOP_LOSS_PRICE = Number(process.env.STOP_LOSS_PRICE || 0.45);
 
 let engineHigh = null, engineLow = null;
@@ -261,7 +261,7 @@ server.listen(PORT, '0.0.0.0', () => {
       sharesPerTrade: SHARES_PER_TRADE,
       trailDistance: TRAIL_DISTANCE,
       takeProfitDistance: TAKE_PROFIT_DISTANCE,
-      stopLossPrice: STOP_LOSS_PRICE,
+      stopLossPrice: null,
       rangeMin: 0.60,
       rangeMax: 0.90,
       statsStatePath: statsPath,
