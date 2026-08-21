@@ -8,14 +8,12 @@ const PolymarketTrader = require('./polymarket-trader');
 const { createEngine } = require('./engine-factory');
 
 const DRY_RUN = (process.env.DRY_RUN || 'true').toLowerCase() === 'true';
-const CAPITAL_HIGH = Number(process.env.CAPITAL_HIGH || 4000);
-const CAPITAL_LOW = Number(process.env.CAPITAL_LOW || 4000);
-const SHARES_PER_TRADE = Number(process.env.SHARES_PER_TRADE || 100);
-const TRAIL_DISTANCE = Number(process.env.TRAIL_DISTANCE || 0.10);
-const TAKE_PROFIT_DISTANCE = Number(process.env.TAKE_PROFIT_DISTANCE || 0.15);
-const STOP_LOSS_PRICE = Number(process.env.STOP_LOSS_PRICE || 0.45);
+const CAPITAL = Number(process.env.CAPITAL || 4000);
+const BASE_SHARES = Number(process.env.BASE_SHARES || 50);
+const MAX_SHARES = Number(process.env.MAX_SHARES || 200);
+const DIP_THRESHOLD = Number(process.env.DIP_THRESHOLD || 0.12);
 
-let engineHigh = null, engineLow = null;
+let engine = null;
 
 const app = express();
 const server = http.createServer(app);
@@ -25,16 +23,16 @@ const PORT = process.env.PORT || 8080;
 app.use(express.json());
 app.get('/healthz', (_, r) => r.sendStatus(200));
 app.get('/api/hedge/status', (_, r) => {
-  try { r.json({ high: engineHigh ? engineHigh.buildState() : null, low: engineLow ? engineLow.buildState() : null }); }
+  try { r.json({ engine: engine ? engine.buildState() : null }); }
   catch (e) { r.status(500).json({ ok: false, error: e.message }); }
 });
-app.post('/api/hedge/pause', (_, r) => { try { if (engineHigh) engineHigh.pauseTrading(); if (engineLow) engineLow.pauseTrading(); r.json({ ok: true }); } catch (e) { r.status(500).json({ ok: false, error: e.message }); } });
-app.post('/api/hedge/resume', (_, r) => { try { if (engineHigh) engineHigh.resumeTrading(); if (engineLow) engineLow.resumeTrading(); r.json({ ok: true }); } catch (e) { r.status(500).json({ ok: false, error: e.message }); } });
+app.post('/api/hedge/pause', (_, r) => { try { if (engine) engine.pauseTrading(); r.json({ ok: true }); } catch (e) { r.status(500).json({ ok: false, error: e.message }); } });
+app.post('/api/hedge/resume', (_, r) => { try { if (engine) engine.resumeTrading(); r.json({ ok: true }); } catch (e) { r.status(500).json({ ok: false, error: e.message }); } });
 
 const DASH = `<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
-<title>BTC Trailing Bot</title>
+<title>BTC Dip-Buy Bot</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Courier New',monospace;background:#000;color:#fff;font-size:12px;font-weight:bold;-webkit-text-size-adjust:100%;overflow-x:hidden}
@@ -61,15 +59,10 @@ body{font-family:'Courier New',monospace;background:#000;color:#fff;font-size:12
 .side-card{background:#111;border:1px solid #444;border-radius:8px;padding:8px 10px;margin-bottom:6px}
 .sc-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px}
 .sc-name{font-size:13px}.sc-up{color:#00ccff}.sc-down{color:#aa88ff}
-.sc-status{font-size:9px;padding:2px 6px;border-radius:4px}
-.sc-idle{background:#333;color:#888}.sc-active{background:#00ff8822;color:#00ff88}
-.limits-list,.positions-list{margin-top:4px}
-.limit-tag,.position-tag{display:inline-block;padding:2px 6px;margin:2px;border-radius:3px;font-size:9px}
-.limit-tag{background:#ffcc0022;color:#ffcc00;border:1px solid #ffcc00}
-.position-tag{background:#00ff8822;color:#00ff88;border:1px solid #00ff88}
+.position-tag{display:inline-block;padding:2px 6px;margin:2px;border-radius:3px;font-size:9px;background:#00ff8822;color:#00ff88;border:1px solid #00ff88}
 .history-list{max-height:300px;overflow-y:auto}
-.h-item{display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #1a1a1a;font-size:9px}
-.h-result{font-size:10px;padding:1px 5px;border-radius:3px}
+.h-item{display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #1a1a1a;font-size:9px;gap:6px}
+.h-result{font-size:10px;padding:1px 5px;border-radius:3px;font-weight:bold}
 .h-win{background:#00ff8822;color:#00ff88}.h-loss{background:#ff444422;color:#ff4444}
 .log-box{margin:8px 14px 0;background:#0a0a0a;border:1px solid #333;border-radius:8px;padding:8px 10px;max-height:200px;overflow-y:auto;font-size:9px;line-height:1.4;white-space:nowrap;-webkit-overflow-scrolling:touch}
 @media(max-width:600px){.log-box{margin:6px 10px 0}}
@@ -77,15 +70,14 @@ body{font-family:'Courier New',monospace;background:#000;color:#fff;font-size:12
 @media(max-width:600px){.chart-box{margin:6px 10px 0}}
 .chart-box canvas{width:100%;height:120px;background:#111;border-radius:6px}
 </style></head><body>
-<div class="hd"><div><div class="logo">BTC <span>Trailing Dual Range</span></div></div><div class="badge badge-dem" id="mode-badge">DEMO</div></div>
+<div class="hd"><div><div class="logo">BTC <span>Dip-Buy</span></div></div><div class="badge badge-dem" id="mode-badge">DEMO</div></div>
 <div class="stats-row" id="stats-row"></div>
 <div class="chart-box"><canvas id="eq-chart"></canvas></div>
-<div class="panel"><div class="p-hd"><div class="p-title">HIGH RANGE 0.60–0.90</div><div class="p-badge" id="high-badge">--</div></div><div class="p-body" id="high-body"></div></div>
-<div class="panel"><div class="p-hd"><div class="p-title">LOW RANGE 0.20–0.50</div><div class="p-badge" id="low-badge">--</div></div><div class="p-body" id="low-body"></div></div>
+<div class="panel"><div class="p-hd"><div class="p-title">5 MINUTE WINDOWS</div><div class="p-badge" id="eng-badge">--</div></div><div class="p-body" id="eng-body"></div></div>
 <div class="log-box" id="log-box"></div>
 <script src="/socket.io/socket.io.js"></script>
 <script>
-var socket=io(),latest={high:null,low:null},allLogs=[];
+var socket=io(),latest=null,allLogs=[];
 var $=function(id){return document.getElementById(id)};
 var fmt2=function(n){return n!=null?Number(n).toFixed(2):'--'};
 var fmt3=function(n){return n!=null?Number(n).toFixed(3):'--'};
@@ -94,30 +86,18 @@ var pC=function(n){return n>0?'pos':n<0?'neg':''};
 
 function sideHtml(name,st){
   if(!st)return'';
-  var hasLimits=(st.activeLimits||[]).length>0;
-  var hasPositions=(st.positions||[]).length>0;
-  var status='IDLE',statusClass='sc-idle';
-  if(hasPositions){status=(st.positions.length)+' POS';statusClass='sc-active';}
-  else if(hasLimits){status=(st.activeLimits.length)+' LIMITS';statusClass='sc-active';}
+  var posList=st.positions||[];
   var h='<div class="side-card">';
-  h+='<div class="sc-head"><span class="sc-name sc-'+name+'">'+name.toUpperCase()+'</span>';
-  h+='<span style="color:#888;font-size:9px">peak '+fmt3(st.peak)+'</span>';
-  h+='<span class="sc-status '+statusClass+'">'+status+'</span></div>';
-  if(hasLimits){
-    h+='<div class="limits-list">';
-    for(var i=0;i<st.activeLimits.length;i++){
-      var l=st.activeLimits[i];
-      h+='<span class="limit-tag">L @'+fmt3(l.limitPrice)+'</span>';
+  h+='<div class="sc-head">';
+  h+='<span class="sc-name sc-'+name+'">'+name.toUpperCase()+'</span>';
+  h+='<span style="color:#888;font-size:9px">peak '+fmt3(st.rollingPeak)+' · '+st.totalShares+'sh held</span>';
+  h+='<span style="font-size:11px" class="'+pC(st.totalUnrealized)+'">'+sgn(st.totalUnrealized)+'</span>';
+  h+='</div>';
+  if(posList.length){
+    for(var i=0;i<posList.length;i++){
+      var p=posList[i];
+      h+='<div><span class="position-tag">#'+p.id+' '+p.shares+'sh @'+fmt3(p.entryPrice)+' → TP '+fmt3(p.tpPrice)+' | dip:'+fmt3(p.dipDepth)+' | '+sgn(p.unrealizedPnl)+'</span></div>';
     }
-    h+='</div>';
-  }
-  if(hasPositions){
-    h+='<div class="positions-list">';
-    for(var j=0;j<st.positions.length;j++){
-      var p=st.positions[j];
-      h+='<span class="position-tag">'+p.shares+'sh @'+fmt3(p.entryPrice)+' → TP '+fmt3(p.tpPrice)+' | '+sgn(p.unrealizedPnl)+'</span>';
-    }
-    h+='</div>';
   }
   h+='</div>';
   return h;
@@ -149,12 +129,13 @@ function panelHtml(st){
   if(hist.length){
     h+='<div style="font-size:8px;color:#888;text-transform:uppercase;letter-spacing:.5px;margin:10px 0 4px">Recent Windows</div>';
     h+='<div class="history-list">';
-    for(var k=0;k<Math.min(hist.length,20);k++){
+    for(var k=0;k<Math.min(hist.length,30);k++){
       var hw=hist[k];
       var resClass=hw.pnl>=0?'h-win':'h-loss';
       h+='<div class="h-item">';
-      h+='<span style="color:#666">'+hw.slug.replace('btc-updown-5m-','')+'</span>';
-      h+='<span style="color:#aaa">'+hw.side.toUpperCase()+' · '+hw.trades+' trades</span>';
+      h+='<span style="color:#666;min-width:60px">'+hw.slug.replace('btc-updown-5m-','')+'</span>';
+      h+='<span style="color:#aaa">'+hw.side.toUpperCase()+'</span>';
+      h+='<span style="color:#888">'+hw.trades+' trades</span>';
       h+='<span class="h-result '+resClass+'">'+(hw.pnl>=0?'WIN':'LOSS')+'</span>';
       h+='<span style="font-size:11px" class="'+pC(hw.pnl)+'">'+sgn(hw.pnl)+'</span>';
       h+='</div>';
@@ -169,41 +150,30 @@ function drawChart(){
   var ctx=canvas.getContext('2d');
   var dpr=window.devicePixelRatio||1,W=canvas.clientWidth||800,H=canvas.clientHeight||120;
   canvas.width=W*dpr;canvas.height=H*dpr;ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,W,H);
-  var curves=[];
-  if(latest.high&&latest.high.equityCurve&&latest.high.equityCurve.length>=2)curves.push({data:latest.high.equityCurve,cap:latest.high.startingCapital,color:'#0099cc'});
-  if(latest.low&&latest.low.equityCurve&&latest.low.equityCurve.length>=2)curves.push({data:latest.low.equityCurve,cap:latest.low.startingCapital,color:'#aa88ff'});
-  if(!curves.length){ctx.fillStyle='#888';ctx.font='10px monospace';ctx.fillText('Collecting data...',14,20);return}
+  if(!latest||!latest.equityCurve||latest.equityCurve.length<2){ctx.fillStyle='#888';ctx.font='10px monospace';ctx.fillText('Collecting data...',14,20);return}
+  var d=latest.equityCurve,cap=latest.startingCapital||4000;
   var min=Infinity,max=-Infinity;
-  curves.forEach(function(c){c.data.forEach(function(p){if(p.equity<min)min=p.equity;if(p.equity>max)max=p.equity});min=Math.min(min,c.cap);max=Math.max(max,c.cap)});
+  d.forEach(function(p){if(p.equity<min)min=p.equity;if(p.equity>max)max=p.equity});min=Math.min(min,cap);max=Math.max(max,cap);
   var pad=10,xA=function(i,l){return pad+(i/(l-1))*(W-pad*2)},yA=function(v){return H-pad-((v-min)/((max-min)||1))*(H-pad*2)};
   ctx.strokeStyle='#333';ctx.lineWidth=1;for(var g=0;g<=4;g++){var gy=pad+(g/4)*(H-pad*2);ctx.beginPath();ctx.moveTo(pad,gy);ctx.lineTo(W-pad,gy);ctx.stroke()}
-  curves.forEach(function(c){
-    var d=c.data,vals=d.map(function(p){return p.equity});
-    ctx.globalAlpha=.5;ctx.setLineDash([4,3]);ctx.beginPath();ctx.moveTo(pad,yA(c.cap));ctx.lineTo(W-pad,yA(c.cap));ctx.stroke();ctx.setLineDash([]);ctx.globalAlpha=1;
-    ctx.beginPath();ctx.moveTo(xA(0,d.length),yA(vals[0]));for(var i=1;i<d.length;i++)ctx.lineTo(xA(i,d.length),yA(vals[i]));
-    ctx.strokeStyle=c.color;ctx.lineWidth=2;ctx.stroke();
-    ctx.lineTo(xA(d.length-1,d.length),H-pad);ctx.lineTo(xA(0,d.length),H-pad);ctx.closePath();ctx.fillStyle=c.color+'11';ctx.fill();
-  });
+  var vals=d.map(function(p){return p.equity});
+  ctx.globalAlpha=.5;ctx.setLineDash([4,3]);ctx.beginPath();ctx.moveTo(pad,yA(cap));ctx.lineTo(W-pad,yA(cap));ctx.stroke();ctx.setLineDash([]);ctx.globalAlpha=1;
+  ctx.beginPath();ctx.moveTo(xA(0,d.length),yA(vals[0]));for(var i=1;i<d.length;i++)ctx.lineTo(xA(i,d.length),yA(vals[i]));
+  ctx.strokeStyle='#00ccff';ctx.lineWidth=2;ctx.stroke();
+  ctx.lineTo(xA(d.length-1,d.length),H-pad);ctx.lineTo(xA(0,d.length),H-pad);ctx.closePath();ctx.fillStyle='#00ccff11';ctx.fill();
 }
 
 function render(){
-  var sh=latest.high,sl=latest.low;
-  var totalPnl=(sh?sh.realizedPnl:0)+(sl?sl.realizedPnl:0);
-  var totalEquity=(sh?sh.equity:0)+(sl?sl.equity:0);
-  var totalW=(sh?(sh.wins||0):0)+(sl?(sl.wins||0):0);
-  var totalL=(sh?(sh.losses||0):0)+(sl?(sl.losses||0):0);
-  var wr=totalW+totalL>0?((totalW/(totalW+totalL))*100).toFixed(1)+'%':'--';
+  var st=latest;
   $('stats-row').innerHTML=[
-    '<div class="st"><div class="st-l">Equity</div><div class="st-v">$'+fmt2(totalEquity)+'</div></div>',
-    '<div class="st"><div class="st-l">Realized</div><div class="st-v '+pC(totalPnl)+'">'+sgn(totalPnl)+'</div></div>',
-    '<div class="st"><div class="st-l">W/L ('+wr+')</div><div class="st-v"><span class="pos">'+totalW+'W</span>/<span class="neg">'+totalL+'L</span></div></div>',
-    '<div class="st"><div class="st-l">Fees</div><div class="st-v">$'+fmt2((sh?sh.totalFeesPaid:0)+(sl?sl.totalFeesPaid:0))+'</div></div>',
+    '<div class="st"><div class="st-l">Equity</div><div class="st-v">$'+fmt2(st?st.equity:0)+'</div></div>',
+    '<div class="st"><div class="st-l">Realized</div><div class="st-v '+pC(st?st.realizedPnl:0)+'">'+sgn(st?st.realizedPnl:0)+'</div></div>',
+    '<div class="st"><div class="st-l">W/L</div><div class="st-v"><span class="pos">'+(st?(st.wins||0):0)+'W</span>/<span class="neg">'+(st?(st.losses||0):0)+'L</span></div></div>',
+    '<div class="st"><div class="st-l">Fees</div><div class="st-v">$'+fmt2(st?st.totalFeesPaid:0)+'</div></div>',
   ].join('');
-  $('high-body').innerHTML=panelHtml(sh);
-  $('high-badge').textContent=(sh?(sh.wins||0)+'W/'+(sh.losses||0)+'L':'--')+' | '+sgn(sh?sh.realizedPnl:0);
-  $('low-body').innerHTML=panelHtml(sl);
-  $('low-badge').textContent=(sl?(sl.wins||0)+'W/'+(sl.losses||0)+'L':'--')+' | '+sgn(sl?sl.realizedPnl:0);
-  var live=(sh&&!sh.dryRun)||(sl&&!sl.dryRun);
+  $('eng-body').innerHTML=panelHtml(st);
+  $('eng-badge').textContent=(st?(st.wins||0)+'W/'+(st.losses||0)+'L':'--')+' | '+sgn(st?st.realizedPnl:0);
+  var live=st&&!st.dryRun;
   $('mode-badge').className='badge '+(live?'badge-live':'badge-dem');
   $('mode-badge').textContent=live?'LIVE':'DEMO';
   drawChart();
@@ -214,22 +184,20 @@ function renderLogs(){
   var wasAtBottom=el.scrollHeight-el.scrollTop-el.clientHeight<40;
   el.innerHTML=allLogs.slice(-200).map(function(l){
     var c='';
-    if(l.indexOf('FILLED')>=0)c=' style="color:#00ff88"';
-    else if(l.indexOf('STOP LOSS')>=0)c=' style="color:#ff4444"';
-    else if(l.indexOf('LIMIT')>=0)c=' style="color:#ffcc00"';
-    else if(l.indexOf('TP HIT')>=0)c=' style="color:#00ff88"';
+    if(l.indexOf('DIP BUY')>=0)c=' style="color:#00ccff"';
+    else if(l.indexOf('TP #')>=0)c=' style="color:#00ff88"';
+    else if(l.indexOf('RESOLVED')>=0)c=' style="color:#ffcc00"';
     return'<div'+c+'>'+l.replace(/</g,'&lt;')+'</div>';
   }).join('');
   if(wasAtBottom)el.scrollTop=el.scrollHeight;
 }
 
-socket.on('hedgeState:BTC-HIGH',function(s){latest.high=s;render()});
-socket.on('hedgeState:BTC-LOW',function(s){latest.low=s;render()});
+socket.on('hedgeState:BTC-DIP',function(s){latest=s;render()});
 socket.on('log',function(line){allLogs.push(line);if(allLogs.length>500)allLogs.shift();renderLogs()});
 setInterval(render,1000);
 setInterval(async function(){
   try{var res=await fetch('/api/hedge/status'),st=await res.json();
-    if(st.high)latest.high=st.high;if(st.low)latest.low=st.low;render();
+    if(st.engine)latest=st.engine;render();
   }catch(e){}
 },10000);
 render();
@@ -243,48 +211,24 @@ const slog = (line) => { console.log(line); io.emit('log', line); };
 const PK = process.env.PRIVATE_KEY;
 if (!PK) { console.error('PRIVATE_KEY env var missing'); process.exit(1); }
 
-console.log('BTC Trailing Limit Bot - Dual Range (HIGH + LOW)');
+console.log('BTC Dip-Buy Engine - Volatility Scaled');
 server.listen(PORT, '0.0.0.0', () => {
   console.log('Dashboard: http://0.0.0.0:' + PORT);
   (async () => {
     const trader = new PolymarketTrader(PK);
     await trader.authenticate();
-
-    const statsPath = process.env.STATS_STATE_PATH || path.join(__dirname, 'stats-high.json');
-    const statsPathLow = process.env.STATS_STATE_PATH_LOW || path.join(__dirname, 'stats-low.json');
-
-    engineHigh = createEngine({
-      label: 'BTC-HIGH',
+    engine = createEngine({
+      label: 'BTC-DIP',
       windowType: '5m',
-      startingCapital: CAPITAL_HIGH,
+      startingCapital: CAPITAL,
       windowSeconds5: 300,
-      sharesPerTrade: SHARES_PER_TRADE,
-      trailDistance: TRAIL_DISTANCE,
-      takeProfitDistance: TAKE_PROFIT_DISTANCE,
-      stopLossPrice: null,
-      rangeMin: 0.60,
-      rangeMax: 0.90,
-      statsStatePath: statsPath,
+      baseShares: BASE_SHARES,
+      maxShares: MAX_SHARES,
+      dipThreshold: DIP_THRESHOLD,
+      statsStatePath: process.env.STATS_STATE_PATH || path.join(__dirname, 'stats-dip.json'),
       trader, dryRun: DRY_RUN, emit, slog,
     });
-
-    engineLow = createEngine({
-      label: 'BTC-LOW',
-      windowType: '5m',
-      startingCapital: CAPITAL_LOW,
-      windowSeconds5: 300,
-      sharesPerTrade: SHARES_PER_TRADE,
-      trailDistance: TRAIL_DISTANCE,
-      takeProfitDistance: TAKE_PROFIT_DISTANCE,
-      stopLossPrice: null,
-      rangeMin: 0.20,
-      rangeMax: 0.50,
-      statsStatePath: statsPathLow,
-      trader, dryRun: DRY_RUN, emit, slog,
-    });
-
-    await engineHigh.start();
-    await engineLow.start();
+    await engine.start();
   })().catch(e => {
     console.error('Bot init failed:', e.message);
     process.exit(1);

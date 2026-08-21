@@ -2,15 +2,20 @@
 
 /**
  * ═══════════════════════════════════════════════════════════════
- *  BTC TRAILING LIMIT ENGINE — 5m Up/Down, dual range engines
+ *  BTC DIP-BUY ENGINE — Volatility-scaled, asymmetric payoff
  * ═══════════════════════════════════════════════════════════════
  *
- *  HIGH engine (0.60–0.90): trailing limit peak−0.05, TP +0.10, SL 0.45
- *  LOW engine  (0.20–0.50): trailing limit peak−0.05, TP +0.10, no SL
+ *  Core idea: buy sharp dips (oversold bounces), size by conviction.
  *
- *  Each local peak fires its own limit order — multiple limits per side.
- *  No cancelling old limits. Filled limits become positions.
- *  UP and DOWN tracked independently within each engine.
+ *  1. Track rolling peak per side (highest since last fill).
+ *  2. Signal: price drops ≥ DIP_THRESHOLD from peak while in range.
+ *  3. Position size scales with drop depth: bigger dip = more shares.
+ *  4. TP scales with entry price: cheaper entry = wider profit target.
+ *     e.g. entry @0.25 → TP @0.35 (+40%), entry @0.70 → TP @0.80 (+14%).
+ *  5. No stop loss — cheap entries have asymmetric upside ($1 payout).
+ *  6. Max 4 open positions per side per window (exposure cap).
+ *  7. Cooldown 8s between entries per side.
+ *  8. Trade entire window. UP/DOWN independent. Single engine 0.10–0.90.
  * ═══════════════════════════════════════════════════════════════
  */
 
@@ -18,7 +23,7 @@ const fs = require('fs');
 const GAMMA = 'https://gamma-api.polymarket.com';
 const CLOB  = 'https://clob.polymarket.com';
 
-const TICK_MS            = 100;
+const TICK_MS            = 200;
 const DISCOVERY_RETRY_MS = 500;
 const RESOLUTION_POLL_MS = 1000;
 const EQUITY_RECORD_MS   = 1000;
@@ -36,15 +41,16 @@ async function getJSON(url) {
 
 function createEngine(cfg) {
   const {
-    label = 'BTC-TRAIL',
+    label = 'BTC-DIP',
     startingCapital = 4000,
     windowType = '5m',
     windowSeconds5 = 300,
-    sharesPerTrade = 100,
-    trailDistance = 0.05,
-    takeProfitDistance = 0.10,
-    stopLossPrice = null,       // null = no SL (low range)
-    rangeMin = 0.60,
+    baseShares = 50,           // shares at minimum signal
+    maxShares = 200,           // shares at maximum signal
+    dipThreshold = 0.12,       // minimum drop from peak to trigger
+    cooldownMs = 8000,         // ms between entries per side
+    maxPositionsPerSide = 4,   // exposure cap
+    rangeMin = 0.10,
     rangeMax = 0.90,
     feeTheta = 0.07,
     trader,
@@ -54,12 +60,13 @@ function createEngine(cfg) {
     slog = () => {},
     nowFn = Date.now,
     tickMs = TICK_MS,
-    priceRefreshMs = 100,
+    priceRefreshMs = 200,
   } = cfg;
 
   const winSec = windowSeconds5;
   const capital = round2(startingCapital);
   let DRY_RUN = dryRun;
+  let posSeq = 0;
 
   function loadStats() {
     if (!statsStatePath) return null;
@@ -69,12 +76,11 @@ function createEngine(cfg) {
 
   function freshSideState() {
     return {
-      peak: 0,
-      prevPrice: 0,
-      lastLimitAt: 0,
-      limits: [],          // array of active limit orders
-      positions: [],       // array of open positions
-      trades: [],
+      rollingPeak: 0,          // highest since last fill
+      lastEntryAt: 0,          // timestamp of last entry
+      positions: [],            // open positions
+      trades: [],               // completed trades this window
+      priceHistory: [],         // recent prices for volatility calc
     };
   }
 
@@ -212,23 +218,43 @@ function createEngine(cfg) {
     return false;
   }
 
-  // ── Trading per side ──
+  // ── Trading ──
   function getPrice(side) { return side === 'up' ? engine.leg.upMid : engine.leg.downMid; }
   function computeFee(shares, price) { return shares * feeTheta * price * (1 - price); }
 
-  function processSideTick(side, price, secsLeft) {
+  // Calculate dynamic position size based on dip depth
+  // Deeper dip = more conviction = more shares
+  function calcShares(drop) {
+    // Normalize: drop of 0.12 = minimum, drop of 0.40+ = maximum
+    const conviction = Math.min(1.0, Math.max(0, (drop - dipThreshold) / 0.28));
+    return Math.max(baseShares, Math.min(maxShares, Math.floor((baseShares + conviction * (maxShares - baseShares)) / 10) * 10));
+  }
+
+  // Dynamic TP: cheaper entry = wider target (asymmetric payoff)
+  // Entry @0.20 → TP @0.32 (+60%)
+  // Entry @0.40 → TP @0.52 (+30%)
+  // Entry @0.60 → TP @0.72 (+20%)
+  // Entry @0.80 → TP @0.92 (+15%)
+  function calcTP(entryPrice) {
+    const pctGain = Math.max(0.12, 0.55 - entryPrice * 0.55);
+    return round3(Math.min(0.97, entryPrice + pctGain));
+  }
+
+  function processSideTick(side, price) {
     const st = engine[side];
     if (price == null) return;
 
-    // Track peak
-    if (price > st.peak) st.peak = price;
+    // Track rolling peak (resets after each fill)
+    if (price > st.rollingPeak) st.rollingPeak = price;
 
-    // Check open positions for TP / SL
+    // Record price history for volatility tracking
+    st.priceHistory.push({ t: nowFn(), p: price });
+    if (st.priceHistory.length > 300) st.priceHistory.shift();
+
+    // Check TP on open positions
     for (let i = st.positions.length - 1; i >= 0; i--) {
       const pos = st.positions[i];
-
-      // Take Profit
-      if (pos.tpPrice != null && price >= pos.tpPrice) {
+      if (price >= pos.tpPrice) {
         const proceeds = round2(pos.shares * pos.tpPrice);
         const fee = computeFee(pos.shares, pos.tpPrice);
         const net = round2(proceeds - fee);
@@ -238,79 +264,48 @@ function createEngine(cfg) {
         engine.totalFeesPaid = round2(engine.totalFeesPaid + fee);
         if (pnl > 0) engine.wins++; else engine.losses++;
         st.trades.push({ side, type: 'TP', entry: pos.entryPrice, exit: pos.tpPrice, shares: pos.shares, pnl });
-        log(`✅ ${side.toUpperCase()} TP #${pos.id} — sold ${pos.shares}sh @${pos.tpPrice.toFixed(3)} | PnL ${sgn2(pnl)} | bankroll $${engine.bankroll.toFixed(2)}`);
+        log(`✅ ${side.toUpperCase()} TP #${pos.id} — ${pos.shares}sh @${pos.tpPrice.toFixed(3)} | PnL ${sgn2(pnl)} | $${engine.bankroll.toFixed(2)}`);
         st.positions.splice(i, 1);
-        continue;
-      }
-
-      // Stop Loss (only if configured)
-      if (stopLossPrice != null && price <= stopLossPrice) {
-        const exitPrice = Math.max(price, 0.01);
-        const proceeds = round2(pos.shares * exitPrice);
-        const fee = computeFee(pos.shares, exitPrice);
-        const net = round2(proceeds - fee);
-        const pnl = round2(net - pos.cost);
-        engine.bankroll = round2(engine.bankroll + net);
-        engine.realizedPnl = round2(engine.realizedPnl + pnl);
-        engine.totalFeesPaid = round2(engine.totalFeesPaid + fee);
-        engine.losses++;
-        st.trades.push({ side, type: 'SL', entry: pos.entryPrice, exit: exitPrice, shares: pos.shares, pnl });
-        log(`🛑 ${side.toUpperCase()} SL #${pos.id} — sold ${pos.shares}sh @${exitPrice.toFixed(3)} | PnL ${sgn2(pnl)} | bankroll $${engine.bankroll.toFixed(2)}`);
-        st.positions.splice(i, 1);
+        // Reset rolling peak after a fill so next signal needs fresh momentum
+        st.rollingPeak = price;
       }
     }
 
-    // Check limit fills — walk-through
-    for (let i = st.limits.length - 1; i >= 0; i--) {
-      const lim = st.limits[i];
-      if (price <= lim.limitPrice) {
-        const fillPrice = lim.limitPrice;
-        const fee = computeFee(sharesPerTrade, fillPrice);
-        const cost = round2(sharesPerTrade * fillPrice + fee);
-        engine.bankroll = round2(engine.bankroll - cost);
-        engine.totalFeesPaid = round2(engine.totalFeesPaid + fee);
-        const pos = {
-          id: lim.id,
-          side,
-          entryPrice: fillPrice,
-          shares: sharesPerTrade,
-          cost,
-          tpPrice: round3(fillPrice + takeProfitDistance),
-        };
-        st.positions.push(pos);
-        st.limits.splice(i, 1);
-        log(`🎯 ${side.toUpperCase()} FILLED #${pos.id} — ${sharesPerTrade}sh @${fillPrice.toFixed(3)} | TP @${pos.tpPrice.toFixed(3)}${stopLossPrice != null ? ` | SL @${stopLossPrice}` : ' | no SL'} | cost $${cost.toFixed(2)}`);
-      }
+    // Check entry signal: deep dip from rolling peak
+    const drop = st.rollingPeak - price;
+    const cooldownOk = (nowFn() - st.lastEntryAt) >= cooldownMs;
+    const canEnter = st.positions.length < maxPositionsPerSide;
+
+    if (drop >= dipThreshold && price >= rangeMin && price <= rangeMax && cooldownOk && canEnter) {
+      const shares = calcShares(drop);
+      const fee = computeFee(shares, price);
+      const cost = round2(shares * price + fee);
+      const tp = calcTP(price);
+      engine.bankroll = round2(engine.bankroll - cost);
+      engine.totalFeesPaid = round2(engine.totalFeesPaid + fee);
+
+      const pos = {
+        id: ++posSeq,
+        side,
+        entryPrice: round3(price),
+        shares,
+        cost,
+        tpPrice: tp,
+        dipDepth: round3(drop),
+      };
+      st.positions.push(pos);
+      st.lastEntryAt = nowFn();
+      // Reset peak so we need a NEW rally before next signal
+      st.rollingPeak = price;
+
+      log(`🎯 ${side.toUpperCase()} DIP BUY #${pos.id} — ${shares}sh @${pos.entryPrice.toFixed(3)} (dip ${round3(drop)} from ${st.rollingPeak + drop}) | TP @${tp.toFixed(3)} | cost $${cost.toFixed(2)}`);
     }
-
-    // Place new limit on local peak signal
-
-      if (price >= rangeMin && price <= rangeMax) {
-        const pullback = st.peak - price;
-        const cooldownOk = (nowFn() - st.lastLimitAt) >= 5000;
-        if (pullback >= trailDistance && st.peak >= rangeMin && st.peak <= rangeMax && cooldownOk) {
-          const newLimitPrice = round3(st.peak - trailDistance);
-          if (newLimitPrice >= rangeMin - trailDistance) {
-            // Don't duplicate same limit price
-            const exists = st.limits.some(l => l.limitPrice === newLimitPrice);
-            if (!exists) {
-              const limitId = `${side}-${Date.now()}`;
-              st.limits.push({ id: limitId, limitPrice: newLimitPrice, peakAtPlacement: st.peak });
-              st.lastLimitAt = nowFn();
-              log(`📤 ${side.toUpperCase()} LIMIT #${limitId.slice(-6)} @${newLimitPrice.toFixed(3)} (peak ${st.peak.toFixed(3)} − ${trailDistance})`);
-            }
-          }
-        }
-    }
-
-    st.prevPrice = price;
   }
 
   function settleWindow(winner) {
-    let windowPnl = 0;
+    let totalPnl = 0;
     for (const side of ['up', 'down']) {
       const st = engine[side];
-      // Close all open positions at resolution
       for (const pos of st.positions) {
         const payout = winner === side ? pos.shares : 0;
         const pnl = round2(payout - pos.cost);
@@ -318,16 +313,15 @@ function createEngine(cfg) {
         engine.realizedPnl = round2(engine.realizedPnl + pnl);
         if (pnl > 0) engine.wins++; else engine.losses++;
         st.trades.push({ side, type: 'resolution', entry: pos.entryPrice, exit: winner === side ? 1.0 : 0, shares: pos.shares, pnl });
-        windowPnl += pnl;
-        log(`🏁 ${side.toUpperCase()} RESOLVED #${pos.id} — ${winner === side ? 'WIN' : 'LOSS'} ${sgn2(pnl)}`);
+        totalPnl += pnl;
+        log(`🏁 ${side.toUpperCase()} #${pos.id} RESOLVED — ${winner === side ? 'WIN' : 'LOSS'} ${sgn2(pnl)}`);
       }
       st.positions = [];
-      st.limits = [];
       if (st.trades.length > 0) {
-        const totalSidePnl = round2(st.trades.reduce((a, t) => a + t.pnl, 0));
+        const sideTotal = round2(st.trades.reduce((a, t) => a + t.pnl, 0));
         engine.history.unshift({
           windowTs: engine.leg.windowTs, slug: engine.leg.slug, side,
-          trades: st.trades.length, pnl: totalSidePnl, bankrollAfter: engine.bankroll,
+          trades: st.trades.length, pnl: sideTotal, bankrollAfter: engine.bankroll,
         });
       }
     }
@@ -353,7 +347,7 @@ function createEngine(cfg) {
           engine.leg = freshLeg(windowTs);
           engine.up = freshSideState();
           engine.down = freshSideState();
-          log(`🆕 window t=${windowTs} opened`);
+          log(`🆕 window t=${windowTs}`);
         }
 
         const leg = engine.leg;
@@ -379,17 +373,16 @@ function createEngine(cfg) {
         }
 
         if (leg.discovered) {
-          const secsLeft = Math.max(0, Math.round((leg.closeAt - now) / 1000));
-          processSideTick('up', leg.upMid, secsLeft);
-          processSideTick('down', leg.downMid, secsLeft);
+          processSideTick('up', leg.upMid);
+          processSideTick('down', leg.downMid);
         }
 
         if (now - engine.lastEquityRecord >= EQUITY_RECORD_MS) {
           engine.lastEquityRecord = now;
           let mtm = 0;
           for (const side of ['up', 'down']) {
+            const p = getPrice(side);
             for (const pos of engine[side].positions) {
-              const p = getPrice(side);
               if (p != null) mtm += pos.shares * p;
             }
           }
@@ -409,13 +402,13 @@ function createEngine(cfg) {
     function sideInfo(name, st) {
       const p = name === 'up' ? (leg?.upMid || 0) : (leg?.downMid || 0);
       return {
-        peak: st.peak,
-        activeLimits: st.limits.map(l => ({ id: l.id, limitPrice: l.limitPrice })),
+        rollingPeak: st.rollingPeak,
         positions: st.positions.map(pos => ({
           ...pos,
           unrealizedPnl: round2(pos.shares * p - pos.cost),
         })),
         totalUnrealized: round2(st.positions.reduce((a, pos) => a + (pos.shares * p - pos.cost), 0)),
+        totalShares: st.positions.reduce((a, pos) => a + pos.shares, 0),
         tradesThisWindow: st.trades.length,
       };
     }
@@ -426,7 +419,7 @@ function createEngine(cfg) {
     );
     return {
       label, windowSeconds: winSec, dryRun: DRY_RUN,
-      rangeMin, rangeMax, hasStopLoss: stopLossPrice != null,
+      dipThreshold, baseShares, maxShares, maxPositionsPerSide, cooldownMs,
       bankroll: engine.bankroll, startingCapital: capital,
       realizedPnl: engine.realizedPnl,
       unrealizedPnl: totalUnreal,
@@ -453,9 +446,10 @@ function createEngine(cfg) {
   function setMode(live) { DRY_RUN = !live; log(`⚙️ ${live ? 'LIVE' : 'DEMO'}`); return { ok: true }; }
 
   async function start() {
-    log(`⛏ ${label} — Trailing Limit [${rangeMin}–${rangeMax}]`);
-    log(`⚙️ Trail ${trailDistance} | TP +${takeProfitDistance}${stopLossPrice != null ? ` | SL ${stopLossPrice}` : ' | no SL'} | ${sharesPerTrade}sh/trade`);
-    log(`⚙️ Multiple limits per peak | Both sides independent | Capital $${capital.toFixed(2)} | ${DRY_RUN ? 'DEMO' : 'LIVE'}`);
+    log(`⛏ ${label} — Dip-Buy Engine [${rangeMin}–${rangeMax}]`);
+    log(`⚙️ Dip ≥${dipThreshold} | Shares ${baseShares}–${maxShares} (scaled by depth)`);
+    log(`⚙️ Dynamic TP (cheaper=+60%, expensive=+15%) | No SL | Max ${maxPositionsPerSide}/side | Cooldown ${(cooldownMs/1000).toFixed(0)}s`);
+    log(`⚙️ Capital $${capital.toFixed(2)} | ${DRY_RUN ? 'DEMO' : 'LIVE'}`);
     mainLoop().catch(e => log(`❌ Fatal: ${e.message}`));
   }
 
