@@ -71,6 +71,7 @@ function createEngine(cfg) {
     return {
       peak: 0,
       prevPrice: 0,
+      lastLimitAt: 0,
       limits: [],          // array of active limit orders
       positions: [],       // array of open positions
       trades: [],
@@ -285,7 +286,9 @@ function createEngine(cfg) {
     // Place new limit on local peak signal
 
       if (price >= rangeMin && price <= rangeMax) {
-        if (st.prevPrice > 0 && price < st.prevPrice && st.peak >= rangeMin && st.peak <= rangeMax) {
+        const pullback = st.peak - price;
+        const cooldownOk = (nowFn() - st.lastLimitAt) >= 5000;
+        if (pullback >= trailDistance && st.peak >= rangeMin && st.peak <= rangeMax && cooldownOk) {
           const newLimitPrice = round3(st.peak - trailDistance);
           if (newLimitPrice >= rangeMin - trailDistance) {
             // Don't duplicate same limit price
@@ -293,6 +296,7 @@ function createEngine(cfg) {
             if (!exists) {
               const limitId = `${side}-${Date.now()}`;
               st.limits.push({ id: limitId, limitPrice: newLimitPrice, peakAtPlacement: st.peak });
+              st.lastLimitAt = nowFn();
               log(`📤 ${side.toUpperCase()} LIMIT #${limitId.slice(-6)} @${newLimitPrice.toFixed(3)} (peak ${st.peak.toFixed(3)} − ${trailDistance})`);
             }
           }
