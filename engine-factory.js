@@ -44,7 +44,7 @@ function createEngine(cfg) {
     startingCapital = 4000,
     windowType = '5m',
     windowSeconds5 = 300,
-    sharesPerTrade = 10,
+    sharesPerTrade = 100,
     trailDistance = 0.05,
     takeProfitDistance = 0.10,
     stopLossPrice = 0.45,

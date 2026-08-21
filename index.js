@@ -9,7 +9,7 @@ const { createEngine } = require('./engine-factory');
 
 const DRY_RUN = (process.env.DRY_RUN || 'true').toLowerCase() === 'true';
 const CAPITAL = Number(process.env.CAPITAL || 4000);
-const SHARES_PER_TRADE = Number(process.env.SHARES_PER_TRADE || 10);
+const SHARES_PER_TRADE = Number(process.env.SHARES_PER_TRADE || 100);
 const TRAIL_DISTANCE = Number(process.env.TRAIL_DISTANCE || 0.05);
 const TAKE_PROFIT_DISTANCE = Number(process.env.TAKE_PROFIT_DISTANCE || 0.10);
 const STOP_LOSS_PRICE = Number(process.env.STOP_LOSS_PRICE || 0.45);
