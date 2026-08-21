@@ -2,23 +2,19 @@
 
 /**
  * ═══════════════════════════════════════════════════════════════
- *  BTC BUCKET LIMIT ENGINE — 5m + 15m Up/Down windows
+ *  BTC TRAILING LIMIT ENGINE — 5m Up/Down windows only
  * ═══════════════════════════════════════════════════════════════
  *
- *  Every 20s (5m) / 60s (15m), create a "bucket":
+ *  Range: 0.60–0.90. Trailing limit buy on local peak.
  *
- *  1. Snapshot current UP/DOWN mid prices.
- *  2. Identify CHEAP side (lower price) and EXPENSIVE side.
- *  3. Place resting GTC limit buy on CHEAP side at exactly its current price.
- *  4. When price walks through → cheap leg FILLED.
- *  5. Immediately place GTC limit buy on EXPENSIVE side at
- *     (current expensive price − 0.10).
- *  6. When that walks through → expensive leg FILLED.
- *  7. Buckets stay open until filled — no timeout.
- *  8. Multiple buckets can be open simultaneously.
- *  9. At window end, winner pays $1/share; PnL = payouts − total cost.
- *
- *  10 shares per side per bucket. No stop loss, no martingale.
+ *  1. No trades first 60s / last 30s.
+ *  2. Track local peak per side (price rose then started dropping).
+ *  3. Place limit buy at peak − 0.05.
+ *  4. New higher peak → cancel old limit, place at new_peak − 0.05.
+ *  5. Price walks through → FILLED. TP = entry + 0.10. SL = 0.45 hard.
+ *  6. TP hit → sell at profit. SL hit → force sell at loss.
+ *  7. After TP/SL → can re-enter same side if conditions met again.
+ *  8. UP and DOWN tracked independently.
  * ═══════════════════════════════════════════════════════════════
  */
 
@@ -44,16 +40,19 @@ async function getJSON(url) {
 
 function createEngine(cfg) {
   const {
-    label = 'BTC-BUCKET',
+    label = 'BTC-TRAIL',
     startingCapital = 4000,
     windowType = '5m',
     windowSeconds5 = 300,
-    bucketIntervalSec = 20,
-    noTradeAfterSec = 180,
-    sharesPerSide = 10,
-    oppositeSideDiscount = 0.10,
+    sharesPerTrade = 10,
+    trailDistance = 0.05,
+    takeProfitDistance = 0.10,
+    stopLossPrice = 0.45,
+    rangeMin = 0.60,
+    rangeMax = 0.90,
+    noTradeFirstSec = 60,
+    noTradeLastSec = 30,
     feeTheta = 0.07,
-    rebatePct = 0,
     trader,
     dryRun = true,
     statsStatePath,
@@ -67,18 +66,31 @@ function createEngine(cfg) {
   const winSec = windowSeconds5;
   const capital = round2(startingCapital);
   let DRY_RUN = dryRun;
-  let tradeSeq = 0;
 
   function loadStats() {
     if (!statsStatePath) return null;
     try {
       const raw = fs.readFileSync(statsStatePath, 'utf8');
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed.bankroll === 'number') return parsed;
-    } catch (_) {}
-    return null;
+      return JSON.parse(raw);
+    } catch (_) { return null; }
   }
   const saved = loadStats();
+
+  // Per-side state
+  function freshSideState() {
+    return {
+      peak: 0,             // highest price seen this cycle
+      prevPrice: 0,        // previous tick price for local peak detection
+      limitActive: false,
+      limitPrice: null,
+      positionOpen: false,
+      entryPrice: null,
+      shares: 0,
+      cost: 0,
+      tpPrice: null,
+      trades: [],           // completed trades this window
+    };
+  }
 
   const engine = {
     bankroll: saved ? saved.bankroll : capital,
@@ -88,13 +100,13 @@ function createEngine(cfg) {
     history: saved && Array.isArray(saved.history) ? saved.history : [],
     equityCurve: saved && Array.isArray(saved.equityCurve) && saved.equityCurve.length
       ? saved.equityCurve : [{ t: nowFn(), equity: capital }],
-    current: null,
+    up: freshSideState(),
+    down: freshSideState(),
+    leg: null,
     pending: [],
-    buckets: [],
     lastResolutionPoll: 0,
     lastPriceFetch: 0,
     lastEquityRecord: 0,
-    lastBucketAt: 0,
     totalFeesPaid: saved ? saved.totalFeesPaid || 0 : 0,
     logs: [],
   };
@@ -103,7 +115,7 @@ function createEngine(cfg) {
     const line = `[${label}] ${new Date().toISOString()} ${msg}`;
     console.log(line);
     engine.logs.push(line);
-    if (engine.logs.length > 200) engine.logs.shift();
+    if (engine.logs.length > 300) engine.logs.shift();
     slog(line);
   }
 
@@ -165,7 +177,7 @@ function createEngine(cfg) {
         log(`🎯 leg discovered ${slug}`);
         return;
       }
-    } catch (e) { log(`⚠️ discoverLeg failed: ${e.message}`); }
+    } catch (e) { log(`⚠️ discoverLeg: ${e.message}`); }
   }
 
   async function refreshLegPrices(leg) {
@@ -204,8 +216,7 @@ function createEngine(cfg) {
         const prices = typeof mk.outcomePrices === 'string' ? JSON.parse(mk.outcomePrices) : mk.outcomePrices;
         const tokens = parseTokens(mk);
         const upIdx = tokens.findIndex(t => String(t.token_id) === String(leg.upTokenId));
-        const downIdx = tokens.findIndex(t => String(t.token_id) === String(leg.downTokenId));
-        if (upIdx >= 0 && downIdx >= 0 && prices[upIdx] != null) {
+        if (upIdx >= 0 && prices[upIdx] != null) {
           leg.resolved = true;
           leg.winner = parseFloat(prices[upIdx]) >= 0.5 ? 'up' : 'down';
           log(`🏁 official resolution — winner ${leg.winner.toUpperCase()}`);
@@ -216,111 +227,148 @@ function createEngine(cfg) {
     return false;
   }
 
-  // ── Bucket management ──
-  function createBucket(leg, now) {
-    const upP = leg.upMid, downP = leg.downMid;
-    if (upP == null || downP == null) return;
-    let cheapSide, cheapPrice, expSide, expPrice;
-    if (upP <= downP) { cheapSide = 'up'; cheapPrice = upP; expSide = 'down'; expPrice = downP; }
-    else { cheapSide = 'down'; cheapPrice = downP; expSide = 'up'; expPrice = upP; }
-    // Price range guard: cheap must be in 0.10–0.90
-    if (cheapPrice < 0.10 || cheapPrice > 0.90) return;
-    const bucket = {
-      id: ++tradeSeq,
-      createdAt: now,
-      leg,
-      cheapSide, cheapTargetPrice: round3(cheapPrice),
-      expSide, expTargetPrice: null,
-      cheapFilled: false, expensiveFilled: false,
-      cheapFillPrice: null, expensiveFillPrice: null,
-      cheapShares: 0, expensiveShares: 0,
-      cheapCost: 0, expensiveCost: 0,
-      cheapOrderId: null, expensiveOrderId: null,
-      settled: false,
-    };
-    engine.buckets.push(bucket);
-    log(`🪣 BUCKET #${bucket.id} — cheap ${cheapSide.toUpperCase()} @${cheapPrice.toFixed(3)} | expensive ${expSide.toUpperCase()} @${expPrice.toFixed(3)} | placing GTC limit buy ${cheapSide.toUpperCase()} ${sharesPerSide}sh @${cheapPrice.toFixed(3)}`);
-    placeCheapLimit(bucket);
+  // ── Trading logic per side ──
+  function getPrice(side) {
+    return side === 'up' ? engine.leg.upMid : engine.leg.downMid;
   }
 
-  async function placeCheapLimit(bucket) {
-    const tokenId = bucket.cheapSide === 'up' ? bucket.leg.upTokenId : bucket.leg.downTokenId;
-    if (!tokenId) return;
-    if (!DRY_RUN && trader) {
-      try {
-        const resp = await trader.placeGtcOrder(tokenId, 'BUY', bucket.cheapTargetPrice, sharesPerSide);
-        bucket.cheapOrderId = resp.id;
-        log(`📤 GTC placed: ${bucket.cheapSide.toUpperCase()} ${sharesPerSide}sh @${bucket.cheapTargetPrice.toFixed(3)} id:${resp.id?.slice(0, 12)}`);
-      } catch (e) { log(`⚠️ GTC place failed: ${e.message}`); }
+  function computeFee(shares, price) {
+    return shares * feeTheta * price * (1 - price);
+  }
+
+  function resetSide(side) {
+    engine[side] = freshSideState();
+  }
+
+  function processSideTick(side, price, nowSec, secsLeft) {
+    const st = engine[side];
+    if (price == null) return;
+
+    // Track peak (highest price seen this cycle)
+    if (price > st.peak) st.peak = price;
+
+    // If position open — check TP and SL
+    if (st.positionOpen) {
+      // Take Profit
+      if (st.tpPrice != null && price >= st.tpPrice) {
+        const proceeds = round2(st.shares * st.tpPrice);
+        const fee = computeFee(st.shares, st.tpPrice);
+        const netProceeds = round2(proceeds - fee);
+        const pnl = round2(netProceeds - st.cost);
+        engine.bankroll = round2(engine.bankroll + netProceeds);
+        engine.realizedPnl = round2(engine.realizedPnl + pnl);
+        engine.totalFeesPaid = round2(engine.totalFeesPaid + fee);
+        const won = pnl > 0;
+        if (won) engine.wins++; else engine.losses++;
+        st.trades.push({ side, type: 'TP', entry: st.entryPrice, exit: st.tpPrice, shares: st.shares, pnl });
+        log(`✅ ${side.toUpperCase()} TP HIT — sold ${st.shares}sh @${st.tpPrice.toFixed(3)} | PnL ${sgn2(pnl)} | bankroll $${engine.bankroll.toFixed(2)}`);
+        resetSide(side);
+        return;
+      }
+      // Stop Loss
+      if (price <= stopLossPrice) {
+        const exitPrice = Math.max(price, 0.01);
+        const proceeds = round2(st.shares * exitPrice);
+        const fee = computeFee(st.shares, exitPrice);
+        const netProceeds = round2(proceeds - fee);
+        const pnl = round2(netProceeds - st.cost);
+        engine.bankroll = round2(engine.bankroll + netProceeds);
+        engine.realizedPnl = round2(engine.realizedPnl + pnl);
+        engine.totalFeesPaid = round2(engine.totalFeesPaid + fee);
+        engine.losses++;
+        st.trades.push({ side, type: 'SL', entry: st.entryPrice, exit: exitPrice, shares: st.shares, pnl });
+        log(`🛑 ${side.toUpperCase()} STOP LOSS — sold ${st.shares}sh @${exitPrice.toFixed(3)} | PnL ${sgn2(pnl)} | bankroll $${engine.bankroll.toFixed(2)}`);
+        resetSide(side);
+        return;
+      }
+      return;
     }
-  }
 
-  function checkCheapFill(bucket) {
-    if (bucket.cheapFilled) return;
-    const mid = bucket.cheapSide === 'up' ? bucket.leg.upMid : bucket.leg.downMid;
-    if (mid == null) return;
-    // Walk-through: price dropped to or below our target
-    if (mid <= bucket.cheapTargetPrice) {
-      bucket.cheapFilled = true;
-      bucket.cheapFillPrice = bucket.cheapTargetPrice;
-      bucket.cheapShares = sharesPerSide;
-      const fee = sharesPerSide * feeTheta * bucket.cheapFillPrice * (1 - bucket.cheapFillPrice);
-      bucket.cheapCost = round2(sharesPerSide * bucket.cheapFillPrice + fee);
-      engine.totalFeesPaid = round2(engine.totalFeesPaid + fee);
-      engine.bankroll = round2(engine.bankroll - bucket.cheapCost);
-      log(`✅ BUCKET #${bucket.id} CHEAP FILLED — ${bucket.cheapSide.toUpperCase()} ${sharesPerSide}sh @${bucket.cheapFillPrice.toFixed(3)} (cost $${bucket.cheapCost.toFixed(2)})`);
-      // Now place expensive side at discount
-      placeExpensiveLimit(bucket);
-    }
-  }
-
-  function placeExpensiveLimit(bucket) {
-    const mid = bucket.expSide === 'up' ? bucket.leg.upMid : bucket.leg.downMid;
-    if (mid == null) return;
-    bucket.expTargetPrice = round3(Math.max(0.01, mid - oppositeSideDiscount));
-    log(`📤 BUCKET #${bucket.id} placing expensive ${bucket.expSide.toUpperCase()} ${sharesPerSide}sh @${bucket.expTargetPrice.toFixed(3)} (${oppositeSideDiscount} below current ${mid.toFixed(3)})`);
-    if (!DRY_RUN && trader) {
-      const tokenId = bucket.expSide === 'up' ? bucket.leg.upTokenId : bucket.leg.downTokenId;
-      if (tokenId) {
-        trader.placeGtcOrder(tokenId, 'BUY', bucket.expTargetPrice, sharesPerSide)
-          .then(resp => { bucket.expensiveOrderId = resp.id; })
-          .catch(e => log(`⚠️ expensive GTC failed: ${e.message}`));
+    // If limit active — check walk-through fill
+    if (st.limitActive && st.limitPrice != null) {
+      if (price <= st.limitPrice) {
+        // FILL!
+        const fillPrice = st.limitPrice;
+        const fee = computeFee(sharesPerTrade, fillPrice);
+        const cost = round2(sharesPerTrade * fillPrice + fee);
+        engine.bankroll = round2(engine.bankroll - cost);
+        engine.totalFeesPaid = round2(engine.totalFeesPaid + fee);
+        st.positionOpen = true;
+        st.entryPrice = fillPrice;
+        st.shares = sharesPerTrade;
+        st.cost = cost;
+        st.tpPrice = round3(fillPrice + takeProfitDistance);
+        st.limitActive = false;
+        st.limitPrice = null;
+        log(`🎯 ${side.toUpperCase()} FILLED — ${sharesPerTrade}sh @${fillPrice.toFixed(3)} | TP @${st.tpPrice.toFixed(3)} | SL @${stopLossPrice} | cost $${cost.toFixed(2)}`);
+        return;
       }
     }
+
+    // Check if we should place/update a limit order
+    // Only during trading window (after first N sec, before last M sec)
+    if (secsLeft > noTradeLastSec && !st.positionOpen) {
+      // Price must be in range
+      if (price >= rangeMin && price <= rangeMax) {
+        // Detect local peak: price was rising, now started dropping
+        if (st.prevPrice > 0 && price < st.prevPrice && st.peak >= rangeMin && st.peak <= rangeMax) {
+          const newLimitPrice = round3(st.peak - trailDistance);
+          if (newLimitPrice >= rangeMin - 0.05) {
+            if (!st.limitActive || st.limitPrice !== newLimitPrice) {
+              st.limitActive = true;
+              st.limitPrice = newLimitPrice;
+              log(`📤 ${side.toUpperCase()} LIMIT @${newLimitPrice.toFixed(3)} (peak ${st.peak.toFixed(3)} − ${trailDistance})`);
+            }
+          }
+        }
+      } else {
+        // Out of range — cancel any active limit
+        if (st.limitActive) {
+          st.limitActive = false;
+          st.limitPrice = null;
+        }
+      }
+    } else if (secsLeft <= noTradeLastSec && st.limitActive) {
+      // Cancel limit near window end
+      st.limitActive = false;
+      st.limitPrice = null;
+    }
+
+    // Update prevPrice for next tick's local peak detection
+    st.prevPrice = price;
   }
 
-  function checkExpensiveFill(bucket) {
-    if (!bucket.cheapFilled || bucket.expensiveFilled || bucket.expTargetPrice == null) return;
-    const mid = bucket.expSide === 'up' ? bucket.leg.upMid : bucket.leg.downMid;
-    if (mid == null) return;
-    if (mid <= bucket.expTargetPrice) {
-      bucket.expensiveFilled = true;
-      bucket.expensiveFillPrice = bucket.expTargetPrice;
-      bucket.expensiveShares = sharesPerSide;
-      const fee = sharesPerSide * feeTheta * bucket.expensiveFillPrice * (1 - bucket.expensiveFillPrice);
-      bucket.expensiveCost = round2(sharesPerSide * bucket.expensiveFillPrice + fee);
-      engine.totalFeesPaid = round2(engine.totalFeesPaid + fee);
-      engine.bankroll = round2(engine.bankroll - bucket.expensiveCost);
-      log(`✅ BUCKET #${bucket.id} EXPENSIVE FILLED — ${bucket.expSide.toUpperCase()} ${sharesPerSide}sh @${bucket.expensiveFillPrice.toFixed(3)} (cost $${bucket.expensiveCost.toFixed(2)})`);
+  // ── Window lifecycle ──
+  function settleWindow(winner) {
+    // Close any open positions at resolution
+    for (const side of ['up', 'down']) {
+      const st = engine[side];
+      if (st.positionOpen) {
+        // Winner pays $1/share, loser $0
+        const payout = winner === side ? st.shares : 0;
+        const pnl = round2(payout - st.cost);
+        engine.bankroll = round2(engine.bankroll + payout);
+        engine.realizedPnl = round2(engine.realizedPnl + pnl);
+        const won = pnl > 0;
+        if (won) engine.wins++; else engine.losses++;
+        st.trades.push({ side, type: 'resolution', entry: st.entryPrice, exit: winner === side ? 1.0 : 0, shares: st.shares, pnl });
+        log(`🏁 ${side.toUpperCase()} RESOLVED — ${winner === side ? 'WIN' : 'LOSS'} ${sgn2(pnl)} | bankroll $${engine.bankroll.toFixed(2)}`);
+      }
+      // Record window summary if there were any trades
+      if (st.trades.length > 0) {
+        const totalPnl = round2(st.trades.reduce((a, t) => a + t.pnl, 0));
+        engine.history.unshift({
+          windowTs: engine.leg.windowTs,
+          slug: engine.leg.slug,
+          side,
+          trades: st.trades.length,
+          pnl: totalPnl,
+          bankrollAfter: engine.bankroll,
+        });
+      }
     }
-  }
-
-  function settleBucket(bucket, winner) {
-    if (bucket.settled) return;
-    bucket.settled = true;
-    let payout = 0;
-    if (winner === bucket.cheapSide) payout += bucket.cheapShares;
-    if (winner === bucket.expSide) payout += bucket.expensiveShares;
-    const totalCost = round2(bucket.cheapCost + bucket.expensiveCost);
-    const pnl = round2(payout - totalCost);
-    engine.bankroll = round2(engine.bankroll + payout);
-    engine.realizedPnl = round2(engine.realizedPnl + pnl);
-    const won = pnl > 0;
-    if (bucket.cheapShares > 0 || bucket.expensiveShares > 0) {
-      if (won) engine.wins++; else engine.losses++;
-    }
-    log(`🏁 BUCKET #${bucket.id} settled — winner ${winner?.toUpperCase() || '?'} | cheap ${bucket.cheapFilled ? `${bucket.cheapShares}sh@${bucket.cheapFillPrice?.toFixed(3)}` : 'unfilled'} | expensive ${bucket.expensiveFilled ? `${bucket.expensiveShares}sh@${bucket.expensiveFillPrice?.toFixed(3)}` : 'unfilled'} | cost $${totalCost.toFixed(2)} payout $${payout.toFixed(2)} PnL ${sgn2(pnl)}`);
-    return { bucketId: bucket.id, winner, payout, totalCost, pnl, won };
+    if (engine.history.length > 300) engine.history.length = 300;
+    saveStats();
   }
 
   // ── Main loop ──
@@ -332,39 +380,20 @@ function createEngine(cfg) {
         const windowTs = Math.floor(nowSec / winSec) * winSec;
 
         // Window transition
-        if (!engine.current || engine.current.windowTs !== windowTs) {
-          // Resolve old window's buckets
-          if (engine.current) {
-            const oldLeg = engine.current;
+        if (!engine.leg || engine.leg.windowTs !== windowTs) {
+          if (engine.leg) {
+            const oldLeg = engine.leg;
             if (!oldLeg.resolved) await attemptFastResolution(oldLeg);
             if (!oldLeg.resolved) await resolveLegOfficial(oldLeg);
-            const winner = oldLeg.winner;
-            const results = [];
-            for (const b of engine.buckets) {
-              if (!b.settled) {
-                const r = settleBucket(b, winner);
-                if (r) results.push(r);
-              }
-            }
-            if (results.length) {
-              const totalPnl = round2(results.reduce((a, r) => a + r.pnl, 0));
-              engine.history.unshift({
-                windowTs: oldLeg.windowTs, slug: oldLeg.slug, winner,
-                buckets: results.length, pnl: totalPnl,
-                bankrollAfter: engine.bankroll, resolvedAt: now,
-              });
-              if (engine.history.length > 300) engine.history.pop();
-              log(`📊 WINDOW ${oldLeg.windowTs} RESOLVED — ${results.length} buckets, total PnL ${sgn2(totalPnl)}, bankroll $${engine.bankroll.toFixed(2)}`);
-            }
-            engine.buckets = [];
+            settleWindow(oldLeg.winner);
           }
-          // New window
-          engine.current = freshLeg(windowTs);
-          engine.lastBucketAt = 0;
+          engine.leg = freshLeg(windowTs);
+          engine.up = freshSideState();
+          engine.down = freshSideState();
           log(`🆕 window t=${windowTs} opened`);
         }
 
-        const leg = engine.current;
+        const leg = engine.leg;
 
         // Discovery
         if (!leg.discovered && now - leg.lastDiscoveryAttempt >= DISCOVERY_RETRY_MS) {
@@ -389,37 +418,28 @@ function createEngine(cfg) {
           engine.pending = still;
         }
 
-        const elapsed = nowSec - windowTs;
-        if (leg.discovered && nowSec < leg.closeAt / 1000 && elapsed < noTradeAfterSec) {
-          if (elapsed - engine.lastBucketAt >= bucketIntervalSec) {
-            engine.lastBucketAt = elapsed;
-            createBucket(leg, now);
-          }
-        }
+        // Process trading
+        if (leg.discovered) {
+          const elapsed = nowSec - windowTs;
+          const secsLeft = Math.max(0, Math.round((leg.closeAt - now) / 1000));
 
-        // Check fills on all open buckets
-        for (const b of engine.buckets) {
-          if (b.settled) continue;
-          checkCheapFill(b);
-          checkExpensiveFill(b);
+          if (elapsed >= noTradeFirstSec && secsLeft > noTradeLastSec) {
+            processSideTick('up', leg.upMid, nowSec, secsLeft);
+            processSideTick('down', leg.downMid, nowSec, secsLeft);
+          }
         }
 
         // Equity recording
         if (now - engine.lastEquityRecord >= EQUITY_RECORD_MS) {
           engine.lastEquityRecord = now;
           let mtm = 0;
-          for (const b of engine.buckets) {
-            if (b.settled) continue;
-            if (b.cheapFilled) {
-              const p = b.cheapSide === 'up' ? leg.upMid : leg.downMid;
-              if (p != null) mtm += b.cheapShares * p;
-            }
-            if (b.expensiveFilled) {
-              const p = b.expSide === 'up' ? leg.upMid : leg.downMid;
-              if (p != null) mtm += b.expensiveShares * p;
+          for (const side of ['up', 'down']) {
+            const st = engine[side];
+            if (st.positionOpen) {
+              const p = getPrice(side);
+              if (p != null) mtm += st.shares * p;
             }
           }
-          const totalCost = round2(engine.buckets.filter(b => !b.settled).reduce((a, b) => a + b.cheapCost + b.expensiveCost, 0));
           engine.equityCurve.push({ t: now, equity: round2(engine.bankroll + mtm) });
           if (engine.equityCurve.length > 10000) engine.equityCurve.shift();
         }
@@ -434,52 +454,38 @@ function createEngine(cfg) {
 
   // ── Dashboard state ──
   function buildState() {
-    const leg = engine.current;
-    const openBuckets = engine.buckets.filter(b => !b.settled).map(b => ({
-      id: b.id,
-      cheapSide: b.cheapSide, cheapTarget: b.cheapTargetPrice,
-      cheapFilled: b.cheapFilled, cheapFillPrice: b.cheapFillPrice,
-      cheapShares: b.cheapShares, cheapCost: b.cheapCost,
-      expSide: b.expSide, expTarget: b.expTargetPrice,
-      expensiveFilled: b.expensiveFilled, expensiveFillPrice: b.expensiveFillPrice,
-      expensiveShares: b.expensiveShares, expensiveCost: b.expensiveCost,
-    }));
-    const settledBuckets = engine.buckets.filter(b => b.settled);
-    let totalUpShares = 0, totalDownShares = 0, totalCost = 0, unrealized = 0;
-    for (const b of openBuckets) {
-      if (b.cheapFilled) {
-        totalCost += b.cheapCost;
-        if (b.cheapSide === 'up') { totalUpShares += b.cheapShares; if (leg?.upMid != null) unrealized += b.cheapShares * leg.upMid - b.cheapCost; }
-        else { totalDownShares += b.cheapShares; if (leg?.downMid != null) unrealized += b.cheapShares * leg.downMid - b.cheapCost; }
-      }
-      if (b.expensiveFilled) {
-        totalCost += b.expensiveCost;
-        if (b.expSide === 'up') { totalUpShares += b.expensiveShares; if (leg?.upMid != null) unrealized += b.expensiveShares * leg.upMid - b.expensiveCost; }
-        else { totalDownShares += b.expensiveShares; if (leg?.downMid != null) unrealized += b.expensiveShares * leg.downMid - b.expensiveCost; }
-      }
+    const leg = engine.leg;
+    function sideInfo(name, st) {
+      return {
+        peak: st.peak,
+        limitActive: st.limitActive,
+        limitPrice: st.limitPrice,
+        positionOpen: st.positionOpen,
+        entryPrice: st.entryPrice,
+        shares: st.shares,
+        tpPrice: st.tpPrice,
+        unrealizedPnl: st.positionOpen && leg ? (() => {
+          const p = name === 'up' ? leg.upMid : leg.downMid;
+          return p != null ? round2(st.shares * p - st.cost) : 0;
+        })() : 0,
+        tradesThisWindow: st.trades,
+      };
     }
     const decided = engine.wins + engine.losses;
     return {
-      label, windowSeconds: winSec, bucketIntervalSec,
-      dryRun: DRY_RUN,
-      bankroll: engine.bankroll,
-      startingCapital: capital,
+      label, windowSeconds: winSec, dryRun: DRY_RUN,
+      bankroll: engine.bankroll, startingCapital: capital,
       realizedPnl: engine.realizedPnl,
-      unrealizedPnl: round2(unrealized),
-      totalCost: round2(totalCost),
-      totalUpShares, totalDownShares,
-      equity: round2(engine.bankroll + unrealized),
+      equity: round2(engine.bankroll + (engine.up.positionOpen ? engine.up.shares * (leg?.upMid || 0) : 0) + (engine.down.positionOpen ? engine.down.shares * (leg?.downMid || 0) : 0)),
       equityCurve: engine.equityCurve.slice(-200),
       wins: engine.wins, losses: engine.losses,
       winRate: decided > 0 ? round2(engine.wins / decided * 100) : null,
-      openBuckets,
-      openBucketCount: openBuckets.length,
-      settledBucketCount: settledBuckets.length,
+      up: sideInfo('up', engine.up),
+      down: sideInfo('down', engine.down),
       currentLeg: leg ? {
         slug: leg.slug, discovered: leg.discovered,
         upMid: leg.upMid, downMid: leg.downMid,
-        windowTs: leg.windowTs, closeAt: leg.closeAt,
-        secsLeft: Math.max(0, Math.round((leg.closeAt - nowFn()) / 1000)),
+        secsLeft: leg ? Math.max(0, Math.round((leg.closeAt - nowFn()) / 1000)) : 0,
       } : null,
       history: engine.history.slice(0, 30),
       logs: engine.logs.slice(-50),
@@ -488,15 +494,14 @@ function createEngine(cfg) {
   }
 
   function emitState() { emit('hedgeState:' + label, buildState()); }
-
   function pauseTrading() { return { ok: true }; }
   function resumeTrading() { return { ok: true }; }
-  function setMode(live) { DRY_RUN = !live; log(`⚙️ ${live ? 'LIVE' : 'DEMO'} mode`); return { ok: true }; }
+  function setMode(live) { DRY_RUN = !live; log(`⚙️ ${live ? 'LIVE' : 'DEMO'}`); return { ok: true }; }
 
   async function start() {
-    log(`⛏ ${label} — Bucket Limit Strategy, ${windowType} windows`);
-    log(`⚙️ Every ${bucketIntervalSec}s: snapshot → place cheap GTC limit → wait walk-through → place expensive at -${oppositeSideDiscount}`);
-    log(`⚙️ ${sharesPerSide}sh per side | no stop loss | hold to resolution | range 0.10–0.90`);
+    log(`⛏ ${label} — Trailing Limit, ${windowType} windows`);
+    log(`⚙️ Range ${rangeMin}–${rangeMax} | Trail ${trailDistance} | TP +${takeProfitDistance} | SL ${stopLossPrice}`);
+    log(`⚙️ No trades first ${noTradeFirstSec}s / last ${noTradeLastSec}s | Both sides independent`);
     log(`⚙️ Capital: $${capital.toFixed(2)} | Mode: ${DRY_RUN ? 'DEMO' : 'LIVE'}`);
     mainLoop().catch(e => log(`❌ Fatal: ${e.message}`));
   }
