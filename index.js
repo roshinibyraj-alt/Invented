@@ -91,7 +91,7 @@ function render(){
  if(p){h+='<div class="pos-line">'+p.side.toUpperCase()+' '+p.label+' · '+p.shares+' SH @'+f2(p.entryPrice)+'</div><div class="sub">Cost $'+f2(p.cost)+' · Stop '+f2(p.stopLossPrice)+' · Mark '+f3(p.markPrice)+'<br>Float <span class="'+cls(p.unrealizedPnl)+'">'+signed(p.unrealizedPnl)+'</span> · Next MG $'+f2(s.nextStakeIfStopped)+'</div>'}
  else{h+='<div class="pos-line flat">NO OPEN POSITION</div><div class="sub">Entry '+f2(s?s.entryPrice:0)+' · Entries '+(s?s.elapsedSecond||0:0)+'/'+(s?s.entryStartSecond||0:0)+'–'+(s?s.entryEndSecond||0:0)+'s · Stop '+f2(s?s.stopLossPrice:0)+'<br>'+((s&&s.canEnter)?'Watching UP/DOWN':((s&&s.tradingAllowed===false)?'Stop-only period':'Martingale limit reached'))+'</div>'}
  h+='</div>';
- h+='<div class="card" style="margin-top:8px"><div class="label">STRATEGY</div><div class="sub">$'+f2(s?s.baseStakeUsd:0)+' base · '+f2(s?s.martingaleMultiplier:0)+'x cross-window · max '+(s?s.maxMartingales:0)+' · entries '+(s?s.entryStartSecond||0:0)+'–'+(s?s.entryEndSecond||0:0)+'s · stop always active</div></div>';
+ h+='<div class="card" style="margin-top:8px"><div class="label">STRATEGY</div><div class="sub">$'+f2(s?s.baseStakeUsd:0)+' base · '+f2(s?s.martingaleMultiplier:0)+'x cross-window · max '+(s?s.maxMartingales:0)+' · '+f2(s?s.entryPrice:0)+' walk-through · entries '+(s?s.entryStartSecond||0:0)+'–'+(s?s.entryEndSecond||0:0)+'s · stop always active</div></div>';
  h+=equityChart(s?s.equityCurve||[]:[],s?s.startingCapital:0);
  h+='<div class="history">';
  var hist=s?s.history||[]:[];

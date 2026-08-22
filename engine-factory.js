@@ -82,7 +82,7 @@ function createEngine(config) {
   };
 
   function freshSideState() {
-    return { mid: null };
+    return { mid: null, previousMid: null };
   }
 
   function log(message) {
@@ -167,12 +167,20 @@ function createEngine(config) {
 
   async function refreshPrices(leg) {
     if (!leg.upTokenId || !leg.downTokenId) return;
+    const previousUp = engine.up.mid;
+    const previousDown = engine.down.mid;
     const [upResponse, downResponse] = await Promise.all([
       getJSON(`${CLOB}/midpoint?token_id=${leg.upTokenId}`).catch(() => null),
       getJSON(`${CLOB}/midpoint?token_id=${leg.downTokenId}`).catch(() => null),
     ]);
-    if (upResponse?.mid != null) engine.up.mid = parseFloat(upResponse.mid);
-    if (downResponse?.mid != null) engine.down.mid = parseFloat(downResponse.mid);
+    if (upResponse?.mid != null) {
+      engine.up.previousMid = previousUp;
+      engine.up.mid = parseFloat(upResponse.mid);
+    }
+    if (downResponse?.mid != null) {
+      engine.down.previousMid = previousDown;
+      engine.down.mid = parseFloat(downResponse.mid);
+    }
   }
 
   function getPrice(side) {
@@ -195,19 +203,9 @@ function createEngine(config) {
     return maxMartingales + 1;
   }
 
-  function bestAskFromBook(book) {
-    let best = null;
-    for (const level of book?.asks || []) {
-      const price = parseFloat(level.price);
-      const size = parseFloat(level.size);
-      if (!Number.isFinite(price) || !Number.isFinite(size) || size <= 0) continue;
-      if (best == null || price < best) best = price;
-    }
-    return best;
-  }
-
-  function isEntryTick(price) {
-    return price != null && Math.abs(price - entryPrice) <= 0.0005;
+  function isWalkThrough(price, previousPrice) {
+    if (price == null || price < entryPrice - 0.0005) return false;
+    return previousPrice != null && previousPrice < entryPrice - 0.0005;
   }
 
   function registerResult(position, pnl) {
@@ -246,37 +244,41 @@ function createEngine(config) {
     const nextLevel = engine.martingaleLevel;
     if (nextLevel >= maxLevels()) return;
 
-    const qualifyingSides = ['up', 'down'].filter(side => isEntryTick(getPrice(side)));
+    const qualifyingSides = ['up', 'down'].filter(side => isWalkThrough(getPrice(side), side === 'up' ? engine.up.previousMid : engine.down.previousMid));
     if (!qualifyingSides.length) return;
 
+    qualifyingSides.sort((left, right) => getPrice(right) - getPrice(left));
     const side = qualifyingSides[0];
-    let entryPrice = round2(Math.ceil(getPrice(side) * 100) / 100);
-
-    if (!dryRunMode) {
-      const book = await trader.getOrderBook(getTokenId(side));
-      const bookAsk = bestAskFromBook(book);
-      if (!bookAsk || !isEntryTick(bookAsk)) {
-        markExecutionRetry();
-        log(`⏳ ${side.toUpperCase()} true best ask unavailable/not exactly ${entryPrice.toFixed(2)} — no fallback`);
-        return;
-      }
-      entryPrice = round2(bookAsk);
-    }
-
     const targetStake = stakeForLevel(nextLevel);
-    const shares = Math.max(0.01, Math.floor((targetStake / entryPrice) * 100) / 100);
-    const fee = computeFee(shares, entryPrice);
-    const cost = round2(shares * entryPrice + fee);
+    let entryPrice = round3(getPrice(side));
+    let shares;
+    let fee;
+    let cost;
 
-    if (!dryRunMode) {
-      const order = await trader.placeFokLimitOrder(getTokenId(side), 'BUY', entryPrice, shares);
+    if (dryRunMode) {
+      shares = Math.max(0.01, Math.floor((targetStake / entryPrice) * 100) / 100);
+      fee = computeFee(shares, entryPrice);
+      cost = round2(shares * entryPrice + fee);
+    } else {
+      const order = await trader.placeFokBuy(getTokenId(side), targetStake);
       if (!order.isFilled) {
         markExecutionRetry();
-        log(`❌ ${side.toUpperCase()} BUY REJECTED ${shares}sh @${entryPrice.toFixed(2)} — no fallback`);
+        log(`❌ ${side.toUpperCase()} FOK MARKET BUY REJECTED $${targetStake.toFixed(2)} — no fallback`);
         return;
       }
       const fillPrice = parseFloat(order.avgPrice);
-      if (Number.isFinite(fillPrice) && fillPrice > 0) entryPrice = Math.min(0.99, Math.max(0.01, fillPrice));
+      if (!Number.isFinite(fillPrice) || fillPrice <= 0) {
+        markExecutionRetry();
+        log(`❌ ${side.toUpperCase()} fill price unavailable — no fallback`);
+        return;
+      }
+      entryPrice = Math.min(0.99, Math.max(0.01, fillPrice));
+      const rawShares = parseFloat(order.raw?.takingAmount || order.raw?.size_matched || 'NaN');
+      shares = Number.isFinite(rawShares) && rawShares > 0
+        ? round3(rawShares)
+        : Math.max(0.01, Math.floor((targetStake / entryPrice) * 1000) / 1000);
+      fee = computeFee(shares, entryPrice);
+      cost = round2(targetStake + fee);
     }
 
     engine.bankroll = round2(engine.bankroll - cost);
@@ -292,6 +294,8 @@ function createEngine(config) {
       cost,
       openedAtMs: now,
     };
+    engine.up.previousMid = getPrice('up');
+    engine.down.previousMid = getPrice('down');
     engine.lastTradeWindowTs = engine.leg.windowTs;
     engine.windowTradeCount += 1;
     engine.windowMartingaleLevel = nextLevel;
