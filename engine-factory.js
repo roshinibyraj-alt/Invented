@@ -5,8 +5,9 @@
  *  BTC INDEPENDENT LIMIT LADDER ENGINE
  * ═══════════════════════════════════════════════════════════════
  *
- *  Every 20 seconds each side independently places one 50-share GTC buy
- *  0.10 below its current midpoint. Filled shares hold through resolution.
+ *  Every 20 seconds each armed side independently places one 50-share GTC
+ *  buy 0.10 below its current midpoint. A side stops and sells everything
+ *  at 0.25, then rearms independently when that same side reaches 0.50.
  * ═══════════════════════════════════════════════════════════════
  */
 
@@ -39,8 +40,10 @@ function createEngine(cfg) {
     baseShares = 50,
     orderIntervalSeconds = 20,
     limitOffset = 0.10,
-    rangeMin = 0.25,
-    rangeMax = 0.99,
+    rangeMin = 0.35,
+    rangeMax = 0.75,
+    stopLossPrice = 0.25,
+    rearmPrice = 0.50,
     feeTheta = 0.07,
     trader,
     dryRun = true,
@@ -67,6 +70,7 @@ function createEngine(cfg) {
 
   function freshSideState() {
     return {
+      active: true,
       orders: [],
       positions: [],
       trades: [],
@@ -211,6 +215,7 @@ function createEngine(cfg) {
 
   async function placeLadderOrder(side, elapsedSec) {
     const leg = engine.leg;
+    if (!engine[side].active) return;
     const currentPrice = getPrice(side);
     if (currentPrice == null || currentPrice < rangeMin || currentPrice > rangeMax) return;
 
@@ -330,21 +335,82 @@ function createEngine(cfg) {
     }
   }
 
-  async function cancelWindowOrders(oldLeg) {
-    for (const side of ['up', 'down']) {
-      for (const record of engine[side].orders) {
-        if (record.status === 'FILLED' || record.status === 'CANCELLED') continue;
-        try {
-          if (!DRY_RUN && record.orderId) await trader.cancelOrder(record.orderId);
-          if (!DRY_RUN && record.orderId) await syncLiveOrder(record);
-          if (record.status !== 'FILLED') record.status = record.filledShares > 0 ? 'PARTIAL' : 'CANCELLED';
-          if (record.status !== 'FILLED') log(`🚫 CANCELLED ${side.toUpperCase()} LIMIT #${record.id} @${record.price.toFixed(2)}`);
-        } catch (e) {
-          log(`⚠️ CANCEL FAIL ${side.toUpperCase()} #${record.id}: ${e.message}`);
-        }
+  async function cancelSideOrders(side) {
+    let allCancelled = true;
+    for (const record of engine[side].orders) {
+      if (record.status === 'FILLED' || record.status === 'CANCELLED') continue;
+      try {
+        if (!DRY_RUN && record.orderId) await trader.cancelOrder(record.orderId);
+        if (!DRY_RUN && record.orderId) await syncLiveOrder(record);
+        if (record.status !== 'FILLED') record.status = record.filledShares > 0 ? 'PARTIAL' : 'CANCELLED';
+        if (record.status !== 'FILLED') log(`🚫 CANCELLED ${side.toUpperCase()} LIMIT #${record.id} @${record.price.toFixed(2)}`);
+      } catch (e) {
+        allCancelled = false;
+        log(`⚠️ CANCEL FAIL ${side.toUpperCase()} #${record.id}: ${e.message}`);
       }
     }
-    void oldLeg;
+    return allCancelled;
+  }
+
+  function closePositionAtStop(pos, exitPrice) {
+    const proceeds = round2(pos.shares * exitPrice);
+    const fee = computeFee(pos.shares, exitPrice);
+    const net = round2(proceeds - fee);
+    const pnl = round2(net - pos.cost);
+    engine.bankroll = round2(engine.bankroll + net);
+    engine.realizedPnl = round2(engine.realizedPnl + pnl);
+    engine.totalFeesPaid = round2(engine.totalFeesPaid + fee);
+    if (pnl > 0) engine.wins++; else engine.losses++;
+    engine[pos.side].trades.push({
+      side: pos.side,
+      type: 'stop',
+      entry: pos.entryPrice,
+      exit: exitPrice,
+      shares: pos.shares,
+      pnl,
+    });
+    log(`🛑 ${pos.side.toUpperCase()} STOP #${pos.id} — SOLD ${pos.shares}sh @${exitPrice.toFixed(2)} | PnL ${sgn2(pnl)}`);
+  }
+
+  async function processStopLoss(side) {
+    const price = getPrice(side);
+    const st = engine[side];
+    if (!st.active || price == null || price > stopLossPrice) return;
+
+    if (!DRY_RUN) await syncLiveFills();
+    const ordersCancelled = await cancelSideOrders(side);
+    if (!ordersCancelled) return;
+
+    const totalShares = round3(st.positions.reduce((sum, pos) => sum + pos.shares, 0));
+    let exitPrice = round3(price);
+    if (totalShares > 0) {
+      if (!DRY_RUN) {
+        const tokenId = side === 'up' ? engine.leg.upTokenId : engine.leg.downTokenId;
+        const response = await trader.placeFokSell(tokenId, totalShares);
+        if (!response.isFilled) {
+          log(`❌ ${side.toUpperCase()} STOP SELL REJECTED — ${totalShares}sh @${price.toFixed(2)} | retrying`);
+          return;
+        }
+        const fillPrice = parseFloat(response.avgPrice);
+        if (Number.isFinite(fillPrice) && fillPrice > 0) exitPrice = Math.min(0.99, Math.max(0.01, fillPrice));
+      }
+      for (const pos of [...st.positions]) closePositionAtStop(pos, exitPrice);
+      st.positions = [];
+    }
+
+    st.active = false;
+    log(`⛔ ${side.toUpperCase()} HALTED @${price.toFixed(3)} — rearm at ${rearmPrice.toFixed(2)}`);
+  }
+
+  function processRearm() {
+    for (const side of ['up', 'down']) {
+      const st = engine[side];
+      const price = getPrice(side);
+      if (!st.active && price != null && price >= rearmPrice) {
+        st.active = true;
+        log(`🔁 ${side.toUpperCase()} REARMED @${price.toFixed(3)}`);
+      }
+    }
   }
 
   function settleWindow(winner) {
@@ -388,7 +454,8 @@ function createEngine(cfg) {
         if (!engine.leg || engine.leg.windowTs !== windowTs) {
           if (engine.leg) {
             const oldLeg = engine.leg;
-            await cancelWindowOrders(oldLeg);
+            await cancelSideOrders('up');
+            await cancelSideOrders('down');
             if (!oldLeg.resolved) await attemptFastResolution(oldLeg);
             if (!oldLeg.resolved) await resolveLegOfficial(oldLeg);
             settleWindow(oldLeg.winner);
@@ -412,6 +479,9 @@ function createEngine(cfg) {
         }
 
         if (leg.discovered) {
+          processRearm();
+          await processStopLoss('up');
+          await processStopLoss('down');
           await processLadderInterval();
           processDemoFills();
           if (!DRY_RUN && now - lastOrderPoll >= 500) {
@@ -446,6 +516,7 @@ function createEngine(cfg) {
       const p = name === 'up' ? (leg?.upMid || 0) : (leg?.downMid || 0);
       const openOrders = st.orders.filter(order => order.status === 'OPEN' || order.status === 'PARTIAL');
       return {
+        active: st.active,
         orders: st.orders.slice(-20),
         openOrders: openOrders.map(order => ({ ...order })),
         openOrderCount: openOrders.length,
@@ -467,7 +538,8 @@ function createEngine(cfg) {
     return {
       label, windowSeconds: winSec, dryRun: DRY_RUN,
       strategy: 'independent-limit-ladder',
-      orderIntervalSeconds, limitOffset, rangeMin, rangeMax, baseShares,
+      orderIntervalSeconds, limitOffset, rangeMin, rangeMax,
+      stopLossPrice, rearmPrice, baseShares,
       bankroll: engine.bankroll, startingCapital: capital,
       realizedPnl: engine.realizedPnl,
       unrealizedPnl: totalUnreal,
@@ -495,7 +567,8 @@ function createEngine(cfg) {
 
   async function start() {
     log(`⛏ ${label} — Independent Limit Ladder`);
-    log(`⚙️ Every ${orderIntervalSeconds}s | ${baseShares}sh @ mid-${limitOffset.toFixed(2)} | range ${rangeMin.toFixed(2)}-${rangeMax.toFixed(2)} | hold to resolution`);
+    log(`⚙️ Every ${orderIntervalSeconds}s | ${baseShares}sh @ mid-${limitOffset.toFixed(2)} | entry ${rangeMin.toFixed(2)}-${rangeMax.toFixed(2)}`);
+    log(`⚙️ Stop/sell ${stopLossPrice.toFixed(2)} | rearm ${rearmPrice.toFixed(2)} | independent sides`);
     log(`⚙️ Capital $${capital.toFixed(2)} | ${DRY_RUN ? 'DEMO' : 'LIVE'}`);
     mainLoop().catch(e => log(`❌ Fatal: ${e.message}`));
   }

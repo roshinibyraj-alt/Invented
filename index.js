@@ -12,8 +12,10 @@ const CAPITAL = Number(process.env.CAPITAL || 4000);
 const BASE_SHARES = Number(process.env.BASE_SHARES || 50);
 const ORDER_INTERVAL_SECONDS = Number(process.env.ORDER_INTERVAL_SECONDS || 20);
 const LIMIT_OFFSET = Number(process.env.LIMIT_OFFSET || 0.10);
-const RANGE_MIN = Number(process.env.RANGE_MIN || 0.25);
-const RANGE_MAX = Number(process.env.RANGE_MAX || 0.99);
+const RANGE_MIN = Number(process.env.RANGE_MIN || 0.35);
+const RANGE_MAX = Number(process.env.RANGE_MAX || 0.75);
+const STOP_LOSS_PRICE = Number(process.env.STOP_LOSS_PRICE || 0.25);
+const REARM_PRICE = Number(process.env.REARM_PRICE || 0.50);
 
 let engine = null;
 
@@ -63,6 +65,8 @@ body{font-family:'Courier New',monospace;background:#000;color:#fff;font-size:12
 .sc-name{font-size:13px}.sc-up{color:#00ccff}.sc-down{color:#aa88ff}
 .position-tag{display:block;padding:4px 6px;margin-top:5px;border-radius:4px;font-size:12px;background:#00ff8822;color:#00ff88}
 .order-tag{display:block;padding:4px 6px;margin-top:5px;border-radius:4px;font-size:12px;background:#ffcc0022;color:#ffcc00}
+.state-tag{display:inline-block;padding:2px 7px;border-radius:10px;font-size:10px}
+.state-on{background:#00ff8822;color:#00ff88}.state-off{background:#ff444422;color:#ff4444}
 .history-list{max-height:300px;overflow-y:auto}
 .h-item{display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #1a1a1a;font-size:10px;gap:6px;flex-wrap:wrap}
 .h-result{font-size:10px;padding:1px 5px;border-radius:3px;font-weight:bold}
@@ -97,6 +101,7 @@ function sideHtml(name,st){
   h+='<span style="color:#fff;font-size:13px;font-weight:bold">'+st.totalShares+' SH</span>';
   h+='<span style="font-size:11px" class="'+pC(st.totalUnrealized)+'">'+sgn(st.totalUnrealized)+'</span>';
   h+='</div>';
+  h+='<div style="margin:3px 0"><span class="state-tag '+(st.active?'state-on':'state-off')+'">'+(st.active?'ARMED':'HALTED')+'</span></div>';
   h+='<div style="font-size:12px;color:#ffcc00">'+orderList.length+' OPEN · '+fmt2(st.openOrderShares||0)+'SH RESTING</div>';
   for(var j=0;j<orderList.length;j++){
     var o=orderList[j];
@@ -195,6 +200,8 @@ function renderLogs(){
     var c='';
     if(l.indexOf('LIMIT')>=0)c=' style="color:#ffcc00"';
     else if(l.indexOf('FILL')>=0)c=' style="color:#00ccff"';
+    else if(l.indexOf('STOP')>=0||l.indexOf('HALTED')>=0)c=' style="color:#ff4444"';
+    else if(l.indexOf('REARMED')>=0)c=' style="color:#00ff88"';
     else if(l.indexOf('RESOLVED')>=0)c=' style="color:'+(l.indexOf('WIN')>=0?'#00ff88':'#ff4444')+'"';
     else if(l.indexOf('RESOLVED')>=0)c=' style="color:#ffcc00"';
     return'<div'+c+'>'+l.replace(/</g,'&lt;')+'</div>';
@@ -237,6 +244,8 @@ server.listen(PORT, '0.0.0.0', () => {
       limitOffset: LIMIT_OFFSET,
       rangeMin: RANGE_MIN,
       rangeMax: RANGE_MAX,
+      stopLossPrice: STOP_LOSS_PRICE,
+      rearmPrice: REARM_PRICE,
       statsStatePath: process.env.STATS_STATE_PATH || path.join(__dirname, 'stats-dip.json'),
       trader, dryRun: DRY_RUN, emit, slog,
     });
