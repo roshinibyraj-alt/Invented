@@ -33,6 +33,8 @@ function createEngine(config) {
     entryStartSecond = 30,
     entryEndSecond = 270,
     stopLossPrice = 0.45,
+    strategy = 'walkthrough',
+    sharedCapital = null,
     feeTheta = 0.07,
     trader,
     dryRun = true,
@@ -57,7 +59,7 @@ function createEngine(config) {
 
   const saved = loadStats();
   const engine = {
-    bankroll: saved ? saved.bankroll : capital,
+    bankroll: sharedCapital ? 0 : (saved ? saved.bankroll : capital),
     realizedPnl: saved ? saved.realizedPnl || 0 : 0,
     wins: saved ? saved.wins || 0 : 0,
     losses: saved ? saved.losses || 0 : 0,
@@ -76,6 +78,7 @@ function createEngine(config) {
     windowMartingaleLevel: 0,
     windowSides: [],
     windowPnl: 0,
+    pendingOrders: saved && Array.isArray(saved.pendingOrders) ? saved.pendingOrders : [],
     lastPriceFetch: 0,
     lastEquityRecord: 0,
     logs: [],
@@ -105,6 +108,7 @@ function createEngine(config) {
         totalFeesPaid: engine.totalFeesPaid,
         martingaleLevel: engine.martingaleLevel,
         lastTradeWindowTs: engine.lastTradeWindowTs,
+        pendingOrders: engine.pendingOrders,
         savedAt: nowFn(),
       }));
     } catch (_) {}
@@ -222,6 +226,11 @@ function createEngine(config) {
     saveStats();
   }
 
+  function adjustCapital(cashDelta, feeDelta = 0) {
+    if (sharedCapital) sharedCapital.adjust(cashDelta, feeDelta);
+    else engine.bankroll = round2(engine.bankroll + cashDelta);
+  }
+
   function markExecutionRetry() {
     executionRetryAt = nowFn() + EXECUTION_RETRY_MS;
   }
@@ -234,6 +243,148 @@ function createEngine(config) {
   function entryAllowed() {
     const second = elapsedSecond();
     return second != null && second >= entryStartSecond && second < entryEndSecond;
+  }
+
+  function orderSharesForStake(stake) {
+    return Math.max(0.01, Math.floor((stake / entryPrice) * 100) / 100);
+  }
+
+  async function cancelPendingOrders(reason) {
+    const remaining = [];
+    for (const record of engine.pendingOrders) {
+      let cancelled = dryRunMode;
+      if (!dryRunMode) {
+        try {
+          await trader.cancelOrder(record.orderId);
+          cancelled = true;
+        } catch (error) {
+          remaining.push(record);
+          log(`⚠️ ${record.side.toUpperCase()} CANCEL FAILED ${record.orderId} — ${error.message}`);
+        }
+      }
+      if (cancelled) {
+        adjustCapital(record.notional);
+        log(`❎ ${record.side.toUpperCase()} LIMIT CANCELLED — ${reason}`);
+      }
+    }
+    engine.pendingOrders = remaining;
+    saveStats();
+  }
+
+  async function readOrderFill(record) {
+    if (dryRunMode) {
+      const price = getPrice(record.side);
+      if (price == null || price > entryPrice + 0.0005) return null;
+      return { shares: record.shares, price: entryPrice, raw: {} };
+    }
+    const order = await trader.getOrder(record.orderId);
+    if (!order) return null;
+    const originalSize = parseFloat(order.original_size ?? order.size ?? record.shares);
+    const matchedSize = parseFloat(order.size_matched ?? order.filled_size ?? order.taker_amount ?? '0');
+    if (!Number.isFinite(matchedSize) || matchedSize <= 0) return null;
+    const fillPrice = parseFloat(order.avg_fill_price || order.price || entryPrice);
+    return {
+      shares: Math.min(record.shares, Number.isFinite(matchedSize) ? matchedSize : record.shares),
+      price: Number.isFinite(fillPrice) && fillPrice > 0 ? fillPrice : entryPrice,
+      raw: order,
+      originalSize,
+    };
+  }
+
+  async function openLimitPair() {
+    if (!engine.leg?.discovered || engine.position || !entryAllowed()) return;
+    if (engine.lastTradeWindowTs === engine.leg.windowTs) return;
+    if (engine.pendingOrders.length) return;
+    const targetStake = stakeForLevel(engine.martingaleLevel);
+    const shares = orderSharesForStake(targetStake);
+    const notional = round2(shares * entryPrice);
+    const planned = ['up', 'down'].map(side => ({ side, token: getTokenId(side) }));
+    const opened = [];
+    try {
+      for (const item of planned) {
+        if (sharedCapital && sharedCapital.available() < notional) throw new Error(`insufficient shared capital for ${item.side.toUpperCase()} $${notional.toFixed(2)}`);
+        const orderId = dryRunMode
+          ? `demo-${engine.leg.windowTs}-${item.side}`
+          : (await trader.placeGtcOrder(item.token, 'BUY', entryPrice, shares)).id;
+        adjustCapital(-notional);
+        const record = { orderId, token: item.token, side: item.side, windowTs: engine.leg.windowTs, price: entryPrice, shares, notional };
+        opened.push(record);
+        engine.pendingOrders.push(record);
+      }
+      log(`📥 LIMIT PAIR — UP/DOWN ${shares}sh @${entryPrice.toFixed(2)} | $${notional.toFixed(2)} reserved per side | MG${engine.martingaleLevel}`);
+      saveStats();
+    } catch (error) {
+      await cancelPendingOrders('pair setup failed');
+      markExecutionRetry();
+      log(`❌ LIMIT PAIR REJECTED — ${error.message} | no fallback`);
+    }
+  }
+
+  function makeLimitPosition(side, shares, fillPrice) {
+    const safeShares = Math.max(0.01, round3(shares));
+    const safePrice = Math.min(0.99, Math.max(0.01, fillPrice));
+    const fee = computeFee(safeShares, safePrice);
+    const cost = round2(safeShares * safePrice + fee);
+    const level = engine.martingaleLevel;
+    adjustCapital(-fee);
+    if (sharedCapital) sharedCapital.addFee(fee);
+    engine.totalFeesPaid = round2(engine.totalFeesPaid + fee);
+    engine.position = {
+      id: ++positionSequence,
+      side,
+      level,
+      label: level === 0 ? 'BASE' : `MG${level}`,
+      stake: stakeForLevel(level),
+      shares: safeShares,
+      entryPrice: safePrice,
+      cost,
+      openedAtMs: nowFn(),
+    };
+    engine.lastTradeWindowTs = engine.leg.windowTs;
+    engine.windowTradeCount += 1;
+    engine.windowMartingaleLevel = level;
+    engine.windowSides.push(side.toUpperCase());
+    executionRetryAt = 0;
+    log(`🎯 ${side.toUpperCase()} ${engine.position.label} LIMIT FILLED — ${safeShares}sh @${safePrice.toFixed(2)} | cost $${cost.toFixed(2)} | hold to resolution`);
+  }
+
+  async function manageLimitPair() {
+    if (!engine.leg?.discovered) return;
+    if (engine.position) {
+      if (engine.pendingOrders.length) await cancelPendingOrders('opposite side cleanup');
+      return;
+    }
+    if (!engine.pendingOrders.length) {
+      await openLimitPair();
+      return;
+    }
+    let trigger = null;
+    for (const record of engine.pendingOrders) {
+      try {
+        const fill = await readOrderFill(record);
+        if (fill) { trigger = { record, fill }; break; }
+      } catch (_) {}
+    }
+    if (!trigger) return;
+    const matched = Math.min(trigger.record.shares, trigger.fill.shares);
+    adjustCapital((trigger.record.shares - matched) * entryPrice);
+    for (const record of engine.pendingOrders) {
+      if (record === trigger.record && matched < record.shares && !dryRunMode) {
+        try { await trader.cancelOrder(record.orderId); } catch (_) {}
+        continue;
+      }
+      if (record !== trigger.record) {
+        if (!dryRunMode) {
+          try { await trader.cancelOrder(record.orderId); }
+          catch (error) { log(`⚠️ ${record.side.toUpperCase()} OPPOSITE CANCEL FAILED — ${error.message}`); }
+        }
+        adjustCapital(record.notional);
+        log(`❎ ${record.side.toUpperCase()} LIMIT CANCELLED — opposite side filled`);
+      }
+    }
+    engine.pendingOrders = [];
+    makeLimitPosition(trigger.record.side, matched, trigger.fill.price);
+    saveStats();
   }
 
   async function enterPosition() {
@@ -250,6 +401,11 @@ function createEngine(config) {
     qualifyingSides.sort((left, right) => getPrice(right) - getPrice(left));
     const side = qualifyingSides[0];
     const targetStake = stakeForLevel(nextLevel);
+    if (sharedCapital && sharedCapital.available() < targetStake) {
+      markExecutionRetry();
+      log(`⏳ insufficient shared capital for $${targetStake.toFixed(2)} — no fallback`);
+      return;
+    }
     let entryPrice = round3(getPrice(side));
     let shares;
     let fee;
@@ -281,8 +437,9 @@ function createEngine(config) {
       cost = round2(targetStake + fee);
     }
 
-    engine.bankroll = round2(engine.bankroll - cost);
+    adjustCapital(-cost);
     engine.totalFeesPaid = round2(engine.totalFeesPaid + fee);
+    if (sharedCapital) sharedCapital.addFee(fee);
     engine.position = {
       id: ++positionSequence,
       side,
@@ -311,7 +468,8 @@ function createEngine(config) {
     const fee = computeFee(position.shares, exitPrice);
     const netProceeds = round2(proceeds - fee);
     const pnl = round2(netProceeds - position.cost);
-    engine.bankroll = round2(engine.bankroll + netProceeds);
+    adjustCapital(netProceeds);
+    if (sharedCapital) sharedCapital.recordResult(pnl);
     engine.realizedPnl = round2(engine.realizedPnl + pnl);
     engine.totalFeesPaid = round2(engine.totalFeesPaid + fee);
     engine.windowPnl = round2(engine.windowPnl + pnl);
@@ -381,7 +539,8 @@ function createEngine(config) {
     if (position) {
       const payout = winner === position.side ? position.shares : 0;
       const pnl = round2(payout - position.cost);
-      engine.bankroll = round2(engine.bankroll + payout);
+      adjustCapital(payout);
+      if (sharedCapital) sharedCapital.recordResult(pnl);
       engine.realizedPnl = round2(engine.realizedPnl + pnl);
       engine.windowPnl = round2(engine.windowPnl + pnl);
       if (pnl > 0) engine.wins += 1; else engine.losses += 1;
@@ -398,7 +557,7 @@ function createEngine(config) {
       trades: engine.windowTradeCount,
       martingales: engine.windowMartingaleLevel || 0,
       pnl: engine.windowPnl,
-      bankrollAfter: engine.bankroll,
+      bankrollAfter: sharedCapital ? sharedCapital.available() : engine.bankroll,
     });
     if (engine.history.length > 300) engine.history.length = 300;
     saveStats();
@@ -421,6 +580,10 @@ function createEngine(config) {
         if (!engine.leg || engine.leg.windowTs !== windowTs) {
           if (engine.leg) {
             const oldLeg = engine.leg;
+            if (strategy === 'limit-pair') {
+              await manageLimitPair();
+              await cancelPendingOrders('window ended');
+            }
             if (!oldLeg.resolved) await attemptFastResolution(oldLeg);
             if (!oldLeg.resolved) await resolveLegOfficially(oldLeg);
             settleWindow(oldLeg.winner);
@@ -429,6 +592,14 @@ function createEngine(config) {
           engine.up = freshSideState();
           engine.down = freshSideState();
           resetWindowState();
+          if (strategy === 'limit-pair' && engine.pendingOrders.length) {
+            const currentTokens = new Set([String(engine.leg.upTokenId), String(engine.leg.downTokenId)]);
+            const stale = engine.pendingOrders.filter(order => order.windowTs !== engine.leg.windowTs || !currentTokens.has(String(order.token)));
+            if (stale.length) {
+              engine.pendingOrders = stale;
+              await cancelPendingOrders('stale window');
+            }
+          }
           log(`🆕 window t=${windowTs}`);
         }
 
@@ -442,15 +613,19 @@ function createEngine(config) {
           await refreshPrices(leg);
         }
         if (leg.discovered) {
-          await checkStopLoss();
-          await enterPosition();
+          if (strategy === 'limit-pair') await manageLimitPair();
+          else {
+            await checkStopLoss();
+            await enterPosition();
+          }
         }
         if (now - engine.lastEquityRecord >= EQUITY_RECORD_MS) {
           engine.lastEquityRecord = now;
           const position = engine.position;
           const markPrice = position ? getPrice(position.side) || 0 : 0;
           const unrealized = position ? position.shares * markPrice - position.cost : 0;
-          engine.equityCurve.push({ t: now, equity: round2(engine.bankroll + unrealized) });
+          const cash = sharedCapital ? sharedCapital.available() : engine.bankroll;
+          engine.equityCurve.push({ t: now, equity: round2(cash + unrealized) });
           if (engine.equityCurve.length > 10000) engine.equityCurve.shift();
         }
         emitState();
@@ -469,7 +644,7 @@ function createEngine(config) {
     const decided = engine.wins + engine.losses;
     return {
       label,
-      strategy: 'martingale',
+      strategy,
       dryRun: dryRunMode,
       windowSeconds: winSec,
       baseStakeUsd,
@@ -483,13 +658,14 @@ function createEngine(config) {
       stopLossPrice,
       martingaleLevel: engine.martingaleLevel,
       tradedThisWindow: engine.lastTradeWindowTs === leg?.windowTs,
+      pendingOrders: engine.pendingOrders,
       nextStakeIfStopped: position ? stakeForLevel(position.level >= maxMartingales ? 0 : position.level + 1) : stakeForLevel(engine.martingaleLevel),
-      canEnter: entryAllowed() && !engine.position && engine.lastTradeWindowTs !== leg?.windowTs && engine.martingaleLevel < maxLevels(),
-      bankroll: engine.bankroll,
-      startingCapital: capital,
+      canEnter: entryAllowed() && !engine.position && !engine.pendingOrders.length && engine.lastTradeWindowTs !== leg?.windowTs && engine.martingaleLevel < maxLevels(),
+      bankroll: sharedCapital ? sharedCapital.available() : engine.bankroll,
+      startingCapital: sharedCapital ? sharedCapital.startingCapital : capital,
       realizedPnl: engine.realizedPnl,
       unrealizedPnl,
-      equity: round2(engine.bankroll + unrealizedPnl),
+      equity: round2((sharedCapital ? sharedCapital.available() : engine.bankroll) + unrealizedPnl),
       equityCurve: engine.equityCurve.slice(-600),
       wins: engine.wins,
       losses: engine.losses,
@@ -499,7 +675,7 @@ function createEngine(config) {
         ...position,
         markPrice,
         unrealizedPnl,
-        stopLossPrice,
+        stopLossPrice: strategy === 'walkthrough' ? stopLossPrice : null,
       } : null,
       currentLeg: leg ? {
         slug: leg.slug,
@@ -524,7 +700,9 @@ function createEngine(config) {
 
   function start() {
     log(`⛏ ${label} — Martingale restored`);
-    log(`⚙️ ${entryPrice.toFixed(2)} walk-through entry | stop ${stopLossPrice.toFixed(2)} | base ${baseStakeUsd.toFixed(2)}`);
+    log(strategy === 'limit-pair'
+      ? `⚙️ ${entryPrice.toFixed(2)} paired limits | no stop | base ${baseStakeUsd.toFixed(2)}`
+      : `⚙️ ${entryPrice.toFixed(2)} walk-through entry | stop ${stopLossPrice.toFixed(2)} | base ${baseStakeUsd.toFixed(2)}`);
     log(`⚙️ ${martingaleMultiplier.toFixed(2)}x cross-window martingale | entries ${entryStartSecond}-${entryEndSecond}s | max ${maxMartingales} | reset after win | stops always active | ${dryRunMode ? 'DEMO' : 'LIVE'}`);
     mainLoop().catch(error => log(`❌ fatal: ${error.message}`));
   }
