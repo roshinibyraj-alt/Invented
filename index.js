@@ -10,10 +10,9 @@ const { createEngine } = require('./engine-factory');
 const DRY_RUN = (process.env.DRY_RUN || 'true').toLowerCase() === 'true';
 const CAPITAL = Number(process.env.CAPITAL || 4000);
 const BASE_STAKE_USD = Number(process.env.BASE_STAKE_USD || 50);
-const MARTINGALE_MULTIPLIER = Number(process.env.MARTINGALE_MULTIPLIER || 2.5);
-const MAX_MARTINGALES = Number(process.env.MAX_MARTINGALES || 3);
-const ENTRY_MIN = Number(process.env.ENTRY_MIN || 0.60);
-const ENTRY_MAX = Number(process.env.ENTRY_MAX || 0.70);
+const MARTINGALE_MULTIPLIER = Number(process.env.MARTINGALE_MULTIPLIER || 2.1);
+const MAX_MARTINGALES = Number(process.env.MAX_MARTINGALES || 5);
+const ENTRY_PRICE = Number(process.env.ENTRY_PRICE || 0.70);
 const STOP_LOSS_PRICE = Number(process.env.STOP_LOSS_PRICE || 0.45);
 const ENTRY_START_SECOND = Number(process.env.ENTRY_START_SECOND || 30);
 const ENTRY_END_SECOND = Number(process.env.ENTRY_END_SECOND || 270);
@@ -58,7 +57,9 @@ body{background:#000;color:#fff;font-family:'Courier New',monospace;font-weight:
 .body{padding:10px}.prices{display:grid;grid-template-columns:1fr auto 1fr;gap:8px;text-align:center;margin-bottom:9px}
 .price{font-size:25px}.count{font-size:22px;color:#ffcc00}
 .position{min-height:82px}.pos-line{font-size:17px;margin-bottom:5px}.sub{font-size:14px;color:#ddd;line-height:1.45}
-.flat{color:#888;font-size:15px}.history{max-height:300px;overflow:auto;margin-top:9px}
+.flat{color:#888;font-size:15px}.chart{margin-top:8px;border:1px solid #222;border-radius:7px;padding:8px;background:#010101}
+.chart svg{display:block;width:100%;height:120px}
+.history{max-height:300px;overflow:auto;margin-top:9px}
 .row{display:flex;justify-content:space-between;gap:7px;padding:7px 0;border-top:1px solid #181818;font-size:12px;flex-wrap:wrap}
 .result{padding:2px 6px;border-radius:4px}.win{color:#00ff88;background:#00ff8822}.loss{color:#ff4444;background:#ff444422}
 .logs{height:230px;overflow:auto;padding:10px;border-top:1px solid #222;background:#010101;font-size:12px;line-height:1.45;white-space:pre}
@@ -80,21 +81,32 @@ function render(){
   box('EQUITY','$'+f2(s?s.equity:0)),
   box('REALIZED','<span class="'+cls(s?s.realizedPnl:0)+'">'+signed(s?s.realizedPnl:0)+'</span>'),
   box('W/L','<span class="positive">'+(s?s.wins||0:0)+'W</span>/<span class="negative">'+(s?s.losses||0:0)+'L</span>'),
-  box('NEXT STAKE','$'+f2(s?s.nextStakeIfStopped:50))
+  box('NEXT STAKE','$'+f2(s?s.nextStakeIfStopped:50)),
+  box('MARTINGALE',s?(s.martingaleLevel===0?'BASE':'MG'+s.martingaleLevel):'--')
  ].join('');
  q('mode').className='badge '+(s&&!s.dryRun?'live':'demo');q('mode').textContent=s&&!s.dryRun?'LIVE':'DEMO';
  var leg=s&&s.currentLeg,p=s&&s.position,h='';
  h+='<div class="prices"><div><div class="label">UP PRICE</div><div class="price accent">'+f3(leg?leg.upMid:null)+'</div></div><div><div class="label">LEFT</div><div class="count">'+(leg?leg.secsLeft||0:0)+'s</div></div><div><div class="label">DOWN PRICE</div><div class="price warning">'+f3(leg?leg.downMid:null)+'</div></div></div>';
  h+='<div class="card position">';
  if(p){h+='<div class="pos-line">'+p.side.toUpperCase()+' '+p.label+' · '+p.shares+' SH @'+f2(p.entryPrice)+'</div><div class="sub">Cost $'+f2(p.cost)+' · Stop '+f2(p.stopLossPrice)+' · Mark '+f3(p.markPrice)+'<br>Float <span class="'+cls(p.unrealizedPnl)+'">'+signed(p.unrealizedPnl)+'</span> · Next MG $'+f2(s.nextStakeIfStopped)+'</div>'}
- else{h+='<div class="pos-line flat">NO OPEN POSITION</div><div class="sub">Entry zone '+f2(s?s.entryMin:0)+'–'+f2(s?s.entryMax:0)+' · Entries '+(s?s.elapsedSecond||0:0)+'/'+(s?s.entryStartSecond||0:0)+'–'+(s?s.entryEndSecond||0:0)+'s · Stop '+f2(s?s.stopLossPrice:0)+'<br>'+((s&&s.canEnter)?'Watching UP/DOWN':((s&&s.tradingAllowed===false)?'Stop-only period':'Martingale limit reached'))+'</div>'}
+ else{h+='<div class="pos-line flat">NO OPEN POSITION</div><div class="sub">Entry '+f2(s?s.entryPrice:0)+' · Entries '+(s?s.elapsedSecond||0:0)+'/'+(s?s.entryStartSecond||0:0)+'–'+(s?s.entryEndSecond||0:0)+'s · Stop '+f2(s?s.stopLossPrice:0)+'<br>'+((s&&s.canEnter)?'Watching UP/DOWN':((s&&s.tradingAllowed===false)?'Stop-only period':'Martingale limit reached'))+'</div>'}
  h+='</div>';
- h+='<div class="card" style="margin-top:8px"><div class="label">STRATEGY</div><div class="sub">$'+f2(s?s.baseStakeUsd:0)+' base · '+f2(s?s.martingaleMultiplier:0)+'x martingale · entries '+(s?s.entryStartSecond||0:0)+'–'+(s?s.entryEndSecond||0:0)+'s · stop always active</div></div>';
+ h+='<div class="card" style="margin-top:8px"><div class="label">STRATEGY</div><div class="sub">$'+f2(s?s.baseStakeUsd:0)+' base · '+f2(s?s.martingaleMultiplier:0)+'x cross-window · max '+(s?s.maxMartingales:0)+' · entries '+(s?s.entryStartSecond||0:0)+'–'+(s?s.entryEndSecond||0:0)+'s · stop always active</div></div>';
+ h+=equityChart(s?s.equityCurve||[]:[],s?s.startingCapital:0);
  h+='<div class="history">';
  var hist=s?s.history||[]:[];
  for(var i=0;i<hist.length;i++){var x=hist[i];h+='<div class="row"><span>'+String(x.windowTs).slice(-5)+'</span><span>'+x.sides+'</span><span>'+x.trades+'T / '+x.martingales+'MG</span><span class="result '+(x.pnl>=0?'win':'loss')+'">'+(x.pnl>=0?'WIN':'LOSS')+' '+signed(x.pnl)+'</span></div>'}
  h+='</div>';q('content').innerHTML=h;
  q('badge').textContent=(leg&&leg.discovered?'LIVE WINDOW':'DISCOVERING')+' | '+signed(s?s.realizedPnl:0);
+}
+function equityChart(curve,startCapital){
+ if(!curve||curve.length<2)return '<div class="chart"><div class="label">EQUITY CURVE</div><div class="sub flat">Collecting capital history…</div></div>';
+ var values=curve.map(function(x){return Number(x.equity)||0});var start=Number(startCapital)||0;values.push(start);
+ var low=Math.min.apply(null,values),high=Math.max.apply(null,values),range=(high-low)||1;
+ function x(i){return (i/(curve.length-1)*600).toFixed(1)}
+ function y(v){return (130-((v-low)/range*110)).toFixed(1)}
+ var points=curve.map(function(v,i){return x(i)+','+y(Number(v.equity)||0)}).join(' ');var area='0,135 '+points+' 600,135';var baseY=y(start);
+ return '<div class="chart"><div class="label">EQUITY CURVE</div><svg viewBox="0 0 600 140" preserveAspectRatio="none"><polygon points="'+area+'" fill="#00ccff22"></polygon><line x1="0" y1="'+baseY+'" x2="600" y2="'+baseY+'" stroke="#556" stroke-dasharray="4 4"></line><polyline points="'+points+'" fill="none" stroke="#00ccff" stroke-width="3"></polyline></svg><div class="sub">Now '+f2(curve[curve.length-1].equity)+' · Start '+f2(start)+'</div></div>';
 }
 function box(label,value){return '<div class="box"><div class="label">'+label+'</div><div class="value">'+value+'</div></div>'}
 function renderLogs(){var el=q('logs');if(!el)return;var bottom=el.scrollHeight-el.scrollTop-el.clientHeight<40;el.innerHTML=logLines.slice(-180).map(function(line){
@@ -128,8 +140,7 @@ server.listen(PORT, '0.0.0.0', () => {
       baseStakeUsd: BASE_STAKE_USD,
       martingaleMultiplier: MARTINGALE_MULTIPLIER,
       maxMartingales: MAX_MARTINGALES,
-      entryMin: ENTRY_MIN,
-      entryMax: ENTRY_MAX,
+      entryPrice: ENTRY_PRICE,
       entryStartSecond: ENTRY_START_SECOND,
       entryEndSecond: ENTRY_END_SECOND,
       stopLossPrice: STOP_LOSS_PRICE,

@@ -27,10 +27,9 @@ function createEngine(config) {
     windowType = '5m',
     windowSeconds5 = 300,
     baseStakeUsd = 50,
-    martingaleMultiplier = 2.5,
-    maxMartingales = 3,
-    entryMin = 0.60,
-    entryMax = 0.70,
+    martingaleMultiplier = 2.1,
+    maxMartingales = 5,
+    entryPrice = 0.70,
     entryStartSecond = 30,
     entryEndSecond = 270,
     stopLossPrice = 0.45,
@@ -71,7 +70,10 @@ function createEngine(config) {
     down: freshSideState(),
     leg: null,
     position: null,
+    martingaleLevel: saved ? saved.martingaleLevel || 0 : 0,
+    lastTradeWindowTs: saved ? saved.lastTradeWindowTs || null : null,
     windowTradeCount: 0,
+    windowMartingaleLevel: 0,
     windowSides: [],
     windowPnl: 0,
     lastPriceFetch: 0,
@@ -99,8 +101,10 @@ function createEngine(config) {
         wins: engine.wins,
         losses: engine.losses,
         history: engine.history.slice(0, 100),
-        equityCurve: engine.equityCurve.slice(-300),
+        equityCurve: engine.equityCurve.slice(-10000),
         totalFeesPaid: engine.totalFeesPaid,
+        martingaleLevel: engine.martingaleLevel,
+        lastTradeWindowTs: engine.lastTradeWindowTs,
         savedAt: nowFn(),
       }));
     } catch (_) {}
@@ -191,6 +195,24 @@ function createEngine(config) {
     return maxMartingales + 1;
   }
 
+  function isEntryTick(price) {
+    return price != null && Math.abs(price - entryPrice) <= 0.0005;
+  }
+
+  function registerResult(position, pnl) {
+    if (pnl > 0) {
+      engine.martingaleLevel = 0;
+      log(`✅ sequence won — reset to $${stakeForLevel(0).toFixed(2)}`);
+    } else if (position.level >= maxMartingales) {
+      engine.martingaleLevel = 0;
+      log(`⚠️ MG${maxMartingales} lost — progression exhausted, restarting base`);
+    } else {
+      engine.martingaleLevel = position.level + 1;
+      log(`⏭ next-window ${engine.martingaleLevel === 0 ? 'BASE' : 'MG' + engine.martingaleLevel} stake $${stakeForLevel(engine.martingaleLevel).toFixed(2)}`);
+    }
+    saveStats();
+  }
+
   function markExecutionRetry() {
     executionRetryAt = nowFn() + EXECUTION_RETRY_MS;
   }
@@ -209,24 +231,21 @@ function createEngine(config) {
     const now = nowFn();
     if (!engine.leg?.discovered || engine.position || now < executionRetryAt) return;
     if (!entryAllowed()) return;
-    const nextLevel = engine.windowTradeCount;
+    if (engine.lastTradeWindowTs === engine.leg.windowTs) return;
+    const nextLevel = engine.martingaleLevel;
     if (nextLevel >= maxLevels()) return;
 
-    const qualifyingSides = ['up', 'down'].filter(side => {
-      const price = getPrice(side);
-      return price != null && price >= entryMin && price <= entryMax;
-    });
+    const qualifyingSides = ['up', 'down'].filter(side => isEntryTick(getPrice(side)));
     if (!qualifyingSides.length) return;
 
-    qualifyingSides.sort((left, right) => getPrice(right) - getPrice(left));
     const side = qualifyingSides[0];
     let entryPrice = round2(Math.ceil(getPrice(side) * 100) / 100);
 
     if (!dryRunMode) {
       const book = await trader.getBestBidAsk(getTokenId(side));
-      if (!book?.bestAsk || book.bestAsk < entryMin || book.bestAsk > entryMax) {
+      if (!book?.bestAsk || !isEntryTick(book.bestAsk)) {
         markExecutionRetry();
-        log(`⏳ ${side.toUpperCase()} ask unavailable/outside zone — no fallback`);
+        log(`⏳ ${side.toUpperCase()} ask unavailable/not exactly ${entryPrice.toFixed(2)} — no fallback`);
         return;
       }
       entryPrice = round2(book.bestAsk);
@@ -261,9 +280,12 @@ function createEngine(config) {
       cost,
       openedAtMs: now,
     };
+    engine.lastTradeWindowTs = engine.leg.windowTs;
     engine.windowTradeCount += 1;
+    engine.windowMartingaleLevel = nextLevel;
     engine.windowSides.push(side.toUpperCase());
     executionRetryAt = 0;
+    saveStats();
     log(`🎯 ${side.toUpperCase()} ${engine.position.label} BUY — $${targetStake.toFixed(2)} → ${shares}sh @${entryPrice.toFixed(2)} | cost $${cost.toFixed(2)} | stop ${stopLossPrice.toFixed(2)}`);
   }
 
@@ -280,6 +302,7 @@ function createEngine(config) {
     if (pnl > 0) engine.wins += 1; else engine.losses += 1;
     engine.position = null;
     log(`${closeType === 'STOP' ? '🛑' : '🏁'} ${position.side.toUpperCase()} ${position.label} ${closeType} — ${position.shares}sh @${exitPrice.toFixed(2)} | PnL ${money(pnl)}`);
+    registerResult(position, pnl);
     return pnl;
   }
 
@@ -348,6 +371,7 @@ function createEngine(config) {
       if (pnl > 0) engine.wins += 1; else engine.losses += 1;
       engine.position = null;
       log(`🏁 ${position.side.toUpperCase()} ${position.label} RESOLVED — PnL ${money(pnl)}`);
+      registerResult(position, pnl);
     }
 
     engine.history.unshift({
@@ -356,7 +380,7 @@ function createEngine(config) {
       winner: winner || 'unresolved',
       sides: engine.windowSides.join('/') || 'NONE',
       trades: engine.windowTradeCount,
-      martingales: Math.max(0, engine.windowTradeCount - 1),
+      martingales: engine.windowMartingaleLevel || 0,
       pnl: engine.windowPnl,
       bankrollAfter: engine.bankroll,
     });
@@ -367,6 +391,7 @@ function createEngine(config) {
   function resetWindowState() {
     engine.position = null;
     engine.windowTradeCount = 0;
+    engine.windowMartingaleLevel = 0;
     engine.windowSides = [];
     engine.windowPnl = 0;
     executionRetryAt = 0;
@@ -434,21 +459,22 @@ function createEngine(config) {
       baseStakeUsd,
       martingaleMultiplier,
       maxMartingales,
-      entryMin,
-      entryMax,
+      entryPrice,
       entryStartSecond,
       entryEndSecond,
       elapsedSecond: elapsedSecond(),
       tradingAllowed: entryAllowed(),
       stopLossPrice,
-      nextStakeIfStopped: position ? stakeForLevel(Math.min(maxLevels() - 1, position.level + 1)) : stakeForLevel(engine.windowTradeCount),
-      canEnter: entryAllowed() && engine.windowTradeCount < maxLevels(),
+      martingaleLevel: engine.martingaleLevel,
+      tradedThisWindow: engine.lastTradeWindowTs === leg?.windowTs,
+      nextStakeIfStopped: position ? stakeForLevel(position.level >= maxMartingales ? 0 : position.level + 1) : stakeForLevel(engine.martingaleLevel),
+      canEnter: entryAllowed() && !engine.position && engine.lastTradeWindowTs !== leg?.windowTs && engine.martingaleLevel < maxLevels(),
       bankroll: engine.bankroll,
       startingCapital: capital,
       realizedPnl: engine.realizedPnl,
       unrealizedPnl,
       equity: round2(engine.bankroll + unrealizedPnl),
-      equityCurve: engine.equityCurve.slice(-200),
+      equityCurve: engine.equityCurve.slice(-600),
       wins: engine.wins,
       losses: engine.losses,
       winRate: decided ? round2(engine.wins / decided * 100) : null,
@@ -482,8 +508,8 @@ function createEngine(config) {
 
   function start() {
     log(`⛏ ${label} — Martingale restored`);
-    log(`⚙️ Entry ${entryMin.toFixed(2)}-${entryMax.toFixed(2)} | stop ${stopLossPrice.toFixed(2)} | base $${baseStakeUsd.toFixed(2)}`);
-    log(`⚙️ ${martingaleMultiplier.toFixed(2)}x martingale | entries ${entryStartSecond}-${entryEndSecond}s | max ${maxMartingales} | stops always active | ${dryRunMode ? 'DEMO' : 'LIVE'}`);
+    log(`⚙️ Exact entry ${entryPrice.toFixed(2)} | stop ${stopLossPrice.toFixed(2)} | base ${baseStakeUsd.toFixed(2)}`);
+    log(`⚙️ ${martingaleMultiplier.toFixed(2)}x cross-window martingale | entries ${entryStartSecond}-${entryEndSecond}s | max ${maxMartingales} | reset after win | stops always active | ${dryRunMode ? 'DEMO' : 'LIVE'}`);
     mainLoop().catch(error => log(`❌ fatal: ${error.message}`));
   }
 
