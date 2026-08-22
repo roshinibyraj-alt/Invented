@@ -2,20 +2,11 @@
 
 /**
  * ═══════════════════════════════════════════════════════════════
- *  BTC DIP-BUY ENGINE — Volatility-scaled, asymmetric payoff
+ *  BTC EARLY FAVORITE ENGINE — momentum continuation
  * ═══════════════════════════════════════════════════════════════
  *
- *  Core idea: buy sharp dips (oversold bounces), size by conviction.
- *
- *  1. Track rolling peak per side (highest since last fill).
- *  2. Signal: price drops ≥ DIP_THRESHOLD from peak while in range.
- *  3. Position size scales with drop depth: bigger dip = more shares.
- *  4. TP scales with entry price: cheaper entry = wider profit target.
- *     e.g. entry @0.25 → TP @0.35 (+40%), entry @0.70 → TP @0.80 (+14%).
- *  5. No stop loss — cheap entries have asymmetric upside ($1 payout).
- *  6. Max 4 open positions per side per window (exposure cap).
- *  7. Cooldown 8s between entries per side.
- *  8. Trade entire window. UP/DOWN independent. Single engine 0.10–0.90.
+ *  One decision per window: buy the leading side at the decision time if it
+ *  has reached the favorite threshold, then hold through resolution.
  * ═══════════════════════════════════════════════════════════════
  */
 
@@ -45,13 +36,9 @@ function createEngine(cfg) {
     startingCapital = 4000,
     windowType = '5m',
     windowSeconds5 = 300,
-    baseShares = 50,           // shares at minimum signal
-    maxShares = 200,           // shares at maximum signal
-    dipThreshold = 0.12,       // minimum drop from peak to trigger
-    cooldownMs = 8000,         // ms between entries per side
-    maxPositionsPerSide = 4,   // exposure cap
-    rangeMin = 0.10,
-    rangeMax = 0.90,
+    baseShares = 50,
+    entryAtSeconds = 30,
+    minFavoritePrice = 0.64,
     feeTheta = 0.07,
     trader,
     dryRun = true,
@@ -76,11 +63,8 @@ function createEngine(cfg) {
 
   function freshSideState() {
     return {
-      rollingPeak: 0,          // highest since last fill
-      lastEntryAt: 0,          // timestamp of last entry
-      positions: [],            // open positions
-      trades: [],               // completed trades this window
-      priceHistory: [],         // recent prices for volatility calc
+      positions: [],
+      trades: [],
     };
   }
 
@@ -95,8 +79,6 @@ function createEngine(cfg) {
     up: freshSideState(),
     down: freshSideState(),
     leg: null,
-    pending: [],
-    lastResolutionPoll: 0,
     lastPriceFetch: 0,
     lastEquityRecord: 0,
     totalFeesPaid: saved ? saved.totalFeesPaid || 0 : 0,
@@ -105,7 +87,6 @@ function createEngine(cfg) {
 
   function log(msg) {
     const line = `[${label}] ${new Date().toISOString()} ${msg}`;
-    console.log(line);
     engine.logs.push(line);
     if (engine.logs.length > 300) engine.logs.shift();
     slog(line);
@@ -121,7 +102,7 @@ function createEngine(cfg) {
         equityCurve: engine.equityCurve.slice(-300),
         totalFeesPaid: engine.totalFeesPaid, savedAt: nowFn(),
       }));
-    } catch (_) {}
+    } catch (e) { log(`⚠️ official resolution: ${e.message}`); }
   }
 
   // ── Market discovery ──
@@ -140,6 +121,7 @@ function createEngine(cfg) {
       conditionId: null, upTokenId: null, downTokenId: null,
       upMid: null, downMid: null,
       discovered: false, lastDiscoveryAttempt: 0,
+      entryAttempted: false, entrySide: null,
       resolved: false, winner: null,
     };
   }
@@ -222,88 +204,57 @@ function createEngine(cfg) {
   function getPrice(side) { return side === 'up' ? engine.leg.upMid : engine.leg.downMid; }
   function computeFee(shares, price) { return shares * feeTheta * price * (1 - price); }
 
-  // Calculate dynamic position size based on dip depth
-  // Deeper dip = more conviction = more shares
-  function calcShares(drop) {
-    // Normalize: drop of 0.12 = minimum, drop of 0.40+ = maximum
-    const conviction = Math.min(1.0, Math.max(0, (drop - dipThreshold) / 0.28));
-    return Math.max(baseShares, Math.min(maxShares, Math.floor((baseShares + conviction * (maxShares - baseShares)) / 10) * 10));
-  }
+  async function processEntry() {
+    const leg = engine.leg;
+    if (!leg?.discovered || leg.entryAttempted || leg.upMid == null || leg.downMid == null) return;
+    const now = nowFn();
+    const nowSec = Math.floor(now / 1000);
+    const elapsedSec = nowSec - engine.leg.windowTs;
 
-  // Dynamic TP: cheaper entry = wider target (asymmetric payoff)
-  // Entry @0.20 → TP @0.32 (+60%)
-  // Entry @0.40 → TP @0.52 (+30%)
-  // Entry @0.60 → TP @0.72 (+20%)
-  // Entry @0.80 → TP @0.92 (+15%)
-  function calcTP(entryPrice) {
-    const pctGain = Math.max(0.12, 0.55 - entryPrice * 0.55);
-    return round3(Math.min(0.97, entryPrice + pctGain));
-  }
+    if (elapsedSec < entryAtSeconds) return;
+    leg.entryAttempted = true;
 
-  function processSideTick(side, price) {
-    const st = engine[side];
-    if (price == null) return;
+    const side = leg.upMid >= leg.downMid ? 'up' : 'down';
+    const favoritePrice = getPrice(side);
+    const underdogPrice = getPrice(side === 'up' ? 'down' : 'up');
+    if (favoritePrice < minFavoritePrice || favoritePrice <= underdogPrice) {
+      leg.entrySide = 'skipped';
+      log(`⏭️ t=${elapsedSec}s SKIP — leading ${side.toUpperCase()} @${favoritePrice.toFixed(3)} < ${minFavoritePrice.toFixed(2)}`);
+      return;
+    }
 
-    // Track rolling peak (resets after each fill)
-    if (price > st.rollingPeak) st.rollingPeak = price;
+    let entryPrice = round2(favoritePrice);
+    if (!DRY_RUN) {
+      const tokenId = side === 'up' ? leg.upTokenId : leg.downTokenId;
+      const book = await trader.getBestBidAsk(tokenId);
+      if (!book || book.bestAsk == null || book.bestAsk <= 0) {
+        leg.entrySide = 'skipped';
+        log(`⚠️ t=${elapsedSec}s SKIP — no executable ask`);
+        return;
+      }
 
-    // Record price history for volatility tracking
-    st.priceHistory.push({ t: nowFn(), p: price });
-    if (st.priceHistory.length > 300) st.priceHistory.shift();
-
-    // Check TP on open positions
-    for (let i = st.positions.length - 1; i >= 0; i--) {
-      const pos = st.positions[i];
-      if (price >= pos.tpPrice) {
-        const proceeds = round2(pos.shares * pos.tpPrice);
-        const fee = computeFee(pos.shares, pos.tpPrice);
-        const net = round2(proceeds - fee);
-        const pnl = round2(net - pos.cost);
-        engine.bankroll = round2(engine.bankroll + net);
-        engine.realizedPnl = round2(engine.realizedPnl + pnl);
-        engine.totalFeesPaid = round2(engine.totalFeesPaid + fee);
-        if (pnl > 0) engine.wins++; else engine.losses++;
-        st.trades.push({ side, type: 'TP', entry: pos.entryPrice, exit: pos.tpPrice, shares: pos.shares, pnl });
-        log(`✅ ${side.toUpperCase()} TP #${pos.id} — ${pos.shares}sh @${pos.tpPrice.toFixed(3)} | PnL ${sgn2(pnl)} | $${engine.bankroll.toFixed(2)}`);
-        st.positions.splice(i, 1);
-        // Reset rolling peak after a fill so next signal needs fresh momentum
-        st.rollingPeak = price;
+      entryPrice = Math.min(0.99, Math.ceil(book.bestAsk * 100) / 100);
+      const order = await trader.placeFokLimitOrder(tokenId, 'BUY', entryPrice, baseShares);
+      if (!order.isFilled) {
+        leg.entrySide = 'skipped';
+        log(`❌ ${side.toUpperCase()} ORDER REJECTED @${entryPrice.toFixed(2)} — no fallback`);
+        return;
       }
     }
 
-    // Check entry signal: deep dip from rolling peak
-    const drop = st.rollingPeak - price;
-    const cooldownOk = (nowFn() - st.lastEntryAt) >= cooldownMs;
-    const canEnter = st.positions.length < maxPositionsPerSide;
-
-    if (drop >= dipThreshold && price >= rangeMin && price <= rangeMax && cooldownOk && canEnter) {
-      const shares = calcShares(drop);
-      const fee = computeFee(shares, price);
-      const cost = round2(shares * price + fee);
-      const tp = calcTP(price);
-      engine.bankroll = round2(engine.bankroll - cost);
-      engine.totalFeesPaid = round2(engine.totalFeesPaid + fee);
-
-      const pos = {
-        id: ++posSeq,
-        side,
-        entryPrice: round3(price),
-        shares,
-        cost,
-        tpPrice: tp,
-        dipDepth: round3(drop),
-      };
-      st.positions.push(pos);
-      st.lastEntryAt = nowFn();
-      // Reset peak so we need a NEW rally before next signal
-      st.rollingPeak = price;
-
-      log(`🎯 ${side.toUpperCase()} DIP BUY #${pos.id} — ${shares}sh @${pos.entryPrice.toFixed(3)} (dip ${round3(drop)} from ${st.rollingPeak + drop}) | TP @${tp.toFixed(3)} | cost $${cost.toFixed(2)}`);
-    }
+    const fee = computeFee(baseShares, entryPrice);
+    const cost = round2(baseShares * entryPrice + fee);
+    engine.bankroll = round2(engine.bankroll - cost);
+    engine.totalFeesPaid = round2(engine.totalFeesPaid + fee);
+    const pos = { id: ++posSeq, side, entryPrice, shares: baseShares, cost };
+    engine[side].positions.push(pos);
+    leg.entrySide = side;
+    log(`🎯 ${side.toUpperCase()} FAVORITE #${pos.id} — ${baseShares}sh @${entryPrice.toFixed(2)} | HOLD | cost $${cost.toFixed(2)} | t=${elapsedSec}s`);
   }
 
   function settleWindow(winner) {
     let totalPnl = 0;
+    log(`🏁 WINDOW RESOLVED — ${String(winner).toUpperCase()}`);
     for (const side of ['up', 'down']) {
       const st = engine[side];
       for (const pos of st.positions) {
@@ -362,19 +313,8 @@ function createEngine(cfg) {
           await refreshLegPrices(leg);
         }
 
-        if (engine.pending.length && now - engine.lastResolutionPoll >= RESOLUTION_POLL_MS) {
-          engine.lastResolutionPoll = now;
-          const still = [];
-          for (const p of engine.pending) {
-            if (!p.resolved) await resolveLegOfficial(p);
-            if (!p.resolved) still.push(p);
-          }
-          engine.pending = still;
-        }
-
         if (leg.discovered) {
-          processSideTick('up', leg.upMid);
-          processSideTick('down', leg.downMid);
+          await processEntry();
         }
 
         if (now - engine.lastEquityRecord >= EQUITY_RECORD_MS) {
@@ -402,7 +342,6 @@ function createEngine(cfg) {
     function sideInfo(name, st) {
       const p = name === 'up' ? (leg?.upMid || 0) : (leg?.downMid || 0);
       return {
-        rollingPeak: st.rollingPeak,
         positions: st.positions.map(pos => ({
           ...pos,
           unrealizedPnl: round2(pos.shares * p - pos.cost),
@@ -419,7 +358,8 @@ function createEngine(cfg) {
     );
     return {
       label, windowSeconds: winSec, dryRun: DRY_RUN,
-      dipThreshold, baseShares, maxShares, maxPositionsPerSide, cooldownMs,
+      strategy: 'early-favorite',
+      entryAtSeconds, minFavoritePrice, baseShares,
       bankroll: engine.bankroll, startingCapital: capital,
       realizedPnl: engine.realizedPnl,
       unrealizedPnl: totalUnreal,
@@ -446,9 +386,8 @@ function createEngine(cfg) {
   function setMode(live) { DRY_RUN = !live; log(`⚙️ ${live ? 'LIVE' : 'DEMO'}`); return { ok: true }; }
 
   async function start() {
-    log(`⛏ ${label} — Dip-Buy Engine [${rangeMin}–${rangeMax}]`);
-    log(`⚙️ Dip ≥${dipThreshold} | Shares ${baseShares}–${maxShares} (scaled by depth)`);
-    log(`⚙️ Dynamic TP (cheaper=+60%, expensive=+15%) | No SL | Max ${maxPositionsPerSide}/side | Cooldown ${(cooldownMs/1000).toFixed(0)}s`);
+    log(`⛏ ${label} — Early Favorite Engine`);
+    log(`⚙️ t=${entryAtSeconds}s | Leading ≥${minFavoritePrice.toFixed(2)} | ${baseShares}sh | hold to resolution`);
     log(`⚙️ Capital $${capital.toFixed(2)} | ${DRY_RUN ? 'DEMO' : 'LIVE'}`);
     mainLoop().catch(e => log(`❌ Fatal: ${e.message}`));
   }

@@ -10,8 +10,8 @@ const { createEngine } = require('./engine-factory');
 const DRY_RUN = (process.env.DRY_RUN || 'true').toLowerCase() === 'true';
 const CAPITAL = Number(process.env.CAPITAL || 4000);
 const BASE_SHARES = Number(process.env.BASE_SHARES || 50);
-const MAX_SHARES = Number(process.env.MAX_SHARES || 200);
-const DIP_THRESHOLD = Number(process.env.DIP_THRESHOLD || 0.12);
+const ENTRY_SECOND = Number(process.env.ENTRY_SECOND || 30);
+const MIN_FAVORITE_PRICE = Number(process.env.MIN_FAVORITE_PRICE || 0.64);
 
 let engine = null;
 
@@ -32,7 +32,7 @@ app.post('/api/hedge/resume', (_, r) => { try { if (engine) engine.resumeTrading
 const DASH = `<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
-<title>BTC Dip-Buy Bot</title>
+<title>BTC Early Favorite Bot</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Courier New',monospace;background:#000;color:#fff;font-size:12px;font-weight:bold;-webkit-text-size-adjust:100%;overflow-x:hidden}
@@ -61,16 +61,16 @@ body{font-family:'Courier New',monospace;background:#000;color:#fff;font-size:12
 .sc-name{font-size:13px}.sc-up{color:#00ccff}.sc-down{color:#aa88ff}
 .position-tag{display:inline-block;padding:2px 6px;margin:2px;border-radius:3px;font-size:9px;background:#00ff8822;color:#00ff88;border:1px solid #00ff88}
 .history-list{max-height:300px;overflow-y:auto}
-.h-item{display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #1a1a1a;font-size:9px;gap:6px}
+.h-item{display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #1a1a1a;font-size:10px;gap:6px;flex-wrap:wrap}
 .h-result{font-size:10px;padding:1px 5px;border-radius:3px;font-weight:bold}
 .h-win{background:#00ff8822;color:#00ff88}.h-loss{background:#ff444422;color:#ff4444}
-.log-box{margin:8px 14px 0;background:#0a0a0a;border:1px solid #333;border-radius:8px;padding:8px 10px;max-height:200px;overflow-y:auto;font-size:9px;line-height:1.4;white-space:nowrap;-webkit-overflow-scrolling:touch}
+.log-box{margin:8px 14px 0;background:#0a0a0a;border:1px solid #333;border-radius:8px;padding:8px 10px;max-height:240px;overflow-x:auto;overflow-y:auto;font-size:11px;line-height:1.45;white-space:pre;-webkit-overflow-scrolling:touch}
 @media(max-width:600px){.log-box{margin:6px 10px 0}}
 .chart-box{margin:8px 14px 0;background:#0a0a0a;border:1px solid #333;border-radius:8px;padding:10px 12px}
 @media(max-width:600px){.chart-box{margin:6px 10px 0}}
 .chart-box canvas{width:100%;height:120px;background:#111;border-radius:6px}
 </style></head><body>
-<div class="hd"><div><div class="logo">BTC <span>Dip-Buy</span></div></div><div class="badge badge-dem" id="mode-badge">DEMO</div></div>
+<div class="hd"><div><div class="logo">BTC <span>Early Favorite</span></div></div><div class="badge badge-dem" id="mode-badge">DEMO</div></div>
 <div class="stats-row" id="stats-row"></div>
 <div class="chart-box"><canvas id="eq-chart"></canvas></div>
 <div class="panel"><div class="p-hd"><div class="p-title">5 MINUTE WINDOWS</div><div class="p-badge" id="eng-badge">--</div></div><div class="p-body" id="eng-body"></div></div>
@@ -90,13 +90,13 @@ function sideHtml(name,st){
   var h='<div class="side-card">';
   h+='<div class="sc-head">';
   h+='<span class="sc-name sc-'+name+'">'+name.toUpperCase()+'</span>';
-  h+='<span style="color:#888;font-size:9px">peak '+fmt3(st.rollingPeak)+' · '+st.totalShares+'sh held</span>';
+  h+='<span style="color:#fff;font-size:13px;font-weight:bold">'+st.totalShares+' SH</span>';
   h+='<span style="font-size:11px" class="'+pC(st.totalUnrealized)+'">'+sgn(st.totalUnrealized)+'</span>';
   h+='</div>';
   if(posList.length){
     for(var i=0;i<posList.length;i++){
       var p=posList[i];
-      h+='<div><span class="position-tag">#'+p.id+' '+p.shares+'sh @'+fmt3(p.entryPrice)+' → TP '+fmt3(p.tpPrice)+' | dip:'+fmt3(p.dipDepth)+' | '+sgn(p.unrealizedPnl)+'</span></div>';
+      h+='<div style="font-size:12px;font-weight:bold;margin-top:5px">#'+p.id+' · '+p.shares+'sh @'+fmt2(p.entryPrice)+' · '+sgn(p.unrealizedPnl)+'</div>';
     }
   }
   h+='</div>';
@@ -184,15 +184,15 @@ function renderLogs(){
   var wasAtBottom=el.scrollHeight-el.scrollTop-el.clientHeight<40;
   el.innerHTML=allLogs.slice(-200).map(function(l){
     var c='';
-    if(l.indexOf('DIP BUY')>=0)c=' style="color:#00ccff"';
-    else if(l.indexOf('TP #')>=0)c=' style="color:#00ff88"';
+    if(l.indexOf('FAVORITE')>=0)c=' style="color:#00ccff"';
+    else if(l.indexOf('RESOLVED')>=0)c=' style="color:'+(l.indexOf('WIN')>=0?'#00ff88':'#ff4444')+'"';
     else if(l.indexOf('RESOLVED')>=0)c=' style="color:#ffcc00"';
     return'<div'+c+'>'+l.replace(/</g,'&lt;')+'</div>';
   }).join('');
   if(wasAtBottom)el.scrollTop=el.scrollHeight;
 }
 
-socket.on('hedgeState:BTC-DIP',function(s){latest=s;render()});
+socket.on('hedgeState:BTC-FAV',function(s){latest=s;render()});
 socket.on('log',function(line){allLogs.push(line);if(allLogs.length>500)allLogs.shift();renderLogs()});
 setInterval(render,1000);
 setInterval(async function(){
@@ -211,20 +211,20 @@ const slog = (line) => { console.log(line); io.emit('log', line); };
 const PK = process.env.PRIVATE_KEY;
 if (!PK) { console.error('PRIVATE_KEY env var missing'); process.exit(1); }
 
-console.log('BTC Dip-Buy Engine - Volatility Scaled');
+console.log('BTC Early Favorite Engine');
 server.listen(PORT, '0.0.0.0', () => {
   console.log('Dashboard: http://0.0.0.0:' + PORT);
   (async () => {
     const trader = new PolymarketTrader(PK);
     await trader.authenticate();
     engine = createEngine({
-      label: 'BTC-DIP',
+      label: 'BTC-FAV',
       windowType: '5m',
       startingCapital: CAPITAL,
       windowSeconds5: 300,
       baseShares: BASE_SHARES,
-      maxShares: MAX_SHARES,
-      dipThreshold: DIP_THRESHOLD,
+      entryAtSeconds: ENTRY_SECOND,
+      minFavoritePrice: MIN_FAVORITE_PRICE,
       statsStatePath: process.env.STATS_STATE_PATH || path.join(__dirname, 'stats-dip.json'),
       trader, dryRun: DRY_RUN, emit, slog,
     });
