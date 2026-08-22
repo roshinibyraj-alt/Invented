@@ -1,49 +1,37 @@
 'use strict';
 
-/**
- * ═══════════════════════════════════════════════════════════════
- *  BTC INDEPENDENT LIMIT LADDER ENGINE
- * ═══════════════════════════════════════════════════════════════
- *
- *  Every 20 seconds each armed side independently places one 50-share GTC
- *  buy 0.10 below its current midpoint. A side stops and sells everything
- *  at 0.25, then rearms independently when that same side reaches 0.50.
- * ═══════════════════════════════════════════════════════════════
- */
-
 const fs = require('fs');
 const GAMMA = 'https://gamma-api.polymarket.com';
-const CLOB  = 'https://clob.polymarket.com';
+const CLOB = 'https://clob.polymarket.com';
 
-const TICK_MS            = 200;
+const TICK_MS = 200;
 const DISCOVERY_RETRY_MS = 500;
-const RESOLUTION_POLL_MS = 1000;
-const EQUITY_RECORD_MS   = 1000;
-const WINNER_PRICE       = 0.90;
+const EQUITY_RECORD_MS = 1000;
+const EXECUTION_RETRY_MS = 2000;
+const WINNER_PRICE = 0.90;
 
-function round2(n) { return Math.round(n * 100) / 100; }
-function round3(n) { return Math.round(n * 1000) / 1000; }
-function sgn2(n) { return (n > 0 ? '+$' : (n < 0 ? '-$' : '±$')) + Math.abs(n).toFixed(2); }
+function round2(value) { return Math.round(value * 100) / 100; }
+function round3(value) { return Math.round(value * 1000) / 1000; }
+function money(value) { return (value > 0 ? '+$' : value < 0 ? '-$' : '$') + Math.abs(value).toFixed(2); }
 
 async function getJSON(url) {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`${res.status} ${url}`);
-  return res.json();
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`${response.status} ${url}`);
+  return response.json();
 }
 
-function createEngine(cfg) {
+function createEngine(config) {
   const {
-    label = 'BTC-LADDER',
+    label = 'BTC-MARTINGALE',
     startingCapital = 4000,
     windowType = '5m',
     windowSeconds5 = 300,
-    baseShares = 50,
-    orderIntervalSeconds = 20,
-    limitOffset = 0.10,
-    rangeMin = 0.35,
-    rangeMax = 0.75,
-    stopLossPrice = 0.25,
-    rearmPrice = 0.50,
+    baseStakeUsd = 50,
+    martingaleMultiplier = 1.5,
+    maxMartingales = 3,
+    entryMin = 0.60,
+    entryMax = 0.70,
+    stopLossPrice = 0.45,
     feeTheta = 0.07,
     trader,
     dryRun = true,
@@ -53,30 +41,20 @@ function createEngine(cfg) {
     nowFn = Date.now,
     tickMs = TICK_MS,
     priceRefreshMs = 200,
-  } = cfg;
+  } = config;
 
   const winSec = windowSeconds5;
   const capital = round2(startingCapital);
-  let DRY_RUN = dryRun;
-  let posSeq = 0;
-  let orderSeq = 0;
-  let lastOrderPoll = 0;
+  let dryRunMode = dryRun;
+  let positionSequence = 0;
+  let executionRetryAt = 0;
 
   function loadStats() {
     if (!statsStatePath) return null;
     try { return JSON.parse(fs.readFileSync(statsStatePath, 'utf8')); } catch (_) { return null; }
   }
+
   const saved = loadStats();
-
-  function freshSideState() {
-    return {
-      active: true,
-      orders: [],
-      positions: [],
-      trades: [],
-    };
-  }
-
   const engine = {
     bankroll: saved ? saved.bankroll : capital,
     realizedPnl: saved ? saved.realizedPnl || 0 : 0,
@@ -84,18 +62,27 @@ function createEngine(cfg) {
     losses: saved ? saved.losses || 0 : 0,
     history: saved && Array.isArray(saved.history) ? saved.history : [],
     equityCurve: saved && Array.isArray(saved.equityCurve) && saved.equityCurve.length
-      ? saved.equityCurve : [{ t: nowFn(), equity: capital }],
+      ? saved.equityCurve
+      : [{ t: nowFn(), equity: capital }],
+    totalFeesPaid: saved ? saved.totalFeesPaid || 0 : 0,
     up: freshSideState(),
     down: freshSideState(),
     leg: null,
+    position: null,
+    windowTradeCount: 0,
+    windowSides: [],
+    windowPnl: 0,
     lastPriceFetch: 0,
     lastEquityRecord: 0,
-    totalFeesPaid: saved ? saved.totalFeesPaid || 0 : 0,
     logs: [],
   };
 
-  function log(msg) {
-    const line = `[${label}] ${new Date().toISOString()} ${msg}`;
+  function freshSideState() {
+    return { mid: null };
+  }
+
+  function log(message) {
+    const line = `[${label}] ${new Date().toISOString()} ${message}`;
     engine.logs.push(line);
     if (engine.logs.length > 300) engine.logs.shift();
     slog(line);
@@ -105,472 +92,382 @@ function createEngine(cfg) {
     if (!statsStatePath) return;
     try {
       fs.writeFileSync(statsStatePath, JSON.stringify({
-        bankroll: engine.bankroll, realizedPnl: engine.realizedPnl,
-        wins: engine.wins, losses: engine.losses,
+        bankroll: engine.bankroll,
+        realizedPnl: engine.realizedPnl,
+        wins: engine.wins,
+        losses: engine.losses,
         history: engine.history.slice(0, 100),
         equityCurve: engine.equityCurve.slice(-300),
-        totalFeesPaid: engine.totalFeesPaid, savedAt: nowFn(),
+        totalFeesPaid: engine.totalFeesPaid,
+        savedAt: nowFn(),
       }));
     } catch (_) {}
   }
 
-  // ── Market discovery ──
-  function parseTokens(mk) {
+  function parseTokens(market) {
     try {
-      const outcomes = typeof mk.outcomes === 'string' ? JSON.parse(mk.outcomes) : (mk.outcomes || []);
-      const tokenIds = typeof mk.clobTokenIds === 'string' ? JSON.parse(mk.clobTokenIds) : (mk.clobTokenIds || []);
-      return outcomes.map((o, i) => ({ outcome: o, token_id: tokenIds[i] || null }));
+      const outcomes = typeof market.outcomes === 'string' ? JSON.parse(market.outcomes) : market.outcomes || [];
+      const tokenIds = typeof market.clobTokenIds === 'string' ? JSON.parse(market.clobTokenIds) : market.clobTokenIds || [];
+      return outcomes.map((outcome, index) => ({ outcome, token_id: tokenIds[index] || null }));
     } catch (_) { return []; }
   }
 
   function freshLeg(windowTs) {
     return {
       slug: `btc-updown-${windowType}-${windowTs}`,
-      windowTs, closeAt: (windowTs + winSec) * 1000,
-      conditionId: null, upTokenId: null, downTokenId: null,
-      upMid: null, downMid: null,
-      discovered: false, lastDiscoveryAttempt: 0,
-      nextLadderAt: winSec > 0 ? 20 : 0,
-      resolved: false, winner: null,
+      windowTs,
+      closeAt: (windowTs + winSec) * 1000,
+      conditionId: null,
+      upTokenId: null,
+      downTokenId: null,
+      discovered: false,
+      lastDiscoveryAttempt: 0,
+      resolved: false,
+      winner: null,
     };
   }
 
   async function discoverLeg(leg) {
-    try {
-      const candidates = [leg.slug];
-      const prefix = leg.slug.split('-').slice(0, -1).join('-');
-      candidates.push(`${prefix}-${leg.windowTs - winSec}`);
-      candidates.push(`${prefix}-${leg.windowTs + winSec}`);
-      for (const slug of candidates) {
+    const prefix = leg.slug.split('-').slice(0, -1).join('-');
+    const candidates = [
+      leg.slug,
+      `${prefix}-${leg.windowTs - winSec}`,
+      `${prefix}-${leg.windowTs + winSec}`,
+    ];
+    for (const slug of candidates) {
+      try {
         const events = await getJSON(`${GAMMA}/events?slug=${encodeURIComponent(slug)}`).catch(() => null);
         const event = Array.isArray(events) ? events[0] : null;
-        if (!event) continue;
-        const mk = (event.markets || [])[0];
-        if (!mk) continue;
-        const tokens = parseTokens(mk);
-        const up = tokens.find(t => /up/i.test(t.outcome));
-        const down = tokens.find(t => /down/i.test(t.outcome));
-        if (!up || !down || !up.token_id || !down.token_id) continue;
-        leg.conditionId = mk.conditionId || null;
+        const market = event?.markets?.[0];
+        if (!market) continue;
+        const tokens = parseTokens(market);
+        const up = tokens.find(token => /up/i.test(token.outcome));
+        const down = tokens.find(token => /down/i.test(token.outcome));
+        if (!up?.token_id || !down?.token_id) continue;
+        leg.conditionId = market.conditionId || null;
         leg.upTokenId = up.token_id;
         leg.downTokenId = down.token_id;
         leg.slug = slug;
         leg.discovered = true;
+        engine.up.mid = null;
+        engine.down.mid = null;
         log(`🎯 leg discovered ${slug}`);
         return;
+      } catch (error) {
+        log(`⚠️ discovery: ${error.message}`);
       }
-    } catch (e) { log(`⚠️ discoverLeg: ${e.message}`); }
+    }
   }
 
-  async function refreshLegPrices(leg) {
+  async function refreshPrices(leg) {
     if (!leg.upTokenId || !leg.downTokenId) return;
-    try {
-      const [upM, downM] = await Promise.all([
-        getJSON(`${CLOB}/midpoint?token_id=${leg.upTokenId}`).catch(() => null),
-        getJSON(`${CLOB}/midpoint?token_id=${leg.downTokenId}`).catch(() => null),
-      ]);
-      if (upM?.mid != null) leg.upMid = parseFloat(upM.mid);
-      if (downM?.mid != null) leg.downMid = parseFloat(downM.mid);
-    } catch (_) {}
+    const [upResponse, downResponse] = await Promise.all([
+      getJSON(`${CLOB}/midpoint?token_id=${leg.upTokenId}`).catch(() => null),
+      getJSON(`${CLOB}/midpoint?token_id=${leg.downTokenId}`).catch(() => null),
+    ]);
+    if (upResponse?.mid != null) engine.up.mid = parseFloat(upResponse.mid);
+    if (downResponse?.mid != null) engine.down.mid = parseFloat(downResponse.mid);
+  }
+
+  function getPrice(side) {
+    return side === 'up' ? engine.up.mid : engine.down.mid;
+  }
+
+  function getTokenId(side) {
+    return side === 'up' ? engine.leg.upTokenId : engine.leg.downTokenId;
+  }
+
+  function computeFee(shares, price) {
+    return shares * feeTheta * price * (1 - price);
+  }
+
+  function stakeForLevel(level) {
+    return round2(baseStakeUsd * Math.pow(martingaleMultiplier, level));
+  }
+
+  function maxLevels() {
+    return maxMartingales + 1;
+  }
+
+  function markExecutionRetry() {
+    executionRetryAt = nowFn() + EXECUTION_RETRY_MS;
+  }
+
+  async function enterPosition() {
+    const now = nowFn();
+    if (!engine.leg?.discovered || engine.position || now < executionRetryAt) return;
+    const nextLevel = engine.windowTradeCount;
+    if (nextLevel >= maxLevels()) return;
+
+    const qualifyingSides = ['up', 'down'].filter(side => {
+      const price = getPrice(side);
+      return price != null && price >= entryMin && price <= entryMax;
+    });
+    if (!qualifyingSides.length) return;
+
+    qualifyingSides.sort((left, right) => getPrice(right) - getPrice(left));
+    const side = qualifyingSides[0];
+    let entryPrice = round2(Math.ceil(getPrice(side) * 100) / 100);
+
+    if (!dryRunMode) {
+      const book = await trader.getBestBidAsk(getTokenId(side));
+      if (!book?.bestAsk || book.bestAsk < entryMin || book.bestAsk > entryMax) {
+        markExecutionRetry();
+        log(`⏳ ${side.toUpperCase()} ask unavailable/outside zone — no fallback`);
+        return;
+      }
+      entryPrice = round2(book.bestAsk);
+    }
+
+    const targetStake = stakeForLevel(nextLevel);
+    const shares = Math.max(0.01, Math.floor((targetStake / entryPrice) * 100) / 100);
+    const fee = computeFee(shares, entryPrice);
+    const cost = round2(shares * entryPrice + fee);
+
+    if (!dryRunMode) {
+      const order = await trader.placeFokLimitOrder(getTokenId(side), 'BUY', entryPrice, shares);
+      if (!order.isFilled) {
+        markExecutionRetry();
+        log(`❌ ${side.toUpperCase()} BUY REJECTED ${shares}sh @${entryPrice.toFixed(2)} — no fallback`);
+        return;
+      }
+      const fillPrice = parseFloat(order.avgPrice);
+      if (Number.isFinite(fillPrice) && fillPrice > 0) entryPrice = Math.min(0.99, Math.max(0.01, fillPrice));
+    }
+
+    engine.bankroll = round2(engine.bankroll - cost);
+    engine.totalFeesPaid = round2(engine.totalFeesPaid + fee);
+    engine.position = {
+      id: ++positionSequence,
+      side,
+      level: nextLevel,
+      label: nextLevel === 0 ? 'BASE' : `MG${nextLevel}`,
+      stake: targetStake,
+      shares,
+      entryPrice,
+      cost,
+      openedAtMs: now,
+    };
+    engine.windowTradeCount += 1;
+    engine.windowSides.push(side.toUpperCase());
+    executionRetryAt = 0;
+    log(`🎯 ${side.toUpperCase()} ${engine.position.label} BUY — $${targetStake.toFixed(2)} → ${shares}sh @${entryPrice.toFixed(2)} | cost $${cost.toFixed(2)} | stop ${stopLossPrice.toFixed(2)}`);
+  }
+
+  function closePosition(exitPrice, closeType) {
+    const position = engine.position;
+    const proceeds = round2(position.shares * exitPrice);
+    const fee = computeFee(position.shares, exitPrice);
+    const netProceeds = round2(proceeds - fee);
+    const pnl = round2(netProceeds - position.cost);
+    engine.bankroll = round2(engine.bankroll + netProceeds);
+    engine.realizedPnl = round2(engine.realizedPnl + pnl);
+    engine.totalFeesPaid = round2(engine.totalFeesPaid + fee);
+    engine.windowPnl = round2(engine.windowPnl + pnl);
+    if (pnl > 0) engine.wins += 1; else engine.losses += 1;
+    engine.position = null;
+    log(`${closeType === 'STOP' ? '🛑' : '🏁'} ${position.side.toUpperCase()} ${position.label} ${closeType} — ${position.shares}sh @${exitPrice.toFixed(2)} | PnL ${money(pnl)}`);
+    return pnl;
+  }
+
+  async function checkStopLoss() {
+    const position = engine.position;
+    if (!position || !engine.leg?.discovered) return;
+    const price = getPrice(position.side);
+    if (price == null || price > stopLossPrice) return;
+    if (nowFn() < executionRetryAt) return;
+
+    let exitPrice = round2(Math.floor(price * 100) / 100);
+    if (!dryRunMode) {
+      const order = await trader.placeFokSell(getTokenId(position.side), position.shares);
+      if (!order.isFilled) {
+        markExecutionRetry();
+        log(`❌ ${position.side.toUpperCase()} STOP SELL REJECTED — retrying while stop remains active`);
+        return;
+      }
+      const fillPrice = parseFloat(order.avgPrice);
+      if (Number.isFinite(fillPrice) && fillPrice > 0) exitPrice = Math.min(0.99, Math.max(0.01, fillPrice));
+    }
+    closePosition(exitPrice, 'STOP');
+    executionRetryAt = 0;
   }
 
   async function attemptFastResolution(leg) {
     if (leg.resolved) return true;
-    if (leg.upMid != null && leg.upMid > WINNER_PRICE) { leg.resolved = true; leg.winner = 'up'; return true; }
-    if (leg.downMid != null && leg.downMid > WINNER_PRICE) { leg.resolved = true; leg.winner = 'down'; return true; }
+    if (engine.up.mid > WINNER_PRICE) { leg.resolved = true; leg.winner = 'up'; return true; }
+    if (engine.down.mid > WINNER_PRICE) { leg.resolved = true; leg.winner = 'down'; return true; }
     return false;
   }
 
-  async function resolveLegOfficial(leg) {
+  async function resolveLegOfficially(leg) {
     if (leg.resolved) return true;
     try {
-      let mk = null;
+      let market = null;
       if (leg.conditionId) {
-        const arr = await getJSON(`${GAMMA}/markets?condition_ids=${encodeURIComponent(leg.conditionId)}`);
-        mk = Array.isArray(arr) ? arr[0] : null;
+        const markets = await getJSON(`${GAMMA}/markets?condition_ids=${encodeURIComponent(leg.conditionId)}`).catch(() => null);
+        market = Array.isArray(markets) ? markets[0] : null;
       }
-      if (!mk) {
-        const events = await getJSON(`${GAMMA}/events?slug=${encodeURIComponent(leg.slug)}`);
-        const ev = Array.isArray(events) ? events[0] : null;
-        mk = ev ? (ev.markets || [])[0] : null;
+      if (!market) {
+        const events = await getJSON(`${GAMMA}/events?slug=${encodeURIComponent(leg.slug)}`).catch(() => null);
+        const event = Array.isArray(events) ? events[0] : null;
+        market = event?.markets?.[0] || null;
       }
-      if (mk && mk.closed === true && mk.outcomePrices) {
-        const prices = typeof mk.outcomePrices === 'string' ? JSON.parse(mk.outcomePrices) : mk.outcomePrices;
-        const tokens = parseTokens(mk);
-        const upIdx = tokens.findIndex(t => String(t.token_id) === String(leg.upTokenId));
-        if (upIdx >= 0 && prices[upIdx] != null) {
-          leg.resolved = true;
-          leg.winner = parseFloat(prices[upIdx]) >= 0.5 ? 'up' : 'down';
-          log(`🏁 official resolution — winner ${leg.winner.toUpperCase()}`);
-          return true;
-        }
-      }
-    } catch (_) {}
-    return false;
-  }
-
-  // ── Trading ──
-  function getPrice(side) { return side === 'up' ? engine.leg.upMid : engine.leg.downMid; }
-  function computeFee(shares, price) { return shares * feeTheta * price * (1 - price); }
-
-  async function placeLadderOrder(side, elapsedSec) {
-    const leg = engine.leg;
-    if (!engine[side].active) return;
-    const currentPrice = getPrice(side);
-    if (currentPrice == null || currentPrice < rangeMin || currentPrice > rangeMax) return;
-
-    const targetCents = Math.round((currentPrice - limitOffset) * 100);
-    const limitPrice = round2(Math.max(0.01, Math.floor(targetCents) / 100));
-    const record = {
-      id: ++orderSeq,
-      side,
-      signalPrice: round3(currentPrice),
-      price: limitPrice,
-      shares: baseShares,
-      filledShares: 0,
-      placedAtMs: nowFn(),
-      placedAtSecond: elapsedSec,
-      status: 'OPEN',
-      orderId: null,
-    };
-
-    if (!DRY_RUN) {
-      const tokenId = side === 'up' ? leg.upTokenId : leg.downTokenId;
-      const response = await trader.placeGtcOrder(tokenId, 'BUY', limitPrice, baseShares);
-      record.orderId = response.id;
-    }
-
-    engine[side].orders.push(record);
-    log(`📥 ${side.toUpperCase()} LIMIT #${record.id} — ${baseShares}sh @${limitPrice.toFixed(2)} | signal ${currentPrice.toFixed(3)} | t=${elapsedSec}s`);
-  }
-
-  async function processLadderInterval() {
-    const leg = engine.leg;
-    if (!leg?.discovered || leg.upMid == null || leg.downMid == null) return;
-    const elapsedSec = Math.floor(nowFn() / 1000) - leg.windowTs;
-    if (elapsedSec < leg.nextLadderAt || elapsedSec >= winSec) return;
-
-    leg.nextLadderAt = (Math.floor(elapsedSec / orderIntervalSeconds) + 1) * orderIntervalSeconds;
-    for (const side of ['up', 'down']) {
-      try { await placeLadderOrder(side, elapsedSec); }
-      catch (e) { log(`❌ ${side.toUpperCase()} ORDER FAILED t=${elapsedSec}s — ${e.message}`); }
-    }
-  }
-
-  function applyFill(record, fillShares, fillPrice) {
-    if (fillShares <= 0) return;
-    const fee = computeFee(fillShares, fillPrice);
-    const cost = round2(fillShares * fillPrice + fee);
-    engine.bankroll = round2(engine.bankroll - cost);
-    engine.totalFeesPaid = round2(engine.totalFeesPaid + fee);
-    const priorShares = record.filledShares;
-    const priorAverage = record.avgFillPrice || 0;
-    const totalShares = round3(priorShares + fillShares);
-    record.avgFillPrice = priorShares > 0
-      ? round3(((priorShares * priorAverage) + (fillShares * fillPrice)) / totalShares)
-      : round3(fillPrice);
-    record.filledShares = round3(record.filledShares + fillShares);
-    record.status = record.filledShares >= record.shares - 1e-9 ? 'FILLED' : 'PARTIAL';
-    const pos = {
-      id: ++posSeq,
-      orderId: record.id,
-      side: record.side,
-      entryPrice: fillPrice,
-      shares: fillShares,
-      cost,
-      filledAtMs: nowFn(),
-    };
-    engine[record.side].positions.push(pos);
-    engine[record.side].trades.push({
-      side: record.side,
-      type: 'fill',
-      entry: fillPrice,
-      shares: fillShares,
-      pnl: 0,
-    });
-    log(`🎯 ${record.side.toUpperCase()} FILL #${pos.id} — ${fillShares}sh @${fillPrice.toFixed(2)} | cost $${cost.toFixed(2)} | order #${record.id}`);
-  }
-
-  async function syncLiveOrder(record) {
-    const state = await trader.getOrder(record.orderId);
-    const originalSize = parseFloat(state?.original_size ?? state?.size ?? record.shares);
-    const filledShares = parseFloat(state?.size_matched ?? state?.filled_size ?? state?.taker_amount ?? '0');
-    const safeFilled = Number.isFinite(filledShares) ? Math.min(originalSize || record.shares, Math.max(0, filledShares)) : 0;
-    const newShares = round3(safeFilled - record.filledShares);
-    const cumulativeAverage = parseFloat(state?.avg_price ?? state?.avg_fill_price ?? record.price);
-    let marginalPrice = record.price;
-    if (Number.isFinite(cumulativeAverage) && cumulativeAverage > 0) {
-      const priorShares = record.filledShares;
-      const priorAverage = record.avgFillPrice || 0;
-      marginalPrice = priorShares > 0 && safeFilled > priorShares
-        ? ((safeFilled * cumulativeAverage) - (priorShares * priorAverage)) / (safeFilled - priorShares)
-        : cumulativeAverage;
-      marginalPrice = Math.min(0.99, Math.max(0.01, marginalPrice));
-    }
-    applyFill(record, newShares, marginalPrice);
-    const status = String(state?.status || '').toUpperCase();
-    if (status === 'CANCELLED' && record.status !== 'FILLED') record.status = safeFilled > 0 ? 'PARTIAL' : 'CANCELLED';
-  }
-
-  function processDemoFills() {
-    const leg = engine.leg;
-    for (const side of ['up', 'down']) {
-      const price = getPrice(side);
-      if (price == null) continue;
-      for (const record of engine[side].orders) {
-        if ((record.status === 'OPEN' || record.status === 'PARTIAL') && price <= record.price) {
-          applyFill(record, round3(record.shares - record.filledShares), record.price);
-        }
-      }
-    }
-  }
-
-  async function syncLiveFills() {
-    const openRecords = ['up', 'down'].flatMap(side => engine[side].orders)
-      .filter(record => record.orderId && record.status !== 'FILLED' && record.status !== 'CANCELLED');
-    if (!openRecords.length) return;
-    for (const record of openRecords) {
-      try { await syncLiveOrder(record); }
-      catch (e) { log(`⚠️ ORDER SYNC #${record.id}: ${e.message}`); }
-    }
-  }
-
-  async function cancelSideOrders(side) {
-    let allCancelled = true;
-    for (const record of engine[side].orders) {
-      if (record.status === 'FILLED' || record.status === 'CANCELLED') continue;
-      try {
-        if (!DRY_RUN && record.orderId) await trader.cancelOrder(record.orderId);
-        if (!DRY_RUN && record.orderId) await syncLiveOrder(record);
-        if (record.status !== 'FILLED') record.status = record.filledShares > 0 ? 'PARTIAL' : 'CANCELLED';
-        if (record.status !== 'FILLED') log(`🚫 CANCELLED ${side.toUpperCase()} LIMIT #${record.id} @${record.price.toFixed(2)}`);
-      } catch (e) {
-        allCancelled = false;
-        log(`⚠️ CANCEL FAIL ${side.toUpperCase()} #${record.id}: ${e.message}`);
-      }
-    }
-    return allCancelled;
-  }
-
-  function closePositionAtStop(pos, exitPrice) {
-    const proceeds = round2(pos.shares * exitPrice);
-    const fee = computeFee(pos.shares, exitPrice);
-    const net = round2(proceeds - fee);
-    const pnl = round2(net - pos.cost);
-    engine.bankroll = round2(engine.bankroll + net);
-    engine.realizedPnl = round2(engine.realizedPnl + pnl);
-    engine.totalFeesPaid = round2(engine.totalFeesPaid + fee);
-    if (pnl > 0) engine.wins++; else engine.losses++;
-    engine[pos.side].trades.push({
-      side: pos.side,
-      type: 'stop',
-      entry: pos.entryPrice,
-      exit: exitPrice,
-      shares: pos.shares,
-      pnl,
-    });
-    log(`🛑 ${pos.side.toUpperCase()} STOP #${pos.id} — SOLD ${pos.shares}sh @${exitPrice.toFixed(2)} | PnL ${sgn2(pnl)}`);
-  }
-
-  async function processStopLoss(side) {
-    const price = getPrice(side);
-    const st = engine[side];
-    if (!st.active || price == null || price > stopLossPrice) return;
-
-    if (!DRY_RUN) await syncLiveFills();
-    const ordersCancelled = await cancelSideOrders(side);
-    if (!ordersCancelled) return;
-
-    const totalShares = round3(st.positions.reduce((sum, pos) => sum + pos.shares, 0));
-    let exitPrice = round3(price);
-    if (totalShares > 0) {
-      if (!DRY_RUN) {
-        const tokenId = side === 'up' ? engine.leg.upTokenId : engine.leg.downTokenId;
-        const response = await trader.placeFokSell(tokenId, totalShares);
-        if (!response.isFilled) {
-          log(`❌ ${side.toUpperCase()} STOP SELL REJECTED — ${totalShares}sh @${price.toFixed(2)} | retrying`);
-          return;
-        }
-        const fillPrice = parseFloat(response.avgPrice);
-        if (Number.isFinite(fillPrice) && fillPrice > 0) exitPrice = Math.min(0.99, Math.max(0.01, fillPrice));
-      }
-      for (const pos of [...st.positions]) closePositionAtStop(pos, exitPrice);
-      st.positions = [];
-    }
-
-    st.active = false;
-    log(`⛔ ${side.toUpperCase()} HALTED @${price.toFixed(3)} — rearm at ${rearmPrice.toFixed(2)}`);
-  }
-
-  function processRearm() {
-    for (const side of ['up', 'down']) {
-      const st = engine[side];
-      const price = getPrice(side);
-      if (!st.active && price != null && price >= rearmPrice) {
-        st.active = true;
-        log(`🔁 ${side.toUpperCase()} REARMED @${price.toFixed(3)}`);
-      }
-    }
+      if (!market?.closed || !market.outcomePrices) return false;
+      const prices = typeof market.outcomePrices === 'string' ? JSON.parse(market.outcomePrices) : market.outcomePrices;
+      const tokens = parseTokens(market);
+      const upIndex = tokens.findIndex(token => String(token.token_id) === String(leg.upTokenId));
+      if (upIndex < 0 || prices[upIndex] == null) return false;
+      leg.resolved = true;
+      leg.winner = parseFloat(prices[upIndex]) >= 0.5 ? 'up' : 'down';
+      log(`🏁 official resolution — ${leg.winner.toUpperCase()}`);
+      return true;
+    } catch (_) { return false; }
   }
 
   function settleWindow(winner) {
-    let totalPnl = 0;
-    let resolvedCount = 0;
-    log(`🏁 WINDOW RESOLVED — ${String(winner).toUpperCase()}`);
-    for (const side of ['up', 'down']) {
-      const st = engine[side];
-      for (const pos of st.positions) {
-        const payout = winner === side ? pos.shares : 0;
-        const pnl = round2(payout - pos.cost);
-        engine.bankroll = round2(engine.bankroll + payout);
-        engine.realizedPnl = round2(engine.realizedPnl + pnl);
-        if (pnl > 0) engine.wins++; else engine.losses++;
-        st.trades.push({ side, type: 'resolution', entry: pos.entryPrice, exit: winner === side ? 1.0 : 0, shares: pos.shares, pnl });
-        resolvedCount++;
-        totalPnl += pnl;
-        log(`🏁 ${side.toUpperCase()} #${pos.id} RESOLVED — ${winner === side ? 'WIN' : 'LOSS'} ${sgn2(pnl)}`);
-      }
-      st.positions = [];
-      if (st.trades.length > 0) {
-        const sideTotal = round2(st.trades.reduce((a, t) => a + t.pnl, 0));
-        engine.history.unshift({
-          windowTs: engine.leg.windowTs, slug: engine.leg.slug, side,
-          trades: resolvedCount, pnl: sideTotal, bankrollAfter: engine.bankroll,
-        });
-      }
+    const position = engine.position;
+    if (position) {
+      const payout = winner === position.side ? position.shares : 0;
+      const pnl = round2(payout - position.cost);
+      engine.bankroll = round2(engine.bankroll + payout);
+      engine.realizedPnl = round2(engine.realizedPnl + pnl);
+      engine.windowPnl = round2(engine.windowPnl + pnl);
+      if (pnl > 0) engine.wins += 1; else engine.losses += 1;
+      engine.position = null;
+      log(`🏁 ${position.side.toUpperCase()} ${position.label} RESOLVED — PnL ${money(pnl)}`);
     }
+
+    engine.history.unshift({
+      windowTs: engine.leg.windowTs,
+      slug: engine.leg.slug,
+      winner: winner || 'unresolved',
+      sides: engine.windowSides.join('/') || 'NONE',
+      trades: engine.windowTradeCount,
+      martingales: Math.max(0, engine.windowTradeCount - 1),
+      pnl: engine.windowPnl,
+      bankrollAfter: engine.bankroll,
+    });
     if (engine.history.length > 300) engine.history.length = 300;
     saveStats();
   }
 
-  // ── Main loop ──
+  function resetWindowState() {
+    engine.position = null;
+    engine.windowTradeCount = 0;
+    engine.windowSides = [];
+    engine.windowPnl = 0;
+    executionRetryAt = 0;
+  }
+
   async function mainLoop() {
     while (true) {
       try {
         const now = nowFn();
-        const nowSec = Math.floor(now / 1000);
-        const windowTs = Math.floor(nowSec / winSec) * winSec;
-
+        const windowTs = Math.floor(now / 1000 / winSec) * winSec;
         if (!engine.leg || engine.leg.windowTs !== windowTs) {
           if (engine.leg) {
             const oldLeg = engine.leg;
-            await cancelSideOrders('up');
-            await cancelSideOrders('down');
             if (!oldLeg.resolved) await attemptFastResolution(oldLeg);
-            if (!oldLeg.resolved) await resolveLegOfficial(oldLeg);
+            if (!oldLeg.resolved) await resolveLegOfficially(oldLeg);
             settleWindow(oldLeg.winner);
           }
           engine.leg = freshLeg(windowTs);
           engine.up = freshSideState();
           engine.down = freshSideState();
+          resetWindowState();
           log(`🆕 window t=${windowTs}`);
         }
 
         const leg = engine.leg;
-
         if (!leg.discovered && now - leg.lastDiscoveryAttempt >= DISCOVERY_RETRY_MS) {
           leg.lastDiscoveryAttempt = now;
           await discoverLeg(leg);
         }
-
         if (now - engine.lastPriceFetch >= priceRefreshMs) {
           engine.lastPriceFetch = now;
-          await refreshLegPrices(leg);
+          await refreshPrices(leg);
         }
-
         if (leg.discovered) {
-          processRearm();
-          await processStopLoss('up');
-          await processStopLoss('down');
-          await processLadderInterval();
-          processDemoFills();
-          if (!DRY_RUN && now - lastOrderPoll >= 500) {
-            lastOrderPoll = now;
-            await syncLiveFills();
-          }
+          await checkStopLoss();
+          await enterPosition();
         }
-
         if (now - engine.lastEquityRecord >= EQUITY_RECORD_MS) {
           engine.lastEquityRecord = now;
-          let mtm = 0;
-          for (const side of ['up', 'down']) {
-            const p = getPrice(side);
-            for (const pos of engine[side].positions) {
-              if (p != null) mtm += pos.shares * p;
-            }
-          }
-          engine.equityCurve.push({ t: now, equity: round2(engine.bankroll + mtm) });
+          const position = engine.position;
+          const markPrice = position ? getPrice(position.side) || 0 : 0;
+          const unrealized = position ? position.shares * markPrice - position.cost : 0;
+          engine.equityCurve.push({ t: now, equity: round2(engine.bankroll + unrealized) });
           if (engine.equityCurve.length > 10000) engine.equityCurve.shift();
         }
-
         emitState();
-      } catch (e) { log(`⚠️ Loop error: ${e.message}`); }
-      await new Promise(res => setTimeout(res, tickMs));
+      } catch (error) {
+        log(`⚠️ loop: ${error.message}`);
+      }
+      await new Promise(resolve => setTimeout(resolve, tickMs));
     }
   }
 
-  // ── Dashboard state ──
   function buildState() {
     const leg = engine.leg;
-    function sideInfo(name, st) {
-      const p = name === 'up' ? (leg?.upMid || 0) : (leg?.downMid || 0);
-      const openOrders = st.orders.filter(order => order.status === 'OPEN' || order.status === 'PARTIAL');
-      return {
-        active: st.active,
-        orders: st.orders.slice(-20),
-        openOrders: openOrders.map(order => ({ ...order })),
-        openOrderCount: openOrders.length,
-        openOrderShares: openOrders.reduce((sum, order) => sum + (order.shares - order.filledShares), 0),
-        positions: st.positions.map(pos => ({
-          ...pos,
-          unrealizedPnl: round2(pos.shares * p - pos.cost),
-        })),
-        totalUnrealized: round2(st.positions.reduce((a, pos) => a + (pos.shares * p - pos.cost), 0)),
-        totalShares: st.positions.reduce((a, pos) => a + pos.shares, 0),
-        tradesThisWindow: st.trades.length,
-      };
-    }
+    const position = engine.position;
+    const markPrice = position ? getPrice(position.side) || 0 : 0;
+    const unrealizedPnl = position ? round2(position.shares * markPrice - position.cost) : 0;
     const decided = engine.wins + engine.losses;
-    const totalUnreal = round2(
-      engine.up.positions.reduce((a, pos) => a + pos.shares * (leg?.upMid || 0) - pos.cost, 0) +
-      engine.down.positions.reduce((a, pos) => a + pos.shares * (leg?.downMid || 0) - pos.cost, 0)
-    );
     return {
-      label, windowSeconds: winSec, dryRun: DRY_RUN,
-      strategy: 'independent-limit-ladder',
-      orderIntervalSeconds, limitOffset, rangeMin, rangeMax,
-      stopLossPrice, rearmPrice, baseShares,
-      bankroll: engine.bankroll, startingCapital: capital,
+      label,
+      strategy: 'martingale',
+      dryRun: dryRunMode,
+      windowSeconds: winSec,
+      baseStakeUsd,
+      martingaleMultiplier,
+      maxMartingales,
+      entryMin,
+      entryMax,
+      stopLossPrice,
+      nextStakeIfStopped: position ? stakeForLevel(Math.min(maxLevels() - 1, position.level + 1)) : stakeForLevel(engine.windowTradeCount),
+      canEnter: engine.windowTradeCount < maxLevels(),
+      bankroll: engine.bankroll,
+      startingCapital: capital,
       realizedPnl: engine.realizedPnl,
-      unrealizedPnl: totalUnreal,
-      equity: round2(engine.bankroll + totalUnreal),
+      unrealizedPnl,
+      equity: round2(engine.bankroll + unrealizedPnl),
       equityCurve: engine.equityCurve.slice(-200),
-      wins: engine.wins, losses: engine.losses,
-      winRate: decided > 0 ? round2(engine.wins / decided * 100) : null,
-      up: sideInfo('up', engine.up),
-      down: sideInfo('down', engine.down),
+      wins: engine.wins,
+      losses: engine.losses,
+      winRate: decided ? round2(engine.wins / decided * 100) : null,
+      totalFeesPaid: engine.totalFeesPaid,
+      position: position ? {
+        ...position,
+        markPrice,
+        unrealizedPnl,
+        stopLossPrice,
+      } : null,
       currentLeg: leg ? {
-        slug: leg.slug, discovered: leg.discovered,
-        upMid: leg.upMid, downMid: leg.downMid,
+        slug: leg.slug,
+        discovered: leg.discovered,
+        upMid: engine.up.mid,
+        downMid: engine.down.mid,
         secsLeft: Math.max(0, Math.round((leg.closeAt - nowFn()) / 1000)),
       } : null,
       history: engine.history.slice(0, 30),
       logs: engine.logs.slice(-50),
-      totalFeesPaid: engine.totalFeesPaid,
     };
   }
 
-  function emitState() { emit('hedgeState:' + label, buildState()); }
+  function emitState() { emit(`hedgeState:${label}`, buildState()); }
   function pauseTrading() { return { ok: true }; }
   function resumeTrading() { return { ok: true }; }
-  function setMode(live) { DRY_RUN = !live; log(`⚙️ ${live ? 'LIVE' : 'DEMO'}`); return { ok: true }; }
+  function setMode(live) {
+    dryRunMode = !live;
+    log(`⚙️ ${live ? 'LIVE' : 'DEMO'} mode`);
+    return { ok: true };
+  }
 
-  async function start() {
-    log(`⛏ ${label} — Independent Limit Ladder`);
-    log(`⚙️ Every ${orderIntervalSeconds}s | ${baseShares}sh @ mid-${limitOffset.toFixed(2)} | entry ${rangeMin.toFixed(2)}-${rangeMax.toFixed(2)}`);
-    log(`⚙️ Stop/sell ${stopLossPrice.toFixed(2)} | rearm ${rearmPrice.toFixed(2)} | independent sides`);
-    log(`⚙️ Capital $${capital.toFixed(2)} | ${DRY_RUN ? 'DEMO' : 'LIVE'}`);
-    mainLoop().catch(e => log(`❌ Fatal: ${e.message}`));
+  function start() {
+    log(`⛏ ${label} — Martingale restored`);
+    log(`⚙️ Entry ${entryMin.toFixed(2)}-${entryMax.toFixed(2)} | stop ${stopLossPrice.toFixed(2)} | base $${baseStakeUsd.toFixed(2)}`);
+    log(`⚙️ ${martingaleMultiplier.toFixed(2)}x martingale | max ${maxMartingales} | ${dryRunMode ? 'DEMO' : 'LIVE'}`);
+    mainLoop().catch(error => log(`❌ fatal: ${error.message}`));
   }
 
   return { start, pauseTrading, resumeTrading, setMode, buildState };
