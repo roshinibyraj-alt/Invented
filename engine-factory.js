@@ -195,6 +195,17 @@ function createEngine(config) {
     return maxMartingales + 1;
   }
 
+  function bestAskFromBook(book) {
+    let best = null;
+    for (const level of book?.asks || []) {
+      const price = parseFloat(level.price);
+      const size = parseFloat(level.size);
+      if (!Number.isFinite(price) || !Number.isFinite(size) || size <= 0) continue;
+      if (best == null || price < best) best = price;
+    }
+    return best;
+  }
+
   function isEntryTick(price) {
     return price != null && Math.abs(price - entryPrice) <= 0.0005;
   }
@@ -242,13 +253,14 @@ function createEngine(config) {
     let entryPrice = round2(Math.ceil(getPrice(side) * 100) / 100);
 
     if (!dryRunMode) {
-      const book = await trader.getBestBidAsk(getTokenId(side));
-      if (!book?.bestAsk || !isEntryTick(book.bestAsk)) {
+      const book = await trader.getOrderBook(getTokenId(side));
+      const bookAsk = bestAskFromBook(book);
+      if (!bookAsk || !isEntryTick(bookAsk)) {
         markExecutionRetry();
-        log(`⏳ ${side.toUpperCase()} ask unavailable/not exactly ${entryPrice.toFixed(2)} — no fallback`);
+        log(`⏳ ${side.toUpperCase()} true best ask unavailable/not exactly ${entryPrice.toFixed(2)} — no fallback`);
         return;
       }
-      entryPrice = round2(book.bestAsk);
+      entryPrice = round2(bookAsk);
     }
 
     const targetStake = stakeForLevel(nextLevel);
