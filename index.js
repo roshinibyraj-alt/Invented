@@ -166,7 +166,7 @@ server.listen(PORT, '0.0.0.0', () => {
       }),
       [LIMIT_LABEL]: createEngine({
         ...common, label: LIMIT_LABEL, strategy: 'limit-pair', sharedCapital,
-        baseStakeUsd: Number(process.env.LIMIT_BASE_STAKE_USD || BASE_STAKE_USD),
+        baseStakeUsd: Number(process.env.LIMIT_BASE_STAKE_USD || 20),
         martingaleMultiplier: Number(process.env.LIMIT_MARTINGALE_MULTIPLIER || 1.5),
         maxMartingales: Number(process.env.LIMIT_MAX_MARTINGALES || 7),
         entryPrice: Number(process.env.LIMIT_ENTRY_PRICE || 0.30),
