@@ -2,11 +2,11 @@
 
 /**
  * ═══════════════════════════════════════════════════════════════
- *  BTC EARLY FAVORITE ENGINE — momentum continuation
+ *  BTC INDEPENDENT LIMIT LADDER ENGINE
  * ═══════════════════════════════════════════════════════════════
  *
- *  One decision per window: buy the leading side at the decision time if it
- *  has reached the favorite threshold, then hold through resolution.
+ *  Every 20 seconds each side independently places one 50-share GTC buy
+ *  0.10 below its current midpoint. Filled shares hold through resolution.
  * ═══════════════════════════════════════════════════════════════
  */
 
@@ -32,13 +32,15 @@ async function getJSON(url) {
 
 function createEngine(cfg) {
   const {
-    label = 'BTC-DIP',
+    label = 'BTC-LADDER',
     startingCapital = 4000,
     windowType = '5m',
     windowSeconds5 = 300,
     baseShares = 50,
-    entryAtSeconds = 30,
-    minFavoritePrice = 0.64,
+    orderIntervalSeconds = 20,
+    limitOffset = 0.10,
+    rangeMin = 0.25,
+    rangeMax = 0.99,
     feeTheta = 0.07,
     trader,
     dryRun = true,
@@ -54,6 +56,8 @@ function createEngine(cfg) {
   const capital = round2(startingCapital);
   let DRY_RUN = dryRun;
   let posSeq = 0;
+  let orderSeq = 0;
+  let lastOrderPoll = 0;
 
   function loadStats() {
     if (!statsStatePath) return null;
@@ -63,6 +67,7 @@ function createEngine(cfg) {
 
   function freshSideState() {
     return {
+      orders: [],
       positions: [],
       trades: [],
     };
@@ -102,7 +107,7 @@ function createEngine(cfg) {
         equityCurve: engine.equityCurve.slice(-300),
         totalFeesPaid: engine.totalFeesPaid, savedAt: nowFn(),
       }));
-    } catch (e) { log(`⚠️ official resolution: ${e.message}`); }
+    } catch (_) {}
   }
 
   // ── Market discovery ──
@@ -121,7 +126,7 @@ function createEngine(cfg) {
       conditionId: null, upTokenId: null, downTokenId: null,
       upMid: null, downMid: null,
       discovered: false, lastDiscoveryAttempt: 0,
-      entryAttempted: false, entrySide: null,
+      nextLadderAt: winSec > 0 ? 20 : 0,
       resolved: false, winner: null,
     };
   }
@@ -204,56 +209,147 @@ function createEngine(cfg) {
   function getPrice(side) { return side === 'up' ? engine.leg.upMid : engine.leg.downMid; }
   function computeFee(shares, price) { return shares * feeTheta * price * (1 - price); }
 
-  async function processEntry() {
+  async function placeLadderOrder(side, elapsedSec) {
     const leg = engine.leg;
-    if (!leg?.discovered || leg.entryAttempted || leg.upMid == null || leg.downMid == null) return;
-    const now = nowFn();
-    const nowSec = Math.floor(now / 1000);
-    const elapsedSec = nowSec - engine.leg.windowTs;
+    const currentPrice = getPrice(side);
+    if (currentPrice == null || currentPrice < rangeMin || currentPrice > rangeMax) return;
 
-    if (elapsedSec < entryAtSeconds) return;
-    leg.entryAttempted = true;
+    const targetCents = Math.round((currentPrice - limitOffset) * 100);
+    const limitPrice = round2(Math.max(0.01, Math.floor(targetCents) / 100));
+    const record = {
+      id: ++orderSeq,
+      side,
+      signalPrice: round3(currentPrice),
+      price: limitPrice,
+      shares: baseShares,
+      filledShares: 0,
+      placedAtMs: nowFn(),
+      placedAtSecond: elapsedSec,
+      status: 'OPEN',
+      orderId: null,
+    };
 
-    const side = leg.upMid >= leg.downMid ? 'up' : 'down';
-    const favoritePrice = getPrice(side);
-    const underdogPrice = getPrice(side === 'up' ? 'down' : 'up');
-    if (favoritePrice < minFavoritePrice || favoritePrice <= underdogPrice) {
-      leg.entrySide = 'skipped';
-      log(`⏭️ t=${elapsedSec}s SKIP — leading ${side.toUpperCase()} @${favoritePrice.toFixed(3)} < ${minFavoritePrice.toFixed(2)}`);
-      return;
-    }
-
-    let entryPrice = round2(favoritePrice);
     if (!DRY_RUN) {
       const tokenId = side === 'up' ? leg.upTokenId : leg.downTokenId;
-      const book = await trader.getBestBidAsk(tokenId);
-      if (!book || book.bestAsk == null || book.bestAsk <= 0) {
-        leg.entrySide = 'skipped';
-        log(`⚠️ t=${elapsedSec}s SKIP — no executable ask`);
-        return;
-      }
-
-      entryPrice = Math.min(0.99, Math.ceil(book.bestAsk * 100) / 100);
-      const order = await trader.placeFokLimitOrder(tokenId, 'BUY', entryPrice, baseShares);
-      if (!order.isFilled) {
-        leg.entrySide = 'skipped';
-        log(`❌ ${side.toUpperCase()} ORDER REJECTED @${entryPrice.toFixed(2)} — no fallback`);
-        return;
-      }
+      const response = await trader.placeGtcOrder(tokenId, 'BUY', limitPrice, baseShares);
+      record.orderId = response.id;
     }
 
-    const fee = computeFee(baseShares, entryPrice);
-    const cost = round2(baseShares * entryPrice + fee);
+    engine[side].orders.push(record);
+    log(`📥 ${side.toUpperCase()} LIMIT #${record.id} — ${baseShares}sh @${limitPrice.toFixed(2)} | signal ${currentPrice.toFixed(3)} | t=${elapsedSec}s`);
+  }
+
+  async function processLadderInterval() {
+    const leg = engine.leg;
+    if (!leg?.discovered || leg.upMid == null || leg.downMid == null) return;
+    const elapsedSec = Math.floor(nowFn() / 1000) - leg.windowTs;
+    if (elapsedSec < leg.nextLadderAt || elapsedSec >= winSec) return;
+
+    leg.nextLadderAt = (Math.floor(elapsedSec / orderIntervalSeconds) + 1) * orderIntervalSeconds;
+    for (const side of ['up', 'down']) {
+      try { await placeLadderOrder(side, elapsedSec); }
+      catch (e) { log(`❌ ${side.toUpperCase()} ORDER FAILED t=${elapsedSec}s — ${e.message}`); }
+    }
+  }
+
+  function applyFill(record, fillShares, fillPrice) {
+    if (fillShares <= 0) return;
+    const fee = computeFee(fillShares, fillPrice);
+    const cost = round2(fillShares * fillPrice + fee);
     engine.bankroll = round2(engine.bankroll - cost);
     engine.totalFeesPaid = round2(engine.totalFeesPaid + fee);
-    const pos = { id: ++posSeq, side, entryPrice, shares: baseShares, cost };
-    engine[side].positions.push(pos);
-    leg.entrySide = side;
-    log(`🎯 ${side.toUpperCase()} FAVORITE #${pos.id} — ${baseShares}sh @${entryPrice.toFixed(2)} | HOLD | cost $${cost.toFixed(2)} | t=${elapsedSec}s`);
+    const priorShares = record.filledShares;
+    const priorAverage = record.avgFillPrice || 0;
+    const totalShares = round3(priorShares + fillShares);
+    record.avgFillPrice = priorShares > 0
+      ? round3(((priorShares * priorAverage) + (fillShares * fillPrice)) / totalShares)
+      : round3(fillPrice);
+    record.filledShares = round3(record.filledShares + fillShares);
+    record.status = record.filledShares >= record.shares - 1e-9 ? 'FILLED' : 'PARTIAL';
+    const pos = {
+      id: ++posSeq,
+      orderId: record.id,
+      side: record.side,
+      entryPrice: fillPrice,
+      shares: fillShares,
+      cost,
+      filledAtMs: nowFn(),
+    };
+    engine[record.side].positions.push(pos);
+    engine[record.side].trades.push({
+      side: record.side,
+      type: 'fill',
+      entry: fillPrice,
+      shares: fillShares,
+      pnl: 0,
+    });
+    log(`🎯 ${record.side.toUpperCase()} FILL #${pos.id} — ${fillShares}sh @${fillPrice.toFixed(2)} | cost $${cost.toFixed(2)} | order #${record.id}`);
+  }
+
+  async function syncLiveOrder(record) {
+    const state = await trader.getOrder(record.orderId);
+    const originalSize = parseFloat(state?.original_size ?? state?.size ?? record.shares);
+    const filledShares = parseFloat(state?.size_matched ?? state?.filled_size ?? state?.taker_amount ?? '0');
+    const safeFilled = Number.isFinite(filledShares) ? Math.min(originalSize || record.shares, Math.max(0, filledShares)) : 0;
+    const newShares = round3(safeFilled - record.filledShares);
+    const cumulativeAverage = parseFloat(state?.avg_price ?? state?.avg_fill_price ?? record.price);
+    let marginalPrice = record.price;
+    if (Number.isFinite(cumulativeAverage) && cumulativeAverage > 0) {
+      const priorShares = record.filledShares;
+      const priorAverage = record.avgFillPrice || 0;
+      marginalPrice = priorShares > 0 && safeFilled > priorShares
+        ? ((safeFilled * cumulativeAverage) - (priorShares * priorAverage)) / (safeFilled - priorShares)
+        : cumulativeAverage;
+      marginalPrice = Math.min(0.99, Math.max(0.01, marginalPrice));
+    }
+    applyFill(record, newShares, marginalPrice);
+    const status = String(state?.status || '').toUpperCase();
+    if (status === 'CANCELLED' && record.status !== 'FILLED') record.status = safeFilled > 0 ? 'PARTIAL' : 'CANCELLED';
+  }
+
+  function processDemoFills() {
+    const leg = engine.leg;
+    for (const side of ['up', 'down']) {
+      const price = getPrice(side);
+      if (price == null) continue;
+      for (const record of engine[side].orders) {
+        if ((record.status === 'OPEN' || record.status === 'PARTIAL') && price <= record.price) {
+          applyFill(record, round3(record.shares - record.filledShares), record.price);
+        }
+      }
+    }
+  }
+
+  async function syncLiveFills() {
+    const openRecords = ['up', 'down'].flatMap(side => engine[side].orders)
+      .filter(record => record.orderId && record.status !== 'FILLED' && record.status !== 'CANCELLED');
+    if (!openRecords.length) return;
+    for (const record of openRecords) {
+      try { await syncLiveOrder(record); }
+      catch (e) { log(`⚠️ ORDER SYNC #${record.id}: ${e.message}`); }
+    }
+  }
+
+  async function cancelWindowOrders(oldLeg) {
+    for (const side of ['up', 'down']) {
+      for (const record of engine[side].orders) {
+        if (record.status === 'FILLED' || record.status === 'CANCELLED') continue;
+        try {
+          if (!DRY_RUN && record.orderId) await trader.cancelOrder(record.orderId);
+          if (!DRY_RUN && record.orderId) await syncLiveOrder(record);
+          if (record.status !== 'FILLED') record.status = record.filledShares > 0 ? 'PARTIAL' : 'CANCELLED';
+          if (record.status !== 'FILLED') log(`🚫 CANCELLED ${side.toUpperCase()} LIMIT #${record.id} @${record.price.toFixed(2)}`);
+        } catch (e) {
+          log(`⚠️ CANCEL FAIL ${side.toUpperCase()} #${record.id}: ${e.message}`);
+        }
+      }
+    }
+    void oldLeg;
   }
 
   function settleWindow(winner) {
     let totalPnl = 0;
+    let resolvedCount = 0;
     log(`🏁 WINDOW RESOLVED — ${String(winner).toUpperCase()}`);
     for (const side of ['up', 'down']) {
       const st = engine[side];
@@ -264,6 +360,7 @@ function createEngine(cfg) {
         engine.realizedPnl = round2(engine.realizedPnl + pnl);
         if (pnl > 0) engine.wins++; else engine.losses++;
         st.trades.push({ side, type: 'resolution', entry: pos.entryPrice, exit: winner === side ? 1.0 : 0, shares: pos.shares, pnl });
+        resolvedCount++;
         totalPnl += pnl;
         log(`🏁 ${side.toUpperCase()} #${pos.id} RESOLVED — ${winner === side ? 'WIN' : 'LOSS'} ${sgn2(pnl)}`);
       }
@@ -272,7 +369,7 @@ function createEngine(cfg) {
         const sideTotal = round2(st.trades.reduce((a, t) => a + t.pnl, 0));
         engine.history.unshift({
           windowTs: engine.leg.windowTs, slug: engine.leg.slug, side,
-          trades: st.trades.length, pnl: sideTotal, bankrollAfter: engine.bankroll,
+          trades: resolvedCount, pnl: sideTotal, bankrollAfter: engine.bankroll,
         });
       }
     }
@@ -291,6 +388,7 @@ function createEngine(cfg) {
         if (!engine.leg || engine.leg.windowTs !== windowTs) {
           if (engine.leg) {
             const oldLeg = engine.leg;
+            await cancelWindowOrders(oldLeg);
             if (!oldLeg.resolved) await attemptFastResolution(oldLeg);
             if (!oldLeg.resolved) await resolveLegOfficial(oldLeg);
             settleWindow(oldLeg.winner);
@@ -314,7 +412,12 @@ function createEngine(cfg) {
         }
 
         if (leg.discovered) {
-          await processEntry();
+          await processLadderInterval();
+          processDemoFills();
+          if (!DRY_RUN && now - lastOrderPoll >= 500) {
+            lastOrderPoll = now;
+            await syncLiveFills();
+          }
         }
 
         if (now - engine.lastEquityRecord >= EQUITY_RECORD_MS) {
@@ -341,7 +444,12 @@ function createEngine(cfg) {
     const leg = engine.leg;
     function sideInfo(name, st) {
       const p = name === 'up' ? (leg?.upMid || 0) : (leg?.downMid || 0);
+      const openOrders = st.orders.filter(order => order.status === 'OPEN' || order.status === 'PARTIAL');
       return {
+        orders: st.orders.slice(-20),
+        openOrders: openOrders.map(order => ({ ...order })),
+        openOrderCount: openOrders.length,
+        openOrderShares: openOrders.reduce((sum, order) => sum + (order.shares - order.filledShares), 0),
         positions: st.positions.map(pos => ({
           ...pos,
           unrealizedPnl: round2(pos.shares * p - pos.cost),
@@ -358,8 +466,8 @@ function createEngine(cfg) {
     );
     return {
       label, windowSeconds: winSec, dryRun: DRY_RUN,
-      strategy: 'early-favorite',
-      entryAtSeconds, minFavoritePrice, baseShares,
+      strategy: 'independent-limit-ladder',
+      orderIntervalSeconds, limitOffset, rangeMin, rangeMax, baseShares,
       bankroll: engine.bankroll, startingCapital: capital,
       realizedPnl: engine.realizedPnl,
       unrealizedPnl: totalUnreal,
@@ -386,8 +494,8 @@ function createEngine(cfg) {
   function setMode(live) { DRY_RUN = !live; log(`⚙️ ${live ? 'LIVE' : 'DEMO'}`); return { ok: true }; }
 
   async function start() {
-    log(`⛏ ${label} — Early Favorite Engine`);
-    log(`⚙️ t=${entryAtSeconds}s | Leading ≥${minFavoritePrice.toFixed(2)} | ${baseShares}sh | hold to resolution`);
+    log(`⛏ ${label} — Independent Limit Ladder`);
+    log(`⚙️ Every ${orderIntervalSeconds}s | ${baseShares}sh @ mid-${limitOffset.toFixed(2)} | range ${rangeMin.toFixed(2)}-${rangeMax.toFixed(2)} | hold to resolution`);
     log(`⚙️ Capital $${capital.toFixed(2)} | ${DRY_RUN ? 'DEMO' : 'LIVE'}`);
     mainLoop().catch(e => log(`❌ Fatal: ${e.message}`));
   }

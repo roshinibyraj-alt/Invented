@@ -10,8 +10,10 @@ const { createEngine } = require('./engine-factory');
 const DRY_RUN = (process.env.DRY_RUN || 'true').toLowerCase() === 'true';
 const CAPITAL = Number(process.env.CAPITAL || 4000);
 const BASE_SHARES = Number(process.env.BASE_SHARES || 50);
-const ENTRY_SECOND = Number(process.env.ENTRY_SECOND || 30);
-const MIN_FAVORITE_PRICE = Number(process.env.MIN_FAVORITE_PRICE || 0.64);
+const ORDER_INTERVAL_SECONDS = Number(process.env.ORDER_INTERVAL_SECONDS || 20);
+const LIMIT_OFFSET = Number(process.env.LIMIT_OFFSET || 0.10);
+const RANGE_MIN = Number(process.env.RANGE_MIN || 0.25);
+const RANGE_MAX = Number(process.env.RANGE_MAX || 0.99);
 
 let engine = null;
 
@@ -32,7 +34,7 @@ app.post('/api/hedge/resume', (_, r) => { try { if (engine) engine.resumeTrading
 const DASH = `<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
-<title>BTC Early Favorite Bot</title>
+<title>BTC Limit Ladder Bot</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Courier New',monospace;background:#000;color:#fff;font-size:12px;font-weight:bold;-webkit-text-size-adjust:100%;overflow-x:hidden}
@@ -59,7 +61,8 @@ body{font-family:'Courier New',monospace;background:#000;color:#fff;font-size:12
 .side-card{background:#111;border:1px solid #444;border-radius:8px;padding:8px 10px;margin-bottom:6px}
 .sc-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px}
 .sc-name{font-size:13px}.sc-up{color:#00ccff}.sc-down{color:#aa88ff}
-.position-tag{display:inline-block;padding:2px 6px;margin:2px;border-radius:3px;font-size:9px;background:#00ff8822;color:#00ff88;border:1px solid #00ff88}
+.position-tag{display:block;padding:4px 6px;margin-top:5px;border-radius:4px;font-size:12px;background:#00ff8822;color:#00ff88}
+.order-tag{display:block;padding:4px 6px;margin-top:5px;border-radius:4px;font-size:12px;background:#ffcc0022;color:#ffcc00}
 .history-list{max-height:300px;overflow-y:auto}
 .h-item{display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #1a1a1a;font-size:10px;gap:6px;flex-wrap:wrap}
 .h-result{font-size:10px;padding:1px 5px;border-radius:3px;font-weight:bold}
@@ -70,7 +73,7 @@ body{font-family:'Courier New',monospace;background:#000;color:#fff;font-size:12
 @media(max-width:600px){.chart-box{margin:6px 10px 0}}
 .chart-box canvas{width:100%;height:120px;background:#111;border-radius:6px}
 </style></head><body>
-<div class="hd"><div><div class="logo">BTC <span>Early Favorite</span></div></div><div class="badge badge-dem" id="mode-badge">DEMO</div></div>
+<div class="hd"><div><div class="logo">BTC <span>Limit Ladder</span></div></div><div class="badge badge-dem" id="mode-badge">DEMO</div></div>
 <div class="stats-row" id="stats-row"></div>
 <div class="chart-box"><canvas id="eq-chart"></canvas></div>
 <div class="panel"><div class="p-hd"><div class="p-title">5 MINUTE WINDOWS</div><div class="p-badge" id="eng-badge">--</div></div><div class="p-body" id="eng-body"></div></div>
@@ -87,12 +90,18 @@ var pC=function(n){return n>0?'pos':n<0?'neg':''};
 function sideHtml(name,st){
   if(!st)return'';
   var posList=st.positions||[];
+  var orderList=st.openOrders||[];
   var h='<div class="side-card">';
   h+='<div class="sc-head">';
   h+='<span class="sc-name sc-'+name+'">'+name.toUpperCase()+'</span>';
   h+='<span style="color:#fff;font-size:13px;font-weight:bold">'+st.totalShares+' SH</span>';
   h+='<span style="font-size:11px" class="'+pC(st.totalUnrealized)+'">'+sgn(st.totalUnrealized)+'</span>';
   h+='</div>';
+  h+='<div style="font-size:12px;color:#ffcc00">'+orderList.length+' OPEN · '+fmt2(st.openOrderShares||0)+'SH RESTING</div>';
+  for(var j=0;j<orderList.length;j++){
+    var o=orderList[j];
+    h+='<span class="order-tag">#'+o.id+' BUY '+o.shares+'sh @'+fmt2(o.price)+' | t='+o.placedAtSecond+'s</span>';
+  }
   if(posList.length){
     for(var i=0;i<posList.length;i++){
       var p=posList[i];
@@ -169,7 +178,7 @@ function render(){
     '<div class="st"><div class="st-l">Equity</div><div class="st-v">$'+fmt2(st?st.equity:0)+'</div></div>',
     '<div class="st"><div class="st-l">Realized</div><div class="st-v '+pC(st?st.realizedPnl:0)+'">'+sgn(st?st.realizedPnl:0)+'</div></div>',
     '<div class="st"><div class="st-l">W/L</div><div class="st-v"><span class="pos">'+(st?(st.wins||0):0)+'W</span>/<span class="neg">'+(st?(st.losses||0):0)+'L</span></div></div>',
-    '<div class="st"><div class="st-l">Fees</div><div class="st-v">$'+fmt2(st?st.totalFeesPaid:0)+'</div></div>',
+    '<div class="st"><div class="st-l">Open Orders</div><div class="st-v">'+((st?.up?.openOrderCount||0)+(st?.down?.openOrderCount||0))+'</div></div>',
   ].join('');
   $('eng-body').innerHTML=panelHtml(st);
   $('eng-badge').textContent=(st?(st.wins||0)+'W/'+(st.losses||0)+'L':'--')+' | '+sgn(st?st.realizedPnl:0);
@@ -184,7 +193,8 @@ function renderLogs(){
   var wasAtBottom=el.scrollHeight-el.scrollTop-el.clientHeight<40;
   el.innerHTML=allLogs.slice(-200).map(function(l){
     var c='';
-    if(l.indexOf('FAVORITE')>=0)c=' style="color:#00ccff"';
+    if(l.indexOf('LIMIT')>=0)c=' style="color:#ffcc00"';
+    else if(l.indexOf('FILL')>=0)c=' style="color:#00ccff"';
     else if(l.indexOf('RESOLVED')>=0)c=' style="color:'+(l.indexOf('WIN')>=0?'#00ff88':'#ff4444')+'"';
     else if(l.indexOf('RESOLVED')>=0)c=' style="color:#ffcc00"';
     return'<div'+c+'>'+l.replace(/</g,'&lt;')+'</div>';
@@ -192,7 +202,7 @@ function renderLogs(){
   if(wasAtBottom)el.scrollTop=el.scrollHeight;
 }
 
-socket.on('hedgeState:BTC-FAV',function(s){latest=s;render()});
+socket.on('hedgeState:BTC-LADDER',function(s){latest=s;render()});
 socket.on('log',function(line){allLogs.push(line);if(allLogs.length>500)allLogs.shift();renderLogs()});
 setInterval(render,1000);
 setInterval(async function(){
@@ -211,20 +221,22 @@ const slog = (line) => { console.log(line); io.emit('log', line); };
 const PK = process.env.PRIVATE_KEY;
 if (!PK) { console.error('PRIVATE_KEY env var missing'); process.exit(1); }
 
-console.log('BTC Early Favorite Engine');
+console.log('BTC Independent Limit Ladder');
 server.listen(PORT, '0.0.0.0', () => {
   console.log('Dashboard: http://0.0.0.0:' + PORT);
   (async () => {
     const trader = new PolymarketTrader(PK);
     await trader.authenticate();
     engine = createEngine({
-      label: 'BTC-FAV',
+      label: 'BTC-LADDER',
       windowType: '5m',
       startingCapital: CAPITAL,
       windowSeconds5: 300,
       baseShares: BASE_SHARES,
-      entryAtSeconds: ENTRY_SECOND,
-      minFavoritePrice: MIN_FAVORITE_PRICE,
+      orderIntervalSeconds: ORDER_INTERVAL_SECONDS,
+      limitOffset: LIMIT_OFFSET,
+      rangeMin: RANGE_MIN,
+      rangeMax: RANGE_MAX,
       statsStatePath: process.env.STATS_STATE_PATH || path.join(__dirname, 'stats-dip.json'),
       trader, dryRun: DRY_RUN, emit, slog,
     });
