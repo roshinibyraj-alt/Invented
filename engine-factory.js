@@ -524,7 +524,7 @@ function createEngine(config) {
 
   function start() {
     log(`⛏ ${label} — Martingale restored`);
-    log(`⚙️ Exact entry ${entryPrice.toFixed(2)} | stop ${stopLossPrice.toFixed(2)} | base ${baseStakeUsd.toFixed(2)}`);
+    log(`⚙️ ${entryPrice.toFixed(2)} walk-through entry | stop ${stopLossPrice.toFixed(2)} | base ${baseStakeUsd.toFixed(2)}`);
     log(`⚙️ ${martingaleMultiplier.toFixed(2)}x cross-window martingale | entries ${entryStartSecond}-${entryEndSecond}s | max ${maxMartingales} | reset after win | stops always active | ${dryRunMode ? 'DEMO' : 'LIVE'}`);
     mainLoop().catch(error => log(`❌ fatal: ${error.message}`));
   }
