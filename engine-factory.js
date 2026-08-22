@@ -27,10 +27,12 @@ function createEngine(config) {
     windowType = '5m',
     windowSeconds5 = 300,
     baseStakeUsd = 50,
-    martingaleMultiplier = 1.5,
+    martingaleMultiplier = 2.5,
     maxMartingales = 3,
     entryMin = 0.60,
     entryMax = 0.70,
+    entryStartSecond = 30,
+    entryEndSecond = 270,
     stopLossPrice = 0.45,
     feeTheta = 0.07,
     trader,
@@ -193,9 +195,20 @@ function createEngine(config) {
     executionRetryAt = nowFn() + EXECUTION_RETRY_MS;
   }
 
+  function elapsedSecond() {
+    if (!engine.leg) return null;
+    return Math.floor((nowFn() - engine.leg.windowTs * 1000) / 1000);
+  }
+
+  function entryAllowed() {
+    const second = elapsedSecond();
+    return second != null && second >= entryStartSecond && second < entryEndSecond;
+  }
+
   async function enterPosition() {
     const now = nowFn();
     if (!engine.leg?.discovered || engine.position || now < executionRetryAt) return;
+    if (!entryAllowed()) return;
     const nextLevel = engine.windowTradeCount;
     if (nextLevel >= maxLevels()) return;
 
@@ -423,9 +436,13 @@ function createEngine(config) {
       maxMartingales,
       entryMin,
       entryMax,
+      entryStartSecond,
+      entryEndSecond,
+      elapsedSecond: elapsedSecond(),
+      tradingAllowed: entryAllowed(),
       stopLossPrice,
       nextStakeIfStopped: position ? stakeForLevel(Math.min(maxLevels() - 1, position.level + 1)) : stakeForLevel(engine.windowTradeCount),
-      canEnter: engine.windowTradeCount < maxLevels(),
+      canEnter: entryAllowed() && engine.windowTradeCount < maxLevels(),
       bankroll: engine.bankroll,
       startingCapital: capital,
       realizedPnl: engine.realizedPnl,
@@ -466,7 +483,7 @@ function createEngine(config) {
   function start() {
     log(`⛏ ${label} — Martingale restored`);
     log(`⚙️ Entry ${entryMin.toFixed(2)}-${entryMax.toFixed(2)} | stop ${stopLossPrice.toFixed(2)} | base $${baseStakeUsd.toFixed(2)}`);
-    log(`⚙️ ${martingaleMultiplier.toFixed(2)}x martingale | max ${maxMartingales} | ${dryRunMode ? 'DEMO' : 'LIVE'}`);
+    log(`⚙️ ${martingaleMultiplier.toFixed(2)}x martingale | entries ${entryStartSecond}-${entryEndSecond}s | max ${maxMartingales} | stops always active | ${dryRunMode ? 'DEMO' : 'LIVE'}`);
     mainLoop().catch(error => log(`❌ fatal: ${error.message}`));
   }
 

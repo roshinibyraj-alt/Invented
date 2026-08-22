@@ -10,11 +10,13 @@ const { createEngine } = require('./engine-factory');
 const DRY_RUN = (process.env.DRY_RUN || 'true').toLowerCase() === 'true';
 const CAPITAL = Number(process.env.CAPITAL || 4000);
 const BASE_STAKE_USD = Number(process.env.BASE_STAKE_USD || 50);
-const MARTINGALE_MULTIPLIER = Number(process.env.MARTINGALE_MULTIPLIER || 1.5);
+const MARTINGALE_MULTIPLIER = Number(process.env.MARTINGALE_MULTIPLIER || 2.5);
 const MAX_MARTINGALES = Number(process.env.MAX_MARTINGALES || 3);
 const ENTRY_MIN = Number(process.env.ENTRY_MIN || 0.60);
 const ENTRY_MAX = Number(process.env.ENTRY_MAX || 0.70);
 const STOP_LOSS_PRICE = Number(process.env.STOP_LOSS_PRICE || 0.45);
+const ENTRY_START_SECOND = Number(process.env.ENTRY_START_SECOND || 30);
+const ENTRY_END_SECOND = Number(process.env.ENTRY_END_SECOND || 270);
 
 let engine = null;
 const app = express();
@@ -85,9 +87,9 @@ function render(){
  h+='<div class="prices"><div><div class="label">UP PRICE</div><div class="price accent">'+f3(leg?leg.upMid:null)+'</div></div><div><div class="label">LEFT</div><div class="count">'+(leg?leg.secsLeft||0:0)+'s</div></div><div><div class="label">DOWN PRICE</div><div class="price warning">'+f3(leg?leg.downMid:null)+'</div></div></div>';
  h+='<div class="card position">';
  if(p){h+='<div class="pos-line">'+p.side.toUpperCase()+' '+p.label+' · '+p.shares+' SH @'+f2(p.entryPrice)+'</div><div class="sub">Cost $'+f2(p.cost)+' · Stop '+f2(p.stopLossPrice)+' · Mark '+f3(p.markPrice)+'<br>Float <span class="'+cls(p.unrealizedPnl)+'">'+signed(p.unrealizedPnl)+'</span> · Next MG $'+f2(s.nextStakeIfStopped)+'</div>'}
- else{h+='<div class="pos-line flat">NO OPEN POSITION</div><div class="sub">Entry zone '+f2(s?s.entryMin:0)+'–'+f2(s?s.entryMax:0)+' · Stop '+f2(s?s.stopLossPrice:0)+'<br>'+((s&&s.canEnter)?'Watching UP/DOWN':'Martingale limit reached')+'</div>'}
+ else{h+='<div class="pos-line flat">NO OPEN POSITION</div><div class="sub">Entry zone '+f2(s?s.entryMin:0)+'–'+f2(s?s.entryMax:0)+' · Entries '+(s?s.elapsedSecond||0:0)+'/'+(s?s.entryStartSecond||0)+'–'+(s?s.entryEndSecond||0)+'s · Stop '+f2(s?s.stopLossPrice:0)+'<br>'+((s&&s.canEnter)?'Watching UP/DOWN':((s&&s.tradingAllowed===false)?'Stop-only period':'Martingale limit reached'))+'</div>'}
  h+='</div>';
- h+='<div class="card" style="margin-top:8px"><div class="label">STRATEGY</div><div class="sub">$'+f2(s?s.baseStakeUsd:0)+' base · '+f2(s?s.martingaleMultiplier:0)+'x martingale · max '+(s?s.maxMartingales:0)+' · hold or stop at resolution</div></div>';
+ h+='<div class="card" style="margin-top:8px"><div class="label">STRATEGY</div><div class="sub">$'+f2(s?s.baseStakeUsd:0)+' base · '+f2(s?s.martingaleMultiplier:0)+'x martingale · entries '+(s?s.entryStartSecond||0)+'–'+(s?s.entryEndSecond||0)+'s · stop always active</div></div>';
  h+='<div class="history">';
  var hist=s?s.history||[]:[];
  for(var i=0;i<hist.length;i++){var x=hist[i];h+='<div class="row"><span>'+String(x.windowTs).slice(-5)+'</span><span>'+x.sides+'</span><span>'+x.trades+'T / '+x.martingales+'MG</span><span class="result '+(x.pnl>=0?'win':'loss')+'">'+(x.pnl>=0?'WIN':'LOSS')+' '+signed(x.pnl)+'</span></div>'}
@@ -128,6 +130,8 @@ server.listen(PORT, '0.0.0.0', () => {
       maxMartingales: MAX_MARTINGALES,
       entryMin: ENTRY_MIN,
       entryMax: ENTRY_MAX,
+      entryStartSecond: ENTRY_START_SECOND,
+      entryEndSecond: ENTRY_END_SECOND,
       stopLossPrice: STOP_LOSS_PRICE,
       statsStatePath: process.env.STATS_STATE_PATH || path.join(__dirname, 'stats-martingale.json'),
       trader,
