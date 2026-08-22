@@ -32,6 +32,7 @@ function createEngine(config) {
     entryPrice = 0.70,
     entryStartSecond = 30,
     entryEndSecond = 270,
+    allowedWindows = null,
     stopLossPrice = 0.45,
     strategy = 'walkthrough',
     sharedCapital = null,
@@ -242,6 +243,9 @@ function createEngine(config) {
 
   function entryAllowed() {
     const second = elapsedSecond();
+    if (allowedWindows && Array.isArray(allowedWindows)) {
+      return second != null && allowedWindows.some(w => second >= w.start && second < w.end);
+    }
     return second != null && second >= entryStartSecond && second < entryEndSecond;
   }
 
@@ -653,6 +657,7 @@ function createEngine(config) {
       entryPrice,
       entryStartSecond,
       entryEndSecond,
+      allowedWindows: allowedWindows || null,
       elapsedSecond: elapsedSecond(),
       tradingAllowed: entryAllowed(),
       stopLossPrice,
@@ -699,11 +704,14 @@ function createEngine(config) {
   }
 
   function start() {
-    log(`⛏ ${label} — Martingale restored`);
+    log(`⛏ ${label} — Momentum engine started`);
     log(strategy === 'limit-pair'
       ? `⚙️ ${entryPrice.toFixed(2)} paired limits | no stop | base ${baseStakeUsd.toFixed(2)}`
       : `⚙️ ${entryPrice.toFixed(2)} walk-through entry | stop ${stopLossPrice.toFixed(2)} | base ${baseStakeUsd.toFixed(2)}`);
-    log(`⚙️ ${martingaleMultiplier.toFixed(2)}x cross-window martingale | entries ${entryStartSecond}-${entryEndSecond}s | max ${maxMartingales} | reset after win | stops always active | ${dryRunMode ? 'DEMO' : 'LIVE'}`);
+    const windowDesc = allowedWindows
+      ? allowedWindows.map(w => `${w.start}-${w.end}s`).join(' & ')
+      : `${entryStartSecond}-${entryEndSecond}s`;
+    log(`⚙️ flat stake | entries ${windowDesc} | stops always active | ${dryRunMode ? 'DEMO' : 'LIVE'}`);
     mainLoop().catch(error => log(`❌ fatal: ${error.message}`));
   }
 
