@@ -22,6 +22,7 @@ let stats={realizedPnl:0,wins:0,losses:0,totalFees:0,equityCurve:[],history:[],l
 let leg=null,btcOpen=null,btcNow=null,upMid=null,downMid=null,fairUp=null;
 let positions=[],firedSides=new Set(),lastDiscovery=0,lastBtc=0,lastClob=0,lastEquity=0;
 let pendingResolutions=[];
+let flipCount=0,oppositeEdgeTicks=0;
 
 async function j(url){const r=await fetch(url);if(!r.ok)throw new Error(r.status+' '+url);return r.json();}
 function r2(v){return Math.round(v*100)/100}
@@ -62,11 +63,50 @@ function fairProbability(){
 
 function findEdge(){
   if(fairUp==null||upMid==null||downMid==null)return null;
-  const upEdge=upMid-(fairUp*(1-EDGE_THRESHOLD));
-  const downEdge=downMid-((1-fairUp)*(1-EDGE_THRESHOLD));
-  if(upEdge<0)return{side:'up',price:upMid,fairUp};
-  if(downEdge<0)return{side:'down',price:downMid,fairUp};
+  const fairDown=1-fairUp;
+  if(upMid<(fairUp*(1-EDGE_THRESHOLD))&&!firedSides.has('up'))return{side:'up',price:upMid};
+  if(downMid<(fairDown*(1-EDGE_THRESHOLD))&&!firedSides.has('down'))return{side:'down',price:downMid};
   return null;
+}
+
+const WINNER_THRESHOLD=0.90;
+
+function checkFlip(){
+  if(flipCount>=1||fairUp==null)return;
+  const hasUp=positions.some(p=>p.side==='up');
+  const hasDown=positions.some(p=>p.side==='down');
+  if(!hasUp&&!hasDown){oppositeEdgeTicks=0;return;}
+  const oppositeSide=hasUp?'down':'up';
+  const oppPrice=oppositeSide==='down'?downMid:upMid;
+  const oppFair=oppositeSide==='down'?(1-fairUp):fairUp;
+  if(oppPrice!=null&&oppPrice<(oppFair*(1-EDGE_THRESHOLD))){oppositeEdgeTicks++}else{oppositeEdgeTicks=0;return}
+  if(oppositeEdgeTicks<3)return;
+  slog(`🔄 FLIP SIGNAL — ${oppositeSide.toUpperCase()} edge confirmed (${oppositeEdgeTicks} ticks)`);
+  const toClose=positions.find(p=>p.side!==oppositeSide);
+  if(toClose){
+    const exitMid=toClose.side==='up'?upMid:downMid;
+    const pnl=r2(toClose.shares*(exitMid||toClose.entryPrice)-toClose.cost);
+    stats.realizedPnl=r2(stats.realizedPnl+pnl);
+    if(pnl>0)stats.wins++;else stats.losses++;
+    positions=positions.filter(p=>p.side!==toClose.side||p!==toClose);
+    slog(`🔄 FLIP CLOSE ${toClose.side.toUpperCase()} @${(exitMid||toClose.entryPrice).toFixed(2)} — PnL ${money(pnl)}`);
+  }
+  firedSides.add(oppositeSide);flipCount++;
+  fire(oppositeSide,oppPrice);
+}
+
+function fastResolve(){
+  if(!leg?.discovered||!positions.length)return;
+  const elapsed=leg.elapsedSecond();
+  if(elapsed<295)return;
+  for(const pos of [...positions]){
+    const mid=pos.side==='up'?upMid:downMid;
+    if(mid!=null&&mid>WINNER_THRESHOLD){
+      settleWith(pos,pos.side);
+      positions=positions.filter(p=>p.id!==pos.id);
+      slog(`⚡ FAST RESOLVE ${pos.side.toUpperCase()} — CLOB ${mid.toFixed(2)}>0.90`);
+    }
+  }
 }
 
 async function fire(side,clobPrice){
@@ -116,7 +156,7 @@ async function tryResolve(oldLeg){
 
 function resetWindow(ts){
   leg={windowTs:ts,elapsedSecond:()=>Math.floor(Date.now()/1000)-ts,discovered:false};
-  btcOpen=null;positions=[];firedSides.clear();lastDiscovery=0;
+  btcOpen=null;positions=[];firedSides.clear();lastDiscovery=0;flipCount=0;oppositeEdgeTicks=0;
   slog(`🆕 window t=${ts}`);
 }
 
@@ -144,6 +184,8 @@ async function loop(){
       if(Date.now()-lastClob>=200){lastClob=Date.now();await fetchClobPrices()}
       fairUp=fairProbability();
       const elapsed=leg?.elapsedSecond?.()||0;
+      fastResolve();
+      checkFlip();
       if(leg?.discovered&&elapsed>=TRADE_START&&elapsed<TRADE_END&&positions.length<2&&btcOpen!=null){
         const edge=findEdge();
         if(edge&&!firedSides.has(edge.side))await fire(edge.side,edge.price);
