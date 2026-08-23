@@ -99,13 +99,15 @@ function fastResolve(){
   if(!leg?.discovered||!positions.length)return;
   const elapsed=leg.elapsedSecond();
   if(elapsed<295)return;
+  const upWinning=upMid!=null&&upMid>WINNER_THRESHOLD;
+  const downWinning=downMid!=null&&downMid>WINNER_THRESHOLD;
+  if(!upWinning&&!downWinning)return;
+  const winner=upWinning?'up':downWinning?'down':null;
+  if(!winner)return;
+  slog(`⚡ FAST RESOLVE triggered — ${winner.toUpperCase()} CLOB ${(winner==='up'?upMid:downMid).toFixed(2)}>0.90`);
   for(const pos of [...positions]){
-    const mid=pos.side==='up'?upMid:downMid;
-    if(mid!=null&&mid>WINNER_THRESHOLD){
-      settleWith(pos,pos.side);
-      positions=positions.filter(p=>p.id!==pos.id);
-      slog(`⚡ FAST RESOLVE ${pos.side.toUpperCase()} — CLOB ${mid.toFixed(2)}>0.90`);
-    }
+    settleWith(pos,winner===pos.side?winner:(winner==='up'?'down':'up'));
+    positions=positions.filter(p=>p.id!==pos.id);
   }
 }
 
