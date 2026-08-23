@@ -416,6 +416,16 @@ function createEngine(config) {
     const qualifyingSides = ['up', 'down'].filter(side => isWalkThrough(getPrice(side), side === 'up' ? engine.up.previousMid : engine.down.previousMid));
     if (!qualifyingSides.length) return;
 
+    if (block === 1) {
+      const block1Position = engine.positions.find(p => p.block === 0);
+      if (block1Position) {
+        const opposite = block1Position.side === 'up' ? 'down' : 'up';
+        if (!qualifyingSides.includes(opposite)) return;
+        qualifyingSides.length = 0;
+        qualifyingSides.push(opposite);
+      }
+    }
+
     qualifyingSides.sort((left, right) => getPrice(right) - getPrice(left));
     const side = qualifyingSides[0];
     const targetStake = stakeForLevel(nextLevel);
