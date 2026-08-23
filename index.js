@@ -84,8 +84,10 @@ function fairProbability(){
 function findEdge(){
   if(fairUp==null||upMid==null||downMid==null)return null;
   const fairDown=1-fairUp;
-  if(upMid<(fairUp*(1-EDGE_THRESHOLD))&&!firedSides.has('up'))return{side:'up',price:upMid};
-  if(downMid<(fairDown*(1-EDGE_THRESHOLD))&&!firedSides.has('down'))return{side:'down',price:downMid};
+  const upDominant=upMid>0.75;
+  const downDominant=downMid>0.75;
+  if(upMid<(fairUp*(1-EDGE_THRESHOLD))&&!firedSides.has('up')&&!downDominant)return{side:'up',price:upMid};
+  if(downMid<(fairDown*(1-EDGE_THRESHOLD))&&!firedSides.has('down')&&!upDominant)return{side:'down',price:downMid};
   return null;
 }
 
