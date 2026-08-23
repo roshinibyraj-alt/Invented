@@ -23,6 +23,7 @@ let leg=null,btcOpen=null,btcNow=null,upMid=null,downMid=null,fairUp=null;
 let positions=[],firedSides=new Set(),lastDiscovery=0,lastBtc=0,lastClob=0,lastEquity=0;
 let pendingResolutions=[];
 let flipCount=0,oppositeEdgeTicks=0;
+let resolvedIds=new Set();
 
 async function j(url){const r=await fetch(url);if(!r.ok)throw new Error(r.status+' '+url);return r.json();}
 function r2(v){return Math.round(v*100)/100}
@@ -102,8 +103,9 @@ function fastResolve(){
   const upWinning=upMid!=null&&upMid>WINNER_THRESHOLD;
   const downWinning=downMid!=null&&downMid>WINNER_THRESHOLD;
   if(!upWinning&&!downWinning)return;
-  const winner=upWinning?'up':downWinning?'down':null;
+  const winner=upWinning&&downWinning?((upMid>downMid)?'up':'down'):upWinning?'up':downWinning?'down':null;
   if(!winner)return;
+  if(upWinning&&downWinning)slog(`⚠️ both mids >0.90 (${upMid}/${downMid}) — picking ${winner.toUpperCase()}`);
   slog(`⚡ FAST RESOLVE triggered — ${winner.toUpperCase()} CLOB ${(winner==='up'?upMid:downMid).toFixed(2)}>0.90`);
   for(const pos of [...positions]){
     settleWith(pos,winner===pos.side?winner:(winner==='up'?'down':'up'));
@@ -137,6 +139,8 @@ async function fire(side,clobPrice){
 
 function settleWith(pos,winner){
   if(!pos)return;
+  if(resolvedIds.has(pos.id))return;
+  resolvedIds.add(pos.id);
   const won=winner===pos.side,payout=won?pos.shares:0,pnl=r2(payout-pos.cost);
   stats.realizedPnl=r2(stats.realizedPnl+pnl);
   if(pnl>0)stats.wins++;else stats.losses++;
@@ -158,7 +162,7 @@ async function tryResolve(oldLeg){
 
 function resetWindow(ts){
   leg={windowTs:ts,elapsedSecond:()=>Math.floor(Date.now()/1000)-ts,discovered:false};
-  btcOpen=null;positions=[];firedSides.clear();lastDiscovery=0;flipCount=0;oppositeEdgeTicks=0;
+  btcOpen=null;positions=[];firedSides.clear();lastDiscovery=0;flipCount=0;oppositeEdgeTicks=0;resolvedIds.clear();
   slog(`🆕 window t=${ts}`);
 }
 
