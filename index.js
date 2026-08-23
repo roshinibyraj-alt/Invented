@@ -77,7 +77,7 @@ function fairProbability(){
   const elapsed=Math.floor(Date.now()/1000)-leg.windowTs;
   const secsLeft=Math.max(1,300-elapsed);
   const diff=btcNow-btcOpen;
-  const sigma=Math.sqrt(secsLeft)*12;
+  const sigma=Math.sqrt(secsLeft)*3;
   return 1/(1+Math.exp(-diff/sigma));
 }
 
