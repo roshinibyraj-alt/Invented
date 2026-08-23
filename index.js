@@ -78,11 +78,12 @@ function chart(curve,start){if(!curve||curve.length<2)return '<div class="card c
 function render(){
  if(!state)return;q('mode').textContent=state.dryRun?'DEMO':'LIVE';q('mode').className='badge '+(state.dryRun?'demo':'live');
  q('topstats').innerHTML=box('CAPITAL','$'+f2(state.equity))+box('REALIZED PNL','<span class="'+cls(state.realizedPnl)+'">'+signed(state.realizedPnl)+'</span>')+box('W/L','<span class="positive">'+(state.wins||0)+'W</span>/<span class="negative">'+(state.losses||0)+'L</span>')+box('FEES PAID','$'+f2(state.totalFeesPaid));
- var s=state,leg=s.currentLeg,p=s.position,h='';
+ var s=state,leg=s.currentLeg,positions=s.positions||[],h='';
  h+='<div class="panel-head"><div class="panel-name">'+esc(s.label)+' <span>0.70 MOMENTUM</span></div><div>'+(leg&&leg.discovered?'LIVE':'FINDING')+'</div></div><div class="body">';
  h+='<div class="prices"><div><div class="label">UP</div><div class="price accent">'+f3(leg?leg.upMid:null)+'</div></div><div><div class="label">LEFT</div><div class="count">'+(leg?leg.secsLeft||0:0)+'s</div></div><div><div class="label">DOWN</div><div class="price warning">'+f3(leg?leg.downMid:null)+'</div></div></div>';
  h+='<div class="card position">';
- if(p)h+='<div class="pos-line">'+esc(p.side.toUpperCase())+' '+esc(p.label)+' · '+esc(p.shares)+' SH @'+f2(p.entryPrice)+'</div><div class="sub">Cost $'+f2(p.cost)+' · Mark '+f3(p.markPrice)+' · Stop '+f2(p.stopLossPrice)+'<br>Float <span class="'+cls(p.unrealizedPnl)+'">'+signed(p.unrealizedPnl)+'</span></div>';
+ if(positions.length){for(var pi=0;pi<positions.length;pi++){var p=positions[pi];
+  h+='<div class="pos-line">'+esc(p.side.toUpperCase())+' B'+((p.block||0)+1)+' · '+esc(p.shares)+' SH @'+f2(p.entryPrice)+'</div><div class="sub">Cost $'+f2(p.cost)+' · Mark '+f3(p.markPrice)+' · Stop '+f2(p.stopLossPrice)+' · Float <span class="'+cls(p.unrealizedPnl)+'">'+signed(p.unrealizedPnl)+'</span></div>';}}
  else h+='<div class="pos-line flat">NO POSITION</div><div class="sub">$500 base · entries 30–60s & 120–150s · '+(s.tradingAllowed?'Watching':'Outside window')+' · '+((s.elapsedSecond!=null)?s.elapsedSecond+'s':'')+'</div>';
  h+='</div>';
  h+='<div class="card" style="margin-top:8px"><div class="label">STRATEGY</div><div class="sub">$500 flat · no martingale · entry @0.70 walk-through · stop @0.45 · windows 30–60s & 120–150s only</div></div>';

@@ -72,13 +72,14 @@ function createEngine(config) {
     up: freshSideState(),
     down: freshSideState(),
     leg: null,
-    position: null,
+    positions: [],
     martingaleLevel: saved ? saved.martingaleLevel || 0 : 0,
     lastTradeWindowTs: saved ? saved.lastTradeWindowTs || null : null,
     windowTradeCount: 0,
     windowMartingaleLevel: 0,
     windowSides: [],
     windowPnl: 0,
+    firedBlocks: {},
     pendingOrders: saved && Array.isArray(saved.pendingOrders) ? saved.pendingOrders : [],
     lastPriceFetch: 0,
     lastEquityRecord: 0,
@@ -241,6 +242,15 @@ function createEngine(config) {
     return Math.floor((nowFn() - engine.leg.windowTs * 1000) / 1000);
   }
 
+  function currentBlock() {
+    const second = elapsedSecond();
+    if (!allowedWindows || !Array.isArray(allowedWindows)) return null;
+    for (let i = 0; i < allowedWindows.length; i++) {
+      if (second >= allowedWindows[i].start && second < allowedWindows[i].end) return i;
+    }
+    return null;
+  }
+
   function entryAllowed() {
     const second = elapsedSecond();
     if (allowedWindows && Array.isArray(allowedWindows)) {
@@ -393,9 +403,13 @@ function createEngine(config) {
 
   async function enterPosition() {
     const now = nowFn();
-    if (!engine.leg?.discovered || engine.position || now < executionRetryAt) return;
+    if (!engine.leg?.discovered || now < executionRetryAt) return;
     if (!entryAllowed()) return;
-    if (engine.lastTradeWindowTs === engine.leg.windowTs) return;
+    if (engine.positions.length >= 2) return;
+    const block = currentBlock();
+    if (block == null) return;
+    const blockKey = `${engine.leg.windowTs}:${block}`;
+    if (engine.firedBlocks[blockKey]) return;
     const nextLevel = engine.martingaleLevel;
     if (nextLevel >= maxLevels()) return;
 
@@ -444,7 +458,7 @@ function createEngine(config) {
     adjustCapital(-cost);
     engine.totalFeesPaid = round2(engine.totalFeesPaid + fee);
     if (sharedCapital) sharedCapital.addFee(fee);
-    engine.position = {
+    const position = {
       id: ++positionSequence,
       side,
       level: nextLevel,
@@ -454,20 +468,21 @@ function createEngine(config) {
       entryPrice,
       cost,
       openedAtMs: now,
+      block,
     };
+    engine.positions.push(position);
     engine.up.previousMid = getPrice('up');
     engine.down.previousMid = getPrice('down');
-    engine.lastTradeWindowTs = engine.leg.windowTs;
     engine.windowTradeCount += 1;
+    engine.firedBlocks[blockKey] = true;
     engine.windowMartingaleLevel = nextLevel;
     engine.windowSides.push(side.toUpperCase());
     executionRetryAt = 0;
     saveStats();
-    log(`🎯 ${side.toUpperCase()} ${engine.position.label} BUY — $${targetStake.toFixed(2)} → ${shares}sh @${entryPrice.toFixed(2)} | cost $${cost.toFixed(2)} | stop ${stopLossPrice.toFixed(2)}`);
+    log(`🎯 ${side.toUpperCase()} BLOCK${block + 1} BUY — $${targetStake.toFixed(2)} → ${shares}sh @${entryPrice.toFixed(2)} | cost $${cost.toFixed(2)} | stop ${stopLossPrice.toFixed(2)}`);
   }
 
-  function closePosition(exitPrice, closeType) {
-    const position = engine.position;
+  function closePosition(position, exitPrice, closeType) {
     const proceeds = round2(position.shares * exitPrice);
     const fee = computeFee(position.shares, exitPrice);
     const netProceeds = round2(proceeds - fee);
@@ -478,17 +493,17 @@ function createEngine(config) {
     engine.totalFeesPaid = round2(engine.totalFeesPaid + fee);
     engine.windowPnl = round2(engine.windowPnl + pnl);
     if (pnl > 0) engine.wins += 1; else engine.losses += 1;
-    engine.position = null;
+    engine.positions = engine.positions.filter(p => p.id !== position.id);
     log(`${closeType === 'STOP' ? '🛑' : '🏁'} ${position.side.toUpperCase()} ${position.label} ${closeType} — ${position.shares}sh @${exitPrice.toFixed(2)} | PnL ${money(pnl)}`);
     registerResult(position, pnl);
     return pnl;
   }
 
   async function checkStopLoss() {
-    const position = engine.position;
-    if (!position || !engine.leg?.discovered) return;
+    if (!engine.leg?.discovered || !engine.positions.length) return;
+    for (const position of [...engine.positions]) {
     const price = getPrice(position.side);
-    if (price == null || price > stopLossPrice) return;
+    if (price == null || price > stopLossPrice) continue;
     if (nowFn() < executionRetryAt) return;
 
     let exitPrice = round2(Math.floor(price * 100) / 100);
@@ -497,12 +512,13 @@ function createEngine(config) {
       if (!order.isFilled) {
         markExecutionRetry();
         log(`❌ ${position.side.toUpperCase()} STOP SELL REJECTED — retrying while stop remains active`);
-        return;
+        continue;
       }
       const fillPrice = parseFloat(order.avgPrice);
       if (Number.isFinite(fillPrice) && fillPrice > 0) exitPrice = Math.min(0.99, Math.max(0.01, fillPrice));
     }
-    closePosition(exitPrice, 'STOP');
+    closePosition(position, exitPrice, 'STOP');
+    }
     executionRetryAt = 0;
   }
 
@@ -539,8 +555,7 @@ function createEngine(config) {
   }
 
   function settleWindow(winner) {
-    const position = engine.position;
-    if (position) {
+    for (const position of [...engine.positions]) {
       const payout = winner === position.side ? position.shares : 0;
       const pnl = round2(payout - position.cost);
       adjustCapital(payout);
@@ -548,10 +563,9 @@ function createEngine(config) {
       engine.realizedPnl = round2(engine.realizedPnl + pnl);
       engine.windowPnl = round2(engine.windowPnl + pnl);
       if (pnl > 0) engine.wins += 1; else engine.losses += 1;
-      engine.position = null;
-      log(`🏁 ${position.side.toUpperCase()} ${position.label} RESOLVED — PnL ${money(pnl)}`);
-      registerResult(position, pnl);
+      log(`🏁 ${position.side.toUpperCase()} BLOCK${(position.block ?? 0) + 1} RESOLVED — PnL ${money(pnl)}`);
     }
+    engine.positions = [];
 
     engine.history.unshift({
       windowTs: engine.leg.windowTs,
@@ -568,7 +582,8 @@ function createEngine(config) {
   }
 
   function resetWindowState() {
-    engine.position = null;
+    engine.positions = [];
+    engine.firedBlocks = {};
     engine.windowTradeCount = 0;
     engine.windowMartingaleLevel = 0;
     engine.windowSides = [];
@@ -625,9 +640,11 @@ function createEngine(config) {
         }
         if (now - engine.lastEquityRecord >= EQUITY_RECORD_MS) {
           engine.lastEquityRecord = now;
-          const position = engine.position;
-          const markPrice = position ? getPrice(position.side) || 0 : 0;
-          const unrealized = position ? position.shares * markPrice - position.cost : 0;
+            let unrealized = 0;
+            for (const pos of engine.positions) {
+              const mp = getPrice(pos.side) || 0;
+              unrealized += pos.shares * mp - pos.cost;
+            }
           const cash = sharedCapital ? sharedCapital.available() : engine.bankroll;
           engine.equityCurve.push({ t: now, equity: round2(cash + unrealized) });
           if (engine.equityCurve.length > 10000) engine.equityCurve.shift();
@@ -642,9 +659,13 @@ function createEngine(config) {
 
   function buildState() {
     const leg = engine.leg;
-    const position = engine.position;
-    const markPrice = position ? getPrice(position.side) || 0 : 0;
-    const unrealizedPnl = position ? round2(position.shares * markPrice - position.cost) : 0;
+    let unrealizedPnl = 0;
+    const positions = engine.positions.map(pos => {
+      const markPrice = getPrice(pos.side) || 0;
+      const upnl = round2(pos.shares * markPrice - pos.cost);
+      unrealizedPnl += upnl;
+      return { ...pos, markPrice, unrealizedPnl: upnl, stopLossPrice };
+    });
     const decided = engine.wins + engine.losses;
     return {
       label,
@@ -662,10 +683,9 @@ function createEngine(config) {
       tradingAllowed: entryAllowed(),
       stopLossPrice,
       martingaleLevel: engine.martingaleLevel,
-      tradedThisWindow: engine.lastTradeWindowTs === leg?.windowTs,
       pendingOrders: engine.pendingOrders,
-      nextStakeIfStopped: position ? stakeForLevel(position.level >= maxMartingales ? 0 : position.level + 1) : stakeForLevel(engine.martingaleLevel),
-      canEnter: entryAllowed() && !engine.position && !engine.pendingOrders.length && engine.lastTradeWindowTs !== leg?.windowTs && engine.martingaleLevel < maxLevels(),
+      nextStakeIfStopped: baseStakeUsd,
+      canEnter: entryAllowed() && engine.positions.length < 2,
       bankroll: sharedCapital ? sharedCapital.available() : engine.bankroll,
       startingCapital: sharedCapital ? sharedCapital.startingCapital : capital,
       realizedPnl: engine.realizedPnl,
@@ -676,12 +696,7 @@ function createEngine(config) {
       losses: engine.losses,
       winRate: decided ? round2(engine.wins / decided * 100) : null,
       totalFeesPaid: engine.totalFeesPaid,
-      position: position ? {
-        ...position,
-        markPrice,
-        unrealizedPnl,
-        stopLossPrice: strategy === 'walkthrough' ? stopLossPrice : null,
-      } : null,
+      positions,
       currentLeg: leg ? {
         slug: leg.slug,
         discovered: leg.discovered,
