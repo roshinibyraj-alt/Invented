@@ -16,7 +16,26 @@ app.get('/healthz',(_,r)=>r.sendStatus(200));
 const privateKey=process.env.PRIVATE_KEY;if(!privateKey){console.error('PRIVATE_KEY missing');process.exit(1);}
 
 let trader=null;
+const STATE_FILE=path.join(__dirname,'convergence-state.json');
 let stats={realizedPnl:0,wins:0,losses:0,totalFees:0,equityCurve:[],history:[],logs:[]};
+
+function loadState(){
+  try{
+    if(fs.existsSync(STATE_FILE)){
+      const saved=JSON.parse(fs.readFileSync(STATE_FILE,'utf8'));
+      stats.realizedPnl=saved.realizedPnl||0;
+      stats.wins=saved.wins||0;
+      stats.losses=saved.losses||0;
+      stats.totalFees=saved.totalFees||0;
+      stats.equityCurve=saved.equityCurve||[];
+      stats.history=saved.history||[];
+    }
+  }catch(_){}
+}
+function saveState(){
+  try{fs.writeFileSync(STATE_FILE,JSON.stringify({realizedPnl:stats.realizedPnl,wins:stats.wins,losses:stats.losses,totalFees:stats.totalFees,equityCurve:stats.equityCurve.slice(-5000),history:stats.history.slice(-200)}))}catch(_){}
+}
+loadState();
 
 // Per-window state
 let leg=null,btcOpen=null,btcNow=null,upMid=null,downMid=null,fairUp=null;
@@ -147,6 +166,7 @@ function settleWith(pos,winner){
   slog(`🏁 ${pos.side.toUpperCase()} ${won?'WIN':'LOSS'} — PnL ${money(pnl)}`);
   stats.history.unshift({ts:Date.now(),winner:won?'WIN':'LOSS',side:pos.side.toUpperCase(),pnl});
   if(stats.history.length>200)stats.history.length=200;
+  saveState();
 }
 
 async function tryResolve(oldLeg){
@@ -201,7 +221,8 @@ async function loop(){
         let unrealized=0;
         positions.forEach(p=>{unrealized+=p.shares*(p.side==='up'?upMid||p.entryPrice:downMid||p.entryPrice)-p.cost});
         stats.equityCurve.push({t:Date.now(),equity:r2(CAPITAL+stats.realizedPnl+unrealized)});
-        if(stats.equityCurve.length>600)stats.equityCurve.shift();
+        if(stats.equityCurve.length>20000)stats.equityCurve.shift();
+        if(stats.equityCurve.length%30===0)saveState();
       }
       emitState();
     }catch(e){slog(`⚠️ ${e.message}`)}
