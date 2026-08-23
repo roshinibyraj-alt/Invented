@@ -6,6 +6,7 @@ const PolymarketTrader=require('./polymarket-trader');
 const DRY_RUN=(process.env.DRY_RUN||'true').toLowerCase()==='true';
 const CAPITAL=Number(process.env.CAPITAL||4000);
 const BASE_STAKE=Number(process.env.BASE_STAKE_USD||100);
+const CLOB='https://clob.polymarket.com';
 const PORT=process.env.PORT||8080;
 const OBSERVE_START=270,OBSERVE_END=285;
 
@@ -39,6 +40,27 @@ async function discoverLeg(ts){
 
 // ─── Strategy State ──────────────────────────────────────────────────────────
 let leg=null,btcOpenPrice=null,ticks=[],fired=false,position=null,lastDiscovery=0,lastBtc=0,lastBtcFetch=0,lastEquity=0;
+let upMid=null,downMid=null,lastClobFetch=0;
+
+async function fetchClobPrices(){
+  if(!leg?.discovered||!leg.upToken)return;
+  try{
+    const [bu,bd]=await Promise.all([
+      j(CLOB+'/book?token_id='+leg.upToken).catch(()=>null),
+      j(CLOB+'/book?token_id='+leg.downToken).catch(()=>null),
+    ]);
+    if(bu){
+      const bids=(bu.bids||[]).map(b=>+b.price).sort((a,b)=>b-a);
+      const asks=(bu.asks||[]).map(a=>+a.price).sort((a,b)=>a-b);
+      upMid=bids.length&&asks.length?round2((bids[0]+asks[0])/2):null;
+    }
+    if(bd){
+      const bids=(bd.bids||[]).map(b=>+b.price).sort((a,b)=>b-a);
+      const asks=(bd.asks||[]).map(a=>+a.price).sort((a,b)=>a-b);
+      downMid=bids.length&&asks.length?round2((bids[0]+asks[0])/2):null;
+    }
+  }catch(_){}
+}
 
 function avgVelocity(){
   if(ticks.length<3)return 0;
@@ -133,6 +155,11 @@ async function loop(){
           }
         }
       }
+      // CLOB prices every tick
+      if(Date.now()-lastClobFetch>=200){
+        lastClobFetch=Date.now();
+        await fetchClobPrices();
+      }
       // Equity curve
       if(nowSec-lastEquity>=1){
         lastEquity=nowSec;
@@ -164,6 +191,7 @@ function buildState(){
   return {dryRun:DRY_RUN,capital:CAPITAL,baseStake:BASE_STAKE,realizedPnl,wins,losses,
     totalFees:round2(totalFees),equityCurve,history,
     btcPrice:lastBtc,btcOpen:btcOpenPrice,tickCount:ticks.length,fired,
+    upMid,downMid,
     velocity:avgVelocity(),projected:lastBtc&&btcOpenPrice?projectedPrice(lastBtc):null,
     position,elapsed:leg?.elapsedSecond?.()||0,legSlug:leg?.slug||null,discovered:!!leg?.discovered,
     winRate:(wins+losses)?round2(wins/(wins+losses)*100):null};
@@ -178,13 +206,14 @@ const HTML=`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewpor
 .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:9px}.box{background:#111;border:1px solid #333;border-radius:6px;padding:8px}.lb{font-size:9px;color:#888;text-transform:uppercase}.val{font-size:16px;margin-top:2px}
 .pos,.green{color:#00ff88}.neg,.red{color:#ff4444}.acc{color:#00ccff}.warn{color:#ffcc00}
 .card{background:#0a0a0a;border:1px solid #222;border-radius:7px;padding:9px;margin-bottom:9px}
-.big{font-size:26px;text-align:center;padding:12px 0}.sub{font-size:11px;color:#999;text-align:center;margin-top:4px}
+.big{font-size:26px;text-align:center;padding:8px 0}.sub{font-size:11px;color:#999;text-align:center;margin-top:4px}
+.prices{display:grid;grid-template-columns:1fr auto 1fr;gap:6px;text-align:center;padding:10px 0}.price{font-size:28px}.plabel{font-size:9px;color:#888;text-transform:uppercase}
 #chart svg{width:100%;height:90px}#hist div,#log div{padding:4px 0;border-bottom:1px solid #181818;font-size:11px}
 #hist{max-height:160px;overflow-y:auto}#log{max-height:220px;overflow-y:auto;background:#000;padding:7px;border:1px solid #222;border-radius:5px;line-height:1.5;white-space:pre-wrap}
 @media(max-width:600px){.grid{grid-template-columns:repeat(2,1fr)}.val{font-size:14px}.big{font-size:20px}}</style></head><body>
 <div class="h"><div class="title">BTC <span>MOMENTUM FINAL</span></div><div id="mode" class="badge demo">DEMO</div></div>
 <div class="grid" id="top"></div>
-<div class="card"><div id="btcline" class="big">--</div><div id="btcdetail" class="sub"></div></div>
+<div class="card"><div class="prices"><div><div class="plabel">UP</div><div class="price acc" id="upPrice">--</div></div><div><div class="plabel">BTC</div><div class="price" style="color:#ffcc00" id="btcPrice">--</div></div><div><div class="plabel">DOWN</div><div class="price warn" id="downPrice">--</div></div></div><div id="btcdetail" class="sub"></div></div>
 <div class="card"><div class="lb" style="margin-bottom:5px">EQUITY CURVE</div><div id="chart"><svg viewBox="0 0 600 90" preserveAspectRatio="none"><polyline id="eqline" fill="none" stroke="#00ccff" stroke-width="2.5"/></svg></div></div>
 <div class="card"><div class="lb" style="margin-bottom:5px">HISTORY</div><div id="hist"></div></div>
 <div class="card"><div class="lb" style="margin-bottom:5px">LOGS</div><div id="log"></div></div>
@@ -200,7 +229,10 @@ function render(){
  var bp=s.btcPrice?('$'+s.btcPrice.toLocaleString()):'--';
  var detail='Beat: $'+f2(s.btcOpen)+' · Ticks: '+s.tickCount+' · Velocity: '+f3(s.velocity)+'$/tick';
  if(s.projected!=null)detail+=' · Projected: $'+f2(s.projected)+' '+(s.projected>s.btcOpen?'▲UP':'▼DOWN');
- q('btcline').innerHTML='<span class="acc">'+bp+'</span>';q('btcdetail').textContent=detail;
+ q('upPrice').textContent=f3(s.upMid);q('downPrice').textContent=f3(s.downMid);
+ var bp=s.btcPrice?('$'+s.btcPrice.toLocaleString()):'--';
+ q('btcPrice').textContent=bp;
+ q('btcdetail').textContent=detail;
  renderChart();
  var hh='';(s.history||[]).forEach(x=>{hh+='<div>'+x.side+' <span class="'+cl(x.pnl)+'">'+sg(x.pnl)+'</span> '+x.winner+'</div>'});q('hist').innerHTML=hh||'<div style="color:#666">No trades yet</div>';
 }
