@@ -108,7 +108,7 @@ function fastResolve(){
   if(upWinning&&downWinning)slog(`⚠️ both mids >0.90 (${upMid}/${downMid}) — picking ${winner.toUpperCase()}`);
   slog(`⚡ FAST RESOLVE triggered — ${winner.toUpperCase()} CLOB ${(winner==='up'?upMid:downMid).toFixed(2)}>0.90`);
   for(const pos of [...positions]){
-    settleWith(pos,winner===pos.side?winner:(winner==='up'?'down':'up'));
+    settleWith(pos,winner);
     positions=positions.filter(p=>p.id!==pos.id);
   }
 }
