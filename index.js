@@ -41,6 +41,7 @@ async function discoverLeg(ts){
 // ─── Strategy State ──────────────────────────────────────────────────────────
 let leg=null,btcOpenPrice=null,ticks=[],fired=false,position=null,lastDiscovery=0,lastBtc=0,lastBtcFetch=0,lastEquity=0;
 let upMid=null,downMid=null,lastClobFetch=0;
+let pendingResolutions=[];
 
 async function fetchClobPrices(){
   if(!leg?.discovered||!leg.upToken)return;
@@ -92,19 +93,6 @@ async function fire(direction){
   }catch(e){slog(`❌ ${side} buy error: ${e.message}`);fired=false;}
 }
 
-function settle(winner){
-  if(!position)return;
-  const won=winner===position.side;
-  const payout=won?position.shares:0;
-  const pnl=round2(payout-position.cost);
-  realizedPnl=round2(realizedPnl+pnl);
-  if(pnl>0)wins++;else losses++;
-  slog(`🏁 ${position.side.toUpperCase()} RESOLVED ${won?'WIN':'LOSS'} — PnL ${money(pnl)}`);
-  history.unshift({ts:leg?.windowTs,winner:pnl>=0?'WIN':'LOSS',side:position.side.toUpperCase(),pnl});
-  if(history.length>200)history.length=200;
-  position=null;
-}
-
 function resetWindow(ts){
   leg={windowTs:ts,elapsedSecond:()=>Math.floor((Date.now()/1000)-ts),discovered:false};
   ticks=[];fired=false;btcOpenPrice=null;lastDiscovery=0;
@@ -119,9 +107,19 @@ async function loop(){
       const ts=Math.floor(nowSec/300)*300;
       if(!leg||leg.windowTs!==ts){
         if(leg&&leg.windowTs!==ts&&!leg.resolved){
-          await resolveOldLeg(leg);
+          pendingResolutions.push({leg:{...leg},position});
+          slog(`⏳ window ended — resolution pending for ${leg.slug}`);
+          if(position)position=null;
         }
         resetWindow(ts);
+      }
+      for(let i=pendingResolutions.length-1;i>=0;i--){
+        const pr=pendingResolutions[i];
+        const resolved=await tryResolve(pr.leg);
+        if(resolved){
+          settleWith(pr.position,pr.leg.winner);
+          pendingResolutions.splice(i,1);
+        }
       }
       if(!leg.discovered&&nowSec-lastDiscovery>=500){
         lastDiscovery=nowSec;
@@ -167,16 +165,28 @@ async function loop(){
   }
 }
 
-async function resolveOldLeg(oldLeg){
+async function tryResolve(oldLeg){
   try{
     const [e]=await j('https://gamma-api.polymarket.com/events?slug='+oldLeg.slug);
     if(e?.markets?.[0]?.closed){
       const prices=JSON.parse(e.markets[0].outcomePrices||'[0,0]');
       oldLeg.winner=parseFloat(prices[0])>=0.5?'up':'down';
       oldLeg.resolved=true;
+      return true;
     }
   }catch(_){}
-  settle(oldLeg.winner||'none');
+  return false;
+}
+
+function settleWith(pos,winner){
+  if(!pos)return;
+  const won=winner===pos.side;
+  const payout=won?pos.shares:0;
+  const pnl=round2(payout-pos.cost);
+  realizedPnl=round2(realizedPnl+pnl);
+  if(pnl>0)wins++;else losses++;
+  slog(`🏁 ${pos.side.toUpperCase()} RESOLVED ${won?'WIN':'LOSS'} — PnL ${money(pnl)}`);
+  history.unshift({ts:Date.now(),winner:pnl>=0?'WIN':'LOSS',side:pos.side.toUpperCase(),pnl});
 }
 
 // ─── API + Dashboard ────────────────────────────────────────────────────────
