@@ -46,19 +46,11 @@ async function fetchClobPrices(){
   if(!leg?.discovered||!leg.upToken)return;
   try{
     const [bu,bd]=await Promise.all([
-      j(CLOB+'/book?token_id='+leg.upToken).catch(()=>null),
-      j(CLOB+'/book?token_id='+leg.downToken).catch(()=>null),
+      j(CLOB+'/midpoint?token_id='+leg.upToken).catch(()=>null),
+      j(CLOB+'/midpoint?token_id='+leg.downToken).catch(()=>null),
     ]);
-    if(bu){
-      const bids=(bu.bids||[]).map(b=>+b.price).sort((a,b)=>b-a);
-      const asks=(bu.asks||[]).map(a=>+a.price).sort((a,b)=>a-b);
-      upMid=bids.length&&asks.length?round2((bids[0]+asks[0])/2):null;
-    }
-    if(bd){
-      const bids=(bd.bids||[]).map(b=>+b.price).sort((a,b)=>b-a);
-      const asks=(bd.asks||[]).map(a=>+a.price).sort((a,b)=>a-b);
-      downMid=bids.length&&asks.length?round2((bids[0]+asks[0])/2):null;
-    }
+    if(bu?.mid)upMid=parseFloat(bu.mid);
+    if(bd?.mid)downMid=parseFloat(bd.mid);
   }catch(_){}
 }
 
@@ -81,8 +73,9 @@ async function fire(direction){
   const side=direction.toUpperCase();
   slog(`🎯 ${side} SIGNAL — velocity ${(avgVelocity()*100).toFixed(2)}¢/tick → projected $${projectedPrice(lastBtc).toFixed(2)} vs beat $${btcOpenPrice?.toFixed(2)}`);
   try{
+    const mid=direction==='up'?upMid:downMid;
     if(DRY_RUN){
-      const entryPrice=lastBtc>btcOpenPrice?0.55:0.45;
+      const entryPrice=mid||0.50;
       const shares=Math.floor(BASE_STAKE/entryPrice*100)/100;
       position={side:direction.toLowerCase(),shares,entryPrice,cost:round2(shares*entryPrice),shares2:shares};
       totalFees+=round2(position.cost*0.07*(1-entryPrice));
