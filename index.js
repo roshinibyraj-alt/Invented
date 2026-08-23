@@ -1,138 +1,227 @@
 'use strict';
+const path=require('path'),fs=require('fs'),express=require('express'),http=require('http');
+const {Server}=require('socket.io');
+const PolymarketTrader=require('./polymarket-trader');
 
-const path = require('path');
-const fs = require('fs');
-const express = require('express');
-const http = require('http');
-const { Server } = require('socket.io');
-const PolymarketTrader = require('./polymarket-trader');
-const { createEngine } = require('./engine-factory');
+const DRY_RUN=(process.env.DRY_RUN||'true').toLowerCase()==='true';
+const CAPITAL=Number(process.env.CAPITAL||4000);
+const BASE_STAKE=Number(process.env.BASE_STAKE_USD||100);
+const PORT=process.env.PORT||8080;
+const OBSERVE_START=270,OBSERVE_END=285;
 
-const DRY_RUN = (process.env.DRY_RUN || 'true').toLowerCase() === 'true';
-const CAPITAL = Number(process.env.CAPITAL || 4000);
-const BASE_STAKE_USD = Number(process.env.BASE_STAKE_USD || 500);
-const PORT = process.env.PORT || 8080;
+const app=express(),server=http.createServer(app),io=new Server(server,{pingInterval:2000,pingTimeout:5000});
+app.get('/healthz',(_,r)=>r.sendStatus(200));
 
-const LABEL = 'BTC-070';
-const STATE_PATH = process.env.WALKTHROUGH_STATE_PATH || path.join(__dirname, 'stats-engine-070.json');
+const privateKey=process.env.PRIVATE_KEY;
+if(!privateKey){console.error('PRIVATE_KEY missing');process.exit(1);}
+let trader=null,realizedPnl=0,wins=0,losses=0,totalFees=0,equityCurve=[],history=[],logs=[];
+const emit=(ev,d)=>io.emit(ev,d);
+const slog=line=>{console.log(line);logs.push(line);if(logs.length>300)logs.shift();io.emit('log',line);};
 
-const app = express();
-const server = http.createServer(app);
-const io = new Server(server, { pingInterval: 2000, pingTimeout: 5000 });
+async function j(url){const r=await fetch(url);if(!r.ok)throw new Error(r.status+' '+url);return r.json();}
+function round2(v){return Math.round(v*100)/100}
+function money(v){return(v>0?'+$':v<0?'-$':'$')+Math.abs(v).toFixed(2)}
 
-app.get('/healthz', (_, request) => request.sendStatus(200));
-app.get('/api/hedge/status', (_, response) => {
-  try {
-    response.json({ dryRun: DRY_RUN, capital: CAPITAL, engine: engine ? engine.buildState() : null });
-  } catch (error) {
-    response.status(500).json({ ok: false, error: error.message });
-  }
-});
+// ─── BTC Price ───────────────────────────────────────────────────────────────
+async function btcPrice(){try{const d=await j('https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT');return parseFloat(d.price)}catch(_){return null}}
+async function btcOpen(ts){try{const k=await j(`https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1s&startTime=${ts*1000}&endTime=${ts*1000+1000}&limit=1`);return k.length?parseFloat(k[0][1]):null}catch(_){return null}}
 
-const emit = (event, data) => io.emit(event, data);
-const slog = line => { console.log(line); io.emit('log', line); };
-const privateKey = process.env.PRIVATE_KEY;
-if (!privateKey) { console.error('PRIVATE_KEY env var missing'); process.exit(1); }
-
-let engine = null;
-
-const ALLOWED_WINDOWS = [
-  { start: 30, end: 60 },
-  { start: 120, end: 150 },
-];
-
-const DASHBOARD = `<!DOCTYPE html>
-<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BTC-070 Momentum</title>
-<style>
-*{box-sizing:border-box;margin:0;padding:0}body{background:#000;color:#fff;font-family:'Courier New',monospace;font-weight:bold;font-size:13px}
-.header{padding:12px;background:#040404;border-bottom:3px solid #00ccff;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px}
-.title{font-size:20px}.title span{color:#00ccff}.badge{border:1px solid #333;border-radius:20px;padding:5px 11px}.demo{color:#ffcc00;background:#ffcc0018}.live{color:#ff5566;background:#ff556618}
-.topstats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;padding:9px}
-.box,.card{background:#030303;border:1px solid #333;border-radius:7px;padding:9px}
-.label{color:#888;font-size:9px;text-transform:uppercase}.value{font-size:17px;margin-top:3px;overflow-wrap:anywhere}
-.positive{color:#00ff88}.negative{color:#ff4444}.accent{color:#00ccff}.warning{color:#ffcc00}.flat{color:#888}
-.engine-panel{border:1px solid #222;border-radius:9px;overflow:hidden;background:#010101;margin:9px}
-.panel-head{padding:10px;background:#060606;border-bottom:1px solid #222;display:flex;justify-content:space-between;font-size:14px}.panel-name span{color:#00ccff}
-.body{padding:9px}.stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;margin-bottom:8px}
-.prices{display:grid;grid-template-columns:1fr auto 1fr;gap:7px;text-align:center;margin-bottom:8px}.price{font-size:28px}.count{font-size:24px;color:#ffcc00}
-.position{min-height:90px}.pos-line{font-size:19px;margin-bottom:5px}.sub{font-size:13px;color:#ddd;line-height:1.45;overflow-wrap:anywhere}
-.chart svg{display:block;width:100%;height:105px}.history{max-height:200px;overflow:auto;margin-top:8px}.row{display:flex;justify-content:space-between;gap:6px;padding:6px 0;border-top:1px solid #181818;font-size:11px;flex-wrap:wrap}
-.result{padding:2px 5px;border-radius:4px}.win{color:#00ff88;background:#00ff8822}.loss{color:#ff4444;background:#ff444422}
-.logs{height:220px;overflow:auto;padding:9px;border-top:1px solid #222;background:#000;font-size:12px;line-height:1.45;white-space:pre-wrap}
-@media(max-width:600px){.topstats,.stats{grid-template-columns:repeat(2,minmax(0,1fr))}.title{font-size:17px}.value{font-size:15px}.price{font-size:22px}.count{font-size:18px}.pos-line{font-size:16px}}
-</style></head><body>
-<div class="header"><div class="title">BTC <span>070 MOMENTUM</span></div><div id="mode" class="badge demo">DEMO</div></div>
-<div class="topstats" id="topstats"></div><div class="engine-panel" id="engine"></div>
-<script src="/socket.io/socket.io.js"></script><script>
-var socket=io(),state=null,logs=[];
-function q(id){return document.getElementById(id)}
-function f2(n){return n==null?'--':Number(n).toFixed(2)}function f3(n){return n==null?'--':Number(n).toFixed(3)}
-function signed(n){return n>0?'+$'+f2(n):n<0? '-$'+f2(Math.abs(n)):'$0.00'}function cls(n){return n>0?'positive':n<0?'negative':''}
-function esc(x){return String(x==null?'':x).replace(/</g,'&lt;')}
-function box(label,value){return '<div class="box"><div class="label">'+label+'</div><div class="value">'+value+'</div></div>'}
-function chart(curve,start){if(!curve||curve.length<2)return '<div class="card chart"><div class="label">EQUITY CURVE</div><div class="sub flat">Collecting…</div></div>';
- var vals=curve.map(function(x){return Number(x.equity)||0});vals.push(Number(start)||0);var lo=Math.min.apply(null,vals),hi=Math.max.apply(null,vals),rg=(hi-lo)||1;
- function px(i){return (i/(curve.length-1)*600).toFixed(1)}function py(v){return (115-((v-lo)/rg*100)).toFixed(1)}
- var pts=curve.map(function(v,i){return px(i)+','+py(Number(v.equity)||0)}).join(' ');
- return '<div class="card chart"><div class="label">EQUITY CURVE</div><svg viewBox="0 0 600 125" preserveAspectRatio="none"><polyline points="'+pts+'" fill="none" stroke="#00ccff" stroke-width="3"></polyline></svg><div class="sub">Now '+f2(curve[curve.length-1].equity)+' · Start '+f2(start)+'</div></div>'}
-function render(){
- if(!state)return;q('mode').textContent=state.dryRun?'DEMO':'LIVE';q('mode').className='badge '+(state.dryRun?'demo':'live');
- q('topstats').innerHTML=box('CAPITAL','$'+f2(state.equity))+box('REALIZED PNL','<span class="'+cls(state.realizedPnl)+'">'+signed(state.realizedPnl)+'</span>')+box('W/L','<span class="positive">'+(state.wins||0)+'W</span>/<span class="negative">'+(state.losses||0)+'L</span>')+box('FEES PAID','$'+f2(state.totalFeesPaid));
- var s=state,leg=s.currentLeg,positions=s.positions||[],h='';
- h+='<div class="panel-head"><div class="panel-name">'+esc(s.label)+' <span>0.70 MOMENTUM</span></div><div>'+(leg&&leg.discovered?'LIVE':'FINDING')+'</div></div><div class="body">';
- h+='<div class="prices"><div><div class="label">UP</div><div class="price accent">'+f3(leg?leg.upMid:null)+'</div></div><div><div class="label">LEFT</div><div class="count">'+(leg?leg.secsLeft||0:0)+'s</div></div><div><div class="label">DOWN</div><div class="price warning">'+f3(leg?leg.downMid:null)+'</div></div></div>';
- h+='<div class="card position">';
- if(positions.length){for(var pi=0;pi<positions.length;pi++){var p=positions[pi];
-  h+='<div class="pos-line">'+esc(p.side.toUpperCase())+' B'+((p.block||0)+1)+' · '+esc(p.shares)+' SH @'+f2(p.entryPrice)+'</div><div class="sub">Cost $'+f2(p.cost)+' · Mark '+f3(p.markPrice)+' · Stop '+f2(p.stopLossPrice)+' · Float <span class="'+cls(p.unrealizedPnl)+'">'+signed(p.unrealizedPnl)+'</span></div>';}}
- else h+='<div class="pos-line flat">NO POSITION</div><div class="sub">$500 base · entries 30–60s & 120–150s · '+(s.tradingAllowed?'Watching':'Outside window')+' · '+((s.elapsedSecond!=null)?s.elapsedSecond+'s':'')+'</div>';
- h+='</div>';
- h+='<div class="card" style="margin-top:8px"><div class="label">STRATEGY</div><div class="sub">$500 flat · no martingale · entry @0.70 walk-through · stop @0.45 · windows 30–60s & 120–150s only</div></div>';
- h+=chart(s.equityCurve||[],s.startingCapital||0);
- h+='<div class="history">';var hist=s.history||[];
- for(var i=0;i<hist.length;i++){var x=hist[i];h+='<div class="row"><span>'+esc(String(x.windowTs).slice(-5))+'</span><span>'+esc(x.sides)+'</span><span>'+x.trades+'T</span><span class="result '+(x.pnl>=0?'win':'loss')+'">'+signed(x.pnl)+'</span></div>'}
- h+='</div></div>';
- q('engine').innerHTML=h;
- var el=q('logs');if(!el)return;var bottom=el.scrollHeight-el.scrollTop-el.clientHeight<40;
- el.innerHTML=logs.slice(-160).map(function(line){var c='';if(line.indexOf('BUY')>=0)c='accent';else if(line.indexOf('STOP')>=0)c='negative';else if(line.indexOf('RESOLVED')>=0||line.indexOf('won')>=0)c='positive';return '<div class="'+c+'">'+esc(line)+'</div>'}).join('');
- if(bottom)el.scrollTop=el.scrollHeight;
+// ─── Polymarket Leg ──────────────────────────────────────────────────────────
+async function discoverLeg(ts){
+  try{
+    const [e]=await j('https://gamma-api.polymarket.com/events?slug=btc-updown-5m-'+ts);
+    if(!e)return null;
+    const m=e.markets[0];
+    const tokens=m.clobTokenIds?JSON.parse(m.clobTokenIds):[];
+    return {ts,slug:'btc-updown-5m-'+ts,upToken:tokens[0],downToken:tokens[1],discovered:true,resolved:false,winner:null};
+  }catch(_){return null}
 }
-socket.on('hedgeState:${LABEL}',function(data){state=data;render()});
-socket.on('log',function(line){logs.push(line);if(logs.length>500)logs.shift();render()});
-setInterval(render,1000);
-(async function(){try{var r=await fetch('/api/hedge/status');var d=await r.json();state=d.engine;render()}catch(_){}})();
-render();
-</script><div class="logs" id="logs"></div></body></html>`;
 
-app.get('/', (_, response) => response.type('html').send(DASHBOARD));
+// ─── Strategy State ──────────────────────────────────────────────────────────
+let leg=null,btcOpenPrice=null,ticks=[],fired=false,position=null,lastDiscovery=0,lastBtc=0,lastBtcFetch=0,lastEquity=0;
 
-console.log('BTC-070 Single Engine Bot');
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`Dashboard: http://0.0.0.0:${PORT}`);
-  (async () => {
-    const trader = new PolymarketTrader(privateKey);
+function avgVelocity(){
+  if(ticks.length<3)return 0;
+  let sum=0;for(let i=1;i<ticks.length;i++)sum+=ticks[i].price-ticks[i-1].price;
+  return sum/(ticks.length-1);
+}
+
+function projectedPrice(current){
+  const vel=avgVelocity();
+  const secsLeft=300-leg.elapsedSecond();
+  return current+(vel*secsLeft);
+}
+
+async function fire(direction){
+  if(!leg||!leg.discovered||fired)return;
+  fired=true;
+  const token=direction==='up'?leg.upToken:leg.downToken;
+  const side=direction.toUpperCase();
+  slog(`🎯 ${side} SIGNAL — velocity ${(avgVelocity()*100).toFixed(2)}¢/tick → projected $${projectedPrice(lastBtc).toFixed(2)} vs beat $${btcOpenPrice?.toFixed(2)}`);
+  try{
+    if(DRY_RUN){
+      const entryPrice=lastBtc>btcOpenPrice?0.55:0.45;
+      const shares=Math.floor(BASE_STAKE/entryPrice*100)/100;
+      position={side:direction.toLowerCase(),shares,entryPrice,cost:round2(shares*entryPrice),shares2:shares};
+      totalFees+=round2(position.cost*0.07*(1-entryPrice));
+      slog(`✅ DEMO ${side} BUY ${shares}sh @${entryPrice} | cost $${position.cost}`);
+    }else{
+      const order=await trader.placeFokBuy(token,BASE_STAKE);
+      if(!order.isFilled){slog(`❌ ${side} FOK rejected`);fired=false;return;}
+      const fp=parseFloat(order.avgPrice)||0.50;
+      const rawShares=parseFloat(order.raw?.takingAmount||order.raw?.size_matched||'0');
+      const sh=rawShares>0?round2(rawShares):Math.floor(BASE_STAKE/fp*100)/100;
+      position={side:direction.toLowerCase(),shares:sh,entryPrice:fp,cost:BASE_STAKE};
+      slog(`✅ LIVE ${side} BUY ${sh}sh @${fp}`);
+    }
+  }catch(e){slog(`❌ ${side} buy error: ${e.message}`);fired=false;}
+}
+
+function settle(winner){
+  if(!position)return;
+  const won=winner===position.side;
+  const payout=won?position.shares:0;
+  const pnl=round2(payout-position.cost);
+  realizedPnl=round2(realizedPnl+pnl);
+  if(pnl>0)wins++;else losses++;
+  slog(`🏁 ${position.side.toUpperCase()} RESOLVED ${won?'WIN':'LOSS'} — PnL ${money(pnl)}`);
+  history.unshift({ts:leg?.windowTs,winner:pnl>=0?'WIN':'LOSS',side:position.side.toUpperCase(),pnl});
+  if(history.length>200)history.length=200;
+  position=null;
+}
+
+function resetWindow(ts){
+  leg={windowTs:ts,elapsedSecond:()=>Math.floor((Date.now()/1000)-ts),discovered:false};
+  ticks=[];fired=false;btcOpenPrice=null;lastDiscovery=0;
+  slog(`🆕 window t=${ts}`);
+}
+
+// ─── Main Loop ──────────────────────────────────────────────────────────────
+async function loop(){
+  while(true){
+    try{
+      const nowSec=Math.floor(Date.now()/1000);
+      const ts=Math.floor(nowSec/300)*300;
+      if(!leg||leg.windowTs!==ts){
+        if(leg&&leg.windowTs!==ts&&!leg.resolved){
+          await resolveOldLeg(leg);
+        }
+        resetWindow(ts);
+      }
+      if(!leg.discovered&&nowSec-lastDiscovery>=500){
+        lastDiscovery=nowSec;
+        const l=await discoverLeg(ts);
+        if(l){Object.assign(leg,l);slog(`🎯 discovered ${l.slug}`);}
+      }
+      // BTC price every tick (200ms)
+      if(nowSec*1000+Date.now()%1000-lastBtcFetch>=200){
+        lastBtcFetch=nowSec*1000+Date.now()%1000;
+        const p=await btcPrice();
+        if(p!=null){
+          lastBtc=p;
+          if(btcOpenPrice==null&&leg.discovered)btcOpenPrice=await btcOpen(ts);
+          if(leg.discovered&&btcOpenPrice!=null){
+            const sec=leg.elapsedSecond();
+            if(sec>=OBSERVE_START&&sec<OBSERVE_END){
+              ticks.push({t:sec,price:p});
+            }
+            if(sec>=OBSERVE_END&&!fired&&ticks.length>=3){
+              const proj=projectedPrice(p);
+              const direction=proj>btcOpenPrice?'up':'down';
+              await fire(direction);
+            }
+          }
+        }
+      }
+      // Equity curve
+      if(nowSec-lastEquity>=1){
+        lastEquity=nowSec;
+        let unrealized=0;
+        if(position&&lastBtc)unrealized=position.shares*(position.entryPrice)-position.cost;
+        equityCurve.push({t:Date.now(),equity:round2(CAPITAL+realizedPnl+unrealized)});
+        if(equityCurve.length>600)equityCurve.shift();
+      }
+      emitState();
+    }catch(e){slog(`⚠️ ${e.message}`);}
+    await new Promise(r=>setTimeout(r,200));
+  }
+}
+
+async function resolveOldLeg(oldLeg){
+  try{
+    const [e]=await j('https://gamma-api.polymarket.com/events?slug='+oldLeg.slug);
+    if(e?.markets?.[0]?.closed){
+      const prices=JSON.parse(e.markets[0].outcomePrices||'[0,0]');
+      oldLeg.winner=parseFloat(prices[0])>=0.5?'up':'down';
+      oldLeg.resolved=true;
+    }
+  }catch(_){}
+  settle(oldLeg.winner||'none');
+}
+
+// ─── API + Dashboard ────────────────────────────────────────────────────────
+function buildState(){
+  return {dryRun:DRY_RUN,capital:CAPITAL,baseStake:BASE_STAKE,realizedPnl,wins,losses,
+    totalFees:round2(totalFees),equityCurve,history,
+    btcPrice:lastBtc,btcOpen:btcOpenPrice,tickCount:ticks.length,fired,
+    velocity:avgVelocity(),projected:lastBtc&&btcOpenPrice?projectedPrice(lastBtc):null,
+    position,elapsed:leg?.elapsedSecond?.()||0,legSlug:leg?.slug||null,discovered:!!leg?.discovered,
+    winRate:(wins+losses)?round2(wins/(wins+losses)*100):null};
+}
+function emitState(){emit('state',buildState());}
+app.get('/api/status',(_,r)=>r.json(buildState()));
+
+const HTML=`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BTC Momentum Final</title>
+<style>*{box-sizing:border-box;margin:0;padding:0}body{background:#000;color:#fff;font-family:'Courier New',monospace;font-weight:bold;font-size:13px;padding:9px}
+.h{display:flex;justify-content:space-between;align-items:center;margin-bottom:9px}.title{font-size:19px}.title span{color:#00ccff}.badge{padding:4px 10px;border-radius:14px;border:1px solid #333;font-size:11px}
+.demo{color:#ffcc00;background:#ffcc0018}.live{color:#ff4444;background:#ff444418}
+.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:9px}.box{background:#111;border:1px solid #333;border-radius:6px;padding:8px}.lb{font-size:9px;color:#888;text-transform:uppercase}.val{font-size:16px;margin-top:2px}
+.pos,.green{color:#00ff88}.neg,.red{color:#ff4444}.acc{color:#00ccff}.warn{color:#ffcc00}
+.card{background:#0a0a0a;border:1px solid #222;border-radius:7px;padding:9px;margin-bottom:9px}
+.big{font-size:26px;text-align:center;padding:12px 0}.sub{font-size:11px;color:#999;text-align:center;margin-top:4px}
+#chart svg{width:100%;height:90px}#hist div,#log div{padding:4px 0;border-bottom:1px solid #181818;font-size:11px}
+#hist{max-height:160px;overflow-y:auto}#log{max-height:220px;overflow-y:auto;background:#000;padding:7px;border:1px solid #222;border-radius:5px;line-height:1.5;white-space:pre-wrap}
+@media(max-width:600px){.grid{grid-template-columns:repeat(2,1fr)}.val{font-size:14px}.big{font-size:20px}}</style></head><body>
+<div class="h"><div class="title">BTC <span>MOMENTUM FINAL</span></div><div id="mode" class="badge demo">DEMO</div></div>
+<div class="grid" id="top"></div>
+<div class="card"><div id="btcline" class="big">--</div><div id="btcdetail" class="sub"></div></div>
+<div class="card"><div class="lb" style="margin-bottom:5px">EQUITY CURVE</div><div id="chart"><svg viewBox="0 0 600 90" preserveAspectRatio="none"><polyline id="eqline" fill="none" stroke="#00ccff" stroke-width="2.5"/></svg></div></div>
+<div class="card"><div class="lb" style="margin-bottom:5px">HISTORY</div><div id="hist"></div></div>
+<div class="card"><div class="lb" style="margin-bottom:5px">LOGS</div><div id="log"></div></div>
+<script src="/socket.io/socket.io.js"></script><script>
+var s=null,logLines=[];
+var sock=io();sock.on('state',d=>{s=d;render()});sock.on('log',l=>{logLines.push(l);if(logLines.length>200)logLines.shift();renderLog()});
+function f2(n){return n==null?'--':Number(n).toFixed(2)}function f3(n){return n==null?'--':Number(n).toFixed(3)}
+function sg(n){return n>0?'+$'+f2(n):n<0?'-$'+f2(Math.abs(n)):'$'+f2(n)}function cl(n){return n>0?'pos':n<0?'neg':''}
+function bx(l,v){return '<div class="box"><div class="lb">'+l+'</div><div class="val">'+v+'</div></div>'}
+function render(){
+ if(!s)return;q('mode').textContent=s.dryRun?'DEMO':'LIVE';q('mode').className='badge '+(s.dryRun?'demo':'live');
+ q('top').innerHTML=bx('CAPITAL','$'+f2(s.capital+s.realizedPnl))+bx('PNL','<span class="'+cl(s.realizedPnl)+'">'+sg(s.realizedPnl)+'</span>')+bx('W/L','<span class="pos">'+s.wins+'W</span>/<span class="neg">'+s.losses+'L</span>')+bx('FEES','$'+f2(s.totalFees));
+ var bp=s.btcPrice?('$'+s.btcPrice.toLocaleString()):'--';
+ var detail='Beat: $'+f2(s.btcOpen)+' · Ticks: '+s.tickCount+' · Velocity: '+f3(s.velocity)+'$/tick';
+ if(s.projected!=null)detail+=' · Projected: $'+f2(s.projected)+' '+(s.projected>s.btcOpen?'▲UP':'▼DOWN');
+ q('btcline').innerHTML='<span class="acc">'+bp+'</span>';q('btcdetail').textContent=detail;
+ renderChart();
+ var hh='';(s.history||[]).forEach(x=>{hh+='<div>'+x.side+' <span class="'+cl(x.pnl)+'">'+sg(x.pnl)+'</span> '+x.winner+'</div>'});q('hist').innerHTML=hh||'<div style="color:#666">No trades yet</div>';
+}
+function renderChart(){if(!s||!s.equityCurve||s.equityCurve.length<2)return;
+ var vals=s.equityCurve.map(x=>x.equity);vals.push(s.capital);var lo=Math.min(...vals),hi=Math.max(...vals),rg=(hi-lo)||1;
+ var pts=s.equityCurve.map((v,i)=>((i/(s.equityCurve.length-1)*600).toFixed(1))+','+((85-(v.equity-lo)/rg*75).toFixed(1))).join(' ');
+ var e=document.getElementById('eqline');e.setAttribute('points',pts);}
+function renderLog(){q('log').innerHTML=logLines.slice(-120).map(l=>{var c='';if(l.indexOf('BUY')>=0)c='class="acc"';else if(l.indexOf('STOP')>=0)c='class="red"';else if(l.indexOf('WIN')>=0)c='class="pos"';return '<div '+c+'>'+esc(l)+'</div>'}).join('');}
+function esc(x){return String(x||'').replace(/</g,'&lt;')}
+function q(id){return document.getElementById(id)}
+setInterval(render,1000);fetch('/api/status').then(r=>r.json()).then(d=>{s=d;render()});render();
+</script></body></html>`;
+app.get('/',(_,r)=>r.type('html').send(HTML));
+
+console.log('BTC Momentum Final — 270-285s observation, extrapolate & fire');
+server.listen(PORT,'0.0.0.0',()=>{
+  console.log(`Dashboard http://0.0.0.0:${PORT}`);
+  (async()=>{
+    trader=new PolymarketTrader(privateKey);
     await trader.authenticate();
-    engine = createEngine({
-      label: LABEL,
-      strategy: 'walkthrough',
-      startingCapital: CAPITAL,
-      baseStakeUsd: BASE_STAKE_USD,
-      windowType: '5m',
-      windowSeconds5: 300,
-      allowedWindows: ALLOWED_WINDOWS,
-      martingaleMultiplier: 1,
-      maxMartingales: 0,
-      entryPrice: Number(process.env.ENTRY_PRICE || 0.70),
-      stopLossPrice: Number(process.env.STOP_LOSS_PRICE || 0.45),
-      feeTheta: 0.07,
-      trader,
-      dryRun: DRY_RUN,
-      statsStatePath: STATE_PATH,
-      emit,
-      slog,
-    });
-    engine.start();
-  })().catch(error => {
-    console.error('Bot init failed:', error.message);
-    process.exit(1);
-  });
+    slog(`⚙️ $${BASE_STAKE} flat · observe ${OBSERVE_START}-${OBSERVE_END}s · extrapolate & fire · ${DRY_RUN?'DEMO':'LIVE'}`);
+    loop();
+  })().catch(e=>{console.error('init:',e.message);process.exit(1)});
 });
