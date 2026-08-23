@@ -232,11 +232,11 @@ app.get('/',(_,r)=>r.type('html').send(HTML));
 
 console.log('BTC Convergence Hunter — fair-value vs CLOB mispricing');
 server.listen(PORT,'0.0.0.0',()=>{
-  console.log(`Dashboard http://0.0.0.0:\${PORT}`);
+  console.log(`Dashboard http://0.0.0.0:${PORT}`);
   (async()=>{
     trader=new PolymarketTrader(privateKey);
     await trader.authenticate();
-    slog(`⚙️ \$\${BASE_STAKE} flat | trade \${TRADE_START}-\${TRADE_END}s | edge >\${(EDGE_THRESHOLD*100).toFixed(0)}% | max 2 positions | \${DRY_RUN?'DEMO':'LIVE'}`);
+    slog(`⚙️ $${BASE_STAKE} flat | trade ${TRADE_START}-${TRADE_END}s | edge >${(EDGE_THRESHOLD*100).toFixed(0)}% | max 2 positions | ${DRY_RUN?'DEMO':'LIVE'}`);
     loop();
   })().catch(e=>{console.error('init:',e.message);process.exit(1)});
 });
