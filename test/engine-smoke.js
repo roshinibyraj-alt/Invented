@@ -18,7 +18,7 @@ async function fakeFetch(url, options = {}) {
   const logs = [];
   const engine = new MomentumLagEngine({ fetchImpl: fakeFetch, onLog: line => logs.push(line) });
   const start = windowStartFor(Date.now());
-  for (const asset of ['btc', 'eth', 'sol', 'xrp']) await engine.discoverMarket(asset, start);
+  for (const asset of ['btc', 'eth']) await engine.discoverMarket(asset, start);
   engine.activeWindowStart = start;
   const market = slug => engine.markets.get(`${slug}-updown-5m-${start}`);
 
@@ -26,15 +26,13 @@ async function fakeFetch(url, options = {}) {
   engine.applyTop(market('btc').down, 0.69, 0.71);
   engine.applyTop(market('eth').up, 0.59, 0.61);
   engine.applyTop(market('eth').down, 0.39, 0.41);
-  engine.applyTop(market('sol').down, 0.19, 0.21);
   engine.evaluateSignals();
 
-  assert.equal(engine.combos.length, 2, 'ETH and SOL opposite-side combos both fire');
-  assert.equal(engine.positions.length, 4, 'each combo has BTC and alt legs');
+  assert.equal(engine.combos.length, 1, 'only the BTC/ETH opposite-side combo fires');
+  assert.equal(engine.positions.length, 2, 'the combo has BTC and ETH legs');
   assert.equal(engine.currentTradeShares(), 5, 'normal windows use the five-share base');
   assert.equal(engine.combos.find(combo => combo.name === 'ETH_DOWN').cost, 3.6);
-  assert.equal(engine.combos.find(combo => combo.name === 'SOL_DOWN').cost, 2.6);
-  assert.equal(engine.bankroll, 19993.8);
+  assert.equal(engine.bankroll, 19996.4);
   assert.equal(engine.ethBoostPending, true, 'ETH decorrelation arms the next three windows');
 
   market('btc').finalUpMax = 0.93; market('btc').finalDownMax = 0.07;
@@ -66,7 +64,7 @@ async function fakeFetch(url, options = {}) {
 
   console.log(JSON.stringify({
     baseShares: 5, boostedShares: 100,
-    baseCombos: 2, realizedPnl: engine.realizedPnl,
+    baseCombos: 1, realizedPnl: engine.realizedPnl,
     bankroll: engine.bankroll, boostStateLogs: logs.filter(line => line.includes('Boost') || line.includes('decorrelation')),
   }, null, 2));
   console.log('CORRELATION-COMBO CLOB POLLING SMOKE PASS');

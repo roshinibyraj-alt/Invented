@@ -5,7 +5,7 @@ const CLOB_REST = process.env.CLOB_REST || 'https://clob.polymarket.com';
 const CLOB_POLL_MS = Number(process.env.CLOB_POLL_MS || 500);
 const CLOB_FRESH_MS = Number(process.env.CLOB_FRESH_MS || 3500);
 const WINDOW_SECONDS = 300;
-const ASSETS = (process.env.ASSETS || 'btc,eth,sol,xrp').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+const ASSETS = ['btc', 'eth'];
 const LEAD_ASSET = (process.env.LEAD_ASSET || 'btc').toLowerCase();
 const START_BANKROLL = Number(process.env.START_BANKROLL || 20000);
 const BASE_TRADE_SHARES = Number(process.env.BASE_TRADE_SHARES || 5);
