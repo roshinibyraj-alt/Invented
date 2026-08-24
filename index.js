@@ -8,7 +8,7 @@ const CAPITAL=Number(process.env.CAPITAL||4000);
 const BASE_STAKE=Number(process.env.BASE_STAKE_USD||100);
 const PORT=process.env.PORT||8080;
 const CLOB='https://clob.polymarket.com';
-const TRADE_START=45,TRADE_END=300;
+const TRADE_START=15,TRADE_END=300;
 const EDGE_THRESHOLD=0.10;
 
 const app=express(),server=http.createServer(app),io=new Server(server,{pingInterval:2000,pingTimeout:5000});
@@ -261,7 +261,7 @@ const HTML=`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewpor
 <div><div class="plabel">DOWN</div><div class="price warn" id="dnP">--</div></div>
 </div></div>
 <div class="card"><div style="font-size:9px;color:#777;text-transform:uppercase;margin-bottom:7px">POSITIONS</div><div id="posarea"></div>
-<div class="stratinfo">\$100 flat per side · max 2 total · one UP + one DOWN · active 45–300s<br>Fires when CLOB mid deviates >\${(10)}% from fair probability · holds to resolution</div></div>
+<div class="stratinfo">\$100 flat per side · max 2 total · one UP + one DOWN · active 15–300s<br>Fires when CLOB mid deviates >\${(10)}% from fair probability · holds to resolution</div></div>
 <div class="card"><div style="font-size:9px;color:#777;text-transform:uppercase;margin-bottom:5px">EQUITY CURVE</div><div id="chart"><svg viewBox="0 0 600 95" preserveAspectRatio="none"><polyline id="eqline" fill="none" stroke="#00ccff" stroke-width="2.5"/></svg></div></div>
 <div class="card"><div style="font-size:9px;color:#777;text-transform:uppercase;margin-bottom:5px">TRADE HISTORY</div><div id="hist"></div></div>
 <div class="card"><div style="font-size:9px;color:#777;text-transform:uppercase;margin-bottom:5px">SERVER LOGS</div><div id="log"></div></div>
