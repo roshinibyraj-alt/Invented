@@ -2,6 +2,9 @@
 
 const GAMMA_API = process.env.GAMMA_API || 'https://gamma-api.polymarket.com';
 const CLOB_WS = process.env.CLOB_WS || 'wss://ws-subscriptions-clob.polymarket.com/ws/market';
+const CLOB_REST = process.env.CLOB_REST || 'https://clob.polymarket.com';
+const STALE_QUOTE_MS = Number(process.env.STALE_QUOTE_MS || 2500);
+const QUOTE_REFRESH_COOLDOWN_MS = Number(process.env.QUOTE_REFRESH_COOLDOWN_MS || 1500);
 const WINDOW_SECONDS = 300;
 const ASSETS = (process.env.ASSETS || 'btc,eth,sol,xrp').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
 const LEAD_ASSET = (process.env.LEAD_ASSET || 'btc').toLowerCase();
@@ -53,6 +56,7 @@ class MomentumLagEngine {
     this.discoveryErrors = [];
     this.lastDiscoveryAt = null;
     this.discoveryRunning = false;
+    this.quoteSyncRunning = false;
     this.connectionStartedAt = null;
     this.handshakeTimer = null;
   }
@@ -534,6 +538,7 @@ class MomentumLagEngine {
       }
       this.settleResolvedCombos();
       this.pruneExpiredMarkets();
+      await this.refreshStaleQuotes();
       this.recordEquity();
     } catch (error) {
       this.log(`⚠️ Loop: ${error.message}`);
@@ -556,6 +561,33 @@ class MomentumLagEngine {
     this.subscribedTokens = new Set([...this.tokens.values()].map(token => token.tokenId));
     if (this.socket?.readyState === 1) this.sendSubscription();
     this.log(`🧹 Released ${expired.length} expired market(s) — ${this.subscribedTokens.size} CLOB tokens active`);
+  }
+
+  async refreshStaleQuotes() {
+    if (this.quoteSyncRunning || this.socket?.readyState !== 1) return;
+    const now = Date.now(), currentStart = windowStartFor(now);
+    const dueTokens = [...this.tokens.values()].filter(token => {
+      const market = this.markets.get(token.slug);
+      return market?.windowStart === currentStart && !market.tradingClosed && !market.resolved &&
+        now - (token.updatedAt || 0) >= STALE_QUOTE_MS &&
+        now - (token.refreshedAt || 0) >= QUOTE_REFRESH_COOLDOWN_MS;
+    });
+    if (!dueTokens.length) return;
+    this.quoteSyncRunning = true;
+    let refreshed = 0;
+    try {
+      await Promise.all(dueTokens.map(async token => {
+        token.refreshedAt = now;
+        try {
+          const book = await this.getJSON(`${CLOB_REST}/book?token_id=${encodeURIComponent(token.tokenId)}`, 1500);
+          this.applyBook(token, Array.isArray(book?.bids) ? book.bids : [], Array.isArray(book?.asks) ? book.asks : []);
+          refreshed++;
+        } catch (_) {}
+      }));
+      this.updatePositionMarks();
+      this.evaluateSignals();
+      if (refreshed) this.log(`♻️ CLOB book resnapshot — ${refreshed} quiet/stale token(s)`);
+    } finally { this.quoteSyncRunning = false; }
   }
 
   publicMarkets() {
