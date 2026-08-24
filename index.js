@@ -44,7 +44,7 @@ let pendingResolutions=[];
 let flipCount=0,oppositeEdgeTicks=0;
 let resolvedIds=new Set();
 
-async function j(url){const r=await fetch(url);if(!r.ok)throw new Error(r.status+' '+url);return r.json();}
+async function j(url){const r=await fetch(url,{signal:AbortSignal.timeout(1500)});if(!r.ok)throw new Error(r.status+' '+url);return r.json();}
 function r2(v){return Math.round(v*100)/100}
 function money(v){return(v>0?'+$':v<0?'-$':'$')+Math.abs(v).toFixed(2)}
 function slog(line){console.log(line);stats.logs.push(line);if(stats.logs.length>300)stats.logs.shift();io.emit('log',line)}
