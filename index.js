@@ -8,7 +8,7 @@ const CAPITAL=Number(process.env.CAPITAL||4000);
 const BASE_STAKE=Number(process.env.BASE_STAKE_USD||100);
 const PORT=process.env.PORT||8080;
 const CLOB='https://clob.polymarket.com';
-const TRADE_START=60,TRADE_END=240;
+const TRADE_START=45,TRADE_END=300;
 const EDGE_THRESHOLD=0.10;
 
 const app=express(),server=http.createServer(app),io=new Server(server,{pingInterval:2000,pingTimeout:5000});
@@ -93,7 +93,7 @@ function findEdge(){
 
 const WINNER_THRESHOLD=0.90;
 
-function checkFlip(){
+async function checkFlip(){
   if(flipCount>=1||fairUp==null)return;
   const hasUp=positions.some(p=>p.side==='up');
   const hasDown=positions.some(p=>p.side==='down');
@@ -104,17 +104,8 @@ function checkFlip(){
   if(oppPrice!=null&&oppPrice<(oppFair*(1-EDGE_THRESHOLD))){oppositeEdgeTicks++}else{oppositeEdgeTicks=0;return}
   if(oppositeEdgeTicks<3)return;
   slog(`🔄 FLIP SIGNAL — ${oppositeSide.toUpperCase()} edge confirmed (${oppositeEdgeTicks} ticks)`);
-  const toClose=positions.find(p=>p.side!==oppositeSide);
-  if(toClose){
-    const exitMid=toClose.side==='up'?upMid:downMid;
-    const pnl=r2(toClose.shares*(exitMid||toClose.entryPrice)-toClose.cost);
-    stats.realizedPnl=r2(stats.realizedPnl+pnl);
-    if(pnl>0)stats.wins++;else stats.losses++;
-    positions=positions.filter(p=>p.side!==toClose.side||p!==toClose);
-    slog(`🔄 FLIP CLOSE ${toClose.side.toUpperCase()} @${(exitMid||toClose.entryPrice).toFixed(2)} — PnL ${money(pnl)}`);
-  }
-  firedSides.add(oppositeSide);flipCount++;
-  fire(oppositeSide,oppPrice);
+  const opened=await fire(oppositeSide,oppPrice);
+  if(opened)flipCount++;else oppositeEdgeTicks=0;
 }
 
 function fastResolve(){
@@ -143,19 +134,20 @@ async function fire(side,clobPrice){
     let pos;
     if(DRY_RUN){
       const shares=Math.floor(BASE_STAKE/clobPrice*100)/100;
-      pos={side,shares,entryPrice:clobPrice,cost:r2(shares*clobPrice),openedAt:Date.now()};
+      pos={id:`${leg.slug}-${side}-${Date.now()}`,side,shares,entryPrice:clobPrice,cost:r2(shares*clobPrice),openedAt:Date.now()};
       slog(`✅ DEMO ${side.toUpperCase()} BUY ${shares}sh @${clobPrice.toFixed(2)} | cost $${pos.cost}`);
     }else{
       const order=await trader.placeFokBuy(token,BASE_STAKE);
-      if(!order.isFilled){slog(`❌ ${side.toUpperCase()} FOK rejected`);firedSides.delete(side);return;}
+      if(!order.isFilled){slog(`❌ ${side.toUpperCase()} FOK rejected`);firedSides.delete(side);return false;}
       const fp=parseFloat(order.avgPrice)||clobPrice;
       const rawShares=parseFloat(order.raw?.takingAmount||order.raw?.size_matched||'0');
       const sh=rawShares>0?r2(rawShares):Math.floor(BASE_STAKE/fp*100)/100;
-      pos={side,shares:sh,entryPrice:fp,cost:BASE_STAKE,openedAt:Date.now()};
+      pos={id:`${leg.slug}-${side}-${Date.now()}`,side,shares:sh,entryPrice:fp,cost:BASE_STAKE,openedAt:Date.now()};
       slog(`✅ LIVE ${side.toUpperCase()} BUY ${sh}sh @${fp}`);
     }
     positions.push(pos);
-  }catch(e){slog(`❌ buy error: ${e.message}`);firedSides.delete(side);}
+    return true;
+  }catch(e){slog(`❌ buy error: ${e.message}`);firedSides.delete(side);return false;}
 }
 
 function settleWith(pos,winner){
@@ -213,7 +205,7 @@ async function loop(){
       fairUp=fairProbability();
       const elapsed=leg?.elapsedSecond?.()||0;
       fastResolve();
-      checkFlip();
+      await checkFlip();
       if(leg?.discovered&&elapsed>=TRADE_START&&elapsed<TRADE_END&&positions.length<2&&btcOpen!=null){
         const edge=findEdge();
         if(edge&&!firedSides.has(edge.side))await fire(edge.side,edge.price);
@@ -269,7 +261,7 @@ const HTML=`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewpor
 <div><div class="plabel">DOWN</div><div class="price warn" id="dnP">--</div></div>
 </div></div>
 <div class="card"><div style="font-size:9px;color:#777;text-transform:uppercase;margin-bottom:7px">POSITIONS</div><div id="posarea"></div>
-<div class="stratinfo">\$100 flat per side · max 2 (UP+DOWN) · trade window 60–240s<br>Fires when CLOB mid deviates >\${(10)}% from fair probability · holds to resolution</div></div>
+<div class="stratinfo">\$100 flat per side · max 2 total · one UP + one DOWN · active 45–300s<br>Fires when CLOB mid deviates >\${(10)}% from fair probability · holds to resolution</div></div>
 <div class="card"><div style="font-size:9px;color:#777;text-transform:uppercase;margin-bottom:5px">EQUITY CURVE</div><div id="chart"><svg viewBox="0 0 600 95" preserveAspectRatio="none"><polyline id="eqline" fill="none" stroke="#00ccff" stroke-width="2.5"/></svg></div></div>
 <div class="card"><div style="font-size:9px;color:#777;text-transform:uppercase;margin-bottom:5px">TRADE HISTORY</div><div id="hist"></div></div>
 <div class="card"><div style="font-size:9px;color:#777;text-transform:uppercase;margin-bottom:5px">SERVER LOGS</div><div id="log"></div></div>
