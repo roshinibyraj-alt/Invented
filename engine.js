@@ -1,15 +1,16 @@
 'use strict';
 
 const GAMMA_API = process.env.GAMMA_API || 'https://gamma-api.polymarket.com';
-const CLOB_WS = process.env.CLOB_WS || 'wss://ws-subscriptions-clob.polymarket.com/ws/market';
 const CLOB_REST = process.env.CLOB_REST || 'https://clob.polymarket.com';
-const STALE_QUOTE_MS = Number(process.env.STALE_QUOTE_MS || 2500);
-const QUOTE_REFRESH_COOLDOWN_MS = Number(process.env.QUOTE_REFRESH_COOLDOWN_MS || 1500);
+const CLOB_POLL_MS = Number(process.env.CLOB_POLL_MS || 500);
+const CLOB_FRESH_MS = Number(process.env.CLOB_FRESH_MS || 3500);
 const WINDOW_SECONDS = 300;
 const ASSETS = (process.env.ASSETS || 'btc,eth,sol,xrp').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
 const LEAD_ASSET = (process.env.LEAD_ASSET || 'btc').toLowerCase();
 const START_BANKROLL = Number(process.env.START_BANKROLL || 20000);
-const TRADE_SHARES = Number(process.env.TRADE_SHARES || 100);
+const BASE_TRADE_SHARES = Number(process.env.BASE_TRADE_SHARES || 5);
+const BOOST_TRADE_SHARES = Number(process.env.BOOST_TRADE_SHARES || 100);
+const BOOST_WINDOWS = Number(process.env.BOOST_WINDOWS || 3);
 const ENTRY_MAX_SUM = Number(process.env.ENTRY_MAX_SUM || 0.75);
 const RESOLUTION_PRICE = Number(process.env.RESOLUTION_PRICE || 0.90);
 const PRICE_HISTORY_MS = Number(process.env.PRICE_HISTORY_MS || 5000);
@@ -23,7 +24,6 @@ function slugFor(asset, start) { return `${asset}-updown-5m-${start}`; }
 
 class MomentumLagEngine {
   constructor(options = {}) {
-    this.WebSocketImpl = options.WebSocketImpl || require('ws');
     this.fetchImpl = options.fetchImpl || fetch;
     this.emitTick = options.onTick || (() => {});
     this.emitLog = options.onLog || (() => {});
@@ -34,9 +34,9 @@ class MomentumLagEngine {
     this.losses = 0;
     this.tickCount = 0;
     this.messageCount = 0;
-    this.reconnects = 0;
-    this.connected = false;
-    this.lastMessageAt = null;
+    this.pollCount = 0;
+    this.lastPollAt = null;
+    this.lastSuccessfulPollAt = null;
     this.equityCurve = [{ t: Date.now(), equity: START_BANKROLL }];
     this.logs = [];
     this.trades = [];
@@ -49,16 +49,16 @@ class MomentumLagEngine {
     this.history = new Map();
     this.discoveredWindows = new Set();
     this.activeWindowStart = null;
-    this.socket = null;
-    this.subscribedTokens = new Set();
+    this.pollRunning = false;
+    this.ethBoostPending = false;
+    this.boostWindowsRemaining = 0;
+    this.ethTriggerWindow = null;
     this.loopRunning = false;
     this.firedComboKeys = new Set();
     this.discoveryErrors = [];
     this.lastDiscoveryAt = null;
     this.discoveryRunning = false;
-    this.quoteSyncRunning = false;
-    this.connectionStartedAt = null;
-    this.handshakeTimer = null;
+    this.lastPollErrorAt = null;
   }
 
   log(message) {
@@ -79,6 +79,20 @@ class MomentumLagEngine {
     const timer = setTimeout(() => controller.abort(), timeout);
     try {
       const response = await this.fetchImpl(url, { signal: controller.signal, headers: { 'User-Agent': 'btc-divergence-bot/1.0' } });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return await response.json();
+    } finally { clearTimeout(timer); }
+  }
+
+  async postJSON(url, body, timeout = 2500) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeout);
+    try {
+      const response = await this.fetchImpl(url, {
+        method: 'POST', signal: controller.signal,
+        headers: { 'Content-Type': 'application/json', 'User-Agent': 'btc-correlation-bot/1.0' },
+        body: JSON.stringify(body),
+      });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       return await response.json();
     } finally { clearTimeout(timer); }
@@ -131,8 +145,7 @@ class MomentumLagEngine {
     this.markets.set(slug, record);
     this.tokens.set(record.up.tokenId, record.up);
     this.tokens.set(record.down.tokenId, record.down);
-    this.subscribe([record.up.tokenId, record.down.tokenId]);
-    this.log(`🎯 ${asset.toUpperCase()} 5m discovered ${slug} — WebSocket armed`);
+    this.log(`🎯 ${asset.toUpperCase()} 5m discovered ${slug} — CLOB polling armed`);
     return record;
   }
 
@@ -157,120 +170,16 @@ class MomentumLagEngine {
       market.windowStart === start && !market.tradingClosed && market.up.tokenId);
   }
 
-  subscribe(tokenIds) {
-    let added = false;
-    for (const tokenId of tokenIds.map(String)) {
-      if (!this.subscribedTokens.has(tokenId)) { this.subscribedTokens.add(tokenId); added = true; }
-    }
-    if (!added || !this.socket || this.socket.readyState !== 1) return;
-    this.sendSubscription();
+  currentTradeShares() {
+    return this.boostWindowsRemaining > 0 ? BOOST_TRADE_SHARES : BASE_TRADE_SHARES;
   }
 
-  sendSubscription() {
-    this.socket.send(JSON.stringify({ assets_ids: [...this.subscribedTokens], type: 'market' }));
-  }
-
-  connect() {
-    if (!this.WebSocketImpl || this.socket) return;
-    this.connectionStartedAt = Date.now();
-    try { this.socket = new this.WebSocketImpl(CLOB_WS); }
-    catch (error) { this.socket = null; this.scheduleReconnect(); return; }
-    const socket = this.socket;
-    this.handshakeTimer = setTimeout(() => {
-      if (this.socket === socket && !this.connected) {
-        this.log('⏱️ CLOB handshake timeout — forcing reconnect');
-        this.reconnects++;this.closeStaleSocket();
-      }
-    }, 3500);
-    socket.onopen = () => {
-      if (this.socket !== socket) return;
-      clearTimeout(this.handshakeTimer);
-      this.connected = true;
-      this.lastMessageAt = Date.now();
-      this.log(`🔌 CLOB market WebSocket connected — ${this.subscribedTokens.size} tokens`);
-      if (this.subscribedTokens.size) this.sendSubscription();
-    };
-    socket.onmessage = event => { if (this.socket === socket) this.handleMessage(String(event.data)); };
-    socket.onerror = () => {};
-    socket.onclose = () => {
-      const hadSocket = this.socket === socket;
-      clearTimeout(this.handshakeTimer);
-      this.connected = false;
-      this.socket = null;
-      if (hadSocket) {
-        this.reconnects++;
-        this.log('⚠️ CLOB socket closed — reconnecting');
-        this.scheduleReconnect();
-      }
-    };
-  }
-
-  closeStaleSocket() {
-    const socket = this.socket;
-    this.socket = null;
-    this.connected = false;
-    if (!socket) return;
-    try { socket.terminate ? socket.terminate() : socket.close(); }
-    catch (_) { try { socket.close(); } catch (_) {} }
-  }
-
-  watchdogTick() {
-    if (!this.socket) { this.connect(); return; }
-    const now = Date.now();
-    if (this.socket.readyState === 0 && now - this.connectionStartedAt > 3500) {
-      this.log('⏱️ CLOB connection stuck — recycling');
-      this.closeStaleSocket();
-      return;
-    }
-    if (this.socket.readyState !== 1) return;
-    const silence = now - (this.lastMessageAt || this.connectionStartedAt);
-    if (silence > 4000) {
-      try { this.socket.send('PING'); } catch (_) {}
-    }
-    if (silence > 9000) {
-      this.log('⚠️ CLOB stream silent — recycling socket');
-      this.reconnects++;this.closeStaleSocket();
-    }
-  }
-
-  scheduleReconnect() {
-    setTimeout(() => this.connect(), 300);
-  }
-
-  handleMessage(raw) {
-    let events;
-    try { events = JSON.parse(raw); } catch (_) { return; }
-    if (!Array.isArray(events)) events = [events];
-    this.messageCount++;
-    this.lastMessageAt = Date.now();
-    for (const event of events) this.processEvent(event);
-    this.tickCount++;
-    this.emitTick(this.publicMarkets(), this.messageCount);
-  }
-
-  processEvent(event) {
-    const eventType = event.event_type;
-    if (event.asset_id && Array.isArray(event.bids)) {
-      const token = this.tokens.get(String(event.asset_id));
-      if (token) {
-        this.applyBook(token, event.bids, event.asks || []);
-        const ownedMarket = this.markets.get(token.slug);
-        if (ownedMarket && Date.now() / 1000 >= ownedMarket.windowEnd) this.resolveFromFinalPrices(ownedMarket);
-        this.updatePositionMarks();this.evaluateSignals();
-      }
-      return;
-    }
-    if (Array.isArray(event.price_changes)) {
-      for (const change of event.price_changes) {
-        const token = this.tokens.get(String(change.asset_id));
-        if (!token) continue;
-        this.applyTop(token, change.best_bid, change.best_ask);
-        const ownedMarket = this.markets.get(token.slug);
-        if (ownedMarket && Date.now() / 1000 >= ownedMarket.windowEnd) this.resolveFromFinalPrices(ownedMarket);
-      }
-      this.updatePositionMarks();this.evaluateSignals();
-    }
-    void eventType;
+  armEthBoost(windowStart) {
+    if (this.ethTriggerWindow === windowStart || this.ethBoostPending) return;
+    this.ethTriggerWindow = windowStart;
+    if (this.boostWindowsRemaining > 0) return;
+    this.ethBoostPending = true;
+    this.log(`🔥 BTC/ETH decorrelation confirmed — next ${BOOST_WINDOWS} window(s) boosted to ${BOOST_TRADE_SHARES} SH per leg`);
   }
 
   applyBook(token, bids, asks) {
@@ -355,10 +264,12 @@ class MomentumLagEngine {
         if (!Number.isFinite(btcToken.mid) || !Number.isFinite(altToken.mid)) continue;
         const combinedMid = round5(btcToken.mid + altToken.mid);
         if (combinedMid >= ENTRY_MAX_SUM) continue;
-        this.fireCombo({
+        const wasFired = this.firedComboKeys.has(comboKey);
+        const opened = this.fireCombo({
           key: comboKey, name: comboName, windowStart: leadMarket.windowStart,
           btcMarket: leadMarket, btcToken, altMarket, altToken, combinedMid,
         });
+        if (!wasFired && altAsset === 'eth' && opened) this.armEthBoost(leadMarket.windowStart);
       }
     }
   }
@@ -370,11 +281,12 @@ class MomentumLagEngine {
 
   fireCombo(signal) {
     const now = Date.now();
-    if (now / 1000 >= signal.btcMarket.windowEnd) return;
+    if (now / 1000 >= signal.btcMarket.windowEnd) return false;
+    const shares = this.currentTradeShares();
     const legs = [signal.btcMarket, signal.altMarket].map((market, index) => {
       const token = index === 0 ? signal.btcToken : signal.altToken;
       const fillPrice = token.ask;
-      const cost = Number.isFinite(fillPrice) ? round2(TRADE_SHARES * fillPrice) : NaN;
+      const cost = Number.isFinite(fillPrice) ? round2(shares * fillPrice) : NaN;
       const fee = Number.isFinite(cost) ? round2(cost * TAKER_FEE_BPS / 10000) : NaN;
       return {
         market, token, fillPrice, cost, fee,
@@ -382,12 +294,12 @@ class MomentumLagEngine {
         conditionId: market.conditionId, tokenId: token.tokenId,
       };
     });
-    if (!legs.every(leg => Number.isFinite(leg.fillPrice))) return;
+    if (!legs.every(leg => Number.isFinite(leg.fillPrice))) return false;
     const cost = round2(legs.reduce((sum, leg) => sum + leg.cost, 0));
     const fees = round2(legs.reduce((sum, leg) => sum + leg.fee, 0));
     if (cost + fees > this.bankroll) {
       this.log(`⚠️ ${signal.name} skipped — need $${round2(cost + fees)}, available $${this.bankroll}`);
-      return;
+      return false;
     }
     this.firedComboKeys.add(signal.key);
 
@@ -397,7 +309,7 @@ class MomentumLagEngine {
     const positionLegs = legs.map((leg, index) => ({
       id: `${comboId}-${leg.asset}-${index}`, comboId, slug: leg.slug,
       asset: leg.asset, conditionId: leg.conditionId, outcome: leg.outcome,
-      tokenId: leg.tokenId, shares: TRADE_SHARES, avgPrice: leg.fillPrice,
+      tokenId: leg.tokenId, shares, avgPrice: leg.fillPrice,
       entryPrice: leg.fillPrice, cost: leg.cost, fee: leg.fee, fills: 1,
       status: 'open', openedAt, markPrice: leg.token.mid,
       signal: {
@@ -409,7 +321,7 @@ class MomentumLagEngine {
     const combo = {
       id: comboId, name: signal.name, status: 'open', windowStart: signal.windowStart,
       windowEnd: signal.btcMarket.windowEnd, combinedEntryMid: signal.combinedMid,
-      combinedAsk: round2(cost / TRADE_SHARES), cost, fees, payout: null, pnl: null,
+      combinedAsk: round2(cost / shares), cost, fees, payout: null, pnl: null,
       result: null, winner: null, resolutionSource: null,
       legs: positionLegs.map(leg => ({ ...leg })), openedAt,
     };
@@ -424,11 +336,12 @@ class MomentumLagEngine {
         pnl: this.positionPnl(leg), signal: leg.signal,
       };
       this.trades.push(trade);
-      this.log(`⚡ BUY ${leg.asset.toUpperCase()} ${leg.outcome} ${TRADE_SHARES}sh @${leg.avgPrice.toFixed(3)} | ${signal.name} mid ${signal.combinedMid.toFixed(3)} < ${ENTRY_MAX_SUM.toFixed(2)} | $${leg.cost.toFixed(2)}`);
+      this.log(`⚡ BUY ${leg.asset.toUpperCase()} ${leg.outcome} ${shares}sh @${leg.avgPrice.toFixed(3)} | ${signal.name} mid ${signal.combinedMid.toFixed(3)} < ${ENTRY_MAX_SUM.toFixed(2)} | $${leg.cost.toFixed(2)}`);
     }
     this.trades = this.trades.slice(-300);
     this.log(`✅ ${signal.name} OPEN — combined mid ${signal.combinedMid.toFixed(3)} · cost $${cost.toFixed(2)} · hold to resolution`);
     this.recordEquity();
+    return true;
   }
 
   positionPnl(position) {
@@ -527,6 +440,14 @@ class MomentumLagEngine {
     try {
       const start = windowStartFor(Date.now());
       if (start !== this.activeWindowStart) {
+        if (this.ethBoostPending) {
+          this.boostWindowsRemaining = BOOST_WINDOWS;
+          this.ethBoostPending = false;
+          this.log(`🚀 Boost active — ${BOOST_WINDOWS} window(s) at ${BOOST_TRADE_SHARES} SH per leg`);
+        } else if (this.boostWindowsRemaining > 0) {
+          this.boostWindowsRemaining--;
+          if (!this.boostWindowsRemaining) this.log('⏹️ Boost sequence complete — base sizing restored');
+        }
         this.activeWindowStart = null;
         this.firedComboKeys.clear();
         await this.discoverWindow(start, 'New');
@@ -538,7 +459,6 @@ class MomentumLagEngine {
       }
       this.settleResolvedCombos();
       this.pruneExpiredMarkets();
-      await this.refreshStaleQuotes();
       this.recordEquity();
     } catch (error) {
       this.log(`⚠️ Loop: ${error.message}`);
@@ -558,36 +478,44 @@ class MomentumLagEngine {
       this.history.delete(market.down.tokenId);
     }
 
-    this.subscribedTokens = new Set([...this.tokens.values()].map(token => token.tokenId));
-    if (this.socket?.readyState === 1) this.sendSubscription();
-    this.log(`🧹 Released ${expired.length} expired market(s) — ${this.subscribedTokens.size} CLOB tokens active`);
+    this.log(`🧹 Released ${expired.length} expired market(s)`);
   }
 
-  async refreshStaleQuotes() {
-    if (this.quoteSyncRunning || this.socket?.readyState !== 1) return;
+  async pollClobBooks() {
+    if (this.pollRunning) return;
     const now = Date.now(), currentStart = windowStartFor(now);
-    const dueTokens = [...this.tokens.values()].filter(token => {
+    const tokens = [...this.tokens.values()].filter(token => {
       const market = this.markets.get(token.slug);
-      return market?.windowStart === currentStart && !market.tradingClosed && !market.resolved &&
-        now - (token.updatedAt || 0) >= STALE_QUOTE_MS &&
-        now - (token.refreshedAt || 0) >= QUOTE_REFRESH_COOLDOWN_MS;
+      return market?.windowStart === currentStart && !market.tradingClosed && !market.resolved;
     });
-    if (!dueTokens.length) return;
-    this.quoteSyncRunning = true;
-    let refreshed = 0;
+    if (!tokens.length) return;
+    this.pollRunning = true;
     try {
-      await Promise.all(dueTokens.map(async token => {
-        token.refreshedAt = now;
-        try {
-          const book = await this.getJSON(`${CLOB_REST}/book?token_id=${encodeURIComponent(token.tokenId)}`, 1500);
-          this.applyBook(token, Array.isArray(book?.bids) ? book.bids : [], Array.isArray(book?.asks) ? book.asks : []);
-          refreshed++;
-        } catch (_) {}
-      }));
+      const books = await this.postJSON(`${CLOB_REST}/books`, tokens.map(token => ({ token_id: token.tokenId })));
+      const byToken = new Map((Array.isArray(books) ? books : [])
+        .map(book => [String(book?.asset_id || ''), book]).filter(([tokenId]) => this.tokens.has(tokenId)));
+      for (const token of tokens) {
+        const book = byToken.get(token.tokenId);
+        if (book) this.applyBook(token, Array.isArray(book.bids) ? book.bids : [], Array.isArray(book.asks) ? book.asks : []);
+      }
+      this.pollCount++;
+      this.messageCount = this.pollCount;
+      this.lastPollAt = now;
+      this.lastSuccessfulPollAt = Date.now();
+      for (const market of this.markets.values()) {
+        if (!market.resolved && Date.now() / 1000 >= market.windowEnd) this.resolveFromFinalPrices(market);
+      }
       this.updatePositionMarks();
       this.evaluateSignals();
-      if (refreshed) this.log(`♻️ CLOB book resnapshot — ${refreshed} quiet/stale token(s)`);
-    } finally { this.quoteSyncRunning = false; }
+      this.tickCount++;
+      this.emitTick(this.publicMarkets(), this.messageCount);
+    } catch (error) {
+      const shouldLog = !this.lastPollErrorAt || Date.now() - this.lastPollErrorAt >= 5000;
+      if (shouldLog) {
+        this.log(`⚠️ CLOB book poll failed: ${error.message}`);
+        this.lastPollErrorAt = Date.now();
+      }
+    } finally { this.pollRunning = false; }
   }
 
   publicMarkets() {
@@ -618,12 +546,15 @@ class MomentumLagEngine {
     const nextDiscovered = ASSETS.filter(asset => this.markets.has(slugFor(asset, activeStart + WINDOW_SECONDS))).length;
     return {
       mode: 'AUTONOMOUS DEMO',
-      strategy: 'BTC+ALT opposite-side combo <0.75 · hold to resolution',
+      strategy: 'BTC+ALT opposite-side combo <0.75 · 5 SH base · ETH trigger boosts next 3 windows',
       serverTime: Date.now(),
       windowStart: activeStart,
-      connected: this.connected, tickCount: this.tickCount, messageCount: this.messageCount,
-      reconnects: this.reconnects, lastMessageAt: this.lastMessageAt,
-      subscribedTokens: this.subscribedTokens.size,
+      connected: this.isClobFresh(), tickCount: this.tickCount, messageCount: this.messageCount,
+      pollCount: this.pollCount, lastPollAt: this.lastPollAt,
+      lastSuccessfulPollAt: this.lastSuccessfulPollAt,
+      trackedTokens: this.tokens.size,
+      boostPending: this.ethBoostPending, boostWindowsRemaining: this.boostWindowsRemaining,
+      currentTradeShares: this.currentTradeShares(),
       discovery: {
         expectedMarkets: ASSETS.length,
         currentDiscovered, nextDiscovered,
@@ -644,7 +575,8 @@ class MomentumLagEngine {
       equityCurve: this.equityCurve.slice(-1500),
       logs: this.logs.slice(-220),
       config: {
-        tradeShares: TRADE_SHARES, entryMaxSum: ENTRY_MAX_SUM,
+        baseTradeShares: BASE_TRADE_SHARES, boostTradeShares: BOOST_TRADE_SHARES,
+        boostWindows: BOOST_WINDOWS, entryMaxSum: ENTRY_MAX_SUM,
         resolutionPrice: RESOLUTION_PRICE, feeBps: TAKER_FEE_BPS,
       },
       uptime: Math.floor((Date.now() - this.startedAt) / 1000),
@@ -660,17 +592,23 @@ class MomentumLagEngine {
     }
   }
 
+
+
+  isClobFresh(now = Date.now()) {
+    return Boolean(this.lastSuccessfulPollAt && now - this.lastSuccessfulPollAt <= CLOB_FRESH_MS);
+  }
+
   async init() {
     const start = windowStartFor(Date.now());
-    this.connect();
     await Promise.all([
       this.discoverWindow(start, 'Current'),
       this.discoverWindow(start + WINDOW_SECONDS, 'Next'),
     ]);
+    await this.pollClobBooks();
     setInterval(() => this.rotateAndSweep(), 250);
-    setInterval(() => this.watchdogTick(), 500);
+    setInterval(() => this.pollClobBooks(), CLOB_POLL_MS);
     setInterval(() => this.retryDiscovery(), 1500);
-    this.log(`🚀 BTC correlation combo bot started | ${ASSETS.join('/')} | demo $${START_BANKROLL}`);
+    this.log(`🚀 BTC correlation combo bot started | ${ASSETS.join('/')} | CLOB books every ${CLOB_POLL_MS}ms | demo ${START_BANKROLL}`);
   }
 }
 
@@ -684,7 +622,7 @@ function publicToken(token) {
 module.exports = {
   MomentumLagEngine,
   config: {
-    ASSETS, LEAD_ASSET, START_BANKROLL, TRADE_SHARES,
+    ASSETS, LEAD_ASSET, START_BANKROLL, BASE_TRADE_SHARES, BOOST_TRADE_SHARES, BOOST_WINDOWS,
     ENTRY_MAX_SUM, RESOLUTION_PRICE, TAKER_FEE_BPS,
   },
 };

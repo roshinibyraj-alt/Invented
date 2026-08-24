@@ -1,6 +1,6 @@
 # Polymarket BTC Correlation Combo Bot
 
-Autonomous 5-minute paper bot built on live Polymarket CLOB order-book WebSockets.
+Autonomous 5-minute correlation-combo paper bot priced by direct Polymarket CLOB order-book snapshots.
 
 ## Strategy
 - BTC is the only anchor asset.
@@ -20,4 +20,4 @@ Autonomous 5-minute paper bot built on live Polymarket CLOB order-book WebSocket
 - Winning legs pay shares × $1; losing legs pay zero.
 
 ## Risk / Dashboard
-Default demo bankroll is `$20,000`. The dashboard shows every live bid, ask, midpoint, spread and short-window delta for BTC, ETH, SOL and XRP, plus open combo marks, floating P&L, execution legs, resolved results, global equity curve and server logs. Prices come only from the CLOB WebSocket stream; if CLOB fails, trading stops.
+Default demo bankroll is `$20,000`. The dashboard shows every live bid, ask, midpoint, spread and short-window delta for BTC, ETH, SOL and XRP, plus open combo marks, floating P&L, execution legs, resolved results, global equity curve and server logs. Base size is 5 shares per leg. A filled BTC/ETH opposite-side decorrelation boosts every combo to 100 shares per leg for the next three consecutive windows. Prices come only from batched CLOB `/books` snapshots every 500 ms; if CLOB fails, trading stops.
