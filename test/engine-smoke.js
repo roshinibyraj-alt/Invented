@@ -33,31 +33,43 @@ async function fakeFetch(url, options = {}) {
   assert.equal(engine.currentTradeShares(), 5, 'normal windows use the five-share base');
   assert.equal(engine.combos.find(combo => combo.name === 'ETH_DOWN').cost, 3.6);
   assert.equal(engine.bankroll, 19996.4);
-  assert.equal(engine.ethBoostPending, true, 'ETH decorrelation arms the next three windows');
+  assert.equal(engine.ethBoostPending, false, 'boost does NOT arm on open — only on WIN');
 
+  // Resolve the combo as a WIN (BTC UP resolved UP, ETH DOWN resolved DOWN)
   market('btc').finalUpMax = 0.93; market('btc').finalDownMax = 0.07;
   market('eth').finalDownMax = 0.93; market('eth').finalUpMax = 0.05;
   market('btc').resolved = false; market('eth').resolved = false;
   engine.resolveFromFinalPrices(market('btc'));
   engine.resolveFromFinalPrices(market('eth'));
   engine.settleResolvedCombos();
+
   const ethCombo = engine.combos.find(combo => combo.name === 'ETH_DOWN');
+  assert.equal(ethCombo.result, 'WIN');
   assert.equal(ethCombo.payout, 10);
   assert.equal(ethCombo.pnl, 6.4);
+  assert.equal(engine.ethBoostPending, true, 'decorrelation WIN arms the next three windows');
 
+  // Simulate window rotation consuming the pending boost
   const originalNow = Date.now;
   try {
     Date.now = () => (start + 301) * 1000;
     await engine.rotateAndSweep();
-    assert.equal(engine.boostWindowsRemaining, 3);
-    assert.equal(engine.currentTradeShares(), 100);
+    assert.equal(engine.boostWindowsRemaining, 3, 'boost windows set to 3 after rotation');
+    assert.equal(engine.currentTradeShares(), 100, 'boosted windows use 100 shares');
 
     engine.boostWindowsRemaining = 1;
     assert.equal(engine.currentTradeShares(), 100);
     Date.now = () => (start + 601) * 1000;
     await engine.rotateAndSweep();
     assert.equal(engine.boostWindowsRemaining, 0);
-    assert.equal(engine.currentTradeShares(), 5);
+    assert.equal(engine.currentTradeShares(), 5, 'base sizing restored after boost expires');
+
+    // Test boost reset: simulate another decorrelation WIN while already boosting
+    engine.boostWindowsRemaining = 2;
+    engine.ethBoostPending = false;
+    engine.ethTriggerWindow = null;
+    engine.armEthBoost(start + 601);
+    assert.equal(engine.boostWindowsRemaining, 3, 'boost resets to 3 on re-confirmed decorrelation WIN');
   } finally {
     Date.now = originalNow;
   }

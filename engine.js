@@ -11,7 +11,7 @@ const START_BANKROLL = Number(process.env.START_BANKROLL || 20000);
 const BASE_TRADE_SHARES = Number(process.env.BASE_TRADE_SHARES || 5);
 const BOOST_TRADE_SHARES = Number(process.env.BOOST_TRADE_SHARES || 100);
 const BOOST_WINDOWS = Number(process.env.BOOST_WINDOWS || 3);
-const ENTRY_MAX_SUM = Number(process.env.ENTRY_MAX_SUM || 0.75);
+const ENTRY_MAX_SUM = Number(process.env.ENTRY_MAX_SUM || 0.85);
 const RESOLUTION_PRICE = Number(process.env.RESOLUTION_PRICE || 0.90);
 const PRICE_HISTORY_MS = Number(process.env.PRICE_HISTORY_MS || 5000);
 const TAKER_FEE_BPS = Number(process.env.TAKER_FEE_BPS || 0);
@@ -175,9 +175,13 @@ class MomentumLagEngine {
   }
 
   armEthBoost(windowStart) {
+    if (this.boostWindowsRemaining > 0) {
+      this.boostWindowsRemaining = BOOST_WINDOWS;
+      this.log(`🔥 Decorrelation re-confirmed — boost reset to ${BOOST_WINDOWS} window(s) at ${BOOST_TRADE_SHARES} SH per leg`);
+      return;
+    }
     if (this.ethTriggerWindow === windowStart || this.ethBoostPending) return;
     this.ethTriggerWindow = windowStart;
-    if (this.boostWindowsRemaining > 0) return;
     this.ethBoostPending = true;
     this.log(`🔥 BTC/ETH decorrelation confirmed — next ${BOOST_WINDOWS} window(s) boosted to ${BOOST_TRADE_SHARES} SH per leg`);
   }
@@ -269,7 +273,7 @@ class MomentumLagEngine {
           key: comboKey, name: comboName, windowStart: leadMarket.windowStart,
           btcMarket: leadMarket, btcToken, altMarket, altToken, combinedMid,
         });
-        if (!wasFired && altAsset === 'eth' && opened) this.armEthBoost(leadMarket.windowStart);
+
       }
     }
   }
@@ -407,6 +411,9 @@ class MomentumLagEngine {
       this.resolvedCombos.unshift({ ...combo, legs: combo.legs.map(leg => ({ ...leg })) });
       this.resolvedCombos = this.resolvedCombos.slice(0, 30);
       this.log(`🏁 [${combo.resolutionSource}] ${combo.name} ${combo.result} — winners ${combo.winner} · cost $${combo.cost.toFixed(2)}, payout $${payout.toFixed(2)}, P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`);
+      if (combo.result === 'WIN' && combo.name.startsWith('ETH_')) {
+        this.armEthBoost(combo.windowStart);
+      }
     }
     // Backward-compatible public positions remain individual combo legs.
     this.positions = this.positions.filter(position => position.status === 'open');
@@ -546,7 +553,7 @@ class MomentumLagEngine {
     const nextDiscovered = ASSETS.filter(asset => this.markets.has(slugFor(asset, activeStart + WINDOW_SECONDS))).length;
     return {
       mode: 'AUTONOMOUS DEMO',
-      strategy: 'BTC+ALT opposite-side combo <0.75 · 5 SH base · ETH trigger boosts next 3 windows',
+      strategy: 'BTC+ALT opposite-side combo <0.85 · 5 SH base · decorrelation WIN resets boost to 3 windows',
       serverTime: Date.now(),
       windowStart: activeStart,
       connected: this.isClobFresh(), tickCount: this.tickCount, messageCount: this.messageCount,
