@@ -196,7 +196,8 @@ class MomentumLagEngine {
       this.log(`📊 Window ${windowStart}: DECORRELATION ${result.btc}/${result.eth}`);
       if (this.boostWindowsRemaining <= 0 && !this.ethBoostPending) {
         this.ethBoostPending = true;
-        this.log(`🔥 Decorrelation detected — next ${BOOST_WINDOWS} window(s) boosted to ${BOOST_TRADE_SHARES} SH per leg`);
+        this.boostWindowsRemaining = BOOST_WINDOWS;
+        this.log(`🔥 Decorrelation detected — ${BOOST_WINDOWS} window(s) boosted to ${BOOST_TRADE_SHARES} SH per leg NOW`);
       }
     }
   }
@@ -464,9 +465,9 @@ class MomentumLagEngine {
       const start = windowStartFor(Date.now());
       if (start !== this.activeWindowStart) {
         if (this.ethBoostPending) {
-          this.boostWindowsRemaining = BOOST_WINDOWS;
+          if (!this.boostWindowsRemaining) this.boostWindowsRemaining = BOOST_WINDOWS;
           this.ethBoostPending = false;
-          this.log(`🚀 Boost active — ${BOOST_WINDOWS} window(s) at ${BOOST_TRADE_SHARES} SH per leg`);
+          this.log(`🚀 Boost active — ${this.boostWindowsRemaining} window(s) at ${BOOST_TRADE_SHARES} SH per leg`);
         } else if (this.boostWindowsRemaining > 0) {
           this.boostWindowsRemaining--;
           if (!this.boostWindowsRemaining) this.log('⏹️ Boost sequence complete — base sizing restored');
