@@ -13,7 +13,7 @@ const engine = new MomentumLagEngine({
   onLog: line => { console.log(line); io.emit('log', line); },
 });
 
-const dashboard = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BTC Correlation Combos</title>
+const dashboard = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>CorrelBot</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}html{color-scheme:dark}
 body{background:#000;color:#fff;font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;font-weight:700;padding:10px}
@@ -33,7 +33,7 @@ h1{font-size:20px;letter-spacing:.3px}.sub{font-size:10px;color:#7f93a8;margin-t
 @media(max-width:1150px){.kpis{grid-template-columns:repeat(4,minmax(0,1fr))}.markets{grid-template-columns:repeat(2,minmax(0,1fr))}.combos,.results,.feeds{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:720px){body{padding:7px}.topbar{flex-direction:column;align-items:stretch}.pills{justify-content:flex-start}.kpis{grid-template-columns:repeat(2,minmax(0,1fr));gap:5px}.two-col{grid-template-columns:1fr}.markets,.combos,.results,.feeds{grid-template-columns:1fr}.mid{font-size:30px}.value,.money{font-size:20px}h1{font-size:17px}}
 </style></head><body><div class="shell">
-<header class="topbar"><div class="brand"><div class="brand-icon">🔗</div><div><h1>BTC Correlation Combos</h1><div class="sub">BTC UP/DOWN + opposite alt side · combined mid &lt;0.85 · hold to resolution · CLOB book polling only</div></div></div><div class="pills"><span class="pill live" id="connection">UI LIVE</span><span class="pill warn" id="clobStatus">CLOB CONNECTING</span><span class="pill warn" id="discoveryStatus">DISCOVERY</span><span class="pill" id="rate">0/s</span><span class="pill" id="uptime">00:00</span></div></header>
+<header class="topbar"><div class="brand"><div class="brand-icon">🔗</div><div><h1>CorrelBot</h1><div class="sub">BTC UP/DOWN + opposite alt side · combined mid &lt;0.85 · hold to resolution · CLOB book polling only</div></div></div><div class="pills"><span class="pill live" id="connection">UI LIVE</span><span class="pill warn" id="clobStatus">CLOB CONNECTING</span><span class="pill warn" id="discoveryStatus">DISCOVERY</span><span class="pill" id="rate">0/s</span><span class="pill" id="uptime">00:00</span></div></header>
 <section class="kpis" id="kpis"></section>
 <section class="two-col"><div class="panel"><div class="panel-head"><span>Global equity curve</span><strong id="equityValue">—</strong></div><div class="chart"><svg id="equityChart" preserveAspectRatio="none"></svg></div></div><div class="panel"><div class="panel-head"><span>Strategy & connection</span><strong>ACTIVE RULES</strong></div><div class="config-grid" id="configGrid"></div></div></section>
 <section class="panel section"><div class="panel-head"><span>Live CLOB order books</span><strong id="tickInfo">WAITING</strong></div><div class="markets" id="marketsGrid"></div></section>
