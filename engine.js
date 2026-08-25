@@ -53,6 +53,8 @@ class MomentumLagEngine {
     this.ethBoostPending = false;
     this.boostWindowsRemaining = 0;
     this.ethTriggerWindow = null;
+    this.correlationStreak = 0;
+    this.windowResults = new Map();
     this.loopRunning = false;
     this.firedComboKeys = new Set();
     this.discoveryErrors = [];
@@ -174,15 +176,29 @@ class MomentumLagEngine {
     return this.boostWindowsRemaining > 0 ? BOOST_TRADE_SHARES : BASE_TRADE_SHARES;
   }
 
-  armEthBoost(windowStart) {
-    if (this.boostWindowsRemaining > 0) {
-      this.log(`🔥 Decorrelation during boost — ${this.boostWindowsRemaining} window(s) remaining`);
-      return;
+  checkCorrelation(windowStart) {
+    const btcMarket = this.markets.get(slugFor('btc', windowStart));
+    const ethMarket = this.markets.get(slugFor('eth', windowStart));
+    if (!btcMarket?.resolved || !ethMarket?.resolved) return;
+    if (this.windowResults.has(windowStart)) return;
+    const result = { btc: btcMarket.winner, eth: ethMarket.winner };
+    this.windowResults.set(windowStart, result);
+    const isCorrelated = result.btc === result.eth;
+    if (isCorrelated) {
+      this.correlationStreak++;
+      this.log(`📊 Window ${windowStart}: CORRELATION ${result.btc}/${result.eth} (streak ${this.correlationStreak})`);
+      if (this.correlationStreak >= 3 && this.boostWindowsRemaining > 0) {
+        this.boostWindowsRemaining = 0;
+        this.log(`⏹️ 3 consecutive correlations — base sizing restored`);
+      }
+    } else {
+      this.correlationStreak = 0;
+      this.log(`📊 Window ${windowStart}: DECORRELATION ${result.btc}/${result.eth}`);
+      if (this.boostWindowsRemaining <= 0 && !this.ethBoostPending) {
+        this.ethBoostPending = true;
+        this.log(`🔥 Decorrelation detected — next ${BOOST_WINDOWS} window(s) boosted to ${BOOST_TRADE_SHARES} SH per leg`);
+      }
     }
-    if (this.ethTriggerWindow === windowStart || this.ethBoostPending) return;
-    this.ethTriggerWindow = windowStart;
-    this.ethBoostPending = true;
-    this.log(`🔥 BTC/ETH decorrelation confirmed — next ${BOOST_WINDOWS} window(s) boosted to ${BOOST_TRADE_SHARES} SH per leg`);
   }
 
   applyBook(token, bids, asks) {
@@ -410,8 +426,9 @@ class MomentumLagEngine {
       this.resolvedCombos.unshift({ ...combo, legs: combo.legs.map(leg => ({ ...leg })) });
       this.resolvedCombos = this.resolvedCombos.slice(0, 30);
       this.log(`🏁 [${combo.resolutionSource}] ${combo.name} ${combo.result} — winners ${combo.winner} · cost $${combo.cost.toFixed(2)}, payout $${payout.toFixed(2)}, P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`);
-      if (combo.result === 'WIN' && combo.name.startsWith('ETH_')) {
-        this.armEthBoost(combo.windowStart);
+      if (combo.result === 'LOSS' && this.boostWindowsRemaining > 0) {
+        this.boostWindowsRemaining = BOOST_WINDOWS;
+        this.log(`🔥 Boost window lost — reset to ${BOOST_WINDOWS} window(s)`);
       }
     }
     // Backward-compatible public positions remain individual combo legs.
@@ -464,6 +481,11 @@ class MomentumLagEngine {
         if (Date.now() / 1000 >= market.windowEnd) this.resolveFromFinalPrices(market);
       }
       this.settleResolvedCombos();
+      const checkStarts = new Set();
+      for (const market of this.markets.values()) {
+        if (market.resolved) checkStarts.add(market.windowStart);
+      }
+      for (const ws of checkStarts) this.checkCorrelation(ws);
       this.pruneExpiredMarkets();
       this.recordEquity();
     } catch (error) {
@@ -560,6 +582,7 @@ class MomentumLagEngine {
       lastSuccessfulPollAt: this.lastSuccessfulPollAt,
       trackedTokens: this.tokens.size,
       boostPending: this.ethBoostPending, boostWindowsRemaining: this.boostWindowsRemaining,
+      correlationStreak: this.correlationStreak,
       currentTradeShares: this.currentTradeShares(),
       discovery: {
         expectedMarkets: ASSETS.length,
