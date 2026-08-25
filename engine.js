@@ -156,6 +156,7 @@ class MomentumLagEngine {
       tokenId: String(tokenId), slug, asset, outcome,
       bid: null, ask: null, mid: null, spread: null,
       previousMid: null, updatedAt: null,
+      bookAsks: [],
     };
   }
 
@@ -207,6 +208,7 @@ class MomentumLagEngine {
     const validAsks = asks.filter(level => Number(level.size) > 0).map(level => ({ price: Number(level.price), size: Number(level.size) }));
     validBids.sort((a, b) => b.price - a.price);
     validAsks.sort((a, b) => a.price - b.price);
+    token.bookAsks = validAsks;
     this.setQuote(token, validBids[0]?.price ?? null, validAsks[0]?.price ?? null);
   }
 
@@ -228,6 +230,26 @@ class MomentumLagEngine {
     this.pushHistory(token.tokenId, token.mid);
     const market = this.markets.get(token.slug);
     if (market) this.trackFinalPrices(market);
+  }
+
+  simulateGtcBookFill(token, shares, ceiling = 0.99) {
+    const asks = token.bookAsks || [];
+    let remaining = shares;
+    let totalCost = 0;
+    const levels = [];
+    for (const level of asks) {
+      if (level.price > ceiling) break;
+      if (remaining <= 0) break;
+      const fill = Math.min(level.size, remaining);
+      const cost = round2(fill * level.price);
+      levels.push({ price: level.price, size: fill, cost });
+      totalCost += cost;
+      remaining -= fill;
+    }
+    const filled = shares - remaining;
+    if (filled <= 0) return null;
+    const avgPrice = round5(totalCost / filled);
+    return { avgPrice, filled, totalCost: round2(totalCost), levels };
   }
 
   trackFinalPrices(market) {
@@ -303,13 +325,19 @@ class MomentumLagEngine {
     const now = Date.now();
     if (now / 1000 >= signal.btcMarket.windowEnd) return false;
     const shares = this.currentTradeShares();
+    const CEILING = 0.99;
     const legs = [signal.btcMarket, signal.altMarket].map((market, index) => {
       const token = index === 0 ? signal.btcToken : signal.altToken;
-      const fillPrice = token.ask;
-      const cost = Number.isFinite(fillPrice) ? round2(shares * fillPrice) : NaN;
-      const fee = Number.isFinite(cost) ? round2(cost * TAKER_FEE_BPS / 10000) : NaN;
+      const bookAsk = token.ask;
+      const bookBid = token.bid;
+      const bookMid = token.mid;
+      const sweep = this.simulateGtcBookFill(token, shares, CEILING);
+      if (!sweep) return { market, token, fillPrice: NaN, bookAsk, bookBid, bookMid, cost: NaN, fee: NaN, sweep: null,
+        outcome: token.outcome, slug: market.slug, asset: market.asset,
+        conditionId: market.conditionId, tokenId: token.tokenId };
       return {
-        market, token, fillPrice, cost, fee,
+        market, token, fillPrice: sweep.avgPrice, bookAsk, bookBid, bookMid,
+        cost: sweep.totalCost, fee: round2(sweep.totalCost * TAKER_FEE_BPS / 10000), sweep,
         outcome: token.outcome, slug: market.slug, asset: market.asset,
         conditionId: market.conditionId, tokenId: token.tokenId,
       };
@@ -350,16 +378,17 @@ class MomentumLagEngine {
     this.bankroll = round2(this.bankroll - cost - fees);
     for (const leg of positionLegs) {
       const trade = {
-        timestamp: now, orderType: 'PAPER-FOK', comboId, combo: signal.name,
+        timestamp: now, orderType: 'PAPER-GTC@0.99', comboId, combo: signal.name,
         slug: leg.slug, asset: leg.asset, outcome: leg.outcome, shares: leg.shares,
         price: leg.avgPrice, cost: leg.cost, markPrice: leg.markPrice,
         pnl: this.positionPnl(leg), signal: leg.signal,
       };
       this.trades.push(trade);
-      this.log(`⚡ BUY ${leg.asset.toUpperCase()} ${leg.outcome} ${shares}sh @${leg.avgPrice.toFixed(3)} | ${signal.name} mid ${signal.combinedMid.toFixed(3)} < ${ENTRY_MAX_SUM.toFixed(2)} | $${leg.cost.toFixed(2)}`);
+      const sweepInfo = leg.sweep ? `sweep ${leg.sweep.filled}sh avg:${leg.sweep.avgPrice.toFixed(3)} levels:${leg.sweep.levels.length}` : 'no book depth';
+      this.log(`⚡ GTC BUY ${leg.asset.toUpperCase()} ${leg.outcome} ${shares}sh @${leg.avgPrice.toFixed(3)} (${sweepInfo} book bid:${leg.bookBid?.toFixed(3)??'-'} ask:${leg.bookAsk?.toFixed(3)??'-'} mid:${leg.bookMid?.toFixed(3)??'-'}) | ${signal.name} combined ${signal.combinedMid.toFixed(3)} < ${ENTRY_MAX_SUM.toFixed(2)} | $${leg.cost.toFixed(2)}`);
     }
     this.trades = this.trades.slice(-300);
-    this.log(`✅ ${signal.name} OPEN — combined mid ${signal.combinedMid.toFixed(3)} · cost $${cost.toFixed(2)} · hold to resolution`);
+    this.log(`✅ ${signal.name} OPEN — GTC@0.99 · combined ${signal.combinedMid.toFixed(3)} · fill avg $${(legs.reduce((s,l)=>s+l.fillPrice,0)/legs.length).toFixed(3)} · cost $${cost.toFixed(2)} · hold to resolution`);
     this.recordEquity();
     return true;
   }

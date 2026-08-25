@@ -102,6 +102,25 @@ class PolymarketTrader {
     return { id };
   }
 
+  // ── GTC limit BUY at ceiling — sweeps entire book up to ceiling price ──
+  async placeGtcCeilingBuy(tokenId, shares, ceiling = 0.99) {
+    let tickSize = '0.01', negRisk = false;
+    try { tickSize = (await this._clob.getTickSize(tokenId)) ?? '0.01'; } catch (_) {}
+    try { negRisk  = (await this._clob.getNegRisk(tokenId))  ?? false;  } catch (_) {}
+    const resp = await this._clob.createAndPostOrder(
+      { tokenID: tokenId, price: ceiling, size: shares, side: Side.BUY },
+      { tickSize, negRisk },
+      OrderType.GTC
+    );
+    const id        = resp?.orderID ?? resp?.id ?? null;
+    const status    = resp?.status || (id ? 'UNKNOWN' : 'FAILED');
+    const remaining = parseFloat(resp?.remaining_size ?? '999');
+    const isFilled  = status === 'FILLED' || (resp?.match_status || '').toLowerCase() === 'filled' || remaining === 0;
+    const avgPrice  = parseFloat(resp?.avg_fill_price || resp?.price || ceiling);
+    if (id) this._log(`🏷️ GTC BUY ${shares}sh ceiling $${ceiling} → ${status} avg:$${avgPrice.toFixed(3)} id:${id.slice(0,12)}…`);
+    return { id, status, isFilled, avgPrice, raw: resp };
+  }
+
   // ── FOK market BUY — amount is dollars ──
   async placeFokBuy(tokenId, dollarAmount) {
     let tickSize = '0.01', negRisk = false;
@@ -206,6 +225,32 @@ class PolymarketTrader {
     } catch (_) { return null; }
   }
 
+
+  // ── Simulate GTC fill by sweeping the order book ──
+  simulateGtcBookFill(book, shares, ceiling = 0.99) {
+    if (!book) return null;
+    const asks = (book.asks || [])
+      .filter(level => Number(level.size) > 0)
+      .map(level => ({ price: Number(level.price), size: Number(level.size) }))
+      .filter(level => level.price > 0 && level.price <= 1)
+      .sort((a, b) => a.price - b.price);
+    let remaining = shares;
+    let totalCost = 0;
+    const levels = [];
+    for (const level of asks) {
+      if (level.price > ceiling) break;
+      if (remaining <= 0) break;
+      const fill = Math.min(level.size, remaining);
+      const cost = Math.round(fill * level.price * 100) / 100;
+      levels.push({ price: level.price, size: fill, cost });
+      totalCost += cost;
+      remaining -= fill;
+    }
+    const filled = shares - remaining;
+    if (filled <= 0) return null;
+    const avgPrice = Math.round(totalCost / filled * 100000) / 100000;
+    return { avgPrice, filled, totalCost: Math.round(totalCost * 100) / 100, levels };
+  }
 
   // ── FOK order with explicit price & size (no market price calc) ──
   async placeFokLimitOrder(tokenId, side, price, size) {
