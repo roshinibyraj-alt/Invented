@@ -176,8 +176,7 @@ class MomentumLagEngine {
 
   armEthBoost(windowStart) {
     if (this.boostWindowsRemaining > 0) {
-      this.boostWindowsRemaining = BOOST_WINDOWS;
-      this.log(`🔥 Decorrelation re-confirmed — boost reset to ${BOOST_WINDOWS} window(s) at ${BOOST_TRADE_SHARES} SH per leg`);
+      this.log(`🔥 Decorrelation during boost — ${this.boostWindowsRemaining} window(s) remaining`);
       return;
     }
     if (this.ethTriggerWindow === windowStart || this.ethBoostPending) return;
@@ -553,7 +552,7 @@ class MomentumLagEngine {
     const nextDiscovered = ASSETS.filter(asset => this.markets.has(slugFor(asset, activeStart + WINDOW_SECONDS))).length;
     return {
       mode: 'AUTONOMOUS DEMO',
-      strategy: 'BTC+ALT opposite-side combo <0.85 · 5 SH base · decorrelation WIN resets boost to 3 windows',
+      strategy: 'BTC+ALT opposite-side combo <0.85 · 5 SH base · 100 SH boost for 3 windows after decorrelation',
       serverTime: Date.now(),
       windowStart: activeStart,
       connected: this.isClobFresh(), tickCount: this.tickCount, messageCount: this.messageCount,
