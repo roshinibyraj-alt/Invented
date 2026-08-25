@@ -583,6 +583,7 @@ class MomentumLagEngine {
       trackedTokens: this.tokens.size,
       boostPending: this.ethBoostPending, boostWindowsRemaining: this.boostWindowsRemaining,
       correlationStreak: this.correlationStreak,
+      windowResults: Object.fromEntries(this.windowResults),
       currentTradeShares: this.currentTradeShares(),
       discovery: {
         expectedMarkets: ASSETS.length,
