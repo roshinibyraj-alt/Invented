@@ -8,7 +8,7 @@ const WINDOW_SECONDS = 300;
 const ASSETS = ['btc', 'eth'];
 const LEAD_ASSET = (process.env.LEAD_ASSET || 'btc').toLowerCase();
 const START_BANKROLL = Number(process.env.START_BANKROLL || 20000);
-const BASE_TRADE_SHARES = Number(process.env.BASE_TRADE_SHARES || 50);
+const BASE_TRADE_SHARES = Number(process.env.BASE_TRADE_SHARES || 100);
 const BOOST_TRADE_SHARES = Number(process.env.BOOST_TRADE_SHARES || 100);
 const BOOST_WINDOWS = Number(process.env.BOOST_WINDOWS || 3);
 const ENTRY_MAX_SUM = Number(process.env.ENTRY_MAX_SUM || 0.85);
@@ -174,7 +174,7 @@ class MomentumLagEngine {
   }
 
   currentTradeShares() {
-    return this.boostWindowsRemaining > 0 ? BOOST_TRADE_SHARES : BASE_TRADE_SHARES;
+    return BASE_TRADE_SHARES;
   }
 
   checkCorrelation(windowStart) {
@@ -292,6 +292,9 @@ class MomentumLagEngine {
     const leadMarket = this.currentMarket(LEAD_ASSET);
     if (!leadMarket || leadMarket.windowStart !== this.activeWindowStart) return;
     if (!Number.isFinite(leadMarket.up.mid) || !Number.isFinite(leadMarket.down.mid)) return;
+    for (const key of this.firedComboKeys) {
+      if (key.startsWith(String(leadMarket.windowStart) + ':')) return;
+    }
 
     for (const altAsset of ASSETS.filter(asset => asset !== LEAD_ASSET)) {
       const altMarket = this.markets.get(slugFor(altAsset, leadMarket.windowStart));
@@ -306,12 +309,11 @@ class MomentumLagEngine {
         if (!Number.isFinite(btcToken.mid) || !Number.isFinite(altToken.mid)) continue;
         const combinedMid = round5(btcToken.mid + altToken.mid);
         if (combinedMid >= ENTRY_MAX_SUM) continue;
-        const wasFired = this.firedComboKeys.has(comboKey);
-        const opened = this.fireCombo({
+        this.fireCombo({
           key: comboKey, name: comboName, windowStart: leadMarket.windowStart,
           btcMarket: leadMarket, btcToken, altMarket, altToken, combinedMid,
         });
-
+        return;
       }
     }
   }
@@ -604,7 +606,7 @@ class MomentumLagEngine {
     const nextDiscovered = ASSETS.filter(asset => this.markets.has(slugFor(asset, activeStart + WINDOW_SECONDS))).length;
     return {
       mode: 'AUTONOMOUS DEMO',
-      strategy: 'BTC+ALT opposite-side combo <0.85 · 5 SH base · 100 SH boost for 3 windows after decorrelation',
+      strategy: 'BTC+ETH opposite-side combo <0.85 · flat 100 SH · 1 combo per window · GTC@0.99 book sweep',
       serverTime: Date.now(),
       windowStart: activeStart,
       connected: this.isClobFresh(), tickCount: this.tickCount, messageCount: this.messageCount,
