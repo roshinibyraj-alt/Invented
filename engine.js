@@ -11,7 +11,10 @@ const START_BANKROLL = Number(process.env.START_BANKROLL || 20000);
 const BASE_TRADE_SHARES = Number(process.env.BASE_TRADE_SHARES || 100);
 const BOOST_TRADE_SHARES = Number(process.env.BOOST_TRADE_SHARES || 100);
 const BOOST_WINDOWS = Number(process.env.BOOST_WINDOWS || 3);
-const ENTRY_MAX_SUM = Number(process.env.ENTRY_MAX_SUM || 0.85);
+const STRONG_THRESHOLD = Number(process.env.STRONG_THRESHOLD || 0.75);
+const WEAK_THRESHOLD = Number(process.env.WEAK_THRESHOLD || 0.50);
+const TRADE_WINDOW_START = Number(process.env.TRADE_WINDOW_START || 30);
+const TRADE_WINDOW_END = Number(process.env.TRADE_WINDOW_END || 270);
 const RESOLUTION_PRICE = Number(process.env.RESOLUTION_PRICE || 0.90);
 const PRICE_HISTORY_MS = Number(process.env.PRICE_HISTORY_MS || 5000);
 const TAKER_FEE_BPS = Number(process.env.TAKER_FEE_BPS || 0);
@@ -291,29 +294,51 @@ class MomentumLagEngine {
   evaluateSignals() {
     const leadMarket = this.currentMarket(LEAD_ASSET);
     if (!leadMarket || leadMarket.windowStart !== this.activeWindowStart) return;
-    if (!Number.isFinite(leadMarket.up.mid) || !Number.isFinite(leadMarket.down.mid)) return;
+    const now = Date.now() / 1000;
+    const elapsed = now - leadMarket.windowStart;
+    if (elapsed < TRADE_WINDOW_START || elapsed > TRADE_WINDOW_END) return;
     for (const key of this.firedComboKeys) {
       if (key.startsWith(String(leadMarket.windowStart) + ':')) return;
     }
 
+    const btcUp = leadMarket.up.mid;
+    const btcDown = leadMarket.down.mid;
+    if (!Number.isFinite(btcUp) || !Number.isFinite(btcDown)) return;
+
     for (const altAsset of ASSETS.filter(asset => asset !== LEAD_ASSET)) {
       const altMarket = this.markets.get(slugFor(altAsset, leadMarket.windowStart));
       if (!altMarket || altMarket.resolved) continue;
-      for (const btcOutcome of ['UP', 'DOWN']) {
-        const comboName = `${altAsset.toUpperCase()}_${btcOutcome === 'UP' ? 'DOWN' : 'UP'}`;
-        const comboKey = `${leadMarket.windowStart}:${comboName}`;
-        if (this.firedComboKeys.has(comboKey)) continue;
-        const btcToken = btcOutcome === 'UP' ? leadMarket.up : leadMarket.down;
-        const altOutcome = btcOutcome === 'UP' ? 'DOWN' : 'UP';
-        const altToken = altOutcome === 'UP' ? altMarket.up : altMarket.down;
-        if (!Number.isFinite(btcToken.mid) || !Number.isFinite(altToken.mid)) continue;
-        const combinedMid = round5(btcToken.mid + altToken.mid);
-        if (combinedMid >= ENTRY_MAX_SUM) continue;
-        this.fireCombo({
-          key: comboKey, name: comboName, windowStart: leadMarket.windowStart,
-          btcMarket: leadMarket, btcToken, altMarket, altToken, combinedMid,
-        });
-        return;
+      const ethUp = altMarket.up.mid;
+      const ethDown = altMarket.down.mid;
+      if (!Number.isFinite(ethUp) || !Number.isFinite(ethDown)) return;
+
+      if (btcUp >= STRONG_THRESHOLD && ethUp <= WEAK_THRESHOLD) {
+        const comboKey = `${leadMarket.windowStart}:ETH_UP`;
+        if (!this.firedComboKeys.has(comboKey)) {
+          this.fireLagging(comboKey, `${altAsset.toUpperCase()}_UP`, leadMarket, altMarket, altMarket.up, 'UP', altAsset, btcUp, ethUp);
+          return;
+        }
+      }
+      if (btcDown >= STRONG_THRESHOLD && ethDown <= WEAK_THRESHOLD) {
+        const comboKey = `${leadMarket.windowStart}:ETH_DOWN`;
+        if (!this.firedComboKeys.has(comboKey)) {
+          this.fireLagging(comboKey, `${altAsset.toUpperCase()}_DOWN`, leadMarket, altMarket, altMarket.down, 'DOWN', altAsset, btcDown, ethDown);
+          return;
+        }
+      }
+      if (ethUp >= STRONG_THRESHOLD && btcUp <= WEAK_THRESHOLD) {
+        const comboKey = `${leadMarket.windowStart}:BTC_UP`;
+        if (!this.firedComboKeys.has(comboKey)) {
+          this.fireLagging(comboKey, `${LEAD_ASSET.toUpperCase()}_UP`, altMarket, leadMarket, leadMarket.up, 'UP', LEAD_ASSET, ethUp, btcUp);
+          return;
+        }
+      }
+      if (ethDown >= STRONG_THRESHOLD && btcDown <= WEAK_THRESHOLD) {
+        const comboKey = `${leadMarket.windowStart}:BTC_DOWN`;
+        if (!this.firedComboKeys.has(comboKey)) {
+          this.fireLagging(comboKey, `${LEAD_ASSET.toUpperCase()}_DOWN`, altMarket, leadMarket, leadMarket.down, 'DOWN', LEAD_ASSET, ethDown, btcDown);
+          return;
+        }
       }
     }
   }
@@ -321,6 +346,58 @@ class MomentumLagEngine {
   currentMarket(asset) {
     return [...this.markets.values()].find(market =>
       market.asset === asset && !market.resolved && Date.now() / 1000 < market.windowEnd) || null;
+  }
+
+  fireLagging(key, name, strongMarket, laggingMarket, laggingToken, outcome, laggingAsset, strongPrice, laggingPrice) {
+    const now = Date.now();
+    const shares = this.currentTradeShares();
+    const CEILING = 0.99;
+    const sweep = this.simulateGtcBookFill(laggingToken, shares, CEILING);
+    if (!sweep) return false;
+    const fillPrice = sweep.avgPrice;
+    const cost = sweep.totalCost;
+    const fee = round2(cost * TAKER_FEE_BPS / 10000);
+    if (cost + fee > this.bankroll) {
+      this.log(`⚠️ ${name} skipped — need $${round2(cost + fee)}, available $${this.bankroll}`);
+      return false;
+    }
+    this.firedComboKeys.add(key);
+
+    const comboId = `${name}-${laggingMarket.windowStart}`;
+    const openedAt = new Date(now).toISOString();
+    const elapsed = Math.floor(now / 1000 - laggingMarket.windowStart);
+    const positionLeg = {
+      id: `${comboId}-${laggingAsset}-0`, comboId, slug: laggingMarket.slug,
+      asset: laggingAsset, conditionId: laggingMarket.conditionId, outcome,
+      tokenId: laggingToken.tokenId, shares, avgPrice: fillPrice,
+      entryPrice: fillPrice, cost, fee, fills: 1,
+      status: 'open', openedAt, markPrice: laggingToken.mid,
+      signal: { combo: name, strong: strongPrice, lagging: laggingPrice, elapsed },
+    };
+
+    const combo = {
+      id: comboId, name, status: 'open', windowStart: laggingMarket.windowStart,
+      windowEnd: laggingMarket.windowEnd, strongPrice, laggingPrice,
+      combinedAsk: round2(fillPrice), cost, fees: fee, payout: null, pnl: null,
+      result: null, winner: null, resolutionSource: null,
+      legs: [{ ...positionLeg }], openedAt,
+    };
+    this.positions.push(positionLeg);
+    this.combos.push(combo);
+    this.bankroll = round2(this.bankroll - cost - fee);
+    const trade = {
+      timestamp: now, orderType: 'PAPER-GTC@0.99', comboId, combo: name,
+      slug: laggingMarket.slug, asset: laggingAsset, outcome, shares,
+      price: fillPrice, cost, markPrice: laggingToken.mid,
+      pnl: this.positionPnl(positionLeg), signal: positionLeg.signal,
+    };
+    this.trades.push(trade);
+    const sweepInfo = sweep ? `sweep ${sweep.filled}sh avg:${sweep.avgPrice.toFixed(3)} levels:${sweep.levels.length}` : 'no book depth';
+    this.log(`⚡ GTC BUY ${laggingAsset.toUpperCase()} ${outcome} ${shares}sh @${fillPrice.toFixed(3)} (${sweepInfo}) | ${name} strong:${strongPrice.toFixed(3)} lagging:${laggingPrice.toFixed(3)} | $${cost.toFixed(2)}`);
+    this.trades = this.trades.slice(-300);
+    this.log(`✅ ${name} OPEN — GTC@0.99 · lagging @${fillPrice.toFixed(3)} · cost $${cost.toFixed(2)} · hold to resolution`);
+    this.recordEquity();
+    return true;
   }
 
   fireCombo(signal) {
@@ -364,7 +441,7 @@ class MomentumLagEngine {
       status: 'open', openedAt, markPrice: leg.token.mid,
       signal: {
         combo: signal.name, combinedMid: signal.combinedMid, elapsed,
-        entryThreshold: ENTRY_MAX_SUM,
+        entryThreshold: STRONG_THRESHOLD,
       },
     }));
 
@@ -387,7 +464,7 @@ class MomentumLagEngine {
       };
       this.trades.push(trade);
       const sweepInfo = leg.sweep ? `sweep ${leg.sweep.filled}sh avg:${leg.sweep.avgPrice.toFixed(3)} levels:${leg.sweep.levels.length}` : 'no book depth';
-      this.log(`⚡ GTC BUY ${leg.asset.toUpperCase()} ${leg.outcome} ${shares}sh @${leg.avgPrice.toFixed(3)} (${sweepInfo} book bid:${leg.bookBid?.toFixed(3)??'-'} ask:${leg.bookAsk?.toFixed(3)??'-'} mid:${leg.bookMid?.toFixed(3)??'-'}) | ${signal.name} combined ${signal.combinedMid.toFixed(3)} < ${ENTRY_MAX_SUM.toFixed(2)} | $${leg.cost.toFixed(2)}`);
+      this.log(`⚡ GTC BUY ${leg.asset.toUpperCase()} ${leg.outcome} ${shares}sh @${leg.avgPrice.toFixed(3)} (${sweepInfo} book bid:${leg.bookBid?.toFixed(3)??'-'} ask:${leg.bookAsk?.toFixed(3)??'-'} mid:${leg.bookMid?.toFixed(3)??'-'}) | ${signal.name} combined ${signal.combinedMid.toFixed(3)} < ${STRONG_THRESHOLD.toFixed(2)} | $${leg.cost.toFixed(2)}`);
     }
     this.trades = this.trades.slice(-300);
     this.log(`✅ ${signal.name} OPEN — GTC@0.99 · combined ${signal.combinedMid.toFixed(3)} · fill avg $${(legs.reduce((s,l)=>s+l.fillPrice,0)/legs.length).toFixed(3)} · cost $${cost.toFixed(2)} · hold to resolution`);
@@ -606,7 +683,7 @@ class MomentumLagEngine {
     const nextDiscovered = ASSETS.filter(asset => this.markets.has(slugFor(asset, activeStart + WINDOW_SECONDS))).length;
     return {
       mode: 'AUTONOMOUS DEMO',
-      strategy: 'BTC+ETH opposite-side combo <0.85 · flat 100 SH · 1 combo per window · GTC@0.99 book sweep',
+      strategy: 'Lagging side catch-up · strong>0.75 weak<0.50 · 30-270s window · flat 100 SH · GTC@0.99',
       serverTime: Date.now(),
       windowStart: activeStart,
       connected: this.isClobFresh(), tickCount: this.tickCount, messageCount: this.messageCount,
@@ -638,7 +715,7 @@ class MomentumLagEngine {
       logs: this.logs.slice(-220),
       config: {
         baseTradeShares: BASE_TRADE_SHARES, boostTradeShares: BOOST_TRADE_SHARES,
-        boostWindows: BOOST_WINDOWS, entryMaxSum: ENTRY_MAX_SUM,
+        boostWindows: BOOST_WINDOWS, strongThreshold: STRONG_THRESHOLD, weakThreshold: WEAK_THRESHOLD, tradeWindow: TRADE_WINDOW_START + '-' + TRADE_WINDOW_END + 's',
         resolutionPrice: RESOLUTION_PRICE, feeBps: TAKER_FEE_BPS,
       },
       uptime: Math.floor((Date.now() - this.startedAt) / 1000),
@@ -685,6 +762,6 @@ module.exports = {
   MomentumLagEngine,
   config: {
     ASSETS, LEAD_ASSET, START_BANKROLL, BASE_TRADE_SHARES, BOOST_TRADE_SHARES, BOOST_WINDOWS,
-    ENTRY_MAX_SUM, RESOLUTION_PRICE, TAKER_FEE_BPS,
+    STRONG_THRESHOLD, WEAK_THRESHOLD, RESOLUTION_PRICE, TAKER_FEE_BPS,
   },
 };
