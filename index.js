@@ -8,88 +8,544 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { pingInterval: 2000, pingTimeout: 5000 });
 const port = process.env.PORT || 8080;
+
 const engine = new MomentumLagEngine({
-  onTick: (markets, messageCount) => io.emit('tick', { t: Date.now(), windowStart: markets[0]?.windowStart ?? null, messageCount, markets }),
-  onLog: line => { console.log(line); io.emit('log', line); },
+  onTick: (markets, messageCount) => io.emit('tick', {
+    t: Date.now(),
+    windowStart: markets[0]?.windowStart ?? null,
+    messageCount,
+    markets,
+  }),
+  onLog: (line) => {
+    console.log(line);
+    io.emit('log', line);
+  },
 });
 
-const dashboard = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>CorrelBot</title>
+// ─── Dashboard HTML ──────────────────────────────────────────
+const dashboard = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CorrelBot</title>
 <style>
-*{box-sizing:border-box;margin:0;padding:0}html{color-scheme:dark}
-body{background:#000;color:#fff;font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;font-weight:700;padding:10px}
-.shell{max-width:1500px;margin:auto}.topbar{display:flex;justify-content:space-between;gap:10px;align-items:center;background:#070b10;border:1px solid #172434;border-radius:14px;padding:12px;margin-bottom:9px}
-h1{font-size:20px;letter-spacing:.3px}.sub{font-size:10px;color:#7f93a8;margin-top:2px}.brand-icon{font-size:24px}
-.pills{display:flex;gap:5px;flex-wrap:wrap;justify-content:right}.pill{border:1px solid #22364b;background:#08111c;border-radius:999px;padding:5px 8px;font-size:9px;color:#9fb1c4;white-space:nowrap}
-.live{color:#00ff9d;border-color:#00ff9d55;background:#00ff9d10}.warn{color:#ffc861;border-color:#ffc86155;background:#ffc86110}.bad{color:#ff5566;border-color:#ff556655;background:#ff556610}
-.kpis{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:6px;margin-bottom:9px}.kpi,.panel,.market-card,.combo,.result,.feed-item{background:#060a0f;border:1px solid #16232f;border-radius:13px}
-.kpi{padding:10px}.label{font-size:8px;text-transform:uppercase;color:#667e94;letter-spacing:.6px}.value{font-size:18px;margin-top:3px}.small{font-size:8px;color:#617589;font-weight:700}
-.two-col{display:grid;grid-template-columns:1fr 320px;gap:9px;margin-bottom:9px}.panel{overflow:hidden}.panel-head{display:flex;justify-content:space-between;align-items:center;padding:10px;border-bottom:1px solid #14202c;font-size:11px;color:#8ea2b6}
-.chart{height:155px;padding:5px}svg{width:100%;height:100%}.config-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;padding:9px}.config-item{background:#080f18;border-radius:9px;padding:8px;font-size:8px;color:#657b91}.config-item b{display:block;font-size:11px;color:#fff;margin-top:2px}
-.panel+.panel{margin-top:9px}.section{margin-bottom:9px}.markets{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}.market-card{padding:9px}.market-top{display:flex;justify-content:space-between;align-items:flex-start}.asset-name{font-size:15px}.timer{font-size:16px;color:#39d7ff;font-variant-numeric:tabular-nums;text-align:right}.timer small{display:block;font-size:8px;color:#65798d}
-.sides{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:8px}.side{background:#05090f;border:1px solid #152430;border-radius:10px;padding:8px}.side-label{font-size:10px;color:#8fa3b7}.up-label{color:#28e0a5}.down-label{color:#ff6b81}.mid{font-size:27px;line-height:1.15;font-variant-numeric:tabular-nums}.quote{font-size:9px;color:#7f93a8}.delta{font-size:9px;margin-top:2px}.green{color:#00ff9d!important}.red{color:#ff4a68!important}.blue{color:#38d6ff!important}.gold{color:#ffd166!important}
-.combos,.results,.feeds{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px}.corr-windows{display:flex;flex-wrap:wrap;gap:4px;padding:8px}.corr-win{padding:5px 8px;border-radius:6px;font-size:10px;font-weight:700;text-align:center;min-width:70px}.corr-win.correlated{background:#1a0a0a;border:1px solid #ff4a6888;color:#ff4a68}.corr-win.decorrelated{background:#0a1a0a;border:1px solid #00ff8588;color:#00ff85}.combo,.result,.feed-item{padding:10px}.combo-top{display:flex;justify-content:space-between;gap:6px}.combo-name{font-size:15px}.status{font-size:8px;color:#38d6ff;border:1px solid #38d6ff44;border-radius:99px;padding:3px 6px}.money{font-size:19px}.legs{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:8px}.leg{background:#05090f;border-radius:9px;padding:7px}.leg b{font-size:14px;display:block}.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:5px;margin-top:8px}.cell,.metric-cell{background:#05090f;border-radius:8px;padding:6px;font-size:8px;color:#677d92}.cell b,.metric-cell b{display:block;font-size:11px;color:#fff}
-.result-name{font-size:14px}.winners{font-size:10px;color:#8da2b7;margin:3px 0}.feed-main{font-size:12px;margin-top:4px}.feed-detail{font-size:8px;color:#687e93;margin-top:2px}.tag-up,.tag-down{border-radius:6px;padding:2px 4px;font-size:9px}.tag-up{color:#28e0a5;background:#28e0a515}.tag-down{color:#ff6b81;background:#ff6b8115}.logs{height:230px;overflow:auto;background:#010407;border-radius:10px;padding:8px;font-family:SFMono-Regular,Consolas,monospace;font-size:9px;font-weight:500;-webkit-overflow-scrolling:touch}.log{white-space:pre-wrap;color:#95a7b9;padding:1px 0}.empty{padding:16px;text-align:center;color:#445467;font-size:11px}
-.stale{color:#ffc861!important}
-@media(max-width:1150px){.kpis{grid-template-columns:repeat(4,minmax(0,1fr))}.markets{grid-template-columns:repeat(2,minmax(0,1fr))}.combos,.results,.feeds{grid-template-columns:repeat(2,minmax(0,1fr))}}
-@media(max-width:720px){body{padding:7px}.topbar{flex-direction:column;align-items:stretch}.pills{justify-content:flex-start}.kpis{grid-template-columns:repeat(2,minmax(0,1fr));gap:5px}.two-col{grid-template-columns:1fr}.markets,.combos,.results,.feeds{grid-template-columns:1fr}.mid{font-size:30px}.value,.money{font-size:20px}h1{font-size:17px}}
-</style></head><body><div class="shell">
-<header class="topbar"><div class="brand"><div class="brand-icon">🔗</div><div><h1>CorrelBot</h1><div class="sub">BTC UP/DOWN + opposite alt side · combined mid &lt;0.85 · hold to resolution · CLOB book polling only</div></div></div><div class="pills"><span class="pill live" id="connection">UI LIVE</span><span class="pill warn" id="clobStatus">CLOB CONNECTING</span><span class="pill warn" id="discoveryStatus">DISCOVERY</span><span class="pill" id="rate">0/s</span><span class="pill" id="uptime">00:00</span></div></header>
-<section class="kpis" id="kpis"></section>
-<section class="two-col"><div class="panel"><div class="panel-head"><span>Global equity curve</span><strong id="equityValue">—</strong></div><div class="chart"><svg id="equityChart" preserveAspectRatio="none"></svg></div></div><div class="panel"><div class="panel-head"><span>Strategy & connection</span><strong>ACTIVE RULES</strong></div><div class="config-grid" id="configGrid"></div></div></section>
-<section class="panel section"><div class="panel-head"><span>Live CLOB order books</span><strong id="tickInfo">WAITING</strong></div><div class="markets" id="marketsGrid"></div></section>
-<section class="panel section"><div class="panel-head"><span>Open correlation combos</span><strong id="comboCount">0 OPEN</strong></div><div class="combos" id="combosGrid"></div></section>
-<section class="panel"><div class="panel-head"><span>Window correlation history</span><strong id="corrLabel">—</strong></div><div class="corr-windows" id="corrWindows"></div></section><div class="two-col"><div class="panel"><div class="panel-head"><span>Resolved combos · last 2s >0.90</span><strong>SETTLED</strong></div><div class="results" id="resultsGrid" style="padding:8px"></div></div><div class="panel"><div class="panel-head"><span>Execution feed</span><strong>PAPER FOK LEGS</strong></div><div class="feeds" style="padding:8px" id="feedGrid"></div></div></div>
-<section class="panel"><div class="panel-head"><span>Server activity</span><strong id="socketStatus">READY</strong></div><div class="logs" id="logsPanel"></div></section>
-</div><script src="/socket.io/socket.io.js"></script><script>
-let state=null,tickData=null,lastLivePacket=null,lastRender=0,priceHistory={},quoteSeen={},quoteStamps={},renderedMarketsKey='',lastMessages=0,lastRateAt=Date.now(),rateValue=0;
-const $=id=>document.getElementById(id),socket=io({transports:['polling'],upgrade:false,reconnectionDelay:250,reconnectionDelayMax:1000,timeout:3000});
-socket.on('connect',()=>{$('connection').textContent='UI LIVE';$('connection').className='pill live'});socket.on('disconnect',()=>{$('connection').textContent='UI RETRY';$('connection').className='pill warn'});
-socket.on('log',line=>{logs.push(line);if(logs.length>300)logs.shift();safe(renderLogs)});socket.on('tick',data=>{if(acceptTick(data)){if(data.messageCount!=null)updateRate(data.messageCount);requestAnimationFrame(()=>safe(()=>{renderLivePrices(lastLivePacket,'CLOB TICK');renderFloating();lastRender=Date.now()}))}});
-socket.on('state',data=>safe(()=>render(data)));
-async function refreshState(){try{const response=await fetch('/api/status');render(await response.json())}catch(error){$('connection').textContent='UI RETRY';$('connection').className='pill warn'}}
-refreshState();setInterval(refreshState,1000);
-function safe(fn){try{fn()}catch(error){console.error('Dashboard render error:',error)}}
-function acceptTick(packet){if(!packet||!Array.isArray(packet.markets)||!packet.markets.length)return false;if(state&&packet.windowStart!==state.windowStart)return false;tickData=packet;lastLivePacket=packet;return true}
-function num(v){return Number(v||0).toLocaleString(undefined,{maximumFractionDigits:2})}function cash(v){return'$'+Number(v||0).toFixed(2)}function money(v){if(v==null)return'—';const n=Number(v);return(n>0?'+$':n<0?'-$':'$')+Math.abs(n).toFixed(2)}function tone(v){return Number(v)>0?'green':Number(v)<0?'red':''}function price(v){return v==null?'—':Number(v).toFixed(3)}function clock(s){s=Math.max(0,Math.floor(s));return String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0')}function esc(x){return String(x||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
-function updateRate(count){const previous=lastMessages;lastMessages=count;if(Date.now()-lastRateAt>=1000){rateValue=Math.max(0,Math.round((count-previous)*1000/(Date.now()-lastRateAt)));lastRateAt=Date.now()}$('rate').textContent=rateValue+'/s'}
-function validPacketFor(data,packet){return packet&&Array.isArray(packet.markets)&&packet.windowStart===data.windowStart&&packet.markets.some(market=>data.markets.some(current=>current.slug===market.slug))}
-function render(data){const previousWindow=state?.windowStart;if(previousWindow!==data.windowStart){tickData=null;lastLivePacket=null;priceHistory={};quoteSeen={};quoteStamps={};renderedMarketsKey=''}state=data;$('uptime').textContent=clock(data.uptime);const clob=$('clobStatus');clob.textContent=data.connected?'CLOB LIVE':(data.trackedTokens?'CLOB POLL RETRY':'CLOB CONNECTING');clob.className='pill '+(data.connected?'live':'warn');const discovery=$('discoveryStatus');discovery.textContent=data.discovery.currentDiscovered+'/'+data.discovery.expectedMarkets+' NOW';discovery.className='pill '+(data.discovery.currentDiscovered===data.discovery.expectedMarkets?'live':'warn');
-$('kpis').innerHTML=[['Equity',cash(data.markValue),'',cash(data.bankroll)+' bankroll'],['Total P&L',money(data.totalPnl),tone(data.totalPnl),'Since launch'],['Realized P&L',money(data.realizedPnl),tone(data.realizedPnl),'Settled combos'],['Floating P&L',money(data.unrealizedPnl),tone(data.unrealizedPnl),'Live mark'],['Open Cost',cash(data.openValue),'',data.combos.length+' combos'],['Win Rate',(data.winRate==null?'—':data.winRate+'%'),'',(data.wins||0)+'W / '+(data.losses||0)+'L'],['Combo Legs',num(data.positions.length),'',data.currentTradeShares+' SH each now'],['CLOB Polls',num(data.messageCount),'',data.pollCount+' batches']].map(item=>'<article class="kpi"><div class="label">'+item[0]+'</div><div class="value '+item[2]+'">'+item[1]+'</div><div class="small">'+item[3]+'</div></article>').join('');
-$('equityValue').textContent=cash(data.markValue);renderChart(data.equityCurve||[]);$('configGrid').innerHTML=[['Strong >',data.config.strongThreshold.toFixed(2)],['Weak <',data.config.weakThreshold.toFixed(2)],['Window',data.config.tradeWindow],['Size',data.config.baseTradeShares+' SH'],['Exit','hold to resolution'],['Resolution','final 2s > '+data.config.resolutionPrice.toFixed(2)],['Fees',data.config.feeBps+' bps'],['Bankroll',cash(data.bankroll)],['Window start',new Date(data.windowStart*1000).toLocaleTimeString()]].map(row=>'<div class="config-item">'+row[0]+'<b>'+row[1]+'</b></div>').join('');
-const packet=validPacketFor(data,lastLivePacket)?lastLivePacket:{t:data.serverTime,windowStart:data.windowStart,markets:data.markets};buildMarkets(data.markets||[]);renderLivePrices(packet,validPacketFor(data,lastLivePacket)?'CLOB TICK':'STATE SNAPSHOT');renderCombos(data.combos||[]);renderResults(data.resolvedCombos||[]);renderFeed(data.trades||[]);renderCorrelation(data);renderLogs()}
-function marketKey(markets){return(state?.windowStart??'')+':'+markets.map(market=>market.slug).sort().join('|')}
-function buildMarkets(markets){const key=marketKey(markets);if(key===renderedMarketsKey&&markets.every(market=>$('market-'+market.asset)))return;$('marketsGrid').innerHTML=markets.length?markets.map(market=>'<article class="market-card" id="market-'+market.asset+'"><div class="market-top"><div><div class="asset-name">'+market.asset.toUpperCase()+'</div><div class="small">'+market.slug+'</div></div><div class="timer" id="timer-'+market.asset+'">--:--<small>T+0s</small></div></div><div class="sides">'+sideHtml(market.asset,'UP')+sideHtml(market.asset,'DOWN')+'</div></article>').join(''):'<div class="empty">Discovering current-window books…</div>';renderedMarketsKey=key}
-function sideHtml(asset,outcome){const id=(asset+'-'+outcome).toLowerCase();return'<div class="side"><div class="side-label '+outcome.toLowerCase()+'-label">'+outcome+'</div><div class="mid" id="mid-'+id+'">—</div><div class="quote">B <span id="bid-'+id+'">—</span> · A <span id="ask-'+id+'">—</span></div><div class="quote">SPR <span id="spread-'+id+'">—</span></div><div class="quote">AGE <span id="age-'+id+'">WAIT</span></div><div class="delta" id="delta-'+id+'">HOLD</div></div>'}
-function rememberPrice(key,value){if(!Number.isFinite(value))return null;const now=Date.now(),list=priceHistory[key]||(priceHistory[key]=[]);list.push({t:now,p:value});while(list.length&&now-list[0].t>2500)list.shift();const old=list.find(item=>now-item.t<=1800&&item.p!==value)||list[0];return value-old.p}
-function ageClass(seenAt){return seenAt&&Date.now()-seenAt<5000?'':' stale'}
-function renderLivePrices(packet,source){if(!packet?.markets||!state)return;const now=Date.now();$('tickInfo').textContent=new Date(packet.t).toLocaleTimeString()+' · '+source+' · '+packet.markets.length+' BOOKS';for(const market of packet.markets){const card=$('market-'+market.asset);if(!card||!state.markets.some(current=>current.slug===market.slug))continue;$('timer-'+market.asset).innerHTML=clock(market.remaining)+'<small>T+'+market.elapsed+'s</small>';for(const side of ['up','down']){const token=market[side];if(!token)continue;const id=(market.asset+'-'+side).toLowerCase(),key=id+':'+market.slug,stamp=Number(token.updatedAt)||0;if(stamp&&quoteStamps[key]!==stamp){quoteStamps[key]=stamp;quoteSeen[key]=now}else if(stamp&&!quoteSeen[key])quoteSeen[key]=now;const seen=quoteSeen[key],stale=!seen||now-seen>=5000,delta=rememberPrice(key,token.mid);$('mid-'+id).textContent=price(token.mid);$('bid-'+id).textContent=price(token.bid);$('ask-'+id).textContent=price(token.ask);$('spread-'+id).textContent=token.spread==null?'—':token.spread.toFixed(3);const ageElement=$('age-'+id);ageElement.textContent=!stamp?'NO BOOK':!seen?'WAIT':now-seen<1000?'NOW':((now-seen)/1000).toFixed(1)+'s';ageElement.parentElement.className='quote'+(stale?' stale':'');const deltaElement=$('delta-'+id);deltaElement.textContent=delta==null?'HOLD':(delta>=0?'▲ +':'▼ ')+delta.toFixed(3);deltaElement.className='delta '+(delta>=0?'green':'red')}}}
-function renderFloating(){if(!state)return;for(const combo of state.combos||[]){const element=$('floating-'+combo.id);if(element)element.textContent=money(combo.unrealized),element.className='money '+tone(combo.unrealized)}}
-function renderCombos(combos){$('comboCount').textContent=combos.length+' OPEN';if(!combos.length){$('combosGrid').innerHTML='<div class="empty">No lagging side opportunity yet (strong>0.75 weak<0.50)</div>';return}$('combosGrid').innerHTML=combos.map(combo=>'<article class="combo"><div class="combo-top"><div><div class="combo-name">'+esc(combo.name)+'</div><div class="small">STRONG '+Number(combo.strongPrice).toFixed(3)+' LAGGING '+Number(combo.laggingPrice).toFixed(3)+' · T+'+Math.floor((Date.now()-combo.windowStart)/1000)+'s</div></div><span class="status">HOLDING</span></div><div class="metrics"><div class="metric-cell">COMBO COST<b>'+cash(combo.cost)+'</b></div><div class="metric-cell">MARK<b>'+cash(combo.markValue)+'</b></div><div class="metric-cell">FLOATING<b class="'+tone(combo.unrealized)+'">'+money(combo.unrealized)+'</b></div></div><div class="legs">'+combo.legs.map(leg=>'<div class="leg"><span class="small">'+leg.asset.toUpperCase()+' '+leg.outcome+'</span><b>'+num(leg.shares)+' SH</b><div class="small">ENTRY '+Number(leg.entryPrice).toFixed(3)+' · MARK '+Number(leg.markPrice??leg.entryPrice).toFixed(3)+'</div><div class="small">COST '+cash(leg.cost)+' · VALUE '+cash(leg.shares*(leg.markPrice??leg.entryPrice))+'</div></div>').join('')+'</div></article>').join('')}
-function renderResults(results){if(!results.length){$('resultsGrid').innerHTML='<div class="empty">No settled combos yet</div>';return}$('resultsGrid').innerHTML=results.map(result=>'<article class="result"><div class="result-name">'+esc(result.name)+' · <span class="'+(result.pnl>=0?'green':'red')+'">'+result.result+'</span><div class="winners">'+esc(result.winner)+'</div></div><div class="money '+tone(result.pnl)+'">'+money(result.pnl)+'<div class="small-money">'+cash(result.payout)+' payout / '+cash(result.cost)+' cost</div></div></article>').join('')}
-function renderFeed(trades){if(!trades.length){$('feedGrid').innerHTML='<div class="empty">Waiting for lagging side entries…</div>';return}$('feedGrid').innerHTML=trades.slice(0,30).map(trade=>'<article class="feed-item"><div class="small">'+new Date(trade.timestamp).toLocaleTimeString()+' · '+esc(trade.signal.combo)+'</div><div class="feed-main"><span class="'+(trade.outcome==='UP'?'tag-up':'tag-down')+'">'+trade.asset.toUpperCase()+' '+trade.outcome+'</span> '+num(trade.shares)+' SH @ '+Number(trade.price).toFixed(3)+'</div><div class="feed-detail">Strong '+Number(trade.signal.strong).toFixed(3)+' Lagging '+Number(trade.signal.lagging).toFixed(3)+' · '+cash(trade.cost)+' · FOK</div></article>').join('')}
-function renderChart(curve){const svg=$('equityChart');if(!curve.length){svg.innerHTML='';return}const values=curve.map(point=>point.equity),low=Math.min(...values),high=Math.max(...values),range=(high-low)||1,width=700,height=160,pad=12,points=curve.map((point,index)=>[index/Math.max(1,curve.length-1)*width,height-pad-(point.equity-low)/range*(height-pad*2)]),path='M'+points.map(point=>point[0].toFixed(1)+','+point[1].toFixed(1)).join(' L'),last=points.at(-1)||[0,height/2],color=state.totalPnl>=0?'#15ff9c':'#ff4a68';svg.innerHTML='<path d="'+path+'" fill="none" stroke="'+color+'" stroke-width="3"/><circle cx="'+last[0]+'" cy="'+last[1]+'" r="5" fill="'+color+'"/>'}
-function renderCorrelation(data){
- const wr=data.windowResults||{};
- const entries=Object.entries(wr).sort((a,b)=>Number(b[0])-Number(a[0]));
- if(!entries.length){$('corrWindows').innerHTML='<div class="empty">No resolved windows yet</div>';$('corrLabel').textContent='—';return}
- const streak=data.correlationStreak||0;
- const boost=data.boostWindowsRemaining||0;
- $('corrLabel').textContent='STREAK '+streak+' · '+(boost?boost+' BOOST':'BASE');
- $('corrWindows').innerHTML=entries.map(([ws,r])=>{
-  const corr=r.btc===r.eth;
-  const dt=new Date(Number(ws)*1000).toLocaleTimeString();
-  return'<div class="corr-win '+(corr?'correlated':'decorrelated')+'">'+dt+'<br>'+(corr?'✓ CORR':'✗ DECO')+'<br>'+r.btc+'/'+r.eth+'</div>';
- }).join('');
+*{box-sizing:border-box;margin:0;padding:0}
+html{color-scheme:dark}
+body{background:#000;color:#e0e6ed;font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;padding:12px}
+.shell{max-width:1540px;margin:auto}
+
+/* ── Top Bar ── */
+.topbar{display:flex;justify-content:space-between;align-items:center;background:#070b10;border:1px solid #172434;border-radius:14px;padding:14px 18px;margin-bottom:10px}
+.brand{display:flex;align-items:center;gap:10px}
+.brand-icon{font-size:26px}
+h1{font-size:20px;letter-spacing:.3px}
+.sub{font-size:9px;color:#7f93a8;margin-top:2px}
+.pills{display:flex;gap:5px;flex-wrap:wrap;justify-content:right}
+.pill{border:1px solid #22364b;background:#08111c;border-radius:999px;padding:5px 10px;font-size:9px;color:#9fb1c4;white-space:nowrap}
+.pill.live{color:#00ff9d;border-color:#00ff9d55;background:#00ff9d10}
+.pill.warn{color:#ffc861;border-color:#ffc86155;background:#ffc86110}
+.pill.bad{color:#ff5566;border-color:#ff556655;background:#ff556610}
+.pill.blue{color:#38d6ff;border-color:#38d6ff55;background:#38d6ff10}
+
+/* ── KPIs ── */
+.kpis{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:6px;margin-bottom:10px}
+.kpi{background:#060a0f;border:1px solid #16232f;border-radius:12px;padding:10px 12px}
+.kpi .label{font-size:8px;text-transform:uppercase;color:#667e94;letter-spacing:.6px}
+.kpi .value{font-size:18px;margin-top:4px;font-variant-numeric:tabular-nums}
+.kpi .small{font-size:8px;color:#617589;margin-top:2px}
+
+/* ── Panels ── */
+.panel{background:#060a0f;border:1px solid #16232f;border-radius:13px;overflow:hidden;margin-bottom:10px}
+.panel-head{display:flex;justify-content:space-between;align-items:center;padding:10px 14px;border-bottom:1px solid #14202c;font-size:11px;color:#8ea2b6}
+.panel-head strong{font-size:11px}
+.panel-body{padding:10px}
+
+/* ── Layout Grids ── */
+.two-col{display:grid;grid-template-columns:1fr 320px;gap:10px;margin-bottom:10px}
+.markets{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;padding:10px}
+.market-card{background:#060a0f;border:1px solid #16232f;border-radius:13px;padding:12px}
+.market-top{display:flex;justify-content:space-between;align-items:flex-start}
+.asset-name{font-size:16px;font-weight:800}
+.asset-slug{font-size:8px;color:#556677;margin-top:1px}
+.timer{font-size:18px;color:#39d7ff;font-variant-numeric:tabular-nums;text-align:right;font-weight:800}
+.timer small{display:block;font-size:8px;color:#65798d}
+.sides{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:10px}
+.side{background:#05090f;border:1px solid #152430;border-radius:10px;padding:10px}
+.side-label{font-size:10px;color:#8fa3b7;margin-bottom:4px}
+.side-label.up{color:#28e0a5}
+.side-label.down{color:#ff6b81}
+.mid{font-size:28px;line-height:1.1;font-variant-numeric:tabular-nums;font-weight:800}
+.quote{font-size:9px;color:#7f93a8;margin-top:4px}
+.spread-badge{display:inline-block;font-size:8px;color:#ffd166;background:#ffd16615;border:1px solid #ffd16633;border-radius:6px;padding:1px 5px;margin-top:3px}
+.age-badge{display:inline-block;font-size:8px;color:#7788;font-size:7px;margin-left:4px}
+
+/* ── Strategy Panel ── */
+.config-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:6px;padding:10px}
+.config-item{background:#080f18;border-radius:9px;padding:8px 10px;font-size:8px;color:#657b91}
+.config-item b{display:block;font-size:11px;color:#fff;margin-top:3px}
+
+/* ── Positions / Combos ── */
+.positions{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;padding:10px}
+.position-card{background:#060a0f;border:1px solid #16232f;border-radius:12px;padding:12px}
+.pos-header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px}
+.pos-name{font-size:14px;font-weight:800}
+.pos-badge{font-size:8px;border-radius:99px;padding:3px 8px;font-weight:700}
+.pos-badge.holding{color:#38d6ff;border:1px solid #38d6ff44;background:#38d6ff10}
+.pos-badge.won{color:#00ff9d;border:1px solid #00ff9d44;background:#00ff9d10}
+.pos-badge.lost{color:#ff5566;border:1px solid #ff556644;background:#ff556610}
+.pos-badge.settled{color:#888;border:1px solid #88888844;background:#88888810}
+.pos-pnl{font-size:20px;margin:4px 0;font-variant-numeric:tabular-nums}
+.pos-meta{font-size:8px;color:#617589}
+.legs{display:grid;gap:6px;margin-top:8px}
+.leg{background:#05090f;border:1px solid #12202c;border-radius:9px;padding:8px 10px}
+.leg-top{display:flex;justify-content:space-between;align-items:center}
+.tag{border-radius:6px;padding:2px 6px;font-size:9px;font-weight:700}
+.tag-up{color:#28e0a5;background:#28e0a515;border:1px solid #28e0a533}
+.tag-down{color:#ff6b81;background:#ff6b8115;border:1px solid #ff6b8133}
+.leg-metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin-top:6px}
+.metric{background:#080f18;border-radius:7px;padding:5px 6px;font-size:8px;color:#677d92}
+.metric b{display:block;font-size:11px;color:#fff;margin-top:1px}
+.combo-total{display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin-top:8px}
+
+/* ── Results ── */
+.results-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;padding:10px}
+.result-card{background:#060a0f;border:1px solid #16232f;border-radius:12px;padding:12px}
+.result-header{display:flex;justify-content:space-between;align-items:center}
+.result-icon{font-size:14px}
+.result-pnl{font-size:18px;margin-top:4px;font-variant-numeric:tabular-nums}
+.result-meta{font-size:8px;color:#617589;margin-top:2px}
+
+/* ── Feed ── */
+.feeds{display:grid;gap:6px;padding:10px}
+.feed-item{background:#080f18;border-radius:9px;padding:8px 10px;border:1px solid #152430}
+.feed-time{font-size:8px;color:#556677}
+.feed-main{font-size:11px;margin-top:3px}
+.feed-detail{font-size:8px;color:#617589;margin-top:2px}
+
+/* ── Chart ── */
+.chart{height:160px;padding:8px}
+svg{width:100%;height:100%}
+
+/* ── Logs ── */
+.logs{height:220px;overflow:auto;background:#010407;border-radius:10px;padding:8px;font-family:SFMono-Regular,Consolas,monospace;font-size:9px;font-weight:500;-webkit-overflow-scrolling:touch}
+.log{white-space:pre-wrap;color:#95a7b9;padding:1px 0}
+.log-info{color:#38d6ff}
+.log-win{color:#00ff9d}
+.log-loss{color:#ff4a68}
+.empty{padding:20px;text-align:center;color:#445467;font-size:11px}
+
+/* ── Colors ── */
+.green{color:#00ff9d!important}
+.red{color:#ff4a68!important}
+.blue{color:#38d6ff!important}
+.gold{color:#ffd166!important}
+.white{color:#fff!important}
+
+/* ── Responsive ── */
+@media(max-width:1100px){.two-col{grid-template-columns:1fr}.kpis{grid-template-columns:repeat(4,1fr)}.markets,.positions,.results-grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <!-- Top Bar -->
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-icon">⚡</div>
+      <div>
+        <h1>CorrelBot</h1>
+        <div class="sub">Lagging side catch-up · strong ≥ 0.75 & weak ≤ 0.50 · GTC@0.99 · 1 combo/window · hold to resolution</div>
+      </div>
+    </div>
+    <div class="pills">
+      <span class="pill live" id="pConnection">CONNECTING</span>
+      <span class="pill warn" id="pClob">CLOB</span>
+      <span class="pill warn" id="pDiscovery">DISCOVERY</span>
+      <span class="pill" id="pTokens">0 TK</span>
+      <span class="pill" id="pRate">0 msg/s</span>
+      <span class="pill blue" id="pUptime">00:00</span>
+    </div>
+  </header>
+
+  <!-- KPIs -->
+  <section class="kpis" id="kpis"></section>
+
+  <!-- Equity Curve + Strategy Config -->
+  <div class="two-col">
+    <div class="panel">
+      <div class="panel-head"><span>📈 Equity Curve</span><strong id="equityValue">—</strong></div>
+      <div class="chart"><svg id="equityChart" preserveAspectRatio="none"></svg></div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><span>⚙️ Strategy Rules</span><strong class="live">ACTIVE</strong></div>
+      <div class="config-grid" id="configGrid"></div>
+    </div>
+  </div>
+
+  <!-- Live Market Prices -->
+  <div class="panel">
+    <div class="panel-head"><span>📊 Live CLOB Order Books</span><strong id="tickInfo">WAITING</strong></div>
+    <div class="markets" id="marketsGrid"></div>
+  </div>
+
+  <!-- Open Positions (Floating P&L) -->
+  <div class="panel">
+    <div class="panel-head"><span>🎯 Open Positions — Floating P&L</span><strong id="openCount">0 OPEN</strong></div>
+    <div class="positions" id="positionsGrid"></div>
+  </div>
+
+  <!-- Resolved Positions -->
+  <div class="panel">
+    <div class="panel-head"><span>✅ Resolved Positions</span><strong>SETTLED</strong></div>
+    <div class="results-grid" id="resultsGrid"></div>
+  </div>
+
+  <!-- Trade Feed -->
+  <div class="panel">
+    <div class="panel-head"><span>⚡ Trade Feed</span><strong id="tradeCount">0 TRADES</strong></div>
+    <div class="feeds" id="feedGrid"></div>
+  </div>
+
+  <!-- Activity Log -->
+  <div class="panel">
+    <div class="panel-head"><span>📋 Activity Log</span><strong id="logCount">0</strong></div>
+    <div class="logs" id="logsPanel"></div>
+  </div>
+
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+/* ─── State ─── */
+let S = null;           // full server state
+let lastTick = null;     // latest tick packet
+let lastRender = 0;
+let msgCount = 0, lastRateTime = Date.now(), rate = 0;
+const logs = [];
+const $ = id => document.getElementById(id);
+
+function safe(fn) { try { fn() } catch(e) { console.error(e) } }
+
+/* ─── Helpers ─── */
+const num  = v => Number(v||0).toLocaleString(undefined, {maximumFractionDigits:2});
+const cash = v => '$' + Number(v||0).toFixed(2);
+const money = v => { if (v==null) return '—'; const n=Number(v); return (n>0?'+$':n<0?'-$':'$') + Math.abs(n).toFixed(2); };
+const tone = v => Number(v)>0 ? 'green' : Number(v)<0 ? 'red' : '';
+const prc  = v => v==null ? '—' : Number(v).toFixed(3);
+const clk  = s => { s=Math.max(0,Math.floor(s)); return String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0'); };
+const esc  = x => String(x||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const age  = ms => { const s=Math.floor((Date.now()-ms)/1000); return s<=0?'now':s<60?s+'s':Math.floor(s/60)+'m'; };
+
+/* ─── Socket ─── */
+const socket = io({ transports:['polling'], upgrade:false, reconnectionDelay:250, reconnectionDelayMax:1000, timeout:3000 });
+
+socket.on('connect', () => { $('pConnection').textContent='LIVE'; $('pConnection').className='pill live'; });
+socket.on('disconnect', () => { $('pConnection').textContent='RETRY'; $('pConnection').className='pill warn'; });
+socket.on('log', line => { logs.push(line); if (logs.length>400) logs.shift(); safe(renderLogs); });
+socket.on('tick', data => {
+  if (!data || !data.windowStart) return;
+  lastTick = data;
+  if (data.messageCount!=null) { const now=Date.now(); if (now-lastRateTime>1000){rate=data.messageCount-msgCount;msgCount=data.messageCount;lastRateTime=now;} }
+  if (Date.now()-lastRender >= 80) { safe(()=>renderLivePrices(data)); lastRender=Date.now(); }
+});
+socket.on('state', data => safe(()=>render(data)));
+
+/* ─── Poll state every 1s as fallback ─── */
+async function pollState() {
+  try {
+    const r = await fetch('/api/status');
+    render(await r.json());
+  } catch(e) {
+    $('pConnection').textContent='RETRY';
+    $('pConnection').className='pill warn';
+  }
 }
-function renderLogs(){const panel=$('logsPanel'),nearBottom=panel.scrollHeight-panel.scrollTop-panel.clientHeight<50;panel.innerHTML=logs.slice(-220).map(line=>{let className='';if(line.includes('BUY'))className='log-info';else if(line.includes('WIN'))className='log-win';else if(line.includes('LOSS')||line.includes('⚠️'))className='log-loss';return'<div class="log '+className+'">'+esc(line)+'</div>'}).join('');if(nearBottom)panel.scrollTop=panel.scrollHeight}
-setInterval(()=>safe(()=>{if(lastLivePacket&&state&&lastLivePacket.windowStart===state.windowStart&&Date.now()-lastRender>=100){renderLivePrices(lastLivePacket,'CLOB TICK');renderFloating();lastRender=Date.now()}}),50);
-</script></body></html>`;
-app.get('/healthz', (_, response) => response.sendStatus(200));
-app.get('/api/status', (_, response) => response.json(engine.buildState()));
-app.get('/', (_, request) => request.type('html').send(dashboard));
-io.on('connection', socket => socket.emit('state', engine.buildState()));
+pollState();
+setInterval(pollState, 1000);
+
+/* ─── Main render ─── */
+function render(data) {
+  if (S && S.windowStart !== data.windowStart) { lastTick = null; }
+  S = data;
+
+  /* pills */
+  $('pUptime').textContent = clk(data.uptime);
+  $('pRate').textContent = rate + ' msg/s';
+  $('pTokens').textContent = data.trackedTokens + ' TK';
+  const clob = $('pClob');
+  clob.textContent = data.connected ? 'CLOB LIVE' : 'CLOB POLL';
+  clob.className = 'pill ' + (data.connected ? 'live' : 'warn');
+  const disc = $('pDiscovery');
+  disc.textContent = data.discovery.currentDiscovered + '/' + data.discovery.expectedMarkets + ' DISC';
+  disc.className = 'pill ' + (data.discovery.currentDiscovered===data.discovery.expectedMarkets ? 'live' : 'warn');
+
+  /* KPIs */
+  $('kpis').innerHTML = [
+    ['Bankroll',    cash(data.bankroll),                              'white'],
+    ['Realized P&L',money(data.realizedPnl),                         data.realizedPnl>0?'green':data.realizedPnl<0?'red':''],
+    ['Unrealized',  money(data.unrealizedPnl),                       data.unrealizedPnl>0?'green':data.unrealizedPnl<0?'red':''],
+    ['Total P&L',   money(data.totalPnl),                            data.totalPnl>0?'green':data.totalPnl<0?'red':''],
+    ['Wins',        data.wins||0,                                     'green'],
+    ['Losses',      data.losses||0,                                   'red'],
+    ['Win Rate',    data.winRate!=null ? data.winRate.toFixed(0)+'%' : '—', data.winRate>50?'green':''],
+    ['Open',        (data.combos||[]).filter(c=>c.status==='open').length, 'blue'],
+  ].map(([l,v,c]) => '<div class="kpi"><div class="label">'+l+'</div><div class="value '+(c||'')+'">'+v+'</div></div>').join('');
+
+  /* equity */
+  $('equityValue').textContent = cash(data.markValue);
+  renderChart(data.equityCurve || []);
+
+  /* strategy config */
+  $('configGrid').innerHTML = [
+    ['Strong side ≥',    data.config.strongThreshold.toFixed(2)],
+    ['Weak side ≤',      data.config.weakThreshold.toFixed(2)],
+    ['Trade window',     data.config.tradeWindow],
+    ['Shares',           data.config.baseTradeShares + ' SH'],
+    ['Entry',            'GTC@0.99 sweep'],
+    ['Exit',             'Hold to resolution'],
+    ['Combo type',       'Lagging side single leg'],
+    ['Mark value',       cash(data.markValue)],
+  ].map(r => '<div class="config-item">'+r[0]+'<b>'+r[1]+'</b></div>').join('');
+
+  /* markets */
+  const mktTick = lastTick && lastTick.windowStart === data.windowStart ? lastTick : null;
+  renderMarkets(data.markets || [], mktTick);
+
+  /* positions */
+  renderPositions(data.combos || []);
+
+  /* resolved */
+  renderResults(data.resolvedCombos || []);
+
+  /* feed */
+  renderFeed(data.trades || []);
+
+  /* logs */
+  renderLogs();
+
+  $('tickInfo').textContent = data.trackedTokens + ' TOKENS';
+}
+
+/* ─── Live Market Cards ─── */
+function renderMarkets(markets, tickData) {
+  if (!markets.length) {
+    $('marketsGrid').innerHTML = '<div class="empty">Discovering current-window CLOB books…</div>';
+    return;
+  }
+  $('marketsGrid').innerHTML = markets.map(m => {
+    const upId  = m.asset.toUpperCase() + '_UP';
+    const dnId  = m.asset.toUpperCase() + '_DN';
+    const elapsed = Math.max(0, Math.floor(Date.now()/1000 - m.windowStart));
+    const remaining = Math.max(0, m.windowEnd - Math.floor(Date.now()/1000));
+    const upMid = m.up?.mid, upBid = m.up?.bid, upAsk = m.up?.ask, upSpread = m.up?.spread, upAge = m.up?.updatedAt;
+    const dnMid = m.down?.mid, dnBid = m.down?.bid, dnAsk = m.down?.ask, dnSpread = m.down?.spread, dnAge = m.down?.updatedAt;
+
+    function sideBlock(outcome, mid, bid, ask, spread, upd, id) {
+      const signal = mid!=null && mid >= data_strong() ? 'green' : mid!=null && mid <= data_weak() ? 'red' : '';
+      return '<div class="side">'
+        + '<div class="side-label '+(outcome==='UP'?'up':'down')+'">'+outcome+'</div>'
+        + '<div class="mid" id="mid-'+id+'">'+prc(mid)+'</div>'
+        + '<div class="quote">Bid <span id="bid-'+id+'">'+prc(bid)+'</span> · Ask <span id="ask-'+id+'">'+prc(ask)+'</span></div>'
+        + '<div><span class="spread-badge">Spread '+prc(spread)+'</span>'
+        + '<span class="age-badge" id="age-'+id+'">'+(upd ? age(upd) : '—')+'</span></div>'
+        + '</div>';
+    }
+
+    return '<div class="market-card">'
+      + '<div class="market-top"><div><div class="asset-name">'+m.asset.toUpperCase()+'</div>'
+      + '<div class="asset-slug">'+esc(m.slug)+'</div></div>'
+      + '<div class="timer" id="timer-'+m.asset+'">'+clk(remaining)+'<small>T+'+elapsed+'s</small></div></div>'
+      + '<div class="sides">'
+      + sideBlock('UP', upMid, upBid, upAsk, upSpread, upAge, upId)
+      + sideBlock('DOWN', dnMid, dnBid, dnAsk, dnSpread, dnAge, dnId)
+      + '</div></div>';
+  }).join('');
+}
+
+function data_strong() { return S?.config?.strongThreshold || 0.75; }
+function data_weak()  { return S?.config?.weakThreshold  || 0.50; }
+
+/* ─── Update live prices from tick (fast path) ─── */
+function renderLivePrices(tick) {
+  if (!tick || !tick.markets) return;
+  for (const m of tick.markets) {
+    const upId = m.asset.toUpperCase() + '_UP';
+    const dnId = m.asset.toUpperCase() + '_DN';
+    function updSide(outcome, token, id) {
+      if (!token) return;
+      const midEl = $('mid-'+id), bidEl = $('bid-'+id), askEl = $('ask-'+id), ageEl = $('age-'+id);
+      if (midEl) midEl.textContent = prc(token.mid);
+      if (bidEl) bidEl.textContent = prc(token.bid);
+      if (askEl) askEl.textContent = prc(token.ask);
+      if (ageEl && token.updatedAt) ageEl.textContent = age(token.updatedAt);
+      /* recolor mid */
+      if (midEl) {
+        const v = Number(token.mid);
+        midEl.className = 'mid ' + (v >= data_strong() ? 'green' : v <= data_weak() ? 'red' : '');
+      }
+    }
+    updSide('UP', m.up, upId);
+    updSide('DOWN', m.down, dnId);
+    /* timer */
+    if (m.windowEnd) {
+      const remaining = Math.max(0, m.windowEnd - Math.floor(Date.now()/1000));
+      const elapsed = Math.max(0, Math.floor(Date.now()/1000 - m.windowStart));
+      const timerEl = $('timer-'+m.asset);
+      if (timerEl) timerEl.innerHTML = clk(remaining)+'<small>T+'+elapsed+'s</small>';
+    }
+  }
+}
+
+/* ─── Floating Positions ─── */
+function renderPositions(combos) {
+  const open = combos.filter(c => c.status === 'open');
+  $('openCount').textContent = open.length + ' OPEN';
+  if (!open.length) {
+    $('positionsGrid').innerHTML = '<div class="empty">No open positions — waiting for lagging side signal</div>';
+    return;
+  }
+  $('positionsGrid').innerHTML = open.map(combo => {
+    const unrealized = combo.unrealized || 0;
+    const markVal = combo.markValue || combo.cost;
+    const elapsed = combo.openedAt ? Math.floor((Date.now() - new Date(combo.openedAt).getTime())/1000) : 0;
+
+    const legsHtml = (combo.legs||[]).map(leg => {
+      const lMark = leg.shares * (leg.markPrice || leg.entryPrice);
+      const lUnrl = leg.shares * ((leg.markPrice || leg.entryPrice) - leg.entryPrice);
+      return '<div class="leg">'
+        + '<div class="leg-top"><span class="tag '+(leg.outcome==='UP'?'tag-up':'tag-down')+'">'
+        + leg.asset.toUpperCase()+' '+leg.outcome+'</span>'
+        + '<span style="font-size:9px;color:#8fa3b7">'+leg.shares+' SH</span></div>'
+        + '<div class="leg-metrics">'
+        + '<div class="metric">ENTRY<b>'+prc(leg.entryPrice)+'</b></div>'
+        + '<div class="metric">MARK<b id="mark-'+combo.id+'-'+leg.asset+'-'+leg.outcome+'">'+prc(leg.markPrice||leg.entryPrice)+'</b></div>'
+        + '<div class="metric">VALUE<b>'+cash(lMark)+'</b></div>'
+        + '<div class="metric">P&L<b class="'+tone(lUnrl)+'">'+money(lUnrl)+'</b></div>'
+        + '</div></div>';
+    }).join('');
+
+    return '<div class="position-card">'
+      + '<div class="pos-header"><div><div class="pos-name">'+esc(combo.name)+'</div>'
+      + '<div class="pos-meta">'+esc(combo.slug||'')+' · T+'+elapsed+'s · strong '+prc(combo.strongPrice)+' lagging '+prc(combo.laggingPrice)+'</div></div>'
+      + '<span class="pos-badge holding">HOLDING</span></div>'
+      + '<div class="pos-pnl '+tone(unrealized)+'" id="floating-'+combo.id+'">'+money(unrealized)+'</div>'
+      + '<div class="pos-meta">Mark: '+cash(markVal)+' · Cost: '+cash(combo.cost)+' · Fees: '+cash(combo.fees)+'</div>'
+      + '<div class="legs">'+legsHtml+'</div>'
+      + '<div class="combo-total">'
+      + '<div class="metric">COST<b>'+cash(combo.cost)+'</b></div>'
+      + '<div class="metric">MARK VALUE<b id="markval-'+combo.id+'">'+cash(markVal)+'</b></div>'
+      + '<div class="metric">UNREALIZED<b id="unrealized-'+combo.id+'" class="'+tone(unrealized)+'">'+money(unrealized)+'</b></div>'
+      + '<div class="metric">FEES<b>'+cash(combo.fees)+'</b></div>'
+      + '</div></div>';
+  }).join('');
+}
+
+/* ─── Fast-path floating P&L update from tick ─── */
+function updateFloating() {
+  if (!S) return;
+  for (const combo of (S.combos||[]).filter(c=>c.status==='open')) {
+    let totalMark = 0;
+    for (const leg of combo.legs) {
+      const markEl = $('mark-'+combo.id+'-'+leg.asset+'-'+leg.outcome);
+      if (markEl) markEl.textContent = prc(leg.markPrice||leg.entryPrice);
+      totalMark += leg.shares * (leg.markPrice || leg.entryPrice);
+    }
+    const unrl = totalMark - combo.cost - combo.fees;
+    const floEl = $('floating-'+combo.id);
+    if (floEl) { floEl.textContent = money(unrl); floEl.className = 'pos-pnl '+tone(unrl); }
+    const mvEl = $('markval-'+combo.id);
+    if (mvEl) mvEl.textContent = cash(totalMark);
+    const uEl = $('unrealized-'+combo.id);
+    if (uEl) { uEl.textContent = money(unrl); uEl.className = 'metric '+tone(unrl); }
+  }
+}
+
+/* ─── Resolved ─── */
+function renderResults(results) {
+  if (!results.length) {
+    $('resultsGrid').innerHTML = '<div class="empty">No resolved positions yet</div>';
+    return;
+  }
+  $('resultsGrid').innerHTML = results.slice(0,20).map(r => {
+    const icon = r.result==='WIN' ? '✅' : r.result==='LOSS' ? '❌' : '➖';
+    return '<div class="result-card">'
+      + '<div class="result-header"><div class="pos-name">'+esc(r.name)+'</div>'
+      + '<span class="pos-badge '+(r.result==='WIN'?'won':'lost')+'">'+icon+' '+r.result+'</span></div>'
+      + '<div class="result-pnl '+tone(r.pnl)+'">'+money(r.pnl)+'</div>'
+      + '<div class="result-meta">Payout '+cash(r.payout)+' · Cost '+cash(r.cost)+' · Winners: '+esc(r.winner||'—')+'</div>'
+      + '</div>';
+  }).join('');
+}
+
+/* ─── Trade Feed ─── */
+function renderFeed(trades) {
+  $('tradeCount').textContent = (trades||[]).length + ' TRADES';
+  if (!trades||!trades.length) {
+    $('feedGrid').innerHTML = '<div class="empty">Waiting for lagging side entries…</div>';
+    return;
+  }
+  $('feedGrid').innerHTML = trades.slice(0,40).map(t => {
+    return '<div class="feed-item">'
+      + '<div class="feed-time">'+new Date(t.timestamp).toLocaleTimeString()+' · '+esc(t.combo)+'</div>'
+      + '<div class="feed-main"><span class="tag '+(t.outcome==='UP'?'tag-up':'tag-down')+'">'+t.asset.toUpperCase()+' '+t.outcome+'</span> '
+      + num(t.shares)+' SH @ '+prc(t.price)+'</div>'
+      + '<div class="feed-detail">Strong '+prc(t.signal?.strong)+' Lagging '+prc(t.signal?.lagging)+' · '+cash(t.cost)+'</div>'
+      + '</div>';
+  }).join('');
+}
+
+/* ─── Chart ─── */
+function renderChart(curve) {
+  const svg = $('equityChart');
+  if (!curve || !curve.length) { svg.innerHTML=''; return; }
+  const vals = curve.map(p=>p.equity), lo=Math.min(...vals), hi=Math.max(...vals), rng=(hi-lo)||1;
+  const W=700, H=160, P=14;
+  const pts = curve.map((p,i) => [i/Math.max(1,curve.length-1)*W, H-P-(p.equity-lo)/rng*(H-P*2)]);
+  const path = 'M'+pts.map(p=>p[0].toFixed(1)+','+p[1].toFixed(1)).join(' L');
+  const last = pts.at(-1)||[0,H/2];
+  const color = S && S.totalPnl>=0 ? '#15ff9c' : '#ff4a68';
+  svg.innerHTML = '<path d="'+path+'" fill="none" stroke="'+color+'" stroke-width="2.5"/>'
+    + '<circle cx="'+last[0]+'" cy="'+last[1]+'" r="4" fill="'+color+'"/>';
+}
+
+/* ─── Logs ─── */
+function renderLogs() {
+  const panel = $('logsPanel');
+  const nearBottom = panel.scrollHeight - panel.scrollTop - panel.clientHeight < 60;
+  $('logCount').textContent = logs.length;
+  panel.innerHTML = logs.slice(-300).map(line => {
+    let cls = '';
+    if (line.includes('BUY')) cls = 'log-info';
+    else if (line.includes('WIN')) cls = 'log-win';
+    else if (line.includes('LOSS') || line.includes('⚠️')) cls = 'log-loss';
+    return '<div class="log '+cls+'">'+esc(line)+'</div>';
+  }).join('');
+  if (nearBottom) panel.scrollTop = panel.scrollHeight;
+}
+
+/* ─── Refresh loop: live prices + floating P&L at 50ms ─── */
+setInterval(() => safe(() => {
+  if (lastTick && S && lastTick.windowStart === S.windowStart && Date.now()-lastRender >= 50) {
+    renderLivePrices(lastTick);
+    updateFloating();
+    lastRender = Date.now();
+  }
+}), 50);
+
+</script>
+</body>
+</html>`;
+
+// ─── Routes ──────────────────────────────────────────────────
+app.get('/healthz', (_, res) => res.sendStatus(200));
+app.get('/api/status', (_, res) => res.json(engine.buildState()));
+app.get('/', (_, req) => req.type('html').send(dashboard));
+
+io.on('connection', (socket) => socket.emit('state', engine.buildState()));
 setInterval(() => io.emit('state', engine.buildState()), 250);
+
 server.listen(port, '0.0.0.0', () => {
-  console.log(`BTC correlation combo dashboard listening on :${port}`);
-  engine.init().catch(error => console.error(`Init failure: ${error.message}`));
+  console.log(`CorrelBot dashboard listening on :${port}`);
+  engine.init().catch((err) => console.error(`Init failure: ${err.message}`));
 });
