@@ -2,14 +2,14 @@
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
-const { MomentumLagEngine } = require('./engine');
+const { MartingaleBotEngine } = require('./engine');
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { pingInterval: 2000, pingTimeout: 5000 });
 const port = process.env.PORT || 8080;
 
-const engine = new MomentumLagEngine({
+const engine = new MartingaleBotEngine({
   onTick: (markets, messageCount) => io.emit('tick', {
     t: Date.now(),
     windowStart: markets[0]?.windowStart ?? null,
@@ -155,7 +155,7 @@ svg{width:100%;height:100%}
       <div class="brand-icon">⚡</div>
       <div>
         <h1>CorrelBot</h1>
-        <div class="sub">Lagging side catch-up · strong ≥ 0.75 & weak ≤ 0.50 · GTC@0.99 · 1 combo/window · hold to resolution</div>
+        <div class="sub">Buy side @0.70 · SL @0.50 · TP=resolution · martingale double on loss · reset on win</div>
       </div>
     </div>
     <div class="pills">
@@ -289,7 +289,7 @@ function render(data) {
     ['Wins',        data.wins||0,                                     'green'],
     ['Losses',      data.losses||0,                                   'red'],
     ['Win Rate',    data.winRate!=null ? data.winRate.toFixed(0)+'%' : '—', data.winRate>50?'green':''],
-    ['Open',        (data.combos||[]).filter(c=>c.status==='open').length, 'blue'],
+    ['Open',        (data.positions||[]).filter(p=>p.status==='open').length, 'blue'],
   ].map(([l,v,c]) => '<div class="kpi"><div class="label">'+l+'</div><div class="value '+(c||'')+'">'+v+'</div></div>').join('');
 
   /* equity */
@@ -298,13 +298,13 @@ function render(data) {
 
   /* strategy config */
   $('configGrid').innerHTML = [
-    ['Strong side ≥',    data.config.strongThreshold.toFixed(2)],
-    ['Weak side ≤',      data.config.weakThreshold.toFixed(2)],
-    ['Trade window',     data.config.tradeWindow],
-    ['Shares',           data.config.baseTradeShares + ' SH'],
-    ['Entry',            'GTC@0.99 sweep'],
-    ['Exit',             'Hold to resolution'],
-    ['Combo type',       'Lagging side single leg'],
+    ['Entry',            data.config.entryPrice.toFixed(2)],
+    ['Stop loss',        data.config.stopLossPrice.toFixed(2)],
+    ['TP',               'Resolution (2s > '+data.config.resolutionPrice.toFixed(2)+')'],
+    ['Base shares',      data.config.baseShares + ' SH'],
+    ['Wait after open',  data.config.marketOpenWait + 's'],
+    ['Bet per window',   '1 per asset'],
+    ['Martingale',       'Double on loss · Reset on win'],
     ['Mark value',       cash(data.markValue)],
   ].map(r => '<div class="config-item">'+r[0]+'<b>'+r[1]+'</b></div>').join('');
 
@@ -313,10 +313,10 @@ function render(data) {
   renderMarkets(data.markets || [], mktTick);
 
   /* positions */
-  renderPositions(data.combos || []);
+  renderPositions(data.positions || []);
 
   /* resolved */
-  renderResults(data.resolvedCombos || []);
+  renderResults(data.resolvedPositions || []);
 
   /* feed */
   renderFeed(data.trades || []);
@@ -342,7 +342,7 @@ function renderMarkets(markets, tickData) {
     const dnMid = m.down?.mid, dnBid = m.down?.bid, dnAsk = m.down?.ask, dnSpread = m.down?.spread, dnAge = m.down?.updatedAt;
 
     function sideBlock(outcome, mid, bid, ask, spread, upd, id) {
-      const signal = mid!=null && mid >= data_strong() ? 'green' : mid!=null && mid <= data_weak() ? 'red' : '';
+      const signal = mid!=null && mid >= data_entry() ? 'green' : mid!=null && mid <= data_sl() ? 'red' : '';
       return '<div class="side">'
         + '<div class="side-label '+(outcome==='UP'?'up':'down')+'">'+outcome+'</div>'
         + '<div class="mid" id="mid-'+id+'">'+prc(mid)+'</div>'
@@ -363,8 +363,8 @@ function renderMarkets(markets, tickData) {
   }).join('');
 }
 
-function data_strong() { return S?.config?.strongThreshold || 0.75; }
-function data_weak()  { return S?.config?.weakThreshold  || 0.50; }
+function data_entry() { return S?.config?.entryPrice || 0.70; }
+function data_sl()     { return S?.config?.stopLossPrice || 0.50; }
 
 /* ─── Update live prices from tick (fast path) ─── */
 function renderLivePrices(tick) {
@@ -382,7 +382,7 @@ function renderLivePrices(tick) {
       /* recolor mid */
       if (midEl) {
         const v = Number(token.mid);
-        midEl.className = 'mid ' + (v >= data_strong() ? 'green' : v <= data_weak() ? 'red' : '');
+        midEl.className = 'mid ' + (v >= data_entry() ? 'green' : v <= data_sl() ? 'red' : '');
       }
     }
     updSide('UP', m.up, upId);
@@ -398,82 +398,64 @@ function renderLivePrices(tick) {
 }
 
 /* ─── Floating Positions ─── */
-function renderPositions(combos) {
-  const open = combos.filter(c => c.status === 'open');
+function renderPositions(positions) {
+  const open = positions.filter(p => p.status === 'open');
   $('openCount').textContent = open.length + ' OPEN';
   if (!open.length) {
-    $('positionsGrid').innerHTML = '<div class="empty">No open positions — waiting for lagging side signal</div>';
+    $('positionsGrid').innerHTML = '<div class="empty">No open bets — waiting for side to hit ' + prc(0.70) + '</div>';
     return;
   }
-  $('positionsGrid').innerHTML = open.map(combo => {
-    const unrealized = combo.unrealized || 0;
-    const markVal = combo.markValue || combo.cost;
-    const elapsed = combo.openedAt ? Math.floor((Date.now() - new Date(combo.openedAt).getTime())/1000) : 0;
-
-    const legsHtml = (combo.legs||[]).map(leg => {
-      const lMark = leg.shares * (leg.markPrice || leg.entryPrice);
-      const lUnrl = leg.shares * ((leg.markPrice || leg.entryPrice) - leg.entryPrice);
-      return '<div class="leg">'
-        + '<div class="leg-top"><span class="tag '+(leg.outcome==='UP'?'tag-up':'tag-down')+'">'
-        + leg.asset.toUpperCase()+' '+leg.outcome+'</span>'
-        + '<span style="font-size:9px;color:#8fa3b7">'+leg.shares+' SH</span></div>'
-        + '<div class="leg-metrics">'
-        + '<div class="metric">ENTRY<b>'+prc(leg.entryPrice)+'</b></div>'
-        + '<div class="metric">MARK<b id="mark-'+combo.id+'-'+leg.asset+'-'+leg.outcome+'">'+prc(leg.markPrice||leg.entryPrice)+'</b></div>'
-        + '<div class="metric">VALUE<b>'+cash(lMark)+'</b></div>'
-        + '<div class="metric">P&L<b class="'+tone(lUnrl)+'">'+money(lUnrl)+'</b></div>'
-        + '</div></div>';
-    }).join('');
-
+  $('positionsGrid').innerHTML = open.map(pos => {
+    const unrealized = pos.unrealized || 0;
+    const markVal = pos.markValue || pos.cost;
+    const elapsed = pos.openedAt ? Math.floor((Date.now() - new Date(pos.openedAt).getTime())/1000) : 0;
+    const badge = pos.outcome === 'UP' ? 'tag-up' : 'tag-down';
     return '<div class="position-card">'
-      + '<div class="pos-header"><div><div class="pos-name">'+esc(combo.name)+'</div>'
-      + '<div class="pos-meta">'+esc(combo.slug||'')+' · T+'+elapsed+'s · strong '+prc(combo.strongPrice)+' lagging '+prc(combo.laggingPrice)+'</div></div>'
+      + '<div class="pos-header"><div><div class="pos-name">⚡ '+esc(pos.asset.toUpperCase())+' '+pos.outcome+'</div>'
+      + '<div class="pos-meta">'+esc(pos.slug||'')+' · T+'+elapsed+'s · Martingale #'+pos.martingaleIndex+'</div></div>'
       + '<span class="pos-badge holding">HOLDING</span></div>'
-      + '<div class="pos-pnl '+tone(unrealized)+'" id="floating-'+combo.id+'">'+money(unrealized)+'</div>'
-      + '<div class="pos-meta">Mark: '+cash(markVal)+' · Cost: '+cash(combo.cost)+' · Fees: '+cash(combo.fees)+'</div>'
-      + '<div class="legs">'+legsHtml+'</div>'
-      + '<div class="combo-total">'
-      + '<div class="metric">COST<b>'+cash(combo.cost)+'</b></div>'
-      + '<div class="metric">MARK VALUE<b id="markval-'+combo.id+'">'+cash(markVal)+'</b></div>'
-      + '<div class="metric">UNREALIZED<b id="unrealized-'+combo.id+'" class="'+tone(unrealized)+'">'+money(unrealized)+'</b></div>'
-      + '<div class="metric">FEES<b>'+cash(combo.fees)+'</b></div>'
-      + '</div></div>';
+      + '<div class="pos-pnl '+tone(unrealized)+'" id="floating-'+pos.id+'">'+money(unrealized)+'</div>'
+      + '<div class="pos-meta">Mark: '+cash(markVal)+' · Cost: '+cash(pos.cost)+' · SL: '+prc(pos.stopLossPrice)+'</div>'
+      + '<div class="legs"><div class="leg">'
+      + '<div class="leg-top"><span class="tag '+badge+'">'+esc(pos.asset.toUpperCase())+' '+pos.outcome+'</span>'
+      + '<span style="font-size:9px;color:#8fa3b7">'+pos.shares+' SH</span></div>'
+      + '<div class="leg-metrics">'
+      + '<div class="metric">ENTRY<b>'+prc(pos.entryPrice)+'</b></div>'
+      + '<div class="metric">MARK<b id="mark-'+pos.id+'">'+prc(pos.markPrice||pos.entryPrice)+'</b></div>'
+      + '<div class="metric">VALUE<b>'+cash(pos.shares*(pos.markPrice||pos.entryPrice))+'</b></div>'
+      + '<div class="metric">P&L<b class="'+tone(unrealized)+'">'+money(unrealized)+'</b></div>'
+      + '</div></div></div>'
+      + '</div>';
   }).join('');
 }
 
 /* ─── Fast-path floating P&L update from tick ─── */
 function updateFloating() {
   if (!S) return;
-  for (const combo of (S.combos||[]).filter(c=>c.status==='open')) {
-    let totalMark = 0;
-    for (const leg of combo.legs) {
-      const markEl = $('mark-'+combo.id+'-'+leg.asset+'-'+leg.outcome);
-      if (markEl) markEl.textContent = prc(leg.markPrice||leg.entryPrice);
-      totalMark += leg.shares * (leg.markPrice || leg.entryPrice);
-    }
-    const unrl = totalMark - combo.cost - combo.fees;
-    const floEl = $('floating-'+combo.id);
+  for (const pos of (S.positions||[]).filter(p=>p.status==='open')) {
+    const markEl = $('mark-'+pos.id);
+    if (markEl) markEl.textContent = prc(pos.markPrice||pos.entryPrice);
+    const unrl = pos.unrealized || 0;
+    const floEl = $('floating-'+pos.id);
     if (floEl) { floEl.textContent = money(unrl); floEl.className = 'pos-pnl '+tone(unrl); }
-    const mvEl = $('markval-'+combo.id);
-    if (mvEl) mvEl.textContent = cash(totalMark);
-    const uEl = $('unrealized-'+combo.id);
-    if (uEl) { uEl.textContent = money(unrl); uEl.className = 'metric '+tone(unrl); }
   }
 }
 
 /* ─── Resolved ─── */
 function renderResults(results) {
   if (!results.length) {
-    $('resultsGrid').innerHTML = '<div class="empty">No resolved positions yet</div>';
+    $('resultsGrid').innerHTML = '<div class="empty">No resolved bets yet</div>';
     return;
   }
   $('resultsGrid').innerHTML = results.slice(0,20).map(r => {
-    const icon = r.result==='WIN' ? '✅' : r.result==='LOSS' ? '❌' : '➖';
+    const won = r.closeReason === 'STOP_LOSS' ? false : (r.won === true);
+    const icon = won ? '✅' : r.closeReason === 'STOP_LOSS' ? '⛔' : '❌';
+    const label = won ? 'WIN' : r.closeReason === 'STOP_LOSS' ? 'SL ' + prc(r.exitPrice) : 'LOSS';
     return '<div class="result-card">'
-      + '<div class="result-header"><div class="pos-name">'+esc(r.name)+'</div>'
-      + '<span class="pos-badge '+(r.result==='WIN'?'won':'lost')+'">'+icon+' '+r.result+'</span></div>'
+      + '<div class="result-header"><div class="pos-name">⚡ '+esc((r.asset||'').toUpperCase())+' '+(r.outcome||'')+' · '+(r.martingaleIndex||0)+'</div>'
+      + '<span class="pos-badge '+(won?'won':'lost')+'">'+icon+' '+label+'</span></div>'
       + '<div class="result-pnl '+tone(r.pnl)+'">'+money(r.pnl)+'</div>'
-      + '<div class="result-meta">Payout '+cash(r.payout)+' · Cost '+cash(r.cost)+' · Winners: '+esc(r.winner||'—')+'</div>'
+      + '<div class="result-meta">Payout '+cash(r.payout)+' · Cost '+cash(r.cost)+' · '+esc(r.closeReason||'')+'</div>'
       + '</div>';
   }).join('');
 }
@@ -482,15 +464,15 @@ function renderResults(results) {
 function renderFeed(trades) {
   $('tradeCount').textContent = (trades||[]).length + ' TRADES';
   if (!trades||!trades.length) {
-    $('feedGrid').innerHTML = '<div class="empty">Waiting for lagging side entries…</div>';
+    $('feedGrid').innerHTML = '<div class="empty">Waiting for a side to hit 0.70…</div>';
     return;
   }
   $('feedGrid').innerHTML = trades.slice(0,40).map(t => {
     return '<div class="feed-item">'
-      + '<div class="feed-time">'+new Date(t.timestamp).toLocaleTimeString()+' · '+esc(t.combo)+'</div>'
+      + '<div class="feed-time">'+new Date(t.timestamp).toLocaleTimeString()+' · '+esc(t.asset.toUpperCase())+' '+(t.outcome||'')+(t.reason?' ('+t.reason+')':'')+'</div>'
       + '<div class="feed-main"><span class="tag '+(t.outcome==='UP'?'tag-up':'tag-down')+'">'+t.asset.toUpperCase()+' '+t.outcome+'</span> '
       + num(t.shares)+' SH @ '+prc(t.price)+'</div>'
-      + '<div class="feed-detail">Strong '+prc(t.signal?.strong)+' Lagging '+prc(t.signal?.lagging)+' · '+cash(t.cost)+'</div>'
+      + '<div class="feed-detail">Trigger '+prc(t.signal?.triggerPrice)+' · '+cash(t.cost)+'</div>'
       + '</div>';
   }).join('');
 }

@@ -8,14 +8,11 @@ const WINDOW_SECONDS = 300;
 const ASSETS = ['btc', 'eth'];
 const LEAD_ASSET = (process.env.LEAD_ASSET || 'btc').toLowerCase();
 const START_BANKROLL = Number(process.env.START_BANKROLL || 20000);
-const BASE_TRADE_SHARES = Number(process.env.BASE_TRADE_SHARES || 100);
-const BOOST_TRADE_SHARES = Number(process.env.BOOST_TRADE_SHARES || 100);
-const BOOST_WINDOWS = Number(process.env.BOOST_WINDOWS || 3);
-const STRONG_THRESHOLD = Number(process.env.STRONG_THRESHOLD || 0.75);
-const WEAK_THRESHOLD = Number(process.env.WEAK_THRESHOLD || 0.50);
-const TRADE_WINDOW_START = Number(process.env.TRADE_WINDOW_START || 30);
-const TRADE_WINDOW_END = Number(process.env.TRADE_WINDOW_END || 270);
+const BASE_SHARES = Number(process.env.BASE_SHARES || 100);
+const ENTRY_PRICE = Number(process.env.ENTRY_PRICE || 0.70);
+const STOP_LOSS_PRICE = Number(process.env.STOP_LOSS_PRICE || 0.50);
 const RESOLUTION_PRICE = Number(process.env.RESOLUTION_PRICE || 0.90);
+const MARKET_OPEN_WAIT = Number(process.env.MARKET_OPEN_WAIT || 10);
 const PRICE_HISTORY_MS = Number(process.env.PRICE_HISTORY_MS || 5000);
 const TAKER_FEE_BPS = Number(process.env.TAKER_FEE_BPS || 0);
 const SWEEP_INTERVAL_MS = Number(process.env.RESOLUTION_SWEEP_MS || 5000);
@@ -25,7 +22,7 @@ function round5(value) { return Math.round(value * 100000) / 100000; }
 function windowStartFor(timeMs) { return Math.floor(timeMs / 1000 / WINDOW_SECONDS) * WINDOW_SECONDS; }
 function slugFor(asset, start) { return `${asset}-updown-5m-${start}`; }
 
-class MomentumLagEngine {
+class MartingaleBotEngine {
   constructor(options = {}) {
     this.fetchImpl = options.fetchImpl || fetch;
     this.emitTick = options.onTick || (() => {});
@@ -44,8 +41,7 @@ class MomentumLagEngine {
     this.logs = [];
     this.trades = [];
     this.positions = [];
-    this.combos = [];
-    this.resolvedCombos = [];
+    this.resolvedPositions = [];
     this.markets = new Map();
     this.tokens = new Map();
     this.windows = new Map();
@@ -53,17 +49,13 @@ class MomentumLagEngine {
     this.discoveredWindows = new Set();
     this.activeWindowStart = null;
     this.pollRunning = false;
-    this.ethBoostPending = false;
-    this.boostWindowsRemaining = 0;
-    this.ethTriggerWindow = null;
-    this.correlationStreak = 0;
-    this.windowResults = new Map();
     this.loopRunning = false;
-    this.firedComboKeys = new Set();
     this.discoveryErrors = [];
     this.lastDiscoveryAt = null;
     this.discoveryRunning = false;
     this.lastPollErrorAt = null;
+    // Per-market martingale state: { shares, losses }
+    this.martingale = new Map();
   }
 
   log(message) {
@@ -83,19 +75,19 @@ class MomentumLagEngine {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeout);
     try {
-      const response = await this.fetchImpl(url, { signal: controller.signal, headers: { 'User-Agent': 'btc-divergence-bot/1.0' } });
+      const response = await this.fetchImpl(url, { signal: controller.signal, headers: { 'User-Agent': 'martingale-bot/1.0' } });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       return await response.json();
     } finally { clearTimeout(timer); }
   }
 
-  async postJSON(url, body, timeout = 2500) {
+  async postJSON(url, body, timeout = 12000) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeout);
     try {
       const response = await this.fetchImpl(url, {
         method: 'POST', signal: controller.signal,
-        headers: { 'Content-Type': 'application/json', 'User-Agent': 'btc-correlation-bot/1.0' },
+        headers: { 'Content-Type': 'application/json', 'User-Agent': 'martingale-bot/1.0' },
         body: JSON.stringify(body),
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -112,14 +104,14 @@ class MomentumLagEngine {
       market = Array.isArray(rows) ? rows[0] : null;
     } catch (error) {
       this.discoveryErrors.unshift(`${slug}: ${error.message}`);
-      this.discoveryErrors=this.discoveryErrors.slice(0,8);
+      this.discoveryErrors = this.discoveryErrors.slice(0, 8);
       this.log(`⚠️ Discovery ${slug}: ${error.message}`);
       return null;
     }
-    this.lastDiscoveryAt=Date.now();
+    this.lastDiscoveryAt = Date.now();
     if (!market || !market.conditionId || !market.clobTokenIds || market.closed) {
       this.discoveryErrors.unshift(`${slug}: market unavailable/closed`);
-      this.discoveryErrors=this.discoveryErrors.slice(0,8);
+      this.discoveryErrors = this.discoveryErrors.slice(0, 8);
       return null;
     }
     this.discoveredWindows.add(slug);
@@ -176,34 +168,15 @@ class MomentumLagEngine {
       market.windowStart === start && !market.tradingClosed && market.up.tokenId);
   }
 
-  currentTradeShares() {
-    return BASE_TRADE_SHARES;
+  martingaleState(asset) {
+    if (!this.martingale.has(asset)) {
+      this.martingale.set(asset, { shares: BASE_SHARES, losses: 0 });
+    }
+    return this.martingale.get(asset);
   }
 
-  checkCorrelation(windowStart) {
-    const btcMarket = this.markets.get(slugFor('btc', windowStart));
-    const ethMarket = this.markets.get(slugFor('eth', windowStart));
-    if (!btcMarket?.resolved || !ethMarket?.resolved) return;
-    if (this.windowResults.has(windowStart)) return;
-    const result = { btc: btcMarket.winner, eth: ethMarket.winner };
-    this.windowResults.set(windowStart, result);
-    const isCorrelated = result.btc === result.eth;
-    if (isCorrelated) {
-      this.correlationStreak++;
-      this.log(`📊 Window ${windowStart}: CORRELATION ${result.btc}/${result.eth} (streak ${this.correlationStreak})`);
-      if (this.correlationStreak >= 3 && this.boostWindowsRemaining > 0) {
-        this.boostWindowsRemaining = 0;
-        this.log(`⏹️ 3 consecutive correlations — base sizing restored`);
-      }
-    } else {
-      this.correlationStreak = 0;
-      this.log(`📊 Window ${windowStart}: DECORRELATION ${result.btc}/${result.eth}`);
-      if (this.boostWindowsRemaining <= 0 && !this.ethBoostPending) {
-        this.ethBoostPending = true;
-        this.boostWindowsRemaining = BOOST_WINDOWS;
-        this.log(`🔥 Decorrelation detected — ${BOOST_WINDOWS} window(s) boosted to ${BOOST_TRADE_SHARES} SH per leg NOW`);
-      }
-    }
+  currentShares(asset) {
+    return this.martingaleState(asset).shares;
   }
 
   applyBook(token, bids, asks) {
@@ -291,212 +264,153 @@ class MomentumLagEngine {
     this.history.set(tokenId, series.slice(-240));
   }
 
-  evaluateSignals() {
-    const leadMarket = this.currentMarket(LEAD_ASSET);
-    if (!leadMarket || leadMarket.windowStart !== this.activeWindowStart) return;
-    const now = Date.now() / 1000;
-    const elapsed = now - leadMarket.windowStart;
-    if (elapsed < TRADE_WINDOW_START || elapsed > TRADE_WINDOW_END) return;
-    for (const key of this.firedComboKeys) {
-      if (key.startsWith(String(leadMarket.windowStart) + ':')) return;
-    }
-
-    const btcUp = leadMarket.up.mid;
-    const btcDown = leadMarket.down.mid;
-    if (!Number.isFinite(btcUp) || !Number.isFinite(btcDown)) return;
-
-    for (const altAsset of ASSETS.filter(asset => asset !== LEAD_ASSET)) {
-      const altMarket = this.markets.get(slugFor(altAsset, leadMarket.windowStart));
-      if (!altMarket || altMarket.resolved) continue;
-      const ethUp = altMarket.up.mid;
-      const ethDown = altMarket.down.mid;
-      if (!Number.isFinite(ethUp) || !Number.isFinite(ethDown)) return;
-
-      if (btcUp >= STRONG_THRESHOLD && ethUp <= WEAK_THRESHOLD) {
-        const comboKey = `${leadMarket.windowStart}:ETH_UP`;
-        if (!this.firedComboKeys.has(comboKey)) {
-          this.fireLagging(comboKey, `${altAsset.toUpperCase()}_UP`, leadMarket, altMarket, altMarket.up, 'UP', altAsset, btcUp, ethUp);
-          return;
-        }
-      }
-      if (btcDown >= STRONG_THRESHOLD && ethDown <= WEAK_THRESHOLD) {
-        const comboKey = `${leadMarket.windowStart}:ETH_DOWN`;
-        if (!this.firedComboKeys.has(comboKey)) {
-          this.fireLagging(comboKey, `${altAsset.toUpperCase()}_DOWN`, leadMarket, altMarket, altMarket.down, 'DOWN', altAsset, btcDown, ethDown);
-          return;
-        }
-      }
-      if (ethUp >= STRONG_THRESHOLD && btcUp <= WEAK_THRESHOLD) {
-        const comboKey = `${leadMarket.windowStart}:BTC_UP`;
-        if (!this.firedComboKeys.has(comboKey)) {
-          this.fireLagging(comboKey, `${LEAD_ASSET.toUpperCase()}_UP`, altMarket, leadMarket, leadMarket.up, 'UP', LEAD_ASSET, ethUp, btcUp);
-          return;
-        }
-      }
-      if (ethDown >= STRONG_THRESHOLD && btcDown <= WEAK_THRESHOLD) {
-        const comboKey = `${leadMarket.windowStart}:BTC_DOWN`;
-        if (!this.firedComboKeys.has(comboKey)) {
-          this.fireLagging(comboKey, `${LEAD_ASSET.toUpperCase()}_DOWN`, altMarket, leadMarket, leadMarket.down, 'DOWN', LEAD_ASSET, ethDown, btcDown);
-          return;
-        }
-      }
-    }
-  }
-
   currentMarket(asset) {
     return [...this.markets.values()].find(market =>
       market.asset === asset && !market.resolved && Date.now() / 1000 < market.windowEnd) || null;
-  }
-
-  fireLagging(key, name, strongMarket, laggingMarket, laggingToken, outcome, laggingAsset, strongPrice, laggingPrice) {
-    const now = Date.now();
-    const shares = this.currentTradeShares();
-    const CEILING = 0.99;
-    const sweep = this.simulateGtcBookFill(laggingToken, shares, CEILING);
-    if (!sweep) return false;
-    const fillPrice = sweep.avgPrice;
-    const cost = sweep.totalCost;
-    const fee = round2(cost * TAKER_FEE_BPS / 10000);
-    if (cost + fee > this.bankroll) {
-      this.log(`⚠️ ${name} skipped — need $${round2(cost + fee)}, available $${this.bankroll}`);
-      return false;
-    }
-    this.firedComboKeys.add(key);
-
-    const comboId = `${name}-${laggingMarket.windowStart}`;
-    const openedAt = new Date(now).toISOString();
-    const elapsed = Math.floor(now / 1000 - laggingMarket.windowStart);
-    const positionLeg = {
-      id: `${comboId}-${laggingAsset}-0`, comboId, slug: laggingMarket.slug,
-      asset: laggingAsset, conditionId: laggingMarket.conditionId, outcome,
-      tokenId: laggingToken.tokenId, shares, avgPrice: fillPrice,
-      entryPrice: fillPrice, cost, fee, fills: 1,
-      status: 'open', openedAt, markPrice: laggingToken.mid,
-      signal: { combo: name, strong: strongPrice, lagging: laggingPrice, elapsed },
-    };
-
-    const combo = {
-      id: comboId, name, status: 'open', windowStart: laggingMarket.windowStart,
-      windowEnd: laggingMarket.windowEnd, strongPrice, laggingPrice,
-      combinedAsk: round2(fillPrice), cost, fees: fee, payout: null, pnl: null,
-      result: null, winner: null, resolutionSource: null,
-      legs: [{ ...positionLeg }], openedAt,
-    };
-    this.positions.push(positionLeg);
-    this.combos.push(combo);
-    this.bankroll = round2(this.bankroll - cost - fee);
-    const trade = {
-      timestamp: now, orderType: 'PAPER-GTC@0.99', comboId, combo: name,
-      slug: laggingMarket.slug, asset: laggingAsset, outcome, shares,
-      price: fillPrice, cost, markPrice: laggingToken.mid,
-      pnl: this.positionPnl(positionLeg), signal: positionLeg.signal,
-    };
-    this.trades.push(trade);
-    const sweepInfo = sweep ? `sweep ${sweep.filled}sh avg:${sweep.avgPrice.toFixed(3)} levels:${sweep.levels.length}` : 'no book depth';
-    this.log(`⚡ GTC BUY ${laggingAsset.toUpperCase()} ${outcome} ${shares}sh @${fillPrice.toFixed(3)} (${sweepInfo}) | ${name} strong:${strongPrice.toFixed(3)} lagging:${laggingPrice.toFixed(3)} | $${cost.toFixed(2)}`);
-    this.trades = this.trades.slice(-300);
-    this.log(`✅ ${name} OPEN — GTC@0.99 · lagging @${fillPrice.toFixed(3)} · cost $${cost.toFixed(2)} · hold to resolution`);
-    this.recordEquity();
-    return true;
-  }
-
-  fireCombo(signal) {
-    const now = Date.now();
-    if (now / 1000 >= signal.btcMarket.windowEnd) return false;
-    const shares = this.currentTradeShares();
-    const CEILING = 0.99;
-    const legs = [signal.btcMarket, signal.altMarket].map((market, index) => {
-      const token = index === 0 ? signal.btcToken : signal.altToken;
-      const bookAsk = token.ask;
-      const bookBid = token.bid;
-      const bookMid = token.mid;
-      const sweep = this.simulateGtcBookFill(token, shares, CEILING);
-      if (!sweep) return { market, token, fillPrice: NaN, bookAsk, bookBid, bookMid, cost: NaN, fee: NaN, sweep: null,
-        outcome: token.outcome, slug: market.slug, asset: market.asset,
-        conditionId: market.conditionId, tokenId: token.tokenId };
-      return {
-        market, token, fillPrice: sweep.avgPrice, bookAsk, bookBid, bookMid,
-        cost: sweep.totalCost, fee: round2(sweep.totalCost * TAKER_FEE_BPS / 10000), sweep,
-        outcome: token.outcome, slug: market.slug, asset: market.asset,
-        conditionId: market.conditionId, tokenId: token.tokenId,
-      };
-    });
-    if (!legs.every(leg => Number.isFinite(leg.fillPrice))) return false;
-    const cost = round2(legs.reduce((sum, leg) => sum + leg.cost, 0));
-    const fees = round2(legs.reduce((sum, leg) => sum + leg.fee, 0));
-    if (cost + fees > this.bankroll) {
-      this.log(`⚠️ ${signal.name} skipped — need $${round2(cost + fees)}, available $${this.bankroll}`);
-      return false;
-    }
-    this.firedComboKeys.add(signal.key);
-
-    const comboId = `${signal.name}-${signal.windowStart}`;
-    const openedAt = new Date(now).toISOString();
-    const elapsed = Math.floor(now / 1000 - signal.windowStart);
-    const positionLegs = legs.map((leg, index) => ({
-      id: `${comboId}-${leg.asset}-${index}`, comboId, slug: leg.slug,
-      asset: leg.asset, conditionId: leg.conditionId, outcome: leg.outcome,
-      tokenId: leg.tokenId, shares, avgPrice: leg.fillPrice,
-      entryPrice: leg.fillPrice, cost: leg.cost, fee: leg.fee, fills: 1,
-      status: 'open', openedAt, markPrice: leg.token.mid,
-      signal: {
-        combo: signal.name, combinedMid: signal.combinedMid, elapsed,
-        entryThreshold: STRONG_THRESHOLD,
-      },
-    }));
-
-    const combo = {
-      id: comboId, name: signal.name, status: 'open', windowStart: signal.windowStart,
-      windowEnd: signal.btcMarket.windowEnd, combinedEntryMid: signal.combinedMid,
-      combinedAsk: round2(cost / shares), cost, fees, payout: null, pnl: null,
-      result: null, winner: null, resolutionSource: null,
-      legs: positionLegs.map(leg => ({ ...leg })), openedAt,
-    };
-    this.positions.push(...positionLegs);
-    this.combos.push(combo);
-    this.bankroll = round2(this.bankroll - cost - fees);
-    for (const leg of positionLegs) {
-      const trade = {
-        timestamp: now, orderType: 'PAPER-GTC@0.99', comboId, combo: signal.name,
-        slug: leg.slug, asset: leg.asset, outcome: leg.outcome, shares: leg.shares,
-        price: leg.avgPrice, cost: leg.cost, markPrice: leg.markPrice,
-        pnl: this.positionPnl(leg), signal: leg.signal,
-      };
-      this.trades.push(trade);
-      const sweepInfo = leg.sweep ? `sweep ${leg.sweep.filled}sh avg:${leg.sweep.avgPrice.toFixed(3)} levels:${leg.sweep.levels.length}` : 'no book depth';
-      this.log(`⚡ GTC BUY ${leg.asset.toUpperCase()} ${leg.outcome} ${shares}sh @${leg.avgPrice.toFixed(3)} (${sweepInfo} book bid:${leg.bookBid?.toFixed(3)??'-'} ask:${leg.bookAsk?.toFixed(3)??'-'} mid:${leg.bookMid?.toFixed(3)??'-'}) | ${signal.name} combined ${signal.combinedMid.toFixed(3)} < ${STRONG_THRESHOLD.toFixed(2)} | $${leg.cost.toFixed(2)}`);
-    }
-    this.trades = this.trades.slice(-300);
-    this.log(`✅ ${signal.name} OPEN — GTC@0.99 · combined ${signal.combinedMid.toFixed(3)} · fill avg $${(legs.reduce((s,l)=>s+l.fillPrice,0)/legs.length).toFixed(3)} · cost $${cost.toFixed(2)} · hold to resolution`);
-    this.recordEquity();
-    return true;
   }
 
   positionPnl(position) {
     return round2(position.shares * (position.markPrice ?? position.avgPrice) - position.cost - position.fee);
   }
 
-  comboMark(combo) {
-    return round2(combo.legs.reduce((sum, leg) => {
-      const market = this.markets.get(leg.slug);
-      const token = leg.outcome === 'UP' ? market?.up : market?.down;
-      return sum + leg.shares * (token?.mid ?? leg.markPrice ?? leg.entryPrice);
-    }, 0));
+  /* ═════════════════════════════════════════════════════════
+     CORE STRATEGY
+     Buy the side that hits 0.70, SL at 0.50, TP at resolution.
+     One bet per window per asset. On loss, double shares. On win, reset.
+     ═════════════════════════════════════════════════════════ */
+  evaluateEntries() {
+    for (const asset of ASSETS) {
+      const market = this.currentMarket(asset);
+      if (!market) continue;
+      if (this.hasOpenBet(asset, market.windowStart)) continue;
+      const elapsed = Date.now() / 1000 - market.windowStart;
+      if (elapsed < MARKET_OPEN_WAIT) continue;
+      // Find the side sitting at/near ENTRY_PRICE (0.70)
+      const candidates = [market.up, market.down].map(token => {
+        const best = token.mid ?? token.ask ?? token.bid;
+        return { token, price: best };
+      }).filter(c => Number.isFinite(c.price) && c.price >= ENTRY_PRICE - 0.02 && c.price <= ENTRY_PRICE + 0.02);
+      if (!candidates.length) continue;
+      candidates.sort((a, b) => a.price - b.price);
+      this.enterBet(market, candidates[0].token, candidates[0].price);
+    }
   }
 
-  comboUnrealizedPnl(combo) {
-    return round2(this.comboMark(combo) - combo.cost - combo.fees);
+  hasOpenBet(asset, windowStart) {
+    return this.positions.some(p => p.status === 'open' && p.asset === asset && p.windowStart === windowStart);
+  }
+
+  enterBet(market, token, triggerPrice) {
+    const asset = market.asset;
+    const shares = this.currentShares(asset);
+    const CEILING = 0.99;
+    const sweep = this.simulateGtcBookFill(token, shares, CEILING);
+    if (!sweep) return false;
+    const entryPrice = sweep.avgPrice;
+    const cost = sweep.totalCost;
+    const fee = round2(cost * TAKER_FEE_BPS / 10000);
+    if (cost + fee > this.bankroll) {
+      this.log(`⚠️ ${asset.toUpperCase()} entry skipped — need $${round2(cost + fee)}, available $${this.bankroll}`);
+      return false;
+    }
+    this.bankroll = round2(this.bankroll - cost - fee);
+    const now = Date.now();
+    const position = {
+      id: `bet-${asset}-${market.windowStart}-${now}`,
+      slug: market.slug, asset, conditionId: market.conditionId,
+      outcome: token.outcome, tokenId: token.tokenId,
+      shares, avgPrice: entryPrice, entryPrice, cost, fee,
+      status: 'open', openedAt: now, markPrice: token.mid,
+      windowStart: market.windowStart, windowEnd: market.windowEnd,
+      stopLossPrice: STOP_LOSS_PRICE,
+      signal: { triggerPrice, triggerSource: 'ENTRY_0.70', bid: token.bid, ask: token.ask, mid: token.mid, elapsed: Math.floor(now / 1000 - market.windowStart) },
+      martingaleIndex: this.martingaleState(asset).losses,
+    };
+    this.positions.push(position);
+    this.trades.push({ timestamp: now, orderType: 'PAPER-GTC@0.99', asset, outcome: token.outcome, shares, price: entryPrice, cost, markPrice: token.mid, pnl: this.positionPnl(position), signal: position.signal });
+    this.trades = this.trades.slice(-300);
+    this.log(`⚡ BUY ${asset.toUpperCase()} ${token.outcome} ${shares}sh @${entryPrice.toFixed(3)} (sweep ${sweep.filled}sh avg:${sweep.avgPrice.toFixed(3)}) martingale #${position.martingaleIndex} · SL ${STOP_LOSS_PRICE.toFixed(2)} · cost $${cost.toFixed(2)}`);
+    this.recordEquity();
+    return true;
+  }
+
+  checkStopLoss() {
+    for (const position of this.positions) {
+      if (position.status !== 'open') continue;
+      const market = this.markets.get(position.slug);
+      if (!market) continue;
+      const token = position.outcome === 'UP' ? market.up : market.down;
+      const mid = token?.mid;
+      if (!Number.isFinite(mid)) continue;
+      if (mid <= STOP_LOSS_PRICE) {
+        // Stop loss hit — close at SL price
+        this.closePosition(position, STOP_LOSS_PRICE, 'STOP_LOSS');
+        this.losses++;
+        // Double the bet for next round
+        const st = this.martingaleState(position.asset);
+        st.losses += 1;
+        st.shares = BASE_SHARES * Math.pow(2, st.losses);
+        this.log(`⛔ ${position.asset.toUpperCase()} ${position.outcome} STOP LOSS @${STOP_LOSS_PRICE.toFixed(2)} — next bet doubled to ${st.shares} SH`);
+      }
+    }
+  }
+
+  settleResolved() {
+    for (const position of this.positions) {
+      if (position.status !== 'open') continue;
+      const market = this.markets.get(position.slug);
+      if (!market?.resolved || !market.winner) continue;
+      const won = position.outcome === market.winner;
+      const payout = won ? position.shares : 0;
+      const exitFee = round2(payout * TAKER_FEE_BPS / 10000);
+      const pnl = round2(payout - exitFee - position.cost - position.fee);
+      position.status = 'closed';
+      position.won = won;
+      position.payout = round2(payout);
+      position.pnl = pnl;
+      position.exitPrice = won ? 1 : 0;
+      position.closedAt = Date.now();
+      position.closeReason = 'RESOLUTION';
+      position.winner = market.winner;
+      this.bankroll = round2(this.bankroll + payout - exitFee);
+      this.realizedPnl = round2(this.realizedPnl + pnl);
+      const st = this.martingaleState(position.asset);
+      if (won) {
+        this.wins++;
+        // Reset martingale on win
+        st.shares = BASE_SHARES;
+        st.losses = 0;
+        this.log(`🏁 ${position.asset.toUpperCase()} ${position.outcome} WIN — payout $${position.payout.toFixed(2)} · cost $${(position.cost + position.fee).toFixed(2)} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)} · martingale reset to ${BASE_SHARES} SH`);
+      } else {
+        this.losses++;
+        st.losses += 1;
+        st.shares = BASE_SHARES * Math.pow(2, st.losses);
+        this.log(`🏁 ${position.asset.toUpperCase()} ${position.outcome} LOSS — payout $0 · cost $${(position.cost + position.fee).toFixed(2)} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)} · next bet doubled to ${st.shares} SH`);
+      }
+      this.resolvedPositions.unshift({ ...position });
+      this.resolvedPositions = this.resolvedPositions.slice(0, 40);
+    }
+    this.positions = this.positions.filter(position => position.status === 'open');
+  }
+
+  closePosition(position, exitPrice, reason) {
+    const proceeds = round2(position.shares * exitPrice);
+    const exitFee = round2(proceeds * TAKER_FEE_BPS / 10000);
+    position.status = 'closed';
+    position.exitPrice = exitPrice;
+    position.payout = round2(proceeds);
+    position.pnl = round2(proceeds - exitFee - position.cost - position.fee);
+    position.closedAt = Date.now();
+    position.closeReason = reason;
+    this.bankroll = round2(this.bankroll + proceeds - exitFee);
+    this.realizedPnl = round2(this.realizedPnl + position.pnl);
+    this.resolvedPositions.unshift({ ...position });
+    this.resolvedPositions = this.resolvedPositions.slice(0, 40);
+    this.trades.push({ timestamp: Date.now(), orderType: 'PAPER-SL', asset: position.asset, outcome: position.outcome, shares: position.shares, price: exitPrice, cost: proceeds, markPrice: exitPrice, pnl: position.pnl, signal: position.signal, reason });
+    this.log(`⛔ ${position.asset.toUpperCase()} ${position.outcome} CLOSED @${exitPrice.toFixed(2)} (${reason}) — P&L ${position.pnl >= 0 ? '+' : '-'}$${Math.abs(position.pnl).toFixed(2)}`);
   }
 
   updatePositionMarks() {
-    for (const combo of this.combos) {
-      if (combo.status !== 'open') continue;
-      for (const leg of combo.legs) {
-        const market = this.markets.get(leg.slug);
-        const token = leg.outcome === 'UP' ? market?.up : market?.down;
-        if (Number.isFinite(token?.mid)) leg.markPrice = token.mid;
-      }
-    }
     for (const position of this.positions) {
       if (position.status !== 'open') continue;
       const market = this.markets.get(position.slug);
@@ -505,50 +419,88 @@ class MomentumLagEngine {
     }
   }
 
-  settleResolvedCombos() {
-    for (const combo of this.combos) {
-      if (combo.status !== 'open') continue;
-      const markets = combo.legs.map(leg => this.markets.get(leg.slug));
-      if (!markets.every(market => market?.resolved && market.winner)) continue;
-      let payout = 0;
-      for (let index = 0; index < combo.legs.length; index++) {
-        const leg = combo.legs[index];
-        const won = leg.outcome === markets[index].winner;
-        const legPayout = won ? leg.shares : 0;
-        payout += legPayout;
-        leg.status = won ? 'won' : 'lost';
-        leg.won = won; leg.payout = round2(legPayout); leg.markPrice = won ? 1 : 0;
-        leg.pnl = round2(legPayout - leg.cost - leg.fee);
-        leg.winner = markets[index].winner; leg.resolutionSource = markets[index].resolutionSource;
-        leg.resolvedAt = new Date().toISOString();
-      }
-      payout = round2(payout);
-      const pnl = round2(payout - combo.cost - combo.fees);
-      combo.status = 'settled'; combo.payout = payout; combo.pnl = pnl;
-      combo.result = pnl > 0 ? 'WIN' : pnl < 0 ? 'LOSS' : 'FLAT';
-      combo.winner = combo.legs.filter(leg => leg.won).map(leg => `${leg.asset.toUpperCase()} ${leg.outcome}`).join(' + ') || 'none';
-      combo.resolutionSource = markets.map(market => market.resolutionSource).join('/');
-      combo.settledAt = new Date().toISOString();
-      this.bankroll = round2(this.bankroll + payout);
-      this.realizedPnl = round2(this.realizedPnl + pnl);
-      if (pnl > 0) this.wins++; else if (pnl < 0) this.losses++;
-      this.resolvedCombos.unshift({ ...combo, legs: combo.legs.map(leg => ({ ...leg })) });
-      this.resolvedCombos = this.resolvedCombos.slice(0, 30);
-      this.log(`🏁 [${combo.resolutionSource}] ${combo.name} ${combo.result} — winners ${combo.winner} · cost $${combo.cost.toFixed(2)}, payout $${payout.toFixed(2)}, P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`);
-      if (combo.result === 'LOSS' && this.boostWindowsRemaining > 0) {
-        this.boostWindowsRemaining = BOOST_WINDOWS;
-        this.log(`🔥 Boost window lost — reset to ${BOOST_WINDOWS} window(s)`);
-      }
-    }
-    // Backward-compatible public positions remain individual combo legs.
-    this.positions = this.positions.filter(position => position.status === 'open');
+  activePositionSummaries() {
+    return this.positions.filter(p => p.status === 'open').map(p => ({
+      ...p,
+      markValue: p.shares * (p.markPrice ?? p.avgPrice),
+      unrealized: this.positionPnl(p),
+    })).reverse();
   }
 
-  activeComboSummaries() {
-    return this.combos.filter(combo => combo.status === 'open').map(combo => ({
-      ...combo, legs: combo.legs.map(leg => ({ ...leg })),
-      markValue: this.comboMark(combo), unrealized: this.comboUnrealizedPnl(combo),
-    })).reverse();
+  publicMarkets() {
+    const currentStart = windowStartFor(Date.now());
+    return [...this.markets.values()]
+      .filter(market => market.windowStart === currentStart)
+      .sort((a, b) => a.asset.localeCompare(b.asset))
+      .map(market => ({
+        slug: market.slug, asset: market.asset, title: market.title,
+        windowStart: market.windowStart, windowEnd: market.windowEnd,
+        resolved: market.resolved, winner: market.winner,
+        resolutionSource: market.resolutionSource,
+        finalUpMax: market.finalUpMax, finalDownMax: market.finalDownMax,
+        elapsed: Math.max(0, Math.floor(Date.now() / 1000 - market.windowStart)),
+        remaining: Math.max(0, market.windowEnd - Math.floor(Date.now() / 1000)),
+        up: publicToken(market.up), down: publicToken(market.down),
+      }));
+  }
+
+  buildState() {
+    this.updatePositionMarks();
+    const open = this.activePositionSummaries();
+    const openValue = round2(open.reduce((sum, p) => sum + p.markValue, 0));
+    const unrealizedPnl = round2(open.reduce((sum, p) => sum + p.unrealized, 0));
+    const markValue = round2(this.bankroll + openValue);
+    const activeStart = windowStartFor(Date.now());
+    const currentDiscovered = ASSETS.filter(asset => this.markets.has(slugFor(asset, activeStart))).length;
+    const nextDiscovered = ASSETS.filter(asset => this.markets.has(slugFor(asset, activeStart + WINDOW_SECONDS))).length;
+    const martingale = Object.fromEntries([...this.martingale.entries()].map(([asset, st]) => [asset, { ...st }]));
+    return {
+      mode: 'AUTONOMOUS DEMO',
+      strategy: 'Buy side @0.70 · SL @0.50 · TP=resolution · martingale double on loss · reset on win',
+      serverTime: Date.now(),
+      windowStart: activeStart,
+      connected: this.isClobFresh(), tickCount: this.tickCount, messageCount: this.messageCount,
+      pollCount: this.pollCount, lastPollAt: this.lastPollAt,
+      lastSuccessfulPollAt: this.lastSuccessfulPollAt,
+      trackedTokens: this.tokens.size,
+      martingale,
+      discovery: {
+        expectedMarkets: ASSETS.length,
+        currentDiscovered, nextDiscovered,
+        expectedTokens: ASSETS.length * 2 * (currentDiscovered === ASSETS.length && nextDiscovered === ASSETS.length ? 2 : 1),
+        errors: this.discoveryErrors,
+        lastDiscoveryAt: this.lastDiscoveryAt,
+      },
+      watchAssets: ASSETS, leadAsset: LEAD_ASSET.toUpperCase(),
+      bankroll: this.bankroll, markValue, realizedPnl: this.realizedPnl,
+      openValue, unrealizedPnl, totalPnl: round2(markValue - START_BANKROLL),
+      wins: this.wins, losses: this.losses,
+      winRate: this.wins + this.losses ? round2(this.wins / (this.wins + this.losses) * 100) : null,
+      markets: this.publicMarkets(),
+      positions: open,
+      resolvedPositions: this.resolvedPositions.slice(0, 30),
+      trades: this.trades.slice(-160).reverse(),
+      equityCurve: this.equityCurve.slice(-1500),
+      logs: this.logs.slice(-220),
+      config: {
+        baseShares: BASE_SHARES, entryPrice: ENTRY_PRICE, stopLossPrice: STOP_LOSS_PRICE,
+        resolutionPrice: RESOLUTION_PRICE, feeBps: TAKER_FEE_BPS, marketOpenWait: MARKET_OPEN_WAIT,
+      },
+      uptime: Math.floor((Date.now() - this.startedAt) / 1000),
+    };
+  }
+
+  recordEquity() {
+    const last = this.equityCurve[this.equityCurve.length - 1];
+    const state = this.buildState();
+    if (!last || Date.now() - last.t > 1000 || Math.abs(last.equity - state.markValue) > 0.001) {
+      this.equityCurve.push({ t: Date.now(), equity: state.markValue });
+      if (this.equityCurve.length > 2000) this.equityCurve.shift();
+    }
+  }
+
+  isClobFresh(now = Date.now()) {
+    return Boolean(this.lastSuccessfulPollAt && now - this.lastSuccessfulPollAt <= CLOB_FRESH_MS);
   }
 
   async retryDiscovery() {
@@ -572,16 +524,7 @@ class MomentumLagEngine {
     try {
       const start = windowStartFor(Date.now());
       if (start !== this.activeWindowStart) {
-        if (this.ethBoostPending) {
-          if (!this.boostWindowsRemaining) this.boostWindowsRemaining = BOOST_WINDOWS;
-          this.ethBoostPending = false;
-          this.log(`🚀 Boost active — ${this.boostWindowsRemaining} window(s) at ${BOOST_TRADE_SHARES} SH per leg`);
-        } else if (this.boostWindowsRemaining > 0) {
-          this.boostWindowsRemaining--;
-          if (!this.boostWindowsRemaining) this.log('⏹️ Boost sequence complete — base sizing restored');
-        }
         this.activeWindowStart = null;
-        this.firedComboKeys.clear();
         await this.discoverWindow(start, 'New');
       }
       for (const market of this.markets.values()) {
@@ -589,12 +532,7 @@ class MomentumLagEngine {
         this.trackFinalPrices(market);
         if (Date.now() / 1000 >= market.windowEnd) this.resolveFromFinalPrices(market);
       }
-      this.settleResolvedCombos();
-      const checkStarts = new Set();
-      for (const market of this.markets.values()) {
-        if (market.resolved) checkStarts.add(market.windowStart);
-      }
-      for (const ws of checkStarts) this.checkCorrelation(ws);
+      this.settleResolved();
       this.pruneExpiredMarkets();
       this.recordEquity();
     } catch (error) {
@@ -606,7 +544,6 @@ class MomentumLagEngine {
     const expiryCutoff = Date.now() / 1000 - 2;
     const expired = [...this.markets.values()].filter(market => market.windowEnd < expiryCutoff);
     if (!expired.length) return;
-
     for (const market of expired) {
       this.markets.delete(market.slug);
       this.tokens.delete(market.up.tokenId);
@@ -614,7 +551,6 @@ class MomentumLagEngine {
       this.history.delete(market.up.tokenId);
       this.history.delete(market.down.tokenId);
     }
-
     this.log(`🧹 Released ${expired.length} expired market(s)`);
   }
 
@@ -643,7 +579,8 @@ class MomentumLagEngine {
         if (!market.resolved && Date.now() / 1000 >= market.windowEnd) this.resolveFromFinalPrices(market);
       }
       this.updatePositionMarks();
-      this.evaluateSignals();
+      this.checkStopLoss();
+      this.evaluateEntries();
       this.tickCount++;
       this.emitTick(this.publicMarkets(), this.messageCount);
     } catch (error) {
@@ -653,88 +590,6 @@ class MomentumLagEngine {
         this.lastPollErrorAt = Date.now();
       }
     } finally { this.pollRunning = false; }
-  }
-
-  publicMarkets() {
-    const currentStart = windowStartFor(Date.now());
-    return [...this.markets.values()]
-      .filter(market => market.windowStart === currentStart)
-      .sort((a, b) => a.asset.localeCompare(b.asset))
-      .map(market => ({
-        slug: market.slug, asset: market.asset, title: market.title,
-        windowStart: market.windowStart, windowEnd: market.windowEnd,
-        resolved: market.resolved, winner: market.winner,
-        resolutionSource: market.resolutionSource,
-        finalUpMax: market.finalUpMax, finalDownMax: market.finalDownMax,
-        elapsed: Math.max(0, Math.floor(Date.now() / 1000 - market.windowStart)),
-        remaining: Math.max(0, market.windowEnd - Math.floor(Date.now() / 1000)),
-        up: publicToken(market.up), down: publicToken(market.down),
-      }));
-  }
-
-  buildState() {
-    this.updatePositionMarks();
-    const openCombos = this.activeComboSummaries();
-    const openValue = round2(openCombos.reduce((sum, combo) => sum + combo.markValue, 0));
-    const unrealizedPnl = round2(openCombos.reduce((sum, combo) => sum + combo.unrealized, 0));
-    const markValue = round2(this.bankroll + openValue);
-    const activeStart = windowStartFor(Date.now());
-    const currentDiscovered = ASSETS.filter(asset => this.markets.has(slugFor(asset, activeStart))).length;
-    const nextDiscovered = ASSETS.filter(asset => this.markets.has(slugFor(asset, activeStart + WINDOW_SECONDS))).length;
-    return {
-      mode: 'AUTONOMOUS DEMO',
-      strategy: 'Lagging side catch-up · strong>0.75 weak<0.50 · 30-270s window · flat 100 SH · GTC@0.99',
-      serverTime: Date.now(),
-      windowStart: activeStart,
-      connected: this.isClobFresh(), tickCount: this.tickCount, messageCount: this.messageCount,
-      pollCount: this.pollCount, lastPollAt: this.lastPollAt,
-      lastSuccessfulPollAt: this.lastSuccessfulPollAt,
-      trackedTokens: this.tokens.size,
-      boostPending: this.ethBoostPending, boostWindowsRemaining: this.boostWindowsRemaining,
-      correlationStreak: this.correlationStreak,
-      windowResults: Object.fromEntries(this.windowResults),
-      currentTradeShares: this.currentTradeShares(),
-      discovery: {
-        expectedMarkets: ASSETS.length,
-        currentDiscovered, nextDiscovered,
-        expectedTokens: ASSETS.length * 2 * (currentDiscovered === ASSETS.length && nextDiscovered === ASSETS.length ? 2 : 1),
-        errors: this.discoveryErrors,
-        lastDiscoveryAt: this.lastDiscoveryAt,
-      },
-      watchAssets: ASSETS, leadAsset: LEAD_ASSET.toUpperCase(),
-      bankroll: this.bankroll, markValue, realizedPnl: this.realizedPnl,
-      openValue, unrealizedPnl, totalPnl: round2(markValue - START_BANKROLL),
-      wins: this.wins, losses: this.losses,
-      winRate: this.wins + this.losses ? round2(this.wins / (this.wins + this.losses) * 100) : null,
-      markets: this.publicMarkets(),
-      positions: this.positions.filter(position => position.status === 'open').slice().reverse(),
-      combos: openCombos,
-      resolvedCombos: this.resolvedCombos.slice(0, 20),
-      trades: this.trades.slice(-160).reverse(),
-      equityCurve: this.equityCurve.slice(-1500),
-      logs: this.logs.slice(-220),
-      config: {
-        baseTradeShares: BASE_TRADE_SHARES, boostTradeShares: BOOST_TRADE_SHARES,
-        boostWindows: BOOST_WINDOWS, strongThreshold: STRONG_THRESHOLD, weakThreshold: WEAK_THRESHOLD, tradeWindow: TRADE_WINDOW_START + '-' + TRADE_WINDOW_END + 's',
-        resolutionPrice: RESOLUTION_PRICE, feeBps: TAKER_FEE_BPS,
-      },
-      uptime: Math.floor((Date.now() - this.startedAt) / 1000),
-    };
-  }
-
-  recordEquity() {
-    const state = this.buildState();
-    const last = this.equityCurve[this.equityCurve.length - 1];
-    if (!last || Date.now() - last.t > 1000 || Math.abs(last.equity - state.markValue) > 0.001) {
-      this.equityCurve.push({ t: Date.now(), equity: state.markValue });
-      if (this.equityCurve.length > 2000) this.equityCurve.shift();
-    }
-  }
-
-
-
-  isClobFresh(now = Date.now()) {
-    return Boolean(this.lastSuccessfulPollAt && now - this.lastSuccessfulPollAt <= CLOB_FRESH_MS);
   }
 
   async init() {
@@ -747,7 +602,7 @@ class MomentumLagEngine {
     setInterval(() => this.rotateAndSweep(), 250);
     setInterval(() => this.pollClobBooks(), CLOB_POLL_MS);
     setInterval(() => this.retryDiscovery(), 1500);
-    this.log(`🚀 BTC correlation combo bot started | ${ASSETS.join('/')} | CLOB books every ${CLOB_POLL_MS}ms | demo ${START_BANKROLL}`);
+    this.log(`🚀 Martingale bot started | ${ASSETS.join('/')} | entry@${ENTRY_PRICE.toFixed(2)} SL@${STOP_LOSS_PRICE.toFixed(2)} base ${BASE_SHARES} SH | demo ${START_BANKROLL}`);
   }
 }
 
@@ -759,9 +614,9 @@ function publicToken(token) {
 }
 
 module.exports = {
-  MomentumLagEngine,
+  MartingaleBotEngine,
   config: {
-    ASSETS, LEAD_ASSET, START_BANKROLL, BASE_TRADE_SHARES, BOOST_TRADE_SHARES, BOOST_WINDOWS,
-    STRONG_THRESHOLD, WEAK_THRESHOLD, RESOLUTION_PRICE, TAKER_FEE_BPS,
+    ASSETS, LEAD_ASSET, START_BANKROLL, BASE_SHARES, ENTRY_PRICE,
+    STOP_LOSS_PRICE, RESOLUTION_PRICE, TAKER_FEE_BPS,
   },
 };
