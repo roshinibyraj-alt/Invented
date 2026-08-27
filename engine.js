@@ -12,6 +12,9 @@ const BASE_SHARES = Number(process.env.BASE_SHARES || 100);
 const TRIGGER_PRICE = Number(process.env.TRIGGER_PRICE || 0.70);
 const LIMIT_PRICE = Number(process.env.LIMIT_PRICE || 0.60);
 const STOP_LOSS_PRICE = Number(process.env.STOP_LOSS_PRICE || 0.45);
+const LIMIT_PRICE_300 = Number(process.env.LIMIT_PRICE_300 || 0.30);
+const BASE_SHARES_300 = Number(process.env.BASE_SHARES_300 || 133);
+const MARTINGALE_300_MULT = Number(process.env.MARTINGALE_300_MULT || 1.5);
 const RESOLUTION_PRICE = Number(process.env.RESOLUTION_PRICE || 0.90);
 const MARKET_OPEN_WAIT = Number(process.env.MARKET_OPEN_WAIT || 10);
 const PRICE_HISTORY_MS = Number(process.env.PRICE_HISTORY_MS || 5000);
@@ -29,7 +32,20 @@ class MartingaleBotEngine {
     this.emitTick = options.onTick || (() => {});
     this.emitLog = options.onLog || (() => {});
     this.startedAt = Date.now();
-    this.bankroll = START_BANKROLL;
+    this.shared = options.shared || null;
+    this.secondary = options.secondary || null;
+    if (this.shared) {
+      this.markets = this.shared.markets;
+      this.tokens = this.shared.tokens;
+      this.history = this.shared.history;
+      this.capital = this.shared.capital;
+    } else {
+      this.markets = new Map();
+      this.tokens = new Map();
+      this.history = new Map();
+      this.capital = { value: START_BANKROLL };
+    }
+    this.bankroll = this.capital.value;
     this.realizedPnl = 0;
     this.wins = 0;
     this.losses = 0;
@@ -43,10 +59,7 @@ class MartingaleBotEngine {
     this.trades = [];
     this.positions = [];
     this.resolvedPositions = [];
-    this.markets = new Map();
-    this.tokens = new Map();
     this.windows = new Map();
-    this.history = new Map();
     this.discoveredWindows = new Set();
     this.activeWindowStart = null;
     this.pollRunning = false;
@@ -360,7 +373,7 @@ class MartingaleBotEngine {
       this.log(`⚠️ ${asset.toUpperCase()} fill skipped — need $${round2(cost + fee)}, available $${this.bankroll}`);
       return false;
     }
-    this.bankroll = round2(this.bankroll - cost - fee);
+    this.bankroll = this.capital.value = round2(this.bankroll - cost - fee);
     const now = Date.now();
     const position = {
       id: `bet-${asset}-${market.windowStart}-${now}`,
@@ -422,7 +435,7 @@ class MartingaleBotEngine {
       position.closedAt = Date.now();
       position.closeReason = 'RESOLUTION';
       position.winner = market.winner;
-      this.bankroll = round2(this.bankroll + payout - exitFee);
+      this.bankroll = this.capital.value = round2(this.bankroll + payout - exitFee);
       this.realizedPnl = round2(this.realizedPnl + pnl);
       const st = this.martingaleState(position.asset);
       if (won) {
@@ -455,7 +468,7 @@ class MartingaleBotEngine {
     position.pnl = round2(proceeds - exitFee - position.cost - position.fee);
     position.closedAt = Date.now();
     position.closeReason = reason;
-    this.bankroll = round2(this.bankroll + proceeds - exitFee);
+    this.bankroll = this.capital.value = round2(this.bankroll + proceeds - exitFee);
     this.realizedPnl = round2(this.realizedPnl + position.pnl);
     this.resolvedPositions.unshift({ ...position });
     this.resolvedPositions = this.resolvedPositions.slice(0, 40);
@@ -500,9 +513,17 @@ class MartingaleBotEngine {
   buildState() {
     this.updatePositionMarks();
     const open = this.activePositionSummaries();
-    const openValue = round2(open.reduce((sum, p) => sum + p.markValue, 0));
-    const unrealizedPnl = round2(open.reduce((sum, p) => sum + p.unrealized, 0));
-    const markValue = round2(this.bankroll + openValue);
+    const sec = this.secondary ? this.secondary.buildState() : null;
+    const secOpen = sec?.positions || [];
+    const openValue = round2(open.reduce((sum, p) => sum + p.markValue, 0) + secOpen.reduce((sum, p) => sum + p.markValue, 0));
+    const unrealizedPnl = round2(open.reduce((sum, p) => sum + p.unrealized, 0) + secOpen.reduce((sum, p) => sum + p.unrealized, 0));
+    const markValue = round2(this.capital.value + openValue);
+    const totalRealized = round2(this.realizedPnl + (sec?.realizedPnl || 0));
+    const totalWins = this.wins + (sec?.wins || 0);
+    const totalLosses = this.losses + (sec?.losses || 0);
+    const allTrades = [...this.trades, ...(sec?.trades || [])].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0)).slice(0, 160);
+    const allResolved = [...this.resolvedPositions, ...(sec?.resolvedPositions || [])]
+      .sort((a, b) => (b.closedAt || 0) - (a.closedAt || 0)).slice(0, 30);
     const activeStart = windowStartFor(Date.now());
     const currentDiscovered = ASSETS.filter(asset => this.markets.has(slugFor(asset, activeStart))).length;
     const nextDiscovered = ASSETS.filter(asset => this.markets.has(slugFor(asset, activeStart + WINDOW_SECONDS))).length;
@@ -518,9 +539,9 @@ class MartingaleBotEngine {
       trackedTokens: this.tokens.size,
       martingale,
       consecutiveLosses: this.consecutiveLosses,
-      maxConsecutiveLosses: this.maxConsecutiveLosses,
-      peakEquity: this.peakEquity,
-      maxDrawdown: this.maxDrawdown,
+      maxConsecutiveLosses: Math.max(this.maxConsecutiveLosses, sec?.maxConsecutiveLosses || 0),
+      peakEquity: Math.max(this.peakEquity, sec?.peakEquity || 0),
+      maxDrawdown: Math.max(this.maxDrawdown, sec?.maxDrawdown || 0),
       discovery: {
         expectedMarkets: ASSETS.length,
         currentDiscovered, nextDiscovered,
@@ -529,21 +550,23 @@ class MartingaleBotEngine {
         lastDiscoveryAt: this.lastDiscoveryAt,
       },
       watchAssets: ASSETS, leadAsset: LEAD_ASSET.toUpperCase(),
-      bankroll: this.bankroll, markValue, realizedPnl: this.realizedPnl,
+      bankroll: this.capital.value, markValue, realizedPnl: totalRealized,
       openValue, unrealizedPnl, totalPnl: round2(markValue - START_BANKROLL),
-      wins: this.wins, losses: this.losses,
-      winRate: this.wins + this.losses ? round2(this.wins / (this.wins + this.losses) * 100) : null,
+      wins: totalWins, losses: totalLosses,
+      winRate: totalWins + totalLosses ? round2(totalWins / (totalWins + totalLosses) * 100) : null,
       markets: this.publicMarkets(),
-      positions: open,
-      resolvedPositions: this.resolvedPositions.slice(0, 30),
-      trades: this.trades.slice(-160).reverse(),
+      positions: [...open, ...secOpen].sort((a, b) => (b.openedAt || 0) - (a.openedAt || 0)),
+      resolvedPositions: allResolved,
+      trades: allTrades,
       equityCurve: this.equityCurve.slice(-1500),
-      logs: this.logs.slice(-220),
+      logs: [...this.logs, ...(sec?.logs || [])].sort().slice(-220),
       config: {
         baseShares: BASE_SHARES, triggerPrice: TRIGGER_PRICE, limitPrice: LIMIT_PRICE, stopLossPrice: STOP_LOSS_PRICE,
         resolutionPrice: RESOLUTION_PRICE, feeBps: TAKER_FEE_BPS, marketOpenWait: MARKET_OPEN_WAIT,
+        baseShares300: BASE_SHARES_300, limitPrice300: LIMIT_PRICE_300,
       },
       uptime: Math.floor((Date.now() - this.startedAt) / 1000),
+      secondary: sec,
     };
   }
 
@@ -593,6 +616,7 @@ class MartingaleBotEngine {
         if (Date.now() / 1000 >= market.windowEnd) this.resolveFromFinalPrices(market);
       }
       this.settleResolved();
+      if (this.secondary) { this.secondary.settleByResolution(); this.secondary.recordEquity(); }
       this.pruneExpiredMarkets();
       this.recordEquity();
     } catch (error) {
@@ -642,6 +666,11 @@ class MartingaleBotEngine {
       this.checkStopLoss();
       this.checkPendingOrders();
       this.evaluateEntries();
+      if (this.secondary) {
+        this.secondary.updatePositionMarks();
+        this.secondary.checkPendingOrders();
+        this.secondary.evaluateEntries();
+      }
       this.tickCount++;
       this.emitTick(this.publicMarkets(), this.messageCount);
     } catch (error) {
@@ -667,6 +696,261 @@ class MartingaleBotEngine {
   }
 }
 
+
+class DoubleSide300Engine {
+  constructor(options = {}) {
+    this.shared = options.shared || null;
+    if (!this.shared) throw new Error('DoubleSide300Engine requires shared feed { markets, tokens, history, capital }');
+    this.markets = this.shared.markets;
+    this.tokens = this.shared.tokens;
+    this.history = this.shared.history;
+    this.capital = this.shared.capital;
+    this.emitLog = options.onLog || (() => {});
+    this.startedAt = Date.now();
+    this.bankroll = this.capital.value;
+    this.realizedPnl = 0;
+    this.wins = 0;
+    this.losses = 0;
+    this.positions = [];
+    this.resolvedPositions = [];
+    this.trades = [];
+    this.logs = [];
+    this.pendingOrders = [];
+    this.betWindows = new Set();
+    this.martingale = new Map();
+    this.consecutiveLosses = 0;
+    this.maxConsecutiveLosses = 0;
+    this.peakEquity = START_BANKROLL;
+    this.maxDrawdown = 0;
+    this.equityCurve = [{ t: Date.now(), equity: START_BANKROLL }];
+  }
+
+  log(message) {
+    const line = `[${new Date().toISOString().slice(11, 23)}] [0.30] ${message}`;
+    this.logs.push(line);
+    if (this.logs.length > 500) this.logs.shift();
+    this.emitLog(line);
+  }
+
+  martingaleState(asset) {
+    if (!this.martingale.has(asset)) this.martingale.set(asset, { shares: BASE_SHARES_300, losses: 0 });
+    return this.martingale.get(asset);
+  }
+
+  currentShares(asset) {
+    return this.martingaleState(asset).shares;
+  }
+
+  simulateGtcBookFill(token, shares, ceiling = LIMIT_PRICE_300) {
+    const asks = token.bookAsks || [];
+    let remaining = shares;
+    let totalCost = 0;
+    for (const level of asks) {
+      if (level.price > ceiling) break;
+      if (remaining <= 0) break;
+      const fill = Math.min(level.size, remaining);
+      totalCost += round2(fill * level.price);
+      remaining -= fill;
+    }
+    const filled = shares - remaining;
+    if (filled <= 0) return null;
+    return { avgPrice: round5(totalCost / filled), filled, totalCost: round2(totalCost) };
+  }
+
+  // Both sides get a limit order at 0.30 immediately once the window is discovered
+  evaluateEntries() {
+    const currentStart = windowStartFor(Date.now());
+    for (const market of this.markets.values()) {
+      if (market.windowStart !== currentStart || market.resolved || market.tradingClosed) continue;
+      if (this.pendingOrders.some(o => o.windowStart === market.windowStart)) continue;
+      const key = `${market.asset}:${market.windowStart}`;
+      if (this.betWindows.has(key)) continue;
+      const asset = market.asset;
+      const shares = this.currentShares(asset);
+      this.pendingOrders.push(
+        {
+          id: `d300-up-${asset}-${market.windowStart}-${Date.now()}`,
+          asset, windowStart: market.windowStart, windowEnd: market.windowEnd,
+          outcome: 'UP', tokenId: market.up.tokenId, slug: market.slug,
+          limitPrice: LIMIT_PRICE_300, placedAt: Date.now(), status: 'pending',
+        },
+        {
+          id: `d300-dn-${asset}-${market.windowStart}-${Date.now()}`,
+          asset, windowStart: market.windowStart, windowEnd: market.windowEnd,
+          outcome: 'DOWN', tokenId: market.down.tokenId, slug: market.slug,
+          limitPrice: LIMIT_PRICE_300, placedAt: Date.now(), status: 'pending',
+        }
+      );
+      this.log(`📌 [0.30] ${asset.toUpperCase()} LIMIT BOTH SIDES @0.30 — ${shares} SH each · martingale #${this.martingaleState(asset).losses}`);
+    }
+  }
+
+  checkPendingOrders() {
+    for (const order of this.pendingOrders) {
+      const market = this.markets.get(order.slug);
+      if (!market) continue;
+      const token = order.outcome === 'UP' ? market.up : market.down;
+      const nowSecs = Date.now() / 1000;
+      if (nowSecs >= order.windowEnd || market.resolved) {
+        order.status = 'cancelled';
+        this.log(`❌ [0.30] LIMIT CANCELLED ${order.asset.toUpperCase()} ${order.outcome} @${LIMIT_PRICE_300.toFixed(2)} — no fill`);
+      } else if (this.simulateGtcBookFill(token, 1, LIMIT_PRICE_300)) {
+        order.status = 'filled';
+        const opposite = this.pendingOrders.find(o => o !== order && o.status === 'pending' && o.windowStart === order.windowStart && o.asset === order.asset);
+        if (opposite) {
+          opposite.status = 'cancelled';
+          this.log(`❌ [0.30] OPPOSITE ${opposite.outcome} ORDER CANCELLED — ${order.outcome} filled first`);
+        }
+        this.enterBet(market, token, order);
+      }
+    }
+    this.pendingOrders = this.pendingOrders.filter(o => o.status !== 'cancelled' && o.status !== 'filled');
+  }
+
+  enterBet(market, token, order) {
+    const asset = market.asset;
+    const shares = this.currentShares(asset);
+    const sweep = this.simulateGtcBookFill(token, shares, LIMIT_PRICE_300);
+    if (!sweep) {
+      this.log(`⚠️ [0.30] ${asset.toUpperCase()} ${token.outcome} fill skipped — no asks ≤${LIMIT_PRICE_300.toFixed(2)}`);
+      return false;
+    }
+    const entryPrice = sweep.avgPrice;
+    const cost = sweep.totalCost;
+    const fee = round2(cost * TAKER_FEE_BPS / 10000);
+    if (cost + fee > this.capital.value) {
+      this.log(`⚠️ [0.30] ${asset.toUpperCase()} fill skipped — need $${round2(cost + fee)}, available $${this.capital.value}`);
+      return false;
+    }
+    this.bankroll = this.capital.value = round2(this.capital.value - cost - fee);
+    const now = Date.now();
+    const position = {
+      id: `d300-${asset}-${market.windowStart}-${now}`,
+      slug: market.slug, asset, conditionId: market.conditionId,
+      outcome: token.outcome, tokenId: token.tokenId,
+      shares, avgPrice: entryPrice, entryPrice, cost, fee,
+      status: 'open', openedAt: now, markPrice: token.mid,
+      windowStart: market.windowStart, windowEnd: market.windowEnd,
+      stopLossPrice: null, engine: '0.30',
+      signal: { limitPrice: LIMIT_PRICE_300, triggerSource: 'BOTH_SIDES_0.30', bid: token.bid, ask: token.ask, mid: token.mid, elapsed: Math.floor(now / 1000 - market.windowStart) },
+      martingaleIndex: this.martingaleState(asset).losses,
+    };
+    this.positions.push(position);
+    this.betWindows.add(`${asset}:${market.windowStart}`);
+    this.trades.push({ timestamp: now, orderType: 'PAPER-LIMIT@0.30', engine: '0.30', asset, outcome: token.outcome, shares, price: entryPrice, cost, markPrice: token.mid, pnl: this.positionPnl(position), signal: position.signal });
+    this.trades = this.trades.slice(-300);
+    this.log(`⚡ [0.30] FILLED ${asset.toUpperCase()} ${token.outcome} ${shares}sh @${entryPrice.toFixed(3)} · martingale #${position.martingaleIndex} · cost $${cost.toFixed(2)}`);
+    this.recordEquity();
+    return true;
+  }
+
+  positionPnl(position) {
+    if (!position || position.status !== 'open') return 0;
+    const markPrice = position.markPrice ?? position.avgPrice;
+    return round2(position.shares * markPrice - position.cost - position.fee);
+  }
+
+  updatePositionMarks() {
+    for (const position of this.positions) {
+      if (position.status !== 'open') continue;
+      const market = this.markets.get(position.slug);
+      const token = position.outcome === 'UP' ? market?.up : market?.down;
+      if (Number.isFinite(token?.mid)) position.markPrice = token.mid;
+    }
+  }
+
+  activePositionSummaries() {
+    return this.positions.filter(p => p.status === 'open').map(p => ({
+      ...p,
+      markValue: p.shares * (p.markPrice ?? p.avgPrice),
+      unrealized: this.positionPnl(p),
+    })).reverse();
+  }
+
+  // No stop loss — TP by resolution only
+  settleByResolution() {
+    for (const position of this.positions) {
+      if (position.status !== 'open') continue;
+      const market = this.markets.get(position.slug);
+      if (!market?.resolved || !market.winner) continue;
+      const won = position.outcome === market.winner;
+      const payout = won ? position.shares : 0;
+      const exitFee = round2(payout * TAKER_FEE_BPS / 10000);
+      const pnl = round2(payout - exitFee - position.cost - position.fee);
+      position.status = 'closed';
+      position.won = won;
+      position.payout = round2(payout);
+      position.pnl = pnl;
+      position.exitPrice = won ? 1 : 0;
+      position.closedAt = Date.now();
+      position.closeReason = 'RESOLUTION';
+      position.winner = market.winner;
+      this.bankroll = this.capital.value = round2(this.capital.value + payout - exitFee);
+      this.realizedPnl = round2(this.realizedPnl + pnl);
+      const st = this.martingaleState(position.asset);
+      if (won) {
+        this.wins++;
+        st.shares = BASE_SHARES_300;
+        st.losses = 0;
+        this.consecutiveLosses = 0;
+        this.log(`🏁 [0.30] ${position.asset.toUpperCase()} ${position.outcome} WIN — payout $${position.payout.toFixed(2)} · cost $${(position.cost + position.fee).toFixed(2)} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)} · reset to ${BASE_SHARES_300} SH`);
+      } else {
+        this.losses++;
+        this.consecutiveLosses += 1;
+        if (this.consecutiveLosses > this.maxConsecutiveLosses) this.maxConsecutiveLosses = this.consecutiveLosses;
+        st.losses += 1;
+        st.shares = round2(BASE_SHARES_300 * Math.pow(MARTINGALE_300_MULT, st.losses));
+        this.log(`🏁 [0.30] ${position.asset.toUpperCase()} ${position.outcome} LOSS — payout $0 · cost $${(position.cost + position.fee).toFixed(2)} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)} · next bet ${st.shares} SH (1.5×)`);
+      }
+      this.resolvedPositions.unshift({ ...position });
+      this.resolvedPositions = this.resolvedPositions.slice(0, 40);
+    }
+    this.positions = this.positions.filter(position => position.status === 'open');
+  }
+
+  buildState() {
+    this.updatePositionMarks();
+    const open = this.activePositionSummaries();
+    const openValue = round2(open.reduce((sum, p) => sum + p.markValue, 0));
+    const unrealizedPnl = round2(open.reduce((sum, p) => sum + p.unrealized, 0));
+    const markValue = round2(this.capital.value + openValue);
+    const martingale = Object.fromEntries([...this.martingale.entries()].map(([asset, st]) => [asset, { ...st }]));
+    return {
+      name: '0.30 Both-Side',
+      strategy: 'Limit buy @0.30 both sides · cancel opposite on fill · no SL · TP=resolution · 1.5× martingale next window',
+      bankroll: this.capital.value, markValue,
+      realizedPnl: this.realizedPnl, openValue, unrealizedPnl,
+      totalPnl: round2(markValue - START_BANKROLL),
+      wins: this.wins, losses: this.losses,
+      winRate: this.wins + this.losses ? round2(this.wins / (this.wins + this.losses) * 100) : null,
+      martingale,
+      consecutiveLosses: this.consecutiveLosses,
+      maxConsecutiveLosses: this.maxConsecutiveLosses,
+      peakEquity: this.peakEquity,
+      maxDrawdown: this.maxDrawdown,
+      positions: open,
+      resolvedPositions: this.resolvedPositions.slice(0, 30),
+      trades: this.trades.slice(-160).reverse(),
+      equityCurve: this.equityCurve.slice(-1500),
+      logs: this.logs.slice(-220),
+      config: { baseShares: BASE_SHARES_300, limitPrice: LIMIT_PRICE_300, multiplier: MARTINGALE_300_MULT, resolutionPrice: RESOLUTION_PRICE, feeBps: TAKER_FEE_BPS },
+    };
+  }
+
+  recordEquity() {
+    const last = this.equityCurve[this.equityCurve.length - 1];
+    const state = this.buildState();
+    if (!last || Date.now() - last.t > 1000 || Math.abs(last.equity - state.markValue) > 0.001) {
+      this.equityCurve.push({ t: Date.now(), equity: state.markValue });
+      if (this.equityCurve.length > 2000) this.equityCurve.shift();
+    }
+    if (state.markValue > this.peakEquity) this.peakEquity = state.markValue;
+    const dd = this.peakEquity - state.markValue;
+    if (dd > this.maxDrawdown) this.maxDrawdown = dd;
+  }
+}
+
+
 function publicToken(token) {
   return {
     bid: token.bid, ask: token.ask, mid: token.mid, spread: token.spread,
@@ -676,6 +960,7 @@ function publicToken(token) {
 
 module.exports = {
   MartingaleBotEngine,
+  DoubleSide300Engine,
   config: {
     ASSETS, LEAD_ASSET, START_BANKROLL, BASE_SHARES, TRIGGER_PRICE, LIMIT_PRICE,
     STOP_LOSS_PRICE, RESOLUTION_PRICE, TAKER_FEE_BPS,

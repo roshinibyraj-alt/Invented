@@ -2,14 +2,23 @@
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
-const { MartingaleBotEngine } = require('./engine');
+const { MartingaleBotEngine, DoubleSide300Engine } = require('./engine');
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { pingInterval: 2000, pingTimeout: 5000 });
 const port = process.env.PORT || 8080;
 
+const SHARED_START = Number(process.env.START_BANKROLL || 20000);
+const shared = {
+  markets: new Map(),
+  tokens: new Map(),
+  history: new Map(),
+  capital: { value: SHARED_START },
+};
+
 const engine = new MartingaleBotEngine({
+  shared,
   onTick: (markets, messageCount) => io.emit('tick', {
     t: Date.now(),
     windowStart: markets[0]?.windowStart ?? null,
@@ -21,6 +30,15 @@ const engine = new MartingaleBotEngine({
     io.emit('log', line);
   },
 });
+
+const secondary = new DoubleSide300Engine({
+  shared,
+  onLog: (line) => {
+    console.log(line);
+    io.emit('log', line);
+  },
+});
+engine.secondary = secondary;
 
 // ─── Dashboard HTML ──────────────────────────────────────────
 const dashboard = `<!DOCTYPE html>
@@ -54,6 +72,7 @@ h1{font-size:20px;letter-spacing:.3px}
 .kpi .label{font-size:8px;text-transform:uppercase;color:#667e94;letter-spacing:.6px}
 .kpi .value{font-size:18px;margin-top:4px;font-variant-numeric:tabular-nums}
 .kpi .small{font-size:8px;color:#617589;margin-top:2px}
+.kpis-small{grid-template-columns:repeat(6,minmax(0,1fr));margin:10px}
 
 /* ── Panels ── */
 .panel{background:#060a0f;border:1px solid #16232f;border-radius:13px;overflow:hidden;margin-bottom:10px}
@@ -208,6 +227,20 @@ svg{width:100%;height:100%}
     <div class="feeds" id="feedGrid"></div>
   </div>
 
+
+  <!-- Independent 0.30 Engine -->
+  <div class="panel" id="secondaryPanel" style="display:none">
+    <div class="panel-head"><span>⚡ Independent 0.30 Engine — both sides · shared capital</span><strong id="secondaryTag">NO STATE</strong></div>
+    <div class="config-grid" id="secondaryConfig"></div>
+    <div class="kpis kpis-small" id="secondaryKpis"></div>
+    <div class="panel-head"><span>🎯 0.30 Open Positions</span><strong id="secondaryOpenCount">0 OPEN</strong></div>
+    <div class="positions" id="secondaryPositions"></div>
+    <div class="panel-head"><span>✅ 0.30 Resolved Positions</span><strong>SETTLED</strong></div>
+    <div class="results-grid" id="secondaryResults"></div>
+    <div class="panel-head"><span>⚡ 0.30 Trade Feed</span><strong id="secondaryTradeCount">0 TRADES</strong></div>
+    <div class="feeds" id="secondaryFeed"></div>
+  </div>
+
   <!-- Activity Log -->
   <div class="panel">
     <div class="panel-head"><span>📋 Activity Log</span><strong id="logCount">0</strong></div>
@@ -317,13 +350,16 @@ function render(data) {
   renderMarkets(data.markets || [], mktTick);
 
   /* positions */
-  renderPositions(data.positions || []);
+  renderPositions(data.positions || [], $('positionsGrid'), $('openCount'));
 
   /* resolved */
-  renderResults(data.resolvedPositions || []);
+  renderResults(data.resolvedPositions || [], $('resultsGrid'));
 
   /* feed */
-  renderFeed(data.trades || []);
+  renderFeed(data.trades || [], $('feedGrid'), $('tradeCount'));
+
+  /* secondary engine */
+  renderSecondary(data.secondary || null);
 
   /* logs */
   renderLogs();
@@ -402,24 +438,26 @@ function renderLivePrices(tick) {
 }
 
 /* ─── Floating Positions ─── */
-function renderPositions(positions) {
+function renderPositions(positions, grid, counter) {
   const open = positions.filter(p => p.status === 'open');
-  $('openCount').textContent = open.length + ' OPEN';
+  counter.textContent = open.length + ' OPEN';
   if (!open.length) {
-    $('positionsGrid').innerHTML = '<div class="empty">Waiting — trigger @0.70 then limit @0.60 to fill</div>';
+    grid.innerHTML = '<div class="empty">No open positions</div>';
     return;
   }
-  $('positionsGrid').innerHTML = open.map(pos => {
+  grid.innerHTML = open.map(pos => {
     const unrealized = pos.unrealized || 0;
     const markVal = pos.markValue || pos.cost;
     const elapsed = pos.openedAt ? Math.floor((Date.now() - new Date(pos.openedAt).getTime())/1000) : 0;
     const badge = pos.outcome === 'UP' ? 'tag-up' : 'tag-down';
+    const engineTag = pos.engine ? '<span class="tag" style="color:#ffd166;background:#ffd16615;border:1px solid #ffd16633">'+esc(pos.engine)+'</span> ' : '';
+    const slText = pos.stopLossPrice != null ? 'SL: '+prc(pos.stopLossPrice) : 'No SL · hold to resolution';
     return '<div class="position-card">'
-      + '<div class="pos-header"><div><div class="pos-name">⚡ '+esc(pos.asset.toUpperCase())+' '+pos.outcome+'</div>'
+      + '<div class="pos-header"><div><div class="pos-name">⚡ '+engineTag+esc(pos.asset.toUpperCase())+' '+pos.outcome+'</div>'
       + '<div class="pos-meta">'+esc(pos.slug||'')+' · T+'+elapsed+'s · Martingale #'+pos.martingaleIndex+'</div></div>'
       + '<span class="pos-badge holding">HOLDING</span></div>'
       + '<div class="pos-pnl '+tone(unrealized)+'" id="floating-'+pos.id+'">'+money(unrealized)+'</div>'
-      + '<div class="pos-meta">Mark: '+cash(markVal)+' · Cost: '+cash(pos.cost)+' · SL: '+prc(pos.stopLossPrice)+'</div>'
+      + '<div class="pos-meta">Mark: '+cash(markVal)+' · Cost: '+cash(pos.cost)+' · '+slText+'</div>'
       + '<div class="legs"><div class="leg">'
       + '<div class="leg-top"><span class="tag '+badge+'">'+esc(pos.asset.toUpperCase())+' '+pos.outcome+'</span>'
       + '<span style="font-size:9px;color:#8fa3b7">'+pos.shares+' SH</span></div>'
@@ -446,17 +484,18 @@ function updateFloating() {
 }
 
 /* ─── Resolved ─── */
-function renderResults(results) {
+function renderResults(results, grid) {
   if (!results.length) {
-    $('resultsGrid').innerHTML = '<div class="empty">No resolved bets yet</div>';
+    grid.innerHTML = '<div class="empty">No resolved bets yet</div>';
     return;
   }
-  $('resultsGrid').innerHTML = results.slice(0,20).map(r => {
+  grid.innerHTML = results.slice(0,20).map(r => {
     const won = r.closeReason === 'STOP_LOSS' ? false : (r.won === true);
     const icon = won ? '✅' : r.closeReason === 'STOP_LOSS' ? '⛔' : '❌';
     const label = won ? 'WIN' : r.closeReason === 'STOP_LOSS' ? 'SL ' + prc(r.exitPrice) : 'LOSS';
+    const engineTag = r.engine ? '<span class="tag" style="color:#ffd166;background:#ffd16615;border:1px solid #ffd16633">'+esc(r.engine)+'</span> ' : '';
     return '<div class="result-card">'
-      + '<div class="result-header"><div class="pos-name">⚡ '+esc((r.asset||'').toUpperCase())+' '+(r.outcome||'')+' · '+(r.martingaleIndex||0)+'</div>'
+      + '<div class="result-header"><div class="pos-name">⚡ '+engineTag+esc((r.asset||'').toUpperCase())+' '+(r.outcome||'')+' · '+(r.martingaleIndex||0)+'</div>'
       + '<span class="pos-badge '+(won?'won':'lost')+'">'+icon+' '+label+'</span></div>'
       + '<div class="result-pnl '+tone(r.pnl)+'">'+money(r.pnl)+'</div>'
       + '<div class="result-meta">Payout '+cash(r.payout)+' · Cost '+cash(r.cost)+' · '+esc(r.closeReason||'')+'</div>'
@@ -465,21 +504,56 @@ function renderResults(results) {
 }
 
 /* ─── Trade Feed ─── */
-function renderFeed(trades) {
-  $('tradeCount').textContent = (trades||[]).length + ' TRADES';
+function renderFeed(trades, grid, counter) {
+  counter.textContent = (trades||[]).length + ' TRADES';
   if (!trades||!trades.length) {
-    $('feedGrid').innerHTML = '<div class="empty">Waiting for a side to hit 0.70 then walk to 0.60…</div>';
+    grid.innerHTML = '<div class="empty">No trades yet</div>';
     return;
   }
-  $('feedGrid').innerHTML = trades.slice(0,40).map(t => {
+  grid.innerHTML = trades.slice(0,40).map(t => {
+    const engineTag = t.engine ? '<span class="tag" style="color:#ffd166;background:#ffd16615;border:1px solid #ffd16633">'+esc(t.engine)+'</span> ' : '';
     return '<div class="feed-item">'
       + '<div class="feed-time">'+new Date(t.timestamp).toLocaleTimeString()+' · '+esc(t.asset.toUpperCase())+' '+(t.outcome||'')+(t.reason?' ('+t.reason+')':'')+'</div>'
-      + '<div class="feed-main"><span class="tag '+(t.outcome==='UP'?'tag-up':'tag-down')+'">'+t.asset.toUpperCase()+' '+t.outcome+'</span> '
+      + '<div class="feed-main">'+engineTag+'<span class="tag '+(t.outcome==='UP'?'tag-up':'tag-down')+'">'+t.asset.toUpperCase()+' '+t.outcome+'</span> '
       + num(t.shares)+' SH @ '+prc(t.price)+'</div>'
-      + '<div class="feed-detail">Trigger '+prc(t.signal?.triggerPrice)+' · '+cash(t.cost)+'</div>'
+      + '<div class="feed-detail">'+(t.signal?.triggerPrice!=null?'Trigger '+prc(t.signal.triggerPrice)+' · ':'')+(t.signal?.limitPrice!=null?'Limit '+prc(t.signal.limitPrice)+' · ':'')+cash(t.cost)+'</div>'
       + '</div>';
   }).join('');
 }
+
+
+/* ─── Independent 0.30 Engine ─── */
+function renderSecondary(sec) {
+  const panel = $('secondaryPanel');
+  if (!sec) { panel.style.display = 'none'; return; }
+  panel.style.display = 'block';
+
+  const mg = sec.martingale && sec.martingale.btc ? sec.martingale.btc : { shares: 133, losses: 0 };
+  $('secondaryTag').textContent = (sec.engine5 || sec.name || '0.30') + ' · ' + mg.shares + ' SH next · loss streak ' + (sec.consecutiveLosses||0);
+
+  $('secondaryConfig').innerHTML = [
+    ['Limit price', sec.config.limitPrice.toFixed(2)],
+    ['Base shares', sec.config.baseShares + ' SH'],
+    ['Mult', sec.config.multiplier.toFixed(1) + 'x on loss'],
+    ['Stop loss', 'None'],
+    ['TP', 'Resolution'],
+    ['Next bet', mg.shares + ' SH' + (mg.losses ? ' (losses ' + mg.losses + ')' : '')],
+  ].map(r => '<div class="config-item">'+r[0]+'<b>'+r[1]+'</b></div>').join('');
+
+  $('secondaryKpis').innerHTML = [
+    ['0.30 Realized P&L', money(sec.realizedPnl), sec.realizedPnl>0?'green':sec.realizedPnl<0?'red':''],
+    ['0.30 Unrealized',   money(sec.unrealizedPnl), sec.unrealizedPnl>0?'green':sec.unrealizedPnl<0?'red':''],
+    ['0.30 Wins',         sec.wins||0, 'green'],
+    ['0.30 Losses',       sec.losses||0, 'red'],
+    ['0.30 Win Rate',     sec.winRate!=null ? sec.winRate.toFixed(0)+'%' : '—', 'white'],
+    ['0.30 Max Loss Streak', sec.maxConsecutiveLosses||0, sec.maxConsecutiveLosses>=3?'red':'white'],
+  ].map(([l,v,c]) => '<div class="kpi"><div class="label">'+l+'</div><div class="value '+(c||'')+'">'+v+'</div></div>').join('');
+
+  renderPositions(sec.positions || [], $('secondaryPositions'), $('secondaryOpenCount'));
+  renderResults(sec.resolvedPositions || [], $('secondaryResults'));
+  renderFeed(sec.trades || [], $('secondaryFeed'), $('secondaryTradeCount'));
+}
+
 
 /* ─── Chart ─── */
 function renderChart(curve) {
