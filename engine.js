@@ -60,6 +60,8 @@ class MartingaleBotEngine {
     this.maxConsecutiveLosses = 0;
     this.peakEquity = START_BANKROLL;
     this.maxDrawdown = 0;
+    // Tracks which windows already had a bet per asset, to prevent intra-window martingale
+    this.betWindows = new Set();
   }
 
   log(message) {
@@ -287,6 +289,7 @@ class MartingaleBotEngine {
       const market = this.currentMarket(asset);
       if (!market) continue;
       if (this.hasOpenBet(asset, market.windowStart)) continue;
+      if (this.betWindows.has(`${asset}:${market.windowStart}`)) continue;
       const elapsed = Date.now() / 1000 - market.windowStart;
       if (elapsed < MARKET_OPEN_WAIT) continue;
       // Find the side sitting at/near ENTRY_PRICE (0.70)
@@ -331,6 +334,7 @@ class MartingaleBotEngine {
       martingaleIndex: this.martingaleState(asset).losses,
     };
     this.positions.push(position);
+    this.betWindows.add(`${asset}:${market.windowStart}`);
     this.trades.push({ timestamp: now, orderType: 'PAPER-GTC@0.99', asset, outcome: token.outcome, shares, price: entryPrice, cost, markPrice: token.mid, pnl: this.positionPnl(position), signal: position.signal });
     this.trades = this.trades.slice(-300);
     this.log(`⚡ BUY ${asset.toUpperCase()} ${token.outcome} ${shares}sh @${entryPrice.toFixed(3)} (sweep ${sweep.filled}sh avg:${sweep.avgPrice.toFixed(3)}) martingale #${position.martingaleIndex} · SL ${STOP_LOSS_PRICE.toFixed(2)} · cost $${cost.toFixed(2)}`);
