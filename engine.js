@@ -9,8 +9,9 @@ const ASSETS = ['btc'];
 const LEAD_ASSET = (process.env.LEAD_ASSET || 'btc').toLowerCase();
 const START_BANKROLL = Number(process.env.START_BANKROLL || 20000);
 const BASE_SHARES = Number(process.env.BASE_SHARES || 100);
-const ENTRY_PRICE = Number(process.env.ENTRY_PRICE || 0.70);
-const STOP_LOSS_PRICE = Number(process.env.STOP_LOSS_PRICE || 0.50);
+const TRIGGER_PRICE = Number(process.env.TRIGGER_PRICE || 0.70);
+const LIMIT_PRICE = Number(process.env.LIMIT_PRICE || 0.60);
+const STOP_LOSS_PRICE = Number(process.env.STOP_LOSS_PRICE || 0.45);
 const RESOLUTION_PRICE = Number(process.env.RESOLUTION_PRICE || 0.90);
 const MARKET_OPEN_WAIT = Number(process.env.MARKET_OPEN_WAIT || 10);
 const PRICE_HISTORY_MS = Number(process.env.PRICE_HISTORY_MS || 5000);
@@ -62,6 +63,7 @@ class MartingaleBotEngine {
     this.maxDrawdown = 0;
     // Tracks which windows already had a bet per asset, to prevent intra-window martingale
     this.betWindows = new Set();
+    this.pendingOrders = [];
   }
 
   log(message) {
@@ -280,9 +282,13 @@ class MartingaleBotEngine {
   }
 
   /* ═════════════════════════════════════════════════════════
-     CORE STRATEGY
-     Buy the side that hits 0.70, SL at 0.50, TP at resolution.
-     One bet per window per asset. On loss, double shares. On win, reset.
+     CORE STRATEGY — Limit-order entry
+     When any side hits TRIGGER_PRICE (0.70) → immediately place
+     GTC limit buy at LIMIT_PRICE (0.60) on that side.
+     Fill only if price walks down to 0.60. If no fill, cancel
+     and skip the window (martingale carries to next window).
+     SL at 0.45, TP at resolution. One bet per window per asset.
+     On loss, double shares. On win, reset.
      ═════════════════════════════════════════════════════════ */
   evaluateEntries() {
     for (const asset of ASSETS) {
@@ -290,16 +296,17 @@ class MartingaleBotEngine {
       if (!market) continue;
       if (this.hasOpenBet(asset, market.windowStart)) continue;
       if (this.betWindows.has(`${asset}:${market.windowStart}`)) continue;
+      if (this.pendingOrders.some(o => o.asset === asset && o.windowStart === market.windowStart)) continue;
       const elapsed = Date.now() / 1000 - market.windowStart;
       if (elapsed < MARKET_OPEN_WAIT) continue;
-      // Find the side sitting at/near ENTRY_PRICE (0.70)
+      // Trigger: any side reaches TRIGGER_PRICE (0.70)
       const candidates = [market.up, market.down].map(token => {
         const best = token.mid ?? token.ask ?? token.bid;
         return { token, price: best };
-      }).filter(c => Number.isFinite(c.price) && c.price >= ENTRY_PRICE - 0.02 && c.price <= ENTRY_PRICE + 0.02);
+      }).filter(c => Number.isFinite(c.price) && c.price >= TRIGGER_PRICE - 0.02);
       if (!candidates.length) continue;
       candidates.sort((a, b) => a.price - b.price);
-      this.enterBet(market, candidates[0].token, candidates[0].price);
+      this.placeLimitOrder(market, candidates[0].token, candidates[0].price);
     }
   }
 
@@ -307,17 +314,50 @@ class MartingaleBotEngine {
     return this.positions.some(p => p.status === 'open' && p.asset === asset && p.windowStart === windowStart);
   }
 
-  enterBet(market, token, triggerPrice) {
+  placeLimitOrder(market, token, triggerPrice) {
+    const asset = market.asset;
+    if (this.pendingOrders.some(o => o.asset === asset && o.windowStart === market.windowStart)) return false;
+    const order = {
+      id: `limit-${asset}-${market.windowStart}-${Date.now()}`,
+      asset, windowStart: market.windowStart, windowEnd: market.windowEnd,
+      outcome: token.outcome, tokenId: token.tokenId, slug: market.slug,
+      limitPrice: LIMIT_PRICE, triggerPrice, placedAt: Date.now(),
+      status: 'pending',
+    };
+    this.pendingOrders.push(order);
+    this.log(`📌 LIMIT PLACED ${asset.toUpperCase()} ${token.outcome} ${this.currentShares(asset)}sh @${LIMIT_PRICE.toFixed(2)} — triggered at ${triggerPrice.toFixed(3)} (≥0.70) · waiting to walk down`);
+    return true;
+  }
+
+  checkPendingOrders() {
+    for (const order of this.pendingOrders) {
+      const market = this.markets.get(order.slug);
+      if (!market) continue;
+      const token = order.outcome === 'UP' ? market.up : market.down;
+      const best = token?.mid ?? token?.ask ?? token?.bid;
+      const nowSecs = Date.now() / 1000;
+      if (nowSecs >= order.windowEnd) {
+        order.status = 'cancelled';
+        this.log(`❌ LIMIT CANCELLED ${order.asset.toUpperCase()} ${order.outcome} — never reached ${LIMIT_PRICE.toFixed(2)} · window skipped · martingale ${this.currentShares(order.asset)} SH carries to next window`);
+      } else if (Number.isFinite(best) && best <= LIMIT_PRICE) {
+        order.status = 'filled';
+        this.log(`✅ LIMIT FILLED ${order.asset.toUpperCase()} ${order.outcome} @${LIMIT_PRICE.toFixed(2)} — price walked to ${best.toFixed(3)}`);
+        this.enterBet(market, token, order);
+      }
+    }
+    this.pendingOrders = this.pendingOrders.filter(o => o.status !== 'cancelled' && o.status !== 'filled');
+  }
+
+  enterBet(market, token, order) {
     const asset = market.asset;
     const shares = this.currentShares(asset);
-    const CEILING = 0.99;
-    const sweep = this.simulateGtcBookFill(token, shares, CEILING);
+    const sweep = this.simulateGtcBookFill(token, shares, LIMIT_PRICE);
     if (!sweep) return false;
     const entryPrice = sweep.avgPrice;
     const cost = sweep.totalCost;
     const fee = round2(cost * TAKER_FEE_BPS / 10000);
     if (cost + fee > this.bankroll) {
-      this.log(`⚠️ ${asset.toUpperCase()} entry skipped — need $${round2(cost + fee)}, available $${this.bankroll}`);
+      this.log(`⚠️ ${asset.toUpperCase()} fill skipped — need $${round2(cost + fee)}, available $${this.bankroll}`);
       return false;
     }
     this.bankroll = round2(this.bankroll - cost - fee);
@@ -330,14 +370,14 @@ class MartingaleBotEngine {
       status: 'open', openedAt: now, markPrice: token.mid,
       windowStart: market.windowStart, windowEnd: market.windowEnd,
       stopLossPrice: STOP_LOSS_PRICE,
-      signal: { triggerPrice, triggerSource: 'ENTRY_0.70', bid: token.bid, ask: token.ask, mid: token.mid, elapsed: Math.floor(now / 1000 - market.windowStart) },
+      signal: { triggerPrice: order.triggerPrice, limitPrice: LIMIT_PRICE, triggerSource: 'LIMIT_0.70→0.60', bid: token.bid, ask: token.ask, mid: token.mid, elapsed: Math.floor(now / 1000 - market.windowStart) },
       martingaleIndex: this.martingaleState(asset).losses,
     };
     this.positions.push(position);
     this.betWindows.add(`${asset}:${market.windowStart}`);
-    this.trades.push({ timestamp: now, orderType: 'PAPER-GTC@0.99', asset, outcome: token.outcome, shares, price: entryPrice, cost, markPrice: token.mid, pnl: this.positionPnl(position), signal: position.signal });
+    this.trades.push({ timestamp: now, orderType: 'PAPER-LIMIT@0.60', asset, outcome: token.outcome, shares, price: entryPrice, cost, markPrice: token.mid, pnl: this.positionPnl(position), signal: position.signal });
     this.trades = this.trades.slice(-300);
-    this.log(`⚡ BUY ${asset.toUpperCase()} ${token.outcome} ${shares}sh @${entryPrice.toFixed(3)} (sweep ${sweep.filled}sh avg:${sweep.avgPrice.toFixed(3)}) martingale #${position.martingaleIndex} · SL ${STOP_LOSS_PRICE.toFixed(2)} · cost $${cost.toFixed(2)}`);
+    this.log(`⚡ FILLED ${asset.toUpperCase()} ${token.outcome} ${shares}sh @${entryPrice.toFixed(3)} (limit ${LIMIT_PRICE.toFixed(2)}) martingale #${position.martingaleIndex} · SL ${STOP_LOSS_PRICE.toFixed(2)} · cost $${cost.toFixed(2)}`);
     this.recordEquity();
     return true;
   }
@@ -469,7 +509,7 @@ class MartingaleBotEngine {
     const martingale = Object.fromEntries([...this.martingale.entries()].map(([asset, st]) => [asset, { ...st }]));
     return {
       mode: 'AUTONOMOUS DEMO',
-      strategy: 'Buy side @0.70 · SL @0.50 · TP=resolution · martingale double on loss · reset on win',
+      strategy: 'Limit @0.60 after 0.70 trigger · SL @0.45 · TP=resolution · martingale next window',
       serverTime: Date.now(),
       windowStart: activeStart,
       connected: this.isClobFresh(), tickCount: this.tickCount, messageCount: this.messageCount,
@@ -500,7 +540,7 @@ class MartingaleBotEngine {
       equityCurve: this.equityCurve.slice(-1500),
       logs: this.logs.slice(-220),
       config: {
-        baseShares: BASE_SHARES, entryPrice: ENTRY_PRICE, stopLossPrice: STOP_LOSS_PRICE,
+        baseShares: BASE_SHARES, triggerPrice: TRIGGER_PRICE, limitPrice: LIMIT_PRICE, stopLossPrice: STOP_LOSS_PRICE,
         resolutionPrice: RESOLUTION_PRICE, feeBps: TAKER_FEE_BPS, marketOpenWait: MARKET_OPEN_WAIT,
       },
       uptime: Math.floor((Date.now() - this.startedAt) / 1000),
@@ -600,6 +640,7 @@ class MartingaleBotEngine {
       }
       this.updatePositionMarks();
       this.checkStopLoss();
+      this.checkPendingOrders();
       this.evaluateEntries();
       this.tickCount++;
       this.emitTick(this.publicMarkets(), this.messageCount);
@@ -622,7 +663,7 @@ class MartingaleBotEngine {
     setInterval(() => this.rotateAndSweep(), 250);
     setInterval(() => this.pollClobBooks(), CLOB_POLL_MS);
     setInterval(() => this.retryDiscovery(), 1500);
-    this.log(`🚀 Martingale bot started | ${ASSETS.join('/')} | entry@${ENTRY_PRICE.toFixed(2)} SL@${STOP_LOSS_PRICE.toFixed(2)} base ${BASE_SHARES} SH | demo ${START_BANKROLL}`);
+    this.log(`🚀 Martingale bot started | ${ASSETS.join('/')} | trigger@${TRIGGER_PRICE.toFixed(2)}→limit@${LIMIT_PRICE.toFixed(2)} SL@${STOP_LOSS_PRICE.toFixed(2)} base ${BASE_SHARES} SH | demo ${START_BANKROLL}`);
   }
 }
 
@@ -636,7 +677,7 @@ function publicToken(token) {
 module.exports = {
   MartingaleBotEngine,
   config: {
-    ASSETS, LEAD_ASSET, START_BANKROLL, BASE_SHARES, ENTRY_PRICE,
+    ASSETS, LEAD_ASSET, START_BANKROLL, BASE_SHARES, TRIGGER_PRICE, LIMIT_PRICE,
     STOP_LOSS_PRICE, RESOLUTION_PRICE, TAKER_FEE_BPS,
   },
 };

@@ -156,7 +156,7 @@ svg{width:100%;height:100%}
       <div class="brand-icon">⚡</div>
       <div>
         <h1>CorrelBot</h1>
-        <div class="sub">Buy side @0.70 · SL @0.50 · TP=resolution · martingale double on loss · reset on win</div>
+        <div class="sub">Trigger @0.70 → Limit @0.60 · SL @0.45 · TP=resolution · martingale next window</div>
       </div>
     </div>
     <div class="pills">
@@ -301,7 +301,8 @@ function render(data) {
 
   /* strategy config */
   $('configGrid').innerHTML = [
-    ['Entry',            data.config.entryPrice.toFixed(2)],
+    ['Trigger',          data.config.triggerPrice.toFixed(2)],
+    ['Limit',            data.config.limitPrice.toFixed(2)],
     ['Stop loss',        data.config.stopLossPrice.toFixed(2)],
     ['TP',               'Resolution (2s > '+data.config.resolutionPrice.toFixed(2)+')'],
     ['Base shares',      data.config.baseShares + ' SH'],
@@ -366,8 +367,8 @@ function renderMarkets(markets, tickData) {
   }).join('');
 }
 
-function data_entry() { return S?.config?.entryPrice || 0.70; }
-function data_sl()     { return S?.config?.stopLossPrice || 0.50; }
+function data_entry() { return S?.config?.triggerPrice || 0.70; }
+function data_sl()     { return S?.config?.stopLossPrice || 0.45; }
 
 /* ─── Update live prices from tick (fast path) ─── */
 function renderLivePrices(tick) {
@@ -405,7 +406,7 @@ function renderPositions(positions) {
   const open = positions.filter(p => p.status === 'open');
   $('openCount').textContent = open.length + ' OPEN';
   if (!open.length) {
-    $('positionsGrid').innerHTML = '<div class="empty">No open bets — waiting for side to hit ' + prc(0.70) + '</div>';
+    $('positionsGrid').innerHTML = '<div class="empty">Waiting — trigger @0.70 then limit @0.60 to fill</div>';
     return;
   }
   $('positionsGrid').innerHTML = open.map(pos => {
@@ -467,7 +468,7 @@ function renderResults(results) {
 function renderFeed(trades) {
   $('tradeCount').textContent = (trades||[]).length + ' TRADES';
   if (!trades||!trades.length) {
-    $('feedGrid').innerHTML = '<div class="empty">Waiting for a side to hit 0.70…</div>';
+    $('feedGrid').innerHTML = '<div class="empty">Waiting for a side to hit 0.70 then walk to 0.60…</div>';
     return;
   }
   $('feedGrid').innerHTML = trades.slice(0,40).map(t => {
