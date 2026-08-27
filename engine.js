@@ -20,9 +20,33 @@ const MARKET_OPEN_WAIT = Number(process.env.MARKET_OPEN_WAIT || 10);
 const PRICE_HISTORY_MS = Number(process.env.PRICE_HISTORY_MS || 5000);
 const TAKER_FEE_BPS = Number(process.env.TAKER_FEE_BPS || 0);
 const SWEEP_INTERVAL_MS = Number(process.env.RESOLUTION_SWEEP_MS || 5000);
+// Polymarket fee/rebate model (official docs):
+// fee = shares x feeRate x p x (1-p). Makers never pay fees (makerFeeRate=0).
+// Crypto taker feeRate = 0.07; maker rebate = 20% of taker-fee-equivalent (fee-curve weighted, daily, $1 min).
+const TAKER_FEE_RATE = Number(process.env.TAKER_FEE_RATE || 0.07);
+const MAKER_FEE_RATE = Number(process.env.MAKER_FEE_RATE || 0);
+const MAKER_REBATE_RATE = Number(process.env.MAKER_REBATE_RATE || 0.20);
+const EQUITY_FILE = process.env.EQUITY_FILE || './equity.json';
+const fs = require('fs');
 
 function round2(value) { return Math.round(value * 100) / 100; }
 function round5(value) { return Math.round(value * 100000) / 100000; }
+function takerFeeFor(shares, price) { return round5(shares * TAKER_FEE_RATE * price * (1 - price)); }
+function makerRebateFor(shares, price) { return round5(takerFeeFor(shares, price) * MAKER_REBATE_RATE); }
+function sampleCurve(curve, max = 1500) {
+  if (!Array.isArray(curve) || curve.length <= max) return curve || [];
+  const step = (curve.length - 1) / (max - 1);
+  const out = [];
+  for (let i = 0; i < max; i++) out.push(curve[Math.round(i * step)]);
+  out[max - 1] = curve[curve.length - 1];
+  return out;
+}
+function loadEquityFile(file) {
+  try {
+    const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return Array.isArray(data) ? data : [];
+  } catch (_) { return []; }
+}
 function windowStartFor(timeMs) { return Math.floor(timeMs / 1000 / WINDOW_SECONDS) * WINDOW_SECONDS; }
 function slugFor(asset, start) { return `${asset}-updown-5m-${start}`; }
 
@@ -50,6 +74,7 @@ class MartingaleBotEngine {
       set: (v) => { this.capital.value = v; },
       configurable: true,
     });
+    this.makerRebateAccrued = 0;
     this.realizedPnl = 0;
     this.wins = 0;
     this.losses = 0;
@@ -58,7 +83,10 @@ class MartingaleBotEngine {
     this.pollCount = 0;
     this.lastPollAt = null;
     this.lastSuccessfulPollAt = null;
-    this.equityCurve = [{ t: Date.now(), equity: START_BANKROLL }];
+    const seededEquity = (options.initialEquity && Array.isArray(options.initialEquity) && options.initialEquity.length)
+      ? options.initialEquity.slice() : null;
+    this.equityCurve = seededEquity || [{ t: Date.now(), equity: START_BANKROLL }];
+    this.equitySavePending = false;
     this.logs = [];
     this.trades = [];
     this.positions = [];
@@ -76,7 +104,11 @@ class MartingaleBotEngine {
     this.martingale = new Map();
     this.consecutiveLosses = 0;
     this.maxConsecutiveLosses = 0;
-    this.peakEquity = START_BANKROLL;
+    if (seededEquity) {
+      this.peakEquity = Math.max(START_BANKROLL, ...seededEquity.map(p => Number(p.equity) || 0));
+    } else {
+      this.peakEquity = START_BANKROLL;
+    }
     this.maxDrawdown = 0;
     // Tracks which windows already had a bet per asset, to prevent intra-window martingale
     this.betWindows = new Set();
@@ -356,7 +388,7 @@ class MartingaleBotEngine {
       if (nowSecs >= order.windowEnd) {
         order.status = 'cancelled';
         this.log(`❌ LIMIT CANCELLED ${order.asset.toUpperCase()} ${order.outcome} — never reached ${LIMIT_PRICE.toFixed(2)} · window skipped · martingale ${this.currentShares(order.asset)} SH carries to next window`);
-      } else if (Number.isFinite(best) && best <= LIMIT_PRICE) {
+      } else if (Number.isFinite(best) && best <= LIMIT_PRICE && this.simulateGtcBookFill(token, 1, LIMIT_PRICE)) {
         order.status = 'filled';
         this.log(`✅ LIMIT FILLED ${order.asset.toUpperCase()} ${order.outcome} @${LIMIT_PRICE.toFixed(2)} — price walked to ${best.toFixed(3)}`);
         this.enterBet(market, token, order);
@@ -368,33 +400,36 @@ class MartingaleBotEngine {
   enterBet(market, token, order) {
     const asset = market.asset;
     const shares = this.currentShares(asset);
-    const sweep = this.simulateGtcBookFill(token, shares, LIMIT_PRICE);
-    if (!sweep) return false;
-    const entryPrice = sweep.avgPrice;
-    const cost = sweep.totalCost;
-    const fee = round2(cost * TAKER_FEE_BPS / 10000);
-    if (cost + fee > this.bankroll) {
-      this.log(`⚠️ ${asset.toUpperCase()} fill skipped — need $${round2(cost + fee)}, available $${this.bankroll}`);
+    // Resting maker limit fills at exactly the limit price — no slippage, no maker fee.
+    const entryPrice = LIMIT_PRICE;
+    const cost = round2(shares * LIMIT_PRICE);
+    const fee = 0;
+    const feeEquivalent = takerFeeFor(shares, LIMIT_PRICE);
+    const rebateEstimate = makerRebateFor(shares, LIMIT_PRICE);
+    if (cost > this.bankroll) {
+      this.log(`⚠️ ${asset.toUpperCase()} fill skipped — need $${round2(cost)}, available $${this.bankroll}`);
       return false;
     }
-    this.bankroll = this.capital.value = round2(this.bankroll - cost - fee);
+    this.bankroll = this.capital.value = round2(this.bankroll - cost);
+    this.makerRebateAccrued = round2(this.makerRebateAccrued + rebateEstimate);
     const now = Date.now();
     const position = {
       id: `bet-${asset}-${market.windowStart}-${now}`,
       slug: market.slug, asset, conditionId: market.conditionId,
       outcome: token.outcome, tokenId: token.tokenId,
       shares, avgPrice: entryPrice, entryPrice, cost, fee,
+      feeEquivalent, rebateEstimate,
       status: 'open', openedAt: now, markPrice: token.mid,
       windowStart: market.windowStart, windowEnd: market.windowEnd,
       stopLossPrice: STOP_LOSS_PRICE,
-      signal: { triggerPrice: order.triggerPrice, limitPrice: LIMIT_PRICE, triggerSource: 'LIMIT_0.70→0.60', bid: token.bid, ask: token.ask, mid: token.mid, elapsed: Math.floor(now / 1000 - market.windowStart) },
+      signal: { triggerPrice: order.triggerPrice, limitPrice: LIMIT_PRICE, triggerSource: 'MAKER_LIMIT_0.70→0.60', bid: token.bid, ask: token.ask, mid: token.mid, elapsed: Math.floor(now / 1000 - market.windowStart) },
       martingaleIndex: this.martingaleState(asset).losses,
     };
     this.positions.push(position);
     this.betWindows.add(`${asset}:${market.windowStart}`);
-    this.trades.push({ timestamp: now, orderType: 'PAPER-LIMIT@0.60', asset, outcome: token.outcome, shares, price: entryPrice, cost, markPrice: token.mid, pnl: this.positionPnl(position), signal: position.signal });
+    this.trades.push({ timestamp: now, orderType: 'PAPER-MAKER-LIMIT@0.60', asset, outcome: token.outcome, shares, price: entryPrice, cost, markPrice: token.mid, pnl: this.positionPnl(position), signal: position.signal, rebateEstimate });
     this.trades = this.trades.slice(-300);
-    this.log(`⚡ FILLED ${asset.toUpperCase()} ${token.outcome} ${shares}sh @${entryPrice.toFixed(3)} (limit ${LIMIT_PRICE.toFixed(2)}) martingale #${position.martingaleIndex} · SL ${STOP_LOSS_PRICE.toFixed(2)} · cost $${cost.toFixed(2)}`);
+    this.log(`⚡ FILLED ${asset.toUpperCase()} ${token.outcome} ${shares}sh @${entryPrice.toFixed(3)} (maker limit ${LIMIT_PRICE.toFixed(2)}, no fee) martingale #${position.martingaleIndex} · cost $${cost.toFixed(2)} · rebate est. $${rebateEstimate.toFixed(5)}`);
     this.recordEquity();
     return true;
   }
@@ -429,7 +464,7 @@ class MartingaleBotEngine {
       if (!market?.resolved || !market.winner) continue;
       const won = position.outcome === market.winner;
       const payout = won ? position.shares : 0;
-      const exitFee = round2(payout * TAKER_FEE_BPS / 10000);
+      const exitFee = 0; // resolution settlement carries no fee
       const pnl = round2(payout - exitFee - position.cost - position.fee);
       position.status = 'closed';
       position.won = won;
@@ -465,7 +500,8 @@ class MartingaleBotEngine {
 
   closePosition(position, exitPrice, reason) {
     const proceeds = round2(position.shares * exitPrice);
-    const exitFee = round2(proceeds * TAKER_FEE_BPS / 10000);
+    // Stop-loss exit crosses the spread (taker sell) -> taker fee applies.
+    const exitFee = takerFeeFor(position.shares, exitPrice);
     position.status = 'closed';
     position.exitPrice = exitPrice;
     position.payout = round2(proceeds);
@@ -558,16 +594,18 @@ class MartingaleBotEngine {
       openValue, unrealizedPnl, totalPnl: round2(markValue - START_BANKROLL),
       wins: totalWins, losses: totalLosses,
       winRate: totalWins + totalLosses ? round2(totalWins / (totalWins + totalLosses) * 100) : null,
+      makerRebateAccrued: round2(this.makerRebateAccrued + (sec?.makerRebateAccrued || 0)),
       markets: this.publicMarkets(),
       positions: [...open, ...secOpen].sort((a, b) => (b.openedAt || 0) - (a.openedAt || 0)),
       resolvedPositions: allResolved,
       trades: allTrades,
-      equityCurve: this.equityCurve.slice(-1500),
+      equityCurve: sampleCurve(this.equityCurve, 1500),
       logs: [...this.logs, ...(sec?.logs || [])].sort().slice(-220),
       config: {
         baseShares: BASE_SHARES, triggerPrice: TRIGGER_PRICE, limitPrice: LIMIT_PRICE, stopLossPrice: STOP_LOSS_PRICE,
         resolutionPrice: RESOLUTION_PRICE, feeBps: TAKER_FEE_BPS, marketOpenWait: MARKET_OPEN_WAIT,
         baseShares300: BASE_SHARES_300, limitPrice300: LIMIT_PRICE_300,
+        makerFeeRate: MAKER_FEE_RATE, takerFeeRate: TAKER_FEE_RATE, makerRebateRate: MAKER_REBATE_RATE,
       },
       uptime: Math.floor((Date.now() - this.startedAt) / 1000),
       secondary: sec,
@@ -579,7 +617,13 @@ class MartingaleBotEngine {
     const state = this.buildState();
     if (!last || Date.now() - last.t > 1000 || Math.abs(last.equity - state.markValue) > 0.001) {
       this.equityCurve.push({ t: Date.now(), equity: state.markValue });
-      if (this.equityCurve.length > 2000) this.equityCurve.shift();
+      if (this.equityCurve.length > 4000) this.equityCurve = sampleCurve(this.equityCurve, 2000);
+      if (Date.now() - (this.lastEquitySaveAt || 0) > 5000) {
+        this.lastEquitySaveAt = Date.now();
+        try {
+          fs.writeFileSync(EQUITY_FILE, JSON.stringify(sampleCurve(this.equityCurve, 2000)));
+        } catch (_) { /* disk unavailable — lifetime curve kept in memory */ }
+      }
     }
     if (state.markValue > this.peakEquity) this.peakEquity = state.markValue;
     const dd = this.peakEquity - state.markValue;
@@ -716,6 +760,7 @@ class DoubleSide300Engine {
       set: (v) => { this.capital.value = v; },
       configurable: true,
     });
+    this.makerRebateAccrued = 0;
     this.realizedPnl = 0;
     this.wins = 0;
     this.losses = 0;
@@ -798,11 +843,12 @@ class DoubleSide300Engine {
       const market = this.markets.get(order.slug);
       if (!market) continue;
       const token = order.outcome === 'UP' ? market.up : market.down;
+      const best = token?.mid ?? token?.ask ?? token?.bid;
       const nowSecs = Date.now() / 1000;
       if (nowSecs >= order.windowEnd || market.resolved) {
         order.status = 'cancelled';
         this.log(`❌ [0.30] LIMIT CANCELLED ${order.asset.toUpperCase()} ${order.outcome} @${LIMIT_PRICE_300.toFixed(2)} — no fill`);
-      } else if (this.simulateGtcBookFill(token, 1, LIMIT_PRICE_300)) {
+      } else if (Number.isFinite(best) && best <= LIMIT_PRICE_300 && this.simulateGtcBookFill(token, 1, LIMIT_PRICE_300)) {
         order.status = 'filled';
         const opposite = this.pendingOrders.find(o => o !== order && o.status === 'pending' && o.windowStart === order.windowStart && o.asset === order.asset);
         if (opposite) {
@@ -818,36 +864,36 @@ class DoubleSide300Engine {
   enterBet(market, token, order) {
     const asset = market.asset;
     const shares = this.currentShares(asset);
-    const sweep = this.simulateGtcBookFill(token, shares, LIMIT_PRICE_300);
-    if (!sweep) {
-      this.log(`⚠️ [0.30] ${asset.toUpperCase()} ${token.outcome} fill skipped — no asks ≤${LIMIT_PRICE_300.toFixed(2)}`);
+    // Resting maker limit fills at exactly the limit price — no slippage, no maker fee.
+    const entryPrice = LIMIT_PRICE_300;
+    const cost = round2(shares * LIMIT_PRICE_300);
+    const fee = 0;
+    const feeEquivalent = takerFeeFor(shares, LIMIT_PRICE_300);
+    const rebateEstimate = makerRebateFor(shares, LIMIT_PRICE_300);
+    if (cost > this.capital.value) {
+      this.log(`⚠️ [0.30] ${asset.toUpperCase()} fill skipped — need $${round2(cost)}, available $${this.capital.value}`);
       return false;
     }
-    const entryPrice = sweep.avgPrice;
-    const cost = sweep.totalCost;
-    const fee = round2(cost * TAKER_FEE_BPS / 10000);
-    if (cost + fee > this.capital.value) {
-      this.log(`⚠️ [0.30] ${asset.toUpperCase()} fill skipped — need $${round2(cost + fee)}, available $${this.capital.value}`);
-      return false;
-    }
-    this.bankroll = this.capital.value = round2(this.capital.value - cost - fee);
+    this.bankroll = this.capital.value = round2(this.capital.value - cost);
+    this.makerRebateAccrued = round2(this.makerRebateAccrued + rebateEstimate);
     const now = Date.now();
     const position = {
       id: `d300-${asset}-${market.windowStart}-${now}`,
       slug: market.slug, asset, conditionId: market.conditionId,
       outcome: token.outcome, tokenId: token.tokenId,
       shares, avgPrice: entryPrice, entryPrice, cost, fee,
+      feeEquivalent, rebateEstimate,
       status: 'open', openedAt: now, markPrice: token.mid,
       windowStart: market.windowStart, windowEnd: market.windowEnd,
       stopLossPrice: null, engine: '0.30',
-      signal: { limitPrice: LIMIT_PRICE_300, triggerSource: 'BOTH_SIDES_0.30', bid: token.bid, ask: token.ask, mid: token.mid, elapsed: Math.floor(now / 1000 - market.windowStart) },
+      signal: { limitPrice: LIMIT_PRICE_300, triggerSource: 'BOTH_SIDES_0.30_MAKER', bid: token.bid, ask: token.ask, mid: token.mid, elapsed: Math.floor(now / 1000 - market.windowStart) },
       martingaleIndex: this.martingaleState(asset).losses,
     };
     this.positions.push(position);
     this.betWindows.add(`${asset}:${market.windowStart}`);
-    this.trades.push({ timestamp: now, orderType: 'PAPER-LIMIT@0.30', engine: '0.30', asset, outcome: token.outcome, shares, price: entryPrice, cost, markPrice: token.mid, pnl: this.positionPnl(position), signal: position.signal });
+    this.trades.push({ timestamp: now, orderType: 'PAPER-MAKER-LIMIT@0.30', engine: '0.30', asset, outcome: token.outcome, shares, price: entryPrice, cost, markPrice: token.mid, pnl: this.positionPnl(position), signal: position.signal, rebateEstimate });
     this.trades = this.trades.slice(-300);
-    this.log(`⚡ [0.30] FILLED ${asset.toUpperCase()} ${token.outcome} ${shares}sh @${entryPrice.toFixed(3)} · martingale #${position.martingaleIndex} · cost $${cost.toFixed(2)}`);
+    this.log(`⚡ [0.30] FILLED ${asset.toUpperCase()} ${token.outcome} ${shares}sh @${entryPrice.toFixed(3)} (maker limit 0.30, no fee) · martingale #${position.martingaleIndex} · cost $${cost.toFixed(2)} · rebate est. $${rebateEstimate.toFixed(5)}`);
     this.recordEquity();
     return true;
   }
@@ -883,7 +929,7 @@ class DoubleSide300Engine {
       if (!market?.resolved || !market.winner) continue;
       const won = position.outcome === market.winner;
       const payout = won ? position.shares : 0;
-      const exitFee = round2(payout * TAKER_FEE_BPS / 10000);
+      const exitFee = 0; // resolution settlement carries no fee
       const pnl = round2(payout - exitFee - position.cost - position.fee);
       position.status = 'closed';
       position.won = won;
@@ -931,6 +977,7 @@ class DoubleSide300Engine {
       totalPnl: round2(markValue - START_BANKROLL),
       wins: this.wins, losses: this.losses,
       winRate: this.wins + this.losses ? round2(this.wins / (this.wins + this.losses) * 100) : null,
+      makerRebateAccrued: this.makerRebateAccrued,
       martingale,
       consecutiveLosses: this.consecutiveLosses,
       maxConsecutiveLosses: this.maxConsecutiveLosses,
@@ -939,9 +986,9 @@ class DoubleSide300Engine {
       positions: open,
       resolvedPositions: this.resolvedPositions.slice(0, 30),
       trades: this.trades.slice(-160).reverse(),
-      equityCurve: this.equityCurve.slice(-1500),
+      equityCurve: sampleCurve(this.equityCurve, 1500),
       logs: this.logs.slice(-220),
-      config: { baseShares: BASE_SHARES_300, limitPrice: LIMIT_PRICE_300, multiplier: MARTINGALE_300_MULT, resolutionPrice: RESOLUTION_PRICE, feeBps: TAKER_FEE_BPS },
+      config: { baseShares: BASE_SHARES_300, limitPrice: LIMIT_PRICE_300, multiplier: MARTINGALE_300_MULT, resolutionPrice: RESOLUTION_PRICE, feeBps: TAKER_FEE_BPS, makerFeeRate: MAKER_FEE_RATE, takerFeeRate: TAKER_FEE_RATE, makerRebateRate: MAKER_REBATE_RATE },
     };
   }
 
@@ -950,7 +997,7 @@ class DoubleSide300Engine {
     const state = this.buildState();
     if (!last || Date.now() - last.t > 1000 || Math.abs(last.equity - state.markValue) > 0.001) {
       this.equityCurve.push({ t: Date.now(), equity: state.markValue });
-      if (this.equityCurve.length > 2000) this.equityCurve.shift();
+      if (this.equityCurve.length > 4000) this.equityCurve = sampleCurve(this.equityCurve, 2000);
     }
     if (state.markValue > this.peakEquity) this.peakEquity = state.markValue;
     const dd = this.peakEquity - state.markValue;
@@ -969,8 +1016,9 @@ function publicToken(token) {
 module.exports = {
   MartingaleBotEngine,
   DoubleSide300Engine,
+  loadEquityFile,
   config: {
     ASSETS, LEAD_ASSET, START_BANKROLL, BASE_SHARES, TRIGGER_PRICE, LIMIT_PRICE,
-    STOP_LOSS_PRICE, RESOLUTION_PRICE, TAKER_FEE_BPS,
+    STOP_LOSS_PRICE, RESOLUTION_PRICE, TAKER_FEE_BPS, TAKER_FEE_RATE, MAKER_FEE_RATE, MAKER_REBATE_RATE,
   },
 };

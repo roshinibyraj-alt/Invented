@@ -1,9 +1,2 @@
 node_modules/
-state.json
-state.json.tmp
-.env
-*.log
-
-# runtime state (never commit)
-model-state-*.json
-stats-state-*.json
+equity.json

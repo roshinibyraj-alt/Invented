@@ -2,7 +2,10 @@
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
-const { MartingaleBotEngine, DoubleSide300Engine } = require('./engine');
+const { MartingaleBotEngine, DoubleSide300Engine, loadEquityFile } = require('./engine');
+const path = require('path');
+const EQUITY_FILE = process.env.EQUITY_FILE || path.join(__dirname, 'equity.json');
+const initialEquity = loadEquityFile(EQUITY_FILE);
 
 const app = express();
 const server = http.createServer(app);
@@ -19,6 +22,7 @@ const shared = {
 
 const engine = new MartingaleBotEngine({
   shared,
+  initialEquity,
   onTick: (markets, messageCount) => io.emit('tick', {
     t: Date.now(),
     windowStart: markets[0]?.windowStart ?? null,
@@ -194,7 +198,7 @@ svg{width:100%;height:100%}
       <div class="brand-icon">⚡</div>
       <div>
         <h1>CorrelBot</h1>
-        <div class="sub">Trigger @0.70 → Limit @0.60 · SL @0.45 · TP=resolution · martingale next window</div>
+        <div class="sub">Maker limit entries @0.60/@0.30 (no slippage/fees) · rebate est. · TP=resolution · lifetime equity</div>
       </div>
     </div>
     <div class="pills">
@@ -363,6 +367,7 @@ function render(data) {
     ['Losses',      data.losses||0,                                   'red'],
     ['Win Rate',    data.winRate!=null ? data.winRate.toFixed(0)+'%' : '—', data.winRate>50?'green':''],
     ['Open',        (data.positions||[]).filter(p=>p.status==='open').length, 'blue'],
+    ['Rebate est.',  cash(data.makerRebateAccrued||0), (data.makerRebateAccrued||0)>0?'gold':'white'],
     ['Max Loss Streak', data.maxConsecutiveLosses||0, data.maxConsecutiveLosses>=3?'red':(data.maxConsecutiveLosses>0?'warn':'white')],
     ['Max DD from Peak', cash(data.maxDrawdown||0), data.maxDrawdown>2000?'red':(data.maxDrawdown>0?'warn':'white')],
   ].map(([l,v,c]) => '<div class="kpi"><div class="label">'+l+'</div><div class="value '+(c||'')+'">'+v+'</div></div>').join('');
@@ -385,6 +390,9 @@ function render(data) {
     ['Bet per window',   '1 per asset'],
     ['Martingale',       'Double on loss · Reset on win'],
     ['Mark value',       cash(data.markValue)],
+    ['Maker fee',        (data.config.makerFeeRate||0) + ' (limit/free)'],
+    ['Taker fee rate',   (data.config.takerFeeRate||0.07).toFixed(2)],
+    ['Maker rebate',     ((data.config.makerRebateRate||0.2)*100).toFixed(0)+'% of fee-equiv'],
   ].map(r => '<div class="config-item">'+r[0]+'<b>'+r[1]+'</b></div>').join('');
 
   /* markets */
@@ -636,6 +644,8 @@ function renderSecondary(sec) {
     ['Stop loss', 'None'],
     ['TP', 'Resolution'],
     ['Next bet', mg.shares + ' SH' + (mg.losses ? ' (losses ' + mg.losses + ')' : '')],
+    ['Maker fee',        '0 (limit/free)'],
+    ['Rebate est.',      cash(sec.makerRebateAccrued||0)],
   ].map(r => '<div class="config-item">'+r[0]+'<b>'+r[1]+'</b></div>').join('');
 
   $('secondaryKpis').innerHTML = [
@@ -644,6 +654,7 @@ function renderSecondary(sec) {
     ['0.30 Wins',         sec.wins||0, 'green'],
     ['0.30 Losses',       sec.losses||0, 'red'],
     ['0.30 Win Rate',     sec.winRate!=null ? sec.winRate.toFixed(0)+'%' : '—', 'white'],
+    ['0.30 Rebate est.',  cash(sec.makerRebateAccrued||0), 'gold'],
     ['0.30 Max Loss Streak', sec.maxConsecutiveLosses||0, sec.maxConsecutiveLosses>=3?'red':'white'],
   ].map(([l,v,c]) => '<div class="kpi"><div class="label">'+l+'</div><div class="value '+(c||'')+'">'+v+'</div></div>').join('');
 
