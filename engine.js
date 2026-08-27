@@ -56,6 +56,10 @@ class MartingaleBotEngine {
     this.lastPollErrorAt = null;
     // Per-market martingale state: { shares, losses }
     this.martingale = new Map();
+    this.consecutiveLosses = 0;
+    this.maxConsecutiveLosses = 0;
+    this.peakEquity = START_BANKROLL;
+    this.maxDrawdown = 0;
   }
 
   log(message) {
@@ -346,11 +350,13 @@ class MartingaleBotEngine {
         // Stop loss hit — close at SL price
         this.closePosition(position, STOP_LOSS_PRICE, 'STOP_LOSS');
         this.losses++;
+        this.consecutiveLosses += 1;
+        if (this.consecutiveLosses > this.maxConsecutiveLosses) this.maxConsecutiveLosses = this.consecutiveLosses;
         // Double the bet for next round
         const st = this.martingaleState(position.asset);
         st.losses += 1;
         st.shares = BASE_SHARES * Math.pow(2, st.losses);
-        this.log(`⛔ ${position.asset.toUpperCase()} ${position.outcome} STOP LOSS @${STOP_LOSS_PRICE.toFixed(2)} — next bet doubled to ${st.shares} SH`);
+        this.log(`⛔ ${position.asset.toUpperCase()} ${position.outcome} STOP LOSS @${STOP_LOSS_PRICE.toFixed(2)} — next bet doubled to ${st.shares} SH · losses-in-row ${this.consecutiveLosses}`);
       }
     }
   }
@@ -377,15 +383,18 @@ class MartingaleBotEngine {
       const st = this.martingaleState(position.asset);
       if (won) {
         this.wins++;
-        // Reset martingale on win
+        // Reset martingale + consecutive losses on win
         st.shares = BASE_SHARES;
         st.losses = 0;
+        this.consecutiveLosses = 0;
         this.log(`🏁 ${position.asset.toUpperCase()} ${position.outcome} WIN — payout $${position.payout.toFixed(2)} · cost $${(position.cost + position.fee).toFixed(2)} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)} · martingale reset to ${BASE_SHARES} SH`);
       } else {
         this.losses++;
+        this.consecutiveLosses += 1;
+        if (this.consecutiveLosses > this.maxConsecutiveLosses) this.maxConsecutiveLosses = this.consecutiveLosses;
         st.losses += 1;
         st.shares = BASE_SHARES * Math.pow(2, st.losses);
-        this.log(`🏁 ${position.asset.toUpperCase()} ${position.outcome} LOSS — payout $0 · cost $${(position.cost + position.fee).toFixed(2)} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)} · next bet doubled to ${st.shares} SH`);
+        this.log(`🏁 ${position.asset.toUpperCase()} ${position.outcome} LOSS — payout $0 · cost $${(position.cost + position.fee).toFixed(2)} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)} · next bet doubled to ${st.shares} SH · losses-in-row ${this.consecutiveLosses}`);
       }
       this.resolvedPositions.unshift({ ...position });
       this.resolvedPositions = this.resolvedPositions.slice(0, 40);
@@ -464,6 +473,10 @@ class MartingaleBotEngine {
       lastSuccessfulPollAt: this.lastSuccessfulPollAt,
       trackedTokens: this.tokens.size,
       martingale,
+      consecutiveLosses: this.consecutiveLosses,
+      maxConsecutiveLosses: this.maxConsecutiveLosses,
+      peakEquity: this.peakEquity,
+      maxDrawdown: this.maxDrawdown,
       discovery: {
         expectedMarkets: ASSETS.length,
         currentDiscovered, nextDiscovered,
@@ -497,6 +510,9 @@ class MartingaleBotEngine {
       this.equityCurve.push({ t: Date.now(), equity: state.markValue });
       if (this.equityCurve.length > 2000) this.equityCurve.shift();
     }
+    if (state.markValue > this.peakEquity) this.peakEquity = state.markValue;
+    const dd = this.peakEquity - state.markValue;
+    if (dd > this.maxDrawdown) this.maxDrawdown = dd;
   }
 
   isClobFresh(now = Date.now()) {

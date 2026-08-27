@@ -49,7 +49,7 @@ h1{font-size:20px;letter-spacing:.3px}
 .pill.blue{color:#38d6ff;border-color:#38d6ff55;background:#38d6ff10}
 
 /* ── KPIs ── */
-.kpis{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:6px;margin-bottom:10px}
+.kpis{display:grid;grid-template-columns:repeat(10,minmax(0,1fr));gap:6px;margin-bottom:10px}
 .kpi{background:#060a0f;border:1px solid #16232f;border-radius:12px;padding:10px 12px}
 .kpi .label{font-size:8px;text-transform:uppercase;color:#667e94;letter-spacing:.6px}
 .kpi .value{font-size:18px;margin-top:4px;font-variant-numeric:tabular-nums}
@@ -140,10 +140,11 @@ svg{width:100%;height:100%}
 .red{color:#ff4a68!important}
 .blue{color:#38d6ff!important}
 .gold{color:#ffd166!important}
+.warn{color:#ffc861!important}
 .white{color:#fff!important}
 
 /* ── Responsive ── */
-@media(max-width:1100px){.two-col{grid-template-columns:1fr}.kpis{grid-template-columns:repeat(4,1fr)}.markets,.positions,.results-grid{grid-template-columns:1fr}}
+@media(max-width:1100px){.two-col{grid-template-columns:1fr}.kpis{grid-template-columns:repeat(5,1fr)}.markets,.positions,.results-grid{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
@@ -290,6 +291,8 @@ function render(data) {
     ['Losses',      data.losses||0,                                   'red'],
     ['Win Rate',    data.winRate!=null ? data.winRate.toFixed(0)+'%' : '—', data.winRate>50?'green':''],
     ['Open',        (data.positions||[]).filter(p=>p.status==='open').length, 'blue'],
+    ['Max Loss Streak', data.maxConsecutiveLosses||0, data.maxConsecutiveLosses>=3?'red':(data.maxConsecutiveLosses>0?'warn':'white')],
+    ['Max DD from Peak', cash(data.maxDrawdown||0), data.maxDrawdown>2000?'red':(data.maxDrawdown>0?'warn':'white')],
   ].map(([l,v,c]) => '<div class="kpi"><div class="label">'+l+'</div><div class="value '+(c||'')+'">'+v+'</div></div>').join('');
 
   /* equity */
