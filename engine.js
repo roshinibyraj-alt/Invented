@@ -45,7 +45,11 @@ class MartingaleBotEngine {
       this.history = new Map();
       this.capital = { value: START_BANKROLL };
     }
-    this.bankroll = this.capital.value;
+    Object.defineProperty(this, 'bankroll', {
+      get: () => this.capital.value,
+      set: (v) => { this.capital.value = v; },
+      configurable: true,
+    });
     this.realizedPnl = 0;
     this.wins = 0;
     this.losses = 0;
@@ -707,7 +711,11 @@ class DoubleSide300Engine {
     this.capital = this.shared.capital;
     this.emitLog = options.onLog || (() => {});
     this.startedAt = Date.now();
-    this.bankroll = this.capital.value;
+    Object.defineProperty(this, 'bankroll', {
+      get: () => this.capital.value,
+      set: (v) => { this.capital.value = v; },
+      configurable: true,
+    });
     this.realizedPnl = 0;
     this.wins = 0;
     this.losses = 0;
