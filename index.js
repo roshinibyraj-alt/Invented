@@ -383,7 +383,6 @@ function render(data) {
   $('configGrid').innerHTML = [
     ['Trigger',          data.config.triggerPrice.toFixed(2)],
     ['Limit',            data.config.limitPrice.toFixed(2)],
-    ['Stop loss',        data.config.stopLossPrice.toFixed(2)],
     ['TP',               'Resolution (2s > '+data.config.resolutionPrice.toFixed(2)+')'],
     ['Base shares',      data.config.baseShares + ' SH'],
     ['Wait after open',  data.config.marketOpenWait + 's'],
@@ -470,7 +469,7 @@ function renderMarkets(markets, tickData) {
     const dnMid = m.down?.mid, dnBid = m.down?.bid, dnAsk = m.down?.ask, dnSpread = m.down?.spread, dnAge = m.down?.updatedAt;
 
     function sideBlock(outcome, mid, bid, ask, spread, upd, id) {
-      const signal = mid!=null && mid >= data_entry() ? 'green' : mid!=null && mid <= data_sl() ? 'red' : '';
+      const signal = mid!=null && mid >= data_entry() ? 'green' : '';
       return '<div class="side">'
         + '<div class="side-label '+(outcome==='UP'?'up':'down')+'">'+outcome+'</div>'
         + '<div class="mid" id="mid-'+id+'">'+prc(mid)+'</div>'
@@ -492,7 +491,6 @@ function renderMarkets(markets, tickData) {
 }
 
 function data_entry() { return S?.config?.triggerPrice || 0.70; }
-function data_sl()     { return S?.config?.stopLossPrice || 0.45; }
 
 /* ─── Update live prices from tick (fast path) ─── */
 function renderLivePrices(tick) {
@@ -524,7 +522,7 @@ function renderLivePrices(tick) {
       /* recolor mid */
       if (midEl) {
         const v = Number(token.mid);
-        midEl.className = 'mid ' + (v >= data_entry() ? 'green' : v <= data_sl() ? 'red' : '');
+        midEl.className = 'mid ' + (v >= data_entry() ? 'green' : '');
       }
     }
     updSide('UP', m.up, upId);
@@ -596,9 +594,9 @@ function renderResults(results, grid) {
     return;
   }
   grid.innerHTML = results.slice(0,20).map(r => {
-    const won = r.closeReason === 'STOP_LOSS' ? false : (r.won === true);
-    const icon = won ? '✅' : r.closeReason === 'STOP_LOSS' ? '⛔' : '❌';
-    const label = won ? 'WIN' : r.closeReason === 'STOP_LOSS' ? 'SL ' + prc(r.exitPrice) : 'LOSS';
+    const won = r.won === true;
+    const icon = won ? '✅' : '❌';
+    const label = won ? 'WIN' : 'LOSS';
     const engineTag = r.engine ? '<span class="tag" style="color:#ffd166;background:#ffd16615;border:1px solid #ffd16633">'+esc(r.engine)+'</span> ' : '';
     return '<div class="result-card">'
       + '<div class="result-header"><div class="pos-name">⚡ '+engineTag+esc((r.asset||'').toUpperCase())+' '+(r.outcome||'')+' · '+(r.martingaleIndex||0)+'</div>'

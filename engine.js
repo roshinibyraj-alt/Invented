@@ -11,7 +11,6 @@ const START_BANKROLL = Number(process.env.START_BANKROLL || 20000);
 const BASE_SHARES = Number(process.env.BASE_SHARES || 100);
 const TRIGGER_PRICE = Number(process.env.TRIGGER_PRICE || 0.70);
 const LIMIT_PRICE = Number(process.env.LIMIT_PRICE || 0.60);
-const STOP_LOSS_PRICE = Number(process.env.STOP_LOSS_PRICE || 0.45);
 const LIMIT_PRICE_300 = Number(process.env.LIMIT_PRICE_300 || 0.30);
 const BASE_SHARES_300 = Number(process.env.BASE_SHARES_300 || 133);
 const MARTINGALE_300_MULT = Number(process.env.MARTINGALE_300_MULT || 1.5);
@@ -421,7 +420,7 @@ class MartingaleBotEngine {
       feeEquivalent, rebateEstimate,
       status: 'open', openedAt: now, markPrice: token.mid,
       windowStart: market.windowStart, windowEnd: market.windowEnd,
-      stopLossPrice: STOP_LOSS_PRICE,
+      stopLossPrice: null,
       signal: { triggerPrice: order.triggerPrice, limitPrice: LIMIT_PRICE, triggerSource: 'MAKER_LIMIT_0.70→0.60', bid: token.bid, ask: token.ask, mid: token.mid, elapsed: Math.floor(now / 1000 - market.windowStart) },
       martingaleIndex: this.martingaleState(asset).losses,
     };
@@ -434,28 +433,6 @@ class MartingaleBotEngine {
     return true;
   }
 
-  checkStopLoss() {
-    for (const position of this.positions) {
-      if (position.status !== 'open') continue;
-      const market = this.markets.get(position.slug);
-      if (!market) continue;
-      const token = position.outcome === 'UP' ? market.up : market.down;
-      const mid = token?.mid;
-      if (!Number.isFinite(mid)) continue;
-      if (mid <= STOP_LOSS_PRICE) {
-        // Stop loss hit — close at SL price
-        this.closePosition(position, STOP_LOSS_PRICE, 'STOP_LOSS');
-        this.losses++;
-        this.consecutiveLosses += 1;
-        if (this.consecutiveLosses > this.maxConsecutiveLosses) this.maxConsecutiveLosses = this.consecutiveLosses;
-        // Double the bet for next round
-        const st = this.martingaleState(position.asset);
-        st.losses += 1;
-        st.shares = BASE_SHARES * Math.pow(2, st.losses);
-        this.log(`⛔ ${position.asset.toUpperCase()} ${position.outcome} STOP LOSS @${STOP_LOSS_PRICE.toFixed(2)} — next bet doubled to ${st.shares} SH · losses-in-row ${this.consecutiveLosses}`);
-      }
-    }
-  }
 
   settleResolved() {
     for (const position of this.positions) {
@@ -498,23 +475,6 @@ class MartingaleBotEngine {
     this.positions = this.positions.filter(position => position.status === 'open');
   }
 
-  closePosition(position, exitPrice, reason) {
-    const proceeds = round2(position.shares * exitPrice);
-    // Stop-loss exit crosses the spread (taker sell) -> taker fee applies.
-    const exitFee = takerFeeFor(position.shares, exitPrice);
-    position.status = 'closed';
-    position.exitPrice = exitPrice;
-    position.payout = round2(proceeds);
-    position.pnl = round2(proceeds - exitFee - position.cost - position.fee);
-    position.closedAt = Date.now();
-    position.closeReason = reason;
-    this.bankroll = this.capital.value = round2(this.bankroll + proceeds - exitFee);
-    this.realizedPnl = round2(this.realizedPnl + position.pnl);
-    this.resolvedPositions.unshift({ ...position });
-    this.resolvedPositions = this.resolvedPositions.slice(0, 40);
-    this.trades.push({ timestamp: Date.now(), orderType: 'PAPER-SL', asset: position.asset, outcome: position.outcome, shares: position.shares, price: exitPrice, cost: proceeds, markPrice: exitPrice, pnl: position.pnl, signal: position.signal, reason });
-    this.log(`⛔ ${position.asset.toUpperCase()} ${position.outcome} CLOSED @${exitPrice.toFixed(2)} (${reason}) — P&L ${position.pnl >= 0 ? '+' : '-'}$${Math.abs(position.pnl).toFixed(2)}`);
-  }
 
   updatePositionMarks() {
     for (const position of this.positions) {
@@ -602,7 +562,7 @@ class MartingaleBotEngine {
       equityCurve: sampleCurve(this.equityCurve, 1500),
       logs: [...this.logs, ...(sec?.logs || [])].sort().slice(-220),
       config: {
-        baseShares: BASE_SHARES, triggerPrice: TRIGGER_PRICE, limitPrice: LIMIT_PRICE, stopLossPrice: STOP_LOSS_PRICE,
+        baseShares: BASE_SHARES, triggerPrice: TRIGGER_PRICE, limitPrice: LIMIT_PRICE,
         resolutionPrice: RESOLUTION_PRICE, feeBps: TAKER_FEE_BPS, marketOpenWait: MARKET_OPEN_WAIT,
         baseShares300: BASE_SHARES_300, limitPrice300: LIMIT_PRICE_300,
         makerFeeRate: MAKER_FEE_RATE, takerFeeRate: TAKER_FEE_RATE, makerRebateRate: MAKER_REBATE_RATE,
@@ -711,7 +671,6 @@ class MartingaleBotEngine {
         if (!market.resolved && Date.now() / 1000 >= market.windowEnd) this.resolveFromFinalPrices(market);
       }
       this.updatePositionMarks();
-      this.checkStopLoss();
       this.checkPendingOrders();
       this.evaluateEntries();
       if (this.secondary) {
@@ -740,7 +699,7 @@ class MartingaleBotEngine {
     setInterval(() => this.rotateAndSweep(), 250);
     setInterval(() => this.pollClobBooks(), CLOB_POLL_MS);
     setInterval(() => this.retryDiscovery(), 1500);
-    this.log(`🚀 Martingale bot started | ${ASSETS.join('/')} | trigger@${TRIGGER_PRICE.toFixed(2)}→limit@${LIMIT_PRICE.toFixed(2)} SL@${STOP_LOSS_PRICE.toFixed(2)} base ${BASE_SHARES} SH | demo ${START_BANKROLL}`);
+    this.log(`🚀 Martingale bot started | ${ASSETS.join('/')} | trigger@${TRIGGER_PRICE.toFixed(2)}→limit@${LIMIT_PRICE.toFixed(2)} no-SL base ${BASE_SHARES} SH | demo ${START_BANKROLL}`);
   }
 }
 
@@ -1019,6 +978,6 @@ module.exports = {
   loadEquityFile,
   config: {
     ASSETS, LEAD_ASSET, START_BANKROLL, BASE_SHARES, TRIGGER_PRICE, LIMIT_PRICE,
-    STOP_LOSS_PRICE, RESOLUTION_PRICE, TAKER_FEE_BPS, TAKER_FEE_RATE, MAKER_FEE_RATE, MAKER_REBATE_RATE,
+    RESOLUTION_PRICE, TAKER_FEE_BPS, TAKER_FEE_RATE, MAKER_FEE_RATE, MAKER_REBATE_RATE,
   },
 };
