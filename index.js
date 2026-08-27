@@ -74,6 +74,25 @@ h1{font-size:20px;letter-spacing:.3px}
 .kpi .small{font-size:8px;color:#617589;margin-top:2px}
 .kpis-small{grid-template-columns:repeat(6,minmax(0,1fr));margin:10px}
 
+/* ── Top Positions Strip ── */
+.strip{display:flex;gap:12px;align-items:stretch;padding:10px}
+.strip-prices{display:flex;flex-direction:column;gap:6px;min-width:170px;border-right:1px solid #14202c;padding-right:12px}
+.sp-label{font-size:9px;color:#8fa3b7;letter-spacing:.5px;font-weight:700}
+.sp-label.up{color:#28e0a5}
+.sp-label.down{color:#ff6b81}
+.sp-value{font-size:32px;font-weight:800;line-height:1.1;font-variant-numeric:tabular-nums}
+.sp-quote{font-size:8px;color:#617589;margin-top:2px}
+.sp-badge{display:inline-block;font-size:8px;color:#ffd166;background:#ffd16615;border:1px solid #ffd16633;border-radius:6px;padding:1px 5px;margin-top:3px}
+.strip-positions{display:flex;gap:8px;flex:1;flex-wrap:wrap;align-content:flex-start}
+.strip-card{flex:1 1 220px;background:#08111c;border:1px solid #22364b;border-radius:10px;padding:10px}
+.sc-name{font-size:14px;font-weight:800}
+.sc-engine{font-size:8px;color:#ffd166;border:1px solid #ffd16633;border-radius:6px;padding:1px 5px;margin-right:4px;font-weight:700}
+.sc-meta{font-size:9px;color:#7f93a8;margin-top:2px;font-weight:600}
+.sc-pnl{font-size:24px;font-weight:800;font-variant-numeric:tabular-nums;margin-top:6px}
+.sc-row{font-size:11px;color:#9fb1c4;margin-top:4px;font-weight:700}
+@media(max-width:900px){.strip{flex-direction:column}.strip-prices{flex-direction:row;border-right:none;border-bottom:1px solid #14202c;padding-bottom:8px;padding-right:0}}
+
+
 /* ── Panels ── */
 .panel{background:#060a0f;border:1px solid #16232f;border-radius:13px;overflow:hidden;margin-bottom:10px}
 .panel-head{display:flex;justify-content:space-between;align-items:center;padding:10px 14px;border-bottom:1px solid #14202c;font-size:11px;color:#8ea2b6}
@@ -187,6 +206,26 @@ svg{width:100%;height:100%}
       <span class="pill blue" id="pUptime">00:00</span>
     </div>
   </header>
+
+
+  <!-- Top Positions Strip (both engines + live BTC prices) -->
+  <div class="panel" id="topStripPanel">
+    <div class="strip">
+      <div class="strip-prices">
+        <div class="sp-label up">BTC 5M UP</div>
+        <div class="sp-value green" id="stripUp">—</div>
+        <div class="sp-quote" id="stripUpQuote">bid — · ask —</div>
+        <div><span class="sp-badge" id="stripUpSpread">—</span></div>
+        <div class="sp-label down" style="margin-top:6px">BTC 5M DOWN</div>
+        <div class="sp-value red" id="stripDown">—</div>
+        <div class="sp-quote" id="stripDownQuote">bid — · ask —</div>
+        <div><span class="sp-badge" id="stripDownSpread">—</span></div>
+      </div>
+      <div class="strip-positions" id="stripPositions">
+        <div class="empty">No open positions</div>
+      </div>
+    </div>
+  </div>
 
   <!-- KPIs -->
   <section class="kpis" id="kpis"></section>
@@ -329,6 +368,9 @@ function render(data) {
   ].map(([l,v,c]) => '<div class="kpi"><div class="label">'+l+'</div><div class="value '+(c||'')+'">'+v+'</div></div>').join('');
 
   /* equity */
+  /* top strip: both engines' positions + live BTC prices */
+  renderTopStrip(data);
+
   $('equityValue').textContent = cash(data.markValue);
   renderChart(data.equityCurve || []);
 
@@ -365,6 +407,44 @@ function render(data) {
   renderLogs();
 
   $('tickInfo').textContent = data.trackedTokens + ' TOKENS';
+}
+
+
+/* ─── Top Strip: both engines' open positions + live BTC prices ─── */
+function renderTopStrip(data) {
+  const mkt = (data.markets||[]).find(m => m.asset === 'btc') || (data.markets||[])[0] || null;
+  if (mkt) {
+    const upTok = mkt.up, dnTok = mkt.down;
+    if (upTok) {
+      $('stripUp').textContent = prc(upTok.mid);
+      $('stripUp').className = 'sp-value ' + (Number(upTok.mid)>=0.68?'green':Number(upTok.mid)<=0.45?'red':'');
+      $('stripUpQuote').textContent = 'bid '+prc(upTok.bid)+' · ask '+prc(upTok.ask);
+      $('stripUpSpread').textContent = 'Spread '+prc(upTok.spread);
+    }
+    if (dnTok) {
+      $('stripDown').textContent = prc(dnTok.mid);
+      $('stripDown').className = 'sp-value ' + (Number(dnTok.mid)>=0.68?'green':Number(dnTok.mid)<=0.45?'red':'');
+      $('stripDownQuote').textContent = 'bid '+prc(dnTok.bid)+' · ask '+prc(dnTok.ask);
+      $('stripDownSpread').textContent = 'Spread '+prc(dnTok.spread);
+    }
+  }
+  const open = (data.positions||[]).filter(p => p.status === 'open');
+  const grid = $('stripPositions');
+  if (!open.length) {
+    grid.innerHTML = '<div class="empty">No open positions</div>';
+    return;
+  }
+  grid.innerHTML = open.slice(0,8).map(pos => {
+    const unrealized = pos.unrealized || 0;
+    const eng = pos.engine ? '<span class="sc-engine">'+esc(pos.engine)+'</span>' : '';
+    const sl = pos.stopLossPrice != null ? 'SL '+prc(pos.stopLossPrice) : 'no SL';
+    return '<div class="strip-card">'
+      + '<div class="sc-name">'+eng+'⚡ '+esc(pos.asset.toUpperCase())+' '+pos.outcome+'</div>'
+      + '<div class="sc-meta">'+pos.shares+' SH @ '+prc(pos.entryPrice)+' · Mart #'+pos.martingaleIndex+'</div>'
+      + '<div class="sc-pnl '+tone(unrealized)+'" id="strip-pnl-'+pos.id+'">'+money(unrealized)+'</div>'
+      + '<div class="sc-row">Mark <span id="strip-mark-'+pos.id+'">'+prc(pos.markPrice||pos.entryPrice)+'</span> · '+sl+'</div>'
+      + '</div>';
+  }).join('');
 }
 
 /* ─── Live Market Cards ─── */
@@ -412,6 +492,20 @@ function renderLivePrices(tick) {
   for (const m of tick.markets) {
     const upId = m.asset.toUpperCase() + '_UP';
     const dnId = m.asset.toUpperCase() + '_DN';
+    if (m.asset === 'btc' || m.asset === 'lead') {
+      if (m.up) {
+        const el = $('stripUp');
+        if (el) { el.textContent = prc(m.up.mid); el.className = 'sp-value ' + (Number(m.up.mid)>=0.68?'green':Number(m.up.mid)<=0.45?'red':''); }
+        const q = $('stripUpQuote'); if (q) q.textContent = 'bid '+prc(m.up.bid)+' · ask '+prc(m.up.ask);
+        const s = $('stripUpSpread'); if (s) s.textContent = 'Spread '+prc(m.up.spread);
+      }
+      if (m.down) {
+        const el = $('stripDown');
+        if (el) { el.textContent = prc(m.down.mid); el.className = 'sp-value ' + (Number(m.down.mid)>=0.68?'green':Number(m.down.mid)<=0.45?'red':''); }
+        const q = $('stripDownQuote'); if (q) q.textContent = 'bid '+prc(m.down.bid)+' · ask '+prc(m.down.ask);
+        const s = $('stripDownSpread'); if (s) s.textContent = 'Spread '+prc(m.down.spread);
+      }
+    }
     function updSide(outcome, token, id) {
       if (!token) return;
       const midEl = $('mid-'+id), bidEl = $('bid-'+id), askEl = $('ask-'+id), ageEl = $('age-'+id);
@@ -480,6 +574,10 @@ function updateFloating() {
     const unrl = pos.unrealized || 0;
     const floEl = $('floating-'+pos.id);
     if (floEl) { floEl.textContent = money(unrl); floEl.className = 'pos-pnl '+tone(unrl); }
+    const sMarkEl = $('strip-mark-'+pos.id);
+    if (sMarkEl) sMarkEl.textContent = prc(pos.markPrice||pos.entryPrice);
+    const sPnlEl = $('strip-pnl-'+pos.id);
+    if (sPnlEl) { sPnlEl.textContent = money(unrl); sPnlEl.className = 'sc-pnl '+tone(unrl); }
   }
 }
 
