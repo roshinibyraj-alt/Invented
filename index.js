@@ -186,7 +186,25 @@ svg{width:100%;height:100%}
 .white{color:#fff!important}
 
 /* ── Responsive ── */
-@media(max-width:1100px){.two-col{grid-template-columns:1fr}.kpis{grid-template-columns:repeat(5,1fr)}.markets,.positions,.results-grid{grid-template-columns:1fr}}
+/* ── Engine Sections ── */
+.engine-shell{border-radius:15px;overflow:hidden;margin-bottom:12px;border:1px solid #16232f}
+.engine-shell.a{border-top:3px solid #38d6ff}
+.engine-shell.b{border-top:3px solid #ffd166}
+.engine-head{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:12px 14px;background:#070d14;border-bottom:1px solid #14202c;flex-wrap:wrap}
+.engine-name{font-size:14px;font-weight:800;letter-spacing:.2px}
+.engine-name .chip{display:inline-block;border-radius:8px;padding:2px 8px;font-size:10px;margin-right:8px;vertical-align:2px}
+.chip.a{color:#38d6ff;background:#38d6ff15;border:1px solid #38d6ff44}
+.chip.b{color:#ffd166;background:#ffd16615;border:1px solid #ffd16644}
+.engine-sub{font-size:8px;color:#6b8095;margin-top:3px}
+.engine-stats{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+.estat{background:#08111c;border:1px solid #22364b;border-radius:9px;padding:6px 10px;text-align:center;min-width:70px}
+.estat .l{font-size:7px;color:#667e94;text-transform:uppercase;letter-spacing:.5px}
+.estat .v{font-size:13px;font-weight:800;margin-top:2px;font-variant-numeric:tabular-nums}
+.engine-body{background:#050a0f}
+.engine-body .block-title{font-size:9px;color:#7f93a8;text-transform:uppercase;letter-spacing:.7px;padding:8px 14px 0}
+.two-col-eng{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:10px}
+
+@media(max-width:1100px){.two-col{grid-template-columns:1fr}.kpis{grid-template-columns:repeat(5,1fr)}.markets,.positions,.results-grid{grid-template-columns:1fr}.two-col-eng{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
@@ -252,43 +270,49 @@ svg{width:100%;height:100%}
     <div class="markets" id="marketsGrid"></div>
   </div>
 
-  <!-- Open Positions (Floating P&L) -->
-  <div class="panel">
-    <div class="panel-head"><span>🎯 Open Positions — Floating P&L</span><strong id="openCount">0 OPEN</strong></div>
-    <div class="positions" id="positionsGrid"></div>
+  <!-- ═══ ENGINE A · MAIN MARTINGALE @0.60 ═══ -->
+  <div class="engine-shell a">
+    <div class="engine-head">
+      <div>
+        <div class="engine-name"><span class="chip a">ENGINE A</span>0.70 → 0.60 Limit Martingale</div>
+        <div class="engine-sub" id="engASub">Trigger ≥0.70 → maker limit @0.60 exact · no SL · TP=resolution · 2× martingale next window</div>
+      </div>
+      <div class="engine-stats" id="engAStats"></div>
+    </div>
+    <div class="engine-body">
+      <div class="block-title">Positions (Floating P&L) · <span id="engAOpenCount">0 OPEN</span></div>
+      <div class="positions" id="engAPositions"></div>
+      <div class="block-title">Resolved · <span id="engACounts">0</span></div>
+      <div class="results-grid two-col-eng" id="engAResults"></div>
+      <div class="block-title">Trade Feed · <span id="engATradeCount">0 TRADES</span></div>
+      <div class="feeds" id="engAFeed"></div>
+      <div class="block-title">Logs · <span id="engALogCount">0</span></div>
+      <div class="logs" id="engALogs"></div>
+    </div>
   </div>
 
-  <!-- Resolved Positions -->
-  <div class="panel">
-    <div class="panel-head"><span>✅ Resolved Positions</span><strong>SETTLED</strong></div>
-    <div class="results-grid" id="resultsGrid"></div>
+  <!-- ═══ ENGINE B · 0.30 BOTH-SIDE MAKER ═══ -->
+  <div class="engine-shell b">
+    <div class="engine-head">
+      <div>
+        <div class="engine-name"><span class="chip b">ENGINE B</span>0.30 Both-Side Maker</div>
+        <div class="engine-sub" id="engBSub">Limit buy both sides @0.30 · cancel opposite on fill · no SL · TP=resolution · 1.5× martingale next window</div>
+      </div>
+      <div class="engine-stats" id="engBStats"></div>
+    </div>
+    <div class="engine-body">
+      <div class="block-title">Positions (Floating P&L) · <span id="engBOpenCount">0 OPEN</span></div>
+      <div class="positions" id="engBPositions"></div>
+      <div class="block-title">Resolved · <span id="engBCounts">0</span></div>
+      <div class="results-grid two-col-eng" id="engBResults"></div>
+      <div class="block-title">Trade Feed · <span id="engBTradeCount">0 TRADES</span></div>
+      <div class="feeds" id="engBFeed"></div>
+      <div class="block-title">Logs · <span id="engBLogCount">0</span></div>
+      <div class="logs" id="engBLogs"></div>
+    </div>
   </div>
 
-  <!-- Trade Feed -->
-  <div class="panel">
-    <div class="panel-head"><span>⚡ Trade Feed</span><strong id="tradeCount">0 TRADES</strong></div>
-    <div class="feeds" id="feedGrid"></div>
-  </div>
-
-
-  <!-- Independent 0.30 Engine -->
-  <div class="panel" id="secondaryPanel" style="display:none">
-    <div class="panel-head"><span>⚡ Independent 0.30 Engine — both sides · shared capital</span><strong id="secondaryTag">NO STATE</strong></div>
-    <div class="config-grid" id="secondaryConfig"></div>
-    <div class="kpis kpis-small" id="secondaryKpis"></div>
-    <div class="panel-head"><span>🎯 0.30 Open Positions</span><strong id="secondaryOpenCount">0 OPEN</strong></div>
-    <div class="positions" id="secondaryPositions"></div>
-    <div class="panel-head"><span>✅ 0.30 Resolved Positions</span><strong>SETTLED</strong></div>
-    <div class="results-grid" id="secondaryResults"></div>
-    <div class="panel-head"><span>⚡ 0.30 Trade Feed</span><strong id="secondaryTradeCount">0 TRADES</strong></div>
-    <div class="feeds" id="secondaryFeed"></div>
-  </div>
-
-  <!-- Activity Log -->
-  <div class="panel">
-    <div class="panel-head"><span>📋 Activity Log</span><strong id="logCount">0</strong></div>
-    <div class="logs" id="logsPanel"></div>
-  </div>
+</div>
 
 </div>
 
@@ -299,7 +323,8 @@ let S = null;           // full server state
 let lastTick = null;     // latest tick packet
 let lastRender = 0;
 let msgCount = 0, lastRateTime = Date.now(), rate = 0;
-const logs = [];
+const logsA = [];
+const logsB = [];
 const $ = id => document.getElementById(id);
 
 function safe(fn) { try { fn() } catch(e) { console.error(e) } }
@@ -319,7 +344,7 @@ const socket = io({ transports:['polling'], upgrade:false, reconnectionDelay:250
 
 socket.on('connect', () => { $('pConnection').textContent='LIVE'; $('pConnection').className='pill live'; });
 socket.on('disconnect', () => { $('pConnection').textContent='RETRY'; $('pConnection').className='pill warn'; });
-socket.on('log', line => { logs.push(line); if (logs.length>400) logs.shift(); safe(renderLogs); });
+socket.on('log', line => { (line.startsWith('[0.30]') ? logsB : logsA).push(line); if (logsB.length>400) logsB.shift(); if (logsA.length>400) logsA.shift(); safe(renderLogs); });
 socket.on('tick', data => {
   if (!data || !data.windowStart) return;
   lastTick = data;
@@ -398,20 +423,8 @@ function render(data) {
   const mktTick = lastTick && lastTick.windowStart === data.windowStart ? lastTick : null;
   renderMarkets(data.markets || [], mktTick);
 
-  /* positions */
-  renderPositions(data.positions || [], $('positionsGrid'), $('openCount'));
-
-  /* resolved */
-  renderResults(data.resolvedPositions || [], $('resultsGrid'));
-
-  /* feed */
-  renderFeed(data.trades || [], $('feedGrid'), $('tradeCount'));
-
-  /* secondary engine */
-  renderSecondary(data.secondary || null);
-
-  /* logs */
-  renderLogs();
+  /* engine towers */
+  renderEngines(data);
 
   $('tickInfo').textContent = data.trackedTokens + ' TOKENS';
 }
@@ -443,8 +456,11 @@ function renderTopStrip(data) {
   }
   grid.innerHTML = open.slice(0,8).map(pos => {
     const unrealized = pos.unrealized || 0;
-    const eng = pos.engine ? '<span class="sc-engine">'+esc(pos.engine)+'</span>' : '';
-    const sl = pos.stopLossPrice != null ? 'SL '+prc(pos.stopLossPrice) : 'no SL';
+    const isB = pos.engine === '0.30';
+    const eng = isB
+      ? '<span class="sc-engine" style="color:#ffd166;border-color:#ffd16644">ENGINE B</span>'
+      : '<span class="sc-engine" style="color:#38d6ff;border-color:#38d6ff44">ENGINE A</span>';
+    const sl = 'no SL · hold to resolution';
     return '<div class="strip-card">'
       + '<div class="sc-name">'+eng+'⚡ '+esc(pos.asset.toUpperCase())+' '+pos.outcome+'</div>'
       + '<div class="sc-meta">'+pos.shares+' SH @ '+prc(pos.entryPrice)+' · Mart #'+pos.martingaleIndex+'</div>'
@@ -626,39 +642,55 @@ function renderFeed(trades, grid, counter) {
 }
 
 
-/* ─── Independent 0.30 Engine ─── */
-function renderSecondary(sec) {
-  const panel = $('secondaryPanel');
-  if (!sec) { panel.style.display = 'none'; return; }
-  panel.style.display = 'block';
+/* ─── Engine towers: A (0.70→0.60) and B (0.30 both-side) ─── */
+function statsBox(label, value, color) {
+  return '<div class="estat"><div class="l">'+label+'</div><div class="v '+(color||'')+'">'+value+'</div></div>';
+}
+function renderEngines(data) {
+  const A = data.engine1 ? data.engine1 : {
+    name:'Engine A', realizedPnl:data.realizedPnl, wins:data.wins, losses:data.losses,
+    winRate:data.winRate, makerRebateAccrued:data.makerRebateAccrued,
+    positions:[], resolvedPositions:[], trades:[], logs:[],
+  };
+  const B = data.secondary ? data.secondary : {
+    name:'Engine B 0.30', realizedPnl:0, wins:0, losses:0, winRate:null,
+    makerRebateAccrued:0, positions:[], resolvedPositions:[], trades:[], logs:[],
+  };
 
-  const mg = sec.martingale && sec.martingale.btc ? sec.martingale.btc : { shares: 133, losses: 0 };
-  $('secondaryTag').textContent = (sec.engine5 || sec.name || '0.30') + ' · ' + mg.shares + ' SH next · loss streak ' + (sec.consecutiveLosses||0);
+  $('engASub').textContent = (A.strategy||'A') + ' · shared cap $' + cash(data.bankroll);
+  $('engAStats').innerHTML =
+    statsBox('Bankroll', cash(data.bankroll), 'white')
+    + statsBox('Realized', money(A.realizedPnl), A.realizedPnl>0?'green':A.realizedPnl<0?'red':'')
+    + statsBox('W / L', (A.wins||0)+'/'+(A.losses||0), '')
+    + statsBox('Win%', A.winRate!=null?A.winRate.toFixed(0)+'%':'—','')
+    + statsBox('Next SH', ((A.martingale&&A.martingale.btc&&A.martingale.btc.shares)||data.config.baseShares||100), 'gold')
+    + statsBox('Mtg #', (A.martingale&&A.martingale.btc&&A.martingale.btc.losses)||0, '')
+    + statsBox('Rebate est.', cash(A.makerRebateAccrued||0), 'gold')
+    + statsBox('Max Streak', A.maxConsecutiveLosses||0, '');
 
-  $('secondaryConfig').innerHTML = [
-    ['Limit price', sec.config.limitPrice.toFixed(2)],
-    ['Base shares', sec.config.baseShares + ' SH'],
-    ['Mult', sec.config.multiplier.toFixed(1) + 'x on loss'],
-    ['Stop loss', 'None'],
-    ['TP', 'Resolution'],
-    ['Next bet', mg.shares + ' SH' + (mg.losses ? ' (losses ' + mg.losses + ')' : '')],
-    ['Maker fee',        '0 (limit/free)'],
-    ['Rebate est.',      cash(sec.makerRebateAccrued||0)],
-  ].map(r => '<div class="config-item">'+r[0]+'<b>'+r[1]+'</b></div>').join('');
+  renderPositions(A.positions || [], $('engAPositions'), $('engAOpenCount'));
+  renderResults(A.resolvedPositions || [], $('engAResults'));
+  $('engACounts').textContent = (A.resolvedPositions||[]).length + ' settled';
+  renderFeed(A.trades || [], $('engAFeed'), $('engATradeCount'));
+  renderEngineLogs($('engALogs'), $('engALogCount'), logsA);
 
-  $('secondaryKpis').innerHTML = [
-    ['0.30 Realized P&L', money(sec.realizedPnl), sec.realizedPnl>0?'green':sec.realizedPnl<0?'red':''],
-    ['0.30 Unrealized',   money(sec.unrealizedPnl), sec.unrealizedPnl>0?'green':sec.unrealizedPnl<0?'red':''],
-    ['0.30 Wins',         sec.wins||0, 'green'],
-    ['0.30 Losses',       sec.losses||0, 'red'],
-    ['0.30 Win Rate',     sec.winRate!=null ? sec.winRate.toFixed(0)+'%' : '—', 'white'],
-    ['0.30 Rebate est.',  cash(sec.makerRebateAccrued||0), 'gold'],
-    ['0.30 Max Loss Streak', sec.maxConsecutiveLosses||0, sec.maxConsecutiveLosses>=3?'red':'white'],
-  ].map(([l,v,c]) => '<div class="kpi"><div class="label">'+l+'</div><div class="value '+(c||'')+'">'+v+'</div></div>').join('');
+  $('engBSub').textContent = (B.strategy||'B') + ' · shared cap $' + cash(data.bankroll);
+  const mgB = (B.martingale && B.martingale.btc) ? B.martingale.btc : { shares:133, losses:0 };
+  $('engBStats').innerHTML =
+    statsBox('Bankroll', cash(data.bankroll), 'white')
+    + statsBox('Realized', money(B.realizedPnl), B.realizedPnl>0?'green':B.realizedPnl<0?'red':'')
+    + statsBox('W / L', (B.wins||0)+'/'+(B.losses||0), '')
+    + statsBox('Win%', B.winRate!=null?B.winRate.toFixed(0)+'%':'—','')
+    + statsBox('Next SH', mgB.shares, 'gold')
+    + statsBox('Mtg #', mgB.losses, '')
+    + statsBox('Rebate est.', cash(B.makerRebateAccrued||0), 'gold')
+    + statsBox('Max Streak', B.maxConsecutiveLosses||0, '');
 
-  renderPositions(sec.positions || [], $('secondaryPositions'), $('secondaryOpenCount'));
-  renderResults(sec.resolvedPositions || [], $('secondaryResults'));
-  renderFeed(sec.trades || [], $('secondaryFeed'), $('secondaryTradeCount'));
+  renderPositions(B.positions || [], $('engBPositions'), $('engBOpenCount'));
+  renderResults(B.resolvedPositions || [], $('engBResults'));
+  $('engBCounts').textContent = (B.resolvedPositions||[]).length + ' settled';
+  renderFeed(B.trades || [], $('engBFeed'), $('engBTradeCount'));
+  renderEngineLogs($('engBLogs'), $('engBLogCount'), logsB);
 }
 
 
@@ -676,19 +708,20 @@ function renderChart(curve) {
     + '<circle cx="'+last[0]+'" cy="'+last[1]+'" r="4" fill="'+color+'"/>';
 }
 
-/* ─── Logs ─── */
-function renderLogs() {
-  const panel = $('logsPanel');
-  const nearBottom = panel.scrollHeight - panel.scrollTop - panel.clientHeight < 60;
-  $('logCount').textContent = logs.length;
-  panel.innerHTML = logs.slice(-300).map(line => {
+/* ─── Logs (per engine) ─── */
+function renderEngineLogs(panel, countEl, arr) {
+  countEl.textContent = arr.length + ' LINES';
+  panel.innerHTML = arr.slice(-300).map(line => {
     let cls = '';
-    if (line.includes('BUY')) cls = 'log-info';
-    else if (line.includes('WIN')) cls = 'log-win';
+    if (line.includes('WIN')) cls = 'log-win';
     else if (line.includes('LOSS') || line.includes('⚠️')) cls = 'log-loss';
+    else if (line.includes('FILLED') || line.includes('LIMIT')) cls = 'log-info';
     return '<div class="log '+cls+'">'+esc(line)+'</div>';
   }).join('');
-  if (nearBottom) panel.scrollTop = panel.scrollHeight;
+}
+function renderLogs() {
+  renderEngineLogs($('engALogs'), $('engALogCount'), logsA);
+  renderEngineLogs($('engBLogs'), $('engBLogCount'), logsB);
 }
 
 /* ─── Refresh loop: live prices + floating P&L at 50ms ─── */

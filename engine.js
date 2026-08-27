@@ -530,7 +530,7 @@ class MartingaleBotEngine {
     const martingale = Object.fromEntries([...this.martingale.entries()].map(([asset, st]) => [asset, { ...st }]));
     return {
       mode: 'AUTONOMOUS DEMO',
-      strategy: 'Limit @0.60 after 0.70 trigger · SL @0.45 · TP=resolution · martingale next window',
+      strategy: 'Limit @0.60 after 0.70 trigger · no SL · TP=resolution · martingale next window',
       serverTime: Date.now(),
       windowStart: activeStart,
       connected: this.isClobFresh(), tickCount: this.tickCount, messageCount: this.messageCount,
@@ -569,6 +569,23 @@ class MartingaleBotEngine {
       },
       uptime: Math.floor((Date.now() - this.startedAt) / 1000),
       secondary: sec,
+      engine1: {
+        name: 'Engine A · 0.70→0.60 Limit Martingale',
+        strategy: 'Trigger ≥0.70 → maker limit @0.60 exact · no SL · TP=resolution · 2× martingale next window',
+        bankroll: this.capital.value,
+        realizedPnl: this.realizedPnl,
+        wins: this.wins, losses: this.losses,
+        winRate: this.wins + this.losses ? round2(this.wins / (this.wins + this.losses) * 100) : null,
+        makerRebateAccrued: this.makerRebateAccrued,
+        martingale,
+        consecutiveLosses: this.consecutiveLosses,
+        maxConsecutiveLosses: this.maxConsecutiveLosses,
+        positions: open,
+        resolvedPositions: this.resolvedPositions.slice(0, 30),
+        trades: this.trades.slice(-160).reverse(),
+        logs: this.logs.slice(-220),
+        config: { baseShares: BASE_SHARES, triggerPrice: TRIGGER_PRICE, limitPrice: LIMIT_PRICE, marketOpenWait: MARKET_OPEN_WAIT, resolutionPrice: RESOLUTION_PRICE },
+      },
     };
   }
 
