@@ -13,9 +13,10 @@ const START_BANKROLL = Number(process.env.START_BANKROLL || 20000);
 const EQUITY_FILE   = process.env.EQUITY_FILE || './equity.json';
 
 // Strategy params
-const MIN_CONFIDENCE    = Number(process.env.MIN_CONFIDENCE || 0.70);
+const HIGH_CONF         = Number(process.env.HIGH_CONF || 0.70);
+const LOW_CONF          = Number(process.env.LOW_CONF || 0.30);
 const ENTRY_ELAPSED      = Number(process.env.ENTRY_ELAPSED || 80);
-const CAP_PER_WINDOW    = Number(process.env.CAP_PER_WINDOW || 0.20);
+const FLAT_SHARES       = Number(process.env.FLAT_SHARES || 1000);
 const REVERSAL_PCT      = Number(process.env.REVERSAL_PCT || 0.05);
 const REVERSAL_CONSIST  = Number(process.env.REVERSAL_CONSIST || 0.60);
 const MIN_BET           = Number(process.env.MIN_BET || 1);
@@ -399,55 +400,69 @@ class BotEngine {
     const elapsed = Math.floor(now / 1000) - cs;
     const remaining = WINDOW_SECONDS - elapsed;
     if (remaining <= 0) return;
-    const betsThisWindow = this.positions.filter(p => p.windowStart === cs);
-    if (betsThisWindow.length >= 1) return;
+    if (elapsed < ENTRY_ELAPSED) return;
+
     const conf = this.signal.confidence;
     const lean = this.signal.lean;
     if (lean !== 'UP' && lean !== 'DOWN') return;
-    if (elapsed < ENTRY_ELAPSED) return;
-    if (conf < MIN_CONFIDENCE) return;
+
     const market = [...this.markets.values()].find(m => m.windowStart === cs && !m.resolved && !m.tradingClosed);
     if (!market) return;
-    const token = lean === 'UP' ? market.up : market.down;
-    const bestAsk = token.ask ?? token.mid ?? token.bid;
-    if (!Number.isFinite(bestAsk) || bestAsk <= 0 || bestAsk >= 1) return;
-    const maxPerWindow = round2(this.bankroll * CAP_PER_WINDOW);
-    const alreadySpent = betsThisWindow.reduce((s, p) => s + p.cost, 0);
-    const remainingBudget = round2(maxPerWindow - alreadySpent);
-    if (remainingBudget < MIN_BET) return;
-    const betAmount = Math.min(remainingBudget, round2(this.bankroll * CAP_PER_WINDOW * conf));
-    if (betAmount < MIN_BET) return;
-    const shares = Math.floor(betAmount / bestAsk);
-    if (shares < 1) return;
-    const cost = round2(shares * bestAsk);
-    const fee = takerFee(shares, bestAsk);
+
+    const upAsk = market.up.ask ?? market.up.mid ?? market.up.bid;
+    const dnAsk = market.down.ask ?? market.down.mid ?? market.down.bid;
+
+    // High confidence (>70%) → buy UP, close any DOWN
+    if (conf >= HIGH_CONF && lean === 'UP') {
+      const dnPos = this.positions.find(p => p.windowStart === cs && p.outcome === 'DOWN' && p.status === 'open');
+      if (dnPos) this.sellPosition(dnPos, 'FLIP_TO_UP');
+      const upPos = this.positions.find(p => p.windowStart === cs && p.outcome === 'UP' && p.status === 'open');
+      if (!upPos && Number.isFinite(upAsk) && upAsk > 0 && upAsk < 1) {
+        this.executeBuy(market, 'UP', upAsk, FLAT_SHARES, cs, market.windowEnd, conf);
+      }
+    }
+    // Low confidence (<30%) → buy DOWN, close any UP
+    else if (conf <= LOW_CONF && lean === 'DOWN') {
+      const upPos = this.positions.find(p => p.windowStart === cs && p.outcome === 'UP' && p.status === 'open');
+      if (upPos) this.sellPosition(upPos, 'FLIP_TO_DN');
+      const dnPos = this.positions.find(p => p.windowStart === cs && p.outcome === 'DOWN' && p.status === 'open');
+      if (!dnPos && Number.isFinite(dnAsk) && dnAsk > 0 && dnAsk < 1) {
+        this.executeBuy(market, 'DOWN', dnAsk, FLAT_SHARES, cs, market.windowEnd, conf);
+      }
+    }
+  }
+
+  executeBuy(market, outcome, price, shares, windowStart, windowEnd, conf) {
+    const cost = round2(shares * price);
+    const fee = takerFee(shares, price);
     const totalCost = round2(cost + fee);
-    if (totalCost > this.bankroll) return;
+    if (totalCost > this.bankroll) { this.log(`⚠️ SKIP ${outcome} ${shares}sh — need $${totalCost.toFixed(2)}, have $${this.bankroll.toFixed(2)}`); return; }
     this.bankroll = round2(this.bankroll - totalCost);
-    const betLabel = 'BET1';
+    const token = outcome === 'UP' ? market.up : market.down;
     const pos = {
       slug: market.slug, asset: market.asset, conditionId: market.conditionId,
-      outcome: lean, tokenId: token.tokenId,
-      shares, entryPrice: bestAsk, cost, fee, totalCost,
-      status: 'open', openedAt: now, markPrice: token.mid,
-      windowStart: cs, windowEnd: market.windowEnd,
+      outcome, tokenId: token.tokenId,
+      shares, entryPrice: price, cost, fee, totalCost,
+      status: 'open', openedAt: Date.now(), markPrice: token.mid,
+      windowStart, windowEnd,
       signalConf: conf, signalScore: this.signal.score,
-      signalIndicators: { ...this.signal.indicators }, betLabel,
+      signalIndicators: { ...this.signal.indicators }, betLabel: outcome,
       exitReason: null, exitPrice: null, closedAt: null, pnl: null,
     };
     this.positions.push(pos);
-    this.trades.push({ timestamp: now, type: 'BUY', outcome: lean, shares, price: bestAsk, cost, fee, confidence: conf, score: this.signal.score, markPrice: token.mid, betLabel });
-    this.log(`⚡ ${betLabel} ${lean} ${shares}sh @${bestAsk.toFixed(3)} · conf ${(conf * 100).toFixed(0)}% · cost $${cost.toFixed(2)}`);
+    this.trades.push({ timestamp: Date.now(), type: 'BUY', outcome, shares, price, cost, fee, confidence: conf, score: this.signal.score, markPrice: token.mid, betLabel: outcome });
+    this.log(`⚡ BUY ${outcome} ${shares}sh @${price.toFixed(3)} · conf ${(conf * 100).toFixed(0)}% · cost $${cost.toFixed(2)}`);
     this.recordEquity();
   }
 
 
   evaluateExit() {
+    // Exits are controlled by the confidence flipper (evaluateEntry).
+    // This only refreshes mark prices for open positions.
     for (const p of this.positions) {
       if (p.status !== 'open') continue;
       const market = this.markets.get(p.slug);
       if (market) { const token = p.outcome === 'UP' ? market.up : market.down; if (Number.isFinite(token?.mid)) p.markPrice = token.mid; }
-      if (this.isTickReversal(p.outcome)) this.sellPosition(p, 'TICK_REVERSAL');
     }
   }
 
@@ -596,7 +611,7 @@ class BotEngine {
       trades: this.trades.slice(-80).reverse(),
       equityCurve: sampleCurve(this.equityCurve, 1500),
       logs: this.logs.slice(-220),
-      config: { minConfidence: MIN_CONFIDENCE, entryElapsed: ENTRY_ELAPSED, capPerWindow: CAP_PER_WINDOW, reversalPct: REVERSAL_PCT, reversalConsist: REVERSAL_CONSIST, takerFeeRate: TAKER_FEE_RATE },
+      config: { highConf: HIGH_CONF, lowConf: LOW_CONF, flatShares: FLAT_SHARES, entryElapsed: ENTRY_ELAPSED, reversalPct: REVERSAL_PCT, reversalConsist: REVERSAL_CONSIST, takerFeeRate: TAKER_FEE_RATE },
       connected: this.isClobFresh(),
       uptime: Math.floor((now - this.startedAt) / 1000),
       tickCount: this.tickHistory.length,
@@ -626,8 +641,8 @@ class BotEngine {
     // Equity snapshot
     setInterval(() => this.recordEquity(), 2000);
 
-    this.log(`🚀 Model Bot started | conf ≥${(MIN_CONFIDENCE*100).toFixed(0)}% after ${ENTRY_ELAPSED}s · 1 bet/window · ${(CAP_PER_WINDOW*100).toFixed(0)}% cap`);
+    this.log(`🚀 Model Bot started | >${(HIGH_CONF*100).toFixed(0)}%→UP · <${(LOW_CONF*100).toFixed(0)}%→DOWN · flip ${FLAT_SHARES}sh · after ${ENTRY_ELAPSED}s`);
   }
 }
 
-module.exports = { BotEngine, loadEquityFile, config: { ASSETS, START_BANKROLL, MIN_CONFIDENCE, ENTRY_ELAPSED, CAP_PER_WINDOW, REVERSAL_PCT, REVERSAL_CONSIST, TAKER_FEE_RATE, WINDOW_SECONDS } };
+module.exports = { BotEngine, loadEquityFile, config: { ASSETS, START_BANKROLL, HIGH_CONF, LOW_CONF, FLAT_SHARES, ENTRY_ELAPSED, REVERSAL_PCT, REVERSAL_CONSIST, TAKER_FEE_RATE, WINDOW_SECONDS } };
