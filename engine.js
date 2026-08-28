@@ -4,9 +4,9 @@
 const GAMMA_API     = process.env.GAMMA_API || 'https://gamma-api.polymarket.com';
 const CLOB_REST     = process.env.CLOB_REST || 'https://clob.polymarket.com';
 const BINANCE_API   = process.env.BINANCE_API || 'https://api.binance.com';
-const CLOB_POLL_MS  = Number(process.env.CLOB_POLL_MS || 1500);
-const CLOB_FRESH_MS = Number(process.env.CLOB_FRESH_MS || 5000);
-const TICK_POLL_MS  = Number(process.env.TICK_POLL_MS || 2000);
+const CLOB_POLL_MS  = Number(process.env.CLOB_POLL_MS || 1000);
+const CLOB_FRESH_MS = Number(process.env.CLOB_FRESH_MS || 4000);
+const TICK_POLL_MS  = Number(process.env.TICK_POLL_MS || 1000);
 const WINDOW_SECONDS = 300;
 const ASSETS        = ['btc'];
 const START_BANKROLL = Number(process.env.START_BANKROLL || 20000);
@@ -80,6 +80,7 @@ class BotEngine {
 
     // Signal
     this.signal = { score: 0, confidence: 0, lean: 'NEUTRAL', updatedAt: null, indicators: {} };
+    this.lastSignalEvalAt = 0;
 
     // Position (one at a time, max)
     this.positions = [];
@@ -251,6 +252,13 @@ class BotEngine {
         this.tickHistory.push({ t: now, p: price });
         if (this.tickHistory.length > 120) this.tickHistory.shift();
         this.tickFetchedAt = now;
+        // React immediately on fresh market data instead of waiting for the next loop tick.
+        const cs = windowStartFor(now);
+        const elapsed = Math.floor(now / 1000) - cs;
+        if (elapsed >= ENTRY_ELAPSED && now - (this.lastSignalEvalAt || 0) >= 300) {
+          this.computeSignal();
+          this.evaluateEntry();
+        }
       }
     } catch (_) {} finally { this.tickFetching = false; }
   }
@@ -626,16 +634,16 @@ class BotEngine {
 
     // CLOB polling
     setInterval(() => this.pollClobBooks(), CLOB_POLL_MS);
-    // Binance tick polling (2s)
+    // Binance tick polling (1s)
     setInterval(() => this.fetchBinanceTick().catch(() => {}), TICK_POLL_MS);
     // Binance candle refresh (10s)
     setInterval(() => this.fetchBinanceCandles().catch(() => {}), 10000);
-    // Signal recomputation (every 3s)
-    setInterval(() => { this.computeSignal(); this.evaluateEntry(); }, 3000);
-    // Exit check (every 2s)
-    setInterval(() => { this.evaluateExit(); }, 2000);
-    // Resolution check (every 5s)
-    setInterval(() => { this.resolveByBinance().catch(() => {}); }, 5000);
+    // Signal recomputation (every 1s)
+    setInterval(() => { this.lastSignalEvalAt = Date.now(); this.computeSignal(); this.evaluateEntry(); }, 1000);
+    // Exit check (every 1s)
+    setInterval(() => { this.evaluateExit(); }, 1000);
+    // Resolution check (every 3s)
+    setInterval(() => { this.resolveByBinance().catch(() => {}); }, 3000);
     // Discovery retry
     setInterval(() => this.retryDiscovery().catch(() => {}), 1500);
     // Equity snapshot
