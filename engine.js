@@ -409,27 +409,27 @@ class BotEngine {
     const market = [...this.markets.values()].find(m => m.windowStart === cs && !m.resolved && !m.tradingClosed);
     if (!market) return;
 
-    const upAsk = market.up.ask ?? market.up.mid ?? market.up.bid;
-    const dnAsk = market.down.ask ?? market.down.mid ?? market.down.bid;
-
-    // High confidence (>70%) → buy UP, close any DOWN
-    if (conf >= HIGH_CONF && lean === 'UP') {
+    const upProb = lean === 'UP' ? conf : (1 - conf);
+    if (upProb >= HIGH_CONF) {
+      // Strong UP signal → buy UP, close any DOWN
       const dnPos = this.positions.find(p => p.windowStart === cs && p.outcome === 'DOWN' && p.status === 'open');
       if (dnPos) this.sellPosition(dnPos, 'FLIP_TO_UP');
       const upPos = this.positions.find(p => p.windowStart === cs && p.outcome === 'UP' && p.status === 'open');
-      if (!upPos && Number.isFinite(upAsk) && upAsk > 0 && upAsk < 1) {
-        this.executeBuy(market, 'UP', upAsk, FLAT_SHARES, cs, market.windowEnd, conf);
-      }
-    }
-    // Low confidence (<30%) → buy DOWN, close any UP
-    else if (conf <= LOW_CONF && lean === 'DOWN') {
+      if (!upPos) this.tryBuy(market, 'UP', cs, market.windowEnd, upProb);
+    } else if (upProb <= LOW_CONF) {
+      // Strong DOWN signal → buy DOWN, close any UP
       const upPos = this.positions.find(p => p.windowStart === cs && p.outcome === 'UP' && p.status === 'open');
       if (upPos) this.sellPosition(upPos, 'FLIP_TO_DN');
       const dnPos = this.positions.find(p => p.windowStart === cs && p.outcome === 'DOWN' && p.status === 'open');
-      if (!dnPos && Number.isFinite(dnAsk) && dnAsk > 0 && dnAsk < 1) {
-        this.executeBuy(market, 'DOWN', dnAsk, FLAT_SHARES, cs, market.windowEnd, conf);
-      }
+      if (!dnPos) this.tryBuy(market, 'DOWN', cs, market.windowEnd, upProb);
     }
+  }
+
+  tryBuy(market, outcome, windowStart, windowEnd, upProb) {
+    const token = outcome === 'UP' ? market.up : market.down;
+    const price = token.ask ?? token.mid ?? token.bid;
+    if (!Number.isFinite(price) || price <= 0 || price >= 1) return;
+    this.executeBuy(market, outcome, price, FLAT_SHARES, windowStart, windowEnd, upProb);
   }
 
   executeBuy(market, outcome, price, shares, windowStart, windowEnd, conf) {
