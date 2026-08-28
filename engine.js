@@ -15,7 +15,7 @@ const EQUITY_FILE   = process.env.EQUITY_FILE || './equity.json';
 // Strategy params
 const HIGH_CONF         = Number(process.env.HIGH_CONF || 0.70);
 const LOW_CONF          = Number(process.env.LOW_CONF || 0.30);
-const ENTRY_ELAPSED      = Number(process.env.ENTRY_ELAPSED || 0);
+const ENTRY_ELAPSED      = Number(process.env.ENTRY_ELAPSED || 10);
 const FLAT_SHARES       = Number(process.env.FLAT_SHARES || 1000);
 const REVERSAL_PCT      = Number(process.env.REVERSAL_PCT || 0.05);
 const REVERSAL_CONSIST  = Number(process.env.REVERSAL_CONSIST || 0.60);
@@ -255,7 +255,7 @@ class BotEngine {
         // React immediately on fresh market data instead of waiting for the next loop tick.
         const cs = windowStartFor(now);
         const elapsed = Math.floor(now / 1000) - cs;
-        if (elapsed < WINDOW_SECONDS && now - (this.lastSignalEvalAt || 0) >= 300) {
+        if (elapsed >= ENTRY_ELAPSED && elapsed < WINDOW_SECONDS && now - (this.lastSignalEvalAt || 0) >= 300) {
           this.computeSignal();
           this.evaluateEntry();
         }
@@ -408,6 +408,7 @@ class BotEngine {
     const elapsed = Math.floor(now / 1000) - cs;
     const remaining = WINDOW_SECONDS - elapsed;
     if (remaining <= 0) return;
+    if (elapsed < ENTRY_ELAPSED) return;
 
     const conf = this.signal.confidence;
     const lean = this.signal.lean;
@@ -648,7 +649,7 @@ class BotEngine {
     // Equity snapshot
     setInterval(() => this.recordEquity(), 2000);
 
-    this.log(`🚀 ConfidenceBot started | conf≥${(HIGH_CONF*100).toFixed(0)}% → follow signal (UP/DOWN) · ${FLAT_SHARES}sh · hold to resolution`);
+    this.log(`🚀 ConfidenceBot started | conf≥${(HIGH_CONF*100).toFixed(0)}% → follow signal (UP/DOWN) · ${FLAT_SHARES}sh · after ${ENTRY_ELAPSED}s wait · hold to resolution`);
   }
 }
 
