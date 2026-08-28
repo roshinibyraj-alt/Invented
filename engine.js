@@ -13,9 +13,8 @@ const START_BANKROLL = Number(process.env.START_BANKROLL || 20000);
 const EQUITY_FILE   = process.env.EQUITY_FILE || './equity.json';
 
 // Strategy params
-const BET1_CONF         = Number(process.env.BET1_CONF || 0.90);
-const BET2_CONF         = Number(process.env.BET2_CONF || 0.70);
-const BET2_ELAPSED      = Number(process.env.BET2_ELAPSED || 180);
+const MIN_CONFIDENCE    = Number(process.env.MIN_CONFIDENCE || 0.70);
+const ENTRY_ELAPSED      = Number(process.env.ENTRY_ELAPSED || 180);
 const CAP_PER_WINDOW    = Number(process.env.CAP_PER_WINDOW || 0.20);
 const REVERSAL_PCT      = Number(process.env.REVERSAL_PCT || 0.05);
 const REVERSAL_CONSIST  = Number(process.env.REVERSAL_CONSIST || 0.60);
@@ -98,7 +97,6 @@ class BotEngine {
     // Equity
     const seeded = (opts.initialEquity && Array.isArray(opts.initialEquity) && opts.initialEquity.length) ? opts.initialEquity.slice() : null;
     this.equityCurve = seeded || [{ t: Date.now(), equity: START_BANKROLL }];
-    this.confHistory = []; // [{t, conf}] for BET1 confirmation
     this.lastEquitySaveAt = 0;
   }
 
@@ -297,8 +295,6 @@ class BotEngine {
     const confidence = Math.min(Math.abs(score) / 7.0, 1.0);
     const lean = score > 0 ? 'UP' : score < 0 ? 'DOWN' : 'NEUTRAL';
     this.signal = { score: round5(score), confidence: round5(confidence), lean, updatedAt: Date.now(), indicators };
-    this.confHistory.push({ t: Date.now(), conf: confidence });
-    if (this.confHistory.length > 20) this.confHistory.shift();
   }
 
   _windowDelta(candles, windowStart) {
@@ -404,19 +400,12 @@ class BotEngine {
     const remaining = WINDOW_SECONDS - elapsed;
     if (remaining <= 0) return;
     const betsThisWindow = this.positions.filter(p => p.windowStart === cs);
-    if (betsThisWindow.length >= 2) return;
+    if (betsThisWindow.length >= 1) return;
     const conf = this.signal.confidence;
     const lean = this.signal.lean;
     if (lean !== 'UP' && lean !== 'DOWN') return;
-    let canEnter = false;
-    if (betsThisWindow.length === 0 && conf >= BET1_CONF) {
-      // Require 2 consecutive ticks ≥ 90% to prevent spike entries
-      const recent = this.confHistory.slice(-3);
-      const confirmed = recent.length >= 2 && recent.slice(-2).every(h => h.conf >= BET1_CONF);
-      if (confirmed) canEnter = true;
-    }
-    if (betsThisWindow.length >= 1 && elapsed >= BET2_ELAPSED && conf >= BET2_CONF) canEnter = true;
-    if (!canEnter) return;
+    if (elapsed < ENTRY_ELAPSED) return;
+    if (conf < MIN_CONFIDENCE) return;
     const market = [...this.markets.values()].find(m => m.windowStart === cs && !m.resolved && !m.tradingClosed);
     if (!market) return;
     const token = lean === 'UP' ? market.up : market.down;
@@ -435,7 +424,7 @@ class BotEngine {
     const totalCost = round2(cost + fee);
     if (totalCost > this.bankroll) return;
     this.bankroll = round2(this.bankroll - totalCost);
-    const betLabel = betsThisWindow.length === 0 ? 'BET1' : 'BET2';
+    const betLabel = 'BET1';
     const pos = {
       slug: market.slug, asset: market.asset, conditionId: market.conditionId,
       outcome: lean, tokenId: token.tokenId,
@@ -607,7 +596,7 @@ class BotEngine {
       trades: this.trades.slice(-80).reverse(),
       equityCurve: sampleCurve(this.equityCurve, 1500),
       logs: this.logs.slice(-220),
-      config: { bet1Conf: BET1_CONF, bet2Conf: BET2_CONF, bet2Elapsed: BET2_ELAPSED, capPerWindow: CAP_PER_WINDOW, reversalPct: REVERSAL_PCT, reversalConsist: REVERSAL_CONSIST, takerFeeRate: TAKER_FEE_RATE },
+      config: { minConfidence: MIN_CONFIDENCE, entryElapsed: ENTRY_ELAPSED, capPerWindow: CAP_PER_WINDOW, reversalPct: REVERSAL_PCT, reversalConsist: REVERSAL_CONSIST, takerFeeRate: TAKER_FEE_RATE },
       connected: this.isClobFresh(),
       uptime: Math.floor((now - this.startedAt) / 1000),
       tickCount: this.tickHistory.length,
@@ -637,8 +626,8 @@ class BotEngine {
     // Equity snapshot
     setInterval(() => this.recordEquity(), 2000);
 
-    this.log(`🚀 Model Bot started | BET1 ≥90% anytime · BET2 ≥70% after 180s · max 2/window · 20% cap`);
+    this.log(`🚀 Model Bot started | conf ≥${(MIN_CONFIDENCE*100).toFixed(0)}% after ${ENTRY_ELAPSED}s · 1 bet/window · ${(CAP_PER_WINDOW*100).toFixed(0)}% cap`);
   }
 }
 
-module.exports = { BotEngine, loadEquityFile, config: { ASSETS, START_BANKROLL, BET1_CONF, BET2_CONF, BET2_ELAPSED, CAP_PER_WINDOW, REVERSAL_PCT, REVERSAL_CONSIST, TAKER_FEE_RATE, WINDOW_SECONDS } };
+module.exports = { BotEngine, loadEquityFile, config: { ASSETS, START_BANKROLL, MIN_CONFIDENCE, ENTRY_ELAPSED, CAP_PER_WINDOW, REVERSAL_PCT, REVERSAL_CONSIST, TAKER_FEE_RATE, WINDOW_SECONDS } };
