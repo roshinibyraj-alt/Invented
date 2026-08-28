@@ -2,21 +2,15 @@
 const express = require('express');
 const http = require('http');
 const path = require('path');
-const { Server } = require('socket.io');
 const { BotEngine, loadEquityFile } = require('./engine');
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, { pingInterval: 2000, pingTimeout: 5000 });
 const port = process.env.PORT || 8080;
 const EQUITY_FILE = process.env.EQUITY_FILE || path.join(__dirname, 'equity.json');
 const initialEquity = loadEquityFile(EQUITY_FILE);
 
-const engine = new BotEngine({
-  initialEquity,
-  onTick: (markets, messageCount) => io.emit('tick', { t: Date.now(), windowStart: markets[0]?.windowStart ?? null, messageCount, markets }),
-  onLog: (line) => { console.log(line); io.emit('log', line); },
-});
+const engine = new BotEngine({ initialEquity });
 
 const dashboard = `<!DOCTYPE html>
 <html lang="en">
@@ -119,7 +113,7 @@ svg{width:100%;height:100%}
     </div>
     <div class="pills">
       <div class="pill live" id="statusPill">● CONNECTING</div>
-      <div class="pill" id="tickPill">ticks 0</div>
+      <div class="pill" id="tickPill">polls 0</div>
       <div class="pill blue" id="uptimePill">00:00:00</div>
     </div>
   </div>
@@ -175,11 +169,10 @@ svg{width:100%;height:100%}
     </div>
   </div>
 </div>
-<script src="/socket.io/socket.io.js"></script>
 <script>
 const $=id=>document.getElementById(id);
 const S={};
-let lastTick=null,lastRender=0;
+let pollCount=0;
 
 function esc(s){return String(s).replace(/[&<>"]/g,c=>({'+':'&#43;','&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
 function money(n){n=n||0;return(n>=0?'+':'')+('$'+Math.abs(n).toFixed(2))}
@@ -187,41 +180,29 @@ function cash(n){return'$'+Number(n||0).toFixed(2)}
 function num(n){return Number(n||0).toLocaleString()}
 function prc(n){return n!=null?Number(n).toFixed(3):'—'}
 function tone(n){return n>=0?'color:#00ff9d':'color:#ff5566'}
-
 function uptimeFmt(s){const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),ss=s%60;return String(h).padStart(2,'0')+':'+String(m).padStart(2,'0')+':'+String(ss).padStart(2,'0')}
 
 function renderMarkets(markets) {
   const c=$('marketsContainer');
   if(!markets||!markets.length){c.innerHTML='<div class="empty">Waiting for market discovery...</div>';return}
   c.innerHTML=markets.map(m=>{
-    const remaining=m.remaining||0;
-    const upMid=m.up.mid!=null?prc(m.up.mid):'—';
-    const dnMid=m.down.mid!=null?prc(m.down.mid):'—';
+    const r=m.remaining||0;
     return '<div class="market-card">'
       +'<div class="market-top"><div><div class="asset-name">'+esc(m.asset.toUpperCase())+' 5m</div>'
       +'<div class="asset-slug">'+esc(m.title)+'</div></div>'
-      +'<div class="timer">'+remaining+'s<small>remaining</small></div></div>'
+      +'<div class="timer">'+r+'s<small>remaining</small></div></div>'
       +'<div class="sides">'
       +'<div class="side"><div class="side-label up">▲ UP</div>'
-      +'<div class="mid" style="color:#28e0a5" id="up-'+m.slug+'">'+upMid+'</div>'
+      +'<div class="mid" style="color:#28e0a5">'+prc(m.up.mid)+'</div>'
       +'<div class="quote">Bid '+prc(m.up.bid)+' · Ask '+prc(m.up.ask)+'</div>'
       +(m.up.spread!=null?'<div class="spread-badge">spr '+prc(m.up.spread)+'</div>':'')+'</div>'
       +'<div class="side"><div class="side-label down">▼ DOWN</div>'
-      +'<div class="mid" style="color:#ff6b81" id="dn-'+m.slug+'">'+dnMid+'</div>'
+      +'<div class="mid" style="color:#ff6b81">'+prc(m.down.mid)+'</div>'
       +'<div class="quote">Bid '+prc(m.down.bid)+' · Ask '+prc(m.down.ask)+'</div>'
       +(m.down.spread!=null?'<div class="spread-badge">spr '+prc(m.down.spread)+'</div>':'')+'</div>'
       +'</div></div>';
   }).join('');
   $('windowCount').textContent=markets.length+' WINDOW(S)';
-}
-
-function renderLivePrices(tick) {
-  if(!tick||!tick.markets)return;
-  for(const m of tick.markets) {
-    const ue=$('up-'+m.slug), de=$('dn-'+m.slug);
-    if(ue)ue.textContent=prc(m.up.mid);
-    if(de)de.textContent=prc(m.down.mid);
-  }
 }
 
 function renderKpis(d) {
@@ -235,14 +216,11 @@ function renderKpis(d) {
   $('maxConsecLoss').textContent='max '+(d.maxConsecutiveLosses||0);
   $('maxDrawdown').textContent=cash(d.maxDrawdown);
   $('rebate').textContent=cash(d.makerRebateAccrued);
-  $('tickPill').textContent='ticks '+(d.tickCount||0);
+  pollCount++;
+  $('tickPill').textContent='polls '+pollCount;
   const sp=$('statusPill');
   if(d.connected){sp.textContent='● LIVE';sp.className='pill live'}else{sp.textContent='● OFFLINE';sp.className='pill bad'}
   $('uptimePill').textContent=uptimeFmt(d.uptime||0);
-}
-
-function renderMartingale(mg) {
-  // Per-asset martingale state: { btc: { shares, losses } }
 }
 
 function renderPositions(positions) {
@@ -252,7 +230,6 @@ function renderPositions(positions) {
     const badge=p.outcome==='UP'?'tag-up':'tag-down';
     const title=esc(p.asset.toUpperCase())+' '+p.outcome;
     const unrealized=p.unrealized||0;
-    const markVal=p.markValue||0;
     const tpNote=p.tpSold?'TP SOLD @'+prc(p.tpPrice):'TP PENDING @0.75';
     const tpClass=p.tpSold?'pos-badge tp':'pos-badge holding';
     const tpBadgeLabel=p.tpSold?'TP DONE':'HOLDING';
@@ -261,25 +238,16 @@ function renderPositions(positions) {
       +'<div style="display:flex;gap:4px">'
       +'<span class="'+tpClass+'">'+tpBadgeLabel+'</span>'
       +'</div></div>'
-      +'<div class="pos-pnl '+tone(unrealized)+'" id="floating-'+p.id+'">'+money(unrealized)+'</div>'
+      +'<div class="pos-pnl" style="'+tone(unrealized)+'">'+money(unrealized)+'</div>'
       +'<div class="pos-meta">Entry '+cash(p.entryPrice)+' · Remaining '+num(p.remainingShares)+'sh · Cost '+cash(p.cost)+'</div>'
       +'<div class="pos-tp-row">'
       +'<div class="pos-tp">Total<b>'+num(p.shares)+' SH</b></div>'
       +'<div class="pos-tp">Remaining<b>'+num(p.remainingShares)+' SH</b></div>'
       +'<div class="pos-tp">TP Status<b>'+tpNote+'</b></div>'
       +'<div class="pos-tp">Mark<b>'+prc(p.markPrice||p.entryPrice)+'</b></div>'
-      +'</div>'
-      +'</div>';
+      +'</div></div>';
   }).join('');
   $('posCount').textContent=positions.length+' POSITION(S)';
-}
-
-function updateFloating() {
-  if(!S||!S.positions)return;
-  for(const p of S.positions) {
-    const fl=$('floating-'+p.id);
-    if(fl){const u=p.unrealized||0; fl.textContent=money(u); fl.style.color=u>=0?'#00ff9d':'#ff5566';}
-  }
 }
 
 function renderResolved(results) {
@@ -293,7 +261,7 @@ function renderResolved(results) {
     return '<div class="result-card">'
       +'<div class="result-header"><div class="pos-name">⚡ '+esc((r.asset||'').toUpperCase())+' '+(r.outcome||'')+' · mg#'+(r.martingaleIndex||0)+tpInfo+'</div>'
       +'<span class="pos-badge '+(won?'won':'lost')+'">'+icon+' '+label+'</span></div>'
-      +'<div class="result-pnl '+(r.pnl>=0?'color:#00ff9d':'color:#ff5566')+'">'+money(r.pnl)+'</div>'
+      +'<div class="result-pnl" style="'+(r.pnl>=0?'color:#00ff9d':'color:#ff5566')+'">'+money(r.pnl)+'</div>'
       +'<div class="result-meta">Payout '+cash(r.payout)+' · Cost '+cash(r.cost)+'</div>'
       +'</div>';
   }).join('');
@@ -309,7 +277,7 @@ function renderFeed(trades) {
     const tagClass=isTp?'tag-tp':(t.outcome==='UP'?'tag-up':'tag-down');
     const label=isTp?'💰 TP SELL':(t.asset.toUpperCase()+' '+(t.outcome||''));
     return '<div class="feed-item">'
-      +'<div class="feed-time">'+new Date(t.timestamp).toLocaleTimeString()+' · '+esc(t.orderType||'')</div>'
+      +'<div class="feed-time">'+new Date(t.timestamp).toLocaleTimeString()+' · '+esc(t.orderType||'')+'</div>'
       +'<div class="feed-main"><span class="tag '+tagClass+'">'+label+'</span> '
       +num(t.shares)+' SH @ '+prc(t.price)+'</div>'
       +'<div class="feed-detail">'+cash(t.cost)+(t.fee?' · fee '+cash(t.fee):'')+' · rebate '+cash(t.rebateEstimate||0)+'</div>'
@@ -367,29 +335,21 @@ function fullRender(d) {
   renderChart(d.equityCurve);
 }
 
-// ── Socket Events ──────────────────────────────────────────
-let socket=io();
-socket.on('state', d=>fullRender(d));
-socket.on('tick', tick=>{lastTick=tick;renderLivePrices(tick);});
-socket.on('connect', ()=>$('statusPill').textContent='● CONNECTED');
-socket.on('disconnect', ()=>$('statusPill').textContent='● RECONNECTING');
-socket.on('log', line=>{
-  const c=$('logContainer');
-  if(!c)return;
-  let cls='';
-  if(line.includes('WIN'))cls='log-win';
-  else if(line.includes('LOSS')||line.includes('⚠️'))cls='log-loss';
-  else if(line.includes('TP SELL')||line.includes('💰'))cls='log-tp';
-  else if(line.includes('FILLED')||line.includes('LIMIT')||line.includes('cancelled'))cls='log-info';
-  const div=document.createElement('div');
-  div.className='log '+cls;
-  div.textContent=line;
-  c.appendChild(div);
-  c.scrollTop=c.scrollHeight;
-});
-
-setInterval(()=>{if(lastTick&&lastTick.markets){renderLivePrices(lastTick);updateFloating();}},50);
-fetch('/api/status').then(r=>r.json()).then(d=>fullRender(d)).catch(()=>{});
+// Pure fetch polling — no websocket
+async function poll() {
+  try {
+    const r = await fetch('/api/status');
+    const d = await r.json();
+    fullRender(d);
+    $('statusPill').textContent = '● LIVE';
+    $('statusPill').className = 'pill live';
+  } catch(e) {
+    $('statusPill').textContent = '● OFFLINE';
+    $('statusPill').className = 'pill bad';
+  }
+}
+setInterval(poll, 1000);
+poll();
 </script>
 </body>
 </html>`;
@@ -397,9 +357,6 @@ fetch('/api/status').then(r=>r.json()).then(d=>fullRender(d)).catch(()=>{});
 app.get('/healthz', (_, res) => res.sendStatus(200));
 app.get('/api/status', (_, res) => res.json(engine.buildState()));
 app.get('/', (_, req) => req.type('html').send(dashboard));
-
-io.on('connection', (socket) => socket.emit('state', engine.buildState()));
-setInterval(() => io.emit('state', engine.buildState()), 250);
 
 server.listen(port, '0.0.0.0', () => {
   console.log(`CorrelBot dashboard listening on :${port}`);
