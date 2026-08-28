@@ -66,7 +66,7 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
 </head>
 <body><div class="wrap">
 <header class="topbar">
-<div class="brand"><div class="btc">₿</div><div><h1>ModelBot</h1><div class="sub">7-INDICATOR SIGNAL · Binance TICK-REVERSAL · CONFIDENCE SIZING · T-${'${'}ENTRY_T_MINUS}S ENTRY</div></div></div>
+<div class="brand"><div class="btc">₿</div><div><h1>ConfidenceBot</h1><div class="sub">7-INDICATOR SIGNAL · CONF≥70% FOLLOW SIGNAL · FLAT 1000 SH · HOLD TO RESOLUTION</div></div></div>
 <div class="status"><span id="statusPill" class="pill bad">OFFLINE</span><span id="tickPill" class="pill">TICKS 0</span><span id="uptimePill" class="pill blue">00:00:00</span></div>
 </header>
 <div class="metrics">
@@ -128,7 +128,7 @@ const prc=n=>n!=null?Number(n).toFixed(3):'—';
 const tone=n=>n>=0?'pos':'neg';
 function uptimeFmt(s){const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),ss=s%60;return String(h).padStart(2,'0')+':'+String(m).padStart(2,'0')+':'+String(ss).padStart(2,'0')}
 function renderMarket(m){const b=$('marketBody');if(!m){b.innerHTML='<div class="empty">Waiting for market...</div>';return}const r=m.remaining||0,e=m.elapsed||0;
-b.innerHTML='<div class="clock">'+r+'s<small> T+'+e+'s · ${'${'}ENTRY_T_MINUS}s entry</small></div><div class="prices">'
+b.innerHTML='<div class="clock">'+r+'s<small> T+'+e+'s · conf entry any time</small></div><div class="prices">'
 +'<div class="side up"><div class="side-name">▲ UP</div><div class="side-price">'+prc(m.up.mid)+'</div>'
 +'<div class="quote-row"><span>Bid</span><span>'+prc(m.up.bid)+'</span></div>'
 +'<div class="quote-row"><span>Ask</span><span>'+prc(m.up.ask)+'</span></div>'
@@ -170,8 +170,7 @@ function renderConfig(c){if(!c)return;const b=$('configBody');b.innerHTML='<div 
 +'<div class="mini"><div class="label">Sizing</div><div class="value">'+(c.flatShares??0)+' sh</div></div>'
 +'<div class="mini"><div class="label">Reversal</div><div class="value">'+(c.reversalPct??0)+'%</div></div>'
 +'<div class="mini"><div class="label">Reversal ≥</div><div class="value">'+((c.reversalConsist??0)*100)+'%</div></div>'
-+'<div class="mini"><div class="label">Fee</div><div class="value">'+((c.takerFeeRate??0)*100)+'%</div></div>'
-+'<div class="mini"><div class="label">Max Entry</div><div class="value">'+((c.maxEntryPrice??0.60).toFixed(2))+'</div></div>'}
++'<div class="mini"><div class="label">Fee</div><div class="value">'+((c.takerFeeRate??0)*100)+'%</div></div>'}
 function renderChart(c){const svg=$('equityChart');if(!c||!c.length){svg.innerHTML='';return}
 const v=c.map(p=>p.equity),lo=Math.min(...v),hi=Math.max(...v),rng=(hi-lo)||1;const W=700,H=120,P=12;
 const pts=c.map((p,i)=>[i/Math.max(1,c.length-1)*W,H-P-(p.equity-lo)/rng*(H-P*2)]);
