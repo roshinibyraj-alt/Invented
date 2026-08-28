@@ -409,36 +409,36 @@ class BotEngine {
     const market = [...this.markets.values()].find(m => m.windowStart === cs && !m.resolved && !m.tradingClosed);
     if (!market) return;
 
-    const upProb = lean === 'UP' ? conf : (1 - conf);
-    if (upProb >= HIGH_CONF) {
+    if (lean === 'UP' && conf >= HIGH_CONF) {
       // Strong UP signal → buy UP, close any DOWN
       const dnPos = this.positions.find(p => p.windowStart === cs && p.outcome === 'DOWN' && p.status === 'open');
       if (dnPos) this.sellPosition(dnPos, 'FLIP_TO_UP');
       const upPos = this.positions.find(p => p.windowStart === cs && p.outcome === 'UP' && p.status === 'open');
-      if (!upPos) this.tryBuy(market, 'UP', cs, market.windowEnd, upProb);
-    } else if (upProb <= LOW_CONF) {
+      if (!upPos) this.tryBuy(market, 'UP', cs, market.windowEnd);
+    } else if (lean === 'DOWN' && conf >= HIGH_CONF) {
       // Strong DOWN signal → buy DOWN, close any UP
       const upPos = this.positions.find(p => p.windowStart === cs && p.outcome === 'UP' && p.status === 'open');
       if (upPos) this.sellPosition(upPos, 'FLIP_TO_DN');
       const dnPos = this.positions.find(p => p.windowStart === cs && p.outcome === 'DOWN' && p.status === 'open');
-      if (!dnPos) this.tryBuy(market, 'DOWN', cs, market.windowEnd, upProb);
+      if (!dnPos) this.tryBuy(market, 'DOWN', cs, market.windowEnd);
     }
   }
 
-  tryBuy(market, outcome, windowStart, windowEnd, upProb) {
+  tryBuy(market, outcome, windowStart, windowEnd) {
     const token = outcome === 'UP' ? market.up : market.down;
     const price = token.ask ?? token.mid ?? token.bid;
     if (!Number.isFinite(price) || price <= 0 || price >= 1) return;
-    this.executeBuy(market, outcome, price, FLAT_SHARES, windowStart, windowEnd, upProb);
+    this.executeBuy(market, outcome, price, FLAT_SHARES, windowStart, windowEnd);
   }
 
-  executeBuy(market, outcome, price, shares, windowStart, windowEnd, conf) {
+  executeBuy(market, outcome, price, shares, windowStart, windowEnd) {
     const cost = round2(shares * price);
     const fee = takerFee(shares, price);
     const totalCost = round2(cost + fee);
     if (totalCost > this.bankroll) { this.log(`⚠️ SKIP ${outcome} ${shares}sh — need $${totalCost.toFixed(2)}, have $${this.bankroll.toFixed(2)}`); return; }
     this.bankroll = round2(this.bankroll - totalCost);
     const token = outcome === 'UP' ? market.up : market.down;
+    const conf = this.signal.confidence;
     const pos = {
       slug: market.slug, asset: market.asset, conditionId: market.conditionId,
       outcome, tokenId: token.tokenId,
@@ -611,7 +611,7 @@ class BotEngine {
       trades: this.trades.slice(-80).reverse(),
       equityCurve: sampleCurve(this.equityCurve, 1500),
       logs: this.logs.slice(-220),
-      config: { highConf: HIGH_CONF, lowConf: LOW_CONF, flatShares: FLAT_SHARES, entryElapsed: ENTRY_ELAPSED, reversalPct: REVERSAL_PCT, reversalConsist: REVERSAL_CONSIST, takerFeeRate: TAKER_FEE_RATE },
+      config: { highConf: HIGH_CONF, minConfidence: HIGH_CONF, lowConf: LOW_CONF, flatShares: FLAT_SHARES, sizingFactor: FLAT_SHARES, entryElapsed: ENTRY_ELAPSED, entryMinElapsed: ENTRY_ELAPSED, entryTMinus: Math.max(Math.floor((WINDOW_SECONDS - ENTRY_ELAPSED) / 60), 1), reversalPct: REVERSAL_PCT, reversalConsist: REVERSAL_CONSIST, takerFeeRate: TAKER_FEE_RATE },
       connected: this.isClobFresh(),
       uptime: Math.floor((now - this.startedAt) / 1000),
       tickCount: this.tickHistory.length,
