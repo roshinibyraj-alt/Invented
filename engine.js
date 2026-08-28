@@ -17,6 +17,7 @@ const HIGH_CONF         = Number(process.env.HIGH_CONF || 0.70);
 const LOW_CONF          = Number(process.env.LOW_CONF || 0.30);
 const ENTRY_ELAPSED      = Number(process.env.ENTRY_ELAPSED || 10);
 const FLAT_SHARES       = Number(process.env.FLAT_SHARES || 1000);
+const MARTINGALE_FACTOR = Number(process.env.MARTINGALE_FACTOR || 1.5);
 const REVERSAL_PCT      = Number(process.env.REVERSAL_PCT || 0.05);
 const REVERSAL_CONSIST  = Number(process.env.REVERSAL_CONSIST || 0.60);
 const MIN_BET           = Number(process.env.MIN_BET || 1);
@@ -90,6 +91,7 @@ class BotEngine {
     this.trades = [];
     this.wins = 0;
     this.losses = 0;
+    this.consecutiveLosses = 0;
     this.realizedPnl = 0;
     this.peakEquity = START_BANKROLL;
     this.maxDrawdown = 0;
@@ -429,11 +431,16 @@ class BotEngine {
     }
   }
 
+  nextShares() {
+    // 1.5x martingale: base shares multiplied by factor per consecutive loss.
+    return Math.round(FLAT_SHARES * Math.pow(MARTINGALE_FACTOR, this.consecutiveLosses));
+  }
+
   tryBuy(market, outcome, windowStart, windowEnd) {
     const token = outcome === 'UP' ? market.up : market.down;
     const price = token.ask ?? token.mid ?? token.bid;
     if (!Number.isFinite(price) || price <= 0 || price >= 1) return;
-    this.executeBuy(market, outcome, price, FLAT_SHARES, windowStart, windowEnd);
+    this.executeBuy(market, outcome, price, this.nextShares(), windowStart, windowEnd);
   }
 
   executeBuy(market, outcome, price, shares, windowStart, windowEnd) {
@@ -486,7 +493,8 @@ class BotEngine {
     p.closedAt = Date.now(); p.pnl = pnl; p.won = pnl >= 0;
     this.bankroll = round2(this.bankroll + netProceeds);
     this.realizedPnl = round2(this.realizedPnl + pnl);
-    if (pnl >= 0) this.wins++; else this.losses++;
+    if (pnl >= 0) { this.wins++; this.consecutiveLosses = 0; }
+    else { this.losses++; this.consecutiveLosses++; }
     this.log(`💰 EXIT ${reason} ${p.betLabel||''} ${p.outcome} ${p.shares}sh @${exitPrice.toFixed(3)} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`);
     this.resolvedPositions.unshift({ ...p });
     this.resolvedPositions = this.resolvedPositions.slice(0, 50);
@@ -550,7 +558,8 @@ class BotEngine {
 
     this.bankroll = round2(this.bankroll + netPayout);
     this.realizedPnl = round2(this.realizedPnl + pnl);
-    if (won) this.wins++; else this.losses++;
+    if (won) { this.wins++; this.consecutiveLosses = 0; }
+    else { this.losses++; this.consecutiveLosses++; }
 
     this.log(`🏁 RESOLUTION ${winner} (${openPrice.toFixed(0)}→${closePrice.toFixed(0)}) · ${p.outcome} ${won ? 'WIN' : 'LOSS'} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`);
     this.resolvedPositions.unshift({ ...p });
@@ -609,6 +618,8 @@ class BotEngine {
       winRate: this.wins + this.losses ? round2(this.wins / (this.wins + this.losses) * 100) : null,
       maxDrawdown: this.maxDrawdown,
       signal: this.signal,
+      consecutiveLosses: this.consecutiveLosses,
+      nextShares: this.nextShares(),
       positions: openPos.map(p => ({ outcome: p.outcome, shares: p.shares, entryPrice: p.entryPrice, cost: p.cost,
         betLabel: p.betLabel, markPrice: p.markPrice,
         unrealized: round2(p.shares * (p.markPrice ?? p.entryPrice) - p.cost - p.fee),
@@ -653,4 +664,4 @@ class BotEngine {
   }
 }
 
-module.exports = { BotEngine, loadEquityFile, config: { ASSETS, START_BANKROLL, HIGH_CONF, LOW_CONF, FLAT_SHARES, ENTRY_ELAPSED, REVERSAL_PCT, REVERSAL_CONSIST, TAKER_FEE_RATE, WINDOW_SECONDS } };
+module.exports = { BotEngine, loadEquityFile, config: { ASSETS, START_BANKROLL, HIGH_CONF, LOW_CONF, FLAT_SHARES, MARTINGALE_FACTOR, ENTRY_ELAPSED, REVERSAL_PCT, REVERSAL_CONSIST, TAKER_FEE_RATE, WINDOW_SECONDS } };

@@ -78,6 +78,7 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
 <div class="box"><div class="label">Window</div><div class="value" id="windowTime">—</div><div class="small" id="entryWindow"></div></div>
 <div class="box"><div class="label">Wins / Losses</div><div class="value" id="winLoss">0 / 0</div><div class="small" id="winRate"></div></div>
 <div class="box"><div class="label">Max Drawdown</div><div class="value neg" id="maxDrawdown">$0</div></div>
+<div class="box"><div class="label">Next Shares</div><div class="value" id="nextShares">1,000</div><div class="small" id="lossStreak"></div></div>
 </div>
 <div class="two-col">
 <div>
@@ -181,7 +182,9 @@ function renderKpi(d){$('bankroll').textContent=cash(d.bankroll);$('markValue').
 const tp=d.totalPnl||0;const te=$('totalPnl');te.textContent=money(tp);te.className='value '+tone(tp);
 const rp=d.realizedPnl||0;const re=$('realizedPnl');re.textContent=money(rp);re.className='value '+tone(rp);
 $('winLoss').textContent=(d.wins||0)+' / '+(d.losses||0);$('winRate').textContent=d.winRate!=null?'Win '+d.winRate+'%':'';
-$('maxDrawdown').textContent=cash(d.maxDrawdown);polls++;$('tickPill').textContent='TICKS '+(d.tickCount||0);
+$('maxDrawdown').textContent=cash(d.maxDrawdown);
+$('nextShares').textContent=num(d.nextShares)+(d.nextShares!=null&&d.nextShares>0?' SH':'');
+$('lossStreak').textContent='LOSS STREAK '+(d.consecutiveLosses||0);polls++;$('tickPill').textContent='TICKS '+(d.tickCount||0);
 $('uptimePill').textContent=uptimeFmt(d.uptime||0);
 const sp=$('statusPill');if(d.connected){sp.textContent='● LIVE';sp.className='pill live'}else{sp.textContent='● OFFLINE';sp.className='pill bad'}
 const m=d.markets&&d.markets[0];if(m){$('windowTime').textContent=m.remaining+'s';$('entryWindow').textContent='T-'+(d.config?.entryTMinus||10)+'s entry'}else{$('windowTime').textContent='—';$('entryWindow').textContent=''}
