@@ -98,6 +98,7 @@ class BotEngine {
     // Equity
     const seeded = (opts.initialEquity && Array.isArray(opts.initialEquity) && opts.initialEquity.length) ? opts.initialEquity.slice() : null;
     this.equityCurve = seeded || [{ t: Date.now(), equity: START_BANKROLL }];
+    this.confHistory = []; // [{t, conf}] for BET1 confirmation
     this.lastEquitySaveAt = 0;
   }
 
@@ -296,6 +297,8 @@ class BotEngine {
     const confidence = Math.min(Math.abs(score) / 7.0, 1.0);
     const lean = score > 0 ? 'UP' : score < 0 ? 'DOWN' : 'NEUTRAL';
     this.signal = { score: round5(score), confidence: round5(confidence), lean, updatedAt: Date.now(), indicators };
+    this.confHistory.push({ t: Date.now(), conf: confidence });
+    if (this.confHistory.length > 20) this.confHistory.shift();
   }
 
   _windowDelta(candles, windowStart) {
@@ -406,7 +409,12 @@ class BotEngine {
     const lean = this.signal.lean;
     if (lean !== 'UP' && lean !== 'DOWN') return;
     let canEnter = false;
-    if (betsThisWindow.length === 0 && conf >= BET1_CONF) canEnter = true;
+    if (betsThisWindow.length === 0 && conf >= BET1_CONF) {
+      // Require 2 consecutive ticks ≥ 90% to prevent spike entries
+      const recent = this.confHistory.slice(-3);
+      const confirmed = recent.length >= 2 && recent.slice(-2).every(h => h.conf >= BET1_CONF);
+      if (confirmed) canEnter = true;
+    }
     if (betsThisWindow.length >= 1 && elapsed >= BET2_ELAPSED && conf >= BET2_CONF) canEnter = true;
     if (!canEnter) return;
     const market = [...this.markets.values()].find(m => m.windowStart === cs && !m.resolved && !m.tradingClosed);
