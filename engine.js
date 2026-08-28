@@ -14,7 +14,7 @@ const EQUITY_FILE   = process.env.EQUITY_FILE || './equity.json';
 
 // Strategy params
 const MIN_CONFIDENCE    = Number(process.env.MIN_CONFIDENCE || 0.70);
-const ENTRY_ELAPSED      = Number(process.env.ENTRY_ELAPSED || 180);
+const ENTRY_ELAPSED      = Number(process.env.ENTRY_ELAPSED || 80);
 const CAP_PER_WINDOW    = Number(process.env.CAP_PER_WINDOW || 0.20);
 const REVERSAL_PCT      = Number(process.env.REVERSAL_PCT || 0.05);
 const REVERSAL_CONSIST  = Number(process.env.REVERSAL_CONSIST || 0.60);
