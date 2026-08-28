@@ -175,6 +175,7 @@ svg{width:100%;height:100%}
     </div>
   </div>
 </div>
+<script src="/socket.io/socket.io.js"></script>
 <script>
 const $=id=>document.getElementById(id);
 const S={};
