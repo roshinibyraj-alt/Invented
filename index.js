@@ -149,11 +149,11 @@ cs.style.color=sc>0?'var(--up)':sc<0?'var(--down)':'var(--muted)';
 const conf=$('confidence');conf.textContent=sig.confidence!=null?(sig.confidence*100).toFixed(1)+'%':'—';
 const cl=$('confLean');if(sig.lean==='UP'){cl.textContent='→ BUY UP';cl.style.color='var(--up)'}else if(sig.lean==='DOWN'){cl.textContent='→ BUY DOWN';cl.style.color='var(--down)'}else{cl.textContent='→ NEUTRAL · no entry';cl.style.color='var(--muted)'}
 }
-function renderPosition(p){const box=$('posBox'),b=$('posBody');if(!p){box.style.display='none';return}
-box.style.display='';const cls=p.outcome==='UP'?'pos-up':'pos-down';
-b.innerHTML='<div class="position-card"><div class="pos-head"><span class="pos-name">'+(p.outcome==='UP'?'▲':'▼')+' '+p.outcome+'</span><span class="pos-side '+cls+'">HOLDING</span></div>'
+function renderPosition(positions){const box=$('posBox'),b=$('posBody');if(!positions||!positions.length){box.style.display='none';return}
+box.style.display='';b.innerHTML=positions.map(p=>{const cls=p.outcome==='UP'?'pos-up':'pos-down';
+return '<div class="position-card" style="margin-bottom:6px"><div class="pos-head"><span class="pos-name">'+(p.outcome==='UP'?'▲':'▼')+' '+p.outcome+'</span><span class="pos-side '+cls+'">'+(p.betLabel||'HOLDING')+'</span></div>'
 +'<div class="pnl '+tone(p.unrealized)+'">'+money(p.unrealized)+'</div>'
-+'<div class="pos-meta">'+num(p.shares)+' SH @ '+prc(p.entryPrice)+' · cost '+cash(p.cost)+' · conf '+(p.confidence*100).toFixed(0)+'% · mark '+prc(p.markPrice)+'</div></div>';
++'<div class="pos-meta">'+num(p.shares)+' SH @ '+prc(p.entryPrice)+' · cost '+cash(p.cost)+' · conf '+(p.confidence*100).toFixed(0)+'% · mark '+prc(p.markPrice)+'</div></div>'}).join('');
 }
 function renderResults(r){const b=$('resBody');if(!r||!r.length){b.innerHTML='<div class="empty">No resolved yet</div>';return}
 b.innerHTML=r.slice(0,15).map(p=>{const w=p.won===true;return '<div class="result"><div><span class="'+(w?'buy':'sell')+'">'+(w?'✅':'❌')+' '+ESC((p.asset||'').toUpperCase())+' '+(p.outcome||'')+'</span>'
@@ -165,7 +165,7 @@ return '<div class="trade-item"><div><span class="'+cls+'">'+tr.type+' '+ESC(tr.
 +'<div class="dim">'+new Date(tr.timestamp).toLocaleTimeString()+' · '+num(tr.shares)+'sh @ '+prc(tr.price)+(tr.confidence!=null?' · conf '+(tr.confidence*100).toFixed(0)+'%':'')+'</div></div>'
 +'<div style="text-align:right">'+cash(tr.cost)+(tr.pnl!=null?'<div class="'+(tr.pnl>=0?'buy':'sell')+'">'+money(tr.pnl)+'</div>':'')+'</div></div>'}).join('')}
 function renderLogs(a){const b=$('logBody'),ct=$('logCount');ct.textContent=a.length+' LINES';b.innerHTML=a.slice(-50).map(l=>{let c='';if(l.includes('WIN'))c='log-win';else if(l.includes('LOSS'))c='log-loss';else if(l.includes('💰'))c='log-tp';else if(l.includes('ENTRY')||l.includes('EXIT')||l.includes('RESOLUTION'))c='log-info';return '<div class="'+c+'">'+ESC(l)+'</div>'}).join('')}
-function renderConfig(c){if(!c)return;const b=$('configBody');b.innerHTML='<div class="mini"><div class="label">Entry T-</div><div class="value">'+c.entryTMinus+'s</div></div>'
+function renderConfig(c){if(!c)return;const b=$('configBody');b.innerHTML='<div class="mini"><div class="label">Entry After</div><div class="value">'+c.entryMinElapsed+'s</div></div>'
 +'<div class="mini"><div class="label">Min Conf</div><div class="value">'+(c.minConfidence*100)+'%</div></div>'
 +'<div class="mini"><div class="label">Sizing</div><div class="value">'+(c.sizingFactor*100)+'%</div></div>'
 +'<div class="mini"><div class="label">Reversal</div><div class="value">'+c.reversalPct+'%</div></div>'
@@ -186,7 +186,7 @@ $('uptimePill').textContent=uptimeFmt(d.uptime||0);
 const sp=$('statusPill');if(d.connected){sp.textContent='● LIVE';sp.className='pill live'}else{sp.textContent='● OFFLINE';sp.className='pill bad'}
 const m=d.markets&&d.markets[0];if(m){$('windowTime').textContent=m.remaining+'s';$('entryWindow').textContent='T-'+(d.config?.entryTMinus||10)+'s entry'}else{$('windowTime').textContent='—';$('entryWindow').textContent=''}
 }
-function fullRender(d){Object.assign(S,d);renderKpi(d);renderMarket(d.markets&&d.markets[0]);renderSignal(d.signal);renderPosition(d.position);renderResults(d.resolvedPositions);renderFeed(d.trades);renderLogs(d.logs);renderConfig(d.config);renderChart(d.equityCurve)}
+function fullRender(d){Object.assign(S,d);renderKpi(d);renderMarket(d.markets&&d.markets[0]);renderSignal(d.signal);renderPosition(d.positions);renderResults(d.resolvedPositions);renderFeed(d.trades);renderLogs(d.logs);renderConfig(d.config);renderChart(d.equityCurve)}
 async function poll(){try{const r=await fetch('/api/status');const d=await r.json();fullRender(d)}catch(e){const sp=$('statusPill');if(sp){sp.textContent='● OFFLINE';sp.className='pill bad'}}}
 setInterval(poll,1000);poll();
 </script></body></html>`;

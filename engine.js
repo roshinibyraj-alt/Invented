@@ -13,9 +13,10 @@ const START_BANKROLL = Number(process.env.START_BANKROLL || 20000);
 const EQUITY_FILE   = process.env.EQUITY_FILE || './equity.json';
 
 // Strategy params
-const ENTRY_T_MINUS     = Number(process.env.ENTRY_T_MINUS || 10);
-const MIN_CONFIDENCE    = Number(process.env.MIN_CONFIDENCE || 0.30);
-const SIZING_FACTOR     = Number(process.env.SIZING_FACTOR || 0.25);
+const BET1_CONF         = Number(process.env.BET1_CONF || 0.90);
+const BET2_CONF         = Number(process.env.BET2_CONF || 0.70);
+const BET2_ELAPSED      = Number(process.env.BET2_ELAPSED || 180);
+const CAP_PER_WINDOW    = Number(process.env.CAP_PER_WINDOW || 0.20);
 const REVERSAL_PCT      = Number(process.env.REVERSAL_PCT || 0.05);
 const REVERSAL_CONSIST  = Number(process.env.REVERSAL_CONSIST || 0.60);
 const MIN_BET           = Number(process.env.MIN_BET || 1);
@@ -81,7 +82,7 @@ class BotEngine {
     this.signal = { score: 0, confidence: 0, lean: 'NEUTRAL', updatedAt: null, indicators: {} };
 
     // Position (one at a time, max)
-    this.position = null; // { slug, outcome, shares, entryPrice, cost, openedAt, fee, signalConf, ... }
+    this.positions = [];
     this.resolvedPositions = [];
 
     // Tracking
@@ -398,107 +399,91 @@ class BotEngine {
     const cs = windowStartFor(now);
     const elapsed = Math.floor(now / 1000) - cs;
     const remaining = WINDOW_SECONDS - elapsed;
-
-    // Already have a position → skip
-    if (this.position && this.position.status === 'open') return;
-
-    // Entry timing: only enter at T-minus seconds before close
-    if (remaining > ENTRY_T_MINUS) return;
     if (remaining <= 0) return;
-
-    // Confidence gate
-    if (this.signal.confidence < MIN_CONFIDENCE) return;
-
+    const betsThisWindow = this.positions.filter(p => p.windowStart === cs);
+    if (betsThisWindow.length >= 2) return;
+    const conf = this.signal.confidence;
     const lean = this.signal.lean;
     if (lean !== 'UP' && lean !== 'DOWN') return;
-
-    // Find the market
+    let canEnter = false;
+    if (betsThisWindow.length === 0 && conf >= BET1_CONF) canEnter = true;
+    if (betsThisWindow.length >= 1 && elapsed >= BET2_ELAPSED && conf >= BET2_CONF) canEnter = true;
+    if (!canEnter) return;
     const market = [...this.markets.values()].find(m => m.windowStart === cs && !m.resolved && !m.tradingClosed);
     if (!market) return;
-
     const token = lean === 'UP' ? market.up : market.down;
     const bestAsk = token.ask ?? token.mid ?? token.bid;
     if (!Number.isFinite(bestAsk) || bestAsk <= 0 || bestAsk >= 1) return;
-
-    // Confidence-based sizing: betAmount = bankroll × sizingFactor × confidence
-    const betAmount = round2(this.bankroll * SIZING_FACTOR * this.signal.confidence);
+    const maxPerWindow = round2(this.bankroll * CAP_PER_WINDOW);
+    const alreadySpent = betsThisWindow.reduce((s, p) => s + p.cost, 0);
+    const remainingBudget = round2(maxPerWindow - alreadySpent);
+    if (remainingBudget < MIN_BET) return;
+    const betAmount = Math.min(remainingBudget, round2(this.bankroll * CAP_PER_WINDOW * conf));
     if (betAmount < MIN_BET) return;
-
-    // Shares at best ask price
     const shares = Math.floor(betAmount / bestAsk);
     if (shares < 1) return;
-
-    // Execute buy (simulated maker limit at best ask, no slippage)
     const cost = round2(shares * bestAsk);
     const fee = takerFee(shares, bestAsk);
     const totalCost = round2(cost + fee);
     if (totalCost > this.bankroll) return;
-
     this.bankroll = round2(this.bankroll - totalCost);
-    this.position = {
+    const betLabel = betsThisWindow.length === 0 ? 'BET1' : 'BET2';
+    const pos = {
       slug: market.slug, asset: market.asset, conditionId: market.conditionId,
       outcome: lean, tokenId: token.tokenId,
       shares, entryPrice: bestAsk, cost, fee, totalCost,
       status: 'open', openedAt: now, markPrice: token.mid,
       windowStart: cs, windowEnd: market.windowEnd,
-      signalConf: this.signal.confidence, signalScore: this.signal.score,
-      signalIndicators: { ...this.signal.indicators },
+      signalConf: conf, signalScore: this.signal.score,
+      signalIndicators: { ...this.signal.indicators }, betLabel,
       exitReason: null, exitPrice: null, closedAt: null, pnl: null,
     };
-    this.trades.push({
-      timestamp: now, type: 'BUY', outcome: lean, shares, price: bestAsk, cost, fee,
-      confidence: this.signal.confidence, score: this.signal.score, markPrice: token.mid,
-    });
-    this.log(`⚡ ENTRY ${lean} ${shares}sh @${bestAsk.toFixed(3)} · conf ${(this.signal.confidence * 100).toFixed(0)}% · cost $${cost.toFixed(2)} · fee $${fee.toFixed(5)}`);
+    this.positions.push(pos);
+    this.trades.push({ timestamp: now, type: 'BUY', outcome: lean, shares, price: bestAsk, cost, fee, confidence: conf, score: this.signal.score, markPrice: token.mid, betLabel });
+    this.log(`⚡ ${betLabel} ${lean} ${shares}sh @${bestAsk.toFixed(3)} · conf ${(conf * 100).toFixed(0)}% · cost $${cost.toFixed(2)}`);
     this.recordEquity();
   }
 
+
   evaluateExit() {
-    if (!this.position || this.position.status !== 'open') return;
-    // Update mark
-    const market = this.markets.get(this.position.slug);
-    if (market) {
-      const token = this.position.outcome === 'UP' ? market.up : market.down;
-      if (Number.isFinite(token?.mid)) this.position.markPrice = token.mid;
-    }
-    // Tick micro-reversal: sell if reversal detected
-    if (this.isTickReversal(this.position.outcome)) {
-      this.sellPosition('TICK_REVERSAL');
+    for (const p of this.positions) {
+      if (p.status !== 'open') continue;
+      const market = this.markets.get(p.slug);
+      if (market) { const token = p.outcome === 'UP' ? market.up : market.down; if (Number.isFinite(token?.mid)) p.markPrice = token.mid; }
+      if (this.isTickReversal(p.outcome)) this.sellPosition(p, 'TICK_REVERSAL');
     }
   }
 
-  sellPosition(reason) {
-    if (!this.position || this.position.status !== 'open') return;
-    const p = this.position;
+
+  sellPosition(p, reason) {
+    if (!p || p.status !== 'open') return;
     const exitPrice = p.markPrice ?? p.entryPrice;
     const proceeds = round2(p.shares * exitPrice);
     const exitFee = takerFee(p.shares, exitPrice);
     const netProceeds = round2(proceeds - exitFee);
     const pnl = round2(netProceeds - p.cost - p.fee);
-    p.status = 'closed';
-    p.exitReason = reason;
-    p.exitPrice = exitPrice;
-    p.exitFee = exitFee;
-    p.closedAt = Date.now();
-    p.pnl = pnl;
-    p.won = pnl >= 0;
+    p.status = 'closed'; p.exitReason = reason; p.exitPrice = exitPrice; p.exitFee = exitFee;
+    p.closedAt = Date.now(); p.pnl = pnl; p.won = pnl >= 0;
     this.bankroll = round2(this.bankroll + netProceeds);
     this.realizedPnl = round2(this.realizedPnl + pnl);
     if (pnl >= 0) this.wins++; else this.losses++;
-    this.log(`💰 EXIT ${reason} ${p.outcome} ${p.shares}sh @${exitPrice.toFixed(3)} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`);
+    this.log(`💰 EXIT ${reason} ${p.betLabel||''} ${p.outcome} ${p.shares}sh @${exitPrice.toFixed(3)} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`);
     this.resolvedPositions.unshift({ ...p });
     this.resolvedPositions = this.resolvedPositions.slice(0, 50);
     this.trades.push({ timestamp: p.closedAt, type: 'SELL', outcome: p.outcome, shares: p.shares, price: exitPrice, cost: p.cost, fee: exitFee, pnl });
-    this.position = null;
+    this.positions = this.positions.filter(x => x !== p);
     this.recordEquity();
   }
 
   // ── Resolution (Binance-based) ────────────────────────────
   async resolveByBinance() {
-    if (!this.position || this.position.status !== 'open') return;
-    const p = this.position;
+    const openPositions = this.positions.filter(p => p.status === 'open');
+    if (!openPositions.length) return;
     const now = Date.now() / 1000;
-    if (now < p.windowEnd) return; // window not yet closed
+    if (now < openPositions[0].windowEnd) return;
+    const candles = this.binanceCandles;
+    if (!candles || candles.length < 2) return;
+    for (const p of openPositions) {
 
     // Fetch the final 1m candle for the window
     const candles = this.binanceCandles;
@@ -551,15 +536,15 @@ class BotEngine {
     this.resolvedPositions.unshift({ ...p });
     this.resolvedPositions = this.resolvedPositions.slice(0, 50);
     this.trades.push({ timestamp: p.closedAt, type: 'RESOLVED', outcome: p.outcome, shares: p.shares, price: won ? 1 : 0, cost: p.cost, fee: p.fee, pnl });
-    this.position = null;
+      this.positions = this.positions.filter(x => x !== p);
+    }
     this.recordEquity();
   }
 
   // ── Equity Curve ──────────────────────────────────────────
   recordEquity() {
-    const markValue = this.position?.status === 'open'
-      ? round2(this.bankroll + this.position.shares * (this.position.markPrice ?? this.position.entryPrice))
-      : this.bankroll;
+    const openMark = this.positions.filter(p => p.status === 'open').reduce((s, p) => s + p.shares * (p.markPrice ?? p.entryPrice), 0);
+    const markValue = round2(this.bankroll + openMark);
     const last = this.equityCurve[this.equityCurve.length - 1];
     if (!last || Date.now() - last.t > 1000 || Math.abs(last.equity - markValue) > 0.001) {
       this.equityCurve.push({ t: Date.now(), equity: markValue });
@@ -591,13 +576,12 @@ class BotEngine {
   }
 
   buildState() {
-    const pos = this.position;
-    const openMarkValue = pos?.status === 'open' ? round2(pos.shares * (pos.markPrice ?? pos.entryPrice)) : 0;
-    const unrealizedPnl = pos?.status === 'open' ? round2(pos.shares * (pos.markPrice ?? pos.entryPrice) - pos.cost - pos.fee) : 0;
+    const openPos = this.positions.filter(p => p.status === 'open');
+    const openMarkValue = openPos.reduce((s, p) => s + p.shares * (p.markPrice ?? p.entryPrice), 0);
+    const unrealizedPnl = openPos.reduce((s, p) => s + round2(p.shares * (p.markPrice ?? p.entryPrice) - p.cost - p.fee), 0);
     const markValue = round2(this.bankroll + openMarkValue);
     const now = Date.now();
     const cs = windowStartFor(now);
-    const remaining = Math.max(0, cs + WINDOW_SECONDS - Math.floor(now / 1000));
     return {
       bankroll: this.bankroll, markValue, realizedPnl: this.realizedPnl,
       unrealizedPnl, totalPnl: round2(markValue - START_BANKROLL),
@@ -605,18 +589,17 @@ class BotEngine {
       winRate: this.wins + this.losses ? round2(this.wins / (this.wins + this.losses) * 100) : null,
       maxDrawdown: this.maxDrawdown,
       signal: this.signal,
-      position: pos?.status === 'open' ? {
-        outcome: pos.outcome, shares: pos.shares, entryPrice: pos.entryPrice, cost: pos.cost,
-        markPrice: pos.markPrice, unrealized: unrealizedPnl,
-        confidence: pos.signalConf, openedAt: pos.openedAt,
-        remaining, side: pos.outcome,
-      } : null,
+      positions: openPos.map(p => ({ outcome: p.outcome, shares: p.shares, entryPrice: p.entryPrice, cost: p.cost,
+        betLabel: p.betLabel, markPrice: p.markPrice,
+        unrealized: round2(p.shares * (p.markPrice ?? p.entryPrice) - p.cost - p.fee),
+        confidence: p.signalConf, openedAt: p.openedAt, side: p.outcome })),
+
       markets: this.publicMarkets(),
       resolvedPositions: this.resolvedPositions.slice(0, 30),
       trades: this.trades.slice(-80).reverse(),
       equityCurve: sampleCurve(this.equityCurve, 1500),
       logs: this.logs.slice(-220),
-      config: { entryTMinus: ENTRY_T_MINUS, minConfidence: MIN_CONFIDENCE, sizingFactor: SIZING_FACTOR, reversalPct: REVERSAL_PCT, reversalConsist: REVERSAL_CONSIST, takerFeeRate: TAKER_FEE_RATE },
+      config: { bet1Conf: BET1_CONF, bet2Conf: BET2_CONF, bet2Elapsed: BET2_ELAPSED, capPerWindow: CAP_PER_WINDOW, reversalPct: REVERSAL_PCT, reversalConsist: REVERSAL_CONSIST, takerFeeRate: TAKER_FEE_RATE },
       connected: this.isClobFresh(),
       uptime: Math.floor((now - this.startedAt) / 1000),
       tickCount: this.tickHistory.length,
@@ -646,8 +629,8 @@ class BotEngine {
     // Equity snapshot
     setInterval(() => this.recordEquity(), 2000);
 
-    this.log(`🚀 Model Bot started | ${ASSETS.join('/')} | entry T-${ENTRY_T_MINUS}s | min conf ${(MIN_CONFIDENCE * 100).toFixed(0)}% | sizing ${(SIZING_FACTOR * 100).toFixed(0)}% bankroll`);
+    this.log(`🚀 Model Bot started | BET1 ≥90% anytime · BET2 ≥70% after 180s · max 2/window · 20% cap`);
   }
 }
 
-module.exports = { BotEngine, loadEquityFile, config: { ASSETS, START_BANKROLL, ENTRY_T_MINUS, MIN_CONFIDENCE, SIZING_FACTOR, REVERSAL_PCT, REVERSAL_CONSIST, TAKER_FEE_RATE, WINDOW_SECONDS } };
+module.exports = { BotEngine, loadEquityFile, config: { ASSETS, START_BANKROLL, BET1_CONF, BET2_CONF, BET2_ELAPSED, CAP_PER_WINDOW, REVERSAL_PCT, REVERSAL_CONSIST, TAKER_FEE_RATE, WINDOW_SECONDS } };
