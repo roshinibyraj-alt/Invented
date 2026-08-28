@@ -10,7 +10,10 @@ const port = process.env.PORT || 8080;
 const EQUITY_FILE = process.env.EQUITY_FILE || path.join(__dirname, 'equity.json');
 const initialEquity = loadEquityFile(EQUITY_FILE);
 
-const engine = new BotEngine({ initialEquity });
+const engine = new BotEngine({
+  initialEquity,
+  onLog: (line) => console.log(line),
+});
 
 const dashboard = `<!DOCTYPE html>
 <html lang="en">
@@ -32,7 +35,7 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
 .status{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:5px}
 .pill{border:1px solid var(--line);padding:4px 7px;font-size:10px;white-space:nowrap;border-radius:6px}
 .live{color:var(--up);border-color:#084b31}.warn{color:var(--amber);border-color:#5a4300}.bad{color:var(--down);border-color:#5c1622}.blue{color:var(--blue);border-color:#0d3a4a}
-.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:8px}
+.metrics{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin-bottom:8px}
 .box,.panel{background:var(--panel);border:1px solid var(--line);padding:9px;border-radius:8px}
 .label{font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px}
 .value{font-size:19px;margin-top:2px}.value.positive{color:var(--up)}.value.negative{color:var(--down)}
@@ -68,6 +71,7 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
  .metrics{grid-template-columns:repeat(2,1fr)}
  .two-col{grid-template-columns:1fr}
 }
+@media(max-width:1100px){.metrics{grid-template-columns:repeat(3,1fr)}}
 @media(max-width:720px){
  body{padding:6px;font-size:13px}
  h1{font-size:16px}.topbar{grid-template-columns:1fr}.status{justify-content:flex-start}
@@ -95,6 +99,8 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
  <div class="box"><div class="label">Consec Losses</div><div class="value" id="consecLoss">0</div><div class="small" id="maxConsecLoss">max 0</div></div>
  <div class="box"><div class="label">Max Drawdown</div><div class="value negative" id="maxDrawdown">$0</div></div>
  <div class="box"><div class="label">Maker Rebate</div><div class="value" id="rebate">$0</div></div>
+ <div class="box"><div class="label">Window Delta</div><div class="value" id="deltaVal">—</div><div class="small" id="deltaLean"></div></div>
+ <div class="box"><div class="label">Signal Hit-rate</div><div class="value" id="sigHitrate">—</div><div class="small" id="sigBets"></div></div>
 </div>
 
 <div class="two-col">
@@ -265,6 +271,19 @@ function renderKpis(d) {
   $('maxConsecLoss').textContent='max '+(d.maxConsecutiveLosses||0);
   $('maxDrawdown').textContent=cash(d.maxDrawdown);
   $('rebate').textContent=cash(d.makerRebateAccrued);
+  const sig=d.signal||{};
+  const del=sig.deltaPct;
+  const dv=$('deltaVal');
+  if(del!=null){dv.textContent=(del>=0?'+':'')+del.toFixed(3)+'%';dv.className='value '+tone(del)}
+  else{dv.textContent='—';dv.className='value'}
+  const lean=sig.lean||'NEUTRAL';
+  const dl=$('deltaLean');
+  if(lean==='UP'){dl.textContent='→ UP · cancels DOWN';dl.style.color='#00ff85'}
+  else if(lean==='DOWN'){dl.textContent='→ DOWN · cancels UP';dl.style.color='#ff4a68'}
+  else{dl.textContent='→ NEUTRAL · both legs';dl.style.color='#9d9d9d'}
+  const sh=$('sigHitrate');
+  if(d.signalTotal>0){sh.textContent=Math.round(d.signalHits/d.signalTotal*100)+'%'}else{sh.textContent='—'}
+  $('sigBets').textContent=(d.signalBets||0)+' lean bets';
   pollCount++;
   $('tickPill').textContent='POLLS '+pollCount;
   const sp=$('statusPill');

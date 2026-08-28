@@ -15,6 +15,8 @@ const MARTINGALE_MULT = Number(process.env.MARTINGALE_MULT || 1.5);
 const RESOLUTION_PRICE = Number(process.env.RESOLUTION_PRICE || 0.90);
 const TAKER_FEE_RATE = Number(process.env.TAKER_FEE_RATE || 0.07);
 const MAKER_REBATE_RATE = Number(process.env.MAKER_REBATE_RATE || 0.20);
+const BINANCE_API = process.env.BINANCE_API || 'https://api.binance.com';
+const DELTA_LEAN_PCT = Number(process.env.DELTA_LEAN_PCT || 0.05);
 const EQUITY_FILE = process.env.EQUITY_FILE || './equity.json';
 const fs = require('fs');
 
@@ -93,6 +95,15 @@ class BotEngine {
     // One window key per asset (cancel opposite = one bet per window)
     this.betWindows = new Set();
     this.pendingOrders = [];
+    // Delta signal (Binance window delta filter)
+    this.signal = { deltaPct: null, lean: 'NEUTRAL', updatedAt: null, source: 'NONE', error: null };
+    this.signalFetching = false;
+    this.signalFetchedAt = 0;
+    this.signalHits = 0;
+    this.signalTotal = 0;
+    this.signalWindowState = new Map(); // windowStart -> { lean, outcome }
+    this.signalBets = 0;
+    this.signalBetHits = 0;
   }
 
   log(msg) {
@@ -245,6 +256,7 @@ class BotEngine {
       this.pollCount++;
       this.messageCount = this.pollCount;
       this.lastSuccessfulPollAt = Date.now();
+      await this.refreshSignal();
       // Check TP on open positions
       for (const pos of this.positions) {
         if (pos.status === 'open' && !pos.tpSold) this.checkTpSell(pos);
@@ -267,6 +279,65 @@ class BotEngine {
   }
 
   currentShares(asset) { return this.mgState(asset).shares; }
+
+  // ── Window Delta Signal (Binance) ─────────────────────────
+  // Δ% = (current BTC price − window-open price) / window-open price × 100
+  async fetchWindowDelta(start) {
+    try {
+      const limit = Math.max(6, Math.ceil((Date.now() / 1000 - start) / 60) + 2);
+      const url = `${BINANCE_API}/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=${limit}`;
+      const candles = await this.getJSON(url, 5000);
+      if (!Array.isArray(candles) || candles.length < 2) return null;
+      // Window-open price: open of the candle that covers window start
+      let openPrice = null;
+      for (const c of candles) {
+        const openTimeSec = Number(c[0] || 0) / 1000;
+        if (openTimeSec <= start && openTimeSec + 60 > start) { openPrice = Number(c[1]); break; }
+      }
+      if (openPrice == null) openPrice = Number(candles[0][1]);
+      const last = candles[candles.length - 1];
+      const current = Number(last[4]); // close
+      if (!Number.isFinite(openPrice) || !Number.isFinite(current) || openPrice <= 0) return null;
+      return round5((current - openPrice) / openPrice * 100);
+    } catch (_) { return null; }
+  }
+
+  async refreshSignal() {
+    if (this.signalFetching) return;
+    const now = Date.now();
+    if (now - this.signalFetchedAt < 1500) return; // cached ~1.5s
+    const start = windowStartFor(now);
+    this.signalFetching = true;
+    try {
+      const delta = await this.fetchWindowDelta(start);
+      if (delta != null) {
+        const lean = delta >= DELTA_LEAN_PCT ? 'UP' : delta <= -DELTA_LEAN_PCT ? 'DOWN' : 'NEUTRAL';
+        this.signal = { deltaPct: delta, lean, updatedAt: now, source: 'BINANCE', error: null };
+      } else {
+        this.signal = { ...this.signal, error: 'binance-fetch', updatedAt: now };
+      }
+      this.signalFetchedAt = now;
+      this.applySignalFilter(start);
+    } finally { this.signalFetching = false; }
+  }
+
+  // Cancel a pending leg that contradicts a decisive signal
+  applySignalFilter(start) {
+    const lean = this.signal?.lean;
+    if (lean !== 'UP' && lean !== 'DOWN') return;
+    const blockOutcome = lean === 'UP' ? 'DOWN' : 'UP';
+    let cancelled = false;
+    for (const order of this.pendingOrders) {
+      if (order.status !== 'pending') continue;
+      if (order.windowStart !== start) continue;
+      if (order.outcome === blockOutcome) {
+        order.status = 'cancelled';
+        cancelled = true;
+        this.log(`🎯 DELTA ${lean === 'UP' ? '+' : ''}${(this.signal.deltaPct ?? 0).toFixed(3)}% → ${lean} lean · ${order.outcome} leg cancelled`);
+      }
+    }
+    if (cancelled) this.pendingOrders = this.pendingOrders.filter(o => o.status === 'pending');
+  }
 
   // ── Strategy: 0.30 Both-Side Limit ────────────────────────
   // One pair per window; cancel opposite on fill
@@ -341,6 +412,12 @@ class BotEngine {
     this.positions.push(position);
     const winKey = `${asset}:${market.windowStart}`;
     this.betWindows.add(winKey);
+    position.signalLean = this.signal?.lean || 'NEUTRAL';
+    position.signalDeltaPct = this.signal?.deltaPct ?? null;
+    if (this.signal?.lean && this.signal.lean !== 'NEUTRAL') {
+      this.signalBets++;
+      this.signalWindowState.set(market.windowStart, { lean: this.signal.lean, outcome: outcome, matched: this.signal.lean === outcome });
+    }
     this.trades.push({ timestamp: now, orderType: 'MAKER-LIMIT@0.30', asset, outcome, shares, price: entryPrice, cost, markPrice: token.mid, pnl: 0, signal: position.signal, rebateEstimate });
     this.trades = this.trades.slice(-300);
     this.log(`⚡ FILLED ${asset.toUpperCase()} ${outcome} ${shares}sh @${entryPrice.toFixed(2)} · mg#${mg.losses} · cost $${cost.toFixed(2)} · rebate $${rebateEstimate.toFixed(5)}`);
@@ -427,6 +504,13 @@ class BotEngine {
       // Credit remaining payout (if any)
       if (payout > 0) this.bankroll = round2(this.capital.value + payout);
       this.realizedPnl = round2(this.realizedPnl + pnl);
+      // Signal hit-rate: if we placed a delta-lean bet this window, score it vs actual winner
+      const sw = this.signalWindowState.get(pos.windowStart);
+      if (sw) {
+        this.signalTotal++;
+        if (sw.lean === market.winner) this.signalHits++;
+        this.signalWindowState.delete(pos.windowStart);
+      }
       const mg = this.mgState(pos.asset);
       if (won) {
         this.wins++;
@@ -537,6 +621,9 @@ class BotEngine {
       wins: this.wins, losses: this.losses,
       winRate: this.wins + this.losses ? round2(this.wins / (this.wins + this.losses) * 100) : null,
       makerRebateAccrued: this.makerRebateAccrued,
+      signal: this.signal,
+      signalHits: this.signalHits, signalTotal: this.signalTotal,
+      signalBets: this.signalBets,
       martingale, consecutiveLosses: this.consecutiveLosses,
       maxConsecutiveLosses: this.maxConsecutiveLosses,
       peakEquity: this.peakEquity, maxDrawdown: this.maxDrawdown,
@@ -560,6 +647,7 @@ class BotEngine {
     setInterval(() => this.rotateAndSweep(), 250);
     setInterval(() => this.pollClobBooks(), CLOB_POLL_MS);
     setInterval(() => this.retryDiscovery(), 1500);
+    setInterval(() => this.refreshSignal().catch(() => {}), 2000);
     this.log(`🚀 Bot started | ${ASSETS.join('/')} | 0.30 both sides · cancel opposite · TP@${TP_PRICE} half · ${MARTINGALE_MULT}× mg · base ${BASE_SHARES} SH`);
   }
 }
