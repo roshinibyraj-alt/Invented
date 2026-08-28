@@ -170,7 +170,8 @@ function renderConfig(c){if(!c)return;const b=$('configBody');b.innerHTML='<div 
 +'<div class="mini"><div class="label">Sizing</div><div class="value">'+(c.flatShares??0)+' sh</div></div>'
 +'<div class="mini"><div class="label">Reversal</div><div class="value">'+(c.reversalPct??0)+'%</div></div>'
 +'<div class="mini"><div class="label">Reversal ≥</div><div class="value">'+((c.reversalConsist??0)*100)+'%</div></div>'
-+'<div class="mini"><div class="label">Fee</div><div class="value">'+((c.takerFeeRate??0)*100)+'%</div></div>'}
++'<div class="mini"><div class="label">Fee</div><div class="value">'+((c.takerFeeRate??0)*100)+'%</div></div>'
++'<div class="mini"><div class="label">Max Entry</div><div class="value">'+((c.maxEntryPrice??0.60).toFixed(2))+'</div></div>'}
 function renderChart(c){const svg=$('equityChart');if(!c||!c.length){svg.innerHTML='';return}
 const v=c.map(p=>p.equity),lo=Math.min(...v),hi=Math.max(...v),rng=(hi-lo)||1;const W=700,H=120,P=12;
 const pts=c.map((p,i)=>[i/Math.max(1,c.length-1)*W,H-P-(p.equity-lo)/rng*(H-P*2)]);

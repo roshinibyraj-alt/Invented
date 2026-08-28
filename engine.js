@@ -16,6 +16,7 @@ const EQUITY_FILE   = process.env.EQUITY_FILE || './equity.json';
 const HIGH_CONF         = Number(process.env.HIGH_CONF || 0.70);
 const LOW_CONF          = Number(process.env.LOW_CONF || 0.30);
 const ENTRY_ELAPSED      = Number(process.env.ENTRY_ELAPSED || 80);
+const MAX_ENTRY_PRICE    = Number(process.env.MAX_ENTRY_PRICE || 0.60);
 const FLAT_SHARES       = Number(process.env.FLAT_SHARES || 1000);
 const REVERSAL_PCT      = Number(process.env.REVERSAL_PCT || 0.05);
 const REVERSAL_CONSIST  = Number(process.env.REVERSAL_CONSIST || 0.60);
@@ -433,6 +434,8 @@ class BotEngine {
     const token = outcome === 'UP' ? market.up : market.down;
     const price = token.ask ?? token.mid ?? token.bid;
     if (!Number.isFinite(price) || price <= 0 || price >= 1) return;
+    // Don't buy if the entry price is above the maximum allowed.
+    if (price > MAX_ENTRY_PRICE) { this.log(`⏭️ SKIP ${outcome} — price ${price.toFixed(3)} > ${MAX_ENTRY_PRICE.toFixed(2)} max entry`); return; }
     this.executeBuy(market, outcome, price, FLAT_SHARES, windowStart, windowEnd);
   }
 
@@ -619,7 +622,7 @@ class BotEngine {
       trades: this.trades.slice(-80).reverse(),
       equityCurve: sampleCurve(this.equityCurve, 1500),
       logs: this.logs.slice(-220),
-      config: { highConf: HIGH_CONF, minConfidence: HIGH_CONF, lowConf: LOW_CONF, flatShares: FLAT_SHARES, sizingFactor: FLAT_SHARES, entryElapsed: ENTRY_ELAPSED, entryMinElapsed: ENTRY_ELAPSED, entryTMinus: Math.max(Math.floor((WINDOW_SECONDS - ENTRY_ELAPSED) / 60), 1), reversalPct: REVERSAL_PCT, reversalConsist: REVERSAL_CONSIST, takerFeeRate: TAKER_FEE_RATE },
+      config: { highConf: HIGH_CONF, minConfidence: HIGH_CONF, lowConf: LOW_CONF, flatShares: FLAT_SHARES, sizingFactor: FLAT_SHARES, maxEntryPrice: MAX_ENTRY_PRICE, entryElapsed: ENTRY_ELAPSED, entryMinElapsed: ENTRY_ELAPSED, entryTMinus: Math.max(Math.floor((WINDOW_SECONDS - ENTRY_ELAPSED) / 60), 1), reversalPct: REVERSAL_PCT, reversalConsist: REVERSAL_CONSIST, takerFeeRate: TAKER_FEE_RATE },
       connected: this.isClobFresh(),
       uptime: Math.floor((now - this.startedAt) / 1000),
       tickCount: this.tickHistory.length,
@@ -653,4 +656,4 @@ class BotEngine {
   }
 }
 
-module.exports = { BotEngine, loadEquityFile, config: { ASSETS, START_BANKROLL, HIGH_CONF, LOW_CONF, FLAT_SHARES, ENTRY_ELAPSED, REVERSAL_PCT, REVERSAL_CONSIST, TAKER_FEE_RATE, WINDOW_SECONDS } };
+module.exports = { BotEngine, loadEquityFile, config: { ASSETS, START_BANKROLL, HIGH_CONF, LOW_CONF, FLAT_SHARES, MAX_ENTRY_PRICE, ENTRY_ELAPSED, REVERSAL_PCT, REVERSAL_CONSIST, TAKER_FEE_RATE, WINDOW_SECONDS } };
