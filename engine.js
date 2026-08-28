@@ -417,18 +417,15 @@ class BotEngine {
     const market = [...this.markets.values()].find(m => m.windowStart === cs && !m.resolved && !m.tradingClosed);
     if (!market) return;
 
+    // No stop loss and no intra-window flip: at most one trade per window.
+    // If a position is already open this window, never sell or re-enter.
+    const alreadyOpen = this.positions.find(p => p.windowStart === cs && p.status === 'open');
+    if (alreadyOpen) return;
+
     if (lean === 'UP' && conf >= HIGH_CONF) {
-      // Strong UP signal → buy UP, close any DOWN
-      const dnPos = this.positions.find(p => p.windowStart === cs && p.outcome === 'DOWN' && p.status === 'open');
-      if (dnPos) this.sellPosition(dnPos, 'FLIP_TO_UP');
-      const upPos = this.positions.find(p => p.windowStart === cs && p.outcome === 'UP' && p.status === 'open');
-      if (!upPos) this.tryBuy(market, 'UP', cs, market.windowEnd);
+      this.tryBuy(market, 'UP', cs, market.windowEnd);
     } else if (lean === 'DOWN' && conf >= HIGH_CONF) {
-      // Strong DOWN signal → buy DOWN, close any UP
-      const upPos = this.positions.find(p => p.windowStart === cs && p.outcome === 'UP' && p.status === 'open');
-      if (upPos) this.sellPosition(upPos, 'FLIP_TO_DN');
-      const dnPos = this.positions.find(p => p.windowStart === cs && p.outcome === 'DOWN' && p.status === 'open');
-      if (!dnPos) this.tryBuy(market, 'DOWN', cs, market.windowEnd);
+      this.tryBuy(market, 'DOWN', cs, market.windowEnd);
     }
   }
 
@@ -440,6 +437,9 @@ class BotEngine {
   }
 
   executeBuy(market, outcome, price, shares, windowStart, windowEnd) {
+    // Hard guard: only one trade per window.
+    const windowTraded = this.positions.some(p => p.windowStart === windowStart && (p.status === 'open' || p.exitReason === 'RESOLUTION'));
+    if (windowTraded) return;
     const cost = round2(shares * price);
     const fee = takerFee(shares, price);
     const totalCost = round2(cost + fee);
