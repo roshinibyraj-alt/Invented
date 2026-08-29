@@ -17,7 +17,10 @@ const HIGH_CONF         = Number(process.env.HIGH_CONF || 0.70);
 const LOW_CONF          = Number(process.env.LOW_CONF || 0.30);
 const ENTRY_ELAPSED      = Number(process.env.ENTRY_ELAPSED || 10);
 const FLAT_SHARES       = Number(process.env.FLAT_SHARES || 1000);
-const MARTINGALE_FACTOR = Number(process.env.MARTINGALE_FACTOR || 1.5);
+const RECOVERY_MULT     = Number(process.env.RECOVERY_MULT || 2);
+const RECOVERY_LEVELS   = [2, 3, 4];   // recovery level ladder, capped at 4x
+const RECOVERY_HOLD     = Number(process.env.RECOVERY_HOLD || 3);   // windows per level
+const MAX_RISK_PCT      = Number(process.env.MAX_RISK_PCT || 0.25); // max bankroll % per window
 const REVERSAL_PCT      = Number(process.env.REVERSAL_PCT || 0.05);
 const REVERSAL_CONSIST  = Number(process.env.REVERSAL_CONSIST || 0.60);
 const MIN_BET           = Number(process.env.MIN_BET || 1);
@@ -91,10 +94,14 @@ class BotEngine {
     this.trades = [];
     this.wins = 0;
     this.losses = 0;
-    this.consecutiveLosses = 0;
     this.realizedPnl = 0;
     this.peakEquity = START_BANKROLL;
     this.maxDrawdown = 0;
+    // Recovery-mode state
+    this.recoveryDebt = 0;        // accumulated losses in USD still to recover
+    this.recoveryLevel = 0;       // 0 = normal; index into RECOVERY_LEVELS (0→2x, 1→3x, 2→4x)
+    this.recoveryWindows = 0;     // windows held at the current level
+    this.recoveryActive = false;  // true while in recovery mode
     this.logs = [];
     this.pollCount = 0;
 
@@ -431,16 +438,30 @@ class BotEngine {
     }
   }
 
+  recoveryMultiplier() {
+    // 1 + level index maps to ladder 2x, 3x, 4x (capped).
+    return RECOVERY_LEVELS[Math.min(this.recoveryLevel, RECOVERY_LEVELS.length - 1)];
+  }
+
   nextShares() {
-    // 1.5x martingale: base shares multiplied by factor per consecutive loss.
-    return Math.round(FLAT_SHARES * Math.pow(MARTINGALE_FACTOR, this.consecutiveLosses));
+    if (!this.recoveryActive) return FLAT_SHARES;
+    return Math.round(FLAT_SHARES * this.recoveryMultiplier());
   }
 
   tryBuy(market, outcome, windowStart, windowEnd) {
     const token = outcome === 'UP' ? market.up : market.down;
     const price = token.ask ?? token.mid ?? token.bid;
     if (!Number.isFinite(price) || price <= 0 || price >= 1) return;
-    this.executeBuy(market, outcome, price, this.nextShares(), windowStart, windowEnd);
+    let shares = this.nextShares();
+    const estCost = shares * price;
+    // Recovery-mode guard: skip the window if the bet would risk too much of the bankroll,
+    // and stay in recovery mode.
+    if (this.recoveryActive && estCost > this.bankroll * MAX_RISK_PCT) {
+      const riskCap = round2(this.bankroll * MAX_RISK_PCT);
+      this.log(`⏸️ RECOVERY SKIP — ${shares}sh @${price.toFixed(3)} ≈ $${estCost.toFixed(2)} > ${(MAX_RISK_PCT*100).toFixed(0)}% bankroll ($${riskCap.toFixed(2)}) · stay in recovery`);
+      return;
+    }
+    this.executeBuy(market, outcome, price, shares, windowStart, windowEnd);
   }
 
   executeBuy(market, outcome, price, shares, windowStart, windowEnd) {
@@ -471,6 +492,50 @@ class BotEngine {
   }
 
 
+  // ── Recovery-mode state machine ───────────────────────────
+  _onRecoveryWin(profit) {
+    if (!this.recoveryActive) return; // normal mode, nothing to track
+    this.recoveryDebt = round2(Math.max(0, this.recoveryDebt - profit));
+    if (this.recoveryDebt <= 0) {
+      this.recoveryActive = false;
+      this.recoveryLevel = 0;
+      this.recoveryWindows = 0;
+      this.log(`✅ RECOVERY COMPLETE — debt cleared, back to ${FLAT_SHARES}sh base`);
+      return;
+    }
+    // Win didn't clear the debt: count this window at the current level.
+    this.recoveryWindows += 1;
+    this.log(`🔁 RECOVERY HOLD — win +$${profit.toFixed(2)} · debt $${this.recoveryDebt.toFixed(2)} · level ${this.recoveryMultiplier()}x (${this.recoveryWindows}/${RECOVERY_HOLD})`);
+    if (this.recoveryWindows >= RECOVERY_HOLD) this._stepRecoveryUp();
+  }
+
+  _onRecoveryLoss(lost) {
+    this.recoveryDebt = round2(this.recoveryDebt + lost);
+    if (!this.recoveryActive) {
+      // First loss → enter recovery at 2x
+      this.recoveryActive = true;
+      this.recoveryLevel = 0;
+      this.recoveryWindows = 0;
+      this.log(`🛟 RECOVERY MODE ENTERED — loss $${lost.toFixed(2)} · debt $${this.recoveryDebt.toFixed(2)} · bet ${this.recoveryMultiplier()}x = ${this.nextShares()}sh`);
+      return;
+    }
+    // Additional loss in recovery → step up the level immediately
+    this.recoveryWindows = 0;
+    this._stepRecoveryUp();
+    this.log(`⬆️ RECOVERY LOSS — lost $${lost.toFixed(2)} · debt $${this.recoveryDebt.toFixed(2)} · level ${this.recoveryMultiplier()}x = ${this.nextShares()}sh`);
+  }
+
+  _stepRecoveryUp() {
+    const maxLevel = RECOVERY_LEVELS.length - 1;
+    if (this.recoveryLevel < maxLevel) {
+      this.recoveryLevel += 1;
+      this.recoveryWindows = 0;
+    } else {
+      // Already at cap (4x): keep cycling 3-window holds at cap.
+      this.recoveryWindows = 0;
+    }
+  }
+
   evaluateExit() {
     // Exits are controlled by the confidence flipper (evaluateEntry).
     // This only refreshes mark prices for open positions.
@@ -493,8 +558,8 @@ class BotEngine {
     p.closedAt = Date.now(); p.pnl = pnl; p.won = pnl >= 0;
     this.bankroll = round2(this.bankroll + netProceeds);
     this.realizedPnl = round2(this.realizedPnl + pnl);
-    if (pnl >= 0) { this.wins++; this.consecutiveLosses = 0; }
-    else { this.losses++; this.consecutiveLosses++; }
+    if (pnl >= 0) { this.wins++; this._onRecoveryWin(pnl); }
+    else { this.losses++; this._onRecoveryLoss(p.cost + p.fee); }
     this.log(`💰 EXIT ${reason} ${p.betLabel||''} ${p.outcome} ${p.shares}sh @${exitPrice.toFixed(3)} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`);
     this.resolvedPositions.unshift({ ...p });
     this.resolvedPositions = this.resolvedPositions.slice(0, 50);
@@ -558,8 +623,13 @@ class BotEngine {
 
     this.bankroll = round2(this.bankroll + netPayout);
     this.realizedPnl = round2(this.realizedPnl + pnl);
-    if (won) { this.wins++; this.consecutiveLosses = 0; }
-    else { this.losses++; this.consecutiveLosses++; }
+    if (won) {
+      this.wins++;
+      this._onRecoveryWin(pnl);
+    } else {
+      this.losses++;
+      this._onRecoveryLoss(p.cost + p.fee);
+    }
 
     this.log(`🏁 RESOLUTION ${winner} (${openPrice.toFixed(0)}→${closePrice.toFixed(0)}) · ${p.outcome} ${won ? 'WIN' : 'LOSS'} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`);
     this.resolvedPositions.unshift({ ...p });
@@ -618,8 +688,17 @@ class BotEngine {
       winRate: this.wins + this.losses ? round2(this.wins / (this.wins + this.losses) * 100) : null,
       maxDrawdown: this.maxDrawdown,
       signal: this.signal,
-      consecutiveLosses: this.consecutiveLosses,
       nextShares: this.nextShares(),
+      recovery: {
+        active: this.recoveryActive,
+        debt: this.recoveryDebt,
+        level: this.recoveryLevel,
+        multiplier: this.recoveryActive ? this.recoveryMultiplier() : 1,
+        windows: this.recoveryWindows,
+        hold: RECOVERY_HOLD,
+        cap: RECOVERY_LEVELS[RECOVERY_LEVELS.length - 1],
+        ladder: RECOVERY_LEVELS,
+      },
       positions: openPos.map(p => ({ outcome: p.outcome, shares: p.shares, entryPrice: p.entryPrice, cost: p.cost,
         betLabel: p.betLabel, markPrice: p.markPrice,
         unrealized: round2(p.shares * (p.markPrice ?? p.entryPrice) - p.cost - p.fee),
@@ -664,4 +743,4 @@ class BotEngine {
   }
 }
 
-module.exports = { BotEngine, loadEquityFile, config: { ASSETS, START_BANKROLL, HIGH_CONF, LOW_CONF, FLAT_SHARES, MARTINGALE_FACTOR, ENTRY_ELAPSED, REVERSAL_PCT, REVERSAL_CONSIST, TAKER_FEE_RATE, WINDOW_SECONDS } };
+module.exports = { BotEngine, loadEquityFile, config: { ASSETS, START_BANKROLL, HIGH_CONF, LOW_CONF, FLAT_SHARES, RECOVERY_MULT, RECOVERY_LEVELS, RECOVERY_HOLD, MAX_RISK_PCT, ENTRY_ELAPSED, REVERSAL_PCT, REVERSAL_CONSIST, TAKER_FEE_RATE, WINDOW_SECONDS } };
