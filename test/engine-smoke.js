@@ -1,83 +1,98 @@
+'use strict';
 const assert = require('node:assert/strict');
-const { MomentumLagEngine } = require('../engine');
+const { BotEngine } = require('../engine');
 
-function windowStartFor(timeMs) { return Math.floor(timeMs / 1000 / 300) * 300; }
-async function fakeFetch(url, options = {}) {
-  const urlText = String(url);
-  if (urlText.endsWith('/books') && options.method === 'POST') return { ok: true, json: async () => [] };
-  const match = urlText.match(/slug=([a-z]+)-updown-5m-(\d+)/);
-  assert.ok(match, 'unexpected discovery URL: ' + urlText);
-  const [asset, start] = [match[1], match[2]];
-  return { ok: true, json: async () => [{
-    conditionId: '0x' + asset + start, question: asset.toUpperCase() + ' test', closed: false,
-    outcomes: '["Up","Down"]', clobTokenIds: `["${asset}-${start}-up","${asset}-${start}-down"]`,
-  }] };
+async function setup(candles) {
+  const engine = new BotEngine({
+    fetchImpl: async (url, options = {}) => {
+      const u = String(url);
+      if (u.endsWith('/books') && options.method === 'POST') return { ok: true, json: async () => [] };
+      if (u.includes('/markets')) {
+        return { ok: true, json: async () => [{
+          conditionId: '0xbtc', question: 'BTC test', closed: false,
+          outcomes: '["Up","Down"]', clobTokenIds: '["up-id","down-id"]',
+        }] };
+      }
+      if (u.includes('klines')) return { ok: true, json: async () => candles };
+      if (u.includes('ticker/price')) return { ok: true, json: async () => ({ price: '60000' }) };
+      throw new Error('unexpected url ' + u);
+    },
+  });
+  engine.binanceCandles = candles;
+  return engine;
+}
+
+function candle(openTime, open, close, high, low, volume) {
+  return { openTime, open, high: high ?? Math.max(open, close), low: low ?? Math.min(open, close), close, volume: volume ?? 1000 };
 }
 
 (async () => {
   const logs = [];
-  const engine = new MomentumLagEngine({ fetchImpl: fakeFetch, onLog: line => logs.push(line) });
-  const start = windowStartFor(Date.now());
-  for (const asset of ['btc', 'eth']) await engine.discoverMarket(asset, start);
+  const engine = await setup([]);
+  engine.onLog = line => logs.push(line);
+
+  // ── Discovery ─────────────────────────────────────────────
+  const cs = Math.floor(Date.now() / 1000 / 300) * 300;
+  const market = await engine.discoverMarket('btc', cs);
+  assert.ok(market, 'btc market should discover');
+  assert.equal(engine.positions.length, 0);
+
+  // ── Recovery ladder caps at 2x ────────────────────────────
+  assert.equal(engine.nextShares(), 1000, 'base size is 1000 shares');
+  assert.equal(engine.recoveryActive, false);
+
+  // First loss → enter recovery at 2x
+  engine._onRecoveryLoss(100);
+  assert.equal(engine.recoveryActive, true, 'recovery should be active after loss');
+  assert.equal(engine.recoveryDebt, 100);
+  assert.equal(engine.recoveryMultiplier(), 2, 'first recovery level is 2x');
+  assert.equal(engine.nextShares(), 2000, '2x recovery sizes at 2000 shares');
+
+  // Additional loss while in recovery → stays capped at 2x (ladder is [2])
+  engine._onRecoveryLoss(80);
+  assert.equal(engine.recoveryDebt, 180);
+  assert.equal(engine.recoveryMultiplier(), 2, 'ladder caps at 2x, never 3x/4x');
+  assert.equal(engine.nextShares(), 2000, 'still 2000 shares at cap');
+
+  // A win that clears the debt exits recovery
+  engine._onRecoveryWin(180);
+  assert.equal(engine.recoveryActive, false, 'debt cleared → recovery off');
+  assert.equal(engine.recoveryDebt, 0);
+  assert.equal(engine.nextShares(), 1000, 'back to base 1000 shares');
+
+  // ── Resolution uses exact boundary candles ────────────────
+  // Re-enter recovery with a small debt to test the winning resolution path.
+  engine._onRecoveryLoss(50);
+  assert.equal(engine.recoveryActive, true);
+
+  const start = Math.floor((Date.now() - 600000) / 1000 / 300) * 300;
+  const end = start + 300;
+  await engine.discoverMarket('btc', start);
+  const candles = [
+    candle(start, 60000, 60100),            // window open candle (BTC 60000)
+    candle(start + 60, 60100, 60120),
+    candle(start + 120, 60120, 60150),
+    candle(start + 180, 60150, 60180),
+    candle(start + 240, 60180, 60200),      // window close candle (ends at end)
+  ];
+  engine.binanceCandles = candles;
   engine.activeWindowStart = start;
-  const market = slug => engine.markets.get(`${slug}-updown-5m-${start}`);
 
-  engine.applyTop(market('btc').up, 0.29, 0.31);
-  engine.applyTop(market('btc').down, 0.69, 0.71);
-  engine.applyTop(market('eth').up, 0.59, 0.61);
-  engine.applyTop(market('eth').down, 0.39, 0.41);
-  engine.evaluateSignals();
+  // Build an open UP position bought this window
+  const upMarket = engine.markets.get(`btc-updown-5m-${start}`);
+  upMarket.up.ask = 0.65; upMarket.up.bid = 0.63; upMarket.up.mid = 0.64;
+  engine.executeBuy(upMarket, 'UP', 0.64, 2000, start, end);
 
-  assert.equal(engine.combos.length, 1, 'only the BTC/ETH opposite-side combo fires');
-  assert.equal(engine.positions.length, 2, 'the combo has BTC and ETH legs');
-  assert.equal(engine.currentTradeShares(), 5, 'normal windows use the five-share base');
-  assert.equal(engine.combos.find(combo => combo.name === 'ETH_DOWN').cost, 3.6);
-  assert.equal(engine.bankroll, 19996.4);
-  assert.equal(engine.ethBoostPending, false, 'boost does NOT arm on open — only on WIN');
+  // Resolution should win (close 60200 > open 60000 → UP, and position is UP)
+  engine.resolveByBinance();
+  const resolved = engine.resolvedPositions.find(p => p.windowStart === start);
+  assert.ok(resolved, 'position should have resolved');
+  assert.equal(resolved.won, true, 'UP won: close > open');
+  assert.equal(resolved.pnl, Math.round((2000 - resolved.cost - resolved.fee) * 100) / 100, 'winning UP position pays shares minus cost');
+  assert.equal(engine.recoveryActive, false, 'this win clears the 50 debt all the way to base');
+  assert.equal(engine.nextShares(), 1000, 'resolved back to base 1000 shares');
+  assert.equal(engine.positions.filter(p => p.windowStart === start && p.status === 'open').length, 0, 'position removed from open list');
 
-  // Resolve the combo as a WIN (BTC UP resolved UP, ETH DOWN resolved DOWN)
-  market('btc').finalUpMax = 0.93; market('btc').finalDownMax = 0.07;
-  market('eth').finalDownMax = 0.93; market('eth').finalUpMax = 0.05;
-  market('btc').resolved = false; market('eth').resolved = false;
-  engine.resolveFromFinalPrices(market('btc'));
-  engine.resolveFromFinalPrices(market('eth'));
-  engine.settleResolvedCombos();
-
-  const ethCombo = engine.combos.find(combo => combo.name === 'ETH_DOWN');
-  assert.equal(ethCombo.result, 'WIN');
-  assert.equal(ethCombo.payout, 10);
-  assert.equal(ethCombo.pnl, 6.4);
-  assert.equal(engine.ethBoostPending, true, 'decorrelation WIN arms the next three windows');
-
-  // Simulate window rotation consuming the pending boost
-  const originalNow = Date.now;
-  try {
-    Date.now = () => (start + 301) * 1000;
-    await engine.rotateAndSweep();
-    assert.equal(engine.boostWindowsRemaining, 3, 'boost windows set to 3 after rotation');
-    assert.equal(engine.currentTradeShares(), 100, 'boosted windows use 100 shares');
-
-    engine.boostWindowsRemaining = 1;
-    assert.equal(engine.currentTradeShares(), 100);
-    Date.now = () => (start + 601) * 1000;
-    await engine.rotateAndSweep();
-    assert.equal(engine.boostWindowsRemaining, 0);
-    assert.equal(engine.currentTradeShares(), 5, 'base sizing restored after boost expires');
-
-    // Test boost reset: simulate another decorrelation WIN while already boosting
-    engine.boostWindowsRemaining = 2;
-    engine.ethBoostPending = false;
-    engine.ethTriggerWindow = null;
-    engine.armEthBoost(start + 601);
-    assert.equal(engine.boostWindowsRemaining, 3, 'boost resets to 3 on re-confirmed decorrelation WIN');
-  } finally {
-    Date.now = originalNow;
-  }
-
-  console.log(JSON.stringify({
-    baseShares: 5, boostedShares: 100,
-    baseCombos: 1, realizedPnl: engine.realizedPnl,
-    bankroll: engine.bankroll, boostStateLogs: logs.filter(line => line.includes('Boost') || line.includes('decorrelation')),
-  }, null, 2));
-  console.log('CORRELATION-COMBO CLOB POLLING SMOKE PASS');
-})().catch(error => { console.error(error); process.exitCode = 1; });
+  console.log('✅ ConfidenceBot smoke: recovery cap 2x + exact-boundary resolution OK');
+  process.exit(0);
+})().catch(e => { console.error('SMOKE FAIL:', e.message); process.exit(1); });

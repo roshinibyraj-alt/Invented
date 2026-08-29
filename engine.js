@@ -18,7 +18,7 @@ const LOW_CONF          = Number(process.env.LOW_CONF || 0.30);
 const ENTRY_ELAPSED      = Number(process.env.ENTRY_ELAPSED || 10);
 const FLAT_SHARES       = Number(process.env.FLAT_SHARES || 1000);
 const RECOVERY_MULT     = Number(process.env.RECOVERY_MULT || 2);
-const RECOVERY_LEVELS   = [2, 3, 4];   // recovery level ladder, capped at 4x
+const RECOVERY_LEVELS   = [2];         // recovery level ladder, capped at 2x
 const RECOVERY_HOLD     = Number(process.env.RECOVERY_HOLD || 3);   // windows per level
 const MAX_RISK_PCT      = Number(process.env.MAX_RISK_PCT || 0.25); // max bankroll % per window
 const REVERSAL_PCT      = Number(process.env.REVERSAL_PCT || 0.05);
@@ -576,68 +576,63 @@ class BotEngine {
     if (now < openPositions[0].windowEnd) return;
     const candles = this.binanceCandles;
     if (!candles || candles.length < 2) return;
+
+    // Build exact boundary prices from 1m candles.
+    // Window boundaries align to minute marks: open = open of the candle starting
+    // at windowStart, close = close of the candle ending at windowEnd.
+    const candleAt = ts => candles.find(c => c.openTime === ts);
+    const candleEndingAt = ts => candles.find(c => c.openTime === ts - 60);
+    const pending = [];
+
     for (const p of openPositions) {
+      const openCandle = candleAt(p.windowStart);
+      const closeCandle = candleEndingAt(p.windowEnd);
+      // Never resolve with a wrong/wrong-time price: if the exact boundary candles
+      // aren't present yet, retry on the next resolution cycle.
+      if (!openCandle || !closeCandle) continue;
 
-    // Fetch the final 1m candle for the window
-    const candles = this.binanceCandles;
-    if (!candles || candles.length < 2) return;
+      const openPrice = openCandle.open;
+      const closePrice = closeCandle.close;
+      if (!Number.isFinite(openPrice) || !Number.isFinite(closePrice)) continue;
 
-    // Find the close price at window end
-    let closePrice = null;
-    for (const c of candles) {
-      if (c.openTime >= p.windowEnd - 60 && c.openTime < p.windowEnd) {
-        closePrice = c.close; break;
+      const winner = closePrice >= openPrice ? 'UP' : 'DOWN';
+      const won = p.outcome === winner;
+      const payout = won ? p.shares : 0;
+      const netPayout = round2(payout);
+      const pnl = round2(netPayout - p.cost - p.fee);
+
+      p.status = 'closed';
+      p.won = won;
+      p.exitReason = 'RESOLUTION';
+      p.exitPrice = won ? 1 : 0;
+      p.exitFee = 0;
+      p.closedAt = Date.now();
+      p.pnl = pnl;
+      p.resolvedWinner = winner;
+      p.resolvedOpen = openPrice;
+      p.resolvedClose = closePrice;
+
+      this.bankroll = round2(this.bankroll + netPayout);
+      this.realizedPnl = round2(this.realizedPnl + pnl);
+      if (won) {
+        this.wins++;
+        this._onRecoveryWin(pnl);
+      } else {
+        this.losses++;
+        this._onRecoveryLoss(p.cost + p.fee);
       }
-    }
-    if (closePrice == null) {
-      // Fallback: use the latest candle's close
-      closePrice = candles[candles.length - 1]?.close;
-    }
-    // Find the open price at window start
-    let openPrice = null;
-    for (const c of candles) {
-      if (c.openTime <= p.windowStart && c.openTime + 60 > p.windowStart) {
-        openPrice = c.open; break;
-      }
-    }
-    if (openPrice == null) openPrice = candles[0]?.open;
-    if (!Number.isFinite(closePrice) || !Number.isFinite(openPrice)) return;
 
-    const winner = closePrice >= openPrice ? 'UP' : 'DOWN';
-    const won = p.outcome === winner;
-    const payout = won ? p.shares : 0;
-    const exitFee = 0; // Polymarket resolution has no fee
-    const netPayout = round2(payout);
-    const pnl = round2(netPayout - p.cost - p.fee);
-
-    p.status = 'closed';
-    p.won = won;
-    p.exitReason = 'RESOLUTION';
-    p.exitPrice = won ? 1 : 0;
-    p.exitFee = 0;
-    p.closedAt = Date.now();
-    p.pnl = pnl;
-    p.resolvedWinner = winner;
-    p.resolvedOpen = openPrice;
-    p.resolvedClose = closePrice;
-
-    this.bankroll = round2(this.bankroll + netPayout);
-    this.realizedPnl = round2(this.realizedPnl + pnl);
-    if (won) {
-      this.wins++;
-      this._onRecoveryWin(pnl);
-    } else {
-      this.losses++;
-      this._onRecoveryLoss(p.cost + p.fee);
+      this.log(`🏁 RESOLUTION ${winner} (${openPrice.toFixed(0)}→${closePrice.toFixed(0)}) · ${p.outcome} ${won ? 'WIN' : 'LOSS'} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`);
+      this.resolvedPositions.unshift({ ...p });
+      this.resolvedPositions = this.resolvedPositions.slice(0, 50);
+      this.trades.push({ timestamp: p.closedAt, type: 'RESOLVED', outcome: p.outcome, shares: p.shares, price: won ? 1 : 0, cost: p.cost, fee: p.fee, pnl });
+      pending.push(p);
     }
-
-    this.log(`🏁 RESOLUTION ${winner} (${openPrice.toFixed(0)}→${closePrice.toFixed(0)}) · ${p.outcome} ${won ? 'WIN' : 'LOSS'} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`);
-    this.resolvedPositions.unshift({ ...p });
-    this.resolvedPositions = this.resolvedPositions.slice(0, 50);
-    this.trades.push({ timestamp: p.closedAt, type: 'RESOLVED', outcome: p.outcome, shares: p.shares, price: won ? 1 : 0, cost: p.cost, fee: p.fee, pnl });
-      this.positions = this.positions.filter(x => x !== p);
+    if (pending.length) {
+      const ids = new Set(pending.map(p => p));
+      this.positions = this.positions.filter(x => !ids.has(x));
+      this.recordEquity();
     }
-    this.recordEquity();
   }
 
   // ── Equity Curve ──────────────────────────────────────────
