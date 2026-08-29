@@ -87,6 +87,7 @@ class BotEngine {
     // Signal
     this.signal = { score: 0, confidence: 0, lean: 'NEUTRAL', updatedAt: null, indicators: {} };
     this.lastSignalEvalAt = 0;
+    this.entryWindow = null;   // first window allowed to enter (set post-init to avoid mid-window start)
 
     // Position (one at a time, max)
     this.positions = [];
@@ -436,6 +437,9 @@ class BotEngine {
   evaluateEntry() {
     const now = Date.now();
     const cs = windowStartFor(now);
+    // On (re)start we never enter the in-progress window — wait for the next
+    // full window so a push/redeploy doesn't fire mid-window.
+    if (this.entryWindow != null && cs < this.entryWindow) return;
     const elapsed = Math.floor(now / 1000) - cs;
     const remaining = WINDOW_SECONDS - elapsed;
     if (remaining <= 0) return;
@@ -733,6 +737,9 @@ class BotEngine {
   // ── Main Loop ─────────────────────────────────────────────
   async init() {
     const start = windowStartFor(Date.now());
+    // Begin trading only when a fresh window starts (avoid mid-window start on deploy).
+    this.entryWindow = start + WINDOW_SECONDS;
+    this.log(`⏳ Started mid-window ${start} — will begin trading at next window ${this.entryWindow}`);
     await Promise.all([this.discoverMarket('btc', start), this.discoverMarket('btc', start + WINDOW_SECONDS)]);
     await this.fetchBinanceCandles();
 

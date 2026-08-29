@@ -15,7 +15,7 @@ const dashboard = `<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ModelBot — BTC 5m</title>
+<title>RecoveryBot — BTC 5m</title>
 <style>
 *{box-sizing:border-box}:root{--bg:#000;--panel:#070707;--line:#222;--muted:#9d9d9d;--up:#00ff85;--down:#ff4a68;--amber:#ffc400;--blue:#38d6ff}
 html,body{background:#000;color:#fff;font-family:Arial,Helvetica,sans-serif;font-weight:800;margin:0}
@@ -66,7 +66,7 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
 </head>
 <body><div class="wrap">
 <header class="topbar">
-<div class="brand"><div class="btc">₿</div><div><h1>ConfidenceBot</h1><div class="sub">7-INDICATOR SIGNAL · CONF≥70% FOLLOW SIGNAL · FLAT 1000 SH · HOLD TO RESOLUTION</div></div></div>
+<div class="brand"><div class="btc">₿</div><div><h1>RecoveryBot</h1><div class="sub">7-INDICATOR SIGNAL · CONF≥70% FOLLOW SIGNAL · FLAT 1000 SH · HOLD TO RESOLUTION</div></div></div>
 <div class="status"><span id="statusPill" class="pill bad">OFFLINE</span><span id="tickPill" class="pill">TICKS 0</span><span id="uptimePill" class="pill blue">00:00:00</span></div>
 </header>
 <div class="metrics">
@@ -209,6 +209,6 @@ app.get('/healthz', (_, res) => res.sendStatus(200));
 app.get('/api/status', (_, res) => res.json(engine.buildState()));
 app.get('/', (_, req) => req.type('html').send(dashboard));
 server.listen(port, '0.0.0.0', () => {
-  console.log(`ModelBot listening on :${port}`);
+  console.log(`RecoveryBot listening on :${port}`);
   engine.init().catch(e => console.error(`Init: ${e.message}`));
 });
