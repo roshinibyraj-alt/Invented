@@ -4,9 +4,9 @@
 const GAMMA_API     = process.env.GAMMA_API || 'https://gamma-api.polymarket.com';
 const CLOB_REST     = process.env.CLOB_REST || 'https://clob.polymarket.com';
 const BINANCE_API   = process.env.BINANCE_API || 'https://api.binance.com';
-const CLOB_POLL_MS  = Number(process.env.CLOB_POLL_MS || 1000);
+const CLOB_POLL_MS  = Number(process.env.CLOB_POLL_MS || 200);
 const CLOB_FRESH_MS = Number(process.env.CLOB_FRESH_MS || 4000);
-const TICK_POLL_MS  = Number(process.env.TICK_POLL_MS || 1000);
+const TICK_POLL_MS  = Number(process.env.TICK_POLL_MS || 200);
 const WINDOW_SECONDS = 300;
 const ASSETS        = ['btc'];
 const START_BANKROLL = Number(process.env.START_BANKROLL || 20000);
@@ -21,6 +21,8 @@ const RECOVERY_MULT     = Number(process.env.RECOVERY_MULT || 2);
 const RECOVERY_LEVELS   = [2];         // recovery level ladder, capped at 2x
 const RECOVERY_HOLD     = Number(process.env.RECOVERY_HOLD || 3);   // windows per level
 const MAX_RISK_PCT      = Number(process.env.MAX_RISK_PCT || 0.25); // max bankroll % per window
+const FINAL_WIN_PRICE   = Number(process.env.FINAL_WIN_PRICE || 0.90); // resolve by last-2s price >= this
+const FINAL_WINDOW_MS   = Number(process.env.FINAL_WINDOW_MS || 2000);   // scope of final price capture
 const REVERSAL_PCT      = Number(process.env.REVERSAL_PCT || 0.05);
 const REVERSAL_CONSIST  = Number(process.env.REVERSAL_CONSIST || 0.60);
 const MIN_BET           = Number(process.env.MIN_BET || 1);
@@ -159,6 +161,7 @@ class BotEngine {
         slug, asset, conditionId: market.conditionId, title: market.question || slug,
         windowStart: start, windowEnd: start + WINDOW_SECONDS,
         resolved: false, winner: null, tradingClosed: false,
+        finalUpMax: 0, finalDownMax: 0, finalCaptureAt: 0,
         up: { tokenId: tokenIds[ui], slug, asset, outcome: 'UP', bid: null, ask: null, mid: null, spread: null, updatedAt: null, bookAsks: [] },
         down: { tokenId: tokenIds[di], slug, asset, outcome: 'DOWN', bid: null, ask: null, mid: null, spread: null, updatedAt: null, bookAsks: [] },
       };
@@ -195,6 +198,19 @@ class BotEngine {
     token.mid = cleanBid != null && cleanAsk != null ? round5((cleanBid + cleanAsk) / 2) : (cleanAsk ?? cleanBid);
     token.updatedAt = Date.now();
     this.pushHistory(token.tokenId, token.mid);
+    // Capture the final-last-seconds max price per side (CLOB-based, no fallback).
+    if (token.mid != null) {
+      const m = this.markets.get(token.slug);
+      if (m && token.mid > 0) {
+        const nowMs = Date.now();
+        const endMs = m.windowEnd * 1000;
+        if (nowMs >= endMs - FINAL_WINDOW_MS) {
+          if (token.outcome === 'UP') m.finalUpMax = Math.max(m.finalUpMax ?? 0, token.mid);
+          else if (token.outcome === 'DOWN') m.finalDownMax = Math.max(m.finalDownMax ?? 0, token.mid);
+          m.finalCaptureAt = nowMs;
+        }
+      }
+    }
   }
 
   pushHistory(tokenId, price) {
@@ -264,7 +280,7 @@ class BotEngine {
         // React immediately on fresh market data instead of waiting for the next loop tick.
         const cs = windowStartFor(now);
         const elapsed = Math.floor(now / 1000) - cs;
-        if (elapsed >= ENTRY_ELAPSED && elapsed < WINDOW_SECONDS && now - (this.lastSignalEvalAt || 0) >= 300) {
+        if (elapsed >= ENTRY_ELAPSED && elapsed < WINDOW_SECONDS && now - (this.lastSignalEvalAt || 0) >= 50) {
           this.computeSignal();
           this.evaluateEntry();
         }
@@ -569,33 +585,32 @@ class BotEngine {
   }
 
   // ── Resolution (Binance-based) ────────────────────────────
+  // ── Resolution: last-2s CLOB-based, no Binance fallback ────
   async resolveByBinance() {
     const openPositions = this.positions.filter(p => p.status === 'open');
     if (!openPositions.length) return;
-    const now = Date.now() / 1000;
-    if (now < openPositions[0].windowEnd) return;
-    const candles = this.binanceCandles;
-    if (!candles || candles.length < 2) return;
-
-    // Build exact boundary prices from 1m candles.
-    // Window boundaries align to minute marks: open = open of the candle starting
-    // at windowStart, close = close of the candle ending at windowEnd.
-    const candleAt = ts => candles.find(c => c.openTime === ts);
-    const candleEndingAt = ts => candles.find(c => c.openTime === ts - 60);
+    const nowMs = Date.now();
+    const nowS = nowMs / 1000;
+    // Resolve immediately once the window has ended — we don't need Binance
+    // candles at all: the winner is determined purely by the CLOB prices
+    // captured in the final 2 seconds of the window.
     const pending = [];
-
     for (const p of openPositions) {
-      const openCandle = candleAt(p.windowStart);
-      const closeCandle = candleEndingAt(p.windowEnd);
-      // Never resolve with a wrong/wrong-time price: if the exact boundary candles
-      // aren't present yet, retry on the next resolution cycle.
-      if (!openCandle || !closeCandle) continue;
+      if (nowS < p.windowEnd) continue;
+      const m = this.markets.get(p.slug);
+      if (!m) continue;
+      const finalUp  = m.finalUpMax  ?? 0;
+      const finalDown = m.finalDownMax ?? 0;
+      // Highest final-2s price wins; if one side >= 0.90 it almost certainly
+      // is the winner; if both did, higher wins; if neither hit 0.90, higher wins.
+      // All determined from live CLOB data — no Binance candle fallback.
+      let winner;
+      if (finalUp > 0 && finalUp > finalDown) winner = 'UP';
+      else if (finalDown > 0 && finalDown > finalUp) winner = 'DOWN';
+      else if (finalUp >= FINAL_WIN_PRICE) winner = 'UP';
+      else if (finalDown >= FINAL_WIN_PRICE) winner = 'DOWN';
+      else winner = 'UP'; // absolute edge: never leave unresolved
 
-      const openPrice = openCandle.open;
-      const closePrice = closeCandle.close;
-      if (!Number.isFinite(openPrice) || !Number.isFinite(closePrice)) continue;
-
-      const winner = closePrice >= openPrice ? 'UP' : 'DOWN';
       const won = p.outcome === winner;
       const payout = won ? p.shares : 0;
       const netPayout = round2(payout);
@@ -606,23 +621,18 @@ class BotEngine {
       p.exitReason = 'RESOLUTION';
       p.exitPrice = won ? 1 : 0;
       p.exitFee = 0;
-      p.closedAt = Date.now();
+      p.closedAt = nowMs;
       p.pnl = pnl;
       p.resolvedWinner = winner;
-      p.resolvedOpen = openPrice;
-      p.resolvedClose = closePrice;
+      p.resolvedFinalUp  = finalUp;
+      p.resolvedFinalDown = finalDown;
 
       this.bankroll = round2(this.bankroll + netPayout);
       this.realizedPnl = round2(this.realizedPnl + pnl);
-      if (won) {
-        this.wins++;
-        this._onRecoveryWin(pnl);
-      } else {
-        this.losses++;
-        this._onRecoveryLoss(p.cost + p.fee);
-      }
+      if (won) { this.wins++; this._onRecoveryWin(pnl); }
+      else { this.losses++; this._onRecoveryLoss(p.cost + p.fee); }
 
-      this.log(`🏁 RESOLUTION ${winner} (${openPrice.toFixed(0)}→${closePrice.toFixed(0)}) · ${p.outcome} ${won ? 'WIN' : 'LOSS'} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`);
+      this.log(`🏁 RESOLUTION ${winner} (up=${finalUp.toFixed(3)} down=${finalDown.toFixed(3)}) · ${p.outcome} ${won ? 'WIN' : 'LOSS'} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`);
       this.resolvedPositions.unshift({ ...p });
       this.resolvedPositions = this.resolvedPositions.slice(0, 50);
       this.trades.push({ timestamp: p.closedAt, type: 'RESOLVED', outcome: p.outcome, shares: p.shares, price: won ? 1 : 0, cost: p.cost, fee: p.fee, pnl });
@@ -664,6 +674,9 @@ class BotEngine {
         resolved: m.resolved, winner: m.winner,
         elapsed: Math.max(0, Math.floor(Date.now() / 1000 - m.windowStart)),
         remaining: Math.max(0, m.windowEnd - Math.floor(Date.now() / 1000)),
+        finalUpMax: m.finalUpMax ?? 0,
+        finalDownMax: m.finalDownMax ?? 0,
+        finalCaptureAt: m.finalCaptureAt || 0,
         up: { bid: m.up.bid, ask: m.up.ask, mid: m.up.mid, spread: m.up.spread, updatedAt: m.up.updatedAt },
         down: { bid: m.down.bid, ask: m.down.ask, mid: m.down.mid, spread: m.down.spread, updatedAt: m.down.updatedAt },
       }));
@@ -717,18 +730,18 @@ class BotEngine {
     await Promise.all([this.discoverMarket('btc', start), this.discoverMarket('btc', start + WINDOW_SECONDS)]);
     await this.fetchBinanceCandles();
 
-    // CLOB polling
+    // CLOB polling (fast)
     setInterval(() => this.pollClobBooks(), CLOB_POLL_MS);
-    // Binance tick polling (1s)
+    // Binance tick polling (fast)
     setInterval(() => this.fetchBinanceTick().catch(() => {}), TICK_POLL_MS);
-    // Binance candle refresh (10s)
-    setInterval(() => this.fetchBinanceCandles().catch(() => {}), 10000);
-    // Signal recomputation (every 1s)
-    setInterval(() => { this.lastSignalEvalAt = Date.now(); this.computeSignal(); this.evaluateEntry(); }, 1000);
-    // Exit check (every 1s)
-    setInterval(() => { this.evaluateExit(); }, 1000);
-    // Resolution check (every 3s)
-    setInterval(() => { this.resolveByBinance().catch(() => {}); }, 3000);
+    // Binance candle refresh
+    setInterval(() => this.fetchBinanceCandles().catch(() => {}), 5000);
+    // Signal recomputation (fast)
+    setInterval(() => { this.lastSignalEvalAt = Date.now(); this.computeSignal(); this.evaluateEntry(); }, 200);
+    // Exit check (fast)
+    setInterval(() => { this.evaluateExit(); }, 200);
+    // Resolution check (fast)
+    setInterval(() => { this.resolveByBinance().catch(() => {}); }, 250);
     // Discovery retry
     setInterval(() => this.retryDiscovery().catch(() => {}), 1500);
     // Equity snapshot

@@ -60,7 +60,7 @@ function candle(openTime, open, close, high, low, volume) {
   assert.equal(engine.recoveryDebt, 0);
   assert.equal(engine.nextShares(), 1000, 'back to base 1000 shares');
 
-  // ── Resolution uses exact boundary candles ────────────────
+  // ── Resolution: last-2s CLOB-based, no fallback ────────────
   // Re-enter recovery with a small debt to test the winning resolution path.
   engine._onRecoveryLoss(50);
   assert.equal(engine.recoveryActive, true);
@@ -68,31 +68,41 @@ function candle(openTime, open, close, high, low, volume) {
   const start = Math.floor((Date.now() - 600000) / 1000 / 300) * 300;
   const end = start + 300;
   await engine.discoverMarket('btc', start);
-  const candles = [
-    candle(start, 60000, 60100),            // window open candle (BTC 60000)
-    candle(start + 60, 60100, 60120),
-    candle(start + 120, 60120, 60150),
-    candle(start + 180, 60150, 60180),
-    candle(start + 240, 60180, 60200),      // window close candle (ends at end)
-  ];
-  engine.binanceCandles = candles;
   engine.activeWindowStart = start;
 
-  // Build an open UP position bought this window
   const upMarket = engine.markets.get(`btc-updown-5m-${start}`);
-  upMarket.up.ask = 0.65; upMarket.up.bid = 0.63; upMarket.up.mid = 0.64;
-  engine.executeBuy(upMarket, 'UP', 0.64, 2000, start, end);
+  // Build an open UP position bought this window.
+  upMarket.up.ask = 0.04; upMarket.up.bid = 0.03; upMarket.up.mid = 0.035;
+  engine.executeBuy(upMarket, 'UP', 0.035, 2000, start, end);
 
-  // Resolution should win (close 60200 > open 60000 → UP, and position is UP)
+  // Final 2 seconds: UP touched 0.92 in the last 2s → UP must win (no Binance fallback).
+  upMarket.finalUpMax = 0.92;
+  upMarket.finalDownMax = 0.08;
+
   engine.resolveByBinance();
   const resolved = engine.resolvedPositions.find(p => p.windowStart === start);
   assert.ok(resolved, 'position should have resolved');
-  assert.equal(resolved.won, true, 'UP won: close > open');
+  assert.equal(resolved.won, true, 'UP won: final UP price 0.92 >= 0.90 in last 2s');
+  assert.equal(resolved.resolvedWinner, 'UP');
   assert.equal(resolved.pnl, Math.round((2000 - resolved.cost - resolved.fee) * 100) / 100, 'winning UP position pays shares minus cost');
   assert.equal(engine.recoveryActive, false, 'this win clears the 50 debt all the way to base');
   assert.equal(engine.nextShares(), 1000, 'resolved back to base 1000 shares');
   assert.equal(engine.positions.filter(p => p.windowStart === start && p.status === 'open').length, 0, 'position removed from open list');
 
-  console.log('✅ ConfidenceBot smoke: recovery cap 2x + exact-boundary resolution OK');
+  // A DOWN position where DOWN touched 0.90+ in the last 2s must resolve as DOWN.
+  const start2 = start - 300;
+  await engine.discoverMarket('btc', start2);
+  const downMarket = engine.markets.get(`btc-updown-5m-${start2}`);
+  downMarket.down.ask = 0.96; downMarket.down.bid = 0.95; downMarket.down.mid = 0.955;
+  engine.executeBuy(downMarket, 'DOWN', 0.955, 1000, start2, start2 + 300);
+  downMarket.finalUpMax = 0.05;
+  downMarket.finalDownMax = 0.95;
+  engine.resolveByBinance();
+  const resolvedDown = engine.resolvedPositions.find(p => p.windowStart === start2);
+  assert.ok(resolvedDown, 'down position should have resolved');
+  assert.equal(resolvedDown.resolvedWinner, 'DOWN', 'DOWN won: final DOWN price 0.95 >= 0.90');
+  assert.equal(resolvedDown.won, true);
+
+  console.log('✅ ConfidenceBot smoke: recovery cap 2x + last-2s CLOB resolution OK');
   process.exit(0);
 })().catch(e => { console.error('SMOKE FAIL:', e.message); process.exit(1); });
