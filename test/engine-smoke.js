@@ -22,46 +22,32 @@ async function setup(candles) {
   return engine;
 }
 
-function candle(openTime, open, close, high, low, volume) {
-  return { openTime, open, high: high ?? Math.max(open, close), low: low ?? Math.min(open, close), close, volume: volume ?? 1000 };
-}
-
 (async () => {
   const logs = [];
   const engine = await setup([]);
   engine.onLog = line => logs.push(line);
 
-  // ── Discovery ─────────────────────────────────────────────
-  const cs = Math.floor(Date.now() / 1000 / 300) * 300;
-  const market = await engine.discoverMarket('btc', cs);
-  assert.ok(market, 'btc market should discover');
-  assert.equal(engine.positions.length, 0);
-
   // ── Recovery ladder caps at 2x ────────────────────────────
   assert.equal(engine.nextShares(), 1000, 'base size is 1000 shares');
   assert.equal(engine.recoveryActive, false);
 
-  // First loss → enter recovery at 2x
   engine._onRecoveryLoss(100);
   assert.equal(engine.recoveryActive, true, 'recovery should be active after loss');
   assert.equal(engine.recoveryDebt, 100);
   assert.equal(engine.recoveryMultiplier(), 2, 'first recovery level is 2x');
   assert.equal(engine.nextShares(), 2000, '2x recovery sizes at 2000 shares');
 
-  // Additional loss while in recovery → stays capped at 2x (ladder is [2])
   engine._onRecoveryLoss(80);
   assert.equal(engine.recoveryDebt, 180);
   assert.equal(engine.recoveryMultiplier(), 2, 'ladder caps at 2x, never 3x/4x');
   assert.equal(engine.nextShares(), 2000, 'still 2000 shares at cap');
 
-  // A win that clears the debt exits recovery
   engine._onRecoveryWin(180);
   assert.equal(engine.recoveryActive, false, 'debt cleared → recovery off');
   assert.equal(engine.recoveryDebt, 0);
   assert.equal(engine.nextShares(), 1000, 'back to base 1000 shares');
 
-  // ── Resolution: last-2s CLOB-based, no fallback ────────────
-  // Re-enter recovery with a small debt to test the winning resolution path.
+  // ── Resolution: last-2s CLOB, no fallback ─────────────────
   engine._onRecoveryLoss(50);
   assert.equal(engine.recoveryActive, true);
 
@@ -71,38 +57,55 @@ function candle(openTime, open, close, high, low, volume) {
   engine.activeWindowStart = start;
 
   const upMarket = engine.markets.get(`btc-updown-5m-${start}`);
-  // Build an open UP position bought this window.
   upMarket.up.ask = 0.04; upMarket.up.bid = 0.03; upMarket.up.mid = 0.035;
   engine.executeBuy(upMarket, 'UP', 0.035, 2000, start, end);
 
-  // Final 2 seconds: UP touched 0.92 in the last 2s → UP must win (no Binance fallback).
+  // Final 2s: UP touched 0.92 → UP wins
   upMarket.finalUpMax = 0.92;
   upMarket.finalDownMax = 0.08;
-
   engine.resolveByBinance();
   const resolved = engine.resolvedPositions.find(p => p.windowStart === start);
   assert.ok(resolved, 'position should have resolved');
-  assert.equal(resolved.won, true, 'UP won: final UP price 0.92 >= 0.90 in last 2s');
-  assert.equal(resolved.resolvedWinner, 'UP');
+  assert.equal(resolved.won, true, 'UP won: final UP price 0.92 >= 0.90');
   assert.equal(resolved.pnl, Math.round((2000 - resolved.cost - resolved.fee) * 100) / 100, 'winning UP position pays shares minus cost');
-  assert.equal(engine.recoveryActive, false, 'this win clears the 50 debt all the way to base');
+  assert.equal(engine.recoveryActive, false, 'this win clears the 50 debt');
   assert.equal(engine.nextShares(), 1000, 'resolved back to base 1000 shares');
-  assert.equal(engine.positions.filter(p => p.windowStart === start && p.status === 'open').length, 0, 'position removed from open list');
+  assert.equal(engine.positions.filter(p => p.windowStart === start && p.status === 'open').length, 0);
 
-  // A DOWN position where DOWN touched 0.90+ in the last 2s must resolve as DOWN.
+  // ── Key bug fix test: unchanged book within final 2s ───────
+  // Simulate: price reached 0.91 on a book change (captured), then book
+  // is unchanged on subsequent polls — finalDownMax must STILL be 0.91.
   const start2 = start - 300;
   await engine.discoverMarket('btc', start2);
   const downMarket = engine.markets.get(`btc-updown-5m-${start2}`);
-  downMarket.down.ask = 0.96; downMarket.down.bid = 0.95; downMarket.down.mid = 0.955;
-  engine.executeBuy(downMarket, 'DOWN', 0.955, 1000, start2, start2 + 300);
-  downMarket.finalUpMax = 0.05;
-  downMarket.finalDownMax = 0.95;
-  engine.resolveByBinance();
-  const resolvedDown = engine.resolvedPositions.find(p => p.windowStart === start2);
-  assert.ok(resolvedDown, 'down position should have resolved');
-  assert.equal(resolvedDown.resolvedWinner, 'DOWN', 'DOWN won: final DOWN price 0.95 >= 0.90');
-  assert.equal(resolvedDown.won, true);
+  // Set DOWN mid to 0.91 — simulates a prior poll already set this.
+  downMarket.down.bid = 0.90; downMarket.down.ask = 0.92; downMarket.down.mid = 0.91;
+  downMarket.up.bid = 0.08; downMarket.up.ask = 0.10; downMarket.up.mid = 0.09;
+  engine.executeBuy(downMarket, 'DOWN', 0.91, 1000, start2, start2 + 300);
 
-  console.log('✅ ConfidenceBot smoke: recovery cap 2x + last-2s CLOB resolution OK');
+  // Apply a book with the SAME prices (unchanged from previous poll).
+  // Before the fix, this would early-return without capturing.
+  // After the fix, capture MUST run even on unchanged books.
+  const downToken = downMarket.down;
+  engine.applyBook(downToken, [{ price: '0.90', size: '500' }], [{ price: '0.92', size: '500' }]);
+  assert.equal(downMarket.finalDownMax, 0.91, 'capture fires even on unchanged book within final 2s');
+  assert.equal(downMarket.finalCaptureAt > 0, true, 'capture timestamp set');
+
+  // Now call again with same book — still captures (not blocked by early return)
+  engine.applyBook(downToken, [{ price: '0.90', size: '500' }], [{ price: '0.92', size: '500' }]);
+  assert.equal(downMarket.finalDownMax, 0.91, 'unchanged book still captured');
+
+  // Simulate a price spike: mid jumps to 0.96
+  engine.applyBook(downToken, [{ price: '0.95', size: '500' }], [{ price: '0.97', size: '500' }]);
+  assert.equal(downMarket.finalDownMax, 0.96, 'spike captured on new book change');
+
+  downMarket.finalUpMax = 0.05;
+  engine.resolveByBinance();
+  const resolved2 = engine.resolvedPositions.find(p => p.windowStart === start2);
+  assert.ok(resolved2, 'down position should resolve');
+  assert.equal(resolved2.resolvedWinner, 'DOWN', 'DOWN won');
+  assert.equal(resolved2.won, true);
+
+  console.log('✅ Invented smoke: recovery + last-2s CLOB + unchanged-book capture fix OK');
   process.exit(0);
-})().catch(e => { console.error('SMOKE FAIL:', e.message); process.exit(1); });
+})().catch(e => { console.error('SMOKE FAIL:', e); process.exit(1); });

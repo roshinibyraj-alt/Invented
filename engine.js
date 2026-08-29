@@ -184,7 +184,24 @@ class BotEngine {
   }
 
   // ── CLOB Book Polling ─────────────────────────────────────
+  // Final-2s capture: record the max UP/DOWN mid seen during the last
+  // FINAL_WINDOW_MS of the window. Runs on EVERY book poll — even when the
+  // book is unchanged between polls — so a 0.90+ price is never skipped.
+  captureFinalPrice(token) {
+    if (token?.mid == null || token.mid <= 0) return;
+    const m = this.markets.get(token.slug);
+    if (!m) return;
+    const nowMs = Date.now();
+    const endMs = m.windowEnd * 1000;
+    if (nowMs < endMs - FINAL_WINDOW_MS) return;
+    if (token.outcome === 'UP') m.finalUpMax = Math.max(m.finalUpMax ?? 0, token.mid);
+    else if (token.outcome === 'DOWN') m.finalDownMax = Math.max(m.finalDownMax ?? 0, token.mid);
+    m.finalCaptureAt = nowMs;
+  }
+
   applyBook(token, bids, asks) {
+    // Capture the current mid first (fires even if the book is unchanged).
+    this.captureFinalPrice(token);
     const validAsks = asks.filter(l => Number(l.size) > 0).map(l => ({ price: Number(l.price), size: Number(l.size) }));
     validAsks.sort((a, b) => a.price - b.price);
     token.bookAsks = validAsks;
@@ -198,19 +215,8 @@ class BotEngine {
     token.mid = cleanBid != null && cleanAsk != null ? round5((cleanBid + cleanAsk) / 2) : (cleanAsk ?? cleanBid);
     token.updatedAt = Date.now();
     this.pushHistory(token.tokenId, token.mid);
-    // Capture the final-last-seconds max price per side (CLOB-based, no fallback).
-    if (token.mid != null) {
-      const m = this.markets.get(token.slug);
-      if (m && token.mid > 0) {
-        const nowMs = Date.now();
-        const endMs = m.windowEnd * 1000;
-        if (nowMs >= endMs - FINAL_WINDOW_MS) {
-          if (token.outcome === 'UP') m.finalUpMax = Math.max(m.finalUpMax ?? 0, token.mid);
-          else if (token.outcome === 'DOWN') m.finalDownMax = Math.max(m.finalDownMax ?? 0, token.mid);
-          m.finalCaptureAt = nowMs;
-        }
-      }
-    }
+    // Capture the freshly-updated mid when the book changed.
+    this.captureFinalPrice(token);
   }
 
   pushHistory(tokenId, price) {
