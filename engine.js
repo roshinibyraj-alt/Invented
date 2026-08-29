@@ -731,6 +731,8 @@ class BotEngine {
       connected: this.isClobFresh(),
       uptime: Math.floor((now - this.startedAt) / 1000),
       tickCount: this.tickHistory.length,
+      entryWindow: this.entryWindow,
+      waitingForWindow: this.entryWindow != null && windowStartFor(now) < this.entryWindow,
     };
   }
 

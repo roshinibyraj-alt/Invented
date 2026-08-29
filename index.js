@@ -67,7 +67,7 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
 <body><div class="wrap">
 <header class="topbar">
 <div class="brand"><div class="btc">₿</div><div><h1>RecoveryBot</h1><div class="sub">7-INDICATOR SIGNAL · CONF≥70% FOLLOW SIGNAL · FLAT 1000 SH · HOLD TO RESOLUTION</div></div></div>
-<div class="status"><span id="statusPill" class="pill bad">OFFLINE</span><span id="tickPill" class="pill">TICKS 0</span><span id="uptimePill" class="pill blue">00:00:00</span></div>
+<div class="status"><span id="waitPill" class="pill warn">WAIT —</span><span id="statusPill" class="pill bad">OFFLINE</span><span id="tickPill" class="pill">TICKS 0</span><span id="uptimePill" class="pill blue">00:00:00</span></div>
 </header>
 <div class="metrics">
 <div class="box"><div class="label">Bankroll</div><div class="value" id="bankroll">$20,000</div></div>
@@ -195,7 +195,7 @@ if(rec.active){
   $('recoveryStatus').className='value';
   $('recoveryDetails').textContent='NEXT '+num(d.nextShares)+' SH · CAP '+(rec.cap||4)+'x';
   rb.style.borderColor='';
-}polls++;$('tickPill').textContent='TICKS '+(d.tickCount||0);
+}polls++;const wp=$('waitPill');if(wp){if(d.waitingForWindow){const ww=Math.max(0,Math.ceil((d.entryWindow-Window.now()/1000)));wp.textContent='WAIT '+ww+'s';wp.className='pill warn'}else{wp.textContent='TRADING';wp.className='pill live'}};$('tickPill').textContent='TICKS '+(d.tickCount||0);
 $('uptimePill').textContent=uptimeFmt(d.uptime||0);
 const sp=$('statusPill');if(d.connected){sp.textContent='● LIVE';sp.className='pill live'}else{sp.textContent='● OFFLINE';sp.className='pill bad'}
 const m=d.markets&&d.markets[0];if(m){$('windowTime').textContent=m.remaining+'s';$('entryWindow').textContent='T-'+(d.config?.entryTMinus||10)+'s entry'}else{$('windowTime').textContent='—';$('entryWindow').textContent=''}
