@@ -9,7 +9,7 @@ const WINDOW_SECONDS = 300;                     // BTC 5m windows
 const ENTRY_PRICE   = Number(process.env.ENTRY_PRICE   || 0.70); // first entry fire level
 const SL_PRICE      = Number(process.env.SL_PRICE      || 0.50); // stop-loss sell level
 const REENTRY_PRICE = Number(process.env.REENTRY_PRICE || 0.65); // re-entry fire level after SL
-const WAIT_SECONDS  = Number(process.env.WAIT_SECONDS  || 7);    // wait after window open
+const WAIT_SECONDS  = Number(process.env.WAIT_SECONDS  || 45);   // wait after window open
 const SLIP_CEILING  = Number(process.env.SLIP_CEILING  || 0.99); // accept ANY slippage up to this ceiling (0.99)
 const BASE_PCT      = Number(process.env.BASE_PCT      || 0.10); // base = this fraction of bankroll (10%)
 const MARTINGALE_X  = Number(process.env.MARTINGALE_X  || 2);    // double shares each re-entry
