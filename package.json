@@ -12,5 +12,5 @@
   "dependencies": {
     "express": "^4.19.2"
   },
-  "description": "FlipBot (Invented repo): BTC 5m \u2014 wait 45s, first entry only at/below 0.70 (wait for pullback), SL 0.50, re-enter any side \u22650.65 x2 (max 2 martingale/window), base 10% of capital, NO carry"
+  "description": "FlipBot (Invented repo): BTC 5m \u2014 wait 45s, first entry ONLY in 0.65\u20130.70 band (no cheap low-side buys), SL 0.50, re-enter any side \u22650.65 x2 (max 2 martingale/window), base 10% of capital, NO carry"
 }

@@ -7,6 +7,7 @@ const CLOB_REST = process.env.CLOB_REST || 'https://clob.polymarket.com';
 const WINDOW_SECONDS = 300;                     // BTC 5m windows
 
 const ENTRY_PRICE   = Number(process.env.ENTRY_PRICE   || 0.70); // first entry fire level
+const FIRST_ENTRY_MIN = Number(process.env.FIRST_ENTRY_MIN || 0.65); // first entry only fires in [0.65, 0.70]
 const SL_PRICE      = Number(process.env.SL_PRICE      || 0.50); // stop-loss sell level
 const REENTRY_PRICE = Number(process.env.REENTRY_PRICE || 0.65); // re-entry fire level after SL
 const WAIT_SECONDS  = Number(process.env.WAIT_SECONDS  || 45);   // wait after window open
@@ -312,10 +313,10 @@ class FlipBotEngine {
       if (ask > SLIP_CEILING) return null;
       if (ask < target) return null;
     } else {
-      // First entry: wait for the price to pull back to the entry level — fire
-      // only when price is AT or BELOW 0.70, never above.
-      if (ask > target) return null;
-      if (ask <= 0.05) return null;
+      // First entry: fire ONLY in the [FIRST_ENTRY_MIN, ENTRY_PRICE] band (0.65-0.70).
+      // Wait for the favorite side to pull back to 0.70; never buy the cheap leg.
+      if (ask > ENTRY_PRICE) return null;
+      if (ask < FIRST_ENTRY_MIN) return null;
     }
     // Don't re-fire the same static level.
     if (token.lastFireTick === ask) return null;
@@ -470,7 +471,7 @@ class FlipBotEngine {
     return {
       version: '3.0.0',
       name: this.name,
-      strategy: `FLIP BOT · wait ${WAIT_SECONDS}s → first entry ≤ ${ENTRY_PRICE.toFixed(2)} (wait for pullback) · re-enter ≥ ${REENTRY_PRICE.toFixed(2)} ×${MARTINGALE_X} · SL ${SL_PRICE.toFixed(2)} (max ${MAX_MARTINGALE} martingale) · base 10% · NO carry`,
+      strategy: `FLIP BOT · wait ${WAIT_SECONDS}s → first entry ${FIRST_ENTRY_MIN.toFixed(2)}–${ENTRY_PRICE.toFixed(2)} band · re-enter ≥ ${REENTRY_PRICE.toFixed(2)} ×${MARTINGALE_X} · SL ${SL_PRICE.toFixed(2)} (max ${MAX_MARTINGALE} martingale) · base 10% · NO carry`,
       serverTime: now,
       connected: this.isClobFresh(),
       lastError: this.lastError,

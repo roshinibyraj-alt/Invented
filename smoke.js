@@ -2,8 +2,8 @@
 // Internal smoke test — drives the flip bot through simulated windows.
 // Strategy verification (v6):
 //  1. Wait WAIT_SECONDS (45s) after window start — no fire before that.
-//  2. First entry: ANY side's ask AT/BELOW ENTRY_PRICE (0.70) — the bot waits
-//     for a pullback to 0.70 and never fires above it. Start size = base =
+//  2. First entry: ANY side's ask in the [0.65, 0.70] band — waits for the
+//     favorite side to pull back to 0.70 and never buys the cheap leg. Start size = base =
 //     10% of capital in shares (1000 * 0.10 / 0.70 = 142.85 -> 143).
 //  3. Stop loss: held side mid <= SL_PRICE (0.50) -> sell immediately at 0.50.
 //  4. Re-entry after SL: wait for ANY side's ask >= REENTRY_PRICE (0.65), fire
@@ -38,7 +38,7 @@ function upPrice() {
   }
   if (mode === 'any-down') {
     if (d < 46) return 0.50;
-    if (d < 250) return 0.70;                  // UP ask 0.705 > 0.70 ineligible; DOWN ask 0.305 ≤ 0.70 -> ENTRY DOWN
+    if (d < 250) return 0.35;                  // UP ask 0.355 < 0.65 ineligible; DOWN ask 0.655 in [0.65,0.70] -> ENTRY DOWN
     return 0.26;                               // DOWN holds, DOWN wins
   }
   if (mode === 'wait-gate') {
