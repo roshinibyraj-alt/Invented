@@ -57,7 +57,7 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
 .spread{display:inline-block;font-size:10px;color:var(--amber);margin-top:2px}
 .section-head{display:flex;justify-content:space-between;align-items:center;font-size:11px;color:#fff;text-transform:uppercase}
 .empty{color:var(--muted);padding:10px;border:1px dashed #333;text-align:center}
-.chart{width:100%;height:120px;display:block}
+.chart{width:100%;height:150px;display:block}
 .mini{background:#000;border:1px solid var(--line);padding:6px;border-radius:6px}
 .mini .label{font-size:8px}.mini .value{font-size:13px}
 .list{max-height:220px;overflow:auto;margin-top:6px}
@@ -78,6 +78,10 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
 <div class="brand"><div class="btc">₿</div><div><h1>FlipBot</h1><div class="sub" id="strategy">LOADING…</div></div></div>
 <div class="status"><span id="waitPill" class="pill warn">WAIT —</span><span id="statusPill" class="pill bad">OFFLINE</span><span id="tickPill" class="pill">TICKS 0</span><span id="uptimePill" class="pill blue">00:00:00</span></div>
 </header>
+<div class="box equity" style="margin-bottom:8px">
+<div class="section-head"><span>Lifetime Equity</span><span id="equityPeakLabel"></span></div>
+<svg class="chart" id="equityChart"></svg>
+</div>
 <div class="metrics">
 <div class="box"><div class="label">Bankroll</div><div class="value" id="bankroll">$1,000</div></div>
 <div class="box"><div class="label">Mark Value</div><div class="value" id="markValue">$1,000</div></div>
@@ -114,10 +118,6 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
 <div class="box" style="margin-bottom:8px">
 <div class="section-head"><span>Config</span></div>
 <div id="configBody" style="display:grid;grid-template-columns:repeat(2,1fr);gap:5px;margin-top:6px"></div>
-</div>
-<div class="box" style="margin-bottom:8px">
-<div class="section-head"><span>Equity</span></div>
-<svg class="chart" id="equityChart"></svg>
 </div>
 <div class="box" style="margin-bottom:8px">
 <div class="section-head"><span>Trade Feed</span><span id="feedCount"></span></div>
@@ -176,7 +176,7 @@ function renderConfig(c){if(!c)return;const b=$('configBody');b.innerHTML='<div 
 +'<div class="mini"><div class="label">Next Shares</div><div class="value">'+num(c.nextShares)+' sh</div></div>'
 +'<div class="mini"><div class="label">Slippage Ceiling</div><div class="value">'+(c.slippageCap!=null?c.slippageCap.toFixed(2):'0.99')+'</div></div>'
 +'<div class="mini"><div class="label">Demo Capital</div><div class="value">'+cash(c.bankroll)+'</div></div>'}
-function renderChart(c){const svg=$('equityChart');if(!c||!c.length){svg.innerHTML='';return}
+function renderChart(c){const svg=$('equityChart');const epl=$('equityPeakLabel');if(epl)epl.textContent='VALUE '+cash(S.markValue||0)+' · PEAK '+cash(S.peakEquity||0);if(!c||!c.length){svg.innerHTML='';return}
 const v=c.map(p=>p.equity),lo=Math.min(...v),hi=Math.max(...v),rng=(hi-lo)||1;const W=700,H=120,P=12;
 const pts=c.map((p,i)=>[i/Math.max(1,c.length-1)*W,H-P-(p.equity-lo)/rng*(H-P*2)]);
 const path='M'+pts.map(p=>p[0].toFixed(1)+','+p[1].toFixed(1)).join(' L');const last=pts.at(-1)||[0,H/2];
