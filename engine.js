@@ -41,6 +41,9 @@ class FlipBotEngine {
     this.wins = 0;
     this.losses = 0;
     this.peakEquity = this.bankroll;
+    this.maxDrawdown = 0;        // biggest drop from peak equity (lifetime)
+    this.maxReentryEver = 0;   // highest martingale steps ever used in one window
+    this.maxSharesEver = 0;    // largest single entry ever placed (lifetime)
 
     this.markets = new Map();          // slug -> market record
     this.tokens = new Map();           // tokenId -> token
@@ -345,6 +348,8 @@ class FlipBotEngine {
       entryNo: this.positionSeq, isReentry,
     };
     this.positions.push(position);
+    if (shares > this.maxSharesEver) this.maxSharesEver = shares;
+    if (this.reentryCount > this.maxReentryEver) this.maxReentryEver = this.reentryCount;
     this.trades.push({ timestamp: Date.now(), type: 'BUY', slug: market.slug, outcome, shares, price, cost, reason: `ENTRY#${this.positionSeq} ${this.reentryCount > 0 ? `RE@${REENTRY_PRICE}` : `@${ENTRY_PRICE}`} fill ${fillPrice.toFixed(3)}` });
     this.log(`⚡ ENTRY#${this.positionSeq} ${outcome} ${shares}sh @ ${price.toFixed(3)} · cost $${cost.toFixed(2)} · fill ${fillPrice.toFixed(3)}` + (this.reentryCount > 0 ? ` · RE-ENTRY after SL` : ` · first entry`));
     this.onTick(this.buildState());
@@ -512,10 +517,13 @@ class FlipBotEngine {
       tradeCount: this.trades.length,
       trades: this.trades.slice(-60).reverse(),
       results: this.results.slice(0, 30),
-      equityCurve: this.equityCurve.slice(-1000),
+      equityCurve: this.equityCurveForUi(), // full lifetime range (downsampled for UI)
       logs: this.logs.slice(-160),
       peakEquity: this.peakEquity,
       drawdown: round2(this.peakEquity - this.markValue()),
+      maxDrawdown: this.maxDrawdown,
+      maxReentryEver: this.maxReentryEver,
+      maxSharesEver: this.maxSharesEver,
       uptime: Math.floor((now - this.startedAt) / 1000),
       config: {
         entryPrice: ENTRY_PRICE, slPrice: SL_PRICE, reentryPrice: REENTRY_PRICE, waitSeconds: WAIT_SECONDS,
@@ -530,11 +538,24 @@ class FlipBotEngine {
   recordEquity() {
     const mark = this.markValue();
     if (mark > this.peakEquity) this.peakEquity = mark;
+    const dd = this.peakEquity - mark;
+    if (dd > this.maxDrawdown) this.maxDrawdown = round2(dd);
     const last = this.equityCurve[this.equityCurve.length - 1];
     if (!last || Date.now() - last.t > 1000 || Math.abs(last.equity - mark) > 0.001) {
-      this.equityCurve.push({ t: Date.now(), equity: mark });
-      if (this.equityCurve.length > 1500) this.equityCurve.shift();
+      this.equityCurve.push({ t: Date.now(), equity: mark }); // lifetime: keep full curve
     }
+  }
+
+  // Serve the full lifetime curve, downsampled so the dashboard stays light.
+  equityCurveForUi() {
+    const FULL = this.equityCurve;
+    if (FULL.length <= 3000) return FULL;
+    const step = Math.ceil(FULL.length / 3000);
+    const out = [];
+    for (let i = 0; i < FULL.length; i += step) out.push(FULL[i]);
+    const last = FULL[FULL.length - 1];
+    if (out[out.length - 1] !== last) out.push(last);
+    return out;
   }
 
   // ── Main loop ─────────────────────────────────────────────

@@ -88,6 +88,8 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
 <div class="box"><div class="label">Wins / Losses</div><div class="value" id="winLoss">0 / 0</div><div class="small" id="winRate"></div></div>
 <div class="box"><div class="label">Entry # / Status</div><div class="value" id="flipInfo">0 / —</div><div class="small" id="baseInfo">BASE 0 SH</div></div>
 <div class="box"><div class="label">Max Drawdown</div><div class="value neg" id="maxDrawdown">$0.00</div></div>
+<div class="box"><div class="label">Peak Capital</div><div class="value pos" id="peakCapital">$1,000</div></div>
+<div class="box"><div class="label">Highest Martingale</div><div class="value amb" id="maxMartingaleEver">M0</div><div class="small" id="maxSharesEver">0 SH</div></div>
 </div>
 <div class="two-col">
 <div>
@@ -185,7 +187,10 @@ const tp=d.totalPnl||0;const te=$('totalPnl');te.textContent=money(tp);te.classN
 const rp=d.realizedPnl||0;const re=$('realizedPnl');re.textContent=money(rp);re.className='value '+tone(rp);
 const up=d.unrealizedPnl||0;const ue=$('unrealizedPnl');ue.textContent=money(up);ue.className='value '+tone(up);
 $('winLoss').textContent=(d.wins||0)+' / '+(d.losses||0);$('winRate').textContent=d.winRate!=null?'Win '+d.winRate+'%':'';
-$('maxDrawdown').textContent=cash(d.drawdown||0);
+$('maxDrawdown').textContent=cash(d.maxDrawdown||0);
+const pk=$('peakCapital');if(pk)pk.textContent=cash(d.peakEquity||0);
+const mm=$('maxMartingaleEver');if(mm)mm.textContent='M'+(d.maxReentryEver||0);
+const ms=$('maxSharesEver');if(ms)ms.textContent=num(d.maxSharesEver||0)+' SH';
 $('windowTime').textContent=d.windowRemaining!=null?d.windowRemaining+'s':'—';
 const eh=$('entryHint');const waitSec=(d.config&&d.config.waitSeconds)||7;if(d.windowPaused){eh.textContent='⛔ '+ESC(d.pauseReason||'PAUSED')}else if(d.waitingForWindow){eh.textContent='WAITING FOR NEXT WINDOW'}else if(d.noMoreEntries){eh.textContent='⛔ MARTINGALE CAP REACHED · NO MORE ENTRIES THIS WINDOW'}else if(d.windowElapsed!=null&&d.windowElapsed<waitSec){eh.textContent='WAIT '+(waitSec-d.windowElapsed)+'s → first entry in 0.65–0.70'}else if(d.openEntry){eh.textContent='HOLDING '+(d.openEntry==='UP'?'▲ UP':'▼ DOWN')+' · SL @ 0.50'}else if(d.awaitingReentry){eh.textContent='WAITING RE-ENTRY @ 0.65 · NEXT '+num(d.nextShares)+' SH'}else{eh.textContent='READY · WAIT SIDE IN 0.65–0.70';}
 eh.style.color=(d.windowPaused||d.noMoreEntries)?'#ff4a68':'';
