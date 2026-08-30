@@ -189,12 +189,12 @@ const rb=$('recoveryBox');
 if(rec.active){
   $('recoveryStatus').textContent=rec.multiplier+'x (L'+(rec.level+1)+')';
   $('recoveryStatus').className='value negative';
-  $('recoveryDetails').textContent='DEBT $'+Math.round(rec.debt)+' · WINDOW '+(rec.windows)+'/'+(rec.hold)+' · NEXT '+num(d.nextShares)+' SH';
+  $('recoveryDetails').textContent='DEBT $'+Math.round(rec.debt)+' · WINDOW '+(rec.windows)+'/'+(rec.hold)+' · NEXT '+num(d.nextShares)+' SH'+(d.slStatus?' · SL '+d.slStatus:'');
   rb.style.borderColor='#5c1622';
 }else{
   $('recoveryStatus').textContent='OFF';
   $('recoveryStatus').className='value';
-  $('recoveryDetails').textContent='NEXT '+num(d.nextShares)+' SH · CAP '+(rec.cap||4)+'x';
+  $('recoveryDetails').textContent='NEXT '+num(d.nextShares)+' SH · CAP '+(rec.cap||4)+'x'+(d.slStatus?' · SL '+d.slStatus:'');
   rb.style.borderColor='';
 }polls++;const wp=$('waitPill');if(wp){if(d.waitingForWindow){const ww=Math.max(0,Math.ceil((d.entryWindow-Window.now()/1000)));wp.textContent='WAIT '+ww+'s';wp.className='pill warn'}else{wp.textContent='TRADING';wp.className='pill live'}};$('tickPill').textContent='TICKS '+(d.tickCount||0);
 $('uptimePill').textContent=uptimeFmt(d.uptime||0);

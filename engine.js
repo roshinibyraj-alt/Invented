@@ -512,6 +512,7 @@ class BotEngine {
       signalConf: conf, signalScore: this.signal.score,
       signalIndicators: { ...this.signal.indicators }, betLabel: outcome,
       exitReason: null, exitPrice: null, closedAt: null, pnl: null,
+      slArmed: false,
     };
     this.positions.push(pos);
     this.trades.push({ timestamp: Date.now(), type: 'BUY', outcome, shares, price, cost, fee, confidence: conf, score: this.signal.score, markPrice: token.mid, betLabel: outcome });
@@ -576,14 +577,19 @@ class BotEngine {
       if (Number.isFinite(token?.mid)) p.markPrice = token.mid;
 
       // Stop loss (applies to ANY position): once the window is at least
-      // STOP_LOSS_AFTER seconds old, if the held side's price touches
-      // STOP_LOSS_PRICE or lower, sell immediately at the stop price.
+      // STOP_LOSS_AFTER seconds old, if the held side's price drops BELOW
+      // STOP_LOSS_PRICE we arm the stop. Then we wait for it to come back up
+      // to STOP_LOSS_PRICE and sell at that level (never dump below it).
       const elapsed = nowS - p.windowStart;
       if (elapsed >= STOP_LOSS_AFTER) {
         const px = token.ask ?? token.mid ?? token.bid;
-        if (Number.isFinite(px) && px <= STOP_LOSS_PRICE) {
-          p.markPrice = STOP_LOSS_PRICE;
-          this.sellPosition(p, 'STOP_LOSS');
+        if (Number.isFinite(px)) {
+          if (p.slArmed && px >= STOP_LOSS_PRICE) {
+            p.markPrice = STOP_LOSS_PRICE;
+            this.sellPosition(p, 'STOP_LOSS');
+          } else if (px < STOP_LOSS_PRICE) {
+            p.slArmed = true;
+          }
         }
       }
     }
@@ -723,6 +729,7 @@ class BotEngine {
       winRate: this.wins + this.losses ? round2(this.wins / (this.wins + this.losses) * 100) : null,
       maxDrawdown: this.maxDrawdown,
       signal: this.signal,
+      slStatus: (() => { const p = openPos[0]; if (!p) return ''; if (p.slArmed) return 'ARMED · waiting for ' + STOP_LOSS_PRICE.toFixed(2); const el = Math.floor(Date.now() / 1000 - p.windowStart); return el >= STOP_LOSS_AFTER ? 'WATCHING (≥' + STOP_LOSS_AFTER + 's)' : ''; })(),
       nextShares: this.nextShares(),
       recovery: {
         active: this.recoveryActive,
@@ -737,7 +744,7 @@ class BotEngine {
       positions: openPos.map(p => ({ outcome: p.outcome, shares: p.shares, entryPrice: p.entryPrice, cost: p.cost,
         betLabel: p.betLabel, markPrice: p.markPrice,
         unrealized: round2(p.shares * (p.markPrice ?? p.entryPrice) - p.cost - p.fee),
-        confidence: p.signalConf, openedAt: p.openedAt, side: p.outcome })),
+        confidence: p.signalConf, openedAt: p.openedAt, side: p.outcome, slArmed: p.slArmed })),
 
       markets: this.publicMarkets(),
       resolvedPositions: this.resolvedPositions.slice(0, 30),

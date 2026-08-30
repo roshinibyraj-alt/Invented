@@ -60,18 +60,25 @@ async function setup(candles) {
   slMarket.down.ask = 0.55; slMarket.down.bid = 0.52; slMarket.down.mid = 0.54;
   engine.executeBuy(slMarket, 'UP', 0.44, 1000, slStart, slStart + 300);
 
-  // Before 240s elapsed: price <= 0.20 must NOT stop-loss (condition not met).
-  engine.positions[engine.positions.length - 1].windowStart = Math.floor(Date.now() / 1000) - 230;
+  // Before 240s elapsed: price below 0.20 must NOT stop-loss (not armed yet).
+  const slPosRef = engine.positions[engine.positions.length - 1];
+  slPosRef.windowStart = Math.floor(Date.now() / 1000) - 230;
   slMarket.up.ask = 0.15; slMarket.up.mid = 0.14;
   engine.evaluateExit();
-  assert.ok(engine.positions.some(p => p.windowStart === Math.floor(Date.now() / 1000) - 230 && p.status === 'open'), 'no stop-loss before 240s elapsed');
+  assert.ok(slPosRef.status === 'open', 'no stop-loss before 240s elapsed');
 
-  // At/after 240s elapsed: price <= 0.20 triggers the stop loss.
-  engine.positions[engine.positions.length - 1].windowStart = Math.floor(Date.now() / 1000) - 241;
+  // At/after 240s elapsed: price below 0.20 → arm, but still HOLD (wait for recovery to 0.20).
+  slPosRef.windowStart = Math.floor(Date.now() / 1000) - 241;
   slMarket.up.ask = 0.15; slMarket.up.mid = 0.14;
+  engine.evaluateExit();
+  assert.ok(slPosRef.status === 'open', 'below 0.20 after 240s → armed, still holding (waiting for recovery)');
+  assert.equal(slPosRef.slArmed, true, 'stop-loss armed');
+
+  // Price comes back to 0.20 → sell as stop loss at 0.20.
+  slMarket.up.ask = 0.20; slMarket.up.mid = 0.19;
   engine.evaluateExit();
   const slPos = engine.resolvedPositions.find(p => p.exitReason === 'STOP_LOSS');
-  assert.ok(slPos, 'stop-loss fires after 240s elapsed when price <= 0.20');
+  assert.ok(slPos, 'stop-loss sells once price recovers to 0.20');
   assert.equal(slPos.exitPrice, 0.20, 'sold at the stop-loss price 0.20');
   assert.equal(engine.positions.some(p => p.status === 'open' && p.slug === slMarket.slug), false, 'position closed after stop-loss');
 
@@ -134,6 +141,6 @@ async function setup(candles) {
   assert.equal(resolved2.resolvedWinner, 'DOWN', 'DOWN won');
   assert.equal(resolved2.won, true);
 
-  console.log('✅ Invented smoke: 4x recovery + stop-loss 0.20 after 240s + last-2s CLOB OK');
+  console.log('✅ Invented smoke: 4x recovery + stop-loss 0.20 after 240s (wait for recovery) + last-2s CLOB OK');
   process.exit(0);
 })().catch(e => { console.error('SMOKE FAIL:', e); process.exit(1); });
