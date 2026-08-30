@@ -50,6 +50,8 @@ class FlipBotEngine {
     this.maxDrawdown = 0;        // biggest drop from peak equity (lifetime)
     this.maxReentryEver = 0;   // highest martingale steps ever used in one window
     this.maxSharesEver = 0;    // largest single entry ever placed (lifetime)
+    this.maxDeepestBeforeWin = 0;   // deepest martingale escalation reached before a win (all-time)
+    this.maxConsecLosesBeforeWin = 0; // most consecutive losing steps before a win (all-time)
 
     this.markets = new Map();          // slug -> market record
     this.tokens = new Map();           // tokenId -> token
@@ -436,6 +438,13 @@ class FlipBotEngine {
         this.sellPosition(pos, exitPrice, 'RESOLUTION', { winner, won });
         if (won) winPayout += payout; else lossCost += pos.cost;
       }
+      // Track the deepest martingale escalation & consecutive losing steps before the winning leg.
+      const winPos = group.find(p => p.outcome === winner && p.exitReason != null && p.won);
+      if (winPos) {
+        const stepsBeforeWin = Math.max(0, (winPos.entryNo || 1) - 1);
+        if (stepsBeforeWin > this.maxDeepestBeforeWin) this.maxDeepestBeforeWin = stepsBeforeWin;
+        if (stepsBeforeWin > this.maxConsecLosesBeforeWin) this.maxConsecLosesBeforeWin = stepsBeforeWin;
+      }
       this.log(`🏁 WINDOW ${m.slug.slice(-10)} RESOLVED → ${winner} · win payout $${winPayout.toFixed(2)} · loss cost $${lossCost.toFixed(2)}`);
       // No carry-over: next window always starts fresh at base.
     }
@@ -537,6 +546,8 @@ class FlipBotEngine {
       maxDrawdown: this.maxDrawdown,
       maxReentryEver: this.maxReentryEver,
       maxSharesEver: this.maxSharesEver,
+      maxDeepestBeforeWin: this.maxDeepestBeforeWin,
+      maxConsecLosesBeforeWin: this.maxConsecLosesBeforeWin,
       uptime: Math.floor((now - this.startedAt) / 1000),
       config: {
         entryPrice: ENTRY_PRICE, slPrice: SL_PRICE, reentryPrice: REENTRY_PRICE, waitSeconds: WAIT_SECONDS,

@@ -46,6 +46,15 @@ function upPrice() {
     if (d < 250) return 0.695;                 // ask 0.700 at/below after wait
     return 0.82;                               // UP wins
   }
+  if (mode === 'win-at-3') {
+    if (d < 46) return 0.50;
+    if (d < 96) return 0.695;             // ENTRY#1 (base) @ ask 0.700
+    if (d < 146) return 0.45;             // SL#1
+    if (d < 196) return 0.66;             // ENTRY#2 (2x) @ 0.665
+    if (d < 246) return 0.45;             // SL#2
+    if (d < 296) return 0.67;             // ENTRY#3 (4x) @ 0.675
+    return 0.90;                          // UP wins at resolution -> deepest before win = M2
+  }
   // mode === 'all-sl': base @0.70 -> SL -> 2*base @0.65 -> SL -> 4*base @0.65 -> SL
   // (cap reached, window stops). Distinct re-entry levels avoid lastFireTick guard.
   if (d < 46) return 0.50;
@@ -175,7 +184,16 @@ async function fullScenario(name, windows) {
     if (w2Base !== expW2) failures.push(`NO-CARRY WIN: W2 base ${w2Base} != expected ${expW2} (fresh, ~10% of bankroll)`);
   }
 
-  // SCENARIO 3: wait gate + side-agnostic
+  // SCENARIO 3: win at the deepest martingale (entry #3) -> record M2 / 2 loses before win
+  {
+    const e = await fullScenario('WIN-AT-3 (deepest martingale before win)', [
+      { i: 1, mode: 'win-at-3', expectStart: base10 },
+    ]);
+    if (e.maxDeepestBeforeWin !== 2) failures.push(`WIN-AT-3: maxDeepestBeforeWin ${e.maxDeepestBeforeWin} != 2`);
+    if (e.maxConsecLosesBeforeWin !== 2) failures.push(`WIN-AT-3: maxConsecLosesBeforeWin ${e.maxConsecLosesBeforeWin} != 2`);
+  }
+
+  // SCENARIO 4: wait gate + side-agnostic
   {
     const e = await fullScenario('WAIT-GATE', [
       { i: 1, mode: 'wait-gate', expectStart: base10, preWait: 0 },
