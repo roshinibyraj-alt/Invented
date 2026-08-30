@@ -27,7 +27,7 @@ async function setup(candles) {
   const engine = await setup([]);
   engine.onLog = line => logs.push(line);
 
-  // ── Recovery ladder caps at 2x ────────────────────────────
+  // ── Recovery ladder 2x → 3x → 4x (cap 4x) ─────────────────
   assert.equal(engine.nextShares(), 1000, 'base size is 1000 shares');
   assert.equal(engine.recoveryActive, false);
 
@@ -39,13 +39,41 @@ async function setup(candles) {
 
   engine._onRecoveryLoss(80);
   assert.equal(engine.recoveryDebt, 180);
-  assert.equal(engine.recoveryMultiplier(), 2, 'ladder caps at 2x, never 3x/4x');
-  assert.equal(engine.nextShares(), 2000, 'still 2000 shares at cap');
+  assert.equal(engine.recoveryMultiplier(), 3, 'second loss steps to 3x');
+  assert.equal(engine.nextShares(), 3000, '3x recovery sizes at 3000 shares');
 
-  engine._onRecoveryWin(180);
+  engine._onRecoveryLoss(50);
+  assert.equal(engine.recoveryDebt, 230);
+  assert.equal(engine.recoveryMultiplier(), 4, 'third loss steps to 4x (cap)');
+  assert.equal(engine.nextShares(), 4000, '4x recovery sizes at 4000 shares');
+
+  engine._onRecoveryWin(230);
   assert.equal(engine.recoveryActive, false, 'debt cleared → recovery off');
   assert.equal(engine.recoveryDebt, 0);
   assert.equal(engine.nextShares(), 1000, 'back to base 1000 shares');
+
+  // ── Stop loss: any position, only after elapsed >= 240s ───
+  const slStart = Math.floor((Date.now() - 300000) / 1000 / 300) * 300;
+  await engine.discoverMarket('btc', slStart);
+  const slMarket = engine.markets.get(`btc-updown-5m-${slStart}`);
+  slMarket.up.ask = 0.45; slMarket.up.bid = 0.42; slMarket.up.mid = 0.44;
+  slMarket.down.ask = 0.55; slMarket.down.bid = 0.52; slMarket.down.mid = 0.54;
+  engine.executeBuy(slMarket, 'UP', 0.44, 1000, slStart, slStart + 300);
+
+  // Before 240s elapsed: price <= 0.20 must NOT stop-loss (condition not met).
+  engine.positions[engine.positions.length - 1].windowStart = Math.floor(Date.now() / 1000) - 230;
+  slMarket.up.ask = 0.15; slMarket.up.mid = 0.14;
+  engine.evaluateExit();
+  assert.ok(engine.positions.some(p => p.windowStart === Math.floor(Date.now() / 1000) - 230 && p.status === 'open'), 'no stop-loss before 240s elapsed');
+
+  // At/after 240s elapsed: price <= 0.20 triggers the stop loss.
+  engine.positions[engine.positions.length - 1].windowStart = Math.floor(Date.now() / 1000) - 241;
+  slMarket.up.ask = 0.15; slMarket.up.mid = 0.14;
+  engine.evaluateExit();
+  const slPos = engine.resolvedPositions.find(p => p.exitReason === 'STOP_LOSS');
+  assert.ok(slPos, 'stop-loss fires after 240s elapsed when price <= 0.20');
+  assert.equal(slPos.exitPrice, 0.20, 'sold at the stop-loss price 0.20');
+  assert.equal(engine.positions.some(p => p.status === 'open' && p.slug === slMarket.slug), false, 'position closed after stop-loss');
 
   // ── Resolution: last-2s CLOB, no fallback ─────────────────
   engine._onRecoveryLoss(50);
@@ -106,6 +134,6 @@ async function setup(candles) {
   assert.equal(resolved2.resolvedWinner, 'DOWN', 'DOWN won');
   assert.equal(resolved2.won, true);
 
-  console.log('✅ Invented smoke: recovery + last-2s CLOB + unchanged-book capture fix OK');
+  console.log('✅ Invented smoke: 4x recovery + stop-loss 0.20 after 240s + last-2s CLOB OK');
   process.exit(0);
 })().catch(e => { console.error('SMOKE FAIL:', e); process.exit(1); });

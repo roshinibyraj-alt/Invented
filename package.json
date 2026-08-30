@@ -15,5 +15,5 @@
     "express": "^4.19.2",
     "viem": "^2.21.0"
   },
-  "description": "BTC-led Polymarket correlation combo paper bot with live CLOB book polling"
+  "description": "RecoveryBot — 7-indicator BTC 5m signal follower, confidence>=70% follow signal, 2x/3x/4x recovery ladder, stop-loss 0.20 after 240s"
 }

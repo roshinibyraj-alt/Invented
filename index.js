@@ -66,7 +66,7 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
 </head>
 <body><div class="wrap">
 <header class="topbar">
-<div class="brand"><div class="btc">₿</div><div><h1>RecoveryBot</h1><div class="sub">7-INDICATOR SIGNAL · CONF≥70% FOLLOW SIGNAL · FLAT 1000 SH · HOLD TO RESOLUTION</div></div></div>
+<div class="brand"><div class="btc">₿</div><div><h1>RecoveryBot</h1><div class="sub">7-INDICATOR SIGNAL · CONF≥70% FOLLOW SIGNAL · RECOVERY 2x→3x→4x · SL 0.20 AFTER 240s</div></div></div>
 <div class="status"><span id="waitPill" class="pill warn">WAIT —</span><span id="statusPill" class="pill bad">OFFLINE</span><span id="tickPill" class="pill">TICKS 0</span><span id="uptimePill" class="pill blue">00:00:00</span></div>
 </header>
 <div class="metrics">
@@ -171,7 +171,8 @@ function renderConfig(c){if(!c)return;const b=$('configBody');b.innerHTML='<div 
 +'<div class="mini"><div class="label">Sizing</div><div class="value">'+(c.flatShares??0)+' sh</div></div>'
 +'<div class="mini"><div class="label">Reversal</div><div class="value">'+(c.reversalPct??0)+'%</div></div>'
 +'<div class="mini"><div class="label">Reversal ≥</div><div class="value">'+((c.reversalConsist??0)*100)+'%</div></div>'
-+'<div class="mini"><div class="label">Fee</div><div class="value">'+((c.takerFeeRate??0)*100)+'%</div></div>'}
++'<div class="mini"><div class="label">Fee</div><div class="value">'+((c.takerFeeRate??0)*100)+'%</div></div>'
++'<div class="mini"><div class="label">Stop Loss</div><div class="value">'+(c.stopLossPrice??0.20).toFixed(2)+' after '+(c.stopLossAfter??240)+'s</div></div>'}
 function renderChart(c){const svg=$('equityChart');if(!c||!c.length){svg.innerHTML='';return}
 const v=c.map(p=>p.equity),lo=Math.min(...v),hi=Math.max(...v),rng=(hi-lo)||1;const W=700,H=120,P=12;
 const pts=c.map((p,i)=>[i/Math.max(1,c.length-1)*W,H-P-(p.equity-lo)/rng*(H-P*2)]);

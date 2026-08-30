@@ -18,9 +18,11 @@ const LOW_CONF          = Number(process.env.LOW_CONF || 0.30);
 const ENTRY_ELAPSED      = Number(process.env.ENTRY_ELAPSED || 10);
 const FLAT_SHARES       = Number(process.env.FLAT_SHARES || 1000);
 const RECOVERY_MULT     = Number(process.env.RECOVERY_MULT || 2);
-const RECOVERY_LEVELS   = [2];         // recovery level ladder, capped at 2x
+const RECOVERY_LEVELS   = [2, 3, 4];   // recovery level ladder, capped at 4x
 const RECOVERY_HOLD     = Number(process.env.RECOVERY_HOLD || 3);   // windows per level
 const MAX_RISK_PCT      = Number(process.env.MAX_RISK_PCT || 0.25); // max bankroll % per window
+const STOP_LOSS_PRICE   = Number(process.env.STOP_LOSS_PRICE || 0.20); // intra-window stop loss trigger price
+const STOP_LOSS_AFTER   = Number(process.env.STOP_LOSS_AFTER || 240);  // only stop-loss once window elapsed >= this (s)
 const FINAL_WIN_PRICE   = Number(process.env.FINAL_WIN_PRICE || 0.90); // resolve by last-2s price >= this
 const FINAL_WINDOW_MS   = Number(process.env.FINAL_WINDOW_MS || 2000);   // scope of final price capture
 const REVERSAL_PCT      = Number(process.env.REVERSAL_PCT || 0.05);
@@ -563,12 +565,27 @@ class BotEngine {
   }
 
   evaluateExit() {
-    // Exits are controlled by the confidence flipper (evaluateEntry).
-    // This only refreshes mark prices for open positions.
+    // This only refreshes mark prices for open positions, plus the late-window
+    // stop loss. No other intra-window exits: hold to resolution.
+    const nowS = Date.now() / 1000;
     for (const p of this.positions) {
       if (p.status !== 'open') continue;
       const market = this.markets.get(p.slug);
-      if (market) { const token = p.outcome === 'UP' ? market.up : market.down; if (Number.isFinite(token?.mid)) p.markPrice = token.mid; }
+      if (!market) continue;
+      const token = p.outcome === 'UP' ? market.up : market.down;
+      if (Number.isFinite(token?.mid)) p.markPrice = token.mid;
+
+      // Stop loss (applies to ANY position): once the window is at least
+      // STOP_LOSS_AFTER seconds old, if the held side's price touches
+      // STOP_LOSS_PRICE or lower, sell immediately at the stop price.
+      const elapsed = nowS - p.windowStart;
+      if (elapsed >= STOP_LOSS_AFTER) {
+        const px = token.ask ?? token.mid ?? token.bid;
+        if (Number.isFinite(px) && px <= STOP_LOSS_PRICE) {
+          p.markPrice = STOP_LOSS_PRICE;
+          this.sellPosition(p, 'STOP_LOSS');
+        }
+      }
     }
   }
 
@@ -727,7 +744,7 @@ class BotEngine {
       trades: this.trades.slice(-80).reverse(),
       equityCurve: sampleCurve(this.equityCurve, 1500),
       logs: this.logs.slice(-220),
-      config: { highConf: HIGH_CONF, minConfidence: HIGH_CONF, lowConf: LOW_CONF, flatShares: FLAT_SHARES, sizingFactor: FLAT_SHARES, entryElapsed: ENTRY_ELAPSED, entryMinElapsed: ENTRY_ELAPSED, reversalPct: REVERSAL_PCT, reversalConsist: REVERSAL_CONSIST, takerFeeRate: TAKER_FEE_RATE },
+      config: { highConf: HIGH_CONF, minConfidence: HIGH_CONF, lowConf: LOW_CONF, flatShares: FLAT_SHARES, sizingFactor: FLAT_SHARES, entryElapsed: ENTRY_ELAPSED, entryMinElapsed: ENTRY_ELAPSED, reversalPct: REVERSAL_PCT, reversalConsist: REVERSAL_CONSIST, takerFeeRate: TAKER_FEE_RATE, stopLossPrice: STOP_LOSS_PRICE, stopLossAfter: STOP_LOSS_AFTER },
       connected: this.isClobFresh(),
       uptime: Math.floor((now - this.startedAt) / 1000),
       tickCount: this.tickHistory.length,
@@ -762,8 +779,8 @@ class BotEngine {
     // Equity snapshot
     setInterval(() => this.recordEquity(), 2000);
 
-    this.log(`🚀 ConfidenceBot started | conf≥${(HIGH_CONF*100).toFixed(0)}% → follow signal (UP/DOWN) · ${FLAT_SHARES}sh · after ${ENTRY_ELAPSED}s wait · hold to resolution`);
+    this.log(`🚀 ConfidenceBot started | conf≥${(HIGH_CONF*100).toFixed(0)}% → follow signal (UP/DOWN) · ${FLAT_SHARES}sh · after ${ENTRY_ELAPSED}s wait · SL ${STOP_LOSS_PRICE.toFixed(2)} after ${STOP_LOSS_AFTER}s · hold to resolution`);
   }
 }
 
-module.exports = { BotEngine, loadEquityFile, config: { ASSETS, START_BANKROLL, HIGH_CONF, LOW_CONF, FLAT_SHARES, RECOVERY_MULT, RECOVERY_LEVELS, RECOVERY_HOLD, MAX_RISK_PCT, ENTRY_ELAPSED, REVERSAL_PCT, REVERSAL_CONSIST, TAKER_FEE_RATE, WINDOW_SECONDS } };
+module.exports = { BotEngine, loadEquityFile, config: { ASSETS, START_BANKROLL, HIGH_CONF, LOW_CONF, FLAT_SHARES, RECOVERY_MULT, RECOVERY_LEVELS, RECOVERY_HOLD, MAX_RISK_PCT, STOP_LOSS_PRICE, STOP_LOSS_AFTER, ENTRY_ELAPSED, REVERSAL_PCT, REVERSAL_CONSIST, TAKER_FEE_RATE, WINDOW_SECONDS } };

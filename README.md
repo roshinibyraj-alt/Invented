@@ -1,19 +1,29 @@
-# Polymarket BTC Correlation Combo Bot
+# RecoveryBot — BTC 5m Signal Follower with 4x Recovery
 
-Autonomous 5-minute correlation-combo paper bot priced by direct Polymarket CLOB order-book snapshots.
+BTC-led 5-minute Polymarket paper bot driven by a 7-indicator Binance signal composite, with a 4x recovery-ladder sizing engine.
 
 ## Strategy
-- BTC is the only anchor asset.
-- Two independent BTC-anchor combinations are monitored:
-  - BTC UP + ETH DOWN
-  - BTC DOWN + ETH UP
-- No altcoin-to-altcoin combination is allowed.
-- When a combo's combined CLOB midpoint is below `0.85`, buy `5 shares` (100 when boosted) of each leg at executable CLOB ask prices.
-- Both combinations can run concurrently; multiple combos may share a BTC side.
-- There is no intra-window take-profit or stop-loss.
-- Every combo holds to resolution.
-- During the final two seconds each market's highest UP/DOWN midpoints are sampled. If one side exceeds `0.90`, that side is declared the winner and combo P&L settles immediately.
-- Winning legs pay shares × $1; losing legs pay zero.
+- Watch the `btc-updown-5m-*` market only.
+- Compute a composite score from 7 indicators on Binance 1m candles + tick data:
+  Window Delta, Micro Momentum, Acceleration, EMA 9/21, RSI 14, Volume Surge, Tick Trend.
+- Lean = UP (score > 0) or DOWN (score < 0). Confidence = |score| / 7.0.
+- Wait 10 seconds after the window opens, then follow the signal at confidence >= 70% (`HIGH_CONF`):
+  - lean UP → buy UP
+  - lean DOWN → buy DOWN
+- Single trade per window, no intra-window flip.
+- **Stop loss**: applies to ANY position once the window is at least
+  `STOP_LOSS_AFTER` (240s) old — if the held side's price touches `STOP_LOSS_PRICE`
+  (0.20) or lower, the position is sold immediately at 0.20.
+- Otherwise hold to resolution: during the final two seconds the highest UP/DOWN
+  CLOB prices are sampled; `>= 0.90` side (or higher side) wins and settles.
 
-## Risk / Dashboard
-Default demo bankroll is `$20,000`. The dashboard shows every live bid, ask, midpoint, spread and short-window delta for BTC and ETH, plus open combo marks, floating P&L, execution legs, resolved results, global equity curve and server logs. Base size is 5 shares per leg. When a decorrelation combo resolves as a WIN (BTC UP + ETH DOWN or BTC DOWN + ETH UP), the bot boosts to 100 shares per leg for the next three consecutive windows. If another decorrelation win occurs during an active boost, the 3-window counter resets. Prices come only from batched CLOB `/books` snapshots every 500 ms; if CLOB fails, trading stops.
+## Recovery Sizing (2x → 3x → 4x)
+- Base shares: 1000 (`FLAT_SHARES`).
+- On a loss the bot enters recovery mode: ladder `RECOVERY_LEVELS = [2, 3, 4]`,
+  held up to `RECOVERY_HOLD` (3) windows per level, stepping up on each loss until
+  the accumulated debt is fully recovered, then back to base size.
+- Max-risk guard: a recovery bet is skipped if it would risk more than
+  `MAX_RISK_PCT` (25%) of bankroll.
+
+## Pricing
+All market prices come from batched CLOB `/books` snapshots. Signal data comes from Binance public REST (candles + tick price).
