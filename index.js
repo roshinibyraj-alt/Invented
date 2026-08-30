@@ -88,6 +88,7 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
 <div class="box"><div class="label">Total P&L</div><div class="value" id="totalPnl">+$0.00</div></div>
 <div class="box"><div class="label">Realized</div><div class="value" id="realizedPnl">+$0.00</div></div>
 <div class="box"><div class="label">Unrealized</div><div class="value" id="unrealizedPnl">$0</div></div>
+<div class="box"><div class="label">Total Fees</div><div class="value neg" id="totalFees">$0.00</div></div>
 <div class="box"><div class="label">Window</div><div class="value" id="windowTime">—</div><div class="small" id="entryHint"></div></div>
 <div class="box"><div class="label">Wins / Losses</div><div class="value" id="winLoss">0 / 0</div><div class="small" id="winRate"></div></div>
 <div class="box"><div class="label">Entry # / Status</div><div class="value" id="flipInfo">0 / —</div><div class="small" id="baseInfo">BASE 0 SH</div></div>
@@ -175,6 +176,7 @@ function renderConfig(c){if(!c)return;const b=$('configBody');b.innerHTML='<div 
 +'<div class="mini"><div class="label">M'+(c.maxMartingale||0)+' Steps Used</div><div class="value">'+num(c.reentryCount||0)+' / '+(c.maxMartingale||0)+'</div></div>'
 +'<div class="mini"><div class="label">Next Shares</div><div class="value">'+num(c.nextShares)+' sh</div></div>'
 +'<div class="mini"><div class="label">Slippage Ceiling</div><div class="value">'+(c.slippageCap!=null?c.slippageCap.toFixed(2):'0.99')+'</div></div>'
++'<div class="mini"><div class="label">Taker Fee</div><div class="value">'+(c.takerFeeRate!=null?(c.takerFeeRate*100).toFixed(2)+'%':'7.00%')+'</div></div>'
 +'<div class="mini"><div class="label">Demo Capital</div><div class="value">'+cash(c.bankroll)+'</div></div>'}
 function renderChart(c){const svg=$('equityChart');const epl=$('equityPeakLabel');if(epl)epl.textContent='VALUE '+cash(S.markValue||0)+' · PEAK '+cash(S.peakEquity||0);if(!c||!c.length){svg.innerHTML='';return}
 const v=c.map(p=>p.equity),lo=Math.min(...v),hi=Math.max(...v),rng=(hi-lo)||1;const W=700,H=120,P=12;
@@ -186,6 +188,7 @@ function renderKpi(d){$('bankroll').textContent=cash(d.bankroll);$('markValue').
 const tp=d.totalPnl||0;const te=$('totalPnl');te.textContent=money(tp);te.className='value '+tone(tp);
 const rp=d.realizedPnl||0;const re=$('realizedPnl');re.textContent=money(rp);re.className='value '+tone(rp);
 const up=d.unrealizedPnl||0;const ue=$('unrealizedPnl');ue.textContent=money(up);ue.className='value '+tone(up);
+const tf=$('totalFees');if(tf)tf.textContent=cash(d.totalFeesPaid||0);
 $('winLoss').textContent=(d.wins||0)+' / '+(d.losses||0);$('winRate').textContent=d.winRate!=null?'Win '+d.winRate+'%':'';
 $('maxDrawdown').textContent=cash(d.maxDrawdown||0);
 const pk=$('peakCapital');if(pk)pk.textContent=cash(d.peakEquity||0);

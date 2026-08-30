@@ -28,7 +28,7 @@ Paper/demo trading bot for the Polymarket **BTC Up/Down 5-minute** market. No wa
 | `CLOB_POLL_MS` | `300` | CLOB polling interval |
 
 ## Pricing
-Gamma is used only to resolve the slug into the UP/DOWN CLOB token IDs; all prices come from the CLOB order book (`POST /books`). Fires use the actual observed ask (slippage accepted up to 0.99); the stop-loss sells at 0.50. No fees modelled.
+Gamma is used only to resolve the slug into the UP/DOWN CLOB token IDs; all prices come from the CLOB order book (`POST /books`). Fires use the actual observed ask (slippage accepted up to 0.99); the stop-loss sells at 0.50. Polymarket taker fees are modelled: `fee = C × TAKER_FEE_RATE × p × (1 − p)` (default TAKER_FEE_RATE=0.07 for Crypto, makers 0), applied on every buy and sell fill and deducted from bankroll/P&L; total fees shown on the dashboard.
 
 ## Run
 ```bash

@@ -16,6 +16,7 @@ const BASE_PCT      = Number(process.env.BASE_PCT      || 0.10); // base = this 
 const MARTINGALE_X  = Number(process.env.MARTINGALE_X  || 2);    // double shares each re-entry
 const MAX_MARTINGALE = Number(process.env.MAX_MARTINGALE || 2);   // max martingale steps per window (base + 2 = 3 entries max)
 const START_BANKROLL= Number(process.env.START_BANKROLL|| 1000); // demo capital
+const TAKER_FEE_RATE = Number(process.env.TAKER_FEE_RATE || 0.07); // Polymarket crypto taker fee rate (0.07 = 7%); makers 0
 
 const CLOB_POLL_MS   = Math.max(100, Number(process.env.CLOB_POLL_MS || 300));
 const CLOB_FRESH_MS  = Math.max(CLOB_POLL_MS, Number(process.env.CLOB_FRESH_MS || 1500));
@@ -24,6 +25,10 @@ const CLOB_TIMEOUT_MS= Math.max(400, Number(process.env.CLOB_TIMEOUT_MS || 1500)
 // ── Helpers ────────────────────────────────────────────────
 function round2(v) { return Math.round(v * 100) / 100; }
 function round5(v) { return Math.round(v * 100000) / 100000; }
+// Polymarket taker fee: fee = C * feeRate * p * (1 - p), rounded to 5 decimals.
+function takerFee(C, p, rate = TAKER_FEE_RATE) {
+  return round5(C * rate * p * (1 - p));
+}
 function windowStartFor(ms) { return Math.floor(ms / 1000 / WINDOW_SECONDS) * WINDOW_SECONDS; }
 function slugFor(start) { return `btc-updown-5m-${start}`; }
 
@@ -38,6 +43,7 @@ class FlipBotEngine {
     this.bankroll = options.bankroll ?? START_BANKROLL;
     this.initialBankroll = this.bankroll;
     this.realizedPnl = 0;
+    this.totalFeesPaid = 0;
     this.wins = 0;
     this.losses = 0;
     this.peakEquity = this.bankroll;
@@ -325,14 +331,17 @@ class FlipBotEngine {
     if (token.lastFireTick === ask) return null;
     const shares = this.nextShares;
     const cost = round2(shares * ask);
-    if (cost > this.bankroll) { this.log(`⚠️  SKIP ${outcome} @ ${ask.toFixed(3)} — bankroll $${this.bankroll.toFixed(2)} < cost $${cost.toFixed(2)}`); return null; }
+    const fee = takerFee(shares, ask);
+    if (cost + fee > this.bankroll) { this.log(`⚠️  SKIP ${outcome} @ ${ask.toFixed(3)} — bankroll $${this.bankroll.toFixed(2)} < cost+fee $${(cost+fee).toFixed(2)}`); return null; }
     return { outcome, shares, fillPrice: ask };
   }
 
   executeEntry(market, outcome, shares, fillPrice, target) {
     const price = fillPrice;
     const cost = round2(shares * price);
-    this.bankroll = round2(this.bankroll - cost);
+    const fee = takerFee(shares, price);
+    this.bankroll = round2(this.bankroll - cost - fee);
+    this.totalFeesPaid = round2(this.totalFeesPaid + fee);
     this.positionSeq += 1;
     const isReentry = this.positionSeq > 1;
     if (isReentry) this.reentryCount += 1;
@@ -343,15 +352,15 @@ class FlipBotEngine {
     const position = {
       slug: market.slug, outcome, market,
       windowStart: market.windowStart, windowEnd: market.windowEnd,
-      shares, entryPrice: price, cost,
+      shares, entryPrice: price, cost, buyFee: fee,
       openedAt: Date.now(), exitReason: null, exitPrice: null, pnl: null,
       entryNo: this.positionSeq, isReentry,
     };
     this.positions.push(position);
     if (shares > this.maxSharesEver) this.maxSharesEver = shares;
     if (this.reentryCount > this.maxReentryEver) this.maxReentryEver = this.reentryCount;
-    this.trades.push({ timestamp: Date.now(), type: 'BUY', slug: market.slug, outcome, shares, price, cost, reason: `ENTRY#${this.positionSeq} ${this.reentryCount > 0 ? `RE@${REENTRY_PRICE}` : `@${ENTRY_PRICE}`} fill ${fillPrice.toFixed(3)}` });
-    this.log(`⚡ ENTRY#${this.positionSeq} ${outcome} ${shares}sh @ ${price.toFixed(3)} · cost $${cost.toFixed(2)} · fill ${fillPrice.toFixed(3)}` + (this.reentryCount > 0 ? ` · RE-ENTRY after SL` : ` · first entry`));
+    this.trades.push({ timestamp: Date.now(), type: 'BUY', slug: market.slug, outcome, shares, price, cost, fee, reason: `ENTRY#${this.positionSeq} ${this.reentryCount > 0 ? `RE@${REENTRY_PRICE}` : `@${ENTRY_PRICE}`} fill ${fillPrice.toFixed(3)}` });
+    this.log(`⚡ ENTRY#${this.positionSeq} ${outcome} ${shares}sh @ ${price.toFixed(3)} · cost $${cost.toFixed(2)} · fee $${fee.toFixed(4)} · fill ${fillPrice.toFixed(3)}` + (this.reentryCount > 0 ? ` · RE-ENTRY after SL` : ` · first entry`));
     this.onTick(this.buildState());
   }
 
@@ -382,19 +391,22 @@ class FlipBotEngine {
   sellPosition(position, price, reason, extra = {}) {
     if (position.exitReason != null) return;
     const proceeds = round2(position.shares * price);
-    const pnl = round2(proceeds - position.cost);
+    const fee = takerFee(position.shares, price);
+    const pnl = round2(proceeds - position.cost - (position.buyFee || 0) - fee);
     if (pnl >= 0) this.wins++; else this.losses++;
-    this.bankroll = round2(this.bankroll + proceeds);
+    this.bankroll = round2(this.bankroll + proceeds - fee);
+    this.totalFeesPaid = round2(this.totalFeesPaid + fee);
     this.realizedPnl = round2(this.realizedPnl + pnl);
     position.pnl = pnl;
     position.exitPrice = price;
     position.exitReason = reason;
+    position.sellFee = fee;
     position.closedAt = Date.now();
     position.won = extra.won != null ? extra.won : pnl > 0;
     this.results.unshift({ ...position, market: undefined, token: undefined });
     this.results = this.results.slice(0, 50);
-    this.trades.push({ timestamp: Date.now(), type: 'SELL', slug: position.slug, outcome: position.outcome, shares: position.shares, price, pnl, reason, ...extra });
-    this.log(`💰 ${reason === 'RESOLUTION' ? 'RESOLUTION' : 'STOP-LOSS'} ${position.outcome} @ ${price.toFixed(2)} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)} · ${position.shares}sh · entry #${position.entryNo}`);
+    this.trades.push({ timestamp: Date.now(), type: 'SELL', slug: position.slug, outcome: position.outcome, shares: position.shares, price, pnl, fee, reason, ...extra });
+    this.log(`💰 ${reason === 'RESOLUTION' ? 'RESOLUTION' : 'STOP-LOSS'} ${position.outcome} @ ${price.toFixed(2)} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)} · ${position.shares}sh · entry #${position.entryNo} · fees $${((position.buyFee||0)+fee).toFixed(4)}`);
     this.recordEquity();
     this.onTick(this.buildState());
   }
@@ -486,6 +498,7 @@ class FlipBotEngine {
       bankroll: this.bankroll,
       markValue: this.markValue(),
       realizedPnl: this.realizedPnl,
+      totalFeesPaid: this.totalFeesPaid,
       unrealizedPnl: round2(openUnrealized),
       totalPnl: round2(this.markValue() - this.initialBankroll),
       wins: this.wins, losses: this.losses,
@@ -528,7 +541,7 @@ class FlipBotEngine {
       config: {
         entryPrice: ENTRY_PRICE, slPrice: SL_PRICE, reentryPrice: REENTRY_PRICE, waitSeconds: WAIT_SECONDS,
         basePct: BASE_PCT, martingaleX: MARTINGALE_X, slippageCap: SLIP_CEILING,
-        baseShares: this.baseShares, maxMartingale: this.maxMartingale, noMoreEntries: this.noMoreEntries, nextShares: this.nextShares, entryTarget: this.entryTarget,
+        baseShares: this.baseShares, maxMartingale: this.maxMartingale, noMoreEntries: this.noMoreEntries, nextShares: this.nextShares, entryTarget: this.entryTarget, takerFeeRate: TAKER_FEE_RATE,
         openEntry: this.openEntry, reentryCount: this.reentryCount,
         pollMs: CLOB_POLL_MS, bankroll: this.initialBankroll,
       },
@@ -579,4 +592,4 @@ class FlipBotEngine {
   }
 }
 
-module.exports = { FlipBotEngine, config: { ENTRY_PRICE, SL_PRICE, REENTRY_PRICE, WAIT_SECONDS, BASE_PCT, MARTINGALE_X, MAX_MARTINGALE, START_BANKROLL, CLOB_POLL_MS } };
+module.exports = { FlipBotEngine, config: { ENTRY_PRICE, SL_PRICE, REENTRY_PRICE, WAIT_SECONDS, BASE_PCT, MARTINGALE_X, MAX_MARTINGALE, START_BANKROLL, CLOB_POLL_MS, TAKER_FEE_RATE } };
