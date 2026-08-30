@@ -1,19 +1,16 @@
 {
-  "name": "btc-correlation-combo-bot",
-  "version": "4.1.1",
+  "name": "polymarket-flip-bot-invented",
+  "version": "6.0.0",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "smoke": "node test/engine-smoke.js"
+    "smoke": "node --check engine.js && node --check index.js && node smoke.js"
   },
   "engines": {
     "node": ">=18.0.0"
   },
   "dependencies": {
-    "@polymarket/builder-relayer-client": "^0.0.10",
-    "@polymarket/clob-client-v2": "^1.1.0",
-    "express": "^4.19.2",
-    "viem": "^2.21.0"
+    "express": "^4.19.2"
   },
-  "description": "RecoveryBot — 7-indicator BTC 5m signal follower, confidence>=70% follow signal, 2x/3x/4x recovery ladder, stop-loss 0.20 after 240s"
+  "description": "FlipBot (Invented repo): BTC 5m — wait 7s, fire any side @0.70, SL @0.50, re-enter @0.65 x2 (max 2 martingale/window), base 10% of capital, NO carry"
 }

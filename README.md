@@ -1,29 +1,41 @@
-# RecoveryBot — BTC 5m Signal Follower with 4x Recovery
+# Polymarket BTC 5m Flip Bot (paper) — Invented repo
 
-BTC-led 5-minute Polymarket paper bot driven by a 7-indicator Binance signal composite, with a 4x recovery-ladder sizing engine.
+Paper/demo trading bot for the Polymarket **BTC Up/Down 5-minute** market. No wallet, no private key — every fill is simulated on the live CLOB order book.
 
-## Strategy
-- Watch the `btc-updown-5m-*` market only.
-- Compute a composite score from 7 indicators on Binance 1m candles + tick data:
-  Window Delta, Micro Momentum, Acceleration, EMA 9/21, RSI 14, Volume Surge, Tick Trend.
-- Lean = UP (score > 0) or DOWN (score < 0). Confidence = |score| / 7.0.
-- Wait 10 seconds after the window opens, then follow the signal at confidence >= 70% (`HIGH_CONF`):
-  - lean UP → buy UP
-  - lean DOWN → buy DOWN
-- Single trade per window, no intra-window flip.
-- **Stop loss**: applies to ANY position once the window is at least
-  `STOP_LOSS_AFTER` (240s) old — if the held side's price touches `STOP_LOSS_PRICE`
-  (0.20) or lower, the position is sold immediately at 0.20.
-- Otherwise hold to resolution: during the final two seconds the highest UP/DOWN
-  CLOB prices are sampled; `>= 0.90` side (or higher side) wins and settles.
+## Strategy (intra-window stop-loss martingale, no carry)
+- **Demo capital:** $1,000 (configurable via `START_BANKROLL`).
+- **Wait gate:** after a window opens the bot waits **7s** before any order.
+- **Entry:** once the wait elapses, whichever side's **ask reaches 0.70** fires immediately (no previous-tick-below requirement). **Slippage ceiling 0.99**: the fill is taken at the actual observed ask, never above 0.99.
+- **Sizing / base:** start size = **base = 10% of current capital** in shares (at 0.70). At $1,000 that is 143 shares.
+- **Stop loss:** while holding, if the held side's price drops to **0.50**, the bot sells immediately at 0.50.
+- **Martingale (capped at 2 per window):** after each stop-loss the bot waits for **any side** to reach **0.65** and fires with **2× the previous position's shares**. Capped at **2 martingale steps per window** — max 3 entries per window: `S → 2S → 4S`. If the 3rd bet also stop-losses, the window simply ends.
+- **No carry-over:** every window starts fresh at base (10% of current capital). A losing window does **not** escalate the next window's size.
+- **Hold to resolution (win):** if a position never hits the stop-loss it is held until the window resolves; the winning side pays 1.0, the losing side 0.
+- **Next window:** base is recalculated as 10% of the updated capital.
 
-## Recovery Sizing (2x → 3x → 4x)
-- Base shares: 1000 (`FLAT_SHARES`).
-- On a loss the bot enters recovery mode: ladder `RECOVERY_LEVELS = [2, 3, 4]`,
-  held up to `RECOVERY_HOLD` (3) windows per level, stepping up on each loss until
-  the accumulated debt is fully recovered, then back to base size.
-- Max-risk guard: a recovery bet is skipped if it would risk more than
-  `MAX_RISK_PCT` (25%) of bankroll.
+## Config (env vars)
+| Var | Default | Meaning |
+| --- | --- | --- |
+| `ENTRY_PRICE` | `0.70` | First entry fires when any side's ask reaches this |
+| `SL_PRICE` | `0.50` | Stop-loss level (market sell) |
+| `REENTRY_PRICE` | `0.65` | Re-entry fires when any side's ask reaches this |
+| `WAIT_SECONDS` | `7` | Wait after window open before trading |
+| `MAX_MARTINGALE` | `2` | Max martingale steps per window (base + 2 = 3 entries max) |
+| `SLIP_CEILING` | `0.99` | Max accepted fill price (slippage ceiling) |
+| `BASE_PCT` | `0.10` | Base = 10% of capital (in shares at entry price) |
+| `MARTINGALE_X` | `2` | Each re-entry = previous shares × this |
+| `START_BANKROLL` | `1000` | Demo starting capital |
+| `CLOB_POLL_MS` | `300` | CLOB polling interval |
 
 ## Pricing
-All market prices come from batched CLOB `/books` snapshots. Signal data comes from Binance public REST (candles + tick price).
+Gamma is used only to resolve the slug into the UP/DOWN CLOB token IDs; all prices come from the CLOB order book (`POST /books`). Fires use the actual observed ask (slippage accepted up to 0.99); the stop-loss sells at 0.50. No fees modelled.
+
+## Run
+```bash
+npm install
+npm start          # http://localhost:3000
+npm run smoke      # engine+index syntax + internal window simulation
+```
+
+## Dashboard
+Live BTC 5m UP/DOWN bid/ask/mid, window countdown, wait countdown, base (10%), martingale steps used / max, entry/status, next shares, open positions (entry/mark/unrealized), bankroll/equity/realized PnL, wins/losses, drawdown, trade feed, logs, lifetime equity chart.

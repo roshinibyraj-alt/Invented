@@ -1,2 +1,4 @@
 node_modules/
-equity.json
+.env
+*.log
+.DS_Store
