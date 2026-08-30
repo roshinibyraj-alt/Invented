@@ -1,19 +1,21 @@
 'use strict';
 // Internal smoke test — drives the flip bot through simulated windows.
 // Strategy verification (v6):
-//  1. Wait WAIT_SECONDS (7s) after window start — no fire before that.
-//  2. First entry: ANY side's ask ticks >= ENTRY_PRICE (0.70). Start size =
-//     base = 10% of capital in shares (1000 * 0.10 / 0.70 = 142.85 -> 143).
+//  1. Wait WAIT_SECONDS (45s) after window start — no fire before that.
+//  2. First entry: ANY side's ask AT/BELOW ENTRY_PRICE (0.70) — the bot waits
+//     for a pullback to 0.70 and never fires above it. Start size = base =
+//     10% of capital in shares (1000 * 0.10 / 0.70 = 142.85 -> 143).
 //  3. Stop loss: held side mid <= SL_PRICE (0.50) -> sell immediately at 0.50.
 //  4. Re-entry after SL: wait for ANY side's ask >= REENTRY_PRICE (0.65), fire
-//     with DOUBLE shares, capped at MAX_MARTINGALE (2) steps per window
-//     (up to 3 entries: S -> 2S -> 4S). After the 3rd SL the window stops.
+//     with DOUBLE shares; ceiling 0.99 is slippage-only there. Capped at
+//     MAX_MARTINGALE (2) steps per window (up to 3 entries: S -> 2S -> 4S).
+//     After the 3rd SL the window stops.
 //  5. NO CARRY: every window starts fresh at base regardless of prior losses.
 
 const { FlipBotEngine } = require('./engine');
 
 const WINDOW = 300;
-const WAIT = 7;
+const WAIT = 45;
 const ENTRY = 0.70;
 const SL = 0.50;
 const REENTRY = 0.65;
@@ -30,28 +32,28 @@ function round2(v) { return Math.round(v * 100) / 100; }
 function upPrice() {
   const d = step;
   if (mode === 'win') {
-    if (d < 6) return 0.50;
-    if (d < 250) return 0.70;                  // ENTRY @ ask 0.705 (start base)
+    if (d < 46) return 0.50;
+    if (d < 250) return 0.695;                 // ENTRY @ ask 0.700 (start base)
     return 0.90;                               // hold, UP wins
   }
   if (mode === 'any-down') {
-    if (d < 6) return 0.50;
-    if (d < 250) return 0.28;                  // DOWN ask ~0.725 -> ENTRY DOWN
+    if (d < 46) return 0.50;
+    if (d < 250) return 0.70;                  // UP ask 0.705 > 0.70 ineligible; DOWN ask 0.305 ≤ 0.70 -> ENTRY DOWN
     return 0.26;                               // DOWN holds, DOWN wins
   }
   if (mode === 'wait-gate') {
-    if (d < 6) return 0.50;
-    if (d < 250) return 0.72;                  // ask 0.725 after wait
+    if (d < 46) return 0.50;
+    if (d < 250) return 0.695;                 // ask 0.700 at/below after wait
     return 0.82;                               // UP wins
   }
   // mode === 'all-sl': base @0.70 -> SL -> 2*base @0.65 -> SL -> 4*base @0.65 -> SL
   // (cap reached, window stops). Distinct re-entry levels avoid lastFireTick guard.
-  if (d < 6) return 0.50;
-  if (d < 49) return 0.72;              // ENTRY#1 (base) @ 0.725
-  if (d < 99) return 0.45;              // SL#1 @ 0.50
-  if (d < 149) return 0.66;             // ENTRY#2 (2x) @ 0.665
-  if (d < 199) return 0.45;             // SL#2
-  if (d < 249) return 0.67;             // ENTRY#3 (4x) @ 0.675
+  if (d < 46) return 0.50;
+  if (d < 96) return 0.695;             // ENTRY#1 (base) @ ask 0.700
+  if (d < 146) return 0.45;             // SL#1 @ 0.50
+  if (d < 196) return 0.66;             // ENTRY#2 (2x) @ 0.665
+  if (d < 246) return 0.45;             // SL#2
+  if (d < 296) return 0.67;             // ENTRY#3 (4x) @ 0.675
   return 0.45;                          // SL#3 -> cap, stop
 }
 

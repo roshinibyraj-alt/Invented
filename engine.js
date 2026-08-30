@@ -306,8 +306,17 @@ class FlipBotEngine {
   tryBuildEntry(outcome, market, target) {
     const token = outcome === 'UP' ? market.up : market.down;
     const ask = token.ask;
-    if (ask == null || ask > SLIP_CEILING) return null;
-    if (ask < target) return null;
+    if (ask == null) return null;
+    if (this.awaitingReentry) {
+      // Re-entry after SL: fire at/above the re-entry level; ceiling = slippage only.
+      if (ask > SLIP_CEILING) return null;
+      if (ask < target) return null;
+    } else {
+      // First entry: wait for the price to pull back to the entry level — fire
+      // only when price is AT or BELOW 0.70, never above.
+      if (ask > target) return null;
+      if (ask <= 0.05) return null;
+    }
     // Don't re-fire the same static level.
     if (token.lastFireTick === ask) return null;
     const shares = this.nextShares;
@@ -461,7 +470,7 @@ class FlipBotEngine {
     return {
       version: '3.0.0',
       name: this.name,
-      strategy: `FLIP BOT · wait ${WAIT_SECONDS}s → fire @ ${ENTRY_PRICE.toFixed(2)} · SL ${SL_PRICE.toFixed(2)} · re-enter @ ${REENTRY_PRICE.toFixed(2)} ×${MARTINGALE_X} (max ${MAX_MARTINGALE} martingale) · base 10% · NO carry`,
+      strategy: `FLIP BOT · wait ${WAIT_SECONDS}s → first entry ≤ ${ENTRY_PRICE.toFixed(2)} (wait for pullback) · re-enter ≥ ${REENTRY_PRICE.toFixed(2)} ×${MARTINGALE_X} · SL ${SL_PRICE.toFixed(2)} (max ${MAX_MARTINGALE} martingale) · base 10% · NO carry`,
       serverTime: now,
       connected: this.isClobFresh(),
       lastError: this.lastError,
@@ -539,7 +548,7 @@ class FlipBotEngine {
       setInterval(() => this.evaluate(), 200),
       setInterval(() => this.recordEquity(), 1000),
     ];
-    this.log(`🚀 FlipBot started | wait ${WAIT_SECONDS}s → fire @ ${ENTRY_PRICE} any side · SL @ ${SL_PRICE} · re-enter @ ${REENTRY_PRICE} ×${MARTINGALE_X} · ceiling ${SLIP_CEILING}`);
+    this.log(`🚀 FlipBot started | wait ${WAIT_SECONDS}s → fire AT/BELOW ${ENTRY_PRICE} any side (wait for pullback) · SL @ ${SL_PRICE} · re-enter @ ${REENTRY_PRICE} ×${MARTINGALE_X} · ceiling ${SLIP_CEILING}`);
   }
 
   close() {

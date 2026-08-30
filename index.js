@@ -96,7 +96,7 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
 <div id="marketBody"><div class="empty">Waiting for market...</div></div>
 </div>
 <div class="box" style="margin-bottom:8px">
-<div class="section-head"><span>Flip Engine — wait 7s then fire @ 0.70, SL 0.50, re-enter @ 0.65 ×2</span></div>
+<div class="section-head"><span>Flip Engine — wait 45s, fire first entry ≤ 0.70 (pullback), SL 0.50, re-enter ≥ 0.65 ×2</span></div>
 <div id="orderBody"><div class="empty">No entries yet this window</div></div>
 </div>
 <div class="box" id="posBox" style="margin-bottom:8px;display:none">
@@ -187,7 +187,7 @@ const up=d.unrealizedPnl||0;const ue=$('unrealizedPnl');ue.textContent=money(up)
 $('winLoss').textContent=(d.wins||0)+' / '+(d.losses||0);$('winRate').textContent=d.winRate!=null?'Win '+d.winRate+'%':'';
 $('maxDrawdown').textContent=cash(d.drawdown||0);
 $('windowTime').textContent=d.windowRemaining!=null?d.windowRemaining+'s':'—';
-const eh=$('entryHint');const waitSec=(d.config&&d.config.waitSeconds)||7;if(d.windowPaused){eh.textContent='⛔ '+ESC(d.pauseReason||'PAUSED')}else if(d.waitingForWindow){eh.textContent='WAITING FOR NEXT WINDOW'}else if(d.noMoreEntries){eh.textContent='⛔ MARTINGALE CAP REACHED · NO MORE ENTRIES THIS WINDOW'}else if(d.windowElapsed!=null&&d.windowElapsed<waitSec){eh.textContent='WAIT '+(waitSec-d.windowElapsed)+'s → FIRE @ 0.70'}else if(d.openEntry){eh.textContent='HOLDING '+(d.openEntry==='UP'?'▲ UP':'▼ DOWN')+' · SL @ 0.50'}else if(d.awaitingReentry){eh.textContent='WAITING RE-ENTRY @ 0.65 · NEXT '+num(d.nextShares)+' SH'}else{eh.textContent='READY · FIRE ANY SIDE @ 0.70';}
+const eh=$('entryHint');const waitSec=(d.config&&d.config.waitSeconds)||7;if(d.windowPaused){eh.textContent='⛔ '+ESC(d.pauseReason||'PAUSED')}else if(d.waitingForWindow){eh.textContent='WAITING FOR NEXT WINDOW'}else if(d.noMoreEntries){eh.textContent='⛔ MARTINGALE CAP REACHED · NO MORE ENTRIES THIS WINDOW'}else if(d.windowElapsed!=null&&d.windowElapsed<waitSec){eh.textContent='WAIT '+(waitSec-d.windowElapsed)+'s → fire ≤ 0.70'}else if(d.openEntry){eh.textContent='HOLDING '+(d.openEntry==='UP'?'▲ UP':'▼ DOWN')+' · SL @ 0.50'}else if(d.awaitingReentry){eh.textContent='WAITING RE-ENTRY @ 0.65 · NEXT '+num(d.nextShares)+' SH'}else{eh.textContent='READY · WAIT PRICE ≤ 0.70';}
 eh.style.color=(d.windowPaused||d.noMoreEntries)?'#ff4a68':'';
 const fi=$('flipInfo');if(fi){const oe=d.openEntry||'—';fi.textContent=(d.reentryCount||0)+' / '+(d.config&&d.config.maxMartingale?d.config.maxMartingale:2)+' RE · '+num(d.nextShares||0)+' NEXT';fi.className='value '+(oe==='UP'?'pos':oe==='DOWN'?'neg':'');}
 const bi=$('baseInfo');if(bi){bi.textContent='BASE '+num(d.baseShares||0)+' SH (10%) · NEXT '+num(d.nextShares||0)+' SH';}
