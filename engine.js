@@ -11,10 +11,10 @@ const SL_PRICE      = Number(process.env.SL_PRICE      || 0.50); // stop-loss se
 const REENTRY_PRICE = Number(process.env.REENTRY_PRICE || 0.65); // re-entry fire level after SL
 const WAIT_SECONDS  = Number(process.env.WAIT_SECONDS  || 45);   // wait after window open
 const SLIP_CEILING  = Number(process.env.SLIP_CEILING  || 0.99); // accept ANY slippage up to this ceiling (0.99)
-const BASE_PCT      = Number(process.env.BASE_PCT      || 0.10); // base = this fraction of bankroll (10%)
+const BASE_PCT      = Number(process.env.BASE_PCT      || 0.05); // base = this fraction of bankroll (5%)
 const MARTINGALE_X  = Number(process.env.MARTINGALE_X  || 2);    // double shares each re-entry
 const MAX_MARTINGALE = Number(process.env.MAX_MARTINGALE || 2);   // max martingale steps per window (base + 2 = 3 entries max)
-const START_BANKROLL= Number(process.env.START_BANKROLL|| 1000); // demo capital
+const START_BANKROLL= Number(process.env.START_BANKROLL|| 300); // demo capital
 const TAKER_FEE_RATE = Number(process.env.TAKER_FEE_RATE || 0.07); // Polymarket crypto taker fee rate (0.07 = 7%); makers 0
 
 const CLOB_POLL_MS   = Math.max(100, Number(process.env.CLOB_POLL_MS || 300));
@@ -62,7 +62,7 @@ class FlipBotEngine {
     this.positionSeq = 0;                 // entry count within current window (1-based)
     this.reentryCount = 0;                // how many re-entries (after SL) in this window
     this.maxMartingale = MAX_MARTINGALE;  // max martingale steps per window
-    this.baseShares = Math.max(1, Math.round(this.bankroll * BASE_PCT / ENTRY_PRICE)); // 10% of capital in shares at 0.70
+    this.baseShares = Math.max(1, Math.round(this.bankroll * BASE_PCT / ENTRY_PRICE)); // 5% of capital in shares at 0.70
     this.nextShares = this.baseShares;    // shares for the next entry
     this.entryTarget = ENTRY_PRICE;       // current fire level (0.70 first, 0.65 after SL)
     this.awaitingReentry = false;         // true after an SL, wait for any side at 0.65

@@ -4,7 +4,7 @@
 //  1. Wait WAIT_SECONDS (45s) after window start — no fire before that.
 //  2. First entry: fire when ANY side's ask <= ENTRY_PRICE (0.70). E.g. UP 0.35 /
 //     DOWN 0.65 → ENTRY UP (first side <= 0.70). Start size = base =
-//     10% of capital in shares (1000 * 0.10 / 0.70 = 142.85 -> 143).
+//     5% of capital in shares (300 * 0.05 / 0.70 = 21.43 -> 21).
 //  3. Stop loss: held side mid <= SL_PRICE (0.50) -> sell immediately at 0.50.
 //  4. Re-entry after SL: wait for ANY side's ask >= REENTRY_PRICE (0.65), fire
 //     with DOUBLE shares; ceiling 0.99 is slippage-only there. Capped at
@@ -19,7 +19,7 @@ const WAIT = 45;
 const ENTRY = 0.70;
 const SL = 0.50;
 const REENTRY = 0.65;
-const BASE_PCT = 0.10;
+const BASE_PCT = 0.05;
 const TOKEN_UP = 'token-up';
 const TOKEN_DOWN = 'token-down';
 
@@ -129,7 +129,7 @@ async function resolve(engine, openEnd) {
 }
 
 async function fullScenario(name, windows) {
-  const engine = new FlipBotEngine({ fetchImpl: fakeFetch, bankroll: 1000, onTick: () => {}, onLog: () => {} });
+  const engine = new FlipBotEngine({ fetchImpl: fakeFetch, bankroll: 300, onTick: () => {}, onLog: () => {} });
   const origNow = Date.now;
   t = 1600000000000;
   mode = null;
@@ -160,7 +160,7 @@ async function fullScenario(name, windows) {
 }
 
 (async () => {
-  const base10 = Math.max(1, Math.round(1000 * BASE_PCT / ENTRY)); // 143
+  const base10 = Math.max(1, Math.round(300 * BASE_PCT / ENTRY)); // 21
 
   // SCENARIO 1: all SL in one window -> cap reached, no carry. Next window still base.
   {
@@ -192,7 +192,7 @@ async function fullScenario(name, windows) {
     ]);
     const w2Base = e.baseShares;
     const expW2 = Math.max(1, Math.round(e.bankroll * BASE_PCT / ENTRY));
-    if (w2Base !== expW2) failures.push(`NO-CARRY WIN: W2 base ${w2Base} != expected ${expW2} (fresh, ~10% of bankroll)`);
+    if (w2Base !== expW2) failures.push(`NO-CARRY WIN: W2 base ${w2Base} != expected ${expW2} (fresh, ~5% of bankroll)`);
   }
 
   // SCENARIO 3: win at the deepest martingale (entry #3) -> record M2 / 2 loses before win
