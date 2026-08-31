@@ -299,6 +299,20 @@ class FlipBotEngine {
   }
 
   tryEntry(market) {
+    // Initial base entry: buy the CHEAP side (lower ask) after the wait.
+    // Martingale re-entries keep the existing behavior (any side at target).
+    if (this.positionSeq === 0) {
+      const upAsk = market.up?.ask;
+      const dnAsk = market.down?.ask;
+      if (upAsk == null || dnAsk == null) return;
+      const cheap = upAsk <= dnAsk ? 'UP' : 'DOWN';
+      const ask = cheap === 'UP' ? upAsk : dnAsk;
+      if (ask > this.entryTarget) return;      // only after the favorite moves cheap side <= 0.70
+      if (ask <= 0.05) return;
+      const rd = this.tryBuildEntry(cheap, market, this.entryTarget);
+      if (rd) this.executeEntry(market, rd.outcome, rd.shares, rd.fillPrice, this.entryTarget);
+      return;
+    }
     // Fire when ANY side's ask ticks to the current target (<= SLIP_CEILING).
     const target = this.entryTarget;
     const upRd = this.tryBuildEntry('UP', market, target);
@@ -323,8 +337,8 @@ class FlipBotEngine {
       if (ask > SLIP_CEILING) return null;
       if (ask < target) return null;
     } else {
-      // First entry: fire when ANY side ask ticks down to AT/BELOW 0.70
-      // (matches the analyzed profitable logs — may buy the cheap side too).
+      // (cheap-side initial entry is handled in tryEntry for positionSeq 0;
+      //  this branch is only used for martingale re-entry sizing checks.)
       if (ask > target) return null;
       if (ask <= 0.05) return null;
     }

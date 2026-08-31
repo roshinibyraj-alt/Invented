@@ -1,9 +1,9 @@
 'use strict';
 // Internal smoke test — drives the flip bot through simulated windows.
-// Strategy verification (v6):
+// Strategy verification (v7 — cheap-side initial entry):
 //  1. Wait WAIT_SECONDS (45s) after window start — no fire before that.
-//  2. First entry: fire when ANY side.s ask ticks down to AT/BELOW 0.70 (old
-//     analyzed profitable logs — may buy the cheap/losing side too). Start size = base =
+//  2. First entry: buy the CHEAP side (lower ask) once past wait. E.g. UP 0.35 /
+//     DOWN 0.65 → ENTRY DOWN (cheap side). Start size = base =
 //     10% of capital in shares (1000 * 0.10 / 0.70 = 142.85 -> 143).
 //  3. Stop loss: held side mid <= SL_PRICE (0.50) -> sell immediately at 0.50.
 //  4. Re-entry after SL: wait for ANY side's ask >= REENTRY_PRICE (0.65), fire
@@ -32,44 +32,49 @@ function round2(v) { return Math.round(v * 100) / 100; }
 function upPrice() {
   const d = step;
   if (mode === 'win') {
+    // Cheap side (UP=0.35) wins at resolution.
     if (d < 46) return 0.50;
-    if (d < 250) return 0.695;                 // ENTRY @ ask 0.700 (start base)
-    return 0.90;                               // hold, UP wins
+    if (d < 250) return 0.35;                  // UP ask 0.355 is CHEAP (< DOWN 0.655) -> ENTRY UP
+    return 0.90;                               // UP wins
   }
   if (mode === 'any-down') {
+    // Cheap side is DOWN (UP=0.70, DOWN=0.30) -> ENTRY DOWN.
     if (d < 46) return 0.50;
-    if (d < 250) return 0.35;                  // UP ask 0.355 cheap; DOWN ask 0.655 <=0.70 -> ENTRY DOWN
-    return 0.26;                               // DOWN holds, DOWN wins
+    if (d < 250) return 0.70;                  // DOWN ask 0.305 is CHEAP -> ENTRY DOWN
+    return 0.10;                               // DOWN wins at resolution
   }
   if (mode === 'cheap-buy') {
+    // Ultra-cheap UP at 0.125 -> ENTRY UP, wins.
     if (d < 46) return 0.50;
-    if (d < 250) return 0.125;                 // UP ask 0.13 cheap side -> ENTRY UP (old behavior, buys cheap leg)
+    if (d < 250) return 0.125;                 // UP ask 0.13 is CHEAP -> ENTRY UP
     return 0.90;                               // UP wins at resolution
   }
-
   if (mode === 'wait-gate') {
+    // Both sides at 0.50 -> tie -> UP by default, then UP wins.
     if (d < 46) return 0.50;
-    if (d < 250) return 0.695;                 // ask 0.700 at/below after wait
+    if (d < 250) return 0.50;                  // UP=DOWN=0.50, tie -> UP by default
     return 0.82;                               // UP wins
   }
   if (mode === 'win-at-3') {
+    // Cheap UP at 0.38 SLs when price drops, then re-entries at 0.66/0.67, wins at 3rd (M2).
+    // Key: after each SL, DOWN ask stays < 0.65 so re-entry waits for UP pullback.
     if (d < 46) return 0.50;
-    if (d < 96) return 0.695;             // ENTRY#1 (base) @ ask 0.700
-    if (d < 146) return 0.45;             // SL#1
-    if (d < 196) return 0.66;             // ENTRY#2 (2x) @ 0.665
-    if (d < 246) return 0.45;             // SL#2
-    if (d < 296) return 0.67;             // ENTRY#3 (4x) @ 0.675
-    return 0.90;                          // UP wins at resolution -> deepest before win = M2
+    if (d < 80) return 0.38;                   // ENTRY#1 UP (cheap) @ 0.385
+    if (d < 120) return 0.45;                  // SL#1 @ 0.50 (DOWN=0.55, ask 0.555 < 0.65)
+    if (d < 160) return 0.66;                  // ENTRY#2 UP (re-entry) @ 0.665 (DOWN=0.34, ask 0.345 < 0.65)
+    if (d < 180) return 0.45;                  // SL#2 (DOWN=0.55, ask 0.555 < 0.65)
+    if (d < 220) return 0.67;                  // ENTRY#3 UP (re-entry) @ 0.675
+    return 0.90;                               // UP wins -> deepest before win = M2
   }
-  // mode === 'all-sl': base @0.70 -> SL -> 2*base @0.65 -> SL -> 4*base @0.65 -> SL
-  // (cap reached, window stops). Distinct re-entry levels avoid lastFireTick guard.
+  // mode === 'all-sl': cheap UP -> SL -> 2x re-entry -> SL -> 4x re-entry -> SL -> cap, stop.
+  // After each SL, DOWN ask < 0.65 so re-entry waits for UP pullback.
   if (d < 46) return 0.50;
-  if (d < 96) return 0.695;             // ENTRY#1 (base) @ ask 0.700
-  if (d < 146) return 0.45;             // SL#1 @ 0.50
-  if (d < 196) return 0.66;             // ENTRY#2 (2x) @ 0.665
-  if (d < 246) return 0.45;             // SL#2
-  if (d < 296) return 0.67;             // ENTRY#3 (4x) @ 0.675
-  return 0.45;                          // SL#3 -> cap, stop
+  if (d < 80) return 0.38;                     // ENTRY#1 UP (cheap) @ 0.385
+  if (d < 120) return 0.45;                    // SL#1 @ 0.50
+  if (d < 160) return 0.66;                    // ENTRY#2 UP (re-entry) @ 0.665
+  if (d < 180) return 0.45;                    // SL#2
+  if (d < 220) return 0.67;                    // ENTRY#3 UP (re-entry) @ 0.675
+  return 0.45;                                 // SL#3 -> cap, stop
 }
 
 function askOf(price) { return round2(price + 0.005); }
@@ -166,7 +171,7 @@ async function fullScenario(name, windows) {
     const buys = e.trades.filter(x => x.type === 'BUY');
     // W1: base -> 2x -> 4x (from initial bankroll 1000 -> base 143)
     const w1 = buys.slice(0, 3).map(b => b.shares);
-    const exp1 = [base10, base10 * 2, base10 * 4];
+    const exp1 = [base10, base10 * 2, base10 * 4]; // same share count regardless of buy price // same share count regardless of buy price
     if (JSON.stringify(w1) !== JSON.stringify(exp1)) failures.push(`NO-CARRY: W1 shares ${w1} != ${exp1}`);
     // W2: NO carry — starts FRESH at base recomputed from the (reduced) bankroll,
     // NOT escalated to 143->286->572. So W2 = [w2base, 2x, 4x] where w2base < base10.
@@ -199,20 +204,20 @@ async function fullScenario(name, windows) {
     if (e.maxConsecLosesBeforeWin !== 2) failures.push(`WIN-AT-3: maxConsecLosesBeforeWin ${e.maxConsecLosesBeforeWin} != 2`);
   }
 
-  // SCENARIO 4: wait gate + side-agnostic
+  // SCENARIO 4: wait gate + cheap-side agnostic
   {
     const e = await fullScenario('WAIT-GATE', [
       { i: 1, mode: 'wait-gate', expectStart: base10, preWait: 0 },
     ]);
     const buys = e.trades.filter(x => x.type === 'BUY');
-    if (buys.length < 1 || buys[0].outcome !== 'UP') failures.push('WAIT-GATE: expected UP first entry');
+    if (buys.length < 1 || buys[0].outcome !== 'UP') failures.push('WAIT-GATE: expected UP (tie at 0.50)');
   }
   {
-    const e = await fullScenario('ANY-SIDE DOWN', [
+    const e = await fullScenario('ANY-SIDE DOWN (cheap side)', [
       { i: 1, mode: 'any-down', expectStart: base10 },
     ]);
     const buys = e.trades.filter(x => x.type === 'BUY');
-    if (buys.length < 1 || buys[0].outcome !== 'DOWN') failures.push('ANY-SIDE: expected DOWN first entry');
+    if (buys.length < 1 || buys[0].outcome !== 'DOWN') failures.push('ANY-SIDE: expected DOWN (cheap side at 0.305)');
   }
   {
     const e = await fullScenario('CHEAP-BUY (old cheap-leg entry)', [

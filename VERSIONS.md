@@ -9,3 +9,8 @@
 ## LATEST: equity chart on top + lifetime stats
 - Commits up to `f19bbf1`
 - First entry only in **0.65–0.70 band** (no cheap-side buys) · lifetime equity curve · max drawdown from peak · highest martingale tracker.
+
+## LATEST: cheap-side initial entry
+- First entry: buys the CHEAP side (lower ask) after 45s wait — always takes the underdog.
+- Martingale re-entries unchanged (any side at ≥0.65 with 2× shares).
+- Added win-at-3 with timing fix (SLs fire when opposite side ask < 0.65).
