@@ -284,16 +284,6 @@ class FlipBotEngine {
 
     const elapsed = Math.floor(nowS - market.windowStart);
 
-    // Frozen-market detection: if both sides are pinned at ~0.50 for 60+ seconds
-    // after the wait period, the market is suspended — skip this window.
-    if (!this.windowFrozen && elapsed >= WAIT_SECONDS + 60 && !this.openEntry) {
-      const upMid = market.up.mid, dnMid = market.down.mid;
-      if (upMid != null && dnMid != null && Math.abs(upMid - 0.50) <= 0.02 && Math.abs(dnMid - 0.50) <= 0.02) {
-        this.windowFrozen = true;
-        this.noMoreEntries = true;
-        this.log(`⏸️ Frozen market detected — both sides at ~0.50 after ${elapsed}s · skipping window`);
-      }
-    }
 
     if (!this.windowPaused) {
       if (this.openEntry) {
@@ -310,21 +300,8 @@ class FlipBotEngine {
   }
 
   tryEntry(market) {
-    // Initial base entry: buy the CHEAP side (lower ask) after the wait.
-    // Martingale re-entries keep the existing behavior (any side at target).
-    if (this.positionSeq === 0) {
-      const upAsk = market.up?.ask;
-      const dnAsk = market.down?.ask;
-      if (upAsk == null || dnAsk == null) return;
-      const cheap = upAsk <= dnAsk ? 'UP' : 'DOWN';
-      const ask = cheap === 'UP' ? upAsk : dnAsk;
-      if (ask > this.entryTarget) return;      // only after the favorite moves cheap side <= 0.70
-      if (ask <= 0.05) return;
-      const rd = this.tryBuildEntry(cheap, market, this.entryTarget);
-      if (rd) this.executeEntry(market, rd.outcome, rd.shares, rd.fillPrice, this.entryTarget);
-      return;
-    }
     // Fire when ANY side's ask ticks to the current target (<= SLIP_CEILING).
+    // Matches the v070-pullback-analyzed profitable behavior — may buy the cheap side.
     const target = this.entryTarget;
     const upRd = this.tryBuildEntry('UP', market, target);
     const dnRd = this.tryBuildEntry('DOWN', market, target);
@@ -348,8 +325,7 @@ class FlipBotEngine {
       if (ask > SLIP_CEILING) return null;
       if (ask < target) return null;
     } else {
-      // (cheap-side initial entry is handled in tryEntry for positionSeq 0;
-      //  this branch is only used for martingale re-entry sizing checks.)
+      // First entry fires via tryEntry when any side ask <= target; this branch is for re-entry sizing.
       if (ask > target) return null;
       if (ask <= 0.05) return null;
     }

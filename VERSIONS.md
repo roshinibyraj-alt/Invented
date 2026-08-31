@@ -6,15 +6,10 @@
 - Strategy: wait 45s · **first entry AT/BELOW 0.70** (pullback, no 0.65–0.70 band yet) · SL 0.50 · re-enter ≥0.65 ×2 · ceiling 0.99 · **base 10% · NO carry**
 - Known behavior in this version: first entry could buy the cheap side (0.12–0.30); profitable "SL at 0.50" still escalated the martingale.
 
-## LATEST: equity chart on top + lifetime stats
-- Commits up to `f19bbf1`
-- First entry only in **0.65–0.70 band** (no cheap-side buys) · lifetime equity curve · max drawdown from peak · highest martingale tracker.
-
-## LATEST: cheap-side initial entry
-- First entry: buys the CHEAP side (lower ask) after 45s wait — always takes the underdog.
-- Martingale re-entries unchanged (any side at ≥0.65 with 2× shares).
-- Added win-at-3 with timing fix (SLs fire when opposite side ask < 0.65).
-
-## LATEST: TP on cheap first exit + frozen-market skip
-- Cheap-side first entry (entry < 0.50) exiting at SL 0.50 is labeled **TP** (profitable win); martingale STILL escalates after it (unchanged flow).
-- Frozen-market detection: if both sides are pinned at ~0.50 for 60s+ after the wait, the window is skipped (market suspended).
+## v080-any-side-fees  ← current
+- Reverted to v070 entry logic: **fire ANY side ≤ 0.70** (not cheap-side specific). May buy the underdog — this produced the profitable analyzed logs.
+- **Polymarket taker fees added**: `fee = shares × 0.07 × price × (1 − price)` on every buy and sell.
+- **TP label fixed**: exits at 0.50 with entry < 0.50 correctly labeled as **TP** (profit), not STOP-LOSS. Martingale still escalates after TP (unchanged).
+- **Frozen-market skip removed**: bot trades every window regardless of price stagnation.
+- 45-second wait after window open retained.
+- **Config**: 10% base · no carry · max 2 martingale per window.

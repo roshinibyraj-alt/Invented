@@ -1,9 +1,9 @@
 'use strict';
 // Internal smoke test — drives the flip bot through simulated windows.
-// Strategy verification (v7 — cheap-side initial entry):
+// Strategy verification (v8 — any-side entry, no frozen skip):
 //  1. Wait WAIT_SECONDS (45s) after window start — no fire before that.
-//  2. First entry: buy the CHEAP side (lower ask) once past wait. E.g. UP 0.35 /
-//     DOWN 0.65 → ENTRY DOWN (cheap side). Start size = base =
+//  2. First entry: fire when ANY side's ask <= ENTRY_PRICE (0.70). E.g. UP 0.35 /
+//     DOWN 0.65 → ENTRY UP (first side <= 0.70). Start size = base =
 //     10% of capital in shares (1000 * 0.10 / 0.70 = 142.85 -> 143).
 //  3. Stop loss: held side mid <= SL_PRICE (0.50) -> sell immediately at 0.50.
 //  4. Re-entry after SL: wait for ANY side's ask >= REENTRY_PRICE (0.65), fire
@@ -204,7 +204,7 @@ async function fullScenario(name, windows) {
     if (e.maxConsecLosesBeforeWin !== 2) failures.push(`WIN-AT-3: maxConsecLosesBeforeWin ${e.maxConsecLosesBeforeWin} != 2`);
   }
 
-  // SCENARIO 4: wait gate + cheap-side agnostic
+  // SCENARIO 4: wait gate + any-side entry (may buy cheap side)
   {
     const e = await fullScenario('WAIT-GATE', [
       { i: 1, mode: 'wait-gate', expectStart: base10, preWait: 0 },
@@ -213,11 +213,11 @@ async function fullScenario(name, windows) {
     if (buys.length < 1 || buys[0].outcome !== 'UP') failures.push('WAIT-GATE: expected UP (tie at 0.50)');
   }
   {
-    const e = await fullScenario('ANY-SIDE DOWN (cheap side)', [
+    const e = await fullScenario('ANY-SIDE DOWN', [
       { i: 1, mode: 'any-down', expectStart: base10 },
     ]);
     const buys = e.trades.filter(x => x.type === 'BUY');
-    if (buys.length < 1 || buys[0].outcome !== 'DOWN') failures.push('ANY-SIDE: expected DOWN (cheap side at 0.305)');
+    if (buys.length < 1 || buys[0].outcome !== 'DOWN') failures.push('ANY-SIDE: expected DOWN (ask 0.305 <= 0.70)');
   }
   {
     const e = await fullScenario('CHEAP-BUY (old cheap-leg entry)', [
