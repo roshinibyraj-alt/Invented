@@ -179,7 +179,7 @@ async function fullScenario(name, windows) {
     const w2base = w2[0];
     if (w2base >= base10) failures.push(`NO-CARRY: W2 base ${w2base} >= W1 base ${base10} — carry/escalation must NOT happen`);
     if (JSON.stringify(w2) !== JSON.stringify([w2base, w2base * 2, w2base * 4])) failures.push(`NO-CARRY: W2 shares ${w2} not 2x-martingale from fresh base`);
-    if (e.trades.filter(x => x.type === 'SELL' && x.reason === 'STOP_LOSS').length !== 6) failures.push(`NO-CARRY: expected 6 SLs, got ${e.trades.filter(x => x.type === 'SELL' && x.reason === 'STOP_LOSS').length}`);
+    if (e.trades.filter(x => x.type === 'SELL' && (x.reason === 'STOP_LOSS' || x.reason === 'TP')).length !== 6) failures.push(`NO-CARRY: expected 6 SL/TP exits, got ${e.trades.filter(x => x.type === 'SELL' && x.reason === 'STOP_LOSS').length}`);
     if (buys.length !== 6) failures.push(`NO-CARRY: expected exactly 6 buys (3 per window), got ${buys.length}`);
   }
 

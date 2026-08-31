@@ -14,3 +14,7 @@
 - First entry: buys the CHEAP side (lower ask) after 45s wait — always takes the underdog.
 - Martingale re-entries unchanged (any side at ≥0.65 with 2× shares).
 - Added win-at-3 with timing fix (SLs fire when opposite side ask < 0.65).
+
+## LATEST: TP on cheap first exit + frozen-market skip
+- Cheap-side first entry (entry < 0.50) exiting at SL 0.50 is labeled **TP** (profitable win); martingale STILL escalates after it (unchanged flow).
+- Frozen-market detection: if both sides are pinned at ~0.50 for 60s+ after the wait, the window is skipped (market suspended).
