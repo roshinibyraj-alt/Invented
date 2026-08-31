@@ -14,7 +14,7 @@ const app = express();
 const port = Number(process.env.PORT || 3000);
 
 const engine = new FlipBotEngine({
-  name: 'FlipBot5m',
+  name: 'Invented',
   onLog: line => console.log(`[FLIP] ${line}`),
 });
 
@@ -27,7 +27,7 @@ const dashboard = `<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>FlipBot — BTC 5m</title>
+<title>Invented — BTC 5m</title>
 <style>
 *{box-sizing:border-box}
 :root{--bg:#000;--panel:#070707;--line:#222;--muted:#9d9d9d;--up:#00ff85;--down:#ff4a68;--amber:#ffc400;--blue:#38d6ff}
@@ -75,7 +75,7 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
 </head>
 <body><div class="wrap">
 <header class="topbar">
-<div class="brand"><div class="btc">₿</div><div><h1>FlipBot</h1><div class="sub" id="strategy">LOADING…</div></div></div>
+<div class="brand"><div class="btc">₿</div><div><h1>Invented</h1><div class="sub" id="strategy">LOADING…</div></div></div>
 <div class="status"><span id="waitPill" class="pill warn">WAIT —</span><span id="statusPill" class="pill bad">OFFLINE</span><span id="tickPill" class="pill">TICKS 0</span><span id="uptimePill" class="pill blue">00:00:00</span></div>
 </header>
 <div class="box equity" style="margin-bottom:8px">
