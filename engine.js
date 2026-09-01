@@ -401,7 +401,7 @@ class CheapHunterEngine {
       name: this.name,
       strategy: `3-Check CheapHunter · C1≤0.35@9s · C2≤0.25@17s · C3≤0.20@30s · ${BASE_PCT*100}% base`,
       serverTime: now,
-      connected: (this.lastSuccessfulPollAt != null && Date.now() - this.lastSuccessfulPollAt < 15000) || this.pollCount > 0,
+      connected: this.pollCount > 0 || this.tickCount > 0,
       lastError: this.lastError,
       pollCount: this.pollCount,
       tickCount: this.tickCount,
