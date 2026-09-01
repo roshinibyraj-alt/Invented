@@ -26,8 +26,7 @@ const dashboard = `<!doctype html>
 *{box-sizing:border-box}
 :root{--bg:#000;--panel:#070707;--line:#222;--muted:#9d9d9d;--up:#00ff85;--down:#ff4a68;--amber:#ffc400;--blue:#38d6ff}
 html,body{background:#000;color:#fff;font-family:Arial,Helvetica,sans-serif;font-weight:800;margin:0}
-body{padding:10px;font-size:15px}
-.wrap{max-width:1200px;margin:auto}
+body{padding:10px;font-size:15px}.wrap{max-width:1200px;margin:auto}
 .topbar{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;margin-bottom:8px}
 .brand{display:flex;align-items:center;gap:8px}
 .btc{width:38px;height:38px;border-radius:50%;background:#f7931a;display:grid;place-items:center;font-size:22px}
@@ -70,11 +69,9 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
 <div class="brand"><div class="btc">₿</div><div><h1>45 Seconds Waiter</h1><div class="sub" id="strategy">LOADING…</div></div></div>
 <div class="status"><span id="statusPill" class="pill bad">OFFLINE</span><span id="uptimePill" class="pill blue">00:00:00</span></div>
 </header>
-
 <div class="box equity" style="margin-bottom:8px">
 <div class="section-head"><span>Lifetime Equity</span><span id="equityPeakLabel"></span></div>
 <svg class="chart" id="equityChart"></svg></div>
-
 <div class="metrics">
 <div class="box"><div class="label">Bankroll</div><div class="value" id="bankroll">$300</div></div>
 <div class="box"><div class="label">Total P&L</div><div class="value" id="totalPnl">+$0.00</div></div>
@@ -85,7 +82,6 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
 <div class="box"><div class="label">Open Positions</div><div class="value" id="openCount">0</div><div class="small" id="unrealizedPnl"></div></div>
 <div class="box"><div class="label">Max Drawdown</div><div class="value neg" id="maxDrawdown">$0.00</div></div>
 </div>
-
 <div class="box" style="margin-bottom:8px">
 <div class="section-head"><span>3 Checks — Window Status</span></div>
 <div class="check-bar" id="checkBar">
@@ -93,195 +89,42 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
 <div class="check-box" id="cb2"><div class="check-id">CHECK 2</div><div class="check-val" id="cv2">WAIT</div><div class="small">≤ 0.25 @ 17s</div></div>
 <div class="check-box" id="cb3"><div class="check-id">CHECK 3</div><div class="check-val" id="cv3">WAIT</div><div class="small">≤ 0.20 @ 30s</div></div>
 </div></div>
-
-<div class="two-col">
-<div>
-<div class="box" style="margin-bottom:8px">
-<div class="section-head"><span>BTC UP / DOWN</span><span id="windowTitle"></span></div>
+<div class="two-col"><div>
+<div class="box" style="margin-bottom:8px"><div class="section-head"><span>BTC UP / DOWN</span><span id="windowTitle"></span></div>
 <div id="marketBody"><div class="empty">Waiting for market…</div></div></div>
-<div class="box" id="posBox" style="margin-bottom:8px;display:none">
-<div class="section-head"><span>Open Positions</span></div>
-<div id="posBody"></div></div>
-<div class="box">
-<div class="section-head"><span>Resolved</span><span id="resCount"></span></div>
-<div class="list"><div id="resBody"></div></div></div>
-</div>
-<div>
-<div class="box" style="margin-bottom:8px">
-<div class="section-head"><span>Config</span></div>
+<div class="box" id="posBox" style="margin-bottom:8px;display:none"><div class="section-head"><span>Open Positions</span></div><div id="posBody"></div></div>
+<div class="box"><div class="section-head"><span>Resolved</span><span id="resCount"></span></div><div class="list"><div id="resBody"></div></div></div>
+</div><div>
+<div class="box" style="margin-bottom:8px"><div class="section-head"><span>Config</span></div>
 <div id="configBody" style="display:grid;grid-template-columns:repeat(2,1fr);gap:5px;margin-top:6px"></div></div>
-<div class="box" style="margin-bottom:8px">
-<div class="section-head"><span>Trade Feed</span><span id="feedCount"></span></div>
-<div class="list"><div id="feedBody"></div></div></div>
-<div class="box">
-<div class="section-head"><span>Logs</span><span id="logCount"></span></div>
-<div class="logs" id="logBody"></div></div>
-</div>
-</div>
-</div></body></html>`;
-
-const ESC = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-const $ = id => document.getElementById(id);
-const money = n => { n = n || 0; return (n >= 0 ? '+' : '−') + ('$' + Math.abs(n).toFixed(2)); };
-const cash = n => '$' + Number(n || 0).toFixed(2);
-const num = n => Number(n || 0).toLocaleString();
-const prc = n => n != null ? Number(n).toFixed(3) : '—';
-const tone = n => n >= 0 ? 'pos' : 'neg';
-function uptimeFmt(s) { const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60; return String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0') + ':' + String(ss).padStart(2, '0'); }
-
-let S = {};
-
-function renderKpi(d) {
-  $('bankroll').textContent = cash(d.bankroll);
-  const tp = d.totalPnl || 0; const te = $('totalPnl'); te.textContent = money(tp); te.className = 'value ' + tone(tp);
-  const rp = d.realizedPnl || 0; const re = $('realizedPnl'); re.textContent = money(rp); re.className = 'value ' + tone(rp);
-  $('totalFees').textContent = cash(d.totalFeesPaid || 0);
-  $('winLoss').textContent = (d.wins || 0) + ' / ' + (d.losses || 0); $('winRate').textContent = d.winRate != null ? 'Win ' + d.winRate + '%' : '';
-  $('maxDrawdown').textContent = cash(d.maxDrawdown || 0);
-  $('windowTime').textContent = d.windowRemaining != null ? d.windowRemaining + 's' : '—';
-  $('openCount').textContent = d.openEntryCount || 0;
-  const up = d.unrealizedPnl || 0; const ue = $('unrealizedPnl'); if (ue) { ue.textContent = money(up); ue.className = 'small ' + tone(up); }
-
-  // Entry hint
-  const eh = $('entryHint');
-  const elapsed = d.windowElapsed || 0;
-  const checks = d.checks || [];
-  const allDone = checks.length > 0 && checks.every(c => c.fired);
-  if (d.waitingForWindow) { eh.textContent = 'WAITING FOR NEXT WINDOW'; }
-  else if (d.openEntryCount > 0) { eh.textContent = 'HOLDING POSITION(S) · TP @ 0.50'; }
-  else if (allDone) { eh.textContent = 'ALL CHECKS EXPIRED'; }
-  else { eh.textContent = 'SCANNING ' + checks.filter(c => !c.fired).length + ' CHECK(S)'; }
-
-  // 3 check boxes
-  for (const c of checks) {
-    const cv = $('cv' + c.id);
-    const cb = $('cb' + c.id);
-    if (c.fired) {
-      cv.textContent = 'FIRED ✓'; cv.className = 'check-val fired';
-      cb.className = 'check-box fired';
-    } else {
-      const remaining = c.timeout - elapsed;
-      if (remaining > 0) { cv.textContent = remaining + 's'; cv.className = 'check-val wait'; cb.className = 'check-box'; }
-      else { cv.textContent = 'SCAN…'; cv.className = 'check-val wait'; cb.className = 'check-box'; }
-    }
-  }
-
-  const wp = $('statusPill');
-  if (d.connected) { wp.textContent = '● LIVE'; wp.className = 'pill live'; }
-  else { wp.textContent = '● OFFLINE'; wp.className = 'pill bad'; }
-  $('uptimePill').textContent = uptimeFmt(d.uptime || 0);
-  const mt = d.currentWindow;
-  if (mt) { $('windowTitle').textContent = mt.remaining + 's LEFT'; } else { $('windowTitle').textContent = ''; }
-}
-
-function renderMarket(m) {
-  const b = $('marketBody');
-  if (!m) { b.innerHTML = '<div class="empty">Waiting for market…</div>'; return; }
-  const r = m.remaining || 0, e = m.elapsed || 0;
-  b.innerHTML = '<div class="clock">' + r + 's<small> T+' + e + 's</small></div><div class="prices">'
-    + '<div class="side up"><div class="side-name">▲ UP</div><div class="side-price">' + prc(m.up.mid) + '</div>'
-    + '<div class="quote-row"><span>Bid</span><span>' + prc(m.up.bid) + '</span></div>'
-    + '<div class="quote-row"><span>Ask</span><span>' + prc(m.up.ask) + '</span></div></div>'
-    + '<div class="side down"><div class="side-name">▼ DOWN</div><div class="side-price">' + prc(m.down.mid) + '</div>'
-    + '<div class="quote-row"><span>Bid</span><span>' + prc(m.down.bid) + '</span></div>'
-    + '<div class="quote-row"><span>Ask</span><span>' + prc(m.down.ask) + '</span></div></div></div>';
-}
-
-function renderPositions(a) {
-  const b = $('posBody'), pb = $('posBox');
-  if (!a || !a.length) { pb.style.display = 'none'; return; }
-  pb.style.display = '';
-  b.innerHTML = a.map(p => {
-    const cls = p.outcome === 'UP' ? 'pos' : 'neg';
-    const mark = p.markPrice != null ? p.markPrice : p.entryPrice;
-    return '<div class="trade-item"><div><span class="' + cls + '">' + (p.outcome === 'UP' ? '▲ UP' : '▼ DOWN') + '</span>'
-      + '<div class="dim">CHECK ' + (p.entryNo || '?') + ' · ' + num(p.shares) + 'sh @ ' + prc(p.entryPrice) + ' · MARK ' + prc(mark) + ' · TP @ 0.50</div></div>'
-      + '<div class="' + tone(p.unrealized) + '">' + money(p.unrealized) + '</div></div>';
-  }).join('');
-}
-
-function renderResults(a) {
-  const b = $('resBody'), ct = $('resCount'); ct.textContent = (a ? a.length : 0) + ' RESOLVED';
-  b.innerHTML = !a || !a.length ? '<div class="empty">NO RESOLVED POSITIONS YET</div>' : a.map(r => {
-    const side = r.outcome === 'UP' ? '▲ UP' : '▼ DOWN';
-    const cls = r.pnl >= 0 ? 'buy' : 'sell';
-    return '<div class="result"><div><span class="' + cls + '">' + side + ' ' + (r.exitReason || '') + '</span>'
-      + '<div class="dim">' + new Date(r.closedAt).toLocaleTimeString() + ' · ' + num(r.shares) + 'sh @ ' + prc(r.entryPrice) + ' · ' + (r.won ? 'WIN' : 'LOSS') + '</div></div>'
-      + '<div class="' + cls + '">' + money(r.pnl) + '</div></div>';
-  }).join('');
-}
-
-function renderFeed(a) {
-  const b = $('feedBody'), ct = $('feedCount'); ct.textContent = (a ? a.length : 0) + ' TRADES';
-  b.innerHTML = !a || !a.length ? '<div class="empty">NO TRADES YET</div>' : a.map(tr => {
-    const isBuy = tr.type === 'BUY';
-    const cls = isBuy ? 'buy' : 'sell';
-    const side = tr.outcome === 'UP' ? '▲ UP' : '▼ DOWN';
-    return '<div class="trade-item"><div><span class="' + cls + '">' + (isBuy ? 'BUY' : 'SELL') + ' ' + side + '</span>'
-      + '<div class="dim">' + new Date(tr.timestamp).toLocaleTimeString() + ' · ' + num(tr.shares) + 'sh @ ' + prc(tr.price) + '</div></div>'
-      + '<div class="' + cls + '">' + money(tr.pnl || 0) + '</div></div>';
-  }).join('');
-}
-
-function renderLogs(a) {
-  const b = $('logBody'), ct = $('logCount'); ct.textContent = (a ? a.length : 0) + ' LINES';
-  b.innerHTML = (a || []).slice(-50).map(l => {
-    let cls = '';
-    if (l.includes('WIN')) cls = 'log-win';
-    else if (l.includes('LOSS')) cls = 'log-loss';
-    else if (l.includes('TP')) cls = 'log-tp';
-    else if (l.includes('🎯') || l.includes('🏁') || l.includes('CHECK')) cls = 'log-info';
-    return '<div class="' + cls + '">' + ESC(l) + '</div>';
-  }).join('');
-}
-
-function renderConfig(c) {
-  if (!c) return;
-  const b = $('configBody');
-  const checksHtml = (c.checks || []).map(ch =>
-    '<div class="mini"><div class="label">Check ' + ch.id + '</div><div class="value">≤' + ch.threshold.toFixed(2) + ' @ ' + ch.timeout + 's</div></div>'
-  ).join('');
-  b.innerHTML = checksHtml
-    + '<div class="mini"><div class="label">TP Level</div><div class="value">' + c.tpPrice.toFixed(2) + '</div></div>'
-    + '<div class="mini"><div class="label">Base %</div><div class="value">' + (c.basePct * 100) + '%</div></div>'
-    + '<div class="mini"><div class="label">Capital</div><div class="value">' + cash(c.bankroll) + '</div></div>'
-    + '<div class="mini"><div class="label">Taker Fee</div><div class="value">' + (c.takerFeeRate != null ? (c.takerFeeRate * 100).toFixed(2) + '%' : '7%') + '</div></div>';
-}
-
-function renderChart(c) {
-  const svg = $('equityChart'), epl = $('equityPeakLabel');
-  if (epl) epl.textContent = 'VALUE ' + cash(S.markValue || 0) + ' · PEAK ' + cash(S.peakEquity || 0);
-  if (!c || !c.length) { svg.innerHTML = ''; return; }
-  const v = c.map(p => p.equity), lo = Math.min(...v), hi = Math.max(...v), rng = (hi - lo) || 1;
-  const W = 700, H = 120, P = 12;
-  const pts = c.map((p, i) => [i / Math.max(1, c.length - 1) * W, H - P - (p.equity - lo) / rng * (H - P * 2)]);
-  const path = 'M' + pts.map(p => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' L');
-  const last = pts.at(-1) || [0, H / 2];
-  const color = S.totalPnl >= 0 ? '#00ff85' : '#ff4a68';
-  svg.innerHTML = '<path d="' + path + '" fill="none" stroke="' + color + '" stroke-width="2.5"/><circle cx="' + last[0] + '" cy="' + last[1] + '" r="4" fill="' + color + '"/>';
-}
-
-function fullRender(d) {
-  Object.assign(S, d);
-  $('strategy').textContent = d.strategy || '';
-  renderKpi(d); renderMarket(d.currentWindow); renderPositions(d.positions);
-  renderResults(d.results); renderFeed(d.trades); renderLogs(d.logs);
-  renderConfig(d.config); renderChart(d.equityCurve);
-}
-
-async function poll() {
-  try {
-    const r = await fetch('/api/status', { cache: 'no-store' });
-    const d = await r.json();
-    fullRender(d);
-  } catch (e) {
-    const sp = $('statusPill');
-    if (sp) { sp.textContent = '● OFFLINE'; sp.className = 'pill bad'; }
-  }
-}
-
-setInterval(poll, 700);
-poll();
+<div class="box" style="margin-bottom:8px"><div class="section-head"><span>Trade Feed</span><span id="feedCount"></span></div><div class="list"><div id="feedBody"></div></div></div>
+<div class="box"><div class="section-head"><span>Logs</span><span id="logCount"></span></div><div class="logs" id="logBody"></div></div>
+</div></div></div>
+<script>
+const ESC=s=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+const $=id=>document.getElementById(id);
+const money=n=>{n=n||0;return(n>=0?'+':'−')+('$'+Math.abs(n).toFixed(2))};
+const cash=n=>'$'+Number(n||0).toFixed(2);
+const num=n=>Number(n||0).toLocaleString();
+const prc=n=>n!=null?Number(n).toFixed(3):'—';
+const tone=n=>n>=0?'pos':'neg';
+function uptimeFmt(s){const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),ss=s%60;return String(h).padStart(2,'0')+':'+String(m).padStart(2,'0')+':'+String(ss).padStart(2,'0')}
+let S={};
+function renderKpi(d){$('bankroll').textContent=cash(d.bankroll);const tp=d.totalPnl||0;const te=$('totalPnl');te.textContent=money(tp);te.className='value '+tone(tp);const rp=d.realizedPnl||0;const re=$('realizedPnl');re.textContent=money(rp);re.className='value '+tone(rp);$('totalFees').textContent=cash(d.totalFeesPaid||0);$('winLoss').textContent=(d.wins||0)+' / '+(d.losses||0);$('winRate').textContent=d.winRate!=null?'Win '+d.winRate+'%':'';$('maxDrawdown').textContent=cash(d.maxDrawdown||0);$('windowTime').textContent=d.windowRemaining!=null?d.windowRemaining+'s':'—';$('openCount').textContent=d.openEntryCount||0;const up=d.unrealizedPnl||0;const ue=$('unrealizedPnl');if(ue){ue.textContent=money(up);ue.className='small '+tone(up)}
+const eh=$('entryHint');const elapsed=d.windowElapsed||0;const checks=d.checks||[];const allDone=checks.length>0&&checks.every(c=>c.fired);if(d.waitingForWindow){eh.textContent='WAITING FOR NEXT WINDOW'}else if(d.openEntryCount>0){eh.textContent='HOLDING POSITION(S) · TP @ 0.50'}else if(allDone){eh.textContent='ALL CHECKS EXPIRED'}else{eh.textContent='SCANNING '+checks.filter(c=>!c.fired).length+' CHECK(S)'}
+for(const c of checks){const cv=$('cv'+c.id);const cb=$('cb'+c.id);if(c.fired){cv.textContent='FIRED ✓';cv.className='check-val fired';cb.className='check-box fired'}else{const remaining=c.timeout-elapsed;cv.textContent=remaining>0?remaining+'s':'SCAN…';cv.className='check-val wait';cb.className='check-box'}}
+const wp=$('statusPill');if(d.connected){wp.textContent='● LIVE';wp.className='pill live'}else{wp.textContent='● OFFLINE';wp.className='pill bad'}$('uptimePill').textContent=uptimeFmt(d.uptime||0);const mt=d.currentWindow;if(mt){$('windowTitle').textContent=mt.remaining+'s LEFT'}else{$('windowTitle').textContent=''}}
+function renderMarket(m){const b=$('marketBody');if(!m){b.innerHTML='<div class="empty">Waiting for market…</div>';return}b.innerHTML='<div class="clock">'+m.remaining+'s<small> T+'+m.elapsed+'s</small></div><div class="prices"><div class="side up"><div class="side-name">▲ UP</div><div class="side-price">'+prc(m.up.mid)+'</div><div class="quote-row"><span>Bid</span><span>'+prc(m.up.bid)+'</span></div><div class="quote-row"><span>Ask</span><span>'+prc(m.up.ask)+'</span></div></div><div class="side down"><div class="side-name">▼ DOWN</div><div class="side-price">'+prc(m.down.mid)+'</div><div class="quote-row"><span>Bid</span><span>'+prc(m.down.bid)+'</span></div><div class="quote-row"><span>Ask</span><span>'+prc(m.down.ask)+'</span></div></div></div>'}
+function renderPositions(a){const b=$('posBody'),pb=$('posBox');if(!a||!a.length){pb.style.display='none';return}pb.style.display='';b.innerHTML=a.map(p=>{const cls=p.outcome==='UP'?'pos':'neg';const mark=p.markPrice!=null?p.markPrice:p.entryPrice;return '<div class="trade-item"><div><span class="'+cls+'">'+(p.outcome==='UP'?'▲ UP':'▼ DOWN')+'</span><div class="dim">CHECK '+(p.entryNo||'?')+' · '+num(p.shares)+'sh @ '+prc(p.entryPrice)+' · MARK '+prc(mark)+' · TP @ 0.50</div></div><div class="'+tone(p.unrealized)+'">'+money(p.unrealized)+'</div></div>'}).join('')}
+function renderResults(a){const b=$('resBody'),ct=$('resCount');ct.textContent=(a?a.length:0)+' RESOLVED';b.innerHTML=!a||!a.length?'<div class="empty">NO RESOLVED POSITIONS YET</div>':a.map(r=>{const side=r.outcome==='UP'?'▲ UP':'▼ DOWN';const cls=r.pnl>=0?'buy':'sell';return '<div class="result"><div><span class="'+cls+'">'+side+' '+(r.exitReason||'')+'</span><div class="dim">'+new Date(r.closedAt).toLocaleTimeString()+' · '+num(r.shares)+'sh @ '+prc(r.entryPrice)+' · '+(r.won?'WIN':'LOSS')+'</div></div><div class="'+cls+'">'+money(r.pnl)+'</div></div>'}).join('')}
+function renderFeed(a){const b=$('feedBody'),ct=$('feedCount');ct.textContent=(a?a.length:0)+' TRADES';b.innerHTML=!a||!a.length?'<div class="empty">NO TRADES YET</div>':a.map(tr=>{const isBuy=tr.type==='BUY';const cls=isBuy?'buy':'sell';const side=tr.outcome==='UP'?'▲ UP':'▼ DOWN';return '<div class="trade-item"><div><span class="'+cls+'">'+(isBuy?'BUY':'SELL')+' '+side+'</span><div class="dim">'+new Date(tr.timestamp).toLocaleTimeString()+' · '+num(tr.shares)+'sh @ '+prc(tr.price)+'</div></div><div class="'+cls+'">'+money(tr.pnl||0)+'</div></div>'}).join('')}
+function renderLogs(a){const b=$('logBody'),ct=$('logCount');ct.textContent=(a?a.length:0)+' LINES';b.innerHTML=(a||[]).slice(-50).map(l=>{let cls='';if(l.includes('WIN'))cls='log-win';else if(l.includes('LOSS'))cls='log-loss';else if(l.includes('TP'))cls='log-tp';else if(l.includes('🎯')||l.includes('🏁')||l.includes('CHECK'))cls='log-info';return '<div class="'+cls+'">'+ESC(l)+'</div>'}).join('')}
+function renderConfig(c){if(!c)return;const b=$('configBody');const ch=(c.checks||[]).map(x=>'<div class="mini"><div class="label">Check '+x.id+'</div><div class="value">≤'+x.threshold.toFixed(2)+' @ '+x.timeout+'s</div></div>').join('');b.innerHTML=ch+'<div class="mini"><div class="label">TP Level</div><div class="value">'+c.tpPrice.toFixed(2)+'</div></div><div class="mini"><div class="label">Base %</div><div class="value">'+(c.basePct*100)+'%</div></div><div class="mini"><div class="label">Capital</div><div class="value">'+cash(c.bankroll)+'</div></div><div class="mini"><div class="label">Taker Fee</div><div class="value">'+(c.takerFeeRate!=null?(c.takerFeeRate*100).toFixed(2)+'%':'7%')+'</div></div>'}
+function renderChart(c){const svg=$('equityChart'),epl=$('equityPeakLabel');if(epl)epl.textContent='VALUE '+cash(S.markValue||0)+' · PEAK '+cash(S.peakEquity||0);if(!c||!c.length){svg.innerHTML='';return}const v=c.map(p=>p.equity),lo=Math.min(...v),hi=Math.max(...v),rng=(hi-lo)||1;const W=700,H=120,P=12;const pts=c.map((p,i)=>[i/Math.max(1,c.length-1)*W,H-P-(p.equity-lo)/rng*(H-P*2)]);const path='M'+pts.map(p=>p[0].toFixed(1)+','+p[1].toFixed(1)).join(' L');const last=pts.at(-1)||[0,H/2];const color=S.totalPnl>=0?'#00ff85':'#ff4a68';svg.innerHTML='<path d="'+path+'" fill="none" stroke="'+color+'" stroke-width="2.5"/><circle cx="'+last[0]+'" cy="'+last[1]+'" r="4" fill="'+color+'"/>'}
+function fullRender(d){Object.assign(S,d);$('strategy').textContent=d.strategy||'';renderKpi(d);renderMarket(d.currentWindow);renderPositions(d.positions);renderResults(d.results);renderFeed(d.trades);renderLogs(d.logs);renderConfig(d.config);renderChart(d.equityCurve)}
+async function poll(){try{const r=await fetch('/api/status',{cache:'no-store'});const d=await r.json();fullRender(d)}catch(e){const sp=$('statusPill');if(sp){sp.textContent='● OFFLINE';sp.className='pill bad'}}}
+setInterval(poll,700);poll();
+</script></body></html>`;
 
 app.get('/', (_, res) => res.type('html').send(dashboard));
 
