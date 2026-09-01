@@ -8,7 +8,6 @@ const WINDOW_SECONDS = 300;                     // BTC 5m windows
 const WAIT_SECONDS   = Number(process.env.WAIT_SECONDS   || 45);   // (unused, kept for compat)
 const BASE_PCT       = Number(process.env.BASE_PCT       || 0.05); // 5% of bankroll in dollars
 const START_BANKROLL = Number(process.env.START_BANKROLL  || 300);
-const TP_PRICE       = Number(process.env.TP_PRICE       || 0.50); // take-profit target
 const TAKER_FEE_RATE = Number(process.env.TAKER_FEE_RATE || 0.07);
 const CLOB_POLL_MS   = Math.max(100, Number(process.env.CLOB_POLL_MS || 300));
 const CLOB_FRESH_MS  = Math.max(CLOB_POLL_MS, Number(process.env.CLOB_FRESH_MS || 1500));
@@ -215,7 +214,7 @@ class CheapHunterEngine {
     // Init 3 independent checks — each unfired
     this.windowChecks = CHECKS.map(c => ({ ...c, fired: false }));
     const checkDesc = CHECKS.map(c => `C${c.id}≤${c.threshold.toFixed(2)}@${c.timeout}s`).join(' · ');
-    this.log(`🆕 WINDOW ${market.slug.slice(-10)} — BASE $${this.baseCost.toFixed(2)} = ${BASE_PCT*100}% · ${checkDesc} · TP @ ${TP_PRICE.toFixed(2)}`);
+    this.log(`🆕 WINDOW ${market.slug.slice(-10)} — BASE $${this.baseCost.toFixed(2)} = ${BASE_PCT*100}% · ${checkDesc}`);
     this.onTick(this.buildState());
   }
 
@@ -235,8 +234,6 @@ class CheapHunterEngine {
     const elapsed = Math.floor(nowS - market.windowStart);
 
     if (!this.windowPaused) {
-      // Check TP on all open positions
-      this.checkTp(market);
 
       // Run each independent check (skip on exact tick window opens to avoid double-fire)
       if (this.windowJustOpened) {
@@ -292,7 +289,7 @@ class CheapHunterEngine {
       windowStart: market.windowStart, windowEnd: market.windowEnd,
       shares, entryPrice: price, cost, buyFee: fee,
       openedAt: Date.now(), exitReason: null, exitPrice: null, pnl: null,
-      entryNo: check.id, tpTarget: TP_PRICE,
+      entryNo: check.id,
     };
     this.openEntries.push(position);
     this.positions.push(position);
@@ -302,24 +299,6 @@ class CheapHunterEngine {
     this.onTick(this.buildState());
   }
 
-  checkTp(market) {
-    // Check TP on ALL open positions (not just one)
-    for (const pos of this.openEntries) {
-      if (pos.exitReason != null) continue;
-      const token = pos.outcome === 'UP' ? market.up : market.down;
-      const px = token.mid ?? token.bid ?? token.ask;
-      if (px == null) continue;
-      if (px >= pos.tpTarget) {
-        this.sellPosition(pos, pos.tpTarget, 'TP_LIMIT');
-        // Show current market direction at TP time
-        const upM = market.up.mid, dnM = market.down.mid;
-        const dirNow = upM != null && dnM != null ? (upM >= dnM ? 'UP leading' : 'DOWN leading') : '';
-        this.log(`✅ TP LIMIT CHECK ${pos.entryNo} ${pos.outcome} ${pos.shares}sh @ ${pos.tpTarget.toFixed(2)} — mid ${px.toFixed(3)} · ${dirNow}`);
-      }
-    }
-    // Clean up closed positions from openEntries
-    this.openEntries = this.openEntries.filter(p => p.exitReason == null);
-  }
 
   resolveExpired(market, nowS) {
     const open = this.positions.filter(p => p.exitReason == null);
@@ -353,11 +332,7 @@ class CheapHunterEngine {
         const side = pos.outcome === winner ? 'WIN' : 'LOSS';
         this.log(`   ${side} ${pos.outcome} ${pos.shares}sh @ ${pos.entryPrice.toFixed(3)} → P&L ${pos.pnl >= 0 ? '+' : '-'}$${Math.abs(pos.pnl).toFixed(2)}`);
       }
-      // Also log any positions that TP'd earlier in this window (already closed)
-      const tpPositions = this.results.filter(r => r.slug === m.slug && r.exitReason === 'TP_LIMIT');
-      for (const tp of tpPositions) {
-        this.log(`   TP ${tp.outcome} ${tp.shares}sh @ ${tp.entryPrice.toFixed(3)} → P&L +$${Math.abs(tp.pnl).toFixed(2)}`);
-      }
+
     }
     if (buckets.size) this.positions = this.positions.filter(p => p.exitReason == null);
   }
@@ -380,7 +355,7 @@ class CheapHunterEngine {
     this.results.unshift({ ...position, market: undefined });
     this.results = this.results.slice(0, 50);
     this.trades.push({ timestamp: Date.now(), type: 'SELL', slug: position.slug, outcome: position.outcome, shares: position.shares, price, pnl, fee, reason, ...extra });
-    const tag = reason === 'RESOLUTION' ? '🏁 RESOLUTION' : reason === 'TP_LIMIT' ? '✅ TP LIMIT' : '💰 SELL';
+    const tag = reason === 'RESOLUTION' ? '🏁 RESOLUTION' : '💰 SELL';
     this.log(`${tag} C${position.entryNo} ${position.outcome} @ ${price.toFixed(2)} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)} · ${position.shares}sh`);
     this.recordEquity();
     this.onTick(this.buildState());
@@ -424,7 +399,7 @@ class CheapHunterEngine {
     return {
       version: '4.0.0',
       name: this.name,
-      strategy: `3-Check CheapHunter · C1≤0.35@9s · C2≤0.25@17s · C3≤0.20@30s · TP @ ${TP_PRICE.toFixed(2)} · ${BASE_PCT*100}% base`,
+      strategy: `3-Check CheapHunter · C1≤0.35@9s · C2≤0.25@17s · C3≤0.20@30s · ${BASE_PCT*100}% base`,
       serverTime: now,
       connected: this.pollCount > 0 || this.tickCount > 0,
       lastError: this.lastError,
@@ -462,7 +437,7 @@ class CheapHunterEngine {
       maxDrawdown: this.maxDrawdown,
       uptime: Math.floor((now - this.startedAt) / 1000),
       config: {
-        checks: CHECKS, tpPrice: TP_PRICE, basePct: BASE_PCT, baseCost: this.baseCost,
+        checks: CHECKS,  basePct: BASE_PCT, baseCost: this.baseCost,
         bankroll: this.initialBankroll, pollMs: CLOB_POLL_MS, takerFeeRate: TAKER_FEE_RATE,
       },
     };
@@ -503,7 +478,7 @@ class CheapHunterEngine {
       setInterval(() => this.recordEquity(), 1000),
     ];
     const checkDesc = CHECKS.map(c => `C${c.id}≤${c.threshold} within ${c.timeout}s`).join(' · ');
-    this.log(`🚀 CheapHunter started | ${checkDesc} · TP @ ${TP_PRICE} · ${BASE_PCT*100}% base · no SL · no martingale`);
+    this.log(`🚀 CheapHunter started | ${checkDesc} · ${BASE_PCT*100}% base · no SL · no martingale`);
   }
 
   close() {
@@ -512,4 +487,4 @@ class CheapHunterEngine {
   }
 }
 
-module.exports = { CheapHunterEngine, config: { CHECKS, TP_PRICE, BASE_PCT, START_BANKROLL, CLOB_POLL_MS, TAKER_FEE_RATE } };
+module.exports = { CheapHunterEngine, config: { CHECKS, BASE_PCT, START_BANKROLL, CLOB_POLL_MS, TAKER_FEE_RATE } };
