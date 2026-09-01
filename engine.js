@@ -33,7 +33,7 @@ class CheapHunterEngine {
     this.fetchImpl = options.fetchImpl || fetch;
     this.onTick = options.onTick || (() => {});
     this.onLog = options.onLog || (() => {});
-    this.name = options.name || 'CheapHunter45';
+    this.name = options.name || '3 Check Bot';
     this.startedAt = Date.now();
 
     this.bankroll = options.bankroll ?? START_BANKROLL;

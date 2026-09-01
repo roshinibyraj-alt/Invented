@@ -10,7 +10,7 @@ const app = express();
 const port = Number(process.env.PORT || 3000);
 
 const engine = new CheapHunterEngine({
-  name: '45 Seconds Waiter',
+  name: '3 Check Bot',
   onLog: line => console.log(`[CH] ${line}`),
 });
 
@@ -21,7 +21,7 @@ app.get('/api/status', (_, res) => res.json(engine.buildState()));
 const dashboard = `<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>45 Seconds Waiter — 3-Check CheapHunter</title>
+<title>3 Check Bot — BTC 5m</title>
 <style>
 *{box-sizing:border-box}
 :root{--bg:#000;--panel:#070707;--line:#222;--muted:#9d9d9d;--up:#00ff85;--down:#ff4a68;--amber:#ffc400;--blue:#38d6ff}
@@ -66,7 +66,7 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
 @media(max-width:480px){body{padding:6px;font-size:13px}h1{font-size:16px}.topbar{grid-template-columns:1fr}.side-price{font-size:28px}.clock{font-size:30px}.check-val{font-size:15px}}
 </style></head><body><div class="wrap">
 <header class="topbar">
-<div class="brand"><div class="btc">₿</div><div><h1>45 Seconds Waiter</h1><div class="sub" id="strategy">LOADING…</div></div></div>
+<div class="brand"><div class="btc">₿</div><div><h1>3 Check Bot</h1><div class="sub" id="strategy">LOADING…</div></div></div>
 <div class="status"><span id="statusPill" class="pill bad">OFFLINE</span><span id="uptimePill" class="pill blue">00:00:00</span></div>
 </header>
 <div class="box equity" style="margin-bottom:8px">
