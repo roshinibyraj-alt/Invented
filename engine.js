@@ -311,7 +311,10 @@ class CheapHunterEngine {
       if (px == null) continue;
       if (px >= pos.tpTarget) {
         this.sellPosition(pos, pos.tpTarget, 'TP_LIMIT');
-        this.log(`✅ TP LIMIT CHECK ${pos.entryNo} at ${pos.tpTarget.toFixed(2)} — mid ${px.toFixed(3)} >= target`);
+        // Show current market direction at TP time
+        const upM = market.up.mid, dnM = market.down.mid;
+        const dirNow = upM != null && dnM != null ? (upM >= dnM ? 'UP leading' : 'DOWN leading') : '';
+        this.log(`✅ TP LIMIT CHECK ${pos.entryNo} ${pos.outcome} ${pos.shares}sh @ ${pos.tpTarget.toFixed(2)} — mid ${px.toFixed(3)} · ${dirNow}`);
       }
     }
     // Clean up closed positions from openEntries
@@ -344,7 +347,17 @@ class CheapHunterEngine {
         const payout = won ? pos.shares : 0;
         if (won) winPayout += payout; else lossCost += pos.cost;
       }
-      this.log(`🏁 WINDOW ${m.slug.slice(-10)} RESOLVED → ${winner} · win payout $${winPayout.toFixed(2)} · loss cost $${lossCost.toFixed(2)}`);
+      this.log(`🏁 WINDOW ${m.slug.slice(-10)} RESOLVED → ${winner} won · payout $${winPayout.toFixed(2)} · loss $${lossCost.toFixed(2)}`);
+      // Per-position breakdown
+      for (const pos of group) {
+        const side = pos.outcome === winner ? 'WIN' : 'LOSS';
+        this.log(`   ${side} ${pos.outcome} ${pos.shares}sh @ ${pos.entryPrice.toFixed(3)} → P&L ${pos.pnl >= 0 ? '+' : '-'}$${Math.abs(pos.pnl).toFixed(2)}`);
+      }
+      // Also log any positions that TP'd earlier in this window (already closed)
+      const tpPositions = this.results.filter(r => r.slug === m.slug && r.exitReason === 'TP_LIMIT');
+      for (const tp of tpPositions) {
+        this.log(`   TP ${tp.outcome} ${tp.shares}sh @ ${tp.entryPrice.toFixed(3)} → P&L +$${Math.abs(tp.pnl).toFixed(2)}`);
+      }
     }
     if (buckets.size) this.positions = this.positions.filter(p => p.exitReason == null);
   }
