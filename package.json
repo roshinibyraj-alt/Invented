@@ -1,16 +1,12 @@
 {
-  "name": "polymarket-flip-bot-invented",
-  "version": "6.0.0",
+  "name": "cheap-hunter-45",
+  "version": "4.0.0",
+  "description": "BTC 5m CheapHunter: 3 independent checks (0.35@9s, 0.25@17s, 0.20@30s), TP 0.50, no SL, no martingale",
   "main": "index.js",
+  "engines": { "node": ">=18.0.0" },
   "scripts": {
     "start": "node index.js",
-    "smoke": "node --check engine.js && node --check index.js && node smoke.js"
+    "smoke": "node smoke.js"
   },
-  "engines": {
-    "node": ">=18.0.0"
-  },
-  "dependencies": {
-    "express": "^4.19.2"
-  },
-  "description": "FlipBot (Invented repo): BTC 5m \u2014 wait 45s, first entry ONLY in 0.65\u20130.70 band (no cheap low-side buys), SL 0.50, re-enter any side \u22650.65 x2 (max 2 martingale/window), base 10% of capital, NO carry"
+  "dependencies": { "express": "^4.19.2" }
 }
