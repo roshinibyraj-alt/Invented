@@ -286,7 +286,7 @@ class CheapHunterEngine {
     this.finalUpMax = null;
     this.finalDownMax = null;
     const color = this.candle.getColor();
-    const side = color === 'GREEN' ? 'DOWN' : (color === 'RED' ? 'UP' : null);
+    const side = color === 'GREEN' ? 'UP' : (color === 'RED' ? 'DOWN' : null);
 
     if (!side) {
       this.log(`⏭️ No candle signal (${color}) — skipping window ${market.slug.slice(-10)}`);
@@ -536,7 +536,7 @@ class CheapHunterEngine {
       currentWindow: market ? this.publicMarket(market) : null,
       candle: this.candle.buildState(),
       orderLadder: {
-        side: this.candle.getColor() === 'GREEN' ? 'DOWN' : (this.candle.getColor() === 'RED' ? 'UP' : '—'),
+        side: this.candle.getColor() === 'GREEN' ? 'UP' : (this.candle.getColor() === 'RED' ? 'DOWN' : '—'),
         prices: LADDER_PRICES,
         sharesPerOrder: ORDER_SHARES,
       },
