@@ -257,6 +257,16 @@ class CheapHunterEngine {
       this.lastError = null;
       this.pollCount += 1;
       this.tickCount += 1;
+
+      // Immediately check fills after fresh book data
+      try {
+        const cs2 = windowStartFor(Date.now());
+        const market2 = this.markets.get(slugFor(cs2));
+        if (market2 && !market2.settled) {
+          const elapsed2 = Math.floor(Date.now() / 1000 - market2.windowStart);
+          if (elapsed2 < WINDOW_SECONDS) this._checkFills(market2);
+        }
+      } catch (_) {}
     } catch (error) {
       this.lastError = error.message;
       if (!this.lastPollErrorAt || Date.now() - this.lastPollErrorAt > 5000) {
