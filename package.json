@@ -1,7 +1,7 @@
 {
-  "name": "candlebot-ladder",
-  "version": "5.0.0",
-  "description": "CandleBot: Binance 5m candle color signal \u2192 6 limit buys (0.40-0.15) 100sh each, hold to resolution, demo $500",
+  "name": "prevwinner-bot",
+  "version": "1.0.0",
+  "description": "PrevWinner Bot: CLOB prev-window-winner → 6 limit buys (0.40-0.15) 100sh each, hold to resolution, demo $2000",
   "main": "index.js",
   "engines": {
     "node": ">=18.0.0"

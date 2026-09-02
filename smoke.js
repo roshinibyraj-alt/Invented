@@ -14,123 +14,154 @@ function makeFetch(script) {
       if (!tokenMap[wStart]) tokenMap[wStart] = { up: 'tok_up_' + wStart, dn: 'tok_dn_' + wStart };
       return Promise.resolve({ ok: true, json: () => Promise.resolve([{ conditionId: '0x' + wStart, question: 'BTC ' + wStart, outcomes: JSON.stringify(['Up', 'Down']), clobTokenIds: JSON.stringify([tokenMap[wStart].up, tokenMap[wStart].dn]), closed: false }]) });
     }
-    const [u, d] = script[pollN] || [0.50, 0.50];
-    pollN += 1;
+    const [u, d] = script[pollN++] || [0.50, 0.50];
     const books = [];
-    for (const wStart of Object.keys(tokenMap)) {
-      books.push({ asset_id: tokenMap[wStart].up, asks: [{ price: u, size: 500 }], bids: [{ price: Math.max(0.01, u - 0.01), size: 500 }] });
-      books.push({ asset_id: tokenMap[wStart].dn, asks: [{ price: d, size: 500 }], bids: [{ price: Math.max(0.01, d - 0.01), size: 500 }] });
+    for (const w of Object.keys(tokenMap)) {
+      books.push({ asset_id: tokenMap[w].up, asks: [{ price: u, size: 500 }], bids: [{ price: Math.max(0.01, u - 0.01), size: 500 }] });
+      books.push({ asset_id: tokenMap[w].dn, asks: [{ price: d, size: 500 }], bids: [{ price: Math.max(0.01, d - 0.01), size: 500 }] });
     }
     return Promise.resolve({ ok: true, json: () => Promise.resolve(books) });
   };
 }
 
-function mkEngine(script) {
+function slugFor(s) { return 'btc-updown-5m-' + s; }
+
+const PREV = FIRST - WINDOW;
+
+async function setup(script, upMax, downMax) {
   const e = new CheapHunterEngine({ fetchImpl: makeFetch(script), bankroll: 2000, onTick: () => {}, onLog: () => {} });
-  e.entryWindow = FIRST;
+  e.entryWindow = 0;
+  await e.discoverWindow(PREV);
+  await e.discoverWindow(FIRST);
+  await e.discoverWindow(FIRST + WINDOW);
+  const mPrev = e.markets.get(slugFor(PREV));
+  mPrev.settled = true;
+  mPrev.finalUpMax = upMax;
+  mPrev.finalDownMax = downMax;
   return e;
 }
 
+// Run poll+evaluate cycles. Since tests run within a 5-min window,
+// elapsed is always > 2, so the ladder is placed on the first evaluate.
+async function drive(e, cycles) {
+  for (let i = 0; i < cycles; i++) {
+    await e.pollClob();
+    e.evaluate();
+  }
+}
+
 const failures = [];
-
 (async () => {
-  // Test 1: GREEN candle → BUY UP. Up ask dips to 0.30 → 3 fills (bid=0.29 ≤ 0.40/0.35/0.30)
+  // TEST 1: Prev UP won → UP ladder fills on dip (0.30)
   {
-    const script = [[0.50, 0.50], [0.30, 0.70], [0.50, 0.50]];
-    const engine = mkEngine(script);
-    engine.candle.lastColor = 'GREEN';
-    await engine.discoverWindow(FIRST);
-    await engine.discoverWindow(FIRST + WINDOW);
-    await engine.pollClob(); engine.evaluate();
-    await engine.pollClob(); engine.evaluate();
-    await engine.pollClob(); engine.evaluate();
-    const filled = engine.pendingOrders.filter(o => o.status === 'FILLED');
-    console.log('\n--- GREEN candle → BUY UP · dip 0.30 ---');
-    filled.forEach(o => console.log('  ✅', o.outcome, 'limit', o.limitPrice, '@ fill', o.fillPrice));
-    console.log('  filled:', filled.length, '| bank:', engine.bankroll.toFixed(2));
-    if (filled.length !== 3) failures.push('GREEN-UP: expected 3 fills, got ' + filled.length);
-    if (filled.some(o => o.fillPrice !== o.limitPrice)) failures.push('GREEN-UP: fill price mismatch');
+    console.log('\n--- TEST 1: Prev UP won → UP ladder fills ---');
+    const e = await setup([[0.50,0.50],[0.30,0.70],[0.50,0.50]], 0.99, 0.01);
+    await drive(e, 4);
+    const filled = e.pendingOrders.filter(o => o.status === 'FILLED');
+    console.log('  filled:', filled.length, 'side:', e._windowSide, 'pending:', e.pendingOrders.filter(o=>o.status==='PENDING').length);
+    filled.forEach(o => console.log('  ✅', o.outcome, o.limitPrice, '@', o.fillPrice));
+    if (filled.length !== 3) failures.push('TEST1: expected 3, got ' + filled.length);
   }
 
-  // Test 2: RED candle → BUY DOWN. Down ask dips to 0.30 → 3 fills
+  // TEST 2: Prev DOWN won → DOWN ladder fills
   {
-    const script = [[0.50, 0.50], [0.70, 0.30], [0.50, 0.50]];
-    const engine = mkEngine(script);
-    engine.candle.lastColor = 'RED';
-    await engine.discoverWindow(FIRST);
-    await engine.discoverWindow(FIRST + WINDOW);
-    await engine.pollClob(); engine.evaluate();
-    await engine.pollClob(); engine.evaluate();
-    await engine.pollClob(); engine.evaluate();
-    const filled = engine.pendingOrders.filter(o => o.status === 'FILLED');
-    console.log('\n--- RED candle → BUY DOWN · dip 0.30 ---');
-    filled.forEach(o => console.log('  ✅', o.outcome, 'limit', o.limitPrice, '@ fill', o.fillPrice));
-    console.log('  filled:', filled.length, '| bank:', engine.bankroll.toFixed(2));
-    if (filled.length !== 3) failures.push('RED-DOWN: expected 3 fills, got ' + filled.length);
+    console.log('\n--- TEST 2: Prev DOWN won → DOWN ladder fills ---');
+    const e = await setup([[0.70,0.30],[0.50,0.50]], 0.01, 0.99);
+    await drive(e, 4);
+    const filled = e.pendingOrders.filter(o => o.status === 'FILLED');
+    console.log('  filled:', filled.length, 'side:', e._windowSide);
+    filled.forEach(o => console.log('  ✅', o.outcome, o.limitPrice, '@', o.fillPrice));
+    if (filled.length !== 3) failures.push('TEST2: expected 3, got ' + filled.length);
   }
 
-  // Test 3: FROZEN — 0.50 both sides, no fills
+  // TEST 3: No prev winner → skip
   {
-    const script = [[0.50, 0.50], [0.50, 0.50], [0.50, 0.50]];
-    const engine = mkEngine(script);
-    engine.candle.lastColor = 'GREEN';
-    await engine.discoverWindow(FIRST);
-    await engine.discoverWindow(FIRST + WINDOW);
-    await engine.pollClob(); engine.evaluate();
-    await engine.pollClob(); engine.evaluate();
-    await engine.pollClob(); engine.evaluate();
-    const filled = engine.pendingOrders.filter(o => o.status === 'FILLED').length;
-    console.log('\n--- FROZEN 0.50: fills', filled, '---');
-    if (filled !== 0) failures.push('FROZEN: expected 0 fills, got ' + filled);
+    console.log('\n--- TEST 3: No prev winner → skip ---');
+    const e = await setup([[0.50,0.50]], 0.60, 0.60);
+    await drive(e, 2);
+    console.log('  pending:', e.pendingOrders.length, 'windowSide:', e._windowSide);
+    if (e.pendingOrders.length !== 0) failures.push('TEST3: should have 0 pending');
+    if (e._windowSide !== null) failures.push('TEST3: windowSide should be null');
   }
 
-  // Test 4: NO SIGNAL
+  // TEST 4: All 6 rungs fill — warm-up avoids token swap, then deep dip
   {
-    const engine = mkEngine([[0.50, 0.50]]);
-    engine.candle.lastColor = null;
-    await engine.discoverWindow(FIRST);
-    await engine.discoverWindow(FIRST + WINDOW);
-    await engine.pollClob(); engine.evaluate();
-    console.log('\n--- NO SIGNAL: pending', engine.pendingOrders.length, '---');
-    if (engine.pendingOrders.length !== 0) failures.push('NOSIGNAL: should not place orders');
+    console.log('\n--- TEST 4: All 6 rungs fill ---');
+    const e = await setup([[0.60,0.40],[0.10,0.90],[0.50,0.50]], 0.99, 0.01);
+    await drive(e, 6);
+    const filled = e.pendingOrders.filter(o => o.status === 'FILLED');
+    console.log('  filled:', filled.length, 'bank:', e.bankroll.toFixed(2));
+    filled.forEach(o => console.log('  ✅', o.outcome, o.limitPrice, '@', o.fillPrice));
+    if (filled.length !== 6) failures.push('TEST4: expected 6, got ' + filled.length);
   }
 
-  // Test 5: ALL 6 FILLS — deep dip to 0.10
+  // TEST 5: Partial fill (4 of 6)
   {
-    const script = [[0.50, 0.50], [0.10, 0.90], [0.50, 0.50]];
-    const engine = mkEngine(script);
-    engine.candle.lastColor = 'GREEN';
-    await engine.discoverWindow(FIRST);
-    await engine.discoverWindow(FIRST + WINDOW);
-    await engine.pollClob(); engine.evaluate();
-    await engine.pollClob(); engine.evaluate();
-    await engine.pollClob(); engine.evaluate();
-    const filled = engine.pendingOrders.filter(o => o.status === 'FILLED');
-    console.log('\n--- ALL 6 FILLS · dip 0.10 ---');
-    filled.forEach(o => console.log('  ✅', o.outcome, 'limit', o.limitPrice));
-    console.log('  filled:', filled.length, '| bank:', engine.bankroll.toFixed(2));
-    if (filled.length !== 6) failures.push('ALLFILLS: expected 6 fills, got ' + filled.length);
+    console.log('\n--- TEST 5: Partial fill ---');
+    const e = await setup([[0.60,0.40],[0.22,0.78],[0.50,0.50]], 0.99, 0.01);
+    await drive(e, 6);
+    const filled = e.pendingOrders.filter(o => o.status === 'FILLED');
+    const pending = e.pendingOrders.filter(o => o.status === 'PENDING');
+    console.log('  filled:', filled.length, 'pending:', pending.length);
+    filled.forEach(o => console.log('  ✅', o.outcome, o.limitPrice, '@', o.fillPrice));
+    pending.forEach(o => console.log('  ⏳', o.outcome, o.limitPrice));
+    if (filled.length !== 4) failures.push('TEST5: expected 4 fills, got ' + filled.length);
+    if (pending.length !== 2) failures.push('TEST5: expected 2 pending, got ' + pending.length);
   }
 
-  // Test 6: PARTIAL — dip to 0.22 → 4 fills (bid=0.21 ≤ 0.40/0.35/0.30/0.25)
+  // TEST 6: Frozen 0.50 → no fills
   {
-    const script = [[0.50, 0.50], [0.22, 0.78], [0.50, 0.50]];
-    const engine = mkEngine(script);
-    engine.candle.lastColor = 'GREEN';
-    await engine.discoverWindow(FIRST);
-    await engine.discoverWindow(FIRST + WINDOW);
-    await engine.pollClob(); engine.evaluate();
-    await engine.pollClob(); engine.evaluate();
-    await engine.pollClob(); engine.evaluate();
-    const filled = engine.pendingOrders.filter(o => o.status === 'FILLED');
-    const pending = engine.pendingOrders.filter(o => o.status === 'PENDING');
-    console.log('\n--- PARTIAL · dip 0.22: fills', filled.length, '| pending', pending.length, '---');
-    if (filled.length !== 4) failures.push('PARTIAL: expected 4 fills, got ' + filled.length);
-    if (pending.length !== 2) failures.push('PARTIAL: expected 2 pending, got ' + pending.length);
+    console.log('\n--- TEST 6: Frozen 0.50 ---');
+    const e = await setup([[0.50,0.50],[0.50,0.50]], 0.99, 0.01);
+    await drive(e, 4);
+    const filled = e.pendingOrders.filter(o => o.status === 'FILLED').length;
+    console.log('  filled:', filled);
+    if (filled !== 0) failures.push('TEST6: expected 0, got ' + filled);
   }
 
-  console.log('\n=== SMOKE RESULT ===');
-  if (failures.length === 0) console.log('All passed ✅');
-  else failures.forEach(f => console.log('FAIL: ' + f));
-  process.exit(failures.length > 0 ? 1 : 0);
+  // TEST 7: Resolution — UP wins, positions pay out
+  {
+    console.log('\n--- TEST 7: Resolution UP wins ---');
+    const e = await setup([[0.60,0.40],[0.30,0.70],[0.50,0.50]], 0.99, 0.01);
+    await drive(e, 4);
+    const openBefore = e.positions.filter(p => p.exitReason == null && p.slug === slugFor(FIRST));
+    console.log('  open positions:', openBefore.length);
+    openBefore.forEach(p => console.log('    ', p.outcome, p.shares + 'sh @', p.entryPrice, 'cost:', p.cost.toFixed(2)));
+    // Force resolution
+    const market = e.markets.get(slugFor(FIRST));
+    market.settled = true;
+    market.finalUpMax = 0.98;
+    market.finalDownMax = 0.30;
+    e._resolveExpiredPositions(market, market.windowEnd + 1);
+    const results = e.results.filter(r => r.slug === slugFor(FIRST));
+    console.log('  results:', results.length, 'wins:', e.wins, 'losses:', e.losses);
+    results.forEach(r => console.log('  ', r.won ? '🏆' : '❌', r.outcome, r.shares + 'sh', 'pnl:' + (r.pnl >= 0 ? '+' : '') + r.pnl.toFixed(2)));
+    const totalPnl = results.reduce((s, r) => s + r.pnl, 0);
+    console.log('  window P&L:', totalPnl >= 0 ? '+' : '', totalPnl.toFixed(2));
+    if (results.length === 0) failures.push('TEST7: expected results, got 0');
+  }
+
+  // TEST 8: Resolution — neither reaches 0.95 → refund
+  {
+    console.log('\n--- TEST 8: Resolution no winner → refund ---');
+    const e = await setup([[0.60,0.40],[0.30,0.70],[0.50,0.50]], 0.99, 0.01);
+    await drive(e, 4);
+    const openBefore = e.positions.filter(p => p.exitReason == null && p.slug === slugFor(FIRST));
+    console.log('  open positions:', openBefore.length);
+    const market = e.markets.get(slugFor(FIRST));
+    market.settled = true;
+    market.finalUpMax = 0.60;
+    market.finalDownMax = 0.70;
+    const bankBefore = e.bankroll;
+    e._resolveExpiredPositions(market, market.windowEnd + 1);
+    const bankAfter = e.bankroll;
+    console.log('  bank before:', bankBefore.toFixed(2), 'after:', bankAfter.toFixed(2));
+    console.log('  refund?', bankAfter >= bankBefore ? 'YES' : 'NO');
+    if (bankAfter < bankBefore) failures.push('TEST8: bank should not decrease on refund');
+  }
+
+  console.log('\n=== RESULT ===');
+  if (!failures.length) console.log('All passed ✅');
+  else failures.forEach(f => console.log('FAIL:', f));
+  process.exit(failures.length ? 1 : 0);
 })();

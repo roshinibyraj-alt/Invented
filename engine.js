@@ -9,11 +9,8 @@ const CLOB_FRESH_MS  = Math.max(CLOB_POLL_MS, Number(process.env.CLOB_FRESH_MS |
 const CLOB_TIMEOUT_MS= Math.max(400, Number(process.env.CLOB_TIMEOUT_MS || 1500));
 const START_BANKROLL  = Number(process.env.START_BANKROLL || 2000);
 
-// Price ladder — 6 limit buy order levels, 100 shares each
 const ORDER_SHARES = 100;
 const LADDER_PRICES = [0.40, 0.35, 0.30, 0.25, 0.20, 0.15];
-
-// Resolution threshold: one side must reach this to declare a winner
 const RESOLUTION_THRESHOLD = 0.95;
 
 // ── Helpers ───────────────────────────────────────────────
@@ -22,97 +19,27 @@ function round5(v) { return Math.round(v * 100000) / 100000; }
 function windowStartFor(ms) { return Math.floor(ms / 1000 / WINDOW_SECONDS) * WINDOW_SECONDS; }
 function slugFor(start) { return `btc-updown-5m-${start}`; }
 
-// ── Binance 5m Candle Signal ──────────────────────────────
-class CandleSignalManager {
-  constructor(log) {
-    this.log = log;
-    this.lastClosedCandle = null;
-    this.currentCandle = null;
-    this.ws = null;
-    this.connected = false;
-    this.lastColor = null;
-  }
-
-  connect() {
-    try {
-      if (typeof WebSocket === 'undefined') {
-        this.log('⚠️ WebSocket unavailable in this Node version — no candle signal');
-        return;
-      }
-      this.ws = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@kline_5m');
-      this.ws.onopen = () => {
-        this.connected = true;
-        this.log('✅ Binance WS connected (btcusdt 5m kline)');
-      };
-      this.ws.onmessage = (e) => this._onMessage(e);
-      this.ws.onclose = () => {
-        this.connected = false;
-        this.log('🔌 Binance WS closed — reconnecting in 5s');
-        setTimeout(() => this.connect(), 5000);
-      };
-      this.ws.onerror = () => { this.connected = false; };
-    } catch (err) {
-      this.log(`⚠️ Binance WS failed: ${err.message}`);
-    }
-  }
-
-  _onMessage(event) {
-    try {
-      const msg = JSON.parse(event.data);
-      const k = msg.k;
-      if (!k) return;
-      const o = parseFloat(k.o), c = parseFloat(k.c);
-      this.currentCandle = { open: o, close: c };
-      if (k.x) {
-        const color = c > o ? 'GREEN' : (c < o ? 'RED' : 'NEUTRAL');
-        const closeTime = k.T;
-        const wStart = Math.floor(closeTime / 1000 / WINDOW_SECONDS) * WINDOW_SECONDS;
-        this.lastClosedCandle = { open: o, close: c, color, windowStart: wStart };
-        this.lastColor = color;
-        this.log(`🕯️ Candle closed ${color} (O:${o.toFixed(2)} C:${c.toFixed(2)}) — signals for window ${wStart + WINDOW_SECONDS}`);
-      }
-    } catch (_) {}
-  }
-
-  getColor() {
-    return this.lastColor || 'NEUTRAL';
-  }
-
-  buildState() {
-    const cc = this.currentCandle || this.lastClosedCandle;
-    return {
-      connected: this.connected,
-      lastColor: this.lastColor,
-      candleOpen: cc?.open ?? null,
-      candleClose: cc?.close ?? null,
-    };
-  }
-}
-
 // ── Engine ────────────────────────────────────────────────
 class CheapHunterEngine {
   constructor(options = {}) {
     this.fetchImpl = options.fetchImpl || fetch;
     this.onTick = options.onTick || (() => {});
     this.onLog = options.onLog || (() => {});
-    this.name = options.name || 'CandleBot';
+    this.name = options.name || 'PrevWinner';
     this.startedAt = Date.now();
     this.bankroll = options.bankroll ?? START_BANKROLL;
     this.initialBankroll = this.bankroll;
     this.realizedPnl = 0;
-        this.wins = 0;
+    this.wins = 0;
     this.losses = 0;
     this.peakEquity = this.bankroll;
     this.maxDrawdown = 0;
     this.markets = new Map();
     this.tokens = new Map();
     this.discoveryJobs = new Map();
-    this.currentStart = windowStartFor(Date.now());
     this.windowStartFor = null;
-    this._ordersPlacedForWindow = null;
-    this._windowColor = null;
-    this.positions = [];           // filled positions (holding to resolution)
-    this.pendingOrders = [];       // limit orders waiting for ask to reach limit
+    this.positions = [];
+    this.pendingOrders = [];
     this.finalUpMax = null;
     this.finalDownMax = null;
     this.results = [];
@@ -128,7 +55,12 @@ class CheapHunterEngine {
     this.pollCount = 0;
     this.tickCount = 0;
     this.timers = [];
-    this.candle = new CandleSignalManager((m) => this.log(m));
+
+    // Previous window winner tracking
+    this._prevWindowWinner = null;   // 'UP' | 'DOWN' | null (skip)
+    this._prevWindowSlug = null;
+    this._ordersPlacedForWindow = null;
+    this._windowSide = null;         // frozen side for current window
   }
 
   log(message) {
@@ -150,7 +82,7 @@ class CheapHunterEngine {
     try {
       const response = await this.fetchImpl(url, {
         ...options, signal: controller.signal,
-        headers: { 'Content-Type': 'application/json', 'User-Agent': 'candlebot/1.0', ...(options.headers || {}) },
+        headers: { 'Content-Type': 'application/json', 'User-Agent': 'prevwinner/1.0', ...(options.headers || {}) },
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       return await response.json();
@@ -218,18 +150,15 @@ class CheapHunterEngine {
     token.mid = token.bid != null && token.ask != null ? round5((token.bid + token.ask) / 2) : (token.ask ?? token.bid);
     token.updatedAt = Date.now();
 
-    // Capture final-2s max prices for resolution
+    // Track max prices during window for resolution
     if (token.slug) {
       const m = this.markets.get(token.slug);
       if (m && !m.settled) {
-        const nowS = Date.now() / 1000;
-        if (nowS >= m.windowEnd - 2) {
-          const probe = token.ask ?? token.bid ?? token.mid ?? 0;
-          if (token.outcome === 'UP') {
-            if (m.finalUpMax == null || probe > m.finalUpMax) m.finalUpMax = probe;
-          } else {
-            if (m.finalDownMax == null || probe > m.finalDownMax) m.finalDownMax = probe;
-          }
+        const probe = token.ask ?? token.bid ?? token.mid ?? 0;
+        if (token.outcome === 'UP') {
+          if (m.finalUpMax == null || probe > m.finalUpMax) m.finalUpMax = probe;
+        } else {
+          if (m.finalDownMax == null || probe > m.finalDownMax) m.finalDownMax = probe;
         }
       }
     }
@@ -260,21 +189,6 @@ class CheapHunterEngine {
       this.pollCount += 1;
       this.tickCount += 1;
 
-      // Validate token mapping on first poll — swap if mid prices are inverted
-      if (this.pollCount === 1) {
-        for (const m of markets) {
-          if (m.up.mid != null && m.down.mid != null && m.up.mid < m.down.mid) {
-            this.log(`⚠️ Token swap detected: UP mid $${m.up.mid.toFixed(3)} < DOWN mid $${m.down.mid.toFixed(3)} — swapping`);
-            const tmp = { ...m.up };
-            Object.assign(m.up, m.down, { outcome: 'UP' });
-            Object.assign(m.down, tmp, { outcome: 'DOWN' });
-            // Update tokens map too
-            this.tokens.set(m.up.tokenId, m.up);
-            this.tokens.set(m.down.tokenId, m.down);
-          }
-        }
-      }
-
       // Immediately check fills after fresh book data
       try {
         const cs2 = windowStartFor(Date.now());
@@ -297,29 +211,58 @@ class CheapHunterEngine {
     return Boolean(this.lastSuccessfulPollAt && now - this.lastSuccessfulPollAt <= CLOB_FRESH_MS);
   }
 
-  // ── Window Open: Place 6 PENDING limit orders ──────────
+  // ── Detect previous window winner from CLOB prices ──────
+  _detectPrevWinner(market) {
+    const prevSlug = slugFor(market.windowStart - WINDOW_SECONDS);
+    const prev = this.markets.get(prevSlug);
+    if (!prev || !prev.settled) {
+      this._prevWindowWinner = null;
+      this._prevWindowSlug = null;
+      return;
+    }
+
+    const upMax = prev.finalUpMax ?? 0;
+    const downMax = prev.finalDownMax ?? 0;
+
+    if (upMax >= RESOLUTION_THRESHOLD) {
+      this._prevWindowWinner = 'UP';
+    } else if (downMax >= RESOLUTION_THRESHOLD) {
+      this._prevWindowWinner = 'DOWN';
+    } else {
+      this._prevWindowWinner = null; // skip
+    }
+    this._prevWindowSlug = prev.slug;
+  }
+
+  // ── Window Open: freeze side + place ladder after 2s ────
   _detectWindow(market) {
-    // Freeze candle color at window open — won't change even if Binance candle flips mid-window
     this.windowStartFor = market.windowStart;
     this._ordersPlacedForWindow = null;
-    this._windowColor = this.candle.getColor();
     this.finalUpMax = null;
     this.finalDownMax = null;
-    this.log(`🔍 Window ${market.slug.slice(-10)} opened — candle ${this._windowColor} — orders in 2s`);
+
+    // Determine side from previous window winner
+    this._detectPrevWinner(market);
+    const side = this._prevWindowWinner;
+
+    if (!side) {
+      this.log(`⏭️ No prev winner (UP max=${(this.markets.get(slugFor(market.windowStart - WINDOW_SECONDS))?.finalUpMax ?? 0).toFixed(3)} DOWN max=${(this.markets.get(slugFor(market.windowStart - WINDOW_SECONDS))?.finalDownMax ?? 0).toFixed(3)}) — skipping ${market.slug.slice(-10)}`);
+    } else {
+      this._windowSide = side;
+      this.log(`🔍 Window ${market.slug.slice(-10)} — prev winner ${side} — orders in 2s`);
+    }
+    this.onTick(this.buildState());
   }
 
   _placeLadder(market) {
-    const color = this._windowColor;
-    const side = color === 'GREEN' ? 'UP' : (color === 'RED' ? 'DOWN' : null);
-
+    const side = this._windowSide;
     if (!side) {
-      this.log(`⏭️ No candle signal (${color}) — skipping window ${market.slug.slice(-10)}`);
       this.onTick(this.buildState());
       return;
     }
 
     this.pendingOrders = [];
-    this.log(`🚀 WINDOW ${market.slug.slice(-10)} — signal ${color} → ${side} × ${LADDER_PRICES.length} limit orders pending`);
+    this.log(`🚀 WINDOW ${market.slug.slice(-10)} — BUY ${side} × ${LADDER_PRICES.length} limit orders`);
 
     for (const price of LADDER_PRICES) {
       const cost = round2(ORDER_SHARES * price);
@@ -342,20 +285,14 @@ class CheapHunterEngine {
   // ── Check pending orders against CLOB book each tick ──
   _checkFills(market) {
     if (!this.pendingOrders.length) return;
-    const side = this.pendingOrders[0]?.outcome;
-    const token = side === 'UP' ? market.up : market.down;
+    const token = this.pendingOrders[0]?.outcome === 'UP' ? market.up : market.down;
     if (!token || token.bid == null) return;
 
     const bid = token.bid;
-    // Debug: log what we're checking every few seconds
-    if (!this._lastFillDebugAt || Date.now() - this._lastFillDebugAt > 5000) {
-      this._lastFillDebugAt = Date.now();
-      this.log(`🔍 FILL CHECK: orders=${side} | token.outcome=${token.outcome} | bid=$${bid.toFixed(3)} | UP.bid=$${(market.up?.bid ?? null)?.toFixed(3)} DOWN.bid=$${(market.down?.bid ?? null)?.toFixed(3)} | limits=${this.pendingOrders.filter(o=>o.status==='PENDING').map(o=>o.limitPrice).join('/')}`);
-    }
     for (const order of this.pendingOrders) {
       if (order.status !== 'PENDING') continue;
       if (order.slug !== market.slug) continue;
-      // Limit buy fills when ask ≤ limit price (fill at the better of ask or limit)
+      // Limit buy fills when bid ≤ limit price
       if (bid > order.limitPrice) continue;
 
       const fillPrice = order.limitPrice;
@@ -387,7 +324,7 @@ class CheapHunterEngine {
         reason: `FILL bid $${bid.toFixed(2)} ≤ limit $${order.limitPrice.toFixed(2)} → $${fillPrice.toFixed(2)}`,
         fee: 0,
       });
-      this.log(`✅ FILL ${order.outcome} ${order.shares}sh @ $${fillPrice.toFixed(2)} (bid $${bid.toFixed(2)} ≤ limit $${order.limitPrice.toFixed(2)}) · cost $${fillCost.toFixed(2)}`);
+      this.log(`✅ FILL ${order.outcome} ${order.shares}sh @ $${fillPrice.toFixed(2)} (bid $${bid.toFixed(2)} ≤ limit) · cost $${fillCost.toFixed(2)}`);
     }
   }
 
@@ -396,28 +333,36 @@ class CheapHunterEngine {
     for (const order of this.pendingOrders) {
       if (order.status === 'PENDING' && order.slug === market.slug) {
         order.status = 'CANCELLED';
-        this.log(`❌ CANCEL LIMIT ${order.outcome} ${order.shares}sh @ $${order.limitPrice.toFixed(2)} — window ended, ask was $${(market.up?.ask ?? market.down?.ask ?? 0).toFixed(2)}`);
+        this.log(`❌ CANCEL ${order.outcome} ${order.shares}sh @ $${order.limitPrice.toFixed(2)} — window ended`);
       }
     }
   }
 
-  // ── Resolution: ≥0.95 final-2s max, otherwise refund ───
+  // ── Resolution: ≥0.95 final max, otherwise refund ───────
   _resolveExpiredPositions(market, nowS) {
     if (!market) return;
-    const open = this.positions.filter(p => p.exitReason == null && p.slug === market.slug);
-    if (!open.length) return;
     if (nowS < market.windowEnd) return;
 
+    // Always settle the market once past its window end
     market.settled = true;
     const fUp = market.finalUpMax ?? 0;
     const fDown = market.finalDownMax ?? 0;
 
     let winner = null;
     if (fUp >= RESOLUTION_THRESHOLD) winner = 'UP';
-    else if (fDown >= RESOLUTION_THRESHOLD) winner = 'DOWN';
+    if (fDown >= RESOLUTION_THRESHOLD) winner = 'DOWN';
+
+    const open = this.positions.filter(p => p.exitReason == null && p.slug === market.slug);
+    if (!open.length) {
+      // No positions to resolve, but market is now settled
+      this.log(`🏁 ${market.slug.slice(-10)} settled — ${winner ? winner + ' won' : 'NO WINNER'} (UP max=${fUp.toFixed(3)} DOWN max=${fDown.toFixed(3)}) — no positions`);
+      this.recordEquity();
+      this.onTick(this.buildState());
+      return;
+    }
 
     if (!winner) {
-      this.log(`⏳ WINDOW ${market.slug.slice(-10)} — no winner (UP max=${fUp.toFixed(3)}, DOWN max=${fDown.toFixed(3)}) — refunding cost`);
+      this.log(`⏳ ${market.slug.slice(-10)} — NO WINNER (UP max=${fUp.toFixed(3)} DOWN max=${fDown.toFixed(3)}) — refunding`);
       for (const pos of open) {
         const refund = pos.cost;
         this.bankroll = round2(this.bankroll + refund);
@@ -441,7 +386,6 @@ class CheapHunterEngine {
       return;
     }
 
-    // Real winner declared
     let winPayout = 0, lossCost = 0;
     for (const pos of open) {
       const won = pos.outcome === winner;
@@ -463,10 +407,9 @@ class CheapHunterEngine {
         reason: `${won ? 'WIN' : 'LOSS'} ${pos.outcome} ${pos.shares}sh @ $${pos.entryPrice.toFixed(2)} → P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)} (${winner} won, UP max=${fUp.toFixed(3)} DOWN max=${fDown.toFixed(3)})`,
       });
       if (won) winPayout += pos.shares; else lossCost += pos.cost;
-      const tag = won ? '✅ WIN' : '❌ LOSS';
-      this.log(`${tag} ${pos.outcome} ${pos.shares}sh @ $${pos.entryPrice.toFixed(2)} → P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`);
+      this.log(`${won ? '✅ WIN' : '❌ LOSS'} ${pos.outcome} ${pos.shares}sh @ $${pos.entryPrice.toFixed(2)} → P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`);
     }
-    this.log(`🏁 WINDOW ${market.slug.slice(-10)} RESOLVED → ${winner} won · payout $${winPayout.toFixed(2)} · loss $${lossCost.toFixed(2)} (UP max=${fUp.toFixed(3)} DOWN max=${fDown.toFixed(3)})`);
+    this.log(`🏁 ${market.slug.slice(-10)} RESOLVED → ${winner} won · payout $${winPayout.toFixed(2)} · loss $${lossCost.toFixed(2)} (UP max=${fUp.toFixed(3)} DOWN max=${fDown.toFixed(3)})`);
     this.positions = this.positions.filter(p => p.exitReason == null);
     this.recordEquity();
     this.onTick(this.buildState());
@@ -480,9 +423,7 @@ class CheapHunterEngine {
     const market = this.markets.get(slugFor(cs));
     const elapsed = Math.floor(nowS - cs);
 
-    // Resolve expired windows — resolve the PREVIOUS window (just ended) and the current one.
-    // When a new window begins, the old window's elapsed is exactly WINDOW_SECONDS, so
-    // resolve it here before placing new orders.
+    // Resolve previous window
     const prevStart = Math.floor((nowS - WINDOW_SECONDS) / WINDOW_SECONDS) * WINDOW_SECONDS;
     const prevMarket = this.markets.get(slugFor(prevStart));
     if (prevMarket && !prevMarket.settled) {
@@ -493,6 +434,7 @@ class CheapHunterEngine {
       }
     }
 
+    // Resolve current window if past end
     if (market && !market.settled) {
       if (elapsed >= WINDOW_SECONDS) {
         this._cancelUnfilled(market);
@@ -503,7 +445,7 @@ class CheapHunterEngine {
     if (!market) { this.onTick(this.buildState()); return; }
     if (this.entryWindow != null && market.windowStart < this.entryWindow) { this.onTick(this.buildState()); return; }
 
-    // New window — detect signal (freeze candle color)
+    // New window — detect side from previous window winner
     if (this.windowStartFor !== market.windowStart) this._detectWindow(market);
 
     // Place ladder 2 seconds after window opens
@@ -519,17 +461,27 @@ class CheapHunterEngine {
     this.onTick(this.buildState());
   }
 
-  // ── State ──────────────────────────────────────────────
-  markValue() {
-    let mark = this.bankroll;
-    for (const pos of this.positions.filter(p => p.exitReason == null)) {
-      const token = pos.outcome === 'UP' ? pos.market?.up : pos.market?.down;
-      const price = token?.mid ?? pos.entryPrice;
-      mark = round2(mark + pos.shares * price);
-    }
-    return mark;
+  // ── Equity tracking ─────────────────────────────────────
+  recordEquity() {
+    const now = Date.now();
+    const last = this.equityCurve[this.equityCurve.length - 1];
+    if (last && now - last.t < 5000) return; // record every 5s max
+    const equity = this.markValue();
+    this.equityCurve.push({ t: now, equity: round2(equity) });
+    if (this.equityCurve.length > 2000) this.equityCurve = this.equityCurve.slice(-1500);
   }
 
+  markValue() {
+    let m = this.bankroll;
+    for (const p of this.positions.filter(p => p.exitReason == null)) {
+      const token = p.outcome === 'UP' ? p.market?.up : p.market?.down;
+      const price = token?.mid ?? p.entryPrice;
+      m += round2(p.shares * price);
+    }
+    return round2(m);
+  }
+
+  // ── State ──────────────────────────────────────────────
   publicMarket(market) {
     return {
       slug: market.slug, title: market.title,
@@ -554,9 +506,9 @@ class CheapHunterEngine {
     }, 0);
     return {
       name: this.name,
-      strategy: `Candle Color + Ladder · 6 limit buys @ 0.40-0.15 · ${ORDER_SHARES}sh each · CLOB-verified fills · no SL · hold to resolution`,
+      strategy: `Prev Winner + Ladder · ${LADDER_PRICES.length} limit buys @ ${LADDER_PRICES.join('/')} · ${ORDER_SHARES}sh each · CLOB-verified fills · no SL · hold to resolution`,
       serverTime: now,
-      connected: this.pollCount > 0,
+      connected: this.pollCount > 0 && this.isClobFresh(now),
       lastError: this.lastError,
       pollCount: this.pollCount,
       lastSuccessfulPollAt: this.lastSuccessfulPollAt,
@@ -569,73 +521,42 @@ class CheapHunterEngine {
       winRate: this.wins + this.losses ? round2(this.wins / (this.wins + this.losses) * 100) : null,
       entryWindow: this.entryWindow,
       waitingForWindow: this.entryWindow != null && cs < this.entryWindow,
+      prevWindowWinner: this._prevWindowWinner,
       currentWindow: market ? this.publicMarket(market) : null,
-      candle: this.candle.buildState(),
       orderLadder: {
-        side: this.candle.getColor() === 'GREEN' ? 'UP' : (this.candle.getColor() === 'RED' ? 'DOWN' : '—'),
+        side: this._windowSide || this._prevWindowWinner || '—',
         prices: LADDER_PRICES,
         sharesPerOrder: ORDER_SHARES,
       },
       pendingOrders: this.pendingOrders.map(o => ({
-        outcome: o.outcome, limitPrice: o.limitPrice, shares: o.shares, status: o.status,
-        fillPrice: o.fillPrice, filledAt: o.filledAt,
+        outcome: o.outcome, limitPrice: o.limitPrice, shares: o.shares,
+        status: o.status, fillPrice: o.fillPrice, filledAt: o.filledAt,
       })),
       positions: open.map(p => {
         const token = p.outcome === 'UP' ? p.market?.up : p.market?.down;
-        const mark = token?.mid ?? p.entryPrice;
-        return {
-          outcome: p.outcome, shares: p.shares, entryPrice: p.entryPrice,
-          cost: p.cost, markPrice: mark,
-          unrealized: round2(p.shares * mark - p.cost),
-          remaining: p.windowEnd ? Math.max(0, p.windowEnd - Math.floor(now / 1000)) : null,
-        };
+        const markPrice = token?.mid ?? p.entryPrice;
+        return { outcome: p.outcome, shares: p.shares, entryPrice: p.entryPrice, cost: p.cost, markPrice, unrealized: round2(p.shares * markPrice - p.cost) };
       }),
-      tradeCount: this.trades.length,
-      trades: this.trades.slice(-60).reverse(),
-      results: this.results.slice(0, 30),
-      equityCurve: this._equityCurveForUi(),
-      logs: this.logs.slice(-160),
-      peakEquity: this.peakEquity,
-      drawdown: round2(this.peakEquity - this.markValue()),
-      maxDrawdown: this.maxDrawdown,
-      uptime: Math.floor((now - this.startedAt) / 1000),
-      config: {
-        ladderPrices: LADDER_PRICES, orderShares: ORDER_SHARES,
-        bankroll: this.initialBankroll,
-        resolutionThreshold: RESOLUTION_THRESHOLD,
-      },
+      results: this.results.slice(-50),
+      trades: this.trades.slice(-50),
+      logs: this.logs,
+      equityCurve: this.equityCurve,
+      config: { ladderPrices: LADDER_PRICES, orderShares: ORDER_SHARES, bankroll: this.bankroll },
     };
   }
 
-  recordEquity() {
-    const mark = this.markValue();
-    if (mark > this.peakEquity) this.peakEquity = mark;
-    const dd = this.peakEquity - mark;
-    if (dd > this.maxDrawdown) this.maxDrawdown = round2(dd);
-    const last = this.equityCurve[this.equityCurve.length - 1];
-    if (!last || Date.now() - last.t > 1000 || Math.abs(last.equity - mark) > 0.001) {
-      this.equityCurve.push({ t: Date.now(), equity: mark });
-    }
-  }
-
-  _equityCurveForUi() {
-    const FULL = this.equityCurve;
-    if (FULL.length <= 3000) return FULL;
-    const step = Math.ceil(FULL.length / 3000);
-    const out = [];
-    for (let i = 0; i < FULL.length; i += step) out.push(FULL[i]);
-    const last = FULL[FULL.length - 1];
-    if (out[out.length - 1] !== last) out.push(last);
-    return out;
-  }
-
-  // ── Init & Cleanup ─────────────────────────────────────
+  // ── Init ────────────────────────────────────────────────
   async init() {
-    const start = windowStartFor(Date.now());
-    this.entryWindow = start + WINDOW_SECONDS;
-    this.log(`⏳ Started mid-window ${start} — trading begins at next window ${this.entryWindow}`);
-    await Promise.all([this.discoverWindow(start), this.discoverWindow(start + WINDOW_SECONDS)]);
-    this.candle.connect();
+    const now = Date.now();
+    const curStart = windowStartFor(now);
+    this.entryWindow = curStart + WINDOW_SECONDS;
+    this.log(`⏳ Started mid-window ${curStart} — first trade at next window ${this.entryWindow}`);
+
+    await Promise.all([
+      this.discoverWindow(curStart),
+      this.discoverWindow(curStart + WINDOW_SECONDS),
+    ]);
+
     this.timers = [
       setInterval(() => { this.pollClob().catch(() => {}); }, CLOB_POLL_MS),
       setInterval(() => {
@@ -645,14 +566,13 @@ class CheapHunterEngine {
       setInterval(() => this.evaluate(), 200),
       setInterval(() => this.recordEquity(), 1000),
     ];
-    this.log(`🚀 CandleBot started | Candle-color + 6-limit ladder · ${ORDER_SHARES}sh · CLOB-verified fills · no SL · hold to resolution`);
+    this.log(`🚀 ${this.name} started · ${LADDER_PRICES.length} limit buys @ ${LADDER_PRICES.join('/')} · ${ORDER_SHARES}sh · CLOB-only · no Binance · prev-window-winner strategy`);
   }
 
   close() {
     for (const t of this.timers) clearInterval(t);
     this.timers = [];
-    if (this.candle.ws) try { this.candle.ws.close(); } catch (_) {}
   }
 }
 
-module.exports = { CheapHunterEngine, config: { LADDER_PRICES, ORDER_SHARES, START_BANKROLL, CLOB_POLL_MS, RESOLUTION_THRESHOLD } };
+module.exports = { CheapHunterEngine, config: { LADDER_PRICES, ORDER_SHARES, START_BANKROLL } };

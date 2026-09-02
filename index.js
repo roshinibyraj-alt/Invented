@@ -10,8 +10,8 @@ const app = express();
 const port = Number(process.env.PORT || 3000);
 
 const engine = new CheapHunterEngine({
-  name: 'CandleBot',
-  onLog: line => console.log(`[CB] ${line}`),
+  name: 'PrevWinner',
+  onLog: line => console.log(`[PW] ${line}`),
 });
 
 app.disable('x-powered-by');
@@ -21,7 +21,7 @@ app.get('/api/status', (_, res) => res.json(engine.buildState()));
 const dashboard = `<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>CandleBot — BTC 5m</title>
+<title>PrevWinner Bot — BTC 5m</title>
 <style>
 *{box-sizing:border-box}
 :root{--bg:#000;--panel:#070707;--line:#222;--muted:#9d9d9d;--up:#00ff85;--down:#ff4a68;--amber:#ffc400;--blue:#38d6ff}
@@ -57,103 +57,169 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
 .buy{color:var(--up)}.sell{color:var(--down)}.dim{color:var(--muted);font-size:10px;font-weight:700}
 .logs{height:200px;overflow:auto;background:#010407;border-radius:8px;padding:8px;font-family:"Courier New",monospace;font-size:10px;line-height:1.45;color:#e4e4e4;margin-top:6px;white-space:pre-wrap}
 .log-win{color:var(--up)}.log-loss{color:var(--down)}.log-tp{color:var(--amber)}.log-info{color:var(--blue)}
-.candle-bar{display:grid;grid-template-columns:auto 1fr 1fr 1fr;gap:8px;align-items:center;margin-bottom:8px}
-.candle-signal{border:1px solid var(--line);padding:10px;border-radius:8px;background:#000;text-align:center}
-.candle-signal .color{font-size:28px;margin-top:2px}
-.candle-signal .color.green{color:var(--up)}.candle-signal .color.red{color:var(--down)}.candle-signal .color.neutral{color:var(--muted)}
+.prev-winner-bar{display:grid;grid-template-columns:auto 1fr;gap:8px;align-items:center;margin-bottom:8px}
+.prev-winner-box{border:1px solid var(--line);padding:10px;border-radius:8px;background:#000;text-align:center}
+.prev-winner-box .side-label{font-size:28px;margin-top:2px}
+.prev-winner-box .side-label.up{color:var(--up)}.prev-winner-box .side-label.down{color:var(--down)}.prev-winner-box .side-label.skip{color:var(--muted)}
 .ladder-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:4px;margin-top:6px}
 .ladder-cell{border:1px solid var(--line);padding:6px;border-radius:6px;background:#000;text-align:center;font-size:11px}
 .ladder-cell.filled{border-color:var(--up);background:#084b31}.ladder-cell.pending{border-color:var(--line)}
 .ladder-price{font-size:13px;margin-top:2px}
 .ladder-shares{font-size:9px;color:var(--muted);margin-top:1px}
-@media(max-width:860px){.metrics{grid-template-columns:repeat(2,1fr)}.two-col{grid-template-columns:1fr}.candle-bar{grid-template-columns:1fr}.ladder-grid{grid-template-columns:repeat(3,1fr)}}
-@media(max-width:480px){body{padding:6px;font-size:13px}h1{font-size:16px}.topbar{grid-template-columns:1fr}.side-price{font-size:28px}.clock{font-size:30px}.ladder-grid{grid-template-columns:repeat(2,1fr)}}
-</style></head><body><div class="wrap">
-<header class="topbar">
-<div class="brand"><div class="btc">₿</div><div><h1>CandleBot</h1><div class="sub" id="strategy">LOADING…</div></div></div>
-<div class="status"><span id="statusPill" class="pill bad">OFFLINE</span><span id="uptimePill" class="pill blue">00:00:00</span></div>
-</header>
-<div class="metrics" id="kpiRow"></div>
-<div class="candle-bar" id="candleBar"></div>
-<div class="two-col">
-<div>
-<div class="box"><div class="section-head"><span>📊 Market — <span id="windowTitle">WAITING…</span></span></div><div id="marketBody"><div class="empty">Waiting for market…</div></div></div>
-<div class="box" style="margin-top:8px"><div class="section-head"><span>📈 Positions</span><span id="posCount" class="dim">0</span></div><div class="list" id="posBody"></div></div>
-<div class="box" style="margin-top:8px"><div class="section-head"><span>✅ Resolved</span><span id="resCount" class="dim">0</span></div><div class="list" id="resBody"></div></div>
+@media(max-width:860px){.metrics{grid-template-columns:repeat(2,1fr)}.two-col{grid-template-columns:1fr}.ladder-grid{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:480px){body{padding:6px;font-size:13px}h1{font-size:16px}.side-price{font-size:24px}.metrics{grid-template-columns:repeat(2,1fr)}}
+</style>
+</head><body>
+<div class="wrap">
+  <div class="topbar">
+    <div class="brand"><div class="btc">₿</div><div><h1 id="botName">PrevWinner Bot</h1><div class="sub" id="strategy">BTC 5m Binary · Prev Winner Ladder</div></div></div>
+    <div class="status">
+      <span class="pill" id="statusPill">● CONNECTING</span>
+      <span class="pill" id="pollPill">—</span>
+      <span class="pill blue" id="timePill">—</span>
+    </div>
+  </div>
+
+  <div class="metrics">
+    <div class="box"><div class="label">Capital</div><div class="value" id="kpiBankroll">—</div></div>
+    <div class="box"><div class="label">Total P&L</div><div class="value" id="kpiPnl">—</div></div>
+    <div class="box"><div class="label">Wins</div><div class="value" id="kpiWins">—</div><div class="small" id="kpiWinRate"></div></div>
+    <div class="box"><div class="label">Losses</div><div class="value" id="kpiLosses">—</div><div class="small" id="kpiMaxDd"></div></div>
+  </div>
+
+  <div class="prev-winner-bar" id="prevWinnerBar">
+    <div class="prev-winner-box" style="min-width:140px">
+      <div class="label">Prev Window Winner</div>
+      <div class="side-label" id="prevWinnerSide">—</div>
+    </div>
+    <div class="panel" id="clockBox">
+      <div class="label">Current Window</div>
+      <div class="clock" id="clock">—<small> sec</small></div>
+    </div>
+  </div>
+
+  <div class="prices" id="priceBar">
+    <div class="side up">
+      <div class="side-name">▲ UP</div>
+      <div class="side-price" id="upPrice">—</div>
+      <div class="quote-row"><span>BID</span><span id="upBid">—</span></div>
+      <div class="quote-row"><span>ASK</span><span id="upAsk">—</span></div>
+      <div class="quote-row"><span>SPREAD</span><span id="upSpread">—</span></div>
+    </div>
+    <div class="side down">
+      <div class="side-name">▼ DOWN</div>
+      <div class="side-price" id="downPrice">—</div>
+      <div class="quote-row"><span>BID</span><span id="downBid">—</span></div>
+      <div class="quote-row"><span>ASK</span><span id="downAsk">—</span></div>
+      <div class="quote-row"><span>SPREAD</span><span id="downSpread">—</span></div>
+    </div>
+  </div>
+
+  <div class="two-col" style="margin-top:8px">
+    <div>
+      <div class="panel">
+        <div class="section-head"><span>Ladder — <span id="ladderSide">—</span></span><span id="ladderStatus">—</span></div>
+        <div class="ladder-grid" id="ladderGrid"></div>
+      </div>
+      <div class="panel" style="margin-top:8px">
+        <div class="section-head"><span id="posCount">0 OPEN</span></div>
+        <div class="list" id="posBody"><div class="empty">NO OPEN POSITIONS</div></div>
+      </div>
+      <div class="panel" style="margin-top:8px">
+        <div class="section-head"><span id="resCount">0 RESOLVED</span></div>
+        <div class="list" id="resBody"><div class="empty">NO RESOLVED POSITIONS YET</div></div>
+      </div>
+    </div>
+    <div>
+      <div class="panel">
+        <div class="section-head"><span>Equity Curve</span><span class="dim" id="equityPeakLabel">—</span></div>
+        <svg class="chart" id="equityChart" viewBox="0 0 700 120"></svg>
+      </div>
+      <div class="panel" style="margin-top:8px">
+        <div class="section-head"><span id="feedCount">0 TRADES</span></div>
+        <div class="list" id="feedBody"><div class="empty">NO TRADES YET</div></div>
+      </div>
+      <div class="panel" style="margin-top:8px">
+        <div class="section-head"><span id="logCount">0 LINES</span></div>
+        <div class="logs" id="logBody"></div>
+      </div>
+      <div class="panel" style="margin-top:8px">
+        <div class="section-head"><span>Config</span></div>
+        <div id="configBody" style="margin-top:6px"></div>
+      </div>
+    </div>
+  </div>
 </div>
-<div>
-<div class="box"><div class="section-head"><span>📜 Trade Feed</span><span id="feedCount" class="dim">0</span></div><div class="list" id="feedBody" style="max-height:180px"></div></div>
-<div class="box" style="margin-top:8px"><div class="section-head"><span>📝 Logs</span><span id="logCount" class="dim">0</span></div><div class="logs" id="logBody"></div></div>
-<div class="box" style="margin-top:8px"><div class="section-head"><span>⚙ Config</span></div><div id="configBody"></div></div>
-</div>
-</div>
-<div class="box" style="margin-top:8px"><div class="section-head"><span>📈 Equity Curve</span><span id="equityPeakLabel" class="dim"></span></div><svg class="chart" id="equityChart" viewBox="0 0 700 120" preserveAspectRatio="none"></svg></div>
 <script>
-const S = {};
-function $(id) { return document.getElementById(id); }
-function num(n) { return n != null ? Number(n).toLocaleString() : '—'; }
-function money(n) { if (n == null) return '—'; return (n >= 0 ? '+$' : '-$') + Math.abs(n).toFixed(2); }
-function prc(n) { return n != null ? '$' + Number(n).toFixed(2) : '—'; }
-function cash(n) { return '$' + Number(n || 0).toFixed(2); }
-function pct(n) { return n != null ? n + '%' : '—'; }
-function uptime(s) { const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60; return String(h).padStart(2,'0') + ':' + String(m).padStart(2,'0') + ':' + String(sec).padStart(2,'0'); }
-function tone(v) { return v >= 0 ? 'pos' : 'neg'; }
-function ESC(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+const $=id=>document.getElementById(id);
+const S={};
+function money(v){if(v==null)return'—';return(v>=0?'+':'')+ '$' + Math.abs(v).toFixed(2)}
+function prc(v){return v!=null?'$'+Number(v).toFixed(3):'—'}
+function num(v){return v!=null?Number(v).toLocaleString():'—'}
+function cash(v){return '$'+Number(v||0).toFixed(2)}
+function tone(v){return v>0?'value pos':v<0?'value neg':'value amb'}
+function ESC(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 function renderKpi(d) {
-  const html = [
-    '<div class="box"><div class="label">Capital</div><div class="value">' + cash(d.bankroll) + '</div><div class="small">Mark ' + cash(d.markValue) + '</div></div>',
-    '<div class="box"><div class="label">Realized P&L</div><div class="value ' + (d.realizedPnl >= 0 ? 'pos' : 'neg') + '">' + money(d.realizedPnl) + '</div><div class="small">Maker: no fees</div></div>',
-    '<div class="box"><div class="label">Unrealized</div><div class="value ' + (d.unrealizedPnl >= 0 ? 'pos' : 'neg') + '">' + money(d.unrealizedPnl) + '</div></div>',
-    '<div class="box"><div class="label">Total P&L</div><div class="value ' + (d.totalPnl >= 0 ? 'pos' : 'neg') + '">' + money(d.totalPnl) + '</div><div class="small">Drawdown ' + cash(d.drawdown || 0) + '</div></div>',
-  ].join('');
-  $('kpiRow').innerHTML = html;
-  $('uptimePill').textContent = uptime(d.uptime || 0);
+  $('kpiBankroll').textContent = cash(d.bankroll);
+  const pnl = d.totalPnl || 0;
+  const pe = $('kpiPnl'); pe.textContent = money(pnl); pe.className = 'value ' + (pnl >= 0 ? 'pos' : 'neg');
+  $('kpiWins').textContent = d.wins || 0;
+  $('kpiWinRate').textContent = d.winRate != null ? d.winRate + '% WR' : '';
+  $('kpiLosses').textContent = d.losses || 0;
+  $('kpiMaxDd').textContent = d.maxDrawdown ? 'DD ' + cash(d.maxDrawdown) : '';
+  // Status pills
   const sp = $('statusPill');
-  if (d.connected) { sp.textContent = '● LIVE'; sp.className = 'pill live'; } else { sp.textContent = '● OFFLINE'; sp.className = 'pill bad'; }
-}
-function renderCandleBar(d) {
-  if (!d) return;
-  const c = d.candle || {};
-  const lo = d.orderLadder || {};
-  let colorClass = 'neutral';
-  let colorText = '⏳ WAITING…';
-  if (c.lastColor === 'GREEN') { colorClass = 'green'; colorText = '🟢 GREEN (UP)'; }
-  else if (c.lastColor === 'RED') { colorClass = 'red'; colorText = '🔴 RED (DOWN)'; }
-  else if (c.lastColor === 'NEUTRAL') { colorText = '⚪ NEUTRAL'; }
-  const candleInfo = '<div class="candle-signal"><div class="label">BINANCE SIGNAL</div><div class="color ' + colorClass + '">' + colorText + '</div><div class="small" style="margin-top:4px">' + (c.connected ? '🟢 Connected' : '🔴 Disconnected') + '</div></div>';
-  const ws = $('windowTitle');
-  if (d.currentWindow) ws.textContent = d.currentWindow.slug.replace('btc-updown-5m-', 'Window ');
-  let ladderHtml = '';
-  if (lo.prices && lo.side && lo.side !== '—') {
-    const orders = d.pendingOrders || [];
-    const orderMap = {};
-    orders.forEach(o => { orderMap[o.limitPrice] = o; });
-    ladderHtml = '<div style="grid-column:1/5"><div class="label">ORDER LADDER — BUY ' + lo.side + ' × ' + (lo.sharesPerOrder || 100) + 'sh</div><div class="ladder-grid">' + lo.prices.map(p => {
-      const o = orderMap[p];
-      const status = o ? o.status : 'WAITING';
-      let cls = 'pending';
-      let label = '⏳ WAITING';
-      if (status === 'FILLED') { cls = 'filled'; label = '✅ FILLED @ $' + (o.fillPrice || 0).toFixed(2); }
-      else if (status === 'CANCELLED') { cls = 'pending'; label = '❌ CANCELLED'; }
-      else if (status === 'PENDING') { cls = 'pending'; label = '⏳ PENDING'; }
-      return '<div class="ladder-cell ' + cls + '"><div class="ladder-price">$' + p.toFixed(2) + '</div><div class="ladder-shares">' + label + '</div></div>';
-    }).join('') + '</div></div>';
-  } else {
-    ladderHtml = '<div style="grid-column:1/5"><div class="empty">No candle signal yet — ladder will appear after signal</div></div>';
+  if (d.connected) { sp.textContent = '● LIVE'; sp.className = 'pill live'; }
+  else if (d.lastError) { sp.textContent = '● ERROR'; sp.className = 'pill bad'; }
+  else { sp.textContent = '● OFFLINE'; sp.className = 'pill bad'; }
+  $('pollPill').textContent = 'polls:' + (d.pollCount || 0);
+  // Time
+  if (d.currentWindow) {
+    const rem = d.currentWindow.remaining;
+    $('clock').innerHTML = rem + '<small> sec</small>';
+    $('timePill').textContent = rem + 's left';
   }
-  $('candleBar').innerHTML = candleInfo + ladderHtml;
+  // Prev winner
+  const pw = d.prevWindowWinner;
+  const pws = $('prevWinnerSide');
+  if (pw === 'UP') { pws.textContent = '▲ UP'; pws.className = 'side-label up'; }
+  else if (pw === 'DOWN') { pws.textContent = '▼ DOWN'; pws.className = 'side-label down'; }
+  else { pws.textContent = 'SKIP'; pws.className = 'side-label skip'; }
 }
 function renderMarket(m) {
-  const b = $('marketBody');
-  if (!m) { b.innerHTML = '<div class="empty">Waiting for market…</div>'; return; }
-  b.innerHTML = '<div class="clock">' + m.remaining + 's<small> T+' + m.elapsed + 's</small></div><div class="prices"><div class="side up"><div class="side-name">▲ UP</div><div class="side-price">' + prc(m.up.mid) + '</div><div class="quote-row"><span>Bid</span><span>' + prc(m.up.bid) + '</span></div><div class="quote-row"><span>Ask</span><span>' + prc(m.up.ask) + '</span></div></div><div class="side down"><div class="side-name">▼ DOWN</div><div class="side-price">' + prc(m.down.mid) + '</div><div class="quote-row"><span>Bid</span><span>' + prc(m.down.bid) + '</span></div><div class="quote-row"><span>Ask</span><span>' + prc(m.down.ask) + '</span></div></div></div>';
+  if (!m) return;
+  $('upPrice').textContent = prc(m.up?.mid);
+  $('upBid').textContent = prc(m.up?.bid);
+  $('upAsk').textContent = prc(m.up?.ask);
+  $('upSpread').textContent = m.up?.spread != null ? m.up.spread.toFixed(3) : '—';
+  $('downPrice').textContent = prc(m.down?.mid);
+  $('downBid').textContent = prc(m.down?.bid);
+  $('downAsk').textContent = prc(m.down?.ask);
+  $('downSpread').textContent = m.down?.spread != null ? m.down.spread.toFixed(3) : '—';
+}
+function renderLadder(d) {
+  const ol = d.orderLadder;
+  const grid = $('ladderGrid');
+  const side = ol?.side || '—';
+  $('ladderSide').textContent = side;
+  const prices = ol?.prices || [];
+  const pp = d.pendingOrders || [];
+  const filled = pp.filter(o => o.status === 'FILLED');
+  const pending = pp.filter(o => o.status === 'PENDING');
+  $('ladderStatus').textContent = filled.length + '/' + prices.length + ' filled';
+  grid.innerHTML = prices.map(p => {
+    const fo = filled.find(f => f.limitPrice === p);
+    const po = pending.find(f => f.limitPrice === p);
+    if (fo) return '<div class="ladder-cell filled"><div class="ladder-price">$' + fo.limitPrice.toFixed(2) + '</div><div class="ladder-shares">' + fo.shares + 'sh FILL @ $' + fo.fillPrice.toFixed(2) + '</div></div>';
+    if (po) return '<div class="ladder-cell pending"><div class="ladder-price">$' + po.limitPrice.toFixed(2) + '</div><div class="ladder-shares">' + po.shares + 'sh PENDING</div></div>';
+    return '<div class="ladder-cell"><div class="ladder-price">$' + p.toFixed(2) + '</div><div class="ladder-shares">100sh</div></div>';
+  }).join('');
 }
 function renderPositions(a) {
-  const b = $('posBody'), pb = $('posBox') || b.parentElement;
-  if (!a || !a.length) { b.innerHTML = '<div class="empty">No open positions</div>'; return; }
-  $('posCount').textContent = a.length;
-  b.innerHTML = a.map(p => {
-    const cls = p.outcome === 'UP' ? 'buy' : 'sell';
+  const b = $('posBody'), ct = $('posCount');
+  ct.textContent = (a ? a.length : 0) + ' OPEN';
+  b.innerHTML = !a || !a.length ? '<div class="empty">NO OPEN POSITIONS</div>' : a.map(p => {
+    const cls = p.unrealized >= 0 ? 'buy' : 'sell';
     const mark = p.markPrice != null ? p.markPrice : p.entryPrice;
     return '<div class="trade-item"><div><span class="' + cls + '">' + (p.outcome === 'UP' ? '▲ UP' : '▼ DOWN') + '</span><div class="dim">' + num(p.shares) + 'sh @ $' + p.entryPrice.toFixed(2) + ' · MARK ' + prc(mark) + '</div></div><div class="' + tone(p.unrealized) + '">' + money(p.unrealized) + '</div></div>';
   }).join('');
@@ -174,7 +240,7 @@ function renderFeed(a) {
     const isBuy = tr.type === 'BUY';
     const cls = isBuy ? 'buy' : 'sell';
     const side = tr.outcome === 'UP' ? '▲ UP' : '▼ DOWN';
-    return '<div class="trade-item"><div><span class="' + cls + '">' + (isBuy ? 'BUY' : 'SELL') + ' ' + side + '</span><div class="dim">' + new Date(tr.timestamp).toLocaleTimeString() + ' · ' + num(tr.shares) + 'sh @ $' + tr.price.toFixed(2) + '</div></div><div class="' + cls + '">' + money(tr.pnl || 0) + '</div></div>';
+    return '<div class="trade-item"><div><span class="' + cls + '">' + (isBuy ? 'BUY' : (tr.type === 'REFUND' ? '↩' : 'SELL')) + ' ' + side + '</span><div class="dim">' + new Date(tr.timestamp).toLocaleTimeString() + ' · ' + num(tr.shares) + 'sh @ $' + tr.price.toFixed(2) + '</div></div><div class="' + cls + '">' + money(tr.pnl || 0) + '</div></div>';
   }).join('');
 }
 function renderLogs(a) {
@@ -185,7 +251,7 @@ function renderLogs(a) {
     if (l.includes('WIN')) cls = 'log-win';
     else if (l.includes('LOSS')) cls = 'log-loss';
     else if (l.includes('💰')) cls = 'log-tp';
-    else if (l.includes('🎯') || l.includes('🏁') || l.includes('BUY') || l.includes('🕯️')) cls = 'log-info';
+    else if (l.includes('🎯') || l.includes('🏁') || l.includes('BUY') || l.includes('🚀') || l.includes('✅')) cls = 'log-info';
     return '<div class="' + cls + '">' + ESC(l) + '</div>';
   }).join('');
   b.scrollTop = b.scrollHeight;
@@ -195,8 +261,7 @@ function renderConfig(c) {
   const b = $('configBody');
   b.innerHTML = '<div class="mini" style="display:inline-block;margin-right:6px"><div class="label">Ladder Prices</div><div class="value">' + (c.ladderPrices || []).join(', ') + '</div></div>' +
     '<div class="mini" style="display:inline-block;margin-right:6px"><div class="label">Shares/Order</div><div class="value">' + (c.orderShares || 100) + '</div></div>' +
-    '<div class="mini" style="display:inline-block;margin-right:6px"><div class="label">Capital</div><div class="value">' + cash(c.bankroll) + '</div></div>' +
-    '<div class="mini" style="display:inline-block"><div class="label">Taker Fee</div><div class="value">' + (c.takerFeeRate != null ? (c.takerFeeRate * 100).toFixed(2) + '%' : '7%') + '</div></div>';
+    '<div class="mini" style="display:inline-block"><div class="label">Capital</div><div class="value">' + cash(c.bankroll) + '</div></div>';
 }
 function renderChart(c) {
   const svg = $('equityChart'), epl = $('equityPeakLabel');
@@ -214,8 +279,8 @@ function fullRender(d) {
   Object.assign(S, d);
   $('strategy').textContent = d.strategy || '';
   renderKpi(d);
-  renderCandleBar(d);
   renderMarket(d.currentWindow);
+  renderLadder(d);
   renderPositions(d.positions);
   renderResults(d.results);
   renderFeed(d.trades);
@@ -240,6 +305,6 @@ poll();
 app.get('/', (_, res) => res.type('html').send(dashboard));
 
 app.listen(port, '0.0.0.0', () => {
-  console.log(`CandleBot listening on :${port}`);
+  console.log(`PrevWinner Bot listening on :${port}`);
   engine.init().catch(e => console.error('Init:', e.message));
 });
