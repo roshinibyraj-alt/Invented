@@ -252,15 +252,17 @@ class CheapHunterEngine {
     this.finalUpMax = null;
     this.finalDownMax = null;
 
-    // Determine side from previous window winner
+    // Determine side: FADE the previous winner (contrarian)
     this._detectPrevWinner(market);
-    const side = this._prevWindowWinner;
+    const winner = this._prevWindowWinner;
 
-    if (!side) {
+    if (!winner) {
       this.log(`⏭️ No prev winner (UP max=${(this.markets.get(slugFor(market.windowStart - WINDOW_SECONDS))?.finalUpMax ?? 0).toFixed(3)} DOWN max=${(this.markets.get(slugFor(market.windowStart - WINDOW_SECONDS))?.finalDownMax ?? 0).toFixed(3)}) — skipping ${market.slug.slice(-10)}`);
     } else {
-      this._windowSide = side;
-      this.log(`🔍 Window ${market.slug.slice(-10)} — prev winner ${side} — orders in 2s`);
+      // FADE: buy the LOSING side (mean-reversion)
+      const fadeSide = winner === 'UP' ? 'DOWN' : 'UP';
+      this._windowSide = fadeSide;
+      this.log(`🔍 Window ${market.slug.slice(-10)} — prev winner ${winner} → FADING ${fadeSide} — orders in 2s`);
     }
     this.onTick(this.buildState());
   }
@@ -517,7 +519,7 @@ class CheapHunterEngine {
     }, 0);
     return {
       name: this.name,
-      strategy: `Prev Winner + Ladder · ${LADDER.length} limit buys @ ${LADDER.map(r=>r.price+'×'+r.shares).join('/')} · CLOB-verified fills · no SL · hold to resolution`,
+      strategy: `FADE Prev Winner (Contrarian) · ${LADDER.length} limit buys @ ${LADDER.map(r=>r.price+'×'+r.shares).join('/')} · CLOB · no SL · hold to resolution`,
       serverTime: now,
       connected: this.pollCount > 0 && this.isClobFresh(now),
       lastError: this.lastError,
@@ -577,7 +579,7 @@ class CheapHunterEngine {
       setInterval(() => this.evaluate(), 200),
       setInterval(() => this.recordEquity(), 1000),
     ];
-    this.log(`🚀 ${this.name} started · ${LADDER.length} limit buys · CLOB-only · prev-window-winner strategy`);
+    this.log(`🚀 ${this.name} started · ${LADDER.length} limit buys · CLOB-only · FADE contrarian strategy`);
   }
 
   close() {

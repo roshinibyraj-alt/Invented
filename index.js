@@ -10,7 +10,7 @@ const app = express();
 const port = Number(process.env.PORT || 3000);
 
 const engine = new CheapHunterEngine({
-  name: 'PrevWinner',
+  name: 'FadeBot',
   onLog: line => console.log(`[PW] ${line}`),
 });
 
@@ -21,7 +21,7 @@ app.get('/api/status', (_, res) => res.json(engine.buildState()));
 const dashboard = `<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>PrevWinner Bot — BTC 5m</title>
+<title>FadeBot — BTC 5m</title>
 <style>
 *{box-sizing:border-box}
 :root{--bg:#000;--panel:#070707;--line:#222;--muted:#9d9d9d;--up:#00ff85;--down:#ff4a68;--amber:#ffc400;--blue:#38d6ff}
@@ -72,7 +72,7 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
 </head><body>
 <div class="wrap">
   <div class="topbar">
-    <div class="brand"><div class="btc">₿</div><div><h1 id="botName">PrevWinner Bot</h1><div class="sub" id="strategy">BTC 5m Binary · Prev Winner Ladder</div></div></div>
+    <div class="brand"><div class="btc">₿</div><div><h1 id="botName">FadeBot</h1><div class="sub" id="strategy">BTC 5m Binary · Fade Prev Winner (Contrarian)</div></div></div>
     <div class="status">
       <span class="pill" id="statusPill">● CONNECTING</span>
       <span class="pill" id="pollPill">—</span>
@@ -89,7 +89,7 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
 
   <div class="prev-winner-bar" id="prevWinnerBar">
     <div class="prev-winner-box" style="min-width:140px">
-      <div class="label">Prev Window Winner</div>
+      <div class="label">Prev Winner → We Fade</div>
       <div class="side-label" id="prevWinnerSide">—</div>
     </div>
     <div class="panel" id="clockBox">

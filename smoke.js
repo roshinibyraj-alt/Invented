@@ -49,22 +49,22 @@ async function drive(e, cycles) {
 
 const failures = [];
 (async () => {
-  // TEST 1: Prev UP won → UP ladder fills on dip to 0.30
+  // TEST 1: Prev UP won → FADE DOWN ladder fills
   {
-    console.log('\n--- TEST 1: Prev UP won → UP ladder fills ---');
-    const e = await setup([[0.50,0.50],[0.30,0.70],[0.50,0.50]], 0.99, 0.01);
+    console.log('\n--- TEST 1: Prev UP won → FADE DOWN ---');
+    const e = await setup([[0.50,0.50],[0.70,0.30],[0.50,0.50]], 0.99, 0.01);
     await drive(e, 4);
     const filled = e.pendingOrders.filter(o => o.status === 'FILLED');
     console.log('  filled:', filled.length, 'side:', e._windowSide);
     filled.forEach(o => console.log('  ✅', o.outcome, o.limitPrice, o.shares + 'sh @', o.fillPrice));
-    // 0.49(200)+0.45(200)+0.40(100)+0.35(100)+0.30(100) = 5 fills (bid=0.29)
+    // Prev winner = UP → fade DOWN. DOWN price dips to 0.30 → bid 0.29 → fills 0.49,0.45,0.40,0.35 (bid 0.29 <= 0.35), 0.30 not (0.29>0.30)
     if (filled.length !== 5) failures.push('TEST1: expected 5, got ' + filled.length);
   }
 
-  // TEST 2: Prev DOWN won → DOWN ladder fills
+  // TEST 2: Prev DOWN won → FADE UP ladder fills
   {
-    console.log('\n--- TEST 2: Prev DOWN won → DOWN ladder fills ---');
-    const e = await setup([[0.70,0.30],[0.50,0.50]], 0.01, 0.99);
+    console.log('\n--- TEST 2: Prev DOWN won → FADE UP ---');
+    const e = await setup([[0.70,0.30],[0.30,0.70],[0.50,0.50]], 0.01, 0.99);
     await drive(e, 4);
     const filled = e.pendingOrders.filter(o => o.status === 'FILLED');
     console.log('  filled:', filled.length, 'side:', e._windowSide);
@@ -82,33 +82,32 @@ const failures = [];
     if (e._windowSide !== null) failures.push('TEST3: windowSide should be null');
   }
 
-  // TEST 4: All 8 rungs fill — deep dip
+  // TEST 4: All 8 rungs fill — fade side deep dips
   {
     console.log('\n--- TEST 4: All 8 rungs fill ---');
-    const e = await setup([[0.60,0.40],[0.10,0.90],[0.50,0.50]], 0.99, 0.01);
+    const e = await setup([[0.50,0.50],[0.60,0.10],[0.50,0.50]], 0.99, 0.01);
     await drive(e, 6);
     const filled = e.pendingOrders.filter(o => o.status === 'FILLED');
-    console.log('  filled:', filled.length, 'bank:', e.bankroll.toFixed(2));
+    console.log('  filled:', filled.length, 'side:', e._windowSide, 'bank:', e.bankroll.toFixed(2));
     filled.forEach(o => console.log('  ✅', o.outcome, o.limitPrice, o.shares + 'sh @', o.fillPrice));
     if (filled.length !== 8) failures.push('TEST4: expected 8, got ' + filled.length);
   }
 
-  // TEST 5: Partial fill (6 of 8)
+  // TEST 5: Partial fill — fade side moderate dip
   {
     console.log('\n--- TEST 5: Partial fill ---');
-    const e = await setup([[0.60,0.40],[0.32,0.68],[0.50,0.50]], 0.99, 0.01);
+    const e = await setup([[0.50,0.50],[0.60,0.32],[0.50,0.50]], 0.99, 0.01);
     await drive(e, 6);
     const filled = e.pendingOrders.filter(o => o.status === 'FILLED');
     const pending = e.pendingOrders.filter(o => o.status === 'PENDING');
-    console.log('  filled:', filled.length, 'pending:', pending.length);
+    console.log('  filled:', filled.length, 'pending:', pending.length, 'side:', e._windowSide);
     filled.forEach(o => console.log('  ✅', o.outcome, o.limitPrice, o.shares + 'sh @', o.fillPrice));
     pending.forEach(o => console.log('  ⏳', o.outcome, o.limitPrice, o.shares + 'sh'));
-    // bid=0.31 → 0.49,0.45,0.40,0.35 fill (4); 0.30 does NOT fill (0.31 > 0.30)
     if (filled.length !== 4) failures.push('TEST5: expected 4 fills, got ' + filled.length);
     if (pending.length !== 4) failures.push('TEST5: expected 4 pending, got ' + pending.length);
   }
 
-  // TEST 6: Frozen 0.50 → 0.49 rung fills (bid 0.49 ≤ limit 0.49)
+  // TEST 6: Frozen 0.50 → 0.49 rung fills
   {
     console.log('\n--- TEST 6: Frozen 0.50 ---');
     const e = await setup([[0.50,0.50],[0.50,0.50]], 0.99, 0.01);
@@ -119,14 +118,11 @@ const failures = [];
     if (filled.length !== 1) failures.push('TEST6: expected 1, got ' + filled.length);
   }
 
-  // TEST 7: Resolution UP wins
+  // TEST 7: Resolution UP wins (DOWN faded side loses)
   {
-    console.log('\n--- TEST 7: Resolution UP wins ---');
-    const e = await setup([[0.60,0.40],[0.30,0.70],[0.50,0.50]], 0.99, 0.01);
+    console.log('\n--- TEST 7: Resolution UP wins → faded DOWN loses ---');
+    const e = await setup([[0.50,0.50],[0.60,0.30],[0.50,0.50]], 0.99, 0.01);
     await drive(e, 4);
-    const openBefore = e.positions.filter(p => p.exitReason == null && p.slug === slugFor(FIRST));
-    console.log('  open positions:', openBefore.length);
-    openBefore.forEach(p => console.log('    ', p.outcome, p.shares + 'sh @', p.entryPrice, 'cost:', p.cost.toFixed(2)));
     const market = e.markets.get(slugFor(FIRST));
     market.settled = true;
     market.finalUpMax = 0.98;
@@ -137,23 +133,25 @@ const failures = [];
     const totalPnl = results.reduce((s, r) => s + r.pnl, 0);
     console.log('  window P&L:', totalPnl >= 0 ? '+' : '', totalPnl.toFixed(2));
     if (results.length === 0) failures.push('TEST7: expected results, got 0');
+    if (e.losses !== results.length) failures.push('TEST7: expected all losses (faded DOWN lost)');
   }
 
-  // TEST 8: Resolution no winner → refund
+  // TEST 8: Resolution DOWN wins → faded DOWN wins (profit)
   {
-    console.log('\n--- TEST 8: Resolution no winner → refund ---');
-    const e = await setup([[0.60,0.40],[0.30,0.70],[0.50,0.50]], 0.99, 0.01);
+    console.log('\n--- TEST 8: Resolution DOWN wins → faded DOWN profits ---');
+    const e = await setup([[0.50,0.50],[0.60,0.30],[0.50,0.50]], 0.99, 0.01);
     await drive(e, 4);
     const market = e.markets.get(slugFor(FIRST));
     market.settled = true;
-    market.finalUpMax = 0.60;
-    market.finalDownMax = 0.70;
-    const bankBefore = e.bankroll;
+    market.finalUpMax = 0.30;
+    market.finalDownMax = 0.98;
     e._resolveExpiredPositions(market, market.windowEnd + 1);
-    const bankAfter = e.bankroll;
-    console.log('  bank before:', bankBefore.toFixed(2), 'after:', bankAfter.toFixed(2));
-    console.log('  refund?', bankAfter >= bankBefore ? 'YES' : 'NO');
-    if (bankAfter < bankBefore) failures.push('TEST8: bank should not decrease on refund');
+    const results = e.results.filter(r => r.slug === slugFor(FIRST));
+    const totalPnl = results.reduce((s, r) => s + r.pnl, 0);
+    console.log('  results:', results.length, 'wins:', e.wins, 'losses:', e.losses);
+    console.log('  window P&L:', totalPnl >= 0 ? '+' : '', totalPnl.toFixed(2));
+    if (results.length === 0) failures.push('TEST8: expected results, got 0');
+    if (totalPnl <= 0) failures.push('TEST8: expected profit, got ' + totalPnl);
   }
 
   console.log('\n=== RESULT ===');
