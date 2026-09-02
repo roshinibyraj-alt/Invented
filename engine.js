@@ -9,8 +9,19 @@ const CLOB_FRESH_MS  = Math.max(CLOB_POLL_MS, Number(process.env.CLOB_FRESH_MS |
 const CLOB_TIMEOUT_MS= Math.max(400, Number(process.env.CLOB_TIMEOUT_MS || 1500));
 const START_BANKROLL  = Number(process.env.START_BANKROLL || 2000);
 
-const ORDER_SHARES = 100;
-const LADDER_PRICES = [0.40, 0.35, 0.30, 0.25, 0.20, 0.15];
+const DEFAULT_SHARES = 100;
+const LADDER = [
+  { price: 0.49, shares: 200 },
+  { price: 0.45, shares: 200 },
+  { price: 0.40, shares: 100 },
+  { price: 0.35, shares: 100 },
+  { price: 0.30, shares: 100 },
+  { price: 0.25, shares: 100 },
+  { price: 0.20, shares: 100 },
+  { price: 0.15, shares: 100 },
+];
+const LADDER_PRICES = LADDER.map(r => r.price);
+const ORDER_SHARES = DEFAULT_SHARES;
 const RESOLUTION_THRESHOLD = 0.95;
 
 // ── Helpers ───────────────────────────────────────────────
@@ -262,22 +273,22 @@ class CheapHunterEngine {
     }
 
     this.pendingOrders = [];
-    this.log(`🚀 WINDOW ${market.slug.slice(-10)} — BUY ${side} × ${LADDER_PRICES.length} limit orders`);
+    this.log(`🚀 WINDOW ${market.slug.slice(-10)} — BUY ${side} × ${LADDER.length} limit orders`);
 
-    for (const price of LADDER_PRICES) {
-      const cost = round2(ORDER_SHARES * price);
+    for (const rung of LADDER) {
+      const cost = round2(rung.shares * rung.price);
       this.pendingOrders.push({
-        id: `ord_${Date.now()}_${price.toFixed(2)}`,
+        id: `ord_${Date.now()}_${rung.price.toFixed(2)}`,
         slug: market.slug,
         outcome: side,
-        limitPrice: price,
-        shares: ORDER_SHARES,
+        limitPrice: rung.price,
+        shares: rung.shares,
         cost,
         status: 'PENDING',
         filledAt: null,
         fillPrice: null,
       });
-      this.log(`📋 LIMIT ${side} ${ORDER_SHARES}sh @ $${price.toFixed(2)} — PENDING`);
+      this.log(`📋 LIMIT ${side} ${rung.shares}sh @ $${rung.price.toFixed(2)} — PENDING`);
     }
     this.onTick(this.buildState());
   }
@@ -506,7 +517,7 @@ class CheapHunterEngine {
     }, 0);
     return {
       name: this.name,
-      strategy: `Prev Winner + Ladder · ${LADDER_PRICES.length} limit buys @ ${LADDER_PRICES.join('/')} · ${ORDER_SHARES}sh each · CLOB-verified fills · no SL · hold to resolution`,
+      strategy: `Prev Winner + Ladder · ${LADDER.length} limit buys @ ${LADDER.map(r=>r.price+'×'+r.shares).join('/')} · CLOB-verified fills · no SL · hold to resolution`,
       serverTime: now,
       connected: this.pollCount > 0 && this.isClobFresh(now),
       lastError: this.lastError,
@@ -526,7 +537,7 @@ class CheapHunterEngine {
       orderLadder: {
         side: this._windowSide || this._prevWindowWinner || '—',
         prices: LADDER_PRICES,
-        sharesPerOrder: ORDER_SHARES,
+        ladder: LADDER.map(r => ({ price: r.price, shares: r.shares })),
       },
       pendingOrders: this.pendingOrders.map(o => ({
         outcome: o.outcome, limitPrice: o.limitPrice, shares: o.shares,
@@ -541,7 +552,7 @@ class CheapHunterEngine {
       trades: this.trades.slice(-50),
       logs: this.logs,
       equityCurve: this.equityCurve,
-      config: { ladderPrices: LADDER_PRICES, orderShares: ORDER_SHARES, bankroll: this.bankroll },
+      config: { ladder: LADDER.map(r => ({ price: r.price, shares: r.shares })), bankroll: this.bankroll },
     };
   }
 
@@ -566,7 +577,7 @@ class CheapHunterEngine {
       setInterval(() => this.evaluate(), 200),
       setInterval(() => this.recordEquity(), 1000),
     ];
-    this.log(`🚀 ${this.name} started · ${LADDER_PRICES.length} limit buys @ ${LADDER_PRICES.join('/')} · ${ORDER_SHARES}sh · CLOB-only · no Binance · prev-window-winner strategy`);
+    this.log(`🚀 ${this.name} started · ${LADDER.length} limit buys · CLOB-only · prev-window-winner strategy`);
   }
 
   close() {
@@ -575,4 +586,4 @@ class CheapHunterEngine {
   }
 }
 
-module.exports = { CheapHunterEngine, config: { LADDER_PRICES, ORDER_SHARES, START_BANKROLL } };
+module.exports = { CheapHunterEngine, config: { LADDER, LADDER_PRICES, ORDER_SHARES, START_BANKROLL } };

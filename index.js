@@ -61,12 +61,12 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
 .prev-winner-box{border:1px solid var(--line);padding:10px;border-radius:8px;background:#000;text-align:center}
 .prev-winner-box .side-label{font-size:28px;margin-top:2px}
 .prev-winner-box .side-label.up{color:var(--up)}.prev-winner-box .side-label.down{color:var(--down)}.prev-winner-box .side-label.skip{color:var(--muted)}
-.ladder-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:4px;margin-top:6px}
+.ladder-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin-top:6px}
 .ladder-cell{border:1px solid var(--line);padding:6px;border-radius:6px;background:#000;text-align:center;font-size:11px}
 .ladder-cell.filled{border-color:var(--up);background:#084b31}.ladder-cell.pending{border-color:var(--line)}
 .ladder-price{font-size:13px;margin-top:2px}
 .ladder-shares{font-size:9px;color:var(--muted);margin-top:1px}
-@media(max-width:860px){.metrics{grid-template-columns:repeat(2,1fr)}.two-col{grid-template-columns:1fr}.ladder-grid{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:860px){.metrics{grid-template-columns:repeat(2,1fr)}.two-col{grid-template-columns:1fr}.ladder-grid{grid-template-columns:repeat(4,1fr)}}
 @media(max-width:480px){body{padding:6px;font-size:13px}h1{font-size:16px}.side-price{font-size:24px}.metrics{grid-template-columns:repeat(2,1fr)}}
 </style>
 </head><body>
@@ -202,17 +202,17 @@ function renderLadder(d) {
   const grid = $('ladderGrid');
   const side = ol?.side || '—';
   $('ladderSide').textContent = side;
-  const prices = ol?.prices || [];
+  const ladder = ol?.ladder || [];
   const pp = d.pendingOrders || [];
   const filled = pp.filter(o => o.status === 'FILLED');
   const pending = pp.filter(o => o.status === 'PENDING');
-  $('ladderStatus').textContent = filled.length + '/' + prices.length + ' filled';
-  grid.innerHTML = prices.map(p => {
-    const fo = filled.find(f => f.limitPrice === p);
-    const po = pending.find(f => f.limitPrice === p);
+  $('ladderStatus').textContent = filled.length + '/' + ladder.length + ' filled';
+  grid.innerHTML = ladder.map(r => {
+    const fo = filled.find(f => f.limitPrice === r.price);
+    const po = pending.find(f => f.limitPrice === r.price);
     if (fo) return '<div class="ladder-cell filled"><div class="ladder-price">$' + fo.limitPrice.toFixed(2) + '</div><div class="ladder-shares">' + fo.shares + 'sh FILL @ $' + fo.fillPrice.toFixed(2) + '</div></div>';
     if (po) return '<div class="ladder-cell pending"><div class="ladder-price">$' + po.limitPrice.toFixed(2) + '</div><div class="ladder-shares">' + po.shares + 'sh PENDING</div></div>';
-    return '<div class="ladder-cell"><div class="ladder-price">$' + p.toFixed(2) + '</div><div class="ladder-shares">100sh</div></div>';
+    return '<div class="ladder-cell"><div class="ladder-price">$' + r.price.toFixed(2) + '</div><div class="ladder-shares">' + r.shares + 'sh</div></div>';
   }).join('');
 }
 function renderPositions(a) {
@@ -259,8 +259,7 @@ function renderLogs(a) {
 function renderConfig(c) {
   if (!c) return;
   const b = $('configBody');
-  b.innerHTML = '<div class="mini" style="display:inline-block;margin-right:6px"><div class="label">Ladder Prices</div><div class="value">' + (c.ladderPrices || []).join(', ') + '</div></div>' +
-    '<div class="mini" style="display:inline-block;margin-right:6px"><div class="label">Shares/Order</div><div class="value">' + (c.orderShares || 100) + '</div></div>' +
+  b.innerHTML = '<div class="mini" style="display:inline-block;margin-right:6px"><div class="label">Ladder</div><div class="value">' + ((c.ladder || []).map(r => '$'+r.price+'×'+r.shares).join(' · ') || '—') + '</div></div>' +
     '<div class="mini" style="display:inline-block"><div class="label">Capital</div><div class="value">' + cash(c.bankroll) + '</div></div>';
 }
 function renderChart(c) {
