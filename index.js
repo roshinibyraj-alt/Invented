@@ -125,10 +125,18 @@ function renderCandleBar(d) {
   if (d.currentWindow) ws.textContent = d.currentWindow.slug.replace('btc-updown-5m-', 'Window ');
   let ladderHtml = '';
   if (lo.prices && lo.side && lo.side !== '—') {
-    const filledPrices = (d.positions || []).map(p => p.entryPrice);
+    const orders = d.pendingOrders || [];
+    const orderMap = {};
+    orders.forEach(o => { orderMap[o.limitPrice] = o; });
     ladderHtml = '<div style="grid-column:1/5"><div class="label">ORDER LADDER — BUY ' + lo.side + ' × ' + (lo.sharesPerOrder || 100) + 'sh</div><div class="ladder-grid">' + lo.prices.map(p => {
-      const filled = filledPrices.some(fp => Math.abs(fp - p) < 0.001);
-      return '<div class="ladder-cell ' + (filled ? 'filled' : 'pending') + '"><div class="ladder-price">$' + p.toFixed(2) + '</div><div class="ladder-shares">' + (filled ? '✅ FILLED' : '⏳ PENDING') + '</div></div>';
+      const o = orderMap[p];
+      const status = o ? o.status : 'WAITING';
+      let cls = 'pending';
+      let label = '⏳ WAITING';
+      if (status === 'FILLED') { cls = 'filled'; label = '✅ FILLED @ $' + (o.fillPrice || 0).toFixed(2); }
+      else if (status === 'CANCELLED') { cls = 'pending'; label = '❌ CANCELLED'; }
+      else if (status === 'PENDING') { cls = 'pending'; label = '⏳ PENDING'; }
+      return '<div class="ladder-cell ' + cls + '"><div class="ladder-price">$' + p.toFixed(2) + '</div><div class="ladder-shares">' + label + '</div></div>';
     }).join('') + '</div></div>';
   } else {
     ladderHtml = '<div style="grid-column:1/5"><div class="empty">No candle signal yet — ladder will appear after signal</div></div>';

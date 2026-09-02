@@ -14,6 +14,9 @@ const START_BANKROLL  = Number(process.env.START_BANKROLL || 500);
 const ORDER_SHARES = 100;
 const LADDER_PRICES = [0.40, 0.35, 0.30, 0.25, 0.20, 0.15];
 
+// Resolution threshold: one side must reach this to declare a winner
+const RESOLUTION_THRESHOLD = 0.95;
+
 // ── Helpers ───────────────────────────────────────────────
 function round2(v) { return Math.round(v * 100) / 100; }
 function round5(v) { return Math.round(v * 100000) / 100000; }
@@ -25,11 +28,11 @@ function slugFor(start) { return `btc-updown-5m-${start}`; }
 class CandleSignalManager {
   constructor(log) {
     this.log = log;
-    this.lastClosedCandle = null; // { open, close, color, windowStart }
-    this.currentCandle = null;   // { open, close }
+    this.lastClosedCandle = null;
+    this.currentCandle = null;
     this.ws = null;
     this.connected = false;
-    this.lastColor = null;       // 'GREEN' or 'RED'
+    this.lastColor = null;
   }
 
   connect() {
@@ -49,10 +52,7 @@ class CandleSignalManager {
         this.log('🔌 Binance WS closed — reconnecting in 5s');
         setTimeout(() => this.connect(), 5000);
       };
-      this.ws.onerror = (err) => {
-        this.connected = false;
-        this.log(`⚠️ Binance WS error: ${err.message || 'unknown'}`);
-      };
+      this.ws.onerror = () => { this.connected = false; };
     } catch (err) {
       this.log(`⚠️ Binance WS failed: ${err.message}`);
     }
@@ -112,7 +112,10 @@ class CheapHunterEngine {
     this.discoveryJobs = new Map();
     this.currentStart = windowStartFor(Date.now());
     this.windowStartFor = null;
-    this.positions = [];
+    this.positions = [];           // filled positions (holding to resolution)
+    this.pendingOrders = [];       // limit orders waiting for ask to reach limit
+    this.finalUpMax = null;
+    this.finalDownMax = null;
     this.results = [];
     this.trades = [];
     this.logs = [];
@@ -173,6 +176,7 @@ class CheapHunterEngine {
         const rec = {
           slug, title: market.question || slug, conditionId: market.conditionId,
           windowStart: start, windowEnd: start + WINDOW_SECONDS, settled: false, winner: null,
+          finalUpMax: null, finalDownMax: null,
           up: this._makeToken(String(tokenIds[ui]), slug, 'UP'),
           down: this._makeToken(String(tokenIds[di]), slug, 'DOWN'),
         };
@@ -214,6 +218,22 @@ class CheapHunterEngine {
     token.spread = token.bid != null && token.ask != null ? round5(token.ask - token.bid) : null;
     token.mid = token.bid != null && token.ask != null ? round5((token.bid + token.ask) / 2) : (token.ask ?? token.bid);
     token.updatedAt = Date.now();
+
+    // Capture final-2s max prices for resolution
+    if (token.slug) {
+      const m = this.markets.get(token.slug);
+      if (m && !m.settled) {
+        const nowS = Date.now() / 1000;
+        if (nowS >= m.windowEnd - 2) {
+          const probe = token.ask ?? token.bid ?? token.mid ?? 0;
+          if (token.outcome === 'UP') {
+            if (m.finalUpMax == null || probe > m.finalUpMax) m.finalUpMax = probe;
+          } else {
+            if (m.finalDownMax == null || probe > m.finalDownMax) m.finalDownMax = probe;
+          }
+        }
+      }
+    }
   }
 
   // ── CLOB Polling ───────────────────────────────────────
@@ -253,9 +273,11 @@ class CheapHunterEngine {
     return Boolean(this.lastSuccessfulPollAt && now - this.lastSuccessfulPollAt <= CLOB_FRESH_MS);
   }
 
-  // ── Window Open: Place 6 Limit Orders ──────────────────
+  // ── Window Open: Place 6 PENDING limit orders ──────────
   _prepareWindow(market) {
     this.windowStartFor = market.windowStart;
+    this.finalUpMax = null;
+    this.finalDownMax = null;
     const color = this.candle.getColor();
     const side = color === 'GREEN' ? 'UP' : (color === 'RED' ? 'DOWN' : null);
 
@@ -265,91 +287,154 @@ class CheapHunterEngine {
       return;
     }
 
-    this.log(`🚀 WINDOW ${market.slug.slice(-10)} — signal ${color} → BUY ${side} × ${LADDER_PRICES.length} limit orders`);
+    this.pendingOrders = [];
+    this.log(`🚀 WINDOW ${market.slug.slice(-10)} — signal ${color} → ${side} × ${LADDER_PRICES.length} limit orders pending`);
 
     for (const price of LADDER_PRICES) {
       const cost = round2(ORDER_SHARES * price);
       const fee = takerFee(ORDER_SHARES, price);
-      if (cost + fee > this.bankroll) {
-        this.log(`⚠️ SKIP BUY ${side} ${ORDER_SHARES}sh @ $${price.toFixed(2)} — bankroll $${this.bankroll.toFixed(2)} < cost+fee $${(cost + fee).toFixed(2)}`);
-        continue;
-      }
-      this.bankroll = round2(this.bankroll - cost - fee);
-      this.totalFeesPaid = round2(this.totalFeesPaid + fee);
-      const position = {
-        slug: market.slug, outcome: side, market,
-        windowStart: market.windowStart, windowEnd: market.windowEnd,
-        shares: ORDER_SHARES, entryPrice: price, cost, buyFee: fee,
-        openedAt: Date.now(), exitReason: null, exitPrice: null, pnl: null,
-      };
-      this.positions.push(position);
-      this.trades.push({
-        timestamp: Date.now(), type: 'BUY', slug: market.slug, outcome: side,
-        shares: ORDER_SHARES, price, cost, fee,
-        reason: `LADDER @ $${price.toFixed(2)} · ${side} ${ORDER_SHARES}sh`,
+      this.pendingOrders.push({
+        id: `ord_${Date.now()}_${price.toFixed(2)}`,
+        slug: market.slug,
+        outcome: side,
+        limitPrice: price,
+        shares: ORDER_SHARES,
+        cost, buyFee: fee,
+        status: 'PENDING',
+        filledAt: null,
+        fillPrice: null,
       });
-      this.log(`✅ BUY ${side} ${ORDER_SHARES}sh @ $${price.toFixed(2)} · cost $${cost.toFixed(2)} · fee $${fee.toFixed(4)}`);
+      this.log(`📋 LIMIT ${side} ${ORDER_SHARES}sh @ $${price.toFixed(2)} — PENDING`);
     }
     this.onTick(this.buildState());
   }
 
-  // ── Resolution ─────────────────────────────────────────
-  _resolveExpiredPositions(market, nowS) {
-    const open = this.positions.filter(p => p.exitReason == null);
-    const buckets = new Map();
-    for (const pos of open) {
-      if (!buckets.has(pos.slug)) buckets.set(pos.slug, []);
-      buckets.get(pos.slug).push(pos);
-    }
-    for (const [slug, group] of buckets) {
-      const m = group[0]?.market;
-      if (!m || nowS < m.windowEnd) continue;
-      m.settled = true;
-      const upMid = m.up.mid, downMid = m.down.mid;
-      let winner = null;
-      if (upMid != null && downMid != null) winner = upMid >= downMid ? 'UP' : 'DOWN';
-      else if (upMid != null) winner = upMid >= 0.5 ? 'UP' : 'DOWN';
-      else if (downMid != null) winner = downMid >= 0.5 ? 'DOWN' : 'UP';
-      if (!winner) winner = 'UP';
-      m.winner = winner;
-      let winPayout = 0, lossCost = 0;
-      for (const pos of group) {
-        const won = pos.outcome === winner;
-        const exitPrice = won ? 1 : 0;
-        this._sellPosition(pos, exitPrice, 'RESOLUTION', { winner, won });
-        if (won) winPayout += pos.shares; else lossCost += pos.cost;
+  // ── Check pending orders against CLOB book each tick ──
+  _checkFills(market) {
+    if (!this.pendingOrders.length) return;
+    const token = this.pendingOrders[0]?.outcome === 'UP' ? market.up : market.down;
+    if (!token || token.ask == null) return;
+
+    const ask = token.ask;
+    for (const order of this.pendingOrders) {
+      if (order.status !== 'PENDING') continue;
+      if (order.slug !== market.slug) continue;
+      // Limit buy fills when ask ≤ limit price (fill at the better of ask or limit)
+      if (ask > order.limitPrice) continue;
+
+      // Fill this order at the ask price (realistic: fill at market)
+      const fillPrice = Math.min(ask, order.limitPrice);
+      const fillCost = round2(order.shares * fillPrice);
+      const fillFee = takerFee(order.shares, fillPrice);
+
+      if (fillCost + fillFee > this.bankroll) {
+        this.log(`⚠️ SKIP FILL ${order.outcome} ${order.shares}sh @ $${fillPrice.toFixed(2)} — bankroll too low`);
+        order.status = 'CANCELLED';
+        continue;
       }
-      this.log(`🏁 WINDOW ${m.slug.slice(-10)} RESOLVED → ${winner} won · payout $${winPayout.toFixed(2)} · loss $${lossCost.toFixed(2)}`);
-      for (const pos of group) {
-        const tag = pos.outcome === winner ? 'WIN' : 'LOSS';
-        this.log(`   ${tag} ${pos.outcome} ${pos.shares}sh @ $${pos.entryPrice.toFixed(2)} → P&L ${pos.pnl >= 0 ? '+' : '-'}$${Math.abs(pos.pnl).toFixed(2)}`);
-      }
+
+      order.status = 'FILLED';
+      order.fillPrice = fillPrice;
+      order.filledAt = Date.now();
+      order.cost = fillCost;
+      order.buyFee = fillFee;
+
+      this.bankroll = round2(this.bankroll - fillCost - fillFee);
+      this.totalFeesPaid = round2(this.totalFeesPaid + fillFee);
+
+      const position = {
+        slug: order.slug, outcome: order.outcome, market,
+        windowStart: market.windowStart, windowEnd: market.windowEnd,
+        shares: order.shares, entryPrice: fillPrice, cost: fillCost, buyFee: fillFee,
+        openedAt: Date.now(), exitReason: null, exitPrice: null, pnl: null,
+      };
+      this.positions.push(position);
+      this.trades.push({
+        timestamp: Date.now(), type: 'BUY', slug: order.slug, outcome: order.outcome,
+        shares: order.shares, price: fillPrice, cost: fillCost, fee: fillFee,
+        reason: `FILL ask $${ask.toFixed(2)} ≤ limit $${order.limitPrice.toFixed(2)} → $${fillPrice.toFixed(2)}`,
+      });
+      this.log(`✅ FILL ${order.outcome} ${order.shares}sh @ $${fillPrice.toFixed(2)} (ask $${ask.toFixed(2)} ≤ limit $${order.limitPrice.toFixed(2)}) · cost $${fillCost.toFixed(2)}`);
     }
-    if (buckets.size) this.positions = this.positions.filter(p => p.exitReason == null);
   }
 
-  _sellPosition(position, price, reason, extra = {}) {
-    if (position.exitReason != null) return;
-    const proceeds = round2(position.shares * price);
-    const fee = (price > 0 && price < 1) ? takerFee(position.shares, price) : 0;
-    const pnl = round2(proceeds - position.cost - (position.buyFee || 0) - fee);
-    if (pnl >= 0) this.wins++; else this.losses++;
-    this.bankroll = round2(this.bankroll + proceeds - fee);
-    this.totalFeesPaid = round2(this.totalFeesPaid + fee);
-    this.realizedPnl = round2(this.realizedPnl + pnl);
-    position.pnl = pnl;
-    position.exitPrice = price;
-    position.exitReason = reason;
-    position.sellFee = fee;
-    position.closedAt = Date.now();
-    position.won = extra.won != null ? extra.won : pnl > 0;
-    this.results.unshift({ ...position, market: undefined });
-    this.results = this.results.slice(0, 50);
-    this.trades.push({
-      timestamp: Date.now(), type: 'SELL', slug: position.slug, outcome: position.outcome,
-      shares: position.shares, price, pnl, fee, reason, ...extra,
-    });
-    this.log(`💰 SELL ${position.outcome} @ ${price.toFixed(2)} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)} · ${position.shares}sh`);
+  // ── Cancel remaining unfilled orders at window end ──────
+  _cancelUnfilled(market) {
+    for (const order of this.pendingOrders) {
+      if (order.status === 'PENDING' && order.slug === market.slug) {
+        order.status = 'CANCELLED';
+        this.log(`❌ CANCEL LIMIT ${order.outcome} ${order.shares}sh @ $${order.limitPrice.toFixed(2)} — window ended, ask was $${(market.up?.ask ?? market.down?.ask ?? 0).toFixed(2)}`);
+      }
+    }
+  }
+
+  // ── Resolution: ≥0.95 final-2s max, otherwise refund ───
+  _resolveExpiredPositions(market, nowS) {
+    if (!market) return;
+    const open = this.positions.filter(p => p.exitReason == null && p.slug === market.slug);
+    if (!open.length) return;
+    if (nowS < market.windowEnd) return;
+
+    market.settled = true;
+    const fUp = market.finalUpMax ?? 0;
+    const fDown = market.finalDownMax ?? 0;
+
+    let winner = null;
+    if (fUp >= RESOLUTION_THRESHOLD) winner = 'UP';
+    else if (fDown >= RESOLUTION_THRESHOLD) winner = 'DOWN';
+
+    if (!winner) {
+      this.log(`⏳ WINDOW ${market.slug.slice(-10)} — no winner (UP max=${fUp.toFixed(3)}, DOWN max=${fDown.toFixed(3)}) — refunding cost`);
+      for (const pos of open) {
+        const refund = pos.cost;
+        this.bankroll = round2(this.bankroll + refund);
+        this.results.unshift({
+          slug: pos.slug, outcome: pos.outcome, shares: pos.shares,
+          entryPrice: pos.entryPrice, cost: pos.cost, exitPrice: 0, pnl: 0,
+          exitReason: 'UNRESOLVED_REFUND', closedAt: Date.now(), won: null,
+        });
+        this.trades.push({
+          timestamp: Date.now(), type: 'REFUND', slug: pos.slug, outcome: pos.outcome,
+          shares: pos.shares, price: 0, pnl: 0, reason: `UNRESOLVED — UP=${fUp.toFixed(3)} DOWN=${fDown.toFixed(3)} — cost refunded`,
+        });
+        this.log(`   REFUND ${pos.outcome} ${pos.shares}sh @ $${pos.entryPrice.toFixed(2)} — cost $${pos.cost.toFixed(2)} returned`);
+        pos.exitReason = 'UNRESOLVED_REFUND';
+        pos.exitPrice = 0;
+        pos.pnl = 0;
+        pos.closedAt = Date.now();
+      }
+      this.recordEquity();
+      this.onTick(this.buildState());
+      return;
+    }
+
+    // Real winner declared
+    let winPayout = 0, lossCost = 0;
+    for (const pos of open) {
+      const won = pos.outcome === winner;
+      const exitPrice = won ? 1 : 0;
+      const proceeds = won ? pos.shares : 0;
+      const pnl = round2(proceeds - pos.cost);
+      if (pnl >= 0) this.wins++; else this.losses++;
+      this.bankroll = round2(this.bankroll + proceeds);
+      this.realizedPnl = round2(this.realizedPnl + pnl);
+      pos.pnl = pnl;
+      pos.exitPrice = exitPrice;
+      pos.exitReason = 'RESOLUTION';
+      pos.closedAt = Date.now();
+      pos.won = won;
+      this.results.unshift({ slug: pos.slug, outcome: pos.outcome, shares: pos.shares, entryPrice: pos.entryPrice, cost: pos.cost, exitPrice, pnl, exitReason: 'RESOLUTION', closedAt: Date.now(), won });
+      this.trades.push({
+        timestamp: Date.now(), type: 'RESOLVED', slug: pos.slug, outcome: pos.outcome,
+        shares: pos.shares, price: exitPrice, pnl,
+        reason: `${won ? 'WIN' : 'LOSS'} ${pos.outcome} ${pos.shares}sh @ $${pos.entryPrice.toFixed(2)} → P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)} (${winner} won, UP max=${fUp.toFixed(3)} DOWN max=${fDown.toFixed(3)})`,
+      });
+      if (won) winPayout += pos.shares; else lossCost += pos.cost;
+      const tag = won ? '✅ WIN' : '❌ LOSS';
+      this.log(`${tag} ${pos.outcome} ${pos.shares}sh @ $${pos.entryPrice.toFixed(2)} → P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`);
+    }
+    this.log(`🏁 WINDOW ${market.slug.slice(-10)} RESOLVED → ${winner} won · payout $${winPayout.toFixed(2)} · loss $${lossCost.toFixed(2)} (UP max=${fUp.toFixed(3)} DOWN max=${fDown.toFixed(3)})`);
+    this.positions = this.positions.filter(p => p.exitReason == null);
     this.recordEquity();
     this.onTick(this.buildState());
   }
@@ -360,10 +445,35 @@ class CheapHunterEngine {
     const nowS = now / 1000;
     const cs = windowStartFor(now);
     const market = this.markets.get(slugFor(cs));
-    this._resolveExpiredPositions(market, nowS);
+    const elapsed = Math.floor(nowS - cs);
+
+    // Resolve expired windows
+    if (market) {
+      if (elapsed >= WINDOW_SECONDS) {
+        this._cancelUnfilled(market);
+        this._resolveExpiredPositions(market, nowS);
+      }
+    }
+
+    // Also check next window for resolution (deferred)
+    const nextMarket = this.markets.get(slugFor(cs + WINDOW_SECONDS));
+    if (nextMarket && !nextMarket.settled) {
+      const nextElapsed = Math.floor(nowS - nextMarket.windowStart);
+      if (nextElapsed >= WINDOW_SECONDS) {
+        this._cancelUnfilled(nextMarket);
+        this._resolveExpiredPositions(nextMarket, nowS);
+      }
+    }
+
     if (!market) { this.onTick(this.buildState()); return; }
     if (this.entryWindow != null && market.windowStart < this.entryWindow) { this.onTick(this.buildState()); return; }
+
+    // New window — place limit orders
     if (this.windowStartFor !== market.windowStart) this._prepareWindow(market);
+
+    // Check pending order fills against CLOB book
+    if (elapsed < WINDOW_SECONDS) this._checkFills(market);
+
     this.recordEquity();
     this.onTick(this.buildState());
   }
@@ -386,7 +496,7 @@ class CheapHunterEngine {
       settled: market.settled, winner: market.winner,
       elapsed: Math.max(0, Math.floor(Date.now() / 1000) - market.windowStart),
       remaining: Math.max(0, market.windowEnd - Math.floor(Date.now() / 1000)),
-      up:   { bid: market.up.bid, ask: market.up.ask, mid: market.up.mid, spread: market.up.spread },
+      up: { bid: market.up.bid, ask: market.up.ask, mid: market.up.mid, spread: market.up.spread },
       down: { bid: market.down.bid, ask: market.down.ask, mid: market.down.mid, spread: market.down.spread },
     };
   }
@@ -403,7 +513,7 @@ class CheapHunterEngine {
     }, 0);
     return {
       name: this.name,
-      strategy: `Candle Color + Ladder · 6 limit buys @ 0.40-0.15 · ${ORDER_SHARES}sh each · ${LADDER_PRICES.length}× ${ORDER_SHARES}sh`,
+      strategy: `Candle Color + Ladder · 6 limit buys @ 0.40-0.15 · ${ORDER_SHARES}sh each · CLOB-verified fills · no SL · hold to resolution`,
       serverTime: now,
       connected: this.pollCount > 0,
       lastError: this.lastError,
@@ -426,6 +536,10 @@ class CheapHunterEngine {
         prices: LADDER_PRICES,
         sharesPerOrder: ORDER_SHARES,
       },
+      pendingOrders: this.pendingOrders.map(o => ({
+        outcome: o.outcome, limitPrice: o.limitPrice, shares: o.shares, status: o.status,
+        fillPrice: o.fillPrice, filledAt: o.filledAt,
+      })),
       positions: open.map(p => {
         const token = p.outcome === 'UP' ? p.market?.up : p.market?.down;
         const mark = token?.mid ?? p.entryPrice;
@@ -448,6 +562,7 @@ class CheapHunterEngine {
       config: {
         ladderPrices: LADDER_PRICES, orderShares: ORDER_SHARES,
         bankroll: this.initialBankroll, takerFeeRate: TAKER_FEE_RATE,
+        resolutionThreshold: RESOLUTION_THRESHOLD,
       },
     };
   }
@@ -490,7 +605,7 @@ class CheapHunterEngine {
       setInterval(() => this.evaluate(), 200),
       setInterval(() => this.recordEquity(), 1000),
     ];
-    this.log(`🚀 CandleBot started | Candle-color signal + 6-limit ladder · ${ORDER_SHARES}sh each · no SL · no TP · hold to resolution`);
+    this.log(`🚀 CandleBot started | Candle-color + 6-limit ladder · ${ORDER_SHARES}sh · CLOB-verified fills · no SL · hold to resolution`);
   }
 
   close() {
@@ -500,4 +615,4 @@ class CheapHunterEngine {
   }
 }
 
-module.exports = { CheapHunterEngine, config: { LADDER_PRICES, ORDER_SHARES, START_BANKROLL, CLOB_POLL_MS, TAKER_FEE_RATE } };
+module.exports = { CheapHunterEngine, config: { LADDER_PRICES, ORDER_SHARES, START_BANKROLL, CLOB_POLL_MS, TAKER_FEE_RATE, RESOLUTION_THRESHOLD } };
