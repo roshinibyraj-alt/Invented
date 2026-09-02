@@ -7,7 +7,7 @@ const WINDOW_SECONDS = 300;
 const CLOB_POLL_MS   = Math.max(100, Number(process.env.CLOB_POLL_MS || 300));
 const CLOB_FRESH_MS  = Math.max(CLOB_POLL_MS, Number(process.env.CLOB_FRESH_MS || 1500));
 const CLOB_TIMEOUT_MS= Math.max(400, Number(process.env.CLOB_TIMEOUT_MS || 1500));
-const START_BANKROLL  = Number(process.env.START_BANKROLL || 2000);
+const START_BANKROLL  = Number(process.env.START_BANKROLL || 10000);
 
 const DEFAULT_SHARES = 100;
 const LADDER = [
