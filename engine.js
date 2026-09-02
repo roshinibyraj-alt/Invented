@@ -9,20 +9,12 @@ const CLOB_FRESH_MS  = Math.max(CLOB_POLL_MS, Number(process.env.CLOB_FRESH_MS |
 const CLOB_TIMEOUT_MS= Math.max(400, Number(process.env.CLOB_TIMEOUT_MS || 1500));
 const START_BANKROLL  = Number(process.env.START_BANKROLL || 10000);
 
-const DEFAULT_SHARES = 100;
-const LADDER = [
-  { price: 0.49, shares: 200 },
-  { price: 0.45, shares: 200 },
-  { price: 0.40, shares: 100 },
-  { price: 0.35, shares: 100 },
-  { price: 0.30, shares: 100 },
-  { price: 0.25, shares: 100 },
-  { price: 0.20, shares: 100 },
-  { price: 0.15, shares: 100 },
-];
-const LADDER_PRICES = LADDER.map(r => r.price);
-const ORDER_SHARES = DEFAULT_SHARES;
+const BASE_SHARES       = 100;
+const ENTRY_TRIGGER     = 0.80;
+const STOP_LOSS_PRICE   = 0.62;
 const RESOLUTION_THRESHOLD = 0.95;
+const MARTINGALE_MULT   = 2.5;
+const MAX_ENTRIES_PER_WINDOW = 2;
 
 // ── Helpers ───────────────────────────────────────────────
 function round2(v) { return Math.round(v * 100) / 100; }
@@ -31,12 +23,12 @@ function windowStartFor(ms) { return Math.floor(ms / 1000 / WINDOW_SECONDS) * WI
 function slugFor(start) { return `btc-updown-5m-${start}`; }
 
 // ── Engine ────────────────────────────────────────────────
-class CheapHunterEngine {
+class MomentumCatchEngine {
   constructor(options = {}) {
     this.fetchImpl = options.fetchImpl || fetch;
     this.onTick = options.onTick || (() => {});
     this.onLog = options.onLog || (() => {});
-    this.name = options.name || 'PrevWinner';
+    this.name = options.name || 'FadeBot';
     this.startedAt = Date.now();
     this.bankroll = options.bankroll ?? START_BANKROLL;
     this.initialBankroll = this.bankroll;
@@ -48,11 +40,8 @@ class CheapHunterEngine {
     this.markets = new Map();
     this.tokens = new Map();
     this.discoveryJobs = new Map();
-    this.windowStartFor = null;
+    this._currentWindowSlug = null;
     this.positions = [];
-    this.pendingOrders = [];
-    this.finalUpMax = null;
-    this.finalDownMax = null;
     this.results = [];
     this.trades = [];
     this.logs = [];
@@ -67,17 +56,21 @@ class CheapHunterEngine {
     this.tickCount = 0;
     this.timers = [];
 
-    // Previous window winner tracking
-    this._prevWindowWinner = null;   // 'UP' | 'DOWN' | null (skip)
-    this._prevWindowSlug = null;
-    this._ordersPlacedForWindow = null;
-    this._windowSide = null;         // frozen side for current window
+    // ── Strategy state ──
+    this._baseShares = BASE_SHARES;
+    this._windowEntries = 0;
+    this._windowActive = null;       // { slug, outcome, shares, entryPrice, cost, openedAt }
+    this._windowTriggered = new Set(); // which side already triggered 0.80 this window
+    this._pendingFill = null;        // { slug, outcome, shares, triggerPrice, firedAt } — waiting for next tick
+    this._pendingSL = null;          // { slug, outcome, shares, entryPrice, cost, openedAt } — SL sell pending
+    this._windowSlug = null;
+    this._lastEvalAt = 0;
   }
 
   log(message) {
     const line = `${new Date().toISOString().slice(11, 23)} ${message}`;
     this.logs.push(line);
-    if (this.logs.length > 300) this.logs.shift();
+    if (this.logs.length > 500) this.logs.shift();
     this.onLog(line);
   }
 
@@ -93,14 +86,14 @@ class CheapHunterEngine {
     try {
       const response = await this.fetchImpl(url, {
         ...options, signal: controller.signal,
-        headers: { 'Content-Type': 'application/json', 'User-Agent': 'prevwinner/1.0', ...(options.headers || {}) },
+        headers: { 'Content-Type': 'application/json', 'User-Agent': 'momentumcatch/1.0', ...(options.headers || {}) },
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       return await response.json();
     } finally { clearTimeout(timer); }
   }
 
-  // ── Discovery (slug-only, no fallback) ──────────────────
+  // ── Discovery ───────────────────────────────────────────
   discoverWindow(start) {
     const slug = slugFor(start);
     if (this.markets.has(slug)) return Promise.resolve(this.markets.get(slug));
@@ -119,33 +112,31 @@ class CheapHunterEngine {
           slug, title: market.question || slug, conditionId: market.conditionId,
           windowStart: start, windowEnd: start + WINDOW_SECONDS, settled: false, winner: null,
           finalUpMax: null, finalDownMax: null,
-          up: this._makeToken(String(tokenIds[ui]), slug, 'UP'),
-          down: this._makeToken(String(tokenIds[di]), slug, 'DOWN'),
+          up: { tokenId: String(tokenIds[ui]), slug, outcome: 'UP', bid: null, ask: null, mid: null, spread: null, bookAsks: [], bookBids: [], updatedAt: null },
+          down: { tokenId: String(tokenIds[di]), slug, outcome: 'DOWN', bid: null, ask: null, mid: null, spread: null, bookAsks: [], bookBids: [], updatedAt: null },
         };
         this.markets.set(slug, rec);
+        this.tokens.set(rec.up.tokenId, rec.up);
+        this.tokens.set(rec.down.tokenId, rec.down);
         this.log(`🎯 MARKET ${slug} · ${rec.title}`);
         return rec;
-      } catch (error) {
-        this.lastError = error.message;
-        if (!this.lastPollErrorAt || Date.now() - this.lastPollErrorAt > 5000) {
-          this.lastPollErrorAt = Date.now();
-          this.log(`DISCOVERY FAIL ${slug}: ${error.message}`);
-        }
-        return null;
+      } catch (e) {
+        this.log(`DISCOVERY FAIL ${slug}: ${e.message}`);
+        throw e;
       } finally { this.discoveryJobs.delete(slug); }
     })();
     this.discoveryJobs.set(slug, job);
     return job;
   }
 
+  // ── Book handling ───────────────────────────────────────
   _makeToken(tokenId, slug, outcome) {
-    const token = { tokenId: String(tokenId), slug, outcome, bid: null, ask: null, mid: null, spread: null, topAskNotional: 0, updatedAt: null, bookAsks: [], bookBids: [], prevAsk: null };
+    const token = { tokenId: String(tokenId), slug, outcome, bid: null, ask: null, mid: null, spread: null, updatedAt: null };
     this.tokens.set(token.tokenId, token);
     return token;
   }
 
   applyBook(token, bids, asks) {
-    token.prevAsk = token.ask;
     const validBids = (bids || []).filter(l => Number(l.size) > 0).map(l => ({ price: Number(l.price), size: Number(l.size) }));
     validBids.sort((a, b) => b.price - a.price);
     const validAsks = (asks || []).filter(l => Number(l.size) > 0).map(l => ({ price: Number(l.price), size: Number(l.size) }));
@@ -154,14 +145,13 @@ class CheapHunterEngine {
     token.bookAsks = validAsks;
     const bestBid = validBids[0]?.price ?? null;
     const bestAsk = validAsks[0]?.price ?? null;
-    token.topAskNotional = validAsks[0] ? round2(validAsks[0].price * validAsks[0].size) : 0;
     token.bid = Number.isFinite(bestBid) && bestBid > 0 && bestBid <= 1 ? bestBid : null;
     token.ask = Number.isFinite(bestAsk) && bestAsk > 0 && bestAsk <= 1 ? bestAsk : null;
     token.spread = token.bid != null && token.ask != null ? round5(token.ask - token.bid) : null;
     token.mid = token.bid != null && token.ask != null ? round5((token.bid + token.ask) / 2) : (token.ask ?? token.bid);
     token.updatedAt = Date.now();
 
-    // Track max prices during window for resolution
+    // Track max prices for resolution
     if (token.slug) {
       const m = this.markets.get(token.slug);
       if (m && !m.settled) {
@@ -199,16 +189,6 @@ class CheapHunterEngine {
       this.lastError = null;
       this.pollCount += 1;
       this.tickCount += 1;
-
-      // Immediately check fills after fresh book data
-      try {
-        const cs2 = windowStartFor(Date.now());
-        const market2 = this.markets.get(slugFor(cs2));
-        if (market2 && !market2.settled) {
-          const elapsed2 = Math.floor(Date.now() / 1000 - market2.windowStart);
-          if (elapsed2 < WINDOW_SECONDS) this._checkFills(market2);
-        }
-      } catch (_) {}
     } catch (error) {
       this.lastError = error.message;
       if (!this.lastPollErrorAt || Date.now() - this.lastPollErrorAt > 5000) {
@@ -222,213 +202,227 @@ class CheapHunterEngine {
     return Boolean(this.lastSuccessfulPollAt && now - this.lastSuccessfulPollAt <= CLOB_FRESH_MS);
   }
 
-  // ── Detect previous window winner from CLOB prices ──────
-  _detectPrevWinner(market) {
-    const prevSlug = slugFor(market.windowStart - WINDOW_SECONDS);
-    const prev = this.markets.get(prevSlug);
-    if (!prev || !prev.settled) {
-      this._prevWindowWinner = null;
-      this._prevWindowSlug = null;
+  // ── Strategy Logic ─────────────────────────────────────
+  _resetWindow(market) {
+    if (this._windowSlug === market.slug) return; // already reset
+    this._windowSlug = market.slug;
+    this._windowEntries = 0;
+    this._windowActive = null;
+    this._windowTriggered.clear();
+    this._pendingFill = null;
+    this._pendingSL = null;
+    this.log(`📊 Window ${market.slug.slice(-10)} open — base ${this._baseShares}sh — monitoring for ${ENTRY_TRIGGER} trigger`);
+  }
+
+  _getSideTokens(market) {
+    return { up: market.up, down: market.down };
+  }
+
+  // Check if any side reaches 0.80 and fire entry
+  _checkEntry(market, nowS) {
+    if (this._windowActive || this._pendingFill || this._pendingSL) return;
+    if (this._windowEntries >= MAX_ENTRIES_PER_WINDOW) return;
+    if (nowS < market.windowStart + 1) return; // wait at least 1s after window opens
+
+    const { up, down } = this._getSideTokens(market);
+    let triggerSide = null;
+
+    if (up.ask != null && up.ask >= ENTRY_TRIGGER && !this._windowTriggered.has('UP')) {
+      triggerSide = 'UP';
+    } else if (down.ask != null && down.ask >= ENTRY_TRIGGER && !this._windowTriggered.has('DOWN')) {
+      triggerSide = 'DOWN';
+    }
+
+    if (!triggerSide) return;
+
+    this._windowTriggered.add(triggerSide);
+    const triggerPrice = triggerSide === 'UP' ? up.ask : down.ask;
+
+    // Fire entry — fill price will be set on next tick (slippage simulation)
+    this._pendingFill = {
+      slug: market.slug,
+      outcome: triggerSide,
+      shares: this._baseShares,
+      triggerPrice,
+      firedAt: Date.now(),
+    };
+    this.log(`🔥 ENTRY FIRED ${triggerSide} — ${this._baseShares}sh @ ask $${triggerPrice.toFixed(2)} — awaiting fill`);
+  }
+
+  // Resolve pending fill on next tick (slippage simulation)
+  _resolveFill(market) {
+    if (!this._pendingFill) return;
+    const pf = this._pendingFill;
+    const token = pf.outcome === 'UP' ? market.up : market.down;
+
+    // Slippage: fill price = current ask ± random slippage (can be better or worse)
+    const ask = token.ask ?? pf.triggerPrice;
+    // Slippage range: -0.03 (better) to +0.05 (worse), capped at 0.99
+    const slippage = (Math.random() * 0.08 - 0.03); // -0.03 to +0.05
+    let fillPrice = round5(Math.max(0.01, Math.min(0.99, ask + slippage)));
+
+    const cost = round2(pf.shares * fillPrice);
+
+    if (cost > this.bankroll) {
+      this.log(`⚠️ SKIP FILL ${pf.outcome} ${pf.shares}sh — bankroll too low ($${this.bankroll.toFixed(2)})`);
+      this._pendingFill = null;
       return;
     }
 
-    const upMax = prev.finalUpMax ?? 0;
-    const downMax = prev.finalDownMax ?? 0;
+    const position = {
+      slug: pf.slug, outcome: pf.outcome, market,
+      windowStart: market.windowStart, windowEnd: market.windowEnd,
+      shares: pf.shares, entryPrice: fillPrice, cost,
+      openedAt: Date.now(), exitReason: null, exitPrice: null, pnl: null,
+    };
+    this.positions.push(position);
+    this._windowActive = position;
+    this._windowEntries += 1;
+    this.bankroll = round2(this.bankroll - cost);
 
-    if (upMax >= RESOLUTION_THRESHOLD) {
-      this._prevWindowWinner = 'UP';
-    } else if (downMax >= RESOLUTION_THRESHOLD) {
-      this._prevWindowWinner = 'DOWN';
-    } else {
-      this._prevWindowWinner = null; // skip
-    }
-    this._prevWindowSlug = prev.slug;
+    this.trades.push({
+      timestamp: Date.now(), type: 'BUY', slug: pf.slug, outcome: pf.outcome,
+      shares: pf.shares, price: fillPrice, cost,
+      reason: `FILL ask $${ask.toFixed(2)} slippage → $${fillPrice.toFixed(2)} (${pf.shares}sh)`,
+      fee: 0,
+    });
+    this.log(`✅ FILL ${pf.outcome} ${pf.shares}sh @ $${fillPrice.toFixed(2)} (ask was $${ask.toFixed(2)}, slippage ${fillPrice > ask ? '+' : ''}${(fillPrice - ask).toFixed(3)}) · cost $${cost.toFixed(2)} · entry #${this._windowEntries}/${MAX_ENTRIES_PER_WINDOW}`);
+    this._pendingFill = null;
   }
 
-  // ── Window Open: freeze side + place ladder after 2s ────
-  _detectWindow(market) {
-    this.windowStartFor = market.windowStart;
-    this._ordersPlacedForWindow = null;
-    this.finalUpMax = null;
-    this.finalDownMax = null;
+  // Check stop loss at 0.62
+  _checkStopLoss(market) {
+    if (!this._windowActive || this._pendingSL) return;
+    const pos = this._windowActive;
+    const token = pos.outcome === 'UP' ? market.up : market.down;
 
-    // Determine side: FADE the previous winner (contrarian)
-    this._detectPrevWinner(market);
-    const winner = this._prevWindowWinner;
-
-    if (!winner) {
-      this.log(`⏭️ No prev winner (UP max=${(this.markets.get(slugFor(market.windowStart - WINDOW_SECONDS))?.finalUpMax ?? 0).toFixed(3)} DOWN max=${(this.markets.get(slugFor(market.windowStart - WINDOW_SECONDS))?.finalDownMax ?? 0).toFixed(3)}) — skipping ${market.slug.slice(-10)}`);
-    } else {
-      // FADE: buy the LOSING side (mean-reversion)
-      const fadeSide = winner === 'UP' ? 'DOWN' : 'UP';
-      this._windowSide = fadeSide;
-      this.log(`🔍 Window ${market.slug.slice(-10)} — prev winner ${winner} → FADING ${fadeSide} — orders in 2s`);
-    }
-    this.onTick(this.buildState());
-  }
-
-  _placeLadder(market) {
-    const side = this._windowSide;
-    if (!side) {
-      this.onTick(this.buildState());
-      return;
-    }
-
-    this.pendingOrders = [];
-    this.log(`🚀 WINDOW ${market.slug.slice(-10)} — BUY ${side} × ${LADDER.length} limit orders`);
-
-    for (const rung of LADDER) {
-      const cost = round2(rung.shares * rung.price);
-      this.pendingOrders.push({
-        id: `ord_${Date.now()}_${rung.price.toFixed(2)}`,
-        slug: market.slug,
-        outcome: side,
-        limitPrice: rung.price,
-        shares: rung.shares,
-        cost,
-        status: 'PENDING',
-        filledAt: null,
-        fillPrice: null,
-      });
-      this.log(`📋 LIMIT ${side} ${rung.shares}sh @ $${rung.price.toFixed(2)} — PENDING`);
-    }
-    this.onTick(this.buildState());
-  }
-
-  // ── Check pending orders against CLOB book each tick ──
-  _checkFills(market) {
-    if (!this.pendingOrders.length) return;
-    const token = this.pendingOrders[0]?.outcome === 'UP' ? market.up : market.down;
-    if (!token || token.bid == null) return;
-
-    const bid = token.bid;
-    for (const order of this.pendingOrders) {
-      if (order.status !== 'PENDING') continue;
-      if (order.slug !== market.slug) continue;
-      // Limit buy fills when bid ≤ limit price
-      if (bid > order.limitPrice) continue;
-
-      const fillPrice = order.limitPrice;
-      const fillCost = round2(order.shares * fillPrice);
-
-      if (fillCost > this.bankroll) {
-        this.log(`⚠️ SKIP FILL ${order.outcome} ${order.shares}sh @ $${fillPrice.toFixed(2)} — bankroll too low`);
-        order.status = 'CANCELLED';
-        continue;
-      }
-
-      order.status = 'FILLED';
-      order.fillPrice = fillPrice;
-      order.filledAt = Date.now();
-      order.cost = fillCost;
-
-      this.bankroll = round2(this.bankroll - fillCost);
-
-      const position = {
-        slug: order.slug, outcome: order.outcome, market,
-        windowStart: market.windowStart, windowEnd: market.windowEnd,
-        shares: order.shares, entryPrice: fillPrice, cost: fillCost,
-        openedAt: Date.now(), exitReason: null, exitPrice: null, pnl: null,
-      };
-      this.positions.push(position);
-      this.trades.push({
-        timestamp: Date.now(), type: 'BUY', slug: order.slug, outcome: order.outcome,
-        shares: order.shares, price: fillPrice, cost: fillCost,
-        reason: `FILL bid $${bid.toFixed(2)} ≤ limit $${order.limitPrice.toFixed(2)} → $${fillPrice.toFixed(2)}`,
-        fee: 0,
-      });
-      this.log(`✅ FILL ${order.outcome} ${order.shares}sh @ $${fillPrice.toFixed(2)} (bid $${bid.toFixed(2)} ≤ limit) · cost $${fillCost.toFixed(2)}`);
+    if (token.ask != null && token.ask <= STOP_LOSS_PRICE) {
+      // SL triggered — sell at market, fill on next tick
+      this._pendingSL = { ...pos };
+      this.log(`🛑 SL TRIGGERED ${pos.outcome} ${pos.shares}sh — ask $${token.ask.toFixed(2)} ≤ $${STOP_LOSS_PRICE} — selling`);
     }
   }
 
-  // ── Cancel remaining unfilled orders at window end ──────
-  _cancelUnfilled(market) {
-    for (const order of this.pendingOrders) {
-      if (order.status === 'PENDING' && order.slug === market.slug) {
-        order.status = 'CANCELLED';
-        this.log(`❌ CANCEL ${order.outcome} ${order.shares}sh @ $${order.limitPrice.toFixed(2)} — window ended`);
-      }
-    }
+  // Resolve pending SL fill on next tick
+  _resolveSL(market) {
+    if (!this._pendingSL) return;
+    const ps = this._pendingSL;
+    const token = ps.outcome === 'UP' ? market.up : market.down;
+
+    // SL fill with slippage (can be better or worse than 0.62)
+    const ask = token.ask ?? STOP_LOSS_PRICE;
+    const slippage = (Math.random() * 0.06 - 0.03); // -0.03 to +0.03
+    let fillPrice = round5(Math.max(0.01, Math.min(0.99, STOP_LOSS_PRICE + slippage)));
+
+    const proceeds = round2(ps.shares * fillPrice);
+    const pnl = round2(proceeds - ps.cost);
+
+    this.bankroll = round2(this.bankroll + proceeds);
+    this.realizedPnl = round2(this.realizedPnl + pnl);
+    this.losses += 1;
+
+    // Mark position as resolved
+    ps.exitReason = 'STOP_LOSS';
+    ps.exitPrice = fillPrice;
+    ps.pnl = pnl;
+    ps.closedAt = Date.now();
+
+    this.results.unshift({
+      slug: ps.slug, outcome: ps.outcome, shares: ps.shares,
+      entryPrice: ps.entryPrice, cost: ps.cost, exitPrice: fillPrice, pnl,
+      exitReason: 'STOP_LOSS', closedAt: Date.now(), won: false,
+    });
+    this.trades.push({
+      timestamp: Date.now(), type: 'SELL', slug: ps.slug, outcome: ps.outcome,
+      shares: ps.shares, price: fillPrice, pnl,
+      reason: `SL @ $${fillPrice.toFixed(2)} → P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`,
+    });
+    this.log(`❌ SL ${ps.outcome} ${ps.shares}sh sold @ $${fillPrice.toFixed(2)} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`);
+
+    this._windowActive = null;
+    this._pendingSL = null;
+    // Allow re-entry on either side for the 2nd entry
+    this._windowTriggered.clear();
+
+    // Escalate martingale for next entry/window
+    this._baseShares = round2(this._baseShares * MARTINGALE_MULT);
+    this.log(`📈 Martingale → next base ${this._baseShares}sh`);
   }
 
-  // ── Resolution: ≥0.95 final max, otherwise refund ───────
-  _resolveExpiredPositions(market, nowS) {
-    if (!market) return;
-    if (nowS < market.windowEnd) return;
+  // Check resolution (last 1 second of window)
+  _checkResolution(market, nowS) {
+    if (!this._windowActive) return;
+    if (nowS < market.windowEnd - 1) return; // only check in last 1 second
 
-    // Always settle the market once past its window end
+    const pos = this._windowActive;
+    const token = pos.outcome === 'UP' ? market.up : market.down;
+    const ask = token.ask ?? 0;
+
     market.settled = true;
-    const fUp = market.finalUpMax ?? 0;
-    const fDown = market.finalDownMax ?? 0;
+    const won = ask >= RESOLUTION_THRESHOLD;
 
-    let winner = null;
-    if (fUp >= RESOLUTION_THRESHOLD) winner = 'UP';
-    if (fDown >= RESOLUTION_THRESHOLD) winner = 'DOWN';
-
-    const open = this.positions.filter(p => p.exitReason == null && p.slug === market.slug);
-    if (!open.length) {
-      // No positions to resolve, but market is now settled
-      this.log(`🏁 ${market.slug.slice(-10)} settled — ${winner ? winner + ' won' : 'NO WINNER'} (UP max=${fUp.toFixed(3)} DOWN max=${fDown.toFixed(3)}) — no positions`);
-      this.recordEquity();
-      this.onTick(this.buildState());
-      return;
-    }
-
-    if (!winner) {
-      this.log(`⏳ ${market.slug.slice(-10)} — NO WINNER (UP max=${fUp.toFixed(3)} DOWN max=${fDown.toFixed(3)}) — refunding`);
-      for (const pos of open) {
-        const refund = pos.cost;
-        this.bankroll = round2(this.bankroll + refund);
-        this.results.unshift({
-          slug: pos.slug, outcome: pos.outcome, shares: pos.shares,
-          entryPrice: pos.entryPrice, cost: pos.cost, exitPrice: 0, pnl: 0,
-          exitReason: 'UNRESOLVED_REFUND', closedAt: Date.now(), won: null,
-        });
-        this.trades.push({
-          timestamp: Date.now(), type: 'REFUND', slug: pos.slug, outcome: pos.outcome,
-          shares: pos.shares, price: 0, pnl: 0, reason: `UNRESOLVED — UP=${fUp.toFixed(3)} DOWN=${fDown.toFixed(3)} — cost refunded`,
-        });
-        this.log(`   REFUND ${pos.outcome} ${pos.shares}sh @ $${pos.entryPrice.toFixed(2)} — cost $${pos.cost.toFixed(2)} returned`);
-        pos.exitReason = 'UNRESOLVED_REFUND';
-        pos.exitPrice = 0;
-        pos.pnl = 0;
-        pos.closedAt = Date.now();
-      }
-      this.recordEquity();
-      this.onTick(this.buildState());
-      return;
-    }
-
-    let winPayout = 0, lossCost = 0;
-    for (const pos of open) {
-      const won = pos.outcome === winner;
-      const exitPrice = won ? 1 : 0;
-      const proceeds = won ? pos.shares : 0;
+    if (won) {
+      const proceeds = pos.shares; // $1 per share
       const pnl = round2(proceeds - pos.cost);
-      if (pnl >= 0) this.wins++; else this.losses++;
       this.bankroll = round2(this.bankroll + proceeds);
       this.realizedPnl = round2(this.realizedPnl + pnl);
+      this.wins += 1;
+
+      pos.exitReason = 'RESOLUTION_WIN';
+      pos.exitPrice = 1;
       pos.pnl = pnl;
-      pos.exitPrice = exitPrice;
-      pos.exitReason = 'RESOLUTION';
       pos.closedAt = Date.now();
-      pos.won = won;
-      this.results.unshift({ slug: pos.slug, outcome: pos.outcome, shares: pos.shares, entryPrice: pos.entryPrice, cost: pos.cost, exitPrice, pnl, exitReason: 'RESOLUTION', closedAt: Date.now(), won });
+      pos.won = true;
+
+      this.results.unshift({
+        slug: pos.slug, outcome: pos.outcome, shares: pos.shares,
+        entryPrice: pos.entryPrice, cost: pos.cost, exitPrice: 1, pnl,
+        exitReason: 'RESOLUTION_WIN', closedAt: Date.now(), won: true,
+      });
       this.trades.push({
         timestamp: Date.now(), type: 'RESOLVED', slug: pos.slug, outcome: pos.outcome,
-        shares: pos.shares, price: exitPrice, pnl,
-        reason: `${won ? 'WIN' : 'LOSS'} ${pos.outcome} ${pos.shares}sh @ $${pos.entryPrice.toFixed(2)} → P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)} (${winner} won, UP max=${fUp.toFixed(3)} DOWN max=${fDown.toFixed(3)})`,
+        shares: pos.shares, price: 1, pnl,
+        reason: `WIN ${pos.outcome} ${pos.shares}sh @ $${pos.entryPrice.toFixed(2)} → P&L +$${pnl.toFixed(2)} (ask $${ask.toFixed(3)} ≥ 0.95)`,
       });
-      if (won) winPayout += pos.shares; else lossCost += pos.cost;
-      this.log(`${won ? '✅ WIN' : '❌ LOSS'} ${pos.outcome} ${pos.shares}sh @ $${pos.entryPrice.toFixed(2)} → P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`);
+      this.log(`🏆 WIN ${pos.outcome} ${pos.shares}sh @ $${pos.entryPrice.toFixed(2)} → P&L +$${pnl.toFixed(2)} (ask $${ask.toFixed(3)} ≥ 0.95) — martingale RESET to ${BASE_SHARES}sh`);
+
+      // Reset martingale
+      this._baseShares = BASE_SHARES;
+    } else {
+      const pnl = round2(0 - pos.cost);
+      this.bankroll = round2(this.bankroll); // $0 proceeds
+      this.realizedPnl = round2(this.realizedPnl + pnl);
+      this.losses += 1;
+
+      pos.exitReason = 'RESOLUTION_LOSS';
+      pos.exitPrice = 0;
+      pos.pnl = pnl;
+      pos.closedAt = Date.now();
+      pos.won = false;
+
+      this.results.unshift({
+        slug: pos.slug, outcome: pos.outcome, shares: pos.shares,
+        entryPrice: pos.entryPrice, cost: pos.cost, exitPrice: 0, pnl,
+        exitReason: 'RESOLUTION_LOSS', closedAt: Date.now(), won: false,
+      });
+      this.trades.push({
+        timestamp: Date.now(), type: 'RESOLVED', slug: pos.slug, outcome: pos.outcome,
+        shares: pos.shares, price: 0, pnl,
+        reason: `LOSS ${pos.outcome} ${pos.shares}sh @ $${pos.entryPrice.toFixed(2)} → P&L -$${Math.abs(pnl).toFixed(2)} (ask $${ask.toFixed(3)} < 0.95)`,
+      });
+      this.log(`💀 LOSS ${pos.outcome} ${pos.shares}sh @ $${pos.entryPrice.toFixed(2)} → P&L -$${Math.abs(pnl).toFixed(2)} (ask $${ask.toFixed(3)} < 0.95) — martingale → ${this._baseShares}sh`);
+
+      // Escalate martingale for next window
+      this._baseShares = round2(this._baseShares * MARTINGALE_MULT);
     }
-    this.log(`🏁 ${market.slug.slice(-10)} RESOLVED → ${winner} won · payout $${winPayout.toFixed(2)} · loss $${lossCost.toFixed(2)} (UP max=${fUp.toFixed(3)} DOWN max=${fDown.toFixed(3)})`);
+
+    this._windowActive = null;
     this.positions = this.positions.filter(p => p.exitReason == null);
     this.recordEquity();
     this.onTick(this.buildState());
   }
 
-  // ── Evaluate (called every 200ms) ──────────────────────
+  // ── Main evaluate loop ─────────────────────────────────
   evaluate() {
     const now = Date.now();
     const nowS = now / 1000;
@@ -436,39 +430,34 @@ class CheapHunterEngine {
     const market = this.markets.get(slugFor(cs));
     const elapsed = Math.floor(nowS - cs);
 
-    // Resolve previous window
-    const prevStart = Math.floor((nowS - WINDOW_SECONDS) / WINDOW_SECONDS) * WINDOW_SECONDS;
-    const prevMarket = this.markets.get(slugFor(prevStart));
-    if (prevMarket && !prevMarket.settled) {
-      const prevElapsed = Math.floor(nowS - prevMarket.windowStart);
-      if (prevElapsed >= WINDOW_SECONDS) {
-        this._cancelUnfilled(prevMarket);
-        this._resolveExpiredPositions(prevMarket, nowS);
-      }
-    }
-
-    // Resolve current window if past end
-    if (market && !market.settled) {
-      if (elapsed >= WINDOW_SECONDS) {
-        this._cancelUnfilled(market);
-        this._resolveExpiredPositions(market, nowS);
-      }
-    }
+    // Discover current + next window
+    if (!this.markets.has(slugFor(cs))) this.discoverWindow(cs).catch(() => {});
+    if (!this.markets.has(slugFor(cs + WINDOW_SECONDS))) this.discoverWindow(cs + WINDOW_SECONDS).catch(() => {});
 
     if (!market) { this.onTick(this.buildState()); return; }
     if (this.entryWindow != null && market.windowStart < this.entryWindow) { this.onTick(this.buildState()); return; }
 
-    // New window — detect side from previous window winner
-    if (this.windowStartFor !== market.windowStart) this._detectWindow(market);
+    // New window — reset state
+    this._resetWindow(market);
 
-    // Place ladder 2 seconds after window opens
-    if (this.windowStartFor === market.windowStart && !this._ordersPlacedForWindow && elapsed >= 2) {
-      this._ordersPlacedForWindow = market.windowStart;
-      this._placeLadder(market);
+    // During active window — check entry + SL first (may create pendingFill / pendingSL)
+    if (elapsed >= 1 && elapsed < WINDOW_SECONDS) {
+      this._checkEntry(market, nowS);
+      this._checkStopLoss(market);
     }
 
-    // Check pending order fills against CLOB book
-    if (elapsed < WINDOW_SECONDS) this._checkFills(market);
+    // Resolve pending SL fill (sell position)
+    this._resolveSL(market);
+
+    // Resolve pending entry fill (open position)
+    this._resolveFill(market);
+
+    // Check resolution (last 1 second or past window end)
+    if (nowS >= market.windowEnd - 1 || elapsed >= WINDOW_SECONDS) {
+      if (this._windowActive) {
+        this._checkResolution(market, nowS);
+      }
+    }
 
     this.recordEquity();
     this.onTick(this.buildState());
@@ -477,8 +466,8 @@ class CheapHunterEngine {
   // ── Equity tracking ─────────────────────────────────────
   recordEquity() {
     const now = Date.now();
-    const last = this.equityCurve[this.equityCurve.length - 1];
-    if (last && now - last.t < 5000) return; // record every 5s max
+    const last = this.equityCurve.at(-1);
+    if (last && now - last.t < 5000) return;
     const equity = this.markValue();
     this.equityCurve.push({ t: now, equity: round2(equity) });
     if (this.equityCurve.length > 2000) this.equityCurve = this.equityCurve.slice(-1500);
@@ -519,7 +508,7 @@ class CheapHunterEngine {
     }, 0);
     return {
       name: this.name,
-      strategy: `FADE Prev Winner (Contrarian) · ${LADDER.length} limit buys @ ${LADDER.map(r=>r.price+'×'+r.shares).join('/')} · CLOB · no SL · hold to resolution`,
+      strategy: `Momentum Catch · ${ENTRY_TRIGGER} trigger · SL ${STOP_LOSS_PRICE} · ${MAX_ENTRIES_PER_WINDOW} entries/window · ${MARTINGALE_MULT}x martingale · base ${BASE_SHARES}sh`,
       serverTime: now,
       connected: this.pollCount > 0 && this.isClobFresh(now),
       lastError: this.lastError,
@@ -534,17 +523,15 @@ class CheapHunterEngine {
       winRate: this.wins + this.losses ? round2(this.wins / (this.wins + this.losses) * 100) : null,
       entryWindow: this.entryWindow,
       waitingForWindow: this.entryWindow != null && cs < this.entryWindow,
-      prevWindowWinner: this._prevWindowWinner,
+      prevWindowWinner: null,
       currentWindow: market ? this.publicMarket(market) : null,
-      orderLadder: {
-        side: this._windowSide || this._prevWindowWinner || '—',
-        prices: LADDER_PRICES,
-        ladder: LADDER.map(r => ({ price: r.price, shares: r.shares })),
-      },
-      pendingOrders: this.pendingOrders.map(o => ({
-        outcome: o.outcome, limitPrice: o.limitPrice, shares: o.shares,
-        status: o.status, fillPrice: o.fillPrice, filledAt: o.filledAt,
-      })),
+      martingaleBase: this._baseShares,
+      windowEntries: this._windowEntries,
+      maxEntries: MAX_ENTRIES_PER_WINDOW,
+      entryTrigger: ENTRY_TRIGGER,
+      stopLoss: STOP_LOSS_PRICE,
+      pendingFill: this._pendingFill ? { outcome: this._pendingFill.outcome, shares: this._pendingFill.shares, triggerPrice: this._pendingFill.triggerPrice } : null,
+      pendingSL: this._pendingSL ? { outcome: this._pendingSL.outcome, shares: this._pendingSL.shares, entryPrice: this._pendingSL.entryPrice } : null,
       positions: open.map(p => {
         const token = p.outcome === 'UP' ? p.market?.up : p.market?.down;
         const markPrice = token?.mid ?? p.entryPrice;
@@ -554,7 +541,7 @@ class CheapHunterEngine {
       trades: this.trades.slice(-50),
       logs: this.logs,
       equityCurve: this.equityCurve,
-      config: { ladder: LADDER.map(r => ({ price: r.price, shares: r.shares })), bankroll: this.bankroll },
+      config: { baseShares: BASE_SHARES, entryTrigger: ENTRY_TRIGGER, stopLoss: STOP_LOSS_PRICE, martingaleMult: MARTINGALE_MULT, maxEntries: MAX_ENTRIES_PER_WINDOW, bankroll: this.bankroll },
     };
   }
 
@@ -579,7 +566,7 @@ class CheapHunterEngine {
       setInterval(() => this.evaluate(), 200),
       setInterval(() => this.recordEquity(), 1000),
     ];
-    this.log(`🚀 ${this.name} started · ${LADDER.length} limit buys · CLOB-only · FADE contrarian strategy`);
+    this.log(`🚀 ${this.name} started · ${ENTRY_TRIGGER} trigger · SL ${STOP_LOSS_PRICE} · ${MARTINGALE_MULT}x martingale · base ${BASE_SHARES}sh · CLOB-only`);
   }
 
   close() {
@@ -588,4 +575,4 @@ class CheapHunterEngine {
   }
 }
 
-module.exports = { CheapHunterEngine, config: { LADDER, LADDER_PRICES, ORDER_SHARES, START_BANKROLL } };
+module.exports = { MomentumCatchEngine, config: { BASE_SHARES, ENTRY_TRIGGER, STOP_LOSS_PRICE, MARTINGALE_MULT, MAX_ENTRIES_PER_WINDOW, START_BANKROLL } };

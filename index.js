@@ -1,7 +1,7 @@
 'use strict';
 
 const express = require('express');
-const { CheapHunterEngine } = require('./engine');
+const { MomentumCatchEngine } = require('./engine');
 
 process.on('unhandledRejection', (reason) => console.error('[FATAL]', reason));
 process.on('uncaughtException', (err) => console.error('[FATAL]', err));
@@ -9,9 +9,9 @@ process.on('uncaughtException', (err) => console.error('[FATAL]', err));
 const app = express();
 const port = Number(process.env.PORT || 3000);
 
-const engine = new CheapHunterEngine({
-  name: 'FadeBot',
-  onLog: line => console.log(`[PW] ${line}`),
+const engine = new MomentumCatchEngine({
+  name: 'MomentumCatch',
+  onLog: line => console.log(`[MC] ${line}`),
 });
 
 app.disable('x-powered-by');
@@ -21,7 +21,7 @@ app.get('/api/status', (_, res) => res.json(engine.buildState()));
 const dashboard = `<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>FadeBot — BTC 5m</title>
+<title>MomentumCatch — BTC 5m</title>
 <style>
 *{box-sizing:border-box}
 :root{--bg:#000;--panel:#070707;--line:#222;--muted:#9d9d9d;--up:#00ff85;--down:#ff4a68;--amber:#ffc400;--blue:#38d6ff}
@@ -57,22 +57,17 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
 .buy{color:var(--up)}.sell{color:var(--down)}.dim{color:var(--muted);font-size:10px;font-weight:700}
 .logs{height:200px;overflow:auto;background:#010407;border-radius:8px;padding:8px;font-family:"Courier New",monospace;font-size:10px;line-height:1.45;color:#e4e4e4;margin-top:6px;white-space:pre-wrap}
 .log-win{color:var(--up)}.log-loss{color:var(--down)}.log-tp{color:var(--amber)}.log-info{color:var(--blue)}
-.prev-winner-bar{display:grid;grid-template-columns:auto 1fr;gap:8px;align-items:center;margin-bottom:8px}
-.prev-winner-box{border:1px solid var(--line);padding:10px;border-radius:8px;background:#000;text-align:center}
-.prev-winner-box .side-label{font-size:28px;margin-top:2px}
-.prev-winner-box .side-label.up{color:var(--up)}.prev-winner-box .side-label.down{color:var(--down)}.prev-winner-box .side-label.skip{color:var(--muted)}
-.ladder-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin-top:6px}
-.ladder-cell{border:1px solid var(--line);padding:6px;border-radius:6px;background:#000;text-align:center;font-size:11px}
-.ladder-cell.filled{border-color:var(--up);background:#084b31}.ladder-cell.pending{border-color:var(--line)}
-.ladder-price{font-size:13px;margin-top:2px}
-.ladder-shares{font-size:9px;color:var(--muted);margin-top:1px}
-@media(max-width:860px){.metrics{grid-template-columns:repeat(2,1fr)}.two-col{grid-template-columns:1fr}.ladder-grid{grid-template-columns:repeat(4,1fr)}}
+.session-bar{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:8px}
+.session-box{border:1px solid var(--line);padding:10px;border-radius:8px;background:#000;text-align:center}
+.session-box .big{font-size:26px;margin-top:2px}
+.session-box .big.up{color:var(--up)}.session-box .big.down{color:var(--down)}.session-box .big.amber{color:var(--amber)}
+@media(max-width:860px){.metrics{grid-template-columns:repeat(2,1fr)}.two-col{grid-template-columns:1fr}.session-bar{grid-template-columns:1fr}}
 @media(max-width:480px){body{padding:6px;font-size:13px}h1{font-size:16px}.side-price{font-size:24px}.metrics{grid-template-columns:repeat(2,1fr)}}
 </style>
 </head><body>
 <div class="wrap">
   <div class="topbar">
-    <div class="brand"><div class="btc">₿</div><div><h1 id="botName">FadeBot</h1><div class="sub" id="strategy">BTC 5m Binary · Fade Prev Winner (Contrarian)</div></div></div>
+    <div class="brand"><div class="btc">₿</div><div><h1 id="botName">MomentumCatch</h1><div class="sub" id="strategy">BTC 5m Binary · Momentum Catcher</div></div></div>
     <div class="status">
       <span class="pill" id="statusPill">● CONNECTING</span>
       <span class="pill" id="pollPill">—</span>
@@ -87,14 +82,18 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
     <div class="box"><div class="label">Losses</div><div class="value" id="kpiLosses">—</div><div class="small" id="kpiMaxDd"></div></div>
   </div>
 
-  <div class="prev-winner-bar" id="prevWinnerBar">
-    <div class="prev-winner-box" style="min-width:140px">
-      <div class="label">Prev Winner → We Fade</div>
-      <div class="side-label" id="prevWinnerSide">—</div>
+  <div class="session-bar" id="sessionBar">
+    <div class="session-box">
+      <div class="label">Martingale Base</div>
+      <div class="big amber" id="mBase">—</div>
     </div>
-    <div class="panel" id="clockBox">
-      <div class="label">Current Window</div>
-      <div class="clock" id="clock">—<small> sec</small></div>
+    <div class="session-box">
+      <div class="label">Entries This Window</div>
+      <div class="big" id="mEntries">—</div>
+    </div>
+    <div class="session-box">
+      <div class="label">Trigger / SL</div>
+      <div class="big" id="mTrig">—</div>
     </div>
   </div>
 
@@ -118,10 +117,6 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
   <div class="two-col" style="margin-top:8px">
     <div>
       <div class="panel">
-        <div class="section-head"><span>Ladder — <span id="ladderSide">—</span></span><span id="ladderStatus">—</span></div>
-        <div class="ladder-grid" id="ladderGrid"></div>
-      </div>
-      <div class="panel" style="margin-top:8px">
         <div class="section-head"><span id="posCount">0 OPEN</span></div>
         <div class="list" id="posBody"><div class="empty">NO OPEN POSITIONS</div></div>
       </div>
@@ -167,24 +162,19 @@ function renderKpi(d) {
   $('kpiWinRate').textContent = d.winRate != null ? d.winRate + '% WR' : '';
   $('kpiLosses').textContent = d.losses || 0;
   $('kpiMaxDd').textContent = d.maxDrawdown ? 'DD ' + cash(d.maxDrawdown) : '';
-  // Status pills
   const sp = $('statusPill');
   if (d.connected) { sp.textContent = '● LIVE'; sp.className = 'pill live'; }
   else if (d.lastError) { sp.textContent = '● ERROR'; sp.className = 'pill bad'; }
   else { sp.textContent = '● OFFLINE'; sp.className = 'pill bad'; }
   $('pollPill').textContent = 'polls:' + (d.pollCount || 0);
-  // Time
   if (d.currentWindow) {
     const rem = d.currentWindow.remaining;
-    $('clock').innerHTML = rem + '<small> sec</small>';
+    $('clock') ? $('clock').innerHTML = rem + '<small> sec</small>' : null;
     $('timePill').textContent = rem + 's left';
   }
-  // Prev winner
-  const pw = d.prevWindowWinner;
-  const pws = $('prevWinnerSide');
-  if (pw === 'UP') { pws.textContent = '▲ UP'; pws.className = 'side-label up'; }
-  else if (pw === 'DOWN') { pws.textContent = '▼ DOWN'; pws.className = 'side-label down'; }
-  else { pws.textContent = 'SKIP'; pws.className = 'side-label skip'; }
+  $('mBase').textContent = (d.martingaleBase || 0) + ' sh';
+  $('mEntries').textContent = (d.windowEntries || 0) + '/' + (d.maxEntries || 2);
+  $('mTrig').textContent = '$' + (d.entryTrigger || 0).toFixed(2) + ' / $' + (d.stopLoss || 0).toFixed(2);
 }
 function renderMarket(m) {
   if (!m) return;
@@ -197,31 +187,12 @@ function renderMarket(m) {
   $('downAsk').textContent = prc(m.down?.ask);
   $('downSpread').textContent = m.down?.spread != null ? m.down.spread.toFixed(3) : '—';
 }
-function renderLadder(d) {
-  const ol = d.orderLadder;
-  const grid = $('ladderGrid');
-  const side = ol?.side || '—';
-  $('ladderSide').textContent = side;
-  const ladder = ol?.ladder || [];
-  const pp = d.pendingOrders || [];
-  const filled = pp.filter(o => o.status === 'FILLED');
-  const pending = pp.filter(o => o.status === 'PENDING');
-  $('ladderStatus').textContent = filled.length + '/' + ladder.length + ' filled';
-  grid.innerHTML = ladder.map(r => {
-    const fo = filled.find(f => f.limitPrice === r.price);
-    const po = pending.find(f => f.limitPrice === r.price);
-    if (fo) return '<div class="ladder-cell filled"><div class="ladder-price">$' + fo.limitPrice.toFixed(2) + '</div><div class="ladder-shares">' + fo.shares + 'sh FILL @ $' + fo.fillPrice.toFixed(2) + '</div></div>';
-    if (po) return '<div class="ladder-cell pending"><div class="ladder-price">$' + po.limitPrice.toFixed(2) + '</div><div class="ladder-shares">' + po.shares + 'sh PENDING</div></div>';
-    return '<div class="ladder-cell"><div class="ladder-price">$' + r.price.toFixed(2) + '</div><div class="ladder-shares">' + r.shares + 'sh</div></div>';
-  }).join('');
-}
 function renderPositions(a) {
   const b = $('posBody'), ct = $('posCount');
   ct.textContent = (a ? a.length : 0) + ' OPEN';
   b.innerHTML = !a || !a.length ? '<div class="empty">NO OPEN POSITIONS</div>' : a.map(p => {
     const cls = p.unrealized >= 0 ? 'buy' : 'sell';
-    const mark = p.markPrice != null ? p.markPrice : p.entryPrice;
-    return '<div class="trade-item"><div><span class="' + cls + '">' + (p.outcome === 'UP' ? '▲ UP' : '▼ DOWN') + '</span><div class="dim">' + num(p.shares) + 'sh @ $' + p.entryPrice.toFixed(2) + ' · MARK ' + prc(mark) + '</div></div><div class="' + tone(p.unrealized) + '">' + money(p.unrealized) + '</div></div>';
+    return '<div class="trade-item"><div><span class="' + cls + '">' + (p.outcome === 'UP' ? '▲ UP' : '▼ DOWN') + '</span><div class="dim">' + num(p.shares) + 'sh @ $' + p.entryPrice.toFixed(2) + ' · MARK ' + prc(p.markPrice) + '</div></div><div class="' + tone(p.unrealized) + '">' + money(p.unrealized) + '</div></div>';
   }).join('');
 }
 function renderResults(a) {
@@ -237,10 +208,9 @@ function renderFeed(a) {
   const b = $('feedBody'), ct = $('feedCount');
   ct.textContent = (a ? a.length : 0) + ' TRADES';
   b.innerHTML = !a || !a.length ? '<div class="empty">NO TRADES YET</div>' : a.map(tr => {
-    const isBuy = tr.type === 'BUY';
-    const cls = isBuy ? 'buy' : 'sell';
+    const cls = tr.type === 'BUY' || (tr.type === 'RESOLVED' && (tr.pnl || 0) >= 0) ? 'buy' : 'sell';
     const side = tr.outcome === 'UP' ? '▲ UP' : '▼ DOWN';
-    return '<div class="trade-item"><div><span class="' + cls + '">' + (isBuy ? 'BUY' : (tr.type === 'REFUND' ? '↩' : 'SELL')) + ' ' + side + '</span><div class="dim">' + new Date(tr.timestamp).toLocaleTimeString() + ' · ' + num(tr.shares) + 'sh @ $' + tr.price.toFixed(2) + '</div></div><div class="' + cls + '">' + money(tr.pnl || 0) + '</div></div>';
+    return '<div class="trade-item"><div><span class="' + cls + '">' + tr.type + ' ' + side + '</span><div class="dim">' + new Date(tr.timestamp).toLocaleTimeString() + ' · ' + num(tr.shares) + 'sh @ $' + tr.price.toFixed(2) + '</div></div><div class="' + cls + '">' + money(tr.pnl || 0) + '</div></div>';
   }).join('');
 }
 function renderLogs(a) {
@@ -249,9 +219,9 @@ function renderLogs(a) {
   b.innerHTML = (a || []).slice(-80).map(l => {
     let cls = '';
     if (l.includes('WIN')) cls = 'log-win';
-    else if (l.includes('LOSS')) cls = 'log-loss';
+    else if (l.includes('LOSS') || l.includes('SL')) cls = 'log-loss';
     else if (l.includes('💰')) cls = 'log-tp';
-    else if (l.includes('🎯') || l.includes('🏁') || l.includes('BUY') || l.includes('🚀') || l.includes('✅')) cls = 'log-info';
+    else if (l.includes('🔥') || l.includes('✅') || l.includes('🏁') || l.includes('🚀')) cls = 'log-info';
     return '<div class="' + cls + '">' + ESC(l) + '</div>';
   }).join('');
   b.scrollTop = b.scrollHeight;
@@ -259,7 +229,10 @@ function renderLogs(a) {
 function renderConfig(c) {
   if (!c) return;
   const b = $('configBody');
-  b.innerHTML = '<div class="mini" style="display:inline-block;margin-right:6px"><div class="label">Ladder</div><div class="value">' + ((c.ladder || []).map(r => '$'+r.price+'×'+r.shares).join(' · ') || '—') + '</div></div>' +
+  b.innerHTML = '<div class="mini" style="display:inline-block;margin-right:6px"><div class="label">Base</div><div class="value">' + (c.baseShares || 0) + ' sh</div></div>' +
+    '<div class="mini" style="display:inline-block;margin-right:6px"><div class="label">Trigger</div><div class="value">$' + (c.entryTrigger || 0).toFixed(2) + '</div></div>' +
+    '<div class="mini" style="display:inline-block;margin-right:6px"><div class="label">SL</div><div class="value">$' + (c.stopLoss || 0).toFixed(2) + '</div></div>' +
+    '<div class="mini" style="display:inline-block;margin-right:6px"><div class="label">Martingale</div><div class="value">' + (c.martingaleMult || 0).toFixed(1) + 'x</div></div>' +
     '<div class="mini" style="display:inline-block"><div class="label">Capital</div><div class="value">' + cash(c.bankroll) + '</div></div>';
 }
 function renderChart(c) {
@@ -279,7 +252,6 @@ function fullRender(d) {
   $('strategy').textContent = d.strategy || '';
   renderKpi(d);
   renderMarket(d.currentWindow);
-  renderLadder(d);
   renderPositions(d.positions);
   renderResults(d.results);
   renderFeed(d.trades);
@@ -304,6 +276,6 @@ poll();
 app.get('/', (_, res) => res.type('html').send(dashboard));
 
 app.listen(port, '0.0.0.0', () => {
-  console.log(`PrevWinner Bot listening on :${port}`);
+  console.log(`MomentumCatch Bot listening on :${port}`);
   engine.init().catch(e => console.error('Init:', e.message));
 });
