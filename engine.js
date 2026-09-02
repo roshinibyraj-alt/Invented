@@ -342,10 +342,16 @@ class CheapHunterEngine {
   // ── Check pending orders against CLOB book each tick ──
   _checkFills(market) {
     if (!this.pendingOrders.length) return;
-    const token = this.pendingOrders[0]?.outcome === 'UP' ? market.up : market.down;
+    const side = this.pendingOrders[0]?.outcome;
+    const token = side === 'UP' ? market.up : market.down;
     if (!token || token.bid == null) return;
 
     const bid = token.bid;
+    // Debug: log what we're checking every few seconds
+    if (!this._lastFillDebugAt || Date.now() - this._lastFillDebugAt > 5000) {
+      this._lastFillDebugAt = Date.now();
+      this.log(`🔍 FILL CHECK: orders=${side} | token.outcome=${token.outcome} | bid=$${bid.toFixed(3)} | UP.bid=$${(market.up?.bid ?? null)?.toFixed(3)} DOWN.bid=$${(market.down?.bid ?? null)?.toFixed(3)} | limits=${this.pendingOrders.filter(o=>o.status==='PENDING').map(o=>o.limitPrice).join('/')}`);
+    }
     for (const order of this.pendingOrders) {
       if (order.status !== 'PENDING') continue;
       if (order.slug !== market.slug) continue;
