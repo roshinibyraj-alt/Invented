@@ -286,7 +286,7 @@ class CheapHunterEngine {
     this.finalUpMax = null;
     this.finalDownMax = null;
     const color = this.candle.getColor();
-    const side = color === 'GREEN' ? 'UP' : (color === 'RED' ? 'DOWN' : null);
+    const side = color === 'GREEN' ? 'DOWN' : (color === 'RED' ? 'UP' : null);
 
     if (!side) {
       this.log(`⏭️ No candle signal (${color}) — skipping window ${market.slug.slice(-10)}`);
@@ -319,14 +319,14 @@ class CheapHunterEngine {
   _checkFills(market) {
     if (!this.pendingOrders.length) return;
     const token = this.pendingOrders[0]?.outcome === 'UP' ? market.up : market.down;
-    if (!token || token.ask == null) return;
+    if (!token || token.bid == null) return;
 
-    const ask = token.ask;
+    const bid = token.bid;
     for (const order of this.pendingOrders) {
       if (order.status !== 'PENDING') continue;
       if (order.slug !== market.slug) continue;
       // Limit buy fills when ask ≤ limit price (fill at the better of ask or limit)
-      if (ask > order.limitPrice) continue;
+      if (bid > order.limitPrice) continue;
 
       const fillPrice = order.limitPrice;
       const fillCost = round2(order.shares * fillPrice);
@@ -354,10 +354,10 @@ class CheapHunterEngine {
       this.trades.push({
         timestamp: Date.now(), type: 'BUY', slug: order.slug, outcome: order.outcome,
         shares: order.shares, price: fillPrice, cost: fillCost,
-        reason: `FILL ask $${ask.toFixed(2)} ≤ limit $${order.limitPrice.toFixed(2)} → $${fillPrice.toFixed(2)}`,
+        reason: `FILL bid $${bid.toFixed(2)} ≤ limit $${order.limitPrice.toFixed(2)} → $${fillPrice.toFixed(2)}`,
         fee: 0,
       });
-      this.log(`✅ FILL ${order.outcome} ${order.shares}sh @ $${fillPrice.toFixed(2)} (ask $${ask.toFixed(2)} ≤ limit $${order.limitPrice.toFixed(2)}) · cost $${fillCost.toFixed(2)}`);
+      this.log(`✅ FILL ${order.outcome} ${order.shares}sh @ $${fillPrice.toFixed(2)} (bid $${bid.toFixed(2)} ≤ limit $${order.limitPrice.toFixed(2)}) · cost $${fillCost.toFixed(2)}`);
     }
   }
 
@@ -536,7 +536,7 @@ class CheapHunterEngine {
       currentWindow: market ? this.publicMarket(market) : null,
       candle: this.candle.buildState(),
       orderLadder: {
-        side: this.candle.getColor() === 'GREEN' ? 'UP' : (this.candle.getColor() === 'RED' ? 'DOWN' : '—'),
+        side: this.candle.getColor() === 'GREEN' ? 'DOWN' : (this.candle.getColor() === 'RED' ? 'UP' : '—'),
         prices: LADDER_PRICES,
         sharesPerOrder: ORDER_SHARES,
       },
