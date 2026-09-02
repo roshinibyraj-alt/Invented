@@ -63,10 +63,17 @@ const failures = [];
     buys.forEach(b => console.log('   ', b.reason, 'price:', b.price));
     // 3 fills at 0.28 each = 84.00 cost, no fees
     const totalCost = buys.reduce((s, b) => s + b.cost, 0);
-    console.log('  total cost:', totalCost.toFixed(2), '(no fee)');
+    console.log('  fill prices:', buys.map(b => b.price).join(', '));
+    console.log('  total cost:', totalCost.toFixed(2), '(limit price × 100 each)');
     console.log('  capital:', engine.bankroll.toFixed(2));
     if (Math.abs(engine.bankroll - (2000 - totalCost)) > 0.01) failures.push('NOCAP: bankroll ' + engine.bankroll + ' != 2000 - ' + totalCost);
     console.log('  check: 2000 -', totalCost.toFixed(2), '=', (2000 - totalCost).toFixed(2), '✓');
+    // Verify fills are at exact limit prices, not ask price
+    const expectedPrices = [0.40, 0.35, 0.30];
+    const actualPrices = buys.map(b => b.price);
+    for (let i = 0; i < expectedPrices.length; i++) {
+      if (Math.abs(actualPrices[i] - expectedPrices[i]) > 0.001) failures.push('LIMIT: expected fill ' + expectedPrices[i] + ', got ' + actualPrices[i]);
+    }
   }
 
   // Test 3: No signal → no orders placed

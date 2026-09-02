@@ -318,7 +318,7 @@ class CheapHunterEngine {
       // Limit buy fills when ask ≤ limit price (fill at the better of ask or limit)
       if (ask > order.limitPrice) continue;
 
-      const fillPrice = Math.min(ask, order.limitPrice);
+      const fillPrice = order.limitPrice;
       const fillCost = round2(order.shares * fillPrice);
 
       if (fillCost > this.bankroll) {
