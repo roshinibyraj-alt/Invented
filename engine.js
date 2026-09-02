@@ -10,11 +10,12 @@ const CLOB_TIMEOUT_MS= Math.max(400, Number(process.env.CLOB_TIMEOUT_MS || 1500)
 const START_BANKROLL  = Number(process.env.START_BANKROLL || 10000);
 
 const BASE_SHARES       = 100;
-const ENTRY_TRIGGER     = 0.80;
-const STOP_LOSS_PRICE   = 0.62;
+const ENTRY_TRIGGER     = 0.70;
+const STOP_LOSS_PRICE   = 0.50;
 const RESOLUTION_THRESHOLD = 0.95;
 const MARTINGALE_MULT   = 2.5;
 const MAX_ENTRIES_PER_WINDOW = 2;
+const WAIT_SECONDS        = 45;
 const TAKER_FEE = 0.02; // 2% taker fee
 
 // ── Helpers ───────────────────────────────────────────────
@@ -245,7 +246,7 @@ class MomentumCatchEngine {
   _checkEntry(market, nowS) {
     if (this._windowActive || this._pendingFill || this._pendingSL) return;
     if (this._windowEntries >= MAX_ENTRIES_PER_WINDOW) return;
-    if (nowS < market.windowStart + 1) return; // wait at least 1s after window opens
+    if (nowS < market.windowStart + WAIT_SECONDS) return; // wait 45s after window opens
 
     const { up, down } = this._getSideTokens(market);
     let triggerSide = null;
@@ -536,7 +537,7 @@ class MomentumCatchEngine {
     }, 0);
     return {
       name: this.name,
-      strategy: `Momentum Catch · ${ENTRY_TRIGGER} trigger · SL ${STOP_LOSS_PRICE} · ${MAX_ENTRIES_PER_WINDOW} entries/window · ${MARTINGALE_MULT}x martingale · base ${BASE_SHARES}sh`,
+      strategy: `Momentum Catch · ${WAIT_SECONDS}s wait · ${ENTRY_TRIGGER} trigger · SL ${STOP_LOSS_PRICE} · ${MAX_ENTRIES_PER_WINDOW} entries/window · ${MARTINGALE_MULT}x martingale · base ${BASE_SHARES}sh`,
       serverTime: now,
       connected: this.pollCount > 0 && this.isClobFresh(now),
       lastError: this.lastError,
