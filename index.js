@@ -233,6 +233,7 @@ function renderConfig(c) {
     '<div class="mini" style="display:inline-block;margin-right:6px"><div class="label">Trigger</div><div class="value">$' + (c.entryTrigger || 0).toFixed(2) + '</div></div>' +
     '<div class="mini" style="display:inline-block;margin-right:6px"><div class="label">SL</div><div class="value">$' + (c.stopLoss || 0).toFixed(2) + '</div></div>' +
     '<div class="mini" style="display:inline-block;margin-right:6px"><div class="label">Martingale</div><div class="value">' + (c.martingaleMult || 0).toFixed(1) + 'x</div></div>' +
+    '<div class="mini" style="display:inline-block;margin-right:6px"><div class="label">Taker Fee</div><div class="value">' + ((c.takerFeeRate != null ? c.takerFeeRate : 0.02) * 100).toFixed(0) + '%</div></div>' +
     '<div class="mini" style="display:inline-block"><div class="label">Capital</div><div class="value">' + cash(c.bankroll) + '</div></div>';
 }
 function renderChart(c) {
