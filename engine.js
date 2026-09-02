@@ -1,40 +1,104 @@
 'use strict';
 
-// ── Config (env-overridable) ───────────────────────────────
-const GAMMA_API = process.env.GAMMA_API || 'https://gamma-api.polymarket.com';
-const CLOB_REST = process.env.CLOB_REST || 'https://clob.polymarket.com';
-
-const WINDOW_SECONDS = 300;                     // BTC 5m windows
-const WAIT_SECONDS   = Number(process.env.WAIT_SECONDS   || 45);   // (unused, kept for compat)
-const BASE_PCT       = Number(process.env.BASE_PCT       || 0.05); // 5% of bankroll in dollars
-const START_BANKROLL = Number(process.env.START_BANKROLL  || 300);
+// ── Config ────────────────────────────────────────────────
+const GAMMA_API   = process.env.GAMMA_API   || 'https://gamma-api.polymarket.com';
+const CLOB_REST   = process.env.CLOB_REST   || 'https://clob.polymarket.com';
+const WINDOW_SECONDS = 300;
 const TAKER_FEE_RATE = Number(process.env.TAKER_FEE_RATE || 0.07);
 const CLOB_POLL_MS   = Math.max(100, Number(process.env.CLOB_POLL_MS || 300));
 const CLOB_FRESH_MS  = Math.max(CLOB_POLL_MS, Number(process.env.CLOB_FRESH_MS || 1500));
 const CLOB_TIMEOUT_MS= Math.max(400, Number(process.env.CLOB_TIMEOUT_MS || 1500));
+const START_BANKROLL  = Number(process.env.START_BANKROLL || 500);
 
-// Three independent checks — each has its own timeout (seconds) and threshold (ask price)
-const CHECKS = [
-  { id: 1, timeout: Number(process.env.CHECK1_TIMEOUT || 9),  threshold: Number(process.env.CHECK1_THRESHOLD || 0.35) },
-  { id: 2, timeout: Number(process.env.CHECK2_TIMEOUT || 17), threshold: Number(process.env.CHECK2_THRESHOLD || 0.25) },
-  { id: 3, timeout: Number(process.env.CHECK3_TIMEOUT || 30), threshold: Number(process.env.CHECK3_THRESHOLD || 0.20) },
-];
+// Price ladder — 6 limit buy order levels, 100 shares each
+const ORDER_SHARES = 100;
+const LADDER_PRICES = [0.40, 0.35, 0.30, 0.25, 0.20, 0.15];
 
-// ── Helpers ────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────
 function round2(v) { return Math.round(v * 100) / 100; }
 function round5(v) { return Math.round(v * 100000) / 100000; }
-function takerFee(C, p, rate = TAKER_FEE_RATE) { return round5(C * rate * p * (1 - p)); }
+function takerFee(shares, price) { return round5(shares * TAKER_FEE_RATE * price * (1 - price)); }
 function windowStartFor(ms) { return Math.floor(ms / 1000 / WINDOW_SECONDS) * WINDOW_SECONDS; }
 function slugFor(start) { return `btc-updown-5m-${start}`; }
 
+// ── Binance 5m Candle Signal ──────────────────────────────
+class CandleSignalManager {
+  constructor(log) {
+    this.log = log;
+    this.lastClosedCandle = null; // { open, close, color, windowStart }
+    this.currentCandle = null;   // { open, close }
+    this.ws = null;
+    this.connected = false;
+    this.lastColor = null;       // 'GREEN' or 'RED'
+  }
+
+  connect() {
+    try {
+      if (typeof WebSocket === 'undefined') {
+        this.log('⚠️ WebSocket unavailable in this Node version — no candle signal');
+        return;
+      }
+      this.ws = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@kline_5m');
+      this.ws.onopen = () => {
+        this.connected = true;
+        this.log('✅ Binance WS connected (btcusdt 5m kline)');
+      };
+      this.ws.onmessage = (e) => this._onMessage(e);
+      this.ws.onclose = () => {
+        this.connected = false;
+        this.log('🔌 Binance WS closed — reconnecting in 5s');
+        setTimeout(() => this.connect(), 5000);
+      };
+      this.ws.onerror = (err) => {
+        this.connected = false;
+        this.log(`⚠️ Binance WS error: ${err.message || 'unknown'}`);
+      };
+    } catch (err) {
+      this.log(`⚠️ Binance WS failed: ${err.message}`);
+    }
+  }
+
+  _onMessage(event) {
+    try {
+      const msg = JSON.parse(event.data);
+      const k = msg.k;
+      if (!k) return;
+      const o = parseFloat(k.o), c = parseFloat(k.c);
+      this.currentCandle = { open: o, close: c };
+      if (k.x) {
+        const color = c > o ? 'GREEN' : (c < o ? 'RED' : 'NEUTRAL');
+        const closeTime = k.T;
+        const wStart = Math.floor(closeTime / 1000 / WINDOW_SECONDS) * WINDOW_SECONDS;
+        this.lastClosedCandle = { open: o, close: c, color, windowStart: wStart };
+        this.lastColor = color;
+        this.log(`🕯️ Candle closed ${color} (O:${o.toFixed(2)} C:${c.toFixed(2)}) — signals for window ${wStart + WINDOW_SECONDS}`);
+      }
+    } catch (_) {}
+  }
+
+  getColor() {
+    return this.lastColor || 'NEUTRAL';
+  }
+
+  buildState() {
+    const cc = this.currentCandle || this.lastClosedCandle;
+    return {
+      connected: this.connected,
+      lastColor: this.lastColor,
+      candleOpen: cc?.open ?? null,
+      candleClose: cc?.close ?? null,
+    };
+  }
+}
+
+// ── Engine ────────────────────────────────────────────────
 class CheapHunterEngine {
   constructor(options = {}) {
     this.fetchImpl = options.fetchImpl || fetch;
     this.onTick = options.onTick || (() => {});
     this.onLog = options.onLog || (() => {});
-    this.name = options.name || '3 Check Bot';
+    this.name = options.name || 'CandleBot';
     this.startedAt = Date.now();
-
     this.bankroll = options.bankroll ?? START_BANKROLL;
     this.initialBankroll = this.bankroll;
     this.realizedPnl = 0;
@@ -43,27 +107,16 @@ class CheapHunterEngine {
     this.losses = 0;
     this.peakEquity = this.bankroll;
     this.maxDrawdown = 0;
-
     this.markets = new Map();
     this.tokens = new Map();
     this.discoveryJobs = new Map();
     this.currentStart = windowStartFor(Date.now());
-
-    // Per-window state
     this.windowStartFor = null;
-    this.baseCost = 0;
-    this.openEntries = [];          // active position objects (can be up to 3)
-    this.windowChecks = [];         // per-window check state: [{fired, timeout, threshold}]
     this.positions = [];
     this.results = [];
     this.trades = [];
-    this.windowPaused = false;
-    this.windowJustOpened = false;
-    this.pauseReason = null;
-
     this.logs = [];
     this.equityCurve = [{ t: Date.now(), equity: this.bankroll }];
-
     this.entryWindow = null;
     this.pollInFlight = 0;
     this.lastPollAt = null;
@@ -73,6 +126,7 @@ class CheapHunterEngine {
     this.pollCount = 0;
     this.tickCount = 0;
     this.timers = [];
+    this.candle = new CandleSignalManager((m) => this.log(m));
   }
 
   log(message) {
@@ -94,14 +148,14 @@ class CheapHunterEngine {
     try {
       const response = await this.fetchImpl(url, {
         ...options, signal: controller.signal,
-        headers: { 'Content-Type': 'application/json', 'User-Agent': 'cheap-hunter/1.0', ...(options.headers || {}) },
+        headers: { 'Content-Type': 'application/json', 'User-Agent': 'candlebot/1.0', ...(options.headers || {}) },
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       return await response.json();
     } finally { clearTimeout(timer); }
   }
 
-  // ── Discovery ─────────────────────────────────────────────
+  // ── Discovery (slug-only, no fallback) ──────────────────
   discoverWindow(start) {
     const slug = slugFor(start);
     if (this.markets.has(slug)) return Promise.resolve(this.markets.get(slug));
@@ -119,8 +173,8 @@ class CheapHunterEngine {
         const rec = {
           slug, title: market.question || slug, conditionId: market.conditionId,
           windowStart: start, windowEnd: start + WINDOW_SECONDS, settled: false, winner: null,
-          up: this.makeToken(String(tokenIds[ui]), slug, 'UP'),
-          down: this.makeToken(String(tokenIds[di]), slug, 'DOWN'),
+          up: this._makeToken(String(tokenIds[ui]), slug, 'UP'),
+          down: this._makeToken(String(tokenIds[di]), slug, 'DOWN'),
         };
         this.markets.set(slug, rec);
         this.log(`🎯 MARKET ${slug} · ${rec.title}`);
@@ -138,7 +192,7 @@ class CheapHunterEngine {
     return job;
   }
 
-  makeToken(tokenId, slug, outcome) {
+  _makeToken(tokenId, slug, outcome) {
     const token = { tokenId: String(tokenId), slug, outcome, bid: null, ask: null, mid: null, spread: null, topAskNotional: 0, updatedAt: null, bookAsks: [], bookBids: [], prevAsk: null };
     this.tokens.set(token.tokenId, token);
     return token;
@@ -162,6 +216,7 @@ class CheapHunterEngine {
     token.updatedAt = Date.now();
   }
 
+  // ── CLOB Polling ───────────────────────────────────────
   async pollClob() {
     if (this.pollInFlight >= 2) return;
     const now = Date.now();
@@ -198,109 +253,48 @@ class CheapHunterEngine {
     return Boolean(this.lastSuccessfulPollAt && now - this.lastSuccessfulPollAt <= CLOB_FRESH_MS);
   }
 
-  // ── Strategy: 3 independent checks ──────────────────────
-  computeBaseForNextWindow() {
-    this.baseCost = Math.max(1, Math.round(this.bankroll * BASE_PCT * 100) / 100);
-  }
-
-  prepareWindow(market) {
+  // ── Window Open: Place 6 Limit Orders ──────────────────
+  _prepareWindow(market) {
     this.windowStartFor = market.windowStart;
-    this.openEntries = [];
-    this.windowPaused = false;
-    this.pauseReason = null;
-    this.computeBaseForNextWindow();
-    this.windowOpenedAt = Date.now();
-    this.windowJustOpened = true;
-    // Init 3 independent checks — each unfired
-    this.windowChecks = CHECKS.map(c => ({ ...c, fired: false }));
-    const checkDesc = CHECKS.map(c => `C${c.id}≤${c.threshold.toFixed(2)}@${c.timeout}s`).join(' · ');
-    this.log(`🆕 WINDOW ${market.slug.slice(-10)} — BASE $${this.baseCost.toFixed(2)} = ${BASE_PCT*100}% · ${checkDesc}`);
-    this.onTick(this.buildState());
-  }
+    const color = this.candle.getColor();
+    const side = color === 'GREEN' ? 'UP' : (color === 'RED' ? 'DOWN' : null);
 
-  evaluate() {
-    const now = Date.now();
-    const nowS = now / 1000;
-    const cs = windowStartFor(now);
-    const market = this.markets.get(slugFor(cs));
-
-    // Resolve any open positions whose window has ended
-    this.resolveExpired(market, nowS);
-
-    if (!market) return;
-    if (this.entryWindow != null && market.windowStart < this.entryWindow) return;
-    if (this.windowStartFor !== market.windowStart) this.prepareWindow(market);
-
-    const elapsed = Math.floor(nowS - market.windowStart);
-
-    if (!this.windowPaused) {
-
-      // Run each independent check (skip on exact tick window opens to avoid double-fire)
-      if (this.windowJustOpened) {
-        this.windowJustOpened = false;
-      } else {
-        for (const check of this.windowChecks) {
-          if (check.fired) continue;
-          if (elapsed <= check.timeout) {
-            this.tryCheckEntry(market, check, elapsed);
-          } else {
-            check.fired = true;
-            this.log(`⏰ CHECK ${check.id} EXPIRED — no side ≤ ${check.threshold.toFixed(2)} within ${check.timeout}s`);
-          }
-        }
-      }
-    }
-
-    this.recordEquity();
-    this.onTick(this.buildState());
-  }
-
-  tryCheckEntry(market, check, elapsed) {
-    const upAsk = market.up.ask, dnAsk = market.down.ask;
-    if (upAsk == null || dnAsk == null) return;
-    let side = null, ask = null;
-    if (upAsk <= check.threshold && dnAsk <= check.threshold) {
-      ask = upAsk; side = 'UP';
-      if (dnAsk < upAsk) { ask = dnAsk; side = 'DOWN'; }
-    } else if (upAsk <= check.threshold) { side = 'UP'; ask = upAsk; }
-    else if (dnAsk <= check.threshold) { side = 'DOWN'; ask = dnAsk; }
-    if (!side) return; // neither side cheap enough yet
-    check.fired = true;
-    const shares = Math.max(1, Math.floor(this.baseCost / ask));
-    const cost = round2(shares * ask);
-    const fee = takerFee(shares, ask);
-    if (cost + fee > this.bankroll) {
-      this.log(`⚠️ SKIP CHECK ${check.id} ${side} @ ${ask.toFixed(3)} — bankroll $${this.bankroll.toFixed(2)} < cost+fee $${(cost+fee).toFixed(2)}`);
+    if (!side) {
+      this.log(`⏭️ No candle signal (${color}) — skipping window ${market.slug.slice(-10)}`);
+      this.onTick(this.buildState());
       return;
     }
-    this.executeEntry(market, side, shares, ask, check);
-  }
 
-  executeEntry(market, outcome, shares, fillPrice, check) {
-    const price = fillPrice;
-    const cost = round2(shares * price);
-    const fee = takerFee(shares, price);
-    this.bankroll = round2(this.bankroll - cost - fee);
-    this.totalFeesPaid = round2(this.totalFeesPaid + fee);
-    this.openEntry = outcome;
+    this.log(`🚀 WINDOW ${market.slug.slice(-10)} — signal ${color} → BUY ${side} × ${LADDER_PRICES.length} limit orders`);
 
-    const position = {
-      slug: market.slug, outcome, market,
-      windowStart: market.windowStart, windowEnd: market.windowEnd,
-      shares, entryPrice: price, cost, buyFee: fee,
-      openedAt: Date.now(), exitReason: null, exitPrice: null, pnl: null,
-      entryNo: check.id,
-    };
-    this.openEntries.push(position);
-    this.positions.push(position);
-    this.trades.push({ timestamp: Date.now(), type: 'BUY', slug: market.slug, outcome, shares, price, cost, fee,
-      reason: `CHECK ${check.id} · ${outcome} ${shares}sh @ ${price.toFixed(3)} ≤ ${check.threshold.toFixed(2)}` });
-    this.log(`⚡ CHECK ${check.id} BUY ${outcome} ${shares}sh @ ${price.toFixed(3)} · cost $${cost.toFixed(2)} · fee $${fee.toFixed(4)} · ≤ ${check.threshold.toFixed(2)}`);
+    for (const price of LADDER_PRICES) {
+      const cost = round2(ORDER_SHARES * price);
+      const fee = takerFee(ORDER_SHARES, price);
+      if (cost + fee > this.bankroll) {
+        this.log(`⚠️ SKIP BUY ${side} ${ORDER_SHARES}sh @ $${price.toFixed(2)} — bankroll $${this.bankroll.toFixed(2)} < cost+fee $${(cost + fee).toFixed(2)}`);
+        continue;
+      }
+      this.bankroll = round2(this.bankroll - cost - fee);
+      this.totalFeesPaid = round2(this.totalFeesPaid + fee);
+      const position = {
+        slug: market.slug, outcome: side, market,
+        windowStart: market.windowStart, windowEnd: market.windowEnd,
+        shares: ORDER_SHARES, entryPrice: price, cost, buyFee: fee,
+        openedAt: Date.now(), exitReason: null, exitPrice: null, pnl: null,
+      };
+      this.positions.push(position);
+      this.trades.push({
+        timestamp: Date.now(), type: 'BUY', slug: market.slug, outcome: side,
+        shares: ORDER_SHARES, price, cost, fee,
+        reason: `LADDER @ $${price.toFixed(2)} · ${side} ${ORDER_SHARES}sh`,
+      });
+      this.log(`✅ BUY ${side} ${ORDER_SHARES}sh @ $${price.toFixed(2)} · cost $${cost.toFixed(2)} · fee $${fee.toFixed(4)}`);
+    }
     this.onTick(this.buildState());
   }
 
-
-  resolveExpired(market, nowS) {
+  // ── Resolution ─────────────────────────────────────────
+  _resolveExpiredPositions(market, nowS) {
     const open = this.positions.filter(p => p.exitReason == null);
     const buckets = new Map();
     for (const pos of open) {
@@ -322,22 +316,19 @@ class CheapHunterEngine {
       for (const pos of group) {
         const won = pos.outcome === winner;
         const exitPrice = won ? 1 : 0;
-        this.sellPosition(pos, exitPrice, 'RESOLUTION', { winner, won });
-        const payout = won ? pos.shares : 0;
-        if (won) winPayout += payout; else lossCost += pos.cost;
+        this._sellPosition(pos, exitPrice, 'RESOLUTION', { winner, won });
+        if (won) winPayout += pos.shares; else lossCost += pos.cost;
       }
       this.log(`🏁 WINDOW ${m.slug.slice(-10)} RESOLVED → ${winner} won · payout $${winPayout.toFixed(2)} · loss $${lossCost.toFixed(2)}`);
-      // Per-position breakdown
       for (const pos of group) {
-        const side = pos.outcome === winner ? 'WIN' : 'LOSS';
-        this.log(`   ${side} ${pos.outcome} ${pos.shares}sh @ ${pos.entryPrice.toFixed(3)} → P&L ${pos.pnl >= 0 ? '+' : '-'}$${Math.abs(pos.pnl).toFixed(2)}`);
+        const tag = pos.outcome === winner ? 'WIN' : 'LOSS';
+        this.log(`   ${tag} ${pos.outcome} ${pos.shares}sh @ $${pos.entryPrice.toFixed(2)} → P&L ${pos.pnl >= 0 ? '+' : '-'}$${Math.abs(pos.pnl).toFixed(2)}`);
       }
-
     }
     if (buckets.size) this.positions = this.positions.filter(p => p.exitReason == null);
   }
 
-  sellPosition(position, price, reason, extra = {}) {
+  _sellPosition(position, price, reason, extra = {}) {
     if (position.exitReason != null) return;
     const proceeds = round2(position.shares * price);
     const fee = (price > 0 && price < 1) ? takerFee(position.shares, price) : 0;
@@ -354,35 +345,49 @@ class CheapHunterEngine {
     position.won = extra.won != null ? extra.won : pnl > 0;
     this.results.unshift({ ...position, market: undefined });
     this.results = this.results.slice(0, 50);
-    this.trades.push({ timestamp: Date.now(), type: 'SELL', slug: position.slug, outcome: position.outcome, shares: position.shares, price, pnl, fee, reason, ...extra });
-    const tag = reason === 'RESOLUTION' ? '🏁 RESOLUTION' : '💰 SELL';
-    this.log(`${tag} C${position.entryNo} ${position.outcome} @ ${price.toFixed(2)} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)} · ${position.shares}sh`);
+    this.trades.push({
+      timestamp: Date.now(), type: 'SELL', slug: position.slug, outcome: position.outcome,
+      shares: position.shares, price, pnl, fee, reason, ...extra,
+    });
+    this.log(`💰 SELL ${position.outcome} @ ${price.toFixed(2)} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)} · ${position.shares}sh`);
     this.recordEquity();
     this.onTick(this.buildState());
   }
 
-  // ── State / equity ────────────────────────────────────────
+  // ── Evaluate (called every 200ms) ──────────────────────
+  evaluate() {
+    const now = Date.now();
+    const nowS = now / 1000;
+    const cs = windowStartFor(now);
+    const market = this.markets.get(slugFor(cs));
+    this._resolveExpiredPositions(market, nowS);
+    if (!market) { this.onTick(this.buildState()); return; }
+    if (this.entryWindow != null && market.windowStart < this.entryWindow) { this.onTick(this.buildState()); return; }
+    if (this.windowStartFor !== market.windowStart) this._prepareWindow(market);
+    this.recordEquity();
+    this.onTick(this.buildState());
+  }
+
+  // ── State ──────────────────────────────────────────────
   markValue() {
-    const open = this.positions.filter(p => p.exitReason == null);
-    const openCost = open.reduce((s, p) => s + p.cost, 0);
-    const openMv = open.reduce((s, p) => {
-      const token = p.outcome === 'UP' ? p.market?.up : p.market?.down;
-      const mark = token?.mid ?? p.entryPrice;
-      return s + round2(p.shares * mark);
-    }, 0);
-    return round2(this.bankroll + openMv - openCost - open.reduce((s, p) => s + (p.buyFee || 0), 0));
+    let mark = this.bankroll;
+    for (const pos of this.positions.filter(p => p.exitReason == null)) {
+      const token = pos.outcome === 'UP' ? pos.market?.up : pos.market?.down;
+      const price = token?.mid ?? pos.entryPrice;
+      mark = round2(mark + pos.shares * price);
+    }
+    return mark;
   }
 
   publicMarket(market) {
-    const now = Date.now();
     return {
       slug: market.slug, title: market.title,
       windowStart: market.windowStart, windowEnd: market.windowEnd,
-      remaining: Math.max(0, market.windowEnd - Math.floor(now / 1000)),
-      elapsed: Math.max(0, Math.floor(now / 1000 - market.windowStart)),
       settled: market.settled, winner: market.winner,
-      up: { bid: market.up.bid, ask: market.up.ask, mid: market.up.mid, spread: market.up.spread, topAskNotional: market.up.topAskNotional, updatedAt: market.up.updatedAt },
-      down: { bid: market.down.bid, ask: market.down.ask, mid: market.down.mid, spread: market.down.spread, topAskNotional: market.down.topAskNotional, updatedAt: market.down.updatedAt },
+      elapsed: Math.max(0, Math.floor(Date.now() / 1000) - market.windowStart),
+      remaining: Math.max(0, market.windowEnd - Math.floor(Date.now() / 1000)),
+      up:   { bid: market.up.bid, ask: market.up.ask, mid: market.up.mid, spread: market.up.spread },
+      down: { bid: market.down.bid, ask: market.down.ask, mid: market.down.mid, spread: market.down.spread },
     };
   }
 
@@ -397,14 +402,12 @@ class CheapHunterEngine {
       return s + round2(p.shares * mark - p.cost);
     }, 0);
     return {
-      version: '4.0.0',
       name: this.name,
-      strategy: `3-Check CheapHunter · C1≤0.35@9s · C2≤0.25@17s · C3≤0.20@30s · ${BASE_PCT*100}% base`,
+      strategy: `Candle Color + Ladder · 6 limit buys @ 0.40-0.15 · ${ORDER_SHARES}sh each · ${LADDER_PRICES.length}× ${ORDER_SHARES}sh`,
       serverTime: now,
-      connected: this.pollCount > 0 || this.tickCount > 0,
+      connected: this.pollCount > 0,
       lastError: this.lastError,
       pollCount: this.pollCount,
-      tickCount: this.tickCount,
       lastSuccessfulPollAt: this.lastSuccessfulPollAt,
       bankroll: this.bankroll,
       markValue: this.markValue(),
@@ -416,29 +419,35 @@ class CheapHunterEngine {
       winRate: this.wins + this.losses ? round2(this.wins / (this.wins + this.losses) * 100) : null,
       entryWindow: this.entryWindow,
       waitingForWindow: this.entryWindow != null && cs < this.entryWindow,
-      windowPaused: this.windowPaused,
       currentWindow: market ? this.publicMarket(market) : null,
-      baseCost: this.baseCost,
-      openEntryCount: this.openEntries.length,
-      windowElapsed: market ? Math.max(0, Math.floor(now / 1000 - market.windowStart)) : 0,
-      checks: (this.windowChecks || []).map(c => ({ id: c.id, threshold: c.threshold, timeout: c.timeout, fired: c.fired })),
+      candle: this.candle.buildState(),
+      orderLadder: {
+        side: this.candle.getColor() === 'GREEN' ? 'UP' : (this.candle.getColor() === 'RED' ? 'DOWN' : '—'),
+        prices: LADDER_PRICES,
+        sharesPerOrder: ORDER_SHARES,
+      },
       positions: open.map(p => {
         const token = p.outcome === 'UP' ? p.market?.up : p.market?.down;
         const mark = token?.mid ?? p.entryPrice;
-        return { outcome: p.outcome, shares: p.shares, entryPrice: p.entryPrice, cost: p.cost, markPrice: mark, unrealized: round2(p.shares * mark - p.cost), remaining: p.windowEnd ? Math.max(0, p.windowEnd - Math.floor(now / 1000)) : null, entryNo: p.entryNo };
+        return {
+          outcome: p.outcome, shares: p.shares, entryPrice: p.entryPrice,
+          cost: p.cost, markPrice: mark,
+          unrealized: round2(p.shares * mark - p.cost),
+          remaining: p.windowEnd ? Math.max(0, p.windowEnd - Math.floor(now / 1000)) : null,
+        };
       }),
       tradeCount: this.trades.length,
       trades: this.trades.slice(-60).reverse(),
       results: this.results.slice(0, 30),
-      equityCurve: this.equityCurveForUi(),
+      equityCurve: this._equityCurveForUi(),
       logs: this.logs.slice(-160),
       peakEquity: this.peakEquity,
       drawdown: round2(this.peakEquity - this.markValue()),
       maxDrawdown: this.maxDrawdown,
       uptime: Math.floor((now - this.startedAt) / 1000),
       config: {
-        checks: CHECKS,  basePct: BASE_PCT, baseCost: this.baseCost,
-        bankroll: this.initialBankroll, pollMs: CLOB_POLL_MS, takerFeeRate: TAKER_FEE_RATE,
+        ladderPrices: LADDER_PRICES, orderShares: ORDER_SHARES,
+        bankroll: this.initialBankroll, takerFeeRate: TAKER_FEE_RATE,
       },
     };
   }
@@ -454,7 +463,7 @@ class CheapHunterEngine {
     }
   }
 
-  equityCurveForUi() {
+  _equityCurveForUi() {
     const FULL = this.equityCurve;
     if (FULL.length <= 3000) return FULL;
     const step = Math.ceil(FULL.length / 3000);
@@ -465,26 +474,30 @@ class CheapHunterEngine {
     return out;
   }
 
-  // ── Main loop ─────────────────────────────────────────────
+  // ── Init & Cleanup ─────────────────────────────────────
   async init() {
     const start = windowStartFor(Date.now());
     this.entryWindow = start + WINDOW_SECONDS;
     this.log(`⏳ Started mid-window ${start} — trading begins at next window ${this.entryWindow}`);
     await Promise.all([this.discoverWindow(start), this.discoverWindow(start + WINDOW_SECONDS)]);
+    this.candle.connect();
     this.timers = [
       setInterval(() => { this.pollClob().catch(() => {}); }, CLOB_POLL_MS),
-      setInterval(() => { this.discoverWindow(windowStartFor(Date.now())).catch(() => {}); this.discoverWindow(windowStartFor(Date.now()) + WINDOW_SECONDS).catch(() => {}); }, 5000),
+      setInterval(() => {
+        this.discoverWindow(windowStartFor(Date.now())).catch(() => {});
+        this.discoverWindow(windowStartFor(Date.now()) + WINDOW_SECONDS).catch(() => {});
+      }, 5000),
       setInterval(() => this.evaluate(), 200),
       setInterval(() => this.recordEquity(), 1000),
     ];
-    const checkDesc = CHECKS.map(c => `C${c.id}≤${c.threshold} within ${c.timeout}s`).join(' · ');
-    this.log(`🚀 CheapHunter started | ${checkDesc} · ${BASE_PCT*100}% base · no SL · no martingale`);
+    this.log(`🚀 CandleBot started | Candle-color signal + 6-limit ladder · ${ORDER_SHARES}sh each · no SL · no TP · hold to resolution`);
   }
 
   close() {
     for (const t of this.timers) clearInterval(t);
     this.timers = [];
+    if (this.candle.ws) try { this.candle.ws.close(); } catch (_) {}
   }
 }
 
-module.exports = { CheapHunterEngine, config: { CHECKS, BASE_PCT, START_BANKROLL, CLOB_POLL_MS, TAKER_FEE_RATE } };
+module.exports = { CheapHunterEngine, config: { LADDER_PRICES, ORDER_SHARES, START_BANKROLL, CLOB_POLL_MS, TAKER_FEE_RATE } };

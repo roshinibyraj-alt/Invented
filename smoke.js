@@ -2,29 +2,9 @@
 const { CheapHunterEngine } = require('./engine');
 
 const WINDOW = 300;
-const START = 300;
 const FIRST_WINDOW = Math.floor(Date.now() / 1000 / WINDOW) * WINDOW;
 
-let step = 0, mode = null, nowMs = 0;
 const windowTokens = {};
-
-function askOf(p) { return Math.round((p + 0.005) * 100) / 100; }
-
-function upPrice() {
-  const d = step;
-  if (mode === 'all3') return 0.80;
-  if (mode === 'c3-only') return d < 29 ? 0.50 : 0.80;
-  if (mode === 'no-fire') return d < 29 ? 0.50 : 0.55;
-  return d < 29 ? 0.50 : 0.80;
-}
-function dnPrice() {
-  const d = step;
-  if (mode === 'all3') return 0.15;
-  if (mode === 'c3-only') return d < 29 ? 0.50 : 0.15;
-  if (mode === 'no-fire') return d < 29 ? 0.50 : 0.45;
-  return (d >= 25 && d < 29) ? 0.18 : (d < 25 ? 0.50 : 0.45);
-}
-
 function fakeFetch(url, options) {
   if (url.includes('gamma-api')) {
     const slug = url.match(/slug=(btc-updown-5m-\d+)/)?.[1] || 'test';
@@ -32,62 +12,62 @@ function fakeFetch(url, options) {
     windowTokens[wStart] = { up: 'tok_up_' + wStart, dn: 'tok_dn_' + wStart };
     return Promise.resolve({ ok: true, json: () => Promise.resolve([{ conditionId: '0x' + wStart, question: 'BTC ' + wStart, outcomes: JSON.stringify(['Up', 'Down']), clobTokenIds: JSON.stringify([windowTokens[wStart].up, windowTokens[wStart].dn]), closed: false }]) });
   }
-  const up = upPrice(), dn = dnPrice();
   const books = [];
   for (const wStart of Object.keys(windowTokens)) {
-    books.push({ asset_id: windowTokens[wStart].up, asks: [{ price: askOf(up), size: 100 }], bids: [] });
-    books.push({ asset_id: windowTokens[wStart].dn, asks: [{ price: askOf(dn), size: 100 }], bids: [] });
+    books.push({ asset_id: windowTokens[wStart].up, asks: [{ price: 0.50, size: 100 }], bids: [{ price: 0.49, size: 100 }] });
+    books.push({ asset_id: windowTokens[wStart].dn, asks: [{ price: 0.50, size: 100 }], bids: [{ price: 0.49, size: 100 }] });
   }
   return Promise.resolve({ ok: true, json: () => Promise.resolve(books) });
 }
 
-async function runWindowPart(engine, wStart, m, durSeconds) {
-  mode = m;
-  step = 0;
-  nowMs = wStart * 1000;
-  Date.now = () => nowMs;
-  await engine.discoverWindow(wStart);
-  for (let s = 0; s < durSeconds + 2; s++) {
-    await engine.pollClob();
-    engine.evaluate();
-    nowMs += 1000;
-    step += 1;
-  }
-  return (engine.trades || []).filter(t => t.type === 'BUY');
-}
-
 const failures = [];
 (async () => {
-  // Test 1: no check fires (nothing cheap)
+  // Test 1: GREEN signal → BUY UP × 6
   {
-    const engine = new CheapHunterEngine({ fetchImpl: fakeFetch, bankroll: START, onTick: () => {}, onLog: () => {} });
-    engine.entryWindow = 0;
-    const buys = await runWindowPart(engine, FIRST_WINDOW, 'no-fire', 35);
-    console.log('\n--- NO CHEAP (no fire) ---');
-    console.log('  buys:', buys.length, '| bank:', engine.bankroll.toFixed(2));
-    if (buys.length !== 0) failures.push('NO-FIRE: expected 0 buys');
-  }
-
-  // Test 2: c3-only fires (DN <0.20 at 29s only)
-  {
-    const engine = new CheapHunterEngine({ fetchImpl: fakeFetch, bankroll: START, onTick: () => {}, onLog: () => {} });
-    engine.entryWindow = 0;
-    const buys = await runWindowPart(engine, FIRST_WINDOW + WINDOW, 'c3-only', 35);
-    console.log('\n--- C3 ONLY ---');
+    const engine = new CheapHunterEngine({ fetchImpl: fakeFetch, bankroll: 500, onTick: () => {}, onLog: () => {} });
+    engine.entryWindow = FIRST_WINDOW;   // allow trading NOW
+    engine.candle.lastColor = 'GREEN';
+    await engine.discoverWindow(FIRST_WINDOW);
+    await engine.discoverWindow(FIRST_WINDOW + WINDOW);
+    engine.evaluate();
+    const buys = (engine.trades || []).filter(t => t.type === 'BUY');
+    console.log('\n--- GREEN → BUY UP × 6 ---');
     buys.forEach(b => console.log('   ', b.reason));
     console.log('  buys:', buys.length);
-    if (buys.length !== 1) failures.push('C3: expected 1 buy, got ' + buys.length);
+    if (buys.length !== 6) failures.push('GREEN: expected 6 buys, got ' + buys.length);
+    if (buys.some(b => b.outcome !== 'UP')) failures.push('GREEN: all buys should be UP');
+    const costTotal = buys.reduce((s, b) => s + b.cost, 0);
+    console.log('  capital after:', engine.bankroll.toFixed(2), '| cost:', costTotal.toFixed(2));
   }
 
-  // Test 3: all 3 fire (DN cheap from start at 0.15)
+  // Test 2: RED signal → BUY DOWN × 6
   {
-    const engine = new CheapHunterEngine({ fetchImpl: fakeFetch, bankroll: START, onTick: () => {}, onLog: () => {} });
-    engine.entryWindow = 0;
-    const buys = await runWindowPart(engine, FIRST_WINDOW + WINDOW * 2, 'all3', 35);
-    console.log('\n--- ALL 3 FIRE ---');
+    const engine = new CheapHunterEngine({ fetchImpl: fakeFetch, bankroll: 500, onTick: () => {}, onLog: () => {} });
+    engine.entryWindow = FIRST_WINDOW;
+    engine.candle.lastColor = 'RED';
+    await engine.discoverWindow(FIRST_WINDOW);
+    await engine.discoverWindow(FIRST_WINDOW + WINDOW);
+    engine.evaluate();
+    const buys = (engine.trades || []).filter(t => t.type === 'BUY');
+    console.log('\n--- RED → BUY DOWN × 6 ---');
     buys.forEach(b => console.log('   ', b.reason));
     console.log('  buys:', buys.length);
-    if (buys.length !== 3) failures.push('ALL3: expected 3 buys, got ' + buys.length);
+    if (buys.length !== 6) failures.push('RED: expected 6 buys, got ' + buys.length);
+    if (buys.some(b => b.outcome !== 'DOWN')) failures.push('RED: all buys should be DOWN');
+  }
+
+  // Test 3: NO SIGNAL → skip
+  {
+    const engine = new CheapHunterEngine({ fetchImpl: fakeFetch, bankroll: 500, onTick: () => {}, onLog: () => {} });
+    engine.entryWindow = FIRST_WINDOW;
+    engine.candle.lastColor = null;
+    await engine.discoverWindow(FIRST_WINDOW);
+    await engine.discoverWindow(FIRST_WINDOW + WINDOW);
+    engine.evaluate();
+    const buys = (engine.trades || []).filter(t => t.type === 'BUY');
+    console.log('\n--- NO SIGNAL → skip ---');
+    console.log('  buys:', buys.length);
+    if (buys.length !== 0) failures.push('NOSIGNAL: expected 0 buys, got ' + buys.length);
   }
 
   console.log('\n=== SMOKE RESULT ===');

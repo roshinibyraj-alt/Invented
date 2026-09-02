@@ -1,12 +1,16 @@
 {
-  "name": "cheap-hunter-45",
-  "version": "4.0.0",
-  "description": "BTC 5m CheapHunter: 3 independent checks (0.35@9s, 0.25@17s, 0.20@30s), TP 0.50, no SL, no martingale",
+  "name": "candlebot-ladder",
+  "version": "5.0.0",
+  "description": "CandleBot: Binance 5m candle color signal \u2192 6 limit buys (0.40-0.15) 100sh each, hold to resolution, demo $500",
   "main": "index.js",
-  "engines": { "node": ">=18.0.0" },
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "scripts": {
     "start": "node index.js",
     "smoke": "node smoke.js"
   },
-  "dependencies": { "express": "^4.19.2" }
+  "dependencies": {
+    "express": "^4.19.2"
+  }
 }
