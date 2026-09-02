@@ -109,6 +109,8 @@ class CheapHunterEngine {
     this.discoveryJobs = new Map();
     this.currentStart = windowStartFor(Date.now());
     this.windowStartFor = null;
+    this._ordersPlacedForWindow = null;
+    this._windowColor = null;
     this.positions = [];           // filled positions (holding to resolution)
     this.pendingOrders = [];       // limit orders waiting for ask to reach limit
     this.finalUpMax = null;
@@ -281,11 +283,18 @@ class CheapHunterEngine {
   }
 
   // ── Window Open: Place 6 PENDING limit orders ──────────
-  _prepareWindow(market) {
+  _detectWindow(market) {
+    // Freeze candle color at window open — won't change even if Binance candle flips mid-window
     this.windowStartFor = market.windowStart;
+    this._ordersPlacedForWindow = null;
+    this._windowColor = this.candle.getColor();
     this.finalUpMax = null;
     this.finalDownMax = null;
-    const color = this.candle.getColor();
+    this.log(`🔍 Window ${market.slug.slice(-10)} opened — candle ${this._windowColor} — orders in 2s`);
+  }
+
+  _placeLadder(market) {
+    const color = this._windowColor;
     const side = color === 'GREEN' ? 'UP' : (color === 'RED' ? 'DOWN' : null);
 
     if (!side) {
@@ -473,8 +482,14 @@ class CheapHunterEngine {
     if (!market) { this.onTick(this.buildState()); return; }
     if (this.entryWindow != null && market.windowStart < this.entryWindow) { this.onTick(this.buildState()); return; }
 
-    // New window — place limit orders
-    if (this.windowStartFor !== market.windowStart) this._prepareWindow(market);
+    // New window — detect signal (freeze candle color)
+    if (this.windowStartFor !== market.windowStart) this._detectWindow(market);
+
+    // Place ladder 2 seconds after window opens
+    if (this.windowStartFor === market.windowStart && !this._ordersPlacedForWindow && elapsed >= 2) {
+      this._ordersPlacedForWindow = market.windowStart;
+      this._placeLadder(market);
+    }
 
     // Check pending order fills against CLOB book
     if (elapsed < WINDOW_SECONDS) this._checkFills(market);
