@@ -260,6 +260,21 @@ class CheapHunterEngine {
       this.pollCount += 1;
       this.tickCount += 1;
 
+      // Validate token mapping on first poll — swap if mid prices are inverted
+      if (this.pollCount === 1) {
+        for (const m of markets) {
+          if (m.up.mid != null && m.down.mid != null && m.up.mid < m.down.mid) {
+            this.log(`⚠️ Token swap detected: UP mid $${m.up.mid.toFixed(3)} < DOWN mid $${m.down.mid.toFixed(3)} — swapping`);
+            const tmp = { ...m.up };
+            Object.assign(m.up, m.down, { outcome: 'UP' });
+            Object.assign(m.down, tmp, { outcome: 'DOWN' });
+            // Update tokens map too
+            this.tokens.set(m.up.tokenId, m.up);
+            this.tokens.set(m.down.tokenId, m.down);
+          }
+        }
+      }
+
       // Immediately check fills after fresh book data
       try {
         const cs2 = windowStartFor(Date.now());
