@@ -207,6 +207,27 @@ class MomentumCatchEngine {
   // ── Strategy Logic ─────────────────────────────────────
   _resetWindow(market) {
     if (this._windowSlug === market.slug) return; // already reset
+
+    // Force-close any leftover positions from the previous window
+    const oldPositions = this.positions.filter(p => p.exitReason == null && p.slug !== market.slug);
+    for (const pos of oldPositions) {
+      // Treat unresolved position as a loss (cost was already deducted)
+      pos.exitReason = 'UNRESOLVED_LOSS';
+      pos.exitPrice = 0;
+      pos.pnl = -pos.cost;
+      pos.closedAt = Date.now();
+      pos.won = false;
+      this.losses += 1;
+      this.realizedPnl = round2(this.realizedPnl - pos.cost);
+      this.results.unshift({
+        slug: pos.slug, outcome: pos.outcome, shares: pos.shares,
+        entryPrice: pos.entryPrice, cost: pos.cost, exitPrice: 0, pnl: -pos.cost,
+        exitReason: 'UNRESOLVED_LOSS', closedAt: Date.now(), won: false,
+      });
+      this.log(`🧹 UNRESOLVED ${pos.outcome} ${pos.shares}sh — treated as loss, cost $${pos.cost.toFixed(2)} written off`);
+    }
+    this.positions = this.positions.filter(p => p.exitReason == null);
+
     this._windowSlug = market.slug;
     this._windowEntries = 0;
     this._windowActive = null;
