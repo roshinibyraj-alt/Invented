@@ -4,11 +4,10 @@
 const GAMMA_API   = process.env.GAMMA_API   || 'https://gamma-api.polymarket.com';
 const CLOB_REST   = process.env.CLOB_REST   || 'https://clob.polymarket.com';
 const WINDOW_SECONDS = 300;
-const TAKER_FEE_RATE = Number(process.env.TAKER_FEE_RATE || 0.07);
 const CLOB_POLL_MS   = Math.max(100, Number(process.env.CLOB_POLL_MS || 300));
 const CLOB_FRESH_MS  = Math.max(CLOB_POLL_MS, Number(process.env.CLOB_FRESH_MS || 1500));
 const CLOB_TIMEOUT_MS= Math.max(400, Number(process.env.CLOB_TIMEOUT_MS || 1500));
-const START_BANKROLL  = Number(process.env.START_BANKROLL || 500);
+const START_BANKROLL  = Number(process.env.START_BANKROLL || 2000);
 
 // Price ladder — 6 limit buy order levels, 100 shares each
 const ORDER_SHARES = 100;
@@ -20,7 +19,6 @@ const RESOLUTION_THRESHOLD = 0.95;
 // ── Helpers ───────────────────────────────────────────────
 function round2(v) { return Math.round(v * 100) / 100; }
 function round5(v) { return Math.round(v * 100000) / 100000; }
-function takerFee(shares, price) { return round5(shares * TAKER_FEE_RATE * price * (1 - price)); }
 function windowStartFor(ms) { return Math.floor(ms / 1000 / WINDOW_SECONDS) * WINDOW_SECONDS; }
 function slugFor(start) { return `btc-updown-5m-${start}`; }
 
@@ -102,8 +100,7 @@ class CheapHunterEngine {
     this.bankroll = options.bankroll ?? START_BANKROLL;
     this.initialBankroll = this.bankroll;
     this.realizedPnl = 0;
-    this.totalFeesPaid = 0;
-    this.wins = 0;
+        this.wins = 0;
     this.losses = 0;
     this.peakEquity = this.bankroll;
     this.maxDrawdown = 0;
@@ -292,14 +289,13 @@ class CheapHunterEngine {
 
     for (const price of LADDER_PRICES) {
       const cost = round2(ORDER_SHARES * price);
-      const fee = takerFee(ORDER_SHARES, price);
       this.pendingOrders.push({
         id: `ord_${Date.now()}_${price.toFixed(2)}`,
         slug: market.slug,
         outcome: side,
         limitPrice: price,
         shares: ORDER_SHARES,
-        cost, buyFee: fee,
+        cost,
         status: 'PENDING',
         filledAt: null,
         fillPrice: null,
@@ -322,12 +318,10 @@ class CheapHunterEngine {
       // Limit buy fills when ask ≤ limit price (fill at the better of ask or limit)
       if (ask > order.limitPrice) continue;
 
-      // Fill this order at the ask price (realistic: fill at market)
       const fillPrice = Math.min(ask, order.limitPrice);
       const fillCost = round2(order.shares * fillPrice);
-      const fillFee = takerFee(order.shares, fillPrice);
 
-      if (fillCost + fillFee > this.bankroll) {
+      if (fillCost > this.bankroll) {
         this.log(`⚠️ SKIP FILL ${order.outcome} ${order.shares}sh @ $${fillPrice.toFixed(2)} — bankroll too low`);
         order.status = 'CANCELLED';
         continue;
@@ -337,22 +331,21 @@ class CheapHunterEngine {
       order.fillPrice = fillPrice;
       order.filledAt = Date.now();
       order.cost = fillCost;
-      order.buyFee = fillFee;
 
-      this.bankroll = round2(this.bankroll - fillCost - fillFee);
-      this.totalFeesPaid = round2(this.totalFeesPaid + fillFee);
+      this.bankroll = round2(this.bankroll - fillCost);
 
       const position = {
         slug: order.slug, outcome: order.outcome, market,
         windowStart: market.windowStart, windowEnd: market.windowEnd,
-        shares: order.shares, entryPrice: fillPrice, cost: fillCost, buyFee: fillFee,
+        shares: order.shares, entryPrice: fillPrice, cost: fillCost,
         openedAt: Date.now(), exitReason: null, exitPrice: null, pnl: null,
       };
       this.positions.push(position);
       this.trades.push({
         timestamp: Date.now(), type: 'BUY', slug: order.slug, outcome: order.outcome,
-        shares: order.shares, price: fillPrice, cost: fillCost, fee: fillFee,
+        shares: order.shares, price: fillPrice, cost: fillCost,
         reason: `FILL ask $${ask.toFixed(2)} ≤ limit $${order.limitPrice.toFixed(2)} → $${fillPrice.toFixed(2)}`,
+        fee: 0,
       });
       this.log(`✅ FILL ${order.outcome} ${order.shares}sh @ $${fillPrice.toFixed(2)} (ask $${ask.toFixed(2)} ≤ limit $${order.limitPrice.toFixed(2)}) · cost $${fillCost.toFixed(2)}`);
     }
@@ -447,21 +440,23 @@ class CheapHunterEngine {
     const market = this.markets.get(slugFor(cs));
     const elapsed = Math.floor(nowS - cs);
 
-    // Resolve expired windows
-    if (market) {
-      if (elapsed >= WINDOW_SECONDS) {
-        this._cancelUnfilled(market);
-        this._resolveExpiredPositions(market, nowS);
+    // Resolve expired windows — resolve the PREVIOUS window (just ended) and the current one.
+    // When a new window begins, the old window's elapsed is exactly WINDOW_SECONDS, so
+    // resolve it here before placing new orders.
+    const prevStart = Math.floor((nowS - WINDOW_SECONDS) / WINDOW_SECONDS) * WINDOW_SECONDS;
+    const prevMarket = this.markets.get(slugFor(prevStart));
+    if (prevMarket && !prevMarket.settled) {
+      const prevElapsed = Math.floor(nowS - prevMarket.windowStart);
+      if (prevElapsed >= WINDOW_SECONDS) {
+        this._cancelUnfilled(prevMarket);
+        this._resolveExpiredPositions(prevMarket, nowS);
       }
     }
 
-    // Also check next window for resolution (deferred)
-    const nextMarket = this.markets.get(slugFor(cs + WINDOW_SECONDS));
-    if (nextMarket && !nextMarket.settled) {
-      const nextElapsed = Math.floor(nowS - nextMarket.windowStart);
-      if (nextElapsed >= WINDOW_SECONDS) {
-        this._cancelUnfilled(nextMarket);
-        this._resolveExpiredPositions(nextMarket, nowS);
+    if (market && !market.settled) {
+      if (elapsed >= WINDOW_SECONDS) {
+        this._cancelUnfilled(market);
+        this._resolveExpiredPositions(market, nowS);
       }
     }
 
@@ -522,7 +517,6 @@ class CheapHunterEngine {
       bankroll: this.bankroll,
       markValue: this.markValue(),
       realizedPnl: this.realizedPnl,
-      totalFeesPaid: this.totalFeesPaid,
       unrealizedPnl: round2(openUnrealized),
       totalPnl: round2(this.markValue() - this.initialBankroll),
       wins: this.wins, losses: this.losses,
@@ -561,7 +555,7 @@ class CheapHunterEngine {
       uptime: Math.floor((now - this.startedAt) / 1000),
       config: {
         ladderPrices: LADDER_PRICES, orderShares: ORDER_SHARES,
-        bankroll: this.initialBankroll, takerFeeRate: TAKER_FEE_RATE,
+        bankroll: this.initialBankroll,
         resolutionThreshold: RESOLUTION_THRESHOLD,
       },
     };
@@ -615,4 +609,4 @@ class CheapHunterEngine {
   }
 }
 
-module.exports = { CheapHunterEngine, config: { LADDER_PRICES, ORDER_SHARES, START_BANKROLL, CLOB_POLL_MS, TAKER_FEE_RATE, RESOLUTION_THRESHOLD } };
+module.exports = { CheapHunterEngine, config: { LADDER_PRICES, ORDER_SHARES, START_BANKROLL, CLOB_POLL_MS, RESOLUTION_THRESHOLD } };

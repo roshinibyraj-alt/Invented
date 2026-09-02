@@ -102,7 +102,7 @@ function ESC(s) { const d = document.createElement('div'); d.textContent = s; re
 function renderKpi(d) {
   const html = [
     '<div class="box"><div class="label">Capital</div><div class="value">' + cash(d.bankroll) + '</div><div class="small">Mark ' + cash(d.markValue) + '</div></div>',
-    '<div class="box"><div class="label">Realized P&L</div><div class="value ' + (d.realizedPnl >= 0 ? 'pos' : 'neg') + '">' + money(d.realizedPnl) + '</div><div class="small">Fees ' + cash(d.totalFeesPaid) + '</div></div>',
+    '<div class="box"><div class="label">Realized P&L</div><div class="value ' + (d.realizedPnl >= 0 ? 'pos' : 'neg') + '">' + money(d.realizedPnl) + '</div><div class="small">Maker: no fees</div></div>',
     '<div class="box"><div class="label">Unrealized</div><div class="value ' + (d.unrealizedPnl >= 0 ? 'pos' : 'neg') + '">' + money(d.unrealizedPnl) + '</div></div>',
     '<div class="box"><div class="label">Total P&L</div><div class="value ' + (d.totalPnl >= 0 ? 'pos' : 'neg') + '">' + money(d.totalPnl) + '</div><div class="small">Drawdown ' + cash(d.drawdown || 0) + '</div></div>',
   ].join('');
