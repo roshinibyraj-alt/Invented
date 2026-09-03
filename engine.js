@@ -263,10 +263,14 @@ class MomentumCatchEngine {
     const upPrice = up.mid ?? up.ask ?? up.bid ?? 0;
     const downPrice = down.mid ?? down.ask ?? down.bid ?? 0;
 
+    // Check which sides already have open positions
+    const hasUp = this.positions.some(p => p.exitReason == null && p.outcome === 'UP');
+    const hasDown = this.positions.some(p => p.exitReason == null && p.outcome === 'DOWN');
+
     let triggerSide = null;
-    if (upPrice >= 0.69 && upPrice <= 0.70 && !this._windowSkipped.has('UP')) {
+    if (!hasUp && upPrice >= 0.69 && upPrice <= 0.70 && !this._windowSkipped.has('UP')) {
       triggerSide = 'UP';
-    } else if (downPrice >= 0.69 && downPrice <= 0.70 && !this._windowSkipped.has('DOWN')) {
+    } else if (!hasDown && downPrice >= 0.69 && downPrice <= 0.70 && !this._windowSkipped.has('DOWN')) {
       triggerSide = 'DOWN';
     }
 
