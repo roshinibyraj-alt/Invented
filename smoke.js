@@ -62,8 +62,8 @@ const failures = [];
     await step(e, 80); // UP drops to 0.40 ≤ 0.50 → SL fires
     console.log('  losses:', e.losses, 'base:', e._baseShares, 'active:', !!e._windowActive);
     if (e.losses !== 1) failures.push('TEST2: expected 1 loss, got ' + e.losses);
-    if (Math.abs(e._baseShares - 250) > 0.01) failures.push('TEST2: base should be 250, got ' + e._baseShares);
-    console.log('  ✅ SL resolved, martingale →', e._baseShares);
+    if (Math.abs(e._baseShares - 100) > 0.01) failures.push('TEST2: base should stay 100 after SL, got ' + e._baseShares);
+    console.log('  ✅ SL resolved, no escalation (base stays', e._baseShares + ')');
   }
 
   // TEST 3: Max 2 entries per window
@@ -116,9 +116,9 @@ const failures = [];
   // TEST 7: Loss carries martingale to next window
   {
     console.log('\n--- TEST 7: Loss carries martingale ---');
-    const e = await setup([[0.40,0.60],[0.70,0.30],[0.30,0.70]]);
+    const e = await setup([[0.40,0.60],[0.70,0.30],[0.55,0.45]]);
     await step(e, 46); await step(e, 47); // buy UP
-    await step(e, 299); // UP at 0.30 < 0.95 → loss
+    await step(e, 299); // UP at 0.55 < 0.95 → loss (above SL so no SL sell)
     console.log('  losses:', e.losses, 'base:', e._baseShares);
     if (e.losses !== 1) failures.push('TEST7: expected 1 loss');
     if (Math.abs(e._baseShares - 250) > 0.01) failures.push('TEST7: base should be 250');
