@@ -342,14 +342,20 @@ class MomentumCatchEngine {
   // Check stop loss at 0.62
   _checkStopLoss(market) {
     if (!this._windowActive || this._pendingSL) return;
-    if (this._positionAge < 2) return; // don't SL on first tick of position
+
     const pos = this._windowActive;
     const token = pos.outcome === 'UP' ? market.up : market.down;
 
-    if (token.ask != null && token.ask <= STOP_LOSS_PRICE) {
+    // Use min of bid/ask/mid to catch SL even with CLOB lag
+    const slProbe = Math.min(
+      token.ask ?? 1,
+      token.bid ?? 1,
+      token.mid ?? 1
+    );
+    if (slProbe <= STOP_LOSS_PRICE) {
       // SL triggered — sell at market, fill on next tick
       this._pendingSL = { ...pos };
-      this.log(`🛑 SL TRIGGERED ${pos.outcome} ${pos.shares}sh — ask $${token.ask.toFixed(2)} ≤ $${STOP_LOSS_PRICE} — selling`);
+      this.log(`🛑 SL TRIGGERED ${pos.outcome} ${pos.shares}sh — probe $${slProbe.toFixed(2)} (bid $${token.bid ?? '-'} ask $${token.ask ?? '-'} mid $${token.mid ?? '-'}) ≤ $${STOP_LOSS_PRICE} — selling`);
     }
   }
 
