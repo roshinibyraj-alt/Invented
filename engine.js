@@ -268,9 +268,9 @@ class MomentumCatchEngine {
     const hasDown = this.positions.some(p => p.exitReason == null && p.outcome === 'DOWN');
 
     let triggerSide = null;
-    if (!hasUp && upPrice >= 0.69 && upPrice <= 0.70 && !this._windowSkipped.has('UP')) {
+    if (!hasUp && upPrice >= 0.69 && !this._windowSkipped.has('UP')) {
       triggerSide = 'UP';
-    } else if (!hasDown && downPrice >= 0.69 && downPrice <= 0.70 && !this._windowSkipped.has('DOWN')) {
+    } else if (!hasDown && downPrice >= 0.69 && !this._windowSkipped.has('DOWN')) {
       triggerSide = 'DOWN';
     }
 
