@@ -553,7 +553,7 @@ class MomentumCatchEngine {
       trades: this.trades.slice(-50),
       logs: this.logs,
       equityCurve: this.equityCurve,
-      config: { baseShares: BASE_SHARES, entryTrigger: 0.70, noStopLoss: true, martingaleMult: MARTINGALE_MULT, martingaleCap: MAX_MARTINGALE_CAP, takerFeeRate: TAKER_FEE, bankroll: this.bankroll },
+      config: { baseShares: this._baseShares, entryTrigger: 0.70, noStopLoss: true, martingaleMult: MARTINGALE_MULT, martingaleCap: MAX_MARTINGALE_CAP, takerFeeRate: TAKER_FEE, bankroll: this.bankroll },
     };
   }
 
