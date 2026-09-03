@@ -65,6 +65,7 @@ class MomentumCatchEngine {
     this._windowActive = null;       // { slug, outcome, shares, entryPrice, cost, openedAt }
     this._windowTriggered = new Set(); // which side already triggered 0.70 this window
     this._windowSkipped = new Set();   // which side was skipped due to bankroll this window
+    this._lastOutcome = null;             // last traded side, next must flip
     this._pendingFill = null;        // { slug, outcome, shares, triggerPrice, firedAt } — waiting for next tick
     
     this._positionAge = 0;          // { slug, outcome, shares, entryPrice, cost, openedAt } — SL sell pending
@@ -237,8 +238,8 @@ class MomentumCatchEngine {
     this._windowTriggered.clear();
     this._windowSkipped.clear();
     this._pendingFill = null;
-    
     this._positionAge = 0;
+    this._lastOutcome = null;
     // Bankroll guard at window open: reset base if it can't be afforded
     const windowCostEstimate = round2(this._baseShares * 0.70 * 1.025);
     if (this._baseShares > BASE_SHARES && windowCostEstimate > this.bankroll * 0.50) {
@@ -264,10 +265,10 @@ class MomentumCatchEngine {
 
     const upPrice = up.mid ?? up.ask ?? up.bid ?? 0;
     const downPrice = down.mid ?? down.ask ?? down.bid ?? 0;
-    // Trigger when price ticks into 0.69-0.70 range
-    if (upPrice >= 0.69 && upPrice <= 0.70 && !this._windowTriggered.has('UP') && !this._windowSkipped.has('UP')) {
+    // Must flip: if last was UP, only DOWN can trigger and vice versa
+    if (upPrice >= 0.69 && upPrice <= 0.70 && (this._lastOutcome === null || this._lastOutcome === 'DOWN')) {
       triggerSide = 'UP';
-    } else if (downPrice >= 0.69 && downPrice <= 0.70 && !this._windowTriggered.has('DOWN') && !this._windowSkipped.has('DOWN')) {
+    } else if (downPrice >= 0.69 && downPrice <= 0.70 && (this._lastOutcome === null || this._lastOutcome === 'UP')) {
       triggerSide = 'DOWN';
     }
 
@@ -393,6 +394,7 @@ class MomentumCatchEngine {
 
       // Reset martingale
       this._baseShares = BASE_SHARES;
+      this._lastOutcome = pos.outcome;
     } else {
       const pnl = round2(0 - pos.cost);
       this.bankroll = round2(this.bankroll); // $0 proceeds
@@ -421,12 +423,13 @@ class MomentumCatchEngine {
       // Bankroll guard: if next position cost exceeds 50% of bankroll, reset to base
       const nextCostEstimate = round2(this._baseShares * 0.70 * 1.025);
       if (nextCostEstimate > this.bankroll * 0.50) {
-        this.log(`💀 LOSS ${pos.outcome} ${pos.shares}sh @ $${pos.entryPrice.toFixed(2)} → P&L -$${Math.abs(pnl).toFixed(2)} — martingale ${this._baseShares}sh would cost $${nextCostEstimate.toFixed(2)} > 50% bankroll → RESET to ${BASE_SHARES}sh`); this._windowTriggered.clear();
+        this.log(`💀 LOSS ${pos.outcome} ${pos.shares}sh @ $${pos.entryPrice.toFixed(2)} → P&L -$${Math.abs(pnl).toFixed(2)} — martingale ${this._baseShares}sh would cost $${nextCostEstimate.toFixed(2)} > 50% bankroll → RESET to ${BASE_SHARES}sh`);
         this._baseShares = BASE_SHARES;
       } else {
         this.log(`💀 LOSS ${pos.outcome} ${pos.shares}sh @ $${pos.entryPrice.toFixed(2)} → P&L -$${Math.abs(pnl).toFixed(2)} — martingale → ${this._baseShares}sh`);
-      this._windowTriggered.clear(); // allow re-entry in same window
       }
+      this._lastOutcome = pos.outcome;
+      this._windowTriggered.clear();
     }
 
     this._windowActive = null;
