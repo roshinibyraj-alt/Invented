@@ -47,7 +47,7 @@ const failures = [];
   // TEST 1: UP reaches 0.70 → buy UP (after 45s wait)
   {
     console.log('\n--- TEST 1: UP hits 0.70 after 45s → buy UP ---');
-    const e = await setup([[0.40,0.60],[0.70,0.30],[0.70,0.30]]);
+    const e = await setup([[0.40,0.60],[0.71,0.29],[0.71,0.29]]);
     await step(e, 46); await step(e, 47);
     console.log('  positions:', e.positions.length, 'entries:', e._windowEntries);
     if (e.positions.length !== 1 || e._windowEntries !== 1) failures.push('TEST1: expected 1 entry, got ' + e.positions.length);
@@ -57,7 +57,7 @@ const failures = [];
   // TEST 2: SL at 0.50 → sell + martingale
   {
     console.log('\n--- TEST 2: SL hit at 0.50 → sell + martingale ---');
-    const e = await setup([[0.40,0.60],[0.70,0.30],[0.40,0.60],[0.40,0.60]]);
+    const e = await setup([[0.40,0.60],[0.71,0.29],[0.50,0.50],[0.50,0.50]]);
     await step(e, 46); await step(e, 47); // buy UP at 0.70
     await step(e, 80); // UP drops to 0.40 ≤ 0.50 → SL fires
     console.log('  losses:', e.losses, 'base:', e._baseShares, 'active:', !!e._windowActive);
@@ -69,7 +69,7 @@ const failures = [];
   // TEST 3: Max 2 entries per window
   {
     console.log('\n--- TEST 3: Max 2 entries per window ---');
-    const e = await setup([[0.40,0.60],[0.70,0.30],[0.40,0.60],[0.40,0.60],[0.70,0.30],[0.70,0.30]]);
+    const e = await setup([[0.40,0.60],[0.71,0.29],[0.50,0.50],[0.50,0.50],[0.71,0.29],[0.71,0.29]]);
     await step(e, 46); await step(e, 47); // entry 1
     await step(e, 80); // SL
     await step(e, 81); // resolve SL
@@ -84,7 +84,7 @@ const failures = [];
   // TEST 4: Resolution win resets martingale
   {
     console.log('\n--- TEST 4: Resolution win resets martingale ---');
-    const e = await setup([[0.40,0.60],[0.70,0.30],[0.97,0.03]]);
+    const e = await setup([[0.40,0.60],[0.71,0.29],[0.97,0.03]]);
     await step(e, 46); await step(e, 47); // buy UP
     e._baseShares = 250;
     await step(e, 299); // win (UP 0.97 ≥ 0.95)
@@ -97,7 +97,7 @@ const failures = [];
   // TEST 5: Entry before 45s is blocked
   {
     console.log('\n--- TEST 5: Entry before 45s → blocked ---');
-    const e = await setup([[0.40,0.60],[0.70,0.30],[0.70,0.30]]);
+    const e = await setup([[0.40,0.60],[0.71,0.29],[0.71,0.29]]);
     await step(e, 2); await step(e, 10);
     console.log('  entries before 45s:', e._windowEntries, '(should be 0)');
     if (e._windowEntries !== 0) failures.push('TEST5: entry should be blocked before 45s');
@@ -116,7 +116,7 @@ const failures = [];
   // TEST 7: Loss carries martingale to next window
   {
     console.log('\n--- TEST 7: Loss carries martingale ---');
-    const e = await setup([[0.40,0.60],[0.70,0.30],[0.55,0.45]]);
+    const e = await setup([[0.40,0.60],[0.71,0.29],[0.55,0.45]]);
     await step(e, 46); await step(e, 47); // buy UP
     await step(e, 299); // UP at 0.55 < 0.95 → loss (above SL so no SL sell)
     console.log('  losses:', e.losses, 'base:', e._baseShares);
@@ -128,7 +128,7 @@ const failures = [];
   // TEST 8: SL + re-entry in same window
   {
     console.log('\n--- TEST 8: SL + re-entry ---');
-    const e = await setup([[0.40,0.60],[0.70,0.30],[0.40,0.60],[0.40,0.60],[0.70,0.30],[0.40,0.60]]);
+    const e = await setup([[0.40,0.60],[0.71,0.29],[0.50,0.50],[0.50,0.50],[0.71,0.29],[0.50,0.50]]);
     await step(e, 46); await step(e, 47); // entry 1
     await step(e, 80); // SL fires
     await step(e, 82); await step(e, 83); // entry 2

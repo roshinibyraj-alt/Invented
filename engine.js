@@ -263,16 +263,18 @@ class MomentumCatchEngine {
     const { up, down } = this._getSideTokens(market);
     let triggerSide = null;
 
-    if (up.ask != null && up.ask >= ENTRY_TRIGGER && !this._windowTriggered.has('UP') && !this._windowSkipped.has('UP')) {
+    const upPrice = up.mid ?? up.ask ?? up.bid ?? 0;
+    const downPrice = down.mid ?? down.ask ?? down.bid ?? 0;
+    if (upPrice >= ENTRY_TRIGGER && !this._windowTriggered.has('UP') && !this._windowSkipped.has('UP')) {
       triggerSide = 'UP';
-    } else if (down.ask != null && down.ask >= ENTRY_TRIGGER && !this._windowTriggered.has('DOWN') && !this._windowSkipped.has('DOWN')) {
+    } else if (downPrice >= ENTRY_TRIGGER && !this._windowTriggered.has('DOWN') && !this._windowSkipped.has('DOWN')) {
       triggerSide = 'DOWN';
     }
 
     if (!triggerSide) return;
 
     // Bankroll guard: don't fire if we can't afford even 1 share at this price
-    const triggerPrice = triggerSide === 'UP' ? up.ask : down.ask;
+    const triggerPrice = triggerSide === 'UP' ? upPrice : downPrice;
     const minCost = round2(this._baseShares * triggerPrice * 1.025);
     if (minCost > this.bankroll) {
       this.log(`⚠️ SKIP ${triggerSide} — can't afford ${this._baseShares}sh @ $${triggerPrice.toFixed(2)} (need $${minCost.toFixed(2)}, have $${this.bankroll.toFixed(2)})`);
@@ -346,16 +348,10 @@ class MomentumCatchEngine {
     const pos = this._windowActive;
     const token = pos.outcome === 'UP' ? market.up : market.down;
 
-    // Use min of bid/ask/mid to catch SL even with CLOB lag
-    const slProbe = Math.min(
-      token.ask ?? 1,
-      token.bid ?? 1,
-      token.mid ?? 1
-    );
-    if (slProbe <= STOP_LOSS_PRICE) {
-      // SL triggered — sell at market, fill on next tick
+    const slPrice = token.mid ?? token.ask ?? token.bid ?? 1;
+    if (slPrice <= STOP_LOSS_PRICE) {
       this._pendingSL = { ...pos };
-      this.log(`🛑 SL TRIGGERED ${pos.outcome} ${pos.shares}sh — probe $${slProbe.toFixed(2)} (bid $${token.bid ?? '-'} ask $${token.ask ?? '-'} mid $${token.mid ?? '-'}) ≤ $${STOP_LOSS_PRICE} — selling`);
+      this.log(`🛑 SL TRIGGERED ${pos.outcome} ${pos.shares}sh — price $${slPrice.toFixed(2)} ≤ $${STOP_LOSS_PRICE} — selling`);
     }
   }
 
@@ -413,11 +409,8 @@ class MomentumCatchEngine {
     const upToken = market.up;
     const downToken = market.down;
 
-    // Use max of bid/ask/mid per side to avoid CLOB lag
-    const upPrice = Math.max(upToken.ask ?? 0, upToken.bid ?? 0, upToken.mid ?? 0);
-    const downPrice = Math.max(downToken.ask ?? 0, downToken.bid ?? 0, downToken.mid ?? 0);
-
-    // Also track window-high prices
+    const upPrice = upToken.mid ?? upToken.ask ?? upToken.bid ?? 0;
+    const downPrice = downToken.mid ?? downToken.ask ?? downToken.bid ?? 0;
     const upHigh = Math.max(upPrice, market.finalUpMax ?? 0);
     const downHigh = Math.max(downPrice, market.finalDownMax ?? 0);
 
