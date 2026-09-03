@@ -258,23 +258,30 @@ class MomentumCatchEngine {
   _checkEntry(market, nowS) {
     if (this._pendingFill) return;
     if (nowS <= market.windowStart + WAIT_SECONDS) return;
+    if (nowS >= market.windowEnd - 5) return; // no entries near resolution
 
     const { up, down } = this._getSideTokens(market);
     const upPrice = up.mid ?? up.ask ?? up.bid ?? 0;
     const downPrice = down.mid ?? down.ask ?? down.bid ?? 0;
 
-    // Check which sides already have open positions
-    const hasUp = this.positions.some(p => p.exitReason == null && p.outcome === 'UP');
-    const hasDown = this.positions.some(p => p.exitReason == null && p.outcome === 'DOWN');
-
+    // Flip logic: alternate sides with doubling
     let triggerSide = null;
-    if (!hasUp && upPrice >= 0.69 && !this._windowSkipped.has('UP')) {
-      triggerSide = 'UP';
-    } else if (!hasDown && downPrice >= 0.69 && !this._windowSkipped.has('DOWN')) {
+    if (this._lastOutcome === null) {
+      // First entry: either side
+      if (upPrice >= 0.69) triggerSide = 'UP';
+      else if (downPrice >= 0.69) triggerSide = 'DOWN';
+    } else if (this._lastOutcome === 'UP' && downPrice >= 0.69) {
       triggerSide = 'DOWN';
+    } else if (this._lastOutcome === 'DOWN' && upPrice >= 0.69) {
+      triggerSide = 'UP';
     }
 
     if (!triggerSide) return;
+
+    // Double shares on each flip
+    if (this._lastOutcome !== null) {
+      this._baseShares = round2(this._baseShares * 2);
+    }
 
     const triggerPrice = triggerSide === 'UP' ? upPrice : downPrice;
     const minCost = round2(this._baseShares * triggerPrice * 1.025);
@@ -335,6 +342,7 @@ class MomentumCatchEngine {
     });
     this.log(`✅ FILL ${pf.outcome} ${pf.shares}sh @ $${fillPrice.toFixed(2)} (trigger $${pf.triggerPrice.toFixed(2)}) · cost $${grossCost.toFixed(2)} + fee $${fee.toFixed(2)} = $${cost.toFixed(2)} · entry #${this._windowEntries}`);
     this._pendingFill = null;
+    this._lastOutcome = pf.outcome;
   }
 
   // No stop loss — hold to resolution
