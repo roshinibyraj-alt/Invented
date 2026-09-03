@@ -264,48 +264,13 @@ class MomentumCatchEngine {
     const downPrice = down.mid ?? down.ask ?? down.bid ?? 0;
 
     let triggerSide = null;
-
-    if (this._windowActive) {
-      // FLIP: opposite side hits 0.70 while holding
-      const opposite = this._windowActive.outcome === 'UP' ? 'DOWN' : 'UP';
-      const oppPrice = opposite === 'UP' ? upPrice : downPrice;
-      if (oppPrice >= 0.69 && oppPrice <= 0.70) {
-        triggerSide = opposite;
-      }
-    } else {
-      // FRESH ENTRY: first trade, either side
-      if (upPrice >= 0.69 && upPrice <= 0.70) {
-        triggerSide = 'UP';
-      } else if (downPrice >= 0.69 && downPrice <= 0.70) {
-        triggerSide = 'DOWN';
-      }
+    if (upPrice >= 0.69 && upPrice <= 0.70 && !this._windowSkipped.has('UP')) {
+      triggerSide = 'UP';
+    } else if (downPrice >= 0.69 && downPrice <= 0.70 && !this._windowSkipped.has('DOWN')) {
+      triggerSide = 'DOWN';
     }
 
     if (!triggerSide) return;
-
-    // If flipping, close old position at current mid price
-    if (this._windowActive) {
-      const oldPos = this._windowActive;
-      const oldToken = oldPos.outcome === 'UP' ? market.up : market.down;
-      const oldMid = oldToken.mid ?? oldPos.entryPrice;
-      const oldProceeds = round2(oldPos.shares * oldMid);
-      const oldFee = takerFee(oldPos.shares, oldMid);
-      const oldNet = round2(oldProceeds - oldFee);
-      const oldPnl = round2(oldNet - oldPos.cost);
-
-      oldPos.exitReason = 'FLIP';
-      oldPos.exitPrice = oldMid;
-      oldPos.pnl = oldPnl;
-      oldPos.closedAt = Date.now();
-      oldPos.won = oldPnl >= 0;
-      this.bankroll = round2(this.bankroll + oldNet);
-      this.realizedPnl = round2(this.realizedPnl + oldPnl);
-      if (oldPnl >= 0) this.wins++; else this.losses++;
-      this.results.unshift({ slug: oldPos.slug, outcome: oldPos.outcome, shares: oldPos.shares, entryPrice: oldPos.entryPrice, cost: oldPos.cost, exitPrice: oldMid, pnl: oldPnl, exitReason: 'FLIP', closedAt: Date.now(), won: oldPnl >= 0 });
-      this.log(`🔄 FLIP ${oldPos.outcome} ${oldPos.shares}sh @ $${oldPos.entryPrice.toFixed(2)} → sold at $${oldMid.toFixed(2)} · P&L ${oldPnl >= 0 ? '+' : '-'}$${Math.abs(oldPnl).toFixed(2)}`);
-      this._windowActive = null;
-      this.positions = this.positions.filter(p => p.exitReason == null);
-    }
 
     const triggerPrice = triggerSide === 'UP' ? upPrice : downPrice;
     const minCost = round2(this._baseShares * triggerPrice * 1.025);
@@ -354,9 +319,8 @@ class MomentumCatchEngine {
       shares: pf.shares, entryPrice: fillPrice, cost, fee,
       openedAt: Date.now(), exitReason: null, exitPrice: null, pnl: null,
     };
-    this._windowTriggered.add(pf.outcome); // mark triggered ONLY on successful fill
+    this._windowTriggered.add(pf.outcome);
     this.positions.push(position);
-    this._windowActive = position;
     this._windowEntries += 1;
     this.bankroll = round2(this.bankroll - cost);
 
@@ -373,13 +337,12 @@ class MomentumCatchEngine {
 
   // Check resolution (last 1 second of window)
   _checkResolution(market, nowS) {
-    if (!this._windowActive) return;
-    if (nowS < market.windowEnd - 1) return; // only check in last 1 second
+    const openPositions = this.positions.filter(p => p.exitReason == null && p.slug === market.slug);
+    if (openPositions.length === 0) return;
+    if (nowS < market.windowEnd - 1) return;
 
-    const pos = this._windowActive;
     const upToken = market.up;
     const downToken = market.down;
-
     const upPrice = upToken.mid ?? upToken.ask ?? upToken.bid ?? 0;
     const downPrice = downToken.mid ?? downToken.ask ?? downToken.bid ?? 0;
     const upHigh = Math.max(upPrice, market.finalUpMax ?? 0);
@@ -387,7 +350,8 @@ class MomentumCatchEngine {
 
     market.settled = true;
 
-    // Winner = whichever side reached 0.95+ (using best of current + window-high)
+    // Resolve each open position
+    for (const pos of openPositions) {
     let won = false;
     if (pos.outcome === 'UP') {
       won = upHigh >= RESOLUTION_THRESHOLD || (upPrice > downPrice && upPrice >= 0.90);
@@ -462,7 +426,7 @@ class MomentumCatchEngine {
       this._windowTriggered.clear();
     }
 
-    this._windowActive = null;
+    } // end for each position
     this.positions = this.positions.filter(p => p.exitReason == null);
     this.recordEquity();
     this.onTick(this.buildState());
@@ -499,9 +463,7 @@ class MomentumCatchEngine {
 
     // Check resolution (last 1 second or past window end)
     if (nowS >= market.windowEnd - 1 || elapsed >= WINDOW_SECONDS) {
-      if (this._windowActive) {
-        this._checkResolution(market, nowS);
-      }
+      this._checkResolution(market, nowS);
     }
 
     this.recordEquity();
