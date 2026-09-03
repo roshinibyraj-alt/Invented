@@ -11,7 +11,6 @@ const START_BANKROLL  = Number(process.env.START_BANKROLL || 10000);
 
 const BASE_SHARES       = 100;
 const ENTRY_TRIGGER     = 0.70;
-const STOP_LOSS_PRICE   = 0.50;
 const RESOLUTION_THRESHOLD = 0.95;
 const MARTINGALE_MULT   = 2.5;
 const MAX_MARTINGALE_CAP = 400; // cap at 4x base
@@ -67,7 +66,7 @@ class MomentumCatchEngine {
     this._windowTriggered = new Set(); // which side already triggered 0.70 this window
     this._windowSkipped = new Set();   // which side was skipped due to bankroll this window
     this._pendingFill = null;        // { slug, outcome, shares, triggerPrice, firedAt } — waiting for next tick
-    this._pendingSL = null;
+    
     this._positionAge = 0;          // { slug, outcome, shares, entryPrice, cost, openedAt } — SL sell pending
     this._windowSlug = null;
     this._lastEvalAt = 0;
@@ -238,7 +237,7 @@ class MomentumCatchEngine {
     this._windowTriggered.clear();
     this._windowSkipped.clear();
     this._pendingFill = null;
-    this._pendingSL = null;
+    
     this._positionAge = 0;
     // Bankroll guard at window open: reset base if it can't be afforded
     const windowCostEstimate = round2(this._baseShares * 0.70 * 1.025);
@@ -256,8 +255,8 @@ class MomentumCatchEngine {
 
   // Check if any side reaches 0.80 and fire entry
   _checkEntry(market, nowS) {
-    if (this._windowActive || this._pendingFill || this._pendingSL) return;
-    if (this._windowEntries >= MAX_ENTRIES_PER_WINDOW) return;
+    if (this._windowActive || this._pendingFill) return;
+    // Unlimited entries per window
     if (nowS <= market.windowStart + WAIT_SECONDS) return; // wait 45s after window opens
 
     const { up, down } = this._getSideTokens(market);
@@ -265,9 +264,10 @@ class MomentumCatchEngine {
 
     const upPrice = up.mid ?? up.ask ?? up.bid ?? 0;
     const downPrice = down.mid ?? down.ask ?? down.bid ?? 0;
-    if (upPrice >= ENTRY_TRIGGER && !this._windowTriggered.has('UP') && !this._windowSkipped.has('UP')) {
+    // Trigger when price ticks into 0.69-0.70 range
+    if (upPrice >= 0.69 && upPrice <= 0.70 && !this._windowTriggered.has('UP') && !this._windowSkipped.has('UP')) {
       triggerSide = 'UP';
-    } else if (downPrice >= ENTRY_TRIGGER && !this._windowTriggered.has('DOWN') && !this._windowSkipped.has('DOWN')) {
+    } else if (downPrice >= 0.69 && downPrice <= 0.70 && !this._windowTriggered.has('DOWN') && !this._windowSkipped.has('DOWN')) {
       triggerSide = 'DOWN';
     }
 
@@ -304,11 +304,8 @@ class MomentumCatchEngine {
     const pf = this._pendingFill;
     const token = pf.outcome === 'UP' ? market.up : market.down;
 
-    // Slippage: fill price = current ask ± random slippage (can be better or worse)
-    const ask = token.ask ?? pf.triggerPrice;
-    // Slippage range: -0.03 (better) to +0.05 (worse), capped at 0.99
-    const slippage = (Math.random() * 0.08 - 0.03); // -0.03 to +0.05
-    let fillPrice = round5(Math.max(0.01, Math.min(0.99, ask + slippage)));
+    // Limit order fills at exactly 0.70
+    const fillPrice = 0.70;
 
     const grossCost = round2(pf.shares * fillPrice);
     const fee = takerFee(pf.shares, fillPrice);
@@ -335,70 +332,13 @@ class MomentumCatchEngine {
     this.trades.push({
       timestamp: Date.now(), type: 'BUY', slug: pf.slug, outcome: pf.outcome,
       shares: pf.shares, price: fillPrice, cost, fee,
-      reason: `FILL ask $${ask.toFixed(2)} slippage → $${fillPrice.toFixed(2)} (${pf.shares}sh) · fee $${fee.toFixed(2)}`,
+      reason: `LIMIT 0.70 fill → $${fillPrice.toFixed(2)} (${pf.shares}sh) · fee $${fee.toFixed(2)}`,
     });
-    this.log(`✅ FILL ${pf.outcome} ${pf.shares}sh @ $${fillPrice.toFixed(2)} (ask $${ask.toFixed(2)}) · cost $${grossCost.toFixed(2)} + fee $${fee.toFixed(2)} = $${cost.toFixed(2)} · entry #${this._windowEntries}/${MAX_ENTRIES_PER_WINDOW}`);
+    this.log(`✅ FILL ${pf.outcome} ${pf.shares}sh @ $${fillPrice.toFixed(2)} (trigger $${pf.triggerPrice.toFixed(2)}) · cost $${grossCost.toFixed(2)} + fee $${fee.toFixed(2)} = $${cost.toFixed(2)} · entry #${this._windowEntries}`);
     this._pendingFill = null;
   }
 
-  // Check stop loss at 0.62
-  _checkStopLoss(market) {
-    if (!this._windowActive || this._pendingSL) return;
-
-    const pos = this._windowActive;
-    const token = pos.outcome === 'UP' ? market.up : market.down;
-
-    const slPrice = token.mid ?? token.ask ?? token.bid ?? 1;
-    if (slPrice <= STOP_LOSS_PRICE) {
-      this._pendingSL = { ...pos };
-      this.log(`🛑 SL TRIGGERED ${pos.outcome} ${pos.shares}sh — price $${slPrice.toFixed(2)} ≤ $${STOP_LOSS_PRICE} — selling`);
-    }
-  }
-
-  // Resolve pending SL fill on next tick
-  _resolveSL(market) {
-    if (!this._pendingSL) return;
-    const ps = this._pendingSL;
-    const token = ps.outcome === 'UP' ? market.up : market.down;
-
-    // SL fill with slippage (can be better or worse than 0.62)
-    const ask = token.ask ?? STOP_LOSS_PRICE;
-    const slippage = (Math.random() * 0.06 - 0.03); // -0.03 to +0.03
-    let fillPrice = round5(Math.max(0.01, Math.min(0.99, STOP_LOSS_PRICE + slippage)));
-
-    const grossProceeds = round2(ps.shares * fillPrice);
-    const fee = takerFee(ps.shares, fillPrice);
-    const proceeds = round2(grossProceeds - fee);
-    const pnl = round2(proceeds - ps.cost);
-
-    this.bankroll = round2(this.bankroll + proceeds);
-    this.realizedPnl = round2(this.realizedPnl + pnl);
-    this.losses += 1;
-
-    // Mark position as resolved
-    ps.exitReason = 'STOP_LOSS';
-    ps.exitPrice = fillPrice;
-    ps.pnl = pnl;
-    ps.closedAt = Date.now();
-
-    this.results.unshift({
-      slug: ps.slug, outcome: ps.outcome, shares: ps.shares,
-      entryPrice: ps.entryPrice, cost: ps.cost, exitPrice: fillPrice, pnl,
-      exitReason: 'STOP_LOSS', closedAt: Date.now(), won: false,
-    });
-    this.trades.push({
-      timestamp: Date.now(), type: 'SELL', slug: ps.slug, outcome: ps.outcome,
-      shares: ps.shares, price: fillPrice, pnl,
-      reason: `SL @ $${fillPrice.toFixed(2)} → P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`,
-    });
-    this.log(`❌ SL ${ps.outcome} ${ps.shares}sh sold @ $${fillPrice.toFixed(2)} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`);
-
-    this._windowActive = null;
-    this._pendingSL = null;
-    this._positionAge = 0;
-    // Allow re-entry on either side for the 2nd entry
-    this._windowTriggered.clear();
-  }
+  // No stop loss — hold to resolution
 
   // Check resolution (last 1 second of window)
   _checkResolution(market, nowS) {
@@ -481,10 +421,11 @@ class MomentumCatchEngine {
       // Bankroll guard: if next position cost exceeds 50% of bankroll, reset to base
       const nextCostEstimate = round2(this._baseShares * 0.70 * 1.025);
       if (nextCostEstimate > this.bankroll * 0.50) {
-        this.log(`💀 LOSS ${pos.outcome} ${pos.shares}sh @ $${pos.entryPrice.toFixed(2)} → P&L -$${Math.abs(pnl).toFixed(2)} — martingale ${this._baseShares}sh would cost $${nextCostEstimate.toFixed(2)} > 50% of $${this.bankroll.toFixed(2)} → RESET to ${BASE_SHARES}sh`);
+        this.log(`💀 LOSS ${pos.outcome} ${pos.shares}sh @ $${pos.entryPrice.toFixed(2)} → P&L -$${Math.abs(pnl).toFixed(2)} — martingale ${this._baseShares}sh would cost $${nextCostEstimate.toFixed(2)} > 50% bankroll → RESET to ${BASE_SHARES}sh`); this._windowTriggered.clear();
         this._baseShares = BASE_SHARES;
       } else {
         this.log(`💀 LOSS ${pos.outcome} ${pos.shares}sh @ $${pos.entryPrice.toFixed(2)} → P&L -$${Math.abs(pnl).toFixed(2)} — martingale → ${this._baseShares}sh`);
+      this._windowTriggered.clear(); // allow re-entry in same window
       }
     }
 
@@ -516,11 +457,9 @@ class MomentumCatchEngine {
     if (elapsed >= 1 && elapsed < WINDOW_SECONDS) {
       this._positionAge++;
       this._checkEntry(market, nowS);
-      this._checkStopLoss(market);
     }
 
-    // Resolve pending SL fill (sell position)
-    this._resolveSL(market);
+
 
     // Resolve pending entry fill (open position)
     this._resolveFill(market);
@@ -581,7 +520,7 @@ class MomentumCatchEngine {
     }, 0);
     return {
       name: this.name,
-      strategy: `MomentumCatch · ${WAIT_SECONDS}s wait · ${ENTRY_TRIGGER} trigger · SL ${STOP_LOSS_PRICE} · ${MAX_ENTRIES_PER_WINDOW} entries/window · ${MARTINGALE_MULT}x martingale · base ${BASE_SHARES}sh`,
+      strategy: `MomentumCatch · limit 0.70 · no SL · unlimited entries · ${MARTINGALE_MULT}x martingale · base ${BASE_SHARES}sh`,
       serverTime: now,
       connected: this.pollCount > 0 && this.isClobFresh(now),
       lastError: this.lastError,
@@ -602,9 +541,9 @@ class MomentumCatchEngine {
       windowEntries: this._windowEntries,
       maxEntries: MAX_ENTRIES_PER_WINDOW,
       entryTrigger: ENTRY_TRIGGER,
-      stopLoss: STOP_LOSS_PRICE,
+
       pendingFill: this._pendingFill ? { outcome: this._pendingFill.outcome, shares: this._pendingFill.shares, triggerPrice: this._pendingFill.triggerPrice } : null,
-      pendingSL: this._pendingSL ? { outcome: this._pendingSL.outcome, shares: this._pendingSL.shares, entryPrice: this._pendingSL.entryPrice } : null,
+
       positions: open.map(p => {
         const token = p.outcome === 'UP' ? p.market?.up : p.market?.down;
         const markPrice = token?.mid ?? p.entryPrice;
@@ -614,7 +553,7 @@ class MomentumCatchEngine {
       trades: this.trades.slice(-50),
       logs: this.logs,
       equityCurve: this.equityCurve,
-      config: { baseShares: BASE_SHARES, entryTrigger: ENTRY_TRIGGER, stopLoss: STOP_LOSS_PRICE, martingaleMult: MARTINGALE_MULT, martingaleCap: MAX_MARTINGALE_CAP, maxEntries: MAX_ENTRIES_PER_WINDOW, takerFeeRate: TAKER_FEE, bankroll: this.bankroll },
+      config: { baseShares: BASE_SHARES, entryTrigger: 0.70, noStopLoss: true, martingaleMult: MARTINGALE_MULT, martingaleCap: MAX_MARTINGALE_CAP, takerFeeRate: TAKER_FEE, bankroll: this.bankroll },
     };
   }
 
@@ -639,7 +578,7 @@ class MomentumCatchEngine {
       setInterval(() => this.evaluate(), 200),
       setInterval(() => this.recordEquity(), 1000),
     ];
-    this.log(`🚀 ${this.name} started · ${ENTRY_TRIGGER} trigger · SL ${STOP_LOSS_PRICE} · ${MARTINGALE_MULT}x martingale · base ${BASE_SHARES}sh · ${(TAKER_FEE*100).toFixed(0)}% taker fee · CLOB-only`);
+    this.log(`🚀 ${this.name} started · limit 0.70 · no SL · ${MARTINGALE_MULT}x martingale · base ${BASE_SHARES}sh · ${(TAKER_FEE*100).toFixed(0)}% taker fee · CLOB-only`);
   }
 
   close() {
@@ -648,4 +587,4 @@ class MomentumCatchEngine {
   }
 }
 
-module.exports = { MomentumCatchEngine, config: { BASE_SHARES, ENTRY_TRIGGER, STOP_LOSS_PRICE, MARTINGALE_MULT, MAX_ENTRIES_PER_WINDOW, TAKER_FEE, START_BANKROLL } };
+module.exports = { MomentumCatchEngine, config: { BASE_SHARES, ENTRY_TRIGGER: 0.70, MARTINGALE_MULT, TAKER_FEE, START_BANKROLL } };

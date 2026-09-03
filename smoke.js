@@ -6,7 +6,6 @@ let fakeNow = Date.now();
 Date.now = () => fakeNow;
 function setNow(ms) { fakeNow = ms; }
 const FIRST = Math.floor(fakeNow / 1000 / WINDOW) * WINDOW;
-function slugFor(s) { return 'btc-updown-5m-' + s; }
 
 function makeFetch(script) {
   const tokenMap = {};
@@ -18,18 +17,18 @@ function makeFetch(script) {
       if (!tokenMap[wStart]) tokenMap[wStart] = { up: 'tok_up_' + wStart, dn: 'tok_dn_' + wStart };
       return Promise.resolve({ ok: true, json: () => Promise.resolve([{ conditionId: '0x' + wStart, question: 'BTC ' + wStart, outcomes: JSON.stringify(['Up', 'Down']), clobTokenIds: JSON.stringify([tokenMap[wStart].up, tokenMap[wStart].dn]), closed: false }]) });
     }
-    const [u, d] = script[pollN++] || [0.50, 0.50];
+    const mid = script[pollN++] || [0.50, 0.50];
     const books = [];
     for (const w of Object.keys(tokenMap)) {
-      books.push({ asset_id: tokenMap[w].up, asks: [{ price: u, size: 1000 }], bids: [{ price: Math.max(0.01, u - 0.01), size: 1000 }] });
-      books.push({ asset_id: tokenMap[w].dn, asks: [{ price: d, size: 1000 }], bids: [{ price: Math.max(0.01, d - 0.01), size: 1000 }] });
+      books.push({ asset_id: tokenMap[w].up, asks: [{ price: mid[0] + 0.01, size: 1000 }], bids: [{ price: Math.max(0.01, mid[0] - 0.01), size: 1000 }] });
+      books.push({ asset_id: tokenMap[w].dn, asks: [{ price: mid[1] + 0.01, size: 1000 }], bids: [{ price: Math.max(0.01, mid[1] - 0.01), size: 1000 }] });
     }
     return Promise.resolve({ ok: true, json: () => Promise.resolve(books) });
   };
 }
 
-async function setup(script) {
-  const e = new MomentumCatchEngine({ fetchImpl: makeFetch(script), bankroll: 10000, onTick: () => {}, onLog: () => {} });
+async function setup(script, bankroll) {
+  const e = new MomentumCatchEngine({ fetchImpl: makeFetch(script), bankroll: bankroll || 10000, onTick: () => {}, onLog: () => {} });
   e.entryWindow = 0;
   await e.discoverWindow(FIRST);
   await e.discoverWindow(FIRST + WINDOW);
@@ -44,97 +43,83 @@ async function step(e, secs) {
 
 const failures = [];
 (async () => {
-  // TEST 1: UP reaches 0.70 → buy UP (after 45s wait)
+  // TEST 1: UP mid=0.70 → limit buy at 0.70
   {
-    console.log('\n--- TEST 1: UP hits 0.70 after 45s → buy UP ---');
-    const e = await setup([[0.40,0.60],[0.71,0.29],[0.71,0.29]]);
+    console.log('\n--- TEST 1: UP mid=0.70 → limit buy ---');
+    const e = await setup([[0.50,0.50],[0.70,0.30],[0.70,0.30]]);
     await step(e, 46); await step(e, 47);
-    console.log('  positions:', e.positions.length, 'entries:', e._windowEntries);
-    if (e.positions.length !== 1 || e._windowEntries !== 1) failures.push('TEST1: expected 1 entry, got ' + e.positions.length);
-    else console.log('  ✅ entry:', e.positions[0].outcome, e.positions[0].shares + 'sh @ $' + e.positions[0].entryPrice.toFixed(3));
+    if (e.positions.length !== 1) failures.push('TEST1: expected 1 entry');
+    else if (e.positions[0].entryPrice !== 0.70) failures.push('TEST1: fill should be 0.70, got ' + e.positions[0].entryPrice);
+    else console.log('  ✅ limit fill at 0.70');
   }
 
-  // TEST 2: SL at 0.50 → sell + martingale
+  // TEST 2: UP mid=0.69 triggers
   {
-    console.log('\n--- TEST 2: SL hit at 0.50 → sell + martingale ---');
-    const e = await setup([[0.40,0.60],[0.71,0.29],[0.50,0.50],[0.50,0.50]]);
-    await step(e, 46); await step(e, 47); // buy UP at 0.70
-    await step(e, 80); // UP drops to 0.40 ≤ 0.50 → SL fires
-    console.log('  losses:', e.losses, 'base:', e._baseShares, 'active:', !!e._windowActive);
-    if (e.losses !== 1) failures.push('TEST2: expected 1 loss, got ' + e.losses);
-    if (Math.abs(e._baseShares - 100) > 0.01) failures.push('TEST2: base should stay 100 after SL, got ' + e._baseShares);
-    console.log('  ✅ SL resolved, no escalation (base stays', e._baseShares + ')');
+    console.log('\n--- TEST 2: UP mid=0.69 triggers ---');
+    const e = await setup([[0.50,0.50],[0.69,0.31],[0.69,0.31]]);
+    await step(e, 46); await step(e, 47);
+    if (e.positions.length !== 1) failures.push('TEST2: 0.69 should trigger');
+    else console.log('  ✅ 0.69 triggers');
   }
 
-  // TEST 3: Max 2 entries per window
+  // TEST 3: UP mid=0.68 no trigger
   {
-    console.log('\n--- TEST 3: Max 2 entries per window ---');
-    const e = await setup([[0.40,0.60],[0.71,0.29],[0.50,0.50],[0.50,0.50],[0.71,0.29],[0.71,0.29]]);
-    await step(e, 46); await step(e, 47); // entry 1
-    await step(e, 80); // SL
-    await step(e, 81); // resolve SL
-    await step(e, 82); await step(e, 83); // entry 2 attempt
-    console.log('  entries:', e._windowEntries);
-    await step(e, 100); await step(e, 101); // 3rd attempt → blocked
-    console.log('  after 3rd attempt:', e._windowEntries, '(should be 2)');
-    if (e._windowEntries !== 2) failures.push('TEST3: expected 2 entries, got ' + e._windowEntries);
-    else console.log('  ✅ max 2 enforced');
-  }
-
-  // TEST 4: Resolution win resets martingale
-  {
-    console.log('\n--- TEST 4: Resolution win resets martingale ---');
-    const e = await setup([[0.40,0.60],[0.71,0.29],[0.97,0.03]]);
-    await step(e, 46); await step(e, 47); // buy UP
-    e._baseShares = 250;
-    await step(e, 299); // win (UP 0.97 ≥ 0.95)
-    console.log('  wins:', e.wins, 'base:', e._baseShares);
-    if (e.wins !== 1) failures.push('TEST4: expected 1 win');
-    if (e._baseShares !== 100) failures.push('TEST4: base should be 100, got ' + e._baseShares);
-    console.log('  ✅ win, martingale reset to', e._baseShares);
-  }
-
-  // TEST 5: Entry before 45s is blocked
-  {
-    console.log('\n--- TEST 5: Entry before 45s → blocked ---');
-    const e = await setup([[0.40,0.60],[0.71,0.29],[0.71,0.29]]);
-    await step(e, 2); await step(e, 10);
-    console.log('  entries before 45s:', e._windowEntries, '(should be 0)');
-    if (e._windowEntries !== 0) failures.push('TEST5: entry should be blocked before 45s');
-    else console.log('  ✅ blocked before wait period');
-  }
-
-  // TEST 6: No 0.70 → no position
-  {
-    console.log('\n--- TEST 6: No 0.70 → no position ---');
-    const e = await setup([[0.50,0.50],[0.55,0.45]]);
+    console.log('\n--- TEST 3: UP mid=0.68 no trigger ---');
+    const e = await setup([[0.50,0.50],[0.68,0.32],[0.68,0.32]]);
     await step(e, 46); await step(e, 120);
-    if (e.positions.length !== 0) failures.push('TEST6: expected 0 positions');
-    else console.log('  ✅ no position when neither side reaches 0.70');
+    if (e.positions.length !== 0) failures.push('TEST3: 0.68 should not trigger');
+    else console.log('  ✅ 0.68 no trigger');
   }
 
-  // TEST 7: Loss carries martingale to next window
+  // TEST 4: Win → $1/share, reset martingale
   {
-    console.log('\n--- TEST 7: Loss carries martingale ---');
-    const e = await setup([[0.40,0.60],[0.71,0.29],[0.55,0.45]]);
-    await step(e, 46); await step(e, 47); // buy UP
-    await step(e, 299); // UP at 0.55 < 0.95 → loss (above SL so no SL sell)
-    console.log('  losses:', e.losses, 'base:', e._baseShares);
-    if (e.losses !== 1) failures.push('TEST7: expected 1 loss');
-    if (Math.abs(e._baseShares - 250) > 0.01) failures.push('TEST7: base should be 250');
-    console.log('  ✅ loss, martingale →', e._baseShares);
+    console.log('\n--- TEST 4: Resolution win ---');
+    const e = await setup([[0.50,0.50],[0.70,0.30],[0.97,0.03]]);
+    e._baseShares = 250;
+    await step(e, 46); await step(e, 47); await step(e, 299);
+    if (e.wins !== 1) failures.push('TEST4: expected win');
+    else if (e._baseShares !== 100) failures.push('TEST4: base should reset to 100');
+    else console.log('  ✅ win resets martingale to 100');
   }
 
-  // TEST 8: SL + re-entry in same window
+  // TEST 5: Loss → 2.5x martingale
   {
-    console.log('\n--- TEST 8: SL + re-entry ---');
-    const e = await setup([[0.40,0.60],[0.71,0.29],[0.50,0.50],[0.50,0.50],[0.71,0.29],[0.50,0.50]]);
-    await step(e, 46); await step(e, 47); // entry 1
-    await step(e, 80); // SL fires
-    await step(e, 82); await step(e, 83); // entry 2
-    console.log('  entries:', e._windowEntries);
-    if (e._windowEntries !== 2) failures.push('TEST8: expected 2 entries, got ' + e._windowEntries);
-    else console.log('  ✅ SL + re-entry successful');
+    console.log('\n--- TEST 5: Resolution loss → 2.5x ---');
+    const e = await setup([[0.50,0.50],[0.70,0.30],[0.55,0.45]]);
+    await step(e, 46); await step(e, 47); await step(e, 299);
+    if (e.losses !== 1) failures.push('TEST5: expected loss');
+    else if (Math.abs(e._baseShares - 250) > 0.01) failures.push('TEST5: base should be 250');
+    else console.log('  ✅ loss escalates to 250');
+  }
+
+  // TEST 6: Entry before 45s blocked
+  {
+    console.log('\n--- TEST 6: Entry before 45s blocked ---');
+    const e = await setup([[0.70,0.30],[0.70,0.30]]);
+    await step(e, 2); await step(e, 10);
+    if (e._windowEntries !== 0) failures.push('TEST6: should block before 45s');
+    else console.log('  ✅ blocked before wait');
+  }
+
+  // TEST 7: No SL — holds to resolution
+  {
+    console.log('\n--- TEST 7: No SL, holds to resolution ---');
+    const e = await setup([[0.50,0.50],[0.70,0.30],[0.40,0.60],[0.55,0.45]]);
+    await step(e, 46); await step(e, 47);
+    await step(e, 80); await step(e, 120);
+    await step(e, 299);
+    if (e._windowActive !== null) failures.push('TEST7: should be resolved');
+    else console.log('  ✅ held to resolution');
+  }
+
+  // TEST 8: Bankroll guard resets bloated base
+  {
+    console.log('\n--- TEST 8: Bankroll guard ---');
+    const e = await setup([[0.50,0.50],[0.70,0.30]], 5000);
+    e._baseShares = 9765;
+    await step(e, 46);
+    if (e._baseShares !== 100) failures.push('TEST8: should reset to 100');
+    else console.log('  ✅ bankroll guard reset');
   }
 
   console.log('\n=== RESULT ===');
