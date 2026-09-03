@@ -404,11 +404,26 @@ class MomentumCatchEngine {
     if (nowS < market.windowEnd - 1) return; // only check in last 1 second
 
     const pos = this._windowActive;
-    const token = pos.outcome === 'UP' ? market.up : market.down;
-    const ask = token.ask ?? 0;
+    const upToken = market.up;
+    const downToken = market.down;
+
+    // Use max of bid/ask/mid per side to avoid CLOB lag
+    const upPrice = Math.max(upToken.ask ?? 0, upToken.bid ?? 0, upToken.mid ?? 0);
+    const downPrice = Math.max(downToken.ask ?? 0, downToken.bid ?? 0, downToken.mid ?? 0);
+
+    // Also track window-high prices
+    const upHigh = Math.max(upPrice, market.finalUpMax ?? 0);
+    const downHigh = Math.max(downPrice, market.finalDownMax ?? 0);
 
     market.settled = true;
-    const won = ask >= RESOLUTION_THRESHOLD;
+
+    // Winner = whichever side reached 0.95+ (using best of current + window-high)
+    let won = false;
+    if (pos.outcome === 'UP') {
+      won = upHigh >= RESOLUTION_THRESHOLD || (upPrice > downPrice && upPrice >= 0.90);
+    } else {
+      won = downHigh >= RESOLUTION_THRESHOLD || (downPrice > upPrice && downPrice >= 0.90);
+    }
 
     if (won) {
       const grossProceeds = pos.shares; // $1 per share
@@ -433,7 +448,7 @@ class MomentumCatchEngine {
       this.trades.push({
         timestamp: Date.now(), type: 'RESOLVED', slug: pos.slug, outcome: pos.outcome,
         shares: pos.shares, price: 1, pnl,
-        reason: `WIN ${pos.outcome} ${pos.shares}sh @ $${pos.entryPrice.toFixed(2)} → P&L +$${pnl.toFixed(2)} (ask $${ask.toFixed(3)} ≥ 0.95)`,
+        reason: `WIN ${pos.outcome} ${pos.shares}sh @ $${pos.entryPrice.toFixed(2)} → P&L +$${pnl.toFixed(2)} (up $${upPrice.toFixed(3)} dn $${downPrice.toFixed(3)})`,
       });
       this.log(`🏆 WIN ${pos.outcome} ${pos.shares}sh @ $${pos.entryPrice.toFixed(2)} → P&L +$${pnl.toFixed(2)} (proceeds $${grossProceeds.toFixed(2)} - fee $${fee.toFixed(2)}) — martingale RESET`);
 
@@ -459,7 +474,7 @@ class MomentumCatchEngine {
       this.trades.push({
         timestamp: Date.now(), type: 'RESOLVED', slug: pos.slug, outcome: pos.outcome,
         shares: pos.shares, price: 0, pnl,
-        reason: `LOSS ${pos.outcome} ${pos.shares}sh @ $${pos.entryPrice.toFixed(2)} → P&L -$${Math.abs(pnl).toFixed(2)} (ask $${ask.toFixed(3)} < 0.95)`,
+        reason: `LOSS ${pos.outcome} ${pos.shares}sh @ $${pos.entryPrice.toFixed(2)} → P&L -$${Math.abs(pnl).toFixed(2)} (up $${upPrice.toFixed(3)} dn $${downPrice.toFixed(3)})`,
       });
       // Escalate martingale for next window (capped at MAX_MARTINGALE_CAP)
       this._baseShares = Math.min(round2(this._baseShares * MARTINGALE_MULT), MAX_MARTINGALE_CAP);
