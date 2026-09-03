@@ -280,7 +280,7 @@ class MomentumCatchEngine {
 
     // Double shares on each flip
     if (this._lastOutcome !== null) {
-      this._baseShares = round2(this._baseShares * 2);
+      this._baseShares = round2(this._baseShares * 3);
     }
 
     const triggerPrice = triggerSide === 'UP' ? upPrice : downPrice;
