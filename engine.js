@@ -256,31 +256,62 @@ class MomentumCatchEngine {
 
   // Check if any side reaches 0.80 and fire entry
   _checkEntry(market, nowS) {
-    if (this._windowActive || this._pendingFill) return;
-    // Unlimited entries per window
-    if (nowS <= market.windowStart + WAIT_SECONDS) return; // wait 45s after window opens
+    if (this._pendingFill) return;
+    if (nowS <= market.windowStart + WAIT_SECONDS) return;
 
     const { up, down } = this._getSideTokens(market);
-    let triggerSide = null;
-
     const upPrice = up.mid ?? up.ask ?? up.bid ?? 0;
     const downPrice = down.mid ?? down.ask ?? down.bid ?? 0;
-    // Must flip: if last was UP, only DOWN can trigger and vice versa
-    if (upPrice >= 0.69 && upPrice <= 0.70 && (this._lastOutcome === null || this._lastOutcome === 'DOWN')) {
-      triggerSide = 'UP';
-    } else if (downPrice >= 0.69 && downPrice <= 0.70 && (this._lastOutcome === null || this._lastOutcome === 'UP')) {
-      triggerSide = 'DOWN';
+
+    let triggerSide = null;
+
+    if (this._windowActive) {
+      // FLIP: opposite side hits 0.70 while holding
+      const opposite = this._windowActive.outcome === 'UP' ? 'DOWN' : 'UP';
+      const oppPrice = opposite === 'UP' ? upPrice : downPrice;
+      if (oppPrice >= 0.69 && oppPrice <= 0.70) {
+        triggerSide = opposite;
+      }
+    } else {
+      // FRESH ENTRY: first trade, either side
+      if (upPrice >= 0.69 && upPrice <= 0.70) {
+        triggerSide = 'UP';
+      } else if (downPrice >= 0.69 && downPrice <= 0.70) {
+        triggerSide = 'DOWN';
+      }
     }
 
     if (!triggerSide) return;
 
-    // Bankroll guard: don't fire if we can't afford even 1 share at this price
+    // If flipping, close old position at current mid price
+    if (this._windowActive) {
+      const oldPos = this._windowActive;
+      const oldToken = oldPos.outcome === 'UP' ? market.up : market.down;
+      const oldMid = oldToken.mid ?? oldPos.entryPrice;
+      const oldProceeds = round2(oldPos.shares * oldMid);
+      const oldFee = takerFee(oldPos.shares, oldMid);
+      const oldNet = round2(oldProceeds - oldFee);
+      const oldPnl = round2(oldNet - oldPos.cost);
+
+      oldPos.exitReason = 'FLIP';
+      oldPos.exitPrice = oldMid;
+      oldPos.pnl = oldPnl;
+      oldPos.closedAt = Date.now();
+      oldPos.won = oldPnl >= 0;
+      this.bankroll = round2(this.bankroll + oldNet);
+      this.realizedPnl = round2(this.realizedPnl + oldPnl);
+      if (oldPnl >= 0) this.wins++; else this.losses++;
+      this.results.unshift({ slug: oldPos.slug, outcome: oldPos.outcome, shares: oldPos.shares, entryPrice: oldPos.entryPrice, cost: oldPos.cost, exitPrice: oldMid, pnl: oldPnl, exitReason: 'FLIP', closedAt: Date.now(), won: oldPnl >= 0 });
+      this.log(`🔄 FLIP ${oldPos.outcome} ${oldPos.shares}sh @ $${oldPos.entryPrice.toFixed(2)} → sold at $${oldMid.toFixed(2)} · P&L ${oldPnl >= 0 ? '+' : '-'}$${Math.abs(oldPnl).toFixed(2)}`);
+      this._windowActive = null;
+      this.positions = this.positions.filter(p => p.exitReason == null);
+    }
+
     const triggerPrice = triggerSide === 'UP' ? upPrice : downPrice;
     const minCost = round2(this._baseShares * triggerPrice * 1.025);
     if (minCost > this.bankroll) {
       this.log(`⚠️ SKIP ${triggerSide} — can't afford ${this._baseShares}sh @ $${triggerPrice.toFixed(2)} (need $${minCost.toFixed(2)}, have $${this.bankroll.toFixed(2)})`);
       this._windowSkipped.add(triggerSide);
-      // Reset to base if bloated
       if (this._baseShares > BASE_SHARES) {
         this.log(`🔄 Bankroll guard — resetting martingale base ${this._baseShares}sh → ${BASE_SHARES}sh`);
         this._baseShares = BASE_SHARES;
@@ -288,7 +319,6 @@ class MomentumCatchEngine {
       return;
     }
 
-    // Fire entry — fill price will be set on next tick (slippage simulation)
     this._pendingFill = {
       slug: market.slug,
       outcome: triggerSide,
@@ -296,7 +326,7 @@ class MomentumCatchEngine {
       triggerPrice,
       firedAt: Date.now(),
     };
-    this.log(`🔥 ENTRY FIRED ${triggerSide} — ${this._baseShares}sh @ ask $${triggerPrice.toFixed(2)} — awaiting fill`);
+    this.log(`🔥 ENTRY FIRED ${triggerSide} — ${this._baseShares}sh @ $${triggerPrice.toFixed(2)} — awaiting fill`);
   }
 
   // Resolve pending fill on next tick (slippage simulation)
