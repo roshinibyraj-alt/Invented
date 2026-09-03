@@ -75,7 +75,7 @@ const failures = [];
   {
     console.log('\n--- TEST 4: Resolution win ---');
     const e = await setup([[0.50,0.50],[0.70,0.30],[0.97,0.03]]);
-    e._baseShares = 250;
+    e._baseShares = 300;
     await step(e, 46); await step(e, 47); await step(e, 299);
     if (e.wins !== 1) failures.push('TEST4: expected win');
     else if (e._baseShares !== 100) failures.push('TEST4: base should reset to 100');
@@ -88,8 +88,8 @@ const failures = [];
     const e = await setup([[0.50,0.50],[0.70,0.30],[0.55,0.45]]);
     await step(e, 46); await step(e, 47); await step(e, 299);
     if (e.losses !== 1) failures.push('TEST5: expected loss');
-    else if (Math.abs(e._baseShares - 250) > 0.01) failures.push('TEST5: base should be 250');
-    else console.log('  ✅ loss escalates to 250');
+    else if (Math.abs(e._baseShares - 300) > 0.01) failures.push('TEST5: base should be 300');
+    else console.log('  ✅ loss escalates to 300');
   }
 
   // TEST 6: Entry before 45s blocked
