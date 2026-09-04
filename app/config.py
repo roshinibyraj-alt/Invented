@@ -26,44 +26,32 @@ RESOLUTION_WINDOW_SECONDS = 2.0
 # falling back to a last-observed-price approximation.
 RESOLUTION_RETRY_SECONDS = 6
 
-# ---- Engine B ---------------------------------------------------------------
-ENGINE_B_BASE_SHARES = 200
+# ---- Engine B (interval accumulation strategy) -------------------------
+# Phase 1: cheap-side scalping.
+#   Every ENGINE_B_INTERVAL_SECONDS from ENGINE_B_PHASE1_START to
+#   ENGINE_B_PHASE1_END (inclusive), look at both sides and buy the
+#   CHEAPER one with ENGINE_B_PHASE1_SHARES shares, but only if that
+#   cheaper price is below ENGINE_B_PHASE1_MAX_PRICE. Otherwise skip
+#   that tick. The side bought can differ from check to check.
+ENGINE_B_INTERVAL_SECONDS = 15
+ENGINE_B_PHASE1_START = 15
+ENGINE_B_PHASE1_END = 120
+ENGINE_B_PHASE1_SHARES = 20
+ENGINE_B_PHASE1_MAX_PRICE = 0.40
 
-# Entry: wait this long after window open before taking any position.
-ENGINE_B_ENTRY_WAIT_SECONDS = 45
+# Phase 2: expensive-side momentum buying.
+#   Every ENGINE_B_INTERVAL_SECONDS from ENGINE_B_PHASE2_START to
+#   ENGINE_B_PHASE2_END (inclusive), look at both sides and buy the
+#   MORE EXPENSIVE one with ENGINE_B_PHASE2_SHARES shares, but only if
+#   that price is above ENGINE_B_PHASE2_MIN_PRICE. Otherwise skip that
+#   tick.
+ENGINE_B_PHASE2_START = 135
+ENGINE_B_PHASE2_END = 255
+ENGINE_B_PHASE2_SHARES = 40
+ENGINE_B_PHASE2_MIN_PRICE = 0.60
 
-# Entry must be below this price (buy the cheaper of the two sides).
-ENGINE_B_ENTRY_MAX_PRICE = 0.70
-
-# Exit tiers, keyed off the entry price:
-#   entry <  ENGINE_B_LOW_TIER_MAX               -> TP at ENGINE_B_LOW_TIER_TP
-#   entry >= ENGINE_B_HIGH_TIER_MIN               -> hold to resolution
-#   entry in between (no rule given)              -> defaults to hold to
-#                                                     resolution (a 0.50 TP
-#                                                     would be a guaranteed
-#                                                     loss above entry 0.50,
-#                                                     so it can't extend
-#                                                     into this band)
-ENGINE_B_LOW_TIER_MAX = 0.30
-ENGINE_B_LOW_TIER_TP = 0.50
-ENGINE_B_HIGH_TIER_MIN = 0.60
-
-# Stop loss: fixed offset below entry price (entry - offset).
-ENGINE_B_STOP_LOSS_OFFSET = 0.15
-
-# After entering, wait this long before arming the doubling watch.
-ENGINE_B_POST_ENTRY_WAIT_SECONDS = 45
-
-# Doubling trigger: fires once per window, the first time the *other*
-# side (not the one held) prints inside this band.
-ENGINE_B_DOUBLE_BAND_LOW = 0.70
-ENGINE_B_DOUBLE_BAND_HIGH = 0.72
-
-# Logging-only resolution signal (kept from the original design): a side
-# printing >= this in the last RESOLUTION_WINDOW_SECONDS is logged as the
-# likely winner. No action is taken on it -- positions are held to expiry
-# or exited via TP/SL as normal.
-ENGINE_B_RESOLUTION_PRICE = 0.90
+# No stop loss / take profit / doubling -- every fill from both phases
+# is held and settled at window close against the real outcome.
 
 # ---- Misc -----------------------------------------------------------------
 LOG_MAX_ENTRIES = 500

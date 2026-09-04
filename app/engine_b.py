@@ -1,37 +1,28 @@
 """
-Engine B (v3) -- the only engine running.
+Engine B (v4) -- interval accumulation strategy. The only engine running.
 
 Flow
 ----
-1. Wait ENGINE_B_ENTRY_WAIT_SECONDS (45s) after window open. No action
-   before that.
-2. At the 45s mark, buy the cheaper of the two sides, provided its price
-   is below ENGINE_B_ENTRY_MAX_PRICE (0.70). This becomes the "primary"
-   leg.
-3. Exit rule for a leg depends on ITS OWN entry price tier:
-     entry <  0.30            -> take profit at 0.50
-     entry >= 0.60            -> hold to resolution (no early exit)
-     entry in [0.30, 0.60)    -> hold to resolution (no rule was given
-                                  for this band; defaulted here since a
-                                  0.50 TP would guarantee a loss above
-                                  entry 0.50)
-   Stop loss for a leg is always (that leg's entry price - 0.15),
-   active from the moment the leg opens.
-4. After the primary leg opens, wait another 45s, then watch the OTHER
-   side (not the one held). The first time it prints inside
-   [0.70, 0.72], open a SECOND, FULLY INDEPENDENT leg: buy the same
-   share count again on the held side, at whatever that side's current
-   price is. This leg gets its OWN entry price, its OWN stop loss
-   (leg entry - 0.15), and its OWN TP tier -- it is NOT blended into
-   the primary leg's average. Fires at most once per window.
-5. Each leg is monitored and exited independently for the rest of the
-   window -- one can hit its TP or SL while the other keeps running (or
-   is later added). Both are on the same side, but they are two
-   separate positions in the ledger.
-6. A side printing 0.90+ in the last 2 seconds before close is logged
-   for visibility but never triggers an action on its own.
-7. At window close, any legs still open are settled at Polymarket's
-   real outcome: $1/share if the leg's side won, $0/share if it lost.
+Phase 1 (cheap-side scalping), t in [PHASE1_START, PHASE1_END], every
+INTERVAL_SECONDS (default: 15s, 30s, ..., 120s):
+    Look at both UP and DOWN prices. Whichever is cheaper is the
+    candidate. If that price is below PHASE1_MAX_PRICE (0.40), buy
+    PHASE1_SHARES (20) of it. Otherwise skip this tick -- no action.
+    The side bought can flip from tick to tick depending on which side
+    happens to be cheaper at that moment.
+
+Dead zone: (PHASE1_END, PHASE2_START) -- no buying.
+
+Phase 2 (expensive-side momentum), t in [PHASE2_START, PHASE2_END],
+every INTERVAL_SECONDS (default: 135s, 150s, ..., 255s):
+    Look at both UP and DOWN prices. Whichever is MORE expensive is
+    the candidate. If that price is above PHASE2_MIN_PRICE (0.60), buy
+    PHASE2_SHARES (40) of it. Otherwise skip this tick.
+
+Every fill from both phases is an independent leg. There is no stop
+loss, no take profit, and no exit logic of any kind -- all legs are
+held until window close and settled against Polymarket's real outcome
+($1/share if that leg's side won, $0/share if it lost).
 """
 import time
 from dataclasses import dataclass
@@ -45,9 +36,8 @@ from .paper_broker import PaperBroker
 @dataclass
 class Leg:
     position: Position
-    stop_loss_price: float
-    tp_price: Optional[float]  # None means "hold to resolution"
-    tag: str  # "primary" or "double"
+    tag: str          # "phase1" or "phase2"
+    tick_seconds: int  # scheduled elapsed-time this leg fired at
 
 
 class EngineB:
@@ -57,26 +47,28 @@ class EngineB:
         self.broker = broker
         self.window: Optional[WindowMarket] = None
         self.legs: List[Leg] = []
-        self.side: Optional[Side] = None
-        self.entry_time: Optional[float] = None
-        self.entry_attempted = False
-        self.no_entry = False
-        self.doubled = False
-        self.winner_logged = False
+        self._fired_ticks: set = set()  # elapsed-second marks already handled this window
 
     def reset_for_window(self, window: WindowMarket):
         self.window = window
         self.legs = []
-        self.side = None
-        self.entry_time = None
-        self.entry_attempted = False
-        self.no_entry = False
-        self.doubled = False
-        self.winner_logged = False
+        self._fired_ticks = set()
         self.broker.log_event(
             self.name, window.slug, "WINDOW_OPEN",
-            note=f"Waiting {config.ENGINE_B_ENTRY_WAIT_SECONDS}s before entry (size={config.ENGINE_B_BASE_SHARES})",
+            note=(f"Phase 1: {config.ENGINE_B_PHASE1_SHARES} shares of cheaper side "
+                  f"every {config.ENGINE_B_INTERVAL_SECONDS}s from "
+                  f"{config.ENGINE_B_PHASE1_START}s-{config.ENGINE_B_PHASE1_END}s if < "
+                  f"{config.ENGINE_B_PHASE1_MAX_PRICE}. Phase 2: "
+                  f"{config.ENGINE_B_PHASE2_SHARES} shares of expensive side every "
+                  f"{config.ENGINE_B_INTERVAL_SECONDS}s from {config.ENGINE_B_PHASE2_START}s-"
+                  f"{config.ENGINE_B_PHASE2_END}s if > {config.ENGINE_B_PHASE2_MIN_PRICE}"),
         )
+
+    def _scheduled_ticks(self, start: int, end: int):
+        t = start
+        while t <= end:
+            yield t
+            t += config.ENGINE_B_INTERVAL_SECONDS
 
     def on_tick(self, up_price: Optional[float], down_price: Optional[float],
                 seconds_to_close: float, now: Optional[float] = None):
@@ -84,138 +76,99 @@ class EngineB:
             return
         now = now or time.time()
         elapsed = now - self.window.open_ts
-        prices = {Side.UP: up_price, Side.DOWN: down_price}
+        if up_price is None or down_price is None:
+            return
 
-        if not self.entry_attempted:
-            if elapsed >= config.ENGINE_B_ENTRY_WAIT_SECONDS:
-                self._attempt_entry(prices, now)
-        else:
-            self._manage_exits(prices)
-            if (not self.doubled and self.legs and self.entry_time is not None
-                    and (now - self.entry_time) >= config.ENGINE_B_POST_ENTRY_WAIT_SECONDS):
-                self._check_double_trigger(prices)
+        for tick in self._scheduled_ticks(config.ENGINE_B_PHASE1_START, config.ENGINE_B_PHASE1_END):
+            key = ("p1", tick)
+            if key in self._fired_ticks:
+                continue
+            if elapsed >= tick:
+                self._fired_ticks.add(key)
+                self._try_phase1(up_price, down_price, tick)
 
-        if (not self.winner_logged and seconds_to_close <= config.RESOLUTION_WINDOW_SECONDS
-                and seconds_to_close >= 0):
-            self._log_resolution_signal(prices)
+        for tick in self._scheduled_ticks(config.ENGINE_B_PHASE2_START, config.ENGINE_B_PHASE2_END):
+            key = ("p2", tick)
+            if key in self._fired_ticks:
+                continue
+            if elapsed >= tick:
+                self._fired_ticks.add(key)
+                self._try_phase2(up_price, down_price, tick)
 
-    def _build_leg(self, side: Side, shares: float, price: float, tag: str) -> Leg:
+    def _try_phase1(self, up_price: float, down_price: float, tick: int):
+        cheap_side = Side.UP if up_price <= down_price else Side.DOWN
+        cheap_price = up_price if cheap_side == Side.UP else down_price
+        if cheap_price >= config.ENGINE_B_PHASE1_MAX_PRICE:
+            self.broker.log_event(
+                self.name, self.window.slug, "PHASE1_SKIP",
+                side=cheap_side.value, price=cheap_price,
+                note=f"t={tick}s: cheaper side {cheap_price:.2f} >= {config.ENGINE_B_PHASE1_MAX_PRICE}, no buy",
+            )
+            return
+        self._build_leg(cheap_side, config.ENGINE_B_PHASE1_SHARES, cheap_price, tag="phase1", tick=tick)
+
+    def _try_phase2(self, up_price: float, down_price: float, tick: int):
+        exp_side = Side.UP if up_price >= down_price else Side.DOWN
+        exp_price = up_price if exp_side == Side.UP else down_price
+        if exp_price <= config.ENGINE_B_PHASE2_MIN_PRICE:
+            self.broker.log_event(
+                self.name, self.window.slug, "PHASE2_SKIP",
+                side=exp_side.value, price=exp_price,
+                note=f"t={tick}s: expensive side {exp_price:.2f} <= {config.ENGINE_B_PHASE2_MIN_PRICE}, no buy",
+            )
+            return
+        self._build_leg(exp_side, config.ENGINE_B_PHASE2_SHARES, exp_price, tag="phase2", tick=tick)
+
+    def _build_leg(self, side: Side, shares: float, price: float, tag: str, tick: int) -> Leg:
         position = self.broker.buy(
             self.name, self.window.slug, side, shares, price,
-            note=f"{tag} leg entry",
+            note=f"{tag} leg entry @ t={tick}s",
         )
-        stop_loss_price = price - config.ENGINE_B_STOP_LOSS_OFFSET
-        tp_price = config.ENGINE_B_LOW_TIER_TP if price < config.ENGINE_B_LOW_TIER_MAX else None
-        tier_note = f"TP {tp_price}" if tp_price is not None else "hold to resolution"
         self.broker.log_event(
             self.name, self.window.slug, "LEG_OPENED",
             side=side.value, price=price,
-            note=f"{tag} leg: {tier_note}; SL {stop_loss_price:.2f}",
+            note=f"{tag} leg (t={tick}s): {shares} shares, held to resolution",
         )
-        return Leg(position=position, stop_loss_price=stop_loss_price,
-                   tp_price=tp_price, tag=tag)
-
-    def _attempt_entry(self, prices, now: float):
-        up_p, down_p = prices.get(Side.UP), prices.get(Side.DOWN)
-        if up_p is None or down_p is None:
-            return  # retry next tick, don't mark as attempted yet
-        self.entry_attempted = True
-
-        cheaper_side = Side.UP if up_p <= down_p else Side.DOWN
-        entry_price = prices[cheaper_side]
-
-        if entry_price >= config.ENGINE_B_ENTRY_MAX_PRICE:
-            self.no_entry = True
-            self.broker.log_event(self.name, self.window.slug, "NO_ENTRY",
-                                   note=f"Both sides >= {config.ENGINE_B_ENTRY_MAX_PRICE} at entry check -- skipped")
-            return
-
-        self.side = cheaper_side
-        self.entry_time = now
-        leg = self._build_leg(cheaper_side, config.ENGINE_B_BASE_SHARES, entry_price, tag="primary")
+        leg = Leg(position=position, tag=tag, tick_seconds=tick)
         self.legs.append(leg)
-
-    def _manage_exits(self, prices):
-        if not self.legs or self.side is None:
-            return
-        p = prices.get(self.side)
-        if p is None:
-            return
-        remaining = []
-        for leg in self.legs:
-            if p <= leg.stop_loss_price:
-                self.broker.sell(self.name, self.window.slug, leg.position, p,
-                                  note=f"{leg.tag} leg stop loss hit at {leg.stop_loss_price:.2f}")
-                continue
-            if leg.tp_price is not None and p >= leg.tp_price:
-                self.broker.sell(self.name, self.window.slug, leg.position, p,
-                                  note=f"{leg.tag} leg take profit hit at {leg.tp_price:.2f}")
-                continue
-            remaining.append(leg)
-        self.legs = remaining
-
-    def _check_double_trigger(self, prices):
-        if self.doubled or not self.legs or self.side is None:
-            return
-        other_side = self.side.other()
-        other_p = prices.get(other_side)
-        if other_p is None:
-            return
-        if config.ENGINE_B_DOUBLE_BAND_LOW <= other_p <= config.ENGINE_B_DOUBLE_BAND_HIGH:
-            held_price = prices.get(self.side)
-            if held_price is None:
-                return
-            leg = self._build_leg(self.side, config.ENGINE_B_BASE_SHARES, held_price, tag="double")
-            self.legs.append(leg)
-            self.doubled = True
-            self.broker.log_event(
-                self.name, self.window.slug, "DOUBLED",
-                note=f"Other side printed {other_p:.2f} inside {config.ENGINE_B_DOUBLE_BAND_LOW}-{config.ENGINE_B_DOUBLE_BAND_HIGH} -- opened independent second leg",
-            )
-
-    def _log_resolution_signal(self, prices):
-        winner = None
-        for side, p in prices.items():
-            if p is not None and p >= config.ENGINE_B_RESOLUTION_PRICE:
-                winner = side
-                break
-        if winner is not None:
-            self.winner_logged = True
-            self.broker.log_event(self.name, self.window.slug, "RESOLUTION_SIGNAL",
-                                   side=winner.value, price=prices[winner],
-                                   note="Logging only, no action taken")
+        return leg
 
     def finalize_window(self, winning_side: Optional[Side]):
         if winning_side is not None:
             for leg in self.legs:
                 won = leg.position.side == winning_side
                 self.broker.resolve_expiry(self.name, self.window.slug, leg.position,
-                                            won, note=f"{leg.tag} leg held to expiry")
+                                            won, note=f"{leg.tag} leg (t={leg.tick_seconds}s) held to expiry")
         self.legs = []
 
     def snapshot(self) -> dict:
-        if not self.entry_attempted:
-            phase = "waiting_entry"
-        elif self.no_entry:
-            phase = "no_entry"
-        elif self.legs:
-            phase = "doubled" if self.doubled else "in_position"
+        phase1_fired = sum(1 for k in self._fired_ticks if k[0] == "p1")
+        phase2_fired = sum(1 for k in self._fired_ticks if k[0] == "p2")
+        phase1_total = len(list(self._scheduled_ticks(config.ENGINE_B_PHASE1_START, config.ENGINE_B_PHASE1_END)))
+        phase2_total = len(list(self._scheduled_ticks(config.ENGINE_B_PHASE2_START, config.ENGINE_B_PHASE2_END)))
+        elapsed = (time.time() - self.window.open_ts) if self.window else 0
+        if phase1_fired < phase1_total:
+            phase = "phase1"
+        elif elapsed < config.ENGINE_B_PHASE2_START:
+            phase = "dead_zone"
+        elif phase2_fired < phase2_total:
+            phase = "phase2"
         else:
-            phase = "closed"  # all legs already exited via TP/SL this window
+            phase = "done"
         return {
             "phase": phase,
             "window": self.window.slug if self.window else None,
-            "side": self.side.value if self.side else None,
-            "entry_time": self.entry_time,
-            "doubled": self.doubled,
+            "phase1_checks_done": phase1_fired,
+            "phase1_checks_total": phase1_total,
+            "phase2_checks_done": phase2_fired,
+            "phase2_checks_total": phase2_total,
             "legs": [
                 {
                     "tag": leg.tag,
+                    "tick_seconds": leg.tick_seconds,
                     "side": leg.position.side.value,
                     "shares": leg.position.shares,
                     "entry_price": leg.position.entry_price,
-                    "stop_loss_price": leg.stop_loss_price,
-                    "tp_price": leg.tp_price,
                 }
                 for leg in self.legs
             ],
