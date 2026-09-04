@@ -115,6 +115,47 @@ class PolymarketClient:
             close_ts=open_ts + config.WINDOW_SECONDS,
         )
 
+    # ---- resolution (real settlement, not a price guess) ---------------------
+
+    async def fetch_resolution(self, slug: str):
+        """Returns the real winning Side once Polymarket has settled this
+        market, or None if it isn't resolved yet. Uses `closed` + a
+        decisive outcomePrices split (winner priced >=0.99) rather than
+        just reading the live CLOB price, since the live price can be
+        noisy/stale right at the boundary."""
+        from .models import Side  # local import avoids a circular import
+        market_json = await self.fetch_market_by_slug(slug)
+        if not market_json:
+            return None
+        if not market_json.get("closed"):
+            return None
+        outcome_prices = market_json.get("outcomePrices")
+        outcomes = market_json.get("outcomes")
+        if isinstance(outcome_prices, str):
+            try:
+                outcome_prices = json.loads(outcome_prices)
+            except Exception:
+                return None
+        if isinstance(outcomes, str):
+            try:
+                outcomes = json.loads(outcomes)
+            except Exception:
+                return None
+        if not outcome_prices or not outcomes or len(outcome_prices) < 2:
+            return None
+        try:
+            prices = [float(p) for p in outcome_prices]
+        except Exception:
+            return None
+        if max(prices) < 0.99:
+            return None  # closed but not yet decisively settled -- wait
+        pairs = dict(zip([o.lower() for o in outcomes], prices))
+        up_p = pairs.get("up") or pairs.get("yes")
+        down_p = pairs.get("down") or pairs.get("no")
+        if up_p is None or down_p is None:
+            return None
+        return Side.UP if up_p > down_p else Side.DOWN
+
     # ---- live pricing -------------------------------------------------------
 
     async def get_price(self, token_id: str) -> Optional[float]:

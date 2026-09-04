@@ -66,7 +66,7 @@ class BotState:
     async def _roll_window(self, new_window: WindowMarket):
         # Finalize the previous window before starting the new one.
         if self.current_window is not None:
-            winning_side = self._infer_winner()
+            winning_side = await self._resolve_previous_window(self.current_window)
             self.engine_a.finalize_window(winning_side)
             self.engine_b.finalize_window(winning_side)
 
@@ -75,10 +75,32 @@ class BotState:
         self.engine_a.reset_for_window(new_window)
         self.engine_b.reset_for_window(new_window)
 
+    async def _resolve_previous_window(self, window: WindowMarket) -> Optional[Side]:
+        """Use Polymarket's actual settled outcome, not a price guess.
+        These 5-minute crypto markets typically settle within a couple of
+        seconds of close, so we retry briefly before giving up."""
+        for _ in range(6):  # ~6 seconds of retrying
+            winner = await self.client.fetch_resolution(window.slug)
+            if winner is not None:
+                return winner
+            await asyncio.sleep(1.0)
+        # Real outcome not confirmed in time -- fall back to the
+        # approximation and say so explicitly in the log, so it's never
+        # silently treated as equivalent to a real settlement.
+        fallback = self._infer_winner()
+        self.broker.log_event(
+            "SYS", window.slug, "RESOLUTION_FALLBACK",
+            side=fallback.value if fallback else None,
+            note="Polymarket outcome not confirmed within 6s; settled by last observed price instead",
+        )
+        return fallback
+
     def _infer_winner(self) -> Optional[Side]:
-        """Best-effort winner inference from the last observed prices of the
-        window that just ended: whichever side priced higher wins (resolves
-        to $1). This is a paper-trading approximation of on-chain resolution."""
+        """Fallback only -- used when Polymarket's real settlement isn't
+        confirmed within the retry window. Approximates the winner as
+        whichever side's last observed price was higher. Prefer
+        `PolymarketClient.fetch_resolution` (the real outcome) wherever
+        possible; this exists so the bot never stalls waiting forever."""
         if self.last_up_price is None or self.last_down_price is None:
             return None
         return Side.UP if self.last_up_price >= self.last_down_price else Side.DOWN
