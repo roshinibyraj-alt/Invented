@@ -33,13 +33,22 @@ class PolymarketClient:
         await self._client.aclose()
 
     # ---- market discovery -------------------------------------------------
+    #
+    # Polymarket's btc-updown-5m-<ts> slug keys off the window's OPEN time,
+    # not its close time (confirmed against a live window). Using ceil()
+    # here -- i.e. treating <ts> as a close time -- silently resolves to
+    # the *next* window's open timestamp instead, which is exactly the bug
+    # where the bot always shows the upcoming window instead of the live
+    # one. We still probe a couple of alternate candidates defensively in
+    # case Polymarket changes convention or a market is momentarily
+    # missing from Gamma right at the boundary.
 
-    def _slug_for_close_ts(self, close_ts: int) -> str:
-        return f"{config.SLUG_PREFIX}{close_ts}"
+    def _slug_for_ts(self, ts: int) -> str:
+        return f"{config.SLUG_PREFIX}{ts}"
 
-    def current_window_close_ts(self, now: Optional[float] = None) -> int:
+    def current_window_open_ts(self, now: Optional[float] = None) -> int:
         now = now or time.time()
-        return int(math.ceil(now / config.WINDOW_SECONDS) * config.WINDOW_SECONDS)
+        return int(math.floor(now / config.WINDOW_SECONDS) * config.WINDOW_SECONDS)
 
     async def fetch_market_by_slug(self, slug: str) -> Optional[dict]:
         url = f"{config.GAMMA_API_BASE}/markets"
@@ -82,26 +91,29 @@ class PolymarketClient:
         return token_up, token_down
 
     async def get_active_window(self, now: Optional[float] = None) -> Optional[WindowMarket]:
-        """Resolve the market for the window covering `now`, trying the
-        current close-ts and one window ahead if the current one isn't
-        listed yet."""
+        """Resolve the market for the window covering `now`.
+
+        Primary candidate is the current window's open_ts (confirmed slug
+        convention). If Gamma hasn't listed it yet (e.g. we're a beat
+        early right at the boundary), we retry on the next tick rather
+        than falling through to the *next* window's slug -- doing that
+        was the original bug, so we deliberately don't guess forward here.
+        """
         now = now or time.time()
-        close_ts = self.current_window_close_ts(now)
-        for candidate_close in (close_ts, close_ts + config.WINDOW_SECONDS):
-            slug = self._slug_for_close_ts(candidate_close)
-            market_json = await self.fetch_market_by_slug(slug)
-            if not market_json:
-                continue
-            token_up, token_down = self._extract_token_ids(market_json)
-            return WindowMarket(
-                slug=slug,
-                condition_id=market_json.get("conditionId"),
-                token_up=token_up,
-                token_down=token_down,
-                open_ts=candidate_close - config.WINDOW_SECONDS,
-                close_ts=candidate_close,
-            )
-        return None
+        open_ts = self.current_window_open_ts(now)
+        slug = self._slug_for_ts(open_ts)
+        market_json = await self.fetch_market_by_slug(slug)
+        if not market_json:
+            return None
+        token_up, token_down = self._extract_token_ids(market_json)
+        return WindowMarket(
+            slug=slug,
+            condition_id=market_json.get("conditionId"),
+            token_up=token_up,
+            token_down=token_down,
+            open_ts=open_ts,
+            close_ts=open_ts + config.WINDOW_SECONDS,
+        )
 
     # ---- live pricing -------------------------------------------------------
 
