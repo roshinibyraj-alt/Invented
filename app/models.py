@@ -43,13 +43,6 @@ class Position:
     def cost(self) -> float:
         return self.shares * self.entry_price
 
-    def add(self, extra_shares: float, extra_price: float):
-        """Blend additional shares into this position, updating the
-        weighted-average entry price (used by the doubling mechanic)."""
-        total_cost = self.cost + (extra_shares * extra_price)
-        self.shares += extra_shares
-        self.entry_price = total_cost / self.shares
-
 
 @dataclass
 class TradeLogEntry:

@@ -20,8 +20,12 @@ $5,000 balance, no real orders) with a live dashboard.
    in config — the brief said 0.15–0.20, defaulted to the lower end).
 5. After entering, wait another **45 seconds**, then watch the *other*
    side (not the one held). The first time it prints inside **0.70–0.72**,
-   double the position — buy the same number of shares again on the
-   held side, blending the average entry price. Fires once per window.
+   open a **second, fully independent leg** — buy the same share count
+   again on the held side, at that side's current price. This leg gets
+   its **own** entry price, stop loss (leg entry − 0.15), and TP tier —
+   it is **not** blended into the primary leg's average. Fires at most
+   once per window. Each leg is then tracked and exited independently
+   (one can hit its own TP/SL while the other stays open).
 6. A side printing **0.90+** in the last 2 seconds before close is
    logged for visibility but triggers no action — exits only happen via
    TP, SL, or expiry settlement.
