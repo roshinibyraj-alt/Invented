@@ -1,45 +1,48 @@
 # Polymarket BTC 5m Up/Down Bot — paper trading
 
-Two independent strategy engines trading Polymarket's `btc-updown-5m-*`
-markets, running in **paper mode** (simulated $5,000 balance, no real
-orders) with a live dashboard.
+Engine B is the only strategy running (Engine A was removed). It trades
+Polymarket's `btc-updown-5m-*` markets in **paper mode** (simulated
+$5,000 balance, no real orders) with a live dashboard.
 
-## Strategy
+## Strategy — Engine B
 
-**Engine A** — 100 base shares
-1. On window open, place resting limit buys at **0.30** on both Up and Down.
-2. Whichever fills first wins; cancel the other resting order.
-3. No stop loss.
-4. If the held side's price touches **0.60+**, arm a guard. If it then
-   retraces to **0.50**, market-sell immediately.
-5. Otherwise hold to expiry. A 0.90+ price in the last 2 seconds before
-   close is logged as the resolution signal but triggers no action.
+1. Wait **45 seconds** after window open. No action before that.
+2. At the 45s mark, buy the **cheaper** of the two sides, provided its
+   price is below **0.70**.
+3. Exit depends on the entry price tier:
+   - entry **< 0.30** → take profit at **0.50**
+   - entry **>= 0.60** → hold to resolution (no early exit)
+   - entry **0.30–0.60** → not specified in the original brief; defaults
+     to "hold to resolution" here, since a 0.50 TP would guarantee a
+     loss for any entry above 0.50. Change `ENGINE_B_LOW_TIER_MAX` /
+     add a rule in `engine_b.py` if you want different behavior.
+4. **Stop loss** at entry price minus **0.15** (`ENGINE_B_STOP_LOSS_OFFSET`
+   in config — the brief said 0.15–0.20, defaulted to the lower end).
+5. After entering, wait another **45 seconds**, then watch the *other*
+   side (not the one held). The first time it prints inside **0.70–0.72**,
+   double the position — buy the same number of shares again on the
+   held side, blending the average entry price. Fires once per window.
+6. A side printing **0.90+** in the last 2 seconds before close is
+   logged for visibility but triggers no action — exits only happen via
+   TP, SL, or expiry settlement.
 
-**Engine B** — 200 base shares, martingale
-1. Watch both sides after open. The first side to touch **0.70** is
-   skipped for the window.
-2. If the *other* side then reaches 0.70, market-buy it.
-3. Stop loss at **0.50**.
-4. Same logging-only 0.90+ resolution rule as Engine A.
-5. A stop-loss loss **doubles** next window's size (200 → 400 → 800…).
-   A win resets size back to 200.
-
-Both engines share one balance/ledger but trade independently — they
-often land on the same side by construction, but neither is hard-wired
-to follow the other.
+Every window is settled against Polymarket's real outcome (via
+`fetch_resolution`, with a short retry + price-based fallback — see the
+"resolution" section below), which pays $1/share on the winning side
+and $0 on the losing side, updating the shared balance.
 
 ## Project layout
 
 ```
 app/
-  config.py            strategy + runtime parameters
-  models.py             shared dataclasses/enums
-  polymarket_client.py  Gamma (market discovery) + CLOB (pricing) API client
-  paper_broker.py        simulated wallet / fills / PnL
-  engine_a.py / engine_b.py   the two strategies
-  state.py               background polling loop + orchestration
-  main.py                 FastAPI app (serves API + dashboard)
-static/index.html         dashboard UI
+  config.py             strategy + runtime parameters
+  models.py              shared dataclasses/enums
+  polymarket_client.py   Gamma (market discovery) + CLOB (pricing) + resolution API client
+  paper_broker.py         simulated wallet / fills / PnL
+  engine_b.py              the strategy (45s entry, tiered exit, SL, doubling)
+  state.py                 background polling loop + orchestration
+  main.py                  FastAPI app (serves API + dashboard)
+static/index.html          dashboard UI
 ```
 
 ## Run locally
@@ -93,7 +96,6 @@ This build intentionally stops at paper trading. To route real orders:
   Polymarket API credentials (key/secret/passphrase).
 - Replace the `buy`/`sell` calls in `paper_broker.py` with real
   `create_order` / `post_order` calls, and replace the simulated fill
-  checks in `engine_a.py`/`engine_b.py` with real order-status polling
-  (limit fills aren't guaranteed at your exact 0.30 print the way the
-  paper sim assumes).
+  checks in `engine_b.py` with real order-status polling (market orders
+  aren't guaranteed to fill at the exact print you observed).
 - Add slippage/fee handling and a kill switch before risking capital.

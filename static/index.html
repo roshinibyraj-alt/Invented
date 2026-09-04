@@ -114,12 +114,9 @@
   /* Engine panels */
   .engines {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: 1fr;
     gap: 16px;
     margin-bottom: 18px;
-  }
-  @media (max-width: 720px) {
-    .engines { grid-template-columns: 1fr; }
   }
   .panel {
     border: 1px solid var(--line);
@@ -245,24 +242,15 @@
   <canvas id="spark" width="1000" height="70"></canvas>
 
   <div class="engines">
-    <div class="panel" id="panel-a">
-      <div class="panel-head">
-        <h2>Engine A — 0.30 fade</h2>
-        <div class="phase-tag" id="a-phase">—</div>
-      </div>
-      <div class="kv"><span class="k">Position</span><span class="v" id="a-position">flat</span></div>
-      <div class="kv"><span class="k">Resting orders</span><span class="v" id="a-resting">—</span></div>
-      <div class="kv"><span class="k">Guard</span><span class="v" id="a-guard">not armed</span></div>
-    </div>
-
     <div class="panel" id="panel-b">
       <div class="panel-head">
-        <h2>Engine B — 0.70 momentum</h2>
+        <h2>Engine B — 45s entry, tiered exit</h2>
         <div class="phase-tag" id="b-phase">—</div>
       </div>
       <div class="kv"><span class="k">Position</span><span class="v" id="b-position">flat</span></div>
-      <div class="kv"><span class="k">Skipped side</span><span class="v" id="b-skipped">—</span></div>
-      <div class="kv"><span class="k">Next size</span><span class="v" id="b-size">200</span></div>
+      <div class="kv"><span class="k">Stop loss</span><span class="v" id="b-sl">—</span></div>
+      <div class="kv"><span class="k">Take profit</span><span class="v" id="b-tp">—</span></div>
+      <div class="kv"><span class="k">Doubled</span><span class="v" id="b-doubled">no</span></div>
     </div>
   </div>
 
@@ -386,22 +374,17 @@ async function refresh() {
 
     drawSpark(data.price_history);
 
-    // Engine A
-    const a = data.engine_a;
-    $('a-phase').textContent = a.phase.replace(/_/g,' ');
-    $('a-position').textContent = a.position ? `${a.position.side} · ${a.position.shares} @ ${a.position.entry_price.toFixed(3)}` : 'flat';
-    const restingKeys = Object.keys(a.resting_orders || {});
-    $('a-resting').textContent = restingKeys.length ? restingKeys.map(k => `${k} @ ${a.resting_orders[k]}`).join(' / ') : 'none';
-    $('a-guard').textContent = a.phase === 'armed' ? 'armed (watching 0.50 retrace)' : (a.phase === 'exited_guard' ? 'exited on retrace' : 'not armed');
-    $('panel-a').className = 'panel ' + (a.phase === 'armed' ? 'side-amber' : sideClassForPanel(a));
-
     // Engine B
     const b = data.engine_b;
     $('b-phase').textContent = b.phase.replace(/_/g,' ');
     $('b-position').textContent = b.position ? `${b.position.side} · ${b.position.shares} @ ${b.position.entry_price.toFixed(3)}` : 'flat';
-    $('b-skipped').textContent = b.skipped_side || '—';
-    $('b-size').textContent = b.current_shares;
-    $('panel-b').className = 'panel ' + (b.phase === 'stopped_out' ? 'side-amber' : sideClassForPanel(b));
+    $('b-sl').textContent = b.stop_loss_price !== null && b.stop_loss_price !== undefined ? b.stop_loss_price.toFixed(3) : '—';
+    $('b-tp').textContent = b.tp_price !== null && b.tp_price !== undefined ? b.tp_price.toFixed(3) : 'hold to resolution';
+    $('b-doubled').textContent = b.doubled ? 'yes' : 'no';
+    let bClass = sideClassForPanel(b);
+    if (b.phase === 'stopped_out') bClass = 'side-amber';
+    if (b.doubled) bClass = 'side-amber';
+    $('panel-b').className = 'panel ' + bClass;
 
     $('balance').textContent = fmtMoney(data.balance);
     const pnlEl = $('pnl');

@@ -13,22 +13,16 @@ class Side(str, Enum):
         return Side.DOWN if self == Side.UP else Side.UP
 
 
-class EngineAPhase(str, Enum):
-    WAITING_FILL = "waiting_fill"        # two resting limit orders live
-    HOLDING = "holding"                  # one side filled, holding to expiry
-    ARMED = "armed"                      # holding + touched 0.60+, guard active
-    EXITED_GUARD = "exited_guard"        # sold early on 0.50 retrace
-    RESOLVED = "resolved"                # window closed
-    FLAT = "flat"                        # no market yet / between windows
-
-
 class EngineBPhase(str, Enum):
-    WATCHING = "watching"                # waiting for first 0.70 touch
-    ONE_SIDE_SKIPPED = "one_side_skipped"  # first side hit 0.70, now watching the other
-    IN_POSITION = "in_position"
-    STOPPED_OUT = "stopped_out"
-    RESOLVED = "resolved"
-    FLAT = "flat"
+    WAITING_ENTRY = "waiting_entry"          # before the 45s entry wait elapses
+    ENTERED_WAITING = "entered_waiting"      # position taken, in the post-entry 45s wait
+    WATCHING_DOUBLE = "watching_double"      # watching the other side for the 0.70-0.72 band
+    DOUBLED = "doubled"                      # doubling has fired, holding to exit/resolution
+    TP_EXIT = "tp_exit"                      # sold on the low-tier take-profit
+    STOPPED_OUT = "stopped_out"              # sold on stop loss
+    NO_ENTRY = "no_entry"                    # both sides were >=0.70 at the 45s mark -- skipped
+    RESOLVED = "resolved"                    # window closed and settled
+    FLAT = "flat"                            # no market yet / between windows
 
 
 @dataclass
@@ -48,6 +42,13 @@ class Position:
     @property
     def cost(self) -> float:
         return self.shares * self.entry_price
+
+    def add(self, extra_shares: float, extra_price: float):
+        """Blend additional shares into this position, updating the
+        weighted-average entry price (used by the doubling mechanic)."""
+        total_cost = self.cost + (extra_shares * extra_price)
+        self.shares += extra_shares
+        self.entry_price = total_cost / self.shares
 
 
 @dataclass

@@ -1,11 +1,10 @@
-"""Shared runtime state + the background loop that drives both engines."""
+"""Shared runtime state + the background loop that drives Engine B."""
 import asyncio
 import time
 from collections import deque
 from typing import Optional
 
 from . import config
-from .engine_a import EngineA
 from .engine_b import EngineB
 from .models import PricePoint, Side, WindowMarket
 from .paper_broker import PaperBroker
@@ -15,7 +14,6 @@ from .polymarket_client import PolymarketClient
 class BotState:
     def __init__(self):
         self.broker = PaperBroker(config.STARTING_BALANCE_USDC)
-        self.engine_a = EngineA(self.broker)
         self.engine_b = EngineB(self.broker)
         self.client = PolymarketClient()
         self.current_window: Optional[WindowMarket] = None
@@ -60,47 +58,39 @@ class BotState:
         self.price_history.append(PricePoint(ts=now, up=up_price, down=down_price))
 
         seconds_to_close = self.current_window.close_ts - now
-        self.engine_a.on_tick(up_price, down_price, seconds_to_close)
-        self.engine_b.on_tick(up_price, down_price, seconds_to_close)
+        self.engine_b.on_tick(up_price, down_price, seconds_to_close, now=now)
 
     async def _roll_window(self, new_window: WindowMarket):
         # Finalize the previous window before starting the new one.
         if self.current_window is not None:
             winning_side = await self._resolve_previous_window(self.current_window)
-            self.engine_a.finalize_window(winning_side)
             self.engine_b.finalize_window(winning_side)
 
         self.current_window = new_window
         self.price_history.clear()
-        self.engine_a.reset_for_window(new_window)
         self.engine_b.reset_for_window(new_window)
 
     async def _resolve_previous_window(self, window: WindowMarket) -> Optional[Side]:
         """Use Polymarket's actual settled outcome, not a price guess.
         These 5-minute crypto markets typically settle within a couple of
         seconds of close, so we retry briefly before giving up."""
-        for _ in range(6):  # ~6 seconds of retrying
+        for _ in range(config.RESOLUTION_RETRY_SECONDS):
             winner = await self.client.fetch_resolution(window.slug)
             if winner is not None:
                 return winner
             await asyncio.sleep(1.0)
-        # Real outcome not confirmed in time -- fall back to the
-        # approximation and say so explicitly in the log, so it's never
-        # silently treated as equivalent to a real settlement.
         fallback = self._infer_winner()
         self.broker.log_event(
             "SYS", window.slug, "RESOLUTION_FALLBACK",
             side=fallback.value if fallback else None,
-            note="Polymarket outcome not confirmed within 6s; settled by last observed price instead",
+            note="Polymarket outcome not confirmed within retry window; settled by last observed price instead",
         )
         return fallback
 
     def _infer_winner(self) -> Optional[Side]:
         """Fallback only -- used when Polymarket's real settlement isn't
         confirmed within the retry window. Approximates the winner as
-        whichever side's last observed price was higher. Prefer
-        `PolymarketClient.fetch_resolution` (the real outcome) wherever
-        possible; this exists so the bot never stalls waiting forever."""
+        whichever side's last observed price was higher."""
         if self.last_up_price is None or self.last_down_price is None:
             return None
         return Side.UP if self.last_up_price >= self.last_down_price else Side.DOWN
@@ -128,7 +118,6 @@ class BotState:
             "balance": round(self.broker.balance, 2),
             "starting_balance": self.broker.starting_balance,
             "pnl_total": round(self.broker.balance - self.broker.starting_balance, 2),
-            "engine_a": self.engine_a.snapshot(),
             "engine_b": self.engine_b.snapshot(),
             "log": [
                 {

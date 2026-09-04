@@ -30,6 +30,20 @@ class PaperBroker:
         ))
         return Position(side=side, shares=shares, entry_price=price)
 
+    def buy_add(self, engine: str, window_slug: str, position: Position,
+                extra_shares: float, price: float, note: str = "") -> Position:
+        """Add shares to an existing position (used by the doubling
+        mechanic), blending the average entry price."""
+        cost = extra_shares * price
+        self.balance -= cost
+        position.add(extra_shares, price)
+        self._push_log(TradeLogEntry(
+            ts=time.time(), engine=engine, window_slug=window_slug,
+            event="BUY_ADD", side=position.side.value, price=price,
+            shares=extra_shares, balance_after=self.balance, note=note,
+        ))
+        return position
+
     def sell(self, engine: str, window_slug: str, position: Position,
               price: float, note: str = "") -> float:
         proceeds = position.shares * price
