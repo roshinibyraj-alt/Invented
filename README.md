@@ -1,41 +1,99 @@
-# Polymarket BTC 5m Flip Bot (paper) — Invented repo
+# Polymarket BTC 5m Up/Down Bot — paper trading
 
-Paper/demo trading bot for the Polymarket **BTC Up/Down 5-minute** market. No wallet, no private key — every fill is simulated on the live CLOB order book.
+Two independent strategy engines trading Polymarket's `btc-updown-5m-*`
+markets, running in **paper mode** (simulated $5,000 balance, no real
+orders) with a live dashboard.
 
-## Strategy (intra-window stop-loss martingale, no carry)
-- **Demo capital:** $1,000 (configurable via `START_BANKROLL`).
-- **Wait gate:** after a window opens the bot waits **7s** before any order.
-- **Entry:** once the wait elapses, whichever side's **ask reaches 0.70** fires immediately (no previous-tick-below requirement). **Slippage ceiling 0.99**: the fill is taken at the actual observed ask, never above 0.99.
-- **Sizing / base:** start size = **base = 10% of current capital** in shares (at 0.70). At $1,000 that is 143 shares.
-- **Stop loss:** while holding, if the held side's price drops to **0.50**, the bot sells immediately at 0.50.
-- **Martingale (capped at 2 per window):** after each stop-loss the bot waits for **any side** to reach **0.65** and fires with **2× the previous position's shares**. Capped at **2 martingale steps per window** — max 3 entries per window: `S → 2S → 4S`. If the 3rd bet also stop-losses, the window simply ends.
-- **No carry-over:** every window starts fresh at base (10% of current capital). A losing window does **not** escalate the next window's size.
-- **Hold to resolution (win):** if a position never hits the stop-loss it is held until the window resolves; the winning side pays 1.0, the losing side 0.
-- **Next window:** base is recalculated as 10% of the updated capital.
+## Strategy
 
-## Config (env vars)
-| Var | Default | Meaning |
-| --- | --- | --- |
-| `ENTRY_PRICE` | `0.70` | First entry fires when any side's ask reaches this |
-| `SL_PRICE` | `0.50` | Stop-loss level (market sell) |
-| `REENTRY_PRICE` | `0.65` | Re-entry fires when any side's ask reaches this |
-| `WAIT_SECONDS` | `7` | Wait after window open before trading |
-| `MAX_MARTINGALE` | `2` | Max martingale steps per window (base + 2 = 3 entries max) |
-| `SLIP_CEILING` | `0.99` | Max accepted fill price (slippage ceiling) |
-| `BASE_PCT` | `0.10` | Base = 10% of capital (in shares at entry price) |
-| `MARTINGALE_X` | `2` | Each re-entry = previous shares × this |
-| `START_BANKROLL` | `1000` | Demo starting capital |
-| `CLOB_POLL_MS` | `300` | CLOB polling interval |
+**Engine A** — 100 base shares
+1. On window open, place resting limit buys at **0.30** on both Up and Down.
+2. Whichever fills first wins; cancel the other resting order.
+3. No stop loss.
+4. If the held side's price touches **0.60+**, arm a guard. If it then
+   retraces to **0.50**, market-sell immediately.
+5. Otherwise hold to expiry. A 0.90+ price in the last 2 seconds before
+   close is logged as the resolution signal but triggers no action.
 
-## Pricing
-Gamma is used only to resolve the slug into the UP/DOWN CLOB token IDs; all prices come from the CLOB order book (`POST /books`). Fires use the actual observed ask (slippage accepted up to 0.99); the stop-loss sells at 0.50. Polymarket taker fees are modelled: `fee = C × TAKER_FEE_RATE × p × (1 − p)` (default TAKER_FEE_RATE=0.07 for Crypto, makers 0), applied on every buy and sell fill and deducted from bankroll/P&L; total fees shown on the dashboard.
+**Engine B** — 200 base shares, martingale
+1. Watch both sides after open. The first side to touch **0.70** is
+   skipped for the window.
+2. If the *other* side then reaches 0.70, market-buy it.
+3. Stop loss at **0.50**.
+4. Same logging-only 0.90+ resolution rule as Engine A.
+5. A stop-loss loss **doubles** next window's size (200 → 400 → 800…).
+   A win resets size back to 200.
 
-## Run
-```bash
-npm install
-npm start          # http://localhost:3000
-npm run smoke      # engine+index syntax + internal window simulation
+Both engines share one balance/ledger but trade independently — they
+often land on the same side by construction, but neither is hard-wired
+to follow the other.
+
+## Project layout
+
+```
+app/
+  config.py            strategy + runtime parameters
+  models.py             shared dataclasses/enums
+  polymarket_client.py  Gamma (market discovery) + CLOB (pricing) API client
+  paper_broker.py        simulated wallet / fills / PnL
+  engine_a.py / engine_b.py   the two strategies
+  state.py               background polling loop + orchestration
+  main.py                 FastAPI app (serves API + dashboard)
+static/index.html         dashboard UI
 ```
 
-## Dashboard
-Live BTC 5m UP/DOWN bid/ask/mid, window countdown, wait countdown, base (10%), martingale steps used / max, entry/status, next shares, open positions (entry/mark/unrealized), bankroll/equity/realized PnL, wins/losses, drawdown, trade feed, logs, lifetime equity chart.
+## Run locally
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+uvicorn app.main:app --reload
+```
+
+Open http://localhost:8000
+
+## Deploy: GitHub → Railway
+
+1. Push this folder to a new GitHub repo:
+   ```bash
+   git init
+   git add .
+   git commit -m "Initial commit: BTC 5m paper trading bot"
+   git branch -M main
+   git remote add origin <your-repo-url>
+   git push -u origin main
+   ```
+2. In Railway: **New Project → Deploy from GitHub repo**, pick the repo.
+   Railway auto-detects Python via Nixpacks and uses the `Procfile` /
+   `railway.json` start command — no manual build config needed.
+3. Under **Variables**, set any of the values from `.env.example` you
+   want to override (defaults work out of the box for paper mode).
+4. Deploy. Railway assigns a public URL — that's your dashboard.
+
+## Important: verify the Polymarket API responses once live
+
+`app/polymarket_client.py` isolates all HTTP calls to Polymarket's
+public Gamma (metadata) and CLOB (pricing) APIs. Field names on these
+endpoints have shifted before. After your first deploy:
+
+- Confirm `fetch_market_by_slug` is returning a market for the current
+  `btc-updown-5m-<closeTimestamp>` slug (check the dashboard header —
+  if it says "waiting for market..." the slug/lookup needs a tweak).
+- Confirm `get_price` is returning sane 0–1 values (check the Up/Down
+  price readouts and the sparkline).
+
+If either is off, the fix is contained entirely to that one file — the
+engines, broker, and dashboard don't touch raw API responses.
+
+## Going live (real orders)
+
+This build intentionally stops at paper trading. To route real orders:
+- Add `py-clob-client`, an EOA wallet with USDC/MATIC on Polygon, and
+  Polymarket API credentials (key/secret/passphrase).
+- Replace the `buy`/`sell` calls in `paper_broker.py` with real
+  `create_order` / `post_order` calls, and replace the simulated fill
+  checks in `engine_a.py`/`engine_b.py` with real order-status polling
+  (limit fills aren't guaranteed at your exact 0.30 print the way the
+  paper sim assumes).
+- Add slippage/fee handling and a kill switch before risking capital.
