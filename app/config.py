@@ -33,11 +33,11 @@ RESOLUTION_RETRY_SECONDS = 6
 #   CHEAPER one with ENGINE_B_PHASE1_SHARES shares, but only if that
 #   cheaper price is below ENGINE_B_PHASE1_MAX_PRICE. Otherwise skip
 #   that tick. The side bought can differ from check to check.
-ENGINE_B_INTERVAL_SECONDS = 15
-ENGINE_B_PHASE1_START = 15
-ENGINE_B_PHASE1_END = 120
-ENGINE_B_PHASE1_SHARES = 20
-ENGINE_B_PHASE1_MAX_PRICE = 0.40
+ENGINE_B_INTERVAL_SECONDS = 10
+ENGINE_B_PHASE1_START = 10
+ENGINE_B_PHASE1_END = 70
+ENGINE_B_PHASE1_SHARES = 50
+ENGINE_B_PHASE1_MAX_PRICE = 0.50
 
 # Phase 2: expensive-side momentum buying.
 #   Every ENGINE_B_INTERVAL_SECONDS from ENGINE_B_PHASE2_START to
@@ -45,10 +45,10 @@ ENGINE_B_PHASE1_MAX_PRICE = 0.40
 #   MORE EXPENSIVE one with ENGINE_B_PHASE2_SHARES shares, but only if
 #   that price is above ENGINE_B_PHASE2_MIN_PRICE. Otherwise skip that
 #   tick.
-ENGINE_B_PHASE2_START = 135
-ENGINE_B_PHASE2_END = 255
-ENGINE_B_PHASE2_SHARES = 40
-ENGINE_B_PHASE2_MIN_PRICE = 0.60
+ENGINE_B_PHASE2_START = 100
+ENGINE_B_PHASE2_END = 170
+ENGINE_B_PHASE2_SHARES = 50
+ENGINE_B_PHASE2_MIN_PRICE = 0.50
 
 # No stop loss / take profit / doubling -- every fill from both phases
 # is held and settled at window close against the real outcome.

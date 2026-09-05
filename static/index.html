@@ -144,11 +144,28 @@
       </div>
     </div>
 
+    <div class="prices" style="margin-top:12px;">
+      <div class="price-box up">
+        <div class="side-label">UP POSITION</div>
+        <div class="p" id="posUpShares">0 sh</div>
+        <div style="font-family:var(--mono); font-size:12px; color:var(--muted); margin-top:6px;">
+          avg entry <span id="posUpAvg" style="color:var(--text); font-weight:700;">—</span>
+        </div>
+      </div>
+      <div class="price-box down">
+        <div class="side-label">DOWN POSITION</div>
+        <div class="p" id="posDownShares">0 sh</div>
+        <div style="font-family:var(--mono); font-size:12px; color:var(--muted); margin-top:6px;">
+          avg entry <span id="posDownAvg" style="color:var(--text); font-weight:700;">—</span>
+        </div>
+      </div>
+    </div>
+
     <canvas id="chart" height="150"></canvas>
 
     <div class="phase-section">
       <div class="phase-head">
-        <span class="phase-name" id="p1Name">PHASE 1 — cheap side &lt; 0.40, 20 shares</span>
+        <span class="phase-name" id="p1Name">PHASE 1 — cheap side &lt; 0.50, 50 shares</span>
         <span class="phase-meta" id="p1Meta">0 / 0</span>
       </div>
       <div class="ticks" id="p1Ticks"></div>
@@ -156,7 +173,7 @@
 
     <div class="phase-section">
       <div class="phase-head">
-        <span class="phase-name" id="p2Name">PHASE 2 — expensive side &gt; 0.60, 40 shares</span>
+        <span class="phase-name" id="p2Name">PHASE 2 — expensive side &gt; 0.50, 50 shares</span>
         <span class="phase-meta" id="p2Meta">0 / 0</span>
       </div>
       <div class="ticks" id="p2Ticks"></div>
@@ -235,8 +252,8 @@ function drawChart(){
   const x = i => pad + (i/(history.length-1)) * (w-pad*2);
   const y = v => h - pad - ((v-min)/(max-min)) * (h-pad*2);
 
-  // reference lines at 0.40 / 0.60
-  [0.40,0.60].forEach(ref=>{
+  // reference line at 0.50 (shared cheap/expensive threshold)
+  [0.50].forEach(ref=>{
     if(ref>min && ref<max){
       ctx.strokeStyle = 'rgba(122,139,163,0.25)';
       ctx.setLineDash([3,3]);
@@ -342,8 +359,15 @@ async function poll(){
     $('p2Meta').textContent = `${eb.phase2_checks_done||0} / ${eb.phase2_checks_total||0} checks`;
     $('p1Name').className = 'phase-name' + (eb.phase==='phase1' ? ' active':'');
     $('p2Name').className = 'phase-name' + (eb.phase==='phase2' ? ' active':'');
-    renderTicks($('p1Ticks'), eb.phase1_checks_done||0, eb.phase1_checks_total||8, 15, 15, legs, 'phase1');
-    renderTicks($('p2Ticks'), eb.phase2_checks_done||0, eb.phase2_checks_total||9, 135, 15, legs, 'phase2');
+    renderTicks($('p1Ticks'), eb.phase1_checks_done||0, eb.phase1_checks_total||7, 10, 10, legs, 'phase1');
+    renderTicks($('p2Ticks'), eb.phase2_checks_done||0, eb.phase2_checks_total||8, 100, 10, legs, 'phase2');
+
+    const upPos = eb.up_position || {shares:0, avg_entry_price:null};
+    const downPos = eb.down_position || {shares:0, avg_entry_price:null};
+    $('posUpShares').textContent = `${upPos.shares} sh`;
+    $('posUpAvg').textContent = fmtP(upPos.avg_entry_price);
+    $('posDownShares').textContent = `${downPos.shares} sh`;
+    $('posDownAvg').textContent = fmtP(downPos.avg_entry_price);
 
     renderLegs(legs);
     renderLog(s.log || []);

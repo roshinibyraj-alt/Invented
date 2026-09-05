@@ -155,6 +155,21 @@ class EngineB:
             phase = "phase2"
         else:
             phase = "done"
+        positions = {Side.UP: [], Side.DOWN: []}
+        for leg in self.legs:
+            positions[leg.position.side].append(leg.position)
+
+        def _agg(side: Side) -> dict:
+            legs_for_side = positions[side]
+            total_shares = sum(p.shares for p in legs_for_side)
+            avg_price = (sum(p.shares * p.entry_price for p in legs_for_side) / total_shares
+                         if total_shares else None)
+            return {
+                "shares": total_shares,
+                "avg_entry_price": avg_price,
+                "num_legs": len(legs_for_side),
+            }
+
         return {
             "phase": phase,
             "window": self.window.slug if self.window else None,
@@ -162,6 +177,8 @@ class EngineB:
             "phase1_checks_total": phase1_total,
             "phase2_checks_done": phase2_fired,
             "phase2_checks_total": phase2_total,
+            "up_position": _agg(Side.UP),
+            "down_position": _agg(Side.DOWN),
             "legs": [
                 {
                     "tag": leg.tag,
