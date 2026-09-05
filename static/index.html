@@ -85,7 +85,7 @@
   tr:last-child td{border-bottom:none;}
   .side-tag{padding:2px 7px; border-radius:5px; font-size:10.5px; font-weight:700;}
   .side-tag.UP{background:var(--up-dim); color:var(--up);} .side-tag.DOWN{background:var(--down-dim); color:var(--down);}
-  .tag-phase1{color:var(--blue);} .tag-phase2{color:var(--amber);}
+  .tag-momentum{color:var(--blue);} .tag-late_snipe{color:var(--amber);}
   .empty{color:var(--muted); font-size:12.5px; padding:14px 4px; text-align:center;}
 
   .log-list{display:flex; flex-direction:column; gap:5px; max-height:420px; overflow-y:auto; padding-right:4px;}
@@ -112,7 +112,7 @@
   <header>
     <div class="title">
       <h1>BTC 5m Up/Down</h1>
-      <span class="sub">interval accumulation bot</span>
+      <span class="sub">momentum signal bot</span>
     </div>
     <div class="status-pill"><span class="dot" id="statusDot"></span><span id="statusText">connecting…</span></div>
   </header>
@@ -167,18 +167,20 @@
 
     <div class="phase-section">
       <div class="phase-head">
-        <span class="phase-name" id="p1Name">PHASE 1 — cheap side &lt; 0.50, 50 shares</span>
-        <span class="phase-meta" id="p1Meta">0 / 0</span>
+        <span class="phase-name" id="scanName">MOMENTUM SCAN — trend + price-band confirmed, confidence-scaled size</span>
+        <span class="phase-meta" id="scanMeta">0 / 0</span>
       </div>
-      <div class="ticks" id="p1Ticks"></div>
+      <div class="ticks" id="scanTicks"></div>
     </div>
 
     <div class="phase-section">
       <div class="phase-head">
-        <span class="phase-name" id="p2Name">PHASE 2 — expensive side &gt; 0.50, 50 shares</span>
-        <span class="phase-meta" id="p2Meta">0 / 0</span>
+        <span class="phase-name">EXPOSURE USED</span>
+        <span class="phase-meta" id="exposureMeta">0 / 0 shares</span>
       </div>
-      <div class="ticks" id="p2Ticks"></div>
+      <div class="bar-track" style="height:9px;">
+        <div class="bar-fill" id="exposureFill" style="width:0%; background:linear-gradient(90deg,var(--blue),var(--amber));"></div>
+      </div>
     </div>
   </div>
 
@@ -198,7 +200,7 @@
     </div>
   </div>
 
-  <footer>polling /api/state every 1s · phase 1: 15s–120s every 15s · phase 2: 135s–255s every 15s</footer>
+  <footer>polling /api/state every 1s · momentum scan 20s–260s every 10s (20s lookback, Δ≥0.03, band 0.45–0.80) · late snipe @ 280s · exposure cap 260 shares</footer>
 </div>
 
 <script>
@@ -208,30 +210,26 @@ const fmtP = n => (n === null || n === undefined) ? '—' : Number(n).toFixed(3)
 
 let history = []; // {ts, up, down}
 
-function renderTicks(container, checksDone, checksTotal, start, interval, legs, tag){
+function renderScanTicks(container, checks){
   container.innerHTML = '';
-  const legByTick = {};
-  legs.filter(l => l.tag === tag).forEach(l => legByTick[l.tick_seconds] = l);
-  for(let i=0;i<checksTotal;i++){
-    const tickSec = start + i*interval;
+  checks.forEach(c=>{
     const el = document.createElement('div');
-    const leg = legByTick[tickSec];
-    const done = i < checksDone;
-    if(leg){
-      el.className = 'tick ' + (leg.side === 'UP' ? 'bought-up' : 'bought-down');
-      el.textContent = leg.side[0] + tickSec;
-      el.title = `${tag} @ t=${tickSec}s — bought ${leg.side} x${leg.shares} @ ${fmtP(leg.entry_price)}`;
-    } else if(done){
+    if(c.status === 'bought'){
+      el.className = 'tick ' + (c.side === 'UP' ? 'bought-up' : 'bought-down');
+      el.textContent = (c.side[0] + c.tick);
+      el.title = `t=${c.tick}s (${c.kind}) — bought ${c.side} x${c.shares} @ ${fmtP(c.price)} — ${c.note||''}`;
+    } else if(c.status === 'skipped'){
       el.className = 'tick skipped';
-      el.textContent = tickSec;
-      el.title = `t=${tickSec}s — condition not met, skipped`;
+      el.textContent = c.tick;
+      el.title = `t=${c.tick}s (${c.kind}) — skipped: ${c.note||''}`;
     } else {
       el.className = 'tick pending';
-      el.textContent = tickSec;
-      el.title = `t=${tickSec}s — upcoming`;
+      el.textContent = c.tick;
+      el.title = `t=${c.tick}s (${c.kind}) — upcoming`;
     }
+    if(c.kind === 'snipe'){ el.style.borderStyle = 'dashed'; el.style.borderWidth = '2px'; }
     container.appendChild(el);
-  }
+  });
 }
 
 function drawChart(){
@@ -310,7 +308,7 @@ function renderLegs(legs){
   legs.forEach(l=>{
     const tr = document.createElement('tr');
     tr.innerHTML = `
-      <td class="${l.tag==='phase1'?'tag-phase1':'tag-phase2'}">${l.tag}</td>
+      <td class="tag-${l.tag}">${l.tag}</td>
       <td>${l.tick_seconds}s</td>
       <td><span class="side-tag ${l.side}">${l.side}</span></td>
       <td>${l.shares}</td>
@@ -357,12 +355,13 @@ async function poll(){
 
     const eb = s.engine_b || {};
     const legs = eb.legs || [];
-    $('p1Meta').textContent = `${eb.phase1_checks_done||0} / ${eb.phase1_checks_total||0} checks`;
-    $('p2Meta').textContent = `${eb.phase2_checks_done||0} / ${eb.phase2_checks_total||0} checks`;
-    $('p1Name').className = 'phase-name' + (eb.phase==='phase1' ? ' active':'');
-    $('p2Name').className = 'phase-name' + (eb.phase==='phase2' ? ' active':'');
-    renderTicks($('p1Ticks'), eb.phase1_checks_done||0, eb.phase1_checks_total||7, 10, 10, legs, 'phase1');
-    renderTicks($('p2Ticks'), eb.phase2_checks_done||0, eb.phase2_checks_total||8, 100, 10, legs, 'phase2');
+    $('scanMeta').textContent = `${eb.checks_done||0} / ${eb.checks_total||0} checks`;
+    $('scanName').className = 'phase-name' + (eb.phase==='scanning' ? ' active':'');
+    renderScanTicks($('scanTicks'), eb.checks || []);
+
+    const expUsed = eb.exposure_used || 0, expCap = eb.exposure_cap || 1;
+    $('exposureMeta').textContent = `${Math.round(expUsed)} / ${expCap} shares`;
+    $('exposureFill').style.width = Math.min(100, (expUsed/expCap)*100) + '%';
 
     const upPos = eb.up_position || {shares:0, avg_entry_price:null, total_cost:null};
     const downPos = eb.down_position || {shares:0, avg_entry_price:null, total_cost:null};

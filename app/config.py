@@ -26,32 +26,52 @@ RESOLUTION_WINDOW_SECONDS = 2.0
 # falling back to a last-observed-price approximation.
 RESOLUTION_RETRY_SECONDS = 6
 
-# ---- Engine B (interval accumulation strategy) -------------------------
-# Phase 1: cheap-side scalping.
-#   Every ENGINE_B_INTERVAL_SECONDS from ENGINE_B_PHASE1_START to
-#   ENGINE_B_PHASE1_END (inclusive), look at both sides and buy the
-#   CHEAPER one with ENGINE_B_PHASE1_SHARES shares, but only if that
-#   cheaper price is below ENGINE_B_PHASE1_MAX_PRICE. Otherwise skip
-#   that tick. The side bought can differ from check to check.
-ENGINE_B_INTERVAL_SECONDS = 10
-ENGINE_B_PHASE1_START = 10
-ENGINE_B_PHASE1_END = 70
-ENGINE_B_PHASE1_SHARES = 50
-ENGINE_B_PHASE1_MAX_PRICE = 0.50
+# ---- Engine B (v5 -- momentum-confirmed signal strategy) ---------------
+# Replaces the old fixed-schedule "buy on a clock" approach entirely.
+# A blind buy on every tick has no edge in an efficient market beyond
+# whatever the fee/spread costs; this version only trades when a side
+# shows real momentum AND sits in a sane confirmation price band, sizes
+# by how strong that momentum is, and caps total exposure per window.
+#
+# Regular scan: every MOM_CHECK_INTERVAL_SECONDS from MOM_ENTRY_START to
+# MOM_ENTRY_END, compare each side's current price to its price
+# MOM_LOOKBACK_SECONDS ago. A side qualifies if it has risen by at least
+# MOM_MIN_DELTA over that lookback AND its current price sits inside
+# [MOM_CONFIRM_MIN_PRICE, MOM_CONFIRM_MAX_PRICE]. If both sides qualify,
+# take the one with the stronger momentum. If neither qualifies, skip
+# the tick -- no forced trade.
+MOM_LOOKBACK_SECONDS = 20
+MOM_MIN_DELTA = 0.03
+MOM_NORMALIZE_DELTA = 0.12   # delta at/above which size scaling maxes out
 
-# Phase 2: expensive-side momentum buying.
-#   Every ENGINE_B_INTERVAL_SECONDS from ENGINE_B_PHASE2_START to
-#   ENGINE_B_PHASE2_END (inclusive), look at both sides and buy the
-#   MORE EXPENSIVE one with ENGINE_B_PHASE2_SHARES shares, but only if
-#   that price is above ENGINE_B_PHASE2_MIN_PRICE. Otherwise skip that
-#   tick.
-ENGINE_B_PHASE2_START = 100
-ENGINE_B_PHASE2_END = 170
-ENGINE_B_PHASE2_SHARES = 50
-ENGINE_B_PHASE2_MIN_PRICE = 0.50
+MOM_CONFIRM_MIN_PRICE = 0.45
+MOM_CONFIRM_MAX_PRICE = 0.80
 
-# No stop loss / take profit / doubling -- every fill from both phases
-# is held and settled at window close against the real outcome.
+MOM_CHECK_INTERVAL_SECONDS = 10
+MOM_ENTRY_START = 20         # needs a full lookback of history first
+MOM_ENTRY_END = 260
+
+# Confidence-scaled sizing: BASE at the minimum qualifying momentum,
+# scaling up to MAX as momentum strength approaches MOM_NORMALIZE_DELTA.
+MOM_BASE_SHARES = 20
+MOM_MAX_SHARES = 60
+
+# Hard cap on total shares bought (either side combined) per window --
+# a wrong read can't compound past this regardless of how many ticks
+# keep signaling.
+MOM_MAX_TOTAL_SHARES_PER_WINDOW = 260
+
+# Late-window confirmation add: a single shot near the close. By then
+# the fee curve is cheaper near the extremes and the "which side is
+# winning" signal is at its most reliable -- but only if that side
+# hasn't already gone parabolic (diminishing reward for the risk).
+MOM_LATE_SNIPE_AT = 280
+MOM_LATE_SNIPE_MIN_PRICE = 0.55
+MOM_LATE_SNIPE_MAX_PRICE = 0.95
+MOM_LATE_SNIPE_SHARES = 20
+
+# Every fill (regular scan or late snipe) is held and settled at window
+# close against the real outcome -- no stop loss / take profit / exit.
 
 # ---- Trading fees ---------------------------------------------------------
 # Polymarket taker fee (per docs.polymarket.com/trading/fees, Crypto
