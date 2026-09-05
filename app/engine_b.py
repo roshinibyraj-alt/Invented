@@ -164,9 +164,13 @@ class EngineB:
             total_shares = sum(p.shares for p in legs_for_side)
             avg_price = (sum(p.shares * p.entry_price for p in legs_for_side) / total_shares
                          if total_shares else None)
+            total_fees = sum(p.fee for p in legs_for_side)
+            total_cost = sum(p.cost for p in legs_for_side)  # notional + fees
             return {
                 "shares": total_shares,
                 "avg_entry_price": avg_price,
+                "total_fees": total_fees,
+                "total_cost": total_cost,
                 "num_legs": len(legs_for_side),
             }
 

@@ -19,16 +19,24 @@ class PaperBroker:
         if len(self.log) > config.LOG_MAX_ENTRIES:
             self.log.pop(0)
 
+    def _taker_fee(self, shares: float, price: float) -> float:
+        if not config.APPLY_TAKER_FEES:
+            return 0.0
+        # fee = shares * price * feeRate * (price * (1 - price)) ** exponent
+        return shares * price * config.TAKER_FEE_RATE * (price * (1 - price)) ** config.TAKER_FEE_EXPONENT
+
     def buy(self, engine: str, window_slug: str, side: Side, shares: float,
             price: float, note: str = "") -> Position:
-        cost = shares * price
-        self.balance -= cost
+        notional = shares * price
+        fee = self._taker_fee(shares, price)
+        self.balance -= (notional + fee)
         self._push_log(TradeLogEntry(
             ts=time.time(), engine=engine, window_slug=window_slug,
             event="BUY", side=side.value, price=price, shares=shares,
-            balance_after=self.balance, note=note,
+            fee=fee, balance_after=self.balance,
+            note=f"{note} (fee ${fee:.4f})" if fee else note,
         ))
-        return Position(side=side, shares=shares, entry_price=price)
+        return Position(side=side, shares=shares, entry_price=price, fee=fee)
 
     def sell(self, engine: str, window_slug: str, position: Position,
               price: float, note: str = "") -> float:

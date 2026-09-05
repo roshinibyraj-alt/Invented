@@ -53,5 +53,19 @@ ENGINE_B_PHASE2_MIN_PRICE = 0.50
 # No stop loss / take profit / doubling -- every fill from both phases
 # is held and settled at window close against the real outcome.
 
+# ---- Trading fees ---------------------------------------------------------
+# Polymarket taker fee (per docs.polymarket.com/trading/fees, Crypto
+# category). Charged only on entry (buys); redemption/resolution is
+# fee-free, and there is no maker fee since every fill here is a taker
+# market order. Formula: fee = shares * price * FEE_RATE * (price * (1 - price)) ** FEE_EXPONENT
+# NOTE: Polymarket has revised this fee schedule multiple times in 2026
+# and third-party sources disagree on the exact current rate for the
+# 5-min/15-min crypto sub-category specifically -- verify against
+# GET https://clob.polymarket.com/fee-rate?token_id=... before trading
+# real money. APPLY_TAKER_FEES can be set False to model a fee-free run.
+APPLY_TAKER_FEES = True
+TAKER_FEE_RATE = 0.07
+TAKER_FEE_EXPONENT = 1
+
 # ---- Misc -----------------------------------------------------------------
 LOG_MAX_ENTRIES = 500

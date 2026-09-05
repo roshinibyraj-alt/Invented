@@ -148,15 +148,17 @@
       <div class="price-box up">
         <div class="side-label">UP POSITION</div>
         <div class="p" id="posUpShares">0 sh</div>
-        <div style="font-family:var(--mono); font-size:12px; color:var(--muted); margin-top:6px;">
-          avg entry <span id="posUpAvg" style="color:var(--text); font-weight:700;">—</span>
+        <div style="font-family:var(--mono); font-size:12px; color:var(--muted); margin-top:6px; display:flex; justify-content:space-between; gap:10px;">
+          <span>avg entry <b id="posUpAvg" style="color:var(--text);">—</b></span>
+          <span>cost <b id="posUpCost" style="color:var(--text);">—</b></span>
         </div>
       </div>
       <div class="price-box down">
         <div class="side-label">DOWN POSITION</div>
         <div class="p" id="posDownShares">0 sh</div>
-        <div style="font-family:var(--mono); font-size:12px; color:var(--muted); margin-top:6px;">
-          avg entry <span id="posDownAvg" style="color:var(--text); font-weight:700;">—</span>
+        <div style="font-family:var(--mono); font-size:12px; color:var(--muted); margin-top:6px; display:flex; justify-content:space-between; gap:10px;">
+          <span>avg entry <b id="posDownAvg" style="color:var(--text);">—</b></span>
+          <span>cost <b id="posDownCost" style="color:var(--text);">—</b></span>
         </div>
       </div>
     </div>
@@ -362,12 +364,14 @@ async function poll(){
     renderTicks($('p1Ticks'), eb.phase1_checks_done||0, eb.phase1_checks_total||7, 10, 10, legs, 'phase1');
     renderTicks($('p2Ticks'), eb.phase2_checks_done||0, eb.phase2_checks_total||8, 100, 10, legs, 'phase2');
 
-    const upPos = eb.up_position || {shares:0, avg_entry_price:null};
-    const downPos = eb.down_position || {shares:0, avg_entry_price:null};
+    const upPos = eb.up_position || {shares:0, avg_entry_price:null, total_cost:null};
+    const downPos = eb.down_position || {shares:0, avg_entry_price:null, total_cost:null};
     $('posUpShares').textContent = `${upPos.shares} sh`;
     $('posUpAvg').textContent = fmtP(upPos.avg_entry_price);
+    $('posUpCost').textContent = fmt$(upPos.total_cost);
     $('posDownShares').textContent = `${downPos.shares} sh`;
     $('posDownAvg').textContent = fmtP(downPos.avg_entry_price);
+    $('posDownCost').textContent = fmt$(downPos.total_cost);
 
     renderLegs(legs);
     renderLog(s.log || []);
