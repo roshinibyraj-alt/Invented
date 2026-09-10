@@ -1,18 +1,35 @@
 """
-Central configuration for the BTC 5-min up/down paper-trading bot.
-Strategy: instant limit-order ladder on Engine B. No stop loss; every
-fill takes profit at 0.75 if reached, otherwise holds to expiry and
-settles against the real market outcome.
+Central configuration for the BTC 5-min up/down "confused market" bot.
+
+Strategy (see app/engine.py for the full write-up):
+  1. Watch each 5-min window. After CONFUSED_AFTER_SECONDS have elapsed,
+     start checking whether both UP and DOWN mid-price are sitting inside
+     [CONFUSED_LOW, CONFUSED_HIGH] -- i.e. neither side has a clear edge.
+  2. Once that holds for CONFUSED_CONFIRM_TICKS consecutive ticks (a
+     debounce, so one noisy tick can't false-trigger), place a 3-level
+     resting BUY ladder on BOTH sides at once: LADDER_LEVELS. Every
+     order is a maker limit buy; none are ever proactively cancelled --
+     they simply stop resting when the window closes.
+  3. Whichever side's ladder gets a fill FIRST (any single tranche, on
+     either UP or DOWN) becomes the "first side" for the rest of the
+     window. Its fills take profit at the tiered targets in
+     LADDER_LEVELS (per-price TP). Fills on the other side (the side
+     that fills after) always take profit at OPPOSITE_TP, regardless of
+     which price tranche they filled at.
+  4. TP orders are resting maker sell limits too. No stop loss --
+     anything still open when the window closes rides to resolution:
+     $1/share if that side won, $0 if it lost. No re-arming after a
+     window resolves; each window gets at most one ladder.
 """
 import os
 
 # ---- Mode -------------------------------------------------------------
 TRADING_MODE = os.getenv("TRADING_MODE", "paper")
 
-# ---- Capital ------------------------------------------------------------
-STARTING_BALANCE_USDC = float(os.getenv("STARTING_BALANCE_USDC", "5000"))
-
-# ---- Market discovery ---------------------------------------------------
+# ---- Market discovery / pricing ---------------------------------------
+# CLOB only -- no Gamma price fallback anywhere in this app. Gamma is
+# used purely for one-time window metadata (slug -> token ids) in
+# polymarket_client.py; every live price/book read goes to CLOB.
 GAMMA_API_BASE = os.getenv("GAMMA_API_BASE", "https://gamma-api.polymarket.com")
 CLOB_API_BASE = os.getenv("CLOB_API_BASE", "https://clob.polymarket.com")
 SLUG_PREFIX = "btc-updown-5m-"
@@ -20,45 +37,54 @@ WINDOW_SECONDS = 300
 
 POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
 
-# How many seconds before window close counts as the "resolution window"
-# for the logging-only 0.90+ signal.
-RESOLUTION_WINDOW_SECONDS = 2.0
+# ---- Confused-market detection -----------------------------------------
+# Don't even look for "confused" until this many seconds into the
+# 5-minute window have elapsed (per spec: after 4 minutes).
+CONFUSED_AFTER_SECONDS = 240.0
 
-# How many seconds to retry Polymarket's real settlement outcome before
-# falling back to a last-observed-price approximation.
-RESOLUTION_RETRY_SECONDS = 6
+# Both UP mid-price and DOWN mid-price must sit in this band.
+CONFUSED_LOW = 0.30
+CONFUSED_HIGH = 0.60
 
-# ---- Engine B: limit-order ladder strategy -------------------------------
-#
-# At window open, place resting limit buy orders on BOTH sides, at
-# every 0.01 increment from LADDER_HIGH down to LADDER_LOW inclusive,
-# LADDER_SHARES each. As a side's price falls through a rung, that rung
-# fills. No stop loss. Any side whose price reaches LADDER_TP_PRICE
-# gets everything currently held on that side sold immediately, AND
-# all remaining unfilled rungs on that side are cancelled -- once a
-# side has taken profit, it never re-enters for the rest of the
-# window. Anything still held at window close (a side that never hit
-# TP) settles against the real market outcome.
-LADDER_HIGH = 0.49
-LADDER_LOW = 0.02
-LADDER_STEP = 0.01
-LADDER_SHARES = 10
-LADDER_TP_PRICE = 0.75
+# Debounce: the in-band condition must hold for this many CONSECUTIVE
+# ticks before the ladder fires (avoids triggering on one noisy print).
+# At POLL_INTERVAL_SECONDS=1.0 this is a ~5s confirmation window.
+# NOTE: this debounce is an assumption filling a gap in the spec --
+# adjust/remove (set to 1) if you want the very first in-band tick to
+# fire immediately instead.
+CONFUSED_CONFIRM_TICKS = 5
 
-# ---- Fees / Maker Rebates ------------------------------------------------
-# Every order in this strategy is a resting limit order (maker side), so
-# NO taker fee is ever charged here. Instead, makers earn a rebate:
-#   matched_fee = shares * TAKER_FEE_RATE * price * (1 - price)
-#   rebate      = matched_fee * MAKER_REBATE_SHARE
-# TAKER_FEE_RATE (0.07) is the Crypto-category taker fee rate used only
-# to derive the rebate base -- we never charge it directly since we're
-# always the maker. MAKER_REBATE_SHARE is Crypto's category rebate share
-# (20% -- Sports is 15%, most other categories 25%, Geopolitics 0%).
-# See docs.polymarket.com/market-makers/maker-rebates -- verify both
-# numbers there before relying on this for real capital, Polymarket sets
-# them at its discretion and they've changed before in 2026.
+# ---- Ladder -------------------------------------------------------------
+# Per side (UP and DOWN), placed together the instant "confused" fires.
+# price -> (shares, take_profit_price_for_the_FIRST_side_to_fill)
+LADDER_LEVELS = [
+    # price, shares, first-side TP
+    (0.30, 200.0, 0.70),
+    (0.20, 100.0, 0.80),
+    (0.10, 50.0, 0.90),
+]
+
+# Flat TP applied to every fill on the SECOND (opposite) side to fill,
+# regardless of which price tranche it was.
+OPPOSITE_TP = 0.99
+
+MAKER_REBATE_FRACTION = 0.20  # rebate earned on every resting-order fill (both entry and TP)
+
+# Demo capital: single source of truth for the paper balance, same
+# convention as the reference bot -- debited on every buy fill, credited
+# on every TP fill / resolution settlement. Halts permanently if it
+# ever drops below $0.
+STARTING_CAPITAL = float(os.getenv("STARTING_CAPITAL", "2000"))
+
+# ---- Trading fees -----------------------------------------------------
+# This engine is maker-only on both entries and exits (never crosses the
+# spread), so it never pays the taker fee itself -- kept here purely as
+# the basis for the maker rebate calculation above. Verify against
+# GET https://clob.polymarket.com/fee-rate?token_id=... before trading
+# real money.
+APPLY_TAKER_FEES = True
 TAKER_FEE_RATE = 0.07
-MAKER_REBATE_SHARE = 0.20
+TAKER_FEE_EXPONENT = 1
 
 # ---- Misc -----------------------------------------------------------------
 LOG_MAX_ENTRIES = 500

@@ -1,125 +1,56 @@
-# Polymarket BTC 5m Up/Down Bot — paper trading
+# BTC 5m Confused-Market Bot
 
-Engine B runs an **instant limit-order ladder** against Polymarket's
-`btc-updown-5m-*` markets, in **paper mode** (simulated $5,000 balance,
-no real orders) with a live dashboard.
+Paper-trading bot for Polymarket's `btc-updown-5m-*` markets, built on the
+market-discovery/CLOB scaffolding of the reference ladder bot, with a new
+engine implementing a "confused market" ladder + tiered take-profit
+strategy.
 
-## Strategy — Engine B (ladder)
+## Strategy
 
-At window open, place resting limit buy orders on **both** sides — Up
-and Down — at every **0.01 increment from 0.49 down to 0.02** (48
-rungs per side, 96 orders total), **10 shares** each, all placed in one
-shot as fast as possible.
-
-- **Fills:** as a side's price falls through the ladder, each rung it
-  crosses fills (a big move between polls fills every rung it swept
-  through, not just the nearest one).
-- **No stop loss.**
-- **Take profit:** if a side's price reaches **0.75+**, everything
-  currently held on that side is sold immediately **and all remaining
-  unfilled rungs on that side are cancelled** — once a side has taken
-  profit, it never re-enters for the rest of the window.
-- **At window close:** anything still held settles against
-  Polymarket's real outcome — $1/share if that side won, $0 if it
-  lost. Unfilled rungs simply expire.
-
-## Fees / Maker Rebates
-
-Every order in this strategy is a resting limit order — the maker side
-of the fill. Polymarket charges **$0 to makers**. Instead, makers earn
-a rebate:
-
-```
-matched_fee = shares * TAKER_FEE_RATE * price * (1 - price)   # TAKER_FEE_RATE = 0.07
-rebate      = matched_fee * MAKER_REBATE_SHARE                 # 20% for Crypto
-```
-
-E.g. 100 shares filled at 0.50 → $1.75 matched fee → $0.35 rebate.
-Credited on every buy and every TP sell. Redemption at expiry isn't a
-matched trade and earns no rebate. Verify both numbers at
-docs.polymarket.com/market-makers/maker-rebates before relying on this
-for real capital — Polymarket sets the rebate share at its discretion
-and it's changed before.
-
-## Dashboard
-
-- Live Up/Down prices + sparkline.
-- **Ladder visualization** for each side: all 48 rungs from 0.49 to
-  0.02, each showing its own trade details inline — fill price, shares,
-  fill time, rebate earned, and a live floating (unrealized) P&L per
-  rung while it's still open. No need to cross-reference the trade log
-  to understand what a rung did.
-  - **Pending** rungs show as resting, dimmed.
-  - **Filled** rungs show shares/entry/rebate + live floating P&L,
-    color-coded green (Up) or red (Down).
-  - **Cancelled** rungs (unfilled when TP fired) show struck-through and
-    faded — visibly "no re-entry."
-  - **Closed via TP** rungs show the realized P&L from that exit.
-  - **Settled** rungs (held to expiry) show whether that specific fill
-    won ($1) or lost ($0) and its realized P&L.
-- Per-side summary: total shares, avg entry, cost, rebates earned,
-  aggregate unrealized P&L, and a "closed out — no re-entry" badge once
-  a side's TP has fired.
-- Balance / total P&L / rebates strip and the full trade log (still
-  available for a complete chronological audit trail).
-
-## Project layout
-
-```
-app/
-  config.py             strategy + runtime parameters
-  models.py              shared dataclasses/enums
-  polymarket_client.py   Gamma (market discovery) + CLOB (pricing) + resolution API client
-  paper_broker.py         simulated wallet / fills / PnL / fees
-  engine_b.py              the ladder strategy
-  state.py                 background polling loop + orchestration
-  main.py                  FastAPI app (serves API + dashboard)
-static/index.html          dashboard UI
-```
+1. **Detect**: after 4 minutes elapsed in the 5-minute window, watch UP and
+   DOWN mid-price (CLOB best bid/ask midpoint — no Gamma price fallback,
+   ever). If both sit in `[0.30, 0.60]` for 5 consecutive ticks in a row
+   (a debounce against one noisy print — tune via `CONFUSED_CONFIRM_TICKS`
+   in `app/config.py`, or set it to 1 for an immediate single-tick trigger),
+   the market is "confused." Fires once per window.
+2. **Enter**: place a 3-level resting buy ladder on **both** UP and DOWN
+   simultaneously: 200sh@0.30, 100sh@0.20, 50sh@0.10 (6 orders total, all
+   maker limit buys). None are ever proactively cancelled — they only stop
+   resting when the window closes.
+3. **First side / opposite side**: whichever side's *any* tranche fills
+   first locks in as the "first side" for the rest of the window, even if
+   its other tranches fill later. First-side fills use tiered TP
+   (0.30→0.70, 0.20→0.80, 0.10→0.90). Every fill on the other side —
+   which necessarily fills after — gets a flat TP of 0.99, regardless of
+   entry price.
+4. **Exit**: TP orders are resting maker sells. No stop loss. Anything
+   still open at window close rides to resolution ($1/sh win, $0/sh loss),
+   inferred from the last observed CLOB midpoint (see `state.py`).
+5. **No re-arm**: each window gets at most one ladder.
 
 ## Run locally
 
-```bash
-python -m venv .venv && source .venv/bin/activate
+```
 pip install -r requirements.txt
-cp .env.example .env
+cp .env.example .env   # edit if needed
 uvicorn app.main:app --reload
 ```
 
-Open http://localhost:8000
+Dashboard at http://localhost:8000
 
-## Deploy: GitHub → Railway
+## Config knobs (`app/config.py`)
 
-1. Push this folder to a new GitHub repo:
-   ```bash
-   git init
-   git add .
-   git commit -m "Instant limit-order ladder strategy"
-   git branch -M main
-   git remote add origin <your-repo-url>
-   git push -u origin main
-   ```
-2. In Railway: **New Project → Deploy from GitHub repo**, pick the repo.
-   Railway auto-detects Python via Nixpacks and uses the `Procfile` /
-   `railway.json` start command — no manual build config needed.
-3. Under **Variables**, set any of the values from `.env.example` you
-   want to override (defaults work out of the box for paper mode).
-4. Deploy. Railway assigns a public URL — that's your dashboard.
+- `CONFUSED_AFTER_SECONDS`, `CONFUSED_LOW/HIGH`, `CONFUSED_CONFIRM_TICKS`
+- `LADDER_LEVELS` (price, shares, first-side TP per tranche)
+- `OPPOSITE_TP`
+- `STARTING_CAPITAL`, fee/rebate constants
 
-## Verify the Polymarket API responses once live
+## Notes / assumptions carried over from the spec conversation
 
-`app/polymarket_client.py` isolates all HTTP calls to Polymarket's
-public Gamma (metadata) and CLOB (pricing) APIs. After your first
-deploy, confirm the dashboard header shows a real slug, prices
-populate, and fills settle correctly at window close (check the trade
-log for `RESOLVE_WIN`/`RESOLVE_LOSS` or `RESOLUTION_FALLBACK` rows).
-
-## Going live (real orders)
-
-This build intentionally stops at paper trading. Note that in real
-order-book conditions, queue priority at each rung matters (this is
-what "bot must be at the highest acceptable price, faster" in the
-original brief refers to) — paper mode simulates fills purely against
-polled prices and doesn't model queue position, so real fills may
-differ from the simulation, especially at the top of the ladder near
-0.49 where competition for that price level is highest.
+- The "bouncing 0.30–0.60" condition is read from CLOB best bid/ask
+  midpoint, checked on every tick.
+- A short confirm-tick debounce was added since "bouncing" implies some
+  persistence, not a single instant read — adjustable/removable in config.
+- This engine replaces the reference bot's merge-arbitrage engine
+  entirely; it reuses `polymarket_client.py`, `models.py`, `paper_broker.py`,
+  and the `main.py`/`state.py` orchestration loop unchanged in behavior.

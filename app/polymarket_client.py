@@ -1,10 +1,11 @@
 """
 Thin client around Polymarket's public read APIs.
 
-Two APIs are involved:
+Three APIs are involved:
   - Gamma API (metadata): market question, slug, close time, and the two
     CLOB token ids (one per outcome: Up / Down).
-  - CLOB API (live pricing): current price per token id.
+  - CLOB API (live pricing): midpoint/last-trade price per token id, and
+    the real order book (best bid / best ask) via get_book().
 
 NOTE: Polymarket's public API surface has shifted field names between
 versions in the past. This module is the single place to patch if a
@@ -116,6 +117,13 @@ class PolymarketClient:
         )
 
     # ---- resolution (real settlement, not a price guess) ---------------------
+    #
+    # NOT CALLED anywhere right now -- state.py settles every window off
+    # the last observed CLOB price instead (see BotState._infer_winner),
+    # per explicit request to keep outcomes deterministic and simple
+    # rather than waiting on/confirming Polymarket's real resolution.
+    # Left in place in case you want real-resolution settlement back;
+    # wiring it in is a one-line change in state.py's _roll_window.
 
     async def fetch_resolution(self, slug: str):
         """Returns the real winning Side once Polymarket has settled this
@@ -187,3 +195,42 @@ class PolymarketClient:
         except Exception:
             pass
         return None
+
+    async def get_book(self, token_id: str) -> "tuple[Optional[float], Optional[float]]":
+        """Best bid and best ask for a token, from the real order book
+        (not a synthesized spread around the midpoint). Returns
+        (best_bid, best_ask); either can be None if that side of the
+        book is empty or the request fails.
+
+        Convention: ask is always >= bid (ask = lowest price a seller
+        will accept, bid = highest price a buyer will pay). The /book
+        response's bids/asks arrays aren't guaranteed sorted here, so
+        best bid = max price in bids[], best ask = min price in asks[]."""
+        if not token_id:
+            return None, None
+        try:
+            resp = await self._client.get(
+                f"{config.CLOB_API_BASE}/book", params={"token_id": token_id}
+            )
+            if resp.status_code != 200:
+                return None, None
+            data = resp.json()
+        except Exception:
+            return None, None
+        if not isinstance(data, dict):
+            return None, None
+
+        def best(levels, pick_max: bool):
+            if not levels:
+                return None
+            try:
+                prices = [float(lvl.get("price")) for lvl in levels if lvl.get("price") is not None]
+            except Exception:
+                return None
+            if not prices:
+                return None
+            return max(prices) if pick_max else min(prices)
+
+        best_bid = best(data.get("bids"), pick_max=True)
+        best_ask = best(data.get("asks"), pick_max=False)
+        return best_bid, best_ask
