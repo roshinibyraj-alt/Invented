@@ -161,7 +161,7 @@
       <div class="countdown" id="countdown">--:--</div>
     </div>
 
-    <div class="confused-banner" id="confusedBanner">watching for confused market…</div>
+    <div class="confused-banner" id="confusedBanner">waiting for window to open…</div>
 
     <div class="prices">
       <div class="price-box up">
@@ -276,20 +276,15 @@ async function poll(){
 
     const e = s.engine || {};
     const def = e.def || {};
-    $('bandNote').textContent = def.confused_low!=null
-      ? `confused band: [${def.confused_low}, ${def.confused_high}] after ${def.confused_after_seconds}s elapsed`
-      : '';
+    $('bandNote').textContent = 'ladder fires immediately on the first tick of each window — no wait, no price-band filter';
 
     const banner = $('confusedBanner');
     if(e.ladder_placed){
       banner.className = 'confused-banner placed';
       banner.textContent = `ladder placed${e.first_side ? ` — first side to fill: ${e.first_side}` : ' — waiting for first fill'}`;
-    } else if((e.confirm_streak||0) > 0){
-      banner.className = 'confused-banner armed';
-      banner.textContent = `confused condition building: ${e.confirm_streak}/${e.confirm_needed} confirm ticks`;
     } else {
       banner.className = 'confused-banner';
-      banner.textContent = 'watching for confused market…';
+      banner.textContent = 'waiting for window to open…';
     }
 
     $('statFills').textContent = e.fills_this_window || 0;

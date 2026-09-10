@@ -1,18 +1,13 @@
 """
-Trading engine -- "confused market" ladder with side-dependent take-profit.
+Trading engine -- immediate-entry ladder with side-dependent take-profit.
 
-Detect: after config.CONFUSED_AFTER_SECONDS have elapsed in the window,
-watch UP mid-price and DOWN mid-price (midpoint of that side's best
-bid/ask, from CLOB /book -- never Gamma). If EITHER side sits inside
-[CONFUSED_LOW, CONFUSED_HIGH] for CONFUSED_CONFIRM_TICKS consecutive
-ticks in a row, the market is "confused" -- that side hasn't pulled
-away this late in the window. This fires at most once per window.
-
-Enter: the instant "confused" fires, place config.LADDER_LEVELS as
-resting BUY limit orders on BOTH UP and DOWN simultaneously (3 price
-tranches each, 6 orders total). Pure maker orders -- never cross the
-spread. None of the six are ever proactively cancelled by the engine;
-they only stop resting because the window itself closes.
+Entry: on the very first tick of each new window, unconditionally place
+config.LADDER_LEVELS as resting BUY limit orders on BOTH UP and DOWN
+simultaneously (3 price tranches each, 6 orders total). No wait, no
+price-band filter -- it fires immediately, once per window. Pure maker
+orders -- never cross the spread. None of the six are ever proactively
+cancelled by the engine; they only stop resting because the window
+itself closes.
 
 First side / second side: the side whose ladder gets ANY tranche filled
 first (by wall-clock -- whichever fill is processed first) becomes the
@@ -31,8 +26,8 @@ to window resolution like everything else: $1/share if the side won,
 $0 if it lost.
 
 No re-arming: once a window has had its ladder placed, it is never
-placed again in that window (the "confused" check simply stops running
-after the first trigger). Each new 5-minute window is a brand-new
+placed again in that window (the entry only ever fires on the first
+tick). Each new 5-minute window is a brand-new
 market/token, so state resets fully in reset_for_window().
 """
 import time
@@ -48,10 +43,6 @@ def _midpoint(bid: Optional[float], ask: Optional[float]) -> Optional[float]:
     if bid is not None and ask is not None:
         return (bid + ask) / 2
     return ask if ask is not None else bid
-
-
-def _in_band(price: Optional[float]) -> bool:
-    return price is not None and config.CONFUSED_LOW <= price <= config.CONFUSED_HIGH
 
 
 @dataclass
@@ -79,9 +70,8 @@ class EngineState:
     down_bid: Optional[float] = None
     down_ask: Optional[float] = None
 
-    # confused-detection bookkeeping
+    # ladder-entry bookkeeping
     ladder_placed: bool = False
-    confirm_streak: int = 0
 
     # resting orders
     pending_buys: List[RestingBuy] = field(default_factory=list)
@@ -124,7 +114,6 @@ class Engine:
     def reset_for_window(self, window: WindowMarket):
         self.s.window = window
         self.s.ladder_placed = False
-        self.s.confirm_streak = 0
         self.s.pending_buys = []
         self.s.pending_sells = []
         self.s.first_side = None
@@ -146,9 +135,7 @@ class Engine:
 
         self.broker.log_event(
             self.name, window.slug, "WINDOW_OPEN",
-            note=(f"watching for a confused market after {config.CONFUSED_AFTER_SECONDS:.0f}s elapsed "
-                  f"(either side in [{config.CONFUSED_LOW},{config.CONFUSED_HIGH}] for "
-                  f"{config.CONFUSED_CONFIRM_TICKS} consecutive ticks)"),
+            note="placing ladder immediately on the first tick -- no wait, no price-band filter",
             balance_after=self.s.balance,
         )
 
@@ -162,39 +149,24 @@ class Engine:
         if self.s.halted:
             return
 
-        elapsed = config.WINDOW_SECONDS - seconds_to_close
-
         if not self.s.ladder_placed:
-            self._check_confused(elapsed)
+            up_mid = _midpoint(self.s.up_bid, self.s.up_ask)
+            down_mid = _midpoint(self.s.down_bid, self.s.down_ask)
+            self._place_ladder(up_mid, down_mid)
 
         self._check_buy_fills()
         self._check_sell_fills()
 
-    # ---- confused detection + ladder entry ------------------------------
+    # ---- immediate ladder entry ------------------------------------------
 
-    def _check_confused(self, elapsed: float):
-        if elapsed < config.CONFUSED_AFTER_SECONDS:
-            self.s.confirm_streak = 0
-            return
-
-        up_mid = _midpoint(self.s.up_bid, self.s.up_ask)
-        down_mid = _midpoint(self.s.down_bid, self.s.down_ask)
-
-        if _in_band(up_mid) or _in_band(down_mid):
-            self.s.confirm_streak += 1
-        else:
-            self.s.confirm_streak = 0
-            return
-
-        if self.s.confirm_streak >= config.CONFUSED_CONFIRM_TICKS:
-            self._place_ladder(up_mid, down_mid)
-
-    def _place_ladder(self, up_mid: float, down_mid: float):
+    def _place_ladder(self, up_mid: Optional[float], down_mid: Optional[float]):
         self.s.ladder_placed = True
+        up_str = f"{up_mid:.3f}" if up_mid is not None else "n/a"
+        down_str = f"{down_mid:.3f}" if down_mid is not None else "n/a"
         self.broker.log_event(
-            self.name, self.s.window.slug, "CONFUSED_DETECTED",
-            note=(f"at least one side bouncing in range for {config.CONFUSED_CONFIRM_TICKS} ticks "
-                  f"(up_mid={up_mid:.3f}, down_mid={down_mid:.3f}) -- placing ladder on both sides"),
+            self.name, self.s.window.slug, "LADDER_ENTRY",
+            note=(f"first tick of window -- placing ladder on both sides unconditionally "
+                  f"(up_mid={up_str}, down_mid={down_str})"),
             balance_after=self.s.balance,
         )
         for side in (Side.UP, Side.DOWN):
@@ -349,7 +321,7 @@ class Engine:
                 self.broker.log_event(
                     self.name, self.s.window.slug, "NO_TRADE",
                     balance_after=self.s.balance,
-                    note="market never went confused this window (or the ladder never got hit) -- no fills",
+                    note="ladder placed but never got hit this window -- no fills",
                 )
 
         self._record_equity_point()
@@ -405,8 +377,6 @@ class Engine:
             "last_window_pnl": self.s.last_window_pnl,
 
             "ladder_placed": self.s.ladder_placed,
-            "confirm_streak": self.s.confirm_streak,
-            "confirm_needed": config.CONFUSED_CONFIRM_TICKS,
             "first_side": self.s.first_side.value if self.s.first_side else None,
 
             "up_shares": round(self.s.up_shares, 4),
@@ -437,9 +407,6 @@ class Engine:
                         ("traded" if self.s.fills_this_window > 0 else "waiting"))),
 
             "def": {
-                "confused_low": config.CONFUSED_LOW,
-                "confused_high": config.CONFUSED_HIGH,
-                "confused_after_seconds": config.CONFUSED_AFTER_SECONDS,
                 "ladder_levels": [{"price": p, "shares": s, "first_side_tp": tp} for p, s, tp in config.LADDER_LEVELS],
                 "opposite_tp": config.OPPOSITE_TP,
             },

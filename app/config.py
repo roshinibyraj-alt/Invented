@@ -2,21 +2,19 @@
 Central configuration for the BTC 5-min up/down "confused market" bot.
 
 Strategy (see app/engine.py for the full write-up):
-  1. Watch each 5-min window. After CONFUSED_AFTER_SECONDS have elapsed,
-     start checking whether EITHER UP or DOWN mid-price is sitting inside
-     [CONFUSED_LOW, CONFUSED_HIGH] -- i.e. that side doesn't have a clear edge.
-  2. Once that holds for CONFUSED_CONFIRM_TICKS consecutive ticks (a
-     debounce, so one noisy tick can't false-trigger), place a 3-level
-     resting BUY ladder on BOTH sides at once: LADDER_LEVELS. Every
-     order is a maker limit buy; none are ever proactively cancelled --
-     they simply stop resting when the window closes.
-  3. Whichever side's ladder gets a fill FIRST (any single tranche, on
+  1. At the very first tick of each 5-min window, immediately place a
+     3-level resting BUY ladder on BOTH sides at once: LADDER_LEVELS.
+     No wait, no price-band filter -- the ladder fires unconditionally,
+     once, the instant a window opens. Every order is a maker limit
+     buy; none are ever proactively cancelled -- they simply stop
+     resting when the window closes.
+  2. Whichever side's ladder gets a fill FIRST (any single tranche, on
      either UP or DOWN) becomes the "first side" for the rest of the
      window. Its fills take profit at the tiered targets in
      LADDER_LEVELS (per-price TP). Fills on the other side (the side
      that fills after) always take profit at OPPOSITE_TP, regardless of
      which price tranche they filled at.
-  4. TP orders are resting maker sell limits too. No stop loss --
+  3. TP orders are resting maker sell limits too. No stop loss --
      anything still open when the window closes rides to resolution:
      $1/share if that side won, $0 if it lost. No re-arming after a
      window resolves; each window gets at most one ladder.
@@ -37,24 +35,9 @@ WINDOW_SECONDS = 300
 
 POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
 
-# ---- Confused-market detection -----------------------------------------
-# Don't even look for "confused" until this many seconds into the
-# 5-minute window have elapsed (per spec: after 4 minutes).
-CONFUSED_AFTER_SECONDS = 240.0
-
-# EITHER UP mid-price or DOWN mid-price sitting in this band is enough
-# to trigger (OR, not AND -- one side alone can fire the ladder).
-CONFUSED_LOW = 0.35
-CONFUSED_HIGH = 0.65
-
-# Debounce: the in-band condition must hold for this many CONSECUTIVE
-# ticks before the ladder fires (avoids triggering on one noisy print).
-# Set to 1 -> the very first in-band tick (after CONFUSED_AFTER_SECONDS)
-# fires the ladder immediately, no debounce.
-CONFUSED_CONFIRM_TICKS = 1
-
 # ---- Ladder -------------------------------------------------------------
-# Per side (UP and DOWN), placed together the instant "confused" fires.
+# Per side (UP and DOWN), placed together on the very first tick of the
+# window -- no wait, no price-band filter.
 # price -> (shares, take_profit_price_for_the_FIRST_side_to_fill)
 LADDER_LEVELS = [
     # price, shares, first-side TP
