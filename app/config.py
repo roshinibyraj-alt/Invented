@@ -1,23 +1,26 @@
 """
-Central configuration for the BTC 5-min up/down "confused market" bot.
+Central configuration for the BTC 5-min up/down ladder-martingale bot.
 
 Strategy (see app/engine.py for the full write-up):
-  1. At the very first tick of each 5-min window, immediately place a
+  1. At the very first tick of each 5-min window, unconditionally place a
      3-level resting BUY ladder on BOTH sides at once: LADDER_LEVELS.
-     No wait, no price-band filter -- the ladder fires unconditionally,
-     once, the instant a window opens. Every order is a maker limit
-     buy; none are ever proactively cancelled -- they simply stop
-     resting when the window closes.
-  2. Whichever side's ladder gets a fill FIRST (any single tranche, on
-     either UP or DOWN) becomes the "first side" for the rest of the
-     window. Its fills take profit at the tiered targets in
-     LADDER_LEVELS (per-price TP). Fills on the other side (the side
-     that fills after) always take profit at OPPOSITE_TP, regardless of
-     which price tranche they filled at.
-  3. TP orders are resting maker sell limits too. No stop loss --
-     anything still open when the window closes rides to resolution:
-     $1/share if that side won, $0 if it lost. No re-arming after a
-     window resolves; each window gets at most one ladder.
+     No wait, no price-band filter.
+  2. Rung-level race: the moment either side's rung fills, the SAME rung
+     on the OPPOSITE side is immediately cancelled (each rung -- 0.30,
+     0.20, 0.10 -- races independently; the other rungs are unaffected).
+  3. Every fill, on any rung/side, gets a resting TP sell at the flat
+     TP_PRICE (0.99). No tiered/first-side TP anymore.
+  4. No stop loss -- if a TP never hits before the window closes, that
+     position rides to resolution: $1/share if its side won, $0 if it
+     lost. Resolution outcome IS the win/loss for the martingale below
+     (a TP fill always counts as a win for its rung).
+  5. Per-rung martingale: each rung (0.30 / 0.20 / 0.10) tracks its own
+     consecutive-loss streak, counted since its last win, and persisting
+     across windows. Every time that streak reaches another multiple of
+     RUNG_LOSS_DOUBLE_THRESHOLDS[rung], the share size for that rung
+     doubles again (compounding -- e.g. for the 0.30 rung: loss #2 -> 2x,
+     loss #4 -> 4x, loss #6 -> 8x, ...). Any win on a rung resets its
+     streak and share size back to base.
 """
 import os
 
@@ -37,18 +40,27 @@ POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
 
 # ---- Ladder -------------------------------------------------------------
 # Per side (UP and DOWN), placed together on the very first tick of the
-# window -- no wait, no price-band filter.
-# price -> (shares, take_profit_price_for_the_FIRST_side_to_fill)
+# window -- no wait, no price-band filter. "shares" here is the BASE
+# size for that rung; actual order size = base * current rung multiplier
+# (see RUNG_LOSS_DOUBLE_THRESHOLDS below).
+# price -> base_shares
 LADDER_LEVELS = [
-    # price, shares, first-side TP
-    (0.30, 200.0, 0.70),
-    (0.20, 100.0, 0.80),
-    (0.10, 50.0, 0.90),
+    (0.30, 200.0),
+    (0.20, 100.0),
+    (0.10, 50.0),
 ]
 
-# Flat TP applied to every fill on the SECOND (opposite) side to fill,
-# regardless of which price tranche it was.
-OPPOSITE_TP = 0.99
+# Flat TP applied to every fill, on any rung, any side.
+TP_PRICE = 0.99
+
+# Per-rung martingale: number of consecutive losses (since that rung's
+# last win) needed before its share size doubles again. Compounding --
+# reached again every N more losses, not just once.
+RUNG_LOSS_DOUBLE_THRESHOLDS = {
+    0.30: 2,
+    0.20: 4,
+    0.10: 8,
+}
 
 MAKER_REBATE_FRACTION = 0.20  # rebate earned on every resting-order fill (both entry and TP)
 

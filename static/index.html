@@ -276,12 +276,12 @@ async function poll(){
 
     const e = s.engine || {};
     const def = e.def || {};
-    $('bandNote').textContent = 'ladder fires immediately on the first tick of each window — no wait, no price-band filter';
+    $('bandNote').textContent = 'ladder fires immediately on the first tick of each window — no wait, no price-band filter. Per-rung race: opposite side same rung cancels on a fill. Flat TP 0.99 everywhere. Per-rung martingale doubles size after N consecutive losses.';
 
     const banner = $('confusedBanner');
     if(e.ladder_placed){
       banner.className = 'confused-banner placed';
-      banner.textContent = `ladder placed${e.first_side ? ` — first side to fill: ${e.first_side}` : ' — waiting for first fill'}`;
+      banner.textContent = 'ladder placed on both sides';
     } else {
       banner.className = 'confused-banner';
       banner.textContent = 'waiting for window to open…';
@@ -297,16 +297,24 @@ async function poll(){
     badge.className = 'tag engine-badge ' + (e.status || 'waiting');
 
     const defGrid = $('defGrid');
+    const rungState = e.rung_state || {};
     if(def.ladder_levels){
-      defGrid.innerHTML = def.ladder_levels.map(l => `
-        <div class="def-item"><div class="k">Entry ${l.price}</div><div class="v">${l.shares.toFixed(0)}sh &rarr; TP ${l.first_side_tp} (first side)</div></div>
-      `).join('') + `<div class="def-item"><div class="k">Opposite side TP</div><div class="v">flat ${def.opposite_tp}</div></div>`;
+      defGrid.innerHTML = def.ladder_levels.map(l => {
+        const rs = rungState[String(l.price)] || {};
+        return `
+        <div class="def-item"><div class="k">Rung ${l.price}</div><div class="v">base ${l.base_shares.toFixed(0)}sh × ${rs.multiplier||1} = ${(rs.current_shares!=null?rs.current_shares:l.base_shares).toFixed(0)}sh
+        (losses ${rs.loss_streak||0}/${rs.double_threshold||'-'})</div></div>`;
+      }).join('') + `<div class="def-item"><div class="k">TP (all fills)</div><div class="v">flat ${def.tp_price}</div></div>`;
     }
 
-    $('upShares').textContent = fmtSh(e.up_shares);
-    $('upAvg').textContent = e.up_avg_price!=null ? `avg ${fmtP(e.up_avg_price)}` : 'no position';
-    $('downShares').textContent = fmtSh(e.down_shares);
-    $('downAvg').textContent = e.down_avg_price!=null ? `avg ${fmtP(e.down_avg_price)}` : 'no position';
+    const upPositions = (e.open_positions||[]).filter(p=>p.side==='up');
+    const downPositions = (e.open_positions||[]).filter(p=>p.side==='down');
+    const sumSh = arr => arr.reduce((a,p)=>a+p.shares,0);
+    const avgPx = arr => { const sh=sumSh(arr); return sh>1e-9 ? arr.reduce((a,p)=>a+p.shares*p.entry_price,0)/sh : null; };
+    $('upShares').textContent = fmtSh(sumSh(upPositions));
+    $('upAvg').textContent = avgPx(upPositions)!=null ? `avg ${fmtP(avgPx(upPositions))}` : 'no position';
+    $('downShares').textContent = fmtSh(sumSh(downPositions));
+    $('downAvg').textContent = avgPx(downPositions)!=null ? `avg ${fmtP(avgPx(downPositions))}` : 'no position';
 
     const buyList = $('buyList');
     if(!e.pending_buys || !e.pending_buys.length){
@@ -327,8 +335,10 @@ async function poll(){
     }
 
     const enginePnlEl = $('enginePnl');
-    enginePnlEl.textContent = (e.total_pnl>=0?'+':'') + fmt$(e.total_pnl);
-    enginePnlEl.className = 'engine-pnl ' + (e.total_pnl>0.005?'pos':(e.total_pnl<-0.005?'neg':'zero'));
+    const totalEquityPnl = (e.realized_pnl||0) + (e.unrealized_pnl||0);
+    enginePnlEl.textContent = (totalEquityPnl>=0?'+':'') + fmt$(totalEquityPnl)
+      + ` (realized ${e.realized_pnl>=0?'+':''}${fmt$(e.realized_pnl||0)}, floating ${e.unrealized_pnl>=0?'+':''}${fmt$(e.unrealized_pnl||0)})`;
+    enginePnlEl.className = 'engine-pnl ' + (totalEquityPnl>0.005?'pos':(totalEquityPnl<-0.005?'neg':'zero'));
     $('engineLastPnl').textContent = e.last_window_pnl ? `last window: ${e.last_window_pnl>=0?'+':''}${fmt$(e.last_window_pnl)}` : '';
 
     renderLog(s.log || []);

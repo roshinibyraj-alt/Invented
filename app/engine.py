@@ -1,34 +1,37 @@
 """
-Trading engine -- immediate-entry ladder with side-dependent take-profit.
+Trading engine -- immediate-entry ladder, per-rung race + per-rung martingale.
 
 Entry: on the very first tick of each new window, unconditionally place
 config.LADDER_LEVELS as resting BUY limit orders on BOTH UP and DOWN
-simultaneously (3 price tranches each, 6 orders total). No wait, no
-price-band filter -- it fires immediately, once per window. Pure maker
-orders -- never cross the spread. None of the six are ever proactively
-cancelled by the engine; they only stop resting because the window
-itself closes.
+simultaneously (3 price rungs each, 6 orders total). No wait, no
+price-band filter -- it fires immediately, once per window. Order size
+per rung = base size * that rung's current martingale multiplier (see
+below). Pure maker orders -- never cross the spread.
 
-First side / second side: the side whose ladder gets ANY tranche filled
-first (by wall-clock -- whichever fill is processed first) becomes the
-"first side" for the rest of this window, permanently, even though its
-other tranches may still be unfilled and fill later. Its fills use the
-tiered per-price TP baked into LADDER_LEVELS (0.30->0.70, 0.20->0.80,
-0.10->0.90). Every fill on the OTHER side -- which, by definition, fills
-after the first side -- uses the flat config.OPPOSITE_TP (0.99)
-regardless of which price tranche it was.
+Per-rung race: the moment a rung fills on one side, the SAME rung
+(same price) on the OPPOSITE side is immediately cancelled -- each of
+the 3 rungs races independently between UP and DOWN. The other rungs
+keep resting untouched.
 
-Exit: each fill immediately gets its own resting TP sell limit at the
-price determined above. TP orders are maker too (fill when the book's
-bid on that side rises to/through the TP price). There is no stop loss
-and no merge exit here -- if a TP never gets hit, that inventory rides
-to window resolution like everything else: $1/share if the side won,
-$0 if it lost.
+Exit: every fill (any rung, any side) immediately gets its own resting
+TP sell limit at the flat config.TP_PRICE (0.99). TP orders are maker
+too (fill when the book's bid on that side rises to/through TP). There
+is no stop loss -- if a TP never hits, that position rides to window
+resolution instead: $1/share if its side won, $0 if it lost.
+
+Per-rung martingale: each rung price (0.30 / 0.20 / 0.10) tracks its
+own consecutive-loss streak (a "loss" = a filled position at that rung
+that never hit TP and then lost at resolution; a TP fill always counts
+as a win). The streak persists across windows and only resets to 0 on
+a win at that rung. Every time the streak reaches another multiple of
+config.RUNG_LOSS_DOUBLE_THRESHOLDS[rung], that rung's share-size
+multiplier doubles again (compounding).
 
 No re-arming: once a window has had its ladder placed, it is never
-placed again in that window (the entry only ever fires on the first
-tick). Each new 5-minute window is a brand-new
-market/token, so state resets fully in reset_for_window().
+placed again in that window. Each new 5-minute window is a brand-new
+market/token, so per-window state resets in reset_for_window() -- but
+the per-rung loss-streak/multiplier state is engine-lifetime, not reset
+per window.
 """
 import time
 from dataclasses import dataclass, field
@@ -48,9 +51,8 @@ def _midpoint(bid: Optional[float], ask: Optional[float]) -> Optional[float]:
 @dataclass
 class RestingBuy:
     side: Side
-    price: float          # entry limit price
-    shares: float
-    first_side_tp: float  # the TP this tranche would use IF its side turns out to be the first side
+    price: float          # entry limit price == the rung
+    shares: float          # already includes the current rung multiplier
 
 
 @dataclass
@@ -58,7 +60,8 @@ class RestingSell:
     side: Side
     tp_price: float
     shares: float
-    entry_price: float    # for pnl/cost-basis bookkeeping
+    entry_price: float    # the rung this position was entered at
+    cost: float            # actual cash paid (post maker-rebate) for this position
 
 
 @dataclass
@@ -73,20 +76,13 @@ class EngineState:
     # ladder-entry bookkeeping
     ladder_placed: bool = False
 
-    # resting orders
+    # resting orders / open positions
     pending_buys: List[RestingBuy] = field(default_factory=list)
-    pending_sells: List[RestingSell] = field(default_factory=list)
+    pending_sells: List[RestingSell] = field(default_factory=list)  # = open (floating) positions
 
-    # which side filled first this window (locks in permanently once set)
-    first_side: Optional[Side] = None
-
-    # open inventory per side not yet covered by a TP fill (should
-    # normally be ~0 since every buy fill immediately spawns its TP,
-    # but tracked for resolution settlement of anything still open)
-    up_shares: float = 0.0
-    up_cost: float = 0.0
-    down_shares: float = 0.0
-    down_cost: float = 0.0
+    # per-rung martingale state -- ENGINE-LIFETIME, not reset per window
+    rung_loss_streak: Dict[float, int] = field(default_factory=dict)
+    rung_multiplier: Dict[float, int] = field(default_factory=dict)
 
     fills_this_window: int = 0
     tp_fills_this_window: int = 0
@@ -97,7 +93,7 @@ class EngineState:
     no_trade_windows: int = 0
     resolution_wins: int = 0
     resolution_losses: int = 0
-    total_pnl: float = 0.0
+    total_pnl: float = 0.0  # realized pnl, lifetime
 
     balance: float = 0.0
     halted: bool = False
@@ -110,17 +106,15 @@ class Engine:
     def __init__(self, broker: PaperBroker):
         self.broker = broker
         self.s = EngineState(balance=config.STARTING_CAPITAL)
+        for price, _ in config.LADDER_LEVELS:
+            self.s.rung_loss_streak[price] = 0
+            self.s.rung_multiplier[price] = 1
 
     def reset_for_window(self, window: WindowMarket):
         self.s.window = window
         self.s.ladder_placed = False
         self.s.pending_buys = []
         self.s.pending_sells = []
-        self.s.first_side = None
-        self.s.up_shares = 0.0
-        self.s.up_cost = 0.0
-        self.s.down_shares = 0.0
-        self.s.down_cost = 0.0
         self.s.fills_this_window = 0
         self.s.tp_fills_this_window = 0
         self.s.last_window_pnl = 0.0
@@ -150,100 +144,91 @@ class Engine:
             return
 
         if not self.s.ladder_placed:
-            up_mid = _midpoint(self.s.up_bid, self.s.up_ask)
-            down_mid = _midpoint(self.s.down_bid, self.s.down_ask)
-            self._place_ladder(up_mid, down_mid)
+            self._place_ladder()
 
         self._check_buy_fills()
         self._check_sell_fills()
 
-    # ---- immediate ladder entry ------------------------------------------
+    # ---- immediate ladder entry -------------------------------------------
 
-    def _place_ladder(self, up_mid: Optional[float], down_mid: Optional[float]):
+    def _place_ladder(self):
         self.s.ladder_placed = True
-        up_str = f"{up_mid:.3f}" if up_mid is not None else "n/a"
-        down_str = f"{down_mid:.3f}" if down_mid is not None else "n/a"
         self.broker.log_event(
             self.name, self.s.window.slug, "LADDER_ENTRY",
-            note=(f"first tick of window -- placing ladder on both sides unconditionally "
-                  f"(up_mid={up_str}, down_mid={down_str})"),
+            note="first tick of window -- placing ladder on both sides unconditionally",
             balance_after=self.s.balance,
         )
         for side in (Side.UP, Side.DOWN):
-            for price, shares, tp in config.LADDER_LEVELS:
-                self.s.pending_buys.append(RestingBuy(side=side, price=price, shares=shares, first_side_tp=tp))
+            for price, base_shares in config.LADDER_LEVELS:
+                mult = self.s.rung_multiplier[price]
+                shares = base_shares * mult
+                self.s.pending_buys.append(RestingBuy(side=side, price=price, shares=shares))
                 self.broker.log_event(
                     self.name, self.s.window.slug, "ORDER_PLACED", side=side.value, price=price,
                     shares=shares, balance_after=self.s.balance,
-                    note=f"resting buy: {side.value} {shares:.0f}sh @ {price} (maker, not cancelled this window)",
+                    note=(f"resting buy: {side.value} {shares:.0f}sh @ {price} "
+                          f"(base {base_shares:.0f}sh x{mult} martingale, maker, "
+                          f"cancelled only if opposite side fills this rung)"),
                 )
 
-    # ---- buy fills --------------------------------------------------------
+    # ---- buy fills + per-rung opposite cancellation -----------------------
 
     def _check_buy_fills(self):
         if not self.s.pending_buys:
             return
-        still_pending = []
-        # deterministic ordering: process UP tranches before DOWN so a
-        # same-tick simultaneous fill breaks ties toward UP as "first side"
+        # deterministic ordering: UP before DOWN, cheapest rung first
         ordered = sorted(self.s.pending_buys, key=lambda o: (o.side != Side.UP, o.price))
+        removed_ids = set()
         for order in ordered:
+            if id(order) in removed_ids:
+                continue  # already cancelled by an opposite-side fill this tick
             current_ask = self.s.up_ask if order.side == Side.UP else self.s.down_ask
             if current_ask is not None and current_ask <= order.price:
                 self._fill_buy(order)
-            else:
-                still_pending.append(order)
-        self.s.pending_buys = still_pending
+                removed_ids.add(id(order))
+                opposite_side = Side.DOWN if order.side == Side.UP else Side.UP
+                for other in ordered:
+                    if (other.side == opposite_side and other.price == order.price
+                            and id(other) not in removed_ids):
+                        removed_ids.add(id(other))
+                        self._cancel_opposite(other)
+        if removed_ids:
+            self.s.pending_buys = [o for o in self.s.pending_buys if id(o) not in removed_ids]
+
+    def _cancel_opposite(self, order: RestingBuy):
+        self.broker.log_event(
+            self.name, self.s.window.slug, "CANCELLED", side=order.side.value, price=order.price,
+            shares=order.shares, balance_after=self.s.balance,
+            note=(f"opposite-side same-rung order cancelled: {order.side.value} {order.shares:.0f}sh "
+                  f"@ {order.price} (other side filled this rung first)"),
+        )
 
     def _fill_buy(self, order: RestingBuy):
         rebate = config.MAKER_REBATE_FRACTION * self.broker.taker_fee_amount(order.shares, order.price)
         cost = order.shares * order.price - rebate
-        self._add_inventory(order.side, order.shares, cost)
         self.s.balance -= cost
         self.s.fills_this_window += 1
         self.s.total_fills += 1
-
-        if self.s.first_side is None:
-            self.s.first_side = order.side
-
-        is_first_side = order.side == self.s.first_side
-        tp_price = order.first_side_tp if is_first_side else config.OPPOSITE_TP
 
         self.broker.log_event(
             self.name, self.s.window.slug, "BUY", side=order.side.value, price=order.price,
             shares=order.shares, fee=-rebate, balance_after=self.s.balance,
             note=(f"ladder fill (maker): {order.side.value} {order.shares:.0f}sh @ {order.price} "
-                  f"(rebate ${rebate:.4f}) -- {'FIRST side' if is_first_side else 'opposite side'}, "
-                  f"TP set at {tp_price}"),
+                  f"(rebate ${rebate:.4f}) -- TP set at {config.TP_PRICE}"),
         )
         if self.s.balance < 0:
             self._halt()
             return
 
         self.s.pending_sells.append(RestingSell(
-            side=order.side, tp_price=tp_price, shares=order.shares, entry_price=order.price,
+            side=order.side, tp_price=config.TP_PRICE, shares=order.shares,
+            entry_price=order.price, cost=cost,
         ))
         self.broker.log_event(
-            self.name, self.s.window.slug, "TP_PLACED", side=order.side.value, price=tp_price,
+            self.name, self.s.window.slug, "TP_PLACED", side=order.side.value, price=config.TP_PRICE,
             shares=order.shares, balance_after=self.s.balance,
-            note=f"resting TP sell: {order.side.value} {order.shares:.0f}sh @ {tp_price} (entry {order.price})",
+            note=f"resting TP sell: {order.side.value} {order.shares:.0f}sh @ {config.TP_PRICE} (entry {order.price})",
         )
-
-    def _add_inventory(self, side: Side, shares: float, cost: float):
-        if side == Side.UP:
-            self.s.up_shares += shares
-            self.s.up_cost += cost
-        else:
-            self.s.down_shares += shares
-            self.s.down_cost += cost
-
-    def _remove_inventory(self, side: Side, shares: float, cost: float):
-        if side == Side.UP:
-            self.s.up_shares -= shares
-            self.s.up_cost -= cost
-        else:
-            self.s.down_shares -= shares
-            self.s.down_cost -= cost
 
     # ---- TP (sell) fills ----------------------------------------------------
 
@@ -262,10 +247,8 @@ class Engine:
     def _fill_sell(self, order: RestingSell):
         rebate = config.MAKER_REBATE_FRACTION * self.broker.taker_fee_amount(order.shares, order.tp_price)
         proceeds = order.shares * order.tp_price + rebate
-        cost_basis = order.shares * order.entry_price
-        pnl = proceeds - cost_basis
+        pnl = proceeds - order.cost
 
-        self._remove_inventory(order.side, order.shares, cost_basis)
         self.s.balance += proceeds
         self.s.total_pnl += pnl
         self.s.last_window_pnl += pnl
@@ -278,8 +261,41 @@ class Engine:
             note=(f"TP hit: {order.side.value} {order.shares:.0f}sh sold @ {order.tp_price} "
                   f"(entry {order.entry_price}, pnl ${pnl:.4f})"),
         )
+        self._record_rung_outcome(order.entry_price, won=True)
         if self.s.balance < 0:
             self._halt()
+
+    # ---- per-rung martingale ------------------------------------------------
+
+    def _record_rung_outcome(self, rung_price: float, won: bool):
+        if rung_price not in self.s.rung_loss_streak:
+            self.s.rung_loss_streak[rung_price] = 0
+            self.s.rung_multiplier[rung_price] = 1
+
+        if won:
+            prev_streak = self.s.rung_loss_streak[rung_price]
+            prev_mult = self.s.rung_multiplier[rung_price]
+            self.s.rung_loss_streak[rung_price] = 0
+            self.s.rung_multiplier[rung_price] = 1
+            if prev_streak or prev_mult != 1:
+                self.broker.log_event(
+                    self.name, self.s.window.slug if self.s.window else "", "RUNG_RESET",
+                    price=rung_price, balance_after=self.s.balance,
+                    note=f"rung {rung_price} won -- loss streak reset 0, multiplier reset to 1x (was {prev_mult}x)",
+                )
+        else:
+            self.s.rung_loss_streak[rung_price] += 1
+            threshold = config.RUNG_LOSS_DOUBLE_THRESHOLDS.get(rung_price)
+            streak = self.s.rung_loss_streak[rung_price]
+            if threshold and streak % threshold == 0:
+                old_mult = self.s.rung_multiplier[rung_price]
+                self.s.rung_multiplier[rung_price] = old_mult * 2
+                self.broker.log_event(
+                    self.name, self.s.window.slug if self.s.window else "", "RUNG_DOUBLED",
+                    price=rung_price, balance_after=self.s.balance,
+                    note=(f"rung {rung_price}: {streak} consecutive losses (threshold {threshold}) -- "
+                          f"multiplier {old_mult}x -> {old_mult * 2}x"),
+                )
 
     def _halt(self):
         self.s.halted = True
@@ -303,38 +319,26 @@ class Engine:
             )
         self.s.pending_buys = []
 
-        for order in self.s.pending_sells:
-            self.broker.log_event(
-                self.name, self.s.window.slug, "TP_EXPIRED", side=order.side.value, price=order.tp_price,
-                shares=order.shares, balance_after=self.s.balance,
-                note=(f"TP never hit, window closing: {order.side.value} {order.shares:.0f}sh "
-                      f"(entry {order.entry_price}) rides to resolution instead"),
-            )
+        if not self.s.halted:
+            for order in self.s.pending_sells:
+                self._settle_position(order, winning_side)
         self.s.pending_sells = []
 
-        if not self.s.halted:
-            self._settle_leftover(Side.UP, winning_side)
-            self._settle_leftover(Side.DOWN, winning_side)
-
-            if self.s.fills_this_window == 0:
-                self.s.no_trade_windows += 1
-                self.broker.log_event(
-                    self.name, self.s.window.slug, "NO_TRADE",
-                    balance_after=self.s.balance,
-                    note="ladder placed but never got hit this window -- no fills",
-                )
+        if not self.s.halted and self.s.fills_this_window == 0:
+            self.s.no_trade_windows += 1
+            self.broker.log_event(
+                self.name, self.s.window.slug, "NO_TRADE",
+                balance_after=self.s.balance,
+                note="ladder placed but never got hit this window -- no fills",
+            )
 
         self._record_equity_point()
         self.s.window = None
 
-    def _settle_leftover(self, side: Side, winning_side: Optional[Side]):
-        shares = self.s.up_shares if side == Side.UP else self.s.down_shares
-        cost = self.s.up_cost if side == Side.UP else self.s.down_cost
-        if shares <= 1e-9:
-            return
-        won = winning_side is not None and side == winning_side
-        proceeds = shares * (1.0 if won else 0.0)
-        pnl = proceeds - cost
+    def _settle_position(self, order: RestingSell, winning_side: Optional[Side]):
+        won = winning_side is not None and order.side == winning_side
+        proceeds = order.shares * (1.0 if won else 0.0)
+        pnl = proceeds - order.cost
         self.s.balance += proceeds
         self.s.total_pnl += pnl
         self.s.last_window_pnl += pnl
@@ -344,15 +348,12 @@ class Engine:
             self.s.resolution_losses += 1
         event = "RESOLVE_WIN" if won else "RESOLVE_LOSS"
         self.broker.log_event(
-            self.name, self.s.window.slug, event, side=side.value, shares=shares, pnl=pnl,
+            self.name, self.s.window.slug, event, side=order.side.value, shares=order.shares, pnl=pnl,
             balance_after=self.s.balance,
-            note=(f"leftover {side.value} inventory ({shares:.0f}sh, TP never hit) settled at resolution: "
-                  f"{'won $1/sh' if won else 'lost, $0/sh'}"),
+            note=(f"TP never hit, position ({order.side.value} {order.shares:.0f}sh, entry {order.entry_price}) "
+                  f"settled at resolution: {'won $1/sh' if won else 'lost, $0/sh'}"),
         )
-        if side == Side.UP:
-            self.s.up_shares, self.s.up_cost = 0.0, 0.0
-        else:
-            self.s.down_shares, self.s.down_cost = 0.0, 0.0
+        self._record_rung_outcome(order.entry_price, won=won)
         if self.s.balance < 0:
             self._halt()
 
@@ -367,22 +368,45 @@ class Engine:
 
     # ---- dashboard payload -------------------------------------------------
 
+    def _mark_price(self, side: Side) -> Optional[float]:
+        # what you could sell at right now -- the current bid on that side
+        bid = self.s.up_bid if side == Side.UP else self.s.down_bid
+        return bid
+
     def snapshot(self) -> dict:
+        open_positions = []
+        unrealized_pnl = 0.0
+        open_market_value = 0.0
+        for o in self.s.pending_sells:
+            mark = self._mark_price(o.side)
+            mark_for_calc = mark if mark is not None else o.entry_price
+            market_value = o.shares * mark_for_calc
+            pos_unrealized = market_value - o.cost
+            unrealized_pnl += pos_unrealized
+            open_market_value += market_value
+            open_positions.append({
+                "side": o.side.value,
+                "entry_price": o.entry_price,
+                "shares": o.shares,
+                "cost": round(o.cost, 4),
+                "tp_price": o.tp_price,
+                "mark_price": mark,
+                "unrealized_pnl": round(pos_unrealized, 4),
+            })
+
         return {
             "balance": round(self.s.balance, 2),
             "starting_capital": config.STARTING_CAPITAL,
             "halted": self.s.halted,
             "equity_curve": self.s.equity_curve[-150:],
-            "total_pnl": self.s.total_pnl,
-            "last_window_pnl": self.s.last_window_pnl,
+
+            "realized_pnl": round(self.s.total_pnl, 4),
+            "unrealized_pnl": round(unrealized_pnl, 4),
+            "equity": round(self.s.balance + open_market_value, 4),
+            "last_window_pnl": round(self.s.last_window_pnl, 4),
 
             "ladder_placed": self.s.ladder_placed,
-            "first_side": self.s.first_side.value if self.s.first_side else None,
-
-            "up_shares": round(self.s.up_shares, 4),
-            "up_avg_price": (self.s.up_cost / self.s.up_shares) if self.s.up_shares > 1e-9 else None,
-            "down_shares": round(self.s.down_shares, 4),
-            "down_avg_price": (self.s.down_cost / self.s.down_shares) if self.s.down_shares > 1e-9 else None,
+            "open_positions": open_positions,
 
             "pending_buys": [
                 {"side": o.side.value, "price": o.price, "shares": o.shares}
@@ -402,12 +426,23 @@ class Engine:
             "resolution_losses": self.s.resolution_losses,
 
             "status": ("halted" if self.s.halted else
-                       ("open" if (self.s.up_shares > 1e-9 or self.s.down_shares > 1e-9
-                                   or self.s.pending_buys or self.s.pending_sells) else
+                       ("open" if (self.s.pending_buys or self.s.pending_sells) else
                         ("traded" if self.s.fills_this_window > 0 else "waiting"))),
 
+            "rung_state": {
+                str(price): {
+                    "base_shares": base_shares,
+                    "multiplier": self.s.rung_multiplier.get(price, 1),
+                    "current_shares": base_shares * self.s.rung_multiplier.get(price, 1),
+                    "loss_streak": self.s.rung_loss_streak.get(price, 0),
+                    "double_threshold": config.RUNG_LOSS_DOUBLE_THRESHOLDS.get(price),
+                }
+                for price, base_shares in config.LADDER_LEVELS
+            },
+
             "def": {
-                "ladder_levels": [{"price": p, "shares": s, "first_side_tp": tp} for p, s, tp in config.LADDER_LEVELS],
-                "opposite_tp": config.OPPOSITE_TP,
+                "ladder_levels": [{"price": p, "base_shares": s} for p, s in config.LADDER_LEVELS],
+                "tp_price": config.TP_PRICE,
+                "rung_loss_double_thresholds": config.RUNG_LOSS_DOUBLE_THRESHOLDS,
             },
         }
