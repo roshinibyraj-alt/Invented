@@ -3,10 +3,10 @@ Trading engine -- "confused market" ladder with side-dependent take-profit.
 
 Detect: after config.CONFUSED_AFTER_SECONDS have elapsed in the window,
 watch UP mid-price and DOWN mid-price (midpoint of that side's best
-bid/ask, from CLOB /book -- never Gamma). If both sit inside
+bid/ask, from CLOB /book -- never Gamma). If EITHER side sits inside
 [CONFUSED_LOW, CONFUSED_HIGH] for CONFUSED_CONFIRM_TICKS consecutive
-ticks in a row, the market is "confused" -- neither side has pulled
-ahead this late in the window. This fires at most once per window.
+ticks in a row, the market is "confused" -- that side hasn't pulled
+away this late in the window. This fires at most once per window.
 
 Enter: the instant "confused" fires, place config.LADDER_LEVELS as
 resting BUY limit orders on BOTH UP and DOWN simultaneously (3 price
@@ -147,7 +147,7 @@ class Engine:
         self.broker.log_event(
             self.name, window.slug, "WINDOW_OPEN",
             note=(f"watching for a confused market after {config.CONFUSED_AFTER_SECONDS:.0f}s elapsed "
-                  f"(both sides in [{config.CONFUSED_LOW},{config.CONFUSED_HIGH}] for "
+                  f"(either side in [{config.CONFUSED_LOW},{config.CONFUSED_HIGH}] for "
                   f"{config.CONFUSED_CONFIRM_TICKS} consecutive ticks)"),
             balance_after=self.s.balance,
         )
@@ -180,7 +180,7 @@ class Engine:
         up_mid = _midpoint(self.s.up_bid, self.s.up_ask)
         down_mid = _midpoint(self.s.down_bid, self.s.down_ask)
 
-        if _in_band(up_mid) and _in_band(down_mid):
+        if _in_band(up_mid) or _in_band(down_mid):
             self.s.confirm_streak += 1
         else:
             self.s.confirm_streak = 0
@@ -193,7 +193,7 @@ class Engine:
         self.s.ladder_placed = True
         self.broker.log_event(
             self.name, self.s.window.slug, "CONFUSED_DETECTED",
-            note=(f"both sides bouncing in range for {config.CONFUSED_CONFIRM_TICKS} ticks "
+            note=(f"at least one side bouncing in range for {config.CONFUSED_CONFIRM_TICKS} ticks "
                   f"(up_mid={up_mid:.3f}, down_mid={down_mid:.3f}) -- placing ladder on both sides"),
             balance_after=self.s.balance,
         )

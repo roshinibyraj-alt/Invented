@@ -3,8 +3,8 @@ Central configuration for the BTC 5-min up/down "confused market" bot.
 
 Strategy (see app/engine.py for the full write-up):
   1. Watch each 5-min window. After CONFUSED_AFTER_SECONDS have elapsed,
-     start checking whether both UP and DOWN mid-price are sitting inside
-     [CONFUSED_LOW, CONFUSED_HIGH] -- i.e. neither side has a clear edge.
+     start checking whether EITHER UP or DOWN mid-price is sitting inside
+     [CONFUSED_LOW, CONFUSED_HIGH] -- i.e. that side doesn't have a clear edge.
   2. Once that holds for CONFUSED_CONFIRM_TICKS consecutive ticks (a
      debounce, so one noisy tick can't false-trigger), place a 3-level
      resting BUY ladder on BOTH sides at once: LADDER_LEVELS. Every
@@ -42,17 +42,16 @@ POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
 # 5-minute window have elapsed (per spec: after 4 minutes).
 CONFUSED_AFTER_SECONDS = 240.0
 
-# Both UP mid-price and DOWN mid-price must sit in this band.
-CONFUSED_LOW = 0.30
-CONFUSED_HIGH = 0.60
+# EITHER UP mid-price or DOWN mid-price sitting in this band is enough
+# to trigger (OR, not AND -- one side alone can fire the ladder).
+CONFUSED_LOW = 0.35
+CONFUSED_HIGH = 0.65
 
 # Debounce: the in-band condition must hold for this many CONSECUTIVE
 # ticks before the ladder fires (avoids triggering on one noisy print).
-# At POLL_INTERVAL_SECONDS=1.0 this is a ~5s confirmation window.
-# NOTE: this debounce is an assumption filling a gap in the spec --
-# adjust/remove (set to 1) if you want the very first in-band tick to
-# fire immediately instead.
-CONFUSED_CONFIRM_TICKS = 5
+# Set to 1 -> the very first in-band tick (after CONFUSED_AFTER_SECONDS)
+# fires the ladder immediately, no debounce.
+CONFUSED_CONFIRM_TICKS = 1
 
 # ---- Ladder -------------------------------------------------------------
 # Per side (UP and DOWN), placed together the instant "confused" fires.
