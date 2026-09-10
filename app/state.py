@@ -118,13 +118,13 @@ class BotState:
             "balance": round(self.broker.balance, 2),
             "starting_balance": self.broker.starting_balance,
             "pnl_total": round(self.broker.balance - self.broker.starting_balance, 2),
-            "total_fees_paid": round(self.broker.total_fees_paid, 4),
+            "total_rebates_earned": round(self.broker.total_rebates_earned, 4),
             "engine_b": self.engine_b.snapshot(up_price=self.last_up_price, down_price=self.last_down_price),
             "log": [
                 {
                     "ts": e.ts, "engine": e.engine, "window": e.window_slug,
                     "event": e.event, "side": e.side, "price": e.price,
-                    "shares": e.shares, "pnl": e.pnl, "fee": e.fee,
+                    "shares": e.shares, "pnl": e.pnl, "rebate": e.rebate,
                     "balance_after": e.balance_after, "note": e.note,
                 }
                 for e in reversed(self.broker.log[-100:])

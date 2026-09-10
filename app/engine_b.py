@@ -21,7 +21,7 @@ from typing import Dict, List, Optional
 
 from . import config
 from .models import Position, Side, WindowMarket
-from .paper_broker import PaperBroker
+from .paper_broker import PaperBroker, compute_maker_rebate
 
 
 def _build_ladder() -> List[float]:
@@ -139,13 +139,15 @@ class EngineB:
         held = self.holdings[side]
         shares = sum(p.shares for p in held)
         cost = sum(p.cost for p in held)
+        rebates_earned = sum(compute_maker_rebate(p.shares, p.entry_price) for p in held)
         avg_price = (cost / shares) if shares else None
         mark_value = (shares * mark_price) if (mark_price is not None and shares) else None
-        unrealized_pnl = (mark_value - cost) if mark_value is not None else None
+        unrealized_pnl = (mark_value - cost + rebates_earned) if mark_value is not None else None
         return {
             "shares": shares,
             "avg_price": avg_price,
             "cost": cost,
+            "rebates_earned": rebates_earned,
             "mark_value": mark_value,
             "unrealized_pnl": unrealized_pnl,
             "open_positions": len(held),

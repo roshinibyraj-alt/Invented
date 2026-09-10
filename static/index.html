@@ -142,6 +142,7 @@
         <div class="kv"><span class="k">Shares</span><span class="v" id="up-shares">0</span></div>
         <div class="kv"><span class="k">Avg</span><span class="v" id="up-avg">—</span></div>
         <div class="kv"><span class="k">Cost</span><span class="v" id="up-cost">$0.00</span></div>
+        <div class="kv"><span class="k">Rebate</span><span class="v" id="up-rebate">$0.00</span></div>
         <div class="kv"><span class="k">Unreal. P&amp;L</span><span class="v" id="up-pnl">—</span></div>
       </div>
     </div>
@@ -153,6 +154,7 @@
         <div class="kv"><span class="k">Shares</span><span class="v" id="down-shares">0</span></div>
         <div class="kv"><span class="k">Avg</span><span class="v" id="down-avg">—</span></div>
         <div class="kv"><span class="k">Cost</span><span class="v" id="down-cost">$0.00</span></div>
+        <div class="kv"><span class="k">Rebate</span><span class="v" id="down-rebate">$0.00</span></div>
         <div class="kv"><span class="k">Unreal. P&amp;L</span><span class="v" id="down-pnl">—</span></div>
       </div>
     </div>
@@ -161,7 +163,7 @@
   <div class="balance-strip">
     <div class="stat"><div class="label">Balance</div><div class="value mono" id="balance">$0.00</div></div>
     <div class="stat"><div class="label">Total P&amp;L</div><div class="value mono" id="pnl">$0.00</div></div>
-    <div class="stat"><div class="label">Fees paid</div><div class="value mono" id="fees">$0.00</div></div>
+    <div class="stat"><div class="label">Rebates earned</div><div class="value mono" id="fees">$0.00</div></div>
     <div class="stat"><div class="label">Starting capital</div><div class="value mono" id="starting">$5,000.00</div></div>
   </div>
 
@@ -169,7 +171,7 @@
     <h2>Trade log</h2>
     <div class="log-scroll">
       <table>
-        <thead><tr><th>Time</th><th>Eng</th><th>Event</th><th>Side</th><th>Price</th><th>Shares</th><th>Fee</th><th>P&amp;L</th><th>Note</th></tr></thead>
+        <thead><tr><th>Time</th><th>Eng</th><th>Event</th><th>Side</th><th>Price</th><th>Shares</th><th>Rebate</th><th>P&amp;L</th><th>Note</th></tr></thead>
         <tbody id="log-body"></tbody>
       </table>
     </div>
@@ -219,12 +221,12 @@ function renderLog(entries) {
     const time = new Date(e.ts * 1000).toLocaleTimeString();
     const sideClass = e.side === 'UP' ? 'tag-up' : (e.side === 'DOWN' ? 'tag-down' : '');
     const pnlStr = (e.pnl === null || e.pnl === undefined) ? '—' : fmtMoney(e.pnl);
-    const feeStr = (e.fee === null || e.fee === undefined) ? '—' : fmtMoney(e.fee);
+    const rebateStr = (e.rebate === null || e.rebate === undefined) ? '—' : fmtMoney(e.rebate);
     tr.innerHTML = `
       <td>${time}</td><td>${e.engine}</td><td>${e.event}</td>
       <td class="${sideClass}">${e.side || '—'}</td>
       <td>${e.price !== null && e.price !== undefined ? e.price.toFixed(3) : '—'}</td>
-      <td>${e.shares || '—'}</td><td>${feeStr}</td><td>${pnlStr}</td>
+      <td>${e.shares || '—'}</td><td>${rebateStr}</td><td>${pnlStr}</td>
       <td class="note">${e.note || ''}</td>`;
     body.appendChild(tr);
   });
@@ -270,6 +272,7 @@ async function refresh() {
       $(prefix+'-shares').textContent = s.shares;
       $(prefix+'-avg').textContent = s.avg_price !== null ? s.avg_price.toFixed(3) : '—';
       $(prefix+'-cost').textContent = fmtMoney(s.cost);
+      $(prefix+'-rebate').textContent = fmtMoney(s.rebates_earned);
       const pnlEl = $(prefix+'-pnl');
       pnlEl.textContent = s.unrealized_pnl !== null ? fmtMoney(s.unrealized_pnl) : '—';
       pnlEl.className = 'v ' + (s.unrealized_pnl > 0 ? 'pos' : (s.unrealized_pnl < 0 ? 'neg' : ''));
@@ -282,7 +285,7 @@ async function refresh() {
     pnlEl.textContent = fmtMoney(data.pnl_total);
     pnlEl.className = 'value mono ' + (data.pnl_total > 0 ? 'pos' : (data.pnl_total < 0 ? 'neg' : ''));
     $('starting').textContent = fmtMoney(data.starting_balance);
-    $('fees').textContent = fmtMoney(data.total_fees_paid);
+    $('fees').textContent = fmtMoney(data.total_rebates_earned);
 
     renderLog(data.log);
   } catch (e) {

@@ -43,11 +43,20 @@ LADDER_STEP = 0.01
 LADDER_SHARES = 10
 LADDER_TP_PRICE = 0.99
 
-# ---- Fees ---------------------------------------------------------------
-# Polymarket taker fee: fee = shares * FEE_RATE * price * (1 - price).
-# Applied to every buy/sell in this bot (all fills treated as taker).
-# Redemption at expiry is not a matched trade and is not fee'd.
+# ---- Fees / Maker Rebates ------------------------------------------------
+# Every order in this strategy is a resting limit order (maker side), so
+# NO taker fee is ever charged here. Instead, makers earn a rebate:
+#   matched_fee = shares * TAKER_FEE_RATE * price * (1 - price)
+#   rebate      = matched_fee * MAKER_REBATE_SHARE
+# TAKER_FEE_RATE (0.07) is the Crypto-category taker fee rate used only
+# to derive the rebate base -- we never charge it directly since we're
+# always the maker. MAKER_REBATE_SHARE is Crypto's category rebate share
+# (20% -- Sports is 15%, most other categories 25%, Geopolitics 0%).
+# See docs.polymarket.com/market-makers/maker-rebates -- verify both
+# numbers there before relying on this for real capital, Polymarket sets
+# them at its discretion and they've changed before in 2026.
 TAKER_FEE_RATE = 0.07
+MAKER_REBATE_SHARE = 0.20
 
 # ---- Misc -----------------------------------------------------------------
 LOG_MAX_ENTRIES = 500

@@ -54,7 +54,7 @@ class TradeLogEntry:
     price: Optional[float] = None
     shares: Optional[float] = None
     pnl: Optional[float] = None
-    fee: Optional[float] = None
+    rebate: Optional[float] = None
     balance_after: Optional[float] = None
     note: Optional[str] = None
 

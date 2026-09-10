@@ -23,11 +23,23 @@ shot as fast as possible.
   Polymarket's real outcome — $1/share if that side won, $0 if it
   lost. Unfilled rungs simply expire.
 
-## Fees
+## Fees / Maker Rebates
 
-Same taker-fee model as before: `fee = shares * 0.07 * price * (1 -
-price)`, charged on every buy and sell. Redemption at expiry isn't a
-matched trade and isn't fee'd.
+Every order in this strategy is a resting limit order — the maker side
+of the fill. Polymarket charges **$0 to makers**. Instead, makers earn
+a rebate:
+
+```
+matched_fee = shares * TAKER_FEE_RATE * price * (1 - price)   # TAKER_FEE_RATE = 0.07
+rebate      = matched_fee * MAKER_REBATE_SHARE                 # 20% for Crypto
+```
+
+E.g. 100 shares filled at 0.50 → $1.75 matched fee → $0.35 rebate.
+Credited on every buy and every TP sell. Redemption at expiry isn't a
+matched trade and earns no rebate. Verify both numbers at
+docs.polymarket.com/market-makers/maker-rebates before relying on this
+for real capital — Polymarket sets the rebate share at its discretion
+and it's changed before.
 
 ## Dashboard
 
