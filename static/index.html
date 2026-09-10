@@ -67,6 +67,7 @@
   .ladder-card h2.up { color: var(--up); }
   .ladder-card h2.down { color: var(--down); }
   .ladder-sub { font-size: 11.5px; color: var(--muted); margin-bottom: 14px; }
+  .ladder-sub.closed { color: var(--amber); font-weight: 500; }
 
   .rungs {
     display: flex; flex-direction: column-reverse; gap: 2px;
@@ -136,7 +137,7 @@
   <div class="ladder-section">
     <div class="ladder-card">
       <h2 class="up">Up ladder</h2>
-      <div class="ladder-sub">0.49 → 0.02, 10 shares/rung · TP 0.99</div>
+      <div class="ladder-sub" id="up-sub">0.49 → 0.02, 10 shares/rung · TP 0.75</div>
       <div class="rungs" id="rungs-up"></div>
       <div class="exposure-mini">
         <div class="kv"><span class="k">Shares</span><span class="v" id="up-shares">0</span></div>
@@ -148,7 +149,7 @@
     </div>
     <div class="ladder-card">
       <h2 class="down">Down ladder</h2>
-      <div class="ladder-sub">0.49 → 0.02, 10 shares/rung · TP 0.99</div>
+      <div class="ladder-sub" id="down-sub">0.49 → 0.02, 10 shares/rung · TP 0.75</div>
       <div class="rungs" id="rungs-down"></div>
       <div class="exposure-mini">
         <div class="kv"><span class="k">Shares</span><span class="v" id="down-shares">0</span></div>
@@ -279,6 +280,15 @@ async function refresh() {
     }
     fillSide('up', b.up);
     fillSide('down', b.down);
+    const upSub = $('up-sub'), downSub = $('down-sub');
+    upSub.textContent = b.up.tp_fired
+      ? 'TP hit @ 0.75 — closed out, no re-entry this window'
+      : '0.49 → 0.02, 10 shares/rung · TP 0.75';
+    upSub.className = 'ladder-sub' + (b.up.tp_fired ? ' closed' : '');
+    downSub.textContent = b.down.tp_fired
+      ? 'TP hit @ 0.75 — closed out, no re-entry this window'
+      : '0.49 → 0.02, 10 shares/rung · TP 0.75';
+    downSub.className = 'ladder-sub' + (b.down.tp_fired ? ' closed' : '');
 
     $('balance').textContent = fmtMoney(data.balance);
     const pnlEl = $('pnl');

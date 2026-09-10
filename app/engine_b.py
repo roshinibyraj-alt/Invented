@@ -10,10 +10,11 @@ rung's price (we sweep every pending rung against the newly polled
 price each tick, so a big price move between polls still fills every
 rung it crossed, not just the nearest one).
 
-No stop loss. If a side's price reaches 0.99+, everything currently
-held on that side is sold immediately -- this can fire more than once
-per window if price round-trips, since unfilled rungs are never
-cancelled. Anything still held at window close settles against
+No stop loss. If a side's price reaches 0.75+, everything currently
+held on that side is sold immediately AND all remaining unfilled rungs
+on that side are cancelled -- once a side has taken profit, it never
+re-enters for the rest of the window (no re-entry, ever). Anything
+still held at window close (a side that never hit TP) settles against
 Polymarket's real outcome: $1/share if that side won, $0 if it lost.
 """
 import time
@@ -45,6 +46,7 @@ class EngineB:
         self.pending: Dict[Side, List[float]] = {}
         # holdings[side] = list of open Positions on that side (not yet TP'd)
         self.holdings: Dict[Side, List[Position]] = {Side.UP: [], Side.DOWN: []}
+        self.tp_fired: Dict[Side, bool] = {Side.UP: False, Side.DOWN: False}
         self.fills_log: List[Position] = []  # every fill ever made this window (for expiry settlement bookkeeping)
         self.winner_logged = False
 
@@ -53,6 +55,7 @@ class EngineB:
         rungs = _build_ladder()
         self.pending = {Side.UP: list(rungs), Side.DOWN: list(rungs)}
         self.holdings = {Side.UP: [], Side.DOWN: []}
+        self.tp_fired = {Side.UP: False, Side.DOWN: False}
         self.winner_logged = False
         self.broker.log_event(
             self.name, window.slug, "WINDOW_OPEN",
@@ -102,14 +105,23 @@ class EngineB:
         if price < config.LADDER_TP_PRICE:
             return
         held = self.holdings[side]
-        if not held:
-            return
+        if not held and not self.pending[side]:
+            return  # already fully closed out and cancelled, nothing to do
         for position in held:
             self.broker.sell(
                 self.name, self.window.slug, position, price,
                 note=f"TP at {config.LADDER_TP_PRICE} (price {price:.3f})",
             )
         self.holdings[side] = []
+        if self.pending[side]:
+            cancelled_count = len(self.pending[side])
+            self.pending[side] = []
+            self.broker.log_event(
+                self.name, self.window.slug, "RUNGS_CANCELLED",
+                side=side.value,
+                note=f"TP fired -- cancelled {cancelled_count} remaining unfilled rungs, no re-entry this window",
+            )
+        self.tp_fired[side] = True
 
     def _log_resolution_signal(self, prices):
         winner = None
@@ -153,6 +165,7 @@ class EngineB:
             "open_positions": len(held),
             "pending_rungs": len(self.pending.get(side, [])),
             "filled_rungs": [round(p.entry_price, 2) for p in held],
+            "tp_fired": self.tp_fired.get(side, False),
         }
 
     def snapshot(self, up_price: Optional[float] = None, down_price: Optional[float] = None) -> dict:

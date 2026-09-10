@@ -15,10 +15,10 @@ shot as fast as possible.
   crosses fills (a big move between polls fills every rung it swept
   through, not just the nearest one).
 - **No stop loss.**
-- **Take profit:** if a side's price reaches **0.99+**, everything
-  currently held on that side is sold immediately. Unfilled rungs are
-  never cancelled, so this can fire more than once per window if price
-  dips and recovers multiple times.
+- **Take profit:** if a side's price reaches **0.75+**, everything
+  currently held on that side is sold immediately **and all remaining
+  unfilled rungs on that side are cancelled** — once a side has taken
+  profit, it never re-enters for the rest of the window.
 - **At window close:** anything still held settles against
   Polymarket's real outcome — $1/share if that side won, $0 if it
   lost. Unfilled rungs simply expire.

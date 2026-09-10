@@ -1,7 +1,7 @@
 """
 Central configuration for the BTC 5-min up/down paper-trading bot.
 Strategy: instant limit-order ladder on Engine B. No stop loss; every
-fill takes profit at 0.99 if reached, otherwise holds to expiry and
+fill takes profit at 0.75 if reached, otherwise holds to expiry and
 settles against the real market outcome.
 """
 import os
@@ -34,14 +34,16 @@ RESOLUTION_RETRY_SECONDS = 6
 # every 0.01 increment from LADDER_HIGH down to LADDER_LOW inclusive,
 # LADDER_SHARES each. As a side's price falls through a rung, that rung
 # fills. No stop loss. Any side whose price reaches LADDER_TP_PRICE
-# gets everything currently held on that side sold immediately (can
-# fire more than once per window). Anything still held at window close
-# settles against the real market outcome.
+# gets everything currently held on that side sold immediately, AND
+# all remaining unfilled rungs on that side are cancelled -- once a
+# side has taken profit, it never re-enters for the rest of the
+# window. Anything still held at window close (a side that never hit
+# TP) settles against the real market outcome.
 LADDER_HIGH = 0.49
 LADDER_LOW = 0.02
 LADDER_STEP = 0.01
 LADDER_SHARES = 10
-LADDER_TP_PRICE = 0.99
+LADDER_TP_PRICE = 0.75
 
 # ---- Fees / Maker Rebates ------------------------------------------------
 # Every order in this strategy is a resting limit order (maker side), so
