@@ -43,6 +43,13 @@ class PolymarketClient:
     # one. We still probe a couple of alternate candidates defensively in
     # case Polymarket changes convention or a market is momentarily
     # missing from Gamma right at the boundary.
+    #
+    # IMPORTANT: for the 5-minute crypto series, Gamma's `/markets?slug=...`
+    # returns an empty list -- these markets are only addressable by slug
+    # through the `/events?slug=...` endpoint (each event wraps exactly one
+    # market for this series, in event["markets"][0]). Confirmed against a
+    # live event: `/markets?slug=btc-updown-5m-<ts>` -> [], while
+    # `/events?slug=btc-updown-5m-<ts>` -> [{ ..., "markets": [{...}] }].
 
     def _slug_for_ts(self, ts: int) -> str:
         return f"{config.SLUG_PREFIX}{ts}"
@@ -52,18 +59,35 @@ class PolymarketClient:
         return int(math.floor(now / config.WINDOW_SECONDS) * config.WINDOW_SECONDS)
 
     async def fetch_market_by_slug(self, slug: str) -> Optional[dict]:
-        url = f"{config.GAMMA_API_BASE}/markets"
+        url = f"{config.GAMMA_API_BASE}/events"
         try:
             resp = await self._client.get(url, params={"slug": slug})
             resp.raise_for_status()
             data = resp.json()
         except Exception:
             return None
+
+        event = None
         if isinstance(data, list) and data:
-            return data[0]
-        if isinstance(data, dict) and data.get("markets"):
-            markets = data["markets"]
-            return markets[0] if markets else None
+            event = data[0]
+        elif isinstance(data, dict) and data.get("events"):
+            events = data["events"]
+            event = events[0] if events else None
+        elif isinstance(data, dict) and data.get("slug"):
+            # some Gamma responses return the event object directly (not a list)
+            event = data
+
+        if not isinstance(event, dict):
+            return None
+
+        markets = event.get("markets")
+        if isinstance(markets, list) and markets:
+            return markets[0]
+        # extremely defensive fallback: if Gamma ever returns the market
+        # fields flattened directly on the event (no nested "markets"),
+        # treat the event itself as the market record.
+        if event.get("clobTokenIds") is not None:
+            return event
         return None
 
     def _extract_token_ids(self, market_json: dict):
