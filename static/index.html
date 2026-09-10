@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>BTC 5m — ladder desk</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0A0E14;
+    --panel: #10161F;
+    --panel-2: #0D1219;
+    --line: #212a37;
+    --text: #D8DEE9;
+    --muted: #6B7686;
+    --up: #35D68A;
+    --down: #FF5D5D;
+    --amber: #F5A623;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin:0; padding:0; background: var(--bg); color: var(--text);
+    font-family: 'IBM Plex Sans', sans-serif; -webkit-font-smoothing: antialiased; }
+  .mono { font-family: 'IBM Plex Mono', monospace; }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 28px 20px 60px; }
+
+  .topbar { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 22px; }
+  .topbar h1 { font-size: 15px; font-weight: 600; margin: 0; }
+  .status-pill { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--up); }
+  .dot.err { background: var(--down); }
+
+  .hero {
+    border: 1px solid var(--line);
+    background: linear-gradient(180deg, var(--panel), var(--panel-2));
+    padding: 26px 28px;
+    display: flex; justify-content: space-between; align-items: center;
+    flex-wrap: wrap; gap: 20px; margin-bottom: 18px;
+  }
+  .slug { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+  .clock { font-size: 52px; font-weight: 500; line-height: 1; font-variant-numeric: tabular-nums; }
+  .clock.close { color: var(--amber); }
+  .sides { display: flex; gap: 28px; }
+  .side-block { text-align: right; }
+  .side-label { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  .side-price { font-size: 30px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .side-price.up { color: var(--up); }
+  .side-price.down { color: var(--down); }
+
+  canvas#spark { width: 100%; height: 70px; display: block; margin-top: 18px; }
+
+  /* Ladder visualization */
+  .ladder-section {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 18px;
+  }
+  @media (max-width: 720px) { .ladder-section { grid-template-columns: 1fr; } }
+
+  .ladder-card {
+    border: 1px solid var(--line);
+    background: var(--panel);
+    padding: 18px 20px;
+  }
+  .ladder-card h2 { font-size: 14px; font-weight: 600; margin: 0 0 4px; }
+  .ladder-card h2.up { color: var(--up); }
+  .ladder-card h2.down { color: var(--down); }
+  .ladder-sub { font-size: 11.5px; color: var(--muted); margin-bottom: 14px; }
+
+  .rungs {
+    display: flex; flex-direction: column-reverse; gap: 2px;
+    max-height: 340px; overflow-y: auto; padding-right: 4px;
+  }
+  .rung {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 11px; font-family: 'IBM Plex Mono', monospace;
+    padding: 2px 0;
+  }
+  .rung-price { width: 38px; color: var(--muted); }
+  .rung-bar { flex: 1; height: 8px; background: var(--panel-2); border: 1px solid var(--line); position: relative; }
+  .rung-bar .fill { height: 100%; }
+  .rung.filled.UP .fill { background: var(--up); width: 100%; }
+  .rung.filled.DOWN .fill { background: var(--down); width: 100%; }
+  .rung.pending .fill { width: 0%; }
+  .rung.tp-line .rung-price { color: var(--amber); font-weight: 600; }
+
+  .exposure-mini { display: flex; gap: 14px; margin-top: 14px; flex-wrap: wrap; }
+  .exposure-mini .kv { flex: 1; min-width: 90px; font-size: 12px; }
+  .exposure-mini .k { color: var(--muted); display: block; margin-bottom: 2px; }
+  .exposure-mini .v { font-family: 'IBM Plex Mono', monospace; font-size: 14px; font-weight: 600; }
+  .v.pos { color: var(--up); }
+  .v.neg { color: var(--down); }
+
+  .balance-strip { display: flex; gap: 16px; margin-bottom: 18px; flex-wrap: wrap; }
+  .stat { flex: 1; min-width: 140px; border: 1px solid var(--line); background: var(--panel); padding: 14px 18px; }
+  .stat .label { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+  .stat .value { font-size: 22px; font-weight: 600; font-family: 'IBM Plex Mono', monospace; }
+  .value.pos { color: var(--up); }
+  .value.neg { color: var(--down); }
+
+  .log-panel { border: 1px solid var(--line); background: var(--panel); }
+  .log-panel h2 { font-size: 13px; font-weight: 600; margin: 0; padding: 14px 18px; border-bottom: 1px solid var(--line); }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th { text-align: left; color: var(--muted); font-weight: 500; padding: 8px 14px; border-bottom: 1px solid var(--line); }
+  td { padding: 7px 14px; border-bottom: 1px solid var(--line); font-family: 'IBM Plex Mono', monospace; white-space: nowrap; }
+  td.note { white-space: normal; font-family: 'IBM Plex Sans', sans-serif; color: var(--muted); }
+  tr:last-child td { border-bottom: none; }
+  .tag-up { color: var(--up); }
+  .tag-down { color: var(--down); }
+  .log-scroll { max-height: 340px; overflow-y: auto; }
+
+  .footnote { margin-top: 16px; font-size: 11.5px; color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="topbar">
+    <h1>BTC 5m up / down — ladder desk</h1>
+    <div class="status-pill"><span class="dot" id="status-dot"></span><span id="status-text">connecting</span></div>
+  </div>
+
+  <div class="hero">
+    <div>
+      <div class="slug" id="slug">—</div>
+      <div class="clock mono" id="clock">--:--</div>
+    </div>
+    <div class="sides">
+      <div class="side-block"><div class="side-label">Up</div><div class="side-price up mono" id="price-up">—</div></div>
+      <div class="side-block"><div class="side-label">Down</div><div class="side-price down mono" id="price-down">—</div></div>
+    </div>
+  </div>
+  <canvas id="spark" width="1000" height="70"></canvas>
+
+  <div class="ladder-section">
+    <div class="ladder-card">
+      <h2 class="up">Up ladder</h2>
+      <div class="ladder-sub">0.49 → 0.02, 10 shares/rung · TP 0.99</div>
+      <div class="rungs" id="rungs-up"></div>
+      <div class="exposure-mini">
+        <div class="kv"><span class="k">Shares</span><span class="v" id="up-shares">0</span></div>
+        <div class="kv"><span class="k">Avg</span><span class="v" id="up-avg">—</span></div>
+        <div class="kv"><span class="k">Cost</span><span class="v" id="up-cost">$0.00</span></div>
+        <div class="kv"><span class="k">Unreal. P&amp;L</span><span class="v" id="up-pnl">—</span></div>
+      </div>
+    </div>
+    <div class="ladder-card">
+      <h2 class="down">Down ladder</h2>
+      <div class="ladder-sub">0.49 → 0.02, 10 shares/rung · TP 0.99</div>
+      <div class="rungs" id="rungs-down"></div>
+      <div class="exposure-mini">
+        <div class="kv"><span class="k">Shares</span><span class="v" id="down-shares">0</span></div>
+        <div class="kv"><span class="k">Avg</span><span class="v" id="down-avg">—</span></div>
+        <div class="kv"><span class="k">Cost</span><span class="v" id="down-cost">$0.00</span></div>
+        <div class="kv"><span class="k">Unreal. P&amp;L</span><span class="v" id="down-pnl">—</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="balance-strip">
+    <div class="stat"><div class="label">Balance</div><div class="value mono" id="balance">$0.00</div></div>
+    <div class="stat"><div class="label">Total P&amp;L</div><div class="value mono" id="pnl">$0.00</div></div>
+    <div class="stat"><div class="label">Fees paid</div><div class="value mono" id="fees">$0.00</div></div>
+    <div class="stat"><div class="label">Starting capital</div><div class="value mono" id="starting">$5,000.00</div></div>
+  </div>
+
+  <div class="log-panel">
+    <h2>Trade log</h2>
+    <div class="log-scroll">
+      <table>
+        <thead><tr><th>Time</th><th>Eng</th><th>Event</th><th>Side</th><th>Price</th><th>Shares</th><th>Fee</th><th>P&amp;L</th><th>Note</th></tr></thead>
+        <tbody id="log-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="footnote">Paper trading — no live orders are placed. Prices are polled from Polymarket's public market-data API.</div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+function fmtMoney(n) {
+  if (n === null || n === undefined) return '—';
+  const sign = n < 0 ? '-' : '';
+  return sign + '$' + Math.abs(n).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+}
+function fmtPrice(n) { return (n === null || n === undefined) ? '—' : n.toFixed(3); }
+function fmtClock(seconds) {
+  if (seconds === null || seconds === undefined) return '--:--';
+  seconds = Math.max(0, Math.round(seconds));
+  const m = Math.floor(seconds / 60), s = seconds % 60;
+  return String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0');
+}
+
+function drawSpark(history) {
+  const canvas = $('spark'), ctx = canvas.getContext('2d');
+  const w = canvas.width, h = canvas.height;
+  ctx.clearRect(0,0,w,h);
+  if (!history || history.length < 2) return;
+  const n = history.length, xStep = w / (n - 1);
+  function drawLine(key, color) {
+    ctx.beginPath(); ctx.strokeStyle = color; ctx.lineWidth = 2;
+    history.forEach((p, i) => {
+      const v = p[key]; if (v === null || v === undefined) return;
+      const x = i * xStep, y = h - (v * h);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  }
+  drawLine('up', '#35D68A'); drawLine('down', '#FF5D5D');
+}
+
+function renderLog(entries) {
+  const body = $('log-body'); body.innerHTML = '';
+  entries.forEach(e => {
+    const tr = document.createElement('tr');
+    const time = new Date(e.ts * 1000).toLocaleTimeString();
+    const sideClass = e.side === 'UP' ? 'tag-up' : (e.side === 'DOWN' ? 'tag-down' : '');
+    const pnlStr = (e.pnl === null || e.pnl === undefined) ? '—' : fmtMoney(e.pnl);
+    const feeStr = (e.fee === null || e.fee === undefined) ? '—' : fmtMoney(e.fee);
+    tr.innerHTML = `
+      <td>${time}</td><td>${e.engine}</td><td>${e.event}</td>
+      <td class="${sideClass}">${e.side || '—'}</td>
+      <td>${e.price !== null && e.price !== undefined ? e.price.toFixed(3) : '—'}</td>
+      <td>${e.shares || '—'}</td><td>${feeStr}</td><td>${pnlStr}</td>
+      <td class="note">${e.note || ''}</td>`;
+    body.appendChild(tr);
+  });
+}
+
+function renderLadder(containerId, ladder, filledRungs, sideKey) {
+  const container = $(containerId);
+  container.innerHTML = '';
+  const filledSet = new Set(filledRungs.map(p => p.toFixed(2)));
+  ladder.forEach(price => {
+    const key = price.toFixed(2);
+    const isFilled = filledSet.has(key);
+    const div = document.createElement('div');
+    div.className = 'rung ' + (isFilled ? ('filled ' + sideKey) : 'pending');
+    div.innerHTML = `<span class="rung-price">${key}</span><span class="rung-bar"><span class="fill"></span></span>`;
+    container.appendChild(div);
+  });
+}
+
+async function refresh() {
+  try {
+    const res = await fetch('/api/state');
+    const data = await res.json();
+
+    $('status-dot').className = 'dot' + (data.error ? ' err' : '');
+    $('status-text').textContent = data.error ? data.error : data.status;
+
+    $('slug').textContent = data.window ? data.window.slug : 'waiting for market...';
+    const secondsToClose = data.window ? (data.window.close_ts - data.server_time) : null;
+    const clockEl = $('clock');
+    clockEl.textContent = fmtClock(secondsToClose);
+    clockEl.className = 'clock mono' + (secondsToClose !== null && secondsToClose <= 30 ? ' close' : '');
+
+    $('price-up').textContent = fmtPrice(data.prices.up);
+    $('price-down').textContent = fmtPrice(data.prices.down);
+    drawSpark(data.price_history);
+
+    const b = data.engine_b;
+    renderLadder('rungs-up', b.ladder, b.up.filled_rungs, 'UP');
+    renderLadder('rungs-down', b.ladder, b.down.filled_rungs, 'DOWN');
+
+    function fillSide(prefix, s) {
+      $(prefix+'-shares').textContent = s.shares;
+      $(prefix+'-avg').textContent = s.avg_price !== null ? s.avg_price.toFixed(3) : '—';
+      $(prefix+'-cost').textContent = fmtMoney(s.cost);
+      const pnlEl = $(prefix+'-pnl');
+      pnlEl.textContent = s.unrealized_pnl !== null ? fmtMoney(s.unrealized_pnl) : '—';
+      pnlEl.className = 'v ' + (s.unrealized_pnl > 0 ? 'pos' : (s.unrealized_pnl < 0 ? 'neg' : ''));
+    }
+    fillSide('up', b.up);
+    fillSide('down', b.down);
+
+    $('balance').textContent = fmtMoney(data.balance);
+    const pnlEl = $('pnl');
+    pnlEl.textContent = fmtMoney(data.pnl_total);
+    pnlEl.className = 'value mono ' + (data.pnl_total > 0 ? 'pos' : (data.pnl_total < 0 ? 'neg' : ''));
+    $('starting').textContent = fmtMoney(data.starting_balance);
+    $('fees').textContent = fmtMoney(data.total_fees_paid);
+
+    renderLog(data.log);
+  } catch (e) {
+    $('status-dot').className = 'dot err';
+    $('status-text').textContent = 'disconnected';
+  }
+}
+
+refresh();
+setInterval(refresh, 1000);
+</script>
+</body>
+</html>
