@@ -70,21 +70,35 @@
   .ladder-sub.closed { color: var(--amber); font-weight: 500; }
 
   .rungs {
-    display: flex; flex-direction: column-reverse; gap: 2px;
-    max-height: 340px; overflow-y: auto; padding-right: 4px;
+    display: flex; flex-direction: column; gap: 3px;
+    max-height: 420px; overflow-y: auto; padding-right: 4px;
   }
   .rung {
-    display: flex; align-items: center; gap: 8px;
+    display: grid;
+    grid-template-columns: 42px 1fr 60px;
+    align-items: center; gap: 8px;
     font-size: 11px; font-family: 'IBM Plex Mono', monospace;
-    padding: 2px 0;
+    padding: 4px 6px;
+    border: 1px solid transparent;
   }
-  .rung-price { width: 38px; color: var(--muted); }
-  .rung-bar { flex: 1; height: 8px; background: var(--panel-2); border: 1px solid var(--line); position: relative; }
-  .rung-bar .fill { height: 100%; }
-  .rung.filled.UP .fill { background: var(--up); width: 100%; }
-  .rung.filled.DOWN .fill { background: var(--down); width: 100%; }
-  .rung.pending .fill { width: 0%; }
-  .rung.tp-line .rung-price { color: var(--amber); font-weight: 600; }
+  .rung-price { color: var(--muted); }
+  .rung.filled { border-color: var(--line); background: rgba(255,255,255,0.02); }
+  .rung.filled.UP .rung-price { color: var(--up); font-weight: 600; }
+  .rung.filled.DOWN .rung-price { color: var(--down); font-weight: 600; }
+  .rung.closed_tp { border-color: var(--line); background: rgba(245,166,35,0.06); opacity: 0.85; }
+  .rung.settled_win { border-color: var(--up); background: rgba(53,214,138,0.06); }
+  .rung.settled_loss { border-color: var(--down); background: rgba(255,93,93,0.06); opacity: 0.7; }
+  .rung.cancelled { opacity: 0.35; }
+  .rung.cancelled .rung-price { text-decoration: line-through; }
+  .rung.pending { opacity: 0.45; }
+  .rung-detail { color: var(--muted); font-size: 10.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .rung-pnl { text-align: right; font-weight: 600; }
+  .rung-pnl.pos { color: var(--up); }
+  .rung-pnl.neg { color: var(--down); }
+  .rung-tag {
+    font-size: 9px; text-transform: uppercase; letter-spacing: 0.3px;
+    color: var(--amber); margin-left: 4px;
+  }
 
   .exposure-mini { display: flex; gap: 14px; margin-top: 14px; flex-wrap: wrap; }
   .exposure-mini .kv { flex: 1; min-width: 90px; font-size: 12px; }
@@ -233,16 +247,50 @@ function renderLog(entries) {
   });
 }
 
-function renderLadder(containerId, ladder, filledRungs, sideKey) {
+function fmtTime(ts) {
+  if (!ts) return '';
+  return new Date(ts * 1000).toLocaleTimeString([], {hour12: false});
+}
+
+function renderLadder(containerId, rungs, sideKey) {
   const container = $(containerId);
   container.innerHTML = '';
-  const filledSet = new Set(filledRungs.map(p => p.toFixed(2)));
-  ladder.forEach(price => {
-    const key = price.toFixed(2);
-    const isFilled = filledSet.has(key);
+  rungs.forEach(r => {
     const div = document.createElement('div');
-    div.className = 'rung ' + (isFilled ? ('filled ' + sideKey) : 'pending');
-    div.innerHTML = `<span class="rung-price">${key}</span><span class="rung-bar"><span class="fill"></span></span>`;
+    let cls = 'rung ' + r.status;
+    if (r.status === 'filled') cls += ' ' + sideKey;
+    div.className = cls;
+
+    let detail = '';
+    let pnlValue = null;
+    let pnlLabel = '';
+
+    if (r.status === 'pending') {
+      detail = `${r.shares} sh resting`;
+    } else if (r.status === 'cancelled') {
+      detail = 'cancelled — no re-entry';
+    } else if (r.status === 'filled') {
+      detail = `${r.shares} sh @ ${r.fill_price.toFixed(2)} · filled ${fmtTime(r.fill_ts)} · rebate ${r.rebate.toFixed(3)}`;
+      pnlValue = r.unrealized_pnl;
+      pnlLabel = 'floating';
+    } else if (r.status === 'closed_tp') {
+      detail = `${r.shares} sh @ ${r.fill_price.toFixed(2)} → TP ${r.close_price.toFixed(2)}`;
+      pnlValue = r.realized_pnl;
+      pnlLabel = 'closed';
+    } else if (r.status === 'settled_win' || r.status === 'settled_loss') {
+      detail = `${r.shares} sh @ ${r.fill_price.toFixed(2)} → ${r.status === 'settled_win' ? 'won $1.00' : 'lost $0.00'}`;
+      pnlValue = r.realized_pnl;
+      pnlLabel = 'settled';
+    }
+
+    const pnlClass = pnlValue === null ? '' : (pnlValue > 0 ? 'pos' : (pnlValue < 0 ? 'neg' : ''));
+    const pnlText = pnlValue === null ? '—' : (pnlValue >= 0 ? '+' : '') + '$' + pnlValue.toFixed(2);
+
+    div.innerHTML = `
+      <span class="rung-price">${r.price.toFixed(2)}</span>
+      <span class="rung-detail">${detail}</span>
+      <span class="rung-pnl ${pnlClass}">${pnlText}</span>
+    `;
     container.appendChild(div);
   });
 }
@@ -266,8 +314,8 @@ async function refresh() {
     drawSpark(data.price_history);
 
     const b = data.engine_b;
-    renderLadder('rungs-up', b.ladder, b.up.filled_rungs, 'UP');
-    renderLadder('rungs-down', b.ladder, b.down.filled_rungs, 'DOWN');
+    renderLadder('rungs-up', b.up.rungs, 'UP');
+    renderLadder('rungs-down', b.down.rungs, 'DOWN');
 
     function fillSide(prefix, s) {
       $(prefix+'-shares').textContent = s.shares;

@@ -45,9 +45,23 @@ and it's changed before.
 
 - Live Up/Down prices + sparkline.
 - **Ladder visualization** for each side: all 48 rungs from 0.49 to
-  0.02, colored in when filled (green for Up, red for Down), showing
-  live shares/avg entry/cost/unrealized P&L for that side.
-- Balance / total P&L / fees strip and full trade log.
+  0.02, each showing its own trade details inline — fill price, shares,
+  fill time, rebate earned, and a live floating (unrealized) P&L per
+  rung while it's still open. No need to cross-reference the trade log
+  to understand what a rung did.
+  - **Pending** rungs show as resting, dimmed.
+  - **Filled** rungs show shares/entry/rebate + live floating P&L,
+    color-coded green (Up) or red (Down).
+  - **Cancelled** rungs (unfilled when TP fired) show struck-through and
+    faded — visibly "no re-entry."
+  - **Closed via TP** rungs show the realized P&L from that exit.
+  - **Settled** rungs (held to expiry) show whether that specific fill
+    won ($1) or lost ($0) and its realized P&L.
+- Per-side summary: total shares, avg entry, cost, rebates earned,
+  aggregate unrealized P&L, and a "closed out — no re-entry" badge once
+  a side's TP has fired.
+- Balance / total P&L / rebates strip and the full trade log (still
+  available for a complete chronological audit trail).
 
 ## Project layout
 
