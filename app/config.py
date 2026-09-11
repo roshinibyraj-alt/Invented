@@ -3,23 +3,24 @@ Central configuration for the BTC 5-min up/down ladder-martingale bot.
 
 Strategy (see app/engine.py for the full write-up):
   1. At the very first tick of each 5-min window, unconditionally place a
-     3-level resting BUY ladder on BOTH sides at once: LADDER_LEVELS.
+     2-level resting BUY ladder on BOTH sides at once: LADDER_LEVELS.
      No wait, no price-band filter.
   2. Rung-level race: the moment either side's rung fills, the SAME rung
-     on the OPPOSITE side is immediately cancelled (each rung -- 0.30,
-     0.20, 0.10 -- races independently; the other rungs are unaffected).
+     on the OPPOSITE side is immediately cancelled (each rung -- 0.40,
+     0.30 -- races independently; the other rung is unaffected).
   3. Every fill, on any rung/side, gets a resting TP sell at the flat
      TP_PRICE (0.99). No tiered/first-side TP anymore.
   4. No stop loss -- if a TP never hits before the window closes, that
      position rides to resolution: $1/share if its side won, $0 if it
      lost. Resolution outcome IS the win/loss for the martingale below
      (a TP fill always counts as a win for its rung).
-  5. Per-rung martingale: each rung (0.30 / 0.20 / 0.10) tracks its own
+  5. Per-rung martingale: each rung (0.40 / 0.30) tracks its own
      consecutive-loss streak, counted since its last win, and persisting
      across windows. Every time that streak reaches another multiple of
      RUNG_LOSS_DOUBLE_THRESHOLDS[rung], the share size for that rung
      doubles again (compounding -- e.g. for the 0.30 rung: loss #2 -> 2x,
-     loss #4 -> 4x, loss #6 -> 8x, ...). Any win on a rung resets its
+     loss #4 -> 4x, loss #6 -> 8x, ...). The 0.40 rung follows the same
+     compounding logic as the 0.30 rung. Any win on a rung resets its
      streak and share size back to base.
 """
 import os
@@ -45,9 +46,8 @@ POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
 # (see RUNG_LOSS_DOUBLE_THRESHOLDS below).
 # price -> base_shares
 LADDER_LEVELS = [
-    (0.30, 200.0),
-    (0.20, 100.0),
-    (0.10, 50.0),
+    (0.40, 20.0),
+    (0.30, 15.0),
 ]
 
 # Flat TP applied to every fill, on any rung, any side.
@@ -57,9 +57,8 @@ TP_PRICE = 0.99
 # last win) needed before its share size doubles again. Compounding --
 # reached again every N more losses, not just once.
 RUNG_LOSS_DOUBLE_THRESHOLDS = {
+    0.40: 2,
     0.30: 2,
-    0.20: 4,
-    0.10: 8,
 }
 
 MAKER_REBATE_FRACTION = 0.20  # rebate earned on every resting-order fill (both entry and TP)

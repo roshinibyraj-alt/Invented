@@ -3,15 +3,15 @@ Trading engine -- immediate-entry ladder, per-rung race + per-rung martingale.
 
 Entry: on the very first tick of each new window, unconditionally place
 config.LADDER_LEVELS as resting BUY limit orders on BOTH UP and DOWN
-simultaneously (3 price rungs each, 6 orders total). No wait, no
+simultaneously (2 price rungs each, 4 orders total). No wait, no
 price-band filter -- it fires immediately, once per window. Order size
 per rung = base size * that rung's current martingale multiplier (see
 below). Pure maker orders -- never cross the spread.
 
 Per-rung race: the moment a rung fills on one side, the SAME rung
 (same price) on the OPPOSITE side is immediately cancelled -- each of
-the 3 rungs races independently between UP and DOWN. The other rungs
-keep resting untouched.
+the 2 rungs races independently between UP and DOWN. The other rung
+keeps resting untouched.
 
 Exit: every fill (any rung, any side) immediately gets its own resting
 TP sell limit at the flat config.TP_PRICE (0.99). TP orders are maker
@@ -19,13 +19,14 @@ too (fill when the book's bid on that side rises to/through TP). There
 is no stop loss -- if a TP never hits, that position rides to window
 resolution instead: $1/share if its side won, $0 if it lost.
 
-Per-rung martingale: each rung price (0.30 / 0.20 / 0.10) tracks its
+Per-rung martingale: each rung price (0.40 / 0.30) tracks its
 own consecutive-loss streak (a "loss" = a filled position at that rung
 that never hit TP and then lost at resolution; a TP fill always counts
 as a win). The streak persists across windows and only resets to 0 on
 a win at that rung. Every time the streak reaches another multiple of
 config.RUNG_LOSS_DOUBLE_THRESHOLDS[rung], that rung's share-size
-multiplier doubles again (compounding).
+multiplier doubles again (compounding). The 0.40 rung uses the same
+threshold/compounding logic as the 0.30 rung.
 
 No re-arming: once a window has had its ladder placed, it is never
 placed again in that window. Each new 5-minute window is a brand-new
