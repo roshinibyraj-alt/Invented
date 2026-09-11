@@ -1,21 +1,35 @@
 """
-Central configuration for the BTC 5-min breakout-limit-buy bot.
+Central configuration for the BTC 5-min up/down bot.
 
-Strategy (see app/engine.py for full write-up):
-  1. Wait 60 seconds after window opens. No action before that.
-  2. After 60s, monitor both sides. The first side to tick above 0.75
-     becomes the "tracked side" for this window.
-  3. Place a resting BUY limit order at (current_price − 0.10).
-     As price ticks higher, the limit order price updates dynamically:
-       - price hits 0.75 → limit buy at 0.65
-       - price hits 0.85 → limit buy at 0.75
-       - price hits 0.95 → limit buy at 0.85
-       - etc.
-  4. 100 shares per fill.
-  5. Stop loss at 0.50 applies immediately on fill.
-  6. Take profit at 0.99 (resting limit sell).
-  7. If neither TP nor SL hits by window close, position settles at
-     Polymarket's real binary resolution ($1/share win, $0/share loss).
+Single engine -- ladder breakout with pullback limit entries:
+
+  1. Cold start: do nothing for the first ARM_DELAY_SECONDS (60s) of each
+     window -- no monitoring, no orders.
+  2. Arm: after the cold start, watch both sides' mid-price every tick.
+     Whichever side's mid-price first reaches LADDER_THRESHOLDS[0] (0.75)
+     becomes the ARMED side for the rest of that window -- the other side
+     is no longer watched (they're complementary, so once one is rallying
+     the other's falling).
+  3. Ladder: every time the armed side's mid-price climbs through the
+     next threshold in LADDER_THRESHOLDS (0.75 / 0.85 / 0.95), place one
+     new resting limit BUY order (maker), priced LADDER_OFFSET (0.10)
+     below that threshold:
+       - crosses 0.75 -> resting buy @ 0.65
+       - crosses 0.85 -> resting buy @ 0.75
+       - crosses 0.95 -> resting buy @ 0.85
+     Each rung is placed once and stays resting waiting for a pullback --
+     it is NOT cancelled just because price keeps climbing past it.
+  4. Per fill: every rung that fills becomes its own independent
+     position of SHARES_PER_RUNG (100) shares with its own stop loss
+     (LADDER_SL_PRICE, 0.50 -- taker market sell the instant the bid
+     drops to/through it) and take profit (LADDER_TP_PRICE, 0.99 --
+     resting maker sell). Up to 3 positions can be open at once in one
+     window if all three rungs fill.
+  5. Window close: cancel any rungs that never filled; force a taker
+     close on any positions still open.
+
+Sizing is flat -- SHARES_PER_RUNG every time, no martingale or
+anti-martingale progression carried between windows or between rungs.
 """
 import os
 
@@ -23,6 +37,9 @@ import os
 TRADING_MODE = os.getenv("TRADING_MODE", "paper")
 
 # ---- Market discovery / pricing ---------------------------------------
+# CLOB only -- no Gamma price fallback anywhere in this app. Gamma is
+# used purely for one-time window metadata (slug -> token ids) in
+# polymarket_client.py; every live price/book read goes to CLOB.
 GAMMA_API_BASE = os.getenv("GAMMA_API_BASE", "https://gamma-api.polymarket.com")
 CLOB_API_BASE = os.getenv("CLOB_API_BASE", "https://clob.polymarket.com")
 SLUG_PREFIX = "btc-updown-5m-"
@@ -30,21 +47,30 @@ WINDOW_SECONDS = 300
 
 POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
 
-# ---- Strategy ----------------------------------------------------------
-WAIT_SECONDS = 60           # wait this long after window opens
-BREAKOUT_THRESHOLD = 0.75   # side must tick above this to start laddering
-LIMIT_OFFSET = 0.10         # limit buy = current_price − this
-SHARES_PER_FILL = 100       # flat 100 shares per fill
-SL_PRICE = 0.50             # stop loss (market sell) — applies immediately on fill
-TP_PRICE = 0.99             # take profit (resting limit sell)
+# ---- Ladder breakout engine --------------------------------------------
+LADDER_ARM_DELAY_SECONDS = 60          # do nothing for the first minute of each window
+LADDER_THRESHOLDS = [0.75, 0.85, 0.95]  # mid-price levels that arm / extend the ladder
+LADDER_OFFSET = 0.10                    # each rung's limit buy sits this far below its threshold
+LADDER_SL_PRICE = 0.50                  # shared stop loss for every filled rung
+LADDER_TP_PRICE = 0.99                  # shared take profit for every filled rung
+LADDER_SHARES_PER_RUNG = 100.0          # flat size, every rung, every window
 
-# ---- Fees --------------------------------------------------------------
+MAKER_REBATE_FRACTION = 0.20  # rebate earned on every resting-order fill (maker side)
+
+# Demo capital: single source of truth for the paper balance -- debited
+# on every buy fill, credited on every TP/SL/forced-close settlement.
+# Halts permanently if it ever drops below $0.
+STARTING_CAPITAL = float(os.getenv("STARTING_CAPITAL", "2000"))
+
+# ---- Trading fees -----------------------------------------------------
+# Ladder rung entries and TP exits are resting maker orders (no fee, earn
+# the maker rebate above); the stop loss and any forced window-end close
+# are taker market orders and pay the fee for real. Verify against
+# GET https://clob.polymarket.com/fee-rate?token_id=... before trading
+# real money.
 APPLY_TAKER_FEES = True
 TAKER_FEE_RATE = 0.07
 TAKER_FEE_EXPONENT = 1
 
-# ---- Capital -----------------------------------------------------------
-STARTING_CAPITAL = float(os.getenv("STARTING_CAPITAL", "2000"))
-
-# ---- Misc ---------------------------------------------------------------
+# ---- Misc -----------------------------------------------------------------
 LOG_MAX_ENTRIES = 500

@@ -129,7 +129,7 @@ class BotState:
                 {"ts": p.ts, "up": p.up, "down": p.down}
                 for p in list(self.price_history)[-120:]
             ],
-            "pnl_total": round(eng["realized_pnl"], 2),
+            "pnl_total": round(eng["realized_pnl"] + eng["unrealized_pnl"], 2),
             "demo_capital": {
                 "balance": eng["balance"],
                 "starting_capital": eng["starting_capital"],

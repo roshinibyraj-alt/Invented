@@ -1,24 +1,11 @@
 """
-Trading engine — breakout-limit-buy ladder (100 shares/rung).
+Trading engine -- ladder breakout with pullback limit entries.
 
-Flow per 5-min window:
-  1. WAITING phase (first 60s): observe prices, no orders.
-  2. MONITORING phase (after 60s): watch both sides. The first side
-     whose price ticks above BREAKOUT_THRESHOLD (0.75) becomes the
-     tracked side for the rest of the window.
-  3. LADDER phase: while the tracked side's price keeps ticking up,
-     place a resting BUY limit order at (current_price − LIMIT_OFFSET)
-     for SHARES_PER_FILL (100) shares:
-       - price ticks 0.75 → limit buy at 0.65
-       - price ticks 0.85 → limit buy at 0.75
-       - price ticks 0.95 → limit buy at 0.85
-     Each new tick level adds one more resting buy (all levels race —
-     the first to fill wins; the rest keep resting and may fill too).
-  4. FILL: every filled rung immediately becomes its own position with:
-     - SL: market sell at 0.50 (fires the instant the exit price ≤ 0.50)
-     - TP: resting limit sell at 0.99
-  5. RESOLUTION: any position still open at window close settles at
-     Polymarket's real outcome ($1/share win, $0/share loss).
+See app/config.py for the full strategy write-up. Summary: sit out the
+first minute of each window, then watch for either side to break 0.75.
+Once armed, place a resting limit buy 0.10 below every threshold
+(0.75/0.85/0.95) the price climbs through. Each fill is its own 100-share
+position with a shared SL (0.50) and TP (0.99).
 """
 import time
 from dataclasses import dataclass, field
@@ -35,20 +22,48 @@ def _midpoint(bid: Optional[float], ask: Optional[float]) -> Optional[float]:
     return ask if ask is not None else bid
 
 
+# ---------------------------------------------------------------------------
+# Shared capital -- single balance the engine debits/credits.
+# ---------------------------------------------------------------------------
+
 @dataclass
-class RestingBuy:
-    side: Side
-    price: float
+class CapitalPool:
+    balance: float
+    halted: bool = False
+    equity_curve: List[dict] = field(default_factory=list)
+
+    def record_equity_point(self, window_slug: Optional[str]):
+        self.equity_curve.append({
+            "window": window_slug, "ts": time.time(), "balance": round(self.balance, 2),
+        })
+        if len(self.equity_curve) > 500:
+            self.equity_curve = self.equity_curve[-500:]
+
+    def check_halt(self) -> bool:
+        if not self.halted and self.balance < 0:
+            self.halted = True
+        return self.halted
+
+
+# ---------------------------------------------------------------------------
+# Ladder breakout engine
+# ---------------------------------------------------------------------------
+
+@dataclass
+class RestingOrder:
+    threshold: float      # the price level whose crossing placed this rung
+    limit_price: float    # threshold - LADDER_OFFSET
     shares: float
+    placed_ts: float
 
 
 @dataclass
-class Position:
-    side: Side
-    shares: float
+class LadderPosition:
+    threshold: float
     entry_price: float
+    shares: float
     cost: float
-    tp_price: float
+    entry_ts: float
 
 
 @dataclass
@@ -59,326 +74,325 @@ class EngineState:
     down_bid: Optional[float] = None
     down_ask: Optional[float] = None
 
-    phase: str = "waiting"          # waiting, monitoring, ladder, done
-    window_start_ts: float = 0.0
-
-    tracked_side: Optional[Side] = None
-
-    resting_buys: List[RestingBuy] = field(default_factory=list)
-    placed_limits: List[float] = field(default_factory=list)
-    positions: List[Position] = field(default_factory=list)
+    armed_side: Optional[Side] = None
+    next_threshold_idx: int = 0
+    resting_orders: List[RestingOrder] = field(default_factory=list)
+    positions: List[LadderPosition] = field(default_factory=list)
 
     fills_this_window: int = 0
-    sl_exits: int = 0
-    tp_exits: int = 0
-    total_fills: int = 0
-    no_trade_windows: int = 0
-    resolution_wins: int = 0
-    resolution_losses: int = 0
-    total_pnl: float = 0.0
+    last_window_pnl: float = 0.0
 
-    balance: float = 0.0
-    halted: bool = False
-    equity_curve: list = field(default_factory=list)
+    total_rungs_placed: int = 0
+    total_fills: int = 0
+    total_tp_fills: int = 0
+    total_sl_fills: int = 0
+    total_forced_closes: int = 0
+    total_cancelled_rungs: int = 0
+    no_trade_windows: int = 0
+    wins: int = 0
+    losses: int = 0
+    total_pnl: float = 0.0
 
 
 class Engine:
-    name = "BOT"
+    """Ladder breakout / pullback limit entries, driven off its own
+    capital pool. Kept as the class name `Engine` / constructed the same
+    way (Engine(broker)) so app/state.py doesn't need structural
+    changes."""
+
+    name = "LADDER"
 
     def __init__(self, broker: PaperBroker):
         self.broker = broker
-        self.s = EngineState(balance=config.STARTING_CAPITAL)
-        self.s.equity_curve.append({
-            "window": None, "ts": time.time(), "balance": round(self.s.balance, 2),
-        })
+        self.capital = CapitalPool(balance=config.STARTING_CAPITAL)
+        self.s = EngineState()
+        self.capital.record_equity_point(None)
+
+    def _log(self, event, **kw):
+        self.broker.log_event(self.name, self.s.window.slug if self.s.window else "", event,
+                               balance_after=self.capital.balance, **kw)
 
     def reset_for_window(self, window: WindowMarket):
         self.s.window = window
-        self.s.phase = "waiting"
-        self.s.window_start_ts = time.time()
-        self.s.tracked_side = None
-        self.s.resting_buys = []
-        self.s.placed_limits = []
+        self.s.armed_side = None
+        self.s.next_threshold_idx = 0
+        self.s.resting_orders = []
         self.s.positions = []
         self.s.fills_this_window = 0
+        self.s.last_window_pnl = 0.0
 
-        if self.s.halted:
-            self.broker.log_event(
-                self.name, window.slug, "HALTED",
-                note="Bot is halted — no trades this window",
-            )
-
-    # ---- main tick -------------------------------------------------------
-
-    def on_tick(self, up_bid, up_ask, down_bid, down_ask, seconds_to_close, now=None):
-        if self.s.halted or self.s.window is None:
+        if self.capital.halted:
+            self._log("HALTED", note=f"engine halted (balance ${self.capital.balance:.2f} < $0) -- no trading")
             return
 
-        now = now or time.time()
-        self.s.up_bid = up_bid
-        self.s.up_ask = up_ask
-        self.s.down_bid = down_bid
-        self.s.down_ask = down_ask
+        self._log("WINDOW_OPEN", note=(
+            f"cold start for {config.LADDER_ARM_DELAY_SECONDS}s, then watching for either side "
+            f"to reach {config.LADDER_THRESHOLDS[0]}"
+        ))
 
-        elapsed = now - self.s.window_start_ts
-
-        if self.s.phase == "waiting":
-            if elapsed >= config.WAIT_SECONDS:
-                self.s.phase = "monitoring"
-                self.broker.log_event(
-                    self.name, self.s.window.slug, "MONITORING",
-                    note=(f"{config.WAIT_SECONDS}s elapsed — watching for a side "
-                          f"above {config.BREAKOUT_THRESHOLD}"),
-                )
+    def on_tick(self, up_bid, up_ask, down_bid, down_ask, seconds_to_close: float = None, now: Optional[float] = None):
+        if self.s.window is None or self.capital.halted:
             return
+        now = now if now is not None else time.time()
+        self.s.up_bid, self.s.up_ask = up_bid, up_ask
+        self.s.down_bid, self.s.down_ask = down_bid, down_ask
 
-        if self.s.phase == "monitoring":
-            self._watch_for_breakout()
-            return
+        if now - self.s.window.open_ts < config.LADDER_ARM_DELAY_SECONDS:
+            return  # cold start -- do nothing at all yet
 
-        if self.s.phase in ("ladder",):
-            self._ladder_tick()
-            self._manage_positions()
-            return
+        if self.s.armed_side is None:
+            self._check_arm(now)
+        else:
+            self._check_ladder_extend(now)
+            self._check_rung_fills(now)
+            self._check_exits(now)
 
-    # ---- monitoring ------------------------------------------------------
+    # ---- arm: first side to cross the first threshold -----------------------
 
-    def _watch_for_breakout(self):
+    def _check_arm(self, now: float):
         up_mid = _midpoint(self.s.up_bid, self.s.up_ask)
         down_mid = _midpoint(self.s.down_bid, self.s.down_ask)
+        first_threshold = config.LADDER_THRESHOLDS[0]
+        # deterministic tie-break: UP checked first if both cross the same tick
+        if up_mid is not None and up_mid >= first_threshold:
+            self._arm(Side.UP, now)
+        elif down_mid is not None and down_mid >= first_threshold:
+            self._arm(Side.DOWN, now)
 
-        if up_mid is not None and up_mid >= config.BREAKOUT_THRESHOLD:
-            self._start_ladder(Side.UP, up_mid)
+    def _arm(self, side: Side, now: float):
+        self.s.armed_side = side
+        self._log("ARMED", side=side.value, price=config.LADDER_THRESHOLDS[0],
+                   note=f"{side.value} reached {config.LADDER_THRESHOLDS[0]} -- watching this side only from here")
+        self._place_rung(config.LADDER_THRESHOLDS[0], now)
+        self.s.next_threshold_idx = 1
+
+    # ---- ladder: place a new resting rung each time price climbs a step -----
+
+    def _armed_mid(self) -> Optional[float]:
+        if self.s.armed_side == Side.UP:
+            return _midpoint(self.s.up_bid, self.s.up_ask)
+        return _midpoint(self.s.down_bid, self.s.down_ask)
+
+    def _armed_ask(self) -> Optional[float]:
+        return self.s.up_ask if self.s.armed_side == Side.UP else self.s.down_ask
+
+    def _armed_bid(self) -> Optional[float]:
+        return self.s.up_bid if self.s.armed_side == Side.UP else self.s.down_bid
+
+    def _check_ladder_extend(self, now: float):
+        mid = self._armed_mid()
+        if mid is None:
             return
-        if down_mid is not None and down_mid >= config.BREAKOUT_THRESHOLD:
-            self._start_ladder(Side.DOWN, down_mid)
+        while self.s.next_threshold_idx < len(config.LADDER_THRESHOLDS) and \
+                mid >= config.LADDER_THRESHOLDS[self.s.next_threshold_idx]:
+            self._place_rung(config.LADDER_THRESHOLDS[self.s.next_threshold_idx], now)
+            self.s.next_threshold_idx += 1
+
+    def _place_rung(self, threshold: float, now: float):
+        limit_price = round(threshold - config.LADDER_OFFSET, 4)
+        order = RestingOrder(threshold=threshold, limit_price=limit_price,
+                              shares=config.LADDER_SHARES_PER_RUNG, placed_ts=now)
+        self.s.resting_orders.append(order)
+        self.s.total_rungs_placed += 1
+        self._log("RUNG_PLACED", side=self.s.armed_side.value, price=limit_price,
+                   shares=order.shares,
+                   note=f"{self.s.armed_side.value} crossed {threshold} -- resting limit buy "
+                        f"{order.shares:.0f}sh @ {limit_price}")
+
+    # ---- fills: resting buy fills when the ask pulls back to/through it ----
+
+    def _check_rung_fills(self, now: float):
+        ask = self._armed_ask()
+        if ask is None or not self.s.resting_orders:
             return
-
-    def _start_ladder(self, side: Side, price: float):
-        self.s.tracked_side = side
-        self.s.phase = "ladder"
-        self.broker.log_event(
-            self.name, self.s.window.slug, "LADDER_START",
-            side=side.value, price=price,
-            note=f"tracked {side.value} first above {config.BREAKOUT_THRESHOLD} @ {price:.3f}",
-        )
-        self._place_rung(price)
-
-    def _place_rung(self, current_price: float):
-        limit = current_price - config.LIMIT_OFFSET
-        if limit <= 0:
-            return
-        # place one resting buy per new limit level (dedupe)
-        if any(abs(l - limit) < 1e-9 for l in self.s.placed_limits):
-            return
-        self.s.placed_limits.append(limit)
-        self.s.resting_buys.append(RestingBuy(
-            side=self.s.tracked_side,
-            price=limit,
-            shares=config.SHARES_PER_FILL,
-        ))
-        self.broker.log_event(
-            self.name, self.s.window.slug, "LIMIT_BUY",
-            side=self.s.tracked_side.value, price=limit,
-            shares=config.SHARES_PER_FILL,
-            note=(f"price {current_price:.3f} → limit buy "
-                  f"{config.SHARES_PER_FILL:.0f}sh @ {limit:.3f}"),
-        )
-
-    # ---- ladder tick -----------------------------------------------------
-
-    def _ladder_tick(self):
-        # re-evaluate the tracked side's ask and add new rungs as it rises
-        if self.s.tracked_side == Side.UP:
-            ask = self.s.up_ask
-        else:
-            ask = self.s.down_ask
-        if ask is None:
-            return
-        if ask >= config.BREAKOUT_THRESHOLD:
-            self._place_rung(ask)
-
-        # fill check: a resting buy fills when the tracked side's ASK
-        # walks down to (or through) the limit price
-        for order in list(self.s.resting_buys):
-            if self.s.tracked_side == Side.UP:
-                fill_ref = self.s.up_ask
+        still_resting = []
+        for order in self.s.resting_orders:
+            if ask <= order.limit_price:
+                self._fill_rung(order, now)
             else:
-                fill_ref = self.s.down_ask
-            if fill_ref is not None and fill_ref <= order.price:
-                self._fill_buy(order)
+                still_resting.append(order)
+        self.s.resting_orders = still_resting
 
-    def _fill_buy(self, order: RestingBuy):
-        if order not in self.s.resting_buys:
-            return
-        self.s.resting_buys.remove(order)
-
-        cost = order.shares * order.price
-        self.s.balance -= cost
-        self.s.positions.append(Position(
-            side=order.side,
-            shares=order.shares,
-            entry_price=order.price,
-            cost=cost,
-            tp_price=config.TP_PRICE,
-        ))
+    def _fill_rung(self, order: RestingOrder, now: float):
+        rebate = config.MAKER_REBATE_FRACTION * self.broker.taker_fee_amount(order.shares, order.limit_price)
+        cost = order.shares * order.limit_price - rebate
+        self.capital.balance -= cost
         self.s.fills_this_window += 1
         self.s.total_fills += 1
 
-        self.broker.log_event(
-            self.name, self.s.window.slug, "FILL",
-            side=order.side.value, price=order.price, shares=order.shares,
-            balance_after=self.s.balance,
-            note=(f"limit buy {order.shares:.0f}sh filled @ {order.price:.3f} "
-                  f"— SL {config.SL_PRICE} / TP {config.TP_PRICE}"),
-        )
-
-    # ---- position management (SL / TP) -----------------------------------
-
-    def _manage_positions(self):
-        for pos in list(self.s.positions):
-            if pos.side == Side.UP:
-                bid = self.s.up_bid
-            else:
-                bid = self.s.down_bid
-            if bid is None:
-                continue
-
-            # SL fires immediately if the exit price is at/below 0.50
-            if bid <= config.SL_PRICE:
-                self._close_position(pos, bid, "SL")
-            elif bid >= pos.tp_price:
-                self._close_position(pos, pos.tp_price, "TP")
-
-    def _close_position(self, pos: Position, exit_price: float, reason: str):
-        if pos not in self.s.positions:
+        self._log("RUNG_FILL", side=self.s.armed_side.value, price=order.limit_price, shares=order.shares,
+                   fee=-rebate,
+                   note=(f"pullback to {order.limit_price} filled the {order.threshold} rung -- "
+                         f"{order.shares:.0f}sh @ {order.limit_price} (rebate ${rebate:.4f}) -- "
+                         f"TP {config.LADDER_TP_PRICE}, SL {config.LADDER_SL_PRICE}"))
+        if self.capital.check_halt():
+            self._log("HALTED", note=f"balance ${self.capital.balance:.2f} < $0 -- bankrupt")
             return
-        self.s.positions.remove(pos)
 
-        proceeds = pos.shares * exit_price
+        self.s.positions.append(LadderPosition(
+            threshold=order.threshold, entry_price=order.limit_price,
+            shares=order.shares, cost=cost, entry_ts=now,
+        ))
+
+    # ---- exits: SL (taker) or TP (maker), independent per position ---------
+
+    def _check_exits(self, now: float):
+        if not self.s.positions:
+            return
+        bid = self._armed_bid()
+        if bid is None:
+            return
+        still_open = []
+        for pos in self.s.positions:
+            if bid <= config.LADDER_SL_PRICE:
+                self._close_taker(pos, price=bid, reason="SL_FILL", note_prefix="stop loss hit")
+                self.s.total_sl_fills += 1
+            elif bid >= config.LADDER_TP_PRICE:
+                self._close_maker(pos, price=config.LADDER_TP_PRICE, reason="TP_FILL", note_prefix="TP hit")
+                self.s.total_tp_fills += 1
+            else:
+                still_open.append(pos)
+        self.s.positions = still_open
+
+    def _close_maker(self, pos: LadderPosition, price: float, reason: str, note_prefix: str):
+        rebate = config.MAKER_REBATE_FRACTION * self.broker.taker_fee_amount(pos.shares, price)
+        proceeds = pos.shares * price + rebate
         pnl = proceeds - pos.cost
-        self.s.balance += proceeds
+        self._settle(pos, proceeds, pnl, reason, fee=rebate,
+                      note=f"{note_prefix} (maker): rung {pos.threshold} {pos.shares:.0f}sh sold @ {price} "
+                           f"(entry {pos.entry_price}, rebate ${rebate:.4f}, pnl ${pnl:.4f})")
+
+    def _close_taker(self, pos: LadderPosition, price: float, reason: str, note_prefix: str):
+        fee = self.broker.taker_fee_amount(pos.shares, price)
+        proceeds = pos.shares * price - fee
+        pnl = proceeds - pos.cost
+        self._settle(pos, proceeds, pnl, reason, fee=fee,
+                      note=f"{note_prefix} (taker): rung {pos.threshold} {pos.shares:.0f}sh sold @ {price} "
+                           f"(entry {pos.entry_price}, fee ${fee:.4f}, pnl ${pnl:.4f})")
+
+    def _settle(self, pos: LadderPosition, proceeds: float, pnl: float, reason: str, fee: float, note: str):
+        self.capital.balance += proceeds
         self.s.total_pnl += pnl
-
-        if reason == "SL":
-            self.s.sl_exits += 1
+        self.s.last_window_pnl += pnl
+        if pnl >= 0:
+            self.s.wins += 1
         else:
-            self.s.tp_exits += 1
+            self.s.losses += 1
+        self._log(reason, side=self.s.armed_side.value if self.s.armed_side else None,
+                   price=pos.entry_price, shares=pos.shares, pnl=pnl, fee=fee, note=note)
+        self.capital.check_halt()
 
-        self.broker.log_event(
-            self.name, self.s.window.slug, reason,
-            side=pos.side.value, price=exit_price, shares=pos.shares,
-            pnl=pnl, balance_after=self.s.balance,
-            note=(f"{reason} @ {exit_price:.3f} (entry {pos.entry_price:.3f}): "
-                  f"{'+$' if pnl >= 0 else '-$'}{abs(pnl):.2f}"),
-        )
-
-        if self.s.balance < 0:
-            self._halt()
-
-    # ---- window finalize -------------------------------------------------
+    # ---- window close -------------------------------------------------------
 
     def finalize_window(self, winning_side: Optional[Side]):
-        # settle any positions still open at window close
-        for pos in list(self.s.positions):
-            self.s.positions.remove(pos)
-            won = winning_side is not None and pos.side == winning_side
-            proceeds = pos.shares * (1.0 if won else 0.0)
-            pnl = proceeds - pos.cost
-            self.s.balance += proceeds
-            self.s.total_pnl += pnl
-            event = "RESOLVE_WIN" if won else "RESOLVE_LOSS"
-            self.broker.log_event(
-                self.name, self.s.window.slug, event,
-                side=pos.side.value, shares=pos.shares, pnl=pnl,
-                balance_after=self.s.balance,
-                note=(f"resolution: {'won $1/sh' if won else 'lost $0/sh'} "
-                      f"(entry {pos.entry_price:.3f}, {pos.shares:.0f} shares)"),
-            )
-            if won:
-                self.s.resolution_wins += 1
-            else:
-                self.s.resolution_losses += 1
-            if self.s.balance < 0:
-                self._halt()
+        if self.s.window is None:
+            return
+        window_slug = self.s.window.slug
 
-        if self.s.fills_this_window == 0:
+        if not self.capital.halted and self.s.resting_orders:
+            for order in self.s.resting_orders:
+                self.s.total_cancelled_rungs += 1
+                self._log("RUNG_CANCELLED", side=self.s.armed_side.value if self.s.armed_side else None,
+                           price=order.limit_price,
+                           note=f"window closed -- cancelling unfilled {order.threshold} rung @ {order.limit_price}")
+            self.s.resting_orders = []
+
+        if not self.capital.halted and self.s.positions:
+            bid = self._armed_bid()
+            for pos in list(self.s.positions):
+                close_price = bid if bid is not None else pos.entry_price
+                self._close_taker(pos, price=close_price, reason="FORCED_CLOSE",
+                                   note_prefix="window closed, forced taker close")
+                self.s.total_forced_closes += 1
+            self.s.positions = []
+
+        if not self.capital.halted and self.s.armed_side is None:
             self.s.no_trade_windows += 1
+            self._log("NO_TRADE", note=f"price never reached {config.LADDER_THRESHOLDS[0]} this window -- never armed")
 
-        self.s.equity_curve.append({
-            "window": self.s.window.slug if self.s.window else None,
-            "ts": time.time(),
-            "balance": round(self.s.balance, 2),
-        })
-        if len(self.s.equity_curve) > 500:
-            self.s.equity_curve = self.s.equity_curve[-500:]
+        self.s.window = None
+        self.capital.record_equity_point(window_slug)
 
-        # drop any unused resting buys (they don't carry over)
-        self.s.resting_buys = []
-
-    def _halt(self):
-        self.s.halted = True
-        self.broker.log_event(
-            self.name, self.s.window.slug or "SYS", "HALT",
-            note=f"Balance negative (${self.s.balance:.2f}) — bot halted",
-        )
-
-    # ---- dashboard payload -----------------------------------------------
+    # ---- dashboard payload -------------------------------------------------
 
     def snapshot(self) -> dict:
+        now = time.time()
+        bid = self._armed_bid() if self.s.armed_side else None
+
+        resting_orders = [{
+            "threshold": o.threshold, "limit_price": o.limit_price, "shares": o.shares,
+            "seconds_resting": round(now - o.placed_ts, 1),
+        } for o in self.s.resting_orders]
+
         open_positions = []
         unrealized_pnl = 0.0
         open_market_value = 0.0
-
         for pos in self.s.positions:
-            if pos.side == Side.UP:
-                mark = self.s.up_bid
-            else:
-                mark = self.s.down_bid
-            mark_for_calc = mark if mark is not None else pos.entry_price
-            market_value = pos.shares * mark_for_calc
-            pos_unrealized = market_value - pos.cost
-            unrealized_pnl += pos_unrealized
+            mark = bid if bid is not None else pos.entry_price
+            market_value = pos.shares * mark
+            pos_pnl = market_value - pos.cost
+            unrealized_pnl += pos_pnl
             open_market_value += market_value
             open_positions.append({
-                "side": pos.side.value,
-                "entry_price": pos.entry_price,
-                "shares": pos.shares,
-                "cost": round(pos.cost, 4),
-                "tp_price": pos.tp_price,
-                "mark_price": mark,
-                "unrealized_pnl": round(pos_unrealized, 4),
+                "threshold": pos.threshold, "entry_price": pos.entry_price, "shares": pos.shares,
+                "cost": round(pos.cost, 4), "mark_price": mark, "unrealized_pnl": round(pos_pnl, 4),
+                "seconds_since_entry": round(now - pos.entry_ts, 1),
             })
 
+        realized_pnl = round(self.s.total_pnl, 4)
+        next_threshold = (config.LADDER_THRESHOLDS[self.s.next_threshold_idx]
+                           if self.s.next_threshold_idx < len(config.LADDER_THRESHOLDS) else None)
+
+        if self.capital.halted:
+            status = "halted"
+        elif self.s.positions:
+            status = "open"
+        elif self.s.resting_orders:
+            status = "resting"
+        elif self.s.armed_side:
+            status = "armed"
+        else:
+            status = "waiting"
+
         return {
-            "balance": round(self.s.balance, 2),
+            "engine": "LADDER", "label": "Ladder breakout 0.75 / 0.85 / 0.95",
+
+            "balance": round(self.capital.balance, 2),
             "starting_capital": config.STARTING_CAPITAL,
-            "halted": self.s.halted,
-            "equity_curve": self.s.equity_curve,
-            "realized_pnl": round(self.s.total_pnl, 4),
+            "halted": self.capital.halted,
+            "equity_curve": self.capital.equity_curve,
+            "equity": round(self.capital.balance + open_market_value, 4),
+
+            "realized_pnl": realized_pnl,
             "unrealized_pnl": round(unrealized_pnl, 4),
-            "equity": round(self.s.balance + open_market_value, 4),
-            "phase": self.s.phase,
-            "tracked_side": self.s.tracked_side.value if self.s.tracked_side else None,
-            "pending_buys": [
-                {"side": o.side.value, "price": o.price, "shares": o.shares}
-                for o in self.s.resting_buys
-            ],
+            "open_market_value": round(open_market_value, 4),
+            "last_window_pnl": round(self.s.last_window_pnl, 4),
+
+            "armed_side": self.s.armed_side.value if self.s.armed_side else None,
+            "next_threshold": next_threshold,
+            "resting_orders": resting_orders,
             "open_positions": open_positions,
+
             "fills_this_window": self.s.fills_this_window,
-            "sl_exits": self.s.sl_exits,
-            "tp_exits": self.s.tp_exits,
+            "total_rungs_placed": self.s.total_rungs_placed,
             "total_fills": self.s.total_fills,
+            "total_tp_fills": self.s.total_tp_fills,
+            "total_sl_fills": self.s.total_sl_fills,
+            "total_forced_closes": self.s.total_forced_closes,
+            "total_cancelled_rungs": self.s.total_cancelled_rungs,
             "no_trade_windows": self.s.no_trade_windows,
-            "resolution_wins": self.s.resolution_wins,
-            "resolution_losses": self.s.resolution_losses,
-            "status": ("halted" if self.s.halted else self.s.phase),
+            "wins": self.s.wins,
+            "losses": self.s.losses,
+            "win_rate": round(100 * self.s.wins / (self.s.wins + self.s.losses), 1) if (self.s.wins + self.s.losses) else None,
+
+            "status": status,
+
             "def": {
-                "wait_seconds": config.WAIT_SECONDS,
-                "breakout_threshold": config.BREAKOUT_THRESHOLD,
-                "limit_offset": config.LIMIT_OFFSET,
-                "shares_per_fill": config.SHARES_PER_FILL,
-                "sl_price": config.SL_PRICE,
-                "tp_price": config.TP_PRICE,
+                "arm_delay_seconds": config.LADDER_ARM_DELAY_SECONDS,
+                "thresholds": config.LADDER_THRESHOLDS,
+                "offset": config.LADDER_OFFSET,
+                "sl_price": config.LADDER_SL_PRICE,
+                "tp_price": config.LADDER_TP_PRICE,
+                "shares_per_rung": config.LADDER_SHARES_PER_RUNG,
             },
         }
