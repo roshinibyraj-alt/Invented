@@ -122,6 +122,20 @@
   .log-row .ev.CONFUSED_DETECTED{color:var(--purple);} .log-row .ev.HALTED{color:var(--down);}
   .log-row .note{color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
   .log-row .pnl{font-weight:700;}
+
+  .rung-loss-grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px;}
+  .rung-loss-box{background:var(--panel-3); border:1px solid var(--border); border-radius:10px; padding:12px 14px;}
+  .rung-loss-box .k{font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; font-weight:600;}
+  .rung-loss-box .max-val{font-family:var(--mono); font-size:26px; font-weight:800; margin-top:4px; color:var(--amber);}
+  .rung-loss-box .max-val.zero{color:var(--text);}
+  .rung-loss-box .sub{font-size:10px; color:var(--faint); margin-top:1px;}
+  .rung-loss-box .cur{font-family:var(--mono); font-size:11px; color:var(--muted); margin-top:8px; padding-top:8px; border-top:1px solid var(--border);}
+
+  .equity-wrap{position:relative;}
+  .equity-svg{width:100%; height:220px; display:block;}
+  .equity-summary{display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px; margin-top:10px;
+    font-family:var(--mono); font-size:11px; color:var(--muted);}
+  .equity-summary b{color:var(--text);}
 </style>
 </head>
 <body>
@@ -180,6 +194,19 @@
       </div>
     </div>
     <div class="band-note" id="bandNote"></div>
+  </div>
+
+  <div class="card">
+    <h2>All-time equity curve</h2>
+    <div class="equity-wrap">
+      <svg class="equity-svg" id="equityChart" viewBox="0 0 1000 220" preserveAspectRatio="none"></svg>
+    </div>
+    <div class="equity-summary" id="equitySummary"></div>
+  </div>
+
+  <div class="card">
+    <h2>Max loss streak by rung</h2>
+    <div class="rung-loss-grid" id="rungLossGrid"></div>
   </div>
 
   <div class="two-col">
@@ -306,6 +333,8 @@ async function poll(){
         (losses ${rs.loss_streak||0}/${rs.double_threshold||'-'})</div></div>`;
       }).join('') + `<div class="def-item"><div class="k">TP (all fills)</div><div class="v">flat ${def.tp_price}</div></div>`;
     }
+    renderRungLossTracker(rungState, def.ladder_levels || []);
+    renderEquityCurve(e.equity_curve || []);
 
     const upPositions = (e.open_positions||[]).filter(p=>p.side==='up');
     const downPositions = (e.open_positions||[]).filter(p=>p.side==='down');
@@ -346,6 +375,69 @@ async function poll(){
     $('statusDot').className = 'dot err';
     $('statusText').textContent = 'disconnected';
   }
+}
+
+function renderRungLossTracker(rungState, ladderLevels){
+  const grid = $('rungLossGrid');
+  if(!ladderLevels.length){
+    grid.innerHTML = '<div class="empty">no rungs configured</div>';
+    return;
+  }
+  grid.innerHTML = ladderLevels.map(l => {
+    const rs = rungState[String(l.price)] || {};
+    const max = rs.max_loss_streak || 0;
+    const cur = rs.loss_streak || 0;
+    return `
+      <div class="rung-loss-box">
+        <div class="k">Rung ${l.price}</div>
+        <div class="max-val ${max===0?'zero':''}">${max}</div>
+        <div class="sub">max consecutive losses so far</div>
+        <div class="cur">current streak ${cur}/${rs.double_threshold||'-'} &middot; size ${rs.multiplier||1}x</div>
+      </div>`;
+  }).join('');
+}
+
+function renderEquityCurve(curve){
+  const svg = $('equityChart');
+  const summary = $('equitySummary');
+  if(!curve || curve.length < 2){
+    svg.innerHTML = '<text x="500" y="110" text-anchor="middle" fill="var(--faint)" font-size="13" font-family="monospace">not enough data yet — waiting on the first window to close</text>';
+    summary.innerHTML = '';
+    return;
+  }
+  const w = 1000, h = 220, padL = 60, padR = 12, padT = 16, padB = 24;
+  const balances = curve.map(p => p.balance);
+  const minB = Math.min(...balances), maxB = Math.max(...balances);
+  const range = (maxB - minB) || 1;
+  const x = i => padL + (i / (curve.length - 1)) * (w - padL - padR);
+  const y = b => padT + (1 - (b - minB) / range) * (h - padT - padB);
+
+  const first = curve[0].balance, last = curve[curve.length - 1].balance;
+  const up = last >= first;
+  const color = up ? 'var(--up)' : 'var(--down)';
+
+  const linePts = curve.map((p, i) => `${x(i)},${y(p.balance)}`).join(' ');
+  const areaPts = `${x(0)},${y(minB)} ${linePts} ${x(curve.length - 1)},${y(minB)}`;
+
+  svg.innerHTML = `
+    <line x1="${padL}" y1="${y(first)}" x2="${w - padR}" y2="${y(first)}"
+      stroke="var(--faint)" stroke-dasharray="3,3" stroke-width="1"/>
+    <polygon points="${areaPts}" fill="${color}" opacity="0.10"/>
+    <polyline points="${linePts}" fill="none" stroke="${color}" stroke-width="2.2"/>
+    <text x="${padL - 6}" y="${y(maxB) + 4}" text-anchor="end" fill="var(--muted)" font-size="10" font-family="monospace">${fmt$(maxB)}</text>
+    <text x="${padL - 6}" y="${y(minB) + 4}" text-anchor="end" fill="var(--muted)" font-size="10" font-family="monospace">${fmt$(minB)}</text>
+    <text x="${padL}" y="${h - 6}" fill="var(--faint)" font-size="9" font-family="monospace">${new Date(curve[0].ts * 1000).toLocaleString()}</text>
+    <text x="${w - padR}" y="${h - 6}" text-anchor="end" fill="var(--faint)" font-size="9" font-family="monospace">${new Date(curve[curve.length - 1].ts * 1000).toLocaleString()}</text>
+  `;
+
+  const delta = last - first;
+  summary.innerHTML = `
+    <span>start <b>${fmt$(first)}</b></span>
+    <span>current <b class="${delta>=0?'':''}" style="color:${up?'var(--up)':'var(--down)'}">${fmt$(last)}</b></span>
+    <span>high <b>${fmt$(maxB)}</b></span>
+    <span>low <b>${fmt$(minB)}</b></span>
+    <span>${curve.length} points (all-time)</span>
+  `;
 }
 
 function renderLog(entries){

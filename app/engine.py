@@ -84,6 +84,9 @@ class EngineState:
     # per-rung martingale state -- ENGINE-LIFETIME, not reset per window
     rung_loss_streak: Dict[float, int] = field(default_factory=dict)
     rung_multiplier: Dict[float, int] = field(default_factory=dict)
+    # high-water mark of rung_loss_streak per rung -- never resets on a win,
+    # tracks the worst consecutive-loss run that rung has ever had
+    rung_max_loss_streak: Dict[float, int] = field(default_factory=dict)
 
     fills_this_window: int = 0
     tp_fills_this_window: int = 0
@@ -110,6 +113,12 @@ class Engine:
         for price, _ in config.LADDER_LEVELS:
             self.s.rung_loss_streak[price] = 0
             self.s.rung_multiplier[price] = 1
+            self.s.rung_max_loss_streak[price] = 0
+        # starting point for the all-time equity curve, so the chart has a
+        # baseline before the first window even closes
+        self.s.equity_curve.append({
+            "window": None, "ts": time.time(), "balance": round(self.s.balance, 2),
+        })
 
     def reset_for_window(self, window: WindowMarket):
         self.s.window = window
@@ -286,8 +295,10 @@ class Engine:
                 )
         else:
             self.s.rung_loss_streak[rung_price] += 1
-            threshold = config.RUNG_LOSS_DOUBLE_THRESHOLDS.get(rung_price)
             streak = self.s.rung_loss_streak[rung_price]
+            if streak > self.s.rung_max_loss_streak.get(rung_price, 0):
+                self.s.rung_max_loss_streak[rung_price] = streak
+            threshold = config.RUNG_LOSS_DOUBLE_THRESHOLDS.get(rung_price)
             if threshold and streak % threshold == 0:
                 old_mult = self.s.rung_multiplier[rung_price]
                 self.s.rung_multiplier[rung_price] = old_mult * 2
@@ -399,7 +410,10 @@ class Engine:
             "balance": round(self.s.balance, 2),
             "starting_capital": config.STARTING_CAPITAL,
             "halted": self.s.halted,
-            "equity_curve": self.s.equity_curve[-150:],
+            # all-time (engine-lifetime) equity curve -- one point at engine
+            # start plus one per window close; capped at 500 points total
+            # (see _record_equity_point), so this is already the full history
+            "equity_curve": self.s.equity_curve,
 
             "realized_pnl": round(self.s.total_pnl, 4),
             "unrealized_pnl": round(unrealized_pnl, 4),
@@ -436,6 +450,7 @@ class Engine:
                     "multiplier": self.s.rung_multiplier.get(price, 1),
                     "current_shares": base_shares * self.s.rung_multiplier.get(price, 1),
                     "loss_streak": self.s.rung_loss_streak.get(price, 0),
+                    "max_loss_streak": self.s.rung_max_loss_streak.get(price, 0),
                     "double_threshold": config.RUNG_LOSS_DOUBLE_THRESHOLDS.get(price),
                 }
                 for price, base_shares in config.LADDER_LEVELS
