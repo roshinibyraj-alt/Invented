@@ -155,7 +155,7 @@
   <header>
     <div>
       <h1>Ladder breakout</h1>
-      <div class="sub">BTC 5m up/down — 60s cold start, arm @0.75, ladder rungs @0.75/0.85/0.95, SL 0.50, TP 0.99</div>
+      <div class="sub">BTC 5m up/down — 60s cold start, arm @0.65, ladder rungs @0.65/0.75/0.85 (at mid), SL 0.50, TP 0.99</div>
     </div>
     <div class="status-pill"><span class="dot" id="statusDot"></span><span id="statusText">connecting</span></div>
   </header>
@@ -185,7 +185,7 @@
       <div class="gauge-bidask"><span id="downBidAsk">bid — / ask —</span></div>
     </div>
     <div class="gauge-legend">
-      <span><i style="background:var(--amber);"></i>0.75 / 0.85 / 0.95 thresholds</span>
+      <span><i style="background:var(--amber);"></i>0.65 / 0.75 / 0.85 thresholds (entries placed at mid)</span>
       <span><i style="background:var(--coral);"></i>0.50 stop loss</span>
       <span><i style="background:var(--mint);"></i>0.99 take profit</span>
     </div>
@@ -226,7 +226,7 @@ const fmt$ = v => (v==null ? '—' : (v<0?'-$':'$') + Math.abs(Number(v)).toFixe
 const fmtP = v => (v==null ? '—' : Number(v).toFixed(3));
 const fmtSh = v => (v==null ? '0' : Number(v).toFixed(0));
 const pnlClass = v => (v>0.005?'pos':(v<-0.005?'neg':''));
-const THRESHOLDS = [0.75, 0.85, 0.95];
+const THRESHOLDS = [0.65, 0.75, 0.85];
 const SL_PRICE = 0.50, TP_PRICE = 0.99;
 
 function renderGauge(trackId, midId, bidAskId, sideLblId, side, bid, ask, isArmed, nextThresholdIdx, gaugeElId, isTheArmedSide){
@@ -315,14 +315,14 @@ function renderEngineCard(e){
   const el = $('engineCard');
   if(!e || !e.def){ el.innerHTML = '<div class="empty">no data</div>'; return; }
   const statusLabels = {
-    waiting:'watching for 0.75', armed:'armed, watching for pullback', resting:'orders resting',
+    waiting:'watching for 0.65', armed:'armed, entries at mid', resting:'orders resting',
     open:'position(s) open', halted:'halted',
   };
 
   const defRowsHtml = [
     ['Cold start', `${e.def.arm_delay_seconds}s`],
     ['Thresholds', e.def.thresholds.join(' / ')],
-    ['Rung offset', `-${fmtP(e.def.offset)}`],
+    ['Entry style', 'at mid, no offset'],
     ['SL / TP', `${fmtP(e.def.sl_price)} / ${fmtP(e.def.tp_price)}`],
     ['Shares / rung', fmtSh(e.def.shares_per_rung)],
     ['Armed side', e.armed_side || '—'],

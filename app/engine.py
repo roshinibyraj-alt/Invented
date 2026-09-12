@@ -1,11 +1,11 @@
 """
-Trading engine -- ladder breakout with pullback limit entries.
+Trading engine -- ladder breakout with immediate at-mid limit entries.
 
 See app/config.py for the full strategy write-up. Summary: sit out the
-first minute of each window, then watch for either side to break 0.75.
-Once armed, place a resting limit buy 0.10 below every threshold
-(0.75/0.85/0.95) the price climbs through. Each fill is its own 100-share
-position with a shared SL (0.50) and TP (0.99).
+first minute of each window, then watch for either side to break 0.65.
+Once armed, place a resting limit buy right at the current mid the
+instant price climbs through each threshold (0.65/0.75/0.85). Each fill
+is its own 100-share position with a shared SL (0.50) and TP (0.99).
 """
 import time
 from dataclasses import dataclass, field
@@ -52,7 +52,7 @@ class CapitalPool:
 @dataclass
 class RestingOrder:
     threshold: float      # the price level whose crossing placed this rung
-    limit_price: float    # threshold - LADDER_OFFSET
+    limit_price: float    # placed at the mid price when this rung's threshold was crossed
     shares: float
     placed_ts: float
 
@@ -161,9 +161,10 @@ class Engine:
 
     def _arm(self, side: Side, now: float):
         self.s.armed_side = side
-        self._log("ARMED", side=side.value, price=config.LADDER_THRESHOLDS[0],
+        mid = self._armed_mid()
+        self._log("ARMED", side=side.value, price=mid,
                    note=f"{side.value} reached {config.LADDER_THRESHOLDS[0]} -- watching this side only from here")
-        self._place_rung(config.LADDER_THRESHOLDS[0], now)
+        self._place_rung(config.LADDER_THRESHOLDS[0], mid, now)
         self.s.next_threshold_idx = 1
 
     # ---- ladder: place a new resting rung each time price climbs a step -----
@@ -185,11 +186,11 @@ class Engine:
             return
         while self.s.next_threshold_idx < len(config.LADDER_THRESHOLDS) and \
                 mid >= config.LADDER_THRESHOLDS[self.s.next_threshold_idx]:
-            self._place_rung(config.LADDER_THRESHOLDS[self.s.next_threshold_idx], now)
+            self._place_rung(config.LADDER_THRESHOLDS[self.s.next_threshold_idx], mid, now)
             self.s.next_threshold_idx += 1
 
-    def _place_rung(self, threshold: float, now: float):
-        limit_price = round(threshold - config.LADDER_OFFSET, 4)
+    def _place_rung(self, threshold: float, mid_price: float, now: float):
+        limit_price = round(mid_price, 4)  # placed immediately at the current mid, no offset
         order = RestingOrder(threshold=threshold, limit_price=limit_price,
                               shares=config.LADDER_SHARES_PER_RUNG, placed_ts=now)
         self.s.resting_orders.append(order)
@@ -197,7 +198,7 @@ class Engine:
         self._log("RUNG_PLACED", side=self.s.armed_side.value, price=limit_price,
                    shares=order.shares,
                    note=f"{self.s.armed_side.value} crossed {threshold} -- resting limit buy "
-                        f"{order.shares:.0f}sh @ {limit_price}")
+                        f"{order.shares:.0f}sh @ {limit_price} (placed at current mid)")
 
     # ---- fills: resting buy fills when the ask pulls back to/through it ----
 
@@ -355,7 +356,7 @@ class Engine:
             status = "waiting"
 
         return {
-            "engine": "LADDER", "label": "Ladder breakout 0.75 / 0.85 / 0.95",
+            "engine": "LADDER", "label": "Ladder breakout 0.65 / 0.75 / 0.85",
 
             "balance": round(self.capital.balance, 2),
             "starting_capital": config.STARTING_CAPITAL,
@@ -390,7 +391,6 @@ class Engine:
             "def": {
                 "arm_delay_seconds": config.LADDER_ARM_DELAY_SECONDS,
                 "thresholds": config.LADDER_THRESHOLDS,
-                "offset": config.LADDER_OFFSET,
                 "sl_price": config.LADDER_SL_PRICE,
                 "tp_price": config.LADDER_TP_PRICE,
                 "shares_per_rung": config.LADDER_SHARES_PER_RUNG,
