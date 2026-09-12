@@ -13,6 +13,12 @@ Single engine -- one position at a time, re-armed after every stop out:
      shares, taker, priced against real book depth. The other side is
      not bought. (Tie-break if both cross in the same tick: UP checked
      first, same convention as the old ladder engine.)
+     Entries do NOT chase: if a side's mid has already jumped past
+     TRAIL_ARM_PRICE + ENTRY_MAX_CHASE (e.g. a gap between polls skips
+     straight from 0.55 to 0.84), that tick is skipped entirely -- no
+     buy. The engine keeps watching and will only enter once that
+     side's price comes back down into the [0.60, 0.62] band, i.e. a
+     real pullback to ~0.60, not a chase of wherever price ran to.
   3. Trailing stop: since entry only ever happens right as price
      crosses 0.60, the stop loss is armed immediately on entry at 0.50
      (0.60 - TRAIL_STEP). From there it trails the price up in
@@ -76,6 +82,18 @@ TRAIL_ARM_PRICE = 0.60      # price level that triggers entry AND arms the trail
 TRAIL_STEP = 0.10           # both the trailing increment and the initial SL offset below TRAIL_ARM_PRICE
 TP_PRICE = 0.99             # take profit, active from the moment of entry
 REARM_COOLDOWN_SECONDS = 10.0  # after a trailing-stop exit, wait this long before watching for the next 0.60 cross again
+
+# ENTRY_MAX_CHASE: entries only fire when mid-price is between
+# TRAIL_ARM_PRICE and TRAIL_ARM_PRICE + ENTRY_MAX_CHASE. Without this
+# cap, a fast move or a gap between polls (POLL_INTERVAL_SECONDS) can
+# jump straight from well below 0.60 to something like 0.84 -- the raw
+# `mid >= TRAIL_ARM_PRICE` check has no upper bound, so it would chase
+# and buy right at 0.84 instead of the intended "buy right as price
+# touches 0.60". With this cap, an overshoot past the band is skipped
+# entirely (no buy) and the engine keeps watching -- it will only enter
+# once that side's price comes back down into the band, i.e. a real
+# pullback to ~0.60, not a chase of wherever price already ran to.
+ENTRY_MAX_CHASE = 0.02
 
 # ---- Time-based window filters -----------------------------------------
 # ENTRY_LOCKOUT_SECONDS: no entries in the first N seconds of a window --

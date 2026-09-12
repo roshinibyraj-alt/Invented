@@ -127,6 +127,12 @@ class EngineState:
     entries_this_window: int = 0     # per-window only, used for the NO_TRADE check below
     rearms_this_window: int = 0      # per-window only, used for the REARMED log note
 
+    # True while a side's mid is currently above the entry-chase band
+    # (see config.ENTRY_MAX_CHASE) -- used to log the "waiting for
+    # pullback" note once per overshoot episode instead of every tick.
+    up_chasing: bool = False
+    down_chasing: bool = False
+
 
 class Engine:
     """One-way re-arming trailing-stop engine, driven off its own
@@ -233,16 +239,42 @@ class Engine:
             cost += remaining * worst_price
         return cost / shares
 
-    # ---- entry: first side to reach TRAIL_ARM_PRICE ------------------------
+    # ---- entry: first side to reach TRAIL_ARM_PRICE, but don't chase --------
 
     def _check_entry(self, now: float):
         up_mid = self._mid_for(Side.UP)
         down_mid = self._mid_for(Side.DOWN)
         # deterministic tie-break: UP checked first if both cross the same tick
-        if up_mid is not None and up_mid >= config.TRAIL_ARM_PRICE:
-            self._enter(Side.UP, now)
-        elif down_mid is not None and down_mid >= config.TRAIL_ARM_PRICE:
-            self._enter(Side.DOWN, now)
+        if up_mid is not None and self._try_entry_side(Side.UP, up_mid, now):
+            return
+        if down_mid is not None:
+            self._try_entry_side(Side.DOWN, down_mid, now)
+
+    def _try_entry_side(self, side: Side, mid: float, now: float) -> bool:
+        """Returns True if an entry was taken (or attempted) on this
+        side this tick, so the caller can skip checking the other side."""
+        band_lo = config.TRAIL_ARM_PRICE
+        band_hi = round(config.TRAIL_ARM_PRICE + config.ENTRY_MAX_CHASE, 4)
+        chasing_flag = "up_chasing" if side == Side.UP else "down_chasing"
+
+        if mid < band_lo:
+            setattr(self.s, chasing_flag, False)
+            return False
+
+        if mid > band_hi:
+            # overshot the band -- don't chase, just keep watching for a
+            # pullback. Only log the first tick of each overshoot episode.
+            if not getattr(self.s, chasing_flag):
+                setattr(self.s, chasing_flag, True)
+                self._log("NO_ENTRY_CHASE", side=side.value, price=mid,
+                           note=(f"{side.value} mid jumped to {mid:.4f}, past the "
+                                 f"{band_lo:.2f}-{band_hi:.2f} entry band -- not chasing, "
+                                 f"waiting for a pullback to {config.TRAIL_ARM_PRICE}"))
+            return False
+
+        setattr(self.s, chasing_flag, False)
+        self._enter(side, now)
+        return True
 
     def _enter(self, side: Side, now: float):
         ask = self._ask_for(side)
@@ -516,5 +548,6 @@ class Engine:
                 "tp_price": config.TP_PRICE,
                 "entry_lockout_seconds": config.ENTRY_LOCKOUT_SECONDS,
                 "force_sell_after_seconds": config.FORCE_SELL_AFTER_SECONDS,
+                "entry_max_chase": config.ENTRY_MAX_CHASE,
             },
         }

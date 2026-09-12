@@ -306,7 +306,7 @@ function renderEngineCard(e){
   };
 
   const defRowsHtml = [
-    ['Entry', 'first side to reach 0.60'],
+    ['Entry', `first side to reach 0.60, no chase past +${e.def.entry_max_chase}`],
     ['Entry lockout', `first ${fmtSec(e.def.entry_lockout_seconds)} of window`],
     ['Shares / entry', fmtSh(e.def.shares_per_side)],
     ['Trail arms at', fmtP(e.def.trail_arm_price)],
