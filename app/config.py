@@ -25,6 +25,13 @@ Single engine -- one position at a time, re-armed after every stop out:
      repeat any number of times within a single window. If TP hits
      instead, the engine does NOT re-arm -- no more entries for the
      rest of that window.
+     A trailing stop can itself fire right at 0.60 (e.g. price ran to
+     0.70+, trail_sl ratcheted to 0.60, then pulled back). Watching
+     for entries again the instant that fill lands would immediately
+     re-trigger the same 0.60 cross that just stopped it out. To avoid
+     that contradiction, re-arming is delayed REARM_COOLDOWN_SECONDS
+     (10s) after every trailing-stop exit before the engine resumes
+     watching for the next entry.
   6. All fills (entry, trailing SL, TP, forced close) are TAKER orders,
      priced by walking the real order book depth needed to cover the
      full size, not just the single best bid/ask -- see
@@ -58,6 +65,7 @@ SHARES_PER_SIDE = 300.0     # flat size, every entry
 TRAIL_ARM_PRICE = 0.60      # price level that triggers entry AND arms the trailing stop
 TRAIL_STEP = 0.10           # both the trailing increment and the initial SL offset below TRAIL_ARM_PRICE
 TP_PRICE = 0.99             # take profit, active from the moment of entry
+REARM_COOLDOWN_SECONDS = 10.0  # after a trailing-stop exit, wait this long before watching for the next 0.60 cross again
 
 # Demo capital: single source of truth for the paper balance -- debited
 # on every buy fill, credited on every TP/SL/forced-close settlement.

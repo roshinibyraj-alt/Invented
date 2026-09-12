@@ -80,6 +80,7 @@
   .status-badge.open{background:var(--mint-dim); color:var(--mint);}
   .status-badge.done{background:var(--violet-dim); color:var(--violet);}
   .status-badge.halted{background:var(--coral-dim); color:var(--coral);}
+  .status-badge.cooldown{background:var(--violet-dim); color:var(--violet);}
   .rearm-banner{background:var(--violet-dim); border:1px solid var(--violet); color:var(--violet);
     font-size:11px; font-family:var(--mono); font-weight:600; padding:8px 12px; border-radius:9px; margin-bottom:14px;}
 
@@ -298,6 +299,7 @@ function renderEngineCard(e){
   const statusLabels = {
     watching:'watching both sides for 0.60', open:'position open, trailing',
     done:'TP hit — done for this window', halted:'halted',
+    cooldown:`cooling down (${e.cooldown_seconds_left ?? '?'}s)`,
   };
 
   const defRowsHtml = [
@@ -340,7 +342,12 @@ function renderEngineCard(e){
         </div>
       </div>`;
   } else {
-    posHtml = `<div class="position-box empty">${e.done_for_window ? 'no open position — done for this window' : 'no open position — watching for 0.60'}</div>`;
+    const emptyMsg = e.done_for_window
+      ? 'no open position — done for this window'
+      : (e.status === 'cooldown'
+          ? `no open position — cooling down ${e.cooldown_seconds_left}s before watching again`
+          : 'no open position — watching for 0.60');
+    posHtml = `<div class="position-box empty">${emptyMsg}</div>`;
   }
 
   el.innerHTML = `

@@ -5,12 +5,16 @@ See app/config.py for the full strategy write-up. Summary: no cold
 start. Watch both sides' mid-price; the instant either one reaches 0.60,
 buy that side (taker, real depth-weighted price) and immediately arm a
 trailing stop at 0.50, ratcheting up 0.10 at a time as price climbs.
-If the trailing stop hits, the position closes and the engine goes
-right back to watching both sides for the next 0.60 cross -- this can
-repeat any number of times in a window. If TP (0.99) hits instead, the
-engine stops re-arming for the rest of that window. All fills are taker
-orders priced by walking real order-book depth (see
-_realistic_fill_price), not just the top-of-book quote.
+If the trailing stop hits, the position closes and, after a
+REARM_COOLDOWN_SECONDS (10s) pause, the engine goes right back to
+watching both sides for the next 0.60 cross -- this can repeat any
+number of times in a window. The cooldown exists because a trailing
+stop can itself fire exactly at 0.60 (ratcheted up from an earlier
+run to 0.70+, then pulled back), and re-watching immediately would
+re-trigger on that same 0.60 cross the stop just exited on. If TP
+(0.99) hits instead, the engine stops re-arming for the rest of that
+window. All fills are taker orders priced by walking real order-book
+depth (see _realistic_fill_price), not just the top-of-book quote.
 """
 import time
 from dataclasses import dataclass, field
@@ -89,6 +93,7 @@ class EngineState:
 
     position: Optional[Position] = None
     done_for_window: bool = False   # set True after a TP hit -- no more entries this window
+    rearm_at: float = 0.0           # monotonic ts; entries are blocked until now >= this (post trailing-stop cooldown)
 
     fills_this_window: int = 0
     last_window_pnl: float = 0.0
@@ -151,7 +156,7 @@ class Engine:
 
         if self.s.position is not None:
             self._check_exit(now)
-        elif not self.s.done_for_window:
+        elif not self.s.done_for_window and now >= self.s.rearm_at:
             self._check_entry(now)
 
     # ---- price/level lookups ----------------------------------------------
@@ -265,16 +270,16 @@ class Engine:
             return
 
         if bid >= config.TP_PRICE:
-            self._try_close(pos, trigger_bid=bid, reason="TP_FILL", note_prefix="take profit hit", rearm=False)
+            self._try_close(pos, trigger_bid=bid, reason="TP_FILL", note_prefix="take profit hit", rearm=False, now=now)
             return
 
         if bid <= pos.trail_sl:
-            self._try_close(pos, trigger_bid=bid, reason="SL_FILL", note_prefix="trailing stop hit", rearm=True)
+            self._try_close(pos, trigger_bid=bid, reason="SL_FILL", note_prefix="trailing stop hit", rearm=True, now=now)
             return
 
         self._advance_trail(pos, bid)
 
-    def _try_close(self, pos: Position, trigger_bid: float, reason: str, note_prefix: str, rearm: bool):
+    def _try_close(self, pos: Position, trigger_bid: float, reason: str, note_prefix: str, rearm: bool, now: float):
         """A trigger condition (TP or trailing SL) has been met based on
         the top-of-book bid. The actual fill is priced against real book
         depth, which can be materially worse than that trigger price if
@@ -299,9 +304,11 @@ class Engine:
 
         if rearm:
             self.s.total_rearms += 1
+            self.s.rearm_at = now + config.REARM_COOLDOWN_SECONDS
             self._log("REARMED", note=(
-                f"trailing stop closed it out -- watching both sides again for the next "
-                f"{config.TRAIL_ARM_PRICE} cross ({self.s.total_rearms} rearm(s) this window)"
+                f"trailing stop closed it out -- cooling down {config.REARM_COOLDOWN_SECONDS:.0f}s before "
+                f"watching both sides again for the next {config.TRAIL_ARM_PRICE} cross "
+                f"({self.s.total_rearms} rearm(s) this window)"
             ))
         else:
             self.s.done_for_window = True
@@ -412,12 +419,16 @@ class Engine:
         open_market_value = payload["shares"] * payload["mark_price"] if payload else 0.0
         realized_pnl = round(self.s.total_pnl, 4)
 
+        now = time.time()
+        cooling_down = self.s.rearm_at > now
         if self.capital.halted:
             status = "halted"
         elif payload:
             status = "open"
         elif self.s.done_for_window:
             status = "done"
+        elif cooling_down:
+            status = "cooldown"
         else:
             status = "watching"
 
@@ -438,6 +449,7 @@ class Engine:
             "position": payload,
             "open_positions": open_positions,
             "done_for_window": self.s.done_for_window,
+            "cooldown_seconds_left": round(max(0.0, self.s.rearm_at - now), 1) if cooling_down else 0.0,
 
             "fills_this_window": self.s.fills_this_window,
             "total_entries": self.s.total_entries,
