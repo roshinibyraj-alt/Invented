@@ -1,49 +1,39 @@
-# Ladder breakout — BTC 5m bot
+# Dual-entry trailing stop — BTC 5m bot
 
 Paper-trading bot for Polymarket's `btc-updown-5m-*` markets. Runs a
-single ladder-breakout strategy with immediate at-mid limit entries.
+single strategy: buy both sides immediately at window open, then trail
+a stop independently on whichever side moves into its favor.
 
 ## Strategy
 
-1. **Cold start**: do nothing for the first 60 seconds of each window —
-   no monitoring, no orders.
-2. **Arm**: after the cold start, watch both sides' mid-price every
-   tick. Whichever side's mid-price first reaches 0.65 becomes the
-   **armed side** for the rest of that window — the other side is no
-   longer watched (they're complementary; once one is rallying the
-   other's falling).
-3. **Ladder**: every time the armed side's mid-price climbs through the
-   next threshold (0.65 → 0.75 → 0.85), place one new resting limit BUY
-   order (maker) *immediately, right at that tick's current mid price* —
-   not offset below it:
-   - crosses 0.65 → resting buy @ (mid at that tick, ~0.65)
-   - crosses 0.75 → resting buy @ (mid at that tick, ~0.75)
-   - crosses 0.85 → resting buy @ (mid at that tick, ~0.85)
+1. **Entry**: the instant a window is live, fire an immediate **taker**
+   buy of 300 shares on **both** the UP token and the DOWN token. No
+   cold start, no waiting on any price level — both sides go on right
+   away, each becoming its own independent position.
+2. **No stop loss to start**: each side sits completely unprotected
+   until its own price first reaches 0.60.
+3. **Trailing stop**: once a side's price reaches 0.60, its stop loss
+   arms at 0.50 (0.60 − 0.10). From there it trails the price up in
+   0.10 steps, only ever moving up, never back down:
+   - price reaches 0.60 → stop loss 0.50
+   - price reaches 0.70 → stop loss 0.60
+   - price reaches 0.80 → stop loss 0.70
+   - ...and so on
 
-   Each rung is placed once and stays resting — since a buy limit sits
-   between the bid and ask, it still needs the ask to fall back down
-   to/through it to fill (roughly half the spread), it just isn't
-   waiting for a full pullback anymore. It is **not** cancelled just
-   because price keeps climbing past it.
-4. **Per fill**: every rung that fills becomes its own independent
-   position of 100 shares with its own stop loss (0.50 — taker market
-   sell the instant the bid drops to/through it) and take profit (0.99
-   — resting maker sell). Up to 3 positions can be open at once in one
-   window if all three rungs fill.
-5. **Rearm (one per window)**: the first time a stop loss hits in a
-   window, the bot rearms — cancels any other still-resting rungs,
-   forgets which side was armed (goes back to watching *either* side
-   from 0.65, no cold start this time), and doubles the size for every
-   rung placed from then on (200 shares instead of 100). This can only
-   happen once per window; a second stop loss later in the same window
-   does not trigger another rearm — the bot just keeps trading normally
-   on whichever side it's currently on.
-6. **Window close**: cancel any rungs that never filled; force a taker
-   close on any positions still open.
+   If a side never reaches 0.60 in a window, it never gets a stop loss
+   at all — it rides fully exposed until TP or the forced window-end
+   close.
+4. **Take profit**: fixed at 0.99 for both sides from the moment
+   they're bought, independent of whether the trailing stop has armed.
+5. **Independence**: the two positions are tracked completely
+   separately. If UP's trailing stop closes it out, DOWN is entirely
+   unaffected — it keeps sitting unprotected below 0.60, or keeps
+   trailing on its own once it gets there. Nothing about one side
+   being closed changes how the other is handled.
+6. **Window close**: force a taker close on any side(s) still open.
 
-Sizing is flat until a rearm happens — 100 shares every rung, doubling
-to 200 for the rest of the window after the one rearm. No martingale or
-anti-martingale progression beyond that single double-up.
+Sizing is flat — 300 shares per side, every window, no progression,
+doubling, or rearm logic of any kind.
 
 ## Run locally
 
@@ -57,29 +47,25 @@ Dashboard at http://localhost:8000
 
 ## Config knobs (`app/config.py`)
 
-- `LADDER_ARM_DELAY_SECONDS`, `LADDER_THRESHOLDS`, `LADDER_SL_PRICE`, `LADDER_TP_PRICE`, `LADDER_SHARES_PER_RUNG`
-- `STARTING_CAPITAL`, fee/rebate constants
+- `SHARES_PER_SIDE`, `TRAIL_ARM_PRICE`, `TRAIL_STEP`, `TP_PRICE`
+- `STARTING_CAPITAL`, taker fee constants
 
 ## Notes / assumptions
 
-- Arming and ladder-threshold crossings read the CLOB best bid/ask
-  **mid-price**, checked every tick. Rung fills and SL/TP exits read the
-  live **ask**/**bid** respectively (a resting buy needs a real ask to
-  cross down into it; SL/TP read off the bid).
-- Before any rearm, only one side trades per window — once armed, the
-  other side is ignored until either the window ends or a stop loss
-  triggers a rearm, at which point both sides are watched again.
-- Positions remember which side they were opened on, independent of
-  whatever the "currently armed side" is — so a position opened before
-  a rearm keeps being watched (and can still hit its own SL/TP) even
-  after the bot has rearmed onto the *other* side.
-- If price shoots straight through multiple thresholds in one tick
-  (e.g. 0.60 → 0.86), every rung up to and including the one just
-  crossed gets placed in that same tick, each at that tick's mid.
-- A big-enough pullback can fill more than one rung in the same tick if
-  the ask drops below multiple resting limit prices at once.
-- Rung entries and TP exits are resting maker orders (no fee, earn the
-  maker rebate); the stop loss and any forced window-end close are
-  taker market orders and pay the fee for real.
+- Every fill in this engine — both entries, both kinds of exit
+  (trailing stop / TP), and any forced window-end close — is a taker
+  order, priced off the **real** current ask (entries) or bid (exits)
+  read at the moment it fires, not an assumed value.
+- The trailing-stop level check and the SL/TP check both read the
+  live **bid** for that side, so the stop only ratchets based on what
+  a market sell could actually realize, not a possibly-stale mid.
+- If price shoots straight through multiple 0.10 levels in one tick
+  (e.g. 0.55 → 0.85), the trailing stop jumps straight to the
+  appropriate level for the highest one crossed that tick, not
+  step-by-step.
+- A window where a side never gets a live ask at all (e.g. the book is
+  empty right at open) simply retries entry on the next tick; the
+  engine doesn't force a fill without a real quote to fill against.
 - This reuses `polymarket_client.py`, `models.py`, `paper_broker.py`,
-  and the `main.py`/`state.py` orchestration loop unchanged in behavior.
+  and the `main.py`/`state.py` orchestration loop unchanged in
+  behavior.
