@@ -30,11 +30,20 @@ single ladder-breakout strategy with immediate at-mid limit entries.
    sell the instant the bid drops to/through it) and take profit (0.99
    — resting maker sell). Up to 3 positions can be open at once in one
    window if all three rungs fill.
-5. **Window close**: cancel any rungs that never filled; force a taker
+5. **Rearm (one per window)**: the first time a stop loss hits in a
+   window, the bot rearms — cancels any other still-resting rungs,
+   forgets which side was armed (goes back to watching *either* side
+   from 0.65, no cold start this time), and doubles the size for every
+   rung placed from then on (200 shares instead of 100). This can only
+   happen once per window; a second stop loss later in the same window
+   does not trigger another rearm — the bot just keeps trading normally
+   on whichever side it's currently on.
+6. **Window close**: cancel any rungs that never filled; force a taker
    close on any positions still open.
 
-Sizing is flat — 100 shares every rung, every window. No martingale or
-anti-martingale progression.
+Sizing is flat until a rearm happens — 100 shares every rung, doubling
+to 200 for the rest of the window after the one rearm. No martingale or
+anti-martingale progression beyond that single double-up.
 
 ## Run locally
 
@@ -57,8 +66,13 @@ Dashboard at http://localhost:8000
   **mid-price**, checked every tick. Rung fills and SL/TP exits read the
   live **ask**/**bid** respectively (a resting buy needs a real ask to
   cross down into it; SL/TP read off the bid).
-- Only one side ever trades per window — once armed, the other side is
-  ignored entirely for the rest of that window.
+- Before any rearm, only one side trades per window — once armed, the
+  other side is ignored until either the window ends or a stop loss
+  triggers a rearm, at which point both sides are watched again.
+- Positions remember which side they were opened on, independent of
+  whatever the "currently armed side" is — so a position opened before
+  a rearm keeps being watched (and can still hit its own SL/TP) even
+  after the bot has rearmed onto the *other* side.
 - If price shoots straight through multiple thresholds in one tick
   (e.g. 0.60 → 0.86), every rung up to and including the one just
   crossed gets placed in that same tick, each at that tick's mid.

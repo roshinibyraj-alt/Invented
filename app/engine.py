@@ -59,6 +59,7 @@ class RestingOrder:
 
 @dataclass
 class LadderPosition:
+    side: Side             # recorded at fill time -- stays fixed even if the engine later rearms onto the other side
     threshold: float
     entry_price: float
     shares: float
@@ -79,6 +80,9 @@ class EngineState:
     resting_orders: List[RestingOrder] = field(default_factory=list)
     positions: List[LadderPosition] = field(default_factory=list)
 
+    shares_per_rung: float = 0.0  # set from config in reset_for_window; doubles after the one rearm
+    rearm_used: bool = False
+
     fills_this_window: int = 0
     last_window_pnl: float = 0.0
 
@@ -88,6 +92,7 @@ class EngineState:
     total_sl_fills: int = 0
     total_forced_closes: int = 0
     total_cancelled_rungs: int = 0
+    total_rearms: int = 0
     no_trade_windows: int = 0
     wins: int = 0
     losses: int = 0
@@ -118,6 +123,8 @@ class Engine:
         self.s.next_threshold_idx = 0
         self.s.resting_orders = []
         self.s.positions = []
+        self.s.shares_per_rung = config.LADDER_SHARES_PER_RUNG
+        self.s.rearm_used = False
         self.s.fills_this_window = 0
         self.s.last_window_pnl = 0.0
 
@@ -140,12 +147,16 @@ class Engine:
         if now - self.s.window.open_ts < config.LADDER_ARM_DELAY_SECONDS:
             return  # cold start -- do nothing at all yet
 
+        # Exits run every tick regardless of arm state -- a rearm can leave
+        # positions open on a side that's no longer the (new) armed side,
+        # and those still need their own SL/TP watched every tick.
+        self._check_exits(now)
+
         if self.s.armed_side is None:
             self._check_arm(now)
         else:
             self._check_ladder_extend(now)
             self._check_rung_fills(now)
-            self._check_exits(now)
 
     # ---- arm: first side to cross the first threshold -----------------------
 
@@ -177,8 +188,8 @@ class Engine:
     def _armed_ask(self) -> Optional[float]:
         return self.s.up_ask if self.s.armed_side == Side.UP else self.s.down_ask
 
-    def _armed_bid(self) -> Optional[float]:
-        return self.s.up_bid if self.s.armed_side == Side.UP else self.s.down_bid
+    def _bid_for(self, side: Side) -> Optional[float]:
+        return self.s.up_bid if side == Side.UP else self.s.down_bid
 
     def _check_ladder_extend(self, now: float):
         mid = self._armed_mid()
@@ -192,13 +203,14 @@ class Engine:
     def _place_rung(self, threshold: float, mid_price: float, now: float):
         limit_price = round(mid_price, 4)  # placed immediately at the current mid, no offset
         order = RestingOrder(threshold=threshold, limit_price=limit_price,
-                              shares=config.LADDER_SHARES_PER_RUNG, placed_ts=now)
+                              shares=self.s.shares_per_rung, placed_ts=now)
         self.s.resting_orders.append(order)
         self.s.total_rungs_placed += 1
         self._log("RUNG_PLACED", side=self.s.armed_side.value, price=limit_price,
                    shares=order.shares,
                    note=f"{self.s.armed_side.value} crossed {threshold} -- resting limit buy "
-                        f"{order.shares:.0f}sh @ {limit_price} (placed at current mid)")
+                        f"{order.shares:.0f}sh @ {limit_price} (placed at current mid)"
+                        + (" [rearmed, double size]" if self.s.rearm_used else ""))
 
     # ---- fills: resting buy fills when the ask pulls back to/through it ----
 
@@ -231,7 +243,7 @@ class Engine:
             return
 
         self.s.positions.append(LadderPosition(
-            threshold=order.threshold, entry_price=order.limit_price,
+            side=self.s.armed_side, threshold=order.threshold, entry_price=order.limit_price,
             shares=order.shares, cost=cost, entry_ts=now,
         ))
 
@@ -240,20 +252,53 @@ class Engine:
     def _check_exits(self, now: float):
         if not self.s.positions:
             return
-        bid = self._armed_bid()
-        if bid is None:
-            return
         still_open = []
+        sl_hit = False
         for pos in self.s.positions:
+            bid = self._bid_for(pos.side)
+            if bid is None:
+                still_open.append(pos)
+                continue
             if bid <= config.LADDER_SL_PRICE:
                 self._close_taker(pos, price=bid, reason="SL_FILL", note_prefix="stop loss hit")
                 self.s.total_sl_fills += 1
+                sl_hit = True
             elif bid >= config.LADDER_TP_PRICE:
                 self._close_maker(pos, price=config.LADDER_TP_PRICE, reason="TP_FILL", note_prefix="TP hit")
                 self.s.total_tp_fills += 1
             else:
                 still_open.append(pos)
         self.s.positions = still_open
+        if sl_hit:
+            self._maybe_rearm(now)
+
+    def _maybe_rearm(self, now: float):
+        """After the FIRST stop loss hit in a window, rearm: cancel any
+        other still-resting orders, forget which side was armed (watch
+        both sides again from scratch, no cold start), and double the
+        per-rung size for everything placed from here on. Only fires
+        once per window -- a second SL later in the same window is a
+        no-op here."""
+        if self.s.rearm_used:
+            return
+        self.s.rearm_used = True
+        self.s.total_rearms += 1
+
+        for order in self.s.resting_orders:
+            self.s.total_cancelled_rungs += 1
+            self._log("RUNG_CANCELLED", side=self.s.armed_side.value if self.s.armed_side else None,
+                       price=order.limit_price,
+                       note=f"rearming -- cancelling unfilled {order.threshold} rung @ {order.limit_price}")
+        self.s.resting_orders = []
+
+        self.s.armed_side = None
+        self.s.next_threshold_idx = 0
+        self.s.shares_per_rung = config.LADDER_SHARES_PER_RUNG * 2
+
+        self._log("REARMED", note=(
+            f"stop loss hit -- rearming to watch either side again, now {self.s.shares_per_rung:.0f}sh/rung "
+            f"(double) -- this window's one rearm is used"
+        ))
 
     def _close_maker(self, pos: LadderPosition, price: float, reason: str, note_prefix: str):
         rebate = config.MAKER_REBATE_FRACTION * self.broker.taker_fee_amount(pos.shares, price)
@@ -279,7 +324,7 @@ class Engine:
             self.s.wins += 1
         else:
             self.s.losses += 1
-        self._log(reason, side=self.s.armed_side.value if self.s.armed_side else None,
+        self._log(reason, side=pos.side.value,
                    price=pos.entry_price, shares=pos.shares, pnl=pnl, fee=fee, note=note)
         self.capital.check_halt()
 
@@ -299,15 +344,15 @@ class Engine:
             self.s.resting_orders = []
 
         if not self.capital.halted and self.s.positions:
-            bid = self._armed_bid()
             for pos in list(self.s.positions):
+                bid = self._bid_for(pos.side)
                 close_price = bid if bid is not None else pos.entry_price
                 self._close_taker(pos, price=close_price, reason="FORCED_CLOSE",
                                    note_prefix="window closed, forced taker close")
                 self.s.total_forced_closes += 1
             self.s.positions = []
 
-        if not self.capital.halted and self.s.armed_side is None:
+        if not self.capital.halted and self.s.fills_this_window == 0:
             self.s.no_trade_windows += 1
             self._log("NO_TRADE", note=f"price never reached {config.LADDER_THRESHOLDS[0]} this window -- never armed")
 
@@ -318,7 +363,6 @@ class Engine:
 
     def snapshot(self) -> dict:
         now = time.time()
-        bid = self._armed_bid() if self.s.armed_side else None
 
         resting_orders = [{
             "threshold": o.threshold, "limit_price": o.limit_price, "shares": o.shares,
@@ -329,15 +373,16 @@ class Engine:
         unrealized_pnl = 0.0
         open_market_value = 0.0
         for pos in self.s.positions:
+            bid = self._bid_for(pos.side)
             mark = bid if bid is not None else pos.entry_price
             market_value = pos.shares * mark
             pos_pnl = market_value - pos.cost
             unrealized_pnl += pos_pnl
             open_market_value += market_value
             open_positions.append({
-                "threshold": pos.threshold, "entry_price": pos.entry_price, "shares": pos.shares,
-                "cost": round(pos.cost, 4), "mark_price": mark, "unrealized_pnl": round(pos_pnl, 4),
-                "seconds_since_entry": round(now - pos.entry_ts, 1),
+                "side": pos.side.value, "threshold": pos.threshold, "entry_price": pos.entry_price,
+                "shares": pos.shares, "cost": round(pos.cost, 4), "mark_price": mark,
+                "unrealized_pnl": round(pos_pnl, 4), "seconds_since_entry": round(now - pos.entry_ts, 1),
             })
 
         realized_pnl = round(self.s.total_pnl, 4)
@@ -352,6 +397,8 @@ class Engine:
             status = "resting"
         elif self.s.armed_side:
             status = "armed"
+        elif self.s.rearm_used:
+            status = "rearmed"
         else:
             status = "waiting"
 
@@ -374,6 +421,9 @@ class Engine:
             "resting_orders": resting_orders,
             "open_positions": open_positions,
 
+            "rearm_used": self.s.rearm_used,
+            "current_shares_per_rung": self.s.shares_per_rung,
+
             "fills_this_window": self.s.fills_this_window,
             "total_rungs_placed": self.s.total_rungs_placed,
             "total_fills": self.s.total_fills,
@@ -381,6 +431,7 @@ class Engine:
             "total_sl_fills": self.s.total_sl_fills,
             "total_forced_closes": self.s.total_forced_closes,
             "total_cancelled_rungs": self.s.total_cancelled_rungs,
+            "total_rearms": self.s.total_rearms,
             "no_trade_windows": self.s.no_trade_windows,
             "wins": self.s.wins,
             "losses": self.s.losses,
@@ -394,5 +445,6 @@ class Engine:
                 "sl_price": config.LADDER_SL_PRICE,
                 "tp_price": config.LADDER_TP_PRICE,
                 "shares_per_rung": config.LADDER_SHARES_PER_RUNG,
+                "rearm_shares_per_rung": config.LADDER_SHARES_PER_RUNG * 2,
             },
         }

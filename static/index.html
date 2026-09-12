@@ -80,7 +80,10 @@
   .status-badge.armed{background:var(--amber-dim); color:var(--amber);}
   .status-badge.resting{background:var(--violet-dim); color:var(--violet);}
   .status-badge.open{background:var(--mint-dim); color:var(--mint);}
+  .status-badge.rearmed{background:var(--violet-dim); color:var(--violet);}
   .status-badge.halted{background:var(--coral-dim); color:var(--coral);}
+  .rearm-banner{background:var(--violet-dim); border:1px solid var(--violet); color:var(--violet);
+    font-size:11px; font-family:var(--mono); font-weight:600; padding:8px 12px; border-radius:9px; margin-bottom:14px;}
 
   .def-grid{display:grid; grid-template-columns:repeat(2,1fr); gap:8px; margin-bottom:14px;}
   .def-item{background:var(--panel-3); border-radius:9px; padding:10px 12px;}
@@ -140,6 +143,7 @@
   .log-row .ev.RUNG_PLACED{color:var(--violet);}
   .log-row .ev.RUNG_FILL{color:var(--mint);}
   .log-row .ev.RUNG_CANCELLED{color:var(--faint);}
+  .log-row .ev.REARMED{color:var(--violet);}
   .log-row .ev.TP_FILL{color:var(--mint);}
   .log-row .ev.SL_FILL{color:var(--coral);}
   .log-row .ev.FORCED_CLOSE{color:var(--violet);}
@@ -155,7 +159,7 @@
   <header>
     <div>
       <h1>Ladder breakout</h1>
-      <div class="sub">BTC 5m up/down — 60s cold start, arm @0.65, ladder rungs @0.65/0.75/0.85 (at mid), SL 0.50, TP 0.99</div>
+      <div class="sub">BTC 5m up/down — 60s cold start, arm @0.65, ladder rungs @0.65/0.75/0.85 (at mid), SL 0.50, TP 0.99, one rearm at 2x size after SL</div>
     </div>
     <div class="status-pill"><span class="dot" id="statusDot"></span><span id="statusText">connecting</span></div>
   </header>
@@ -316,7 +320,7 @@ function renderEngineCard(e){
   if(!e || !e.def){ el.innerHTML = '<div class="empty">no data</div>'; return; }
   const statusLabels = {
     waiting:'watching for 0.65', armed:'armed, entries at mid', resting:'orders resting',
-    open:'position(s) open', halted:'halted',
+    open:'position(s) open', rearmed:'rearmed \u2014 watching both sides', halted:'halted',
   };
 
   const defRowsHtml = [
@@ -324,9 +328,13 @@ function renderEngineCard(e){
     ['Thresholds', e.def.thresholds.join(' / ')],
     ['Entry style', 'at mid, no offset'],
     ['SL / TP', `${fmtP(e.def.sl_price)} / ${fmtP(e.def.tp_price)}`],
-    ['Shares / rung', fmtSh(e.def.shares_per_rung)],
+    ['Shares / rung', `${fmtSh(e.current_shares_per_rung)}${e.rearm_used?' (rearmed 2x)':''}`],
     ['Armed side', e.armed_side || '—'],
   ].map(([k,v]) => `<div class="def-item"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
+
+  const rearmBanner = e.rearm_used
+    ? `<div class="rearm-banner">Rearmed after a stop loss \u2014 now watching either side at ${fmtSh(e.current_shares_per_rung)}sh/rung. This window's one rearm is used.</div>`
+    : '';
 
   const resting = e.resting_orders || [];
   let restingHtml;
@@ -347,10 +355,11 @@ function renderEngineCard(e){
   if(positions.length){
     posHtml = positions.map(pos => {
       const mins = Math.floor((pos.seconds_since_entry||0)/60), secs = Math.floor((pos.seconds_since_entry||0)%60);
+      const sideColor = pos.side==='UP' ? 'var(--mint)' : 'var(--coral)';
       return `
       <div class="position-box ${pos.unrealized_pnl<0?'loss':''}">
         <div class="position-top">
-          <span class="rung-tag">${fmtP(pos.threshold)} rung</span>
+          <span class="rung-tag"><span style="color:${sideColor}">${pos.side}</span> \u00b7 ${fmtP(pos.threshold)} rung</span>
           <span class="shares">${fmtSh(pos.shares)}sh \u00b7 ${mins}:${String(secs).padStart(2,'0')} held</span>
         </div>
         <div class="position-grid">
@@ -375,6 +384,7 @@ function renderEngineCard(e){
       <span class="status-badge ${e.status}">${statusLabels[e.status] || e.status}</span>
     </h2>
     <div class="def-grid">${defRowsHtml}</div>
+    ${rearmBanner}
     <div class="subhead">Resting orders (${resting.length})</div>
     ${restingHtml}
     <div class="subhead">Open positions (${positions.length})</div>
@@ -387,7 +397,7 @@ function renderStats(e){
     ['total_rungs_placed','rungs placed',''], ['total_fills','fills',''],
     ['total_tp_fills','tp fills','win'], ['total_sl_fills','sl fills','loss'],
     ['total_forced_closes','forced close',''], ['total_cancelled_rungs','cancelled',''],
-    ['no_trade_windows','no-trade',''], ['win_rate','win rate %',''],
+    ['total_rearms','rearms',''], ['no_trade_windows','no-trade',''], ['win_rate','win rate %',''],
   ];
   $('statsGrid').innerHTML = tiles.map(([key,label,cls]) => {
     let v = e[key];
