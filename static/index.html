@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Dual-entry trailing stop — BTC 5m bot</title>
+<title>One-way re-arming trailing stop — BTC 5m bot</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
@@ -76,10 +76,12 @@
   .card h2 .tag{font-size:10px; padding:2px 8px; border-radius:6px; background:var(--panel-3); color:var(--faint); font-family:var(--mono); font-weight:500;}
 
   .status-badge{font-size:10.5px; font-weight:600; padding:4px 10px; border-radius:6px;}
-  .status-badge.entering{background:var(--amber-dim); color:var(--amber);}
+  .status-badge.watching{background:#1a2029; color:#6a7688;}
   .status-badge.open{background:var(--mint-dim); color:var(--mint);}
-  .status-badge.closed{background:var(--violet-dim); color:var(--violet);}
+  .status-badge.done{background:var(--violet-dim); color:var(--violet);}
   .status-badge.halted{background:var(--coral-dim); color:var(--coral);}
+  .rearm-banner{background:var(--violet-dim); border:1px solid var(--violet); color:var(--violet);
+    font-size:11px; font-family:var(--mono); font-weight:600; padding:8px 12px; border-radius:9px; margin-bottom:14px;}
 
   .def-grid{display:grid; grid-template-columns:repeat(2,1fr); gap:8px; margin-bottom:14px;}
   .def-item{background:var(--panel-3); border-radius:9px; padding:10px 12px;}
@@ -137,6 +139,8 @@
   .log-row .ev{font-weight:600; font-size:9.5px; padding:2px 7px; border-radius:5px; background:#1a222f; text-align:center; white-space:nowrap;}
   .log-row .ev.ENTRY_FILL{color:var(--amber);}
   .log-row .ev.TRAIL_UPDATE{color:var(--violet);}
+  .log-row .ev.REARMED{color:var(--violet);}
+  .log-row .ev.DONE_FOR_WINDOW{color:var(--mint);}
   .log-row .ev.TP_FILL{color:var(--mint);}
   .log-row .ev.SL_FILL{color:var(--coral);}
   .log-row .ev.FORCED_CLOSE{color:var(--violet);}
@@ -152,8 +156,8 @@
 <div class="wrap">
   <header>
     <div>
-      <h1>Dual-entry trailing stop</h1>
-      <div class="sub">BTC 5m up/down — buy both sides immediately at window open (taker, real ask), 300sh each, TP 0.99 both sides, per-side trailing stop can only arm after 2min AND price at 0.60+, then ratchets up 0.10 at a time — exits price against real book depth, not just top-of-book</div>
+      <h1>One-way re-arming trailing stop</h1>
+      <div class="sub">BTC 5m up/down — watch both sides, buy whichever reaches 0.60 first (taker, real fill), trail arms immediately at 0.50 and ratchets up 0.10 at a time, TP 0.99 — a stop-out re-arms and watches again, a TP ends trading for the window — exits price against real book depth, not just top-of-book</div>
     </div>
     <div class="status-pill"><span class="dot" id="statusDot"></span><span id="statusText">connecting</span></div>
   </header>
@@ -163,10 +167,6 @@
   <div class="clock-row">
     <div>
       <div class="slug" id="windowSlug">waiting for window</div>
-      <div id="trailFilterWrap" style="display:none;">
-        <div class="cold-start-bar"><div class="cold-start-fill" id="trailFilterFill" style="width:0%;"></div></div>
-        <div class="cold-start-lbl" id="trailFilterLbl"></div>
-      </div>
     </div>
     <div class="countdown" id="countdown">--:--</div>
   </div>
@@ -226,17 +226,17 @@ const fmtSh = v => (v==null ? '0' : Number(v).toFixed(0));
 const pnlClass = v => (v>0.005?'pos':(v<-0.005?'neg':''));
 const TRAIL_ARM_PRICE = 0.60, TP_PRICE = 0.99;
 
-function renderGauge(trackId, midId, bidAskId, sideLblId, side, bid, ask, pos, gaugeElId){
+function renderGauge(trackId, midId, bidAskId, sideLblId, side, bid, ask, pos, anyPositionOpen, gaugeElId){
   const mid = (bid!=null && ask!=null) ? (bid+ask)/2 : (ask!=null?ask:bid);
   $(midId).textContent = fmtP(mid);
   $(bidAskId).textContent = `bid ${fmtP(bid)} / ask ${fmtP(ask)}`;
-  $(gaugeElId).classList.toggle('dimmed', !pos);
-  $(sideLblId).innerHTML = side + (pos && pos.trail_armed ? '<span class="armed-tag">trailing</span>' : '');
+  $(gaugeElId).classList.toggle('dimmed', anyPositionOpen && !pos);
+  $(sideLblId).innerHTML = side + (pos ? '<span class="armed-tag">trailing</span>' : '');
 
   const track = document.getElementById(trackId);
   const pct = mid!=null ? Math.max(0,Math.min(100, mid*100)) : 0;
   let marks = `<div class="gauge-fill ${side}" style="width:${pct}%"></div>`;
-  marks += `<div class="gauge-mark threshold ${pos&&pos.trail_armed?'done':''}" style="left:${TRAIL_ARM_PRICE*100}%"><span class="lbl">${TRAIL_ARM_PRICE} arm</span></div>`;
+  marks += `<div class="gauge-mark threshold ${pos?'done':''}" style="left:${TRAIL_ARM_PRICE*100}%"><span class="lbl">${TRAIL_ARM_PRICE} arm</span></div>`;
   marks += `<div class="gauge-mark tp" style="left:${TP_PRICE*100}%"><span class="lbl">${TP_PRICE} tp</span></div>`;
   if(pos && pos.trail_sl != null){
     marks += `<div class="gauge-mark sl" style="left:${pos.trail_sl*100}%"><span class="lbl">${fmtP(pos.trail_sl)} sl</span></div>`;
@@ -271,27 +271,15 @@ async function poll(){
       const cd = $('countdown');
       cd.textContent = `${m}:${String(sec).padStart(2,'0')}`;
       cd.className = 'countdown' + (remaining <= 20 ? ' hot' : '');
-
-      const wrap = $('trailFilterWrap');
-      if(!e.trail_filter_open && !e.halted && e.seconds_until_trail_active != null){
-        wrap.style.display = 'block';
-        const total = (e.def && e.def.trail_min_seconds) || 120;
-        const secsLeft = Math.max(0, e.seconds_until_trail_active);
-        const pct = Math.min(100, ((total-secsLeft)/total)*100);
-        $('trailFilterFill').style.width = pct + '%';
-        $('trailFilterLbl').textContent = `trailing stop filter — arms in ${Math.ceil(secsLeft)}s`;
-      } else {
-        wrap.style.display = 'none';
-      }
-    } else {
-      $('trailFilterWrap').style.display = 'none';
     }
 
     const book = s.book || {};
+    const upPos = (e.position && e.position.side === 'UP') ? e.position : null;
+    const downPos = (e.position && e.position.side === 'DOWN') ? e.position : null;
     renderGauge('upTrack','upMid','upBidAsk','upSideLbl','UP', book.up_bid, book.up_ask,
-                e.up_position, 'upGauge');
+                upPos, !!e.position, 'upGauge');
     renderGauge('downTrack','downMid','downBidAsk','downSideLbl','DOWN', book.down_bid, book.down_ask,
-                e.down_position, 'downGauge');
+                downPos, !!e.position, 'downGauge');
 
     renderEngineCard(e);
     renderStats(e);
@@ -308,28 +296,33 @@ function renderEngineCard(e){
   const el = $('engineCard');
   if(!e || !e.def){ el.innerHTML = '<div class="empty">no data</div>'; return; }
   const statusLabels = {
-    entering:'buying both sides (taker)', open:'position(s) open',
-    closed:'both sides closed this window', halted:'halted',
+    watching:'watching both sides for 0.60', open:'position open, trailing',
+    done:'TP hit — done for this window', halted:'halted',
   };
 
   const defRowsHtml = [
-    ['Entry', 'both sides, immediately, taker'],
-    ['Shares / side', fmtSh(e.def.shares_per_side)],
+    ['Entry', 'first side to reach 0.60'],
+    ['Shares / entry', fmtSh(e.def.shares_per_side)],
     ['Trail arms at', fmtP(e.def.trail_arm_price)],
-    ['Trail min delay', `${e.def.trail_min_seconds}s`],
     ['Trail step', fmtP(e.def.trail_step)],
-    ['TP (both sides)', fmtP(e.def.tp_price)],
-    ['Initial SL', 'none until trail arms'],
+    ['TP', fmtP(e.def.tp_price)],
+    ['After SL', 'closes + re-arms, watches again'],
+    ['After TP', 'closes, no more entries this window'],
   ].map(([k,v]) => `<div class="def-item"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
 
-  const positions = e.open_positions || [];
+  const rearmBanner = e.total_rearms
+    ? `<div class="rearm-banner">${e.total_rearms} stop-out rearm(s) so far this window \u2014 watching both sides again for the next ${fmtP(e.def.trail_arm_price)} cross.</div>`
+    : '';
+  const doneBanner = e.done_for_window
+    ? `<div class="rearm-banner">Take profit hit \u2014 no more entries for the rest of this window.</div>`
+    : '';
+
+  const pos = e.position;
   let posHtml;
-  if(positions.length){
-    posHtml = positions.map(pos => {
-      const mins = Math.floor((pos.seconds_since_entry||0)/60), secs = Math.floor((pos.seconds_since_entry||0)%60);
-      const sideColor = pos.side==='UP' ? 'var(--mint)' : 'var(--coral)';
-      const slText = pos.trail_armed ? `${fmtP(pos.trail_sl)} (trailing)` : 'none yet';
-      return `
+  if(pos){
+    const mins = Math.floor((pos.seconds_since_entry||0)/60), secs = Math.floor((pos.seconds_since_entry||0)%60);
+    const sideColor = pos.side==='UP' ? 'var(--mint)' : 'var(--coral)';
+    posHtml = `
       <div class="position-box ${pos.unrealized_pnl<0?'loss':''}">
         <div class="position-top">
           <span class="rung-tag"><span style="color:${sideColor}">${pos.side}</span></span>
@@ -338,7 +331,7 @@ function renderEngineCard(e){
         <div class="position-grid">
           <div><div class="k">Entry</div><div class="v">${fmtP(pos.entry_price)}</div></div>
           <div><div class="k">Mark</div><div class="v">${fmtP(pos.mark_price)}</div></div>
-          <div><div class="k">Stop loss</div><div class="v">${slText}</div></div>
+          <div><div class="k">Stop loss</div><div class="v">${fmtP(pos.trail_sl)} (trailing)</div></div>
           <div><div class="k">Mkt value</div><div class="v">${fmt$(pos.shares*pos.mark_price)}</div></div>
         </div>
         <div class="position-pnl-row">
@@ -346,9 +339,8 @@ function renderEngineCard(e){
           <span class="v ${pnlClass(pos.unrealized_pnl)}">${pos.unrealized_pnl>=0?'+':''}${fmt$(pos.unrealized_pnl)}</span>
         </div>
       </div>`;
-    }).join('');
   } else {
-    posHtml = `<div class="position-box empty">no open positions</div>`;
+    posHtml = `<div class="position-box empty">${e.done_for_window ? 'no open position — done for this window' : 'no open position — watching for 0.60'}</div>`;
   }
 
   el.innerHTML = `
@@ -357,14 +349,17 @@ function renderEngineCard(e){
       <span class="status-badge ${e.status}">${statusLabels[e.status] || e.status}</span>
     </h2>
     <div class="def-grid">${defRowsHtml}</div>
-    <div class="subhead">Open positions (${positions.length})</div>
+    ${rearmBanner}
+    ${doneBanner}
+    <div class="subhead">Position</div>
     ${posHtml}
   `;
 }
 
 function renderStats(e){
   const tiles = [
-    ['total_entries','entries',''], ['total_trail_updates','trail steps',''],
+    ['total_entries','entries',''], ['total_rearms','rearms',''],
+    ['total_trail_updates','trail steps',''],
     ['total_tp_fills','tp fills','win'], ['total_sl_fills','sl fills','loss'],
     ['total_forced_closes','forced close',''], ['total_illiquid_skips','illiquid skips',''],
     ['no_trade_windows','no-trade',''], ['win_rate','win rate %',''],

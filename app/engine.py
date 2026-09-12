@@ -1,20 +1,16 @@
 """
-Trading engine -- buy both sides immediately at window open, trail a
-stop on each side independently once it moves into favor.
+Trading engine -- one position at a time, re-armed after every stop out.
 
 See app/config.py for the full strategy write-up. Summary: no cold
-start, no arm/threshold ladder. The instant a window is live, buy
-SHARES_PER_SIDE of BOTH tokens as taker orders. Each side then runs its
-own completely independent trailing-stop: no SL until price first hits
-0.60 (and at least TRAIL_MIN_SECONDS have passed since window open),
-then a stop at 0.50 that ratchets up by 0.10 every time price climbs
-another 0.10. TP is a flat 0.99 for both sides throughout. All entries
-and exits are taker orders, priced by walking the real order book depth
-for the required size (see _realistic_fill_price) rather than assuming
-the whole order fills at the single best bid/ask -- that assumption is
-what silently understated losses on a side that goes illiquid late in a
-window (a thin, stale-looking top-of-book quote isn't what 300 shares
-actually sells for).
+start. Watch both sides' mid-price; the instant either one reaches 0.60,
+buy that side (taker, real depth-weighted price) and immediately arm a
+trailing stop at 0.50, ratcheting up 0.10 at a time as price climbs.
+If the trailing stop hits, the position closes and the engine goes
+right back to watching both sides for the next 0.60 cross -- this can
+repeat any number of times in a window. If TP (0.99) hits instead, the
+engine stops re-arming for the rest of that window. All fills are taker
+orders priced by walking real order-book depth (see
+_realistic_fill_price), not just the top-of-book quote.
 """
 import time
 from dataclasses import dataclass, field
@@ -55,19 +51,22 @@ class CapitalPool:
 
 
 # ---------------------------------------------------------------------------
-# Per-side position with its own independent trailing stop
+# The single open position (if any) and its trailing stop
 # ---------------------------------------------------------------------------
 
 @dataclass
-class SidePosition:
+class Position:
     side: Side
-    entry_price: float          # real ask paid at window open
+    entry_price: float          # real depth-weighted fill, not just top-of-book ask
     shares: float
     cost: float
     entry_ts: float
 
-    trail_sl: Optional[float] = None   # None until this side's own price first hits TRAIL_ARM_PRICE
-    last_trail_level: float = 0.0      # last TRAIL_ARM_PRICE + n*TRAIL_STEP level this side has reached
+    # Entry only ever happens right as price crosses TRAIL_ARM_PRICE, so
+    # the trail is armed immediately at entry -- never None like the
+    # dual-entry version, where a side could sit unprotected pre-arm.
+    trail_sl: float = 0.0
+    last_trail_level: float = 0.0
 
 
 @dataclass
@@ -88,14 +87,14 @@ class EngineState:
     down_bid_levels: Optional[list] = None
     down_ask_levels: Optional[list] = None
 
-    entries_done: bool = False   # both-side entry attempted/complete for this window
-    up_position: Optional[SidePosition] = None
-    down_position: Optional[SidePosition] = None
+    position: Optional[Position] = None
+    done_for_window: bool = False   # set True after a TP hit -- no more entries this window
 
     fills_this_window: int = 0
     last_window_pnl: float = 0.0
 
     total_entries: int = 0
+    total_rearms: int = 0            # number of times watching resumed after a trailing-stop exit
     total_tp_fills: int = 0
     total_sl_fills: int = 0
     total_trail_updates: int = 0
@@ -108,9 +107,10 @@ class EngineState:
 
 
 class Engine:
-    """Dual-entry trailing-stop engine, driven off its own capital pool.
-    Kept as the class name `Engine` / constructed the same way
-    (Engine(broker)) so app/state.py doesn't need structural changes."""
+    """One-way re-arming trailing-stop engine, driven off its own
+    capital pool. Kept as the class name `Engine` / constructed the
+    same way (Engine(broker)) so app/state.py doesn't need structural
+    changes."""
 
     name = "TRAIL"
 
@@ -132,9 +132,10 @@ class Engine:
             return
 
         self._log("WINDOW_OPEN", note=(
-            f"buying both sides immediately, {config.SHARES_PER_SIDE:.0f}sh each, taker -- "
-            f"trailing stop can only arm after {config.TRAIL_MIN_SECONDS}s AND price at {config.TRAIL_ARM_PRICE}+, "
-            f"TP {config.TP_PRICE} for both from the start"
+            f"watching both sides -- first to reach {config.TRAIL_ARM_PRICE} gets bought "
+            f"({config.SHARES_PER_SIDE:.0f}sh, taker), trail arms immediately at "
+            f"{config.TRAIL_ARM_PRICE - config.TRAIL_STEP:.2f}, TP {config.TP_PRICE} -- "
+            f"a stop-out re-arms and watches again, a TP does not"
         ))
 
     def on_tick(self, up_bid, up_ask, down_bid, down_ask, seconds_to_close: float = None, now: Optional[float] = None,
@@ -148,19 +149,21 @@ class Engine:
         self.s.up_bid_levels, self.s.up_ask_levels = up_bid_levels, up_ask_levels
         self.s.down_bid_levels, self.s.down_ask_levels = down_bid_levels, down_ask_levels
 
-        if not self.s.entries_done:
-            self._enter_both(now)
+        if self.s.position is not None:
+            self._check_exit(now)
+        elif not self.s.done_for_window:
+            self._check_entry(now)
 
-        self._check_side(Side.UP, now)
-        self._check_side(Side.DOWN, now)
-
-    # ---- entry: both sides, immediately, taker --------------------------
+    # ---- price/level lookups ----------------------------------------------
 
     def _ask_for(self, side: Side) -> Optional[float]:
         return self.s.up_ask if side == Side.UP else self.s.down_ask
 
     def _bid_for(self, side: Side) -> Optional[float]:
         return self.s.up_bid if side == Side.UP else self.s.down_bid
+
+    def _mid_for(self, side: Side) -> Optional[float]:
+        return _midpoint(self._bid_for(side), self._ask_for(side))
 
     def _ask_levels_for(self, side: Side) -> Optional[list]:
         return self.s.up_ask_levels if side == Side.UP else self.s.down_ask_levels
@@ -174,29 +177,16 @@ class Engine:
         against a real order book, instead of assuming the whole size
         fills at the single best quote.
 
-        This is the fix for a side going illiquid late in a window: if
-        only a few shares are resting at the best bid/ask and the rest
-        of the book is thin or empty, a 300-share taker order does NOT
-        realistically fill entirely at that top price -- it walks down
-        through worse levels. Pricing the whole order at the best quote
-        (the old behavior) silently understates the loss on a losing
-        side whose book has gone quiet.
-
-        - levels is None -> no depth data was available this tick
-          (e.g. the API only gave us a bare best bid/ask, or the book
-          fetch failed outright); fall back to filling the whole size
-          at `fallback_price`, same as before.
+        - levels is None -> no depth data was available this tick; fall
+          back to filling the whole size at `fallback_price`.
         - levels is [] -> the book was fetched successfully and there
-          is truly nothing resting on this side right now; there is
-          nothing to realistically trade against, so return None (the
-          caller should NOT invent a fill).
+          is truly nothing resting on this side right now; return None
+          -- the caller should NOT invent a fill.
         - levels is non-empty -> walk it best-price-first. If the
           visible depth doesn't cover the full size, the unfilled
-          remainder is conservatively priced at the worst level seen
-          (walking further out never gets a *better* price than that,
-          only the same or worse), so a thin book pulls the average
-          fill price down instead of quietly pretending it doesn't
-          matter.
+          remainder is conservatively priced at the worst level seen,
+          so a thin book pulls the average fill price accordingly
+          instead of quietly pretending it doesn't matter.
         """
         if levels is None:
             return fallback_price
@@ -217,19 +207,18 @@ class Engine:
             cost += remaining * worst_price
         return cost / shares
 
-    def _enter_both(self, now: float):
-        """Fires each side's entry the first tick a live ask is available
-        for it. If only one side has a quote yet, that side goes in and
-        the other is retried next tick -- entries_done only flips once
-        both are actually filled."""
-        if self.s.up_position is None:
-            self._fire_entry(Side.UP, now)
-        if self.s.down_position is None:
-            self._fire_entry(Side.DOWN, now)
-        if self.s.up_position is not None and self.s.down_position is not None:
-            self.s.entries_done = True
+    # ---- entry: first side to reach TRAIL_ARM_PRICE ------------------------
 
-    def _fire_entry(self, side: Side, now: float):
+    def _check_entry(self, now: float):
+        up_mid = self._mid_for(Side.UP)
+        down_mid = self._mid_for(Side.DOWN)
+        # deterministic tie-break: UP checked first if both cross the same tick
+        if up_mid is not None and up_mid >= config.TRAIL_ARM_PRICE:
+            self._enter(Side.UP, now)
+        elif down_mid is not None and down_mid >= config.TRAIL_ARM_PRICE:
+            self._enter(Side.DOWN, now)
+
+    def _enter(self, side: Side, now: float):
         ask = self._ask_for(side)
         if ask is None:
             return  # no live ask yet -- retry next tick
@@ -238,95 +227,98 @@ class Engine:
         fill_price = self._realistic_fill_price(levels, shares, ask)
         if fill_price is None:
             # book fetched fine but genuinely has no offers right now --
-            # can't buy into nothing; retry next tick
+            # can't buy into nothing; keep watching, retry next tick
             self.s.total_illiquid_skips += 1
+            self._log("NO_LIQUIDITY", side=side.value, price=ask,
+                       note=f"{side.value} reached {config.TRAIL_ARM_PRICE} but book has zero ask depth -- waiting")
             return
+
         fee = self.broker.taker_fee_amount(shares, fill_price)
         cost = shares * fill_price + fee
         self.capital.balance -= cost
         self.s.total_entries += 1
 
         slip_note = f" (book-depth-weighted, best ask was {ask})" if abs(fill_price - ask) > 1e-9 else ""
+        trail_sl = round(config.TRAIL_ARM_PRICE - config.TRAIL_STEP, 4)
         self._log("ENTRY_FILL", side=side.value, price=fill_price, shares=shares, fee=fee,
-                   note=(f"window-open taker buy: {shares:.0f}sh @ real fill {fill_price:.4f}{slip_note} "
-                         f"(fee ${fee:.4f}) -- no SL yet, arms at {config.TRAIL_ARM_PRICE}; TP {config.TP_PRICE}"))
+                   note=(f"{side.value} reached {config.TRAIL_ARM_PRICE} -- taker buy {shares:.0f}sh @ real fill "
+                         f"{fill_price:.4f}{slip_note} (fee ${fee:.4f}) -- trail armed immediately, SL {trail_sl}, "
+                         f"TP {config.TP_PRICE}"))
 
         if self.capital.check_halt():
             self._log("HALTED", note=f"balance ${self.capital.balance:.2f} < $0 -- bankrupt")
             return
 
-        pos = SidePosition(side=side, entry_price=fill_price, shares=shares, cost=cost, entry_ts=now)
-        if side == Side.UP:
-            self.s.up_position = pos
-        else:
-            self.s.down_position = pos
+        self.s.position = Position(
+            side=side, entry_price=fill_price, shares=shares, cost=cost, entry_ts=now,
+            trail_sl=trail_sl, last_trail_level=config.TRAIL_ARM_PRICE,
+        )
 
-    # ---- per-side: trail update, then SL/TP check -----------------------
+    # ---- exit: trailing stop (re-arms) or TP (does not) --------------------
 
-    def _check_side(self, side: Side, now: float):
-        pos = self.s.up_position if side == Side.UP else self.s.down_position
+    def _check_exit(self, now: float):
+        pos = self.s.position
         if pos is None:
             return
-        bid = self._bid_for(side)
+        bid = self._bid_for(pos.side)
         if bid is None:
             return
 
         if bid >= config.TP_PRICE:
-            self._try_close(pos, side, trigger_bid=bid, reason="TP_FILL", note_prefix="take profit hit")
+            self._try_close(pos, trigger_bid=bid, reason="TP_FILL", note_prefix="take profit hit", rearm=False)
             return
 
-        if pos.trail_sl is not None and bid <= pos.trail_sl:
-            self._try_close(pos, side, trigger_bid=bid, reason="SL_FILL", note_prefix="trailing stop hit")
+        if bid <= pos.trail_sl:
+            self._try_close(pos, trigger_bid=bid, reason="SL_FILL", note_prefix="trailing stop hit", rearm=True)
             return
 
-        if self._trail_filter_open(now):
-            self._advance_trail(pos, bid)
+        self._advance_trail(pos, bid)
 
-    def _try_close(self, pos: SidePosition, side: Side, trigger_bid: float, reason: str, note_prefix: str):
+    def _try_close(self, pos: Position, trigger_bid: float, reason: str, note_prefix: str, rearm: bool):
         """A trigger condition (TP or trailing SL) has been met based on
         the top-of-book bid. The actual fill is priced against real book
         depth, which can be materially worse than that trigger price if
-        the side has gone illiquid -- that gap is exactly what used to
-        get silently ignored."""
-        levels = self._bid_levels_for(side)
+        the side has gone illiquid."""
+        levels = self._bid_levels_for(pos.side)
         fill_price = self._realistic_fill_price(levels, pos.shares, trigger_bid)
         if fill_price is None:
             # trigger fired but there's truly nothing to sell into this
             # instant -- don't invent a fill, wait for the book to show
-            # something (position stays open, will be re-checked next tick)
+            # something (position stays open, re-checked next tick)
             self.s.total_illiquid_skips += 1
-            self._log("NO_LIQUIDITY", side=side.value, price=trigger_bid,
+            self._log("NO_LIQUIDITY", side=pos.side.value, price=trigger_bid,
                        note=f"{reason} triggered at bid {trigger_bid} but book has zero depth to sell into -- waiting")
             return
+
         if reason == "TP_FILL":
             self.s.total_tp_fills += 1
         else:
             self.s.total_sl_fills += 1
         self._close(pos, price=fill_price, reason=reason, note_prefix=note_prefix, trigger_price=trigger_bid)
-        self._clear(side)
+        self.s.position = None
 
-    def _trail_filter_open(self, now: float) -> bool:
-        """Trailing-stop activation filter: even if price already reached
-        TRAIL_ARM_PRICE, the trail is not allowed to arm/advance until at
-        least TRAIL_MIN_SECONDS have passed since the window opened. This
-        only gates *arming/advancing* the trail -- TP stays live from the
-        very first tick regardless, and once a trail has armed it keeps
-        being checked for a stop-out every tick same as always."""
-        if self.s.window is None:
-            return False
-        return (now - self.s.window.open_ts) >= config.TRAIL_MIN_SECONDS
+        if rearm:
+            self.s.total_rearms += 1
+            self._log("REARMED", note=(
+                f"trailing stop closed it out -- watching both sides again for the next "
+                f"{config.TRAIL_ARM_PRICE} cross ({self.s.total_rearms} rearm(s) this window)"
+            ))
+        else:
+            self.s.done_for_window = True
+            self._log("DONE_FOR_WINDOW", note="take profit hit -- no more entries for the rest of this window")
 
-    def _advance_trail(self, pos: SidePosition, bid: float):
+    def _advance_trail(self, pos: Position, bid: float):
         """Ratchets pos.trail_sl up every time price reaches a new
         TRAIL_ARM_PRICE + n*TRAIL_STEP level. Never moves down. Example
-        with TRAIL_ARM_PRICE=0.60, TRAIL_STEP=0.10: price hits 0.60 ->
-        SL 0.50; price hits 0.70 -> SL 0.60; price hits 0.80 -> SL 0.70."""
-        next_level = pos.last_trail_level + config.TRAIL_STEP if pos.last_trail_level > 0 else config.TRAIL_ARM_PRICE
+        with TRAIL_ARM_PRICE=0.60, TRAIL_STEP=0.10: entry (price hit
+        0.60) -> SL 0.50; price hits 0.70 -> SL 0.60; price hits 0.80 ->
+        SL 0.70."""
+        next_level = round(pos.last_trail_level + config.TRAIL_STEP, 4)
         moved = False
         while bid >= next_level:
             pos.last_trail_level = next_level
             new_sl = round(next_level - config.TRAIL_STEP, 4)
-            if pos.trail_sl is None or new_sl > pos.trail_sl:
+            if new_sl > pos.trail_sl:
                 pos.trail_sl = new_sl
             moved = True
             next_level = round(next_level + config.TRAIL_STEP, 4)
@@ -335,13 +327,7 @@ class Engine:
             self._log("TRAIL_UPDATE", side=pos.side.value, price=bid,
                        note=f"price reached {pos.last_trail_level:.2f} -- stop loss now {pos.trail_sl}")
 
-    def _clear(self, side: Side):
-        if side == Side.UP:
-            self.s.up_position = None
-        else:
-            self.s.down_position = None
-
-    def _close(self, pos: SidePosition, price: float, reason: str, note_prefix: str, trigger_price: Optional[float] = None):
+    def _close(self, pos: Position, price: float, reason: str, note_prefix: str, trigger_price: Optional[float] = None):
         fee = self.broker.taker_fee_amount(pos.shares, price)
         proceeds = pos.shares * price - fee
         pnl = proceeds - pos.cost
@@ -368,51 +354,45 @@ class Engine:
             return
         window_slug = self.s.window.slug
 
-        if not self.capital.halted:
-            for side, pos in ((Side.UP, self.s.up_position), (Side.DOWN, self.s.down_position)):
-                if pos is None:
-                    continue
-                bid = self._bid_for(side)
-                levels = self._bid_levels_for(side)
-                fill_price = self._realistic_fill_price(levels, pos.shares, bid)
-                if fill_price is None and levels is not None:
-                    # levels was a confirmed empty list (book fetched fine,
-                    # truly nothing resting) -- for a binary market about
-                    # to settle, nobody bidding on this side means it's
-                    # realistically worth close to nothing. Falling back
-                    # to pos.entry_price (flat, no loss) here would be the
-                    # same understatement bug as the trigger-price issue;
-                    # $0 is the honest worst case.
-                    fill_price = 0.0
-                    self._log("NO_LIQUIDITY", side=side.value, price=bid,
-                               note="window closed with zero bid depth on this side -- assuming worst case $0, not entry price")
-                elif fill_price is None:
-                    # levels was None too (no depth data at all this
-                    # tick, not a confirmed-empty book) -- genuine data
-                    # gap rather than confirmed illiquidity, so fall back
-                    # to the old flat assumption instead of guessing $0.
-                    fill_price = pos.entry_price
-                    self._log("NO_LIQUIDITY", side=side.value, price=bid,
-                               note="window closed with no book data at all on this side -- falling back to entry price, not a confirmed $0")
-                self._close(pos, price=fill_price, reason="FORCED_CLOSE",
-                            note_prefix="window closed, forced taker close", trigger_price=bid)
-                self.s.total_forced_closes += 1
-                self._clear(side)
+        if not self.capital.halted and self.s.position is not None:
+            pos = self.s.position
+            bid = self._bid_for(pos.side)
+            levels = self._bid_levels_for(pos.side)
+            fill_price = self._realistic_fill_price(levels, pos.shares, bid)
+            if fill_price is None and levels is not None:
+                # confirmed empty book right at window close -- for a
+                # binary market about to settle, nobody bidding on this
+                # side means it's realistically worth close to nothing.
+                fill_price = 0.0
+                self._log("NO_LIQUIDITY", side=pos.side.value, price=bid,
+                           note="window closed with zero bid depth on this side -- assuming worst case $0, not entry price")
+            elif fill_price is None:
+                # no depth data at all this tick (fetch gap, not a
+                # confirmed-empty book) -- fall back to the old flat
+                # assumption instead of guessing $0
+                fill_price = pos.entry_price
+                self._log("NO_LIQUIDITY", side=pos.side.value, price=bid,
+                           note="window closed with no book data at all on this side -- falling back to entry price, not a confirmed $0")
+            self._close(pos, price=fill_price, reason="FORCED_CLOSE",
+                        note_prefix="window closed, forced taker close", trigger_price=bid)
+            self.s.total_forced_closes += 1
+            self.s.position = None
 
         if not self.capital.halted and self.s.total_entries == 0:
             self.s.no_trade_windows += 1
-            self._log("NO_TRADE", note="never got a live ask to enter either side this window")
+            self._log("NO_TRADE", note=f"price never reached {config.TRAIL_ARM_PRICE} on either side this window")
 
         self.s.window = None
         self.capital.record_equity_point(window_slug)
 
     # ---- dashboard payload -------------------------------------------------
 
-    def _position_payload(self, pos: Optional[SidePosition], side: Side) -> Optional[dict]:
+    def _position_payload(self) -> Optional[dict]:
+        pos = self.s.position
         if pos is None:
             return None
         now = time.time()
-        bid = self._bid_for(side)
+        bid = self._bid_for(pos.side)
         mark = bid if bid is not None else pos.entry_price
         market_value = pos.shares * mark
         pos_pnl = market_value - pos.cost
@@ -420,36 +400,29 @@ class Engine:
             "side": pos.side.value, "entry_price": pos.entry_price, "shares": pos.shares,
             "cost": round(pos.cost, 4), "mark_price": mark,
             "unrealized_pnl": round(pos_pnl, 4), "seconds_since_entry": round(now - pos.entry_ts, 1),
-            "trail_sl": pos.trail_sl, "trail_armed": pos.trail_sl is not None,
-            "last_trail_level": pos.last_trail_level or None,
+            "trail_sl": pos.trail_sl, "trail_armed": True,
+            "last_trail_level": pos.last_trail_level,
         }
 
     def snapshot(self) -> dict:
-        up_payload = self._position_payload(self.s.up_position, Side.UP)
-        down_payload = self._position_payload(self.s.down_position, Side.DOWN)
-        open_positions = [p for p in (up_payload, down_payload) if p is not None]
+        payload = self._position_payload()
+        open_positions = [payload] if payload else []
 
-        unrealized_pnl = sum(p["unrealized_pnl"] for p in open_positions)
-        open_market_value = sum(p["shares"] * p["mark_price"] for p in open_positions)
+        unrealized_pnl = payload["unrealized_pnl"] if payload else 0.0
+        open_market_value = payload["shares"] * payload["mark_price"] if payload else 0.0
         realized_pnl = round(self.s.total_pnl, 4)
-
-        trail_filter_open = self._trail_filter_open(time.time())
-        seconds_until_trail_active = None
-        if self.s.window is not None and not trail_filter_open:
-            seconds_until_trail_active = round(
-                config.TRAIL_MIN_SECONDS - (time.time() - self.s.window.open_ts), 1)
 
         if self.capital.halted:
             status = "halted"
-        elif open_positions:
+        elif payload:
             status = "open"
-        elif self.s.entries_done:
-            status = "closed"
+        elif self.s.done_for_window:
+            status = "done"
         else:
-            status = "entering"
+            status = "watching"
 
         return {
-            "engine": "TRAIL", "label": "Dual-entry trailing stop",
+            "engine": "TRAIL", "label": "One-way re-arming trailing stop",
 
             "balance": round(self.capital.balance, 2),
             "starting_capital": config.STARTING_CAPITAL,
@@ -462,15 +435,13 @@ class Engine:
             "open_market_value": round(open_market_value, 4),
             "last_window_pnl": round(self.s.last_window_pnl, 4),
 
-            "up_position": up_payload,
-            "down_position": down_payload,
+            "position": payload,
             "open_positions": open_positions,
-
-            "trail_filter_open": trail_filter_open,
-            "seconds_until_trail_active": seconds_until_trail_active,
+            "done_for_window": self.s.done_for_window,
 
             "fills_this_window": self.s.fills_this_window,
             "total_entries": self.s.total_entries,
+            "total_rearms": self.s.total_rearms,
             "total_tp_fills": self.s.total_tp_fills,
             "total_sl_fills": self.s.total_sl_fills,
             "total_trail_updates": self.s.total_trail_updates,
@@ -487,7 +458,6 @@ class Engine:
                 "shares_per_side": config.SHARES_PER_SIDE,
                 "trail_arm_price": config.TRAIL_ARM_PRICE,
                 "trail_step": config.TRAIL_STEP,
-                "trail_min_seconds": config.TRAIL_MIN_SECONDS,
                 "tp_price": config.TP_PRICE,
             },
         }
