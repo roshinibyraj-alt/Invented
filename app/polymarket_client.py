@@ -221,40 +221,79 @@ class PolymarketClient:
         return None
 
     async def get_book(self, token_id: str) -> "tuple[Optional[float], Optional[float]]":
-        """Best bid and best ask for a token, from the real order book
-        (not a synthesized spread around the midpoint). Returns
-        (best_bid, best_ask); either can be None if that side of the
-        book is empty or the request fails.
+        """Best bid and best ask for a token -- thin wrapper around
+        get_book_full() kept for any caller that only wants the top of
+        book. Either can be None if that side of the book is empty or
+        the request fails."""
+        full = await self.get_book_full(token_id)
+        if full is None:
+            return None, None
+        return full["best_bid"], full["best_ask"]
+
+    async def get_book_full(self, token_id: str) -> "Optional[dict]":
+        """Full order book for a token, not just the top price -- this is
+        what lets a caller price a real fill by walking through available
+        size instead of assuming unlimited depth at the best quote (which
+        badly overstates achievable fill quality once a side goes
+        illiquid, e.g. late in a window once one side is clearly losing).
+
+        Returns None if the request fails outright (unknown book state --
+        caller should treat this tick as "no data" and fall back to
+        whatever it had). Returns {"best_bid", "best_ask", "bids", "asks"}
+        on success, where "bids"/"asks" are lists of (price, size) tuples,
+        best price first, size in shares -- an empty list is a real
+        signal that the book has NO resting orders on that side right
+        now (as opposed to None, which means the fetch itself failed).
 
         Convention: ask is always >= bid (ask = lowest price a seller
         will accept, bid = highest price a buyer will pay). The /book
-        response's bids/asks arrays aren't guaranteed sorted here, so
-        best bid = max price in bids[], best ask = min price in asks[]."""
+        response's bids/asks arrays aren't guaranteed sorted here, so we
+        sort bids descending (best/highest first) and asks ascending
+        (best/lowest first)."""
         if not token_id:
-            return None, None
+            return None
         try:
             resp = await self._client.get(
                 f"{config.CLOB_API_BASE}/book", params={"token_id": token_id}
             )
             if resp.status_code != 200:
-                return None, None
+                return None
             data = resp.json()
         except Exception:
-            return None, None
+            return None
         if not isinstance(data, dict):
-            return None, None
+            return None
 
-        def best(levels, pick_max: bool):
-            if not levels:
-                return None
-            try:
-                prices = [float(lvl.get("price")) for lvl in levels if lvl.get("price") is not None]
-            except Exception:
-                return None
-            if not prices:
-                return None
-            return max(prices) if pick_max else min(prices)
+        def parse_levels(levels):
+            out = []
+            for lvl in levels or []:
+                try:
+                    price = float(lvl.get("price"))
+                except Exception:
+                    continue
+                try:
+                    size = float(lvl.get("size"))
+                except Exception:
+                    size = 0.0
+                out.append((price, size))
+            return out
 
-        best_bid = best(data.get("bids"), pick_max=True)
-        best_ask = best(data.get("asks"), pick_max=False)
-        return best_bid, best_ask
+        bids = parse_levels(data.get("bids"))
+        asks = parse_levels(data.get("asks"))
+        # If the API didn't actually give us usable size data on any
+        # level, we can't walk the book for a realistic fill -- treat
+        # depth as unknown (None) rather than pretending every level is
+        # zero-size, which would make nothing ever fillable.
+        bids_have_size = any(size > 0 for _, size in bids)
+        asks_have_size = any(size > 0 for _, size in asks)
+
+        bids.sort(key=lambda ps: -ps[0])
+        asks.sort(key=lambda ps: ps[0])
+        best_bid = bids[0][0] if bids else None
+        best_ask = asks[0][0] if asks else None
+
+        return {
+            "best_bid": best_bid, "best_ask": best_ask,
+            "bids": bids if bids_have_size else (None if bids else []),
+            "asks": asks if asks_have_size else (None if asks else []),
+        }

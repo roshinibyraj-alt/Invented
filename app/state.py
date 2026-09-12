@@ -54,9 +54,16 @@ class BotState:
         if self.current_window is None or window.slug != self.current_window.slug:
             await self._roll_window(window)
 
-        # CLOB order book only -- no Gamma price fallback.
-        up_bid, up_ask = await self.client.get_book(self.current_window.token_up)
-        down_bid, down_ask = await self.client.get_book(self.current_window.token_down)
+        # CLOB order book only -- no Gamma price fallback. Full depth (not
+        # just top-of-book) so the engine can price fills realistically
+        # against actual available size instead of assuming unlimited
+        # depth at the best quote.
+        up_book = await self.client.get_book_full(self.current_window.token_up)
+        down_book = await self.client.get_book_full(self.current_window.token_down)
+        up_bid = up_book["best_bid"] if up_book else None
+        up_ask = up_book["best_ask"] if up_book else None
+        down_bid = down_book["best_bid"] if down_book else None
+        down_ask = down_book["best_ask"] if down_book else None
         self.last_up_bid, self.last_up_ask = up_bid, up_ask
         self.last_down_bid, self.last_down_ask = down_bid, down_ask
 
@@ -65,7 +72,13 @@ class BotState:
         self.price_history.append(PricePoint(ts=now, up=up_mid, down=down_mid))
 
         seconds_to_close = self.current_window.close_ts - now
-        self.engine.on_tick(up_bid, up_ask, down_bid, down_ask, seconds_to_close, now=now)
+        self.engine.on_tick(
+            up_bid, up_ask, down_bid, down_ask, seconds_to_close, now=now,
+            up_bid_levels=up_book["bids"] if up_book else None,
+            up_ask_levels=up_book["asks"] if up_book else None,
+            down_bid_levels=down_book["bids"] if down_book else None,
+            down_ask_levels=down_book["asks"] if down_book else None,
+        )
 
     @staticmethod
     def _midpoint(bid: Optional[float], ask: Optional[float]) -> Optional[float]:

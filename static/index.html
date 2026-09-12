@@ -40,6 +40,10 @@
   .clock-row .slug{font-family:var(--mono); font-size:12px; color:var(--muted);}
   .clock-row .countdown{font-family:var(--mono); font-size:30px; font-weight:600; letter-spacing:.5px;}
   .clock-row .countdown.hot{color:var(--amber);}
+  .cold-start-bar{height:5px; border-radius:3px; background:#1a222f; margin-top:4px; width:220px; overflow:hidden;}
+  .cold-start-fill{height:100%; background:var(--amber); border-radius:3px; transition:width .3s linear;}
+  .cold-start-lbl{font-family:var(--mono); font-size:10.5px; color:var(--amber); margin-top:5px;}
+
   .gauge-panel{background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:18px; display:flex; flex-direction:column; gap:16px;}
   .gauge{display:flex; flex-direction:column; gap:6px;}
   .gauge.dimmed{opacity:.4;}
@@ -136,6 +140,7 @@
   .log-row .ev.TP_FILL{color:var(--mint);}
   .log-row .ev.SL_FILL{color:var(--coral);}
   .log-row .ev.FORCED_CLOSE{color:var(--violet);}
+  .log-row .ev.NO_LIQUIDITY{color:var(--amber);}
   .log-row .ev.HALTED{color:var(--coral);}
   .log-row .ev.NO_TRADE{color:var(--faint);}
   .log-row .note{color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
@@ -148,7 +153,7 @@
   <header>
     <div>
       <h1>Dual-entry trailing stop</h1>
-      <div class="sub">BTC 5m up/down — buy both sides immediately at window open (taker, real ask), 300sh each, TP 0.99 both sides, per-side trailing stop arms at 0.60 and ratchets up 0.10 at a time</div>
+      <div class="sub">BTC 5m up/down — buy both sides immediately at window open (taker, real ask), 300sh each, TP 0.99 both sides, per-side trailing stop can only arm after 2min AND price at 0.60+, then ratchets up 0.10 at a time — exits price against real book depth, not just top-of-book</div>
     </div>
     <div class="status-pill"><span class="dot" id="statusDot"></span><span id="statusText">connecting</span></div>
   </header>
@@ -158,6 +163,10 @@
   <div class="clock-row">
     <div>
       <div class="slug" id="windowSlug">waiting for window</div>
+      <div id="trailFilterWrap" style="display:none;">
+        <div class="cold-start-bar"><div class="cold-start-fill" id="trailFilterFill" style="width:0%;"></div></div>
+        <div class="cold-start-lbl" id="trailFilterLbl"></div>
+      </div>
     </div>
     <div class="countdown" id="countdown">--:--</div>
   </div>
@@ -262,6 +271,20 @@ async function poll(){
       const cd = $('countdown');
       cd.textContent = `${m}:${String(sec).padStart(2,'0')}`;
       cd.className = 'countdown' + (remaining <= 20 ? ' hot' : '');
+
+      const wrap = $('trailFilterWrap');
+      if(!e.trail_filter_open && !e.halted && e.seconds_until_trail_active != null){
+        wrap.style.display = 'block';
+        const total = (e.def && e.def.trail_min_seconds) || 120;
+        const secsLeft = Math.max(0, e.seconds_until_trail_active);
+        const pct = Math.min(100, ((total-secsLeft)/total)*100);
+        $('trailFilterFill').style.width = pct + '%';
+        $('trailFilterLbl').textContent = `trailing stop filter — arms in ${Math.ceil(secsLeft)}s`;
+      } else {
+        wrap.style.display = 'none';
+      }
+    } else {
+      $('trailFilterWrap').style.display = 'none';
     }
 
     const book = s.book || {};
@@ -293,6 +316,7 @@ function renderEngineCard(e){
     ['Entry', 'both sides, immediately, taker'],
     ['Shares / side', fmtSh(e.def.shares_per_side)],
     ['Trail arms at', fmtP(e.def.trail_arm_price)],
+    ['Trail min delay', `${e.def.trail_min_seconds}s`],
     ['Trail step', fmtP(e.def.trail_step)],
     ['TP (both sides)', fmtP(e.def.tp_price)],
     ['Initial SL', 'none until trail arms'],
@@ -342,8 +366,8 @@ function renderStats(e){
   const tiles = [
     ['total_entries','entries',''], ['total_trail_updates','trail steps',''],
     ['total_tp_fills','tp fills','win'], ['total_sl_fills','sl fills','loss'],
-    ['total_forced_closes','forced close',''], ['no_trade_windows','no-trade',''],
-    ['win_rate','win rate %',''],
+    ['total_forced_closes','forced close',''], ['total_illiquid_skips','illiquid skips',''],
+    ['no_trade_windows','no-trade',''], ['win_rate','win rate %',''],
   ];
   $('statsGrid').innerHTML = tiles.map(([key,label,cls]) => {
     let v = e[key];
