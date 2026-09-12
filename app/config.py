@@ -1,7 +1,7 @@
 """
 Central configuration for the BTC 5-min up/down bot.
 
-Single engine -- ladder breakout with immediate at-mid limit entries:
+Single engine -- ladder breakout with immediate TAKER entries:
 
   1. Cold start: do nothing for the first ARM_DELAY_SECONDS (60s) of each
      window -- no monitoring, no orders.
@@ -11,28 +11,30 @@ Single engine -- ladder breakout with immediate at-mid limit entries:
      is no longer watched (they're complementary, so once one is rallying
      the other's falling).
   3. Ladder: every time the armed side's mid-price climbs through the
-     next threshold in LADDER_THRESHOLDS (0.65 / 0.75 / 0.85), place one
-     new resting limit BUY order (maker) *immediately, right at that
-     tick's current mid price* -- not offset below it:
-       - crosses 0.65 -> resting buy @ (mid at that tick, ~0.65)
-       - crosses 0.75 -> resting buy @ (mid at that tick, ~0.75)
-       - crosses 0.85 -> resting buy @ (mid at that tick, ~0.85)
-     Each rung is placed once and stays resting -- since a buy limit sits
-     between the bid and ask, it still needs the ask to fall back down
-     to/through it to fill (roughly half the spread), it just isn't
-     waiting for a full 0.10 pullback anymore. It is NOT cancelled just
-     because price keeps climbing past it.
+     next threshold in LADDER_THRESHOLDS (0.65 / 0.75 / 0.85), fire an
+     immediate TAKER buy -- no resting limit order, so the fill is
+     guaranteed instead of waiting on a pullback that might never come.
+     The price actually paid is the REAL best ask read from the book at
+     the moment of firing (checked fresh, not assumed to equal the mid
+     that triggered the threshold) -- that's the realistic fill price,
+     and it's what gets recorded as the position's entry price.
   4. Per fill: every rung that fills becomes its own independent
-     position of SHARES_PER_RUNG (100) shares with its own stop loss
-     (LADDER_SL_PRICE, 0.50 -- taker market sell the instant the bid
-     drops to/through it) and take profit (LADDER_TP_PRICE, 0.99 --
-     resting maker sell). Up to 3 positions can be open at once in one
-     window if all three rungs fill.
-  5. Window close: cancel any rungs that never filled; force a taker
-     close on any positions still open.
+     position of SHARES_PER_RUNG shares (doubling after every stop loss,
+     see below) with its own stop loss (LADDER_SL_PRICE, 0.50) and take
+     profit (LADDER_TP_PRICE, 0.99) -- both taker market orders, filled
+     at the real current bid the instant it drops to/through SL or rises
+     to/through TP. Up to 3 positions can be open at once in one window
+     if all three rungs fill.
+  5. Rearm: EVERY stop loss hit (not just the first) doubles the size
+     used for every rung placed for the rest of the window, and resets
+     the engine to watch both sides again from scratch. This compounds
+     -- a second SL doubles again on top of the first. The SL and TP
+     price levels never change with size; a doubled-up rung shares the
+     exact same 0.50 SL / 0.99 TP as every other rung.
+  6. Window close: force a taker close on any positions still open.
 
-Sizing is flat -- SHARES_PER_RUNG every time, no martingale or
-anti-martingale progression carried between windows or between rungs.
+Sizing starts flat at SHARES_PER_RUNG and only changes via the SL-driven
+doubling above -- never any other progression.
 """
 import os
 
@@ -57,17 +59,16 @@ LADDER_SL_PRICE = 0.50                  # shared stop loss for every filled rung
 LADDER_TP_PRICE = 0.99                  # shared take profit for every filled rung
 LADDER_SHARES_PER_RUNG = 100.0          # flat size, every rung, every window
 
-MAKER_REBATE_FRACTION = 0.20  # rebate earned on every resting-order fill (maker side)
-
 # Demo capital: single source of truth for the paper balance -- debited
 # on every buy fill, credited on every TP/SL/forced-close settlement.
 # Halts permanently if it ever drops below $0.
 STARTING_CAPITAL = float(os.getenv("STARTING_CAPITAL", "2000"))
 
 # ---- Trading fees -----------------------------------------------------
-# Ladder rung entries and TP exits are resting maker orders (no fee, earn
-# the maker rebate above); the stop loss and any forced window-end close
-# are taker market orders and pay the fee for real. Verify against
+# Every fill in this engine is a taker market order now -- rung entries,
+# TP exits, SL exits, and forced window-end closes all pay the taker fee
+# for real. There is no maker rebate anywhere anymore (it only applied
+# to resting orders, and nothing rests). Verify against
 # GET https://clob.polymarket.com/fee-rate?token_id=... before trading
 # real money.
 APPLY_TAKER_FEES = True

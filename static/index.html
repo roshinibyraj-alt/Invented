@@ -140,9 +140,8 @@
   .log-row .t{color:var(--faint);}
   .log-row .ev{font-weight:600; font-size:9.5px; padding:2px 7px; border-radius:5px; background:#1a222f; text-align:center; white-space:nowrap;}
   .log-row .ev.ARMED{color:var(--amber);}
-  .log-row .ev.RUNG_PLACED{color:var(--violet);}
   .log-row .ev.RUNG_FILL{color:var(--mint);}
-  .log-row .ev.RUNG_CANCELLED{color:var(--faint);}
+  .log-row .ev.RUNG_SKIPPED{color:var(--faint);}
   .log-row .ev.REARMED{color:var(--violet);}
   .log-row .ev.TP_FILL{color:var(--mint);}
   .log-row .ev.SL_FILL{color:var(--coral);}
@@ -159,7 +158,7 @@
   <header>
     <div>
       <h1>Ladder breakout</h1>
-      <div class="sub">BTC 5m up/down — 60s cold start, arm @0.65, ladder rungs @0.65/0.75/0.85 (at mid), SL 0.50, TP 0.99, one rearm at 2x size after SL</div>
+      <div class="sub">BTC 5m up/down — 60s cold start, arm @0.65, ladder rungs @0.65/0.75/0.85 (taker, real ask), SL 0.50, TP 0.99, doubles size on every SL (compounding)</div>
     </div>
     <div class="status-pill"><span class="dot" id="statusDot"></span><span id="statusText">connecting</span></div>
   </header>
@@ -319,21 +318,22 @@ function renderEngineCard(e){
   const el = $('engineCard');
   if(!e || !e.def){ el.innerHTML = '<div class="empty">no data</div>'; return; }
   const statusLabels = {
-    waiting:'watching for 0.65', armed:'armed, entries at mid', resting:'orders resting',
+    waiting:'watching for 0.65', armed:'armed, entries fill instantly (taker)',
     open:'position(s) open', rearmed:'rearmed \u2014 watching both sides', halted:'halted',
   };
 
+  const rearmMult = Math.pow(2, e.rearms_this_window || 0);
   const defRowsHtml = [
     ['Cold start', `${e.def.arm_delay_seconds}s`],
     ['Thresholds', e.def.thresholds.join(' / ')],
-    ['Entry style', 'at mid, no offset'],
-    ['SL / TP', `${fmtP(e.def.sl_price)} / ${fmtP(e.def.tp_price)}`],
-    ['Shares / rung', `${fmtSh(e.current_shares_per_rung)}${e.rearm_used?' (rearmed 2x)':''}`],
+    ['Entry style', 'taker, fills at real ask'],
+    ['SL / TP', `${fmtP(e.def.sl_price)} / ${fmtP(e.def.tp_price)} (same for every rung, any size)`],
+    ['Shares / rung', `${fmtSh(e.current_shares_per_rung)}${e.rearms_this_window?` (${rearmMult}x base, ${e.rearms_this_window} SL rearm(s))`:''}`],
     ['Armed side', e.armed_side || '—'],
   ].map(([k,v]) => `<div class="def-item"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
 
-  const rearmBanner = e.rearm_used
-    ? `<div class="rearm-banner">Rearmed after a stop loss \u2014 now watching either side at ${fmtSh(e.current_shares_per_rung)}sh/rung. This window's one rearm is used.</div>`
+  const rearmBanner = e.rearms_this_window
+    ? `<div class="rearm-banner">${e.rearms_this_window} stop-loss rearm(s) so far this window \u2014 now watching either side at ${fmtSh(e.current_shares_per_rung)}sh/rung (${rearmMult}x base size). Every further SL doubles it again.</div>`
     : '';
 
   const resting = e.resting_orders || [];
@@ -347,7 +347,7 @@ function renderEngineCard(e){
         <span class="age">${Math.floor(o.seconds_resting)}s resting</span>
       </div>`).join('');
   } else {
-    restingHtml = `<div class="position-box empty">no resting orders</div>`;
+    restingHtml = `<div class="position-box empty">none — taker entries fill instantly, nothing rests</div>`;
   }
 
   const positions = e.open_positions || [];

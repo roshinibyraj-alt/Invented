@@ -1,11 +1,16 @@
 """
-Trading engine -- ladder breakout with immediate at-mid limit entries.
+Trading engine -- ladder breakout with immediate taker entries.
 
 See app/config.py for the full strategy write-up. Summary: sit out the
 first minute of each window, then watch for either side to break 0.65.
-Once armed, place a resting limit buy right at the current mid the
-instant price climbs through each threshold (0.65/0.75/0.85). Each fill
-is its own 100-share position with a shared SL (0.50) and TP (0.99).
+Once armed, fire an immediate taker buy the instant price climbs through
+each threshold (0.65/0.75/0.85) -- no resting orders, so every rung is
+guaranteed to fill (subject to the fee spent to guarantee it). The real
+best-ask price at the moment of firing is what actually gets paid, not
+the mid price that triggered the threshold. Each fill is its own share
+position with a shared SL (0.50) and TP (0.99). Every stop-loss hit
+doubles the size used for every rung placed for the rest of the window
+(cumulative -- a second SL doubles again, on top of the first).
 """
 import time
 from dataclasses import dataclass, field
@@ -50,18 +55,11 @@ class CapitalPool:
 # ---------------------------------------------------------------------------
 
 @dataclass
-class RestingOrder:
-    threshold: float      # the price level whose crossing placed this rung
-    limit_price: float    # placed at the mid price when this rung's threshold was crossed
-    shares: float
-    placed_ts: float
-
-
-@dataclass
 class LadderPosition:
     side: Side             # recorded at fill time -- stays fixed even if the engine later rearms onto the other side
     threshold: float
-    entry_price: float
+    entry_price: float     # the REAL ask the taker buy actually paid, not the mid that triggered it
+    trigger_mid: float     # the mid price that crossed the threshold, kept for reference/logging only
     shares: float
     cost: float
     entry_ts: float
@@ -77,11 +75,10 @@ class EngineState:
 
     armed_side: Optional[Side] = None
     next_threshold_idx: int = 0
-    resting_orders: List[RestingOrder] = field(default_factory=list)
     positions: List[LadderPosition] = field(default_factory=list)
 
-    shares_per_rung: float = 0.0  # set from config in reset_for_window; doubles after the one rearm
-    rearm_used: bool = False
+    shares_per_rung: float = 0.0  # set from config in reset_for_window; doubles every time a SL fires
+    rearms_this_window: int = 0
 
     fills_this_window: int = 0
     last_window_pnl: float = 0.0
@@ -100,10 +97,9 @@ class EngineState:
 
 
 class Engine:
-    """Ladder breakout / pullback limit entries, driven off its own
-    capital pool. Kept as the class name `Engine` / constructed the same
-    way (Engine(broker)) so app/state.py doesn't need structural
-    changes."""
+    """Ladder breakout / taker entries, driven off its own capital pool.
+    Kept as the class name `Engine` / constructed the same way
+    (Engine(broker)) so app/state.py doesn't need structural changes."""
 
     name = "LADDER"
 
@@ -121,10 +117,9 @@ class Engine:
         self.s.window = window
         self.s.armed_side = None
         self.s.next_threshold_idx = 0
-        self.s.resting_orders = []
         self.s.positions = []
         self.s.shares_per_rung = config.LADDER_SHARES_PER_RUNG
-        self.s.rearm_used = False
+        self.s.rearms_this_window = 0
         self.s.fills_this_window = 0
         self.s.last_window_pnl = 0.0
 
@@ -156,7 +151,6 @@ class Engine:
             self._check_arm(now)
         else:
             self._check_ladder_extend(now)
-            self._check_rung_fills(now)
 
     # ---- arm: first side to cross the first threshold -----------------------
 
@@ -175,10 +169,10 @@ class Engine:
         mid = self._armed_mid()
         self._log("ARMED", side=side.value, price=mid,
                    note=f"{side.value} reached {config.LADDER_THRESHOLDS[0]} -- watching this side only from here")
-        self._place_rung(config.LADDER_THRESHOLDS[0], mid, now)
+        self._fire_entry(config.LADDER_THRESHOLDS[0], mid, now)
         self.s.next_threshold_idx = 1
 
-    # ---- ladder: place a new resting rung each time price climbs a step -----
+    # ---- ladder: fire an immediate taker buy each time price climbs a step --
 
     def _armed_mid(self) -> Optional[float]:
         if self.s.armed_side == Side.UP:
@@ -197,63 +191,52 @@ class Engine:
             return
         while self.s.next_threshold_idx < len(config.LADDER_THRESHOLDS) and \
                 mid >= config.LADDER_THRESHOLDS[self.s.next_threshold_idx]:
-            self._place_rung(config.LADDER_THRESHOLDS[self.s.next_threshold_idx], mid, now)
+            self._fire_entry(config.LADDER_THRESHOLDS[self.s.next_threshold_idx], mid, now)
             self.s.next_threshold_idx += 1
 
-    def _place_rung(self, threshold: float, mid_price: float, now: float):
-        limit_price = round(mid_price, 4)  # placed immediately at the current mid, no offset
-        order = RestingOrder(threshold=threshold, limit_price=limit_price,
-                              shares=self.s.shares_per_rung, placed_ts=now)
-        self.s.resting_orders.append(order)
-        self.s.total_rungs_placed += 1
-        self._log("RUNG_PLACED", side=self.s.armed_side.value, price=limit_price,
-                   shares=order.shares,
-                   note=f"{self.s.armed_side.value} crossed {threshold} -- resting limit buy "
-                        f"{order.shares:.0f}sh @ {limit_price} (placed at current mid)"
-                        + (" [rearmed, double size]" if self.s.rearm_used else ""))
-
-    # ---- fills: resting buy fills when the ask pulls back to/through it ----
-
-    def _check_rung_fills(self, now: float):
+    def _fire_entry(self, threshold: float, trigger_mid: float, now: float):
+        """Taker buy, fired the instant the threshold is crossed. Filled at
+        the REAL best ask from the book (self._armed_ask()), not the mid
+        that triggered it -- that ask is checked fresh right here so the
+        recorded entry price is the realistic fill, not an assumption."""
         ask = self._armed_ask()
-        if ask is None or not self.s.resting_orders:
+        if ask is None:
+            # no live ask to fill against yet -- skip this tick, the ladder
+            # extend loop will retry crossing this same threshold next tick
+            self._log("RUNG_SKIPPED", side=self.s.armed_side.value, price=trigger_mid,
+                       note=f"{threshold} crossed but no live ask to fill a taker buy against -- waiting for a quote")
+            self.s.next_threshold_idx -= 0  # no-op, kept for clarity: idx is only advanced by the caller on success
             return
-        still_resting = []
-        for order in self.s.resting_orders:
-            if ask <= order.limit_price:
-                self._fill_rung(order, now)
-            else:
-                still_resting.append(order)
-        self.s.resting_orders = still_resting
 
-    def _fill_rung(self, order: RestingOrder, now: float):
-        rebate = config.MAKER_REBATE_FRACTION * self.broker.taker_fee_amount(order.shares, order.limit_price)
-        cost = order.shares * order.limit_price - rebate
+        shares = self.s.shares_per_rung
+        fee = self.broker.taker_fee_amount(shares, ask)
+        cost = shares * ask + fee
         self.capital.balance -= cost
         self.s.fills_this_window += 1
         self.s.total_fills += 1
+        self.s.total_rungs_placed += 1
 
-        self._log("RUNG_FILL", side=self.s.armed_side.value, price=order.limit_price, shares=order.shares,
-                   fee=-rebate,
-                   note=(f"pullback to {order.limit_price} filled the {order.threshold} rung -- "
-                         f"{order.shares:.0f}sh @ {order.limit_price} (rebate ${rebate:.4f}) -- "
+        slip = round(ask - trigger_mid, 4)
+        self._log("RUNG_FILL", side=self.s.armed_side.value, price=ask, shares=shares, fee=fee,
+                   note=(f"{threshold} rung, taker buy: {shares:.0f}sh @ real ask {ask} "
+                         f"(crossed at mid {trigger_mid}, slippage {slip:+.4f}, fee ${fee:.4f}) -- "
                          f"TP {config.LADDER_TP_PRICE}, SL {config.LADDER_SL_PRICE}"))
+
         if self.capital.check_halt():
             self._log("HALTED", note=f"balance ${self.capital.balance:.2f} < $0 -- bankrupt")
             return
 
         self.s.positions.append(LadderPosition(
-            side=self.s.armed_side, threshold=order.threshold, entry_price=order.limit_price,
-            shares=order.shares, cost=cost, entry_ts=now,
+            side=self.s.armed_side, threshold=threshold, entry_price=ask, trigger_mid=trigger_mid,
+            shares=shares, cost=cost, entry_ts=now,
         ))
 
-    # ---- exits: SL (taker) or TP (maker), independent per position ---------
+    # ---- exits: SL and TP, both taker, independent per position -------------
 
     def _check_exits(self, now: float):
         if not self.s.positions:
             return
         still_open = []
-        sl_hit = False
         for pos in self.s.positions:
             bid = self._bid_for(pos.side)
             if bid is None:
@@ -262,58 +245,46 @@ class Engine:
             if bid <= config.LADDER_SL_PRICE:
                 self._close_taker(pos, price=bid, reason="SL_FILL", note_prefix="stop loss hit")
                 self.s.total_sl_fills += 1
-                sl_hit = True
+                # Every SL hit rearms -- not just the first one in a window.
+                self._rearm(now)
             elif bid >= config.LADDER_TP_PRICE:
-                self._close_maker(pos, price=config.LADDER_TP_PRICE, reason="TP_FILL", note_prefix="TP hit")
+                # taker sell at the REAL current bid (not the 0.99 target
+                # itself) -- that bid is what a market sell actually fills at
+                self._close_taker(pos, price=bid, reason="TP_FILL", note_prefix="take profit hit")
                 self.s.total_tp_fills += 1
             else:
                 still_open.append(pos)
         self.s.positions = still_open
-        if sl_hit:
-            self._maybe_rearm(now)
 
-    def _maybe_rearm(self, now: float):
-        """After the FIRST stop loss hit in a window, rearm: cancel any
-        other still-resting orders, forget which side was armed (watch
-        both sides again from scratch, no cold start), and double the
-        per-rung size for everything placed from here on. Only fires
-        once per window -- a second SL later in the same window is a
-        no-op here."""
-        if self.s.rearm_used:
-            return
-        self.s.rearm_used = True
+    def _rearm(self, now: float):
+        """Fires on EVERY stop loss hit in a window (not just the first):
+        cancel nothing (there's nothing resting to cancel -- entries fire
+        instantly now), forget which side was armed so the engine watches
+        both sides again from scratch, and double the per-rung size for
+        everything placed from here on. This compounds: 2nd SL in the same
+        window doubles again on top of the first, etc. The SL/TP price
+        levels themselves (config.LADDER_SL_PRICE / LADDER_TP_PRICE) never
+        change with size -- every rung, at any size, shares the exact same
+        stop loss and take profit."""
+        self.s.rearms_this_window += 1
         self.s.total_rearms += 1
-
-        for order in self.s.resting_orders:
-            self.s.total_cancelled_rungs += 1
-            self._log("RUNG_CANCELLED", side=self.s.armed_side.value if self.s.armed_side else None,
-                       price=order.limit_price,
-                       note=f"rearming -- cancelling unfilled {order.threshold} rung @ {order.limit_price}")
-        self.s.resting_orders = []
 
         self.s.armed_side = None
         self.s.next_threshold_idx = 0
-        self.s.shares_per_rung = config.LADDER_SHARES_PER_RUNG * 2
+        self.s.shares_per_rung = self.s.shares_per_rung * 2
 
         self._log("REARMED", note=(
             f"stop loss hit -- rearming to watch either side again, now {self.s.shares_per_rung:.0f}sh/rung "
-            f"(double) -- this window's one rearm is used"
+            f"({self.s.rearms_this_window} rearm(s) this window, {2 ** self.s.rearms_this_window:.0f}x base size) "
+            f"-- SL stays {config.LADDER_SL_PRICE} / TP stays {config.LADDER_TP_PRICE} for these too"
         ))
-
-    def _close_maker(self, pos: LadderPosition, price: float, reason: str, note_prefix: str):
-        rebate = config.MAKER_REBATE_FRACTION * self.broker.taker_fee_amount(pos.shares, price)
-        proceeds = pos.shares * price + rebate
-        pnl = proceeds - pos.cost
-        self._settle(pos, proceeds, pnl, reason, fee=rebate,
-                      note=f"{note_prefix} (maker): rung {pos.threshold} {pos.shares:.0f}sh sold @ {price} "
-                           f"(entry {pos.entry_price}, rebate ${rebate:.4f}, pnl ${pnl:.4f})")
 
     def _close_taker(self, pos: LadderPosition, price: float, reason: str, note_prefix: str):
         fee = self.broker.taker_fee_amount(pos.shares, price)
         proceeds = pos.shares * price - fee
         pnl = proceeds - pos.cost
         self._settle(pos, proceeds, pnl, reason, fee=fee,
-                      note=f"{note_prefix} (taker): rung {pos.threshold} {pos.shares:.0f}sh sold @ {price} "
+                      note=f"{note_prefix} (taker, real fill @ {price}): rung {pos.threshold} {pos.shares:.0f}sh sold "
                            f"(entry {pos.entry_price}, fee ${fee:.4f}, pnl ${pnl:.4f})")
 
     def _settle(self, pos: LadderPosition, proceeds: float, pnl: float, reason: str, fee: float, note: str):
@@ -335,14 +306,6 @@ class Engine:
             return
         window_slug = self.s.window.slug
 
-        if not self.capital.halted and self.s.resting_orders:
-            for order in self.s.resting_orders:
-                self.s.total_cancelled_rungs += 1
-                self._log("RUNG_CANCELLED", side=self.s.armed_side.value if self.s.armed_side else None,
-                           price=order.limit_price,
-                           note=f"window closed -- cancelling unfilled {order.threshold} rung @ {order.limit_price}")
-            self.s.resting_orders = []
-
         if not self.capital.halted and self.s.positions:
             for pos in list(self.s.positions):
                 bid = self._bid_for(pos.side)
@@ -363,11 +326,6 @@ class Engine:
 
     def snapshot(self) -> dict:
         now = time.time()
-
-        resting_orders = [{
-            "threshold": o.threshold, "limit_price": o.limit_price, "shares": o.shares,
-            "seconds_resting": round(now - o.placed_ts, 1),
-        } for o in self.s.resting_orders]
 
         open_positions = []
         unrealized_pnl = 0.0
@@ -393,17 +351,15 @@ class Engine:
             status = "halted"
         elif self.s.positions:
             status = "open"
-        elif self.s.resting_orders:
-            status = "resting"
         elif self.s.armed_side:
             status = "armed"
-        elif self.s.rearm_used:
+        elif self.s.rearms_this_window:
             status = "rearmed"
         else:
             status = "waiting"
 
         return {
-            "engine": "LADDER", "label": "Ladder breakout 0.65 / 0.75 / 0.85",
+            "engine": "LADDER", "label": "Ladder breakout 0.65 / 0.75 / 0.85 (taker)",
 
             "balance": round(self.capital.balance, 2),
             "starting_capital": config.STARTING_CAPITAL,
@@ -418,10 +374,11 @@ class Engine:
 
             "armed_side": self.s.armed_side.value if self.s.armed_side else None,
             "next_threshold": next_threshold,
-            "resting_orders": resting_orders,
+            "resting_orders": [],  # kept for API/dashboard compatibility -- taker fills are instant, nothing ever rests
             "open_positions": open_positions,
 
-            "rearm_used": self.s.rearm_used,
+            "rearm_used": self.s.rearms_this_window > 0,
+            "rearms_this_window": self.s.rearms_this_window,
             "current_shares_per_rung": self.s.shares_per_rung,
 
             "fills_this_window": self.s.fills_this_window,
