@@ -312,8 +312,8 @@ function renderEngineCard(e){
     ['After TP', 'closes, no more entries this window'],
   ].map(([k,v]) => `<div class="def-item"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
 
-  const rearmBanner = e.total_rearms
-    ? `<div class="rearm-banner">${e.total_rearms} stop-out rearm(s) so far this window \u2014 watching both sides again for the next ${fmtP(e.def.trail_arm_price)} cross.</div>`
+  const rearmBanner = e.rearms_this_window
+    ? `<div class="rearm-banner">${e.rearms_this_window} stop-out rearm(s) so far this window \u2014 watching both sides again for the next ${fmtP(e.def.trail_arm_price)} cross.</div>`
     : '';
   const doneBanner = e.done_for_window
     ? `<div class="rearm-banner">Take profit hit \u2014 no more entries for the rest of this window.</div>`

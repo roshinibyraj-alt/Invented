@@ -55,6 +55,32 @@ class CapitalPool:
 
 
 # ---------------------------------------------------------------------------
+# Lifetime session stats -- persists across windows for the life of the
+# Engine, just like CapitalPool. Anything shown on the dashboard as a
+# running/cumulative total (realized P&L, win/loss record, fill counts)
+# belongs here, NOT in EngineState, which is fully replaced by a blank
+# instance every reset_for_window() call. Mixing a cumulative counter
+# into EngineState silently zeroes it out every ~5 minutes -- that was
+# the cause of "balance" (lifetime, in CapitalPool) drifting away from
+# "realized_pnl" (was being reset to the current window's pnl only).
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SessionStats:
+    total_entries: int = 0
+    total_rearms: int = 0
+    total_tp_fills: int = 0
+    total_sl_fills: int = 0
+    total_trail_updates: int = 0
+    total_forced_closes: int = 0
+    total_illiquid_skips: int = 0
+    no_trade_windows: int = 0
+    wins: int = 0
+    losses: int = 0
+    total_pnl: float = 0.0          # lifetime realized P&L -- balance == starting_capital + total_pnl whenever flat
+
+
+# ---------------------------------------------------------------------------
 # The single open position (if any) and its trailing stop
 # ---------------------------------------------------------------------------
 
@@ -97,18 +123,8 @@ class EngineState:
 
     fills_this_window: int = 0
     last_window_pnl: float = 0.0
-
-    total_entries: int = 0
-    total_rearms: int = 0            # number of times watching resumed after a trailing-stop exit
-    total_tp_fills: int = 0
-    total_sl_fills: int = 0
-    total_trail_updates: int = 0
-    total_forced_closes: int = 0
-    total_illiquid_skips: int = 0
-    no_trade_windows: int = 0
-    wins: int = 0
-    losses: int = 0
-    total_pnl: float = 0.0
+    entries_this_window: int = 0     # per-window only, used for the NO_TRADE check below
+    rearms_this_window: int = 0      # per-window only, used for the REARMED log note
 
 
 class Engine:
@@ -122,6 +138,7 @@ class Engine:
     def __init__(self, broker: PaperBroker):
         self.broker = broker
         self.capital = CapitalPool(balance=config.STARTING_CAPITAL)
+        self.stats = SessionStats()
         self.s = EngineState()
         self.capital.record_equity_point(None)
 
@@ -233,7 +250,7 @@ class Engine:
         if fill_price is None:
             # book fetched fine but genuinely has no offers right now --
             # can't buy into nothing; keep watching, retry next tick
-            self.s.total_illiquid_skips += 1
+            self.stats.total_illiquid_skips += 1
             self._log("NO_LIQUIDITY", side=side.value, price=ask,
                        note=f"{side.value} reached {config.TRAIL_ARM_PRICE} but book has zero ask depth -- waiting")
             return
@@ -241,7 +258,8 @@ class Engine:
         fee = self.broker.taker_fee_amount(shares, fill_price)
         cost = shares * fill_price + fee
         self.capital.balance -= cost
-        self.s.total_entries += 1
+        self.stats.total_entries += 1
+        self.s.entries_this_window += 1
 
         slip_note = f" (book-depth-weighted, best ask was {ask})" if abs(fill_price - ask) > 1e-9 else ""
         trail_sl = round(config.TRAIL_ARM_PRICE - config.TRAIL_STEP, 4)
@@ -290,25 +308,26 @@ class Engine:
             # trigger fired but there's truly nothing to sell into this
             # instant -- don't invent a fill, wait for the book to show
             # something (position stays open, re-checked next tick)
-            self.s.total_illiquid_skips += 1
+            self.stats.total_illiquid_skips += 1
             self._log("NO_LIQUIDITY", side=pos.side.value, price=trigger_bid,
                        note=f"{reason} triggered at bid {trigger_bid} but book has zero depth to sell into -- waiting")
             return
 
         if reason == "TP_FILL":
-            self.s.total_tp_fills += 1
+            self.stats.total_tp_fills += 1
         else:
-            self.s.total_sl_fills += 1
+            self.stats.total_sl_fills += 1
         self._close(pos, price=fill_price, reason=reason, note_prefix=note_prefix, trigger_price=trigger_bid)
         self.s.position = None
 
         if rearm:
-            self.s.total_rearms += 1
+            self.stats.total_rearms += 1
+            self.s.rearms_this_window += 1
             self.s.rearm_at = now + config.REARM_COOLDOWN_SECONDS
             self._log("REARMED", note=(
                 f"trailing stop closed it out -- cooling down {config.REARM_COOLDOWN_SECONDS:.0f}s before "
                 f"watching both sides again for the next {config.TRAIL_ARM_PRICE} cross "
-                f"({self.s.total_rearms} rearm(s) this window)"
+                f"({self.s.rearms_this_window} rearm(s) this window)"
             ))
         else:
             self.s.done_for_window = True
@@ -330,7 +349,7 @@ class Engine:
             moved = True
             next_level = round(next_level + config.TRAIL_STEP, 4)
         if moved:
-            self.s.total_trail_updates += 1
+            self.stats.total_trail_updates += 1
             self._log("TRAIL_UPDATE", side=pos.side.value, price=bid,
                        note=f"price reached {pos.last_trail_level:.2f} -- stop loss now {pos.trail_sl}")
 
@@ -339,13 +358,13 @@ class Engine:
         proceeds = pos.shares * price - fee
         pnl = proceeds - pos.cost
         self.capital.balance += proceeds
-        self.s.total_pnl += pnl
+        self.stats.total_pnl += pnl
         self.s.last_window_pnl += pnl
         self.s.fills_this_window += 1
         if pnl >= 0:
-            self.s.wins += 1
+            self.stats.wins += 1
         else:
-            self.s.losses += 1
+            self.stats.losses += 1
         slip_note = ""
         if trigger_price is not None and abs(price - trigger_price) > 1e-9:
             slip_note = f" (triggered @ {trigger_price}, book-depth-weighted real fill {price:.4f})"
@@ -382,11 +401,11 @@ class Engine:
                            note="window closed with no book data at all on this side -- falling back to entry price, not a confirmed $0")
             self._close(pos, price=fill_price, reason="FORCED_CLOSE",
                         note_prefix="window closed, forced taker close", trigger_price=bid)
-            self.s.total_forced_closes += 1
+            self.stats.total_forced_closes += 1
             self.s.position = None
 
-        if not self.capital.halted and self.s.total_entries == 0:
-            self.s.no_trade_windows += 1
+        if not self.capital.halted and self.s.entries_this_window == 0:
+            self.stats.no_trade_windows += 1
             self._log("NO_TRADE", note=f"price never reached {config.TRAIL_ARM_PRICE} on either side this window")
 
         self.s.window = None
@@ -417,7 +436,7 @@ class Engine:
 
         unrealized_pnl = payload["unrealized_pnl"] if payload else 0.0
         open_market_value = payload["shares"] * payload["mark_price"] if payload else 0.0
-        realized_pnl = round(self.s.total_pnl, 4)
+        realized_pnl = round(self.stats.total_pnl, 4)
 
         now = time.time()
         cooling_down = self.s.rearm_at > now
@@ -452,17 +471,19 @@ class Engine:
             "cooldown_seconds_left": round(max(0.0, self.s.rearm_at - now), 1) if cooling_down else 0.0,
 
             "fills_this_window": self.s.fills_this_window,
-            "total_entries": self.s.total_entries,
-            "total_rearms": self.s.total_rearms,
-            "total_tp_fills": self.s.total_tp_fills,
-            "total_sl_fills": self.s.total_sl_fills,
-            "total_trail_updates": self.s.total_trail_updates,
-            "total_forced_closes": self.s.total_forced_closes,
-            "total_illiquid_skips": self.s.total_illiquid_skips,
-            "no_trade_windows": self.s.no_trade_windows,
-            "wins": self.s.wins,
-            "losses": self.s.losses,
-            "win_rate": round(100 * self.s.wins / (self.s.wins + self.s.losses), 1) if (self.s.wins + self.s.losses) else None,
+            "entries_this_window": self.s.entries_this_window,
+            "rearms_this_window": self.s.rearms_this_window,
+            "total_entries": self.stats.total_entries,
+            "total_rearms": self.stats.total_rearms,
+            "total_tp_fills": self.stats.total_tp_fills,
+            "total_sl_fills": self.stats.total_sl_fills,
+            "total_trail_updates": self.stats.total_trail_updates,
+            "total_forced_closes": self.stats.total_forced_closes,
+            "total_illiquid_skips": self.stats.total_illiquid_skips,
+            "no_trade_windows": self.stats.no_trade_windows,
+            "wins": self.stats.wins,
+            "losses": self.stats.losses,
+            "win_rate": round(100 * self.stats.wins / (self.stats.wins + self.stats.losses), 1) if (self.stats.wins + self.stats.losses) else None,
 
             "status": status,
 
