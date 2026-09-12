@@ -3,11 +3,15 @@ Central configuration for the BTC 5-min up/down bot.
 
 Single engine -- one position at a time, re-armed after every stop out:
 
-  1. Window open: watch both sides' mid-price every tick. No cold start.
+  1. Window open: watch both sides' mid-price every tick. No cold start,
+     except the first ENTRY_LOCKOUT_SECONDS (15s) of the window, where
+     no entries are taken at all -- the market is often thin/choppy
+     right at window open.
   2. Entry: the instant EITHER side's mid-price first reaches
-     TRAIL_ARM_PRICE (0.60), buy that side -- SHARES_PER_SIDE shares,
-     taker, priced against real book depth. The other side is not
-     bought. (Tie-break if both cross in the same tick: UP checked
+     TRAIL_ARM_PRICE (0.60) -- and at least ENTRY_LOCKOUT_SECONDS has
+     elapsed since window open -- buy that side -- SHARES_PER_SIDE
+     shares, taker, priced against real book depth. The other side is
+     not bought. (Tie-break if both cross in the same tick: UP checked
      first, same convention as the old ladder engine.)
   3. Trailing stop: since entry only ever happens right as price
      crosses 0.60, the stop loss is armed immediately on entry at 0.50
@@ -38,7 +42,13 @@ Single engine -- one position at a time, re-armed after every stop out:
      Engine._realistic_fill_price. A thin/illiquid book pulls the
      average fill price accordingly instead of assuming unlimited
      depth at the top quote.
-  7. Window close: force a taker close on any position still open.
+  7. Time-based force sell: if TP still hasn't hit by
+     FORCE_SELL_AFTER_SECONDS (270s) into the window, any open position
+     is force-closed immediately (taker, real fill) instead of waiting
+     on the trailing stop. Same as a TP hit, this also ends the window
+     for re-entry purposes -- no more entries for the rest of that
+     window once a time-based force sell has fired.
+  8. Window close: force a taker close on any position still open.
 
 Sizing is flat -- SHARES_PER_SIDE every entry, no progression, doubling,
 or rearm-driven size change of any kind. "Rearm" here only means
@@ -66,6 +76,21 @@ TRAIL_ARM_PRICE = 0.60      # price level that triggers entry AND arms the trail
 TRAIL_STEP = 0.10           # both the trailing increment and the initial SL offset below TRAIL_ARM_PRICE
 TP_PRICE = 0.99             # take profit, active from the moment of entry
 REARM_COOLDOWN_SECONDS = 10.0  # after a trailing-stop exit, wait this long before watching for the next 0.60 cross again
+
+# ---- Time-based window filters -----------------------------------------
+# ENTRY_LOCKOUT_SECONDS: no entries in the first N seconds of a window --
+# the market is often thin/choppy right at window open, so wait it out
+# before watching for the 0.60 cross.
+ENTRY_LOCKOUT_SECONDS = 15.0
+# FORCE_SELL_AFTER_SECONDS: if TP still hasn't hit by N seconds into the
+# window, force-close any open position immediately (taker, real fill --
+# same pricing path as the trailing stop / window-close forced close).
+# This is deliberately separate from and earlier than the window-close
+# forced close in finalize_window(), which only fires if a position is
+# *still* open at the literal end of the window (e.g. one that opened
+# after this cutoff). A time-based force sell also ends the window for
+# re-entry purposes -- same as a TP hit, no more entries after it fires.
+FORCE_SELL_AFTER_SECONDS = 270.0
 
 # Demo capital: single source of truth for the paper balance -- debited
 # on every buy fill, credited on every TP/SL/forced-close settlement.

@@ -81,6 +81,7 @@
   .status-badge.done{background:var(--violet-dim); color:var(--violet);}
   .status-badge.halted{background:var(--coral-dim); color:var(--coral);}
   .status-badge.cooldown{background:var(--violet-dim); color:var(--violet);}
+  .status-badge.lockout{background:#1a2029; color:#6a7688;}
   .rearm-banner{background:var(--violet-dim); border:1px solid var(--violet); color:var(--violet);
     font-size:11px; font-family:var(--mono); font-weight:600; padding:8px 12px; border-radius:9px; margin-bottom:14px;}
 
@@ -224,6 +225,7 @@ const $ = id => document.getElementById(id);
 const fmt$ = v => (v==null ? '—' : (v<0?'-$':'$') + Math.abs(Number(v)).toFixed(2));
 const fmtP = v => (v==null ? '—' : Number(v).toFixed(3));
 const fmtSh = v => (v==null ? '0' : Number(v).toFixed(0));
+const fmtSec = v => (v==null ? '—' : `${Number(v).toFixed(0)}s`);
 const pnlClass = v => (v>0.005?'pos':(v<-0.005?'neg':''));
 const TRAIL_ARM_PRICE = 0.60, TP_PRICE = 0.99;
 
@@ -300,14 +302,17 @@ function renderEngineCard(e){
     watching:'watching both sides for 0.60', open:'position open, trailing',
     done:'TP hit — done for this window', halted:'halted',
     cooldown:`cooling down (${e.cooldown_seconds_left ?? '?'}s)`,
+    lockout:`window just opened (${e.lockout_seconds_left ?? '?'}s left)`,
   };
 
   const defRowsHtml = [
     ['Entry', 'first side to reach 0.60'],
+    ['Entry lockout', `first ${fmtSec(e.def.entry_lockout_seconds)} of window`],
     ['Shares / entry', fmtSh(e.def.shares_per_side)],
     ['Trail arms at', fmtP(e.def.trail_arm_price)],
     ['Trail step', fmtP(e.def.trail_step)],
     ['TP', fmtP(e.def.tp_price)],
+    ['Force sell', `if TP not hit by ${fmtSec(e.def.force_sell_after_seconds)}`],
     ['After SL', 'closes + re-arms, watches again'],
     ['After TP', 'closes, no more entries this window'],
   ].map(([k,v]) => `<div class="def-item"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
@@ -346,7 +351,9 @@ function renderEngineCard(e){
       ? 'no open position — done for this window'
       : (e.status === 'cooldown'
           ? `no open position — cooling down ${e.cooldown_seconds_left}s before watching again`
-          : 'no open position — watching for 0.60');
+          : (e.status === 'lockout'
+              ? `no open position — window just opened, watching starts in ${e.lockout_seconds_left}s`
+              : 'no open position — watching for 0.60'));
     posHtml = `<div class="position-box empty">${emptyMsg}</div>`;
   }
 
@@ -368,7 +375,7 @@ function renderStats(e){
     ['total_entries','entries',''], ['total_rearms','rearms',''],
     ['total_trail_updates','trail steps',''],
     ['total_tp_fills','tp fills','win'], ['total_sl_fills','sl fills','loss'],
-    ['total_forced_closes','forced close',''], ['total_illiquid_skips','illiquid skips',''],
+    ['total_forced_closes','forced close',''], ['total_time_force_closes','time force sell',''], ['total_illiquid_skips','illiquid skips',''],
     ['no_trade_windows','no-trade',''], ['win_rate','win rate %',''],
   ];
   $('statsGrid').innerHTML = tiles.map(([key,label,cls]) => {

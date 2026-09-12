@@ -73,6 +73,7 @@ class SessionStats:
     total_sl_fills: int = 0
     total_trail_updates: int = 0
     total_forced_closes: int = 0
+    total_time_force_closes: int = 0  # forced closes triggered by FORCE_SELL_AFTER_SECONDS, not window-end
     total_illiquid_skips: int = 0
     no_trade_windows: int = 0
     wins: int = 0
@@ -173,8 +174,11 @@ class Engine:
 
         if self.s.position is not None:
             self._check_exit(now)
-        elif not self.s.done_for_window and now >= self.s.rearm_at:
+        elif not self.s.done_for_window and now >= self.s.rearm_at and self._elapsed_since_open(now) >= config.ENTRY_LOCKOUT_SECONDS:
             self._check_entry(now)
+
+    def _elapsed_since_open(self, now: float) -> float:
+        return now - self.s.window.open_ts
 
     # ---- price/level lookups ----------------------------------------------
 
@@ -291,6 +295,12 @@ class Engine:
             self._try_close(pos, trigger_bid=bid, reason="TP_FILL", note_prefix="take profit hit", rearm=False, now=now)
             return
 
+        if self._elapsed_since_open(now) >= config.FORCE_SELL_AFTER_SECONDS:
+            self._try_close(pos, trigger_bid=bid, reason="TIME_FORCE_CLOSE",
+                             note_prefix=f"TP never hit by {config.FORCE_SELL_AFTER_SECONDS:.0f}s into the window -- forced close",
+                             rearm=False, now=now)
+            return
+
         if bid <= pos.trail_sl:
             self._try_close(pos, trigger_bid=bid, reason="SL_FILL", note_prefix="trailing stop hit", rearm=True, now=now)
             return
@@ -315,6 +325,8 @@ class Engine:
 
         if reason == "TP_FILL":
             self.stats.total_tp_fills += 1
+        elif reason == "TIME_FORCE_CLOSE":
+            self.stats.total_time_force_closes += 1
         else:
             self.stats.total_sl_fills += 1
         self._close(pos, price=fill_price, reason=reason, note_prefix=note_prefix, trigger_price=trigger_bid)
@@ -331,7 +343,11 @@ class Engine:
             ))
         else:
             self.s.done_for_window = True
-            self._log("DONE_FOR_WINDOW", note="take profit hit -- no more entries for the rest of this window")
+            done_note = ("take profit hit -- no more entries for the rest of this window"
+                         if reason == "TP_FILL" else
+                         f"{config.FORCE_SELL_AFTER_SECONDS:.0f}s time cutoff forced the position closed -- "
+                         f"no more entries for the rest of this window")
+            self._log("DONE_FOR_WINDOW", note=done_note)
 
     def _advance_trail(self, pos: Position, bid: float):
         """Ratchets pos.trail_sl up every time price reaches a new
@@ -440,6 +456,8 @@ class Engine:
 
         now = time.time()
         cooling_down = self.s.rearm_at > now
+        elapsed_since_open = self._elapsed_since_open(now) if self.s.window is not None else None
+        in_lockout = elapsed_since_open is not None and elapsed_since_open < config.ENTRY_LOCKOUT_SECONDS
         if self.capital.halted:
             status = "halted"
         elif payload:
@@ -448,6 +466,8 @@ class Engine:
             status = "done"
         elif cooling_down:
             status = "cooldown"
+        elif in_lockout:
+            status = "lockout"
         else:
             status = "watching"
 
@@ -469,6 +489,7 @@ class Engine:
             "open_positions": open_positions,
             "done_for_window": self.s.done_for_window,
             "cooldown_seconds_left": round(max(0.0, self.s.rearm_at - now), 1) if cooling_down else 0.0,
+            "lockout_seconds_left": round(max(0.0, config.ENTRY_LOCKOUT_SECONDS - elapsed_since_open), 1) if in_lockout else 0.0,
 
             "fills_this_window": self.s.fills_this_window,
             "entries_this_window": self.s.entries_this_window,
@@ -479,6 +500,7 @@ class Engine:
             "total_sl_fills": self.stats.total_sl_fills,
             "total_trail_updates": self.stats.total_trail_updates,
             "total_forced_closes": self.stats.total_forced_closes,
+            "total_time_force_closes": self.stats.total_time_force_closes,
             "total_illiquid_skips": self.stats.total_illiquid_skips,
             "no_trade_windows": self.stats.no_trade_windows,
             "wins": self.stats.wins,
@@ -492,5 +514,7 @@ class Engine:
                 "trail_arm_price": config.TRAIL_ARM_PRICE,
                 "trail_step": config.TRAIL_STEP,
                 "tp_price": config.TP_PRICE,
+                "entry_lockout_seconds": config.ENTRY_LOCKOUT_SECONDS,
+                "force_sell_after_seconds": config.FORCE_SELL_AFTER_SECONDS,
             },
         }
