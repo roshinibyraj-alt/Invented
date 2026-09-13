@@ -254,10 +254,17 @@ class Engine:
             if order.status != "resting":
                 continue
             if ask <= order.price:
-                # maker fill: exact limit price, no slippage, no fee
+                # maker fill: exact limit price, no slippage, no fee.
+                # This debit is the missing piece that was silently
+                # inflating equity -- shares_held/cost_basis were being
+                # updated on every fill without ever taking the cost out
+                # of the actual capital balance, so buying looked free
+                # and "equity" (balance + market value) double-counted
+                # every dollar spent on a fill.
                 order.status = "filled"
                 order.filled_ts = now
                 cost = order.shares * order.price
+                self.capital.balance -= cost
                 book.shares_held += order.shares
                 book.cost_basis += cost
                 self.s.total_rung_fills += 1
@@ -265,6 +272,9 @@ class Engine:
                            note=(f"resting buy filled (maker, no fee): {order.shares:.0f}sh @ {order.price} "
                                  f"(ask reached it) -- {side.value} now holds {book.shares_held:.0f}sh, "
                                  f"cost basis ${book.cost_basis:.2f}"))
+                if self.capital.check_halt():
+                    self._log("HALTED", note=f"balance ${self.capital.balance:.2f} < $0 -- bankrupt")
+                    return
 
     # ---- profit target: combined across both sides -------------------------
 

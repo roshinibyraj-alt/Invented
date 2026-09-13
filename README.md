@@ -62,7 +62,14 @@ Dashboard at http://localhost:8000
   no partial fills, no fee, no slippage modeled for the maker leg
   itself. The depth-aware realistic-fill-price logic only applies to
   the two TAKER legs (the profit-target sell-everything exit, and the
-  forced window-end close).
+  forced window-end close). The cost of every fill is debited from the
+  capital balance the instant it fills, same as any other buy — this
+  was a real accounting bug in an earlier build of this version
+  (fills updated `shares_held`/`cost_basis` but never actually took
+  the money out of `balance`, silently inflating the equity figure by
+  the cost of every fill). Verified end-to-end: after any sequence of
+  fills and a sell, `starting_capital + total_pnl` matches the final
+  balance exactly.
 - The $100 profit target is evaluated against **gross unrealized P&L**
   (mark value minus cost basis) — it does not pre-subtract the taker
   fee that the eventual exit will incur, so realized profit after
