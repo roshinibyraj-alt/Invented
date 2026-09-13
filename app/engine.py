@@ -12,7 +12,7 @@ during those 120s. The instant the 120s grid-building window times
 out, any rung still resting (never filled) is cancelled -- no new
 orders, no more waiting for stragglers to fill. From there the bot
 just watches combined unrealized P&L across both sides' filled shares,
-and the instant it reaches +$10, sells everything (taker, priced by
+and the instant it reaches +$100, sells everything (taker, priced by
 walking real book depth) and is done for the window.
 """
 import time
@@ -104,6 +104,8 @@ class EngineState:
     total_illiquid_skips: int = 0
     total_profit_target_hits: int = 0
     total_forced_closes: int = 0
+    total_merges: int = 0
+    total_merge_volume: float = 0.0   # cumulative pairs merged, all windows this engine has run
     no_trade_windows: int = 0
     wins: int = 0
     losses: int = 0
@@ -165,6 +167,12 @@ class Engine:
         # cancels all resting orders, there's nothing left here to fill.
         self._check_fills(Side.UP, now)
         self._check_fills(Side.DOWN, now)
+
+        # Fee-free CTF merge: check every tick, both phases, independent
+        # of the profit-target watch below -- no reason to wait once
+        # both sides are holding shares and the merge profit clears the
+        # bar.
+        self._check_merge_opportunity(now)
 
         if elapsed >= config.GRID_DURATION_SECONDS:
             if not self.s.grid_timeout_handled:
@@ -304,6 +312,59 @@ class Engine:
                     f"grid-building window ({config.GRID_DURATION_SECONDS}s) timed out -- "
                     f"cancelled {cancelled} still-resting unfilled rung(s) on {side.value}"
                 ))
+
+    # ---- CTF merge: fee-free, independent of profit-target watch -----------
+
+    def _check_merge_opportunity(self, now: float):
+        """UP and DOWN are complementary CTF outcome tokens of the same
+        condition -- 1 share of each merges straight back into $1.00 of
+        USDC via the contract directly, no orderbook, no taker fee, no
+        slippage. Whenever we're holding filled shares on BOTH sides,
+        min(up_shares, down_shares) of them are eligible. The profit on
+        merging that many pairs is just $1/pair minus their combined
+        (proportional) cost basis -- fires the instant that clears
+        MERGE_PROFIT_THRESHOLD_USD. Any leftover imbalance (whichever
+        side has more shares) is left exactly as-is for the normal
+        grid/profit-target/window-close logic to keep handling."""
+        up_book, down_book = self.s.up_book, self.s.down_book
+        mergeable = min(up_book.shares_held, down_book.shares_held)
+        if mergeable <= 1e-9:
+            return
+
+        up_avg_cost = up_book.cost_basis / up_book.shares_held
+        down_avg_cost = down_book.cost_basis / down_book.shares_held
+        pair_cost = up_avg_cost + down_avg_cost
+        proceeds = mergeable * 1.0          # $1 collateral redeemed per merged pair
+        profit = proceeds - mergeable * pair_cost
+        if profit < config.MERGE_PROFIT_THRESHOLD_USD:
+            return
+
+        self._execute_merge(mergeable, up_avg_cost, down_avg_cost, proceeds, profit)
+
+    def _execute_merge(self, shares: float, up_avg_cost: float, down_avg_cost: float,
+                        proceeds: float, profit: float):
+        up_book, down_book = self.s.up_book, self.s.down_book
+        up_book.shares_held -= shares
+        up_book.cost_basis -= shares * up_avg_cost
+        down_book.shares_held -= shares
+        down_book.cost_basis -= shares * down_avg_cost
+
+        self.capital.balance += proceeds
+        self.s.total_pnl += profit
+        self.s.last_window_pnl += profit
+        self.s.total_merges += 1
+        self.s.total_merge_volume += shares
+        if profit >= 0:
+            self.s.wins += 1
+        else:
+            self.s.losses += 1  # not reachable given the threshold check, kept for symmetry
+        pair_cost = up_avg_cost + down_avg_cost
+        self._log("MERGE", price=round(pair_cost, 4), shares=shares,
+                   fee=0.0, pnl=profit,
+                   note=(f"fee-free CTF merge: {shares:.0f} UP+DOWN pairs redeemed for ${proceeds:.2f} "
+                         f"(combined cost {pair_cost:.4f}/pair, no orderbook, no fee) -- pnl ${profit:.2f}. "
+                         f"UP now {up_book.shares_held:.0f}sh / DOWN now {down_book.shares_held:.0f}sh"))
+        self.capital.check_halt()
 
     # ---- profit target: combined across both sides -------------------------
 
@@ -468,6 +529,8 @@ class Engine:
             "total_illiquid_skips": self.s.total_illiquid_skips,
             "total_profit_target_hits": self.s.total_profit_target_hits,
             "total_forced_closes": self.s.total_forced_closes,
+            "total_merges": self.s.total_merges,
+            "total_merge_volume": self.s.total_merge_volume,
             "no_trade_windows": self.s.no_trade_windows,
             "wins": self.s.wins,
             "losses": self.s.losses,
@@ -480,5 +543,6 @@ class Engine:
                 "grid_spacing": config.GRID_SPACING,
                 "grid_duration_seconds": config.GRID_DURATION_SECONDS,
                 "profit_target_usd": config.PROFIT_TARGET_USD,
+                "merge_profit_threshold_usd": config.MERGE_PROFIT_THRESHOLD_USD,
             },
         }

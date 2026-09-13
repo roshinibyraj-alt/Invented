@@ -29,7 +29,7 @@ combined profit-target exit:
      the bot just watches. Every tick it totals the UNREALIZED profit across
      every filled share on BOTH sides combined (mark-to-market minus
      cost basis, summed UP + DOWN). The instant that combined total
-     reaches PROFIT_TARGET_USD ($10), it sells EVERYTHING on both
+     reaches PROFIT_TARGET_USD ($100), it sells EVERYTHING on both
      sides as taker orders (priced by walking real book depth, not
      just top-of-book -- see Engine._realistic_fill_price) and is done
      for the rest of that window: no more orders, no more monitoring.
@@ -37,6 +37,18 @@ combined profit-target exit:
      still-resting unfilled orders (no penalty) and force a taker close
      on any shares still held, same depth-aware pricing as the exit
      above.
+
+Merges (fee-free, independent of the above): every tick, regardless of
+grid-building/watching phase, check whether we're holding filled shares
+on BOTH sides at once. UP+DOWN are complementary tokens of the same
+condition, so min(up_shares, down_shares) of them can be merged straight
+back into that many dollars of USDC via Polymarket's CTF contract --
+no orderbook, no taker fee, no slippage. The moment that merge's profit
+(the $1/pair redemption minus the pair's combined cost basis) clears
+MERGE_PROFIT_THRESHOLD_USD ($10), the bot merges that many shares off
+both books immediately and banks the profit, leaving any leftover
+imbalance (whichever side has more shares) resting for the grid/exit
+logic above to handle normally.
 
 Sizing is flat -- GRID_ORDER_SHARES (100) per rung, no progression.
 """
@@ -60,7 +72,20 @@ POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
 GRID_ORDER_SHARES = 100.0        # flat size per resting rung
 GRID_SPACING = 0.05              # minimum distance between any two rungs on the same side
 GRID_DURATION_SECONDS = 120      # stop placing NEW orders after this long; resting orders stay live
-PROFIT_TARGET_USD = 10.0        # combined unrealized profit (both sides) that triggers sell-everything -- sell all at +$10
+PROFIT_TARGET_USD = 100.0        # combined unrealized profit (both sides) that triggers sell-everything
+
+# ---- CTF merge (fee-free) ------------------------------------------------
+# UP and DOWN are complementary outcome tokens of the SAME condition --
+# 1 UP share + 1 DOWN share can be merged back into $1.00 of USDC
+# collateral directly through Polymarket's CTF contract (mergePositions),
+# with no orderbook, no taker fee, and no slippage. Since every grid rung
+# on both sides buys BELOW mid, whenever we hold filled shares on both
+# sides at once, their combined cost basis per pair is very often under
+# $1 -- that gap is a locked-in profit the instant it's merged, no need
+# to wait for a favorable price move or pay a taker fee to realize it.
+# Checked every tick; fires the moment the mergeable pair profit clears
+# this bar (kept well above $0 so we're not merging over dust/rounding).
+MERGE_PROFIT_THRESHOLD_USD = 10.0
 
 # Demo capital: single source of truth for the paper balance -- debited
 # on every buy fill, credited on every sell settlement. Halts
