@@ -1,19 +1,16 @@
 """
-Trading engine -- two independent non-overlapping limit-order grids
-(one per side), built for the first 120s of a window, then a combined
-profit-target exit.
+Trading engine -- breakout entry on either side, fixed TP/SL exit,
+anti-martingale position sizing across windows.
 
-See app/config.py for the full strategy write-up. Summary: for the
-first 120s, each side independently drops a new resting limit buy at
-(current mid - 0.05) any time that price isn't within 0.05 of an order
-already placed on that side. Resting orders fill (maker, no fee, at
-their own limit price) whenever that side's ask reaches them, any time
-during those 120s. The instant the 120s grid-building window times
-out, any rung still resting (never filled) is cancelled -- no new
-orders, no more waiting for stragglers to fill. From there the bot
-just watches combined unrealized P&L across both sides' filled shares,
-and the instant it reaches +$100, sells everything (taker, priced by
-walking real book depth) and is done for the window.
+See app/config.py for the full strategy write-up. Summary: watch both
+sides' mid price from window open; the instant either reaches 0.70,
+buy that side only (capped at 0.10 slippage above trigger -- skip the
+trade entirely if the market's already past that). Once filled, exit
+the whole position the instant that side's bid reaches 0.99 (TP) or
+0.40 (SL), or force-close at window end if neither hit first. Size is
+base * 2.1 ** martingale_step, where martingale_step persists across
+windows: a win steps it up (reset to 0 if already at the cap), a loss
+resets it to 0, a no-trade window leaves it untouched.
 """
 import time
 from dataclasses import dataclass, field
@@ -54,26 +51,21 @@ class CapitalPool:
 
 
 # ---------------------------------------------------------------------------
-# One resting/filled/cancelled grid rung
+# The single open position for a window, if any.
 # ---------------------------------------------------------------------------
 
 @dataclass
-class GridOrder:
-    price: float
+class Position:
+    side: Side
     shares: float
-    status: str = "resting"   # resting | filled | cancelled
-    placed_ts: float = 0.0
-    filled_ts: Optional[float] = None
+    entry_price: float
+    entry_fee: float
+    entry_ts: float
+    martingale_step: int   # the step this position's size was sized at (for the log/dashboard)
 
-
-@dataclass
-class SideBook:
-    orders: List[GridOrder] = field(default_factory=list)  # every order ever placed on this side
-    shares_held: float = 0.0     # aggregate filled shares, all rungs combined
-    cost_basis: float = 0.0      # aggregate cost of those shares (fee-free, maker fills)
-
-    def rung_prices(self) -> List[float]:
-        return [o.price for o in self.orders]  # includes resting + filled + cancelled -- a used price slot stays used
+    @property
+    def cost(self) -> float:
+        return self.shares * self.entry_price + self.entry_fee
 
 
 @dataclass
@@ -94,19 +86,16 @@ class EngineState:
     down_bid_levels: Optional[list] = None
     down_ask_levels: Optional[list] = None
 
-    up_book: SideBook = field(default_factory=SideBook)
-    down_book: SideBook = field(default_factory=SideBook)
-    done_for_window: bool = False   # set True once the profit target has been hit and everything sold
-    grid_timeout_handled: bool = False  # set True once resting rungs have been cancelled at the 120s grid-building timeout
+    position: Optional[Position] = None
+    trade_taken: bool = False    # this window's one entry slot has been used (filled or missed)
+    done_for_window: bool = False   # position closed (or trade skipped) -- nothing left to watch
 
-    total_orders_placed: int = 0
-    total_rung_fills: int = 0
-    total_illiquid_skips: int = 0
-    total_profit_target_hits: int = 0
-    total_forced_closes: int = 0
-    total_merges: int = 0
-    total_merge_volume: float = 0.0   # cumulative pairs merged, all windows this engine has run
-    no_trade_windows: int = 0
+    total_triggers: int = 0          # times either side reached 0.70 and an entry was attempted
+    total_missed_entries: int = 0    # triggers where price ran past the slippage cap before filling
+    total_tp_hits: int = 0
+    total_sl_hits: int = 0
+    total_forced_closes: int = 0     # window closed before TP/SL was reached
+    no_trade_windows: int = 0        # 0.70 was never reached at all
     wins: int = 0
     losses: int = 0
     total_pnl: float = 0.0
@@ -114,21 +103,26 @@ class EngineState:
 
 
 class Engine:
-    """Independent dual-grid engine, driven off its own capital pool.
-    Kept as the class name `Engine` / constructed the same way
-    (Engine(broker)) so app/state.py doesn't need structural changes."""
+    """Breakout-entry / fixed-TP-SL engine with anti-martingale sizing,
+    driven off its own capital pool. Kept as the class name `Engine` /
+    constructed the same way (Engine(broker)) so app/state.py doesn't
+    need structural changes."""
 
-    name = "GRID"
+    name = "BREAKOUT"
 
     def __init__(self, broker: PaperBroker):
         self.broker = broker
         self.capital = CapitalPool(balance=config.STARTING_CAPITAL)
         self.s = EngineState()
+        self.martingale_step = 0   # persists across windows -- NOT part of EngineState
         self.capital.record_equity_point(None)
 
     def _log(self, event, **kw):
         self.broker.log_event(self.name, self.s.window.slug if self.s.window else "", event,
                                balance_after=self.capital.balance, **kw)
+
+    def _current_stake_shares(self) -> float:
+        return config.BASE_ORDER_SHARES * (config.ANTI_MARTINGALE_MULTIPLIER ** self.martingale_step)
 
     def reset_for_window(self, window: WindowMarket):
         self.s = EngineState(window=window)
@@ -137,11 +131,12 @@ class Engine:
             self._log("HALTED", note=f"engine halted (balance ${self.capital.balance:.2f} < $0) -- no trading")
             return
 
-        self._log("WINDOW_OPEN", note=(
-            f"building independent grids on both sides for {config.GRID_DURATION_SECONDS}s -- "
-            f"rungs {config.GRID_SPACING} apart, {config.GRID_ORDER_SHARES:.0f}sh each, maker limit buys. "
-            f"At {config.GRID_DURATION_SECONDS}s: cancel any still-resting rungs, then watch combined "
-            f"unrealized P&L and sell everything (taker) at +${config.PROFIT_TARGET_USD:.0f}"
+        stake = self._current_stake_shares()
+        self._log("WINDOW_OPEN", shares=stake, note=(
+            f"watching for either side's mid to reach {config.ENTRY_TRIGGER_PRICE} -- "
+            f"stake this window: {stake:.0f}sh (martingale step {self.martingale_step}, "
+            f"{config.ANTI_MARTINGALE_MULTIPLIER}x ladder, cap {config.MAX_MARTINGALE_STEPS}). "
+            f"TP {config.TP_PRICE} / SL {config.SL_PRICE}, slippage cap {config.ENTRY_SLIPPAGE}"
         ))
 
     def on_tick(self, up_bid, up_ask, down_bid, down_ask, seconds_to_close: float = None, now: Optional[float] = None,
@@ -158,27 +153,11 @@ class Engine:
         if self.s.done_for_window:
             return
 
-        elapsed = now - self.s.window.open_ts
-        if elapsed < config.GRID_DURATION_SECONDS:
-            self._maybe_place_rung(Side.UP, now)
-            self._maybe_place_rung(Side.DOWN, now)
-
-        # Checked every tick, but after the grid-building timeout below
-        # cancels all resting orders, there's nothing left here to fill.
-        self._check_fills(Side.UP, now)
-        self._check_fills(Side.DOWN, now)
-
-        # Fee-free CTF merge: check every tick, both phases, independent
-        # of the profit-target watch below -- no reason to wait once
-        # both sides are holding shares and the merge profit clears the
-        # bar.
-        self._check_merge_opportunity(now)
-
-        if elapsed >= config.GRID_DURATION_SECONDS:
-            if not self.s.grid_timeout_handled:
-                self._cancel_resting_orders(now)
-                self.s.grid_timeout_handled = True
-            self._check_profit_target(now)
+        if self.s.position is None:
+            if not self.s.trade_taken:
+                self._check_entry_trigger(now)
+        else:
+            self._check_exit(now)
 
     # ---- price/level lookups ----------------------------------------------
 
@@ -197,17 +176,11 @@ class Engine:
     def _bid_levels_for(self, side: Side) -> Optional[list]:
         return self.s.up_bid_levels if side == Side.UP else self.s.down_bid_levels
 
-    def _book_for(self, side: Side) -> SideBook:
-        return self.s.up_book if side == Side.UP else self.s.down_book
-
     @staticmethod
     def _realistic_fill_price(levels: Optional[list], shares: float, fallback_price: Optional[float]) -> Optional[float]:
         """Volume-weighted average price to actually trade `shares`
         against a real order book, instead of assuming the whole size
-        fills at the single best quote. Used for the TAKER exits only
-        (profit-target sell-everything, forced window-end close) --
-        resting maker rungs fill at their own exact limit price, no
-        walk needed.
+        fills at the single best quote.
 
         - levels is None -> no depth data this tick; fall back to
           filling the whole size at `fallback_price`.
@@ -235,205 +208,106 @@ class Engine:
             cost += remaining * worst_price
         return cost / shares
 
-    # ---- grid building: independent per side -------------------------------
+    # ---- entry: breakout trigger, one shot per window -----------------------
 
-    def _maybe_place_rung(self, side: Side, now: float):
-        mid = self._mid_for(side)
-        if mid is None:
-            return
-        target = round(mid - config.GRID_SPACING, 4)
-        if target <= 0 or target >= 1:
-            return  # not a valid tradeable price
-
-        book = self._book_for(side)
-        existing_prices = book.rung_prices()
-        # "must not overlap" / "0.05 distance" -- no existing order
-        # (resting, filled, or cancelled) may sit closer than GRID_SPACING
-        # to the candidate.
-        too_close = any(abs(p - target) < config.GRID_SPACING - 1e-9 for p in existing_prices)
-        if too_close:
-            return
-
-        order = GridOrder(price=target, shares=config.GRID_ORDER_SHARES, placed_ts=now)
-        book.orders.append(order)
-        self.s.total_orders_placed += 1
-        self._log("RUNG_PLACED", side=side.value, price=target, shares=order.shares,
-                   note=f"resting limit buy: {order.shares:.0f}sh @ {target} (mid was {mid}, {config.GRID_SPACING} below)")
-
-    def _check_fills(self, side: Side, now: float):
-        book = self._book_for(side)
-        ask = self._ask_for(side)
-        if ask is None:
-            return
-        for order in book.orders:
-            if order.status != "resting":
-                continue
-            if ask <= order.price:
-                # maker fill: exact limit price, no slippage, no fee.
-                # This debit is the missing piece that was silently
-                # inflating equity -- shares_held/cost_basis were being
-                # updated on every fill without ever taking the cost out
-                # of the actual capital balance, so buying looked free
-                # and "equity" (balance + market value) double-counted
-                # every dollar spent on a fill.
-                order.status = "filled"
-                order.filled_ts = now
-                cost = order.shares * order.price
-                self.capital.balance -= cost
-                book.shares_held += order.shares
-                book.cost_basis += cost
-                self.s.total_rung_fills += 1
-                self._log("RUNG_FILL", side=side.value, price=order.price, shares=order.shares, fee=0.0,
-                           note=(f"resting buy filled (maker, no fee): {order.shares:.0f}sh @ {order.price} "
-                                 f"(ask reached it) -- {side.value} now holds {book.shares_held:.0f}sh, "
-                                 f"cost basis ${book.cost_basis:.2f}"))
-                if self.capital.check_halt():
-                    self._log("HALTED", note=f"balance ${self.capital.balance:.2f} < $0 -- bankrupt")
-                    return
-
-    # ---- grid-building timeout: drop unfilled rungs, keep filled shares ----
-
-    def _cancel_resting_orders(self, now: float):
-        """Called once, the instant the 120s grid-building window times
-        out. Any rung that never got a fill is cancelled here instead of
-        being left live for the rest of the window -- only rungs that
-        already filled carry forward into the profit-target watch phase.
-        Filled shares are untouched; this only touches status=='resting'
-        orders."""
+    def _check_entry_trigger(self, now: float):
         for side in (Side.UP, Side.DOWN):
-            book = self._book_for(side)
-            cancelled = 0
-            for order in book.orders:
-                if order.status == "resting":
-                    order.status = "cancelled"
-                    cancelled += 1
-            if cancelled:
-                self._log("GRID_TIMEOUT_CANCEL", side=side.value, note=(
-                    f"grid-building window ({config.GRID_DURATION_SECONDS}s) timed out -- "
-                    f"cancelled {cancelled} still-resting unfilled rung(s) on {side.value}"
-                ))
+            mid = self._mid_for(side)
+            if mid is not None and mid >= config.ENTRY_TRIGGER_PRICE:
+                self._attempt_entry(side, now)
+                return   # window's one trade slot is spent, win or miss -- ignore the other side
 
-    # ---- CTF merge: fee-free, independent of profit-target watch -----------
+    def _attempt_entry(self, side: Side, now: float):
+        self.s.trade_taken = True
+        self.s.total_triggers += 1
+        shares = self._current_stake_shares()
+        ask = self._ask_for(side)
+        levels = self._ask_levels_for(side)
+        fill_price = self._realistic_fill_price(levels, shares, ask)
+        cap = round(config.ENTRY_TRIGGER_PRICE + config.ENTRY_SLIPPAGE, 6)
 
-    def _check_merge_opportunity(self, now: float):
-        """UP and DOWN are complementary CTF outcome tokens of the same
-        condition -- 1 share of each merges straight back into $1.00 of
-        USDC via the contract directly, no orderbook, no taker fee, no
-        slippage. Whenever we're holding filled shares on BOTH sides,
-        min(up_shares, down_shares) of them are eligible. The profit on
-        merging that many pairs is just $1/pair minus their combined
-        (proportional) cost basis -- fires the instant that clears
-        MERGE_PROFIT_THRESHOLD_USD. Any leftover imbalance (whichever
-        side has more shares) is left exactly as-is for the normal
-        grid/profit-target/window-close logic to keep handling."""
-        up_book, down_book = self.s.up_book, self.s.down_book
-        mergeable = min(up_book.shares_held, down_book.shares_held)
-        if mergeable <= 1e-9:
+        if fill_price is None or fill_price > cap:
+            self.s.total_missed_entries += 1
+            self.s.done_for_window = True
+            self._log("MISSED_ENTRY", side=side.value, price=fill_price,
+                       note=(f"{side.value} reached {config.ENTRY_TRIGGER_PRICE} but real fill price "
+                             f"({fill_price if fill_price is not None else 'no liquidity'}) is past the "
+                             f"{cap} slippage cap -- skipping, no position taken, no capital risked"))
             return
 
-        up_avg_cost = up_book.cost_basis / up_book.shares_held
-        down_avg_cost = down_book.cost_basis / down_book.shares_held
-        pair_cost = up_avg_cost + down_avg_cost
-        proceeds = mergeable * 1.0          # $1 collateral redeemed per merged pair
-        profit = proceeds - mergeable * pair_cost
-        if profit < config.MERGE_PROFIT_THRESHOLD_USD:
-            return
-
-        self._execute_merge(mergeable, up_avg_cost, down_avg_cost, proceeds, profit)
-
-    def _execute_merge(self, shares: float, up_avg_cost: float, down_avg_cost: float,
-                        proceeds: float, profit: float):
-        up_book, down_book = self.s.up_book, self.s.down_book
-        up_book.shares_held -= shares
-        up_book.cost_basis -= shares * up_avg_cost
-        down_book.shares_held -= shares
-        down_book.cost_basis -= shares * down_avg_cost
-
-        self.capital.balance += proceeds
-        self.s.total_pnl += profit
-        self.s.last_window_pnl += profit
-        self.s.total_merges += 1
-        self.s.total_merge_volume += shares
-        if profit >= 0:
-            self.s.wins += 1
-        else:
-            self.s.losses += 1  # not reachable given the threshold check, kept for symmetry
-        pair_cost = up_avg_cost + down_avg_cost
-        self._log("MERGE", price=round(pair_cost, 4), shares=shares,
-                   fee=0.0, pnl=profit,
-                   note=(f"fee-free CTF merge: {shares:.0f} UP+DOWN pairs redeemed for ${proceeds:.2f} "
-                         f"(combined cost {pair_cost:.4f}/pair, no orderbook, no fee) -- pnl ${profit:.2f}. "
-                         f"UP now {up_book.shares_held:.0f}sh / DOWN now {down_book.shares_held:.0f}sh"))
+        fee = self.broker.taker_fee_amount(shares, fill_price)
+        cost = shares * fill_price + fee
+        self.capital.balance -= cost
+        self.s.position = Position(side=side, shares=shares, entry_price=fill_price, entry_fee=fee,
+                                    entry_ts=now, martingale_step=self.martingale_step)
+        self._log("ENTRY_FILL", side=side.value, price=round(fill_price, 4), shares=shares, fee=round(fee, 4),
+                   note=(f"breakout buy filled (taker): {shares:.0f}sh @ {fill_price:.4f} "
+                         f"(trigger {config.ENTRY_TRIGGER_PRICE}, cap {cap}, fee ${fee:.4f}) -- "
+                         f"TP {config.TP_PRICE} / SL {config.SL_PRICE}"))
         self.capital.check_halt()
 
-    # ---- profit target: combined across both sides -------------------------
+    # ---- exit: fixed TP/SL, one position at a time --------------------------
 
-    def _combined_unrealized_pnl(self) -> float:
-        total = 0.0
-        for side in (Side.UP, Side.DOWN):
-            book = self._book_for(side)
-            if book.shares_held <= 0:
-                continue
-            bid = self._bid_for(side)
-            mark = bid if bid is not None else (book.cost_basis / book.shares_held)
-            total += book.shares_held * mark - book.cost_basis
-        return total
+    def _check_exit(self, now: float):
+        pos = self.s.position
+        bid = self._bid_for(pos.side)
+        if bid is None:
+            return
+        if bid >= config.TP_PRICE:
+            self.s.total_tp_hits += 1
+            self._close_position(now, reason="TP_HIT",
+                                  note_prefix=f"take-profit hit ({config.TP_PRICE})")
+        elif bid <= config.SL_PRICE:
+            self.s.total_sl_hits += 1
+            self._close_position(now, reason="SL_HIT",
+                                  note_prefix=f"stop-loss hit ({config.SL_PRICE})")
 
-    def _check_profit_target(self, now: float):
-        combined = self._combined_unrealized_pnl()
-        if combined >= config.PROFIT_TARGET_USD:
-            self.s.total_profit_target_hits += 1
-            self._log("PROFIT_TARGET_HIT", price=round(combined, 4),
-                       note=f"combined unrealized P&L reached ${combined:.2f} (target ${config.PROFIT_TARGET_USD:.0f}) -- selling everything")
-            self._sell_everything(now, reason="PROFIT_TARGET_EXIT",
-                                   note_prefix="profit target hit, selling out")
-            self.s.done_for_window = True
+    def _close_position(self, now: float, reason: str, note_prefix: str):
+        pos = self.s.position
+        bid = self._bid_for(pos.side)
+        levels = self._bid_levels_for(pos.side)
+        fill_price = self._realistic_fill_price(levels, pos.shares, bid)
+        if fill_price is None:
+            # confirmed empty book -- nobody bidding at all right now
+            fill_price = 0.0
+            self._log("NO_LIQUIDITY", side=pos.side.value, price=bid,
+                       note=f"{reason} but book has zero bid depth on {pos.side.value} -- assuming worst case $0")
 
-    def _sell_everything(self, now: float, reason: str, note_prefix: str):
-        """Cancels any still-resting orders and taker-sells every filled
-        share on both sides, priced by walking real book depth."""
-        for side in (Side.UP, Side.DOWN):
-            book = self._book_for(side)
-            for order in book.orders:
-                if order.status == "resting":
-                    order.status = "cancelled"
-            if book.shares_held <= 0:
-                continue
-            bid = self._bid_for(side)
-            levels = self._bid_levels_for(side)
-            fill_price = self._realistic_fill_price(levels, book.shares_held, bid)
-            if fill_price is None and levels is not None:
-                # confirmed empty book -- nobody bidding on this side at
-                # all; realistically worth close to nothing right now
-                fill_price = 0.0
-                self._log("NO_LIQUIDITY", side=side.value, price=bid,
-                           note=f"{reason} but book has zero bid depth on {side.value} -- assuming worst case $0")
-            elif fill_price is None:
-                fill_price = bid if bid is not None else (book.cost_basis / book.shares_held)
-                self._log("NO_LIQUIDITY", side=side.value, price=bid,
-                           note=f"{reason} but no book data at all on {side.value} -- falling back to last known price")
-            self._settle_side_close(side, book, fill_price, reason, note_prefix)
-
-    def _settle_side_close(self, side: Side, book: SideBook, price: float, reason: str, note_prefix: str):
-        shares = book.shares_held
-        cost = book.cost_basis
-        fee = self.broker.taker_fee_amount(shares, price)
-        proceeds = shares * price - fee
-        pnl = proceeds - cost
+        fee = self.broker.taker_fee_amount(pos.shares, fill_price)
+        proceeds = pos.shares * fill_price - fee
+        pnl = proceeds - pos.cost
         self.capital.balance += proceeds
         self.s.total_pnl += pnl
         self.s.last_window_pnl += pnl
-        if pnl >= 0:
+        win = pnl >= 0
+        if win:
             self.s.wins += 1
         else:
             self.s.losses += 1
-        self._log(reason, side=side.value, price=round(cost / shares, 4) if shares else None,
-                   shares=shares, pnl=pnl, fee=fee,
-                   note=(f"{note_prefix} (taker, real fill @ {price:.4f}): {shares:.0f}sh sold across all "
-                         f"filled rungs (avg cost {cost/shares:.4f}, fee ${fee:.4f}, pnl ${pnl:.4f})"))
+
+        self._log(reason, side=pos.side.value, price=round(fill_price, 4), shares=pos.shares,
+                   fee=round(fee, 4), pnl=round(pnl, 4),
+                   note=(f"{note_prefix} (taker, real fill @ {fill_price:.4f}): {pos.shares:.0f}sh sold "
+                         f"(entry {pos.entry_price:.4f}, fee ${fee:.4f}, pnl ${pnl:.4f})"))
         self.capital.check_halt()
-        book.shares_held = 0.0
-        book.cost_basis = 0.0
+        self._advance_martingale(win)
+        self.s.position = None
+        self.s.done_for_window = True
+
+    def _advance_martingale(self, win: bool):
+        prev = self.martingale_step
+        if win:
+            if self.martingale_step >= config.MAX_MARTINGALE_STEPS:
+                self.martingale_step = 0
+            else:
+                self.martingale_step += 1
+        else:
+            self.martingale_step = 0
+        if self.martingale_step != prev:
+            self._log("MARTINGALE_STEP", note=(
+                f"{'win' if win else 'loss'} -- stake step {prev} -> {self.martingale_step} "
+                f"for next window ({self._current_stake_shares():.0f}sh)"
+            ))
 
     # ---- window close -------------------------------------------------------
 
@@ -442,95 +316,94 @@ class Engine:
             return
         window_slug = self.s.window.slug
 
-        if not self.capital.halted and not self.s.done_for_window:
-            any_shares = self.s.up_book.shares_held > 0 or self.s.down_book.shares_held > 0
-            for side in (Side.UP, Side.DOWN):
-                book = self._book_for(side)
-                for order in book.orders:
-                    if order.status == "resting":
-                        order.status = "cancelled"
-            if any_shares:
-                self._sell_everything(time.time(), reason="FORCED_CLOSE", note_prefix="window closed, forced taker close")
-            self.s.total_forced_closes += 1 if any_shares else 0
-
-        if not self.capital.halted and self.s.total_orders_placed == 0:
-            self.s.no_trade_windows += 1
-            self._log("NO_TRADE", note="never got a live price to place a single grid order this window")
+        if not self.capital.halted:
+            if self.s.position is not None:
+                self.s.total_forced_closes += 1
+                self._close_position(time.time(), reason="FORCED_CLOSE",
+                                      note_prefix="window closed before TP/SL, forced taker close")
+            elif not self.s.trade_taken:
+                self.s.no_trade_windows += 1
+                self._log("NO_TRADE", note=f"neither side ever reached {config.ENTRY_TRIGGER_PRICE} this window")
 
         self.s.window = None
         self.capital.record_equity_point(window_slug)
 
     # ---- dashboard payload -------------------------------------------------
 
-    def _side_payload(self, side: Side) -> dict:
-        book = self._book_for(side)
-        bid = self._bid_for(side)
-        mark = bid if bid is not None else None
-        market_value = book.shares_held * mark if (mark is not None and book.shares_held > 0) else None
-        unrealized = (market_value - book.cost_basis) if market_value is not None else None
-        orders = [{
-            "price": o.price, "shares": o.shares, "status": o.status,
-            "placed_ts": o.placed_ts, "filled_ts": o.filled_ts,
-        } for o in book.orders]
+    def _position_payload(self) -> Optional[dict]:
+        pos = self.s.position
+        if pos is None:
+            return None
+        bid = self._bid_for(pos.side)
+        mark = bid if bid is not None else pos.entry_price
+        market_value = pos.shares * mark
+        unrealized = market_value - pos.cost
+        to_tp = round(config.TP_PRICE - mark, 4)
+        to_sl = round(mark - config.SL_PRICE, 4)
         return {
-            "side": side.value,
-            "orders": orders,
-            "resting_count": sum(1 for o in book.orders if o.status == "resting"),
-            "filled_count": sum(1 for o in book.orders if o.status == "filled"),
-            "shares_held": book.shares_held,
-            "cost_basis": round(book.cost_basis, 4),
+            "side": pos.side.value,
+            "shares": pos.shares,
+            "entry_price": round(pos.entry_price, 4),
+            "entry_fee": round(pos.entry_fee, 4),
+            "entry_ts": pos.entry_ts,
+            "martingale_step": pos.martingale_step,
             "mark_price": mark,
-            "market_value": round(market_value, 4) if market_value is not None else None,
-            "unrealized_pnl": round(unrealized, 4) if unrealized is not None else None,
+            "market_value": round(market_value, 4),
+            "unrealized_pnl": round(unrealized, 4),
+            "tp_price": config.TP_PRICE,
+            "sl_price": config.SL_PRICE,
+            "distance_to_tp": to_tp,
+            "distance_to_sl": to_sl,
         }
 
     def snapshot(self) -> dict:
-        up = self._side_payload(Side.UP)
-        down = self._side_payload(Side.DOWN)
-        combined_unrealized = self._combined_unrealized_pnl()
-        open_market_value = (up["market_value"] or 0) + (down["market_value"] or 0)
+        position = self._position_payload()
+        market_value = position["market_value"] if position else 0.0
+        unrealized = position["unrealized_pnl"] if position else 0.0
         realized_pnl = round(self.s.total_pnl, 4)
-
-        elapsed = (time.time() - self.s.window.open_ts) if self.s.window else None
-        grid_building = elapsed is not None and elapsed < config.GRID_DURATION_SECONDS
-        seconds_until_watch_phase = (config.GRID_DURATION_SECONDS - elapsed) if grid_building else None
 
         if self.capital.halted:
             status = "halted"
+        elif position is not None:
+            status = "in_position"
         elif self.s.done_for_window:
             status = "done"
-        elif grid_building:
-            status = "building"
         else:
             status = "watching"
 
+        up_mid = self._mid_for(Side.UP)
+        down_mid = self._mid_for(Side.DOWN)
+
         return {
-            "engine": "GRID", "label": "Independent dual-grid, profit-target exit",
+            "engine": "BREAKOUT", "label": "Breakout entry, fixed TP/SL, anti-martingale",
 
             "balance": round(self.capital.balance, 2),
             "starting_capital": config.STARTING_CAPITAL,
             "halted": self.capital.halted,
             "equity_curve": self.capital.equity_curve,
-            "equity": round(self.capital.balance + open_market_value, 4),
+            "equity": round(self.capital.balance + market_value, 4),
 
             "realized_pnl": realized_pnl,
-            "unrealized_pnl": round(combined_unrealized, 4),
-            "open_market_value": round(open_market_value, 4),
+            "unrealized_pnl": round(unrealized, 4),
+            "open_market_value": round(market_value, 4),
             "last_window_pnl": round(self.s.last_window_pnl, 4),
 
-            "up_book": up,
-            "down_book": down,
+            "up_mid": up_mid,
+            "down_mid": down_mid,
+            "trade_taken": self.s.trade_taken,
+            "position": position,
             "done_for_window": self.s.done_for_window,
-            "grid_building": grid_building,
-            "seconds_until_watch_phase": round(seconds_until_watch_phase, 1) if seconds_until_watch_phase is not None else None,
 
-            "total_orders_placed": self.s.total_orders_placed,
-            "total_rung_fills": self.s.total_rung_fills,
-            "total_illiquid_skips": self.s.total_illiquid_skips,
-            "total_profit_target_hits": self.s.total_profit_target_hits,
+            "martingale_step": self.martingale_step,
+            "martingale_cap": config.MAX_MARTINGALE_STEPS,
+            "current_stake_shares": self._current_stake_shares(),
+            "martingale_multiplier": round(config.ANTI_MARTINGALE_MULTIPLIER ** self.martingale_step, 4),
+
+            "total_triggers": self.s.total_triggers,
+            "total_missed_entries": self.s.total_missed_entries,
+            "total_tp_hits": self.s.total_tp_hits,
+            "total_sl_hits": self.s.total_sl_hits,
             "total_forced_closes": self.s.total_forced_closes,
-            "total_merges": self.s.total_merges,
-            "total_merge_volume": self.s.total_merge_volume,
             "no_trade_windows": self.s.no_trade_windows,
             "wins": self.s.wins,
             "losses": self.s.losses,
@@ -539,10 +412,13 @@ class Engine:
             "status": status,
 
             "def": {
-                "grid_order_shares": config.GRID_ORDER_SHARES,
-                "grid_spacing": config.GRID_SPACING,
-                "grid_duration_seconds": config.GRID_DURATION_SECONDS,
-                "profit_target_usd": config.PROFIT_TARGET_USD,
-                "merge_profit_threshold_usd": config.MERGE_PROFIT_THRESHOLD_USD,
+                "entry_trigger_price": config.ENTRY_TRIGGER_PRICE,
+                "entry_slippage": config.ENTRY_SLIPPAGE,
+                "entry_cap_price": round(config.ENTRY_TRIGGER_PRICE + config.ENTRY_SLIPPAGE, 4),
+                "tp_price": config.TP_PRICE,
+                "sl_price": config.SL_PRICE,
+                "base_order_shares": config.BASE_ORDER_SHARES,
+                "anti_martingale_multiplier": config.ANTI_MARTINGALE_MULTIPLIER,
+                "max_martingale_steps": config.MAX_MARTINGALE_STEPS,
             },
         }

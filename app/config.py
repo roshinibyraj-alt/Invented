@@ -1,56 +1,42 @@
 """
 Central configuration for the BTC 5-min up/down bot.
 
-Single engine -- two fully independent non-overlapping limit-order grids
-(one per side), running for the first 120s of each window, then a
-combined profit-target exit:
+Single engine -- breakout-entry, fixed TP/SL, anti-martingale sizing:
 
-  1. Grid building (first GRID_DURATION_SECONDS / 120s of the window):
-     every tick, on EACH side independently, compute a candidate rung
-     price = (current mid price) - GRID_SPACING (0.05). If that
-     candidate isn't within GRID_SPACING of any order already placed on
-     that side (resting, filled, or cancelled), place a new resting
-     limit BUY there for GRID_ORDER_SHARES (100) shares. This produces
-     a ladder of buy orders that are never closer than 0.05 apart, and
-     that keeps extending as price explores new territory in either
-     direction (a new low pulls the ladder down; a bounce back up past
-     the lowest rungs can add a new rung near the new price too, as
-     long as it's >=0.05 from everything already placed).
-  2. Fills: a resting limit buy on a side fills -- at its own limit
-     price, no slippage -- the moment that side's best ask drops to or
-     through it. This is a real maker fill (no taker fee) since it's a
-     resting order, not a market sweep. Fills only happen during the
-     120s grid-building window -- see (3) for what happens the instant
-     it times out.
-  3. Grid-building timeout (120s): the instant GRID_DURATION_SECONDS
-     elapses, no more new orders are placed AND any rung still resting
-     (never filled) is cancelled outright, on both sides, once. Shares
-     that already filled are untouched and carry forward. From here on
-     the bot just watches. Every tick it totals the UNREALIZED profit across
-     every filled share on BOTH sides combined (mark-to-market minus
-     cost basis, summed UP + DOWN). The instant that combined total
-     reaches PROFIT_TARGET_USD ($100), it sells EVERYTHING on both
-     sides as taker orders (priced by walking real book depth, not
-     just top-of-book -- see Engine._realistic_fill_price) and is done
-     for the rest of that window: no more orders, no more monitoring.
-  4. Window close: if the profit target was never hit, cancel any
-     still-resting unfilled orders (no penalty) and force a taker close
-     on any shares still held, same depth-aware pricing as the exit
-     above.
+  1. Entry trigger: from the instant a window opens, watch both sides'
+     mid price every tick. The moment EITHER side's mid reaches
+     ENTRY_TRIGGER_PRICE (0.70), immediately attempt a buy on that side
+     only -- whichever side triggers first takes the window's one and
+     only trade slot; the other side is ignored for the rest of the
+     window even if it later reaches 0.70 too.
+  2. Fill / slippage: the entry is priced by walking real ask depth
+     (see Engine._realistic_fill_price), but capped at
+     ENTRY_TRIGGER_PRICE + ENTRY_SLIPPAGE (0.80) -- if the market has
+     already moved past that cap by the time the trigger fires, the
+     entry is skipped entirely (logged as MISSED_ENTRY, no position,
+     no capital risked) rather than chasing an arbitrarily bad price.
+  3. Exit: once filled, every tick checks that side's bid against two
+     fixed absolute levels -- TP_PRICE (0.99) and SL_PRICE (0.40).
+     Whichever is reached first closes the whole position as a taker
+     sell, priced by walking real bid depth. If the window closes
+     before either level is reached, the position is force-closed at
+     whatever the market will pay (same as a normal SL/TP would be
+     counted for win/loss purposes).
+  4. Sizing -- anti-martingale: position size is
+     BASE_ORDER_SHARES * ANTI_MARTINGALE_MULTIPLIER ** martingale_step.
+     martingale_step persists across windows (not reset per window):
+       - a WIN steps it up by one (capped at MAX_MARTINGALE_STEPS),
+         except a win that was already AT the cap resets back to 0.
+       - a LOSS resets it to 0 immediately.
+       - a window with no trade taken (trigger never reached, or the
+         entry was skipped for slippage) leaves it unchanged.
+     With the defaults (2.1x, cap 2) the ladder is:
+       step 0 = 1x -> step 1 = 2.1x -> step 2 = 4.41x -> (win) -> step 0
 
-Merges (fee-free, independent of the above): every tick, regardless of
-grid-building/watching phase, check whether we're holding filled shares
-on BOTH sides at once. UP+DOWN are complementary tokens of the same
-condition, so min(up_shares, down_shares) of them can be merged straight
-back into that many dollars of USDC via Polymarket's CTF contract --
-no orderbook, no taker fee, no slippage. The moment that merge's profit
-(the $1/pair redemption minus the pair's combined cost basis) clears
-MERGE_PROFIT_THRESHOLD_USD ($10), the bot merges that many shares off
-both books immediately and banks the profit, leaving any leftover
-imbalance (whichever side has more shares) resting for the grid/exit
-logic above to handle normally.
-
-Sizing is flat -- GRID_ORDER_SHARES (100) per rung, no progression.
+At most one trade per window, no order-book ladder, no merge -- a
+position only ever exists on one side at a time, so the fee-free CTF
+merge mechanic (holding both sides at once) doesn't apply here and was
+removed along with the old dual-grid logic.
 """
 import os
 
@@ -68,24 +54,15 @@ WINDOW_SECONDS = 300
 
 POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
 
-# ---- Independent dual-grid engine ---------------------------------------
-GRID_ORDER_SHARES = 100.0        # flat size per resting rung
-GRID_SPACING = 0.05              # minimum distance between any two rungs on the same side
-GRID_DURATION_SECONDS = 120      # stop placing NEW orders after this long; resting orders stay live
-PROFIT_TARGET_USD = 100.0        # combined unrealized profit (both sides) that triggers sell-everything
+# ---- Breakout-entry / fixed TP-SL engine ---------------------------------
+ENTRY_TRIGGER_PRICE = 0.70        # mid price that arms a buy on that side
+ENTRY_SLIPPAGE = 0.10             # max price above trigger we'll chase (cap = 0.80)
+TP_PRICE = 0.99                   # take-profit exit level
+SL_PRICE = 0.40                   # stop-loss exit level
 
-# ---- CTF merge (fee-free) ------------------------------------------------
-# UP and DOWN are complementary outcome tokens of the SAME condition --
-# 1 UP share + 1 DOWN share can be merged back into $1.00 of USDC
-# collateral directly through Polymarket's CTF contract (mergePositions),
-# with no orderbook, no taker fee, and no slippage. Since every grid rung
-# on both sides buys BELOW mid, whenever we hold filled shares on both
-# sides at once, their combined cost basis per pair is very often under
-# $1 -- that gap is a locked-in profit the instant it's merged, no need
-# to wait for a favorable price move or pay a taker fee to realize it.
-# Checked every tick; fires the moment the mergeable pair profit clears
-# this bar (kept well above $0 so we're not merging over dust/rounding).
-MERGE_PROFIT_THRESHOLD_USD = 10.0
+BASE_ORDER_SHARES = 100.0                 # step-0 (1x) position size
+ANTI_MARTINGALE_MULTIPLIER = 2.1          # size multiplier applied per step, after a win
+MAX_MARTINGALE_STEPS = 2                  # steps 0..2 -> multipliers 1x, 2.1x, 4.41x
 
 # Demo capital: single source of truth for the paper balance -- debited
 # on every buy fill, credited on every sell settlement. Halts
@@ -93,13 +70,11 @@ MERGE_PROFIT_THRESHOLD_USD = 10.0
 STARTING_CAPITAL = float(os.getenv("STARTING_CAPITAL", "2000"))
 
 # ---- Trading fees -----------------------------------------------------
-# Grid rungs are resting MAKER limit orders -- they fill at their own
-# limit price with no fee (no rebate modeled either, just flat zero).
-# The profit-target sell-everything exit and any forced window-end
-# close are TAKER market orders and pay the fee for real, priced by
-# walking real book depth. Verify against
-# GET https://clob.polymarket.com/fee-rate?token_id=... before trading
-# real money.
+# Both entry and exit here are reactive/triggered fills (not resting
+# orders placed ahead of time), so both are modeled as TAKER fills and
+# pay the fee for real, priced by walking real book depth. Verify
+# against GET https://clob.polymarket.com/fee-rate?token_id=... before
+# trading real money.
 APPLY_TAKER_FEES = True
 TAKER_FEE_RATE = 0.07
 TAKER_FEE_EXPONENT = 1

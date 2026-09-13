@@ -1,44 +1,48 @@
-# Dual-grid, profit-target exit — BTC 5m bot
+# Breakout entry, fixed TP/SL, anti-martingale — BTC 5m bot
 
 Paper-trading bot for Polymarket's `btc-updown-5m-*` markets. Runs a
-single strategy: UP and DOWN each build their own fully independent
-grid of resting limit buy orders for the first two minutes, then the
-bot watches combined profit across both sides and sells everything the
-moment it's up $100.
+single strategy: watch both sides for a breakout past 0.70, buy
+whichever side gets there first, exit at a fixed take-profit or
+stop-loss, and size the next window's trade up after a win using an
+anti-martingale ladder.
 
 ## Strategy
 
-1. **Independent grids**: UP and DOWN are tracked completely
-   separately — nothing about one side's orders or fills affects the
-   other's.
-2. **Grid building (first 120 seconds of the window)**: every tick, on
-   each side, compute a candidate rung price = (current mid price) −
-   0.05. If that candidate is at least 0.05 away from every order
-   already placed on that side (resting, filled, or cancelled — a used
-   price slot stays used), place a new resting limit buy there for 100
-   shares. This produces a ladder of buy orders that's never closer
-   than 0.05 apart and keeps extending as price explores new territory
-   in either direction.
-3. **Fills**: a resting limit buy is a real maker order — it fills at
-   its own exact limit price (no slippage, no fee) the moment that
-   side's best ask drops to or through it. Fills can happen any time
-   the order is live, including after the 120-second grid-building
-   window ends (only *placing new orders* stops after 120s; anything
-   already resting stays live until it fills or the window closes).
-4. **After 120 seconds**: no more new orders are placed on either
-   side. The bot just watches. Every tick it totals the **unrealized**
-   profit across every filled share on **both sides combined**
-   (mark-to-market minus cost basis, UP + DOWN summed together). The
-   instant that combined total reaches **+$100**, it sells everything
-   on both sides — taker orders, priced by walking real book depth,
-   not just top-of-book — and is done for the rest of that window: no
-   more orders, no more monitoring.
-5. **Window close**: if the $100 target is never hit, cancel any
-   still-resting unfilled orders (no penalty) and force a taker close
-   on any shares still held, same depth-aware pricing as the exit
-   above.
+1. **Entry trigger**: from the instant a window opens, watch both
+   sides' mid price every tick. The moment **either** side's mid
+   reaches **0.70**, immediately attempt a buy on that side only —
+   whichever side triggers first takes the window's one and only trade
+   slot. The other side is ignored for the rest of the window, even if
+   it later reaches 0.70 too.
+2. **Fill / slippage cap**: the entry is priced by walking real ask
+   depth (not just top-of-book), but capped at 0.70 + 0.10 = **0.80**.
+   If the market has already moved past that cap by the time the
+   trigger fires, the entry is skipped entirely — logged as
+   `MISSED_ENTRY`, no position taken, no capital risked — rather than
+   chasing an arbitrarily bad price.
+3. **Exit**: once filled, every tick checks that side's bid against
+   two fixed absolute levels — **take-profit 0.99** and **stop-loss
+   0.40**. Whichever is reached first closes the whole position as a
+   taker sell, priced by walking real bid depth. If the window closes
+   before either level is reached, the position is force-closed at
+   whatever the market will pay, and still counts as a win or loss for
+   sizing purposes.
+4. **Sizing — anti-martingale**: position size is
+   `BASE_ORDER_SHARES * 2.1 ** martingale_step`. The step **persists
+   across windows** (it's not part of a window's state):
+   - a **win** steps it up by one, capped at 2 steps — except a win
+     that was already *at* the cap resets back to step 0
+   - a **loss** resets it to step 0 immediately
+   - a window where 0.70 was never reached, or the entry was skipped
+     for slippage, leaves the step unchanged
 
-Sizing is flat — 100 shares per rung, no progression or doubling.
+   With the defaults (2.1x, cap 2) the ladder is:
+   `100sh (1x) → 210sh (2.1x) → 441sh (4.41x) → win resets to 100sh`
+
+At most one trade is open per window, on one side only — a position
+never exists on both sides simultaneously, so there's no fee-free CTF
+merge mechanic here (that only applies when holding both complementary
+outcome tokens at once).
 
 ## Run locally
 
@@ -52,41 +56,31 @@ Dashboard at http://localhost:8000
 
 ## Config knobs (`app/config.py`)
 
-- `GRID_ORDER_SHARES`, `GRID_SPACING`, `GRID_DURATION_SECONDS`, `PROFIT_TARGET_USD`
-- `STARTING_CAPITAL`, taker fee constants (entries are fee-free maker fills; only the exit and forced close pay a fee)
+- `ENTRY_TRIGGER_PRICE` (0.70), `ENTRY_SLIPPAGE` (0.10), `TP_PRICE` (0.99), `SL_PRICE` (0.40)
+- `BASE_ORDER_SHARES` (100), `ANTI_MARTINGALE_MULTIPLIER` (2.1), `MAX_MARTINGALE_STEPS` (2)
+- `STARTING_CAPITAL`, taker fee constants (both entry and exit are taker fills here — reactive/triggered orders, not resting maker orders)
 
 ## Notes / assumptions
 
-- Resting limit buys are simulated as filling **fully, at their exact
-  limit price**, the instant the side's best ask reaches that price —
-  no partial fills, no fee, no slippage modeled for the maker leg
-  itself. The depth-aware realistic-fill-price logic only applies to
-  the two TAKER legs (the profit-target sell-everything exit, and the
-  forced window-end close). The cost of every fill is debited from the
-  capital balance the instant it fills, same as any other buy — this
-  was a real accounting bug in an earlier build of this version
-  (fills updated `shares_held`/`cost_basis` but never actually took
-  the money out of `balance`, silently inflating the equity figure by
-  the cost of every fill). Verified end-to-end: after any sequence of
-  fills and a sell, `starting_capital + total_pnl` matches the final
-  balance exactly.
-- The $100 profit target is evaluated against **gross unrealized P&L**
-  (mark value minus cost basis) — it does not pre-subtract the taker
-  fee that the eventual exit will incur, so realized profit after
-  exiting will be a little under $100 once that fee is paid.
-- "No overlap" / "0.05 apart" is enforced against every order ever
-  placed on that side, not just the most recent one — so the grid
-  never has two rungs closer than 0.05, no matter how price moves
-  around in between.
+- Both the entry and the exit are modeled as **taker** fills, priced
+  by walking real order-book depth rather than assuming unlimited size
+  at the top-of-book quote. Entry additionally enforces the 0.80
+  slippage cap; if the walked fill price would exceed it, no trade is
+  taken.
+- The cost of every fill is debited from the capital balance the
+  instant it fills, and every exit's proceeds are credited back —
+  `starting_capital + total_pnl` should match the final balance
+  exactly across any sequence of trades.
+- A win/loss for anti-martingale purposes is decided purely by realized
+  P&L sign on the close (`TP_HIT`, `SL_HIT`, or `FORCED_CLOSE` at
+  window end all count).
 - If the book is fetched successfully but truly has nothing resting on
-  a side at exit time (`bids: []`), that's treated as a real
-  no-liquidity signal — the position on that side is marked down to
-  $0 rather than assuming no loss. If the book fetch itself fails
-  (`None`, not `[]`), that's a genuine data gap and the last known
-  price is used instead.
-- A window where price never moves enough to place a single order
-  (extremely unlikely, but possible right at open) is counted as a
-  no-trade window.
+  the held side at exit time (`bids: []`), that's treated as a real
+  no-liquidity signal — the position is marked down to $0 rather than
+  assuming no loss. If the book fetch itself fails (`None`, not `[]`),
+  that's a genuine data gap and the last known price is used instead.
+- A window where 0.70 is never reached on either side is counted as a
+  no-trade window and does not affect the martingale step.
 - This reuses `models.py` and `paper_broker.py` unchanged;
   `polymarket_client.py` (full order-book depth via `get_book_full()`)
   and `state.py`/`main.py`'s orchestration loop are unchanged from the
