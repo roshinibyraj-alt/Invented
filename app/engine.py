@@ -1,16 +1,19 @@
 """
-Trading engine -- breakout entry on either side, fixed TP/SL exit,
-anti-martingale position sizing across windows.
+Trading engine -- breakout entry on either side, TP redemption + trailing
+SL exit, anti-martingale position sizing across windows.
 
 See app/config.py for the full strategy write-up. Summary: watch both
 sides' mid price from window open; the instant either reaches 0.70,
 buy that side only (capped at 0.10 slippage above trigger -- skip the
 trade entirely if the market's already past that). Once filled, exit
-the whole position the instant that side's bid reaches 0.99 (TP) or
-0.40 (SL), or force-close at window end if neither hit first. Size is
-base * 2.1 ** martingale_step, where martingale_step persists across
-windows: a win steps it up (reset to 0 if already at the cap), a loss
-resets it to 0, a no-trade window leaves it untouched.
+the instant that side's bid reaches 0.99 -- redeemed at a flat $1.00/
+share, fee-free, not sold -- or the trailing SL is hit (starts at 0.40,
+ratchets up in one-way steps to 0.50/0.60/0.70 as the position's
+high-water mark clears 0.80/0.90/0.97), or force-close at window end if
+neither happens first. Size is base * 2.1 ** martingale_step, where
+martingale_step persists across windows: a win steps it up (reset to 0
+if already at the cap), a loss resets it to 0, a no-trade window leaves
+it untouched.
 """
 import time
 from dataclasses import dataclass, field
@@ -62,6 +65,7 @@ class Position:
     entry_fee: float
     entry_ts: float
     martingale_step: int   # the step this position's size was sized at (for the log/dashboard)
+    high_water_mark: float = 0.0   # best bid seen since entry -- drives the trailing SL
 
     @property
     def cost(self) -> float:
@@ -136,7 +140,8 @@ class Engine:
             f"watching for either side's mid to reach {config.ENTRY_TRIGGER_PRICE} -- "
             f"stake this window: {stake:.0f}sh (martingale step {self.martingale_step}, "
             f"{config.ANTI_MARTINGALE_MULTIPLIER}x ladder, cap {config.MAX_MARTINGALE_STEPS}). "
-            f"TP {config.TP_PRICE} / SL {config.SL_PRICE}, slippage cap {config.ENTRY_SLIPPAGE}"
+            f"TP {config.TP_PRICE} (redeem $1) / initial SL {config.SL_BASE}, "
+            f"slippage cap {config.ENTRY_SLIPPAGE}"
         ))
 
     def on_tick(self, up_bid, up_ask, down_bid, down_ask, seconds_to_close: float = None, now: Optional[float] = None,
@@ -239,41 +244,72 @@ class Engine:
         cost = shares * fill_price + fee
         self.capital.balance -= cost
         self.s.position = Position(side=side, shares=shares, entry_price=fill_price, entry_fee=fee,
-                                    entry_ts=now, martingale_step=self.martingale_step)
+                                    entry_ts=now, martingale_step=self.martingale_step,
+                                    high_water_mark=fill_price)
         self._log("ENTRY_FILL", side=side.value, price=round(fill_price, 4), shares=shares, fee=round(fee, 4),
                    note=(f"breakout buy filled (taker): {shares:.0f}sh @ {fill_price:.4f} "
                          f"(trigger {config.ENTRY_TRIGGER_PRICE}, cap {cap}, fee ${fee:.4f}) -- "
-                         f"TP {config.TP_PRICE} / SL {config.SL_PRICE}"))
+                         f"TP {config.TP_PRICE} (redeem $1) / initial SL {config.SL_BASE}"))
         self.capital.check_halt()
 
-    # ---- exit: fixed TP/SL, one position at a time --------------------------
+    # ---- exit: TP redemption + trailing SL, one position at a time ----------
+
+    @staticmethod
+    def _effective_sl(high_water_mark: float) -> float:
+        """One-way ratchet: walk the steps in ascending trigger order and
+        keep the last (highest) one the high-water mark has reached.
+        Never returns a lower SL than a previously-reached step would
+        have, since the caller always feeds in the cumulative HWM, not
+        the current price."""
+        sl = config.SL_BASE
+        for trigger, stepped_sl in config.SL_TRAIL_STEPS:
+            if high_water_mark >= trigger:
+                sl = stepped_sl
+        return sl
 
     def _check_exit(self, now: float):
         pos = self.s.position
         bid = self._bid_for(pos.side)
         if bid is None:
             return
+        if bid > pos.high_water_mark:
+            pos.high_water_mark = bid
+
         if bid >= config.TP_PRICE:
             self.s.total_tp_hits += 1
             self._close_position(now, reason="TP_HIT",
-                                  note_prefix=f"take-profit hit ({config.TP_PRICE})")
-        elif bid <= config.SL_PRICE:
+                                  note_prefix=f"take-profit hit ({config.TP_PRICE})",
+                                  fill_price_override=1.0, fee_override=0.0)
+            return
+
+        effective_sl = self._effective_sl(pos.high_water_mark)
+        if bid <= effective_sl:
             self.s.total_sl_hits += 1
+            trailed = effective_sl > config.SL_BASE
             self._close_position(now, reason="SL_HIT",
-                                  note_prefix=f"stop-loss hit ({config.SL_PRICE})")
+                                  note_prefix=(f"trailing stop hit (SL trailed to {effective_sl} after "
+                                               f"reaching {pos.high_water_mark:.4f})" if trailed
+                                               else f"stop-loss hit ({effective_sl})"))
 
-    def _close_position(self, now: float, reason: str, note_prefix: str):
+    def _close_position(self, now: float, reason: str, note_prefix: str,
+                         fill_price_override: Optional[float] = None, fee_override: Optional[float] = None):
         pos = self.s.position
-        bid = self._bid_for(pos.side)
-        levels = self._bid_levels_for(pos.side)
-        fill_price = self._realistic_fill_price(levels, pos.shares, bid)
-        if fill_price is None:
-            # confirmed empty book -- nobody bidding at all right now
-            fill_price = 0.0
-            self._log("NO_LIQUIDITY", side=pos.side.value, price=bid,
-                       note=f"{reason} but book has zero bid depth on {pos.side.value} -- assuming worst case $0")
+        if fill_price_override is not None:
+            # TP: booked as a CTF resolution redemption, not an orderbook
+            # trade -- flat $1.00/share, no fee, no book-depth lookup.
+            fill_price = fill_price_override
+            fee = fee_override if fee_override is not None else 0.0
+        else:
+            bid = self._bid_for(pos.side)
+            levels = self._bid_levels_for(pos.side)
+            fill_price = self._realistic_fill_price(levels, pos.shares, bid)
+            if fill_price is None:
+                # confirmed empty book -- nobody bidding at all right now
+                fill_price = 0.0
+                self._log("NO_LIQUIDITY", side=pos.side.value, price=bid,
+                           note=f"{reason} but book has zero bid depth on {pos.side.value} -- assuming worst case $0")
+            fee = self.broker.taker_fee_amount(pos.shares, fill_price)
 
-        fee = self.broker.taker_fee_amount(pos.shares, fill_price)
         proceeds = pos.shares * fill_price - fee
         pnl = proceeds - pos.cost
         self.capital.balance += proceeds
@@ -287,8 +323,9 @@ class Engine:
 
         self._log(reason, side=pos.side.value, price=round(fill_price, 4), shares=pos.shares,
                    fee=round(fee, 4), pnl=round(pnl, 4),
-                   note=(f"{note_prefix} (taker, real fill @ {fill_price:.4f}): {pos.shares:.0f}sh sold "
-                         f"(entry {pos.entry_price:.4f}, fee ${fee:.4f}, pnl ${pnl:.4f})"))
+                   note=(f"{note_prefix} ({'redemption, fee-free' if fill_price_override is not None else 'taker'}, "
+                         f"@ {fill_price:.4f}): {pos.shares:.0f}sh (entry {pos.entry_price:.4f}, "
+                         f"fee ${fee:.4f}, pnl ${pnl:.4f})"))
         self.capital.check_halt()
         self._advance_martingale(win)
         self.s.position = None
@@ -336,10 +373,12 @@ class Engine:
             return None
         bid = self._bid_for(pos.side)
         mark = bid if bid is not None else pos.entry_price
+        hwm = max(pos.high_water_mark, mark)
+        effective_sl = self._effective_sl(hwm)
         market_value = pos.shares * mark
         unrealized = market_value - pos.cost
         to_tp = round(config.TP_PRICE - mark, 4)
-        to_sl = round(mark - config.SL_PRICE, 4)
+        to_sl = round(mark - effective_sl, 4)
         return {
             "side": pos.side.value,
             "shares": pos.shares,
@@ -348,10 +387,13 @@ class Engine:
             "entry_ts": pos.entry_ts,
             "martingale_step": pos.martingale_step,
             "mark_price": mark,
+            "high_water_mark": round(hwm, 4),
             "market_value": round(market_value, 4),
             "unrealized_pnl": round(unrealized, 4),
             "tp_price": config.TP_PRICE,
-            "sl_price": config.SL_PRICE,
+            "sl_price": round(effective_sl, 4),
+            "sl_base": config.SL_BASE,
+            "sl_trailed": effective_sl > config.SL_BASE,
             "distance_to_tp": to_tp,
             "distance_to_sl": to_sl,
         }
@@ -416,7 +458,8 @@ class Engine:
                 "entry_slippage": config.ENTRY_SLIPPAGE,
                 "entry_cap_price": round(config.ENTRY_TRIGGER_PRICE + config.ENTRY_SLIPPAGE, 4),
                 "tp_price": config.TP_PRICE,
-                "sl_price": config.SL_PRICE,
+                "sl_base": config.SL_BASE,
+                "sl_trail_steps": [{"trigger": t, "sl": s} for t, s in config.SL_TRAIL_STEPS],
                 "base_order_shares": config.BASE_ORDER_SHARES,
                 "anti_martingale_multiplier": config.ANTI_MARTINGALE_MULTIPLIER,
                 "max_martingale_steps": config.MAX_MARTINGALE_STEPS,

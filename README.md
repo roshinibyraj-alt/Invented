@@ -20,13 +20,26 @@ anti-martingale ladder.
    trigger fires, the entry is skipped entirely — logged as
    `MISSED_ENTRY`, no position taken, no capital risked — rather than
    chasing an arbitrarily bad price.
-3. **Exit**: once filled, every tick checks that side's bid against
-   two fixed absolute levels — **take-profit 0.99** and **stop-loss
-   0.40**. Whichever is reached first closes the whole position as a
-   taker sell, priced by walking real bid depth. If the window closes
-   before either level is reached, the position is force-closed at
-   whatever the market will pay, and still counts as a win or loss for
-   sizing purposes.
+3. **Exit**: once filled, every tick checks that side's bid against a
+   take-profit level and a trailing stop-loss:
+   - **Take-profit (0.99)**: treated as a certain win and **redeemed**,
+     not sold — credited at a flat **$1.00/share, fee-free** (a CTF
+     resolution redemption, not an orderbook trade), instead of
+     taker-selling at ~0.99 and losing a sliver of edge to fee/slippage.
+   - **Trailing stop-loss**: starts at **0.40**, and ratchets up in
+     one-way steps off the position's high-water mark (best bid seen
+     since entry) — it never moves back down, even if price pulls back
+     below the level that raised it:
+     - high-water mark ≥ 0.80 → SL moves to 0.50
+     - high-water mark ≥ 0.90 → SL moves to 0.60
+     - high-water mark ≥ 0.97 → SL moves to 0.70
+
+     An SL exit is a real taker sell, priced by walking real bid depth
+     — unlike TP, it isn't a guaranteed-resolution redemption.
+
+   If the window closes before either is reached, the position is
+   force-closed at whatever the market will pay (also a real taker
+   sell), and still counts as a win/loss for sizing purposes.
 4. **Sizing — anti-martingale**: position size is
    `BASE_ORDER_SHARES * 2.1 ** martingale_step`. The step **persists
    across windows** (it's not part of a window's state):
@@ -56,11 +69,20 @@ Dashboard at http://localhost:8000
 
 ## Config knobs (`app/config.py`)
 
-- `ENTRY_TRIGGER_PRICE` (0.70), `ENTRY_SLIPPAGE` (0.10), `TP_PRICE` (0.99), `SL_PRICE` (0.40)
+- `ENTRY_TRIGGER_PRICE` (0.70), `ENTRY_SLIPPAGE` (0.10), `TP_PRICE` (0.99), `SL_BASE` (0.40), `SL_TRAIL_STEPS` (0.80→0.50, 0.90→0.60, 0.97→0.70)
 - `BASE_ORDER_SHARES` (100), `ANTI_MARTINGALE_MULTIPLIER` (2.1), `MAX_MARTINGALE_STEPS` (2)
-- `STARTING_CAPITAL`, taker fee constants (both entry and exit are taker fills here — reactive/triggered orders, not resting maker orders)
+- `STARTING_CAPITAL`, taker fee constants (entry, SL, and forced-close are taker fills; TP is a fee-free redemption at $1.00, not a trade)
 
 ## Notes / assumptions
+
+- TP being modeled as a flat $1.00 redemption assumes a token sitting
+  at 0.99 is a settled win — it does not model the (small) chance the
+  window still resolves against it before the redemption actually
+  happens on-chain.
+- The trailing SL only ever moves up. It's driven by the position's
+  high-water mark, not the current price, so a spike to 0.92 followed
+  by a pullback to 0.65 does **not** trigger a stop (SL is already at
+  0.60) — only a further drop to 0.60 or below would.
 
 - Both the entry and the exit are modeled as **taker** fills, priced
   by walking real order-book depth rather than assuming unlimited size

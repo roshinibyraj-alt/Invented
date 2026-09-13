@@ -154,7 +154,7 @@
   <header>
     <div>
       <h1>Breakout entry, fixed TP/SL, anti-martingale</h1>
-      <div class="sub">BTC 5m up/down — the instant either side's mid reaches 0.70, buy that side (taker, up to 0.10 slippage). TP 0.99 / SL 0.40 closes it. One trade per window. Win: stake steps up 2.1x next window (cap 2 steps, then resets). Loss: resets to base.</div>
+      <div class="sub">BTC 5m up/down — the instant either side's mid reaches 0.70, buy that side (taker, up to 0.10 slippage). TP 0.99 redeems at $1.00, fee-free. SL starts at 0.40 and trails up (never back down) to 0.50 / 0.60 / 0.70 as price clears 0.80 / 0.90 / 0.97. One trade per window. Win: stake steps up 2.1x next window (cap 2 steps, then resets). Loss: resets to base.</div>
     </div>
     <div class="status-pill"><span class="dot" id="statusDot"></span><span id="statusText">connecting</span></div>
   </header>
@@ -239,7 +239,7 @@ function renderGauge(trackId, midId, bidAskId, sideLblId, side, bid, ask, e, gau
   marks += `<div class="gauge-mark trigger" style="left:${trig*100}%"><span class="lbl">${fmtP(trig)}</span></div>`;
   if(held){
     marks += `<div class="gauge-mark tp" style="left:${e.def.tp_price*100}%"><span class="lbl">TP ${fmtP(e.def.tp_price)}</span></div>`;
-    marks += `<div class="gauge-mark sl" style="left:${e.def.sl_price*100}%"><span class="lbl">SL ${fmtP(e.def.sl_price)}</span></div>`;
+    marks += `<div class="gauge-mark sl" style="left:${pos.sl_price*100}%"><span class="lbl">SL ${fmtP(pos.sl_price)}${pos.sl_trailed?' \u2191':''}</span></div>`;
     marks += `<div class="gauge-mark entry" style="left:${pos.entry_price*100}%"><span class="lbl">in ${fmtP(pos.entry_price)}</span></div>`;
   }
   track.innerHTML = marks;
@@ -301,9 +301,9 @@ function renderEngineCard(e){
   const defRowsHtml = [
     ['Entry trigger', fmtP(e.def.entry_trigger_price)],
     ['Slippage cap', `+${fmtP(e.def.entry_slippage)} (max ${fmtP(e.def.entry_cap_price)})`],
-    ['Take-profit', fmtP(e.def.tp_price)],
-    ['Stop-loss', fmtP(e.def.sl_price)],
-    ['Base stake', `${fmtSh(e.def.base_order_shares)}sh`],
+    ['Take-profit', `${fmtP(e.def.tp_price)} \u2192 redeemed @ $1.00, fee-free`],
+    ['Stop-loss (base)', fmtP(e.def.sl_base)],
+    ['SL trails to', e.def.sl_trail_steps.map(s => `${fmtP(s.sl)} @${fmtP(s.trigger)}`).join(' / ')],
     ['This window\u2019s stake', `${fmtSh(e.current_stake_shares)}sh (${e.martingale_multiplier}x)`],
   ].map(([k,v]) => `<div class="def-item"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
 
@@ -313,7 +313,8 @@ function renderEngineCard(e){
     phaseBanner = 'Halted — no further trades.';
   } else if(e.position){
     phaseCls = 'armed';
-    phaseBanner = `Position open on ${e.position.side} @ ${fmtP(e.position.entry_price)} — watching for TP ${fmtP(e.def.tp_price)} or SL ${fmtP(e.def.sl_price)}.`;
+    const p = e.position;
+    phaseBanner = `Position open on ${p.side} @ ${fmtP(p.entry_price)} — TP ${fmtP(e.def.tp_price)} (redeem $1) / SL ${fmtP(p.sl_price)}${p.sl_trailed ? ' (trailed up from '+fmtP(e.def.sl_base)+')' : ''}, high-water ${fmtP(p.high_water_mark)}.`;
   } else if(e.done_for_window){
     phaseCls = 'done';
     phaseBanner = e.trade_taken
@@ -335,9 +336,9 @@ function renderEngineCard(e){
         </div>
         <div class="position-grid">
           <div><div class="k">Mark</div><div class="v">${fmtP(pos.mark_price)}</div></div>
+          <div><div class="k">High-water</div><div class="v">${fmtP(pos.high_water_mark)}</div></div>
           <div><div class="k">To TP</div><div class="v" style="color:var(--mint)">${fmtP(pos.distance_to_tp)}</div></div>
-          <div><div class="k">To SL</div><div class="v" style="color:var(--coral)">${fmtP(pos.distance_to_sl)}</div></div>
-          <div><div class="k">Mkt value</div><div class="v">${fmt$(pos.market_value)}</div></div>
+          <div><div class="k">SL now / to SL</div><div class="v" style="color:var(--coral)">${fmtP(pos.sl_price)}${pos.sl_trailed?' \u2191':''} / ${fmtP(pos.distance_to_sl)}</div></div>
         </div>
         <div class="position-pnl-row">
           <span class="lbl">unrealized P&amp;L</span>

@@ -15,13 +15,24 @@ Single engine -- breakout-entry, fixed TP/SL, anti-martingale sizing:
      already moved past that cap by the time the trigger fires, the
      entry is skipped entirely (logged as MISSED_ENTRY, no position,
      no capital risked) rather than chasing an arbitrarily bad price.
-  3. Exit: once filled, every tick checks that side's bid against two
-     fixed absolute levels -- TP_PRICE (0.99) and SL_PRICE (0.40).
-     Whichever is reached first closes the whole position as a taker
-     sell, priced by walking real bid depth. If the window closes
-     before either level is reached, the position is force-closed at
-     whatever the market will pay (same as a normal SL/TP would be
-     counted for win/loss purposes).
+  3. Exit: once filled, every tick checks that side's bid against a
+     take-profit level and a trailing stop-loss:
+       - TP_PRICE (0.99): treated as a certain win and REDEEMED, not
+         sold -- credited at a flat $1.00/share with zero fee (a CTF
+         resolution redemption, not an orderbook trade -- same
+         no-fee logic as the merge mechanic), instead of taker-selling
+         at ~0.99 and losing a sliver of edge to fee/slippage.
+       - Stop-loss trails up in one-way steps off the position's
+         high-water mark (the best bid seen since entry) and never
+         moves back down, even if price pulls back below the level
+         that raised it: SL_STEPS (see below) map "price has reached
+         at least X" -> "SL is now Y". Below the first step it's just
+         SL_BASE (0.40). An SL exit is a real taker sell, priced by
+         walking real bid depth, since (unlike TP) it isn't a
+         guaranteed-resolution redemption.
+     If the window closes before either is reached, the position is
+     force-closed at whatever the market will pay (also a real taker
+     sell), and still counts as a win/loss for sizing purposes.
   4. Sizing -- anti-martingale: position size is
      BASE_ORDER_SHARES * ANTI_MARTINGALE_MULTIPLIER ** martingale_step.
      martingale_step persists across windows (not reset per window):
@@ -54,11 +65,24 @@ WINDOW_SECONDS = 300
 
 POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
 
-# ---- Breakout-entry / fixed TP-SL engine ---------------------------------
+# ---- Breakout-entry / trailing-SL / TP-redemption engine -----------------
 ENTRY_TRIGGER_PRICE = 0.70        # mid price that arms a buy on that side
 ENTRY_SLIPPAGE = 0.10             # max price above trigger we'll chase (cap = 0.80)
-TP_PRICE = 0.99                   # take-profit exit level
-SL_PRICE = 0.40                   # stop-loss exit level
+TP_PRICE = 0.99                   # take-profit level -- hit = redeemed at $1.00, fee-free
+SL_BASE = 0.40                    # stop-loss before any trailing step has triggered
+
+# Trailing stop-loss: (price the position's high-water mark must reach,
+# the SL it moves to once it does). Must stay sorted ascending by
+# trigger -- Engine._effective_sl walks it in order and keeps the last
+# (highest) one whose trigger the high-water mark has reached, so a
+# later/lower entry here would never actually win out over an earlier
+# higher one. One-way ratchet: once a step fires it never moves back
+# down, even if price pulls back below that step's trigger afterward.
+SL_TRAIL_STEPS = [
+    (0.80, 0.50),
+    (0.90, 0.60),
+    (0.97, 0.70),
+]
 
 BASE_ORDER_SHARES = 100.0                 # step-0 (1x) position size
 ANTI_MARTINGALE_MULTIPLIER = 2.1          # size multiplier applied per step, after a win
@@ -70,11 +94,14 @@ MAX_MARTINGALE_STEPS = 2                  # steps 0..2 -> multipliers 1x, 2.1x, 
 STARTING_CAPITAL = float(os.getenv("STARTING_CAPITAL", "2000"))
 
 # ---- Trading fees -----------------------------------------------------
-# Both entry and exit here are reactive/triggered fills (not resting
-# orders placed ahead of time), so both are modeled as TAKER fills and
-# pay the fee for real, priced by walking real book depth. Verify
-# against GET https://clob.polymarket.com/fee-rate?token_id=... before
-# trading real money.
+# Entry, SL, and a forced window-end close are reactive/triggered fills
+# (not resting orders placed ahead of time), so all three are modeled
+# as TAKER fills and pay the fee for real, priced by walking real book
+# depth. TP is the one exception: it's booked as a resolution
+# redemption (see TP_PRICE above), not an orderbook trade, so it pays
+# no fee at all. Verify the taker rate against
+# GET https://clob.polymarket.com/fee-rate?token_id=... before trading
+# real money.
 APPLY_TAKER_FEES = True
 TAKER_FEE_RATE = 0.07
 TAKER_FEE_EXPONENT = 1
