@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>One-way re-arming trailing stop — BTC 5m bot</title>
+<title>Dual-grid, profit-target exit — BTC 5m bot</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
@@ -59,10 +59,9 @@
   .gauge-fill.DOWN{background:linear-gradient(90deg,var(--coral-dim),var(--coral));}
   .gauge-mark{position:absolute; top:-4px; bottom:-4px; width:2px; background:var(--faint);}
   .gauge-mark .lbl{position:absolute; top:-17px; left:50%; transform:translateX(-50%); font-family:var(--mono); font-size:9px; color:var(--faint); white-space:nowrap;}
-  .gauge-mark.threshold{background:var(--amber);} .gauge-mark.threshold .lbl{color:var(--amber);}
-  .gauge-mark.threshold.done{background:#6b5427;} .gauge-mark.threshold.done .lbl{color:#6b5427;}
-  .gauge-mark.sl{background:var(--coral);} .gauge-mark.sl .lbl{color:var(--coral); top:auto; bottom:-17px;}
-  .gauge-mark.tp{background:var(--mint);} .gauge-mark.tp .lbl{color:var(--mint); top:auto; bottom:-17px;}
+  .gauge-mark.rung-resting{background:var(--amber);} .gauge-mark.rung-resting .lbl{color:var(--amber);}
+  .gauge-mark.rung-filled{background:var(--mint);} .gauge-mark.rung-filled .lbl{color:var(--mint); top:auto; bottom:-17px;}
+  .gauge-mark.rung-cancelled{background:var(--faint); opacity:.5;} .gauge-mark.rung-cancelled .lbl{color:var(--faint); top:auto; bottom:-17px;}
   .gauge-bidask{font-family:var(--mono); font-size:10.5px; color:var(--faint); display:flex; justify-content:space-between; margin-top:2px;}
   .gauge-legend{display:flex; gap:16px; flex-wrap:wrap; font-family:var(--mono); font-size:10px; color:var(--muted); padding-top:14px; border-top:1px solid var(--line);}
   .gauge-legend span{display:flex; align-items:center; gap:5px;}
@@ -76,12 +75,10 @@
   .card h2 .tag{font-size:10px; padding:2px 8px; border-radius:6px; background:var(--panel-3); color:var(--faint); font-family:var(--mono); font-weight:500;}
 
   .status-badge{font-size:10.5px; font-weight:600; padding:4px 10px; border-radius:6px;}
+  .status-badge.building{background:var(--amber-dim); color:var(--amber);}
   .status-badge.watching{background:#1a2029; color:#6a7688;}
-  .status-badge.open{background:var(--mint-dim); color:var(--mint);}
   .status-badge.done{background:var(--violet-dim); color:var(--violet);}
   .status-badge.halted{background:var(--coral-dim); color:var(--coral);}
-  .status-badge.cooldown{background:var(--violet-dim); color:var(--violet);}
-  .status-badge.lockout{background:#1a2029; color:#6a7688;}
   .rearm-banner{background:var(--violet-dim); border:1px solid var(--violet); color:var(--violet);
     font-size:11px; font-family:var(--mono); font-weight:600; padding:8px 12px; border-radius:9px; margin-bottom:14px;}
 
@@ -138,14 +135,11 @@
   .log-row{display:grid; grid-template-columns:76px 1fr auto; gap:10px; align-items:center;
     font-family:var(--mono); font-size:11px; padding:7px 9px; border-radius:7px; background:var(--panel-3);}
   .log-row .t{color:var(--faint);}
-  .log-row .eng-tag{font-size:9px; font-weight:700; color:var(--faint); background:var(--panel-3); border-radius:4px; padding:1px 5px; margin-right:2px;}
   .log-row .ev{font-weight:600; font-size:9.5px; padding:2px 7px; border-radius:5px; background:#1a222f; text-align:center; white-space:nowrap;}
-  .log-row .ev.ENTRY_FILL{color:var(--amber);}
-  .log-row .ev.TRAIL_UPDATE{color:var(--violet);}
-  .log-row .ev.REARMED{color:var(--violet);}
-  .log-row .ev.DONE_FOR_WINDOW{color:var(--mint);}
-  .log-row .ev.TP_FILL{color:var(--mint);}
-  .log-row .ev.SL_FILL{color:var(--coral);}
+  .log-row .ev.RUNG_PLACED{color:var(--amber);}
+  .log-row .ev.RUNG_FILL{color:var(--mint);}
+  .log-row .ev.PROFIT_TARGET_HIT{color:var(--mint);}
+  .log-row .ev.PROFIT_TARGET_EXIT{color:var(--mint);}
   .log-row .ev.FORCED_CLOSE{color:var(--violet);}
   .log-row .ev.NO_LIQUIDITY{color:var(--amber);}
   .log-row .ev.HALTED{color:var(--coral);}
@@ -159,8 +153,8 @@
 <div class="wrap">
   <header>
     <div>
-      <h1>One-way re-arming trailing stop</h1>
-      <div class="sub">BTC 5m up/down — watch both sides, buy whichever reaches 0.60 first (taker, real fill), trail arms immediately at 0.50 and ratchets up 0.10 at a time, TP 0.99 — a stop-out re-arms and watches again, a TP ends trading for the window — exits price against real book depth, not just top-of-book</div>
+      <h1>Dual-grid, profit-target exit</h1>
+      <div class="sub">BTC 5m up/down — UP and DOWN run fully independent grids: for the first 120s, each side drops a resting limit buy 0.05 below its own mid any time that's ≥0.05 from an existing rung, 100sh each. After 120s: no new orders — watch combined unrealized P&L across both sides, sell everything (taker, real depth) the instant it hits +$100</div>
     </div>
     <div class="status-pill"><span class="dot" id="statusDot"></span><span id="statusText">connecting</span></div>
   </header>
@@ -186,9 +180,9 @@
       <div class="gauge-bidask"><span id="downBidAsk">bid — / ask —</span></div>
     </div>
     <div class="gauge-legend">
-      <span><i style="background:var(--amber);"></i>0.60 trailing-stop arm level</span>
-      <span><i style="background:var(--coral);"></i>this side's current trailing stop (once armed)</span>
-      <span><i style="background:var(--mint);"></i>0.99 take profit</span>
+      <span><i style="background:var(--amber);"></i>resting limit buy (unfilled rung)</span>
+      <span><i style="background:var(--mint);"></i>filled rung</span>
+      <span><i style="background:var(--faint);"></i>cancelled rung</span>
     </div>
   </div>
 
@@ -203,21 +197,6 @@
       <div class="card">
         <h2>Balance</h2>
         <div class="equity-hero" id="equityHero"></div>
-      </div>
-    </div>
-  </div>
-
-  <div class="two-col">
-    <div class="card" id="chopCard"></div>
-
-    <div style="display:flex; flex-direction:column; gap:12px;">
-      <div class="card">
-        <h2>Chop trade stats</h2>
-        <div class="stats-grid" id="chopStatsGrid"></div>
-      </div>
-      <div class="card">
-        <h2>Chop balance</h2>
-        <div class="equity-hero" id="chopEquityHero"></div>
       </div>
     </div>
   </div>
@@ -241,84 +220,24 @@ const $ = id => document.getElementById(id);
 const fmt$ = v => (v==null ? '—' : (v<0?'-$':'$') + Math.abs(Number(v)).toFixed(2));
 const fmtP = v => (v==null ? '—' : Number(v).toFixed(3));
 const fmtSh = v => (v==null ? '0' : Number(v).toFixed(0));
-const fmtSec = v => (v==null ? '—' : `${Number(v).toFixed(0)}s`);
 const pnlClass = v => (v>0.005?'pos':(v<-0.005?'neg':''));
-const TRAIL_ARM_PRICE = 0.60, TP_PRICE = 0.99;
 
-function renderGauge(trackId, midId, bidAskId, sideLblId, side, bid, ask, pos, anyPositionOpen, gaugeElId){
+function renderGauge(trackId, midId, bidAskId, sideLblId, side, bid, ask, book, gaugeElId){
   const mid = (bid!=null && ask!=null) ? (bid+ask)/2 : (ask!=null?ask:bid);
   $(midId).textContent = fmtP(mid);
   $(bidAskId).textContent = `bid ${fmtP(bid)} / ask ${fmtP(ask)}`;
-  $(gaugeElId).classList.toggle('dimmed', anyPositionOpen && !pos);
-  $(sideLblId).innerHTML = side + (pos ? '<span class="armed-tag">trailing</span>' : '');
+  const held = book && book.shares_held > 0;
+  $(gaugeElId).classList.toggle('dimmed', false);
+  $(sideLblId).innerHTML = side + (held ? `<span class="armed-tag">${fmtSh(book.shares_held)}sh held</span>` : '');
 
   const track = document.getElementById(trackId);
   const pct = mid!=null ? Math.max(0,Math.min(100, mid*100)) : 0;
   let marks = `<div class="gauge-fill ${side}" style="width:${pct}%"></div>`;
-  marks += `<div class="gauge-mark threshold ${pos?'done':''}" style="left:${TRAIL_ARM_PRICE*100}%"><span class="lbl">${TRAIL_ARM_PRICE} arm</span></div>`;
-  marks += `<div class="gauge-mark tp" style="left:${TP_PRICE*100}%"><span class="lbl">${TP_PRICE} tp</span></div>`;
-  if(pos && pos.trail_sl != null){
-    marks += `<div class="gauge-mark sl" style="left:${pos.trail_sl*100}%"><span class="lbl">${fmtP(pos.trail_sl)} sl</span></div>`;
-  }
+  (book && book.orders ? book.orders : []).forEach(o => {
+    const cls = o.status === 'filled' ? 'filled' : (o.status === 'cancelled' ? 'cancelled' : 'resting');
+    marks += `<div class="gauge-mark rung-${cls}" style="left:${o.price*100}%"><span class="lbl">${fmtP(o.price)}</span></div>`;
+  });
   track.innerHTML = marks;
-}
-
-function renderChopCard(c){
-  const el = $('chopCard');
-  if(!c || !c.def){ el.innerHTML = '<div class="empty">no data</div>'; return; }
-  const statusLabels = {
-    watching:'watching for a pullback to 0.40', open:'position(s) open', halted:'halted',
-    lockout:`window just opened (${c.lockout_seconds_left ?? '?'}s left)`,
-  };
-
-  const defRowsHtml = [
-    ['Entry', `pullback into 0.40 \u00b1${c.def.entry_max_chase}, no chase`],
-    ['Entry lockout', `first ${fmtSec(c.def.entry_lockout_seconds)} of window`],
-    ['Shares / entry', fmtSh(c.def.shares_per_entry)],
-    ['Buy level', fmtP(c.def.buy_price)],
-    ['Stop loss', fmtP(c.def.sl_price)],
-    ['Take profit', fmtP(c.def.tp_price)],
-    ['Force sell', `if neither hit by ${fmtSec(c.def.force_sell_after_seconds)}`],
-    ['UP / DOWN', 'fully independent, both can hold at once'],
-    ['After SL or TP', 'closes + re-arms \u2014 multiple entries allowed'],
-  ].map(([k,v]) => `<div class="def-item"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
-
-  const renderSidePos = (label, pos) => {
-    if(!pos){
-      return `<div class="position-box empty">${label}: no open position \u2014 watching for ${fmtP(c.def.buy_price)}</div>`;
-    }
-    const mins = Math.floor((pos.seconds_since_entry||0)/60), secs = Math.floor((pos.seconds_since_entry||0)%60);
-    const sideColor = pos.side==='UP' ? 'var(--mint)' : 'var(--coral)';
-    return `
-      <div class="position-box ${pos.unrealized_pnl<0?'loss':''}">
-        <div class="position-top">
-          <span class="rung-tag"><span style="color:${sideColor}">${pos.side}</span></span>
-          <span class="shares">${fmtSh(pos.shares)}sh \u00b7 ${mins}:${String(secs).padStart(2,'0')} held</span>
-        </div>
-        <div class="position-grid">
-          <div><div class="k">Entry</div><div class="v">${fmtP(pos.entry_price)}</div></div>
-          <div><div class="k">Mark</div><div class="v">${fmtP(pos.mark_price)}</div></div>
-          <div><div class="k">SL / TP</div><div class="v">${fmtP(c.def.sl_price)} / ${fmtP(c.def.tp_price)}</div></div>
-          <div><div class="k">Mkt value</div><div class="v">${fmt$(pos.shares*pos.mark_price)}</div></div>
-        </div>
-        <div class="position-pnl-row">
-          <span class="lbl">unrealized P&amp;L</span>
-          <span class="v ${pnlClass(pos.unrealized_pnl)}">${pos.unrealized_pnl>=0?'+':''}${fmt$(pos.unrealized_pnl)}</span>
-        </div>
-      </div>`;
-  };
-
-  el.innerHTML = `
-    <h2>
-      Chop engine
-      <span class="status-badge ${c.status}">${statusLabels[c.status] || c.status}</span>
-    </h2>
-    <div class="def-grid">${defRowsHtml}</div>
-    <div class="subhead">UP position</div>
-    ${renderSidePos('UP', c.up_position)}
-    <div class="subhead">DOWN position</div>
-    ${renderSidePos('DOWN', c.down_position)}
-  `;
 }
 
 async function poll(){
@@ -351,23 +270,14 @@ async function poll(){
     }
 
     const book = s.book || {};
-    const upPos = (e.position && e.position.side === 'UP') ? e.position : null;
-    const downPos = (e.position && e.position.side === 'DOWN') ? e.position : null;
-    renderGauge('upTrack','upMid','upBidAsk','upSideLbl','UP', book.up_bid, book.up_ask,
-                upPos, !!e.position, 'upGauge');
-    renderGauge('downTrack','downMid','downBidAsk','downSideLbl','DOWN', book.down_bid, book.down_ask,
-                downPos, !!e.position, 'downGauge');
+    renderGauge('upTrack','upMid','upBidAsk','upSideLbl','UP', book.up_bid, book.up_ask, e.up_book, 'upGauge');
+    renderGauge('downTrack','downMid','downBidAsk','downSideLbl','DOWN', book.down_bid, book.down_ask, e.down_book, 'downGauge');
 
     renderEngineCard(e);
     renderStats(e);
     renderEquityHero(e);
     renderEquityCurve(e.equity_curve || []);
     renderLog(s.log || []);
-
-    const c = s.chop_engine || {};
-    renderChopCard(c);
-    renderChopStats(c, 'chopStatsGrid');
-    renderEquityHero(c, 'chopEquityHero');
   }catch(err){
     $('statusDot').className = 'dot err';
     $('statusText').textContent = 'disconnected';
@@ -380,60 +290,59 @@ function renderEngineCard(e){
   const statusLabels = {
     watching:'watching both sides for 0.60', open:'position open, trailing',
     done:'TP hit — done for this window', halted:'halted',
-    cooldown:`cooling down (${e.cooldown_seconds_left ?? '?'}s)`,
-    lockout:`window just opened (${e.lockout_seconds_left ?? '?'}s left)`,
+  };
+
+function renderEngineCard(e){
+  const el = $('engineCard');
+  if(!e || !e.def){ el.innerHTML = '<div class="empty">no data</div>'; return; }
+  const statusLabels = {
+    building:'building grids (0-120s)', watching:'watching combined P&L',
+    done:'profit target hit — done for this window', halted:'halted',
   };
 
   const defRowsHtml = [
-    ['Entry', `first side to reach 0.60, no chase past +${e.def.entry_max_chase}`],
-    ['Entry lockout', `first ${fmtSec(e.def.entry_lockout_seconds)} of window`],
-    ['Shares / entry', fmtSh(e.def.shares_per_side)],
-    ['Trail arms at', fmtP(e.def.trail_arm_price)],
-    ['Trail step', fmtP(e.def.trail_step)],
-    ['TP', fmtP(e.def.tp_price)],
-    ['Force sell', `if TP not hit by ${fmtSec(e.def.force_sell_after_seconds)}`],
-    ['After SL', 'closes + re-arms, watches again'],
-    ['After TP', 'closes, no more entries this window'],
+    ['Rung size', `${fmtSh(e.def.grid_order_shares)}sh`],
+    ['Rung spacing', fmtP(e.def.grid_spacing)],
+    ['Grid window', `first ${e.def.grid_duration_seconds}s`],
+    ['Profit target', `${fmt$(e.def.profit_target_usd)} combined`],
+    ['Order type', 'resting limit buy (maker, no fee)'],
+    ['Exit type', 'taker, real book depth'],
   ].map(([k,v]) => `<div class="def-item"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
 
-  const rearmBanner = e.rearms_this_window
-    ? `<div class="rearm-banner">${e.rearms_this_window} stop-out rearm(s) so far this window \u2014 watching both sides again for the next ${fmtP(e.def.trail_arm_price)} cross.</div>`
-    : '';
-  const doneBanner = e.done_for_window
-    ? `<div class="rearm-banner">Take profit hit \u2014 no more entries for the rest of this window.</div>`
-    : '';
+  const phaseBanner = e.grid_building
+    ? `<div class="rearm-banner">Building grids \u2014 ${Math.ceil(e.seconds_until_watch_phase||0)}s left before new orders stop and combined P&amp;L watching begins.</div>`
+    : (e.done_for_window
+        ? `<div class="rearm-banner">Profit target hit \u2014 everything sold, no more orders for the rest of this window.</div>`
+        : `<div class="rearm-banner">Watching combined unrealized P&amp;L \u2014 sells everything the instant it reaches ${fmt$(e.def.profit_target_usd)}.</div>`);
 
-  const pos = e.position;
-  let posHtml;
-  if(pos){
-    const mins = Math.floor((pos.seconds_since_entry||0)/60), secs = Math.floor((pos.seconds_since_entry||0)%60);
-    const sideColor = pos.side==='UP' ? 'var(--mint)' : 'var(--coral)';
-    posHtml = `
-      <div class="position-box ${pos.unrealized_pnl<0?'loss':''}">
+  const combinedPnl = e.unrealized_pnl;
+  const pnlBanner = `
+    <div class="position-pnl-row" style="margin-bottom:14px; padding:10px 12px; background:var(--panel-3); border-radius:9px; border-top:none;">
+      <span class="lbl">combined unrealized P&amp;L (both sides)</span>
+      <span class="v ${pnlClass(combinedPnl)}">${combinedPnl>=0?'+':''}${fmt$(combinedPnl)} / ${fmt$(e.def.profit_target_usd)}</span>
+    </div>`;
+
+  function sideBox(book){
+    if(!book) return `<div class="position-box empty">no data</div>`;
+    const sideColor = book.side==='UP' ? 'var(--mint)' : 'var(--coral)';
+    const heldText = book.shares_held > 0 ? `${fmtSh(book.shares_held)}sh @ avg ${fmtP(book.cost_basis/book.shares_held)}` : 'no shares held';
+    return `
+      <div class="position-box ${(book.unrealized_pnl||0)<0?'loss':''}">
         <div class="position-top">
-          <span class="rung-tag"><span style="color:${sideColor}">${pos.side}</span></span>
-          <span class="shares">${fmtSh(pos.shares)}sh \u00b7 ${mins}:${String(secs).padStart(2,'0')} held</span>
+          <span class="rung-tag"><span style="color:${sideColor}">${book.side}</span></span>
+          <span class="shares">${book.resting_count} resting \u00b7 ${book.filled_count} filled</span>
         </div>
         <div class="position-grid">
-          <div><div class="k">Entry</div><div class="v">${fmtP(pos.entry_price)}</div></div>
-          <div><div class="k">Mark</div><div class="v">${fmtP(pos.mark_price)}</div></div>
-          <div><div class="k">Stop loss</div><div class="v">${fmtP(pos.trail_sl)} (trailing)</div></div>
-          <div><div class="k">Mkt value</div><div class="v">${fmt$(pos.shares*pos.mark_price)}</div></div>
+          <div><div class="k">Held</div><div class="v">${heldText}</div></div>
+          <div><div class="k">Mark</div><div class="v">${fmtP(book.mark_price)}</div></div>
+          <div><div class="k">Cost basis</div><div class="v">${fmt$(book.cost_basis)}</div></div>
+          <div><div class="k">Mkt value</div><div class="v">${book.market_value!=null?fmt$(book.market_value):'—'}</div></div>
         </div>
         <div class="position-pnl-row">
           <span class="lbl">unrealized P&amp;L</span>
-          <span class="v ${pnlClass(pos.unrealized_pnl)}">${pos.unrealized_pnl>=0?'+':''}${fmt$(pos.unrealized_pnl)}</span>
+          <span class="v ${pnlClass(book.unrealized_pnl)}">${book.unrealized_pnl!=null ? (book.unrealized_pnl>=0?'+':'')+fmt$(book.unrealized_pnl) : '—'}</span>
         </div>
       </div>`;
-  } else {
-    const emptyMsg = e.done_for_window
-      ? 'no open position — done for this window'
-      : (e.status === 'cooldown'
-          ? `no open position — cooling down ${e.cooldown_seconds_left}s before watching again`
-          : (e.status === 'lockout'
-              ? `no open position — window just opened, watching starts in ${e.lockout_seconds_left}s`
-              : 'no open position — watching for 0.60'));
-    posHtml = `<div class="position-box empty">${emptyMsg}</div>`;
   }
 
   el.innerHTML = `
@@ -442,47 +351,34 @@ function renderEngineCard(e){
       <span class="status-badge ${e.status}">${statusLabels[e.status] || e.status}</span>
     </h2>
     <div class="def-grid">${defRowsHtml}</div>
-    ${rearmBanner}
-    ${doneBanner}
-    <div class="subhead">Position</div>
-    ${posHtml}
+    ${phaseBanner}
+    ${pnlBanner}
+    <div class="subhead">UP grid</div>
+    ${sideBox(e.up_book)}
+    <div class="subhead">DOWN grid</div>
+    ${sideBox(e.down_book)}
   `;
 }
 
-function renderStats(e, elId='statsGrid'){
+function renderStats(e){
   const tiles = [
-    ['total_entries','entries',''], ['total_rearms','rearms',''],
-    ['total_trail_updates','trail steps',''],
-    ['total_tp_fills','tp fills','win'], ['total_sl_fills','sl fills','loss'],
-    ['total_forced_closes','forced close',''], ['total_time_force_closes','time force sell',''], ['total_illiquid_skips','illiquid skips',''],
-    ['no_trade_windows','no-trade',''], ['win_rate','win rate %',''],
+    ['total_orders_placed','orders placed',''], ['total_rung_fills','rung fills',''],
+    ['total_profit_target_hits','target hits','win'], ['total_forced_closes','forced close',''],
+    ['total_illiquid_skips','illiquid skips',''], ['no_trade_windows','no-trade',''],
+    ['win_rate','win rate %',''],
   ];
-  $(elId).innerHTML = tiles.map(([key,label,cls]) => {
+  $('statsGrid').innerHTML = tiles.map(([key,label,cls]) => {
     let v = e[key];
     if(key==='win_rate') v = (v==null ? '—' : v);
     return `<div class="stat-tile ${cls}"><div class="n">${v ?? 0}</div><div class="l">${label}</div></div>`;
   }).join('');
 }
 
-function renderChopStats(e, elId){
-  const tiles = [
-    ['total_entries','entries',''], ['total_rearms','rearms',''],
-    ['total_tp_fills','tp fills','win'], ['total_sl_fills','sl fills','loss'],
-    ['total_forced_closes','forced close',''], ['total_time_force_closes','time force sell',''], ['total_illiquid_skips','illiquid skips',''],
-    ['no_trade_windows','no-trade',''], ['win_rate','win rate %',''],
-  ];
-  $(elId).innerHTML = tiles.map(([key,label,cls]) => {
-    let v = e[key];
-    if(key==='win_rate') v = (v==null ? '—' : v);
-    return `<div class="stat-tile ${cls}"><div class="n">${v ?? 0}</div><div class="l">${label}</div></div>`;
-  }).join('');
-}
-
-function renderEquityHero(e, elId='equityHero'){
+function renderEquityHero(e){
   const above = (e.balance||0) >= (e.starting_capital||0);
   const delta = (e.balance||0) - (e.starting_capital||0);
   const deltaPct = e.starting_capital ? (delta/e.starting_capital*100) : 0;
-  $(elId).innerHTML = `
+  $('equityHero').innerHTML = `
     <div class="item">
       <div class="k">Balance</div>
       <div class="v ${above?'pos':'neg'}">${fmt$(e.balance)}</div>
@@ -557,7 +453,7 @@ function renderLog(entries){
     }
     row.innerHTML = `
       <span class="t">${t}</span>
-      <span class="note"><span class="eng-tag">${e.engine||''}</span> <span class="ev ${e.event}">${e.event}</span> ${sideTag} ${e.note || ''} ${e.price!==null&&e.price!==undefined? '@ '+fmtP(e.price):''}</span>
+      <span class="note"><span class="ev ${e.event}">${e.event}</span> ${sideTag} ${e.note || ''} ${e.price!==null&&e.price!==undefined? '@ '+fmtP(e.price):''}</span>
       ${pnlHtml}
     `;
     list.appendChild(row);

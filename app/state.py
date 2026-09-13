@@ -6,7 +6,6 @@ from typing import Optional
 
 from . import config
 from .engine import Engine
-from .chop_engine import ChopEngine
 from .models import PricePoint, Side, WindowMarket
 from .paper_broker import PaperBroker
 from .polymarket_client import PolymarketClient
@@ -16,7 +15,6 @@ class BotState:
     def __init__(self):
         self.broker = PaperBroker()
         self.engine = Engine(self.broker)
-        self.chop_engine = ChopEngine(self.broker)
         self.client = PolymarketClient()
         self.current_window: Optional[WindowMarket] = None
         self.price_history: deque = deque(maxlen=300)  # ~5 min at 1s ticks
@@ -81,13 +79,6 @@ class BotState:
             down_bid_levels=down_book["bids"] if down_book else None,
             down_ask_levels=down_book["asks"] if down_book else None,
         )
-        self.chop_engine.on_tick(
-            up_bid, up_ask, down_bid, down_ask, seconds_to_close, now=now,
-            up_bid_levels=up_book["bids"] if up_book else None,
-            up_ask_levels=up_book["asks"] if up_book else None,
-            down_bid_levels=down_book["bids"] if down_book else None,
-            down_ask_levels=down_book["asks"] if down_book else None,
-        )
 
     @staticmethod
     def _midpoint(bid: Optional[float], ask: Optional[float]) -> Optional[float]:
@@ -108,14 +99,12 @@ class BotState:
                       f"down={down_mid} (no Polymarket resolution check)"),
             )
             self.engine.finalize_window(winning_side)
-            self.chop_engine.finalize_window(winning_side)
 
         self.current_window = new_window
         self.price_history.clear()
         self.last_up_bid = self.last_up_ask = None
         self.last_down_bid = self.last_down_ask = None
         self.engine.reset_for_window(new_window)
-        self.chop_engine.reset_for_window(new_window)
 
     def _infer_winner(self) -> Optional[Side]:
         """Sole outcome source: whichever side's last observed CLOB midpoint
@@ -132,7 +121,6 @@ class BotState:
 
     def snapshot(self) -> dict:
         eng = self.engine.snapshot()
-        chop = self.chop_engine.snapshot()
         return {
             "status": self.status,
             "error": self.error,
@@ -154,7 +142,6 @@ class BotState:
                 {"ts": p.ts, "up": p.up, "down": p.down}
                 for p in list(self.price_history)[-120:]
             ],
-            # kept for backward compatibility -- reflects the TRAIL engine only.
             "pnl_total": round(eng["realized_pnl"] + eng["unrealized_pnl"], 2),
             "demo_capital": {
                 "balance": eng["balance"],
@@ -162,7 +149,6 @@ class BotState:
                 "halted": eng["halted"],
             },
             "engine": eng,
-            "chop_engine": chop,
             "log": [
                 {
                     "ts": e.ts, "engine": e.engine, "window": e.window_slug,

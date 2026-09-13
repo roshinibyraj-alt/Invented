@@ -1,24 +1,21 @@
 """
-Trading engine -- one position at a time, re-armed after every stop out.
+Trading engine -- two independent non-overlapping limit-order grids
+(one per side), built for the first 120s of a window, then a combined
+profit-target exit.
 
-See app/config.py for the full strategy write-up. Summary: no cold
-start. Watch both sides' mid-price; the instant either one reaches 0.60,
-buy that side (taker, real depth-weighted price) and immediately arm a
-trailing stop at 0.50, ratcheting up 0.10 at a time as price climbs.
-If the trailing stop hits, the position closes and, after a
-REARM_COOLDOWN_SECONDS (10s) pause, the engine goes right back to
-watching both sides for the next 0.60 cross -- this can repeat any
-number of times in a window. The cooldown exists because a trailing
-stop can itself fire exactly at 0.60 (ratcheted up from an earlier
-run to 0.70+, then pulled back), and re-watching immediately would
-re-trigger on that same 0.60 cross the stop just exited on. If TP
-(0.99) hits instead, the engine stops re-arming for the rest of that
-window. All fills are taker orders priced by walking real order-book
-depth (see _realistic_fill_price), not just the top-of-book quote.
+See app/config.py for the full strategy write-up. Summary: for the
+first 120s, each side independently drops a new resting limit buy at
+(current mid - 0.05) any time that price isn't within 0.05 of an order
+already placed on that side. Resting orders fill (maker, no fee, at
+their own limit price) whenever that side's ask reaches them, any time
+before the window closes. After 120s, no new orders are placed; the bot
+just watches combined unrealized P&L across both sides' filled shares,
+and the instant it reaches +$100, sells everything (taker, priced by
+walking real book depth) and is done for the window.
 """
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import List, Optional
 
 from . import config
 from .models import Side, WindowMarket
@@ -55,49 +52,26 @@ class CapitalPool:
 
 
 # ---------------------------------------------------------------------------
-# Lifetime session stats -- persists across windows for the life of the
-# Engine, just like CapitalPool. Anything shown on the dashboard as a
-# running/cumulative total (realized P&L, win/loss record, fill counts)
-# belongs here, NOT in EngineState, which is fully replaced by a blank
-# instance every reset_for_window() call. Mixing a cumulative counter
-# into EngineState silently zeroes it out every ~5 minutes -- that was
-# the cause of "balance" (lifetime, in CapitalPool) drifting away from
-# "realized_pnl" (was being reset to the current window's pnl only).
+# One resting/filled/cancelled grid rung
 # ---------------------------------------------------------------------------
 
 @dataclass
-class SessionStats:
-    total_entries: int = 0
-    total_rearms: int = 0
-    total_tp_fills: int = 0
-    total_sl_fills: int = 0
-    total_trail_updates: int = 0
-    total_forced_closes: int = 0
-    total_time_force_closes: int = 0  # forced closes triggered by FORCE_SELL_AFTER_SECONDS, not window-end
-    total_illiquid_skips: int = 0
-    no_trade_windows: int = 0
-    wins: int = 0
-    losses: int = 0
-    total_pnl: float = 0.0          # lifetime realized P&L -- balance == starting_capital + total_pnl whenever flat
-
-
-# ---------------------------------------------------------------------------
-# The single open position (if any) and its trailing stop
-# ---------------------------------------------------------------------------
-
-@dataclass
-class Position:
-    side: Side
-    entry_price: float          # real depth-weighted fill, not just top-of-book ask
+class GridOrder:
+    price: float
     shares: float
-    cost: float
-    entry_ts: float
+    status: str = "resting"   # resting | filled | cancelled
+    placed_ts: float = 0.0
+    filled_ts: Optional[float] = None
 
-    # Entry only ever happens right as price crosses TRAIL_ARM_PRICE, so
-    # the trail is armed immediately at entry -- never None like the
-    # dual-entry version, where a side could sit unprotected pre-arm.
-    trail_sl: float = 0.0
-    last_trail_level: float = 0.0
+
+@dataclass
+class SideBook:
+    orders: List[GridOrder] = field(default_factory=list)  # every order ever placed on this side
+    shares_held: float = 0.0     # aggregate filled shares, all rungs combined
+    cost_basis: float = 0.0      # aggregate cost of those shares (fee-free, maker fills)
+
+    def rung_prices(self) -> List[float]:
+        return [o.price for o in self.orders]  # includes resting + filled + cancelled -- a used price slot stays used
 
 
 @dataclass
@@ -118,34 +92,32 @@ class EngineState:
     down_bid_levels: Optional[list] = None
     down_ask_levels: Optional[list] = None
 
-    position: Optional[Position] = None
-    done_for_window: bool = False   # set True after a TP hit -- no more entries this window
-    rearm_at: float = 0.0           # monotonic ts; entries are blocked until now >= this (post trailing-stop cooldown)
+    up_book: SideBook = field(default_factory=SideBook)
+    down_book: SideBook = field(default_factory=SideBook)
+    done_for_window: bool = False   # set True once the profit target has been hit and everything sold
 
-    fills_this_window: int = 0
+    total_orders_placed: int = 0
+    total_rung_fills: int = 0
+    total_illiquid_skips: int = 0
+    total_profit_target_hits: int = 0
+    total_forced_closes: int = 0
+    no_trade_windows: int = 0
+    wins: int = 0
+    losses: int = 0
+    total_pnl: float = 0.0
     last_window_pnl: float = 0.0
-    entries_this_window: int = 0     # per-window only, used for the NO_TRADE check below
-    rearms_this_window: int = 0      # per-window only, used for the REARMED log note
-
-    # True while a side's mid is currently above the entry-chase band
-    # (see config.ENTRY_MAX_CHASE) -- used to log the "waiting for
-    # pullback" note once per overshoot episode instead of every tick.
-    up_chasing: bool = False
-    down_chasing: bool = False
 
 
 class Engine:
-    """One-way re-arming trailing-stop engine, driven off its own
-    capital pool. Kept as the class name `Engine` / constructed the
-    same way (Engine(broker)) so app/state.py doesn't need structural
-    changes."""
+    """Independent dual-grid engine, driven off its own capital pool.
+    Kept as the class name `Engine` / constructed the same way
+    (Engine(broker)) so app/state.py doesn't need structural changes."""
 
-    name = "TRAIL"
+    name = "GRID"
 
     def __init__(self, broker: PaperBroker):
         self.broker = broker
         self.capital = CapitalPool(balance=config.STARTING_CAPITAL)
-        self.stats = SessionStats()
         self.s = EngineState()
         self.capital.record_equity_point(None)
 
@@ -161,10 +133,9 @@ class Engine:
             return
 
         self._log("WINDOW_OPEN", note=(
-            f"watching both sides -- first to reach {config.TRAIL_ARM_PRICE} gets bought "
-            f"({config.SHARES_PER_SIDE:.0f}sh, taker), trail arms immediately at "
-            f"{config.TRAIL_ARM_PRICE - config.TRAIL_STEP:.2f}, TP {config.TP_PRICE} -- "
-            f"a stop-out re-arms and watches again, a TP does not"
+            f"building independent grids on both sides for {config.GRID_DURATION_SECONDS}s -- "
+            f"rungs {config.GRID_SPACING} apart, {config.GRID_ORDER_SHARES:.0f}sh each, maker limit buys. "
+            f"After that: watch combined unrealized P&L, sell everything (taker) at +${config.PROFIT_TARGET_USD:.0f}"
         ))
 
     def on_tick(self, up_bid, up_ask, down_bid, down_ask, seconds_to_close: float = None, now: Optional[float] = None,
@@ -178,13 +149,21 @@ class Engine:
         self.s.up_bid_levels, self.s.up_ask_levels = up_bid_levels, up_ask_levels
         self.s.down_bid_levels, self.s.down_ask_levels = down_bid_levels, down_ask_levels
 
-        if self.s.position is not None:
-            self._check_exit(now)
-        elif not self.s.done_for_window and now >= self.s.rearm_at and self._elapsed_since_open(now) >= config.ENTRY_LOCKOUT_SECONDS:
-            self._check_entry(now)
+        if self.s.done_for_window:
+            return
 
-    def _elapsed_since_open(self, now: float) -> float:
-        return now - self.s.window.open_ts
+        elapsed = now - self.s.window.open_ts
+        if elapsed < config.GRID_DURATION_SECONDS:
+            self._maybe_place_rung(Side.UP, now)
+            self._maybe_place_rung(Side.DOWN, now)
+
+        # Resting orders can fill any time the order is live, grid-building
+        # phase or not.
+        self._check_fills(Side.UP, now)
+        self._check_fills(Side.DOWN, now)
+
+        if elapsed >= config.GRID_DURATION_SECONDS:
+            self._check_profit_target(now)
 
     # ---- price/level lookups ----------------------------------------------
 
@@ -203,22 +182,24 @@ class Engine:
     def _bid_levels_for(self, side: Side) -> Optional[list]:
         return self.s.up_bid_levels if side == Side.UP else self.s.down_bid_levels
 
+    def _book_for(self, side: Side) -> SideBook:
+        return self.s.up_book if side == Side.UP else self.s.down_book
+
     @staticmethod
     def _realistic_fill_price(levels: Optional[list], shares: float, fallback_price: Optional[float]) -> Optional[float]:
         """Volume-weighted average price to actually trade `shares`
         against a real order book, instead of assuming the whole size
-        fills at the single best quote.
+        fills at the single best quote. Used for the TAKER exits only
+        (profit-target sell-everything, forced window-end close) --
+        resting maker rungs fill at their own exact limit price, no
+        walk needed.
 
-        - levels is None -> no depth data was available this tick; fall
-          back to filling the whole size at `fallback_price`.
-        - levels is [] -> the book was fetched successfully and there
-          is truly nothing resting on this side right now; return None
-          -- the caller should NOT invent a fill.
-        - levels is non-empty -> walk it best-price-first. If the
-          visible depth doesn't cover the full size, the unfilled
-          remainder is conservatively priced at the worst level seen,
-          so a thin book pulls the average fill price accordingly
-          instead of quietly pretending it doesn't matter.
+        - levels is None -> no depth data this tick; fall back to
+          filling the whole size at `fallback_price`.
+        - levels is [] -> book fetched fine, genuinely nothing resting
+          on this side; return None, caller must not invent a fill.
+        - levels is non-empty -> walk best-price-first; any shortfall
+          in visible depth is priced at the worst level seen.
         """
         if levels is None:
             return fallback_price
@@ -239,187 +220,120 @@ class Engine:
             cost += remaining * worst_price
         return cost / shares
 
-    # ---- entry: first side to reach TRAIL_ARM_PRICE, but don't chase --------
+    # ---- grid building: independent per side -------------------------------
 
-    def _check_entry(self, now: float):
-        up_mid = self._mid_for(Side.UP)
-        down_mid = self._mid_for(Side.DOWN)
-        # deterministic tie-break: UP checked first if both cross the same tick
-        if up_mid is not None and self._try_entry_side(Side.UP, up_mid, now):
+    def _maybe_place_rung(self, side: Side, now: float):
+        mid = self._mid_for(side)
+        if mid is None:
             return
-        if down_mid is not None:
-            self._try_entry_side(Side.DOWN, down_mid, now)
+        target = round(mid - config.GRID_SPACING, 4)
+        if target <= 0 or target >= 1:
+            return  # not a valid tradeable price
 
-    def _try_entry_side(self, side: Side, mid: float, now: float) -> bool:
-        """Returns True if an entry was taken (or attempted) on this
-        side this tick, so the caller can skip checking the other side."""
-        band_lo = config.TRAIL_ARM_PRICE
-        band_hi = round(config.TRAIL_ARM_PRICE + config.ENTRY_MAX_CHASE, 4)
-        chasing_flag = "up_chasing" if side == Side.UP else "down_chasing"
+        book = self._book_for(side)
+        existing_prices = book.rung_prices()
+        # "must not overlap" / "0.05 distance" -- no existing order
+        # (resting, filled, or cancelled) may sit closer than GRID_SPACING
+        # to the candidate.
+        too_close = any(abs(p - target) < config.GRID_SPACING - 1e-9 for p in existing_prices)
+        if too_close:
+            return
 
-        if mid < band_lo:
-            setattr(self.s, chasing_flag, False)
-            return False
+        order = GridOrder(price=target, shares=config.GRID_ORDER_SHARES, placed_ts=now)
+        book.orders.append(order)
+        self.s.total_orders_placed += 1
+        self._log("RUNG_PLACED", side=side.value, price=target, shares=order.shares,
+                   note=f"resting limit buy: {order.shares:.0f}sh @ {target} (mid was {mid}, {config.GRID_SPACING} below)")
 
-        if mid > band_hi:
-            # overshot the band -- don't chase, just keep watching for a
-            # pullback. Only log the first tick of each overshoot episode.
-            if not getattr(self.s, chasing_flag):
-                setattr(self.s, chasing_flag, True)
-                self._log("NO_ENTRY_CHASE", side=side.value, price=mid,
-                           note=(f"{side.value} mid jumped to {mid:.4f}, past the "
-                                 f"{band_lo:.2f}-{band_hi:.2f} entry band -- not chasing, "
-                                 f"waiting for a pullback to {config.TRAIL_ARM_PRICE}"))
-            return False
-
-        setattr(self.s, chasing_flag, False)
-        self._enter(side, now)
-        return True
-
-    def _enter(self, side: Side, now: float):
+    def _check_fills(self, side: Side, now: float):
+        book = self._book_for(side)
         ask = self._ask_for(side)
         if ask is None:
-            return  # no live ask yet -- retry next tick
-        shares = config.SHARES_PER_SIDE
-        levels = self._ask_levels_for(side)
-        fill_price = self._realistic_fill_price(levels, shares, ask)
-        if fill_price is None:
-            # book fetched fine but genuinely has no offers right now --
-            # can't buy into nothing; keep watching, retry next tick
-            self.stats.total_illiquid_skips += 1
-            self._log("NO_LIQUIDITY", side=side.value, price=ask,
-                       note=f"{side.value} reached {config.TRAIL_ARM_PRICE} but book has zero ask depth -- waiting")
             return
+        for order in book.orders:
+            if order.status != "resting":
+                continue
+            if ask <= order.price:
+                # maker fill: exact limit price, no slippage, no fee
+                order.status = "filled"
+                order.filled_ts = now
+                cost = order.shares * order.price
+                book.shares_held += order.shares
+                book.cost_basis += cost
+                self.s.total_rung_fills += 1
+                self._log("RUNG_FILL", side=side.value, price=order.price, shares=order.shares, fee=0.0,
+                           note=(f"resting buy filled (maker, no fee): {order.shares:.0f}sh @ {order.price} "
+                                 f"(ask reached it) -- {side.value} now holds {book.shares_held:.0f}sh, "
+                                 f"cost basis ${book.cost_basis:.2f}"))
 
-        fee = self.broker.taker_fee_amount(shares, fill_price)
-        cost = shares * fill_price + fee
-        self.capital.balance -= cost
-        self.stats.total_entries += 1
-        self.s.entries_this_window += 1
+    # ---- profit target: combined across both sides -------------------------
 
-        slip_note = f" (book-depth-weighted, best ask was {ask})" if abs(fill_price - ask) > 1e-9 else ""
-        trail_sl = round(config.TRAIL_ARM_PRICE - config.TRAIL_STEP, 4)
-        self._log("ENTRY_FILL", side=side.value, price=fill_price, shares=shares, fee=fee,
-                   note=(f"{side.value} reached {config.TRAIL_ARM_PRICE} -- taker buy {shares:.0f}sh @ real fill "
-                         f"{fill_price:.4f}{slip_note} (fee ${fee:.4f}) -- trail armed immediately, SL {trail_sl}, "
-                         f"TP {config.TP_PRICE}"))
+    def _combined_unrealized_pnl(self) -> float:
+        total = 0.0
+        for side in (Side.UP, Side.DOWN):
+            book = self._book_for(side)
+            if book.shares_held <= 0:
+                continue
+            bid = self._bid_for(side)
+            mark = bid if bid is not None else (book.cost_basis / book.shares_held)
+            total += book.shares_held * mark - book.cost_basis
+        return total
 
-        if self.capital.check_halt():
-            self._log("HALTED", note=f"balance ${self.capital.balance:.2f} < $0 -- bankrupt")
-            return
-
-        self.s.position = Position(
-            side=side, entry_price=fill_price, shares=shares, cost=cost, entry_ts=now,
-            trail_sl=trail_sl, last_trail_level=config.TRAIL_ARM_PRICE,
-        )
-
-    # ---- exit: trailing stop (re-arms) or TP (does not) --------------------
-
-    def _check_exit(self, now: float):
-        pos = self.s.position
-        if pos is None:
-            return
-        bid = self._bid_for(pos.side)
-        if bid is None:
-            return
-
-        if bid >= config.TP_PRICE:
-            self._try_close(pos, trigger_bid=bid, reason="TP_FILL", note_prefix="take profit hit", rearm=False, now=now)
-            return
-
-        if self._elapsed_since_open(now) >= config.FORCE_SELL_AFTER_SECONDS:
-            self._try_close(pos, trigger_bid=bid, reason="TIME_FORCE_CLOSE",
-                             note_prefix=f"TP never hit by {config.FORCE_SELL_AFTER_SECONDS:.0f}s into the window -- forced close",
-                             rearm=False, now=now)
-            return
-
-        if bid <= pos.trail_sl:
-            self._try_close(pos, trigger_bid=bid, reason="SL_FILL", note_prefix="trailing stop hit", rearm=True, now=now)
-            return
-
-        self._advance_trail(pos, bid)
-
-    def _try_close(self, pos: Position, trigger_bid: float, reason: str, note_prefix: str, rearm: bool, now: float):
-        """A trigger condition (TP or trailing SL) has been met based on
-        the top-of-book bid. The actual fill is priced against real book
-        depth, which can be materially worse than that trigger price if
-        the side has gone illiquid."""
-        levels = self._bid_levels_for(pos.side)
-        fill_price = self._realistic_fill_price(levels, pos.shares, trigger_bid)
-        if fill_price is None:
-            # trigger fired but there's truly nothing to sell into this
-            # instant -- don't invent a fill, wait for the book to show
-            # something (position stays open, re-checked next tick)
-            self.stats.total_illiquid_skips += 1
-            self._log("NO_LIQUIDITY", side=pos.side.value, price=trigger_bid,
-                       note=f"{reason} triggered at bid {trigger_bid} but book has zero depth to sell into -- waiting")
-            return
-
-        if reason == "TP_FILL":
-            self.stats.total_tp_fills += 1
-        elif reason == "TIME_FORCE_CLOSE":
-            self.stats.total_time_force_closes += 1
-        else:
-            self.stats.total_sl_fills += 1
-        self._close(pos, price=fill_price, reason=reason, note_prefix=note_prefix, trigger_price=trigger_bid)
-        self.s.position = None
-
-        if rearm:
-            self.stats.total_rearms += 1
-            self.s.rearms_this_window += 1
-            self.s.rearm_at = now + config.REARM_COOLDOWN_SECONDS
-            self._log("REARMED", note=(
-                f"trailing stop closed it out -- cooling down {config.REARM_COOLDOWN_SECONDS:.0f}s before "
-                f"watching both sides again for the next {config.TRAIL_ARM_PRICE} cross "
-                f"({self.s.rearms_this_window} rearm(s) this window)"
-            ))
-        else:
+    def _check_profit_target(self, now: float):
+        combined = self._combined_unrealized_pnl()
+        if combined >= config.PROFIT_TARGET_USD:
+            self.s.total_profit_target_hits += 1
+            self._log("PROFIT_TARGET_HIT", price=round(combined, 4),
+                       note=f"combined unrealized P&L reached ${combined:.2f} (target ${config.PROFIT_TARGET_USD:.0f}) -- selling everything")
+            self._sell_everything(now, reason="PROFIT_TARGET_EXIT",
+                                   note_prefix="profit target hit, selling out")
             self.s.done_for_window = True
-            done_note = ("take profit hit -- no more entries for the rest of this window"
-                         if reason == "TP_FILL" else
-                         f"{config.FORCE_SELL_AFTER_SECONDS:.0f}s time cutoff forced the position closed -- "
-                         f"no more entries for the rest of this window")
-            self._log("DONE_FOR_WINDOW", note=done_note)
 
-    def _advance_trail(self, pos: Position, bid: float):
-        """Ratchets pos.trail_sl up every time price reaches a new
-        TRAIL_ARM_PRICE + n*TRAIL_STEP level. Never moves down. Example
-        with TRAIL_ARM_PRICE=0.60, TRAIL_STEP=0.10: entry (price hit
-        0.60) -> SL 0.50; price hits 0.70 -> SL 0.60; price hits 0.80 ->
-        SL 0.70."""
-        next_level = round(pos.last_trail_level + config.TRAIL_STEP, 4)
-        moved = False
-        while bid >= next_level:
-            pos.last_trail_level = next_level
-            new_sl = round(next_level - config.TRAIL_STEP, 4)
-            if new_sl > pos.trail_sl:
-                pos.trail_sl = new_sl
-            moved = True
-            next_level = round(next_level + config.TRAIL_STEP, 4)
-        if moved:
-            self.stats.total_trail_updates += 1
-            self._log("TRAIL_UPDATE", side=pos.side.value, price=bid,
-                       note=f"price reached {pos.last_trail_level:.2f} -- stop loss now {pos.trail_sl}")
+    def _sell_everything(self, now: float, reason: str, note_prefix: str):
+        """Cancels any still-resting orders and taker-sells every filled
+        share on both sides, priced by walking real book depth."""
+        for side in (Side.UP, Side.DOWN):
+            book = self._book_for(side)
+            for order in book.orders:
+                if order.status == "resting":
+                    order.status = "cancelled"
+            if book.shares_held <= 0:
+                continue
+            bid = self._bid_for(side)
+            levels = self._bid_levels_for(side)
+            fill_price = self._realistic_fill_price(levels, book.shares_held, bid)
+            if fill_price is None and levels is not None:
+                # confirmed empty book -- nobody bidding on this side at
+                # all; realistically worth close to nothing right now
+                fill_price = 0.0
+                self._log("NO_LIQUIDITY", side=side.value, price=bid,
+                           note=f"{reason} but book has zero bid depth on {side.value} -- assuming worst case $0")
+            elif fill_price is None:
+                fill_price = bid if bid is not None else (book.cost_basis / book.shares_held)
+                self._log("NO_LIQUIDITY", side=side.value, price=bid,
+                           note=f"{reason} but no book data at all on {side.value} -- falling back to last known price")
+            self._settle_side_close(side, book, fill_price, reason, note_prefix)
 
-    def _close(self, pos: Position, price: float, reason: str, note_prefix: str, trigger_price: Optional[float] = None):
-        fee = self.broker.taker_fee_amount(pos.shares, price)
-        proceeds = pos.shares * price - fee
-        pnl = proceeds - pos.cost
+    def _settle_side_close(self, side: Side, book: SideBook, price: float, reason: str, note_prefix: str):
+        shares = book.shares_held
+        cost = book.cost_basis
+        fee = self.broker.taker_fee_amount(shares, price)
+        proceeds = shares * price - fee
+        pnl = proceeds - cost
         self.capital.balance += proceeds
-        self.stats.total_pnl += pnl
+        self.s.total_pnl += pnl
         self.s.last_window_pnl += pnl
-        self.s.fills_this_window += 1
         if pnl >= 0:
-            self.stats.wins += 1
+            self.s.wins += 1
         else:
-            self.stats.losses += 1
-        slip_note = ""
-        if trigger_price is not None and abs(price - trigger_price) > 1e-9:
-            slip_note = f" (triggered @ {trigger_price}, book-depth-weighted real fill {price:.4f})"
-        self._log(reason, side=pos.side.value, price=pos.entry_price, shares=pos.shares, pnl=pnl, fee=fee,
-                   note=(f"{note_prefix} (taker, real fill @ {price:.4f}{slip_note}): {pos.shares:.0f}sh sold "
-                         f"(entry {pos.entry_price}, fee ${fee:.4f}, pnl ${pnl:.4f})"))
+            self.s.losses += 1
+        self._log(reason, side=side.value, price=round(cost / shares, 4) if shares else None,
+                   shares=shares, pnl=pnl, fee=fee,
+                   note=(f"{note_prefix} (taker, real fill @ {price:.4f}): {shares:.0f}sh sold across all "
+                         f"filled rungs (avg cost {cost/shares:.4f}, fee ${fee:.4f}, pnl ${pnl:.4f})"))
         self.capital.check_halt()
+        book.shares_held = 0.0
+        book.cost_basis = 0.0
 
     # ---- window close -------------------------------------------------------
 
@@ -428,83 +342,70 @@ class Engine:
             return
         window_slug = self.s.window.slug
 
-        if not self.capital.halted and self.s.position is not None:
-            pos = self.s.position
-            bid = self._bid_for(pos.side)
-            levels = self._bid_levels_for(pos.side)
-            fill_price = self._realistic_fill_price(levels, pos.shares, bid)
-            if fill_price is None and levels is not None:
-                # confirmed empty book right at window close -- for a
-                # binary market about to settle, nobody bidding on this
-                # side means it's realistically worth close to nothing.
-                fill_price = 0.0
-                self._log("NO_LIQUIDITY", side=pos.side.value, price=bid,
-                           note="window closed with zero bid depth on this side -- assuming worst case $0, not entry price")
-            elif fill_price is None:
-                # no depth data at all this tick (fetch gap, not a
-                # confirmed-empty book) -- fall back to the old flat
-                # assumption instead of guessing $0
-                fill_price = pos.entry_price
-                self._log("NO_LIQUIDITY", side=pos.side.value, price=bid,
-                           note="window closed with no book data at all on this side -- falling back to entry price, not a confirmed $0")
-            self._close(pos, price=fill_price, reason="FORCED_CLOSE",
-                        note_prefix="window closed, forced taker close", trigger_price=bid)
-            self.stats.total_forced_closes += 1
-            self.s.position = None
+        if not self.capital.halted and not self.s.done_for_window:
+            any_shares = self.s.up_book.shares_held > 0 or self.s.down_book.shares_held > 0
+            for side in (Side.UP, Side.DOWN):
+                book = self._book_for(side)
+                for order in book.orders:
+                    if order.status == "resting":
+                        order.status = "cancelled"
+            if any_shares:
+                self._sell_everything(time.time(), reason="FORCED_CLOSE", note_prefix="window closed, forced taker close")
+            self.s.total_forced_closes += 1 if any_shares else 0
 
-        if not self.capital.halted and self.s.entries_this_window == 0:
-            self.stats.no_trade_windows += 1
-            self._log("NO_TRADE", note=f"price never reached {config.TRAIL_ARM_PRICE} on either side this window")
+        if not self.capital.halted and self.s.total_orders_placed == 0:
+            self.s.no_trade_windows += 1
+            self._log("NO_TRADE", note="never got a live price to place a single grid order this window")
 
         self.s.window = None
         self.capital.record_equity_point(window_slug)
 
     # ---- dashboard payload -------------------------------------------------
 
-    def _position_payload(self) -> Optional[dict]:
-        pos = self.s.position
-        if pos is None:
-            return None
-        now = time.time()
-        bid = self._bid_for(pos.side)
-        mark = bid if bid is not None else pos.entry_price
-        market_value = pos.shares * mark
-        pos_pnl = market_value - pos.cost
+    def _side_payload(self, side: Side) -> dict:
+        book = self._book_for(side)
+        bid = self._bid_for(side)
+        mark = bid if bid is not None else None
+        market_value = book.shares_held * mark if (mark is not None and book.shares_held > 0) else None
+        unrealized = (market_value - book.cost_basis) if market_value is not None else None
+        orders = [{
+            "price": o.price, "shares": o.shares, "status": o.status,
+            "placed_ts": o.placed_ts, "filled_ts": o.filled_ts,
+        } for o in book.orders]
         return {
-            "side": pos.side.value, "entry_price": pos.entry_price, "shares": pos.shares,
-            "cost": round(pos.cost, 4), "mark_price": mark,
-            "unrealized_pnl": round(pos_pnl, 4), "seconds_since_entry": round(now - pos.entry_ts, 1),
-            "trail_sl": pos.trail_sl, "trail_armed": True,
-            "last_trail_level": pos.last_trail_level,
+            "side": side.value,
+            "orders": orders,
+            "resting_count": sum(1 for o in book.orders if o.status == "resting"),
+            "filled_count": sum(1 for o in book.orders if o.status == "filled"),
+            "shares_held": book.shares_held,
+            "cost_basis": round(book.cost_basis, 4),
+            "mark_price": mark,
+            "market_value": round(market_value, 4) if market_value is not None else None,
+            "unrealized_pnl": round(unrealized, 4) if unrealized is not None else None,
         }
 
     def snapshot(self) -> dict:
-        payload = self._position_payload()
-        open_positions = [payload] if payload else []
+        up = self._side_payload(Side.UP)
+        down = self._side_payload(Side.DOWN)
+        combined_unrealized = self._combined_unrealized_pnl()
+        open_market_value = (up["market_value"] or 0) + (down["market_value"] or 0)
+        realized_pnl = round(self.s.total_pnl, 4)
 
-        unrealized_pnl = payload["unrealized_pnl"] if payload else 0.0
-        open_market_value = payload["shares"] * payload["mark_price"] if payload else 0.0
-        realized_pnl = round(self.stats.total_pnl, 4)
+        elapsed = (time.time() - self.s.window.open_ts) if self.s.window else None
+        grid_building = elapsed is not None and elapsed < config.GRID_DURATION_SECONDS
+        seconds_until_watch_phase = (config.GRID_DURATION_SECONDS - elapsed) if grid_building else None
 
-        now = time.time()
-        cooling_down = self.s.rearm_at > now
-        elapsed_since_open = self._elapsed_since_open(now) if self.s.window is not None else None
-        in_lockout = elapsed_since_open is not None and elapsed_since_open < config.ENTRY_LOCKOUT_SECONDS
         if self.capital.halted:
             status = "halted"
-        elif payload:
-            status = "open"
         elif self.s.done_for_window:
             status = "done"
-        elif cooling_down:
-            status = "cooldown"
-        elif in_lockout:
-            status = "lockout"
+        elif grid_building:
+            status = "building"
         else:
             status = "watching"
 
         return {
-            "engine": "TRAIL", "label": "One-way re-arming trailing stop",
+            "engine": "GRID", "label": "Independent dual-grid, profit-target exit",
 
             "balance": round(self.capital.balance, 2),
             "starting_capital": config.STARTING_CAPITAL,
@@ -513,41 +414,32 @@ class Engine:
             "equity": round(self.capital.balance + open_market_value, 4),
 
             "realized_pnl": realized_pnl,
-            "unrealized_pnl": round(unrealized_pnl, 4),
+            "unrealized_pnl": round(combined_unrealized, 4),
             "open_market_value": round(open_market_value, 4),
             "last_window_pnl": round(self.s.last_window_pnl, 4),
 
-            "position": payload,
-            "open_positions": open_positions,
+            "up_book": up,
+            "down_book": down,
             "done_for_window": self.s.done_for_window,
-            "cooldown_seconds_left": round(max(0.0, self.s.rearm_at - now), 1) if cooling_down else 0.0,
-            "lockout_seconds_left": round(max(0.0, config.ENTRY_LOCKOUT_SECONDS - elapsed_since_open), 1) if in_lockout else 0.0,
+            "grid_building": grid_building,
+            "seconds_until_watch_phase": round(seconds_until_watch_phase, 1) if seconds_until_watch_phase is not None else None,
 
-            "fills_this_window": self.s.fills_this_window,
-            "entries_this_window": self.s.entries_this_window,
-            "rearms_this_window": self.s.rearms_this_window,
-            "total_entries": self.stats.total_entries,
-            "total_rearms": self.stats.total_rearms,
-            "total_tp_fills": self.stats.total_tp_fills,
-            "total_sl_fills": self.stats.total_sl_fills,
-            "total_trail_updates": self.stats.total_trail_updates,
-            "total_forced_closes": self.stats.total_forced_closes,
-            "total_time_force_closes": self.stats.total_time_force_closes,
-            "total_illiquid_skips": self.stats.total_illiquid_skips,
-            "no_trade_windows": self.stats.no_trade_windows,
-            "wins": self.stats.wins,
-            "losses": self.stats.losses,
-            "win_rate": round(100 * self.stats.wins / (self.stats.wins + self.stats.losses), 1) if (self.stats.wins + self.stats.losses) else None,
+            "total_orders_placed": self.s.total_orders_placed,
+            "total_rung_fills": self.s.total_rung_fills,
+            "total_illiquid_skips": self.s.total_illiquid_skips,
+            "total_profit_target_hits": self.s.total_profit_target_hits,
+            "total_forced_closes": self.s.total_forced_closes,
+            "no_trade_windows": self.s.no_trade_windows,
+            "wins": self.s.wins,
+            "losses": self.s.losses,
+            "win_rate": round(100 * self.s.wins / (self.s.wins + self.s.losses), 1) if (self.s.wins + self.s.losses) else None,
 
             "status": status,
 
             "def": {
-                "shares_per_side": config.SHARES_PER_SIDE,
-                "trail_arm_price": config.TRAIL_ARM_PRICE,
-                "trail_step": config.TRAIL_STEP,
-                "tp_price": config.TP_PRICE,
-                "entry_lockout_seconds": config.ENTRY_LOCKOUT_SECONDS,
-                "force_sell_after_seconds": config.FORCE_SELL_AFTER_SECONDS,
-                "entry_max_chase": config.ENTRY_MAX_CHASE,
+                "grid_order_shares": config.GRID_ORDER_SHARES,
+                "grid_spacing": config.GRID_SPACING,
+                "grid_duration_seconds": config.GRID_DURATION_SECONDS,
+                "profit_target_usd": config.PROFIT_TARGET_USD,
             },
         }
