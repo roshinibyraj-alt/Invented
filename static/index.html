@@ -138,6 +138,7 @@
   .log-row{display:grid; grid-template-columns:76px 1fr auto; gap:10px; align-items:center;
     font-family:var(--mono); font-size:11px; padding:7px 9px; border-radius:7px; background:var(--panel-3);}
   .log-row .t{color:var(--faint);}
+  .log-row .eng-tag{font-size:9px; font-weight:700; color:var(--faint); background:var(--panel-3); border-radius:4px; padding:1px 5px; margin-right:2px;}
   .log-row .ev{font-weight:600; font-size:9.5px; padding:2px 7px; border-radius:5px; background:#1a222f; text-align:center; white-space:nowrap;}
   .log-row .ev.ENTRY_FILL{color:var(--amber);}
   .log-row .ev.TRAIL_UPDATE{color:var(--violet);}
@@ -206,6 +207,21 @@
     </div>
   </div>
 
+  <div class="two-col">
+    <div class="card" id="chopCard"></div>
+
+    <div style="display:flex; flex-direction:column; gap:12px;">
+      <div class="card">
+        <h2>Chop trade stats</h2>
+        <div class="stats-grid" id="chopStatsGrid"></div>
+      </div>
+      <div class="card">
+        <h2>Chop balance</h2>
+        <div class="equity-hero" id="chopEquityHero"></div>
+      </div>
+    </div>
+  </div>
+
   <div class="card">
     <h2>Equity curve <span class="tag" id="equityTag"></span></h2>
     <div class="equity-wrap">
@@ -245,6 +261,64 @@ function renderGauge(trackId, midId, bidAskId, sideLblId, side, bid, ask, pos, a
     marks += `<div class="gauge-mark sl" style="left:${pos.trail_sl*100}%"><span class="lbl">${fmtP(pos.trail_sl)} sl</span></div>`;
   }
   track.innerHTML = marks;
+}
+
+function renderChopCard(c){
+  const el = $('chopCard');
+  if(!c || !c.def){ el.innerHTML = '<div class="empty">no data</div>'; return; }
+  const statusLabels = {
+    watching:'watching for a pullback to 0.40', open:'position(s) open', halted:'halted',
+    lockout:`window just opened (${c.lockout_seconds_left ?? '?'}s left)`,
+  };
+
+  const defRowsHtml = [
+    ['Entry', `pullback into 0.40 \u00b1${c.def.entry_max_chase}, no chase`],
+    ['Entry lockout', `first ${fmtSec(c.def.entry_lockout_seconds)} of window`],
+    ['Shares / entry', fmtSh(c.def.shares_per_entry)],
+    ['Buy level', fmtP(c.def.buy_price)],
+    ['Stop loss', fmtP(c.def.sl_price)],
+    ['Take profit', fmtP(c.def.tp_price)],
+    ['Force sell', `if neither hit by ${fmtSec(c.def.force_sell_after_seconds)}`],
+    ['UP / DOWN', 'fully independent, both can hold at once'],
+    ['After SL or TP', 'closes + re-arms \u2014 multiple entries allowed'],
+  ].map(([k,v]) => `<div class="def-item"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
+
+  const renderSidePos = (label, pos) => {
+    if(!pos){
+      return `<div class="position-box empty">${label}: no open position \u2014 watching for ${fmtP(c.def.buy_price)}</div>`;
+    }
+    const mins = Math.floor((pos.seconds_since_entry||0)/60), secs = Math.floor((pos.seconds_since_entry||0)%60);
+    const sideColor = pos.side==='UP' ? 'var(--mint)' : 'var(--coral)';
+    return `
+      <div class="position-box ${pos.unrealized_pnl<0?'loss':''}">
+        <div class="position-top">
+          <span class="rung-tag"><span style="color:${sideColor}">${pos.side}</span></span>
+          <span class="shares">${fmtSh(pos.shares)}sh \u00b7 ${mins}:${String(secs).padStart(2,'0')} held</span>
+        </div>
+        <div class="position-grid">
+          <div><div class="k">Entry</div><div class="v">${fmtP(pos.entry_price)}</div></div>
+          <div><div class="k">Mark</div><div class="v">${fmtP(pos.mark_price)}</div></div>
+          <div><div class="k">SL / TP</div><div class="v">${fmtP(c.def.sl_price)} / ${fmtP(c.def.tp_price)}</div></div>
+          <div><div class="k">Mkt value</div><div class="v">${fmt$(pos.shares*pos.mark_price)}</div></div>
+        </div>
+        <div class="position-pnl-row">
+          <span class="lbl">unrealized P&amp;L</span>
+          <span class="v ${pnlClass(pos.unrealized_pnl)}">${pos.unrealized_pnl>=0?'+':''}${fmt$(pos.unrealized_pnl)}</span>
+        </div>
+      </div>`;
+  };
+
+  el.innerHTML = `
+    <h2>
+      Chop engine
+      <span class="status-badge ${c.status}">${statusLabels[c.status] || c.status}</span>
+    </h2>
+    <div class="def-grid">${defRowsHtml}</div>
+    <div class="subhead">UP position</div>
+    ${renderSidePos('UP', c.up_position)}
+    <div class="subhead">DOWN position</div>
+    ${renderSidePos('DOWN', c.down_position)}
+  `;
 }
 
 async function poll(){
@@ -289,6 +363,11 @@ async function poll(){
     renderEquityHero(e);
     renderEquityCurve(e.equity_curve || []);
     renderLog(s.log || []);
+
+    const c = s.chop_engine || {};
+    renderChopCard(c);
+    renderChopStats(c, 'chopStatsGrid');
+    renderEquityHero(c, 'chopEquityHero');
   }catch(err){
     $('statusDot').className = 'dot err';
     $('statusText').textContent = 'disconnected';
@@ -370,7 +449,7 @@ function renderEngineCard(e){
   `;
 }
 
-function renderStats(e){
+function renderStats(e, elId='statsGrid'){
   const tiles = [
     ['total_entries','entries',''], ['total_rearms','rearms',''],
     ['total_trail_updates','trail steps',''],
@@ -378,18 +457,32 @@ function renderStats(e){
     ['total_forced_closes','forced close',''], ['total_time_force_closes','time force sell',''], ['total_illiquid_skips','illiquid skips',''],
     ['no_trade_windows','no-trade',''], ['win_rate','win rate %',''],
   ];
-  $('statsGrid').innerHTML = tiles.map(([key,label,cls]) => {
+  $(elId).innerHTML = tiles.map(([key,label,cls]) => {
     let v = e[key];
     if(key==='win_rate') v = (v==null ? '—' : v);
     return `<div class="stat-tile ${cls}"><div class="n">${v ?? 0}</div><div class="l">${label}</div></div>`;
   }).join('');
 }
 
-function renderEquityHero(e){
+function renderChopStats(e, elId){
+  const tiles = [
+    ['total_entries','entries',''], ['total_rearms','rearms',''],
+    ['total_tp_fills','tp fills','win'], ['total_sl_fills','sl fills','loss'],
+    ['total_forced_closes','forced close',''], ['total_time_force_closes','time force sell',''], ['total_illiquid_skips','illiquid skips',''],
+    ['no_trade_windows','no-trade',''], ['win_rate','win rate %',''],
+  ];
+  $(elId).innerHTML = tiles.map(([key,label,cls]) => {
+    let v = e[key];
+    if(key==='win_rate') v = (v==null ? '—' : v);
+    return `<div class="stat-tile ${cls}"><div class="n">${v ?? 0}</div><div class="l">${label}</div></div>`;
+  }).join('');
+}
+
+function renderEquityHero(e, elId='equityHero'){
   const above = (e.balance||0) >= (e.starting_capital||0);
   const delta = (e.balance||0) - (e.starting_capital||0);
   const deltaPct = e.starting_capital ? (delta/e.starting_capital*100) : 0;
-  $('equityHero').innerHTML = `
+  $(elId).innerHTML = `
     <div class="item">
       <div class="k">Balance</div>
       <div class="v ${above?'pos':'neg'}">${fmt$(e.balance)}</div>
@@ -464,7 +557,7 @@ function renderLog(entries){
     }
     row.innerHTML = `
       <span class="t">${t}</span>
-      <span class="note"><span class="ev ${e.event}">${e.event}</span> ${sideTag} ${e.note || ''} ${e.price!==null&&e.price!==undefined? '@ '+fmtP(e.price):''}</span>
+      <span class="note"><span class="eng-tag">${e.engine||''}</span> <span class="ev ${e.event}">${e.event}</span> ${sideTag} ${e.note || ''} ${e.price!==null&&e.price!==undefined? '@ '+fmtP(e.price):''}</span>
       ${pnlHtml}
     `;
     list.appendChild(row);

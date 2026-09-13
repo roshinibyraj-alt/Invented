@@ -1,11 +1,19 @@
 # One-way re-arming trailing stop — BTC 5m bot
 
-Paper-trading bot for Polymarket's `btc-updown-5m-*` markets. Runs a
-single strategy: one position at a time, entering whichever side first
-reaches 0.60, trailing a stop on it, and — if that stop hits — going
-right back to watching for the next 0.60 cross.
+Paper-trading bot for Polymarket's `btc-updown-5m-*` markets. Runs **two
+independent strategies side by side**, sharing the same price feed and
+event log but each with its own paper capital pool so their P&L is
+directly comparable:
 
-## Strategy
+1. **TRAIL** — one position at a time, entering whichever side first
+   reaches 0.60, trailing a stop on it, and — if that stop hits — going
+   right back to watching for the next 0.60 cross.
+2. **CHOP** — UP and DOWN traded completely independently, buying on a
+   pullback to 0.40, taking profit at 0.60, cutting losses at 0.20, and
+   re-arming after every exit (including TP) to watch for the next
+   pullback. Either or both sides can be holding a position at once.
+
+## Strategy: TRAIL
 
 1. **Watch**: after window open, watch both sides' mid-price every
    tick — except the first **15 seconds**, where no entries are taken
@@ -64,6 +72,42 @@ Sizing is flat — 300 shares every entry, no progression or doubling.
 "Rearm" here only means going back to watching for the next 0.60
 cross, not a bigger size.
 
+## Strategy: CHOP
+
+A second, independent strategy (`app/chop_engine.py`), running alongside
+TRAIL against the same live prices. Thesis: round levels like 0.60 tend
+to act as chop/resistance rather than a clean breakout (that's part of
+why TRAIL gets stopped out there so often) — this engine trades that
+range directly instead of trying to break out of it.
+
+1. **Watch, independently**: UP and DOWN are two completely separate
+   state machines. Either, both, or neither can be holding a position
+   at the same time. Same 15s `CHOP_ENTRY_LOCKOUT_SECONDS` at window
+   open as TRAIL, applied per side.
+2. **Entry**: buy `CHOP_SHARES_PER_ENTRY` (300) shares, taker, real
+   depth-weighted price, when that side's mid pulls back into the band
+   `CHOP_BUY_PRICE ± CHOP_ENTRY_MAX_CHASE` (0.40 ± 0.02). The band is
+   symmetric — unlike TRAIL's one-sided band — since 0.40 can be
+   approached rising from below or falling from above. A gap straight
+   through the band in either direction is skipped, not chased; that
+   side keeps watching for a real pullback into the band.
+3. **Exit — fixed absolute levels, not relative to entry**: take profit
+   at `CHOP_TP_PRICE` (0.60), stop loss at `CHOP_SL_PRICE` (0.20).
+4. **Time-based force sell**: same safety net as TRAIL — if neither TP
+   nor SL has hit by `CHOP_FORCE_SELL_AFTER_SECONDS` (270s) into the
+   window, that side's open position is force-closed.
+5. **Re-arm — always, both exits**: closing via SL *or* TP re-arms that
+   side to watch for the next pullback to 0.40. Unlike TRAIL, a TP does
+   **not** end trading for the window here — multiple entries per side
+   per window are expected and intended.
+6. **Window close**: force a taker close on any position(s) still open,
+   independently per side.
+
+Own separate demo capital (`CHOP_STARTING_CAPITAL`, default $2000) from
+TRAIL's, so the two strategies' P&L can be compared without conflating
+them. Both log to the same event log (tagged `TRAIL` / `CHOP`) via the
+same shared `PaperBroker`.
+
 ## Run locally
 
 ```
@@ -76,12 +120,21 @@ Dashboard at http://localhost:8000
 
 ## Config knobs (`app/config.py`)
 
+TRAIL:
 - `SHARES_PER_SIDE`, `TRAIL_ARM_PRICE`, `TRAIL_STEP`, `TP_PRICE`
 - `ENTRY_LOCKOUT_SECONDS` (15s no-entry window at window open)
 - `ENTRY_MAX_CHASE` (0.02 — entry band above `TRAIL_ARM_PRICE`, no chasing past it)
 - `REARM_COOLDOWN_SECONDS` (10s pause after a trailing-stop exit before re-watching)
 - `FORCE_SELL_AFTER_SECONDS` (270s — force-close if TP hasn't hit by then)
-- `STARTING_CAPITAL`, taker fee constants
+- `STARTING_CAPITAL`
+
+CHOP:
+- `CHOP_SHARES_PER_ENTRY`, `CHOP_BUY_PRICE`, `CHOP_SL_PRICE`, `CHOP_TP_PRICE`
+- `CHOP_ENTRY_LOCKOUT_SECONDS`, `CHOP_ENTRY_MAX_CHASE` (symmetric band around `CHOP_BUY_PRICE`)
+- `CHOP_FORCE_SELL_AFTER_SECONDS`
+- `CHOP_STARTING_CAPITAL`
+
+Shared: taker fee constants (`APPLY_TAKER_FEES`, `TAKER_FEE_RATE`, `TAKER_FEE_EXPONENT`).
 
 ## Notes / assumptions
 

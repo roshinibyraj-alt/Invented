@@ -125,5 +125,39 @@ APPLY_TAKER_FEES = True
 TAKER_FEE_RATE = 0.07
 TAKER_FEE_EXPONENT = 1
 
+# ---------------------------------------------------------------------------
+# Chop engine -- a second, independent strategy (see chop_engine.py). Runs
+# alongside the trailing-stop engine above, sharing the same PaperBroker
+# (so both engines' events interleave in one log) but with its own capital
+# pool so its P&L is directly comparable, not mixed in with TRAIL's.
+#
+# Thesis: round levels like 0.60 tend to act as resistance/chop rather than
+# a clean breakout point (that's why TRAIL gets stopped out there so often).
+# This engine trades that range directly: buy near the middle (0.40) on a
+# pullback, take profit at the range top (0.60), cut losses if the range
+# floor breaks (0.20). UP and DOWN are tracked completely independently --
+# either or both can be holding a position at the same time -- and either
+# exit (SL or TP) re-arms that side to watch for the next return to 0.40,
+# unlike TRAIL where a TP ends the window.
+# ---------------------------------------------------------------------------
+CHOP_SHARES_PER_ENTRY = 300.0
+CHOP_BUY_PRICE = 0.40
+CHOP_SL_PRICE = 0.20
+CHOP_TP_PRICE = 0.60
+
+# Entries only fire when mid is within CHOP_BUY_PRICE +/- CHOP_ENTRY_MAX_CHASE
+# (symmetric, unlike TRAIL's one-sided band, since 0.40 can be approached
+# from above -- falling toward it -- or from below -- rising toward it).
+# A gap past the band in either direction is skipped, not chased; the side
+# keeps watching for an actual pullback into the band.
+CHOP_ENTRY_MAX_CHASE = 0.02
+
+# Same window-open lockout and pre-close force-sell safety as TRAIL, applied
+# independently per side.
+CHOP_ENTRY_LOCKOUT_SECONDS = 15.0
+CHOP_FORCE_SELL_AFTER_SECONDS = 270.0
+
+CHOP_STARTING_CAPITAL = float(os.getenv("CHOP_STARTING_CAPITAL", "2000"))
+
 # ---- Misc -----------------------------------------------------------------
 LOG_MAX_ENTRIES = 500
