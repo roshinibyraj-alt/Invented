@@ -288,14 +288,6 @@ function renderEngineCard(e){
   const el = $('engineCard');
   if(!e || !e.def){ el.innerHTML = '<div class="empty">no data</div>'; return; }
   const statusLabels = {
-    watching:'watching both sides for 0.60', open:'position open, trailing',
-    done:'TP hit — done for this window', halted:'halted',
-  };
-
-function renderEngineCard(e){
-  const el = $('engineCard');
-  if(!e || !e.def){ el.innerHTML = '<div class="empty">no data</div>'; return; }
-  const statusLabels = {
     building:'building grids (0-120s)', watching:'watching combined P&L',
     done:'profit target hit — done for this window', halted:'halted',
   };
