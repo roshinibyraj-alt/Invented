@@ -45,9 +45,9 @@ class BotState:
 
     async def _tick(self):
         now = time.time()
-        window = await self.client.get_active_window(now)
+        window, error_reason = await self.client.get_active_window(now)
         if window is None:
-            self.error = "No market found for current window slug"
+            self.error = error_reason or "No market found for current window slug"
             return
         self.error = None
 

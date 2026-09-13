@@ -58,14 +58,18 @@ class PolymarketClient:
         now = now or time.time()
         return int(math.floor(now / config.WINDOW_SECONDS) * config.WINDOW_SECONDS)
 
-    async def fetch_market_by_slug(self, slug: str) -> Optional[dict]:
+    async def fetch_market_by_slug(self, slug: str) -> "tuple[Optional[dict], Optional[str]]":
+        """Returns (market_json, error_reason). error_reason is None on
+        success, otherwise a short diagnostic string explaining exactly
+        which step failed -- this is what should show up in the
+        dashboard's error banner instead of a generic 'not found'."""
         url = f"{config.GAMMA_API_BASE}/events"
         try:
             resp = await self._client.get(url, params={"slug": slug})
             resp.raise_for_status()
             data = resp.json()
-        except Exception:
-            return None
+        except Exception as e:
+            return None, f"Gamma /events request failed for slug={slug}: {e}"
 
         event = None
         if isinstance(data, list) and data:
@@ -78,17 +82,17 @@ class PolymarketClient:
             event = data
 
         if not isinstance(event, dict):
-            return None
+            return None, f"Gamma /events returned no event for slug={slug} (response shape: {type(data).__name__}, empty or unrecognized)"
 
         markets = event.get("markets")
         if isinstance(markets, list) and markets:
-            return markets[0]
+            return markets[0], None
         # extremely defensive fallback: if Gamma ever returns the market
         # fields flattened directly on the event (no nested "markets"),
         # treat the event itself as the market record.
         if event.get("clobTokenIds") is not None:
-            return event
-        return None
+            return event, None
+        return None, f"Gamma event found for slug={slug} but it has no 'markets' array and no clobTokenIds on the event itself -- response shape may have changed"
 
     def _extract_token_ids(self, market_json: dict):
         """Gamma returns clobTokenIds as a JSON-encoded string list, in the
@@ -115,7 +119,7 @@ class PolymarketClient:
             token_up, token_down = raw_tokens[0], raw_tokens[1]
         return token_up, token_down
 
-    async def get_active_window(self, now: Optional[float] = None) -> Optional[WindowMarket]:
+    async def get_active_window(self, now: Optional[float] = None) -> "tuple[Optional[WindowMarket], Optional[str]]":
         """Resolve the market for the window covering `now`.
 
         Primary candidate is the current window's open_ts (confirmed slug
@@ -123,14 +127,28 @@ class PolymarketClient:
         early right at the boundary), we retry on the next tick rather
         than falling through to the *next* window's slug -- doing that
         was the original bug, so we deliberately don't guess forward here.
-        """
+
+        Returns (WindowMarket, None) on full success. Returns (None,
+        reason) if EITHER the market lookup fails OR the market was
+        found but its CLOB token ids couldn't be extracted -- a window
+        with unusable token ids is treated as a failure here, not a
+        half-valid result, since silently returning token_up=None would
+        make every subsequent price fetch fail forever with no visible
+        error (this was a real bug: the dashboard showed 'live' with no
+        error while prices stayed blank)."""
         now = now or time.time()
         open_ts = self.current_window_open_ts(now)
         slug = self._slug_for_ts(open_ts)
-        market_json = await self.fetch_market_by_slug(slug)
+        market_json, reason = await self.fetch_market_by_slug(slug)
         if not market_json:
-            return None
+            return None, reason
         token_up, token_down = self._extract_token_ids(market_json)
+        if not token_up or not token_down:
+            return None, (
+                f"Gamma market found for slug={slug} but token ids couldn't be extracted "
+                f"(clobTokenIds={market_json.get('clobTokenIds')!r}, outcomes={market_json.get('outcomes')!r}) "
+                f"-- check _extract_token_ids for a field-name mismatch"
+            )
         return WindowMarket(
             slug=slug,
             condition_id=market_json.get("conditionId"),
@@ -138,7 +156,7 @@ class PolymarketClient:
             token_down=token_down,
             open_ts=open_ts,
             close_ts=open_ts + config.WINDOW_SECONDS,
-        )
+        ), None
 
     # ---- resolution (real settlement, not a price guess) ---------------------
     #
@@ -156,7 +174,7 @@ class PolymarketClient:
         just reading the live CLOB price, since the live price can be
         noisy/stale right at the boundary."""
         from .models import Side  # local import avoids a circular import
-        market_json = await self.fetch_market_by_slug(slug)
+        market_json, _reason = await self.fetch_market_by_slug(slug)
         if not market_json:
             return None
         if not market_json.get("closed"):
