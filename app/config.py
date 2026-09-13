@@ -19,12 +19,14 @@ combined profit-target exit:
   2. Fills: a resting limit buy on a side fills -- at its own limit
      price, no slippage -- the moment that side's best ask drops to or
      through it. This is a real maker fill (no taker fee) since it's a
-     resting order, not a market sweep. Fills can happen at any point
-     the order is live, including after the 120s grid-building window
-     closes (only placing NEW orders stops after 120s -- orders already
-     resting stay live until they fill or the window ends).
-  3. After 120s: no more new orders are placed on either side. The bot
-     just watches. Every tick it totals the UNREALIZED profit across
+     resting order, not a market sweep. Fills only happen during the
+     120s grid-building window -- see (3) for what happens the instant
+     it times out.
+  3. Grid-building timeout (120s): the instant GRID_DURATION_SECONDS
+     elapses, no more new orders are placed AND any rung still resting
+     (never filled) is cancelled outright, on both sides, once. Shares
+     that already filled are untouched and carry forward. From here on
+     the bot just watches. Every tick it totals the UNREALIZED profit across
      every filled share on BOTH sides combined (mark-to-market minus
      cost basis, summed UP + DOWN). The instant that combined total
      reaches PROFIT_TARGET_USD ($100), it sells EVERYTHING on both

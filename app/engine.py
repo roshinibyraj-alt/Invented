@@ -8,7 +8,9 @@ first 120s, each side independently drops a new resting limit buy at
 (current mid - 0.05) any time that price isn't within 0.05 of an order
 already placed on that side. Resting orders fill (maker, no fee, at
 their own limit price) whenever that side's ask reaches them, any time
-before the window closes. After 120s, no new orders are placed; the bot
+during those 120s. The instant the 120s grid-building window times
+out, any rung still resting (never filled) is cancelled -- no new
+orders, no more waiting for stragglers to fill. From there the bot
 just watches combined unrealized P&L across both sides' filled shares,
 and the instant it reaches +$100, sells everything (taker, priced by
 walking real book depth) and is done for the window.
@@ -95,6 +97,7 @@ class EngineState:
     up_book: SideBook = field(default_factory=SideBook)
     down_book: SideBook = field(default_factory=SideBook)
     done_for_window: bool = False   # set True once the profit target has been hit and everything sold
+    grid_timeout_handled: bool = False  # set True once resting rungs have been cancelled at the 120s grid-building timeout
 
     total_orders_placed: int = 0
     total_rung_fills: int = 0
@@ -135,7 +138,8 @@ class Engine:
         self._log("WINDOW_OPEN", note=(
             f"building independent grids on both sides for {config.GRID_DURATION_SECONDS}s -- "
             f"rungs {config.GRID_SPACING} apart, {config.GRID_ORDER_SHARES:.0f}sh each, maker limit buys. "
-            f"After that: watch combined unrealized P&L, sell everything (taker) at +${config.PROFIT_TARGET_USD:.0f}"
+            f"At {config.GRID_DURATION_SECONDS}s: cancel any still-resting rungs, then watch combined "
+            f"unrealized P&L and sell everything (taker) at +${config.PROFIT_TARGET_USD:.0f}"
         ))
 
     def on_tick(self, up_bid, up_ask, down_bid, down_ask, seconds_to_close: float = None, now: Optional[float] = None,
@@ -157,12 +161,15 @@ class Engine:
             self._maybe_place_rung(Side.UP, now)
             self._maybe_place_rung(Side.DOWN, now)
 
-        # Resting orders can fill any time the order is live, grid-building
-        # phase or not.
+        # Checked every tick, but after the grid-building timeout below
+        # cancels all resting orders, there's nothing left here to fill.
         self._check_fills(Side.UP, now)
         self._check_fills(Side.DOWN, now)
 
         if elapsed >= config.GRID_DURATION_SECONDS:
+            if not self.s.grid_timeout_handled:
+                self._cancel_resting_orders(now)
+                self.s.grid_timeout_handled = True
             self._check_profit_target(now)
 
     # ---- price/level lookups ----------------------------------------------
@@ -275,6 +282,28 @@ class Engine:
                 if self.capital.check_halt():
                     self._log("HALTED", note=f"balance ${self.capital.balance:.2f} < $0 -- bankrupt")
                     return
+
+    # ---- grid-building timeout: drop unfilled rungs, keep filled shares ----
+
+    def _cancel_resting_orders(self, now: float):
+        """Called once, the instant the 120s grid-building window times
+        out. Any rung that never got a fill is cancelled here instead of
+        being left live for the rest of the window -- only rungs that
+        already filled carry forward into the profit-target watch phase.
+        Filled shares are untouched; this only touches status=='resting'
+        orders."""
+        for side in (Side.UP, Side.DOWN):
+            book = self._book_for(side)
+            cancelled = 0
+            for order in book.orders:
+                if order.status == "resting":
+                    order.status = "cancelled"
+                    cancelled += 1
+            if cancelled:
+                self._log("GRID_TIMEOUT_CANCEL", side=side.value, note=(
+                    f"grid-building window ({config.GRID_DURATION_SECONDS}s) timed out -- "
+                    f"cancelled {cancelled} still-resting unfilled rung(s) on {side.value}"
+                ))
 
     # ---- profit target: combined across both sides -------------------------
 
