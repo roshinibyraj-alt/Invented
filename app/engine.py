@@ -12,7 +12,7 @@ during those 120s. The instant the 120s grid-building window times
 out, any rung still resting (never filled) is cancelled -- no new
 orders, no more waiting for stragglers to fill. From there the bot
 just watches combined unrealized P&L across both sides' filled shares,
-and the instant it reaches +$100, sells everything (taker, priced by
+and the instant it reaches +$10, sells everything (taker, priced by
 walking real book depth) and is done for the window.
 """
 import time

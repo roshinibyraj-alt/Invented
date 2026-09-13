@@ -29,7 +29,7 @@ combined profit-target exit:
      the bot just watches. Every tick it totals the UNREALIZED profit across
      every filled share on BOTH sides combined (mark-to-market minus
      cost basis, summed UP + DOWN). The instant that combined total
-     reaches PROFIT_TARGET_USD ($100), it sells EVERYTHING on both
+     reaches PROFIT_TARGET_USD ($10), it sells EVERYTHING on both
      sides as taker orders (priced by walking real book depth, not
      just top-of-book -- see Engine._realistic_fill_price) and is done
      for the rest of that window: no more orders, no more monitoring.
@@ -60,7 +60,7 @@ POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
 GRID_ORDER_SHARES = 100.0        # flat size per resting rung
 GRID_SPACING = 0.05              # minimum distance between any two rungs on the same side
 GRID_DURATION_SECONDS = 120      # stop placing NEW orders after this long; resting orders stay live
-PROFIT_TARGET_USD = 100.0        # combined unrealized profit (both sides) that triggers sell-everything
+PROFIT_TARGET_USD = 10.0        # combined unrealized profit (both sides) that triggers sell-everything -- sell all at +$10
 
 # Demo capital: single source of truth for the paper balance -- debited
 # on every buy fill, credited on every sell settlement. Halts
