@@ -16,16 +16,21 @@ window — no re-entry after a stop-out.
    watch; if the cheap side is outside the zone at that moment, no
    trade is taken this window.
 2. **Exit**: once filled, every tick checks that side's mid against a
-   take-profit level and a continuous trailing stop:
-   - **Take-profit (0.99)**: treated as a certain win and **redeemed**,
-     not sold — credited at a flat **$1.00/share, fee-free** (a CTF
-     resolution redemption, not an orderbook trade), instead of
-     taker-selling at ~0.99 and losing a sliver of edge to fee/slippage.
-   - **Trailing stop**: recomputed every tick as
-     `high_water_mark − trail_distance`, rounded to the cent. It only
-     ever moves up, since it's driven off the position's monotonic
-     high-water mark (best mid seen since entry), never the raw
-     current price:
+   take-profit level and a trailing stop. **The trailing stop is
+   inactive for the first 2 minutes after entry** — during that
+   window only TP can close the position; the high-water mark keeps
+   tracking regardless, so once the stop arms it starts from wherever
+   price has already gotten to, not from scratch.
+   - **Take-profit (0.99)**: live immediately from entry, treated as a
+     certain win and **redeemed**, not sold — credited at a flat
+     **$1.00/share, fee-free** (a CTF resolution redemption, not an
+     orderbook trade), instead of taker-selling at ~0.99 and losing a
+     sliver of edge to fee/slippage.
+   - **Trailing stop**: arms **120 seconds** after entry. Once armed,
+     recomputed every tick as `high_water_mark − trail_distance`,
+     rounded to the cent. It only ever moves up, since it's driven off
+     the position's monotonic high-water mark (best mid seen since
+     entry), never the raw current price:
      - trail distance is **0.20** while the high-water mark is at or
        below 0.85
      - once the high-water mark climbs **above 0.85**, the trail
@@ -62,6 +67,7 @@ Dashboard at http://localhost:8000
 ## Config knobs (`app/config.py`)
 
 - `ENTRY_WAIT_SECONDS` (10), `ENTRY_ZONE_LOW` / `ENTRY_ZONE_HIGH` (0.20 / 0.80), `TP_PRICE` (0.99)
+- `TRAIL_START_DELAY_SECONDS` (120) — trailing stop is inactive until this long after entry; TP is live the whole time
 - `TRAIL_DISTANCE` (0.20), `TRAIL_DISTANCE_TIGHT` (0.10), `TRAIL_TIGHTEN_PRICE` (0.85) — trail
   narrows from 0.20 to 0.10 once the position's high-water mark climbs above 0.85
 - `BASE_ORDER_SHARES` (100) — flat size, no martingale
@@ -77,6 +83,11 @@ Dashboard at http://localhost:8000
   high-water mark, not the current price, so a spike to 0.90 followed
   by a pullback to 0.85 does **not** trigger a stop by itself — only a
   further drop through the (possibly now-tightened) stop level would.
+- During the first 120s after entry the stop cannot fire at all, even
+  if price craters — only TP is live. The high-water mark still
+  updates during that window, so if price runs up and pulls back
+  before the 120s is over, the stop (once armed) reflects the peak
+  it already saw, not the price at the moment of arming.
 - A stop-out is terminal for the window: no flip into the opposite
   side, no re-entry. At most one trade is taken per window.
 - Both the entry and the exit are modeled as **taker** fills, priced

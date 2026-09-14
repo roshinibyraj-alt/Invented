@@ -12,15 +12,20 @@ redemption:
      If it's outside the zone at the 10s mark, no trade is taken this
      window. This is a single check at t=10s, not a rearmed watch --
      the zone/cheap-side gating applies to this initial entry only.
-  2. Trailing stop: continuous, not stepped. Every tick, if the
-     position's bid has made a new high-water mark, the stop is
-     recomputed as high_water_mark - trail_distance, rounded to the
-     cent (0.01) tick size. The trail distance is TRAIL_DISTANCE (0.20)
-     normally, but narrows to TRAIL_DISTANCE_TIGHT (0.10) once the
-     high-water mark has gone above TRAIL_TIGHTEN_PRICE (0.85) --
-     tightening the stop as the position gets deep in the money. It
-     only ever moves up (one-way ratchet) since it's driven off the
-     monotonic high-water mark. Bid <= stop -> stop hit.
+  2. Trailing stop: continuous, not stepped, and inactive for the
+     first TRAIL_START_DELAY_SECONDS (120s) after entry -- during that
+     window only TP can close the position, the stop cannot fire (the
+     high-water mark still tracks the whole time, so the stop starts
+     from wherever price has gotten to once it activates, not from
+     scratch). Once active, every tick that the position's mid has
+     made a new high-water mark, the stop is recomputed as
+     high_water_mark - trail_distance, rounded to the cent (0.01) tick
+     size. The trail distance is TRAIL_DISTANCE (0.20) normally, but
+     narrows to TRAIL_DISTANCE_TIGHT (0.10) once the high-water mark
+     has gone above TRAIL_TIGHTEN_PRICE (0.85) -- tightening the stop
+     as the position gets deep in the money. It only ever moves up
+     (one-way ratchet) since it's driven off the monotonic high-water
+     mark. Mid <= stop -> stop hit (once active).
   3. TP: TP_PRICE (0.99) hit -> REDEEMED, not sold -- credited at a
      flat $1.00/share, zero fee (CTF resolution redemption).
   4. No flips: a stop-hit closes the position and the window is done --
@@ -59,6 +64,7 @@ TP_PRICE = 0.99                   # take-profit level -- hit = redeemed at $1.00
 TRAIL_DISTANCE = 0.20             # continuous trailing stop distance from high-water mark
 TRAIL_DISTANCE_TIGHT = 0.10       # narrowed trail distance once high-water mark > TRAIL_TIGHTEN_PRICE
 TRAIL_TIGHTEN_PRICE = 0.85        # high-water mark threshold above which the tighter trail applies
+TRAIL_START_DELAY_SECONDS = 120.0 # trailing stop is inactive until this long after entry (TP still live)
 PRICE_TICK = 0.01                 # rounding granularity for the stop price
 
 BASE_ORDER_SHARES = 100.0         # flat size for every entry -- initial and every flip, no martingale

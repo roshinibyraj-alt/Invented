@@ -1,24 +1,29 @@
 """
 Trading engine -- delayed cheap-side entry, continuous trailing stop
-that tightens above 0.85, single trade per window, TP redemption.
+(inactive for the first 2 minutes, then tightens above 0.85), single
+trade per window, TP redemption.
 
 See app/config.py for the full strategy write-up. Summary: 10s after
 window open, buy whichever side is cheaper (by MID price) if (and only
-if) that mid is inside the 0.20-0.80 entry zone. From then on, a
-continuous trailing stop sits behind the position's high-water MID --
-0.20 back normally, narrowing to 0.10 back once the high-water mark
-has gone above 0.85 -- and only ever tightens. Mid price is what
-triggers every decision (entry zone check, TP, stop), but every actual
-fill is a real taker execution priced off real ask/bid order-book
-depth (see Engine._realistic_fill_price), so mid and fill price can
-differ by the spread. If mid reaches 0.99, redeem at a flat
-$1.00/share, fee-free, done for the window. If the trailing stop is
-hit instead, the position is closed and the window is done -- no
-flip, no re-entry on the other side, at most one trade per window. No
-martingale anywhere; every entry is BASE_ORDER_SHARES. Every fill
-except TP is a taker order and pays the taker fee; TP is the sole
-fee-free exception since it's a CTF resolution redemption, not an
-orderbook trade.
+if) that mid is inside the 0.20-0.80 entry zone. From then on, TP is
+live immediately, but the trailing stop doesn't arm until
+TRAIL_START_DELAY_SECONDS (120s) after entry -- before that, only TP
+can close the position. The high-water mark keeps tracking the whole
+time regardless, so once the stop arms it starts from wherever price
+has already gotten to, not from scratch. Once armed, the stop sits
+behind the position's high-water MID -- 0.20 back normally, narrowing
+to 0.10 back once the high-water mark has gone above 0.85 -- and only
+ever tightens. Mid price is what triggers every decision (entry zone
+check, TP, stop), but every actual fill is a real taker execution
+priced off real ask/bid order-book depth (see
+Engine._realistic_fill_price), so mid and fill price can differ by the
+spread. If mid reaches 0.99, redeem at a flat $1.00/share, fee-free,
+done for the window. If the trailing stop is hit instead, the position
+is closed and the window is done -- no flip, no re-entry on the other
+side, at most one trade per window. No martingale anywhere; every
+entry is BASE_ORDER_SHARES. Every fill except TP is a taker order and
+pays the taker fee; TP is the sole fee-free exception since it's a CTF
+resolution redemption, not an orderbook trade.
 """
 import time
 from dataclasses import dataclass, field
@@ -111,10 +116,11 @@ class EngineState:
 
 
 class Engine:
-    """Delayed cheap-side entry / continuous trailing stop (tightens above
-    0.85) / single trade per window, driven off its own capital pool.
-    Kept as the class name `Engine` / constructed the same way
-    (Engine(broker)) so app/state.py doesn't need structural changes."""
+    """Delayed cheap-side entry / trailing stop that arms 2 minutes after
+    entry and tightens above 0.85 / single trade per window, driven off
+    its own capital pool. Kept as the class name `Engine` / constructed
+    the same way (Engine(broker)) so app/state.py doesn't need
+    structural changes."""
 
     name = "FLIP"
 
@@ -138,8 +144,9 @@ class Engine:
         self._log("WINDOW_OPEN", shares=config.BASE_ORDER_SHARES, note=(
             f"waiting {config.ENTRY_WAIT_SECONDS:.0f}s, then buying the cheaper side if it's within "
             f"[{config.ENTRY_ZONE_LOW}, {config.ENTRY_ZONE_HIGH}] -- flat {config.BASE_ORDER_SHARES:.0f}sh, "
-            f"no martingale. TP {config.TP_PRICE} (redeem $1) / continuous {config.TRAIL_DISTANCE} trailing "
-            f"stop (tightens to {config.TRAIL_DISTANCE_TIGHT} above {config.TRAIL_TIGHTEN_PRICE}), "
+            f"no martingale. TP {config.TP_PRICE} (redeem $1) live immediately / trailing stop arms "
+            f"{config.TRAIL_START_DELAY_SECONDS:.0f}s after entry, {config.TRAIL_DISTANCE} trail "
+            f"(tightens to {config.TRAIL_DISTANCE_TIGHT} above {config.TRAIL_TIGHTEN_PRICE}), "
             f"one trade per window -- no flip on stop-out."
         ))
 
@@ -271,7 +278,7 @@ class Engine:
         self._log("ENTRY_FILL", side=side.value, price=round(fill_price, 4), shares=shares, fee=round(fee, 4),
                    note=(f"entry buy filled (taker, real ask depth): {shares:.0f}sh @ {fill_price:.4f} "
                          f"({zone_note}, fee ${fee:.4f}) -- TP {config.TP_PRICE} (redeem $1) / "
-                         f"stop starts {config.TRAIL_DISTANCE} below entry mid"))
+                         f"trailing stop arms in {config.TRAIL_START_DELAY_SECONDS:.0f}s"))
         self.capital.check_halt()
 
     # ---- exit: TP redemption or continuous trailing-stop hit ---------------
@@ -303,6 +310,9 @@ class Engine:
                                   note_prefix=f"take-profit hit ({config.TP_PRICE} mid)",
                                   fill_price_override=1.0, fee_override=0.0)
             return
+
+        if now - pos.entry_ts < config.TRAIL_START_DELAY_SECONDS:
+            return   # stop isn't armed yet -- only TP can close in this window
 
         stop = self._effective_stop(pos.high_water_mark)
         if mid <= stop:
@@ -390,6 +400,9 @@ class Engine:
         unrealized = market_value - pos.cost
         to_tp = round(config.TP_PRICE - mark, 4)
         to_stop = round(mark - stop, 4)
+        elapsed = time.time() - pos.entry_ts
+        stop_armed = elapsed >= config.TRAIL_START_DELAY_SECONDS
+        stop_arms_in = round(max(0.0, config.TRAIL_START_DELAY_SECONDS - elapsed), 1)
         return {
             "side": pos.side.value,
             "shares": pos.shares,
@@ -402,6 +415,8 @@ class Engine:
             "unrealized_pnl": round(unrealized, 4),
             "tp_price": config.TP_PRICE,
             "stop_price": round(stop, 4),
+            "stop_armed": stop_armed,
+            "stop_arms_in": stop_arms_in,
             "trail_distance": config.TRAIL_DISTANCE,
             "distance_to_tp": to_tp,
             "distance_to_stop": to_stop,
@@ -467,6 +482,7 @@ class Engine:
                 "trail_distance": config.TRAIL_DISTANCE,
                 "trail_distance_tight": config.TRAIL_DISTANCE_TIGHT,
                 "trail_tighten_price": config.TRAIL_TIGHTEN_PRICE,
+                "trail_start_delay_seconds": config.TRAIL_START_DELAY_SECONDS,
                 "base_order_shares": config.BASE_ORDER_SHARES,
             },
         }
