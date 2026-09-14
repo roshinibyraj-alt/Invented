@@ -14,9 +14,9 @@ spread. If mid reaches 0.99, redeem at a flat $1.00/share, fee-free,
 done for the window. If the trailing stop is hit instead, immediately
 flip into the opposite side at the same flat size (no zone check on
 flips, real taker buy against ask depth), and the same trailing-stop
-logic applies to the new position. Flips are unlimited -- this can
-keep flipping back and forth all window until a TP lands or the window
-closes. No martingale anywhere; every entry is BASE_ORDER_SHARES.
+logic applies to the new position. Flips are capped at
+MAX_FLIPS_PER_WINDOW (1) -- after that one flip, any further stop-out
+just ends the window flat. No martingale anywhere; every entry is BASE_ORDER_SHARES.
 Every fill except TP is a taker order and pays the taker fee; TP is
 the sole fee-free exception since it's a CTF resolution redemption,
 not an orderbook trade.
@@ -143,7 +143,7 @@ class Engine:
             f"waiting {config.ENTRY_WAIT_SECONDS:.0f}s, then buying the cheaper side if it's within "
             f"[{config.ENTRY_ZONE_LOW}, {config.ENTRY_ZONE_HIGH}] -- flat {config.BASE_ORDER_SHARES:.0f}sh, "
             f"no martingale. TP {config.TP_PRICE} (redeem $1) / continuous {config.TRAIL_DISTANCE} trailing "
-            f"stop, unlimited flips on stop-out."
+            f"stop, up to {config.MAX_FLIPS_PER_WINDOW} flip(s) on stop-out."
         ))
 
     def on_tick(self, up_bid, up_ask, down_bid, down_ask, seconds_to_close: float = None, now: Optional[float] = None,
@@ -360,8 +360,18 @@ class Engine:
             self.s.done_for_window = True
             return
 
-        # Stop hit -> unlimited flip, flat size, no zone check, regardless
-        # of whether this position closed up or down overall.
+        if self.s.flip_count >= config.MAX_FLIPS_PER_WINDOW:
+            # Already used the window's one flip -- this stop-out just
+            # ends the window flat, no further re-entry.
+            self.s.done_for_window = True
+            self._log("NO_TRADE", side=pos.side.value, note=(
+                f"stop hit but the window's {config.MAX_FLIPS_PER_WINDOW} flip(s) already used -- "
+                f"staying flat for the rest of this window"
+            ))
+            return
+
+        # Stop hit, flip budget remaining -> flip, flat size, no zone check,
+        # regardless of whether this position closed up or down overall.
         self.s.flip_count += 1
         self.s.total_flips += 1
         flip_side = pos.side.other()
@@ -439,7 +449,7 @@ class Engine:
         down_mid = self._mid_for(Side.DOWN)
 
         return {
-            "engine": "FLIP", "label": "Delayed cheap-side entry, continuous 0.20 trail, unlimited flips",
+            "engine": "FLIP", "label": "Delayed cheap-side entry, continuous 0.20 trail, one flip",
 
             "balance": round(self.capital.balance, 2),
             "starting_capital": config.STARTING_CAPITAL,
@@ -481,5 +491,6 @@ class Engine:
                 "tp_price": config.TP_PRICE,
                 "trail_distance": config.TRAIL_DISTANCE,
                 "base_order_shares": config.BASE_ORDER_SHARES,
+                "max_flips_per_window": config.MAX_FLIPS_PER_WINDOW,
             },
         }
