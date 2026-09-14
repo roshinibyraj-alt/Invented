@@ -45,21 +45,35 @@ class BotState:
 
     async def _tick(self):
         now = time.time()
-        window, error_reason = await self.client.get_active_window(now)
-        if window is None:
-            self.error = error_reason or "No market found for current window slug"
-            return
-        self.error = None
 
-        if self.current_window is None or window.slug != self.current_window.slug:
-            await self._roll_window(window)
+        # The window's metadata (slug/token ids) doesn't change intra-
+        # window, so once we have a current window that hasn't reached
+        # its close time yet, skip the Gamma metadata round-trip entirely
+        # and go straight to prices -- that was a full extra network hop
+        # blocking every single tick for no reason. Only re-resolve when
+        # we have no window yet, or we're at/past the known close time
+        # (window roll).
+        if self.current_window is not None and now < self.current_window.close_ts:
+            window = self.current_window
+        else:
+            window, error_reason = await self.client.get_active_window(now)
+            if window is None:
+                self.error = error_reason or "No market found for current window slug"
+                return
+            self.error = None
+            if self.current_window is None or window.slug != self.current_window.slug:
+                await self._roll_window(window)
 
         # CLOB order book only -- no Gamma price fallback. Full depth (not
         # just top-of-book) so the engine can price fills realistically
         # against actual available size instead of assuming unlimited
-        # depth at the best quote.
-        up_book = await self.client.get_book_full(self.current_window.token_up)
-        down_book = await self.client.get_book_full(self.current_window.token_down)
+        # depth at the best quote. Fetched concurrently (not one-after-
+        # the-other) so a stop/flip decision isn't waiting on two
+        # sequential round-trips -- cuts tick latency roughly in half.
+        up_book, down_book = await asyncio.gather(
+            self.client.get_book_full(self.current_window.token_up),
+            self.client.get_book_full(self.current_window.token_down),
+        )
         up_bid = up_book["best_bid"] if up_book else None
         up_ask = up_book["best_ask"] if up_book else None
         down_bid = down_book["best_bid"] if down_book else None

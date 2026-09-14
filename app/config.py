@@ -53,7 +53,7 @@ CLOB_API_BASE = os.getenv("CLOB_API_BASE", "https://clob.polymarket.com")
 SLUG_PREFIX = "btc-updown-5m-"
 WINDOW_SECONDS = 300
 
-POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
+POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "0.5"))
 
 # ---- Delayed cheap-side entry / continuous trailing stop / flip engine ----
 ENTRY_WAIT_SECONDS = 10.0         # wait this long after window open before checking entry

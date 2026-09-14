@@ -3,16 +3,23 @@ Trading engine -- delayed cheap-side entry, continuous 0.20 trailing
 stop, unlimited flat-size flips, TP redemption.
 
 See app/config.py for the full strategy write-up. Summary: 10s after
-window open, buy whichever side is cheaper if (and only if) it's
-inside the 0.20-0.80 entry zone. From then on, a continuous trailing
-stop sits 0.20 behind the position's high-water mark and only ever
-tightens. If bid reaches 0.99, redeem at a flat $1.00/share, fee-free,
+window open, buy whichever side is cheaper (by MID price) if (and only
+if) that mid is inside the 0.20-0.80 entry zone. From then on, a
+continuous trailing stop sits 0.20 behind the position's high-water
+MID and only ever tightens -- mid price is what triggers every
+decision (entry zone check, TP, stop), but every actual fill is a real
+taker execution priced off real ask/bid order-book depth (see
+Engine._realistic_fill_price), so mid and fill price can differ by the
+spread. If mid reaches 0.99, redeem at a flat $1.00/share, fee-free,
 done for the window. If the trailing stop is hit instead, immediately
 flip into the opposite side at the same flat size (no zone check on
-flips), and the same trailing-stop logic applies to the new position.
-Flips are unlimited -- this can keep flipping back and forth all
-window until a TP lands or the window closes. No martingale anywhere;
-every entry is BASE_ORDER_SHARES.
+flips, real taker buy against ask depth), and the same trailing-stop
+logic applies to the new position. Flips are unlimited -- this can
+keep flipping back and forth all window until a TP lands or the window
+closes. No martingale anywhere; every entry is BASE_ORDER_SHARES.
+Every fill except TP is a taker order and pays the taker fee; TP is
+the sole fee-free exception since it's a CTF resolution redemption,
+not an orderbook trade.
 """
 import time
 from dataclasses import dataclass, field
@@ -216,8 +223,8 @@ class Engine:
             return   # not yet -- keep waiting, don't mark checked
 
         self.s.entry_checked = True
-        up_ask, down_ask = self.s.up_ask, self.s.down_ask
-        if up_ask is None or down_ask is None:
+        up_mid, down_mid = self._mid_for(Side.UP), self._mid_for(Side.DOWN)
+        if up_mid is None or down_mid is None:
             # no price data at the check moment -- skip the window rather
             # than guess
             self.s.no_trade_windows += 1
@@ -225,22 +232,22 @@ class Engine:
             self._log("NO_TRADE", note="no price data at the 10s entry check -- skipping window")
             return
 
-        side = Side.UP if up_ask <= down_ask else Side.DOWN
-        price = up_ask if side == Side.UP else down_ask
+        side = Side.UP if up_mid <= down_mid else Side.DOWN
+        price = up_mid if side == Side.UP else down_mid
 
         if not (config.ENTRY_ZONE_LOW <= price <= config.ENTRY_ZONE_HIGH):
             self.s.total_no_entry_zone += 1
             self.s.no_trade_windows += 1
             self.s.done_for_window = True
             self._log("NO_TRADE", side=side.value, price=round(price, 4), note=(
-                f"cheap side ({side.value}) @ {price:.4f} is outside the entry zone "
+                f"cheap side ({side.value}) mid @ {price:.4f} is outside the entry zone "
                 f"[{config.ENTRY_ZONE_LOW}, {config.ENTRY_ZONE_HIGH}] at the {config.ENTRY_WAIT_SECONDS:.0f}s "
                 f"check -- no trade this window"
             ))
             return
 
         self.s.total_entries_attempted += 1
-        self._open_position(side, now, flip_number=0, zone_note=f"cheap side, in-zone @ {price:.4f}")
+        self._open_position(side, now, flip_number=0, zone_note=f"cheap side, in-zone @ mid {price:.4f}")
 
     # ---- position open (initial or flip) -----------------------------------
 
@@ -261,13 +268,15 @@ class Engine:
         fee = self.broker.taker_fee_amount(shares, fill_price)
         cost = shares * fill_price + fee
         self.capital.balance -= cost
+        mid_now = self._mid_for(side)
+        hwm_start = mid_now if mid_now is not None else fill_price
         self.s.position = Position(side=side, shares=shares, entry_price=fill_price, entry_fee=fee,
-                                    entry_ts=now, flip_number=flip_number, high_water_mark=fill_price)
+                                    entry_ts=now, flip_number=flip_number, high_water_mark=hwm_start)
         event = "ENTRY_FILL" if flip_number == 0 else "FLIP_FILL"
         self._log(event, side=side.value, price=round(fill_price, 4), shares=shares, fee=round(fee, 4),
-                   note=(f"{'entry' if flip_number == 0 else f'flip #{flip_number}'} buy filled (taker): "
-                         f"{shares:.0f}sh @ {fill_price:.4f} ({zone_note}, fee ${fee:.4f}) -- "
-                         f"TP {config.TP_PRICE} (redeem $1) / stop starts {config.TRAIL_DISTANCE} below entry"))
+                   note=(f"{'entry' if flip_number == 0 else f'flip #{flip_number}'} buy filled (taker, real ask "
+                         f"depth): {shares:.0f}sh @ {fill_price:.4f} ({zone_note}, fee ${fee:.4f}) -- "
+                         f"TP {config.TP_PRICE} (redeem $1) / stop starts {config.TRAIL_DISTANCE} below entry mid"))
         self.capital.check_halt()
 
     # ---- exit: TP redemption or continuous trailing-stop hit -> flip -------
@@ -283,25 +292,25 @@ class Engine:
 
     def _check_exit(self, now: float):
         pos = self.s.position
-        bid = self._bid_for(pos.side)
-        if bid is None:
+        mid = self._mid_for(pos.side)
+        if mid is None:
             return
-        if bid > pos.high_water_mark:
-            pos.high_water_mark = bid
+        if mid > pos.high_water_mark:
+            pos.high_water_mark = mid
 
-        if bid >= config.TP_PRICE:
+        if mid >= config.TP_PRICE:
             self.s.total_tp_hits += 1
             self._close_position(now, reason="TP_HIT",
-                                  note_prefix=f"take-profit hit ({config.TP_PRICE})",
+                                  note_prefix=f"take-profit hit ({config.TP_PRICE} mid)",
                                   fill_price_override=1.0, fee_override=0.0, is_terminal=True)
             return
 
         stop = self._effective_stop(pos.high_water_mark)
-        if bid <= stop:
+        if mid <= stop:
             self.s.total_stop_hits += 1
             self._close_position(now, reason="STOP_HIT",
-                                  note_prefix=(f"continuous trailing stop hit at {stop:.4f} "
-                                               f"(high-water {pos.high_water_mark:.4f}, "
+                                  note_prefix=(f"continuous trailing stop hit at mid {stop:.4f} "
+                                               f"(high-water mid {pos.high_water_mark:.4f}, "
                                                f"{config.TRAIL_DISTANCE} trail)"),
                                   is_terminal=False)
 
@@ -315,6 +324,8 @@ class Engine:
             fill_price = fill_price_override
             fee = fee_override if fee_override is not None else 0.0
         else:
+            # Real taker sell against actual bid depth -- mid only decides
+            # WHEN to exit, never what price it fills at.
             bid = self._bid_for(pos.side)
             levels = self._bid_levels_for(pos.side)
             fill_price = self._realistic_fill_price(levels, pos.shares, bid)
@@ -383,8 +394,8 @@ class Engine:
         pos = self.s.position
         if pos is None:
             return None
-        bid = self._bid_for(pos.side)
-        mark = bid if bid is not None else pos.entry_price
+        mid = self._mid_for(pos.side)
+        mark = mid if mid is not None else pos.entry_price
         hwm = max(pos.high_water_mark, mark)
         stop = self._effective_stop(hwm)
         market_value = pos.shares * mark
