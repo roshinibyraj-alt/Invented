@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Delayed entry, 0.20 trail, unlimited flips — BTC 5m bot</title>
+<title>Delayed expensive-side entry, 0.15 trail, one flip — BTC 5m bot</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
@@ -153,7 +153,7 @@
 <div class="wrap">
   <header>
     <div>
-      <h1>Delayed cheap-side entry, 0.20 trail, unlimited flips</h1>
+      <h1>Delayed expensive-side entry, 0.15 trail, one flip</h1>
       <div class="sub">BTC 5m up/down — the instant either side's mid reaches 0.70, buy that side (taker, up to 0.10 slippage). TP 0.99 redeems at $1.00, fee-free. SL starts at 0.40 and trails up (never back down) to 0.50 / 0.60 / 0.70 as price clears 0.80 / 0.90 / 0.97. One trade per window. Win: stake steps up 2.1x next window (cap 2 steps, then resets). Loss: resets to base.</div>
     </div>
     <div class="status-pill"><span class="dot" id="statusDot"></span><span id="statusText">connecting</span></div>
@@ -300,7 +300,7 @@ function renderEngineCard(e){
   };
 
   const defRowsHtml = [
-    ['Entry wait', `${fmtSh(e.def.entry_wait_seconds)}s, then buy cheap side`],
+    ['Entry wait', `${fmtSh(e.def.entry_wait_seconds)}s, then buy expensive side`],
     ['Entry zone', `${fmtP(e.def.entry_zone_low)} \u2013 ${fmtP(e.def.entry_zone_high)} (initial entry only)`],
     ['Take-profit', `${fmtP(e.def.tp_price)} \u2192 redeemed @ $1.00, fee-free`],
     ['Trailing stop', `continuous, ${fmtP(e.def.trail_distance)} behind high-water mark`],
@@ -323,7 +323,7 @@ function renderEngineCard(e){
       ? `Trade closed — ${e.flip_count} flip(s) this window — done for the rest of this window.`
       : 'Entry zone missed at the 10s check — no trade this window.';
   } else {
-    phaseBanner = `Waiting ${fmtSh(e.def.entry_wait_seconds)}s after window open, then buying the cheap side if it's in zone.`;
+    phaseBanner = `Waiting ${fmtSh(e.def.entry_wait_seconds)}s after window open, then buying the expensive side if it's in zone.`;
   }
 
   function positionBox(){

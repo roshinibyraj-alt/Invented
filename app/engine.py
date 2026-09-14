@@ -1,11 +1,11 @@
 """
-Trading engine -- delayed cheap-side entry, continuous 0.20 trailing
-stop, unlimited flat-size flips, TP redemption.
+Trading engine -- delayed expensive-side entry, continuous 0.15 trailing
+stop, one flat-size flip, TP redemption.
 
-See app/config.py for the full strategy write-up. Summary: 10s after
-window open, buy whichever side is cheaper (by MID price) if (and only
-if) that mid is inside the 0.20-0.80 entry zone. From then on, a
-continuous trailing stop sits 0.20 behind the position's high-water
+See app/config.py for the full strategy write-up. Summary: 90s after
+window open, buy whichever side is more expensive (by MID price) if
+(and only if) that mid is inside the 0.35-0.80 entry zone. From then on, a
+continuous trailing stop sits 0.15 behind the position's high-water
 MID and only ever tightens -- mid price is what triggers every
 decision (entry zone check, TP, stop), but every actual fill is a real
 taker execution priced off real ask/bid order-book depth (see
@@ -16,7 +16,8 @@ flip into the opposite side at the same flat size (no zone check on
 flips, real taker buy against ask depth), and the same trailing-stop
 logic applies to the new position. Flips are capped at
 MAX_FLIPS_PER_WINDOW (1) -- after that one flip, any further stop-out
-just ends the window flat. No martingale anywhere; every entry is BASE_ORDER_SHARES.
+just ends the window flat. No new entry or flip fires once
+NO_TRADE_AFTER_SECONDS has elapsed in the window. No martingale anywhere; every entry is BASE_ORDER_SHARES.
 Every fill except TP is a taker order and pays the taker fee; TP is
 the sole fee-free exception since it's a CTF resolution redemption,
 not an orderbook trade.
@@ -97,17 +98,17 @@ class EngineState:
     down_ask_levels: Optional[list] = None
 
     position: Optional[Position] = None
-    entry_checked: bool = False     # the one t=10s entry check has happened (fired or skipped)
+    entry_checked: bool = False     # the one t=ENTRY_WAIT_SECONDS entry check has happened (fired or skipped)
     done_for_window: bool = False   # TP hit, or window closed with nothing open -- nothing left to watch
     flip_count: int = 0             # flips taken so far this window
 
-    total_entries_attempted: int = 0   # t=10s checks where a side was in-zone and a buy was attempted
-    total_no_entry_zone: int = 0       # t=10s checks where the cheap side was outside the entry zone
+    total_entries_attempted: int = 0   # t=ENTRY_WAIT_SECONDS checks where a side was in-zone and a buy was attempted
+    total_no_entry_zone: int = 0       # t=ENTRY_WAIT_SECONDS checks where the expensive side was outside the entry zone
     total_flips: int = 0
     total_tp_hits: int = 0
     total_stop_hits: int = 0
     total_forced_closes: int = 0       # window closed before TP/stop was reached
-    no_trade_windows: int = 0          # entry zone missed at t=10s, nothing ever opened
+    no_trade_windows: int = 0          # entry zone missed at t=ENTRY_WAIT_SECONDS, nothing ever opened
     wins: int = 0
     losses: int = 0
     total_pnl: float = 0.0
@@ -115,8 +116,8 @@ class EngineState:
 
 
 class Engine:
-    """Delayed cheap-side entry / continuous 0.20 trailing stop / unlimited
-    flat-size flips, driven off its own capital pool. Kept as the class
+    """Delayed expensive-side entry / continuous 0.15 trailing stop / one
+    flat-size flip, driven off its own capital pool. Kept as the class
     name `Engine` / constructed the same way (Engine(broker)) so
     app/state.py doesn't need structural changes."""
 
@@ -215,7 +216,7 @@ class Engine:
             cost += remaining * worst_price
         return cost / shares
 
-    # ---- initial entry: single check at t=10s, cheap side, zone-gated ------
+    # ---- initial entry: single check at t=ENTRY_WAIT_SECONDS, expensive side, zone-gated ------
 
     def _check_initial_entry(self, now: float):
         elapsed = now - self.s.window.open_ts
@@ -223,16 +224,26 @@ class Engine:
             return   # not yet -- keep waiting, don't mark checked
 
         self.s.entry_checked = True
+
+        if elapsed > config.NO_TRADE_AFTER_SECONDS:
+            self.s.no_trade_windows += 1
+            self.s.done_for_window = True
+            self._log("NO_TRADE", note=(
+                f"entry check didn't run until {elapsed:.1f}s in, past the "
+                f"{config.NO_TRADE_AFTER_SECONDS:.0f}s no-new-trades cutoff -- skipping window"
+            ))
+            return
+
         up_mid, down_mid = self._mid_for(Side.UP), self._mid_for(Side.DOWN)
         if up_mid is None or down_mid is None:
             # no price data at the check moment -- skip the window rather
             # than guess
             self.s.no_trade_windows += 1
             self.s.done_for_window = True
-            self._log("NO_TRADE", note="no price data at the 10s entry check -- skipping window")
+            self._log("NO_TRADE", note=f"no price data at the {config.ENTRY_WAIT_SECONDS:.0f}s entry check -- skipping window")
             return
 
-        side = Side.UP if up_mid <= down_mid else Side.DOWN
+        side = Side.UP if up_mid >= down_mid else Side.DOWN
         price = up_mid if side == Side.UP else down_mid
 
         if not (config.ENTRY_ZONE_LOW <= price <= config.ENTRY_ZONE_HIGH):
@@ -240,18 +251,29 @@ class Engine:
             self.s.no_trade_windows += 1
             self.s.done_for_window = True
             self._log("NO_TRADE", side=side.value, price=round(price, 4), note=(
-                f"cheap side ({side.value}) mid @ {price:.4f} is outside the entry zone "
+                f"expensive side ({side.value}) mid @ {price:.4f} is outside the entry zone "
                 f"[{config.ENTRY_ZONE_LOW}, {config.ENTRY_ZONE_HIGH}] at the {config.ENTRY_WAIT_SECONDS:.0f}s "
                 f"check -- no trade this window"
             ))
             return
 
         self.s.total_entries_attempted += 1
-        self._open_position(side, now, flip_number=0, zone_note=f"cheap side, in-zone @ mid {price:.4f}")
+        self._open_position(side, now, flip_number=0, zone_note=f"expensive side, in-zone @ mid {price:.4f}")
 
     # ---- position open (initial or flip) -----------------------------------
 
     def _open_position(self, side: Side, now: float, flip_number: int, zone_note: str):
+        elapsed = now - self.s.window.open_ts
+        if elapsed > config.NO_TRADE_AFTER_SECONDS:
+            self.s.done_for_window = True
+            self._log("NO_TRADE", side=side.value, note=(
+                f"{'entry' if flip_number == 0 else f'flip #{flip_number}'} would open at {elapsed:.1f}s, "
+                f"past the {config.NO_TRADE_AFTER_SECONDS:.0f}s no-new-trades cutoff -- skipped"
+            ))
+            if flip_number == 0:
+                self.s.no_trade_windows += 1
+            return
+
         shares = config.BASE_ORDER_SHARES
         ask = self._ask_for(side)
         levels = self._ask_levels_for(side)
@@ -393,7 +415,7 @@ class Engine:
                                       is_terminal=True)
             elif not self.s.entry_checked:
                 self.s.no_trade_windows += 1
-                self._log("NO_TRADE", note="window closed before the 10s entry check ever ran")
+                self._log("NO_TRADE", note="window closed before the entry check ever ran")
 
         self.s.window = None
         self.capital.record_equity_point(window_slug)
@@ -449,7 +471,7 @@ class Engine:
         down_mid = self._mid_for(Side.DOWN)
 
         return {
-            "engine": "FLIP", "label": "Delayed cheap-side entry, continuous 0.20 trail, one flip",
+            "engine": "FLIP", "label": "Delayed expensive-side entry, continuous 0.15 trail, one flip",
 
             "balance": round(self.capital.balance, 2),
             "starting_capital": config.STARTING_CAPITAL,
