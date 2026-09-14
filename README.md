@@ -1,20 +1,27 @@
-# Delayed cheap-side entry, tightening trail, single trade — BTC 5m bot
+# Momentum-continuation entry, tightening trail, single trade — BTC 5m bot
 
 Paper-trading bot for Polymarket's `btc-updown-5m-*` markets. Runs a
 single strategy: 10 seconds after a window opens, buy whichever side
-is cheaper if it's within a defined price zone, then manage the exit
-with a continuous trailing stop that tightens once the position gets
-deep in the money, or a fixed take-profit. At most one trade per
-window — no re-entry after a stop-out.
+won the *previous* window — regardless of whether it's currently cheap
+or expensive — as long as it's within a defined price zone, then
+manage the exit with a continuous trailing stop that arms after a
+delay and tightens once the position gets deep in the money. At most
+one trade per window — no re-entry after a stop-out.
 
 ## Strategy
 
-1. **Entry**: wait **10s** after the window opens, then look at both
-   sides' mid price once. Buy whichever side is cheaper ("the cheap
-   side") — but only if that price is inside the entry zone
-   **0.20–0.80**. This is a single check at t=10s, not a rearmed
-   watch; if the cheap side is outside the zone at that moment, no
-   trade is taken this window.
+1. **Entry**: wait **10s** after the window opens. The entry side is
+   whichever side **won the previous window**, by last observed price
+   (see `_infer_winner()` in `app/state.py`) — **not** whichever side
+   is cheaper right now. It's bought regardless of whether that side
+   happens to be cheap or expensive at the 10s mark. The only price
+   condition left is that the chosen side's mid must be inside the
+   entry zone **0.20–0.80**; if it's outside the zone at that moment,
+   no trade is taken this window. If there's no previous-window result
+   yet — the very first window after startup, or the winner couldn't
+   be inferred (missing price data at rollover) — the window is
+   skipped entirely, since there's nothing to follow. This is a single
+   check at t=10s, not a rearmed watch.
 2. **Exit**: once filled, every tick checks that side's mid against a
    take-profit level and a trailing stop. **The trailing stop is
    inactive for the first 2 minutes after entry** — during that
@@ -102,8 +109,17 @@ Dashboard at http://localhost:8000
   no-liquidity signal — the position is marked down to $0 rather than
   assuming no loss. If the book fetch itself fails (`None`, not `[]`),
   that's a genuine data gap and the last known price is used instead.
-- A window where the cheap side is outside the entry zone at the 10s
-  check is counted as a no-trade window.
+- A window where the momentum side is outside the entry zone at the
+  10s check, or where there's no prior-window result yet, is counted
+  as a no-trade window.
+- The previous window's winner is inferred from the **last observed
+  CLOB midpoint** at rollover (`_infer_winner()` in `app/state.py`),
+  not from Polymarket's actual settled resolution — see
+  `fetch_resolution()` in `polymarket_client.py` if real-resolution
+  settlement is wanted instead. If that inference comes back `None`
+  (missing price data right at rollover), the momentum signal is
+  cleared and the next window is skipped rather than trading on stale
+  information.
 - This reuses `models.py` and `paper_broker.py` unchanged;
   `polymarket_client.py` (full order-book depth via `get_book_full()`)
   and `state.py`/`main.py`'s orchestration loop are unchanged.

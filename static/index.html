@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Delayed entry, trail tightens above 0.85, single trade — BTC 5m bot</title>
+<title>Momentum-continuation entry, trail tightens above 0.85, single trade — BTC 5m bot</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
@@ -153,7 +153,7 @@
 <div class="wrap">
   <header>
     <div>
-      <h1>Delayed cheap-side entry, trail tightens above 0.85, single trade</h1>
+      <h1>Momentum-continuation entry, trail tightens above 0.85, single trade</h1>
       <div class="sub">BTC 5m up/down — the instant either side's mid reaches 0.70, buy that side (taker, up to 0.10 slippage). TP 0.99 redeems at $1.00, fee-free. SL starts at 0.40 and trails up (never back down) to 0.50 / 0.60 / 0.70 as price clears 0.80 / 0.90 / 0.97. One trade per window. Win: stake steps up 2.1x next window (cap 2 steps, then resets). Loss: resets to base.</div>
     </div>
     <div class="status-pill"><span class="dot" id="statusDot"></span><span id="statusText">connecting</span></div>
@@ -300,7 +300,8 @@ function renderEngineCard(e){
   };
 
   const defRowsHtml = [
-    ['Entry wait', `${fmtSh(e.def.entry_wait_seconds)}s, then buy cheap side`],
+    ['Entry wait', `${fmtSh(e.def.entry_wait_seconds)}s, then buy the side that won the previous window`],
+    ['Entry rule', `follows prior window's winner — bought regardless of cheap or expensive, if in-zone`],
     ['Entry zone', `${fmtP(e.def.entry_zone_low)} \u2013 ${fmtP(e.def.entry_zone_high)} (initial entry only)`],
     ['Take-profit', `${fmtP(e.def.tp_price)} \u2192 redeemed @ $1.00, fee-free`],
     ['Trailing stop', `arms ${fmtSh(e.def.trail_start_delay_seconds)}s after entry, then ${fmtP(e.def.trail_distance)} behind high-water mark (tightens to ${fmtP(e.def.trail_distance_tight)} above ${fmtP(e.def.trail_tighten_price)})`],
@@ -321,9 +322,13 @@ function renderEngineCard(e){
     phaseCls = 'done';
     phaseBanner = e.total_entries_attempted > 0
       ? 'Trade closed — done for the rest of this window.'
-      : 'Entry zone missed at the 10s check — no trade this window.';
+      : (e.last_winning_side
+          ? 'Entry zone missed at the 10s check — no trade this window.'
+          : 'No prior window result to follow yet — no trade this window.');
   } else {
-    phaseBanner = `Waiting ${fmtSh(e.def.entry_wait_seconds)}s after window open, then buying the cheap side if it's in zone.`;
+    phaseBanner = e.last_winning_side
+      ? `Waiting ${fmtSh(e.def.entry_wait_seconds)}s after window open, then buying ${e.last_winning_side} (won the previous window) if it's in zone.`
+      : `Waiting ${fmtSh(e.def.entry_wait_seconds)}s after window open — no prior window result yet, so this window will be skipped.`;
   }
 
   function positionBox(){

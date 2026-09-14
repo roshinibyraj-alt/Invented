@@ -71,8 +71,9 @@ class BotState:
         # the-other) so a stop/flip decision isn't waiting on two
         # sequential round-trips -- cuts tick latency roughly in half. Both
         # sides are still fetched every tick since the entry check needs
-        # both mids to pick the cheap side, even though exits only ever
-        # watch the one held side.
+        # both mids to log up/down context and infer the window's
+        # eventual winner, even though exits only ever watch the one
+        # held side.
         up_book, down_book = await asyncio.gather(
             self.client.get_book_full(self.current_window.token_up),
             self.client.get_book_full(self.current_window.token_down),

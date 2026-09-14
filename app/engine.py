@@ -1,21 +1,26 @@
 """
-Trading engine -- delayed cheap-side entry, continuous trailing stop
+Trading engine -- momentum-continuation entry (follows the previous
+window's winning side, not the cheap side), continuous trailing stop
 (inactive for the first 2 minutes, then tightens above 0.85), single
 trade per window, TP redemption.
 
 See app/config.py for the full strategy write-up. Summary: 10s after
-window open, buy whichever side is cheaper (by MID price) if (and only
-if) that mid is inside the 0.20-0.80 entry zone. From then on, TP is
-live immediately, but the trailing stop doesn't arm until
-TRAIL_START_DELAY_SECONDS (120s) after entry -- before that, only TP
-can close the position. The high-water mark keeps tracking the whole
-time regardless, so once the stop arms it starts from wherever price
-has already gotten to, not from scratch. Once armed, the stop sits
-behind the position's high-water MID -- 0.20 back normally, narrowing
-to 0.10 back once the high-water mark has gone above 0.85 -- and only
-ever tightens. Mid price is what triggers every decision (entry zone
-check, TP, stop), but every actual fill is a real taker execution
-priced off real ask/bid order-book depth (see
+window open, buy whichever side won the PREVIOUS window (by last
+observed price) -- regardless of whether that side is currently cheap
+or expensive -- if (and only if) its mid is inside the 0.20-0.80 entry
+zone. If there's no prior window result yet (e.g. the very first
+window after startup, or the previous window's winner couldn't be
+inferred), the window is skipped entirely rather than guessing. From
+then on, TP is live immediately, but the trailing stop doesn't arm
+until TRAIL_START_DELAY_SECONDS (120s) after entry -- before that,
+only TP can close the position. The high-water mark keeps tracking the
+whole time regardless, so once the stop arms it starts from wherever
+price has already gotten to, not from scratch. Once armed, the stop
+sits behind the position's high-water MID -- 0.20 back normally,
+narrowing to 0.10 back once the high-water mark has gone above 0.85 --
+and only ever tightens. Mid price is what triggers every decision
+(entry zone check, TP, stop), but every actual fill is a real taker
+execution priced off real ask/bid order-book depth (see
 Engine._realistic_fill_price), so mid and fill price can differ by the
 spread. If mid reaches 0.99, redeem at a flat $1.00/share, fee-free,
 done for the window. If the trailing stop is hit instead, the position
@@ -116,7 +121,8 @@ class EngineState:
 
 
 class Engine:
-    """Delayed cheap-side entry / trailing stop that arms 2 minutes after
+    """Momentum-continuation entry (follows previous window's winning
+    side, not the cheap side) / trailing stop that arms 2 minutes after
     entry and tightens above 0.85 / single trade per window, driven off
     its own capital pool. Kept as the class name `Engine` / constructed
     the same way (Engine(broker)) so app/state.py doesn't need
@@ -129,6 +135,11 @@ class Engine:
         self.capital = CapitalPool(balance=config.STARTING_CAPITAL)
         self.s = EngineState()
         self.capital.record_equity_point(None)
+        # Persists across windows (unlike EngineState, which is replaced
+        # wholesale in reset_for_window): which side the previous window
+        # resolved to, used to pick this window's entry side. None until
+        # a window has actually finalized with a known winner.
+        self.last_winning_side: Optional[Side] = None
 
     def _log(self, event, **kw):
         self.broker.log_event(self.name, self.s.window.slug if self.s.window else "", event,
@@ -141,8 +152,12 @@ class Engine:
             self._log("HALTED", note=f"engine halted (balance ${self.capital.balance:.2f} < $0) -- no trading")
             return
 
+        momentum_note = (f"following {self.last_winning_side.value} (previous window closed "
+                          f"{self.last_winning_side.value} by price)" if self.last_winning_side is not None
+                          else "no prior window result yet -- this window will be skipped")
         self._log("WINDOW_OPEN", shares=config.BASE_ORDER_SHARES, note=(
-            f"waiting {config.ENTRY_WAIT_SECONDS:.0f}s, then buying the cheaper side if it's within "
+            f"waiting {config.ENTRY_WAIT_SECONDS:.0f}s, then buying the momentum side -- {momentum_note} -- "
+            f"regardless of whether it's the cheap or expensive side, if it's within "
             f"[{config.ENTRY_ZONE_LOW}, {config.ENTRY_ZONE_HIGH}] -- flat {config.BASE_ORDER_SHARES:.0f}sh, "
             f"no martingale. TP {config.TP_PRICE} (redeem $1) live immediately / trailing stop arms "
             f"{config.TRAIL_START_DELAY_SECONDS:.0f}s after entry, {config.TRAIL_DISTANCE} trail "
@@ -219,7 +234,7 @@ class Engine:
             cost += remaining * worst_price
         return cost / shares
 
-    # ---- initial entry: single check at t=10s, cheap side, zone-gated ------
+    # ---- initial entry: single check at t=10s, momentum side, zone-gated --
 
     def _check_initial_entry(self, now: float):
         elapsed = now - self.s.window.open_ts
@@ -227,31 +242,38 @@ class Engine:
             return   # not yet -- keep waiting, don't mark checked
 
         self.s.entry_checked = True
-        up_mid, down_mid = self._mid_for(Side.UP), self._mid_for(Side.DOWN)
-        if up_mid is None or down_mid is None:
-            # no price data at the check moment -- skip the window rather
-            # than guess
+
+        side = self.last_winning_side
+        if side is None:
             self.s.no_trade_windows += 1
             self.s.done_for_window = True
-            self._log("NO_TRADE", note="no price data at the 10s entry check -- skipping window")
+            self._log("NO_TRADE", note="no prior window result to follow yet -- skipping window")
             return
 
-        side = Side.UP if up_mid <= down_mid else Side.DOWN
-        price = up_mid if side == Side.UP else down_mid
+        price = self._mid_for(side)
+        if price is None:
+            self.s.no_trade_windows += 1
+            self.s.done_for_window = True
+            self._log("NO_TRADE", side=side.value,
+                       note="no price data at the 10s entry check -- skipping window")
+            return
 
         if not (config.ENTRY_ZONE_LOW <= price <= config.ENTRY_ZONE_HIGH):
             self.s.total_no_entry_zone += 1
             self.s.no_trade_windows += 1
             self.s.done_for_window = True
             self._log("NO_TRADE", side=side.value, price=round(price, 4), note=(
-                f"cheap side ({side.value}) mid @ {price:.4f} is outside the entry zone "
-                f"[{config.ENTRY_ZONE_LOW}, {config.ENTRY_ZONE_HIGH}] at the {config.ENTRY_WAIT_SECONDS:.0f}s "
-                f"check -- no trade this window"
+                f"momentum side {side.value} (previous window closed {side.value} by price) mid @ {price:.4f} "
+                f"is outside the entry zone [{config.ENTRY_ZONE_LOW}, {config.ENTRY_ZONE_HIGH}] at the "
+                f"{config.ENTRY_WAIT_SECONDS:.0f}s check -- no trade this window"
             ))
             return
 
         self.s.total_entries_attempted += 1
-        self._open_position(side, now, zone_note=f"cheap side, in-zone @ mid {price:.4f}")
+        self._open_position(side, now, zone_note=(
+            f"momentum continuation of {side.value} (previous window closed {side.value} by price), "
+            f"in-zone @ mid {price:.4f}, bought regardless of cheap/expensive"
+        ))
 
     # ---- position open (single entry per window) ---------------------------
 
@@ -383,6 +405,13 @@ class Engine:
                 self.s.no_trade_windows += 1
                 self._log("NO_TRADE", note="window closed before the 10s entry check ever ran")
 
+        # Feeds next window's entry-side filter -- whichever side this
+        # window closed to (by last observed price) is what next
+        # window's momentum-continuation entry will follow. A None here
+        # (winner couldn't be inferred) clears the signal rather than
+        # leaving a stale one, so next window's entry is skipped too.
+        self.last_winning_side = winning_side
+
         self.s.window = None
         self.capital.record_equity_point(window_slug)
 
@@ -441,7 +470,7 @@ class Engine:
         down_mid = self._mid_for(Side.DOWN)
 
         return {
-            "engine": "FLIP", "label": "Delayed cheap-side entry, continuous trail (tightens above 0.85), single trade",
+            "engine": "FLIP", "label": "Momentum-continuation entry (follows prior window's winner), continuous trail (tightens above 0.85), single trade",
 
             "balance": round(self.capital.balance, 2),
             "starting_capital": config.STARTING_CAPITAL,
@@ -456,6 +485,7 @@ class Engine:
 
             "up_mid": up_mid,
             "down_mid": down_mid,
+            "last_winning_side": self.last_winning_side.value if self.last_winning_side else None,
             "entry_checked": self.s.entry_checked,
             "position": position,
             "done_for_window": self.s.done_for_window,

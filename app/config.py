@@ -1,17 +1,22 @@
 """
 Central configuration for the BTC 5-min up/down bot.
 
-Single engine -- delayed cheap-side entry, continuous trailing stop
-(tightens above a price threshold), single trade per window, TP
-redemption:
+Single engine -- momentum-continuation entry (follows the previous
+window's winning side, not the cheap side), continuous trailing stop
+(tightens above a price threshold, and inactive for a delay after
+entry), single trade per window, TP redemption:
 
   1. Entry: from window open, wait ENTRY_WAIT_SECONDS (10s). At that
-     point, look at both sides' ask price once and buy whichever is
-     cheaper ("the cheap side") -- but ONLY if that side's price is
-     inside the entry zone [ENTRY_ZONE_LOW, ENTRY_ZONE_HIGH] (0.20-0.80).
-     If it's outside the zone at the 10s mark, no trade is taken this
-     window. This is a single check at t=10s, not a rearmed watch --
-     the zone/cheap-side gating applies to this initial entry only.
+     point, the entry side is whichever side WON the previous window
+     (by last observed price) -- NOT whichever side is cheaper right
+     now. Bought regardless of whether that side happens to be cheap
+     or expensive at the moment. The only price condition left is: the
+     chosen side's price must be inside the entry zone
+     [ENTRY_ZONE_LOW, ENTRY_ZONE_HIGH] (0.20-0.80); if it's outside the
+     zone at the 10s mark, no trade is taken this window. If there's no
+     previous-window result yet (startup, or the winner couldn't be
+     inferred), the window is skipped -- there's nothing to follow.
+     This is a single check at t=10s, not a rearmed watch.
   2. Trailing stop: continuous, not stepped, and inactive for the
      first TRAIL_START_DELAY_SECONDS (120s) after entry -- during that
      window only TP can close the position, the stop cannot fire (the
@@ -56,7 +61,7 @@ WINDOW_SECONDS = 300
 
 POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "0.5"))
 
-# ---- Delayed cheap-side entry / continuous trailing stop / flip engine ----
+# ---- Momentum-continuation entry / continuous trailing stop engine --------
 ENTRY_WAIT_SECONDS = 10.0         # wait this long after window open before checking entry
 ENTRY_ZONE_LOW = 0.20             # entry zone floor -- initial entry only
 ENTRY_ZONE_HIGH = 0.80            # entry zone ceiling -- initial entry only
