@@ -1,53 +1,43 @@
 """
 Central configuration for the BTC 5-min up/down bot.
 
-Single engine -- breakout-entry, fixed TP/SL, anti-martingale sizing:
+Single engine -- delayed cheap-side entry, continuous 0.20 trailing
+stop, unlimited flat-size flips, TP redemption:
 
-  1. Entry trigger: from the instant a window opens, watch both sides'
-     mid price every tick. The moment EITHER side's mid reaches
-     ENTRY_TRIGGER_PRICE (0.70), immediately attempt a buy on that side
-     only -- whichever side triggers first takes the window's one and
-     only trade slot; the other side is ignored for the rest of the
-     window even if it later reaches 0.70 too.
-  2. Fill / slippage: the entry is priced by walking real ask depth
-     (see Engine._realistic_fill_price), but capped at
-     ENTRY_TRIGGER_PRICE + ENTRY_SLIPPAGE (0.80) -- if the market has
-     already moved past that cap by the time the trigger fires, the
-     entry is skipped entirely (logged as MISSED_ENTRY, no position,
-     no capital risked) rather than chasing an arbitrarily bad price.
-  3. Exit: once filled, every tick checks that side's bid against a
-     take-profit level and a trailing stop-loss:
-       - TP_PRICE (0.99): treated as a certain win and REDEEMED, not
-         sold -- credited at a flat $1.00/share with zero fee (a CTF
-         resolution redemption, not an orderbook trade -- same
-         no-fee logic as the merge mechanic), instead of taker-selling
-         at ~0.99 and losing a sliver of edge to fee/slippage.
-       - Stop-loss trails up in one-way steps off the position's
-         high-water mark (the best bid seen since entry) and never
-         moves back down, even if price pulls back below the level
-         that raised it: SL_STEPS (see below) map "price has reached
-         at least X" -> "SL is now Y". Below the first step it's just
-         SL_BASE (0.40). An SL exit is a real taker sell, priced by
-         walking real bid depth, since (unlike TP) it isn't a
-         guaranteed-resolution redemption.
-     If the window closes before either is reached, the position is
-     force-closed at whatever the market will pay (also a real taker
-     sell), and still counts as a win/loss for sizing purposes.
-  4. Sizing -- anti-martingale: position size is
-     BASE_ORDER_SHARES * ANTI_MARTINGALE_MULTIPLIER ** martingale_step.
-     martingale_step persists across windows (not reset per window):
-       - a WIN steps it up by one (capped at MAX_MARTINGALE_STEPS),
-         except a win that was already AT the cap resets back to 0.
-       - a LOSS resets it to 0 immediately.
-       - a window with no trade taken (trigger never reached, or the
-         entry was skipped for slippage) leaves it unchanged.
-     With the defaults (2.1x, cap 2) the ladder is:
-       step 0 = 1x -> step 1 = 2.1x -> step 2 = 4.41x -> (win) -> step 0
+  1. Entry: from window open, wait ENTRY_WAIT_SECONDS (10s). At that
+     point, look at both sides' ask price once and buy whichever is
+     cheaper ("the cheap side") -- but ONLY if that side's price is
+     inside the entry zone [ENTRY_ZONE_LOW, ENTRY_ZONE_HIGH] (0.20-0.80).
+     If it's outside the zone at the 10s mark, no trade is taken this
+     window. This is a single check at t=10s, not a rearmed watch --
+     the zone/cheap-side gating applies to this initial entry only.
+  2. Trailing stop: continuous, not stepped. Every tick, if the
+     position's bid has made a new high-water mark, the stop is
+     recomputed as high_water_mark - TRAIL_DISTANCE (0.20), rounded to
+     the cent (0.01) tick size. It only ever moves up (one-way
+     ratchet) since it's driven off the monotonic high-water mark. Bid
+     <= stop -> stop hit.
+  3. TP: TP_PRICE (0.99) hit -> REDEEMED, not sold -- credited at a
+     flat $1.00/share, zero fee (CTF resolution redemption). Terminal
+     for the window: no further flips after a TP.
+  4. Flip on stop hit: when the trailing stop is hit (whether the
+     position is up or down overall), the bot immediately buys the
+     OPPOSITE side, flat BASE_ORDER_SHARES, no entry-zone check, no
+     price condition -- it fires regardless of price. The flip
+     position gets the exact same continuous 0.20 trailing stop
+     treatment. Flips are UNLIMITED within a window: every stop-hit on
+     a flip immediately triggers the next flip, back and forth, until
+     either a TP is hit or the window closes. If price data is missing
+     for a tick, nothing fires that tick.
+  5. Sizing: flat, no martingale of any kind. Every entry -- initial or
+     any flip -- is exactly BASE_ORDER_SHARES. No cross-window sizing
+     memory either; every window starts fresh.
+  6. Window close: if a position is still open when the window closes,
+     it's force-closed at whatever the market will pay (real taker
+     sell).
 
-At most one trade per window, no order-book ladder, no merge -- a
-position only ever exists on one side at a time, so the fee-free CTF
-merge mechanic (holding both sides at once) doesn't apply here and was
-removed along with the old dual-grid logic.
+At most one position open at a time (flips replace, they don't stack),
+no order-book ladder, no merge.
 """
 import os
 
@@ -65,28 +55,15 @@ WINDOW_SECONDS = 300
 
 POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
 
-# ---- Breakout-entry / trailing-SL / TP-redemption engine -----------------
-ENTRY_TRIGGER_PRICE = 0.70        # mid price that arms a buy on that side
-ENTRY_SLIPPAGE = 0.10             # max price above trigger we'll chase (cap = 0.80)
+# ---- Delayed cheap-side entry / continuous trailing stop / flip engine ----
+ENTRY_WAIT_SECONDS = 10.0         # wait this long after window open before checking entry
+ENTRY_ZONE_LOW = 0.20             # entry zone floor -- initial entry only
+ENTRY_ZONE_HIGH = 0.80            # entry zone ceiling -- initial entry only
 TP_PRICE = 0.99                   # take-profit level -- hit = redeemed at $1.00, fee-free
-SL_BASE = 0.40                    # stop-loss before any trailing step has triggered
+TRAIL_DISTANCE = 0.20             # continuous trailing stop distance from high-water mark
+PRICE_TICK = 0.01                 # rounding granularity for the stop price
 
-# Trailing stop-loss: (price the position's high-water mark must reach,
-# the SL it moves to once it does). Must stay sorted ascending by
-# trigger -- Engine._effective_sl walks it in order and keeps the last
-# (highest) one whose trigger the high-water mark has reached, so a
-# later/lower entry here would never actually win out over an earlier
-# higher one. One-way ratchet: once a step fires it never moves back
-# down, even if price pulls back below that step's trigger afterward.
-SL_TRAIL_STEPS = [
-    (0.80, 0.50),
-    (0.90, 0.60),
-    (0.97, 0.70),
-]
-
-BASE_ORDER_SHARES = 100.0                 # step-0 (1x) position size
-ANTI_MARTINGALE_MULTIPLIER = 2.1          # size multiplier applied per step, after a win
-MAX_MARTINGALE_STEPS = 2                  # steps 0..2 -> multipliers 1x, 2.1x, 4.41x
+BASE_ORDER_SHARES = 100.0         # flat size for every entry -- initial and every flip, no martingale
 
 # Demo capital: single source of truth for the paper balance -- debited
 # on every buy fill, credited on every sell settlement. Halts

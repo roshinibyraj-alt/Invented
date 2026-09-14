@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Breakout entry, fixed TP/SL, anti-martingale — BTC 5m bot</title>
+<title>Delayed entry, 0.20 trail, unlimited flips — BTC 5m bot</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
@@ -153,7 +153,7 @@
 <div class="wrap">
   <header>
     <div>
-      <h1>Breakout entry, fixed TP/SL, anti-martingale</h1>
+      <h1>Delayed cheap-side entry, 0.20 trail, unlimited flips</h1>
       <div class="sub">BTC 5m up/down — the instant either side's mid reaches 0.70, buy that side (taker, up to 0.10 slippage). TP 0.99 redeems at $1.00, fee-free. SL starts at 0.40 and trails up (never back down) to 0.50 / 0.60 / 0.70 as price clears 0.80 / 0.90 / 0.97. One trade per window. Win: stake steps up 2.1x next window (cap 2 steps, then resets). Loss: resets to base.</div>
     </div>
     <div class="status-pill"><span class="dot" id="statusDot"></span><span id="statusText">connecting</span></div>
@@ -235,11 +235,12 @@ function renderGauge(trackId, midId, bidAskId, sideLblId, side, bid, ask, e, gau
   const track = document.getElementById(trackId);
   const pct = mid!=null ? Math.max(0,Math.min(100, mid*100)) : 0;
   let marks = `<div class="gauge-fill ${side}" style="width:${pct}%"></div>`;
-  const trig = e.def.entry_trigger_price;
-  marks += `<div class="gauge-mark trigger" style="left:${trig*100}%"><span class="lbl">${fmtP(trig)}</span></div>`;
+  const lo = e.def.entry_zone_low, hi = e.def.entry_zone_high;
+  marks += `<div class="gauge-mark trigger" style="left:${lo*100}%"><span class="lbl">${fmtP(lo)}</span></div>`;
+  marks += `<div class="gauge-mark trigger" style="left:${hi*100}%"><span class="lbl">${fmtP(hi)}</span></div>`;
   if(held){
     marks += `<div class="gauge-mark tp" style="left:${e.def.tp_price*100}%"><span class="lbl">TP ${fmtP(e.def.tp_price)}</span></div>`;
-    marks += `<div class="gauge-mark sl" style="left:${pos.sl_price*100}%"><span class="lbl">SL ${fmtP(pos.sl_price)}${pos.sl_trailed?' \u2191':''}</span></div>`;
+    marks += `<div class="gauge-mark sl" style="left:${pos.stop_price*100}%"><span class="lbl">stop ${fmtP(pos.stop_price)}</span></div>`;
     marks += `<div class="gauge-mark entry" style="left:${pos.entry_price*100}%"><span class="lbl">in ${fmtP(pos.entry_price)}</span></div>`;
   }
   track.innerHTML = marks;
@@ -294,17 +295,17 @@ function renderEngineCard(e){
   const el = $('engineCard');
   if(!e || !e.def){ el.innerHTML = '<div class="empty">no data</div>'; return; }
   const statusLabels = {
-    watching:'watching for 0.70 breakout', in_position:'position open — watching TP/SL',
+    waiting_entry:'waiting for 10s entry check', in_position:'position open — watching TP/stop',
     done:'done for this window', halted:'halted',
   };
 
   const defRowsHtml = [
-    ['Entry trigger', fmtP(e.def.entry_trigger_price)],
-    ['Slippage cap', `+${fmtP(e.def.entry_slippage)} (max ${fmtP(e.def.entry_cap_price)})`],
+    ['Entry wait', `${fmtSh(e.def.entry_wait_seconds)}s, then buy cheap side`],
+    ['Entry zone', `${fmtP(e.def.entry_zone_low)} \u2013 ${fmtP(e.def.entry_zone_high)} (initial entry only)`],
     ['Take-profit', `${fmtP(e.def.tp_price)} \u2192 redeemed @ $1.00, fee-free`],
-    ['Stop-loss (base)', fmtP(e.def.sl_base)],
-    ['SL trails to', e.def.sl_trail_steps.map(s => `${fmtP(s.sl)} @${fmtP(s.trigger)}`).join(' / ')],
-    ['This window\u2019s stake', `${fmtSh(e.current_stake_shares)}sh (${e.martingale_multiplier}x)`],
+    ['Trailing stop', `continuous, ${fmtP(e.def.trail_distance)} behind high-water mark`],
+    ['Flips', 'unlimited, flat size, no zone check'],
+    ['Order size', `${fmtSh(e.def.base_order_shares)}sh flat, no martingale`],
   ].map(([k,v]) => `<div class="def-item"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
 
   let phaseBanner;
@@ -314,14 +315,15 @@ function renderEngineCard(e){
   } else if(e.position){
     phaseCls = 'armed';
     const p = e.position;
-    phaseBanner = `Position open on ${p.side} @ ${fmtP(p.entry_price)} — TP ${fmtP(e.def.tp_price)} (redeem $1) / SL ${fmtP(p.sl_price)}${p.sl_trailed ? ' (trailed up from '+fmtP(e.def.sl_base)+')' : ''}, high-water ${fmtP(p.high_water_mark)}.`;
+    const flipTag = p.flip_number > 0 ? ` (flip #${p.flip_number})` : '';
+    phaseBanner = `Position open on ${p.side}${flipTag} @ ${fmtP(p.entry_price)} — TP ${fmtP(e.def.tp_price)} (redeem $1) / stop ${fmtP(p.stop_price)}, high-water ${fmtP(p.high_water_mark)}.`;
   } else if(e.done_for_window){
     phaseCls = 'done';
-    phaseBanner = e.trade_taken
-      ? 'Trade closed — done for the rest of this window.'
-      : 'Entry was skipped (slippage cap exceeded) — done for the rest of this window.';
+    phaseBanner = e.total_entries_attempted > 0 || e.flip_count > 0
+      ? `Trade closed — ${e.flip_count} flip(s) this window — done for the rest of this window.`
+      : 'Entry zone missed at the 10s check — no trade this window.';
   } else {
-    phaseBanner = `Watching both sides — buys the instant either mid reaches ${fmtP(e.def.entry_trigger_price)}.`;
+    phaseBanner = `Waiting ${fmtSh(e.def.entry_wait_seconds)}s after window open, then buying the cheap side if it's in zone.`;
   }
 
   function positionBox(){
@@ -338,23 +340,13 @@ function renderEngineCard(e){
           <div><div class="k">Mark</div><div class="v">${fmtP(pos.mark_price)}</div></div>
           <div><div class="k">High-water</div><div class="v">${fmtP(pos.high_water_mark)}</div></div>
           <div><div class="k">To TP</div><div class="v" style="color:var(--mint)">${fmtP(pos.distance_to_tp)}</div></div>
-          <div><div class="k">SL now / to SL</div><div class="v" style="color:var(--coral)">${fmtP(pos.sl_price)}${pos.sl_trailed?' \u2191':''} / ${fmtP(pos.distance_to_sl)}</div></div>
+          <div><div class="k">Stop now / to stop</div><div class="v" style="color:var(--coral)">${fmtP(pos.stop_price)} / ${fmtP(pos.distance_to_stop)}</div></div>
         </div>
         <div class="position-pnl-row">
           <span class="lbl">unrealized P&amp;L</span>
           <span class="v ${pnlClass(pos.unrealized_pnl)}">${pos.unrealized_pnl>=0?'+':''}${fmt$(pos.unrealized_pnl)}</span>
         </div>
       </div>`;
-  }
-
-  function ladder(){
-    const steps = [];
-    for(let i=0;i<=e.martingale_cap;i++){
-      const mult = Math.pow(2.1, i).toFixed(2).replace(/0+$/,'').replace(/\.$/,'');
-      const active = i === e.martingale_step;
-      steps.push(`<div class="step ${active?'active':''}"><div class="m">${mult}x</div><div class="s">step ${i}</div></div>`);
-    }
-    return `<div class="ladder">${steps.join('')}</div>`;
   }
 
   el.innerHTML = `
@@ -366,15 +358,14 @@ function renderEngineCard(e){
     <div class="phase-banner ${phaseCls}">${phaseBanner}</div>
     <div class="subhead">Position</div>
     ${positionBox()}
-    <div class="subhead">Anti-martingale ladder</div>
-    ${ladder()}
+    <div class="subhead">Flips this window: ${fmtSh(e.flip_count)}</div>
   `;
 }
 
 function renderStats(e){
   const tiles = [
-    ['total_triggers','triggers',''], ['total_missed_entries','missed (slippage)',''],
-    ['total_tp_hits','TP hits','win'], ['total_sl_hits','SL hits','loss'],
+    ['total_entries_attempted','entries',''], ['total_no_entry_zone','missed (zone)',''],
+    ['total_flips','flips',''], ['total_tp_hits','TP hits','win'], ['total_stop_hits','stop hits','loss'],
     ['total_forced_closes','forced close',''], ['no_trade_windows','no-trade',''],
     ['win_rate','win rate %',''],
   ];

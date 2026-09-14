@@ -1,19 +1,18 @@
 """
-Trading engine -- breakout entry on either side, TP redemption + trailing
-SL exit, anti-martingale position sizing across windows.
+Trading engine -- delayed cheap-side entry, continuous 0.20 trailing
+stop, unlimited flat-size flips, TP redemption.
 
-See app/config.py for the full strategy write-up. Summary: watch both
-sides' mid price from window open; the instant either reaches 0.70,
-buy that side only (capped at 0.10 slippage above trigger -- skip the
-trade entirely if the market's already past that). Once filled, exit
-the instant that side's bid reaches 0.99 -- redeemed at a flat $1.00/
-share, fee-free, not sold -- or the trailing SL is hit (starts at 0.40,
-ratchets up in one-way steps to 0.50/0.60/0.70 as the position's
-high-water mark clears 0.80/0.90/0.97), or force-close at window end if
-neither happens first. Size is base * 2.1 ** martingale_step, where
-martingale_step persists across windows: a win steps it up (reset to 0
-if already at the cap), a loss resets it to 0, a no-trade window leaves
-it untouched.
+See app/config.py for the full strategy write-up. Summary: 10s after
+window open, buy whichever side is cheaper if (and only if) it's
+inside the 0.20-0.80 entry zone. From then on, a continuous trailing
+stop sits 0.20 behind the position's high-water mark and only ever
+tightens. If bid reaches 0.99, redeem at a flat $1.00/share, fee-free,
+done for the window. If the trailing stop is hit instead, immediately
+flip into the opposite side at the same flat size (no zone check on
+flips), and the same trailing-stop logic applies to the new position.
+Flips are unlimited -- this can keep flipping back and forth all
+window until a TP lands or the window closes. No martingale anywhere;
+every entry is BASE_ORDER_SHARES.
 """
 import time
 from dataclasses import dataclass, field
@@ -64,8 +63,8 @@ class Position:
     entry_price: float
     entry_fee: float
     entry_ts: float
-    martingale_step: int   # the step this position's size was sized at (for the log/dashboard)
-    high_water_mark: float = 0.0   # best bid seen since entry -- drives the trailing SL
+    flip_number: int            # 0 = initial entry, 1 = first flip, 2 = second flip, ...
+    high_water_mark: float = 0.0   # best bid seen since entry -- drives the continuous trailing stop
 
     @property
     def cost(self) -> float:
@@ -91,15 +90,17 @@ class EngineState:
     down_ask_levels: Optional[list] = None
 
     position: Optional[Position] = None
-    trade_taken: bool = False    # this window's one entry slot has been used (filled or missed)
-    done_for_window: bool = False   # position closed (or trade skipped) -- nothing left to watch
+    entry_checked: bool = False     # the one t=10s entry check has happened (fired or skipped)
+    done_for_window: bool = False   # TP hit, or window closed with nothing open -- nothing left to watch
+    flip_count: int = 0             # flips taken so far this window
 
-    total_triggers: int = 0          # times either side reached 0.70 and an entry was attempted
-    total_missed_entries: int = 0    # triggers where price ran past the slippage cap before filling
+    total_entries_attempted: int = 0   # t=10s checks where a side was in-zone and a buy was attempted
+    total_no_entry_zone: int = 0       # t=10s checks where the cheap side was outside the entry zone
+    total_flips: int = 0
     total_tp_hits: int = 0
-    total_sl_hits: int = 0
-    total_forced_closes: int = 0     # window closed before TP/SL was reached
-    no_trade_windows: int = 0        # 0.70 was never reached at all
+    total_stop_hits: int = 0
+    total_forced_closes: int = 0       # window closed before TP/stop was reached
+    no_trade_windows: int = 0          # entry zone missed at t=10s, nothing ever opened
     wins: int = 0
     losses: int = 0
     total_pnl: float = 0.0
@@ -107,26 +108,22 @@ class EngineState:
 
 
 class Engine:
-    """Breakout-entry / fixed-TP-SL engine with anti-martingale sizing,
-    driven off its own capital pool. Kept as the class name `Engine` /
-    constructed the same way (Engine(broker)) so app/state.py doesn't
-    need structural changes."""
+    """Delayed cheap-side entry / continuous 0.20 trailing stop / unlimited
+    flat-size flips, driven off its own capital pool. Kept as the class
+    name `Engine` / constructed the same way (Engine(broker)) so
+    app/state.py doesn't need structural changes."""
 
-    name = "BREAKOUT"
+    name = "FLIP"
 
     def __init__(self, broker: PaperBroker):
         self.broker = broker
         self.capital = CapitalPool(balance=config.STARTING_CAPITAL)
         self.s = EngineState()
-        self.martingale_step = 0   # persists across windows -- NOT part of EngineState
         self.capital.record_equity_point(None)
 
     def _log(self, event, **kw):
         self.broker.log_event(self.name, self.s.window.slug if self.s.window else "", event,
                                balance_after=self.capital.balance, **kw)
-
-    def _current_stake_shares(self) -> float:
-        return config.BASE_ORDER_SHARES * (config.ANTI_MARTINGALE_MULTIPLIER ** self.martingale_step)
 
     def reset_for_window(self, window: WindowMarket):
         self.s = EngineState(window=window)
@@ -135,13 +132,11 @@ class Engine:
             self._log("HALTED", note=f"engine halted (balance ${self.capital.balance:.2f} < $0) -- no trading")
             return
 
-        stake = self._current_stake_shares()
-        self._log("WINDOW_OPEN", shares=stake, note=(
-            f"watching for either side's mid to reach {config.ENTRY_TRIGGER_PRICE} -- "
-            f"stake this window: {stake:.0f}sh (martingale step {self.martingale_step}, "
-            f"{config.ANTI_MARTINGALE_MULTIPLIER}x ladder, cap {config.MAX_MARTINGALE_STEPS}). "
-            f"TP {config.TP_PRICE} (redeem $1) / initial SL {config.SL_BASE}, "
-            f"slippage cap {config.ENTRY_SLIPPAGE}"
+        self._log("WINDOW_OPEN", shares=config.BASE_ORDER_SHARES, note=(
+            f"waiting {config.ENTRY_WAIT_SECONDS:.0f}s, then buying the cheaper side if it's within "
+            f"[{config.ENTRY_ZONE_LOW}, {config.ENTRY_ZONE_HIGH}] -- flat {config.BASE_ORDER_SHARES:.0f}sh, "
+            f"no martingale. TP {config.TP_PRICE} (redeem $1) / continuous {config.TRAIL_DISTANCE} trailing "
+            f"stop, unlimited flips on stop-out."
         ))
 
     def on_tick(self, up_bid, up_ask, down_bid, down_ask, seconds_to_close: float = None, now: Optional[float] = None,
@@ -159,8 +154,8 @@ class Engine:
             return
 
         if self.s.position is None:
-            if not self.s.trade_taken:
-                self._check_entry_trigger(now)
+            if not self.s.entry_checked:
+                self._check_initial_entry(now)
         else:
             self._check_exit(now)
 
@@ -213,59 +208,78 @@ class Engine:
             cost += remaining * worst_price
         return cost / shares
 
-    # ---- entry: breakout trigger, one shot per window -----------------------
+    # ---- initial entry: single check at t=10s, cheap side, zone-gated ------
 
-    def _check_entry_trigger(self, now: float):
-        for side in (Side.UP, Side.DOWN):
-            mid = self._mid_for(side)
-            if mid is not None and mid >= config.ENTRY_TRIGGER_PRICE:
-                self._attempt_entry(side, now)
-                return   # window's one trade slot is spent, win or miss -- ignore the other side
+    def _check_initial_entry(self, now: float):
+        elapsed = now - self.s.window.open_ts
+        if elapsed < config.ENTRY_WAIT_SECONDS:
+            return   # not yet -- keep waiting, don't mark checked
 
-    def _attempt_entry(self, side: Side, now: float):
-        self.s.trade_taken = True
-        self.s.total_triggers += 1
-        shares = self._current_stake_shares()
+        self.s.entry_checked = True
+        up_ask, down_ask = self.s.up_ask, self.s.down_ask
+        if up_ask is None or down_ask is None:
+            # no price data at the check moment -- skip the window rather
+            # than guess
+            self.s.no_trade_windows += 1
+            self.s.done_for_window = True
+            self._log("NO_TRADE", note="no price data at the 10s entry check -- skipping window")
+            return
+
+        side = Side.UP if up_ask <= down_ask else Side.DOWN
+        price = up_ask if side == Side.UP else down_ask
+
+        if not (config.ENTRY_ZONE_LOW <= price <= config.ENTRY_ZONE_HIGH):
+            self.s.total_no_entry_zone += 1
+            self.s.no_trade_windows += 1
+            self.s.done_for_window = True
+            self._log("NO_TRADE", side=side.value, price=round(price, 4), note=(
+                f"cheap side ({side.value}) @ {price:.4f} is outside the entry zone "
+                f"[{config.ENTRY_ZONE_LOW}, {config.ENTRY_ZONE_HIGH}] at the {config.ENTRY_WAIT_SECONDS:.0f}s "
+                f"check -- no trade this window"
+            ))
+            return
+
+        self.s.total_entries_attempted += 1
+        self._open_position(side, now, flip_number=0, zone_note=f"cheap side, in-zone @ {price:.4f}")
+
+    # ---- position open (initial or flip) -----------------------------------
+
+    def _open_position(self, side: Side, now: float, flip_number: int, zone_note: str):
+        shares = config.BASE_ORDER_SHARES
         ask = self._ask_for(side)
         levels = self._ask_levels_for(side)
         fill_price = self._realistic_fill_price(levels, shares, ask)
-        cap = round(config.ENTRY_TRIGGER_PRICE + config.ENTRY_SLIPPAGE, 6)
 
-        if fill_price is None or fill_price > cap:
-            self.s.total_missed_entries += 1
+        if fill_price is None:
+            self._log("NO_LIQUIDITY", side=side.value,
+                       note=f"no ask liquidity on {side.value} -- {'entry' if flip_number == 0 else 'flip'} skipped")
             self.s.done_for_window = True
-            self._log("MISSED_ENTRY", side=side.value, price=fill_price,
-                       note=(f"{side.value} reached {config.ENTRY_TRIGGER_PRICE} but real fill price "
-                             f"({fill_price if fill_price is not None else 'no liquidity'}) is past the "
-                             f"{cap} slippage cap -- skipping, no position taken, no capital risked"))
+            if flip_number == 0:
+                self.s.no_trade_windows += 1
             return
 
         fee = self.broker.taker_fee_amount(shares, fill_price)
         cost = shares * fill_price + fee
         self.capital.balance -= cost
         self.s.position = Position(side=side, shares=shares, entry_price=fill_price, entry_fee=fee,
-                                    entry_ts=now, martingale_step=self.martingale_step,
-                                    high_water_mark=fill_price)
-        self._log("ENTRY_FILL", side=side.value, price=round(fill_price, 4), shares=shares, fee=round(fee, 4),
-                   note=(f"breakout buy filled (taker): {shares:.0f}sh @ {fill_price:.4f} "
-                         f"(trigger {config.ENTRY_TRIGGER_PRICE}, cap {cap}, fee ${fee:.4f}) -- "
-                         f"TP {config.TP_PRICE} (redeem $1) / initial SL {config.SL_BASE}"))
+                                    entry_ts=now, flip_number=flip_number, high_water_mark=fill_price)
+        event = "ENTRY_FILL" if flip_number == 0 else "FLIP_FILL"
+        self._log(event, side=side.value, price=round(fill_price, 4), shares=shares, fee=round(fee, 4),
+                   note=(f"{'entry' if flip_number == 0 else f'flip #{flip_number}'} buy filled (taker): "
+                         f"{shares:.0f}sh @ {fill_price:.4f} ({zone_note}, fee ${fee:.4f}) -- "
+                         f"TP {config.TP_PRICE} (redeem $1) / stop starts {config.TRAIL_DISTANCE} below entry"))
         self.capital.check_halt()
 
-    # ---- exit: TP redemption + trailing SL, one position at a time ----------
+    # ---- exit: TP redemption or continuous trailing-stop hit -> flip -------
 
     @staticmethod
-    def _effective_sl(high_water_mark: float) -> float:
-        """One-way ratchet: walk the steps in ascending trigger order and
-        keep the last (highest) one the high-water mark has reached.
-        Never returns a lower SL than a previously-reached step would
-        have, since the caller always feeds in the cumulative HWM, not
-        the current price."""
-        sl = config.SL_BASE
-        for trigger, stepped_sl in config.SL_TRAIL_STEPS:
-            if high_water_mark >= trigger:
-                sl = stepped_sl
-        return sl
+    def _effective_stop(high_water_mark: float) -> float:
+        """Continuous trail: always exactly TRAIL_DISTANCE behind the
+        high-water mark, rounded to the price tick. Monotonically
+        non-decreasing since the caller always feeds in the cumulative
+        HWM, never the raw current price -- so it only ever tightens."""
+        stop = high_water_mark - config.TRAIL_DISTANCE
+        return round(stop / config.PRICE_TICK) * config.PRICE_TICK
 
     def _check_exit(self, now: float):
         pos = self.s.position
@@ -279,20 +293,21 @@ class Engine:
             self.s.total_tp_hits += 1
             self._close_position(now, reason="TP_HIT",
                                   note_prefix=f"take-profit hit ({config.TP_PRICE})",
-                                  fill_price_override=1.0, fee_override=0.0)
+                                  fill_price_override=1.0, fee_override=0.0, is_terminal=True)
             return
 
-        effective_sl = self._effective_sl(pos.high_water_mark)
-        if bid <= effective_sl:
-            self.s.total_sl_hits += 1
-            trailed = effective_sl > config.SL_BASE
-            self._close_position(now, reason="SL_HIT",
-                                  note_prefix=(f"trailing stop hit (SL trailed to {effective_sl} after "
-                                               f"reaching {pos.high_water_mark:.4f})" if trailed
-                                               else f"stop-loss hit ({effective_sl})"))
+        stop = self._effective_stop(pos.high_water_mark)
+        if bid <= stop:
+            self.s.total_stop_hits += 1
+            self._close_position(now, reason="STOP_HIT",
+                                  note_prefix=(f"continuous trailing stop hit at {stop:.4f} "
+                                               f"(high-water {pos.high_water_mark:.4f}, "
+                                               f"{config.TRAIL_DISTANCE} trail)"),
+                                  is_terminal=False)
 
     def _close_position(self, now: float, reason: str, note_prefix: str,
-                         fill_price_override: Optional[float] = None, fee_override: Optional[float] = None):
+                         fill_price_override: Optional[float] = None, fee_override: Optional[float] = None,
+                         is_terminal: bool = False):
         pos = self.s.position
         if fill_price_override is not None:
             # TP: booked as a CTF resolution redemption, not an orderbook
@@ -327,24 +342,20 @@ class Engine:
                          f"@ {fill_price:.4f}): {pos.shares:.0f}sh (entry {pos.entry_price:.4f}, "
                          f"fee ${fee:.4f}, pnl ${pnl:.4f})"))
         self.capital.check_halt()
-        self._advance_martingale(win)
         self.s.position = None
-        self.s.done_for_window = True
 
-    def _advance_martingale(self, win: bool):
-        prev = self.martingale_step
-        if win:
-            if self.martingale_step >= config.MAX_MARTINGALE_STEPS:
-                self.martingale_step = 0
-            else:
-                self.martingale_step += 1
-        else:
-            self.martingale_step = 0
-        if self.martingale_step != prev:
-            self._log("MARTINGALE_STEP", note=(
-                f"{'win' if win else 'loss'} -- stake step {prev} -> {self.martingale_step} "
-                f"for next window ({self._current_stake_shares():.0f}sh)"
-            ))
+        if is_terminal or self.capital.halted:
+            # TP, or a forced window-end close -- no flip.
+            self.s.done_for_window = True
+            return
+
+        # Stop hit -> unlimited flip, flat size, no zone check, regardless
+        # of whether this position closed up or down overall.
+        self.s.flip_count += 1
+        self.s.total_flips += 1
+        flip_side = pos.side.other()
+        self._open_position(flip_side, now, flip_number=self.s.flip_count,
+                             zone_note=f"flip #{self.s.flip_count}, no zone check")
 
     # ---- window close -------------------------------------------------------
 
@@ -357,10 +368,11 @@ class Engine:
             if self.s.position is not None:
                 self.s.total_forced_closes += 1
                 self._close_position(time.time(), reason="FORCED_CLOSE",
-                                      note_prefix="window closed before TP/SL, forced taker close")
-            elif not self.s.trade_taken:
+                                      note_prefix="window closed before TP/stop, forced taker close",
+                                      is_terminal=True)
+            elif not self.s.entry_checked:
                 self.s.no_trade_windows += 1
-                self._log("NO_TRADE", note=f"neither side ever reached {config.ENTRY_TRIGGER_PRICE} this window")
+                self._log("NO_TRADE", note="window closed before the 10s entry check ever ran")
 
         self.s.window = None
         self.capital.record_equity_point(window_slug)
@@ -374,28 +386,27 @@ class Engine:
         bid = self._bid_for(pos.side)
         mark = bid if bid is not None else pos.entry_price
         hwm = max(pos.high_water_mark, mark)
-        effective_sl = self._effective_sl(hwm)
+        stop = self._effective_stop(hwm)
         market_value = pos.shares * mark
         unrealized = market_value - pos.cost
         to_tp = round(config.TP_PRICE - mark, 4)
-        to_sl = round(mark - effective_sl, 4)
+        to_stop = round(mark - stop, 4)
         return {
             "side": pos.side.value,
             "shares": pos.shares,
             "entry_price": round(pos.entry_price, 4),
             "entry_fee": round(pos.entry_fee, 4),
             "entry_ts": pos.entry_ts,
-            "martingale_step": pos.martingale_step,
+            "flip_number": pos.flip_number,
             "mark_price": mark,
             "high_water_mark": round(hwm, 4),
             "market_value": round(market_value, 4),
             "unrealized_pnl": round(unrealized, 4),
             "tp_price": config.TP_PRICE,
-            "sl_price": round(effective_sl, 4),
-            "sl_base": config.SL_BASE,
-            "sl_trailed": effective_sl > config.SL_BASE,
+            "stop_price": round(stop, 4),
+            "trail_distance": config.TRAIL_DISTANCE,
             "distance_to_tp": to_tp,
-            "distance_to_sl": to_sl,
+            "distance_to_stop": to_stop,
         }
 
     def snapshot(self) -> dict:
@@ -408,16 +419,16 @@ class Engine:
             status = "halted"
         elif position is not None:
             status = "in_position"
-        elif self.s.done_for_window:
-            status = "done"
+        elif not self.s.entry_checked:
+            status = "waiting_entry"
         else:
-            status = "watching"
+            status = "done"
 
         up_mid = self._mid_for(Side.UP)
         down_mid = self._mid_for(Side.DOWN)
 
         return {
-            "engine": "BREAKOUT", "label": "Breakout entry, fixed TP/SL, anti-martingale",
+            "engine": "FLIP", "label": "Delayed cheap-side entry, continuous 0.20 trail, unlimited flips",
 
             "balance": round(self.capital.balance, 2),
             "starting_capital": config.STARTING_CAPITAL,
@@ -432,19 +443,18 @@ class Engine:
 
             "up_mid": up_mid,
             "down_mid": down_mid,
-            "trade_taken": self.s.trade_taken,
+            "entry_checked": self.s.entry_checked,
             "position": position,
             "done_for_window": self.s.done_for_window,
+            "flip_count": self.s.flip_count,
 
-            "martingale_step": self.martingale_step,
-            "martingale_cap": config.MAX_MARTINGALE_STEPS,
-            "current_stake_shares": self._current_stake_shares(),
-            "martingale_multiplier": round(config.ANTI_MARTINGALE_MULTIPLIER ** self.martingale_step, 4),
+            "base_order_shares": config.BASE_ORDER_SHARES,
 
-            "total_triggers": self.s.total_triggers,
-            "total_missed_entries": self.s.total_missed_entries,
+            "total_entries_attempted": self.s.total_entries_attempted,
+            "total_no_entry_zone": self.s.total_no_entry_zone,
+            "total_flips": self.s.total_flips,
             "total_tp_hits": self.s.total_tp_hits,
-            "total_sl_hits": self.s.total_sl_hits,
+            "total_stop_hits": self.s.total_stop_hits,
             "total_forced_closes": self.s.total_forced_closes,
             "no_trade_windows": self.s.no_trade_windows,
             "wins": self.s.wins,
@@ -454,14 +464,11 @@ class Engine:
             "status": status,
 
             "def": {
-                "entry_trigger_price": config.ENTRY_TRIGGER_PRICE,
-                "entry_slippage": config.ENTRY_SLIPPAGE,
-                "entry_cap_price": round(config.ENTRY_TRIGGER_PRICE + config.ENTRY_SLIPPAGE, 4),
+                "entry_wait_seconds": config.ENTRY_WAIT_SECONDS,
+                "entry_zone_low": config.ENTRY_ZONE_LOW,
+                "entry_zone_high": config.ENTRY_ZONE_HIGH,
                 "tp_price": config.TP_PRICE,
-                "sl_base": config.SL_BASE,
-                "sl_trail_steps": [{"trigger": t, "sl": s} for t, s in config.SL_TRAIL_STEPS],
+                "trail_distance": config.TRAIL_DISTANCE,
                 "base_order_shares": config.BASE_ORDER_SHARES,
-                "anti_martingale_multiplier": config.ANTI_MARTINGALE_MULTIPLIER,
-                "max_martingale_steps": config.MAX_MARTINGALE_STEPS,
             },
         }
