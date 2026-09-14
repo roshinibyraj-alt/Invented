@@ -18,7 +18,7 @@ entry), single trade per window, TP redemption:
      inferred), the window is skipped -- there's nothing to follow.
      This is a single check at t=10s, not a rearmed watch.
   2. Trailing stop: continuous, not stepped, and inactive for the
-     first TRAIL_START_DELAY_SECONDS (120s) after entry -- during that
+     first TRAIL_START_DELAY_SECONDS (180s) after entry -- during that
      window only TP can close the position, the stop cannot fire (the
      high-water mark still tracks the whole time, so the stop starts
      from wherever price has gotten to once it activates, not from
@@ -69,7 +69,7 @@ TP_PRICE = 0.99                   # take-profit level -- hit = redeemed at $1.00
 TRAIL_DISTANCE = 0.20             # continuous trailing stop distance from high-water mark
 TRAIL_DISTANCE_TIGHT = 0.10       # narrowed trail distance once high-water mark > TRAIL_TIGHTEN_PRICE
 TRAIL_TIGHTEN_PRICE = 0.85        # high-water mark threshold above which the tighter trail applies
-TRAIL_START_DELAY_SECONDS = 120.0 # trailing stop is inactive until this long after entry (TP still live)
+TRAIL_START_DELAY_SECONDS = 180.0 # trailing stop is inactive until this long after entry (TP still live)
 PRICE_TICK = 0.01                 # rounding granularity for the stop price
 
 BASE_ORDER_SHARES = 100.0         # flat size for every entry -- initial and every flip, no martingale

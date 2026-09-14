@@ -12,7 +12,7 @@ zone. If there's no prior window result yet (e.g. the very first
 window after startup, or the previous window's winner couldn't be
 inferred), the window is skipped entirely rather than guessing. From
 then on, TP is live immediately, but the trailing stop doesn't arm
-until TRAIL_START_DELAY_SECONDS (120s) after entry -- before that,
+until TRAIL_START_DELAY_SECONDS (180s) after entry -- before that,
 only TP can close the position. The high-water mark keeps tracking the
 whole time regardless, so once the stop arms it starts from wherever
 price has already gotten to, not from scratch. Once armed, the stop
