@@ -27,16 +27,13 @@ private keys.
     decrements. Once it reaches 0 the engine trades normally again.
 
   Engines 6-9 (TAKER, aggressive buy the moment a side hits the trigger):
-    E6 trigger 0.60, stop-loss 0.20
-    E7 trigger 0.70, stop-loss 0.30
-    E8 trigger 0.80, stop-loss 0.40
-    E9 trigger 0.90, stop-loss 0.50
+    E6 trigger 0.60 · E7 trigger 0.70 · E8 trigger 0.80 · E9 trigger 0.90
 
     Whichever side's mid first reaches the trigger is bought immediately
-    as a taker at real ask depth (VWAP fill + taker fee). Stop-loss is a
-    taker sell at real bid depth. TP at 0.99 redeems at $1.00/share,
-    fee-free; an open position at close settles at the inferred winner.
-    No skip logic, no re-entry after exit.
+    as a taker at real ask depth (VWAP fill + taker fee). No stop loss.
+    TP at 0.99 redeems at $1.00/share, fee-free; an open position at
+    close settles at the inferred winner. No skip logic, no re-entry
+    after exit.
 
 Shared rules: flat BASE_ORDER_SHARES (100) per engine, no martingale.
 CLOB-only live pricing -- Gamma is used purely for one-time window
@@ -71,15 +68,15 @@ ENGINE_SPECS = [
     EngineSpec(engine_id=3, kind="LIMIT", entry_price=0.30, skip_windows=3),
     EngineSpec(engine_id=4, kind="LIMIT", entry_price=0.40, skip_windows=2),
     EngineSpec(engine_id=5, kind="LIMIT", entry_price=0.50, skip_windows=1),
-    EngineSpec(engine_id=6, kind="TAKER", entry_price=0.60, sl_price=0.20),
-    EngineSpec(engine_id=7, kind="TAKER", entry_price=0.70, sl_price=0.30),
-    EngineSpec(engine_id=8, kind="TAKER", entry_price=0.80, sl_price=0.40),
-    EngineSpec(engine_id=9, kind="TAKER", entry_price=0.90, sl_price=0.50),
+    EngineSpec(engine_id=6, kind="TAKER", entry_price=0.60),
+    EngineSpec(engine_id=7, kind="TAKER", entry_price=0.70),
+    EngineSpec(engine_id=8, kind="TAKER", entry_price=0.80),
+    EngineSpec(engine_id=9, kind="TAKER", entry_price=0.90),
 ]
 
 # ---- Trading fees -----------------------------------------------------
 # LIMIT engines fill as resting maker orders -> no fee, no slippage
-# (they fill exactly at their limit price). TAKER engines buy/sell
+# (they fill exactly at their limit price). TAKER engines buy
 # aggressively and pay the taker fee for real, priced by walking real
 # book depth. TP is booked as a resolution redemption / CTF settlement
 # ($1.00/share) and pays no fee at all.

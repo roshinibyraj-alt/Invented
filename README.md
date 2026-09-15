@@ -25,10 +25,9 @@ keys — paper mode only.
 ### Engines 6-9 — taker triggers (0.60 / 0.70 / 0.80 / 0.90)
 - Whichever side's mid first reaches the trigger is bought immediately as
   a taker, priced against real ask depth (VWAP fill + taker fee).
-- Stop-loss: position mid <= 0.20 / 0.30 / 0.40 / 0.50 -> taker sell at
-  real bid depth (VWAP + taker fee).
-- TP at 0.99 redeems at $1.00/share, fee-free. Open at close -> settle at
-  inferred winner. No skip logic, no re-entry after exit.
+- No stop loss on any engine. TP at 0.99 redeems at $1.00/share, fee-free.
+  Open at close -> settle at inferred winner. No skip logic, no re-entry
+  after exit.
 
 ## Shared rules
 - Flat 100 shares per engine, no martingale, isolated $500 bankroll each.

@@ -15,10 +15,9 @@ trades normally again.
 
 Engines 6-9 (TAKER): whichever side's mid first reaches the trigger
 (0.60 / 0.70 / 0.80 / 0.90) is bought immediately as a taker at real ask
-depth (VWAP fill + taker fee). Stop-loss: position mid <= sl_price
-(0.20 / 0.30 / 0.40 / 0.50) -> taker sell at real bid depth (VWAP +
-taker fee). TP 0.99 -> $1.00/share redemption, fee-free. Open at close ->
-settle at inferred winner. No skip logic, no re-entry after exit.
+depth (VWAP fill + taker fee). No stop loss. TP 0.99 -> $1.00/share
+redemption, fee-free. Open at close -> settle at inferred winner. No
+skip logic, no re-entry after exit.
 
 All engines: flat BASE_ORDER_SHARES (100), no martingale, isolated
 $500 bankroll each ($4,500 total demo capital).
@@ -137,7 +136,7 @@ class Engine:
         else:
             self._log("WINDOW_OPEN", note=(
                 f"watching both mids -- whichever side first reaches {self.spec.entry_price:.2f} is bought "
-                f"as taker (real ask depth + fee). SL {self.spec.sl_price:.2f} / TP {config.TP_PRICE} -> $1.00. "
+                f"as taker (real ask depth + fee). No SL. TP {config.TP_PRICE} -> $1.00. "
                 f"flat {self.spec.base_shares:.0f}sh. No skip."
             ))
 
@@ -246,9 +245,7 @@ class Engine:
             mark = self._mid_for(side)
             if mark is None:
                 return
-            if mark <= self.spec.sl_price:
-                self._sl_sell(now)
-            elif mark >= config.TP_PRICE:
+            if mark >= config.TP_PRICE:
                 self._tp_redeem(now)
 
     def _taker_buy(self, side: Side, now: float):
@@ -271,32 +268,8 @@ class Engine:
         self.total_entries += 1
         self._log("ENTRY_FILL", side=side.value, price=round(fill, 4), shares=shares, fee=round(fee, 4), note=(
             f"taker entry: {side.value} mid reached {self.spec.entry_price:.2f} -> bought {shares:.0f}sh @ "
-            f"{fill:.4f} (VWAP ask depth, fee ${fee:.4f}). SL {self.spec.sl_price:.2f} / TP {config.TP_PRICE} -> $1.00."
+            f"{fill:.4f} (VWAP ask depth, fee ${fee:.4f}). No SL. TP {config.TP_PRICE} -> $1.00."
         ))
-
-    def _sl_sell(self, now: float):
-        pos = self.s.position
-        bid = self._bid_for(pos.side)
-        levels = self._bid_levels_for(pos.side)
-        fill = self._realistic_fill_price(levels, pos.shares, bid)
-        if fill is None:
-            return  # no bid liquidity -- wait for next tick
-        fee = self.broker.taker_fee_amount(pos.shares, fill)
-        proceeds = pos.shares * fill - fee
-        pnl = proceeds - pos.cost
-        self.cap.balance += proceeds
-        self.total_sl_hits += 1
-        self.total_losses += 1
-        self.last_window_pnl = pnl
-        self.total_pnl += pnl
-        self.s.done_for_window = True
-        self._record_equity()
-        self._log("SL_HIT", side=pos.side.value, price=round(fill, 4), shares=pos.shares,
-                  fee=round(fee, 4), pnl=round(pnl, 2), note=(
-            f"stop-loss: {pos.side.value} mid <= {self.spec.sl_price:.2f} -> sold {pos.shares:.0f}sh @ "
-            f"{fill:.4f} (VWAP bid depth, fee ${fee:.4f}). PnL ${pnl:.2f}. Window done."
-        ))
-        self.s.position = None
 
     # ---- TP / settlement -----------------------------------------------------
 
