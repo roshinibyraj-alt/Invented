@@ -1,11 +1,11 @@
-"""Shared runtime state + the background loop that drives the engine."""
+"""Shared runtime state + the background loop that drives all nine engines."""
 import asyncio
 import time
 from collections import deque
 from typing import Optional
 
 from . import config
-from .engine import Engine
+from .engine import EngineManager
 from .models import PricePoint, Side, WindowMarket
 from .paper_broker import PaperBroker
 from .polymarket_client import PolymarketClient
@@ -14,7 +14,7 @@ from .polymarket_client import PolymarketClient
 class BotState:
     def __init__(self):
         self.broker = PaperBroker()
-        self.engine = Engine(self.broker)
+        self.engine = EngineManager(self.broker)
         self.client = PolymarketClient()
         self.current_window: Optional[WindowMarket] = None
         self.price_history: deque = deque(maxlen=300)  # ~5 min at 1s ticks
@@ -46,13 +46,8 @@ class BotState:
     async def _tick(self):
         now = time.time()
 
-        # The window's metadata (slug/token ids) doesn't change intra-
-        # window, so once we have a current window that hasn't reached
-        # its close time yet, skip the Gamma metadata round-trip entirely
-        # and go straight to prices -- that was a full extra network hop
-        # blocking every single tick for no reason. Only re-resolve when
-        # we have no window yet, or we're at/past the known close time
-        # (window roll).
+        # Reuse the current window's metadata intra-window; only re-resolve
+        # Gamma at rollover (CLOB is still hit every tick for prices).
         if self.current_window is not None and now < self.current_window.close_ts:
             window = self.current_window
         else:
@@ -64,16 +59,6 @@ class BotState:
             if self.current_window is None or window.slug != self.current_window.slug:
                 await self._roll_window(window)
 
-        # CLOB order book only -- no Gamma price fallback. Full depth (not
-        # just top-of-book) so the engine can price fills realistically
-        # against actual available size instead of assuming unlimited
-        # depth at the best quote. Fetched concurrently (not one-after-
-        # the-other) so a stop/flip decision isn't waiting on two
-        # sequential round-trips -- cuts tick latency roughly in half. Both
-        # sides are still fetched every tick since the entry check needs
-        # both mids to log up/down context and infer the window's
-        # eventual winner, even though exits only ever watch the one
-        # held side.
         up_book, down_book = await asyncio.gather(
             self.client.get_book_full(self.current_window.token_up),
             self.client.get_book_full(self.current_window.token_down),
@@ -127,18 +112,23 @@ class BotState:
     def _infer_winner(self) -> Optional[Side]:
         """Sole outcome source: whichever side's last observed CLOB midpoint
         was higher when the window rolled over -- a live-market read, not
-        Polymarket's settled resolution. See fetch_resolution() in
-        polymarket_client.py if you want real-resolution settlement instead."""
+        Polymarket's settled resolution."""
         up_mid = self._midpoint(self.last_up_bid, self.last_up_ask)
         down_mid = self._midpoint(self.last_down_bid, self.last_down_ask)
         if up_mid is None or down_mid is None:
             return None
         return Side.UP if up_mid >= down_mid else Side.DOWN
 
-    # ---- dashboard payload -------------------------------------------------
+    # ---- dashboard payload ---------------------------------------------------
 
     def snapshot(self) -> dict:
-        eng = self.engine.snapshot()
+        engs = self.engine.snapshot()
+        total_balance = round(sum(e["balance"] for e in engs), 2)
+        total_pnl = round(sum(e["total_pnl"] for e in engs), 2)
+        total_unrealized = round(sum(e["unrealized_pnl"] for e in engs), 2)
+        total_wins = sum(e["total_wins"] for e in engs)
+        total_losses = sum(e["total_losses"] for e in engs)
+
         return {
             "status": self.status,
             "error": self.error,
@@ -147,6 +137,7 @@ class BotState:
                 "slug": self.current_window.slug,
                 "open_ts": self.current_window.open_ts,
                 "close_ts": self.current_window.close_ts,
+                "seconds_to_close": round(self.current_window.close_ts - time.time(), 1),
             },
             "book": {
                 "up_bid": self.last_up_bid, "up_ask": self.last_up_ask,
@@ -160,13 +151,17 @@ class BotState:
                 {"ts": p.ts, "up": p.up, "down": p.down}
                 for p in list(self.price_history)[-120:]
             ],
-            "pnl_total": round(eng["realized_pnl"] + eng["unrealized_pnl"], 2),
-            "demo_capital": {
-                "balance": eng["balance"],
-                "starting_capital": eng["starting_capital"],
-                "halted": eng["halted"],
+            "totals": {
+                "balance": total_balance,
+                "starting_capital": round(config.STARTING_CAPITAL, 2),
+                "total_pnl": total_pnl,
+                "unrealized_pnl": total_unrealized,
+                "wins": total_wins,
+                "losses": total_losses,
+                "win_rate": round(100 * total_wins / (total_wins + total_losses), 1)
+                if (total_wins + total_losses) else None,
             },
-            "engine": eng,
+            "engines": engs,
             "log": [
                 {
                     "ts": e.ts, "engine": e.engine, "window": e.window_slug,
@@ -174,6 +169,6 @@ class BotState:
                     "shares": e.shares, "pnl": e.pnl,
                     "balance_after": e.balance_after, "note": e.note,
                 }
-                for e in reversed(self.broker.log[-100:])
+                for e in reversed(self.broker.log[-200:])
             ],
         }
