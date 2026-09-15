@@ -165,8 +165,8 @@ class Engine:
                 f"Kelly {self.current_shares:.0f}sh @ {self.spec.entry_price:.2f} (edge "
                 f"{config.EDGE_ESTIMATE:.0%}, kelly={config.KELLY_FRACTION:.0%}). "
                 f"resting limits on BOTH sides -- first fill wins, other cancelled. "
-                f"No SL, TP {config.TP_PRICE} -> $1.00. "
-                f"Skip state: {self.skip_remaining}/{self.spec.skip_windows}."
+                f"No SL, TP sell at {self.spec.tp_price:.2f}. "
+                f"Skip: {self.skip_remaining}/{self.spec.skip_windows}."
             ))
         else:
             sl = self.spec.sl_price if self.spec.sl_price is not None else config.SL_PRICE_TAKER
@@ -174,7 +174,7 @@ class Engine:
                 f"Kelly {self.current_shares:.0f}sh @ {self.spec.entry_price:.2f} (edge "
                 f"{config.EDGE_ESTIMATE:.0%}, kelly={config.KELLY_FRACTION:.0%}). "
                 f"taker buy when mid reaches {self.spec.entry_price:.2f} -- SL {sl:.2f}, "
-                f"TP {config.TP_PRICE} -> $1.00. No skip."
+                f"TP {self.spec.tp_price:.2f}. No skip."
             ))
 
     # ---- per-tick drive ----------------------------------------------------
@@ -239,8 +239,8 @@ class Engine:
                 self._fill_limit(Side.DOWN, now)
         else:
             mark = self._mid_for(self.s.position.side)
-            if mark is not None and mark >= config.TP_PRICE:
-                self._tp_redeem(now)
+            if mark is not None and mark >= self.spec.tp_price:
+                self._tp_sell(now)
 
     def _fill_limit(self, side: Side, now: float):
         shares = self.current_shares
@@ -256,7 +256,7 @@ class Engine:
         self.total_entries += 1
         self._log("ENTRY_FILL", side=side.value, price=round(price, 3), shares=shares, fee=0.0, note=(
             f"limit buy filled: {side.value} @ {price:.3f} ({shares:.0f}sh, cost ${cost:.2f}) -- "
-            f"other side order cancelled. No SL, TP {config.TP_PRICE} -> $1.00."))
+            f"other side order cancelled. TP sell at {self.spec.tp_price:.2f}."))
 
     # ---- TAKER engines -------------------------------------------------------
 
@@ -307,7 +307,7 @@ class Engine:
                   fee=round(fee, 4), note=(
             f"taker entry: {side.value} mid reached {self.spec.entry_price:.2f} -> "
             f"{shares:.0f}sh @ {fill:.4f} (VWAP ask, fee ${fee:.4f}). "
-            f"SL {sl:.2f}, TP {config.TP_PRICE} -> $1.00."))
+            f"SL {sl:.2f}, TP {self.spec.tp_price:.2f} -> $1.00."))
 
     def _sl_sell(self, now: float):
         pos = self.s.position
@@ -335,6 +335,35 @@ class Engine:
 
     # ---- TP / settlement -----------------------------------------------------
 
+    def _tp_sell(self, now: float):
+        """Take-profit sell: sell at bid depth when position side's mid >= tp_price.
+        Used by LIMIT engines (E1-E5) with tp_price=0.70."""
+        pos = self.s.position
+        bid = self._bid_for(pos.side)
+        levels = self._bid_levels_for(pos.side)
+        fill = self._realistic_fill_price(levels, pos.shares, bid)
+        if fill is None:
+            return
+        fee = self.broker.taker_fee_amount(pos.shares, fill)
+        proceeds = pos.shares * fill - fee
+        pnl = proceeds - pos.cost
+        self.cap.balance += proceeds
+        pos.tp_hit = True
+        self.total_tp_hits += 1
+        self.total_wins += 1
+        self.last_window_pnl = pnl
+        self.total_pnl += pnl
+        self.s.done_for_window = True
+        if self.spec.skip_windows > 0:
+            self.skip_remaining = self.spec.skip_windows
+            self._log("SKIP_ARMED", note=f"skip armed: {self.spec.skip_windows} windows after this win")
+        self._record_equity()
+        self._log("TP_HIT", side=pos.side.value, price=round(fill, 4), shares=pos.shares,
+                  fee=round(fee, 4), pnl=round(pnl, 2), note=(
+            f"TP sell: {pos.side.value} mid >= {self.spec.tp_price:.2f} -> sold {pos.shares:.0f}sh @ "
+            f"{fill:.4f} (bid depth, fee ${fee:.4f}). PnL ${pnl:.2f}."))
+        self.s.position = None
+
     def _tp_redeem(self, now: float):
         pos = self.s.position
         proceeds = pos.shares * 1.0
@@ -352,7 +381,7 @@ class Engine:
         self._record_equity()
         self._log("TP_HIT", side=pos.side.value, price=1.0, shares=pos.shares,
                   pnl=round(pnl, 2), note=(
-            f"TP {config.TP_PRICE} -> redeemed {pos.shares:.0f}sh at $1.00/share, fee-free. "
+            f"TP {self.spec.tp_price:.2f} -> redeemed {pos.shares:.0f}sh at $1.00/share, fee-free. "
             f"PnL ${pnl:.2f}."))
         self.s.position = None
 
@@ -466,6 +495,7 @@ class Engine:
             "engine_id": self.spec.engine_id, "kind": self.spec.kind,
             "entry_price": self.spec.entry_price, "sl_price": sl,
             "skip_windows": self.spec.skip_windows,
+            "tp_price": self.spec.tp_price,
             "kelly_shares": self.current_shares,
             "kelly_fraction": round(kelly_f, 4),
             "edge": config.EDGE_ESTIMATE,

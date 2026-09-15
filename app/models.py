@@ -20,6 +20,7 @@ class EngineSpec:
     kind: str               # "LIMIT" (resting buy both sides) or "TAKER" (aggressive on trigger)
     entry_price: float      # limit price for LIMIT engines / trigger price for TAKER engines
     sl_price: Optional[float] = None   # TAKER engines only
+    tp_price: float = 0.99   # LIMIT: sell at this price; TAKER: CTF redeem at $1.00 when mid >= this
     skip_windows: int = 0   # LIMIT engines only: windows to skip after a win
     base_shares: float = 100.0
     starting_capital: float = 500.0

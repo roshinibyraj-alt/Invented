@@ -196,6 +196,7 @@ function renderEngines(s){
       <div class="e-body">
         <div>kelly <b>${mono(e.kelly_shares)}sh</b></div>
         <div>SL <b>${e.sl_price==null?'none':mono(e.sl_price)}</b></div>
+        <div>TP <b>${mono(e.tp_price)}</b></div>
         <div>balance <b>${usd(e.balance)}</b></div>
         <div>uPnL <b class="${e.unrealized_pnl>=0?'':'neg'}">${usd(e.unrealized_pnl)}</b></div>
         <div>wins <b>${e.total_wins}</b></div>
