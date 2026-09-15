@@ -166,7 +166,7 @@ class Engine:
                 f"{config.EDGE_ESTIMATE:.0%}, kelly={config.KELLY_FRACTION:.0%}). "
                 f"resting limits on BOTH sides -- first fill wins, other cancelled. "
                 f"No SL, TP sell at {self.spec.tp_price:.2f}. "
-                f"Skip: {self.skip_remaining}/{self.spec.skip_windows}."
+                f"no skip, trades every window."
             ))
         else:
             sl = self.spec.sl_price if self.spec.sl_price is not None else config.SL_PRICE_TAKER

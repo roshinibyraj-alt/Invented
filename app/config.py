@@ -49,11 +49,11 @@ ENGINE_CAPITAL = 500.0
 STARTING_CAPITAL = ENGINE_CAPITAL * 9
 
 ENGINE_SPECS = [
-    EngineSpec(engine_id=1, kind="LIMIT", entry_price=0.10, tp_price=0.70, skip_windows=5),
-    EngineSpec(engine_id=2, kind="LIMIT", entry_price=0.20, tp_price=0.70, skip_windows=4),
-    EngineSpec(engine_id=3, kind="LIMIT", entry_price=0.30, tp_price=0.70, skip_windows=3),
-    EngineSpec(engine_id=4, kind="LIMIT", entry_price=0.40, tp_price=0.70, skip_windows=2),
-    EngineSpec(engine_id=5, kind="LIMIT", entry_price=0.50, tp_price=0.70, skip_windows=1),
+    EngineSpec(engine_id=1, kind="LIMIT", entry_price=0.10, tp_price=0.70),
+    EngineSpec(engine_id=2, kind="LIMIT", entry_price=0.20, tp_price=0.70),
+    EngineSpec(engine_id=3, kind="LIMIT", entry_price=0.30, tp_price=0.70),
+    EngineSpec(engine_id=4, kind="LIMIT", entry_price=0.40, tp_price=0.70),
+    EngineSpec(engine_id=5, kind="LIMIT", entry_price=0.50, tp_price=0.70),
     EngineSpec(engine_id=6, kind="TAKER", entry_price=0.60, sl_price=0.30),
     EngineSpec(engine_id=7, kind="TAKER", entry_price=0.70, sl_price=0.30),
     EngineSpec(engine_id=8, kind="TAKER", entry_price=0.80, sl_price=0.30),
