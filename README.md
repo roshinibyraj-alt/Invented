@@ -25,9 +25,21 @@ keys — paper mode only.
 ### Engines 6-9 — taker triggers (0.60 / 0.70 / 0.80 / 0.90)
 - Whichever side's mid first reaches the trigger is bought immediately as
   a taker, priced against real ask depth (VWAP fill + taker fee).
-- No stop loss on any engine. TP at 0.99 redeems at $1.00/share, fee-free.
-  Open at close -> settle at inferred winner. No skip logic, no re-entry
-  after exit.
+- Stop loss at 0.30 on all taker engines. TP at 0.99 redeems at
+  $1.00/share, fee-free. Open at close -> settle at inferred winner. No
+  skip logic, no re-entry after exit.
+
+## Sizing (Kelly)
+
+Every engine sizes its shares with fractional Kelly, recomputed at each
+window open from its own bankroll:
+
+- Edge assumed: `EDGE_ESTIMATE` (default 5% above the implied price).
+- Fraction applied: `KELLY_FRACTION` (default half-Kelly = 0.5).
+- Hard cap: `MAX_BET_PCT` (default 50% of the engine bankroll) and a
+  `MIN_SHARES` floor (default 10).
+- LIMIT (no SL): f* = edge / (1 - price). TAKER (SL = 0.30):
+  f* = p_est - q/b with b = (1-price)/(price-0.30).
 
 ## Shared rules
 - Flat 100 shares per engine, no martingale, isolated $500 bankroll each.

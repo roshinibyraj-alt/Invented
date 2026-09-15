@@ -194,12 +194,13 @@ function renderEngines(s){
         <div class="e-status${statusCls}">${e.status.replace(/_/g,' ')}</div>
       </div>
       <div class="e-body">
-        <div>entry <b>${mono(e.entry_price)}</b></div>
+        <div>kelly <b>${mono(e.kelly_shares)}sh</b></div>
         <div>SL <b>${e.sl_price==null?'none':mono(e.sl_price)}</b></div>
         <div>balance <b>${usd(e.balance)}</b></div>
         <div>uPnL <b class="${e.unrealized_pnl>=0?'':'neg'}">${usd(e.unrealized_pnl)}</b></div>
         <div>wins <b>${e.total_wins}</b></div>
         <div>losses <b>${e.total_losses}</b></div>
+        <div>edge <b>${(e.edge*100).toFixed(0)}%</b> / frac <b>${(e.kelly_fraction*100).toFixed(0)}%</b></div>
         <div>W/L rate <b>${winRate}</b></div>
         <div>last PnL <b class="${e.last_window_pnl>=0?'':'neg'}">${usd(e.last_window_pnl)}</b></div>
       </div>
