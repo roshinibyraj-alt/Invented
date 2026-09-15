@@ -10,9 +10,11 @@ capital ($500/engine). Paper mode only.
   No stop loss. TP at 0.99 -> $1.00/share, fee-free. Skip N windows
   after a win (5/4/3/2/1); would-have-win during skip resets counter.
 
-  Engines 6-9 (TAKER): first side whose mid reaches 0.60/0.70/0.80/0.90
-  is bought immediately as taker (real ask depth + fee). Stop loss at
-  0.30 for all taker engines. TP at 0.99 -> $1.00/share, fee-free.
+  Engines 6-9 (TAKER): sleep for the first 120s after the window opens
+  (TAKER_WAKEUP_SECONDS), then whichever side's mid reaches
+  0.60/0.70/0.80/0.90 is bought immediately as taker (real ask depth +
+  fee). Stop loss at 0.30 for all taker engines. TP at 0.99 ->
+  $1.00/share, fee-free.
 
 Sizing: Kelly-optimal shares per engine, computed fresh at each window
 open from the engine's current balance, entry price, a configurable
@@ -34,6 +36,11 @@ SLUG_PREFIX = "btc-updown-5m-"
 WINDOW_SECONDS = 300
 
 POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "0.5"))
+
+# TAKER engines 6-9 wake up this many seconds after window open before
+# they start watching for their trigger price (sleep through the early
+# volatile minutes, then trade the latter half of the window).
+TAKER_WAKEUP_SECONDS = float(os.getenv("TAKER_WAKEUP_SECONDS", "120"))
 
 # ---- TP ---------------------------------------------------------------
 TP_PRICE = 0.99                 # mid >= this -> redeem at $1.00/share, fee-free

@@ -261,6 +261,14 @@ class Engine:
     # ---- TAKER engines -------------------------------------------------------
 
     def _tick_taker(self, now: float):
+        # Sleep for the first TAKER_WAKEUP_SECONDS of the window -- no
+        # trigger watching until the wakeup moment.
+        if self.s.window is not None and self.s.position is None:
+            elapsed = now - self.s.window.open_ts
+            if elapsed < config.TAKER_WAKEUP_SECONDS:
+                if not self.s.trigger_fired and not self.s.done_for_window:
+                    self.s.done_for_window = False
+                return
         if self.s.position is None:
             up_mid = self._mid_for(Side.UP)
             down_mid = self._mid_for(Side.DOWN)
