@@ -32,7 +32,13 @@ ENTRY_RECOVERY = 0.50           # flagged side must reach this mid to trigger en
 SL_PRICE = 0.10                 # stop loss: mid <= this -> taker sell
 TP_PRICE = 0.99                 # take profit: mid >= this -> redeem at $1.00
 
-ORDER_SHARES = 500.0            # flat share count per entry
+# Tiered sizing: shares depend on how deep the dip went.
+DIP_TIERS = [
+    (0.40, 100),   # dipped below 0.40 -> buy 100 shares on recovery
+    (0.30, 200),   # dipped below 0.30 -> buy 200 shares
+    (0.20, 400),   # dipped below 0.20 -> buy 400 shares
+    (0.10, 800),   # dipped below 0.10 -> buy 800 shares
+]
 STARTING_CAPITAL = 4500.0
 
 # ---- Trading fees -----------------------------------------------------

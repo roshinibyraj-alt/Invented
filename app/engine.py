@@ -11,7 +11,7 @@ Strategy
 
 3. When the flagged side recovers to ENTRY_RECOVERY (0.50), buy.
 4. After flagging, wait for the dipped side's mid to recover to
-   ENTRY_RECOVERY (0.50).  The instant mid >= 0.50, buy ORDER_SHARES
+   ENTRY_RECOVERY (0.50).  The instant mid >= 0.50, buy tiered shares
    (500) at the current ask as a taker (immediate fill, no limit wait).
 5. Manage the position: SL at 0.10 (taker sell at bid depth, taker fee)
    or TP at 0.99 (redeem $1.00/share, fee-free).  If neither is hit
@@ -48,6 +48,7 @@ class Engine:
 
         # Flag
         self.dipped_side: Optional[Side] = None
+        self.dip_min_price: float = 1.0
         self.dipped_logged: bool = False
 
         # Lifetime stats
@@ -78,12 +79,12 @@ class Engine:
         self.done_for_window = False
         self.last_tick = window.open_ts
         self.dipped_side = None
+        self.dipped_min_price = 1.0
         self.dipped_logged = False
-        self._log("WINDOW_OPEN", shares=config.ORDER_SHARES, note=(
-            f"watching both sides -- whichever dips below {config.DIP_THRESHOLD:.2f}, "
-            f"then recovers to {config.ENTRY_RECOVERY:.2f} "
-            f"-> buy {config.ORDER_SHARES:.0f}sh taker. SL {config.SL_PRICE:.2f} / TP {config.TP_PRICE:.2f}. "
-            f"balance ${self.balance:.2f}"
+        self._log("WINDOW_OPEN", shares=100, note=(
+            f"watching both sides -- dip below {config.DIP_THRESHOLD:.2f} then recover to "
+            f"{config.ENTRY_RECOVERY:.2f} -> tiered buy (100/200/400/800sh by depth). "
+            f"SL {config.SL_PRICE:.2f} / TP {config.TP_PRICE:.2f}. balance ${self.balance:.2f}"
         ))
 
     # ---- dip timer + entry -------------------------------------------------
@@ -93,24 +94,39 @@ class Engine:
         if self.dipped_side is None:
             if up_mid is not None and up_mid < config.DIP_THRESHOLD:
                 self.dipped_side = Side.UP
+                self.dipped_min_price = up_mid
                 self._log("SIDE_DIPPED", side="UP", price=round(up_mid, 4), note=(
                     f"UP dipped below {config.DIP_THRESHOLD:.2f} (mid={up_mid:.4f}) -- "
-                    f"waiting for recovery to {config.ENTRY_RECOVERY:.2f}"))
+                    f"tracking depth, waiting for recovery to {config.ENTRY_RECOVERY:.2f}"))
             elif down_mid is not None and down_mid < config.DIP_THRESHOLD:
                 self.dipped_side = Side.DOWN
+                self.dipped_min_price = down_mid
                 self._log("SIDE_DIPPED", side="DOWN", price=round(down_mid, 4), note=(
                     f"DOWN dipped below {config.DIP_THRESHOLD:.2f} (mid={down_mid:.4f}) -- "
-                    f"waiting for recovery to {config.ENTRY_RECOVERY:.2f}"))
+                    f"tracking depth, waiting for recovery to {config.ENTRY_RECOVERY:.2f}"))
             return
 
-        # Side flagged — buy on recovery to ENTRY_RECOVERY
+        # Track deepest dip
         mid = up_mid if self.dipped_side == Side.UP else down_mid
+        if mid is not None and mid < self.dipped_min_price:
+            self.dipped_min_price = mid
+
+        # Buy on recovery to ENTRY_RECOVERY
         if mid is not None and mid >= config.ENTRY_RECOVERY:
             self._buy(now, mid)
 
+    @staticmethod
+    def _tiered_shares(min_price: float) -> float:
+        """Return share count based on how deep the dip went."""
+        shares = config.DIP_TIERS[0][1]  # default: shallowest tier (100)
+        for threshold, sh in config.DIP_TIERS:
+            if min_price < threshold:
+                shares = sh
+        return shares
+
     def _buy(self, now, mid):
         side = self.dipped_side
-        shares = config.ORDER_SHARES
+        shares = self._tiered_shares(self.dipped_min_price)
         ask = self._ask_for(side)
         levels = self._ask_levels_for(side)
         fill = self._realistic_fill_price(levels, shares, ask)
@@ -130,8 +146,8 @@ class Engine:
         self._log("ENTRY_FILL", side=side.value, price=round(fill, 4), shares=shares,
                   fee=round(fee, 4), note=(
             f"taker buy: {side.value} mid recovered to {config.ENTRY_RECOVERY:.2f} "
-            f"-> {shares:.0f}sh @ {fill:.4f} (ask depth, fee ${fee:.4f}). "
-            f"SL {config.SL_PRICE:.2f} / TP {config.TP_PRICE:.2f}."))
+            f"-> {shares:.0f}sh @ {fill:.4f} (dip min={self.dipped_min_price:.4f}, "
+            f"ask depth, fee ${fee:.4f}). SL {config.SL_PRICE:.2f} / TP {config.TP_PRICE:.2f}."))
 
     # ---- position management -----------------------------------------------
 
@@ -300,6 +316,8 @@ class Engine:
             "position": position,
             "unrealized_pnl": position["unrealized_pnl"] if position else 0.0,
             "dipped_side": self.dipped_side.value if self.dipped_side else None,
+            "dip_min_price": round(self.dipped_min_price, 4) if self.dipped_side else None,
+            "dip_shares": self._tiered_shares(self.dipped_min_price) if self.dipped_side else 0,
 
             "total_entries": self.total_entries,
             "total_tp_hits": self.total_tp_hits,
@@ -317,6 +335,6 @@ class Engine:
                 "entry_recovery": config.ENTRY_RECOVERY,
                 "sl_price": config.SL_PRICE,
                 "tp_price": config.TP_PRICE,
-                "order_shares": config.ORDER_SHARES,
+                "order_shares": 100,
             },
         }

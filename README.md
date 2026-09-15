@@ -7,8 +7,10 @@ engine. Demo capital: $4,500.
 
 1. From window open, watch both sides' mid prices.
 2. Whichever side's mid first dips below 0.45 is flagged as "dipped".
-3. When the dipped side's mid recovers to 0.50, buy 500 shares as a
-   taker at the current ask (immediate fill, no limit waiting).
+   The minimum price reached during the dip is tracked.
+3. When the dipped side's mid recovers to 0.50, buy shares based on
+   dip depth: below 0.40 → 100sh, below 0.30 → 200sh, below 0.20 →
+   400sh, below 0.10 → 800sh. Taker fill at current ask.
 5. Manage the position: SL at 0.10 (taker sell at bid depth, taker
    fee) or TP at 0.99 (redeem $1.00/share, fee-free). If neither is
    hit before the window closes, settle by the inferred CLOB winner.

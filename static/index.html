@@ -173,7 +173,7 @@ function renderDip(s){
 
   let badge='';
   if(e.dipped_side){
-    badge=`<div class="status-badge dip">DIPPED: ${e.dipped_side} · waiting recovery to ${(def.entry_recovery??0.5).toFixed(2)}</div>`;
+    badge=`<div class="status-badge dip">DIPPED: ${e.dipped_side} · min ${mono(e.dip_min_price)} · ${e.dip_shares}sh on recovery</div>`;
   }
   if(e.status==='in_position'){
     badge=`<div class="status-badge pos">IN POSITION</div>`;
