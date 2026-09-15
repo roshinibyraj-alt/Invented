@@ -13,10 +13,9 @@ Strategy
 4. After flagging, wait for the dipped side's mid to recover to
    ENTRY_RECOVERY (0.50).  The instant mid >= 0.50, buy tiered shares
    (500) at the current ask as a taker (immediate fill, no limit wait).
-5. Manage the position: SL at 0.10 (taker sell at bid depth, taker fee)
-   or TP at 0.99 (redeem $1.00/share, fee-free).  If neither is hit
+5. Manage the position: TP at 0.99 (redeem $1.00/share, fee-free).  If neither is hit
    before the window closes, settle by the inferred CLOB winner.
-6. Max one trade per window.  No re-entry after SL or TP.
+6. Max one trade per window.
 """
 import time
 from typing import Optional
@@ -84,7 +83,7 @@ class Engine:
         self._log("WINDOW_OPEN", shares=100, note=(
             f"watching both sides -- dip below {config.DIP_THRESHOLD:.2f} then recover to "
             f"{config.ENTRY_RECOVERY:.2f} -> tiered buy (100/200/400/800sh by depth). "
-            f"SL {config.SL_PRICE:.2f} / TP {config.TP_PRICE:.2f}. balance ${self.balance:.2f}"
+            f"No SL. TP {config.TP_PRICE:.2f}. balance ${self.balance:.2f}"
         ))
 
     # ---- dip timer + entry -------------------------------------------------
@@ -147,7 +146,7 @@ class Engine:
                   fee=round(fee, 4), note=(
             f"taker buy: {side.value} mid recovered to {config.ENTRY_RECOVERY:.2f} "
             f"-> {shares:.0f}sh @ {fill:.4f} (dip min={self.dipped_min_price:.4f}, "
-            f"ask depth, fee ${fee:.4f}). SL {config.SL_PRICE:.2f} / TP {config.TP_PRICE:.2f}."))
+            f"ask depth, fee ${fee:.4f}). No SL, TP {config.TP_PRICE:.2f}."))
 
     # ---- position management -----------------------------------------------
 
@@ -157,30 +156,6 @@ class Engine:
         side = pos["side"]
         mark = _midpoint(up_bid, up_ask) if side == Side.UP else _midpoint(down_bid, down_ask)
         if mark is None:
-            return
-
-        # SL check
-        if mark <= config.SL_PRICE:
-            bid = up_bid if side == Side.UP else down_bid
-            levels = up_bid_levels if side == Side.UP else down_bid_levels
-            fill = self._realistic_fill_price(levels, pos["shares"], bid)
-            if fill is None:
-                return
-            fee = self.broker.taker_fee_amount(pos["shares"], fill)
-            proceeds = pos["shares"] * fill - fee
-            pnl = proceeds - pos["cost"]
-            self.balance += proceeds
-            self.total_sl_hits += 1
-            self.total_losses += 1
-            self.last_window_pnl = pnl
-            self.total_pnl += pnl
-            self.done_for_window = True
-            self._record_equity()
-            self._log("SL_HIT", side=side.value, price=round(fill, 4), shares=pos["shares"],
-                      fee=round(fee, 4), pnl=round(pnl, 2), note=(
-                f"SL {config.SL_PRICE:.2f}: sold {pos['shares']:.0f}sh @ {fill:.4f} "
-                f"(bid depth, fee ${fee:.4f}). PnL ${pnl:.2f}."))
-            self.position = None
             return
 
         # TP check
@@ -333,7 +308,6 @@ class Engine:
                 "dip_threshold": config.DIP_THRESHOLD,
                 "dip_threshold": config.DIP_THRESHOLD,
                 "entry_recovery": config.ENTRY_RECOVERY,
-                "sl_price": config.SL_PRICE,
                 "tp_price": config.TP_PRICE,
                 "order_shares": 100,
             },

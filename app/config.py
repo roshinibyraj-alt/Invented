@@ -8,7 +8,7 @@ Strategy: dip-recovery
   seconds straight, that side is flagged as "dipped". The bot then
   waits for the flagged side's mid to recover to 0.50 and buys 500
   shares as a taker at the current ask (no limit waiting -- immediate
-  fill). SL at 0.10 (taker sell). TP at 0.99 (redeem $1.00/share,
+  fill). No stop loss. TP at 0.99 (redeem $1.00/share,
   fee-free). Max one trade per window.
 
 Demo capital: $4,500. CLOB-only pricing, no fallback.
@@ -29,7 +29,6 @@ POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "0.5"))
 DIP_THRESHOLD = 0.45            # price must be below this to count as "deep"
 # no consecutive timer — just watch which side dips below DIP_THRESHOLD
 ENTRY_RECOVERY = 0.50           # flagged side must reach this mid to trigger entry
-SL_PRICE = 0.10                 # stop loss: mid <= this -> taker sell
 TP_PRICE = 0.99                 # take profit: mid >= this -> redeem at $1.00
 
 # Tiered sizing: shares depend on how deep the dip went.
