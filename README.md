@@ -1,55 +1,81 @@
 # Momentum-continuation entry, tightening trail, single trade — BTC 5m bot
 
 Paper-trading bot for Polymarket's `btc-updown-5m-*` markets. Runs a
-single strategy: 10 seconds after a window opens, buy whichever side
-won the *previous* window — regardless of whether it's currently cheap
-or expensive — as long as it's within a defined price zone, then
-manage the exit with a continuous trailing stop that arms after a
-delay and tightens once the position gets deep in the money. At most
-one trade per window — no re-entry after a stop-out.
+single strategy: 10 seconds after a window opens, lock onto whichever
+side won the *previous* window — regardless of whether it's currently
+cheap or expensive — and buy it either right away or after waiting for
+it to dip to 0.50, as long as it's within a defined price zone at fire
+time. Then manage the exit with a continuous trailing stop that arms
+after a delay and tightens once the position gets deep in the money.
+At most one trade per window — no re-entry after a stop-out.
 
 ## Strategy
 
-1. **Entry**: wait **10s** after the window opens. The entry side is
-   whichever side **won the previous window**, by last observed price
-   (see `_infer_winner()` in `app/state.py`) — **not** whichever side
-   is cheaper right now. It's bought regardless of whether that side
-   happens to be cheap or expensive at the 10s mark. The only price
-   condition left is that the chosen side's mid must be inside the
-   entry zone **0.20–0.80**; if it's outside the zone at that moment,
-   no trade is taken this window. If there's no previous-window result
-   yet — the very first window after startup, or the winner couldn't
-   be inferred (missing price data at rollover) — the window is
-   skipped entirely, since there's nothing to follow. This is a single
-   check at t=10s, not a rearmed watch.
+1. **Entry**: wait **10s** after the window opens, then **lock in** the
+   entry side as whichever side **won the previous window**, by last
+   observed price (see `_infer_winner()` in `app/state.py`) — **not**
+   whichever side is cheaper right now. If there's no previous-window
+   result yet — the very first window after startup, or the winner
+   couldn't be inferred (missing price data at rollover) — the window
+   is skipped entirely right there, since there's nothing to follow;
+   no side gets locked in and nothing is watched.
+
+   Once a side is locked in, when it actually fires depends on its
+   price at that moment:
+   - if it's already **at or below 0.50**, the entry zone
+     (**0.20–0.80**) is checked immediately and the trade fires (or is
+     skipped if outside the zone) right there, same as before.
+   - if it's **above 0.50**, the trade does **not** fire yet. The bot
+     keeps watching that side every tick — no deadline — until it
+     falls to or below 0.50. At that point the entry zone is checked
+     and the trade fires (or is skipped if the zone check fails at
+     that exact moment). If it never dips to 0.50 before the window
+     closes, **no trade is taken that window at all**.
+
+   Either way, the side is bought regardless of whether it's cheap or
+   expensive in absolute terms — the 0.50 rule only decides *when* to
+   fire, the entry zone is what decides *whether* to fire.
 2. **Exit**: once filled, every tick checks that side's mid against a
-   take-profit level and a trailing stop. **The trailing stop is
-   inactive for the first 2 minutes after entry** — during that
-   window only TP can close the position; the high-water mark keeps
-   tracking regardless, so once the stop arms it starts from wherever
-   price has already gotten to, not from scratch.
+   take-profit level, a trailing stop, and a hard-stop override.
    - **Take-profit (0.99)**: live immediately from entry, treated as a
      certain win and **redeemed**, not sold — credited at a flat
      **$1.00/share, fee-free** (a CTF resolution redemption, not an
      orderbook trade), instead of taker-selling at ~0.99 and losing a
      sliver of edge to fee/slippage.
-   - **Trailing stop**: arms **120 seconds** after entry. Once armed,
-     recomputed every tick as `high_water_mark − trail_distance`,
-     rounded to the cent. It only ever moves up, since it's driven off
-     the position's monotonic high-water mark (best mid seen since
-     entry), never the raw current price:
+   - **Trailing stop**: inactive until **3 minutes after the window
+     opened** (not 3 minutes after entry — if entry happens later than
+     the usual 10s mark, the stop still arms at the same
+     window-relative moment). Before it arms, only TP can close the
+     position; the high-water mark keeps tracking the whole time
+     regardless, so once it arms it starts from wherever price has
+     already gotten to, not from scratch. Once armed, recomputed every
+     tick as `high_water_mark − trail_distance`, rounded to the cent.
+     It only ever moves up, since it's driven off the position's
+     monotonic high-water mark (best mid seen since entry), never the
+     raw current price:
      - trail distance is **0.20** while the high-water mark is at or
        below 0.85
      - once the high-water mark climbs **above 0.85**, the trail
        narrows to **0.10** — tightening the stop as the position gets
        deep in the money
+   - **Hard-stop override**: independent of the 3-minute trailing-arm
+     delay above, the instant the position's high-water mark reaches
+     **0.90**, the trailing stop is **permanently deactivated** for
+     that position and replaced with a **fixed stop-loss at 0.60** —
+     much wider than where the tightened trail would sit (e.g. a 0.95
+     high-water mark would trail-stop at 0.85, but once the hard stop
+     takes over it's 0.60 instead). This deliberately gives a
+     deep-in-the-money position room to wobble near resolution instead
+     of getting stopped out by a routine pullback, and it does **not**
+     revert even if price later falls back under 0.90.
 
-     A stop exit is a real taker sell, priced by walking real bid
-     depth — unlike TP, it isn't a guaranteed-resolution redemption.
+     A stop exit (trailing or hard) is a real taker sell, priced by
+     walking real bid depth — unlike TP, it isn't a guaranteed-
+     resolution redemption.
    - **A stop-out ends the window.** There's no flip into the opposite
      side and no re-entry — at most one trade per window.
 
-   If the window closes before either TP or the stop is reached, the
+   If the window closes before either TP or a stop is reached, the
    position is force-closed at whatever the market will pay (also a
    real taker sell).
 3. **Sizing**: flat. Every entry is exactly `BASE_ORDER_SHARES`
@@ -73,10 +99,12 @@ Dashboard at http://localhost:8000
 
 ## Config knobs (`app/config.py`)
 
-- `ENTRY_WAIT_SECONDS` (10), `ENTRY_ZONE_LOW` / `ENTRY_ZONE_HIGH` (0.20 / 0.80), `TP_PRICE` (0.99)
-- `TRAIL_START_DELAY_SECONDS` (120) — trailing stop is inactive until this long after entry; TP is live the whole time
+- `ENTRY_WAIT_SECONDS` (10), `ENTRY_ZONE_LOW` / `ENTRY_ZONE_HIGH` (0.20 / 0.80), `ENTRY_DIP_THRESHOLD` (0.50), `TP_PRICE` (0.99)
+- `TRAIL_START_DELAY_SECONDS` (180) — trailing stop is inactive until this long after **window open** (not entry); TP is live the whole time
 - `TRAIL_DISTANCE` (0.20), `TRAIL_DISTANCE_TIGHT` (0.10), `TRAIL_TIGHTEN_PRICE` (0.85) — trail
   narrows from 0.20 to 0.10 once the position's high-water mark climbs above 0.85
+- `HARD_STOP_TRIGGER_PRICE` (0.90), `HARD_STOP_PRICE` (0.60) — once the high-water mark reaches
+  the trigger, trailing is permanently replaced by this fixed stop, independent of the arm delay
 - `BASE_ORDER_SHARES` (100) — flat size, no martingale
 - `STARTING_CAPITAL`, taker fee constants (entry, stop, and forced-close are taker fills; TP is a fee-free redemption at $1.00, not a trade)
 
@@ -90,11 +118,18 @@ Dashboard at http://localhost:8000
   high-water mark, not the current price, so a spike to 0.90 followed
   by a pullback to 0.85 does **not** trigger a stop by itself — only a
   further drop through the (possibly now-tightened) stop level would.
-- During the first 120s after entry the stop cannot fire at all, even
-  if price craters — only TP is live. The high-water mark still
-  updates during that window, so if price runs up and pulls back
-  before the 120s is over, the stop (once armed) reflects the peak
-  it already saw, not the price at the moment of arming.
+- During the first 3 minutes **after the window opens**, the trailing
+  stop cannot fire at all, even if price craters — only TP is live.
+  The high-water mark still updates during that window, so if price
+  runs up and pulls back before the delay is over, the stop (once
+  armed) reflects the peak it already saw, not the price at the
+  moment of arming.
+- The hard-stop override is a separate mechanism from the trailing-arm
+  delay above and isn't gated by it: it can trigger in the first few
+  seconds of a position if price runs to 0.90 fast enough. Once it
+  triggers, the position no longer benefits from the tightened trail
+  at all for the rest of the window — it's protected only by the fixed
+  0.60 floor.
 - A stop-out is terminal for the window: no flip into the opposite
   side, no re-entry. At most one trade is taken per window.
 - Both the entry and the exit are modeled as **taker** fills, priced
@@ -109,9 +144,10 @@ Dashboard at http://localhost:8000
   no-liquidity signal — the position is marked down to $0 rather than
   assuming no loss. If the book fetch itself fails (`None`, not `[]`),
   that's a genuine data gap and the last known price is used instead.
-- A window where the momentum side is outside the entry zone at the
-  10s check, or where there's no prior-window result yet, is counted
-  as a no-trade window.
+- A window is counted as a no-trade window whenever it ends without a
+  fill: no prior-window result to follow, the entry zone check fails
+  (whether at the 10s check or after a dip), or the dip to 0.50 simply
+  never arrives before the window closes.
 - The previous window's winner is inferred from the **last observed
   CLOB midpoint** at rollover (`_infer_winner()` in `app/state.py`),
   not from Polymarket's actual settled resolution — see

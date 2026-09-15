@@ -7,30 +7,63 @@ window's winning side, not the cheap side), continuous trailing stop
 entry), single trade per window, TP redemption:
 
   1. Entry: from window open, wait ENTRY_WAIT_SECONDS (10s). At that
-     point, the entry side is whichever side WON the previous window
-     (by last observed price) -- NOT whichever side is cheaper right
-     now. Bought regardless of whether that side happens to be cheap
-     or expensive at the moment. The only price condition left is: the
-     chosen side's price must be inside the entry zone
-     [ENTRY_ZONE_LOW, ENTRY_ZONE_HIGH] (0.20-0.80); if it's outside the
-     zone at the 10s mark, no trade is taken this window. If there's no
+     point, the entry side is LOCKED IN as whichever side WON the
+     previous window (by last observed price) -- NOT whichever side is
+     cheaper right now -- and that choice doesn't change for the rest
+     of the window, even though firing the actual trade might be
+     delayed (see the dip-wait rule below). If there's no
      previous-window result yet (startup, or the winner couldn't be
-     inferred), the window is skipped -- there's nothing to follow.
-     This is a single check at t=10s, not a rearmed watch.
-  2. Trailing stop: continuous, not stepped, and inactive for the
-     first TRAIL_START_DELAY_SECONDS (180s) after entry -- during that
-     window only TP can close the position, the stop cannot fire (the
-     high-water mark still tracks the whole time, so the stop starts
-     from wherever price has gotten to once it activates, not from
-     scratch). Once active, every tick that the position's mid has
-     made a new high-water mark, the stop is recomputed as
-     high_water_mark - trail_distance, rounded to the cent (0.01) tick
-     size. The trail distance is TRAIL_DISTANCE (0.20) normally, but
-     narrows to TRAIL_DISTANCE_TIGHT (0.10) once the high-water mark
-     has gone above TRAIL_TIGHTEN_PRICE (0.85) -- tightening the stop
-     as the position gets deep in the money. It only ever moves up
-     (one-way ratchet) since it's driven off the monotonic high-water
-     mark. Mid <= stop -> stop hit (once active).
+     inferred), the window is skipped outright -- there's nothing to
+     follow, no side is locked in, no watching happens.
+     Once a side is locked in, the entry doesn't necessarily fire
+     immediately:
+       - if the locked side's price is already at or below
+         ENTRY_DIP_THRESHOLD (0.50), the entry zone gate
+         ([ENTRY_ZONE_LOW, ENTRY_ZONE_HIGH], 0.20-0.80) is checked
+         right away and the trade fires (or is skipped if outside the
+         zone) at that same t=10s moment, same as before.
+       - if the locked side's price is ABOVE 0.50 at t=10s, the trade
+         does NOT fire yet. Instead the bot watches that side every
+         tick, with no further deadline, until its price falls to or
+         below 0.50 -- at that point the entry zone gate is checked
+         and the trade fires (or is skipped if the zone check fails at
+         that moment). If price never dips to 0.50 before the window
+         closes, no trade is taken that window at all.
+     The side itself is bought regardless of whether it's cheap or
+     expensive in an absolute sense -- the 0.50 rule is only a wait
+     condition on when to fire, not a zone check by itself; the entry
+     zone is still the only price condition standing between "price
+     dipped to 0.50" and an actual fill.
+  2. Trailing stop: continuous, not stepped, and inactive until
+     TRAIL_START_DELAY_SECONDS (180s / 3min) after the WINDOW OPENED
+     -- not after entry. Since entry itself only ever happens at the
+     ENTRY_WAIT_SECONDS (10s) mark, this means the stop arms roughly
+     (TRAIL_START_DELAY_SECONDS - ENTRY_WAIT_SECONDS) after entry in
+     the common case, but it's the window clock that's authoritative:
+     if entry ever happens later than 10s into the window, the stop
+     still arms at the same window-relative moment, not a fixed
+     duration after that particular entry. Before it's armed, only TP
+     can close the position (the high-water mark still tracks the
+     whole time, so the stop starts from wherever price has gotten to
+     once it activates, not from scratch). Once active, every tick
+     that the position's mid has made a new high-water mark, the stop
+     is recomputed as high_water_mark - trail_distance, rounded to the
+     cent (0.01) tick size. The trail distance is TRAIL_DISTANCE (0.20)
+     normally, but narrows to TRAIL_DISTANCE_TIGHT (0.10) once the
+     high-water mark has gone above TRAIL_TIGHTEN_PRICE (0.85) --
+     tightening the stop as the position gets deep in the money. It
+     only ever moves up (one-way ratchet) since it's driven off the
+     monotonic high-water mark. Mid <= stop -> stop hit (once active).
+  2a. Hard stop override: independent of the arming delay above, the
+     instant the position's high-water mark reaches HARD_STOP_TRIGGER_PRICE
+     (0.90), the trailing stop is permanently deactivated for the rest
+     of that position and replaced with a fixed HARD_STOP_PRICE (0.60)
+     stop-loss -- much wider than where the tightened trail would sit
+     (e.g. a 0.95 high-water mark would trail-stop at 0.85, but once
+     the hard stop takes over it's 0.60 instead), deliberately giving
+     the position room to wobble near resolution instead of getting
+     stopped out by a small pullback. This does not revert even if
+     price pulls back below 0.90 afterwards.
   3. TP: TP_PRICE (0.99) hit -> REDEEMED, not sold -- credited at a
      flat $1.00/share, zero fee (CTF resolution redemption).
   4. No flips: a stop-hit closes the position and the window is done --
@@ -65,11 +98,16 @@ POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "0.5"))
 ENTRY_WAIT_SECONDS = 10.0         # wait this long after window open before checking entry
 ENTRY_ZONE_LOW = 0.20             # entry zone floor -- initial entry only
 ENTRY_ZONE_HIGH = 0.80            # entry zone ceiling -- initial entry only
+ENTRY_DIP_THRESHOLD = 0.50        # side must be at/below this to fire; if it's above at the t=10s
+                                   # check, the bot keeps watching every tick (still zone-gated) until
+                                   # it dips to/below this level before it will buy
 TP_PRICE = 0.99                   # take-profit level -- hit = redeemed at $1.00, fee-free
 TRAIL_DISTANCE = 0.20             # continuous trailing stop distance from high-water mark
 TRAIL_DISTANCE_TIGHT = 0.10       # narrowed trail distance once high-water mark > TRAIL_TIGHTEN_PRICE
 TRAIL_TIGHTEN_PRICE = 0.85        # high-water mark threshold above which the tighter trail applies
-TRAIL_START_DELAY_SECONDS = 180.0 # trailing stop is inactive until this long after entry (TP still live)
+TRAIL_START_DELAY_SECONDS = 180.0 # trailing stop is inactive until this long after WINDOW OPEN (not entry) -- TP still live
+HARD_STOP_TRIGGER_PRICE = 0.90    # high-water mark threshold that permanently swaps trailing for the hard stop
+HARD_STOP_PRICE = 0.60            # fixed stop-loss price once the hard stop is triggered -- no longer trails
 PRICE_TICK = 0.01                 # rounding granularity for the stop price
 
 BASE_ORDER_SHARES = 100.0         # flat size for every entry -- initial and every flip, no martingale

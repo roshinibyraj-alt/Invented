@@ -1,34 +1,47 @@
 """
 Trading engine -- momentum-continuation entry (follows the previous
 window's winning side, not the cheap side), continuous trailing stop
-(inactive for the first 2 minutes, then tightens above 0.85), single
-trade per window, TP redemption.
+that arms 3 minutes after window open and tightens above 0.85, a hard
+stop-loss override once deep ITM, single trade per window, TP
+redemption.
 
 See app/config.py for the full strategy write-up. Summary: 10s after
-window open, buy whichever side won the PREVIOUS window (by last
+window open, lock in whichever side won the PREVIOUS window (by last
 observed price) -- regardless of whether that side is currently cheap
-or expensive -- if (and only if) its mid is inside the 0.20-0.80 entry
-zone. If there's no prior window result yet (e.g. the very first
-window after startup, or the previous window's winner couldn't be
-inferred), the window is skipped entirely rather than guessing. From
+or expensive. If it's already at/below the 0.50 dip threshold, the
+0.20-0.80 entry zone is checked immediately and the trade fires (or is
+skipped) right there; if it's above 0.50, the bot keeps watching that
+side every tick, no deadline, until it dips to/below 0.50, at which
+point the zone check happens and the trade fires or is skipped. If
+there's no prior window result yet (e.g. the very first window after
+startup, or the previous window's winner couldn't be inferred), the
+window is skipped entirely rather than guessing -- no side is even
+locked in. From
 then on, TP is live immediately, but the trailing stop doesn't arm
-until TRAIL_START_DELAY_SECONDS (180s) after entry -- before that,
-only TP can close the position. The high-water mark keeps tracking the
-whole time regardless, so once the stop arms it starts from wherever
-price has already gotten to, not from scratch. Once armed, the stop
-sits behind the position's high-water MID -- 0.20 back normally,
-narrowing to 0.10 back once the high-water mark has gone above 0.85 --
-and only ever tightens. Mid price is what triggers every decision
-(entry zone check, TP, stop), but every actual fill is a real taker
-execution priced off real ask/bid order-book depth (see
+until TRAIL_START_DELAY_SECONDS (180s / 3min) after the WINDOW OPENED
+(not after entry) -- before that, only TP can close the position. The
+high-water mark keeps tracking the whole time regardless, so once the
+stop arms it starts from wherever price has already gotten to, not
+from scratch. Once armed, the stop sits behind the position's
+high-water MID -- 0.20 back normally, narrowing to 0.10 back once the
+high-water mark has gone above 0.85 -- and only ever tightens.
+Independent of that arming delay, the moment the high-water mark
+reaches HARD_STOP_TRIGGER_PRICE (0.90), the trailing stop is
+permanently deactivated for that position and replaced with a fixed
+HARD_STOP_PRICE (0.60) stop-loss -- much wider than the tightened
+trail would be, deliberately giving a deep-ITM position room to wobble
+without getting stopped out; this never reverts even if price falls
+back under 0.90. Mid price is what triggers every decision (entry zone
+check, TP, stop), but every actual fill is a real taker execution
+priced off real ask/bid order-book depth (see
 Engine._realistic_fill_price), so mid and fill price can differ by the
 spread. If mid reaches 0.99, redeem at a flat $1.00/share, fee-free,
-done for the window. If the trailing stop is hit instead, the position
-is closed and the window is done -- no flip, no re-entry on the other
-side, at most one trade per window. No martingale anywhere; every
-entry is BASE_ORDER_SHARES. Every fill except TP is a taker order and
-pays the taker fee; TP is the sole fee-free exception since it's a CTF
-resolution redemption, not an orderbook trade.
+done for the window. If the trailing stop or hard stop is hit instead,
+the position is closed and the window is done -- no flip, no re-entry
+on the other side, at most one trade per window. No martingale
+anywhere; every entry is BASE_ORDER_SHARES. Every fill except TP is a
+taker order and pays the taker fee; TP is the sole fee-free exception
+since it's a CTF resolution redemption, not an orderbook trade.
 """
 import time
 from dataclasses import dataclass, field
@@ -80,6 +93,8 @@ class Position:
     entry_fee: float
     entry_ts: float
     high_water_mark: float = 0.0   # best bid seen since entry -- drives the continuous trailing stop
+    hard_stop_active: bool = False # once high-water mark >= HARD_STOP_TRIGGER_PRICE, trailing is permanently
+                                    # replaced by the fixed HARD_STOP_PRICE stop -- never reverts
 
     @property
     def cost(self) -> float:
@@ -105,13 +120,18 @@ class EngineState:
     down_ask_levels: Optional[list] = None
 
     position: Optional[Position] = None
-    entry_checked: bool = False     # the one t=10s entry check has happened (fired or skipped)
+    entry_checked: bool = False     # the t=10s side-lock-in has happened (side chosen, or window skipped)
+    momentum_side: Optional[Side] = None   # side locked in at the t=10s check; None if the window was
+                                            # skipped outright (no prior winner) rather than just still waiting
+    awaiting_dip: bool = False      # side is locked in and was above the dip threshold -- watching every
+                                     # tick for it to fall to/below ENTRY_DIP_THRESHOLD before firing
     done_for_window: bool = False   # TP or stop hit, or window closed with nothing open -- nothing left to watch
 
     total_entries_attempted: int = 0   # t=10s checks where a side was in-zone and a buy was attempted
     total_no_entry_zone: int = 0       # t=10s checks where the cheap side was outside the entry zone
     total_tp_hits: int = 0
-    total_stop_hits: int = 0
+    total_stop_hits: int = 0           # trailing-stop closes only
+    total_hard_stop_hits: int = 0      # fixed hard-stop closes only (position ran to 0.90+ first)
     total_forced_closes: int = 0       # window closed before TP/stop was reached
     no_trade_windows: int = 0          # entry zone missed at t=10s, nothing ever opened
     wins: int = 0
@@ -122,8 +142,9 @@ class EngineState:
 
 class Engine:
     """Momentum-continuation entry (follows previous window's winning
-    side, not the cheap side) / trailing stop that arms 2 minutes after
-    entry and tightens above 0.85 / single trade per window, driven off
+    side, not the cheap side) / trailing stop that arms 3 minutes after
+    window open, tightens above 0.85, and gets permanently overridden by
+    a fixed hard stop above 0.90 / single trade per window, driven off
     its own capital pool. Kept as the class name `Engine` / constructed
     the same way (Engine(broker)) so app/state.py doesn't need
     structural changes."""
@@ -156,12 +177,15 @@ class Engine:
                           f"{self.last_winning_side.value} by price)" if self.last_winning_side is not None
                           else "no prior window result yet -- this window will be skipped")
         self._log("WINDOW_OPEN", shares=config.BASE_ORDER_SHARES, note=(
-            f"waiting {config.ENTRY_WAIT_SECONDS:.0f}s, then buying the momentum side -- {momentum_note} -- "
-            f"regardless of whether it's the cheap or expensive side, if it's within "
-            f"[{config.ENTRY_ZONE_LOW}, {config.ENTRY_ZONE_HIGH}] -- flat {config.BASE_ORDER_SHARES:.0f}sh, "
-            f"no martingale. TP {config.TP_PRICE} (redeem $1) live immediately / trailing stop arms "
-            f"{config.TRAIL_START_DELAY_SECONDS:.0f}s after entry, {config.TRAIL_DISTANCE} trail "
-            f"(tightens to {config.TRAIL_DISTANCE_TIGHT} above {config.TRAIL_TIGHTEN_PRICE}), "
+            f"waiting {config.ENTRY_WAIT_SECONDS:.0f}s, then locking in the momentum side -- {momentum_note} -- "
+            f"regardless of whether it's the cheap or expensive side. Fires right away if it's at/below "
+            f"{config.ENTRY_DIP_THRESHOLD} and within [{config.ENTRY_ZONE_LOW}, {config.ENTRY_ZONE_HIGH}]; "
+            f"if it's above {config.ENTRY_DIP_THRESHOLD}, waits (no deadline) for a dip to/below that level "
+            f"before checking the zone and firing -- flat {config.BASE_ORDER_SHARES:.0f}sh, no martingale. "
+            f"TP {config.TP_PRICE} (redeem $1) live immediately / trailing stop arms "
+            f"{config.TRAIL_START_DELAY_SECONDS:.0f}s after window open, {config.TRAIL_DISTANCE} trail "
+            f"(tightens to {config.TRAIL_DISTANCE_TIGHT} above {config.TRAIL_TIGHTEN_PRICE}, permanently "
+            f"replaced by a fixed {config.HARD_STOP_PRICE} hard stop above {config.HARD_STOP_TRIGGER_PRICE}), "
             f"one trade per window -- no flip on stop-out."
         ))
 
@@ -180,8 +204,7 @@ class Engine:
             return
 
         if self.s.position is None:
-            if not self.s.entry_checked:
-                self._check_initial_entry(now)
+            self._check_entry(now)
         else:
             self._check_exit(now)
 
@@ -234,45 +257,61 @@ class Engine:
             cost += remaining * worst_price
         return cost / shares
 
-    # ---- initial entry: single check at t=10s, momentum side, zone-gated --
+    # ---- entry: t=10s side lock-in, then fire immediately or wait for a --
+    # ---- dip to ENTRY_DIP_THRESHOLD before the zone-gated buy ------------
 
-    def _check_initial_entry(self, now: float):
-        elapsed = now - self.s.window.open_ts
-        if elapsed < config.ENTRY_WAIT_SECONDS:
-            return   # not yet -- keep waiting, don't mark checked
+    def _check_entry(self, now: float):
+        if not self.s.entry_checked:
+            elapsed = now - self.s.window.open_ts
+            if elapsed < config.ENTRY_WAIT_SECONDS:
+                return   # not yet -- keep waiting, don't lock in a side
 
-        self.s.entry_checked = True
+            self.s.entry_checked = True
+            side = self.last_winning_side
+            if side is None:
+                self.s.no_trade_windows += 1
+                self.s.done_for_window = True
+                self._log("NO_TRADE", note="no prior window result to follow yet -- skipping window")
+                return
 
-        side = self.last_winning_side
+            self.s.momentum_side = side
+            self._log("ENTRY_SIDE_LOCKED", side=side.value, note=(
+                f"momentum side locked in: {side.value} (previous window closed {side.value} by price) "
+                f"at the {config.ENTRY_WAIT_SECONDS:.0f}s check"
+            ))
+
+        side = self.s.momentum_side
         if side is None:
-            self.s.no_trade_windows += 1
-            self.s.done_for_window = True
-            self._log("NO_TRADE", note="no prior window result to follow yet -- skipping window")
-            return
+            return   # already skipped this window above (done_for_window is True)
 
         price = self._mid_for(side)
         if price is None:
-            self.s.no_trade_windows += 1
-            self.s.done_for_window = True
-            self._log("NO_TRADE", side=side.value,
-                       note="no price data at the 10s entry check -- skipping window")
-            return
+            return   # no price data this tick -- keep waiting, try again next tick
+
+        if price > config.ENTRY_DIP_THRESHOLD:
+            if not self.s.awaiting_dip:
+                self.s.awaiting_dip = True
+                self._log("AWAITING_DIP", side=side.value, price=round(price, 4), note=(
+                    f"{side.value} mid @ {price:.4f} is above the {config.ENTRY_DIP_THRESHOLD} dip threshold -- "
+                    f"waiting for it to fall to/below {config.ENTRY_DIP_THRESHOLD} before firing"
+                ))
+            return   # keep watching every tick, no deadline other than window close
 
         if not (config.ENTRY_ZONE_LOW <= price <= config.ENTRY_ZONE_HIGH):
             self.s.total_no_entry_zone += 1
             self.s.no_trade_windows += 1
             self.s.done_for_window = True
             self._log("NO_TRADE", side=side.value, price=round(price, 4), note=(
-                f"momentum side {side.value} (previous window closed {side.value} by price) mid @ {price:.4f} "
-                f"is outside the entry zone [{config.ENTRY_ZONE_LOW}, {config.ENTRY_ZONE_HIGH}] at the "
-                f"{config.ENTRY_WAIT_SECONDS:.0f}s check -- no trade this window"
+                f"momentum side {side.value} dipped to {price:.4f} but that's outside the entry zone "
+                f"[{config.ENTRY_ZONE_LOW}, {config.ENTRY_ZONE_HIGH}] -- no trade this window"
             ))
             return
 
         self.s.total_entries_attempted += 1
+        dip_note = " after waiting for the dip" if self.s.awaiting_dip else ""
         self._open_position(side, now, zone_note=(
             f"momentum continuation of {side.value} (previous window closed {side.value} by price), "
-            f"in-zone @ mid {price:.4f}, bought regardless of cheap/expensive"
+            f"in-zone @ mid {price:.4f}{dip_note}, bought regardless of cheap/expensive"
         ))
 
     # ---- position open (single entry per window) ---------------------------
@@ -300,7 +339,7 @@ class Engine:
         self._log("ENTRY_FILL", side=side.value, price=round(fill_price, 4), shares=shares, fee=round(fee, 4),
                    note=(f"entry buy filled (taker, real ask depth): {shares:.0f}sh @ {fill_price:.4f} "
                          f"({zone_note}, fee ${fee:.4f}) -- TP {config.TP_PRICE} (redeem $1) / "
-                         f"trailing stop arms in {config.TRAIL_START_DELAY_SECONDS:.0f}s"))
+                         f"trailing stop arms {config.TRAIL_START_DELAY_SECONDS:.0f}s after window open"))
         self.capital.check_halt()
 
     # ---- exit: TP redemption or continuous trailing-stop hit ---------------
@@ -333,7 +372,28 @@ class Engine:
                                   fill_price_override=1.0, fee_override=0.0)
             return
 
-        if now - pos.entry_ts < config.TRAIL_START_DELAY_SECONDS:
+        # Hard stop: the instant the position has run deep enough ITM,
+        # permanently swap the trailing stop for a fixed, much wider
+        # stop-loss -- independent of the trail-arm delay below, and it
+        # never reverts even if price pulls back under the trigger
+        # afterwards.
+        if not pos.hard_stop_active and pos.high_water_mark >= config.HARD_STOP_TRIGGER_PRICE:
+            pos.hard_stop_active = True
+            self._log("HARD_STOP_ARMED", price=round(pos.high_water_mark, 4), note=(
+                f"high-water mid reached {config.HARD_STOP_TRIGGER_PRICE} -- trailing stop deactivated, "
+                f"hard stop-loss now fixed at {config.HARD_STOP_PRICE} for the rest of this position"
+            ))
+
+        if pos.hard_stop_active:
+            if mid <= config.HARD_STOP_PRICE:
+                self.s.total_hard_stop_hits += 1
+                self._close_position(now, reason="HARD_STOP_HIT", note_prefix=(
+                    f"hard stop-loss hit at {config.HARD_STOP_PRICE:.4f} (fixed -- trailing stop was "
+                    f"deactivated once high-water mid passed {config.HARD_STOP_TRIGGER_PRICE})"
+                ))
+            return   # hard-stop mode: trailing logic below no longer applies to this position
+
+        if now - self.s.window.open_ts < config.TRAIL_START_DELAY_SECONDS:
             return   # stop isn't armed yet -- only TP can close in this window
 
         stop = self._effective_stop(pos.high_water_mark)
@@ -404,6 +464,14 @@ class Engine:
             elif not self.s.entry_checked:
                 self.s.no_trade_windows += 1
                 self._log("NO_TRADE", note="window closed before the 10s entry check ever ran")
+            elif not self.s.done_for_window:
+                # side was locked in and (usually) was waiting for a dip to
+                # ENTRY_DIP_THRESHOLD that never came before the window ended
+                self.s.no_trade_windows += 1
+                note = (f"window closed while still waiting for {self.s.momentum_side.value} to dip to/below "
+                         f"{config.ENTRY_DIP_THRESHOLD} -- no trade this window" if self.s.awaiting_dip
+                         else "window closed before a trade fired -- no trade this window")
+                self._log("NO_TRADE", note=note)
 
         # Feeds next window's entry-side filter -- whichever side this
         # window closed to (by last observed price) is what next
@@ -424,14 +492,22 @@ class Engine:
         mid = self._mid_for(pos.side)
         mark = mid if mid is not None else pos.entry_price
         hwm = max(pos.high_water_mark, mark)
-        stop = self._effective_stop(hwm)
+        hard_stop_active = pos.hard_stop_active or hwm >= config.HARD_STOP_TRIGGER_PRICE
         market_value = pos.shares * mark
         unrealized = market_value - pos.cost
         to_tp = round(config.TP_PRICE - mark, 4)
+
+        window_open_ts = self.s.window.open_ts if self.s.window is not None else pos.entry_ts
+        elapsed_since_open = time.time() - window_open_ts
+        stop_armed = elapsed_since_open >= config.TRAIL_START_DELAY_SECONDS
+        stop_arms_in = round(max(0.0, config.TRAIL_START_DELAY_SECONDS - elapsed_since_open), 1)
+
+        if hard_stop_active:
+            stop = config.HARD_STOP_PRICE
+        else:
+            stop = self._effective_stop(hwm)
         to_stop = round(mark - stop, 4)
-        elapsed = time.time() - pos.entry_ts
-        stop_armed = elapsed >= config.TRAIL_START_DELAY_SECONDS
-        stop_arms_in = round(max(0.0, config.TRAIL_START_DELAY_SECONDS - elapsed), 1)
+
         return {
             "side": pos.side.value,
             "shares": pos.shares,
@@ -446,6 +522,9 @@ class Engine:
             "stop_price": round(stop, 4),
             "stop_armed": stop_armed,
             "stop_arms_in": stop_arms_in,
+            "hard_stop_active": hard_stop_active,
+            "hard_stop_trigger_price": config.HARD_STOP_TRIGGER_PRICE,
+            "hard_stop_price": config.HARD_STOP_PRICE,
             "trail_distance": config.TRAIL_DISTANCE,
             "distance_to_tp": to_tp,
             "distance_to_stop": to_stop,
@@ -463,6 +542,8 @@ class Engine:
             status = "in_position"
         elif not self.s.entry_checked:
             status = "waiting_entry"
+        elif self.s.awaiting_dip and not self.s.done_for_window:
+            status = "waiting_dip"
         else:
             status = "done"
 
@@ -487,6 +568,8 @@ class Engine:
             "down_mid": down_mid,
             "last_winning_side": self.last_winning_side.value if self.last_winning_side else None,
             "entry_checked": self.s.entry_checked,
+            "momentum_side": self.s.momentum_side.value if self.s.momentum_side else None,
+            "awaiting_dip": self.s.awaiting_dip,
             "position": position,
             "done_for_window": self.s.done_for_window,
 
@@ -496,6 +579,7 @@ class Engine:
             "total_no_entry_zone": self.s.total_no_entry_zone,
             "total_tp_hits": self.s.total_tp_hits,
             "total_stop_hits": self.s.total_stop_hits,
+            "total_hard_stop_hits": self.s.total_hard_stop_hits,
             "total_forced_closes": self.s.total_forced_closes,
             "no_trade_windows": self.s.no_trade_windows,
             "wins": self.s.wins,
@@ -508,11 +592,14 @@ class Engine:
                 "entry_wait_seconds": config.ENTRY_WAIT_SECONDS,
                 "entry_zone_low": config.ENTRY_ZONE_LOW,
                 "entry_zone_high": config.ENTRY_ZONE_HIGH,
+                "entry_dip_threshold": config.ENTRY_DIP_THRESHOLD,
                 "tp_price": config.TP_PRICE,
                 "trail_distance": config.TRAIL_DISTANCE,
                 "trail_distance_tight": config.TRAIL_DISTANCE_TIGHT,
                 "trail_tighten_price": config.TRAIL_TIGHTEN_PRICE,
                 "trail_start_delay_seconds": config.TRAIL_START_DELAY_SECONDS,
+                "hard_stop_trigger_price": config.HARD_STOP_TRIGGER_PRICE,
+                "hard_stop_price": config.HARD_STOP_PRICE,
                 "base_order_shares": config.BASE_ORDER_SHARES,
             },
         }
