@@ -88,7 +88,7 @@ section h3{font-size:10px;letter-spacing:1px;color:var(--faint);font-family:var(
   <header>
     <div>
       <h1>⚡ Dip-Recovery Bot</h1>
-      <div style="font-size:10.5px;color:var(--muted);font-family:var(--mono);margin-top:2px">BTC 5m paper · dip below 0.45 → recover to 0.50 → tiered buy (100/200/400/800sh) · no SL / TP 0.99 · $4,500</div>
+      <div style="font-size:10.5px;color:var(--muted);font-family:var(--mono);margin-top:2px">BTC 5m paper · dip below 0.40 → recover to 0.50 → buy (100→800sh martingale) · SL 0.25 / TP 0.99 · $4,500</div>
     </div>
     <div class="pill"><span class="dot" id="dot"></span><span id="stxt">connecting…</span></div>
   </header>
@@ -165,7 +165,8 @@ function render(s){
   if(e.dipped_side&&e.status==='waiting_recovery'){
     tier=`<div style="margin-top:8px;font-family:var(--mono);font-size:11px;color:var(--muted)">
       dip min: <b style="color:var(--text)">${M(e.dip_min_price)}</b> →
-      <b style="color:var(--amber)">${e.dip_shares}sh</b> on recovery to 0.50</div>`;
+      <b style="color:var(--amber)">${e.current_shares}sh</b> on recovery to 0.50
+      ${e.martingale_level>0?` · <span style="color:var(--red)">martingale L${e.martingale_level}</span>`:''}</div>`;
   }
   $('tierInfo').innerHTML=tier;
 

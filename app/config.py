@@ -26,18 +26,14 @@ WINDOW_SECONDS = 300
 POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "0.5"))
 
 # ---- Strategy ---------------------------------------------------------
-DIP_THRESHOLD = 0.45            # price must be below this to count as "deep"
-# no consecutive timer — just watch which side dips below DIP_THRESHOLD
+DIP_THRESHOLD = 0.40            # price must be below this to count as "deep"
+# no timer — watch which side dips below DIP_THRESHOLD
 ENTRY_RECOVERY = 0.50           # flagged side must reach this mid to trigger entry
 TP_PRICE = 0.99                 # take profit: mid >= this -> redeem at $1.00
 
-# Tiered sizing: shares depend on how deep the dip went.
-DIP_TIERS = [
-    (0.40, 100),   # dipped below 0.40 -> buy 100 shares on recovery
-    (0.30, 200),   # dipped below 0.30 -> buy 200 shares
-    (0.20, 400),   # dipped below 0.20 -> buy 400 shares
-    (0.10, 800),   # dipped below 0.10 -> buy 800 shares
-]
+BASE_SHARES = 100.0              # base bet; martingale doubles up to MAX_MARTINGALE_LEVEL
+SL_PRICE = 0.25                  # stop loss: mid <= this -> taker sell
+MAX_MARTINGALE_LEVEL = 3         # up to 3 doublings (100 -> 200 -> 400 -> 800)
 STARTING_CAPITAL = 4500.0
 
 # ---- Trading fees -----------------------------------------------------
