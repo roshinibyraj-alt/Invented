@@ -7,8 +7,9 @@ Strategy
 2. Track how long each side stays *consecutively* below DIP_THRESHOLD
    (0.40). If the price bounces back above DIP_THRESHOLD, the timer
    resets to zero.
-3. Once either side's consecutive-below time exceeds DIP_MIN_SECONDS
-   (10s), that side is flagged as "dipped".
+2. Whichever side's mid first dips below DIP_THRESHOLD (0.45) is flagged.
+
+3. When the flagged side recovers to ENTRY_RECOVERY (0.50), buy.
 4. After flagging, wait for the dipped side's mid to recover to
    ENTRY_RECOVERY (0.50).  The instant mid >= 0.50, buy ORDER_SHARES
    (500) at the current ask as a taker (immediate fill, no limit wait).
@@ -43,8 +44,6 @@ class Engine:
         self.done_for_window: bool = False
 
         # Dip timer: consecutive seconds each side has been below DIP_THRESHOLD
-        self.below_timer_up: float = 0.0
-        self.below_timer_down: float = 0.0
         self.last_tick: Optional[float] = None
 
         # Flag
@@ -77,14 +76,12 @@ class Engine:
         self.window = window
         self.position = None
         self.done_for_window = False
-        self.below_timer_up = 0.0
-        self.below_timer_down = 0.0
         self.last_tick = window.open_ts
         self.dipped_side = None
         self.dipped_logged = False
         self._log("WINDOW_OPEN", shares=config.ORDER_SHARES, note=(
-            f"watching both sides -- whichever dips below {config.DIP_THRESHOLD:.2f} for "
-            f">{config.DIP_MIN_SECONDS:.0f}s straight, then recovers to {config.ENTRY_RECOVERY:.2f} "
+            f"watching both sides -- whichever dips below {config.DIP_THRESHOLD:.2f}, "
+            f"then recovers to {config.ENTRY_RECOVERY:.2f} "
             f"-> buy {config.ORDER_SHARES:.0f}sh taker. SL {config.SL_PRICE:.2f} / TP {config.TP_PRICE:.2f}. "
             f"balance ${self.balance:.2f}"
         ))
@@ -92,40 +89,21 @@ class Engine:
     # ---- dip timer + entry -------------------------------------------------
 
     def _tick_dip_monitor(self, up_mid, down_mid, now):
-        dt = now - self.last_tick if self.last_tick is not None else 0.0
-        self.last_tick = now
-
-        # Update consecutive-below timers
-        if up_mid is not None:
-            if up_mid < config.DIP_THRESHOLD:
-                self.below_timer_up += dt
-            else:
-                self.below_timer_up = 0.0
-
-        if down_mid is not None:
-            if down_mid < config.DIP_THRESHOLD:
-                self.below_timer_down += dt
-            else:
-                self.below_timer_down = 0.0
-
-        # Check if either side has been below long enough to flag
+        # Flag whichever side first dips below DIP_THRESHOLD
         if self.dipped_side is None:
-            if self.below_timer_up > config.DIP_MIN_SECONDS:
+            if up_mid is not None and up_mid < config.DIP_THRESHOLD:
                 self.dipped_side = Side.UP
-            elif self.below_timer_down > config.DIP_MIN_SECONDS:
+                self._log("SIDE_DIPPED", side="UP", price=round(up_mid, 4), note=(
+                    f"UP dipped below {config.DIP_THRESHOLD:.2f} (mid={up_mid:.4f}) -- "
+                    f"waiting for recovery to {config.ENTRY_RECOVERY:.2f}"))
+            elif down_mid is not None and down_mid < config.DIP_THRESHOLD:
                 self.dipped_side = Side.DOWN
+                self._log("SIDE_DIPPED", side="DOWN", price=round(down_mid, 4), note=(
+                    f"DOWN dipped below {config.DIP_THRESHOLD:.2f} (mid={down_mid:.4f}) -- "
+                    f"waiting for recovery to {config.ENTRY_RECOVERY:.2f}"))
+            return
 
-            if self.dipped_side is not None and not self.dipped_logged:
-                self.dipped_logged = True
-                timer = self.below_timer_up if self.dipped_side == Side.UP else self.below_timer_down
-                self._log("SIDE_DIPPED", side=self.dipped_side.value,
-                          price=round(up_mid if self.dipped_side == Side.UP else down_mid, 4),
-                          note=(f"{self.dipped_side.value} below {config.DIP_THRESHOLD:.2f} for "
-                                f"{timer:.1f}s (>{config.DIP_MIN_SECONDS:.0f}s) -- flagged, "
-                                f"waiting for recovery to {config.ENTRY_RECOVERY:.2f}"))
-            return  # either not flagged yet or already waiting
-
-        # Side is flagged -- wait for recovery to ENTRY_RECOVERY
+        # Side flagged — buy on recovery to ENTRY_RECOVERY
         mid = up_mid if self.dipped_side == Side.UP else down_mid
         if mid is not None and mid >= config.ENTRY_RECOVERY:
             self._buy(now, mid)
@@ -322,8 +300,7 @@ class Engine:
             "position": position,
             "unrealized_pnl": position["unrealized_pnl"] if position else 0.0,
             "dipped_side": self.dipped_side.value if self.dipped_side else None,
-            "below_timer_up": round(self.below_timer_up, 1),
-            "below_timer_down": round(self.below_timer_down, 1),
+
             "total_entries": self.total_entries,
             "total_tp_hits": self.total_tp_hits,
             "total_sl_hits": self.total_sl_hits,
@@ -336,7 +313,7 @@ class Engine:
             "equity_curve": self.equity_curve,
             "def": {
                 "dip_threshold": config.DIP_THRESHOLD,
-                "dip_min_seconds": config.DIP_MIN_SECONDS,
+                "dip_threshold": config.DIP_THRESHOLD,
                 "entry_recovery": config.ENTRY_RECOVERY,
                 "sl_price": config.SL_PRICE,
                 "tp_price": config.TP_PRICE,

@@ -26,8 +26,8 @@ WINDOW_SECONDS = 300
 POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "0.5"))
 
 # ---- Strategy ---------------------------------------------------------
-DIP_THRESHOLD = 0.40            # price must be below this to count as "deep"
-DIP_MIN_SECONDS = 10.0          # consecutive seconds below DIP_THRESHOLD to flag
+DIP_THRESHOLD = 0.45            # price must be below this to count as "deep"
+# no consecutive timer — just watch which side dips below DIP_THRESHOLD
 ENTRY_RECOVERY = 0.50           # flagged side must reach this mid to trigger entry
 SL_PRICE = 0.10                 # stop loss: mid <= this -> taker sell
 TP_PRICE = 0.99                 # take profit: mid >= this -> redeem at $1.00

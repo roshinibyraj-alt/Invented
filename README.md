@@ -5,15 +5,10 @@ engine. Demo capital: $4,500.
 
 ## Strategy
 
-1. From window open, monitor both sides' mid prices every tick.
-2. Track how long each side stays *consecutively* below 0.40 (the
-   "dip timer"). If the price bounces back above 0.40, the timer
-   resets to zero.
-3. Once either side's consecutive-below time exceeds 10 seconds, that
-   side is flagged as "dipped".
-4. After flagging, wait for the dipped side's mid to recover to 0.50.
-   The instant it does, buy 500 shares as a taker at the current ask
-   (immediate fill, no limit waiting).
+1. From window open, watch both sides' mid prices.
+2. Whichever side's mid first dips below 0.45 is flagged as "dipped".
+3. When the dipped side's mid recovers to 0.50, buy 500 shares as a
+   taker at the current ask (immediate fill, no limit waiting).
 5. Manage the position: SL at 0.10 (taker sell at bid depth, taker
    fee) or TP at 0.99 (redeem $1.00/share, fee-free). If neither is
    hit before the window closes, settle by the inferred CLOB winner.
