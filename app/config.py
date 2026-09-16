@@ -31,6 +31,7 @@ DIP_THRESHOLD = 0.40            # price must be below this to count as "deep"
 # no timer — watch which side dips below DIP_THRESHOLD
 ENTRY_RECOVERY = 0.50           # flagged side must reach this mid to trigger entry
 TP_PRICE = 0.99                 # take profit: mid >= this -> redeem at $1.00
+WAIT_AFTER_OPEN_SECONDS = 5     # don't start monitoring dip until 5s after window opens
 
 # Tiered sizing (CUMULATIVE): each deeper tier adds its shares on top of
 # the shallower ones.  E.g. dipped below 0.20 -> 100+200+400 = 700sh.

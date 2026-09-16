@@ -78,7 +78,8 @@ class Engine:
         self.dipped_min_price = 1.0
         self.dipped_logged = False
         self._log("WINDOW_OPEN", note=(
-            f"watching both sides -- dip below {config.DIP_THRESHOLD:.2f} then recover to "
+            f"window open -- waiting {config.WAIT_AFTER_OPEN_SECONDS}s, then watching both sides "
+            f"-- dip below {config.DIP_THRESHOLD:.2f} then recover to "
             f"{config.ENTRY_RECOVERY:.2f} -> cumulative tiered buy "
             f"(100/300/700/1500sh by depth). No SL. "
             f"TP {config.TP_PRICE:.2f}. balance ${self.balance:.2f}"
@@ -229,6 +230,11 @@ class Engine:
         if self.window is None or self.halted or self.done_for_window:
             return
         now = now if now is not None else time.time()
+        # ignore ticks before the post-open waiting period
+        if now < self.window.open_ts + config.WAIT_AFTER_OPEN_SECONDS:
+            self._up_bid, self._up_ask = up_bid, up_ask
+            self._down_bid, self._down_ask = down_bid, down_ask
+            return
         # store book data for helper lookups
         self._up_bid, self._up_ask = up_bid, up_ask
         self._down_bid, self._down_ask = down_bid, down_ask
