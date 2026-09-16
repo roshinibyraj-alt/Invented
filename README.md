@@ -11,11 +11,13 @@ mid falling = red).
 
 After the first 3 candles close:
 
-| Pattern | Action |
+Signal triggers only when the 3rd candle differs from the 2nd:
+
+| C2 → C3 | Action |
 |---|---|
-| RRG, RGG, GRG | buy **UP** (taker at ask, 500sh) |
-| GRR, GGR, RGR | buy **DOWN** (taker at ask, 500sh) |
-| RRR, GGG, anything else | no trade this window |
+| red → green | buy **UP** (taker at ask, 500sh) |
+| green → red | buy **DOWN** (taker at ask, 500sh) |
+| same color (or flat) | no trade this window |
 
 - One trade max per window
 - No stop-loss

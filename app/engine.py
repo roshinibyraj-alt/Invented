@@ -6,10 +6,10 @@ Strategy
 1. From window open, sample the UP-side CLOB mid every tick to build
    one-minute candles (mid up over the minute = green, mid down = red).
 2. When the 3rd candle closes (~180s into the window), evaluate the
-   pattern of the first three candles (R = red candle, G = green):
-       GRR, GGR, RGR  -> buy DOWN (taker at ask)
-       RRG, RGG, GRG  -> buy UP (taker at ask)
-       RRR and GGG and any other combos -> no trade this window.
+   signal: trade only when 3rd candle differs from 2nd candle.
+       3rd green (2nd red) -> buy UP (taker at ask)
+       3rd red   (2nd green) -> buy DOWN (taker at ask)
+       C2 == C3 (or flat) -> no trade this window.
 3. Flat ENTRY_SHARES (500) per trade. No stop-loss. TP at 0.99 redeems
    $1.00/share (fee-free); otherwise the window settles by the inferred
    CLOB winner. One trade max per window.
@@ -80,7 +80,7 @@ class Engine:
         self.signal_fired = False
         self._log("WINDOW_OPEN", note=(
             f"window open -- building 5x 1-min candles from UP mid. "
-            f"Pattern red/red/green -> buy UP, green/green/red -> buy DOWN. "
+            f"Signal: 3rd candle differs from 2nd -> green 3rd BUY UP, red 3rd BUY DOWN. "
             f"No SL. TP {config.TP_PRICE:.2f}. balance ${self.balance:.2f}"
         ))
 
@@ -140,15 +140,21 @@ class Engine:
         self.candle_bucket = []
 
     def _evaluate_pattern(self, now):
-        pattern = tuple(self.candle_colors[:config.PATTERN_CANDLES])
+        colors = self.candle_colors[:config.PATTERN_CANDLES]
         self.signal_fired = True
-        if pattern in config.BUY_UP_PATTERNS:
-            self._buy(Side.UP, now, pattern)
-        elif pattern in config.BUY_DOWN_PATTERNS:
-            self._buy(Side.DOWN, now, pattern)
+        c2 = colors[1] if len(colors) >= 2 else None
+        c3 = colors[2] if len(colors) >= 3 else None
+        if c2 == c3 or c3 is None:
+            self._log("NO_PATTERN", note=(
+                f"candles {colors} -- 3rd candle same as 2nd (or flat) -- no trade"))
+            return
+        if c3 == "green":
+            self._buy(Side.UP, now, (c2, c3))
+        elif c3 == "red":
+            self._buy(Side.DOWN, now, (c2, c3))
         else:
             self._log("NO_PATTERN", note=(
-                f"pattern {pattern} -- not in GRR/GGR/RGR (down) or RRG/RGG/GRG (up) -- no trade"))
+                f"candles {colors} -- 3rd candle not green/red -- no trade"))
 
     # ---- entry ---------------------------------------------------------------
 
@@ -293,7 +299,6 @@ class Engine:
                 "pattern_candles": config.PATTERN_CANDLES,
                 "entry_shares": config.ENTRY_SHARES,
                 "tp_price": config.TP_PRICE,
-                "buy_up_pattern": "RRG, RGG, GRG",
-                "buy_down_pattern": "GRR, GGR, RGR",
+                "signal_rule": "3rd candle must differ from 2nd; green 3rd -> UP, red 3rd -> DOWN",
             },
         }
