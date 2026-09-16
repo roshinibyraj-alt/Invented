@@ -6,10 +6,10 @@ Strategy
 1. From window open, sample the UP-side CLOB mid every tick to build
    one-minute candles (mid up over the minute = green, mid down = red).
 2. When the 3rd candle closes (~180s into the window), evaluate the
-   pattern of the first three candles:
-       red, red, green      -> buy UP (taker at ask)
-       green, green, red    -> buy DOWN (taker at ask)
-   Any other combination -> no trade this window.
+   pattern of the first three candles (R = red candle, G = green):
+       GRR, GGR, RGR  -> buy DOWN (taker at ask)
+       RRG, RGG, GRG  -> buy UP (taker at ask)
+       RRR and GGG and any other combos -> no trade this window.
 3. Flat ENTRY_SHARES (500) per trade. No stop-loss. TP at 0.99 redeems
    $1.00/share (fee-free); otherwise the window settles by the inferred
    CLOB winner. One trade max per window.
@@ -142,13 +142,13 @@ class Engine:
     def _evaluate_pattern(self, now):
         pattern = tuple(self.candle_colors[:config.PATTERN_CANDLES])
         self.signal_fired = True
-        if pattern == ("red", "red", "green"):
+        if pattern in config.BUY_UP_PATTERNS:
             self._buy(Side.UP, now, pattern)
-        elif pattern == ("green", "green", "red"):
+        elif pattern in config.BUY_DOWN_PATTERNS:
             self._buy(Side.DOWN, now, pattern)
         else:
             self._log("NO_PATTERN", note=(
-                f"pattern {pattern} does not match red/red/green or green/green/red -- no trade"))
+                f"pattern {pattern} -- not in GRR/GGR/RGR (down) or RRG/RGG/GRG (up) -- no trade"))
 
     # ---- entry ---------------------------------------------------------------
 
@@ -293,7 +293,7 @@ class Engine:
                 "pattern_candles": config.PATTERN_CANDLES,
                 "entry_shares": config.ENTRY_SHARES,
                 "tp_price": config.TP_PRICE,
-                "buy_up_pattern": "red, red, green",
-                "buy_down_pattern": "green, green, red",
+                "buy_up_pattern": "RRG, RGG, GRG",
+                "buy_down_pattern": "GRR, GGR, RGR",
             },
         }

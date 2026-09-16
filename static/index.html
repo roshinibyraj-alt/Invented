@@ -97,7 +97,7 @@ section h3{font-size:10px;letter-spacing:1px;color:var(--faint);font-family:var(
   <header>
     <div>
       <h1>🕯️ Candle-Pattern Bot</h1>
-      <div class="sub">BTC 5m paper · 5× 1-min candles from UP mid · red-red-green → buy UP · green-green-red → buy DOWN · no SL · TP 0.99 · $4,500</div>
+      <div class="sub">BTC 5m paper · 5× 1-min candles from UP mid · GRR/GGR/RGR → buy DOWN · RRG/RGG/GRG → buy UP · no SL · TP 0.99 · $4,500</div>
     </div>
     <div class="pill"><span class="dot" id="dot"></span><span id="stxt">connecting…</span></div>
   </header>
@@ -177,9 +177,9 @@ function render(s){
     sig='pattern evaluated · no matching signal this window';
   } else if(colors.length>=2){
     sig=`need ${(e.def?e.def.pattern_candles:3)-colors.length} more candle(s)`+
-        ` · red-red-green → <b class="up">BUY UP</b> · green-green-red → <b class="dn">BUY DOWN</b>`;
+        ` · RRG/RGG/GRG → <b class="up">BUY UP</b> · GRR/GGR/RGR → <b class="dn">BUY DOWN</b>`;
   } else {
-    sig=`building candle ${(colors.length+1)} of ${(e.def?e.def.pattern_candles:3)} · red-red-green → <b class="up">BUY UP</b> · green-green-red → <b class="dn">BUY DOWN</b>`;
+    sig=`building candle ${(colors.length+1)} of ${(e.def?e.def.pattern_candles:3)} · RRG/RGG/GRG → <b class="up">BUY UP</b> · GRR/GGR/RGR → <b class="dn">BUY DOWN</b>`;
   }
   $('sigInfo').innerHTML=sig;
 

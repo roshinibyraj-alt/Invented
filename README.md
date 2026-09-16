@@ -13,9 +13,9 @@ After the first 3 candles close:
 
 | Pattern | Action |
 |---|---|
-| red, red, green | buy **UP** (taker at ask, 500sh) |
-| green, green, red | buy **DOWN** (taker at ask, 500sh) |
-| anything else | no trade this window |
+| RRG, RGG, GRG | buy **UP** (taker at ask, 500sh) |
+| GRR, GGR, RGR | buy **DOWN** (taker at ask, 500sh) |
+| RRR, GGG, anything else | no trade this window |
 
 - One trade max per window
 - No stop-loss
