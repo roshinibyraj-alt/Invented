@@ -3,14 +3,12 @@ Single-engine BTC 5-minute up/down paper bot.
 
 Strategy: dip-recovery
   From window open watch both sides' mid prices. Whichever side first
-  dips below 0.40 is flagged. When the flagged side recovers to 0.50,
-  the bot buys shares sized CUMULATIVELY by how deep the dip went:
-    below 0.40 -> 100 shares
-    below 0.30 -> 100 + 200 = 300 shares
-    below 0.20 -> 100 + 200 + 400 = 700 shares
-    below 0.10 -> 100 + 200 + 400 + 800 = 1500 shares
-  Taker fill at current ask. No stop loss. TP at 0.99 (redeem
-  $1.00/share, fee-free). Max one trade per window.
+  dips below 0.30 is flagged. When the flagged side returns to 0.48,
+  the bot places a resting LIMIT buy order at 0.48 (so it never fills
+  worse than 0.48) for a flat 500 shares. Fill is confirmed by price
+  walk-through: once the ask trades at/below 0.48, the order is booked
+  filled at 0.48. No stop loss. TP at 0.99 (redeem $1.00/share,
+  fee-free). Max one trade per window.
 
 Demo capital: $4,500. CLOB-only pricing, no fallback.
 """
@@ -27,20 +25,12 @@ WINDOW_SECONDS = 300
 POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "0.5"))
 
 # ---- Strategy ---------------------------------------------------------
-DIP_THRESHOLD = 0.40            # price must be below this to count as "deep"
-# no timer — watch which side dips below DIP_THRESHOLD
-ENTRY_RECOVERY = 0.50           # flagged side must reach this mid to trigger entry
+DIP_THRESHOLD = 0.30            # single dip level — flag whichever side first dips below this
+ENTRY_RECOVERY = 0.48           # flagged side returning to this mid fires the limit order
+ENTRY_LIMIT = 0.48              # resting limit buy price — never fills worse than 0.48
+ENTRY_SHARES = 500              # flat share size per window
 TP_PRICE = 0.99                 # take profit: mid >= this -> redeem at $1.00
 WAIT_AFTER_OPEN_SECONDS = 5     # don't start monitoring dip until 5s after window opens
-
-# Tiered sizing (CUMULATIVE): each deeper tier adds its shares on top of
-# the shallower ones.  E.g. dipped below 0.20 -> 100+200+400 = 700sh.
-DIP_TIERS = [
-    (0.40, 100),   # dipped below 0.40 -> +100 shares (total 100)
-    (0.30, 200),   # dipped below 0.30 -> +200 shares (total 300)
-    (0.20, 400),   # dipped below 0.20 -> +400 shares (total 700)
-    (0.10, 800),   # dipped below 0.10 -> +800 shares (total 1500)
-]
 STARTING_CAPITAL = 4500.0
 
 # ---- Trading fees -----------------------------------------------------

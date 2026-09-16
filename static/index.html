@@ -88,7 +88,7 @@ section h3{font-size:10px;letter-spacing:1px;color:var(--faint);font-family:var(
   <header>
     <div>
       <h1>⚡ Dip-Recovery Bot</h1>
-      <div style="font-size:10.5px;color:var(--muted);font-family:var(--mono);margin-top:2px">BTC 5m paper · wait 5s → dip below 0.40 → recover to 0.50 → cumulative tier buy (100/300/700/1500sh) · no SL · TP 0.99 · $4,500</div>
+      <div style="font-size:10.5px;color:var(--muted);font-family:var(--mono);margin-top:2px">BTC 5m paper · wait 5s → dip below 0.30 → recover to 0.48 → limit buy 500sh @ 0.48 · no SL · TP 0.99 · $4,500</div>
     </div>
     <div class="pill"><span class="dot" id="dot"></span><span id="stxt">connecting…</span></div>
   </header>
@@ -162,11 +162,18 @@ function render(s){
   $('statusBadge').innerHTML=badge;
 
   let tier='';
-  if(e.dipped_side&&e.status==='waiting_recovery'){
-    tier=`<div style="margin-top:8px;font-family:var(--mono);font-size:11px;color:var(--muted)">
-      dip min: <b style="color:var(--text)">${M(e.dip_min_price)}</b> →
-      <b style="color:var(--amber)">${e.dip_shares}sh</b> on recovery to 0.50
-      (cumulative: 100/300/700/1500)</div>`;
+  if(e.dipped_side){
+    if(e.order_pending){
+      tier=`<div style="margin-top:8px;font-family:var(--mono);font-size:11px;color:var(--muted)">
+        dip min: <b style="color:var(--text)">${M(e.dip_min_price)}</b> →
+        <b style="color:var(--green)">${e.order_pending} limit order pending</b>:
+        <b style="color:var(--amber)">${e.entry_shares}sh @ ${e.entry_limit}</b>
+        (waiting for price walk-through)</div>`;
+    } else {
+      tier=`<div style="margin-top:8px;font-family:var(--mono);font-size:11px;color:var(--muted)">
+        dip min: <b style="color:var(--text)">${M(e.dip_min_price)}</b> → waiting for return to
+        <b style="color:var(--amber)">${e.entry_limit}</b> → limit ${e.entry_shares}sh</div>`;
+    }
   }
   $('tierInfo').innerHTML=tier;
 
