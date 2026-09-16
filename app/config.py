@@ -1,16 +1,16 @@
 """
-Dual-strategy BTC 5-minute up/down paper bot.
+Candle-pattern BTC 5-minute up/down paper bot.
 
-Two strategies share one position slot per window:
+The 5-minute window is divided into 5 one-minute candles (the UP-side
+CLOB mid price is the candle basis: mid rising over the minute = green,
+falling = red). After the first 3 candles close:
 
-Strategy A (dip-recovery):
-  Dip below 0.30 → recover to 0.48 → limit buy 500sh @ 0.48
+  pattern red,  red,  green  -> buy UP
+  pattern green, green, red  -> buy DOWN
 
-Strategy B (spike-reversal):
-  Spike above 0.70 → return to 0.50 → limit buy 500sh @ 0.48
-
-Both: TP at 0.99 (redeem $1.00/share, fee-free), no SL.
-Alternation: A starts active. Win → swap for next window. Loss → same.
+Trade: flat ENTRY_SHARES at the current ask (immediate taker), one
+trade max per window. No stop-loss. TP at 0.99 (redeem $1.00/share,
+fee-free); otherwise settle by the inferred CLOB winner.
 
 Demo capital: $4,500. CLOB-only pricing, no fallback.
 """
@@ -26,20 +26,12 @@ SLUG_PREFIX = "btc-updown-5m-"
 WINDOW_SECONDS = 300
 POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "0.5"))
 
-# ---- Shared strategy params --------------------------------------------
-ENTRY_LIMIT = 0.48              # resting limit buy price (same for both strategies)
-ENTRY_SHARES = 500              # flat share size per window
-TP_PRICE = 0.99                 # take profit: mid >= this -> redeem at $1.00
-WAIT_AFTER_OPEN_SECONDS = 5     # wait after window opens before monitoring
+# ---- Candle-pattern strategy -------------------------------------------
+CANDLE_SECONDS = 60                     # one-minute candles within the 5-min window
+PATTERN_CANDLES = 3                     # use the first 3 candles for the pattern
+ENTRY_SHARES = 500                      # flat share size per window
+TP_PRICE = 0.99                         # take profit: mid >= this -> redeem at $1.00
 STARTING_CAPITAL = 4500.0
-
-# ---- Strategy A: dip-recovery -------------------------------------------
-DIP_THRESHOLD = 0.30            # flag whichever side first dips below this
-ENTRY_RECOVERY = 0.48           # flagged side returning to this mid fires limit order
-
-# ---- Strategy B: spike-reversal -----------------------------------------
-SPIKE_THRESHOLD = 0.70          # flag whichever side first spikes above this
-B_RECOVERY = 0.50               # flagged side returning to this mid fires limit order
 
 # ---- Trading fees -----------------------------------------------------
 APPLY_TAKER_FEES = True
