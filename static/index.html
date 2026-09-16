@@ -205,9 +205,9 @@ function render(s){
 
   // position card (up to 2 positions, one per signal)
   let pos='';
-  const poss=e.positions||[];
-  if(poss.length){
-    pos=poss.map(pp=>{
+  const pps=e.positions||[];
+  if(pps.length){
+    pos=pps.map(pp=>{
       const c=pp.unrealized_pnl>=0?'pnl-pos':'pnl-neg';
       return `<div class="pw">
         <div class="r"><span style="font-weight:700;color:${pp.side==='UP'?'var(--green)':'var(--red)'}">T${pp.slot} · ${pp.side} ${M(pp.shares)}sh</span><span class="${c}">${$U(pp.unrealized_pnl)}</span></div>
