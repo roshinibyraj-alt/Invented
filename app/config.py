@@ -4,17 +4,22 @@ Candle-pattern BTC 5-minute up/down paper bot.
 The 5-minute window is divided into 5 one-minute candles. Candle color
 is determined by the real Binance BTCUSDT spot price (spot rising over
 the minute = green candle, falling = red candle) -- NOT the CLOB
-probability price, which drifts with time decay. After the first 3
-candles close:
+probability price, which drifts with time decay.
 
-  Signal: trade only when 3rd candle differs from 2nd candle.
+Two independent signals per window (up to 2 trades):
+
+  Trade #1 (after candle 2): C1/C2 = red,green -> buy UP
+                             C1/C2 = green,red -> buy DOWN
+                             same color -> no first trade
+
+  Trade #2 (after candle 3, existing setup): C3 must differ from C2.
     3rd green (2nd red) -> buy UP
     3rd red   (2nd green) -> buy DOWN
-  Same color on C2/C3 (GRR, RGG, RRR, GGG) -> no trade
+    same color on C2/C3 (GRR, RGG, RRR, GGG) -> no second trade
 
-Trade: flat ENTRY_SHARES at the current ask (immediate taker), one
-trade max per window. No stop-loss. TP at 0.99 (redeem $1.00/share,
-fee-free); otherwise settle by the inferred CLOB winner.
+Trades: flat ENTRY_SHARES at the current ask (immediate taker), per
+signal. No stop-loss. TP at 0.99 (redeem $1.00/share, fee-free);
+otherwise settle by the inferred CLOB winner.
 
 Demo capital: $4,500. CLOB-only pricing, no fallback.
 """
@@ -38,7 +43,8 @@ BINANCE_SYMBOL = "BTCUSDT"
 
 # ---- Candle-pattern strategy -------------------------------------------
 CANDLE_SECONDS = 60                     # one-minute candles within the 5-min window
-PATTERN_CANDLES = 3                     # use the first 3 candles for the pattern
+FIRST_SIGNAL_CANDLES = 2                # trade #1 uses the first 2 candles (RG->UP, GR->DOWN)
+PATTERN_CANDLES = 3                     # trade #2 uses the first 3 candles (C3 must differ from C2)
 ENTRY_SHARES = 500                      # flat share size per window
 TP_PRICE = 0.99                         # take profit: mid >= this -> redeem at $1.00
 STARTING_CAPITAL = 4500.0

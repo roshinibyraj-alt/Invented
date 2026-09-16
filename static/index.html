@@ -97,7 +97,7 @@ section h3{font-size:10px;letter-spacing:1px;color:var(--faint);font-family:var(
   <header>
     <div>
       <h1>🕯️ Candle-Pattern Bot</h1>
-      <div class="sub">BTC 5m paper · 5× 1-min candles from Binance BTC spot · signal: candle 3 ≠ candle 2 · green 3rd → BUY UP · red 3rd → BUY DOWN · TP 0.99</div>
+      <div class="sub">BTC 5m paper · Binance BTC spot candles · T1 after C2: RG→UP / GR→DOWN · T2 after C3: C3≠C2 → green UP / red DOWN · TP 0.99</div>
     </div>
     <div class="pill"><span class="dot" id="dot"></span><span id="stxt">connecting…</span></div>
   </header>
@@ -108,7 +108,7 @@ section h3{font-size:10px;letter-spacing:1px;color:var(--faint);font-family:var(
   </div>
 
   <div class="candles">
-    <h3>1-Minute Candles (UP mid as basis)</h3>
+    <h3>1-Minute Candles (Binance BTC spot as basis)</h3>
     <div class="candle-row" id="candleRow"></div>
     <div class="sig" id="sigInfo"></div>
   </div>
@@ -171,15 +171,16 @@ function render(s){
   $('candleRow').innerHTML=cr;
 
   let sig='';
-  if(e.position){
-    sig=`signal matched → <b class="${e.position.side==='UP'?'up':'dn'}">${e.position.side === 'UP' ? 'BUY UP' : 'BUY DOWN'}</b> · ${M(e.position.shares)}sh @ ${M(e.position.entry_price)}`;
+  const poss=e.positions||[];
+  if(poss.length){
+    sig=poss.map(pp=>`T${pp.slot} <b class="${pp.side==='UP'?'up':'dn'}">${pp.side === 'UP' ? 'BUY UP' : 'BUY DOWN'}</b> ${M(pp.shares)}sh @ ${M(pp.entry_price)}`).join(' · ');
   } else if(e.signal_fired){
-    sig='pattern evaluated · no matching signal this window';
+    sig='both signals evaluated · no trades this window';
   } else if(colors.length>=2){
     sig=`need ${(e.def?e.def.pattern_candles:3)-colors.length} more candle(s)`+
-        ` · candle 3 ≠ 2 · green 3rd → <b class="up">UP</b> · red 3rd → <b class="dn">DOWN</b>`;
+        ` · T1 (C2): RG → <b class="up">UP</b> / GR → <b class="dn">DOWN</b> · T2 (C3): C3≠C2 → green <b class="up">UP</b> / red <b class="dn">DOWN</b>`;
   } else {
-    sig=`building candle ${(colors.length+1)} of ${(e.def?e.def.pattern_candles:3)} · candle 3 ≠ 2 · green 3rd → <b class="up">UP</b> · red 3rd → <b class="dn">DOWN</b>`;
+    sig=`building candle ${(colors.length+1)} of ${(e.def?e.def.pattern_candles:3)} · T1 (C2): RG → <b class="up">UP</b> / GR → <b class="dn">DOWN</b> · T2 (C3): C3≠C2 → green <b class="up">UP</b> / red <b class="dn">DOWN</b>`;
   }
   $('sigInfo').innerHTML=sig;
 
@@ -202,17 +203,19 @@ function render(s){
   else badge='<span class="badge mon">MONITORING</span>';
   $('statusBadge').innerHTML=badge;
 
-  // position card
+  // position card (up to 2 positions, one per signal)
   let pos='';
-  const pp=e.position;
-  if(pp){
-    const c=pp.unrealized_pnl>=0?'pnl-pos':'pnl-neg';
-    pos=`<div class="pw">
-      <div class="r"><span style="font-weight:700;color:${pp.side==='UP'?'var(--green)':'var(--red)'}">${pp.side} ${M(pp.shares)}sh</span><span class="${c}">${$U(pp.unrealized_pnl)}</span></div>
-      <div class="r"><span>entry</span><b>${M(pp.entry_price)}</b></div>
-      <div class="r"><span>mark</span><b>${M(pp.mark)}</b></div>
-      <div class="r"><span>cost</span><b>${$U(pp.cost)}</b></div>
-    </div>`;
+  const poss=e.positions||[];
+  if(poss.length){
+    pos=poss.map(pp=>{
+      const c=pp.unrealized_pnl>=0?'pnl-pos':'pnl-neg';
+      return `<div class="pw">
+        <div class="r"><span style="font-weight:700;color:${pp.side==='UP'?'var(--green)':'var(--red)'}">T${pp.slot} · ${pp.side} ${M(pp.shares)}sh</span><span class="${c}">${$U(pp.unrealized_pnl)}</span></div>
+        <div class="r"><span>entry</span><b>${M(pp.entry_price)}</b></div>
+        <div class="r"><span>mark</span><b>${M(pp.mark)}</b></div>
+        <div class="r"><span>cost</span><b>${$U(pp.cost)}</b></div>
+      </div>`;
+    }).join('');
   }
   $('posCard').innerHTML=pos;
 
