@@ -2,14 +2,15 @@
 Single-engine BTC 5-minute up/down paper bot.
 
 Strategy: dip-recovery
-  After the window opens, track how long each side stays consecutively
-  below 0.40. If the timer resets (price bounces back above 0.40) it
-  starts over. Once either side has been below 0.40 for more than 10
-  seconds straight, that side is flagged as "dipped". The bot then
-  waits for the flagged side's mid to recover to 0.50 and buys 500
-  shares as a taker at the current ask (no limit waiting -- immediate
-  fill). No stop loss. TP at 0.99 (redeem $1.00/share,
-  fee-free). Max one trade per window.
+  From window open watch both sides' mid prices. Whichever side first
+  dips below 0.40 is flagged. When the flagged side recovers to 0.50,
+  the bot buys shares sized CUMULATIVELY by how deep the dip went:
+    below 0.40 -> 100 shares
+    below 0.30 -> 100 + 200 = 300 shares
+    below 0.20 -> 100 + 200 + 400 = 700 shares
+    below 0.10 -> 100 + 200 + 400 + 800 = 1500 shares
+  Taker fill at current ask. No stop loss. TP at 0.99 (redeem
+  $1.00/share, fee-free). Max one trade per window.
 
 Demo capital: $4,500. CLOB-only pricing, no fallback.
 """
@@ -31,9 +32,14 @@ DIP_THRESHOLD = 0.40            # price must be below this to count as "deep"
 ENTRY_RECOVERY = 0.50           # flagged side must reach this mid to trigger entry
 TP_PRICE = 0.99                 # take profit: mid >= this -> redeem at $1.00
 
-BASE_SHARES = 100.0              # base bet; martingale doubles up to MAX_MARTINGALE_LEVEL
-SL_PRICE = 0.25                  # stop loss: mid <= this -> taker sell
-MAX_MARTINGALE_LEVEL = 3         # up to 3 doublings (100 -> 200 -> 400 -> 800)
+# Tiered sizing (CUMULATIVE): each deeper tier adds its shares on top of
+# the shallower ones.  E.g. dipped below 0.20 -> 100+200+400 = 700sh.
+DIP_TIERS = [
+    (0.40, 100),   # dipped below 0.40 -> +100 shares (total 100)
+    (0.30, 200),   # dipped below 0.30 -> +200 shares (total 300)
+    (0.20, 400),   # dipped below 0.20 -> +400 shares (total 700)
+    (0.10, 800),   # dipped below 0.10 -> +800 shares (total 1500)
+]
 STARTING_CAPITAL = 4500.0
 
 # ---- Trading fees -----------------------------------------------------

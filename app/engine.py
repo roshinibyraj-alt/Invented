@@ -4,16 +4,16 @@ Dip-recovery trading engine for Polymarket's btc-updown-5m-* markets.
 Strategy
 --------
 1. From window open, monitor both sides' mid prices every tick.
-2. Whichever side's mid first dips below DIP_THRESHOLD (0.40) is flagged.
-
-3. When the flagged side recovers to ENTRY_RECOVERY (0.50), buy
-   `current_shares` at the current ask as a taker (immediate fill).
-4. Manage the position: SL at SL_PRICE (0.25), TP at 0.99 (redeem
-   $1.00/share, fee-free).  If neither is hit before the window closes,
-   settle by the inferred CLOB winner.
-5. Max one trade per window.  If the position loses (SL hit or
-   resolution loss), martingale doubles: 100 -> 200 -> 400 -> 800
-   (max MAX_MARTINGALE_LEVEL=3 doublings), reset to base on a win.
+2. Whichever side's mid first dips below DIP_THRESHOLD (0.40) is flagged;
+   the deepest mid reached during the dip is tracked.
+3. When the flagged side recovers to ENTRY_RECOVERY (0.50), buy shares
+   sized CUMULATIVELY by dip depth (see config.DIP_TIERS): deeper dips
+   stack each tier's share count (below 0.20 -> 100+200+400 = 700sh).
+   Taker fill at the current ask (immediate fill).
+4. Manage the position: no stop loss.  TP at 0.99 redeems $1.00/share
+   (fee-free).  If TP isn't hit before the window closes, settle by the
+   inferred CLOB winner at window close.
+5. Max one trade per window.  No martingale.
 """
 import time
 from typing import Optional
@@ -51,14 +51,11 @@ class Engine:
         # Lifetime stats
         self.total_entries: int = 0
         self.total_tp_hits: int = 0
-        self.total_sl_hits: int = 0
         self.total_wins: int = 0
         self.total_losses: int = 0
         self.last_window_pnl: float = 0.0
         self.total_pnl: float = 0.0
-        self.martingale_level: int = 0
         self.equity_curve: list = []
-        self.current_shares: float = config.BASE_SHARES
 
     # ---- logging ----------------------------------------------------------
 
@@ -80,12 +77,11 @@ class Engine:
         self.dipped_side = None
         self.dipped_min_price = 1.0
         self.dipped_logged = False
-        self.current_shares = config.BASE_SHARES * (2 ** self.martingale_level)
-        self._log("WINDOW_OPEN", shares=self.current_shares, note=(
+        self._log("WINDOW_OPEN", note=(
             f"watching both sides -- dip below {config.DIP_THRESHOLD:.2f} then recover to "
-            f"{config.ENTRY_RECOVERY:.2f} -> buy {self.current_shares:.0f}sh "
-            f"(martingale x{2 ** self.martingale_level}). "
-            f"SL {config.SL_PRICE:.2f} / TP {config.TP_PRICE:.2f}. balance ${self.balance:.2f}"
+            f"{config.ENTRY_RECOVERY:.2f} -> cumulative tiered buy "
+            f"(100/300/700/1500sh by depth). No SL. "
+            f"TP {config.TP_PRICE:.2f}. balance ${self.balance:.2f}"
         ))
 
     # ---- dip timer + entry -------------------------------------------------
@@ -116,9 +112,23 @@ class Engine:
         if mid is not None and mid >= config.ENTRY_RECOVERY:
             self._buy(now, mid)
 
+    @staticmethod
+    def _tiered_shares(min_price: float) -> float:
+        """CUMULATIVE share count based on how deep the dip went.
+
+        Each tier whose threshold the dip pierced adds its shares on top
+        of the shallower ones: below 0.40 -> 100, below 0.30 -> 300,
+        below 0.20 -> 700, below 0.10 -> 1500.
+        """
+        shares = 0.0
+        for threshold, sh in config.DIP_TIERS:
+            if min_price < threshold:
+                shares += sh
+        return shares
+
     def _buy(self, now, mid):
         side = self.dipped_side
-        shares = self.current_shares
+        shares = self._tiered_shares(self.dipped_min_price)
         ask = self._ask_for(side)
         levels = self._ask_levels_for(side)
         fill = self._realistic_fill_price(levels, shares, ask)
@@ -138,8 +148,9 @@ class Engine:
         self._log("ENTRY_FILL", side=side.value, price=round(fill, 4), shares=shares,
                   fee=round(fee, 4), note=(
             f"taker buy: {side.value} mid recovered to {config.ENTRY_RECOVERY:.2f} "
-            f"-> {shares:.0f}sh @ {fill:.4f} (ask depth, fee ${fee:.4f}). "
-            f"SL {config.SL_PRICE:.2f} / TP {config.TP_PRICE:.2f}."))
+            f"-> {shares:.0f}sh @ {fill:.4f} (dip min={self.dipped_min_price:.4f}, "
+            f"cumulative tiers, ask depth, fee ${fee:.4f}). "
+            f"No SL, TP {config.TP_PRICE:.2f}."))
 
     # ---- position management -----------------------------------------------
 
@@ -149,32 +160,6 @@ class Engine:
         side = pos["side"]
         mark = _midpoint(up_bid, up_ask) if side == Side.UP else _midpoint(down_bid, down_ask)
         if mark is None:
-            return
-
-        # SL check
-        if mark <= config.SL_PRICE:
-            bid = up_bid if side == Side.UP else down_bid
-            levels = up_bid_levels if side == Side.UP else down_bid_levels
-            fill = self._realistic_fill_price(levels, pos["shares"], bid)
-            if fill is None:
-                return
-            fee = self.broker.taker_fee_amount(pos["shares"], fill)
-            proceeds = pos["shares"] * fill - fee
-            pnl = proceeds - pos["cost"]
-            self.balance += proceeds
-            self.total_sl_hits += 1
-            self.total_losses += 1
-            self.last_window_pnl = pnl
-            self.total_pnl += pnl
-            self.done_for_window = True
-            self.martingale_level = min(self.martingale_level + 1, config.MAX_MARTINGALE_LEVEL)
-            self._record_equity()
-            self._log("SL_HIT", side=side.value, price=round(fill, 4), shares=pos["shares"],
-                      fee=round(fee, 4), pnl=round(pnl, 2), note=(
-                f"SL {config.SL_PRICE:.2f}: sold {pos['shares']:.0f}sh @ {fill:.4f} "
-                f"(bid depth, fee ${fee:.4f}). PnL ${pnl:.2f}. "
-                f"martingale -> level {self.martingale_level}"))
-            self.position = None
             return
 
         # TP check
@@ -187,12 +172,11 @@ class Engine:
             self.last_window_pnl = pnl
             self.total_pnl += pnl
             self.done_for_window = True
-            self.martingale_level = 0
             self._record_equity()
             self._log("TP_HIT", side=side.value, price=1.0, shares=pos["shares"],
                       pnl=round(pnl, 2), note=(
                 f"TP {config.TP_PRICE:.2f}: redeemed {pos['shares']:.0f}sh at $1.00/share, "
-                f"fee-free. PnL ${pnl:.2f}. martingale reset"))
+                f"fee-free. PnL ${pnl:.2f}"))
             self.position = None
 
     # ---- window close settlement -------------------------------------------
@@ -209,23 +193,19 @@ class Engine:
                 self.total_wins += 1
                 self.last_window_pnl = pnl
                 self.total_pnl += pnl
-                self.martingale_level = 0
                 self._log("RESOLUTION_WIN", side=pos["side"].value, price=1.0,
                           shares=pos["shares"], pnl=round(pnl, 2), note=(
                     f"window won by {winning_side.value} -- "
-                    f"{pos['shares']:.0f}sh redeemed at $1.00. PnL ${pnl:.2f}. "
-                    f"martingale reset"))
+                    f"{pos['shares']:.0f}sh redeemed at $1.00. PnL ${pnl:.2f}"))
             else:
                 pnl = -pos["cost"]
                 self.total_losses += 1
                 self.last_window_pnl = pnl
                 self.total_pnl += pnl
-                self.martingale_level = min(self.martingale_level + 1, config.MAX_MARTINGALE_LEVEL)
                 self._log("RESOLUTION_LOSS", side=pos["side"].value, price=0.0,
                           shares=pos["shares"], pnl=round(pnl, 2), note=(
                     f"window won by {winning_side.value if winning_side else 'unknown'} -- "
-                    f"{pos['side'].value} expires worthless. PnL ${pnl:.2f}. "
-                    f"martingale -> level {self.martingale_level}"))
+                    f"{pos['side'].value} expires worthless. PnL ${pnl:.2f}"))
             self.position = None
             self._record_equity()
             return
@@ -316,12 +296,10 @@ class Engine:
             "unrealized_pnl": position["unrealized_pnl"] if position else 0.0,
             "dipped_side": self.dipped_side.value if self.dipped_side else None,
             "dip_min_price": round(self.dipped_min_price, 4) if self.dipped_side else None,
-            "current_shares": self.current_shares,
-            "martingale_level": self.martingale_level,
+            "dip_shares": self._tiered_shares(self.dipped_min_price) if self.dipped_side else 0,
 
             "total_entries": self.total_entries,
             "total_tp_hits": self.total_tp_hits,
-            "total_sl_hits": self.total_sl_hits,
             "total_wins": self.total_wins,
             "total_losses": self.total_losses,
             "last_window_pnl": round(self.last_window_pnl, 2),
