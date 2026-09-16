@@ -3,8 +3,11 @@ Candle-pattern trading engine for Polymarket's btc-updown-5m-* markets.
 
 Strategy
 --------
-1. From window open, sample the UP-side CLOB mid every tick to build
-   one-minute candles (mid up over the minute = green, mid down = red).
+1. From window open, sample the Binance BTCUSDT spot price every tick
+   to build one-minute candles (spot up over the minute = green, spot
+   down = red). The CLOB probability price is NOT used for candles --
+   it drifts with time decay. CLOB still drives entry ask, TP and
+   resolution.
 2. When the 3rd candle closes (~180s into the window), evaluate the
    signal: trade only when 3rd candle differs from 2nd candle.
        3rd green (2nd red) -> buy UP (taker at ask)
@@ -79,7 +82,7 @@ class Engine:
         self.building_candle = -1
         self.signal_fired = False
         self._log("WINDOW_OPEN", note=(
-            f"window open -- building 5x 1-min candles from UP mid. "
+            f"window open -- building 5x 1-min candles from Binance BTCUSDT spot. "
             f"Signal: 3rd candle differs from 2nd -> green 3rd BUY UP, red 3rd BUY DOWN. "
             f"No SL. TP {config.TP_PRICE:.2f}. balance ${self.balance:.2f}"
         ))
@@ -88,7 +91,8 @@ class Engine:
 
     def on_tick(self, up_bid, up_ask, down_bid, down_ask, seconds_to_close=None, now=None,
                 up_bid_levels=None, up_ask_levels=None,
-                down_bid_levels=None, down_ask_levels=None):
+                down_bid_levels=None, down_ask_levels=None,
+                btc_spot=None):
         if self.window is None or self.halted or self.done_for_window:
             return
         now = now if now is not None else time.time()
@@ -102,11 +106,13 @@ class Engine:
         if self.position is not None:
             self._tick_position(up_mid, down_mid, now)
         elif not self.signal_fired:
-            self._tick_candle_builder(up_mid, now)
+            # candles are built ONLY from the real Binance spot price;
+            # if the feed is down the bucket stays empty (no fake candles)
+            self._tick_candle_builder(btc_spot, now)
 
     # ---- candle building + signal --------------------------------------------
 
-    def _tick_candle_builder(self, up_mid, now):
+    def _tick_candle_builder(self, spot, now):
         idx = int((now - self.window.open_ts) // config.CANDLE_SECONDS)
         idx = min(idx, config.PATTERN_CANDLES)  # only need the first 3 candles
 
@@ -116,8 +122,8 @@ class Engine:
             self.building_candle = idx
             self.candle_bucket = []
 
-        if up_mid is not None:
-            self.candle_bucket.append(up_mid)
+        if spot is not None:
+            self.candle_bucket.append(spot)
 
         # once 3 candles are closed, evaluate the pattern once
         if len(self.candle_colors) >= config.PATTERN_CANDLES and not self.signal_fired:

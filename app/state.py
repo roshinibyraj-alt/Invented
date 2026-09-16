@@ -5,6 +5,7 @@ from collections import deque
 from typing import Optional
 
 from . import config
+from .binance_client import BinanceClient
 from .engine import Engine
 from .models import PricePoint, Side, WindowMarket
 from .paper_broker import PaperBroker
@@ -16,6 +17,7 @@ class BotState:
         self.broker = PaperBroker()
         self.engine = Engine(self.broker)
         self.client = PolymarketClient()
+        self.binance = BinanceClient()
         self.current_window: Optional[WindowMarket] = None
         self.price_history: deque = deque(maxlen=300)
         self.last_up_bid: Optional[float] = None
@@ -27,12 +29,14 @@ class BotState:
         self._task: Optional[asyncio.Task] = None
 
     async def start(self):
+        await self.binance.start()
         self._task = asyncio.create_task(self._run_loop())
 
     async def stop(self):
         if self._task:
             self._task.cancel()
         await self.client.close()
+        await self.binance.stop()
 
     async def _run_loop(self):
         self.status = "running"
@@ -79,6 +83,7 @@ class BotState:
             up_ask_levels=up_book["asks"] if up_book else None,
             down_bid_levels=down_book["bids"] if down_book else None,
             down_ask_levels=down_book["asks"] if down_book else None,
+            btc_spot=self.binance.last_price,
         )
 
     @staticmethod
@@ -137,6 +142,12 @@ class BotState:
                 {"ts": p.ts, "up": p.up, "down": p.down}
                 for p in list(self.price_history)[-120:]
             ],
+            "binance": {
+                "spot": self.binance.last_price,
+                "connected": self.binance.connected,
+                "last_update": self.binance.last_update_ts,
+                "error": self.binance.error,
+            },
             "engine": eng,
             "log": [
                 {"ts": e.ts, "engine": e.engine, "window": e.window_slug,

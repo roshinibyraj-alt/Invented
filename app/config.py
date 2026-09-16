@@ -1,9 +1,11 @@
 """
 Candle-pattern BTC 5-minute up/down paper bot.
 
-The 5-minute window is divided into 5 one-minute candles (the UP-side
-CLOB mid price is the candle basis: mid rising over the minute = green,
-falling = red). After the first 3 candles close:
+The 5-minute window is divided into 5 one-minute candles. Candle color
+is determined by the real Binance BTCUSDT spot price (spot rising over
+the minute = green candle, falling = red candle) -- NOT the CLOB
+probability price, which drifts with time decay. After the first 3
+candles close:
 
   Signal: trade only when 3rd candle differs from 2nd candle.
     3rd green (2nd red) -> buy UP
@@ -27,6 +29,12 @@ CLOB_API_BASE = os.getenv("CLOB_API_BASE", "https://clob.polymarket.com")
 SLUG_PREFIX = "btc-updown-5m-"
 WINDOW_SECONDS = 300
 POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "0.5"))
+
+# ---- Binance spot feed (candle color only) -----------------------------
+BINANCE_API_BASE = os.getenv("BINANCE_API_BASE", "https://api.binance.com")
+BINANCE_WS_URL = os.getenv("BINANCE_WS_URL",
+                           "wss://stream.binance.com:9443/ws/btcusdt@aggTrade")
+BINANCE_SYMBOL = "BTCUSDT"
 
 # ---- Candle-pattern strategy -------------------------------------------
 CANDLE_SECONDS = 60                     # one-minute candles within the 5-min window

@@ -5,9 +5,10 @@ capital: $4,500. CLOB-only pricing, no fallback.
 
 ## Strategy
 
-The 5-minute window is divided into 5 one-minute candles. The UP-side
-CLOB mid price is the candle basis (mid rising over the minute = green,
-mid falling = red).
+The 5-minute window is divided into 5 one-minute candles. Candle color
+is determined by the real Binance BTCUSDT spot price (spot rising over
+the minute = green, spot falling = red) -- NOT the CLOB probability
+price, which drifts with time decay.
 
 After the first 3 candles close:
 
