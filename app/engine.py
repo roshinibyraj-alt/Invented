@@ -1,353 +1,376 @@
 """
-Candle-pattern trading engine for Polymarket's btc-updown-5m-* markets.
+Trading engine -- one trade per window, direction decided by the color
+of BTC's own second 1-minute spot candle (Binance).
 
-Strategy
---------
-1. From window open, sample the Binance BTCUSDT spot price every tick
-   to build one-minute candles (spot up over the minute = green, spot
-   down = red). The CLOB probability price is NOT used for candles --
-   it drifts with time decay. CLOB still drives entry ask, TP and
-   resolution.
-
-2. TWO independent signals per window (up to 2 trades, ENTRY_SHARES
-   each):
-
-   Trade #1 -- when the 2nd candle closes (~120s):
-       C1/C2 = red,green  -> buy UP (taker at ask)
-       C1/C2 = green,red  -> buy DOWN (taker at ask)
-       C1 == C2 (or flat) -> no first trade
-
-   Trade #2 -- when the 3rd candle closes (~180s) (existing setup):
-       C3 differs from C2: green 3rd (red 2nd) -> buy UP
-                           red   3rd (green 2nd) -> buy DOWN
-       C2 == C3 (or flat) -> no second trade
-
-3. No stop-loss. TP at 0.99 redeems $1.00/share (fee-free) per
-   position; otherwise each open position settles by the inferred CLOB
-   winner at window close.
+See app/config.py for the full strategy write-up. Summary: watch
+minute 1 do nothing; the instant minute 2's Binance candle closes,
+green -> buy UP, red -> buy DOWN, flat -> no trade. Real taker buy on
+Polymarket's own book (Binance is signal-only, never execution). No SL.
+TP 0.99, real taker exit. One trade max per window; no re-arm.
 """
 import time
+from dataclasses import dataclass, field
 from typing import Optional
 
 from . import config
+from .binance_client import BinanceKlineFeed
 from .models import Side, WindowMarket
 from .paper_broker import PaperBroker
 
 
-def _midpoint(bid, ask):
-    if bid is not None and ask is not None:
-        return (bid + ask) / 2
-    return ask if ask is not None else bid
+def _realistic_fill_price(levels: Optional[list], shares: float, fallback_price: Optional[float]) -> Optional[float]:
+    """Volume-weighted average price to actually trade `shares` against a
+    real order book, instead of assuming the whole size fills at the
+    single best quote.
+
+    - levels is None -> no depth data this tick; fall back to filling
+      the whole size at `fallback_price`.
+    - levels is [] -> book fetched fine, genuinely nothing resting on
+      this side; return None, caller must not invent a fill.
+    - levels is non-empty -> walk best-price-first; any shortfall in
+      visible depth is priced at the worst level seen.
+    """
+    if levels is None:
+        return fallback_price
+    if not levels:
+        return None
+    remaining = shares
+    cost = 0.0
+    worst_price = levels[-1][0]
+    for price, size in levels:
+        if remaining <= 1e-9:
+            break
+        take = min(remaining, size) if size and size > 0 else 0.0
+        if take <= 0:
+            continue
+        cost += take * price
+        remaining -= take
+    if remaining > 1e-9:
+        cost += remaining * worst_price
+    return cost / shares
 
 
-class Engine:
-    def __init__(self, broker: PaperBroker):
-        self.broker = broker
-        self.balance: float = config.STARTING_CAPITAL
-        self.halted: bool = False
+@dataclass
+class CapitalPool:
+    balance: float
+    halted: bool = False
+    equity_curve: list = field(default_factory=list)
 
-        # window state
-        self.window: Optional[WindowMarket] = None
-        self.positions: list = []
-        self.done_for_window: bool = False
-
-        # book snapshot per tick
-        self._up_bid = self._up_ask = None
-        self._down_bid = self._down_ask = None
-
-        # candle state
-        self.candle_colors: list = []          # "red" | "green" | "flat" (closed candles)
-        self.candle_bucket: list = []          # Binance spot samples during current candle
-        self.building_candle: int = -1         # candle index being built (0-based)
-        self.first_signal_fired: bool = False  # 2-candle signal evaluated
-        self.second_signal_fired: bool = False  # 3-candle signal (existing) evaluated
-
-        # lifetime stats
-        self.total_entries: int = 0
-        self.total_tp_hits: int = 0
-        self.total_wins: int = 0
-        self.total_losses: int = 0
-        self.last_window_pnl: float = 0.0
-        self.total_pnl: float = 0.0
-        self.equity_curve: list = []
-        self._window_pnl: float = 0.0
-
-    # ---- logging ------------------------------------------------------------
-
-    def _log(self, event: str, **kw):
-        self.broker.log_event(
-            "BOT", self.window.slug if self.window else "",
-            event, balance_after=round(self.balance, 2), **kw,
-        )
-
-    # ---- window lifecycle ----------------------------------------------------
-
-    def reset_for_window(self, window: WindowMarket):
-        if self.halted:
-            return
-        self.window = window
-        self.positions = []
-        self.done_for_window = False
-        self.candle_colors = []
-        self.candle_bucket = []
-        self.building_candle = -1
-        self.first_signal_fired = False
-        self.second_signal_fired = False
-        self._window_pnl = 0.0
-        self._log("WINDOW_OPEN", note=(
-            f"window open -- building 5x 1-min candles from Binance BTCUSDT spot. "
-            f"Trade#1 after C2: RG->UP, GR->DOWN. Trade#2 after C3: C3 differs from C2 -> "
-            f"green 3rd UP, red 3rd DOWN. No SL. TP {config.TP_PRICE:.2f}. "
-            f"balance ${self.balance:.2f}"
-        ))
-
-    # ---- main tick -----------------------------------------------------------
-
-    def on_tick(self, up_bid, up_ask, down_bid, down_ask, seconds_to_close=None, now=None,
-                up_bid_levels=None, up_ask_levels=None,
-                down_bid_levels=None, down_ask_levels=None,
-                btc_spot=None):
-        if self.window is None or self.halted or self.done_for_window:
-            return
-        now = now if now is not None else time.time()
-        # store book data for helpers
-        self._up_bid, self._up_ask = up_bid, up_ask
-        self._down_bid, self._down_ask = down_bid, down_ask
-
-        up_mid = _midpoint(up_bid, up_ask)
-        down_mid = _midpoint(down_bid, down_ask)
-
-        # 1) manage open positions (TP per position)
-        if self.positions:
-            self._tick_positions(up_mid, down_mid, now)
-
-        # 2) keep building candles + evaluating both signals
-        if not (self.first_signal_fired and self.second_signal_fired):
-            self._tick_candle_builder(btc_spot, now)
-
-        # 3) window's entries are done once both signals are evaluated
-        if self.first_signal_fired and self.second_signal_fired and not self.positions:
-            self.done_for_window = True
-
-    # ---- candle building + signals ------------------------------------------
-
-    def _tick_candle_builder(self, spot, now):
-        idx = int((now - self.window.open_ts) // config.CANDLE_SECONDS)
-        idx = min(idx, config.PATTERN_CANDLES)  # only need the first 3 candles
-
-        # crossing a candle boundary -> close the previous candle
-        if idx != self.building_candle:
-            self._close_candle()
-            self.building_candle = idx
-            self.candle_bucket = []
-
-        if spot is not None:
-            self.candle_bucket.append(spot)
-
-        # Trade #1: 2-candle signal (red,green -> UP / green,red -> DOWN)
-        if len(self.candle_colors) >= config.FIRST_SIGNAL_CANDLES and not self.first_signal_fired:
-            self._evaluate_first_signal(now)
-
-        # Trade #2: existing 3-candle signal (C3 differs from C2)
-        if len(self.candle_colors) >= config.PATTERN_CANDLES and not self.second_signal_fired:
-            self._evaluate_second_signal(now)
-
-    def _close_candle(self):
-        if not self.candle_bucket:
-            return
-        first = self.candle_bucket[0]
-        last = self.candle_bucket[-1]
-        if last > first + 1e-6:
-            self.candle_colors.append("green")
-        elif last < first - 1e-6:
-            self.candle_colors.append("red")
-        else:
-            self.candle_colors.append("flat")
-        self._log("CANDLE_CLOSE", price=round(last, 4), note=(
-            f"candle #{len(self.candle_colors)} "
-            f"{self.candle_colors[-1].upper()} (open {first:.4f} -> close {last:.4f})"))
-        self.candle_bucket = []
-
-    def _evaluate_first_signal(self, now):
-        colors = self.candle_colors[:config.FIRST_SIGNAL_CANDLES]
-        self.first_signal_fired = True
-        if len(colors) < config.FIRST_SIGNAL_CANDLES:
-            return
-        c1, c2 = colors[0], colors[1]
-        if c1 == c2 or c1 not in ("green", "red") or c2 not in ("green", "red"):
-            self._log("NO_SIGNAL_1", note=(
-                f"candles {colors} -- C1/C2 must differ (RG->UP, GR->DOWN) -- no first trade"))
-            return
-        if c1 == "red" and c2 == "green":
-            self._buy(Side.UP, now, (c1, c2), slot=1)
-        else:
-            self._buy(Side.DOWN, now, (c1, c2), slot=1)
-
-    def _evaluate_second_signal(self, now):
-        colors = self.candle_colors[:config.PATTERN_CANDLES]
-        self.second_signal_fired = True
-        if len(colors) < config.PATTERN_CANDLES:
-            return
-        c2 = colors[1]
-        c3 = colors[2]
-        if c2 == c3 or c3 not in ("green", "red"):
-            self._log("NO_SIGNAL_2", note=(
-                f"candles {colors} -- 3rd candle same as 2nd (or flat) -- no second trade"))
-            return
-        if c3 == "green":
-            self._buy(Side.UP, now, (c2, c3), slot=2)
-        elif c3 == "red":
-            self._buy(Side.DOWN, now, (c2, c3), slot=2)
-
-    # ---- entry ---------------------------------------------------------------
-
-    def _buy(self, side, now, pattern, slot):
-        shares = config.ENTRY_SHARES
-        ask = self._ask_for(side)
-        if ask is None:
-            self._log("NO_LIQUIDITY", side=side.value, shares=shares,
-                      note="no ask on entry side -- skip")
-            return
-        fee = self.broker.taker_fee_amount(shares, ask)
-        cost = shares * ask + fee
-        self.balance -= cost
-        if self.balance < 0:
-            self.halted = True
-        self.positions.append({"side": side, "shares": shares,
-                               "entry_price": ask, "entry_fee": fee,
-                               "cost": cost, "entry_ts": now, "slot": slot})
-        self.total_entries += 1
-        self._log("ENTRY_FILL", side=side.value, price=round(ask, 4),
-                  shares=shares, fee=round(fee, 4), note=(
-            f"Trade#{slot} pattern {'/'.join(pattern)} -> taker buy {side.value} "
-            f"{shares:.0f}sh @ {ask:.4f}, fee ${fee:.4f}. TP {config.TP_PRICE:.2f}."))
-
-    # ---- position management -------------------------------------------------
-
-    def _tick_positions(self, up_mid, down_mid, now):
-        remaining = []
-        for pos in self.positions:
-            side = pos["side"]
-            mark = up_mid if side == Side.UP else down_mid
-            if mark is None or mark < config.TP_PRICE:
-                remaining.append(pos)
-                continue
-            proceeds = pos["shares"] * 1.0
-            pnl = proceeds - pos["cost"]
-            self.balance += proceeds
-            self._window_pnl += pnl
-            self.total_tp_hits += 1
-            self.total_wins += 1
-            self.total_pnl += pnl
-            self._record_equity()
-            self._log("TP_HIT", side=side.value, price=1.0, shares=pos["shares"],
-                      pnl=round(pnl, 2), note=(
-                f"Trade#{pos['slot']} TP {config.TP_PRICE:.2f}: redeemed {pos['shares']:.0f}sh "
-                f"at $1.00/share, fee-free. PnL ${pnl:.2f}"))
-        self.positions = remaining
-
-    # ---- window close settlement ---------------------------------------------
-
-    def finalize_window(self, winning_side: Optional[Side]):
-        if self.halted or self.window is None:
-            return
-        for pos in self.positions:
-            if winning_side is not None and winning_side == pos["side"]:
-                proceeds = pos["shares"] * 1.0
-                pnl = proceeds - pos["cost"]
-                self.balance += proceeds
-                self._window_pnl += pnl
-                self.total_wins += 1
-                self.total_pnl += pnl
-                self._log("RESOLUTION_WIN", side=pos["side"].value, price=1.0,
-                          shares=pos["shares"], pnl=round(pnl, 2), note=(
-                    f"Trade#{pos['slot']} window won by {winning_side.value} -- "
-                    f"{pos['shares']:.0f}sh redeemed at $1.00. PnL ${pnl:.2f}"))
-            else:
-                pnl = -pos["cost"]
-                self._window_pnl += pnl
-                self.total_losses += 1
-                self.total_pnl += pnl
-                self._log("RESOLUTION_LOSS", side=pos["side"].value, price=0.0,
-                          shares=pos["shares"], pnl=round(pnl, 2), note=(
-                    f"Trade#{pos['slot']} window won by "
-                    f"{winning_side.value if winning_side else 'unknown'} -- "
-                    f"{pos['side'].value} expires worthless. PnL ${pnl:.2f}"))
-        self.positions = []
-        self.last_window_pnl = self._window_pnl
-        self._window_pnl = 0.0
-        if self.total_entries == 0:
-            self._log("NO_TRADE", note="no pattern match or no fill this window")
-        self.done_for_window = True
-        self._record_equity()
-
-    # ---- helpers -------------------------------------------------------------
-
-    def _ask_for(self, side):  return self._up_ask if side == Side.UP else self._down_ask
-    def _bid_for(self, side):  return self._up_bid if side == Side.UP else self._down_bid
-    def _mid_for(self, side):  return _midpoint(self._bid_for(side), self._ask_for(side))
-
-    def _record_equity(self):
-        self.equity_curve.append({"window": self.window.slug if self.window else "",
-                                  "ts": time.time(), "balance": round(self.balance, 2)})
+    def record_equity_point(self, window_slug: Optional[str]):
+        self.equity_curve.append({
+            "window": window_slug, "ts": time.time(), "balance": round(self.balance, 2),
+        })
         if len(self.equity_curve) > 500:
             self.equity_curve = self.equity_curve[-500:]
 
-    # ---- dashboard snapshot ----------------------------------------------------
+    def check_halt(self) -> bool:
+        if not self.halted and self.balance < 0:
+            self.halted = True
+        return self.halted
 
-    def snapshot(self):
-        positions = []
-        unrealized = 0.0
-        for pos in self.positions:
-            mark = self._mid_for(pos["side"]) or pos["entry_price"]
-            upnl = pos["shares"] * mark - pos["cost"]
-            unrealized += upnl
-            positions.append({"side": pos["side"].value, "shares": pos["shares"],
-                              "slot": pos["slot"],
-                              "entry_price": round(pos["entry_price"], 4),
-                              "entry_fee": round(pos["entry_fee"], 4),
-                              "cost": round(pos["cost"], 4), "mark": round(mark, 4),
-                              "unrealized_pnl": round(upnl, 2)})
-        position = positions[0] if positions else None
 
-        if self.halted:
-            status = "halted"
-        elif positions:
-            status = "in_position"
-        elif self.first_signal_fired and self.second_signal_fired:
-            status = "done_signal"
-        elif len(self.candle_colors) < config.PATTERN_CANDLES:
-            status = "building_candles"
+@dataclass
+class Position:
+    side: Side
+    entry_price: float
+    shares: float
+    cost: float
+    entry_ts: float
+
+
+@dataclass
+class EngineState:
+    window: Optional[WindowMarket] = None
+    up_bid: Optional[float] = None
+    up_ask: Optional[float] = None
+    down_bid: Optional[float] = None
+    down_ask: Optional[float] = None
+    up_bid_levels: Optional[list] = None
+    up_ask_levels: Optional[list] = None
+    down_bid_levels: Optional[list] = None
+    down_ask_levels: Optional[list] = None
+
+    position: Optional[Position] = None
+    decision_made: bool = False     # True once the minute-2 candle has been read (whichever way it went)
+    decided_color: Optional[str] = None   # "green" | "red" | "flat", for display, once known
+
+    total_entries: int = 0
+    total_tp_fills: int = 0
+    total_forced_closes: int = 0
+    total_flat_candles: int = 0
+    total_no_signal_windows: int = 0   # Binance data never arrived in time
+    total_illiquid_skips: int = 0
+    wins: int = 0
+    losses: int = 0
+    total_pnl: float = 0.0
+    last_window_pnl: float = 0.0
+
+
+class Engine:
+    """Candle-color engine, driven off a single shared capital pool.
+    Constructed as Engine(broker, binance_feed) -- app/state.py owns
+    the BinanceKlineFeed instance and passes it in so this engine never
+    manages the websocket connection itself, only reads from it."""
+
+    name = "CANDLE"
+
+    def __init__(self, broker: PaperBroker, binance_feed: BinanceKlineFeed):
+        self.broker = broker
+        self.binance_feed = binance_feed
+        self.capital = CapitalPool(balance=config.STARTING_CAPITAL)
+        self.s = EngineState()
+        self.capital.record_equity_point(None)
+
+    def _log(self, event, **kw):
+        self.broker.log_event(self.name, self.s.window.slug if self.s.window else "", event,
+                               balance_after=self.capital.balance, **kw)
+
+    def reset_for_window(self, window: WindowMarket):
+        self.s = EngineState(window=window)
+        if self.capital.halted:
+            self._log("HALTED", note=f"engine halted (balance ${self.capital.balance:.2f} < $0) -- no trading")
+            return
+        self._log("WINDOW_OPEN", note=(
+            f"watching minute 1 (0-60s), reading Binance's minute-2 candle "
+            f"({config.SIGNAL_MINUTE_OFFSET}-{config.SIGNAL_MINUTE_OFFSET+config.SIGNAL_MINUTE_DURATION}s) for color -- "
+            f"green->UP, red->DOWN, flat->no trade. {config.BASE_SHARES:.0f}sh, taker, no SL, TP {config.TP_PRICE}"
+        ))
+
+    def on_tick(self, up_bid, up_ask, down_bid, down_ask, seconds_to_close: float = None, now: Optional[float] = None,
+                up_bid_levels: Optional[list] = None, up_ask_levels: Optional[list] = None,
+                down_bid_levels: Optional[list] = None, down_ask_levels: Optional[list] = None):
+        if self.s.window is None or self.capital.halted:
+            return
+        now = now if now is not None else time.time()
+        self.s.up_bid, self.s.up_ask = up_bid, up_ask
+        self.s.down_bid, self.s.down_ask = down_bid, down_ask
+        self.s.up_bid_levels, self.s.up_ask_levels = up_bid_levels, up_ask_levels
+        self.s.down_bid_levels, self.s.down_ask_levels = down_bid_levels, down_ask_levels
+
+        if self.s.position is not None:
+            self._check_exit(now)
+            return
+
+        if self.s.decision_made:
+            return  # already decided this window (traded, or a flat candle skip) -- no re-arm
+
+        elapsed = now - self.s.window.open_ts
+        if elapsed < config.SIGNAL_MINUTE_OFFSET + config.SIGNAL_MINUTE_DURATION:
+            return  # minute 2 hasn't finished yet
+
+        self._check_signal(now)
+
+    # ---- price/level lookups ----------------------------------------------
+
+    def _ask_for(self, side: Side) -> Optional[float]:
+        return self.s.up_ask if side == Side.UP else self.s.down_ask
+
+    def _bid_for(self, side: Side) -> Optional[float]:
+        return self.s.up_bid if side == Side.UP else self.s.down_bid
+
+    def _ask_levels_for(self, side: Side) -> Optional[list]:
+        return self.s.up_ask_levels if side == Side.UP else self.s.down_ask_levels
+
+    def _bid_levels_for(self, side: Side) -> Optional[list]:
+        return self.s.up_bid_levels if side == Side.UP else self.s.down_bid_levels
+
+    # ---- signal: read the minute-2 Binance candle ---------------------------
+
+    def _check_signal(self, now: float):
+        minute2_open_ts = self.s.window.open_ts + config.SIGNAL_MINUTE_OFFSET
+        candle = self.binance_feed.get_candle(minute2_open_ts)
+
+        if candle is None or not candle.closed:
+            # Binance data for this candle isn't in yet -- keep waiting,
+            # retried every tick. Not a skip; just not ready.
+            return
+
+        if candle.close > candle.open:
+            color = "green"
+        elif candle.close < candle.open:
+            color = "red"
         else:
-            status = "monitoring"
+            color = "flat"
+
+        self.s.decided_color = color
+        self._log("CANDLE_READ", price=candle.close,
+                   note=(f"Binance minute-2 candle: open {candle.open}, close {candle.close} -> {color} "
+                         f"(open_time {candle.open_time})"))
+
+        if color == "flat":
+            self.s.total_flat_candles += 1
+            self.s.decision_made = True
+            self._log("NO_TRADE", note="flat candle (close == open) -- no directional signal, skipping this window")
+            return
+
+        side = Side.UP if color == "green" else Side.DOWN
+        self._enter(side, now)
+        self.s.decision_made = True
+
+    def _enter(self, side: Side, now: float):
+        ask = self._ask_for(side)
+        if ask is None:
+            self.s.total_illiquid_skips += 1
+            self._log("NO_LIQUIDITY", side=side.value, note=f"signal fired ({side.value}) but no live ask yet -- skipping entry this window")
+            return
+        levels = self._ask_levels_for(side)
+        fill_price = _realistic_fill_price(levels, config.BASE_SHARES, ask)
+        if fill_price is None:
+            self.s.total_illiquid_skips += 1
+            self._log("NO_LIQUIDITY", side=side.value, price=ask,
+                       note=f"signal fired ({side.value}) but book has zero ask depth -- skipping entry this window")
+            return
+        shares = config.BASE_SHARES
+        fee = self.broker.taker_fee_amount(shares, fill_price)
+        cost = shares * fill_price + fee
+        self.capital.balance -= cost
+        self.s.total_entries += 1
+        self._log("ENTRY_FILL", side=side.value, price=fill_price, shares=shares, fee=fee,
+                   note=(f"candle signal {self.s.decided_color} -> taker buy {side.value}: {shares:.0f}sh @ "
+                         f"real fill {fill_price:.4f} (fee ${fee:.4f}) -- no SL, TP {config.TP_PRICE}"))
+        if self.capital.check_halt():
+            self._log("HALTED", note=f"balance ${self.capital.balance:.2f} < $0 -- bankrupt")
+            return
+        self.s.position = Position(side=side, entry_price=fill_price, shares=shares, cost=cost, entry_ts=now)
+
+    # ---- exit: TP only, no SL ------------------------------------------------
+
+    def _check_exit(self, now: float):
+        pos = self.s.position
+        bid = self._bid_for(pos.side)
+        if bid is None or bid < config.TP_PRICE:
+            return
+        levels = self._bid_levels_for(pos.side)
+        fill_price = _realistic_fill_price(levels, pos.shares, bid)
+        if fill_price is None:
+            self.s.total_illiquid_skips += 1
+            self._log("NO_LIQUIDITY", side=pos.side.value, price=bid,
+                       note=f"TP triggered @ {bid} but zero bid depth -- waiting")
+            return
+        fee = self.broker.taker_fee_amount(pos.shares, fill_price)
+        proceeds = pos.shares * fill_price - fee
+        pnl = proceeds - pos.cost
+        self.capital.balance += proceeds
+        self.s.total_pnl += pnl
+        self.s.last_window_pnl += pnl
+        self.s.wins += 1
+        self.s.total_tp_fills += 1
+        self._log("TP_FILL", side=pos.side.value, price=pos.entry_price, shares=pos.shares, pnl=pnl, fee=fee,
+                   note=(f"TP hit, real fill @ {fill_price:.4f} (triggered @ {bid}) "
+                         f"(entry {pos.entry_price}, fee ${fee:.4f}, pnl ${pnl:.4f})"))
+        self.capital.check_halt()
+        self.s.position = None
+
+    # ---- window close -------------------------------------------------------
+
+    def finalize_window(self, winning_side: Optional[Side]):
+        if self.s.window is None:
+            return
+        window_slug = self.s.window.slug
+
+        if not self.capital.halted:
+            if self.s.position is not None:
+                pos = self.s.position
+                bid = self._bid_for(pos.side)
+                levels = self._bid_levels_for(pos.side)
+                fill_price = _realistic_fill_price(levels, pos.shares, bid)
+                if fill_price is None:
+                    fill_price = 0.0
+                    self._log("NO_LIQUIDITY", side=pos.side.value, price=bid,
+                               note="window closed with zero bid depth -- assuming worst case $0")
+                fee = self.broker.taker_fee_amount(pos.shares, fill_price)
+                proceeds = pos.shares * fill_price - fee
+                pnl = proceeds - pos.cost
+                self.capital.balance += proceeds
+                self.s.total_pnl += pnl
+                self.s.last_window_pnl += pnl
+                self.s.total_forced_closes += 1
+                if pnl >= 0:
+                    self.s.wins += 1
+                else:
+                    self.s.losses += 1
+                self._log("FORCED_CLOSE", side=pos.side.value, price=pos.entry_price, shares=pos.shares,
+                           pnl=pnl, fee=fee,
+                           note=(f"window closed, forced taker close @ {fill_price:.4f} "
+                                 f"(entry {pos.entry_price}, fee ${fee:.4f}, pnl ${pnl:.4f})"))
+                self.capital.check_halt()
+                self.s.position = None
+            elif not self.s.decision_made:
+                self.s.total_no_signal_windows += 1
+                self._log("NO_TRADE", note="minute-2 Binance candle never arrived/closed in time this window")
+
+        self.s.window = None
+        self.capital.record_equity_point(window_slug)
+
+    # ---- dashboard payload -------------------------------------------------
+
+    def snapshot(self) -> dict:
+        pos = self.s.position
+        pos_payload = None
+        open_market_value = 0.0
+        unrealized = 0.0
+        if pos is not None:
+            bid = self._bid_for(pos.side)
+            mark = bid if bid is not None else pos.entry_price
+            open_market_value = pos.shares * mark
+            unrealized = open_market_value - pos.cost
+            pos_payload = {
+                "side": pos.side.value, "entry_price": pos.entry_price, "shares": pos.shares,
+                "cost": round(pos.cost, 4), "mark_price": mark, "unrealized_pnl": round(unrealized, 4),
+                "seconds_since_entry": round(time.time() - pos.entry_ts, 1),
+            }
+
+        elapsed = (time.time() - self.s.window.open_ts) if self.s.window else None
+        signal_ready_at = config.SIGNAL_MINUTE_OFFSET + config.SIGNAL_MINUTE_DURATION
+        seconds_until_signal = (signal_ready_at - elapsed) if (elapsed is not None and elapsed < signal_ready_at) else None
+
+        if self.capital.halted:
+            status = "halted"
+        elif pos is not None:
+            status = "open"
+        elif self.s.decision_made:
+            status = "done"
+        elif elapsed is not None and elapsed < signal_ready_at:
+            status = "watching_candle"
+        else:
+            status = "awaiting_signal"
 
         return {
-            "status": status,
-            "balance": round(self.balance, 2),
-            "starting_capital": config.STARTING_CAPITAL,
-            "halted": self.halted,
-            "position": position,
-            "positions": positions,
-            "unrealized_pnl": round(unrealized, 2),
-            "candle_colors": list(self.candle_colors),
-            "building": self.building_candle,
-            "signal_fired": self.first_signal_fired and self.second_signal_fired,
+            "engine": "CANDLE", "label": "BTC minute-2 candle color",
 
-            "total_entries": self.total_entries,
-            "total_tp_hits": self.total_tp_hits,
-            "total_wins": self.total_wins,
-            "total_losses": self.total_losses,
-            "last_window_pnl": round(self.last_window_pnl, 2),
-            "total_pnl": round(self.total_pnl, 2),
-            "win_rate": round(100 * self.total_wins / (self.total_wins + self.total_losses), 1)
-            if (self.total_wins + self.total_losses) else None,
-            "equity_curve": self.equity_curve,
+            "balance": round(self.capital.balance, 2),
+            "starting_capital": config.STARTING_CAPITAL,
+            "halted": self.capital.halted,
+            "equity_curve": self.capital.equity_curve,
+            "equity": round(self.capital.balance + open_market_value, 4),
+
+            "realized_pnl": round(self.s.total_pnl, 4),
+            "unrealized_pnl": round(unrealized, 4),
+            "open_market_value": round(open_market_value, 4),
+            "last_window_pnl": round(self.s.last_window_pnl, 4),
+
+            "position": pos_payload,
+            "decision_made": self.s.decision_made,
+            "decided_color": self.s.decided_color,
+            "seconds_until_signal": round(seconds_until_signal, 1) if seconds_until_signal is not None else None,
+            "binance": self.binance_feed.status(),
+
+            "total_entries": self.s.total_entries,
+            "total_tp_fills": self.s.total_tp_fills,
+            "total_forced_closes": self.s.total_forced_closes,
+            "total_flat_candles": self.s.total_flat_candles,
+            "total_no_signal_windows": self.s.total_no_signal_windows,
+            "total_illiquid_skips": self.s.total_illiquid_skips,
+            "wins": self.s.wins,
+            "losses": self.s.losses,
+            "win_rate": round(100 * self.s.wins / (self.s.wins + self.s.losses), 1) if (self.s.wins + self.s.losses) else None,
+
+            "status": status,
+
             "def": {
-                "candle_seconds": config.CANDLE_SECONDS,
-                "pattern_candles": config.PATTERN_CANDLES,
-                "entry_shares": config.ENTRY_SHARES,
+                "shares": config.BASE_SHARES,
+                "signal_minute_offset": config.SIGNAL_MINUTE_OFFSET,
+                "signal_minute_duration": config.SIGNAL_MINUTE_DURATION,
                 "tp_price": config.TP_PRICE,
-                "first_signal_rule": "after C2: RG -> BUY UP, GR -> BUY DOWN",
-                "second_signal_rule": "after C3: C3 differs from C2 -- green 3rd -> UP, red 3rd -> DOWN",
             },
         }

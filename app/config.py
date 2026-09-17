@@ -1,27 +1,34 @@
 """
-Candle-pattern BTC 5-minute up/down paper bot.
+Central configuration for the BTC 5-min up/down bot.
 
-The 5-minute window is divided into 5 one-minute candles. Candle color
-is determined by the real Binance BTCUSDT spot price (spot rising over
-the minute = green candle, falling = red candle) -- NOT the CLOB
-probability price, which drifts with time decay.
+Single engine -- one trade per window, direction decided by the color
+of BTC's own second 1-minute spot candle (from Binance, via websocket):
 
-Two independent signals per window (up to 2 trades):
+  1. Minute 1 (0-60s of the window): no action -- just elapses while
+     Binance's first 1-minute candle for this window forms.
+  2. Minute 2 (60-120s of the window): once THIS candle closes (its
+     Binance kline event arrives with x=true), compare its close to its
+     open:
+       - close > open (green) -> buy UP
+       - close < open (red)   -> buy DOWN
+       - close == open (flat) -> no trade this window
+     Binance's spot price is used ONLY to decide the color -- it never
+     prices or executes anything. The actual entry is a real TAKER buy
+     against Polymarket's own order book (real depth-weighted fill,
+     real fee), fired the instant the candle closes and its color is
+     known.
+  3. No stop-loss. Take profit is fixed at TP_PRICE (0.99) -- a real
+     taker sell, priced by walking actual book depth, the moment the
+     bid reaches it.
+  4. No re-arming: one entry per window, maximum. If TP never hits, the
+     position is force-closed at window end (taker, real depth-weighted
+     price).
 
-  Trade #1 (after candle 2): C1/C2 = red,green -> buy UP
-                             C1/C2 = green,red -> buy DOWN
-                             same color -> no first trade
-
-  Trade #2 (after candle 3, existing setup): C3 must differ from C2.
-    3rd green (2nd red) -> buy UP
-    3rd red   (2nd green) -> buy DOWN
-    same color on C2/C3 (GRR, RGG, RRR, GGG) -> no second trade
-
-Trades: flat ENTRY_SHARES at the current ask (immediate taker), per
-signal. No stop-loss. TP at 0.99 (redeem $1.00/share, fee-free);
-otherwise settle by the inferred CLOB winner.
-
-Demo capital: $4,500. CLOB-only pricing, no fallback.
+If Binance's data for the relevant candle hasn't arrived yet by the
+120s mark (feed lag, reconnect, etc.), the engine keeps checking every
+tick and fires the instant it becomes available -- it does not guess or
+skip just because it's a little late, though obviously a decision can
+no longer be acted on once the window itself has closed.
 """
 import os
 
@@ -29,30 +36,33 @@ import os
 TRADING_MODE = os.getenv("TRADING_MODE", "paper")
 
 # ---- Market discovery / pricing ---------------------------------------
+# CLOB only -- no Gamma price fallback anywhere in this app. Gamma is
+# used purely for one-time window metadata (slug -> token ids) in
+# polymarket_client.py; every live price/book read goes to CLOB.
 GAMMA_API_BASE = os.getenv("GAMMA_API_BASE", "https://gamma-api.polymarket.com")
 CLOB_API_BASE = os.getenv("CLOB_API_BASE", "https://clob.polymarket.com")
 SLUG_PREFIX = "btc-updown-5m-"
 WINDOW_SECONDS = 300
-POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "0.5"))
 
-# ---- Binance spot feed (candle color only) -----------------------------
-BINANCE_API_BASE = os.getenv("BINANCE_API_BASE", "https://api.binance.com")
-BINANCE_WS_URL = os.getenv("BINANCE_WS_URL",
-                           "wss://stream.binance.com:9443/ws/btcusdt@aggTrade")
-BINANCE_SYMBOL = "BTCUSDT"
+POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
 
-# ---- Candle-pattern strategy -------------------------------------------
-CANDLE_SECONDS = 60                     # one-minute candles within the 5-min window
-FIRST_SIGNAL_CANDLES = 2                # trade #1 uses the first 2 candles (RG->UP, GR->DOWN)
-PATTERN_CANDLES = 3                     # trade #2 uses the first 3 candles (C3 must differ from C2)
-ENTRY_SHARES = 500                      # flat share size per window
-TP_PRICE = 0.99                         # take profit: mid >= this -> redeem at $1.00
-STARTING_CAPITAL = 4500.0
+# ---- Candle-color engine ------------------------------------------------
+BASE_SHARES = 500.0
+SIGNAL_MINUTE_OFFSET = 60    # the decision candle is the one starting this many seconds after window open
+SIGNAL_MINUTE_DURATION = 60  # ...and running for this long (i.e. covers window_open+60s to +120s)
+TP_PRICE = 0.99
+
+STARTING_CAPITAL = float(os.getenv("STARTING_CAPITAL", "2000"))
 
 # ---- Trading fees -----------------------------------------------------
+# Every fill in this engine is a taker market order -- the entry, the
+# TP exit, and any forced window-end close all pay the real fee, priced
+# by walking real order-book depth. Verify against
+# GET https://clob.polymarket.com/fee-rate?token_id=... before trading
+# real money.
 APPLY_TAKER_FEES = True
 TAKER_FEE_RATE = 0.07
 TAKER_FEE_EXPONENT = 1
 
-# ---- Misc -------------------------------------------------------------
+# ---- Misc -----------------------------------------------------------------
 LOG_MAX_ENTRIES = 500

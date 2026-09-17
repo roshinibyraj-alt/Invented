@@ -26,11 +26,9 @@ class PaperBroker:
             self.log.pop(0)
 
     def taker_fee_amount(self, shares: float, price: float) -> float:
-        """The taker fee for a fill of this size/price. Both legs of the
-        breakout strategy call this -- the entry (a reactive buy once
-        price has already broken through the trigger) and the exit
-        (TP/SL/forced-close) are both taker fills, not resting maker
-        orders, so both pay this fee for real."""
+        """The taker fee that would apply to a market-order fill of this
+        size/price. Used to compute the maker rebate on entry/TP fills
+        (which are resting limit orders and don't pay it themselves)."""
         return self._taker_fee(shares, price)
 
     def _taker_fee(self, shares: float, price: float) -> float:

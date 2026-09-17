@@ -1,5 +1,5 @@
 """Shared dataclasses / enums."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 import time
@@ -25,7 +25,7 @@ class TradeLogEntry:
     ts: float
     engine: str          # "BOT" or "SYS"
     window_slug: str
-    event: str
+    event: str            # human readable event name
     side: Optional[str] = None
     price: Optional[float] = None
     shares: Optional[float] = None
