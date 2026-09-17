@@ -9,8 +9,8 @@ of BTC's own second 1-minute spot candle (from Binance, via websocket):
   2. Minute 2 (60-120s of the window): once THIS candle closes (its
      Binance kline event arrives with x=true), compare its close to its
      open:
-       - close > open (green) -> buy UP
-       - close < open (red)   -> buy DOWN
+       - close > open (green) -> buy DOWN
+       - close < open (red)   -> buy UP
        - close == open (flat) -> no trade this window
      Binance's spot price is used ONLY to decide the color -- it never
      prices or executes anything. The actual entry is a real TAKER buy
@@ -52,7 +52,7 @@ SIGNAL_MINUTE_OFFSET = 60    # the decision candle is the one starting this many
 SIGNAL_MINUTE_DURATION = 60  # ...and running for this long (i.e. covers window_open+60s to +120s)
 TP_PRICE = 0.99
 
-STARTING_CAPITAL = float(os.getenv("STARTING_CAPITAL", "2000"))
+STARTING_CAPITAL = float(os.getenv("STARTING_CAPITAL", "10000"))
 
 # ---- Trading fees -----------------------------------------------------
 # Every fill in this engine is a taker market order -- the entry, the

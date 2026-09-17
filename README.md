@@ -10,8 +10,8 @@ per window, direction decided by the color of BTC's own second
    Binance's first 1-minute candle for this window forms.
 2. **Minute 2 (60–120s)**: the instant this candle closes (Binance
    sends its final update, `x: true`), compare close to open:
-   - **green** (close > open) → buy **UP**
-   - **red** (close < open) → buy **DOWN**
+   - **green** (close > open) → buy **DOWN**
+   - **red** (close < open) → buy **UP**
    - **flat** (close == open) → no trade this window
 3. Binance's spot price is used **only** to decide the color — it
    never prices or executes anything. The actual entry is a real
@@ -56,7 +56,7 @@ order book is where every actual buy/sell is priced and filled.
 ## Config knobs (`app/config.py`)
 
 - `BASE_SHARES`, `SIGNAL_MINUTE_OFFSET`, `SIGNAL_MINUTE_DURATION`, `TP_PRICE`
-- `STARTING_CAPITAL` ($2000, single shared pool)
+- `STARTING_CAPITAL` ($10000, single shared pool)
 - Taker fee constants (every fill in this engine is a real taker order)
 
 ## Notes / assumptions

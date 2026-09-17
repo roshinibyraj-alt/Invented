@@ -4,7 +4,7 @@ of BTC's own second 1-minute spot candle (Binance).
 
 See app/config.py for the full strategy write-up. Summary: watch
 minute 1 do nothing; the instant minute 2's Binance candle closes,
-green -> buy UP, red -> buy DOWN, flat -> no trade. Real taker buy on
+green -> buy DOWN, red -> buy UP, flat -> no trade. Real taker buy on
 Polymarket's own book (Binance is signal-only, never execution). No SL.
 TP 0.99, real taker exit. One trade max per window; no re-arm.
 """
@@ -133,7 +133,7 @@ class Engine:
         self._log("WINDOW_OPEN", note=(
             f"watching minute 1 (0-60s), reading Binance's minute-2 candle "
             f"({config.SIGNAL_MINUTE_OFFSET}-{config.SIGNAL_MINUTE_OFFSET+config.SIGNAL_MINUTE_DURATION}s) for color -- "
-            f"green->UP, red->DOWN, flat->no trade. {config.BASE_SHARES:.0f}sh, taker, no SL, TP {config.TP_PRICE}"
+            f"green->DOWN, red->UP, flat->no trade. {config.BASE_SHARES:.0f}sh, taker, no SL, TP {config.TP_PRICE}"
         ))
 
     def on_tick(self, up_bid, up_ask, down_bid, down_ask, seconds_to_close: float = None, now: Optional[float] = None,
@@ -203,7 +203,7 @@ class Engine:
             self._log("NO_TRADE", note="flat candle (close == open) -- no directional signal, skipping this window")
             return
 
-        side = Side.UP if color == "green" else Side.DOWN
+        side = Side.DOWN if color == "green" else Side.UP
         self._enter(side, now)
         self.s.decision_made = True
 

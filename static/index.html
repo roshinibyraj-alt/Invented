@@ -150,7 +150,7 @@
   <header>
     <div>
       <h1>Candle-color engine</h1>
-      <div class="sub">BTC 5m up/down — minute 1: watch only. Minute 2: read BTC's own 1-min spot candle from Binance (websocket, signal only) — green→buy UP, red→buy DOWN, flat→skip. 500sh, taker, no SL, TP 0.99, one trade/window</div>
+      <div class="sub">BTC 5m up/down — minute 1: watch only. Minute 2: read BTC's own 1-min spot candle from Binance (websocket, signal only) — green→buy DOWN, red→buy UP, flat→skip. 500sh, taker, no SL, TP 0.99, one trade/window</div>
     </div>
     <div class="status-pill"><span class="dot" id="statusDot"></span><span id="statusText">connecting</span></div>
   </header>
@@ -251,9 +251,9 @@ function renderBinancePanel(e, secondsIntoWindow){
   const banner = $('signalBanner');
   const color = e.decided_color;
   if(color === 'green'){
-    banner.className = 'signal-banner green'; banner.textContent = 'GREEN — bought UP';
+    banner.className = 'signal-banner green'; banner.textContent = 'GREEN — bought DOWN';
   } else if(color === 'red'){
-    banner.className = 'signal-banner red'; banner.textContent = 'RED — bought DOWN';
+    banner.className = 'signal-banner red'; banner.textContent = 'RED — bought UP';
   } else if(color === 'flat'){
     banner.className = 'signal-banner flat'; banner.textContent = 'FLAT candle — no trade this window';
   } else if(secondsIntoWindow!=null && secondsIntoWindow < 120){
