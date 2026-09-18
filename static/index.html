@@ -109,6 +109,21 @@
   .stat-tile .l{font-size:10px; color:var(--muted); margin-top:3px;}
   .stat-tile.win .n{color:var(--mint);} .stat-tile.loss .n{color:var(--coral);}
 
+  .winrate-grid{display:grid; grid-template-columns:1fr 1fr; gap:10px;}
+  @media (max-width:520px){ .winrate-grid{grid-template-columns:1fr;} }
+  .winrate-box{background:var(--panel-3); border-radius:11px; padding:14px 16px; border:1px solid var(--line);}
+  .winrate-box.contrarian{border-color:var(--violet-dim); background:linear-gradient(135deg,var(--violet-dim),var(--panel-3) 65%);}
+  .winrate-box .head{display:flex; justify-content:space-between; align-items:baseline; margin-bottom:8px;}
+  .winrate-box .head .t{font-size:11.5px; font-weight:600; color:var(--muted);}
+  .winrate-box.contrarian .head .t{color:var(--violet);}
+  .winrate-box .head .rate{font-family:var(--mono); font-size:22px; font-weight:600;}
+  .winrate-box .wl{font-family:var(--mono); font-size:11px; color:var(--faint); display:flex; gap:10px;}
+  .winrate-box .wl .w{color:var(--mint);} .winrate-box .wl .l{color:var(--coral);}
+  .streak-line{margin-top:10px; padding-top:10px; border-top:1px solid var(--line);
+    font-family:var(--mono); font-size:11.5px; color:var(--muted); display:flex; justify-content:space-between; align-items:center;}
+  .streak-line .badge{font-size:10px; font-weight:600; padding:3px 9px; border-radius:6px; background:var(--panel-3); color:var(--muted);}
+  .streak-line .badge.active{background:var(--violet-dim); color:var(--violet);}
+
   .equity-hero{display:grid; grid-template-columns:repeat(3,1fr); gap:12px;}
   .equity-hero .item .k{font-size:11px; color:var(--muted); font-weight:600;}
   .equity-hero .item .v{font-family:var(--mono); font-size:24px; font-weight:600; margin-top:6px;}
@@ -147,7 +162,7 @@
   <header>
     <div>
       <h1>Previous-window momentum</h1>
-      <div class="sub">BTC 5m up/down — the instant a new window opens, read the JUST-CLOSED window's own last 1-min Binance candle: green→resting limit buy UP @ 0.45, red→resting limit buy DOWN @ 0.45, flat→skip. If unfilled 10s after window open, cancel and buy at market instead. 200sh, no SL, TP 0.99, one trade/window</div>
+      <div class="sub">BTC 5m up/down — the instant a new window opens, read the JUST-CLOSED window's own last 1-min Binance candle: green→resting limit buy UP @ 0.45, red→resting limit buy DOWN @ 0.45, flat→skip. RSI(14) vetoes the trade if already overbought/oversold in that direction. After 3 normal wins in a row, next trade fades the signal, then resets. Resting limit order only — no market fallback. 200sh, no SL, TP 0.99, one trade/window</div>
     </div>
     <div class="status-pill"><span class="dot" id="statusDot"></span><span id="statusText">connecting</span></div>
   </header>
@@ -187,6 +202,12 @@
   <div class="card">
     <h2>Trade stats</h2>
     <div class="stats-grid" id="statsGrid"></div>
+  </div>
+
+  <div class="card">
+    <h2>Win rate</h2>
+    <div class="winrate-grid" id="winrateGrid"></div>
+    <div class="streak-line" id="streakLine"></div>
   </div>
 
   <div class="card">
@@ -288,6 +309,7 @@ async function poll(){
     renderBinancePanel(e);
     renderEngineCard(e);
     renderStats(e);
+    renderWinRate(e);
     renderEquityHero(e);
     renderEquityCurve(e.equity_curve || []);
     renderLog(s.log || []);
@@ -308,12 +330,13 @@ function renderEngineCard(e){
   const defRowsHtml = [
     ['Shares', fmtSh(e.def.shares)],
     ['Order price', fmtP(e.def.order_price)],
-    ['Fill timeout', '10s, then market'],
+    ['TP price', fmtP(e.def.tp_price)],
   ].map(([k,v]) => `<div class="def-item"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
 
   let orderHtml = '';
   if(e.order && e.order.status === 'resting'){
-    orderHtml = `<div class="order-box"><span class="lbl">resting: ${e.order.side} ${fmtSh(e.order.shares)}sh @ ${fmtP(e.order.price)}</span><span>waiting for fill</span></div>`;
+    const tag = e.order.is_contrarian ? ` <span class="lbl" style="color:var(--violet)">[CONTRARIAN, real signal ${e.order.signal_side}]</span>` : '';
+    orderHtml = `<div class="order-box"><span class="lbl">resting: ${e.order.side} ${fmtSh(e.order.shares)}sh @ ${fmtP(e.order.price)}</span>${tag}<span>waiting for fill</span></div>`;
   }
 
   const pos = e.position;
@@ -356,18 +379,41 @@ function renderEngineCard(e){
 function renderStats(e){
   const tiles = [
     ['total_orders_placed','orders placed',''], ['total_order_fills','maker fills',''],
-    ['total_timeout_cancels','10s timeouts',''], ['total_market_fallback_fills','market fallbacks',''],
     ['total_tp_fills','tp fills','win'], ['total_forced_closes','forced close',''],
     ['total_unfilled_cancels','unfilled cancels',''], ['total_flat_candles','flat candles',''],
     ['total_no_signal_windows','no-signal',''], ['total_illiquid_skips','illiquid skips',''],
-    ['total_rsi_vetoes','RSI vetoes',''],
-    ['win_rate','win rate %',''],
+    ['total_rsi_vetoes','RSI vetoes',''], ['total_contrarian_trades','contrarian trades',''],
   ];
   $('statsGrid').innerHTML = tiles.map(([key,label,cls]) => {
-    let v = e[key];
-    if(key==='win_rate') v = (v==null ? '—' : v);
+    const v = e[key];
     return `<div class="stat-tile ${cls}"><div class="n">${v ?? 0}</div><div class="l">${label}</div></div>`;
   }).join('');
+}
+
+function renderWinRate(e){
+  const box = (title, wins, losses, rate, extraCls) => {
+    const rateTxt = (rate==null ? '—' : rate.toFixed(1)+'%');
+    const rateCls = (rate==null ? '' : (rate>=50 ? 'pos' : 'neg'));
+    return `
+      <div class="winrate-box ${extraCls}">
+        <div class="head">
+          <span class="t">${title}</span>
+          <span class="rate ${rateCls}">${rateTxt}</span>
+        </div>
+        <div class="wl"><span class="w">${wins ?? 0}W</span><span class="l">${losses ?? 0}L</span></div>
+      </div>`;
+  };
+  $('winrateGrid').innerHTML =
+    box('Normal (signal)', e.wins_normal, e.losses_normal, e.win_rate_normal, '') +
+    box('Contrarian (faded)', e.wins_contrarian, e.losses_contrarian, e.win_rate_contrarian, 'contrarian');
+
+  const trigger = e.win_streak_trigger ?? 3;
+  const streak = e.win_streak ?? 0;
+  const armed = streak >= trigger;
+  $('streakLine').innerHTML = `
+    <span>Current win streak: <b>${streak}</b> / ${trigger}</span>
+    <span class="badge ${armed?'active':''}">${armed ? 'NEXT TRADE: CONTRARIAN' : 'next trade: normal'}</span>
+  `;
 }
 
 function renderEquityHero(e){

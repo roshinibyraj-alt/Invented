@@ -65,6 +65,14 @@ RSI_PERIOD = 14
 RSI_OVERBOUGHT = 70.0
 RSI_OVERSOLD = 30.0
 
+# ---- win-streak contrarian filter ----------------------------------------
+# Applied only to trades that already passed the RSI veto above. After
+# WIN_STREAK_TRIGGER consecutive wins on normal (real-signal) trades, the
+# next trade bets against the signal side instead of with it. That one
+# contrarian trade settles (win or loss either way), the streak resets to
+# 0, and normal signal-following resumes.
+WIN_STREAK_TRIGGER = 3
+
 STARTING_CAPITAL = float(os.getenv("STARTING_CAPITAL", "2000"))
 
 # ---- Trading fees -----------------------------------------------------
