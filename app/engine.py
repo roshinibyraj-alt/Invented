@@ -1,14 +1,17 @@
 """
-Trading engine -- one resting limit buy per window, direction decided
-by the color of the PREVIOUS window's own last 1-minute Binance spot
-candle.
+Trading engine -- one resting limit buy per window. Direction is
+decided by the color of the PREVIOUS window's own last 1-minute
+Binance spot candle, then FADED: the bot always trades the opposite
+side of that signal.
 
 See app/config.py for the full strategy write-up. Summary: the instant
 a new window opens, read the just-finished window's [240s,300s) minute
-candle -- green -> resting limit buy UP @ 0.45, red -> resting limit
-buy DOWN @ 0.45, flat -> no trade. Real MAKER fill (own exact price, no
-fee) whenever that side's ask reaches it. No SL. TP 0.99, real taker
-exit. One order/trade max per window; no re-arm.
+candle -- green -> real signal UP, red -> real signal DOWN, flat -> no
+trade. RSI veto is checked against that real signal side. If it
+survives, the bot places a resting limit buy on the OPPOSITE side,
+always, @ 0.45. Real MAKER fill (own exact price, no fee) whenever
+that side's ask reaches it. No SL. TP 0.99, real taker exit. One
+order/trade max per window; no re-arm.
 """
 import time
 from dataclasses import dataclass, field
@@ -79,8 +82,7 @@ class RestingOrder:
     price: float
     shares: float
     status: str = "resting"   # resting | filled | cancelled
-    is_contrarian: bool = False
-    signal_side: Optional[Side] = None   # the real (pre-flip) signal side, for logging
+    signal_side: Optional[Side] = None   # the real (pre-fade) signal side, for logging
 
 
 @dataclass
@@ -90,16 +92,15 @@ class Position:
     shares: float
     cost: float
     entry_ts: float
-    is_contrarian: bool = False
     signal_side: Optional[Side] = None
 
 
 @dataclass
 class EngineState:
     """Per-window transient state -- fully replaced by reset_for_window()
-    at the start of every window. Cumulative stats (totals, win/loss
-    counts, streak) live on the Engine itself, below, so they survive
-    across windows instead of getting wiped every 5 minutes."""
+    at the start of every window. Cumulative stats live on the Engine
+    itself, below, so they survive across windows instead of getting
+    wiped every 5 minutes."""
     window: Optional[WindowMarket] = None
     up_bid: Optional[float] = None
     up_ask: Optional[float] = None
@@ -119,7 +120,7 @@ class EngineState:
 
 
 class Engine:
-    """Previous-window-momentum engine, driven off a single shared
+    """Previous-window-momentum-faded engine, driven off a single shared
     capital pool. Constructed as Engine(broker, binance_feed) --
     app/state.py owns the BinanceKlineFeed instance and passes it in."""
 
@@ -146,39 +147,11 @@ class Engine:
         self.wins = 0
         self.losses = 0
 
-        # ---- win-streak contrarian filter -----------------------------------
-        # After WIN_STREAK_TRIGGER consecutive wins on normal (real-signal)
-        # trades, the next trade fades the signal (opposite side) instead of
-        # following it. That one contrarian trade settles either way, then
-        # win_streak resets to 0 and normal signal-following resumes.
-        self.win_streak = 0
-        self.total_contrarian_trades = 0
-        self.wins_normal = 0
-        self.losses_normal = 0
-        self.wins_contrarian = 0
-        self.losses_contrarian = 0
-
-    def _record_trade_result(self, pos: Position, pnl: float):
-        """Called once per settled trade (TP fill or forced window-close
-        close) to update win/loss counts and the streak filter."""
-        win = pnl >= 0
-        if win:
+    def _record_trade_result(self, pnl: float):
+        if pnl >= 0:
             self.wins += 1
         else:
             self.losses += 1
-        if pos.is_contrarian:
-            if win:
-                self.wins_contrarian += 1
-            else:
-                self.losses_contrarian += 1
-            self.win_streak = 0   # contrarian bet resolved -- back to normal
-        else:
-            if win:
-                self.wins_normal += 1
-                self.win_streak += 1
-            else:
-                self.losses_normal += 1
-                self.win_streak = 0
 
     def _log(self, event, **kw):
         self.broker.log_event(self.name, self.s.window.slug if self.s.window else "", event,
@@ -190,10 +163,9 @@ class Engine:
             self._log("HALTED", note=f"engine halted (balance ${self.capital.balance:.2f} < $0) -- no trading")
             return
         self._log("WINDOW_OPEN", note=(
-            f"reading previous window's last-minute candle -- green->resting buy UP @ {config.ORDER_PRICE}, "
-            f"red->resting buy DOWN @ {config.ORDER_PRICE}, flat->no trade, RSI({config.RSI_PERIOD}) veto "
-            f"if overbought/oversold in that direction, then fade the signal after "
-            f"{config.WIN_STREAK_TRIGGER} normal wins in a row (win_streak={self.win_streak}). "
+            f"reading previous window's last-minute candle -- green->real signal UP, red->real signal DOWN, "
+            f"flat->no trade, RSI({config.RSI_PERIOD}) veto on the real signal side if overbought/oversold, "
+            f"then FADE: resting limit buy is placed on the OPPOSITE side, always, @ {config.ORDER_PRICE}. "
             f"{config.ORDER_SHARES:.0f}sh, maker, no SL, TP {config.TP_PRICE}"
         ))
 
@@ -270,35 +242,26 @@ class Engine:
             if side == Side.UP and rsi > config.RSI_OVERBOUGHT:
                 self.total_rsi_vetoes += 1
                 self._log("RSI_VETO", side=side.value, note=(
-                    f"{color} signal for UP but RSI({config.RSI_PERIOD}) {rsi:.1f} > "
+                    f"real signal {color}/UP but RSI({config.RSI_PERIOD}) {rsi:.1f} > "
                     f"{config.RSI_OVERBOUGHT} (overbought) -- skipping, momentum looks exhausted"))
                 return
             if side == Side.DOWN and rsi < config.RSI_OVERSOLD:
                 self.total_rsi_vetoes += 1
                 self._log("RSI_VETO", side=side.value, note=(
-                    f"{color} signal for DOWN but RSI({config.RSI_PERIOD}) {rsi:.1f} < "
+                    f"real signal {color}/DOWN but RSI({config.RSI_PERIOD}) {rsi:.1f} < "
                     f"{config.RSI_OVERSOLD} (oversold) -- skipping, momentum looks exhausted"))
                 return
 
-        # RSI veto is checked against the real signal side only, above.
-        # The win-streak filter is applied after that, and only flips
-        # which side the order actually goes on.
-        is_contrarian = self.win_streak >= config.WIN_STREAK_TRIGGER
-        trade_side = side.other() if is_contrarian else side
-        if is_contrarian:
-            self.total_contrarian_trades += 1
-            self._log("CONTRARIAN_FLIP", side=trade_side.value, note=(
-                f"win streak at {self.win_streak} (>= {config.WIN_STREAK_TRIGGER}) -- fading the {color} "
-                f"signal: real signal was {side.value}, betting {trade_side.value} instead"))
+        # Always fade: trade the opposite side of the real signal.
+        trade_side = side.other()
 
         self.s.order = RestingOrder(side=trade_side, price=config.ORDER_PRICE, shares=config.ORDER_SHARES,
-                                     is_contrarian=is_contrarian, signal_side=side)
+                                     signal_side=side)
         self.total_orders_placed += 1
         rsi_note = f", RSI({config.RSI_PERIOD}) {rsi:.1f}" if rsi is not None else ", RSI n/a (insufficient history)"
-        contrarian_note = f" [CONTRARIAN, real signal {side.value}]" if is_contrarian else ""
         self._log("RUNG_PLACED", side=trade_side.value, price=config.ORDER_PRICE, shares=config.ORDER_SHARES,
-                   note=(f"{color} signal{rsi_note}{contrarian_note} -> resting limit buy {trade_side.value}: "
-                         f"{config.ORDER_SHARES:.0f}sh @ {config.ORDER_PRICE}"))
+                   note=(f"real signal {color}/{side.value}{rsi_note} -> FADED -> resting limit buy "
+                         f"{trade_side.value}: {config.ORDER_SHARES:.0f}sh @ {config.ORDER_PRICE}"))
 
     def _check_fill(self, now: float):
         order = self.s.order
@@ -315,7 +278,7 @@ class Engine:
             self._log("HALTED", note=f"balance ${self.capital.balance:.2f} < $0 -- bankrupt")
             return
         self.s.position = Position(side=order.side, entry_price=order.price, shares=order.shares, cost=cost,
-                                    entry_ts=now, is_contrarian=order.is_contrarian, signal_side=order.signal_side)
+                                    entry_ts=now, signal_side=order.signal_side)
 
     # ---- exit: TP only, no SL ------------------------------------------------
 
@@ -336,7 +299,7 @@ class Engine:
         self.capital.balance += proceeds
         self.total_pnl += pnl
         self.s.last_window_pnl += pnl
-        self._record_trade_result(pos, pnl)
+        self._record_trade_result(pnl)
         self.total_tp_fills += 1
         self._log("TP_FILL", side=pos.side.value, price=pos.entry_price, shares=pos.shares, pnl=pnl, fee=fee,
                    note=(f"TP hit, real fill @ {fill_price:.4f} (triggered @ {bid}) "
@@ -368,7 +331,7 @@ class Engine:
                 self.total_pnl += pnl
                 self.s.last_window_pnl += pnl
                 self.total_forced_closes += 1
-                self._record_trade_result(pos, pnl)
+                self._record_trade_result(pnl)
                 self._log("FORCED_CLOSE", side=pos.side.value, price=pos.entry_price, shares=pos.shares,
                            pnl=pnl, fee=fee,
                            note=(f"window closed, forced taker close @ {fill_price:.4f} "
@@ -403,6 +366,7 @@ class Engine:
                 "side": pos.side.value, "entry_price": pos.entry_price, "shares": pos.shares,
                 "cost": round(pos.cost, 4), "mark_price": mark, "unrealized_pnl": round(unrealized, 4),
                 "seconds_since_entry": round(time.time() - pos.entry_ts, 1),
+                "signal_side": pos.signal_side.value if pos.signal_side else None,
             }
 
         order_payload = None
@@ -410,7 +374,6 @@ class Engine:
             order_payload = {
                 "side": self.s.order.side.value, "price": self.s.order.price,
                 "shares": self.s.order.shares, "status": self.s.order.status,
-                "is_contrarian": self.s.order.is_contrarian,
                 "signal_side": self.s.order.signal_side.value if self.s.order.signal_side else None,
             }
 
@@ -425,11 +388,10 @@ class Engine:
         else:
             status = "awaiting_signal"
 
-        def _rate(w, l):
-            return round(100 * w / (w + l), 1) if (w + l) else None
+        win_rate = round(100 * self.wins / (self.wins + self.losses), 1) if (self.wins + self.losses) else None
 
         return {
-            "engine": "PREVCANDLE", "label": "Previous-window last-candle momentum",
+            "engine": "PREVCANDLE", "label": "Previous-window last-candle (faded)",
 
             "balance": round(self.capital.balance, 2),
             "starting_capital": config.STARTING_CAPITAL,
@@ -460,17 +422,7 @@ class Engine:
 
             "wins": self.wins,
             "losses": self.losses,
-            "win_rate": _rate(self.wins, self.losses),
-
-            "win_streak": self.win_streak,
-            "win_streak_trigger": config.WIN_STREAK_TRIGGER,
-            "total_contrarian_trades": self.total_contrarian_trades,
-            "wins_normal": self.wins_normal,
-            "losses_normal": self.losses_normal,
-            "win_rate_normal": _rate(self.wins_normal, self.losses_normal),
-            "wins_contrarian": self.wins_contrarian,
-            "losses_contrarian": self.losses_contrarian,
-            "win_rate_contrarian": _rate(self.wins_contrarian, self.losses_contrarian),
+            "win_rate": win_rate,
 
             "status": status,
 

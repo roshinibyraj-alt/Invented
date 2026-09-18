@@ -1,29 +1,32 @@
 """
 Central configuration for the BTC 5-min up/down bot.
 
-Single engine -- one resting limit buy per window, direction decided by
-the color of the PREVIOUS window's own last 1-minute Binance spot
-candle (the 240-300s candle of the window that just closed):
+Single engine -- one resting limit buy per window. Direction is decided
+by the color of the PREVIOUS window's own last 1-minute Binance spot
+candle (the 240-300s candle of the window that just closed), then
+FADED (the bot trades the opposite side of that signal, always):
 
   1. The instant a new window opens, read that candle (already closed
      by definition -- it ended exactly when this window began):
-       - green (close > open) -> place a resting limit buy on UP,
-         200 shares, @ 0.45
-       - red   (close < open) -> place a resting limit buy on DOWN,
-         200 shares, @ 0.45
+       - green (close > open) -> real signal UP
+       - red   (close < open) -> real signal DOWN
        - flat  (close == open) -> no trade this window
      If Binance's data for that candle hasn't arrived yet right at the
      window boundary (feed lag), the engine keeps checking every tick
-     and places the order the instant it becomes available.
-  2. This is a real MAKER limit order -- it fills at its own exact
+     and reads it the instant it becomes available.
+  2. RSI(14) veto is checked against the REAL signal side (see below) --
+     if it survives, the bot places its resting limit buy on the
+     OPPOSITE side of the real signal, always (this is a fade/contrarian
+     strategy, not momentum-following).
+  3. This is a real MAKER limit order -- it fills at its own exact
      price (0.45), no slippage, no fee, the moment that side's ask
      drops to/through it. It is NOT a taker/market buy. LIMIT ONLY:
      if it never fills, it just sits resting until the window closes,
      then is cancelled with no penalty -- no market-order fallback.
-  3. No stop-loss. Take profit is fixed at TP_PRICE (0.99) -- a real
+  4. No stop-loss. Take profit is fixed at TP_PRICE (0.99) -- a real
      taker sell, priced by walking actual book depth, the moment the
      bid reaches it.
-  4. Only one order, one trade max per window -- no re-arming. If the
+  5. Only one order, one trade max per window -- no re-arming. If the
      resting order fills but TP never hits, the position is
      force-closed at window end (taker, real depth-weighted price).
 
@@ -47,31 +50,24 @@ WINDOW_SECONDS = 300
 
 POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
 
-# ---- Previous-window-momentum engine -------------------------------------
+# ---- Previous-window-momentum engine (faded) ------------------------------
 ORDER_SHARES = 200.0
-ORDER_PRICE = 0.45           # fixed absolute limit price, whichever side is signaled
+ORDER_PRICE = 0.45           # fixed absolute limit price, whichever side is traded
 SIGNAL_CANDLE_OFFSET = 240   # the decision candle is the previous window's [240s, 300s) minute
 TP_PRICE = 0.99
 
 # ---- RSI veto -----------------------------------------------------------
 # Computed on the 1-minute BTC feed, as of the same signal candle used for
-# color. Does NOT set direction -- it only blocks a trade the candle color
-# already picked, when that direction looks exhausted rather than fresh:
-#   green -> UP signal, but RSI already overbought  -> skip (veto)
-#   red   -> DOWN signal, but RSI already oversold  -> skip (veto)
+# color. Checked against the REAL signal side (before the fade flip) --
+# it only blocks a trade when that real signal direction looks exhausted
+# rather than fresh:
+#   green -> real signal UP,   but RSI already overbought -> veto (no trade)
+#   red   -> real signal DOWN, but RSI already oversold   -> veto (no trade)
 # If there isn't enough closed-candle history yet (startup/reconnect), the
 # veto is skipped and the trade proceeds on candle color alone.
 RSI_PERIOD = 14
 RSI_OVERBOUGHT = 70.0
 RSI_OVERSOLD = 30.0
-
-# ---- win-streak contrarian filter ----------------------------------------
-# Applied only to trades that already passed the RSI veto above. After
-# WIN_STREAK_TRIGGER consecutive wins on normal (real-signal) trades, the
-# next trade bets against the signal side instead of with it. That one
-# contrarian trade settles (win or loss either way), the streak resets to
-# 0, and normal signal-following resumes.
-WIN_STREAK_TRIGGER = 3
 
 STARTING_CAPITAL = float(os.getenv("STARTING_CAPITAL", "2000"))
 
