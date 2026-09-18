@@ -1,12 +1,14 @@
 """
-Trading engine -- one trade per window, direction decided by the color
-of BTC's own second 1-minute spot candle (Binance).
+Trading engine -- one resting limit buy per window, direction decided
+by the color of the PREVIOUS window's own last 1-minute Binance spot
+candle.
 
-See app/config.py for the full strategy write-up. Summary: watch
-minute 1 do nothing; the instant minute 2's Binance candle closes,
-green -> buy DOWN, red -> buy UP, flat -> no trade. Real taker buy on
-Polymarket's own book (Binance is signal-only, never execution). No SL.
-TP 0.99, real taker exit. One trade max per window; no re-arm.
+See app/config.py for the full strategy write-up. Summary: the instant
+a new window opens, read the just-finished window's [240s,300s) minute
+candle -- green -> resting limit buy UP @ 0.45, red -> resting limit
+buy DOWN @ 0.45, flat -> no trade. Real MAKER fill (own exact price, no
+fee) whenever that side's ask reaches it. No SL. TP 0.99, real taker
+exit. One order/trade max per window; no re-arm.
 """
 import time
 from dataclasses import dataclass, field
@@ -21,7 +23,9 @@ from .paper_broker import PaperBroker
 def _realistic_fill_price(levels: Optional[list], shares: float, fallback_price: Optional[float]) -> Optional[float]:
     """Volume-weighted average price to actually trade `shares` against a
     real order book, instead of assuming the whole size fills at the
-    single best quote.
+    single best quote. Used only for the TAKER TP exit / forced close --
+    the entry itself is a resting maker order that fills at its own
+    exact limit price, no walk needed.
 
     - levels is None -> no depth data this tick; fall back to filling
       the whole size at `fallback_price`.
@@ -70,6 +74,14 @@ class CapitalPool:
 
 
 @dataclass
+class RestingOrder:
+    side: Side
+    price: float
+    shares: float
+    status: str = "resting"   # resting | filled | cancelled
+
+
+@dataclass
 class Position:
     side: Side
     entry_price: float
@@ -90,15 +102,18 @@ class EngineState:
     down_bid_levels: Optional[list] = None
     down_ask_levels: Optional[list] = None
 
+    order: Optional[RestingOrder] = None
     position: Optional[Position] = None
-    decision_made: bool = False     # True once the minute-2 candle has been read (whichever way it went)
-    decided_color: Optional[str] = None   # "green" | "red" | "flat", for display, once known
+    decision_made: bool = False     # True once the signal candle has been read (whichever way it went)
+    decided_color: Optional[str] = None   # "green" | "red" | "flat", once known
 
-    total_entries: int = 0
+    total_orders_placed: int = 0
+    total_order_fills: int = 0
     total_tp_fills: int = 0
     total_forced_closes: int = 0
+    total_unfilled_cancels: int = 0
     total_flat_candles: int = 0
-    total_no_signal_windows: int = 0   # Binance data never arrived in time
+    total_no_signal_windows: int = 0
     total_illiquid_skips: int = 0
     wins: int = 0
     losses: int = 0
@@ -107,12 +122,11 @@ class EngineState:
 
 
 class Engine:
-    """Candle-color engine, driven off a single shared capital pool.
-    Constructed as Engine(broker, binance_feed) -- app/state.py owns
-    the BinanceKlineFeed instance and passes it in so this engine never
-    manages the websocket connection itself, only reads from it."""
+    """Previous-window-momentum engine, driven off a single shared
+    capital pool. Constructed as Engine(broker, binance_feed) --
+    app/state.py owns the BinanceKlineFeed instance and passes it in."""
 
-    name = "CANDLE"
+    name = "PREVCANDLE"
 
     def __init__(self, broker: PaperBroker, binance_feed: BinanceKlineFeed):
         self.broker = broker
@@ -131,9 +145,9 @@ class Engine:
             self._log("HALTED", note=f"engine halted (balance ${self.capital.balance:.2f} < $0) -- no trading")
             return
         self._log("WINDOW_OPEN", note=(
-            f"watching minute 1 (0-60s), reading Binance's minute-2 candle "
-            f"({config.SIGNAL_MINUTE_OFFSET}-{config.SIGNAL_MINUTE_OFFSET+config.SIGNAL_MINUTE_DURATION}s) for color -- "
-            f"green->DOWN, red->UP, flat->no trade. {config.BASE_SHARES:.0f}sh, taker, no SL, TP {config.TP_PRICE}"
+            f"reading previous window's last-minute candle -- green->resting buy UP @ {config.ORDER_PRICE}, "
+            f"red->resting buy DOWN @ {config.ORDER_PRICE}, flat->no trade. {config.ORDER_SHARES:.0f}sh, "
+            f"maker, no SL, TP {config.TP_PRICE}"
         ))
 
     def on_tick(self, up_bid, up_ask, down_bid, down_ask, seconds_to_close: float = None, now: Optional[float] = None,
@@ -151,14 +165,12 @@ class Engine:
             self._check_exit(now)
             return
 
-        if self.s.decision_made:
-            return  # already decided this window (traded, or a flat candle skip) -- no re-arm
+        if not self.s.decision_made:
+            self._check_signal(now)
+            return
 
-        elapsed = now - self.s.window.open_ts
-        if elapsed < config.SIGNAL_MINUTE_OFFSET + config.SIGNAL_MINUTE_DURATION:
-            return  # minute 2 hasn't finished yet
-
-        self._check_signal(now)
+        if self.s.order is not None and self.s.order.status == "resting":
+            self._check_fill(now)
 
     # ---- price/level lookups ----------------------------------------------
 
@@ -168,21 +180,22 @@ class Engine:
     def _bid_for(self, side: Side) -> Optional[float]:
         return self.s.up_bid if side == Side.UP else self.s.down_bid
 
-    def _ask_levels_for(self, side: Side) -> Optional[list]:
-        return self.s.up_ask_levels if side == Side.UP else self.s.down_ask_levels
-
     def _bid_levels_for(self, side: Side) -> Optional[list]:
         return self.s.up_bid_levels if side == Side.UP else self.s.down_bid_levels
 
-    # ---- signal: read the minute-2 Binance candle ---------------------------
+    # ---- signal: read the PREVIOUS window's last-minute candle --------------
 
     def _check_signal(self, now: float):
-        minute2_open_ts = self.s.window.open_ts + config.SIGNAL_MINUTE_OFFSET
-        candle = self.binance_feed.get_candle(minute2_open_ts)
+        # The previous window's last minute is exactly the 60 seconds
+        # right before this window opened -- i.e. [this_open-60, this_open).
+        signal_open_ts = self.s.window.open_ts - 60
+        candle = self.binance_feed.get_candle(signal_open_ts)
 
         if candle is None or not candle.closed:
             # Binance data for this candle isn't in yet -- keep waiting,
-            # retried every tick. Not a skip; just not ready.
+            # retried every tick. It should normally already be closed
+            # (it ended exactly when this window opened), but feed lag
+            # or a reconnect can delay it briefly.
             return
 
         if candle.close > candle.open:
@@ -194,44 +207,36 @@ class Engine:
 
         self.s.decided_color = color
         self._log("CANDLE_READ", price=candle.close,
-                   note=(f"Binance minute-2 candle: open {candle.open}, close {candle.close} -> {color} "
-                         f"(open_time {candle.open_time})"))
+                   note=(f"previous window's last-minute candle: open {candle.open}, close {candle.close} -> "
+                         f"{color} (open_time {candle.open_time})"))
 
+        self.s.decision_made = True
         if color == "flat":
             self.s.total_flat_candles += 1
-            self.s.decision_made = True
             self._log("NO_TRADE", note="flat candle (close == open) -- no directional signal, skipping this window")
             return
 
-        side = Side.DOWN if color == "green" else Side.UP
-        self._enter(side, now)
-        self.s.decision_made = True
+        side = Side.UP if color == "green" else Side.DOWN
+        self.s.order = RestingOrder(side=side, price=config.ORDER_PRICE, shares=config.ORDER_SHARES)
+        self.s.total_orders_placed += 1
+        self._log("RUNG_PLACED", side=side.value, price=config.ORDER_PRICE, shares=config.ORDER_SHARES,
+                   note=f"{color} signal -> resting limit buy {side.value}: {config.ORDER_SHARES:.0f}sh @ {config.ORDER_PRICE}")
 
-    def _enter(self, side: Side, now: float):
-        ask = self._ask_for(side)
-        if ask is None:
-            self.s.total_illiquid_skips += 1
-            self._log("NO_LIQUIDITY", side=side.value, note=f"signal fired ({side.value}) but no live ask yet -- skipping entry this window")
+    def _check_fill(self, now: float):
+        order = self.s.order
+        ask = self._ask_for(order.side)
+        if ask is None or ask > order.price:
             return
-        levels = self._ask_levels_for(side)
-        fill_price = _realistic_fill_price(levels, config.BASE_SHARES, ask)
-        if fill_price is None:
-            self.s.total_illiquid_skips += 1
-            self._log("NO_LIQUIDITY", side=side.value, price=ask,
-                       note=f"signal fired ({side.value}) but book has zero ask depth -- skipping entry this window")
-            return
-        shares = config.BASE_SHARES
-        fee = self.broker.taker_fee_amount(shares, fill_price)
-        cost = shares * fill_price + fee
+        order.status = "filled"
+        cost = order.shares * order.price
         self.capital.balance -= cost
-        self.s.total_entries += 1
-        self._log("ENTRY_FILL", side=side.value, price=fill_price, shares=shares, fee=fee,
-                   note=(f"candle signal {self.s.decided_color} -> taker buy {side.value}: {shares:.0f}sh @ "
-                         f"real fill {fill_price:.4f} (fee ${fee:.4f}) -- no SL, TP {config.TP_PRICE}"))
+        self.s.total_order_fills += 1
+        self._log("RUNG_FILL", side=order.side.value, price=order.price, shares=order.shares, fee=0.0,
+                   note=f"resting buy filled (maker, no fee): {order.shares:.0f}sh @ {order.price}")
         if self.capital.check_halt():
             self._log("HALTED", note=f"balance ${self.capital.balance:.2f} < $0 -- bankrupt")
             return
-        self.s.position = Position(side=side, entry_price=fill_price, shares=shares, cost=cost, entry_ts=now)
+        self.s.position = Position(side=order.side, entry_price=order.price, shares=order.shares, cost=cost, entry_ts=now)
 
     # ---- exit: TP only, no SL ------------------------------------------------
 
@@ -244,8 +249,7 @@ class Engine:
         fill_price = _realistic_fill_price(levels, pos.shares, bid)
         if fill_price is None:
             self.s.total_illiquid_skips += 1
-            self._log("NO_LIQUIDITY", side=pos.side.value, price=bid,
-                       note=f"TP triggered @ {bid} but zero bid depth -- waiting")
+            self._log("NO_LIQUIDITY", side=pos.side.value, price=bid, note=f"TP triggered @ {bid} but zero bid depth -- waiting")
             return
         fee = self.broker.taker_fee_amount(pos.shares, fill_price)
         proceeds = pos.shares * fill_price - fee
@@ -295,9 +299,14 @@ class Engine:
                                  f"(entry {pos.entry_price}, fee ${fee:.4f}, pnl ${pnl:.4f})"))
                 self.capital.check_halt()
                 self.s.position = None
+            elif self.s.order is not None and self.s.order.status == "resting":
+                self.s.order.status = "cancelled"
+                self.s.total_unfilled_cancels += 1
+                self._log("RUNG_CANCELLED", side=self.s.order.side.value, price=self.s.order.price,
+                           note="window closed, resting order never filled -- cancelled, no penalty")
             elif not self.s.decision_made:
                 self.s.total_no_signal_windows += 1
-                self._log("NO_TRADE", note="minute-2 Binance candle never arrived/closed in time this window")
+                self._log("NO_TRADE", note="previous window's last-minute candle never arrived/closed in time")
 
         self.s.window = None
         self.capital.record_equity_point(window_slug)
@@ -320,23 +329,26 @@ class Engine:
                 "seconds_since_entry": round(time.time() - pos.entry_ts, 1),
             }
 
-        elapsed = (time.time() - self.s.window.open_ts) if self.s.window else None
-        signal_ready_at = config.SIGNAL_MINUTE_OFFSET + config.SIGNAL_MINUTE_DURATION
-        seconds_until_signal = (signal_ready_at - elapsed) if (elapsed is not None and elapsed < signal_ready_at) else None
+        order_payload = None
+        if self.s.order is not None:
+            order_payload = {
+                "side": self.s.order.side.value, "price": self.s.order.price,
+                "shares": self.s.order.shares, "status": self.s.order.status,
+            }
 
         if self.capital.halted:
             status = "halted"
         elif pos is not None:
             status = "open"
+        elif order_payload is not None and order_payload["status"] == "resting":
+            status = "order_resting"
         elif self.s.decision_made:
             status = "done"
-        elif elapsed is not None and elapsed < signal_ready_at:
-            status = "watching_candle"
         else:
             status = "awaiting_signal"
 
         return {
-            "engine": "CANDLE", "label": "BTC minute-2 candle color",
+            "engine": "PREVCANDLE", "label": "Previous-window last-candle momentum",
 
             "balance": round(self.capital.balance, 2),
             "starting_capital": config.STARTING_CAPITAL,
@@ -350,14 +362,16 @@ class Engine:
             "last_window_pnl": round(self.s.last_window_pnl, 4),
 
             "position": pos_payload,
+            "order": order_payload,
             "decision_made": self.s.decision_made,
             "decided_color": self.s.decided_color,
-            "seconds_until_signal": round(seconds_until_signal, 1) if seconds_until_signal is not None else None,
             "binance": self.binance_feed.status(),
 
-            "total_entries": self.s.total_entries,
+            "total_orders_placed": self.s.total_orders_placed,
+            "total_order_fills": self.s.total_order_fills,
             "total_tp_fills": self.s.total_tp_fills,
             "total_forced_closes": self.s.total_forced_closes,
+            "total_unfilled_cancels": self.s.total_unfilled_cancels,
             "total_flat_candles": self.s.total_flat_candles,
             "total_no_signal_windows": self.s.total_no_signal_windows,
             "total_illiquid_skips": self.s.total_illiquid_skips,
@@ -368,9 +382,8 @@ class Engine:
             "status": status,
 
             "def": {
-                "shares": config.BASE_SHARES,
-                "signal_minute_offset": config.SIGNAL_MINUTE_OFFSET,
-                "signal_minute_duration": config.SIGNAL_MINUTE_DURATION,
+                "shares": config.ORDER_SHARES,
+                "order_price": config.ORDER_PRICE,
                 "tp_price": config.TP_PRICE,
             },
         }

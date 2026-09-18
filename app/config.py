@@ -1,34 +1,34 @@
 """
 Central configuration for the BTC 5-min up/down bot.
 
-Single engine -- one trade per window, direction decided by the color
-of BTC's own second 1-minute spot candle (from Binance, via websocket):
+Single engine -- one resting limit buy per window, direction decided by
+the color of the PREVIOUS window's own last 1-minute Binance spot
+candle (the 240-300s candle of the window that just closed):
 
-  1. Minute 1 (0-60s of the window): no action -- just elapses while
-     Binance's first 1-minute candle for this window forms.
-  2. Minute 2 (60-120s of the window): once THIS candle closes (its
-     Binance kline event arrives with x=true), compare its close to its
-     open:
-       - close > open (green) -> buy DOWN
-       - close < open (red)   -> buy UP
-       - close == open (flat) -> no trade this window
-     Binance's spot price is used ONLY to decide the color -- it never
-     prices or executes anything. The actual entry is a real TAKER buy
-     against Polymarket's own order book (real depth-weighted fill,
-     real fee), fired the instant the candle closes and its color is
-     known.
+  1. The instant a new window opens, read that candle (already closed
+     by definition -- it ended exactly when this window began):
+       - green (close > open) -> place a resting limit buy on UP,
+         200 shares, @ 0.45
+       - red   (close < open) -> place a resting limit buy on DOWN,
+         200 shares, @ 0.45
+       - flat  (close == open) -> no trade this window
+     If Binance's data for that candle hasn't arrived yet right at the
+     window boundary (feed lag), the engine keeps checking every tick
+     and places the order the instant it becomes available.
+  2. This is a real MAKER limit order -- it fills at its own exact
+     price (0.45), no slippage, no fee, the moment that side's ask
+     drops to/through it. It is NOT a taker/market buy.
   3. No stop-loss. Take profit is fixed at TP_PRICE (0.99) -- a real
      taker sell, priced by walking actual book depth, the moment the
      bid reaches it.
-  4. No re-arming: one entry per window, maximum. If TP never hits, the
-     position is force-closed at window end (taker, real depth-weighted
-     price).
+  4. Only one order, one trade max per window -- no re-arming. If the
+     order never fills, it's cancelled at window end (no penalty, not
+     a loss). If it fills but TP never hits, the position is
+     force-closed at window end (taker, real depth-weighted price).
 
-If Binance's data for the relevant candle hasn't arrived yet by the
-120s mark (feed lag, reconnect, etc.), the engine keeps checking every
-tick and fires the instant it becomes available -- it does not guess or
-skip just because it's a little late, though obviously a decision can
-no longer be acted on once the window itself has closed.
+This completely replaces the previous "read minute 2 of THIS window"
+strategy -- Binance is still signal-only (never prices or executes
+anything), just reading a different candle now.
 """
 import os
 
@@ -46,18 +46,19 @@ WINDOW_SECONDS = 300
 
 POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
 
-# ---- Candle-color engine ------------------------------------------------
-BASE_SHARES = 500.0
-SIGNAL_MINUTE_OFFSET = 60    # the decision candle is the one starting this many seconds after window open
-SIGNAL_MINUTE_DURATION = 60  # ...and running for this long (i.e. covers window_open+60s to +120s)
+# ---- Previous-window-momentum engine -------------------------------------
+ORDER_SHARES = 200.0
+ORDER_PRICE = 0.45           # fixed absolute limit price, whichever side is signaled
+SIGNAL_CANDLE_OFFSET = 240   # the decision candle is the previous window's [240s, 300s) minute
 TP_PRICE = 0.99
 
-STARTING_CAPITAL = float(os.getenv("STARTING_CAPITAL", "10000"))
+STARTING_CAPITAL = float(os.getenv("STARTING_CAPITAL", "2000"))
 
 # ---- Trading fees -----------------------------------------------------
-# Every fill in this engine is a taker market order -- the entry, the
-# TP exit, and any forced window-end close all pay the real fee, priced
-# by walking real order-book depth. Verify against
+# The entry is a resting MAKER limit order -- it fills at its own exact
+# price with no fee. Only the TP exit and any forced window-end close
+# are TAKER market orders and pay the real fee, priced by walking real
+# order-book depth. Verify against
 # GET https://clob.polymarket.com/fee-rate?token_id=... before trading
 # real money.
 APPLY_TAKER_FEES = True

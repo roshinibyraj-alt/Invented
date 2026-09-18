@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Candle-color engine — BTC 5m bot</title>
+<title>Previous-window momentum — BTC 5m bot</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
@@ -46,19 +46,7 @@
   .binance-head h2{margin:0; font-size:12.5px; color:var(--muted); font-weight:600;}
   .binance-conn{font-family:var(--mono); font-size:10.5px; display:flex; align-items:center; gap:6px;}
   .binance-conn .dot{width:6px; height:6px;}
-
-  .minute-track{display:grid; grid-template-columns:1fr 1fr; gap:10px;}
-  .minute-box{background:var(--panel-3); border-radius:11px; padding:14px; border:1px solid var(--line); position:relative;}
-  .minute-box.active{border-color:var(--amber);}
-  .minute-box .lbl{font-size:10.5px; color:var(--muted); font-weight:600; margin-bottom:8px;}
-  .minute-box .candle-visual{display:flex; align-items:center; justify-content:center; height:70px;}
-  .candle-body{width:22px; border-radius:3px;}
-  .candle-body.green{background:var(--mint);} .candle-body.red{background:var(--coral);} .candle-body.flat{background:var(--faint);}
-  .candle-wick{width:2px; background:inherit; margin:0 auto;}
-  .minute-box .ohlc{font-family:var(--mono); font-size:10.5px; color:var(--muted); text-align:center; margin-top:6px;}
-  .minute-box .waiting{color:var(--faint); text-align:center; font-size:11.5px; padding-top:24px;}
-
-  .signal-banner{margin-top:14px; padding:10px 14px; border-radius:10px; font-family:var(--mono); font-size:12px; font-weight:600; text-align:center;}
+  .signal-banner{padding:12px 14px; border-radius:10px; font-family:var(--mono); font-size:12.5px; font-weight:600; text-align:center;}
   .signal-banner.green{background:var(--mint-dim); color:var(--mint);}
   .signal-banner.red{background:var(--coral-dim); color:var(--coral);}
   .signal-banner.flat{background:var(--panel-3); color:var(--faint);}
@@ -72,10 +60,12 @@
   .gauge-head .side{font-size:13px; font-weight:600;}
   .gauge-head .side.UP{color:var(--mint);} .gauge-head .side.DOWN{color:var(--coral);}
   .gauge-head .mid{font-family:var(--mono); font-size:17px; font-weight:600;}
-  .gauge-track{position:relative; height:20px; background:var(--panel-3); border-radius:7px; overflow:hidden; border:1px solid var(--line);}
+  .gauge-track{position:relative; height:22px; background:var(--panel-3); border-radius:7px; overflow:visible; border:1px solid var(--line);}
   .gauge-fill{position:absolute; left:0; top:0; bottom:0; border-radius:6px 0 0 6px; transition:width .3s ease;}
   .gauge-fill.UP{background:linear-gradient(90deg,var(--mint-dim),var(--mint));}
   .gauge-fill.DOWN{background:linear-gradient(90deg,var(--coral-dim),var(--coral));}
+  .gauge-mark{position:absolute; top:-4px; bottom:-4px; width:2px; background:var(--amber);}
+  .gauge-mark .lbl{position:absolute; top:-17px; left:50%; transform:translateX(-50%); font-family:var(--mono); font-size:9px; color:var(--amber); white-space:nowrap;}
   .gauge-bidask{font-family:var(--mono); font-size:10.5px; color:var(--faint); display:flex; justify-content:space-between; margin-top:2px;}
 
   .card{background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:18px;}
@@ -83,16 +73,20 @@
   .card h2 .tag{font-size:10px; padding:2px 8px; border-radius:6px; background:var(--panel-3); color:var(--faint); font-family:var(--mono); font-weight:500;}
 
   .status-badge{font-size:10.5px; font-weight:600; padding:4px 10px; border-radius:6px;}
-  .status-badge.watching_candle{background:#1a2029; color:#6a7688;}
-  .status-badge.awaiting_signal{background:var(--amber-dim); color:var(--amber);}
+  .status-badge.awaiting_signal{background:#1a2029; color:#6a7688;}
+  .status-badge.order_resting{background:var(--amber-dim); color:var(--amber);}
   .status-badge.open{background:var(--mint-dim); color:var(--mint);}
   .status-badge.done{background:var(--violet-dim); color:var(--violet);}
   .status-badge.halted{background:var(--coral-dim); color:var(--coral);}
 
-  .def-grid{display:grid; grid-template-columns:repeat(2,1fr); gap:8px; margin-bottom:14px;}
+  .def-grid{display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin-bottom:14px;}
   .def-item{background:var(--panel-3); border-radius:9px; padding:10px 12px;}
   .def-item .k{font-size:10px; color:var(--muted);}
   .def-item .v{font-family:var(--mono); font-size:12.5px; font-weight:600; margin-top:3px;}
+
+  .order-box{border-radius:11px; padding:12px 14px; border:1px dashed var(--amber); background:var(--amber-dim); margin-bottom:10px;
+    font-family:var(--mono); font-size:12px; display:flex; justify-content:space-between; align-items:center;}
+  .order-box .lbl{color:var(--amber); font-weight:600;}
 
   .position-box{border-radius:11px; padding:14px 16px; border:1px solid var(--line);
     background:linear-gradient(135deg,var(--mint-glow),transparent 65%);}
@@ -134,7 +128,9 @@
   .log-row .t{color:var(--faint);}
   .log-row .ev{font-weight:600; font-size:9.5px; padding:2px 7px; border-radius:5px; background:#1a222f; text-align:center; white-space:nowrap;}
   .log-row .ev.CANDLE_READ{color:var(--amber);}
-  .log-row .ev.ENTRY_FILL{color:var(--amber);}
+  .log-row .ev.RUNG_PLACED{color:var(--amber);}
+  .log-row .ev.RUNG_FILL{color:var(--mint);}
+  .log-row .ev.RUNG_CANCELLED{color:var(--faint);}
   .log-row .ev.TP_FILL{color:var(--mint);}
   .log-row .ev.FORCED_CLOSE{color:var(--violet);}
   .log-row .ev.NO_LIQUIDITY{color:var(--amber);}
@@ -149,8 +145,8 @@
 <div class="wrap">
   <header>
     <div>
-      <h1>Candle-color engine</h1>
-      <div class="sub">BTC 5m up/down — minute 1: watch only. Minute 2: read BTC's own 1-min spot candle from Binance (websocket, signal only) — green→buy DOWN, red→buy UP, flat→skip. 500sh, taker, no SL, TP 0.99, one trade/window</div>
+      <h1>Previous-window momentum</h1>
+      <div class="sub">BTC 5m up/down — the instant a new window opens, read the JUST-CLOSED window's own last 1-min Binance candle: green→resting limit buy UP @ 0.45, red→resting limit buy DOWN @ 0.45, flat→skip. 200sh, maker, no SL, TP 0.99, one trade/window</div>
     </div>
     <div class="status-pill"><span class="dot" id="statusDot"></span><span id="statusText">connecting</span></div>
   </header>
@@ -166,19 +162,8 @@
 
   <div class="binance-card">
     <div class="binance-head">
-      <h2>Binance BTC/USDT — signal source</h2>
+      <h2>Binance BTC/USDT — signal source (previous window's last minute)</h2>
       <div class="binance-conn" id="binanceConn"><span class="dot"></span><span>—</span></div>
-    </div>
-    <div class="minute-track">
-      <div class="minute-box" id="minute1Box">
-        <div class="lbl">Minute 1 (0–60s) — watch only</div>
-        <div class="waiting">no decision made from this minute</div>
-      </div>
-      <div class="minute-box" id="minute2Box">
-        <div class="lbl">Minute 2 (60–120s) — decision candle</div>
-        <div class="candle-visual" id="candleVisual"><span class="waiting">waiting for window</span></div>
-        <div class="ohlc" id="candleOhlc"></div>
-      </div>
     </div>
     <div class="signal-banner pending" id="signalBanner">waiting</div>
   </div>
@@ -186,12 +171,12 @@
   <div class="gauge-panel">
     <div class="gauge" data-side="UP" id="upGauge">
       <div class="gauge-head"><span class="side UP">UP</span><span class="mid" id="upMid">—</span></div>
-      <div class="gauge-track"><div class="gauge-fill UP" id="upFill" style="width:0%"></div></div>
+      <div class="gauge-track" id="upTrack"><div class="gauge-fill UP" id="upFill" style="width:0%"></div></div>
       <div class="gauge-bidask"><span id="upBidAsk">bid — / ask —</span></div>
     </div>
     <div class="gauge" data-side="DOWN" id="downGauge">
       <div class="gauge-head"><span class="side DOWN">DOWN</span><span class="mid" id="downMid">—</span></div>
-      <div class="gauge-track"><div class="gauge-fill DOWN" id="downFill" style="width:0%"></div></div>
+      <div class="gauge-track" id="downTrack"><div class="gauge-fill DOWN" id="downFill" style="width:0%"></div></div>
       <div class="gauge-bidask"><span id="downBidAsk">bid — / ask —</span></div>
     </div>
   </div>
@@ -228,51 +213,42 @@ const fmt$ = v => (v==null ? '—' : (v<0?'-$':'$') + Math.abs(Number(v)).toFixe
 const fmtP = v => (v==null ? '—' : Number(v).toFixed(3));
 const fmtSh = v => (v==null ? '0' : Number(v).toFixed(0));
 const pnlClass = v => (v>0.005?'pos':(v<-0.005?'neg':''));
+const ORDER_PRICE = 0.45;
 
-function renderPriceGauge(fillId, midId, bidAskId, bid, ask){
+function renderGauge(trackId, fillId, midId, bidAskId, bid, ask, order, side){
   const mid = (bid!=null && ask!=null) ? (bid+ask)/2 : (ask!=null?ask:bid);
   $(midId).textContent = fmtP(mid);
   $(bidAskId).textContent = `bid ${fmtP(bid)} / ask ${fmtP(ask)}`;
   const pct = mid!=null ? Math.max(0,Math.min(100, mid*100)) : 0;
   $(fillId).style.width = pct + '%';
+  const track = $(trackId);
+  let marks = '';
+  if(order && order.side === side){
+    marks = `<div class="gauge-mark" style="left:${order.price*100}%"><span class="lbl">${fmtP(order.price)}</span></div>`;
+  }
+  const existing = track.querySelector('.gauge-mark');
+  if(existing) existing.remove();
+  if(marks) track.insertAdjacentHTML('beforeend', marks);
 }
 
-function renderBinancePanel(e, secondsIntoWindow){
+function renderBinancePanel(e){
   const bin = e.binance || {};
   const connEl = $('binanceConn');
   connEl.innerHTML = bin.connected
     ? `<span class="dot live" style="background:var(--mint); box-shadow:0 0 5px var(--mint);"></span><span>connected${bin.last_message_age_s!=null? ' · '+bin.last_message_age_s.toFixed(1)+'s ago':''}</span>`
     : `<span class="dot" style="background:var(--coral);"></span><span>disconnected${bin.last_error? ' — '+bin.last_error : ''}</span>`;
 
-  const m1 = $('minute1Box'), m2 = $('minute2Box');
-  m1.classList.toggle('active', secondsIntoWindow!=null && secondsIntoWindow < 60);
-  m2.classList.toggle('active', secondsIntoWindow!=null && secondsIntoWindow >= 60 && secondsIntoWindow < 120);
-
   const banner = $('signalBanner');
   const color = e.decided_color;
   if(color === 'green'){
-    banner.className = 'signal-banner green'; banner.textContent = 'GREEN — bought DOWN';
+    banner.className = 'signal-banner green'; banner.textContent = `GREEN (previous window) — resting buy UP @ ${ORDER_PRICE}`;
   } else if(color === 'red'){
-    banner.className = 'signal-banner red'; banner.textContent = 'RED — bought UP';
+    banner.className = 'signal-banner red'; banner.textContent = `RED (previous window) — resting buy DOWN @ ${ORDER_PRICE}`;
   } else if(color === 'flat'){
-    banner.className = 'signal-banner flat'; banner.textContent = 'FLAT candle — no trade this window';
-  } else if(secondsIntoWindow!=null && secondsIntoWindow < 120){
-    banner.className = 'signal-banner pending';
-    banner.textContent = `waiting for minute-2 candle to close — ${e.seconds_until_signal!=null?Math.ceil(e.seconds_until_signal)+'s left':''}`;
+    banner.className = 'signal-banner flat'; banner.textContent = 'FLAT previous candle — no trade this window';
   } else {
     banner.className = 'signal-banner pending';
-    banner.textContent = 'waiting for Binance candle data...';
-  }
-
-  const visual = $('candleVisual');
-  const ohlc = $('candleOhlc');
-  if(color){
-    const cls = color === 'green' ? 'green' : (color === 'red' ? 'red' : 'flat');
-    visual.innerHTML = `<div class="candle-wick" style="height:60px;"><div class="candle-body ${cls}" style="height:100%;"></div></div>`;
-    ohlc.textContent = color.toUpperCase();
-  } else {
-    visual.innerHTML = '<span class="waiting">not closed yet</span>';
-    ohlc.textContent = '';
+    banner.textContent = 'waiting for previous-window candle data from Binance...';
   }
 }
 
@@ -296,10 +272,8 @@ async function poll(){
 
     $('windowSlug').textContent = s.window ? s.window.slug : 'waiting for window';
 
-    let secondsIntoWindow = null;
     if(s.window){
       const remaining = Math.max(0, s.window.close_ts - s.server_time);
-      secondsIntoWindow = s.server_time - s.window.open_ts;
       const m = Math.floor(remaining/60), sec = Math.floor(remaining%60);
       const cd = $('countdown');
       cd.textContent = `${m}:${String(sec).padStart(2,'0')}`;
@@ -307,10 +281,10 @@ async function poll(){
     }
 
     const book = s.book || {};
-    renderPriceGauge('upFill','upMid','upBidAsk', book.up_bid, book.up_ask);
-    renderPriceGauge('downFill','downMid','downBidAsk', book.down_bid, book.down_ask);
+    renderGauge('upTrack','upFill','upMid','upBidAsk', book.up_bid, book.up_ask, e.order, 'UP');
+    renderGauge('downTrack','downFill','downMid','downBidAsk', book.down_bid, book.down_ask, e.order, 'DOWN');
 
-    renderBinancePanel(e, secondsIntoWindow);
+    renderBinancePanel(e);
     renderEngineCard(e);
     renderStats(e);
     renderEquityHero(e);
@@ -326,16 +300,20 @@ function renderEngineCard(e){
   const el = $('engineCard');
   if(!e || !e.def){ el.innerHTML = '<div class="empty">no data</div>'; return; }
   const statusLabels = {
-    watching_candle:'watching minute 1', awaiting_signal:'awaiting minute-2 close',
+    awaiting_signal:'awaiting previous-candle signal', order_resting:'order resting, unfilled',
     open:'position open', done:'done for this window', halted:'halted',
   };
 
   const defRowsHtml = [
     ['Shares', fmtSh(e.def.shares)],
-    ['Signal window', `${e.def.signal_minute_offset}-${e.def.signal_minute_offset+e.def.signal_minute_duration}s`],
+    ['Order price', fmtP(e.def.order_price)],
     ['Stop loss', 'none'],
-    ['Take profit', fmtP(e.def.tp_price)],
   ].map(([k,v]) => `<div class="def-item"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
+
+  let orderHtml = '';
+  if(e.order && e.order.status === 'resting'){
+    orderHtml = `<div class="order-box"><span class="lbl">resting: ${e.order.side} ${fmtSh(e.order.shares)}sh @ ${fmtP(e.order.price)}</span><span>waiting for fill</span></div>`;
+  }
 
   const pos = e.position;
   let posHtml;
@@ -360,7 +338,7 @@ function renderEngineCard(e){
         </div>
       </div>`;
   } else {
-    posHtml = `<div class="position-box empty">${e.decision_made ? 'no open position — done for this window' : 'no open position — waiting on signal'}</div>`;
+    posHtml = `<div class="position-box empty">${e.decision_made ? 'no open position' : 'no open position — waiting on signal'}</div>`;
   }
 
   el.innerHTML = `
@@ -369,14 +347,16 @@ function renderEngineCard(e){
       <span class="status-badge ${e.status}">${statusLabels[e.status] || e.status}</span>
     </h2>
     <div class="def-grid">${defRowsHtml}</div>
+    ${orderHtml}
     ${posHtml}
   `;
 }
 
 function renderStats(e){
   const tiles = [
-    ['total_entries','entries',''], ['total_tp_fills','tp fills','win'],
-    ['total_forced_closes','forced close',''], ['total_flat_candles','flat candles',''],
+    ['total_orders_placed','orders placed',''], ['total_order_fills','order fills',''],
+    ['total_tp_fills','tp fills','win'], ['total_forced_closes','forced close',''],
+    ['total_unfilled_cancels','unfilled cancels',''], ['total_flat_candles','flat candles',''],
     ['total_no_signal_windows','no-signal',''], ['total_illiquid_skips','illiquid skips',''],
     ['win_rate','win rate %',''],
   ];
