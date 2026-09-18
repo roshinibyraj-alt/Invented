@@ -109,6 +109,8 @@ class EngineState:
 
     total_orders_placed: int = 0
     total_order_fills: int = 0
+    total_timeout_cancels: int = 0
+    total_market_fallback_fills: int = 0
     total_tp_fills: int = 0
     total_forced_closes: int = 0
     total_unfilled_cancels: int = 0
@@ -171,6 +173,8 @@ class Engine:
 
         if self.s.order is not None and self.s.order.status == "resting":
             self._check_fill(now)
+            if self.s.order is not None and self.s.order.status == "resting":
+                self._check_timeout(now)
 
     # ---- price/level lookups ----------------------------------------------
 
@@ -237,6 +241,50 @@ class Engine:
             self._log("HALTED", note=f"balance ${self.capital.balance:.2f} < $0 -- bankrupt")
             return
         self.s.position = Position(side=order.side, entry_price=order.price, shares=order.shares, cost=cost, entry_ts=now)
+
+    def _check_timeout(self, now: float):
+        """If the resting limit order is still unfilled
+        RESTING_ORDER_TIMEOUT_SECONDS after the window opened, cancel it
+        and buy the same size immediately at market (real taker fill,
+        priced by walking actual book depth, real fee) -- this
+        guarantees a fill either way instead of risking price never
+        revisiting 0.45 for the rest of the window."""
+        order = self.s.order
+        elapsed = now - self.s.window.open_ts
+        if elapsed < config.RESTING_ORDER_TIMEOUT_SECONDS:
+            return
+
+        order.status = "cancelled"
+        self.s.total_timeout_cancels += 1
+        self._log("RUNG_CANCELLED", side=order.side.value, price=order.price,
+                   note=(f"still unfilled {elapsed:.1f}s after window open (timeout "
+                         f"{config.RESTING_ORDER_TIMEOUT_SECONDS}s) -- cancelling, buying at market instead"))
+        self._enter_at_market(order.side, order.shares, now)
+
+    def _enter_at_market(self, side: Side, shares: float, now: float):
+        ask = self._ask_for(side)
+        if ask is None:
+            self.s.total_illiquid_skips += 1
+            self._log("NO_LIQUIDITY", side=side.value, note=f"market fallback for {side.value} but no live ask yet -- skipping entry this window")
+            return
+        levels = self.s.up_ask_levels if side == Side.UP else self.s.down_ask_levels
+        fill_price = _realistic_fill_price(levels, shares, ask)
+        if fill_price is None:
+            self.s.total_illiquid_skips += 1
+            self._log("NO_LIQUIDITY", side=side.value, price=ask,
+                       note=f"market fallback for {side.value} but book has zero ask depth -- skipping entry this window")
+            return
+        fee = self.broker.taker_fee_amount(shares, fill_price)
+        cost = shares * fill_price + fee
+        self.capital.balance -= cost
+        self.s.total_market_fallback_fills += 1
+        self._log("ENTRY_FILL", side=side.value, price=fill_price, shares=shares, fee=fee,
+                   note=(f"market fallback taker buy: {shares:.0f}sh @ real fill {fill_price:.4f} "
+                         f"(fee ${fee:.4f}) -- no SL, TP {config.TP_PRICE}"))
+        if self.capital.check_halt():
+            self._log("HALTED", note=f"balance ${self.capital.balance:.2f} < $0 -- bankrupt")
+            return
+        self.s.position = Position(side=side, entry_price=fill_price, shares=shares, cost=cost, entry_ts=now)
 
     # ---- exit: TP only, no SL ------------------------------------------------
 
@@ -369,6 +417,8 @@ class Engine:
 
             "total_orders_placed": self.s.total_orders_placed,
             "total_order_fills": self.s.total_order_fills,
+            "total_timeout_cancels": self.s.total_timeout_cancels,
+            "total_market_fallback_fills": self.s.total_market_fallback_fills,
             "total_tp_fills": self.s.total_tp_fills,
             "total_forced_closes": self.s.total_forced_closes,
             "total_unfilled_cancels": self.s.total_unfilled_cancels,

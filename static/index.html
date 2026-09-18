@@ -130,7 +130,8 @@
   .log-row .ev.CANDLE_READ{color:var(--amber);}
   .log-row .ev.RUNG_PLACED{color:var(--amber);}
   .log-row .ev.RUNG_FILL{color:var(--mint);}
-  .log-row .ev.RUNG_CANCELLED{color:var(--faint);}
+  .log-row .ev.RUNG_CANCELLED{color:var(--violet);}
+  .log-row .ev.ENTRY_FILL{color:var(--amber);}
   .log-row .ev.TP_FILL{color:var(--mint);}
   .log-row .ev.FORCED_CLOSE{color:var(--violet);}
   .log-row .ev.NO_LIQUIDITY{color:var(--amber);}
@@ -146,7 +147,7 @@
   <header>
     <div>
       <h1>Previous-window momentum</h1>
-      <div class="sub">BTC 5m up/down — the instant a new window opens, read the JUST-CLOSED window's own last 1-min Binance candle: green→resting limit buy UP @ 0.45, red→resting limit buy DOWN @ 0.45, flat→skip. 200sh, maker, no SL, TP 0.99, one trade/window</div>
+      <div class="sub">BTC 5m up/down — the instant a new window opens, read the JUST-CLOSED window's own last 1-min Binance candle: green→resting limit buy UP @ 0.45, red→resting limit buy DOWN @ 0.45, flat→skip. If unfilled 10s after window open, cancel and buy at market instead. 200sh, no SL, TP 0.99, one trade/window</div>
     </div>
     <div class="status-pill"><span class="dot" id="statusDot"></span><span id="statusText">connecting</span></div>
   </header>
@@ -307,7 +308,7 @@ function renderEngineCard(e){
   const defRowsHtml = [
     ['Shares', fmtSh(e.def.shares)],
     ['Order price', fmtP(e.def.order_price)],
-    ['Stop loss', 'none'],
+    ['Fill timeout', '10s, then market'],
   ].map(([k,v]) => `<div class="def-item"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
 
   let orderHtml = '';
@@ -354,7 +355,8 @@ function renderEngineCard(e){
 
 function renderStats(e){
   const tiles = [
-    ['total_orders_placed','orders placed',''], ['total_order_fills','order fills',''],
+    ['total_orders_placed','orders placed',''], ['total_order_fills','maker fills',''],
+    ['total_timeout_cancels','10s timeouts',''], ['total_market_fallback_fills','market fallbacks',''],
     ['total_tp_fills','tp fills','win'], ['total_forced_closes','forced close',''],
     ['total_unfilled_cancels','unfilled cancels',''], ['total_flat_candles','flat candles',''],
     ['total_no_signal_windows','no-signal',''], ['total_illiquid_skips','illiquid skips',''],

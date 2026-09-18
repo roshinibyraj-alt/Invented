@@ -18,15 +18,25 @@ resting limit order per window, direction decided by the color of the
 2. This is a real **maker** limit order — it fills at its own exact
    price (0.45), no slippage, no fee, the moment that side's ask drops
    to/through it. It is **not** a taker/market buy.
-3. **No stop-loss.** Take profit is fixed at 0.99 — a real taker sell,
+3. **10-second fill timeout**: if that resting order is still unfilled
+   10 seconds after the window opened, it's cancelled immediately and
+   the same size is bought **at market instead** — a real taker buy,
+   priced by walking actual order-book depth, real fee. This
+   guarantees the signal actually gets acted on rather than risking a
+   window where price never revisits 0.45 at all.
+4. **No stop-loss.** Take profit is fixed at 0.99 — a real taker sell,
    priced by walking actual book depth, the moment the bid reaches it.
-4. Only one order, one trade max per window — no re-arming. If the
-   order never fills, it's cancelled at window end (no penalty, not a
-   loss). If it fills but TP never hits, the position is force-closed
-   at window end (taker, real depth-weighted price).
-5. If Binance's data for that candle hasn't arrived yet right at the
+5. Only one order, one trade max per window — no re-arming. If the
+   order fills (either the resting maker fill or the 10s market
+   fallback) but TP never hits, the position is force-closed at window
+   end (taker, real depth-weighted price).
+6. If Binance's data for that candle hasn't arrived yet right at the
    window boundary (feed lag), the engine keeps checking every tick
-   and places the order the instant it becomes available.
+   and places the order the instant it becomes available — the 10s
+   fill-timeout clock only starts once an order actually exists, but
+   is still measured from window open, so a late-placed order can
+   trigger its own market fallback on the very next tick if window
+   open + 10s has already passed by the time it's placed.
 
 This completely replaces the earlier "read minute 2 of the current
 window" strategy — Binance is still signal-only (never prices or
@@ -44,9 +54,9 @@ Dashboard at http://localhost:8000
 
 ## Config knobs (`app/config.py`)
 
-- `ORDER_SHARES` (200), `ORDER_PRICE` (0.45), `TP_PRICE` (0.99)
+- `ORDER_SHARES` (200), `ORDER_PRICE` (0.45), `RESTING_ORDER_TIMEOUT_SECONDS` (10), `TP_PRICE` (0.99)
 - `STARTING_CAPITAL` ($2000, single shared pool)
-- Taker fee constants (the entry is a fee-free maker fill; only the TP exit and forced close pay a real fee)
+- Taker fee constants (the resting entry is a fee-free maker fill; the 10s market fallback, the TP exit, and any forced close all pay a real fee)
 
 ## Notes / assumptions
 

@@ -18,13 +18,19 @@ candle (the 240-300s candle of the window that just closed):
   2. This is a real MAKER limit order -- it fills at its own exact
      price (0.45), no slippage, no fee, the moment that side's ask
      drops to/through it. It is NOT a taker/market buy.
+  2a. Timeout: if that resting order is STILL unfilled
+      RESTING_ORDER_TIMEOUT_SECONDS (10s) after the window opened,
+      cancel it immediately and buy the same size at market instead --
+      a real TAKER buy, priced by walking actual book depth, real fee.
+      This guarantees a fill either way rather than risking never
+      getting filled because price never revisits 0.45.
   3. No stop-loss. Take profit is fixed at TP_PRICE (0.99) -- a real
      taker sell, priced by walking actual book depth, the moment the
      bid reaches it.
   4. Only one order, one trade max per window -- no re-arming. If the
-     order never fills, it's cancelled at window end (no penalty, not
-     a loss). If it fills but TP never hits, the position is
-     force-closed at window end (taker, real depth-weighted price).
+     order fills (either as the resting maker fill or the 10s market
+     fallback) but TP never hits, the position is force-closed at
+     window end (taker, real depth-weighted price).
 
 This completely replaces the previous "read minute 2 of THIS window"
 strategy -- Binance is still signal-only (never prices or executes
@@ -50,6 +56,7 @@ POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
 ORDER_SHARES = 200.0
 ORDER_PRICE = 0.45           # fixed absolute limit price, whichever side is signaled
 SIGNAL_CANDLE_OFFSET = 240   # the decision candle is the previous window's [240s, 300s) minute
+RESTING_ORDER_TIMEOUT_SECONDS = 10   # cancel the resting limit order and buy taker at market if still unfilled this long after window open
 TP_PRICE = 0.99
 
 STARTING_CAPITAL = float(os.getenv("STARTING_CAPITAL", "2000"))
