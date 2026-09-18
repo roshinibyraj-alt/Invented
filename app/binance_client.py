@@ -96,6 +96,40 @@ class BinanceKlineFeed:
         key = int(minute_open_ts // 60) * 60
         return self.candles.get(float(key))
 
+    def get_recent_closes(self, end_open_ts: float, count: int) -> Optional[list]:
+        """`count` consecutive closed-candle closes, oldest -> newest,
+        ending at (and including) the minute containing end_open_ts.
+        Returns None if any minute in that span is missing or its candle
+        hasn't closed yet -- caller must not compute on a partial series."""
+        end_key = int(end_open_ts // 60) * 60
+        closes = []
+        for i in range(count - 1, -1, -1):
+            c = self.candles.get(float(end_key - i * 60))
+            if c is None or not c.closed:
+                return None
+            closes.append(c.close)
+        return closes
+
+    def get_rsi(self, end_open_ts: float, period: int) -> Optional[float]:
+        """Simple (non-Wilder) RSI over `period` 1-minute closes ending at
+        end_open_ts. None if there isn't a full, uninterrupted run of
+        period+1 closed candles yet (e.g. right after startup/reconnect)."""
+        closes = self.get_recent_closes(end_open_ts, period + 1)
+        if closes is None:
+            return None
+        gains, losses = 0.0, 0.0
+        for i in range(1, len(closes)):
+            diff = closes[i] - closes[i - 1]
+            if diff >= 0:
+                gains += diff
+            else:
+                losses += -diff
+        avg_gain, avg_loss = gains / period, losses / period
+        if avg_loss == 0:
+            return 100.0
+        rs = avg_gain / avg_loss
+        return 100.0 - (100.0 / (1.0 + rs))
+
     def status(self) -> dict:
         return {
             "connected": self.connected,

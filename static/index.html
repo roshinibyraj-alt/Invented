@@ -360,6 +360,7 @@ function renderStats(e){
     ['total_tp_fills','tp fills','win'], ['total_forced_closes','forced close',''],
     ['total_unfilled_cancels','unfilled cancels',''], ['total_flat_candles','flat candles',''],
     ['total_no_signal_windows','no-signal',''], ['total_illiquid_skips','illiquid skips',''],
+    ['total_rsi_vetoes','RSI vetoes',''],
     ['win_rate','win rate %',''],
   ];
   $('statsGrid').innerHTML = tiles.map(([key,label,cls]) => {

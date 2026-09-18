@@ -117,6 +117,7 @@ class EngineState:
     total_flat_candles: int = 0
     total_no_signal_windows: int = 0
     total_illiquid_skips: int = 0
+    total_rsi_vetoes: int = 0
     wins: int = 0
     losses: int = 0
     total_pnl: float = 0.0
@@ -148,8 +149,8 @@ class Engine:
             return
         self._log("WINDOW_OPEN", note=(
             f"reading previous window's last-minute candle -- green->resting buy UP @ {config.ORDER_PRICE}, "
-            f"red->resting buy DOWN @ {config.ORDER_PRICE}, flat->no trade. {config.ORDER_SHARES:.0f}sh, "
-            f"maker, no SL, TP {config.TP_PRICE}"
+            f"red->resting buy DOWN @ {config.ORDER_PRICE}, flat->no trade, RSI({config.RSI_PERIOD}) veto "
+            f"if overbought/oversold in that direction. {config.ORDER_SHARES:.0f}sh, maker, no SL, TP {config.TP_PRICE}"
         ))
 
     def on_tick(self, up_bid, up_ask, down_bid, down_ask, seconds_to_close: float = None, now: Optional[float] = None,
@@ -173,8 +174,6 @@ class Engine:
 
         if self.s.order is not None and self.s.order.status == "resting":
             self._check_fill(now)
-            if self.s.order is not None and self.s.order.status == "resting":
-                self._check_timeout(now)
 
     # ---- price/level lookups ----------------------------------------------
 
@@ -221,10 +220,28 @@ class Engine:
             return
 
         side = Side.UP if color == "green" else Side.DOWN
+
+        rsi = self.binance_feed.get_rsi(signal_open_ts, config.RSI_PERIOD)
+        if rsi is not None:
+            if side == Side.UP and rsi > config.RSI_OVERBOUGHT:
+                self.s.total_rsi_vetoes += 1
+                self._log("RSI_VETO", side=side.value, note=(
+                    f"{color} signal for UP but RSI({config.RSI_PERIOD}) {rsi:.1f} > "
+                    f"{config.RSI_OVERBOUGHT} (overbought) -- skipping, momentum looks exhausted"))
+                return
+            if side == Side.DOWN and rsi < config.RSI_OVERSOLD:
+                self.s.total_rsi_vetoes += 1
+                self._log("RSI_VETO", side=side.value, note=(
+                    f"{color} signal for DOWN but RSI({config.RSI_PERIOD}) {rsi:.1f} < "
+                    f"{config.RSI_OVERSOLD} (oversold) -- skipping, momentum looks exhausted"))
+                return
+
         self.s.order = RestingOrder(side=side, price=config.ORDER_PRICE, shares=config.ORDER_SHARES)
         self.s.total_orders_placed += 1
+        rsi_note = f", RSI({config.RSI_PERIOD}) {rsi:.1f}" if rsi is not None else ", RSI n/a (insufficient history)"
         self._log("RUNG_PLACED", side=side.value, price=config.ORDER_PRICE, shares=config.ORDER_SHARES,
-                   note=f"{color} signal -> resting limit buy {side.value}: {config.ORDER_SHARES:.0f}sh @ {config.ORDER_PRICE}")
+                   note=(f"{color} signal{rsi_note} -> resting limit buy {side.value}: "
+                         f"{config.ORDER_SHARES:.0f}sh @ {config.ORDER_PRICE}"))
 
     def _check_fill(self, now: float):
         order = self.s.order
@@ -241,50 +258,6 @@ class Engine:
             self._log("HALTED", note=f"balance ${self.capital.balance:.2f} < $0 -- bankrupt")
             return
         self.s.position = Position(side=order.side, entry_price=order.price, shares=order.shares, cost=cost, entry_ts=now)
-
-    def _check_timeout(self, now: float):
-        """If the resting limit order is still unfilled
-        RESTING_ORDER_TIMEOUT_SECONDS after the window opened, cancel it
-        and buy the same size immediately at market (real taker fill,
-        priced by walking actual book depth, real fee) -- this
-        guarantees a fill either way instead of risking price never
-        revisiting 0.45 for the rest of the window."""
-        order = self.s.order
-        elapsed = now - self.s.window.open_ts
-        if elapsed < config.RESTING_ORDER_TIMEOUT_SECONDS:
-            return
-
-        order.status = "cancelled"
-        self.s.total_timeout_cancels += 1
-        self._log("RUNG_CANCELLED", side=order.side.value, price=order.price,
-                   note=(f"still unfilled {elapsed:.1f}s after window open (timeout "
-                         f"{config.RESTING_ORDER_TIMEOUT_SECONDS}s) -- cancelling, buying at market instead"))
-        self._enter_at_market(order.side, order.shares, now)
-
-    def _enter_at_market(self, side: Side, shares: float, now: float):
-        ask = self._ask_for(side)
-        if ask is None:
-            self.s.total_illiquid_skips += 1
-            self._log("NO_LIQUIDITY", side=side.value, note=f"market fallback for {side.value} but no live ask yet -- skipping entry this window")
-            return
-        levels = self.s.up_ask_levels if side == Side.UP else self.s.down_ask_levels
-        fill_price = _realistic_fill_price(levels, shares, ask)
-        if fill_price is None:
-            self.s.total_illiquid_skips += 1
-            self._log("NO_LIQUIDITY", side=side.value, price=ask,
-                       note=f"market fallback for {side.value} but book has zero ask depth -- skipping entry this window")
-            return
-        fee = self.broker.taker_fee_amount(shares, fill_price)
-        cost = shares * fill_price + fee
-        self.capital.balance -= cost
-        self.s.total_market_fallback_fills += 1
-        self._log("ENTRY_FILL", side=side.value, price=fill_price, shares=shares, fee=fee,
-                   note=(f"market fallback taker buy: {shares:.0f}sh @ real fill {fill_price:.4f} "
-                         f"(fee ${fee:.4f}) -- no SL, TP {config.TP_PRICE}"))
-        if self.capital.check_halt():
-            self._log("HALTED", note=f"balance ${self.capital.balance:.2f} < $0 -- bankrupt")
-            return
-        self.s.position = Position(side=side, entry_price=fill_price, shares=shares, cost=cost, entry_ts=now)
 
     # ---- exit: TP only, no SL ------------------------------------------------
 
@@ -425,6 +398,7 @@ class Engine:
             "total_flat_candles": self.s.total_flat_candles,
             "total_no_signal_windows": self.s.total_no_signal_windows,
             "total_illiquid_skips": self.s.total_illiquid_skips,
+            "total_rsi_vetoes": self.s.total_rsi_vetoes,
             "wins": self.s.wins,
             "losses": self.s.losses,
             "win_rate": round(100 * self.s.wins / (self.s.wins + self.s.losses), 1) if (self.s.wins + self.s.losses) else None,
