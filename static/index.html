@@ -52,6 +52,11 @@
   .signal-banner.flat{background:var(--panel-3); color:var(--faint);}
   .signal-banner.pending{background:var(--panel-3); color:var(--muted);}
 
+  .ai-status{display:flex; justify-content:space-between; flex-wrap:wrap; gap:6px 14px; margin-top:10px;
+    font-family:var(--mono); font-size:10.5px; color:var(--muted);}
+  .ai-status b{color:var(--text);}
+  .ai-status .ready{color:var(--mint);} .ai-status .cold{color:var(--amber);}
+
   .gauge-panel{background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:18px;
     display:grid; grid-template-columns:1fr 1fr; gap:16px;}
   @media (max-width:640px){ .gauge-panel{grid-template-columns:1fr;} }
@@ -128,6 +133,8 @@
   .log-row .t{color:var(--faint);}
   .log-row .ev{font-weight:600; font-size:9.5px; padding:2px 7px; border-radius:5px; background:#1a222f; text-align:center; white-space:nowrap;}
   .log-row .ev.CANDLE_READ{color:var(--amber);}
+  .log-row .ev.AI_SIGNAL{color:var(--amber);}
+  .log-row .ev.AI_LEARN{color:var(--faint);}
   .log-row .ev.RUNG_PLACED{color:var(--amber);}
   .log-row .ev.RUNG_FILL{color:var(--mint);}
   .log-row .ev.RUNG_CANCELLED{color:var(--violet);}
@@ -147,7 +154,7 @@
   <header>
     <div>
       <h1>Previous-window momentum</h1>
-      <div class="sub">BTC 5m up/down — the instant a new window opens, read the JUST-CLOSED window's own last 1-min Binance candle: green→real signal UP, red→real signal DOWN, flat→skip. RSI(14) vetoes the trade if the real signal side is already overbought/oversold. Otherwise the bot FADES it — always trades the opposite side — resting limit buy @ 0.45. Limit order only, no market fallback. 200sh, no SL, TP 0.99, one trade/window</div>
+      <div class="sub">BTC 5m up/down — an online AI signal engine (self-training logistic regression, no external API calls) predicts the next window from RSI/momentum/volatility/streak features. Confident UP/DOWN → real signal; else skipped. RSI(14) vetoes the real signal if overbought/oversold. Otherwise the bot FADES it — always trades the opposite side — resting limit buy @ 0.45. Limit order only, no market fallback. 200sh, no SL, TP 0.99, one trade/window</div>
     </div>
     <div class="status-pill"><span class="dot" id="statusDot"></span><span id="statusText">connecting</span></div>
   </header>
@@ -163,10 +170,11 @@
 
   <div class="binance-card">
     <div class="binance-head">
-      <h2>Binance BTC/USDT — signal source (previous window's last minute)</h2>
+      <h2>AI signal engine — online logistic regression (self-trained, no external API)</h2>
       <div class="binance-conn" id="binanceConn"><span class="dot"></span><span>—</span></div>
     </div>
     <div class="signal-banner pending" id="signalBanner">waiting</div>
+    <div class="ai-status" id="aiStatus"></div>
   </div>
 
   <div class="gauge-panel">
@@ -240,17 +248,38 @@ function renderBinancePanel(e){
     : `<span class="dot" style="background:var(--coral);"></span><span>disconnected${bin.last_error? ' — '+bin.last_error : ''}</span>`;
 
   const banner = $('signalBanner');
-  const color = e.decided_color;
-  if(color === 'green'){
-    banner.className = 'signal-banner green'; banner.textContent = `GREEN (previous window) — real signal UP, FADED — resting buy DOWN @ ${ORDER_PRICE}`;
-  } else if(color === 'red'){
-    banner.className = 'signal-banner red'; banner.textContent = `RED (previous window) — real signal DOWN, FADED — resting buy UP @ ${ORDER_PRICE}`;
-  } else if(color === 'flat'){
-    banner.className = 'signal-banner flat'; banner.textContent = 'FLAT previous candle — no trade this window';
+  const side = e.ai_predicted_side;
+  if(side === 'UP'){
+    banner.className = 'signal-banner green';
+    banner.textContent = `AI predicts UP (conf ${e.ai_confidence!=null?(e.ai_confidence*100).toFixed(0)+'%':'—'}), FADED — resting buy DOWN @ ${ORDER_PRICE}`;
+  } else if(side === 'DOWN'){
+    banner.className = 'signal-banner red';
+    banner.textContent = `AI predicts DOWN (conf ${e.ai_confidence!=null?(e.ai_confidence*100).toFixed(0)+'%':'—'}), FADED — resting buy UP @ ${ORDER_PRICE}`;
+  } else if(e.decision_made){
+    banner.className = 'signal-banner flat';
+    const ai = e.ai || {};
+    const reason = !ai.ready ? `cold start (${ai.n_trained}/${ai.min_samples_to_predict} windows trained)`
+      : (e.ai_p_up!=null ? `low confidence (P(up)=${(e.ai_p_up*100).toFixed(0)}%)` : 'no feature data yet');
+    banner.textContent = `NO SIGNAL — ${reason}`;
   } else {
     banner.className = 'signal-banner pending';
     banner.textContent = 'waiting for previous-window candle data from Binance...';
   }
+
+  renderAiStatus(e.ai || {});
+}
+
+function renderAiStatus(ai){
+  const el = $('aiStatus');
+  const readyTag = ai.ready
+    ? `<span class="ready">ready</span>`
+    : `<span class="cold">cold start ${ai.n_trained ?? 0}/${ai.min_samples_to_predict ?? '—'}</span>`;
+  const acc = ai.accuracy!=null ? ai.accuracy.toFixed(1)+'%' : '—';
+  el.innerHTML = `
+    <span>${readyTag}</span>
+    <span>trained on <b>${ai.n_trained ?? 0}</b> windows</span>
+    <span>directional accuracy <b>${acc}</b> (${ai.correct_predictions ?? 0}/${ai.total_predictions ?? 0})</span>
+  `;
 }
 
 async function poll(){
@@ -358,7 +387,7 @@ function renderStats(e){
   const tiles = [
     ['total_orders_placed','orders placed',''], ['total_order_fills','maker fills',''],
     ['total_tp_fills','tp fills','win'], ['total_forced_closes','forced close',''],
-    ['total_unfilled_cancels','unfilled cancels',''], ['total_flat_candles','flat candles',''],
+    ['total_unfilled_cancels','unfilled cancels',''], ['total_flat_candles','AI no-signal',''],
     ['total_no_signal_windows','no-signal',''], ['total_illiquid_skips','illiquid skips',''],
     ['total_rsi_vetoes','RSI vetoes',''],
     ['win_rate','win rate %',''],

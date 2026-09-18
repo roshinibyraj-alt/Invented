@@ -2,18 +2,19 @@
 Central configuration for the BTC 5-min up/down bot.
 
 Single engine -- one resting limit buy per window. Direction is decided
-by the color of the PREVIOUS window's own last 1-minute Binance spot
-candle (the 240-300s candle of the window that just closed), then
-FADED (the bot trades the opposite side of that signal, always):
+by an online AI signal engine (app/ai_signal.py) predicting the next
+window's outcome, then FADED (the bot trades the opposite side of that
+prediction, always):
 
-  1. The instant a new window opens, read that candle (already closed
-     by definition -- it ended exactly when this window began):
-       - green (close > open) -> real signal UP
-       - red   (close < open) -> real signal DOWN
-       - flat  (close == open) -> no trade this window
-     If Binance's data for that candle hasn't arrived yet right at the
-     window boundary (feed lag), the engine keeps checking every tick
-     and reads it the instant it becomes available.
+  1. The instant a new window opens, read the previous window's last
+     1-minute Binance candle (already closed by definition) and use it
+     -- along with RSI, momentum, volatility, and streak features
+     computed off the same feed -- as input to the AI signal engine's
+     prediction of P(next window resolves UP).
+       - confident UP prediction -> real signal UP
+       - confident DOWN prediction -> real signal DOWN
+       - not confident, or the model hasn't trained on enough windows
+         yet (cold start) -> no trade this window
   2. RSI(14) veto is checked against the REAL signal side (see below) --
      if it survives, the bot places its resting limit buy on the
      OPPOSITE side of the real signal, always (this is a fade/contrarian
@@ -29,10 +30,14 @@ FADED (the bot trades the opposite side of that signal, always):
   5. Only one order, one trade max per window -- no re-arming. If the
      resting order fills but TP never hits, the position is
      force-closed at window end (taker, real depth-weighted price).
+  6. Every window's true outcome (once known) is fed back into the AI
+     signal engine as one online training step -- it keeps learning
+     for as long as the bot runs, whether or not a trade was actually
+     placed that window.
 
 This completely replaces the previous "read minute 2 of THIS window"
 strategy -- Binance is still signal-only (never prices or executes
-anything), just reading a different candle now.
+anything), just feeding a model instead of being read directly now.
 """
 import os
 
@@ -70,6 +75,18 @@ RSI_OVERBOUGHT = 70.0
 RSI_OVERSOLD = 30.0
 
 STARTING_CAPITAL = float(os.getenv("STARTING_CAPITAL", "2000"))
+
+# ---- AI signal engine -----------------------------------------------------
+# Replaces "candle color = real signal" with an online (self-training)
+# logistic regression predicting P(next window resolves UP), fit
+# incrementally after every window's true outcome becomes known -- no
+# external API calls, no offline training step, no historical dataset
+# needed. See app/ai_signal.py for the model itself and feature list.
+AI_MIN_SAMPLES_TO_PREDICT = 30   # cold-start: skip trading until this many windows have been learned from
+AI_LEARNING_RATE = 0.05
+AI_L2_REG = 0.001
+AI_CONFIDENCE_BAND = 0.06        # |P(up) - 0.5| must exceed this or the window is treated as "no signal"
+AI_STREAK_LOOKBACK = 10          # max consecutive same-color candles counted for the streak feature
 
 # ---- Trading fees -----------------------------------------------------
 # The entry is a resting MAKER limit order -- it fills at its own exact
