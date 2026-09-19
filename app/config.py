@@ -58,21 +58,20 @@ WINDOW_SECONDS = 300
 
 POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
 
-# ---- Previous-window-momentum engine (faded) ------------------------------
+# ---- Order sizing / pricing (AI signal engine, faded) ----------------------
 ORDER_SHARES = 200.0
 ORDER_PRICE = 0.45           # fixed absolute limit price, whichever side is traded
 SIGNAL_CANDLE_OFFSET = 240   # the decision candle is the previous window's [240s, 300s) minute
 TP_PRICE = 0.99
 
-# ---- RSI veto -----------------------------------------------------------
+# ---- RSI flag (informational, no-skip mode) --------------------------------
 # Computed on the 1-minute BTC feed, as of the same signal candle used for
-# color. Checked against the REAL signal side (before the fade flip) --
-# it only blocks a trade when that real signal direction looks exhausted
-# rather than fresh:
-#   green -> real signal UP,   but RSI already overbought -> veto (no trade)
-#   red   -> real signal DOWN, but RSI already oversold   -> veto (no trade)
+# the AI's features. Checked against the REAL signal side (before the fade
+# flip) and logged for visibility -- it does NOT block the trade:
+#   AI signal UP,   RSI already overbought -> flagged, trade still placed
+#   AI signal DOWN, RSI already oversold   -> flagged, trade still placed
 # If there isn't enough closed-candle history yet (startup/reconnect), the
-# veto is skipped and the trade proceeds on candle color alone.
+# flag is just skipped (nothing to compute it from).
 RSI_PERIOD = 14
 RSI_OVERBOUGHT = 70.0
 RSI_OVERSOLD = 30.0

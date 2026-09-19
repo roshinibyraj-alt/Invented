@@ -27,18 +27,28 @@ class BotState:
         self.last_down_ask: Optional[float] = None
         self.status = "starting"
         self.error: Optional[str] = None
-        self.pretrain_status = {"done": False, "windows_trained": 0, "error": None}
+        self.pretrain_status = {"done": False, "windows_trained": 0, "candles_seeded": 0, "error": None}
         self._task: Optional[asyncio.Task] = None
 
     async def start(self):
+        # Fetch+train+seed happens BEFORE the live websocket starts, so
+        # the REST-sourced seed data can never race with / get
+        # clobbered by real-time updates landing mid-seed.
+        result = await pretrain_ai(self.engine.ai, live_feed=self.binance_feed)
+        self.pretrain_status = {"done": True, **result}
+        if result["error"]:
+            self.broker.log_event(
+                "SYS", "", "AI_PRETRAIN",
+                note=f"pretraining skipped/failed ({result['error']}) -- starting fully cold, learns/fills online instead",
+            )
+        else:
+            self.broker.log_event(
+                "SYS", "", "AI_PRETRAIN",
+                note=(f"pretrained AI on {result['windows_trained']} historical windows AND seeded the live "
+                      f"feed with {result['candles_seeded']} historical candles -- full feature lookback "
+                      f"available from the first live tick, no ~15min live warm-up needed"),
+            )
         self.binance_feed.start()
-        n, err = await pretrain_ai(self.engine.ai)
-        self.pretrain_status = {"done": True, "windows_trained": n, "error": err}
-        self.broker.log_event(
-            "SYS", "", "AI_PRETRAIN",
-            note=(f"pretrained on {n} historical windows from Binance REST klines"
-                  if not err else f"pretraining skipped/failed ({err}) -- starting fully untrained, learns online instead"),
-        )
         self._task = asyncio.create_task(self._run_loop())
 
     async def stop(self):

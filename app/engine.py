@@ -148,7 +148,7 @@ class Engine:
         self.total_unfilled_cancels = 0
         self.total_no_signal_windows = 0
         self.total_illiquid_skips = 0
-        self.total_rsi_vetoes = 0
+        self.total_rsi_flags = 0
         self.total_pnl = 0.0
         self.wins = 0
         self.losses = 0
@@ -255,12 +255,12 @@ class Engine:
         rsi = self.binance_feed.get_rsi(signal_open_ts, config.RSI_PERIOD)
         if rsi is not None:
             if side == Side.UP and rsi > config.RSI_OVERBOUGHT:
-                self.total_rsi_vetoes += 1
+                self.total_rsi_flags += 1
                 self._log("RSI_FLAG", side=side.value, note=(
                     f"AI signal UP but RSI({config.RSI_PERIOD}) {rsi:.1f} > {config.RSI_OVERBOUGHT} "
                     f"(overbought) -- flagged only, trade still placed (no-skip mode)"))
             elif side == Side.DOWN and rsi < config.RSI_OVERSOLD:
-                self.total_rsi_vetoes += 1
+                self.total_rsi_flags += 1
                 self._log("RSI_FLAG", side=side.value, note=(
                     f"AI signal DOWN but RSI({config.RSI_PERIOD}) {rsi:.1f} < {config.RSI_OVERSOLD} "
                     f"(oversold) -- flagged only, trade still placed (no-skip mode)"))
@@ -446,7 +446,7 @@ class Engine:
             "total_unfilled_cancels": self.total_unfilled_cancels,
             "total_no_signal_windows": self.total_no_signal_windows,
             "total_illiquid_skips": self.total_illiquid_skips,
-            "total_rsi_vetoes": self.total_rsi_vetoes,
+            "total_rsi_flags": self.total_rsi_flags,
 
             "wins": self.wins,
             "losses": self.losses,

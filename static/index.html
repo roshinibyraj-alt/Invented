@@ -272,8 +272,8 @@ function renderAiStatus(ai, pretrain){
   const pretrainTag = !pretrain.done
     ? `<span class="cold">pretraining…</span>`
     : (pretrain.error
-        ? `<span class="cold">pretrain failed — learning online only</span>`
-        : `<span class="ready">pretrained on ${pretrain.windows_trained} historical windows</span>`);
+        ? `<span class="cold">pretrain failed — starting cold, fills in live (~15min)</span>`
+        : `<span class="ready">pretrained on ${pretrain.windows_trained} windows, seeded ${pretrain.candles_seeded} live candles</span>`);
   el.innerHTML = `
     <span>${pretrainTag}</span>
     <span>trained on <b>${ai.n_trained ?? 0}</b> windows (${ai.pretrained_windows ?? 0} pretrain + ${ai.live_trained_windows ?? 0} live)</span>
@@ -387,7 +387,7 @@ function renderStats(e){
     ['total_orders_placed','orders placed',''], ['total_order_fills','maker fills',''],
     ['total_tp_fills','tp fills','win'], ['total_forced_closes','forced close',''],
     ['total_unfilled_cancels','unfilled cancels',''], ['total_no_signal_windows','no-signal (feed gap)',''],
-    ['total_illiquid_skips','illiquid skips',''], ['total_rsi_vetoes','RSI flags',''],
+    ['total_illiquid_skips','illiquid skips',''], ['total_rsi_flags','RSI flags',''],
     ['win_rate','win rate %',''],
   ];
   $('statsGrid').innerHTML = tiles.map(([key,label,cls]) => {

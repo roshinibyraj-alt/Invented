@@ -1,16 +1,32 @@
 """
-Historical pretraining for the AI signal engine (app/ai_signal.py).
+Historical pretraining for the AI signal engine (app/ai_signal.py) --
+AND live-feed warm-start, which matters just as much.
 
 Binance's public REST klines endpoint needs no API key and serves
 years of history, so at startup the bot fetches the last
-config.AI_BACKTEST_DAYS of 1-minute BTC/USDT candles and replays them
-through the EXACT same feature computation (AISignalEngine.compute_features)
-and the same 5-minute window grid the live bot uses (windows align to
-epoch multiples of WINDOW_SECONDS -- see polymarket_client.py's
-current_window_open_ts()), training the model on all of it before the
-first live tick. This removes the old live cold-start almost entirely:
-the model already has real learned weights from minute one instead of
-starting from all-zero weights.
+config.AI_BACKTEST_DAYS of 1-minute BTC/USDT candles ONCE and uses
+them for two separate things:
+
+  1. pretrain_from_klines(): replays them through the EXACT same
+     feature computation (AISignalEngine.compute_features) and the
+     same 5-minute window grid the live bot uses (windows align to
+     epoch multiples of WINDOW_SECONDS -- see polymarket_client.py's
+     current_window_open_ts()), training the model's weights on all
+     of it before the first live tick.
+  2. seed_live_feed(): pretraining only warms up the MODEL's weights.
+     The live engine's _check_signal() still computes the CURRENT
+     window's features off the live BinanceKlineFeed's own candle
+     cache -- that cache starts empty and needs ~15 real minutes to
+     fill (RSI(14) + the 10-candle lookback) before compute_features()
+     stops returning None, no matter how well-trained the model
+     already is. This seeds that live cache with the same historical
+     data so a full lookback is available from the very first live
+     tick too -- otherwise "pretrained but still shows not-enough-
+     history" is exactly what you'd see for the first ~15 minutes.
+
+Both must run, in this order, BEFORE the live websocket
+(binance_feed.start()) is started -- see pretrain_ai() below, which is
+the single entry point state.py calls that does both.
 
 Label used for each historical window: whether BTC's own spot price
 finished the window higher than it opened. The live bot's true label
@@ -22,9 +38,9 @@ solid proxy label for pretraining.
 
 Network failures here are non-fatal by design: if Binance's REST API
 is unreachable (offline dev environment, rate limit, outage), the bot
-just starts with an untrained model and learns online instead, same
-as before this feature existed. Nothing about this module can prevent
-the bot from starting.
+just starts with an untrained model and an empty live cache and learns
+online instead, same as before this feature existed. Nothing about
+this module can prevent the bot from starting.
 """
 import time
 from typing import Optional
@@ -108,18 +124,50 @@ def pretrain_from_klines(ai: AISignalEngine, klines: list) -> int:
     return n_trained
 
 
-async def pretrain_ai(ai: AISignalEngine) -> "tuple[int, Optional[str]]":
-    """Top-level entry point called once at startup. Returns
-    (windows_trained, error_message). error_message is None on
-    success; on any failure, windows_trained is 0 and the caller
-    should just proceed -- this is best-effort warm-starting, never a
-    hard requirement to run."""
+def seed_live_feed(feed: BinanceKlineFeed, klines: list) -> int:
+    """Pretraining warms up the MODEL's weights, but the live engine's
+    _check_signal() still reads the CURRENT window's features off
+    `feed` (the real BinanceKlineFeed the websocket writes into) --
+    without this, that cache starts empty and needs ~15 live minutes
+    to fill (RSI(14) + the 10-candle momentum/volatility lookback)
+    before compute_features() stops returning None, no matter how
+    well-trained the model already is. This seeds `feed.candles` with
+    the tail of the same historical data used for pretraining, so
+    there's already a full lookback window available from the first
+    live tick. Only the most recent MAX_CANDLES are kept (matches the
+    feed's own trim policy) -- older history isn't needed for feature
+    computation anyway. Must be called BEFORE feed.start(), so the
+    live websocket's real-time updates aren't clobbered by this
+    REST-sourced data landing after it.
+    Returns how many candles were seeded."""
+    from .binance_client import MAX_CANDLES
+    if not klines:
+        return 0
+    recent = klines[-MAX_CANDLES:]
+    for open_time, o, c in recent:
+        key = int(open_time // 60) * 60
+        feed.candles[float(key)] = Candle(open_time=key, open=o, close=c, closed=True)
+    feed._trim()
+    return len(recent)
+
+
+async def pretrain_ai(ai: AISignalEngine, live_feed: Optional[BinanceKlineFeed] = None) -> dict:
+    """Top-level entry point called once at startup, before
+    live_feed.start(). Fetches historical klines ONCE and uses them
+    for both: (1) training the model's weights, and (2) seeding
+    live_feed's candle cache so the live engine has a full feature
+    lookback immediately instead of waiting ~15 live minutes for it to
+    fill naturally. Returns a status dict; on any failure the model
+    just starts untrained and the feed just starts empty, same as
+    before this module existed -- this is best-effort warm-starting,
+    never a hard requirement to run."""
     try:
         klines = await fetch_historical_klines(config.AI_BACKTEST_DAYS)
     except Exception as e:
-        return 0, f"{type(e).__name__}: {e}"
+        return {"windows_trained": 0, "candles_seeded": 0, "error": f"{type(e).__name__}: {e}"}
     try:
-        n = pretrain_from_klines(ai, klines)
-        return n, None
+        n_trained = pretrain_from_klines(ai, klines)
+        n_seeded = seed_live_feed(live_feed, klines) if live_feed is not None else 0
+        return {"windows_trained": n_trained, "candles_seeded": n_seeded, "error": None}
     except Exception as e:
-        return 0, f"{type(e).__name__}: {e}"
+        return {"windows_trained": 0, "candles_seeded": 0, "error": f"{type(e).__name__}: {e}"}
