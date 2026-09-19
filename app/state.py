@@ -9,7 +9,7 @@ import httpx
 from . import config
 from .backtest import run_prebacktest
 from .engine import Engine
-from .marketdata import fetch_live_frames
+from .marketdata import WINDOW_TF, fetch_live_frames
 from .models import PricePoint, Side, WindowMarket
 from .mtf_engine import MTFPredictor, price_at
 from .paper_broker import PaperBroker
@@ -28,7 +28,7 @@ class BotState:
         self.client = PolymarketClient()
         self.http = httpx.AsyncClient(timeout=10)      # Binance market-data client (analysis only)
         self.current_window: Optional[WindowMarket] = None
-        self.price_history: deque = deque(maxlen=300)  # ~5 min at 1s ticks
+        self.price_history: deque = deque(maxlen=config.WINDOW_SECONDS)  # ~one window at 1s ticks
         self.last_up_bid: Optional[float] = None
         self.last_up_ask: Optional[float] = None
         self.last_down_bid: Optional[float] = None
@@ -140,14 +140,14 @@ class BotState:
         )
 
     async def _ensure_frames(self, now: float):
-        """Fetch the 1D/4H/1H/15m (+5m) candles for the current window's
+        """Fetch the 1D/4H/1H/15m candles for the current window's
         snapshot, retrying every few seconds until the engine has them."""
         if not self.engine.needs_frames() or now - self._frames_last_attempt < FRAMES_RETRY_SECONDS:
             return
         self._frames_last_attempt = now
         try:
             frames = await fetch_live_frames(self.http)
-            price = price_at(frames["5m"], self.current_window.open_ts)
+            price = price_at(frames[WINDOW_TF], self.current_window.open_ts)
             if self.engine.set_frames(frames, price):
                 self.frames_error = None
             else:

@@ -1,22 +1,22 @@
 """
 Startup pre-backtest for the multi-timeframe engine (app/mtf_engine.py).
 
-Fetches the last config.MTF_BACKTEST_DAYS (7) days of 5-minute candles
-plus 1D / 4H / 1H / 15m candles (with warm-up history so the slow
-indicators are converged), replays every completed 5-minute window --
-snapshot at window open, outcome at window close -- and mines the
-situations that were reliably right. See mtf_engine.py for the method
-and the out-of-sample honesty check.
+Fetches the last config.MTF_BACKTEST_DAYS (7) days of 1D / 4H / 1H / 15m
+candles (with warm-up history so the slow indicators are converged),
+replays every completed 15-minute window -- snapshot at window open,
+outcome at window close -- and mines the situations that were reliably
+right. See mtf_engine.py for the method and the out-of-sample honesty
+check.
 
-Window outcome = whether the window's own 5-minute BTC/USDT candle
-closed above its open. Windows sit on the epoch-multiple-of-300s grid
-(same as Polymarket's), so a Binance 5m candle is exactly one window.
-Polymarket doesn't expose historical order books, but these markets
-resolve on BTC's own move, so this is a solid proxy label.
+Window outcome = whether the window's own 15-minute BTC/USDT candle closed
+at or above its open (Polymarket's "Up" rule). Windows sit on the
+epoch-multiple-of-900s grid (same as Polymarket's), so a Binance 15m
+candle is exactly one window. Polymarket settles on the Chainlink BTC/USD
+stream, not Binance, and doesn't expose historical order books, but the two
+prices track closely, so this is a solid proxy label.
 
 Network failures are non-fatal by design: the bot still starts, just
-with no situations (so no trades) until a retry succeeds -- it never
-trades without evidence.
+with no models (so no trades) until a retry succeeds.
 """
 import asyncio
 

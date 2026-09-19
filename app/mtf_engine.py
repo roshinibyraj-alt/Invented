@@ -4,7 +4,7 @@ Multi-timeframe (1D / 4H / 1H / 15m) prediction engine with a built-in
 
 How it works
 ------------
-1. SNAPSHOT.  At every 5-minute window open, the market is described as a
+1. SNAPSHOT.  At every 15-minute window open, the market is described as a
    set of discrete readings ("tokens") from nine indicators on each of the
    four timeframes -- e.g. "4H trend UP", "1H RSI<30", "15m MACD- falling"
    -- plus the time of day ("T 08-12h UTC") and weekday/weekend. Only
@@ -13,7 +13,7 @@ How it works
    snapshot is identical in the backtest and live and cannot look ahead.
 
 2. PRE-BACKTEST.  The last MTF_BACKTEST_DAYS (7) days are replayed: every
-   5-minute window becomes one record = (its tokens, did it finish UP?).
+   15-minute window becomes one record = (its tokens, did it finish UP?).
    The miner then searches every 1-, 2- and 3-token "situation"
    ("4H trend UP + 1H RSI<30 + T 08-12h UTC") and keeps only those that
    were right often enough, on enough windows, to be unlikely luck:
@@ -61,7 +61,7 @@ from typing import Dict, List, Optional, Tuple
 
 from . import config
 from . import indicators as ind
-from .marketdata import TF_ORDER, TIMEFRAMES, Candle
+from .marketdata import TF_ORDER, TIMEFRAMES, WINDOW_TF, Candle
 from .models import Side
 
 BLOCK_HOURS = 4
@@ -153,11 +153,16 @@ def _frame_tokens(tf: str, p: Prepared, i: int, forming_open: float, price_now: 
     candle_t = "candle GREEN" if c.close > c.open else "candle RED"
 
     atr_v = v["atr"]
-    move_atr = (price_now - forming_open) / atr_v if atr_v else 0.0
-    form_t = ("now >0.5ATR above open" if move_atr > 0.5 else
-              "now >0.5ATR below open" if move_atr < -0.5 else "now near open")
-
-    tokens = [f"{tf} {t}" for t in (rsi_t, macd_t, f"trend {trend}", bb_t, st_t, adx_t, vol_t, candle_t, form_t)]
+    # Price vs the still-forming candle's open. For the timeframe that IS the
+    # window (15m) that candle has only just opened, so the reading is always
+    # ~0 and carries no information -- leave it out.
+    is_window_tf = TIMEFRAMES[tf][1] == config.WINDOW_SECONDS
+    move_atr = None if is_window_tf else ((price_now - forming_open) / atr_v if atr_v else 0.0)
+    labels = [rsi_t, macd_t, f"trend {trend}", bb_t, st_t, adx_t, vol_t, candle_t]
+    if move_atr is not None:
+        labels.append("now >0.5ATR above open" if move_atr > 0.5 else
+                      "now >0.5ATR below open" if move_atr < -0.5 else "now near open")
+    tokens = [f"{tf} {t}" for t in labels]
     readings = {
         "rsi": round(rsi_v, 1), "macd_hist": round(h, 4), "macd_state": macd_t,
         "trend": trend, "ema20": round(e20, 2), "ema50": round(e50, 2),
@@ -165,7 +170,7 @@ def _frame_tokens(tf: str, p: Prepared, i: int, forming_open: float, price_now: 
         "pdi": round(v["pdi"], 1), "mdi": round(v["mdi"], 1),
         "atr_pct": round(atr_v / close * 100, 3) if close else None,
         "vol_ratio": round(vr, 2), "candle": "GREEN" if c.close > c.open else "RED",
-        "now_vs_open_atr": round(move_atr, 2),
+        "now_vs_open_atr": round(move_atr, 2) if move_atr is not None else None,
     }
     return tokens, readings
 
@@ -209,15 +214,17 @@ def window_tokens(prepared: Dict[str, Prepared], t: float, price_now: float
     return frozenset(tokens), readings
 
 
-def price_at(five_min: List[Candle], t: float) -> Optional[float]:
-    """Window-open price: the open of the 5m candle starting at t, or (if
-    Binance hasn't listed it yet) the close of the one that just ended."""
-    for c in reversed(five_min):
+def price_at(window_candles: List[Candle], t: float) -> Optional[float]:
+    """Window-open price: the open of the window-timeframe (15m) candle
+    starting at t, or (if Binance hasn't listed it yet) the close of the one
+    that just ended."""
+    w = config.WINDOW_SECONDS
+    for c in reversed(window_candles):
         if c.open_time == t:
             return c.open
-        if c.open_time == t - 300:
+        if c.open_time == t - w:
             return c.close
-        if c.open_time < t - 300:
+        if c.open_time < t - w:
             break
     return None
 
@@ -231,7 +238,7 @@ class WindowRecord:
 
 def build_records(data: Dict[str, List[Candle]], now: Optional[float] = None,
                   days: Optional[float] = None) -> List[WindowRecord]:
-    """Replay history into one record per completed 5-minute window."""
+    """Replay history into one record per completed 15-minute window."""
     now = now if now is not None else time.time()
     days = days if days is not None else config.MTF_BACKTEST_DAYS
     prepared = prepare_frames(data)
@@ -239,14 +246,16 @@ def build_records(data: Dict[str, List[Candle]], now: Optional[float] = None,
         return []
     start = now - days * 86400
     out: List[WindowRecord] = []
-    for c in data["5m"]:
+    w = config.WINDOW_SECONDS
+    for c in data[WINDOW_TF]:
         t = c.open_time
-        if t < start or t + 300 > now or t % 300 != 0:
+        if t < start or t + w > now or t % w != 0:
             continue
         res = window_tokens(prepared, t, c.open)
         if res is None:
             continue
-        out.append(WindowRecord(ts=t, tokens=res[0], up=c.close > c.open))
+        # Polymarket: "Up" if the end price is >= the start price.
+        out.append(WindowRecord(ts=t, tokens=res[0], up=c.close >= c.open))
     out.sort(key=lambda r: r.ts)
     return out
 
@@ -684,7 +693,7 @@ def evaluate(records: List[WindowRecord], live: ModelSet, top_k: Optional[int] =
                                 "z_threshold": round(ms_tr.z_threshold, 2)}
     summary["in_sample"] = _score(records, live, top_k, allow)
     summary["period_start"] = records[0].ts
-    summary["period_end"] = records[-1].ts + 300
+    summary["period_end"] = records[-1].ts + config.WINDOW_SECONDS
     return summary
 
 

@@ -4,25 +4,29 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app.marketdata import Candle, TIMEFRAMES
 
 def gen_5m(days, seed=1, plant=False, start_ts=1_760_000_000//86400*86400):
-    """5m random walk. plant=True: in UTC 08-12h, if last closed 15m candle is RED, next 5m bar is UP w.p. 0.72."""
+    """Random-walk BTC as 5-minute bars, generated one 15-minute WINDOW (3 bars) at a time.
+    plant=True: in UTC 08-12h, if the last closed 15m candle is RED, the next 15m window
+    finishes UP w.p. 0.85 (otherwise 0.5)."""
     rnd = random.Random(seed)
-    n = int(days*288)
-    out=[]; price=60000.0
-    for k in range(n):
-        t = start_ts + k*300
+    n_windows = int(days * 96)
+    out = []; price = 60000.0
+    for k in range(n_windows):
+        t = start_ts + k * 900
         up_prob = 0.5
-        if plant and 8 <= (t//3600)%24 < 12 and len(out) >= 3:
-            # last closed 15m candle as of t
-            i15 = (t//900)*900
-            bars=[c for c in out[-6:] if i15-900 <= c.open_time < i15]
-            if len(bars)==3 and bars[-1].close < bars[0].open:
-                up_prob = 0.72
-        mag = abs(rnd.gauss(0, 0.0012))
-        ret = mag if rnd.random() < up_prob else -mag
-        o = price; c = o*(1+ret)
-        h = max(o,c)*(1+abs(rnd.gauss(0,0.0004))); l = min(o,c)*(1-abs(rnd.gauss(0,0.0004)))
-        out.append(Candle(t,o,h,l,c,rnd.uniform(50,150)))
-        price = c
+        if plant and 8 <= (t // 3600) % 24 < 12 and len(out) >= 3:
+            prev = out[-3:]
+            if prev[-1].close < prev[0].open:
+                up_prob = 0.85
+        sign = 1 if rnd.random() < up_prob else -1
+        mag = abs(rnd.gauss(0, 0.002))
+        noise = [rnd.gauss(0, 0.0004) for _ in range(3)]
+        mean = sum(noise) / 3
+        for j in range(3):
+            ret = sign * mag / 3 + (noise[j] - mean)      # zero-sum noise keeps the window's net sign
+            o = price; c = o * (1 + ret)
+            h = max(o, c) * (1 + abs(rnd.gauss(0, 0.0003))); l = min(o, c) * (1 - abs(rnd.gauss(0, 0.0003)))
+            out.append(Candle(t + j * 300, o, h, l, c, rnd.uniform(50, 150)))
+            price = c
     return out
 
 def agg(c5, secs):
@@ -39,7 +43,7 @@ def agg(c5, secs):
 
 def make(days=130, seed=1, plant=False):
     c5=gen_5m(days,seed,plant)
-    data={"5m":c5}
+    data={}
     for tf,(iv,secs) in TIMEFRAMES.items():
         data[tf]=agg(c5,secs)
     now=c5[-1].open_time+300

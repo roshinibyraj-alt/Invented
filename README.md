@@ -1,7 +1,7 @@
-# ⚡ ALPHASTRIKE — multi-timeframe BTC 5m up/down bot
+# ⚡ ALPHASTRIKE — multi-timeframe BTC 15m up/down bot
 
-Paper-trading bot for Polymarket's `btc-updown-5m-*` markets. At every
-5-minute window it asks one question — **UP or DOWN, and why?** — using
+Paper-trading bot for Polymarket's `btc-updown-15m-*` markets. At every
+15-minute window it asks one question — **UP or DOWN, and why?** — using
 indicators on four timeframes (1D, 4H, 1H, 15m), and trades **with** the
 answer, at the window's first seconds, as a taker. The reasons behind
 every call are logged and shown on the dashboard.
@@ -11,14 +11,16 @@ every call are logged and shown on the dashboard.
 1. **Snapshot at window open.** Nine indicators on each of 1D / 4H / 1H /
    15m — RSI(14), MACD(12,26,9), EMA20/50 trend, Bollinger %B, Stochastic,
    ADX(+DI/−DI), volume vs its 20-period average, last candle colour, and
-   where price is versus the still-forming candle's open (in ATRs) — plus
+   where price is versus the still-forming candle's open (in ATRs; skipped
+   for 15m, whose forming candle *is* the window) — plus
    the UTC time-of-day block and weekday/weekend. Each reading is bucketed
    into a token such as `4H trend UP` or `1H RSI<30`. Only fully closed
    candles as of the window open are used (plus the forming candle's
    *open*, which is already known), so nothing can look ahead. The test
    suite checks that the live path and the backtest path produce
    identical snapshots even when the forming candle's data is corrupted.
-2. **Pre-backtest of the last 7 days** (~2,000 windows, run at startup).
+2. **Pre-backtest of the last 7 days** (~670 fifteen-minute windows, run at
+   startup).
    Every window becomes *(snapshot, did it finish UP?)*. The miner tests
    every 1-, 2- and 3-token **situation** — e.g. `4H trend UP + 1H RSI<30
    + T 08-12h UTC` — and keeps only situations that:
@@ -60,7 +62,7 @@ every call are logged and shown on the dashboard.
 5. **Keeps learning.** Every resolved window — traded or not — is
    appended to a rolling 7-day history (oldest dropped) together with
    its snapshot and true outcome, and the situations are re-mined every
-   `MTF_REFRESH_EVERY_WINDOWS` windows (default 12, about hourly) in a
+   `MTF_REFRESH_EVERY_WINDOWS` windows (default 4, about hourly) in a
    worker thread, never at window rollover so it can't delay the entry.
    New situations can appear, and ones that stopped working fall away.
    Live hit rate of the calls is tracked separately on the dashboard.
@@ -99,7 +101,7 @@ mirror such as `https://api.binance.us/api/v3/klines`.
 
 - `app/indicators.py` — pure-Python RSI, MACD, EMA/SMA, Bollinger,
   Stochastic, ATR, ADX (checked against pandas to ~1e-12)
-- `app/marketdata.py` — Binance REST klines (1D/4H/1H/15m/5m)
+- `app/marketdata.py` — Binance REST klines (1D/4H/1H/15m; the 15m candles are also the windows)
 - `app/mtf_engine.py` — snapshot tokens, situation miner, prediction,
   out-of-sample evaluation
 - `app/backtest.py` — startup pre-backtest orchestration
@@ -133,8 +135,19 @@ mirror such as `https://api.binance.us/api/v3/klines`.
   at ~50%, the bot is paying fees for a coin flip. Watch the per-tier
   live accuracy, and use `MTF_ALLOW_FALLBACK=0` to trade only validated
   situations.
-- Window outcome in the backtest = the window's own Binance 5m candle
-  closed above its open. Live outcomes (history append, win/loss
+- **15-minute windows mean fewer samples.** A week is only ~670 windows
+  (vs ~2,000 five-minute ones), so fewer situations can clear the noise
+  test and the out-of-sample check (~200 windows) is itself noisy (a
+  pure-noise week can easily show 55–57% out-of-sample by luck). On
+  synthetic data with a planted pattern, the miner recovered it in 5 of 8
+  one-week samples but 8 of 8 two-week samples, so consider
+  `MTF_BACKTEST_DAYS=14` (or up to 21).
+- Polymarket settles "Up" if the Chainlink BTC/USD price at the end is
+  greater than or equal to the price at the start. The backtest label is
+  the window's Binance 15m candle closing at/above its open — a close
+  proxy, not the identical price source.
+- Window outcome in the backtest = the window's own Binance 15m candle
+  closed at or above its open. Live outcomes (history append, win/loss
   settlement) come from the last observed Polymarket CLOB midpoint at
   window rollover (`state.py`'s `_infer_winner`), not Polymarket's own
   settled resolution.

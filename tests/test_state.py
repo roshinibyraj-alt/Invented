@@ -19,7 +19,7 @@ async def main():
     B.build_records = lambda d: orig(d, now=now)
     await bs._run_backtest()
     print("backtest status:", bs.backtest_status, "| log:", bs.broker.log[-1].note[:200])
-    assert bs.backtest_status["windows"] == 2016 and bs.backtest_status["error"] is None
+    assert bs.backtest_status["windows"] == 672 and bs.backtest_status["error"] is None
 
     # window at a matched time
     rec = next(r for r in bs.predictor.records if bs.predictor.predict(r.tokens, {}))

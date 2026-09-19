@@ -1,14 +1,17 @@
 """
 Binance public REST klines (no API key) -- OHLCV for the four analysis
-timeframes (1D, 4H, 1H, 15m) plus 5-minute candles.
+timeframes (1D, 4H, 1H, 15m).
 
   * 1D / 4H / 1H / 15m  -> inputs to the indicators (app/indicators.py)
-  * 5m                  -> the price at each window's open, and (for the
-                           backtest) each window's true outcome. Windows
-                           sit on the epoch-multiple-of-300s grid, so a
-                           5m Binance candle IS one Polymarket window:
+  * 15m (again)         -> the price at each window's open and, for the
+                           backtest, each window's true outcome. Windows
+                           sit on the epoch-multiple-of-900s grid, so a
+                           15m Binance candle IS one Polymarket window:
                            it opens at the window's open, closes at its
-                           close.
+                           close. (At window open, the newest 15m candle
+                           is the just-started window itself: its OPEN is
+                           the window-open price, its other fields are
+                           still unknown and are never read.)
 
 Nothing here prices or executes anything -- all order pricing and fills
 are against Polymarket's own CLOB book (polymarket_client.py).
@@ -33,7 +36,7 @@ TIMEFRAMES: Dict[str, tuple] = {
     "15m": ("15m", 900),
 }
 TF_ORDER = ["1D", "4H", "1H", "15m"]   # display / rule-text order, slowest first
-FIVE_MIN = ("5m", 300)
+WINDOW_TF = "15m"                       # the timeframe whose candles ARE the market windows
 KLINES_LIMIT = 1000                     # Binance's per-request cap
 
 
@@ -83,15 +86,14 @@ async def fetch_klines(client: httpx.AsyncClient, interval: str, start_s: Option
 
 
 async def fetch_backtest_data(days: float) -> Dict[str, List[Candle]]:
-    """History for the backtest: `days` of 5m candles (window outcomes +
-    window-open prices) and, for every analysis timeframe, the same
-    period PLUS config.MTF_WARMUP_CANDLES of extra history before it so
-    the slow indicators (EMA50, ADX, MACD) are fully converged on the
-    very first backtest window."""
+    """History for the backtest: for every analysis timeframe (15m doubles
+    as the window candles), `days` of candles PLUS config.MTF_WARMUP_CANDLES
+    of extra history before them so the slow indicators (EMA50, ADX, MACD)
+    are fully converged on the very first backtest window."""
     now = time.time()
     start = now - days * 86400
     async with httpx.AsyncClient(timeout=25) as client:
-        jobs = {"5m": fetch_klines(client, FIVE_MIN[0], start_s=start - 600, end_s=now)}
+        jobs = {}
         for name in TF_ORDER:
             interval, secs = TIMEFRAMES[name]
             jobs[name] = fetch_klines(client, interval, start_s=start - config.MTF_WARMUP_CANDLES * secs, end_s=now)
@@ -100,14 +102,14 @@ async def fetch_backtest_data(days: float) -> Dict[str, List[Candle]]:
 
 
 async def fetch_live_frames(client: Optional[httpx.AsyncClient] = None) -> Dict[str, List[Candle]]:
-    """Most recent candles for every timeframe + 5m, for a live prediction.
+    """Most recent candles for every timeframe, for a live prediction.
     Newest candle in each list may still be forming; the tokenizer only
     reads fully-closed candles as of the window's open (plus the forming
     candle's OPEN price, which is already known)."""
     own = client is None
     client = client or httpx.AsyncClient(timeout=10)
     try:
-        jobs = {"5m": fetch_klines(client, FIVE_MIN[0], limit=6)}
+        jobs = {}
         for name in TF_ORDER:
             jobs[name] = fetch_klines(client, TIMEFRAMES[name][0], limit=config.MTF_WARMUP_CANDLES + 20)
         results = await asyncio.gather(*jobs.values())

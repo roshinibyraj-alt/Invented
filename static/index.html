@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>ALPHASTRIKE — BTC 5m bot</title>
+<title>ALPHASTRIKE — BTC 15m bot</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
@@ -182,7 +182,7 @@
   <header>
     <div>
       <h1>⚡ ALPHASTRIKE</h1>
-      <div class="sub">Multi-timeframe strike bot for BTC 5m up/down. 1D/4H/1H/15m indicators, pre-backtested on the last 7 days, decide UP or DOWN and show exactly why. No limit orders: 2s after the window opens it buys the predicted side as a taker (while the ask is below 0.60, checked every tick until close). 200sh, no SL, TP 0.99</div>
+      <div class="sub">Multi-timeframe strike bot for BTC 15-minute up/down. 1D/4H/1H/15m indicators, pre-backtested on the last 7 days, decide UP or DOWN and show exactly why. No limit orders: 2s after the window opens it buys the predicted side as a taker (while the ask is below 0.60, checked every tick until close). 200sh, no SL, TP 0.99</div>
     </div>
     <div class="status-pill"><span class="dot" id="statusDot"></span><span id="statusText">connecting</span></div>
   </header>
@@ -294,7 +294,7 @@ function renderReadings(readings){
     const tcol = r.trend==='UP' ? 'UP' : (r.trend==='DOWN' ? 'DOWN' : '');
     return `<tr><td><b>${tf}</b></td><td>${r.rsi}</td><td>${esc(r.macd_state)}</td><td class="${tcol}">${r.trend}</td>
       <td>${r.adx} (${r.pdi}/${r.mdi})</td><td>${r.pctb}</td><td>${r.stoch}</td><td>${r.vol_ratio}×</td>
-      <td class="${r.candle==='GREEN'?'UP':'DOWN'}">${r.candle}</td><td>${r.now_vs_open_atr>0?'+':''}${r.now_vs_open_atr} ATR</td></tr>`;
+      <td class="${r.candle==='GREEN'?'UP':'DOWN'}">${r.candle}</td><td>${r.now_vs_open_atr==null ? '—' : (r.now_vs_open_atr>0?'+':'')+r.now_vs_open_atr+' ATR'}</td></tr>`;
   }).join('');
   return `<div class="sect-label">Indicators at window open</div><div class="tbl-scroll"><table class="mtf">
     <tr><th>TF</th><th>RSI</th><th>MACD</th><th>Trend</th><th>ADX (+DI/-DI)</th><th>BB %B</th><th>Stoch</th><th>Vol</th><th>Last candle</th><th>Now vs open</th></tr>${rows}</table></div>`;
@@ -346,8 +346,8 @@ function renderBacktest(e, s){
   let verdict, vcls = '';
   if(!oos.predicted || oos.predicted < 30){
     verdict = `Only ${oos.predicted||0} out-of-sample calls — too few to judge whether the signal works.`; vcls = 'warn';
-  } else if(oos.z >= 1.96 && oos.accuracy > 0.5){
-    verdict = `Out-of-sample: ${pct(oos.accuracy)} right on ${oos.predicted} windows the models never saw (z=${oos.z}). Looks like a real edge, though 7 days is short.`; vcls = 'good';
+  } else if(oos.z >= 2.5 && oos.accuracy > 0.5){
+    verdict = `Out-of-sample: ${pct(oos.accuracy)} right on ${oos.predicted} windows the models never saw (z=${oos.z}). Promising, though a week of 15-minute windows is a small sample.`; vcls = 'good';
   } else {
     verdict = `Out-of-sample: ${pct(oos.accuracy)} on ${oos.predicted} unseen windows (z=${oos.z}) — no reliable edge, i.e. close to a coin flip. With taker entries at ~0.5–0.6 plus fees, a coin flip loses money: roughly 55%+ is needed to break even.`; vcls = 'warn';
   }

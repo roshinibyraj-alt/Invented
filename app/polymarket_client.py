@@ -35,7 +35,7 @@ class PolymarketClient:
 
     # ---- market discovery -------------------------------------------------
     #
-    # Polymarket's btc-updown-5m-<ts> slug keys off the window's OPEN time,
+    # Polymarket's btc-updown-15m-<ts> slug keys off the window's OPEN time,
     # not its close time (confirmed against a live window). Using ceil()
     # here -- i.e. treating <ts> as a close time -- silently resolves to
     # the *next* window's open timestamp instead, which is exactly the bug
@@ -44,12 +44,13 @@ class PolymarketClient:
     # case Polymarket changes convention or a market is momentarily
     # missing from Gamma right at the boundary.
     #
-    # IMPORTANT: for the 5-minute crypto series, Gamma's `/markets?slug=...`
+    # IMPORTANT: for the short-window crypto series, Gamma's `/markets?slug=...`
     # returns an empty list -- these markets are only addressable by slug
     # through the `/events?slug=...` endpoint (each event wraps exactly one
     # market for this series, in event["markets"][0]). Confirmed against a
-    # live event: `/markets?slug=btc-updown-5m-<ts>` -> [], while
-    # `/events?slug=btc-updown-5m-<ts>` -> [{ ..., "markets": [{...}] }].
+    # live event (5m series): `/markets?slug=btc-updown-5m-<ts>` -> [], while
+    # `/events?slug=btc-updown-5m-<ts>` -> [{ ..., "markets": [{...}] }]. The
+    # 15m series uses the same event slug pattern (btc-updown-15m-<open ts>).
 
     def _slug_for_ts(self, ts: int) -> str:
         return f"{config.SLUG_PREFIX}{ts}"

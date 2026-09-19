@@ -91,7 +91,7 @@ class EngineState:
     """Per-window transient state -- fully replaced by reset_for_window()
     at the start of every window. Cumulative stats live on the Engine
     itself, below, so they survive across windows instead of getting
-    wiped every 5 minutes."""
+    wiped every window."""
     window: Optional[WindowMarket] = None
     up_bid: Optional[float] = None
     up_ask: Optional[float] = None
@@ -105,7 +105,7 @@ class EngineState:
     position: Optional[Position] = None
     decision_made: bool = False     # True once the signal has been decided (a side, or no-trade)
     prepared: Optional[dict] = None       # per-timeframe candles + indicator series for THIS window (from state.py)
-    price_now: Optional[float] = None     # BTC price at window open (open of the 5m candle)
+    price_now: Optional[float] = None     # BTC price at window open (open of the 15m window candle)
     tokens: Optional[frozenset] = None    # market snapshot at window open, kept for the history append at close
     prediction: Optional[Prediction] = None   # the engine's call + the reasons behind it
     predicted_side: Optional[Side] = None     # the side traded

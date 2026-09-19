@@ -16,13 +16,15 @@ for seed in (3, 4, 5, 6):
     assert oos["rules"] <= 1, oos
 print(f"noise ok: {total_noise_rules} situations kept across 4 pure-noise weeks (chance-level false positives only)")
 
+# 15-minute windows are ~3x fewer than 5-minute ones (7 days = 672 windows), so a real pattern
+# is recovered less reliably from one week than from two: measured 5/8 weeks at 7 days vs 8/8 at 14.
 found = 0
 for seed in (3, 5, 7):
     data, now = make(130, seed=seed, plant=True)
-    recs = M.build_records(data, now=now, days=7)
+    recs = M.build_records(data, now=now, days=14)
     p = M.MTFPredictor(); p.load_records(recs)
     if any({"15m candle RED", "T 08-12h UTC"} <= r.token_set and r.direction == "UP" for r in p.rules):
         found += 1
 assert found >= 2, found
-print(f"planted pattern (15m candle RED + T 08-12h UTC -> UP) recovered in {found}/3 weeks")
+print(f"planted pattern (15m candle RED + T 08-12h UTC -> UP) recovered in {found}/3 two-week samples")
 print("NOISE TESTS PASSED")

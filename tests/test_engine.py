@@ -18,7 +18,7 @@ assert len(pred.rules) > 0
 def live_frames_at(t, garble=True):
     f = {}
     for name, cs in data.items():
-        secs = 300 if name=="5m" else TIMEFRAMES[name][1]
+        secs = TIMEFRAMES[name][1]
         keep = [copy.copy(c) for c in cs if c.open_time <= t][-(config.MTF_WARMUP_CANDLES+20):]
         if garble:
             # the newest candle in each list is the FORMING one (open_time <= t < open_time+secs): its
@@ -33,7 +33,7 @@ checked = 0
 for rec in recs[::37]:
     t = rec.ts
     frames = live_frames_at(t)
-    price = M.price_at(frames["5m"], t)
+    price = M.price_at(frames["15m"], t)
     res = M.window_tokens(M.prepare_frames(frames), t, price)
     assert res is not None, t
     assert res[0] == rec.tokens, (t, res[0] ^ rec.tokens)
@@ -43,14 +43,15 @@ print(f"1 ok: live tokens == backtest tokens on {checked} windows, even with gar
 # ---- 2. staleness: missing latest closed 15m candle -> None (never guess)
 t = recs[100].ts
 frames = live_frames_at(t)
+price_ok = M.price_at(frames["15m"], t)
 frames["15m"] = [c for c in frames["15m"] if c.open_time < (t // 900) * 900 - 900]      # drop last closed candle + forming
-assert M.window_tokens(M.prepare_frames(frames), t, M.price_at(frames["5m"], t)) is None
+assert M.window_tokens(M.prepare_frames(frames), t, price_ok) is None
 print("2 ok: stale timeframe -> no snapshot")
 
 # ---- 3. engine end-to-end: signal -> taker buy of the PREDICTED side at window open + 2s
 def mk_engine(t):
     e = Engine(PaperBroker(), pred)
-    w = WindowMarket("w", None, "u", "d", float(t), float(t + 300))
+    w = WindowMarket("w", None, "u", "d", float(t), float(t + config.WINDOW_SECONDS))
     e.reset_for_window(w)
     return e, w
 
@@ -62,7 +63,7 @@ assert target, "no matched window"
 rec, expected = target
 t = rec.ts
 frames = live_frames_at(t)
-price_now = M.price_at(frames["5m"], t)
+price_now = M.price_at(frames["15m"], t)
 
 def tick(e, ts, ua, da, ul=None, dl=None, ub=0.4, db=0.4):
     e.on_tick(ub, ua, db, da, 300, now=ts, up_bid_levels=[(ub,1000)], down_bid_levels=[(db,1000)], up_ask_levels=ul, down_ask_levels=dl)
@@ -145,7 +146,8 @@ e, w = mk_engine(t + 300 * 10**6)
 e.s.tokens = rec.tokens; e.s.predicted_side = Side.UP
 before = pred.total_predictions
 e.finalize_window(Side.UP)
-assert len(pred.records) == min(n0 + 1, 2016) and pred.records[-1].ts > recs[-1].ts and pred.total_predictions == before + 1
+cap = int(config.MTF_BACKTEST_DAYS * 86400 / config.WINDOW_SECONDS)
+assert len(pred.records) == min(n0 + 1, cap) and pred.records[-1].ts > recs[-1].ts and pred.total_predictions == before + 1
 print("9 ok: resolved window appended to history + live accuracy tracked")
 
 # ---- 10. snapshot serialises

@@ -1,5 +1,5 @@
 """
-Central configuration for ALPHASTRIKE -- BTC 5-min up/down bot.
+Central configuration for ALPHASTRIKE -- BTC 15-min up/down bot.
 
 One strategy, one entry per window, and the bot trades WITH the signal
 (buys the side the engine predicts), always as a TAKER -- no resting
@@ -49,8 +49,8 @@ TRADING_MODE = os.getenv("TRADING_MODE", "paper")
 # polymarket_client.py; every live price/book read goes to CLOB.
 GAMMA_API_BASE = os.getenv("GAMMA_API_BASE", "https://gamma-api.polymarket.com")
 CLOB_API_BASE = os.getenv("CLOB_API_BASE", "https://clob.polymarket.com")
-SLUG_PREFIX = "btc-updown-5m-"
-WINDOW_SECONDS = 300
+SLUG_PREFIX = "btc-updown-15m-"
+WINDOW_SECONDS = 900             # 15-minute windows (epoch-multiple-of-900s grid, same as Polymarket's)
 
 POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
 
@@ -71,7 +71,7 @@ BINANCE_KLINES_URL = os.getenv("BINANCE_KLINES_URL", "https://api.binance.com/ap
 BINANCE_SYMBOL = os.getenv("BINANCE_SYMBOL", "BTCUSDT")
 
 # ---- Multi-timeframe prediction engine (app/mtf_engine.py) ------------------
-MTF_BACKTEST_DAYS = float(os.getenv("MTF_BACKTEST_DAYS", "7"))    # pre-backtest / rolling history length
+MTF_BACKTEST_DAYS = float(os.getenv("MTF_BACKTEST_DAYS", "7"))    # pre-backtest / rolling history length (7d = only ~670 fifteen-minute windows; 14-21 gives the miner more to work with)
 MTF_WARMUP_CANDLES = 300            # extra candles per timeframe so slow indicators are converged
 # A "situation" (1-3 conditions, e.g. "4H trend UP + 1H RSI<30 + T 08-12h UTC")
 # is kept only if it passes ALL of these on the backtest history:
@@ -89,7 +89,7 @@ MTF_ALLOW_FALLBACK = os.getenv("MTF_ALLOW_FALLBACK", "1").strip().lower() not in
 MTF_CANDIDATE_MIN_Z = 2.0           # "weak pattern" tier: same filters, no noise calibration, this z floor
 MTF_BASELINE_PRIOR = 20.0           # baseline tier: pseudo-observations shrinking each reading toward the base rate
 MTF_BASELINE_MIN_TOKEN_N = 15       # baseline tier: ignore readings seen in fewer windows than this
-MTF_REFRESH_EVERY_WINDOWS = 12      # re-mine the situations every N resolved windows (~1h)
+MTF_REFRESH_EVERY_WINDOWS = 4       # re-mine the situations every N resolved windows (~1h with 15m windows)
 
 # ---- Trading fees -----------------------------------------------------
 # Every entry, the TP exit and any forced window-end close are TAKER market
