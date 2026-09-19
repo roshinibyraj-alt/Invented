@@ -19,7 +19,7 @@ async def lifespan(app: FastAPI):
     await bot_state.stop()
 
 
-app = FastAPI(title="Polymarket BTC 5m Bot", lifespan=lifespan)
+app = FastAPI(title="ALPHASTRIKE — Polymarket BTC 5m Bot", lifespan=lifespan)
 
 
 @app.get("/api/state")

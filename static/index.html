@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Previous-window momentum — BTC 5m bot</title>
+<title>ALPHASTRIKE — BTC 5m bot</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
@@ -57,6 +57,28 @@
   .ai-status b{color:var(--text);}
   .ai-status .ready{color:var(--mint);} .ai-status .cold{color:var(--amber);}
 
+  .why{display:flex; flex-direction:column; gap:7px; margin-top:12px;}
+  .why-item{background:var(--panel-3); border-radius:9px; padding:10px 12px; font-family:var(--mono); font-size:11px; border-left:3px solid var(--faint);}
+  .why-item.UP{border-left-color:var(--mint);} .why-item.DOWN{border-left-color:var(--coral);}
+  .why-item .txt{color:var(--text); font-size:11.5px; line-height:1.45;}
+  .why-item .meta{color:var(--muted); margin-top:4px; display:flex; flex-wrap:wrap; gap:4px 12px;}
+  .why-item b.UP{color:var(--mint);} .why-item b.DOWN{color:var(--coral);}
+  .dots{display:inline-flex; gap:3px; vertical-align:middle;}
+  .dots i{width:7px; height:7px; border-radius:50%; display:inline-block; background:var(--coral);}
+  .dots i.ok{background:var(--mint);}
+  .sect-label{font-size:10.5px; color:var(--faint); margin:14px 0 6px; font-family:var(--mono); text-transform:uppercase; letter-spacing:.6px;}
+  .tbl-scroll{overflow-x:auto;}
+  table.mtf{width:100%; border-collapse:collapse; font-family:var(--mono); font-size:10.5px; min-width:520px;}
+  table.mtf th{color:var(--muted); font-weight:500; text-align:left; padding:5px 8px; border-bottom:1px solid var(--line); white-space:nowrap;}
+  table.mtf td{padding:6px 8px; border-bottom:1px solid var(--line); white-space:nowrap;}
+  table.mtf td.UP{color:var(--mint);} table.mtf td.DOWN{color:var(--coral);}
+  table.mtf td.wrap{white-space:normal; min-width:200px;}
+  .verdict{margin-top:10px; padding:10px 12px; border-radius:9px; font-family:var(--mono); font-size:11.5px; background:var(--panel-3); color:var(--muted);}
+  .verdict.good{background:var(--mint-dim); color:var(--mint);} .verdict.warn{background:var(--amber-dim); color:var(--amber);}
+  .kv{display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin-top:4px;}
+  .kv > div{background:var(--panel-3); border-radius:9px; padding:10px 12px;}
+  .kv .k{font-size:10px; color:var(--muted);} .kv .v{font-family:var(--mono); font-size:14px; font-weight:600; margin-top:3px;}
+
   .gauge-panel{background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:18px;
     display:grid; grid-template-columns:1fr 1fr; gap:16px;}
   @media (max-width:640px){ .gauge-panel{grid-template-columns:1fr;} }
@@ -79,8 +101,7 @@
 
   .status-badge{font-size:10.5px; font-weight:600; padding:4px 10px; border-radius:6px;}
   .status-badge.awaiting_signal{background:#1a2029; color:#6a7688;}
-  .status-badge.order_resting{background:var(--amber-dim); color:var(--amber);}
-  .status-badge.taker_watching{background:var(--amber-dim); color:var(--amber);}
+  .status-badge.entry_pending{background:var(--amber-dim); color:var(--amber);}
   .status-badge.open{background:var(--mint-dim); color:var(--mint);}
   .status-badge.done{background:var(--violet-dim); color:var(--violet);}
   .status-badge.halted{background:var(--coral-dim); color:var(--coral);}
@@ -133,23 +154,21 @@
     font-family:var(--mono); font-size:11px; padding:7px 9px; border-radius:7px; background:var(--panel-3);}
   .log-row .t{color:var(--faint);}
   .log-row .ev{font-weight:600; font-size:9.5px; padding:2px 7px; border-radius:5px; background:#1a222f; text-align:center; white-space:nowrap;}
-  .log-row .ev.CANDLE_READ{color:var(--amber);}
-  .log-row .ev.AI_SIGNAL{color:var(--amber);}
-  .log-row .ev.AI_LEARN{color:var(--faint);}
-  .log-row .ev.RUNG_PLACED{color:var(--amber);}
-  .log-row .ev.RUNG_FILL{color:var(--mint);}
-  .log-row .ev.RUNG_CANCELLED{color:var(--violet);}
-  .log-row .ev.RUNG_TIMEOUT{color:var(--violet);}
-  .log-row .ev.TAKER_WAIT{color:var(--amber);}
+  .log-row .ev.SNAPSHOT{color:var(--muted);}
+  .log-row .ev.MTF_SIGNAL{color:var(--amber);}
+  .log-row .ev.MTF_LEARN{color:var(--faint);}
+  .log-row .ev.MTF_REBUILD{color:var(--violet);}
+  .log-row .ev.PREBACKTEST{color:var(--violet);}
+  .log-row .ev.SIGNAL_ARMED{color:var(--amber);}
+  .log-row .ev.ENTRY_WAIT{color:var(--amber);}
   .log-row .ev.TAKER_ENTRY{color:var(--mint);}
-  .log-row .ev.TAKER_SKIPPED{color:var(--faint);}
+  .log-row .ev.ENTRY_SKIPPED{color:var(--faint);}
   .log-row .ev.TP_FILL{color:var(--mint);}
   .log-row .ev.FORCED_CLOSE{color:var(--violet);}
   .log-row .ev.NO_LIQUIDITY{color:var(--amber);}
-  .log-row .ev.RSI_FLAG{color:var(--violet);}
   .log-row .ev.HALTED{color:var(--coral);}
   .log-row .ev.NO_TRADE{color:var(--faint);}
-  .log-row .note{color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+  .log-row .note{color:var(--muted); overflow-wrap:anywhere;}
   .log-row .pnl{font-weight:600;}
   .empty{color:var(--faint); font-size:12px; padding:6px 2px;}
 </style>
@@ -158,8 +177,8 @@
 <div class="wrap">
   <header>
     <div>
-      <h1>AI signal — trade with signal</h1>
-      <div class="sub">BTC 5m up/down — an AI signal engine (self-training logistic regression, pretrained on historical Binance data at startup, no external API calls) predicts the next window from RSI/momentum/volatility/streak features. NO-SKIP MODE: the AI always picks a side and the bot always places an order — RSI is logged but no longer blocks. The bot trades WITH the signal: resting limit buy on the signalled side @ 0.45. If unfilled after 30s it is cancelled, then the bot buys at market (taker) the moment the signalled side's ask is below 0.60, watching until the window closes (no trade if it never is). 200sh, no SL, TP 0.99</div>
+      <h1>⚡ ALPHASTRIKE</h1>
+      <div class="sub">Multi-timeframe strike bot for BTC 5m up/down. 1D/4H/1H/15m indicators, pre-backtested on the last 7 days, decide UP or DOWN and show exactly why. No limit orders: 2s after the window opens it buys the predicted side as a taker (while the ask is below 0.60, checked every tick until close). 200sh, no SL, TP 0.99</div>
     </div>
     <div class="status-pill"><span class="dot" id="statusDot"></span><span id="statusText">connecting</span></div>
   </header>
@@ -175,12 +194,15 @@
 
   <div class="binance-card">
     <div class="binance-head">
-      <h2>AI signal engine — online logistic regression (self-trained, no external API)</h2>
+      <h2>Signal — why the bot buys UP or DOWN this window</h2>
       <div class="binance-conn" id="binanceConn"><span class="dot"></span><span>—</span></div>
     </div>
     <div class="signal-banner pending" id="signalBanner">waiting</div>
-    <div class="ai-status" id="aiStatus"></div>
+    <div id="whyBox"></div>
+    <div id="readingsBox"></div>
   </div>
+
+  <div class="card" id="backtestCard"></div>
 
   <div class="gauge-panel">
     <div class="gauge" data-side="UP" id="upGauge">
@@ -227,11 +249,7 @@ const fmt$ = v => (v==null ? '—' : (v<0?'-$':'$') + Math.abs(Number(v)).toFixe
 const fmtP = v => (v==null ? '—' : Number(v).toFixed(3));
 const fmtSh = v => (v==null ? '0' : Number(v).toFixed(0));
 const pnlClass = v => (v>0.005?'pos':(v<-0.005?'neg':''));
-const ORDER_PRICE = 0.45;
-const ORDER_TIMEOUT = 30;
-const TAKER_MAX = 0.60;
-
-function renderGauge(trackId, fillId, midId, bidAskId, bid, ask, order, side){
+function renderGauge(trackId, fillId, midId, bidAskId, bid, ask, entry, cap, side){
   const mid = (bid!=null && ask!=null) ? (bid+ask)/2 : (ask!=null?ask:bid);
   $(midId).textContent = fmtP(mid);
   $(bidAskId).textContent = `bid ${fmtP(bid)} / ask ${fmtP(ask)}`;
@@ -239,52 +257,112 @@ function renderGauge(trackId, fillId, midId, bidAskId, bid, ask, order, side){
   $(fillId).style.width = pct + '%';
   const track = $(trackId);
   let marks = '';
-  if(order && order.side === side && order.status === 'resting'){
-    marks = `<div class="gauge-mark" style="left:${order.price*100}%"><span class="lbl">${fmtP(order.price)}</span></div>`;
+  if(entry && entry.side === side && cap!=null){
+    marks = `<div class="gauge-mark" style="left:${cap*100}%"><span class="lbl">buy if ask &lt; ${fmtP(cap)}</span></div>`;
   }
   const existing = track.querySelector('.gauge-mark');
   if(existing) existing.remove();
   if(marks) track.insertAdjacentHTML('beforeend', marks);
 }
 
-function renderBinancePanel(e){
-  const bin = e.binance || {};
-  const connEl = $('binanceConn');
-  connEl.innerHTML = bin.connected
-    ? `<span class="dot live" style="background:var(--mint); box-shadow:0 0 5px var(--mint);"></span><span>connected${bin.last_message_age_s!=null? ' · '+bin.last_message_age_s.toFixed(1)+'s ago':''}</span>`
-    : `<span class="dot" style="background:var(--coral);"></span><span>disconnected${bin.last_error? ' — '+bin.last_error : ''}</span>`;
+const esc = x => String(x).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const pct = v => v==null ? '—' : (v*100).toFixed(1)+'%';
+const fmtWhen = ts => new Date(ts*1000).toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'});
+const TFS = ['1D','4H','1H','15m'];
 
-  const banner = $('signalBanner');
-  const side = e.ai_predicted_side;
-  if(side === 'UP'){
-    banner.className = 'signal-banner green';
-    banner.textContent = `AI predicts UP (conf ${e.ai_confidence!=null?(e.ai_confidence*100).toFixed(0)+'%':'—'}) — buy UP: resting @ ${ORDER_PRICE}, taker fallback < ${TAKER_MAX} after ${ORDER_TIMEOUT}s`;
-  } else if(side === 'DOWN'){
-    banner.className = 'signal-banner red';
-    banner.textContent = `AI predicts DOWN (conf ${e.ai_confidence!=null?(e.ai_confidence*100).toFixed(0)+'%':'—'}) — buy DOWN: resting @ ${ORDER_PRICE}, taker fallback < ${TAKER_MAX} after ${ORDER_TIMEOUT}s`;
-  } else if(e.decision_made){
-    banner.className = 'signal-banner flat';
-    banner.textContent = 'NO TRADE — Binance feed missing candle history this window (only case that can skip in no-skip mode)';
-  } else {
-    banner.className = 'signal-banner pending';
-    banner.textContent = 'waiting for previous-window candle data from Binance...';
-  }
-
-  renderAiStatus(e.ai || {}, e.pretrain || {});
+function renderReason(r){
+  const dots = (r.recent||[]).map(x => `<i class="${x.ok?'ok':''}" title="${fmtWhen(x.ts)} — ${x.ok?'right':'wrong'}"></i>`).join('');
+  const best = r.best_time ? `<span>best: ${esc(r.best_time.time)} (${pct(r.best_time.hit_rate)} of ${r.best_time.n})</span>` : '';
+  return `<div class="why-item ${r.direction}">
+    <div class="txt">${esc(r.text)}</div>
+    <div class="meta">
+      <span>→ <b class="${r.direction}">${r.direction}</b> ${pct(r.hit_rate)} of ${r.n} windows</span>
+      <span>z ${r.z}</span>${best}
+      <span>last matches <span class="dots">${dots}</span></span>
+    </div></div>`;
 }
 
-function renderAiStatus(ai, pretrain){
-  const el = $('aiStatus');
-  const acc = ai.accuracy!=null ? ai.accuracy.toFixed(1)+'%' : '—';
-  const pretrainTag = !pretrain.done
-    ? `<span class="cold">pretraining…</span>`
-    : (pretrain.error
-        ? `<span class="cold">pretrain failed — starting cold, fills in live (~15min)</span>`
-        : `<span class="ready">pretrained on ${pretrain.windows_trained} windows, seeded ${pretrain.candles_seeded} live candles</span>`);
+function renderReadings(readings){
+  if(!readings) return '';
+  const rows = TFS.filter(tf => readings[tf]).map(tf => {
+    const r = readings[tf];
+    const tcol = r.trend==='UP' ? 'UP' : (r.trend==='DOWN' ? 'DOWN' : '');
+    return `<tr><td><b>${tf}</b></td><td>${r.rsi}</td><td>${esc(r.macd_state)}</td><td class="${tcol}">${r.trend}</td>
+      <td>${r.adx} (${r.pdi}/${r.mdi})</td><td>${r.pctb}</td><td>${r.stoch}</td><td>${r.vol_ratio}×</td>
+      <td class="${r.candle==='GREEN'?'UP':'DOWN'}">${r.candle}</td><td>${r.now_vs_open_atr>0?'+':''}${r.now_vs_open_atr} ATR</td></tr>`;
+  }).join('');
+  return `<div class="sect-label">Indicators at window open</div><div class="tbl-scroll"><table class="mtf">
+    <tr><th>TF</th><th>RSI</th><th>MACD</th><th>Trend</th><th>ADX (+DI/-DI)</th><th>BB %B</th><th>Stoch</th><th>Vol</th><th>Last candle</th><th>Now vs open</th></tr>${rows}</table></div>`;
+}
+
+function renderSignalPanel(e, s){
+  const bt = s.backtest || {};
+  const connEl = $('binanceConn');
+  connEl.innerHTML = s.frames_error
+    ? `<span class="dot" style="background:var(--coral);"></span><span>market data: ${esc(s.frames_error)}</span>`
+    : `<span class="dot live" style="background:var(--mint); box-shadow:0 0 5px var(--mint);"></span><span>market data ok</span>`;
+
+  const banner = $('signalBanner');
+  const p = e.prediction;
+  if(p){
+    banner.className = 'signal-banner ' + (p.side==='UP' ? 'green' : 'red');
+    banner.textContent = `Predicts ${p.side} (${(p.confidence*100).toFixed(0)}%) — taker buy ${p.side} at +${e.def.entry_delay_s}s if ask < ${e.def.entry_max_price} · ${p.n_matched} situations matched (${p.n_for} agree / ${p.n_against} disagree)`;
+    $('whyBox').innerHTML = `<div class="sect-label">Why ${p.side} — strongest matching situations from the 7-day backtest</div><div class="why">${p.reasons.map(renderReason).join('')}</div>`;
+    $('readingsBox').innerHTML = renderReadings(p.readings);
+  } else if(e.decision_made){
+    banner.className = 'signal-banner flat';
+    banner.textContent = e.skip_reason === 'no_match'
+      ? 'NO TRADE — no situation validated on the last 7 days matches the current market, so there is no evidence for either side'
+      : 'NO TRADE — market data incomplete for this window (a timeframe missing candles)';
+    $('whyBox').innerHTML = ''; $('readingsBox').innerHTML = '';
+  } else {
+    banner.className = 'signal-banner pending';
+    banner.textContent = !bt.done ? 'running the 7-day pre-backtest…' : 'waiting for candle data from Binance…';
+    $('whyBox').innerHTML = ''; $('readingsBox').innerHTML = '';
+  }
+}
+
+function renderBacktest(e, s){
+  const bt = s.backtest || {}, pr = e.predictor || {}, sm = pr.summary || {};
+  const el = $('backtestCard');
+  if(!bt.done){ el.innerHTML = '<h2>Pre-backtest</h2><div class="empty">running…</div>'; return; }
+  if(bt.error && !bt.windows){
+    el.innerHTML = `<h2>Pre-backtest</h2><div class="verdict warn">failed: ${esc(bt.error)} — no situations, so no trades until it succeeds (retrying every 60s)</div>`;
+    return;
+  }
+  const oos = sm.out_of_sample || {}, ins = sm.in_sample || {};
+  let verdict, vcls = '';
+  if(!pr.n_rules){
+    verdict = 'No situation passed the noise-calibrated test on this data — the engine will not trade until one does. That is the honest result when nothing beats chance.'; vcls = 'warn';
+  } else if(!oos.predicted || oos.predicted < 30){
+    verdict = `Only ${oos.predicted||0} out-of-sample calls — too few to judge whether the situations really work.`; vcls = 'warn';
+  } else if(oos.z >= 1.96 && oos.accuracy > 0.5){
+    verdict = `Out-of-sample: ${pct(oos.accuracy)} right on ${oos.predicted} windows the rules never saw (z=${oos.z}). Looks like a real edge, though 7 days is short.`; vcls = 'good';
+  } else {
+    verdict = `Out-of-sample: ${pct(oos.accuracy)} on ${oos.predicted} unseen windows (z=${oos.z}) — no reliable edge. Treat the signals as unproven.`; vcls = 'warn';
+  }
+  const fmtD = ts => ts ? new Date(ts*1000).toLocaleDateString([], {month:'short', day:'numeric'}) : '—';
+  const live = pr.live_predictions ? `${pr.live_accuracy}% (${pr.live_correct}/${pr.live_predictions})` : '—';
+  const rows = (pr.top_rules||[]).map(r => `<tr>
+      <td class="wrap">${esc(r.text)}</td><td class="${r.direction}">${r.direction}</td>
+      <td>${pct(r.hit_rate)}</td><td>${r.n}</td><td>${r.z}</td>
+      <td>${r.best_time ? esc(r.best_time.time)+' ('+pct(r.best_time.hit_rate)+', n='+r.best_time.n+')' : '—'}</td></tr>`).join('');
+  const byTime = (ins.by_time||[]).map(t => `<tr><td>${esc(t.time)}</td><td>${t.n}</td><td>${pct(t.accuracy)}</td></tr>`).join('');
   el.innerHTML = `
-    <span>${pretrainTag}</span>
-    <span>trained on <b>${ai.n_trained ?? 0}</b> windows (${ai.pretrained_windows ?? 0} pretrain + ${ai.live_trained_windows ?? 0} live)</span>
-    <span>directional accuracy <b>${acc}</b> (${ai.correct_predictions ?? 0}/${ai.total_predictions ?? 0})</span>
+    <h2>Pre-backtest — last ${fmtSh(sm.windows ? sm.windows/288 : 0)} days <span class="tag">${pr.rebuilding ? 're-mining…' : (pr.built_at ? 'updated '+new Date(pr.built_at*1000).toLocaleTimeString() : '')}</span></h2>
+    <div class="kv">
+      <div><div class="k">Windows replayed</div><div class="v">${sm.windows ?? 0} (${fmtD(sm.period_start)}–${fmtD(sm.period_end)})</div></div>
+      <div><div class="k">Validated situations</div><div class="v">${pr.n_rules ?? 0}</div></div>
+      <div><div class="k">Z cut-off (noise-calibrated)</div><div class="v">${sm.z_threshold ?? '—'}</div></div>
+      <div><div class="k">Out-of-sample accuracy</div><div class="v">${pct(oos.accuracy)} <span style="font-size:10px;color:var(--muted)">n=${oos.predicted ?? 0}, z=${oos.z ?? '—'}</span></div></div>
+      <div><div class="k">In-sample accuracy (optimistic)</div><div class="v">${pct(ins.accuracy)} <span style="font-size:10px;color:var(--muted)">n=${ins.predicted ?? 0}</span></div></div>
+      <div><div class="k">Live accuracy since start</div><div class="v">${live}</div></div>
+    </div>
+    <div class="verdict ${vcls}">${verdict}</div>
+    ${rows ? `<div class="sect-label">Strongest situations (situation → side it favoured, when it was right)</div>
+      <div class="tbl-scroll"><table class="mtf"><tr><th>Situation</th><th>Side</th><th>Right</th><th>Windows</th><th>z</th><th>Best time of day</th></tr>${rows}</table></div>` : ''}
+    ${byTime ? `<div class="sect-label">In-sample accuracy by time of day (optimistic)</div>
+      <div class="tbl-scroll"><table class="mtf" style="min-width:0"><tr><th>Time</th><th>Calls</th><th>Right</th></tr>${byTime}</table></div>` : ''}
   `;
 }
 
@@ -317,10 +395,11 @@ async function poll(){
     }
 
     const book = s.book || {};
-    renderGauge('upTrack','upFill','upMid','upBidAsk', book.up_bid, book.up_ask, e.order, 'UP');
-    renderGauge('downTrack','downFill','downMid','downBidAsk', book.down_bid, book.down_ask, e.order, 'DOWN');
+    renderGauge('upTrack','upFill','upMid','upBidAsk', book.up_bid, book.up_ask, e.entry, e.def && e.def.entry_max_price, 'UP');
+    renderGauge('downTrack','downFill','downMid','downBidAsk', book.down_bid, book.down_ask, e.entry, e.def && e.def.entry_max_price, 'DOWN');
 
-    renderBinancePanel(e);
+    renderSignalPanel(e, s);
+    renderBacktest(e, s);
     renderEngineCard(e);
     renderStats(e);
     renderEquityHero(e);
@@ -336,25 +415,23 @@ function renderEngineCard(e){
   const el = $('engineCard');
   if(!e || !e.def){ el.innerHTML = '<div class="empty">no data</div>'; return; }
   const statusLabels = {
-    awaiting_signal:'awaiting previous-candle signal', order_resting:'order resting, unfilled', taker_watching:'timed out — watching for ask < 0.60',
+    awaiting_signal:'awaiting signal', entry_pending:'strike armed — waiting to buy',
     open:'position open', done:'done for this window', halted:'halted',
   };
 
   const defRowsHtml = [
     ['Shares', fmtSh(e.def.shares)],
-    ['Order price', fmtP(e.def.order_price)],
-    ['Timeout', fmtSh(e.def.order_timeout_s)+'s'],
-    ['Taker if ask <', fmtP(e.def.taker_max_price)],
+    ['Buy at', '+'+fmtSh(e.def.entry_delay_s)+'s (taker)'],
+    ['Buy if ask <', fmtP(e.def.entry_max_price)],
     ['TP price', fmtP(e.def.tp_price)],
   ].map(([k,v]) => `<div class="def-item"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
 
   let orderHtml = '';
-  if(e.order && e.order.status === 'resting'){
-    const tag = e.order.signal_side ? ` <span class="lbl" style="color:var(--violet)">[signal ${e.order.signal_side}]</span>` : '';
-    const left = e.order.seconds_resting!=null ? Math.max(0, e.def.order_timeout_s - e.order.seconds_resting).toFixed(0) : '—';
-    orderHtml = `<div class="order-box"><span class="lbl">resting: ${e.order.side} ${fmtSh(e.order.shares)}sh @ ${fmtP(e.order.price)}</span>${tag}<span>waiting for fill · ${left}s to timeout</span></div>`;
-  } else if(e.status === 'taker_watching' && e.order){
-    orderHtml = `<div class="order-box"><span class="lbl">timed out — watching ${e.order.side} ask</span><span>taker buy when ask &lt; ${fmtP(e.def.taker_max_price)}</span></div>`;
+  if(e.entry){
+    const wait = e.entry.seconds_until_entry > 0
+      ? `buying in ${e.entry.seconds_until_entry.toFixed(0)}s`
+      : `ask ${fmtP(e.entry.ask)} — buying as soon as it is below ${fmtP(e.def.entry_max_price)}`;
+    orderHtml = `<div class="order-box"><span class="lbl">strike armed: ${e.entry.side} ${fmtSh(e.entry.shares)}sh (taker)</span><span>${wait}</span></div>`;
   }
 
   const pos = e.position;
@@ -396,10 +473,10 @@ function renderEngineCard(e){
 
 function renderStats(e){
   const tiles = [
-    ['total_orders_placed','orders placed',''], ['total_order_fills','maker fills',''], ['total_timeout_cancels','30s timeouts',''], ['total_taker_entries','taker entries',''], ['total_taker_skips','taker skips (ask ≥ 0.60)',''],
+    ['total_entries','entries (taker)',''], ['total_entry_skips','skipped: ask ≥ cap',''],
     ['total_tp_fills','tp fills','win'], ['total_forced_closes','forced close',''],
-    ['total_unfilled_cancels','unfilled cancels',''], ['total_no_signal_windows','no-signal (feed gap)',''],
-    ['total_illiquid_skips','illiquid skips',''], ['total_rsi_flags','RSI flags',''],
+    ['total_no_signal_windows','skipped: data gap',''], ['total_no_match_windows','skipped: no situation',''],
+    ['total_illiquid_skips','illiquid skips',''],
     ['win_rate','win rate %',''],
   ];
   $('statsGrid').innerHTML = tiles.map(([key,label,cls]) => {

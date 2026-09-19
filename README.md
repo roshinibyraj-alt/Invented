@@ -1,112 +1,127 @@
-# AI signal (traded with the signal) — BTC 5m bot
+# ⚡ ALPHASTRIKE — multi-timeframe BTC 5m up/down bot
 
-Paper-trading bot for Polymarket's `btc-updown-5m-*` markets. One entry
-attempt **every** window (no-skip mode), direction decided by an AI
-signal engine predicting the next window's outcome. The bot trades
-**with** that signal (no fade).
+Paper-trading bot for Polymarket's `btc-updown-5m-*` markets. At every
+5-minute window it asks one question — **UP or DOWN, and why?** — using
+indicators on four timeframes (1D, 4H, 1H, 15m), and trades **with** the
+answer, at the window's first seconds, as a taker. The reasons behind
+every call are logged and shown on the dashboard.
 
-## Strategy
+## How the signal works (`app/mtf_engine.py`)
 
-1. The instant a new window opens, compute features off the Binance
-   BTC/USDT 1-minute feed — RSI(14), 3- and 10-candle momentum,
-   10-candle volatility, the signal candle's own color, and the
-   current same-color candle streak — and feed them to the AI signal
-   engine (`app/ai_signal.py`), a small logistic regression predicting
-   P(next window resolves UP).
-2. **No-skip mode**: the model always returns UP or DOWN. RSI is
-   computed and logged against the predicted side for visibility, but
-   it does **not** block the trade.
-3. The bot places a resting **maker** limit buy on the **signalled**
-   side @ 0.45 (`ORDER_PRICE`). It fills at its own exact price, no
-   slippage, no fee, the moment that side's ask drops to/through it.
-4. **30-second timeout** (`ORDER_TIMEOUT_SECONDS`): if the resting
-   order hasn't filled 30s after it was placed, it is cancelled.
-5. **Taker fallback**: from the cancel until the window closes, the
-   first tick the signalled side's best ask is strictly **below 0.60**
-   (`TAKER_FALLBACK_MAX_PRICE`), the bot buys at market — a real
-   taker fill priced by walking actual ask depth for the full size,
-   paying the taker fee. The 0.60 gate is checked against the best
-   ask, so a 200-share fill on a thin book can average slightly above
-   0.60. If the ask never gets below 0.60 before the window closes,
-   there is no trade that window.
-6. **No stop-loss.** Take profit is fixed at 0.99 — a real taker sell,
-   priced by walking actual book depth, the moment the bid reaches it.
-7. Only one entry, one trade max per window — no re-arming. If the
-   position is open but TP never hits, it is force-closed at window
-   end (taker, real depth-weighted price).
-8. Every window's true outcome (once known, via the last observed CLOB
-   midpoint at window rollover) is fed back into the AI signal engine
-   as one online training step — whether or not a trade was placed.
+1. **Snapshot at window open.** Nine indicators on each of 1D / 4H / 1H /
+   15m — RSI(14), MACD(12,26,9), EMA20/50 trend, Bollinger %B, Stochastic,
+   ADX(+DI/−DI), volume vs its 20-period average, last candle colour, and
+   where price is versus the still-forming candle's open (in ATRs) — plus
+   the UTC time-of-day block and weekday/weekend. Each reading is bucketed
+   into a token such as `4H trend UP` or `1H RSI<30`. Only fully closed
+   candles as of the window open are used (plus the forming candle's
+   *open*, which is already known), so nothing can look ahead. The test
+   suite checks that the live path and the backtest path produce
+   identical snapshots even when the forming candle's data is corrupted.
+2. **Pre-backtest of the last 7 days** (~2,000 windows, run at startup).
+   Every window becomes *(snapshot, did it finish UP?)*. The miner tests
+   every 1-, 2- and 3-token **situation** — e.g. `4H trend UP + 1H RSI<30
+   + T 08-12h UTC` — and keeps only situations that:
+   - matched at least `MTF_MIN_SAMPLES` (25) windows,
+   - beat a coin flip by a z-score above a cut-off **calibrated on the
+     data itself**: the same search is re-run on copies with the
+     outcomes shuffled (where nothing can be predictive) and the cut-off
+     is the level noise reaches only 5% of the time. Without this, a
+     search over thousands of situations always finds "winners" by luck —
+     on pure random data a fixed cut-off keeps dozens of them,
+   - pointed the same way in both halves of the week, and
+   - (2-/3-condition ones) clearly beat each of their own parts.
+3. **Live call.** The current snapshot is matched against the kept
+   situations; the strongest matches vote (hit rates shrunk toward 50% for
+   small samples, averaged in log-odds). Output: side, confidence, and the
+   exact situations behind it — their historical hit rate, sample size,
+   z-score, the time of day they worked best, and whether their last six
+   matches were right. **If no validated situation matches, there is no
+   trade** — no evidence, no side.
+4. **Honesty check.** The same procedure is also run on the first 70% of
+   the week and scored on the untouched last 30%. That out-of-sample
+   accuracy (with z-score and a plain-language verdict) is on the
+   dashboard next to the in-sample number, which is optimistic by
+   construction.
+5. **Keeps learning.** Every resolved window — traded or not — is
+   appended to a rolling 7-day history (oldest dropped) together with
+   its snapshot and true outcome, and the situations are re-mined every
+   `MTF_REFRESH_EVERY_WINDOWS` windows (default 12, about hourly) in a
+   worker thread, never at window rollover so it can't delay the entry.
+   New situations can appear, and ones that stopped working fall away.
+   Live hit rate of the calls is tracked separately on the dashboard.
 
-The only thing that can skip a window for data reasons is missing
-candle history from the live Binance feed. See "Startup warm-start"
-below for why that's rare.
+## Execution (taker only, no limit orders)
 
-## Startup warm-start (`app/backtest.py`)
-
-At process startup, **before** the live Binance websocket connects,
-the bot fetches `AI_BACKTEST_DAYS` (default 3) of 1-minute BTC/USDT
-candles from Binance's free public REST klines endpoint (no API key
-needed) and uses that one fetch for two things:
-
-- **Pretrains the model's weights** by replaying the history through
-  the exact same feature computation and 5-minute window grid the
-  live bot uses. Label: whether BTC's own price finished each
-  historical window higher than it opened (Polymarket's own
-  historical order book isn't available, but that's the real thing
-  these markets resolve on).
-- **Seeds the live feed's candle cache** with the most recent ~30
-  candles from that same fetch. This matters separately from
-  pretraining: the model's weights being trained doesn't help if the
-  live feed's own candle cache is still empty — that cache normally
-  needs ~15 real minutes to fill (RSI(14) + the 10-candle lookback)
-  before features can be computed at all. Seeding it means a full
-  lookback is available from the very first live tick instead.
-
-Both steps are best-effort: if Binance's REST API is unreachable, the
-bot just starts fully cold (untrained model, empty feed cache) and
-learns/fills in online instead — same as if this module didn't exist.
-Nothing here can prevent the bot from starting.
+1. Signal computed at window open.
+2. `ENTRY_DELAY_SECONDS` (2s) after the window opens, buy `200` shares of
+   the predicted side at market (taker): priced by walking real ask
+   depth, taker fee paid and included in cost basis. The loop polls once
+   a second, so the buy lands on the first tick at/after +2s (or on the
+   tick the signal arrives, if the candle data was late).
+3. Guard: only while that side's best ask is strictly below
+   `ENTRY_MAX_PRICE` (0.60). If it isn't, the bot re-checks every tick and
+   buys the first tick it is below; if it never is, no trade that window.
+   Set `ENTRY_MAX_PRICE=1.0` to buy at any price.
+4. No stop-loss. Take profit at `0.99` (real taker sell, depth-walked). If
+   TP never hits, force-closed at window end.
+5. One entry per window, no re-arm.
 
 ## Run locally
 
 ```
 pip install -r requirements.txt
-cp .env.example .env   # edit if needed, all vars are optional
+cp .env.example .env   # all vars optional
 uvicorn app.main:app --reload
 ```
 
-Dashboard at http://localhost:8000
+Dashboard at http://localhost:8000. Startup fetches ~7 days of Binance
+klines (a few seconds) and mines the situations (~5–10s) before the
+first window is traded. Binance is used only for analysis; if your host
+is geo-blocked from `api.binance.com`, set `BINANCE_KLINES_URL` to a
+mirror such as `https://api.binance.us/api/v3/klines`.
+
+## Layout
+
+- `app/indicators.py` — pure-Python RSI, MACD, EMA/SMA, Bollinger,
+  Stochastic, ATR, ADX (checked against pandas to ~1e-12)
+- `app/marketdata.py` — Binance REST klines (1D/4H/1H/15m/5m)
+- `app/mtf_engine.py` — snapshot tokens, situation miner, prediction,
+  out-of-sample evaluation
+- `app/backtest.py` — startup pre-backtest orchestration
+- `app/engine.py` — trading engine (+2s taker entry, TP, forced close)
+- `app/state.py` — runtime loop, live candle fetch, periodic re-mining
+- `app/polymarket_client.py`, `app/paper_broker.py`, `app/models.py` —
+  Polymarket CLOB access, fee/log helper, shared types
+- `tests/` — `python tests/run_all.py` (no network needed): indicators vs
+  pandas, live-vs-backtest snapshot equality / no-lookahead, order flow,
+  state orchestration, and noise-vs-planted-pattern checks on synthetic data
 
 ## Config knobs (`app/config.py`)
 
-- `ORDER_SHARES` (200), `ORDER_PRICE` (0.45), `ORDER_TIMEOUT_SECONDS` (30), `TAKER_FALLBACK_MAX_PRICE` (0.60), `TP_PRICE` (0.99)
-- `RSI_PERIOD` / `RSI_OVERBOUGHT` / `RSI_OVERSOLD` — informational flag only, doesn't block trades
-- `AI_LEARNING_RATE`, `AI_L2_REG`, `AI_STREAK_LOOKBACK` — online logistic regression hyperparameters
-- `AI_BACKTEST_DAYS` (env: `AI_BACKTEST_DAYS`, default 3) — how much history to pretrain/seed from at startup
-- `STARTING_CAPITAL` (env: `STARTING_CAPITAL`, default $2000, single shared pool)
-- Taker fee constants — the resting entry is a fee-free maker fill; the taker-fallback entry, the TP exit and any forced close all pay a real fee
+- Execution: `ORDER_SHARES` (200), `ENTRY_DELAY_SECONDS` (2),
+  `ENTRY_MAX_PRICE` (0.60), `TP_PRICE` (0.99), `STARTING_CAPITAL` ($2000)
+- Signal: `MTF_BACKTEST_DAYS` (7), `MTF_MIN_SAMPLES` (25), `MTF_MIN_Z`
+  (2.6, floor), `MTF_PERMUTATIONS` (30, `0` disables the noise
+  calibration and leaves only `MTF_MIN_Z` — many more situations will
+  pass, most of them luck), `MTF_TOP_RULES` (7 voters),
+  `MTF_MAX_RULE_SIZE` (3), `MTF_REFRESH_EVERY_WINDOWS` (12)
 
 ## Notes / assumptions
 
-- The signal candle's open time is always `window.open_ts - 60` — the
-  60 seconds immediately preceding this window's start.
-- If Binance data is unavailable for a window (feed down, or too
-  early after a fresh process start for the lookback to be full even
-  after seeding), that's logged as a no-signal window — not a loss.
-- The resting entry fills fully at its exact limit price with no fee
-  (maker convention). The taker-fallback entry, the TP exit and the
-  forced window-end close use the depth-aware realistic-fill-price
-  logic and pay the taker fee (the entry fee is included in the
-  position's cost basis).
-- The 30s timeout is measured from when the order is placed (right
-  after the signal is computed), not from window open, and is checked
-  on the 1s poll loop, so it fires within ~1s of 30s.
-- The true win/loss label used both for online learning and for
-  settling trades comes from the last observed Polymarket CLOB
-  midpoint at window rollover (`state.py`'s `_infer_winner`) — a
-  live-market read, not Polymarket's own settled resolution.
-- This reuses `models.py`, `paper_broker.py`, `binance_client.py`, and
-  `polymarket_client.py` largely unchanged from earlier iterations of
-  this bot — `config.py`, `engine.py`, `ai_signal.py`, `backtest.py`,
-  and the dashboard are what implement the current strategy.
+- **Expect few trades.** Five-minute BTC direction is close to a coin flip;
+  after the noise calibration, a week of data often yields few or no
+  situations that beat chance, and the bot then simply doesn't trade. The
+  dashboard says so explicitly rather than inventing a reason. Any edge
+  it does find comes from ~2,000 windows, so treat it as a hypothesis to
+  watch in paper trading (live accuracy is tracked), not a proven result.
+- Window outcome in the backtest = the window's own Binance 5m candle
+  closed above its open. Live outcomes (history append, win/loss
+  settlement) come from the last observed Polymarket CLOB midpoint at
+  window rollover (`state.py`'s `_infer_winner`), not Polymarket's own
+  settled resolution.
+- The 0.60 gate uses the best ask; a 200-share fill on a thin book can
+  average slightly above it, and taker fills pay the fee.
+- Windows are skipped only for missing market data, no matching
+  validated situation, or the ask staying at/above the cap all window;
+  each is counted separately on the dashboard.

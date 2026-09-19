@@ -4,21 +4,29 @@ import time
 from collections import deque
 from typing import Optional
 
+import httpx
+
 from . import config
-from .backtest import pretrain_ai
-from .binance_client import BinanceKlineFeed
+from .backtest import run_prebacktest
 from .engine import Engine
+from .marketdata import fetch_live_frames
 from .models import PricePoint, Side, WindowMarket
+from .mtf_engine import MTFPredictor, price_at
 from .paper_broker import PaperBroker
 from .polymarket_client import PolymarketClient
+
+FRAMES_RETRY_SECONDS = 3.0        # how often to retry a failed/incomplete candle fetch within a window
+BACKTEST_RETRY_SECONDS = 60.0     # how often to retry the startup pre-backtest if it failed
+REBUILD_AFTER_SECONDS = 20.0      # start a periodic re-mine this long after a window opens (never at rollover)
 
 
 class BotState:
     def __init__(self):
         self.broker = PaperBroker()
-        self.binance_feed = BinanceKlineFeed()
-        self.engine = Engine(self.broker, self.binance_feed)
+        self.predictor = MTFPredictor()
+        self.engine = Engine(self.broker, self.predictor)
         self.client = PolymarketClient()
+        self.http = httpx.AsyncClient(timeout=10)      # Binance market-data client (analysis only)
         self.current_window: Optional[WindowMarket] = None
         self.price_history: deque = deque(maxlen=300)  # ~5 min at 1s ticks
         self.last_up_bid: Optional[float] = None
@@ -27,34 +35,48 @@ class BotState:
         self.last_down_ask: Optional[float] = None
         self.status = "starting"
         self.error: Optional[str] = None
-        self.pretrain_status = {"done": False, "windows_trained": 0, "candles_seeded": 0, "error": None}
+        self.backtest_status = {"done": False, "windows": 0, "rules": 0, "error": None}
+        self.frames_error: Optional[str] = None
+        self._frames_last_attempt = 0.0
+        self._backtest_last_attempt = 0.0
+        self._backtest_running = False
+        self._rebuild_scheduled = False
         self._task: Optional[asyncio.Task] = None
 
     async def start(self):
-        # Fetch+train+seed happens BEFORE the live websocket starts, so
-        # the REST-sourced seed data can never race with / get
-        # clobbered by real-time updates landing mid-seed.
-        result = await pretrain_ai(self.engine.ai, live_feed=self.binance_feed)
-        self.pretrain_status = {"done": True, **result}
-        if result["error"]:
-            self.broker.log_event(
-                "SYS", "", "AI_PRETRAIN",
-                note=f"pretraining skipped/failed ({result['error']}) -- starting fully cold, learns/fills online instead",
-            )
-        else:
-            self.broker.log_event(
-                "SYS", "", "AI_PRETRAIN",
-                note=(f"pretrained AI on {result['windows_trained']} historical windows AND seeded the live "
-                      f"feed with {result['candles_seeded']} historical candles -- full feature lookback "
-                      f"available from the first live tick, no ~15min live warm-up needed"),
-            )
-        self.binance_feed.start()
+        # The pre-backtest runs BEFORE the live loop starts, so the very first
+        # window already has its validated situations to match against.
+        await self._run_backtest()
         self._task = asyncio.create_task(self._run_loop())
+
+    async def _run_backtest(self):
+        if self._backtest_running:
+            return
+        self._backtest_running = True
+        self._backtest_last_attempt = time.time()
+        try:
+            result = await run_prebacktest(self.predictor)
+            self.backtest_status = {"done": True, **result}
+            if result["error"]:
+                self.broker.log_event(
+                    "SYS", "", "PREBACKTEST",
+                    note=f"pre-backtest failed ({result['error']}) -- no situations yet, will retry every "
+                         f"{BACKTEST_RETRY_SECONDS:.0f}s; no trades until it succeeds")
+            else:
+                sm = self.predictor.summary
+                oos = sm.get("out_of_sample", {})
+                self.broker.log_event(
+                    "SYS", "", "PREBACKTEST",
+                    note=(f"backtested {result['windows']} windows over the last {config.MTF_BACKTEST_DAYS:g} days -> "
+                          f"{result['rules']} validated situations. Out-of-sample: accuracy {oos.get('accuracy')} "
+                          f"on {oos.get('predicted')} predicted windows (z={oos.get('z')}, coverage {oos.get('coverage')})"))
+        finally:
+            self._backtest_running = False
 
     async def stop(self):
         if self._task:
             self._task.cancel()
-        await self.binance_feed.stop()
+        await self.http.aclose()
         await self.client.close()
 
     async def _run_loop(self):
@@ -94,6 +116,18 @@ class BotState:
         down_mid = self._midpoint(down_bid, down_ask)
         self.price_history.append(PricePoint(ts=now, up=up_mid, down=down_mid))
 
+        await self._ensure_frames(now)
+        # Re-mine the situations only well after the window's entry has fired: the
+        # worker thread shares the GIL with this loop, and the +2s entry must not
+        # be delayed by CPU work at window rollover.
+        if (self.predictor.needs_rebuild() and not self._rebuild_scheduled
+                and now - self.current_window.open_ts >= REBUILD_AFTER_SECONDS):
+            self._rebuild_scheduled = True
+            asyncio.create_task(self._rebuild_rules())
+        if (not self.backtest_status.get("windows") and not self._backtest_running
+                and now - self._backtest_last_attempt >= BACKTEST_RETRY_SECONDS):
+            asyncio.create_task(self._run_backtest())
+
         seconds_to_close = self.current_window.close_ts - now
         self.engine.on_tick(
             up_bid, up_ask, down_bid, down_ask, seconds_to_close, now=now,
@@ -102,6 +136,34 @@ class BotState:
             down_bid_levels=down_book["bids"] if down_book else None,
             down_ask_levels=down_book["asks"] if down_book else None,
         )
+
+    async def _ensure_frames(self, now: float):
+        """Fetch the 1D/4H/1H/15m (+5m) candles for the current window's
+        snapshot, retrying every few seconds until the engine has them."""
+        if not self.engine.needs_frames() or now - self._frames_last_attempt < FRAMES_RETRY_SECONDS:
+            return
+        self._frames_last_attempt = now
+        try:
+            frames = await fetch_live_frames(self.http)
+            price = price_at(frames["5m"], self.current_window.open_ts)
+            if self.engine.set_frames(frames, price):
+                self.frames_error = None
+            else:
+                self.frames_error = "incomplete candle data (a timeframe empty or window-open price missing)"
+        except Exception as e:
+            self.frames_error = f"{type(e).__name__}: {e}"
+
+    async def _rebuild_rules(self):
+        try:
+            await asyncio.to_thread(self.predictor.rebuild)
+        finally:
+            self._rebuild_scheduled = False
+        sm = self.predictor.summary
+        oos = sm.get("out_of_sample", {})
+        self.broker.log_event(
+            "SYS", "", "MTF_REBUILD",
+            note=(f"re-mined situations on {len(self.predictor.records)} windows -> {len(self.predictor.rules)} kept. "
+                  f"Out-of-sample accuracy {oos.get('accuracy')} on {oos.get('predicted')} windows (z={oos.get('z')})"))
 
     @staticmethod
     def _midpoint(bid: Optional[float], ask: Optional[float]) -> Optional[float]:
@@ -148,7 +210,8 @@ class BotState:
             "status": self.status,
             "error": self.error,
             "server_time": time.time(),
-            "pretrain": self.pretrain_status,
+            "backtest": self.backtest_status,
+            "frames_error": self.frames_error,
             "window": None if not self.current_window else {
                 "slug": self.current_window.slug,
                 "open_ts": self.current_window.open_ts,
