@@ -119,9 +119,8 @@ class EngineState:
     decision_made: bool = False     # True once the AI signal has been decided (whichever way it went)
     decided_color: Optional[str] = None   # "green" | "red" | "flat", the signal candle's own color (one AI feature, for display)
     ai_features: Optional[list] = None    # feature vector computed at signal time, kept for the learn() step at window close
-    ai_predicted_side: Optional[Side] = None   # the real (pre-fade) AI prediction, if confident enough to trade
+    ai_predicted_side: Optional[Side] = None   # the real (pre-fade) AI prediction
     ai_confidence: Optional[float] = None
-    ai_p_up: Optional[float] = None       # raw P(up), even when below the confidence band / not yet trading
 
     last_window_pnl: float = 0.0
 
@@ -147,7 +146,6 @@ class Engine:
         self.total_tp_fills = 0
         self.total_forced_closes = 0
         self.total_unfilled_cancels = 0
-        self.total_flat_candles = 0
         self.total_no_signal_windows = 0
         self.total_illiquid_skips = 0
         self.total_rsi_vetoes = 0
@@ -171,10 +169,11 @@ class Engine:
             self._log("HALTED", note=f"engine halted (balance ${self.capital.balance:.2f} < $0) -- no trading")
             return
         self._log("WINDOW_OPEN", note=(
-            f"AI signal engine predicts next window (trained on {self.ai.n_trained} past windows, "
-            f"min {config.AI_MIN_SAMPLES_TO_PREDICT} to trade) -- RSI({config.RSI_PERIOD}) veto on the real "
-            f"predicted side if overbought/oversold, then FADE: resting limit buy is placed on the OPPOSITE "
-            f"side, always, @ {config.ORDER_PRICE}. {config.ORDER_SHARES:.0f}sh, maker, no SL, TP {config.TP_PRICE}"
+            f"AI signal engine predicts next window (trained on {self.ai.n_trained} windows: "
+            f"{self.ai.pretrained_windows} pretrained + {self.ai.n_trained - self.ai.pretrained_windows} live) "
+            f"-- RSI({config.RSI_PERIOD}) logged but does not block the trade (no-skip mode), then FADE: "
+            f"resting limit buy is placed on the OPPOSITE side, always, @ {config.ORDER_PRICE}. "
+            f"{config.ORDER_SHARES:.0f}sh, maker, no SL, TP {config.TP_PRICE}"
         ))
 
     def on_tick(self, up_bid, up_ask, down_bid, down_ask, seconds_to_close: float = None, now: Optional[float] = None,
@@ -239,41 +238,32 @@ class Engine:
 
         if feats is None:
             self.total_no_signal_windows += 1
-            self._log("NO_TRADE", note="AI signal engine missing feature history (startup/reconnect) -- skipping")
+            self._log("NO_TRADE", note=(
+                "AI signal engine missing feature history (startup/reconnect, not enough candle "
+                "history yet) -- only case that can skip a window in no-skip mode"))
             return
 
-        side, p_up_or_conf = self.ai.predict(feats)
-        self.s.ai_p_up = p_up_or_conf if side is None else None
-
-        if side is None:
-            self.total_flat_candles += 1   # reused as "AI gave no tradeable signal this window"
-            if self.ai.n_trained < config.AI_MIN_SAMPLES_TO_PREDICT:
-                reason = f"cold start, only trained on {self.ai.n_trained}/{config.AI_MIN_SAMPLES_TO_PREDICT} windows so far"
-            else:
-                reason = f"low confidence (P(up)={p_up_or_conf:.2f}, inside the {config.AI_CONFIDENCE_BAND} no-trade band)"
-            self._log("NO_TRADE", note=f"AI signal: {reason} -- skipping this window")
-            return
-
-        confidence = p_up_or_conf
+        # No-skip mode: predict() always returns a real side here.
+        side, confidence = self.ai.predict(feats)
         self.s.ai_predicted_side = side
         self.s.ai_confidence = confidence
         self._log("AI_SIGNAL", side=side.value, price=candle.close,
                    note=f"AI predicts {side.value} (confidence {confidence:.2f}), trained on {self.ai.n_trained} windows")
 
+        # RSI is logged for visibility but does NOT block the trade --
+        # every window with candle history places an order.
         rsi = self.binance_feed.get_rsi(signal_open_ts, config.RSI_PERIOD)
         if rsi is not None:
             if side == Side.UP and rsi > config.RSI_OVERBOUGHT:
                 self.total_rsi_vetoes += 1
-                self._log("RSI_VETO", side=side.value, note=(
-                    f"real AI signal UP but RSI({config.RSI_PERIOD}) {rsi:.1f} > "
-                    f"{config.RSI_OVERBOUGHT} (overbought) -- skipping, momentum looks exhausted"))
-                return
-            if side == Side.DOWN and rsi < config.RSI_OVERSOLD:
+                self._log("RSI_FLAG", side=side.value, note=(
+                    f"AI signal UP but RSI({config.RSI_PERIOD}) {rsi:.1f} > {config.RSI_OVERBOUGHT} "
+                    f"(overbought) -- flagged only, trade still placed (no-skip mode)"))
+            elif side == Side.DOWN and rsi < config.RSI_OVERSOLD:
                 self.total_rsi_vetoes += 1
-                self._log("RSI_VETO", side=side.value, note=(
-                    f"real AI signal DOWN but RSI({config.RSI_PERIOD}) {rsi:.1f} < "
-                    f"{config.RSI_OVERSOLD} (oversold) -- skipping, momentum looks exhausted"))
-                return
+                self._log("RSI_FLAG", side=side.value, note=(
+                    f"AI signal DOWN but RSI({config.RSI_PERIOD}) {rsi:.1f} < {config.RSI_OVERSOLD} "
+                    f"(oversold) -- flagged only, trade still placed (no-skip mode)"))
 
         # Always fade: trade the opposite side of the real AI prediction.
         trade_side = side.other()
@@ -446,7 +436,6 @@ class Engine:
             "decided_color": self.s.decided_color,
             "ai_predicted_side": self.s.ai_predicted_side.value if self.s.ai_predicted_side else None,
             "ai_confidence": round(self.s.ai_confidence, 3) if self.s.ai_confidence is not None else None,
-            "ai_p_up": round(self.s.ai_p_up, 3) if self.s.ai_p_up is not None else None,
             "ai": self.ai.status(),
             "binance": self.binance_feed.status(),
 
@@ -455,7 +444,6 @@ class Engine:
             "total_tp_fills": self.total_tp_fills,
             "total_forced_closes": self.total_forced_closes,
             "total_unfilled_cancels": self.total_unfilled_cancels,
-            "total_flat_candles": self.total_flat_candles,
             "total_no_signal_windows": self.total_no_signal_windows,
             "total_illiquid_skips": self.total_illiquid_skips,
             "total_rsi_vetoes": self.total_rsi_vetoes,

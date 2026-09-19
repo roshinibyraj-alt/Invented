@@ -5,6 +5,7 @@ from collections import deque
 from typing import Optional
 
 from . import config
+from .backtest import pretrain_ai
 from .binance_client import BinanceKlineFeed
 from .engine import Engine
 from .models import PricePoint, Side, WindowMarket
@@ -26,10 +27,18 @@ class BotState:
         self.last_down_ask: Optional[float] = None
         self.status = "starting"
         self.error: Optional[str] = None
+        self.pretrain_status = {"done": False, "windows_trained": 0, "error": None}
         self._task: Optional[asyncio.Task] = None
 
     async def start(self):
         self.binance_feed.start()
+        n, err = await pretrain_ai(self.engine.ai)
+        self.pretrain_status = {"done": True, "windows_trained": n, "error": err}
+        self.broker.log_event(
+            "SYS", "", "AI_PRETRAIN",
+            note=(f"pretrained on {n} historical windows from Binance REST klines"
+                  if not err else f"pretraining skipped/failed ({err}) -- starting fully untrained, learns online instead"),
+        )
         self._task = asyncio.create_task(self._run_loop())
 
     async def stop(self):
@@ -129,6 +138,7 @@ class BotState:
             "status": self.status,
             "error": self.error,
             "server_time": time.time(),
+            "pretrain": self.pretrain_status,
             "window": None if not self.current_window else {
                 "slug": self.current_window.slug,
                 "open_ts": self.current_window.open_ts,

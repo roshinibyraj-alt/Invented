@@ -141,7 +141,7 @@
   .log-row .ev.TP_FILL{color:var(--mint);}
   .log-row .ev.FORCED_CLOSE{color:var(--violet);}
   .log-row .ev.NO_LIQUIDITY{color:var(--amber);}
-  .log-row .ev.RSI_VETO{color:var(--violet);}
+  .log-row .ev.RSI_FLAG{color:var(--violet);}
   .log-row .ev.HALTED{color:var(--coral);}
   .log-row .ev.NO_TRADE{color:var(--faint);}
   .log-row .note{color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
@@ -154,7 +154,7 @@
   <header>
     <div>
       <h1>Previous-window momentum</h1>
-      <div class="sub">BTC 5m up/down — an online AI signal engine (self-training logistic regression, no external API calls) predicts the next window from RSI/momentum/volatility/streak features. Confident UP/DOWN → real signal; else skipped. RSI(14) vetoes the real signal if overbought/oversold. Otherwise the bot FADES it — always trades the opposite side — resting limit buy @ 0.45. Limit order only, no market fallback. 200sh, no SL, TP 0.99, one trade/window</div>
+      <div class="sub">BTC 5m up/down — an AI signal engine (self-training logistic regression, pretrained on historical Binance data at startup, no external API calls) predicts the next window from RSI/momentum/volatility/streak features. NO-SKIP MODE: the AI always picks a side and the bot always trades — RSI is logged but no longer blocks. The bot FADES the AI's real signal — always trades the opposite side — resting limit buy @ 0.45. Limit order only, no market fallback (a trade is placed every window; whether it fills still depends on real prices reaching 0.45). 200sh, no SL, TP 0.99</div>
     </div>
     <div class="status-pill"><span class="dot" id="statusDot"></span><span id="statusText">connecting</span></div>
   </header>
@@ -257,27 +257,26 @@ function renderBinancePanel(e){
     banner.textContent = `AI predicts DOWN (conf ${e.ai_confidence!=null?(e.ai_confidence*100).toFixed(0)+'%':'—'}), FADED — resting buy UP @ ${ORDER_PRICE}`;
   } else if(e.decision_made){
     banner.className = 'signal-banner flat';
-    const ai = e.ai || {};
-    const reason = !ai.ready ? `cold start (${ai.n_trained}/${ai.min_samples_to_predict} windows trained)`
-      : (e.ai_p_up!=null ? `low confidence (P(up)=${(e.ai_p_up*100).toFixed(0)}%)` : 'no feature data yet');
-    banner.textContent = `NO SIGNAL — ${reason}`;
+    banner.textContent = 'NO TRADE — Binance feed missing candle history this window (only case that can skip in no-skip mode)';
   } else {
     banner.className = 'signal-banner pending';
     banner.textContent = 'waiting for previous-window candle data from Binance...';
   }
 
-  renderAiStatus(e.ai || {});
+  renderAiStatus(e.ai || {}, e.pretrain || {});
 }
 
-function renderAiStatus(ai){
+function renderAiStatus(ai, pretrain){
   const el = $('aiStatus');
-  const readyTag = ai.ready
-    ? `<span class="ready">ready</span>`
-    : `<span class="cold">cold start ${ai.n_trained ?? 0}/${ai.min_samples_to_predict ?? '—'}</span>`;
   const acc = ai.accuracy!=null ? ai.accuracy.toFixed(1)+'%' : '—';
+  const pretrainTag = !pretrain.done
+    ? `<span class="cold">pretraining…</span>`
+    : (pretrain.error
+        ? `<span class="cold">pretrain failed — learning online only</span>`
+        : `<span class="ready">pretrained on ${pretrain.windows_trained} historical windows</span>`);
   el.innerHTML = `
-    <span>${readyTag}</span>
-    <span>trained on <b>${ai.n_trained ?? 0}</b> windows</span>
+    <span>${pretrainTag}</span>
+    <span>trained on <b>${ai.n_trained ?? 0}</b> windows (${ai.pretrained_windows ?? 0} pretrain + ${ai.live_trained_windows ?? 0} live)</span>
     <span>directional accuracy <b>${acc}</b> (${ai.correct_predictions ?? 0}/${ai.total_predictions ?? 0})</span>
   `;
 }
@@ -387,9 +386,8 @@ function renderStats(e){
   const tiles = [
     ['total_orders_placed','orders placed',''], ['total_order_fills','maker fills',''],
     ['total_tp_fills','tp fills','win'], ['total_forced_closes','forced close',''],
-    ['total_unfilled_cancels','unfilled cancels',''], ['total_flat_candles','AI no-signal',''],
-    ['total_no_signal_windows','no-signal',''], ['total_illiquid_skips','illiquid skips',''],
-    ['total_rsi_vetoes','RSI vetoes',''],
+    ['total_unfilled_cancels','unfilled cancels',''], ['total_no_signal_windows','no-signal (feed gap)',''],
+    ['total_illiquid_skips','illiquid skips',''], ['total_rsi_vetoes','RSI flags',''],
     ['win_rate','win rate %',''],
   ];
   $('statsGrid').innerHTML = tiles.map(([key,label,cls]) => {

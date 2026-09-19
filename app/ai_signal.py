@@ -1,7 +1,5 @@
 """
-Lightweight online AI signal engine -- a from-scratch logistic
-regression, trained continuously (one gradient step per resolved
-window) on features computed off the Binance 1-minute feed. No
+Lightweight AI signal engine -- a from-scratch logistic regression, no
 external ML dependencies (numpy/scikit-learn) and no external API
 calls (no Claude/LLM call in the trading-decision path) -- pure
 Python, so it's cheap to deploy and fast enough to run every tick.
@@ -15,13 +13,21 @@ Predicts P(next window resolves UP) from:
   - current same-color candle streak length (signed: +3 = 3 green in a
     row, -2 = 2 red in a row)
 
-Trains online (partial-fit, one step per window) each time a window's
-true outcome becomes known via record_outcome() -- there's no separate
-offline training step and no historical dataset required. Cold-starts
-with no predictions at all until AI_MIN_SAMPLES_TO_PREDICT windows have
-been learned from; before that, predict() returns (None, None) so the
-engine just skips trading that window, same as the old "flat candle"
-skip used to.
+NO-SKIP MODE: predict() always returns a side (UP or DOWN) whenever
+features are available -- there's no "not confident enough" or "not
+trained enough" case that blocks a trade. Before the model has any
+real training (all weights still zero, e.g. a fresh process with
+pretraining unavailable), the raw prediction is an exact 50/50 tie;
+in that case it falls back to the signal candle's own color so the
+engine still has a deterministic side to act on every window.
+
+Trains via two paths, both feeding the same online weights:
+  - pretrain-once at startup on historical Binance data replayed
+    through this same feature/window logic (see app/backtest.py) --
+    removes almost all of the old "needs live windows to warm up" lag.
+  - continuous online learning, one gradient step per window, each
+    time a window's true outcome becomes known via record_outcome()
+    (called from Engine.finalize_window()).
 """
 import math
 from dataclasses import dataclass
@@ -77,6 +83,7 @@ class AISignalEngine:
         self.bias = 0.0
         self.stats = [_RunningStat() for _ in range(N_FEATURES)]
         self.n_trained = 0
+        self.pretrained_windows = 0    # how many of n_trained came from startup backtest replay vs live
         self.total_predictions = 0
         self.correct_predictions = 0
 
@@ -133,27 +140,27 @@ class AISignalEngine:
     # ---- predict / learn --------------------------------------------------
 
     def predict(self, feats: Optional[list]):
-        """Returns (side, confidence) where confidence is P(that side
-        wins), or (None, p_up) if the model isn't trained on enough
-        windows yet or the prediction is inside the no-trade confidence
-        band -- p_up is still returned for logging/dashboard purposes
-        even when no trade results."""
+        """Returns (side, confidence) -- always a real side when feats is
+        available (no-skip mode: no confidence band, no min-trained
+        gate). confidence is P(that side wins). Falls back to fading
+        nothing and just reading the signal candle's own color if the
+        model is a completely untrained 50/50 tie (all-zero weights)."""
         if feats is None:
             return None, None
-        if self.n_trained < config.AI_MIN_SAMPLES_TO_PREDICT:
-            return None, None
         p_up = self._predict_proba(feats)
-        if abs(p_up - 0.5) < config.AI_CONFIDENCE_BAND:
-            return None, p_up
+        if p_up == 0.5:
+            last_color = feats[FEATURE_NAMES.index("last_color")]
+            p_up = 0.5001 if last_color >= 0 else 0.4999
         side = Side.UP if p_up >= 0.5 else Side.DOWN
         confidence = p_up if side == Side.UP else 1 - p_up
         return side, confidence
 
-    def learn(self, feats: Optional[list], actual_up: bool):
+    def learn(self, feats: Optional[list], actual_up: bool, pretrain: bool = False):
         """One online SGD step with L2 regularization. Updates the
         running per-feature mean/variance first (so standardization
         keeps improving too), then a single logistic-regression
-        gradient step."""
+        gradient step. pretrain=True just tags the step as having come
+        from the startup historical replay, for the dashboard."""
         if feats is None:
             return
         for i, raw in enumerate(feats):
@@ -167,6 +174,8 @@ class AISignalEngine:
             self.weights[i] -= config.AI_LEARNING_RATE * grad
         self.bias -= config.AI_LEARNING_RATE * error
         self.n_trained += 1
+        if pretrain:
+            self.pretrained_windows += 1
 
     def record_prediction_result(self, predicted_side: Optional[Side], actual_up: bool):
         """Tracks the model's own directional hit rate -- independent of
@@ -186,8 +195,8 @@ class AISignalEngine:
                     if self.total_predictions else None)
         return {
             "n_trained": self.n_trained,
-            "min_samples_to_predict": config.AI_MIN_SAMPLES_TO_PREDICT,
-            "ready": self.n_trained >= config.AI_MIN_SAMPLES_TO_PREDICT,
+            "pretrained_windows": self.pretrained_windows,
+            "live_trained_windows": self.n_trained - self.pretrained_windows,
             "total_predictions": self.total_predictions,
             "correct_predictions": self.correct_predictions,
             "accuracy": accuracy,
