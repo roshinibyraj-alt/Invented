@@ -1,46 +1,42 @@
 """
 Central configuration for the BTC 5-min up/down bot.
 
-Single engine -- one resting limit buy EVERY window (no-skip mode).
+Single engine -- one entry attempt EVERY window (no-skip mode).
 Direction is decided by an AI signal engine (app/ai_signal.py)
 predicting the next window's outcome -- pretrained on historical
 Binance data at startup (app/backtest.py) so it isn't starting cold --
-then FADED (the bot trades the opposite side of that prediction,
-always):
+and the bot trades WITH that signal (no fade):
 
   1. The instant a new window opens, compute AI features off the
      Binance feed and get a prediction -- the model always returns UP
-     or DOWN (no "not confident enough" skip), so the real signal is
+     or DOWN (no "not confident enough" skip), so the signal is
      decided every window that has candle history.
-  2. RSI(14) is computed and logged against the real signal side for
-     visibility, but does NOT block the trade -- this is a no-skip
-     strategy, one trade attempt every window.
-  3. The bot places its resting limit buy on the OPPOSITE side of the
-     real signal, always (this is a fade/contrarian strategy, not
-     momentum-following).
-  4. This is a real MAKER limit order -- it fills at its own exact
-     price (0.45), no slippage, no fee, the moment that side's ask
-     drops to/through it. It is NOT a taker/market buy. LIMIT ONLY:
-     if it never fills, it just sits resting until the window closes,
-     then is cancelled with no penalty -- no market-order fallback.
-     (Placing an order every window is guaranteed; an order actually
-     FILLING still depends on real market prices reaching 0.45, which
-     can't be forced without becoming a taker order again.)
+  2. RSI(14) is computed and logged against the signal side for
+     visibility, but does NOT block the trade.
+  3. The bot places a resting MAKER limit buy on the SIGNALLED side
+     @ ORDER_PRICE (0.45). It fills at its own exact price, no
+     slippage, no fee, the moment that side's ask drops to/through it.
+  4. If the resting order hasn't filled ORDER_TIMEOUT_SECONDS (30s)
+     after being placed, it is cancelled and the bot switches to
+     TAKER fallback: from then until the window closes, the moment the
+     signalled side's best ask is BELOW TAKER_FALLBACK_MAX_PRICE
+     (0.60), the bot buys at market (taker) -- priced by walking real
+     ask depth, paying the taker fee. If the ask never gets below
+     0.60 before the window closes, no trade that window.
   5. No stop-loss. Take profit is fixed at TP_PRICE (0.99) -- a real
      taker sell, priced by walking actual book depth, the moment the
      bid reaches it.
-  6. Only one order, one trade max per window -- no re-arming. If the
-     resting order fills but TP never hits, the position is
-     force-closed at window end (taker, real depth-weighted price).
+  6. Only one entry, one trade max per window -- no re-arming. If the
+     position is open but TP never hits, it is force-closed at window
+     end (taker, real depth-weighted price).
   7. Every window's true outcome (once known) is fed back into the AI
      signal engine as one online training step -- it keeps learning
      for as long as the bot runs, whether or not a trade was actually
      placed that window.
 
-The only thing that can still skip a window entirely is missing candle
-history from the live Binance feed (disconnected, or too early after
-process startup for e.g. the RSI/momentum lookback to be full) -- a
-data-availability issue, not a strategy choice.
+The only thing that can skip a window for data reasons is missing
+candle history from the live Binance feed (disconnected, or too early
+after process startup for the RSI/momentum lookback to be full).
 """
 import os
 
@@ -58,16 +54,18 @@ WINDOW_SECONDS = 300
 
 POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
 
-# ---- Order sizing / pricing (AI signal engine, faded) ----------------------
+# ---- Order sizing / pricing (AI signal engine, traded WITH the signal) ------
 ORDER_SHARES = 200.0
-ORDER_PRICE = 0.45           # fixed absolute limit price, whichever side is traded
+ORDER_PRICE = 0.45           # fixed absolute resting-limit price on the signalled side
+ORDER_TIMEOUT_SECONDS = 30.0        # cancel the resting order if unfilled this long after placement
+TAKER_FALLBACK_MAX_PRICE = 0.60     # after the cancel, taker-buy only while signalled side's best ask is strictly BELOW this
 SIGNAL_CANDLE_OFFSET = 240   # the decision candle is the previous window's [240s, 300s) minute
 TP_PRICE = 0.99
 
 # ---- RSI flag (informational, no-skip mode) --------------------------------
 # Computed on the 1-minute BTC feed, as of the same signal candle used for
-# the AI's features. Checked against the REAL signal side (before the fade
-# flip) and logged for visibility -- it does NOT block the trade:
+# the AI's features. Checked against the signal side and logged for
+# visibility -- it does NOT block the trade:
 #   AI signal UP,   RSI already overbought -> flagged, trade still placed
 #   AI signal DOWN, RSI already oversold   -> flagged, trade still placed
 # If there isn't enough closed-candle history yet (startup/reconnect), the
@@ -112,10 +110,10 @@ AI_BACKTEST_DAYS = float(os.getenv("AI_BACKTEST_DAYS", "3"))
 AI_BACKTEST_BASE_URL = "https://api.binance.com/api/v3/klines"
 
 # ---- Trading fees -----------------------------------------------------
-# The entry is a resting MAKER limit order -- it fills at its own exact
-# price with no fee. Only the TP exit and any forced window-end close
-# are TAKER market orders and pay the real fee, priced by walking real
-# order-book depth. Verify against
+# The resting entry is a MAKER limit order -- it fills at its own exact
+# price with no fee. The taker-fallback entry (after the 30s timeout),
+# the TP exit and any forced window-end close are TAKER market orders
+# and pay the real fee, priced by walking real order-book depth. Verify against
 # GET https://clob.polymarket.com/fee-rate?token_id=... before trading
 # real money.
 APPLY_TAKER_FEES = True
