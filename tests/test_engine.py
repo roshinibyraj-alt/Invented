@@ -131,13 +131,13 @@ tick(e, t + 2, *asks_for(side, 0.52, 0.48)); e.finalize_window(Side.DOWN if side
 assert e.total_forced_closes == 1 and e.total_pnl < 0
 print("7 ok: TP exit and forced close")
 
-# ---- 8. no matching situation -> NO_TRADE, nothing armed
+# ---- 8. engine with no models at all -> NO_TRADE, nothing armed
 e, w = mk_engine(t); e.set_frames(frames, price_now)
-saved = pred.rules; pred.rules = []
-tick(e, t + 0.3, 0.5, 0.5); pred.rules = saved
+saved = pred.models; pred.models = None
+tick(e, t + 0.3, 0.5, 0.5); pred.models = saved
 assert not e.s.entry_pending and e.total_no_match_windows == 1 and e.s.decision_made and e.s.position is None
 tick(e, t + 5, 0.5, 0.5); assert e.s.position is None
-print("8 ok: no validated situation -> no trade")
+print("8 ok: no models -> no trade")
 
 # ---- 9. close: history append + prediction scoring
 n0 = len(pred.records)
@@ -152,6 +152,6 @@ print("9 ok: resolved window appended to history + live accuracy tracked")
 import json
 e2, w2 = mk_engine(t); e2.set_frames(frames, price_now); tick(e2, t + 0.3, 0.5, 0.5)
 snap = e2.snapshot(); json.dumps(snap)
-assert snap["prediction"]["reasons"] and snap["def"]["entry_delay_s"] == 2.0 and snap["def"]["entry_max_price"] == 0.60
+assert snap["prediction"]["reasons"] and snap["prediction"]["tier"] in ("validated","candidate","baseline") and snap["def"]["entry_delay_s"] == 2.0 and snap["def"]["entry_max_price"] == 0.60
 print("10 ok: snapshot JSON | status:", snap["status"])
 print("ALL PASSED")

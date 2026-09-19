@@ -66,6 +66,10 @@
   .dots{display:inline-flex; gap:3px; vertical-align:middle;}
   .dots i{width:7px; height:7px; border-radius:50%; display:inline-block; background:var(--coral);}
   .dots i.ok{background:var(--mint);}
+  .tier{display:inline-block; padding:2px 8px; border-radius:6px; font-family:var(--mono); font-size:10px; font-weight:600; margin-right:8px; vertical-align:middle;}
+  .tier.validated{background:var(--mint-dim); color:var(--mint);}
+  .tier.candidate{background:var(--amber-dim); color:var(--amber);}
+  .tier.baseline{background:var(--panel-3); color:var(--muted);}
   .sect-label{font-size:10.5px; color:var(--faint); margin:14px 0 6px; font-family:var(--mono); text-transform:uppercase; letter-spacing:.6px;}
   .tbl-scroll{overflow-x:auto;}
   table.mtf{width:100%; border-collapse:collapse; font-family:var(--mono); font-size:10.5px; min-width:520px;}
@@ -269,6 +273,7 @@ const esc = x => String(x).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'
 const pct = v => v==null ? '—' : (v*100).toFixed(1)+'%';
 const fmtWhen = ts => new Date(ts*1000).toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'});
 const TFS = ['1D','4H','1H','15m'];
+const TIER_TEXT = {validated:'VALIDATED', candidate:'WEAK PATTERN', baseline:'BASELINE'};
 
 function renderReason(r){
   const dots = (r.recent||[]).map(x => `<i class="${x.ok?'ok':''}" title="${fmtWhen(x.ts)} — ${x.ok?'right':'wrong'}"></i>`).join('');
@@ -306,13 +311,19 @@ function renderSignalPanel(e, s){
   const p = e.prediction;
   if(p){
     banner.className = 'signal-banner ' + (p.side==='UP' ? 'green' : 'red');
-    banner.textContent = `Predicts ${p.side} (${(p.confidence*100).toFixed(0)}%) — taker buy ${p.side} at +${e.def.entry_delay_s}s if ask < ${e.def.entry_max_price} · ${p.n_matched} situations matched (${p.n_for} agree / ${p.n_against} disagree)`;
-    $('whyBox').innerHTML = `<div class="sect-label">Why ${p.side} — strongest matching situations from the 7-day backtest</div><div class="why">${p.reasons.map(renderReason).join('')}</div>`;
+    const what = p.tier==='baseline' ? 'readings weighed' : 'situations matched';
+    banner.innerHTML = `<span class="tier ${p.tier}">${TIER_TEXT[p.tier]||p.tier}</span>Predicts ${p.side} (${(p.confidence*100).toFixed(0)}%) — taker buy ${p.side} at +${e.def.entry_delay_s}s if ask < ${e.def.entry_max_price} · ${p.n_matched} ${what} (${p.n_for} agree / ${p.n_against} disagree)`;
+    const hdr = {
+      validated: `Why ${p.side} — strongest matching situations (passed the noise test on the 7-day backtest)`,
+      candidate: `Why ${p.side} — strong-looking situations from the 7-day backtest, but they did NOT pass the noise test, so they may be luck`,
+      baseline:  `Why ${p.side} — no strong pattern matches; these readings pulled hardest (how windows with each reading ended over the last 7 days)`,
+    }[p.tier] || `Why ${p.side}`;
+    $('whyBox').innerHTML = `<div class="sect-label">${hdr}</div><div class="why">${p.reasons.map(renderReason).join('')}</div>`;
     $('readingsBox').innerHTML = renderReadings(p.readings);
   } else if(e.decision_made){
     banner.className = 'signal-banner flat';
     banner.textContent = e.skip_reason === 'no_match'
-      ? 'NO TRADE — no situation validated on the last 7 days matches the current market, so there is no evidence for either side'
+      ? 'NO TRADE — the engine has no usable history yet (pre-backtest still running or failed), or strict mode is on and no validated situation matches'
       : 'NO TRADE — market data incomplete for this window (a timeframe missing candles)';
     $('whyBox').innerHTML = ''; $('readingsBox').innerHTML = '';
   } else {
@@ -331,19 +342,30 @@ function renderBacktest(e, s){
     return;
   }
   const oos = sm.out_of_sample || {}, ins = sm.in_sample || {};
+  const bt_ = oos.by_tier || {};
   let verdict, vcls = '';
-  if(!pr.n_rules){
-    verdict = 'No situation passed the noise-calibrated test on this data — the engine will not trade until one does. That is the honest result when nothing beats chance.'; vcls = 'warn';
-  } else if(!oos.predicted || oos.predicted < 30){
-    verdict = `Only ${oos.predicted||0} out-of-sample calls — too few to judge whether the situations really work.`; vcls = 'warn';
+  if(!oos.predicted || oos.predicted < 30){
+    verdict = `Only ${oos.predicted||0} out-of-sample calls — too few to judge whether the signal works.`; vcls = 'warn';
   } else if(oos.z >= 1.96 && oos.accuracy > 0.5){
-    verdict = `Out-of-sample: ${pct(oos.accuracy)} right on ${oos.predicted} windows the rules never saw (z=${oos.z}). Looks like a real edge, though 7 days is short.`; vcls = 'good';
+    verdict = `Out-of-sample: ${pct(oos.accuracy)} right on ${oos.predicted} windows the models never saw (z=${oos.z}). Looks like a real edge, though 7 days is short.`; vcls = 'good';
   } else {
-    verdict = `Out-of-sample: ${pct(oos.accuracy)} on ${oos.predicted} unseen windows (z=${oos.z}) — no reliable edge. Treat the signals as unproven.`; vcls = 'warn';
+    verdict = `Out-of-sample: ${pct(oos.accuracy)} on ${oos.predicted} unseen windows (z=${oos.z}) — no reliable edge, i.e. close to a coin flip. With taker entries at ~0.5–0.6 plus fees, a coin flip loses money: roughly 55%+ is needed to break even.`; vcls = 'warn';
   }
+  if(!pr.n_rules && sm.fallback !== false){
+    verdict = 'No situation passed the noise test this week, so calls come from weak patterns and the baseline. ' + verdict;
+  } else if(!pr.n_rules){
+    verdict = 'No situation passed the noise test and strict mode is on — no trades. ' + verdict; vcls = 'warn';
+  }
+  const tierRows = ['validated','candidate','baseline'].filter(t => bt_[t]).map(t => {
+    const x = bt_[t], live = (pr.live_by_tier||{})[t];
+    return `<tr><td><span class="tier ${t}">${TIER_TEXT[t]}</span></td><td>${x.predicted}</td><td>${pct(x.accuracy)}</td>
+      <td>${live ? live.predicted+' calls, '+pct(live.accuracy) : '—'}</td></tr>`;
+  }).join('');
   const fmtD = ts => ts ? new Date(ts*1000).toLocaleDateString([], {month:'short', day:'numeric'}) : '—';
   const live = pr.live_predictions ? `${pr.live_accuracy}% (${pr.live_correct}/${pr.live_predictions})` : '—';
-  const rows = (pr.top_rules||[]).map(r => `<tr>
+  const shown = (pr.top_rules && pr.top_rules.length) ? pr.top_rules : (pr.top_candidates||[]);
+  const shownLabel = (pr.top_rules && pr.top_rules.length) ? 'Strongest validated situations' : 'Strongest weak patterns (NOT noise-validated)';
+  const rows = shown.map(r => `<tr>
       <td class="wrap">${esc(r.text)}</td><td class="${r.direction}">${r.direction}</td>
       <td>${pct(r.hit_rate)}</td><td>${r.n}</td><td>${r.z}</td>
       <td>${r.best_time ? esc(r.best_time.time)+' ('+pct(r.best_time.hit_rate)+', n='+r.best_time.n+')' : '—'}</td></tr>`).join('');
@@ -352,14 +374,16 @@ function renderBacktest(e, s){
     <h2>Pre-backtest — last ${fmtSh(sm.windows ? sm.windows/288 : 0)} days <span class="tag">${pr.rebuilding ? 're-mining…' : (pr.built_at ? 'updated '+new Date(pr.built_at*1000).toLocaleTimeString() : '')}</span></h2>
     <div class="kv">
       <div><div class="k">Windows replayed</div><div class="v">${sm.windows ?? 0} (${fmtD(sm.period_start)}–${fmtD(sm.period_end)})</div></div>
-      <div><div class="k">Validated situations</div><div class="v">${pr.n_rules ?? 0}</div></div>
+      <div><div class="k">Validated / weak patterns</div><div class="v">${pr.n_rules ?? 0} / ${pr.n_candidates ?? 0}</div></div>
       <div><div class="k">Z cut-off (noise-calibrated)</div><div class="v">${sm.z_threshold ?? '—'}</div></div>
       <div><div class="k">Out-of-sample accuracy</div><div class="v">${pct(oos.accuracy)} <span style="font-size:10px;color:var(--muted)">n=${oos.predicted ?? 0}, z=${oos.z ?? '—'}</span></div></div>
       <div><div class="k">In-sample accuracy (optimistic)</div><div class="v">${pct(ins.accuracy)} <span style="font-size:10px;color:var(--muted)">n=${ins.predicted ?? 0}</span></div></div>
       <div><div class="k">Live accuracy since start</div><div class="v">${live}</div></div>
     </div>
     <div class="verdict ${vcls}">${verdict}</div>
-    ${rows ? `<div class="sect-label">Strongest situations (situation → side it favoured, when it was right)</div>
+    ${tierRows ? `<div class="sect-label">Accuracy by evidence tier (out-of-sample backtest vs live so far)</div>
+      <div class="tbl-scroll"><table class="mtf" style="min-width:0"><tr><th>Tier</th><th>OOS calls</th><th>OOS right</th><th>Live</th></tr>${tierRows}</table></div>` : ''}
+    ${rows ? `<div class="sect-label">${shownLabel} (situation → side it favoured, when it was right)</div>
       <div class="tbl-scroll"><table class="mtf"><tr><th>Situation</th><th>Side</th><th>Right</th><th>Windows</th><th>z</th><th>Best time of day</th></tr>${rows}</table></div>` : ''}
     ${byTime ? `<div class="sect-label">In-sample accuracy by time of day (optimistic)</div>
       <div class="tbl-scroll"><table class="mtf" style="min-width:0"><tr><th>Time</th><th>Calls</th><th>Right</th></tr>${byTime}</table></div>` : ''}
@@ -477,10 +501,12 @@ function renderStats(e){
     ['total_tp_fills','tp fills','win'], ['total_forced_closes','forced close',''],
     ['total_no_signal_windows','skipped: data gap',''], ['total_no_match_windows','skipped: no situation',''],
     ['total_illiquid_skips','illiquid skips',''],
+    ['sig_validated','signals: validated',''], ['sig_candidate','signals: weak pattern',''], ['sig_baseline','signals: baseline',''],
     ['win_rate','win rate %',''],
   ];
   $('statsGrid').innerHTML = tiles.map(([key,label,cls]) => {
     let v = e[key];
+    if(key.startsWith('sig_')) v = (e.tier_counts||{})[key.slice(4)];
     if(key==='win_rate') v = (v==null ? '—' : v);
     return `<div class="stat-tile ${cls}"><div class="n">${v ?? 0}</div><div class="l">${label}</div></div>`;
   }).join('');

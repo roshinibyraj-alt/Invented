@@ -32,9 +32,13 @@ How it works
    rates, shrunk toward 50% for small samples, are averaged in log-odds
    space) and the engine returns UP or DOWN together with the exact
    situations that produced the call, their historical hit rates,
-   sample sizes and the times of day they worked. No matching
-   situation -> no prediction -> no trade (there is no evidence-based
-   reason to pick a side).
+   sample sizes and the times of day they worked. If none of the
+   noise-validated situations matches, the engine falls back -- and SAYS
+   it did -- first to strong-looking-but-unvalidated situations ("weak
+   pattern"), then to a damped naive-Bayes weighing of every current
+   reading ("baseline"), so every window gets a call and a reason. The
+   tier is shown with the call and scored separately in the backtest.
+   (MTF_ALLOW_FALLBACK=0 restores validated-only trading.)
 
 4. HONESTY CHECK.  Alongside the live rules the engine re-runs the same
    procedure with only the first 70% of the week and scores it on the
@@ -479,18 +483,36 @@ def mine_rules(records: List[WindowRecord], *, min_n: Optional[int] = None, min_
 
 
 # ---------------------------------------------------------------------------
-# Prediction
+# Prediction (three tiers, strongest evidence first)
 # ---------------------------------------------------------------------------
+#
+#   validated  situations that passed the noise-calibrated test in mine_rules
+#   candidate  situations that looked strong in the last 7 days (z >=
+#              MTF_CANDIDATE_MIN_Z, same consistency / parsimony filters) but did
+#              NOT clear the noise-calibrated bar -- so they may well be luck
+#   baseline   nothing above matches: weigh every current reading at once with a
+#              damped naive-Bayes vote, so there is ALWAYS a call and a "why"
+#
+# The tier is reported with every call so weak evidence is never presented as
+# strong, and the out-of-sample backtest scores each tier separately.
+
+TIER_LABELS = {
+    "validated": "VALIDATED situation (passed the noise test)",
+    "candidate": "WEAK pattern (strong in last 7d, NOT noise-validated)",
+    "baseline": "BASELINE (no strong pattern; all readings weighed together)",
+}
+
 
 @dataclass
 class Prediction:
     side: Side
     p_up: float
     confidence: float          # P(chosen side)
-    n_matched: int
-    n_for: int                 # matched situations agreeing with the chosen side
+    tier: str                  # "validated" | "candidate" | "baseline"
+    n_matched: int             # matched situations (or readings weighed, for baseline)
+    n_for: int                 # of those, how many agree with the chosen side
     n_against: int
-    reasons: List[dict]        # top situations that produced the call
+    reasons: List[dict]        # top situations / readings behind the call
     readings: Dict[str, dict]  # per-timeframe indicator readings at window open
 
 
@@ -499,33 +521,137 @@ def _logit(p: float) -> float:
     return math.log(p / (1 - p))
 
 
+def _sigmoid(x: float) -> float:
+    return 1.0 / (1.0 + math.exp(-x))
+
+
 def _vote(rules: List[Rule], tokens: frozenset, top_k: int):
     matched = [r for r in rules if r.token_set <= tokens]
     if not matched:
         return None
     matched.sort(key=lambda r: (r.z, r.n), reverse=True)
     top = matched[:top_k]
-    mean_logit = sum(_logit(r.p_up) for r in top) / len(top)
-    p_up = 1.0 / (1.0 + math.exp(-mean_logit))
+    p_up = _sigmoid(sum(_logit(r.p_up) for r in top) / len(top))
     side = Side.UP if p_up >= 0.5 else Side.DOWN
     return matched, top, p_up, side
 
 
-def _score(records: List[WindowRecord], rules: List[Rule], top_k: int) -> dict:
+class Baseline:
+    """Always-available fallback: for every reading in the current snapshot,
+    how did windows with that reading tend to end (shrunk toward the week's
+    base up-rate)? The per-reading log-odds shifts are summed and damped by
+    sqrt(#readings) because the readings overlap heavily (RSI, MACD and trend
+    on one timeframe mostly say the same thing) -- summing them raw would be
+    wildly overconfident. The week's base rate is subtracted out so a drifting
+    week doesn't make it always say UP."""
+
+    def __init__(self, records: List[WindowRecord]):
+        n = len(records)
+        ups = sum(1 for r in records if r.up)
+        self.base = (ups + 1.0) / (n + 2.0)
+        stats: Dict[str, list] = {}
+        for r in records:
+            for tok in r.tokens:
+                c = stats.setdefault(tok, [0, 0])
+                c[0] += 1
+                c[1] += 1 if r.up else 0
+        self.stats = stats
+
+    def vote(self, tokens: frozenset, want_reasons: bool = True, top_n: int = 5):
+        prior, min_n = config.MTF_BASELINE_PRIOR, config.MTF_BASELINE_MIN_TOKEN_N
+        base_logit = _logit(self.base)
+        contribs = []
+        for tok in tokens:
+            st = self.stats.get(tok)
+            if not st or st[0] < min_n:
+                continue
+            n, u = st
+            p = (u + prior * self.base) / (n + prior)
+            contribs.append((_logit(p) - base_logit, tok, n, u))
+        if not contribs:
+            return None
+        p_up = _sigmoid(sum(c[0] for c in contribs) / math.sqrt(len(contribs)))
+        side_up = p_up >= 0.5
+        n_for = sum(1 for c in contribs if (c[0] >= 0) == side_up)
+        reasons: List[dict] = []
+        if want_reasons:
+            for llr, tok, n, u in sorted(contribs, key=lambda c: abs(c[0]), reverse=True)[:top_n]:
+                direction = "UP" if llr >= 0 else "DOWN"
+                hits = u if direction == "UP" else n - u
+                reasons.append({
+                    "text": tok, "direction": direction, "n": n, "hits": hits,
+                    "hit_rate": round(hits / n, 3), "z": round((2 * hits - n) / math.sqrt(n), 2),
+                    "p_up": round(u / n, 3), "best_time": None, "recent": [],
+                })
+        return {"p_up": p_up, "n_used": len(contribs), "n_for": n_for, "reasons": reasons}
+
+
+@dataclass
+class ModelSet:
+    rules: List[Rule]                 # validated
+    candidates: List[Rule]            # strong-looking but not noise-validated
+    baseline: Optional[Baseline]
+    z_threshold: float
+
+
+def build_models(records: List[WindowRecord]) -> ModelSet:
+    rules, z_thr = mine_rules(records)
+    candidates, _ = mine_rules(records, permutations=0, min_z=config.MTF_CANDIDATE_MIN_Z)
+    return ModelSet(rules=rules, candidates=candidates,
+                    baseline=Baseline(records) if records else None, z_threshold=z_thr)
+
+
+@dataclass
+class Decision:
+    tier: str
+    side: Side
+    p_up: float
+    n_matched: int
+    n_for: int
+    reasons: List[dict]
+
+
+def _decide(ms: Optional[ModelSet], tokens: frozenset, top_k: int, allow_fallback: bool,
+            want_reasons: bool = True) -> Optional[Decision]:
+    if ms is None:
+        return None
+    tiers = [("validated", ms.rules)]
+    if allow_fallback:
+        tiers.append(("candidate", ms.candidates))
+    for tier, rules in tiers:
+        v = _vote(rules, tokens, top_k)
+        if v is not None:
+            matched, top, p_up, side = v
+            return Decision(tier=tier, side=side, p_up=p_up, n_matched=len(matched),
+                            n_for=sum(1 for r in matched if r.direction == side.value),
+                            reasons=[r.to_dict() for r in top] if want_reasons else [])
+    if allow_fallback and ms.baseline is not None:
+        b = ms.baseline.vote(tokens, want_reasons=want_reasons)
+        if b is not None:
+            side = Side.UP if b["p_up"] >= 0.5 else Side.DOWN
+            return Decision(tier="baseline", side=side, p_up=b["p_up"], n_matched=b["n_used"],
+                            n_for=b["n_for"], reasons=b["reasons"])
+    return None
+
+
+def _score(records: List[WindowRecord], ms: ModelSet, top_k: int, allow_fallback: bool) -> dict:
     n = len(records)
     predicted = correct = 0
     blocks: Dict[int, list] = {}
+    tiers: Dict[str, list] = {}
     for rec in records:
-        v = _vote(rules, rec.tokens, top_k)
-        if v is None:
+        d = _decide(ms, rec.tokens, top_k, allow_fallback, want_reasons=False)
+        if d is None:
             continue
-        side = v[3]
-        ok = (side == Side.UP) == rec.up
+        ok = (d.side == Side.UP) == rec.up
         predicted += 1
         correct += 1 if ok else 0
         cell = blocks.setdefault(block_of(rec.ts), [0, 0])
         cell[0] += 1
         cell[1] += 1 if ok else 0
+        tc = tiers.setdefault(d.tier, [0, 0])
+        tc[0] += 1
+        tc[1] += 1 if ok else 0
     return {
         "windows": n, "predicted": predicted, "correct": correct,
         "coverage": round(predicted / n, 3) if n else None,
@@ -534,36 +660,42 @@ def _score(records: List[WindowRecord], rules: List[Rule], top_k: int) -> dict:
         "up_rate": round(sum(1 for r in records if r.up) / n, 3) if n else None,
         "by_time": [{"time": block_label(b), "n": c[0], "accuracy": round(c[1] / c[0], 3)}
                     for b, c in sorted(blocks.items())],
+        "by_tier": {t: {"predicted": c[0], "correct": c[1], "accuracy": round(c[1] / c[0], 3)}
+                    for t, c in tiers.items()},
     }
 
 
-def evaluate(records: List[WindowRecord], live_rules: List[Rule], top_k: Optional[int] = None,
-             live_z_threshold: Optional[float] = None) -> dict:
-    """In-sample score of the live rules + an honest out-of-sample score:
-    mine on the first 70%, score on the untouched last 30%."""
+def evaluate(records: List[WindowRecord], live: ModelSet, top_k: Optional[int] = None) -> dict:
+    """In-sample score of the live models + an honest out-of-sample score:
+    build everything from the first 70% of the period, score it on the
+    untouched last 30% -- overall and per tier."""
     top_k = config.MTF_TOP_RULES if top_k is None else top_k
+    allow = config.MTF_ALLOW_FALLBACK
     n = len(records)
-    summary = {"windows": n, "n_rules": len(live_rules), "z_threshold": live_z_threshold}
+    summary = {"windows": n, "n_rules": len(live.rules), "n_candidates": len(live.candidates),
+               "z_threshold": round(live.z_threshold, 2), "fallback": allow}
     if n < 100:
         return summary
     split = int(n * 0.7)
     train, test = records[:split], records[split:]
-    rules_tr, z_tr = mine_rules(train)
-    summary["out_of_sample"] = {**_score(test, rules_tr, top_k), "train_windows": len(train),
-                                "rules": len(rules_tr), "z_threshold": round(z_tr, 2)}
-    summary["in_sample"] = _score(records, live_rules, top_k)
+    ms_tr = build_models(train)
+    summary["out_of_sample"] = {**_score(test, ms_tr, top_k, allow), "train_windows": len(train),
+                                "rules": len(ms_tr.rules), "candidates": len(ms_tr.candidates),
+                                "z_threshold": round(ms_tr.z_threshold, 2)}
+    summary["in_sample"] = _score(records, live, top_k, allow)
     summary["period_start"] = records[0].ts
     summary["period_end"] = records[-1].ts + 300
     return summary
 
 
 class MTFPredictor:
-    """Holds the rolling history, the mined situations, and the backtest
-    summary. One instance lives for the process lifetime."""
+    """Holds the rolling history, the fitted models (validated situations,
+    weaker candidates, baseline), and the backtest summary. One instance
+    lives for the process lifetime."""
 
     def __init__(self):
         self.records: List[WindowRecord] = []
-        self.rules: List[Rule] = []
+        self.models: Optional[ModelSet] = None
         self.summary: dict = {}
         self.built_at: Optional[float] = None
         self.windows_since_rebuild = 0
@@ -571,7 +703,16 @@ class MTFPredictor:
         self.live_added = 0
         self.total_predictions = 0
         self.correct_predictions = 0
+        self.tier_live: Dict[str, list] = {}
         self._lock = threading.Lock()
+
+    @property
+    def rules(self) -> List[Rule]:
+        return self.models.rules if self.models else []
+
+    @property
+    def candidates(self) -> List[Rule]:
+        return self.models.candidates if self.models else []
 
     # ---- history / (re)building -------------------------------------------
 
@@ -595,7 +736,7 @@ class MTFPredictor:
         return (not self.rebuilding) and self.windows_since_rebuild >= config.MTF_REFRESH_EVERY_WINDOWS
 
     def rebuild(self):
-        """Blocking (a second or two) -- call from a worker thread while live."""
+        """Blocking (several seconds) -- call from a worker thread while live."""
         with self._lock:
             if self.rebuilding:
                 return
@@ -603,33 +744,36 @@ class MTFPredictor:
             snapshot = list(self.records)
             self.windows_since_rebuild = 0
         try:
-            rules, z_thr = mine_rules(snapshot)
-            summary = evaluate(snapshot, rules, live_z_threshold=round(z_thr, 2))
-            # single assignments: readers see either the old or the new set, never a partial one
-            self.rules, self.summary, self.built_at = rules, summary, time.time()
+            models = build_models(snapshot)
+            summary = evaluate(snapshot, models)
+            # single assignments: readers see either the old or the new models, never a mix
+            self.models, self.summary, self.built_at = models, summary, time.time()
         finally:
             self.rebuilding = False
 
     # ---- live prediction --------------------------------------------------------
 
     def predict(self, tokens: frozenset, readings: Dict[str, dict]) -> Optional[Prediction]:
-        v = _vote(self.rules, tokens, config.MTF_TOP_RULES)
-        if v is None:
+        d = _decide(self.models, tokens, config.MTF_TOP_RULES, config.MTF_ALLOW_FALLBACK)
+        if d is None:
             return None
-        matched, top, p_up, side = v
-        n_for = sum(1 for r in matched if r.direction == side.value)
+        conf = d.p_up if d.side == Side.UP else 1 - d.p_up
         return Prediction(
-            side=side, p_up=p_up, confidence=p_up if side == Side.UP else 1 - p_up,
-            n_matched=len(matched), n_for=n_for, n_against=len(matched) - n_for,
-            reasons=[r.to_dict() for r in top], readings=readings,
+            side=d.side, p_up=d.p_up, confidence=conf, tier=d.tier,
+            n_matched=d.n_matched, n_for=d.n_for, n_against=d.n_matched - d.n_for,
+            reasons=d.reasons, readings=readings,
         )
 
-    def record_result(self, predicted: Optional[Side], actual_up: bool):
+    def record_result(self, predicted: Optional[Side], actual_up: bool, tier: Optional[str] = None):
         if predicted is None:
             return
+        ok = (predicted == Side.UP) == actual_up
         self.total_predictions += 1
-        if (predicted == Side.UP) == actual_up:
-            self.correct_predictions += 1
+        self.correct_predictions += 1 if ok else 0
+        if tier:
+            c = self.tier_live.setdefault(tier, [0, 0])
+            c[0] += 1
+            c[1] += 1 if ok else 0
 
     # ---- text / dashboard -------------------------------------------------------
 
@@ -637,10 +781,11 @@ class MTFPredictor:
     def explain(pred: Prediction, max_reasons: int = 3) -> str:
         parts = []
         for r in pred.reasons[:max_reasons]:
-            when = f", best {r['best_time']['time']} ({r['best_time']['hit_rate']:.0%} of {r['best_time']['n']})" \
-                if r["best_time"] else ""
+            when = (f", best {r['best_time']['time']} ({r['best_time']['hit_rate']:.0%} of {r['best_time']['n']})"
+                    if r.get("best_time") else "")
             parts.append(f"[{r['text']} -> {r['direction']} {r['hit_rate']:.0%} of {r['n']} windows, z={r['z']}{when}]")
-        return (f"{pred.side.value} {pred.confidence:.0%} | {pred.n_matched} situations matched "
+        what = "readings weighed" if pred.tier == "baseline" else "situations matched"
+        return (f"{pred.tier.upper()} {pred.side.value} {pred.confidence:.0%} | {pred.n_matched} {what} "
                 f"({pred.n_for} agree, {pred.n_against} disagree) | " + " ".join(parts))
 
     def status(self) -> dict:
@@ -650,11 +795,16 @@ class MTFPredictor:
             "history_windows": len(self.records),
             "live_windows_added": self.live_added,
             "n_rules": len(self.rules),
+            "n_candidates": len(self.candidates),
+            "fallback": config.MTF_ALLOW_FALLBACK,
             "built_at": self.built_at,
             "rebuilding": self.rebuilding,
             "summary": self.summary,
             "top_rules": [r.to_dict() for r in self.rules[:12]],
+            "top_candidates": [r.to_dict() for r in self.candidates[:10]],
             "live_predictions": self.total_predictions,
             "live_correct": self.correct_predictions,
             "live_accuracy": live_acc,
+            "live_by_tier": {t: {"predicted": c[0], "correct": c[1], "accuracy": round(c[1] / c[0], 3)}
+                             for t, c in self.tier_live.items()},
         }

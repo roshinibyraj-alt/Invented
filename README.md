@@ -31,18 +31,32 @@ every call are logged and shown on the dashboard.
      on pure random data a fixed cut-off keeps dozens of them,
    - pointed the same way in both halves of the week, and
    - (2-/3-condition ones) clearly beat each of their own parts.
-3. **Live call.** The current snapshot is matched against the kept
-   situations; the strongest matches vote (hit rates shrunk toward 50% for
-   small samples, averaged in log-odds). Output: side, confidence, and the
-   exact situations behind it — their historical hit rate, sample size,
-   z-score, the time of day they worked best, and whether their last six
-   matches were right. **If no validated situation matches, there is no
-   trade** — no evidence, no side.
-4. **Honesty check.** The same procedure is also run on the first 70% of
-   the week and scored on the untouched last 30%. That out-of-sample
-   accuracy (with z-score and a plain-language verdict) is on the
-   dashboard next to the in-sample number, which is optimistic by
-   construction.
+3. **Live call — every window gets one, and says how solid it is.** The
+   current snapshot is matched in three tiers, strongest evidence first,
+   and the tier is shown with the call:
+   - **VALIDATED** — situations that passed the noise test above. The
+     strongest matches vote (hit rates shrunk toward 50% for small
+     samples, averaged in log-odds). Shown with hit rate, sample size,
+     z-score, the time of day they worked best, and whether their last
+     six matches were right.
+   - **WEAK PATTERN** — situations that looked strong in the last 7 days
+     (z ≥ 2.0, same consistency filters) but did *not* clear the noise
+     test, so they may be luck. Used only when no validated situation
+     matches.
+   - **BASELINE** — nothing above matches, so every current reading is
+     weighed together: how did windows with each reading tend to end
+     over the week (shrunk toward the base rate, damped for overlap, week
+     drift subtracted so it doesn't always say UP). Shown as the
+     readings that pulled hardest.
+   `MTF_ALLOW_FALLBACK=0` restores validated-only trading (windows with
+   no validated match are then skipped — on real BTC data that is often
+   every window).
+4. **Honesty check.** The same procedure (all three tiers) is also run on
+   the first 70% of the week and scored on the untouched last 30% —
+   overall and per tier. That out-of-sample accuracy (with z-score and a
+   plain-language verdict) is on the dashboard next to the in-sample
+   number, which is optimistic by construction, and next to the live
+   accuracy per tier as windows resolve.
 5. **Keeps learning.** Every resolved window — traded or not — is
    appended to a rolling 7-day history (oldest dropped) together with
    its snapshot and true outcome, and the situations are re-mined every
@@ -95,13 +109,14 @@ mirror such as `https://api.binance.us/api/v3/klines`.
   Polymarket CLOB access, fee/log helper, shared types
 - `tests/` — `python tests/run_all.py` (no network needed): indicators vs
   pandas, live-vs-backtest snapshot equality / no-lookahead, order flow,
-  state orchestration, and noise-vs-planted-pattern checks on synthetic data
+  state orchestration, noise-vs-planted-pattern checks, and the tiered
+  fallback, on synthetic data
 
 ## Config knobs (`app/config.py`)
 
 - Execution: `ORDER_SHARES` (200), `ENTRY_DELAY_SECONDS` (2),
   `ENTRY_MAX_PRICE` (0.60), `TP_PRICE` (0.99), `STARTING_CAPITAL` ($2000)
-- Signal: `MTF_BACKTEST_DAYS` (7), `MTF_MIN_SAMPLES` (25), `MTF_MIN_Z`
+- Signal: `MTF_ALLOW_FALLBACK` (on), `MTF_BACKTEST_DAYS` (7), `MTF_MIN_SAMPLES` (25), `MTF_MIN_Z`
   (2.6, floor), `MTF_PERMUTATIONS` (30, `0` disables the noise
   calibration and leaves only `MTF_MIN_Z` — many more situations will
   pass, most of them luck), `MTF_TOP_RULES` (7 voters),
@@ -109,12 +124,15 @@ mirror such as `https://api.binance.us/api/v3/klines`.
 
 ## Notes / assumptions
 
-- **Expect few trades.** Five-minute BTC direction is close to a coin flip;
-  after the noise calibration, a week of data often yields few or no
-  situations that beat chance, and the bot then simply doesn't trade. The
-  dashboard says so explicitly rather than inventing a reason. Any edge
-  it does find comes from ~2,000 windows, so treat it as a hypothesis to
-  watch in paper trading (live accuracy is tracked), not a proven result.
+- **Trading a weak signal.** Five-minute BTC direction is close to a coin
+  flip. When nothing validates, the WEAK PATTERN / BASELINE tiers still
+  produce a call so the bot trades every window — but on random data
+  their measured out-of-sample accuracy is ~50%, and a taker buy at
+  ~0.5–0.6 plus fees needs roughly 55%+ to break even. The dashboard
+  shows the real out-of-sample and live accuracy per tier; if they sit
+  at ~50%, the bot is paying fees for a coin flip. Watch the per-tier
+  live accuracy, and use `MTF_ALLOW_FALLBACK=0` to trade only validated
+  situations.
 - Window outcome in the backtest = the window's own Binance 5m candle
   closed above its open. Live outcomes (history append, win/loss
   settlement) come from the last observed Polymarket CLOB midpoint at
@@ -122,6 +140,7 @@ mirror such as `https://api.binance.us/api/v3/klines`.
   settled resolution.
 - The 0.60 gate uses the best ask; a 200-share fill on a thin book can
   average slightly above it, and taker fills pay the fee.
-- Windows are skipped only for missing market data, no matching
-  validated situation, or the ask staying at/above the cap all window;
+- Windows are skipped only for missing market data, the engine having no
+  history yet (pre-backtest failed), or the ask staying at/above the
+  cap all window (plus, in strict mode, no validated situation);
   each is counted separately on the dashboard.

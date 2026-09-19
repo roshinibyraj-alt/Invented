@@ -13,7 +13,11 @@ limit orders:
      the last MTF_BACKTEST_DAYS (7) days, matches that snapshot against
      the situations that were historically right and calls UP or DOWN,
      with the exact situations, hit rates, sample sizes and times of day
-     behind the call. No matching situation -> no trade.
+     behind the call. Every window gets a call: noise-validated
+     situations first, then strong-looking-but-unvalidated ("weak
+     pattern") ones, then a naive-Bayes "baseline" over all readings --
+     the tier is reported with each call (MTF_ALLOW_FALLBACK=0 = trade
+     validated situations only).
   3. ENTRY_DELAY_SECONDS (2s) after the window opens, buy the predicted
      side at market (taker) -- priced by walking real ask depth, taker
      fee paid -- provided that side's best ask is BELOW ENTRY_MAX_PRICE
@@ -29,9 +33,10 @@ limit orders:
      periodically, so it keeps tracking the most recent week.
 
 Windows can be skipped for three reasons only: market data unavailable
-(Binance REST unreachable / a timeframe missing candles), no
-historically-validated situation matches the current snapshot, or the
-predicted side's ask stayed at/above ENTRY_MAX_PRICE all window.
+(Binance REST unreachable / a timeframe missing candles), the engine has
+no history yet (pre-backtest failed), or the predicted side's ask stayed
+at/above ENTRY_MAX_PRICE all window. (With MTF_ALLOW_FALLBACK=0 a window
+with no validated situation is also skipped.)
 """
 import os
 
@@ -79,6 +84,11 @@ MTF_MAX_RULE_SIZE = 3               # max conditions per situation
 MTF_MAX_RULES = 300                 # keep only the strongest N situations
 MTF_TOP_RULES = 7                   # strongest matching situations that vote on a live call
 MTF_SHRINK_PRIOR = 10.0             # pseudo-observations pulling small-sample hit rates toward 50%
+MTF_ALLOW_FALLBACK = os.getenv("MTF_ALLOW_FALLBACK", "1").strip().lower() not in ("0", "false", "no", "off")
+                                    # False = trade ONLY when a noise-validated situation matches (often: never)
+MTF_CANDIDATE_MIN_Z = 2.0           # "weak pattern" tier: same filters, no noise calibration, this z floor
+MTF_BASELINE_PRIOR = 20.0           # baseline tier: pseudo-observations shrinking each reading toward the base rate
+MTF_BASELINE_MIN_TOKEN_N = 15       # baseline tier: ignore readings seen in fewer windows than this
 MTF_REFRESH_EVERY_WINDOWS = 12      # re-mine the situations every N resolved windows (~1h)
 
 # ---- Trading fees -----------------------------------------------------

@@ -138,7 +138,8 @@ class Engine:
         self.total_forced_closes = 0
         self.total_entry_skips = 0           # signal fired but the ask never got below the cap
         self.total_no_signal_windows = 0     # market data unavailable / incomplete
-        self.total_no_match_windows = 0      # data fine, but no validated situation matched
+        self.total_no_match_windows = 0      # data fine, but the engine had nothing at all (no history) -- rare
+        self.tier_counts = {"validated": 0, "candidate": 0, "baseline": 0}   # signals fired, by evidence tier
         self.total_illiquid_skips = 0
         self.total_pnl = 0.0
         self.wins = 0
@@ -161,8 +162,8 @@ class Engine:
             return
         st = self.predictor.status()
         self._log("WINDOW_OPEN", note=(
-            f"ALPHASTRIKE: multi-timeframe engine (1D/4H/1H/15m) with {st['n_rules']} validated situations from "
-            f"{st['history_windows']} backtested windows. Trades WITH the signal: taker buy of the predicted side "
+            f"ALPHASTRIKE: multi-timeframe engine (1D/4H/1H/15m), {st['n_rules']} noise-validated + "
+            f"{st['n_candidates']} weak-pattern situations from {st['history_windows']} backtested windows. Trades WITH the signal: taker buy of the predicted side "
             f"{config.ENTRY_DELAY_SECONDS:g}s after window open, {config.ORDER_SHARES:.0f}sh, while ask < "
             f"{config.ENTRY_MAX_PRICE} (checked every tick until close). No SL, TP {config.TP_PRICE}"
         ))
@@ -244,13 +245,15 @@ class Engine:
             self.total_no_match_windows += 1
             self.s.skip_reason = "no_match"
             self._log("NO_TRADE", note=(
-                f"no historically-validated situation matches this snapshot "
-                f"({len(self.predictor.rules)} situations checked) -- no evidence for a side, skipping"))
+                ("no noise-validated situation matches this snapshot (strict mode, MTF_ALLOW_FALLBACK=0) -- skipping"
+                 if not config.MTF_ALLOW_FALLBACK else
+                 "engine has no usable history/models yet (pre-backtest not finished or failed) -- skipping")))
             return
 
         self.s.prediction = pred
         self.s.predicted_side = pred.side
         self.s.confidence = pred.confidence
+        self.tier_counts[pred.tier] = self.tier_counts.get(pred.tier, 0) + 1
         self._log("MTF_SIGNAL", side=pred.side.value, price=self.s.price_now,
                    note=self.predictor.explain(pred))
 
@@ -353,7 +356,8 @@ class Engine:
         if self.s.tokens is not None and winning_side is not None:
             actual_up = (winning_side == Side.UP)
             self.predictor.add_record(self.s.window.open_ts, self.s.tokens, actual_up)
-            self.predictor.record_result(self.s.predicted_side, actual_up)
+            self.predictor.record_result(self.s.predicted_side, actual_up,
+                                         self.s.prediction.tier if self.s.prediction else None)
             verdict = ""
             if self.s.predicted_side is not None:
                 verdict = f"; signal {self.s.predicted_side.value} was {'RIGHT' if (self.s.predicted_side == winning_side) else 'WRONG'}"
@@ -462,6 +466,7 @@ class Engine:
                 "side": self.s.prediction.side.value,
                 "p_up": round(self.s.prediction.p_up, 3),
                 "confidence": round(self.s.prediction.confidence, 3),
+                "tier": self.s.prediction.tier,
                 "n_matched": self.s.prediction.n_matched,
                 "n_for": self.s.prediction.n_for,
                 "n_against": self.s.prediction.n_against,
@@ -476,6 +481,7 @@ class Engine:
             "total_entry_skips": self.total_entry_skips,
             "total_no_signal_windows": self.total_no_signal_windows,
             "total_no_match_windows": self.total_no_match_windows,
+            "tier_counts": self.tier_counts,
             "total_illiquid_skips": self.total_illiquid_skips,
 
             "wins": self.wins,

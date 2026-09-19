@@ -68,8 +68,10 @@ class BotState:
                 self.broker.log_event(
                     "SYS", "", "PREBACKTEST",
                     note=(f"backtested {result['windows']} windows over the last {config.MTF_BACKTEST_DAYS:g} days -> "
-                          f"{result['rules']} validated situations. Out-of-sample: accuracy {oos.get('accuracy')} "
-                          f"on {oos.get('predicted')} predicted windows (z={oos.get('z')}, coverage {oos.get('coverage')})"))
+                          f"{result['rules']} noise-validated situations, {len(self.predictor.candidates)} weak-pattern. "
+                          f"Out-of-sample (rules built on the first 70%, scored on the last 30%): accuracy "
+                          f"{oos.get('accuracy')} on {oos.get('predicted')} windows (z={oos.get('z')}), "
+                          f"by tier {oos.get('by_tier')}"))
         finally:
             self._backtest_running = False
 
@@ -162,7 +164,7 @@ class BotState:
         oos = sm.get("out_of_sample", {})
         self.broker.log_event(
             "SYS", "", "MTF_REBUILD",
-            note=(f"re-mined situations on {len(self.predictor.records)} windows -> {len(self.predictor.rules)} kept. "
+            note=(f"re-mined situations on {len(self.predictor.records)} windows -> {len(self.predictor.rules)} validated / {len(self.predictor.candidates)} weak-pattern. "
                   f"Out-of-sample accuracy {oos.get('accuracy')} on {oos.get('predicted')} windows (z={oos.get('z')})"))
 
     @staticmethod
