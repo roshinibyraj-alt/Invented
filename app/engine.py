@@ -1,33 +1,36 @@
 """
-ALPHASTRIKE trading engine -- one entry per window. Direction is decided by
-the multi-timeframe prediction engine (app/mtf_engine.py), and the bot
-trades WITH that signal (buys the side it predicts), always as a taker.
+ALPHASTRIKE trading engine -- "the current window decides the next window".
 
-See app/config.py for the full strategy write-up. Summary: at each window
-open, snapshot 1D/4H/1H/15m indicators, match them against the situations
-that were right in the last 7 days, and get UP or DOWN plus the reasons.
-ENTRY_DELAY_SECONDS (2s) after the window opens, buy that side at market
-(taker, depth-walked, with fee) as long as its best ask is below
-ENTRY_MAX_PRICE (0.60) -- otherwise keep checking every tick until the
-window closes. No SL. TP 0.99, real taker exit. One entry/trade max per
-window. Every resolved window is added to the engine's history (whether
-or not a trade happened) so the situations stay current.
+Signal (app/strategy.py): from the five 1-minute closes of the window that
+just closed. UP = minute 2 below minute 1 AND avg(min3-5) above avg(min1-2);
+DOWN = the exact opposite; otherwise no trade.
+
+Trade, in the NEXT window, on the signalled side:
+  1. Resting maker limit buy, LIMIT_SHARES (200) @ LIMIT_PRICE (0.40),
+     placed as soon as the signal is known (window open).
+  2. Unfilled LIMIT_TIMEOUT_SECONDS (120s) after placement -> cancelled;
+     from then until the window closes, the first tick the side's best ask
+     is below TAKER_MAX_PRICE (0.60), buy TAKER_SHARES (300) at market
+     (taker, depth-walked, with fee). Never ask -> no trade.
+  3. No SL. TP 0.99 (real taker exit), else forced close at window end.
+  4. One entry per window: the 200sh limit fill OR the 300sh taker buy.
 """
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional
 
 from . import config
 from .models import Side, WindowMarket
-from .mtf_engine import MTFPredictor, Prediction, prepare_frames, window_tokens
 from .paper_broker import PaperBroker
+from .strategy import SignalResult
 
 
 def _realistic_fill_price(levels: Optional[list], shares: float, fallback_price: Optional[float]) -> Optional[float]:
     """Volume-weighted average price to actually trade `shares` against a
     real order book, instead of assuming the whole size fills at the
-    single best quote. Used for every fill: the taker entry, the TP exit
-    and the forced window-end close.
+    single best quote. Used for the taker entry, the TP exit and the
+    forced window-end close.
 
     - levels is None -> no depth data this tick; fall back to filling
       the whole size at `fallback_price`.
@@ -76,22 +79,48 @@ class CapitalPool:
 
 
 @dataclass
+class CapitalPool:
+    balance: float
+    halted: bool = False
+    equity_curve: list = field(default_factory=list)
+
+    def record_equity_point(self, window_slug: Optional[str]):
+        self.equity_curve.append({
+            "window": window_slug, "ts": time.time(), "balance": round(self.balance, 2),
+        })
+        if len(self.equity_curve) > 500:
+            self.equity_curve = self.equity_curve[-500:]
+
+    def check_halt(self) -> bool:
+        if not self.halted and self.balance < 0:
+            self.halted = True
+        return self.halted
+
+
+@dataclass
+class RestingOrder:
+    side: Side
+    price: float
+    shares: float
+    placed_ts: float
+    status: str = "resting"     # resting | filled | cancelled
+
+
+@dataclass
 class Position:
     side: Side
     entry_price: float
     shares: float
     cost: float
     entry_ts: float
-    signal_side: Optional[Side] = None
-    entry_type: str = "taker"
+    entry_type: str = "maker"   # "maker" (limit fill) | "taker" (post-timeout fallback)
 
 
 @dataclass
 class EngineState:
     """Per-window transient state -- fully replaced by reset_for_window()
     at the start of every window. Cumulative stats live on the Engine
-    itself, below, so they survive across windows instead of getting
-    wiped every window."""
+    itself so they survive across windows."""
     window: Optional[WindowMarket] = None
     up_bid: Optional[float] = None
     up_ask: Optional[float] = None
@@ -102,44 +131,42 @@ class EngineState:
     down_bid_levels: Optional[list] = None
     down_ask_levels: Optional[list] = None
 
+    # signal_status: pending (waiting for the previous window's candles) | armed (side chosen,
+    # order placed) | no_pattern | no_data (candles never arrived) | late_join (bot started mid-window)
+    signal_status: str = "pending"
+    signal: Optional[SignalResult] = None
+    order: Optional[RestingOrder] = None
     position: Optional[Position] = None
-    decision_made: bool = False     # True once the signal has been decided (a side, or no-trade)
-    prepared: Optional[dict] = None       # per-timeframe candles + indicator series for THIS window (from state.py)
-    price_now: Optional[float] = None     # BTC price at window open (open of the 15m window candle)
-    tokens: Optional[frozenset] = None    # market snapshot at window open, kept for the history append at close
-    prediction: Optional[Prediction] = None   # the engine's call + the reasons behind it
-    predicted_side: Optional[Side] = None     # the side traded
-    confidence: Optional[float] = None
-    skip_reason: Optional[str] = None      # "no_data" | "no_match" when the window was decided as no-trade
-    entry_pending: bool = False     # signal decided, entry not made yet (waiting for +2s or for ask < cap)
-    entry_wait_logged: bool = False # so the "ask still >= cap" note is logged once, not every tick
-
+    taker_watching: bool = False     # limit timed out and was cancelled; watching for ask < cap until close
+    taker_wait_logged: bool = False  # so the "ask still >= cap" note is logged once, not every tick
+    entry_type: Optional[str] = None # how this window's entry happened, for the history table
     last_window_pnl: float = 0.0
 
 
 class Engine:
-    """Multi-timeframe-signal engine, driven off a single shared capital
-    pool. Constructed as Engine(broker, predictor) -- app/state.py owns
-    the MTFPredictor and feeds each window's candle data in via
-    set_frames()."""
+    name = "BOT"
 
-    name = "MTF"
-
-    def __init__(self, broker: PaperBroker, predictor: MTFPredictor):
+    def __init__(self, broker: PaperBroker):
         self.broker = broker
-        self.predictor = predictor
         self.capital = CapitalPool(balance=config.STARTING_CAPITAL)
         self.s = EngineState()
         self.capital.record_equity_point(None)
+        self.history = deque(maxlen=30)      # one row per finished window, for the dashboard
 
         # ---- cumulative stats, survive across windows ----------------------
-        self.total_entries = 0
+        self.total_signals_up = 0
+        self.total_signals_down = 0
+        self.total_no_pattern = 0
+        self.total_no_data = 0
+        self.signal_right = 0
+        self.signal_wrong = 0
+        self.total_limit_placed = 0
+        self.total_limit_fills = 0
+        self.total_limit_timeouts = 0
+        self.total_taker_entries = 0
+        self.total_taker_skips = 0           # timed out, then the ask never got below the cap
         self.total_tp_fills = 0
         self.total_forced_closes = 0
-        self.total_entry_skips = 0           # signal fired but the ask never got below the cap
-        self.total_no_signal_windows = 0     # market data unavailable / incomplete
-        self.total_no_match_windows = 0      # data fine, but the engine had nothing at all (no history) -- rare
-        self.tier_counts = {"validated": 0, "candidate": 0, "baseline": 0}   # signals fired, by evidence tier
         self.total_illiquid_skips = 0
         self.total_pnl = 0.0
         self.wins = 0
@@ -155,32 +182,53 @@ class Engine:
         self.broker.log_event(self.name, self.s.window.slug if self.s.window else "", event,
                                balance_after=self.capital.balance, **kw)
 
-    def reset_for_window(self, window: WindowMarket):
+    # ---- window lifecycle --------------------------------------------------------
+
+    def reset_for_window(self, window: WindowMarket, late_join: bool = False):
         self.s = EngineState(window=window)
         if self.capital.halted:
             self._log("HALTED", note=f"engine halted (balance ${self.capital.balance:.2f} < $0) -- no trading")
             return
-        st = self.predictor.status()
+        if late_join:
+            self.s.signal_status = "late_join"
+            self._log("NO_TRADE", note="bot started mid-window -- skipping this window, trading from the next one")
+            return
         self._log("WINDOW_OPEN", note=(
-            f"ALPHASTRIKE: multi-timeframe engine (1D/4H/1H/15m), {st['n_rules']} noise-validated + "
-            f"{st['n_candidates']} weak-pattern situations from {st['history_windows']} backtested windows. Trades WITH the signal: taker buy of the predicted side "
-            f"{config.ENTRY_DELAY_SECONDS:g}s after window open, {config.ORDER_SHARES:.0f}sh, while ask < "
-            f"{config.ENTRY_MAX_PRICE} (checked every tick until close). No SL, TP {config.TP_PRICE}"
-        ))
+            f"ALPHASTRIKE: reading the previous window's 1-minute closes. Limit buy {config.LIMIT_SHARES:.0f}sh "
+            f"@ {config.LIMIT_PRICE}; unfilled after {config.LIMIT_TIMEOUT_SECONDS:.0f}s -> cancel, then taker buy "
+            f"{config.TAKER_SHARES:.0f}sh while ask < {config.TAKER_MAX_PRICE}. No SL, TP {config.TP_PRICE}"))
 
-    # ---- market data hand-off (called by state.py) ---------------------------------
+    def needs_signal(self) -> bool:
+        return (self.s.window is not None and not self.capital.halted and self.s.signal_status == "pending")
 
-    def needs_frames(self) -> bool:
-        return (self.s.window is not None and not self.capital.halted
-                and not self.s.decision_made and self.s.prepared is None)
+    def set_signal(self, result: SignalResult, now: Optional[float] = None):
+        """Called by state.py once the previous window's five minute-closes are in."""
+        now = now if now is not None else time.time()
+        self.s.signal = result
+        closes = " / ".join(f"{c:.2f}" for c in result.closes)
+        if result.side is None:
+            self.s.signal_status = "no_pattern"
+            self.total_no_pattern += 1
+            self._log("NO_SIGNAL", note=f"closes {closes} -- {result.reason}")
+            return
+        self.s.signal_status = "armed"
+        if result.side == Side.UP:
+            self.total_signals_up += 1
+        else:
+            self.total_signals_down += 1
+        self._log("SIGNAL", side=result.side.value, note=f"closes {closes} -- {result.reason}")
+        self.s.order = RestingOrder(side=result.side, price=config.LIMIT_PRICE,
+                                     shares=config.LIMIT_SHARES, placed_ts=now)
+        self.total_limit_placed += 1
+        self._log("LIMIT_PLACED", side=result.side.value, price=config.LIMIT_PRICE, shares=config.LIMIT_SHARES,
+                   note=(f"resting limit buy {result.side.value}: {config.LIMIT_SHARES:.0f}sh @ {config.LIMIT_PRICE} "
+                         f"(cancel + taker buy {config.TAKER_SHARES:.0f}sh if unfilled after "
+                         f"{config.LIMIT_TIMEOUT_SECONDS:.0f}s)"))
 
-    def set_frames(self, frames: dict, price_now: Optional[float]):
-        """frames: raw candles per timeframe from marketdata.fetch_live_frames()."""
-        prepared = prepare_frames(frames)
-        if prepared is None or price_now is None:
-            return False
-        self.s.prepared, self.s.price_now = prepared, price_now
-        return True
+    def set_signal_unavailable(self, reason: str):
+        self.s.signal_status = "no_data"
+        self.total_no_data += 1
+        self._log("NO_TRADE", note=f"previous window's candles unavailable ({reason}) -- skipping this window")
 
     def on_tick(self, up_bid, up_ask, down_bid, down_ask, seconds_to_close: float = None, now: Optional[float] = None,
                 up_bid_levels: Optional[list] = None, up_ask_levels: Optional[list] = None,
@@ -196,15 +244,10 @@ class Engine:
         if self.s.position is not None:
             self._check_exit(now)
             return
-
-        if not self.s.decision_made:
-            self._check_signal(now)
-            if not self.s.entry_pending:
-                return       # no data yet, or no trade this window
-            # signal just armed -- fall through so a late signal (data arrived after +2s) buys THIS tick
-
-        if self.s.entry_pending:
-            self._check_entry(now)
+        if self.s.order is not None and self.s.order.status == "resting":
+            self._check_fill(now)
+        elif self.s.taker_watching:
+            self._check_taker(now)
 
     # ---- price/level lookups ----------------------------------------------
 
@@ -220,101 +263,77 @@ class Engine:
     def _ask_levels_for(self, side: Side) -> Optional[list]:
         return self.s.up_ask_levels if side == Side.UP else self.s.down_ask_levels
 
-    # ---- signal: multi-timeframe prediction ---------------------------------------
+    # ---- entry 1: resting limit buy -------------------------------------------
 
-    def _check_signal(self, now: float):
-        if self.s.prepared is None:
-            return   # candle data not in yet -- state.py keeps retrying the fetch every few seconds
-        window = self.s.window
-        self.s.decision_made = True
-
-        res = window_tokens(self.s.prepared, window.open_ts, self.s.price_now)
-        if res is None:
-            self.total_no_signal_windows += 1
-            self.s.skip_reason = "no_data"
-            self._log("NO_TRADE", note=(
-                "market snapshot unavailable -- a timeframe is missing candles / indicators not converged "
-                "(data gap, not a strategy choice)"))
+    def _check_fill(self, now: float):
+        order = self.s.order
+        ask = self._ask_for(order.side)
+        if ask is not None and ask <= order.price:
+            # Someone is selling at/below our bid -> the resting order fills at ITS OWN price
+            # (maker: no slippage, no fee), all-or-nothing.
+            order.status = "filled"
+            cost = order.shares * order.price
+            self.capital.balance -= cost
+            self.total_limit_fills += 1
+            self.s.entry_type = "maker"
+            self._log("LIMIT_FILL", side=order.side.value, price=order.price, shares=order.shares,
+                       note=(f"limit buy filled @ {order.price} (ask fell to {ask}), {order.shares:.0f}sh, "
+                             f"maker: no fee, cost ${cost:.2f}, {now - order.placed_ts:.0f}s after placement"))
+            if self.capital.check_halt():
+                self._log("HALTED", note=f"balance ${self.capital.balance:.2f} < $0 -- bankrupt")
+                return
+            self.s.position = Position(side=order.side, entry_price=order.price, shares=order.shares,
+                                        cost=cost, entry_ts=now, entry_type="maker")
             return
-        tokens, readings = res
-        self.s.tokens = tokens
-        self._log("SNAPSHOT", price=self.s.price_now, note=self._snapshot_text(readings))
+        if now - order.placed_ts >= config.LIMIT_TIMEOUT_SECONDS:
+            order.status = "cancelled"
+            self.total_limit_timeouts += 1
+            self.s.taker_watching = True
+            self._log("LIMIT_TIMEOUT", side=order.side.value, price=order.price,
+                       note=(f"limit buy unfilled after {now - order.placed_ts:.0f}s -- cancelled; taker fallback armed: "
+                             f"buy {config.TAKER_SHARES:.0f}sh {order.side.value} at market whenever ask < "
+                             f"{config.TAKER_MAX_PRICE} until window close"))
+            self._check_taker(now)
 
-        pred = self.predictor.predict(tokens, readings)
-        if pred is None:
-            self.total_no_match_windows += 1
-            self.s.skip_reason = "no_match"
-            self._log("NO_TRADE", note=(
-                ("no noise-validated situation matches this snapshot (strict mode, MTF_ALLOW_FALLBACK=0) -- skipping"
-                 if not config.MTF_ALLOW_FALLBACK else
-                 "engine has no usable history/models yet (pre-backtest not finished or failed) -- skipping")))
+    # ---- entry 2: taker fallback after the timeout -----------------------------
+
+    def _check_taker(self, now: float):
+        """Every tick from the cancel until the window closes: buy TAKER_SHARES at
+        market the first tick the side's best ask is strictly below TAKER_MAX_PRICE.
+        The gate is the best ask; the fill itself is priced by walking real ask depth
+        for the full size, and pays the taker fee."""
+        order = self.s.order
+        if order is None or self.s.position is not None:
             return
-
-        self.s.prediction = pred
-        self.s.predicted_side = pred.side
-        self.s.confidence = pred.confidence
-        self.tier_counts[pred.tier] = self.tier_counts.get(pred.tier, 0) + 1
-        self._log("MTF_SIGNAL", side=pred.side.value, price=self.s.price_now,
-                   note=self.predictor.explain(pred))
-
-        # Trade WITH the signal. The buy itself fires from _check_entry() once
-        # ENTRY_DELAY_SECONDS have passed since the window opened.
-        self.s.entry_pending = True
-        self._log("SIGNAL_ARMED", side=pred.side.value,
-                   note=(f"{pred.side.value} ({pred.confidence:.0%}) -> taker buy {config.ORDER_SHARES:.0f}sh at "
-                         f"window open +{config.ENTRY_DELAY_SECONDS:g}s if ask < {config.ENTRY_MAX_PRICE}"))
-
-    @staticmethod
-    def _snapshot_text(readings: dict) -> str:
-        parts = []
-        for tf, r in readings.items():
-            parts.append(f"{tf}: RSI {r['rsi']} {r['macd_state']} trend {r['trend']} ADX {r['adx']}")
-        return " | ".join(parts)
-
-    # ---- entry: taker buy of the predicted side ------------------------------------
-
-    def _check_entry(self, now: float):
-        """Runs every tick once the signal is armed. From window open +
-        ENTRY_DELAY_SECONDS it buys at market (taker) the first tick the
-        predicted side's best ask is strictly below ENTRY_MAX_PRICE. The
-        gate is the best ask; the fill itself is priced by walking real ask
-        depth for the full size, and pays the taker fee."""
-        side = self.s.predicted_side
-        if side is None or self.s.position is not None:
-            return
-        if now < self.s.window.open_ts + config.ENTRY_DELAY_SECONDS:
-            return
+        side = order.side
         ask = self._ask_for(side)
-        if ask is None or ask >= config.ENTRY_MAX_PRICE:
-            if not self.s.entry_wait_logged:
-                self.s.entry_wait_logged = True
-                self._log("ENTRY_WAIT", side=side.value, price=ask,
-                           note=(f"{side.value} ask {ask} is not below {config.ENTRY_MAX_PRICE} -- "
-                                 f"checking every tick until window close"))
+        if ask is None or ask >= config.TAKER_MAX_PRICE:
+            if not self.s.taker_wait_logged:
+                self.s.taker_wait_logged = True
+                self._log("TAKER_WAIT", side=side.value, price=ask,
+                           note=f"{side.value} ask {ask} is not below {config.TAKER_MAX_PRICE} -- checking every tick until window close")
             return
-        levels = self._ask_levels_for(side)
-        fill_price = _realistic_fill_price(levels, config.ORDER_SHARES, ask)
+        shares = config.TAKER_SHARES
+        fill_price = _realistic_fill_price(self._ask_levels_for(side), shares, ask)
         if fill_price is None:
-            # Book fetched fine but nothing resting on the ask side -- can't buy, keep trying.
             self.total_illiquid_skips += 1
             self._log("NO_LIQUIDITY", side=side.value, price=ask,
-                       note=f"entry triggered @ ask {ask} but zero ask depth -- retrying next tick")
+                       note=f"taker entry triggered @ ask {ask} but zero ask depth -- retrying next tick")
             return
-        shares = config.ORDER_SHARES
         fee = self.broker.taker_fee_amount(shares, fill_price)
         cost = shares * fill_price + fee
         self.capital.balance -= cost
-        self.total_entries += 1
-        self.s.entry_pending = False
+        self.total_taker_entries += 1
+        self.s.taker_watching = False
+        self.s.entry_type = "taker"
         self._log("TAKER_ENTRY", side=side.value, price=fill_price, shares=shares, fee=fee,
-                   note=(f"taker buy filled @ {fill_price:.4f} (best ask {ask} < {config.ENTRY_MAX_PRICE}), "
-                         f"{shares:.0f}sh, fee ${fee:.4f}, total cost ${cost:.4f}, "
-                         f"{now - self.s.window.open_ts:.1f}s after window open"))
+                   note=(f"taker buy filled @ {fill_price:.4f} (best ask {ask} < {config.TAKER_MAX_PRICE}), "
+                         f"{shares:.0f}sh, fee ${fee:.4f}, total cost ${cost:.4f}"))
         if self.capital.check_halt():
             self._log("HALTED", note=f"balance ${self.capital.balance:.2f} < $0 -- bankrupt")
             return
         self.s.position = Position(side=side, entry_price=fill_price, shares=shares, cost=cost,
-                                    entry_ts=now, signal_side=side, entry_type="taker")
+                                    entry_ts=now, entry_type="taker")
 
     # ---- exit: TP only, no SL ------------------------------------------------
 
@@ -348,22 +367,20 @@ class Engine:
     def finalize_window(self, winning_side: Optional[Side]):
         if self.s.window is None:
             return
-        window_slug = self.s.window.slug
+        window = self.s.window
+        window_slug = window.slug
+        sig = self.s.signal
+        result_txt = None
 
-        # Add this window (snapshot + true outcome) to the engine's history --
-        # whether or not a trade was placed -- so the situations stay current
-        # (they are re-mined periodically by state.py).
-        if self.s.tokens is not None and winning_side is not None:
-            actual_up = (winning_side == Side.UP)
-            self.predictor.add_record(self.s.window.open_ts, self.s.tokens, actual_up)
-            self.predictor.record_result(self.s.predicted_side, actual_up,
-                                         self.s.prediction.tier if self.s.prediction else None)
-            verdict = ""
-            if self.s.predicted_side is not None:
-                verdict = f"; signal {self.s.predicted_side.value} was {'RIGHT' if (self.s.predicted_side == winning_side) else 'WRONG'}"
-            self._log("MTF_LEARN", note=(
-                f"window resolved {winning_side.value}{verdict} -- added to history "
-                f"({len(self.predictor.records)} windows)"))
+        # Was the signal right? (signal side == the side that won the window it traded)
+        if sig is not None and sig.side is not None and winning_side is not None:
+            if sig.side == winning_side:
+                self.signal_right += 1
+            else:
+                self.signal_wrong += 1
+            self._log("SIGNAL_RESULT", side=sig.side.value,
+                       note=f"window resolved {winning_side.value}: signal {sig.side.value} was "
+                            f"{'RIGHT' if sig.side == winning_side else 'WRONG'}")
 
         if not self.capital.halted:
             if self.s.position is not None:
@@ -386,18 +403,44 @@ class Engine:
                 self._log("FORCED_CLOSE", side=pos.side.value, price=pos.entry_price, shares=pos.shares,
                            pnl=pnl, fee=fee,
                            note=(f"window closed, forced taker close @ {fill_price:.4f} "
-                                 f"(entry {pos.entry_price}, fee ${fee:.4f}, pnl ${pnl:.4f})"))
+                                 f"(entry {pos.entry_price:.4f}, fee ${fee:.4f}, pnl ${pnl:.4f})"))
                 self.capital.check_halt()
                 self.s.position = None
-            elif self.s.entry_pending:
-                self.total_entry_skips += 1
-                self._log("ENTRY_SKIPPED", side=self.s.predicted_side.value if self.s.predicted_side else "",
-                           note=(f"window closed and the ask never got below {config.ENTRY_MAX_PRICE} "
+                result_txt = f"{self.s.entry_type} entry, forced close"
+            elif self.s.order is not None and self.s.order.status == "resting":
+                self.s.order.status = "cancelled"
+                self.total_limit_timeouts += 1
+                self._log("LIMIT_CANCELLED", side=self.s.order.side.value, price=self.s.order.price,
+                           note="window closed with the limit order still resting -- cancelled")
+                result_txt = "limit never filled"
+            elif self.s.taker_watching:
+                self.total_taker_skips += 1
+                self._log("TAKER_SKIPPED", side=self.s.order.side.value if self.s.order else "",
+                           note=(f"window closed and the ask never got below {config.TAKER_MAX_PRICE} "
                                  f"(or had no depth) -- no trade this window"))
-            elif not self.s.decision_made:
-                self.total_no_signal_windows += 1
-                self._log("NO_TRADE", note="candle data never arrived for this window")
+                result_txt = f"limit timed out, ask never < {config.TAKER_MAX_PRICE}"
+            elif self.s.signal_status == "pending":
+                self.total_no_data += 1
+                self.s.signal_status = "no_data"
+                self._log("NO_TRADE", note="previous window's candles never arrived for this window")
 
+        if self.s.signal_status == "no_pattern":
+            result_txt = "no pattern"
+        elif self.s.signal_status == "no_data":
+            result_txt = "no candle data"
+        elif self.s.signal_status == "late_join":
+            result_txt = "joined mid-window"
+        if result_txt is None and self.s.entry_type is not None:
+            result_txt = f"{self.s.entry_type} entry, TP hit"
+
+        self.history.appendleft({
+            "slug": window_slug, "open_ts": window.open_ts,
+            "signal": sig.side.value if (sig and sig.side) else None,
+            "closes": [round(c, 2) for c in sig.closes] if sig else None,
+            "winner": winning_side.value if winning_side else None,
+            "entry": self.s.entry_type, "result": result_txt,
+            "pnl": round(self.s.last_window_pnl, 2) if (self.s.entry_type is not None) else None,
+        })
         self.s.window = None
         self.capital.record_equity_point(window_slug)
 
@@ -417,33 +460,37 @@ class Engine:
                 "side": pos.side.value, "entry_price": pos.entry_price, "shares": pos.shares,
                 "cost": round(pos.cost, 4), "mark_price": mark, "unrealized_pnl": round(unrealized, 4),
                 "seconds_since_entry": round(time.time() - pos.entry_ts, 1),
-                "signal_side": pos.signal_side.value if pos.signal_side else None,
                 "entry_type": pos.entry_type,
             }
 
-        entry_payload = None
-        if self.s.entry_pending and self.s.predicted_side is not None and self.s.window is not None:
-            entry_payload = {
-                "side": self.s.predicted_side.value, "shares": config.ORDER_SHARES,
-                "seconds_until_entry": round(max(0.0, self.s.window.open_ts + config.ENTRY_DELAY_SECONDS - time.time()), 1),
-                "ask": self._ask_for(self.s.predicted_side),
+        order_payload = None
+        o = self.s.order
+        if o is not None:
+            order_payload = {
+                "side": o.side.value, "price": o.price, "shares": o.shares, "status": o.status,
+                "seconds_resting": round(time.time() - o.placed_ts, 1) if o.status == "resting" else None,
+                "ask": self._ask_for(o.side),
             }
 
         if self.capital.halted:
             status = "halted"
         elif pos is not None:
             status = "open"
-        elif self.s.entry_pending:
-            status = "entry_pending"
-        elif self.s.decision_made:
-            status = "done"
-        else:
+        elif o is not None and o.status == "resting":
+            status = "limit_resting"
+        elif self.s.taker_watching:
+            status = "taker_watching"
+        elif self.s.signal_status == "pending":
             status = "awaiting_signal"
+        else:
+            status = "done"
 
         win_rate = round(100 * self.wins / (self.wins + self.losses), 1) if (self.wins + self.losses) else None
+        judged = self.signal_right + self.signal_wrong
+        signal_acc = round(100 * self.signal_right / judged, 1) if judged else None
 
         return {
-            "engine": "MTF", "label": "ALPHASTRIKE",
+            "engine": "BOT", "label": "ALPHASTRIKE",
 
             "balance": round(self.capital.balance, 2),
             "starting_capital": config.STARTING_CAPITAL,
@@ -457,31 +504,25 @@ class Engine:
             "last_window_pnl": round(self.s.last_window_pnl, 4),
 
             "position": pos_payload,
-            "entry": entry_payload,
-            "decision_made": self.s.decision_made,
-            "skip_reason": self.s.skip_reason,
-            "predicted_side": self.s.predicted_side.value if self.s.predicted_side else None,
-            "confidence": round(self.s.confidence, 3) if self.s.confidence is not None else None,
-            "prediction": None if self.s.prediction is None else {
-                "side": self.s.prediction.side.value,
-                "p_up": round(self.s.prediction.p_up, 3),
-                "confidence": round(self.s.prediction.confidence, 3),
-                "tier": self.s.prediction.tier,
-                "n_matched": self.s.prediction.n_matched,
-                "n_for": self.s.prediction.n_for,
-                "n_against": self.s.prediction.n_against,
-                "reasons": self.s.prediction.reasons,
-                "readings": self.s.prediction.readings,
-            },
-            "predictor": self.predictor.status(),
+            "order": order_payload,
+            "signal_status": self.s.signal_status,
+            "signal": self.s.signal.to_dict() if self.s.signal else None,
+            "history": list(self.history),
 
-            "total_entries": self.total_entries,
+            "total_signals_up": self.total_signals_up,
+            "total_signals_down": self.total_signals_down,
+            "total_no_pattern": self.total_no_pattern,
+            "total_no_data": self.total_no_data,
+            "signal_right": self.signal_right,
+            "signal_wrong": self.signal_wrong,
+            "signal_accuracy": signal_acc,
+            "total_limit_placed": self.total_limit_placed,
+            "total_limit_fills": self.total_limit_fills,
+            "total_limit_timeouts": self.total_limit_timeouts,
+            "total_taker_entries": self.total_taker_entries,
+            "total_taker_skips": self.total_taker_skips,
             "total_tp_fills": self.total_tp_fills,
             "total_forced_closes": self.total_forced_closes,
-            "total_entry_skips": self.total_entry_skips,
-            "total_no_signal_windows": self.total_no_signal_windows,
-            "total_no_match_windows": self.total_no_match_windows,
-            "tier_counts": self.tier_counts,
             "total_illiquid_skips": self.total_illiquid_skips,
 
             "wins": self.wins,
@@ -491,9 +532,11 @@ class Engine:
             "status": status,
 
             "def": {
-                "shares": config.ORDER_SHARES,
-                "entry_delay_s": config.ENTRY_DELAY_SECONDS,
-                "entry_max_price": config.ENTRY_MAX_PRICE,
+                "limit_price": config.LIMIT_PRICE,
+                "limit_shares": config.LIMIT_SHARES,
+                "limit_timeout_s": config.LIMIT_TIMEOUT_SECONDS,
+                "taker_shares": config.TAKER_SHARES,
+                "taker_max_price": config.TAKER_MAX_PRICE,
                 "tp_price": config.TP_PRICE,
             },
         }

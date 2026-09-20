@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>ALPHASTRIKE — BTC 15m bot</title>
+<title>ALPHASTRIKE — BTC 5m bot</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
@@ -66,10 +66,6 @@
   .dots{display:inline-flex; gap:3px; vertical-align:middle;}
   .dots i{width:7px; height:7px; border-radius:50%; display:inline-block; background:var(--coral);}
   .dots i.ok{background:var(--mint);}
-  .tier{display:inline-block; padding:2px 8px; border-radius:6px; font-family:var(--mono); font-size:10px; font-weight:600; margin-right:8px; vertical-align:middle;}
-  .tier.validated{background:var(--mint-dim); color:var(--mint);}
-  .tier.candidate{background:var(--amber-dim); color:var(--amber);}
-  .tier.baseline{background:var(--panel-3); color:var(--muted);}
   .sect-label{font-size:10.5px; color:var(--faint); margin:14px 0 6px; font-family:var(--mono); text-transform:uppercase; letter-spacing:.6px;}
   .tbl-scroll{overflow-x:auto;}
   table.mtf{width:100%; border-collapse:collapse; font-family:var(--mono); font-size:10.5px; min-width:520px;}
@@ -105,7 +101,8 @@
 
   .status-badge{font-size:10.5px; font-weight:600; padding:4px 10px; border-radius:6px;}
   .status-badge.awaiting_signal{background:#1a2029; color:#6a7688;}
-  .status-badge.entry_pending{background:var(--amber-dim); color:var(--amber);}
+  .status-badge.limit_resting{background:var(--amber-dim); color:var(--amber);}
+  .status-badge.taker_watching{background:var(--amber-dim); color:var(--amber);}
   .status-badge.open{background:var(--mint-dim); color:var(--mint);}
   .status-badge.done{background:var(--violet-dim); color:var(--violet);}
   .status-badge.halted{background:var(--coral-dim); color:var(--coral);}
@@ -158,15 +155,16 @@
     font-family:var(--mono); font-size:11px; padding:7px 9px; border-radius:7px; background:var(--panel-3);}
   .log-row .t{color:var(--faint);}
   .log-row .ev{font-weight:600; font-size:9.5px; padding:2px 7px; border-radius:5px; background:#1a222f; text-align:center; white-space:nowrap;}
-  .log-row .ev.SNAPSHOT{color:var(--muted);}
-  .log-row .ev.MTF_SIGNAL{color:var(--amber);}
-  .log-row .ev.MTF_LEARN{color:var(--faint);}
-  .log-row .ev.MTF_REBUILD{color:var(--violet);}
-  .log-row .ev.PREBACKTEST{color:var(--violet);}
-  .log-row .ev.SIGNAL_ARMED{color:var(--amber);}
-  .log-row .ev.ENTRY_WAIT{color:var(--amber);}
+  .log-row .ev.SIGNAL{color:var(--amber);}
+  .log-row .ev.NO_SIGNAL{color:var(--faint);}
+  .log-row .ev.SIGNAL_RESULT{color:var(--muted);}
+  .log-row .ev.LIMIT_PLACED{color:var(--amber);}
+  .log-row .ev.LIMIT_FILL{color:var(--mint);}
+  .log-row .ev.LIMIT_TIMEOUT{color:var(--violet);}
+  .log-row .ev.LIMIT_CANCELLED{color:var(--violet);}
+  .log-row .ev.TAKER_WAIT{color:var(--amber);}
   .log-row .ev.TAKER_ENTRY{color:var(--mint);}
-  .log-row .ev.ENTRY_SKIPPED{color:var(--faint);}
+  .log-row .ev.TAKER_SKIPPED{color:var(--faint);}
   .log-row .ev.TP_FILL{color:var(--mint);}
   .log-row .ev.FORCED_CLOSE{color:var(--violet);}
   .log-row .ev.NO_LIQUIDITY{color:var(--amber);}
@@ -182,7 +180,7 @@
   <header>
     <div>
       <h1>⚡ ALPHASTRIKE</h1>
-      <div class="sub">Multi-timeframe strike bot for BTC 15-minute up/down. 1D/4H/1H/15m indicators, pre-backtested on the last 7 days, decide UP or DOWN and show exactly why. No limit orders: 2s after the window opens it buys the predicted side as a taker (while the ask is below 0.60, checked every tick until close). 200sh, no SL, TP 0.99</div>
+      <div class="sub">BTC 5-minute up/down. The window that just closed decides the next one: minute 2 below minute 1 and minutes 3–5 averaging above minutes 1–2 → buy UP (exact opposite → buy DOWN). Resting limit buy 200sh @ 0.40; unfilled after 2 min → cancel, then taker-buy 300sh while the ask is below 0.60. No SL, TP 0.99</div>
     </div>
     <div class="status-pill"><span class="dot" id="statusDot"></span><span id="statusText">connecting</span></div>
   </header>
@@ -198,15 +196,12 @@
 
   <div class="binance-card">
     <div class="binance-head">
-      <h2>Signal — why the bot buys UP or DOWN this window</h2>
+      <h2>Signal — from the previous window's five 1-minute closes</h2>
       <div class="binance-conn" id="binanceConn"><span class="dot"></span><span>—</span></div>
     </div>
     <div class="signal-banner pending" id="signalBanner">waiting</div>
-    <div id="whyBox"></div>
-    <div id="readingsBox"></div>
+    <div id="signalDetail"></div>
   </div>
-
-  <div class="card" id="backtestCard"></div>
 
   <div class="gauge-panel">
     <div class="gauge" data-side="UP" id="upGauge">
@@ -222,6 +217,8 @@
   </div>
 
   <div class="card" id="engineCard"></div>
+
+  <div class="card" id="historyCard"></div>
 
   <div class="card">
     <h2>Trade stats</h2>
@@ -253,7 +250,7 @@ const fmt$ = v => (v==null ? '—' : (v<0?'-$':'$') + Math.abs(Number(v)).toFixe
 const fmtP = v => (v==null ? '—' : Number(v).toFixed(3));
 const fmtSh = v => (v==null ? '0' : Number(v).toFixed(0));
 const pnlClass = v => (v>0.005?'pos':(v<-0.005?'neg':''));
-function renderGauge(trackId, fillId, midId, bidAskId, bid, ask, entry, cap, side){
+function renderGauge(trackId, fillId, midId, bidAskId, bid, ask, order, status, def, side){
   const mid = (bid!=null && ask!=null) ? (bid+ask)/2 : (ask!=null?ask:bid);
   $(midId).textContent = fmtP(mid);
   $(bidAskId).textContent = `bid ${fmtP(bid)} / ask ${fmtP(ask)}`;
@@ -261,8 +258,12 @@ function renderGauge(trackId, fillId, midId, bidAskId, bid, ask, entry, cap, sid
   $(fillId).style.width = pct + '%';
   const track = $(trackId);
   let marks = '';
-  if(entry && entry.side === side && cap!=null){
-    marks = `<div class="gauge-mark" style="left:${cap*100}%"><span class="lbl">buy if ask &lt; ${fmtP(cap)}</span></div>`;
+  if(order && order.side === side && def){
+    if(order.status === 'resting'){
+      marks = `<div class="gauge-mark" style="left:${order.price*100}%"><span class="lbl">limit ${fmtP(order.price)}</span></div>`;
+    } else if(status === 'taker_watching'){
+      marks = `<div class="gauge-mark" style="left:${def.taker_max_price*100}%"><span class="lbl">buy if ask &lt; ${fmtP(def.taker_max_price)}</span></div>`;
+    }
   }
   const existing = track.querySelector('.gauge-mark');
   if(existing) existing.remove();
@@ -270,124 +271,65 @@ function renderGauge(trackId, fillId, midId, bidAskId, bid, ask, entry, cap, sid
 }
 
 const esc = x => String(x).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
-const pct = v => v==null ? '—' : (v*100).toFixed(1)+'%';
-const fmtWhen = ts => new Date(ts*1000).toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'});
-const TFS = ['1D','4H','1H','15m'];
-const TIER_TEXT = {validated:'VALIDATED', candidate:'WEAK PATTERN', baseline:'BASELINE'};
+const fmtC = v => v==null ? '—' : Number(v).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2});
+const chk = ok => ok ? '<span style="color:var(--mint)">✓</span>' : '<span style="color:var(--coral)">✗</span>';
 
-function renderReason(r){
-  const dots = (r.recent||[]).map(x => `<i class="${x.ok?'ok':''}" title="${fmtWhen(x.ts)} — ${x.ok?'right':'wrong'}"></i>`).join('');
-  const best = r.best_time ? `<span>best: ${esc(r.best_time.time)} (${pct(r.best_time.hit_rate)} of ${r.best_time.n})</span>` : '';
-  return `<div class="why-item ${r.direction}">
-    <div class="txt">${esc(r.text)}</div>
-    <div class="meta">
-      <span>→ <b class="${r.direction}">${r.direction}</b> ${pct(r.hit_rate)} of ${r.n} windows</span>
-      <span>z ${r.z}</span>${best}
-      <span>last matches <span class="dots">${dots}</span></span>
-    </div></div>`;
-}
+function renderSignal(e, s){
+  const conn = $('binanceConn');
+  conn.innerHTML = s.signal_error
+    ? `<span class="dot" style="background:var(--amber);"></span><span>${esc(s.signal_error)}</span>`
+    : `<span class="dot live" style="background:var(--mint); box-shadow:0 0 5px var(--mint);"></span><span>Binance 1m data ok</span>`;
 
-function renderReadings(readings){
-  if(!readings) return '';
-  const rows = TFS.filter(tf => readings[tf]).map(tf => {
-    const r = readings[tf];
-    const tcol = r.trend==='UP' ? 'UP' : (r.trend==='DOWN' ? 'DOWN' : '');
-    return `<tr><td><b>${tf}</b></td><td>${r.rsi}</td><td>${esc(r.macd_state)}</td><td class="${tcol}">${r.trend}</td>
-      <td>${r.adx} (${r.pdi}/${r.mdi})</td><td>${r.pctb}</td><td>${r.stoch}</td><td>${r.vol_ratio}×</td>
-      <td class="${r.candle==='GREEN'?'UP':'DOWN'}">${r.candle}</td><td>${r.now_vs_open_atr==null ? '—' : (r.now_vs_open_atr>0?'+':'')+r.now_vs_open_atr+' ATR'}</td></tr>`;
-  }).join('');
-  return `<div class="sect-label">Indicators at window open</div><div class="tbl-scroll"><table class="mtf">
-    <tr><th>TF</th><th>RSI</th><th>MACD</th><th>Trend</th><th>ADX (+DI/-DI)</th><th>BB %B</th><th>Stoch</th><th>Vol</th><th>Last candle</th><th>Now vs open</th></tr>${rows}</table></div>`;
-}
-
-function renderSignalPanel(e, s){
-  const bt = s.backtest || {};
-  const connEl = $('binanceConn');
-  connEl.innerHTML = s.frames_error
-    ? `<span class="dot" style="background:var(--coral);"></span><span>market data: ${esc(s.frames_error)}</span>`
-    : `<span class="dot live" style="background:var(--mint); box-shadow:0 0 5px var(--mint);"></span><span>market data ok</span>`;
-
-  const banner = $('signalBanner');
-  const p = e.prediction;
-  if(p){
-    banner.className = 'signal-banner ' + (p.side==='UP' ? 'green' : 'red');
-    const what = p.tier==='baseline' ? 'readings weighed' : 'situations matched';
-    banner.innerHTML = `<span class="tier ${p.tier}">${TIER_TEXT[p.tier]||p.tier}</span>Predicts ${p.side} (${(p.confidence*100).toFixed(0)}%) — taker buy ${p.side} at +${e.def.entry_delay_s}s if ask < ${e.def.entry_max_price} · ${p.n_matched} ${what} (${p.n_for} agree / ${p.n_against} disagree)`;
-    const hdr = {
-      validated: `Why ${p.side} — strongest matching situations (passed the noise test on the 7-day backtest)`,
-      candidate: `Why ${p.side} — strong-looking situations from the 7-day backtest, but they did NOT pass the noise test, so they may be luck`,
-      baseline:  `Why ${p.side} — no strong pattern matches; these readings pulled hardest (how windows with each reading ended over the last 7 days)`,
-    }[p.tier] || `Why ${p.side}`;
-    $('whyBox').innerHTML = `<div class="sect-label">${hdr}</div><div class="why">${p.reasons.map(renderReason).join('')}</div>`;
-    $('readingsBox').innerHTML = renderReadings(p.readings);
-  } else if(e.decision_made){
+  const banner = $('signalBanner'), sig = e.signal, st = e.signal_status;
+  if(st === 'armed' && sig){
+    banner.className = 'signal-banner ' + (sig.side==='UP' ? 'green' : 'red');
+    banner.textContent = `${sig.side} signal → ${sig.side==='UP' ? 'dip then recovery' : 'pop then fade'} in the previous window. Buying ${sig.side} in this window.`;
+  } else if(st === 'no_pattern'){
     banner.className = 'signal-banner flat';
-    banner.textContent = e.skip_reason === 'no_match'
-      ? 'NO TRADE — the engine has no usable history yet (pre-backtest still running or failed), or strict mode is on and no validated situation matches'
-      : 'NO TRADE — market data incomplete for this window (a timeframe missing candles)';
-    $('whyBox').innerHTML = ''; $('readingsBox').innerHTML = '';
+    banner.textContent = 'No pattern in the previous window — no trade in this window';
+  } else if(st === 'late_join'){
+    banner.className = 'signal-banner flat';
+    banner.textContent = 'Bot started mid-window — trading resumes from the next window';
+  } else if(st === 'no_data'){
+    banner.className = 'signal-banner flat';
+    banner.textContent = 'The previous window\'s candles never arrived — this window is skipped';
   } else {
     banner.className = 'signal-banner pending';
-    banner.textContent = !bt.done ? 'running the 7-day pre-backtest…' : 'waiting for candle data from Binance…';
-    $('whyBox').innerHTML = ''; $('readingsBox').innerHTML = '';
+    banner.textContent = 'reading the previous window\'s 1-minute closes…';
   }
+
+  if(!sig){ $('signalDetail').innerHTML = ''; return; }
+  const rows = sig.closes.map((c,i) => {
+    const d = i>0 ? c - sig.closes[i-1] : null;
+    return `<tr><td>min ${i+1}</td><td>${fmtC(c)}</td><td style="color:${d==null?'var(--faint)':(d>0?'var(--mint)':(d<0?'var(--coral)':'var(--muted)'))}">${d==null?'—':(d>0?'+':'')+d.toFixed(2)}</td></tr>`;
+  }).join('');
+  $('signalDetail').innerHTML = `
+    <div class="tbl-scroll"><table class="mtf" style="min-width:0"><tr><th>Minute</th><th>Close</th><th>vs previous</th></tr>${rows}</table></div>
+    <div class="kv" style="grid-template-columns:repeat(2,1fr);margin-top:10px;">
+      <div><div class="k">avg(min 1–2)</div><div class="v">${fmtC(sig.avg_first2)}</div></div>
+      <div><div class="k">avg(min 3–5)</div><div class="v">${fmtC(sig.avg_last3)}</div></div>
+    </div>
+    <div class="tbl-scroll"><table class="mtf" style="min-width:0;margin-top:10px;">
+      <tr><th>Test</th><th>UP needs</th><th>DOWN needs</th></tr>
+      <tr><td>min 2 vs min 1</td><td>below ${chk(sig.min2_below_min1)}</td><td>above ${chk(sig.min2_above_min1)}</td></tr>
+      <tr><td>avg(3–5) vs avg(1–2)</td><td>above ${chk(sig.last3_above_first2)}</td><td>below ${chk(sig.last3_below_first2)}</td></tr>
+    </table></div>
+    <div class="verdict">${esc(sig.reason)}</div>`;
 }
 
-function renderBacktest(e, s){
-  const bt = s.backtest || {}, pr = e.predictor || {}, sm = pr.summary || {};
-  const el = $('backtestCard');
-  if(!bt.done){ el.innerHTML = '<h2>Pre-backtest</h2><div class="empty">running…</div>'; return; }
-  if(bt.error && !bt.windows){
-    el.innerHTML = `<h2>Pre-backtest</h2><div class="verdict warn">failed: ${esc(bt.error)} — no situations, so no trades until it succeeds (retrying every 60s)</div>`;
-    return;
-  }
-  const oos = sm.out_of_sample || {}, ins = sm.in_sample || {};
-  const bt_ = oos.by_tier || {};
-  let verdict, vcls = '';
-  if(!oos.predicted || oos.predicted < 30){
-    verdict = `Only ${oos.predicted||0} out-of-sample calls — too few to judge whether the signal works.`; vcls = 'warn';
-  } else if(oos.z >= 2.5 && oos.accuracy > 0.5){
-    verdict = `Out-of-sample: ${pct(oos.accuracy)} right on ${oos.predicted} windows the models never saw (z=${oos.z}). Promising, though a week of 15-minute windows is a small sample.`; vcls = 'good';
-  } else {
-    verdict = `Out-of-sample: ${pct(oos.accuracy)} on ${oos.predicted} unseen windows (z=${oos.z}) — no reliable edge, i.e. close to a coin flip. With taker entries at ~0.5–0.6 plus fees, a coin flip loses money: roughly 55%+ is needed to break even.`; vcls = 'warn';
-  }
-  if(!pr.n_rules && sm.fallback !== false){
-    verdict = 'No situation passed the noise test this week, so calls come from weak patterns and the baseline. ' + verdict;
-  } else if(!pr.n_rules){
-    verdict = 'No situation passed the noise test and strict mode is on — no trades. ' + verdict; vcls = 'warn';
-  }
-  const tierRows = ['validated','candidate','baseline'].filter(t => bt_[t]).map(t => {
-    const x = bt_[t], live = (pr.live_by_tier||{})[t];
-    return `<tr><td><span class="tier ${t}">${TIER_TEXT[t]}</span></td><td>${x.predicted}</td><td>${pct(x.accuracy)}</td>
-      <td>${live ? live.predicted+' calls, '+pct(live.accuracy) : '—'}</td></tr>`;
+function renderHistory(e){
+  const el = $('historyCard');
+  const rows = (e.history||[]).slice(0,12).map(h => {
+    const t = new Date(h.open_ts*1000).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+    const sc = h.signal==='UP' ? 'var(--mint)' : (h.signal==='DOWN' ? 'var(--coral)' : 'var(--faint)');
+    const right = (h.signal && h.winner) ? (h.signal===h.winner ? chk(true) : chk(false)) : '';
+    const pnl = h.pnl==null ? '' : `<span style="color:${h.pnl>=0?'var(--mint)':'var(--coral)'}">${h.pnl>=0?'+':''}${h.pnl.toFixed(2)}</span>`;
+    return `<tr><td>${t}</td><td style="color:${sc};font-weight:600">${h.signal||'—'}</td><td>${h.winner||'—'} ${right}</td><td>${esc(h.result||'—')}</td><td>${pnl}</td></tr>`;
   }).join('');
-  const fmtD = ts => ts ? new Date(ts*1000).toLocaleDateString([], {month:'short', day:'numeric'}) : '—';
-  const live = pr.live_predictions ? `${pr.live_accuracy}% (${pr.live_correct}/${pr.live_predictions})` : '—';
-  const shown = (pr.top_rules && pr.top_rules.length) ? pr.top_rules : (pr.top_candidates||[]);
-  const shownLabel = (pr.top_rules && pr.top_rules.length) ? 'Strongest validated situations' : 'Strongest weak patterns (NOT noise-validated)';
-  const rows = shown.map(r => `<tr>
-      <td class="wrap">${esc(r.text)}</td><td class="${r.direction}">${r.direction}</td>
-      <td>${pct(r.hit_rate)}</td><td>${r.n}</td><td>${r.z}</td>
-      <td>${r.best_time ? esc(r.best_time.time)+' ('+pct(r.best_time.hit_rate)+', n='+r.best_time.n+')' : '—'}</td></tr>`).join('');
-  const byTime = (ins.by_time||[]).map(t => `<tr><td>${esc(t.time)}</td><td>${t.n}</td><td>${pct(t.accuracy)}</td></tr>`).join('');
-  el.innerHTML = `
-    <h2>Pre-backtest — last ${fmtSh(sm.windows ? sm.windows/288 : 0)} days <span class="tag">${pr.rebuilding ? 're-mining…' : (pr.built_at ? 'updated '+new Date(pr.built_at*1000).toLocaleTimeString() : '')}</span></h2>
-    <div class="kv">
-      <div><div class="k">Windows replayed</div><div class="v">${sm.windows ?? 0} (${fmtD(sm.period_start)}–${fmtD(sm.period_end)})</div></div>
-      <div><div class="k">Validated / weak patterns</div><div class="v">${pr.n_rules ?? 0} / ${pr.n_candidates ?? 0}</div></div>
-      <div><div class="k">Z cut-off (noise-calibrated)</div><div class="v">${sm.z_threshold ?? '—'}</div></div>
-      <div><div class="k">Out-of-sample accuracy</div><div class="v">${pct(oos.accuracy)} <span style="font-size:10px;color:var(--muted)">n=${oos.predicted ?? 0}, z=${oos.z ?? '—'}</span></div></div>
-      <div><div class="k">In-sample accuracy (optimistic)</div><div class="v">${pct(ins.accuracy)} <span style="font-size:10px;color:var(--muted)">n=${ins.predicted ?? 0}</span></div></div>
-      <div><div class="k">Live accuracy since start</div><div class="v">${live}</div></div>
-    </div>
-    <div class="verdict ${vcls}">${verdict}</div>
-    ${tierRows ? `<div class="sect-label">Accuracy by evidence tier (out-of-sample backtest vs live so far)</div>
-      <div class="tbl-scroll"><table class="mtf" style="min-width:0"><tr><th>Tier</th><th>OOS calls</th><th>OOS right</th><th>Live</th></tr>${tierRows}</table></div>` : ''}
-    ${rows ? `<div class="sect-label">${shownLabel} (situation → side it favoured, when it was right)</div>
-      <div class="tbl-scroll"><table class="mtf"><tr><th>Situation</th><th>Side</th><th>Right</th><th>Windows</th><th>z</th><th>Best time of day</th></tr>${rows}</table></div>` : ''}
-    ${byTime ? `<div class="sect-label">In-sample accuracy by time of day (optimistic)</div>
-      <div class="tbl-scroll"><table class="mtf" style="min-width:0"><tr><th>Time</th><th>Calls</th><th>Right</th></tr>${byTime}</table></div>` : ''}
-  `;
+  const judged = (e.signal_right||0) + (e.signal_wrong||0);
+  el.innerHTML = `<h2>Recent windows <span class="tag">signal right ${e.signal_right||0}/${judged}${e.signal_accuracy!=null?' · '+e.signal_accuracy+'%':''}</span></h2>` +
+    (rows ? `<div class="tbl-scroll"><table class="mtf" style="min-width:0"><tr><th>Window</th><th>Signal</th><th>Winner</th><th>What happened</th><th>P&amp;L</th></tr>${rows}</table></div>`
+          : '<div class="empty">no finished windows yet</div>');
 }
 
 async function poll(){
@@ -419,11 +361,11 @@ async function poll(){
     }
 
     const book = s.book || {};
-    renderGauge('upTrack','upFill','upMid','upBidAsk', book.up_bid, book.up_ask, e.entry, e.def && e.def.entry_max_price, 'UP');
-    renderGauge('downTrack','downFill','downMid','downBidAsk', book.down_bid, book.down_ask, e.entry, e.def && e.def.entry_max_price, 'DOWN');
+    renderGauge('upTrack','upFill','upMid','upBidAsk', book.up_bid, book.up_ask, e.order, e.status, e.def, 'UP');
+    renderGauge('downTrack','downFill','downMid','downBidAsk', book.down_bid, book.down_ask, e.order, e.status, e.def, 'DOWN');
 
-    renderSignalPanel(e, s);
-    renderBacktest(e, s);
+    renderSignal(e, s);
+    renderHistory(e);
     renderEngineCard(e);
     renderStats(e);
     renderEquityHero(e);
@@ -439,23 +381,24 @@ function renderEngineCard(e){
   const el = $('engineCard');
   if(!e || !e.def){ el.innerHTML = '<div class="empty">no data</div>'; return; }
   const statusLabels = {
-    awaiting_signal:'awaiting signal', entry_pending:'strike armed — waiting to buy',
+    awaiting_signal:'reading signal', limit_resting:'limit order resting', taker_watching:'timed out — watching ask',
     open:'position open', done:'done for this window', halted:'halted',
   };
 
   const defRowsHtml = [
-    ['Shares', fmtSh(e.def.shares)],
-    ['Buy at', '+'+fmtSh(e.def.entry_delay_s)+'s (taker)'],
-    ['Buy if ask <', fmtP(e.def.entry_max_price)],
+    ['Limit buy', fmtSh(e.def.limit_shares)+'sh @ '+fmtP(e.def.limit_price)],
+    ['Cancel after', fmtSh(e.def.limit_timeout_s)+'s'],
+    ['Then taker', fmtSh(e.def.taker_shares)+'sh if ask < '+fmtP(e.def.taker_max_price)],
     ['TP price', fmtP(e.def.tp_price)],
   ].map(([k,v]) => `<div class="def-item"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
 
   let orderHtml = '';
-  if(e.entry){
-    const wait = e.entry.seconds_until_entry > 0
-      ? `buying in ${e.entry.seconds_until_entry.toFixed(0)}s`
-      : `ask ${fmtP(e.entry.ask)} — buying as soon as it is below ${fmtP(e.def.entry_max_price)}`;
-    orderHtml = `<div class="order-box"><span class="lbl">strike armed: ${e.entry.side} ${fmtSh(e.entry.shares)}sh (taker)</span><span>${wait}</span></div>`;
+  const o = e.order;
+  if(o && o.status === 'resting'){
+    const left = Math.max(0, e.def.limit_timeout_s - (o.seconds_resting||0));
+    orderHtml = `<div class="order-box"><span class="lbl">resting: buy ${o.side} ${fmtSh(o.shares)}sh @ ${fmtP(o.price)}</span><span>ask ${fmtP(o.ask)} · cancels in ${left.toFixed(0)}s</span></div>`;
+  } else if(e.status === 'taker_watching' && o){
+    orderHtml = `<div class="order-box"><span class="lbl">limit cancelled — watching ${o.side} ask ${fmtP(o.ask)}</span><span>taker buy ${fmtSh(e.def.taker_shares)}sh as soon as it is below ${fmtP(e.def.taker_max_price)}</span></div>`;
   }
 
   const pos = e.position;
@@ -467,7 +410,7 @@ function renderEngineCard(e){
       <div class="position-box ${pos.unrealized_pnl<0?'loss':''}">
         <div class="position-top">
           <span class="side-tag" style="color:${sideColor}">${pos.side}</span>
-          <span class="shares">${fmtSh(pos.shares)}sh · ${mins}:${String(secs).padStart(2,'0')} held</span>
+          <span class="shares">${fmtSh(pos.shares)}sh (${pos.entry_type}) · ${mins}:${String(secs).padStart(2,'0')} held</span>
         </div>
         <div class="position-grid">
           <div><div class="k">Entry</div><div class="v">${fmtP(pos.entry_price)}</div></div>
@@ -481,7 +424,7 @@ function renderEngineCard(e){
         </div>
       </div>`;
   } else {
-    posHtml = `<div class="position-box empty">${e.decision_made ? 'no open position' : 'no open position — waiting on signal'}</div>`;
+    posHtml = `<div class="position-box empty">no open position</div>`;
   }
 
   el.innerHTML = `
@@ -497,17 +440,17 @@ function renderEngineCard(e){
 
 function renderStats(e){
   const tiles = [
-    ['total_entries','entries (taker)',''], ['total_entry_skips','skipped: ask ≥ cap',''],
+    ['total_signals_up','UP signals',''], ['total_signals_down','DOWN signals',''],
+    ['total_no_pattern','no pattern (skipped)',''], ['total_no_data','no data (skipped)',''],
+    ['signal_accuracy','signal right %',''],
+    ['total_limit_fills','limit fills (200sh)','win'], ['total_limit_timeouts','limit timeouts',''],
+    ['total_taker_entries','taker entries (300sh)',''], ['total_taker_skips','taker skips (ask ≥ 0.60)',''],
     ['total_tp_fills','tp fills','win'], ['total_forced_closes','forced close',''],
-    ['total_no_signal_windows','skipped: data gap',''], ['total_no_match_windows','skipped: no situation',''],
-    ['total_illiquid_skips','illiquid skips',''],
-    ['sig_validated','signals: validated',''], ['sig_candidate','signals: weak pattern',''], ['sig_baseline','signals: baseline',''],
-    ['win_rate','win rate %',''],
+    ['total_illiquid_skips','illiquid skips',''], ['win_rate','win rate %',''],
   ];
   $('statsGrid').innerHTML = tiles.map(([key,label,cls]) => {
     let v = e[key];
-    if(key.startsWith('sig_')) v = (e.tier_counts||{})[key.slice(4)];
-    if(key==='win_rate') v = (v==null ? '—' : v);
+    if(key==='win_rate' || key==='signal_accuracy') v = (v==null ? '—' : v);
     return `<div class="stat-tile ${cls}"><div class="n">${v ?? 0}</div><div class="l">${label}</div></div>`;
   }).join('');
 }
