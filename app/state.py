@@ -26,8 +26,9 @@ class BotState:
         self.error: Optional[str] = None
         self._task: Optional[asyncio.Task] = None
 
-        # Last-second CLOB read of the window that is about to close (see _watch_close).
-        self._last_second_prices = None
+        # Last-second CLOB read of the window that is about to close (see _tick), one per side.
+        self._last_up = None
+        self._last_down = None
 
     async def start(self):
         self._task = asyncio.create_task(self._run_loop())
@@ -85,15 +86,21 @@ class BotState:
                             up_bid_levels=up_bid_lv, up_ask_levels=up_ask_lv,
                             down_bid_levels=down_bid_lv, down_ask_levels=down_ask_lv)
 
-        # Last-second winner read, while it's still the live window. Keep overwriting with
-        # the FRESHEST reading available right up to close, rather than gating on one exact
-        # tick landing in a narrow 1s sliver -- a single missed/late poll tick there used to
-        # mean no read was ever captured, and the window fell back to "undecided" forever.
-        # _read_result() bounds staleness with SETTLE_MAX_STALENESS_SECONDS, so this just
-        # maximizes the chance of having *some* recent-enough reading by close.
-        if (now < window.close_ts and window.close_ts - now <= config.CLOSE_PHASE_SECONDS
-                and up_bid is not None and down_bid is not None):
-            self._last_second_prices = (up_bid, up_ask, down_bid, down_ask, now)
+        # Last-second winner read, while it's still the live window. Track each side
+        # INDEPENDENTLY, keeping the freshest reading available for whichever side still has a
+        # bid, right up to close. The two used to be captured as one joint (up, down) snapshot
+        # gated on BOTH bids being present -- but right at the close the losing side's bid often
+        # disappears entirely (nobody bids on shares about to resolve to $0), so that joint
+        # snapshot kept falling back to an older, pre-close reading where the winning side hadn't
+        # crossed 0.95 yet -- a real "someone was at 0.95+ at the close" got reported as
+        # undecided. Reading each side on its own means a vanished losing-side bid can no longer
+        # blank out a clear winning-side read. _read_result() bounds staleness per side with
+        # SETTLE_MAX_STALENESS_SECONDS.
+        if now < window.close_ts and window.close_ts - now <= config.CLOSE_PHASE_SECONDS:
+            if up_bid is not None:
+                self._last_up = (up_bid, up_ask, now)
+            if down_bid is not None:
+                self._last_down = (down_bid, down_ask, now)
 
     async def _roll_window(self, window: WindowMarket, now: float):
         prev = self.current_window
@@ -106,31 +113,39 @@ class BotState:
             self.engine.finalize_window(result)
 
         self.current_window = window
-        self._last_second_prices = None
+        self._last_up = None
+        self._last_down = None
         self.engine.reset_for_window(window, now=now)
         if late:
             self.engine._no_signal("bot started mid-window -- watching this one to read its result")
 
     def _read_result(self, window: WindowMarket) -> dict:
         """The window that just closed: who won, from the freshest close-phase CLOB read
-        captured in _tick(). WIN_PRICE (0.95) or higher on a side's bid = that side won.
-        Neither side there, no read was captured at all (e.g. an empty book the whole close
-        phase), or the freshest read we did get is older than SETTLE_MAX_STALENESS_SECONDS
-        (i.e. we never got a fresh tick in right before close) = undecided."""
+        captured in _tick() -- read independently per side, so a vanished bid on the losing side
+        can't blank out a clear read on the winning side. WIN_PRICE (0.95) or higher on a side's
+        bid = that side won. A side with no read captured at all (e.g. no bid the whole close
+        phase), or whose freshest read is older than SETTLE_MAX_STALENESS_SECONDS (i.e. we never
+        got a fresh tick in right before close), doesn't count for that side."""
         up = down = None
-        age = None
-        snap = getattr(self, "_last_second_prices", None)
-        if snap is not None:
-            up_bid, up_ask, down_bid, down_ask, ts = snap
+        ages = []
+        if self._last_up is not None:
+            up_bid, up_ask, ts = self._last_up
             age = round(window.close_ts - ts, 2)
             if age <= config.SETTLE_MAX_STALENESS_SECONDS:
-                up, down = up_bid, down_bid
+                up = up_bid
+                ages.append(age)
+        if self._last_down is not None:
+            down_bid, down_ask, ts = self._last_down
+            age = round(window.close_ts - ts, 2)
+            if age <= config.SETTLE_MAX_STALENESS_SECONDS:
+                down = down_bid
+                ages.append(age)
         winner = None
         if up is not None and up >= config.WIN_PRICE:
             winner = Side.UP
         elif down is not None and down >= config.WIN_PRICE:
             winner = Side.DOWN
-        return {"winner": winner, "up": up, "down": down, "age": age}
+        return {"winner": winner, "up": up, "down": down, "age": min(ages) if ages else None}
 
     # ---- dashboard payload -------------------------------------------------
 

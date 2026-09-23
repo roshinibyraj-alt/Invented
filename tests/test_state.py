@@ -63,7 +63,7 @@ async def main():
     bs.client.books["u1"]["bid"] = 0.97
     bs.client.books["u1"]["bids"] = [(0.97, 1000)]
     await run_to(T0 + 300 - 0.5)
-    up_bid, *_ = bs._last_second_prices
+    up_bid, *_ = bs._last_up
     assert up_bid == 0.97
     print("2 ok: last-second CLOB read captured UP at 0.97")
 
@@ -96,6 +96,15 @@ async def main():
     assert snap["engine"]["history"] and snap["window"]["slug"] == bs.current_window.slug
     assert snap["engine"]["sizing"]["base"] in (400, 500)
     print("6 ok: dashboard snapshot serialises; history rows:", len(snap["engine"]["history"]))
+
+    # ---- regression: winning side hits 0.95+ but the LOSING side's bid vanishes right at the
+    # close (nobody bids on shares about to resolve to $0) -- must still resolve to a winner,
+    # not fall back to "undecided" just because one side went quiet.
+    bs.client.books["u2"].update(bid=0.97, bids=[(0.97, 1000)])
+    bs.client.books["d2"].update(bid=None, bids=[])
+    await run_to(T0 + 900 + 1)
+    assert e.prev["winner"] == Side.UP and e.prev["up"] == 0.97 and e.prev["down"] is None
+    print("7 ok: losing side's bid disappearing at the close doesn't blank out a clear winner read")
 
     time_mod.time = orig_time
 
