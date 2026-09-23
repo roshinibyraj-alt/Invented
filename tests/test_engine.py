@@ -5,119 +5,190 @@ from app import config
 from app.engine import Engine
 from app.models import Side, WindowMarket
 from app.paper_broker import PaperBroker
-from app.strategy import evaluate
 
 T = 1_800_000_000
-UP_CLOSES = [100.0, 99.0, 99.8, 100.2, 100.5]
-DOWN_CLOSES = [100.0, 101.0, 100.2, 99.8, 99.5]
-FLAT_CLOSES = [100.0, 100.0, 100.0, 100.0, 100.0]
+LP = config.LIMIT_ENTRY_PRICE            # 0.40
+TO = config.LIMIT_ENTRY_TIMEOUT_SECONDS  # 30
+CAP = config.MARKET_ENTRY_CAP            # 0.50
+BASE = config.BASE_DOLLARS               # 500
+STEP = config.DOLLARS_STEP               # 100
 
-def mk(closes=UP_CLOSES, late=False, signal=True):
+def mk(prev=None):
+    """prev: None (no signal yet) or a Side (previous window's winner)."""
     e = Engine(PaperBroker())
-    w = WindowMarket("w", None, "u", "d", float(T), float(T + 300))
-    e.reset_for_window(w, late_join=late)
-    if signal and not late:
-        e.set_signal(evaluate(closes), now=float(T))
+    if prev is not None:
+        e.prev = {"slug": "w0", "open_ts": T - 300, "winner": prev, "up": 0.97, "down": 0.03, "age": 0.1}
+    w = WindowMarket("w1", None, "u", "d", float(T), float(T + 300))
+    e.reset_for_window(w, now=float(T))
     return e
 
 def tick(e, ts, ua, da, ul=None, dl=None, ub=0.30, db=0.30):
-    e.on_tick(ub, ua, db, da, 300, now=ts, up_bid_levels=[(ub, 1000)], down_bid_levels=[(db, 1000)],
+    e.on_tick(ub, ua, db, da, now=ts, up_bid_levels=[(ub, 1000)], down_bid_levels=[(db, 1000)],
               up_ask_levels=ul, down_ask_levels=dl)
 
 def ev(e): return [x.event for x in e.broker.log]
+def close(e, winner=None, up=None, down=None): e.finalize_window({"winner": winner, "up": up, "down": down, "age": 0.1})
 
-# ---- 1. UP signal -> resting limit on UP @ 0.40 x 200 the moment the window opens
-e = mk(UP_CLOSES)
-o = e.s.order
-assert o.side == Side.UP and o.price == 0.40 and o.shares == 200 and o.status == "resting"
-assert "SIGNAL" in ev(e) and "LIMIT_PLACED" in ev(e) and e.snapshot()["status"] == "limit_resting"
-print("1 ok: UP signal -> resting limit buy UP 200 @ 0.40")
+# ---- 0. sanity on the new config shape
+assert LP == 0.40 and TO == 30 and CAP == 0.50 and BASE == 500 and STEP == 100
+print(f"0 ok: LIMIT_ENTRY_PRICE={LP}, LIMIT_ENTRY_TIMEOUT_SECONDS={TO}, MARKET_ENTRY_CAP={CAP}, BASE_DOLLARS={BASE}, DOLLARS_STEP={STEP}")
 
-# ---- 2. limit fills at its own price when the ask reaches it; maker = no fee; nothing more is bought
-e = mk(UP_CLOSES); bal0 = e.capital.balance
+# ---- 1. no previous window -> no signal, nothing fires
+e = mk(prev=None); assert e.s.plan == "no_signal" and e.snapshot()["status"] == "no_signal"
 tick(e, T + 5, 0.45, 0.55); assert e.s.position is None
-tick(e, T + 30, 0.40, 0.60)
+print("1 ok: no previous window -> no signal, no trade")
+
+# ---- 2. UP won previous window -> follow UP, $500, armed in the "limit" phase
+e = mk(prev=Side.UP); assert e.s.plan == "trading" and e.s.side == Side.UP and e.s.dollars == 500
+en = e.snapshot()["entry"]; assert en["dollars"] == 500 and en["phase"] == "limit"
+tick(e, T + 1, 0.45, 0.55); tick(e, T + 10, 0.45, 0.55); assert e.s.position is None  # ask never reaches 0.40
+print("2 ok: UP won last window -> armed $500 UP, resting limit, no fill above 0.40")
+
+# ---- 3. phase 1: ask reaches LIMIT_ENTRY_PRICE within the timeout -> maker fill, no fee
+e = mk(prev=Side.UP); tick(e, T + 5, LP, 0.60)
 p = e.s.position
-assert p and p.side == Side.UP and p.shares == 200 and p.entry_price == 0.40 and p.entry_type == "maker"
-assert abs(p.cost - 80.0) < 1e-9 and abs(bal0 - e.capital.balance - 80.0) < 1e-9
-tick(e, T + 200, 0.50, 0.50)                       # later: ask < 0.60 must NOT trigger a second (taker) buy
-assert e.s.position.shares == 200 and e.total_taker_entries == 0 and e.total_limit_fills == 1
-print("2 ok: limit fills @ 0.40 (maker, no fee, $80), no taker follow-up")
+assert p and p.side == Side.UP and abs(p.entry_price - LP) < 1e-9
+assert abs(p.shares - 500 / LP) < 1e-9 and abs(p.cost - 500) < 1e-9  # no fee on the maker fill
+assert e.total_entries == 1 and e.snapshot()["status"] == "open" and e.snapshot()["entry"] is None
+assert "LIMIT_FILLED" in ev(e)
+print(f"3 ok: phase 1 limit filled @ {LP:.2f}, {p.shares:.2f}sh, no fee, cost ${p.cost:.2f}")
 
-# ---- 3. DOWN signal is the exact mirror: order on DOWN, UP's price is irrelevant
-e = mk(DOWN_CLOSES)
-assert e.s.order.side == Side.DOWN and e.s.order.price == 0.40
-tick(e, T + 5, 0.30, 0.45); assert e.s.position is None
-tick(e, T + 6, 0.30, 0.39); assert e.s.position and e.s.position.side == Side.DOWN
-print("3 ok: DOWN signal -> order on DOWN")
+# ---- 4. phase 1 never reaches 0.40 -> limit cancelled at 30s, phase 2 begins
+e = mk(prev=Side.UP)
+tick(e, T + 5, 0.75, 0.25); tick(e, T + 29, 0.75, 0.25)
+assert e.s.position is None and "LIMIT_CANCELLED" not in ev(e)
+tick(e, T + TO + 0.1, 0.75, 0.25)   # still above the 0.40 limit AND above the 0.50 cap
+assert "LIMIT_CANCELLED" in ev(e) and e.s.position is None  # cancelled, but 0.75 > cap so no fire yet either
+print("4 ok: unfilled limit cancelled after the timeout")
 
-# ---- 4. 2-minute timeout: cancel, then taker 300 sh (depth-walked, with fee) once ask < 0.60
-e = mk(UP_CLOSES); bal0 = e.capital.balance
-tick(e, T + 119, 0.55, 0.45); assert e.s.order.status == "resting" and e.s.position is None
-lv = [(0.55, 100), (0.58, 400)]
-tick(e, T + 120, 0.55, 0.45, ul=lv)
+# ---- 5. phase 2: ask already at/below the cap -> immediate market buy, depth-walked, taker fee
+e = mk(prev=Side.UP)
+tick(e, T + TO + 1, 0.45, 0.55, ul=[(0.45, 1000)])   # single deep level -> fills entirely at 0.45
 p = e.s.position
-vwap = (100 * 0.55 + 200 * 0.58) / 300
-assert e.s.order.status == "cancelled" and "LIMIT_TIMEOUT" in ev(e)
-assert p and p.side == Side.UP and p.shares == 300 and p.entry_type == "taker" and abs(p.entry_price - vwap) < 1e-9
-fee = e.broker.taker_fee_amount(300, vwap)
-assert abs(p.cost - (300 * vwap + fee)) < 1e-9 and abs(bal0 - e.capital.balance - p.cost) < 1e-9
-print(f"4 ok: cancelled at 120s, taker 300sh @ {vwap:.4f} (depth-walked), fee ${fee:.3f} in cost")
+assert p and abs(p.entry_price - 0.45) < 1e-9 and abs(p.shares - 500 / 0.45) < 1e-9
+fee = e.broker.taker_fee_amount(p.shares, 0.45)
+assert abs(p.cost - (500 + fee)) < 1e-9 and "MARKET_ENTRY" in ev(e)
+print(f"5 ok: phase 2 market buy @ 0.45 (<= {CAP} cap), {p.shares:.2f}sh, fee ${fee:.4f}")
 
-# ---- 5. after the timeout, ask >= 0.60 -> keep checking every tick; buy first tick strictly below 0.60
-e = mk(UP_CLOSES)
-tick(e, T + 121, 0.70, 0.30); assert e.s.position is None and e.s.taker_watching
-tick(e, T + 150, 0.60, 0.40); assert e.s.position is None            # exactly 0.60 is not below
-tick(e, T + 200, 0.65, 0.35); assert e.s.position is None
-tick(e, T + 280, 0.59, 0.41, ul=[(0.59, 1000)])
-assert e.s.position and e.s.position.shares == 300 and e.s.position.entry_price == 0.59
-assert ev(e).count("TAKER_WAIT") == 1
-print("5 ok: waits until ask < 0.60 (checked every tick until close)")
+# ---- 6. phase 2: price above the cap -> waits (logs once), buys once it comes back down
+e = mk(prev=Side.UP)
+tick(e, T + TO + 1, 0.75, 0.25, ul=[(0.75, 1000)])
+tick(e, T + TO + 20, 0.60, 0.40, ul=[(0.60, 1000)])
+assert e.s.position is None and ev(e).count("WAITING_FOR_PRICE") == 1     # logs once, not every tick
+tick(e, T + TO + 40, 0.48, 0.52, ul=[(0.48, 1000)])
+assert e.s.position and abs(e.s.position.entry_price - 0.48) < 1e-9
+print("6 ok: price above cap -> waits, buys the moment it drops back to <= cap")
 
-# ---- 6. never below 0.60 -> skipped, nothing spent
-e = mk(UP_CLOSES)
-tick(e, T + 130, 0.72, 0.28); tick(e, T + 290, 0.80, 0.20)
-e.finalize_window(Side.UP)
-assert e.total_taker_skips == 1 and e.total_pnl == 0 and e.capital.balance == config.STARTING_CAPITAL
-assert e.history[0]["result"].startswith("limit timed out")
-print("6 ok: ask never < 0.60 -> no trade, balance untouched")
+# ---- 7. boundary: exactly the cap fills; deep in the money also fills
+for ask in (0.50, 0.10):
+    e = mk(prev=Side.UP); tick(e, T + TO + 1, ask, 1 - ask, ul=[(ask, 1000)])
+    assert e.s.position and abs(e.s.position.entry_price - ask) < 1e-9
+print("7 ok: fires at exactly the 0.50 cap and at any price below it")
 
-# ---- 7. fill beats timeout on the same tick
-e = mk(UP_CLOSES)
-tick(e, T + 120, 0.39, 0.61); assert e.s.position and e.s.position.entry_type == "maker" and e.total_limit_timeouts == 0
-print("7 ok: fill checked before timeout")
+# ---- 8. DOWN won previous window -> follows DOWN (either phase)
+e = mk(prev=Side.DOWN); tick(e, T + 5, 0.30, LP)
+assert e.s.position and e.s.position.side == Side.DOWN and abs(e.s.position.entry_price - LP) < 1e-9
+print("8 ok: DOWN won -> follows DOWN")
 
-# ---- 8. no pattern / no data / late join -> nothing placed
-e = mk(FLAT_CLOSES); assert e.s.order is None and e.s.signal_status == "no_pattern" and e.total_no_pattern == 1
-tick(e, T + 5, 0.30, 0.30); tick(e, T + 200, 0.50, 0.50); assert e.s.position is None
-e = mk(signal=False); assert e.needs_signal(); e.set_signal_unavailable("boom"); assert e.s.signal_status == "no_data" and e.s.order is None
-e = mk(late=True); assert not e.needs_signal() and e.s.signal_status == "late_join"
-tick(e, T + 200, 0.30, 0.30); assert e.s.order is None and e.s.position is None
-print("8 ok: no pattern / no data / late join -> no order")
+# ---- 9. one entry per window: no second buy
+e = mk(prev=Side.UP); tick(e, T + 5, LP, 0.60); tick(e, T + 100, 0.50, 0.50); tick(e, T + 200, 0.30, 0.70)
+assert e.total_entries == 1
+print("9 ok: one entry per window")
 
-# ---- 9. exits: TP on a maker entry, and forced close; exit works for taker entries too
-e = mk(UP_CLOSES); tick(e, T + 5, 0.40, 0.60)
-e.on_tick(0.99, 1.0, 0.01, 0.02, 200, now=T + 60, up_bid_levels=[(0.99, 1000)])
-assert e.s.position is None and e.total_tp_fills == 1 and e.total_pnl > 0
-assert abs(e.total_pnl - (200 * 0.99 - e.broker.taker_fee_amount(200, 0.99) - 80.0)) < 1e-9
-e = mk(UP_CLOSES); tick(e, T + 5, 0.40, 0.60)
-tick(e, T + 100, 0.30, 0.70, ub=0.20); e.finalize_window(Side.DOWN)
-assert e.total_forced_closes == 1 and e.total_pnl < 0 and e.losses == 1
-print("9 ok: TP exit (+) and forced close (-)")
+# ---- 10. no ask / empty book in phase 2: nothing invented, retries, logs once, buys when it returns
+e = mk(prev=Side.UP)
+tick(e, T + TO + 1, None, 0.5, ul=[]); tick(e, T + TO + 2, None, 0.5, ul=[]); tick(e, T + TO + 3, 0.48, 0.5, ul=[])
+assert e.s.position is None and e.total_illiquid_skips >= 1 and ev(e).count("NO_LIQUIDITY") == 1
+tick(e, T + TO + 4, 0.48, 0.52, ul=[(0.48, 1000)])
+assert e.s.position and abs(e.s.position.entry_price - 0.48) < 1e-9
+print("10 ok: empty book in phase 2 -> retries, no fake fill, buys when depth returns")
 
-# ---- 10. signal accuracy tracking + history rows + JSON snapshot
-e = mk(UP_CLOSES); e.finalize_window(Side.UP)
-e2 = mk(DOWN_CLOSES); e2.finalize_window(Side.UP)
-assert e.signal_right == 1 and e2.signal_wrong == 1
-h = e.history[0]; assert h["signal"] == "UP" and h["winner"] == "UP" and h["closes"] == [100.0, 99.0, 99.8, 100.2, 100.5]
-e3 = mk(UP_CLOSES); tick(e3, T + 5, 0.40, 0.60)
-snap = e3.snapshot(); json.dumps(snap)
-assert snap["position"]["entry_type"] == "maker" and snap["signal"]["side"] == "UP" and snap["def"]["limit_price"] == 0.40
-print("10 ok: signal accuracy + history + JSON snapshot")
+# ---- 11. never fills (never <=0.40, never <=0.50) -> ENTRY_MISSED at close, base unchanged
+e = mk(prev=Side.UP); tick(e, T + 5, 0.90, 0.10); tick(e, T + TO + 5, 0.90, 0.10, ul=[(0.90, 1000)]); tick(e, T + 290, 0.90, 0.10)
+close(e, winner=Side.UP, up=0.97, down=0.03)
+assert e.total_no_fills == 1 and "ENTRY_MISSED" in ev(e) and e.capital.balance == config.STARTING_CAPITAL
+assert e.base == 500 and e.history[0]["result"] == "no fill"
+print("11 ok: price never reaches either threshold -> no trade, base untouched, balance untouched")
 
-# ---- 11. zero ask depth after the timeout -> no fabricated fill, retries
-e = mk(UP_CLOSES); tick(e, T + 121, 0.55, 0.45, ul=[])
-assert e.s.position is None and e.total_illiquid_skips == 1
-tick(e, T + 122, 0.55, 0.45, ul=[(0.55, 1000)]); assert e.s.position and e.s.position.shares == 300
-print("11 ok: empty book -> retries, no fake fill")
+# ---- 12. no entry at/after the window close
+e = mk(prev=Side.UP); tick(e, T + 300, LP, 0.60); assert e.s.position is None
+print("12 ok: nothing fires at/after the window close")
+
+# ---- 13. settlement: win pays $1/share, loss pays $0 -- and the dollar ladder moves
+e = mk(prev=Side.UP); tick(e, T + 5, LP, 0.60); cost = e.s.position.cost; shares = e.s.position.shares
+close(e, winner=Side.UP, up=0.97, down=0.03)
+assert e.wins == 1 and e.base == 400 and abs(e.total_pnl - (shares * 1.0 - cost)) < 1e-9
+e2 = mk(prev=Side.DOWN); tick(e2, T + 5, 0.60, LP); cost2 = e2.s.position.cost
+close(e2, winner=Side.UP, up=0.97, down=0.03)          # followed DOWN, UP won -> loss
+assert e2.losses == 1 and e2.base == 500 and abs(e2.total_pnl - (0 - cost2)) < 1e-9
+print("13 ok: win -> $1/share, base -$100; loss -> $0/share, base reset to $500")
+
+# ---- 14. undecided close (neither side 0.95+): no ladder move, open position exits at last bid
+e = mk(prev=Side.UP); tick(e, T + 5, LP, 0.60)
+tick(e, T + 250, 0.55, 0.60, ub=0.55)
+close(e, winner=None, up=0.55, down=0.45)
+assert e.total_undecided == 1 and e.wins == 0 and e.losses == 0 and e.base == 500     # undecided doesn't move the ladder
+assert "no signal" not in ev(e) and e.history[0]["winner"] is None
+print("14 ok: undecided window -> position exits at last bid, ladder untouched")
+
+def next_window(prev_open_ts):
+    ot = prev_open_ts + 300
+    return WindowMarket(f"w{int(ot)}", None, "u", "d", float(ot), float(ot + 300)), ot
+
+# ---- 15. the ladder: $500 -> $400 -> $300 -> $200 -> $100 -> $0, then same-side signals are skipped
+e = mk(prev=Side.UP); ot = T
+for expected in (500, 400, 300, 200, 100):
+    assert e.s.plan == "trading" and e.s.dollars == expected, (e.s.dollars, expected)
+    tick(e, ot + 5, LP, 0.60)
+    close(e, winner=Side.UP, up=0.97, down=0.03)
+    w, ot = next_window(ot)
+    e.reset_for_window(w, now=float(ot))
+assert e.base == 0 and e.floor_side == Side.UP
+assert e.s.plan == "floor_skip" and e.s.plan_note.startswith("base is 0")
+tick(e, ot + 5, LP, 0.60); tick(e, ot + 200, 0.30, 0.70)
+assert e.s.position is None and e.total_floor_skips == 1
+close(e, winner=Side.UP, up=0.97, down=0.03)
+assert e.base == 0                                    # still skipped -> ladder doesn't move
+print("15 ok: $500->$400->$300->$200->$100->$0, then UP signals skipped at the floor")
+
+# ---- 16. first opposite-direction signal after the floor: trades $500, restarts the base
+w, ot = next_window(ot); e.reset_for_window(w, now=float(ot))
+e.prev = {"slug": "wx", "open_ts": ot, "winner": Side.DOWN, "up": 0.03, "down": 0.97, "age": 0.1}
+w, ot = next_window(ot); e.reset_for_window(w, now=float(ot))
+assert e.s.plan == "trading" and e.s.side == Side.DOWN and e.s.dollars == 500
+assert "BASE_RESTART" in ev(e)
+tick(e, ot + 5, 0.60, LP)
+assert e.s.position and abs(e.s.position.cost - 500) < 1e-9
+print("16 ok: opposite signal after the floor -> $500, base restarted")
+
+# ---- 17. any loss (even mid-ladder) resets the base to $500
+e = mk(prev=Side.UP); ot = T; tick(e, ot + 5, LP, 0.60)
+close(e, winner=Side.UP, up=0.97, down=0.03); assert e.base == 400          # one win
+w, ot = next_window(ot); e.reset_for_window(w, now=float(ot))
+tick(e, ot + 5, LP, 0.60)
+close(e, winner=Side.DOWN, up=0.03, down=0.97)                              # followed UP, DOWN won -> loss
+assert e.base == 500 and e.floor_side is None
+print("17 ok: a loss mid-ladder resets the base to $500")
+
+# ---- 18. no signal / floor-skip / no-fill windows never move the base
+e = mk(prev=None); tick(e, T + 5, LP, 0.60); close(e, winner=Side.UP, up=0.97, down=0.03)
+assert e.base == 500 and e.wins == 0 and e.losses == 0
+print("18 ok: no-signal window doesn't move the base")
+
+# ---- 19. missed a window (gap) -> no signal even though prev exists
+e = Engine(PaperBroker())
+e.prev = {"slug": "w0", "open_ts": T - 900, "winner": Side.UP, "up": 0.97, "down": 0.03, "age": 0.1}  # 3 windows back
+w = WindowMarket("w1", None, "u", "d", float(T), float(T + 300))
+e.reset_for_window(w, now=float(T))
+assert e.s.plan == "no_signal" and "missed a window" in e.s.plan_note
+print("19 ok: gap in windows -> no signal")
+
+# ---- 20. JSON snapshot + history rows
+e = mk(prev=Side.UP); tick(e, T + 5, LP, 0.60)
+snap = e.snapshot(); json.dumps(snap)
+assert snap["position"]["side"] == "UP"
+assert snap["def"] == {"limit_price": 0.40, "limit_timeout_s": 30, "market_cap": 0.50, "base_dollars": 500, "step": 100, "win_price": 0.95}
+close(e, winner=Side.UP, up=0.97, down=0.03)
+h = e.history[0]; assert h["followed"] == "UP" and h["winner"] == "UP" and h["base_after"] == 400 and h["shares"] is not None
+print("20 ok: JSON snapshot + history row")
 print("ALL PASSED")

@@ -1,33 +1,27 @@
 """
-Central configuration for ALPHASTRIKE -- BTC 5-min up/down bot.
+Central configuration for DIPHUNTER -- BTC 5-minute up/down, "follow the last window".
 
-Strategy: "the current window decides the next window".
+  SIGNAL: whichever side won the PREVIOUS window is the side to trade in the next one.
+  WINNER: read from Polymarket's own CLOB prices in the last second of the window --
+          the side whose price is 0.95+ won. Neither at 0.95+ -> undecided -> no signal.
 
-  SIGNAL (from the window that just closed, using its five 1-minute
-  BTC closes c1..c5):
-    UP   : minute 2 closed BELOW minute 1  (early dip)
-           AND avg(c3, c4, c5) > avg(c1, c2)  (then recovered)
-    DOWN : exactly the opposite -- minute 2 closed ABOVE minute 1
-           AND avg(c3, c4, c5) < avg(c1, c2)
-    else : no pattern -> no trade in the next window.
+  ENTRY (next window, traded side, size = current base): TWO phases.
+    Phase 1 (0s to LIMIT_ENTRY_TIMEOUT_SECONDS after open): a resting limit buy at
+      LIMIT_ENTRY_PRICE (0.40). Fills (maker, no fee) the moment the ask reaches 0.40 or below.
+    Phase 2 (after LIMIT_ENTRY_TIMEOUT_SECONDS): the limit is cancelled. From then until the
+      window closes, the bot buys at market (taker, depth-walked fill, taker fee) the instant the
+      ask is at or below MARKET_ENTRY_CAP (0.50) -- immediately if it's already there, or whenever
+      it comes back down to it. Never reaching the cap before close means no trade that window.
+  EXIT: none. The position is held to the window end and settled by the 0.95 rule:
+        winner pays $1/share, loser $0.
 
-  TRADE (in the NEXT window, on the signalled side):
-    1. The moment the window opens, place a resting MAKER limit buy for
-       LIMIT_SHARES (200) @ LIMIT_PRICE (0.40). It fills at its own exact
-       price, no fee, if that side's ask drops to/through it.
-    2. If it hasn't filled LIMIT_TIMEOUT_SECONDS (120s = 2 min) after being
-       placed, cancel it and switch to TAKER fallback: from then until the
-       window closes, the first tick that side's best ask is BELOW
-       TAKER_MAX_PRICE (0.60), buy TAKER_SHARES (300) at market -- priced by
-       walking real ask depth, taker fee paid. If the ask never gets below
-       0.60, no trade that window.
-    3. No stop-loss. Take profit at TP_PRICE (0.99) -- a real taker sell,
-       depth-walked. If TP never hits, force-closed at window end.
-    4. One entry per window (either the 200sh limit fill OR the 300sh taker
-       buy, never both).
+  SIZE: one shared base, in DOLLARS, starts at BASE_DOLLARS (500). Every win takes off
+        DOLLARS_STEP (100), floor 0. Any loss resets it to 500. At 0 the bot skips
+        same-direction signals; the first opposite-direction signal trades 500 and restarts the
+        base. Shares bought = base dollars / actual fill price, so the dollar risk per trade is
+        fixed but share count scales with price.
 
-Minute prices come from Binance BTCUSDT 1-minute candles (public REST);
-every order is priced/filled against Polymarket's own CLOB book.
+Everything is priced/filled against Polymarket's CLOB book. No other data source.
 """
 import os
 
@@ -35,41 +29,40 @@ import os
 TRADING_MODE = os.getenv("TRADING_MODE", "paper")
 
 # ---- Market discovery / pricing ---------------------------------------
-# CLOB only -- no Gamma price fallback anywhere in this app. Gamma is
-# used purely for one-time window metadata (slug -> token ids) in
-# polymarket_client.py; every live price/book read goes to CLOB.
+# CLOB only for prices. Gamma is used purely for one-time window metadata
+# (slug -> token ids) in polymarket_client.py.
 GAMMA_API_BASE = os.getenv("GAMMA_API_BASE", "https://gamma-api.polymarket.com")
 CLOB_API_BASE = os.getenv("CLOB_API_BASE", "https://clob.polymarket.com")
 SLUG_PREFIX = "btc-updown-5m-"
-WINDOW_SECONDS = 300             # 5-minute windows: five 1-minute candles per window
+WINDOW_SECONDS = 300
 
+# ---- Polling cadence -----------------------------------------------------
 POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
+# Faster polling in the last seconds of a window, so the 0.95 winner read is as close to the
+# final second as possible.
+CLOSE_PHASE_POLL_SECONDS = float(os.getenv("CLOSE_PHASE_POLL_SECONDS", "0.25"))
+CLOSE_PHASE_SECONDS = 3.0
 
-# ---- Entry: resting limit first, taker fallback -------------------------
-LIMIT_PRICE = float(os.getenv("LIMIT_PRICE", "0.40"))
-LIMIT_SHARES = float(os.getenv("LIMIT_SHARES", "200"))
-LIMIT_TIMEOUT_SECONDS = float(os.getenv("LIMIT_TIMEOUT_SECONDS", "120"))
-TAKER_SHARES = float(os.getenv("TAKER_SHARES", "300"))
-TAKER_MAX_PRICE = float(os.getenv("TAKER_MAX_PRICE", "0.60"))   # taker-buy only while best ask is strictly BELOW this
-TP_PRICE = 0.99
+# ---- Entry: resting limit first, then a capped market buy ---------------
+LIMIT_ENTRY_PRICE = float(os.getenv("LIMIT_ENTRY_PRICE", "0.40"))              # phase 1 resting limit price
+LIMIT_ENTRY_TIMEOUT_SECONDS = float(os.getenv("LIMIT_ENTRY_TIMEOUT_SECONDS", "30"))  # cancel + switch to market after this long
+MARKET_ENTRY_CAP = float(os.getenv("MARKET_ENTRY_CAP", "0.50"))                # phase 2: buy at market once ask <= this
 
-STARTING_CAPITAL = float(os.getenv("STARTING_CAPITAL", "2000"))
+# ---- Sizing ladder (dollars, not shares) ---------------------------------
+BASE_DOLLARS = float(os.getenv("BASE_DOLLARS", "500"))
+DOLLARS_STEP = float(os.getenv("DOLLARS_STEP", "100"))
 
-# ---- Signal data (Binance public REST, no API key) ------------------------
-# Used ONLY to read the previous window's 1-minute closes. If your host is
-# geo-blocked from api.binance.com, point this at a mirror (e.g.
-# https://api.binance.us/api/v3/klines) -- same response format.
-BINANCE_KLINES_URL = os.getenv("BINANCE_KLINES_URL", "https://api.binance.com/api/v3/klines")
-BINANCE_SYMBOL = os.getenv("BINANCE_SYMBOL", "BTCUSDT")
-SIGNAL_MAX_WAIT_SECONDS = 60.0     # give up on a window's signal if the candles haven't arrived this long after open
-LATE_JOIN_GRACE_SECONDS = 10.0     # a window first seen more than this many seconds after its open is not traded
+# ---- Winner rule --------------------------------------------------------------
+WIN_PRICE = float(os.getenv("WIN_PRICE", "0.95"))                 # side priced at/above this at the close won
+SETTLE_MAX_STALENESS_SECONDS = float(os.getenv("SETTLE_MAX_STALENESS_SECONDS", "3"))  # older reads don't count
+
+STARTING_CAPITAL = float(os.getenv("STARTING_CAPITAL", "5000"))
 
 # ---- Trading fees -----------------------------------------------------
-# The taker fallback entry, the TP exit and any forced window-end close are
-# TAKER market orders and pay the real fee, priced by walking real
-# order-book depth. The resting-limit entry is a maker fill: no fee.
-# Verify against GET https://clob.polymarket.com/fee-rate?token_id=...
-# before trading real money.
+# Phase 1 (resting limit) fill is a maker fill: no fee. Phase 2 (market buy, capped at
+# MARKET_ENTRY_CAP) is a taker order and pays the real fee, priced by walking real order-book
+# depth. Settlement at window end is a redemption: no fee.
+# Verify against GET https://clob.polymarket.com/fee-rate?token_id=... before real money.
 APPLY_TAKER_FEES = True
 TAKER_FEE_RATE = 0.07
 TAKER_FEE_EXPONENT = 1
