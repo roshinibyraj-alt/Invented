@@ -1,115 +1,90 @@
-# ⚡ DIPHUNTER — BTC 5m up/down bot
+# BTC 5m Rung Bot — Polymarket (Paper Trading)
 
-Paper-trading bot for Polymarket's `btc-updown-5m-*` markets. Strategy:
-**follow the last window.** Everything is priced and settled off
-Polymarket's own CLOB — no external price feed.
+Simulated market-making bot for Polymarket's BTC 5-minute up/down markets
+(`btc-updown-5m-<epoch>`). Runs 4 independent "rungs," each resting limit
+orders on both the UP and DOWN token at a flat size, with a **shadow-mode
+cooldown**: after a rung wins for real, it stops risking capital and just
+observes for a while, only resuming real trading once it would have lost.
 
-## The signal
+**This build is paper trading only.** It never signs or sends a real
+order — no private key, no CLOB API key, nothing to leak. All prices come
+from Polymarket's public, no-auth Gamma/CLOB endpoints; fills are
+simulated locally. Wire in a real broker later (see `app/engine.py`) once
+you're ready to trade live — that's a deliberate, separate step.
 
-Whichever side **won the previous window** is bought in the next one:
+## Strategy, exactly as specified
 
-- previous window UP → buy UP; previous window DOWN → buy DOWN.
+- **Discovery**: window slugs are deterministic — `btc-updown-5m-<epoch>`
+  where `epoch` is a clean multiple of 300s. The bot computes the current
+  and next window slug from the clock, no scraping needed.
+- **Rungs**: 0.40, 0.35, 0.30, 0.25. At window open, each rung places a
+  resting order on **both** UP and DOWN at its price, always sized at a
+  **flat 500 shares** — no sizing ladder.
+- **Fill logic**: a rung's order is simulated as filled when the token's
+  live ask price touches its limit price. Whichever side fills first
+  cancels the other side's resting order for that rung.
+- **Cutoff**: at 270s into the 5-minute window, any still-resting orders
+  are cancelled — no new fills allowed after that.
+- **Settlement**: in the last 2 seconds of the window, whichever side's
+  price is above 0.95 is the winner ($1); if neither crosses 0.95, the
+  higher of the two prices wins (your chosen tie-break).
+- **ACTIVE / SHADOW mode, per rung, independent:**
+  - Every rung starts **ACTIVE** — real orders, real capital.
+  - A **real WIN** sends that rung into **SHADOW** for the next window: no
+    real orders, no capital at risk, but the exact same fill/settlement
+    logic still runs on paper so the bot can observe what *would* happen.
+  - Each SHADOW window's hypothetical outcome decides the next window:
+    **hypothetical WIN** → stay in SHADOW, skip again; **hypothetical
+    LOSS** → resume ACTIVE (real trading) the very next window;
+    **NO_FILL** → neutral, stay in SHADOW and keep waiting.
+  - A **real LOSS** has no special effect — the rung just keeps trading
+    ACTIVE as normal.
+- **Capital**: each rung tracks its own $5,000 paper bankroll — totally
+  separate P&L, streaks, and win rate per rung. SHADOW windows never move
+  the bankroll; they're purely observational and shown separately in the
+  dashboard (dashed border, "hypothetical" P&L, not counted in totals).
 
-**Winner rule:** in the last second of a window, read both sides' CLOB
-prices. A side is the winner once its price is **0.95+** (`WIN_PRICE`).
-If neither side gets there, the window is undecided and the next window
-has no signal. The very first window after startup is watched only —
-there's no previous result yet to follow.
-
-## The trade
-
-Two phases, on the followed side, sized to the current dollar base (see
-below):
-
-1. **Phase 1 — resting limit.** From the moment the window opens, a limit
-   buy rests at **0.40** (`LIMIT_ENTRY_PRICE`). It fills — maker, no fee —
-   the instant the ask reaches 0.40 or below, for up to **30 seconds**
-   (`LIMIT_ENTRY_TIMEOUT_SECONDS`).
-2. **Phase 2 — capped market buy.** If still unfilled at 30s, the limit is
-   cancelled. From then until the window closes, the bot buys at market
-   (taker, depth-walked fill, taker fee) the instant the ask is at or below
-   **0.50** (`MARKET_ENTRY_CAP`) — immediately if it's already there, or
-   whenever it comes back down to it. Never reaching the cap before close
-   means no trade that window (the base doesn't move).
-3. **No exit.** The position is held to the window's close and settled by
-   the same 0.95 rule: winner pays **$1/share**, loser **$0**. If the
-   window turns out undecided, any open position is closed at the last
-   bid instead (real proceeds, not $1/$0) — and this doesn't move the
-   ladder, since it isn't a real win or loss.
-4. One entry per window. Shares bought = dollars spent ÷ actual fill
-   price, so the dollar risk is fixed but share count scales with price.
-
-## Size ladder
-
-One shared base for both sides, in **dollars**, starting at **$500**
-(`BASE_DOLLARS`):
+## Project layout
 
 ```
-$500 → $400 → $300 → $200 → $100 → $0   (−$100 per win, floor $0)
+app/
+  config.py            all tunable constants
+  models.py             RungState / WindowState / SimOrder / TradeRecord
+  polymarket_client.py  Gamma + CLOB read-only client (no auth)
+  engine.py              window lifecycle, fill simulation, settlement
+  main.py                 FastAPI app, REST snapshot, websocket feed
+static/
+  index.html, style.css, app.js    the dashboard (no build step, plain JS)
 ```
-
-- Every **win** (the followed side matched the window's winner) takes
-  $100 off the base.
-- **Any loss resets the base to $500** — wherever it was on the ladder.
-- At **$0**, the bot **skips** signals on the side that ran the base down
-  (it still watches and records the result, just doesn't trade). The
-  **first signal on the opposite side** trades $500 and restarts the base.
-- A window where the entry never got filled **still moves the ladder**
-  as a "paper" win/loss once the signalled side is decided — signal won:
-  −$100 off the base; signal lost: base resets to $500 — no cash moves
-  either way, only the ladder. An undecided window (neither side hit
-  0.95+) or a no-signal window leaves the base exactly where it was.
 
 ## Run locally
 
-```
+```bash
 pip install -r requirements.txt
-cp .env.example .env   # all vars optional
-uvicorn app.main:app --reload
+uvicorn app.main:app --reload --port 8000
 ```
 
-Dashboard at http://localhost:8000: the countdown, the previous window's
-result (both final prices, which side won), live UP/DOWN books, the
-armed entry (limit resting / market armed / waiting) or open position,
-the size ladder, a history of recent windows (followed side, winner,
-result, P&L, base after), stats, equity curve and event log.
+Open `http://localhost:8000`.
 
-## Layout
+## Deploy on Railway
 
-- `app/engine.py` — the strategy: signal handling, the two-phase entry
-  (resting limit → capped market buy), settlement, the dollar size ladder
-- `app/state.py` — runtime loop, window rolling, the last-second CLOB
-  winner read, faster polling right at the close
-- `app/polymarket_client.py`, `app/paper_broker.py`, `app/models.py` —
-  Polymarket CLOB access, fee/log helper, shared types
-- `tests/` — `python tests/run_all.py` (no network needed): the ladder
-  (including the floor-skip / restart edge cases), the entry timing and
-  fill logic, empty-book retries, settlement (win/loss/undecided), and
-  the orchestration with a fake CLOB across several windows
+1. Push this repo to GitHub.
+2. In Railway: **New Project → Deploy from GitHub repo**, pick this repo.
+3. Railway auto-detects Python via Nixpacks and uses `railway.json` /
+   `Procfile` for the start command (`uvicorn app.main:app --host 0.0.0.0
+   --port $PORT`). No environment variables are required to run in paper
+   mode.
+4. Once deployed, open the Railway-provided URL — the dashboard is served
+   at `/`, live data over `/ws`, and a JSON snapshot at `/api/snapshot`.
 
-## Config (`app/config.py`, env-overridable)
+## Notes / known simplifications
 
-`LIMIT_ENTRY_PRICE` (0.40), `LIMIT_ENTRY_TIMEOUT_SECONDS` (30),
-`MARKET_ENTRY_CAP` (0.50), `BASE_DOLLARS` ($500), `DOLLARS_STEP` ($100),
-`WIN_PRICE` (0.95), `STARTING_CAPITAL` ($5000), `POLL_INTERVAL_SECONDS`
-(1.0), `CLOSE_PHASE_POLL_SECONDS` (0.25, used in the last 3s of a window
-for a tighter winner read).
-
-## Notes / assumptions
-
-- The limit fill and the market-cap check can only fire on a poll tick, so
-  timing is accurate to within one poll interval; lower
-  `POLL_INTERVAL_SECONDS` to tighten it.
-- The phase-1 limit fill is treated as a maker fill (no fee) since it's a
-  resting order rather than a taker sweep; the phase-2 market buy pays the
-  real taker fee.
-- The winner read is a single last-second snapshot, not an average —
-  matching the "0.95+ in the final second" rule as literally as possible
-  given 1s (0.25s near the close) polling, with a
-  `SETTLE_MAX_STALENESS_SECONDS` grace window if the exact last tick is
-  missed.
-- Taker fee uses `TAKER_FEE_RATE`/`TAKER_FEE_EXPONENT` in `config.py`;
-  verify against Polymarket's fee-rate endpoint before real money.
-- This is a fixed rule, not a fitted model: nothing here has been
-  backtested. The dashboard's follow-accuracy and win-rate tallies are
-  there to measure it as it runs.
+- Fill simulation assumes your resting order fills in full the instant
+  the ask touches your price — real order books can partial-fill or you
+  can be queued behind other resting orders at the same price.
+- Settlement uses Polymarket's live CLOB price at T‑2s as a proxy for the
+  window's outcome, per your spec — this is not the same as Polymarket's
+  own on-chain resolution, which may differ in edge cases.
+- $5,000 per rung is tracked as a running paper balance, not a hard order
+  cap — orders are always sized in shares per your ladder, regardless of
+  the balance (flag this if you want a hard capital guard added).

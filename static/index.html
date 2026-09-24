@@ -1,469 +1,79 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>DIPHUNTER</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>⚡</text></svg>">
-<style>
-  :root{
-    --bg:#08090c; --panel:#0f1116; --panel-2:#13161d; --panel-3:#181c25;
-    --line:#20242f; --text:#e7e9ee; --muted:#8891a3; --faint:#565d6e;
-    --mint:#3ddc97; --mint-dim:#173b2c; --mint-glow:rgba(61,220,151,.12);
-    --coral:#ff6b6b; --coral-dim:#3a1c1e; --coral-glow:rgba(255,107,107,.10);
-    --amber:#f5b942; --amber-dim:#3a2e10;
-    --violet:#8b7ffb; --violet-dim:#211c3e;
-    --mono:'SF Mono',ui-monospace,'Roboto Mono',Menlo,Consolas,monospace;
-    --sans:-apple-system,BlinkMacSystemFont,'Inter',system-ui,sans-serif;
-  }
-  @media (prefers-color-scheme: light){
-    :root:not([data-theme="dark"]){
-      --bg:#f4f5f7; --panel:#fff; --panel-2:#f8f9fb; --panel-3:#eef0f4;
-      --line:#e2e5eb; --text:#171a21; --muted:#5c6473; --faint:#9aa1b0;
-    }
-  }
-  :root[data-theme="dark"]{ --bg:#08090c; --panel:#0f1116; }
-  *{box-sizing:border-box;}
-  html{scroll-padding-top:env(safe-area-inset-top,0px);}
-  body{
-    margin:0; background:var(--bg); color:var(--text); font-family:var(--sans);
-    padding-top:env(safe-area-inset-top,0px); padding-bottom:env(safe-area-inset-bottom,0px);
-    -webkit-font-smoothing:antialiased;
-  }
-  .wrap{max-width:840px; margin:0 auto; padding:16px 16px 48px;}
-  .top{display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:14px;}
-  .brand{display:flex; align-items:center; gap:9px; font-weight:700; font-size:17px; letter-spacing:.2px;}
-  .brand .bolt{font-size:17px;}
-  .sub{font-size:12px; color:var(--muted); margin-top:5px; line-height:1.5; max-width:540px;}
-  .pill{display:inline-flex; align-items:center; gap:6px; font-family:var(--mono); font-size:11px;
-        padding:5px 10px; border-radius:99px; background:var(--panel-2); border:1px solid var(--line); color:var(--muted); white-space:nowrap;}
-  .dot{width:6px; height:6px; border-radius:50%; background:var(--faint); display:inline-block;}
-  .dot.live{background:var(--mint); box-shadow:0 0 6px var(--mint);}
-  .dot.err{background:var(--coral);}
-
-  .card{background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:16px; margin-bottom:12px;}
-  .card h2{font-size:13px; font-weight:600; margin:0 0 12px; display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;}
-  .card h2 .tag{font-family:var(--mono); font-size:10.5px; font-weight:500; color:var(--muted); background:var(--panel-3); padding:3px 8px; border-radius:6px;}
-
-  .clock-row{display:flex; align-items:center; justify-content:space-between; gap:10px;}
-  .clock-row .slug{font-family:var(--mono); font-size:11.5px; color:var(--muted);}
-  .clock-row .t{font-family:var(--mono); font-size:26px; font-weight:600; letter-spacing:.5px;}
-  .clock-row .t.hot{color:var(--amber);}
-
-  .prev-banner{border-radius:10px; padding:14px 16px; font-size:13.5px; line-height:1.55; margin-bottom:12px;}
-  .prev-banner.UP{background:linear-gradient(135deg,var(--mint-glow),transparent 70%); border:1px solid var(--mint-dim);}
-  .prev-banner.DOWN{background:linear-gradient(135deg,var(--coral-glow),transparent 70%); border:1px solid var(--coral-dim);}
-  .prev-banner.none{background:var(--panel-2); border:1px solid var(--line); color:var(--muted);}
-  .prev-banner b{color:inherit;}
-  .prev-grid{display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:2px;}
-  .prev-side{background:var(--panel-3); border-radius:9px; padding:9px 12px;}
-  .prev-side .k{font-size:10.5px; color:var(--muted);}
-  .prev-side .v{font-family:var(--mono); font-size:16px; font-weight:600; margin-top:2px;}
-  .prev-side.winner{outline:1.5px solid currentColor;}
-  .prev-side.UP{color:var(--mint);} .prev-side.DOWN{color:var(--coral);}
-
-  .book-row{display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:12px;}
-  .book{background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:14px 16px;}
-  .book .side{font-family:var(--mono); font-size:11px; font-weight:700; letter-spacing:.4px;}
-  .book.UP .side{color:var(--mint);} .book.DOWN .side{color:var(--coral);}
-  .book .mid{font-family:var(--mono); font-size:22px; font-weight:700; margin-top:6px;}
-  .book .ba{font-family:var(--mono); font-size:10.5px; color:var(--faint); margin-top:4px;}
-  .gauge-track{position:relative; height:6px; border-radius:99px; background:var(--panel-3); margin-top:9px; overflow:hidden;}
-  .gauge-fill{position:absolute; inset:0 auto 0 0; border-radius:99px;}
-  .gauge-fill.UP{background:linear-gradient(90deg,#1f8f63,var(--mint));}
-  .gauge-fill.DOWN{background:linear-gradient(90deg,#b23f3f,var(--coral));}
-
-  .status-badge{font-family:var(--mono); font-size:10.5px; font-weight:600; padding:4px 9px; border-radius:99px;}
-  .status-badge.no_signal{background:var(--panel-3); color:var(--faint);}
-  .status-badge.floor_skip{background:var(--violet-dim); color:var(--violet);}
-  .status-badge.entry_pending{background:var(--amber-dim); color:var(--amber);}
-  .status-badge.open{background:var(--mint-dim); color:var(--mint);}
-  .status-badge.done{background:var(--panel-3); color:var(--muted);}
-  .status-badge.halted{background:var(--coral-dim); color:var(--coral);}
-
-  .entry-box{border-radius:10px; padding:12px 14px; font-family:var(--mono); font-size:12px; display:flex;
-             align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; margin-bottom:10px;
-             background:var(--amber-dim); border:1px dashed var(--amber); color:var(--amber);}
-  .pos-box{border-radius:10px; padding:14px 16px; margin-bottom:4px;}
-  .pos-box.UP{background:linear-gradient(135deg,var(--mint-glow),transparent 70%); border:1px solid var(--mint-dim);}
-  .pos-box.DOWN{background:linear-gradient(135deg,var(--coral-glow),transparent 70%); border:1px solid var(--coral-dim);}
-  .pos-head{display:flex; align-items:center; justify-content:space-between; gap:10px; font-family:var(--mono); font-size:12px; margin-bottom:10px;}
-  .pos-head .sd{font-weight:700; font-size:13px;}
-  .pos-head.UP .sd{color:var(--mint);} .pos-head.DOWN .sd{color:var(--coral);}
-  .pos-metrics{display:grid; grid-template-columns:repeat(4,1fr); gap:10px;}
-  .pos-metrics .m .k{font-size:10px; color:var(--muted);}
-  .pos-metrics .m .v{font-family:var(--mono); font-size:14.5px; font-weight:600; margin-top:2px;}
-  .none-msg{color:var(--faint); font-size:12.5px; font-style:italic; padding:6px 2px;}
-
-  .sizing-row{display:grid; grid-template-columns:repeat(3,1fr); gap:10px;}
-  .sizing-row .m{background:var(--panel-3); border-radius:9px; padding:10px 12px;}
-  .sizing-row .m .k{font-size:10.5px; color:var(--muted);}
-  .sizing-row .m .v{font-family:var(--mono); font-size:17px; font-weight:600; margin-top:2px;}
-  .ladder{display:flex; gap:4px; margin-top:12px; flex-wrap:wrap;}
-  .ladder .step{font-family:var(--mono); font-size:10px; padding:4px 8px; border-radius:6px; background:var(--panel-3); color:var(--faint);}
-  .ladder .step.done{background:var(--mint-dim); color:var(--mint);}
-  .ladder .step.cur{background:var(--amber-dim); color:var(--amber); outline:1px solid var(--amber);}
-  .ladder .step.floor{background:var(--violet-dim); color:var(--violet);}
-
-  table{width:100%; border-collapse:collapse; font-size:12px;}
-  th{text-align:left; font-weight:500; color:var(--muted); font-size:10.5px; padding:0 8px 8px 0; border-bottom:1px solid var(--line);}
-  td{padding:8px 8px 8px 0; border-bottom:1px solid var(--line); font-family:var(--mono); font-size:11.5px; vertical-align:middle;}
-  tr:last-child td{border-bottom:none;}
-  .tbl-wrap{overflow-x:auto;}
-  .side-tag{font-weight:700;} .side-tag.UP{color:var(--mint);} .side-tag.DOWN{color:var(--coral);}
-  .pnl.pos{color:var(--mint);} .pnl.neg{color:var(--coral);}
-
-  .stat-grid{display:grid; grid-template-columns:repeat(3,1fr); gap:10px;}
-  .stat{background:var(--panel-3); border-radius:10px; padding:12px 14px;}
-  .stat .v{font-family:var(--mono); font-size:19px; font-weight:700;}
-  .stat .k{font-size:10.5px; color:var(--muted); margin-top:3px;}
-  .stat .v.win{color:var(--mint);} .stat .v.loss{color:var(--coral);}
-
-  .bal-row{display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px;}
-  .bal-row .m .k{font-size:10.5px; color:var(--muted);}
-  .bal-row .m .v{font-family:var(--mono); font-size:19px; font-weight:700; margin-top:3px;}
-  .bal-row .m .v.pos{color:var(--mint);} .bal-row .m .v.neg{color:var(--coral);}
-  .bal-sub{font-family:var(--mono); font-size:10.5px; color:var(--faint); margin-top:3px;}
-
-  svg.eq{width:100%; height:86px; display:block;}
-
-  .log-row{padding:8px 0; border-bottom:1px solid var(--line); font-family:var(--mono); font-size:11px; display:flex; gap:10px;}
-  .log-row:last-child{border-bottom:none;}
-  .log-row .t{color:var(--faint); flex:0 0 56px;}
-  .log-row .ev{flex:0 0 108px; font-weight:600;}
-  .log-row .msg{color:var(--muted); flex:1; min-width:0; overflow-wrap:anywhere;}
-  .log-row .ev.SIGNAL{color:var(--violet);}
-  .log-row .ev.BASE_RESTART{color:var(--violet);}
-  .log-row .ev.SKIP_BASE_ZERO{color:var(--faint);}
-  .log-row .ev.TAKER_ENTRY{color:var(--amber);}
-  .log-row .ev.ENTRY_MISSED{color:var(--faint);}
-  .log-row .ev.SETTLED_WIN{color:var(--mint);}
-  .log-row .ev.SETTLED_LOSS{color:var(--coral);}
-  .log-row .ev.SETTLED_UNDECIDED{color:var(--muted);}
-  .log-row .ev.LADDER{color:var(--amber);}
-  .log-row .ev.HALTED{color:var(--coral);}
-  .log-scroll{max-height:340px; overflow-y:auto;}
-
-  .def-grid{display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin-top:2px;}
-  .def-item{background:var(--panel-3); border-radius:9px; padding:10px 12px;}
-  @media (max-width:640px){ .def-grid{grid-template-columns:1fr 1fr;} }
-  .def-item .k{font-size:10px; color:var(--muted);}
-  .def-item .v{font-family:var(--mono); font-size:13px; font-weight:600; margin-top:2px;}
-
-  @media (max-width:640px){
-    .book-row{grid-template-columns:1fr;}
-    .pos-metrics{grid-template-columns:1fr 1fr;}
-    .sizing-row{grid-template-columns:1fr;}
-    .bal-row{grid-template-columns:1fr;}
-    .stat-grid{grid-template-columns:1fr 1fr;}
-    .prev-grid{grid-template-columns:1fr;}
-    .log-row{flex-wrap:wrap;}
-    .log-row .msg{flex-basis:100%;}
-  }
-</style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BTC 5m Rung Bot — Paper Trading</title>
+<link rel="stylesheet" href="/style.css">
 </head>
 <body>
-<div class="wrap">
+<div class="shell">
 
-  <div class="top">
-    <div>
-      <div class="brand"><span class="bolt">⚡</span> DIPHUNTER</div>
-      <div class="sub">BTC 5-minute up/down. Whichever side won the previous window is bought in the next one. Taker buy at market, 5s after the window opens, at any price. No exits — held to settlement. Size starts at 500sh, −100 per win, reset to 500 on any loss.</div>
+  <header class="top">
+    <div class="brand">
+      <h1>BTC 5m Rung Bot</h1>
+      <span class="sub">Polymarket up/down · independent rung strategy</span>
     </div>
-    <span class="pill" id="connPill"><span class="dot" id="connDot"></span><span id="connText">connecting</span></span>
-  </div>
-
-  <div class="card">
-    <div class="clock-row">
-      <span class="slug" id="slug">—</span>
-      <span class="t" id="clock">—:—</span>
+    <div style="display:flex; align-items:center; gap:12px;">
+      <span class="mode-pill" id="modePill">PAPER TRADING</span>
+      <span class="conn" id="connStatus"><span class="dot"></span><span id="connText">connecting…</span></span>
     </div>
+  </header>
+
+  <div class="ticker mono" id="ticker">
+    <div class="cell"><div class="label">CURRENT WINDOW</div><div class="value" id="tWindow">—</div></div>
+    <div class="cell"><div class="label">WINDOW CLOSES IN</div><div class="value" id="tWindowRemaining">—</div></div>
+    <div class="cell"><div class="label">ORDER CUTOFF (270s)</div><div class="value" id="tCutoff">—</div></div>
+    <div class="cell"><div class="label">UP PRICE</div><div class="value up" id="tUpPrice">—</div></div>
+    <div class="cell"><div class="label">DOWN PRICE</div><div class="value down" id="tDownPrice">—</div></div>
   </div>
 
-  <div class="card">
-    <h2>Previous window <span class="tag" id="prevTag">—</span></h2>
-    <div id="prevBox"></div>
+  <div class="section-title">
+    <span>OPEN POSITIONS — floating, marked to live price</span>
+    <span class="hint" id="posCount"></span>
   </div>
+  <div class="positions-wrap" id="positionsWrap"></div>
 
-  <div class="book-row">
-    <div class="book UP">
-      <div class="side">UP</div>
-      <div class="mid" id="upMid">—</div>
-      <div class="ba" id="upBidAsk">bid — / ask —</div>
-      <div class="gauge-track"><div class="gauge-fill UP" id="upFill" style="width:0%"></div></div>
+  <div class="section-title">
+    <span>RUNGS — each independent, $5,000 allocated, flat 500 shares</span>
+    <span class="hint">win → SHADOW next window (observe only) · shadow win → skip again · shadow loss → resume LIVE</span>
+  </div>
+  <div class="rung-header-row mono">
+    <span>RUNG</span><span>ORDERS / POSITION</span><span>SIZE</span><span>FLOATING P&amp;L / REALIZED</span>
+  </div>
+  <div class="rungs" id="rungBoard"></div>
+
+  <div class="section-title">PORTFOLIO</div>
+  <div class="agg mono" id="aggStrip"></div>
+
+  <div class="grid2">
+    <div class="panel">
+      <div class="panel-head">TRADE LOG — most recent settlements across all rungs</div>
+      <div class="scroll-body">
+        <table class="log mono">
+          <thead>
+            <tr>
+              <th>TIME</th><th>WINDOW</th><th>RUNG</th><th>SIDE</th>
+              <th>SIZE</th><th>COST</th><th>RESULT</th><th>PNL</th>
+            </tr>
+          </thead>
+          <tbody id="logBody"></tbody>
+        </table>
+      </div>
     </div>
-    <div class="book DOWN">
-      <div class="side">DOWN</div>
-      <div class="mid" id="downMid">—</div>
-      <div class="ba" id="downBidAsk">bid — / ask —</div>
-      <div class="gauge-track"><div class="gauge-fill DOWN" id="downFill" style="width:0%"></div></div>
-    </div>
-  </div>
 
-  <div class="card">
-    <h2>Engine <span class="status-badge" id="engineStatus">—</span></h2>
-    <div class="def-grid">
-      <div class="def-item"><div class="k">Entry</div><div class="v" id="defEntry">—</div></div>
-      <div class="def-item"><div class="k">Base / step</div><div class="v" id="defBase">—</div></div>
-      <div class="def-item"><div class="k">Win rule</div><div class="v" id="defWin">—</div></div>
-    </div>
-  </div>
-
-  <div class="card">
-    <h2>Trade</h2>
-    <div id="entryBox"></div>
-    <div id="posBox"></div>
-  </div>
-
-  <div class="card">
-    <h2>Size ladder</h2>
-    <div class="sizing-row">
-      <div class="m"><div class="k">Current base</div><div class="v" id="szBase">—</div></div>
-      <div class="m"><div class="k">Wins in this run</div><div class="v" id="szWins">—</div></div>
-      <div class="m"><div class="k">Floor side</div><div class="v" id="szFloor">—</div></div>
-    </div>
-    <div class="ladder" id="ladderRow"></div>
-  </div>
-
-  <div class="card">
-    <h2>Recent windows <span class="tag" id="followTag">follow right —/—</span></h2>
-    <div class="tbl-wrap"><table>
-      <thead><tr><th>Window</th><th>Followed</th><th>Winner</th><th>Shares</th><th>Result</th><th>P&amp;L</th><th>Base after</th></tr></thead>
-      <tbody id="histBody"><tr><td colspan="7" style="color:var(--faint); font-style:italic;">no finished windows yet</td></tr></tbody>
-    </table></div>
-  </div>
-
-  <div class="card">
-    <h2>Trade stats</h2>
-    <div class="stat-grid" id="statGrid"></div>
-  </div>
-
-  <div class="card">
-    <h2>Balance</h2>
-    <div class="bal-row">
-      <div class="m"><div class="k">Balance</div><div class="v" id="balBalance">—</div><div class="bal-sub" id="balSub">—</div></div>
-      <div class="m"><div class="k">Realized P&amp;L</div><div class="v" id="balRealized">—</div><div class="bal-sub" id="balRealizedSub">lifetime, closed windows</div></div>
-      <div class="m"><div class="k">Unrealized P&amp;L</div><div class="v" id="balUnrealized">—</div><div class="bal-sub">floating, open position</div></div>
+    <div class="panel">
+      <div class="panel-head">ENGINE LOG</div>
+      <div class="events" id="eventsBody"></div>
     </div>
   </div>
 
-  <div class="card">
-    <h2>Equity curve <span class="tag" id="eqTag">— points</span></h2>
-    <svg class="eq" id="eqSvg" viewBox="0 0 600 86" preserveAspectRatio="none"></svg>
-  </div>
-
-  <div class="card">
-    <h2>Event log</h2>
-    <div class="log-scroll" id="logScroll"></div>
-  </div>
+  <footer class="foot mono">
+    <span id="footUptime">uptime —</span>
+    <span>simulated fills from public CLOB prices · no wallet · no signed orders</span>
+  </footer>
 
 </div>
-
-<script>
-const $ = id => document.getElementById(id);
-const esc = x => String(x).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const fmtP = v => v==null ? '—' : Number(v).toFixed(3);
-const fmtM = v => v==null ? '—' : '$' + Number(v).toFixed(2);
-const fmtSh = v => v==null ? '—' : Number(v).toLocaleString(undefined,{maximumFractionDigits:0});
-const fmtShF = v => v==null ? '—' : Number(v).toFixed(2);
-const fmtC = v => v==null ? '—' : '$' + Number(v).toLocaleString(undefined,{minimumFractionDigits:2, maximumFractionDigits:2});
-const signed = v => (v==null) ? '—' : (v>=0?'+':'') + fmtM(v);
-const fmtT = ts => { const d=new Date(ts*1000); return d.toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}); };
-const sideWord = s => s==='UP' ? 'UP' : (s==='DOWN' ? 'DOWN' : '—');
-
-let serverOffset = 0;
-
-function renderClock(win){
-  if(!win){ $('slug').textContent='waiting for window'; $('clock').textContent='—:—'; return; }
-  $('slug').textContent = win.slug;
-  const now = Date.now()/1000 + serverOffset;
-  const left = Math.max(0, win.close_ts - now);
-  const m = Math.floor(left/60), s = Math.floor(left%60);
-  const el = $('clock');
-  el.textContent = `${m}:${String(s).padStart(2,'0')}`;
-  el.classList.toggle('hot', left <= 5);
-}
-
-function renderPrev(prev){
-  const tag = $('prevTag');
-  const box = $('prevBox');
-  if(!prev){ tag.textContent='none yet'; box.innerHTML = '<div class="none-msg">No previous window observed yet — the bot is watching the current one to read its result.</div>'; return; }
-  tag.textContent = prev.slug;
-  const w = prev.winner;
-  const cls = w || 'none';
-  const headline = w ? `${w} won this window's read (${w==='UP'?fmtP(prev.up):fmtP(prev.down)} ≥ 0.95) → buying ${w} in the next window.`
-                     : `Neither side reached 0.95 at the close — undecided, no signal for the next window.`;
-  box.innerHTML = `<div class="prev-banner ${cls}">${headline}
-    <div class="prev-grid">
-      <div class="prev-side UP ${w==='UP'?'winner':''}"><div class="k">UP</div><div class="v">${fmtP(prev.up)}</div></div>
-      <div class="prev-side DOWN ${w==='DOWN'?'winner':''}"><div class="k">DOWN</div><div class="v">${fmtP(prev.down)}</div></div>
-    </div></div>`;
-}
-
-function renderGauge(fillId, midId, bidAskId, bid, ask){
-  const mid = (bid!=null && ask!=null) ? (bid+ask)/2 : (ask!=null?ask:bid);
-  $(midId).textContent = fmtP(mid);
-  $(bidAskId).textContent = `bid ${fmtP(bid)} / ask ${fmtP(ask)}`;
-  const pct = mid!=null ? Math.max(0,Math.min(100, mid*100)) : 0;
-  $(fillId).style.width = pct + '%';
-}
-
-function renderEngine(e){
-  const statusLabel = {
-    no_signal:'no signal', floor_skip:'skipped — base at floor', entry_pending:'entry armed',
-    open:'position open', done:'settled', halted:'halted',
-  }[e.status] || e.status;
-  const badge = $('engineStatus');
-  badge.textContent = statusLabel; badge.className = 'status-badge ' + e.status;
-
-  $('defEntry').textContent = `limit @ ${fmtP(e.def.limit_price)} → market ≤ ${fmtP(e.def.market_cap)}`;
-  $('defBase').textContent = fmtM(e.def.base_dollars) + ' / −' + fmtM(e.def.step);
-  $('defWin').textContent = fmtP(e.def.win_price) + '+ wins';
-
-  let entryHtml = '';
-  const en = e.entry;
-  if(en){
-    let when;
-    if(en.phase === 'limit') when = `limit resting · ${en.seconds_left.toFixed(0)}s left`;
-    else if(en.phase === 'market_armed') when = 'market buy firing now';
-    else when = 'waiting for price to drop';
-    entryHtml = `<div class="entry-box"><span>armed: <b>${en.side}</b> ${fmtM(en.dollars)} · ${esc(en.phase_note)}</span><span>${when} · ask ${fmtP(en.ask)}</span></div>`;
-  } else if(e.plan === 'floor_skip'){
-    entryHtml = `<div class="entry-box" style="background:var(--violet-dim); border-color:var(--violet); color:var(--violet);"><span>${esc(e.plan_note || 'base at floor — skipping this signal')}</span></div>`;
-  } else if(e.plan === 'no_signal'){
-    entryHtml = `<div class="entry-box" style="background:var(--panel-3); border:1px dashed var(--line); color:var(--faint);"><span>${esc(e.plan_note || 'no signal')}</span></div>`;
-  }
-  $('entryBox').innerHTML = entryHtml;
-
-  const pos = e.position;
-  if(pos){
-    const upnl = pos.unrealized_pnl;
-    $('posBox').innerHTML = `<div class="pos-box ${pos.side}">
-      <div class="pos-head ${pos.side}"><span class="sd">${pos.side}</span><span>${fmtShF(pos.shares)}sh @ ${fmtP(pos.entry_price)} · held ${Math.floor(pos.seconds_since_entry/60)}:${String(Math.floor(pos.seconds_since_entry%60)).padStart(2,'0')}</span></div>
-      <div class="pos-metrics">
-        <div class="m"><div class="k">Entry</div><div class="v">${fmtP(pos.entry_price)}</div></div>
-        <div class="m"><div class="k">Mark</div><div class="v">${fmtP(pos.mark_price)}</div></div>
-        <div class="m"><div class="k">If it wins</div><div class="v" style="color:var(--mint)">${signed(pos.payout_if_win)}</div></div>
-        <div class="m"><div class="k">If it loses</div><div class="v" style="color:var(--coral)">${signed(pos.loss_if_lose)}</div></div>
-      </div>
-      <div style="margin-top:8px; font-family:var(--mono); font-size:11px; color:${upnl>=0?'var(--mint)':'var(--coral)'}">mark-to-market ${signed(upnl)}</div>
-    </div>`;
-  } else if(!en){
-    $('posBox').innerHTML = '<div class="none-msg">no open position</div>';
-  } else {
-    $('posBox').innerHTML = '';
-  }
-
-  const sz = e.sizing;
-  $('szBase').textContent = fmtM(sz.base);
-  $('szWins').textContent = sz.wins_in_run;
-  $('szFloor').textContent = sz.floor_side || '—';
-  const steps = [500,400,300,200,100,0];
-  $('ladderRow').innerHTML = steps.map(v => {
-    let cls = v > sz.base ? 'done' : (v === sz.base ? 'cur' : '');
-    if(v===0 && sz.base===0 && sz.floor_side) cls += ' floor';
-    return `<span class="step ${cls}">$${v}</span>`;
-  }).join('');
-
-  $('followTag').textContent = `follow right ${e.follow_right}/${e.follow_right+e.follow_wrong}` + (e.follow_accuracy!=null?` (${e.follow_accuracy}%)`:'');
-
-  const hist = e.history || [];
-  $('histBody').innerHTML = hist.length ? hist.map(h => {
-    const pnl = h.pnl;
-    const pnlHtml = pnl==null ? '—' : `<span class="pnl ${pnl>=0?'pos':'neg'}">${signed(pnl)}</span>`;
-    return `<tr>
-      <td>${esc(h.slug.replace('btc-updown-5m-',''))}</td>
-      <td>${h.followed?`<span class="side-tag ${h.followed}">${h.followed}</span>`:'—'}</td>
-      <td>${h.winner?`<span class="side-tag ${h.winner}">${h.winner}</span>`:'undecided'}</td>
-      <td>${h.shares!=null?`${fmtShF(h.shares)}sh @ ${fmtP(h.entry_price)}`:'—'}</td>
-      <td>${esc(h.result)}</td>
-      <td>${pnlHtml}</td>
-      <td>${fmtM(h.base_after)}</td>
-    </tr>`;
-  }).join('') : '<tr><td colspan="7" style="color:var(--faint); font-style:italic;">no finished windows yet</td></tr>';
-
-  const stats = [
-    ['total_entries','entries filled','win'], ['total_no_fills','no fill',''],
-    ['wins','wins','win'], ['losses','losses','loss'],
-    ['total_floor_skips','skipped (base at floor)',''], ['total_no_signal','no signal',''],
-    ['total_undecided','undecided windows',''], ['total_illiquid_skips','illiquid retries',''],
-    ['win_rate','win rate %','win'],
-  ];
-  $('statGrid').innerHTML = stats.map(([k,label,cls]) => {
-    let v = e[k]; if(k==='win_rate') v = v==null?'—':v+'%';
-    return `<div class="stat"><div class="v ${cls}">${v==null?'—':v}</div><div class="k">${label}</div></div>`;
-  }).join('');
-
-  $('balBalance').textContent = fmtM(e.balance);
-  $('balSub').textContent = `${signed(e.balance - e.starting_capital)} since start`;
-  const rv = e.realized_pnl;
-  $('balRealized').textContent = signed(rv); $('balRealized').className = 'v ' + (rv>=0?'pos':'neg');
-  const uv = e.unrealized_pnl;
-  $('balUnrealized').textContent = signed(uv); $('balUnrealized').className = 'v ' + (uv>=0?'pos':'neg');
-
-  renderEquity(e.equity_curve || []);
-}
-
-function renderEquity(points){
-  const svg = $('eqSvg');
-  $('eqTag').textContent = points.length + ' points';
-  if(points.length < 2){ svg.innerHTML=''; return; }
-  const vals = points.map(p=>p.balance);
-  const min = Math.min(...vals), max = Math.max(...vals);
-  const range = (max-min) || 1;
-  const W=600,H=86,pad=4;
-  const pts = points.map((p,i) => {
-    const x = pad + (i/(points.length-1)) * (W-2*pad);
-    const y = H-pad - ((p.balance-min)/range) * (H-2*pad);
-    return [x,y];
-  });
-  const line = pts.map((p,i)=> (i===0?'M':'L')+p[0].toFixed(1)+','+p[1].toFixed(1)).join(' ');
-  const up = vals[vals.length-1] >= vals[0];
-  const color = up ? 'var(--mint)' : 'var(--coral)';
-  const area = line + ` L${pts[pts.length-1][0].toFixed(1)},${H} L${pts[0][0].toFixed(1)},${H} Z`;
-  svg.innerHTML = `<path d="${area}" fill="${up?'rgba(61,220,151,.12)':'rgba(255,107,107,.10)'}" stroke="none"/>
-    <path d="${line}" fill="none" stroke="${color}" stroke-width="1.6"/>`;
-}
-
-function renderLog(log){
-  $('logScroll').innerHTML = (log||[]).map(l => {
-    const parts = [];
-    if(l.side) parts.push(l.side);
-    if(l.price!=null) parts.push('@ '+fmtP(l.price));
-    if(l.shares!=null) parts.push(fmtShF(l.shares)+'sh');
-    if(l.pnl!=null) parts.push('pnl '+signed(l.pnl));
-    const meta = parts.length ? `<b>${esc(parts.join(' · '))}</b> ` : '';
-    return `<div class="log-row"><span class="t">${fmtT(l.ts)}</span><span class="ev ${esc(l.event)}">${esc(l.event)}</span><span class="msg">${meta}${esc(l.note||'')}</span></div>`;
-  }).join('') || '<div class="none-msg">no events yet</div>';
-}
-
-async function poll(){
-  try{
-    const res = await fetch('/api/state');
-    const s = await res.json();
-    serverOffset = s.server_time - Date.now()/1000;
-
-    const connected = !s.error;
-    $('connDot').className = 'dot ' + (connected ? 'live' : 'err');
-    $('connText').textContent = s.market_error ? 'market error' : (connected ? 'live' : 'error');
-
-    renderClock(s.window);
-    renderPrev(s.engine.prev);
-    renderGauge('upFill','upMid','upBidAsk', s.book.up_bid, s.book.up_ask);
-    renderGauge('downFill','downMid','downBidAsk', s.book.down_bid, s.book.down_ask);
-    renderEngine(s.engine);
-    renderLog(s.log);
-  } catch(e){
-    $('connDot').className = 'dot err'; $('connText').textContent = 'disconnected';
-  }
-}
-let lastWindow = null;
-setInterval(() => { if(lastWindow) renderClock(lastWindow); }, 250);
-const origRenderClock = renderClock;
-renderClock = (win) => { lastWindow = win; origRenderClock(win); };
-
-poll();
-setInterval(poll, 1000);
-</script>
+<script src="/app.js"></script>
 </body>
 </html>
