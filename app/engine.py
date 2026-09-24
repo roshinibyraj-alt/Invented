@@ -345,9 +345,7 @@ class Engine:
             },
             "config": {
                 "rung_prices": config.RUNG_PRICES,
-                "base_size": config.BASE_SIZE,
-                "size_step": config.SIZE_STEP,
-                "floor_size": config.FLOOR_SIZE,
+                "rung_size": config.RUNG_SIZE,
                 "capital_per_rung": config.CAPITAL_PER_RUNG,
                 "order_cutoff_seconds": config.ORDER_CUTOFF_SECONDS,
                 "window_seconds": config.WINDOW_SECONDS,
