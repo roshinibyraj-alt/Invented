@@ -193,19 +193,81 @@ function render(snap) {
   document.getElementById('footUptime').textContent = `uptime ${fmtSecs(snap.uptime_seconds)}`;
 }
 
-function setConn(state) {
+function setConn(state, detail) {
   const el = document.getElementById('connStatus');
   const txt = document.getElementById('connText');
   el.className = 'conn ' + state;
-  txt.textContent = state === 'live' ? 'live' : (state === 'down' ? 'disconnected — retrying' : 'connecting…');
+  const labels = {
+    live: 'live',
+    polling: 'live (polling fallback)',
+    down: detail || 'disconnected — retrying',
+    connecting: 'connecting…',
+  };
+  txt.textContent = labels[state] || state;
+}
+
+let wsFailCount = 0;
+let pollTimer = null;
+
+function startPolling() {
+  if (pollTimer) return;
+  console.warn('WebSocket unavailable after several attempts — falling back to REST polling of /api/snapshot.');
+  pollTimer = setInterval(async () => {
+    try {
+      const res = await fetch('/api/snapshot');
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      render(await res.json());
+      setConn('polling');
+    } catch (e) {
+      console.error('polling fallback failed:', e);
+      setConn('down', 'server unreachable — check it is running');
+    }
+  }, 2000);
+}
+
+function stopPolling() {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
 }
 
 function connect() {
+  if (location.protocol === 'file:') {
+    // Opened straight from disk (double-clicked index.html) instead of via
+    // the running server — there is no backend to talk to at all.
+    console.error(
+      'This page was opened as a local file (file://). It needs to be served by ' +
+      'the FastAPI backend: run `pip install -r requirements.txt` then ' +
+      '`uvicorn app.main:app --reload --port 8000` and open http://localhost:8000 instead.'
+    );
+    setConn('down', 'open via http://localhost, not as a local file — see console');
+    return;
+  }
+
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  const ws = new WebSocket(`${proto}://${location.host}/ws`);
-  ws.onopen = () => setConn('live');
+  let ws;
+  try {
+    ws = new WebSocket(`${proto}://${location.host}/ws`);
+  } catch (e) {
+    console.error('failed to construct WebSocket:', e);
+    wsFailCount++;
+    if (wsFailCount >= 3) startPolling();
+    setTimeout(connect, 2000);
+    return;
+  }
+
+  ws.onopen = () => {
+    wsFailCount = 0;
+    stopPolling();
+    setConn('live');
+  };
   ws.onmessage = (ev) => render(JSON.parse(ev.data));
-  ws.onclose = () => { setConn('down'); setTimeout(connect, 2000); };
-  ws.onerror = () => ws.close();
+  ws.onerror = (ev) => console.error('WebSocket error (see Network tab for details):', ev);
+  ws.onclose = (ev) => {
+    console.warn(`WebSocket closed (code ${ev.code}${ev.reason ? ', reason: ' + ev.reason : ''}).`);
+    wsFailCount++;
+    if (wsFailCount >= 3) startPolling();
+    setConn('down');
+    setTimeout(connect, 2000);
+  };
 }
 connect();
+fetch('/api/snapshot').then(r => r.ok && r.json()).then(snap => snap && render(snap)).catch(() => {});

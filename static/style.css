@@ -94,6 +94,7 @@ header.top {
   background: var(--muted-2);
 }
 .conn.live .dot { background: var(--up); box-shadow: 0 0 6px var(--up); }
+.conn.polling .dot { background: var(--amber); box-shadow: 0 0 6px var(--amber); }
 .conn.down .dot { background: var(--down); }
 
 /* ---------- ticker strip ---------- */
