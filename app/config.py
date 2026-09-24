@@ -19,7 +19,9 @@ Central configuration for DIPHUNTER -- BTC 5-minute up/down, "follow the last wi
         DOLLARS_STEP (100), floor 0. Any loss resets it to 500. At 0 the bot skips
         same-direction signals; the first opposite-direction signal trades 500 and restarts the
         base. Shares bought = base dollars / actual fill price, so the dollar risk per trade is
-        fixed but share count scales with price.
+        fixed but share count scales with price. A window with no fill still moves the ladder as
+        a "paper" win/loss once the signalled side is decided (no cash moved either way) -- only
+        a genuinely undecided window, a no-signal window, or a floor-skip leaves it untouched.
 
 Everything is priced/filled against Polymarket's CLOB book. No other data source.
 """

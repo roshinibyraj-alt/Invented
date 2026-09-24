@@ -28,6 +28,9 @@ def tick(e, ts, ua, da, ul=None, dl=None, ub=0.30, db=0.30):
 
 def ev(e): return [x.event for x in e.broker.log]
 def close(e, winner=None, up=None, down=None): e.finalize_window({"winner": winner, "up": up, "down": down, "age": 0.1})
+def next_window(prev_open_ts):
+    ot = prev_open_ts + 300
+    return WindowMarket(f"w{int(ot)}", None, "u", "d", float(ot), float(ot + 300)), ot
 
 # ---- 0. sanity on the new config shape
 assert LP == 0.40 and TO == 30 and CAP == 0.50 and BASE == 500 and STEP == 100
@@ -103,12 +106,30 @@ tick(e, T + TO + 4, 0.48, 0.52, ul=[(0.48, 1000)])
 assert e.s.position and abs(e.s.position.entry_price - 0.48) < 1e-9
 print("10 ok: empty book in phase 2 -> retries, no fake fill, buys when depth returns")
 
-# ---- 11. never fills (never <=0.40, never <=0.50) -> ENTRY_MISSED at close, base unchanged
+# ---- 11. never fills, and the window ends undecided -> ENTRY_MISSED, base genuinely untouched
 e = mk(prev=Side.UP); tick(e, T + 5, 0.90, 0.10); tick(e, T + TO + 5, 0.90, 0.10, ul=[(0.90, 1000)]); tick(e, T + 290, 0.90, 0.10)
-close(e, winner=Side.UP, up=0.97, down=0.03)
+close(e, winner=None, up=0.55, down=0.45)
 assert e.total_no_fills == 1 and "ENTRY_MISSED" in ev(e) and e.capital.balance == config.STARTING_CAPITAL
 assert e.base == 500 and e.history[0]["result"] == "no fill"
-print("11 ok: price never reaches either threshold -> no trade, base untouched, balance untouched")
+print("11 ok: price never reaches either threshold, window undecided -> no trade, base untouched, balance untouched")
+
+# ---- 11b. no fill, but the signalled side goes on to win anyway -> "paper" win, base steps down,
+#           no cash moves
+e = mk(prev=Side.UP); tick(e, T + 5, 0.90, 0.10); tick(e, T + TO + 5, 0.90, 0.10, ul=[(0.90, 1000)])
+close(e, winner=Side.UP, up=0.97, down=0.03)
+assert e.total_no_fills == 1 and e.wins == 1 and e.base == 400
+assert e.capital.balance == config.STARTING_CAPITAL          # no money moved
+assert e.history[0]["result"] == "no fill -- signal won (paper)" and e.history[0]["base_after"] == 400
+print("11c ok: no fill but signal won -> paper win, base -$100, no cash moved")
+
+# ---- 11d. no fill, signalled side loses -> "paper" loss, base resets to $500, no cash moves
+e = mk(prev=Side.UP); e.base = 300     # pretend we're already partway down the ladder
+tick(e, T + 5, 0.90, 0.10)             # never fills this window
+close(e, winner=Side.DOWN, up=0.03, down=0.97)     # followed UP, DOWN won -> paper loss
+assert e.total_no_fills == 1 and e.losses == 1 and e.base == 500
+assert e.capital.balance == config.STARTING_CAPITAL
+assert e.history[0]["result"] == "no fill -- signal lost (paper)"
+print("11d ok: no fill but signal lost -> paper loss, base reset to $500, no cash moved")
 
 # ---- 12. no entry at/after the window close
 e = mk(prev=Side.UP); tick(e, T + 300, LP, 0.60); assert e.s.position is None
@@ -130,10 +151,6 @@ close(e, winner=None, up=0.55, down=0.45)
 assert e.total_undecided == 1 and e.wins == 0 and e.losses == 0 and e.base == 500     # undecided doesn't move the ladder
 assert "no signal" not in ev(e) and e.history[0]["winner"] is None
 print("14 ok: undecided window -> position exits at last bid, ladder untouched")
-
-def next_window(prev_open_ts):
-    ot = prev_open_ts + 300
-    return WindowMarket(f"w{int(ot)}", None, "u", "d", float(ot), float(ot + 300)), ot
 
 # ---- 15. the ladder: $500 -> $400 -> $300 -> $200 -> $100 -> $0, then same-side signals are skipped
 e = mk(prev=Side.UP); ot = T

@@ -16,9 +16,11 @@ Exit   : none. Held to the window end and settled by the 0.95 rule: winner $1/sh
 
 Size   : ONE shared base, in DOLLARS, starts at BASE_DOLLARS (500). Each win -DOLLARS_STEP (100),
          floor 0. Any loss resets to 500. At 0, same-direction signals are skipped; the first
-         opposite-direction signal trades 500 and restarts the base. Windows with no trade
-         (skipped, no signal, never filled) change nothing. Shares bought = dollars spent /
-         actual fill price, so dollar risk is fixed but share count scales with price.
+         opposite-direction signal trades 500 and restarts the base. A no-fill window still moves
+         the ladder as a "paper" win/loss if the signalled side is later decided (won -> -100,
+         lost -> reset to 500, no cash moved either way) -- only a genuinely undecided window, a
+         no-signal window, or a floor-skip leaves the base untouched. Shares bought = dollars
+         spent / actual fill price, so dollar risk is fixed but share count scales with price.
 """
 import time
 from collections import deque
@@ -418,12 +420,22 @@ class Engine:
             self.s.position = None
         elif self.s.plan == "trading" and not self.capital.halted:
             self.total_no_fills += 1
-            self._log("ENTRY_MISSED", side=self.s.side.value,
-                       note="window closed without a fill: limit never reached "
-                            f"{config.LIMIT_ENTRY_PRICE:.2f} in the first {config.LIMIT_ENTRY_TIMEOUT_SECONDS:g}s, "
-                            f"and price never came back to {config.MARKET_ENTRY_CAP:.2f} after -- "
-                            f"no trade, base stays ${self.base:.0f}")
-            result_txt = "no fill"
+            base_note = (f"limit never reached {config.LIMIT_ENTRY_PRICE:.2f} in the first "
+                         f"{config.LIMIT_ENTRY_TIMEOUT_SECONDS:g}s, and price never came back to "
+                         f"{config.MARKET_ENTRY_CAP:.2f} after -- no trade, no money at risk")
+            if winner is not None:
+                won = self.s.side == winner
+                self._log("ENTRY_MISSED", side=self.s.side.value,
+                           note=(f"window closed without a fill: {base_note}. But the signal "
+                                 f"{'won' if won else 'lost'} anyway -- treating this as a paper "
+                                 f"{'win' if won else 'loss'} for the size ladder only (no cash moved)"))
+                self._update_ladder(won, self.s.side)
+                result_txt = "no fill -- signal won (paper)" if won else "no fill -- signal lost (paper)"
+            else:
+                self._log("ENTRY_MISSED", side=self.s.side.value,
+                           note=f"window closed without a fill: {base_note}, and the window was undecided "
+                                f"-- base stays ${self.base:.0f}")
+                result_txt = "no fill"
 
         self.history.appendleft({
             "slug": window.slug, "open_ts": window.open_ts,

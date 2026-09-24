@@ -54,8 +54,11 @@ $500 → $400 → $300 → $200 → $100 → $0   (−$100 per win, floor $0)
 - At **$0**, the bot **skips** signals on the side that ran the base down
   (it still watches and records the result, just doesn't trade). The
   **first signal on the opposite side** trades $500 and restarts the base.
-- An undecided window, a no-signal window, or a signal that never got
-  filled all leave the base exactly where it was.
+- A window where the entry never got filled **still moves the ladder**
+  as a "paper" win/loss once the signalled side is decided — signal won:
+  −$100 off the base; signal lost: base resets to $500 — no cash moves
+  either way, only the ladder. An undecided window (neither side hit
+  0.95+) or a no-signal window leaves the base exactly where it was.
 
 ## Run locally
 
