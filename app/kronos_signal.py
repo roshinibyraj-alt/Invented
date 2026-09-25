@@ -6,8 +6,7 @@ Replaces the previous strict UP/DOWN/UP/DOWN alternation: on every new
 model (https://github.com/shiyu-coder/Kronos), a decoder-only transformer
 pretrained on 12B+ real OHLCV candles across 45+ exchanges -- to forecast
 the next few 1-minute BTC candles, and only take a side if that forecast
-is directionally confident. If it isn't, the window is skipped entirely
-(same "no trade this window" behavior the old price filter already had).
+is directionally confident. If it isn't, the window is skipped entirely.
 
 Two moving pieces:
 
@@ -24,13 +23,9 @@ Two moving pieces:
     at most every KRONOS_REFRESH_SECONDS rather than on every 1s tick --
     a transformer forward pass is far too slow to run every poll.
 
-Install (not on PyPI, and not vendored here):
-    pip install torch huggingface_hub pandas numpy
-    # then pull the Kronos package itself from its repo -- see the
-    # project's README for the current recommended install step -- and
-    # make sure `from model import Kronos, KronosTokenizer, KronosPredictor`
-    # resolves (e.g. drop the repo's `model/` package next to this file,
-    # or `pip install -e` a checkout of it).
+The Kronos model package is vendored in the project's model/ directory.
+The first inference downloads the configured tokenizer and model weights
+from Hugging Face into the runtime cache.
 
 This module is defensive by design: any import, load, or inference
 failure is caught and logged, and get_signal() just returns (None, 0.0)

@@ -7,8 +7,10 @@ python-dotenv==1.0.1
 pandas==2.2.2
 numpy==1.26.4
 torch==2.4.1              # CPU wheel is fine for Kronos-small/base; swap for a CUDA build if KRONOS_DEVICE=cuda
-huggingface_hub==0.25.1
-# Kronos itself isn't on PyPI -- pull the `model/` package from its repo
-# (https://github.com/shiyu-coder/Kronos) into this project, or
-# `pip install -e` a checkout of it, so that
-# `from model import Kronos, KronosTokenizer, KronosPredictor` resolves.
+huggingface_hub==0.33.1
+einops==0.8.1
+tqdm==4.67.1
+safetensors==0.6.2
+
+# Kronos model code is vendored in model/ from:
+# https://github.com/shiyu-coder/Kronos

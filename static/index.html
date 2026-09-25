@@ -294,7 +294,7 @@ function renderEngineCard(elId, e){
     ['Skipped (signal)', e.skipped_signal||0],
     ['Take profit', '0.99 (booked @ $1.00/sh)'],
     ['Ladder', `${fmtSh(e.min_shares)}sh floor \u2192 ${fmtSh(e.base_shares)}sh base \u2192 ${fmtSh(e.max_shares)}sh cap`],
-    ['Entry filter', `ask must be below ${fmtP(e.max_entry_price)}`],
+    ['Entry', 'first live ask on Kronos-selected side'],
   ].map(([k,v]) => `<div class="def-item"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
 
   const cur = e.current_shares||0, maxSh = Math.max(1, e.max_shares||1000);
@@ -363,7 +363,6 @@ function renderEngineCard(elId, e){
       <span>${e.settled_wins||0} won settle</span>
       <span>${e.settled_losses||0} lost settle</span>
       <span>${e.resets||0} resets</span>
-      <span>${e.skipped_price||0} skipped (\u22650.50)</span>
     </div>
   `;
 }
@@ -387,7 +386,6 @@ function renderStats(e){
     [e.fills||0, 'entries'], [e.tp_fills||0, 'tp fills'],
     [e.settled_wins||0, 'won settle'], [e.settled_losses||0, 'lost settle'],
     [e.resets||0, 'resets'],
-    [e.skipped_price||0, 'skipped (\u22650.50)'],
     [(wins+losses) ? (100*wins/(wins+losses)).toFixed(1) : '\u2014', 'win rate %'],
   ];
   $('statsGrid').innerHTML = tiles.map(([v,label]) =>

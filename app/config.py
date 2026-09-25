@@ -10,13 +10,8 @@ floor, 1000 cap), asymmetric reset behavior at each end:
     BTC/USDT candles, and hands back a side only if the forecast move is
     confident enough (KRONOS_MIN_CONFIDENCE). No more alternation --
     if Kronos isn't confident (or the model/candle buffer isn't ready),
-    the window is skipped entirely, same as the old price-filter skip.
-    ENGINE2_SHARES worth of shares, taker, on window open -- but only if
-    the ask is below ENGINE2_MAX_ENTRY_PRICE (0.50) at the moment of
-    entry. That's checked every tick, all window: if the ask never dips
-    below 0.50 the whole window, no trade happens that window at all --
-    the ladder is untouched, and Kronos is asked fresh for the next
-    window as normal.
+    the window is skipped entirely. When Kronos does select a side, the
+    bot enters on the first tick with a live ask for that side.
 
   - Sizing: starts at the base (ENGINE2_SHARES, 500sh). Each WIN (TP
     fill, or settling in the position's favor) steps size down by
@@ -95,13 +90,6 @@ KRONOS_REFRESH_SECONDS = 15.0    # re-run inference at most this often, not ever
 # these starting values are not calibrated to anything.
 KRONOS_MOVE_SCALE = 0.0015
 KRONOS_MIN_CONFIDENCE = 0.15
-
-# ---- Entry price filter --------------------------------------------------
-# Only enter if the ask is below this at the moment of the check (checked
-# every tick, all window -- if it never dips below, that window is
-# skipped entirely: no trade, ladder untouched, side alternation still
-# advances to the other side next window).
-ENGINE2_MAX_ENTRY_PRICE = 0.50
 
 # ---- Engine sizing: win/loss ladder --------------------------------------
 ENGINE2_SHARES = 500.0        # base size -- where every reset lands
