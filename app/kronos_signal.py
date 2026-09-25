@@ -6,26 +6,36 @@ Replaces the previous strict UP/DOWN/UP/DOWN alternation: on every new
 model (https://github.com/shiyu-coder/Kronos), a decoder-only transformer
 pretrained on 12B+ real OHLCV candles across 45+ exchanges -- to forecast
 the next few 1-minute BTC candles, and only take a side if that forecast
-is directionally confident. If it isn't, the window is skipped entirely.
+is directionally confident. If it isn't, the window is skipped entirely
+(same "no trade this window" behavior the old price filter already had).
 
 Two moving pieces:
 
-  - CandleFeed: a rolling buffer of real 1m BTC/USDT OHLCV candles, pulled
-    from Binance's public klines REST endpoint (no auth). Kronos needs
-    genuine market history to condition its forecast on -- Polymarket's
-    own token prices are a binary contract *on* this same BTC price, not
-    the underlying series, so they're the wrong thing to feed the model.
-    Kept on its own refresh cycle, independent of the Polymarket poll
-    loop, so a Polymarket hiccup doesn't starve the model of data.
+  - CandleFeed: a rolling buffer of real 1m BTC/USD(T) OHLCV candles.
+    Binance's public klines endpoint (no auth) is tried first; some hosts
+    (Railway, AWS, GCP, etc.) get 403/451'd by Binance, so on failure it
+    falls back through Coinbase Exchange, Kraken, then Bybit's public
+    endpoints (see CANDLE_SOURCES below) until one responds. A source that
+    just failed is skipped for SOURCE_BACKOFF_SECONDS rather than retried
+    every tick. Kronos needs genuine market history to condition its
+    forecast on -- Polymarket's own token prices are a binary contract
+    *on* this same BTC price, not the underlying series, so they're the
+    wrong thing to feed the model. Kept on its own refresh cycle,
+    independent of the Polymarket poll loop, so a Polymarket hiccup
+    doesn't starve the model of data.
 
   - KronosSignal: lazily loads the tokenizer + model once (first call),
     then serves cached (side, confidence) results, re-running inference
     at most every KRONOS_REFRESH_SECONDS rather than on every 1s tick --
     a transformer forward pass is far too slow to run every poll.
 
-The Kronos model package is vendored in the project's model/ directory.
-The first inference downloads the configured tokenizer and model weights
-from Hugging Face into the runtime cache.
+Install (not on PyPI, and not vendored here):
+    pip install torch huggingface_hub pandas numpy
+    # then pull the Kronos package itself from its repo -- see the
+    # project's README for the current recommended install step -- and
+    # make sure `from model import Kronos, KronosTokenizer, KronosPredictor`
+    # resolves (e.g. drop the repo's `model/` package next to this file,
+    # or `pip install -e` a checkout of it).
 
 This module is defensive by design: any import, load, or inference
 failure is caught and logged, and get_signal() just returns (None, 0.0)
@@ -35,7 +45,7 @@ it never raises into the trading loop.
 import logging
 import time
 from collections import deque
-from typing import Optional
+from typing import List, Optional
 
 import httpx
 
@@ -45,60 +55,188 @@ from .models import Side
 log = logging.getLogger("kronos_signal")
 
 
+# ---------------------------------------------------------------------------
+# Candle sources -- Binance is tried first, but some hosts (Railway, AWS,
+# GCP, etc.) get 403/451'd by Binance's public API, so we fall back through
+# a couple of other exchanges' public, no-auth REST endpoints. Every source
+# normalizes to the same list-of-dicts shape, oldest bar first:
+#   {"timestamps": <unix seconds>, "open", "high", "low", "close", "volume"}
+# ---------------------------------------------------------------------------
+
+class CandleSource:
+    name = "base"
+
+    async def fetch(self, client: httpx.AsyncClient, limit: int) -> List[dict]:
+        raise NotImplementedError
+
+
+class BinanceSource(CandleSource):
+    name = "binance"
+
+    async def fetch(self, client, limit):
+        resp = await client.get(
+            "https://api.binance.com/api/v3/klines",
+            params={"symbol": "BTCUSDT", "interval": "1m", "limit": limit},
+        )
+        resp.raise_for_status()
+        return [
+            {
+                "timestamps": int(r[0]) // 1000,
+                "open": float(r[1]), "high": float(r[2]),
+                "low": float(r[3]), "close": float(r[4]),
+                "volume": float(r[5]),
+            }
+            for r in resp.json()
+        ]
+
+
+class CoinbaseSource(CandleSource):
+    """Coinbase Exchange's public candles endpoint. Caps out around 300
+    bars per call and ignores `limit` beyond that -- fine, refresh() tops
+    the buffer up over time anyway."""
+    name = "coinbase"
+
+    async def fetch(self, client, limit):
+        resp = await client.get(
+            "https://api.exchange.coinbase.com/products/BTC-USD/candles",
+            params={"granularity": 60},
+        )
+        resp.raise_for_status()
+        rows = resp.json()[:limit]  # newest first: [time, low, high, open, close, volume]
+        out = [
+            {
+                "timestamps": int(r[0]),
+                "low": float(r[1]), "high": float(r[2]),
+                "open": float(r[3]), "close": float(r[4]),
+                "volume": float(r[5]),
+            }
+            for r in rows
+        ]
+        out.sort(key=lambda c: c["timestamps"])
+        return out
+
+
+class KrakenSource(CandleSource):
+    name = "kraken"
+
+    async def fetch(self, client, limit):
+        resp = await client.get(
+            "https://api.kraken.com/0/public/OHLC",
+            params={"pair": "XBTUSD", "interval": 1},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("error"):
+            raise RuntimeError(f"Kraken error: {data['error']}")
+        result = data.get("result", {})
+        pair_key = next((k for k in result if k != "last"), None)
+        if pair_key is None:
+            raise RuntimeError("Kraken response missing OHLC series")
+        rows = result[pair_key][-limit:]
+        return [
+            {
+                "timestamps": int(r[0]),
+                "open": float(r[1]), "high": float(r[2]),
+                "low": float(r[3]), "close": float(r[4]),
+                "volume": float(r[6]),
+            }
+            for r in rows
+        ]
+
+
+class BybitSource(CandleSource):
+    name = "bybit"
+
+    async def fetch(self, client, limit):
+        resp = await client.get(
+            "https://api.bybit.com/v5/market/kline",
+            params={"category": "spot", "symbol": "BTCUSDT", "interval": "1", "limit": limit},
+        )
+        resp.raise_for_status()
+        rows = resp.json().get("result", {}).get("list", [])  # newest first
+        out = [
+            {
+                "timestamps": int(r[0]) // 1000,
+                "open": float(r[1]), "high": float(r[2]),
+                "low": float(r[3]), "close": float(r[4]),
+                "volume": float(r[5]),
+            }
+            for r in rows
+        ]
+        out.sort(key=lambda c: c["timestamps"])
+        return out
+
+
+CANDLE_SOURCES: List[CandleSource] = [BinanceSource(), CoinbaseSource(), KrakenSource(), BybitSource()]
+SOURCE_BACKOFF_SECONDS = 60.0  # don't retry a source that just failed on every single tick
+
+
 class CandleFeed:
-    """Rolling buffer of 1m BTC/USDT OHLCV candles from Binance's public
-    klines endpoint."""
+    """Rolling buffer of 1m BTC/USD(T) OHLCV candles, sourced from
+    whichever exchange in CANDLE_SOURCES currently responds."""
 
     def __init__(self, maxlen: int = None):
         self._client = httpx.AsyncClient(timeout=8.0)
         self.candles: "deque[dict]" = deque(maxlen=maxlen or config.KRONOS_CONTEXT_BARS)
+        self.active_source: Optional[str] = None
+        self._source_failed_until: dict = {}  # source name -> ts before which we skip it
 
     async def close(self):
         await self._client.aclose()
 
+    async def _fetch_from_any_source(self, limit: int) -> Optional[List[dict]]:
+        now = time.time()
+        # Try the currently-working source first so we're not re-probing
+        # every exchange on every single tick once one is healthy.
+        ordered = sorted(CANDLE_SOURCES, key=lambda s: s.name != self.active_source)
+        for source in ordered:
+            if now < self._source_failed_until.get(source.name, 0):
+                continue
+            try:
+                rows = await source.fetch(self._client, limit)
+                if not rows:
+                    raise RuntimeError("empty response")
+                if source.name != self.active_source:
+                    log.info("Kronos candle feed using %s%s", source.name,
+                             " (switched from " + self.active_source + ")" if self.active_source else "")
+                    self.active_source = source.name
+                self._source_failed_until.pop(source.name, None)
+                return rows
+            except Exception as e:
+                log.warning("Kronos candle source %s failed: %s", source.name, e)
+                self._source_failed_until[source.name] = now + SOURCE_BACKOFF_SECONDS
+        self.active_source = None
+        return None
+
     async def warm_up(self):
         """One-shot backfill on startup so the model has real context
         immediately instead of waiting ~maxlen minutes to fill tick by tick."""
-        try:
-            resp = await self._client.get(
-                "https://api.binance.com/api/v3/klines",
-                params={"symbol": "BTCUSDT", "interval": "1m", "limit": self.candles.maxlen},
-            )
-            resp.raise_for_status()
-            for row in resp.json():
+        rows = await self._fetch_from_any_source(self.candles.maxlen)
+        if rows:
+            for row in rows:
                 self._push(row)
-            log.info("Kronos candle feed warmed up with %d bars", len(self.candles))
-        except Exception as e:
-            log.warning("Kronos candle backfill failed: %s", e)
+            log.info("Kronos candle feed warmed up with %d bars from %s", len(self.candles), self.active_source)
+        else:
+            log.warning("Kronos candle backfill failed on every source -- will keep retrying on refresh()")
 
     async def refresh(self):
         """Pull the last couple of candles and merge them in. Cheap
-        enough to call every poll tick -- Binance updates the
+        enough to call every poll tick -- exchanges update the
         in-progress candle continuously; closed ones roll over once a
-        minute."""
-        try:
-            resp = await self._client.get(
-                "https://api.binance.com/api/v3/klines",
-                params={"symbol": "BTCUSDT", "interval": "1m", "limit": 3},
-            )
-            resp.raise_for_status()
-            for row in resp.json():
+        minute. Also used to keep retrying a backfill that failed on
+        every source at startup."""
+        rows = await self._fetch_from_any_source(3 if self.candles else self.candles.maxlen)
+        if rows:
+            for row in rows:
                 self._push(row)
-        except Exception as e:
-            log.warning("Kronos candle refresh failed: %s", e)
+        # else: every source is down or backing off -- leave the buffer as
+        # it is and try again next tick.
 
     def _push(self, row):
-        open_time = int(row[0])
-        candle = {
-            "timestamps": open_time // 1000,
-            "open": float(row[1]), "high": float(row[2]),
-            "low": float(row[3]), "close": float(row[4]),
-            "volume": float(row[5]),
-        }
-        if self.candles and self.candles[-1]["timestamps"] == candle["timestamps"]:
-            self.candles[-1] = candle          # update the still-forming bar
+        if self.candles and self.candles[-1]["timestamps"] == row["timestamps"]:
+            self.candles[-1] = row             # update the still-forming bar
         else:
-            self.candles.append(candle)
+            self.candles.append(row)
 
     def is_warm(self) -> bool:
         return len(self.candles) >= config.KRONOS_MIN_CONTEXT_BARS

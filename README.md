@@ -1,25 +1,36 @@
-# Kronos BTC 5m paper bot
+# Breakout @ 0.70 — BTC 5m bot
 
-Paper-trading bot for Polymarket's `btc-updown-5m-*` markets. Each five-minute
-window uses the Kronos time-series model to select UP or DOWN, then enters on
-the first live ask for that selected side.
+Paper-trading bot for Polymarket's `btc-updown-5m-*` markets. Runs a single
+breakout strategy with anti-martingale sizing.
 
 ## Strategy
 
-1. **Forecast**: maintain a rolling buffer of real 1-minute BTC/USDT candles
-   from Binance. At each new window, Kronos forecasts the next five candles.
-2. **Signal**: take the forecast direction only when its confidence is at
-   least `KRONOS_MIN_CONFIDENCE`; otherwise skip the window.
-3. **Entry**: once a side is selected, buy on the first tick with a live ask.
-   There is no entry-price ceiling.
-4. **Take profit**: resting maker sell at 0.99, booked as $1.00/share.
-5. **Settlement**: positions still open at the window boundary settle at the
-   observed winning side's $1.00/$0.00 outcome.
-6. **Sizing ladder**: start at 500 shares, step down 100 shares after wins and
-   step up 100 shares after losses, with the configured floor and cap.
+### Breakout taker entry @ 0.70
+1. **Enter**: watches both sides' mid-price every tick. Whichever side's
+   mid-price reaches 0.70 first triggers a one-time taker market BUY of
+   that side for $30 notional (crosses the spread, pays the taker fee).
+   Fires at most once per window.
+2. **Take profit**: resting maker TP sell at 0.99.
+3. **Stop loss (time-tightened)**: starts at 0.29 and steps up the
+   longer the position stays open:
+   - 0:00–2:00 since entry → 0.29 (base)
+   - 2:00–3:00 since entry → 0.40
+   - 3:00–4:00 since entry → 0.45
+   - 4:00+ since entry → 0.50 (final minute of the window)
 
-Inference is cached for 15 seconds by default (`KRONOS_REFRESH_SECONDS`) so a
-transformer forward pass is not repeated on every one-second poll.
+   The moment the bid drops to/through whichever level is currently
+   active, immediately taker-sell (market order, pays taker fee) to
+   guarantee the exit.
+4. **Forced close**: if the window closes with the position still open
+   (no TP, no SL hit), force a taker close (market sell) right at window
+   end.
+5. **Anti-martingale**: base size $30. A win doubles the size for the
+   next window (2x → $60, 4x → $120, 8x → $240 — up to 3 doublings),
+   pressing size only with prior winnings. A loss (SL hit, or a forced
+   close that lost money), or completing the 3rd press level, resets
+   size back to base. This bounds the *percentage* lost on any single
+   trade (the stop-loss distance) but not the dollar amount, which
+   scales with whatever level the streak had pressed to.
 
 ## Run locally
 
@@ -33,15 +44,12 @@ Dashboard at http://localhost:8000
 
 ## Config knobs (`app/config.py`)
 
-- `KRONOS_MODEL_ID`, `KRONOS_TOKENIZER_ID`, `KRONOS_DEVICE`
-- `KRONOS_CONTEXT_BARS`, `KRONOS_PRED_LEN`, `KRONOS_REFRESH_SECONDS`
-- `KRONOS_MOVE_SCALE`, `KRONOS_MIN_CONFIDENCE`
+- `ENGINE2_TRIGGER_PRICE`, `ENGINE2_TP_PRICE`, `ENGINE2_SL_SCHEDULE`, `ENGINE2_BASE_USD`, `ENGINE2_MAX_MARTINGALE_LEVEL`
 - `STARTING_CAPITAL`, fee/rebate constants
 
 ## Notes / assumptions
 
-- Kronos's `model/` package is vendored in this repository under the MIT
-  license. The first inference downloads model weights from Hugging Face.
-- If candle data, the model, or inference is unavailable, the window is
-  skipped rather than trading without a signal.
-- This is paper trading; no live order placement is implemented.
+- The breakout trigger reads CLOB best bid/ask **mid-price**, checked every tick.
+- Entry, the stop loss, and any forced window-end close are all taker orders and pay the taker fee for real; TP is still a resting maker order.
+- A forced close at window end counts as a win for anti-martingale purposes if its realized P&L is ≥ $0, and a loss otherwise — there's no explicit TP/SL trigger to key off of in that case.
+- This reuses `polymarket_client.py`, `models.py`, `paper_broker.py`, and the `main.py`/`state.py` orchestration loop unchanged in behavior.
