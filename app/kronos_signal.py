@@ -156,9 +156,9 @@ class KronosSignal:
             rows = list(self.feed.candles)
             df = pd.DataFrame(rows)
             df["timestamps"] = pd.to_datetime(df["timestamps"], unit="s")
-            y_timestamp = pd.date_range(
+            y_timestamp = pd.Series(pd.date_range(
                 df["timestamps"].iloc[-1], periods=config.KRONOS_PRED_LEN + 1, freq="1min",
-            )[1:]
+            )[1:])
             pred = self._predictor.predict(
                 df=df[["open", "high", "low", "close", "volume"]],
                 x_timestamp=df["timestamps"],
