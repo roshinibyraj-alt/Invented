@@ -181,7 +181,7 @@
     </div>
     <div class="gauge-legend">
       <span><i style="background:var(--mint);"></i>0.99 take profit</span>
-      <span id="nextSideLegend">next side: <span id="nextSideVal">—</span></span>
+      <span id="nextSideLegend">Kronos side: <span id="nextSideVal">—</span></span>
     </div>
   </div>
 
@@ -269,7 +269,8 @@ async function poll(){
     renderGauge('downTrack','downMid','downBidAsk','DOWN', book.down_bid, book.down_ask);
 
     const nextSideEl = $('nextSideVal');
-    if(nextSideEl) nextSideEl.textContent = e.next_side || '\u2014';
+    if(nextSideEl) nextSideEl.textContent = e.entry_side_this_window
+      ? `${e.entry_side_this_window} (${Math.round((e.last_signal_confidence||0)*100)}%)` : '\u2014';
     renderEngineCard('engineCard', e);
     renderDrawdown(e);
     renderStats(e);
@@ -287,8 +288,10 @@ function renderEngineCard(elId, e){
   if(!e){ el.innerHTML = '<div class="empty">no data</div>'; return; }
 
   const defRowsHtml = [
-    ['Side selection', 'strict alternation every window (win/loss doesn\u2019t matter)'],
-    ['Next side', e.next_side || '\u2014'],
+    ['Side selection', 'Kronos forecast each window \u2014 no confident call means no trade'],
+    ['This window\u2019s side', e.entry_side_this_window
+      ? `${e.entry_side_this_window} (confidence ${Math.round((e.last_signal_confidence||0)*100)}%)` : '\u2014 (skipped)'],
+    ['Skipped (signal)', e.skipped_signal||0],
     ['Take profit', '0.99 (booked @ $1.00/sh)'],
     ['Ladder', `${fmtSh(e.min_shares)}sh floor \u2192 ${fmtSh(e.base_shares)}sh base \u2192 ${fmtSh(e.max_shares)}sh cap`],
     ['Entry filter', `ask must be below ${fmtP(e.max_entry_price)}`],

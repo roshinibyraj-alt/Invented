@@ -1,6 +1,6 @@
 """
-Trading engine -- alternating-side, win/loss-driven size ladder. See
-app/config.py for the full strategy write-up.
+Trading engine -- Kronos-driven side selection, win/loss-driven size
+ladder. See app/config.py for the full strategy write-up.
 """
 import time
 from dataclasses import dataclass, field
@@ -77,7 +77,7 @@ class EngineState:
     entered_this_window: bool = False
     position: Optional[Position] = None
 
-    next_side: Side = Side.UP          # strict alternation, independent of win/loss
+    last_signal_confidence: float = 0.0   # Kronos confidence behind entry_side_this_window (0 if no call)
     current_shares: float = config.ENGINE2_SHARES
     pinned_at_cap: bool = False        # True while stuck at the 1000sh cap, recovering
     session_pnl: float = 0.0           # cumulative $ P&L since the last reset (floor or cap-recovery)
@@ -89,12 +89,14 @@ class EngineState:
     settled_losses: int = 0
     resets: int = 0
     skipped_price: int = 0             # windows where ask never dropped below the entry ceiling
+    skipped_signal: int = 0            # windows where Kronos had no confident call
     wins: int = 0
     losses: int = 0
 
 
 class Engine:
-    """Alternates UP/DOWN every window no matter what. Position size
+    """Side each window is decided by Kronos (see app/kronos_signal.py):
+    no confident forecast means no trade that window. Position size
     starts at 500sh; each win steps it down 100sh, each loss steps it up
     100sh. Hitting the 0sh floor after a win resets straight back to
     500sh next window. Hitting the 1000sh cap after a loss pins size at
@@ -104,7 +106,7 @@ class Engine:
     to the window's real $0/$1 settlement. Runs continuously."""
 
     name = "E2"
-    label = "Alternating win/loss ladder"
+    label = "Kronos-driven win/loss ladder"
 
     def __init__(self, broker: PaperBroker):
         self.broker = broker
@@ -116,18 +118,25 @@ class Engine:
         self.broker.log_event(self.name, self.s.window.slug if self.s.window else "", event,
                                balance_after=self.capital.balance, **kw)
 
-    # ---- side selection: strict alternation, every window -------------------
+    # ---- side selection: handed in from outside (Kronos), not decided here --
 
-    def reset_for_window(self, window: WindowMarket):
+    def reset_for_window(self, window: WindowMarket, side: Optional[Side] = None, confidence: float = 0.0):
+        """`side` is whatever app/kronos_signal.py's KronosSignal.get_signal()
+        returned for this window -- None means Kronos had no confident
+        call, in which case this window is skipped exactly like the old
+        price-filter skip (ladder untouched, tried again next window)."""
         self.s.window = window
         self.s.entered_this_window = False
+        self.s.last_signal_confidence = confidence
 
         if self.capital.halted:
             self.s.entry_side_this_window = None
             return
 
-        self.s.entry_side_this_window = self.s.next_side
-        self.s.next_side = Side.DOWN if self.s.next_side == Side.UP else Side.UP
+        self.s.entry_side_this_window = side
+        if side is None:
+            self.s.skipped_signal += 1
+            self._log("SKIPPED_SIGNAL", note="Kronos had no confident call this window -- no entry taken")
 
     # ---- tick: fire the entry (once, on the first tick with a live ask),
     # watch for TP, and track live equity for max-drawdown -------------------
@@ -327,7 +336,7 @@ class Engine:
             "unrealized_pnl": round(unrealized_pnl, 4),
 
             "entry_side_this_window": self.s.entry_side_this_window.value if self.s.entry_side_this_window else None,
-            "next_side": self.s.next_side.value,
+            "last_signal_confidence": round(self.s.last_signal_confidence, 4),
             "current_shares": self.s.current_shares,
             "base_shares": config.ENGINE2_SHARES,
             "min_shares": config.ENGINE2_MIN_SHARES,
@@ -339,6 +348,7 @@ class Engine:
             "fills": self.s.fills, "tp_fills": self.s.tp_fills,
             "settled_wins": self.s.settled_wins, "settled_losses": self.s.settled_losses,
             "resets": self.s.resets, "skipped_price": self.s.skipped_price,
+            "skipped_signal": self.s.skipped_signal,
             "max_entry_price": config.ENGINE2_MAX_ENTRY_PRICE,
             "wins": self.s.wins, "losses": self.s.losses,
             "win_rate": round(100 * self.s.wins / (self.s.wins + self.s.losses), 1) if (self.s.wins + self.s.losses) else None,

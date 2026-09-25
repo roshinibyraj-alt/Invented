@@ -6,6 +6,7 @@ from typing import Optional
 
 from . import config
 from .engine import Engine
+from .kronos_signal import CandleFeed, KronosSignal
 from .models import PricePoint, Side, WindowMarket
 from .paper_broker import PaperBroker
 from .polymarket_client import PolymarketClient
@@ -16,6 +17,8 @@ class BotState:
         self.broker = PaperBroker()
         self.engine = Engine(self.broker)
         self.client = PolymarketClient()
+        self.candle_feed = CandleFeed()
+        self.kronos = KronosSignal(self.candle_feed)
         self.current_window: Optional[WindowMarket] = None
         self.price_history: deque = deque(maxlen=300)  # ~5 min at 1s ticks
         self.last_up_bid: Optional[float] = None
@@ -27,12 +30,14 @@ class BotState:
         self._task: Optional[asyncio.Task] = None
 
     async def start(self):
+        await self.candle_feed.warm_up()
         self._task = asyncio.create_task(self._run_loop())
 
     async def stop(self):
         if self._task:
             self._task.cancel()
         await self.client.close()
+        await self.candle_feed.close()
 
     async def _run_loop(self):
         self.status = "running"
@@ -50,6 +55,8 @@ class BotState:
             self.error = "No market found for current window slug"
             return
         self.error = None
+
+        await self.candle_feed.refresh()  # cheap -- own cadence, independent of Polymarket
 
         if self.current_window is None or window.slug != self.current_window.slug:
             await self._roll_window(window)
@@ -91,7 +98,9 @@ class BotState:
         self.price_history.clear()
         self.last_up_bid = self.last_up_ask = None
         self.last_down_bid = self.last_down_ask = None
-        self.engine.reset_for_window(new_window)
+
+        side, confidence = self.kronos.get_signal(now=time.time())
+        self.engine.reset_for_window(new_window, side=side, confidence=confidence)
 
     def _infer_winner(self) -> Optional[Side]:
         """Sole outcome source: whichever side's last observed CLOB midpoint

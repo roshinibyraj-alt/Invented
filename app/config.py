@@ -1,17 +1,21 @@
 """
 Central configuration for the BTC 5-min up/down bot.
 
-Alternating side, win/loss-driven size ladder (500 base, 0 floor, 1000
-cap), asymmetric reset behavior at each end:
+Kronos-driven side selection, win/loss-driven size ladder (500 base, 0
+floor, 1000 cap), asymmetric reset behavior at each end:
 
-  - Side selection: strict alternation every window, regardless of the
-    previous trade's outcome -- UP, DOWN, UP, DOWN, ... No signal of any
-    kind (candle-based or otherwise) decides the side anymore.
+  - Side selection: at the start of every window, app/kronos_signal.py
+    forecasts the next few 1-minute BTC candles with Kronos (an
+    open-source K-line foundation model) off a rolling buffer of real
+    BTC/USDT candles, and hands back a side only if the forecast move is
+    confident enough (KRONOS_MIN_CONFIDENCE). No more alternation --
+    if Kronos isn't confident (or the model/candle buffer isn't ready),
+    the window is skipped entirely, same as the old price-filter skip.
     ENGINE2_SHARES worth of shares, taker, on window open -- but only if
     the ask is below ENGINE2_MAX_ENTRY_PRICE (0.50) at the moment of
     entry. That's checked every tick, all window: if the ask never dips
     below 0.50 the whole window, no trade happens that window at all --
-    the ladder is untouched, and the side still alternates for next
+    the ladder is untouched, and Kronos is asked fresh for the next
     window as normal.
 
   - Sizing: starts at the base (ENGINE2_SHARES, 500sh). Each WIN (TP
@@ -69,6 +73,28 @@ POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
 # ---- Take profit (shared exit mechanic) --------------------------------
 ENGINE_TP_PRICE = 0.99          # resting maker sell
 ENGINE_TP_COUNTS_AS = 1.00      # TP fill is booked at this price for realized P&L, not 0.99
+
+# ---- Kronos-driven side selection --------------------------------------
+# Model repos on Hugging Face; override via env if you want a bigger/
+# smaller Kronos variant. See app/kronos_signal.py for the full flow.
+KRONOS_TOKENIZER_ID = os.getenv("KRONOS_TOKENIZER_ID", "NeoQuasar/Kronos-Tokenizer-base")
+KRONOS_MODEL_ID = os.getenv("KRONOS_MODEL_ID", "NeoQuasar/Kronos-small")
+KRONOS_DEVICE = os.getenv("KRONOS_DEVICE", "cpu")
+
+KRONOS_CONTEXT_BARS = 400        # rolling 1m BTC/USDT candle buffer fed to the model
+KRONOS_MIN_CONTEXT_BARS = 60     # don't call a side until the buffer has at least this many bars
+KRONOS_PRED_LEN = 5              # forecast horizon in 1m bars -- matches the 5m window
+KRONOS_TEMPERATURE = 1.0
+KRONOS_TOP_P = 0.9
+KRONOS_SAMPLE_COUNT = 1
+KRONOS_REFRESH_SECONDS = 15.0    # re-run inference at most this often, not every 1s poll tick
+
+# Forecast |move| that maps to 100% confidence, and the floor below which
+# a window is skipped rather than traded on a weak signal. Both are in
+# fractional BTC price terms (0.0015 = 0.15%) -- tune against backtests,
+# these starting values are not calibrated to anything.
+KRONOS_MOVE_SCALE = 0.0015
+KRONOS_MIN_CONFIDENCE = 0.15
 
 # ---- Entry price filter --------------------------------------------------
 # Only enter if the ask is below this at the moment of the check (checked
