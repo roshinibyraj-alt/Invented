@@ -1,372 +1,335 @@
-from __future__ import annotations
-import asyncio
-import logging
+"""
+Trading engine -- alternating-side, win/loss-driven size ladder. See
+app/config.py for the full strategy write-up.
+"""
 import time
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import List, Optional
 
 from . import config
-from .models import RungState, RungOrders, SimOrder, Side, OrderStatus, Outcome, RungMode, WindowState
-from .polymarket_client import PolymarketClient, window_start_for, slug_for_window
+from .models import Side, WindowMarket
+from .paper_broker import PaperBroker
 
-log = logging.getLogger("engine")
+
+# ---------------------------------------------------------------------------
+# Capital -- balance, equity curve, and running peak / max-drawdown tracking.
+# ---------------------------------------------------------------------------
+
+@dataclass
+class CapitalPool:
+    balance: float
+    halted: bool = False
+    equity_curve: List[dict] = field(default_factory=list)
+
+    peak_equity: float = 0.0
+    max_drawdown: float = 0.0       # largest $ drop from a peak, ever observed
+    max_drawdown_pct: float = 0.0   # that drop as a % of the peak it fell from
+
+    def __post_init__(self):
+        self.peak_equity = self.balance
+
+    def record_equity_point(self, window_slug: Optional[str]):
+        self.equity_curve.append({
+            "window": window_slug, "ts": time.time(), "balance": round(self.balance, 2),
+        })
+        if len(self.equity_curve) > 500:
+            self.equity_curve = self.equity_curve[-500:]
+
+    def update_drawdown(self, equity: float):
+        """Call on every live equity read (balance + open position's
+        current market value) so intra-window swings count, not just the
+        balance at settlement."""
+        if equity > self.peak_equity:
+            self.peak_equity = equity
+        drawdown = self.peak_equity - equity
+        if drawdown > self.max_drawdown:
+            self.max_drawdown = drawdown
+            self.max_drawdown_pct = (drawdown / self.peak_equity * 100) if self.peak_equity else 0.0
+
+    def check_halt(self) -> bool:
+        if not self.halted and self.balance < 0:
+            self.halted = True
+        return self.halted
+
+
+@dataclass
+class Position:
+    side: Side
+    entry_price: float
+    shares: float
+    cost: float
+    entry_ts: float = 0.0
+
+
+# ---------------------------------------------------------------------------
+# Engine state
+# ---------------------------------------------------------------------------
+
+@dataclass
+class EngineState:
+    window: Optional[WindowMarket] = None
+    up_bid: Optional[float] = None
+    up_ask: Optional[float] = None
+    down_bid: Optional[float] = None
+    down_ask: Optional[float] = None
+
+    entry_side_this_window: Optional[Side] = None
+    entered_this_window: bool = False
+    position: Optional[Position] = None
+
+    next_side: Side = Side.UP          # strict alternation, independent of win/loss
+    current_shares: float = config.ENGINE2_SHARES
+    pinned_at_cap: bool = False        # True while stuck at the 1000sh cap, recovering
+    session_pnl: float = 0.0           # cumulative $ P&L since the last reset (floor or cap-recovery)
+
+    total_pnl: float = 0.0
+    fills: int = 0
+    tp_fills: int = 0
+    settled_wins: int = 0
+    settled_losses: int = 0
+    resets: int = 0
+    wins: int = 0
+    losses: int = 0
 
 
 class Engine:
-    def __init__(self):
-        self.client = PolymarketClient()
-        self.rungs: dict[float, RungState] = {p: RungState(price=p) for p in config.RUNG_PRICES}
-        self.active_windows: dict[str, WindowState] = {}
-        self.window_history: list[dict] = []   # archived, settled windows (light dicts)
-        self._token_cache: dict[str, tuple[str, str]] = {}   # slug -> (up, down)
-        self.events_log: list[dict] = []
-        self._subscribers: list[asyncio.Queue] = []
-        self.started_at = time.time()
+    """Alternates UP/DOWN every window no matter what. Position size
+    starts at 500sh; each win steps it down 100sh, each loss steps it up
+    100sh. Hitting the 0sh floor after a win resets straight back to
+    500sh next window. Hitting the 1000sh cap after a loss pins size at
+    1000sh -- ignoring further win/loss stepping -- until cumulative
+    realized P&L since the last reset recovers to >=$0, then it resets
+    to 500sh. Resting TP at 0.99 (booked as $1/share); otherwise rides
+    to the window's real $0/$1 settlement. Runs continuously."""
 
-    # ---- pub/sub for the websocket layer -----------------------------
-    def subscribe(self) -> asyncio.Queue:
-        q = asyncio.Queue(maxsize=4)
-        self._subscribers.append(q)
-        return q
+    name = "E2"
+    label = "Alternating win/loss ladder"
 
-    def unsubscribe(self, q: asyncio.Queue):
-        if q in self._subscribers:
-            self._subscribers.remove(q)
+    def __init__(self, broker: PaperBroker):
+        self.broker = broker
+        self.capital = CapitalPool(balance=config.STARTING_CAPITAL)
+        self.s = EngineState()
+        self.capital.record_equity_point(None)
 
-    def _log_event(self, text: str, level: str = "info"):
-        entry = {"ts": time.time(), "text": text, "level": level}
-        self.events_log.append(entry)
-        if len(self.events_log) > 200:
-            self.events_log.pop(0)
-        log.info(text)
+    def _log(self, event, **kw):
+        self.broker.log_event(self.name, self.s.window.slug if self.s.window else "", event,
+                               balance_after=self.capital.balance, **kw)
 
-    async def _broadcast(self):
-        snap = self.snapshot()
-        dead = []
-        for q in self._subscribers:
-            if q.full():
-                try:
-                    q.get_nowait()
-                except Exception:
-                    pass
-            try:
-                q.put_nowait(snap)
-            except Exception:
-                dead.append(q)
-        for q in dead:
-            self.unsubscribe(q)
+    # ---- side selection: strict alternation, every window -------------------
 
-    # ---- main loop -----------------------------------------------------
-    async def run_forever(self):
-        self._log_event("Engine started — paper trading mode, no real orders will be sent.")
-        while True:
-            try:
-                await self._tick()
-            except Exception as e:
-                log.exception("tick failed: %s", e)
-                self._log_event(f"tick error: {e}", level="error")
-            await asyncio.sleep(config.TICK_SECONDS)
+    def reset_for_window(self, window: WindowMarket):
+        self.s.window = window
+        self.s.entered_this_window = False
 
-    async def _tick(self):
-        now = time.time()
-        cur_start = window_start_for(now)
-        cur_slug = slug_for_window(cur_start)
-        next_slug = slug_for_window(cur_start + config.WINDOW_SECONDS)
-
-        # Prefetch the next window's token ids shortly before it opens
-        secs_into_current = now - cur_start
-        if secs_into_current >= config.WINDOW_SECONDS - config.PREFETCH_LEAD_SECONDS:
-            await self._ensure_tokens_cached(next_slug)
-
-        await self._ensure_tokens_cached(cur_slug)
-
-        # Open the current window if we haven't yet and we have its tokens
-        if cur_slug not in self.active_windows and cur_slug in self._token_cache:
-            up_id, down_id = self._token_cache[cur_slug]
-            ws = WindowState(
-                slug=cur_slug,
-                start_ts=cur_start,
-                end_ts=cur_start + config.WINDOW_SECONDS,
-                up_token_id=up_id,
-                down_token_id=down_id,
-            )
-            self.active_windows[cur_slug] = ws
-            self._log_event(f"Window {cur_slug} opened — placing rung orders.")
-
-        # Process every active window
-        for slug in list(self.active_windows.keys()):
-            ws = self.active_windows[slug]
-            await self._process_window(ws, now)
-            if ws.settled and now > ws.end_ts + config.WINDOW_ARCHIVE_DELAY:
-                self.window_history.append(self._archive_dict(ws))
-                if len(self.window_history) > 100:
-                    self.window_history.pop(0)
-                del self.active_windows[slug]
-
-        await self._broadcast()
-
-    async def _ensure_tokens_cached(self, slug: str):
-        if slug in self._token_cache:
-            return
-        tokens = await self.client.get_up_down_token_ids(slug)
-        if tokens:
-            self._token_cache[slug] = tokens
-            self._log_event(f"Discovered market {slug}.")
-        # prune cache so it doesn't grow forever
-        if len(self._token_cache) > 20:
-            oldest = sorted(self._token_cache.keys())[0]
-            self._token_cache.pop(oldest, None)
-
-    async def _process_window(self, ws: WindowState, now: float):
-        elapsed = now - ws.start_ts
-
-        # Place resting orders exactly once, at window open. Size is always
-        # flat (config.RUNG_SIZE). Whether this window trades for real or is
-        # purely observational is decided by each rung's *current* mode,
-        # snapshotted right now so it can't change mid-window.
-        if not ws.orders_placed:
-            for price, rung in self.rungs.items():
-                is_shadow = rung.mode == RungMode.SHADOW
-                ws.rungs[price] = RungOrders(
-                    up=SimOrder(side=Side.UP, price=price, size=config.RUNG_SIZE),
-                    down=SimOrder(side=Side.DOWN, price=price, size=config.RUNG_SIZE),
-                    is_shadow=is_shadow,
-                )
-                if is_shadow:
-                    self._log_event(
-                        f"[{ws.slug}] rung {price:.2f} in SHADOW mode — observing only, no capital at risk."
-                    )
-            ws.orders_placed = True
-
-        if ws.settled:
+        if self.capital.halted:
+            self.s.entry_side_this_window = None
             return
 
-        # Fetch live prices (best ask, i.e. price to buy) for both legs
-        up_price = await self.client.get_price(ws.up_token_id, side="buy")
-        down_price = await self.client.get_price(ws.down_token_id, side="buy")
-        if up_price is not None:
-            ws.last_up_price = up_price
-        if down_price is not None:
-            ws.last_down_price = down_price
+        self.s.entry_side_this_window = self.s.next_side
+        self.s.next_side = Side.DOWN if self.s.next_side == Side.UP else Side.UP
 
-        # --- fill simulation, per rung, independent ---------------------
-        if elapsed < config.ORDER_CUTOFF_SECONDS:
-            for price, ro in ws.rungs.items():
-                if ro.filled_side is not None:
-                    continue  # already resolved this rung for this window
-                up_ask = ws.last_up_price
-                down_ask = ws.last_down_price
-                if ro.up.status == OrderStatus.PENDING and up_ask is not None and up_ask <= price:
-                    ro.up.status = OrderStatus.FILLED
-                    ro.up.fill_price = price
-                    ro.up.filled_at = now
-                    ro.filled_side = Side.UP
-                    if ro.down.status == OrderStatus.PENDING:
-                        ro.down.status = OrderStatus.CANCELLED
-                    tag = "SHADOW" if ro.is_shadow else "LIVE"
-                    self._log_event(
-                        f"[{ws.slug}] ({tag}) rung {price:.2f} UP filled @ {price:.2f} "
-                        f"({config.RUNG_SIZE} sh) — DOWN order cancelled."
-                    )
-                elif ro.down.status == OrderStatus.PENDING and down_ask is not None and down_ask <= price:
-                    ro.down.status = OrderStatus.FILLED
-                    ro.down.fill_price = price
-                    ro.down.filled_at = now
-                    ro.filled_side = Side.DOWN
-                    if ro.up.status == OrderStatus.PENDING:
-                        ro.up.status = OrderStatus.CANCELLED
-                    tag = "SHADOW" if ro.is_shadow else "LIVE"
-                    self._log_event(
-                        f"[{ws.slug}] ({tag}) rung {price:.2f} DOWN filled @ {price:.2f} "
-                        f"({config.RUNG_SIZE} sh) — UP order cancelled."
-                    )
+    # ---- tick: fire the entry (once, on the first tick with a live ask),
+    # watch for TP, and track live equity for max-drawdown -------------------
 
-        self._assert_fill_priority(ws)
+    def on_tick(self, up_bid, up_ask, down_bid, down_ask, seconds_to_close: float = None, now: Optional[float] = None):
+        now = now if now is not None else time.time()
+        self.s.up_bid, self.s.up_ask = up_bid, up_ask
+        self.s.down_bid, self.s.down_ask = down_bid, down_ask
+        if self.capital.halted or self.s.window is None:
+            return
 
-        # --- cutoff: no trades after 270s -------------------------------
-        if elapsed >= config.ORDER_CUTOFF_SECONDS:
-            for price, ro in ws.rungs.items():
-                if ro.cutoff_applied:
-                    continue
-                if ro.up.status == OrderStatus.PENDING:
-                    ro.up.status = OrderStatus.CANCELLED
-                if ro.down.status == OrderStatus.PENDING:
-                    ro.down.status = OrderStatus.CANCELLED
-                ro.cutoff_applied = True
+        if (self.s.entry_side_this_window is not None
+                and not self.s.entered_this_window and self.s.position is None):
+            ask = up_ask if self.s.entry_side_this_window == Side.UP else down_ask
+            if ask is not None:
+                self._enter(self.s.entry_side_this_window, ask, now)
+                self.s.entered_this_window = True
 
-        # --- settlement: last two seconds of the window -----------------
-        settle_at = ws.end_ts - config.WIN_CHECK_SECONDS_BEFORE_CLOSE
-        if now >= settle_at and not ws.settled:
-            up_p = ws.last_up_price if ws.last_up_price is not None else 0.0
-            down_p = ws.last_down_price if ws.last_down_price is not None else 0.0
-            if up_p > config.WIN_PRICE_THRESHOLD and down_p <= config.WIN_PRICE_THRESHOLD:
-                winner = Side.UP
-            elif down_p > config.WIN_PRICE_THRESHOLD and up_p <= config.WIN_PRICE_THRESHOLD:
-                winner = Side.DOWN
+        self._check_tp()
+        self.capital.update_drawdown(self._live_equity())
+
+    def _live_equity(self) -> float:
+        pos = self.s.position
+        if pos is None:
+            return self.capital.balance
+        mark = self.s.up_bid if pos.side == Side.UP else self.s.down_bid
+        mark = mark if mark is not None else pos.entry_price
+        return self.capital.balance + pos.shares * mark
+
+    def _enter(self, side: Side, ask: float, now: float):
+        shares = self.s.current_shares
+        if shares <= 0:
+            return  # floor edge case -- nothing to enter with until the reset lands next window
+        fee = self.broker.taker_fee_amount(shares, ask)
+        cost = shares * ask + fee
+        self.capital.balance -= cost
+        self.s.fills += 1
+        self._log("CANDLE_BUY", side=side.value, price=ask, shares=shares, fee=fee,
+                   note=f"taker buy {shares:.0f}sh {side.value} @ {ask} on window open (fee ${fee:.4f})")
+        if self.capital.check_halt():
+            self._log("HALTED", note=f"balance ${self.capital.balance:.2f} < $0 -- bankrupt")
+            return
+        self.s.position = Position(side=side, entry_price=ask, shares=shares, cost=cost, entry_ts=now)
+
+    def _check_tp(self):
+        pos = self.s.position
+        if pos is None:
+            return
+        bid = self.s.up_bid if pos.side == Side.UP else self.s.down_bid
+        if bid is None or bid < config.ENGINE_TP_PRICE:
+            return
+        rebate = config.MAKER_REBATE_FRACTION * self.broker.taker_fee_amount(pos.shares, config.ENGINE_TP_PRICE)
+        proceeds = pos.shares * config.ENGINE_TP_COUNTS_AS + rebate
+        pnl = proceeds - pos.cost
+        self._settle(pos, proceeds, pnl, "TP_FILL", fee=rebate,
+                      note=(f"TP hit -- {pos.shares:.0f}sh sold @ {config.ENGINE_TP_PRICE} "
+                            f"(maker, rebate ${rebate:.4f}), booked @ ${config.ENGINE_TP_COUNTS_AS:.2f}/sh "
+                            f"(entry {pos.entry_price}, pnl ${pnl:.4f})"))
+        self.s.tp_fills += 1
+        self.s.position = None
+
+    def finalize_window(self, winning_side: Optional[Side]):
+        """Called once per window close -- an open position must still
+        resolve. If TP already closed it, there's nothing left to do."""
+        window_slug = self.s.window.slug if self.s.window else None
+        pos = self.s.position
+        if pos is not None:
+            if winning_side is None:
+                # no observed outcome (e.g. missing book data right at the
+                # boundary) -- settle at cost rather than silently losing
+                # the debit or guessing a winner. Neutral -- doesn't step
+                # the ladder either way.
+                self._settle(pos, pos.cost, 0.0, "SETTLE_UNKNOWN", fee=0.0,
+                              note="window closed with no observed winner -- settled at cost (no gain/loss)")
+            elif pos.side == winning_side:
+                proceeds = pos.shares * 1.0
+                pnl = proceeds - pos.cost
+                self._settle(pos, proceeds, pnl, "SETTLE_WIN", fee=0.0,
+                              note=f"window resolved -- {pos.side.value} won, {pos.shares:.0f}sh paid $1.00/sh (pnl ${pnl:.4f})")
+                self.s.settled_wins += 1
             else:
-                # neither (or both, edge case) crossed 0.95 — higher price wins
-                winner = Side.UP if up_p >= down_p else Side.DOWN
-            ws.winner = winner
+                pnl = 0.0 - pos.cost
+                self._settle(pos, 0.0, pnl, "SETTLE_LOSS", fee=0.0,
+                              note=f"window resolved -- {pos.side.value} lost, {pos.shares:.0f}sh paid $0.00/sh (pnl ${pnl:.4f})")
+                self.s.settled_losses += 1
+            self.s.position = None
 
-            for price, ro in ws.rungs.items():
-                rung = self.rungs[price]
-                size_used = ro.up.size if ro.filled_side == Side.UP else (
-                    ro.down.size if ro.filled_side == Side.DOWN else config.RUNG_SIZE
-                )
-                if ro.filled_side is None:
-                    outcome = Outcome.NO_FILL
-                elif ro.filled_side == winner:
-                    outcome = Outcome.WIN
-                else:
-                    outcome = Outcome.LOSS
+        self.capital.update_drawdown(self._live_equity())
+        self.capital.record_equity_point(window_slug)
+        self.s.window = None
 
-                mode_before = rung.mode
-                if ro.is_shadow:
-                    rung.record_shadow_outcome(ws.slug, ro.filled_side, size_used, outcome, now)
-                    if outcome == Outcome.LOSS:
-                        self._log_event(
-                            f"[{ws.slug}] rung {price:.2f} SHADOW observed a LOSS — "
-                            f"resuming LIVE trading next window."
-                        )
-                    elif outcome == Outcome.WIN:
-                        self._log_event(
-                            f"[{ws.slug}] rung {price:.2f} SHADOW observed a WIN — "
-                            f"staying in SHADOW, skipping another window."
-                        )
-                    else:
-                        self._log_event(
-                            f"[{ws.slug}] rung {price:.2f} SHADOW had NO_FILL — "
-                            f"neutral, staying in SHADOW."
-                        )
-                else:
-                    rung.record_real_outcome(ws.slug, ro.filled_side, size_used, outcome, now)
-                    if mode_before != rung.mode:
-                        self._log_event(
-                            f"[{ws.slug}] rung {price:.2f} WON live — entering SHADOW mode next window."
-                        )
-                ro.settled = True
+    def _settle(self, pos: Position, proceeds: float, pnl: float, reason: str, fee: float, note: str):
+        self.capital.balance += proceeds
+        self.s.total_pnl += pnl
+        if pnl >= 0:
+            self.s.wins += 1
+        else:
+            self.s.losses += 1
+        self._log(reason, side=pos.side.value, price=pos.entry_price, shares=pos.shares, pnl=pnl, fee=fee, note=note)
+        self.capital.check_halt()
+        self.capital.update_drawdown(self._live_equity())
 
-            ws.settled = True
-            self._log_event(
-                f"[{ws.slug}] SETTLED — winner {winner.value} "
-                f"(UP {up_p:.3f} / DOWN {down_p:.3f})"
-            )
+        if reason in ("TP_FILL", "SETTLE_WIN"):
+            self._apply_ladder(pnl, is_win=True)
+        elif reason == "SETTLE_LOSS":
+            self._apply_ladder(pnl, is_win=False)
+        # SETTLE_UNKNOWN -- neutral, no ladder step
 
-    def _assert_fill_priority(self, ws: WindowState):
-        """A resting order at a higher price is always more aggressive (closer
-        to the market) than one at a lower price on the same token, so it can
-        never be skipped: if a lower rung filled, every higher rung on that
-        same side must be FILLED or CANCELLED too — never left PENDING.
-        Any violation here means a real bug in the fill loop, not normal
-        market behavior, so it's logged loudly rather than silently ignored.
-        """
-        prices_desc = sorted(ws.rungs.keys(), reverse=True)  # 0.40 -> 0.25, most to least aggressive
-        for side_attr in ("up", "down"):
-            # Walk from the highest (most aggressive) price down to the lowest.
-            # Once we've seen a higher-priced order still PENDING, no lower-priced
-            # order on the same side should ever show FILLED.
-            pending_higher_price = None
-            for price in prices_desc:
-                order = getattr(ws.rungs[price], side_attr)
-                if order.status == OrderStatus.FILLED and pending_higher_price is not None:
-                    self._log_event(
-                        f"INVARIANT VIOLATION [{ws.slug}] {side_attr.upper()} rung {price:.2f} "
-                        f"FILLED while higher rung {pending_higher_price:.2f} (more aggressive, "
-                        f"should fill first) is still PENDING — this should be impossible.",
-                        level="error",
-                    )
-                if order.status == OrderStatus.PENDING and pending_higher_price is None:
-                    pending_higher_price = price
+    # ---- the ladder itself: floor is a plain count-based reset, cap is a
+    # dollar-P&L-gated recovery -------------------------------------------
 
-    def _archive_dict(self, ws: WindowState) -> dict:
-        d = ws.to_dict()
-        return d
+    def _apply_ladder(self, pnl: float, is_win: bool):
+        self.s.session_pnl += pnl
 
-    # ---- snapshot for dashboard -----------------------------------------
+        if self.s.pinned_at_cap:
+            if self.s.session_pnl >= 0:
+                self._reset_ladder(
+                    f"pinned at {config.ENGINE2_MAX_SHARES:.0f}sh -- cumulative P&L since pin recovered "
+                    f"(+${self.s.session_pnl:.2f}) -- resetting to base {config.ENGINE2_SHARES:.0f}sh")
+            # else: stays pinned at the cap, still recovering
+            return
+
+        if is_win:
+            self.s.current_shares = max(config.ENGINE2_MIN_SHARES, self.s.current_shares - config.ENGINE2_SIZE_STEP)
+            if self.s.current_shares <= config.ENGINE2_MIN_SHARES:
+                self._reset_ladder(f"hit the {config.ENGINE2_MIN_SHARES:.0f}sh floor after a win -- resetting to base {config.ENGINE2_SHARES:.0f}sh")
+        else:
+            self.s.current_shares = min(config.ENGINE2_MAX_SHARES, self.s.current_shares + config.ENGINE2_SIZE_STEP)
+            if self.s.current_shares >= config.ENGINE2_MAX_SHARES:
+                self.s.pinned_at_cap = True
+                self._log("PINNED_AT_CAP",
+                           note=(f"hit the {config.ENGINE2_MAX_SHARES:.0f}sh cap after a loss -- staying here until "
+                                 f"cumulative P&L since pin (currently ${self.s.session_pnl:.2f}) recovers to >=$0"))
+
+    def _reset_ladder(self, note: str):
+        self.s.current_shares = config.ENGINE2_SHARES
+        self.s.pinned_at_cap = False
+        self.s.session_pnl = 0.0
+        self.s.resets += 1
+        self._log("LADDER_RESET", note=note)
+
+    # ---- dashboard payload --------------------------------------------------
+
     def snapshot(self) -> dict:
-        now = time.time()
-        cur_start = window_start_for(now)
-        cur_slug = slug_for_window(cur_start)
-        elapsed = now - cur_start
-        cutoff_remaining = max(0.0, config.ORDER_CUTOFF_SECONDS - elapsed)
-        window_remaining = max(0.0, config.WINDOW_SECONDS - elapsed)
+        pos = self.s.position
+        position_payload = None
+        unrealized_pnl = 0.0
+        open_market_value = 0.0
+        if pos is not None:
+            mark = self.s.up_bid if pos.side == Side.UP else self.s.down_bid
+            mark_for_calc = mark if mark is not None else pos.entry_price
+            open_market_value = pos.shares * mark_for_calc
+            unrealized_pnl = open_market_value - pos.cost
+            elapsed = max(0.0, time.time() - pos.entry_ts)
+            position_payload = {
+                "side": pos.side.value, "entry_price": pos.entry_price, "shares": round(pos.shares, 2),
+                "cost": round(pos.cost, 4), "tp_price": config.ENGINE_TP_PRICE,
+                "seconds_since_entry": round(elapsed, 1), "mark_price": mark,
+                "unrealized_pnl": round(unrealized_pnl, 4),
+            }
 
-        total_pnl = sum(r.total_pnl for r in self.rungs.values())
-        total_trades = sum(r.total_trades for r in self.rungs.values())
-        total_wins = sum(r.wins for r in self.rungs.values())
-        total_capital = sum(r.capital_balance for r in self.rungs.values())
-        total_start_capital = sum(r.capital_start for r in self.rungs.values())
+        if self.capital.halted:
+            status = "halted"
+        elif pos is not None:
+            status = "open"
+        elif self.s.entry_side_this_window is not None and not self.s.entered_this_window:
+            status = "armed"
+        else:
+            status = "waiting"
 
-        # Open positions — filled, unsettled orders across all active windows,
-        # marked to the current live price ("floating" P&L).
-        open_positions = []
-        floating_pnl = 0.0
-        for ws in self.active_windows.values():
-            for price, ro in ws.rungs.items():
-                if ro.filled_side is None or ro.settled:
-                    continue
-                order = ro.up if ro.filled_side == Side.UP else ro.down
-                mark = ws.last_up_price if ro.filled_side == Side.UP else ws.last_down_price
-                entry = order.fill_price
-                size = order.size
-                unrealized = size * (mark - entry) if (mark is not None and entry is not None) else 0.0
-                if not ro.is_shadow:
-                    floating_pnl += unrealized   # shadow positions risk no capital — excluded from real P&L
-                open_positions.append({
-                    "window_slug": ws.slug,
-                    "rung_price": price,
-                    "side": ro.filled_side.value,
-                    "size": size,
-                    "entry_price": entry,
-                    "mark_price": mark,
-                    "cost_basis": round(size * entry, 2),
-                    "mark_value": round(size * mark, 2) if mark is not None else None,
-                    "unrealized_pnl": round(unrealized, 2),
-                    "window_remaining": round(max(0.0, ws.end_ts - now), 1),
-                    "filled_at": order.filled_at,
-                    "is_shadow": ro.is_shadow,
-                })
-        open_positions.sort(key=lambda p: p["rung_price"], reverse=True)
-
-        recent_trades = []
-        for rung in self.rungs.values():
-            recent_trades.extend(rung.history[-25:])
-        recent_trades.sort(key=lambda t: t.settled_at, reverse=True)
-        recent_trades = recent_trades[:40]
+        equity = round(self.capital.balance + open_market_value, 4)
 
         return {
-            "server_time": now,
-            "mode": "PAPER TRADING",
-            "current_window": {
-                "slug": cur_slug,
-                "elapsed": round(elapsed, 1),
-                "cutoff_remaining": round(cutoff_remaining, 1),
-                "window_remaining": round(window_remaining, 1),
-                "past_cutoff": elapsed >= config.ORDER_CUTOFF_SECONDS,
-            },
-            "config": {
-                "rung_prices": config.RUNG_PRICES,
-                "rung_size": config.RUNG_SIZE,
-                "capital_per_rung": config.CAPITAL_PER_RUNG,
-                "order_cutoff_seconds": config.ORDER_CUTOFF_SECONDS,
-                "window_seconds": config.WINDOW_SECONDS,
-            },
-            "aggregate": {
-                "realized_pnl": round(total_pnl, 2),
-                "floating_pnl": round(floating_pnl, 2),
-                "combined_pnl": round(total_pnl + floating_pnl, 2),
-                "total_pnl": round(total_pnl, 2),   # kept for backwards-compat
-                "total_trades": total_trades,
-                "total_wins": total_wins,
-                "win_rate": round((total_wins / total_trades * 100) if total_trades else 0.0, 1),
-                "total_capital": round(total_capital, 2),
-                "total_start_capital": total_start_capital,
-                "roi_pct": round(((total_capital + floating_pnl - total_start_capital) / total_start_capital * 100)
-                                  if total_start_capital else 0.0, 2),
-            },
-            "rungs": [self.rungs[p].to_dict() for p in config.RUNG_PRICES],
-            "active_windows": [w.to_dict() for w in self.active_windows.values()],
-            "open_positions": open_positions,
-            "recent_trades": [t.to_dict() for t in recent_trades],
-            "events": self.events_log[-30:],
-            "uptime_seconds": round(now - self.started_at),
+            "engine": self.name, "label": self.label,
+
+            "balance": round(self.capital.balance, 2),
+            "starting_capital": config.STARTING_CAPITAL,
+            "halted": self.capital.halted,
+            "equity_curve": self.capital.equity_curve,
+            "equity": equity,
+
+            "peak_equity": round(self.capital.peak_equity, 2),
+            "max_drawdown": round(self.capital.max_drawdown, 2),
+            "max_drawdown_pct": round(self.capital.max_drawdown_pct, 2),
+
+            "realized_pnl": round(self.s.total_pnl, 4),
+            "unrealized_pnl": round(unrealized_pnl, 4),
+
+            "entry_side_this_window": self.s.entry_side_this_window.value if self.s.entry_side_this_window else None,
+            "next_side": self.s.next_side.value,
+            "current_shares": self.s.current_shares,
+            "base_shares": config.ENGINE2_SHARES,
+            "min_shares": config.ENGINE2_MIN_SHARES,
+            "max_shares": config.ENGINE2_MAX_SHARES,
+            "pinned_at_cap": self.s.pinned_at_cap,
+            "session_pnl": round(self.s.session_pnl, 4),
+            "position": position_payload,
+
+            "fills": self.s.fills, "tp_fills": self.s.tp_fills,
+            "settled_wins": self.s.settled_wins, "settled_losses": self.s.settled_losses,
+            "resets": self.s.resets,
+            "wins": self.s.wins, "losses": self.s.losses,
+            "win_rate": round(100 * self.s.wins / (self.s.wins + self.s.losses), 1) if (self.s.wins + self.s.losses) else None,
+
+            "status": status,
         }

@@ -1,54 +1,35 @@
-from __future__ import annotations
-import asyncio
-import logging
-import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from .engine import Engine
+from .state import BotState
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
-engine = Engine()
+bot_state = BotState()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    task = asyncio.create_task(engine.run_forever())
+    await bot_state.start()
     yield
-    task.cancel()
-    await engine.client.close()
-
-app = FastAPI(title="Polymarket 5m BTC Rung Bot", lifespan=lifespan)
+    await bot_state.stop()
 
 
-@app.get("/api/snapshot")
-async def snapshot():
-    return JSONResponse(engine.snapshot())
+app = FastAPI(title="Polymarket BTC 5m Bot", lifespan=lifespan)
 
 
-@app.get("/healthz")
-async def healthz():
-    return {"ok": True}
+@app.get("/api/state")
+async def get_state():
+    return bot_state.snapshot()
 
 
-@app.websocket("/ws")
-async def ws_feed(ws: WebSocket):
-    await ws.accept()
-    q = engine.subscribe()
-    try:
-        await ws.send_json(engine.snapshot())
-        while True:
-            snap = await q.get()
-            await ws.send_json(snap)
-    except WebSocketDisconnect:
-        pass
-    finally:
-        engine.unsubscribe(q)
+@app.get("/")
+async def dashboard():
+    return FileResponse(STATIC_DIR / "index.html")
 
 
-static_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
-app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")

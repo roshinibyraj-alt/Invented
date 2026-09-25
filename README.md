@@ -1,90 +1,55 @@
-# BTC 5m Rung Bot — Polymarket (Paper Trading)
+# Breakout @ 0.70 — BTC 5m bot
 
-Simulated market-making bot for Polymarket's BTC 5-minute up/down markets
-(`btc-updown-5m-<epoch>`). Runs 4 independent "rungs," each resting limit
-orders on both the UP and DOWN token at a flat size, with a **shadow-mode
-cooldown**: after a rung wins for real, it stops risking capital and just
-observes for a while, only resuming real trading once it would have lost.
+Paper-trading bot for Polymarket's `btc-updown-5m-*` markets. Runs a single
+breakout strategy with anti-martingale sizing.
 
-**This build is paper trading only.** It never signs or sends a real
-order — no private key, no CLOB API key, nothing to leak. All prices come
-from Polymarket's public, no-auth Gamma/CLOB endpoints; fills are
-simulated locally. Wire in a real broker later (see `app/engine.py`) once
-you're ready to trade live — that's a deliberate, separate step.
+## Strategy
 
-## Strategy, exactly as specified
+### Breakout taker entry @ 0.70
+1. **Enter**: watches both sides' mid-price every tick. Whichever side's
+   mid-price reaches 0.70 first triggers a one-time taker market BUY of
+   that side for $30 notional (crosses the spread, pays the taker fee).
+   Fires at most once per window.
+2. **Take profit**: resting maker TP sell at 0.99.
+3. **Stop loss (time-tightened)**: starts at 0.29 and steps up the
+   longer the position stays open:
+   - 0:00–2:00 since entry → 0.29 (base)
+   - 2:00–3:00 since entry → 0.40
+   - 3:00–4:00 since entry → 0.45
+   - 4:00+ since entry → 0.50 (final minute of the window)
 
-- **Discovery**: window slugs are deterministic — `btc-updown-5m-<epoch>`
-  where `epoch` is a clean multiple of 300s. The bot computes the current
-  and next window slug from the clock, no scraping needed.
-- **Rungs**: 0.40, 0.35, 0.30, 0.25. At window open, each rung places a
-  resting order on **both** UP and DOWN at its price, always sized at a
-  **flat 500 shares** — no sizing ladder.
-- **Fill logic**: a rung's order is simulated as filled when the token's
-  live ask price touches its limit price. Whichever side fills first
-  cancels the other side's resting order for that rung.
-- **Cutoff**: at 270s into the 5-minute window, any still-resting orders
-  are cancelled — no new fills allowed after that.
-- **Settlement**: in the last 2 seconds of the window, whichever side's
-  price is above 0.95 is the winner ($1); if neither crosses 0.95, the
-  higher of the two prices wins (your chosen tie-break).
-- **ACTIVE / SHADOW mode, per rung, independent:**
-  - Every rung starts **ACTIVE** — real orders, real capital.
-  - A **real WIN** sends that rung into **SHADOW** for the next window: no
-    real orders, no capital at risk, but the exact same fill/settlement
-    logic still runs on paper so the bot can observe what *would* happen.
-  - Each SHADOW window's hypothetical outcome decides the next window:
-    **hypothetical WIN** → stay in SHADOW, skip again; **hypothetical
-    LOSS** → resume ACTIVE (real trading) the very next window;
-    **NO_FILL** → neutral, stay in SHADOW and keep waiting.
-  - A **real LOSS** has no special effect — the rung just keeps trading
-    ACTIVE as normal.
-- **Capital**: each rung tracks its own $5,000 paper bankroll — totally
-  separate P&L, streaks, and win rate per rung. SHADOW windows never move
-  the bankroll; they're purely observational and shown separately in the
-  dashboard (dashed border, "hypothetical" P&L, not counted in totals).
-
-## Project layout
-
-```
-app/
-  config.py            all tunable constants
-  models.py             RungState / WindowState / SimOrder / TradeRecord
-  polymarket_client.py  Gamma + CLOB read-only client (no auth)
-  engine.py              window lifecycle, fill simulation, settlement
-  main.py                 FastAPI app, REST snapshot, websocket feed
-static/
-  index.html, style.css, app.js    the dashboard (no build step, plain JS)
-```
+   The moment the bid drops to/through whichever level is currently
+   active, immediately taker-sell (market order, pays taker fee) to
+   guarantee the exit.
+4. **Forced close**: if the window closes with the position still open
+   (no TP, no SL hit), force a taker close (market sell) right at window
+   end.
+5. **Anti-martingale**: base size $30. A win doubles the size for the
+   next window (2x → $60, 4x → $120, 8x → $240 — up to 3 doublings),
+   pressing size only with prior winnings. A loss (SL hit, or a forced
+   close that lost money), or completing the 3rd press level, resets
+   size back to base. This bounds the *percentage* lost on any single
+   trade (the stop-loss distance) but not the dollar amount, which
+   scales with whatever level the streak had pressed to.
 
 ## Run locally
 
-```bash
+```
 pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000
+cp .env.example .env   # edit if needed
+uvicorn app.main:app --reload
 ```
 
-Open `http://localhost:8000`.
+Dashboard at http://localhost:8000
 
-## Deploy on Railway
+## Config knobs (`app/config.py`)
 
-1. Push this repo to GitHub.
-2. In Railway: **New Project → Deploy from GitHub repo**, pick this repo.
-3. Railway auto-detects Python via Nixpacks and uses `railway.json` /
-   `Procfile` for the start command (`uvicorn app.main:app --host 0.0.0.0
-   --port $PORT`). No environment variables are required to run in paper
-   mode.
-4. Once deployed, open the Railway-provided URL — the dashboard is served
-   at `/`, live data over `/ws`, and a JSON snapshot at `/api/snapshot`.
+- `ENGINE2_TRIGGER_PRICE`, `ENGINE2_TP_PRICE`, `ENGINE2_SL_SCHEDULE`, `ENGINE2_BASE_USD`, `ENGINE2_MAX_MARTINGALE_LEVEL`
+- `STARTING_CAPITAL`, fee/rebate constants
 
-## Notes / known simplifications
+## Notes / assumptions
 
-- Fill simulation assumes your resting order fills in full the instant
-  the ask touches your price — real order books can partial-fill or you
-  can be queued behind other resting orders at the same price.
-- Settlement uses Polymarket's live CLOB price at T‑2s as a proxy for the
-  window's outcome, per your spec — this is not the same as Polymarket's
-  own on-chain resolution, which may differ in edge cases.
-- $5,000 per rung is tracked as a running paper balance, not a hard order
-  cap — orders are always sized in shares per your ladder, regardless of
-  the balance (flag this if you want a hard capital guard added).
+- The breakout trigger reads CLOB best bid/ask **mid-price**, checked every tick.
+- Entry, the stop loss, and any forced window-end close are all taker orders and pay the taker fee for real; TP is still a resting maker order.
+- A forced close at window end counts as a win for anti-martingale purposes if its realized P&L is ≥ $0, and a loss otherwise — there's no explicit TP/SL trigger to key off of in that case.
+- This reuses `polymarket_client.py`, `models.py`, `paper_broker.py`, and the `main.py`/`state.py` orchestration loop unchanged in behavior.

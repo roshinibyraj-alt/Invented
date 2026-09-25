@@ -1,36 +1,90 @@
 """
-All strategy constants live here. Nothing else in the app should hardcode
-these numbers — change behavior by changing this file (or the env vars
-listed below on Railway).
+Central configuration for the BTC 5-min up/down bot.
+
+Alternating side, win/loss-driven size ladder (500 base, 0 floor, 1000
+cap), asymmetric reset behavior at each end:
+
+  - Side selection: strict alternation every window, regardless of the
+    previous trade's outcome -- UP, DOWN, UP, DOWN, ... No signal of any
+    kind (candle-based or otherwise) decides the side anymore.
+    ENGINE2_SHARES worth of shares, taker, on window open.
+
+  - Sizing: starts at the base (ENGINE2_SHARES, 500sh). Each WIN (TP
+    fill, or settling in the position's favor) steps size down by
+    ENGINE2_SIZE_STEP (100sh); each LOSS (settling against the
+    position) steps size up by 100sh.
+
+  - Floor (ENGINE2_MIN_SHARES, 0sh): the moment a win drops size to the
+    floor, that's a simple reset -- the very next window goes straight
+    back to the 500 base (no recovery condition, purely count-based).
+
+  - Cap (ENGINE2_MAX_SHARES, 1000sh): the moment a loss pushes size up
+    to the cap, the bot pins there -- every subsequent window keeps
+    trading exactly 1000sh (ignoring further win/loss stepping) while
+    tracking cumulative realized P&L since the last reset. Only once
+    that cumulative P&L recovers back to >=$0 does it reset to the 500
+    base (the recovery condition is dollar-based here, unlike the
+    floor, which is not).
+
+  - Any reset (from the floor, or from cap recovery) zeroes the
+    cumulative-P&L tracker, so the next climb toward the cap is always
+    measured fresh from that reset point.
+
+  Exit mechanics (unchanged):
+    - A resting take-profit sell at ENGINE_TP_PRICE (0.99) (maker). If
+      it fills, realized proceeds are booked as $1.00/share (not the
+      literal 0.99 fill price) per explicit instruction -- fee/rebate
+      is still computed off the real 0.99 fill price.
+    - No stop loss. If the window closes before TP fills, the position
+      is NOT force-closed at market -- it settles naturally with the
+      binary market's real resolution: $1/share if the position's side
+      won that window, $0/share if it lost (no fee on settlement --
+      it's a resolution, not a trade).
+
+  Dashboard also tracks running peak equity and maximum drawdown from
+  that peak (in $ and %), using live mark-to-market equity (balance +
+  open position's current market value) so intra-window swings count.
 """
 import os
 
-# ---- Market ---------------------------------------------------------------
-ASSET_SLUG_PREFIX = os.getenv("ASSET_SLUG_PREFIX", "btc-updown-5m")
-WINDOW_SECONDS = 300            # 5 minutes, fixed by Polymarket's series
-GAMMA_API = "https://gamma-api.polymarket.com"
-CLOB_API = "https://clob.polymarket.com"
+# ---- Mode -------------------------------------------------------------
+TRADING_MODE = os.getenv("TRADING_MODE", "paper")
 
-# ---- Rungs ------------------------------------------------------------
-RUNG_PRICES = [0.40, 0.35, 0.30, 0.25]
-RUNG_SIZE = 500                 # flat shares, every rung, every real trade — no ladder
-CAPITAL_PER_RUNG = 5000.0       # independent bankroll per rung, USDC
+# ---- Market discovery / pricing ---------------------------------------
+# CLOB only -- no Gamma price fallback anywhere in this app. Gamma is
+# used purely for one-time window metadata (slug -> token ids) in
+# polymarket_client.py; every live price/book read goes to CLOB.
+GAMMA_API_BASE = os.getenv("GAMMA_API_BASE", "https://gamma-api.polymarket.com")
+CLOB_API_BASE = os.getenv("CLOB_API_BASE", "https://clob.polymarket.com")
+SLUG_PREFIX = "btc-updown-5m-"
+WINDOW_SECONDS = 300
 
-# ---- Timing -----------------------------------------------------------
-ORDER_CUTOFF_SECONDS = 270      # no new fills / resting orders honored after this
-WIN_CHECK_SECONDS_BEFORE_CLOSE = 2   # "last two seconds" settlement check
-WIN_PRICE_THRESHOLD = 0.95      # price above this = winner
-PREFETCH_LEAD_SECONDS = 30      # look up next window's token ids this early
-WINDOW_ARCHIVE_DELAY = 8        # keep a settled window "live" this long after close, for UI
-MAX_HISTORY = 300               # trade log rows kept in memory
+POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
 
-# ---- Loop ---------------------------------------------------------------
-TICK_SECONDS = 1.0
-PRICE_FETCH_TIMEOUT = 4.0
-GAMMA_FETCH_TIMEOUT = 6.0
+# ---- Take profit (shared exit mechanic) --------------------------------
+ENGINE_TP_PRICE = 0.99          # resting maker sell
+ENGINE_TP_COUNTS_AS = 1.00      # TP fill is booked at this price for realized P&L, not 0.99
 
-# ---- Mode -----------------------------------------------------------------
-# This build is PAPER TRADING ONLY. No private key, no CLOB API secret, no
-# real order is ever signed or sent. Fills are simulated from public CLOB
-# mid/ask prices. Flip this only once a real broker implementation exists.
-LIVE_TRADING_ENABLED = False
+# ---- Engine sizing: win/loss ladder --------------------------------------
+ENGINE2_SHARES = 500.0        # base size -- where every reset lands
+ENGINE2_SIZE_STEP = 100.0     # shares removed per win / added per loss
+ENGINE2_MIN_SHARES = 0.0      # floor -- hitting this resets to base next window
+ENGINE2_MAX_SHARES = 1000.0   # cap -- hitting this pins size until cumulative P&L recovers
+
+MAKER_REBATE_FRACTION = 0.20  # rebate earned on every resting-order fill (maker side)
+
+# Demo capital: debited on entry fill, credited on TP/settlement. The
+# engine halts permanently if balance ever drops below $0.
+STARTING_CAPITAL = float(os.getenv("STARTING_CAPITAL", "10000"))
+
+# ---- Trading fees -----------------------------------------------------
+# Entries are taker orders and pay the fee for real; TP is a resting
+# maker order (rebate). Window-close settlement is not a trade -- no fee
+# either way. Verify against GET https://clob.polymarket.com/fee-rate?token_id=...
+# before trading real money.
+APPLY_TAKER_FEES = True
+TAKER_FEE_RATE = 0.07
+TAKER_FEE_EXPONENT = 1
+
+# ---- Misc -----------------------------------------------------------------
+LOG_MAX_ENTRIES = 500
