@@ -7,7 +7,12 @@ cap), asymmetric reset behavior at each end:
   - Side selection: strict alternation every window, regardless of the
     previous trade's outcome -- UP, DOWN, UP, DOWN, ... No signal of any
     kind (candle-based or otherwise) decides the side anymore.
-    ENGINE2_SHARES worth of shares, taker, on window open.
+    ENGINE2_SHARES worth of shares, taker, on window open -- but only if
+    the ask is below ENGINE2_MAX_ENTRY_PRICE (0.50) at the moment of
+    entry. That's checked every tick, all window: if the ask never dips
+    below 0.50 the whole window, no trade happens that window at all --
+    the ladder is untouched, and the side still alternates for next
+    window as normal.
 
   - Sizing: starts at the base (ENGINE2_SHARES, 500sh). Each WIN (TP
     fill, or settling in the position's favor) steps size down by
@@ -64,6 +69,13 @@ POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
 # ---- Take profit (shared exit mechanic) --------------------------------
 ENGINE_TP_PRICE = 0.99          # resting maker sell
 ENGINE_TP_COUNTS_AS = 1.00      # TP fill is booked at this price for realized P&L, not 0.99
+
+# ---- Entry price filter --------------------------------------------------
+# Only enter if the ask is below this at the moment of the check (checked
+# every tick, all window -- if it never dips below, that window is
+# skipped entirely: no trade, ladder untouched, side alternation still
+# advances to the other side next window).
+ENGINE2_MAX_ENTRY_PRICE = 0.50
 
 # ---- Engine sizing: win/loss ladder --------------------------------------
 ENGINE2_SHARES = 500.0        # base size -- where every reset lands

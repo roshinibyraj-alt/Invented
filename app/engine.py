@@ -88,6 +88,7 @@ class EngineState:
     settled_wins: int = 0
     settled_losses: int = 0
     resets: int = 0
+    skipped_price: int = 0             # windows where ask never dropped below the entry ceiling
     wins: int = 0
     losses: int = 0
 
@@ -141,9 +142,11 @@ class Engine:
         if (self.s.entry_side_this_window is not None
                 and not self.s.entered_this_window and self.s.position is None):
             ask = up_ask if self.s.entry_side_this_window == Side.UP else down_ask
-            if ask is not None:
+            if ask is not None and ask < config.ENGINE2_MAX_ENTRY_PRICE:
                 self._enter(self.s.entry_side_this_window, ask, now)
                 self.s.entered_this_window = True
+            # else: keep watching every tick this window -- ask may still
+            # drop below the entry ceiling before the window closes
 
         self._check_tp()
         self.capital.update_drawdown(self._live_equity())
@@ -213,6 +216,14 @@ class Engine:
                               note=f"window resolved -- {pos.side.value} lost, {pos.shares:.0f}sh paid $0.00/sh (pnl ${pnl:.4f})")
                 self.s.settled_losses += 1
             self.s.position = None
+        elif self.s.entry_side_this_window is not None and not self.s.entered_this_window:
+            # signalled side never got a qualifying (<0.50) ask all window --
+            # no trade at all, ladder untouched, side selection still alternates next window
+            self.s.skipped_price += 1
+            self._log("SKIPPED_PRICE",
+                       side=self.s.entry_side_this_window.value,
+                       note=(f"{self.s.entry_side_this_window.value} never traded below "
+                             f"{config.ENGINE2_MAX_ENTRY_PRICE} this window -- no entry taken"))
 
         self.capital.update_drawdown(self._live_equity())
         self.capital.record_equity_point(window_slug)
@@ -327,7 +338,8 @@ class Engine:
 
             "fills": self.s.fills, "tp_fills": self.s.tp_fills,
             "settled_wins": self.s.settled_wins, "settled_losses": self.s.settled_losses,
-            "resets": self.s.resets,
+            "resets": self.s.resets, "skipped_price": self.s.skipped_price,
+            "max_entry_price": config.ENGINE2_MAX_ENTRY_PRICE,
             "wins": self.s.wins, "losses": self.s.losses,
             "win_rate": round(100 * self.s.wins / (self.s.wins + self.s.losses), 1) if (self.s.wins + self.s.losses) else None,
 
