@@ -70,9 +70,9 @@ key into source code.** If the key has ever been shared, move funds to a new
 wallet and replace the deployment secret before live deployment. Without a
 valid key, the demo continues but the worker reports a live startup error.
 
-The default is `TRADING_MODE=paper`, which runs the unchanged demo without
-sending real orders. In either mode, the dashboard's 500-share trades remain
-simulations.
+The default is `TRADING_MODE=live`. Set `TRADING_MODE=paper` to run the
+unchanged demo without sending real orders. In either mode, the dashboard's
+500-share trades remain simulations.
 
 ## Run
 
