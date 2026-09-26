@@ -14,7 +14,7 @@ profit it sleeps for three windows, then resumes with session P&L reset.
 
 ## Separate real orders
 
-`TRADING_MODE=live` (the default) starts a separate Polymarket order worker.
+`TRADING_MODE=live` starts a separate Polymarket order worker.
 Each demo `CANDLE_BUY` event queues **one** real FAK market buy for that
 window, denominated in USDC:
 
@@ -68,8 +68,9 @@ key into source code.** If the key has ever been shared, move funds to a new
 wallet and replace the deployment secret before live deployment. Without a
 valid key, the demo continues but the worker reports a live startup error.
 
-Use `TRADING_MODE=paper` to run the unchanged demo without sending real
-orders. In either mode, the dashboard's 500-share trades remain simulations.
+The default is `TRADING_MODE=paper`, which runs the unchanged demo without
+sending real orders. In either mode, the dashboard's 500-share trades remain
+simulations.
 
 ## Run
 

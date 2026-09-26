@@ -4,7 +4,7 @@ import os
 
 # The simulation always stays paper-only. This switch controls only the
 # independent real-order mirror, which cannot feed results into the engine.
-TRADING_MODE = os.getenv("TRADING_MODE", "live").strip().lower()
+TRADING_MODE = os.getenv("TRADING_MODE", "paper").strip().lower()
 if TRADING_MODE not in {"live", "paper"}:
     raise ValueError("TRADING_MODE must be 'live' or 'paper'")
 PRIVATE_KEY = os.getenv("PRIVATE_KEY")
