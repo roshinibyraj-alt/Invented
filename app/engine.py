@@ -240,9 +240,7 @@ class Engine:
         slug = self.state.window.slug if self.state.window else None
         if position is not None:
             if winner is None:
-                raise RuntimeError(
-                    "Cannot settle an open position before Polymarket publishes its resolution"
-                )
+                self._settle(position, 0.0, "SETTLE_UNKNOWN", position.cost)
             elif winner == position.side:
                 proceeds = position.shares
                 self._settle(position, proceeds - position.cost, "SETTLE_WIN", proceeds)

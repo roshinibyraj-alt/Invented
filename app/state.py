@@ -8,7 +8,7 @@ from . import config
 from .binance_client import BinanceCandleClient
 from .broker import Broker
 from .engine import Engine
-from .models import WindowMarket
+from .models import Side, WindowMarket
 from .polymarket_client import PolymarketClient
 
 
@@ -27,17 +27,8 @@ class BotState:
         self.error = None
         self._task: Optional[asyncio.Task] = None
         self._ticks = 0
-        self._pending_settlement_slug: Optional[str] = None
-
     async def start(self):
         await self.broker.start()
-        if config.TRADING_MODE == "live":
-            initial_balance = float(self.broker.balance)
-            self.engine.capital.balance = initial_balance
-            self.engine.capital.starting = initial_balance
-            self.engine.capital.peak_equity = initial_balance
-            self.engine.capital.equity_curve.clear()
-            self.engine.capital.checkpoint(None)
         self.status = "running"
         self._task = asyncio.create_task(self._run_loop())
 
@@ -88,28 +79,35 @@ class BotState:
             except Exception as exc:
                 self.broker.log_event("BALANCE_ERROR", note=str(exc))
 
+    @staticmethod
+    def _midpoint(bid, ask):
+        if bid is not None and ask is not None:
+            return (bid + ask) / 2
+        return ask if ask is not None else bid
+
+    def _infer_winner(self) -> Optional[Side]:
+        """Use the demo's last-observed UP/DOWN midpoints for accounting."""
+        up = self._midpoint(self.last_up_bid, self.last_up_ask)
+        down = self._midpoint(self.last_down_bid, self.last_down_ask)
+        if up is None or down is None:
+            return None
+        return Side.UP if up >= down else Side.DOWN
+
     async def _roll_window(self, new_window: WindowMarket):
         if self.current_window is not None:
-            winner = None
-            if self.engine.state.position is not None:
-                winner = await self.client.fetch_resolution(self.current_window.slug)
-                if winner is None:
-                    if self._pending_settlement_slug != self.current_window.slug:
-                        self.broker.log_event(
-                            "WINDOW_SETTLEMENT_PENDING",
-                            window=self.current_window.slug,
-                            note="waiting for official Polymarket resolution; new entries paused",
-                        )
-                        self._pending_settlement_slug = self.current_window.slug
-                    return
-                self.broker.log_event(
-                    "WINDOW_SETTLED",
-                    window=self.current_window.slug,
-                    side=winner.value,
-                    note="settlement source: official Polymarket resolution",
-                )
+            winner = self._infer_winner()
+            up_mid = self._midpoint(self.last_up_bid, self.last_up_ask)
+            down_mid = self._midpoint(self.last_down_bid, self.last_down_ask)
+            self.broker.log_event(
+                "WINDOW_SETTLED",
+                window=self.current_window.slug,
+                side=winner.value if winner else None,
+                note=(
+                    f"demo price settlement: up={up_mid}, down={down_mid}; "
+                    "official Polymarket resolution is not used"
+                ),
+            )
             await self.engine.finalize_window(winner)
-            self._pending_settlement_slug = None
 
         candle = await self.binance.get_candle_for_close_ts(new_window.open_ts)
         self.engine.record_candle(candle)

@@ -39,9 +39,17 @@ dollar budget is a spending ceiling.
 ## Exits and settlement
 
 The bot attempts a taker FOK exit when the live bid reaches `0.99`. If the
-position remains open at the window boundary, it settles according to the
-official Polymarket resolution. New entries remain paused until that result is
-published; the bot never infers a real-money winner from a midpoint.
+position remains open at the window boundary, the strategy uses the demo
+settlement rule: whichever side had the higher last-observed CLOB midpoint is
+counted as the winner. If quotes are missing, the demo ledger records a wash.
+It does not query Polymarket's official resolution to update the ladder.
+
+In live mode, the dashboard's simulated P&L, win/loss counts, and next-dollar
+budget follow that demo rule. They are not a record of redeemed collateral or
+the exchange's eventual payout. The bot sends real FOK taker orders for entries
+and take-profit exits; it does not redeem or reconcile shares left open at
+window expiry. Strategy capital and ladder accounting stay in demo mode; the
+connected wallet balance is displayed separately and does not drive sizing.
 
 The existing `$500` session target and three-window sleep behavior are retained.
 All state is held in memory; restart the service only when no position is at
