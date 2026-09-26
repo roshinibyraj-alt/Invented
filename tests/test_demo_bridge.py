@@ -3,6 +3,7 @@ import time
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from unittest.mock import patch
 
 from app.engine import Engine
@@ -164,6 +165,10 @@ class DemoBridgeTest(unittest.IsolatedAsyncioTestCase):
         fake.buy = uncertain
         await bridge._buy(intent)
         self.assertEqual(bridge._guard.get(intent.slug)[2], "uncertain")
+        self.assertTrue(bridge.snapshot()["buy_halted"])
+        await bridge._buy(replace(intent, slug="next-window"))
+        self.assertEqual(len(fake.buys), 1)
+        self.assertIn("LIVE_BUY_SKIPPED", [event[0] for event in fake.events])
 
         async def verification_error(*args):
             raise TimeoutError("exchange unavailable")

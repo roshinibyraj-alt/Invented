@@ -39,6 +39,7 @@ class LiveBridge:
         self._queue: asyncio.Queue[Optional[OrderIntent]] = asyncio.Queue()
         self._task: Optional[asyncio.Task] = None
         self._failed = False
+        self._buy_halted = False
         self._seen_windows: set[str] = set()
         self._filled_shares: dict[str, float] = {}
         self._guard: Optional[LiveOrderGuard] = None
@@ -83,7 +84,7 @@ class LiveBridge:
             if entry.window_slug in self._seen_windows:
                 return
             self._seen_windows.add(entry.window_slug)
-            if not self.enabled or self._failed or window is None:
+            if not self.enabled or self._failed or self._buy_halted or window is None:
                 return
             if (self._ephemeral_guard and self._started_at is not None
                     and window.open_ts < self._started_at):
@@ -156,6 +157,12 @@ class LiveBridge:
             await self.broker.close()
 
     async def _buy(self, intent: OrderIntent):
+        if self._buy_halted:
+            self.broker.log_event(
+                "LIVE_BUY_SKIPPED", window=intent.slug,
+                note="real buys halted after an uncertain prior order",
+            )
+            return
         try:
             if self._guard is None:
                 raise RuntimeError("durable live buy guard is not initialized")
@@ -193,6 +200,7 @@ class LiveBridge:
                 note=f"status={result.get('status', 'unknown')}",
             )
         except Exception as exc:
+            self._buy_halted = True
             try:
                 self._guard.record(intent.slug, "uncertain")
             except Exception as guard_exc:
@@ -200,7 +208,8 @@ class LiveBridge:
                                       note=f"buy outcome uncertain; status could not be saved: {guard_exc}")
             self.broker.log_event(
                 "LIVE_BUY_ERROR", window=intent.slug, side=intent.side,
-                trade_usd=intent.budget_usd, note=f"{exc}; window reserved, no automatic retry",
+                trade_usd=intent.budget_usd,
+                note=f"{exc}; window reserved, further real buys halted until restart",
             )
 
     async def _verify_prior_buy(self, intent: OrderIntent):
@@ -242,5 +251,6 @@ class LiveBridge:
             "enabled": self.enabled,
             "budget_usd": self.budget_usd,
             "startup_failed": self._failed,
+            "buy_halted": self._buy_halted,
             "recent_events": list(reversed(self.broker.events[-20:])),
         }

@@ -21,8 +21,8 @@ test('matched FAK buy reports actual USD and shares, not requested shares', () =
     success: true,
     status: 'matched',
     orderID: 'buy-order',
-    makingAmount: '1000000',
-    takingAmount: '1300000',
+    makingAmount: '1',
+    takingAmount: '1.3',
   }, 'BUY', 1);
   assert.equal(fill.filled, true);
   assert.equal(fill.cost, 1);
@@ -35,8 +35,8 @@ test('matched FAK sell reports actual proceeds', () => {
     success: true,
     status: 'matched',
     orderID: 'sell-order',
-    makingAmount: '5200000',
-    takingAmount: '5000000',
+    makingAmount: '5.2',
+    takingAmount: '5',
   }, 'SELL', 5.2);
   assert.equal(fill.filled, true);
   assert.equal(fill.shares, 5.2);
@@ -48,8 +48,8 @@ test('partially filled FAK buy uses spent dollars, not the one-dollar request', 
     success: true,
     status: 'matched',
     orderID: 'partial-buy',
-    makingAmount: '750000',
-    takingAmount: '1000000',
+    makingAmount: '0.75',
+    takingAmount: '1',
   }, 'BUY', 1);
   assert.equal(fill.filled, true);
   assert.equal(fill.cost, 0.75);
@@ -62,8 +62,8 @@ test('partially filled FAK sell reports only the shares actually sold', () => {
     success: true,
     status: 'matched',
     orderID: 'partial-sell',
-    makingAmount: '2000000',
-    takingAmount: '1900000',
+    makingAmount: '2',
+    takingAmount: '1.9',
   }, 'SELL', 5.2);
   assert.equal(fill.filled, true);
   assert.equal(fill.shares, 2);
@@ -85,6 +85,10 @@ test('exchange rejection is not a fill; uncertain submissions require review', (
   }, 'BUY', 1), /no usable fill amounts/);
   assert.throws(() => parseMarketResponse({
     success: true, status: 'matched', orderID: 'overspend',
-    makingAmount: '2000000', takingAmount: '3000000',
+    makingAmount: '2', takingAmount: '3',
+  }, 'BUY', 1), /implausible fill amounts/);
+  assert.throws(() => parseMarketResponse({
+    success: true, status: 'matched', orderID: 'tiny',
+    makingAmount: '0.000001', takingAmount: '0.000002',
   }, 'BUY', 1), /implausible fill amounts/);
 });

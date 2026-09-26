@@ -50,9 +50,10 @@ function parseMarketResponse(response, side, requestedAmount) {
     throw new Error(`Market order needs manual reconciliation (status=${status}, order=${orderId || 'unknown'})`);
   }
 
-  // The CLOB response reports matched asset quantities in 1e-6 units.
-  const making = Number(response.makingAmount) / 1e6;
-  const taking = Number(response.takingAmount) / 1e6;
+  // Order response amounts are decimal asset quantities, unlike balance
+  // allowance amounts, which the CLOB reports in 1e-6 units.
+  const making = Number(response.makingAmount);
+  const taking = Number(response.takingAmount);
   if (!Number.isFinite(making) || !Number.isFinite(taking)
       || making <= 0 || taking <= 0) {
     throw new Error(`Matched market order has no usable fill amounts (order=${orderId || 'unknown'})`);

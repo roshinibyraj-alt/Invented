@@ -60,7 +60,9 @@ logged; the demo continues. Independent per-instance volumes or a shared
 filesystem without reliable SQLite file locking cannot prevent duplicates.
 Keep the persistent file when redeploying, and check exchange history
 manually before migrating an existing live service to the guard. The app
-does not reconcile unsold real positions.
+does not reconcile unsold real positions. If a real buy's outcome is
+uncertain, further real buys stop until the process restarts; check exchange
+activity before restarting or resuming live mode.
 
 The real worker requires a fresh, private `PRIVATE_KEY` runtime
 secret, adequate collateral and allowance. **Never commit or paste a signing
