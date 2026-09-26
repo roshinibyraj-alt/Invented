@@ -1,4 +1,4 @@
-"""Single-candle contrarian demo engine."""
+"""Reference 10-candle imbalance demo engine."""
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -61,12 +61,14 @@ class EngineState:
     up_ask: Optional[float] = None
     down_bid: Optional[float] = None
     down_ask: Optional[float] = None
-    active: bool = True
-    sleep_windows_remaining: int = 0
     entry_side_this_window: Optional[Side] = None
+    reds_this_signal: int = 0
+    greens_this_signal: int = 0
     entered_this_window: bool = False
     position: Optional[Position] = None
-    session_pnl: float = 0.0
+    locked_side: Optional[Side] = None
+    required_color: Optional[str] = None
+    current_shares: float = config.ENGINE2_SHARES
     total_pnl: float = 0.0
     fills: int = 0
     tp_fills: int = 0
@@ -78,16 +80,17 @@ class EngineState:
 
 
 class Engine:
-    """Red candles buy UP; green candles buy DOWN, 500 shares per entry."""
+    """Trade the reference's locked 10-candle imbalance with demo sizing."""
 
     name = "E2"
-    label = "Single-candle contrarian"
+    label = "10-candle imbalance"
 
     def __init__(self, broker: PaperBroker):
         self.broker = broker
         self.shares = config.ENGINE2_SHARES
         self.candle_history: Deque[str] = deque(maxlen=config.CANDLE_HISTORY_MAXLEN)
         self.last_candle: Optional[dict] = None
+        self._last_recorded_close_ms: Optional[float] = None
         self.capital = CapitalPool(balance=config.STARTING_CAPITAL)
         self.s = EngineState()
         self.capital.record_equity_point(None)
@@ -101,31 +104,27 @@ class Engine:
             **kw,
         )
 
-    def _wake_up(self):
-        self.s.active = True
-        self.s.sleep_windows_remaining = 0
-        self.s.session_pnl = 0.0
+    def seed_history(self, candles: List[dict]):
+        for candle in candles:
+            self.candle_history.append(candle["color"])
+        if candles:
+            self.last_candle = candles[-1]
+            self._last_recorded_close_ms = candles[-1].get("close_time_ms")
+        reds = list(self.candle_history).count("red")
+        greens = list(self.candle_history).count("green")
         self._log(
-            "ENGINE_RESUMED",
-            note=f"resumed after sleep -- session P&L reset, target +${config.ENGINE_PROFIT_TARGET_USD:.0f}",
+            "HISTORY_SEEDED",
+            note=f"backfilled {len(candles)} closed candles ({reds} red, {greens} green) -- ready to trade immediately",
         )
-
-    def _check_sleep(self):
-        if self.s.active and self.s.session_pnl >= config.ENGINE_PROFIT_TARGET_USD:
-            self.s.active = False
-            self.s.sleep_windows_remaining = config.ENGINE_SLEEP_WINDOWS
-            self._log(
-                "ENGINE_SLEEP",
-                note=(
-                    f"session P&L +${self.s.session_pnl:.2f} reached target -- "
-                    f"sleeping {config.ENGINE_SLEEP_WINDOWS} windows"
-                ),
-            )
 
     def record_candle(self, candle: Optional[dict]):
         self.last_candle = candle
         if candle is not None:
+            close_ms = candle.get("close_time_ms")
+            if close_ms is not None and close_ms == self._last_recorded_close_ms:
+                return
             self.candle_history.append(candle["color"])
+            self._last_recorded_close_ms = close_ms
 
     def reset_for_window(self, window: WindowMarket):
         self.s.window = window
@@ -133,20 +132,46 @@ class Engine:
         self.s.entered_this_window = False
         if self.capital.halted:
             return
-        if not self.s.active:
-            if self.s.sleep_windows_remaining > 0:
-                self.s.sleep_windows_remaining -= 1
+
+        last_n = list(self.candle_history)[-config.IMBALANCE_WINDOW:]
+        reds = last_n.count("red")
+        greens = last_n.count("green")
+        self.s.reds_this_signal = reds
+        self.s.greens_this_signal = greens
+
+        if self.s.locked_side is not None:
+            just_closed = self.candle_history[-1] if self.candle_history else None
+            if just_closed == self.s.required_color:
+                self._log(
+                    "IMBALANCE_UNLOCK",
+                    note=f"a {self.s.required_color} candle finally closed -- unlocking {self.s.locked_side.value}, re-evaluating from scratch",
+                )
+                self.s.locked_side = None
+                self.s.required_color = None
+            else:
+                self.s.entry_side_this_window = self.s.locked_side
                 return
-            self._wake_up()
-        # A missing candle must not reuse yesterday's signal just because
-        # older colors remain available for the demo history display.
-        if self.last_candle is not None:
-            last_color = self.last_candle["color"]
-            if last_color == "red":
-                self.s.entry_side_this_window = Side.UP
-            elif last_color == "green":
-                self.s.entry_side_this_window = Side.DOWN
-        if self.s.entry_side_this_window is None:
+
+        if len(last_n) < config.IMBALANCE_WINDOW:
+            self.s.no_signal_windows += 1
+            return
+        if reds - greens >= config.IMBALANCE_THRESHOLD:
+            self.s.locked_side = Side.UP
+            self.s.required_color = "green"
+            self.s.entry_side_this_window = Side.UP
+            self._log(
+                "IMBALANCE_SIGNAL", side="UP",
+                note=f"last {config.IMBALANCE_WINDOW} candles: {reds} red / {greens} green -- green lacking, locking onto UP until a green candle closes ({self.s.current_shares:.0f}sh)",
+            )
+        elif greens - reds >= config.IMBALANCE_THRESHOLD:
+            self.s.locked_side = Side.DOWN
+            self.s.required_color = "red"
+            self.s.entry_side_this_window = Side.DOWN
+            self._log(
+                "IMBALANCE_SIGNAL", side="DOWN",
+                note=f"last {config.IMBALANCE_WINDOW} candles: {reds} red / {greens} green -- red lacking, locking onto DOWN until a red candle closes ({self.s.current_shares:.0f}sh)",
+            )
+        else:
             self.s.no_signal_windows += 1
 
     def on_tick(
@@ -164,8 +189,7 @@ class Engine:
         if self.capital.halted or self.s.window is None:
             return
         if (
-            self.s.active
-            and self.s.entry_side_this_window is not None
+            self.s.entry_side_this_window is not None
             and not self.s.entered_this_window
             and self.s.position is None
         ):
@@ -185,7 +209,7 @@ class Engine:
         return self.capital.balance + pos.shares * mark
 
     def _enter(self, side: Side, ask: float, now: float):
-        shares = self.shares
+        shares = self.s.current_shares
         fee = self.broker.taker_fee_amount(shares, ask)
         cost = shares * ask + fee
         self.capital.balance -= cost
@@ -264,7 +288,6 @@ class Engine:
     def _settle(self, pos: Position, proceeds: float, pnl: float, reason: str, fee: float, note: str):
         self.capital.balance += proceeds
         self.s.total_pnl += pnl
-        self.s.session_pnl += pnl
         if pnl >= 0:
             self.s.wins += 1
         else:
@@ -280,7 +303,30 @@ class Engine:
         )
         self.capital.check_halt()
         self.capital.update_drawdown(self._live_equity())
-        self._check_sleep()
+        if reason in ("SETTLE_WIN", "TP_FILL"):
+            self._adjust_size(is_win=True)
+        elif reason == "SETTLE_LOSS":
+            self._adjust_size(is_win=False)
+
+    def _adjust_size(self, is_win: bool):
+        old_size = self.s.current_shares
+        if is_win:
+            self.s.current_shares = max(
+                config.ENGINE2_MIN_SHARES,
+                self.s.current_shares - config.ENGINE2_SIZE_STEP,
+            )
+        else:
+            self.s.current_shares = min(
+                config.ENGINE2_SHARES + config.ENGINE2_MAX_ADDITIONS * config.ENGINE2_SIZE_STEP,
+                self.s.current_shares + config.ENGINE2_SIZE_STEP,
+            )
+        if self.s.current_shares != old_size:
+            self._log(
+                "SIZE_ADJUST",
+                side=self.s.entry_side_this_window.value if self.s.entry_side_this_window else None,
+                shares=self.s.current_shares,
+                note=f"{'win' if is_win else 'loss'}: next size {old_size:.0f}sh -> {self.s.current_shares:.0f}sh",
+            )
 
     def snapshot(self) -> dict:
         pos = self.s.position
@@ -305,8 +351,6 @@ class Engine:
             }
         if self.capital.halted:
             status = "halted"
-        elif not self.s.active:
-            status = "sleeping"
         elif pos is not None:
             status = "open"
         elif self.s.entry_side_this_window is not None and not self.s.entered_this_window:
@@ -316,9 +360,14 @@ class Engine:
         return {
             "engine": self.name,
             "label": self.label,
-            "active": self.s.active,
-            "sleep_windows_remaining": self.s.sleep_windows_remaining,
-            "shares": self.shares,
+            "base_shares": self.shares,
+            "current_shares": self.s.current_shares,
+            "next_size_if_win": max(config.ENGINE2_MIN_SHARES, self.s.current_shares - config.ENGINE2_SIZE_STEP),
+            "next_size_if_loss": min(config.ENGINE2_SHARES + config.ENGINE2_MAX_ADDITIONS * config.ENGINE2_SIZE_STEP, self.s.current_shares + config.ENGINE2_SIZE_STEP),
+            "size_step": config.ENGINE2_SIZE_STEP,
+            "max_additions": config.ENGINE2_MAX_ADDITIONS,
+            "min_shares": config.ENGINE2_MIN_SHARES,
+            "max_shares": config.ENGINE2_SHARES + config.ENGINE2_MAX_ADDITIONS * config.ENGINE2_SIZE_STEP,
             "balance": round(self.capital.balance, 2),
             "starting_capital": config.STARTING_CAPITAL,
             "halted": self.capital.halted,
@@ -328,17 +377,18 @@ class Engine:
             "max_drawdown": round(self.capital.max_drawdown, 2),
             "max_drawdown_pct": round(self.capital.max_drawdown_pct, 2),
             "realized_pnl": round(self.s.total_pnl, 4),
-            "session_pnl": round(self.s.session_pnl, 4),
             "unrealized_pnl": round(unrealized_pnl, 4),
-            "profit_target": config.ENGINE_PROFIT_TARGET_USD,
-            "progress_pct": round(
-                100 * max(0.0, self.s.session_pnl) / config.ENGINE_PROFIT_TARGET_USD, 1
-            ),
             "entry_side_this_window": (
                 self.s.entry_side_this_window.value if self.s.entry_side_this_window else None
             ),
+            "locked_side": self.s.locked_side.value if self.s.locked_side else None,
+            "required_color": self.s.required_color,
+            "reds_this_signal": self.s.reds_this_signal,
+            "greens_this_signal": self.s.greens_this_signal,
+            "imbalance_window": config.IMBALANCE_WINDOW,
+            "imbalance_threshold": config.IMBALANCE_THRESHOLD,
             "position": position_payload,
-            "candle_history": list(self.candle_history)[-10:],
+            "candle_history": list(self.candle_history)[-config.IMBALANCE_WINDOW:],
             "last_candle": self.last_candle,
             "fills": self.s.fills,
             "tp_fills": self.s.tp_fills,

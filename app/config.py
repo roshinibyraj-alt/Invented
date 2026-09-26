@@ -1,4 +1,4 @@
-"""Candle demo configuration and separate live execution settings."""
+"""Reference imbalance demo configuration and separate live execution settings."""
 import os
 
 
@@ -19,16 +19,19 @@ POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
 BINANCE_SYMBOL = os.getenv("BINANCE_SYMBOL", "BTCUSDT")
 CANDLE_HISTORY_MAXLEN = 20
 
-# Single-candle contrarian strategy and exits.
+# Reference 10-candle imbalance, lock/unlock, and simulated sizing.
+IMBALANCE_WINDOW = 10
+IMBALANCE_THRESHOLD = 2
 ENGINE_TP_PRICE = 0.99
 ENGINE_TP_COUNTS_AS = 1.00
-ENGINE_PROFIT_TARGET_USD = 500.0
-ENGINE_SLEEP_WINDOWS = 3
 ENGINE2_SHARES = 500.0
+ENGINE2_SIZE_STEP = 100.0
+ENGINE2_MAX_ADDITIONS = 7
+ENGINE2_MIN_SHARES = 500.0
 MAKER_REBATE_FRACTION = 0.20
 
 # Simulated balance and trading-fee accounting.
-STARTING_CAPITAL = float(os.getenv("STARTING_CAPITAL", "2000"))
+STARTING_CAPITAL = float(os.getenv("STARTING_CAPITAL", "10000"))
 APPLY_TAKER_FEES = True
 TAKER_FEE_RATE = 0.07
 TAKER_FEE_EXPONENT = 1

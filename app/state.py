@@ -32,9 +32,21 @@ class BotState:
         self._task: Optional[asyncio.Task] = None
 
     async def start(self):
+        await self._seed_candle_history()
         await self.real.start()
         self.status = "running"
         self._task = asyncio.create_task(self._run_loop())
+
+    async def _seed_candle_history(self):
+        try:
+            candles = await self.binance.get_closed_candles(limit=config.IMBALANCE_WINDOW)
+        except Exception as exc:
+            self.broker.log_event(
+                "SYS", "", "HISTORY_SEED_FAILED",
+                note=f"could not backfill candle history: {exc}",
+            )
+            return
+        self.engine.seed_history(candles[-config.IMBALANCE_WINDOW:])
 
     async def stop(self):
         if self._task:
@@ -130,7 +142,7 @@ class BotState:
                 f"Binance {config.BINANCE_SYMBOL} candle: {candle['color']} "
                 f"(open {candle['open']}, close {candle['close']})"
                 if candle
-                else "Binance candle unavailable this window -- no candle signal"
+                else "Binance candle unavailable this window -- an existing imbalance lock may continue"
             ),
         )
         self.current_window = new_window

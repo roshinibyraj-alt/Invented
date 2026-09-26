@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Candle Contrarian — Demo and Real Orders</title>
+  <title>BTC 5m Imbalance — Demo and Real Orders</title>
   <style>
     :root{color-scheme:dark;--bg:#080b10;--panel:#121820;--line:#273241;--text:#e8edf5;--muted:#91a0b3;--mint:#48dbad;--red:#ff7184;--amber:#ffc857}
     *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px system-ui,-apple-system,sans-serif}
@@ -22,7 +22,7 @@
 <body>
 <main>
   <header>
-    <div><h1>BTC 5m Candle Contrarian</h1><div class="sub">500-share demo · red → UP / green → DOWN · separate real order mirror</div></div>
+    <div><h1>BTC 5m Candle Imbalance</h1><div class="sub">10 closed candles · gap ≥ 2 locks a side · separate $1–$8 real buys</div></div>
     <div><span class="badge" id="modeBadge">CONNECTING</span><div class="small" id="status">Connecting…</div><div class="small" id="liveBudget"></div></div>
   </header>
   <section class="grid">
@@ -40,7 +40,7 @@
   </section>
   <section class="card position"><div class="label">Position</div><div id="position" style="margin-top:9px">No open position.</div></section>
   <section class="card log"><div class="label">Event log</div><div id="log" class="log-list"></div></section>
-  <div class="foot">Demo balance, position and statistics are simulated. Real USDC balance is available exchange collateral, not the value of held shares. The live bot only buys on candle signals; it does not sell or redeem positions.</div>
+  <div class="foot">Demo balance, positions, and 500–1,200 share sizes are simulated. Real USDC balance is available exchange collateral, not the value of held shares. The live bot buys only on demo imbalance entries; it does not sell or redeem positions.</div>
   <div id="error" class="alert"></div>
 </main>
 <script>
@@ -56,11 +56,11 @@ function render(s){
   $('liveBudget').textContent=s.trading_mode==='live'?`Next real buy: ${money(s.real_trading?.budget_usd)}`:'No real orders';
   $('window').textContent=w?esc(w.slug.replace('btc-updown-5m-','#')):'—';
   $('remaining').textContent=w?`${Math.max(0,w.seconds_remaining).toFixed(0)} seconds remaining`:'Waiting for market';
-  $('strategy').textContent=e.halted?'Halted':!e.active?`Sleeping (${e.sleep_windows_remaining} windows)`:p?'Position open':e.entry_side_this_window?`Armed ${e.entry_side_this_window}`:'Waiting for candle signal';
+  $('strategy').textContent=e.halted?'Halted':p?'Position open':e.entry_side_this_window?`Locked ${e.locked_side||e.entry_side_this_window}`:'No imbalance signal';
   const c=e.last_candle;
-  $('candle').innerHTML=`Last candle: <span class="candle ${c?.color==='red'?'down':c?.color==='green'?'up':''}">${c?esc(c.color.toUpperCase()):'—'}</span>${c?` · ${esc(c.open)} → ${esc(c.close)}`:''}`;
+  $('candle').innerHTML=`Last candle: <span class="candle ${c?.color==='red'?'down':c?.color==='green'?'up':''}">${c?esc(c.color.toUpperCase()):'—'}</span> · last ${e.imbalance_window||10}: ${e.reds_this_signal||0} red / ${e.greens_this_signal||0} green${e.required_color?` · unlock on ${esc(e.required_color)}`:''}`;
   $('balance').textContent=money(e.balance);
-  $('pnl').textContent=`Realized ${money(e.realized_pnl)} · Session ${money(e.session_pnl)} · Unrealized ${money(e.unrealized_pnl)}`;
+  $('pnl').textContent=`Realized ${money(e.realized_pnl)} · Unrealized ${money(e.unrealized_pnl)}`;
   const real=s.real_trading||{};
   $('realBalance').textContent=s.trading_mode==='live'?money(real.balance_usdc):'—';
   $('realBalanceNote').textContent=s.trading_mode!=='live'?'Real trading off':real.balance_updated_at?`Available USDC · updated ${new Date(real.balance_updated_at*1000).toLocaleTimeString()}`:'Exchange balance unavailable';
@@ -69,13 +69,13 @@ function render(s){
   $('upBook').textContent=`bid ${price(b.up_bid)} / ask ${price(b.up_ask)}`;
   $('downBook').textContent=`bid ${price(b.down_bid)} / ask ${price(b.down_ask)}`;
   $('stats').innerHTML=[
-    stat('Simulated shares',Number(e.shares||500).toFixed(0)),
-    stat('Profit target',money(e.profit_target)),
-    stat('Target progress',`${Number(e.progress_pct||0).toFixed(1)}%`),
+    stat('Next demo shares',Number(e.current_shares||500).toFixed(0)),
+    stat('After demo win',Number(e.next_size_if_win||500).toFixed(0)),
+    stat('After demo loss',Number(e.next_size_if_loss||600).toFixed(0)),
     stat('Fills / TP fills',`${e.fills||0} / ${e.tp_fills||0}`),
     stat('Wins / losses',`${e.wins||0} / ${e.losses||0}`),
     stat('Win rate',e.win_rate==null?'—':`${e.win_rate}%`),
-    stat('Sleep windows',e.sleep_windows_remaining||0),
+    stat('Locked side',e.locked_side||'None'),
     stat('Max drawdown',`${money(e.max_drawdown)} (${Number(e.max_drawdown_pct||0).toFixed(2)}%)`)
   ].join('');
   $('position').innerHTML=p?`<b class="${p.side==='UP'?'up':'down'}">${esc(p.side)}</b> · ${Number(p.shares).toFixed(0)} shares @ ${price(p.entry_price)} · cost ${money(p.cost)} · TP ${price(p.tp_price)} maker · mark ${price(p.mark_price)} · unrealized ${money(p.unrealized_pnl)}`:'No open position.';

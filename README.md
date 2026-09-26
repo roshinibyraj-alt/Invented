@@ -1,24 +1,32 @@
-# BTC 5m Candle Contrarian Demo + Live Orders
+# BTC 5m Imbalance Demo + Live Buys
 
-The **demo strategy** is the original candle-contrarian simulation from the
-attached archive. It reads the most recently closed Binance BTCUSDT 5-minute
-candle: red buys UP, green buys DOWN, and a doji or missing candle skips the
-window. It simulates **500 shares** on the first available ask. Its balance,
-position, P&L, wins, losses, and sleep cycle remain simulated.
+The **demo strategy** matches the reference repo's 10-candle imbalance logic.
+At startup it backfills the last 10 closed Binance BTCUSDT five-minute candles.
+Each new window counts red and green candles in that rolling window. A gap of
+at least two locks **UP** when red candles dominate or **DOWN** when green
+candles dominate; otherwise it skips. Once locked, it trades that side each
+window until a candle of the lacking color closes, then unlocks and evaluates
+the current 10-candle count again. There is no profit-target pause.
+
+The demo buys at the first available CLOB ask. Its next trade starts at
+**500 simulated shares**; each resolved win or simulated take-profit reduces
+the next size by 100 to a floor of 500, and each resolved loss increases it
+by 100 to a cap of 1,200. Unfilled and unknown-result windows do not change
+the demo size. The demo starts with **$10,000** of simulated capital by default.
 
 The demo models a maker take-profit when the bid reaches $0.99, booking
 $1/share plus its modeled rebate. Otherwise it settles at the next window
 using the higher **last-observed UP/DOWN CLOB midpoint**. Missing quotes are a
-wash. It does not use the exchange's official resolution. At $500 of session
-profit it sleeps for three windows, then resumes with session P&L reset.
+wash. It does not use the exchange's official resolution.
 
 ## Separate real orders
 
 `TRADING_MODE=live` starts a separate Polymarket order worker.
-Each demo `CANDLE_BUY` event queues **one** real FAK market buy for that
-window, denominated in USDC:
+Each demo `CANDLE_BUY` event from the imbalance strategy queues **one** real
+FAK market buy for that window, denominated in USDC:
 
-- The first real buy is **$1**.
+- The real budget starts at **$1**. A demo result in a skipped startup
+  window can change it before the first real order is actually sent.
 - A demo loss increases the *next* real buy by $1; a demo win decreases it by
   $1. A wash leaves it unchanged. The range is **$1–$8**.
 - The real amount is never increased to meet a market minimum. An order
@@ -28,7 +36,7 @@ window, denominated in USDC:
 - The FAK market buy accepts available asks up to **$0.99 per share**, even if
   that is much higher than the demo ask. It can still fail if there is no
   matching liquidity. It is a market-order request in **USDC**, not a request
-  for 500 real shares.
+  for 500–1,200 real shares.
 
 The live worker **only buys on `CANDLE_BUY` signals**. Demo take-profits and
 settlements remain simulated and can change the next real buy budget, but
@@ -75,8 +83,8 @@ wallet and replace the deployment secret before live deployment. Without a
 valid key, the demo continues but the worker reports a live startup error.
 
 The default is `TRADING_MODE=live`. Set `TRADING_MODE=paper` to run the
-unchanged demo without sending real orders. In either mode, the dashboard's
-500-share trades remain simulations.
+reference demo without sending real orders. In either mode, the dashboard's
+500–1,200 share trades remain simulations.
 
 ## Run
 
