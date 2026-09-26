@@ -1,6 +1,8 @@
 'use strict';
 
 const readline = require('readline');
+const { ensureWebCrypto } = require('./trader_crypto');
+ensureWebCrypto();
 const PolymarketTrader = require('./trader_client');
 const { marketLimitPrice, roundToTick } = require('./order_utils');
 
