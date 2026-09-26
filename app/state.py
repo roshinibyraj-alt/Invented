@@ -25,6 +25,14 @@ class BotState:
         self.last_up_ask: Optional[float] = None
         self.last_down_bid: Optional[float] = None
         self.last_down_ask: Optional[float] = None
+        # Display values may use a CLOB midpoint/last-trade fallback when
+        # the order book is temporarily empty. These are never passed to the
+        # engine, which still requires a real bid/ask book.
+        self.display_up_bid: Optional[float] = None
+        self.display_up_ask: Optional[float] = None
+        self.display_down_bid: Optional[float] = None
+        self.display_down_ask: Optional[float] = None
+        self.display_price_source: Optional[str] = None
         self.status = "starting"
         self.error: Optional[str] = None
         self._task: Optional[asyncio.Task] = None
@@ -71,11 +79,32 @@ class BotState:
         if self.current_window is None or window.slug != self.current_window.slug:
             await self._roll_window(window)
 
-        # CLOB order book only -- no Gamma price fallback.
-        up_bid, up_ask = await self.client.get_book(self.current_window.token_up)
-        down_bid, down_ask = await self.client.get_book(self.current_window.token_down)
+        # Read both books together so one slow token cannot hold up the
+        # other. If a book is temporarily empty, get_price() supplies a
+        # display-only CLOB midpoint/last-trade value; it never reaches the
+        # engine, so entries still require a real order book.
+        (up_bid, up_ask, up_display, up_source), (
+            down_bid, down_ask, down_display, down_source,
+        ) = await asyncio.gather(
+            self._read_token(self.current_window.token_up),
+            self._read_token(self.current_window.token_down),
+        )
         self.last_up_bid, self.last_up_ask = up_bid, up_ask
         self.last_down_bid, self.last_down_ask = down_bid, down_ask
+        if up_display is not None:
+            if up_source == "order_book":
+                self.display_up_bid, self.display_up_ask = up_bid, up_ask
+            else:
+                self.display_up_bid = self.display_up_ask = up_display
+        if down_display is not None:
+            if down_source == "order_book":
+                self.display_down_bid, self.display_down_ask = down_bid, down_ask
+            else:
+                self.display_down_bid = self.display_down_ask = down_display
+        if up_source == "order_book" or down_source == "order_book":
+            self.display_price_source = "order_book"
+        elif up_source == "clob_price" or down_source == "clob_price":
+            self.display_price_source = "clob_price"
 
         up_mid = self._midpoint(up_bid, up_ask)
         down_mid = self._midpoint(down_bid, down_ask)
@@ -108,6 +137,9 @@ class BotState:
         self.price_history.clear()
         self.last_up_bid = self.last_up_ask = None
         self.last_down_bid = self.last_down_ask = None
+        self.display_up_bid = self.display_up_ask = None
+        self.display_down_bid = self.display_down_ask = None
+        self.display_price_source = None
 
         # The window key makes this a single fresh decision per 5-minute
         # market. A cached signal from the previous window must not stick
@@ -121,6 +153,18 @@ class BotState:
             window_key=new_window.slug,
         )
         self.engine.reset_for_window(new_window, side=side, confidence=confidence)
+
+    async def _read_token(self, token_id: str):
+        bid, ask = await self.client.get_book(token_id)
+        if bid is not None or ask is not None:
+            return bid, ask, self._midpoint(bid, ask), "order_book"
+
+        # This is only for the dashboard. The engine continues to receive
+        # (None, None) and therefore cannot trade on a synthetic spread.
+        price = await self.client.get_price(token_id)
+        if price is not None:
+            return None, None, price, "clob_price"
+        return None, None, None, None
 
     def _infer_winner(self) -> Optional[Side]:
         """Sole outcome source: whichever side's last observed CLOB midpoint
@@ -147,12 +191,13 @@ class BotState:
                 "close_ts": self.current_window.close_ts,
             },
             "book": {
-                "up_bid": self.last_up_bid, "up_ask": self.last_up_ask,
-                "down_bid": self.last_down_bid, "down_ask": self.last_down_ask,
+                "up_bid": self.display_up_bid, "up_ask": self.display_up_ask,
+                "down_bid": self.display_down_bid, "down_ask": self.display_down_ask,
+                "source": self.display_price_source,
             },
             "prices": {
-                "up": self._midpoint(self.last_up_bid, self.last_up_ask),
-                "down": self._midpoint(self.last_down_bid, self.last_down_ask),
+                "up": self._midpoint(self.display_up_bid, self.display_up_ask),
+                "down": self._midpoint(self.display_down_bid, self.display_down_ask),
             },
             "kronos": {
                 "volatility": self.kronos.last_volatility,
