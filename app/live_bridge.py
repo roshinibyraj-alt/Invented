@@ -14,6 +14,7 @@ from .models import TradeLogEntry, WindowMarket
 LIVE_BASE_USD = 1.0
 LIVE_STEP_USD = 1.0
 LIVE_MAX_USD = 8.0
+EPHEMERAL_GUARD_DB = "/tmp/polymarket_live_orders.sqlite"
 
 
 @dataclass(frozen=True)
@@ -41,15 +42,25 @@ class LiveBridge:
         self._seen_windows: set[str] = set()
         self._filled_shares: dict[str, float] = {}
         self._guard: Optional[LiveOrderGuard] = None
+        self._ephemeral_guard = False
+        self._started_at: Optional[float] = None
 
     async def start(self):
         if self.enabled:
+            guard_path = os.getenv("LIVE_ORDER_GUARD_DB", "")
+            self._ephemeral_guard = not bool(guard_path)
+            self._started_at = time.time()
             try:
-                self._guard = LiveOrderGuard(os.getenv("LIVE_ORDER_GUARD_DB", ""))
+                self._guard = LiveOrderGuard(guard_path or EPHEMERAL_GUARD_DB)
             except Exception as exc:
                 self._failed = True
                 self.broker.log_event("LIVE_GUARD_ERROR", note=f"real buys disabled: {exc}")
                 return
+            if self._ephemeral_guard:
+                self.broker.log_event(
+                    "LIVE_GUARD_EPHEMERAL",
+                    note="temporary local guard; run one instance; startup skips the current window",
+                )
             self._task = asyncio.create_task(self._run())
 
     async def close(self):
@@ -73,6 +84,13 @@ class LiveBridge:
                 return
             self._seen_windows.add(entry.window_slug)
             if not self.enabled or self._failed or window is None:
+                return
+            if (self._ephemeral_guard and self._started_at is not None
+                    and window.open_ts < self._started_at):
+                self.broker.log_event(
+                    "LIVE_BUY_SKIPPED", window=entry.window_slug,
+                    note="started during this window; next full window can trade",
+                )
                 return
             token_id = window.token_up if entry.side == "UP" else window.token_down
             if token_id is None or entry.price is None:

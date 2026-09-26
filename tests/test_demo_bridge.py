@@ -20,6 +20,12 @@ class FakeLiveBroker:
         self.events = []
         self.verifications = []
 
+    async def start(self):
+        pass
+
+    async def close(self):
+        pass
+
     async def buy(self, token_id, budget_usd, reference_ask):
         self.buys.append((token_id, budget_usd, reference_ask))
         return self.buy_result
@@ -178,15 +184,33 @@ class DemoBridgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake.buys, [])
         self.assertIn("LIVE_GUARD_ERROR", [event[0] for event in fake.events])
 
-    async def test_missing_persistent_path_disables_live_startup(self):
+    async def test_missing_persistent_path_uses_temporary_guard(self):
         bridge = LiveBridge()
         bridge.enabled = True
         bridge.broker = FakeLiveBroker({})
-        with patch.dict("os.environ", {"LIVE_ORDER_GUARD_DB": ""}):
+        with patch.dict("os.environ", {"LIVE_ORDER_GUARD_DB": ""}), \
+             patch("app.live_bridge.EPHEMERAL_GUARD_DB", self.guard_path):
             await bridge.start()
-        self.assertTrue(bridge._failed)
-        self.assertIsNone(bridge._task)
-        self.assertIn("LIVE_GUARD_ERROR", [event[0] for event in bridge.broker.events])
+        self.assertFalse(bridge._failed)
+        self.assertIsNotNone(bridge._guard)
+        self.assertTrue(bridge._ephemeral_guard)
+        self.assertIn("LIVE_GUARD_EPHEMERAL", [event[0] for event in bridge.broker.events])
+        await bridge.close()
+
+    async def test_temporary_guard_skips_partial_window_but_allows_full_window(self):
+        engine, bridge, fake = self.setup_engine({})
+        bridge._ephemeral_guard = True
+        bridge._started_at = time.time()
+        engine.on_tick(0.30, 0.40, 0.60, 0.70)
+        self.assertEqual(engine.s.position.shares, 500)
+        self.assertTrue(bridge._queue.empty())
+        self.assertIn("LIVE_BUY_SKIPPED", [event[0] for event in fake.events])
+
+        next_engine, next_bridge, _ = self.setup_engine({})
+        next_bridge._ephemeral_guard = True
+        next_bridge._started_at = time.time() - 30
+        next_engine.on_tick(0.30, 0.40, 0.60, 0.70)
+        self.assertEqual(next_bridge._queue.get_nowait().budget_usd, 1)
 
     async def test_competing_instances_reserve_only_once(self):
         first = LiveOrderGuard(self.guard_path)

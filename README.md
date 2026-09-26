@@ -39,21 +39,28 @@ for resolution. This app does not redeem or reconcile them.
 Real fills, rejections, errors, and eventual exchange outcomes **never change
 the demo balance, position, result, or $1–$8 sizing sequence**. Real-order
 attempts and results are printed to service logs and shown in the JSON state
-as `real_trading`. Before enabling live trading, set `LIVE_ORDER_GUARD_DB`
-to an **absolute path on a persistent volume shared by every instance**
-(for example `/data/live_orders.sqlite`). SQLite atomically reserves each
-market window *before* a real buy is submitted. Restarting or running another
-instance with the same database will not submit another buy for that window,
+as `real_trading`. Each process uses SQLite to reserve a market window
+*before* a real buy is submitted. With only `PRIVATE_KEY` configured, the bot
+uses a **temporary local guard** and skips any window already open when it
+starts. This allows a single instance to trade from the next full window
+without another Railway variable. Temporary storage is not durable:
+restarts, redeployments, or multiple instances can still produce duplicate
+real buys, potentially repeatedly, and the real budget may reach $8.
+Run **one instance** in this mode.
+
+For durable duplicate prevention, set `LIVE_ORDER_GUARD_DB` to an **absolute
+path on a persistent volume shared by every instance** (for example
+`/data/live_orders.sqlite`). Restarting or running another instance with
+the same database will then not submit another buy for a reserved window,
 even if the first order was rejected or its outcome is unknown. On a prior
 reservation the worker checks authenticated exchange trade history for
-diagnostics; an empty or unavailable response never permits a retry. If the
-path is missing or the guard fails, real buys are disabled or blocked and
-errors are logged; the demo continues. Do not use an ephemeral filesystem or
-independent per-instance volumes or a shared filesystem without reliable
-SQLite file locking: they cannot prevent duplicates across
-restarts/instances. Keep this file when redeploying, and check exchange
-history manually before migrating an existing live service to the guard.
-The app does not reconcile unsold real positions.
+diagnostics; an empty or unavailable response never permits a retry. If an
+explicitly configured guard path fails, real buys are blocked and errors are
+logged; the demo continues. Independent per-instance volumes or a shared
+filesystem without reliable SQLite file locking cannot prevent duplicates.
+Keep the persistent file when redeploying, and check exchange history
+manually before migrating an existing live service to the guard. The app
+does not reconcile unsold real positions.
 
 The real worker requires a fresh, private `PRIVATE_KEY` runtime
 secret, adequate collateral and allowance. **Never commit or paste a signing
