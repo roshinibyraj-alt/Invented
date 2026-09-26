@@ -1,38 +1,12 @@
-"""Shared dataclasses / enums."""
-from dataclasses import dataclass, field
+"""Small shared data structures used by the strategy and dashboard."""
+from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
-import time
 
 
 class Side(str, Enum):
     UP = "UP"
     DOWN = "DOWN"
-
-    def other(self) -> "Side":
-        return Side.DOWN if self == Side.UP else Side.UP
-
-
-@dataclass
-class PricePoint:
-    ts: float
-    up: Optional[float]
-    down: Optional[float]
-
-
-@dataclass
-class TradeLogEntry:
-    ts: float
-    engine: str          # "BOT" or "SYS"
-    window_slug: str
-    event: str            # human readable event name
-    side: Optional[str] = None
-    price: Optional[float] = None
-    shares: Optional[float] = None
-    fee: Optional[float] = None
-    pnl: Optional[float] = None
-    balance_after: Optional[float] = None
-    note: Optional[str] = None
 
 
 @dataclass
@@ -43,3 +17,13 @@ class WindowMarket:
     token_down: Optional[str]
     open_ts: float
     close_ts: float
+
+
+@dataclass
+class Position:
+    side: Side
+    token_id: str
+    entry_price: float
+    shares: float
+    cost: float
+    entry_ts: float

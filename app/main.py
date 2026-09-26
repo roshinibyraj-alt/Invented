@@ -1,14 +1,14 @@
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Response
+from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .state import BotState
 
-STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
+STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 bot_state = BotState()
 
 
@@ -19,13 +19,21 @@ async def lifespan(app: FastAPI):
     await bot_state.stop()
 
 
-app = FastAPI(title="Polymarket BTC 5m Bot", lifespan=lifespan)
+app = FastAPI(title="Polymarket BTC 5m Real Contrarian Bot", lifespan=lifespan)
+
+
+@app.get("/healthz")
+async def healthz():
+    return {
+        "ok": bot_state.error is None,
+        "status": bot_state.status,
+        "mode": bot_state.snapshot()["trading_mode"],
+        "error": bot_state.error,
+    }
 
 
 @app.get("/api/state")
-async def get_state(response: Response):
-    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
-    response.headers["Pragma"] = "no-cache"
+async def state():
     return bot_state.snapshot()
 
 

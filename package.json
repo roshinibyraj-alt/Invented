@@ -1,0 +1,10 @@
+{
+  "name": "polymarket-real-trader-bridge",
+  "private": true,
+  "type": "commonjs",
+  "dependencies": {
+    "@polymarket/builder-relayer-client": "0.0.10",
+    "@polymarket/clob-client-v2": "1.2.0",
+    "viem": "2.56.9"
+  }
+}

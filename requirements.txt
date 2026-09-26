@@ -1,16 +1,3 @@
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
 httpx==0.27.2
-python-dotenv==1.0.1
-
-# --- Kronos side-selection (app/kronos_signal.py) ---
-pandas==2.3.0
-numpy==2.1.3
-torch==2.5.1              # CPU wheel is fine for Kronos-small/base; swap for a CUDA build if KRONOS_DEVICE=cuda
-huggingface_hub==0.25.1
-safetensors==0.4.5
-einops==0.8.0
-tqdm==4.66.5
-# Kronos itself isn't on PyPI; the compatible `model/` package is vendored
-# in this repository. The model weights are loaded from Hugging Face at
-# runtime by app/kronos_signal.py.

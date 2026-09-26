@@ -1,357 +1,339 @@
-"""
-Trading engine -- Kronos-driven side selection, win/loss-driven size
-ladder. See app/config.py for the full strategy write-up.
-"""
+"""Single-candle contrarian strategy with paper/live execution."""
 import time
+from collections import deque
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Deque, Optional
 
 from . import config
-from .models import Side, WindowMarket
-from .paper_broker import PaperBroker
+from .broker import Broker
+from .models import Position, Side, WindowMarket
 
-
-# ---------------------------------------------------------------------------
-# Capital -- balance, equity curve, and running peak / max-drawdown tracking.
-# ---------------------------------------------------------------------------
 
 @dataclass
-class CapitalPool:
+class Capital:
     balance: float
-    halted: bool = False
-    equity_curve: List[dict] = field(default_factory=list)
-
+    starting: float
     peak_equity: float = 0.0
-    max_drawdown: float = 0.0       # largest $ drop from a peak, ever observed
-    max_drawdown_pct: float = 0.0   # that drop as a % of the peak it fell from
+    max_drawdown: float = 0.0
+    max_drawdown_pct: float = 0.0
+    halted: bool = False
+    equity_curve: list[dict] = field(default_factory=list)
 
     def __post_init__(self):
         self.peak_equity = self.balance
 
-    def record_equity_point(self, window_slug: Optional[str]):
-        self.equity_curve.append({
-            "window": window_slug, "ts": time.time(), "balance": round(self.balance, 2),
-        })
-        if len(self.equity_curve) > 500:
-            self.equity_curve = self.equity_curve[-500:]
-
-    def update_drawdown(self, equity: float):
-        """Call on every live equity read (balance + open position's
-        current market value) so intra-window swings count, not just the
-        balance at settlement."""
-        if equity > self.peak_equity:
-            self.peak_equity = equity
+    def update(self, equity: float):
+        self.peak_equity = max(self.peak_equity, equity)
         drawdown = self.peak_equity - equity
         if drawdown > self.max_drawdown:
             self.max_drawdown = drawdown
-            self.max_drawdown_pct = (drawdown / self.peak_equity * 100) if self.peak_equity else 0.0
+            self.max_drawdown_pct = drawdown / self.peak_equity * 100 if self.peak_equity else 0
 
-    def check_halt(self) -> bool:
-        if not self.halted and self.balance < 0:
-            self.halted = True
-        return self.halted
+    def checkpoint(self, window: Optional[str]):
+        self.equity_curve.append({
+            "window": window,
+            "ts": time.time(),
+            "balance": round(self.balance, 4),
+        })
+        self.equity_curve = self.equity_curve[-500:]
 
 
 @dataclass
-class Position:
-    side: Side
-    entry_price: float
-    shares: float
-    cost: float
-    entry_ts: float = 0.0
-
-
-# ---------------------------------------------------------------------------
-# Engine state
-# ---------------------------------------------------------------------------
-
-@dataclass
-class EngineState:
+class StrategyState:
     window: Optional[WindowMarket] = None
-    up_bid: Optional[float] = None
-    up_ask: Optional[float] = None
-    down_bid: Optional[float] = None
-    down_ask: Optional[float] = None
-
-    entry_side_this_window: Optional[Side] = None
-    entered_this_window: bool = False
+    last_candle: Optional[dict] = None
+    signal: Optional[Side] = None
+    entered: bool = False
     position: Optional[Position] = None
-
-    last_signal_confidence: float = 0.0   # Kronos confidence behind entry_side_this_window (0 if no call)
-    current_shares: float = config.ENGINE2_SHARES
-    pinned_at_cap: bool = False        # True while stuck at the 1000sh cap, recovering
-    session_pnl: float = 0.0           # cumulative $ P&L since the last reset (floor or cap-recovery)
-
-    total_pnl: float = 0.0
+    active: bool = True
+    sleep_windows_remaining: int = 0
+    session_pnl: float = 0.0
+    realized_pnl: float = 0.0
     fills: int = 0
+    wins: int = 0
+    losses: int = 0
     tp_fills: int = 0
     settled_wins: int = 0
     settled_losses: int = 0
-    resets: int = 0
-    skipped_price: int = 0             # windows where ask never dropped below the entry ceiling
-    skipped_signal: int = 0            # windows where Kronos had no confident call
-    wins: int = 0
-    losses: int = 0
+    no_signal_windows: int = 0
+    last_exit_attempt: float = 0.0
 
 
 class Engine:
-    """Side each window is decided by Kronos (see app/kronos_signal.py):
-    no confident forecast means no trade that window. Position size
-    starts at 500sh; each win steps it down 100sh, each loss steps it up
-    100sh. Hitting the 0sh floor after a win resets straight back to
-    500sh next window. Hitting the 1000sh cap after a loss pins size at
-    1000sh -- ignoring further win/loss stepping -- until cumulative
-    realized P&L since the last reset recovers to >=$0, then it resets
-    to 500sh. Resting TP at 0.99 (booked as $1/share); otherwise rides
-    to the window's real $0/$1 settlement. Runs continuously."""
+    name = "BOT"
+    label = "Single-candle contrarian"
 
-    name = "E2"
-    label = "Kronos-driven win/loss ladder"
-
-    def __init__(self, broker: PaperBroker):
+    def __init__(self, broker: Broker):
         self.broker = broker
-        self.capital = CapitalPool(balance=config.STARTING_CAPITAL)
-        self.s = EngineState()
-        self.capital.record_equity_point(None)
+        self.capital = Capital(config.STARTING_CAPITAL, config.STARTING_CAPITAL)
+        self.state = StrategyState()
+        self.candle_history: Deque[str] = deque(maxlen=config.CANDLE_HISTORY_MAXLEN)
+        self.trade_usd = config.BASE_TRADE_USD
+        self.window_mark_up = None
+        self.window_mark_down = None
+        self.capital.checkpoint(None)
 
-    def _log(self, event, **kw):
-        self.broker.log_event(self.name, self.s.window.slug if self.s.window else "", event,
-                               balance_after=self.capital.balance, **kw)
+    def log(self, event: str, note: str = "", **fields):
+        self.broker.log_event(
+            event,
+            note=note,
+            window=self.state.window.slug if self.state.window else "",
+            balance_after=self.capital.balance,
+            **fields,
+        )
 
-    # ---- side selection: handed in from outside (Kronos), not decided here --
+    def record_candle(self, candle: Optional[dict]):
+        self.state.last_candle = candle
+        if candle:
+            self.candle_history.append(candle["color"])
 
-    def reset_for_window(self, window: WindowMarket, side: Optional[Side] = None, confidence: float = 0.0):
-        """`side` is whatever app/kronos_signal.py's KronosSignal.get_signal()
-        returned for this window -- None means Kronos had no confident
-        call, in which case this window is skipped exactly like the old
-        price-filter skip (ladder untouched, tried again next window)."""
-        self.s.window = window
-        self.s.entered_this_window = False
-        self.s.last_signal_confidence = confidence
+    def reset_for_window(self, window: WindowMarket):
+        self.state.window = window
+        self.state.signal = None
+        self.state.entered = False
+        if not self.state.active:
+            if self.state.sleep_windows_remaining:
+                self.state.sleep_windows_remaining -= 1
+                self.log(
+                    "SLEEP_WINDOW",
+                    f"skipping this window; {self.state.sleep_windows_remaining} sleep windows remain",
+                )
+                return
+            self.state.active = True
+            self.state.session_pnl = 0.0
+            self.log("ENGINE_RESUMED", "session P&L reset after sleep")
 
-        if self.capital.halted:
-            self.s.entry_side_this_window = None
-            return
+        if self.state.last_candle:
+            color = self.state.last_candle["color"]
+            if color == "red":
+                self.state.signal = Side.UP
+            elif color == "green":
+                self.state.signal = Side.DOWN
 
-        self.s.entry_side_this_window = side
-        if side is None:
-            self.s.skipped_signal += 1
-            self._log("SKIPPED_SIGNAL", note="Kronos had no confident call this window -- no entry taken")
+        if self.state.signal is None:
+            self.state.no_signal_windows += 1
+            self.log("NO_SIGNAL", "doji or unavailable Binance candle")
+        else:
+            self.log(
+                "SIGNAL",
+                f"{self.candle_history[-1]} candle -> buy {self.state.signal.value}",
+                side=self.state.signal.value,
+                trade_usd=self.trade_usd,
+            )
 
-    # ---- tick: fire the entry (once, on the first tick with a live ask),
-    # watch for TP, and track live equity for max-drawdown -------------------
-
-    def on_tick(self, up_bid, up_ask, down_bid, down_ask, seconds_to_close: float = None, now: Optional[float] = None):
-        now = now if now is not None else time.time()
-        self.s.up_bid, self.s.up_ask = up_bid, up_ask
-        self.s.down_bid, self.s.down_ask = down_bid, down_ask
-        if self.capital.halted or self.s.window is None:
-            return
-
-        if (self.s.entry_side_this_window is not None
-                and not self.s.entered_this_window and self.s.position is None):
-            ask = up_ask if self.s.entry_side_this_window == Side.UP else down_ask
-            if ask is not None and ask < config.ENGINE2_MAX_ENTRY_PRICE:
-                self._enter(self.s.entry_side_this_window, ask, now)
-                self.s.entered_this_window = True
-            # else: keep watching every tick this window -- ask may still
-            # drop below the entry ceiling before the window closes
-
-        self._check_tp()
-        self.capital.update_drawdown(self._live_equity())
-
-    def _live_equity(self) -> float:
-        pos = self.s.position
-        if pos is None:
+    def _equity(self) -> float:
+        position = self.state.position
+        if position is None:
             return self.capital.balance
-        mark = self.s.up_bid if pos.side == Side.UP else self.s.down_bid
-        mark = mark if mark is not None else pos.entry_price
-        return self.capital.balance + pos.shares * mark
+        mark = (
+            self.window_mark_up
+            if position.side == Side.UP
+            else self.window_mark_down
+        )
+        return self.capital.balance + position.shares * (mark or position.entry_price)
 
-    def _enter(self, side: Side, ask: float, now: float):
-        shares = self.s.current_shares
+    async def on_tick(
+        self,
+        up_bid: Optional[float],
+        up_ask: Optional[float],
+        down_bid: Optional[float],
+        down_ask: Optional[float],
+        now: Optional[float] = None,
+    ):
+        now = time.time() if now is None else now
+        self.window_mark_up = up_bid
+        self.window_mark_down = down_bid
+        self.state.up_bid = up_bid
+        self.state.up_ask = up_ask
+        self.state.down_bid = down_bid
+        self.state.down_ask = down_ask
+
+        if (
+            self.state.active
+            and self.state.signal
+            and not self.state.entered
+            and self.state.position is None
+        ):
+            ask = up_ask if self.state.signal == Side.UP else down_ask
+            token = (
+                self.state.window.token_up
+                if self.state.signal == Side.UP
+                else self.state.window.token_down
+            )
+            if ask is not None and token:
+                self.state.entered = True
+                await self._enter(self.state.signal, token, ask, now)
+
+        position = self.state.position
+        if position is not None:
+            bid = up_bid if position.side == Side.UP else down_bid
+            if bid is not None and bid >= config.TAKE_PROFIT_PRICE:
+                await self._take_profit(position, bid, now)
+
+        self.capital.update(self._equity())
+
+    async def _enter(self, side: Side, token_id: str, ask: float, now: float):
+        try:
+            result = await self.broker.buy(token_id, self.trade_usd, ask)
+        except Exception as exc:
+            self.log("ENTRY_ERROR", str(exc), side=side.value, trade_usd=self.trade_usd)
+            return
+        if not result.get("filled"):
+            self.log(
+                "ENTRY_REJECTED",
+                f"FOK entry did not fill: {result.get('status', 'unknown')}",
+                side=side.value,
+                trade_usd=self.trade_usd,
+            )
+            return
+
+        shares = float(result.get("shares") or 0)
+        avg_price = float(result.get("avgPrice") or ask)
+        cost = float(result.get("cost") or shares * avg_price)
         if shares <= 0:
-            return  # floor edge case -- nothing to enter with until the reset lands next window
-        fee = self.broker.taker_fee_amount(shares, ask)
-        cost = shares * ask + fee
+            self.log("ENTRY_REJECTED", "filled response contained no shares")
+            return
+        self.state.position = Position(side, token_id, avg_price, shares, cost, now)
+        self.state.fills += 1
         self.capital.balance -= cost
-        self.s.fills += 1
-        self._log("CANDLE_BUY", side=side.value, price=ask, shares=shares, fee=fee,
-                   note=f"taker buy {shares:.0f}sh {side.value} @ {ask} on window open (fee ${fee:.4f})")
-        if self.capital.check_halt():
-            self._log("HALTED", note=f"balance ${self.capital.balance:.2f} < $0 -- bankrupt")
-            return
-        self.s.position = Position(side=side, entry_price=ask, shares=shares, cost=cost, entry_ts=now)
+        self.log(
+            "ENTRY_FILLED",
+            f"taker FOK buy {shares:.4f} {side.value} @ {avg_price:.4f}",
+            side=side.value,
+            price=avg_price,
+            shares=shares,
+            trade_usd=self.trade_usd,
+            order_id=result.get("orderId"),
+        )
 
-    def _check_tp(self):
-        pos = self.s.position
-        if pos is None:
+    async def _take_profit(self, position: Position, bid: float, now: float):
+        if now - self.state.last_exit_attempt < 2:
             return
-        bid = self.s.up_bid if pos.side == Side.UP else self.s.down_bid
-        if bid is None or bid < config.ENGINE_TP_PRICE:
+        self.state.last_exit_attempt = now
+        try:
+            result = await self.broker.sell(position.token_id, position.shares, bid)
+        except Exception as exc:
+            self.log("EXIT_ERROR", str(exc), side=position.side.value)
             return
-        rebate = config.MAKER_REBATE_FRACTION * self.broker.taker_fee_amount(pos.shares, config.ENGINE_TP_PRICE)
-        proceeds = pos.shares * config.ENGINE_TP_COUNTS_AS + rebate
-        pnl = proceeds - pos.cost
-        self._settle(pos, proceeds, pnl, "TP_FILL", fee=rebate,
-                      note=(f"TP hit -- {pos.shares:.0f}sh sold @ {config.ENGINE_TP_PRICE} "
-                            f"(maker, rebate ${rebate:.4f}), booked @ ${config.ENGINE_TP_COUNTS_AS:.2f}/sh "
-                            f"(entry {pos.entry_price}, pnl ${pnl:.4f})"))
-        self.s.tp_fills += 1
-        self.s.position = None
+        if not result.get("filled"):
+            self.log("TP_REJECTED", "FOK taker exit did not fill", side=position.side.value)
+            return
 
-    def finalize_window(self, winning_side: Optional[Side]):
-        """Called once per window close -- an open position must still
-        resolve. If TP already closed it, there's nothing left to do."""
-        window_slug = self.s.window.slug if self.s.window else None
-        pos = self.s.position
-        if pos is not None:
-            if winning_side is None:
-                # no observed outcome (e.g. missing book data right at the
-                # boundary) -- settle at cost rather than silently losing
-                # the debit or guessing a winner. Neutral -- doesn't step
-                # the ladder either way.
-                self._settle(pos, pos.cost, 0.0, "SETTLE_UNKNOWN", fee=0.0,
-                              note="window closed with no observed winner -- settled at cost (no gain/loss)")
-            elif pos.side == winning_side:
-                proceeds = pos.shares * 1.0
-                pnl = proceeds - pos.cost
-                self._settle(pos, proceeds, pnl, "SETTLE_WIN", fee=0.0,
-                              note=f"window resolved -- {pos.side.value} won, {pos.shares:.0f}sh paid $1.00/sh (pnl ${pnl:.4f})")
-                self.s.settled_wins += 1
+        shares = float(result.get("shares") or position.shares)
+        avg_price = float(result.get("avgPrice") or bid)
+        proceeds = float(result.get("proceeds") or shares * avg_price)
+        pnl = proceeds - position.cost
+        self.state.tp_fills += 1
+        self._settle(position, pnl, "TAKE_PROFIT", proceeds)
+        self.state.position = None
+        self.log(
+            "TP_FILLED",
+            f"taker FOK sell {shares:.4f} {position.side.value} @ {avg_price:.4f}",
+            side=position.side.value,
+            price=avg_price,
+            shares=shares,
+            pnl=pnl,
+        )
+
+    async def finalize_window(self, winner: Optional[Side]):
+        position = self.state.position
+        slug = self.state.window.slug if self.state.window else None
+        if position is not None:
+            if winner is None:
+                raise RuntimeError(
+                    "Cannot settle an open position before Polymarket publishes its resolution"
+                )
+            elif winner == position.side:
+                proceeds = position.shares
+                self._settle(position, proceeds - position.cost, "SETTLE_WIN", proceeds)
+                self.state.settled_wins += 1
             else:
-                pnl = 0.0 - pos.cost
-                self._settle(pos, 0.0, pnl, "SETTLE_LOSS", fee=0.0,
-                              note=f"window resolved -- {pos.side.value} lost, {pos.shares:.0f}sh paid $0.00/sh (pnl ${pnl:.4f})")
-                self.s.settled_losses += 1
-            self.s.position = None
-        elif self.s.entry_side_this_window is not None and not self.s.entered_this_window:
-            # signalled side never got a qualifying (<0.50) ask all window --
-            # no trade at all, ladder untouched, side selection still alternates next window
-            self.s.skipped_price += 1
-            self._log("SKIPPED_PRICE",
-                       side=self.s.entry_side_this_window.value,
-                       note=(f"{self.s.entry_side_this_window.value} never traded below "
-                             f"{config.ENGINE2_MAX_ENTRY_PRICE} this window -- no entry taken"))
+                self._settle(position, -position.cost, "SETTLE_LOSS", 0.0)
+                self.state.settled_losses += 1
+            self.state.position = None
+        self.capital.update(self._equity())
+        self.capital.checkpoint(slug)
 
-        self.capital.update_drawdown(self._live_equity())
-        self.capital.record_equity_point(window_slug)
-        self.s.window = None
-
-    def _settle(self, pos: Position, proceeds: float, pnl: float, reason: str, fee: float, note: str):
+    def _settle(self, position: Position, pnl: float, reason: str, proceeds: float):
         self.capital.balance += proceeds
-        self.s.total_pnl += pnl
-        if pnl >= 0:
-            self.s.wins += 1
+        self.state.realized_pnl += pnl
+        self.state.session_pnl += pnl
+        if pnl > 0:
+            self.state.wins += 1
+            self.trade_usd = max(config.BASE_TRADE_USD, self.trade_usd - config.TRADE_STEP_USD)
+            direction = "win -> step down"
+        elif pnl < 0:
+            self.state.losses += 1
+            self.trade_usd = min(config.MAX_TRADE_USD, self.trade_usd + config.TRADE_STEP_USD)
+            direction = "loss -> step up"
         else:
-            self.s.losses += 1
-        self._log(reason, side=pos.side.value, price=pos.entry_price, shares=pos.shares, pnl=pnl, fee=fee, note=note)
-        self.capital.check_halt()
-        self.capital.update_drawdown(self._live_equity())
-
-        if reason in ("TP_FILL", "SETTLE_WIN"):
-            self._apply_ladder(pnl, is_win=True)
-        elif reason == "SETTLE_LOSS":
-            self._apply_ladder(pnl, is_win=False)
-        # SETTLE_UNKNOWN -- neutral, no ladder step
-
-    # ---- the ladder itself: floor is a plain count-based reset, cap is a
-    # dollar-P&L-gated recovery -------------------------------------------
-
-    def _apply_ladder(self, pnl: float, is_win: bool):
-        self.s.session_pnl += pnl
-
-        if self.s.pinned_at_cap:
-            if self.s.session_pnl >= 0:
-                self._reset_ladder(
-                    f"pinned at {config.ENGINE2_MAX_SHARES:.0f}sh -- cumulative P&L since pin recovered "
-                    f"(+${self.s.session_pnl:.2f}) -- resetting to base {config.ENGINE2_SHARES:.0f}sh")
-            # else: stays pinned at the cap, still recovering
-            return
-
-        if is_win:
-            self.s.current_shares = max(config.ENGINE2_MIN_SHARES, self.s.current_shares - config.ENGINE2_SIZE_STEP)
-            if self.s.current_shares <= config.ENGINE2_MIN_SHARES:
-                self._reset_ladder(f"hit the {config.ENGINE2_MIN_SHARES:.0f}sh floor after a win -- resetting to base {config.ENGINE2_SHARES:.0f}sh")
-        else:
-            self.s.current_shares = min(config.ENGINE2_MAX_SHARES, self.s.current_shares + config.ENGINE2_SIZE_STEP)
-            if self.s.current_shares >= config.ENGINE2_MAX_SHARES:
-                self.s.pinned_at_cap = True
-                self._log("PINNED_AT_CAP",
-                           note=(f"hit the {config.ENGINE2_MAX_SHARES:.0f}sh cap after a loss -- staying here until "
-                                 f"cumulative P&L since pin (currently ${self.s.session_pnl:.2f}) recovers to >=$0"))
-
-    def _reset_ladder(self, note: str):
-        self.s.current_shares = config.ENGINE2_SHARES
-        self.s.pinned_at_cap = False
-        self.s.session_pnl = 0.0
-        self.s.resets += 1
-        self._log("LADDER_RESET", note=note)
-
-    # ---- dashboard payload --------------------------------------------------
+            direction = "wash -> size unchanged"
+        self.log(
+            reason,
+            f"pnl ${pnl:.4f}; {direction}; next trade ${self.trade_usd:.2f}",
+            pnl=pnl,
+            next_trade_usd=self.trade_usd,
+        )
+        if self.state.session_pnl >= config.PROFIT_TARGET_USD and self.state.active:
+            self.state.active = False
+            self.state.sleep_windows_remaining = config.SLEEP_WINDOWS
+            self.log(
+                "ENGINE_SLEEP",
+                f"session target reached; sleeping {config.SLEEP_WINDOWS} windows",
+            )
 
     def snapshot(self) -> dict:
-        pos = self.s.position
-        position_payload = None
-        unrealized_pnl = 0.0
-        open_market_value = 0.0
-        if pos is not None:
-            mark = self.s.up_bid if pos.side == Side.UP else self.s.down_bid
-            mark_for_calc = mark if mark is not None else pos.entry_price
-            open_market_value = pos.shares * mark_for_calc
-            unrealized_pnl = open_market_value - pos.cost
-            elapsed = max(0.0, time.time() - pos.entry_ts)
-            position_payload = {
-                "side": pos.side.value, "entry_price": pos.entry_price, "shares": round(pos.shares, 2),
-                "cost": round(pos.cost, 4), "tp_price": config.ENGINE_TP_PRICE,
-                "seconds_since_entry": round(elapsed, 1), "mark_price": mark,
-                "unrealized_pnl": round(unrealized_pnl, 4),
-            }
-
-        if self.capital.halted:
-            status = "halted"
-        elif pos is not None:
-            status = "open"
-        elif self.s.entry_side_this_window is not None and not self.s.entered_this_window:
-            status = "armed"
-        else:
-            status = "waiting"
-
-        equity = round(self.capital.balance + open_market_value, 4)
-
+        position = self.state.position
+        mark = None
+        if position:
+            mark = self.state.up_bid if position.side == Side.UP else self.state.down_bid
+        unrealized = 0.0
+        if position:
+            unrealized = position.shares * (mark or position.entry_price) - position.cost
+        wins_losses = self.state.wins + self.state.losses
         return {
-            "engine": self.name, "label": self.label,
-
-            "balance": round(self.capital.balance, 2),
-            "starting_capital": config.STARTING_CAPITAL,
+            "mode": config.TRADING_MODE,
+            "label": self.label,
+            "active": self.state.active,
+            "sleep_windows_remaining": self.state.sleep_windows_remaining,
+            "trade_usd": round(self.trade_usd, 2),
+            "trade_floor_usd": config.BASE_TRADE_USD,
+            "trade_ceiling_usd": config.MAX_TRADE_USD,
+            "signal": self.state.signal.value if self.state.signal else None,
+            "balance": round(self.capital.balance, 4),
+            "starting_capital": self.capital.starting,
+            "wallet_balance": round(self.broker.balance, 4),
             "halted": self.capital.halted,
+            "realized_pnl": round(self.state.realized_pnl, 4),
+            "unrealized_pnl": round(unrealized, 4),
+            "session_pnl": round(self.state.session_pnl, 4),
+            "profit_target": config.PROFIT_TARGET_USD,
+            "progress_pct": round(max(0, self.state.session_pnl) / config.PROFIT_TARGET_USD * 100, 2),
+            "position": (
+                {
+                    "side": position.side.value,
+                    "entry_price": position.entry_price,
+                    "shares": position.shares,
+                    "cost": position.cost,
+                    "mark_price": mark,
+                    "unrealized_pnl": unrealized,
+                    "seconds_held": time.time() - position.entry_ts,
+                }
+                if position
+                else None
+            ),
+            "fills": self.state.fills,
+            "wins": self.state.wins,
+            "losses": self.state.losses,
+            "win_rate": round(self.state.wins / wins_losses * 100, 2) if wins_losses else None,
+            "tp_fills": self.state.tp_fills,
+            "settled_wins": self.state.settled_wins,
+            "settled_losses": self.state.settled_losses,
+            "no_signal_windows": self.state.no_signal_windows,
+            "last_candle": self.state.last_candle,
+            "candle_history": list(self.candle_history)[-10:],
             "equity_curve": self.capital.equity_curve,
-            "equity": equity,
-
-            "peak_equity": round(self.capital.peak_equity, 2),
-            "max_drawdown": round(self.capital.max_drawdown, 2),
-            "max_drawdown_pct": round(self.capital.max_drawdown_pct, 2),
-
-            "realized_pnl": round(self.s.total_pnl, 4),
-            "unrealized_pnl": round(unrealized_pnl, 4),
-
-            "entry_side_this_window": self.s.entry_side_this_window.value if self.s.entry_side_this_window else None,
-            "last_signal_confidence": round(self.s.last_signal_confidence, 4),
-            "current_shares": self.s.current_shares,
-            "base_shares": config.ENGINE2_SHARES,
-            "min_shares": config.ENGINE2_MIN_SHARES,
-            "max_shares": config.ENGINE2_MAX_SHARES,
-            "pinned_at_cap": self.s.pinned_at_cap,
-            "session_pnl": round(self.s.session_pnl, 4),
-            "position": position_payload,
-
-            "fills": self.s.fills, "tp_fills": self.s.tp_fills,
-            "settled_wins": self.s.settled_wins, "settled_losses": self.s.settled_losses,
-            "resets": self.s.resets, "skipped_price": self.s.skipped_price,
-            "skipped_signal": self.s.skipped_signal,
-            "max_entry_price": config.ENGINE2_MAX_ENTRY_PRICE,
-            "wins": self.s.wins, "losses": self.s.losses,
-            "win_rate": round(100 * self.s.wins / (self.s.wins + self.s.losses), 1) if (self.s.wins + self.s.losses) else None,
-
-            "status": status,
+            "peak_equity": self.capital.peak_equity,
+            "max_drawdown": self.capital.max_drawdown,
+            "max_drawdown_pct": self.capital.max_drawdown_pct,
         }
