@@ -1,7 +1,7 @@
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -23,7 +23,9 @@ app = FastAPI(title="Polymarket BTC 5m Bot", lifespan=lifespan)
 
 
 @app.get("/api/state")
-async def get_state():
+async def get_state(response: Response):
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
     return bot_state.snapshot()
 
 

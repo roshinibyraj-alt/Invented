@@ -28,14 +28,21 @@ class BotState:
         self.status = "starting"
         self.error: Optional[str] = None
         self._task: Optional[asyncio.Task] = None
+        self._warmup_task: Optional[asyncio.Task] = None
 
     async def start(self):
-        await self.candle_feed.warm_up()
+        # Do not hold FastAPI startup hostage to exchange timeouts. The
+        # dashboard and health endpoints should be available immediately
+        # while the candle buffer warms in the background.
+        self._warmup_task = asyncio.create_task(self.candle_feed.warm_up())
         self._task = asyncio.create_task(self._run_loop())
 
     async def stop(self):
-        if self._task:
-            self._task.cancel()
+        tasks = [task for task in (self._task, self._warmup_task) if task]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         await self.client.close()
         await self.candle_feed.close()
 
@@ -56,7 +63,10 @@ class BotState:
             return
         self.error = None
 
-        await self.candle_feed.refresh()  # cheap -- own cadence, independent of Polymarket
+        # warm_up() owns the feed until it completes; avoid competing HTTP
+        # calls during startup. After that, refresh it independently.
+        if self._warmup_task is None or self._warmup_task.done():
+            await self.candle_feed.refresh()
 
         if self.current_window is None or window.slug != self.current_window.slug:
             await self._roll_window(window)
@@ -102,7 +112,11 @@ class BotState:
         # The window key makes this a single fresh decision per 5-minute
         # market. A cached signal from the previous window must not stick
         # across a boundary and create a late entry.
-        side, confidence = self.kronos.get_signal(
+        # Kronos inference/model loading is synchronous and can take several
+        # seconds on CPU. Run it outside the asyncio event loop so /api/state
+        # remains responsive while the new window is being evaluated.
+        side, confidence = await asyncio.to_thread(
+            self.kronos.get_signal,
             now=time.time(),
             window_key=new_window.slug,
         )

@@ -237,9 +237,19 @@ function renderGauge(trackId, midId, bidAskId, side, bid, ask){
   `;
 }
 
+let pollInFlight = false;
+
 async function poll(){
+  if(pollInFlight) return;
+  pollInFlight = true;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 4000);
   try{
-    const res = await fetch('/api/state');
+    const res = await fetch('/api/state', {
+      cache: 'no-store',
+      signal: controller.signal,
+    });
+    if(!res.ok) throw new Error(`state request failed: ${res.status}`);
     const s = await res.json();
 
     const dot = $('statusDot'), text = $('statusText');
@@ -279,7 +289,10 @@ async function poll(){
     renderLog(s.log || []);
   }catch(err){
     $('statusDot').className = 'dot err';
-    $('statusText').textContent = 'disconnected';
+    $('statusText').textContent = err.name === 'AbortError' ? 'state timeout' : 'disconnected';
+  }finally{
+    clearTimeout(timeout);
+    pollInFlight = false;
   }
 }
 
