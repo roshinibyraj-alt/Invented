@@ -3,61 +3,81 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>BTC 5m Contrarian Trader</title>
+  <title>Candle Contrarian — Demo and Real Orders</title>
   <style>
-    :root{color-scheme:dark;--bg:#080b10;--card:#10151d;--line:#253040;--muted:#8290a3;--text:#e8edf5;--mint:#51e0ac;--red:#ff6f83;--amber:#ffc857;--blue:#76a9ff}
+    :root{color-scheme:dark;--bg:#080b10;--panel:#121820;--line:#273241;--text:#e8edf5;--muted:#91a0b3;--mint:#48dbad;--red:#ff7184;--amber:#ffc857}
     *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px system-ui,-apple-system,sans-serif}
-    .shell{max-width:1180px;margin:auto;padding:28px 20px 56px}.top{display:flex;justify-content:space-between;gap:20px;align-items:flex-start;border-bottom:1px solid var(--line);padding-bottom:18px}
-    h1{font-size:22px;margin:0 0 5px}.sub,.muted{color:var(--muted)}.pill{border:1px solid var(--mint);color:var(--mint);padding:6px 10px;border-radius:5px;font:12px ui-monospace,monospace;text-transform:uppercase}
-    .status{margin-top:9px;text-align:right;color:var(--muted);font-size:12px}.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--amber);margin-right:6px}.dot.live{background:var(--mint)}.dot.err{background:var(--red)}
-    .hero{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin:18px 0}.card{background:var(--card);border:1px solid var(--line);border-radius:7px;padding:17px}.label{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.08em}.value{font-size:25px;font-weight:700;margin-top:7px}.pos{color:var(--mint)}.neg{color:var(--red)}.warn{color:var(--amber)}
-    .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.stats{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}.stat{padding:10px 0;border-top:1px solid var(--line)}.stat b{display:block;font-size:18px;margin-top:4px}
-    .book{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px}.side{border:1px solid var(--line);border-radius:6px;padding:13px}.side h3{margin:0 0 8px}.up{color:var(--mint)}.down{color:var(--red)}.bar{height:8px;background:#202a37;border-radius:8px;overflow:hidden;margin:10px 0}.fill{height:100%;background:var(--mint)}.fill.down{background:var(--red)}
-    .log{max-height:370px;overflow:auto;margin-top:10px}.event{border-top:1px solid var(--line);padding:8px 0;font-size:12px}.event time{color:var(--muted);margin-right:10px}.event b{color:var(--blue)}pre{white-space:pre-wrap;color:var(--muted)}
-    @media(max-width:760px){.top{display:block}.status{text-align:left}.hero,.grid{grid-template-columns:1fr}.book{grid-template-columns:1fr}}
+    main{max-width:1100px;margin:auto;padding:25px 18px 50px}header{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;border-bottom:1px solid var(--line);padding-bottom:17px}
+    h1{font-size:22px;margin:0 0 5px}.muted,.sub{color:var(--muted)}.sub{font-size:13px}.badge{border:1px solid var(--mint);border-radius:5px;color:var(--mint);padding:6px 10px;font:12px ui-monospace,monospace}
+    .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:16px 0}.card{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:16px}
+    .label{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}.value{font-size:24px;font-weight:700;margin:7px 0}.small{font-size:12px;color:var(--muted)}
+    .columns{display:grid;grid-template-columns:1fr 1fr;gap:12px}.book{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}.quote{border:1px solid var(--line);padding:12px;border-radius:7px}
+    .up{color:var(--mint)}.down{color:var(--red)}.stats{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}.stat{border-top:1px solid var(--line);padding-top:9px}.stat b{display:block;font-size:16px;margin-top:4px}
+    .position,.log{margin-top:12px}.log-list{max-height:340px;overflow:auto;margin-top:8px}.event{border-top:1px solid var(--line);padding:9px 0;font-size:12px}.event b{color:#91b5ff}.event time{color:var(--muted);margin-right:9px}
+    .alert{color:var(--red);margin-top:12px}.candle{font-weight:700}.foot{font-size:11px;color:var(--muted);margin-top:12px}
+    @media(max-width:720px){.grid,.columns{grid-template-columns:1fr}.book{grid-template-columns:1fr}header{display:block}.badge{display:inline-block;margin-top:10px}}
   </style>
 </head>
 <body>
-<main class="shell">
-  <header class="top">
-    <div><h1>BTC 5m Contrarian Trader</h1><div class="sub">Binance candle signal → Polymarket UP/DOWN taker entry</div></div>
-    <div><div id="mode" class="pill">loading</div><div class="status"><span id="dot" class="dot"></span><span id="status">connecting</span></div></div>
+<main>
+  <header>
+    <div><h1>BTC 5m Candle Contrarian</h1><div class="sub">500-share demo · red → UP / green → DOWN · separate real order mirror</div></div>
+    <div><span class="badge" id="modeBadge">CONNECTING</span><div class="small" id="status">Connecting…</div><div class="small" id="liveBudget"></div></div>
   </header>
-  <section class="hero">
-    <div class="card"><div class="label">Current window</div><div id="window" class="value">—</div><div id="remaining" class="muted"></div></div>
-    <div class="card"><div class="label">Next trade budget</div><div id="tradeUsd" class="value">—</div><div id="signal" class="muted"></div></div>
-    <div class="card"><div class="label">Wallet balance</div><div id="wallet" class="value">—</div><div id="balance" class="muted"></div></div>
-  </section>
   <section class="grid">
-    <div class="card"><div class="label">Live order book</div><div class="book">
-      <div class="side"><h3 class="up">UP <span id="upMid">—</span></h3><div id="upBar" class="bar"><div class="fill" style="width:0"></div></div><div id="upQuote" class="muted">bid — / ask —</div></div>
-      <div class="side"><h3 class="down">DOWN <span id="downMid">—</span></h3><div id="downBar" class="bar"><div class="fill down" style="width:0"></div></div><div id="downQuote" class="muted">bid — / ask —</div></div>
-    </div></div>
-    <div class="card"><div class="label">Strategy state</div><div id="stats" class="stats"></div></div>
+    <div class="card"><div class="label">Window</div><div id="window" class="value">—</div><div id="remaining" class="small"></div></div>
+    <div class="card"><div class="label">Strategy</div><div id="strategy" class="value">Waiting</div><div id="candle" class="small">Last candle: —</div></div>
+    <div class="card"><div class="label">Demo balance</div><div id="balance" class="value">—</div><div id="pnl" class="small"></div></div>
   </section>
-  <section class="card" style="margin-top:12px"><div class="label">Position</div><div id="position" style="margin-top:10px">No open position.</div></section>
-  <section class="card" style="margin-top:12px"><div class="label">Event log</div><div id="log" class="log"></div></section>
+  <section class="columns">
+    <div class="card"><div class="label">Live CLOB midpoint estimate</div><div class="book">
+      <div class="quote"><b class="up">UP</b><div id="upMid" class="value">—</div><div id="upBook" class="small">bid — / ask —</div></div>
+      <div class="quote"><b class="down">DOWN</b><div id="downMid" class="value">—</div><div id="downBook" class="small">bid — / ask —</div></div>
+    </div><div id="resolution" class="foot">Open positions settle against whichever side had the higher last observed midpoint at rollover.</div></div>
+    <div class="card"><div class="label">Engine statistics</div><div id="stats" class="stats"></div></div>
+  </section>
+  <section class="card position"><div class="label">Position</div><div id="position" style="margin-top:9px">No open position.</div></section>
+  <section class="card log"><div class="label">Event log</div><div id="log" class="log-list"></div></section>
+  <div class="foot">The balance, position, and statistics above are demo-only. When enabled, separate real FOK orders are sent without changing these results.</div>
+  <div id="error" class="alert"></div>
 </main>
 <script>
-const $=id=>document.getElementById(id), money=v=>v==null?'—':`$${Number(v).toFixed(2)}`, price=v=>v==null?'—':Number(v).toFixed(3);
+const $=id=>document.getElementById(id);
+const money=n=>n==null?'—':`$${Number(n).toFixed(2)}`;
+const price=n=>n==null?'—':Number(n).toFixed(3);
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function stat(label,value){return `<div class="stat"><span class="label">${label}</span><b>${value}</b></div>`}
 function render(s){
-  const e=s.engine||{}, w=s.window, b=s.book||{};
-  $('mode').textContent=(s.trading_mode||'unknown').toUpperCase();
-  $('mode').style.color=s.trading_mode==='live'?'var(--red)':'var(--mint)';
-  $('mode').style.borderColor=s.trading_mode==='live'?'var(--red)':'var(--mint)';
-  $('status').textContent=s.error||s.status||'unknown'; $('dot').className='dot '+(s.error?'err':'live');
-  $('window').textContent=w?w.slug.replace('btc-updown-5m-','#'):'—'; $('remaining').textContent=w?`${Math.max(0,w.seconds_remaining).toFixed(0)} seconds remaining`:'waiting';
-  $('tradeUsd').textContent=money(e.trade_usd); $('signal').textContent=e.signal?`signal: ${e.signal}`:'no signal';
-  $('wallet').textContent=money(e.wallet_balance); $('balance').textContent=`strategy ledger ${money(e.balance)}`;
-  const up=(b.up_bid!=null&&b.up_ask!=null)?(b.up_bid+b.up_ask)/2:null, down=(b.down_bid!=null&&b.down_ask!=null)?(b.down_bid+b.down_ask)/2:null;
-  $('upMid').textContent=price(up); $('downMid').textContent=price(down); $('upQuote').textContent=`bid ${price(b.up_bid)} / ask ${price(b.up_ask)}`; $('downQuote').textContent=`bid ${price(b.down_bid)} / ask ${price(b.down_ask)}`;
-  $('upBar').firstElementChild.style.width=`${Math.max(0,Math.min(100,(up||0)*100))}%`; $('downBar').firstElementChild.style.width=`${Math.max(0,Math.min(100,(down||0)*100))}%`;
-  $('stats').innerHTML=[stat('mode',e.active?'active':`sleeping (${e.sleep_windows_remaining})`),stat('realized P&L',money(e.realized_pnl)),stat('win / loss',`${e.wins||0} / ${e.losses||0}`),stat('win rate',e.win_rate==null?'—':`${e.win_rate}%`),stat('ladder','$1 floor → $8 cap'),stat('slippage','±$0.30 FOK')].join('');
-  const p=e.position; $('position').innerHTML=p?`<b class="${p.side==='UP'?'up':'down'}">${p.side}</b> · ${Number(p.shares).toFixed(4)} shares @ ${price(p.entry_price)} · cost ${money(p.cost)} · mark ${price(p.mark_price)} · floating ${money(p.unrealized_pnl)}`:'No open position.';
-  $('log').innerHTML=(s.log||[]).map(x=>`<div class="event"><time>${new Date(x.ts*1000).toLocaleTimeString()}</time><b>${x.event}</b> ${x.note||''}</div>`).join('')||'<pre>No events yet.</pre>';
+  const e=s.engine||{},w=s.window,b=s.book||{},p=e.position;
+  $('modeBadge').textContent=s.trading_mode==='live'?'LIVE ORDERS + DEMO':'DEMO ONLY';
+  $('status').textContent=s.real_trading?.startup_failed?'Real trader unavailable; demo continues':s.error||s.status||'unknown';
+  $('liveBudget').textContent=s.trading_mode==='live'?`Next real buy: ${money(s.real_trading?.budget_usd)}`:'No real orders';
+  $('window').textContent=w?esc(w.slug.replace('btc-updown-5m-','#')):'—';
+  $('remaining').textContent=w?`${Math.max(0,w.seconds_remaining).toFixed(0)} seconds remaining`:'Waiting for market';
+  $('strategy').textContent=e.halted?'Halted':!e.active?`Sleeping (${e.sleep_windows_remaining} windows)`:p?'Position open':e.entry_side_this_window?`Armed ${e.entry_side_this_window}`:'Waiting for candle signal';
+  const c=e.last_candle;
+  $('candle').innerHTML=`Last candle: <span class="candle ${c?.color==='red'?'down':c?.color==='green'?'up':''}">${c?esc(c.color.toUpperCase()):'—'}</span>${c?` · ${esc(c.open)} → ${esc(c.close)}`:''}`;
+  $('balance').textContent=money(e.balance);
+  $('pnl').textContent=`Realized ${money(e.realized_pnl)} · Session ${money(e.session_pnl)} · Unrealized ${money(e.unrealized_pnl)}`;
+  const mid=(bid,ask)=>bid!=null&&ask!=null?(Number(bid)+Number(ask))/2:(ask??bid);
+  $('upMid').textContent=price(mid(b.up_bid,b.up_ask));$('downMid').textContent=price(mid(b.down_bid,b.down_ask));
+  $('upBook').textContent=`bid ${price(b.up_bid)} / ask ${price(b.up_ask)}`;
+  $('downBook').textContent=`bid ${price(b.down_bid)} / ask ${price(b.down_ask)}`;
+  $('stats').innerHTML=[
+    stat('Simulated shares',Number(e.shares||500).toFixed(0)),
+    stat('Profit target',money(e.profit_target)),
+    stat('Target progress',`${Number(e.progress_pct||0).toFixed(1)}%`),
+    stat('Fills / TP fills',`${e.fills||0} / ${e.tp_fills||0}`),
+    stat('Wins / losses',`${e.wins||0} / ${e.losses||0}`),
+    stat('Win rate',e.win_rate==null?'—':`${e.win_rate}%`),
+    stat('Sleep windows',e.sleep_windows_remaining||0),
+    stat('Max drawdown',`${money(e.max_drawdown)} (${Number(e.max_drawdown_pct||0).toFixed(2)}%)`)
+  ].join('');
+  $('position').innerHTML=p?`<b class="${p.side==='UP'?'up':'down'}">${esc(p.side)}</b> · ${Number(p.shares).toFixed(0)} shares @ ${price(p.entry_price)} · cost ${money(p.cost)} · TP ${price(p.tp_price)} maker · mark ${price(p.mark_price)} · unrealized ${money(p.unrealized_pnl)}`:'No open position.';
+  $('log').innerHTML=(s.log||[]).map(x=>`<div class="event"><time>${new Date(x.ts*1000).toLocaleTimeString()}</time><b>${esc(x.event)}</b> ${esc(x.note||'')}</div>`).join('')||'<span class="small">No events yet.</span>';
+  $('error').textContent=s.error||'';
 }
-async function poll(){try{const r=await fetch('/api/state',{cache:'no-store'});if(!r.ok)throw Error(`HTTP ${r.status}`);render(await r.json())}catch(e){$('status').textContent=e.message;$('dot').className='dot err'}}
+async function poll(){try{const r=await fetch('/api/state',{cache:'no-store'});if(!r.ok)throw Error(`HTTP ${r.status}`);render(await r.json())}catch(e){$('status').textContent='Connection error';$('error').textContent=e.message}}
 poll();setInterval(poll,1000);
 </script>
 </body>

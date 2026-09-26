@@ -2,12 +2,13 @@
 
 const readline = require('readline');
 const PolymarketTrader = require('./trader_client');
+const { marketLimitPrice, roundToTick } = require('./order_utils');
 
-const privateKey = process.env.POLYMARKET_PRIVATE_KEY;
+const privateKey = process.env.PRIVATE_KEY;
 if (!privateKey) {
   process.stdout.write(`${JSON.stringify({
     event: 'error',
-    error: 'POLYMARKET_PRIVATE_KEY is not configured',
+    error: 'PRIVATE_KEY is not configured',
   })}\n`);
   process.exit(1);
 }
@@ -20,21 +21,12 @@ const reply = (id, ok, result, error) => {
   process.stdout.write(`${JSON.stringify({ id, ok, result, error })}\n`);
 };
 
-const roundUp = (value, tick) => {
-  const places = Math.max(0, String(tick).split('.')[1]?.length || 0);
-  const factor = 10 ** places;
-  return Math.ceil((value - 1e-12) * factor) / factor;
-};
-
-const roundDown = (value, tick) => {
-  const places = Math.max(0, String(tick).split('.')[1]?.length || 0);
-  const factor = 10 ** places;
-  return Math.floor((value + 1e-12) * factor) / factor;
-};
-
 async function run(command, args) {
   if (command === 'balance') return trader.balance();
   if (command === 'book') return trader.book(args.tokenId);
+  if (command === 'verify_buy') {
+    return trader.verifyBuy(args.tokenId, args.openTs, args.orderId);
+  }
   if (command === 'shutdown') {
     process.exit(0);
   }
@@ -42,48 +34,50 @@ async function run(command, args) {
     throw new Error(`Unknown trader command: ${command}`);
   }
 
-  const book = await trader.book(args.tokenId);
   const reference = command === 'buy' ? args.referenceAsk : args.referenceBid;
+  let book;
+  try {
+    book = await trader.book(args.tokenId);
+  } catch {
+    book = {};
+  }
   const marketPrice = command === 'buy' ? book.bestAsk : book.bestBid;
-  const quote = Number.isFinite(marketPrice) ? marketPrice : reference;
-  if (!Number.isFinite(quote) || quote <= 0) {
+  const executablePrice = Number.isFinite(marketPrice) && marketPrice > 0
+    ? marketPrice
+    : Number(reference);
+  if (!Number.isFinite(executablePrice) || executablePrice <= 0) {
     return { filled: false, status: 'NO_QUOTE', shares: 0 };
   }
 
   const tickSize = (await trader.clob.getTickSize(args.tokenId)) || '0.01';
-  const slippage = Number(args.slippage || 0.30);
-  let limitPrice = command === 'buy'
-    ? Math.min(0.99, quote + slippage)
-    : Math.max(0.01, quote - slippage);
-  limitPrice = command === 'buy'
-    ? roundUp(limitPrice, tickSize)
-    : roundDown(limitPrice, tickSize);
-  limitPrice = Math.min(0.99, Math.max(0.01, limitPrice));
-
-  let size;
-  if (command === 'buy') {
-    // Budget is a ceiling: even at the worst accepted price, the order
-    // cannot exceed the requested dollar amount.
-    size = roundDown(Number(args.budgetUsd) / limitPrice, '0.01');
-  } else {
-    size = roundDown(Number(args.shares), '0.01');
+  const side = command === 'buy' ? 'BUY' : 'SELL';
+  const limitPrice = marketLimitPrice(side, executablePrice, reference, args.slippage, tickSize);
+  if (limitPrice === null) {
+    return { filled: false, status: 'PRICE_MOVED', shares: 0 };
   }
-  if (!Number.isFinite(size) || size <= 0) {
+
+  // The SDK's FAK market BUY takes USDC; SELL takes shares. Never silently
+  // increase the real ladder budget to satisfy a market's minimum.
+  const amount = command === 'buy'
+    ? Number(args.budgetUsd)
+    : roundToTick(Number(args.shares), '0.01', 'down');
+  if (!Number.isFinite(amount) || amount <= 0) {
     return { filled: false, status: 'SIZE_TOO_SMALL', shares: 0, limitPrice };
+  }
+  if (command === 'buy' && (!Number.isInteger(amount) || amount < 1 || amount > 8)) {
+    return { filled: false, status: 'BUDGET_OUT_OF_RANGE', shares: 0, limitPrice };
   }
 
   const result = await trader.order(
     args.tokenId,
-    command === 'buy' ? 'BUY' : 'SELL',
+    side,
     limitPrice,
-    size,
+    amount,
   );
   return {
     ...result,
     limitPrice,
     budgetUsd: command === 'buy' ? Number(args.budgetUsd) : undefined,
-    cost: command === 'buy' ? result.shares * result.avgPrice : undefined,
-    proceeds: command === 'sell' ? result.shares * result.avgPrice : undefined,
   };
 }
 

@@ -10,6 +10,7 @@ const {
   OrderType,
 } = require('@polymarket/clob-client-v2');
 const { RelayClient } = require('@polymarket/builder-relayer-client');
+const { parseMarketResponse } = require('./order_utils');
 
 const CLOB_HOST = 'https://clob.polymarket.com';
 const CHAIN_ID = 137;
@@ -77,35 +78,38 @@ class PolymarketTrader {
     };
   }
 
-  async order(tokenId, side, price, size) {
+  async verifyBuy(tokenId, openTs, orderId) {
+    // Only authenticated account trades are returned by this endpoint.
+    // Never interpret an empty response as permission to retry a buy.
+    const trades = await this.clob.getTrades({ asset_id: tokenId });
+    if (!Array.isArray(trades)) {
+      throw new Error('Unexpected exchange trade history response');
+    }
+    const matches = trades.filter((trade) => {
+      const id = trade.taker_order_id || trade.taker_order_id_hash || trade.id;
+      const timestamp = Number(trade.match_time || trade.created_at || 0);
+      return (trade.asset_id === tokenId || trade.asset_id === String(tokenId))
+        && String(trade.side).toUpperCase() === 'BUY'
+        && (orderId ? id === orderId : timestamp >= Number(openTs));
+    });
+    return { matchingTrades: matches.length, orderId: orderId || null };
+  }
+
+  async order(tokenId, side, price, amount) {
     const tickSize = (await this.clob.getTickSize(tokenId)) || '0.01';
     const negRisk = (await this.clob.getNegRisk(tokenId)) || false;
-    const response = await this.clob.createAndPostOrder(
+    const response = await this.clob.createAndPostMarketOrder(
       {
         tokenID: tokenId,
         price,
-        size,
+        amount,
         side: side === 'BUY' ? Side.BUY : Side.SELL,
+        orderType: OrderType.FAK,
       },
       { tickSize, negRisk },
-      OrderType.FOK,
+      OrderType.FAK,
     );
-    const orderId = response?.orderID || response?.id || null;
-    const status = response?.status || (orderId ? 'UNKNOWN' : 'FAILED');
-    const matchStatus = String(response?.match_status || '').toLowerCase();
-    const remaining = parseFloat(response?.remaining_size || '999');
-    const filled = status === 'FILLED'
-      || matchStatus === 'filled'
-      || (size > 0 && remaining === 0);
-    const avgPrice = parseFloat(response?.avg_fill_price || response?.price || price);
-    return {
-      orderId,
-      status,
-      filled,
-      shares: filled ? size : 0,
-      avgPrice,
-      raw: response,
-    };
+    return parseMarketResponse(response, side, amount);
   }
 }
 

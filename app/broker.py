@@ -25,13 +25,13 @@ class Broker:
     async def start(self):
         if not self.live:
             return
-        if not config.POLYMARKET_PRIVATE_KEY:
+        if not config.PRIVATE_KEY:
             raise RuntimeError(
-                "TRADING_MODE=live requires the POLYMARKET_PRIVATE_KEY secret"
+                "TRADING_MODE=live requires the PRIVATE_KEY secret"
             )
         root = Path(__file__).resolve().parent.parent
         env = os.environ.copy()
-        env["POLYMARKET_PRIVATE_KEY"] = config.POLYMARKET_PRIVATE_KEY
+        env["PRIVATE_KEY"] = config.PRIVATE_KEY
         self._process = await asyncio.create_subprocess_exec(
             "node",
             "trader_worker.js",
@@ -48,7 +48,12 @@ class Broker:
         payload = json.loads(ready.decode())
         if payload.get("event") != "ready":
             raise RuntimeError(f"Trader worker failed authentication: {payload}")
-        self.balance = await self.get_balance()
+        try:
+            self.balance = await self.get_balance()
+        except Exception as exc:
+            # Wallet balance display must not prevent an otherwise ready
+            # worker from submitting the demo's next real order.
+            self.log_event("LIVE_BALANCE_UNAVAILABLE", note=str(exc))
 
     async def close(self):
         if not self._process:
@@ -66,15 +71,30 @@ class Broker:
         self._process = None
 
     def log_event(self, event: str, note: str = "", **fields):
+        safe_note = str(note)
+        if config.PRIVATE_KEY:
+            safe_note = safe_note.replace(config.PRIVATE_KEY, "[redacted]")
+            raw_key = config.PRIVATE_KEY.removeprefix("0x")
+            if raw_key:
+                safe_note = safe_note.replace(raw_key, "[redacted]")
         item = {
             "ts": __import__("time").time(),
             "event": event,
-            "note": note,
+            "note": safe_note,
             **fields,
         }
         self.events.append(item)
         if len(self.events) > config.LOG_MAX_ENTRIES:
             self.events.pop(0)
+        # Railway users may have no dashboard; keep trade attempts and
+        # rejections visible in the service's standard output as well.
+        print(json.dumps({
+            "event": event,
+            "window": fields.get("window"),
+            "side": fields.get("side"),
+            "trade_usd": fields.get("trade_usd"),
+            "note": safe_note,
+        }), flush=True)
 
     def taker_fee_amount(self, shares: float, price: float) -> float:
         # This is only used for paper-mode estimates. Live fills report the
@@ -113,6 +133,11 @@ class Broker:
             return None, None
         result = await self.request("book", {"tokenId": token_id})
         return result.get("bestBid"), result.get("bestAsk")
+
+    async def verify_buy(self, token_id: str, open_ts: float, order_id: Optional[str] = None):
+        return await self.request("verify_buy", {
+            "tokenId": token_id, "openTs": open_ts, "orderId": order_id,
+        })
 
     async def buy(self, token_id: str, budget_usd: float, reference_ask: float) -> dict:
         if self.live:

@@ -1,67 +1,72 @@
-# BTC 5m Contrarian Trader
+# BTC 5m Candle Contrarian Demo + Live Orders
 
-This bot trades Polymarket BTC 5-minute UP/DOWN markets from the most recently
-closed Binance BTCUSDT 5-minute candle:
+The **demo strategy** is the original candle-contrarian simulation from the
+attached archive. It reads the most recently closed Binance BTCUSDT 5-minute
+candle: red buys UP, green buys DOWN, and a doji or missing candle skips the
+window. It simulates **500 shares** on the first available ask. Its balance,
+position, P&L, wins, losses, and sleep cycle remain simulated.
 
-- green candle → buy DOWN
-- red candle → buy UP
-- doji or missing candle → skip the window
+The demo models a maker take-profit when the bid reaches $0.99, booking
+$1/share plus its modeled rebate. Otherwise it settles at the next window
+using the higher **last-observed UP/DOWN CLOB midpoint**. Missing quotes are a
+wash. It does not use the exchange's official resolution. At $500 of session
+profit it sleeps for three windows, then resumes with session P&L reset.
 
-## Real trading
+## Separate real orders
 
-The default mode is `live`. It uses the supplied Polymarket signer pattern,
-derives CLOB credentials at startup, and submits **FOK limit orders**. FOK
-orders are takers, while the explicit limit price prevents fills beyond the
-slippage ceiling.
+`TRADING_MODE=live` (the default) starts a separate Polymarket order worker.
+Each demo `CANDLE_BUY` event queues **one** real FAK market buy for that
+window, denominated in USDC:
 
-Required runtime secret:
+- The first real buy is **$1**.
+- A demo loss increases the *next* real buy by $1; a demo win decreases it by
+  $1. A wash leaves it unchanged. The range is **$1–$8**.
+- The real amount is never increased to meet a market minimum. An order
+  rejected by the exchange stays rejected; the demo still runs normally.
+- FAK fills any immediately available amount up to the requested USDC budget
+  and cancels the rest. It can partially fill or fail to fill.
+- The FAK market buy accepts available asks up to **$0.99 per share**, even if
+  that is much higher than the demo ask. It can still fail if there is no
+  matching liquidity. It is a market-order request in **USDC**, not a request
+  for 500 real shares. Real sells retain the $0.30 adverse-price limit.
 
-```text
-POLYMARKET_PRIVATE_KEY
-```
+On a demo take-profit, the worker attempts a real FAK sell **only if it knows
+the real buy filled and how many shares it received**. Otherwise it logs that
+there were no confirmed shares to sell. Positions not sold before expiry are
+left for Polymarket resolution; a partially filled sell can also leave shares
+for resolution. This app does not redeem or reconcile them.
 
-Never commit this value. The private key funds the wallet used by the trader;
-verify the wallet, collateral balance, and allowance before enabling live mode.
+Real fills, rejections, errors, and eventual exchange outcomes **never change
+the demo balance, position, result, or $1–$8 sizing sequence**. Real-order
+attempts and results are printed to service logs and shown in the JSON state
+as `real_trading`. Before enabling live trading, set `LIVE_ORDER_GUARD_DB`
+to an **absolute path on a persistent volume shared by every instance**
+(for example `/data/live_orders.sqlite`). SQLite atomically reserves each
+market window *before* a real buy is submitted. Restarting or running another
+instance with the same database will not submit another buy for that window,
+even if the first order was rejected or its outcome is unknown. On a prior
+reservation the worker checks authenticated exchange trade history for
+diagnostics; an empty or unavailable response never permits a retry. If the
+path is missing or the guard fails, real buys are disabled or blocked and
+errors are logged; the demo continues. Do not use an ephemeral filesystem or
+independent per-instance volumes or a shared filesystem without reliable
+SQLite file locking: they cannot prevent duplicates across
+restarts/instances. Keep this file when redeploying, and check exchange
+history manually before migrating an existing live service to the guard.
+The app does not reconcile unsold real positions.
 
-## Dollar sizing
+The real worker requires a fresh, private `PRIVATE_KEY` runtime
+secret, adequate collateral and allowance. **Never commit or paste a signing
+key into source code.** If the key has ever been shared, move funds to a new
+wallet and replace the deployment secret before live deployment. Without a
+valid key, the demo continues but the worker reports a live startup error.
 
-The strategy uses a dollar budget rather than a fixed share count:
-
-- starts at `$1`
-- a loss moves the next budget up by `$1`
-- a win moves the next budget down by `$1`
-- the budget is clamped between `$1` and `$8`
-
-Each entry is a taker FOK order with a `±$0.30` token-price slippage ceiling.
-The order size is calculated from the worst accepted price, so the requested
-dollar budget is a spending ceiling.
-
-## Exits and settlement
-
-The bot attempts a taker FOK exit when the live bid reaches `0.99`. If the
-position remains open at the window boundary, the strategy uses the demo
-settlement rule: whichever side had the higher last-observed CLOB midpoint is
-counted as the winner. If quotes are missing, the demo ledger records a wash.
-It does not query Polymarket's official resolution to update the ladder.
-
-In live mode, the dashboard's simulated P&L, win/loss counts, and next-dollar
-budget follow that demo rule. They are not a record of redeemed collateral or
-the exchange's eventual payout. The bot sends real FOK taker orders for entries
-and take-profit exits; it does not redeem or reconcile shares left open at
-window expiry. Strategy capital and ladder accounting stay in demo mode; the
-connected wallet balance is displayed separately and does not drive sizing.
-
-The existing `$500` session target and three-window sleep behavior are retained.
-All state is held in memory; restart the service only when no position is at
-risk or after confirming the open position state on Polymarket.
+Use `TRADING_MODE=paper` to run the unchanged demo without sending real
+orders. In either mode, the dashboard's 500-share trades remain simulations.
 
 ## Run
 
-```bash
-npm install
-pip install -r requirements.txt
-TRADING_MODE=live POLYMARKET_PRIVATE_KEY=... uvicorn app.main:app --host 0.0.0.0 --port 8000
-```
-
-The dashboard is at `/`, health is at `/healthz`, and JSON state is at
-`/api/state`.
+Install `requirements.txt` and `package.json` dependencies, then start
+`uvicorn app.main:app --host 0.0.0.0 --port 8000`. Configure the key in the
+runtime secret manager for live mode; do not put it on the command line.
+The dashboard is at `/`, health at `/healthz`, and JSON state at `/api/state`.

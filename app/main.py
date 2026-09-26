@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from . import config
 from .state import BotState
 
 
@@ -19,7 +20,7 @@ async def lifespan(app: FastAPI):
     await bot_state.stop()
 
 
-app = FastAPI(title="Polymarket BTC 5m Real Contrarian Bot", lifespan=lifespan)
+app = FastAPI(title="Polymarket BTC 5m Contrarian Bot", lifespan=lifespan)
 
 
 @app.get("/healthz")
@@ -27,7 +28,9 @@ async def healthz():
     return {
         "ok": bot_state.error is None,
         "status": bot_state.status,
-        "mode": bot_state.snapshot()["trading_mode"],
+        "mode": config.TRADING_MODE,
+        "demo_mode": "paper",
+        "live_startup_failed": bot_state.real.snapshot()["startup_failed"],
         "error": bot_state.error,
     }
 
