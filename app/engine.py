@@ -1,4 +1,4 @@
-"""Reference 10-candle imbalance demo engine."""
+"""Previous-candle direction demo engine."""
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -62,12 +62,8 @@ class EngineState:
     down_bid: Optional[float] = None
     down_ask: Optional[float] = None
     entry_side_this_window: Optional[Side] = None
-    reds_this_signal: int = 0
-    greens_this_signal: int = 0
     entered_this_window: bool = False
     position: Optional[Position] = None
-    locked_side: Optional[Side] = None
-    required_color: Optional[str] = None
     current_shares: float = config.ENGINE2_SHARES
     total_pnl: float = 0.0
     fills: int = 0
@@ -80,15 +76,16 @@ class EngineState:
 
 
 class Engine:
-    """Trade the reference's locked 10-candle imbalance with demo sizing."""
+    """Trade the side selected by the immediately previous closed candle."""
 
     name = "E2"
-    label = "10-candle imbalance"
+    label = "previous candle direction"
 
     def __init__(self, broker: PaperBroker):
         self.broker = broker
         self.shares = config.ENGINE2_SHARES
         self.candle_history: Deque[str] = deque(maxlen=config.CANDLE_HISTORY_MAXLEN)
+        self.candle_records: Deque[dict] = deque(maxlen=config.CANDLE_HISTORY_MAXLEN)
         self.last_candle: Optional[dict] = None
         self._last_recorded_close_ms: Optional[float] = None
         self.capital = CapitalPool(balance=config.STARTING_CAPITAL)
@@ -107,14 +104,13 @@ class Engine:
     def seed_history(self, candles: List[dict]):
         for candle in candles:
             self.candle_history.append(candle["color"])
+            self.candle_records.append(dict(candle))
         if candles:
             self.last_candle = candles[-1]
             self._last_recorded_close_ms = candles[-1].get("close_time_ms")
-        reds = list(self.candle_history).count("red")
-        greens = list(self.candle_history).count("green")
         self._log(
             "HISTORY_SEEDED",
-            note=f"backfilled {len(candles)} closed candles ({reds} red, {greens} green) -- ready to trade immediately",
+            note=f"backfilled {len(candles)} previous closed candle records",
         )
 
     def record_candle(self, candle: Optional[dict]):
@@ -124,7 +120,15 @@ class Engine:
             if close_ms is not None and close_ms == self._last_recorded_close_ms:
                 return
             self.candle_history.append(candle["color"])
+            self.candle_records.append(dict(candle))
             self._last_recorded_close_ms = close_ms
+
+    def begin_window(self, window: WindowMarket):
+        """Clear the prior window's signal while the new candle becomes available."""
+        self.s.window = window
+        self.s.entry_side_this_window = None
+        self.s.entered_this_window = False
+        self.last_candle = None
 
     def reset_for_window(self, window: WindowMarket):
         self.s.window = window
@@ -133,46 +137,30 @@ class Engine:
         if self.capital.halted:
             return
 
-        last_n = list(self.candle_history)[-config.IMBALANCE_WINDOW:]
-        reds = last_n.count("red")
-        greens = last_n.count("green")
-        self.s.reds_this_signal = reds
-        self.s.greens_this_signal = greens
-
-        if self.s.locked_side is not None:
-            just_closed = self.candle_history[-1] if self.candle_history else None
-            if just_closed == self.s.required_color:
-                self._log(
-                    "IMBALANCE_UNLOCK",
-                    note=f"a {self.s.required_color} candle finally closed -- unlocking {self.s.locked_side.value}, re-evaluating from scratch",
-                )
-                self.s.locked_side = None
-                self.s.required_color = None
-            else:
-                self.s.entry_side_this_window = self.s.locked_side
-                return
-
-        if len(last_n) < config.IMBALANCE_WINDOW:
-            self.s.no_signal_windows += 1
-            return
-        if reds - greens >= config.IMBALANCE_THRESHOLD:
-            self.s.locked_side = Side.UP
-            self.s.required_color = "green"
-            self.s.entry_side_this_window = Side.UP
-            self._log(
-                "IMBALANCE_SIGNAL", side="UP",
-                note=f"last {config.IMBALANCE_WINDOW} candles: {reds} red / {greens} green -- green lacking, locking onto UP until a green candle closes ({self.s.current_shares:.0f}sh)",
-            )
-        elif greens - reds >= config.IMBALANCE_THRESHOLD:
-            self.s.locked_side = Side.DOWN
-            self.s.required_color = "red"
-            self.s.entry_side_this_window = Side.DOWN
-            self._log(
-                "IMBALANCE_SIGNAL", side="DOWN",
-                note=f"last {config.IMBALANCE_WINDOW} candles: {reds} red / {greens} green -- red lacking, locking onto DOWN until a red candle closes ({self.s.current_shares:.0f}sh)",
-            )
+        color = self.last_candle.get("color") if self.last_candle else None
+        if color == "red":
+            side = Side.DOWN
+        elif color == "green":
+            side = Side.UP
         else:
             self.s.no_signal_windows += 1
+            note = (
+                "previous candle was a doji -- window is void"
+                if color == "doji"
+                else "previous candle unavailable -- no entry this window"
+            )
+            self._log("PREVIOUS_CANDLE_VOID", note=note)
+            return
+
+        self.s.entry_side_this_window = side
+        self._log(
+            "PREVIOUS_CANDLE_SIGNAL",
+            side=side.value,
+            note=(
+                f"previous 5m candle was {color} -- signal {side.value} "
+                f"({self.s.current_shares:.0f} demo shares)"
+            ),
+        )
 
     def on_tick(
         self,
@@ -192,6 +180,7 @@ class Engine:
             self.s.entry_side_this_window is not None
             and not self.s.entered_this_window
             and self.s.position is None
+            and now >= self.s.window.open_ts + config.ENTRY_DELAY_SECONDS
         ):
             ask = up_ask if self.s.entry_side_this_window == Side.UP else down_ask
             if ask is not None:
@@ -220,7 +209,10 @@ class Engine:
             price=ask,
             shares=shares,
             fee=fee,
-            note=f"taker buy {shares:.0f}sh {side.value} @ {ask} on window open (fee ${fee:.4f})",
+            note=(
+                f"taker buy {shares:.0f}sh {side.value} @ {ask} after "
+                f"{config.ENTRY_DELAY_SECONDS:g}s window delay (fee ${fee:.4f})"
+            ),
         )
         if self.capital.check_halt():
             self._log("HALTED", note=f"balance ${self.capital.balance:.2f} < $0 -- bankrupt")
@@ -381,14 +373,10 @@ class Engine:
             "entry_side_this_window": (
                 self.s.entry_side_this_window.value if self.s.entry_side_this_window else None
             ),
-            "locked_side": self.s.locked_side.value if self.s.locked_side else None,
-            "required_color": self.s.required_color,
-            "reds_this_signal": self.s.reds_this_signal,
-            "greens_this_signal": self.s.greens_this_signal,
-            "imbalance_window": config.IMBALANCE_WINDOW,
-            "imbalance_threshold": config.IMBALANCE_THRESHOLD,
+            "entered_this_window": self.s.entered_this_window,
             "position": position_payload,
-            "candle_history": list(self.candle_history)[-config.IMBALANCE_WINDOW:],
+            "candle_history": list(self.candle_history)[-config.CANDLE_RECORDS_DISPLAY:],
+            "candle_records": list(self.candle_records)[-config.CANDLE_RECORDS_DISPLAY:],
             "last_candle": self.last_candle,
             "fills": self.s.fills,
             "tp_fills": self.s.tp_fills,

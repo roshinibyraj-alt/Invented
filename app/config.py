@@ -1,4 +1,4 @@
-"""Reference imbalance demo configuration and separate live execution settings."""
+"""Previous-candle demo configuration and separate live execution settings."""
 import os
 
 
@@ -15,13 +15,13 @@ CLOB_API_BASE = os.getenv("CLOB_API_BASE", "https://clob.polymarket.com")
 SLUG_PREFIX = "btc-updown-5m-"
 WINDOW_SECONDS = 300
 POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
+ENTRY_DELAY_SECONDS = 3.0
 
 BINANCE_SYMBOL = os.getenv("BINANCE_SYMBOL", "BTCUSDT")
 CANDLE_HISTORY_MAXLEN = 20
+CANDLE_RECORDS_DISPLAY = 10
 
-# Reference 10-candle imbalance, lock/unlock, and simulated sizing.
-IMBALANCE_WINDOW = 10
-IMBALANCE_THRESHOLD = 2
+# Simulated sizing is independent from real-order sizing.
 ENGINE_TP_PRICE = 0.99
 ENGINE_TP_COUNTS_AS = 1.00
 ENGINE2_SHARES = 500.0

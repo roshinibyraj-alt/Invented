@@ -39,14 +39,16 @@ class BotState:
 
     async def _seed_candle_history(self):
         try:
-            candles = await self.binance.get_closed_candles(limit=config.IMBALANCE_WINDOW)
+            candles = await self.binance.get_closed_candles(
+                limit=config.CANDLE_RECORDS_DISPLAY
+            )
         except Exception as exc:
             self.broker.log_event(
                 "SYS", "", "HISTORY_SEED_FAILED",
                 note=f"could not backfill candle history: {exc}",
             )
             return
-        self.engine.seed_history(candles[-config.IMBALANCE_WINDOW:])
+        self.engine.seed_history(candles[-config.CANDLE_RECORDS_DISPLAY:])
 
     async def stop(self):
         if self._task:
@@ -93,6 +95,7 @@ class BotState:
         self.error = None
         if self.current_window is None or window.slug != self.current_window.slug:
             await self._roll_window(window)
+            now = time.time()
 
         up_bid, up_ask = await self.client.get_book(self.current_window.token_up)
         down_bid, down_ask = await self.client.get_book(self.current_window.token_down)
@@ -132,6 +135,16 @@ class BotState:
             )
             self.engine.finalize_window(winning_side)
 
+        self.current_window = new_window
+        self.engine.begin_window(new_window)
+        self.price_history.clear()
+        self.last_up_bid = self.last_up_ask = None
+        self.last_down_bid = self.last_down_ask = None
+
+        delay = new_window.open_ts + config.ENTRY_DELAY_SECONDS - time.time()
+        if delay > 0:
+            await asyncio.sleep(delay)
+
         candle = await self.binance.get_candle_for_close_ts(new_window.open_ts)
         self.engine.record_candle(candle)
         self.broker.log_event(
@@ -140,15 +153,12 @@ class BotState:
             "CANDLE",
             note=(
                 f"Binance {config.BINANCE_SYMBOL} candle: {candle['color']} "
-                f"(open {candle['open']}, close {candle['close']})"
+                f"(open {candle['open']}, close {candle['close']}, "
+                f"close time {candle['close_time_ms']})"
                 if candle
-                else "Binance candle unavailable this window -- an existing imbalance lock may continue"
+                else "Binance previous candle unavailable -- this window will be void"
             ),
         )
-        self.current_window = new_window
-        self.price_history.clear()
-        self.last_up_bid = self.last_up_ask = None
-        self.last_down_bid = self.last_down_ask = None
         self.engine.reset_for_window(new_window)
 
     def _infer_winner(self) -> Optional[Side]:

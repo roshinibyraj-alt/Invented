@@ -1,4 +1,4 @@
-"""Offline checks for reference imbalance signals and separate live execution."""
+"""Offline checks for previous-candle signals and separate live execution."""
 import asyncio
 import time
 import tempfile
@@ -68,7 +68,7 @@ class DemoBridgeTest(unittest.IsolatedAsyncioTestCase):
         mirror.broker = fake
         window = WindowMarket(
             "btc-updown-5m-test", None, "up-token", "down-token",
-            time.time() - 1, time.time() + 300,
+            time.time() - 5, time.time() + 300,
         )
         broker.on_event = lambda entry: mirror.on_demo_event(
             entry, window,
@@ -77,57 +77,75 @@ class DemoBridgeTest(unittest.IsolatedAsyncioTestCase):
             [{"color": "red", "open": 1, "close": 0}] * 9
             + [{"color": "green", "open": 0, "close": 1}]
         )
-        engine.record_candle({"color": "red", "open": 1, "close": 0})
+        engine.record_candle({"color": "green", "open": 0, "close": 1})
         engine.reset_for_window(window)
         return engine, mirror, fake
 
-    async def test_reference_requires_ten_candles_and_two_color_gap(self):
-        broker = PaperBroker()
-        engine = Engine(broker)
-        window = WindowMarket(
-            "btc-updown-5m-neutral", None, "up", "down",
-            time.time() - 1, time.time() + 300,
-        )
-        engine.seed_history([{"color": "red"}] * 9)
-        engine.reset_for_window(window)
-        engine.on_tick(0.3, 0.4, 0.6, 0.7)
-        self.assertIsNone(engine.s.entry_side_this_window)
-        self.assertEqual(engine.s.fills, 0)
-        engine.record_candle({"color": "green"})
-        engine.reset_for_window(window)
-        self.assertEqual(engine.s.entry_side_this_window, Side.UP)
-        self.assertEqual((engine.s.reds_this_signal, engine.s.greens_this_signal), (9, 1))
+    async def test_previous_candle_selects_side_and_doji_is_void(self):
+        for color, expected_side in (
+            ("red", Side.DOWN),
+            ("green", Side.UP),
+            ("doji", None),
+        ):
+            with self.subTest(color=color):
+                engine = Engine(PaperBroker())
+                window = WindowMarket(
+                    f"btc-updown-5m-{color}", None, "up", "down",
+                    time.time() - 5, time.time() + 300,
+                )
+                engine.record_candle({
+                    "color": color,
+                    "open": 100,
+                    "close": 100 if color == "doji" else (
+                        99 if color == "red" else 101
+                    ),
+                })
+                engine.reset_for_window(window)
+                self.assertEqual(engine.s.entry_side_this_window, expected_side)
+                engine.on_tick(0.3, 0.4, 0.6, 0.7)
+                if expected_side is None:
+                    self.assertIsNone(engine.s.position)
+                    self.assertEqual(engine.s.fills, 0)
+                    self.assertIn(
+                        "PREVIOUS_CANDLE_VOID",
+                        [event.event for event in engine.broker.log],
+                    )
+                else:
+                    self.assertEqual(engine.s.position.side, expected_side)
+                    self.assertEqual(engine.s.fills, 1)
 
-        neutral = Engine(PaperBroker())
-        neutral.seed_history([{"color": "red"}] * 5 + [{"color": "green"}] * 5)
-        neutral.reset_for_window(window)
-        neutral.on_tick(0.3, 0.4, 0.6, 0.7)
-        self.assertIsNone(neutral.s.entry_side_this_window)
-        self.assertEqual(neutral.s.fills, 0)
-
-        down = Engine(PaperBroker())
-        down.seed_history([{"color": "green"}] * 6 + [{"color": "red"}] * 4)
-        down.reset_for_window(window)
-        self.assertEqual(down.s.entry_side_this_window, Side.DOWN)
-        self.assertEqual(down.s.required_color, "red")
-
-    async def test_reference_lock_survives_shrinking_gap_until_missing_color_closes(self):
+    async def test_demo_entry_waits_three_seconds_after_window_open(self):
         engine = Engine(PaperBroker())
-        engine.seed_history([{"color": "red"}] * 6 + [{"color": "green"}] * 4)
+        open_ts = time.time()
         window = WindowMarket(
-            "btc-updown-5m-lock", None, "up", "down",
-            time.time() - 1, time.time() + 300,
+            "btc-updown-5m-entry-delay", None, "up", "down",
+            open_ts, open_ts + 300,
         )
-        engine.reset_for_window(window)
-        self.assertEqual(engine.s.locked_side, Side.UP)
-        engine.record_candle({"color": "doji"})
-        engine.reset_for_window(window)
-        self.assertEqual((engine.s.reds_this_signal, engine.s.greens_this_signal), (5, 4))
-        self.assertEqual(engine.s.entry_side_this_window, Side.UP)
         engine.record_candle({"color": "green"})
         engine.reset_for_window(window)
-        self.assertIsNone(engine.s.locked_side)
-        self.assertIsNone(engine.s.entry_side_this_window)
+        engine.on_tick(0.3, 0.4, 0.6, 0.7, now=open_ts + 2.99)
+        self.assertEqual(engine.s.fills, 0)
+        self.assertIsNone(engine.s.position)
+        engine.on_tick(0.3, 0.4, 0.6, 0.7, now=open_ts + 3.0)
+        self.assertEqual(engine.s.fills, 1)
+        self.assertEqual(engine.s.position.side, Side.UP)
+
+    async def test_red_signal_mirrors_down_token(self):
+        engine, mirror, _ = self.setup_engine({"filled": False, "status": "rejected"})
+        engine.record_candle({"color": "red"})
+        engine.reset_for_window(engine.s.window)
+        engine.on_tick(0.30, 0.40, 0.60, 0.70)
+        intent = mirror._queue.get_nowait()
+        self.assertEqual((intent.token_id, intent.budget_usd), ("down-token", 1))
+
+    async def test_doji_void_does_not_queue_a_real_buy(self):
+        engine, mirror, fake = self.setup_engine({})
+        engine.record_candle({"color": "doji"})
+        engine.reset_for_window(engine.s.window)
+        engine.on_tick(0.30, 0.40, 0.60, 0.70)
+        self.assertEqual(engine.s.fills, 0)
+        self.assertTrue(mirror._queue.empty())
+        self.assertEqual(fake.buys, [])
 
     async def test_startup_does_not_count_backfilled_candle_twice(self):
         engine = Engine(PaperBroker())
@@ -141,23 +159,24 @@ class DemoBridgeTest(unittest.IsolatedAsyncioTestCase):
         engine.record_candle(candles[-1])
         window = WindowMarket(
             "btc-updown-5m-first", None, "up", "down",
-            time.time() - 1, time.time() + 300,
+            time.time() - 5, time.time() + 300,
         )
         engine.reset_for_window(window)
         engine.on_tick(0.3, 0.4, 0.6, 0.7)
-        self.assertEqual((engine.s.reds_this_signal, engine.s.greens_this_signal), (5, 5))
-        self.assertIsNone(engine.s.entry_side_this_window)
-        self.assertEqual(engine.s.fills, 0)
+        self.assertEqual(engine.s.entry_side_this_window, Side.DOWN)
+        self.assertEqual(engine.s.fills, 1)
+        self.assertEqual(len(engine.candle_history), 10)
+        self.assertEqual(len(engine.candle_records), 10)
 
-    async def test_reference_continues_after_over_500_demo_profit(self):
+    async def test_strategy_continues_after_over_500_demo_profit(self):
         engine = Engine(PaperBroker())
         engine.seed_history([{"color": "red"}] * 10)
         for index in range(3):
             window = WindowMarket(
                 f"btc-updown-5m-profit-{index}", None, "up", "down",
-                time.time() - 1, time.time() + 300,
+                time.time() - 5, time.time() + 300,
             )
-            engine.record_candle({"color": "red"})
+            engine.record_candle({"color": "green"})
             engine.reset_for_window(window)
             engine.on_tick(0.1, 0.2, 0.7, 0.8)
             self.assertEqual(engine.s.fills, index + 1)
@@ -265,7 +284,7 @@ class DemoBridgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mirror.budget_usd, 1)
         self.assertEqual(engine.s.current_shares, 500)
 
-    async def test_next_window_uses_reference_demo_size_and_real_budget(self):
+    async def test_next_window_uses_demo_size_and_real_budget(self):
         engine, bridge, _ = self.setup_engine({"filled": False, "status": "rejected"})
         engine.on_tick(0.30, 0.40, 0.60, 0.70)
         bridge._queue.get_nowait()
@@ -274,9 +293,9 @@ class DemoBridgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bridge.budget_usd, 2)
         next_window = WindowMarket(
             "btc-updown-5m-next", None, "up-next", "down-next",
-            time.time() - 1, time.time() + 300,
+            time.time() - 5, time.time() + 300,
         )
-        engine.record_candle({"color": "red", "open": 1, "close": 0})
+        engine.record_candle({"color": "green", "open": 0, "close": 1})
         engine.reset_for_window(next_window)
         engine.on_tick(0.30, 0.40, 0.60, 0.70)
         self.assertEqual(engine.s.position.shares, 600)
@@ -285,21 +304,21 @@ class DemoBridgeTest(unittest.IsolatedAsyncioTestCase):
             next_window.slug, 2,
         ))
 
-    async def test_missing_candle_preserves_reference_lock_in_next_window(self):
+    async def test_missing_candle_is_void_and_does_not_reuse_old_signal(self):
         engine, mirror, fake = self.setup_engine({"filled": False, "status": "rejected"})
         engine.on_tick(0.30, 0.40, 0.60, 0.70)
         await mirror._buy(mirror._queue.get_nowait())
         engine.finalize_window(Side.DOWN)
         next_window = WindowMarket(
             "btc-updown-5m-next", None, "up-next", "down-next",
-            time.time() - 1, time.time() + 300,
+            time.time() - 5, time.time() + 300,
         )
         engine.record_candle(None)
         engine.reset_for_window(next_window)
         engine.on_tick(0.30, 0.40, 0.60, 0.70)
-        self.assertEqual(engine.s.entry_side_this_window, Side.UP)
+        self.assertIsNone(engine.s.entry_side_this_window)
         self.assertEqual(len(fake.buys), 1)
-        self.assertEqual(mirror._queue.get_nowait().slug, next_window.slug)
+        self.assertTrue(mirror._queue.empty())
 
     async def test_restart_and_second_instance_never_resubmit_same_window(self):
         engine, first, fake = self.setup_engine(

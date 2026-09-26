@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>BTC 5m Imbalance — Demo and Real Orders</title>
+  <title>BTC 5m Previous Candle — Demo and Real Orders</title>
   <style>
     :root{color-scheme:dark;--bg:#080b10;--panel:#121820;--line:#273241;--text:#e8edf5;--muted:#91a0b3;--mint:#48dbad;--red:#ff7184;--amber:#ffc857}
     *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px system-ui,-apple-system,sans-serif}
@@ -15,6 +15,7 @@
     .up{color:var(--mint)}.down{color:var(--red)}.stats{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}.stat{border-top:1px solid var(--line);padding-top:9px}.stat b{display:block;font-size:16px;margin-top:4px}
     .position,.log{margin-top:12px}.log-list{max-height:340px;overflow:auto;margin-top:8px}.event{border-top:1px solid var(--line);padding:9px 0;font-size:12px}.event b{color:#91b5ff}.event time{color:var(--muted);margin-right:9px}
     .alert{color:var(--red);margin-top:12px}.candle{font-weight:700}.foot{font-size:11px;color:var(--muted);margin-top:12px}
+    .candles{margin-top:12px}.table-wrap{overflow-x:auto;margin-top:8px}table{width:100%;border-collapse:collapse;font-size:12px}th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);white-space:nowrap}th{color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.06em}.selected{background:#1a2530}.selected td:first-child{color:var(--mint)}
     @media(min-width:721px) and (max-width:950px){.grid{grid-template-columns:repeat(2,1fr)}}
     @media(max-width:720px){.grid,.columns{grid-template-columns:1fr}.book{grid-template-columns:1fr}header{display:block}.badge{display:inline-block;margin-top:10px}}
   </style>
@@ -22,12 +23,12 @@
 <body>
 <main>
   <header>
-    <div><h1>BTC 5m Candle Imbalance</h1><div class="sub">10 closed candles · gap ≥ 2 locks a side · separate $1–$8 real buys</div></div>
+    <div><h1>BTC 5m Previous Candle</h1><div class="sub">Previous red → DOWN · green → UP · doji is void · 3-second entry delay · separate $1–$8 real buys</div></div>
     <div><span class="badge" id="modeBadge">CONNECTING</span><div class="small" id="status">Connecting…</div><div class="small" id="liveBudget"></div></div>
   </header>
   <section class="grid">
     <div class="card"><div class="label">Window</div><div id="window" class="value">—</div><div id="remaining" class="small"></div></div>
-    <div class="card"><div class="label">Strategy</div><div id="strategy" class="value">Waiting</div><div id="candle" class="small">Last candle: —</div></div>
+    <div class="card"><div class="label">Strategy</div><div id="strategy" class="value">Waiting</div><div id="candle" class="small">Previous candle: —</div></div>
     <div class="card"><div class="label">Demo balance</div><div id="balance" class="value">—</div><div id="pnl" class="small"></div></div>
     <div class="card"><div class="label">Real USDC balance</div><div id="realBalance" class="value">—</div><div id="realBalanceNote" class="small">Checking exchange…</div></div>
   </section>
@@ -38,16 +39,27 @@
     </div><div id="resolution" class="foot">Open positions settle against whichever side had the higher last observed midpoint at rollover.</div></div>
     <div class="card"><div class="label">Engine statistics</div><div id="stats" class="stats"></div></div>
   </section>
+  <section class="card candles">
+    <div class="label">Previous candle records</div>
+    <div class="small">Recent closed Binance five-minute candles; the highlighted candle is the input for this window.</div>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Closed at</th><th>Open</th><th>Close</th><th>Color</th><th>Rule result</th></tr></thead>
+      <tbody id="candleRecords"><tr><td colspan="5" class="small">Waiting for candle history…</td></tr></tbody>
+    </table></div>
+  </section>
   <section class="card position"><div class="label">Position</div><div id="position" style="margin-top:9px">No open position.</div></section>
   <section class="card log"><div class="label">Event log</div><div id="log" class="log-list"></div></section>
-  <div class="foot">Demo balance, positions, and 500–1,200 share sizes are simulated. Real USDC balance is available exchange collateral, not the value of held shares. The live bot buys only on demo imbalance entries; it does not sell or redeem positions.</div>
+  <div class="foot">Demo balance, positions, and 500–1,200 share sizes are simulated. Real USDC balance is available exchange collateral, not the value of held shares. The live bot mirrors demo candle signals with its separate budget; it does not sell or redeem positions.</div>
   <div id="error" class="alert"></div>
 </main>
 <script>
 const $=id=>document.getElementById(id);
 const money=n=>n==null?'—':`$${Number(n).toFixed(2)}`;
 const price=n=>n==null?'—':Number(n).toFixed(3);
+const number=n=>n==null?'—':Number(n).toLocaleString(undefined,{maximumFractionDigits:2});
+const candleTime=n=>n==null?'—':new Date(Number(n)).toLocaleString();
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const resultFor=color=>color==='red'?'DOWN':color==='green'?'UP':'VOID';
 function stat(label,value){return `<div class="stat"><span class="label">${label}</span><b>${value}</b></div>`}
 function render(s){
   const e=s.engine||{},w=s.window,b=s.book||{},p=e.position;
@@ -56,9 +68,17 @@ function render(s){
   $('liveBudget').textContent=s.trading_mode==='live'?`Next real buy: ${money(s.real_trading?.budget_usd)}`:'No real orders';
   $('window').textContent=w?esc(w.slug.replace('btc-updown-5m-','#')):'—';
   $('remaining').textContent=w?`${Math.max(0,w.seconds_remaining).toFixed(0)} seconds remaining`:'Waiting for market';
-  $('strategy').textContent=e.halted?'Halted':p?'Position open':e.entry_side_this_window?`Locked ${e.locked_side||e.entry_side_this_window}`:'No imbalance signal';
+  $('strategy').textContent=e.halted?'Halted':p?'Position open':e.entry_side_this_window?`Signal ${e.entry_side_this_window}`:e.last_candle?.color==='doji'?'Void — doji':!e.last_candle?'No previous candle':'No trade';
   const c=e.last_candle;
-  $('candle').innerHTML=`Last candle: <span class="candle ${c?.color==='red'?'down':c?.color==='green'?'up':''}">${c?esc(c.color.toUpperCase()):'—'}</span> · last ${e.imbalance_window||10}: ${e.reds_this_signal||0} red / ${e.greens_this_signal||0} green${e.required_color?` · unlock on ${esc(e.required_color)}`:''}`;
+  $('candle').innerHTML=c
+    ?`Previous: <span class="candle ${c.color==='red'?'down':c.color==='green'?'up':''}">${esc(c.color.toUpperCase())} → ${resultFor(c.color)}</span> · open ${number(c.open)} · close ${number(c.close)} · closed ${esc(candleTime(c.close_time_ms))}`
+    :'Previous candle unavailable — no entry this window';
+  const records=(e.candle_records||[]).slice(-10).reverse();
+  $('candleRecords').innerHTML=records.length?records.map(r=>{
+    const selected=c?.close_time_ms!=null&&Number(r.close_time_ms)===Number(c.close_time_ms);
+    const tone=r.color==='red'?'down':r.color==='green'?'up':'';
+    return `<tr class="${selected?'selected':''}"><td>${esc(candleTime(r.close_time_ms))}${selected?' · SIGNAL INPUT':''}</td><td>${number(r.open)}</td><td>${number(r.close)}</td><td class="${tone}">${esc(String(r.color||'').toUpperCase())}</td><td>${resultFor(r.color)}</td></tr>`;
+  }).join(''):'<tr><td colspan="5" class="small">No previous candle records available.</td></tr>';
   $('balance').textContent=money(e.balance);
   $('pnl').textContent=`Realized ${money(e.realized_pnl)} · Unrealized ${money(e.unrealized_pnl)}`;
   const real=s.real_trading||{};
@@ -75,7 +95,7 @@ function render(s){
     stat('Fills / TP fills',`${e.fills||0} / ${e.tp_fills||0}`),
     stat('Wins / losses',`${e.wins||0} / ${e.losses||0}`),
     stat('Win rate',e.win_rate==null?'—':`${e.win_rate}%`),
-    stat('Locked side',e.locked_side||'None'),
+    stat('Previous candle',c?.color?`${String(c.color).toUpperCase()} → ${resultFor(c.color)}`:'Unavailable'),
     stat('Max drawdown',`${money(e.max_drawdown)} (${Number(e.max_drawdown_pct||0).toFixed(2)}%)`)
   ].join('');
   $('position').innerHTML=p?`<b class="${p.side==='UP'?'up':'down'}">${esc(p.side)}</b> · ${Number(p.shares).toFixed(0)} shares @ ${price(p.entry_price)} · cost ${money(p.cost)} · TP ${price(p.tp_price)} maker · mark ${price(p.mark_price)} · unrealized ${money(p.unrealized_pnl)}`:'No open position.';

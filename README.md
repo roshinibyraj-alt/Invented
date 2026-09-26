@@ -1,14 +1,19 @@
-# BTC 5m Imbalance Demo + Live Buys
+# BTC 5m Previous-Candle Demo + Live Buys
 
-The **demo strategy** matches the reference repo's 10-candle imbalance logic.
-At startup it backfills the last 10 closed Binance BTCUSDT five-minute candles.
-Each new window counts red and green candles in that rolling window. A gap of
-at least two locks **UP** when red candles dominate or **DOWN** when green
-candles dominate; otherwise it skips. Once locked, it trades that side each
-window until a candle of the lacking color closes, then unlocks and evaluates
-the current 10-candle count again. There is no profit-target pause.
+At each new Polymarket five-minute window, the **demo strategy** uses the
+immediately previous closed Binance BTCUSDT five-minute candle:
 
-The demo buys at the first available CLOB ask. Its next trade starts at
+- Previous candle **red** → buy **DOWN**.
+- Previous candle **green** → buy **UP**.
+- Previous candle **doji** or unavailable → void the window; make no entry.
+
+The bot waits **3 seconds after the window opens** before fetching the previous
+candle and evaluating the signal. It backfills up to 10 recent candles at
+startup so the dashboard can show candle records; only the candle immediately
+before the current window selects the side. A backfilled candle repeated by the
+first live fetch is not recorded twice.
+
+After the delay, the demo buys at the first available CLOB ask. Its next trade starts at
 **500 simulated shares**; each resolved win or simulated take-profit reduces
 the next size by 100 to a floor of 500, and each resolved loss increases it
 by 100 to a cap of 1,200. Unfilled and unknown-result windows do not change
@@ -22,7 +27,7 @@ wash. It does not use the exchange's official resolution.
 ## Separate real orders
 
 `TRADING_MODE=live` starts a separate Polymarket order worker.
-Each demo `CANDLE_BUY` event from the imbalance strategy queues **one** real
+Each demo `CANDLE_BUY` event from the previous-candle strategy queues **one** real
 FAK market buy for that window, denominated in USDC:
 
 - The real budget starts at **$1**. A demo result in a skipped startup
