@@ -69,6 +69,8 @@ SLUG_PREFIX = "btc-updown-5m-"
 WINDOW_SECONDS = 300
 
 POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
+HTTP_TIMEOUT_SECONDS = float(os.getenv("HTTP_TIMEOUT_SECONDS", "6.0"))
+HTTP_RECONNECT_BACKOFF_SECONDS = float(os.getenv("HTTP_RECONNECT_BACKOFF_SECONDS", "5.0"))
 
 # ---- Take profit (shared exit mechanic) --------------------------------
 ENGINE_TP_PRICE = 0.99          # resting maker sell

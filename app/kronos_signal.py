@@ -169,7 +169,7 @@ class BybitSource(CandleSource):
 
 
 CANDLE_SOURCES: List[CandleSource] = [BinanceSource(), CoinbaseSource(), KrakenSource(), BybitSource()]
-SOURCE_BACKOFF_SECONDS = 60.0  # don't retry a source that just failed on every single tick
+SOURCE_BACKOFF_SECONDS = config.HTTP_RECONNECT_BACKOFF_SECONDS
 
 
 class CandleFeed:
@@ -177,13 +177,23 @@ class CandleFeed:
     whichever exchange in CANDLE_SOURCES currently responds."""
 
     def __init__(self, maxlen: int = None):
-        self._client = httpx.AsyncClient(timeout=8.0)
+        self._client = httpx.AsyncClient(timeout=config.HTTP_TIMEOUT_SECONDS)
         self.candles: "deque[dict]" = deque(maxlen=maxlen or config.KRONOS_CONTEXT_BARS)
         self.active_source: Optional[str] = None
         self._source_failed_until: dict = {}  # source name -> ts before which we skip it
+        self.reconnects = 0
 
     async def close(self):
         await self._client.aclose()
+
+    async def _reconnect(self):
+        old_client = self._client
+        self._client = httpx.AsyncClient(timeout=config.HTTP_TIMEOUT_SECONDS)
+        self.reconnects += 1
+        try:
+            await old_client.aclose()
+        except Exception:
+            pass
 
     async def _fetch_from_any_source(self, limit: int) -> Optional[List[dict]]:
         now = time.time()
@@ -203,6 +213,10 @@ class CandleFeed:
                     self.active_source = source.name
                 self._source_failed_until.pop(source.name, None)
                 return rows
+            except httpx.RequestError as e:
+                await self._reconnect()
+                log.warning("Kronos candle source %s disconnected: %s", source.name, e)
+                self._source_failed_until[source.name] = now + SOURCE_BACKOFF_SECONDS
             except Exception as e:
                 log.warning("Kronos candle source %s failed: %s", source.name, e)
                 self._source_failed_until[source.name] = now + SOURCE_BACKOFF_SECONDS

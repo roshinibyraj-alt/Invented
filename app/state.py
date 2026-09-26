@@ -144,6 +144,11 @@ class BotState:
                 "volatility": self.kronos.last_volatility,
                 "confidence_threshold": self.kronos.last_threshold,
             },
+            "connectivity": {
+                "candle_source": self.candle_feed.active_source,
+                "candle_reconnects": self.candle_feed.reconnects,
+                "polymarket_reconnects": self.client.reconnects,
+            },
             "price_history": [
                 {"ts": p.ts, "up": p.up, "down": p.down}
                 for p in list(self.price_history)[-120:]

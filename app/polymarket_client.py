@@ -16,6 +16,7 @@ name is off, `_extract_token_ids` / `_parse_market_json` are the two
 functions to fix.
 """
 import json
+import logging
 import math
 import time
 from typing import Optional
@@ -25,13 +26,33 @@ import httpx
 from . import config
 from .models import WindowMarket
 
+log = logging.getLogger("polymarket_client")
+
 
 class PolymarketClient:
     def __init__(self):
-        self._client = httpx.AsyncClient(timeout=8.0)
+        self._client = httpx.AsyncClient(timeout=config.HTTP_TIMEOUT_SECONDS)
+        self.reconnects = 0
 
     async def close(self):
         await self._client.aclose()
+
+    async def _reconnect(self):
+        old_client = self._client
+        self._client = httpx.AsyncClient(timeout=config.HTTP_TIMEOUT_SECONDS)
+        self.reconnects += 1
+        try:
+            await old_client.aclose()
+        except Exception:
+            pass
+
+    async def _get(self, url: str, **kwargs):
+        try:
+            return await self._client.get(url, **kwargs)
+        except httpx.RequestError as e:
+            await self._reconnect()
+            log.warning("Polymarket request disconnected: %s", e)
+            raise
 
     # ---- market discovery -------------------------------------------------
     #
@@ -61,10 +82,11 @@ class PolymarketClient:
     async def fetch_market_by_slug(self, slug: str) -> Optional[dict]:
         url = f"{config.GAMMA_API_BASE}/events"
         try:
-            resp = await self._client.get(url, params={"slug": slug})
+            resp = await self._get(url, params={"slug": slug})
             resp.raise_for_status()
             data = resp.json()
-        except Exception:
+        except Exception as e:
+            log.warning("Market discovery failed for %s: %s", slug, e)
             return None
 
         event = None
@@ -196,7 +218,7 @@ class PolymarketClient:
         if not token_id:
             return None
         try:
-            resp = await self._client.get(
+            resp = await self._get(
                 f"{config.CLOB_API_BASE}/midpoint", params={"token_id": token_id}
             )
             if resp.status_code == 200:
@@ -207,7 +229,7 @@ class PolymarketClient:
         except Exception:
             pass
         try:
-            resp = await self._client.get(
+            resp = await self._get(
                 f"{config.CLOB_API_BASE}/last-trade-price",
                 params={"token_id": token_id},
             )
@@ -233,7 +255,7 @@ class PolymarketClient:
         if not token_id:
             return None, None
         try:
-            resp = await self._client.get(
+            resp = await self._get(
                 f"{config.CLOB_API_BASE}/book", params={"token_id": token_id}
             )
             if resp.status_code != 200:
