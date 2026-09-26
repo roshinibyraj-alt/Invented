@@ -99,7 +99,13 @@ class BotState:
         self.last_up_bid = self.last_up_ask = None
         self.last_down_bid = self.last_down_ask = None
 
-        side, confidence = self.kronos.get_signal(now=time.time())
+        # The window key makes this a single fresh decision per 5-minute
+        # market. A cached signal from the previous window must not stick
+        # across a boundary and create a late entry.
+        side, confidence = self.kronos.get_signal(
+            now=time.time(),
+            window_key=new_window.slug,
+        )
         self.engine.reset_for_window(new_window, side=side, confidence=confidence)
 
     def _infer_winner(self) -> Optional[Side]:
@@ -133,6 +139,10 @@ class BotState:
             "prices": {
                 "up": self._midpoint(self.last_up_bid, self.last_up_ask),
                 "down": self._midpoint(self.last_down_bid, self.last_down_ask),
+            },
+            "kronos": {
+                "volatility": self.kronos.last_volatility,
+                "confidence_threshold": self.kronos.last_threshold,
             },
             "price_history": [
                 {"ts": p.ts, "up": p.up, "down": p.down}

@@ -87,14 +87,23 @@ KRONOS_PRED_LEN = 5              # forecast horizon in 1m bars -- matches the 5m
 KRONOS_TEMPERATURE = 1.0
 KRONOS_TOP_P = 0.9
 KRONOS_SAMPLE_COUNT = 1
-KRONOS_REFRESH_SECONDS = 15.0    # re-run inference at most this often, not every 1s poll tick
+KRONOS_REFRESH_SECONDS = 15.0    # cache only within the same 5m window
 
 # Forecast |move| that maps to 100% confidence, and the floor below which
 # a window is skipped rather than traded on a weak signal. Both are in
 # fractional BTC price terms (0.0015 = 0.15%) -- tune against backtests,
 # these starting values are not calibrated to anything.
 KRONOS_MOVE_SCALE = 0.0015
-KRONOS_MIN_CONFIDENCE = 0.15
+KRONOS_MIN_CONFIDENCE = float(os.getenv("KRONOS_MIN_CONFIDENCE", "0.15"))
+
+# In volatile conditions a useful directional forecast can have a smaller
+# normalized move than the fixed threshold expects. The threshold moves from
+# KRONOS_MIN_CONFIDENCE down toward the floor as recent 1m close volatility
+# rises, but never below the floor.
+KRONOS_MIN_CONFIDENCE_FLOOR = float(os.getenv("KRONOS_MIN_CONFIDENCE_FLOOR", "0.08"))
+KRONOS_VOLATILITY_LOOKBACK = int(os.getenv("KRONOS_VOLATILITY_LOOKBACK", "60"))
+KRONOS_VOLATILITY_LOW = float(os.getenv("KRONOS_VOLATILITY_LOW", "0.0005"))
+KRONOS_VOLATILITY_HIGH = float(os.getenv("KRONOS_VOLATILITY_HIGH", "0.0025"))
 
 # ---- Entry price filter --------------------------------------------------
 # Only enter if the ask is below this at the moment of the check (checked

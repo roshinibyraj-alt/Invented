@@ -43,6 +43,7 @@ so the engine treats it exactly like "no confident call this window" --
 it never raises into the trading loop.
 """
 import logging
+import math
 import time
 from collections import deque
 from typing import List, Optional
@@ -253,6 +254,9 @@ class KronosSignal:
         self._cached_side: Optional[Side] = None
         self._cached_conf: float = 0.0
         self._cached_at: float = 0.0
+        self._cached_window_key: Optional[str] = None
+        self.last_volatility: Optional[float] = None
+        self.last_threshold: float = config.KRONOS_MIN_CONFIDENCE
 
     def _ensure_loaded(self) -> bool:
         if self._predictor is not None:
@@ -276,14 +280,51 @@ class KronosSignal:
             self._load_failed = True
             return False
 
-    def get_signal(self, now: Optional[float] = None) -> "tuple[Optional[Side], float]":
+    def _confidence_threshold(self, closes) -> float:
+        """Lower the confidence floor as recent 1m volatility increases."""
+        lookback = max(2, config.KRONOS_VOLATILITY_LOOKBACK)
+        recent = [float(value) for value in closes[-lookback:]]
+        returns = [
+            math.log(current / previous)
+            for previous, current in zip(recent, recent[1:])
+            if previous > 0 and current > 0
+        ]
+        volatility = (
+            (sum((value - (sum(returns) / len(returns))) ** 2 for value in returns)
+             / len(returns)) ** 0.5
+            if returns else 0.0
+        )
+        self.last_volatility = volatility
+
+        low = config.KRONOS_VOLATILITY_LOW
+        high = max(low, config.KRONOS_VOLATILITY_HIGH)
+        scale = 1.0 if high == low else max(0.0, min(1.0, (volatility - low) / (high - low)))
+        floor = min(config.KRONOS_MIN_CONFIDENCE_FLOOR, config.KRONOS_MIN_CONFIDENCE)
+        threshold = config.KRONOS_MIN_CONFIDENCE - (
+            scale * (config.KRONOS_MIN_CONFIDENCE - floor)
+        )
+        self.last_threshold = threshold
+        return threshold
+
+    def get_signal(
+        self,
+        now: Optional[float] = None,
+        window_key: Optional[str] = None,
+    ) -> "tuple[Optional[Side], float]":
         """Returns (side, confidence 0..1). (None, 0.0) means: buffer not
         warm yet, model unavailable, forecast too weak to act on, or
-        inference errored -- caller should skip the window in all cases."""
+        inference errored -- caller should skip the window in all cases.
+
+        A cache entry is valid only for the same window. This prevents a
+        signal generated near one boundary from being reused for the next
+        window when the boundary arrives within KRONOS_REFRESH_SECONDS.
+        """
         now = now if now is not None else time.time()
-        if now - self._cached_at < config.KRONOS_REFRESH_SECONDS:
+        same_window = window_key is not None and window_key == self._cached_window_key
+        if same_window and now - self._cached_at < config.KRONOS_REFRESH_SECONDS:
             return self._cached_side, self._cached_conf
         self._cached_at = now
+        self._cached_window_key = window_key
 
         if not self.feed.is_warm() or not self._ensure_loaded():
             self._cached_side, self._cached_conf = None, 0.0
@@ -310,8 +351,9 @@ class KronosSignal:
             forecast_close = float(pred["close"].iloc[-1])
             move = (forecast_close - last_close) / last_close
             conf = min(1.0, abs(move) / config.KRONOS_MOVE_SCALE)
+            threshold = self._confidence_threshold(df["close"].tolist())
 
-            if conf < config.KRONOS_MIN_CONFIDENCE:
+            if conf < threshold:
                 self._cached_side, self._cached_conf = None, conf
             else:
                 self._cached_side = Side.UP if move > 0 else Side.DOWN
