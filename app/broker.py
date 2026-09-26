@@ -6,7 +6,9 @@ is passed only through the process environment.
 """
 import asyncio
 import json
+import math
 import os
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -16,7 +18,9 @@ from . import config
 class Broker:
     def __init__(self):
         self.live = config.TRADING_MODE == "live"
-        self.balance = config.STARTING_CAPITAL
+        self.balance: Optional[float] = None if self.live else config.STARTING_CAPITAL
+        self.balance_updated_at: Optional[float] = None
+        self._balance_error: Optional[str] = None
         self.events: list[dict] = []
         self._process: Optional[asyncio.subprocess.Process] = None
         self._request_id = 0
@@ -48,12 +52,7 @@ class Broker:
         payload = json.loads(ready.decode())
         if payload.get("event") != "ready":
             raise RuntimeError(f"Trader worker failed authentication: {payload}")
-        try:
-            self.balance = await self.get_balance()
-        except Exception as exc:
-            # Wallet balance display must not prevent an otherwise ready
-            # worker from submitting the demo's next real order.
-            self.log_event("LIVE_BALANCE_UNAVAILABLE", note=str(exc))
+        await self.refresh_balance()
 
     async def close(self):
         if not self._process:
@@ -125,8 +124,25 @@ class Broker:
         if not self.live:
             return self.balance
         result = await self.request("balance", {})
-        self.balance = float(result or 0)
+        balance = float(result)
+        if not math.isfinite(balance) or balance < 0:
+            raise ValueError("Exchange returned an invalid USDC balance")
+        self.balance = balance
+        self.balance_updated_at = time.time()
+        self._balance_error = None
         return self.balance
+
+    async def refresh_balance(self) -> Optional[float]:
+        try:
+            return await self.get_balance()
+        except Exception as exc:
+            self.balance = None
+            self.balance_updated_at = None
+            error = str(exc)
+            if error != self._balance_error:
+                self.log_event("LIVE_BALANCE_UNAVAILABLE", note=error)
+            self._balance_error = error
+            return None
 
     async def get_book(self, token_id: str):
         if not self.live:
@@ -158,28 +174,6 @@ class Broker:
             "shares": shares,
             "avgPrice": price,
             "cost": shares * price + fee,
-            "fee": fee,
-            "orderId": "paper",
-        }
-
-    async def sell(self, token_id: str, shares: float, reference_bid: float) -> dict:
-        if self.live:
-            return await self.request(
-                "sell",
-                {
-                    "tokenId": token_id,
-                    "shares": shares,
-                    "referenceBid": reference_bid,
-                    "slippage": config.SLIPPAGE_CEILING,
-                },
-            )
-        price = max(float(reference_bid), 0.01)
-        fee = self.taker_fee_amount(shares, price)
-        return {
-            "filled": True,
-            "shares": shares,
-            "avgPrice": price,
-            "proceeds": shares * price - fee,
             "fee": fee,
             "orderId": "paper",
         }

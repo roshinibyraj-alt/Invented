@@ -55,10 +55,7 @@ class BotState:
                     note="demo has insufficient capital to hold the entry",
                 )
                 return
-            self.real.on_demo_event(
-                entry, self.current_window,
-                self.engine.s.up_bid, self.engine.s.down_bid,
-            )
+            self.real.on_demo_event(entry, self.current_window)
         except Exception as exc:
             # A real-order bridge error must never change the demo's ledger.
             self.real.broker.log_event(

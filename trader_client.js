@@ -95,7 +95,7 @@ class PolymarketTrader {
     return { matchingTrades: matches.length, orderId: orderId || null };
   }
 
-  async order(tokenId, side, price, amount) {
+  async buy(tokenId, price, amount) {
     const tickSize = (await this.clob.getTickSize(tokenId)) || '0.01';
     const negRisk = (await this.clob.getNegRisk(tokenId)) || false;
     const response = await this.clob.createAndPostMarketOrder(
@@ -103,13 +103,13 @@ class PolymarketTrader {
         tokenID: tokenId,
         price,
         amount,
-        side: side === 'BUY' ? Side.BUY : Side.SELL,
+        side: Side.BUY,
         orderType: OrderType.FAK,
       },
       { tickSize, negRisk },
       OrderType.FAK,
     );
-    return parseMarketResponse(response, side, amount);
+    return parseMarketResponse(response, 'BUY', amount);
   }
 }
 

@@ -9,12 +9,13 @@
     *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px system-ui,-apple-system,sans-serif}
     main{max-width:1100px;margin:auto;padding:25px 18px 50px}header{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;border-bottom:1px solid var(--line);padding-bottom:17px}
     h1{font-size:22px;margin:0 0 5px}.muted,.sub{color:var(--muted)}.sub{font-size:13px}.badge{border:1px solid var(--mint);border-radius:5px;color:var(--mint);padding:6px 10px;font:12px ui-monospace,monospace}
-    .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:16px 0}.card{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:16px}
+    .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:16px 0}.card{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:16px}
     .label{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}.value{font-size:24px;font-weight:700;margin:7px 0}.small{font-size:12px;color:var(--muted)}
     .columns{display:grid;grid-template-columns:1fr 1fr;gap:12px}.book{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}.quote{border:1px solid var(--line);padding:12px;border-radius:7px}
     .up{color:var(--mint)}.down{color:var(--red)}.stats{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}.stat{border-top:1px solid var(--line);padding-top:9px}.stat b{display:block;font-size:16px;margin-top:4px}
     .position,.log{margin-top:12px}.log-list{max-height:340px;overflow:auto;margin-top:8px}.event{border-top:1px solid var(--line);padding:9px 0;font-size:12px}.event b{color:#91b5ff}.event time{color:var(--muted);margin-right:9px}
     .alert{color:var(--red);margin-top:12px}.candle{font-weight:700}.foot{font-size:11px;color:var(--muted);margin-top:12px}
+    @media(min-width:721px) and (max-width:950px){.grid{grid-template-columns:repeat(2,1fr)}}
     @media(max-width:720px){.grid,.columns{grid-template-columns:1fr}.book{grid-template-columns:1fr}header{display:block}.badge{display:inline-block;margin-top:10px}}
   </style>
 </head>
@@ -28,6 +29,7 @@
     <div class="card"><div class="label">Window</div><div id="window" class="value">—</div><div id="remaining" class="small"></div></div>
     <div class="card"><div class="label">Strategy</div><div id="strategy" class="value">Waiting</div><div id="candle" class="small">Last candle: —</div></div>
     <div class="card"><div class="label">Demo balance</div><div id="balance" class="value">—</div><div id="pnl" class="small"></div></div>
+    <div class="card"><div class="label">Real USDC balance</div><div id="realBalance" class="value">—</div><div id="realBalanceNote" class="small">Checking exchange…</div></div>
   </section>
   <section class="columns">
     <div class="card"><div class="label">Live CLOB midpoint estimate</div><div class="book">
@@ -38,7 +40,7 @@
   </section>
   <section class="card position"><div class="label">Position</div><div id="position" style="margin-top:9px">No open position.</div></section>
   <section class="card log"><div class="label">Event log</div><div id="log" class="log-list"></div></section>
-  <div class="foot">The balance, position, and statistics above are demo-only. When enabled, separate real FOK orders are sent without changing these results.</div>
+  <div class="foot">Demo balance, position and statistics are simulated. Real USDC balance is available exchange collateral, not the value of held shares. The live bot only buys on candle signals; it does not sell or redeem positions.</div>
   <div id="error" class="alert"></div>
 </main>
 <script>
@@ -50,7 +52,7 @@ function stat(label,value){return `<div class="stat"><span class="label">${label
 function render(s){
   const e=s.engine||{},w=s.window,b=s.book||{},p=e.position;
   $('modeBadge').textContent=s.trading_mode==='live'?'LIVE ORDERS + DEMO':'DEMO ONLY';
-  $('status').textContent=s.real_trading?.startup_failed?'Real trader unavailable; demo continues':s.error||s.status||'unknown';
+  $('status').textContent=s.real_trading?.startup_failed?'Real trader unavailable; demo continues':s.real_trading?.buy_halted?'Real buys halted; demo continues':s.error||s.status||'unknown';
   $('liveBudget').textContent=s.trading_mode==='live'?`Next real buy: ${money(s.real_trading?.budget_usd)}`:'No real orders';
   $('window').textContent=w?esc(w.slug.replace('btc-updown-5m-','#')):'—';
   $('remaining').textContent=w?`${Math.max(0,w.seconds_remaining).toFixed(0)} seconds remaining`:'Waiting for market';
@@ -59,6 +61,9 @@ function render(s){
   $('candle').innerHTML=`Last candle: <span class="candle ${c?.color==='red'?'down':c?.color==='green'?'up':''}">${c?esc(c.color.toUpperCase()):'—'}</span>${c?` · ${esc(c.open)} → ${esc(c.close)}`:''}`;
   $('balance').textContent=money(e.balance);
   $('pnl').textContent=`Realized ${money(e.realized_pnl)} · Session ${money(e.session_pnl)} · Unrealized ${money(e.unrealized_pnl)}`;
+  const real=s.real_trading||{};
+  $('realBalance').textContent=s.trading_mode==='live'?money(real.balance_usdc):'—';
+  $('realBalanceNote').textContent=s.trading_mode!=='live'?'Real trading off':real.balance_updated_at?`Available USDC · updated ${new Date(real.balance_updated_at*1000).toLocaleTimeString()}`:'Exchange balance unavailable';
   const mid=(bid,ask)=>bid!=null&&ask!=null?(Number(bid)+Number(ask))/2:(ask??bid);
   $('upMid').textContent=price(mid(b.up_bid,b.up_ask));$('downMid').textContent=price(mid(b.down_bid,b.down_ask));
   $('upBook').textContent=`bid ${price(b.up_bid)} / ask ${price(b.up_ask)}`;

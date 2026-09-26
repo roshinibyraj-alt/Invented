@@ -4,7 +4,7 @@ const readline = require('readline');
 const { ensureWebCrypto } = require('./trader_crypto');
 ensureWebCrypto();
 const PolymarketTrader = require('./trader_client');
-const { marketLimitPrice, roundToTick } = require('./order_utils');
+const { marketLimitPrice } = require('./order_utils');
 
 const privateKey = process.env.PRIVATE_KEY;
 if (!privateKey) {
@@ -32,18 +32,18 @@ async function run(command, args) {
   if (command === 'shutdown') {
     process.exit(0);
   }
-  if (command !== 'buy' && command !== 'sell') {
+  if (command !== 'buy') {
     throw new Error(`Unknown trader command: ${command}`);
   }
 
-  const reference = command === 'buy' ? args.referenceAsk : args.referenceBid;
+  const reference = args.referenceAsk;
   let book;
   try {
     book = await trader.book(args.tokenId);
   } catch {
     book = {};
   }
-  const marketPrice = command === 'buy' ? book.bestAsk : book.bestBid;
+  const marketPrice = book.bestAsk;
   const executablePrice = Number.isFinite(marketPrice) && marketPrice > 0
     ? marketPrice
     : Number(reference);
@@ -52,34 +52,26 @@ async function run(command, args) {
   }
 
   const tickSize = (await trader.clob.getTickSize(args.tokenId)) || '0.01';
-  const side = command === 'buy' ? 'BUY' : 'SELL';
-  const limitPrice = marketLimitPrice(side, executablePrice, reference, args.slippage, tickSize);
+  const limitPrice = marketLimitPrice('BUY', executablePrice, reference, args.slippage, tickSize);
   if (limitPrice === null) {
     return { filled: false, status: 'PRICE_MOVED', shares: 0 };
   }
 
-  // The SDK's FAK market BUY takes USDC; SELL takes shares. Never silently
-  // increase the real ladder budget to satisfy a market's minimum.
-  const amount = command === 'buy'
-    ? Number(args.budgetUsd)
-    : roundToTick(Number(args.shares), '0.01', 'down');
+  // The SDK's FAK market buy takes USDC. Never silently increase the
+  // real ladder budget to satisfy a market's minimum.
+  const amount = Number(args.budgetUsd);
   if (!Number.isFinite(amount) || amount <= 0) {
     return { filled: false, status: 'SIZE_TOO_SMALL', shares: 0, limitPrice };
   }
-  if (command === 'buy' && (!Number.isInteger(amount) || amount < 1 || amount > 8)) {
+  if (!Number.isInteger(amount) || amount < 1 || amount > 8) {
     return { filled: false, status: 'BUDGET_OUT_OF_RANGE', shares: 0, limitPrice };
   }
 
-  const result = await trader.order(
-    args.tokenId,
-    side,
-    limitPrice,
-    amount,
-  );
+  const result = await trader.buy(args.tokenId, limitPrice, amount);
   return {
     ...result,
     limitPrice,
-    budgetUsd: command === 'buy' ? Number(args.budgetUsd) : undefined,
+    budgetUsd: amount,
   };
 }
 

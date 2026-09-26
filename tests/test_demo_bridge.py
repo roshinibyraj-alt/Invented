@@ -1,11 +1,13 @@
 """Offline checks that real execution cannot change the restored demo."""
+import asyncio
 import time
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
+from app.broker import Broker
 from app.engine import Engine
 from app.live_bridge import LiveBridge
 from app.live_order_guard import LiveOrderGuard
@@ -20,6 +22,9 @@ class FakeLiveBroker:
         self.sells = []
         self.events = []
         self.verifications = []
+        self.balance = 12.34
+        self.balance_updated_at = time.time()
+        self.balance_refreshes = 0
 
     async def start(self):
         pass
@@ -27,13 +32,17 @@ class FakeLiveBroker:
     async def close(self):
         pass
 
+    async def refresh_balance(self):
+        self.balance_refreshes += 1
+        self.balance_updated_at = time.time()
+        return self.balance
+
     async def buy(self, token_id, budget_usd, reference_ask):
         self.buys.append((token_id, budget_usd, reference_ask))
         return self.buy_result
 
     async def sell(self, token_id, shares, reference_bid):
-        self.sells.append((token_id, shares, reference_bid))
-        return {"filled": False, "status": "rejected"}
+        raise AssertionError("real sells must never be sent")
 
     async def verify_buy(self, token_id, open_ts, order_id=None):
         self.verifications.append((token_id, open_ts, order_id))
@@ -62,7 +71,7 @@ class DemoBridgeTest(unittest.IsolatedAsyncioTestCase):
             time.time() - 1, time.time() + 300,
         )
         broker.on_event = lambda entry: mirror.on_demo_event(
-            entry, window, engine.s.up_bid, engine.s.down_bid,
+            entry, window,
         )
         engine.record_candle({"color": "red", "open": 1, "close": 0})
         engine.reset_for_window(window)
@@ -88,7 +97,7 @@ class DemoBridgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mirror.budget_usd, 2)
         self.assertEqual(engine.s.settled_losses, 1)
 
-    async def test_take_profit_tracks_demo_win_even_if_real_sell_rejects(self):
+    async def test_demo_take_profit_never_sends_real_sell(self):
         engine, mirror, fake = self.setup_engine({
             "filled": True, "shares": 5.2, "status": "matched",
         })
@@ -98,9 +107,50 @@ class DemoBridgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(engine.s.position)
         self.assertEqual(engine.s.tp_fills, 1)
         self.assertEqual(mirror.budget_usd, 1)
-        await mirror._sell(mirror._queue.get_nowait())
-        self.assertEqual(fake.sells, [("up-token", 5.2, 0.99)])
+        self.assertTrue(mirror._queue.empty())
+        self.assertEqual(fake.sells, [])
         self.assertEqual(engine.s.tp_fills, 1)
+
+    async def test_real_balance_is_separate_and_refreshes_after_buy(self):
+        engine, mirror, fake = self.setup_engine({
+            "filled": True, "shares": 2, "status": "matched",
+        })
+        demo_balance = engine.capital.balance
+        self.assertEqual(mirror.snapshot()["balance_usdc"], 12.34)
+        engine.on_tick(0.30, 0.40, 0.60, 0.70)
+        demo_after_buy = engine.capital.balance
+        self.assertLess(demo_after_buy, demo_balance)
+        mirror._queue.put_nowait(None)
+        await mirror._run()
+        self.assertEqual(fake.balance_refreshes, 1)
+        self.assertEqual(engine.capital.balance, demo_after_buy)
+        self.assertEqual(mirror.snapshot()["balance_usdc"], 12.34)
+        self.assertIsNotNone(mirror.snapshot()["balance_updated_at"])
+
+    async def test_balance_failure_never_displays_demo_or_stale_balance(self):
+        broker = Broker()
+        broker.live = True
+        broker.request = AsyncMock(return_value=14.25)
+        self.assertEqual(await broker.refresh_balance(), 14.25)
+        self.assertIsNotNone(broker.balance_updated_at)
+        broker.request = AsyncMock(side_effect=TimeoutError("exchange unavailable"))
+        self.assertIsNone(await broker.refresh_balance())
+        self.assertIsNone(broker.balance)
+        self.assertIsNone(broker.balance_updated_at)
+        self.assertIn("LIVE_BALANCE_UNAVAILABLE", [x["event"] for x in broker.events])
+        broker.request = AsyncMock(return_value=0)
+        self.assertEqual(await broker.refresh_balance(), 0)
+        self.assertIsNone(broker._balance_error)
+
+    async def test_balance_refreshes_while_no_trade_signal(self):
+        _, mirror, fake = self.setup_engine({})
+        with patch("app.live_bridge.BALANCE_REFRESH_SECONDS", 0.01):
+            task = asyncio.create_task(mirror._run())
+            await asyncio.sleep(0.04)
+            mirror._queue.put_nowait(None)
+            await task
+        self.assertGreaterEqual(fake.balance_refreshes, 1)
+        self.assertEqual(fake.buys, [])
 
     async def test_ladder_steps_from_one_to_eight_and_back_on_demo_results(self):
         engine, mirror, _ = self.setup_engine({"filled": False, "status": "rejected"})

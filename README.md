@@ -28,18 +28,22 @@ window, denominated in USDC:
 - The FAK market buy accepts available asks up to **$0.99 per share**, even if
   that is much higher than the demo ask. It can still fail if there is no
   matching liquidity. It is a market-order request in **USDC**, not a request
-  for 500 real shares. Real sells retain the $0.30 adverse-price limit.
+  for 500 real shares.
 
-On a demo take-profit, the worker attempts a real FAK sell **only if it knows
-the real buy filled and how many shares it received**. Otherwise it logs that
-there were no confirmed shares to sell. Positions not sold before expiry are
-left for Polymarket resolution; a partially filled sell can also leave shares
-for resolution. This app does not redeem or reconcile them.
+The live worker **only buys on `CANDLE_BUY` signals**. Demo take-profits and
+settlements remain simulated and can change the next real buy budget, but
+they never submit a real sell. Bought shares remain for Polymarket resolution;
+this app does not sell, redeem, or reconcile real positions.
 
 Real fills, rejections, errors, and eventual exchange outcomes **never change
 the demo balance, position, result, or $1–$8 sizing sequence**. Real-order
 attempts and results are printed to service logs and shown in the JSON state
-as `real_trading`. Each process uses SQLite to reserve a market window
+as `real_trading`. The dashboard also shows the live exchange's available
+USDC collateral balance, refreshed every 30 seconds and after a buy. It
+does not include the value of held shares. This dashboard and `/api/state`
+are public, so visitors can see that balance. If the balance read fails,
+the dashboard shows it as unavailable rather than a demo or stale value.
+Each process uses SQLite to reserve a market window
 *before* a real buy is submitted. With only `PRIVATE_KEY` configured, the bot
 uses a **temporary local guard** and skips any window already open when it
 starts. This allows a single instance to trade from the next full window

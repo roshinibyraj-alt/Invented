@@ -15,11 +15,11 @@ LIVE_BASE_USD = 1.0
 LIVE_STEP_USD = 1.0
 LIVE_MAX_USD = 8.0
 EPHEMERAL_GUARD_DB = "/tmp/polymarket_live_orders.sqlite"
+BALANCE_REFRESH_SECONDS = 30
 
 
 @dataclass(frozen=True)
 class OrderIntent:
-    kind: str
     slug: str
     side: str
     token_id: str
@@ -41,7 +41,6 @@ class LiveBridge:
         self._failed = False
         self._buy_halted = False
         self._seen_windows: set[str] = set()
-        self._filled_shares: dict[str, float] = {}
         self._guard: Optional[LiveOrderGuard] = None
         self._ephemeral_guard = False
         self._started_at: Optional[float] = None
@@ -74,8 +73,6 @@ class LiveBridge:
         self,
         entry: TradeLogEntry,
         window: Optional[WindowMarket],
-        up_bid: Optional[float] = None,
-        down_bid: Optional[float] = None,
     ):
         if entry.engine != "E2":
             return
@@ -98,7 +95,7 @@ class LiveBridge:
                 self.broker.log_event("LIVE_BUY_SKIPPED", window=entry.window_slug, note="missing token or ask")
                 return
             self._queue.put_nowait(OrderIntent(
-                "buy", entry.window_slug, entry.side or "", token_id,
+                entry.window_slug, entry.side or "", token_id,
                 entry.price, window.close_ts, self.budget_usd, window.open_ts,
             ))
             self.broker.log_event(
@@ -109,16 +106,6 @@ class LiveBridge:
 
         if entry.event not in {"TP_FILL", "SETTLE_WIN", "SETTLE_LOSS", "SETTLE_UNKNOWN"}:
             return
-        if entry.event.startswith("SETTLE_"):
-            self._filled_shares.pop(entry.window_slug, None)
-        if entry.event == "TP_FILL" and self.enabled and not self._failed and window:
-            token_id = window.token_up if entry.side == "UP" else window.token_down
-            bid = up_bid if entry.side == "UP" else down_bid
-            if token_id and bid is not None:
-                self._queue.put_nowait(OrderIntent(
-                    "sell", entry.window_slug, entry.side or "",
-                    token_id, bid, window.close_ts,
-                ))
 
         # Only the demo's own P&L moves the REAL order-size ladder.
         # A missing winner/wash and every real exchange result leave it alone.
@@ -143,16 +130,20 @@ class LiveBridge:
                 self.broker.log_event("LIVE_STARTUP_ERROR", note=str(exc))
                 return
             while True:
-                intent = await self._queue.get()
+                try:
+                    intent = await asyncio.wait_for(
+                        self._queue.get(), timeout=BALANCE_REFRESH_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    await self.broker.refresh_balance()
+                    continue
                 if intent is None:
                     return
                 if time.time() >= intent.close_ts:
-                    self.broker.log_event("LIVE_ORDER_EXPIRED", window=intent.slug, note=intent.kind)
+                    self.broker.log_event("LIVE_ORDER_EXPIRED", window=intent.slug, note="buy")
                     continue
-                if intent.kind == "buy":
-                    await self._buy(intent)
-                else:
-                    await self._sell(intent)
+                await self._buy(intent)
+                await self.broker.refresh_balance()
         finally:
             await self.broker.close()
 
@@ -189,8 +180,6 @@ class LiveBridge:
                 self.broker.log_event("LIVE_GUARD_ERROR", window=intent.slug,
                                       note=f"buy sent; status could not be saved: {exc}")
             if result.get("filled"):
-                if time.time() < intent.close_ts:
-                    self._filled_shares[intent.slug] = float(result["shares"])
                 event = "LIVE_BUY_FILLED"
             else:
                 event = "LIVE_BUY_REJECTED"
@@ -228,28 +217,12 @@ class LiveBridge:
                 note=f"{exc}; prior reservation remains; no second buy",
             )
 
-    async def _sell(self, intent: OrderIntent):
-        shares = self._filled_shares.pop(intent.slug, 0.0)
-        if shares <= 0:
-            self.broker.log_event(
-                "LIVE_TP_SKIPPED", window=intent.slug,
-                note="no confirmed real shares to sell; demo TP unaffected",
-            )
-            return
-        try:
-            result = await self.broker.sell(intent.token_id, shares, intent.reference_price)
-            self.broker.log_event(
-                "LIVE_TP_FILLED" if result.get("filled") else "LIVE_TP_REJECTED",
-                window=intent.slug, side=intent.side,
-                note=f"status={result.get('status', 'unknown')}",
-            )
-        except Exception as exc:
-            self.broker.log_event("LIVE_TP_ERROR", window=intent.slug, note=str(exc))
-
     def snapshot(self) -> dict:
         return {
             "enabled": self.enabled,
             "budget_usd": self.budget_usd,
+            "balance_usdc": self.broker.balance if self.enabled else None,
+            "balance_updated_at": self.broker.balance_updated_at if self.enabled else None,
             "startup_failed": self._failed,
             "buy_halted": self._buy_halted,
             "recent_events": list(reversed(self.broker.events[-20:])),
