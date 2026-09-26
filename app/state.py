@@ -28,7 +28,13 @@ class BotState:
         self._task: Optional[asyncio.Task] = None
         self._ticks = 0
     async def start(self):
-        await self.broker.start()
+        try:
+            await self.broker.start()
+        except Exception as exc:
+            self.status = "error"
+            self.error = f"Broker startup failed: {exc}"
+            self.broker.log_event("STARTUP_ERROR", note=self.error)
+            return
         self.status = "running"
         self._task = asyncio.create_task(self._run_loop())
 
@@ -47,7 +53,6 @@ class BotState:
         while True:
             try:
                 await self._tick()
-                self.error = None
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -71,6 +76,7 @@ class BotState:
         self.last_up_bid, self.last_up_ask = up_bid, up_ask
         self.last_down_bid, self.last_down_ask = down_bid, down_ask
         await self.engine.on_tick(up_bid, up_ask, down_bid, down_ask, now)
+        self.error = None
 
         self._ticks += 1
         if config.TRADING_MODE == "live" and self._ticks % 15 == 0:
