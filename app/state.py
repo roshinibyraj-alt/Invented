@@ -5,7 +5,6 @@ from collections import deque
 from typing import Optional
 
 from . import config
-from .binance_client import BinanceCandleClient
 from .engine import Engine
 from .live_bridge import LiveBridge
 from .models import PricePoint, Side, WindowMarket
@@ -20,7 +19,6 @@ class BotState:
         self.real = LiveBridge()
         self.broker.on_event = self._mirror_event
         self.client = PolymarketClient()
-        self.binance = BinanceCandleClient()
         self.current_window: Optional[WindowMarket] = None
         self.price_history: deque = deque(maxlen=300)
         self.last_up_bid: Optional[float] = None
@@ -32,23 +30,9 @@ class BotState:
         self._task: Optional[asyncio.Task] = None
 
     async def start(self):
-        await self._seed_candle_history()
         await self.real.start()
         self.status = "running"
         self._task = asyncio.create_task(self._run_loop())
-
-    async def _seed_candle_history(self):
-        try:
-            candles = await self.binance.get_closed_candles(
-                limit=config.CANDLE_RECORDS_DISPLAY
-            )
-        except Exception as exc:
-            self.broker.log_event(
-                "SYS", "", "HISTORY_SEED_FAILED",
-                note=f"could not backfill candle history: {exc}",
-            )
-            return
-        self.engine.seed_history(candles[-config.CANDLE_RECORDS_DISPLAY:])
 
     async def stop(self):
         if self._task:
@@ -58,7 +42,6 @@ class BotState:
             except asyncio.CancelledError:
                 pass
         await self.client.close()
-        await self.binance.close()
         await self.real.close()
 
     def _mirror_event(self, entry):
@@ -146,24 +129,8 @@ class BotState:
         self.last_up_bid = self.last_up_ask = None
         self.last_down_bid = self.last_down_ask = None
 
-        delay = new_window.open_ts + config.ENTRY_DELAY_SECONDS - time.time()
-        if delay > 0:
-            await asyncio.sleep(delay)
-
-        candle = await self.binance.get_candle_for_close_ts(new_window.open_ts)
-        self.engine.record_candle(candle)
-        self.broker.log_event(
-            "SYS",
-            new_window.slug,
-            "CANDLE",
-            note=(
-                f"Binance {config.BINANCE_SYMBOL} candle: {candle['color']} "
-                f"(open {candle['open']}, close {candle['close']}, "
-                f"close time {candle['close_time_ms']})"
-                if candle
-                else "Binance previous candle unavailable -- this window will be void"
-            ),
-        )
+        # Signal selection never waits for Binance; entry itself remains
+        # gated by ENTRY_DELAY_SECONDS in Engine.on_tick.
         self.engine.reset_for_window(new_window)
 
     def _infer_winner(self) -> Optional[Side]:

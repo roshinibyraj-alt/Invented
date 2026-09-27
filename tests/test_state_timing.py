@@ -29,7 +29,6 @@ class StateTimingTest(unittest.IsolatedAsyncioTestCase):
             "btc-updown-5m-crossing", None, "up-token", "down-token", 1000, 1300,
         )
         state.current_window = window
-        state.engine.record_candle({"color": "green"})
         state.engine.reset_for_window(window)
         state.client = SimpleNamespace(
             get_active_window=AsyncMock(return_value=window),
@@ -68,7 +67,7 @@ class StateTimingTest(unittest.IsolatedAsyncioTestCase):
         state.engine.finalize_window(state._infer_winner())
         self.assertEqual(state.engine.s.price_skipped_windows, 1)
         self.assertEqual((state.engine.s.wins, state.engine.s.losses), (0, 0))
-        self.assertEqual(state.engine.s.current_shares, 500)
+        self.assertEqual(state.engine.s.budget_usd, 100)
 
 
 if __name__ == "__main__":

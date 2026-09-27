@@ -12,8 +12,6 @@ from .models import TradeLogEntry, WindowMarket
 
 
 LIVE_BASE_USD = 1.0
-LIVE_STEP_USD = 1.0
-LIVE_MAX_USD = 8.0
 EPHEMERAL_GUARD_DB = "/tmp/polymarket_live_orders.sqlite"
 BALANCE_REFRESH_SECONDS = 30
 
@@ -120,10 +118,11 @@ class LiveBridge:
             outcome = entry.pnl
         else:
             return
+        old_budget = self.budget_usd
         if outcome < 0:
-            self.budget_usd = min(LIVE_MAX_USD, self.budget_usd + LIVE_STEP_USD)
+            self.budget_usd *= 2
         elif outcome > 0:
-            self.budget_usd = max(LIVE_BASE_USD, self.budget_usd - LIVE_STEP_USD)
+            self.budget_usd = LIVE_BASE_USD
         if self.enabled:
             note = (
                 f"demo {entry.event}: signal result={'win' if outcome > 0 else 'loss'}"
@@ -132,7 +131,8 @@ class LiveBridge:
             )
             self.broker.log_event(
                 "LIVE_NEXT_BUDGET", window=entry.window_slug,
-                trade_usd=self.budget_usd, note=note,
+                trade_usd=self.budget_usd,
+                note=f"{note}; next real stake ${old_budget:.2f} -> ${self.budget_usd:.2f}",
             )
 
     async def _run(self):

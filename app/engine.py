@@ -1,8 +1,7 @@
-"""Previous-candle direction demo engine."""
+"""Fixed UP/DOWN/SKIP cycle with a dollar-denominated demo Martingale."""
 import time
-from collections import deque
 from dataclasses import dataclass, field
-from typing import Deque, List, Optional
+from typing import List, Optional
 
 from . import config
 from .models import Side, WindowMarket
@@ -64,7 +63,8 @@ class EngineState:
     entry_side_this_window: Optional[Side] = None
     entered_this_window: bool = False
     position: Optional[Position] = None
-    current_shares: float = config.ENGINE2_SHARES
+    budget_usd: float = config.DEMO_BASE_USD
+    pattern_skipped_windows: int = 0
     total_pnl: float = 0.0
     fills: int = 0
     tp_fills: int = 0
@@ -79,18 +79,13 @@ class EngineState:
 
 
 class Engine:
-    """Trade the side selected by the immediately previous closed candle."""
+    """Trade a UTC-epoch anchored three-window cycle."""
 
     name = "E2"
-    label = "previous candle direction"
+    label = "UP → DOWN → SKIP"
 
     def __init__(self, broker: PaperBroker):
         self.broker = broker
-        self.shares = config.ENGINE2_SHARES
-        self.candle_history: Deque[str] = deque(maxlen=config.CANDLE_HISTORY_MAXLEN)
-        self.candle_records: Deque[dict] = deque(maxlen=config.CANDLE_HISTORY_MAXLEN)
-        self.last_candle: Optional[dict] = None
-        self._last_recorded_close_ms: Optional[float] = None
         self.capital = CapitalPool(balance=config.STARTING_CAPITAL)
         self.s = EngineState()
         self.capital.record_equity_point(None)
@@ -104,34 +99,11 @@ class Engine:
             **kw,
         )
 
-    def seed_history(self, candles: List[dict]):
-        for candle in candles:
-            self.candle_history.append(candle["color"])
-            self.candle_records.append(dict(candle))
-        if candles:
-            self.last_candle = candles[-1]
-            self._last_recorded_close_ms = candles[-1].get("close_time_ms")
-        self._log(
-            "HISTORY_SEEDED",
-            note=f"backfilled {len(candles)} previous closed candle records",
-        )
-
-    def record_candle(self, candle: Optional[dict]):
-        self.last_candle = candle
-        if candle is not None:
-            close_ms = candle.get("close_time_ms")
-            if close_ms is not None and close_ms == self._last_recorded_close_ms:
-                return
-            self.candle_history.append(candle["color"])
-            self.candle_records.append(dict(candle))
-            self._last_recorded_close_ms = close_ms
-
     def begin_window(self, window: WindowMarket):
-        """Clear the prior window's signal while the new candle becomes available."""
+        """Clear the prior window's signal before selecting this window's phase."""
         self.s.window = window
         self.s.entry_side_this_window = None
         self.s.entered_this_window = False
-        self.last_candle = None
 
     def reset_for_window(self, window: WindowMarket):
         self.s.window = window
@@ -140,29 +112,20 @@ class Engine:
         if self.capital.halted:
             return
 
-        color = self.last_candle.get("color") if self.last_candle else None
-        if color == "red":
-            side = Side.DOWN
-        elif color == "green":
-            side = Side.UP
-        else:
-            self.s.no_signal_windows += 1
-            note = (
-                "previous candle was a doji -- window is void"
-                if color == "doji"
-                else "previous candle unavailable -- no entry this window"
-            )
-            self._log("PREVIOUS_CANDLE_VOID", note=note)
+        # Derive phase from the market's five-minute timestamp, not from
+        # process uptime. Restarts and missing windows cannot shift the cycle.
+        phase = (int(window.open_ts) // config.WINDOW_SECONDS) % 3
+        if phase == 2:
+            self.s.pattern_skipped_windows += 1
+            self._log("PATTERN_SKIP", note="scheduled SKIP -- no buy or size change")
             return
 
+        side = Side.UP if phase == 0 else Side.DOWN
         self.s.entry_side_this_window = side
         self._log(
-            "PREVIOUS_CANDLE_SIGNAL",
+            "PATTERN_SIGNAL",
             side=side.value,
-            note=(
-                f"previous 5m candle was {color} -- signal {side.value} "
-                f"({self.s.current_shares:.0f} demo shares)"
-            ),
+            note=f"fixed cycle {side.value}; next demo stake ${self.s.budget_usd:.2f}",
         )
 
     def on_tick(
@@ -187,7 +150,7 @@ class Engine:
             and now < self.s.window.close_ts
         ):
             ask = up_ask if self.s.entry_side_this_window == Side.UP else down_ask
-            if ask is not None and ask < config.ENTRY_MAX_ASK:
+            if ask is not None and 0 < ask < config.ENTRY_MAX_ASK:
                 self._enter(self.s.entry_side_this_window, ask, now)
                 self.s.entered_this_window = True
         self._check_tp()
@@ -202,9 +165,17 @@ class Engine:
         return self.capital.balance + pos.shares * mark
 
     def _enter(self, side: Side, ask: float, now: float):
-        shares = self.s.current_shares
+        # Budget includes the simulated taker fee, not just the ask proceeds.
+        shares = self.s.budget_usd / (ask + self.broker.taker_fee_amount(1, ask))
         fee = self.broker.taker_fee_amount(shares, ask)
         cost = shares * ask + fee
+        if cost > self.capital.balance + 1e-9:
+            self.capital.halted = True
+            self._log(
+                "HALTED",
+                note=f"demo stake ${self.s.budget_usd:.2f} exceeds available capital ${self.capital.balance:.2f}",
+            )
+            return
         self.capital.balance -= cost
         self.s.fills += 1
         self._log(
@@ -214,14 +185,11 @@ class Engine:
             shares=shares,
             fee=fee,
             note=(
-                f"taker buy {shares:.0f}sh {side.value} @ {ask} after "
+                f"taker buy {shares:.4f}sh {side.value} @ {ask} for ${cost:.2f} after "
                 f"{config.ENTRY_DELAY_SECONDS:g}s delay with ask below "
                 f"${config.ENTRY_MAX_ASK:.2f} (fee ${fee:.4f})"
             ),
         )
-        if self.capital.check_halt():
-            self._log("HALTED", note=f"balance ${self.capital.balance:.2f} < $0 -- bankrupt")
-            return
         self.s.position = Position(side, ask, shares, cost, now)
 
     def _check_tp(self):
@@ -282,6 +250,7 @@ class Engine:
             self.s.window is not None
             and self.s.entry_side_this_window is not None
             and not self.s.entered_this_window
+            and not self.capital.halted
         ):
             side = self.s.entry_side_this_window
             self.s.price_skipped_windows += 1
@@ -341,23 +310,13 @@ class Engine:
             self._adjust_size(is_win=False)
 
     def _adjust_size(self, is_win: bool):
-        old_size = self.s.current_shares
-        if is_win:
-            self.s.current_shares = max(
-                config.ENGINE2_MIN_SHARES,
-                self.s.current_shares - config.ENGINE2_SIZE_STEP,
-            )
-        else:
-            self.s.current_shares = min(
-                config.ENGINE2_SHARES + config.ENGINE2_MAX_ADDITIONS * config.ENGINE2_SIZE_STEP,
-                self.s.current_shares + config.ENGINE2_SIZE_STEP,
-            )
-        if self.s.current_shares != old_size:
+        old_size = self.s.budget_usd
+        self.s.budget_usd = config.DEMO_BASE_USD if is_win else old_size * 2
+        if self.s.budget_usd != old_size:
             self._log(
                 "SIZE_ADJUST",
                 side=self.s.entry_side_this_window.value if self.s.entry_side_this_window else None,
-                shares=self.s.current_shares,
-                note=f"{'win' if is_win else 'loss'}: next size {old_size:.0f}sh -> {self.s.current_shares:.0f}sh",
+                note=f"{'win' if is_win else 'loss'}: next demo stake ${old_size:.2f} -> ${self.s.budget_usd:.2f}",
             )
 
     def snapshot(self) -> dict:
@@ -392,14 +351,11 @@ class Engine:
         return {
             "engine": self.name,
             "label": self.label,
-            "base_shares": self.shares,
-            "current_shares": self.s.current_shares,
-            "next_size_if_win": max(config.ENGINE2_MIN_SHARES, self.s.current_shares - config.ENGINE2_SIZE_STEP),
-            "next_size_if_loss": min(config.ENGINE2_SHARES + config.ENGINE2_MAX_ADDITIONS * config.ENGINE2_SIZE_STEP, self.s.current_shares + config.ENGINE2_SIZE_STEP),
-            "size_step": config.ENGINE2_SIZE_STEP,
-            "max_additions": config.ENGINE2_MAX_ADDITIONS,
-            "min_shares": config.ENGINE2_MIN_SHARES,
-            "max_shares": config.ENGINE2_SHARES + config.ENGINE2_MAX_ADDITIONS * config.ENGINE2_SIZE_STEP,
+            "base_budget_usd": config.DEMO_BASE_USD,
+            "budget_usd": self.s.budget_usd,
+            "next_budget_if_win": config.DEMO_BASE_USD,
+            "next_budget_if_loss": self.s.budget_usd * 2,
+            "pattern_skipped_windows": self.s.pattern_skipped_windows,
             "balance": round(self.capital.balance, 2),
             "starting_capital": config.STARTING_CAPITAL,
             "halted": self.capital.halted,
@@ -416,9 +372,6 @@ class Engine:
             "entered_this_window": self.s.entered_this_window,
             "entry_max_ask": config.ENTRY_MAX_ASK,
             "position": position_payload,
-            "candle_history": list(self.candle_history)[-config.CANDLE_RECORDS_DISPLAY:],
-            "candle_records": list(self.candle_records)[-config.CANDLE_RECORDS_DISPLAY:],
-            "last_candle": self.last_candle,
             "fills": self.s.fills,
             "tp_fills": self.s.tp_fills,
             "settled_wins": self.s.settled_wins,

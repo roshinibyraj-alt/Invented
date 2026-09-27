@@ -1,4 +1,4 @@
-"""Previous-candle demo configuration and separate live execution settings."""
+"""Fixed-cycle demo configuration and separate live execution settings."""
 import os
 
 
@@ -18,17 +18,12 @@ POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
 ENTRY_DELAY_SECONDS = 3.0
 ENTRY_MAX_ASK = 0.50
 
-BINANCE_SYMBOL = os.getenv("BINANCE_SYMBOL", "BTCUSDT")
-CANDLE_HISTORY_MAXLEN = 20
-CANDLE_RECORDS_DISPLAY = 10
+BINANCE_SYMBOL = os.getenv("BINANCE_SYMBOL", "BTCUSDT")  # legacy client, not used for signals
 
 # Simulated sizing is independent from real-order sizing.
 ENGINE_TP_PRICE = 0.99
 ENGINE_TP_COUNTS_AS = 1.00
-ENGINE2_SHARES = 500.0
-ENGINE2_SIZE_STEP = 100.0
-ENGINE2_MAX_ADDITIONS = 7
-ENGINE2_MIN_SHARES = 500.0
+DEMO_BASE_USD = 100.0
 MAKER_REBATE_FRACTION = 0.20
 
 # Simulated balance and trading-fee accounting.

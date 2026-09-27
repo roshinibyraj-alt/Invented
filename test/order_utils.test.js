@@ -2,13 +2,21 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { marketLimitPrice, parseMarketResponse } = require('../order_utils');
+const { marketLimitPrice, buyBudgetUsd, parseMarketResponse } = require('../order_utils');
 
 test('FAK buy accepts asks up to $0.99 regardless of the demo ask', () => {
   assert.equal(marketLimitPrice('BUY', 0.79, 0.79, 0.30, '0.01'), 0.99);
   assert.equal(marketLimitPrice('BUY', 0.91, 0.50, 0.30, '0.01'), 0.99);
   assert.equal(marketLimitPrice('BUY', 0.50, 0.503, 0.283, '0.005'), 0.99);
   assert.equal(marketLimitPrice('BUY', 0.995, 0.50, 0.30, '0.005'), null);
+});
+
+test('uncapped real Martingale accepts $16 and larger safe whole-dollar stakes', () => {
+  assert.equal(buyBudgetUsd(16), 16);
+  assert.equal(buyBudgetUsd(1024), 1024);
+  for (const invalid of [0, -1, 1.5, Infinity, NaN, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.equal(buyBudgetUsd(invalid), null);
+  }
 });
 
 test('FAK sell refuses a bid below the observed price floor', () => {

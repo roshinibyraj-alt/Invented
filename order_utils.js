@@ -35,6 +35,13 @@ function marketLimitPrice(side, bookPrice, referencePrice, slippage, tickSize) {
   throw new Error(`Unknown order side: ${side}`);
 }
 
+function buyBudgetUsd(value) {
+  const amount = Number(value);
+  // The Martingale has no ceiling, but an order must still have a safe,
+  // whole-dollar positive USDC amount.
+  return Number.isSafeInteger(amount) && amount >= 1 ? amount : null;
+}
+
 function parseMarketResponse(response, side, requestedAmount) {
   const status = String(response?.status || 'unknown').toLowerCase();
   const orderId = response?.orderID || null;
@@ -75,4 +82,4 @@ function parseMarketResponse(response, side, requestedAmount) {
   };
 }
 
-module.exports = { marketLimitPrice, parseMarketResponse, roundToTick };
+module.exports = { marketLimitPrice, buyBudgetUsd, parseMarketResponse, roundToTick };
