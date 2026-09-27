@@ -16,6 +16,8 @@ SLUG_PREFIX = "btc-updown-5m-"
 WINDOW_SECONDS = 300
 POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
 ENTRY_DELAY_SECONDS = 3.0
+# Demo entry gate only; real orders mirror CANDLE_BUY without reapplying this
+# threshold and keep their separate $0.99/share execution ceiling.
 ENTRY_MAX_ASK = 0.50
 
 BINANCE_SYMBOL = os.getenv("BINANCE_SYMBOL", "BTCUSDT")  # legacy client, not used for signals
