@@ -155,7 +155,10 @@ class Broker:
             "tokenId": token_id, "openTs": open_ts, "orderId": order_id,
         })
 
-    async def buy(self, token_id: str, budget_usd: float, reference_ask: float) -> dict:
+    async def buy(
+        self, token_id: str, budget_usd: float, reference_ask: float,
+        close_ts: Optional[float] = None,
+    ) -> dict:
         if self.live:
             return await self.request(
                 "buy",
@@ -164,6 +167,7 @@ class Broker:
                     "budgetUsd": budget_usd,
                     "referenceAsk": reference_ask,
                     "slippage": config.SLIPPAGE_CEILING,
+                    "closeTs": close_ts,
                 },
             )
         price = max(float(reference_ask), 0.01)

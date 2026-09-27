@@ -23,7 +23,7 @@
 <body>
 <main>
   <header>
-    <div><h1>BTC 5m Previous Candle</h1><div class="sub">Previous red → DOWN · green → UP · doji is void · 3-second entry delay · separate $1–$8 real buys</div></div>
+    <div><h1>BTC 5m Previous Candle</h1><div class="sub">Red → DOWN · green → UP · doji is void · wait 3 seconds, then enter only when signaled ask &lt; $0.50</div></div>
     <div><span class="badge" id="modeBadge">CONNECTING</span><div class="small" id="status">Connecting…</div><div class="small" id="liveBudget"></div></div>
   </header>
   <section class="grid">
@@ -36,7 +36,7 @@
     <div class="card"><div class="label">Live CLOB midpoint estimate</div><div class="book">
       <div class="quote"><b class="up">UP</b><div id="upMid" class="value">—</div><div id="upBook" class="small">bid — / ask —</div></div>
       <div class="quote"><b class="down">DOWN</b><div id="downMid" class="value">—</div><div id="downBook" class="small">bid — / ask —</div></div>
-    </div><div id="resolution" class="foot">Open positions settle against whichever side had the higher last observed midpoint at rollover.</div></div>
+    </div><div id="resolution" class="foot">Open positions settle against the higher last observed midpoint at rollover. Ties leave the result unknown.</div></div>
     <div class="card"><div class="label">Engine statistics</div><div id="stats" class="stats"></div></div>
   </section>
   <section class="card candles">
@@ -49,7 +49,7 @@
   </section>
   <section class="card position"><div class="label">Position</div><div id="position" style="margin-top:9px">No open position.</div></section>
   <section class="card log"><div class="label">Event log</div><div id="log" class="log-list"></div></section>
-  <div class="foot">Demo balance, positions, and 500–1,200 share sizes are simulated. Real USDC balance is available exchange collateral, not the value of held shares. The live bot mirrors demo candle signals with its separate budget; it does not sell or redeem positions.</div>
+  <div class="foot">A price-trigger skip still counts the observed signal win or loss for both sizing ladders, but creates no position or P&amp;L. Without a winner, only the skip count changes. Demo shares are simulated. Real buys use a separate $1–$8 budget and an existing FAK ceiling of $0.99 per share, so an order triggered below $0.50 could fill higher if the quote moves. The live bot does not sell or redeem positions. Real USDC balance is available collateral, not held-share value.</div>
   <div id="error" class="alert"></div>
 </main>
 <script>
@@ -68,7 +68,7 @@ function render(s){
   $('liveBudget').textContent=s.trading_mode==='live'?`Next real buy: ${money(s.real_trading?.budget_usd)}`:'No real orders';
   $('window').textContent=w?esc(w.slug.replace('btc-updown-5m-','#')):'—';
   $('remaining').textContent=w?`${Math.max(0,w.seconds_remaining).toFixed(0)} seconds remaining`:'Waiting for market';
-  $('strategy').textContent=e.halted?'Halted':p?'Position open':e.entry_side_this_window?`Signal ${e.entry_side_this_window}`:e.last_candle?.color==='doji'?'Void — doji':!e.last_candle?'No previous candle':'No trade';
+  $('strategy').textContent=e.halted?'Halted':p?'Position open':e.entered_this_window?'Trade complete':e.entry_side_this_window?`${e.entry_side_this_window} · wait < ${money(e.entry_max_ask)}`:e.last_candle?.color==='doji'?'Void — doji':!e.last_candle?'No previous candle':'No trade';
   const c=e.last_candle;
   $('candle').innerHTML=c
     ?`Previous: <span class="candle ${c.color==='red'?'down':c.color==='green'?'up':''}">${esc(c.color.toUpperCase())} → ${resultFor(c.color)}</span> · open ${number(c.open)} · close ${number(c.close)} · closed ${esc(candleTime(c.close_time_ms))}`
@@ -93,8 +93,10 @@ function render(s){
     stat('After demo win',Number(e.next_size_if_win||500).toFixed(0)),
     stat('After demo loss',Number(e.next_size_if_loss||600).toFixed(0)),
     stat('Fills / TP fills',`${e.fills||0} / ${e.tp_fills||0}`),
-    stat('Wins / losses',`${e.wins||0} / ${e.losses||0}`),
-    stat('Win rate',e.win_rate==null?'—':`${e.win_rate}%`),
+    stat('Scored wins / losses',`${e.wins||0} / ${e.losses||0}`),
+    stat('Scored win rate',e.win_rate==null?'—':`${e.win_rate}%`),
+    stat('Price-trigger skips',e.price_skipped_windows||0),
+    stat('Skipped signals W / L',`${e.skipped_signal_wins||0} / ${e.skipped_signal_losses||0}`),
     stat('Previous candle',c?.color?`${String(c.color).toUpperCase()} → ${resultFor(c.color)}`:'Unavailable'),
     stat('Max drawdown',`${money(e.max_drawdown)} (${Number(e.max_drawdown_pct||0).toFixed(2)}%)`)
   ].join('');

@@ -36,6 +36,11 @@ async function run(command, args) {
     throw new Error(`Unknown trader command: ${command}`);
   }
 
+  const closeMs = Number(args.closeTs) * 1000;
+  if (!Number.isFinite(closeMs) || Date.now() >= closeMs) {
+    return { filled: false, status: 'WINDOW_CLOSED', shares: 0 };
+  }
+
   const reference = args.referenceAsk;
   let book;
   try {
@@ -67,7 +72,10 @@ async function run(command, args) {
     return { filled: false, status: 'BUDGET_OUT_OF_RANGE', shares: 0, limitPrice };
   }
 
-  const result = await trader.buy(args.tokenId, limitPrice, amount);
+  if (Date.now() >= closeMs) {
+    return { filled: false, status: 'WINDOW_CLOSED', shares: 0, limitPrice };
+  }
+  const result = await trader.buy(args.tokenId, limitPrice, amount, closeMs);
   return {
     ...result,
     limitPrice,

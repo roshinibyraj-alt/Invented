@@ -95,9 +95,12 @@ class PolymarketTrader {
     return { matchingTrades: matches.length, orderId: orderId || null };
   }
 
-  async buy(tokenId, price, amount) {
+  async buy(tokenId, price, amount, closeMs) {
     const tickSize = (await this.clob.getTickSize(tokenId)) || '0.01';
     const negRisk = (await this.clob.getNegRisk(tokenId)) || false;
+    if (closeMs !== undefined && (!Number.isFinite(closeMs) || Date.now() >= closeMs)) {
+      return { filled: false, status: 'WINDOW_CLOSED', shares: 0 };
+    }
     const response = await this.clob.createAndPostMarketOrder(
       {
         tokenID: tokenId,

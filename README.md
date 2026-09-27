@@ -8,21 +8,32 @@ immediately previous closed Binance BTCUSDT five-minute candle:
 - Previous candle **doji** or unavailable → void the window; make no entry.
 
 The bot waits **3 seconds after the window opens** before fetching the previous
-candle and evaluating the signal. It backfills up to 10 recent candles at
+candle and evaluating the signal. It then checks the signaled side's CLOB
+**ask** on every tick. It buys only when that ask is **strictly below $0.50**
+and the current window is still open. At $0.50 or above, or without an ask, it
+keeps waiting through the window. It backfills up to 10 recent candles at
 startup so the dashboard can show candle records; only the candle immediately
 before the current window selects the side. A backfilled candle repeated by the
 first live fetch is not recorded twice.
 
-After the delay, the demo buys at the first available CLOB ask. Its next trade starts at
-**500 simulated shares**; each resolved win or simulated take-profit reduces
-the next size by 100 to a floor of 500, and each resolved loss increases it
-by 100 to a cap of 1,200. Unfilled and unknown-result windows do not change
-the demo size. The demo starts with **$10,000** of simulated capital by default.
+If the ask never qualifies, the window counts as a **price-trigger skip**:
+no demo or real buy is sent, no position opens, and no trade P&L is booked.
+The signaled side's result still counts as a win or loss using the higher
+last-observed UP/DOWN midpoint. It moves both next-trade sizing ladders just
+like a traded outcome. When there is no observed winner, it remains a skip
+without a win/loss or size change. Doji and unavailable candles are void,
+not scored as price-trigger skips.
+
+The demo buys at the first qualifying CLOB ask. Its next trade starts at
+**500 simulated shares**; each scored win or simulated take-profit reduces
+the next size by 100 to a floor of 500, and each scored loss increases it
+by 100 to a cap of 1,200. The demo starts with **$10,000** of simulated capital
+by default.
 
 The demo models a maker take-profit when the bid reaches $0.99, booking
 $1/share plus its modeled rebate. Otherwise it settles at the next window
-using the higher **last-observed UP/DOWN CLOB midpoint**. Missing quotes are a
-wash. It does not use the exchange's official resolution.
+using the higher **last-observed UP/DOWN CLOB midpoint**. Missing or tied quotes
+are a wash. It does not use the exchange's official resolution.
 
 ## Separate real orders
 
@@ -30,8 +41,8 @@ wash. It does not use the exchange's official resolution.
 Each demo `CANDLE_BUY` event from the previous-candle strategy queues **one** real
 FAK market buy for that window, denominated in USDC:
 
-- The real budget starts at **$1**. A demo result in a skipped startup
-  window can change it before the first real order is actually sent.
+- The real budget starts at **$1**. A scored price-trigger skip or a demo
+  result in a skipped startup window can change it before a real order is sent.
 - A demo loss increases the *next* real buy by $1; a demo win decreases it by
   $1. A wash leaves it unchanged. The range is **$1–$8**.
 - The real amount is never increased to meet a market minimum. An order
@@ -39,14 +50,17 @@ FAK market buy for that window, denominated in USDC:
 - FAK fills any immediately available amount up to the requested USDC budget
   and cancels the rest. It can partially fill or fail to fill.
 - The FAK market buy accepts available asks up to **$0.99 per share**, even if
-  that is much higher than the demo ask. It can still fail if there is no
+  that is much higher than the demo ask. The **$0.50 rule is a trigger on the
+  observed ask, not a new real-order price cap**; the real quote may change
+  before the order is filled. It can still fail if there is no
   matching liquidity. It is a market-order request in **USDC**, not a request
   for 500–1,200 real shares.
 
-The live worker **only buys on `CANDLE_BUY` signals**. Demo take-profits and
-settlements remain simulated and can change the next real buy budget, but
-they never submit a real sell. Bought shares remain for Polymarket resolution;
-this app does not sell, redeem, or reconcile real positions.
+The live worker **only buys on `CANDLE_BUY` signals**. Demo take-profits,
+settlements, and scored price-trigger skips can change the next real buy
+budget, but they never submit a real sell. Bought shares remain for
+Polymarket resolution; this app does not sell, redeem, or reconcile real
+positions.
 
 Real fills, rejections, errors, and eventual exchange outcomes **never change
 the demo balance, position, result, or $1–$8 sizing sequence**. Real-order

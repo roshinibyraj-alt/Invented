@@ -95,21 +95,26 @@ class BotState:
         self.error = None
         if self.current_window is None or window.slug != self.current_window.slug:
             await self._roll_window(window)
-            now = time.time()
 
         up_bid, up_ask = await self.client.get_book(self.current_window.token_up)
         down_bid, down_ask = await self.client.get_book(self.current_window.token_down)
+        quote_ts = time.time()
+        if quote_ts >= self.current_window.close_ts:
+            # These requests crossed the window boundary. Keep the last
+            # pre-close quotes for settlement and discover the new window
+            # on the next tick; never enter using post-close book data.
+            return
         self.last_up_bid, self.last_up_ask = up_bid, up_ask
         self.last_down_bid, self.last_down_ask = down_bid, down_ask
 
         self.price_history.append(PricePoint(
-            ts=now,
+            ts=quote_ts,
             up=self._midpoint(up_bid, up_ask),
             down=self._midpoint(down_bid, down_ask),
         ))
-        seconds_to_close = self.current_window.close_ts - now
+        seconds_to_close = self.current_window.close_ts - quote_ts
         self.engine.on_tick(
-            up_bid, up_ask, down_bid, down_ask, seconds_to_close, now=now
+            up_bid, up_ask, down_bid, down_ask, seconds_to_close, now=quote_ts
         )
 
     @staticmethod
@@ -165,9 +170,9 @@ class BotState:
         """Settle by whichever side had the higher last observed midpoint."""
         up_mid = self._midpoint(self.last_up_bid, self.last_up_ask)
         down_mid = self._midpoint(self.last_down_bid, self.last_down_ask)
-        if up_mid is None or down_mid is None:
+        if up_mid is None or down_mid is None or up_mid == down_mid:
             return None
-        return Side.UP if up_mid >= down_mid else Side.DOWN
+        return Side.UP if up_mid > down_mid else Side.DOWN
 
     def snapshot(self) -> dict:
         eng = self.engine.snapshot()

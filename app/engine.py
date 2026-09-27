@@ -71,6 +71,9 @@ class EngineState:
     settled_wins: int = 0
     settled_losses: int = 0
     no_signal_windows: int = 0
+    price_skipped_windows: int = 0
+    skipped_signal_wins: int = 0
+    skipped_signal_losses: int = 0
     wins: int = 0
     losses: int = 0
 
@@ -181,9 +184,10 @@ class Engine:
             and not self.s.entered_this_window
             and self.s.position is None
             and now >= self.s.window.open_ts + config.ENTRY_DELAY_SECONDS
+            and now < self.s.window.close_ts
         ):
             ask = up_ask if self.s.entry_side_this_window == Side.UP else down_ask
-            if ask is not None:
+            if ask is not None and ask < config.ENTRY_MAX_ASK:
                 self._enter(self.s.entry_side_this_window, ask, now)
                 self.s.entered_this_window = True
         self._check_tp()
@@ -211,7 +215,8 @@ class Engine:
             fee=fee,
             note=(
                 f"taker buy {shares:.0f}sh {side.value} @ {ask} after "
-                f"{config.ENTRY_DELAY_SECONDS:g}s window delay (fee ${fee:.4f})"
+                f"{config.ENTRY_DELAY_SECONDS:g}s delay with ask below "
+                f"${config.ENTRY_MAX_ASK:.2f} (fee ${fee:.4f})"
             ),
         )
         if self.capital.check_halt():
@@ -273,6 +278,40 @@ class Engine:
                 )
                 self.s.settled_losses += 1
             self.s.position = None
+        elif (
+            self.s.window is not None
+            and self.s.entry_side_this_window is not None
+            and not self.s.entered_this_window
+        ):
+            side = self.s.entry_side_this_window
+            self.s.price_skipped_windows += 1
+            if winning_side is None:
+                self._log(
+                    "PRICE_FILTER_SKIPPED_UNKNOWN",
+                    side=side.value,
+                    note=(
+                        f"no {side.value} ask below ${config.ENTRY_MAX_ASK:.2f} was observed; "
+                        "no observed winner, no trade or size change"
+                    ),
+                )
+            else:
+                is_win = side == winning_side
+                if is_win:
+                    self.s.wins += 1
+                    self.s.skipped_signal_wins += 1
+                else:
+                    self.s.losses += 1
+                    self.s.skipped_signal_losses += 1
+                self._log(
+                    "PRICE_FILTER_SKIPPED_WIN" if is_win else "PRICE_FILTER_SKIPPED_LOSS",
+                    side=side.value,
+                    note=(
+                        f"no {side.value} ask below ${config.ENTRY_MAX_ASK:.2f} was observed; "
+                        f"last midpoint favored {winning_side.value}, so signal "
+                        f"{'won' if is_win else 'lost'}; no trade or P&L"
+                    ),
+                )
+                self._adjust_size(is_win)
         self.capital.update_drawdown(self._live_equity())
         self.capital.record_equity_point(window_slug)
         self.s.window = None
@@ -280,10 +319,11 @@ class Engine:
     def _settle(self, pos: Position, proceeds: float, pnl: float, reason: str, fee: float, note: str):
         self.capital.balance += proceeds
         self.s.total_pnl += pnl
-        if pnl >= 0:
-            self.s.wins += 1
-        else:
-            self.s.losses += 1
+        if reason != "SETTLE_UNKNOWN":
+            if pnl >= 0:
+                self.s.wins += 1
+            else:
+                self.s.losses += 1
         self._log(
             reason,
             side=pos.side.value,
@@ -374,6 +414,7 @@ class Engine:
                 self.s.entry_side_this_window.value if self.s.entry_side_this_window else None
             ),
             "entered_this_window": self.s.entered_this_window,
+            "entry_max_ask": config.ENTRY_MAX_ASK,
             "position": position_payload,
             "candle_history": list(self.candle_history)[-config.CANDLE_RECORDS_DISPLAY:],
             "candle_records": list(self.candle_records)[-config.CANDLE_RECORDS_DISPLAY:],
@@ -383,6 +424,9 @@ class Engine:
             "settled_wins": self.s.settled_wins,
             "settled_losses": self.s.settled_losses,
             "no_signal_windows": self.s.no_signal_windows,
+            "price_skipped_windows": self.s.price_skipped_windows,
+            "skipped_signal_wins": self.s.skipped_signal_wins,
+            "skipped_signal_losses": self.s.skipped_signal_losses,
             "wins": self.s.wins,
             "losses": self.s.losses,
             "win_rate": (

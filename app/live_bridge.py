@@ -104,22 +104,36 @@ class LiveBridge:
             )
             return
 
-        if entry.event not in {"TP_FILL", "SETTLE_WIN", "SETTLE_LOSS", "SETTLE_UNKNOWN"}:
+        if entry.event not in {
+            "TP_FILL", "SETTLE_WIN", "SETTLE_LOSS", "SETTLE_UNKNOWN",
+            "PRICE_FILTER_SKIPPED_WIN", "PRICE_FILTER_SKIPPED_LOSS",
+        }:
             return
 
-        # Only the demo's own P&L moves the REAL order-size ladder.
-        # A missing winner/wash and every real exchange result leave it alone.
-        if entry.event != "SETTLE_UNKNOWN" and entry.pnl is not None:
-            if entry.pnl < 0:
-                self.budget_usd = min(LIVE_MAX_USD, self.budget_usd + LIVE_STEP_USD)
-            elif entry.pnl > 0:
-                self.budget_usd = max(LIVE_BASE_USD, self.budget_usd - LIVE_STEP_USD)
-            if self.enabled:
-                self.broker.log_event(
-                    "LIVE_NEXT_BUDGET", window=entry.window_slug,
-                    trade_usd=self.budget_usd,
-                    note=f"demo {entry.event}: pnl={entry.pnl:.4f}",
-                )
+        # Scored price skips move the ladder without inventing a trade or P&L.
+        # Real fills and unknown results never change the demo-driven budget.
+        if entry.event == "PRICE_FILTER_SKIPPED_WIN":
+            outcome = 1
+        elif entry.event == "PRICE_FILTER_SKIPPED_LOSS":
+            outcome = -1
+        elif entry.event != "SETTLE_UNKNOWN" and entry.pnl is not None:
+            outcome = entry.pnl
+        else:
+            return
+        if outcome < 0:
+            self.budget_usd = min(LIVE_MAX_USD, self.budget_usd + LIVE_STEP_USD)
+        elif outcome > 0:
+            self.budget_usd = max(LIVE_BASE_USD, self.budget_usd - LIVE_STEP_USD)
+        if self.enabled:
+            note = (
+                f"demo {entry.event}: signal result={'win' if outcome > 0 else 'loss'}"
+                if entry.event.startswith("PRICE_FILTER_SKIPPED_")
+                else f"demo {entry.event}: pnl={entry.pnl:.4f}"
+            )
+            self.broker.log_event(
+                "LIVE_NEXT_BUDGET", window=entry.window_slug,
+                trade_usd=self.budget_usd, note=note,
+            )
 
     async def _run(self):
         try:
@@ -154,6 +168,12 @@ class LiveBridge:
                 note="real buys halted after an uncertain prior order",
             )
             return
+        if time.time() >= intent.close_ts:
+            self.broker.log_event(
+                "LIVE_ORDER_EXPIRED", window=intent.slug,
+                note="buy window closed before reservation",
+            )
+            return
         try:
             if self._guard is None:
                 raise RuntimeError("durable live buy guard is not initialized")
@@ -167,19 +187,37 @@ class LiveBridge:
         if not reserved:
             await self._verify_prior_buy(intent)
             return
+        if time.time() >= intent.close_ts:
+            try:
+                self._guard.record(intent.slug, "expired")
+            except Exception as exc:
+                self.broker.log_event(
+                    "LIVE_GUARD_ERROR", window=intent.slug,
+                    note=f"window closed after reservation; status could not be saved: {exc}",
+                )
+            self.broker.log_event(
+                "LIVE_ORDER_EXPIRED", window=intent.slug,
+                note="buy window closed after reservation",
+            )
+            return
         try:
             result = await self.broker.buy(
                 intent.token_id, intent.budget_usd, intent.reference_price,
+                intent.close_ts,
             )
             try:
                 self._guard.record(
-                    intent.slug, "filled" if result.get("filled") else "rejected",
+                    intent.slug,
+                    "expired" if result.get("status") == "WINDOW_CLOSED"
+                    else "filled" if result.get("filled") else "rejected",
                     result.get("orderId"),
                 )
             except Exception as exc:
                 self.broker.log_event("LIVE_GUARD_ERROR", window=intent.slug,
                                       note=f"buy sent; status could not be saved: {exc}")
-            if result.get("filled"):
+            if result.get("status") == "WINDOW_CLOSED":
+                event = "LIVE_ORDER_EXPIRED"
+            elif result.get("filled"):
                 event = "LIVE_BUY_FILLED"
             else:
                 event = "LIVE_BUY_REJECTED"
