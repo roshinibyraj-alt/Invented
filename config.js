@@ -2,6 +2,7 @@
 
 // All strategy constants live here. Real orders only when LIVE_TRADING=true (demo otherwise).
 module.exports = {
+  DEMO_CAPITAL: 5000,          // play-money starting balance in DEMO mode (USD)
   STREAK_LEN: 3,               // consecutive same-side window winners that trigger a bet
   BASE_SHARES: 100,            // base stake in shares
   MAX_LOSS_DOUBLINGS: 2,       // 100 -> 200 -> 400, a 3rd straight loss resets to base
@@ -9,7 +10,7 @@ module.exports = {
   SHARED_LADDER: false,        // false = separate sizing ladder per side (UP / DOWN)
 
   // Who won a window: in the last END_WATCH_MS before it closes, a side priced above WIN_PRICE wins.
-  // If neither side gets there, the bot falls back to Polymarket's official resolution.
+  // The other side is the loser (~0). No fallback: a window not seen ending >WIN_PRICE stays unknown and any streak using it is skipped.
   END_WATCH_MS: 3000,
   WIN_PRICE: 0.96,
 

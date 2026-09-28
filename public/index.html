@@ -3,124 +3,245 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>3-window streak bot</title>
+<title>Streak Bot · BTC 5-min</title>
 <style>
-  :root {
-    --bg: #0b0d10; --panel: #14171c; --border: #262b33; --text: #e8ebf0; --dim: #8891a0;
-    --mint: #35d399; --coral: #ff6b6b; --amber: #f5b942;
-  }
-  * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; padding: 16px; }
-  h1 { font-size: 18px; margin: 0 0 4px; }
-  .warn { background: #3a1c1c; border: 1px solid var(--coral); color: var(--coral); padding: 8px 12px; border-radius: 8px; margin-bottom: 12px; font-weight: 600; }
-  .err { background: #3a1c1c; border: 1px solid var(--coral); color: var(--coral); padding: 8px 12px; border-radius: 8px; margin-bottom: 12px; display: none; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; margin-bottom: 16px; }
-  .tile { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px; }
-  .tile .n { font-size: 22px; font-weight: 700; }
-  .tile .l { color: var(--dim); font-size: 12px; margin-top: 2px; }
-  .pos { color: var(--mint); } .neg { color: var(--coral); }
-  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px; margin-bottom: 16px; }
-  .panel h2 { font-size: 13px; color: var(--dim); text-transform: uppercase; letter-spacing: .04em; margin: 0 0 10px; }
-  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
-  th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--border); white-space: nowrap; }
-  th { color: var(--dim); font-weight: 600; }
-  .ev-ENTRY_FILLED { color: var(--amber); } .ev-SETTLED_WIN { color: var(--mint); } .ev-SETTLED_LOSS { color: var(--coral); }
-  .ev-ERROR { color: var(--coral); } .ev-VOID, .ev-NO_TRADE, .ev-WAIT, .ev-OUTCOME { color: var(--dim); } .ev-SIGNAL, .ev-FIRING { color: var(--amber); } .ev-MISMATCH { color: var(--coral); }
-  .addr { font-family: ui-monospace, monospace; font-size: 11px; color: var(--dim); word-break: break-all; }
+:root{--bg:#080a1c;--p1:#12152e;--p2:#181c3b;--line:#262b52;--tx:#eef0ff;--dim:#8a90b8;
+--up:#2ee6a6;--up2:#18b5d8;--dn:#ff5c7c;--dn2:#ff9a5c;--vio:#8b7bff;--amb:#ffc857;--pink:#ff7ad9}
+*{box-sizing:border-box}
+body{margin:0;color:var(--tx);font:14px/1.5 ui-rounded,"SF Pro Rounded",Inter,"Segoe UI",system-ui,sans-serif;font-variant-numeric:tabular-nums;
+background:radial-gradient(900px 500px at 10% -10%,#2b1f6e55,transparent),radial-gradient(800px 500px at 100% 0,#0e5c7a44,transparent),var(--bg);padding:18px;min-height:100vh}
+.wrap{max-width:1240px;margin:auto}
+header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;margin-bottom:16px}
+.brand{display:flex;align-items:center;gap:12px}
+.logo{width:42px;height:42px;border-radius:13px;background:linear-gradient(135deg,var(--up),var(--vio) 55%,var(--dn));display:grid;place-items:center;font-size:20px;box-shadow:0 6px 24px #8b7bff55}
+h1{font-size:20px;margin:0;letter-spacing:-.01em}.sub{color:var(--dim);font-size:12.5px}
+.pills{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.pill{padding:5px 12px;border-radius:99px;border:1px solid var(--line);background:var(--p1);font-size:12.5px;color:var(--dim);display:flex;gap:7px;align-items:center}
+.pill.demo{color:var(--amb);border-color:#ffc85766;background:#ffc85714}.pill.live{color:#fff;background:var(--dn);border-color:var(--dn)}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--up);box-shadow:0 0 0 0 #2ee6a688;animation:pulse 1.6s infinite}.dot.off{background:var(--dn);animation:none}
+@keyframes pulse{70%{box-shadow:0 0 0 8px #2ee6a600}}
+.err{display:none;background:#ff5c7c22;border:1px solid var(--dn);color:#ffb3c1;padding:10px 14px;border-radius:12px;margin-bottom:14px}
+.grid{display:grid;gap:14px;margin-bottom:14px}
+.g2{grid-template-columns:1.6fr 1fr}.g3{grid-template-columns:1fr 1fr}.g4{grid-template-columns:1.5fr 1fr}
+@media(max-width:860px){.g2,.g3,.g4{grid-template-columns:1fr}}
+.card{background:linear-gradient(160deg,var(--p2),var(--p1));border:1px solid var(--line);border-radius:18px;padding:16px 18px;position:relative;overflow:hidden}
+.card h2{font-size:14px;margin:0 0 12px;color:var(--dim);font-weight:600;display:flex;justify-content:space-between;align-items:center;gap:8px}
+.big{font-size:38px;font-weight:800;letter-spacing:-.02em;line-height:1.1}
+.pos{color:var(--up)}.neg{color:var(--dn)}.dim{color:var(--dim)}
+.hero{background:linear-gradient(135deg,#2a1d78,#123a70 60%,#0f5a6d);border-color:#4b4fb0}
+.hero .lbl{color:#b9bfff;font-size:13px}
+.row{display:flex;gap:18px;flex-wrap:wrap;align-items:flex-end;justify-content:space-between}
+.chip{display:inline-block;padding:2px 10px;border-radius:99px;font-size:12px;font-weight:700}
+.chip.up{background:#2ee6a622;color:var(--up)}.chip.dn{background:#ff5c7c22;color:var(--dn)}.chip.am{background:#ffc85722;color:var(--amb)}.chip.vi{background:#8b7bff26;color:#b6acff}.chip.gr{background:#ffffff14;color:var(--dim)}
+.ring{display:flex;gap:16px;align-items:center}
+.ring svg{flex:none}.ring .t{font-size:30px;font-weight:800}
+.price{padding:18px}.price.up{background:linear-gradient(150deg,#0e5b52,#0d2f45)}.price.dn{background:linear-gradient(150deg,#6b1f3d,#3a1c3f)}
+.price .n{font-size:56px;font-weight:800;line-height:1;letter-spacing:-.03em}.price .n small{font-size:24px;opacity:.7}
+.price .ba{display:flex;gap:16px;color:#ffffffb0;font-size:13px;margin-top:10px}
+.price .tag{position:absolute;right:16px;top:14px;font-size:44px;opacity:.16}
+.split{height:12px;border-radius:9px;background:var(--dn);overflow:hidden;display:flex;margin:6px 0 4px}
+.split i{background:linear-gradient(90deg,var(--up),var(--up2));display:block;transition:width .5s}
+.cs{display:flex;gap:5px;align-items:flex-end;overflow-x:auto;padding-bottom:4px}
+.c{flex:1;min-width:26px;text-align:center;font-size:10px;color:var(--dim)}
+.c b{display:grid;place-items:center;height:38px;border-radius:9px;font-size:15px;margin-bottom:3px}
+.c.U b{background:linear-gradient(180deg,#2ee6a633,#2ee6a611);color:var(--up);border:1px solid #2ee6a666}
+.c.D b{background:linear-gradient(180deg,#ff5c7c33,#ff5c7c11);color:var(--dn);border:1px solid #ff5c7c66}
+.c em{font-style:normal;display:block;height:14px;font-size:11px}.c em.W{color:var(--up)}.c em.L{color:var(--dn)}
+.c.now b{border-style:dashed;background:none;color:var(--dim)}
+.sig{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:12px 0 4px}
+.box{background:#ffffff0a;border:1px solid var(--line);border-radius:12px;padding:10px 12px;font-size:12.5px;color:var(--dim);margin-top:10px}
+.lad{display:flex;gap:6px;margin-top:6px}.lad div{flex:1;text-align:center;padding:7px 0;border-radius:10px;background:#ffffff0a;border:1px solid var(--line);color:var(--dim);font-weight:700}
+.lad div.on{color:#0b0d20;border:none}.lad.u div.on{background:linear-gradient(135deg,var(--up),var(--up2))}.lad.d div.on{background:linear-gradient(135deg,var(--dn),var(--dn2))}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+.st{padding:12px 14px;border-radius:14px;background:#ffffff08;border:1px solid var(--line)}
+.st .v{font-size:22px;font-weight:800}.st .l{font-size:12px;color:var(--dim)}
+.st.a{border-left:3px solid var(--up)}.st.b{border-left:3px solid var(--dn)}.st.c2{border-left:3px solid var(--vio)}.st.d{border-left:3px solid var(--amb)}.st.e{border-left:3px solid var(--up2)}.st.f{border-left:3px solid var(--pink)}
+.tw{overflow-x:auto}table{width:100%;border-collapse:collapse;font-size:12.5px}
+th,td{text-align:left;padding:7px 8px;border-bottom:1px solid #ffffff10;white-space:nowrap}th{color:var(--dim);font-weight:600}
+td.note{white-space:normal;color:#c5c9ee;min-width:220px}
+.tabs{display:flex;gap:6px}.tabs button{background:#ffffff0d;border:1px solid var(--line);color:var(--dim);border-radius:99px;padding:3px 12px;cursor:pointer;font:inherit;font-size:12px}
+.tabs button.on{background:var(--vio);color:#fff;border-color:var(--vio)}
+.empty{color:var(--dim);padding:18px;text-align:center}
+.addr{font-family:ui-monospace,monospace;font-size:11px;color:var(--dim);word-break:break-all;margin-top:10px}
+svg text{fill:var(--dim);font-size:10px}
 </style>
 </head>
-<body>
-  <h1>3-window streak bot</h1>
-  <div class="warn" id="modeBanner">loading…</div>
-  <div id="errBanner" class="err"></div>
+<body><div class="wrap">
+<header>
+  <div class="brand"><div class="logo">📈</div><div><h1>Streak Bot</h1><div class="sub">Polymarket · BTC up/down · 5-minute windows</div></div></div>
+  <div class="pills"><span class="pill" id="mode">…</span><span class="pill" id="up">uptime –</span><span class="pill"><i class="dot" id="conn"></i><span id="connT">connecting</span></span></div>
+</header>
+<div class="err" id="err"></div>
 
-  <div class="grid">
-    <div class="tile"><div class="n" id="wallet">—</div><div class="l">wallet balance (USDC)</div></div>
-    <div class="tile"><div class="n" id="stakes">—</div><div class="l">next stake (shares) DOWN / UP</div></div>
-    <div class="tile"><div class="n" id="realizedPnl">—</div><div class="l">realized P&amp;L (est.)</div></div>
-    <div class="tile"><div class="n" id="winRate">—</div><div class="l">win rate (W / L)</div></div>
-    <div class="tile"><div class="n" id="candles">—</div><div class="l">last 3 window winners</div></div>
-    <div class="tile"><div class="n" id="winStatus">—</div><div class="l">this window</div></div>
+<div class="grid g2">
+  <div class="card hero">
+    <div class="row"><div><div class="lbl" id="balLbl">Demo balance</div><div class="big" id="bal">–</div>
+      <div style="margin-top:6px"><span id="pnlChip" class="chip gr">–</span> <span class="lbl" id="eqTxt"></span></div></div>
+      <div style="text-align:right"><div class="lbl">Start capital</div><div style="font-size:22px;font-weight:700" id="cap">–</div><div class="lbl" id="openTxt"></div></div></div>
+    <svg id="eqChart" viewBox="0 0 600 130" width="100%" style="margin-top:12px"></svg>
   </div>
-
-  <div class="panel">
-    <h2>Status</h2>
-    <div id="statusLine" style="color: var(--dim)">loading…</div>
-    <div class="addr" id="walletAddr"></div>
+  <div class="card">
+    <h2>Current window <span id="winStat" class="chip gr">–</span></h2>
+    <div class="ring"><svg width="104" height="104" viewBox="0 0 104 104"><circle cx="52" cy="52" r="44" fill="none" stroke="#ffffff14" stroke-width="9"/>
+      <circle id="arc" cx="52" cy="52" r="44" fill="none" stroke="url(#g)" stroke-width="9" stroke-linecap="round" transform="rotate(-90 52 52)" stroke-dasharray="276.5" stroke-dashoffset="0"/>
+      <defs><linearGradient id="g"><stop offset="0" stop-color="#2ee6a6"/><stop offset="1" stop-color="#8b7bff"/></linearGradient></defs></svg>
+      <div><div class="t" id="cd">–</div><div class="dim" id="phase">–</div><div class="dim" style="font-size:11.5px" id="slug"></div></div></div>
+    <div class="box" id="how"></div>
   </div>
+</div>
 
-  <div class="panel">
-    <h2>Event log</h2>
-    <table>
-      <thead><tr><th>time</th><th>event</th><th>window</th><th>side</th><th>shares</th><th>pnl</th><th>note</th></tr></thead>
-      <tbody id="logBody"></tbody>
-    </table>
+<div class="grid g3">
+  <div class="card price up"><div class="tag">▲</div><div class="dim" style="color:#b8fff0">UP · BTC ends higher</div><div class="n" id="upP">–</div>
+    <div class="ba"><span>bid <b id="upB">–</b></span><span>ask <b id="upA">–</b></span></div></div>
+  <div class="card price dn"><div class="tag">▼</div><div class="dim" style="color:#ffc7d3">DOWN · BTC ends lower</div><div class="n" id="dnP">–</div>
+    <div class="ba"><span>bid <b id="dnB">–</b></span><span>ask <b id="dnA">–</b></span></div></div>
+</div>
+
+<div class="card" style="margin-bottom:14px">
+  <h2>Live prices this window <span class="dim" style="font-weight:400">green = UP · red = DOWN · shaded end = winner is read</span></h2>
+  <div class="split"><i id="splitUp" style="width:50%"></i></div>
+  <div class="row" style="font-size:12px;color:var(--dim);margin-bottom:6px"><span id="splUp">UP –</span><span id="splDn">DOWN –</span></div>
+  <svg id="pxChart" viewBox="0 0 700 220" width="100%"></svg>
+</div>
+
+<div class="grid g4">
+  <div class="card">
+    <h2>Which side won each window <span class="dim" style="font-weight:400">oldest → newest</span></h2>
+    <div class="cs" id="cs"></div>
+    <div class="row" style="margin-top:12px;align-items:center">
+      <div><span class="chip up" id="cUp">UP 0</span> <span class="chip dn" id="cDn">DOWN 0</span> <span class="dim" style="font-size:12px">won since start</span></div>
+      <div class="dim" id="streakTxt"></div></div>
+    <div class="sig" id="sig"></div>
+    <div class="box" id="rule"></div>
   </div>
+  <div class="card">
+    <h2>Next bet size (shares)</h2>
+    <div class="dim" style="font-size:12px">UP side</div><div class="lad u" id="ladU"></div>
+    <div class="dim" style="font-size:12px;margin-top:10px">DOWN side</div><div class="lad d" id="ladD"></div>
+    <div class="box">A loss doubles the next bet on that side, a win doubles it once, then it resets to the base bet.</div>
+  </div>
+</div>
 
+<div class="card" style="margin-bottom:14px"><h2>Performance</h2><div class="stats" id="stats"></div></div>
+
+<div class="card" style="margin-bottom:14px"><h2>Open positions</h2><div class="tw" id="open"></div></div>
+<div class="card" style="margin-bottom:14px"><h2>Trade history</h2><div class="tw" id="trades"></div></div>
+
+<div class="card">
+  <h2>Event log <span class="tabs" id="tabs"><button class="on" data-f="all">All</button><button data-f="trade">Trades</button><button data-f="out">Outcomes</button><button data-f="err">Errors</button></span></h2>
+  <div class="tw"><table><thead><tr><th>Time</th><th>Event</th><th>Window</th><th>Side</th><th>Shares</th><th>P&amp;L</th><th>Note</th></tr></thead><tbody id="log"></tbody></table></div>
+  <div class="addr" id="addr"></div>
+</div>
+</div>
 <script>
-function fmtTime(ts) { return new Date(ts).toLocaleTimeString(); }
-function fmtMoney(n) { return n == null ? '—' : (n >= 0 ? '+' : '') + '$' + n.toFixed(2); }
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const usd=(n,sg)=>n==null?'–':(sg&&n>=0?'+':n<0?'-':'')+'$'+Math.abs(n).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+const cents=n=>n==null?'–':(n*100).toFixed(1)+'¢';
+const hhmm=ts=>new Date(ts*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+let S=null,skew=0,filter='all';
+const GRN='#2ee6a6',RED='#ff5c7c';
 
-async function poll() {
-  try {
-    const res = await fetch('/api/state');
-    const s = await res.json();
-
-    const errEl = document.getElementById('errBanner');
-    if (s.error) { errEl.style.display = 'block'; errEl.textContent = s.error; }
-    else { errEl.style.display = 'none'; }
-
-    const mb = document.getElementById('modeBanner');
-    if (s.mode === 'LIVE') {
-      mb.textContent = '⚠️ LIVE — every fill here is a real Polymarket trade with real funds.';
-      mb.style.cssText = '';
-    } else {
-      mb.textContent = 'DEMO MODE — simulated fills on the real order book, no real orders, no real funds.';
-      mb.style.cssText = 'background:#3a2f12;border-color:#f5b942;color:#f5b942';
-    }
-    document.getElementById('wallet').textContent = s.mode === 'DEMO' ? 'DEMO' : (s.walletBalance == null ? '—' : '$' + s.walletBalance.toFixed(2));
-    document.getElementById('stakes').textContent = s.stakes.DOWN + ' / ' + s.stakes.UP;
-    const pnlEl = document.getElementById('realizedPnl');
-    pnlEl.textContent = fmtMoney(s.stats.realizedPnl);
-    pnlEl.className = 'n ' + (s.stats.realizedPnl >= 0 ? 'pos' : 'neg');
-
-    const w = s.stats.wins, l = s.stats.losses;
-    const wr = (w + l) > 0 ? ((100 * w / (w + l)).toFixed(1) + '%') : '—';
-    document.getElementById('winRate').textContent = wr + ' (' + w + '/' + l + ')';
-
-    const sig = s.lastSignal;
-    document.getElementById('candles').innerHTML = sig
-      ? sig.outcomes.map(c => '<span class="' + (c === 'UP' ? 'pos' : 'neg') + '">' + c + '</span>').join(' ') + (sig.side ? ' → ' + sig.side : '')
-      : (s.recentOutcomes.length ? s.recentOutcomes.map(o => o.winner).join(' ') : '—');
-
-    const win = s.window;
-    document.getElementById('winStatus').textContent = win ? win.status : '—';
-
-    document.getElementById('statusLine').textContent =
-      'window ' + (win ? win.slug : '—') + ' · uptime ' + Math.floor(s.uptimeSec/60) + 'm '
-      + (s.uptimeSec%60) + 's · pending ' + s.pending.length + ' · no-signal ' + s.stats.noSignal
-      + ' · void (no data / no fill) ' + s.stats.voidNoData + ' / ' + s.stats.voidNoFill;
-    document.getElementById('walletAddr').textContent = s.walletAddress || '';
-
-    const rows = s.log.map(e => {
-      const cls = 'ev-' + e.event;
-      return '<tr class="' + cls + '">' +
-        '<td>' + fmtTime(e.ts) + '</td>' +
-        '<td>' + e.event + '</td>' +
-        '<td>' + (e.slug ? e.slug.replace('btc-updown-5m-', '') : '—') + '</td>' +
-        '<td>' + (e.side || '—') + '</td>' +
-        '<td>' + (e.shares != null ? e.shares : '—') + '</td>' +
-        '<td>' + (e.pnl != null ? fmtMoney(e.pnl) : '—') + '</td>' +
-        '<td>' + (e.note || '') + '</td>' +
-      '</tr>';
-    }).join('');
-    document.getElementById('logBody').innerHTML = rows;
-  } catch (e) {
-    document.getElementById('statusLine').textContent = 'disconnected from bot process';
-  }
+function eqChart(s){
+  const pts=s.equity.filter(p=>p.v!=null);const cap=s.account.capital;
+  if(pts.length<2||cap==null){$('eqChart').innerHTML='<text x="300" y="70" text-anchor="middle" fill="#b9bfff" style="fill:#b9bfff;font-size:13px">Equity curve appears after the first settled trade</text>';return}
+  const vs=pts.map(p=>p.v).concat(cap),mn=Math.min(...vs),mx=Math.max(...vs),pad=(mx-mn)*.15||1;
+  const X=i=>10+i*580/(pts.length-1),Y=v=>120-(v-(mn-pad))/((mx+pad)-(mn-pad))*110;
+  const d=pts.map((p,i)=>(i?'L':'M')+X(i).toFixed(1)+' '+Y(p.v).toFixed(1)).join(' ');
+  const up=pts[pts.length-1].v>=cap,col=up?GRN:RED;
+  $('eqChart').innerHTML=`<defs><linearGradient id="ea" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${col}" stop-opacity=".45"/><stop offset="1" stop-color="${col}" stop-opacity="0"/></linearGradient></defs>
+  <line x1="10" x2="590" y1="${Y(cap)}" y2="${Y(cap)}" stroke="#ffffff44" stroke-dasharray="4 4"/>
+  <path d="${d} L${X(pts.length-1)} 125 L10 125Z" fill="url(#ea)"/><path d="${d}" fill="none" stroke="${col}" stroke-width="2.5" stroke-linejoin="round"/>
+  <circle cx="${X(pts.length-1)}" cy="${Y(pts[pts.length-1].v)}" r="4.5" fill="${col}"/>`;
 }
-poll();
-setInterval(poll, 1500);
-</script>
-</body>
-</html>
+function pxChart(s){
+  const cf=s.cfg,W=700,H=220,l=34,r=8,t=10,b=22,X=x=>l+x/cf.windowSec*(W-l-r),Y=v=>t+(1-v)*(H-t-b);
+  let g='';for(const v of [0,.25,.5,.75,1])g+=`<line x1="${l}" x2="${W-r}" y1="${Y(v)}" y2="${Y(v)}" stroke="#ffffff12"/><text x="2" y="${Y(v)+3}">${Math.round(v*100)}¢</text>`;
+  for(const m of [0,60,120,180,240,300])g+=`<text x="${X(m)-8}" y="${H-6}">${m}s</text>`;
+  g+=`<rect x="${X(cf.windowSec-cf.endWatchMs/1000)}" y="${t}" width="${X(cf.windowSec)-X(cf.windowSec-cf.endWatchMs/1000)}" height="${H-t-b}" fill="#ffc85730"/>
+  <line x1="${X(cf.entryDelayMs/1000)}" x2="${X(cf.entryDelayMs/1000)}" y1="${t}" y2="${H-b}" stroke="#8b7bff" stroke-dasharray="3 3"/><text x="${X(cf.entryDelayMs/1000)+4}" y="${t+10}" style="fill:#b6acff">entry</text>
+  <line x1="${l}" x2="${W-r}" y1="${Y(cf.winPrice)}" y2="${Y(cf.winPrice)}" stroke="#ffc857" stroke-dasharray="2 4"/><text x="${W-r-70}" y="${Y(cf.winPrice)-3}" style="fill:#ffc857">win ${cf.winPrice*100}¢</text>`;
+  const ps=s.priceSeries||[];
+  if(ps.length>1)for(const [k,c] of [['up',GRN],['down',RED]]){
+    g+=`<path d="${ps.map((p,i)=>(i?'L':'M')+X(p.t).toFixed(1)+' '+Y(p[k]).toFixed(1)).join(' ')}" fill="none" stroke="${c}" stroke-width="2.4" stroke-linejoin="round"/>`}
+  else g+=`<text x="${W/2}" y="${H/2}" text-anchor="middle">waiting for prices…</text>`;
+  $('pxChart').innerHTML=g;
+}
+function render(s){
+  S=s;skew=s.now-Date.now();
+  $('mode').className='pill '+(s.mode==='LIVE'?'live':'demo');$('mode').textContent=s.mode==='LIVE'?'LIVE · real funds':'DEMO · simulated fills';
+  $('up').textContent='uptime '+Math.floor(s.uptimeSec/3600)+'h '+Math.floor(s.uptimeSec%3600/60)+'m';
+  $('conn').className='dot';$('connT').textContent='connected';
+  $('err').style.display=s.error?'block':'none';$('err').textContent=s.error||'';
+  const a=s.account,pnl=s.stats.realizedPnl;
+  $('balLbl').textContent=s.mode==='LIVE'?'Wallet balance':'Demo balance';
+  $('bal').textContent=usd(a.equity);$('cap').textContent=usd(a.capital);
+  const roi=a.capital?pnl/a.capital*100:0;
+  $('pnlChip').className='chip '+(pnl>=0?'up':'dn');$('pnlChip').textContent=usd(pnl,1)+' ('+(roi>=0?'+':'')+roi.toFixed(2)+'%)';
+  $('eqTxt').textContent='cash '+usd(a.cash);$('openTxt').textContent=a.openValue>0?'in open bets '+usd(a.openValue):'no open bets';
+  eqChart(s);
+  const P=s.prices;
+  $('upP').innerHTML=P?(P.up.mid==null?'–':(P.up.mid*100).toFixed(1)+'<small>¢</small>'):'–';
+  $('dnP').innerHTML=P?(P.down.mid==null?'–':(P.down.mid*100).toFixed(1)+'<small>¢</small>'):'–';
+  $('upB').textContent=cents(P&&P.up.bid);$('upA').textContent=cents(P&&P.up.ask);$('dnB').textContent=cents(P&&P.down.bid);$('dnA').textContent=cents(P&&P.down.ask);
+  if(P&&P.up.mid!=null&&P.down.mid!=null){const t=P.up.mid+P.down.mid,u=P.up.mid/t*100;$('splitUp').style.width=u+'%';$('splUp').textContent='UP '+u.toFixed(0)+'% chance';$('splDn').textContent='DOWN '+(100-u).toFixed(0)+'% chance'}
+  pxChart(s);
+  const cf=s.cfg;
+  $('how').innerHTML=`<b style="color:var(--tx)">How a winner is decided:</b> in the last ${cf.endWatchMs/1000}s of a window, the side priced above ${cf.winPrice*100}¢ has won and each winning share pays $1; the other side has lost and pays $0. If no side gets there, that window stays unknown and the bot skips any bet that needs it.`;
+  // window strip
+  const ro=s.recentOutcomes;let h='';
+  ro.forEach(o=>{const w=o.winner==='UP'?'U':'D';h+=`<div class="c ${w}" title="${hhmm(o.openTs)} · ${o.winner} won at ${cents(o.price)}, ${o.winner==='UP'?'DOWN':'UP'} lost at ${cents(o.loser)}${o.traded?' · bet '+o.traded:''}"><b>${w==='U'?'▲':'▼'}</b><em class="${o.result==='WIN'?'W':o.result==='LOSS'?'L':''}">${o.result==='WIN'?'✓ win':o.result==='LOSS'?'✗ loss':o.traded?'…':''}</em>${hhmm(o.openTs)}<br>${cents(o.price)}</div>`});
+  $('cs').innerHTML=(h||'<div class="empty">Reading previous windows…</div>')+'<div class="c now"><b>?</b><em></em>now</div>';
+  $('cs').scrollLeft=9999;
+  $('cUp').textContent='UP '+s.counts.UP;$('cDn').textContent='DOWN '+s.counts.DOWN;
+  const st=s.streak;$('streakTxt').innerHTML=st.len?`Current streak: <b class="${st.side==='UP'?'pos':'neg'}">${st.side} ×${st.len}</b> (need ${cf.streakLen})`:'No streak yet';
+  const sg=s.lastSignal;
+  $('sig').innerHTML=sg?`<span class="dim">Last check:</span>${sg.outcomes.map(o=>`<span class="chip ${o==='UP'?'up':'dn'}">${o}</span>`).join('')}<span class="dim">→</span>${sg.side?`<span class="chip am">Bet ${sg.side}</span>`:'<span class="chip gr">No bet</span>'}`:'<span class="dim">Waiting for the last '+cf.streakLen+' winners…</span>';
+  $('rule').innerHTML=`If the last <b style="color:var(--tx)">${cf.streakLen}</b> windows all ended the same way, bet the <b style="color:var(--tx)">opposite</b> side ${cf.entryDelayMs/1000}s after the new window opens, at any price, and hold to resolution.`;
+  const lad=(side)=>{const cur=s.stakes[side],n=cf.maxLoss+1;return Array.from({length:n},(_,i)=>{const v=cf.base*2**i;return `<div class="${v===cur?'on':''}">${v}</div>`}).join('')};
+  $('ladU').innerHTML=lad('UP');$('ladD').innerHTML=lad('DOWN');
+  stats(s);tables(s);logs(s);
+}
+function stats(s){
+  const T=s.trades,w=T.filter(t=>t.pnl>0),l=T.filter(t=>t.pnl<=0),sum=a=>a.reduce((x,t)=>x+t.pnl,0);
+  const gw=sum(w),gl=Math.abs(sum(l)),n=s.stats.wins+s.stats.losses,wr=n?s.stats.wins/n*100:null;
+  const box=(c,v,l,cls='')=>`<div class="st ${c}"><div class="v ${cls}">${v}</div><div class="l">${l}</div></div>`;
+  $('stats').innerHTML=
+    box('a',wr==null?'–':wr.toFixed(1)+'%','Win rate ('+s.stats.wins+' W / '+s.stats.losses+' L)')+
+    box('c2',n,'Settled trades')+
+    box('a',usd(s.stats.realizedPnl,1),'Net profit (after est. fees)',s.stats.realizedPnl>=0?'pos':'neg')+
+    box('e',w.length?usd(gw/w.length):'–','Average win','pos')+
+    box('b',l.length?usd(-gl/l.length):'–','Average loss','neg')+
+    box('d',gl?(gw/gl).toFixed(2):'–','Profit factor')+
+    box('a',T.length?usd(Math.max(...T.map(t=>t.pnl)),1):'–','Best trade','pos')+
+    box('b',T.length?usd(Math.min(...T.map(t=>t.pnl)),1):'–','Worst trade','neg')+
+    box('f',usd(-s.account.maxDrawdown),'Max drawdown','neg')+
+    box('e',usd(T.reduce((x,t)=>x+t.fee,0)),'Fees paid (est.)')+
+    box('c2',s.stats.noSignal,'Windows skipped (no streak)')+
+    box('d',s.stats.voidNoData+' / '+s.stats.voidNoFill,'Void (no data / no fill)');
+}
+const side=x=>`<span class="chip ${x==='UP'?'up':'dn'}">${x}</span>`;
+function tables(s){
+  $('open').innerHTML=s.pending.length?`<table><thead><tr><th>Window</th><th>Side</th><th>Shares</th><th>Entry</th><th>Cost</th><th>Now</th><th>Unrealized</th><th>Closes</th></tr></thead><tbody>${s.pending.map(p=>`<tr><td>${hhmm(p.openTs)}</td><td>${side(p.side)}</td><td>${p.shares}</td><td>${cents(p.price)}</td><td>${usd(p.cost)}</td><td>${cents(p.mark)}</td><td class="${p.unrealized>=0?'pos':'neg'}">${p.unrealized==null?'–':usd(p.unrealized,1)}</td><td>${hhmm(p.closeTs)}</td></tr>`).join('')}</tbody></table>`:'<div class="empty">No open bets. The bot enters 3s into a window after a '+s.cfg.streakLen+'-window streak.</div>';
+  $('trades').innerHTML=s.trades.length?`<table><thead><tr><th>Window</th><th>Bet</th><th>Winner</th><th>Shares</th><th>Entry</th><th>Cost</th><th>Result</th><th>P&amp;L</th></tr></thead><tbody>${s.trades.map(t=>`<tr><td>${hhmm(t.openTs)}</td><td>${side(t.side)}</td><td>${side(t.winner)}</td><td>${t.shares}</td><td>${cents(t.price)}</td><td>${usd(t.cost)}</td><td><span class="chip ${t.outcome==='WIN'?'up':'dn'}">${t.outcome}</span></td><td class="${t.pnl>=0?'pos':'neg'}"><b>${usd(t.pnl,1)}</b></td></tr>`).join('')}</tbody></table>`:'<div class="empty">No settled trades yet.</div>';
+}
+const grp={trade:['SIGNAL','FIRING','ENTRY_FILLED','SETTLED_WIN','SETTLED_LOSS','VOID'],out:['OUTCOME','NO_TRADE','WAIT','MISMATCH'],err:['ERROR','SETTLEMENT_TIMEOUT']};
+const col={ENTRY_FILLED:'am',SIGNAL:'am',FIRING:'am',SETTLED_WIN:'up',SETTLED_LOSS:'dn',ERROR:'dn',MISMATCH:'dn',SETTLEMENT_TIMEOUT:'dn',OUTCOME:'vi'};
+function logs(s){
+  const L=s.log.filter(e=>filter==='all'||grp[filter].includes(e.event));
+  $('log').innerHTML=L.map(e=>`<tr><td>${new Date(e.ts).toLocaleTimeString()}</td><td><span class="chip ${col[e.event]||'gr'}">${e.event}</span></td><td>${e.slug?hhmm(+e.slug.split('-').pop()):'–'}</td><td>${e.side?side(e.side):'–'}</td><td>${e.shares??'–'}</td><td class="${e.pnl>=0?'pos':'neg'}">${e.pnl!=null?usd(e.pnl,1):'–'}</td><td class="note">${esc(e.note)}</td></tr>`).join('')||'<tr><td colspan="7" class="empty">Nothing here yet.</td></tr>';
+  $('addr').textContent=s.walletAddress||'';
+}
+$('tabs').onclick=e=>{if(!e.target.dataset.f)return;filter=e.target.dataset.f;[...$('tabs').children].forEach(b=>b.classList.toggle('on',b===e.target));if(S)logs(S)};
+setInterval(()=>{ // countdown ticks between polls
+  if(!S||!S.window)return;const n=Date.now()+skew,el=n/1000-S.window.openTs,rem=Math.max(0,S.cfg.windowSec-el);
+  $('cd').textContent=Math.floor(rem/60)+':'+String(Math.floor(rem%60)).padStart(2,'0');
+  $('arc').setAttribute('stroke-dashoffset',(276.5*(1-rem/S.cfg.windowSec)).toFixed(1));
+  const st=S.window.status,m={starting:'Starting up',armed:'Signal armed',no_signal:'No streak, sitting out',firing:'Placing bet…',fired:'Holding to resolution',void_no_fill:'Bet not filled',void_no_data:'Skipped, no data'};
+  $('phase').textContent=rem<=S.cfg.endWatchMs/1000?'Reading the winner…':(m[st]||st);
+  $('winStat').textContent=st;$('winStat').className='chip '+(st==='fired'?'am':st==='armed'||st==='firing'?'vi':'gr');
+  $('slug').textContent=S.window.slug;
+},250);
+async function poll(){try{render(await(await fetch('/api/state')).json())}catch(e){$('conn').className='dot off';$('connT').textContent='disconnected'}}
+poll();setInterval(poll,1200);
+</script></body></html>
