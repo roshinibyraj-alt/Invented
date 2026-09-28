@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 
 from app.broker import Broker
 from app.engine import Engine
-from app.live_bridge import LiveBridge
+from app.live_bridge import LiveBridge, OrderIntent
 from app.live_order_guard import LiveOrderGuard
 from app.models import Side, WindowMarket
 from app.paper_broker import PaperBroker
@@ -263,6 +263,67 @@ class DemoBridgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(engine.s.price_skipped_windows, 0)
         self.assertEqual((engine.s.wins, engine.s.losses, mirror.budget_usd), (0, 0, 1))
         self.assertEqual(engine.s.pattern_skipped_windows, 1)
+
+    async def test_pause_discards_queued_buy_but_demo_and_real_ladder_continue(self):
+        engine, bridge, fake = self.setup_engine({})
+        first_window = WindowMarket(
+            "pause-up-window", None, "up-token", "down-token", 900, 1200,
+        )
+        engine.broker.on_event = lambda entry: bridge.on_demo_event(entry, first_window)
+        engine.reset_for_window(first_window)
+        engine.on_tick(0.30, 0.40, 0.60, 0.70, now=904)
+        self.assertEqual(engine.s.position.side, Side.UP)
+        self.assertEqual(bridge._queue.qsize(), 1)
+
+        response = bridge.set_paused(True)
+        self.assertTrue(response["paused"])
+        self.assertEqual(response["discarded_queued_buys"], 1)
+        self.assertTrue(bridge._queue.empty())
+        self.assertEqual(fake.buys, [])
+
+        engine.finalize_window(Side.DOWN)
+        self.assertEqual((engine.s.budget_usd, bridge.budget_usd), (200, 2))
+        next_window = WindowMarket(
+            "pause-down-window", None, "up-token-2", "down-token-2", 1200, 1500,
+        )
+        engine.broker.on_event = lambda entry: bridge.on_demo_event(entry, next_window)
+        engine.reset_for_window(next_window)
+        engine.on_tick(0.30, 0.40, 0.30, 0.40, now=1204)
+        self.assertEqual(engine.s.position.side, Side.DOWN)
+        self.assertAlmostEqual(engine.s.position.cost, 200)
+        self.assertTrue(bridge._queue.empty())
+        self.assertEqual(fake.buys, [])
+        self.assertTrue(bridge.snapshot()["paused"])
+
+    async def test_pausing_reports_but_does_not_cancel_an_in_flight_real_buy(self):
+        _, bridge, fake = self.setup_engine({})
+        intent = OrderIntent(
+            "pause-in-flight-window", "UP", "up-token", 0.40,
+            time.time() + 300, 1, time.time(),
+        )
+        submitted = asyncio.Event()
+        finish_buy = asyncio.Event()
+        submitted_buys = []
+
+        async def blocked_buy(token_id, budget_usd, reference_ask, close_ts=None):
+            submitted_buys.append((token_id, budget_usd, reference_ask, close_ts))
+            submitted.set()
+            await finish_buy.wait()
+            return {"filled": True, "status": "matched"}
+
+        fake.buy = blocked_buy
+        task = asyncio.create_task(bridge._buy(intent))
+        await submitted.wait()
+        response = bridge.set_paused(True)
+        self.assertTrue(response["paused"])
+        self.assertTrue(response["buy_in_progress"])
+        self.assertTrue(bridge.snapshot()["buy_in_progress"])
+
+        finish_buy.set()
+        await task
+        self.assertEqual(len(submitted_buys), 1)
+        self.assertFalse(bridge.snapshot()["buy_in_progress"])
+        self.assertIn("LIVE_TRADING_PAUSED", [event[0] for event in fake.events])
 
     async def test_real_buy_expired_before_reservation_is_not_sent(self):
         engine, mirror, fake = self.setup_engine({})

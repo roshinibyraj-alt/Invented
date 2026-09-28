@@ -38,6 +38,8 @@ class LiveBridge:
         self._task: Optional[asyncio.Task] = None
         self._failed = False
         self._buy_halted = False
+        self.paused = False
+        self._buy_in_progress = False
         self._seen_windows: set[str] = set()
         self._guard: Optional[LiveOrderGuard] = None
         self._ephemeral_guard = False
@@ -67,6 +69,44 @@ class LiveBridge:
                 self._queue.put_nowait(None)
             await self._task
 
+    def set_paused(self, paused: bool) -> dict:
+        """Pause or resume real buys without stopping the demo engine."""
+        if not isinstance(paused, bool):
+            raise ValueError("paused must be a boolean")
+        changed = self.paused != paused
+        self.paused = paused
+        discarded = 0
+        if paused:
+            while True:
+                try:
+                    intent = self._queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if intent is None:
+                    self._queue.put_nowait(None)
+                    break
+                discarded += 1
+                self.broker.log_event(
+                    "LIVE_BUY_SKIPPED",
+                    window=intent.slug,
+                    side=intent.side,
+                    trade_usd=intent.budget_usd,
+                    note="dashboard pause discarded queued buy; demo continues",
+                )
+        if changed:
+            self.broker.log_event(
+                "LIVE_TRADING_PAUSED" if paused else "LIVE_TRADING_RESUMED",
+                note=(
+                    "dashboard control; demo continues and real stake follows demo results"
+                    if paused else "dashboard control; future demo buys may queue real orders"
+                ),
+            )
+        return {
+            "paused": self.paused,
+            "buy_in_progress": self._buy_in_progress,
+            "discarded_queued_buys": discarded,
+        }
+
     def on_demo_event(
         self,
         entry: TradeLogEntry,
@@ -79,6 +119,15 @@ class LiveBridge:
             if entry.window_slug in self._seen_windows:
                 return
             self._seen_windows.add(entry.window_slug)
+            if self.paused:
+                self.broker.log_event(
+                    "LIVE_BUY_SKIPPED",
+                    window=entry.window_slug,
+                    side=entry.side,
+                    trade_usd=self.budget_usd,
+                    note="dashboard pause is active; demo trade continues",
+                )
+                return
             if not self.enabled or self._failed or self._buy_halted or window is None:
                 return
             if (self._ephemeral_guard and self._started_at is not None
@@ -168,6 +217,15 @@ class LiveBridge:
                 note="real buys halted after an uncertain prior order",
             )
             return
+        if self.paused:
+            self.broker.log_event(
+                "LIVE_BUY_SKIPPED",
+                window=intent.slug,
+                side=intent.side,
+                trade_usd=intent.budget_usd,
+                note="dashboard pause is active; queued real buy discarded",
+            )
+            return
         if time.time() >= intent.close_ts:
             self.broker.log_event(
                 "LIVE_ORDER_EXPIRED", window=intent.slug,
@@ -201,10 +259,14 @@ class LiveBridge:
             )
             return
         try:
-            result = await self.broker.buy(
-                intent.token_id, intent.budget_usd, intent.reference_price,
-                intent.close_ts,
-            )
+            self._buy_in_progress = True
+            try:
+                result = await self.broker.buy(
+                    intent.token_id, intent.budget_usd, intent.reference_price,
+                    intent.close_ts,
+                )
+            finally:
+                self._buy_in_progress = False
             try:
                 self._guard.record(
                     intent.slug,
@@ -263,5 +325,7 @@ class LiveBridge:
             "balance_updated_at": self.broker.balance_updated_at if self.enabled else None,
             "startup_failed": self._failed,
             "buy_halted": self._buy_halted,
+            "paused": self.paused,
+            "buy_in_progress": self._buy_in_progress,
             "recent_events": list(reversed(self.broker.events[-20:])),
         }

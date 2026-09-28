@@ -4,6 +4,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 from . import config
 from .state import BotState
@@ -23,6 +24,10 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Polymarket BTC 5m Fixed-Cycle Bot", lifespan=lifespan)
 
 
+class RealTradingPauseRequest(BaseModel):
+    paused: bool
+
+
 @app.get("/healthz")
 async def healthz():
     return {
@@ -38,6 +43,11 @@ async def healthz():
 @app.get("/api/state")
 async def state():
     return bot_state.snapshot()
+
+
+@app.post("/api/real-trading/pause")
+async def set_real_trading_pause(request: RealTradingPauseRequest):
+    return bot_state.real.set_paused(request.paused)
 
 
 @app.get("/")

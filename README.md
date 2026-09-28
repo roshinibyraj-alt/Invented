@@ -69,6 +69,11 @@ USDC collateral balance, refreshed every 30 seconds and after a buy. It
 does not include the value of held shares. This dashboard and `/api/state`
 are public, so visitors can see that balance. If the balance read fails,
 the dashboard shows it as unavailable rather than a demo or stale value.
+The public dashboard also has a Pause/Resume control, and any visitor can use
+it. Pausing discards queued real buys and prevents future real buys while demo
+trading continues; demo outcomes continue to update the real stake ladder. A
+real order already submitted may still fill. Pause state is in memory and
+resets on service restart, so live buys are enabled again after a restart.
 Each process uses SQLite to reserve a market window
 *before* a real buy is submitted. With only `PRIVATE_KEY` configured, the bot
 uses a **temporary local guard** and skips any window already open when it
