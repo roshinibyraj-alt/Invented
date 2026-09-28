@@ -48,8 +48,8 @@
   </section>
   <section class="card position"><div class="label">Position</div><div id="position" style="margin-top:9px">No open position.</div></section>
   <section class="card log"><div class="label">Event log</div><div id="log" class="log-list"></div></section>
-  <div class="foot">Scheduled SKIP windows do not trade or change stakes. If an UP or DOWN window fails the price trigger, its observed result still changes both next stakes; no position or P&amp;L is created. A loss doubles the next demo ($100 base) and real ($1 base) stake; a win resets each to base. Stakes have no configured maximum; demo trading stops when the stake exceeds available demo capital. The existing real FAK ceiling is $0.99 per share, so an order triggered below $0.50 can fill higher. Real buys do not sell or redeem positions. Real USDC balance is available collateral, not held-share value.</div>
-  <div class="foot">The public Pause/Resume control stops queued and future real buys; an order already submitted may still fill. Demo trading continues and its results keep advancing the real stake ladder. The control resets to Resume-available after a service restart.</div>
+  <div class="foot">Scheduled SKIP windows do not trade or change sizes. If an UP or DOWN window fails the price trigger, its observed result still changes the demo stake and may increase the next real order size; no position or P&amp;L is created. Demo losses double the next demo stake ($100 base); each scored loss adds one share to the next real buy, starting at 6 shares. A demo win resets the demo stake but leaves the real share count unchanged. Scheduled skips and unknown results leave both sizes unchanged. The real share count restarts at 6 after a service restart. Neither size has a configured maximum; demo trading stops when the stake exceeds available demo capital. Real FAK buys request a fixed share count, can partially fill, and accept asks only up to $0.99 per share. Real buys do not sell or redeem positions. Real USDC balance is available collateral, not held-share value.</div>
+  <div class="foot">The public Pause/Resume control stops queued and future real buys; an order already submitted may still fill. Demo trading continues and its results keep advancing the real share count. The control resets to Resume-available after a service restart.</div>
   <div id="error" class="alert"></div>
 </main>
 <script>
@@ -66,14 +66,14 @@ function render(s){
   realTradingPaused=!!real.paused;
   $('modeBadge').textContent=s.trading_mode==='live'?'LIVE ORDERS + DEMO':'DEMO ONLY';
   $('status').textContent=real.startup_failed?'Real trader unavailable; demo continues':real.buy_halted?'Real buys halted; demo continues':real.paused?'Real trading paused; demo continues':s.error||s.status||'unknown';
-  $('liveBudget').textContent=s.trading_mode==='live'?(real.paused?`Paused · next real buy: ${money(real.budget_usd)}`:`Next real buy: ${money(real.budget_usd)}`):'No real orders';
+  $('liveBudget').textContent=s.trading_mode==='live'?`${real.paused?'Paused · ':''}Next real buy: ${real.next_order_shares??'—'} shares`:'No real orders';
   const pauseButton=$('realPauseButton');
   pauseButton.hidden=s.trading_mode!=='live'||!real.enabled;
   pauseButton.disabled=pauseRequestInFlight||real.startup_failed||real.buy_halted;
   pauseButton.textContent=real.buy_halted?'Real buys halted':real.paused?'Resume real trading':'Pause real trading';
   pauseButton.classList.toggle('paused',!!real.paused);
   pauseButton.setAttribute('aria-pressed',String(!!real.paused));
-  $('pauseNote').textContent=pauseError||pauseNotice||(real.paused?(real.buy_in_progress?'Paused; an order already in progress may still fill.':'Real orders paused; demo continues and updates the real stake ladder.'):real.buy_in_progress?'A real order is in progress and cannot be cancelled.':'Anyone with this dashboard can pause or resume real buys.');
+  $('pauseNote').textContent=pauseError||pauseNotice||(real.paused?(real.buy_in_progress?'Paused; an order already in progress may still fill.':'Real orders paused; demo continues and updates the real share count.'):real.buy_in_progress?'A real order is in progress and cannot be cancelled.':'Anyone with this dashboard can pause or resume real buys.');
   $('window').textContent=w?esc(w.slug.replace('btc-updown-5m-','#')):'—';
   $('remaining').textContent=w?`${Math.max(0,w.seconds_remaining).toFixed(0)} seconds remaining`:'Waiting for market';
   $('strategy').textContent=e.halted?'Demo halted':p?'Position open':e.entered_this_window?'Trade complete':e.entry_side_this_window?`${e.entry_side_this_window} · wait < ${money(e.entry_max_ask)}`:'Scheduled SKIP';

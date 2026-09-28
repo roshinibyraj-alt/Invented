@@ -2,7 +2,10 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { marketLimitPrice, buyBudgetUsd, parseMarketResponse } = require('../order_utils');
+const {
+  marketLimitPrice, buyShareCount,
+  parseMarketResponse, parseShareBuyResponse,
+} = require('../order_utils');
 
 test('FAK buy accepts asks up to $0.99 regardless of the demo ask', () => {
   assert.equal(marketLimitPrice('BUY', 0.79, 0.79, 0.30, '0.01'), 0.99);
@@ -11,11 +14,11 @@ test('FAK buy accepts asks up to $0.99 regardless of the demo ask', () => {
   assert.equal(marketLimitPrice('BUY', 0.995, 0.50, 0.30, '0.005'), null);
 });
 
-test('uncapped real Martingale accepts $16 and larger safe whole-dollar stakes', () => {
-  assert.equal(buyBudgetUsd(16), 16);
-  assert.equal(buyBudgetUsd(1024), 1024);
-  for (const invalid of [0, -1, 1.5, Infinity, NaN, Number.MAX_SAFE_INTEGER + 1]) {
-    assert.equal(buyBudgetUsd(invalid), null);
+test('real buy size is a positive whole number of shares', () => {
+  assert.equal(buyShareCount(6), 6);
+  assert.equal(buyShareCount('7'), 7);
+  for (const invalid of [true, false, null, '', 0, -1, 1.5, Infinity, NaN, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.equal(buyShareCount(invalid), null);
   }
 });
 
@@ -63,6 +66,35 @@ test('partially filled FAK buy uses spent dollars, not the one-dollar request', 
   assert.equal(fill.cost, 0.75);
   assert.equal(fill.shares, 1);
   assert.equal(fill.avgPrice, 0.75);
+});
+
+test('share-sized FAK buy reports actual partial fill and enforces requested share ceiling', () => {
+  const fill = parseShareBuyResponse({
+    success: true,
+    status: 'matched',
+    orderID: 'partial-share-buy',
+    makingAmount: '4.95',
+    takingAmount: '5',
+  }, 6, 0.99);
+  assert.equal(fill.filled, true);
+  assert.equal(fill.requestedShares, 6);
+  assert.equal(fill.shares, 5);
+  assert.equal(fill.cost, 4.95);
+
+  assert.throws(() => parseShareBuyResponse({
+    success: true,
+    status: 'matched',
+    orderID: 'oversized-share-buy',
+    makingAmount: '5.8',
+    takingAmount: '6.2',
+  }, 6, 0.99), /exceeded requested size/);
+  assert.throws(() => parseShareBuyResponse({
+    success: true,
+    status: 'matched',
+    orderID: 'over-limit-share-buy',
+    makingAmount: '6.00',
+    takingAmount: '6',
+  }, 6, 0.99), /implausible fill amounts/);
 });
 
 test('partially filled FAK sell reports only the shares actually sold', () => {

@@ -38,8 +38,8 @@ class FakeLiveBroker:
         self.balance_updated_at = time.time()
         return self.balance
 
-    async def buy(self, token_id, budget_usd, reference_ask, close_ts=None):
-        self.buys.append((token_id, budget_usd, reference_ask))
+    async def buy(self, token_id, shares, reference_ask, close_ts=None):
+        self.buys.append((token_id, shares, reference_ask))
         self.buy_deadlines.append(close_ts)
         return self.buy_result
 
@@ -117,23 +117,23 @@ class DemoBridgeTest(unittest.IsolatedAsyncioTestCase):
             current[0] = windows[phase]
             engine.reset_for_window(current[0])
             engine.on_tick(0.3, 0.4, 0.3, 0.4, now=current[0].open_ts + 4)
-            self.assertEqual(bridge._queue.get_nowait().budget_usd, 2 ** phase)
+            self.assertEqual(bridge._queue.get_nowait().order_shares, 6 + phase)
             engine.finalize_window(winner)
-        self.assertEqual((engine.s.budget_usd, bridge.budget_usd), (400, 4))
+        self.assertEqual((engine.s.budget_usd, bridge.next_order_shares), (400, 8))
         current[0] = windows[2]
         engine.reset_for_window(current[0])
         engine.on_tick(0.3, 0.4, 0.3, 0.4, now=current[0].open_ts + 4)
         engine.finalize_window(Side.UP)
-        self.assertEqual((engine.s.budget_usd, bridge.budget_usd), (400, 4))
+        self.assertEqual((engine.s.budget_usd, bridge.next_order_shares), (400, 8))
         self.assertTrue(bridge._queue.empty())
         self.assertEqual(fake.buys, [])
         current[0] = windows[3]
         engine.reset_for_window(current[0])
         engine.on_tick(0.3, 0.4, 0.3, 0.4, now=current[0].open_ts + 4)
         self.assertAlmostEqual(engine.s.position.cost, 400)
-        self.assertEqual(bridge._queue.get_nowait().budget_usd, 4)
+        self.assertEqual(bridge._queue.get_nowait().order_shares, 8)
         engine.finalize_window(Side.UP)
-        self.assertEqual((engine.s.budget_usd, bridge.budget_usd), (100, 1))
+        self.assertEqual((engine.s.budget_usd, bridge.next_order_shares), (100, 8))
 
     async def test_demo_halts_when_stake_exceeds_available_capital(self):
         engine, bridge, fake = self.setup_engine({})
@@ -145,7 +145,7 @@ class DemoBridgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(bridge._queue.empty())
         self.assertEqual(fake.buys, [])
         engine.finalize_window(Side.DOWN)
-        self.assertEqual((engine.s.price_skipped_windows, bridge.budget_usd), (0, 1))
+        self.assertEqual((engine.s.price_skipped_windows, bridge.next_order_shares), (0, 6))
 
     async def test_demo_entry_waits_three_seconds_after_window_open(self):
         engine = Engine(PaperBroker())
@@ -168,7 +168,7 @@ class DemoBridgeTest(unittest.IsolatedAsyncioTestCase):
         engine.reset_for_window(window)
         engine.on_tick(0.30, 0.40, 0.30, 0.49, now=window.open_ts + 4)
         intent = mirror._queue.get_nowait()
-        self.assertEqual((intent.token_id, intent.budget_usd), ("down-token", 1))
+        self.assertEqual((intent.token_id, intent.order_shares), ("down-token", 6))
 
     async def test_price_filter_waits_and_only_checks_signaled_ask(self):
         engine, mirror, _ = self.setup_engine({})
@@ -188,7 +188,7 @@ class DemoBridgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(engine.s.fills, 1)
         self.assertTrue(mirror._queue.empty())
 
-    async def test_price_skip_loss_moves_both_ladders_without_a_trade(self):
+    async def test_price_skip_loss_increments_demo_and_real_share_size(self):
         engine, mirror, fake = self.setup_engine({})
         starting_balance = engine.capital.balance
         engine.on_tick(0.55, 0.60, 0.30, 0.35)
@@ -196,7 +196,7 @@ class DemoBridgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(engine.s.price_skipped_windows, 1)
         self.assertEqual((engine.s.skipped_signal_wins, engine.s.skipped_signal_losses), (0, 1))
         self.assertEqual((engine.s.wins, engine.s.losses), (0, 1))
-        self.assertEqual((engine.s.budget_usd, mirror.budget_usd), (200, 2))
+        self.assertEqual((engine.s.budget_usd, mirror.next_order_shares), (200, 7))
         self.assertEqual((engine.capital.balance, engine.s.total_pnl), (starting_balance, 0))
         self.assertEqual(engine.s.fills, 0)
         self.assertIsNone(engine.s.position)
@@ -206,17 +206,17 @@ class DemoBridgeTest(unittest.IsolatedAsyncioTestCase):
         engine.finalize_window(Side.DOWN)
         self.assertEqual(engine.s.price_skipped_windows, 1)
 
-    async def test_price_skip_win_moves_both_ladders_without_a_trade(self):
+    async def test_price_skip_win_keeps_real_share_size_unchanged(self):
         engine, mirror, _ = self.setup_engine({})
         engine.s.budget_usd = 400
-        mirror.budget_usd = 4
+        mirror.next_order_shares = 9
         starting_balance = engine.capital.balance
         engine.on_tick(0.60, 0.70, 0.30, 0.35)
         engine.finalize_window(Side.UP)
         self.assertEqual(engine.s.price_skipped_windows, 1)
         self.assertEqual((engine.s.skipped_signal_wins, engine.s.skipped_signal_losses), (1, 0))
         self.assertEqual((engine.s.wins, engine.s.losses), (1, 0))
-        self.assertEqual((engine.s.budget_usd, mirror.budget_usd), (100, 1))
+        self.assertEqual((engine.s.budget_usd, mirror.next_order_shares), (100, 9))
         self.assertEqual((engine.capital.balance, engine.s.total_pnl), (starting_balance, 0))
         self.assertEqual(engine.s.fills, 0)
         self.assertTrue(mirror._queue.empty())
@@ -227,7 +227,7 @@ class DemoBridgeTest(unittest.IsolatedAsyncioTestCase):
         engine.finalize_window(None)
         self.assertEqual(engine.s.price_skipped_windows, 1)
         self.assertEqual((engine.s.wins, engine.s.losses), (0, 0))
-        self.assertEqual((engine.s.budget_usd, mirror.budget_usd), (100, 1))
+        self.assertEqual((engine.s.budget_usd, mirror.next_order_shares), (100, 6))
         self.assertIn("PRICE_FILTER_SKIPPED_UNKNOWN", [event.event for event in engine.broker.log])
         self.assertTrue(mirror._queue.empty())
 
@@ -238,7 +238,7 @@ class DemoBridgeTest(unittest.IsolatedAsyncioTestCase):
         mirror._queue.get_nowait()
         engine.finalize_window(None)
         self.assertEqual((engine.s.wins, engine.s.losses), (0, 0))
-        self.assertEqual((engine.s.budget_usd, mirror.budget_usd), (100, 1))
+        self.assertEqual((engine.s.budget_usd, mirror.next_order_shares), (100, 6))
         self.assertEqual((engine.capital.balance, engine.s.total_pnl), (initial_balance, 0))
         self.assertIn("SETTLE_UNKNOWN", [event.event for event in engine.broker.log])
 
@@ -261,10 +261,10 @@ class DemoBridgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake.buys, [])
         engine.finalize_window(Side.UP)
         self.assertEqual(engine.s.price_skipped_windows, 0)
-        self.assertEqual((engine.s.wins, engine.s.losses, mirror.budget_usd), (0, 0, 1))
+        self.assertEqual((engine.s.wins, engine.s.losses, mirror.next_order_shares), (0, 0, 6))
         self.assertEqual(engine.s.pattern_skipped_windows, 1)
 
-    async def test_pause_discards_queued_buy_but_demo_and_real_ladder_continue(self):
+    async def test_pause_discards_queued_buy_but_demo_and_real_share_count_continue(self):
         engine, bridge, fake = self.setup_engine({})
         first_window = WindowMarket(
             "pause-up-window", None, "up-token", "down-token", 900, 1200,
@@ -282,7 +282,7 @@ class DemoBridgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake.buys, [])
 
         engine.finalize_window(Side.DOWN)
-        self.assertEqual((engine.s.budget_usd, bridge.budget_usd), (200, 2))
+        self.assertEqual((engine.s.budget_usd, bridge.next_order_shares), (200, 7))
         next_window = WindowMarket(
             "pause-down-window", None, "up-token-2", "down-token-2", 1200, 1500,
         )
@@ -305,8 +305,8 @@ class DemoBridgeTest(unittest.IsolatedAsyncioTestCase):
         finish_buy = asyncio.Event()
         submitted_buys = []
 
-        async def blocked_buy(token_id, budget_usd, reference_ask, close_ts=None):
-            submitted_buys.append((token_id, budget_usd, reference_ask, close_ts))
+        async def blocked_buy(token_id, shares, reference_ask, close_ts=None):
+            submitted_buys.append((token_id, shares, reference_ask, close_ts))
             submitted.set()
             await finish_buy.wait()
             return {"filled": True, "status": "matched"}
@@ -389,19 +389,19 @@ class DemoBridgeTest(unittest.IsolatedAsyncioTestCase):
         )
         engine.on_tick(0.30, 0.40, 0.60, 0.70)
         intent = mirror._queue.get_nowait()
-        self.assertEqual((intent.token_id, intent.budget_usd), ("up-token", 1))
+        self.assertEqual((intent.token_id, intent.order_shares), ("up-token", 6))
         self.assertAlmostEqual(engine.s.position.cost, 100)
         demo_balance = engine.capital.balance
 
         await mirror._buy(intent)
-        self.assertEqual(fake.buys, [("up-token", 1, 0.40)])
+        self.assertEqual(fake.buys, [("up-token", 6, 0.40)])
         self.assertEqual(fake.buy_deadlines, [intent.close_ts])
         self.assertEqual(engine.capital.balance, demo_balance)
         self.assertAlmostEqual(engine.s.position.cost, 100)
-        self.assertEqual(mirror.budget_usd, 1)
+        self.assertEqual(mirror.next_order_shares, 6)
 
         engine.finalize_window(Side.DOWN)
-        self.assertEqual(mirror.budget_usd, 2)
+        self.assertEqual(mirror.next_order_shares, 7)
         self.assertEqual(engine.s.settled_losses, 1)
 
     async def test_demo_take_profit_never_sends_real_sell(self):
@@ -413,7 +413,7 @@ class DemoBridgeTest(unittest.IsolatedAsyncioTestCase):
         engine.on_tick(0.99, 0.995, 0.01, 0.02)
         self.assertIsNone(engine.s.position)
         self.assertEqual(engine.s.tp_fills, 1)
-        self.assertEqual(mirror.budget_usd, 1)
+        self.assertEqual(mirror.next_order_shares, 6)
         self.assertTrue(mirror._queue.empty())
         self.assertEqual(fake.sells, [])
         self.assertEqual(engine.s.tp_fills, 1)
@@ -456,7 +456,7 @@ class DemoBridgeTest(unittest.IsolatedAsyncioTestCase):
         await broker.buy("up-token", 2, 0.49, close_ts=1234)
         command, args = broker.request.await_args.args
         self.assertEqual(command, "buy")
-        self.assertEqual((args["tokenId"], args["budgetUsd"], args["referenceAsk"], args["closeTs"]), (
+        self.assertEqual((args["tokenId"], args["shares"], args["referenceAsk"], args["closeTs"]), (
             "up-token", 2, 0.49, 1234,
         ))
 
@@ -470,27 +470,27 @@ class DemoBridgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(fake.balance_refreshes, 1)
         self.assertEqual(fake.buys, [])
 
-    async def test_ladder_doubles_without_cap_and_resets_on_win(self):
+    async def test_demo_doubles_but_real_shares_increment_and_win_keeps_size(self):
         engine, mirror, _ = self.setup_engine({"filled": False, "status": "rejected"})
         engine.on_tick(0.30, 0.40, 0.60, 0.70)
         entry = engine.s.position
         for loss_count in range(1, 11):
             engine.s.position = entry
             engine.finalize_window(Side.DOWN)
-            self.assertEqual(mirror.budget_usd, 2 ** loss_count)
+            self.assertEqual(mirror.next_order_shares, 6 + loss_count)
             self.assertEqual(engine.s.budget_usd, 100 * 2 ** loss_count)
         engine.s.position = entry
         engine.finalize_window(Side.UP)
-        self.assertEqual(mirror.budget_usd, 1)
+        self.assertEqual(mirror.next_order_shares, 16)
         self.assertEqual(engine.s.budget_usd, 100)
 
-    async def test_next_window_uses_demo_size_and_real_budget(self):
+    async def test_next_window_uses_demo_size_and_real_share_count(self):
         engine, bridge, _ = self.setup_engine({"filled": False, "status": "rejected"})
         engine.on_tick(0.30, 0.40, 0.60, 0.70)
         bridge._queue.get_nowait()
         engine.finalize_window(Side.DOWN)
         self.assertEqual(engine.s.budget_usd, 200)
-        self.assertEqual(bridge.budget_usd, 2)
+        self.assertEqual(bridge.next_order_shares, 7)
         next_open = (int(time.time()) // 900) * 900 + 900
         next_window = WindowMarket(
             "btc-updown-5m-next", None, "up-next", "down-next",
@@ -500,8 +500,8 @@ class DemoBridgeTest(unittest.IsolatedAsyncioTestCase):
         engine.on_tick(0.30, 0.40, 0.60, 0.70, now=next_window.open_ts + 4)
         self.assertAlmostEqual(engine.s.position.cost, 200)
         next_intent = bridge._queue.get_nowait()
-        self.assertEqual((next_intent.slug, next_intent.budget_usd), (
-            next_window.slug, 2,
+        self.assertEqual((next_intent.slug, next_intent.order_shares), (
+            next_window.slug, 7,
         ))
 
     async def test_missing_candle_does_not_suppress_fixed_pattern(self):
@@ -592,13 +592,13 @@ class DemoBridgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(bridge._queue.empty())
         self.assertIn("LIVE_BUY_SKIPPED", [event[0] for event in fake.events])
         engine.finalize_window(Side.DOWN)
-        self.assertEqual(bridge.budget_usd, 2)
+        self.assertEqual(bridge.next_order_shares, 7)
 
         next_engine, next_bridge, _ = self.setup_engine({})
         next_bridge._ephemeral_guard = True
         next_bridge._started_at = next_engine.s.window.open_ts - 1
         next_engine.on_tick(0.30, 0.40, 0.60, 0.70)
-        self.assertEqual(next_bridge._queue.get_nowait().budget_usd, 1)
+        self.assertEqual(next_bridge._queue.get_nowait().order_shares, 6)
 
     async def test_competing_instances_reserve_only_once(self):
         first = LiveOrderGuard(self.guard_path)

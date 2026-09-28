@@ -10,7 +10,7 @@ const {
   OrderType,
 } = require('@polymarket/clob-client-v2');
 const { RelayClient } = require('@polymarket/builder-relayer-client');
-const { parseMarketResponse } = require('./order_utils');
+const { buyShareCount, parseShareBuyResponse } = require('./order_utils');
 
 const CLOB_HOST = 'https://clob.polymarket.com';
 const CHAIN_ID = 137;
@@ -95,24 +95,27 @@ class PolymarketTrader {
     return { matchingTrades: matches.length, orderId: orderId || null };
   }
 
-  async buy(tokenId, price, amount, closeMs) {
+  async buy(tokenId, price, shareCount, closeMs) {
+    const shares = buyShareCount(shareCount);
+    if (shares === null) {
+      return { filled: false, status: 'SHARES_OUT_OF_RANGE', shares: 0 };
+    }
     const tickSize = (await this.clob.getTickSize(tokenId)) || '0.01';
     const negRisk = (await this.clob.getNegRisk(tokenId)) || false;
     if (closeMs !== undefined && (!Number.isFinite(closeMs) || Date.now() >= closeMs)) {
       return { filled: false, status: 'WINDOW_CLOSED', shares: 0 };
     }
-    const response = await this.clob.createAndPostMarketOrder(
+    const response = await this.clob.createAndPostOrder(
       {
         tokenID: tokenId,
         price,
-        amount,
+        size: shares,
         side: Side.BUY,
-        orderType: OrderType.FAK,
       },
       { tickSize, negRisk },
       OrderType.FAK,
     );
-    return parseMarketResponse(response, 'BUY', amount);
+    return parseShareBuyResponse(response, shares, price);
   }
 }
 

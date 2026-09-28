@@ -37,32 +37,35 @@ are a wash. It does not use the exchange's official resolution.
 
 `TRADING_MODE=live` starts a separate Polymarket order worker.
 Each demo `CANDLE_BUY` event from an UP or DOWN pattern window queues **one** real
-FAK market buy for that window, denominated in USDC:
+FAK limit buy for that window, sized in shares:
 
-- The real budget starts at **$1**. Every scored demo loss doubles the next
-  real buy; every scored demo win resets it to $1. Scheduled SKIP and unknown
-  results leave it unchanged. There is **no configured stake maximum**:
-  consecutive losses request $1, $2, $4, $8, $16 and so on until insufficient
-  collateral or exchange rejection prevents a fill.
-- The real amount is never increased to meet a market minimum. An order
-  rejected by the exchange stays rejected; the demo still runs normally.
-- FAK fills any immediately available amount up to the requested USDC budget
+- The real order starts at **6 shares**. Every scored demo loss adds one share
+  to the next buy (6, 7, 8, 9, ...). A scored demo win leaves the current real
+  share count unchanged. Scheduled SKIP and unknown results also leave it
+  unchanged. There is **no configured share-count maximum**.
+- The share progression is process-local and starts again at 6 after a service
+  restart.
+- The order is sized by token shares, not by a fixed USDC budget. It is never
+  silently resized to meet a market minimum; an exchange rejection leaves the
+  demo running normally.
+- FAK fills any immediately available amount up to the requested share count
   and cancels the rest. It can partially fill or fail to fill.
-- The FAK market buy accepts available asks up to **$0.99 per share**, even if
+- The share-sized FAK limit buy accepts available asks up to **$0.99 per share**, even if
   that is much higher than the demo ask. The **$0.50 rule is a trigger on the
   observed ask, not a new real-order price cap**; the real quote may change
   before the order is filled. It can still fail if there is no
-  matching liquidity. It is a market-order request in **USDC**, not a request
-  for a fixed number of real shares.
+  matching liquidity. The $0.99 per-share limit means a 6-share request can
+  spend up to $5.94 before any applicable fees; later share counts increase
+  this possible spend.
 
 The live worker **only buys on `CANDLE_BUY` signals**. Demo take-profits,
 settlements, and scored price-trigger skips can change the next real buy
-budget, but they never submit a real sell. Bought shares remain for
+share count after a loss, but they never submit a real sell. Bought shares remain for
 Polymarket resolution; this app does not sell, redeem, or reconcile real
 positions.
 
 Real fills, rejections, errors, and eventual exchange outcomes **never change
-the demo balance, position, result, or sizing sequence**. Real-order
+the demo balance, position, result, or real share count**. Real-order
 attempts and results are printed to service logs and shown in the JSON state
 as `real_trading`. The dashboard also shows the live exchange's available
 USDC collateral balance, refreshed every 30 seconds and after a buy. It
@@ -71,7 +74,7 @@ are public, so visitors can see that balance. If the balance read fails,
 the dashboard shows it as unavailable rather than a demo or stale value.
 The public dashboard also has a Pause/Resume control, and any visitor can use
 it. Pausing discards queued real buys and prevents future real buys while demo
-trading continues; demo outcomes continue to update the real stake ladder. A
+trading continues; demo outcomes continue to update the real share count. A
 real order already submitted may still fill. Pause state is in memory and
 resets on service restart, so live buys are enabled again after a restart.
 Each process uses SQLite to reserve a market window

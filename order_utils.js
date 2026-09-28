@@ -22,7 +22,7 @@ function marketLimitPrice(side, bookPrice, referencePrice, slippage, tickSize) {
     return null;
   }
   if (side === 'BUY') {
-    // A market buy may cross any available ask up to $0.99 per share.
+    // A share-sized FAK buy may cross available asks up to $0.99 per share.
     const cap = Math.min(0.99, 1 - tick);
     const price = roundToTick(cap, tickSize, 'down');
     return price >= book && price >= tick ? price : null;
@@ -35,11 +35,12 @@ function marketLimitPrice(side, bookPrice, referencePrice, slippage, tickSize) {
   throw new Error(`Unknown order side: ${side}`);
 }
 
-function buyBudgetUsd(value) {
-  const amount = Number(value);
-  // The Martingale has no ceiling, but an order must still have a safe,
-  // whole-dollar positive USDC amount.
-  return Number.isSafeInteger(amount) && amount >= 1 ? amount : null;
+function buyShareCount(value) {
+  if (typeof value === 'boolean' || value === null || value === undefined || value === '') {
+    return null;
+  }
+  const shares = Number(value);
+  return Number.isSafeInteger(shares) && shares >= 1 ? shares : null;
 }
 
 function parseMarketResponse(response, side, requestedAmount) {
@@ -82,4 +83,24 @@ function parseMarketResponse(response, side, requestedAmount) {
   };
 }
 
-module.exports = { marketLimitPrice, buyBudgetUsd, parseMarketResponse, roundToTick };
+function parseShareBuyResponse(response, requestedShares, limitPrice) {
+  const shares = buyShareCount(requestedShares);
+  const price = Number(limitPrice);
+  if (shares === null || !Number.isFinite(price) || price <= 0 || price > 0.99) {
+    throw new Error('Invalid share-sized buy request');
+  }
+  const fill = parseMarketResponse(response, 'BUY', shares * price);
+  if (!fill.filled) return { ...fill, requestedShares: shares };
+  if (fill.shares > shares + 1e-6) {
+    throw new Error(`Matched share order exceeded requested size (order=${fill.orderId || 'unknown'})`);
+  }
+  return { ...fill, requestedShares: shares };
+}
+
+module.exports = {
+  marketLimitPrice,
+  buyShareCount,
+  parseMarketResponse,
+  parseShareBuyResponse,
+  roundToTick,
+};

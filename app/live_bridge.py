@@ -11,7 +11,7 @@ from .live_order_guard import LiveOrderGuard
 from .models import TradeLogEntry, WindowMarket
 
 
-LIVE_BASE_USD = 1.0
+LIVE_BASE_SHARES = 6
 EPHEMERAL_GUARD_DB = "/tmp/polymarket_live_orders.sqlite"
 BALANCE_REFRESH_SECONDS = 30
 
@@ -23,7 +23,7 @@ class OrderIntent:
     token_id: str
     reference_price: float
     close_ts: float
-    budget_usd: float = 0.0
+    order_shares: int = 0
     open_ts: float = 0.0
 
 
@@ -33,7 +33,7 @@ class LiveBridge:
     def __init__(self):
         self.enabled = config.TRADING_MODE == "live"
         self.broker = Broker()
-        self.budget_usd = LIVE_BASE_USD
+        self.next_order_shares = LIVE_BASE_SHARES
         self._queue: asyncio.Queue[Optional[OrderIntent]] = asyncio.Queue()
         self._task: Optional[asyncio.Task] = None
         self._failed = False
@@ -90,7 +90,7 @@ class LiveBridge:
                     "LIVE_BUY_SKIPPED",
                     window=intent.slug,
                     side=intent.side,
-                    trade_usd=intent.budget_usd,
+                    trade_shares=intent.order_shares,
                     note="dashboard pause discarded queued buy; demo continues",
                 )
         if changed:
@@ -124,7 +124,7 @@ class LiveBridge:
                     "LIVE_BUY_SKIPPED",
                     window=entry.window_slug,
                     side=entry.side,
-                    trade_usd=self.budget_usd,
+                    trade_shares=self.next_order_shares,
                     note="dashboard pause is active; demo trade continues",
                 )
                 return
@@ -143,11 +143,11 @@ class LiveBridge:
                 return
             self._queue.put_nowait(OrderIntent(
                 entry.window_slug, entry.side or "", token_id,
-                entry.price, window.close_ts, self.budget_usd, window.open_ts,
+                entry.price, window.close_ts, self.next_order_shares, window.open_ts,
             ))
             self.broker.log_event(
                 "LIVE_BUY_QUEUED", window=entry.window_slug,
-                side=entry.side, trade_usd=self.budget_usd,
+                side=entry.side, trade_shares=self.next_order_shares,
             )
             return
 
@@ -157,8 +157,8 @@ class LiveBridge:
         }:
             return
 
-        # Scored price skips move the ladder without inventing a trade or P&L.
-        # Real fills and unknown results never change the demo-driven budget.
+        # Scored price skips affect sizing without inventing a trade or P&L.
+        # Real fills and unknown results never change the demo-driven share size.
         if entry.event == "PRICE_FILTER_SKIPPED_WIN":
             outcome = 1
         elif entry.event == "PRICE_FILTER_SKIPPED_LOSS":
@@ -167,11 +167,9 @@ class LiveBridge:
             outcome = entry.pnl
         else:
             return
-        old_budget = self.budget_usd
+        old_shares = self.next_order_shares
         if outcome < 0:
-            self.budget_usd *= 2
-        elif outcome > 0:
-            self.budget_usd = LIVE_BASE_USD
+            self.next_order_shares += 1
         if self.enabled:
             note = (
                 f"demo {entry.event}: signal result={'win' if outcome > 0 else 'loss'}"
@@ -179,9 +177,14 @@ class LiveBridge:
                 else f"demo {entry.event}: pnl={entry.pnl:.4f}"
             )
             self.broker.log_event(
-                "LIVE_NEXT_BUDGET", window=entry.window_slug,
-                trade_usd=self.budget_usd,
-                note=f"{note}; next real stake ${old_budget:.2f} -> ${self.budget_usd:.2f}",
+                "LIVE_NEXT_ORDER_SIZE", window=entry.window_slug,
+                trade_shares=self.next_order_shares,
+                note=(
+                    f"{note}; next real order size {old_shares} -> "
+                    f"{self.next_order_shares} shares"
+                    if self.next_order_shares != old_shares
+                    else f"{note}; real order size stays at {self.next_order_shares} shares"
+                ),
             )
 
     async def _run(self):
@@ -222,7 +225,7 @@ class LiveBridge:
                 "LIVE_BUY_SKIPPED",
                 window=intent.slug,
                 side=intent.side,
-                trade_usd=intent.budget_usd,
+                trade_shares=intent.order_shares,
                 note="dashboard pause is active; queued real buy discarded",
             )
             return
@@ -262,7 +265,7 @@ class LiveBridge:
             self._buy_in_progress = True
             try:
                 result = await self.broker.buy(
-                    intent.token_id, intent.budget_usd, intent.reference_price,
+                    intent.token_id, intent.order_shares, intent.reference_price,
                     intent.close_ts,
                 )
             finally:
@@ -285,7 +288,7 @@ class LiveBridge:
                 event = "LIVE_BUY_REJECTED"
             self.broker.log_event(
                 event, window=intent.slug, side=intent.side,
-                trade_usd=intent.budget_usd,
+                trade_shares=intent.order_shares,
                 note=f"status={result.get('status', 'unknown')}",
             )
         except Exception as exc:
@@ -297,7 +300,7 @@ class LiveBridge:
                                       note=f"buy outcome uncertain; status could not be saved: {guard_exc}")
             self.broker.log_event(
                 "LIVE_BUY_ERROR", window=intent.slug, side=intent.side,
-                trade_usd=intent.budget_usd,
+                trade_shares=intent.order_shares,
                 note=f"{exc}; window reserved, further real buys halted until restart",
             )
 
@@ -320,7 +323,7 @@ class LiveBridge:
     def snapshot(self) -> dict:
         return {
             "enabled": self.enabled,
-            "budget_usd": self.budget_usd,
+            "next_order_shares": self.next_order_shares,
             "balance_usdc": self.broker.balance if self.enabled else None,
             "balance_updated_at": self.broker.balance_updated_at if self.enabled else None,
             "startup_failed": self._failed,

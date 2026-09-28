@@ -36,10 +36,10 @@ test('a buy is not submitted when metadata lookup finishes after the window clos
       signalNegRisk();
       return new Promise((resolve) => { resolveNegRisk = resolve; });
     },
-    createAndPostMarketOrder: async () => { posts += 1; },
+    createAndPostOrder: async () => { posts += 1; },
   };
   const closeMs = Date.now() + 60_000;
-  const buy = trader.buy('token', 0.49, 1, closeMs);
+  const buy = trader.buy('token', 0.99, 6, closeMs);
   await negRiskStarted;
   const actualNow = Date.now;
   try {
@@ -52,4 +52,33 @@ test('a buy is not submitted when metadata lookup finishes after the window clos
   } finally {
     Date.now = actualNow;
   }
+});
+
+test('client submits the requested share count as a marketable FAK limit order', async () => {
+  const trader = Object.create(PolymarketTrader.prototype);
+  const calls = [];
+  trader.clob = {
+    getTickSize: async () => '0.01',
+    getNegRisk: async () => false,
+    createAndPostOrder: async (...args) => {
+      calls.push(args);
+      return {
+        success: true,
+        status: 'matched',
+        orderID: 'share-buy',
+        makingAmount: '5.94',
+        takingAmount: '6',
+      };
+    },
+  };
+
+  const result = await trader.buy('up-token', 0.99, 6, Date.now() + 60_000);
+  assert.deepEqual(calls, [[
+    { tokenID: 'up-token', price: 0.99, size: 6, side: 'BUY' },
+    { tickSize: '0.01', negRisk: false },
+    'FAK',
+  ]]);
+  assert.equal(result.requestedShares, 6);
+  assert.equal(result.shares, 6);
+  assert.equal(result.cost, 5.94);
 });

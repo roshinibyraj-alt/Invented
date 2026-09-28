@@ -92,6 +92,7 @@ class Broker:
             "window": fields.get("window"),
             "side": fields.get("side"),
             "trade_usd": fields.get("trade_usd"),
+            "trade_shares": fields.get("trade_shares"),
             "note": safe_note,
         }), flush=True)
 
@@ -156,7 +157,7 @@ class Broker:
         })
 
     async def buy(
-        self, token_id: str, budget_usd: float, reference_ask: float,
+        self, token_id: str, share_count: int, reference_ask: float,
         close_ts: Optional[float] = None,
     ) -> dict:
         if self.live:
@@ -164,14 +165,16 @@ class Broker:
                 "buy",
                 {
                     "tokenId": token_id,
-                    "budgetUsd": budget_usd,
+                    "shares": share_count,
                     "referenceAsk": reference_ask,
                     "slippage": config.SLIPPAGE_CEILING,
                     "closeTs": close_ts,
                 },
             )
         price = max(float(reference_ask), 0.01)
-        shares = round(budget_usd / price, 4)
+        shares = float(share_count)
+        if not math.isfinite(shares) or shares < 1:
+            raise ValueError("share count must be a positive finite number")
         fee = self.taker_fee_amount(shares, price)
         return {
             "filled": True,

@@ -1,6 +1,6 @@
 'use strict';
 
-const { marketLimitPrice, buyBudgetUsd } = require('./order_utils');
+const { marketLimitPrice, buyShareCount } = require('./order_utils');
 
 async function placeBuy(trader, args) {
   const closeMs = Number(args.closeTs) * 1000;
@@ -29,17 +29,17 @@ async function placeBuy(trader, args) {
     return { filled: false, status: 'PRICE_MOVED', shares: 0 };
   }
 
-  // Never silently increase the real ladder budget to meet a market minimum.
-  const amount = buyBudgetUsd(args.budgetUsd);
-  if (amount === null) {
-    return { filled: false, status: 'BUDGET_OUT_OF_RANGE', shares: 0, limitPrice };
+  // Keep the requested token quantity explicit; never silently resize a buy.
+  const shares = buyShareCount(args.shares);
+  if (shares === null) {
+    return { filled: false, status: 'SHARES_OUT_OF_RANGE', shares: 0, limitPrice };
   }
 
   if (Date.now() >= closeMs) {
     return { filled: false, status: 'WINDOW_CLOSED', shares: 0, limitPrice };
   }
-  const result = await trader.buy(args.tokenId, limitPrice, amount, closeMs);
-  return { ...result, limitPrice, budgetUsd: amount };
+  const result = await trader.buy(args.tokenId, limitPrice, shares, closeMs);
+  return { ...result, limitPrice, requestedShares: shares };
 }
 
 module.exports = { placeBuy };
