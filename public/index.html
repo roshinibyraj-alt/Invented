@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>4-candle streak bot — REAL capital</title>
+<title>3-candle streak bot — REAL capital</title>
 <style>
   :root {
     --bg: #0b0d10; --panel: #14171c; --border: #262b33; --text: #e8ebf0; --dim: #8891a0;
@@ -30,16 +30,16 @@
 </style>
 </head>
 <body>
-  <h1>4-candle streak bot</h1>
+  <h1>3-candle streak bot</h1>
   <div class="warn" id="modeBanner">loading…</div>
   <div id="errBanner" class="err"></div>
 
   <div class="grid">
-    <div class="tile"><div class="n" id="wallet">—</div><div class="l">wallet balance (USDC)</div></div>
+    <div class="tile"><div class="n" id="wallet">—</div><div class="l" id="walletLabel">wallet balance (USDC)</div></div>
     <div class="tile"><div class="n" id="stakes">—</div><div class="l">next stake (shares) DOWN / UP</div></div>
     <div class="tile"><div class="n" id="realizedPnl">—</div><div class="l">realized P&amp;L (est.)</div></div>
     <div class="tile"><div class="n" id="winRate">—</div><div class="l">win rate (W / L)</div></div>
-    <div class="tile"><div class="n" id="candles">—</div><div class="l">last 4 closed candles</div></div>
+    <div class="tile"><div class="n" id="candles">—</div><div class="l">last 3 closed candles</div></div>
     <div class="tile"><div class="n" id="winStatus">—</div><div class="l">this window</div></div>
   </div>
 
@@ -78,7 +78,8 @@ async function poll() {
       mb.textContent = 'DEMO MODE — simulated fills on the real order book, no real orders, no real funds.';
       mb.style.cssText = 'background:#3a2f12;border-color:#f5b942;color:#f5b942';
     }
-    document.getElementById('wallet').textContent = s.mode === 'DEMO' ? 'DEMO' : (s.walletBalance == null ? '—' : '$' + s.walletBalance.toFixed(2));
+    document.getElementById('walletLabel').textContent = s.mode === 'DEMO' ? 'demo capital (USDC)' : 'wallet balance (USDC)';
+    document.getElementById('wallet').textContent = s.walletBalance == null ? '—' : '$' + s.walletBalance.toFixed(2);
     document.getElementById('stakes').textContent = s.stakes.DOWN + ' / ' + s.stakes.UP;
     const pnlEl = document.getElementById('realizedPnl');
     pnlEl.textContent = fmtMoney(s.stats.realizedPnl);

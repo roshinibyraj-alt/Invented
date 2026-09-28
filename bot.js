@@ -175,7 +175,8 @@ class Bot {
     if (paid > 0 && got > 0) price = paid / got;
 
     w.status = 'fired';
-    this.pending.push({ slug: w.slug, openTs: w.openTs, closeTs: w.window.closeTs, side, shares, price, firedAt: Date.now() });
+    this.pending.push({ id: result.id, slug: w.slug, openTs: w.openTs, closeTs: w.window.closeTs, side, shares, price, firedAt: Date.now() });
+    if (!this.live) this.walletBalance = this.trader.balance;
     this._push({ event: 'ENTRY_FILLED', slug: w.slug, side, shares, price: round(price, 4),
       note: `filled ${shares}sh ${side} @ ${round(price, 4)} (status ${st || 'n/a'}) -- holding to resolution` });
   }
@@ -226,6 +227,10 @@ class Bot {
   _settle(p, winner) {
     const win = winner === p.side;
     const outcome = win ? 'WIN' : 'LOSS';
+    if (typeof this.trader.settleDemoOrder === 'function') {
+      this.trader.settleDemoOrder(p.id, win);
+      this.walletBalance = this.trader.balance;
+    }
     const item = this.history[this._key(p.side)].find((h) => h.slug === p.slug);
     if (item && !item.final && item.outcome !== outcome) {
       this._push({ event: 'MISMATCH', slug: p.slug, note: `candle said ${item.outcome}, real resolution says ${outcome} -- ladder corrected` });
