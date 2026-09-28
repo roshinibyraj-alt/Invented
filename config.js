@@ -2,7 +2,7 @@
 
 // All strategy constants live here (the only Railway env var is PRIVATE_KEY).
 module.exports = {
-  STREAK_LEN: 3,               // consecutive same-color closed 5m candles that trigger a bet
+  STREAK_LEN: 3,               // consecutive close-to-close BTC 5m price moves that trigger a contrarian bet
   DEMO_STARTING_CAPITAL: 5000, // starting simulated balance in DEMO mode
   BASE_SHARES: 100,            // base stake in shares
   MAX_LOSS_DOUBLINGS: 2,       // 100 -> 200 -> 400, a 3rd straight loss resets to base

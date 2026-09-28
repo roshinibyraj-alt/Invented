@@ -23,7 +23,7 @@ class Bot {
     this.marketPrices = null;                      // current window's live CLOB quotes
     this.history = { UP: [], DOWN: [], ALL: [] };  // ladder history: {slug, outcome, final}
     this.stats = { wins: 0, losses: 0, noSignal: 0, voidNoTrigger: 0, voidNoFill: 0, voidNoData: 0, realizedPnl: 0 };
-    this.lastSignal = null;                        // {colors, side, slug}
+    this.lastSignal = null;                        // {priceMoves, closePrices, side, slug}
     this.walletBalance = null;
     this.startingCapital = this.live ? null : cfg.DEMO_STARTING_CAPITAL;
     this.error = null;
@@ -144,16 +144,17 @@ class Bot {
         return;
       }
       w.signal = sig;
-      this.lastSignal = { colors: sig.colors, side: sig.side, slug };
+      this.lastSignal = { priceMoves: sig.priceMoves, closePrices: sig.closePrices, side: sig.side, slug };
       if (!sig.side) {
         w.status = 'no_signal';
         this.stats.noSignal += 1;
-        this._push({ event: 'NO_TRADE', slug, note: `last ${cfg.STREAK_LEN} candles ${sig.colors.join('/')} -- no streak` });
+        this._push({ event: 'NO_TRADE', slug,
+          note: `last ${cfg.STREAK_LEN} BTC close-to-close moves ${sig.priceMoves.join('/')} -- no same-direction streak` });
         return;
       }
       w.status = 'watching';
       this._push({ event: 'SIGNAL', slug, side: sig.side,
-        note: `last ${cfg.STREAK_LEN} candles all ${sig.colors[0]} -> attempt ${sig.side} order after ${cfg.ENTRY_DELAY_MS / 1000}s (max price $${cfg.PRICE_CAP})` });
+        note: `last ${cfg.STREAK_LEN} BTC close-to-close moves all ${sig.priceMoves[0]} -> attempt ${sig.side} order after ${cfg.ENTRY_DELAY_MS / 1000}s (max price $${cfg.PRICE_CAP})` });
     }
 
     if (w.status !== 'watching' || elapsed < cfg.ENTRY_DELAY_MS) return;
@@ -443,15 +444,15 @@ class Bot {
 
 function describeWindow(w, now) {
   const elapsed = now - w.openTs * 1000;
-  const colors = w.signal?.colors?.join('/') || 'not available';
+  const priceMoves = w.signal?.priceMoves?.join('/') || 'not available';
   switch (w.status) {
     case 'starting':
-      return 'Waiting for the active market and three closed candles.';
+      return 'Waiting for the active market and recent BTC close-to-close prices.';
     case 'watching':
       if (elapsed < cfg.ENTRY_DELAY_MS) {
-        return `Three-candle ${w.signal.side} signal confirmed; first order attempt in ${Math.ceil((cfg.ENTRY_DELAY_MS - elapsed) / 1000)}s.`;
+        return `Three-move price streak confirms a ${w.signal.side} bet; first order attempt in ${Math.ceil((cfg.ENTRY_DELAY_MS - elapsed) / 1000)}s.`;
       }
-      return `Three-candle ${w.signal.side} signal confirmed; attempting an order up to $${cfg.PRICE_CAP}.`;
+      return `Three-move price streak confirms a ${w.signal.side} bet; attempting an order up to $${cfg.PRICE_CAP}.`;
     case 'firing':
       return `Submitting the ${w.signal?.side || ''} FOK order, capped at $${cfg.PRICE_CAP}.`;
     case 'fired':
@@ -459,7 +460,7 @@ function describeWindow(w, now) {
         ? `Entry filled. ${w.marketWinner} already reached a $${cfg.SETTLEMENT_PRICE_THRESHOLD.toFixed(2)} CLOB midpoint.`
         : `Entry filled. Holding until either CLOB midpoint reaches $${cfg.SETTLEMENT_PRICE_THRESHOLD.toFixed(2)}.`;
     case 'no_signal':
-      return `No trade: the last ${cfg.STREAK_LEN} closed candles were ${colors}, not a same-color streak.`;
+      return `No trade: the last ${cfg.STREAK_LEN} BTC close-to-close moves were ${priceMoves}; they were not all UP or all DOWN.`;
     case 'void_no_trigger':
       return `Skipped: no entry order was attempted before the ${cfg.ENTRY_DEADLINE_MS / 1000}s cutoff.`;
     case 'void_no_fill':

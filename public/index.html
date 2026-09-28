@@ -46,7 +46,7 @@
     <div class="tile"><div class="n" id="winRate">—</div><div class="l">win rate (W / L)</div></div>
     <div class="tile"><div class="n" id="upMidpoint">—</div><div class="l">active UP midpoint</div><div class="l" id="upQuote">bid — · ask —</div></div>
     <div class="tile"><div class="n" id="downMidpoint">—</div><div class="l">active DOWN midpoint</div><div class="l" id="downQuote">bid — · ask —</div></div>
-    <div class="tile"><div class="n" id="candles">—</div><div class="l">last 3 closed candles</div></div>
+    <div class="tile"><div class="n" id="priceMoves">—</div><div class="l">last 3 BTC close-to-close moves</div></div>
     <div class="tile"><div class="n" id="winStatus">—</div><div class="l">this window</div></div>
   </div>
 
@@ -147,8 +147,13 @@ async function poll() {
     document.getElementById('winRate').textContent = wr + ' (' + w + '/' + l + ')';
 
     const sig = s.lastSignal;
-    document.getElementById('candles').innerHTML = sig
-      ? sig.colors.map(c => '<span class="' + (c === 'GREEN' ? 'pos' : 'neg') + '">●</span>').join(' ') + (sig.side ? ' → ' + sig.side : '')
+    document.getElementById('priceMoves').innerHTML = sig
+      ? sig.priceMoves.map(move => {
+          const cls = move === 'UP' ? 'pos' : (move === 'DOWN' ? 'neg' : '');
+          const arrow = move === 'UP' ? '↑' : (move === 'DOWN' ? '↓' : '↔');
+          return '<span class="' + cls + '">' + arrow + ' ' + move + '</span>';
+        }).join(' ')
+          + (sig.side ? ' → BET ' + escapeHtml(sig.side) : '')
       : '—';
 
     const win = s.window;

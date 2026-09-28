@@ -21,10 +21,7 @@ async function fetchClosedCandles(nowMs = Date.now()) {
   return rows
     .map((r) => ({
       openTs: r[0],
-      open: parseFloat(r[3]),
       close: parseFloat(r[4]),
-      // flat candle (close === open) counts as GREEN, same as Polymarket's "Up" (end >= start)
-      color: parseFloat(r[4]) >= parseFloat(r[3]) ? 'GREEN' : 'RED',
     }))
     .filter((c) => c.openTs + GRANULARITY <= nowSec)
     .sort((a, b) => a.openTs - b.openTs);
@@ -32,25 +29,35 @@ async function fetchClosedCandles(nowMs = Date.now()) {
 
 /**
  * Signal for the window opening at windowOpenTs.
- * Needs the last STREAK_LEN closed candles to be consecutive and to end at the
- * candle that just closed (windowOpenTs - 300); otherwise not ready yet.
- * Returns { ready:false, reason } or { ready:true, colors, side } where side is
- * 'DOWN' after all-green, 'UP' after all-red, null otherwise.
+ * Counts consecutive close-to-close price moves ending at the last candle
+ * before the window. Three rises signal DOWN; three falls signal UP.
  */
 function evaluateSignal(candles, windowOpenTs) {
-  const last = candles.slice(-STREAK_LEN);
-  if (last.length < STREAK_LEN) return { ready: false, reason: `only ${last.length} closed candles available` };
+  const requiredCloses = STREAK_LEN + 1;
+  const last = candles.slice(-requiredCloses);
+  if (last.length < requiredCloses) {
+    return { ready: false, reason: `only ${last.length} closed candles available; need ${requiredCloses} for ${STREAK_LEN} price moves` };
+  }
   if (last[last.length - 1].openTs !== windowOpenTs - GRANULARITY) {
     return { ready: false, reason: 'latest closed candle not published yet' };
   }
   for (let i = 1; i < last.length; i++) {
     if (last[i].openTs - last[i - 1].openTs !== GRANULARITY) return { ready: false, reason: 'gap in candle data' };
   }
-  const colors = last.map((c) => c.color);
+  if (last.some((c) => !Number.isFinite(c.close))) {
+    return { ready: false, reason: 'invalid candle close price' };
+  }
+  const closePrices = last.map((c) => c.close);
+  const priceMoves = [];
+  for (let i = 1; i < closePrices.length; i++) {
+    if (closePrices[i] > closePrices[i - 1]) priceMoves.push('UP');
+    else if (closePrices[i] < closePrices[i - 1]) priceMoves.push('DOWN');
+    else priceMoves.push('FLAT');
+  }
   let side = null;
-  if (colors.every((c) => c === 'GREEN')) side = 'DOWN';
-  else if (colors.every((c) => c === 'RED')) side = 'UP';
-  return { ready: true, colors, side };
+  if (priceMoves.every((move) => move === 'UP')) side = 'DOWN';
+  else if (priceMoves.every((move) => move === 'DOWN')) side = 'UP';
+  return { ready: true, priceMoves, closePrices, side };
 }
 
 module.exports = { fetchClosedCandles, evaluateSignal };
