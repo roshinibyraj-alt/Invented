@@ -21,6 +21,7 @@
   .pos { color: var(--mint); } .neg { color: var(--coral); }
   .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px; margin-bottom: 16px; }
   .panel h2 { font-size: 13px; color: var(--dim); text-transform: uppercase; letter-spacing: .04em; margin: 0 0 10px; }
+  .table-wrap { overflow-x: auto; }
   table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
   th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--border); white-space: nowrap; }
   th { color: var(--dim); font-weight: 600; }
@@ -35,10 +36,14 @@
   <div id="errBanner" class="err"></div>
 
   <div class="grid">
-    <div class="tile"><div class="n" id="wallet">—</div><div class="l" id="walletLabel">wallet balance (USDC)</div></div>
+    <div class="tile"><div class="n" id="capital">—</div><div class="l" id="capitalLabel">estimated capital / equity</div></div>
+    <div class="tile"><div class="n" id="wallet">—</div><div class="l" id="walletLabel">available wallet cash (USDC)</div></div>
+    <div class="tile"><div class="n" id="unrealizedPnl">—</div><div class="l">unrealized P&amp;L (midpoint estimate)</div></div>
     <div class="tile"><div class="n" id="stakes">—</div><div class="l">next stake (shares) DOWN / UP</div></div>
     <div class="tile"><div class="n" id="realizedPnl">—</div><div class="l">realized P&amp;L (est.)</div></div>
     <div class="tile"><div class="n" id="winRate">—</div><div class="l">win rate (W / L)</div></div>
+    <div class="tile"><div class="n" id="upMidpoint">—</div><div class="l">active UP midpoint</div><div class="l" id="upQuote">bid — · ask —</div></div>
+    <div class="tile"><div class="n" id="downMidpoint">—</div><div class="l">active DOWN midpoint</div><div class="l" id="downQuote">bid — · ask —</div></div>
     <div class="tile"><div class="n" id="candles">—</div><div class="l">last 3 closed candles</div></div>
     <div class="tile"><div class="n" id="winStatus">—</div><div class="l">this window</div></div>
   </div>
@@ -50,16 +55,34 @@
   </div>
 
   <div class="panel">
+    <h2>Open positions</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>window</th><th>side</th><th>shares</th><th>entry</th><th>midpoint</th><th>market value</th><th>unrealized P&amp;L</th><th>result check</th></tr></thead>
+        <tbody id="positionsBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel">
     <h2>Event log</h2>
-    <table>
-      <thead><tr><th>time</th><th>event</th><th>window</th><th>side</th><th>shares</th><th>pnl</th><th>note</th></tr></thead>
-      <tbody id="logBody"></tbody>
-    </table>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>time</th><th>event</th><th>window</th><th>side</th><th>shares</th><th>pnl</th><th>note</th></tr></thead>
+        <tbody id="logBody"></tbody>
+      </table>
+    </div>
   </div>
 
 <script>
 function fmtTime(ts) { return new Date(ts).toLocaleTimeString(); }
 function fmtMoney(n) { return n == null ? '—' : (n >= 0 ? '+' : '') + '$' + n.toFixed(2); }
+function fmtAmount(n) { return n == null ? '—' : '$' + n.toFixed(2); }
+function fmtPrice(n) { return typeof n === 'number' && Number.isFinite(n) ? '$' + n.toFixed(3) : '—'; }
+function setPnl(el, value) {
+  el.textContent = fmtMoney(value);
+  el.className = 'n' + (value == null ? '' : (value >= 0 ? ' pos' : ' neg'));
+}
 
 async function poll() {
   try {
@@ -78,12 +101,21 @@ async function poll() {
       mb.textContent = 'DEMO MODE — simulated fills on the real order book, no real orders, no real funds.';
       mb.style.cssText = 'background:#3a2f12;border-color:#f5b942;color:#f5b942';
     }
-    document.getElementById('walletLabel').textContent = s.mode === 'DEMO' ? 'demo capital (USDC)' : 'wallet balance (USDC)';
+    document.getElementById('capitalLabel').textContent = s.mode === 'DEMO' ? 'demo capital / equity (est.)' : 'bot capital / equity (est.)';
+    document.getElementById('capital').textContent = s.capital == null ? '—' : '$' + s.capital.toFixed(2);
+    document.getElementById('walletLabel').textContent = s.mode === 'DEMO' ? 'available demo cash (USDC)' : 'available wallet cash (USDC)';
     document.getElementById('wallet').textContent = s.walletBalance == null ? '—' : '$' + s.walletBalance.toFixed(2);
     document.getElementById('stakes').textContent = s.stakes.DOWN + ' / ' + s.stakes.UP;
-    const pnlEl = document.getElementById('realizedPnl');
-    pnlEl.textContent = fmtMoney(s.stats.realizedPnl);
-    pnlEl.className = 'n ' + (s.stats.realizedPnl >= 0 ? 'pos' : 'neg');
+    setPnl(document.getElementById('realizedPnl'), s.stats.realizedPnl);
+    setPnl(document.getElementById('unrealizedPnl'), s.unrealizedPnl);
+
+    const prices = s.window && s.window.prices;
+    const up = prices && prices.up;
+    const down = prices && prices.down;
+    document.getElementById('upMidpoint').textContent = fmtPrice(up && up.midpoint);
+    document.getElementById('upQuote').textContent = 'bid ' + fmtPrice(up && up.bestBid) + ' · ask ' + fmtPrice(up && up.bestAsk);
+    document.getElementById('downMidpoint').textContent = fmtPrice(down && down.midpoint);
+    document.getElementById('downQuote').textContent = 'bid ' + fmtPrice(down && down.bestBid) + ' · ask ' + fmtPrice(down && down.bestAsk);
 
     const w = s.stats.wins, l = s.stats.losses;
     const wr = (w + l) > 0 ? ((100 * w / (w + l)).toFixed(1) + '%') : '—';
@@ -104,6 +136,20 @@ async function poll() {
       + (s.uptimeSec%60) + 's · pending ' + s.pending.length + ' · no-signal ' + s.stats.noSignal
       + ' · void (no trigger / no fill) ' + s.stats.voidNoTrigger + ' / ' + s.stats.voidNoFill;
     document.getElementById('walletAddr').textContent = s.walletAddress || '';
+
+    const positionRows = s.pending.map(p =>
+      '<tr>' +
+        '<td>' + p.slug.replace('btc-updown-5m-', '') + '</td>' +
+        '<td>' + p.side + '</td>' +
+        '<td>' + p.shares + '</td>' +
+        '<td>' + fmtPrice(p.entryPrice) + '</td>' +
+        '<td>' + fmtPrice(p.markPrice) + '</td>' +
+        '<td>' + fmtAmount(p.marketValue) + '</td>' +
+        '<td class="' + (p.unrealizedPnl == null ? '' : (p.unrealizedPnl >= 0 ? 'pos' : 'neg')) + '">' + fmtMoney(p.unrealizedPnl) + '</td>' +
+        '<td>' + p.resultCheck + '</td>' +
+      '</tr>'
+    ).join('');
+    document.getElementById('positionsBody').innerHTML = positionRows || '<tr><td colspan="8">No open positions</td></tr>';
 
     const rows = s.log.map(e => {
       const cls = 'ev-' + e.event;
