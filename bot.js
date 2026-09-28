@@ -19,6 +19,7 @@ class Bot {
     this.live = !!opts.live;
     this.w = null;                                 // current window state
     this.pending = [];                             // filled bets awaiting real resolution
+    this.trades = [];                              // recent filled trades, including settled positions
     this.marketPrices = null;                      // current window's live CLOB quotes
     this.history = { UP: [], DOWN: [], ALL: [] };  // ladder history: {slug, outcome, final}
     this.stats = { wins: 0, losses: 0, noSignal: 0, voidNoTrigger: 0, voidNoFill: 0, voidNoData: 0, realizedPnl: 0 };
@@ -86,6 +87,7 @@ class Bot {
     if (!this.w || this.w.slug !== slug) {
       this.w = { slug, openTs, status: 'starting', window: null, signal: null, lastAsk: null };
       this.marketPrices = null;
+      this.lastSignal = null;
     }
     const w = this.w;
     if (DONE.has(w.status)) {
@@ -116,7 +118,7 @@ class Bot {
         w.status = 'void_no_trigger';
         this.stats.voidNoTrigger += 1;
         this._push({ event: 'VOID', slug, side: w.signal.side,
-          note: `price never went below ${cfg.PRICE_TRIGGER} before ${cfg.ENTRY_DEADLINE_MS / 1000}s -- void, ladder unchanged` });
+          note: `no order was attempted before the ${cfg.ENTRY_DEADLINE_MS / 1000}s entry cutoff -- void, ladder unchanged` });
       } else {
         w.status = 'void_no_data';
         this.stats.voidNoData += 1;
@@ -148,7 +150,7 @@ class Bot {
       }
       w.status = 'watching';
       this._push({ event: 'SIGNAL', slug, side: sig.side,
-        note: `last ${cfg.STREAK_LEN} candles all ${sig.colors[0]} -> buy ${sig.side} once ask < ${cfg.PRICE_TRIGGER}` });
+        note: `last ${cfg.STREAK_LEN} candles all ${sig.colors[0]} -> attempt ${sig.side} order after ${cfg.ENTRY_DELAY_MS / 1000}s (max price $${cfg.PRICE_CAP})` });
     }
 
     if (w.status !== 'watching' || elapsed < cfg.ENTRY_DELAY_MS) return;
@@ -157,10 +159,11 @@ class Bot {
     const token = side === 'UP' ? w.window.tokenUp : w.window.tokenDown;
     const ask = bestAsk(await this.trader.getOrderBook(token));
     w.lastAsk = ask;
-    if (ask !== null && ask < cfg.PRICE_TRIGGER) await this._fire(w, side, token, ask);
+    await this._fire(w, side, token, ask);
   }
 
   async _refreshMarketData(window) {
+    const requestStartedAt = Date.now();
     const tokenIds = new Set();
     if (window?.tokenUp) tokenIds.add(window.tokenUp);
     if (window?.tokenDown) tokenIds.add(window.tokenDown);
@@ -197,6 +200,24 @@ class Bot {
       const cost = estimatedPositionCost(p);
       p.unrealizedPnl = p.marketValue === null || cost === null ? null : p.marketValue - cost;
       p.quoteUpdatedAt = updatedAt;
+      p.markStatus = p.markPrice === null
+        ? 'No two-sided CLOB quote; market value and open P&L are unavailable'
+        : 'Marked using the UP/DOWN token bid-ask midpoint';
+
+      const checkAt = p.openTs * 1000 + cfg.SETTLEMENT_CHECK_AFTER_MS;
+      const priorWinner = p.settlementQuote && winnerFromMidpoints(
+        p.settlementQuote.upMidpoint,
+        p.settlementQuote.downMidpoint,
+        cfg.SETTLEMENT_PRICE_THRESHOLD,
+      );
+      if (requestStartedAt >= checkAt && updatedAt >= checkAt && !priorWinner
+        && Number.isFinite(up.midpoint) && Number.isFinite(down.midpoint)) {
+        p.settlementQuote = {
+          upMidpoint: up.midpoint,
+          downMidpoint: down.midpoint,
+          updatedAt,
+        };
+      }
     }
   }
 
@@ -204,7 +225,7 @@ class Bot {
     w.status = 'firing';
     const shares = this._stake(side);
     this._push({ event: 'FIRING', slug: w.slug, side, shares,
-      note: `ask ${ask} < ${cfg.PRICE_TRIGGER} -> buying ${shares}sh at any price (limit ${cfg.PRICE_CAP})` });
+      note: `signal confirmed -> attempting ${shares}sh at the available ask (max $${cfg.PRICE_CAP}; FOK); current ask ${ask == null ? 'unavailable' : '$' + ask}` });
 
     let result;
     try {
@@ -231,11 +252,20 @@ class Bot {
     if (paid > 0 && got > 0) price = paid / got;
 
     w.status = 'fired';
-    this.pending.push({
+    const position = {
       id: result.id, tokenId: token, tokenUp: w.window.tokenUp, tokenDown: w.window.tokenDown,
       slug: w.slug, openTs: w.openTs, closeTs: w.window.closeTs, side, shares, price, firedAt: Date.now(),
-      upMidpoint: null, downMidpoint: null, markPrice: null, marketValue: null, unrealizedPnl: null, quoteUpdatedAt: null,
-    });
+      status: 'OPEN', winner: null, settledAt: null, realizedPnl: null, settlementQuote: null,
+      upMidpoint: null, downMidpoint: null, markPrice: null, marketValue: null, unrealizedPnl: null,
+      quoteUpdatedAt: null, markStatus: 'Waiting for the first CLOB quote',
+    };
+    this.pending.push(position);
+    this.trades.push(position);
+    while (this.trades.length > 100) {
+      const settledIndex = this.trades.findIndex((trade) => trade.status !== 'OPEN');
+      if (settledIndex === -1) break;
+      this.trades.splice(settledIndex, 1);
+    }
     if (!this.live) this.walletBalance = this.trader.balance;
     this._push({ event: 'ENTRY_FILLED', slug: w.slug, side, shares, price: round(price, 4),
       note: `filled ${shares}sh ${side} @ ${round(price, 4)} (status ${st || 'n/a'}) -- holding to resolution` });
@@ -255,7 +285,12 @@ class Bot {
       let now = Date.now();
       const staleDueQuote = this.pending.some((p) => {
         const checkAt = p.openTs * 1000 + cfg.SETTLEMENT_CHECK_AFTER_MS;
-        return now >= checkAt && (
+        const capturedWinner = p.settlementQuote && winnerFromMidpoints(
+          p.settlementQuote.upMidpoint,
+          p.settlementQuote.downMidpoint,
+          cfg.SETTLEMENT_PRICE_THRESHOLD,
+        );
+        return now >= checkAt && !capturedWinner && (
           !p.quoteUpdatedAt
           || p.quoteUpdatedAt < checkAt
           || now - p.quoteUpdatedAt > SETTLEMENT_QUOTE_MAX_AGE_MS
@@ -269,15 +304,14 @@ class Bot {
       for (const p of this.pending) {
         const checkAt = p.openTs * 1000 + cfg.SETTLEMENT_CHECK_AFTER_MS;
         if (now < checkAt) { keep.push(p); continue; }
-        const quoteIsFresh = p.quoteUpdatedAt >= checkAt
-          && now - p.quoteUpdatedAt <= SETTLEMENT_QUOTE_MAX_AGE_MS;
-        const winner = quoteIsFresh
-          ? winnerFromMidpoints(p.upMidpoint, p.downMidpoint, cfg.SETTLEMENT_PRICE_THRESHOLD)
+        const quote = p.settlementQuote;
+        const winner = quote && quote.updatedAt >= checkAt
+          ? winnerFromMidpoints(quote.upMidpoint, quote.downMidpoint, cfg.SETTLEMENT_PRICE_THRESHOLD)
           : null;
         if (!winner) {
           if (!p.settlementWarningLogged && now - checkAt > SETTLEMENT_WARNING_MS) {
             this._push({ event: 'SETTLEMENT_TIMEOUT', slug: p.slug, side: p.side, shares: p.shares,
-              note: 'no unique CLOB midpoint above $0.95 yet -- keeping position open and checking again' });
+              note: `${describeSettlement(p, now)} -- keeping position open and checking again` });
             p.settlementWarningLogged = true;
           }
           keep.push(p);
@@ -303,9 +337,13 @@ class Bot {
     const pnl = win ? p.shares - cost : -cost;
     if (win) this.stats.wins += 1; else this.stats.losses += 1;
     this.stats.realizedPnl += pnl;
+    p.status = win ? 'SETTLED_WIN' : 'SETTLED_LOSS';
+    p.winner = winner;
+    p.realizedPnl = round(pnl, 2);
+    p.settledAt = Date.now();
     this._push({ event: win ? 'SETTLED_WIN' : 'SETTLED_LOSS', slug: p.slug, side: p.side, shares: p.shares,
       pnl: round(pnl, 2),
-      note: `297s+ CLOB midpoint rule selected ${winner} -- ${outcome} on ${p.side} ${p.shares}sh, est. pnl ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)} (incl. est. fee) -- next ${p.side} stake ${this._stake(p.side)}sh` });
+      note: `297s+ CLOB midpoint snapshot UP $${p.settlementQuote.upMidpoint.toFixed(3)} / DOWN $${p.settlementQuote.downMidpoint.toFixed(3)} selected ${winner} -- ${outcome} on ${p.side} ${p.shares}sh, est. pnl ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)} (incl. est. fee) -- next ${p.side} stake ${this._stake(p.side)}sh` });
   }
 
   async _balanceLoop() {
@@ -335,10 +373,28 @@ class Bot {
         markPrice: p.markPrice,
         marketValue: p.marketValue,
         unrealizedPnl: p.unrealizedPnl,
-        resultCheck: now < checkAt
-          ? `checks in ${Math.ceil((checkAt - now) / 1000)}s`
-          : 'waiting for one midpoint above $0.95',
+        markStatus: p.markStatus,
+        settlementQuote: p.settlementQuote,
+        resultCheck: describeSettlement(p, now),
         quoteUpdatedAt: p.quoteUpdatedAt,
+      };
+    });
+    const recentTrades = this.trades.slice(-50).reverse().map((p) => {
+      const open = p.status === 'OPEN';
+      return {
+        slug: p.slug,
+        side: p.side,
+        shares: p.shares,
+        openedAt: p.firedAt,
+        entryPrice: p.price,
+        markPrice: open ? p.markPrice : null,
+        marketValue: open ? p.marketValue : null,
+        pnl: open ? p.unrealizedPnl : p.realizedPnl,
+        pnlType: open ? 'unrealized' : 'realized',
+        status: p.status,
+        statusDetail: open
+          ? `${p.markStatus}; ${describeSettlement(p, now)}`
+          : `Winner ${p.winner} from CLOB midpoint snapshot UP $${p.settlementQuote.upMidpoint.toFixed(3)} / DOWN $${p.settlementQuote.downMidpoint.toFixed(3)}`,
       };
     });
     const marksComplete = positions.every((p) => p.unrealizedPnl !== null);
@@ -355,6 +411,9 @@ class Bot {
       walletBalance: this.walletBalance,
       startingCapital: this.startingCapital,
       capital,
+      capitalStatus: capital === null
+        ? (positions.length ? 'Equity estimate unavailable because at least one open position has no two-sided midpoint' : 'Waiting for starting capital')
+        : 'Estimated from starting capital, realized P&L, and midpoint-marked open positions',
       unrealizedPnl,
       walletAddress: this.trader.depositWallet || this.trader.address,
       window: w ? {
@@ -362,6 +421,7 @@ class Bot {
         status: w.status,
         lastAsk: w.lastAsk,
         side: w.signal ? w.signal.side : null,
+         reason: describeWindow(w, now),
         prices: this.marketPrices?.slug === w.slug
           ? { up: this.marketPrices.up, down: this.marketPrices.down, updatedAt: this.marketPrices.updatedAt }
           : null,
@@ -369,10 +429,61 @@ class Bot {
       lastSignal: this.lastSignal,
       stakes: { DOWN: this._stake('DOWN'), UP: this._stake('UP') },
       pending: positions,
+      trades: recentTrades,
       stats: this.stats,
       log: this.log.slice(-100).reverse(),
     };
   }
+}
+
+function describeWindow(w, now) {
+  const elapsed = now - w.openTs * 1000;
+  const colors = w.signal?.colors?.join('/') || 'not available';
+  switch (w.status) {
+    case 'starting':
+      return 'Waiting for the active market and three closed candles.';
+    case 'watching':
+      if (elapsed < cfg.ENTRY_DELAY_MS) {
+        return `Three-candle ${w.signal.side} signal confirmed; first order attempt in ${Math.ceil((cfg.ENTRY_DELAY_MS - elapsed) / 1000)}s.`;
+      }
+      return `Three-candle ${w.signal.side} signal confirmed; attempting an order up to $${cfg.PRICE_CAP}.`;
+    case 'firing':
+      return `Submitting the ${w.signal?.side || ''} FOK order, capped at $${cfg.PRICE_CAP}.`;
+    case 'fired':
+      return `Entry filled. Holding until one CLOB midpoint is strictly above $${cfg.SETTLEMENT_PRICE_THRESHOLD} after 297s.`;
+    case 'no_signal':
+      return `No trade: the last ${cfg.STREAK_LEN} closed candles were ${colors}, not a same-color streak.`;
+    case 'void_no_trigger':
+      return `Skipped: no entry order was attempted before the ${cfg.ENTRY_DEADLINE_MS / 1000}s cutoff.`;
+    case 'void_no_fill':
+      return `Signal found, but the FOK order did not fill at or below $${cfg.PRICE_CAP}; no shares were entered.`;
+    case 'void_no_data':
+      return `Skipped: market or candle data was unavailable before the ${cfg.ENTRY_DEADLINE_MS / 1000}s cutoff.`;
+    default:
+      return `Window status: ${w.status}.`;
+  }
+}
+
+function describeSettlement(position, now) {
+  const checkAt = position.openTs * 1000 + cfg.SETTLEMENT_CHECK_AFTER_MS;
+  if (now < checkAt) {
+    return `Outcome checks start after 297s (in ${Math.ceil((checkAt - now) / 1000)}s)`;
+  }
+
+  const quote = position.settlementQuote;
+  if (!quote || quote.updatedAt < checkAt) {
+    return 'No two-sided UP/DOWN midpoint captured after 297s; holding open';
+  }
+
+  const winner = winnerFromMidpoints(
+    quote.upMidpoint,
+    quote.downMidpoint,
+    cfg.SETTLEMENT_PRICE_THRESHOLD,
+  );
+  if (!winner) {
+    return `No unique side strictly above $${cfg.SETTLEMENT_PRICE_THRESHOLD} (UP $${quote.upMidpoint.toFixed(3)} / DOWN $${quote.downMidpoint.toFixed(3)}); holding open`;
+  }
+  return `Unique ${winner} midpoint captured after 297s; applying result`;
 }
 
 function bestAsk(book) {

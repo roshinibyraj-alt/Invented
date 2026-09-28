@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>3-candle streak bot — REAL capital</title>
+<title>3-candle streak bot — trade dashboard</title>
 <style>
   :root {
     --bg: #0b0d10; --panel: #14171c; --border: #262b33; --text: #e8ebf0; --dim: #8891a0;
@@ -25,6 +25,8 @@
   table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
   th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--border); white-space: nowrap; }
   th { color: var(--dim); font-weight: 600; }
+  .hint { color: var(--dim); font-size: 12px; margin-top: 4px; }
+  .status-detail { color: var(--dim); white-space: normal; min-width: 260px; }
   .ev-ENTRY_FILLED { color: var(--amber); } .ev-SETTLED_WIN { color: var(--mint); } .ev-SETTLED_LOSS { color: var(--coral); }
   .ev-ERROR { color: var(--coral); } .ev-VOID, .ev-NO_TRADE, .ev-WAIT { color: var(--dim); } .ev-SIGNAL, .ev-FIRING { color: var(--amber); } .ev-MISMATCH { color: var(--coral); }
   .addr { font-family: ui-monospace, monospace; font-size: 11px; color: var(--dim); word-break: break-all; }
@@ -36,9 +38,9 @@
   <div id="errBanner" class="err"></div>
 
   <div class="grid">
-    <div class="tile"><div class="n" id="capital">—</div><div class="l" id="capitalLabel">estimated capital / equity</div></div>
+    <div class="tile"><div class="n" id="capital">—</div><div class="l" id="capitalLabel">estimated capital / equity</div><div class="hint" id="capitalStatus"></div></div>
     <div class="tile"><div class="n" id="wallet">—</div><div class="l" id="walletLabel">available wallet cash (USDC)</div></div>
-    <div class="tile"><div class="n" id="unrealizedPnl">—</div><div class="l">unrealized P&amp;L (midpoint estimate)</div></div>
+    <div class="tile"><div class="n" id="unrealizedPnl">—</div><div class="l">unrealized P&amp;L (midpoint estimate)</div><div class="hint" id="unrealizedHelp"></div></div>
     <div class="tile"><div class="n" id="stakes">—</div><div class="l">next stake (shares) DOWN / UP</div></div>
     <div class="tile"><div class="n" id="realizedPnl">—</div><div class="l">realized P&amp;L (est.)</div></div>
     <div class="tile"><div class="n" id="winRate">—</div><div class="l">win rate (W / L)</div></div>
@@ -51,15 +53,17 @@
   <div class="panel">
     <h2>Status</h2>
     <div id="statusLine" style="color: var(--dim)">loading…</div>
+    <div class="hint" id="windowReason"></div>
     <div class="addr" id="walletAddr"></div>
   </div>
 
   <div class="panel">
-    <h2>Open positions</h2>
+    <h2>Recent trades</h2>
+    <div class="hint">Open P&amp;L is an estimate from the latest two-sided midpoint. Settled P&amp;L includes estimated fees. A missing CLOB quote is shown as unavailable, not zero.</div>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>window</th><th>side</th><th>shares</th><th>entry</th><th>midpoint</th><th>market value</th><th>unrealized P&amp;L</th><th>result check</th></tr></thead>
-        <tbody id="positionsBody"></tbody>
+        <thead><tr><th>entered</th><th>window</th><th>side</th><th>shares</th><th>entry</th><th>midpoint</th><th>market value</th><th>P&amp;L</th><th>status / detail</th></tr></thead>
+        <tbody id="tradesBody"></tbody>
       </table>
     </div>
   </div>
@@ -75,10 +79,27 @@
   </div>
 
 <script>
-function fmtTime(ts) { return new Date(ts).toLocaleTimeString(); }
-function fmtMoney(n) { return n == null ? '—' : (n >= 0 ? '+' : '') + '$' + n.toFixed(2); }
-function fmtAmount(n) { return n == null ? '—' : '$' + n.toFixed(2); }
+function fmtTime(ts) { return typeof ts === 'number' && Number.isFinite(ts) ? new Date(ts).toLocaleTimeString() : '—'; }
+function fmtMoney(n) { return typeof n === 'number' && Number.isFinite(n) ? (n >= 0 ? '+' : '') + '$' + n.toFixed(2) : '—'; }
+function fmtAmount(n) { return typeof n === 'number' && Number.isFinite(n) ? '$' + n.toFixed(2) : '—'; }
 function fmtPrice(n) { return typeof n === 'number' && Number.isFinite(n) ? '$' + n.toFixed(3) : '—'; }
+function escapeHtml(value) {
+  return String(value == null ? '' : value).replace(/[&<>"']/g, ch => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[ch]));
+}
+function statusLabel(status) {
+  return ({
+    starting: 'Loading signal data',
+    watching: 'Signal confirmed',
+    firing: 'Submitting order',
+    fired: 'Entry filled',
+    no_signal: 'No trade: no streak',
+    void_no_trigger: 'Skipped: entry cutoff',
+    void_no_fill: 'Skipped: FOK not filled',
+    void_no_data: 'Skipped: data unavailable'
+  })[status] || status;
+}
 function setPnl(el, value) {
   el.textContent = fmtMoney(value);
   el.className = 'n' + (value == null ? '' : (value >= 0 ? ' pos' : ' neg'));
@@ -103,11 +124,15 @@ async function poll() {
     }
     document.getElementById('capitalLabel').textContent = s.mode === 'DEMO' ? 'demo capital / equity (est.)' : 'bot capital / equity (est.)';
     document.getElementById('capital').textContent = s.capital == null ? '—' : '$' + s.capital.toFixed(2);
+    document.getElementById('capitalStatus').textContent = s.capitalStatus || '';
     document.getElementById('walletLabel').textContent = s.mode === 'DEMO' ? 'available demo cash (USDC)' : 'available wallet cash (USDC)';
     document.getElementById('wallet').textContent = s.walletBalance == null ? '—' : '$' + s.walletBalance.toFixed(2);
     document.getElementById('stakes').textContent = s.stakes.DOWN + ' / ' + s.stakes.UP;
     setPnl(document.getElementById('realizedPnl'), s.stats.realizedPnl);
     setPnl(document.getElementById('unrealizedPnl'), s.unrealizedPnl);
+    document.getElementById('unrealizedHelp').textContent = s.pending.length
+      ? (s.unrealizedPnl == null ? 'Unavailable until every open trade has a two-sided midpoint.' : 'Estimate across ' + s.pending.length + ' open trade(s).')
+      : 'No open trades.';
 
     const prices = s.window && s.window.prices;
     const up = prices && prices.up;
@@ -128,39 +153,41 @@ async function poll() {
 
     const win = s.window;
     document.getElementById('winStatus').textContent = win
-      ? win.status + (win.lastAsk != null && win.status === 'watching' ? ' (ask ' + win.lastAsk + ')' : '')
+      ? statusLabel(win.status) + (win.lastAsk != null && win.status === 'watching' ? ' · best ask ' + fmtPrice(win.lastAsk) : '')
       : '—';
+    document.getElementById('windowReason').textContent = win ? win.reason : '';
 
     document.getElementById('statusLine').textContent =
       'window ' + (win ? win.slug : '—') + ' · uptime ' + Math.floor(s.uptimeSec/60) + 'm '
-      + (s.uptimeSec%60) + 's · pending ' + s.pending.length + ' · no-signal ' + s.stats.noSignal
-      + ' · void (no trigger / no fill) ' + s.stats.voidNoTrigger + ' / ' + s.stats.voidNoFill;
+      + (s.uptimeSec%60) + 's · open trades ' + s.pending.length + ' · no-signal windows ' + s.stats.noSignal
+      + ' · no-entry cutoff / FOK no-fill ' + s.stats.voidNoTrigger + ' / ' + s.stats.voidNoFill;
     document.getElementById('walletAddr').textContent = s.walletAddress || '';
 
-    const positionRows = s.pending.map(p =>
+    const tradeRows = (s.trades || []).map(p =>
       '<tr>' +
-        '<td>' + p.slug.replace('btc-updown-5m-', '') + '</td>' +
-        '<td>' + p.side + '</td>' +
+        '<td>' + fmtTime(p.openedAt) + '</td>' +
+        '<td>' + escapeHtml((p.slug || '').replace('btc-updown-5m-', '')) + '</td>' +
+        '<td>' + escapeHtml(p.side) + '</td>' +
         '<td>' + p.shares + '</td>' +
         '<td>' + fmtPrice(p.entryPrice) + '</td>' +
         '<td>' + fmtPrice(p.markPrice) + '</td>' +
         '<td>' + fmtAmount(p.marketValue) + '</td>' +
-        '<td class="' + (p.unrealizedPnl == null ? '' : (p.unrealizedPnl >= 0 ? 'pos' : 'neg')) + '">' + fmtMoney(p.unrealizedPnl) + '</td>' +
-        '<td>' + p.resultCheck + '</td>' +
+        '<td class="' + (p.pnl == null ? '' : (p.pnl >= 0 ? 'pos' : 'neg')) + '">' + fmtMoney(p.pnl) + ' <span class="hint">' + escapeHtml(p.pnlType) + '</span></td>' +
+        '<td><strong>' + escapeHtml(p.status) + '</strong><div class="status-detail">' + escapeHtml(p.statusDetail) + '</div></td>' +
       '</tr>'
     ).join('');
-    document.getElementById('positionsBody').innerHTML = positionRows || '<tr><td colspan="8">No open positions</td></tr>';
+    document.getElementById('tradesBody').innerHTML = tradeRows || '<tr><td colspan="9">No filled trades yet</td></tr>';
 
     const rows = s.log.map(e => {
       const cls = 'ev-' + e.event;
       return '<tr class="' + cls + '">' +
         '<td>' + fmtTime(e.ts) + '</td>' +
         '<td>' + e.event + '</td>' +
-        '<td>' + (e.slug ? e.slug.replace('btc-updown-5m-', '') : '—') + '</td>' +
-        '<td>' + (e.side || '—') + '</td>' +
+        '<td>' + escapeHtml(e.slug ? e.slug.replace('btc-updown-5m-', '') : '—') + '</td>' +
+        '<td>' + escapeHtml(e.side || '—') + '</td>' +
         '<td>' + (e.shares != null ? e.shares : '—') + '</td>' +
         '<td>' + (e.pnl != null ? fmtMoney(e.pnl) : '—') + '</td>' +
-        '<td>' + (e.note || '') + '</td>' +
+        '<td>' + escapeHtml(e.note || '') + '</td>' +
       '</tr>';
     }).join('');
     document.getElementById('logBody').innerHTML = rows;
