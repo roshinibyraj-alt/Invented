@@ -13,8 +13,9 @@ const DONE = new Set(['no_signal', 'fired', 'void_no_trigger', 'void_no_fill', '
 
 class Bot {
   /** @param trader an authenticated PolymarketTrader */
-  constructor(trader) {
+  constructor(trader, opts = {}) {
     this.trader = trader;
+    this.live = !!opts.live;
     this.w = null;                                 // current window state
     this.pending = [];                             // filled bets awaiting real resolution
     this.history = { UP: [], DOWN: [], ALL: [] };  // ladder history: {slug, outcome, final}
@@ -253,6 +254,7 @@ class Bot {
   snapshot() {
     const w = this.w;
     return {
+      mode: this.live ? 'LIVE' : 'DEMO',
       uptimeSec: Math.floor((Date.now() - this.startedAt) / 1000),
       error: this.error,
       walletBalance: this.walletBalance,

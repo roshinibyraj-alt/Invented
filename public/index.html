@@ -31,7 +31,7 @@
 </head>
 <body>
   <h1>4-candle streak bot</h1>
-  <div class="warn">⚠️ REAL CAPITAL — every fill here is a live Polymarket trade with real funds.</div>
+  <div class="warn" id="modeBanner">loading…</div>
   <div id="errBanner" class="err"></div>
 
   <div class="grid">
@@ -70,7 +70,15 @@ async function poll() {
     if (s.error) { errEl.style.display = 'block'; errEl.textContent = s.error; }
     else { errEl.style.display = 'none'; }
 
-    document.getElementById('wallet').textContent = s.walletBalance == null ? '—' : '$' + s.walletBalance.toFixed(2);
+    const mb = document.getElementById('modeBanner');
+    if (s.mode === 'LIVE') {
+      mb.textContent = '⚠️ LIVE — every fill here is a real Polymarket trade with real funds.';
+      mb.style.cssText = '';
+    } else {
+      mb.textContent = 'DEMO MODE — simulated fills on the real order book, no real orders, no real funds.';
+      mb.style.cssText = 'background:#3a2f12;border-color:#f5b942;color:#f5b942';
+    }
+    document.getElementById('wallet').textContent = s.mode === 'DEMO' ? 'DEMO' : (s.walletBalance == null ? '—' : '$' + s.walletBalance.toFixed(2));
     document.getElementById('stakes').textContent = s.stakes.DOWN + ' / ' + s.stakes.UP;
     const pnlEl = document.getElementById('realizedPnl');
     pnlEl.textContent = fmtMoney(s.stats.realizedPnl);
