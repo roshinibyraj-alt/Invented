@@ -13,6 +13,6 @@
   "dependencies": {
     "viem": "^2.21.0",
     "@polymarket/clob-client-v2": "^1.0.0",
-    "@polymarket/builder-relayer-client": "^1.0.0"
+    "@polymarket/builder-relayer-client": "^0.0.10"
   }
 }
