@@ -85,7 +85,10 @@ class Bot {
     const openTs = currentWindowOpenTs(now);
     const slug = slugForTs(openTs);
     if (!this.w || this.w.slug !== slug) {
-      this.w = { slug, openTs, status: 'starting', window: null, signal: null, lastAsk: null };
+      this.w = {
+        slug, openTs, status: 'starting', window: null, signal: null, lastAsk: null,
+        marketWinner: null, marketWinnerQuote: null,
+      };
       this.marketPrices = null;
       this.lastSignal = null;
     }
@@ -163,7 +166,6 @@ class Bot {
   }
 
   async _refreshMarketData(window) {
-    const requestStartedAt = Date.now();
     const tokenIds = new Set();
     if (window?.tokenUp) tokenIds.add(window.tokenUp);
     if (window?.tokenDown) tokenIds.add(window.tokenDown);
@@ -189,6 +191,22 @@ class Bot {
       };
     }
 
+    if (window && this.w?.slug === window.slug && !this.w.marketWinner) {
+      const up = quotes.get(window.tokenUp) || quoteFromBook(null);
+      const down = quotes.get(window.tokenDown) || quoteFromBook(null);
+      const winner = winnerFromMidpoints(up.midpoint, down.midpoint, cfg.SETTLEMENT_PRICE_THRESHOLD);
+      if (winner) {
+        this.w.marketWinner = winner;
+        this.w.marketWinnerQuote = {
+          upMidpoint: up.midpoint,
+          downMidpoint: down.midpoint,
+          updatedAt,
+        };
+        this._push({ event: 'WINNER_THRESHOLD', slug: window.slug, side: winner,
+          note: `${winner} CLOB midpoint reached $${cfg.SETTLEMENT_PRICE_THRESHOLD.toFixed(2)}; winner latched` });
+      }
+    }
+
     for (const p of this.pending) {
       const up = quotes.get(p.tokenUp) || quoteFromBook(null);
       const down = quotes.get(p.tokenDown) || quoteFromBook(null);
@@ -204,19 +222,16 @@ class Bot {
         ? 'No two-sided CLOB quote; market value and open P&L are unavailable'
         : 'Marked using the UP/DOWN token bid-ask midpoint';
 
-      const checkAt = p.openTs * 1000 + cfg.SETTLEMENT_CHECK_AFTER_MS;
-      const priorWinner = p.settlementQuote && winnerFromMidpoints(
-        p.settlementQuote.upMidpoint,
-        p.settlementQuote.downMidpoint,
-        cfg.SETTLEMENT_PRICE_THRESHOLD,
-      );
-      if (requestStartedAt >= checkAt && updatedAt >= checkAt && !priorWinner
-        && Number.isFinite(up.midpoint) && Number.isFinite(down.midpoint)) {
+      const observedWinner = winnerFromMidpoints(up.midpoint, down.midpoint, cfg.SETTLEMENT_PRICE_THRESHOLD);
+      if (!p.settlementWinner && observedWinner) {
+        p.settlementWinner = observedWinner;
         p.settlementQuote = {
           upMidpoint: up.midpoint,
           downMidpoint: down.midpoint,
           updatedAt,
         };
+        this._push({ event: 'WINNER_THRESHOLD', slug: p.slug, side: observedWinner, shares: p.shares,
+          note: `${observedWinner} CLOB midpoint reached $${cfg.SETTLEMENT_PRICE_THRESHOLD.toFixed(2)}; settling this position` });
       }
     }
   }
@@ -255,7 +270,9 @@ class Bot {
     const position = {
       id: result.id, tokenId: token, tokenUp: w.window.tokenUp, tokenDown: w.window.tokenDown,
       slug: w.slug, openTs: w.openTs, closeTs: w.window.closeTs, side, shares, price, firedAt: Date.now(),
-      status: 'OPEN', winner: null, settledAt: null, realizedPnl: null, settlementQuote: null,
+      status: 'OPEN', winner: null, settlementWinner: w.marketWinner || null,
+      settledAt: null, realizedPnl: null,
+      settlementQuote: w.marketWinnerQuote ? { ...w.marketWinnerQuote } : null,
       upMidpoint: null, downMidpoint: null, markPrice: null, marketValue: null, unrealizedPnl: null,
       quoteUpdatedAt: null, markStatus: 'Waiting for the first CLOB quote',
     };
@@ -277,47 +294,30 @@ class Bot {
     this._push({ event: 'VOID', slug: w.slug, side, shares, note: `${why} -- void, ladder unchanged` });
   }
 
-  // ---- midpoint-rule settlement --------------------------------------------------
+  // ---- CLOB midpoint winner-threshold settlement --------------------------------
   async _settlementLoop() {
     while (this._running) {
       await sleep(SETTLEMENT_POLL_MS);
       if (!this.pending.length) continue;
       let now = Date.now();
-      const staleDueQuote = this.pending.some((p) => {
-        const checkAt = p.openTs * 1000 + cfg.SETTLEMENT_CHECK_AFTER_MS;
-        const capturedWinner = p.settlementQuote && winnerFromMidpoints(
-          p.settlementQuote.upMidpoint,
-          p.settlementQuote.downMidpoint,
-          cfg.SETTLEMENT_PRICE_THRESHOLD,
-        );
-        return now >= checkAt && !capturedWinner && (
-          !p.quoteUpdatedAt
-          || p.quoteUpdatedAt < checkAt
-          || now - p.quoteUpdatedAt > SETTLEMENT_QUOTE_MAX_AGE_MS
-        );
-      });
+      const staleDueQuote = this.pending.some((p) => !p.settlementWinner
+        && (!p.quoteUpdatedAt || now - p.quoteUpdatedAt > SETTLEMENT_QUOTE_MAX_AGE_MS));
       if (staleDueQuote) {
         await this._refreshMarketData(this.w?.window || null);
         now = Date.now();
       }
       const keep = [];
       for (const p of this.pending) {
-        const checkAt = p.openTs * 1000 + cfg.SETTLEMENT_CHECK_AFTER_MS;
-        if (now < checkAt) { keep.push(p); continue; }
-        const quote = p.settlementQuote;
-        const winner = quote && quote.updatedAt >= checkAt
-          ? winnerFromMidpoints(quote.upMidpoint, quote.downMidpoint, cfg.SETTLEMENT_PRICE_THRESHOLD)
-          : null;
-        if (!winner) {
-          if (!p.settlementWarningLogged && now - checkAt > SETTLEMENT_WARNING_MS) {
+        if (!p.settlementWinner) {
+          if (!p.settlementWarningLogged && now - p.openTs * 1000 > SETTLEMENT_WARNING_MS) {
             this._push({ event: 'SETTLEMENT_TIMEOUT', slug: p.slug, side: p.side, shares: p.shares,
-              note: `${describeSettlement(p, now)} -- keeping position open and checking again` });
+              note: `${describeSettlement(p)} -- keeping position open and checking again` });
             p.settlementWarningLogged = true;
           }
           keep.push(p);
           continue;
         }
-        this._settle(p, winner);
+        this._settle(p, p.settlementWinner);
       }
       this.pending = keep;
     }
@@ -341,9 +341,12 @@ class Bot {
     p.winner = winner;
     p.realizedPnl = round(pnl, 2);
     p.settledAt = Date.now();
+    const quoteDetail = p.settlementQuote
+      ? ` UP ${formatMidpoint(p.settlementQuote.upMidpoint)} / DOWN ${formatMidpoint(p.settlementQuote.downMidpoint)}`
+      : '';
     this._push({ event: win ? 'SETTLED_WIN' : 'SETTLED_LOSS', slug: p.slug, side: p.side, shares: p.shares,
       pnl: round(pnl, 2),
-      note: `297s+ CLOB midpoint snapshot UP $${p.settlementQuote.upMidpoint.toFixed(3)} / DOWN $${p.settlementQuote.downMidpoint.toFixed(3)} selected ${winner} -- ${outcome} on ${p.side} ${p.shares}sh, est. pnl ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)} (incl. est. fee) -- next ${p.side} stake ${this._stake(p.side)}sh` });
+      note: `${winner} CLOB midpoint reached $${cfg.SETTLEMENT_PRICE_THRESHOLD.toFixed(2)}${quoteDetail} -- ${outcome} on ${p.side} ${p.shares}sh, est. pnl ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)} (incl. est. fee) -- next ${p.side} stake ${this._stake(p.side)}sh` });
   }
 
   async _balanceLoop() {
@@ -364,7 +367,6 @@ class Bot {
     const w = this.w;
     const now = Date.now();
     const positions = this.pending.map((p) => {
-      const checkAt = p.openTs * 1000 + cfg.SETTLEMENT_CHECK_AFTER_MS;
       return {
         slug: p.slug,
         side: p.side,
@@ -375,7 +377,8 @@ class Bot {
         unrealizedPnl: p.unrealizedPnl,
         markStatus: p.markStatus,
         settlementQuote: p.settlementQuote,
-        resultCheck: describeSettlement(p, now),
+        settlementWinner: p.settlementWinner,
+        resultCheck: describeSettlement(p),
         quoteUpdatedAt: p.quoteUpdatedAt,
       };
     });
@@ -393,8 +396,10 @@ class Bot {
         pnlType: open ? 'unrealized' : 'realized',
         status: p.status,
         statusDetail: open
-          ? `${p.markStatus}; ${describeSettlement(p, now)}`
-          : `Winner ${p.winner} from CLOB midpoint snapshot UP $${p.settlementQuote.upMidpoint.toFixed(3)} / DOWN $${p.settlementQuote.downMidpoint.toFixed(3)}`,
+          ? `${p.markStatus}; ${describeSettlement(p)}`
+          : `Winner ${p.winner} after a CLOB midpoint reached $${cfg.SETTLEMENT_PRICE_THRESHOLD.toFixed(2)}${p.settlementQuote
+            ? ` (UP ${formatMidpoint(p.settlementQuote.upMidpoint)} / DOWN ${formatMidpoint(p.settlementQuote.downMidpoint)})`
+            : ''}`,
       };
     });
     const marksComplete = positions.every((p) => p.unrealizedPnl !== null);
@@ -450,7 +455,9 @@ function describeWindow(w, now) {
     case 'firing':
       return `Submitting the ${w.signal?.side || ''} FOK order, capped at $${cfg.PRICE_CAP}.`;
     case 'fired':
-      return `Entry filled. Holding until one CLOB midpoint is strictly above $${cfg.SETTLEMENT_PRICE_THRESHOLD} after 297s.`;
+      return w.marketWinner
+        ? `Entry filled. ${w.marketWinner} already reached a $${cfg.SETTLEMENT_PRICE_THRESHOLD.toFixed(2)} CLOB midpoint.`
+        : `Entry filled. Holding until either CLOB midpoint reaches $${cfg.SETTLEMENT_PRICE_THRESHOLD.toFixed(2)}.`;
     case 'no_signal':
       return `No trade: the last ${cfg.STREAK_LEN} closed candles were ${colors}, not a same-color streak.`;
     case 'void_no_trigger':
@@ -464,26 +471,13 @@ function describeWindow(w, now) {
   }
 }
 
-function describeSettlement(position, now) {
-  const checkAt = position.openTs * 1000 + cfg.SETTLEMENT_CHECK_AFTER_MS;
-  if (now < checkAt) {
-    return `Outcome checks start after 297s (in ${Math.ceil((checkAt - now) / 1000)}s)`;
+function describeSettlement(position) {
+  if (position.settlementWinner) {
+    return `${position.settlementWinner} midpoint reached $${cfg.SETTLEMENT_PRICE_THRESHOLD.toFixed(2)}; applying that winner`;
   }
-
-  const quote = position.settlementQuote;
-  if (!quote || quote.updatedAt < checkAt) {
-    return 'No two-sided UP/DOWN midpoint captured after 297s; holding open';
-  }
-
-  const winner = winnerFromMidpoints(
-    quote.upMidpoint,
-    quote.downMidpoint,
-    cfg.SETTLEMENT_PRICE_THRESHOLD,
-  );
-  if (!winner) {
-    return `No unique side strictly above $${cfg.SETTLEMENT_PRICE_THRESHOLD} (UP $${quote.upMidpoint.toFixed(3)} / DOWN $${quote.downMidpoint.toFixed(3)}); holding open`;
-  }
-  return `Unique ${winner} midpoint captured after 297s; applying result`;
+  const up = formatMidpoint(position.upMidpoint);
+  const down = formatMidpoint(position.downMidpoint);
+  return `No CLOB midpoint has reached $${cfg.SETTLEMENT_PRICE_THRESHOLD.toFixed(2)} yet (UP ${up} / DOWN ${down}); holding open`;
 }
 
 function bestAsk(book) {
@@ -518,10 +512,13 @@ function quoteFromBook(book) {
   };
 }
 
+function formatMidpoint(value) {
+  return Number.isFinite(value) ? `$${value.toFixed(3)}` : 'unavailable';
+}
+
 function winnerFromMidpoints(upMidpoint, downMidpoint, threshold) {
-  if (!Number.isFinite(upMidpoint) || !Number.isFinite(downMidpoint)) return null;
-  const upWins = upMidpoint > threshold;
-  const downWins = downMidpoint > threshold;
+  const upWins = Number.isFinite(upMidpoint) && upMidpoint >= threshold;
+  const downWins = Number.isFinite(downMidpoint) && downMidpoint >= threshold;
   if (upWins === downWins) return null;
   return upWins ? 'UP' : 'DOWN';
 }

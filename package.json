@@ -5,7 +5,8 @@
   "description": "Real-money BTC 5-min up/down bot: buys the underrepresented side of the last 10 Binance candles, $1 martingale ladder, holds to resolution.",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "test": "node --test"
   },
   "engines": {
     "node": ">=18"

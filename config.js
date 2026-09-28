@@ -11,8 +11,7 @@ module.exports = {
 
   ENTRY_DELAY_MS: 3000,        // first check 3s after the window opens
   ENTRY_DEADLINE_MS: 270000,   // no entry after 270s -> window is void
-  SETTLEMENT_CHECK_AFTER_MS: 297000, // start outcome checks 3s before window close
-  SETTLEMENT_PRICE_THRESHOLD: 0.95,  // settle only if exactly one midpoint is strictly above this threshold
+  SETTLEMENT_PRICE_THRESHOLD: 0.99,  // latch a winner when either CLOB midpoint reaches this price
   PRICE_CAP: 0.99,             // maximum buy limit; FOK does not fill above this price
 
   TAKER_FEE_RATE: 0.07,        // fee = shares * rate * p * (1-p), used for P&L estimate only
