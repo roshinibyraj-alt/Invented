@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Streak Bot · BTC 5-min</title>
+<title>BTC Pullback Bot · BTC 5-min</title>
 <style>
 :root{--bg:#080a1c;--p1:#12152e;--p2:#181c3b;--line:#262b52;--tx:#eef0ff;--dim:#8a90b8;
 --up:#2ee6a6;--up2:#18b5d8;--dn:#ff5c7c;--dn2:#ff9a5c;--vio:#8b7bff;--amb:#ffc857;--pink:#ff7ad9}
@@ -68,7 +68,7 @@ svg text{fill:var(--dim);font-size:10px}
 </head>
 <body><div class="wrap">
 <header>
-  <div class="brand"><div class="logo">📈</div><div><h1>Streak Bot</h1><div class="sub">Polymarket · BTC up/down · 5-minute windows</div></div></div>
+  <div class="brand"><div class="logo">📈</div><div><h1>BTC Pullback Bot</h1><div class="sub">Polymarket · BTC up/down · 5-minute windows</div></div></div>
   <div class="pills"><span class="pill" id="mode">…</span><span class="pill" id="up">uptime –</span><span class="pill"><i class="dot" id="conn"></i><span id="connT">connecting</span></span></div>
 </header>
 <div class="err" id="err"></div>
@@ -106,19 +106,19 @@ svg text{fill:var(--dim);font-size:10px}
 
 <div class="grid g4">
   <div class="card">
-    <h2>Which side won each window <span class="dim" style="font-weight:400">oldest → newest</span></h2>
+    <h2>Window outcomes <span class="dim" style="font-weight:400">oldest → newest</span></h2>
     <div class="cs" id="cs"></div>
     <div class="row" style="margin-top:12px;align-items:center">
       <div><span class="chip up" id="cUp">UP 0</span> <span class="chip dn" id="cDn">DOWN 0</span> <span class="dim" style="font-size:12px">won since start</span></div>
-      <div class="dim" id="streakTxt"></div></div>
+      <div class="dim" id="candleTxt"></div></div>
     <div class="sig" id="sig"></div>
     <div class="box" id="rule"></div>
   </div>
   <div class="card">
-    <h2>Next bet size (shares)</h2>
+    <h2>Fixed entry size (shares)</h2>
     <div class="dim" style="font-size:12px">UP side</div><div class="lad u" id="ladU"></div>
     <div class="dim" style="font-size:12px;margin-top:10px">DOWN side</div><div class="lad d" id="ladD"></div>
-    <div class="box">A loss doubles the next bet on that side, a win doubles it once, then it resets to the base bet.</div>
+    <div class="box">Every qualifying pullback uses the same fixed share size. No win/loss ladder.</div>
   </div>
 </div>
 
@@ -194,12 +194,21 @@ function render(s){
   $('cs').innerHTML=(h||'<div class="empty">Reading previous windows…</div>')+'<div class="c now"><b>?</b><em></em>now</div>';
   $('cs').scrollLeft=9999;
   $('cUp').textContent='UP '+s.counts.UP;$('cDn').textContent='DOWN '+s.counts.DOWN;
-  const st=s.streak;$('streakTxt').innerHTML=st.len?`Current streak: <b class="${st.side==='UP'?'pos':'neg'}">${st.side} ×${st.len}</b> (need ${cf.streakLen})`:'No streak yet';
-  const sg=s.lastSignal;
-  $('sig').innerHTML=sg?`<span class="dim">Last check:</span>${sg.outcomes.map(o=>`<span class="chip ${o==='UP'?'up':'dn'}">${o}</span>`).join('')}<span class="dim">→</span>${sg.side?`<span class="chip am">Bet ${sg.side}</span>`:'<span class="chip gr">No bet</span>'}`:'<span class="dim">Waiting for the last '+cf.streakLen+' winners…</span>';
-  $('rule').innerHTML=`If the last <b style="color:var(--tx)">${cf.streakLen}</b> windows all ended the same way, bet the <b style="color:var(--tx)">opposite</b> side ${cf.entryDelayMs/1000}s after the new window opens, at any price, and hold to resolution.`;
-  const lad=(side)=>{const cur=s.stakes[side],n=cf.maxLoss+1;return Array.from({length:n},(_,i)=>{const v=cf.base*2**i;return `<div class="${v===cur?'on':''}">${v}</div>`}).join('')};
-  $('ladU').innerHTML=lad('UP');$('ladD').innerHTML=lad('DOWN');
+  const cs=s.candleSetup;
+  const fmtBtc=n=>n==null?'–':'$'+Number(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+  $('candleTxt').textContent=cs&&cs.ready
+    ? 'Previous '+cs.previousColor.toLowerCase()+' candle · close '+fmtBtc(cs.previous.close)+' · range '+fmtBtc(cs.previous.low)+'–'+fmtBtc(cs.previous.high)+' · live '+fmtBtc(cs.current.price)
+    : 'Binance BTCUSDT 5-minute feed: '+(cs&&cs.reason?cs.reason:'checking after 2:00');
+  if(cs&&cs.ready){
+    $('sig').innerHTML=cs.side
+      ? '<span class="chip am">Entry triggered: BUY '+esc(cs.side)+' · '+cf.base+' shares</span>'
+      : '<span class="chip gr">Watching for the qualifying pullback…</span>';
+  } else {
+    $('sig').innerHTML='<span class="dim">'+esc(cs&&cs.reason?cs.reason:'Waiting for 2:00 into the new candle and aligned Binance data.')+'</span>';
+  }
+  $('rule').innerHTML='From <b style="color:var(--tx)">2:00</b> onward, enter the first matching pullback: green prior candle, BTC below the prior close and above its low → <b>UP</b>; red prior candle, BTC above the prior close and below its high → <b>DOWN</b>. The relevant prior-candle boundary must remain unbroken. Fixed <b>'+cf.base+' shares</b>, one entry per window. Source: Binance BTCUSDT 5m.';
+  $('ladU').innerHTML='<div class="on">'+cf.base+'</div>';
+  $('ladD').innerHTML='<div class="on">'+cf.base+'</div>';
   stats(s);tables(s);logs(s);
 }
 function stats(s){
@@ -217,12 +226,12 @@ function stats(s){
     box('b',T.length?usd(Math.min(...T.map(t=>t.pnl)),1):'–','Worst trade','neg')+
     box('f',usd(-s.account.maxDrawdown),'Max drawdown','neg')+
     box('e',usd(T.reduce((x,t)=>x+t.fee,0)),'Fees paid (est.)')+
-    box('c2',s.stats.noSignal,'Windows skipped (no streak)')+
+    box('c2',s.stats.noSignal,'Windows without a setup')+
     box('d',s.stats.voidNoData+' / '+s.stats.voidNoFill,'Void (no data / no fill)');
 }
 const side=x=>`<span class="chip ${x==='UP'?'up':'dn'}">${x}</span>`;
 function tables(s){
-  $('open').innerHTML=s.pending.length?`<table><thead><tr><th>Window</th><th>Side</th><th>Shares</th><th>Entry</th><th>Cost</th><th>Now</th><th>Unrealized</th><th>Closes</th></tr></thead><tbody>${s.pending.map(p=>`<tr><td>${hhmm(p.openTs)}</td><td>${side(p.side)}</td><td>${p.shares}</td><td>${cents(p.price)}</td><td>${usd(p.cost)}</td><td>${cents(p.mark)}</td><td class="${p.unrealized>=0?'pos':'neg'}">${p.unrealized==null?'–':usd(p.unrealized,1)}</td><td>${hhmm(p.closeTs)}</td></tr>`).join('')}</tbody></table>`:'<div class="empty">No open bets. The bot enters 3s into a window after a '+s.cfg.streakLen+'-window streak.</div>';
+  $('open').innerHTML=s.pending.length?`<table><thead><tr><th>Window</th><th>Side</th><th>Shares</th><th>Entry</th><th>Cost</th><th>Now</th><th>Unrealized</th><th>Closes</th></tr></thead><tbody>${s.pending.map(p=>`<tr><td>${hhmm(p.openTs)}</td><td>${side(p.side)}</td><td>${p.shares}</td><td>${cents(p.price)}</td><td>${usd(p.cost)}</td><td>${cents(p.mark)}</td><td class="${p.unrealized>=0?'pos':'neg'}">${p.unrealized==null?'–':usd(p.unrealized,1)}</td><td>${hhmm(p.closeTs)}</td></tr>`).join('')}</tbody></table>`:'<div class="empty">No open bets. The bot begins watching for a pullback at 2:00 into each window.</div>';
   $('trades').innerHTML=s.trades.length?`<table><thead><tr><th>Window</th><th>Bet</th><th>Winner</th><th>Shares</th><th>Entry</th><th>Cost</th><th>Result</th><th>P&amp;L</th></tr></thead><tbody>${s.trades.map(t=>`<tr><td>${hhmm(t.openTs)}</td><td>${side(t.side)}</td><td>${side(t.winner)}</td><td>${t.shares}</td><td>${cents(t.price)}</td><td>${usd(t.cost)}</td><td><span class="chip ${t.outcome==='WIN'?'up':'dn'}">${t.outcome}</span></td><td class="${t.pnl>=0?'pos':'neg'}"><b>${usd(t.pnl,1)}</b></td></tr>`).join('')}</tbody></table>`:'<div class="empty">No settled trades yet.</div>';
 }
 const grp={trade:['SIGNAL','FIRING','ENTRY_FILLED','SETTLED_WIN','SETTLED_LOSS','VOID'],out:['OUTCOME','NO_TRADE','WAIT','MISMATCH'],err:['ERROR','SETTLEMENT_TIMEOUT']};
@@ -237,7 +246,7 @@ setInterval(()=>{ // countdown ticks between polls
   if(!S||!S.window)return;const n=Date.now()+skew,el=n/1000-S.window.openTs,rem=Math.max(0,S.cfg.windowSec-el);
   $('cd').textContent=Math.floor(rem/60)+':'+String(Math.floor(rem%60)).padStart(2,'0');
   $('arc').setAttribute('stroke-dashoffset',(276.5*(1-rem/S.cfg.windowSec)).toFixed(1));
-  const st=S.window.status,m={starting:'Starting up',armed:'Signal armed',no_signal:'No streak, sitting out',firing:'Placing bet…',fired:'Holding to resolution',void_no_fill:'Bet not filled',void_no_data:'Skipped, no data'};
+  const st=S.window.status,m={starting:'Starting up',armed:'Watching for pullback',no_signal:'No setup this window',firing:'Placing bet…',fired:'Holding to resolution',void_no_fill:'Bet not filled',void_no_data:'No BTC data'};
   $('phase').textContent=rem<=S.cfg.endWatchMs/1000?'Reading the winner…':(m[st]||st);
   $('winStat').textContent=st;$('winStat').className='chip '+(st==='fired'?'am':st==='armed'||st==='firing'?'vi':'gr');
   $('slug').textContent=S.window.slug;

@@ -1,23 +1,14 @@
 'use strict';
 
-// All strategy constants live here. Real orders only when LIVE_TRADING=true (demo otherwise).
+// Strategy: trade the first qualifying pullback inside the prior BTC 5-minute candle's range.
 module.exports = {
-  DEMO_CAPITAL: 5000,          // play-money starting balance in DEMO mode (USD)
-  STREAK_LEN: 3,               // consecutive same-side window winners that trigger a bet
-  BASE_SHARES: 100,            // base stake in shares
-  MAX_LOSS_DOUBLINGS: 2,       // 100 -> 200 -> 400, a 3rd straight loss resets to base
-  MAX_WIN_DOUBLINGS: 1,        // 100 -> 200, a 2nd straight win resets to base
-  SHARED_LADDER: false,        // false = separate sizing ladder per side (UP / DOWN)
-
-  // Who won a window: in the last END_WATCH_MS before it closes, a side priced above WIN_PRICE wins.
-  // The other side is the loser (~0). No fallback: a window not seen ending >WIN_PRICE stays unknown and any streak using it is skipped.
+  DEMO_CAPITAL: 5000,
+  BTC_SYMBOL: 'BTCUSDT',
+  BTC_INTERVAL: '5m',
+  BASE_SHARES: 500,
+  ENTRY_DELAY_MS: 120000,
+  PRICE_CAP: 0.99,
   END_WATCH_MS: 3000,
   WIN_PRICE: 0.96,
-
-  // Entry: no price filter. One order, ENTRY_DELAY_MS after the window opens, filled at any price.
-  ENTRY_DELAY_MS: 3000,
-  SIGNAL_DEADLINE_MS: 30000,   // if the signal isn't known within 30s of open, skip the window (no late entries)
-  PRICE_CAP: 0.99,             // order limit = highest tick, so a fired order fills at any price
-
-  TAKER_FEE_RATE: 0.07,        // fee = shares * rate * p * (1-p), used for P&L estimate only
+  TAKER_FEE_RATE: 0.07,
 };

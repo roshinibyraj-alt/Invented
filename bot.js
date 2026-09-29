@@ -2,7 +2,8 @@
 
 const cfg = require('./config');
 const { getActiveWindow, currentWindowOpenTs, slugForTs, WINDOW_SECONDS } = require('./polymarket-market');
-const { nextStake } = require('./ladder');
+const { fetchWindowCandles } = require('./btc-candles');
+const { getPullbackSignal } = require('./candle-strategy');
 
 const POLL_MS = 1000;
 const SETTLEMENT_POLL_MS = 1000;
@@ -17,13 +18,13 @@ class Bot {
   constructor(trader, opts = {}) {
     this.trader = trader;
     this.live = !!opts.live;
+    this.getCandles = opts.getCandles || fetchWindowCandles;
     this.w = null;                                 // current window state
     this.pending = [];                             // filled bets awaiting real resolution
-    this.history = { UP: [], DOWN: [], ALL: [] };  // ladder history: {slug, outcome, final}
     this.stats = { wins: 0, losses: 0, noSignal: 0, voidNoFill: 0, voidNoData: 0, realizedPnl: 0 };
     this.outcomes = new Map();                     // window openTs -> {winner:'UP'|'DOWN', source:'price'|'resolution'}
     this._resolveTried = new Map();                // openTs -> last official-resolution lookup time
-    this.lastSignal = null;                        // {outcomes, side, slug}
+    this.lastSignal = null;                        // most recent BTC candle signal
     this.walletBalance = null;
     this.error = null;
     this.log = [];
@@ -93,28 +94,22 @@ class Bot {
     }
   }
 
-  // ---- sizing --------------------------------------------------------------
-  _key(side) { return cfg.SHARED_LADDER ? 'ALL' : side; }
-
-  _stake(side) {
-    const outcomes = this.history[this._key(side)].map((h) => h.outcome);
-    return nextStake(outcomes, cfg.BASE_SHARES, cfg.MAX_LOSS_DOUBLINGS, cfg.MAX_WIN_DOUBLINGS);
-  }
-
-  _setOutcome(side, slug, outcome, final) {
-    const arr = this.history[this._key(side)];
-    const item = arr.find((h) => h.slug === slug);
-    if (!item) arr.push({ slug, outcome, final });
-    else if (!item.final || final) { item.outcome = outcome; item.final = final || item.final; }
-  }
-
   // ---- per-window flow -------------------------------------------------------
   async _tick() {
     const now = Date.now();
     const openTs = currentWindowOpenTs(now);
     const slug = slugForTs(openTs);
     if (!this.w || this.w.slug !== slug) {
-      this.w = { slug, openTs, status: 'starting', window: null, signal: null, outcomeDone: false };
+      const previous = this.w;
+      if (previous && !DONE.has(previous.status) && previous.status !== 'firing') {
+        if (!previous.window || !previous.hasCandleData) {
+          this._voidNoData(previous, 'BTC 5-minute candle data was unavailable before the window ended');
+        } else {
+          this._skipNoSignal(previous, 'no qualifying pullback before this 5-minute window closed');
+        }
+      }
+      this.w = { slug, openTs, status: 'starting', window: null, signal: null, candleSetup: null,
+        hasCandleData: false, outcomeDone: false };
     }
     const w = this.w;
     const elapsed = now - openTs * 1000;
@@ -124,9 +119,7 @@ class Bot {
       if (window) { this.error = null; w.window = window; } else { this.error = reason; }
     }
 
-    this._applyProvisional();
-
-    // every window's winner is tracked (traded or not) because it feeds the streak
+    // Track every window winner during the closing seconds for settlement and dashboard history.
     if (w.window && !w.outcomeDone && elapsed >= WINDOW_MS - cfg.END_WATCH_MS) await this._watchEnd(w);
 
     await this._entryStep(w, elapsed);
@@ -156,42 +149,50 @@ class Bot {
       note: `${winner} won: price ${round(price, 3)} > ${cfg.WIN_PRICE} in last ${cfg.END_WATCH_MS / 1000}s, ${winner === 'UP' ? 'DOWN' : 'UP'} lost at ${loser == null ? '~0' : round(loser, 3)}` });
   }
 
-  /** Winner of the window that opened at openTs, from our own last-seconds price reading only (no fallback). */
-  async _outcomeFor(openTs) { return this.outcomes.get(openTs) || null; }
-
   async _entryStep(w, elapsed) {
     if (DONE.has(w.status) || w.status === 'firing') return;
+    if (!w.window) return;
+    if (elapsed >= WINDOW_MS) return this._skipNoSignal(w, '5-minute window closed before a pullback entry');
+    if (elapsed < cfg.ENTRY_DELAY_MS) return;
 
-    if (!w.signal) {
-      if (elapsed > cfg.SIGNAL_DEADLINE_MS) return this._voidNoData(w, 'signal not available within the first '
-        + `${cfg.SIGNAL_DEADLINE_MS / 1000}s (${w.window ? 'previous outcomes unknown' : 'market not found'}) -- skipping window`);
-      if (!w.window) return;
-      const outs = [];
-      for (let k = cfg.STREAK_LEN; k >= 1; k--) {
-        const o = await this._outcomeFor(w.openTs - WINDOW_SECONDS * k);
-        if (!o) return this._voidNoData(w, `a previous window's winner was not observed (the bot must watch its last ${cfg.END_WATCH_MS / 1000}s) -- skipping, streak unknown`);
-        outs.push(o.winner);
-      }
-      let side = null;
-      if (outs.every((o) => o === 'UP')) side = 'DOWN';
-      else if (outs.every((o) => o === 'DOWN')) side = 'UP';
-      w.signal = { outcomes: outs, side };
-      this.lastSignal = { outcomes: outs, side, slug: w.slug };
-      if (!side) {
-        w.status = 'no_signal';
-        this.stats.noSignal += 1;
-        this._push({ event: 'NO_TRADE', slug: w.slug, note: `last ${cfg.STREAK_LEN} winners ${outs.join('/')} -- no streak` });
-        return;
-      }
-      w.status = 'armed';
-      this._push({ event: 'SIGNAL', slug: w.slug, side,
-        note: `last ${cfg.STREAK_LEN} winners all ${outs[0]} -> buy ${side} at ${cfg.ENTRY_DELAY_MS / 1000}s, any price` });
+    w.status = 'armed';
+    let candles;
+    try {
+      candles = await this.getCandles(w.openTs);
+    } catch (e) {
+      w.candleSetup = { ready: false, reason: e.message, elapsedMs: elapsed };
+      this._warnOnce('btc-feed:' + w.slug, { event: 'ERROR', slug: w.slug,
+        note: 'BTC 5-minute candle feed unavailable: ' + e.message });
+      return;
+    }
+    if (!candles || !candles.previous || !candles.current) {
+      w.candleSetup = { ready: false, reason: 'waiting for the aligned live BTC 5-minute candle', elapsedMs: elapsed };
+      return;
     }
 
-    if (w.status === 'armed' && elapsed >= cfg.ENTRY_DELAY_MS) {
-      const side = w.signal.side;
-      await this._fire(w, side, side === 'UP' ? w.window.tokenUp : w.window.tokenDown);
-    }
+    const previous = candles.previous, current = candles.current;
+    w.hasCandleData = true;
+    const previousColor = previous.close > previous.open ? 'GREEN'
+      : previous.close < previous.open ? 'RED' : 'DOJI';
+    const side = getPullbackSignal(previous, current);
+    const prior = { open: previous.open, high: previous.high, low: previous.low, close: previous.close, openTs: previous.openTs };
+    const live = { price: current.close, high: current.high, low: current.low, openTs: current.openTs };
+    w.candleSetup = { ready: true, previousColor, previous: prior, current: live, side, elapsedMs: elapsed };
+    if (!side) return;
+
+    w.signal = { side, previousColor, previousClose: previous.close, currentPrice: current.close };
+    this.lastSignal = { slug: w.slug, side, previousColor, previousClose: previous.close,
+      previousBoundary: side === 'UP' ? previous.low : previous.high, currentPrice: current.close, ts: Date.now() };
+    this._push({ event: 'SIGNAL', slug: w.slug, side, shares: cfg.BASE_SHARES,
+      note: 'previous ' + previousColor.toLowerCase() + ' BTC candle pullback; fixed ' + cfg.BASE_SHARES + 'sh ' + side });
+    await this._fire(w, side, side === 'UP' ? w.window.tokenUp : w.window.tokenDown);
+  }
+
+  _skipNoSignal(w, why) {
+    if (DONE.has(w.status)) return;
+    w.status = 'no_signal';
+    this.stats.noSignal += 1;
+    this._push({ event: 'NO_TRADE', slug: w.slug, note: why });
   }
 
   _voidNoData(w, why) {
@@ -202,10 +203,9 @@ class Bot {
 
   async _fire(w, side, token) {
     w.status = 'firing';
-    this._applyProvisional();   // make sure the newest known result is in the ladder before sizing
-    const shares = this._stake(side);
+    const shares = cfg.BASE_SHARES;
     this._push({ event: 'FIRING', slug: w.slug, side, shares,
-      note: `buying ${shares}sh ${side} at any price (limit ${cfg.PRICE_CAP})` });
+      note: 'buying fixed ' + shares + 'sh ' + side + ' (FOK limit ' + cfg.PRICE_CAP + ')' });
 
     let result;
     try {
@@ -245,17 +245,7 @@ class Bot {
   _void(w, side, shares, why) {
     w.status = 'void_no_fill';
     this.stats.voidNoFill += 1;
-    this._push({ event: 'VOID', slug: w.slug, side, shares, note: `${why} -- void, ladder unchanged` });
-  }
-
-  /** Our own winner record (price-based) gives a provisional outcome as soon as a window ends, so the
-   * next window is sized correctly even if Gamma hasn't published the official result yet. */
-  _applyProvisional() {
-    for (const p of this.pending) {
-      if (p.final) continue;
-      const o = this.outcomes.get(p.openTs);
-      if (o) this._setOutcome(p.side, p.slug, o.winner === p.side ? 'WIN' : 'LOSS', false);
-    }
+    this._push({ event: 'VOID', slug: w.slug, side, shares, note: `${why} -- void, no position opened` });
   }
 
   // ---- real settlement -----------------------------------------------------------
@@ -285,11 +275,6 @@ class Bot {
   _settle(p, winner) {
     const win = winner === p.side;
     const outcome = win ? 'WIN' : 'LOSS';
-    const item = this.history[this._key(p.side)].find((h) => h.slug === p.slug);
-    if (item && !item.final && item.outcome !== outcome) {
-      this._push({ event: 'MISMATCH', slug: p.slug, note: `candle said ${item.outcome}, real resolution says ${outcome} -- ladder corrected` });
-    }
-    this._setOutcome(p.side, p.slug, outcome, true);
     p.final = true;
 
     const fee = p.fee, cost = p.cost;
@@ -309,7 +294,7 @@ class Bot {
     }
     this._push({ event: win ? 'SETTLED_WIN' : 'SETTLED_LOSS', slug: p.slug, side: p.side, shares: p.shares,
       pnl: round(pnl, 2),
-      note: `${winner} won ($1/share) -- ${outcome} on ${p.side} ${p.shares}sh, est. pnl ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)} (incl. est. fee) -- next ${p.side} stake ${this._stake(p.side)}sh` });
+      note: winner + ' won ($1/share) -- ' + outcome + ' on ' + p.side + ' ' + p.shares + 'sh, est. pnl ' + (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2) + ' (incl. est. fee)' });
   }
 
   async _balanceLoop() {
@@ -327,14 +312,6 @@ class Bot {
 
   snapshot() {
     const w = this.w, px = this.prices, now = Date.now();
-    const streak = { side: null, len: 0 };
-    if (w) {
-      for (let k = 1; ; k++) {
-        const o = this.outcomes.get(w.openTs - WINDOW_SECONDS * k);
-        if (!o || (streak.side && o.winner !== streak.side)) break;
-        streak.side = o.winner; streak.len += 1;
-      }
-    }
     const pending = this.pending.slice(-10).map((p) => {
       const mark = px && px.slug === p.slug ? (p.side === 'UP' ? px.up.mid : px.down.mid) : null;
       return { ...p, mark, unrealized: mark != null ? p.shares * mark - p.cost : null };
@@ -352,9 +329,9 @@ class Bot {
       walletAddress: this.trader.depositWallet || this.trader.address,
       account: { capital: this.capital, cash, openValue, equity: cash == null ? null : cash + openValue, maxDrawdown: this.maxDD },
       window: w ? { slug: w.slug, status: w.status, side: w.signal ? w.signal.side : null, openTs: w.openTs, closeTs: w.openTs + WINDOW_SECONDS } : null,
+      candleSetup: w ? w.candleSetup : null,
       prices: px && w && px.slug === w.slug ? px : null,
       priceSeries: this.priceSeries,
-      streak,
       counts: this.counts,
       recentOutcomes: [...this.outcomes.entries()].slice(-24).map(([t, o]) => {
         const tr = tradeBy.get(t), pd = pendBy.get(t);
@@ -362,13 +339,11 @@ class Bot {
           traded: tr ? tr.side : pd ? pd.side : null, result: tr ? tr.outcome : null, pnl: tr ? tr.pnl : null };
       }),
       lastSignal: this.lastSignal,
-      stakes: { DOWN: this._stake('DOWN'), UP: this._stake('UP') },
       pending,
       trades: this.trades.slice(-60).reverse(),
       equity: this.equity,
       stats: this.stats,
-      cfg: { streakLen: cfg.STREAK_LEN, base: cfg.BASE_SHARES, maxLoss: cfg.MAX_LOSS_DOUBLINGS, maxWin: cfg.MAX_WIN_DOUBLINGS,
-        winPrice: cfg.WIN_PRICE, endWatchMs: cfg.END_WATCH_MS, entryDelayMs: cfg.ENTRY_DELAY_MS, windowSec: WINDOW_SECONDS },
+      cfg: { base: cfg.BASE_SHARES, winPrice: cfg.WIN_PRICE, endWatchMs: cfg.END_WATCH_MS, entryDelayMs: cfg.ENTRY_DELAY_MS, windowSec: WINDOW_SECONDS },
       log: this.log.slice(-100).reverse(),
     };
   }

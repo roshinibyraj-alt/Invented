@@ -2,7 +2,7 @@
   "name": "polymarket-candle-imbalance-bot",
   "version": "1.0.0",
   "private": true,
-  "description": "BTC 5-min up/down bot: 4-candle streak signal, price-filtered entry, share-based martingale ladder, holds to resolution. Demo mode by default.",
+  "description": "BTC 5-min UP/DOWN bot: previous-candle pullback entries after 2 minutes, fixed 500 shares. Demo mode by default.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
