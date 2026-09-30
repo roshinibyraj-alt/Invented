@@ -200,16 +200,16 @@ function render(s){
     ? 'Previous '+cs.previousColor.toLowerCase()+' candle · close '+fmtBtc(cs.previous.close)+(cs.current?' · live '+fmtBtc(cs.current.price):' · live candle pending')
     : 'Binance BTCUSDT 5-minute feed: '+(cs&&cs.reason?cs.reason:'waiting for the previous closed candle');
   if(cs&&cs.ready&&cs.side&&cs.priceQualified){
-    $('sig').innerHTML='<span class="chip am">Entry qualified: BUY '+esc(cs.side)+' · '+cf.base+' shares</span> <span class="dim">best ask '+cents(cs.sideAsk)+' · FOK sweep limit '+cents(cf.priceCap)+'</span>';
+    $('sig').innerHTML='<span class="chip am">Signal '+esc(cs.signalSide)+' → BUY '+esc(cs.side)+' · '+cf.base+' shares</span> <span class="dim">best ask '+cents(cs.sideAsk)+' · FOK sweep limit '+cents(cf.priceCap)+'</span>';
   } else if(cs&&cs.ready&&cs.side){
     const askText=cs.sideAsk==null?'no fresh quote':'best ask '+cents(cs.sideAsk);
-    $('sig').innerHTML='<span class="chip am">Signal: BUY '+esc(cs.side)+'</span> <span class="dim">'+askText+'; trigger below '+(cf.maxEntryAsk*100).toFixed(0)+'¢</span>';
+    $('sig').innerHTML='<span class="chip am">Signal '+esc(cs.signalSide)+' → BUY '+esc(cs.side)+'</span> <span class="dim">'+askText+'; trigger below '+(cf.maxEntryAsk*100).toFixed(0)+'¢</span>';
   } else if(cs&&cs.ready){
     $('sig').innerHTML='<span class="chip gr">Previous candle was a doji — no entry signal</span>';
   } else {
     $('sig').innerHTML='<span class="dim">'+esc(cs&&cs.reason?cs.reason:'Waiting for the previous completed BTC candle and fresh Polymarket quotes.')+'</span>';
   }
-  $('rule').innerHTML='At the start of each 5-minute window, the previous completed BTC candle selects the side: red → <b>DOWN</b>, green → <b>UP</b>, doji → no signal. Enter once the fresh best ask on that side is below <b>'+(cf.maxEntryAsk*100).toFixed(0)+'¢</b>; this can trigger immediately, without waiting for a current-candle pullback. The 500-share FOK can sweep asks up to <b>'+(cf.priceCap*100).toFixed(0)+'¢</b> and voids if fewer than 500 shares are available within the cap. Fixed <b>'+cf.base+' shares</b>, one entry per window. Source: Binance BTCUSDT 5m.';
+  $('rule').innerHTML='At the start of each 5-minute window, the previous completed BTC candle sets the signal: red → <b>DOWN</b>, green → <b>UP</b>, doji → no signal. Entry side is reversed: signal DOWN → <b>BUY UP</b>, signal UP → <b>BUY DOWN</b>. Buy when the fresh best ask for that entry side is below <b>'+(cf.maxEntryAsk*100).toFixed(0)+'¢</b>; this can trigger immediately, without waiting for a current-candle pullback. The 500-share FOK can sweep asks up to <b>'+(cf.priceCap*100).toFixed(0)+'¢</b> and voids if fewer than 500 shares are available within the cap. Fixed <b>'+cf.base+' shares</b>, one entry per window. Source: Binance BTCUSDT 5m.';
   $('ladU').innerHTML='<div class="on">'+cf.base+'</div>';
   $('ladD').innerHTML='<div class="on">'+cf.base+'</div>';
   stats(s);tables(s);logs(s);
@@ -234,7 +234,7 @@ function stats(s){
 }
 const side=x=>`<span class="chip ${x==='UP'?'up':'dn'}">${x}</span>`;
 function tables(s){
-  $('open').innerHTML=s.pending.length?`<table><thead><tr><th>Window</th><th>Side</th><th>Shares</th><th>Entry</th><th>Cost</th><th>Now</th><th>Unrealized</th><th>Closes</th></tr></thead><tbody>${s.pending.map(p=>`<tr><td>${hhmm(p.openTs)}</td><td>${side(p.side)}</td><td>${p.shares}</td><td>${cents(p.price)}</td><td>${usd(p.cost)}</td><td>${cents(p.mark)}</td><td class="${p.unrealized>=0?'pos':'neg'}">${p.unrealized==null?'–':usd(p.unrealized,1)}</td><td>${hhmm(p.closeTs)}</td></tr>`).join('')}</tbody></table>`:'<div class="empty">No open bets. The bot watches the previous candle color and signalled-side ask from the start of each window.</div>';
+  $('open').innerHTML=s.pending.length?`<table><thead><tr><th>Window</th><th>Side</th><th>Shares</th><th>Entry</th><th>Cost</th><th>Now</th><th>Unrealized</th><th>Closes</th></tr></thead><tbody>${s.pending.map(p=>`<tr><td>${hhmm(p.openTs)}</td><td>${side(p.side)}</td><td>${p.shares}</td><td>${cents(p.price)}</td><td>${usd(p.cost)}</td><td>${cents(p.mark)}</td><td class="${p.unrealized>=0?'pos':'neg'}">${p.unrealized==null?'–':usd(p.unrealized,1)}</td><td>${hhmm(p.closeTs)}</td></tr>`).join('')}</tbody></table>`:'<div class="empty">No open bets. The bot watches the previous candle signal and opposite-side entry ask from the start of each window.</div>';
   $('trades').innerHTML=s.trades.length?`<table><thead><tr><th>Window</th><th>Bet</th><th>Winner</th><th>Shares</th><th>Entry</th><th>Cost</th><th>Result</th><th>P&amp;L</th></tr></thead><tbody>${s.trades.map(t=>`<tr><td>${hhmm(t.openTs)}</td><td>${side(t.side)}</td><td>${side(t.winner)}</td><td>${t.shares}</td><td>${cents(t.price)}</td><td>${usd(t.cost)}</td><td><span class="chip ${t.outcome==='WIN'?'up':'dn'}">${t.outcome}</span></td><td class="${t.pnl>=0?'pos':'neg'}"><b>${usd(t.pnl,1)}</b></td></tr>`).join('')}</tbody></table>`:'<div class="empty">No settled trades yet.</div>';
 }
 const grp={trade:['SIGNAL','FIRING','ENTRY_FILLED','SETTLED_WIN','SETTLED_LOSS','VOID'],out:['OUTCOME','NO_TRADE','WAIT','MISMATCH'],err:['ERROR','SETTLEMENT_TIMEOUT']};

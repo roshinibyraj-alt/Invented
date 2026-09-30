@@ -24,7 +24,7 @@ class Bot {
     this.stats = { wins: 0, losses: 0, noSignal: 0, voidNoFill: 0, voidNoData: 0, realizedPnl: 0 };
     this.outcomes = new Map();                     // window openTs -> {winner:'UP'|'DOWN', source:'price'|'resolution'}
     this._resolveTried = new Map();                // openTs -> last official-resolution lookup time
-    this.lastSignal = null;                        // most recent BTC candle signal
+    this.lastSignal = null;                        // most recent BTC candle signal and target entry
     this.walletBalance = null;
     this.error = null;
     this.log = [];
@@ -105,7 +105,7 @@ class Bot {
         if (!previous.window || !previous.hasCandleData) {
           this._voidNoData(previous, 'BTC 5-minute candle data was unavailable before the window ended');
         } else {
-          this._skipNoSignal(previous, 'no signalled-side best ask below ' + (cfg.MAX_ENTRY_ASK * 100) + '¢ before this window closed');
+          this._skipNoSignal(previous, 'no entry-side best ask below ' + (cfg.MAX_ENTRY_ASK * 100) + '¢ before this window closed');
         }
       }
       this.w = { slug, openTs, status: 'starting', window: null, signal: null, candleSetup: null,
@@ -174,25 +174,26 @@ class Bot {
     w.hasCandleData = true;
     const previousColor = previous.close > previous.open ? 'GREEN'
       : previous.close < previous.open ? 'RED' : 'DOJI';
-    const side = getPullbackSignal(previous);
+    const signalSide = getPullbackSignal(previous);
+    const side = signalSide === 'UP' ? 'DOWN' : signalSide === 'DOWN' ? 'UP' : null;
     const prior = { open: previous.open, close: previous.close, openTs: previous.openTs };
     const live = current ? { price: current.close, high: current.high, low: current.low, openTs: current.openTs } : null;
 
-    // Require a fresh best ask for the signalled Polymarket side, strictly below the configured threshold.
+    // Require a fresh best ask for the opposite-side entry, strictly below the configured threshold.
     const quoteState = this.prices;
     const quoteFresh = !!quoteState && quoteState.slug === w.slug && Date.now() - quoteState.ts <= 3000;
     const sideQuote = side && quoteFresh ? (side === 'UP' ? quoteState.up : quoteState.down) : null;
     const sideAsk = sideQuote && Number.isFinite(sideQuote.ask) ? sideQuote.ask : null;
     const priceQualified = side !== null && sideAsk !== null && sideAsk < cfg.MAX_ENTRY_ASK;
-    w.candleSetup = { ready: true, previousColor, previous: prior, current: live, side,
+    w.candleSetup = { ready: true, previousColor, previous: prior, current: live, signalSide, side,
       sideAsk, priceQualified, elapsedMs: elapsed };
     if (!side || !priceQualified) return;
 
-    w.signal = { side, previousColor, previousClose: previous.close, currentPrice: current ? current.close : null, sideAsk };
-    this.lastSignal = { slug: w.slug, side, previousColor, previousClose: previous.close,
+    w.signal = { signalSide, side, previousColor, previousClose: previous.close, currentPrice: current ? current.close : null, sideAsk };
+    this.lastSignal = { slug: w.slug, signalSide, side, previousColor, previousClose: previous.close,
       currentPrice: current ? current.close : null, sideAsk, ts: Date.now() };
     this._push({ event: 'SIGNAL', slug: w.slug, side, shares: cfg.BASE_SHARES,
-      note: 'Previous BTC candle was ' + previousColor.toLowerCase() + '; ' + side + ' best ask ' + (sideAsk * 100).toFixed(1) + '¢ is below ' + (cfg.MAX_ENTRY_ASK * 100) + '¢; fixed ' + cfg.BASE_SHARES + 'sh, FOK may sweep asks up to ' + (cfg.PRICE_CAP * 100).toFixed(0) + '¢' });
+      note: 'Previous BTC candle was ' + previousColor.toLowerCase() + ' and signalled ' + signalSide + '; buying ' + side + '. ' + side + ' best ask ' + (sideAsk * 100).toFixed(1) + '¢ is below ' + (cfg.MAX_ENTRY_ASK * 100) + '¢; fixed ' + cfg.BASE_SHARES + 'sh, FOK may sweep asks up to ' + (cfg.PRICE_CAP * 100).toFixed(0) + '¢' });
     await this._fire(w, side, side === 'UP' ? w.window.tokenUp : w.window.tokenDown,
       cfg.PRICE_CAP);
   }
