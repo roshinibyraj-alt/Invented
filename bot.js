@@ -192,9 +192,9 @@ class Bot {
     this.lastSignal = { slug: w.slug, side, previousColor, previousClose: previous.close,
       previousBoundary: side === 'UP' ? previous.low : previous.high, currentPrice: current.close, sideAsk, ts: Date.now() };
     this._push({ event: 'SIGNAL', slug: w.slug, side, shares: cfg.BASE_SHARES,
-      note: 'BTC pullback and ' + side + ' best ask ' + (sideAsk * 100).toFixed(1) + '¢ below ' + (cfg.MAX_ENTRY_ASK * 100) + '¢; fixed ' + cfg.BASE_SHARES + 'sh' });
+      note: 'BTC pullback and ' + side + ' best ask ' + (sideAsk * 100).toFixed(1) + '¢ below ' + (cfg.MAX_ENTRY_ASK * 100) + '¢; fixed ' + cfg.BASE_SHARES + 'sh, FOK may sweep asks up to ' + (cfg.PRICE_CAP * 100).toFixed(0) + '¢' });
     await this._fire(w, side, side === 'UP' ? w.window.tokenUp : w.window.tokenDown,
-      Math.min(cfg.PRICE_CAP, sideAsk));
+      cfg.PRICE_CAP);
   }
 
   _skipNoSignal(w, why) {
@@ -215,7 +215,7 @@ class Bot {
     w.status = 'firing';
     const shares = cfg.BASE_SHARES;
     this._push({ event: 'FIRING', slug: w.slug, side, shares,
-      note: 'buying fixed ' + shares + 'sh ' + side + ' (FOK limit ' + orderLimit + ')' });
+      note: 'FOK buying fixed ' + shares + 'sh ' + side + ', sweeping asks up to ' + (orderLimit * 100).toFixed(0) + '¢' });
 
     let result;
     try {
@@ -353,7 +353,7 @@ class Bot {
       trades: this.trades.slice(-60).reverse(),
       equity: this.equity,
       stats: this.stats,
-      cfg: { base: cfg.BASE_SHARES, maxEntryAsk: cfg.MAX_ENTRY_ASK, winPrice: cfg.WIN_PRICE, endWatchMs: cfg.END_WATCH_MS, entryDelayMs: cfg.ENTRY_DELAY_MS, windowSec: WINDOW_SECONDS },
+      cfg: { base: cfg.BASE_SHARES, maxEntryAsk: cfg.MAX_ENTRY_ASK, priceCap: cfg.PRICE_CAP, winPrice: cfg.WIN_PRICE, endWatchMs: cfg.END_WATCH_MS, entryDelayMs: cfg.ENTRY_DELAY_MS, windowSec: WINDOW_SECONDS },
       log: this.log.slice(-100).reverse(),
     };
   }

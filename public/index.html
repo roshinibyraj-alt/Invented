@@ -200,7 +200,7 @@ function render(s){
     ? 'Previous '+cs.previousColor.toLowerCase()+' candle · close '+fmtBtc(cs.previous.close)+' · range '+fmtBtc(cs.previous.low)+'–'+fmtBtc(cs.previous.high)+' · live '+fmtBtc(cs.current.price)
     : 'Binance BTCUSDT 5-minute feed: '+(cs&&cs.reason?cs.reason:'checking after 2:00');
   if(cs&&cs.ready&&cs.side&&cs.priceQualified){
-    $('sig').innerHTML='<span class="chip am">Entry qualified: BUY '+esc(cs.side)+' · '+cf.base+' shares</span> <span class="dim">best ask '+cents(cs.sideAsk)+'</span>';
+    $('sig').innerHTML='<span class="chip am">Entry qualified: BUY '+esc(cs.side)+' · '+cf.base+' shares</span> <span class="dim">best ask '+cents(cs.sideAsk)+' · FOK sweep limit '+cents(cf.priceCap)+'</span>';
   } else if(cs&&cs.ready&&cs.side){
     const askText=cs.sideAsk==null?'no fresh quote':'best ask '+cents(cs.sideAsk);
     $('sig').innerHTML='<span class="chip am">BTC setup '+esc(cs.side)+'</span> <span class="dim">'+askText+'; must be below '+(cf.maxEntryAsk*100).toFixed(0)+'¢</span>';
@@ -209,7 +209,7 @@ function render(s){
   } else {
     $('sig').innerHTML='<span class="dim">'+esc(cs&&cs.reason?cs.reason:'Waiting for 2:00 into the new candle and aligned Binance data.')+'</span>';
   }
-  $('rule').innerHTML='From <b style="color:var(--tx)">2:00</b> onward, enter the first matching pullback: green prior candle, BTC below the prior close and above its low → <b>UP</b>; red prior candle, BTC above the prior close and below its high → <b>DOWN</b>. The relevant prior-candle boundary must remain unbroken. The signalled side best ask must also be below <b>'+(cf.maxEntryAsk*100).toFixed(0)+'¢</b>; the FOK order is capped at that ask. Fixed <b>'+cf.base+' shares</b>, one entry per window. Source: Binance BTCUSDT 5m.';
+  $('rule').innerHTML='From <b style="color:var(--tx)">2:00</b> onward, enter the first matching pullback: green prior candle, BTC below the prior close and above its low → <b>UP</b>; red prior candle, BTC above the prior close and below its high → <b>DOWN</b>. The relevant prior-candle boundary must remain unbroken. The signalled side best ask must also be below <b>'+(cf.maxEntryAsk*100).toFixed(0)+'¢</b>; when qualified, the 500-share FOK can sweep asks on that side up to <b>'+(cf.priceCap*100).toFixed(0)+'¢</b> and voids if fewer than 500 shares are available within the cap. Fixed <b>'+cf.base+' shares</b>, one entry per window. Source: Binance BTCUSDT 5m.';
   $('ladU').innerHTML='<div class="on">'+cf.base+'</div>';
   $('ladD').innerHTML='<div class="on">'+cf.base+'</div>';
   stats(s);tables(s);logs(s);
