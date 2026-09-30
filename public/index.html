@@ -199,14 +199,17 @@ function render(s){
   $('candleTxt').textContent=cs&&cs.ready
     ? 'Previous '+cs.previousColor.toLowerCase()+' candle · close '+fmtBtc(cs.previous.close)+' · range '+fmtBtc(cs.previous.low)+'–'+fmtBtc(cs.previous.high)+' · live '+fmtBtc(cs.current.price)
     : 'Binance BTCUSDT 5-minute feed: '+(cs&&cs.reason?cs.reason:'checking after 2:00');
-  if(cs&&cs.ready){
-    $('sig').innerHTML=cs.side
-      ? '<span class="chip am">Entry triggered: BUY '+esc(cs.side)+' · '+cf.base+' shares</span>'
-      : '<span class="chip gr">Watching for the qualifying pullback…</span>';
+  if(cs&&cs.ready&&cs.side&&cs.priceQualified){
+    $('sig').innerHTML='<span class="chip am">Entry qualified: BUY '+esc(cs.side)+' · '+cf.base+' shares</span> <span class="dim">best ask '+cents(cs.sideAsk)+'</span>';
+  } else if(cs&&cs.ready&&cs.side){
+    const askText=cs.sideAsk==null?'no fresh quote':'best ask '+cents(cs.sideAsk);
+    $('sig').innerHTML='<span class="chip am">BTC setup '+esc(cs.side)+'</span> <span class="dim">'+askText+'; must be below '+(cf.maxEntryAsk*100).toFixed(0)+'¢</span>';
+  } else if(cs&&cs.ready){
+    $('sig').innerHTML='<span class="chip gr">Watching for the qualifying BTC pullback…</span>';
   } else {
     $('sig').innerHTML='<span class="dim">'+esc(cs&&cs.reason?cs.reason:'Waiting for 2:00 into the new candle and aligned Binance data.')+'</span>';
   }
-  $('rule').innerHTML='From <b style="color:var(--tx)">2:00</b> onward, enter the first matching pullback: green prior candle, BTC below the prior close and above its low → <b>UP</b>; red prior candle, BTC above the prior close and below its high → <b>DOWN</b>. The relevant prior-candle boundary must remain unbroken. Fixed <b>'+cf.base+' shares</b>, one entry per window. Source: Binance BTCUSDT 5m.';
+  $('rule').innerHTML='From <b style="color:var(--tx)">2:00</b> onward, enter the first matching pullback: green prior candle, BTC below the prior close and above its low → <b>UP</b>; red prior candle, BTC above the prior close and below its high → <b>DOWN</b>. The relevant prior-candle boundary must remain unbroken. The signalled side best ask must also be below <b>'+(cf.maxEntryAsk*100).toFixed(0)+'¢</b>; the FOK order is capped at that ask. Fixed <b>'+cf.base+' shares</b>, one entry per window. Source: Binance BTCUSDT 5m.';
   $('ladU').innerHTML='<div class="on">'+cf.base+'</div>';
   $('ladD').innerHTML='<div class="on">'+cf.base+'</div>';
   stats(s);tables(s);logs(s);
@@ -246,7 +249,7 @@ setInterval(()=>{ // countdown ticks between polls
   if(!S||!S.window)return;const n=Date.now()+skew,el=n/1000-S.window.openTs,rem=Math.max(0,S.cfg.windowSec-el);
   $('cd').textContent=Math.floor(rem/60)+':'+String(Math.floor(rem%60)).padStart(2,'0');
   $('arc').setAttribute('stroke-dashoffset',(276.5*(1-rem/S.cfg.windowSec)).toFixed(1));
-  const st=S.window.status,m={starting:'Starting up',armed:'Watching for pullback',no_signal:'No setup this window',firing:'Placing bet…',fired:'Holding to resolution',void_no_fill:'Bet not filled',void_no_data:'No BTC data'};
+  const st=S.window.status,m={starting:'Starting up',armed:'Checking BTC + side price',no_signal:'No setup this window',firing:'Placing bet…',fired:'Holding to resolution',void_no_fill:'Bet not filled',void_no_data:'No BTC data'};
   $('phase').textContent=rem<=S.cfg.endWatchMs/1000?'Reading the winner…':(m[st]||st);
   $('winStat').textContent=st;$('winStat').className='chip '+(st==='fired'?'am':st==='armed'||st==='firing'?'vi':'gr');
   $('slug').textContent=S.window.slug;

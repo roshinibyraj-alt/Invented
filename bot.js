@@ -105,7 +105,7 @@ class Bot {
         if (!previous.window || !previous.hasCandleData) {
           this._voidNoData(previous, 'BTC 5-minute candle data was unavailable before the window ended');
         } else {
-          this._skipNoSignal(previous, 'no qualifying pullback before this 5-minute window closed');
+          this._skipNoSignal(previous, 'no qualifying BTC pullback with a fresh side ask below ' + (cfg.MAX_ENTRY_ASK * 100) + '¢ before this window closed');
         }
       }
       this.w = { slug, openTs, status: 'starting', window: null, signal: null, candleSetup: null,
@@ -152,7 +152,7 @@ class Bot {
   async _entryStep(w, elapsed) {
     if (DONE.has(w.status) || w.status === 'firing') return;
     if (!w.window) return;
-    if (elapsed >= WINDOW_MS) return this._skipNoSignal(w, '5-minute window closed before a pullback entry');
+    if (elapsed >= WINDOW_MS) return this._skipNoSignal(w, '5-minute window closed before the BTC and side-price filters passed');
     if (elapsed < cfg.ENTRY_DELAY_MS) return;
 
     w.status = 'armed';
@@ -177,15 +177,24 @@ class Bot {
     const side = getPullbackSignal(previous, current);
     const prior = { open: previous.open, high: previous.high, low: previous.low, close: previous.close, openTs: previous.openTs };
     const live = { price: current.close, high: current.high, low: current.low, openTs: current.openTs };
-    w.candleSetup = { ready: true, previousColor, previous: prior, current: live, side, elapsedMs: elapsed };
-    if (!side) return;
 
-    w.signal = { side, previousColor, previousClose: previous.close, currentPrice: current.close };
+    // Require a fresh best ask for the signalled Polymarket side, strictly below the configured threshold.
+    const quoteState = this.prices;
+    const quoteFresh = !!quoteState && quoteState.slug === w.slug && Date.now() - quoteState.ts <= 3000;
+    const sideQuote = side && quoteFresh ? (side === 'UP' ? quoteState.up : quoteState.down) : null;
+    const sideAsk = sideQuote && Number.isFinite(sideQuote.ask) ? sideQuote.ask : null;
+    const priceQualified = side !== null && sideAsk !== null && sideAsk < cfg.MAX_ENTRY_ASK;
+    w.candleSetup = { ready: true, previousColor, previous: prior, current: live, side,
+      sideAsk, priceQualified, elapsedMs: elapsed };
+    if (!side || !priceQualified) return;
+
+    w.signal = { side, previousColor, previousClose: previous.close, currentPrice: current.close, sideAsk };
     this.lastSignal = { slug: w.slug, side, previousColor, previousClose: previous.close,
-      previousBoundary: side === 'UP' ? previous.low : previous.high, currentPrice: current.close, ts: Date.now() };
+      previousBoundary: side === 'UP' ? previous.low : previous.high, currentPrice: current.close, sideAsk, ts: Date.now() };
     this._push({ event: 'SIGNAL', slug: w.slug, side, shares: cfg.BASE_SHARES,
-      note: 'previous ' + previousColor.toLowerCase() + ' BTC candle pullback; fixed ' + cfg.BASE_SHARES + 'sh ' + side });
-    await this._fire(w, side, side === 'UP' ? w.window.tokenUp : w.window.tokenDown);
+      note: 'BTC pullback and ' + side + ' best ask ' + (sideAsk * 100).toFixed(1) + '¢ below ' + (cfg.MAX_ENTRY_ASK * 100) + '¢; fixed ' + cfg.BASE_SHARES + 'sh' });
+    await this._fire(w, side, side === 'UP' ? w.window.tokenUp : w.window.tokenDown,
+      Math.min(cfg.PRICE_CAP, sideAsk));
   }
 
   _skipNoSignal(w, why) {
@@ -201,15 +210,16 @@ class Bot {
     this._push({ event: 'VOID', slug: w.slug, note: why });
   }
 
-  async _fire(w, side, token) {
+  async _fire(w, side, token, priceLimit = cfg.PRICE_CAP) {
+    const orderLimit = Number.isFinite(priceLimit) ? Math.min(cfg.PRICE_CAP, priceLimit) : cfg.PRICE_CAP;
     w.status = 'firing';
     const shares = cfg.BASE_SHARES;
     this._push({ event: 'FIRING', slug: w.slug, side, shares,
-      note: 'buying fixed ' + shares + 'sh ' + side + ' (FOK limit ' + cfg.PRICE_CAP + ')' });
+      note: 'buying fixed ' + shares + 'sh ' + side + ' (FOK limit ' + orderLimit + ')' });
 
     let result;
     try {
-      result = await this.trader.placeFokLimitOrder(token, 'BUY', cfg.PRICE_CAP, shares);
+      result = await this.trader.placeFokLimitOrder(token, 'BUY', orderLimit, shares);
     } catch (e) {
       return this._void(w, side, shares, `order rejected/unfilled: ${e.message}`);
     }
@@ -343,7 +353,7 @@ class Bot {
       trades: this.trades.slice(-60).reverse(),
       equity: this.equity,
       stats: this.stats,
-      cfg: { base: cfg.BASE_SHARES, winPrice: cfg.WIN_PRICE, endWatchMs: cfg.END_WATCH_MS, entryDelayMs: cfg.ENTRY_DELAY_MS, windowSec: WINDOW_SECONDS },
+      cfg: { base: cfg.BASE_SHARES, maxEntryAsk: cfg.MAX_ENTRY_ASK, winPrice: cfg.WIN_PRICE, endWatchMs: cfg.END_WATCH_MS, entryDelayMs: cfg.ENTRY_DELAY_MS, windowSec: WINDOW_SECONDS },
       log: this.log.slice(-100).reverse(),
     };
   }
