@@ -1,17 +1,13 @@
 'use strict';
 
-/** Return UP/DOWN only for an unbroken pullback into the prior candle's range. */
-function getPullbackSignal(previous, current) {
-  if (!previous || !current) return null;
-  const p = { open: Number(previous.open), high: Number(previous.high), low: Number(previous.low), close: Number(previous.close) };
-  const c = { high: Number(current.high), low: Number(current.low), close: Number(current.close) };
-  if (![p.open, p.high, p.low, p.close, c.high, c.low, c.close].every(Number.isFinite)) return null;
-
-  // Prior green candle: price is below its close, remains above its low, and the live candle has not broken that low.
-  if (p.close > p.open && c.close < p.close && c.close > p.low && c.low >= p.low) return 'UP';
-  // Prior red candle: mirror the rule; price is above its close and the live candle has not broken its high.
-  if (p.close < p.open && c.close > p.close && c.close < p.high && c.high <= p.high) return 'DOWN';
-  return null;
+/** Select the buy side using only the previous completed candle's direction. */
+function getPullbackSignal(previous) {
+  if (!previous) return null;
+  const open = Number(previous.open), close = Number(previous.close);
+  if (!Number.isFinite(open) || !Number.isFinite(close)) return null;
+  if (close > open) return 'UP';
+  if (close < open) return 'DOWN';
+  return null; // doji: no signal
 }
 
 module.exports = { getPullbackSignal };

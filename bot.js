@@ -105,7 +105,7 @@ class Bot {
         if (!previous.window || !previous.hasCandleData) {
           this._voidNoData(previous, 'BTC 5-minute candle data was unavailable before the window ended');
         } else {
-          this._skipNoSignal(previous, 'no qualifying BTC pullback with a fresh side ask below ' + (cfg.MAX_ENTRY_ASK * 100) + '¢ before this window closed');
+          this._skipNoSignal(previous, 'no signalled-side best ask below ' + (cfg.MAX_ENTRY_ASK * 100) + '¢ before this window closed');
         }
       }
       this.w = { slug, openTs, status: 'starting', window: null, signal: null, candleSetup: null,
@@ -165,8 +165,8 @@ class Bot {
         note: 'BTC 5-minute candle feed unavailable: ' + e.message });
       return;
     }
-    if (!candles || !candles.previous || !candles.current) {
-      w.candleSetup = { ready: false, reason: 'waiting for the aligned live BTC 5-minute candle', elapsedMs: elapsed };
+    if (!candles || !candles.previous) {
+      w.candleSetup = { ready: false, reason: 'waiting for the previous closed BTC 5-minute candle', elapsedMs: elapsed };
       return;
     }
 
@@ -174,9 +174,9 @@ class Bot {
     w.hasCandleData = true;
     const previousColor = previous.close > previous.open ? 'GREEN'
       : previous.close < previous.open ? 'RED' : 'DOJI';
-    const side = getPullbackSignal(previous, current);
-    const prior = { open: previous.open, high: previous.high, low: previous.low, close: previous.close, openTs: previous.openTs };
-    const live = { price: current.close, high: current.high, low: current.low, openTs: current.openTs };
+    const side = getPullbackSignal(previous);
+    const prior = { open: previous.open, close: previous.close, openTs: previous.openTs };
+    const live = current ? { price: current.close, high: current.high, low: current.low, openTs: current.openTs } : null;
 
     // Require a fresh best ask for the signalled Polymarket side, strictly below the configured threshold.
     const quoteState = this.prices;
@@ -188,11 +188,11 @@ class Bot {
       sideAsk, priceQualified, elapsedMs: elapsed };
     if (!side || !priceQualified) return;
 
-    w.signal = { side, previousColor, previousClose: previous.close, currentPrice: current.close, sideAsk };
+    w.signal = { side, previousColor, previousClose: previous.close, currentPrice: current ? current.close : null, sideAsk };
     this.lastSignal = { slug: w.slug, side, previousColor, previousClose: previous.close,
-      previousBoundary: side === 'UP' ? previous.low : previous.high, currentPrice: current.close, sideAsk, ts: Date.now() };
+      currentPrice: current ? current.close : null, sideAsk, ts: Date.now() };
     this._push({ event: 'SIGNAL', slug: w.slug, side, shares: cfg.BASE_SHARES,
-      note: 'BTC pullback and ' + side + ' best ask ' + (sideAsk * 100).toFixed(1) + '¢ below ' + (cfg.MAX_ENTRY_ASK * 100) + '¢; fixed ' + cfg.BASE_SHARES + 'sh, FOK may sweep asks up to ' + (cfg.PRICE_CAP * 100).toFixed(0) + '¢' });
+      note: 'Previous BTC candle was ' + previousColor.toLowerCase() + '; ' + side + ' best ask ' + (sideAsk * 100).toFixed(1) + '¢ is below ' + (cfg.MAX_ENTRY_ASK * 100) + '¢; fixed ' + cfg.BASE_SHARES + 'sh, FOK may sweep asks up to ' + (cfg.PRICE_CAP * 100).toFixed(0) + '¢' });
     await this._fire(w, side, side === 'UP' ? w.window.tokenUp : w.window.tokenDown,
       cfg.PRICE_CAP);
   }

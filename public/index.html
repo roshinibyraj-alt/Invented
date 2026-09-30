@@ -118,7 +118,7 @@ svg text{fill:var(--dim);font-size:10px}
     <h2>Fixed entry size (shares)</h2>
     <div class="dim" style="font-size:12px">UP side</div><div class="lad u" id="ladU"></div>
     <div class="dim" style="font-size:12px;margin-top:10px">DOWN side</div><div class="lad d" id="ladD"></div>
-    <div class="box">Every qualifying pullback uses the same fixed share size. No win/loss ladder.</div>
+    <div class="box">Every qualifying candle-color and price trigger uses the same fixed share size. No win/loss ladder.</div>
   </div>
 </div>
 
@@ -197,19 +197,19 @@ function render(s){
   const cs=s.candleSetup;
   const fmtBtc=n=>n==null?'–':'$'+Number(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
   $('candleTxt').textContent=cs&&cs.ready
-    ? 'Previous '+cs.previousColor.toLowerCase()+' candle · close '+fmtBtc(cs.previous.close)+' · range '+fmtBtc(cs.previous.low)+'–'+fmtBtc(cs.previous.high)+' · live '+fmtBtc(cs.current.price)
-    : 'Binance BTCUSDT 5-minute feed: '+(cs&&cs.reason?cs.reason:'checking after 2:00');
+    ? 'Previous '+cs.previousColor.toLowerCase()+' candle · close '+fmtBtc(cs.previous.close)+(cs.current?' · live '+fmtBtc(cs.current.price):' · live candle pending')
+    : 'Binance BTCUSDT 5-minute feed: '+(cs&&cs.reason?cs.reason:'waiting for the previous closed candle');
   if(cs&&cs.ready&&cs.side&&cs.priceQualified){
     $('sig').innerHTML='<span class="chip am">Entry qualified: BUY '+esc(cs.side)+' · '+cf.base+' shares</span> <span class="dim">best ask '+cents(cs.sideAsk)+' · FOK sweep limit '+cents(cf.priceCap)+'</span>';
   } else if(cs&&cs.ready&&cs.side){
     const askText=cs.sideAsk==null?'no fresh quote':'best ask '+cents(cs.sideAsk);
-    $('sig').innerHTML='<span class="chip am">BTC setup '+esc(cs.side)+'</span> <span class="dim">'+askText+'; must be below '+(cf.maxEntryAsk*100).toFixed(0)+'¢</span>';
+    $('sig').innerHTML='<span class="chip am">Signal: BUY '+esc(cs.side)+'</span> <span class="dim">'+askText+'; trigger below '+(cf.maxEntryAsk*100).toFixed(0)+'¢</span>';
   } else if(cs&&cs.ready){
-    $('sig').innerHTML='<span class="chip gr">Watching for the qualifying BTC pullback…</span>';
+    $('sig').innerHTML='<span class="chip gr">Previous candle was a doji — no entry signal</span>';
   } else {
-    $('sig').innerHTML='<span class="dim">'+esc(cs&&cs.reason?cs.reason:'Waiting for 2:00 into the new candle and aligned Binance data.')+'</span>';
+    $('sig').innerHTML='<span class="dim">'+esc(cs&&cs.reason?cs.reason:'Waiting for the previous completed BTC candle and fresh Polymarket quotes.')+'</span>';
   }
-  $('rule').innerHTML='From <b style="color:var(--tx)">2:00</b> onward, enter the first matching pullback: green prior candle, BTC below the prior close and above its low → <b>UP</b>; red prior candle, BTC above the prior close and below its high → <b>DOWN</b>. The relevant prior-candle boundary must remain unbroken. The signalled side best ask must also be below <b>'+(cf.maxEntryAsk*100).toFixed(0)+'¢</b>; when qualified, the 500-share FOK can sweep asks on that side up to <b>'+(cf.priceCap*100).toFixed(0)+'¢</b> and voids if fewer than 500 shares are available within the cap. Fixed <b>'+cf.base+' shares</b>, one entry per window. Source: Binance BTCUSDT 5m.';
+  $('rule').innerHTML='At the start of each 5-minute window, the previous completed BTC candle selects the side: red → <b>DOWN</b>, green → <b>UP</b>, doji → no signal. Enter once the fresh best ask on that side is below <b>'+(cf.maxEntryAsk*100).toFixed(0)+'¢</b>; this can trigger immediately, without waiting for a current-candle pullback. The 500-share FOK can sweep asks up to <b>'+(cf.priceCap*100).toFixed(0)+'¢</b> and voids if fewer than 500 shares are available within the cap. Fixed <b>'+cf.base+' shares</b>, one entry per window. Source: Binance BTCUSDT 5m.';
   $('ladU').innerHTML='<div class="on">'+cf.base+'</div>';
   $('ladD').innerHTML='<div class="on">'+cf.base+'</div>';
   stats(s);tables(s);logs(s);
@@ -234,7 +234,7 @@ function stats(s){
 }
 const side=x=>`<span class="chip ${x==='UP'?'up':'dn'}">${x}</span>`;
 function tables(s){
-  $('open').innerHTML=s.pending.length?`<table><thead><tr><th>Window</th><th>Side</th><th>Shares</th><th>Entry</th><th>Cost</th><th>Now</th><th>Unrealized</th><th>Closes</th></tr></thead><tbody>${s.pending.map(p=>`<tr><td>${hhmm(p.openTs)}</td><td>${side(p.side)}</td><td>${p.shares}</td><td>${cents(p.price)}</td><td>${usd(p.cost)}</td><td>${cents(p.mark)}</td><td class="${p.unrealized>=0?'pos':'neg'}">${p.unrealized==null?'–':usd(p.unrealized,1)}</td><td>${hhmm(p.closeTs)}</td></tr>`).join('')}</tbody></table>`:'<div class="empty">No open bets. The bot begins watching for a pullback at 2:00 into each window.</div>';
+  $('open').innerHTML=s.pending.length?`<table><thead><tr><th>Window</th><th>Side</th><th>Shares</th><th>Entry</th><th>Cost</th><th>Now</th><th>Unrealized</th><th>Closes</th></tr></thead><tbody>${s.pending.map(p=>`<tr><td>${hhmm(p.openTs)}</td><td>${side(p.side)}</td><td>${p.shares}</td><td>${cents(p.price)}</td><td>${usd(p.cost)}</td><td>${cents(p.mark)}</td><td class="${p.unrealized>=0?'pos':'neg'}">${p.unrealized==null?'–':usd(p.unrealized,1)}</td><td>${hhmm(p.closeTs)}</td></tr>`).join('')}</tbody></table>`:'<div class="empty">No open bets. The bot watches the previous candle color and signalled-side ask from the start of each window.</div>';
   $('trades').innerHTML=s.trades.length?`<table><thead><tr><th>Window</th><th>Bet</th><th>Winner</th><th>Shares</th><th>Entry</th><th>Cost</th><th>Result</th><th>P&amp;L</th></tr></thead><tbody>${s.trades.map(t=>`<tr><td>${hhmm(t.openTs)}</td><td>${side(t.side)}</td><td>${side(t.winner)}</td><td>${t.shares}</td><td>${cents(t.price)}</td><td>${usd(t.cost)}</td><td><span class="chip ${t.outcome==='WIN'?'up':'dn'}">${t.outcome}</span></td><td class="${t.pnl>=0?'pos':'neg'}"><b>${usd(t.pnl,1)}</b></td></tr>`).join('')}</tbody></table>`:'<div class="empty">No settled trades yet.</div>';
 }
 const grp={trade:['SIGNAL','FIRING','ENTRY_FILLED','SETTLED_WIN','SETTLED_LOSS','VOID'],out:['OUTCOME','NO_TRADE','WAIT','MISMATCH'],err:['ERROR','SETTLEMENT_TIMEOUT']};

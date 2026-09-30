@@ -4,7 +4,7 @@ const cfg = require('./config');
 const { WINDOW_SECONDS } = require('./polymarket-market');
 const API = 'https://api.binance.com/api/v3/klines';
 
-/** Fetch the previous closed and current live BTC 5-minute candles aligned to a Polymarket window. */
+/** Fetch the previous closed and optional current live BTC 5-minute candles aligned to a Polymarket window. */
 async function fetchWindowCandles(windowOpenTs) {
   const query = 'symbol=' + encodeURIComponent(cfg.BTC_SYMBOL)
     + '&interval=' + encodeURIComponent(cfg.BTC_INTERVAL) + '&limit=3';
@@ -27,8 +27,8 @@ async function fetchWindowCandles(windowOpenTs) {
     }
     const previous = candles.find((c) => c.openTs === windowOpenTs - WINDOW_SECONDS);
     const current = candles.find((c) => c.openTs === windowOpenTs);
-    if (!previous || !current) return null; // wait until the live candle is available
-    return { previous, current };
+    if (!previous) return null; // previous completed candle determines the signalled side
+    return { previous, current: current || null };
   } finally {
     clearTimeout(timeout);
   }
