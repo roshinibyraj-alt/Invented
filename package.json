@@ -1,11 +1,12 @@
 {
-  "name": "polymarket-candle-imbalance-bot",
+  "name": "stop-loss-tp",
   "version": "1.0.0",
   "private": true,
-  "description": "BTC 5-min UP/DOWN bot: previous-candle pullback entries after 2 minutes, fixed 500 shares. Demo mode by default.",
+  "description": "Stop loss, Tp — demo-only BTC 5-minute momentum bot.",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "test": "node --test"
   },
   "engines": {
     "node": ">=18"
@@ -13,6 +14,8 @@
   "dependencies": {
     "viem": "^2.21.0",
     "@polymarket/clob-client-v2": "1.1.0",
-    "@polymarket/builder-relayer-client": "latest"
+    "@polymarket/builder-relayer-client": "latest",
+    "ccxt": "^4.5.85",
+    "ws": "^8.18.0"
   }
 }

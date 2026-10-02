@@ -114,9 +114,7 @@ async function getActiveWindow(nowMs = Date.now()) {
 
 /** Real settlement -- polls Gamma for the market's own resolved outcome
  * (closed=true + a decisive outcomePrices split, winner priced >=0.99),
- * NOT a price guess. This is what actually determines wins/losses for
- * the sizing ladder, since real capital is on the line. Returns 'UP',
- * 'DOWN', or null if not resolved yet. */
+ * NOT a price guess. Returns 'UP', 'DOWN', or null if not resolved yet. */
 async function fetchResolution(slug) {
   const { market } = await fetchMarketBySlug(slug);
   if (!market || !market.closed) return null;

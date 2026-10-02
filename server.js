@@ -8,13 +8,14 @@ const INDEX_HTML = fs.readFileSync(path.join(__dirname, 'public', 'index.html'))
 
 function startServer(bot, port) {
   const server = http.createServer((req, res) => {
-    if (req.url === '/api/state') {
+    const pathname = new URL(req.url, 'http://localhost').pathname;
+    if (pathname === '/api/state') {
       const body = JSON.stringify(bot.snapshot());
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
       res.end(body);
       return;
     }
-    if (req.url === '/' || req.url === '/index.html') {
+    if (pathname === '/' || pathname === '/index.html') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(INDEX_HTML);
       return;
