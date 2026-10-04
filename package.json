@@ -1,8 +1,8 @@
 {
-  "name": "stop-loss-tp",
+  "name": "paired-limit-demo",
   "version": "1.0.0",
   "private": true,
-  "description": "Stop loss, Tp — demo-only BTC 5-minute momentum bot.",
+  "description": "Demo-only Polymarket BTC 5-minute paired resting-limit bot.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
