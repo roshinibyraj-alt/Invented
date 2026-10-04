@@ -325,6 +325,9 @@ class Bot {
       }
 
       if (w.entrySide) {
+        // A feed callback can observe the first fill while the pair is still
+        // being submitted. Re-run cancellation once both order records exist.
+        await this._cancelOtherEntryOrder(w, w.entrySide);
         w.status = this._activePositions(w).length ? 'position_open' : 'entry_filled';
       } else if (records.every((entry) => ['CANCELED', 'CANCELLED', 'FILLED'].includes(entry.status))) {
         w.status = 'entry_orders_closed';

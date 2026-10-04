@@ -106,6 +106,31 @@ test('first fill creates a position and cancels the opposite resting order', asy
   assert.ok(fx.bot.log.some((entry) => entry.event === 'OCO_CANCEL'));
 });
 
+test('opposite order is canceled if a feed sees the first fill before pair submission finishes', async () => {
+  const fx = fixture();
+  fx.w.entryOrdersStarted = true;
+  fx.w.orderShares = 500;
+  const up = await fx.trader.placeGtcOrder('up-token', 'BUY', 0.30, 500);
+  fx.w.entryOrders.UP = {
+    side: 'UP', tokenId: 'up-token', orderId: up.id, price: 0.30,
+    shares: 500, matchedShares: 0, rebateRecorded: 0, status: 'LIVE',
+    placedAt: Date.now(), cancelPending: false,
+  };
+  fx.trader.fill(up.id, 500);
+  await fx.bot._checkEntryOrders(fx.w);
+  assert.equal(fx.w.entrySide, 'UP');
+  assert.equal(fx.w.entryOrders.DOWN, undefined);
+
+  const down = await fx.trader.placeGtcOrder('down-token', 'BUY', 0.30, 500);
+  fx.w.entryOrders.DOWN = {
+    side: 'DOWN', tokenId: 'down-token', orderId: down.id, price: 0.30,
+    shares: 500, matchedShares: 0, rebateRecorded: 0, status: 'LIVE',
+    placedAt: Date.now(), cancelPending: false,
+  };
+  await fx.bot._checkEntryOrders(fx.w);
+  assert.equal(fx.w.entryOrders.DOWN.status, 'CANCELED');
+});
+
 test('partial fill is tracked at the limit cost while the unfilled opposite side is canceled', async () => {
   const fx = fixture();
   await postPair(fx);
