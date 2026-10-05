@@ -73,7 +73,7 @@ test('demo marketable BUY respects the observed maximum price and visible depth'
   } finally { global.fetch = originalFetch; }
 });
 
-test('demo marketable BUY sweeps depth to the price cap and targets shares at that cap', async () => {
+test('demo marketable BUY sweeps visible depth up to the price cap', async () => {
   const originalFetch = global.fetch;
   const book = {
     bids: [{ price: '0.48', size: '20' }],
@@ -88,9 +88,26 @@ test('demo marketable BUY sweeps depth to the price cap and targets shares at th
     const trader = new DemoTrader();
     const order = await trader.placeFakMarketOrder('token', 'BUY', 500 * 0.75, { priceLimit: 0.75 });
     assert.equal(order.status, 'matched');
-    assert.equal(Number(order.raw.takingAmount), 500);
+    assert.ok(Math.abs(Number(order.raw.takingAmount) - 500) < 1e-8);
     assert.equal(Number(order.raw.makingAmount), 369.04);
-    assert.equal(order.avgPrice, 369.04 / 500);
+    assert.ok(Math.abs(order.avgPrice - (369.04 / 500)) < 1e-12);
+  } finally { global.fetch = originalFetch; }
+});
+
+test('demo marketable BUY spends a fixed dollar budget and receives extra shares at a better ask', async () => {
+  const originalFetch = global.fetch;
+  const book = {
+    bids: [],
+    asks: [{ price: '0.69', size: '1000' }, { price: '0.75', size: '1000' }],
+  };
+  global.fetch = async () => ({ ok: true, json: async () => book });
+  try {
+    const trader = new DemoTrader();
+    const order = await trader.placeFakMarketOrder('token', 'BUY', 100, { priceLimit: 0.75 });
+    assert.equal(order.status, 'matched');
+    assert.ok(Math.abs(Number(order.raw.makingAmount) - 100) < 1e-8);
+    assert.ok(Math.abs(Number(order.raw.takingAmount) - (100 / 0.69)) < 1e-8);
+    assert.ok(Math.abs(order.avgPrice - 0.69) < 1e-8);
   } finally { global.fetch = originalFetch; }
 });
 

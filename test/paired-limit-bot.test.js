@@ -39,14 +39,14 @@ class FakeDemoTrader {
       .sort((a, b) => a.price - b.price);
     const priceLimit = Number(options.priceLimit);
     const hasPriceLimit = Number.isFinite(priceLimit) && priceLimit > 0;
-    let remaining = hasPriceLimit ? Number(amount) / priceLimit : Number(amount) || 0;
+    let remaining = Number(amount) || 0;
     let shares = 0;
     let notional = 0;
     for (const level of levels) {
-      const take = Math.min(level.size, hasPriceLimit ? remaining : remaining / level.price);
+      const take = Math.min(level.size, remaining / level.price);
       shares += take;
       notional += take * level.price;
-      remaining -= hasPriceLimit ? take : take * level.price;
+      remaining -= take * level.price;
       if (remaining <= 1e-9) break;
     }
     if (shares <= 0) {
@@ -145,7 +145,23 @@ test('no order is placed until a side ask reaches $0.69, then buys a fixed $100 
   assert.equal(fx.w.primaryPosition.role, 'PRIMARY');
   assert.equal(fx.w.primaryPosition.stakeUsd, 100);
   assert.ok(Math.abs(fx.w.primaryPosition.entryNotional - 100) < 1e-8);
+  assert.ok(Math.abs(fx.w.primaryPosition.shares - (100 / 0.69)) < 1e-8);
   assert.ok(fx.bot.cash < 9900); // Stake plus estimated taker fee.
+});
+
+test('one-tick jump from $0.65 to $0.75 still fires a $100 primary buy', async () => {
+  const fx = fixture();
+  await quote(fx, 'UP', 0.64, 0.65);
+  assert.equal(fx.trader.calls.length, 0);
+
+  await quote(fx, 'UP', 0.74, 0.75);
+
+  assert.equal(fx.trader.calls.length, 1);
+  assert.equal(fx.trader.calls[0].amount, 100);
+  assert.equal(fx.trader.calls[0].options.priceLimit, 0.75);
+  assert.equal(fx.w.primaryPosition.stakeUsd, 100);
+  assert.ok(Math.abs(fx.w.primaryPosition.entryNotional - 100) < 1e-8);
+  assert.ok(Math.abs(fx.w.primaryPosition.shares - (100 / 0.75)) < 1e-8);
 });
 
 test('the first side to reach the trigger wins the primary entry', async () => {
@@ -298,7 +314,30 @@ test('thin visible depth creates a partial fixed-dollar fill and tracks actual c
 
   assert.equal(fx.w.primaryPosition.shares, 10);
   assert.ok(Math.abs(fx.w.primaryPosition.entryNotional - 6.9) < 1e-8);
+  assert.equal(fx.w.primaryPosition.stakeUsd, 100);
   assert.ok(fx.bot.cash > 9900);
+});
+
+test('one filled share pays $1 on a win and $0 on a loss', async () => {
+  for (const winner of ['UP', 'DOWN']) {
+    const fx = fixture();
+    fx.trader.askDepth.set('up-token', 1);
+    const primary = await enterPrimary(fx);
+    fx.w.hedgeAttempted = true;
+
+    assert.equal(primary.shares, 1);
+    assert.ok(Math.abs(primary.entryNotional - 0.69) < 1e-8);
+    await confirmClobOutcome(fx, winner);
+
+    const trade = fx.bot.trades.find((item) => item.role === 'PRIMARY');
+    const payout = winner === 'UP' ? 1 : 0;
+    assert.equal(primary.exitProceeds, payout);
+    assert.equal(trade.exitProceeds, payout);
+    assert.equal(trade.exitPrice, payout);
+    assert.equal(trade.outcome, winner === 'UP' ? 'WIN' : 'LOSS');
+    assert.ok(Math.abs(trade.pnl - (payout - primary.entryNotional - primary.entryFee)) < 0.01);
+    assert.equal(fx.bot.currentStakeUsd, winner === 'UP' ? 100 : 200);
+  }
 });
 
 test('insufficient demo cash prevents the entry order', async () => {
