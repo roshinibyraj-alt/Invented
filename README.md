@@ -14,7 +14,7 @@ Orders are simulated locally from public CLOB books using fixed USDC budgets. A 
 
 ## Safety and limits
 
-The active entry point instantiates only `DemoTrader`, which never signs or submits exchange orders. `LIVE_TRADING=true` exits before wallet authentication. Demo cash, current stake, and trade history are in memory and reset when the process restarts. Estimated taker fees and simulated fills are illustrative only; they are not live execution or profitability evidence.
+The active entry point instantiates only `DemoTrader`, which never signs or submits exchange orders. `LIVE_TRADING=true` exits before wallet authentication. Demo cash, current stake, and trade history are in memory and reset when the process restarts. Bot state changes are emitted as structured `[bot]` lines to stdout, with a 30-second heartbeat showing market readiness, asks, and quote freshness. Estimated taker fees and simulated fills are illustrative only; they are not live execution or profitability evidence.
 
 ## Run
 

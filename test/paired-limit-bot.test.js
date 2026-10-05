@@ -64,8 +64,8 @@ class FakeDemoTrader {
   async getBalance() { return null; }
 }
 
-function fixture({ trader = new FakeDemoTrader(), cash } = {}) {
-  const bot = new Bot(trader);
+function fixture({ trader = new FakeDemoTrader(), cash, logger } = {}) {
+  const bot = new Bot(trader, { logger });
   if (cash != null) bot.cash = cash;
   const openTs = currentWindowOpenTs();
   const slug = slugForTs(openTs);
@@ -126,6 +126,7 @@ test('configuration uses $100 base stake, 45% hedge, and $0.69/$0.70 triggers', 
   assert.equal(cfg.ENTRY_TRIGGER_PRICE_USD, 0.69);
   assert.equal(cfg.STOP_LOSS_HEDGE_TRIGGER_PRICE_USD, 0.70);
   assert.equal(cfg.CLOB_PRICE_SETTLEMENT_THRESHOLD_USD, 0.97);
+  assert.equal(cfg.BOT_LOG_HEARTBEAT_MS, 30000);
   assert.equal(cfg.MAX_BUY_SLIPPAGE_PERCENT, 100000);
   assert.equal(cfg.MAX_BINARY_PRICE_USD, 1);
 });
@@ -464,4 +465,27 @@ test('snapshot exposes trigger levels, current primary/hedge stakes, and demo ca
   assert.equal(snapshot.strategy.entryTriggerPrice, 0.69);
   assert.equal(snapshot.strategy.stopLossHedgeTriggerPrice, 0.70);
   assert.equal(snapshot.strategy.priceThresholdUsd, 0.97);
+});
+
+test('bot emits structured events and a throttled heartbeat through its logger', () => {
+  const records = [];
+  const fx = fixture({
+    logger: { log: (line) => records.push(JSON.parse(line.replace(/^\[bot\] /, ''))) },
+  });
+  const now = Date.now();
+  fx.bot._lastMarketEventAt = now - 1200;
+  fx.bot._lastWebSocketQuoteAt = now - 4500;
+
+  fx.bot._push({ event: 'TEST_EVENT', slug: fx.w.slug, note: 'test event' });
+  fx.bot._maybeLogHeartbeat(fx.w, now);
+  fx.bot._maybeLogHeartbeat(fx.w, now + 1000);
+
+  assert.equal(records.filter((record) => record.event === 'TEST_EVENT').length, 1);
+  const heartbeats = records.filter((record) => record.event === 'BOT_HEARTBEAT');
+  assert.equal(heartbeats.length, 1);
+  assert.equal(heartbeats[0].slug, fx.w.slug);
+  assert.equal(heartbeats[0].marketReady, true);
+  assert.equal(heartbeats[0].feedSubscriptionStarted, false);
+  assert.equal(heartbeats[0].lastQuoteAgeMs, 1200);
+  assert.equal(heartbeats[0].lastWebSocketQuoteAgeMs, 4500);
 });

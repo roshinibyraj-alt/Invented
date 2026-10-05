@@ -13,6 +13,7 @@ const MAX_LOG = 300;
 class Bot {
   constructor(trader, opts = {}) {
     this.trader = trader;
+    this.logger = opts.logger || null;
     this.live = !!opts.live;
     this.demoMode = !this.live && !!(trader && trader.demoMode === true);
     this.strategyBlocked = this.live || !this.demoMode;
@@ -46,13 +47,27 @@ class Bot {
     this._marketFeedStop = null;
     this._marketFeedSlug = null;
     this._lastMarketEventAt = 0;
+    this._lastWebSocketQuoteAt = 0;
     this._lastRestFetchAt = 0;
+    this._lastHeartbeatAt = 0;
     this._running = false;
   }
 
   _push(entry) {
-    this.log.push({ ts: Date.now(), ...entry });
+    const record = { ts: Date.now(), ...entry };
+    this.log.push(record);
     if (this.log.length > MAX_LOG) this.log.shift();
+    try {
+      const { ts, ...fields } = record;
+      const line = '[bot] ' + JSON.stringify({
+        at: new Date(ts).toISOString(),
+        ...fields,
+      });
+      if (typeof this.logger === 'function') this.logger(line);
+      else if (this.logger && typeof this.logger.log === 'function') this.logger.log(line);
+    } catch (_) {
+      // Logging must never interrupt the demo strategy.
+    }
   }
 
   _warnOnce(key, entry) {
@@ -72,6 +87,10 @@ class Bot {
       return;
     }
     this._running = true;
+    this._push({
+      event: 'BOT_STARTED',
+      note: 'Demo strategy loops started; monitoring market discovery and CLOB quotes.',
+    });
     void this._loop();
     void this._priceLoop();
     void this._settlementLoop();
@@ -121,12 +140,40 @@ class Bot {
       } else {
         this.error = result.reason || 'active market unavailable';
         w.status = 'waiting_for_market';
+        if (w.marketWaitReason !== this.error) {
+          w.marketWaitReason = this.error;
+          this._push({ event: 'MARKET_WAIT', slug: w.slug, note: this.error });
+        }
       }
     }
 
-    if (!w.window) return;
+    if (!w.window) {
+      this._maybeLogHeartbeat(w);
+      return;
+    }
     const closeTs = Number(w.window.closeTs) || w.openTs + WINDOW_SECONDS;
     if (Date.now() >= closeTs * 1000) await this._closeWindow(w);
+    this._maybeLogHeartbeat(w);
+  }
+
+  _maybeLogHeartbeat(w, now = Date.now()) {
+    if (now - this._lastHeartbeatAt < cfg.BOT_LOG_HEARTBEAT_MS) return;
+    this._lastHeartbeatAt = now;
+    const prices = this.prices && this.prices.slug === w.slug ? this.prices : null;
+    const ageMs = (timestamp) => timestamp > 0 ? Math.max(0, now - timestamp) : null;
+    this._push({
+      event: 'BOT_HEARTBEAT',
+      slug: w.slug,
+      status: w.status,
+      marketReady: !!w.window,
+      feedSubscriptionStarted: this._marketFeedSlug === w.slug,
+      lastQuoteAgeMs: ageMs(this._lastMarketEventAt),
+      lastWebSocketQuoteAgeMs: ageMs(this._lastWebSocketQuoteAt),
+      upAsk: prices && prices.up.ask != null ? round(prices.up.ask, 4) : null,
+      downAsk: prices && prices.down.ask != null ? round(prices.down.ask, 4) : null,
+      error: this.error || null,
+      note: 'Bot loop is active; heartbeat reports quote freshness and market status.',
+    });
   }
 
   async _priceLoop() {
@@ -151,11 +198,12 @@ class Bot {
     this._quotesByToken = new Map();
     this.prices = { slug: w.slug, ts: Date.now(), up: emptyQuote(), down: emptyQuote() };
     this._lastMarketEventAt = 0;
+    this._lastWebSocketQuoteAt = 0;
     this._lastRestFetchAt = 0;
     try {
       this._marketFeedStop = startMarketFeed(
         [w.window.tokenUp, w.window.tokenDown],
-        (tokenId, quoteValue) => this._onQuote(w.slug, tokenId, quoteValue),
+        (tokenId, quoteValue) => this._onQuote(w.slug, tokenId, quoteValue, 'websocket'),
         (error) => this._warnOnce('clob-ws-' + w.slug, {
           event: 'ERROR', slug: w.slug, note: 'Polymarket CLOB feed error: ' + error.message,
         }),
@@ -177,8 +225,8 @@ class Bot {
         this.trader.getOrderBook(w.window.tokenDown),
       ]);
       if (this._marketFeedSlug !== w.slug) return;
-      this._onQuote(w.slug, w.window.tokenUp, quote(books[0]));
-      this._onQuote(w.slug, w.window.tokenDown, quote(books[1]));
+      this._onQuote(w.slug, w.window.tokenUp, quote(books[0]), 'rest');
+      this._onQuote(w.slug, w.window.tokenDown, quote(books[1]), 'rest');
     } catch (error) {
       this._warnOnce('seed-' + w.slug, {
         event: 'ERROR', slug: w.slug, note: 'CLOB quote refresh failed: ' + error.message,
@@ -186,7 +234,7 @@ class Bot {
     }
   }
 
-  _onQuote(slug, tokenId, update) {
+  _onQuote(slug, tokenId, update, source = 'websocket') {
     const w = this.w;
     if (!w || w.slug !== slug || !w.window || w.closed) return;
     const side = tokenId === w.window.tokenUp ? 'UP'
@@ -210,6 +258,7 @@ class Bot {
     const down = this._quotesByToken.get(w.window.tokenDown) || emptyQuote();
     this.prices = { slug, ts: now, up: { ...up }, down: { ...down } };
     this._lastMarketEventAt = now;
+    if (source === 'websocket') this._lastWebSocketQuoteAt = now;
     if (up.ask != null && down.ask != null) {
       if (this._seriesSlug !== slug) { this._seriesSlug = slug; this.priceSeries = []; }
       if (now - this._lastSeriesAt >= 250) {
@@ -734,6 +783,7 @@ class Bot {
 function makeWindowState(slug, openTs) {
   return {
     slug, openTs, status: 'waiting_for_market', window: null,
+    marketWaitReason: null,
     closed: false, closing: false, positions: [], position: null,
     primarySide: null, primaryPosition: null, hedgePosition: null,
     primaryStakeUsd: null, primaryAttempted: false, hedgeAttempted: false,

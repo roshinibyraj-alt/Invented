@@ -16,7 +16,7 @@ async function main() {
   const DemoTrader = require('./demo-trader');
   const trader = new DemoTrader();
 
-  const bot = new Bot(trader, { live: false });
+  const bot = new Bot(trader, { live: false, logger: console });
   bot.start();
   startServer(bot, process.env.PORT || 3000);
 
