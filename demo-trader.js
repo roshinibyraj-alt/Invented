@@ -4,6 +4,7 @@
 // It never signs, sends an order, or accesses a wallet.
 const CLOB_HOST = 'https://clob.polymarket.com';
 const strategy = require('./strategy');
+const config = require('./config');
 
 class DemoTrader {
   constructor() {
@@ -27,19 +28,31 @@ class DemoTrader {
 
   async placeFakMarketOrder(tokenId, side, amount, options = {}) {
     const book = await this.getOrderBook(tokenId);
-    if (!book) return { id: null, status: 'unmatched', isFilled: false, avgPrice: 0, raw: {} };
     const buying = String(side).toUpperCase() === 'BUY';
     const priceLimit = Number(options && options.priceLimit);
     const hasPriceLimit = Number.isFinite(priceLimit) && priceLimit > 0;
-    const levels = (buying ? (book.asks || []) : (book.bids || []))
+    let levels = (buying ? (book && book.asks || []) : (book && book.bids || []))
       .map((level) => ({ price: Number(level.price), size: Number(level.size) }))
       .filter((level) => level.price > 0 && level.size > 0
+        && (!buying || level.price <= config.MAX_BINARY_PRICE_USD)
         && (!hasPriceLimit || (buying ? level.price <= priceLimit : level.price >= priceLimit)))
       .sort(buying ? (a, b) => a.price - b.price : (a, b) => b.price - a.price);
+    // A fresh market-feed ask is sufficient for a demo fill when the public
+    // REST book is missing or empty. Keep this fallback bounded by quote age.
+    if (buying && levels.length === 0) {
+      const cachedQuote = this.quotes.get(tokenId);
+      const quoteAge = cachedQuote ? Date.now() - cachedQuote.updatedAt : Infinity;
+      const ask = Number(cachedQuote && cachedQuote.ask);
+      if (quoteAge >= 0 && quoteAge <= config.PRICE_STALE_MS
+        && ask > 0 && ask <= config.MAX_BINARY_PRICE_USD
+        && (!hasPriceLimit || ask <= priceLimit)) {
+        levels = [{ price: ask, size: Infinity }];
+      }
+    }
     let shares = 0;
     let notional = 0;
-    // BUY amount is a USDC budget. Sweep asks up to the limit until the budget
-    // or eligible depth is exhausted; cheaper fills buy more shares.
+    // BUY amount is a USDC budget. Sweep the eligible asks; cheaper fills buy
+    // more shares. The trigger is not itself a fill-price ceiling.
     let remaining = Math.max(0, Number(amount) || 0);
     for (const level of levels) {
       if (buying) {

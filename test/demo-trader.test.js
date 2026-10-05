@@ -111,6 +111,55 @@ test('demo marketable BUY spends a fixed dollar budget and receives extra shares
   } finally { global.fetch = originalFetch; }
 });
 
+test('demo marketable BUY accepts valid asks below or above the trigger-level reference', async () => {
+  const originalFetch = global.fetch;
+  try {
+    for (const ask of [0.65, 0.80]) {
+      global.fetch = async () => ({
+        ok: true,
+        json: async () => ({ bids: [], asks: [{ price: String(ask), size: '1000' }] }),
+      });
+      const trader = new DemoTrader();
+      const order = await trader.placeFakMarketOrder('token', 'BUY', 100, { priceLimit: 1 });
+      assert.equal(order.status, 'matched');
+      assert.ok(Math.abs(Number(order.raw.makingAmount) - 100) < 1e-8);
+      assert.ok(Math.abs(order.avgPrice - ask) < 1e-8);
+      assert.ok(Math.abs(Number(order.raw.takingAmount) - 100 / ask) < 1e-8);
+    }
+  } finally { global.fetch = originalFetch; }
+});
+
+test('demo marketable BUY falls back to a fresh cached ask when REST book is missing or empty', async () => {
+  const originalFetch = global.fetch;
+  try {
+    const trader = new DemoTrader();
+    trader.updateQuote('token', { bid: 0.68, ask: 0.70 });
+
+    global.fetch = async () => { throw new Error('book unavailable'); };
+    let order = await trader.placeFakMarketOrder('token', 'BUY', 100, { priceLimit: 1 });
+    assert.equal(order.status, 'matched');
+    assert.ok(Math.abs(order.avgPrice - 0.70) < 1e-8);
+    assert.ok(Math.abs(Number(order.raw.takingAmount) - 100 / 0.70) < 1e-8);
+
+    global.fetch = async () => ({ ok: true, json: async () => ({ bids: [], asks: [] }) });
+    order = await trader.placeFakMarketOrder('token', 'BUY', 100, { priceLimit: 1 });
+    assert.equal(order.status, 'matched');
+    assert.ok(Math.abs(order.avgPrice - 0.70) < 1e-8);
+  } finally { global.fetch = originalFetch; }
+});
+
+test('demo marketable BUY does not use a stale cached ask when the REST book is empty', async () => {
+  const originalFetch = global.fetch;
+  global.fetch = async () => ({ ok: true, json: async () => ({ bids: [], asks: [] }) });
+  try {
+    const trader = new DemoTrader();
+    trader.updateQuote('token', { bid: 0.68, ask: 0.70 });
+    trader.quotes.get('token').updatedAt -= 10_000;
+    const order = await trader.placeFakMarketOrder('token', 'BUY', 100, { priceLimit: 1 });
+    assert.equal(order.status, 'unmatched');
+  } finally { global.fetch = originalFetch; }
+});
+
 test('demo marketable SELL respects the observed minimum price and visible depth', async () => {
   const originalFetch = global.fetch;
   const book = {

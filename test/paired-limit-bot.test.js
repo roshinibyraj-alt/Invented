@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const cfg = require('../config');
 const Bot = require('../paired-limit-bot');
+const DemoTrader = require('../demo-trader');
 const { makeWindowState } = require('../paired-limit-bot');
 const { currentWindowOpenTs, slugForTs } = require('../polymarket-market');
 
@@ -13,10 +14,11 @@ class FakeDemoTrader {
     this.calls = [];
     this.books = new Map();
     this.askDepth = new Map();
+    this.executionBooks = new Map();
   }
 
   async getOrderBook(tokenId) {
-    return this.books.get(tokenId) || { bids: [], asks: [] };
+    return this.executionBooks.get(tokenId) || this.books.get(tokenId) || { bids: [], asks: [] };
   }
 
   updateQuote(tokenId, quote) {
@@ -125,6 +127,8 @@ test('configuration uses $100 base stake, 45% hedge, and $0.69/$0.70 triggers', 
   assert.equal(cfg.HEDGE_STAKE_RATIO, 0.45);
   assert.equal(cfg.ENTRY_TRIGGER_PRICE_USD, 0.69);
   assert.equal(cfg.STOP_LOSS_HEDGE_TRIGGER_PRICE_USD, 0.70);
+  assert.equal(cfg.MAX_BUY_SLIPPAGE_PERCENT, 100000);
+  assert.equal(cfg.MAX_BINARY_PRICE_USD, 1);
 });
 
 test('no order is placed until a side ask reaches $0.69, then buys a fixed $100 stake', async () => {
@@ -139,7 +143,7 @@ test('no order is placed until a side ask reaches $0.69, then buys a fixed $100 
   assert.equal(fx.trader.calls.length, 1);
   assert.deepEqual(fx.trader.calls[0], {
     method: 'placeFakMarketOrder', tokenId: 'up-token', side: 'BUY',
-    amount: 100, options: { priceLimit: 0.69 },
+    amount: 100, options: { priceLimit: 1 },
   });
   assert.equal(fx.w.primarySide, 'UP');
   assert.equal(fx.w.primaryPosition.role, 'PRIMARY');
@@ -158,7 +162,7 @@ test('one-tick jump from $0.65 to $0.75 still fires a $100 primary buy', async (
 
   assert.equal(fx.trader.calls.length, 1);
   assert.equal(fx.trader.calls[0].amount, 100);
-  assert.equal(fx.trader.calls[0].options.priceLimit, 0.75);
+  assert.equal(fx.trader.calls[0].options.priceLimit, 1);
   assert.equal(fx.w.primaryPosition.stakeUsd, 100);
   assert.ok(Math.abs(fx.w.primaryPosition.entryNotional - 100) < 1e-8);
   assert.ok(Math.abs(fx.w.primaryPosition.shares - (100 / 0.75)) < 1e-8);
@@ -184,10 +188,42 @@ test('opposite-side buy fires only at the stop trigger and scales to 45% of prim
   assert.equal(fx.trader.calls.length, 2);
   assert.equal(fx.trader.calls[1].tokenId, 'down-token');
   assert.equal(fx.trader.calls[1].amount, 45);
-  assert.equal(fx.trader.calls[1].options.priceLimit, 0.70);
+  assert.equal(fx.trader.calls[1].options.priceLimit, 1);
   assert.equal(fx.w.hedgePosition.role, 'STOP_LOSS_HEDGE');
   assert.equal(fx.w.hedgePosition.stakeUsd, 45);
   assert.equal(fx.bot.stats.stopLossHedges, 1);
+});
+
+test('primary entry can fill above or below its $0.69 trigger at the execution ask', async () => {
+  for (const executionAsk of [0.65, 0.80]) {
+    const fx = fixture();
+    fx.trader.executionBooks.set('up-token', {
+      bids: [],
+      asks: [{ price: String(executionAsk), size: '1000' }],
+    });
+
+    await quote(fx, 'UP', 0.68, 0.69);
+
+    assert.equal(fx.trader.calls.length, 1);
+    assert.equal(fx.trader.calls[0].options.priceLimit, 1);
+    assert.equal(fx.w.primaryPosition.entryPrice, executionAsk);
+    assert.ok(Math.abs(fx.w.primaryPosition.shares - 100 / executionAsk) < 1e-8);
+    assert.ok(Math.abs(fx.w.primaryPosition.entryNotional - 100) < 1e-8);
+  }
+});
+
+test('triggered demo entry fills from the fresh cached ask when REST book is unavailable', async () => {
+  const originalFetch = global.fetch;
+  global.fetch = async () => { throw new Error('book unavailable'); };
+  try {
+    const fx = fixture({ trader: new DemoTrader() });
+    await quote(fx, 'UP', 0.68, 0.69);
+
+    assert.ok(fx.w.primaryPosition);
+    assert.equal(fx.w.primaryPosition.entryPrice, 0.69);
+    assert.ok(Math.abs(fx.w.primaryPosition.entryNotional - 100) < 1e-8);
+    assert.ok(Math.abs(fx.w.primaryPosition.shares - 100 / 0.69) < 1e-8);
+  } finally { global.fetch = originalFetch; }
 });
 
 test('CLOB outcome requires the winner and opposite side to confirm together', async () => {

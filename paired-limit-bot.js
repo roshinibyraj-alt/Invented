@@ -340,9 +340,7 @@ class Bot {
     return !!position;
   }
 
-  async _executeStake(w, side, stakeUsd, role, priceLimit) {
-    const triggerPrice = role === 'PRIMARY'
-      ? cfg.ENTRY_TRIGGER_PRICE_USD : cfg.STOP_LOSS_HEDGE_TRIGGER_PRICE_USD;
+  async _executeStake(w, side, stakeUsd, role, priceReference) {
     const minimumCash = stakeUsd * (1 + cfg.CRYPTO_TAKER_FEE_RATE);
     if (this.cash == null || this.cash + EPSILON < minimumCash) {
       w.status = 'insufficient_cash';
@@ -358,7 +356,13 @@ class Bot {
     if (typeof this.trader.placeFakMarketOrder !== 'function') {
       throw new Error('DemoTrader does not support marketable BUY orders');
     }
-    const order = await this.trader.placeFakMarketOrder(tokenId, 'BUY', stakeUsd, { priceLimit });
+    const maxBuyPrice = Math.min(
+      cfg.MAX_BINARY_PRICE_USD,
+      priceReference * (1 + cfg.MAX_BUY_SLIPPAGE_PERCENT / 100),
+    );
+    const order = await this.trader.placeFakMarketOrder(
+      tokenId, 'BUY', stakeUsd, { priceLimit: maxBuyPrice },
+    );
     const shares = positive(order && order.raw && order.raw.takingAmount);
     const notional = positive(order && order.raw && order.raw.makingAmount);
     if (shares == null || notional == null) {
