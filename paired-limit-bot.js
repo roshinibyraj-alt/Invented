@@ -266,26 +266,37 @@ class Bot {
   async _evaluateEntryTriggers(w, updatedSide) {
     if (this.strategyBlocked || !w || this.w !== w || !w.window || w.closed
       || w.clobConfirmedOutcome || w.clobCloseProvisionalOutcome
-      || w.entryTriggerBusy || Date.now() >= windowCloseMs(w)) return false;
+      || Date.now() >= windowCloseMs(w)) return false;
+    if (w.entryTriggerBusy) {
+      this._latchPendingHedgeTrigger(w, updatedSide);
+      return false;
+    }
 
     if (w.primaryPosition && !w.primaryPosition.settled && !w.hedgeAttempted) {
       const hedgeSide = w.primarySide === 'UP' ? 'DOWN' : 'UP';
       const hedgeQuote = this.prices && this.prices.slug === w.slug
         ? this.prices[hedgeSide.toLowerCase()] : null;
       const hedgeAsk = hedgeQuote == null ? NaN : Number(hedgeQuote.ask);
-      if (!Number.isFinite(hedgeAsk) || hedgeAsk < cfg.STOP_LOSS_HEDGE_TRIGGER_PRICE_USD) {
+      const triggerLatched = w.hedgeTriggerPending;
+      if (!Number.isFinite(hedgeAsk)
+        || (!triggerLatched && hedgeAsk < cfg.STOP_LOSS_HEDGE_TRIGGER_PRICE_USD)) {
         return false;
       }
 
+      const triggerPrice = triggerLatched ? w.hedgeTriggerPendingPrice : hedgeAsk;
       w.hedgeAttempted = true;
+      w.hedgeTriggerPending = false;
+      w.hedgeTriggerPendingPrice = null;
       w.entryTriggerBusy = true;
       w.status = 'stop_loss_hedge_pending';
       this._push({
         event: 'STOP_LOSS_HEDGE_TRIGGERED', slug: w.slug, side: hedgeSide,
-        price: round(hedgeQuote.ask, 4),
+        price: round(triggerPrice, 4),
         stakeUsd: round(w.primaryStakeUsd * cfg.HEDGE_STAKE_RATIO, 2),
         note: hedgeSide + ' ask reached $' + cfg.STOP_LOSS_HEDGE_TRIGGER_PRICE_USD.toFixed(2)
-          + '; placing the scaled opposite-side stop-loss hedge.',
+          + (triggerLatched
+            ? ' while the primary BUY was pending; placing the scaled hedge at the current ask.'
+            : '; placing the scaled opposite-side stop-loss hedge.'),
       });
       try {
         return !!(await this._executeStake(
@@ -326,6 +337,10 @@ class Bot {
       position = await this._executeStake(w, updatedSide, w.primaryStakeUsd, 'PRIMARY', primaryAsk);
     } finally {
       w.entryTriggerBusy = false;
+      if (!w.primaryPosition) {
+        w.hedgeTriggerPending = false;
+        w.hedgeTriggerPendingPrice = null;
+      }
     }
 
     if (position) {
@@ -333,11 +348,33 @@ class Bot {
       const hedgeQuote = this.prices && this.prices.slug === w.slug
         ? this.prices[hedgeSide.toLowerCase()] : null;
       const hedgeAsk = hedgeQuote == null ? NaN : Number(hedgeQuote.ask);
-      if (Number.isFinite(hedgeAsk) && hedgeAsk >= cfg.STOP_LOSS_HEDGE_TRIGGER_PRICE_USD) {
+      if (w.hedgeTriggerPending
+        || (Number.isFinite(hedgeAsk) && hedgeAsk >= cfg.STOP_LOSS_HEDGE_TRIGGER_PRICE_USD)) {
         return this._evaluateEntryTriggers(w, hedgeSide);
       }
     }
     return !!position;
+  }
+
+  _latchPendingHedgeTrigger(w, updatedSide) {
+    if (!w.primaryAttempted || w.primaryPosition || w.hedgeAttempted
+      || !updatedSide || w.hedgeTriggerPending) return false;
+    const hedgeSide = w.primarySide === 'UP' ? 'DOWN' : 'UP';
+    if (updatedSide !== hedgeSide) return false;
+    const hedgeQuote = this.prices && this.prices.slug === w.slug
+      ? this.prices[hedgeSide.toLowerCase()] : null;
+    const hedgeAsk = hedgeQuote == null ? NaN : Number(hedgeQuote.ask);
+    if (!Number.isFinite(hedgeAsk) || hedgeAsk < cfg.STOP_LOSS_HEDGE_TRIGGER_PRICE_USD) return false;
+
+    w.hedgeTriggerPending = true;
+    w.hedgeTriggerPendingPrice = hedgeAsk;
+    this._push({
+      event: 'STOP_LOSS_HEDGE_TRIGGER_LATCHED', slug: w.slug, side: hedgeSide,
+      price: round(hedgeAsk, 4),
+      note: hedgeSide + ' ask reached $' + cfg.STOP_LOSS_HEDGE_TRIGGER_PRICE_USD.toFixed(2)
+        + ' while the primary BUY was pending; the hedge will be attempted after a primary fill.',
+    });
+    return true;
   }
 
   async _executeStake(w, side, stakeUsd, role, priceReference) {
@@ -771,6 +808,7 @@ function makeWindowState(slug, openTs) {
     closed: false, closing: false, positions: [], position: null,
     primarySide: null, primaryPosition: null, hedgePosition: null,
     primaryStakeUsd: null, primaryAttempted: false, hedgeAttempted: false,
+    hedgeTriggerPending: false, hedgeTriggerPendingPrice: null,
     entryTriggerBusy: false, clobConfirmedOutcome: null, clobConfirmedAt: null,
     clobCloseProvisionalOutcome: null, clobClosePrices: null,
   };

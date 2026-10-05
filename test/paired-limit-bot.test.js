@@ -194,6 +194,51 @@ test('opposite-side buy fires only at the stop trigger and scales to 45% of prim
   assert.equal(fx.bot.stats.stopLossHedges, 1);
 });
 
+test('opposite-side trigger is latched while primary order is pending, even if ask retreats', async () => {
+  const fx = fixture();
+  await quote(fx, 'DOWN', 0.29, 0.30);
+
+  let primaryStarted;
+  const primaryStartedPromise = new Promise((resolve) => { primaryStarted = resolve; });
+  let resolvePrimaryOrder;
+  const primaryOrder = new Promise((resolve) => { resolvePrimaryOrder = resolve; });
+  const placeImmediately = fx.trader.placeFakMarketOrder.bind(fx.trader);
+  fx.trader.placeFakMarketOrder = async (tokenId, side, amount, options = {}) => {
+    if (tokenId === 'up-token') {
+      fx.trader.calls.push({ method: 'placeFakMarketOrder', tokenId, side, amount, options });
+      primaryStarted();
+      return primaryOrder;
+    }
+    return placeImmediately(tokenId, side, amount, options);
+  };
+
+  const primaryTask = quote(fx, 'UP', 0.68, 0.69);
+  await primaryStartedPromise;
+  assert.equal(fx.trader.calls.length, 1);
+
+  await quote(fx, 'DOWN', 0.69, 0.70);
+  assert.equal(fx.w.hedgeTriggerPending, true);
+  assert.equal(fx.w.hedgeTriggerPendingPrice, 0.70);
+  assert.equal(fx.trader.calls.length, 1);
+
+  await quote(fx, 'DOWN', 0.64, 0.65);
+  assert.equal(fx.trader.calls.length, 1);
+
+  resolvePrimaryOrder({
+    id: 'fake-primary', status: 'matched', isFilled: true, avgPrice: 0.69,
+    raw: { makingAmount: '100', takingAmount: String(100 / 0.69) },
+  });
+  await primaryTask;
+
+  assert.equal(fx.trader.calls.length, 2);
+  assert.equal(fx.trader.calls[1].tokenId, 'down-token');
+  assert.equal(fx.trader.calls[1].amount, 45);
+  assert.equal(fx.w.hedgePosition.entryPrice, 0.65);
+  assert.equal(fx.w.hedgeTriggerPending, false);
+  const trigger = fx.bot.log.find((entry) => entry.event === 'STOP_LOSS_HEDGE_TRIGGERED');
+  assert.equal(trigger.price, 0.70);
+});
+
 test('primary entry can fill above or below its $0.69 trigger at the execution ask', async () => {
   for (const executionAsk of [0.65, 0.80]) {
     const fx = fixture();
