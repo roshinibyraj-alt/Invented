@@ -1,23 +1,26 @@
 # Demo-mode runbook
 
-Use this checklist to exercise the paired-limit strategy without real orders. `DemoTrader` reads public Polymarket books and simulates fills locally; it does not sign or submit orders.
+Use this checklist to exercise the trigger/hedge strategy without real orders. `DemoTrader` reads public Polymarket books and simulates fills locally; it does not sign or submit orders.
 
 ## Safe startup
 
 1. Keep `LIVE_TRADING` unset or set to anything other than the exact text `true`. No wallet key is needed.
 2. Run `npm install`, then `npm test`.
 3. Start with `npm start` and open `http://localhost:3000`.
-4. Confirm the dashboard says **DEMO MODE**, shows **$10,000** starting capital, and reports **500 shares at $0.30**.
+4. Confirm the dashboard says **DEMO MODE**, shows **$10,000** starting capital, and reports a **$100** primary stake with `$0.69` / `$0.70` triggers.
 5. Set `LIVE_TRADING=true` only in a controlled test if verifying the guard; startup must exit before wallet authentication.
 
 ## What to check
 
-- On an active BTC 5-minute window, two resting BUY limits are simulated: 500 UP shares at $0.30 and 500 DOWN shares at $0.30. The bot checks that available demo cash covers the full $300 pair cost before posting either.
-- When one side fills, it cancels the opposite order and holds the filled shares to settlement. The orders are not exchange-native OCO: if both fill before cancellation completes, both positions are recorded and an `OCO_RACE_FILL` event is logged.
-- At window close, any unfilled entry orders are canceled. Open shares remain subject to the existing held-side CLOB thresholds: midpoint at or above $0.99 counts as a $1 payout; best bid at or below $0.01 counts as a $0 payout. If neither threshold is reached, Gamma's official resolution remains the fallback.
-- A settled loss adds 250 shares to the next pair. A settled win resets the next pair to the 500-share base.
+- On an active BTC 5-minute window, the first UP/DOWN best ask at or above `$0.69` triggers a marketable demo BUY for the current USDC stake. The initial primary stake is `$100`.
+- After the primary entry, the opposite side is bought only when its best ask reaches `$0.70`. The hedge is 45% of the primary stake, so the sequence is `$45`, `$90`, `$180`, and so on. It is an additional position; it does not sell or close the primary.
+- A primary loss doubles the next window's primary stake; a primary win resets it to `$100`. The hedge result does not change the stake progression.
+- If a previous primary is still awaiting CLOB/Gamma settlement, the next primary entry waits rather than using an outdated stake.
+- Before window close, the CLOB confirms both sides when one side's midpoint reaches `$0.99` and the opposite side's best bid reaches `$0.01` or lower. The bot then settles all positions and updates the primary stake ladder.
+- If those thresholds are inconclusive at close, the bot provisionally settles using the higher of the fresh UP/DOWN CLOB midpoints, so stake progression can continue immediately. This may misclassify the winner and cause the wrong stake step. If either midpoint is missing, stale, or tied, Gamma's official result remains the fallback and the next primary entry waits.
+- Marketable demo orders use visible book depth and are capped at the best ask observed when the trigger fires. Thin books can create partial fills, and the average fill price can differ from the trigger; estimated taker fees are included in paper P&L.
 - Equity is available cash plus the marked value of all open shares, including positions from previous windows. Total P&L is equity minus starting capital.
 
 ## Interpret results
 
-Demo cash, stake progression, and trade history are in memory and reset when the process restarts. The public book is used as a fill simulation; fills, estimated maker rebates, settlement thresholds, and P&L are not evidence of live execution or profitability. Stop the process with Ctrl+C.
+Demo cash, stake progression, and trade history are in memory and reset when the process restarts. The public book is used as a fill simulation; fills, estimated taker fees, settlement thresholds, and P&L are not evidence of live execution or profitability. Stop the process with Ctrl+C.

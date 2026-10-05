@@ -1,8 +1,8 @@
 {
-  "name": "paired-limit-demo",
+  "name": "trigger-hedge-demo",
   "version": "1.0.0",
   "private": true,
-  "description": "Demo-only Polymarket BTC 5-minute paired resting-limit bot.",
+  "description": "Demo-only Polymarket BTC 5-minute trigger-and-hedge bot.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",

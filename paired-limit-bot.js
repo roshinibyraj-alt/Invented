@@ -5,11 +5,10 @@ const {
   getActiveWindow, currentWindowOpenTs, slugForTs, WINDOW_SECONDS, fetchResolution,
 } = require('./polymarket-market');
 const startMarketFeed = require('./clob-feed');
-const { estimateMakerRebate } = require('./strategy');
+const { estimateTakerFee } = require('./strategy');
 
 const EPSILON = 1e-8;
 const MAX_LOG = 300;
-const SIDES = ['UP', 'DOWN'];
 
 class Bot {
   constructor(trader, opts = {}) {
@@ -25,8 +24,8 @@ class Bot {
     this._clobTried = new Map();
     this._warned = new Set();
     this.stats = {
-      wins: 0, losses: 0, pairedEntries: 0,
-      estimatedMakerRebates: 0, realizedPnl: 0,
+      wins: 0, losses: 0, primaryEntries: 0, stopLossHedges: 0,
+      estimatedTakerFees: 0, realizedPnl: 0,
     };
     this.counts = { UP: 0, DOWN: 0 };
     this.walletBalance = null;
@@ -37,7 +36,7 @@ class Bot {
     this.startedAt = Date.now();
     this.capital = this.demoMode ? cfg.DEMO_CAPITAL : null;
     this.cash = this.demoMode ? cfg.DEMO_CAPITAL : null;
-    this.currentOrderShares = cfg.BASE_SHARES;
+    this.currentStakeUsd = cfg.BASE_STAKE_USD;
     this.peak = this.capital;
     this.maxDD = 0;
     this.equity = this.capital == null ? [] : [{ ts: Date.now(), v: this.capital }];
@@ -67,9 +66,9 @@ class Bot {
   start() {
     if (this._running || this.strategyBlocked) {
       if (this.strategyBlocked) {
-        this._warnOnce('paired-strategy-blocked', {
+        this._warnOnce('trigger-strategy-blocked', {
           event: 'LIVE_BLOCKED',
-          note: 'Paired limit orders require DemoTrader; no live order methods will be called.',
+          note: 'The trigger strategy requires DemoTrader; no live order methods will be called.',
         });
       }
       return;
@@ -86,7 +85,6 @@ class Bot {
     if (this._marketFeedStop) { try { this._marketFeedStop(); } catch (_) {} }
     this._marketFeedStop = null;
     this._marketFeedSlug = null;
-    if (this.w) void this._cancelEntryOrders(this.w, 'BOT_STOP');
   }
 
   async _loop() {
@@ -116,10 +114,10 @@ class Bot {
       if (result.window) {
         this.error = null;
         w.window = result.window;
-        w.status = 'preparing_entry_orders';
+        w.status = 'watching_entry_trigger';
         this._push({
           event: 'WINDOW_READY', slug: w.slug,
-          note: 'BTC 5-minute market active; preparing UP and DOWN resting BUY limits.',
+          note: 'BTC 5-minute market active; watching UP and DOWN for the $0.69 entry trigger.',
         });
         await this._ensureMarketFeed(w);
       } else {
@@ -129,8 +127,6 @@ class Bot {
     }
 
     if (!w.window) return;
-    if (!w.entryOrdersStarted && !w.closed) await this._placeEntryOrders(w);
-    if (w.entryOrdersStarted && !w.closed) await this._checkEntryOrders(w);
     const closeTs = Number(w.window.closeTs) || w.openTs + WINDOW_SECONDS;
     if (Date.now() >= closeTs * 1000) await this._closeWindow(w);
   }
@@ -199,16 +195,17 @@ class Bot {
       : tokenId === w.window.tokenDown ? 'DOWN' : null;
     if (!side) return;
     const previous = this._quotesByToken.get(tokenId) || emptyQuote();
+    const now = Date.now();
     const next = {
       bid: update && Object.prototype.hasOwnProperty.call(update, 'bid') ? update.bid : previous.bid,
       ask: update && Object.prototype.hasOwnProperty.call(update, 'ask') ? update.ask : previous.ask,
+      ts: now,
     };
     next.mid = next.bid == null || next.ask == null ? null : (next.bid + next.ask) / 2;
     this._quotesByToken.set(tokenId, next);
     if (typeof this.trader.updateQuote === 'function') this.trader.updateQuote(tokenId, next);
     const up = this._quotesByToken.get(w.window.tokenUp) || emptyQuote();
     const down = this._quotesByToken.get(w.window.tokenDown) || emptyQuote();
-    const now = Date.now();
     this.prices = { slug, ts: now, up: { ...up }, down: { ...down } };
     this._lastMarketEventAt = now;
     if (up.ask != null && down.ask != null) {
@@ -223,243 +220,206 @@ class Bot {
       }
     }
 
-    if (w.entryOrdersStarted) {
-      void this._checkEntryOrders(w).catch((error) => {
-        this._push({ event: 'ENTRY_ORDER_CHECK_ERROR', slug, note: error.message });
-      });
-    }
+    const clobWinner = clobPairWinner(this.prices);
+    if (clobWinner) this._confirmClobOutcome(w, clobWinner);
+    const triggerTask = this._evaluateEntryTriggers(w, side).catch((error) => {
+      this._push({ event: 'ENTRY_TRIGGER_ERROR', slug, side, note: error.message });
+    });
     for (const position of this.pending.filter((item) => item.openTs === w.openTs && item.side === side)) {
       const mark = next.bid == null ? next.mid : next.bid;
       if (mark != null && Number.isFinite(Number(mark))) position.lastClobMark = Number(mark);
-      if (!this._settlePositionAtClobPrice(position, next.mid, next.bid)) this._recordEquity();
+      this._recordEquity();
     }
+    return triggerTask;
   }
 
-  async _placeEntryOrders(w) {
+  _confirmClobOutcome(w, winner) {
+    if (!w || w.clobConfirmedOutcome || w.clobCloseProvisionalOutcome) return false;
+    w.clobConfirmedOutcome = winner;
+    w.clobConfirmedAt = Date.now();
+    w.status = 'clob_confirmed';
+    this._recordOutcome(w.openTs, w.slug, winner, 'clob_pair');
+    this._push({
+      event: 'CLOB_PAIR_CONFIRMED', slug: w.slug, side: winner,
+      note: 'UP and DOWN CLOB prices jointly confirmed ' + winner
+        + '; settling positions and updating the primary stake now.',
+    });
+    this._settlePositionsForOpenTs(w.openTs, w.slug, winner, 'CLOB_PAIR_CONFIRMATION');
+    w.status = 'clob_confirmed';
+    return true;
+  }
+
+  _settlePositionsForOpenTs(openTs, slug, winner, reason) {
+    for (const position of this.pending.filter((item) => item.openTs === openTs).slice()) {
+      const payout = winner === position.side ? position.openShares : 0;
+      this.cash += payout + position.makerRebateEstimate;
+      position.exitProceeds += payout;
+      position.openShares = 0;
+      position.resolutionPayout = payout;
+      this._removeFromWindow(position);
+      this._finalizePosition(position, winner === position.side ? 'WIN' : 'LOSS', reason, winner);
+    }
+    this._resolveTried.delete(openTs);
+    this._clobTried.delete(openTs);
+  }
+
+  async _evaluateEntryTriggers(w, updatedSide) {
     if (this.strategyBlocked || !w || this.w !== w || !w.window || w.closed
-      || w.entryOrdersStarted || Date.now() >= windowCloseMs(w)) return false;
-    w.entryOrdersStarted = true;
-    w.orderShares = this.currentOrderShares;
-    const requiredPairCost = w.orderShares * cfg.ENTRY_LIMIT_PRICE_USD * SIDES.length;
-    if (this.cash == null || this.cash + EPSILON < requiredPairCost) {
+      || w.clobConfirmedOutcome || w.clobCloseProvisionalOutcome
+      || w.entryTriggerBusy || Date.now() >= windowCloseMs(w)) return false;
+
+    if (w.primaryPosition && !w.primaryPosition.settled && !w.hedgeAttempted) {
+      const hedgeSide = w.primarySide === 'UP' ? 'DOWN' : 'UP';
+      const hedgeQuote = this.prices && this.prices.slug === w.slug
+        ? this.prices[hedgeSide.toLowerCase()] : null;
+      const hedgeAsk = hedgeQuote == null ? NaN : Number(hedgeQuote.ask);
+      if (!Number.isFinite(hedgeAsk) || hedgeAsk < cfg.STOP_LOSS_HEDGE_TRIGGER_PRICE_USD) {
+        return false;
+      }
+
+      w.hedgeAttempted = true;
+      w.entryTriggerBusy = true;
+      w.status = 'stop_loss_hedge_pending';
+      this._push({
+        event: 'STOP_LOSS_HEDGE_TRIGGERED', slug: w.slug, side: hedgeSide,
+        price: round(hedgeQuote.ask, 4),
+        stakeUsd: round(w.primaryStakeUsd * cfg.HEDGE_STAKE_RATIO, 2),
+        note: hedgeSide + ' ask reached $' + cfg.STOP_LOSS_HEDGE_TRIGGER_PRICE_USD.toFixed(2)
+          + '; placing the scaled opposite-side stop-loss hedge.',
+      });
+      try {
+        return !!(await this._executeStake(
+          w, hedgeSide, w.primaryStakeUsd * cfg.HEDGE_STAKE_RATIO,
+          'STOP_LOSS_HEDGE', hedgeAsk,
+        ));
+      } finally {
+        w.entryTriggerBusy = false;
+      }
+    }
+
+    if (w.primaryAttempted || !updatedSide) return false;
+    const previousPrimaryOpen = this.pending.some((position) =>
+      position.role === 'PRIMARY' && !position.settled && position.openTs < w.openTs);
+    if (previousPrimaryOpen) {
+      w.status = 'awaiting_previous_primary_settlement';
+      return false;
+    }
+    const primaryQuote = this.prices && this.prices.slug === w.slug
+      ? this.prices[updatedSide.toLowerCase()] : null;
+    const primaryAsk = primaryQuote == null ? NaN : Number(primaryQuote.ask);
+    if (!Number.isFinite(primaryAsk) || primaryAsk < cfg.ENTRY_TRIGGER_PRICE_USD) return false;
+
+    w.primaryAttempted = true;
+    w.primarySide = updatedSide;
+    w.primaryStakeUsd = this.currentStakeUsd;
+    w.status = 'primary_entry_pending';
+    this._push({
+      event: 'ENTRY_TRIGGERED', slug: w.slug, side: updatedSide,
+      price: round(primaryQuote.ask, 4), stakeUsd: round(w.primaryStakeUsd, 2),
+      note: updatedSide + ' ask reached $' + cfg.ENTRY_TRIGGER_PRICE_USD.toFixed(2)
+        + '; placing the primary BUY for $' + round(w.primaryStakeUsd, 2) + '.',
+    });
+
+    let position = null;
+    w.entryTriggerBusy = true;
+    try {
+      position = await this._executeStake(w, updatedSide, w.primaryStakeUsd, 'PRIMARY', primaryAsk);
+    } finally {
+      w.entryTriggerBusy = false;
+    }
+
+    if (position) {
+      const hedgeSide = w.primarySide === 'UP' ? 'DOWN' : 'UP';
+      const hedgeQuote = this.prices && this.prices.slug === w.slug
+        ? this.prices[hedgeSide.toLowerCase()] : null;
+      const hedgeAsk = hedgeQuote == null ? NaN : Number(hedgeQuote.ask);
+      if (Number.isFinite(hedgeAsk) && hedgeAsk >= cfg.STOP_LOSS_HEDGE_TRIGGER_PRICE_USD) {
+        return this._evaluateEntryTriggers(w, hedgeSide);
+      }
+    }
+    return !!position;
+  }
+
+  async _executeStake(w, side, stakeUsd, role, priceLimit) {
+    const triggerPrice = role === 'PRIMARY'
+      ? cfg.ENTRY_TRIGGER_PRICE_USD : cfg.STOP_LOSS_HEDGE_TRIGGER_PRICE_USD;
+    const minimumCash = stakeUsd * (1 + cfg.CRYPTO_TAKER_FEE_RATE);
+    if (this.cash == null || this.cash + EPSILON < minimumCash) {
       w.status = 'insufficient_cash';
       this._push({
-        event: 'ENTRY_PAIR_NO_CASH', slug: w.slug, shares: w.orderShares,
-        note: 'Not enough demo cash to cover both ' + w.orderShares + '-share limits at $'
-          + cfg.ENTRY_LIMIT_PRICE_USD.toFixed(2) + ' each; no orders were posted.',
+        event: 'STAKE_NO_CASH', slug: w.slug, side, role, stakeUsd: round(stakeUsd, 2),
+        note: 'Demo cash cannot cover the $' + round(stakeUsd, 2)
+          + ' stake plus a conservative taker-fee reserve.',
       });
-      return false;
+      return null;
     }
 
-    try {
-      for (const side of SIDES) {
-        const tokenId = side === 'UP' ? w.window.tokenUp : w.window.tokenDown;
-        const result = await this.trader.placeGtcOrder(
-          tokenId, 'BUY', cfg.ENTRY_LIMIT_PRICE_USD, w.orderShares,
-        );
-        if (!result || !result.id) throw new Error(side + ' GTC order returned no order ID');
-        w.entryOrders[side] = {
-          side, tokenId, orderId: result.id, price: cfg.ENTRY_LIMIT_PRICE_USD,
-          shares: w.orderShares, matchedShares: 0, rebateRecorded: 0,
-          status: normalizeOrderStatus(result.status || 'LIVE'),
-          placedAt: Date.now(), cancelPending: false,
-        };
-        this._push({
-          event: 'ENTRY_LIMIT_POSTED', slug: w.slug, side, shares: w.orderShares,
-          price: cfg.ENTRY_LIMIT_PRICE_USD,
-          note: 'Posted a ' + w.orderShares + '-share resting BUY limit for ' + side
-            + ' at $' + cfg.ENTRY_LIMIT_PRICE_USD.toFixed(2) + '.',
-        });
-      }
-      if (Object.keys(w.entryOrders).length === SIDES.length) await this._checkEntryOrders(w);
-      else w.status = 'entry_orders_open';
-      this._recordEquity();
-      return true;
-    } catch (error) {
-      await this._cancelEntryOrders(w, 'ENTRY_PAIR_ERROR');
-      w.status = 'entry_order_error';
+    const tokenId = side === 'UP' ? w.window.tokenUp : w.window.tokenDown;
+    if (typeof this.trader.placeFakMarketOrder !== 'function') {
+      throw new Error('DemoTrader does not support marketable BUY orders');
+    }
+    const order = await this.trader.placeFakMarketOrder(tokenId, 'BUY', stakeUsd, { priceLimit });
+    const shares = positive(order && order.raw && order.raw.takingAmount);
+    const notional = positive(order && order.raw && order.raw.makingAmount);
+    if (shares == null || notional == null) {
+      w.status = role === 'PRIMARY' ? 'entry_unfilled' : 'stop_loss_hedge_unfilled';
       this._push({
-        event: 'ENTRY_PAIR_ERROR', slug: w.slug,
-        note: 'Could not establish both sides of the entry pair; canceled any remaining order: ' + error.message,
+        event: role === 'PRIMARY' ? 'ENTRY_UNFILLED' : 'STOP_LOSS_HEDGE_UNFILLED',
+        slug: w.slug, side, role, stakeUsd: round(stakeUsd, 2),
+        note: 'No ' + side + ' shares filled from the visible order book; no position was opened.',
       });
-      return false;
-    }
-  }
-
-  async _checkEntryOrders(w) {
-    if (!w || this.w !== w || !w.entryOrdersStarted || w.closed || w.entryCheckBusy) return false;
-    const records = Object.values(w.entryOrders);
-    if (!records.length) return false;
-    w.entryCheckBusy = true;
-    try {
-      const observations = await Promise.all(records.map(async (entry) => ({
-        entry,
-        state: await this.trader.getOrder(entry.orderId).catch(() => null),
-      })));
-      const newlyMatched = observations
-        .filter(({ entry, state }) => state && matchedShares(state) > entry.matchedShares + EPSILON)
-        .sort((a, b) => {
-          const aTime = Number(a.state.matchedAt) || a.entry.placedAt;
-          const bTime = Number(b.state.matchedAt) || b.entry.placedAt;
-          return aTime - bTime || SIDES.indexOf(a.entry.side) - SIDES.indexOf(b.entry.side);
-        });
-      if (!w.entrySide && newlyMatched.length) {
-        const first = newlyMatched[0];
-        w.entrySide = first.entry.side;
-        w.entryTaken = true;
-        this._push({
-          event: 'OCO_SIDE_FILLED', slug: w.slug, side: w.entrySide,
-          note: w.entrySide + ' filled first; canceling the opposite resting order.',
-        });
-        this._applyEntryOrderState(w, first.entry, first.state);
-        await this._cancelOtherEntryOrder(w, w.entrySide);
-        // Reconcile the selected side from the fetched snapshot. The opposite
-        // side is refreshed by _cancelOtherEntryOrder after cancellation.
-        for (const { entry, state } of observations) {
-          if (entry.side === w.entrySide && state) this._applyEntryOrderState(w, entry, state);
-        }
-      } else {
-        for (const { entry, state } of observations) {
-          if (state) this._applyEntryOrderState(w, entry, state);
-        }
-      }
-
-      if (w.entrySide) {
-        // A feed callback can observe the first fill while the pair is still
-        // being submitted. Re-run cancellation once both order records exist.
-        await this._cancelOtherEntryOrder(w, w.entrySide);
-        w.status = this._activePositions(w).length ? 'position_open' : 'entry_filled';
-      } else if (records.every((entry) => ['CANCELED', 'CANCELLED', 'FILLED'].includes(entry.status))) {
-        w.status = 'entry_orders_closed';
-      } else {
-        w.status = 'entry_orders_open';
-      }
-      return !!w.entrySide;
-    } finally {
-      w.entryCheckBusy = false;
-    }
-  }
-
-  _applyEntryOrderState(w, entry, state) {
-    const matched = Math.max(0, Math.min(entry.shares, matchedShares(state)));
-    const delta = Math.max(0, matched - entry.matchedShares);
-    entry.status = normalizeOrderStatus(state.status || entry.status);
-    if (matched >= entry.shares - EPSILON) entry.status = 'FILLED';
-    else if (matched > EPSILON && entry.status === 'LIVE') entry.status = 'PARTIALLY_FILLED';
-    if (delta <= EPSILON) {
-      entry.matchedShares = Math.max(entry.matchedShares, matched);
-      return;
+      return null;
     }
 
-    if (!w.entrySide) {
-      w.entrySide = entry.side;
-      w.entryTaken = true;
-    } else if (w.entrySide !== entry.side) {
+    const averagePrice = positive(order.avgPrice) || notional / shares;
+    const fee = estimateTakerFee(shares, averagePrice);
+    if (notional + fee > this.cash + EPSILON) {
+      w.status = 'insufficient_cash';
       this._push({
-        event: 'OCO_RACE_FILL', slug: w.slug, side: entry.side, shares: round(delta, 4),
-        note: 'The opposite order also filled before cancellation completed; recording both demo fills.',
+        event: 'STAKE_REJECTED_CASH', slug: w.slug, side, role,
+        note: 'The simulated fill plus estimated taker fee exceeded available demo cash.',
       });
+      return null;
     }
 
-    const price = positive(state.price) || entry.price;
-    const notional = delta * price;
-    const reportedRebate = Number(state.makerRebateEstimate);
-    const cumulativeRebate = Number.isFinite(reportedRebate)
-      ? Math.max(entry.rebateRecorded, reportedRebate)
-      : entry.rebateRecorded + estimateMakerRebate(delta, price);
-    const rebateDelta = Math.max(0, cumulativeRebate - entry.rebateRecorded);
-    entry.rebateRecorded = cumulativeRebate;
-    entry.matchedShares = matched;
-
-    let position = w.positions.find((item) => item.side === entry.side && !item.settled);
-    if (!position) {
-      position = makePosition(w, entry);
-      w.positions.push(position);
-      this.pending.push(position);
-      if (!w.position) w.position = position;
+    const quoteNow = this.prices && this.prices.slug === w.slug
+      ? this.prices[side.toLowerCase()] : null;
+    const position = makePosition(w, {
+      side, tokenId, role, stakeUsd, shares, price: averagePrice,
+      notional, fee, mark: quoteNow && quoteNow.bid,
+    });
+    this.cash -= position.cost;
+    this.pending.push(position);
+    w.positions.push(position);
+    if (!w.position) w.position = position;
+    if (role === 'PRIMARY') {
+      w.primaryPosition = position;
+      w.status = 'position_open';
+      this.stats.primaryEntries += 1;
+    } else {
+      w.hedgePosition = position;
+      w.status = 'position_open_with_hedge';
+      this.stats.stopLossHedges += 1;
     }
-    position.shares += delta;
-    position.openShares += delta;
-    position.entryNotional += notional;
-    position.entryPrice = position.shares > 0 ? position.entryNotional / position.shares : entry.price;
-    position.makerRebateEstimate += rebateDelta;
-    position.cost = position.entryNotional;
-    position.lastClobMark = entry.side === 'UP'
-      ? (this.prices && this.prices.up && this.prices.up.bid) || price
-      : (this.prices && this.prices.down && this.prices.down.bid) || price;
-    position.orderShares = entry.shares;
-    position.status = position.openShares >= position.orderShares - EPSILON
-      ? 'position_open' : 'partially_filled';
-    this.cash -= notional;
-    this.stats.estimatedMakerRebates += rebateDelta;
-    w.entryTaken = true;
-    this.stats.pairedEntries += 1;
+    this.stats.estimatedTakerFees += fee;
     this._recordEquity();
     this._push({
-      event: 'ENTRY_LIMIT_FILLED', slug: w.slug, side: entry.side,
-      shares: round(delta, 4), price: round(price, 4),
-      rebate: round(rebateDelta, 5),
-      note: 'Resting BUY fill: ' + round(delta, 4) + ' ' + entry.side
-        + ' shares at $' + price.toFixed(2) + '.'
-        + (rebateDelta > 0 ? ' Estimated maker rebate $' + rebateDelta.toFixed(5) + '.' : ''),
+      event: role === 'PRIMARY' ? 'ENTRY_FILLED' : 'STOP_LOSS_HEDGE_FILLED',
+      slug: w.slug, side, role, stakeUsd: round(stakeUsd, 2),
+      shares: round(shares, 4), price: round(averagePrice, 4), fee: round(fee, 5),
+      note: role + ' BUY filled ' + round(shares, 4) + ' ' + side
+        + ' shares for $' + round(notional, 2) + ' at average $'
+        + averagePrice.toFixed(4) + '; estimated taker fee $' + fee.toFixed(5) + '.',
     });
-  }
-
-  async _cancelOtherEntryOrder(w, filledSide) {
-    const otherSide = filledSide === 'UP' ? 'DOWN' : 'UP';
-    const entry = w.entryOrders[otherSide];
-    if (!entry || entry.cancelPending
-      || !['LIVE', 'PARTIALLY_FILLED', 'OPEN'].includes(entry.status)) return;
-    entry.cancelPending = true;
-    try {
-      await this.trader.cancelOrder(entry.orderId);
-      const state = await this.trader.getOrder(entry.orderId).catch(() => null);
-      if (state) this._applyEntryOrderState(w, entry, state);
-      if (entry.status === 'LIVE' || entry.status === 'PARTIALLY_FILLED') entry.status = 'CANCELED';
-      this._push({
-        event: 'OCO_CANCEL', slug: w.slug, side: otherSide,
-        note: 'Canceled the unfilled ' + otherSide + ' resting BUY after ' + filledSide + ' filled.',
-      });
-    } catch (error) {
-      entry.cancelPending = false;
-      this._push({
-        event: 'OCO_CANCEL_ERROR', slug: w.slug, side: otherSide,
-        note: 'Could not confirm cancellation of the ' + otherSide + ' order: ' + error.message,
-      });
-    }
-  }
-
-  async _cancelEntryOrders(w, reason) {
-    if (!w || !w.entryOrders) return;
-    for (const entry of Object.values(w.entryOrders)) {
-      try {
-        const before = await this.trader.getOrder(entry.orderId).catch(() => null);
-        if (before) this._applyEntryOrderState(w, entry, before);
-        if (['LIVE', 'PARTIALLY_FILLED', 'OPEN'].includes(entry.status)) {
-          await this.trader.cancelOrder(entry.orderId);
-          const after = await this.trader.getOrder(entry.orderId).catch(() => null);
-          if (after) this._applyEntryOrderState(w, entry, after);
-          if (entry.status === 'LIVE' || entry.status === 'PARTIALLY_FILLED') entry.status = 'CANCELED';
-          this._push({
-            event: 'ENTRY_LIMIT_CANCELED', slug: w.slug, side: entry.side,
-            note: 'Canceled the remaining ' + entry.side + ' entry order (' + reason + ').',
-          });
-        }
-      } catch (error) {
-        this._push({
-          event: 'ENTRY_CANCEL_ERROR', slug: w.slug, side: entry.side,
-          note: 'Could not cancel the ' + entry.side + ' entry order: ' + error.message,
-        });
-      }
-    }
+    return position;
   }
 
   async _closeWindow(w) {
     if (!w || w.closed || w.closing) return;
     w.closing = true;
-    if (w.entryOrdersStarted) {
-      await this._checkEntryOrders(w);
-      await this._cancelEntryOrders(w, 'WINDOW_CLOSED');
+    if (!w.clobConfirmedOutcome && !w.clobCloseProvisionalOutcome
+      && this._activePositions(w).length) {
+      await this._resolveWindowAtClose(w);
     }
     const positions = this._activePositions(w);
     if (positions.length) {
@@ -468,17 +428,61 @@ class Bot {
         this._push({
           event: 'EXPIRY_HOLD', slug: w.slug, side: position.side,
           shares: round(position.openShares, 4),
-          note: 'Window closed; remaining shares are watched for CLOB thresholds, then official resolution.',
+          note: 'Window closed without usable paired CLOB prices; remaining shares wait for another paired CLOB check or official resolution.',
         });
       }
     }
     w.closed = true;
     w.closing = false;
-    w.status = positions.length ? 'awaiting_resolution' : 'window_closed';
+    w.status = w.clobConfirmedOutcome ? 'clob_confirmed'
+      : w.clobCloseProvisionalOutcome ? 'clob_close_provisional'
+        : positions.length ? 'awaiting_resolution'
+          : w.primaryAttempted ? 'window_closed' : 'no_entry';
     this._push({
       event: 'WINDOW_CLOSED', slug: w.slug,
-      note: 'Window ended; no new entry orders will be placed.',
+      note: 'Window ended; no new trigger entries will be placed.',
     });
+  }
+
+  async _resolveWindowAtClose(w) {
+    let pairedQuotes = this.prices && this.prices.slug === w.slug
+      ? { up: this.prices.up, down: this.prices.down } : null;
+    if (!pairedQuotes || !isFreshQuotePair(pairedQuotes)) {
+      try {
+        const [upBook, downBook] = await Promise.all([
+          this.trader.getOrderBook(w.window.tokenUp),
+          this.trader.getOrderBook(w.window.tokenDown),
+        ]);
+        pairedQuotes = { up: quote(upBook), down: quote(downBook) };
+      } catch (error) {
+        this._warnOnce('close-clob-' + w.slug, {
+          event: 'ERROR', slug: w.slug,
+          note: 'Final paired CLOB read failed; waiting for official resolution: ' + error.message,
+        });
+        return false;
+      }
+    }
+
+    if (w.clobConfirmedOutcome || w.clobCloseProvisionalOutcome) return true;
+    const confirmedWinner = clobPairWinner(pairedQuotes);
+    if (confirmedWinner) return this._confirmClobOutcome(w, confirmedWinner);
+
+    const provisionalWinner = clobPriceLeader(pairedQuotes);
+    if (!provisionalWinner) return false;
+    w.clobCloseProvisionalOutcome = provisionalWinner;
+    w.clobClosePrices = {
+      upMid: validPrice(pairedQuotes.up.mid),
+      downMid: validPrice(pairedQuotes.down.mid),
+    };
+    this._recordOutcome(w.openTs, w.slug, provisionalWinner, 'clob_close_provisional');
+    this._push({
+      event: 'CLOB_CLOSE_PROVISIONAL', slug: w.slug, side: provisionalWinner,
+      upMid: w.clobClosePrices.upMid, downMid: w.clobClosePrices.downMid,
+      note: 'Paired thresholds were inconclusive at close; the higher CLOB midpoint is being used provisionally to advance the primary stake ladder.',
+    });
+    this._settlePositionsForOpenTs(w.openTs, w.slug, provisionalWinner, 'CLOB_CLOSE_PROVISIONAL');
+    w.status = 'clob_close_provisional';
+    return true;
   }
 
   _activePositions(w) {
@@ -494,108 +498,85 @@ class Bot {
   }
 
   async _settleClosedPositions(now = Date.now()) {
+    const checkedWindows = new Set();
     for (const position of this.pending.slice()) {
-      if (position.settled) continue;
+      if (position.settled || checkedWindows.has(position.openTs)) continue;
+      const openTs = position.openTs;
+      checkedWindows.add(openTs);
       const closeTime = Number(position.closeTs) * 1000;
-      const activeWindow = this.w && this.w.openTs === position.openTs && !this.w.closed;
+      const activeWindow = this.w && this.w.openTs === openTs && !this.w.closed;
       if (activeWindow && this.prices && this.prices.slug === position.slug
         && now - this.prices.ts <= cfg.PRICE_STALE_MS) {
-        const currentQuote = position.side === 'UP' ? this.prices.up : this.prices.down;
-        if (currentQuote) {
-          const mark = currentQuote.bid == null ? currentQuote.mid : currentQuote.bid;
-          if (mark != null && Number.isFinite(Number(mark))) position.lastClobMark = Number(mark);
+        const windowPositions = this.pending.filter((item) => item.openTs === openTs);
+        for (const pendingPosition of windowPositions) {
+          const currentQuote = pendingPosition.side === 'UP' ? this.prices.up : this.prices.down;
+          const mark = currentQuote && (currentQuote.bid == null ? currentQuote.mid : currentQuote.bid);
+          if (mark != null && Number.isFinite(Number(mark))) pendingPosition.lastClobMark = Number(mark);
         }
-        if (currentQuote
-          && this._settlePositionAtClobPrice(position, currentQuote.mid, currentQuote.bid)) continue;
+        const clobWinner = clobPairWinner(this.prices);
+        if (clobWinner) {
+          this._confirmClobOutcome(this.w, clobWinner);
+          continue;
+        }
+        this._recordEquity();
       }
       if (now < closeTime) continue;
-      if (this.w && this.w.openTs === position.openTs && !this.w.closed) {
+      if (activeWindow) {
         if (this.w.closing) continue;
         await this._closeWindow(this.w);
       }
 
-      let winner = this.outcomes.get(position.openTs)?.winner || null;
-      const lastClobCheck = this._clobTried.get(position) || 0;
+      let winner = this.outcomes.get(openTs)?.winner || null;
+      const lastClobCheck = this._clobTried.get(openTs) || 0;
       if (!winner && now - lastClobCheck >= cfg.RESOLUTION_RETRY_MS) {
-        this._clobTried.set(position, now);
+        this._clobTried.set(openTs, now);
         try {
-          const heldQuote = quote(await this.trader.getOrderBook(position.tokenId));
-          const mark = heldQuote.bid == null ? heldQuote.mid : heldQuote.bid;
-          if (mark != null && Number.isFinite(Number(mark))) position.lastClobMark = Number(mark);
-          if (this._settlePositionAtClobPrice(position, heldQuote.mid, heldQuote.bid)) continue;
+          const [upBook, downBook] = await Promise.all([
+            this.trader.getOrderBook(position.tokenUp),
+            this.trader.getOrderBook(position.tokenDown),
+          ]);
+          const pairedQuotes = { up: quote(upBook), down: quote(downBook) };
+          for (const pendingPosition of this.pending.filter((item) => item.openTs === openTs)) {
+            const heldQuote = pendingPosition.side === 'UP' ? pairedQuotes.up : pairedQuotes.down;
+            const mark = heldQuote.bid == null ? heldQuote.mid : heldQuote.bid;
+            if (mark != null && Number.isFinite(Number(mark))) pendingPosition.lastClobMark = Number(mark);
+          }
+          winner = clobPairWinner(pairedQuotes);
+          if (winner) {
+            this._recordOutcome(openTs, position.slug, winner, 'clob_pair');
+            this._push({
+              event: 'CLOB_PAIR_CONFIRMED', slug: position.slug, side: winner,
+              note: 'UP and DOWN CLOB books jointly confirmed ' + winner
+                + '; settling remaining positions from the paired books.',
+            });
+            this._settlePositionsForOpenTs(openTs, position.slug, winner, 'CLOB_PAIR_CONFIRMATION');
+            continue;
+          }
           this._recordEquity();
         } catch (error) {
           this._warnOnce('clob-settlement-' + position.slug, {
             event: 'ERROR', slug: position.slug,
-            note: 'CLOB threshold check failed; waiting for another quote or official result: ' + error.message,
+            note: 'Paired CLOB resolution check failed; waiting for another quote or official result: ' + error.message,
           });
         }
       }
 
-      const lastTried = this._resolveTried.get(position.openTs) || 0;
+      winner = winner || this.outcomes.get(openTs)?.winner || null;
+      const lastTried = this._resolveTried.get(openTs) || 0;
       if (!winner && now - lastTried >= cfg.RESOLUTION_RETRY_MS) {
-        this._resolveTried.set(position.openTs, now);
+        this._resolveTried.set(openTs, now);
         try { winner = await fetchResolution(position.slug); }
         catch (error) {
-          this._warnOnce('resolution-' + position.openTs, {
+          this._warnOnce('resolution-' + openTs, {
             event: 'ERROR', slug: position.slug,
             note: 'Official result lookup failed: ' + error.message,
           });
         }
-        if (winner) this._recordOutcome(position.openTs, position.slug, winner);
+        if (winner) this._recordOutcome(openTs, position.slug, winner, 'official');
       }
       if (winner !== 'UP' && winner !== 'DOWN') continue;
-      const payout = winner === position.side ? position.openShares : 0;
-      this.cash += payout + position.makerRebateEstimate;
-      position.exitProceeds += payout;
-      position.openShares = 0;
-      position.resolutionPayout = payout;
-      this._removeFromWindow(position);
-      this._finalizePosition(position, winner === position.side ? 'WIN' : 'LOSS', 'RESOLUTION', winner);
-      this._resolveTried.delete(position.openTs);
-      this._clobTried.delete(position);
+      this._settlePositionsForOpenTs(openTs, position.slug, winner, 'RESOLUTION');
     }
-  }
-
-  _settlePositionAtClobPrice(position, midpoint, bestBid) {
-    if (!position || position.settled || position.openShares <= EPSILON) return false;
-    const mid = midpoint == null || midpoint === '' ? null : Number(midpoint);
-    const bid = bestBid == null || bestBid === '' ? null : Number(bestBid);
-    const validMid = Number.isFinite(mid) && mid >= 0 && mid <= 1 ? mid : null;
-    const validBid = Number.isFinite(bid) && bid >= 0 && bid <= 1 ? bid : null;
-    const won = validMid != null && validMid >= cfg.CLOB_WIN_SETTLEMENT_PRICE;
-    const lost = validBid != null && validBid <= cfg.CLOB_LOSS_SETTLEMENT_PRICE;
-    if (!won && !lost) return false;
-
-    const settlementPrice = won ? validMid : validBid;
-    const settlementBasis = won ? 'MIDPOINT' : 'BEST_BID';
-    const remainingShares = position.openShares;
-    const payout = won ? remainingShares : 0;
-    const winner = won ? position.side : (position.side === 'UP' ? 'DOWN' : 'UP');
-    this.cash += payout + position.makerRebateEstimate;
-    position.exitProceeds += payout;
-    position.openShares = 0;
-    position.resolutionPayout = payout;
-    position.clobThresholdPrice = settlementPrice;
-    position.clobSettlementBasis = settlementBasis;
-    this._clobTried.delete(position);
-    this._resolveTried.delete(position.openTs);
-    this._recordOutcome(position.openTs, position.slug, winner);
-    this._removeFromWindow(position);
-    this._push({
-      event: 'CLOB_THRESHOLD_SETTLEMENT',
-      slug: position.slug,
-      side: position.side,
-      price: round(settlementPrice, 4),
-      settlementBasis,
-      shares: round(remainingShares, 4),
-      payout: round(payout, 2),
-      note: 'Held-side CLOB ' + (won ? 'midpoint' : 'best bid') + ' reached $'
-        + settlementPrice.toFixed(4) + '; demo settlement counts ' + round(remainingShares, 4)
-        + ' remaining shares at $' + (won ? '1.00' : '0.00') + ' each.',
-    });
-    this._finalizePosition(position, won ? 'WIN' : 'LOSS', 'CLOB_THRESHOLD', winner);
-    return true;
   }
 
   _removeFromWindow(position) {
@@ -604,12 +585,13 @@ class Bot {
     if (this.w.position === position) this.w.position = this.w.positions[0] || null;
     const active = this._activePositions(this.w);
     this.w.status = active.length ? 'position_open'
-      : (this.w.entrySide ? 'position_settled' : this.w.closed ? 'window_closed' : 'entry_orders_closed');
+      : this.w.closed ? 'window_closed'
+        : this.w.primaryAttempted ? 'position_settled' : 'watching_entry_trigger';
   }
 
-  _recordOutcome(openTs, slug, winner) {
+  _recordOutcome(openTs, slug, winner, source = 'clob-or-official') {
     if (this.outcomes.has(openTs)) return;
-    this.outcomes.set(openTs, { winner, source: 'clob-or-official', price: 1, loser: 0 });
+    this.outcomes.set(openTs, { winner, source, price: 1, loser: 0 });
     this.counts[winner] = (this.counts[winner] || 0) + 1;
     if (this.outcomes.size > 60) this.outcomes.delete(this.outcomes.keys().next().value);
     this._push({ event: 'OUTCOME', slug, side: winner, note: 'Window outcome recorded as ' + winner + '.' });
@@ -624,13 +606,16 @@ class Bot {
     this.stats.realizedPnl += pnl;
     if (outcome === 'WIN') {
       this.stats.wins += 1;
-      this.currentOrderShares = cfg.BASE_SHARES;
     } else if (outcome === 'LOSS') {
       this.stats.losses += 1;
-      this.currentOrderShares += cfg.SHARES_INCREMENT_AFTER_LOSS;
+    }
+    if (position.role === 'PRIMARY') {
+      this.currentStakeUsd = outcome === 'WIN'
+        ? cfg.BASE_STAKE_USD : this.currentStakeUsd * 2;
     }
     const trade = {
       slug: position.slug, openTs: position.openTs, side: position.side,
+      role: position.role, stakeUsd: round(position.stakeUsd, 2),
       shares: position.shares, entryPrice: round(position.entryPrice, 4),
       exitPrice: position.shares > 0 ? round(position.exitProceeds / position.shares, 4) : null,
       entryNotional: round(position.entryNotional, 4),
@@ -645,10 +630,12 @@ class Bot {
     this._push({
       event: outcome === 'WIN' ? 'SETTLED_WIN' : 'SETTLED_LOSS',
       slug: position.slug, side: position.side, pnl: round(pnl, 2),
-      nextShares: this.currentOrderShares,
+      role: position.role, nextStakeUsd: this.currentStakeUsd,
       note: reason + ' · ' + outcome + ' · demo P&L '
         + (pnl >= 0 ? '+' : '') + '$' + round(pnl, 2)
-        + '; next stake is ' + this.currentOrderShares + ' shares.',
+        + (position.role === 'PRIMARY'
+          ? '; next primary stake is $' + round(this.currentStakeUsd, 2) + '.'
+          : '; primary stake progression is unchanged.'),
     });
     this._recordEquity();
   }
@@ -692,7 +679,8 @@ class Bot {
           : (Number.isFinite(Number(position.entryPrice)) ? Number(position.entryPrice) : null))
         : currentMark;
       const costBasis = position.shares > 0
-        ? position.entryNotional * (position.openShares / position.shares) : 0;
+        ? (position.entryNotional + position.entryFee)
+          * (position.openShares / position.shares) : 0;
       return { ...position, mark, unrealized: mark == null
         ? null : position.openShares * mark - costBasis };
     });
@@ -714,27 +702,44 @@ class Bot {
         slug: w.slug, status: w.status, openTs: w.openTs,
         closeTs: Number(w.window && w.window.closeTs) || w.openTs + WINDOW_SECONDS,
         elapsedSeconds: elapsed, closed: w.closed,
-        entrySide: w.entrySide,
-        orderShares: w.orderShares || this.currentOrderShares,
-        positions: this._activePositions(w).map((position) => ({
-          side: position.side, openShares: position.openShares, entryPrice: position.entryPrice,
+        entrySide: w.primarySide,
+        primarySide: w.primarySide,
+        clobConfirmedOutcome: w.clobConfirmedOutcome || null,
+        clobCloseProvisionalOutcome: w.clobCloseProvisionalOutcome || null,
+        clobClosePrices: w.clobClosePrices || null,
+        primaryStakeUsd: w.primaryStakeUsd || null,
+        hedgeStakeUsd: w.hedgePosition ? w.hedgePosition.stakeUsd : null,
+        primaryEntry: w.primaryPosition ? {
+          side: w.primaryPosition.side, stakeUsd: w.primaryPosition.stakeUsd,
+          entryPrice: w.primaryPosition.entryPrice, status: w.primaryPosition.status,
+          settled: w.primaryPosition.settled,
+        } : null,
+        hedgeEntry: w.hedgePosition ? {
+          side: w.hedgePosition.side, stakeUsd: w.hedgePosition.stakeUsd,
+          entryPrice: w.hedgePosition.entryPrice, status: w.hedgePosition.status,
+          settled: w.hedgePosition.settled,
+        } : null,
+        positions: [w.primaryPosition, w.hedgePosition].filter(Boolean).map((position) => ({
+          side: position.side, role: position.role, stakeUsd: position.stakeUsd,
+          openShares: position.openShares, entryPrice: position.entryPrice,
+          status: position.status, settled: position.settled,
         })),
-        positionSide: w.entrySide || null,
+        positionSide: w.primarySide || null,
         openShares: this._activePositions(w).reduce((sum, position) => sum + position.openShares, 0),
-        entryOrders: Object.values(w.entryOrders).map((entry) => ({
-          side: entry.side, price: entry.price, shares: entry.shares,
-          matchedShares: entry.matchedShares, status: entry.status,
-        })),
-        entryTaken: !!w.entryTaken,
+        primaryAttempted: !!w.primaryAttempted,
+        hedgeAttempted: !!w.hedgeAttempted,
+        entryTaken: !!w.primaryPosition,
       } : null,
       prices: px && w && px.slug === w.slug ? px : null,
       priceSeries: this.priceSeries,
       strategy: {
-        baseShares: cfg.BASE_SHARES,
-        sharesIncrementAfterLoss: cfg.SHARES_INCREMENT_AFTER_LOSS,
-        currentOrderShares: this.currentOrderShares,
+        baseStakeUsd: cfg.BASE_STAKE_USD,
+        currentStakeUsd: this.currentStakeUsd,
+        hedgeStakeRatio: cfg.HEDGE_STAKE_RATIO,
+        currentHedgeStakeUsd: round(this.currentStakeUsd * cfg.HEDGE_STAKE_RATIO, 2),
         demoCapital: cfg.DEMO_CAPITAL,
-        entryLimitPrice: cfg.ENTRY_LIMIT_PRICE_USD,
+        entryTriggerPrice: cfg.ENTRY_TRIGGER_PRICE_USD,
+        stopLossHedgeTriggerPrice: cfg.STOP_LOSS_HEDGE_TRIGGER_PRICE_USD,
         clobWinSettlementPrice: cfg.CLOB_WIN_SETTLEMENT_PRICE,
         clobLossSettlementPrice: cfg.CLOB_LOSS_SETTLEMENT_PRICE,
       },
@@ -745,10 +750,10 @@ class Bot {
       stats: this.stats,
       cfg: {
         demoCapital: cfg.DEMO_CAPITAL,
-        baseShares: cfg.BASE_SHARES,
-        sharesIncrementAfterLoss: cfg.SHARES_INCREMENT_AFTER_LOSS,
-        currentOrderShares: this.currentOrderShares,
-        entryLimitPrice: cfg.ENTRY_LIMIT_PRICE_USD,
+        baseStakeUsd: cfg.BASE_STAKE_USD,
+        currentStakeUsd: this.currentStakeUsd,
+        entryTriggerPrice: cfg.ENTRY_TRIGGER_PRICE_USD,
+        stopLossHedgeTriggerPrice: cfg.STOP_LOSS_HEDGE_TRIGGER_PRICE_USD,
         windowSec: WINDOW_SECONDS,
       },
       log: this.log.slice(-100).reverse(),
@@ -760,8 +765,10 @@ function makeWindowState(slug, openTs) {
   return {
     slug, openTs, status: 'waiting_for_market', window: null,
     closed: false, closing: false, positions: [], position: null,
-    entryOrders: {}, entryOrdersStarted: false, entryCheckBusy: false,
-    entrySide: null, entryTaken: false, orderShares: null,
+    primarySide: null, primaryPosition: null, hedgePosition: null,
+    primaryStakeUsd: null, primaryAttempted: false, hedgeAttempted: false,
+    entryTriggerBusy: false, clobConfirmedOutcome: null, clobConfirmedAt: null,
+    clobCloseProvisionalOutcome: null, clobClosePrices: null,
   };
 }
 
@@ -769,16 +776,18 @@ function makePosition(w, entry) {
   return {
     slug: w.slug, openTs: w.openTs,
     closeTs: Number(w.window.closeTs) || w.openTs + WINDOW_SECONDS,
-    side: entry.side, tokenId: entry.tokenId,
-    orderShares: entry.shares, shares: 0, openShares: 0,
-    entryPrice: entry.price, entryNotional: 0,
-    makerRebateEstimate: 0, entryFee: 0, exitFees: 0, cost: 0,
+    tokenUp: w.window.tokenUp, tokenDown: w.window.tokenDown,
+    side: entry.side, tokenId: entry.tokenId, role: entry.role,
+    stakeUsd: entry.stakeUsd, shares: entry.shares, openShares: entry.shares,
+    entryPrice: entry.price, entryNotional: entry.notional,
+    makerRebateEstimate: 0, entryFee: entry.fee, exitFees: 0,
+    cost: entry.notional + entry.fee,
     exitProceeds: 0, status: 'position_open', firedAt: Date.now(),
-    lastClobMark: entry.price, settled: false,
+    lastClobMark: positive(entry.mark) || entry.price, settled: false,
   };
 }
 
-function emptyQuote() { return { bid: null, ask: null, mid: null }; }
+function emptyQuote() { return { bid: null, ask: null, mid: null, ts: null }; }
 
 function sortedLevels(levels, order) {
   return (levels || [])
@@ -793,23 +802,50 @@ function quote(book) {
   const asks = sortedLevels(book && book.asks, 'asc');
   const bid = bids.length ? bids[0].price : null;
   const ask = asks.length ? asks[0].price : null;
-  return { bid, ask, mid: bid == null || ask == null ? null : (bid + ask) / 2 };
+  return { bid, ask, mid: bid == null || ask == null ? null : (bid + ask) / 2, ts: Date.now() };
+}
+
+function clobPairWinner(prices) {
+  if (!isFreshQuotePair(prices)) return null;
+  const upMid = validPrice(prices.up.mid);
+  const downMid = validPrice(prices.down.mid);
+  const upBid = validPrice(prices.up.bid);
+  const downBid = validPrice(prices.down.bid);
+  const upConfirmed = upMid != null && upMid >= cfg.CLOB_WIN_SETTLEMENT_PRICE
+    && downBid != null && downBid <= cfg.CLOB_LOSS_SETTLEMENT_PRICE;
+  const downConfirmed = downMid != null && downMid >= cfg.CLOB_WIN_SETTLEMENT_PRICE
+    && upBid != null && upBid <= cfg.CLOB_LOSS_SETTLEMENT_PRICE;
+  if (upConfirmed === downConfirmed) return null;
+  return upConfirmed ? 'UP' : 'DOWN';
+}
+
+function clobPriceLeader(prices) {
+  if (!isFreshQuotePair(prices)) return null;
+  const upMid = validPrice(prices.up.mid);
+  const downMid = validPrice(prices.down.mid);
+  if (upMid == null || downMid == null || Math.abs(upMid - downMid) <= EPSILON) return null;
+  return upMid > downMid ? 'UP' : 'DOWN';
+}
+
+function isFreshQuotePair(prices) {
+  if (!prices || !prices.up || !prices.down) return false;
+  const upTs = Number(prices.up.ts);
+  const downTs = Number(prices.down.ts);
+  const now = Date.now();
+  return Number.isFinite(upTs) && Number.isFinite(downTs)
+    && now - upTs >= 0 && now - downTs >= 0
+    && now - upTs <= cfg.PRICE_STALE_MS && now - downTs <= cfg.PRICE_STALE_MS;
+}
+
+function validPrice(value) {
+  if (value == null || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 && n <= 1 ? n : null;
 }
 
 function positive(value) {
   const n = Number(value);
   return Number.isFinite(n) && n > 0 ? n : null;
-}
-
-function matchedShares(order) {
-  return Math.max(0, Number(order && (order.size_matched ?? order.matchedShares)) || 0);
-}
-
-function normalizeOrderStatus(status) {
-  const value = String(status || 'LIVE').toUpperCase();
-  if (value === 'MATCHED' || value === 'FILLED') return 'FILLED';
-  if (value === 'CANCELLED') return 'CANCELED';
-  return value;
 }
 
 function windowCloseMs(w) {

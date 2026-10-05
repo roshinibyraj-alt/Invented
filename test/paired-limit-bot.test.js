@@ -11,43 +11,55 @@ class FakeDemoTrader {
   constructor() {
     this.demoMode = true;
     this.calls = [];
-    this.orders = new Map();
-    this.nextId = 1;
+    this.books = new Map();
+    this.askDepth = new Map();
   }
 
-  async placeGtcOrder(tokenId, side, price, size) {
-    this.calls.push({ method: 'placeGtcOrder', tokenId, side, price, size });
-    const id = 'fake-' + this.nextId++;
-    this.orders.set(id, {
-      id, tokenId, side, price, original_size: size, size_matched: 0,
-      status: 'LIVE', makerRebateEstimate: 0,
+  async getOrderBook(tokenId) {
+    return this.books.get(tokenId) || { bids: [], asks: [] };
+  }
+
+  updateQuote(tokenId, quote) {
+    const bid = Number(quote && quote.bid);
+    const ask = Number(quote && quote.ask);
+    this.books.set(tokenId, {
+      bids: Number.isFinite(bid) && bid > 0 ? [{ price: bid, size: 1000 }] : [],
+      asks: Number.isFinite(ask) && ask > 0
+        ? [{ price: ask, size: this.askDepth.get(tokenId) || 1000 }] : [],
     });
-    return { id, status: 'LIVE' };
   }
 
-  async getOrder(id) {
-    const order = this.orders.get(id);
-    return order ? { ...order } : null;
+  async placeFakMarketOrder(tokenId, side, amount, options = {}) {
+    this.calls.push({ method: 'placeFakMarketOrder', tokenId, side, amount, options });
+    const book = await this.getOrderBook(tokenId);
+    const levels = (String(side).toUpperCase() === 'BUY' ? book.asks : book.bids)
+      .map((level) => ({ price: Number(level.price), size: Number(level.size) }))
+      .filter((level) => !Number.isFinite(Number(options.priceLimit))
+        || level.price <= Number(options.priceLimit))
+      .sort((a, b) => a.price - b.price);
+    const priceLimit = Number(options.priceLimit);
+    const hasPriceLimit = Number.isFinite(priceLimit) && priceLimit > 0;
+    let remaining = hasPriceLimit ? Number(amount) / priceLimit : Number(amount) || 0;
+    let shares = 0;
+    let notional = 0;
+    for (const level of levels) {
+      const take = Math.min(level.size, hasPriceLimit ? remaining : remaining / level.price);
+      shares += take;
+      notional += take * level.price;
+      remaining -= hasPriceLimit ? take : take * level.price;
+      if (remaining <= 1e-9) break;
+    }
+    if (shares <= 0) {
+      return { id: null, status: 'unmatched', isFilled: false, avgPrice: 0, raw: {} };
+    }
+    return {
+      id: 'fake-' + this.calls.length, status: 'matched', isFilled: true,
+      avgPrice: notional / shares,
+      raw: { makingAmount: String(notional), takingAmount: String(shares) },
+    };
   }
 
-  async cancelOrder(id) {
-    this.calls.push({ method: 'cancelOrder', id });
-    const order = this.orders.get(id);
-    if (order && order.status === 'LIVE') order.status = 'CANCELED';
-    return { canceled: [id] };
-  }
-
-  fill(id, shares, matchedAt = Date.now()) {
-    const order = this.orders.get(id);
-    order.size_matched = shares;
-    order.status = shares >= order.original_size ? 'MATCHED' : 'LIVE';
-    order.matchedAt = matchedAt;
-    order.makerRebateEstimate = 0;
-  }
-
-  async getOrderBook() { return { bids: [], asks: [] }; }
   async getBalance() { return null; }
-  updateQuote() {}
 }
 
 function fixture({ trader = new FakeDemoTrader(), cash } = {}) {
@@ -61,161 +73,259 @@ function fixture({ trader = new FakeDemoTrader(), cash } = {}) {
     tokenUp: 'up-token', tokenDown: 'down-token',
   };
   bot.w = w;
+  bot.prices = { slug, ts: Date.now(), up: { bid: null, ask: null, mid: null }, down: { bid: null, ask: null, mid: null } };
   return { bot, trader, w };
 }
 
-async function postPair(fx) {
-  const posted = await fx.bot._placeEntryOrders(fx.w);
-  assert.equal(posted, true);
-  assert.deepEqual(Object.keys(fx.w.entryOrders).sort(), ['DOWN', 'UP']);
+async function quote(fx, side, bid, ask) {
+  const tokenId = side === 'UP' ? fx.w.window.tokenUp : fx.w.window.tokenDown;
+  await fx.bot._onQuote(fx.w.slug, tokenId, { bid, ask });
 }
 
-test('configuration selects $10,000 demo capital, $0.30 limits, and 500/250 share sizing', () => {
+async function nextWindow(fx, index) {
+  const openTs = fx.w.openTs + index * 300;
+  const slug = slugForTs(openTs);
+  const w = makeWindowState(slug, openTs);
+  w.window = {
+    slug, openTs, closeTs: openTs + 300,
+    tokenUp: 'up-token-' + index, tokenDown: 'down-token-' + index,
+  };
+  fx.bot.w = w;
+  fx.bot.prices = { slug, ts: Date.now(), up: { bid: null, ask: null, mid: null }, down: { bid: null, ask: null, mid: null } };
+  fx.bot._quotesByToken = new Map();
+  fx.w = w;
+  return w;
+}
+
+async function enterPrimary(fx, side = 'UP') {
+  const opposite = side === 'UP' ? 'DOWN' : 'UP';
+  const callsBefore = fx.trader.calls.length;
+  await quote(fx, opposite, 0.29, 0.30);
+  await quote(fx, side, 0.68, 0.68);
+  assert.equal(fx.trader.calls.length, callsBefore);
+  await quote(fx, side, 0.68, cfg.ENTRY_TRIGGER_PRICE_USD);
+  assert.equal(fx.trader.calls.length, callsBefore + 1);
+  assert.ok(fx.w.primaryPosition);
+  return fx.w.primaryPosition;
+}
+
+async function confirmClobOutcome(fx, winner) {
+  if (winner === 'UP') {
+    await quote(fx, 'UP', 0.99, 1.00);
+    await quote(fx, 'DOWN', 0.01, 0.02);
+  } else {
+    await quote(fx, 'DOWN', 0.99, 1.00);
+    await quote(fx, 'UP', 0.01, 0.02);
+  }
+}
+
+test('configuration uses $100 base stake, 45% hedge, and $0.69/$0.70 triggers', () => {
   assert.equal(cfg.DEMO_CAPITAL, 10000);
-  assert.equal(cfg.ENTRY_LIMIT_PRICE_USD, 0.30);
-  assert.equal(cfg.BASE_SHARES, 500);
-  assert.equal(cfg.SHARES_INCREMENT_AFTER_LOSS, 250);
+  assert.equal(cfg.BASE_STAKE_USD, 100);
+  assert.equal(cfg.HEDGE_STAKE_RATIO, 0.45);
+  assert.equal(cfg.ENTRY_TRIGGER_PRICE_USD, 0.69);
+  assert.equal(cfg.STOP_LOSS_HEDGE_TRIGGER_PRICE_USD, 0.70);
 });
 
-test('posts both sides as resting GTC BUY limits at the configured price and size', async () => {
+test('no order is placed until a side ask reaches $0.69, then buys a fixed $100 stake', async () => {
   const fx = fixture();
-  await postPair(fx);
+  await quote(fx, 'UP', 0.67, 0.68);
+
+  assert.equal(fx.trader.calls.length, 0);
+  assert.equal(fx.bot.cash, 10000);
+
+  await quote(fx, 'UP', 0.68, 0.69);
+
+  assert.equal(fx.trader.calls.length, 1);
+  assert.deepEqual(fx.trader.calls[0], {
+    method: 'placeFakMarketOrder', tokenId: 'up-token', side: 'BUY',
+    amount: 100, options: { priceLimit: 0.69 },
+  });
+  assert.equal(fx.w.primarySide, 'UP');
+  assert.equal(fx.w.primaryPosition.role, 'PRIMARY');
+  assert.equal(fx.w.primaryPosition.stakeUsd, 100);
+  assert.ok(Math.abs(fx.w.primaryPosition.entryNotional - 100) < 1e-8);
+  assert.ok(fx.bot.cash < 9900); // Stake plus estimated taker fee.
+});
+
+test('the first side to reach the trigger wins the primary entry', async () => {
+  const fx = fixture();
+  await quote(fx, 'DOWN', 0.68, 0.69);
+
+  assert.equal(fx.w.primarySide, 'DOWN');
+  assert.equal(fx.trader.calls.length, 1);
+  assert.equal(fx.trader.calls[0].tokenId, 'down-token');
+});
+
+test('opposite-side buy fires only at the stop trigger and scales to 45% of primary stake', async () => {
+  const fx = fixture();
+  await enterPrimary(fx, 'UP');
+  await quote(fx, 'DOWN', 0.69, 0.699);
+  assert.equal(fx.trader.calls.length, 1);
+
+  await quote(fx, 'DOWN', 0.70, 0.70);
 
   assert.equal(fx.trader.calls.length, 2);
-  assert.deepEqual(fx.trader.calls.map(({ side, price, size }) => ({ side, price, size })), [
-    { side: 'BUY', price: 0.30, size: 500 },
-    { side: 'BUY', price: 0.30, size: 500 },
-  ]);
-  assert.equal(fx.bot.cash, 10000);
-  assert.equal(fx.w.status, 'entry_orders_open');
+  assert.equal(fx.trader.calls[1].tokenId, 'down-token');
+  assert.equal(fx.trader.calls[1].amount, 45);
+  assert.equal(fx.trader.calls[1].options.priceLimit, 0.70);
+  assert.equal(fx.w.hedgePosition.role, 'STOP_LOSS_HEDGE');
+  assert.equal(fx.w.hedgePosition.stakeUsd, 45);
+  assert.equal(fx.bot.stats.stopLossHedges, 1);
 });
 
-test('first fill creates a position and cancels the opposite resting order', async () => {
+test('CLOB outcome requires the winner and opposite side to confirm together', async () => {
   const fx = fixture();
-  await postPair(fx);
-  fx.trader.fill(fx.w.entryOrders.UP.orderId, 500);
+  const primary = await enterPrimary(fx);
 
-  await fx.bot._checkEntryOrders(fx.w);
+  await quote(fx, 'UP', 0.99, 1.00);
+  await quote(fx, 'DOWN', 0.02, 0.03);
+  assert.equal(primary.settled, false);
+  assert.equal(fx.bot.currentStakeUsd, 100);
+  assert.equal(fx.w.closed, false);
 
-  assert.equal(fx.w.entrySide, 'UP');
-  assert.equal(fx.w.entryOrders.DOWN.status, 'CANCELED');
-  assert.equal(fx.trader.calls.filter((call) => call.method === 'cancelOrder').length, 1);
-  assert.equal(fx.bot.pending.length, 1);
-  assert.equal(fx.bot.pending[0].shares, 500);
-  assert.equal(fx.bot.cash, 10000 - 500 * 0.30);
-  assert.ok(fx.bot.log.some((entry) => entry.event === 'OCO_CANCEL'));
+  await quote(fx, 'DOWN', 0.01, 0.02);
+  assert.equal(primary.settled, true);
+  assert.equal(fx.w.clobConfirmedOutcome, 'UP');
+  assert.equal(fx.bot.outcomes.get(fx.w.openTs).source, 'clob_pair');
+  assert.equal(fx.bot.currentStakeUsd, 100);
 });
 
-test('opposite order is canceled if a feed sees the first fill before pair submission finishes', async () => {
+test('at close, the higher fresh CLOB midpoint provisionally advances the stake ladder', async () => {
   const fx = fixture();
-  fx.w.entryOrdersStarted = true;
-  fx.w.orderShares = 500;
-  const up = await fx.trader.placeGtcOrder('up-token', 'BUY', 0.30, 500);
-  fx.w.entryOrders.UP = {
-    side: 'UP', tokenId: 'up-token', orderId: up.id, price: 0.30,
-    shares: 500, matchedShares: 0, rebateRecorded: 0, status: 'LIVE',
-    placedAt: Date.now(), cancelPending: false,
-  };
-  fx.trader.fill(up.id, 500);
-  await fx.bot._checkEntryOrders(fx.w);
-  assert.equal(fx.w.entrySide, 'UP');
-  assert.equal(fx.w.entryOrders.DOWN, undefined);
+  const primary = await enterPrimary(fx);
+  await quote(fx, 'DOWN', 0.70, 0.70);
+  const hedge = fx.w.hedgePosition;
+  await quote(fx, 'UP', 0.56, 0.62);
+  await quote(fx, 'DOWN', 0.68, 0.78);
 
-  const down = await fx.trader.placeGtcOrder('down-token', 'BUY', 0.30, 500);
-  fx.w.entryOrders.DOWN = {
-    side: 'DOWN', tokenId: 'down-token', orderId: down.id, price: 0.30,
-    shares: 500, matchedShares: 0, rebateRecorded: 0, status: 'LIVE',
-    placedAt: Date.now(), cancelPending: false,
-  };
-  await fx.bot._checkEntryOrders(fx.w);
-  assert.equal(fx.w.entryOrders.DOWN.status, 'CANCELED');
+  await fx.bot._closeWindow(fx.w);
+
+  assert.equal(fx.w.closed, true);
+  assert.equal(fx.w.clobCloseProvisionalOutcome, 'DOWN');
+  assert.ok(Math.abs(fx.w.clobClosePrices.upMid - 0.59) < 1e-9);
+  assert.ok(Math.abs(fx.w.clobClosePrices.downMid - 0.73) < 1e-9);
+  assert.equal(fx.bot.outcomes.get(fx.w.openTs).source, 'clob_close_provisional');
+  assert.equal(primary.settled, true);
+  assert.equal(hedge.settled, true);
+  assert.equal(fx.bot.currentStakeUsd, 200);
 });
 
-test('partial fill is tracked at the limit cost while the unfilled opposite side is canceled', async () => {
+test('tied or missing close-time midpoints remain on the official-result fallback', async () => {
   const fx = fixture();
-  await postPair(fx);
-  fx.trader.fill(fx.w.entryOrders.DOWN.orderId, 125);
+  const primary = await enterPrimary(fx);
+  await quote(fx, 'UP', 0.49, 0.51);
+  await quote(fx, 'DOWN', 0.49, 0.51);
 
-  await fx.bot._checkEntryOrders(fx.w);
+  await fx.bot._closeWindow(fx.w);
 
-  assert.equal(fx.w.entrySide, 'DOWN');
-  assert.equal(fx.w.entryOrders.DOWN.status, 'PARTIALLY_FILLED');
-  assert.equal(fx.w.entryOrders.UP.status, 'CANCELED');
-  assert.equal(fx.bot.pending[0].shares, 125);
-  assert.equal(fx.bot.pending[0].openShares, 125);
-  assert.equal(fx.bot.cash, 10000 - 125 * 0.30);
+  assert.equal(fx.w.closed, true);
+  assert.equal(fx.w.clobCloseProvisionalOutcome, null);
+  assert.equal(fx.bot.outcomes.has(fx.w.openTs), false);
+  assert.equal(primary.settled, false);
+  assert.equal(fx.bot.currentStakeUsd, 100);
 });
 
-test('an opposite fill that races cancellation is recorded instead of hidden', async () => {
+test('stake progression is $100 → $200 → $400, then resets to $100 after a primary win', async () => {
   const fx = fixture();
-  await postPair(fx);
-  const sameTime = Date.now();
-  fx.trader.fill(fx.w.entryOrders.UP.orderId, 500, sameTime);
-  fx.trader.fill(fx.w.entryOrders.DOWN.orderId, 500, sameTime + 1);
+  const expectedStakes = [100, 200, 400, 100];
 
-  await fx.bot._checkEntryOrders(fx.w);
+  for (let index = 0; index < expectedStakes.length; index += 1) {
+    if (index > 0) await nextWindow(fx, index);
+    const primary = await enterPrimary(fx);
+    const stake = expectedStakes[index];
+    assert.equal(primary.stakeUsd, stake);
 
-  assert.equal(fx.w.entrySide, 'UP');
-  assert.equal(fx.bot.pending.length, 2);
-  assert.ok(fx.bot.log.some((entry) => entry.event === 'OCO_RACE_FILL'));
+    await quote(fx, 'DOWN', 0.70, 0.70);
+    assert.equal(fx.trader.calls.at(-1).amount, stake * 0.45);
+    const hedge = fx.w.hedgePosition;
+
+    if (index < 2) {
+      await confirmClobOutcome(fx, 'DOWN');
+      assert.equal(fx.bot.currentStakeUsd, expectedStakes[index + 1]);
+      assert.equal(hedge.settled, true);
+    } else if (index === 2) {
+      await confirmClobOutcome(fx, 'UP');
+      assert.equal(fx.bot.currentStakeUsd, 100);
+      assert.equal(hedge.settled, true);
+    }
+  }
+
+  assert.deepEqual(
+    fx.trader.calls.filter((call) => call.method === 'placeFakMarketOrder').map((call) => call.amount),
+    [100, 45, 200, 90, 400, 180, 100, 45],
+  );
 });
 
-test('loss adds 250 shares to the next pair, then a win resets to 500', async () => {
+test('settling a hedge does not change the next primary stake', async () => {
   const fx = fixture();
-  await postPair(fx);
-  fx.trader.fill(fx.w.entryOrders.UP.orderId, 500);
-  await fx.bot._checkEntryOrders(fx.w);
+  fx.bot.currentStakeUsd = 200;
+  const primary = await enterPrimary(fx);
+  await quote(fx, 'DOWN', 0.70, 0.70);
+  const hedge = fx.w.hedgePosition;
 
-  fx.bot._settlePositionAtClobPrice(fx.bot.pending[0], 0.50, 0.01);
-  assert.equal(fx.bot.currentOrderShares, 750);
-
-  const nextOpenTs = fx.w.openTs + 300;
-  const next = makeWindowState(slugForTs(nextOpenTs), nextOpenTs);
-  next.window = {
-    slug: next.slug, openTs: nextOpenTs, closeTs: nextOpenTs + 300,
-    tokenUp: 'next-up-token', tokenDown: 'next-down-token',
-  };
-  fx.bot.w = next;
-  const nextPair = await fx.bot._placeEntryOrders(next);
-  assert.equal(nextPair, true);
-  assert.equal(next.orderShares, 750);
-
-  fx.trader.fill(next.entryOrders.DOWN.orderId, 750);
-  await fx.bot._checkEntryOrders(next);
-  fx.bot._settlePositionAtClobPrice(fx.bot.pending[0], 0.99, 0.98);
-  assert.equal(fx.bot.currentOrderShares, 500);
+  fx.bot._finalizePosition(hedge, 'WIN', 'TEST');
+  assert.equal(fx.bot.currentStakeUsd, 200);
+  await confirmClobOutcome(fx, 'DOWN');
+  assert.equal(fx.bot.currentStakeUsd, 400);
+  assert.equal(primary.settled, true);
 });
 
-test('both CLOB threshold and official-result paths settle with the preserved outcomes', async () => {
-  const threshold = fixture();
-  await postPair(threshold);
-  threshold.trader.fill(threshold.w.entryOrders.UP.orderId, 500);
-  await threshold.bot._checkEntryOrders(threshold.w);
-  threshold.bot._settlePositionAtClobPrice(threshold.bot.pending[0], 0.99, 0.98);
-  assert.equal(threshold.bot.trades[0].outcome, 'WIN');
-  assert.equal(threshold.bot.trades[0].reason, 'CLOB_THRESHOLD');
+test('next window waits for the previous primary result before choosing its stake', async () => {
+  const fx = fixture();
+  const previousPrimary = await enterPrimary(fx);
+  const previousWindow = fx.w;
+  await nextWindow(fx, 1);
 
-  const official = fixture();
-  await postPair(official);
-  official.trader.fill(official.w.entryOrders.DOWN.orderId, 500);
-  await official.bot._checkEntryOrders(official.w);
-  const position = official.bot.pending[0];
-  position.closeTs = Math.floor(Date.now() / 1000) - 1;
-  official.w.closed = true;
-  official.w.status = 'awaiting_resolution';
-  official.bot.outcomes.set(position.openTs, { winner: 'DOWN', source: 'official' });
+  await quote(fx, 'UP', 0.68, 0.69);
+  assert.equal(fx.trader.calls.length, 1);
+  assert.equal(fx.w.status, 'awaiting_previous_primary_settlement');
+  assert.equal(fx.w.primaryAttempted, false);
 
-  await official.bot._settleClosedPositions(Date.now());
-  assert.equal(official.bot.trades[0].outcome, 'WIN');
-  assert.equal(official.bot.trades[0].reason, 'RESOLUTION');
+  fx.bot._confirmClobOutcome(previousWindow, 'DOWN');
+  assert.equal(fx.bot.currentStakeUsd, 200);
+  await quote(fx, 'UP', 0.68, 0.69);
+
+  assert.equal(fx.trader.calls.length, 2);
+  assert.equal(fx.trader.calls[1].amount, 200);
+  assert.equal(fx.w.primaryPosition.stakeUsd, 200);
 });
 
-test('pair cost is checked against demo cash before either order is placed', async () => {
-  const fx = fixture({ cash: 299.99 });
-  const posted = await fx.bot._placeEntryOrders(fx.w);
-  assert.equal(posted, false);
+test('thin visible depth creates a partial fixed-dollar fill and tracks actual cost', async () => {
+  const fx = fixture();
+  fx.trader.askDepth.set('up-token', 10);
+  await quote(fx, 'UP', 0.68, 0.69);
+
+  assert.equal(fx.w.primaryPosition.shares, 10);
+  assert.ok(Math.abs(fx.w.primaryPosition.entryNotional - 6.9) < 1e-8);
+  assert.ok(fx.bot.cash > 9900);
+});
+
+test('insufficient demo cash prevents the entry order', async () => {
+  const fx = fixture({ cash: 50 });
+  await quote(fx, 'UP', 0.68, 0.69);
+
   assert.equal(fx.trader.calls.length, 0);
   assert.equal(fx.w.status, 'insufficient_cash');
+  assert.equal(fx.bot.cash, 50);
+});
+
+test('official-result settlement remains available for primary and hedge positions', async () => {
+  const fx = fixture();
+  const primary = await enterPrimary(fx);
+  await quote(fx, 'DOWN', 0.70, 0.70);
+  const hedge = fx.w.hedgePosition;
+
+  primary.closeTs = Math.floor(Date.now() / 1000) - 1;
+  hedge.closeTs = primary.closeTs;
+  fx.w.closed = true;
+  fx.bot.outcomes.set(primary.openTs, { winner: 'UP', source: 'official' });
+  await fx.bot._settleClosedPositions(Date.now());
+
+  assert.equal(primary.settled, true);
+  assert.equal(hedge.settled, true);
+  assert.equal(fx.bot.trades.length, 2);
+  assert.equal(fx.bot.currentStakeUsd, 100);
 });
 
 test('non-DemoTrader instances remain blocked and cannot submit orders', async () => {
@@ -224,17 +334,21 @@ test('non-DemoTrader instances remain blocked and cannot submit orders', async (
   const fx = fixture({ trader });
   assert.equal(fx.bot.executionHalt, true);
   fx.bot.start();
-  assert.equal(await fx.bot._placeEntryOrders(fx.w), false);
+  await quote(fx, 'UP', 0.68, 0.69);
+
   assert.equal(fx.trader.calls.length, 0);
 });
 
-test('snapshot exposes paired-limit strategy settings and demo capital', () => {
+test('snapshot exposes trigger levels, current primary/hedge stakes, and demo capital', async () => {
   const fx = fixture();
+  fx.bot.currentStakeUsd = 200;
   const snapshot = fx.bot.snapshot();
+
   assert.equal(snapshot.mode, 'DEMO');
   assert.equal(snapshot.account.capital, 10000);
-  assert.equal(snapshot.strategy.entryLimitPrice, 0.30);
-  assert.equal(snapshot.strategy.baseShares, 500);
-  assert.equal(snapshot.strategy.sharesIncrementAfterLoss, 250);
-  assert.equal(snapshot.strategy.currentOrderShares, 500);
+  assert.equal(snapshot.strategy.baseStakeUsd, 100);
+  assert.equal(snapshot.strategy.currentStakeUsd, 200);
+  assert.equal(snapshot.strategy.currentHedgeStakeUsd, 90);
+  assert.equal(snapshot.strategy.entryTriggerPrice, 0.69);
+  assert.equal(snapshot.strategy.stopLossHedgeTriggerPrice, 0.70);
 });

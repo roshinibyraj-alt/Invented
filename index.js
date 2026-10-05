@@ -1,6 +1,6 @@
 'use strict';
 
-// This paired-limit strategy is demo-only. Fail before loading
+// This trigger/hedge strategy is demo-only. Fail before loading
 // a wallet trader or authenticating if a live-trading flag is present.
 const LIVE = process.env.LIVE_TRADING === 'true';
 
@@ -20,7 +20,7 @@ async function main() {
   bot.start();
   startServer(bot, process.env.PORT || 3000);
 
-  console.log('MODE: DEMO -- simulated paired-limit fills only. Live trading is disabled for this strategy.');
+  console.log('MODE: DEMO -- simulated trigger/hedge fills only. Live trading is disabled for this strategy.');
 }
 
 main().catch((e) => {
