@@ -78,7 +78,7 @@ function render(s){
     :' · threshold warm-up '+(st.thresholdSampleCount||0)+'/'+(st.thresholdMinSamples||120)+' moves';
   $('ccxtSummary').textContent=cx.error?'Feed error: '+cx.error:'Public spot ticker · target '+(cx.pollMs||st.pollMs||500)+' ms'+pollInterval+thresholdSummary+' · '+(cx.status==='live'?'last update '+time(cx.receivedAt):'waiting for data');
   const elapsed=w?Number(w.elapsedSeconds)||0:0;const remain=Math.max(0,300-elapsed);$('marketTitle').textContent=w?(w.slug||'BTC 5-minute market'):'Waiting for active market';$('windowStatus').textContent=w?String(w.status||'starting').replace(/_/g,' '):'Starting';
-   $('windowStatus').className='status '+(w&&(w.positionSide||w.entryTaken)?'good':w&&w.status==='awaiting_resolution'?'warn':w&&w.closed?'':'');
+   $('windowStatus').className='status '+(w&&(w.positionSide||w.entryTaken)?'good':w&&(w.status==='awaiting_297s_price_threshold'||w.status==='awaiting_previous_primary_settlement')?'warn':w&&w.closed?'':'');
   $('timeLeft').textContent=w?clock(remain)+' remaining':'— remaining';$('elapsedLabel').textContent=clock(elapsed)+' elapsed';$('progress').style.width=Math.min(100,Math.max(0,elapsed/300*100))+'%';
   const thresholdLabel=st.thresholdReady
     ?'ADAPTIVE ±'+usd(st.thresholdUsd)+' · P'+st.thresholdPercentile+' / 20m'
@@ -124,7 +124,7 @@ function render(s){
   const trades=s.trades||[];$('tradeCount').textContent=trades.length+' shown';if(!trades.length){$('trades').innerHTML=rowEmpty('No completed positions yet',9)}else{$('trades').innerHTML='<table class="data"><thead><tr><th>Window</th><th>Side</th><th>Shares</th><th>Entry avg.</th><th>Exit avg.</th><th>Exit proceeds</th><th>Fees</th><th>Reason</th><th>Result</th><th>Net P&amp;L</th></tr></thead><tbody>'+trades.map(function(t){return '<tr><td>'+esc(time(Number(t.openTs)*1000))+'</td><td>'+esc(t.side)+'</td><td>'+qty(t.shares)+'</td><td>'+cents(t.entryPrice)+'</td><td>'+cents(t.exitPrice)+'</td><td>'+usd(t.exitProceeds)+'</td><td>'+usd(t.fee)+'</td><td>'+esc(String(t.reason||'').replace(/_/g,' '))+'</td><td>'+esc(t.outcome)+'</td><td class="'+(Number(t.pnl)>=0?'positive':'negative')+'">'+usd(t.pnl)+'</td></tr>'}).join('')+'</tbody></table>'}
   $('uptime').textContent='Uptime '+clock(s.uptimeSec||0);const logs=s.log||[];if(!logs.length){$('log').innerHTML=rowEmpty('Waiting for bot events',1)}else{$('log').innerHTML=logs.slice(0,35).map(function(item){return '<div class="logrow"><span class="logtime">'+esc(time(item.ts))+'</span><span class="logevent">'+esc(item.event||'EVENT')+'</span><span>'+esc(item.note||'')+'</span></div>'}).join('')}
 }
-function setPairQuote(side,quote,w,pending){const key=side.toLowerCase();$(key+'Bid').textContent=cents(quote&&quote.bid);$(key+'Ask').textContent=cents(quote&&quote.ask);$(key+'Mid').textContent=cents(quote&&quote.mid);const state=$(key+'State');const open=(pending||[]).some(function(p){return p.side===side});if(open)statusStyle(state,'OPEN POSITION','warn');else if(w&&w.primarySide===side)statusStyle(state,'PRIMARY ENTERED','good');else if(w&&w.closed)statusStyle(state,'CLOSED','');else statusStyle(state,'WATCHING','')}
+function setPairQuote(side,quote,w,pending){const key=side.toLowerCase();$(key+'Bid').textContent=cents(quote&&quote.bid);$(key+'Ask').textContent=cents(quote&&quote.ask);$(key+'Mid').textContent=cents(quote&&quote.mid);const state=$(key+'State'),positions=pending||[];const currentOpen=positions.some(function(p){return p.side===side&&w&&p.openTs===w.openTs});const previousOpen=positions.some(function(p){return p.side===side&&w&&p.openTs<w.openTs});const anyOpen=positions.some(function(p){return p.side===side});if(currentOpen)statusStyle(state,'OPEN POSITION','warn');else if(previousOpen)statusStyle(state,'PRIOR WINDOW OPEN','warn');else if(anyOpen)statusStyle(state,'OPEN POSITION','warn');else if(w&&w.primarySide===side)statusStyle(state,'PRIMARY ENTERED','good');else if(w&&w.closed)statusStyle(state,'CLOSED','');else statusStyle(state,'WATCHING','')}
 function render(s){
   const cfg=s.cfg||{},st=s.strategy||{},w=s.window||null,px=s.prices||{},pending=s.pending||[];
   $('mode').textContent=s.mode==='LIVE'?'LIVE TRADING':'DEMO MODE';$('mode').className='pill '+(s.mode==='LIVE'?'live':'demo');
@@ -138,25 +138,32 @@ function render(s){
   const error=$('error');if(s.error||s.executionHalt){error.textContent=s.executionHalt?'This strategy is demo-only and is blocked in LIVE mode; no orders were sent.':s.error;error.className='error show'}else error.className='error';
   const elapsed=w?Number(w.elapsedSeconds)||0:0,remain=Math.max(0,300-elapsed);
   $('marketTitle').textContent=w?(w.slug||'BTC 5-minute market'):'Waiting for market';$('windowStatus').textContent=w?String(w.status||'starting').replace(/_/g,' '):'Starting';
-  $('windowStatus').className='status '+(w&&(w.positionSide||w.entryTaken)?'good':w&&w.status==='awaiting_resolution'?'warn':w&&w.closed?'':'');
+  $('windowStatus').className='status '+(w&&(w.positionSide||w.entryTaken)?'good':w&&(w.status==='awaiting_297s_price_threshold'||w.status==='awaiting_previous_primary_settlement')?'warn':w&&w.closed?'':'');
   $('timeLeft').textContent=w?clock(remain)+' remaining':'— remaining';$('elapsedLabel').textContent=clock(elapsed)+' elapsed';$('progress').style.width=Math.min(100,Math.max(0,elapsed/300*100))+'%';
-   $('gateLabel').textContent=w&&w.closed?'WINDOW CLOSED · CLOB THRESHOLD THEN OFFICIAL RESULT':'PRIMARY ASK TRIGGER · '+usd(st.entryTriggerPrice);
-  $('clobSettleTag').textContent='MID ≥'+usd(st.clobWinSettlementPrice)+'→$1 / BID ≤'+usd(st.clobLossSettlementPrice)+'→$0';
+   $('gateLabel').textContent=w&&w.closed?'WINDOW CLOSED · PRICE THRESHOLD ONLY':'PRIMARY ASK TRIGGER · '+usd(st.entryTriggerPrice);
+  $('clobSettleTag').textContent='FINAL '+Number(st.earlyResolutionSecondsBeforeClose||3)+'s · MID >'+usd(st.earlyResolutionPrice||0.95)+' SETTLES WINNER';
   setPairQuote('UP',px.up,w,pending);setPairQuote('DOWN',px.down,w,pending);
-   statusStyle($('entryPill'),w?String(w.status||'starting').replace(/_/g,' '):'Waiting for market',pending.length?'good':w&&w.primaryAttempted?'warn':'');
-   $('orderSummary').textContent=w&&w.primarySide
+   const currentWindowOpen=pending.some(function(p){return w&&p.openTs===w.openTs});
+   const heldByPrevious=w&&w.status==='awaiting_previous_primary_settlement';
+   const unresolvedAtClose=w&&w.status==='awaiting_297s_price_threshold';
+   statusStyle($('entryPill'),w?String(w.status||'starting').replace(/_/g,' '):'Waiting for market',currentWindowOpen?'good':heldByPrevious||unresolvedAtClose||w&&w.primaryAttempted?'warn':'');
+  $('orderSummary').textContent=heldByPrevious
+    ?'Entry held: the previous window primary is unsettled; waiting for its final-three-second price result.'
+    :w&&w.primarySide
      ?w.primarySide+' primary · '+usd(w.primaryStakeUsd)+' stake.'
      :'First UP/DOWN ask at or above '+usd(st.entryTriggerPrice)+' buys '+usd(st.currentStakeUsd)+'.';
-   $('fillSummary').textContent=w&&w.hedgeEntry
+  $('fillSummary').textContent=heldByPrevious
+    ?'This window has no position yet. The previous window still has an open primary position.'
+    :w&&w.hedgeEntry
      ?w.hedgeEntry.side+' stop-loss hedge fired · '+usd(w.hedgeEntry.stakeUsd)+'.'
      :w&&w.primarySide
        ?'Watch the opposite ask for '+usd(st.stopLossHedgeTriggerPrice)+'; hedge stake is '+usd(st.currentHedgeStakeUsd)+'.'
        :'No opposite buy unless its ask reaches '+usd(st.stopLossHedgeTriggerPrice)+'.';
-   $('settlementSummary').textContent=w&&w.clobConfirmedOutcome
-     ?'Paired CLOB prices confirmed '+w.clobConfirmedOutcome+' before close.'
-     :w&&w.clobCloseProvisionalOutcome
-       ?'At close, used the higher CLOB midpoint provisionally: '+w.clobCloseProvisionalOutcome+'.'
-       :'Before close, settle only when one side mid ≥'+usd(st.clobWinSettlementPrice)+' and opposite bid ≤'+usd(st.clobLossSettlementPrice)+'. Otherwise use the higher midpoint at close; missing or tied quotes wait for official resolution.';
+  $('settlementSummary').textContent=w&&w.clobConfirmedOutcome
+    ?w.clobOutcomeSource==='clob_297_price'
+      ?'In the final '+Number(st.earlyResolutionSecondsBeforeClose||3)+' seconds, '+w.clobConfirmedOutcome+' midpoint exceeded '+usd(st.earlyResolutionPrice||0.95)+': '+w.clobConfirmedOutcome+' wins and the opposite side loses.'
+      :'Paired CLOB prices confirmed '+w.clobConfirmedOutcome+' before close.'
+    :'In the final '+Number(st.earlyResolutionSecondsBeforeClose||3)+' seconds, either fresh midpoint >'+usd(st.earlyResolutionPrice||0.95)+' sets the winner and loser. No official-result fallback.';
    $('currentShares').textContent=usd(st.currentStakeUsd||st.baseStakeUsd);
    $('ladderSummary').textContent='Base '+usd(st.baseStakeUsd)+' · double after primary loss · reset after primary win';
    $('entryPriceTag').textContent='ENTRY · '+usd(st.entryTriggerPrice);

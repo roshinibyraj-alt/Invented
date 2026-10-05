@@ -2,7 +2,7 @@
 
 const cfg = require('./config');
 const {
-  getActiveWindow, currentWindowOpenTs, slugForTs, WINDOW_SECONDS, fetchResolution,
+  getActiveWindow, currentWindowOpenTs, slugForTs, WINDOW_SECONDS,
 } = require('./polymarket-market');
 const startMarketFeed = require('./clob-feed');
 const { estimateTakerFee } = require('./strategy');
@@ -20,8 +20,6 @@ class Bot {
     this.pending = [];
     this.trades = [];
     this.outcomes = new Map();
-    this._resolveTried = new Map();
-    this._clobTried = new Map();
     this._warned = new Set();
     this.stats = {
       wins: 0, losses: 0, primaryEntries: 0, stopLossHedges: 0,
@@ -220,8 +218,13 @@ class Bot {
       }
     }
 
-    const clobWinner = clobPairWinner(this.prices);
-    if (clobWinner) this._confirmClobOutcome(w, clobWinner);
+    const earlyPriceWinner = clob297PriceWinner(this.prices, w, now);
+    if (earlyPriceWinner) {
+      this._confirmClobOutcome(w, earlyPriceWinner, 'clob_297_price');
+    } else {
+      const clobWinner = clobPairWinner(this.prices);
+      if (clobWinner) this._confirmClobOutcome(w, clobWinner);
+    }
     const triggerTask = this._evaluateEntryTriggers(w, side).catch((error) => {
       this._push({ event: 'ENTRY_TRIGGER_ERROR', slug, side, note: error.message });
     });
@@ -233,18 +236,30 @@ class Bot {
     return triggerTask;
   }
 
-  _confirmClobOutcome(w, winner) {
-    if (!w || w.clobConfirmedOutcome || w.clobCloseProvisionalOutcome) return false;
+  _confirmClobOutcome(w, winner, source = 'clob_pair') {
+    if (!w || w.clobConfirmedOutcome) return false;
     w.clobConfirmedOutcome = winner;
+    w.clobOutcomeSource = source;
     w.clobConfirmedAt = Date.now();
     w.status = 'clob_confirmed';
-    this._recordOutcome(w.openTs, w.slug, winner, 'clob_pair');
+    this._recordOutcome(w.openTs, w.slug, winner, source);
+    const loser = winner === 'UP' ? 'DOWN' : 'UP';
+    const earlyPriceResult = source === 'clob_297_price';
     this._push({
-      event: 'CLOB_PAIR_CONFIRMED', slug: w.slug, side: winner,
-      note: 'UP and DOWN CLOB prices jointly confirmed ' + winner
-        + '; settling positions and updating the primary stake now.',
+      event: earlyPriceResult ? 'CLOB_297_PRICE_CONFIRMED' : 'CLOB_PAIR_CONFIRMED',
+      slug: w.slug, side: winner, loser,
+      note: earlyPriceResult
+        ? 'During the final ' + cfg.CLOB_EARLY_RESOLUTION_SECONDS_BEFORE_CLOSE
+          + ' seconds, the ' + winner + ' midpoint exceeded $'
+          + cfg.CLOB_EARLY_RESOLUTION_PRICE_USD.toFixed(2) + '; recording '
+          + winner + ' as winner and ' + loser + ' as loser.'
+        : 'UP and DOWN CLOB prices jointly confirmed ' + winner
+          + '; settling positions and updating the primary stake now.',
     });
-    this._settlePositionsForOpenTs(w.openTs, w.slug, winner, 'CLOB_PAIR_CONFIRMATION');
+    this._settlePositionsForOpenTs(
+      w.openTs, w.slug, winner,
+      earlyPriceResult ? 'CLOB_297_PRICE_THRESHOLD' : 'CLOB_PAIR_CONFIRMATION',
+    );
     w.status = 'clob_confirmed';
     return true;
   }
@@ -259,13 +274,11 @@ class Bot {
       this._removeFromWindow(position);
       this._finalizePosition(position, winner === position.side ? 'WIN' : 'LOSS', reason, winner);
     }
-    this._resolveTried.delete(openTs);
-    this._clobTried.delete(openTs);
   }
 
   async _evaluateEntryTriggers(w, updatedSide) {
     if (this.strategyBlocked || !w || this.w !== w || !w.window || w.closed
-      || w.clobConfirmedOutcome || w.clobCloseProvisionalOutcome
+      || w.clobConfirmedOutcome
       || Date.now() >= windowCloseMs(w)) return false;
     if (w.entryTriggerBusy) {
       this._latchPendingHedgeTrigger(w, updatedSide);
@@ -309,16 +322,26 @@ class Bot {
     }
 
     if (w.primaryAttempted || !updatedSide) return false;
-    const previousPrimaryOpen = this.pending.some((position) =>
-      position.role === 'PRIMARY' && !position.settled && position.openTs < w.openTs);
-    if (previousPrimaryOpen) {
-      w.status = 'awaiting_previous_primary_settlement';
-      return false;
-    }
     const primaryQuote = this.prices && this.prices.slug === w.slug
       ? this.prices[updatedSide.toLowerCase()] : null;
     const primaryAsk = primaryQuote == null ? NaN : Number(primaryQuote.ask);
     if (!Number.isFinite(primaryAsk) || primaryAsk < cfg.ENTRY_TRIGGER_PRICE_USD) return false;
+
+    const previousPrimaryOpen = this.pending.find((position) =>
+      position.role === 'PRIMARY' && !position.settled && position.openTs < w.openTs);
+    if (previousPrimaryOpen) {
+      if (w.status !== 'awaiting_previous_primary_settlement') {
+        this._push({
+          event: 'ENTRY_HELD_PREVIOUS_PRIMARY', slug: w.slug, side: updatedSide,
+          previousSlug: previousPrimaryOpen.slug, previousSide: previousPrimaryOpen.side,
+          note: updatedSide + ' ask reached $' + cfg.ENTRY_TRIGGER_PRICE_USD.toFixed(2)
+            + ', but the primary from ' + previousPrimaryOpen.slug + ' is still open. '
+            + 'This entry is held until the previous window is resolved by the final-3-second price rule.',
+        });
+      }
+      w.status = 'awaiting_previous_primary_settlement';
+      return false;
+    }
 
     w.primaryAttempted = true;
     w.primarySide = updatedSide;
@@ -458,72 +481,29 @@ class Bot {
   async _closeWindow(w) {
     if (!w || w.closed || w.closing) return;
     w.closing = true;
-    if (!w.clobConfirmedOutcome && !w.clobCloseProvisionalOutcome
-      && this._activePositions(w).length) {
-      await this._resolveWindowAtClose(w);
-    }
     const positions = this._activePositions(w);
     if (positions.length) {
       for (const position of positions) {
-        position.status = 'awaiting_resolution';
+        position.status = 'awaiting_297s_price_threshold';
         this._push({
-          event: 'EXPIRY_HOLD', slug: w.slug, side: position.side,
+          event: 'WINDOW_HOLD_NO_297_PRICE_TRIGGER', slug: w.slug, side: position.side,
           shares: round(position.openShares, 4),
-          note: 'Window closed without usable paired CLOB prices; remaining shares wait for another paired CLOB check or official resolution.',
+          note: 'No fresh UP or DOWN midpoint exceeded $'
+            + cfg.CLOB_EARLY_RESOLUTION_PRICE_USD.toFixed(2) + ' during the final '
+            + cfg.CLOB_EARLY_RESOLUTION_SECONDS_BEFORE_CLOSE
+            + ' seconds. Position remains unsettled; no official-result fallback is used.',
         });
       }
     }
     w.closed = true;
     w.closing = false;
     w.status = w.clobConfirmedOutcome ? 'clob_confirmed'
-      : w.clobCloseProvisionalOutcome ? 'clob_close_provisional'
-        : positions.length ? 'awaiting_resolution'
+      : positions.length ? 'awaiting_297s_price_threshold'
           : w.primaryAttempted ? 'window_closed' : 'no_entry';
     this._push({
       event: 'WINDOW_CLOSED', slug: w.slug,
       note: 'Window ended; no new trigger entries will be placed.',
     });
-  }
-
-  async _resolveWindowAtClose(w) {
-    let pairedQuotes = this.prices && this.prices.slug === w.slug
-      ? { up: this.prices.up, down: this.prices.down } : null;
-    if (!pairedQuotes || !isFreshQuotePair(pairedQuotes)) {
-      try {
-        const [upBook, downBook] = await Promise.all([
-          this.trader.getOrderBook(w.window.tokenUp),
-          this.trader.getOrderBook(w.window.tokenDown),
-        ]);
-        pairedQuotes = { up: quote(upBook), down: quote(downBook) };
-      } catch (error) {
-        this._warnOnce('close-clob-' + w.slug, {
-          event: 'ERROR', slug: w.slug,
-          note: 'Final paired CLOB read failed; waiting for official resolution: ' + error.message,
-        });
-        return false;
-      }
-    }
-
-    if (w.clobConfirmedOutcome || w.clobCloseProvisionalOutcome) return true;
-    const confirmedWinner = clobPairWinner(pairedQuotes);
-    if (confirmedWinner) return this._confirmClobOutcome(w, confirmedWinner);
-
-    const provisionalWinner = clobPriceLeader(pairedQuotes);
-    if (!provisionalWinner) return false;
-    w.clobCloseProvisionalOutcome = provisionalWinner;
-    w.clobClosePrices = {
-      upMid: validPrice(pairedQuotes.up.mid),
-      downMid: validPrice(pairedQuotes.down.mid),
-    };
-    this._recordOutcome(w.openTs, w.slug, provisionalWinner, 'clob_close_provisional');
-    this._push({
-      event: 'CLOB_CLOSE_PROVISIONAL', slug: w.slug, side: provisionalWinner,
-      upMid: w.clobClosePrices.upMid, downMid: w.clobClosePrices.downMid,
-      note: 'Paired thresholds were inconclusive at close; the higher CLOB midpoint is being used provisionally to advance the primary stake ladder.',
-    });
-    this._settlePositionsForOpenTs(w.openTs, w.slug, provisionalWinner, 'CLOB_CLOSE_PROVISIONAL');
-    w.status = 'clob_close_provisional';
-    return true;
   }
 
   _activePositions(w) {
@@ -546,13 +526,17 @@ class Bot {
       checkedWindows.add(openTs);
       const closeTime = Number(position.closeTs) * 1000;
       const activeWindow = this.w && this.w.openTs === openTs && !this.w.closed;
-      if (activeWindow && this.prices && this.prices.slug === position.slug
-        && now - this.prices.ts <= cfg.PRICE_STALE_MS) {
+      if (activeWindow && this.prices && this.prices.slug === position.slug) {
         const windowPositions = this.pending.filter((item) => item.openTs === openTs);
         for (const pendingPosition of windowPositions) {
           const currentQuote = pendingPosition.side === 'UP' ? this.prices.up : this.prices.down;
           const mark = currentQuote && (currentQuote.bid == null ? currentQuote.mid : currentQuote.bid);
           if (mark != null && Number.isFinite(Number(mark))) pendingPosition.lastClobMark = Number(mark);
+        }
+        const earlyPriceWinner = clob297PriceWinner(this.prices, this.w, now);
+        if (earlyPriceWinner) {
+          this._confirmClobOutcome(this.w, earlyPriceWinner, 'clob_297_price');
+          continue;
         }
         const clobWinner = clobPairWinner(this.prices);
         if (clobWinner) {
@@ -567,56 +551,10 @@ class Bot {
         await this._closeWindow(this.w);
       }
 
-      let winner = this.outcomes.get(openTs)?.winner || null;
-      const lastClobCheck = this._clobTried.get(openTs) || 0;
-      if (!winner && now - lastClobCheck >= cfg.RESOLUTION_RETRY_MS) {
-        this._clobTried.set(openTs, now);
-        try {
-          const [upBook, downBook] = await Promise.all([
-            this.trader.getOrderBook(position.tokenUp),
-            this.trader.getOrderBook(position.tokenDown),
-          ]);
-          const pairedQuotes = { up: quote(upBook), down: quote(downBook) };
-          for (const pendingPosition of this.pending.filter((item) => item.openTs === openTs)) {
-            const heldQuote = pendingPosition.side === 'UP' ? pairedQuotes.up : pairedQuotes.down;
-            const mark = heldQuote.bid == null ? heldQuote.mid : heldQuote.bid;
-            if (mark != null && Number.isFinite(Number(mark))) pendingPosition.lastClobMark = Number(mark);
-          }
-          winner = clobPairWinner(pairedQuotes);
-          if (winner) {
-            this._recordOutcome(openTs, position.slug, winner, 'clob_pair');
-            this._push({
-              event: 'CLOB_PAIR_CONFIRMED', slug: position.slug, side: winner,
-              note: 'UP and DOWN CLOB books jointly confirmed ' + winner
-                + '; settling remaining positions from the paired books.',
-            });
-            this._settlePositionsForOpenTs(openTs, position.slug, winner, 'CLOB_PAIR_CONFIRMATION');
-            continue;
-          }
-          this._recordEquity();
-        } catch (error) {
-          this._warnOnce('clob-settlement-' + position.slug, {
-            event: 'ERROR', slug: position.slug,
-            note: 'Paired CLOB resolution check failed; waiting for another quote or official result: ' + error.message,
-          });
-        }
+      const winner = this.outcomes.get(openTs)?.winner || null;
+      if (winner === 'UP' || winner === 'DOWN') {
+        this._settlePositionsForOpenTs(openTs, position.slug, winner, 'CLOB_PRICE_RULE');
       }
-
-      winner = winner || this.outcomes.get(openTs)?.winner || null;
-      const lastTried = this._resolveTried.get(openTs) || 0;
-      if (!winner && now - lastTried >= cfg.RESOLUTION_RETRY_MS) {
-        this._resolveTried.set(openTs, now);
-        try { winner = await fetchResolution(position.slug); }
-        catch (error) {
-          this._warnOnce('resolution-' + openTs, {
-            event: 'ERROR', slug: position.slug,
-            note: 'Official result lookup failed: ' + error.message,
-          });
-        }
-        if (winner) this._recordOutcome(openTs, position.slug, winner, 'official');
-      }
-      if (winner !== 'UP' && winner !== 'DOWN') continue;
-      this._settlePositionsForOpenTs(openTs, position.slug, winner, 'RESOLUTION');
     }
   }
 
@@ -630,12 +568,16 @@ class Bot {
         : this.w.primaryAttempted ? 'position_settled' : 'watching_entry_trigger';
   }
 
-  _recordOutcome(openTs, slug, winner, source = 'clob-or-official') {
+  _recordOutcome(openTs, slug, winner, source = 'clob_pair') {
     if (this.outcomes.has(openTs)) return;
-    this.outcomes.set(openTs, { winner, source, price: 1, loser: 0 });
+    const loser = winner === 'UP' ? 'DOWN' : 'UP';
+    this.outcomes.set(openTs, { winner, loser, source, price: 1, loserPrice: 0 });
     this.counts[winner] = (this.counts[winner] || 0) + 1;
     if (this.outcomes.size > 60) this.outcomes.delete(this.outcomes.keys().next().value);
-    this._push({ event: 'OUTCOME', slug, side: winner, note: 'Window outcome recorded as ' + winner + '.' });
+    this._push({
+      event: 'OUTCOME', slug, side: winner, loser,
+      note: 'Window outcome recorded: ' + winner + ' wins and ' + loser + ' loses.',
+    });
   }
 
   _finalizePosition(position, outcome, reason, winner = null) {
@@ -746,8 +688,7 @@ class Bot {
         entrySide: w.primarySide,
         primarySide: w.primarySide,
         clobConfirmedOutcome: w.clobConfirmedOutcome || null,
-        clobCloseProvisionalOutcome: w.clobCloseProvisionalOutcome || null,
-        clobClosePrices: w.clobClosePrices || null,
+        clobOutcomeSource: w.clobOutcomeSource || null,
         primaryStakeUsd: w.primaryStakeUsd || null,
         hedgeStakeUsd: w.hedgePosition ? w.hedgePosition.stakeUsd : null,
         primaryEntry: w.primaryPosition ? {
@@ -781,6 +722,8 @@ class Bot {
         demoCapital: cfg.DEMO_CAPITAL,
         entryTriggerPrice: cfg.ENTRY_TRIGGER_PRICE_USD,
         stopLossHedgeTriggerPrice: cfg.STOP_LOSS_HEDGE_TRIGGER_PRICE_USD,
+        earlyResolutionPrice: cfg.CLOB_EARLY_RESOLUTION_PRICE_USD,
+        earlyResolutionSecondsBeforeClose: cfg.CLOB_EARLY_RESOLUTION_SECONDS_BEFORE_CLOSE,
         clobWinSettlementPrice: cfg.CLOB_WIN_SETTLEMENT_PRICE,
         clobLossSettlementPrice: cfg.CLOB_LOSS_SETTLEMENT_PRICE,
       },
@@ -795,6 +738,8 @@ class Bot {
         currentStakeUsd: this.currentStakeUsd,
         entryTriggerPrice: cfg.ENTRY_TRIGGER_PRICE_USD,
         stopLossHedgeTriggerPrice: cfg.STOP_LOSS_HEDGE_TRIGGER_PRICE_USD,
+        earlyResolutionPrice: cfg.CLOB_EARLY_RESOLUTION_PRICE_USD,
+        earlyResolutionSecondsBeforeClose: cfg.CLOB_EARLY_RESOLUTION_SECONDS_BEFORE_CLOSE,
         windowSec: WINDOW_SECONDS,
       },
       log: this.log.slice(-100).reverse(),
@@ -810,7 +755,7 @@ function makeWindowState(slug, openTs) {
     primaryStakeUsd: null, primaryAttempted: false, hedgeAttempted: false,
     hedgeTriggerPending: false, hedgeTriggerPendingPrice: null,
     entryTriggerBusy: false, clobConfirmedOutcome: null, clobConfirmedAt: null,
-    clobCloseProvisionalOutcome: null, clobClosePrices: null,
+    clobOutcomeSource: null,
   };
 }
 
@@ -861,22 +806,29 @@ function clobPairWinner(prices) {
   return upConfirmed ? 'UP' : 'DOWN';
 }
 
-function clobPriceLeader(prices) {
-  if (!isFreshQuotePair(prices)) return null;
-  const upMid = validPrice(prices.up.mid);
-  const downMid = validPrice(prices.down.mid);
-  if (upMid == null || downMid == null || Math.abs(upMid - downMid) <= EPSILON) return null;
-  return upMid > downMid ? 'UP' : 'DOWN';
+function clob297PriceWinner(prices, w, now = Date.now()) {
+  if (!w || !w.window) return null;
+  const closeMs = windowCloseMs(w);
+  const decisionMs = closeMs - cfg.CLOB_EARLY_RESOLUTION_SECONDS_BEFORE_CLOSE * 1000;
+  if (now < decisionMs || now >= closeMs) return null;
+
+  const candidates = ['UP', 'DOWN'].filter((side) => {
+    const sideQuote = prices && prices[side.toLowerCase()];
+    const mid = validPrice(sideQuote && sideQuote.mid);
+    return mid != null && mid > cfg.CLOB_EARLY_RESOLUTION_PRICE_USD
+      && isFreshQuote(sideQuote, now);
+  });
+  return candidates.length === 1 ? candidates[0] : null;
 }
 
-function isFreshQuotePair(prices) {
+function isFreshQuote(sideQuote, now = Date.now()) {
+  const ts = Number(sideQuote && sideQuote.ts);
+  return Number.isFinite(ts) && now - ts >= 0 && now - ts <= cfg.PRICE_STALE_MS;
+}
+
+function isFreshQuotePair(prices, now = Date.now()) {
   if (!prices || !prices.up || !prices.down) return false;
-  const upTs = Number(prices.up.ts);
-  const downTs = Number(prices.down.ts);
-  const now = Date.now();
-  return Number.isFinite(upTs) && Number.isFinite(downTs)
-    && now - upTs >= 0 && now - downTs >= 0
-    && now - upTs <= cfg.PRICE_STALE_MS && now - downTs <= cfg.PRICE_STALE_MS;
+  return isFreshQuote(prices.up, now) && isFreshQuote(prices.down, now);
 }
 
 function validPrice(value) {
