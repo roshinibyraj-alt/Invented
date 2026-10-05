@@ -112,13 +112,11 @@ async function enterPrimary(fx, side = 'UP') {
 }
 
 async function confirmClobOutcome(fx, winner) {
-  if (winner === 'UP') {
-    await quote(fx, 'UP', 0.99, 1.00);
-    await quote(fx, 'DOWN', 0.01, 0.02);
-  } else {
-    await quote(fx, 'DOWN', 0.99, 1.00);
-    await quote(fx, 'UP', 0.01, 0.02);
-  }
+  const realNow = Date.now;
+  try {
+    Date.now = () => fx.w.openTs * 1000 + 120000;
+    await quote(fx, winner, 0.96, 0.97);
+  } finally { Date.now = realNow; }
 }
 
 test('configuration uses $100 base stake, 45% hedge, and $0.69/$0.70 triggers', () => {
@@ -127,8 +125,7 @@ test('configuration uses $100 base stake, 45% hedge, and $0.69/$0.70 triggers', 
   assert.equal(cfg.HEDGE_STAKE_RATIO, 0.45);
   assert.equal(cfg.ENTRY_TRIGGER_PRICE_USD, 0.69);
   assert.equal(cfg.STOP_LOSS_HEDGE_TRIGGER_PRICE_USD, 0.70);
-  assert.equal(cfg.CLOB_EARLY_RESOLUTION_PRICE_USD, 0.95);
-  assert.equal(cfg.CLOB_EARLY_RESOLUTION_SECONDS_BEFORE_CLOSE, 3);
+  assert.equal(cfg.CLOB_PRICE_SETTLEMENT_THRESHOLD_USD, 0.97);
   assert.equal(cfg.MAX_BUY_SLIPPAGE_PERCENT, 100000);
   assert.equal(cfg.MAX_BINARY_PRICE_USD, 1);
 });
@@ -273,55 +270,50 @@ test('triggered demo entry fills from the fresh cached ask when REST book is una
   } finally { global.fetch = originalFetch; }
 });
 
-test('CLOB outcome requires the winner and opposite side to confirm together', async () => {
-  const fx = fixture();
-  const primary = await enterPrimary(fx);
-
-  await quote(fx, 'UP', 0.99, 1.00);
-  await quote(fx, 'DOWN', 0.02, 0.03);
-  assert.equal(primary.settled, false);
-  assert.equal(fx.bot.currentStakeUsd, 100);
-  assert.equal(fx.w.closed, false);
-
-  await quote(fx, 'DOWN', 0.01, 0.02);
-  assert.equal(primary.settled, true);
-  assert.equal(fx.w.clobConfirmedOutcome, 'UP');
-  assert.equal(fx.bot.outcomes.get(fx.w.openTs).source, 'clob_pair');
-  assert.equal(fx.bot.currentStakeUsd, 100);
-});
-
-test('a single fresh midpoint above $0.95 in the final 3 seconds settles winner and loser', async () => {
+test('a fresh best-ask tick at $0.97 settles winner and loser at any time in the window', async () => {
   for (const winner of ['UP', 'DOWN']) {
     const fx = fixture();
     const primary = await enterPrimary(fx, 'UP');
-    await quote(fx, 'DOWN', 0.69, 0.70);
-    const hedge = fx.w.hedgePosition;
     const openMs = fx.w.openTs * 1000;
     const realNow = Date.now;
 
     try {
-      Date.now = () => openMs + 296000;
-      await quote(fx, winner, 0.95, 0.97);
-      assert.equal(primary.settled, false);
-      assert.equal(hedge.settled, false);
-
-      Date.now = () => openMs + 297000;
-      await quote(fx, winner, 0.95, 0.97);
+      Date.now = () => openMs + 120000;
+      await quote(fx, winner, 0.96, 0.97);
 
       const outcome = fx.bot.outcomes.get(fx.w.openTs);
       assert.equal(outcome.winner, winner);
       assert.equal(outcome.loser, winner === 'UP' ? 'DOWN' : 'UP');
-      assert.equal(outcome.source, 'clob_297_price');
+      assert.equal(outcome.source, 'clob_price_threshold');
       assert.equal(primary.settled, true);
-      assert.equal(hedge.settled, true);
       assert.equal(fx.w.clobConfirmedOutcome, winner);
       assert.equal(fx.bot.currentStakeUsd, winner === 'UP' ? 100 : 200);
-      assert.ok(fx.bot.log.some((entry) => entry.event === 'CLOB_297_PRICE_CONFIRMED'));
+      assert.ok(fx.bot.log.some((entry) => entry.event === 'CLOB_PRICE_THRESHOLD_CONFIRMED'));
     } finally { Date.now = realNow; }
   }
 });
 
-test('closed position remains unsettled when no final-3-second price trigger occurs; no fallback is used', async () => {
+test('a bid update cannot refresh a stale best ask above threshold', async () => {
+  const fx = fixture();
+  const primary = await enterPrimary(fx);
+  const openMs = fx.w.openTs * 1000;
+  const realNow = Date.now;
+
+  try {
+    Date.now = () => openMs + 120000;
+    const staleQuote = {
+      bid: 0.96, ask: 0.97, mid: 0.965,
+      ts: openMs + 110000, bidTs: openMs + 110000, askTs: openMs + 100000,
+    };
+    fx.bot._quotesByToken.set('up-token', staleQuote);
+    await fx.bot._onQuote(fx.w.slug, 'up-token', { bid: 0.96 });
+
+    assert.equal(primary.settled, false);
+    assert.equal(fx.bot.outcomes.has(fx.w.openTs), false);
+  } finally { Date.now = realNow; }
+});
+
+test('closed position remains unsettled when no side reaches $0.97; no fallback is used', async () => {
   const fx = fixture();
   const primary = await enterPrimary(fx);
   await quote(fx, 'UP', 0.49, 0.51);
@@ -331,12 +323,12 @@ test('closed position remains unsettled when no final-3-second price trigger occ
   await fx.bot._settleClosedPositions(Date.now() + 300000);
 
   assert.equal(fx.w.closed, true);
-  assert.equal(fx.w.status, 'awaiting_297s_price_threshold');
+  assert.equal(fx.w.status, 'awaiting_price_threshold');
   assert.equal(fx.bot.outcomes.has(fx.w.openTs), false);
   assert.equal(primary.settled, false);
   assert.ok(fx.bot.pending.includes(primary));
   assert.equal(fx.bot.currentStakeUsd, 100);
-  assert.ok(fx.bot.log.some((entry) => entry.event === 'WINDOW_HOLD_NO_297_PRICE_TRIGGER'));
+  assert.ok(fx.bot.log.some((entry) => entry.event === 'WINDOW_HOLD_NO_PRICE_THRESHOLD'));
 });
 
 test('stake progression is $100 → $200 → $400, then resets to $100 after a primary win', async () => {
@@ -471,6 +463,5 @@ test('snapshot exposes trigger levels, current primary/hedge stakes, and demo ca
   assert.equal(snapshot.strategy.currentHedgeStakeUsd, 90);
   assert.equal(snapshot.strategy.entryTriggerPrice, 0.69);
   assert.equal(snapshot.strategy.stopLossHedgeTriggerPrice, 0.70);
-  assert.equal(snapshot.strategy.earlyResolutionPrice, 0.95);
-  assert.equal(snapshot.strategy.earlyResolutionSecondsBeforeClose, 3);
+  assert.equal(snapshot.strategy.priceThresholdUsd, 0.97);
 });
