@@ -33,12 +33,13 @@ table{border-collapse:collapse;width:100%}th{font-size:9px;color:var(--muted);te
     <div class="eyebrow">Confirmed rules</div><h2>Strategy settings</h2>
     <div class="rule-grid" style="margin-top:11px">
       <div class="rule"><b>$500 per side</b><p>Two independent $250 tranches for UP and two for DOWN.</p></div>
-      <div class="rule"><b>Ask triggers</b><p>For UP and DOWN, tranche A enters at best ask $0.60+ and tranche B at $0.70+.</p></div>
+      <div class="rule"><b>Entry delay · 01:30</b><p>No new entries during the first 90 seconds of each window. Existing position exits remain active.</p></div>
+      <div class="rule"><b>Ask triggers</b><p>For UP and DOWN, tranche A enters at best ask $0.80+ and tranche B at $0.90+.</p></div>
       <div class="rule"><b>TP bid $0.99</b><p>When the CLOB best bid reaches $0.99, demo accounting credits $1.00 per filled share. The displayed CLOB fill average and estimated fee remain separate.</p></div>
       <div class="rule"><b>Hard stop $0.50</b><p>A best bid at or below $0.50 triggers a latched sale. A stopped tranche can rearm once when its ask recovers to its original entry trigger.</p></div>
       <div class="rule"><b>One rearm per tranche</b><p>Each A/B tranche may rearm once per five-minute window after either TP or stop. After TP, its re-entry ask trails the high by $0.10 and buys on a pullback using net proceeds.</p></div>
     </div>
-    <div class="tags"><span class="tag" id="entryCap">Entry cap —</span><span class="tag" id="forcedExit">Forced exit —</span><span class="tag">DEMO ONLY · NO LIVE ORDERS</span></div>
+    <div class="tags"><span class="tag" id="entryDelay">ENTRY LOCK · —</span><span class="tag" id="entryCap">Entry cap —</span><span class="tag" id="forcedExit">Forced exit —</span><span class="tag">DEMO ONLY · NO LIVE ORDERS</span></div>
     <div class="notice">The $0.99 TP threshold is fixed for every position. TP orders still require available CLOB bids at or above $0.99; remaining shares go through forced exit and, if still open, official settlement.</div>
   </article>
 </section>
@@ -86,6 +87,9 @@ function render(s){
   $('windowStatus').className='pill'+(w.closed?'':(s.pending||[]).length?' good':'');
   const remaining=Number(w.secondsRemaining)||0;$('timeLeft').textContent=w.closeTs?clock(remaining)+' remaining':'— remaining';
   const elapsed=Math.max(0,300-remaining);$('progress').style.width=Math.min(100,elapsed/300*100)+'%';
+  const openMs=Number(w.openTs)*1000;
+  const entryWait=Number.isFinite(openMs)?Math.max(0,Number(cfg.entryDelaySeconds||0)-(Number(s.now)-openMs)/1000):null;
+  $('entryDelay').textContent=entryWait===null?'ENTRY LOCK · —':entryWait>0?'ENTRY LOCK · '+clock(entryWait):'ENTRY LOCK · COMPLETE';
   $('entryCap').textContent='MAX ENTRY ASK · '+usd(cfg.maxEntryAsk);
   $('forcedExit').textContent='FORCED EXIT · T−'+Number(cfg.forcedExitBufferSeconds||10)+'s';
   const sides=w.sides||{},rows=[];

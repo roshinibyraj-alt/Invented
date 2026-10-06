@@ -128,7 +128,11 @@ class Bot {
       this._lastRestFetchAt = 0;
       this.priceSeries = [];
       this._seriesSlug = slug;
-      this._push({ event: 'WINDOW_STARTED', slug, note: 'New five-minute UP/DOWN window; each side has two independent $250 tranches.' });
+      this._push({
+        event: 'WINDOW_STARTED', slug, entryDelaySeconds: cfg.ENTRY_DELAY_SECONDS,
+        note: 'New five-minute UP/DOWN window; no entries for the first '
+          + cfg.ENTRY_DELAY_SECONDS + ' seconds, then both sides use two independent $250 tranches.',
+      });
     }
 
     await this._pollExpiredResolutions(now);
@@ -337,6 +341,7 @@ class Bot {
 
       const ask = quote.ask;
       if (ask == null || ask <= 0) continue;
+      if (now < (w.openTs + cfg.ENTRY_DELAY_SECONDS) * 1000) continue;
       if (tranche.state === 'waiting_reentry') {
         if (ask > tranche.reentryPeakAsk + EPSILON) {
           tranche.reentryPeakAsk = ask;
@@ -890,6 +895,7 @@ class Bot {
         firstEntryAsk: cfg.FIRST_ENTRY_ASK_USD, secondEntryAsk: cfg.SECOND_ENTRY_ASK_USD,
         takeProfitBid: cfg.TAKE_PROFIT_BID_USD,
         takeProfitCreditPrice: cfg.TAKE_PROFIT_CREDIT_PRICE_USD,
+        entryDelaySeconds: cfg.ENTRY_DELAY_SECONDS,
         reentryPullback: cfg.REENTRY_PULLBACK_USD,
         maxRearmsPerTranche: cfg.MAX_REARMS_PER_TRANCHE,
         hardStopLossBid: cfg.HARD_STOP_LOSS_BID_USD,
@@ -905,6 +911,7 @@ class Bot {
         firstEntryAsk: cfg.FIRST_ENTRY_ASK_USD, secondEntryAsk: cfg.SECOND_ENTRY_ASK_USD,
         takeProfitBid: cfg.TAKE_PROFIT_BID_USD,
         takeProfitCreditPrice: cfg.TAKE_PROFIT_CREDIT_PRICE_USD,
+        entryDelaySeconds: cfg.ENTRY_DELAY_SECONDS,
         reentryPullback: cfg.REENTRY_PULLBACK_USD,
         maxRearmsPerTranche: cfg.MAX_REARMS_PER_TRANCHE,
         hardStopLossBid: cfg.HARD_STOP_LOSS_BID_USD,
