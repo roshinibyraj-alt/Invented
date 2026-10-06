@@ -2,7 +2,7 @@
 
 const cfg = require('./config');
 const {
-  getActiveWindow, currentWindowOpenTs, slugForTs, WINDOW_SECONDS,
+  getActiveWindow, fetchResolvedOutcomeBySlug, currentWindowOpenTs, slugForTs, WINDOW_SECONDS,
 } = require('./polymarket-market');
 const startMarketFeed = require('./clob-feed');
 
@@ -14,6 +14,7 @@ class Bot {
   constructor(trader, opts = {}) {
     this.trader = trader;
     this.logger = opts.logger || null;
+    this.resolveMarketOutcome = opts.resolveMarketOutcome || fetchResolvedOutcomeBySlug;
     this.demoMode = !!(trader && trader.demoMode === true);
     this.strategyBlocked = !this.demoMode;
     this.error = this.strategyBlocked
@@ -37,11 +38,14 @@ class Bot {
     this._running = false;
     this._warned = new Set();
     this._positionId = 0;
+    this._nextResolutionCheckAt = new Map();
+    this._resolutionCheckInFlight = new Set();
+    this._resolutionStateBySlug = new Map();
     this.pending = [];
     this.trades = [];
     this.log = [];
     this.stats = {
-      entries: 0, exits: 0, wins: 0, losses: 0,
+      entries: 0, exits: 0, settlements: 0, wins: 0, losses: 0,
       realizedPnl: 0, estimatedFees: 0,
     };
     this.peak = this.capital;
@@ -126,6 +130,8 @@ class Bot {
       this._seriesSlug = slug;
       this._push({ event: 'WINDOW_STARTED', slug, note: 'New five-minute UP/DOWN window; each side has two independent $250 tranches.' });
     }
+
+    await this._pollExpiredResolutions(now);
 
     const w = this.w;
     if (!w.window && now >= w.nextDiscoveryAt) {
@@ -306,7 +312,24 @@ class Bot {
     for (const tranche of side.tranches) {
       if (tranche.position) {
         const position = tranche.position;
-        if (quote.bid != null && quote.bid + EPSILON >= position.takeProfitPrice) {
+        if (!position.stopLossTriggered && quote.bid != null
+          && quote.bid <= cfg.HARD_STOP_LOSS_BID_USD + EPSILON) {
+          position.stopLossTriggered = true;
+          position.stopLossTriggeredAt = now;
+          position.stopLossTriggerBid = quote.bid;
+          position.status = 'stop_loss_triggered';
+          this._push({
+            event: 'STOP_LOSS_TRIGGERED', slug: w.slug, side: position.side,
+            tranche: position.trancheId, cycle: position.cycle,
+            triggerBid: round(quote.bid, 4), stopBid: cfg.HARD_STOP_LOSS_BID_USD,
+            shares: round(position.openShares, 5),
+            note: 'Best bid reached the $' + cfg.HARD_STOP_LOSS_BID_USD.toFixed(2)
+              + ' hard stop; attempting to sell remaining shares at available bids.',
+          });
+        }
+        if (position.stopLossTriggered) {
+          await this._sellPosition(w, tranche, position, 'HARD_STOP_LOSS', 0, now);
+        } else if (quote.bid != null && quote.bid + EPSILON >= position.takeProfitPrice) {
           await this._sellPosition(w, tranche, position, 'TAKE_PROFIT', position.takeProfitPrice, now);
         }
         continue;
@@ -374,8 +397,10 @@ class Bot {
       entryPrice: averagePrice, shares, openShares: shares,
       remainingEntryCost: cost, takeProfitPrice: averagePrice + cfg.TAKE_PROFIT_OFFSET_USD,
       takeProfitReachable: averagePrice + cfg.TAKE_PROFIT_OFFSET_USD <= 1 + EPSILON,
+      stopLossTriggered: false, stopLossTriggeredAt: null, stopLossTriggerBid: null,
       exitProceeds: 0, exitFees: 0, netExitProceeds: 0, realizedPnl: 0,
       lastMark: this._quoteFor(sideName, w)?.bid ?? averagePrice,
+      resolutionOutcome: null, resolutionPricePerShare: null,
       openedAt: now, closedAt: null, status: 'open',
     };
     tranche.position = position;
@@ -411,7 +436,7 @@ class Bot {
         this._push({
           event: 'EXIT_IGNORED_AFTER_EXPIRY', slug: w.slug, side: position.side,
           tranche: position.trancheId,
-          note: 'The simulated exit response arrived after expiry; the position remains unresolved.',
+          note: 'The simulated exit response arrived after expiry; remaining shares await official market resolution.',
         });
         return false;
       }
@@ -448,7 +473,8 @@ class Bot {
         reason, sharesSold: round(sold, 5), remainingShares: round(position.openShares, 5),
         avgExit: round(averageExit, 4), proceeds: round(grossProceeds, 2),
         fee: round(fee, 4), realizedPnl: round(position.realizedPnl, 2),
-        note: (reason === 'TAKE_PROFIT' ? 'Take-profit sale' : 'Forced window-exit sale')
+        note: (reason === 'TAKE_PROFIT' ? 'Take-profit sale'
+          : reason === 'HARD_STOP_LOSS' ? 'Hard stop-loss sale' : 'Forced window-exit sale')
           + ' simulated at average best bid $' + averageExit.toFixed(4)
           + (position.openShares > EPSILON ? '; remaining shares stay open for another exit attempt.' : '.'),
       });
@@ -469,7 +495,8 @@ class Bot {
         }
         this._finalizeTrade(position, reason);
       } else {
-        position.status = reason === 'TAKE_PROFIT' ? 'tp_partial' : 'forced_exit_partial';
+        position.status = reason === 'TAKE_PROFIT' ? 'tp_partial'
+          : reason === 'HARD_STOP_LOSS' ? 'stop_loss_partial' : 'forced_exit_partial';
       }
       this._recordEquity(now);
       return position.openShares <= EPSILON;
@@ -487,6 +514,8 @@ class Bot {
       shares: round(position.openShares, 5),
       note: reason === 'TAKE_PROFIT'
         ? 'TP was reached, but no executable CLOB bids at or above the TP price were available.'
+        : reason === 'HARD_STOP_LOSS'
+          ? 'The hard stop was triggered, but no executable CLOB bids were available; retrying on the next quote.'
         : 'Forced exit has no executable CLOB bid available yet; retrying before expiry.',
     });
   }
@@ -534,19 +563,120 @@ class Bot {
     }
     w.closed = true;
     w.closedAt = now;
-    w.status = this._positionsForWindow(w).length ? 'unresolved_exit' : 'window_closed';
+    w.status = this._positionsForWindow(w).length ? 'awaiting_resolution' : 'window_closed';
     for (const position of this._positionsForWindow(w)) {
       position.lastKnownMark = position.lastMark;
       position.lastKnownMarkAt = position.lastMarkAt || null;
-      position.status = 'unresolved_exit';
+      position.status = 'pending_resolution';
       const tranche = w.sides[position.side].tranches.find((item) => item.id === position.trancheId);
-      if (tranche) tranche.state = 'unresolved_exit';
+      if (tranche) tranche.state = 'pending_resolution';
     }
     this._push({
       event: 'WINDOW_CLOSED', slug: w.slug,
-      note: event + ': no further entries or re-entries; any unfilled position remains visible as unresolved.',
+      note: event + ': no further entries or re-entries; unsold shares await Gamma confirmation of the final outcome.',
     });
     if (this._marketFeedSlug === w.slug) this._stopMarketFeed();
+  }
+
+  async _pollExpiredResolutions(now = Date.now()) {
+    const slugs = [...new Set(this.pending
+      .filter((position) => position.openShares > EPSILON
+        && now >= (Number(position.closeTs) || position.openTs + WINDOW_SECONDS) * 1000)
+      .map((position) => position.slug))];
+    const checks = slugs.filter((slug) => !this._resolutionCheckInFlight.has(slug)
+      && now >= (this._nextResolutionCheckAt.get(slug) || 0));
+
+    await Promise.all(checks.map(async (slug) => {
+      this._resolutionCheckInFlight.add(slug);
+      this._nextResolutionCheckAt.set(slug, now + cfg.RESOLUTION_POLL_MS);
+      try {
+        const resolution = await this.resolveMarketOutcome(slug);
+        if (!resolution || resolution.resolved !== true) {
+          this._noteResolutionState(
+            slug,
+            'pending',
+            resolution && resolution.reason
+              ? resolution.reason : 'Waiting for Gamma to confirm the final binary outcome.',
+          );
+          return;
+        }
+        if (!this._settleResolvedWindow(slug, resolution, now)) return;
+        this._resolutionStateBySlug.delete(slug);
+        this._nextResolutionCheckAt.delete(slug);
+      } catch (error) {
+        this._noteResolutionState(slug, 'lookup_error', 'Gamma resolution check failed: ' + error.message);
+      } finally {
+        this._resolutionCheckInFlight.delete(slug);
+      }
+    }));
+  }
+
+  _noteResolutionState(slug, state, note) {
+    if (this._resolutionStateBySlug.get(slug) === state) return;
+    this._resolutionStateBySlug.set(slug, state);
+    this._push({
+      event: state === 'lookup_error' ? 'MARKET_RESOLUTION_CHECK_FAILED' : 'MARKET_RESOLUTION_PENDING',
+      slug, note: note || 'Waiting for Gamma to confirm the final binary outcome.',
+    });
+  }
+
+  _settleResolvedWindow(slug, resolution, now) {
+    const positions = this.pending.filter((position) => position.slug === slug
+      && position.openShares > EPSILON);
+    if (!positions.length) return true;
+
+    const payouts = positions.map((position) => ({
+      position,
+      payoutPerShare: Number(resolution.payoutPerShare && resolution.payoutPerShare[position.side]),
+    }));
+    if (payouts.some(({ payoutPerShare }) => payoutPerShare !== 0 && payoutPerShare !== 1)) {
+      this._noteResolutionState(
+        slug, 'invalid_outcome',
+        'Gamma resolution was missing an unambiguous $0/$1 payout for UP and DOWN.',
+      );
+      return false;
+    }
+
+    for (const { position, payoutPerShare } of payouts) {
+      const sharesSettled = position.openShares;
+      const payout = sharesSettled * payoutPerShare;
+      const entryCostAllocated = position.remainingEntryCost;
+      const realizedDelta = payout - entryCostAllocated;
+
+      position.openShares = 0;
+      position.remainingEntryCost = 0;
+      position.exitProceeds += payout;
+      position.netExitProceeds += payout;
+      position.realizedPnl += realizedDelta;
+      position.lastExitPrice = payoutPerShare;
+      position.lastMark = payoutPerShare;
+      position.closedAt = now;
+      position.status = 'settled';
+      position.resolutionOutcome = resolution.winningSide;
+      position.resolutionPricePerShare = payoutPerShare;
+      this.cash += payout;
+      this.stats.realizedPnl += realizedDelta;
+      this.stats.settlements += 1;
+
+      const tranche = this._trancheFor(position);
+      if (tranche && tranche.position === position) {
+        tranche.position = null;
+        tranche.state = 'settled';
+      }
+
+      this._push({
+        event: 'POSITION_SETTLED', slug, side: position.side,
+        tranche: position.trancheId, cycle: position.cycle,
+        outcome: resolution.winningSide, payoutPerShare,
+        sharesSettled: round(sharesSettled, 5), payout: round(payout, 4),
+        realizedPnl: round(position.realizedPnl, 2),
+        note: 'Official Gamma binary resolution booked at $'
+          + payoutPerShare.toFixed(2) + ' per remaining share.',
+      });
+      this._finalizeTrade(position, 'MARKET_RESOLUTION');
+    }
+    this._recordEquity(now);
+    return true;
   }
 
   _finalizeTrade(position, reason) {
@@ -562,6 +692,8 @@ class Bot {
       exitProceeds: round(position.exitProceeds, 4),
       netExitProceeds: round(position.netExitProceeds, 4),
       fees: round(position.entryFee + position.exitFees, 4),
+      resolutionOutcome: position.resolutionOutcome || null,
+      resolutionPricePerShare: position.resolutionPricePerShare ?? null,
       pnl: round(pnl, 2), reason, ts: Date.now(),
     };
     this.trades.push(trade);
@@ -604,7 +736,7 @@ class Bot {
   _accountValuation() {
     const isMarkedCurrent = (position) => this.w && !this.w.closed
       && Date.now() < windowCloseMs(this.w)
-      && position.status !== 'unresolved_exit'
+      && position.status !== 'pending_resolution'
       && position.openTs === this.w.openTs;
     const markedPositions = this.pending.filter(isMarkedCurrent);
     const unresolvedPositions = this.pending.filter((position) => !isMarkedCurrent(position));
@@ -711,6 +843,7 @@ class Bot {
         sideBudgetUsd: cfg.SIDE_BUDGET_USD, trancheBudgetUsd: cfg.TRANCHE_BUDGET_USD,
         firstEntryAsk: cfg.FIRST_ENTRY_ASK_USD, secondEntryAsk: cfg.SECOND_ENTRY_ASK_USD,
         takeProfitOffset: cfg.TAKE_PROFIT_OFFSET_USD, reentryPullback: cfg.REENTRY_PULLBACK_USD,
+        hardStopLossBid: cfg.HARD_STOP_LOSS_BID_USD,
         maxEntryAsk: cfg.MAX_ENTRY_ASK_USD, forcedExitBufferSeconds: cfg.FORCED_EXIT_BUFFER_SECONDS,
       },
       window, prices: this.prices, priceSeries: this.priceSeries,
@@ -722,6 +855,7 @@ class Bot {
         trancheBudgetUsd: cfg.TRANCHE_BUDGET_USD,
         firstEntryAsk: cfg.FIRST_ENTRY_ASK_USD, secondEntryAsk: cfg.SECOND_ENTRY_ASK_USD,
         takeProfitOffset: cfg.TAKE_PROFIT_OFFSET_USD, reentryPullback: cfg.REENTRY_PULLBACK_USD,
+        hardStopLossBid: cfg.HARD_STOP_LOSS_BID_USD,
         maxEntryAsk: cfg.MAX_ENTRY_ASK_USD, forcedExitBufferSeconds: cfg.FORCED_EXIT_BUFFER_SECONDS,
         windowSec: WINDOW_SECONDS,
       },
@@ -733,19 +867,19 @@ class Bot {
     const currentWindow = this.w && !this.w.closed
       && position.openTs === this.w.openTs
       && Date.now() < windowCloseMs(this.w);
-    const unresolved = position.status === 'unresolved_exit' || !currentWindow;
-    const mark = unresolved ? null
+    const awaitingResolution = position.status === 'pending_resolution' || !currentWindow;
+    const mark = awaitingResolution ? null
       : Number.isFinite(Number(position.lastMark)) ? Number(position.lastMark) : position.entryPrice;
     const lastKnownMark = position.lastKnownMark ?? position.lastMark ?? null;
     const costBasis = position.shares > 0
       ? (position.entryNotional + position.entryFee) * (position.openShares / position.shares) : 0;
     return {
       ...position, mark,
-      status: unresolved ? 'unresolved_exit' : position.status,
-      lastMark: unresolved ? null : position.lastMark,
-      lastKnownMark: unresolved ? lastKnownMark : null,
-      lastKnownMarkAt: unresolved ? (position.lastKnownMarkAt ?? position.lastMarkAt ?? null) : null,
-      unrealized: unresolved ? null : position.openShares * mark - costBasis,
+      status: awaitingResolution ? 'pending_resolution' : position.status,
+      lastMark: awaitingResolution ? null : position.lastMark,
+      lastKnownMark: awaitingResolution ? lastKnownMark : null,
+      lastKnownMarkAt: awaitingResolution ? (position.lastKnownMarkAt ?? position.lastMarkAt ?? null) : null,
+      unrealized: awaitingResolution ? null : position.openShares * mark - costBasis,
     };
   }
 }

@@ -70,9 +70,9 @@ class FakeDemoTrader {
   }
 }
 
-function fixture() {
+function fixture(botOptions = {}) {
   const trader = new FakeDemoTrader();
-  const bot = new Bot(trader);
+  const bot = new Bot(trader, botOptions);
   const slug = slugForTs(OPEN_TS);
   const w = makeWindowState(slug, OPEN_TS);
   w.window = {
@@ -110,6 +110,7 @@ test('strategy constants match the confirmed independent-side rules', () => {
   assert.equal(cfg.SECOND_ENTRY_ASK_USD, 0.60);
   assert.equal(cfg.TAKE_PROFIT_OFFSET_USD, 0.20);
   assert.equal(cfg.REENTRY_PULLBACK_USD, 0.10);
+  assert.equal(cfg.HARD_STOP_LOSS_BID_USD, 0.30);
   assert.equal(cfg.MAX_ENTRY_ASK_USD, 0.90);
   assert.equal(cfg.FORCED_EXIT_BUFFER_SECONDS, 10);
 });
@@ -151,6 +152,63 @@ test('UP and DOWN can each enter independently at $0.60 in the same window', asy
   ]);
   assert.ok(fx.w.sides.UP.tranches.every((tranche) => tranche.state === 'in_position'));
   assert.ok(fx.w.sides.DOWN.tranches.every((tranche) => tranche.state === 'in_position'));
+});
+
+for (const sideName of ['UP', 'DOWN']) {
+  test(`${sideName} hard stop triggers at a $0.30 best bid and sells at the available bid`, async () => {
+    const fx = fixture();
+    await quote(fx, sideName, 0.59, 0.60);
+    const tranches = fx.w.sides[sideName].tranches;
+    const positions = tranches.map((tranche) => tranche.position);
+    assert.ok(positions.every(Boolean));
+
+    await quote(fx, sideName, 0.31, 0.32);
+    assert.ok(positions.every((position) => position.status === 'open'));
+    await quote(fx, sideName, 0.25, 0.26);
+
+    assert.ok(positions.every((position) => position.status === 'closed'));
+    assert.ok(positions.every((position) => position.stopLossTriggered));
+    assert.ok(tranches.every((tranche) => tranche.state === 'done_for_window'));
+    const stopSells = fx.trader.calls.filter((call) => call.side === 'SELL');
+    assert.equal(stopSells.length, 2);
+    assert.ok(stopSells.every((call) => call.options.priceLimit === 0));
+    const stopEvents = fx.bot.log.filter((entry) => entry.event === 'STOP_LOSS_TRIGGERED');
+    assert.equal(stopEvents.length, 2);
+    assert.ok(stopEvents.every((entry) => entry.side === sideName));
+    assert.ok(positions.every((position) => position.lastExitPrice === 0.25));
+  });
+}
+
+test('hard stop stays latched and retries if no bid fills at the trigger', async () => {
+  const fx = fixture();
+  await quote(fx, 'UP', 0.59, 0.60);
+  const [firstTranche, secondTranche] = fx.w.sides.UP.tranches;
+  const firstPosition = firstTranche.position;
+  const originalSell = fx.trader.placeFakMarketOrder.bind(fx.trader);
+  let rejectFirstStop = true;
+  fx.trader.placeFakMarketOrder = async (tokenId, side, amount, options = {}) => {
+    if (String(side).toUpperCase() === 'SELL' && tokenId === 'up-token' && rejectFirstStop) {
+      rejectFirstStop = false;
+      fx.trader.calls.push({ tokenId, side, amount, options: { ...options } });
+      return {
+        id: 'fake-unmatched-stop', status: 'unmatched', isFilled: false, avgPrice: 0,
+        raw: { makingAmount: '0', takingAmount: '0' },
+      };
+    }
+    return originalSell(tokenId, side, amount, options);
+  };
+
+  await quote(fx, 'UP', 0.30, 0.31);
+  assert.equal(firstPosition.status, 'stop_loss_triggered');
+  assert.equal(firstPosition.openShares > 0, true);
+  assert.equal(secondTranche.position, null);
+  assert.equal(firstPosition.stopLossTriggered, true);
+
+  await quote(fx, 'UP', 0.35, 0.36);
+  assert.equal(firstPosition.status, 'closed');
+  assert.equal(firstTranche.state, 'done_for_window');
+  approx(firstPosition.lastExitPrice, 0.35);
+  assert.equal(fx.bot.log.filter((entry) => entry.event === 'STOP_LOSS_TRIGGERED').length, 2);
 });
 
 test('entry asks above $0.90 are skipped; a later eligible ask can still fire', async () => {
@@ -271,17 +329,17 @@ test('a quote after expiry cannot create a simulated late sale', async () => {
   } finally {
     Date.now = realNow;
   }
-  assert.equal(expiredSnapshot.pending[0].status, 'unresolved_exit');
+  assert.equal(expiredSnapshot.pending[0].status, 'pending_resolution');
   assert.equal(expiredSnapshot.pending[0].mark, null);
   assert.equal(expiredSnapshot.account.totalPnl, null);
   await fx.bot._finishWindow(fx.w, expiredAt, 'WINDOW_EXPIRED');
 
   assert.equal(fx.trader.calls.length, 1, 'no SELL should be simulated after expiry');
   assert.ok(position.openShares > 0);
-  assert.equal(position.status, 'unresolved_exit');
+  assert.equal(position.status, 'pending_resolution');
 });
 
-test('expired unresolved positions keep a stale reference mark but are excluded from valuation', async () => {
+test('expired positions awaiting resolution keep a stale reference mark but are excluded from valuation', async () => {
   const fx = fixture();
   fx.w.sides.UP.tranches[1].state = 'done_for_window';
   await quote(fx, 'UP', 0.59, 0.60);
@@ -290,16 +348,89 @@ test('expired unresolved positions keep a stale reference mark but are excluded 
   await fx.bot._finishWindow(fx.w, expiredAt, 'WINDOW_EXPIRED');
 
   const snapshot = fx.bot.snapshot();
-  const unresolved = snapshot.pending[0];
-  assert.equal(unresolved.status, 'unresolved_exit');
-  assert.equal(unresolved.mark, null);
-  assert.equal(unresolved.unrealized, null);
-  approx(unresolved.lastKnownMark, 0.59);
+  const awaitingResolution = snapshot.pending[0];
+  assert.equal(awaitingResolution.status, 'pending_resolution');
+  assert.equal(awaitingResolution.mark, null);
+  assert.equal(awaitingResolution.unrealized, null);
+  approx(awaitingResolution.lastKnownMark, 0.59);
   assert.equal(snapshot.account.unresolvedPositions, 1);
   approx(snapshot.account.unresolvedEntryCost, position.remainingEntryCost, 0.01);
   assert.equal(snapshot.account.equity, null);
   assert.equal(snapshot.account.totalPnl, null);
   assert.equal(snapshot.account.maxDrawdown, null);
+});
+
+for (const scenario of [
+  { name: 'winning', winner: 'UP', payoutPerShare: { UP: 1, DOWN: 0 } },
+  { name: 'losing', winner: 'DOWN', payoutPerShare: { UP: 0, DOWN: 1 } },
+]) {
+  test(`official ${scenario.name} outcome settles only remaining shares and realizes P&L`, async () => {
+    const fx = fixture({
+      resolveMarketOutcome: async () => ({
+        resolved: true, winningSide: scenario.winner, payoutPerShare: scenario.payoutPerShare,
+      }),
+    });
+    fx.w.sides.UP.tranches[1].state = 'done_for_window';
+    await quote(fx, 'UP', 0.59, 0.60);
+    const position = fx.w.sides.UP.tranches[0].position;
+    const entryCost = position.remainingEntryCost;
+    const shares = position.openShares;
+    const cashBeforeSettlement = fx.bot.cash;
+    const expiredAt = (OPEN_TS + 300) * 1000 + 1;
+    await fx.bot._finishWindow(fx.w, expiredAt, 'WINDOW_EXPIRED');
+
+    assert.equal(position.status, 'pending_resolution');
+    assert.equal(fx.bot.trades.length, 0);
+    await fx.bot._pollExpiredResolutions(expiredAt);
+
+    const payoutPerShare = scenario.payoutPerShare.UP;
+    const payout = shares * payoutPerShare;
+    assert.equal(position.status, 'settled');
+    assert.equal(position.openShares, 0);
+    assert.equal(position.resolutionOutcome, scenario.winner);
+    assert.equal(position.resolutionPricePerShare, payoutPerShare);
+    approx(fx.bot.cash, cashBeforeSettlement + payout, 1e-6);
+    approx(fx.bot.stats.realizedPnl, payout - entryCost, 1e-6);
+    assert.equal(fx.bot.stats.settlements, 1);
+    assert.equal(fx.bot.pending.length, 0);
+    assert.equal(fx.bot.trades[0].reason, 'MARKET_RESOLUTION');
+    assert.equal(fx.bot.trades[0].resolutionOutcome, scenario.winner);
+    assert.equal(fx.bot.trades[0].resolutionPricePerShare, payoutPerShare);
+    approx(fx.bot.trades[0].pnl, Math.round((payout - entryCost) * 100) / 100, 1e-6);
+    assert.equal(fx.bot.snapshot().account.unresolvedPositions, 0);
+  });
+}
+
+test('pending Gamma resolution is not guessed and is retried after the poll interval', async () => {
+  let calls = 0;
+  const fx = fixture({
+    resolveMarketOutcome: async () => {
+      calls += 1;
+      return calls === 1
+        ? { resolved: false, reason: 'UMA resolution is still pending.' }
+        : { resolved: true, winningSide: 'UP', payoutPerShare: { UP: 1, DOWN: 0 } };
+    },
+  });
+  fx.w.sides.UP.tranches[1].state = 'done_for_window';
+  await quote(fx, 'UP', 0.59, 0.60);
+  const position = fx.w.sides.UP.tranches[0].position;
+  const expiredAt = (OPEN_TS + 300) * 1000 + 1;
+  await fx.bot._finishWindow(fx.w, expiredAt, 'WINDOW_EXPIRED');
+
+  await fx.bot._pollExpiredResolutions(expiredAt);
+  assert.equal(calls, 1);
+  assert.equal(position.status, 'pending_resolution');
+  assert.equal(fx.bot.trades.length, 0);
+  assert.equal(fx.bot.cash < fx.bot.capital, true);
+
+  await fx.bot._pollExpiredResolutions(expiredAt + cfg.RESOLUTION_POLL_MS - 1);
+  assert.equal(calls, 1, 'do not query Gamma more often than the configured poll interval');
+  await fx.bot._pollExpiredResolutions(expiredAt + cfg.RESOLUTION_POLL_MS);
+
+  assert.equal(calls, 2);
+  assert.equal(position.status, 'settled');
+  assert.equal(fx.bot.pending.length, 0);
+  assert.equal(fx.bot.stats.settlements, 1);
 });
 
 test('demo-only guard blocks non-demo order adapters', async () => {
@@ -327,5 +458,6 @@ test('snapshot reports the demo-only mode and configured TP/cap rules', () => {
   assert.equal(snapshot.strategy.firstEntryAsk, 0.60);
   assert.equal(snapshot.strategy.secondEntryAsk, 0.60);
   assert.equal(snapshot.strategy.forcedExitBufferSeconds, 10);
+  assert.equal(snapshot.strategy.hardStopLossBid, 0.30);
   assert.equal(snapshot.executionHalt, false);
 });
