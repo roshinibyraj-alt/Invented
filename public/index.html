@@ -26,26 +26,26 @@ table{border-collapse:collapse;width:100%}th{font-size:9px;color:var(--muted);te
   <article class="panel">
     <div class="panelhead"><div><div class="eyebrow">Current five-minute window</div><h2 id="market">Waiting for market</h2></div><div class="meta"><span class="pill" id="windowStatus">Starting</span><div id="timeLeft" style="margin-top:6px">— remaining</div></div></div>
     <div class="progress"><i id="progress"></i></div>
-    <div class="tablewrap"><table><thead><tr><th>Side</th><th class="right">Best bid</th><th class="right">Best ask</th><th class="right">Tranche A</th><th class="right">Tranche B</th></tr></thead><tbody id="quotes"></tbody></table></div>
+    <div class="tablewrap"><table><thead><tr><th>Side</th><th class="right">Best bid</th><th class="right">Best ask</th><th>Tranche state</th><th class="right">Stake</th></tr></thead><tbody id="quotes"></tbody></table></div>
     <div class="small" id="windowNote">Market discovery uses Gamma; all price decisions use Polymarket CLOB quotes.</div>
   </article>
   <article class="panel">
     <div class="eyebrow">Confirmed rules</div><h2>Strategy settings</h2>
     <div class="rule-grid" style="margin-top:11px">
-      <div class="rule"><b>$500 per side</b><p>Two independent $250 tranches for UP and two for DOWN.</p></div>
+      <div class="rule"><b>$100 per side · $200 total</b><p>One $100 tranche each for UP and DOWN. Martingale sizing is shared across both sides.</p></div>
       <div class="rule"><b>Entry delay · 01:30</b><p>No new entries during the first 90 seconds of each window. Existing position exits remain active.</p></div>
-      <div class="rule"><b>Ask triggers</b><p>For UP and DOWN, tranche A enters at best ask $0.80+ and tranche B at $0.90+.</p></div>
+      <div class="rule"><b>Entry ask · $0.90</b><p>Each side enters once when its best ask reaches $0.90; asks above the $0.90 cap are skipped.</p></div>
       <div class="rule"><b>TP bid $0.99</b><p>When the CLOB best bid reaches $0.99, demo accounting credits $1.00 per filled share. The displayed CLOB fill average and estimated fee remain separate.</p></div>
-      <div class="rule"><b>Hard stop $0.50</b><p>A best bid at or below $0.50 triggers a latched sale. A stopped tranche can rearm once when its ask recovers to its original entry trigger.</p></div>
-      <div class="rule"><b>One rearm per tranche</b><p>Each A/B tranche may rearm once per five-minute window after either TP or stop. After TP, its re-entry ask trails the high by $0.10 and buys on a pullback using net proceeds.</p></div>
+      <div class="rule"><b>Hard stop · $0.70</b><p>A best bid at or below $0.70 latches a sale. No tranche rearms or re-enters during the same window.</p></div>
+      <div class="rule"><b>Shared martingale · max 2 steps</b><p>A stop increases both sides in the next window: $100 → $200 → $400 each. A win resets both to $100; a stop at the cap resets the following window to $100.</p></div>
     </div>
-    <div class="tags"><span class="tag" id="entryDelay">ENTRY LOCK · —</span><span class="tag" id="entryCap">Entry cap —</span><span class="tag" id="forcedExit">Forced exit —</span><span class="tag">DEMO ONLY · NO LIVE ORDERS</span></div>
+    <div class="tags"><span class="tag" id="entryDelay">ENTRY LOCK · —</span><span class="tag" id="entryCap">Entry cap —</span><span class="tag" id="forcedExit">Forced exit —</span><span class="tag" id="martingale">MARTINGALE · —</span><span class="tag">DEMO ONLY · NO LIVE ORDERS</span></div>
     <div class="notice">The $0.99 TP threshold is fixed for every position. TP orders still require available CLOB bids at or above $0.99; remaining shares go through forced exit and, if still open, official settlement.</div>
   </article>
 </section>
 <section class="panel">
-  <div class="panelhead"><div><div class="eyebrow">Independent tranche state</div><h2>Entry, TP, and re-entry tracking</h2></div><span class="small" id="trancheCount">—</span></div>
-  <div class="tablewrap"><table><thead><tr><th>Side</th><th>Tranche</th><th>Entry trigger</th><th>State</th><th class="right">Available budget</th><th class="right">Avg entry</th><th class="right">TP bid</th><th class="right">Re-entry / rearm ask</th><th class="right">Open shares</th></tr></thead><tbody id="tranches"></tbody></table></div>
+  <div class="panelhead"><div><div class="eyebrow">Independent side state</div><h2>Entry and position tracking</h2></div><span class="small" id="trancheCount">—</span></div>
+  <div class="tablewrap"><table><thead><tr><th>Side</th><th>Tranche</th><th>Entry trigger</th><th>State</th><th class="right">Initial stake</th><th class="right">Available budget</th><th class="right">Avg entry</th><th class="right">TP bid</th><th class="right">Open shares</th></tr></thead><tbody id="tranches"></tbody></table></div>
 </section>
 <section class="panel">
   <div class="panelhead"><div><div class="eyebrow">Open demo positions</div><h2>Position monitor</h2></div><span class="small" id="openCount">0 open</span></div>
@@ -92,24 +92,25 @@ function render(s){
   $('entryDelay').textContent=entryWait===null?'ENTRY LOCK · —':entryWait>0?'ENTRY LOCK · '+clock(entryWait):'ENTRY LOCK · COMPLETE';
   $('entryCap').textContent='MAX ENTRY ASK · '+usd(cfg.maxEntryAsk);
   $('forcedExit').textContent='FORCED EXIT · T−'+Number(cfg.forcedExitBufferSeconds||10)+'s';
+  $('martingale').textContent='NEXT WINDOW · MARTINGALE STEP '+Number((s.martingale||{}).step||0)+'/'+Number((s.martingale||{}).maxSteps||0)+' · '+usd((s.martingale||{}).nextWindowStakeUsd)+' EACH';
   const sides=w.sides||{},rows=[];
   for(const sideName of ['UP','DOWN']){
-    const side=sides[sideName]||{},quote=side.quote||{};
-    const trancheText=(side.tranches||[]).map(t=>t.state==='in_position'?'OPEN '+t.id:t.state==='waiting_entry'?'WATCH '+t.id:t.state==='waiting_reentry'?'RE-ENTRY '+t.id:t.state==='waiting_stop_rearm'?'STOP REARM '+t.id:t.state.replace(/_/g,' ')).join(' · ');
-    rows.push('<tr><td class="'+(sideName==='UP'?'side-up':'side-down')+'">'+sideName+'</td><td class="right">'+px(quote.bid)+'</td><td class="right">'+px(quote.ask)+'</td><td class="right">'+esc(trancheText.split(' · ')[0]||'—')+'</td><td class="right">'+esc(trancheText.split(' · ')[1]||'—')+'</td></tr>');
+    const side=sides[sideName]||{},quote=side.quote||{},tranche=(side.tranches||[])[0]||{};
+    const state=String(tranche.state||'—').replace(/_/g,' ');
+    rows.push('<tr><td class="'+(sideName==='UP'?'side-up':'side-down')+'">'+sideName+'</td><td class="right">'+px(quote.bid)+'</td><td class="right">'+px(quote.ask)+'</td><td>'+esc(state)+'</td><td class="right">'+usd(tranche.initialBudgetUsd)+'</td></tr>');
   }
   $('quotes').innerHTML=rows.join('');
   const trancheRows=[];
   for(const sideName of ['UP','DOWN']){
     for(const t of (sides[sideName]&&sides[sideName].tranches)||[]){
       const p=t.position||{};
-      const state=t.state.replace(/_/g,' ');
-      const pill=state==='in position'?'good':state==='waiting entry'||state==='waiting reentry'||state==='waiting stop rearm'?'warn':'';
-       trancheRows.push('<tr><td class="'+(sideName==='UP'?'side-up':'side-down')+'">'+sideName+'</td><td>'+esc(t.id)+' · #'+Number(t.cycle||0)+' · rearm '+Number(t.rearmsUsed||0)+'/'+Number(t.rearmLimit||1)+'</td><td>ask ≥ '+px(t.entryTrigger)+'</td><td><span class="pill '+pill+'">'+esc(state)+'</span></td><td class="right">'+usd(t.availableUsd)+'</td><td class="right">'+px(p.entryPrice)+'</td><td class="right">'+px(p.takeProfitPrice)+(p.takeProfitReachable===false?' <span class="side-down">unreachable</span>':'')+'</td><td class="right">'+px(t.reentryPrice)+'</td><td class="right">'+qty(p.openShares)+'</td></tr>');
+        const state=t.state.replace(/_/g,' ');
+        const pill=state==='in position'?'good':state==='waiting entry'?'warn':'';
+        trancheRows.push('<tr><td class="'+(sideName==='UP'?'side-up':'side-down')+'">'+sideName+'</td><td>'+esc(t.id)+' · #'+Number(t.cycle||0)+'</td><td>ask ≥ '+px(t.entryTrigger)+'</td><td><span class="pill '+pill+'">'+esc(state)+'</span></td><td class="right">'+usd(t.initialBudgetUsd)+'</td><td class="right">'+usd(t.availableUsd)+'</td><td class="right">'+px(p.entryPrice)+'</td><td class="right">'+px(p.takeProfitPrice)+(p.takeProfitReachable===false?' <span class="side-down">unreachable</span>':'')+'</td><td class="right">'+qty(p.openShares)+'</td></tr>');
     }
   }
   $('tranches').innerHTML=trancheRows.length?trancheRows.join(''):empty('Waiting for market discovery',9);
-  $('trancheCount').textContent=trancheRows.length+' independent tranches';
+  $('trancheCount').textContent=trancheRows.length+' side tranches';
   const pending=s.pending||[];$('openCount').textContent=pending.length+' open position'+(pending.length===1?'':'s');
   $('positions').innerHTML=pending.length?'<table><thead><tr><th>Side</th><th>Tranche</th><th>Cycle</th><th>Entry avg.</th><th>TP</th><th>Shares open</th><th>Best bid mark</th><th>Status</th><th class="right">Unrealized</th></tr></thead><tbody>'+pending.map(p=>{const mark=p.status==='pending_resolution'?(finite(p.lastKnownMark)?'STALE '+px(p.lastKnownMark):'No current mark'):px(p.mark);return '<tr><td class="'+(p.side==='UP'?'side-up':'side-down')+'">'+esc(p.side)+'</td><td>'+esc(p.trancheId)+'</td><td>'+Number(p.cycle)+'</td><td>'+px(p.entryPrice)+'</td><td>'+px(p.takeProfitPrice)+'</td><td>'+qty(p.openShares)+'</td><td>'+mark+'</td><td>'+esc(p.status)+'</td><td class="right">'+pnlHtml(p.unrealized)+'</td></tr>'}).join('')+'</tbody></table>':'<div class="empty">No open positions</div>';
   const trades=s.trades||[];$('tradeCount').textContent=trades.length+' shown';

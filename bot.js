@@ -38,6 +38,7 @@ class Bot {
     this._running = false;
     this._warned = new Set();
     this._positionId = 0;
+    this.martingaleStep = 0;
     this._nextResolutionCheckAt = new Map();
     this._resolutionCheckInFlight = new Set();
     this._resolutionStateBySlug = new Map();
@@ -120,7 +121,8 @@ class Bot {
     if (!this.w || this.w.slug !== slug) {
       if (this.w && !this.w.closed) await this._finishWindow(this.w, now, 'WINDOW_ROLLOVER');
       this._stopMarketFeed();
-      this.w = makeWindowState(slug, openTs);
+      const trancheStakeUsd = this._stakeForMartingaleStep();
+      this.w = makeWindowState(slug, openTs, trancheStakeUsd, this.martingaleStep);
       this.prices = { slug, ts: now, up: emptyQuote(), down: emptyQuote() };
       this._quotesByToken = new Map();
       this._lastQuoteAt = 0;
@@ -130,8 +132,10 @@ class Bot {
       this._seriesSlug = slug;
       this._push({
         event: 'WINDOW_STARTED', slug, entryDelaySeconds: cfg.ENTRY_DELAY_SECONDS,
+        martingaleStep: this.martingaleStep, trancheStakeUsd,
         note: 'New five-minute UP/DOWN window; no entries for the first '
-          + cfg.ENTRY_DELAY_SECONDS + ' seconds, then both sides use two independent $250 tranches.',
+          + cfg.ENTRY_DELAY_SECONDS + ' seconds; UP and DOWN each have one $'
+          + trancheStakeUsd.toFixed(2) + ' tranche at the configured ask threshold.',
       });
     }
 
@@ -183,6 +187,43 @@ class Bot {
     }
     this._marketFeedStop = null;
     this._marketFeedSlug = null;
+  }
+
+  _stakeForMartingaleStep(step = this.martingaleStep) {
+    return cfg.TRANCHE_BUDGET_USD * (2 ** step);
+  }
+
+  _recordMartingaleStop(w, position) {
+    if (w.martingaleStopApplied) return;
+    w.martingaleStopApplied = true;
+    const previousStep = this.martingaleStep;
+    this.martingaleStep = previousStep >= cfg.MAX_MARTINGALE_STEPS ? 0 : previousStep + 1;
+    const resetAtCap = previousStep >= cfg.MAX_MARTINGALE_STEPS;
+    this._push({
+      event: resetAtCap ? 'MARTINGALE_CAP_RESET' : 'MARTINGALE_STEP_UP',
+      slug: w.slug, side: position.side, tranche: position.trancheId,
+      previousStep, martingaleStep: this.martingaleStep,
+      nextWindowStakeUsd: this._stakeForMartingaleStep(),
+      note: resetAtCap
+        ? 'The capped martingale attempt stopped out; both next-window stakes reset to the $'
+          + cfg.TRANCHE_BUDGET_USD.toFixed(2) + ' base.'
+        : 'A hard stop advances the shared martingale; both UP and DOWN next-window stakes are now $'
+          + this._stakeForMartingaleStep().toFixed(2) + ' each.',
+    });
+  }
+
+  _recordMartingaleWin(w, position, reason) {
+    const previousStep = this.martingaleStep;
+    if (previousStep === 0) return;
+    this.martingaleStep = 0;
+    this._push({
+      event: 'MARTINGALE_RESET',
+      slug: w && w.slug || position.slug, side: position.side, tranche: position.trancheId,
+      reason, previousStep, martingaleStep: 0,
+      nextWindowStakeUsd: cfg.TRANCHE_BUDGET_USD,
+      note: 'A winning position resets both UP and DOWN next-window stakes to the $'
+        + cfg.TRANCHE_BUDGET_USD.toFixed(2) + ' base.',
+    });
   }
 
   async _ensureMarketFeed(w) {
@@ -322,6 +363,7 @@ class Bot {
           position.stopLossTriggeredAt = now;
           position.stopLossTriggerBid = quote.bid;
           position.status = 'stop_loss_triggered';
+          this._recordMartingaleStop(w, position);
           this._push({
             event: 'STOP_LOSS_TRIGGERED', slug: w.slug, side: position.side,
             tranche: position.trancheId, cycle: position.cycle,
@@ -342,31 +384,14 @@ class Bot {
       const ask = quote.ask;
       if (ask == null || ask <= 0) continue;
       if (now < (w.openTs + cfg.ENTRY_DELAY_SECONDS) * 1000) continue;
-      if (tranche.state === 'waiting_reentry') {
-        if (ask > tranche.reentryPeakAsk + EPSILON) {
-          tranche.reentryPeakAsk = ask;
-          tranche.reentryPrice = Math.max(
-            tranche.reentryPrice,
-            tranche.reentryPeakAsk - cfg.REENTRY_PULLBACK_USD,
-          );
-        }
-        if (ask <= cfg.MAX_ENTRY_ASK_USD + EPSILON
-          && ask <= tranche.reentryPrice + EPSILON) {
-          await this._buyTranche(w, sideName, tranche, ask, true, now);
-        }
-      } else if (ask > cfg.MAX_ENTRY_ASK_USD + EPSILON) {
-        continue;
-      } else if (tranche.state === 'waiting_stop_rearm') {
-        if (ask + EPSILON >= tranche.reentryPrice) {
-          await this._buyTranche(w, sideName, tranche, ask, true, now);
-        }
-      } else if (tranche.state === 'waiting_entry' && ask + EPSILON >= tranche.entryTrigger) {
-        await this._buyTranche(w, sideName, tranche, ask, false, now);
+      if (ask > cfg.MAX_ENTRY_ASK_USD + EPSILON) continue;
+      if (tranche.state === 'waiting_entry' && ask + EPSILON >= tranche.entryTrigger) {
+        await this._buyTranche(w, sideName, tranche, ask, now);
       }
     }
   }
 
-  async _buyTranche(w, sideName, tranche, triggerAsk, isReentry, now) {
+  async _buyTranche(w, sideName, tranche, triggerAsk, now) {
     const budgetUsd = Number(tranche.availableUsd);
     if (!Number.isFinite(budgetUsd) || budgetUsd <= EPSILON) {
       tranche.state = 'no_budget';
@@ -425,21 +450,18 @@ class Bot {
     };
     tranche.position = position;
     tranche.state = 'in_position';
-    tranche.reentryPrice = null;
-    tranche.reentryPeakAsk = null;
-    if (isReentry) tranche.rearmsUsed += 1;
     this.pending.push(position);
     this.stats.entries += 1;
     this.stats.estimatedFees += fee;
     w.status = 'position_open';
     this._push({
-      event: isReentry ? 'REENTRY_FILLED' : 'ENTRY_FILLED',
+      event: 'ENTRY_FILLED',
       slug: w.slug, side: sideName, tranche: tranche.id, cycle: tranche.cycle,
       triggerAsk: round(triggerAsk, 4), budgetUsd: round(budgetUsd, 2),
       spentUsd: round(notional, 2), shares: round(shares, 5),
       avgEntry: round(averagePrice, 4), takeProfit: round(position.takeProfitPrice, 4),
-      rearmNumber: tranche.rearmsUsed, rearmLimit: cfg.MAX_REARMS_PER_TRANCHE,
-      note: (isReentry ? 'Re-entry' : 'Initial entry') + ' filled from the CLOB book at average $'
+      martingaleStep: w.martingaleStep,
+      note: 'Entry filled from the CLOB book at average $'
         + averagePrice.toFixed(4) + '; TP triggers at best bid $'
         + position.takeProfitPrice.toFixed(4) + ' and credits $'
         + cfg.TAKE_PROFIT_CREDIT_PRICE_USD.toFixed(2) + ' per share in demo accounting.',
@@ -488,6 +510,9 @@ class Bot {
       position.clobExitShares += sold;
       const realizedDelta = grossProceeds - fee - entryCostAllocated;
       position.realizedPnl += realizedDelta;
+      if (reason === 'TAKE_PROFIT') {
+        this._recordMartingaleWin(w, position, 'TAKE_PROFIT');
+      }
       this.stats.realizedPnl += realizedDelta;
       position.lastExitPrice = averageExit;
       position.lastClobExitPrice = clobAverageExit;
@@ -520,27 +545,7 @@ class Bot {
         position.status = 'closed';
         tranche.position = null;
         tranche.availableUsd += position.netExitProceeds;
-        const beforeForcedExit = now < windowCloseMs(w) - cfg.FORCED_EXIT_BUFFER_SECONDS * 1000;
-        const hasRearmRemaining = tranche.rearmsUsed < cfg.MAX_REARMS_PER_TRANCHE;
-        const canReenterAfterTp = reason === 'TAKE_PROFIT' && beforeForcedExit && hasRearmRemaining;
-        const canRearmAfterStop = reason === 'HARD_STOP_LOSS' && beforeForcedExit && hasRearmRemaining;
-        if (canReenterAfterTp) {
-          const quote = this._quoteFor(position.side, w);
-          tranche.reentryPeakAsk = Math.max(
-            position.takeProfitPrice,
-            positive(quote && quote.ask) || position.takeProfitPrice,
-          );
-          tranche.reentryPrice = tranche.reentryPeakAsk - cfg.REENTRY_PULLBACK_USD;
-          tranche.state = 'waiting_reentry';
-        } else if (canRearmAfterStop) {
-          tranche.reentryPrice = tranche.entryTrigger;
-          tranche.reentryPeakAsk = null;
-          tranche.state = 'waiting_stop_rearm';
-        } else {
-          tranche.state = 'done_for_window';
-          tranche.reentryPrice = null;
-          tranche.reentryPeakAsk = null;
-        }
+        tranche.state = 'done_for_window';
         this._finalizeTrade(position, reason);
       } else {
         position.status = reason === 'TAKE_PROFIT' ? 'tp_partial'
@@ -575,7 +580,7 @@ class Bot {
     for (const tranche of side.tranches) {
       if (tranche.position) {
         exits.push(this._sellPosition(w, tranche, tranche.position, 'FORCED_WINDOW_EXIT', 0, now));
-      } else if (tranche.state === 'waiting_entry' || tranche.state === 'waiting_reentry') {
+      } else if (tranche.state === 'waiting_entry') {
         tranche.state = 'window_exit_started';
       }
     }
@@ -589,7 +594,7 @@ class Bot {
       const stopWaitingEntries = () => {
         for (const sideName of SIDES) {
           for (const tranche of w.sides[sideName].tranches) {
-            if (!tranche.position && (tranche.state === 'waiting_entry' || tranche.state === 'waiting_reentry')) {
+            if (!tranche.position && tranche.state === 'waiting_entry') {
               tranche.state = 'window_exit_started';
             }
           }
@@ -729,6 +734,7 @@ class Bot {
 
   _finalizeTrade(position, reason) {
     const pnl = position.realizedPnl;
+    if (pnl > EPSILON) this._recordMartingaleWin(null, position, reason);
     if (pnl >= 0) this.stats.wins += 1;
     else this.stats.losses += 1;
     const trade = {
@@ -863,8 +869,6 @@ class Bot {
           tranches: side.tranches.map((tranche) => ({
             id: tranche.id, entryTrigger: tranche.entryTrigger, initialBudgetUsd: tranche.initialBudgetUsd,
             availableUsd: round(tranche.availableUsd, 2), state: tranche.state, cycle: tranche.cycle,
-            rearmsUsed: tranche.rearmsUsed, rearmLimit: cfg.MAX_REARMS_PER_TRANCHE,
-            reentryPrice: tranche.reentryPrice, reentryPeakAsk: tranche.reentryPeakAsk,
             position: tranche.position ? {
               id: tranche.position.id, entryPrice: tranche.position.entryPrice,
               takeProfitPrice: tranche.position.takeProfitPrice,
@@ -891,30 +895,32 @@ class Bot {
         maxDrawdown: valuation.unresolvedPositions.length ? null : round(this.maxDrawdown, 2),
       },
       strategy: {
-        sideBudgetUsd: cfg.SIDE_BUDGET_USD, trancheBudgetUsd: cfg.TRANCHE_BUDGET_USD,
-        firstEntryAsk: cfg.FIRST_ENTRY_ASK_USD, secondEntryAsk: cfg.SECOND_ENTRY_ASK_USD,
+        trancheBudgetUsd: cfg.TRANCHE_BUDGET_USD, entryAsk: cfg.ENTRY_ASK_USD,
         takeProfitBid: cfg.TAKE_PROFIT_BID_USD,
         takeProfitCreditPrice: cfg.TAKE_PROFIT_CREDIT_PRICE_USD,
         entryDelaySeconds: cfg.ENTRY_DELAY_SECONDS,
-        reentryPullback: cfg.REENTRY_PULLBACK_USD,
-        maxRearmsPerTranche: cfg.MAX_REARMS_PER_TRANCHE,
         hardStopLossBid: cfg.HARD_STOP_LOSS_BID_USD,
         maxEntryAsk: cfg.MAX_ENTRY_ASK_USD, forcedExitBufferSeconds: cfg.FORCED_EXIT_BUFFER_SECONDS,
+        maxMartingaleSteps: cfg.MAX_MARTINGALE_STEPS,
+      },
+      martingale: {
+        step: this.martingaleStep,
+        maxSteps: cfg.MAX_MARTINGALE_STEPS,
+        baseStakeUsd: cfg.TRANCHE_BUDGET_USD,
+        nextWindowStakeUsd: this._stakeForMartingaleStep(),
       },
       window, prices: this.prices, priceSeries: this.priceSeries,
       pending: this.pending.map((position) => this._positionSnapshot(position)),
       trades: this.trades.slice(-60).reverse(),
       stats: { ...this.stats }, equity: this.equity,
       cfg: {
-        demoCapital: this.capital, sideBudgetUsd: cfg.SIDE_BUDGET_USD,
-        trancheBudgetUsd: cfg.TRANCHE_BUDGET_USD,
-        firstEntryAsk: cfg.FIRST_ENTRY_ASK_USD, secondEntryAsk: cfg.SECOND_ENTRY_ASK_USD,
+        demoCapital: this.capital, trancheBudgetUsd: cfg.TRANCHE_BUDGET_USD,
+        entryAsk: cfg.ENTRY_ASK_USD,
         takeProfitBid: cfg.TAKE_PROFIT_BID_USD,
         takeProfitCreditPrice: cfg.TAKE_PROFIT_CREDIT_PRICE_USD,
         entryDelaySeconds: cfg.ENTRY_DELAY_SECONDS,
-        reentryPullback: cfg.REENTRY_PULLBACK_USD,
-        maxRearmsPerTranche: cfg.MAX_REARMS_PER_TRANCHE,
         hardStopLossBid: cfg.HARD_STOP_LOSS_BID_USD,
+        maxMartingaleSteps: cfg.MAX_MARTINGALE_STEPS,
         maxEntryAsk: cfg.MAX_ENTRY_ASK_USD, forcedExitBufferSeconds: cfg.FORCED_EXIT_BUFFER_SECONDS,
         windowSec: WINDOW_SECONDS,
       },
@@ -943,35 +949,33 @@ class Bot {
   }
 }
 
-function makeWindowState(slug, openTs) {
+function makeWindowState(slug, openTs, trancheStakeUsd = cfg.TRANCHE_BUDGET_USD, martingaleStep = 0) {
   return {
     slug, openTs, status: 'waiting_for_market', window: null,
     marketWaitReason: null, nextDiscoveryAt: 0,
     closed: false, closedAt: null,
+    martingaleStep, trancheStakeUsd, martingaleStopApplied: false,
     sides: {
-      UP: makeSide('UP'),
-      DOWN: makeSide('DOWN'),
+      UP: makeSide('UP', trancheStakeUsd),
+      DOWN: makeSide('DOWN', trancheStakeUsd),
     },
   };
 }
 
-function makeSide(name) {
+function makeSide(name, trancheStakeUsd) {
   return {
     name, processing: false, processingPromise: null, dirty: false,
-    tranches: [
-      makeTranche('A', cfg.FIRST_ENTRY_ASK_USD),
-      makeTranche('B', cfg.SECOND_ENTRY_ASK_USD),
-    ],
+    tranches: [makeTranche('SINGLE', cfg.ENTRY_ASK_USD, trancheStakeUsd)],
   };
 }
 
-function makeTranche(id, entryTrigger) {
+function makeTranche(id, entryTrigger, budgetUsd) {
   return {
     id, entryTrigger,
-    initialBudgetUsd: cfg.TRANCHE_BUDGET_USD,
-    availableUsd: cfg.TRANCHE_BUDGET_USD,
+    initialBudgetUsd: budgetUsd,
+    availableUsd: budgetUsd,
     state: 'waiting_entry', cycle: 0,
-    reentryPrice: null, reentryPeakAsk: null, rearmsUsed: 0, position: null,
+    position: null,
   };
 }
 
