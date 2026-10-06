@@ -341,6 +341,10 @@ class Bot {
         if (ask <= tranche.reentryPrice + EPSILON) {
           await this._buyTranche(w, sideName, tranche, ask, true, now);
         }
+      } else if (tranche.state === 'waiting_stop_rearm') {
+        if (ask + EPSILON >= tranche.reentryPrice) {
+          await this._buyTranche(w, sideName, tranche, ask, true, now);
+        }
       } else if (tranche.state === 'waiting_entry' && ask + EPSILON >= tranche.entryTrigger) {
         await this._buyTranche(w, sideName, tranche, ask, false, now);
       }
@@ -485,11 +489,15 @@ class Bot {
         position.status = 'closed';
         tranche.position = null;
         tranche.availableUsd += position.netExitProceeds;
-        const canReenter = reason === 'TAKE_PROFIT'
-          && now < windowCloseMs(w) - cfg.FORCED_EXIT_BUFFER_SECONDS * 1000;
-        if (canReenter) {
+        const beforeForcedExit = now < windowCloseMs(w) - cfg.FORCED_EXIT_BUFFER_SECONDS * 1000;
+        const canReenterAfterTp = reason === 'TAKE_PROFIT' && beforeForcedExit;
+        const canRearmAfterStop = reason === 'HARD_STOP_LOSS' && beforeForcedExit;
+        if (canReenterAfterTp) {
           tranche.reentryPrice = position.takeProfitPrice - cfg.REENTRY_PULLBACK_USD;
           tranche.state = 'waiting_reentry';
+        } else if (canRearmAfterStop) {
+          tranche.reentryPrice = tranche.entryTrigger;
+          tranche.state = 'waiting_stop_rearm';
         } else {
           tranche.state = 'done_for_window';
         }

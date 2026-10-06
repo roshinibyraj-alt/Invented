@@ -183,7 +183,8 @@ for (const sideName of ['UP', 'DOWN']) {
 
     assert.ok(positions.every((position) => position.status === 'closed'));
     assert.ok(positions.every((position) => position.stopLossTriggered));
-    assert.ok(tranches.every((tranche) => tranche.state === 'done_for_window'));
+    assert.ok(tranches.every((tranche) => tranche.state === 'waiting_stop_rearm'));
+    assert.deepEqual(tranches.map((tranche) => tranche.reentryPrice), [0.60, 0.70]);
     const stopSells = fx.trader.calls.filter((call) => call.side === 'SELL');
     assert.equal(stopSells.length, 2);
     assert.ok(stopSells.every((call) => call.options.priceLimit === 0));
@@ -191,6 +192,19 @@ for (const sideName of ['UP', 'DOWN']) {
     assert.equal(stopEvents.length, 2);
     assert.ok(stopEvents.every((entry) => entry.side === sideName));
     assert.ok(positions.every((position) => position.lastExitPrice === 0.25));
+
+    const callsAfterStops = fx.trader.calls.length;
+    await quote(fx, sideName, 0.58, 0.59);
+    assert.equal(fx.trader.calls.length, callsAfterStops, 'asks below each original trigger must not rearm');
+    await quote(fx, sideName, 0.59, 0.60);
+    assert.equal(fx.trader.calls.length, callsAfterStops + 1);
+    assert.equal(tranches[0].cycle, 2);
+    assert.equal(tranches[0].state, 'in_position');
+    assert.equal(tranches[1].state, 'waiting_stop_rearm');
+    await quote(fx, sideName, 0.69, 0.70);
+    assert.equal(fx.trader.calls.length, callsAfterStops + 2);
+    assert.ok(tranches.every((tranche) => tranche.state === 'in_position'));
+    assert.deepEqual(tranches.map((tranche) => tranche.cycle), [2, 2]);
   });
 }
 
@@ -222,7 +236,8 @@ test('hard stop stays latched and retries if no bid fills at the trigger', async
 
   await quote(fx, 'UP', 0.35, 0.36);
   assert.equal(firstPosition.status, 'closed');
-  assert.equal(firstTranche.state, 'done_for_window');
+  assert.equal(firstTranche.state, 'waiting_stop_rearm');
+  approx(firstTranche.reentryPrice, firstTranche.entryTrigger);
   approx(firstPosition.lastExitPrice, 0.35);
   assert.equal(fx.bot.log.filter((entry) => entry.event === 'STOP_LOSS_TRIGGERED').length, 2);
 });

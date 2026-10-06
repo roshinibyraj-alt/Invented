@@ -20,6 +20,7 @@
 
 ## Reading the output
 
-- Dashboard tranche rows show each entry threshold, available budget, average fill, TP, re-entry ask, and open shares.
+- Dashboard tranche rows show each entry threshold, available budget, average fill, TP, TP re-entry / hard-stop rearm ask, and open shares. A hard-stopped tranche rearms only after its full stop sale completes and its ask recovers to that tranche's original entry trigger.
+- Net, realized, unrealized, and per-trade P&L are green when positive and red when negative; win and loss counts have separate colored badges.
 - `[bot]` stdout records window discovery, entries, TP/forced exits, unfilled exits, and a 30-second health heartbeat.
 - Partial-sale P&L is recorded immediately. Equity marks current-window open positions to the latest best bid. Expired shares awaiting official resolution show the last bid only as a stale reference and are excluded from equity/P&L; Gamma resolution polling runs every 15 seconds. Once resolved, the remaining shares are settled to $1/$0 and realized P&L is updated. Taker fees are estimated, and paper fills are not evidence of live execution or profitability.
