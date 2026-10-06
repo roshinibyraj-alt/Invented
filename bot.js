@@ -409,10 +409,11 @@ class Bot {
       side: sideName, trancheId: tranche.id, cycle: tranche.cycle, tokenId,
       entryBudgetUsd: budgetUsd, entryNotional: notional, entryFee: fee,
       entryPrice: averagePrice, shares, openShares: shares,
-      remainingEntryCost: cost, takeProfitPrice: averagePrice + cfg.TAKE_PROFIT_OFFSET_USD,
-      takeProfitReachable: averagePrice + cfg.TAKE_PROFIT_OFFSET_USD <= 1 + EPSILON,
+      remainingEntryCost: cost, takeProfitPrice: cfg.TAKE_PROFIT_BID_USD,
+      takeProfitReachable: cfg.TAKE_PROFIT_BID_USD <= 1 + EPSILON,
       stopLossTriggered: false, stopLossTriggeredAt: null, stopLossTriggerBid: null,
       exitProceeds: 0, exitFees: 0, netExitProceeds: 0, realizedPnl: 0,
+      clobExitProceeds: 0, clobExitShares: 0, lastClobExitPrice: null,
       lastMark: this._quoteFor(sideName, w)?.bid ?? averagePrice,
       resolutionOutcome: null, resolutionPricePerShare: null,
       openedAt: now, closedAt: null, status: 'open',
@@ -421,6 +422,7 @@ class Bot {
     tranche.state = 'in_position';
     tranche.reentryPrice = null;
     tranche.reentryPeakAsk = null;
+    if (isReentry) tranche.rearmsUsed += 1;
     this.pending.push(position);
     this.stats.entries += 1;
     this.stats.estimatedFees += fee;
@@ -431,10 +433,11 @@ class Bot {
       triggerAsk: round(triggerAsk, 4), budgetUsd: round(budgetUsd, 2),
       spentUsd: round(notional, 2), shares: round(shares, 5),
       avgEntry: round(averagePrice, 4), takeProfit: round(position.takeProfitPrice, 4),
+      rearmNumber: tranche.rearmsUsed, rearmLimit: cfg.MAX_REARMS_PER_TRANCHE,
       note: (isReentry ? 'Re-entry' : 'Initial entry') + ' filled from the CLOB book at average $'
-        + averagePrice.toFixed(4) + '; TP is best bid at $'
-        + position.takeProfitPrice.toFixed(4)
-        + (position.takeProfitReachable ? '.' : ' and is above the $1 binary-share ceiling; forced exit only.'),
+        + averagePrice.toFixed(4) + '; TP triggers at best bid $'
+        + position.takeProfitPrice.toFixed(4) + ' and credits $'
+        + cfg.TAKE_PROFIT_CREDIT_PRICE_USD.toFixed(2) + ' per share in demo accounting.',
     });
     return position;
   }
@@ -463,9 +466,12 @@ class Bot {
       }
 
       const sold = Math.min(position.openShares, sharesSold);
-      const grossProceeds = proceeds * (sold / sharesSold);
+      const clobGrossProceeds = proceeds * (sold / sharesSold);
+      const clobAverageExit = clobGrossProceeds / sold;
+      const grossProceeds = reason === 'TAKE_PROFIT'
+        ? sold * cfg.TAKE_PROFIT_CREDIT_PRICE_USD : clobGrossProceeds;
       const averageExit = grossProceeds / sold;
-      const fee = estimateTakerFee(sold, averageExit);
+      const fee = estimateTakerFee(sold, clobAverageExit);
       const entryCostAllocated = position.openShares > EPSILON
         ? position.remainingEntryCost * (sold / position.openShares) : 0;
       position.openShares = Math.max(0, position.openShares - sold);
@@ -473,11 +479,15 @@ class Bot {
       position.exitProceeds += grossProceeds;
       position.exitFees += fee;
       position.netExitProceeds += grossProceeds - fee;
+      position.clobExitProceeds += clobGrossProceeds;
+      position.clobExitShares += sold;
       const realizedDelta = grossProceeds - fee - entryCostAllocated;
       position.realizedPnl += realizedDelta;
       this.stats.realizedPnl += realizedDelta;
       position.lastExitPrice = averageExit;
-      position.lastMark = averageExit;
+      position.lastClobExitPrice = clobAverageExit;
+      position.lastMark = position.openShares > EPSILON
+        ? this._quoteFor(position.side, w)?.bid ?? clobAverageExit : averageExit;
       this.cash += grossProceeds - fee;
       this.stats.estimatedFees += fee;
       this.stats.exits += 1;
@@ -486,11 +496,16 @@ class Bot {
         event: position.openShares <= EPSILON ? 'POSITION_EXITED' : 'POSITION_EXIT_PARTIAL',
         slug: w.slug, side: position.side, tranche: position.trancheId,
         reason, sharesSold: round(sold, 5), remainingShares: round(position.openShares, 5),
-        avgExit: round(averageExit, 4), proceeds: round(grossProceeds, 2),
+        avgExit: round(averageExit, 4), clobAvgExit: round(clobAverageExit, 4),
+        proceeds: round(grossProceeds, 2),
         fee: round(fee, 4), realizedPnl: round(position.realizedPnl, 2),
-        note: (reason === 'TAKE_PROFIT' ? 'Take-profit sale'
-          : reason === 'HARD_STOP_LOSS' ? 'Hard stop-loss sale' : 'Forced window-exit sale')
-          + ' simulated at average best bid $' + averageExit.toFixed(4)
+        note: (reason === 'TAKE_PROFIT'
+          ? 'CLOB TP threshold reached; demo credits $'
+            + cfg.TAKE_PROFIT_CREDIT_PRICE_USD.toFixed(2) + ' per filled share (CLOB average $'
+            + clobAverageExit.toFixed(4) + ').'
+          : (reason === 'HARD_STOP_LOSS' ? 'Hard stop-loss sale'
+            : 'Forced window-exit sale') + ' simulated at average best bid $'
+            + clobAverageExit.toFixed(4))
           + (position.openShares > EPSILON ? '; remaining shares stay open for another exit attempt.' : '.'),
       });
 
@@ -501,8 +516,9 @@ class Bot {
         tranche.position = null;
         tranche.availableUsd += position.netExitProceeds;
         const beforeForcedExit = now < windowCloseMs(w) - cfg.FORCED_EXIT_BUFFER_SECONDS * 1000;
-        const canReenterAfterTp = reason === 'TAKE_PROFIT' && beforeForcedExit;
-        const canRearmAfterStop = reason === 'HARD_STOP_LOSS' && beforeForcedExit;
+        const hasRearmRemaining = tranche.rearmsUsed < cfg.MAX_REARMS_PER_TRANCHE;
+        const canReenterAfterTp = reason === 'TAKE_PROFIT' && beforeForcedExit && hasRearmRemaining;
+        const canRearmAfterStop = reason === 'HARD_STOP_LOSS' && beforeForcedExit && hasRearmRemaining;
         if (canReenterAfterTp) {
           const quote = this._quoteFor(position.side, w);
           tranche.reentryPeakAsk = Math.max(
@@ -517,6 +533,8 @@ class Bot {
           tranche.state = 'waiting_stop_rearm';
         } else {
           tranche.state = 'done_for_window';
+          tranche.reentryPrice = null;
+          tranche.reentryPeakAsk = null;
         }
         this._finalizeTrade(position, reason);
       } else {
@@ -713,6 +731,8 @@ class Bot {
       tranche: position.trancheId, cycle: position.cycle,
       shares: position.shares, entryPrice: round(position.entryPrice, 4),
       exitPrice: position.shares > 0 ? round(position.exitProceeds / position.shares, 4) : null,
+      clobExitPrice: position.clobExitShares > 0
+        ? round(position.clobExitProceeds / position.clobExitShares, 4) : null,
       entryNotional: round(position.entryNotional, 4),
       exitProceeds: round(position.exitProceeds, 4),
       netExitProceeds: round(position.netExitProceeds, 4),
@@ -838,6 +858,7 @@ class Bot {
           tranches: side.tranches.map((tranche) => ({
             id: tranche.id, entryTrigger: tranche.entryTrigger, initialBudgetUsd: tranche.initialBudgetUsd,
             availableUsd: round(tranche.availableUsd, 2), state: tranche.state, cycle: tranche.cycle,
+            rearmsUsed: tranche.rearmsUsed, rearmLimit: cfg.MAX_REARMS_PER_TRANCHE,
             reentryPrice: tranche.reentryPrice, reentryPeakAsk: tranche.reentryPeakAsk,
             position: tranche.position ? {
               id: tranche.position.id, entryPrice: tranche.position.entryPrice,
@@ -867,7 +888,10 @@ class Bot {
       strategy: {
         sideBudgetUsd: cfg.SIDE_BUDGET_USD, trancheBudgetUsd: cfg.TRANCHE_BUDGET_USD,
         firstEntryAsk: cfg.FIRST_ENTRY_ASK_USD, secondEntryAsk: cfg.SECOND_ENTRY_ASK_USD,
-        takeProfitOffset: cfg.TAKE_PROFIT_OFFSET_USD, reentryPullback: cfg.REENTRY_PULLBACK_USD,
+        takeProfitBid: cfg.TAKE_PROFIT_BID_USD,
+        takeProfitCreditPrice: cfg.TAKE_PROFIT_CREDIT_PRICE_USD,
+        reentryPullback: cfg.REENTRY_PULLBACK_USD,
+        maxRearmsPerTranche: cfg.MAX_REARMS_PER_TRANCHE,
         hardStopLossBid: cfg.HARD_STOP_LOSS_BID_USD,
         maxEntryAsk: cfg.MAX_ENTRY_ASK_USD, forcedExitBufferSeconds: cfg.FORCED_EXIT_BUFFER_SECONDS,
       },
@@ -879,7 +903,10 @@ class Bot {
         demoCapital: this.capital, sideBudgetUsd: cfg.SIDE_BUDGET_USD,
         trancheBudgetUsd: cfg.TRANCHE_BUDGET_USD,
         firstEntryAsk: cfg.FIRST_ENTRY_ASK_USD, secondEntryAsk: cfg.SECOND_ENTRY_ASK_USD,
-        takeProfitOffset: cfg.TAKE_PROFIT_OFFSET_USD, reentryPullback: cfg.REENTRY_PULLBACK_USD,
+        takeProfitBid: cfg.TAKE_PROFIT_BID_USD,
+        takeProfitCreditPrice: cfg.TAKE_PROFIT_CREDIT_PRICE_USD,
+        reentryPullback: cfg.REENTRY_PULLBACK_USD,
+        maxRearmsPerTranche: cfg.MAX_REARMS_PER_TRANCHE,
         hardStopLossBid: cfg.HARD_STOP_LOSS_BID_USD,
         maxEntryAsk: cfg.MAX_ENTRY_ASK_USD, forcedExitBufferSeconds: cfg.FORCED_EXIT_BUFFER_SECONDS,
         windowSec: WINDOW_SECONDS,
@@ -937,7 +964,7 @@ function makeTranche(id, entryTrigger) {
     initialBudgetUsd: cfg.TRANCHE_BUDGET_USD,
     availableUsd: cfg.TRANCHE_BUDGET_USD,
     state: 'waiting_entry', cycle: 0,
-    reentryPrice: null, reentryPeakAsk: null, position: null,
+    reentryPrice: null, reentryPeakAsk: null, rearmsUsed: 0, position: null,
   };
 }
 

@@ -34,12 +34,12 @@ table{border-collapse:collapse;width:100%}th{font-size:9px;color:var(--muted);te
     <div class="rule-grid" style="margin-top:11px">
       <div class="rule"><b>$500 per side</b><p>Two independent $250 tranches for UP and two for DOWN.</p></div>
       <div class="rule"><b>Ask triggers</b><p>For UP and DOWN, tranche A enters at best ask $0.60+ and tranche B at $0.70+.</p></div>
-      <div class="rule"><b>TP +$0.10</b><p>Each tranche exits when its CLOB best bid reaches its average fill +$0.10.</p></div>
-      <div class="rule"><b>Hard stop $0.50</b><p>A best bid at or below $0.50 triggers a latched sale. After a full stop exit, that tranche rearms when its ask recovers to its original entry trigger.</p></div>
-      <div class="rule"><b>Recycle proceeds</b><p>After TP, the re-entry ask trails the highest observed ask by $0.10 and buys on a pullback, using net proceeds.</p></div>
+      <div class="rule"><b>TP bid $0.99</b><p>When the CLOB best bid reaches $0.99, demo accounting credits $1.00 per filled share. The displayed CLOB fill average and estimated fee remain separate.</p></div>
+      <div class="rule"><b>Hard stop $0.50</b><p>A best bid at or below $0.50 triggers a latched sale. A stopped tranche can rearm once when its ask recovers to its original entry trigger.</p></div>
+      <div class="rule"><b>One rearm per tranche</b><p>Each A/B tranche may rearm once per five-minute window after either TP or stop. After TP, its re-entry ask trails the high by $0.10 and buys on a pullback using net proceeds.</p></div>
     </div>
     <div class="tags"><span class="tag" id="entryCap">Entry cap —</span><span class="tag" id="forcedExit">Forced exit —</span><span class="tag">DEMO ONLY · NO LIVE ORDERS</span></div>
-    <div class="notice">A $0.90 average fill targets $1.00; that TP triggers only if the best bid reaches $1.00. Otherwise shares go through forced exit and, if still open, official settlement.</div>
+    <div class="notice">The $0.99 TP threshold is fixed for every position. TP orders still require available CLOB bids at or above $0.99; remaining shares go through forced exit and, if still open, official settlement.</div>
   </article>
 </section>
 <section class="panel">
@@ -101,7 +101,7 @@ function render(s){
       const p=t.position||{};
       const state=t.state.replace(/_/g,' ');
       const pill=state==='in position'?'good':state==='waiting entry'||state==='waiting reentry'||state==='waiting stop rearm'?'warn':'';
-      trancheRows.push('<tr><td class="'+(sideName==='UP'?'side-up':'side-down')+'">'+sideName+'</td><td>'+esc(t.id)+' · #'+Number(t.cycle||0)+'</td><td>ask ≥ '+px(t.entryTrigger)+'</td><td><span class="pill '+pill+'">'+esc(state)+'</span></td><td class="right">'+usd(t.availableUsd)+'</td><td class="right">'+px(p.entryPrice)+'</td><td class="right">'+px(p.takeProfitPrice)+(p.takeProfitReachable===false?' <span class="side-down">unreachable</span>':'')+'</td><td class="right">'+px(t.reentryPrice)+'</td><td class="right">'+qty(p.openShares)+'</td></tr>');
+       trancheRows.push('<tr><td class="'+(sideName==='UP'?'side-up':'side-down')+'">'+sideName+'</td><td>'+esc(t.id)+' · #'+Number(t.cycle||0)+' · rearm '+Number(t.rearmsUsed||0)+'/'+Number(t.rearmLimit||1)+'</td><td>ask ≥ '+px(t.entryTrigger)+'</td><td><span class="pill '+pill+'">'+esc(state)+'</span></td><td class="right">'+usd(t.availableUsd)+'</td><td class="right">'+px(p.entryPrice)+'</td><td class="right">'+px(p.takeProfitPrice)+(p.takeProfitReachable===false?' <span class="side-down">unreachable</span>':'')+'</td><td class="right">'+px(t.reentryPrice)+'</td><td class="right">'+qty(p.openShares)+'</td></tr>');
     }
   }
   $('tranches').innerHTML=trancheRows.length?trancheRows.join(''):empty('Waiting for market discovery',9);
@@ -109,7 +109,7 @@ function render(s){
   const pending=s.pending||[];$('openCount').textContent=pending.length+' open position'+(pending.length===1?'':'s');
   $('positions').innerHTML=pending.length?'<table><thead><tr><th>Side</th><th>Tranche</th><th>Cycle</th><th>Entry avg.</th><th>TP</th><th>Shares open</th><th>Best bid mark</th><th>Status</th><th class="right">Unrealized</th></tr></thead><tbody>'+pending.map(p=>{const mark=p.status==='pending_resolution'?(finite(p.lastKnownMark)?'STALE '+px(p.lastKnownMark):'No current mark'):px(p.mark);return '<tr><td class="'+(p.side==='UP'?'side-up':'side-down')+'">'+esc(p.side)+'</td><td>'+esc(p.trancheId)+'</td><td>'+Number(p.cycle)+'</td><td>'+px(p.entryPrice)+'</td><td>'+px(p.takeProfitPrice)+'</td><td>'+qty(p.openShares)+'</td><td>'+mark+'</td><td>'+esc(p.status)+'</td><td class="right">'+pnlHtml(p.unrealized)+'</td></tr>'}).join('')+'</tbody></table>':'<div class="empty">No open positions</div>';
   const trades=s.trades||[];$('tradeCount').textContent=trades.length+' shown';
-  $('trades').innerHTML=trades.length?'<table><thead><tr><th>Time</th><th>Side</th><th>Tranche</th><th>Cycle</th><th>Shares</th><th>Entry avg.</th><th>Exit avg.</th><th>Net proceeds</th><th>Fees</th><th>Reason</th><th class="right">Net P&amp;L</th></tr></thead><tbody>'+trades.map(t=>'<tr><td>'+time(t.ts)+'</td><td class="'+(t.side==='UP'?'side-up':'side-down')+'">'+esc(t.side)+'</td><td>'+esc(t.tranche)+'</td><td>'+Number(t.cycle)+'</td><td>'+qty(t.shares)+'</td><td>'+px(t.entryPrice)+'</td><td>'+px(t.exitPrice)+'</td><td>'+usd(t.netExitProceeds)+'</td><td>'+usd(t.fees)+'</td><td>'+esc(t.reason==='MARKET_RESOLUTION'?'SETTLED '+(t.resolutionOutcome||'')+' @ '+Number(t.resolutionPricePerShare).toFixed(2):t.reason)+'</td><td class="right">'+pnlHtml(t.pnl)+'</td></tr>').join('')+'</tbody></table>':'<div class="empty">No completed tranche cycles</div>';
+   $('trades').innerHTML=trades.length?'<table><thead><tr><th>Time</th><th>Side</th><th>Tranche</th><th>Cycle</th><th>Shares</th><th>Entry avg.</th><th>Accounted exit/share</th><th>CLOB exit avg.</th><th>Net proceeds</th><th>Fees</th><th>Reason</th><th class="right">Net P&amp;L</th></tr></thead><tbody>'+trades.map(t=>'<tr><td>'+time(t.ts)+'</td><td class="'+(t.side==='UP'?'side-up':'side-down')+'">'+esc(t.side)+'</td><td>'+esc(t.tranche)+'</td><td>'+Number(t.cycle)+'</td><td>'+qty(t.shares)+'</td><td>'+px(t.entryPrice)+'</td><td>'+px(t.exitPrice)+'</td><td>'+px(t.clobExitPrice)+'</td><td>'+usd(t.netExitProceeds)+'</td><td>'+usd(t.fees)+'</td><td>'+esc(t.reason==='MARKET_RESOLUTION'?'SETTLED '+(t.resolutionOutcome||'')+' @ '+Number(t.resolutionPricePerShare).toFixed(2):t.reason)+'</td><td class="right">'+pnlHtml(t.pnl)+'</td></tr>').join('')+'</tbody></table>':'<div class="empty">No completed tranche cycles</div>';
   $('uptime').textContent='Uptime '+clock(s.uptimeSec||0);
   const logs=s.log||[];$('log').innerHTML=logs.length?logs.slice(0,35).map(x=>'<div class="logrow"><span class="logtime">'+time(x.ts)+'</span><span class="logevent">'+esc(x.event)+'</span><span>'+esc(x.note)+'</span></div>').join(''):'<div class="empty">Waiting for bot events</div>';
 }

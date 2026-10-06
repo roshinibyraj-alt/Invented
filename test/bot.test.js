@@ -108,8 +108,10 @@ test('strategy constants match the confirmed independent-side rules', () => {
   assert.equal(cfg.TRANCHE_BUDGET_USD, 250);
   assert.equal(cfg.FIRST_ENTRY_ASK_USD, 0.60);
   assert.equal(cfg.SECOND_ENTRY_ASK_USD, 0.70);
-  assert.equal(cfg.TAKE_PROFIT_OFFSET_USD, 0.10);
+  assert.equal(cfg.TAKE_PROFIT_BID_USD, 0.99);
+  assert.equal(cfg.TAKE_PROFIT_CREDIT_PRICE_USD, 1.00);
   assert.equal(cfg.REENTRY_PULLBACK_USD, 0.10);
+  assert.equal(cfg.MAX_REARMS_PER_TRANCHE, 1);
   assert.equal(cfg.HARD_STOP_LOSS_BID_USD, 0.50);
   assert.equal(cfg.MAX_ENTRY_ASK_USD, 0.90);
   assert.equal(cfg.FORCED_EXIT_BUFFER_SECONDS, 10);
@@ -205,6 +207,16 @@ for (const sideName of ['UP', 'DOWN']) {
     assert.equal(fx.trader.calls.length, callsAfterStops + 2);
     assert.ok(tranches.every((tranche) => tranche.state === 'in_position'));
     assert.deepEqual(tranches.map((tranche) => tranche.cycle), [2, 2]);
+    assert.deepEqual(tranches.map((tranche) => tranche.rearmsUsed), [1, 1]);
+
+    await quote(fx, sideName, 0.50, 0.51);
+    assert.ok(tranches.every((tranche) => tranche.state === 'done_for_window'));
+    assert.ok(tranches.every((tranche) => tranche.position === null));
+    const callsAfterSingleRearms = fx.trader.calls.length;
+    await quote(fx, sideName, 0.59, 0.60);
+    await quote(fx, sideName, 0.69, 0.70);
+    assert.equal(fx.trader.calls.length, callsAfterSingleRearms,
+      'a tranche cannot rearm again after its one follow-up position closes');
   });
 }
 
@@ -242,60 +254,106 @@ test('hard stop stays latched and retries if no bid fills at the trigger', async
   assert.equal(fx.bot.log.filter((entry) => entry.event === 'STOP_LOSS_TRIGGERED').length, 2);
 });
 
-test('entry asks above $0.90 are skipped; a cap-price TP remains reachable at $1', async () => {
+test('entry asks above $0.90 are skipped; fixed $0.99 TP credits $1 per share', async () => {
   const fx = fixture();
   await quote(fx, 'UP', 0.90, 0.91);
   assert.equal(fx.trader.calls.length, 0);
 
   await quote(fx, 'UP', 0.89, 0.90);
   assert.equal(fx.trader.calls.length, 2);
-  assert.ok(fx.w.sides.UP.tranches.every((tranche) => tranche.position.takeProfitPrice === 1));
+  assert.ok(fx.w.sides.UP.tranches.every((tranche) => tranche.position.takeProfitPrice === 0.99));
   assert.ok(fx.w.sides.UP.tranches.every((tranche) => tranche.position.takeProfitReachable === true));
 
-  await quote(fx, 'UP', 0.99, 1);
-  assert.equal(fx.trader.calls.length, 2, 'a bid below $1 must not hit the cap-price TP');
-  await quote(fx, 'UP', 1, 1);
-  assert.equal(fx.trader.calls.length, 4, 'a bid at $1 hits the cap-price TP');
+  await quote(fx, 'UP', 0.98, 0.99);
+  assert.equal(fx.trader.calls.length, 2, 'a bid below $0.99 must not hit TP');
+  await quote(fx, 'UP', 0.99, 0.99);
+  assert.equal(fx.trader.calls.length, 4, 'a bid at $0.99 hits TP');
+  assert.ok(fx.bot.trades.every((trade) => trade.exitPrice === 1));
+  assert.ok(fx.bot.trades.every((trade) => trade.clobExitPrice === 0.99));
 });
 
-test('TP uses best bid; re-entry trails the post-TP ask high by $0.10 and recycles proceeds', async () => {
+test('fixed TP credits $1 per share and permits one trailing-pullback rearm', async () => {
   const fx = fixture();
   fx.w.sides.UP.tranches[1].state = 'done_for_window';
   await quote(fx, 'UP', 0.59, 0.60);
   const tranche = fx.w.sides.UP.tranches[0];
   const position = tranche.position;
-  approx(position.takeProfitPrice, 0.70);
+  approx(position.takeProfitPrice, 0.99);
 
-  await quote(fx, 'UP', 0.69, 0.70);
+  await quote(fx, 'UP', 0.98, 0.99);
   assert.equal(fx.trader.calls.length, 1, 'bid below TP must not sell');
 
-  await quote(fx, 'UP', 0.70, 0.70);
+  await quote(fx, 'UP', 0.99, 0.99);
   assert.equal(fx.trader.calls.length, 2);
   assert.equal(fx.trader.calls[1].side, 'SELL');
-  assert.equal(fx.trader.calls[1].options.priceLimit, 0.70);
+  assert.equal(fx.trader.calls[1].options.priceLimit, 0.99);
   assert.equal(tranche.state, 'waiting_reentry');
   assert.equal(tranche.position, null);
-  const expectedNetProceeds = position.shares * 0.70 - estimateTakerFee(position.shares, 0.70);
-  approx(tranche.reentryPrice, 0.60);
-  approx(tranche.reentryPeakAsk, 0.70);
+  const expectedNetProceeds = position.shares * 1 - estimateTakerFee(position.shares, 0.99);
+  approx(tranche.reentryPrice, 0.89);
+  approx(tranche.reentryPeakAsk, 0.99);
   approx(tranche.availableUsd, expectedNetProceeds, 1e-6);
   approx(fx.bot.trades[0].netExitProceeds, expectedNetProceeds, 1e-3);
+  approx(fx.bot.trades[0].exitPrice, 1);
+  approx(fx.bot.trades[0].clobExitPrice, 0.99);
   approx(fx.bot.stats.realizedPnl, fx.bot.trades[0].pnl, 0.01);
 
-  await quote(fx, 'UP', 0.79, 0.80);
-  assert.equal(fx.trader.calls.length, 2, 'a rally to $0.80 must not buy before the pullback');
-  approx(tranche.reentryPrice, 0.70);
-  approx(tranche.reentryPeakAsk, 0.80);
+  await quote(fx, 'UP', 0.99, 1);
+  assert.equal(fx.trader.calls.length, 2, 'a rally to $1 must not buy before the pullback');
+  approx(tranche.reentryPrice, 0.90);
+  approx(tranche.reentryPeakAsk, 1);
 
-  await quote(fx, 'UP', 0.70, 0.71);
-  assert.equal(fx.trader.calls.length, 2, 'ask above the trailing $0.70 target must not re-enter');
-  await quote(fx, 'UP', 0.69, 0.70);
+  await quote(fx, 'UP', 0.90, 0.91);
+  assert.equal(fx.trader.calls.length, 2, 'ask above the trailing $0.90 target must not re-enter');
+  await quote(fx, 'UP', 0.89, 0.90);
   assert.equal(fx.trader.calls.length, 3);
   assert.equal(fx.trader.calls[2].side, 'BUY');
   approx(fx.trader.calls[2].amount, expectedNetProceeds, 1e-6);
-  approx(tranche.position.entryPrice, 0.70);
-  approx(tranche.position.takeProfitPrice, 0.80);
+  approx(tranche.position.entryPrice, 0.90);
+  approx(tranche.position.takeProfitPrice, 0.99);
   assert.equal(tranche.cycle, 2);
+  assert.equal(tranche.rearmsUsed, 1);
+
+  await quote(fx, 'UP', 0.99, 0.99);
+  assert.equal(fx.trader.calls.length, 4, 'the rearmed tranche can still hit its fixed TP');
+  assert.equal(tranche.state, 'done_for_window');
+  const callsAfterRearmedTp = fx.trader.calls.length;
+  await quote(fx, 'UP', 0.59, 0.60);
+  assert.equal(fx.trader.calls.length, callsAfterRearmedTp,
+    'the tranche does not rearm a second time');
+});
+
+test('partial TP fills credit $1 per share while marking remaining shares at the CLOB bid', async () => {
+  const fx = fixture();
+  fx.w.sides.UP.tranches[1].state = 'done_for_window';
+  await quote(fx, 'UP', 0.59, 0.60);
+  const tranche = fx.w.sides.UP.tranches[0];
+  const position = tranche.position;
+  const originalOrder = fx.trader.placeFakMarketOrder.bind(fx.trader);
+  let partial = true;
+  fx.trader.placeFakMarketOrder = async (tokenId, side, amount, options = {}) => {
+    if (String(side).toUpperCase() === 'SELL' && partial) {
+      partial = false;
+      fx.trader.calls.push({ tokenId, side, amount, options: { ...options } });
+      const shares = Number(amount) / 2;
+      return {
+        id: 'fake-partial-tp', status: 'matched', isFilled: true, avgPrice: 0.99,
+        raw: { makingAmount: String(shares), takingAmount: String(shares * 0.99) },
+      };
+    }
+    return originalOrder(tokenId, side, amount, options);
+  };
+
+  await quote(fx, 'UP', 0.99, 0.99);
+  approx(position.openShares, position.shares / 2);
+  approx(position.exitProceeds, position.shares / 2);
+  approx(position.lastMark, 0.99);
+
+  await quote(fx, 'UP', 0.99, 0.99);
+  assert.equal(position.openShares, 0);
+  approx(fx.bot.trades[0].exitPrice, 1);
+  approx(fx.bot.trades[0].clobExitPrice, 0.99);
+  approx(fx.bot.trades[0].exitProceeds, position.shares, 1e-3);
 });
 
 test('forced exits start at T−10 seconds and stop re-entries', async () => {
@@ -493,7 +551,9 @@ test('snapshot reports the demo-only mode and configured TP/cap rules', () => {
   assert.equal(snapshot.mode, 'DEMO');
   assert.equal(snapshot.strategy.sideBudgetUsd, 500);
   assert.equal(snapshot.strategy.trancheBudgetUsd, 250);
-  assert.equal(snapshot.strategy.takeProfitOffset, 0.10);
+  assert.equal(snapshot.strategy.takeProfitBid, 0.99);
+  assert.equal(snapshot.strategy.takeProfitCreditPrice, 1.00);
+  assert.equal(snapshot.strategy.maxRearmsPerTranche, 1);
   assert.equal(snapshot.strategy.maxEntryAsk, 0.90);
   assert.equal(snapshot.strategy.firstEntryAsk, 0.60);
   assert.equal(snapshot.strategy.secondEntryAsk, 0.70);
