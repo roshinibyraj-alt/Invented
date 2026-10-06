@@ -1,8 +1,8 @@
 {
-  "name": "trigger-hedge-demo",
+  "name": "clob-independent-tranche-demo",
   "version": "1.0.0",
   "private": true,
-  "description": "Demo-only Polymarket BTC 5-minute trigger-and-hedge bot.",
+  "description": "Demo-only CLOB-based Polymarket BTC 5-minute UP/DOWN tranche bot.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
@@ -12,10 +12,6 @@
     "node": ">=18"
   },
   "dependencies": {
-    "viem": "^2.21.0",
-    "@polymarket/clob-client-v2": "1.1.0",
-    "@polymarket/builder-relayer-client": "latest",
-    "ccxt": "^4.5.85",
     "ws": "^8.18.0"
   }
 }

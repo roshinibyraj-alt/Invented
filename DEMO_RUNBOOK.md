@@ -1,27 +1,24 @@
-# Demo-mode runbook
-
-Use this checklist to exercise the trigger/hedge strategy without real orders. `DemoTrader` reads public Polymarket books and simulates fills locally; it does not sign or submit orders.
+# CLOB tranche bot demo runbook
 
 ## Safe startup
 
-1. Keep `LIVE_TRADING` unset or set to anything other than the exact text `true`. No wallet key is needed.
-2. Run `npm install`, then `npm test`.
-3. Start with `npm start` and open `http://localhost:3000`.
-4. Confirm the dashboard says **DEMO MODE**, shows **$10,000** starting capital, and reports a **$100** primary stake with `$0.69` / `$0.70` triggers.
-5. Set `LIVE_TRADING=true` only in a controlled test if verifying the guard; startup must exit before wallet authentication.
+1. Keep `LIVE_TRADING` unset. No wallet key or trading credential is used.
+2. Run `npm install`, `npm test`, then `npm start`.
+3. Open `http://localhost:3000` and confirm **DEMO ONLY**.
+4. Confirm the dashboard reports $10,000 paper capital, $500 per side, $250 per tranche, a $0.90 entry cap, and forced exit at T−2 seconds.
 
-## What to check
+## Expected behavior
 
-- On an active BTC 5-minute window, the first UP/DOWN best ask at or above `$0.69` triggers a marketable demo BUY for the current USDC stake. The initial primary stake is `$100`.
-- After the primary entry, the opposite side is bought only when its best ask reaches `$0.70`. The hedge is 45% of the primary stake, so the sequence is `$45`, `$90`, `$180`, and so on. It is an additional position; it does not sell or close the primary.
-- A primary loss doubles the next window's primary stake; a primary win resets it to `$100`. The hedge result does not change the stake progression.
-- At any point while a five-minute window is active, a fresh UP or DOWN best-ask tick at or above `$0.97` declares that side the winner and the opposite side the loser. The bot settles the window's positions and updates the primary stake ladder immediately; it does not need a paired-price confirmation.
-- If neither side's best ask reaches `$0.97` before the window closes, positions remain unresolved. There is no official-result or close-time leader fallback, and the next primary entry waits for the previous primary rather than using an outdated stake.
-- Railway stdout emits structured `[bot]` events for startup, market waits, window readiness, feed errors, and strategy actions. A `BOT_HEARTBEAT` appears every 30 seconds with market readiness, UP/DOWN asks, and ages of the latest quote and WebSocket quote; it does not log every price tick.
-- Marketable BUY amount is a fixed USDC budget: `$100` at `$0.69` targets about **144.93 shares** with enough depth. The trigger is not a fill-price cap: execution can be above or below the triggering ask, with 100000% configured slippage, bounded by the binary contract's valid maximum of `$1`. A one-tick ask jump from `$0.65` to `$0.75` still triggers. Better fills buy more shares; thin books can leave budget unfilled. If the REST book is unavailable or has no usable asks, a cached ask no older than 2.5 seconds is used for the simulated fill. Estimated taker fees are included in paper P&L.
-- Settlement uses actual filled shares: each share on the winning side returns `$1`; each losing share returns `$0`, including partial fills.
-- Equity is available cash plus the marked value of all open shares, including positions from previous windows. Total P&L is equity minus starting capital.
+- UP and DOWN evaluate their own asks and positions; either side can enter without the other.
+- A uses the $0.50 ask trigger; B uses the $0.60 trigger. If first observed at $0.60 or higher, both can buy at the current ask if it is no more than $0.90.
+- The simulator sweeps visible CLOB depth. A thin book may partially fill; any unspent part of the tranche allocation remains available.
+- Each tranche's TP is calculated from its own average fill, not the trigger ask. The simulator sells only at bids at or above that TP.
+- After the complete TP sale, the tranche's available allocation plus its full net sale proceeds are used on the next buy when its ask reaches TP−$0.10. The other tranche's balance and state do not change.
+- An entry above $0.80 has an unreachable +$0.20 TP and stays open until the forced-exit cutoff.
+- At T−2 seconds, the simulator stops entries and attempts to sell open shares against visible bids. It retries while the window remains open. With no bid liquidity, the remaining shares are shown as unresolved; no synthetic sale is recorded.
 
-## Interpret results
+## Reading the output
 
-Demo cash, stake progression, and trade history are in memory and reset when the process restarts. The public book is used as a fill simulation; fills, estimated taker fees, settlement thresholds, and P&L are not evidence of live execution or profitability. Stop the process with Ctrl+C.
+- Dashboard tranche rows show each entry threshold, available budget, average fill, TP, re-entry ask, and open shares.
+- `[bot]` stdout records window discovery, entries, TP/forced exits, unfilled exits, and a 30-second health heartbeat.
+- Equity marks open positions to the latest best bid. Taker fees are estimated, and paper fills are not evidence of live execution or profitability.
