@@ -1,59 +1,65 @@
 'use strict';
 
-// Demo trader reads the public CLOB and simulates orders locally.
-// It never signs, sends an order, or accesses a wallet.
+// Public CLOB book reader and local paper-fill simulator.
+// This class has no wallet, signing, authentication, or live-order methods.
 const CLOB_HOST = 'https://clob.polymarket.com';
-const strategy = require('./strategy');
 const config = require('./config');
 
 class DemoTrader {
   constructor() {
     this.demoMode = true;
     this.address = 'DEMO MODE (no wallet, no real orders)';
-    this.depositWallet = null;
-    this._n = 0;
-    this.orders = new Map();
     this.quotes = new Map();
+    this._nextOrderId = 0;
   }
-
-  async prepareMarket() { return true; }
 
   async getOrderBook(tokenId) {
     try {
-      const response = await fetch(CLOB_HOST + '/book?token_id=' + encodeURIComponent(tokenId));
+      const response = await fetch(
+        CLOB_HOST + '/book?token_id=' + encodeURIComponent(tokenId),
+        { signal: AbortSignal.timeout(4000) },
+      );
       if (!response.ok) return null;
       return await response.json();
-    } catch (_) { return null; }
+    } catch (_) {
+      return null;
+    }
+  }
+
+  updateQuote(tokenId, quote) {
+    this.quotes.set(String(tokenId), {
+      bid: validPrice(quote && quote.bid),
+      ask: validPrice(quote && quote.ask),
+      updatedAt: Date.now(),
+    });
   }
 
   async placeFakMarketOrder(tokenId, side, amount, options = {}) {
-    const book = await this.getOrderBook(tokenId);
     const buying = String(side).toUpperCase() === 'BUY';
+    const book = await this.getOrderBook(tokenId);
     const priceLimit = Number(options && options.priceLimit);
     const hasPriceLimit = Number.isFinite(priceLimit) && priceLimit > 0;
     let levels = (buying ? (book && book.asks || []) : (book && book.bids || []))
       .map((level) => ({ price: Number(level.price), size: Number(level.size) }))
-      .filter((level) => level.price > 0 && level.size > 0
-        && (!buying || level.price <= config.MAX_BINARY_PRICE_USD)
+      .filter((level) => validPrice(level.price) != null
+        && Number.isFinite(level.size) && level.size > 0
         && (!hasPriceLimit || (buying ? level.price <= priceLimit : level.price >= priceLimit)))
       .sort(buying ? (a, b) => a.price - b.price : (a, b) => b.price - a.price);
-    // A fresh market-feed ask is sufficient for a demo fill when the public
-    // REST book is missing or empty. Keep this fallback bounded by quote age.
-    if (buying && levels.length === 0) {
-      const cachedQuote = this.quotes.get(tokenId);
-      const quoteAge = cachedQuote ? Date.now() - cachedQuote.updatedAt : Infinity;
-      const ask = Number(cachedQuote && cachedQuote.ask);
-      if (quoteAge >= 0 && quoteAge <= config.PRICE_STALE_MS
-        && ask > 0 && ask <= config.MAX_BINARY_PRICE_USD
-        && (!hasPriceLimit || ask <= priceLimit)) {
-        levels = [{ price: ask, size: Infinity }];
+
+    if (levels.length === 0) {
+      const cached = this.quotes.get(String(tokenId));
+      const age = cached ? Date.now() - cached.updatedAt : Infinity;
+      const fallbackPrice = Number(cached && (buying ? cached.ask : cached.bid));
+      const priceAllowed = validPrice(fallbackPrice) != null
+        && (!hasPriceLimit || (buying ? fallbackPrice <= priceLimit : fallbackPrice >= priceLimit));
+      if (cached && age >= 0 && age <= config.PRICE_STALE_MS && priceAllowed) {
+        levels = [{ price: fallbackPrice, size: Infinity }];
       }
     }
+
+    let remaining = Math.max(0, Number(amount) || 0);
     let shares = 0;
     let notional = 0;
-    // BUY amount is a USDC budget. Sweep the eligible asks; cheaper fills buy
-    // more shares. The trigger is not itself a fill-price ceiling.
-    let remaining = Math.max(0, Number(amount) || 0);
     for (const level of levels) {
       if (buying) {
         const spend = Math.min(remaining, level.price * level.size);
@@ -68,97 +74,32 @@ class DemoTrader {
       }
       if (remaining <= 1e-9) break;
     }
-    this._n += 1;
-    const id = 'demo-' + this._n;
+
+    const id = 'demo-' + (++this._nextOrderId);
     const raw = buying
-      ? { status: shares > 0 ? 'matched' : 'unmatched', makingAmount: String(notional), takingAmount: String(shares) }
-      : { status: shares > 0 ? 'matched' : 'unmatched', makingAmount: String(shares), takingAmount: String(notional) };
-    return { id, status: raw.status, isFilled: shares > 0, avgPrice: shares > 0 ? notional / shares : 0, raw };
-  }
-
-  async placeGtcOrder(tokenId, side, price, size) {
-    const cachedQuote = this.quotes.get(tokenId);
-    const book = cachedQuote ? null : await this.getOrderBook(tokenId);
-    this._n += 1;
-    const id = 'demo-maker-' + this._n;
-    const order = {
-      id, tokenId, side: String(side).toUpperCase(), price: Number(price),
-      original_size: Number(size), size_matched: 0, status: 'LIVE',
-      makerOnly: true, makerFee: 0, makerRebateEstimate: 0,
-    };
-    this.orders.set(id, order);
-    if (cachedQuote) this._matchAtPrices(order, cachedQuote.bid, cachedQuote.ask);
-    else this._matchAtTouch(order, book);
+      ? {
+        status: shares > 0 ? 'matched' : 'unmatched',
+        makingAmount: String(notional), takingAmount: String(shares),
+      }
+      : {
+        status: shares > 0 ? 'matched' : 'unmatched',
+        makingAmount: String(shares), takingAmount: String(notional),
+      };
     return {
-      id, status: order.status, makerOnly: true, makerFee: 0,
-      makerRebateEstimate: order.makerRebateEstimate, matchedAt: order.matchedAt || null,
+      id, status: raw.status, isFilled: shares > 0,
+      avgPrice: shares > 0 ? notional / shares : 0, raw,
     };
   }
 
-  updateQuote(tokenId, quote) {
-    const bid = Number(quote && quote.bid);
-    const ask = Number(quote && quote.ask);
-    const bestBid = Number.isFinite(bid) && bid > 0 ? bid : null;
-    const bestAsk = Number.isFinite(ask) && ask > 0 ? ask : null;
-    this.quotes.set(tokenId, { bid: bestBid, ask: bestAsk, updatedAt: Date.now() });
-    for (const order of this.orders.values()) {
-      if (order.tokenId === tokenId && order.status === 'LIVE') this._matchAtPrices(order, bestBid, bestAsk);
-    }
+  async getBalance() {
+    return null;
   }
+}
 
-  async getOrder(id) {
-    const order = this.orders.get(id);
-    if (!order) return null;
-    if (order.status === 'LIVE') {
-      const cachedQuote = this.quotes.get(order.tokenId);
-      if (cachedQuote) this._matchAtPrices(order, cachedQuote.bid, cachedQuote.ask);
-      else this._matchAtTouch(order, await this.getOrderBook(order.tokenId));
-    }
-    return { ...order, price: String(order.price), original_size: String(order.original_size), size_matched: String(order.size_matched) };
-  }
-
-  _matchAtTouch(order, book) {
-    if (!book || order.status !== 'LIVE') return;
-    const bids = (book.bids || []).map((level) => Number(level.price)).filter((price) => Number.isFinite(price) && price > 0);
-    const asks = (book.asks || []).map((level) => Number(level.price)).filter((price) => Number.isFinite(price) && price > 0);
-    const bestBid = bids.length ? Math.max(...bids) : null;
-    const bestAsk = asks.length ? Math.min(...asks) : null;
-    this._matchAtPrices(order, bestBid, bestAsk);
-  }
-
-  _matchAtPrices(order, bestBid, bestAsk) {
-    if (order.status !== 'LIVE') return;
-    const touched = order.side === 'BUY'
-      ? strategy.buyLimitTouched(bestAsk, order.price)
-      : strategy.takeProfitTouched(bestBid, order.price);
-    if (!touched) return;
-    // Demo execution is intentionally all-or-none on an executable price touch.
-    // Visible order-book depth is not used to size the simulated fill.
-    order.size_matched = order.original_size;
-    order.status = 'MATCHED';
-    order.matchedAt = Date.now();
-    order.makerRebateEstimate = strategy.estimateMakerRebate(order.size_matched, order.price);
-  }
-
-  async cancelOrder(id) {
-    const order = this.orders.get(id);
-    if (!order) return { canceled: [] };
-    if (order.status === 'LIVE') order.status = 'CANCELED';
-    return { canceled: [id] };
-  }
-
-  async cancelMarketOrders(tokenId) {
-    for (const order of this.orders.values()) {
-      if (order.tokenId === tokenId && order.status === 'LIVE') order.status = 'CANCELED';
-    }
-    return { canceled: true };
-  }
-
-  async getOpenOrders() {
-    return [...this.orders.values()].filter((order) => order.status === 'LIVE').map((order) => ({ ...order }));
-  }
-
-  async getBalance() { return null; }
+function validPrice(value) {
+  if (value == null || value === '') return null;
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 && number <= 1 ? number : null;
 }
 
 module.exports = DemoTrader;

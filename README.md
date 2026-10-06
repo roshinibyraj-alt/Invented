@@ -1,20 +1,21 @@
-# Trigger Hedge Strategy
+# Independent CLOB Tranche Bot
 
-Demo-only Polymarket BTC 5-minute UP/DOWN bot.
+Demo-only Polymarket BTC five-minute UP/DOWN bot. Market metadata is discovered through Gamma; every price trigger and simulated fill uses the public Polymarket CLOB.
 
 ## Strategy
 
-After an active five-minute window opens, the first UP or DOWN **best ask at or above $0.69** triggers a marketable demo BUY for the current fixed-dollar primary stake. The strategy starts at **$100** and doubles the next primary stake after a primary loss (`$100 → $200 → $400 → …`); a primary win resets it to `$100`.
+- UP and DOWN are independent. Each side starts each five-minute window with a $500 allocation split into two $250 tranches.
+- Tranche A buys when that side's best ask is at least $0.50. Tranche B buys when its best ask is at least $0.60. If the first observed ask is already at least $0.60, both tranches may enter at the current available ask.
+- Entry orders spend the tranche's available USDC and never pay above a $0.90 ask. Thin books can result in a partial simulated fill.
+- Each tranche exits when its best bid reaches its average fill price plus $0.20. If the average fill is above $0.80, that TP is above the binary share's $1 ceiling; the position remains open for the forced exit instead.
+- After a complete TP sale, that tranche waits for its ask to fall to TP minus $0.10, then re-enters using its remaining allocation plus all net proceeds from the sale. The other tranche is unaffected. This repeats until the window's forced-exit cutoff.
+- Two seconds before expiry, new entries stop and any open positions are sold against available CLOB bids. If no bid liquidity is available, the demo leaves the remainder marked unresolved rather than inventing a fill.
 
-If a primary from an earlier window is still awaiting settlement, the next primary trigger waits for that result so the correct doubled or reset stake is used.
+## Safety and limitations
 
-After the primary entry, the bot buys the opposite side **only if its best ask reaches $0.70**. That stop-loss hedge is 45% of the primary stake (`$45`, `$90`, `$180`, …). The opposite buy does not close the primary position; both positions remain open for settlement. Only the primary position's result changes the stake progression.
+`DemoTrader` reads public CLOB books and simulates fills locally. It has no wallet, signer, authentication, or live order methods. `LIVE_TRADING=true` is rejected at startup. CCXT/spot-price signals, the old trigger/hedge rules, settlement guesses, and live-trading dependencies are not part of this bot.
 
-Orders are simulated locally from public CLOB books using fixed USDC budgets. A `$100` BUY at `$0.69` targets about **144.93 shares** when enough depth is available; cheaper fills buy more shares, while thin depth can leave part of the budget unfilled. The `$0.69` / `$0.70` prices are triggers, not fill-price ceilings: execution may be above or below the triggering ask, with **100000% configured slippage** (effectively any valid binary-contract ask through `$1`). A one-tick jump from `$0.65` to `$0.75` still triggers the BUY. If the REST book is unavailable or has no usable asks, the simulator uses the cached ask only while it is fresh (no older than 2.5 seconds). Settlement uses actual filled shares: each winning share pays `$1`, and each losing share pays `$0`. At any point while a five-minute window is active, a fresh UP or DOWN best-ask tick at or above `$0.97` declares that side the winner and the opposite side the loser. There is no official-result or close-time leader fallback; if neither ask reaches the threshold, positions remain unresolved and the next primary waits for the prior primary. Demo capital is **$10,000**.
-
-## Safety and limits
-
-The active entry point instantiates only `DemoTrader`, which never signs or submits exchange orders. `LIVE_TRADING=true` exits before wallet authentication. Demo cash, current stake, and trade history are in memory and reset when the process restarts. Bot state changes are emitted as structured `[bot]` lines to stdout, with a 30-second heartbeat showing market readiness, asks, and quote freshness. Estimated taker fees and simulated fills are illustrative only; they are not live execution or profitability evidence.
+Demo balance, tranche balances, positions, and trade history live in memory and reset on restart. Taker fees are estimates; CLOB depth and simulated fills are not evidence of live execution or profitability.
 
 ## Run
 
@@ -24,4 +25,4 @@ npm test
 npm start
 ```
 
-Open `http://localhost:3000` to view the demo dashboard. For the review checklist and settlement behavior, see [`DEMO_RUNBOOK.md`](./DEMO_RUNBOOK.md).
+Open `http://localhost:3000` for the dashboard. The dashboard and `[bot]` stdout events show quotes, tranche state, fills, exits, and unresolved forced exits.

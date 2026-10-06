@@ -1,15 +1,8 @@
 'use strict';
 
 /**
- * Market discovery (Gamma API) + real settlement for the BTC 5-min
- * up/down series. Ported from the paper-trading bot's
- * app/polymarket_client.py -- same slug convention, same "/events"
- * endpoint quirk (this 5-min series is NOT addressable via
- * /markets?slug=..., only /events?slug=... with the market nested one
- * level down at event.markets[0]), same defensive fallbacks.
- *
- * This module is read-only -- it never places an order. Real money only
- * moves through polymarket-trader.js.
+ * Read-only market discovery for BTC five-minute windows.
+ * Price data and simulated execution come from the public Polymarket CLOB.
  */
 
 const GAMMA_API_BASE = 'https://gamma-api.polymarket.com';
@@ -112,36 +105,8 @@ async function getActiveWindow(nowMs = Date.now()) {
   };
 }
 
-/** Real settlement -- polls Gamma for the market's own resolved outcome
- * (closed=true + a decisive outcomePrices split, winner priced >=0.99),
- * NOT a price guess. Returns 'UP', 'DOWN', or null if not resolved yet. */
-async function fetchResolution(slug) {
-  const { market } = await fetchMarketBySlug(slug);
-  if (!market || !market.closed) return null;
-
-  let outcomePrices = market.outcomePrices;
-  let outcomes = market.outcomes;
-  if (typeof outcomePrices === 'string') {
-    try { outcomePrices = JSON.parse(outcomePrices); } catch (_) { return null; }
-  }
-  if (typeof outcomes === 'string') {
-    try { outcomes = JSON.parse(outcomes); } catch (_) { return null; }
-  }
-  if (!outcomePrices || !outcomes || outcomePrices.length < 2) return null;
-
-  const prices = outcomePrices.map((p) => parseFloat(p));
-  const maxP = Math.max(...prices);
-  if (maxP < 0.99) return null; // not decisively resolved yet
-
-  const winIdx = prices.indexOf(maxP);
-  const winLabel = String(outcomes[winIdx]).toLowerCase();
-  if (winLabel === 'up' || winLabel === 'yes') return 'UP';
-  if (winLabel === 'down' || winLabel === 'no') return 'DOWN';
-  return null;
-}
-
 module.exports = {
   WINDOW_SECONDS, SLUG_PREFIX,
   currentWindowOpenTs, slugForTs, fetchMarketBySlug, extractTokenIds,
-  getActiveWindow, fetchResolution,
+  getActiveWindow,
 };
