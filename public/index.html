@@ -33,12 +33,12 @@ table{border-collapse:collapse;width:100%}th{font-size:9px;color:var(--muted);te
     <div class="eyebrow">Confirmed rules</div><h2>Strategy settings</h2>
     <div class="rule-grid" style="margin-top:11px">
       <div class="rule"><b>$500 per side</b><p>Two independent $250 tranches for UP and two for DOWN.</p></div>
-      <div class="rule"><b>Ask triggers</b><p>A enters at $0.50+; B enters at $0.60+. If first seen at $0.60+, both can enter.</p></div>
+      <div class="rule"><b>Ask triggers</b><p>Both $250 tranches on each side enter when that side's best ask reaches $0.60+.</p></div>
       <div class="rule"><b>TP +$0.20</b><p>Each tranche exits when its CLOB best bid reaches average fill +$0.20.</p></div>
       <div class="rule"><b>Recycle proceeds</b><p>Each tranche re-enters at TP −$0.10 using its full net proceeds.</p></div>
     </div>
     <div class="tags"><span class="tag" id="entryCap">Entry cap —</span><span class="tag" id="forcedExit">Forced exit —</span><span class="tag">DEMO ONLY · NO LIVE ORDERS</span></div>
-    <div class="notice">Above an average entry of $0.80, a +$0.20 TP exceeds the $1 share ceiling; that tranche waits for the forced exit.</div>
+    <div class="notice">Above an average entry of $0.80, a +$0.20 TP exceeds the $1 share ceiling. Expired unsold positions remain unvalued and show their last bid only as stale.</div>
   </article>
 </section>
 <section class="panel">
@@ -75,15 +75,16 @@ function render(s){
   $('fresh').textContent='Updated '+time(s.now);
   $('capital').textContent=usd(account.capital);$('cash').textContent=usd(account.cash);$('equity').textContent=usd(account.equity);
   $('drawdown').textContent='Peak drawdown '+usd(account.maxDrawdown);
-  const pnl=Number(account.totalPnl)||0;$('pnl').textContent=(pnl>=0?'+':'')+usd(pnl);$('pnl').style.color=pnl>0?'var(--green)':pnl<0?'var(--red)':'var(--text)';
-  $('record').textContent='Realized '+usd(stats.realizedPnl)+' · Open '+usd(account.unrealizedPnl)+' · '+(stats.wins||0)+'W/'+(stats.losses||0)+'L · est. fees '+usd(stats.estimatedFees);
+  const pnl=account.totalPnl;$('pnl').textContent=finite(pnl)?(Number(pnl)>=0?'+':'')+usd(pnl):'—';$('pnl').style.color=!finite(pnl)?'var(--muted)':Number(pnl)>0?'var(--green)':Number(pnl)<0?'var(--red)':'var(--text)';
+  const unresolved=Number(account.unresolvedPositions)||0;
+  $('record').textContent='Realized '+usd(stats.realizedPnl)+' · Open '+usd(account.unrealizedPnl)+(unresolved?' · '+unresolved+' unresolved; '+usd(account.unresolvedEntryCost)+' cost not valued':'')+' · '+(stats.wins||0)+'W/'+(stats.losses||0)+'L · est. fees '+usd(stats.estimatedFees);
   const error=$('error');if(s.error||s.executionHalt){error.textContent=s.error||'Execution is blocked';error.className='error show'}else error.className='error';
   $('market').textContent=w.slug||'Waiting for active market';$('windowStatus').textContent=String(w.status||'starting').replace(/_/g,' ');
   $('windowStatus').className='pill'+(w.closed?'':(s.pending||[]).length?' good':'');
   const remaining=Number(w.secondsRemaining)||0;$('timeLeft').textContent=w.closeTs?clock(remaining)+' remaining':'— remaining';
   const elapsed=Math.max(0,300-remaining);$('progress').style.width=Math.min(100,elapsed/300*100)+'%';
   $('entryCap').textContent='MAX ENTRY ASK · '+usd(cfg.maxEntryAsk);
-  $('forcedExit').textContent='FORCED EXIT · T−'+Number(cfg.forcedExitBufferSeconds||2)+'s';
+  $('forcedExit').textContent='FORCED EXIT · T−'+Number(cfg.forcedExitBufferSeconds||10)+'s';
   const sides=w.sides||{},rows=[];
   for(const sideName of ['UP','DOWN']){
     const side=sides[sideName]||{},quote=side.quote||{};
@@ -103,7 +104,7 @@ function render(s){
   $('tranches').innerHTML=trancheRows.length?trancheRows.join(''):empty('Waiting for market discovery',9);
   $('trancheCount').textContent=trancheRows.length+' independent tranches';
   const pending=s.pending||[];$('openCount').textContent=pending.length+' open position'+(pending.length===1?'':'s');
-  $('positions').innerHTML=pending.length?'<table><thead><tr><th>Side</th><th>Tranche</th><th>Cycle</th><th>Entry avg.</th><th>TP</th><th>Shares open</th><th>Best bid mark</th><th>Status</th><th class="right">Unrealized</th></tr></thead><tbody>'+pending.map(p=>'<tr><td class="'+(p.side==='UP'?'side-up':'side-down')+'">'+esc(p.side)+'</td><td>'+esc(p.trancheId)+'</td><td>'+Number(p.cycle)+'</td><td>'+px(p.entryPrice)+'</td><td>'+px(p.takeProfitPrice)+'</td><td>'+qty(p.openShares)+'</td><td>'+px(p.mark)+'</td><td>'+esc(p.status)+'</td><td class="right">'+usd(p.unrealized)+'</td></tr>').join('')+'</tbody></table>':'<div class="empty">No open positions</div>';
+  $('positions').innerHTML=pending.length?'<table><thead><tr><th>Side</th><th>Tranche</th><th>Cycle</th><th>Entry avg.</th><th>TP</th><th>Shares open</th><th>Best bid mark</th><th>Status</th><th class="right">Unrealized</th></tr></thead><tbody>'+pending.map(p=>{const mark=p.status==='unresolved_exit'?(finite(p.lastKnownMark)?'STALE '+px(p.lastKnownMark):'No current mark'):px(p.mark);return '<tr><td class="'+(p.side==='UP'?'side-up':'side-down')+'">'+esc(p.side)+'</td><td>'+esc(p.trancheId)+'</td><td>'+Number(p.cycle)+'</td><td>'+px(p.entryPrice)+'</td><td>'+px(p.takeProfitPrice)+'</td><td>'+qty(p.openShares)+'</td><td>'+mark+'</td><td>'+esc(p.status)+'</td><td class="right">'+usd(p.unrealized)+'</td></tr>'}).join('')+'</tbody></table>':'<div class="empty">No open positions</div>';
   const trades=s.trades||[];$('tradeCount').textContent=trades.length+' shown';
   $('trades').innerHTML=trades.length?'<table><thead><tr><th>Time</th><th>Side</th><th>Tranche</th><th>Cycle</th><th>Shares</th><th>Entry avg.</th><th>Exit avg.</th><th>Net proceeds</th><th>Fees</th><th>Reason</th><th class="right">Net P&amp;L</th></tr></thead><tbody>'+trades.map(t=>'<tr><td>'+time(t.ts)+'</td><td class="'+(t.side==='UP'?'side-up':'side-down')+'">'+esc(t.side)+'</td><td>'+esc(t.tranche)+'</td><td>'+Number(t.cycle)+'</td><td>'+qty(t.shares)+'</td><td>'+px(t.entryPrice)+'</td><td>'+px(t.exitPrice)+'</td><td>'+usd(t.netExitProceeds)+'</td><td>'+usd(t.fees)+'</td><td>'+esc(t.reason)+'</td><td class="right">'+usd(t.pnl)+'</td></tr>').join('')+'</tbody></table>':'<div class="empty">No completed tranche cycles</div>';
   $('uptime').textContent='Uptime '+clock(s.uptimeSec||0);

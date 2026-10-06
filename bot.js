@@ -223,6 +223,8 @@ class Bot {
   async _onQuote(slug, tokenId, update, source = 'websocket') {
     const w = this.w;
     if (!w || w.slug !== slug || !w.window || w.closed) return;
+    const now = Date.now();
+    if (now >= windowCloseMs(w)) return;
     const sideName = tokenId === w.window.tokenUp ? 'UP'
       : tokenId === w.window.tokenDown ? 'DOWN' : null;
     if (!sideName) return;
@@ -230,7 +232,6 @@ class Bot {
     const previous = this._quotesByToken.get(tokenId) || emptyQuote();
     const hasBid = update && Object.prototype.hasOwnProperty.call(update, 'bid');
     const hasAsk = update && Object.prototype.hasOwnProperty.call(update, 'ask');
-    const now = Date.now();
     const next = {
       bid: hasBid ? validPrice(update.bid) : previous.bid,
       ask: hasAsk ? validPrice(update.ask) : previous.ask,
@@ -432,7 +433,9 @@ class Bot {
       position.exitProceeds += grossProceeds;
       position.exitFees += fee;
       position.netExitProceeds += grossProceeds - fee;
-      position.realizedPnl += grossProceeds - fee - entryCostAllocated;
+      const realizedDelta = grossProceeds - fee - entryCostAllocated;
+      position.realizedPnl += realizedDelta;
+      this.stats.realizedPnl += realizedDelta;
       position.lastExitPrice = averageExit;
       position.lastMark = averageExit;
       this.cash += grossProceeds - fee;
@@ -444,7 +447,7 @@ class Bot {
         slug: w.slug, side: position.side, tranche: position.trancheId,
         reason, sharesSold: round(sold, 5), remainingShares: round(position.openShares, 5),
         avgExit: round(averageExit, 4), proceeds: round(grossProceeds, 2),
-        fee: round(fee, 4),
+        fee: round(fee, 4), realizedPnl: round(position.realizedPnl, 2),
         note: (reason === 'TAKE_PROFIT' ? 'Take-profit sale' : 'Forced window-exit sale')
           + ' simulated at average best bid $' + averageExit.toFixed(4)
           + (position.openShares > EPSILON ? '; remaining shares stay open for another exit attempt.' : '.'),
@@ -490,26 +493,23 @@ class Bot {
 
   async _forceExitSide(w, sideName, now) {
     const side = w.sides[sideName];
+    const exits = [];
+    w.status = 'forced_exit';
     for (const tranche of side.tranches) {
       if (tranche.position) {
-        await this._sellPosition(w, tranche, tranche.position, 'FORCED_WINDOW_EXIT', 0, now);
+        exits.push(this._sellPosition(w, tranche, tranche.position, 'FORCED_WINDOW_EXIT', 0, now));
       } else if (tranche.state === 'waiting_entry' || tranche.state === 'waiting_reentry') {
         tranche.state = 'window_exit_started';
       }
     }
-    w.status = 'forced_exit';
+    await Promise.all(exits);
   }
 
   async _finishWindow(w, now, event) {
     if (!w || w.closed) return;
     if (w.window) {
-      if (now < windowCloseMs(w)) {
-        for (const sideName of SIDES) {
-          const side = w.sides[sideName];
-          if (side.processingPromise) await side.processingPromise;
-          await this._forceExitSide(w, sideName, now);
-        }
-      } else {
+      const closeMs = windowCloseMs(w);
+      const stopWaitingEntries = () => {
         for (const sideName of SIDES) {
           for (const tranche of w.sides[sideName].tranches) {
             if (!tranche.position && (tranche.state === 'waiting_entry' || tranche.state === 'waiting_reentry')) {
@@ -517,12 +517,27 @@ class Bot {
             }
           }
         }
+      };
+      if (now < closeMs) {
+        await Promise.all(SIDES.map(async (sideName) => {
+          const processing = w.sides[sideName].processingPromise;
+          if (processing) await processing;
+        }));
+        if (Date.now() < closeMs) {
+          await Promise.all(SIDES.map((sideName) => this._forceExitSide(w, sideName, now)));
+        } else {
+          stopWaitingEntries();
+        }
+      } else {
+        stopWaitingEntries();
       }
     }
     w.closed = true;
     w.closedAt = now;
     w.status = this._positionsForWindow(w).length ? 'unresolved_exit' : 'window_closed';
     for (const position of this._positionsForWindow(w)) {
+      position.lastKnownMark = position.lastMark;
+      position.lastKnownMarkAt = position.lastMarkAt || null;
       position.status = 'unresolved_exit';
       const tranche = w.sides[position.side].tranches.find((item) => item.id === position.trancheId);
       if (tranche) tranche.state = 'unresolved_exit';
@@ -536,7 +551,6 @@ class Bot {
 
   _finalizeTrade(position, reason) {
     const pnl = position.realizedPnl;
-    this.stats.realizedPnl += pnl;
     if (pnl >= 0) this.stats.wins += 1;
     else this.stats.losses += 1;
     const trade = {
@@ -587,13 +601,41 @@ class Bot {
     }
   }
 
-  _recordEquity(now = Date.now()) {
-    const openValue = this.pending.reduce((total, position) => {
+  _accountValuation() {
+    const isMarkedCurrent = (position) => this.w && !this.w.closed
+      && Date.now() < windowCloseMs(this.w)
+      && position.status !== 'unresolved_exit'
+      && position.openTs === this.w.openTs;
+    const markedPositions = this.pending.filter(isMarkedCurrent);
+    const unresolvedPositions = this.pending.filter((position) => !isMarkedCurrent(position));
+    const openValue = markedPositions.reduce((total, position) => {
       const mark = Number.isFinite(Number(position.lastMark))
         ? Number(position.lastMark) : Number(position.entryPrice);
       return total + position.openShares * (Number.isFinite(mark) ? mark : 0);
     }, 0);
-    const equity = this.cash + openValue;
+    const unrealizedPnl = markedPositions.reduce((total, position) => {
+      const mark = Number.isFinite(Number(position.lastMark))
+        ? Number(position.lastMark) : Number(position.entryPrice);
+      const value = Number.isFinite(mark) ? mark : 0;
+      return total + position.openShares * value - position.remainingEntryCost;
+    }, 0);
+    const hasUnresolved = unresolvedPositions.length > 0;
+    const equity = hasUnresolved ? null : this.cash + openValue;
+    return {
+      openValue,
+      unrealizedPnl,
+      equity,
+      totalPnl: equity == null ? null : equity - this.capital,
+      unresolvedPositions,
+      unresolvedShares: unresolvedPositions.reduce((sum, position) => sum + position.openShares, 0),
+      unresolvedEntryCost: unresolvedPositions.reduce((sum, position) => sum + position.remainingEntryCost, 0),
+    };
+  }
+
+  _recordEquity(now = Date.now()) {
+    const valuation = this._accountValuation();
+    if (valuation.equity == null) return;
+    const equity = valuation.equity;
     this.peak = Math.max(this.peak, equity);
     this.maxDrawdown = Math.max(this.maxDrawdown, this.peak - equity);
     const last = this.equity[this.equity.length - 1];
@@ -625,9 +667,7 @@ class Bot {
   snapshot() {
     const now = Date.now();
     this._recordEquity(now);
-    const openValue = this.pending.reduce((sum, position) => sum
-      + position.openShares * (Number(position.lastMark) || 0), 0);
-    const equity = this.cash + openValue;
+    const valuation = this._accountValuation();
     const w = this.w;
     const window = w ? {
       slug: w.slug, status: w.status, openTs: w.openTs,
@@ -658,10 +698,14 @@ class Bot {
       now, mode: 'DEMO', uptimeSec: Math.floor((now - this.startedAt) / 1000),
       error: this.error, executionHalt: this.executionHalt,
       account: {
-        capital: this.capital, cash: round(this.cash, 2), openValue: round(openValue, 2),
-        equity: round(equity, 2), totalPnl: round(equity - this.capital, 2),
-        unrealizedPnl: round(openValue - this.pending.reduce((sum, p) => sum + p.remainingEntryCost, 0), 2),
-        maxDrawdown: round(this.maxDrawdown, 2),
+        capital: this.capital, cash: round(this.cash, 2), openValue: round(valuation.openValue, 2),
+        equity: valuation.equity == null ? null : round(valuation.equity, 2),
+        totalPnl: valuation.totalPnl == null ? null : round(valuation.totalPnl, 2),
+        unrealizedPnl: round(valuation.unrealizedPnl, 2),
+        unresolvedPositions: valuation.unresolvedPositions.length,
+        unresolvedShares: round(valuation.unresolvedShares, 5),
+        unresolvedEntryCost: round(valuation.unresolvedEntryCost, 2),
+        maxDrawdown: valuation.unresolvedPositions.length ? null : round(this.maxDrawdown, 2),
       },
       strategy: {
         sideBudgetUsd: cfg.SIDE_BUDGET_USD, trancheBudgetUsd: cfg.TRANCHE_BUDGET_USD,
@@ -686,12 +730,22 @@ class Bot {
   }
 
   _positionSnapshot(position) {
-    const mark = Number.isFinite(Number(position.lastMark)) ? Number(position.lastMark) : position.entryPrice;
+    const currentWindow = this.w && !this.w.closed
+      && position.openTs === this.w.openTs
+      && Date.now() < windowCloseMs(this.w);
+    const unresolved = position.status === 'unresolved_exit' || !currentWindow;
+    const mark = unresolved ? null
+      : Number.isFinite(Number(position.lastMark)) ? Number(position.lastMark) : position.entryPrice;
+    const lastKnownMark = position.lastKnownMark ?? position.lastMark ?? null;
     const costBasis = position.shares > 0
       ? (position.entryNotional + position.entryFee) * (position.openShares / position.shares) : 0;
     return {
       ...position, mark,
-      unrealized: position.openShares * mark - costBasis,
+      status: unresolved ? 'unresolved_exit' : position.status,
+      lastMark: unresolved ? null : position.lastMark,
+      lastKnownMark: unresolved ? lastKnownMark : null,
+      lastKnownMarkAt: unresolved ? (position.lastKnownMarkAt ?? position.lastMarkAt ?? null) : null,
+      unrealized: unresolved ? null : position.openShares * mark - costBasis,
     };
   }
 }

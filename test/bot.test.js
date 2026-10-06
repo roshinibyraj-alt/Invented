@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const cfg = require('../config');
 const Bot = require('../bot');
-const { makeWindowState } = require('../bot');
+const { makeWindowState, estimateTakerFee } = require('../bot');
 const { slugForTs } = require('../polymarket-market');
 
 const OPEN_TS = 1_800_000_000;
@@ -106,12 +106,12 @@ function approx(actual, expected, epsilon = 1e-7) {
 test('strategy constants match the confirmed independent-side rules', () => {
   assert.equal(cfg.SIDE_BUDGET_USD, 500);
   assert.equal(cfg.TRANCHE_BUDGET_USD, 250);
-  assert.equal(cfg.FIRST_ENTRY_ASK_USD, 0.50);
+  assert.equal(cfg.FIRST_ENTRY_ASK_USD, 0.60);
   assert.equal(cfg.SECOND_ENTRY_ASK_USD, 0.60);
   assert.equal(cfg.TAKE_PROFIT_OFFSET_USD, 0.20);
   assert.equal(cfg.REENTRY_PULLBACK_USD, 0.10);
   assert.equal(cfg.MAX_ENTRY_ASK_USD, 0.90);
-  assert.equal(cfg.FORCED_EXIT_BUFFER_SECONDS, 2);
+  assert.equal(cfg.FORCED_EXIT_BUFFER_SECONDS, 10);
 });
 
 test('UP and DOWN each start with two separate $250 tranche budgets', () => {
@@ -124,40 +124,32 @@ test('UP and DOWN each start with two separate $250 tranche budgets', () => {
   }
 });
 
-test('the $0.50 tranche enters independently and does not fire the $0.60 tranche', async () => {
+test('both $250 tranches on either side wait for their $0.60 entry trigger', async () => {
   const fx = fixture();
-  await quote(fx, 'UP', 0.49, 0.50);
+  await quote(fx, 'UP', 0.58, 0.59);
+  assert.equal(fx.trader.calls.length, 0);
+  assert.ok(fx.w.sides.UP.tranches.every((tranche) => tranche.state === 'waiting_entry'));
 
-  assert.equal(fx.trader.calls.length, 1);
-  assert.equal(fx.trader.calls[0].tokenId, 'up-token');
-  assert.equal(fx.trader.calls[0].side, 'BUY');
-  assert.equal(fx.trader.calls[0].amount, 250);
-  assert.equal(fx.trader.calls[0].options.priceLimit, 0.90);
-  assert.equal(fx.w.sides.UP.tranches[0].state, 'in_position');
-  assert.equal(fx.w.sides.UP.tranches[1].state, 'waiting_entry');
+  await quote(fx, 'UP', 0.59, 0.60);
+  assert.equal(fx.trader.calls.length, 2);
+  assert.deepEqual(fx.trader.calls.map((call) => call.amount), [250, 250]);
+  assert.ok(fx.trader.calls.every((call) => call.tokenId === 'up-token'
+    && call.side === 'BUY' && call.options.priceLimit === 0.90));
+  assert.ok(fx.w.sides.UP.tranches.every((tranche) => tranche.state === 'in_position'));
   assert.equal(fx.w.sides.DOWN.tranches[0].state, 'waiting_entry');
 });
 
-test('a first observed ask at $0.60+ catches up both independent tranches', async () => {
+test('UP and DOWN can each enter independently at $0.60 in the same window', async () => {
   const fx = fixture();
   await quote(fx, 'UP', 0.59, 0.60);
+  await quote(fx, 'DOWN', 0.59, 0.60);
 
-  assert.equal(fx.trader.calls.length, 2);
-  assert.deepEqual(fx.trader.calls.map((call) => call.amount), [250, 250]);
-  assert.ok(fx.w.sides.UP.tranches.every((tranche) => tranche.state === 'in_position'));
-  assert.ok(fx.w.sides.DOWN.tranches.every((tranche) => tranche.state === 'waiting_entry'));
-});
-
-test('UP and DOWN can enter independently in the same window', async () => {
-  const fx = fixture();
-  await quote(fx, 'UP', 0.49, 0.50);
-  await quote(fx, 'DOWN', 0.60, 0.61);
-
+  assert.equal(fx.trader.calls.length, 4);
+  assert.deepEqual(fx.trader.calls.map((call) => call.amount), [250, 250, 250, 250]);
   assert.deepEqual(fx.trader.calls.map((call) => call.tokenId), [
-    'up-token', 'down-token', 'down-token',
+    'up-token', 'up-token', 'down-token', 'down-token',
   ]);
-  assert.equal(fx.w.sides.UP.tranches[0].state, 'in_position');
-  assert.equal(fx.w.sides.UP.tranches[1].state, 'waiting_entry');
+  assert.ok(fx.w.sides.UP.tranches.every((tranche) => tranche.state === 'in_position'));
   assert.ok(fx.w.sides.DOWN.tranches.every((tranche) => tranche.state === 'in_position'));
 });
 
@@ -177,48 +169,50 @@ test('entry asks above $0.90 are skipped; a later eligible ask can still fire', 
 
 test('TP uses best bid, sells no lower than target, and recycles all net tranche proceeds', async () => {
   const fx = fixture();
-  await quote(fx, 'UP', 0.49, 0.50);
-  const tranche = fx.w.sides.UP.tranches[0];
   fx.w.sides.UP.tranches[1].state = 'done_for_window';
+  await quote(fx, 'UP', 0.59, 0.60);
+  const tranche = fx.w.sides.UP.tranches[0];
   const position = tranche.position;
-  approx(position.takeProfitPrice, 0.70);
+  approx(position.takeProfitPrice, 0.80);
 
-  await quote(fx, 'UP', 0.69, 0.70);
+  await quote(fx, 'UP', 0.79, 0.80);
   assert.equal(fx.trader.calls.length, 1, 'bid below TP must not sell');
 
-  await quote(fx, 'UP', 0.70, 0.72);
+  await quote(fx, 'UP', 0.80, 0.82);
   assert.equal(fx.trader.calls.length, 2);
   assert.equal(fx.trader.calls[1].side, 'SELL');
-  assert.equal(fx.trader.calls[1].options.priceLimit, 0.70);
+  assert.equal(fx.trader.calls[1].options.priceLimit, 0.80);
   assert.equal(tranche.state, 'waiting_reentry');
   assert.equal(tranche.position, null);
-  approx(tranche.reentryPrice, 0.60);
-  approx(tranche.availableUsd, 342.65, 1e-6);
-  approx(fx.bot.trades[0].netExitProceeds, 342.65, 1e-6);
+  const expectedNetProceeds = position.shares * 0.80 - estimateTakerFee(position.shares, 0.80);
+  approx(tranche.reentryPrice, 0.70);
+  approx(tranche.availableUsd, expectedNetProceeds, 1e-6);
+  approx(fx.bot.trades[0].netExitProceeds, expectedNetProceeds, 1e-3);
+  approx(fx.bot.stats.realizedPnl, fx.bot.trades[0].pnl, 0.01);
 
-  await quote(fx, 'UP', 0.60, 0.61);
+  await quote(fx, 'UP', 0.70, 0.71);
   assert.equal(fx.trader.calls.length, 2, 'ask above TP−$0.10 must not re-enter');
-  await quote(fx, 'UP', 0.59, 0.60);
+  await quote(fx, 'UP', 0.69, 0.70);
   assert.equal(fx.trader.calls.length, 3);
   assert.equal(fx.trader.calls[2].side, 'BUY');
-  approx(fx.trader.calls[2].amount, 342.65, 1e-6);
-  approx(tranche.position.entryPrice, 0.60);
-  approx(tranche.position.takeProfitPrice, 0.80);
+  approx(fx.trader.calls[2].amount, expectedNetProceeds, 1e-6);
+  approx(tranche.position.entryPrice, 0.70);
+  approx(tranche.position.takeProfitPrice, 0.90);
   assert.equal(tranche.cycle, 2);
 });
 
-test('forced exits begin exactly two seconds before expiry and stop re-entries', async () => {
+test('forced exits start at T−10 seconds and stop re-entries', async () => {
   const fx = fixture();
-  await quote(fx, 'UP', 0.49, 0.50);
   fx.w.sides.UP.tranches[1].state = 'done_for_window';
+  await quote(fx, 'UP', 0.59, 0.60);
   const closeMs = (OPEN_TS + 300) * 1000;
   const position = fx.w.sides.UP.tranches[0].position;
 
-  await quote(fx, 'UP', 0.65, 0.66, closeMs - 2501);
+  await quote(fx, 'UP', 0.65, 0.66, closeMs - 10001);
   assert.equal(position.openShares > 0, true);
   assert.equal(fx.trader.calls.length, 1);
 
-  await quote(fx, 'UP', 0.65, 0.66, closeMs - 2000);
+  await quote(fx, 'UP', 0.65, 0.66, closeMs - 10000);
   assert.equal(position.openShares, 0);
   assert.equal(fx.trader.calls.length, 2);
   assert.equal(fx.trader.calls[1].side, 'SELL');
@@ -227,19 +221,85 @@ test('forced exits begin exactly two seconds before expiry and stop re-entries',
   assert.equal(fx.trader.calls.some((call) => call.side === 'BUY' && call.amount !== 250), false);
 });
 
+test('forced exits start sales for all tranches concurrently', async () => {
+  const fx = fixture();
+  await quote(fx, 'UP', 0.59, 0.60);
+  const before = fx.trader.calls.length;
+
+  const exits = fx.bot._forceExitSide(fx.w, 'UP', fx.now);
+  const sells = fx.trader.calls.slice(before).filter((call) => call.side === 'SELL');
+  assert.equal(sells.length, 2);
+  await exits;
+  assert.ok(fx.w.sides.UP.tranches.every((tranche) => tranche.state === 'done_for_window'));
+});
+
+test('partial exits immediately update realized P&L and it reconciles with total P&L', async () => {
+  const fx = fixture();
+  fx.w.sides.UP.tranches[1].state = 'done_for_window';
+  await quote(fx, 'UP', 0.59, 0.60);
+  const tranche = fx.w.sides.UP.tranches[0];
+  const position = tranche.position;
+  fx.trader.books.set('up-token', {
+    bids: [{ price: 0.80, size: 100 }],
+    asks: [],
+  });
+
+  await fx.bot._sellPosition(fx.w, tranche, position, 'TAKE_PROFIT', 0.80, fx.now + 1000);
+
+  assert.equal(position.status, 'tp_partial');
+  assert.ok(position.openShares > 0);
+  assert.ok(position.realizedPnl > 0);
+  approx(fx.bot.stats.realizedPnl, position.realizedPnl, 1e-6);
+  const account = fx.bot.snapshot().account;
+  approx(account.totalPnl, fx.bot.stats.realizedPnl + account.unrealizedPnl, 0.02);
+});
+
 test('a quote after expiry cannot create a simulated late sale', async () => {
   const fx = fixture();
-  await quote(fx, 'UP', 0.49, 0.50);
   fx.w.sides.UP.tranches[1].state = 'done_for_window';
+  await quote(fx, 'UP', 0.59, 0.60);
   const position = fx.w.sides.UP.tranches[0].position;
   const expiredAt = (OPEN_TS + 300) * 1000 + 1;
 
   await quote(fx, 'UP', 0.70, 0.71, expiredAt);
+  approx(position.lastMark, 0.59);
+  const realNow = Date.now;
+  let expiredSnapshot;
+  try {
+    Date.now = () => expiredAt;
+    expiredSnapshot = fx.bot.snapshot();
+  } finally {
+    Date.now = realNow;
+  }
+  assert.equal(expiredSnapshot.pending[0].status, 'unresolved_exit');
+  assert.equal(expiredSnapshot.pending[0].mark, null);
+  assert.equal(expiredSnapshot.account.totalPnl, null);
   await fx.bot._finishWindow(fx.w, expiredAt, 'WINDOW_EXPIRED');
 
   assert.equal(fx.trader.calls.length, 1, 'no SELL should be simulated after expiry');
   assert.ok(position.openShares > 0);
   assert.equal(position.status, 'unresolved_exit');
+});
+
+test('expired unresolved positions keep a stale reference mark but are excluded from valuation', async () => {
+  const fx = fixture();
+  fx.w.sides.UP.tranches[1].state = 'done_for_window';
+  await quote(fx, 'UP', 0.59, 0.60);
+  const position = fx.w.sides.UP.tranches[0].position;
+  const expiredAt = (OPEN_TS + 300) * 1000 + 1;
+  await fx.bot._finishWindow(fx.w, expiredAt, 'WINDOW_EXPIRED');
+
+  const snapshot = fx.bot.snapshot();
+  const unresolved = snapshot.pending[0];
+  assert.equal(unresolved.status, 'unresolved_exit');
+  assert.equal(unresolved.mark, null);
+  assert.equal(unresolved.unrealized, null);
+  approx(unresolved.lastKnownMark, 0.59);
+  assert.equal(snapshot.account.unresolvedPositions, 1);
+  approx(snapshot.account.unresolvedEntryCost, position.remainingEntryCost, 0.01);
+  assert.equal(snapshot.account.equity, null);
+  assert.equal(snapshot.account.totalPnl, null);
+  assert.equal(snapshot.account.maxDrawdown, null);
 });
 
 test('demo-only guard blocks non-demo order adapters', async () => {
@@ -250,7 +310,7 @@ test('demo-only guard blocks non-demo order adapters', async () => {
   bot.w = fx.w;
   bot.prices = fx.bot.prices;
   bot._marketFeedSlug = fx.w.slug;
-  await quote({ ...fx, bot }, 'UP', 0.49, 0.50);
+  await quote({ ...fx, bot }, 'UP', 0.59, 0.60);
 
   assert.equal(bot.executionHalt, true);
   assert.equal(trader.calls.length, 0);
@@ -264,6 +324,8 @@ test('snapshot reports the demo-only mode and configured TP/cap rules', () => {
   assert.equal(snapshot.strategy.trancheBudgetUsd, 250);
   assert.equal(snapshot.strategy.takeProfitOffset, 0.20);
   assert.equal(snapshot.strategy.maxEntryAsk, 0.90);
-  assert.equal(snapshot.strategy.forcedExitBufferSeconds, 2);
+  assert.equal(snapshot.strategy.firstEntryAsk, 0.60);
+  assert.equal(snapshot.strategy.secondEntryAsk, 0.60);
+  assert.equal(snapshot.strategy.forcedExitBufferSeconds, 10);
   assert.equal(snapshot.executionHalt, false);
 });
