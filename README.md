@@ -5,7 +5,7 @@ Demo-only Polymarket BTC five-minute UP/DOWN bot. Market metadata is discovered 
 ## Strategy
 
 - UP and DOWN are independent. Each side starts each five-minute window with a $500 allocation split into two $250 tranches.
-- Both $250 tranches on each side buy when that side's best ask reaches at least $0.60. The UP and DOWN sides are independent.
+- On both UP and DOWN, tranche A buys when that side's best ask reaches $0.60; tranche B has its own $0.70 ask trigger. The sides remain independent.
 - Entry orders spend the tranche's available USDC and never pay above a $0.90 ask. Thin books can result in a partial simulated fill.
 - For every open UP or DOWN tranche, a best bid at or below $0.30 latches a hard stop and attempts to sell all remaining shares at available bids. It keeps retrying on new quotes if no bid is executable; a gap can therefore fill below $0.30. A stopped tranche cannot re-enter that window.
 - Each tranche exits when its best bid reaches its average fill price plus $0.20. If the average fill is above $0.80, that TP is above the binary share's $1 ceiling; the position remains open for the forced exit instead.

@@ -10,7 +10,7 @@
 ## Expected behavior
 
 - UP and DOWN evaluate their own asks and positions; either side can enter without the other.
-- Both $250 tranches on either side use the $0.60 ask trigger; UP and DOWN are independent. The $0.90 entry cap still applies.
+- On either side, tranche A uses a $0.60 ask trigger and tranche B uses $0.70; UP and DOWN remain independent. The $0.90 entry cap still applies.
 - The simulator sweeps visible CLOB depth. A thin book may partially fill; any unspent part of the tranche allocation remains available.
 - On either side, when a best bid reaches or falls below $0.30, the stop latches and the simulator attempts to sell the remaining shares at available bids (so a gap may fill below $0.30). It retries on new quotes if no bid is available, and a stopped tranche cannot re-enter that window.
 - Each tranche's TP is calculated from its own average fill, not the trigger ask. The simulator sells only at bids at or above that TP.

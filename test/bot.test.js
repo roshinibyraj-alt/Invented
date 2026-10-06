@@ -107,7 +107,7 @@ test('strategy constants match the confirmed independent-side rules', () => {
   assert.equal(cfg.SIDE_BUDGET_USD, 500);
   assert.equal(cfg.TRANCHE_BUDGET_USD, 250);
   assert.equal(cfg.FIRST_ENTRY_ASK_USD, 0.60);
-  assert.equal(cfg.SECOND_ENTRY_ASK_USD, 0.60);
+  assert.equal(cfg.SECOND_ENTRY_ASK_USD, 0.70);
   assert.equal(cfg.TAKE_PROFIT_OFFSET_USD, 0.20);
   assert.equal(cfg.REENTRY_PULLBACK_USD, 0.10);
   assert.equal(cfg.HARD_STOP_LOSS_BID_USD, 0.30);
@@ -125,13 +125,19 @@ test('UP and DOWN each start with two separate $250 tranche budgets', () => {
   }
 });
 
-test('both $250 tranches on either side wait for their $0.60 entry trigger', async () => {
+test('tranche A enters at $0.60 and tranche B waits for its $0.70 trigger', async () => {
   const fx = fixture();
   await quote(fx, 'UP', 0.58, 0.59);
   assert.equal(fx.trader.calls.length, 0);
   assert.ok(fx.w.sides.UP.tranches.every((tranche) => tranche.state === 'waiting_entry'));
 
   await quote(fx, 'UP', 0.59, 0.60);
+  assert.equal(fx.trader.calls.length, 1);
+  assert.equal(fx.trader.calls[0].amount, 250);
+  assert.equal(fx.w.sides.UP.tranches[0].state, 'in_position');
+  assert.equal(fx.w.sides.UP.tranches[1].state, 'waiting_entry');
+
+  await quote(fx, 'UP', 0.69, 0.70);
   assert.equal(fx.trader.calls.length, 2);
   assert.deepEqual(fx.trader.calls.map((call) => call.amount), [250, 250]);
   assert.ok(fx.trader.calls.every((call) => call.tokenId === 'up-token'
@@ -140,15 +146,23 @@ test('both $250 tranches on either side wait for their $0.60 entry trigger', asy
   assert.equal(fx.w.sides.DOWN.tranches[0].state, 'waiting_entry');
 });
 
-test('UP and DOWN can each enter independently at $0.60 in the same window', async () => {
+test('UP and DOWN each enter tranche A at $0.60 and tranche B at $0.70 independently', async () => {
   const fx = fixture();
   await quote(fx, 'UP', 0.59, 0.60);
   await quote(fx, 'DOWN', 0.59, 0.60);
+  assert.equal(fx.trader.calls.length, 2);
+  assert.ok(fx.w.sides.UP.tranches[0].position);
+  assert.ok(fx.w.sides.DOWN.tranches[0].position);
+  assert.equal(fx.w.sides.UP.tranches[1].state, 'waiting_entry');
+  assert.equal(fx.w.sides.DOWN.tranches[1].state, 'waiting_entry');
+
+  await quote(fx, 'UP', 0.69, 0.70);
+  await quote(fx, 'DOWN', 0.69, 0.70);
 
   assert.equal(fx.trader.calls.length, 4);
   assert.deepEqual(fx.trader.calls.map((call) => call.amount), [250, 250, 250, 250]);
   assert.deepEqual(fx.trader.calls.map((call) => call.tokenId), [
-    'up-token', 'up-token', 'down-token', 'down-token',
+    'up-token', 'down-token', 'up-token', 'down-token',
   ]);
   assert.ok(fx.w.sides.UP.tranches.every((tranche) => tranche.state === 'in_position'));
   assert.ok(fx.w.sides.DOWN.tranches.every((tranche) => tranche.state === 'in_position'));
@@ -158,6 +172,7 @@ for (const sideName of ['UP', 'DOWN']) {
   test(`${sideName} hard stop triggers at a $0.30 best bid and sells at the available bid`, async () => {
     const fx = fixture();
     await quote(fx, sideName, 0.59, 0.60);
+    await quote(fx, sideName, 0.69, 0.70);
     const tranches = fx.w.sides[sideName].tranches;
     const positions = tranches.map((tranche) => tranche.position);
     assert.ok(positions.every(Boolean));
@@ -182,6 +197,7 @@ for (const sideName of ['UP', 'DOWN']) {
 test('hard stop stays latched and retries if no bid fills at the trigger', async () => {
   const fx = fixture();
   await quote(fx, 'UP', 0.59, 0.60);
+  await quote(fx, 'UP', 0.69, 0.70);
   const [firstTranche, secondTranche] = fx.w.sides.UP.tranches;
   const firstPosition = firstTranche.position;
   const originalSell = fx.trader.placeFakMarketOrder.bind(fx.trader);
@@ -282,6 +298,7 @@ test('forced exits start at T−10 seconds and stop re-entries', async () => {
 test('forced exits start sales for all tranches concurrently', async () => {
   const fx = fixture();
   await quote(fx, 'UP', 0.59, 0.60);
+  await quote(fx, 'UP', 0.69, 0.70);
   const before = fx.trader.calls.length;
 
   const exits = fx.bot._forceExitSide(fx.w, 'UP', fx.now);
@@ -456,7 +473,7 @@ test('snapshot reports the demo-only mode and configured TP/cap rules', () => {
   assert.equal(snapshot.strategy.takeProfitOffset, 0.20);
   assert.equal(snapshot.strategy.maxEntryAsk, 0.90);
   assert.equal(snapshot.strategy.firstEntryAsk, 0.60);
-  assert.equal(snapshot.strategy.secondEntryAsk, 0.60);
+  assert.equal(snapshot.strategy.secondEntryAsk, 0.70);
   assert.equal(snapshot.strategy.forcedExitBufferSeconds, 10);
   assert.equal(snapshot.strategy.hardStopLossBid, 0.30);
   assert.equal(snapshot.executionHalt, false);
