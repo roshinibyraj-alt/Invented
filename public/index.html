@@ -34,12 +34,12 @@ table{border-collapse:collapse;width:100%}th{font-size:9px;color:var(--muted);te
     <div class="rule-grid" style="margin-top:11px">
       <div class="rule"><b>$500 per side</b><p>Two independent $250 tranches for UP and two for DOWN.</p></div>
       <div class="rule"><b>Ask triggers</b><p>For UP and DOWN, tranche A enters at best ask $0.60+ and tranche B at $0.70+.</p></div>
-      <div class="rule"><b>TP +$0.20</b><p>Each tranche exits when its CLOB best bid reaches average fill +$0.20.</p></div>
-      <div class="rule"><b>Hard stop $0.30</b><p>A best bid at or below $0.30 triggers a latched sale. After a full stop exit, that tranche rearms when its ask recovers to its original entry trigger.</p></div>
-      <div class="rule"><b>Recycle proceeds</b><p>Each tranche re-enters at TP −$0.10 using its full net proceeds.</p></div>
+      <div class="rule"><b>TP +$0.10</b><p>Each tranche exits when its CLOB best bid reaches its average fill +$0.10.</p></div>
+      <div class="rule"><b>Hard stop $0.50</b><p>A best bid at or below $0.50 triggers a latched sale. After a full stop exit, that tranche rearms when its ask recovers to its original entry trigger.</p></div>
+      <div class="rule"><b>Recycle proceeds</b><p>After TP, the re-entry ask trails the highest observed ask by $0.10 and buys on a pullback, using net proceeds.</p></div>
     </div>
     <div class="tags"><span class="tag" id="entryCap">Entry cap —</span><span class="tag" id="forcedExit">Forced exit —</span><span class="tag">DEMO ONLY · NO LIVE ORDERS</span></div>
-    <div class="notice">Above an average entry of $0.80, a +$0.20 TP exceeds the $1 share ceiling. Unsold shares await Gamma’s final $1/$0 outcome; their last bid is shown only as stale until then.</div>
+    <div class="notice">A $0.90 average fill targets $1.00; that TP triggers only if the best bid reaches $1.00. Otherwise shares go through forced exit and, if still open, official settlement.</div>
   </article>
 </section>
 <section class="panel">

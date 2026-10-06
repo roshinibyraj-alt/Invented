@@ -108,9 +108,9 @@ test('strategy constants match the confirmed independent-side rules', () => {
   assert.equal(cfg.TRANCHE_BUDGET_USD, 250);
   assert.equal(cfg.FIRST_ENTRY_ASK_USD, 0.60);
   assert.equal(cfg.SECOND_ENTRY_ASK_USD, 0.70);
-  assert.equal(cfg.TAKE_PROFIT_OFFSET_USD, 0.20);
+  assert.equal(cfg.TAKE_PROFIT_OFFSET_USD, 0.10);
   assert.equal(cfg.REENTRY_PULLBACK_USD, 0.10);
-  assert.equal(cfg.HARD_STOP_LOSS_BID_USD, 0.30);
+  assert.equal(cfg.HARD_STOP_LOSS_BID_USD, 0.50);
   assert.equal(cfg.MAX_ENTRY_ASK_USD, 0.90);
   assert.equal(cfg.FORCED_EXIT_BUFFER_SECONDS, 10);
 });
@@ -169,7 +169,7 @@ test('UP and DOWN each enter tranche A at $0.60 and tranche B at $0.70 independe
 });
 
 for (const sideName of ['UP', 'DOWN']) {
-  test(`${sideName} hard stop triggers at a $0.30 best bid and sells at the available bid`, async () => {
+  test(`${sideName} hard stop triggers at a $0.50 best bid and sells at the available bid`, async () => {
     const fx = fixture();
     await quote(fx, sideName, 0.59, 0.60);
     await quote(fx, sideName, 0.69, 0.70);
@@ -177,9 +177,9 @@ for (const sideName of ['UP', 'DOWN']) {
     const positions = tranches.map((tranche) => tranche.position);
     assert.ok(positions.every(Boolean));
 
-    await quote(fx, sideName, 0.31, 0.32);
+    await quote(fx, sideName, 0.51, 0.52);
     assert.ok(positions.every((position) => position.status === 'open'));
-    await quote(fx, sideName, 0.25, 0.26);
+    await quote(fx, sideName, 0.50, 0.51);
 
     assert.ok(positions.every((position) => position.status === 'closed'));
     assert.ok(positions.every((position) => position.stopLossTriggered));
@@ -191,7 +191,7 @@ for (const sideName of ['UP', 'DOWN']) {
     const stopEvents = fx.bot.log.filter((entry) => entry.event === 'STOP_LOSS_TRIGGERED');
     assert.equal(stopEvents.length, 2);
     assert.ok(stopEvents.every((entry) => entry.side === sideName));
-    assert.ok(positions.every((position) => position.lastExitPrice === 0.25));
+    assert.ok(positions.every((position) => position.lastExitPrice === 0.50));
 
     const callsAfterStops = fx.trader.calls.length;
     await quote(fx, sideName, 0.58, 0.59);
@@ -228,7 +228,7 @@ test('hard stop stays latched and retries if no bid fills at the trigger', async
     return originalSell(tokenId, side, amount, options);
   };
 
-  await quote(fx, 'UP', 0.30, 0.31);
+  await quote(fx, 'UP', 0.50, 0.51);
   assert.equal(firstPosition.status, 'stop_loss_triggered');
   assert.equal(firstPosition.openShares > 0, true);
   assert.equal(secondTranche.position, null);
@@ -242,51 +242,59 @@ test('hard stop stays latched and retries if no bid fills at the trigger', async
   assert.equal(fx.bot.log.filter((entry) => entry.event === 'STOP_LOSS_TRIGGERED').length, 2);
 });
 
-test('entry asks above $0.90 are skipped; a later eligible ask can still fire', async () => {
+test('entry asks above $0.90 are skipped; a cap-price TP remains reachable at $1', async () => {
   const fx = fixture();
   await quote(fx, 'UP', 0.90, 0.91);
   assert.equal(fx.trader.calls.length, 0);
 
   await quote(fx, 'UP', 0.89, 0.90);
   assert.equal(fx.trader.calls.length, 2);
-  assert.ok(fx.w.sides.UP.tranches.every((tranche) => tranche.position.takeProfitPrice > 1));
-  assert.ok(fx.w.sides.UP.tranches.every((tranche) => tranche.position.takeProfitReachable === false));
+  assert.ok(fx.w.sides.UP.tranches.every((tranche) => tranche.position.takeProfitPrice === 1));
+  assert.ok(fx.w.sides.UP.tranches.every((tranche) => tranche.position.takeProfitReachable === true));
 
   await quote(fx, 'UP', 0.99, 1);
-  assert.equal(fx.trader.calls.length, 2, 'an unreachable TP must not be treated as hit');
+  assert.equal(fx.trader.calls.length, 2, 'a bid below $1 must not hit the cap-price TP');
+  await quote(fx, 'UP', 1, 1);
+  assert.equal(fx.trader.calls.length, 4, 'a bid at $1 hits the cap-price TP');
 });
 
-test('TP uses best bid, sells no lower than target, and recycles all net tranche proceeds', async () => {
+test('TP uses best bid; re-entry trails the post-TP ask high by $0.10 and recycles proceeds', async () => {
   const fx = fixture();
   fx.w.sides.UP.tranches[1].state = 'done_for_window';
   await quote(fx, 'UP', 0.59, 0.60);
   const tranche = fx.w.sides.UP.tranches[0];
   const position = tranche.position;
-  approx(position.takeProfitPrice, 0.80);
+  approx(position.takeProfitPrice, 0.70);
 
-  await quote(fx, 'UP', 0.79, 0.80);
+  await quote(fx, 'UP', 0.69, 0.70);
   assert.equal(fx.trader.calls.length, 1, 'bid below TP must not sell');
 
-  await quote(fx, 'UP', 0.80, 0.82);
+  await quote(fx, 'UP', 0.70, 0.70);
   assert.equal(fx.trader.calls.length, 2);
   assert.equal(fx.trader.calls[1].side, 'SELL');
-  assert.equal(fx.trader.calls[1].options.priceLimit, 0.80);
+  assert.equal(fx.trader.calls[1].options.priceLimit, 0.70);
   assert.equal(tranche.state, 'waiting_reentry');
   assert.equal(tranche.position, null);
-  const expectedNetProceeds = position.shares * 0.80 - estimateTakerFee(position.shares, 0.80);
-  approx(tranche.reentryPrice, 0.70);
+  const expectedNetProceeds = position.shares * 0.70 - estimateTakerFee(position.shares, 0.70);
+  approx(tranche.reentryPrice, 0.60);
+  approx(tranche.reentryPeakAsk, 0.70);
   approx(tranche.availableUsd, expectedNetProceeds, 1e-6);
   approx(fx.bot.trades[0].netExitProceeds, expectedNetProceeds, 1e-3);
   approx(fx.bot.stats.realizedPnl, fx.bot.trades[0].pnl, 0.01);
 
+  await quote(fx, 'UP', 0.79, 0.80);
+  assert.equal(fx.trader.calls.length, 2, 'a rally to $0.80 must not buy before the pullback');
+  approx(tranche.reentryPrice, 0.70);
+  approx(tranche.reentryPeakAsk, 0.80);
+
   await quote(fx, 'UP', 0.70, 0.71);
-  assert.equal(fx.trader.calls.length, 2, 'ask above TP−$0.10 must not re-enter');
+  assert.equal(fx.trader.calls.length, 2, 'ask above the trailing $0.70 target must not re-enter');
   await quote(fx, 'UP', 0.69, 0.70);
   assert.equal(fx.trader.calls.length, 3);
   assert.equal(fx.trader.calls[2].side, 'BUY');
   approx(fx.trader.calls[2].amount, expectedNetProceeds, 1e-6);
   approx(tranche.position.entryPrice, 0.70);
-  approx(tranche.position.takeProfitPrice, 0.90);
+  approx(tranche.position.takeProfitPrice, 0.80);
   assert.equal(tranche.cycle, 2);
 });
 
@@ -485,11 +493,11 @@ test('snapshot reports the demo-only mode and configured TP/cap rules', () => {
   assert.equal(snapshot.mode, 'DEMO');
   assert.equal(snapshot.strategy.sideBudgetUsd, 500);
   assert.equal(snapshot.strategy.trancheBudgetUsd, 250);
-  assert.equal(snapshot.strategy.takeProfitOffset, 0.20);
+  assert.equal(snapshot.strategy.takeProfitOffset, 0.10);
   assert.equal(snapshot.strategy.maxEntryAsk, 0.90);
   assert.equal(snapshot.strategy.firstEntryAsk, 0.60);
   assert.equal(snapshot.strategy.secondEntryAsk, 0.70);
   assert.equal(snapshot.strategy.forcedExitBufferSeconds, 10);
-  assert.equal(snapshot.strategy.hardStopLossBid, 0.30);
+  assert.equal(snapshot.strategy.hardStopLossBid, 0.50);
   assert.equal(snapshot.executionHalt, false);
 });

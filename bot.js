@@ -336,11 +336,21 @@ class Bot {
       }
 
       const ask = quote.ask;
-      if (ask == null || ask <= 0 || ask > cfg.MAX_ENTRY_ASK_USD + EPSILON) continue;
+      if (ask == null || ask <= 0) continue;
       if (tranche.state === 'waiting_reentry') {
-        if (ask <= tranche.reentryPrice + EPSILON) {
+        if (ask > tranche.reentryPeakAsk + EPSILON) {
+          tranche.reentryPeakAsk = ask;
+          tranche.reentryPrice = Math.max(
+            tranche.reentryPrice,
+            tranche.reentryPeakAsk - cfg.REENTRY_PULLBACK_USD,
+          );
+        }
+        if (ask <= cfg.MAX_ENTRY_ASK_USD + EPSILON
+          && ask <= tranche.reentryPrice + EPSILON) {
           await this._buyTranche(w, sideName, tranche, ask, true, now);
         }
+      } else if (ask > cfg.MAX_ENTRY_ASK_USD + EPSILON) {
+        continue;
       } else if (tranche.state === 'waiting_stop_rearm') {
         if (ask + EPSILON >= tranche.reentryPrice) {
           await this._buyTranche(w, sideName, tranche, ask, true, now);
@@ -410,6 +420,7 @@ class Bot {
     tranche.position = position;
     tranche.state = 'in_position';
     tranche.reentryPrice = null;
+    tranche.reentryPeakAsk = null;
     this.pending.push(position);
     this.stats.entries += 1;
     this.stats.estimatedFees += fee;
@@ -493,10 +504,16 @@ class Bot {
         const canReenterAfterTp = reason === 'TAKE_PROFIT' && beforeForcedExit;
         const canRearmAfterStop = reason === 'HARD_STOP_LOSS' && beforeForcedExit;
         if (canReenterAfterTp) {
-          tranche.reentryPrice = position.takeProfitPrice - cfg.REENTRY_PULLBACK_USD;
+          const quote = this._quoteFor(position.side, w);
+          tranche.reentryPeakAsk = Math.max(
+            position.takeProfitPrice,
+            positive(quote && quote.ask) || position.takeProfitPrice,
+          );
+          tranche.reentryPrice = tranche.reentryPeakAsk - cfg.REENTRY_PULLBACK_USD;
           tranche.state = 'waiting_reentry';
         } else if (canRearmAfterStop) {
           tranche.reentryPrice = tranche.entryTrigger;
+          tranche.reentryPeakAsk = null;
           tranche.state = 'waiting_stop_rearm';
         } else {
           tranche.state = 'done_for_window';
@@ -821,7 +838,7 @@ class Bot {
           tranches: side.tranches.map((tranche) => ({
             id: tranche.id, entryTrigger: tranche.entryTrigger, initialBudgetUsd: tranche.initialBudgetUsd,
             availableUsd: round(tranche.availableUsd, 2), state: tranche.state, cycle: tranche.cycle,
-            reentryPrice: tranche.reentryPrice,
+            reentryPrice: tranche.reentryPrice, reentryPeakAsk: tranche.reentryPeakAsk,
             position: tranche.position ? {
               id: tranche.position.id, entryPrice: tranche.position.entryPrice,
               takeProfitPrice: tranche.position.takeProfitPrice,
@@ -920,7 +937,7 @@ function makeTranche(id, entryTrigger) {
     initialBudgetUsd: cfg.TRANCHE_BUDGET_USD,
     availableUsd: cfg.TRANCHE_BUDGET_USD,
     state: 'waiting_entry', cycle: 0,
-    reentryPrice: null, position: null,
+    reentryPrice: null, reentryPeakAsk: null, position: null,
   };
 }
 
