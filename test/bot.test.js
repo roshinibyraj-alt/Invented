@@ -40,8 +40,7 @@ function fixture() {
     up: { bid: null, ask: null, mid: null },
     down: { bid: null, ask: null, mid: null },
   };
-  bot._placeEntryOrders(w);
-  return { bot, trader, w, now: (OPEN_TS + 120) * 1000 };
+  return { bot, trader, w, now: OPEN_TS * 1000 + cfg.ENTRY_DELAY_MS + 500 };
 }
 
 async function quote(fx, side, bid, ask, timestamp = fx.now) {
@@ -68,101 +67,115 @@ function trade(fx, side, aggressorSide, price, size, timestamp = fx.now + 100, t
   }
 }
 
-async function openMakerPosition(fx, side = 'UP', size = 10) {
-  await quote(fx, side, 0.40, 0.46);
-  trade(fx, side, 'SELL', 0.45, size, fx.now + 300, `entry-${side}-${size}`);
-  await quote(fx, side, 0.40, 0.46, fx.now + 600);
+function makeBook(asks = [], bids = []) {
+  return {
+    asks: asks.map(([price, size]) => ({ price, size })),
+    bids: bids.map(([price, size]) => ({ price, size })),
+  };
+}
+
+async function fireMarketOrders(fx, books, timestamp = fx.now) {
+  fx.trader.books.set('up-token', books.UP || makeBook());
+  fx.trader.books.set('down-token', books.DOWN || makeBook());
+  const realNow = Date.now;
+  try {
+    Date.now = () => timestamp;
+    await fx.bot._maybePlaceMarketEntries(fx.w, timestamp);
+  } finally {
+    Date.now = realNow;
+  }
+}
+
+async function openMarketPosition(fx, side = 'UP', ask = 0.45, size = 10) {
+  const otherSide = side === 'UP' ? 'DOWN' : 'UP';
+  await fireMarketOrders(fx, {
+    [side]: makeBook([[ask, size]], [[Math.max(0.01, ask - 0.05), 100]]),
+    [otherSide]: makeBook(),
+  });
+  const bid = Math.max(0.01, ask - 0.05);
+  await quote(fx, side, bid, ask, fx.now + 300);
   return fx.w.sides[side].tranches[0].position;
+}
+
+async function openBothMarketPositions(fx, upAsk = 0.45, downAsk = 0.45, size = 10) {
+  await fireMarketOrders(fx, {
+    UP: makeBook([[upAsk, size]], [[Math.max(0.01, upAsk - 0.05), 100]]),
+    DOWN: makeBook([[downAsk, size]], [[Math.max(0.01, downAsk - 0.05), 100]]),
+  });
+  for (const [side, ask] of [['UP', upAsk], ['DOWN', downAsk]]) {
+    await quote(fx, side, Math.max(0.01, ask - 0.05), ask, fx.now + 300);
+  }
 }
 
 function approx(actual, expected, epsilon = 1e-7) {
   assert.ok(Math.abs(actual - expected) <= epsilon, `${actual} should be near ${expected}`);
 }
 
-test('strategy constants use a shared $1,000 demo bankroll, $0.45 entry, $0.99 TP and no charged fees', () => {
+test('strategy constants use a shared $1,000 bankroll, a 3-second market-entry delay and $0.99 TP', () => {
   assert.equal(cfg.DEMO_CAPITAL, 1000);
   assert.equal(cfg.BASE_SHARES, 10);
   assert.equal(cfg.MARTINGALE_MULTIPLIER, 1.8);
-  assert.equal(cfg.ENTRY_LIMIT_PRICE_USD, 0.45);
+  assert.equal(cfg.ENTRY_REFERENCE_PRICE_USD, 0.45);
+  assert.equal(cfg.ENTRY_DELAY_MS, 3000);
   assert.equal(cfg.TAKE_PROFIT_BID_USD, 0.99);
-  assert.equal(cfg.TAKER_FEE_RATE, 0);
+  assert.equal(cfg.TAKER_FEE_RATE, 0.07);
   assert.equal(cfg.REBATE_FEE_EQUIVALENT_RATE, 0.07);
   assert.equal(cfg.MAKER_REBATE_RATE, 0.20);
   assert.equal(cfg.PAPER_ORDER_LATENCY_MS, 250);
   approx(estimateMakerRebate(10, 0.45), 0.03465);
 });
 
-test('reserves two independent post-only 10-share bids at $0.45 from shared demo cash', () => {
-  const { bot, w } = fixture();
-  const snapshot = bot.snapshot();
-  assert.equal(w.sides.UP.tranches[0].entryOrder.status, 'waiting_to_post');
-  assert.equal(w.sides.DOWN.tranches[0].entryOrder.status, 'waiting_to_post');
-  assert.equal(w.sides.UP.tranches[0].entryOrder.targetShares, 10);
-  assert.equal(w.sides.DOWN.tranches[0].entryOrder.targetShares, 10);
-  assert.equal(snapshot.account.capital, 1000);
-  approx(snapshot.account.reservedCash, 9);
-  approx(snapshot.account.availableCash, 991);
-  assert.equal(snapshot.martingale.UP.nextShares, 10);
-  assert.equal(snapshot.martingale.DOWN.nextShares, 10);
+test('market entries wait until +3 seconds, ignore the old $0.45 cap, and charge per-level taker fees', async () => {
+  const fx = fixture();
+  fx.trader.books.set('up-token', makeBook([[0.60, 6], [0.70, 4]], [[0.55, 20]]));
+  fx.trader.books.set('down-token', makeBook([[0.90, 10]], [[0.85, 20]]));
+
+  await fireMarketOrders(fx, {
+    UP: fx.trader.books.get('up-token'),
+    DOWN: fx.trader.books.get('down-token'),
+  }, OPEN_TS * 1000 + cfg.ENTRY_DELAY_MS - 1);
+  assert.equal(fx.w.sides.UP.tranches[0].entryOrder, null);
+  assert.equal(fx.w.marketEntryTriggeredAt, null);
+
+  await fireMarketOrders(fx, {
+    UP: fx.trader.books.get('up-token'),
+    DOWN: fx.trader.books.get('down-token'),
+  }, OPEN_TS * 1000 + cfg.ENTRY_DELAY_MS);
+  const up = fx.w.sides.UP.tranches[0];
+  const down = fx.w.sides.DOWN.tranches[0];
+  assert.equal(up.entryOrder.orderType, 'MARKET');
+  assert.equal(up.entryOrder.status, 'filled');
+  approx(up.position.entryPrice, 0.64);
+  approx(up.position.entryNotional, 6.4);
+  approx(up.position.entryFee, 0.1596);
+  approx(down.position.entryPrice, 0.90);
+  approx(down.position.entryFee, 0.063);
+  approx(fx.bot.cash, 1000 - 6.4 - 0.1596 - 9 - 0.063);
+  approx(fx.bot.stats.estimatedFees, 0.2226);
+  assert.equal(fx.bot.snapshot().account.reservedCash, 0);
 });
 
-test('quotes alone never fill; a non-crossing order fills at exactly $0.45 on a later SELL print', async () => {
+test('market buys only fill visible depth and cancel an unfilled remainder', async () => {
   const fx = fixture();
-  await quote(fx, 'UP', 0.40, 0.45);
-  assert.equal(fx.w.sides.UP.tranches[0].entryOrder.status, 'waiting_to_post');
-  trade(fx, 'UP', 'SELL', 0.45, 10, fx.now + 50, 'before-post');
-  assert.equal(fx.w.sides.UP.tranches[0].position, null);
-
-  await quote(fx, 'UP', 0.40, 0.46, fx.now + 100);
-  const order = fx.w.sides.UP.tranches[0].entryOrder;
-  assert.equal(order.status, 'posting');
-  assert.equal(order.restingAt, fx.now + 350);
-  trade(fx, 'UP', 'SELL', 0.45, 10, fx.now + 200, 'before-arrival');
-  assert.equal(fx.w.sides.UP.tranches[0].position, null);
-  await quote(fx, 'UP', 0.44, 0.45, fx.now + 250);
-  assert.equal(order.status, 'waiting_to_post');
-  await quote(fx, 'UP', 0.40, 0.46, fx.now + 300);
-  assert.equal(order.status, 'posting');
-  trade(fx, 'UP', 'SELL', 0.45, 10, fx.now + 500, 'before-second-arrival');
-  assert.equal(fx.w.sides.UP.tranches[0].position, null);
-  trade(fx, 'UP', 'BUY', 0.45, 10, fx.now + 600, 'wrong-side');
-  assert.equal(fx.w.sides.UP.tranches[0].position, null);
-  trade(fx, 'UP', 'SELL', 0.45, 10, fx.now + 650, 'entry-fill');
-  const position = fx.w.sides.UP.tranches[0].position;
-  assert.equal(position.shares, 10);
-  assert.equal(position.entryPrice, 0.45);
-  assert.equal(position.entryNotional, 4.5);
-  assert.equal(position.entryFee, 0);
-  assert.equal(fx.w.sides.UP.tranches[0].entryOrder.status, 'filled');
-  assert.equal(position.takeProfitOrder.status, 'posting');
-  approx(fx.bot.cash, 995.5);
-  approx(fx.bot.stats.estimatedFees, 0);
-  approx(fx.bot.stats.makerFeeEquivalent, 0.17325);
-  approx(fx.bot.stats.estimatedMakerRebate, 0.03465);
+  await fireMarketOrders(fx, {
+    UP: makeBook([[0.80, 4]], [[0.75, 20]]),
+    DOWN: makeBook(),
+  });
+  const up = fx.w.sides.UP.tranches[0];
+  assert.equal(up.entryOrder.status, 'partial_fill_remainder_cancelled');
+  assert.equal(up.entryOrder.orderType, 'MARKET');
+  approx(up.entryOrder.filledShares, 4);
+  approx(up.entryOrder.unfilledShares, 6);
+  approx(up.position.entryPrice, 0.80);
+  approx(up.position.shares, 4);
+  assert.equal(fx.w.sides.DOWN.tranches[0].entryOrder.status, 'no_fill');
+  assert.equal(fx.w.sides.DOWN.tranches[0].position, null);
+  assert.ok(fx.bot.log.some((row) => row.event === 'MARKET_BUY_NO_FILL'));
 });
 
-test('partial maker prints fill only their trade size and duplicate prints do not double count', async () => {
+test('TP remains a post-only $0.99 sell; entry taker fee is included in P&L and rebates stay separate', async () => {
   const fx = fixture();
-  await quote(fx, 'UP', 0.40, 0.46);
-  trade(fx, 'UP', 'SELL', 0.45, 4, fx.now + 300, 'partial-1');
-  const tranche = fx.w.sides.UP.tranches[0];
-  assert.equal(tranche.position.shares, 4);
-  assert.equal(tranche.entryOrder.remainingShares, 6);
-  assert.equal(tranche.entryOrder.status, 'resting');
-  trade(fx, 'UP', 'SELL', 0.45, 4, fx.now + 300, 'partial-1');
-  assert.equal(tranche.position.shares, 4);
-  trade(fx, 'UP', 'SELL', 0.45, 6, fx.now + 400, 'partial-2');
-  assert.equal(tranche.position.shares, 10);
-  assert.equal(tranche.position.openShares, 10);
-  assert.equal(tranche.entryOrder.remainingShares, 0);
-  assert.equal(tranche.entryOrder.status, 'filled');
-  approx(tranche.position.entryPrice, 0.45);
-  approx(fx.bot.stats.estimatedMakerRebate, 0.03465);
-});
-
-test('TP is a post-only $0.99 sell, quote changes do not fill it, and rebate stays outside cash/P&L', async () => {
-  const fx = fixture();
-  const position = await openMakerPosition(fx);
+  const position = await openMarketPosition(fx);
   assert.equal(position.takeProfitOrder.limitPrice, 0.99);
   assert.equal(position.takeProfitOrder.status, 'resting');
   await quote(fx, 'UP', 0.99, 1.00, fx.now + 700);
@@ -176,20 +189,20 @@ test('TP is a post-only $0.99 sell, quote changes do not fill it, and rebate sta
   assert.equal(closed.entryPrice, 0.45);
   assert.equal(closed.exitPrice, 0.99);
   assert.equal(closed.exitProceeds, 9.9);
-  assert.equal(closed.fees, 0);
-  approx(closed.pnl, 5.4);
-  approx(closed.makerFeeEquivalent, 0.18018);
-  approx(closed.estimatedMakerRebate, 0.036036);
-  approx(fx.bot.cash, 1005.4);
-  approx(fx.bot.stats.estimatedFees, 0);
-  approx(fx.bot.stats.realizedPnl, 5.4);
-  approx(fx.bot.snapshot().account.equity, 1005.4);
+  approx(closed.fees, 0.1733, 1e-4);
+  approx(closed.pnl, 5.23, 1e-4);
+  approx(closed.makerFeeEquivalent, 0.00693);
+  approx(closed.estimatedMakerRebate, 0.001386);
+  approx(fx.bot.cash, 1005.22675);
+  approx(fx.bot.stats.estimatedFees, 0.17325);
+  approx(fx.bot.stats.realizedPnl, 5.22675);
+  approx(fx.bot.snapshot().account.equity, 1005.23, 1e-4);
   assert.equal(fx.bot.lossStreak.UP, 0);
 });
 
 test('window close cancels both maker orders and settles remaining shares from final-three-second CLOB bids', async () => {
   const fx = fixture();
-  for (const side of ['UP', 'DOWN']) await openMakerPosition(fx, side);
+  await openBothMarketPositions(fx);
   const closeMs = (OPEN_TS + 300) * 1000;
   await quote(fx, 'UP', 0.985, 0.99, closeMs - 2500);
   await quote(fx, 'DOWN', 0.015, 0.99, closeMs - 1500);
@@ -226,7 +239,7 @@ test('window close cancels both maker orders and settles remaining shares from f
 
 test('close falls back to last in-window CLOB bids and never leaves a position pending', async () => {
   const fx = fixture();
-  await openMakerPosition(fx, 'UP');
+  await openMarketPosition(fx, 'UP');
   const closeMs = (OPEN_TS + 300) * 1000;
   await fx.bot._finishWindow(fx.w, closeMs, 'WINDOW_EXPIRED');
 
@@ -245,7 +258,7 @@ test('close falls back to last in-window CLOB bids and never leaves a position p
 test('close winner tie-break remains deterministic and only affects positions actually opened', async () => {
   const closeMs = (OPEN_TS + 300) * 1000;
   const fx = fixture();
-  await openMakerPosition(fx, 'UP');
+  await openMarketPosition(fx, 'UP');
   await quote(fx, 'DOWN', 0.96, 0.99, closeMs - 2500);
   await quote(fx, 'UP', 0.95, 0.99, closeMs - 1500);
   await fx.bot._finishWindow(fx.w, closeMs, 'WINDOW_EXPIRED');
@@ -254,7 +267,7 @@ test('close winner tie-break remains deterministic and only affects positions ac
   assert.equal(fx.bot.trades[0].resolutionOutcome, 'DOWN');
 
   const freshest = fixture();
-  await openMakerPosition(freshest, 'UP');
+  await openMarketPosition(freshest, 'UP');
   await quote(freshest, 'DOWN', 0.95, 0.99, closeMs - 2500);
   await quote(freshest, 'UP', 0.95, 0.99, closeMs - 1500);
   await freshest.bot._finishWindow(freshest.w, closeMs, 'WINDOW_EXPIRED');
@@ -262,7 +275,7 @@ test('close winner tie-break remains deterministic and only affects positions ac
   assert.equal(freshest.w.closeResolution.tieBreak, 'FRESHEST_QUOTE');
 
   const tie = fixture();
-  await openMakerPosition(tie, 'UP');
+  await openMarketPosition(tie, 'UP');
   tie.w.finalThreeSecondQuoteBySide = {
     UP: { bid: 0.95, ts: closeMs - 1000 },
     DOWN: { bid: 0.95, ts: closeMs - 1000 },
@@ -294,39 +307,49 @@ test('wins and losses update only that side; a same-side win resets its next siz
   assert.equal(bot.snapshot().martingale.DOWN.nextShares, 10);
 });
 
-test('shared cash prevents overcommitment rather than silently resizing an order', () => {
-  const { bot, w } = fixture();
-  bot.cash = 4.50;
-  bot._cancelEntryOrder(w, 'DOWN', w.sides.DOWN.tranches[0], 'test setup');
-  w.sides.DOWN.tranches[0].entryOrder = null;
-  w.sides.DOWN.tranches[0].state = 'waiting_for_market';
-  bot._placeEntryOrders(w);
-  assert.equal(w.sides.DOWN.tranches[0].entryOrder, null);
-  assert.equal(w.sides.DOWN.tranches[0].state, 'capital_blocked');
-  assert.equal(w.sides.UP.tranches[0].entryOrder.targetShares, 10);
+test('shared cash caps both independent market buys without overdrawing the bankroll', async () => {
+  const fx = fixture();
+  fx.bot.cash = 4.50;
+  await fireMarketOrders(fx, {
+    UP: makeBook([[0.45, 10]], [[0.40, 20]]),
+    DOWN: makeBook([[0.45, 10]], [[0.40, 20]]),
+  });
+  assert.ok(fx.bot.cash >= -1e-8);
+  const up = fx.w.sides.UP.tranches[0];
+  const down = fx.w.sides.DOWN.tranches[0];
+  assert.equal(up.entryOrder.status, 'partial_fill_remainder_cancelled');
+  approx(up.entryOrder.filledShares * 0.45 + up.entryOrder.fees, 4.50);
+  assert.equal(down.entryOrder.status, 'no_fill');
+  assert.equal(down.entryOrder.limitingFactor, 'shared_cash');
 });
 
-test('snapshot identifies post-only orders and reports rebates separately from equity', () => {
+test('snapshot reports market entries, opening delay, taker fee rate and separate TP rebates', () => {
   const { bot } = fixture();
   const state = bot.snapshot();
   assert.equal(state.mode, 'DEMO');
   assert.equal(state.strategy.demoCapital, 1000);
   assert.equal(state.strategy.sharedCapital, true);
-  assert.equal(state.strategy.entryLimitPrice, 0.45);
+  assert.equal(state.strategy.entryReferencePrice, 0.45);
+  assert.equal(state.strategy.entryPriceCap, null);
+  assert.equal(state.strategy.entryDelayMs, 3000);
   assert.equal(state.strategy.takeProfitBid, 0.99);
-  assert.equal(state.strategy.entryOrderType, 'POST_ONLY');
+  assert.equal(state.strategy.entryOrderType, 'MARKET');
   assert.equal(state.strategy.takeProfitOrderType, 'POST_ONLY');
-  assert.equal(state.strategy.makerFeesCharged, 0);
+  assert.equal(state.strategy.takerFeeRate, 0.07);
+  assert.equal(state.strategy.takeProfitMakerFeesCharged, 0);
   assert.equal(state.strategy.rebateEstimateIsCash, false);
-  assert.equal(state.strategy.paperOrderLatencyMs, 250);
+  assert.equal(state.strategy.takeProfitPaperOrderLatencyMs, 250);
   assert.equal(state.strategy.hardStopLossBid, null);
   assert.equal(state.strategy.martingaleMultiplier, 1.8);
   assert.equal(state.strategy.settlementMethod, 'CLOB_CLOSE_PRICE');
   assert.equal(state.strategy.settlementCloseSampleSeconds, 3);
   assert.equal(state.strategy.settlementWinnerThreshold, 0.98);
   assert.equal(state.strategy.settlementFallback, 'HIGHER_BID_THEN_FRESHEST_THEN_UP');
-  assert.equal(state.cfg.entryLimitPrice, 0.45);
-  assert.equal(state.cfg.makerFeesCharged, 0);
+  assert.equal(state.cfg.entryReferencePrice, 0.45);
+  assert.equal(state.cfg.entryDelayMs, 3000);
+  assert.equal(state.cfg.entryPriceCap, null);
+  assert.equal(state.cfg.takerFeeRate, 0.07);
+  assert.equal(state.cfg.takeProfitMakerFeesCharged, 0);
   assert.equal(state.cfg.entryAsk, undefined);
   assert.equal(state.cfg.forcedExitBufferSeconds, undefined);
   assert.equal(state.stats.estimatedMakerRebate, 0);

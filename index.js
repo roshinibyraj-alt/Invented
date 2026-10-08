@@ -16,7 +16,7 @@ async function main() {
   bot.start();
   startServer(bot, process.env.PORT || 3000);
 
-  console.log('MODE: DEMO -- public CLOB data and paper-only trade-print fills; no live order code is loaded.');
+  console.log('MODE: DEMO -- public CLOB ask-depth market-entry simulation and post-only TP paper fills; no live order code is loaded.');
 }
 
 main().catch((e) => {

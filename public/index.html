@@ -76,13 +76,13 @@ table{border-collapse:collapse;width:100%}th{font-size:9px;color:var(--muted);te
     <div class="rule-grid" style="margin-top:11px">
       <div class="rule"><b>$1,000 shared demo capital</b><p>UP and DOWN draw from the same cash pool, while their positions and loss streaks remain independent.</p></div>
       <div class="rule"><b>10 base shares per side</b><p>After each side’s own loss, its next order grows by 1.8×. A win resets only that side to 10 shares.</p></div>
-      <div class="rule"><b>Post-only limit buy · $0.45</b><p>Reserve one independent paper bid per side. It rests only when the best ask is above $0.45, after a modeled 250ms post delay, and fills only from a later opposing SELL trade print, booked exactly at $0.45.</p></div>
+      <div class="rule"><b>Market buy · 3-second opening delay</b><p>After the window starts, wait 3 seconds, then independently sweep each side’s visible CLOB asks for its martingale share target. There is no $0.45 price cap: fills use the actual displayed ask levels and can cost more than $0.45 per share. No visible depth or insufficient shared capital can still mean a partial or zero fill.</p></div>
       <div class="rule"><b>Post-only take profit · $0.99</b><p>Rest a paper sell at $0.99 when it will not cross the best bid, after the same modeled delay. A later opposing BUY trade print can fill it, booked exactly at $0.99.</p></div>
       <div class="rule"><b>No stop loss</b><p>No stop or forced pre-expiry sale. Unclosed shares remain open through the window close.</p></div>
       <div class="rule"><b>CLOB close-price paper outcome</b><p>In the final 3 seconds, a bid above $0.98 wins; otherwise the higher bid wins. Missing quotes fall back to the latest in-window bid, then a deterministic tie-break. This is not official settlement.</p></div>
     </div>
-    <div class="tags"><span class="tag" id="entryLimit">LIMIT BUY · —</span><span class="tag" id="tpLimit">TAKE PROFIT · —</span><span class="tag" id="martingale">UP/DOWN · —</span><span class="tag">DEMO ONLY · NO LIVE ORDERS</span></div>
-    <div class="notice">Paper-only: no orders are sent to Polymarket and maker fees are set to $0. Public trade prints cannot reveal our hypothetical queue position, so a print-based fill is only a model—not proof our order would fill. Rebate estimates use the fee-equivalent curve and 20% program rate; actual daily pro-rata payout (including the $1 minimum) is unknown and is never credited to cash, equity, or P&amp;L. At close, CLOB bids provide an internal $1/$0 proxy, not official settlement.</div>
+    <div class="tags"><span class="tag" id="entryLimit">MARKET BUY · —</span><span class="tag" id="tpLimit">TAKE PROFIT · —</span><span class="tag" id="martingale">UP/DOWN · —</span><span class="tag">DEMO ONLY · NO LIVE ORDERS</span></div>
+    <div class="notice">Paper-only: no orders are sent to Polymarket. Market buys sweep the fetched ask depth with no price cap and model per-level taker fees as shares × 0.07 × price × (1-price). A snapshot-based paper fill is not a confirmed venue fill; real depth can change before arrival, and an order may be partial or unfilled. The $0.99 TP remains post-only with zero modeled maker fee. Its 20% rebate estimate is separate from cash, equity, and P&amp;L; actual daily pro-rata payout (including the $1 minimum) is unknown. At close, CLOB bids provide an internal $1/$0 proxy, not official settlement.</div>
   </article>
 </section>
 <section class="panel">
@@ -91,7 +91,7 @@ table{border-collapse:collapse;width:100%}th{font-size:9px;color:var(--muted);te
 </section>
 <section class="panel">
   <div class="panelhead"><div><div class="eyebrow">Completed cycles</div><h2>Trade history</h2></div><span class="small" id="tradeCount">0 trades</span></div>
-  <div class="tablewrap" id="trades"></div><div class="small">The model applies a 250ms order-post delay, but does not know queue position or actual network/venue acceptance; print-triggered fills remain optimistic estimates. Rebate estimates are illustrative only, are not actual earnings, and are excluded from all cash/equity/P&amp;L.</div>
+  <div class="tablewrap" id="trades"></div><div class="small">Entry fill prices are depth-weighted from the paper order-book snapshot taken after the 3-second delay; live book changes and venue latency can make actual execution different. The $0.99 post-only TP still uses modeled 250ms arrival and public trade prints, without queue-position visibility. Rebate estimates are illustrative only, not actual earnings, and excluded from cash/equity/P&amp;L.</div>
 </section>
 <section class="panel">
   <div class="panelhead"><div><div class="eyebrow">Bot activity</div><h2>Recent events</h2></div><span class="small" id="uptime">Uptime —</span></div>
@@ -153,7 +153,7 @@ function render(s){
   $('fresh').textContent='Updated '+time(s.now);
   $('capital').textContent=usd(account.capital);$('cash').textContent=usd(account.availableCash);$('equity').textContent=usd(account.equity);
   renderEquityChart(s.equity,account);
-  $('cashNote').textContent=usd(account.reservedCash)+' reserved for post-only limits · '+usd(account.cash)+' cash';
+   $('cashNote').textContent='No entry cash reserved · '+usd(account.cash)+' cash';
   $('drawdown').textContent='Peak drawdown '+usd(account.maxDrawdown);
   const pnl=account.totalPnl;$('pnl').textContent=finite(pnl)?(Number(pnl)>=0?'+':'')+usd(pnl):'—';$('pnl').className='value '+pnlTone(pnl);
   $('record').innerHTML='Realized '+pnlHtml(stats.realizedPnl)+' · Open '+pnlHtml(account.unrealizedPnl)+' · <span class="score win">'+(Number(stats.wins)||0)+' W</span> <span class="score loss">'+(Number(stats.losses)||0)+' L</span> · fees '+usd(stats.estimatedFees)+' · rebate est. '+usd(stats.estimatedMakerRebate)+' <span class="small">(not cash)</span>';
@@ -168,7 +168,7 @@ function render(s){
    }else{
      $('windowNote').textContent='Gamma supplies market metadata only; CLOB bids set the paper close outcome. At close, final-three-second quotes are used, with deterministic fallbacks so positions never remain pending.';
    }
-  $('entryLimit').textContent='POST-ONLY BUY · '+px(cfg.entryLimitPrice);
+   $('entryLimit').textContent='MARKET BUY · '+Number(cfg.entryDelayMs||0)/1000+'s delay · NO CAP';
   $('tpLimit').textContent='POST-ONLY TP · '+px(cfg.takeProfitBid)+' · NO STOP';
   const mg=s.martingale||{},upMg=mg.UP||{},downMg=mg.DOWN||{};
   $('martingale').textContent='UP '+Number(upMg.lossStreak||0)+' LOSS · '+qty(upMg.nextShares)+' SHARES  /  DOWN '+Number(downMg.lossStreak||0)+' LOSS · '+qty(downMg.nextShares)+' SHARES';
@@ -177,17 +177,18 @@ function render(s){
     const side=sides[sideName]||{},quote=side.quote||{},tranche=(side.tranches||[])[0]||{};
     const state=String(tranche.state||'—').replace(/_/g,' ');
     const order=tranche.entryOrder||{},position=tranche.position||{};
-    const statusTone=state==='in position'||state==='partially filled'?'good':state==='limit order open'||state==='post only waiting'?'warn':'';
+     const statusTone=state==='in position'||state==='partially filled'?'good':state==='waiting for market'?'warn':'';
     const sideClass=sideName==='UP'?'up':'down';
     const stat=(label,value)=>'<div class="side-stat"><span class="side-stat-label">'+label+'</span><span class="side-stat-value">'+value+'</span></div>';
     sideCards.push('<article class="side-card '+sideClass+'">'
       +'<div class="side-card-head"><div class="side-heading"><span class="side-name '+(sideName==='UP'?'side-up':'side-down')+'">'+sideName+'</span><span class="side-caption">independent</span></div><span class="pill '+statusTone+'">'+esc(state)+'</span></div>'
       +'<div class="side-quotes"><div class="quote-box"><span class="quote-label">Best bid</span><span class="quote-value">'+px(quote.bid)+'</span></div><div class="quote-box"><span class="quote-label">Best ask</span><span class="quote-value">'+px(quote.ask)+'</span></div></div>'
       +'<div class="side-stats">'
-      +stat('Limit buy',px(order.limitPrice||cfg.entryLimitPrice))
-      +stat('Order',esc(String(order.status||'not placed').replace(/_/g,' ')))
-      +stat('Target shares',qty(order.targetShares??tranche.targetShares??side.nextShares))
-      +stat('Reserved cash',usd(order.reservedUsd||0))
+       +stat('Entry type',esc(order.orderType||'—'))
+       +stat('Order',esc(String(order.status||'waiting for 3s trigger').replace(/_/g,' ')))
+       +stat('Target / filled',qty(order.targetShares??tranche.targetShares??side.nextShares)+' / '+qty(order.filledShares))
+       +stat('Average fill',px(order.averagePrice))
+       +stat('Paper entry cost',usd(order.totalCost))
       +stat('Average entry',px(position.entryPrice))
       +stat('TP bid',px(position.takeProfitPrice||cfg.takeProfitBid))
       +stat('TP order',esc(String((position.takeProfitOrder||{}).status||'not placed').replace(/_/g,' ')))
