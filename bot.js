@@ -2,11 +2,13 @@
 
 const cfg = require('./config');
 const {
-  getActiveWindow, fetchResolvedOutcomeBySlug, currentWindowOpenTs, slugForTs, WINDOW_SECONDS,
+  getActiveWindow, currentWindowOpenTs, slugForTs, WINDOW_SECONDS,
 } = require('./polymarket-market');
 const startMarketFeed = require('./clob-feed');
 
 const EPSILON = 1e-8;
+const CLOSE_WINNER_THRESHOLD = 0.98;
+const CLOSE_SAMPLE_SECONDS = 3;
 const MAX_LOG = 300;
 const MIN_BOOK_CHECK_INTERVAL_MS = 500;
 const SIDES = ['UP', 'DOWN'];
@@ -15,7 +17,6 @@ class Bot {
   constructor(trader, opts = {}) {
     this.trader = trader;
     this.logger = opts.logger || null;
-    this.resolveMarketOutcome = opts.resolveMarketOutcome || fetchResolvedOutcomeBySlug;
     this.demoMode = !!(trader && trader.demoMode === true);
     this.strategyBlocked = !this.demoMode;
     this.error = this.strategyBlocked
@@ -41,9 +42,6 @@ class Bot {
     this._positionId = 0;
     this.lossStreak = { UP: 0, DOWN: 0 };
     this._entryOrderId = 0;
-    this._nextResolutionCheckAt = new Map();
-    this._resolutionCheckInFlight = new Set();
-    this._resolutionStateBySlug = new Map();
     this.pending = [];
     this.trades = [];
     this.log = [];
@@ -140,8 +138,6 @@ class Bot {
           + cfg.ENTRY_LIMIT_PRICE_USD.toFixed(2) + ' when the market tokens are available.',
       });
     }
-
-    await this._pollExpiredResolutions(now);
 
     const w = this.w;
     if (!w.window && now >= w.nextDiscoveryAt) {
@@ -346,7 +342,7 @@ class Bot {
       bid: hasBid ? validPrice(update.bid) : previous.bid,
       ask: hasAsk ? validPrice(update.ask) : previous.ask,
       ts: now,
-      bidTs: hasBid ? now : previous.bidTs,
+      bidTs: hasBid ? (validPrice(update.bid) == null ? null : now) : previous.bidTs,
       askTs: hasAsk ? now : previous.askTs,
     };
     next.mid = next.bid == null || next.ask == null ? null : (next.bid + next.ask) / 2;
@@ -356,6 +352,14 @@ class Bot {
     const up = this._quotesByToken.get(w.window.tokenUp) || emptyQuote();
     const down = this._quotesByToken.get(w.window.tokenDown) || emptyQuote();
     this.prices = { slug, ts: now, up: { ...up }, down: { ...down } };
+    if (next.bid != null && Number.isFinite(Number(next.bidTs))) {
+      const closeMs = windowCloseMs(w);
+      const sample = { bid: next.bid, ts: Number(next.bidTs) };
+      w.lastClobQuoteBySide[sideName] = sample;
+      if (sample.ts >= closeMs - CLOSE_SAMPLE_SECONDS * 1000 && sample.ts < closeMs) {
+        w.finalThreeSecondQuoteBySide[sideName] = sample;
+      }
+    }
     this._lastQuoteAt = now;
     if (source === 'websocket') this._lastWebSocketQuoteAt = now;
     if (up.ask != null && down.ask != null && now - this._lastSeriesAt >= 250) {
@@ -533,7 +537,7 @@ class Bot {
         this._push({
           event: 'EXIT_IGNORED_AFTER_EXPIRY', slug: w.slug, side: position.side,
           tranche: position.trancheId,
-          note: 'The simulated exit response arrived after expiry; remaining shares await official market resolution.',
+        note: 'The simulated exit response arrived after expiry; remaining shares will use the configured CLOB close-price paper outcome.',
         });
         return false;
       }
@@ -664,81 +668,81 @@ class Bot {
     }
     w.closed = true;
     w.closedAt = now;
-    w.status = this._positionsForWindow(w).length ? 'awaiting_resolution' : 'window_closed';
-    for (const position of this._positionsForWindow(w)) {
-      position.lastKnownMark = position.lastMark;
-      position.lastKnownMarkAt = position.lastMarkAt || null;
-      position.status = 'pending_resolution';
-      const tranche = w.sides[position.side].tranches.find((item) => item.id === position.trancheId);
-      if (tranche) tranche.state = 'pending_resolution';
-    }
+    w.status = 'window_closed';
+    if (this._positionsForWindow(w).length) this._settleClobClose(w, now);
     this._push({
       event: 'WINDOW_CLOSED', slug: w.slug,
-      note: event + ': resting limit orders are cancelled; open shares remain held for Gamma final outcome settlement. No forced exit or stop loss is used.',
+      note: event + ': resting limit orders are cancelled; remaining shares were finalized from CLOB bids using the paper close-price rule. No forced sale or stop loss is used.',
     });
     if (this._marketFeedSlug === w.slug) this._stopMarketFeed();
   }
 
-  async _pollExpiredResolutions(now = Date.now()) {
-    const slugs = [...new Set(this.pending
-      .filter((position) => position.openShares > EPSILON
-        && now >= (Number(position.closeTs) || position.openTs + WINDOW_SECONDS) * 1000)
-      .map((position) => position.slug))];
-    const checks = slugs.filter((slug) => !this._resolutionCheckInFlight.has(slug)
-      && now >= (this._nextResolutionCheckAt.get(slug) || 0));
+  _settleClobClose(w, now) {
+    const positions = this._positionsForWindow(w);
+    if (!positions.length) return null;
 
-    await Promise.all(checks.map(async (slug) => {
-      this._resolutionCheckInFlight.add(slug);
-      this._nextResolutionCheckAt.set(slug, now + cfg.RESOLUTION_POLL_MS);
-      try {
-        const resolution = await this.resolveMarketOutcome(slug);
-        if (!resolution || resolution.resolved !== true) {
-          this._noteResolutionState(
-            slug,
-            'pending',
-            resolution && resolution.reason
-              ? resolution.reason : 'Waiting for Gamma to confirm the final binary outcome.',
-          );
-          return;
+    const closeMs = windowCloseMs(w);
+    const closeQuotes = Object.fromEntries(SIDES.map((side) => {
+      const finalQuote = w.finalThreeSecondQuoteBySide[side];
+      const fallbackQuote = w.lastClobQuoteBySide[side];
+      return [side, finalQuote || fallbackQuote || null];
+    }));
+    const usedFinal = SIDES.map((side) => !!w.finalThreeSecondQuoteBySide[side]);
+    const source = usedFinal.every(Boolean) ? 'FINAL_3_SECONDS'
+      : usedFinal.some(Boolean) ? 'FINAL_3_SECONDS_WITH_LAST_WINDOW_FALLBACK'
+        : 'LAST_WINDOW_QUOTE';
+    const bids = Object.fromEntries(SIDES.map((side) => [
+      side, closeQuotes[side] ? Number(closeQuotes[side].bid) : null,
+    ]));
+    const aboveThreshold = SIDES.filter((side) => bids[side] != null
+      && bids[side] > CLOSE_WINNER_THRESHOLD);
+    let winner;
+    let tieBreak = null;
+
+    if (aboveThreshold.length === 1) {
+      winner = aboveThreshold[0];
+    } else {
+      const upBid = bids.UP == null ? -1 : bids.UP;
+      const downBid = bids.DOWN == null ? -1 : bids.DOWN;
+      if (upBid > downBid) winner = 'UP';
+      else if (downBid > upBid) winner = 'DOWN';
+      else {
+        const upTs = closeQuotes.UP ? Number(closeQuotes.UP.ts) : -1;
+        const downTs = closeQuotes.DOWN ? Number(closeQuotes.DOWN.ts) : -1;
+        if (upTs > downTs) {
+          winner = 'UP';
+          tieBreak = 'FRESHEST_QUOTE';
+        } else if (downTs > upTs) {
+          winner = 'DOWN';
+          tieBreak = 'FRESHEST_QUOTE';
+        } else {
+          winner = 'UP';
+          tieBreak = 'DETERMINISTIC_UP_FALLBACK';
         }
-        if (!this._settleResolvedWindow(slug, resolution, now)) return;
-        this._resolutionStateBySlug.delete(slug);
-        this._nextResolutionCheckAt.delete(slug);
-      } catch (error) {
-        this._noteResolutionState(slug, 'lookup_error', 'Gamma resolution check failed: ' + error.message);
-      } finally {
-        this._resolutionCheckInFlight.delete(slug);
       }
-    }));
-  }
-
-  _noteResolutionState(slug, state, note) {
-    if (this._resolutionStateBySlug.get(slug) === state) return;
-    this._resolutionStateBySlug.set(slug, state);
-    this._push({
-      event: state === 'lookup_error' ? 'MARKET_RESOLUTION_CHECK_FAILED' : 'MARKET_RESOLUTION_PENDING',
-      slug, note: note || 'Waiting for Gamma to confirm the final binary outcome.',
-    });
-  }
-
-  _settleResolvedWindow(slug, resolution, now) {
-    const positions = this.pending.filter((position) => position.slug === slug
-      && position.openShares > EPSILON);
-    if (!positions.length) return true;
-
-    const payouts = positions.map((position) => ({
-      position,
-      payoutPerShare: Number(resolution.payoutPerShare && resolution.payoutPerShare[position.side]),
-    }));
-    if (payouts.some(({ payoutPerShare }) => payoutPerShare !== 0 && payoutPerShare !== 1)) {
-      this._noteResolutionState(
-        slug, 'invalid_outcome',
-        'Gamma resolution was missing an unambiguous $0/$1 payout for UP and DOWN.',
-      );
-      return false;
     }
 
-    for (const { position, payoutPerShare } of payouts) {
+    const thresholdMatched = aboveThreshold.includes(winner);
+    const resolution = w.closeResolution = {
+      method: 'CLOB_CLOSE_PRICE',
+      winner,
+      loser: winner === 'UP' ? 'DOWN' : 'UP',
+      bids,
+      quoteTimestamps: Object.fromEntries(SIDES.map((side) => [
+        side, closeQuotes[side] ? closeQuotes[side].ts : null,
+      ])),
+      source,
+      threshold: CLOSE_WINNER_THRESHOLD,
+      thresholdMatched,
+      tieBreak,
+      decidedAt: now,
+      windowCloseAt: closeMs,
+      note: 'Internal paper classification from Polymarket CLOB best bids; not Polymarket official settlement.',
+    };
+    w.status = 'window_closed';
+
+    for (const position of positions) {
+      const payoutPerShare = position.side === winner ? 1 : 0;
       const sharesSettled = position.openShares;
       const payout = sharesSettled * payoutPerShare;
       const entryCostAllocated = position.remainingEntryCost;
@@ -753,8 +757,14 @@ class Bot {
       position.lastMark = payoutPerShare;
       position.closedAt = now;
       position.status = 'settled';
-      position.resolutionOutcome = resolution.winningSide;
+      position.resolutionOutcome = winner;
       position.resolutionPricePerShare = payoutPerShare;
+      position.settlementMethod = 'CLOB_CLOSE_PRICE';
+      position.settlementSource = source;
+      position.settlementBid = bids[position.side];
+      position.settlementBidUp = bids.UP;
+      position.settlementBidDown = bids.DOWN;
+      position.settlementThresholdMatched = thresholdMatched;
       this.cash += payout;
       this.stats.realizedPnl += realizedDelta;
       this.stats.settlements += 1;
@@ -766,18 +776,27 @@ class Bot {
       }
 
       this._push({
-        event: 'POSITION_SETTLED', slug, side: position.side,
+        event: 'POSITION_SETTLED_CLOB_CLOSE', slug: w.slug, side: position.side,
         tranche: position.trancheId, cycle: position.cycle,
-        outcome: resolution.winningSide, payoutPerShare,
+        outcome: winner, payoutPerShare,
         sharesSettled: round(sharesSettled, 5), payout: round(payout, 4),
+        closeBidUp: bids.UP, closeBidDown: bids.DOWN, quoteSource: source,
+        threshold: CLOSE_WINNER_THRESHOLD, thresholdMatched, tieBreak,
         realizedPnl: round(position.realizedPnl, 2),
-        note: 'Official Gamma binary resolution booked at $'
-          + payoutPerShare.toFixed(2) + ' per remaining share.',
+        note: 'Paper close-price outcome booked at $' + payoutPerShare.toFixed(2)
+          + ' per remaining share. This is not official Polymarket settlement.',
       });
-      this._finalizeTrade(position, 'MARKET_RESOLUTION');
+      this._finalizeTrade(position, 'CLOB_CLOSE_PRICE');
     }
     this._recordEquity(now);
-    return true;
+    this._push({
+      event: 'WINDOW_CLOB_CLOSE_CLASSIFIED', slug: w.slug,
+      outcome: winner, closeBidUp: bids.UP, closeBidDown: bids.DOWN,
+      quoteSource: source, threshold: CLOSE_WINNER_THRESHOLD,
+      thresholdMatched, tieBreak,
+      note: w.closeResolution.note,
+    });
+    return w.closeResolution;
   }
 
   _finalizeTrade(position, reason) {
@@ -800,6 +819,11 @@ class Bot {
       fees: round(position.entryFee + position.exitFees, 4),
       resolutionOutcome: position.resolutionOutcome || null,
       resolutionPricePerShare: position.resolutionPricePerShare ?? null,
+      settlementMethod: position.settlementMethod || null,
+      settlementSource: position.settlementSource || null,
+      settlementBidUp: position.settlementBidUp ?? null,
+      settlementBidDown: position.settlementBidDown ?? null,
+      settlementThresholdMatched: position.settlementThresholdMatched ?? null,
       pnl: round(pnl, 2), reason,
       lossStreakAfter: this.lossStreak[position.side],
       nextShares: round(this._sharesForSide(position.side), 4),
@@ -846,7 +870,6 @@ class Bot {
   _accountValuation() {
     const isMarkedCurrent = (position) => this.w && !this.w.closed
       && Date.now() < windowCloseMs(this.w)
-      && position.status !== 'pending_resolution'
       && position.openTs === this.w.openTs;
     const markedPositions = this.pending.filter(isMarkedCurrent);
     const unresolvedPositions = this.pending.filter((position) => !isMarkedCurrent(position));
@@ -902,7 +925,8 @@ class Bot {
       lastQuoteAgeMs: age(this._lastQuoteAt),
       lastWebSocketQuoteAgeMs: age(this._lastWebSocketQuoteAt),
       error: this.error || null,
-      note: 'CLOB-only demo loop is active; no external spot feed or live-order client is used.',
+      closeSettlement: 'CLOB_CLOSE_PRICE_PAPER',
+      note: 'CLOB-only demo loop is active; close outcomes use a CLOB price proxy, not official settlement. No live-order client is used.',
     });
   }
 
@@ -916,6 +940,7 @@ class Bot {
       closeTs: Number(w.window && w.window.closeTs) || w.openTs + WINDOW_SECONDS,
       secondsRemaining: Math.max(0, ((Number(w.window && w.window.closeTs) || w.openTs + WINDOW_SECONDS) * 1000 - now) / 1000),
       closed: w.closed,
+      closeResolution: w.closeResolution || null,
       sides: Object.fromEntries(SIDES.map((name) => {
         const side = w.sides[name];
         return [name, {
@@ -965,6 +990,10 @@ class Bot {
         baseShares: cfg.BASE_SHARES, entryLimitPrice: cfg.ENTRY_LIMIT_PRICE_USD,
         takeProfitBid: cfg.TAKE_PROFIT_BID_USD, hardStopLossBid: null,
         martingaleMultiplier: cfg.MARTINGALE_MULTIPLIER,
+        settlementMethod: 'CLOB_CLOSE_PRICE',
+        settlementCloseSampleSeconds: CLOSE_SAMPLE_SECONDS,
+        settlementWinnerThreshold: CLOSE_WINNER_THRESHOLD,
+        settlementFallback: 'HIGHER_BID_THEN_FRESHEST_THEN_UP',
       },
       martingale: {
         independent: true,
@@ -988,21 +1017,12 @@ class Bot {
   }
 
   _positionSnapshot(position) {
-    const currentWindow = this.w && !this.w.closed
-      && position.openTs === this.w.openTs
-      && Date.now() < windowCloseMs(this.w);
-    const awaitingResolution = position.status === 'pending_resolution' || !currentWindow;
-    const mark = awaitingResolution ? null
-      : Number.isFinite(Number(position.lastMark)) ? Number(position.lastMark) : position.entryPrice;
-    const lastKnownMark = position.lastKnownMark ?? position.lastMark ?? null;
+    const mark = Number.isFinite(Number(position.lastMark))
+      ? Number(position.lastMark) : position.entryPrice;
     const costBasis = Number(position.remainingEntryCost) || 0;
     return {
       ...position, mark,
-      status: awaitingResolution ? 'pending_resolution' : position.status,
-      lastMark: awaitingResolution ? null : position.lastMark,
-      lastKnownMark: awaitingResolution ? lastKnownMark : null,
-      lastKnownMarkAt: awaitingResolution ? (position.lastKnownMarkAt ?? position.lastMarkAt ?? null) : null,
-      unrealized: awaitingResolution ? null : position.openShares * mark - costBasis,
+      unrealized: position.openShares * mark - costBasis,
     };
   }
 }
@@ -1012,6 +1032,9 @@ function makeWindowState(slug, openTs) {
     slug, openTs, status: 'waiting_for_market', window: null,
     marketWaitReason: null, nextDiscoveryAt: 0,
     closed: false, closedAt: null,
+    lastClobQuoteBySide: { UP: null, DOWN: null },
+    finalThreeSecondQuoteBySide: { UP: null, DOWN: null },
+    closeResolution: null,
     sides: {
       UP: makeSide('UP'),
       DOWN: makeSide('DOWN'),

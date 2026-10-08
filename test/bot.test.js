@@ -198,34 +198,99 @@ test('a low bid causes no stop sale; $0.99 TP sells at actual CLOB proceeds, not
   assert.equal(fx.bot.lossStreak.DOWN, 0);
 });
 
-test('window close cancels unfilled remainder, does not force-sell, and waits for Gamma settlement', async () => {
+test('window close cancels resting orders and immediately books both sides from final-three-second CLOB bids', async () => {
   const fx = fixture();
-  fx.trader.setBook('up-token', [], [{ price: 0.40, size: 4 }]);
-  await quote(fx, 'UP', 0.39, 0.40);
-  const position = fx.w.sides.UP.tranches[0].position;
-  assert.equal(position.openShares, 4);
-  assert.equal(fx.w.sides.UP.tranches[0].entryOrder.status, 'resting');
+  for (const side of ['UP', 'DOWN']) {
+    const token = side === 'UP' ? 'up-token' : 'down-token';
+    fx.trader.setBook(token, [], [{ price: 0.40, size: 10 }]);
+    await quote(fx, side, 0.39, 0.40);
+    assert.equal(fx.w.sides[side].tranches[0].position.openShares, 10);
+  }
 
   const closeMs = (OPEN_TS + 300) * 1000;
+  await quote(fx, 'UP', 0.985, 0.99, closeMs - 2500);
+  await quote(fx, 'DOWN', 0.015, 0.99, closeMs - 1500);
   await fx.bot._finishWindow(fx.w, closeMs, 'WINDOW_EXPIRED');
   assert.equal(fx.trader.calls.filter((call) => call.kind === 'sell').length, 0);
-  assert.equal(fx.w.sides.UP.tranches[0].entryOrder.status, 'cancelled');
+  assert.equal(fx.w.sides.UP.tranches[0].entryOrder.status, 'filled');
+  assert.equal(fx.w.sides.DOWN.tranches[0].entryOrder.status, 'filled');
+  assert.equal(fx.w.closed, true);
+  assert.equal(fx.w.closeResolution.method, 'CLOB_CLOSE_PRICE');
+  assert.equal(fx.w.closeResolution.winner, 'UP');
+  assert.equal(fx.w.closeResolution.thresholdMatched, true);
+  assert.equal(fx.w.closeResolution.source, 'FINAL_3_SECONDS');
   assert.equal(fx.bot.snapshot().account.reservedCash, 0);
-  assert.equal(fx.bot.snapshot().account.equity, null);
-  assert.equal(fx.bot.trades.length, 0);
+  assert.notEqual(fx.bot.snapshot().account.equity, null);
+  assert.equal(fx.bot.pending.length, 0);
+  assert.equal(fx.bot.trades.length, 2);
+  const upTrade = fx.bot.trades.find((trade) => trade.side === 'UP');
+  const downTrade = fx.bot.trades.find((trade) => trade.side === 'DOWN');
+  assert.equal(upTrade.reason, 'CLOB_CLOSE_PRICE');
+  assert.equal(upTrade.resolutionOutcome, 'UP');
+  assert.equal(upTrade.resolutionPricePerShare, 1);
+  assert.equal(upTrade.settlementMethod, 'CLOB_CLOSE_PRICE');
+  assert.ok(upTrade.pnl > 0);
+  assert.equal(downTrade.resolutionOutcome, 'UP');
+  assert.equal(downTrade.resolutionPricePerShare, 0);
+  assert.ok(downTrade.pnl < 0);
   assert.equal(fx.bot.lossStreak.UP, 0);
+  assert.equal(fx.bot.lossStreak.DOWN, 1);
+  assert.equal(fx.bot.snapshot().martingale.UP.nextShares, 10);
+  assert.equal(fx.bot.snapshot().martingale.DOWN.nextShares, 18);
+  assert.equal(fx.bot.log.filter((entry) => entry.event === 'WINDOW_CLOB_CLOSE_CLASSIFIED').length, 1);
+});
 
-  assert.equal(fx.bot._settleResolvedWindow(fx.w.slug, {
-    resolved: true, winningSide: 'DOWN',
-    payoutPerShare: { UP: 0, DOWN: 1 },
-  }, closeMs + 1000), true);
+test('close falls back to last in-window CLOB bids and never leaves a position pending', async () => {
+  const fx = fixture();
+  fx.trader.setBook('up-token', [], [{ price: 0.40, size: 10 }]);
+  await quote(fx, 'UP', 0.39, 0.40);
+  const closeMs = (OPEN_TS + 300) * 1000;
+  await fx.bot._finishWindow(fx.w, closeMs, 'WINDOW_EXPIRED');
+
+  const snapshot = fx.bot.snapshot();
+  assert.equal(fx.w.closeResolution.source, 'LAST_WINDOW_QUOTE');
+  assert.equal(fx.w.closeResolution.bids.UP, 0.39);
+  assert.equal(fx.w.closeResolution.bids.DOWN, null);
+  assert.equal(fx.w.closeResolution.winner, 'UP');
   assert.equal(fx.bot.trades.length, 1);
+  assert.equal(fx.bot.trades[0].resolutionPricePerShare, 1);
+  assert.equal(snapshot.pending.length, 0);
+  assert.equal(snapshot.account.unresolvedPositions, 0);
+  assert.notEqual(snapshot.account.equity, null);
+});
+
+test('when neither final bid exceeds $0.98, higher bid wins; equal bids use freshest quote', async () => {
+  const fx = fixture();
+  fx.trader.setBook('up-token', [], [{ price: 0.40, size: 10 }]);
+  await quote(fx, 'UP', 0.39, 0.40);
+  const closeMs = (OPEN_TS + 300) * 1000;
+  await quote(fx, 'DOWN', 0.96, 0.99, closeMs - 2500);
+  await quote(fx, 'UP', 0.95, 0.99, closeMs - 1500);
+  await fx.bot._finishWindow(fx.w, closeMs, 'WINDOW_EXPIRED');
+  assert.equal(fx.w.closeResolution.winner, 'DOWN');
+  assert.equal(fx.w.closeResolution.thresholdMatched, false);
   assert.equal(fx.bot.trades[0].resolutionOutcome, 'DOWN');
-  assert.ok(fx.bot.trades[0].pnl < 0);
-  assert.equal(fx.bot.lossStreak.UP, 1);
-  assert.equal(fx.bot.lossStreak.DOWN, 0);
-  assert.equal(fx.bot.snapshot().martingale.UP.nextShares, 18);
-  assert.equal(fx.bot.snapshot().martingale.DOWN.nextShares, 10);
+
+  const freshest = fixture();
+  freshest.trader.setBook('up-token', [], [{ price: 0.40, size: 10 }]);
+  await quote(freshest, 'UP', 0.39, 0.40);
+  await quote(freshest, 'DOWN', 0.95, 0.99, closeMs - 2500);
+  await quote(freshest, 'UP', 0.95, 0.99, closeMs - 1500);
+  await freshest.bot._finishWindow(freshest.w, closeMs, 'WINDOW_EXPIRED');
+  assert.equal(freshest.w.closeResolution.winner, 'UP');
+  assert.equal(freshest.w.closeResolution.tieBreak, 'FRESHEST_QUOTE');
+
+  const tie = fixture();
+  tie.trader.setBook('up-token', [], [{ price: 0.40, size: 10 }]);
+  await quote(tie, 'UP', 0.39, 0.40);
+  tie.w.finalThreeSecondQuoteBySide = {
+    UP: { bid: 0.95, ts: closeMs - 1000 },
+    DOWN: { bid: 0.95, ts: closeMs - 1000 },
+  };
+  await tie.bot._finishWindow(tie.w, closeMs, 'WINDOW_EXPIRED');
+  assert.equal(tie.w.closeResolution.winner, 'UP');
+  assert.equal(tie.w.closeResolution.tieBreak, 'DETERMINISTIC_UP_FALLBACK');
+  assert.equal(tie.bot.pending.length, 0);
 });
 
 test('wins and losses update only that side; a same-side win resets its next size', () => {
@@ -238,7 +303,7 @@ test('wins and losses update only that side; a same-side win resets its next siz
     fees: 0.2, realizedPnl: pnl, resolutionOutcome: null,
     resolutionPricePerShare: null, finalized: false,
   });
-  bot._finalizeTrade(position('UP', -2), 'MARKET_RESOLUTION');
+  bot._finalizeTrade(position('UP', -2), 'CLOB_CLOSE_PRICE');
   assert.equal(bot.snapshot().martingale.UP.nextShares, 18);
   assert.equal(bot.snapshot().martingale.DOWN.nextShares, 10);
   bot._finalizeTrade(position('DOWN', 1), 'TAKE_PROFIT');
@@ -271,6 +336,10 @@ test('snapshot exposes new strategy settings and no old stop/forced-exit config'
   assert.equal(state.strategy.takeProfitBid, 0.99);
   assert.equal(state.strategy.hardStopLossBid, null);
   assert.equal(state.strategy.martingaleMultiplier, 1.8);
+  assert.equal(state.strategy.settlementMethod, 'CLOB_CLOSE_PRICE');
+  assert.equal(state.strategy.settlementCloseSampleSeconds, 3);
+  assert.equal(state.strategy.settlementWinnerThreshold, 0.98);
+  assert.equal(state.strategy.settlementFallback, 'HIGHER_BID_THEN_FRESHEST_THEN_UP');
   assert.equal(state.cfg.entryLimitPrice, 0.40);
   assert.equal(state.cfg.entryAsk, undefined);
   assert.equal(state.cfg.forcedExitBufferSeconds, undefined);

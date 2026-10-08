@@ -47,55 +47,6 @@ async function fetchMarketBySlug(slug) {
   return { market: null, reason: `Gamma event found for slug=${slug} but no markets array / clobTokenIds -- response shape may have changed` };
 }
 
-function parseResolvedOutcome(marketJson) {
-  if (!marketJson || marketJson.closed !== true
-    || String(marketJson.umaResolutionStatus || '').toLowerCase() !== 'resolved') {
-    return { resolved: false, reason: 'Gamma has not marked the market closed and resolved.' };
-  }
-
-  const outcomes = parseArray(marketJson.outcomes);
-  const prices = parseArray(marketJson.outcomePrices);
-  if (!outcomes || !prices || outcomes.length !== prices.length) {
-    return { resolved: false, reason: 'Gamma did not return matching outcomes and outcome prices.' };
-  }
-
-  const byOutcome = new Map();
-  outcomes.forEach((outcome, index) => {
-    byOutcome.set(String(outcome).trim().toLowerCase(), Number(prices[index]));
-  });
-  const up = byOutcome.get('up');
-  const down = byOutcome.get('down');
-  const finalBinaryPrice = (price) => Number.isFinite(price)
-    && (Math.abs(price) <= 1e-6 || Math.abs(price - 1) <= 1e-6);
-  if (!finalBinaryPrice(up) || !finalBinaryPrice(down)
-    || Math.abs(up + down - 1) > 1e-6 || up === down) {
-    return { resolved: false, reason: 'Gamma outcome prices are not a final binary $0/$1 result.' };
-  }
-
-  return {
-    resolved: true,
-    winningSide: up === 1 ? 'UP' : 'DOWN',
-    payoutPerShare: { UP: up, DOWN: down },
-  };
-}
-
-function parseArray(value) {
-  if (Array.isArray(value)) return value;
-  if (typeof value !== 'string') return null;
-  try {
-    const parsed = JSON.parse(value);
-    return Array.isArray(parsed) ? parsed : null;
-  } catch (_) {
-    return null;
-  }
-}
-
-async function fetchResolvedOutcomeBySlug(slug) {
-  const { market, reason } = await fetchMarketBySlug(slug);
-  if (!market) return { resolved: false, reason };
-  return parseResolvedOutcome(market);
-}
-
 /** clobTokenIds is a JSON-encoded string list, in the same order as
  * `outcomes` (e.g. ["Up", "Down"]). */
 function extractTokenIds(marketJson) {
@@ -156,6 +107,5 @@ async function getActiveWindow(nowMs = Date.now()) {
 
 module.exports = {
   WINDOW_SECONDS, SLUG_PREFIX,
-  currentWindowOpenTs, slugForTs, fetchMarketBySlug, fetchResolvedOutcomeBySlug,
-  parseResolvedOutcome, extractTokenIds, getActiveWindow,
+  currentWindowOpenTs, slugForTs, fetchMarketBySlug, extractTokenIds, getActiveWindow,
 };
