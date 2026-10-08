@@ -9,13 +9,65 @@ function numberOrNull(value) {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
+function positiveOrNull(value) {
+  if (value === '' || value == null) return null;
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
 function bestFromBook(event) {
   const bids = (event.bids || []).map((x) => numberOrNull(x.price)).filter((x) => x != null);
   const asks = (event.asks || []).map((x) => numberOrNull(x.price)).filter((x) => x != null);
   return { bid: bids.length ? Math.max(...bids) : null, ask: asks.length ? Math.min(...asks) : null };
 }
 
-function startMarketFeed(assetIds, onQuote, onError = () => {}) {
+function decodeMarketEvent(event) {
+  if (!event || typeof event !== 'object') return [];
+  const type = event.event_type || event.type;
+  const payload = event.payload && typeof event.payload === 'object'
+    ? event.payload : event;
+  const assetId = payload.asset_id || payload.assetId
+    || payload.token_id || payload.tokenId;
+
+  if (type === 'book') {
+    return [{ kind: 'quote', assetId, quote: bestFromBook(payload) }];
+  }
+  if (type === 'best_bid_ask') {
+    return [{
+      kind: 'quote', assetId,
+      quote: {
+        bid: numberOrNull(payload.best_bid ?? payload.bestBid),
+        ask: numberOrNull(payload.best_ask ?? payload.bestAsk),
+      },
+    }];
+  }
+  if (type === 'price_change') {
+    return (payload.price_changes || payload.priceChanges || []).map((change) => ({
+      kind: 'quote',
+      assetId: change.asset_id || change.assetId || change.token_id || change.tokenId,
+      quote: {
+        bid: numberOrNull(change.best_bid ?? change.bestBid),
+        ask: numberOrNull(change.best_ask ?? change.bestAsk),
+      },
+    }));
+  }
+  if (type === 'last_trade_price') {
+    return [{
+      kind: 'trade',
+      assetId,
+      trade: {
+        price: numberOrNull(payload.price),
+        size: positiveOrNull(payload.size),
+        side: String(payload.side || '').toUpperCase(),
+        timestamp: payload.timestamp ?? null,
+        transactionHash: payload.transaction_hash || payload.transactionHash || null,
+      },
+    }];
+  }
+  return [];
+}
+
+function startMarketFeed(assetIds, onQuote, onError = () => {}, onTrade = () => {}) {
   const ids = [...new Set((assetIds || []).map(String).filter(Boolean))];
   let stopped = false;
   let socket = null;
@@ -42,22 +94,17 @@ function startMarketFeed(assetIds, onQuote, onError = () => {}) {
     try { onQuote(String(assetId), { bid, ask }); } catch (error) { report(error); }
   }
 
+  function publishTrade(assetId, trade) {
+    if (!assetId || !ids.includes(String(assetId))) return;
+    try { onTrade(String(assetId), trade); } catch (error) { report(error); }
+  }
+
   function handleEvent(event) {
-    if (!event || typeof event !== 'object') return;
-    const type = event.event_type || event.type;
-    if (type === 'book') {
-      const q = bestFromBook(event);
-      publish(event.asset_id || event.assetId, q.bid, q.ask);
-      return;
-    }
-    if (type === 'best_bid_ask') {
-      publish(event.asset_id || event.assetId, numberOrNull(event.best_bid ?? event.bestBid), numberOrNull(event.best_ask ?? event.bestAsk));
-      return;
-    }
-    if (type === 'price_change') {
-      for (const change of (event.price_changes || event.priceChanges || [])) {
-        publish(change.asset_id || change.assetId || change.token_id || change.tokenId,
-          numberOrNull(change.best_bid ?? change.bestBid), numberOrNull(change.best_ask ?? change.bestAsk));
+    for (const decoded of decodeMarketEvent(event)) {
+      if (decoded.kind === 'quote') {
+        publish(decoded.assetId, decoded.quote.bid, decoded.quote.ask);
+      } else if (decoded.kind === 'trade') {
+        publishTrade(decoded.assetId, decoded.trade);
       }
     }
   }
@@ -107,3 +154,4 @@ function startMarketFeed(assetIds, onQuote, onError = () => {}) {
 }
 
 module.exports = startMarketFeed;
+module.exports.decodeMarketEvent = decodeMarketEvent;
