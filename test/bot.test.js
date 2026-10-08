@@ -117,6 +117,7 @@ test('strategy constants use a shared $1,000 bankroll, a 3-second market-entry d
   assert.equal(cfg.MARTINGALE_MULTIPLIER, 1.8);
   assert.equal(cfg.ENTRY_REFERENCE_PRICE_USD, 0.45);
   assert.equal(cfg.ENTRY_DELAY_MS, 3000);
+  assert.equal(cfg.MARKET_ENTRY_MAX_LATENESS_MS, 10_000);
   assert.equal(cfg.TAKE_PROFIT_BID_USD, 0.99);
   assert.equal(cfg.TAKER_FEE_RATE, 0.07);
   assert.equal(cfg.REBATE_FEE_EQUIVALENT_RATE, 0.07);
@@ -171,6 +172,30 @@ test('market buys only fill visible depth and cancel an unfilled remainder', asy
   assert.equal(fx.w.sides.DOWN.tranches[0].entryOrder.status, 'no_fill');
   assert.equal(fx.w.sides.DOWN.tranches[0].position, null);
   assert.ok(fx.bot.log.some((row) => row.event === 'MARKET_BUY_NO_FILL'));
+});
+
+test('bot skips the window if startup/data readiness misses the 3-second trigger grace', async () => {
+  const fx = fixture();
+  const lateAt = OPEN_TS * 1000 + cfg.ENTRY_DELAY_MS + cfg.MARKET_ENTRY_MAX_LATENESS_MS + 1;
+  await fireMarketOrders(fx, {
+    UP: makeBook([[0.45, 10]], [[0.40, 20]]),
+    DOWN: makeBook([[0.45, 10]], [[0.40, 20]]),
+  }, lateAt);
+
+  assert.equal(fx.w.status, 'entry_window_missed');
+  assert.equal(fx.w.marketEntryMissedAt, lateAt);
+  assert.equal(fx.w.sides.UP.tranches[0].state, 'done_for_window');
+  assert.equal(fx.w.sides.DOWN.tranches[0].state, 'done_for_window');
+  assert.equal(fx.w.sides.UP.tranches[0].entryOrder, null);
+  assert.equal(fx.w.sides.DOWN.tranches[0].entryOrder, null);
+  assert.equal(fx.trader.calls.length, 0);
+  const skipped = fx.bot.log.filter((row) => row.event === 'MARKET_ENTRY_WINDOW_MISSED');
+  assert.equal(skipped.length, 1);
+  assert.equal(skipped[0].lateByMs, cfg.MARKET_ENTRY_MAX_LATENESS_MS + 1);
+
+  await fireMarketOrders(fx, { UP: makeBook([[0.45, 10]]), DOWN: makeBook([[0.45, 10]]) }, lateAt + 1000);
+  assert.equal(fx.trader.calls.length, 0);
+  assert.equal(fx.bot.log.filter((row) => row.event === 'MARKET_ENTRY_WINDOW_MISSED').length, 1);
 });
 
 test('TP remains a post-only $0.99 sell; entry taker fee is included in P&L and rebates stay separate', async () => {
@@ -332,6 +357,7 @@ test('snapshot reports market entries, opening delay, taker fee rate and separat
   assert.equal(state.strategy.entryReferencePrice, 0.45);
   assert.equal(state.strategy.entryPriceCap, null);
   assert.equal(state.strategy.entryDelayMs, 3000);
+  assert.equal(state.strategy.entryMaxLatenessMs, 10_000);
   assert.equal(state.strategy.takeProfitBid, 0.99);
   assert.equal(state.strategy.entryOrderType, 'MARKET');
   assert.equal(state.strategy.takeProfitOrderType, 'POST_ONLY');
@@ -347,6 +373,7 @@ test('snapshot reports market entries, opening delay, taker fee rate and separat
   assert.equal(state.strategy.settlementFallback, 'HIGHER_BID_THEN_FRESHEST_THEN_UP');
   assert.equal(state.cfg.entryReferencePrice, 0.45);
   assert.equal(state.cfg.entryDelayMs, 3000);
+  assert.equal(state.cfg.entryMaxLatenessMs, 10_000);
   assert.equal(state.cfg.entryPriceCap, null);
   assert.equal(state.cfg.takerFeeRate, 0.07);
   assert.equal(state.cfg.takeProfitMakerFeesCharged, 0);

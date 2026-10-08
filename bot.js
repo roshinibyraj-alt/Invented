@@ -138,7 +138,7 @@ class Bot {
         upTargetShares: this._sharesForSide('UP'), downTargetShares: this._sharesForSide('DOWN'),
         entryAt: openTs * 1000 + cfg.ENTRY_DELAY_MS,
         entryDelayMs: cfg.ENTRY_DELAY_MS,
-        note: 'New five-minute window; independent UP and DOWN market buys are scheduled after the 3-second opening delay, with no price cap.',
+        note: 'New five-minute window; independent UP and DOWN market buys are scheduled after the 3-second opening delay, with no price cap. If the opening trigger is missed beyond the configured grace, the bot skips this window rather than entering late.',
       });
     }
 
@@ -153,7 +153,7 @@ class Bot {
         this._push({
           event: 'WINDOW_READY', slug: w.slug,
           entryAt: w.openTs * 1000 + cfg.ENTRY_DELAY_MS,
-          note: 'Market tokens found; the bot will wait until the 3-second window-open delay elapses, then sweep available asks for each side.',
+          note: 'Market tokens found; the bot waits for the 3-second opening trigger, then sweeps visible asks. If startup or data delay misses the trigger grace, this window is skipped.',
         });
         await this._ensureMarketFeed(w);
       } else {
@@ -223,6 +223,11 @@ class Bot {
     if (!w || w !== this.w || !w.window || w.closed || this.strategyBlocked) return;
     const triggerAt = w.openTs * 1000 + cfg.ENTRY_DELAY_MS;
     if (now < triggerAt || now >= windowCloseMs(w)) return;
+    if (w.marketEntryMissedAt != null) return;
+    if (now > triggerAt + cfg.MARKET_ENTRY_MAX_LATENESS_MS) {
+      this._markMarketEntryWindowMissed(w, now, triggerAt);
+      return;
+    }
 
     if (w.marketEntryTriggeredAt == null) {
       w.marketEntryTriggeredAt = now;
@@ -259,6 +264,13 @@ class Bot {
     if (w !== this.w || w.closed || Date.now() >= windowCloseMs(w)) return;
 
     const completedAt = Date.now();
+    if (completedAt > triggerAt + cfg.MARKET_ENTRY_MAX_LATENESS_MS) {
+      for (const sideName of dueSides) {
+        w.sides[sideName].tranches[0].marketEntryRequestPending = false;
+      }
+      this._markMarketEntryWindowMissed(w, completedAt, triggerAt);
+      return;
+    }
     for (let index = 0; index < dueSides.length; index += 1) {
       const sideName = dueSides[index];
       const tranche = w.sides[sideName].tranches[0];
@@ -291,6 +303,24 @@ class Bot {
       return !!tranche.entryOrder || tranche.state === 'done_for_window';
     });
     if (entriesComplete && w.status !== 'window_closed') w.status = 'watching_positions';
+  }
+
+  _markMarketEntryWindowMissed(w, now, triggerAt) {
+    if (!w || w.marketEntryMissedAt != null) return;
+    w.marketEntryMissedAt = now;
+    w.status = 'entry_window_missed';
+    for (const sideName of SIDES) {
+      const tranche = w.sides[sideName].tranches[0];
+      tranche.marketEntryRequestPending = false;
+      if (!tranche.entryOrder && !tranche.position) tranche.state = 'done_for_window';
+    }
+    this._push({
+      event: 'MARKET_ENTRY_WINDOW_MISSED', slug: w.slug,
+      scheduledAt: triggerAt, skippedAt: now,
+      lateByMs: now - triggerAt,
+      maximumLatenessMs: cfg.MARKET_ENTRY_MAX_LATENESS_MS,
+      note: 'The 3-second opening entry point was missed beyond the allowed data/startup grace; skipped this window rather than entering late. The next five-minute window remains eligible.',
+    });
   }
 
   _bookMarketEntry(w, sideName, tranche, targetShares, plan, now) {
@@ -946,6 +976,8 @@ class Bot {
       slug: w.slug, status: w.status, openTs: w.openTs,
       entryTriggerTs: w.openTs * 1000 + cfg.ENTRY_DELAY_MS,
       entryTriggeredAt: w.marketEntryTriggeredAt || null,
+      entryMissedAt: w.marketEntryMissedAt || null,
+      entryMaxLatenessMs: cfg.MARKET_ENTRY_MAX_LATENESS_MS,
       closeTs: Number(w.window && w.window.closeTs) || w.openTs + WINDOW_SECONDS,
       secondsRemaining: Math.max(0, ((Number(w.window && w.window.closeTs) || w.openTs + WINDOW_SECONDS) * 1000 - now) / 1000),
       closed: w.closed,
@@ -1016,6 +1048,7 @@ class Bot {
         baseShares: cfg.BASE_SHARES,
         entryReferencePrice: cfg.ENTRY_REFERENCE_PRICE_USD,
         entryPriceCap: null, entryDelayMs: cfg.ENTRY_DELAY_MS,
+        entryMaxLatenessMs: cfg.MARKET_ENTRY_MAX_LATENESS_MS,
         takeProfitBid: cfg.TAKE_PROFIT_BID_USD, hardStopLossBid: null,
         entryOrderType: 'MARKET', takeProfitOrderType: 'POST_ONLY',
         takerFeeRate: cfg.TAKER_FEE_RATE,
@@ -1046,6 +1079,7 @@ class Bot {
         demoCapital: this.capital, baseShares: cfg.BASE_SHARES,
         entryReferencePrice: cfg.ENTRY_REFERENCE_PRICE_USD,
         entryDelayMs: cfg.ENTRY_DELAY_MS,
+        entryMaxLatenessMs: cfg.MARKET_ENTRY_MAX_LATENESS_MS,
         entryPriceCap: null, takerFeeRate: cfg.TAKER_FEE_RATE,
         takeProfitBid: cfg.TAKE_PROFIT_BID_USD,
         takeProfitMakerFeesCharged: 0, makerRebateRate: cfg.MAKER_REBATE_RATE,
@@ -1084,7 +1118,7 @@ function makeWindowState(slug, openTs) {
   return {
     slug, openTs, status: 'waiting_for_market', window: null,
     marketWaitReason: null, nextDiscoveryAt: 0,
-    marketEntryTriggeredAt: null,
+    marketEntryTriggeredAt: null, marketEntryMissedAt: null,
     closed: false, closedAt: null,
     lastClobQuoteBySide: { UP: null, DOWN: null },
     finalThreeSecondQuoteBySide: { UP: null, DOWN: null },

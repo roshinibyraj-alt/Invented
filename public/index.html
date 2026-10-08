@@ -76,7 +76,7 @@ table{border-collapse:collapse;width:100%}th{font-size:9px;color:var(--muted);te
     <div class="rule-grid" style="margin-top:11px">
       <div class="rule"><b>$1,000 shared demo capital</b><p>UP and DOWN draw from the same cash pool, while their positions and loss streaks remain independent.</p></div>
       <div class="rule"><b>10 base shares per side</b><p>After each side’s own loss, its next order grows by 1.8×. A win resets only that side to 10 shares.</p></div>
-      <div class="rule"><b>Market buy · 3-second opening delay</b><p>After the window starts, wait 3 seconds, then independently sweep each side’s visible CLOB asks for its martingale share target. There is no $0.45 price cap: fills use the actual displayed ask levels and can cost more than $0.45 per share. No visible depth or insufficient shared capital can still mean a partial or zero fill.</p></div>
+      <div class="rule"><b>Market buy · 3-second opening delay</b><p>After the window starts, wait 3 seconds, then independently sweep each side’s visible CLOB asks for its martingale share target. There is no $0.45 price cap: fills use the actual displayed ask levels and can cost more than $0.45 per share. If startup or market data is more than 10 seconds late to the trigger, skip that window rather than entering late. No visible depth or insufficient shared capital can still mean a partial or zero fill.</p></div>
       <div class="rule"><b>Post-only take profit · $0.99</b><p>Rest a paper sell at $0.99 when it will not cross the best bid, after the same modeled delay. A later opposing BUY trade print can fill it, booked exactly at $0.99.</p></div>
       <div class="rule"><b>No stop loss</b><p>No stop or forced pre-expiry sale. Unclosed shares remain open through the window close.</p></div>
       <div class="rule"><b>CLOB close-price paper outcome</b><p>In the final 3 seconds, a bid above $0.98 wins; otherwise the higher bid wins. Missing quotes fall back to the latest in-window bid, then a deterministic tie-break. This is not official settlement.</p></div>
@@ -168,7 +168,7 @@ function render(s){
    }else{
      $('windowNote').textContent='Gamma supplies market metadata only; CLOB bids set the paper close outcome. At close, final-three-second quotes are used, with deterministic fallbacks so positions never remain pending.';
    }
-   $('entryLimit').textContent='MARKET BUY · '+Number(cfg.entryDelayMs||0)/1000+'s delay · NO CAP';
+   $('entryLimit').textContent='MARKET BUY · '+Number(cfg.entryDelayMs||0)/1000+'s · '+Number(cfg.entryMaxLatenessMs||0)/1000+'s grace · NO CAP';
   $('tpLimit').textContent='POST-ONLY TP · '+px(cfg.takeProfitBid)+' · NO STOP';
   const mg=s.martingale||{},upMg=mg.UP||{},downMg=mg.DOWN||{};
   $('martingale').textContent='UP '+Number(upMg.lossStreak||0)+' LOSS · '+qty(upMg.nextShares)+' SHARES  /  DOWN '+Number(downMg.lossStreak||0)+' LOSS · '+qty(downMg.nextShares)+' SHARES';
@@ -177,7 +177,7 @@ function render(s){
     const side=sides[sideName]||{},quote=side.quote||{},tranche=(side.tranches||[])[0]||{};
     const state=String(tranche.state||'—').replace(/_/g,' ');
     const order=tranche.entryOrder||{},position=tranche.position||{};
-     const statusTone=state==='in position'||state==='partially filled'?'good':state==='waiting for market'?'warn':'';
+     const statusTone=state==='in position'||state==='partially filled'?'good':state==='waiting for market'||state==='entry window missed'?'warn':'';
     const sideClass=sideName==='UP'?'up':'down';
     const stat=(label,value)=>'<div class="side-stat"><span class="side-stat-label">'+label+'</span><span class="side-stat-value">'+value+'</span></div>';
     sideCards.push('<article class="side-card '+sideClass+'">'
