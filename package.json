@@ -2,7 +2,7 @@
   "name": "clob-independent-tranche-demo",
   "version": "1.0.0",
   "private": true,
-  "description": "Demo-only CLOB-based Polymarket BTC 5-minute UP/DOWN tranche bot.",
+  "description": "Demo-only Polymarket BTC 5-minute UP/DOWN limit-order bot with shared paper capital.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",

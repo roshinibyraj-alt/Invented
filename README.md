@@ -1,22 +1,20 @@
-# Independent CLOB Tranche Bot
+# Polymarket BTC 5-Minute Paper Bot
 
-Demo-only Polymarket BTC five-minute UP/DOWN bot. Market metadata is discovered through Gamma; every price trigger and simulated fill uses the public Polymarket CLOB.
+Demo-only Polymarket BTC five-minute UP/DOWN bot. Gamma supplies market metadata and official final outcomes; Polymarket's public CLOB supplies quotes and order books.
 
 ## Strategy
 
-- UP and DOWN enter independently. Each starts with one $100 tranche per five-minute window.
-- New entries are blocked for the first 90 seconds after each window starts. Existing positions continue to be monitored for TP, hard stop, forced exit, and settlement during the delay.
-- Each side's single tranche enters when its best ask reaches $0.90. The $0.90 cap remains in force, so asks above $0.90 are skipped; thin books can result in a partial simulated fill.
-- For every open UP or DOWN position, a best bid at or below $0.70 latches a hard stop and attempts to sell all remaining shares at available bids. It keeps retrying on new quotes if no bid is executable; a gap can therefore fill below $0.70. Positions never rearm or re-enter within the same window.
-- The martingale is shared by both sides and advances once per window when a hard stop is triggered. Each side's next-window stake follows $100 → $200 → $400 (two doublings maximum). A winning position resets both sides to $100; a stop at the $400 step resets the following window to $100. A window without a win or stop leaves the current step unchanged.
-- Every position has a fixed TP threshold: the CLOB best bid must reach $0.99. For shares actually filled by the TP order, demo accounting credits $1.00 per share; estimated fees are calculated from the actual CLOB fill average, which is recorded separately from the accounted exit price. Unfilled shares remain open and retry on later quotes.
-- Ten seconds before expiry, new entries stop and open positions are sold concurrently against available CLOB bids. Any remainder with no bid stays pending until Gamma confirms the market is closed and resolved with a final binary outcome price. The demo then books each remaining share at $1 for the winning outcome or $0 for the losing outcome.
+- UP and DOWN are independent: each side has its own paper order, position, and consecutive-loss counter. Both use one shared $1,000 demo cash pool.
+- When the current market is available, place one resting paper limit buy on each side at $0.40. Each starts at 10 shares. An order fills only against visible CLOB asks at or below $0.40; unfilled size remains reserved and resting through the window.
+- After a side's finalized losing trade, only that side's next order grows by 1.8×: `10 × 1.8^consecutive_losses` shares. A finalized win resets only that side to 10 shares. A pending or unfilled order is not a loss. If the shared cash pool cannot reserve the full order, that side is skipped; the target is not silently reduced.
+- When the CLOB best bid reaches $0.99, the paper position sells against visible bids at or above $0.99. Proceeds use the actual simulated CLOB fill price, and estimated fees are deducted. There is no stop loss and no forced sale before expiry.
+- At the five-minute close, any unfilled limit remainder is cancelled. Any shares still held wait for Gamma to confirm the official binary $1/$0 outcome, then settle at that payout. Martingale results are calculated from the entire finalized side trade, including any earlier TP fills.
 
 ## Safety and limitations
 
-`DemoTrader` reads public CLOB books and simulates fills locally. It has no wallet, signer, authentication, or live order methods. `LIVE_TRADING=true` is rejected at startup. Gamma's finalized outcomes are read only for demo settlement; CCXT/spot-price signals, the old trigger/hedge rules, unconfirmed settlement guesses, and live-trading dependencies are not part of this bot.
+`DemoTrader` reads public CLOB books and simulates fills locally. It has no wallet, signer, authentication, or live order methods. `LIVE_TRADING=true` is rejected at startup. No private API credentials or order-writing endpoints are used.
 
-Demo balance, martingale level, tranche balances, positions, and trade history live in memory and reset on restart. Partial-sale P&L is recorded immediately. Unsold shares remain pending until Gamma reports a closed, resolved market with $0/$1 outcome prices; account equity/net P&L are withheld until then. Settlement uses only the official final outcome, never a stale CLOB quote. Taker fees are estimates; CLOB depth and simulated fills are not evidence of live execution or profitability.
+The $1,000 cash balance, side loss streaks, positions, and trade history are in memory and reset on restart. The dashboard distinguishes actual cash, cash reserved for resting paper orders, and available cash. Gamma settlement is never guessed; positions remain pending until the official binary outcome is final. The estimated fee model is conservative and paper fills are not evidence of live execution or profitability.
 
 ## Run
 
@@ -26,4 +24,4 @@ npm test
 npm start
 ```
 
-Open `http://localhost:3000` for the dashboard. The dashboard and `[bot]` stdout events show quotes, tranche state, fills, exits, and positions awaiting official resolution.
+Open `http://localhost:3000`. The dashboard and `[bot]` stdout events show both CLOB sides, independent order states and loss streaks, fills, P&L, and positions awaiting official resolution.

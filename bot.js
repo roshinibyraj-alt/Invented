@@ -8,6 +8,7 @@ const startMarketFeed = require('./clob-feed');
 
 const EPSILON = 1e-8;
 const MAX_LOG = 300;
+const MIN_BOOK_CHECK_INTERVAL_MS = 500;
 const SIDES = ['UP', 'DOWN'];
 
 class Bot {
@@ -18,7 +19,7 @@ class Bot {
     this.demoMode = !!(trader && trader.demoMode === true);
     this.strategyBlocked = !this.demoMode;
     this.error = this.strategyBlocked
-      ? 'CLOB tranche strategy requires DemoTrader; live execution is removed.' : null;
+      ? 'Polymarket paper strategy requires DemoTrader; live execution is removed.' : null;
     this.executionHalt = this.strategyBlocked;
     this.startedAt = Date.now();
     this.capital = cfg.DEMO_CAPITAL;
@@ -38,7 +39,8 @@ class Bot {
     this._running = false;
     this._warned = new Set();
     this._positionId = 0;
-    this.martingaleStep = 0;
+    this.lossStreak = { UP: 0, DOWN: 0 };
+    this._entryOrderId = 0;
     this._nextResolutionCheckAt = new Map();
     this._resolutionCheckInFlight = new Set();
     this._resolutionStateBySlug = new Map();
@@ -87,7 +89,8 @@ class Bot {
     this._running = true;
     this._push({
       event: 'BOT_STARTED',
-      note: 'Demo-only independent UP/DOWN tranches started; prices and books come from Polymarket CLOB.',
+      note: 'Polymarket-only paper bot started; independent UP/DOWN limit orders share a $'
+        + cfg.DEMO_CAPITAL.toFixed(2) + ' demo cash pool. No live order client is loaded.',
     });
     void this._loop();
   }
@@ -121,8 +124,7 @@ class Bot {
     if (!this.w || this.w.slug !== slug) {
       if (this.w && !this.w.closed) await this._finishWindow(this.w, now, 'WINDOW_ROLLOVER');
       this._stopMarketFeed();
-      const trancheStakeUsd = this._stakeForMartingaleStep();
-      this.w = makeWindowState(slug, openTs, trancheStakeUsd, this.martingaleStep);
+      this.w = makeWindowState(slug, openTs);
       this.prices = { slug, ts: now, up: emptyQuote(), down: emptyQuote() };
       this._quotesByToken = new Map();
       this._lastQuoteAt = 0;
@@ -131,11 +133,11 @@ class Bot {
       this.priceSeries = [];
       this._seriesSlug = slug;
       this._push({
-        event: 'WINDOW_STARTED', slug, entryDelaySeconds: cfg.ENTRY_DELAY_SECONDS,
-        martingaleStep: this.martingaleStep, trancheStakeUsd,
-        note: 'New five-minute UP/DOWN window; no entries for the first '
-          + cfg.ENTRY_DELAY_SECONDS + ' seconds; UP and DOWN each have one $'
-          + trancheStakeUsd.toFixed(2) + ' tranche at the configured ask threshold.',
+        event: 'WINDOW_STARTED', slug,
+        upLossStreak: this.lossStreak.UP, downLossStreak: this.lossStreak.DOWN,
+        upTargetShares: this._sharesForSide('UP'), downTargetShares: this._sharesForSide('DOWN'),
+        note: 'New five-minute window; independent UP and DOWN paper limit orders will be placed at $'
+          + cfg.ENTRY_LIMIT_PRICE_USD.toFixed(2) + ' when the market tokens are available.',
       });
     }
 
@@ -149,9 +151,10 @@ class Bot {
         this.error = null;
         w.window = result.window;
         w.status = 'watching_entries';
+        this._placeEntryOrders(w);
         this._push({
           event: 'WINDOW_READY', slug: w.slug,
-          note: 'Market tokens found; subscribing to both CLOB books and watching entry asks.',
+          note: 'Market tokens found; both independent $0.40 paper limit orders are active and CLOB books are being monitored.',
         });
         await this._ensureMarketFeed(w);
       } else {
@@ -169,6 +172,7 @@ class Bot {
       this._maybeHeartbeat(w, now);
       return;
     }
+    this._placeEntryOrders(w);
     if (this._marketFeedSlug !== w.slug) await this._ensureMarketFeed(w);
     if (now - this._lastQuoteAt >= cfg.PRICE_FEED_FALLBACK_MS
       && now - this._lastRestFetchAt >= cfg.PRICE_FEED_FALLBACK_MS) {
@@ -189,41 +193,96 @@ class Bot {
     this._marketFeedSlug = null;
   }
 
-  _stakeForMartingaleStep(step = this.martingaleStep) {
-    return cfg.TRANCHE_BUDGET_USD * (2 ** step);
+  _sharesForSide(sideName) {
+    const streak = Math.max(0, Number(this.lossStreak[sideName]) || 0);
+    const shares = cfg.BASE_SHARES * (cfg.MARTINGALE_MULTIPLIER ** streak);
+    return Number.isFinite(shares) ? shares : Number.MAX_VALUE;
   }
 
-  _recordMartingaleStop(w, position) {
-    if (w.martingaleStopApplied) return;
-    w.martingaleStopApplied = true;
-    const previousStep = this.martingaleStep;
-    this.martingaleStep = previousStep >= cfg.MAX_MARTINGALE_STEPS ? 0 : previousStep + 1;
-    const resetAtCap = previousStep >= cfg.MAX_MARTINGALE_STEPS;
-    this._push({
-      event: resetAtCap ? 'MARTINGALE_CAP_RESET' : 'MARTINGALE_STEP_UP',
-      slug: w.slug, side: position.side, tranche: position.trancheId,
-      previousStep, martingaleStep: this.martingaleStep,
-      nextWindowStakeUsd: this._stakeForMartingaleStep(),
-      note: resetAtCap
-        ? 'The capped martingale attempt stopped out; both next-window stakes reset to the $'
-          + cfg.TRANCHE_BUDGET_USD.toFixed(2) + ' base.'
-        : 'A hard stop advances the shared martingale; both UP and DOWN next-window stakes are now $'
-          + this._stakeForMartingaleStep().toFixed(2) + ' each.',
-    });
+  _recordSideResult(position, pnl) {
+    const side = position.side;
+    const previousLossStreak = Math.max(0, Number(this.lossStreak[side]) || 0);
+    if (pnl > EPSILON) {
+      this.lossStreak[side] = 0;
+      this._push({
+        event: 'SIDE_MARTINGALE_RESET', slug: position.slug, side,
+        previousLossStreak, lossStreak: 0, nextShares: cfg.BASE_SHARES,
+        note: 'This side won; only its own loss streak resets to the 10-share base.',
+      });
+    } else if (pnl < -EPSILON) {
+      this.lossStreak[side] = previousLossStreak + 1;
+      this._push({
+        event: 'SIDE_MARTINGALE_STEP_UP', slug: position.slug, side,
+        previousLossStreak, lossStreak: this.lossStreak[side],
+        nextShares: round(this._sharesForSide(side), 4),
+        note: 'This side lost; only its next share size increases by '
+          + cfg.MARTINGALE_MULTIPLIER.toFixed(1) + '×.',
+      });
+    }
   }
 
-  _recordMartingaleWin(w, position, reason) {
-    const previousStep = this.martingaleStep;
-    if (previousStep === 0) return;
-    this.martingaleStep = 0;
-    this._push({
-      event: 'MARTINGALE_RESET',
-      slug: w && w.slug || position.slug, side: position.side, tranche: position.trancheId,
-      reason, previousStep, martingaleStep: 0,
-      nextWindowStakeUsd: cfg.TRANCHE_BUDGET_USD,
-      note: 'A winning position resets both UP and DOWN next-window stakes to the $'
-        + cfg.TRANCHE_BUDGET_USD.toFixed(2) + ' base.',
-    });
+  _reservedCash() {
+    const w = this.w;
+    if (!w) return 0;
+    return SIDES.reduce((total, sideName) => {
+      const order = w.sides[sideName].tranches[0].entryOrder;
+      return total + (order && order.status === 'resting' ? order.reservedUsd : 0);
+    }, 0);
+  }
+
+  _reserveForShares(shares) {
+    const notional = shares * cfg.ENTRY_LIMIT_PRICE_USD;
+    return notional + estimateTakerFee(shares, cfg.ENTRY_LIMIT_PRICE_USD);
+  }
+
+  _placeEntryOrders(w) {
+    if (!w || w !== this.w || !w.window || w.closed || this.strategyBlocked) return;
+    const priority = Math.floor(w.openTs / WINDOW_SECONDS) % 2 === 0
+      ? ['UP', 'DOWN'] : ['DOWN', 'UP'];
+    for (const sideName of priority) {
+      const tranche = w.sides[sideName].tranches[0];
+      if (tranche.entryOrder && tranche.entryOrder.status === 'resting') continue;
+      if (tranche.state === 'done_for_window' || tranche.state === 'in_position') continue;
+
+      const targetShares = this._sharesForSide(sideName);
+      const reserve = this._reserveForShares(targetShares);
+      const available = this.cash - this._reservedCash();
+      if (!Number.isFinite(reserve) || reserve > available + EPSILON) {
+        tranche.state = 'capital_blocked';
+        if (Date.now() - tranche.lastEntryBlockLogAt >= 5000) {
+          tranche.lastEntryBlockLogAt = Date.now();
+          this._push({
+            event: 'ENTRY_LIMIT_BLOCKED_CAPITAL', slug: w.slug, side: sideName,
+            targetShares: round(targetShares, 4), requiredReserveUsd: round(reserve, 2),
+            availableCashUsd: round(Math.max(0, available), 2),
+            note: 'Shared demo cash cannot reserve the full side order; size is not scaled.',
+          });
+        }
+        continue;
+      }
+
+      const tokenId = sideName === 'UP' ? w.window.tokenUp : w.window.tokenDown;
+      const order = {
+        id: 'paper-limit-' + (++this._entryOrderId),
+        tokenId, side: sideName, limitPrice: cfg.ENTRY_LIMIT_PRICE_USD,
+        targetShares, remainingShares: targetShares, filledShares: 0,
+        reservedUsd: reserve, status: 'resting', placedAt: Date.now(),
+        consumedByPrice: {}, lastBookSignature: null,
+      };
+      tranche.entryOrder = order;
+      tranche.targetShares = targetShares;
+      tranche.initialBudgetUsd = targetShares * cfg.ENTRY_LIMIT_PRICE_USD;
+      tranche.availableUsd = reserve;
+      tranche.state = 'limit_order_open';
+      this._push({
+        event: 'ENTRY_LIMIT_PLACED', slug: w.slug, side: sideName,
+        orderId: order.id, limitPrice: order.limitPrice,
+        targetShares: round(targetShares, 4),
+        reservedUsd: round(reserve, 2), lossStreak: this.lossStreak[sideName],
+        note: 'Resting demo limit buy placed at $'
+          + cfg.ENTRY_LIMIT_PRICE_USD.toFixed(2) + '; remains active until filled or window close.',
+      });
+    }
   }
 
   async _ensureMarketFeed(w) {
@@ -346,131 +405,124 @@ class Bot {
     const side = w.sides[sideName];
     const quote = this._quoteFor(sideName, w);
     const closeMs = windowCloseMs(w);
-    const cutoff = closeMs - cfg.FORCED_EXIT_BUFFER_SECONDS * 1000;
-    if (now >= closeMs) return;
-    if (now >= cutoff) {
-      await this._forceExitSide(w, sideName, now);
-      return;
+    if (now >= closeMs || !quote) return;
+    const tranche = side.tranches[0];
+    const entryOrder = tranche.entryOrder;
+
+    if (entryOrder && entryOrder.status === 'resting'
+      && quote.ask != null && quote.ask <= entryOrder.limitPrice + EPSILON) {
+      await this._tryFillLimitBuy(w, sideName, tranche, now);
     }
 
-    if (!quote) return;
-    for (const tranche of side.tranches) {
-      if (tranche.position) {
-        const position = tranche.position;
-        if (!position.stopLossTriggered && quote.bid != null
-          && quote.bid <= cfg.HARD_STOP_LOSS_BID_USD + EPSILON) {
-          position.stopLossTriggered = true;
-          position.stopLossTriggeredAt = now;
-          position.stopLossTriggerBid = quote.bid;
-          position.status = 'stop_loss_triggered';
-          this._recordMartingaleStop(w, position);
-          this._push({
-            event: 'STOP_LOSS_TRIGGERED', slug: w.slug, side: position.side,
-            tranche: position.trancheId, cycle: position.cycle,
-            triggerBid: round(quote.bid, 4), stopBid: cfg.HARD_STOP_LOSS_BID_USD,
-            shares: round(position.openShares, 5),
-            note: 'Best bid reached the $' + cfg.HARD_STOP_LOSS_BID_USD.toFixed(2)
-              + ' hard stop; attempting to sell remaining shares at available bids.',
-          });
-        }
-        if (position.stopLossTriggered) {
-          await this._sellPosition(w, tranche, position, 'HARD_STOP_LOSS', 0, now);
-        } else if (quote.bid != null && quote.bid + EPSILON >= position.takeProfitPrice) {
-          await this._sellPosition(w, tranche, position, 'TAKE_PROFIT', position.takeProfitPrice, now);
-        }
-        continue;
-      }
-
-      const ask = quote.ask;
-      if (ask == null || ask <= 0) continue;
-      if (now < (w.openTs + cfg.ENTRY_DELAY_SECONDS) * 1000) continue;
-      if (ask > cfg.MAX_ENTRY_ASK_USD + EPSILON) continue;
-      if (tranche.state === 'waiting_entry' && ask + EPSILON >= tranche.entryTrigger) {
-        await this._buyTranche(w, sideName, tranche, ask, now);
-      }
+    const position = tranche.position;
+    if (position && position.openShares > EPSILON
+      && quote.bid != null && quote.bid + EPSILON >= cfg.TAKE_PROFIT_BID_USD) {
+      await this._sellPosition(w, tranche, position, 'TAKE_PROFIT', cfg.TAKE_PROFIT_BID_USD, now);
     }
   }
 
-  async _buyTranche(w, sideName, tranche, triggerAsk, now) {
-    const budgetUsd = Number(tranche.availableUsd);
-    if (!Number.isFinite(budgetUsd) || budgetUsd <= EPSILON) {
-      tranche.state = 'no_budget';
-      return null;
-    }
-    const tokenId = sideName === 'UP' ? w.window.tokenUp : w.window.tokenDown;
-    const order = await this.trader.placeFakMarketOrder(
-      tokenId, 'BUY', budgetUsd, { priceLimit: cfg.MAX_ENTRY_ASK_USD },
-    );
-    if (w.closed || Date.now() >= windowCloseMs(w) - cfg.FORCED_EXIT_BUFFER_SECONDS * 1000) {
-      this._push({
-        event: 'ENTRY_IGNORED_CUTOFF', slug: w.slug, side: sideName, tranche: tranche.id,
-        note: 'The demo fill returned at or after the forced-exit cutoff; no late entry was recorded.',
-      });
-      return null;
-    }
-    const shares = positive(order && order.raw && order.raw.takingAmount);
-    const notional = positive(order && order.raw && order.raw.makingAmount);
-    if (shares == null || notional == null) {
-      this._push({
-        event: 'ENTRY_UNFILLED', slug: w.slug, side: sideName, tranche: tranche.id,
-        triggerAsk: round(triggerAsk, 4), budgetUsd: round(budgetUsd, 2),
-        note: 'No CLOB asks at or below $' + cfg.MAX_ENTRY_ASK_USD.toFixed(2) + ' filled this tranche.',
-      });
-      return null;
-    }
+  async _tryFillLimitBuy(w, sideName, tranche, now) {
+    const order = tranche.entryOrder;
+    if (!order || order.status !== 'resting' || order.fillPending) return;
+    const checkNow = Date.now();
+    if (checkNow - (order.lastBookCheckAt || 0) < MIN_BOOK_CHECK_INTERVAL_MS) return;
+    order.lastBookCheckAt = checkNow;
+    order.fillPending = true;
+    try {
+      const fill = await this.trader.simulateLimitBuy(
+        order.tokenId, order.remainingShares, order.limitPrice, order,
+      );
+      if (!fill || !(fill.shares > EPSILON) || !(fill.notional > EPSILON)) return;
+      if (w.closed || Date.now() >= windowCloseMs(w)) {
+        this._push({
+          event: 'ENTRY_FILL_IGNORED_AFTER_EXPIRY', slug: w.slug, side: sideName,
+          orderId: order.id, shares: round(fill.shares, 5),
+          note: 'The paper fill response arrived after window close and was not added to the ledger.',
+        });
+        return;
+      }
 
-    const averagePrice = positive(order.avgPrice) || notional / shares;
-    const fee = estimateTakerFee(shares, averagePrice);
-    const cost = notional + fee;
-    if (cost > this.cash + EPSILON) {
-      this._push({
-        event: 'ENTRY_REJECTED_CASH', slug: w.slug, side: sideName, tranche: tranche.id,
-        note: 'Simulated fill plus estimated taker fee exceeded the demo account cash.',
-      });
-      return null;
-    }
+      const shares = Math.min(order.remainingShares, fill.shares);
+      const notional = fill.notional * (shares / fill.shares);
+      const averagePrice = positive(fill.avgPrice) || notional / shares;
+      const fee = estimateTakerFee(shares, averagePrice);
+      const cost = notional + fee;
+      const nextRemaining = Math.max(0, order.remainingShares - shares);
+      const nextReserve = this._reserveForShares(nextRemaining);
+      const otherReserved = this._reservedCash() - order.reservedUsd;
+      if (this.cash - cost - otherReserved - nextReserve < -EPSILON) {
+        this._push({
+          event: 'ENTRY_FILL_REJECTED_CAPITAL', slug: w.slug, side: sideName,
+          orderId: order.id, shares: round(shares, 5),
+          note: 'The simulated fill would exceed shared demo cash; no fill was recorded.',
+        });
+        return;
+      }
 
-    this.cash -= cost;
-    tranche.availableUsd = Math.max(0, budgetUsd - notional);
-    tranche.cycle += 1;
-    const position = {
-      id: ++this._positionId,
-      slug: w.slug, openTs: w.openTs, closeTs: Number(w.window.closeTs) || w.openTs + WINDOW_SECONDS,
-      side: sideName, trancheId: tranche.id, cycle: tranche.cycle, tokenId,
-      entryBudgetUsd: budgetUsd, entryNotional: notional, entryFee: fee,
-      entryPrice: averagePrice, shares, openShares: shares,
-      remainingEntryCost: cost, takeProfitPrice: cfg.TAKE_PROFIT_BID_USD,
-      takeProfitReachable: cfg.TAKE_PROFIT_BID_USD <= 1 + EPSILON,
-      stopLossTriggered: false, stopLossTriggeredAt: null, stopLossTriggerBid: null,
-      exitProceeds: 0, exitFees: 0, netExitProceeds: 0, realizedPnl: 0,
-      clobExitProceeds: 0, clobExitShares: 0, lastClobExitPrice: null,
-      lastMark: this._quoteFor(sideName, w)?.bid ?? averagePrice,
-      resolutionOutcome: null, resolutionPricePerShare: null,
-      openedAt: now, closedAt: null, status: 'open',
-    };
-    tranche.position = position;
-    tranche.state = 'in_position';
-    this.pending.push(position);
-    this.stats.entries += 1;
-    this.stats.estimatedFees += fee;
-    w.status = 'position_open';
-    this._push({
-      event: 'ENTRY_FILLED',
-      slug: w.slug, side: sideName, tranche: tranche.id, cycle: tranche.cycle,
-      triggerAsk: round(triggerAsk, 4), budgetUsd: round(budgetUsd, 2),
-      spentUsd: round(notional, 2), shares: round(shares, 5),
-      avgEntry: round(averagePrice, 4), takeProfit: round(position.takeProfitPrice, 4),
-      martingaleStep: w.martingaleStep,
-      note: 'Entry filled from the CLOB book at average $'
-        + averagePrice.toFixed(4) + '; TP triggers at best bid $'
-        + position.takeProfitPrice.toFixed(4) + ' and credits $'
-        + cfg.TAKE_PROFIT_CREDIT_PRICE_USD.toFixed(2) + ' per share in demo accounting.',
-    });
-    return position;
+      this.cash -= cost;
+      order.remainingShares = nextRemaining;
+      order.filledShares += shares;
+      order.reservedUsd = nextReserve;
+      if (order.remainingShares <= EPSILON) {
+        order.remainingShares = 0;
+        order.reservedUsd = 0;
+        order.status = 'filled';
+      }
+      tranche.availableUsd = order.reservedUsd;
+      tranche.cycle = 1;
+
+      let position = tranche.position;
+      if (!position) {
+        position = {
+          id: ++this._positionId,
+          slug: w.slug, openTs: w.openTs,
+          closeTs: Number(w.window.closeTs) || w.openTs + WINDOW_SECONDS,
+          side: sideName, trancheId: tranche.id, cycle: tranche.cycle, tokenId: order.tokenId,
+          orderId: order.id, entryBudgetUsd: order.targetShares * order.limitPrice,
+          entryNotional: 0, entryFee: 0, entryPrice: 0,
+          shares: 0, openShares: 0, remainingEntryCost: 0,
+          takeProfitPrice: cfg.TAKE_PROFIT_BID_USD,
+          exitProceeds: 0, exitFees: 0, netExitProceeds: 0, realizedPnl: 0,
+          clobExitProceeds: 0, clobExitShares: 0, lastClobExitPrice: null,
+          lastMark: this._quoteFor(sideName, w)?.bid ?? averagePrice,
+          resolutionOutcome: null, resolutionPricePerShare: null,
+          openedAt: now, closedAt: null, status: 'open', finalized: false,
+        };
+        tranche.position = position;
+      }
+
+      position.shares += shares;
+      position.openShares += shares;
+      position.entryNotional += notional;
+      position.entryFee += fee;
+      position.entryPrice = position.entryNotional / position.shares;
+      position.remainingEntryCost += cost;
+      position.status = 'open';
+      position.lastMark = this._quoteFor(sideName, w)?.bid ?? averagePrice;
+      if (!this.pending.includes(position)) this.pending.push(position);
+      this.stats.entries += 1;
+      this.stats.estimatedFees += fee;
+      w.status = 'position_open';
+      tranche.state = order.status === 'filled' ? 'in_position' : 'partially_filled';
+      this._push({
+        event: 'ENTRY_LIMIT_FILLED', slug: w.slug, side: sideName,
+        orderId: order.id, tranche: tranche.id, cycle: tranche.cycle,
+        limitPrice: order.limitPrice, avgEntry: round(averagePrice, 4),
+        shares: round(shares, 5), totalShares: round(position.shares, 5),
+        remainingOrderShares: round(order.remainingShares, 5),
+        spentUsd: round(notional, 4), fee: round(fee, 4),
+        note: 'Paper limit fill used visible CLOB asks at or below $'
+          + order.limitPrice.toFixed(2) + '; actual displayed fill prices and fees were booked.',
+      });
+    } finally {
+      order.fillPending = false;
+    }
   }
 
   async _sellPosition(w, tranche, position, reason, minimumPrice, now = Date.now()) {
-    if (!position || position.openShares <= EPSILON || position.exitPending) return false;
+    if (!position || position.openShares <= EPSILON || position.exitPending
+      || now - (position.lastExitAttemptAt || 0) < MIN_BOOK_CHECK_INTERVAL_MS) return false;
+    position.lastExitAttemptAt = now;
     position.exitPending = true;
     try {
       const order = await this.trader.placeFakMarketOrder(
@@ -495,8 +547,7 @@ class Bot {
       const sold = Math.min(position.openShares, sharesSold);
       const clobGrossProceeds = proceeds * (sold / sharesSold);
       const clobAverageExit = clobGrossProceeds / sold;
-      const grossProceeds = reason === 'TAKE_PROFIT'
-        ? sold * cfg.TAKE_PROFIT_CREDIT_PRICE_USD : clobGrossProceeds;
+      const grossProceeds = clobGrossProceeds;
       const averageExit = grossProceeds / sold;
       const fee = estimateTakerFee(sold, clobAverageExit);
       const entryCostAllocated = position.openShares > EPSILON
@@ -510,9 +561,6 @@ class Bot {
       position.clobExitShares += sold;
       const realizedDelta = grossProceeds - fee - entryCostAllocated;
       position.realizedPnl += realizedDelta;
-      if (reason === 'TAKE_PROFIT') {
-        this._recordMartingaleWin(w, position, 'TAKE_PROFIT');
-      }
       this.stats.realizedPnl += realizedDelta;
       position.lastExitPrice = averageExit;
       position.lastClobExitPrice = clobAverageExit;
@@ -529,27 +577,27 @@ class Bot {
         avgExit: round(averageExit, 4), clobAvgExit: round(clobAverageExit, 4),
         proceeds: round(grossProceeds, 2),
         fee: round(fee, 4), realizedPnl: round(position.realizedPnl, 2),
-        note: (reason === 'TAKE_PROFIT'
-          ? 'CLOB TP threshold reached; demo credits $'
-            + cfg.TAKE_PROFIT_CREDIT_PRICE_USD.toFixed(2) + ' per filled share (CLOB average $'
-            + clobAverageExit.toFixed(4) + ').'
-          : (reason === 'HARD_STOP_LOSS' ? 'Hard stop-loss sale'
-            : 'Forced window-exit sale') + ' simulated at average best bid $'
-            + clobAverageExit.toFixed(4))
+        note: 'Simulated sale used available CLOB bids at or above the $'
+          + minimumPrice.toFixed(2) + ' take-profit limit; actual average was $'
+          + clobAverageExit.toFixed(4) + '.'
           + (position.openShares > EPSILON ? '; remaining shares stay open for another exit attempt.' : '.'),
       });
 
       if (position.openShares <= EPSILON) {
         position.openShares = 0;
-        position.closedAt = now;
-        position.status = 'closed';
-        tranche.position = null;
-        tranche.availableUsd += position.netExitProceeds;
-        tranche.state = 'done_for_window';
-        this._finalizeTrade(position, reason);
+        if (tranche.entryOrder && tranche.entryOrder.status === 'resting') {
+          position.status = 'entry_order_open';
+          this.pending = this.pending.filter((item) => item !== position);
+          tranche.state = 'limit_order_open';
+        } else {
+          position.closedAt = now;
+          position.status = 'closed';
+          tranche.position = null;
+          tranche.state = 'done_for_window';
+          this._finalizeTrade(position, reason);
+        }
       } else {
-        position.status = reason === 'TAKE_PROFIT' ? 'tp_partial'
-          : reason === 'HARD_STOP_LOSS' ? 'stop_loss_partial' : 'forced_exit_partial';
+        position.status = 'tp_partial';
       }
       this._recordEquity(now);
       return position.openShares <= EPSILON;
@@ -565,53 +613,53 @@ class Bot {
       event: 'EXIT_UNFILLED', slug: w.slug, side: position.side,
       tranche: position.trancheId, reason,
       shares: round(position.openShares, 5),
-      note: reason === 'TAKE_PROFIT'
-        ? 'TP was reached, but no executable CLOB bids at or above the TP price were available.'
-        : reason === 'HARD_STOP_LOSS'
-          ? 'The hard stop was triggered, but no executable CLOB bids were available; retrying on the next quote.'
-        : 'Forced exit has no executable CLOB bid available yet; retrying before expiry.',
+      note: 'TP threshold was reached, but no executable CLOB bids at or above $'
+        + cfg.TAKE_PROFIT_BID_USD.toFixed(2) + ' were available; retrying on the next quote.',
     });
   }
 
-  async _forceExitSide(w, sideName, now) {
-    const side = w.sides[sideName];
-    const exits = [];
-    w.status = 'forced_exit';
-    for (const tranche of side.tranches) {
-      if (tranche.position) {
-        exits.push(this._sellPosition(w, tranche, tranche.position, 'FORCED_WINDOW_EXIT', 0, now));
-      } else if (tranche.state === 'waiting_entry') {
-        tranche.state = 'window_exit_started';
-      }
+  _cancelEntryOrder(w, sideName, tranche, reason) {
+    const order = tranche.entryOrder;
+    if (!order || order.status !== 'resting') return;
+    order.status = 'cancelled';
+    order.reservedUsd = 0;
+    tranche.availableUsd = 0;
+    if (tranche.position && tranche.position.openShares <= EPSILON) {
+      tranche.position.status = 'closed';
+      tranche.position.closedAt = Date.now();
+      tranche.state = 'done_for_window';
+      const position = tranche.position;
+      tranche.position = null;
+      this._finalizeTrade(position, reason);
+    } else if (!tranche.position) {
+      tranche.state = 'done_for_window';
     }
-    await Promise.all(exits);
+    this._push({
+      event: 'ENTRY_LIMIT_CANCELLED', slug: w.slug, side: sideName,
+      orderId: order.id, remainingShares: round(order.remainingShares, 5),
+      note: 'Unfilled limit remainder released at window close; ' + reason + '.',
+    });
   }
 
   async _finishWindow(w, now, event) {
     if (!w || w.closed) return;
-    if (w.window) {
-      const closeMs = windowCloseMs(w);
-      const stopWaitingEntries = () => {
-        for (const sideName of SIDES) {
-          for (const tranche of w.sides[sideName].tranches) {
-            if (!tranche.position && tranche.state === 'waiting_entry') {
-              tranche.state = 'window_exit_started';
-            }
-          }
-        }
-      };
-      if (now < closeMs) {
-        await Promise.all(SIDES.map(async (sideName) => {
-          const processing = w.sides[sideName].processingPromise;
-          if (processing) await processing;
-        }));
-        if (Date.now() < closeMs) {
-          await Promise.all(SIDES.map((sideName) => this._forceExitSide(w, sideName, now)));
-        } else {
-          stopWaitingEntries();
-        }
-      } else {
-        stopWaitingEntries();
+    await Promise.all(SIDES.map(async (sideName) => {
+      const processing = w.sides[sideName].processingPromise;
+      if (processing) await processing;
+    }));
+    for (const sideName of SIDES) {
+      const tranche = w.sides[sideName].tranches[0];
+      this._cancelEntryOrder(w, sideName, tranche, 'window expired');
+      if (tranche.position && tranche.position.openShares <= EPSILON) {
+        const position = tranche.position;
+        tranche.position = null;
+        tranche.state = 'done_for_window';
+        position.status = 'closed';
+        position.closedAt = now;
+        this._finalizeTrade(position, 'LIMIT_ORDER_COMPLETE');
+      }
+      if (!tranche.position && tranche.state !== 'done_for_window') {
+        tranche.state = 'done_for_window';
       }
     }
     w.closed = true;
@@ -626,7 +674,7 @@ class Bot {
     }
     this._push({
       event: 'WINDOW_CLOSED', slug: w.slug,
-      note: event + ': no further entries or re-entries; unsold shares await Gamma confirmation of the final outcome.',
+      note: event + ': resting limit orders are cancelled; open shares remain held for Gamma final outcome settlement. No forced exit or stop loss is used.',
     });
     if (this._marketFeedSlug === w.slug) this._stopMarketFeed();
   }
@@ -733,8 +781,10 @@ class Bot {
   }
 
   _finalizeTrade(position, reason) {
+    if (!position || position.finalized) return;
+    position.finalized = true;
     const pnl = position.realizedPnl;
-    if (pnl > EPSILON) this._recordMartingaleWin(null, position, reason);
+    this._recordSideResult(position, pnl);
     if (pnl >= 0) this.stats.wins += 1;
     else this.stats.losses += 1;
     const trade = {
@@ -750,7 +800,10 @@ class Bot {
       fees: round(position.entryFee + position.exitFees, 4),
       resolutionOutcome: position.resolutionOutcome || null,
       resolutionPricePerShare: position.resolutionPricePerShare ?? null,
-      pnl: round(pnl, 2), reason, ts: Date.now(),
+      pnl: round(pnl, 2), reason,
+      lossStreakAfter: this.lossStreak[position.side],
+      nextShares: round(this._sharesForSide(position.side), 4),
+      ts: Date.now(),
     };
     this.trades.push(trade);
     if (this.trades.length > 200) this.trades.shift();
@@ -758,7 +811,8 @@ class Bot {
     this._push({
       event: 'TRADE_CLOSED', slug: position.slug, side: position.side,
       tranche: position.trancheId, pnl: round(pnl, 2), reason,
-      nextBudgetUsd: round(this._trancheFor(position)?.availableUsd || 0, 2),
+      lossStreak: this.lossStreak[position.side],
+      nextShares: round(this._sharesForSide(position.side), 4),
       note: 'Trade closed with estimated net P&L ' + (pnl >= 0 ? '+' : '') + '$' + round(pnl, 2) + '.',
     });
   }
@@ -865,14 +919,23 @@ class Bot {
       sides: Object.fromEntries(SIDES.map((name) => {
         const side = w.sides[name];
         return [name, {
+          lossStreak: this.lossStreak[name],
+          nextShares: round(this._sharesForSide(name), 4),
           quote: this._quoteFor(name, w),
           tranches: side.tranches.map((tranche) => ({
-            id: tranche.id, entryTrigger: tranche.entryTrigger, initialBudgetUsd: tranche.initialBudgetUsd,
+            id: tranche.id, entryLimitPrice: cfg.ENTRY_LIMIT_PRICE_USD,
+            targetShares: round(tranche.targetShares, 4), initialBudgetUsd: round(tranche.initialBudgetUsd, 2),
             availableUsd: round(tranche.availableUsd, 2), state: tranche.state, cycle: tranche.cycle,
+            entryOrder: tranche.entryOrder ? {
+              id: tranche.entryOrder.id, status: tranche.entryOrder.status,
+              limitPrice: tranche.entryOrder.limitPrice,
+              targetShares: round(tranche.entryOrder.targetShares, 4),
+              remainingShares: round(tranche.entryOrder.remainingShares, 4),
+              reservedUsd: round(tranche.entryOrder.reservedUsd, 2),
+            } : null,
             position: tranche.position ? {
               id: tranche.position.id, entryPrice: tranche.position.entryPrice,
               takeProfitPrice: tranche.position.takeProfitPrice,
-              takeProfitReachable: tranche.position.takeProfitReachable,
               shares: tranche.position.shares, openShares: tranche.position.openShares,
               status: tranche.position.status,
             } : null,
@@ -885,7 +948,10 @@ class Bot {
       now, mode: 'DEMO', uptimeSec: Math.floor((now - this.startedAt) / 1000),
       error: this.error, executionHalt: this.executionHalt,
       account: {
-        capital: this.capital, cash: round(this.cash, 2), openValue: round(valuation.openValue, 2),
+        capital: this.capital, cash: round(this.cash, 2),
+        reservedCash: round(this._reservedCash(), 2),
+        availableCash: round(Math.max(0, this.cash - this._reservedCash()), 2),
+        openValue: round(valuation.openValue, 2),
         equity: valuation.equity == null ? null : round(valuation.equity, 2),
         totalPnl: valuation.totalPnl == null ? null : round(valuation.totalPnl, 2),
         unrealizedPnl: round(valuation.unrealizedPnl, 2),
@@ -895,33 +961,26 @@ class Bot {
         maxDrawdown: valuation.unresolvedPositions.length ? null : round(this.maxDrawdown, 2),
       },
       strategy: {
-        trancheBudgetUsd: cfg.TRANCHE_BUDGET_USD, entryAsk: cfg.ENTRY_ASK_USD,
-        takeProfitBid: cfg.TAKE_PROFIT_BID_USD,
-        takeProfitCreditPrice: cfg.TAKE_PROFIT_CREDIT_PRICE_USD,
-        entryDelaySeconds: cfg.ENTRY_DELAY_SECONDS,
-        hardStopLossBid: cfg.HARD_STOP_LOSS_BID_USD,
-        maxEntryAsk: cfg.MAX_ENTRY_ASK_USD, forcedExitBufferSeconds: cfg.FORCED_EXIT_BUFFER_SECONDS,
-        maxMartingaleSteps: cfg.MAX_MARTINGALE_STEPS,
+        demoCapital: cfg.DEMO_CAPITAL, sharedCapital: true,
+        baseShares: cfg.BASE_SHARES, entryLimitPrice: cfg.ENTRY_LIMIT_PRICE_USD,
+        takeProfitBid: cfg.TAKE_PROFIT_BID_USD, hardStopLossBid: null,
+        martingaleMultiplier: cfg.MARTINGALE_MULTIPLIER,
       },
       martingale: {
-        step: this.martingaleStep,
-        maxSteps: cfg.MAX_MARTINGALE_STEPS,
-        baseStakeUsd: cfg.TRANCHE_BUDGET_USD,
-        nextWindowStakeUsd: this._stakeForMartingaleStep(),
+        independent: true,
+        UP: { lossStreak: this.lossStreak.UP, nextShares: round(this._sharesForSide('UP'), 4) },
+        DOWN: { lossStreak: this.lossStreak.DOWN, nextShares: round(this._sharesForSide('DOWN'), 4) },
       },
       window, prices: this.prices, priceSeries: this.priceSeries,
       pending: this.pending.map((position) => this._positionSnapshot(position)),
       trades: this.trades.slice(-60).reverse(),
       stats: { ...this.stats }, equity: this.equity,
       cfg: {
-        demoCapital: this.capital, trancheBudgetUsd: cfg.TRANCHE_BUDGET_USD,
-        entryAsk: cfg.ENTRY_ASK_USD,
+        demoCapital: this.capital, baseShares: cfg.BASE_SHARES,
+        entryLimitPrice: cfg.ENTRY_LIMIT_PRICE_USD,
         takeProfitBid: cfg.TAKE_PROFIT_BID_USD,
-        takeProfitCreditPrice: cfg.TAKE_PROFIT_CREDIT_PRICE_USD,
-        entryDelaySeconds: cfg.ENTRY_DELAY_SECONDS,
-        hardStopLossBid: cfg.HARD_STOP_LOSS_BID_USD,
-        maxMartingaleSteps: cfg.MAX_MARTINGALE_STEPS,
-        maxEntryAsk: cfg.MAX_ENTRY_ASK_USD, forcedExitBufferSeconds: cfg.FORCED_EXIT_BUFFER_SECONDS,
+        hardStopLossBid: null,
+        martingaleMultiplier: cfg.MARTINGALE_MULTIPLIER,
         windowSec: WINDOW_SECONDS,
       },
       log: this.log.slice(-100).reverse(),
@@ -936,8 +995,7 @@ class Bot {
     const mark = awaitingResolution ? null
       : Number.isFinite(Number(position.lastMark)) ? Number(position.lastMark) : position.entryPrice;
     const lastKnownMark = position.lastKnownMark ?? position.lastMark ?? null;
-    const costBasis = position.shares > 0
-      ? (position.entryNotional + position.entryFee) * (position.openShares / position.shares) : 0;
+    const costBasis = Number(position.remainingEntryCost) || 0;
     return {
       ...position, mark,
       status: awaitingResolution ? 'pending_resolution' : position.status,
@@ -949,33 +1007,31 @@ class Bot {
   }
 }
 
-function makeWindowState(slug, openTs, trancheStakeUsd = cfg.TRANCHE_BUDGET_USD, martingaleStep = 0) {
+function makeWindowState(slug, openTs) {
   return {
     slug, openTs, status: 'waiting_for_market', window: null,
     marketWaitReason: null, nextDiscoveryAt: 0,
     closed: false, closedAt: null,
-    martingaleStep, trancheStakeUsd, martingaleStopApplied: false,
     sides: {
-      UP: makeSide('UP', trancheStakeUsd),
-      DOWN: makeSide('DOWN', trancheStakeUsd),
+      UP: makeSide('UP'),
+      DOWN: makeSide('DOWN'),
     },
   };
 }
 
-function makeSide(name, trancheStakeUsd) {
+function makeSide(name) {
   return {
     name, processing: false, processingPromise: null, dirty: false,
-    tranches: [makeTranche('SINGLE', cfg.ENTRY_ASK_USD, trancheStakeUsd)],
+    tranches: [makeTranche('SINGLE')],
   };
 }
 
-function makeTranche(id, entryTrigger, budgetUsd) {
+function makeTranche(id) {
   return {
-    id, entryTrigger,
-    initialBudgetUsd: budgetUsd,
-    availableUsd: budgetUsd,
-    state: 'waiting_entry', cycle: 0,
-    position: null,
+    id, targetShares: null,
+    initialBudgetUsd: 0, availableUsd: 0,
+    state: 'waiting_for_market', cycle: 0,
+    entryOrder: null, position: null, lastEntryBlockLogAt: 0,
   };
 }
 

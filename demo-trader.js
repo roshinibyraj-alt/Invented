@@ -3,7 +3,6 @@
 // Public CLOB book reader and local paper-fill simulator.
 // This class has no wallet, signing, authentication, or live-order methods.
 const CLOB_HOST = 'https://clob.polymarket.com';
-const config = require('./config');
 
 class DemoTrader {
   constructor() {
@@ -26,6 +25,59 @@ class DemoTrader {
     }
   }
 
+  async simulateLimitBuy(tokenId, targetShares, limitPrice, orderState = {}) {
+    const requested = Math.max(0, Number(targetShares) || 0);
+    const limit = validPrice(limitPrice);
+    if (requested <= 0 || limit == null) {
+      return { shares: 0, notional: 0, avgPrice: 0, fills: [] };
+    }
+
+    const book = await this.getOrderBook(tokenId);
+    if (!book) return { shares: 0, notional: 0, avgPrice: 0, fills: [] };
+    const levels = (book.asks || [])
+      .map((level) => ({ price: Number(level.price), size: Number(level.size) }))
+      .filter((level) => validPrice(level.price) != null
+        && Number.isFinite(level.size) && level.size > 0
+        && level.price <= limit + 1e-9)
+      .sort((a, b) => a.price - b.price);
+
+    const signature = levels.map((level) =>
+      `${level.price.toFixed(4)}:${level.size.toFixed(5)}`).join('|');
+    if (signature === orderState.lastBookSignature) {
+      return { shares: 0, notional: 0, avgPrice: 0, fills: [], unchangedBook: true };
+    }
+    orderState.lastBookSignature = signature;
+    if (!orderState.consumedByPrice || typeof orderState.consumedByPrice !== 'object') {
+      orderState.consumedByPrice = {};
+    }
+
+    let remaining = requested;
+    let shares = 0;
+    let notional = 0;
+    const fills = [];
+    for (const level of levels) {
+      const key = level.price.toFixed(4);
+      const consumed = Math.max(0, Number(orderState.consumedByPrice[key]) || 0);
+      const available = Math.max(0, level.size - consumed);
+      const quantity = Math.min(remaining, available);
+      if (quantity <= 1e-9) continue;
+      shares += quantity;
+      notional += quantity * level.price;
+      remaining -= quantity;
+      orderState.consumedByPrice[key] = consumed + quantity;
+      fills.push({ price: level.price, shares: quantity });
+      if (remaining <= 1e-9) break;
+    }
+
+    return {
+      shares,
+      notional,
+      avgPrice: shares > 0 ? notional / shares : 0,
+      fills,
+      unchangedBook: false,
+    };
+  }
+
   updateQuote(tokenId, quote) {
     this.quotes.set(String(tokenId), {
       bid: validPrice(quote && quote.bid),
@@ -45,17 +97,6 @@ class DemoTrader {
         && Number.isFinite(level.size) && level.size > 0
         && (!hasPriceLimit || (buying ? level.price <= priceLimit : level.price >= priceLimit)))
       .sort(buying ? (a, b) => a.price - b.price : (a, b) => b.price - a.price);
-
-    if (levels.length === 0) {
-      const cached = this.quotes.get(String(tokenId));
-      const age = cached ? Date.now() - cached.updatedAt : Infinity;
-      const fallbackPrice = Number(cached && (buying ? cached.ask : cached.bid));
-      const priceAllowed = validPrice(fallbackPrice) != null
-        && (!hasPriceLimit || (buying ? fallbackPrice <= priceLimit : fallbackPrice >= priceLimit));
-      if (cached && age >= 0 && age <= config.PRICE_STALE_MS && priceAllowed) {
-        levels = [{ price: fallbackPrice, size: Infinity }];
-      }
-    }
 
     let remaining = Math.max(0, Number(amount) || 0);
     let shares = 0;

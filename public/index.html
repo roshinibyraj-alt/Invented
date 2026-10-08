@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>CLOB Tranches · BTC 5-minute demo bot</title>
+<title>Polymarket BTC 5-minute · Demo Bot</title>
 <style>
 :root{color-scheme:dark;--bg:#090d14;--panel:#121a27;--line:#29364a;--text:#edf3ff;--muted:#93a1b8;--green:#59d7a4;--red:#ff788c;--amber:#ffd078;--blue:#a8b9ff}
 *{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 12% -8%,#1b2942 0,transparent 42%),var(--bg);color:var(--text);font:14px/1.45 Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif}main{max-width:1180px;margin:0 auto;padding:25px 18px 42px}
@@ -14,11 +14,11 @@ table{border-collapse:collapse;width:100%}th{font-size:9px;color:var(--muted);te
 </style>
 </head>
 <body><main>
-<header><div class="brand"><div class="logo">↕</div><div><div class="title">Independent CLOB Tranches</div><div class="subtitle">BTC five-minute UP/DOWN · simulated execution</div></div></div><div><span class="badge" id="mode">DEMO ONLY</span><div class="subtitle" id="fresh">Connecting…</div></div></header>
+<header><div class="brand"><div class="logo">↕</div><div><div class="title">Polymarket BTC Binary · Paper Bot</div><div class="subtitle">BTC five-minute UP/DOWN · independent sides · simulated execution</div></div></div><div><span class="badge" id="mode">DEMO ONLY</span><div class="subtitle" id="fresh">Connecting…</div></div></header>
 <div class="error" id="error"></div>
 <section class="cards">
   <div class="card"><div class="label">Demo starting capital</div><div class="value" id="capital">—</div><div class="small">No wallet attached</div></div>
-  <div class="card"><div class="label">Available cash</div><div class="value" id="cash">—</div><div class="small">After simulated fills and fees</div></div>
+  <div class="card"><div class="label">Available cash</div><div class="value" id="cash">—</div><div class="small" id="cashNote">Shared pool after order reserves</div></div>
   <div class="card"><div class="label">Account equity</div><div class="value" id="equity">—</div><div class="small" id="drawdown">Peak drawdown —</div></div>
   <div class="card"><div class="label">Net P&amp;L</div><div class="value" id="pnl">—</div><div class="small" id="record">Realized — · Open —</div></div>
 </section>
@@ -26,26 +26,26 @@ table{border-collapse:collapse;width:100%}th{font-size:9px;color:var(--muted);te
   <article class="panel">
     <div class="panelhead"><div><div class="eyebrow">Current five-minute window</div><h2 id="market">Waiting for market</h2></div><div class="meta"><span class="pill" id="windowStatus">Starting</span><div id="timeLeft" style="margin-top:6px">— remaining</div></div></div>
     <div class="progress"><i id="progress"></i></div>
-    <div class="tablewrap"><table><thead><tr><th>Side</th><th class="right">Best bid</th><th class="right">Best ask</th><th>Tranche state</th><th class="right">Stake</th></tr></thead><tbody id="quotes"></tbody></table></div>
+    <div class="tablewrap"><table><thead><tr><th>Side</th><th class="right">Best bid</th><th class="right">Best ask</th><th>Paper order</th><th class="right">Target shares</th><th class="right">Loss streak</th></tr></thead><tbody id="quotes"></tbody></table></div>
     <div class="small" id="windowNote">Market discovery uses Gamma; all price decisions use Polymarket CLOB quotes.</div>
   </article>
   <article class="panel">
-    <div class="eyebrow">Confirmed rules</div><h2>Strategy settings</h2>
+    <div class="eyebrow">Confirmed rules</div><h2>Polymarket-only demo strategy</h2>
     <div class="rule-grid" style="margin-top:11px">
-      <div class="rule"><b>$100 per side · $200 total</b><p>One $100 tranche each for UP and DOWN. Martingale sizing is shared across both sides.</p></div>
-      <div class="rule"><b>Entry delay · 01:30</b><p>No new entries during the first 90 seconds of each window. Existing position exits remain active.</p></div>
-      <div class="rule"><b>Entry ask · $0.90</b><p>Each side enters once when its best ask reaches $0.90; asks above the $0.90 cap are skipped.</p></div>
-      <div class="rule"><b>TP bid $0.99</b><p>When the CLOB best bid reaches $0.99, demo accounting credits $1.00 per filled share. The displayed CLOB fill average and estimated fee remain separate.</p></div>
-      <div class="rule"><b>Hard stop · $0.70</b><p>A best bid at or below $0.70 latches a sale. No tranche rearms or re-enters during the same window.</p></div>
-      <div class="rule"><b>Shared martingale · max 2 steps</b><p>A stop increases both sides in the next window: $100 → $200 → $400 each. A win resets both to $100; a stop at the cap resets the following window to $100.</p></div>
+      <div class="rule"><b>$1,000 shared demo capital</b><p>UP and DOWN draw from the same cash pool, while their positions and loss streaks remain independent.</p></div>
+      <div class="rule"><b>10 base shares per side</b><p>After each side’s own loss, its next order grows by 1.8×. A win resets only that side to 10 shares.</p></div>
+      <div class="rule"><b>Resting limit buy · $0.40</b><p>Place one paper limit order for each side when the five-minute market is available. It can fill only against visible asks at or below $0.40.</p></div>
+      <div class="rule"><b>Take profit · $0.99</b><p>Sell when the CLOB best bid reaches $0.99; book actual visible bid fills and estimated fees.</p></div>
+      <div class="rule"><b>No stop loss</b><p>No stop or forced pre-expiry sale. Unclosed shares remain open through the window close.</p></div>
+      <div class="rule"><b>Official expiry settlement</b><p>Remaining shares settle at Polymarket’s final $1/$0 outcome. Unfilled limit orders are cancelled at window close.</p></div>
     </div>
-    <div class="tags"><span class="tag" id="entryDelay">ENTRY LOCK · —</span><span class="tag" id="entryCap">Entry cap —</span><span class="tag" id="forcedExit">Forced exit —</span><span class="tag" id="martingale">MARTINGALE · —</span><span class="tag">DEMO ONLY · NO LIVE ORDERS</span></div>
-    <div class="notice">The $0.99 TP threshold is fixed for every position. TP orders still require available CLOB bids at or above $0.99; remaining shares go through forced exit and, if still open, official settlement.</div>
+    <div class="tags"><span class="tag" id="entryLimit">LIMIT BUY · —</span><span class="tag" id="tpLimit">TAKE PROFIT · —</span><span class="tag" id="martingale">UP/DOWN · —</span><span class="tag">DEMO ONLY · NO LIVE ORDERS</span></div>
+    <div class="notice">These are simulated limit orders and fills, not orders sent to Polymarket. The shared $1,000 pool reserves cash for resting orders; if a full side order cannot be reserved, that side is skipped without reducing its 1.8× share target.</div>
   </article>
 </section>
 <section class="panel">
-  <div class="panelhead"><div><div class="eyebrow">Independent side state</div><h2>Entry and position tracking</h2></div><span class="small" id="trancheCount">—</span></div>
-  <div class="tablewrap"><table><thead><tr><th>Side</th><th>Tranche</th><th>Entry trigger</th><th>State</th><th class="right">Initial stake</th><th class="right">Available budget</th><th class="right">Avg entry</th><th class="right">TP bid</th><th class="right">Open shares</th></tr></thead><tbody id="tranches"></tbody></table></div>
+  <div class="panelhead"><div><div class="eyebrow">Independent side state</div><h2>Limit orders and positions</h2></div><span class="small" id="trancheCount">—</span></div>
+  <div class="tablewrap"><table><thead><tr><th>Side</th><th>Paper order</th><th>State</th><th class="right">Target shares</th><th class="right">Reserved cash</th><th class="right">Avg entry</th><th class="right">TP bid</th><th class="right">Open shares</th><th class="right">Loss streak</th></tr></thead><tbody id="tranches"></tbody></table></div>
 </section>
 <section class="panel">
   <div class="panelhead"><div><div class="eyebrow">Open demo positions</div><h2>Position monitor</h2></div><span class="small" id="openCount">0 open</span></div>
@@ -53,7 +53,7 @@ table{border-collapse:collapse;width:100%}th{font-size:9px;color:var(--muted);te
 </section>
 <section class="panel">
   <div class="panelhead"><div><div class="eyebrow">Completed cycles</div><h2>Trade history</h2></div><span class="small" id="tradeCount">0 trades</span></div>
-  <div class="tablewrap" id="trades"></div><div class="small">CLOB depth-based paper fills and estimated fees are illustrative, not proof of live execution or profitability.</div>
+  <div class="tablewrap" id="trades"></div><div class="small">CLOB-depth paper fills and estimated fees are illustrative, not evidence of live execution or profitability.</div>
 </section>
 <section class="panel">
   <div class="panelhead"><div><div class="eyebrow">Bot activity</div><h2>Recent events</h2></div><span class="small" id="uptime">Uptime —</span></div>
@@ -77,7 +77,8 @@ function render(s){
   const w=s.window||{},cfg=s.cfg||{},account=s.account||{},stats=s.stats||{};
   $('mode').textContent='DEMO ONLY';
   $('fresh').textContent='Updated '+time(s.now);
-  $('capital').textContent=usd(account.capital);$('cash').textContent=usd(account.cash);$('equity').textContent=usd(account.equity);
+  $('capital').textContent=usd(account.capital);$('cash').textContent=usd(account.availableCash);$('equity').textContent=usd(account.equity);
+  $('cashNote').textContent=usd(account.reservedCash)+' reserved on resting limits · '+usd(account.cash)+' cash';
   $('drawdown').textContent='Peak drawdown '+usd(account.maxDrawdown);
   const pnl=account.totalPnl;$('pnl').textContent=finite(pnl)?(Number(pnl)>=0?'+':'')+usd(pnl):'—';$('pnl').className='value '+pnlTone(pnl);
   const awaitingResolution=Number(account.unresolvedPositions)||0;
@@ -87,17 +88,15 @@ function render(s){
   $('windowStatus').className='pill'+(w.closed?'':(s.pending||[]).length?' good':'');
   const remaining=Number(w.secondsRemaining)||0;$('timeLeft').textContent=w.closeTs?clock(remaining)+' remaining':'— remaining';
   const elapsed=Math.max(0,300-remaining);$('progress').style.width=Math.min(100,elapsed/300*100)+'%';
-  const openMs=Number(w.openTs)*1000;
-  const entryWait=Number.isFinite(openMs)?Math.max(0,Number(cfg.entryDelaySeconds||0)-(Number(s.now)-openMs)/1000):null;
-  $('entryDelay').textContent=entryWait===null?'ENTRY LOCK · —':entryWait>0?'ENTRY LOCK · '+clock(entryWait):'ENTRY LOCK · COMPLETE';
-  $('entryCap').textContent='MAX ENTRY ASK · '+usd(cfg.maxEntryAsk);
-  $('forcedExit').textContent='FORCED EXIT · T−'+Number(cfg.forcedExitBufferSeconds||10)+'s';
-  $('martingale').textContent='NEXT WINDOW · MARTINGALE STEP '+Number((s.martingale||{}).step||0)+'/'+Number((s.martingale||{}).maxSteps||0)+' · '+usd((s.martingale||{}).nextWindowStakeUsd)+' EACH';
+  $('entryLimit').textContent='LIMIT BUY · '+px(cfg.entryLimitPrice);
+  $('tpLimit').textContent='TAKE PROFIT · '+px(cfg.takeProfitBid)+' · NO STOP';
+  const mg=s.martingale||{},upMg=mg.UP||{},downMg=mg.DOWN||{};
+  $('martingale').textContent='UP '+Number(upMg.lossStreak||0)+' LOSS · '+qty(upMg.nextShares)+' SHARES  /  DOWN '+Number(downMg.lossStreak||0)+' LOSS · '+qty(downMg.nextShares)+' SHARES';
   const sides=w.sides||{},rows=[];
   for(const sideName of ['UP','DOWN']){
     const side=sides[sideName]||{},quote=side.quote||{},tranche=(side.tranches||[])[0]||{};
     const state=String(tranche.state||'—').replace(/_/g,' ');
-    rows.push('<tr><td class="'+(sideName==='UP'?'side-up':'side-down')+'">'+sideName+'</td><td class="right">'+px(quote.bid)+'</td><td class="right">'+px(quote.ask)+'</td><td>'+esc(state)+'</td><td class="right">'+usd(tranche.initialBudgetUsd)+'</td></tr>');
+    rows.push('<tr><td class="'+(sideName==='UP'?'side-up':'side-down')+'">'+sideName+'</td><td class="right">'+px(quote.bid)+'</td><td class="right">'+px(quote.ask)+'</td><td>'+esc((tranche.entryOrder&&tranche.entryOrder.status)||state)+'</td><td class="right">'+qty(tranche.targetShares||side.nextShares)+'</td><td class="right">'+Number(side.lossStreak||0)+'</td></tr>');
   }
   $('quotes').innerHTML=rows.join('');
   const trancheRows=[];
@@ -105,16 +104,17 @@ function render(s){
     for(const t of (sides[sideName]&&sides[sideName].tranches)||[]){
       const p=t.position||{};
         const state=t.state.replace(/_/g,' ');
-        const pill=state==='in position'?'good':state==='waiting entry'?'warn':'';
-        trancheRows.push('<tr><td class="'+(sideName==='UP'?'side-up':'side-down')+'">'+sideName+'</td><td>'+esc(t.id)+' · #'+Number(t.cycle||0)+'</td><td>ask ≥ '+px(t.entryTrigger)+'</td><td><span class="pill '+pill+'">'+esc(state)+'</span></td><td class="right">'+usd(t.initialBudgetUsd)+'</td><td class="right">'+usd(t.availableUsd)+'</td><td class="right">'+px(p.entryPrice)+'</td><td class="right">'+px(p.takeProfitPrice)+(p.takeProfitReachable===false?' <span class="side-down">unreachable</span>':'')+'</td><td class="right">'+qty(p.openShares)+'</td></tr>');
+        const order=t.entryOrder||{};
+        const pill=state==='in position'||state==='partially filled'?'good':state==='limit order open'?'warn':'';
+        trancheRows.push('<tr><td class="'+(sideName==='UP'?'side-up':'side-down')+'">'+sideName+'</td><td>BUY '+px(order.limitPrice||cfg.entryLimitPrice)+' · '+esc(order.status||'—')+'</td><td><span class="pill '+pill+'">'+esc(state)+'</span></td><td class="right">'+qty(order.targetShares||t.targetShares||side.nextShares)+'</td><td class="right">'+usd(order.reservedUsd||0)+'</td><td class="right">'+px(p.entryPrice)+'</td><td class="right">'+px(p.takeProfitPrice||cfg.takeProfitBid)+'</td><td class="right">'+qty(p.openShares||0)+'</td><td class="right">'+Number(side.lossStreak||0)+'</td></tr>');
     }
   }
   $('tranches').innerHTML=trancheRows.length?trancheRows.join(''):empty('Waiting for market discovery',9);
-  $('trancheCount').textContent=trancheRows.length+' side tranches';
+  $('trancheCount').textContent=trancheRows.length+' independent side orders';
   const pending=s.pending||[];$('openCount').textContent=pending.length+' open position'+(pending.length===1?'':'s');
   $('positions').innerHTML=pending.length?'<table><thead><tr><th>Side</th><th>Tranche</th><th>Cycle</th><th>Entry avg.</th><th>TP</th><th>Shares open</th><th>Best bid mark</th><th>Status</th><th class="right">Unrealized</th></tr></thead><tbody>'+pending.map(p=>{const mark=p.status==='pending_resolution'?(finite(p.lastKnownMark)?'STALE '+px(p.lastKnownMark):'No current mark'):px(p.mark);return '<tr><td class="'+(p.side==='UP'?'side-up':'side-down')+'">'+esc(p.side)+'</td><td>'+esc(p.trancheId)+'</td><td>'+Number(p.cycle)+'</td><td>'+px(p.entryPrice)+'</td><td>'+px(p.takeProfitPrice)+'</td><td>'+qty(p.openShares)+'</td><td>'+mark+'</td><td>'+esc(p.status)+'</td><td class="right">'+pnlHtml(p.unrealized)+'</td></tr>'}).join('')+'</tbody></table>':'<div class="empty">No open positions</div>';
   const trades=s.trades||[];$('tradeCount').textContent=trades.length+' shown';
-   $('trades').innerHTML=trades.length?'<table><thead><tr><th>Time</th><th>Side</th><th>Tranche</th><th>Cycle</th><th>Shares</th><th>Entry avg.</th><th>Accounted exit/share</th><th>CLOB exit avg.</th><th>Net proceeds</th><th>Fees</th><th>Reason</th><th class="right">Net P&amp;L</th></tr></thead><tbody>'+trades.map(t=>'<tr><td>'+time(t.ts)+'</td><td class="'+(t.side==='UP'?'side-up':'side-down')+'">'+esc(t.side)+'</td><td>'+esc(t.tranche)+'</td><td>'+Number(t.cycle)+'</td><td>'+qty(t.shares)+'</td><td>'+px(t.entryPrice)+'</td><td>'+px(t.exitPrice)+'</td><td>'+px(t.clobExitPrice)+'</td><td>'+usd(t.netExitProceeds)+'</td><td>'+usd(t.fees)+'</td><td>'+esc(t.reason==='MARKET_RESOLUTION'?'SETTLED '+(t.resolutionOutcome||'')+' @ '+Number(t.resolutionPricePerShare).toFixed(2):t.reason)+'</td><td class="right">'+pnlHtml(t.pnl)+'</td></tr>').join('')+'</tbody></table>':'<div class="empty">No completed tranche cycles</div>';
+    $('trades').innerHTML=trades.length?'<table><thead><tr><th>Time</th><th>Side</th><th>Shares</th><th>Entry avg.</th><th>Actual exit avg.</th><th>Net proceeds</th><th>Fees</th><th>Result</th><th class="right">Net P&amp;L</th></tr></thead><tbody>'+trades.map(t=>'<tr><td>'+time(t.ts)+'</td><td class="'+(t.side==='UP'?'side-up':'side-down')+'">'+esc(t.side)+'</td><td>'+qty(t.shares)+'</td><td>'+px(t.entryPrice)+'</td><td>'+px(t.exitPrice)+'</td><td>'+usd(t.netExitProceeds)+'</td><td>'+usd(t.fees)+'</td><td>'+esc(t.reason==='MARKET_RESOLUTION'?'SETTLED '+(t.resolutionOutcome||'')+' @ '+Number(t.resolutionPricePerShare).toFixed(2):t.reason)+'</td><td class="right">'+pnlHtml(t.pnl)+'</td></tr>').join('')+'</tbody></table>':'<div class="empty">No completed positions yet</div>';
   $('uptime').textContent='Uptime '+clock(s.uptimeSec||0);
   const logs=s.log||[];$('log').innerHTML=logs.length?logs.slice(0,35).map(x=>'<div class="logrow"><span class="logtime">'+time(x.ts)+'</span><span class="logevent">'+esc(x.event)+'</span><span>'+esc(x.note)+'</span></div>').join(''):'<div class="empty">Waiting for bot events</div>';
 }
