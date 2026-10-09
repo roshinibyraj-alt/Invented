@@ -7,6 +7,7 @@ const Bot = require('../bot');
 const { makeWindowState, estimateMakerRebate } = require('../bot');
 const { slugForTs } = require('../polymarket-market');
 const { queueAheadAtLimit } = require('../paper-limit-order');
+const { simulateMarketBuy } = require('../paper-market-order');
 
 const OPEN_TS = 1_800_000_000;
 const OPEN_MS = OPEN_TS * 1000;
@@ -104,19 +105,15 @@ async function fillLow(fx, side = 'UP', timestamp = fx.now) {
 }
 
 async function triggerHigh(fx, side = 'UP', timestamp = fx.now, bid = 0.70) {
+  const tokenId = side === 'UP' ? 'up-token' : 'down-token';
+  fx.trader.books.set(tokenId, makeBook([[0.70, 100]], []));
   await quote(fx, side, bid, Math.min(0.99, bid + 0.01), timestamp);
   const order = fx.w.sides[side].tranches[0].entryOrder;
   return { order, signalAt: timestamp };
 }
 
 async function fillHigh(fx, side = 'UP', timestamp = fx.now) {
-  const { order, signalAt } = await triggerHigh(fx, side, timestamp, 0.72);
-  const arrival = signalAt + cfg.ENTRY_ORDER_LATENCY_MS + 1;
-  const bidQueue = makeBook([[0.75, 100]], [[0.72, 5], [0.70, 3]]);
-  await processBooks(fx, arrival, side === 'UP'
-    ? { UP: bidQueue } : { DOWN: bidQueue });
-  sendTrade(fx, side, 'SELL', 0.70, 8, arrival + 10, `high-queue-${side}`);
-  sendTrade(fx, side, 'SELL', 0.70, order.targetShares, arrival + 20, `high-fill-${side}`);
+  await triggerHigh(fx, side, timestamp, 0.72);
   return fx.w.sides[side].tranches[0].position;
 }
 
@@ -130,7 +127,7 @@ test('strategy config keeps the $0.30 rung martingale and defines the independen
   assert.equal(cfg.MARTINGALE_MULTIPLIER, 1.4);
   assert.equal(cfg.ENTRY_LIMIT_PRICE_USD, 0.30);
   assert.equal(cfg.HIGH_RUNG_SIGNAL_BID, 0.70);
-  assert.equal(cfg.HIGH_RUNG_LIMIT_PRICE_USD, 0.70);
+  assert.equal(cfg.HIGH_RUNG_ORDER_TYPE, 'MARKET_TAKER');
   assert.equal(cfg.HIGH_RUNG_BASE_SHARES, 30);
   assert.equal(cfg.HIGH_RUNG_RETRY_SHARES, 100);
   assert.equal(cfg.HIGH_RUNG_STOP_LOSS_BID, 0.30);
@@ -240,34 +237,67 @@ test('low-rung CLOB loss preserves 1.4x martingale and stays on the low rung', a
   assert.equal(fx.bot.snapshot().martingale.nextShares, 14);
 });
 
-test('high rung stays idle until a side bid reaches $0.70, then places only one $0.70 limit', async () => {
+test('high rung stays idle until a fresh bid reaches $0.70, then sweeps one market buy immediately', async () => {
   const fx = fixture({ rung: 'HIGH', attempt: 1 });
   assert.equal(await placeLowOrders(fx, fx.now), undefined);
   assert.equal(fx.w.sides.UP.tranches[0].entryOrder, null);
   assert.equal(fx.w.sides.DOWN.tranches[0].entryOrder, null);
   await quote(fx, 'UP', 0.69, 0.72, fx.now + 20);
   assert.equal(fx.w.entryOrdersPlacedAt, null);
+  fx.trader.books.set('down-token', makeBook([[0.70, 100]], []));
   await quote(fx, 'DOWN', 0.70, 0.72, fx.now + 40);
   const order = fx.w.sides.DOWN.tranches[0].entryOrder;
-  assert.equal(order.limitPrice, 0.70);
+  assert.equal(order.orderType, 'MARKET_TAKER');
+  assert.equal(order.limitPrice, null);
   assert.equal(order.targetShares, 30);
+  assert.equal(order.status, 'filled');
+  assert.equal(order.averagePrice, 0.70);
   assert.equal(order.rung, 'HIGH');
+  approx(fx.w.sides.DOWN.tranches[0].position.entryFee, 0.441);
   assert.equal(fx.w.sides.UP.tranches[0].entryOrder, null);
   await quote(fx, 'UP', 0.80, 0.82, fx.now + 50);
   assert.equal(fx.w.sides.UP.tranches[0].entryOrder, null);
   assert.equal(fx.w.entrySignalSide, 'DOWN');
 });
 
-test('high rung maker fill requires a post-trigger walkthrough and fills exactly at $0.70 with no fee', async () => {
+test('high-rung taker buy uses visible ask prices, charges per-level taker fees, and earns no maker rebate', async () => {
   const fx = fixture({ rung: 'HIGH', attempt: 1 });
-  const position = await fillHigh(fx, 'DOWN');
+  fx.trader.books.set('down-token', makeBook([[0.70, 10], [0.72, 20]], []));
+  await quote(fx, 'DOWN', 0.70, 0.72, fx.now);
+  const order = fx.w.sides.DOWN.tranches[0].entryOrder;
+  const position = fx.w.sides.DOWN.tranches[0].position;
   assert.equal(position.shares, 30);
-  assert.equal(position.entryPrice, 0.70);
+  approx(position.entryPrice, 21.4 / 30);
   assert.equal(position.rung, 'HIGH');
   assert.equal(position.rungAttempt, 1);
-  assert.equal(position.entryFee, 0);
-  approx(position.makerRebateCredited, estimateMakerRebate(30, 0.70));
-  assert.equal(fx.bot.stats.estimatedFees, 0);
+  approx(position.entryFee, 0.42924);
+  assert.equal(position.makerRebateCredited, 0);
+  approx(fx.bot.stats.estimatedFees, 0.42924);
+  assert.equal(order.status, 'filled');
+  assert.deepEqual(order.fills.map((fill) => fill.price), [0.70, 0.72]);
+  assert.equal(order.fills.every((fill) => fill.maker === false), true);
+  assert.equal(fx.bot.log.some((row) => row.event === 'ENTRY_MARKET_TAKER_FILL'), true);
+});
+
+test('high rung records no loss when its trigger has no executable ask depth', async () => {
+  const fx = fixture({ rung: 'HIGH', attempt: 1 });
+  await quote(fx, 'UP', 0.70, 0.72, fx.now);
+  const tranche = fx.w.sides.UP.tranches[0];
+  assert.equal(tranche.entryOrder.orderType, 'MARKET_TAKER');
+  assert.equal(tranche.entryOrder.status, 'cancelled_unfilled');
+  assert.equal(tranche.position, null);
+  assert.equal(fx.bot.stats.entries, 0);
+  assert.equal(fx.bot.stats.losses, 0);
+  await quote(fx, 'UP', 0.80, 0.82, fx.now + 20);
+  assert.equal(fx.bot.log.filter((row) => row.event === 'HIGH_RUNG_TAKER_TRIGGERED').length, 1);
+});
+
+test('market buy cancels unavailable remainder and records only actually executable shares', async () => {
+  const result = simulateMarketBuy(makeBook([[0.71, 4]], []), 30, 1000, cfg.TAKER_FEE_RATE);
+  assert.equal(result.filledShares, 4);
+  assert.equal(result.remainingShares, 26);
+  approx(result.fees, 4 * 0.07 * 0.71 * 0.29);
+  approx(result.totalCost, 4 * 0.71 + result.fees);
 });
 
 test('high-rung stop at a fresh bid of $0.30 or below sells at observed bid, charges taker fee, and arms one 100-share retry', async () => {
@@ -277,8 +307,8 @@ test('high-rung stop at a fresh bid of $0.30 or below sells at observed bid, cha
   assert.equal(position.finalized, true);
   assert.equal(fx.bot.trades[0].reason, 'HIGH_RUNG_STOP_LOSS');
   assert.equal(fx.bot.trades[0].exitPrice, 0.30);
-  approx(fx.bot.trades[0].fees, 0.441);
-  assert.equal(fx.bot.trades[0].pnl, -12.35);
+  approx(fx.bot.trades[0].fees, 0.882);
+  approx(fx.bot.trades[0].pnl, -12.882, 0.005);
   assert.equal(fx.bot.stats.stopLosses, 1);
   assert.equal(fx.bot.activeRung, 'HIGH');
   assert.equal(fx.bot.highRungAttempt, 2);
@@ -347,7 +377,7 @@ test('snapshot reports both rung rules, the active stage, maker-rebate cash trea
   assert.equal(state.strategy.lowRung.entryLimitPrice, 0.30);
   assert.equal(state.strategy.lowRung.martingaleMultiplier, 1.4);
   assert.equal(state.strategy.highRung.signalBid, 0.70);
-  assert.equal(state.strategy.highRung.entryLimitPrice, 0.70);
+  assert.equal(state.strategy.highRung.orderType, 'MARKET_TAKER');
   assert.equal(state.strategy.highRung.firstAttemptShares, 30);
   assert.equal(state.strategy.highRung.retryShares, 100);
   assert.equal(state.strategy.highRung.stopLossBid, 0.30);

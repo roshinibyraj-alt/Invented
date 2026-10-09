@@ -76,13 +76,13 @@ table{border-collapse:collapse;width:100%}th{font-size:9px;color:var(--muted);te
     <div class="rule-grid" style="margin-top:11px">
        <div class="rule"><b>$1,000 shared demo capital</b><p>UP/DOWN share one cash pool. The $0.30 rung posts both sides; the first partial or full fill cancels the opposite order. The $0.70 rung posts just one order after one side signals.</p></div>
        <div class="rule"><b>Low rung · $0.30 · 10 shares</b><p>Post-only limits on both sides fill at exactly $0.30 only after a later public SELL print walks through the order. Low-rung losses increase its next size by 1.4×; it has no stop.</p></div>
-       <div class="rule"><b>High rung · $0.70 signal and entry</b><p>After a low-rung win, pause the low rung. Wait for a fresh side bid of $0.70+, then place one post-only limit at exactly $0.70 for 30 shares. A first loss arms one 100-share retry; a second loss returns to the low rung.</p></div>
+        <div class="rule"><b>High rung · $0.70 signal → market buy</b><p>After a low-rung win, pause the low rung. As soon as one fresh side bid reaches $0.70+, sweep the currently visible CLOB asks immediately for 30 shares (100 on the one retry). The fill may be above $0.70; taker fees apply and no maker rebate is credited. A second loss returns to the low rung.</p></div>
        <div class="rule"><b>Take profit · $0.99 → $1.00 paper credit</b><p>Both rungs use a post-only TP and require a later public BUY print. Maker entry/TP fees are zero; modeled maker rebates are credited to paper cash and P&amp;L.</p></div>
        <div class="rule"><b>High-rung stop · $0.30 best bid</b><p>Only the $0.70 rung has a stop. At a fresh bid of $0.30 or below, remaining shares are paper-sold at the observed bid and charged the modeled taker fee.</p></div>
        <div class="rule"><b>CLOB close-price paper outcome</b><p>At the final 3 seconds, a bid above $0.98 wins; otherwise the higher bid wins. Fallbacks keep paper positions from remaining pending. This is not official settlement.</p></div>
     </div>
      <div class="tags"><span class="tag" id="entryLimit">LOW RUNG · POST-ONLY LIMIT $0.30</span><span class="tag" id="tpLimit">TP $0.99 → $1.00 · HIGH STOP $0.30</span><span class="tag" id="martingale">ACTIVE RUNG · —</span><span class="tag">DEMO ONLY · NO LIVE ORDERS</span></div>
-     <div class="notice">Paper-only: no orders are sent to Polymarket. Visible asks never create entry fills; a resting order needs a later public SELL print through its exact $0.30/$0.70 limit. Maker entry/TP fees are zero. The modeled 20%-of-fee-equivalent rebate is credited to this paper ledger but is not actual venue earnings. Only the high-rung stop pays a taker fee. CLOB close bids are an internal $1/$0 proxy, not official settlement.</div>
+      <div class="notice">Paper-only: no orders are sent to Polymarket. Low-rung maker entries use exact $0.30 fills after a public SELL walkthrough; the high rung immediately sweeps visible asks on the $0.70 bid trigger and may fill at higher prices. High-rung entry and stop exits pay modeled taker fees; maker entry/TP fills pay no modeled fee, with maker rebate credits shown as a simulation assumption. CLOB close bids are an internal $1/$0 proxy, not official settlement.</div>
   </article>
 </section>
 <section class="panel">
@@ -166,12 +166,12 @@ function render(s){
      const r=w.closeResolution,b=r.bids||{};
      $('windowNote').textContent='Paper close outcome: '+r.winner+' won · final bids UP '+px(b.UP)+' / DOWN '+px(b.DOWN)+' · '+String(r.source||'').replace(/_/g,' ').toLowerCase()+'. Not official Polymarket settlement.';
    }else{
-      $('windowNote').textContent=w.rungAtOpen==='HIGH'
-        ?'HIGH RUNG: waiting for one fresh best bid at $0.70+, then one exact $0.70 post-only buy ('+(Number(w.highRungAttemptAtOpen)===2?'100':'30')+' shares). Low rung is paused.'
+       $('windowNote').textContent=w.rungAtOpen==='HIGH'
+         ?'HIGH RUNG: on a fresh bid at $0.70+, immediately sweep visible asks as a market buy ('+(Number(w.highRungAttemptAtOpen)===2?'100':'30')+' shares). Actual fill price and taker fee depend on book depth. Low rung is paused.'
         :'LOW RUNG: paired exact $0.30 post-only buys; first fill locks the side and preserves its 1.4× loss progression. CLOB bids decide the paper close.';
    }
-    $('entryLimit').textContent=w.rungAtOpen==='HIGH'
-      ?'HIGH RUNG · BID ≥ '+px(cfg.highRungSignalBid)+' · LIMIT '+px(cfg.highRungLimitPrice)
+     $('entryLimit').textContent=w.rungAtOpen==='HIGH'
+       ?'HIGH RUNG · BID ≥ '+px(cfg.highRungSignalBid)+' · MARKET BUY / ASK SWEEP'
       :'LOW RUNG · POST-ONLY LIMIT '+px(cfg.entryLimitPrice)+' · FIRST FILL LOCK';
     $('tpLimit').textContent='TP '+px(cfg.takeProfitBid)+' → '+px(cfg.takeProfitCreditPerShare)+' · HIGH STOP '+px(cfg.highRungStopLossBid);
    const mg=s.martingale||{};

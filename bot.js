@@ -6,6 +6,7 @@ const {
 } = require('./polymarket-market');
 const startMarketFeed = require('./clob-feed');
 const { queueAheadAtLimit } = require('./paper-limit-order');
+const { simulateMarketBuy } = require('./paper-market-order');
 
 const EPSILON = 1e-8;
 const CLOSE_WINNER_THRESHOLD = 0.98;
@@ -94,7 +95,7 @@ class Bot {
       event: 'BOT_STARTED',
       note: 'Polymarket-only paper bot started on the ' + this.activeRung
         + ' rung with $' + cfg.DEMO_CAPITAL.toFixed(2)
-        + ' demo capital. Maker fills use exact limit prices and model rebates; only the high-rung stop exit charges a taker fee. No live order client is loaded.',
+        + ' demo capital. The low rung uses exact-price maker limits and modeled rebates; the high rung triggers a market-taker ask sweep at a fresh $0.70 bid and pays taker fees. No live order client is loaded.',
     });
     void this._loop();
   }
@@ -352,7 +353,7 @@ class Bot {
     };
   }
 
-  _maybeTriggerHighRung(w, sideName, quote, now = Date.now()) {
+  async _maybeTriggerHighRung(w, sideName, quote, now = Date.now()) {
     if (!w || w !== this.w || w.closed || !w.window || w.rungAtOpen !== 'HIGH'
       || w.entryOrdersPlacedAt != null || w.highRungOrderPlacedAt != null) return false;
     const bidTs = Number(quote && quote.bidTs);
@@ -370,18 +371,60 @@ class Bot {
     w.targetShares = shares;
     tranche.targetShares = shares;
     tranche.cycle = attempt;
-    tranche.entryOrder = this._newMakerEntryOrder(
-      tokenId, cfg.HIGH_RUNG_LIMIT_PRICE_USD, shares, placedAt, 'HIGH', attempt,
-    );
-    tranche.state = 'high_rung_order_posting';
-    w.status = 'high_rung_limit_posting';
+    const order = {
+      id: 'paper-market-' + (++this._entryOrderId),
+      tokenId, side: 'BUY', orderType: 'MARKET_TAKER',
+      limitPrice: null, targetShares: shares, filledShares: 0, remainingShares: shares,
+      unfilledShares: shares, cancelledShares: 0,
+      notional: 0, fees: 0, totalCost: 0, averagePrice: null,
+      fills: [], reservedUsd: 0, placedAt, arrivalAt: placedAt,
+      status: 'submitting', rung: 'HIGH', rungAttempt: attempt,
+    };
+    tranche.entryOrder = order;
+    tranche.state = 'high_rung_taker_submitting';
+    w.status = 'high_rung_taker_submitting';
     this._push({
-      event: 'HIGH_RUNG_TRIGGER_ORDER_PLACED', slug: w.slug, side: sideName,
-      attempt, triggerBid: quote.bid, limitPrice: cfg.HIGH_RUNG_LIMIT_PRICE_USD,
-      targetShares: shares, modeledLatencyMs: cfg.ENTRY_ORDER_LATENCY_MS,
-      note: 'One post-only $0.70 limit was placed only after this side bid reached $0.70+. It fills only after a public SELL print walks through the limit.',
+      event: 'HIGH_RUNG_TAKER_TRIGGERED', slug: w.slug, side: sideName,
+      attempt, triggerBid: quote.bid, targetShares: shares,
+      orderType: 'MARKET_TAKER', modeledLatencyMs: 0,
+      note: 'A market-taker paper buy was submitted immediately after a fresh best bid reached $0.70.',
     });
-    return true;
+    try {
+      const book = await this.trader.getOrderBook(tokenId);
+      if (w !== this.w || w.closed || tranche.entryOrder !== order) return false;
+      const plan = simulateMarketBuy(book, shares, this.cash, cfg.TAKER_FEE_RATE);
+      if (plan.fills.length) this._applyEntryFill(w, sideName, plan.fills, Date.now(), order, 'CLOB_ASK_SWEEP');
+      const remaining = Math.max(0, order.targetShares - order.filledShares);
+      order.cancelledShares = remaining;
+      order.unfilledShares = remaining;
+      order.remainingShares = 0;
+      order.status = remaining <= EPSILON ? 'filled'
+        : order.filledShares > EPSILON ? 'partially_filled_cancelled' : 'cancelled_unfilled';
+      if (order.filledShares <= EPSILON) w.status = 'high_rung_no_depth';
+      this._push({
+        event: order.filledShares > EPSILON ? 'HIGH_RUNG_TAKER_RESULT' : 'HIGH_RUNG_TAKER_NO_FILL',
+        slug: w.slug, side: sideName, attempt,
+        targetShares: shares, filledShares: round(order.filledShares, 5),
+        averagePrice: round(order.averagePrice, 5), fees: round(order.fees, 6),
+        cancelledShares: round(remaining, 5),
+        note: order.filledShares > EPSILON
+          ? 'The market buy swept currently visible asks; taker fees were charged per fill level. Any depth-short remainder was cancelled.'
+          : 'No executable ask depth was available; no position or loss was recorded, and the same high-rung attempt carries to the next window.',
+      });
+      this._recordEquity(Date.now());
+      return order.filledShares > EPSILON;
+    } catch (error) {
+      order.status = 'cancelled_unfilled';
+      order.remainingShares = 0;
+      order.unfilledShares = shares;
+      order.cancelledShares = shares;
+      this._push({
+        event: 'HIGH_RUNG_TAKER_NO_FILL', slug: w.slug, side: sideName, attempt,
+        targetShares: shares, note: 'Could not read the CLOB ask book for the taker fill: ' + error.message
+          + '. No position or loss was recorded; this attempt carries to the next window.',
+      });
+      return false;
+    }
   }
 
   _processEntryBooks(w, now = Date.now()) {
@@ -391,7 +434,8 @@ class Bot {
     for (const sideName of priority) {
       const tranche = w.sides[sideName].tranches[0];
       const order = tranche.entryOrder;
-      if (!order || !isLivePaperOrder(order.status) || now < order.arrivalAt) continue;
+      if (!order || order.orderType !== 'POST_ONLY_LIMIT'
+        || !isLivePaperOrder(order.status) || now < order.arrivalAt) continue;
       if (w.entryWinnerSide && w.entryWinnerSide !== sideName) continue;
       const cached = this._booksByToken.get(order.tokenId);
       if (!cached || now - cached.ts > cfg.PRICE_STALE_MS || cached.ts < order.arrivalAt
@@ -471,10 +515,13 @@ class Bot {
     for (const fill of fills) {
       const price = Number(fill.price);
       const desired = Number(fill.shares);
-      if (!Number.isFinite(price) || Math.abs(price - order.limitPrice) > EPSILON
-        || fill.maker !== true
+      const maker = order.orderType === 'POST_ONLY_LIMIT' && fill.maker === true;
+      const taker = order.orderType === 'MARKET_TAKER' && fill.maker === false;
+      if (!Number.isFinite(price) || price <= 0 || price > 1
+        || (maker && Math.abs(price - order.limitPrice) > EPSILON)
+        || (!maker && !taker)
         || !Number.isFinite(desired) || desired <= 0) continue;
-      const feePerShare = 0;
+      const feePerShare = maker ? 0 : cfg.TAKER_FEE_RATE * price * (1 - price);
       const affordable = Math.max(0, this.cash) / price;
       const shares = Math.min(desired, order.remainingShares - filled, affordable);
       if (shares <= EPSILON) continue;
@@ -544,7 +591,10 @@ class Bot {
     }
     position.takeProfitOrder.targetShares += filled;
     position.takeProfitOrder.remainingShares += filled;
-    const rebate = this._accrueMakerRebate(position, filled, order.limitPrice);
+    const isMakerOrder = order.orderType === 'POST_ONLY_LIMIT';
+    const rebate = isMakerOrder
+      ? this._accrueMakerRebate(position, filled, order.limitPrice)
+      : { feeEquivalent: 0, estimate: 0, credited: 0 };
     if (!this.pending.includes(position)) this.pending.push(position);
 
     if (w.entryWinnerSide == null) {
@@ -561,15 +611,17 @@ class Bot {
     w.status = 'position_open';
     this._activatePostOnlyOrders(w, sideName, now);
     this._push({
-      event: 'ENTRY_LIMIT_MAKER_FILL',
+      event: isMakerOrder ? 'ENTRY_LIMIT_MAKER_FILL' : 'ENTRY_MARKET_TAKER_FILL',
       slug: w.slug, side: sideName, orderId: order.id,
       orderType: order.orderType, fillSource: source, rung: order.rung || w.rungAtOpen,
       fillShares: round(filled, 5), cumulativeShares: round(order.filledShares, 5),
       remainingShares: round(order.remainingShares, 5),
-      fillNotional: round(notional, 5), fee: 0,
+      fillNotional: round(notional, 5), fee: round(fees, 6),
       averagePrice: round(order.averagePrice, 5), limitPrice: order.limitPrice,
       makerRebateCredited: round(rebate.estimate, 6),
-      note: 'A resting paper maker limit filled at exactly its limit from an eligible public SELL print; no fee was charged and the modeled maker rebate was credited.',
+      note: isMakerOrder
+        ? 'A resting paper maker limit filled at exactly its limit from an eligible public SELL print; no fee was charged and the modeled maker rebate was credited.'
+        : 'A paper market-taker buy swept visible asks at their quoted prices; the taker fee was charged per fill level and no maker rebate was credited.',
     });
     return isFirstFill || filled > EPSILON;
   }
@@ -700,7 +752,7 @@ class Bot {
     }
 
     this._activatePostOnlyOrders(w, sideName, now);
-    this._maybeTriggerHighRung(w, sideName, next, now);
+    await this._maybeTriggerHighRung(w, sideName, next, now);
     if (source === 'rest') this._processEntryBooks(w, now);
     this._markPositions(w, now);
     this._maybeExecuteHighRungStop(w, sideName, next, now);
@@ -1255,8 +1307,8 @@ class Bot {
       entryWinnerSide: w.entryWinnerSide || null,
       entrySignalSide: w.entrySignalSide || null,
       targetShares: round(w.targetShares, 4),
-      entryLimitPrice: w.rungAtOpen === 'HIGH'
-        ? cfg.HIGH_RUNG_LIMIT_PRICE_USD : cfg.ENTRY_LIMIT_PRICE_USD,
+      entryLimitPrice: w.rungAtOpen === 'HIGH' ? null : cfg.ENTRY_LIMIT_PRICE_USD,
+      entryOrderType: w.rungAtOpen === 'HIGH' ? cfg.HIGH_RUNG_ORDER_TYPE : 'POST_ONLY_LIMIT',
       closeTs: Number(w.window && w.window.closeTs) || w.openTs + WINDOW_SECONDS,
       secondsRemaining: Math.max(0, ((Number(w.window && w.window.closeTs) || w.openTs + WINDOW_SECONDS) * 1000 - now) / 1000),
       closed: w.closed,
@@ -1270,7 +1322,7 @@ class Bot {
           tranches: side.tranches.map((tranche) => ({
             id: tranche.id,
             entryLimitPrice: tranche.entryOrder ? tranche.entryOrder.limitPrice
-              : w.rungAtOpen === 'HIGH' ? cfg.HIGH_RUNG_LIMIT_PRICE_USD : cfg.ENTRY_LIMIT_PRICE_USD,
+              : w.rungAtOpen === 'HIGH' ? null : cfg.ENTRY_LIMIT_PRICE_USD,
             targetShares: round(tranche.targetShares, 4),
             state: tranche.state, cycle: tranche.cycle,
             entryOrder: tranche.entryOrder ? {
@@ -1343,11 +1395,13 @@ class Bot {
         },
         highRung: {
           signalBid: cfg.HIGH_RUNG_SIGNAL_BID,
-          entryLimitPrice: cfg.HIGH_RUNG_LIMIT_PRICE_USD,
+          orderType: cfg.HIGH_RUNG_ORDER_TYPE,
+          entryExecution: 'SWEEP_VISIBLE_ASKS',
           firstAttemptShares: cfg.HIGH_RUNG_BASE_SHARES,
           retryShares: cfg.HIGH_RUNG_RETRY_SHARES,
           maxLossAttempts: 2,
           stopLossBid: cfg.HIGH_RUNG_STOP_LOSS_BID,
+          entryFeeType: 'TAKER',
           stopExitFeeType: 'TAKER',
           oneOrderPerWindow: true,
         },
@@ -1396,7 +1450,7 @@ class Bot {
         demoCapital: this.capital, baseShares: cfg.BASE_SHARES,
         entryLimitPrice: cfg.ENTRY_LIMIT_PRICE_USD,
         highRungSignalBid: cfg.HIGH_RUNG_SIGNAL_BID,
-        highRungLimitPrice: cfg.HIGH_RUNG_LIMIT_PRICE_USD,
+        highRungOrderType: cfg.HIGH_RUNG_ORDER_TYPE,
         highRungBaseShares: cfg.HIGH_RUNG_BASE_SHARES,
         highRungRetryShares: cfg.HIGH_RUNG_RETRY_SHARES,
         highRungStopLossBid: cfg.HIGH_RUNG_STOP_LOSS_BID,
