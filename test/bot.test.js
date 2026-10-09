@@ -128,6 +128,7 @@ test('strategy config keeps the $0.30 rung martingale and defines the independen
   assert.equal(cfg.ENTRY_LIMIT_PRICE_USD, 0.30);
   assert.equal(cfg.HIGH_RUNG_SIGNAL_BID, 0.70);
   assert.equal(cfg.HIGH_RUNG_ORDER_TYPE, 'MARKET_TAKER');
+  assert.equal(cfg.HIGH_RUNG_MAX_ENTRY_PRICE_USD, 0.99);
   assert.equal(cfg.HIGH_RUNG_BASE_SHARES, 30);
   assert.equal(cfg.HIGH_RUNG_RETRY_SHARES, 100);
   assert.equal(cfg.HIGH_RUNG_STOP_LOSS_BID, 0.30);
@@ -300,6 +301,16 @@ test('market buy cancels unavailable remainder and records only actually executa
   approx(result.totalCost, 4 * 0.71 + result.fees);
 });
 
+test('high-rung ask sweep never pays above the $0.99 ceiling', () => {
+  const result = simulateMarketBuy(
+    makeBook([[0.99, 2], [0.991, 20]], []), 30, 1000, cfg.TAKER_FEE_RATE,
+    cfg.HIGH_RUNG_MAX_ENTRY_PRICE_USD,
+  );
+  assert.equal(result.filledShares, 2);
+  assert.equal(result.remainingShares, 28);
+  assert.deepEqual(result.fills.map((fill) => fill.price), [0.99]);
+});
+
 test('high-rung stop at a fresh bid of $0.30 or below sells at observed bid, charges taker fee, and arms one 100-share retry', async () => {
   const fx = fixture({ rung: 'HIGH', attempt: 1 });
   const position = await fillHigh(fx);
@@ -378,6 +389,7 @@ test('snapshot reports both rung rules, the active stage, maker-rebate cash trea
   assert.equal(state.strategy.lowRung.martingaleMultiplier, 1.4);
   assert.equal(state.strategy.highRung.signalBid, 0.70);
   assert.equal(state.strategy.highRung.orderType, 'MARKET_TAKER');
+  assert.equal(state.strategy.highRung.maxEntryPrice, 0.99);
   assert.equal(state.strategy.highRung.firstAttemptShares, 30);
   assert.equal(state.strategy.highRung.retryShares, 100);
   assert.equal(state.strategy.highRung.stopLossBid, 0.30);

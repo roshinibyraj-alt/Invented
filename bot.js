@@ -95,7 +95,7 @@ class Bot {
       event: 'BOT_STARTED',
       note: 'Polymarket-only paper bot started on the ' + this.activeRung
         + ' rung with $' + cfg.DEMO_CAPITAL.toFixed(2)
-        + ' demo capital. The low rung uses exact-price maker limits and modeled rebates; the high rung triggers a market-taker ask sweep at a fresh $0.70 bid and pays taker fees. No live order client is loaded.',
+        + ' demo capital. The low rung uses exact-price maker limits and modeled rebates; the high rung triggers an ask sweep capped at $0.99 after a fresh $0.70 bid and pays taker fees. No live order client is loaded.',
     });
     void this._loop();
   }
@@ -386,13 +386,16 @@ class Bot {
     this._push({
       event: 'HIGH_RUNG_TAKER_TRIGGERED', slug: w.slug, side: sideName,
       attempt, triggerBid: quote.bid, targetShares: shares,
-      orderType: 'MARKET_TAKER', modeledLatencyMs: 0,
-      note: 'A market-taker paper buy was submitted immediately after a fresh best bid reached $0.70.',
+      orderType: cfg.HIGH_RUNG_ORDER_TYPE, modeledLatencyMs: 0,
+      maxAskPrice: cfg.HIGH_RUNG_MAX_ENTRY_PRICE_USD,
+      note: 'A paper buy was submitted immediately after a fresh best bid reached $0.70; visible asks are accepted up to the $0.99 price ceiling.',
     });
     try {
       const book = await this.trader.getOrderBook(tokenId);
       if (w !== this.w || w.closed || tranche.entryOrder !== order) return false;
-      const plan = simulateMarketBuy(book, shares, this.cash, cfg.TAKER_FEE_RATE);
+      const plan = simulateMarketBuy(
+        book, shares, this.cash, cfg.TAKER_FEE_RATE, cfg.HIGH_RUNG_MAX_ENTRY_PRICE_USD,
+      );
       if (plan.fills.length) this._applyEntryFill(w, sideName, plan.fills, Date.now(), order, 'CLOB_ASK_SWEEP');
       const remaining = Math.max(0, order.targetShares - order.filledShares);
       order.cancelledShares = remaining;
@@ -409,7 +412,7 @@ class Bot {
         cancelledShares: round(remaining, 5),
         note: order.filledShares > EPSILON
           ? 'The market buy swept currently visible asks; taker fees were charged per fill level. Any depth-short remainder was cancelled.'
-          : 'No executable ask depth was available; no position or loss was recorded, and the same high-rung attempt carries to the next window.',
+          : 'No executable ask depth at or below the $0.99 ceiling was available; no position or loss was recorded, and the same high-rung attempt carries to the next window.',
       });
       this._recordEquity(Date.now());
       return order.filledShares > EPSILON;
@@ -420,7 +423,7 @@ class Bot {
       order.cancelledShares = shares;
       this._push({
         event: 'HIGH_RUNG_TAKER_NO_FILL', slug: w.slug, side: sideName, attempt,
-        targetShares: shares, note: 'Could not read the CLOB ask book for the taker fill: ' + error.message
+        targetShares: shares, note: 'Could not read the CLOB ask book for the taker fill capped at $0.99: ' + error.message
           + '. No position or loss was recorded; this attempt carries to the next window.',
       });
       return false;
@@ -1397,6 +1400,7 @@ class Bot {
           signalBid: cfg.HIGH_RUNG_SIGNAL_BID,
           orderType: cfg.HIGH_RUNG_ORDER_TYPE,
           entryExecution: 'SWEEP_VISIBLE_ASKS',
+          maxEntryPrice: cfg.HIGH_RUNG_MAX_ENTRY_PRICE_USD,
           firstAttemptShares: cfg.HIGH_RUNG_BASE_SHARES,
           retryShares: cfg.HIGH_RUNG_RETRY_SHARES,
           maxLossAttempts: 2,
@@ -1451,6 +1455,7 @@ class Bot {
         entryLimitPrice: cfg.ENTRY_LIMIT_PRICE_USD,
         highRungSignalBid: cfg.HIGH_RUNG_SIGNAL_BID,
         highRungOrderType: cfg.HIGH_RUNG_ORDER_TYPE,
+        highRungMaxEntryPrice: cfg.HIGH_RUNG_MAX_ENTRY_PRICE_USD,
         highRungBaseShares: cfg.HIGH_RUNG_BASE_SHARES,
         highRungRetryShares: cfg.HIGH_RUNG_RETRY_SHARES,
         highRungStopLossBid: cfg.HIGH_RUNG_STOP_LOSS_BID,

@@ -2,18 +2,20 @@
 
 const EPSILON = 1e-9;
 
-function simulateMarketBuy(book, targetShares, availableUsd, takerFeeRate) {
+function simulateMarketBuy(book, targetShares, availableUsd, takerFeeRate, maxPrice = 1) {
   const target = Number(targetShares);
   let cash = Number(availableUsd);
   const feeRate = Number(takerFeeRate);
+  const priceCap = Number(maxPrice);
   if (!Number.isFinite(target) || target <= 0 || !Number.isFinite(cash) || cash <= 0
-    || !Number.isFinite(feeRate) || feeRate < 0) {
+    || !Number.isFinite(feeRate) || feeRate < 0
+    || !Number.isFinite(priceCap) || priceCap <= 0 || priceCap > 1) {
     return { targetShares: target, filledShares: 0, remainingShares: Math.max(0, target || 0), fees: 0, totalCost: 0, fills: [] };
   }
   const asks = (Array.isArray(book?.asks) ? book.asks : [])
     .map((level) => ({ price: Number(level.price), size: Number(level.size) }))
     .filter((level) => Number.isFinite(level.price) && level.price > 0 && level.price <= 1
-      && Number.isFinite(level.size) && level.size > 0)
+      && level.price <= priceCap && Number.isFinite(level.size) && level.size > 0)
     .sort((a, b) => a.price - b.price);
   let remaining = target, filledShares = 0, fees = 0, totalCost = 0;
   const fills = [];
