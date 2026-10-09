@@ -2,17 +2,20 @@
 
 const EPSILON = 1e-9;
 
-function simulateMarketBuy(book, targetShares, availableUsd, takerFeeRate) {
+function simulateLimitBuy(book, targetShares, limitPrice, availableUsd, takerFeeRate = 0) {
   const target = Number(targetShares);
+  const limit = Number(limitPrice);
   const budget = Number(availableUsd);
   const feeRate = Number(takerFeeRate);
   const asks = (book && Array.isArray(book.asks) ? book.asks : [])
     .map((level) => ({ price: Number(level.price), size: Number(level.size) }))
-    .filter((level) => Number.isFinite(level.price) && level.price > 0 && level.price <= 1
+    .filter((level) => Number.isFinite(level.price) && level.price > 0
+      && level.price <= limit + EPSILON
       && Number.isFinite(level.size) && level.size > 0)
     .sort((a, b) => a.price - b.price);
 
   if (!Number.isFinite(target) || target <= 0
+    || !Number.isFinite(limit) || limit <= 0 || limit > 1
     || !Number.isFinite(budget) || budget < 0
     || !Number.isFinite(feeRate) || feeRate < 0) {
     return emptyPlan(target);
@@ -34,27 +37,27 @@ function simulateMarketBuy(book, targetShares, availableUsd, takerFeeRate) {
 
     const levelNotional = shares * level.price;
     const levelFee = shares * feePerShare;
-    const totalCost = levelNotional + levelFee;
     fills.push({
       price: level.price,
       shares,
       notional: levelNotional,
       fee: levelFee,
-      totalCost,
+      totalCost: levelNotional + levelFee,
     });
     notional += levelNotional;
     fees += levelFee;
     remainingShares -= shares;
-    remainingBudget = Math.max(0, remainingBudget - totalCost);
+    remainingBudget = Math.max(0, remainingBudget - levelNotional - levelFee);
   }
 
   const filledShares = target - remainingShares;
-  const availableDepth = asks.reduce((total, level) => total + level.size, 0);
+  const visibleDepth = asks.reduce((sum, level) => sum + level.size, 0);
   const limitingFactor = remainingShares <= EPSILON ? null
     : remainingBudget <= EPSILON ? 'shared_cash'
-      : availableDepth + EPSILON < target ? 'visible_depth' : 'shared_cash';
+      : visibleDepth + EPSILON < target ? 'visible_depth' : 'shared_cash';
   return {
     targetShares: target,
+    limitPrice: limit,
     filledShares,
     remainingShares: Math.max(0, remainingShares),
     notional,
@@ -66,11 +69,25 @@ function simulateMarketBuy(book, targetShares, availableUsd, takerFeeRate) {
   };
 }
 
-function emptyPlan(targetShares, limitingFactor = 'no_executable_asks') {
+function queueAheadAtLimit(book, limitPrice) {
+  const limit = Number(limitPrice);
+  if (!Number.isFinite(limit) || limit <= 0) return 0;
+  return (book && Array.isArray(book.bids) ? book.bids : [])
+    .reduce((sum, level) => {
+      const price = Number(level.price);
+      const size = Number(level.size);
+      return Number.isFinite(price) && Math.abs(price - limit) <= EPSILON
+        && Number.isFinite(size) && size > 0 ? sum + size : sum;
+    }, 0);
+}
+
+function emptyPlan(targetShares, limitingFactor = 'no_marketable_asks') {
+  const target = Number.isFinite(Number(targetShares)) ? Number(targetShares) : 0;
   return {
-    targetShares: Number.isFinite(Number(targetShares)) ? Number(targetShares) : 0,
+    targetShares: target,
+    limitPrice: null,
     filledShares: 0,
-    remainingShares: Number.isFinite(Number(targetShares)) ? Math.max(0, Number(targetShares)) : 0,
+    remainingShares: Math.max(0, target),
     notional: 0,
     fees: 0,
     totalCost: 0,
@@ -80,4 +97,4 @@ function emptyPlan(targetShares, limitingFactor = 'no_executable_asks') {
   };
 }
 
-module.exports = { simulateMarketBuy };
+module.exports = { simulateLimitBuy, queueAheadAtLimit };

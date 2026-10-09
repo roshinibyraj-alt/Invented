@@ -5,7 +5,7 @@ const {
   getActiveWindow, currentWindowOpenTs, slugForTs, WINDOW_SECONDS,
 } = require('./polymarket-market');
 const startMarketFeed = require('./clob-feed');
-const { simulateMarketBuy } = require('./paper-market-order');
+const { simulateLimitBuy, queueAheadAtLimit } = require('./paper-limit-order');
 
 const EPSILON = 1e-8;
 const CLOSE_WINNER_THRESHOLD = 0.98;
@@ -36,11 +36,12 @@ class Bot {
     this._lastQuoteAt = 0;
     this._lastWebSocketQuoteAt = 0;
     this._lastRestFetchAt = 0;
+    this._booksByToken = new Map();
     this._lastHeartbeatAt = 0;
     this._running = false;
     this._warned = new Set();
     this._positionId = 0;
-    this.lossStreak = { UP: 0, DOWN: 0 };
+    this.lossStreak = 0;
     this._entryOrderId = 0;
     this._exitOrderId = 0;
     this.pending = [];
@@ -89,8 +90,10 @@ class Bot {
     this._running = true;
     this._push({
       event: 'BOT_STARTED',
-      note: 'Polymarket-only paper bot started; independent UP/DOWN market buys share a $'
-        + cfg.DEMO_CAPITAL.toFixed(2) + ' demo cash pool. No live order client is loaded.',
+      note: 'Polymarket-only paper bot started; paired UP/DOWN $'
+        + cfg.ENTRY_LIMIT_PRICE_USD.toFixed(2) + ' limit orders share a $'
+        + cfg.DEMO_CAPITAL.toFixed(2)
+        + ' demo cash pool. First fill cancels the opposite order. No live order client is loaded.',
     });
     void this._loop();
   }
@@ -130,15 +133,17 @@ class Bot {
       this._lastQuoteAt = 0;
       this._lastWebSocketQuoteAt = 0;
       this._lastRestFetchAt = 0;
+      this._booksByToken = new Map();
       this.priceSeries = [];
       this._seriesSlug = slug;
       this._push({
         event: 'WINDOW_STARTED', slug,
-        upLossStreak: this.lossStreak.UP, downLossStreak: this.lossStreak.DOWN,
-        upTargetShares: this._sharesForSide('UP'), downTargetShares: this._sharesForSide('DOWN'),
-        entryAt: openTs * 1000 + cfg.ENTRY_DELAY_MS,
-        entryDelayMs: cfg.ENTRY_DELAY_MS,
-        note: 'New five-minute window; independent UP and DOWN market buys are scheduled after the 3-second opening delay, with no price cap. If the opening trigger is missed beyond the configured grace, the bot skips this window rather than entering late.',
+        lossStreak: this.lossStreak,
+        targetShares: this._sharesForNextTrade(),
+        entryAt: openTs * 1000,
+        note: 'New five-minute window; equal-size UP and DOWN paper limit buys will be posted at $'
+          + cfg.ENTRY_LIMIT_PRICE_USD.toFixed(2)
+          + ' as soon as the market is discovered. The first side to fill cancels the other.',
       });
     }
 
@@ -152,8 +157,10 @@ class Bot {
         w.status = 'watching_entries';
         this._push({
           event: 'WINDOW_READY', slug: w.slug,
-          entryAt: w.openTs * 1000 + cfg.ENTRY_DELAY_MS,
-          note: 'Market tokens found; the bot waits for the 3-second opening trigger, then sweeps visible asks. If startup or data delay misses the trigger grace, this window is skipped.',
+          entryAt: w.openTs * 1000,
+          note: 'Market tokens found; the bot can now post its paired $'
+            + cfg.ENTRY_LIMIT_PRICE_USD.toFixed(2)
+            + ' paper limit buys, subject to modeled order-arrival latency.',
         });
         await this._ensureMarketFeed(w);
       } else {
@@ -172,12 +179,12 @@ class Bot {
       return;
     }
     if (this._marketFeedSlug !== w.slug) await this._ensureMarketFeed(w);
-    if (now - this._lastQuoteAt >= cfg.PRICE_FEED_FALLBACK_MS
-      && now - this._lastRestFetchAt >= cfg.PRICE_FEED_FALLBACK_MS) {
+    if (now - this._lastRestFetchAt >= cfg.PRICE_FEED_FALLBACK_MS) {
       await this._seedQuotes(w);
     }
 
-    await this._maybePlaceMarketEntries(w, Date.now());
+    this._processEntryBooks(w, Date.now());
+    await this._maybePlaceLimitEntries(w, Date.now());
     if (now >= windowCloseMs(w)) await this._finishWindow(w, now, 'WINDOW_EXPIRED');
     this._maybeHeartbeat(w, now);
     this._recordEquity(now);
@@ -191,213 +198,297 @@ class Bot {
     this._marketFeedSlug = null;
   }
 
-  _sharesForSide(sideName) {
-    const streak = Math.max(0, Number(this.lossStreak[sideName]) || 0);
+  _sharesForNextTrade() {
+    const streak = Math.max(0, Number(this.lossStreak) || 0);
     const shares = cfg.BASE_SHARES * (cfg.MARTINGALE_MULTIPLIER ** streak);
     return Number.isFinite(shares) ? shares : Number.MAX_VALUE;
   }
 
-  _recordSideResult(position, pnl) {
-    const side = position.side;
-    const previousLossStreak = Math.max(0, Number(this.lossStreak[side]) || 0);
+  _recordTradeResult(position, pnl) {
+    const previousLossStreak = Math.max(0, Number(this.lossStreak) || 0);
     if (pnl > EPSILON) {
-      this.lossStreak[side] = 0;
+      this.lossStreak = 0;
       this._push({
-        event: 'SIDE_MARTINGALE_RESET', slug: position.slug, side,
+        event: 'MARTINGALE_RESET', slug: position.slug, side: position.side,
         previousLossStreak, lossStreak: 0, nextShares: cfg.BASE_SHARES,
-        note: 'This side won; only its own loss streak resets to the 10-share base.',
+        note: 'The one position in this window won; the shared next-window size resets to 10 shares.',
       });
     } else if (pnl < -EPSILON) {
-      this.lossStreak[side] = previousLossStreak + 1;
+      this.lossStreak = previousLossStreak + 1;
       this._push({
-        event: 'SIDE_MARTINGALE_STEP_UP', slug: position.slug, side,
-        previousLossStreak, lossStreak: this.lossStreak[side],
-        nextShares: round(this._sharesForSide(side), 4),
-        note: 'This side lost; only its next share size increases by '
+        event: 'MARTINGALE_STEP_UP', slug: position.slug, side: position.side,
+        previousLossStreak, lossStreak: this.lossStreak,
+        nextShares: round(this._sharesForNextTrade(), 4),
+        note: 'The one position in this window lost; next-window shares increase by '
           + cfg.MARTINGALE_MULTIPLIER.toFixed(1) + '×.',
       });
     }
   }
 
-  async _maybePlaceMarketEntries(w, now = Date.now()) {
-    if (!w || w !== this.w || !w.window || w.closed || this.strategyBlocked) return;
-    const triggerAt = w.openTs * 1000 + cfg.ENTRY_DELAY_MS;
-    if (now < triggerAt || now >= windowCloseMs(w)) return;
-    if (w.marketEntryMissedAt != null) return;
-    if (now > triggerAt + cfg.MARKET_ENTRY_MAX_LATENESS_MS) {
-      this._markMarketEntryWindowMissed(w, now, triggerAt);
-      return;
-    }
+  async _maybePlaceLimitEntries(w, now = Date.now()) {
+    if (!w || w !== this.w || !w.window || w.closed || this.strategyBlocked
+      || now >= windowCloseMs(w)) return;
+    if (w.entryOrdersPlacedAt != null) return;
 
-    if (w.marketEntryTriggeredAt == null) {
-      w.marketEntryTriggeredAt = now;
-      w.status = 'market_entry_triggered';
-      this._push({
-        event: 'MARKET_ENTRY_TRIGGERED', slug: w.slug,
-        scheduledAt: triggerAt, triggeredAt: now,
-        targetShares: {
-          UP: round(this._sharesForSide('UP'), 4),
-          DOWN: round(this._sharesForSide('DOWN'), 4),
-        },
-        note: 'Three-second opening delay elapsed. Independent paper market buys will sweep visible asks with no $0.45 price cap.',
-      });
-    }
-
-    const priority = Math.floor(w.openTs / WINDOW_SECONDS) % 2 === 0
-      ? ['UP', 'DOWN'] : ['DOWN', 'UP'];
-    const dueSides = priority.filter((sideName) => {
+    const placedAt = Date.now();
+    const targetShares = this._sharesForNextTrade();
+    w.entryOrdersPlacedAt = placedAt;
+    w.targetShares = targetShares;
+    w.status = 'entry_orders_posting';
+    for (const sideName of SIDES) {
+      const tokenId = sideName === 'UP' ? w.window.tokenUp : w.window.tokenDown;
       const tranche = w.sides[sideName].tranches[0];
-      return !tranche.entryOrder && !tranche.marketEntryRequestPending
-        && now >= Number(tranche.nextMarketAttemptAt || 0)
-        && tranche.state !== 'done_for_window'
-        && tranche.state !== 'in_position';
-    });
-    if (!dueSides.length) return;
-
-    for (const sideName of dueSides) {
-      w.sides[sideName].tranches[0].marketEntryRequestPending = true;
+      tranche.targetShares = targetShares;
+      tranche.cycle = 1;
+      tranche.entryOrder = {
+        id: 'paper-limit-' + (++this._entryOrderId),
+        tokenId, side: 'BUY', orderType: 'LIMIT',
+        limitPrice: cfg.ENTRY_LIMIT_PRICE_USD,
+        targetShares, filledShares: 0, remainingShares: targetShares,
+        unfilledShares: targetShares, cancelledShares: 0,
+        notional: 0, fees: 0, totalCost: 0, averagePrice: null,
+        fills: [], reservedUsd: 0, placedAt,
+        arrivalAt: placedAt + cfg.ENTRY_ORDER_LATENCY_MS,
+        restingAt: null, status: 'waiting_to_post',
+        queueAheadShares: 0, lastBookTs: null, seenTradeKeys: {},
+      };
+      tranche.state = 'entry_order_posting';
     }
-    const results = await Promise.allSettled(dueSides.map((sideName) => {
+    this._push({
+      event: 'PAIRED_LIMIT_ORDERS_PLACED', slug: w.slug,
+      limitPrice: cfg.ENTRY_LIMIT_PRICE_USD, targetShares,
+      orderIds: {
+        UP: w.sides.UP.tranches[0].entryOrder.id,
+        DOWN: w.sides.DOWN.tranches[0].entryOrder.id,
+      },
+      modeledLatencyMs: cfg.ENTRY_ORDER_LATENCY_MS,
+      note: 'Paper limit buys are resting independently on UP and DOWN; the first side to receive any fill cancels the other order.',
+    });
+
+    const results = await Promise.allSettled(SIDES.map((sideName) => {
       const tokenId = sideName === 'UP' ? w.window.tokenUp : w.window.tokenDown;
       return this.trader.getOrderBook(tokenId);
     }));
-    if (w !== this.w || w.closed || Date.now() >= windowCloseMs(w)) return;
-
+    if (w !== this.w || w.closed) return;
     const completedAt = Date.now();
-    if (completedAt > triggerAt + cfg.MARKET_ENTRY_MAX_LATENESS_MS) {
-      for (const sideName of dueSides) {
-        w.sides[sideName].tranches[0].marketEntryRequestPending = false;
-      }
-      this._markMarketEntryWindowMissed(w, completedAt, triggerAt);
-      return;
-    }
-    for (let index = 0; index < dueSides.length; index += 1) {
-      const sideName = dueSides[index];
-      const tranche = w.sides[sideName].tranches[0];
-      tranche.marketEntryRequestPending = false;
+    for (let index = 0; index < SIDES.length; index += 1) {
       const result = results[index];
-      const book = result.status === 'fulfilled' ? result.value : null;
-      if (!book || !Array.isArray(book.asks)) {
-        tranche.nextMarketAttemptAt = completedAt + cfg.MARKET_BOOK_RETRY_MS;
-        if (completedAt - tranche.lastMarketBookErrorAt >= 5000) {
-          tranche.lastMarketBookErrorAt = completedAt;
-          this._push({
-            event: 'MARKET_ENTRY_WAITING_FOR_BOOK', slug: w.slug, side: sideName,
-            retryAt: tranche.nextMarketAttemptAt,
-            note: 'Could not fetch a usable CLOB order book; this side will retry after fresh market data is available.',
-          });
-        }
+      const sideName = SIDES[index];
+      const tokenId = sideName === 'UP' ? w.window.tokenUp : w.window.tokenDown;
+      if (result.status === 'fulfilled' && result.value && Array.isArray(result.value.asks)) {
+        this._booksByToken.set(tokenId, { book: result.value, ts: completedAt });
+      }
+    }
+    for (let index = 0; index < SIDES.length; index += 1) {
+      const sideName = SIDES[index];
+      const result = results[index];
+      if (result.status !== 'fulfilled' || !result.value || !Array.isArray(result.value.asks)) {
+        this._push({
+          event: 'ENTRY_BOOK_WAITING', slug: w.slug, side: sideName,
+          note: result.status === 'rejected' ? String(result.reason && result.reason.message || result.reason)
+            : 'CLOB order book is unavailable; the paper limit remains posted and awaits later data.',
+        });
         continue;
       }
-
       const tokenId = sideName === 'UP' ? w.window.tokenUp : w.window.tokenDown;
-      await this._onQuote(w.slug, tokenId, quoteFromBook(book), 'rest');
-      const targetShares = this._sharesForSide(sideName);
-      const availableCash = Math.max(0, this.cash);
-      const plan = simulateMarketBuy(book, targetShares, availableCash, cfg.TAKER_FEE_RATE);
-      this._bookMarketEntry(w, sideName, tranche, targetShares, plan, completedAt);
+      await this._onQuote(w.slug, tokenId, quoteFromBook(result.value), 'rest');
     }
-
-    const entriesComplete = SIDES.every((sideName) => {
-      const tranche = w.sides[sideName].tranches[0];
-      return !!tranche.entryOrder || tranche.state === 'done_for_window';
-    });
-    if (entriesComplete && w.status !== 'window_closed') w.status = 'watching_positions';
+    this._processEntryBooks(w, Date.now());
   }
 
-  _markMarketEntryWindowMissed(w, now, triggerAt) {
-    if (!w || w.marketEntryMissedAt != null) return;
-    w.marketEntryMissedAt = now;
-    w.status = 'entry_window_missed';
-    for (const sideName of SIDES) {
+  _processEntryBooks(w, now = Date.now()) {
+    if (!w || w !== this.w || w.closed || !w.window || now >= windowCloseMs(w)) return;
+    const priority = Math.floor(w.openTs / WINDOW_SECONDS) % 2 === 0
+      ? ['UP', 'DOWN'] : ['DOWN', 'UP'];
+    for (const sideName of priority) {
       const tranche = w.sides[sideName].tranches[0];
-      tranche.marketEntryRequestPending = false;
-      if (!tranche.entryOrder && !tranche.position) tranche.state = 'done_for_window';
+      const order = tranche.entryOrder;
+      if (!order || !isLivePaperOrder(order.status) || now < order.arrivalAt) continue;
+      if (w.entryWinnerSide && w.entryWinnerSide !== sideName) continue;
+      if (order.status === 'waiting_to_post' || order.status === 'posting') {
+        order.status = 'resting';
+        order.restingAt = now;
+        tranche.state = 'limit_order_resting';
+      }
+      const cached = this._booksByToken.get(order.tokenId);
+      if (!cached || now - cached.ts > cfg.PRICE_STALE_MS || order.lastBookTs === cached.ts) continue;
+      order.lastBookTs = cached.ts;
+      if (!order.queueInitialized) {
+        order.queueAheadShares = queueAheadAtLimit(cached.book, order.limitPrice);
+        order.queueInitialized = true;
+        this._push({
+          event: 'ENTRY_LIMIT_RESTING', slug: w.slug, side: sideName,
+          orderId: order.id, limitPrice: order.limitPrice,
+          targetShares: round(order.targetShares, 4),
+          queueAheadShares: round(order.queueAheadShares, 4),
+          note: 'Modeled limit order has reached the public CLOB book after latency; it can fill only at or below its $0.30 limit.',
+        });
+      }
+      if (cached.ts < order.arrivalAt) continue;
+      const plan = simulateLimitBuy(
+        cached.book, order.remainingShares, order.limitPrice,
+        Math.max(0, this.cash), cfg.TAKER_FEE_RATE,
+      );
+      if (plan.filledShares > EPSILON) {
+        this._applyEntryFill(w, sideName, plan.fills.map((fill) => ({ ...fill, maker: false })),
+          now, order, 'CROSSING_ASK');
+      }
     }
+    if (w.entryWinnerSide) w.status = 'position_open';
+    else if (w.status !== 'window_closed') w.status = 'watching_limit_orders';
+  }
+
+  _cancelEntryOrder(w, sideName, reason) {
+    const tranche = w.sides[sideName].tranches[0];
+    const order = tranche.entryOrder;
+    if (!order || !isLivePaperOrder(order.status)) return false;
+    const remaining = Math.max(0, order.remainingShares);
+    order.cancelledShares = remaining;
+    order.unfilledShares = remaining;
+    order.remainingShares = 0;
+    order.status = reason === 'OPPOSITE_FILLED' ? 'cancelled_opposite' : 'cancelled_window';
+    tranche.state = tranche.position && tranche.position.openShares > EPSILON
+      ? 'in_position' : 'done_for_window';
     this._push({
-      event: 'MARKET_ENTRY_WINDOW_MISSED', slug: w.slug,
-      scheduledAt: triggerAt, skippedAt: now,
-      lateByMs: now - triggerAt,
-      maximumLatenessMs: cfg.MARKET_ENTRY_MAX_LATENESS_MS,
-      note: 'The 3-second opening entry point was missed beyond the allowed data/startup grace; skipped this window rather than entering late. The next five-minute window remains eligible.',
+      event: 'ENTRY_LIMIT_CANCELLED', slug: w.slug, side: sideName,
+      orderId: order.id, reason, cancelledShares: round(remaining, 5),
+      note: reason === 'OPPOSITE_FILLED'
+        ? 'The other outcome received the first fill; this unfilled paper order was cancelled.'
+        : 'Unfilled paper limit shares were cancelled at the five-minute window close.',
     });
+    return true;
   }
 
-  _bookMarketEntry(w, sideName, tranche, targetShares, plan, now) {
-    const tokenId = sideName === 'UP' ? w.window.tokenUp : w.window.tokenDown;
-    const order = {
-      id: 'paper-market-' + (++this._entryOrderId),
-      tokenId, side: 'BUY', orderType: 'MARKET',
-      targetShares, filledShares: plan.filledShares,
-      remainingShares: 0, unfilledShares: plan.remainingShares,
-      reservedUsd: 0, placedAt: w.marketEntryTriggeredAt || now,
-      executedAt: now, averagePrice: plan.averagePrice,
-      notional: plan.notional, fees: plan.fees, totalCost: plan.totalCost,
-      fills: plan.fills,
-      status: plan.filledShares <= EPSILON ? 'no_fill'
-        : plan.remainingShares > EPSILON ? 'partial_fill_remainder_cancelled' : 'filled',
-      limitingFactor: plan.limitingFactor,
-    };
-    tranche.entryOrder = order;
-    tranche.targetShares = targetShares;
-    tranche.initialBudgetUsd = plan.totalCost;
-    tranche.availableUsd = 0;
-    tranche.cycle = 1;
-
-    if (plan.filledShares <= EPSILON) {
-      tranche.state = plan.limitingFactor === 'shared_cash' ? 'capital_blocked' : 'no_liquidity';
-      this._push({
-        event: 'MARKET_BUY_NO_FILL', slug: w.slug, side: sideName,
-        orderId: order.id, orderType: order.orderType,
-        targetShares: round(targetShares, 4),
-        availableCashUsd: round(this.cash, 2),
-        limitingFactor: plan.limitingFactor,
-        note: 'No ask shares were executable within visible CLOB depth and shared demo cash; no position or fill was invented.',
+  _applyEntryFill(w, sideName, fills, now, order, source) {
+    if (!fills.length || w.closed || (w.entryWinnerSide && w.entryWinnerSide !== sideName)) return false;
+    const tranche = w.sides[sideName].tranches[0];
+    const tokenId = order.tokenId;
+    let filled = 0;
+    let notional = 0;
+    let fees = 0;
+    for (const fill of fills) {
+      const price = Number(fill.price);
+      const desired = Number(fill.shares);
+      if (!Number.isFinite(price) || price <= 0 || price > order.limitPrice + EPSILON
+        || !Number.isFinite(desired) || desired <= 0) continue;
+      const feePerShare = fill.maker ? 0 : cfg.TAKER_FEE_RATE * price * (1 - price);
+      const affordable = Math.max(0, this.cash) / (price + feePerShare);
+      const shares = Math.min(desired, order.remainingShares - filled, affordable);
+      if (shares <= EPSILON) continue;
+      const cost = shares * price;
+      const fee = shares * feePerShare;
+      filled += shares;
+      notional += cost;
+      fees += fee;
+      order.fills.push({
+        price, shares, notional: cost, fee, totalCost: cost + fee,
+        maker: !!fill.maker, source: fill.source || source, ts: now,
       });
-      return;
     }
+    if (filled <= EPSILON) return false;
 
-    this.cash -= plan.totalCost;
-    this.stats.estimatedFees += plan.fees;
-    const position = {
-      id: ++this._positionId,
-      slug: w.slug, openTs: w.openTs,
-      closeTs: Number(w.window.closeTs) || w.openTs + WINDOW_SECONDS,
-      side: sideName, trancheId: tranche.id, cycle: tranche.cycle, tokenId,
-      orderId: order.id, entryBudgetUsd: plan.totalCost,
-      entryNotional: plan.notional, entryFee: plan.fees,
-      entryPrice: plan.averagePrice,
-      shares: plan.filledShares, openShares: plan.filledShares,
-      remainingEntryCost: plan.totalCost,
-      takeProfitPrice: cfg.TAKE_PROFIT_BID_USD, takeProfitOrder: null,
-      makerFeeEquivalent: 0, estimatedMakerRebate: 0,
-      exitProceeds: 0, exitFees: 0, netExitProceeds: 0, realizedPnl: 0,
-      clobExitProceeds: 0, clobExitShares: 0, lastClobExitPrice: null,
-      lastMark: this._quoteFor(sideName, w)?.bid ?? plan.averagePrice,
-      resolutionOutcome: null, resolutionPricePerShare: null,
-      openedAt: now, closedAt: null, status: 'open', finalized: false,
-    };
-    tranche.position = position;
-    tranche.state = 'in_position';
-    position.takeProfitOrder = this._newTakeProfitOrder(position, position.openShares, now);
+    const totalCost = notional + fees;
+    this.cash = Math.max(0, this.cash - totalCost);
+    this.stats.estimatedFees += fees;
+    order.filledShares += filled;
+    order.remainingShares = Math.max(0, order.targetShares - order.filledShares);
+    order.unfilledShares = order.remainingShares;
+    order.notional += notional;
+    order.fees += fees;
+    order.totalCost += totalCost;
+    order.averagePrice = order.filledShares > EPSILON ? order.notional / order.filledShares : null;
+    order.status = order.remainingShares <= EPSILON ? 'filled' : 'partially_filled';
+
+    let position = tranche.position;
+    const isFirstFill = !position;
+    if (!position) {
+      position = {
+        id: ++this._positionId,
+        slug: w.slug, openTs: w.openTs,
+        closeTs: Number(w.window.closeTs) || w.openTs + WINDOW_SECONDS,
+        side: sideName, trancheId: tranche.id, cycle: tranche.cycle, tokenId,
+        orderId: order.id, entryBudgetUsd: 0, entryNotional: 0, entryFee: 0,
+        entryPrice: null, shares: 0, openShares: 0, remainingEntryCost: 0,
+        takeProfitPrice: cfg.TAKE_PROFIT_BID_USD, takeProfitOrder: null,
+        makerFeeEquivalent: 0, estimatedMakerRebate: 0,
+        exitProceeds: 0, exitFees: 0, netExitProceeds: 0, realizedPnl: 0,
+        clobExitProceeds: 0, clobExitShares: 0, lastClobExitPrice: null,
+        lastMark: this._quoteFor(sideName, w)?.bid ?? order.averagePrice,
+        resolutionOutcome: null, resolutionPricePerShare: null,
+        openedAt: now, closedAt: null, status: 'open', finalized: false,
+      };
+      tranche.position = position;
+      position.takeProfitOrder = this._newTakeProfitOrder(position, 0, now);
+      this.pending.push(position);
+      this.stats.entries += 1;
+    }
+    position.shares += filled;
+    position.openShares += filled;
+    position.entryNotional += notional;
+    position.entryFee += fees;
+    position.entryBudgetUsd += totalCost;
+    position.remainingEntryCost += totalCost;
+    position.entryPrice = position.shares > EPSILON ? position.entryNotional / position.shares : null;
+    position.status = 'open';
+    position.lastMark = this._quoteFor(sideName, w)?.bid ?? position.lastMark ?? position.entryPrice;
+    if (position.takeProfitOrder.status === 'filled'
+      || position.takeProfitOrder.status === 'cancelled') {
+      position.takeProfitOrder.status = 'waiting_to_post';
+      position.takeProfitOrder.placedAt = now;
+      position.takeProfitOrder.restingAt = null;
+    }
+    position.takeProfitOrder.targetShares += filled;
+    position.takeProfitOrder.remainingShares += filled;
     if (!this.pending.includes(position)) this.pending.push(position);
-    this.stats.entries += 1;
+
+    if (w.entryWinnerSide == null) {
+      w.entryWinnerSide = sideName;
+      const otherSide = sideName === 'UP' ? 'DOWN' : 'UP';
+      this._cancelEntryOrder(w, otherSide, 'OPPOSITE_FILLED');
+      this._push({
+        event: 'FIRST_SIDE_FILLED', slug: w.slug, side: sideName,
+        orderId: order.id, oppositeSide: otherSide,
+        note: 'This is the only eligible position for the window; the opposite limit order is cancelled.',
+      });
+    }
+    tranche.state = order.remainingShares > EPSILON ? 'partially_filled' : 'in_position';
     w.status = 'position_open';
     this._activatePostOnlyOrders(w, sideName, now);
-
-    const partial = plan.remainingShares > EPSILON;
     this._push({
-      event: partial ? 'MARKET_BUY_PARTIAL' : 'MARKET_BUY_FILLED',
+      event: source === 'CROSSING_ASK' ? 'ENTRY_LIMIT_TAKER_FILL' : 'ENTRY_LIMIT_MAKER_FILL',
       slug: w.slug, side: sideName, orderId: order.id,
-      orderType: order.orderType, targetShares: round(targetShares, 4),
-      filledShares: round(plan.filledShares, 5),
-      unfilledShares: round(plan.remainingShares, 5),
-      averagePrice: round(plan.averagePrice, 5),
-      notional: round(plan.notional, 4), takerFee: round(plan.fees, 6),
-      totalCost: round(plan.totalCost, 4), fills: plan.fills,
-      limitingFactor: plan.limitingFactor,
-      note: 'Paper market buy swept visible asks with no price cap. The average fill is depth-weighted; the unfilled remainder was cancelled. Taker fees are charged in the demo ledger.',
+      orderType: order.orderType, fillSource: source,
+      fillShares: round(filled, 5), cumulativeShares: round(order.filledShares, 5),
+      remainingShares: round(order.remainingShares, 5),
+      fillNotional: round(notional, 5), takerFee: round(fees, 6),
+      averagePrice: round(order.averagePrice, 5), limitPrice: order.limitPrice,
+      note: source === 'CROSSING_ASK'
+        ? 'A limit order was marketable at modeled arrival; only visible asks at or below $0.30 filled and taker fees were applied.'
+        : 'A resting paper limit filled from an eligible public SELL print, subject to estimated visible queue ahead; no maker fee is modeled.',
     });
+    return isFirstFill || filled > EPSILON;
+  }
+
+  _fillMakerEntry(w, sideName, tranche, trade, tradeAt, now, tradePrice, tradeSize) {
+    const order = tranche.entryOrder;
+    if (!order || !['resting', 'partially_filled'].includes(order.status)
+      || !isLivePaperOrder(order.status) || tradeAt < Number(order.restingAt || 0)
+      || tradePrice > order.limitPrice + EPSILON
+      || !order.queueInitialized
+      || (w.entryWinnerSide && w.entryWinnerSide !== sideName)) return false;
+    if (!markTradeSeen(order, trade, tradeAt, tradePrice, tradeSize, 'SELL')) return false;
+    let eligibleSize = tradeSize;
+    if (Math.abs(tradePrice - order.limitPrice) <= EPSILON && order.queueAheadShares > EPSILON) {
+      const consumed = Math.min(eligibleSize, order.queueAheadShares);
+      order.queueAheadShares = Math.max(0, order.queueAheadShares - consumed);
+      eligibleSize -= consumed;
+    }
+    const fillable = Math.min(order.remainingShares, eligibleSize,
+      Math.max(0, this.cash) / order.limitPrice);
+    if (fillable <= EPSILON) return false;
+    return this._applyEntryFill(w, sideName, [{
+      price: order.limitPrice, shares: fillable, maker: true, source: 'PUBLIC_SELL_PRINT',
+    }], now, order, 'PUBLIC_SELL_PRINT');
   }
 
   async _ensureMarketFeed(w) {
@@ -434,6 +525,12 @@ class Bot {
     ]);
     if (this._marketFeedSlug !== w.slug) return;
     const tokenIds = [w.window.tokenUp, w.window.tokenDown];
+    const fetchedAt = Date.now();
+    for (let index = 0; index < tokenIds.length; index += 1) {
+      if (results[index].status === 'fulfilled') {
+        this._booksByToken.set(tokenIds[index], { book: results[index].value, ts: fetchedAt });
+      }
+    }
     for (let index = 0; index < tokenIds.length; index += 1) {
       const result = results[index];
       if (result.status === 'fulfilled') {
@@ -496,6 +593,7 @@ class Bot {
     }
 
     this._activatePostOnlyOrders(w, sideName, now);
+    if (source === 'rest') this._processEntryBooks(w, now);
     this._markPositions(w, now);
     this._recordEquity(now);
   }
@@ -572,10 +670,11 @@ class Bot {
     if (tradeAt > now + 5000) return false;
 
     const tranche = w.sides[sideName].tranches[0];
+    this._processEntryBooks(w, now);
     this._activatePostOnlyOrders(w, sideName, now);
     const filled = tradeSide === 'BUY'
       ? this._fillMakerTakeProfit(w, sideName, tranche, trade, tradeAt, now, price, size)
-      : false;
+      : this._fillMakerEntry(w, sideName, tranche, trade, tradeAt, now, price, size);
     if (filled) this._recordEquity(now);
     return filled;
   }
@@ -601,7 +700,8 @@ class Bot {
 
     const sold = Math.min(position.openShares, order.remainingShares, tradeSize);
     if (sold <= EPSILON) return false;
-    const averageExit = order.limitPrice;
+    // The requested paper convention credits $1/share when the $0.99 TP prints.
+    const averageExit = 1;
     const proceeds = sold * averageExit;
     const fee = 0;
     const entryCostAllocated = position.openShares > EPSILON
@@ -622,7 +722,7 @@ class Bot {
     position.lastMark = position.openShares > EPSILON
       ? this._quoteFor(sideName, w)?.bid ?? averageExit : averageExit;
     this.cash += proceeds;
-    const rebate = this._accrueMakerRebate(position, sold, averageExit);
+    const rebate = this._accrueMakerRebate(position, sold, order.limitPrice);
     this.stats.exits += 1;
     if (order.remainingShares <= EPSILON) {
       order.remainingShares = 0;
@@ -639,8 +739,8 @@ class Bot {
       makerFeeEquivalent: round(rebate.feeEquivalent, 6),
       rebateEstimate: round(rebate.estimate, 6),
       realizedPnl: round(position.realizedPnl, 2),
-      note: 'Filled from a later public BUY trade print at the $'
-        + order.limitPrice.toFixed(2) + ' post-only take-profit with zero fees. Queue position and actual rebate payout are not observable.',
+      note: 'A later public BUY print reached the $'
+        + order.limitPrice.toFixed(2) + ' TP. Paper proceeds use the requested $1.00/share convention; no maker fee is charged and queue position is estimated.',
     });
 
     if (position.openShares <= EPSILON) {
@@ -678,6 +778,7 @@ class Bot {
     if (!w || w.closed) return;
     for (const sideName of SIDES) {
       const tranche = w.sides[sideName].tranches[0];
+      this._cancelEntryOrder(w, sideName, 'WINDOW_CLOSE');
       const takeProfitOrder = tranche.position && tranche.position.takeProfitOrder;
       if (takeProfitOrder && isLivePaperOrder(takeProfitOrder.status)) {
         takeProfitOrder.status = 'cancelled';
@@ -837,9 +938,9 @@ class Bot {
     if (!position || position.finalized) return;
     position.finalized = true;
     const pnl = position.realizedPnl;
-    this._recordSideResult(position, pnl);
-    if (pnl >= 0) this.stats.wins += 1;
-    else this.stats.losses += 1;
+    this._recordTradeResult(position, pnl);
+    if (pnl > EPSILON) this.stats.wins += 1;
+    else if (pnl < -EPSILON) this.stats.losses += 1;
     const trade = {
       slug: position.slug, openTs: position.openTs, side: position.side,
       tranche: position.trancheId, cycle: position.cycle,
@@ -861,8 +962,8 @@ class Bot {
       settlementBidDown: position.settlementBidDown ?? null,
       settlementThresholdMatched: position.settlementThresholdMatched ?? null,
       pnl: round(pnl, 2), reason,
-      lossStreakAfter: this.lossStreak[position.side],
-      nextShares: round(this._sharesForSide(position.side), 4),
+      lossStreakAfter: this.lossStreak,
+      nextShares: round(this._sharesForNextTrade(), 4),
       ts: Date.now(),
     };
     this.trades.push(trade);
@@ -872,8 +973,8 @@ class Bot {
       event: 'TRADE_CLOSED', slug: position.slug, side: position.side,
       tranche: position.trancheId, pnl: round(pnl, 2), reason,
       estimatedMakerRebate: round(position.estimatedMakerRebate || 0, 6),
-      lossStreak: this.lossStreak[position.side],
-      nextShares: round(this._sharesForSide(position.side), 4),
+      lossStreak: this.lossStreak,
+      nextShares: round(this._sharesForNextTrade(), 4),
       note: 'Trade closed with estimated net P&L ' + (pnl >= 0 ? '+' : '') + '$' + round(pnl, 2) + '.',
     });
   }
@@ -974,10 +1075,10 @@ class Bot {
     const w = this.w;
     const window = w ? {
       slug: w.slug, status: w.status, openTs: w.openTs,
-      entryTriggerTs: w.openTs * 1000 + cfg.ENTRY_DELAY_MS,
-      entryTriggeredAt: w.marketEntryTriggeredAt || null,
-      entryMissedAt: w.marketEntryMissedAt || null,
-      entryMaxLatenessMs: cfg.MARKET_ENTRY_MAX_LATENESS_MS,
+      entryOrdersPlacedAt: w.entryOrdersPlacedAt || null,
+      entryWinnerSide: w.entryWinnerSide || null,
+      targetShares: round(w.targetShares, 4),
+      entryLimitPrice: cfg.ENTRY_LIMIT_PRICE_USD,
       closeTs: Number(w.window && w.window.closeTs) || w.openTs + WINDOW_SECONDS,
       secondsRemaining: Math.max(0, ((Number(w.window && w.window.closeTs) || w.openTs + WINDOW_SECONDS) * 1000 - now) / 1000),
       closed: w.closed,
@@ -985,20 +1086,22 @@ class Bot {
       sides: Object.fromEntries(SIDES.map((name) => {
         const side = w.sides[name];
         return [name, {
-          lossStreak: this.lossStreak[name],
-          nextShares: round(this._sharesForSide(name), 4),
+          lossStreak: this.lossStreak,
+          nextShares: round(this._sharesForNextTrade(), 4),
           quote: this._quoteFor(name, w),
           tranches: side.tranches.map((tranche) => ({
-            id: tranche.id, entryReferencePrice: cfg.ENTRY_REFERENCE_PRICE_USD,
-            targetShares: round(tranche.targetShares, 4), initialBudgetUsd: round(tranche.initialBudgetUsd, 2),
-            availableUsd: round(tranche.availableUsd, 2), state: tranche.state, cycle: tranche.cycle,
+            id: tranche.id, entryLimitPrice: cfg.ENTRY_LIMIT_PRICE_USD,
+            targetShares: round(tranche.targetShares, 4),
+            state: tranche.state, cycle: tranche.cycle,
             entryOrder: tranche.entryOrder ? {
               id: tranche.entryOrder.id, status: tranche.entryOrder.status,
               orderType: tranche.entryOrder.orderType,
+              limitPrice: tranche.entryOrder.limitPrice,
               averagePrice: round(tranche.entryOrder.averagePrice, 5),
               targetShares: round(tranche.entryOrder.targetShares, 4),
               filledShares: round(tranche.entryOrder.filledShares, 4),
               unfilledShares: round(tranche.entryOrder.unfilledShares, 4),
+              cancelledShares: round(tranche.entryOrder.cancelledShares, 4),
               totalCost: round(tranche.entryOrder.totalCost, 4),
               fees: round(tranche.entryOrder.fees, 6),
               reservedUsd: round(tranche.entryOrder.reservedUsd, 2),
@@ -1046,11 +1149,13 @@ class Bot {
       strategy: {
         demoCapital: cfg.DEMO_CAPITAL, sharedCapital: true,
         baseShares: cfg.BASE_SHARES,
-        entryReferencePrice: cfg.ENTRY_REFERENCE_PRICE_USD,
-        entryPriceCap: null, entryDelayMs: cfg.ENTRY_DELAY_MS,
-        entryMaxLatenessMs: cfg.MARKET_ENTRY_MAX_LATENESS_MS,
+        entryLimitPrice: cfg.ENTRY_LIMIT_PRICE_USD,
+        entryPriceCap: cfg.ENTRY_LIMIT_PRICE_USD,
+        entryOrderLatencyMs: cfg.ENTRY_ORDER_LATENCY_MS,
+        firstFillCancelsOpposite: true,
         takeProfitBid: cfg.TAKE_PROFIT_BID_USD, hardStopLossBid: null,
-        entryOrderType: 'MARKET', takeProfitOrderType: 'POST_ONLY',
+        takeProfitCreditPerShare: 1,
+        entryOrderType: 'LIMIT', takeProfitOrderType: 'POST_ONLY',
         takerFeeRate: cfg.TAKER_FEE_RATE,
         takeProfitMakerFeesCharged: 0, makerRebateRate: cfg.MAKER_REBATE_RATE,
         rebateEstimateIsCash: false,
@@ -1062,9 +1167,12 @@ class Bot {
         settlementFallback: 'HIGHER_BID_THEN_FRESHEST_THEN_UP',
       },
       martingale: {
-        independent: true,
-        UP: { lossStreak: this.lossStreak.UP, nextShares: round(this._sharesForSide('UP'), 4) },
-        DOWN: { lossStreak: this.lossStreak.DOWN, nextShares: round(this._sharesForSide('DOWN'), 4) },
+        independent: false,
+        scope: 'SHARED_ONE_TRADE_PER_WINDOW',
+        lossStreak: this.lossStreak,
+        nextShares: round(this._sharesForNextTrade(), 4),
+        UP: { lossStreak: this.lossStreak, nextShares: round(this._sharesForNextTrade(), 4) },
+        DOWN: { lossStreak: this.lossStreak, nextShares: round(this._sharesForNextTrade(), 4) },
       },
       window, prices: this.prices, priceSeries: this.priceSeries,
       pending: this.pending.map((position) => this._positionSnapshot(position)),
@@ -1077,11 +1185,12 @@ class Bot {
       equity: this.equity,
       cfg: {
         demoCapital: this.capital, baseShares: cfg.BASE_SHARES,
-        entryReferencePrice: cfg.ENTRY_REFERENCE_PRICE_USD,
-        entryDelayMs: cfg.ENTRY_DELAY_MS,
-        entryMaxLatenessMs: cfg.MARKET_ENTRY_MAX_LATENESS_MS,
-        entryPriceCap: null, takerFeeRate: cfg.TAKER_FEE_RATE,
+        entryLimitPrice: cfg.ENTRY_LIMIT_PRICE_USD,
+        entryOrderLatencyMs: cfg.ENTRY_ORDER_LATENCY_MS,
+        firstFillCancelsOpposite: true,
+        entryPriceCap: cfg.ENTRY_LIMIT_PRICE_USD, takerFeeRate: cfg.TAKER_FEE_RATE,
         takeProfitBid: cfg.TAKE_PROFIT_BID_USD,
+        takeProfitCreditPerShare: 1,
         takeProfitMakerFeesCharged: 0, makerRebateRate: cfg.MAKER_REBATE_RATE,
         rebateFeeEquivalentRate: cfg.REBATE_FEE_EQUIVALENT_RATE,
         takeProfitPaperOrderLatencyMs: cfg.PAPER_ORDER_LATENCY_MS,
@@ -1118,7 +1227,7 @@ function makeWindowState(slug, openTs) {
   return {
     slug, openTs, status: 'waiting_for_market', window: null,
     marketWaitReason: null, nextDiscoveryAt: 0,
-    marketEntryTriggeredAt: null, marketEntryMissedAt: null,
+    entryOrdersPlacedAt: null, entryWinnerSide: null, targetShares: null,
     closed: false, closedAt: null,
     lastClobQuoteBySide: { UP: null, DOWN: null },
     finalThreeSecondQuoteBySide: { UP: null, DOWN: null },
@@ -1140,11 +1249,8 @@ function makeSide(name) {
 function makeTranche(id) {
   return {
     id, targetShares: null,
-    initialBudgetUsd: 0, availableUsd: 0,
     state: 'waiting_for_market', cycle: 0,
     entryOrder: null, position: null, lastEntryBlockLogAt: 0,
-    marketEntryRequestPending: false, nextMarketAttemptAt: 0,
-    lastMarketBookErrorAt: 0,
   };
 }
 
@@ -1176,7 +1282,8 @@ function estimateMakerRebate(shares, price) {
 }
 
 function isLivePaperOrder(status) {
-  return status === 'waiting_to_post' || status === 'posting' || status === 'resting';
+  return status === 'waiting_to_post' || status === 'posting'
+    || status === 'resting' || status === 'partially_filled';
 }
 
 function normalizeTradeTimestamp(value, fallback) {
