@@ -48,7 +48,7 @@ table{border-collapse:collapse;width:100%}th{font-size:9px;color:var(--muted);te
 </style>
 </head>
 <body><main>
-<header><div class="brand"><div class="logo">↕</div><div><div class="title">Polymarket BTC Binary · Paper Bot</div><div class="subtitle">BTC five-minute UP/DOWN · first-fill side lock · simulated execution</div></div></div><div><span class="badge" id="mode">DEMO ONLY</span><div class="subtitle" id="fresh">Connecting…</div></div></header>
+<header><div class="brand"><div class="logo">↕</div><div><div class="title">Polymarket BTC Binary · Paper Bot</div><div class="subtitle">BTC five-minute UP/DOWN · two-rung maker strategy · simulated execution</div></div></div><div><span class="badge" id="mode">DEMO ONLY</span><div class="subtitle" id="fresh">Connecting…</div></div></header>
 <div class="error" id="error"></div>
 <section class="cards">
   <div class="card"><div class="label">Demo starting capital</div><div class="value" id="capital">—</div><div class="small">No wallet attached</div></div>
@@ -69,20 +69,20 @@ table{border-collapse:collapse;width:100%}th{font-size:9px;color:var(--muted);te
     <div class="panelhead"><div><div class="eyebrow">Current five-minute window</div><h2 id="market">Waiting for market</h2></div><div class="meta"><span class="pill" id="windowStatus">Starting</span><div id="timeLeft" style="margin-top:6px">— remaining</div></div></div>
     <div class="progress"><i id="progress"></i></div>
     <div class="side-grid" id="quotes"></div>
-   <div class="small" id="windowNote">Gamma is used only for market metadata; prices and paper close outcomes use Polymarket CLOB quotes.</div>
+   <div class="small" id="windowNote">Gamma is used only for market metadata; quotes and paper close outcomes use Polymarket CLOB data.</div>
   </article>
   <article class="panel">
     <div class="eyebrow">Confirmed rules</div><h2>Polymarket-only demo strategy</h2>
     <div class="rule-grid" style="margin-top:11px">
-      <div class="rule"><b>$1,000 shared demo capital</b><p>Both $0.30 entry orders use the same paper cash pool. The first side to receive any fill locks the window and cancels the opposite order.</p></div>
-      <div class="rule"><b>10-share base · shared 1.4× martingale</b><p>One loss increases the next window’s target to 14 shares, then 19.6, and so on. A profitable win resets the shared target to 10; an unfilled window changes nothing.</p></div>
-      <div class="rule"><b>Paired $0.30 limit buys</b><p>When the market is found, post one limit order on UP and one on DOWN, each for the current target size, with 250ms modeled arrival. A marketable order only consumes visible asks at or below $0.30; otherwise it rests and can fill only from eligible public SELL prints at or below the limit, with visible queue estimated. Partial fills count as the first fill and cancel the other side.</p></div>
-      <div class="rule"><b>Take profit · $0.99 trigger → $1.00 paper credit</b><p>A resting paper TP sell uses the existing 250ms modeled delay and public BUY prints. Once the $0.99 TP is reached and modeled filled, proceeds are credited at the requested $1.00 per share; no exit fee is charged.</p></div>
-      <div class="rule"><b>No stop loss</b><p>No stop or forced pre-expiry sale. Unclosed shares remain open through the window close.</p></div>
-      <div class="rule"><b>CLOB close-price paper outcome</b><p>In the final 3 seconds, a bid above $0.98 wins; otherwise the higher bid wins. Missing quotes fall back to the latest in-window bid, then a deterministic tie-break. This is not official settlement.</p></div>
+       <div class="rule"><b>$1,000 shared demo capital</b><p>UP/DOWN share one cash pool. The $0.30 rung posts both sides; the first partial or full fill cancels the opposite order. The $0.70 rung posts just one order after one side signals.</p></div>
+       <div class="rule"><b>Low rung · $0.30 · 10 shares</b><p>Post-only limits on both sides fill at exactly $0.30 only after a later public SELL print walks through the order. Low-rung losses increase its next size by 1.4×; it has no stop.</p></div>
+       <div class="rule"><b>High rung · $0.70 signal and entry</b><p>After a low-rung win, pause the low rung. Wait for a fresh side bid of $0.70+, then place one post-only limit at exactly $0.70 for 30 shares. A first loss arms one 100-share retry; a second loss returns to the low rung.</p></div>
+       <div class="rule"><b>Take profit · $0.99 → $1.00 paper credit</b><p>Both rungs use a post-only TP and require a later public BUY print. Maker entry/TP fees are zero; modeled maker rebates are credited to paper cash and P&amp;L.</p></div>
+       <div class="rule"><b>High-rung stop · $0.30 best bid</b><p>Only the $0.70 rung has a stop. At a fresh bid of $0.30 or below, remaining shares are paper-sold at the observed bid and charged the modeled taker fee.</p></div>
+       <div class="rule"><b>CLOB close-price paper outcome</b><p>At the final 3 seconds, a bid above $0.98 wins; otherwise the higher bid wins. Fallbacks keep paper positions from remaining pending. This is not official settlement.</p></div>
     </div>
-    <div class="tags"><span class="tag" id="entryLimit">LIMIT BUY · $0.30 · FIRST FILL LOCK</span><span class="tag" id="tpLimit">TP $0.99 → $1.00 PAPER CREDIT</span><span class="tag" id="martingale">SHARED MARTINGALE · —</span><span class="tag">DEMO ONLY · NO LIVE ORDERS</span></div>
-    <div class="notice">Paper-only: no orders are sent to Polymarket. A limit order that crosses the ask at modeled arrival pays the existing per-level taker fee (shares × 0.07 × price × (1-price)); passive SELL-print fills have no modeled entry fee and estimate visible queue only. Book depth and public prints cannot confirm a real fill. The $0.99 TP’s $1.00/share credit is a requested paper-accounting convention, not the venue’s sale price. Rebate estimates remain separate from cash/equity/P&amp;L. At close, CLOB bids provide an internal $1/$0 proxy, not official settlement.</div>
+     <div class="tags"><span class="tag" id="entryLimit">LOW RUNG · POST-ONLY LIMIT $0.30</span><span class="tag" id="tpLimit">TP $0.99 → $1.00 · HIGH STOP $0.30</span><span class="tag" id="martingale">ACTIVE RUNG · —</span><span class="tag">DEMO ONLY · NO LIVE ORDERS</span></div>
+     <div class="notice">Paper-only: no orders are sent to Polymarket. Visible asks never create entry fills; a resting order needs a later public SELL print through its exact $0.30/$0.70 limit. Maker entry/TP fees are zero. The modeled 20%-of-fee-equivalent rebate is credited to this paper ledger but is not actual venue earnings. Only the high-rung stop pays a taker fee. CLOB close bids are an internal $1/$0 proxy, not official settlement.</div>
   </article>
 </section>
 <section class="panel">
@@ -91,7 +91,7 @@ table{border-collapse:collapse;width:100%}th{font-size:9px;color:var(--muted);te
 </section>
 <section class="panel">
   <div class="panelhead"><div><div class="eyebrow">Completed cycles</div><h2>Trade history</h2></div><span class="small" id="tradeCount">0 trades</span></div>
-   <div class="tablewrap" id="trades"></div><div class="small">Marketable limit fills use visible asks at or below $0.30; resting fills are inferred from public SELL prints with an estimated queue. The $0.99 TP uses modeled 250ms arrival and public BUY prints, then credits $1/share in this demo. Rebate estimates are illustrative only, not actual earnings, and excluded from cash/equity/P&amp;L.</div>
+   <div class="tablewrap" id="trades"></div><div class="small">Entry and TP fills use post-only price-walkthrough paper rules. Maker rebate credits are included in demo equity/P&amp;L under the configured simulation assumption; actual venue payouts can differ.</div>
 </section>
 <section class="panel">
   <div class="panelhead"><div><div class="eyebrow">Bot activity</div><h2>Recent events</h2></div><span class="small" id="uptime">Uptime —</span></div>
@@ -156,7 +156,7 @@ function render(s){
    $('cashNote').textContent='No entry cash reserved · '+usd(account.cash)+' cash';
   $('drawdown').textContent='Peak drawdown '+usd(account.maxDrawdown);
   const pnl=account.totalPnl;$('pnl').textContent=finite(pnl)?(Number(pnl)>=0?'+':'')+usd(pnl):'—';$('pnl').className='value '+pnlTone(pnl);
-  $('record').innerHTML='Realized '+pnlHtml(stats.realizedPnl)+' · Open '+pnlHtml(account.unrealizedPnl)+' · <span class="score win">'+(Number(stats.wins)||0)+' W</span> <span class="score loss">'+(Number(stats.losses)||0)+' L</span> · fees '+usd(stats.estimatedFees)+' · rebate est. '+usd(stats.estimatedMakerRebate)+' <span class="small">(not cash)</span>';
+   $('record').innerHTML='Realized '+pnlHtml(stats.realizedPnl)+' · Open '+pnlHtml(account.unrealizedPnl)+' · <span class="score win">'+(Number(stats.wins)||0)+' W</span> <span class="score loss">'+(Number(stats.losses)||0)+' L</span> · fees '+usd(stats.estimatedFees)+' · maker rebate credited '+usd(stats.makerRebateCredited);
   const error=$('error');if(s.error||s.executionHalt){error.textContent=s.error||'Execution is blocked';error.className='error show'}else error.className='error';
   $('market').textContent=w.slug||'Waiting for active market';$('windowStatus').textContent=String(w.status||'starting').replace(/_/g,' ');
   $('windowStatus').className='pill'+(w.closed?'':(s.pending||[]).length?' good':'');
@@ -166,31 +166,47 @@ function render(s){
      const r=w.closeResolution,b=r.bids||{};
      $('windowNote').textContent='Paper close outcome: '+r.winner+' won · final bids UP '+px(b.UP)+' / DOWN '+px(b.DOWN)+' · '+String(r.source||'').replace(/_/g,' ').toLowerCase()+'. Not official Polymarket settlement.';
    }else{
-     $('windowNote').textContent='Gamma supplies market metadata only; CLOB bids set the paper close outcome. At close, final-three-second quotes are used, with deterministic fallbacks so positions never remain pending.';
+      $('windowNote').textContent=w.rungAtOpen==='HIGH'
+        ?'HIGH RUNG: waiting for one fresh best bid at $0.70+, then one exact $0.70 post-only buy ('+(Number(w.highRungAttemptAtOpen)===2?'100':'30')+' shares). Low rung is paused.'
+        :'LOW RUNG: paired exact $0.30 post-only buys; first fill locks the side and preserves its 1.4× loss progression. CLOB bids decide the paper close.';
    }
-   $('entryLimit').textContent='LIMIT BUY · '+px(cfg.entryLimitPrice)+' · FIRST FILL LOCK';
-   $('tpLimit').textContent='TP '+px(cfg.takeProfitBid)+' → '+px(cfg.takeProfitCreditPerShare)+' PAPER CREDIT · NO SL';
+    $('entryLimit').textContent=w.rungAtOpen==='HIGH'
+      ?'HIGH RUNG · BID ≥ '+px(cfg.highRungSignalBid)+' · LIMIT '+px(cfg.highRungLimitPrice)
+      :'LOW RUNG · POST-ONLY LIMIT '+px(cfg.entryLimitPrice)+' · FIRST FILL LOCK';
+    $('tpLimit').textContent='TP '+px(cfg.takeProfitBid)+' → '+px(cfg.takeProfitCreditPerShare)+' · HIGH STOP '+px(cfg.highRungStopLossBid);
    const mg=s.martingale||{};
-   $('martingale').textContent='SHARED STREAK '+Number(mg.lossStreak||0)+' · NEXT '+qty(mg.nextShares)+' SHARES · '+Number(cfg.martingaleMultiplier||0)+'×';
+    $('martingale').textContent=mg.activeRung==='HIGH'
+      ?'HIGH RUNG · ATTEMPT '+Number(mg.highRungAttempt||1)+' · NEXT '+qty(mg.nextShares)+' SHARES'
+      :'LOW RUNG · LOSS STREAK '+Number(mg.lossStreak||0)+' · NEXT '+qty(mg.nextShares)+' SHARES · '+Number(cfg.martingaleMultiplier||0)+'×';
   const sides=w.sides||{},sideCards=[];
   for(const sideName of ['UP','DOWN']){
     const side=sides[sideName]||{},quote=side.quote||{},tranche=(side.tranches||[])[0]||{};
-    const state=String(tranche.state||'—').replace(/_/g,' ');
+     const state=String(w.rungAtOpen==='HIGH'&&!tranche.entryOrder
+       ?(w.entrySignalSide&&w.entrySignalSide!==sideName?'not selected':'waiting for high rung signal')
+       :(tranche.state||'—')).replace(/_/g,' ');
     const order=tranche.entryOrder||{},position=tranche.position||{};
-     const statusTone=state==='in position'||state==='partially filled'?'good':state==='waiting for market'||state==='entry window missed'?'warn':'';
+      const statusTone=state==='in position'||state==='partially filled'||state==='high rung limit resting'?'good':state==='waiting for market'||state==='waiting for high rung signal'||state==='high rung watching fill'?'warn':'';
+     const sideCaption=w.entryWinnerSide===sideName?'window locked':w.entryWinnerSide?'cancelled':w.rungAtOpen==='HIGH'?(w.entrySignalSide===sideName?'triggered side':w.entrySignalSide?'not selected':'waiting signal'):'paired maker';
+     const displayTarget=order.targetShares??tranche.targetShares??(w.rungAtOpen==='HIGH'
+       ?(w.entrySignalSide===sideName?side.nextShares:null):side.nextShares);
+     const displayOrderStatus=order.status|| (w.rungAtOpen==='HIGH'
+       ?(w.entrySignalSide&&w.entrySignalSide!==sideName?'not selected':'waiting for $0.70 signal')
+       :'waiting for market');
     const sideClass=sideName==='UP'?'up':'down';
     const stat=(label,value)=>'<div class="side-stat"><span class="side-stat-label">'+label+'</span><span class="side-stat-value">'+value+'</span></div>';
     sideCards.push('<article class="side-card '+sideClass+'">'
-       +'<div class="side-card-head"><div class="side-heading"><span class="side-name '+(sideName==='UP'?'side-up':'side-down')+'">'+sideName+'</span><span class="side-caption">'+(w.entryWinnerSide===sideName?'window locked':w.entryWinnerSide?'cancelled': 'paired order')+'</span></div><span class="pill '+statusTone+'">'+esc(state)+'</span></div>'
+        +'<div class="side-card-head"><div class="side-heading"><span class="side-name '+(sideName==='UP'?'side-up':'side-down')+'">'+sideName+'</span><span class="side-caption">'+esc(sideCaption)+'</span></div><span class="pill '+statusTone+'">'+esc(state)+'</span></div>'
       +'<div class="side-quotes"><div class="quote-box"><span class="quote-label">Best bid</span><span class="quote-value">'+px(quote.bid)+'</span></div><div class="quote-box"><span class="quote-label">Best ask</span><span class="quote-value">'+px(quote.ask)+'</span></div></div>'
       +'<div class="side-stats">'
        +stat('Entry type',esc(order.orderType||'—'))
-        +stat('Order',esc(String(order.status||'waiting for market').replace(/_/g,' ')))
-       +stat('Target / filled',qty(order.targetShares??tranche.targetShares??side.nextShares)+' / '+qty(order.filledShares))
+         +stat('Order',esc(String(displayOrderStatus).replace(/_/g,' ')))
+        +stat('Target / filled',qty(displayTarget)+' / '+qty(order.filledShares))
        +stat('Average fill',px(order.averagePrice))
        +stat('Paper entry cost',usd(order.totalCost))
       +stat('Average entry',px(position.entryPrice))
+       +stat('Rung / attempt',esc(position.rung||w.rungAtOpen||'—')+' / '+(Number(position.rungAttempt)||Number(w.highRungAttemptAtOpen)||'—'))
        +stat('TP / paper credit',px(position.takeProfitPrice||cfg.takeProfitBid)+' / '+px(cfg.takeProfitCreditPerShare||1))
+       +(position.rung==='HIGH'?stat('Stop / fee type',px(cfg.highRungStopLossBid)+' / taker'):'')
       +stat('TP order',esc(String((position.takeProfitOrder||{}).status||'not placed').replace(/_/g,' ')))
       +stat('Open shares',qty(position.openShares||0))
       +stat('Loss streak',String(Number(side.lossStreak)||0))
@@ -198,9 +214,9 @@ function render(s){
   }
   $('quotes').innerHTML=sideCards.join('');
    const pending=s.pending||[];$('openCount').textContent=pending.length+' open position'+(pending.length===1?'':'s');
-   $('positions').innerHTML=pending.length?'<table><thead><tr><th>Side</th><th>Tranche</th><th>Cycle</th><th>Entry avg.</th><th>TP</th><th>Shares open</th><th>Best bid mark</th><th>Status</th><th class="right">Unrealized</th></tr></thead><tbody>'+pending.map(p=>'<tr><td class="'+(p.side==='UP'?'side-up':'side-down')+'">'+esc(p.side)+'</td><td>'+esc(p.trancheId)+'</td><td>'+Number(p.cycle)+'</td><td>'+px(p.entryPrice)+'</td><td>'+px(p.takeProfitPrice)+'</td><td>'+qty(p.openShares)+'</td><td>'+px(p.mark)+'</td><td>'+esc(p.status)+'</td><td class="right">'+pnlHtml(p.unrealized)+'</td></tr>').join('')+'</tbody></table>':'<div class="empty">No open positions</div>';
+    $('positions').innerHTML=pending.length?'<table><thead><tr><th>Side</th><th>Rung</th><th>Attempt</th><th>Entry avg.</th><th>TP</th><th>Stop</th><th>Shares open</th><th>Best bid mark</th><th>Status</th><th class="right">Unrealized</th></tr></thead><tbody>'+pending.map(p=>'<tr><td class="'+(p.side==='UP'?'side-up':'side-down')+'">'+esc(p.side)+'</td><td>'+esc(p.rung||'LOW')+'</td><td>'+Number(p.rungAttempt||1)+'</td><td>'+px(p.entryPrice)+'</td><td>'+px(p.takeProfitPrice)+'</td><td>'+(p.rung==='HIGH'?px(cfg.highRungStopLossBid):'—')+'</td><td>'+qty(p.openShares)+'</td><td>'+px(p.mark)+'</td><td>'+esc(p.status)+'</td><td class="right">'+pnlHtml(p.unrealized)+'</td></tr>').join('')+'</tbody></table>':'<div class="empty">No open positions</div>';
   const trades=s.trades||[];$('tradeCount').textContent=trades.length+' shown';
-    $('trades').innerHTML=trades.length?'<table><thead><tr><th>Time</th><th>Side</th><th>Shares</th><th>Entry avg.</th><th>Paper exit avg.</th><th>Paper proceeds</th><th>Fees</th><th>Rebate est. (not credited)</th><th>Result</th><th class="right">Net P&amp;L</th></tr></thead><tbody>'+trades.map(t=>'<tr><td>'+time(t.ts)+'</td><td class="'+(t.side==='UP'?'side-up':'side-down')+'">'+esc(t.side)+'</td><td>'+qty(t.shares)+'</td><td>'+px(t.entryPrice)+'</td><td>'+px(t.exitPrice)+'</td><td>'+usd(t.netExitProceeds)+'</td><td>'+usd(t.fees)+'</td><td>'+usd(t.estimatedMakerRebate)+'</td><td>'+esc(t.reason==='CLOB_CLOSE_PRICE'?'CLOB PAPER '+(t.resolutionOutcome||'')+' @ $'+Number(t.resolutionPricePerShare).toFixed(2):'PAPER '+t.reason)+'</td><td class="right">'+pnlHtml(t.pnl)+'</td></tr>').join('')+'</tbody></table>':'<div class="empty">No completed positions yet</div>';
+     $('trades').innerHTML=trades.length?'<table><thead><tr><th>Time</th><th>Side</th><th>Rung</th><th>Attempt</th><th>Shares</th><th>Entry avg.</th><th>Paper exit avg.</th><th>Paper proceeds</th><th>Fees</th><th>Maker rebate credited</th><th>Result</th><th class="right">Net P&amp;L</th></tr></thead><tbody>'+trades.map(t=>'<tr><td>'+time(t.ts)+'</td><td class="'+(t.side==='UP'?'side-up':'side-down')+'">'+esc(t.side)+'</td><td>'+esc(t.rung||'LOW')+'</td><td>'+Number(t.rungAttempt||1)+'</td><td>'+qty(t.shares)+'</td><td>'+px(t.entryPrice)+'</td><td>'+px(t.exitPrice)+'</td><td>'+usd(t.netExitProceeds)+'</td><td>'+usd(t.fees)+'</td><td>'+usd(t.makerRebateCredited??t.estimatedMakerRebate)+'</td><td>'+esc(t.reason==='CLOB_CLOSE_PRICE'?'CLOB PAPER '+(t.resolutionOutcome||'')+' @ $'+Number(t.resolutionPricePerShare).toFixed(2):'PAPER '+t.reason)+'</td><td class="right">'+pnlHtml(t.pnl)+'</td></tr>').join('')+'</tbody></table>':'<div class="empty">No completed positions yet</div>';
   $('uptime').textContent='Uptime '+clock(s.uptimeSec||0);
   const logs=s.log||[];$('log').innerHTML=logs.length?logs.slice(0,35).map(x=>'<div class="logrow"><span class="logtime">'+time(x.ts)+'</span><span class="logevent">'+esc(x.event)+'</span><span>'+esc(x.note)+'</span></div>').join(''):'<div class="empty">Waiting for bot events</div>';
 }

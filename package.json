@@ -2,7 +2,7 @@
   "name": "polymarket-first-fill-paper-demo",
   "version": "1.0.0",
   "private": true,
-  "description": "Demo-only Polymarket BTC 5-minute paired $0.30 limit bot with first-fill cancellation and shared martingale.",
+  "description": "Demo-only Polymarket BTC 5-minute two-rung post-only strategy with paper maker-rebate credits.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
