@@ -7,13 +7,13 @@ async function main() {
     return;
   }
 
-  const Bot = require('./arb-bot');
+  const Bot = require('./wick-bot');
   const startServer = require('./server');
-  const bot = new Bot({ predictApiKey: process.env.PREDICT_API_KEY });
+  const bot = new Bot();
   bot.start();
   startServer(bot, process.env.PORT || 3000);
 
-  console.log('MODE: DEMO -- cross-venue non-crypto paper arbitrage only; no live order code is loaded.');
+  console.log('MODE: DEMO -- Polymarket BTC 15m wick strategy only; no live order code is loaded.');
 }
 
 main().catch((e) => {

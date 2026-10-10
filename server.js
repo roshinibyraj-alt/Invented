@@ -4,7 +4,7 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const INDEX_HTML = fs.readFileSync(path.join(__dirname, 'public', 'arb.html'));
+const INDEX_HTML = fs.readFileSync(path.join(__dirname, 'public', 'wick.html'));
 
 function startServer(bot, port) {
   const server = http.createServer((req, res) => {

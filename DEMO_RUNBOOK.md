@@ -1,12 +1,10 @@
-# Demo arbitrage runbook
+# Demo runbook
 
-1. Keep `LIVE_TRADING` unset; the project contains no live order executor.
-2. In Railway Variables, configure `PREDICT_API_KEY` server-side. Never paste it in the dashboard or source.
-3. Run `npm test`, then `npm start`.
-4. Check `/api/healthz` and `/api/state`. A missing key or market API failure appears as an error; the dashboard and Railway logs must not show the key.
-5. The scanner refreshes venue markets every 60 seconds and cycles 24 exact-title binary matches every 10 seconds.
-6. It only records a paper pair when both visible ask books contain 500 shares and the estimated all-in edge is at least $0.03 per share, within the shared $10,000 cash balance.
+1. Keep `LIVE_TRADING` unset. There is no live order execution or wallet-signing code.
+2. Confirm Railway starts with `node index.js`.
+3. Check `/api/healthz` and `/api/state`; confirm mode is `DEMO ONLY`, market is the active BTC 15-minute Polymarket window, and Kraken candle refreshes are current.
+4. Review the dashboard's adaptive threshold, similar-candle count, RSI, 1-hour bias, hour block, previous close boundary, confirmation state, and entry ask.
+5. A signal may chase within the same window only at asks up to $0.65 and only with full visible depth for 300 shares.
+6. Positions are held to official Polymarket settlement; unresolved results remain pending and do not create realized P&L.
 
-## Limits
-
-Crypto is excluded by title/category/description/tag keywords. The current scanner only handles exact-title, two-outcome markets with recognized outcome labels and Predict YES/NO book semantics. It intentionally skips markets it cannot map safely. Cross-venue resolution rules may differ; open trades remain pending and do not count as realized profit.
+Railway redeploys or restarts reset the in-memory $10,000 demo balance and paper history.

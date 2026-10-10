@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BTC Wick Bot · Demo</title>
+<style>
+:root{color-scheme:dark;--bg:#080c14;--panel:#121a28;--line:#27364d;--muted:#92a1b7;--text:#eef4ff;--green:#34d399;--red:#fb7185;--gold:#fbbf24;--cyan:#67e8f9}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 15% 0,#1a2a47 0,transparent 45%),var(--bg);color:var(--text);font:14px system-ui,sans-serif}main{max-width:1100px;margin:auto;padding:20px}.head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:16px}.title{font-size:24px;font-weight:850}.muted,.sub{color:var(--muted)}.sub{margin-top:4px}.pill{border:1px solid #215844;background:#10281f;color:var(--green);padding:7px 12px;border-radius:99px;font-weight:800}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:11px}.card,.panel{background:linear-gradient(145deg,#151f30,#101723);border:1px solid var(--line);border-radius:15px;padding:15px}.label{font-size:10px;text-transform:uppercase;letter-spacing:.12em;color:var(--muted)}.value{font-size:22px;font-weight:800;margin-top:7px}.panel{margin-top:12px}.panel h2{font-size:16px;margin:0 0 12px}.cols{display:grid;grid-template-columns:1fr 1fr;gap:12px}.notice{margin:12px 0;padding:12px;border-left:3px solid var(--gold);background:#292313;color:#f7e4b2;border-radius:9px;line-height:1.5}.metric{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--line);gap:10px}.metric:last-child{border:0}.good{color:var(--green)}.bad{color:var(--red)}.gold{color:var(--gold)}.events{max-height:230px;overflow:auto}.event{border-bottom:1px solid var(--line);padding:8px 0;font-size:12px}.time{color:var(--muted);margin-right:7px}.empty{color:var(--muted);padding:12px 0}.err{color:var(--red);white-space:pre-wrap}.small{font-size:11px;line-height:1.5;color:var(--muted)}@media(max-width:700px){main{padding:13px}.grid{grid-template-columns:repeat(2,1fr)}.cols{grid-template-columns:1fr}.title{font-size:20px}}@media(max-width:430px){.head{align-items:flex-start;flex-direction:column}.value{font-size:19px}.card{padding:12px}}
+</style></head><body><main>
+<header class="head"><div><div class="title">BTC 15-minute Wick Bot</div><div class="sub">Adaptive wick signals · paper trading only</div></div><span class="pill" id="status">CONNECTING</span></header>
+<section class="grid">
+<div class="card"><div class="label">Demo bankroll</div><div class="value" id="capital">—</div></div>
+<div class="card"><div class="label">Available cash</div><div class="value" id="cash">—</div></div>
+<div class="card"><div class="label">Open positions</div><div class="value" id="open">—</div></div>
+<div class="card"><div class="label">Size per window</div><div class="value">300 shares</div></div>
+</section>
+<div class="notice">Signal: lower-wick rejection → UP; upper-wick rejection → DOWN. Wick thresholds adapt to the historical 15-minute candle distribution and comparable hour-slot / RSI conditions. Chasing is allowed only when the current ask is at or below $0.65. One paper entry per window; positions hold to official Polymarket settlement.</div>
+<div class="err" id="error"></div>
+<section class="cols">
+<div class="panel"><h2>Current window & adaptive context</h2><div id="context" class="empty">Waiting for market and candles…</div></div>
+<div class="panel"><h2>Wick evaluation</h2><div id="signals" class="empty">No setup evaluated yet.</div></div>
+</section>
+<section class="panel"><h2>Paper positions</h2><div id="positions" class="empty">No positions.</div></section>
+<section class="panel"><h2>Bot events</h2><div id="events" class="events"></div></section>
+<p class="small">Signal candles use public Kraken XBT/USD 1-minute data aggregated into 15-minute and 1-hour context. Polymarket’s official result determines settlement. Differences between the signal feed and the venue’s resolution reference can affect outcomes. No live orders are sent; demo state resets if the service restarts.</p>
+</main>
+<script>
+const esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const usd=x=>'$'+Number(x||0).toFixed(2),fmt=x=>Number.isFinite(Number(x))?Number(x).toFixed(3):'—',when=x=>x?new Date(x).toLocaleTimeString():'—';
+function metric(k,v){return `<div class="metric"><span class="muted">${esc(k)}</span><b>${esc(v)}</b></div>`}
+async function refresh(){try{const r=await fetch('/api/state?ts='+Date.now(),{cache:'no-store'}),s=await r.json(),a=s.scanner?.analysis;
+document.querySelector('#status').textContent=String(s.status||'unknown').replaceAll('_',' ').toUpperCase();
+document.querySelector('#capital').textContent=usd(s.account?.capital);document.querySelector('#cash').textContent=usd(s.account?.cash);document.querySelector('#open').textContent=s.account?.openPositions??0;document.querySelector('#error').textContent=s.error||'';
+document.querySelector('#context').innerHTML=s.window?metric('Market',s.window.title)+metric('UTC window',new Date(s.window.start).toISOString()+' – '+new Date(s.window.end).toISOString())+metric('15m hour block',a?`Block ${a.slot+1} of 4`:'—')+metric('Previous 15m close',a?fmt(a.previousClose):'—')+metric('ATR / RSI',a?`${fmt(a.atr)} / ${fmt(a.rsi)}`:'Warming up')+metric('1h bias / similar candles',a?`${a.hourBias} / ${a.similarCount}`:'—')+metric('Market slug',s.window.slug):'Waiting for active Polymarket BTC 15m window…';
+document.querySelector('#signals').innerHTML=a?.candidates?.length?a.candidates.map(x=>`<div class="metric"><span>${x.kind==='lower'?'Lower wick → UP':'Upper wick → DOWN'}<br><small class="muted">Wick ${fmt(x.normalized)} ATR · threshold ${fmt(x.threshold)} · score ${fmt(x.score)}</small></span><b class="${x.confirmed?'good':'muted'}">${x.confirmed?(x.entryType==='CHASE'?'CHASE':'CONFIRMED'):x.boundaryOk?'WAIT':'BLOCKED: prior close'}</b></div>`).join(''):`<div class="empty">${esc(a?.reason||'Waiting for valid wick + reversal confirmation.')}</div>`;
+const ps=s.positions||[];document.querySelector('#positions').innerHTML=ps.length?ps.map(p=>`<div class="metric"><span><b>${esc(p.side)} · ${esc(p.wick)} wick</b><br><small class="muted">${esc(p.title)} · ${p.shares} shares · ${esc(p.entryType)}</small></span><b class="${p.realizedPnl>0?'good':p.realizedPnl<0?'bad':''}">${esc(p.status)}<br>${p.realizedPnl==null?'':usd(p.realizedPnl)}</b></div>`).join(''):'<div class="empty">No paper positions yet.</div>';
+document.querySelector('#events').innerHTML=(s.events||[]).slice(0,20).map(e=>`<div class="event"><span class="time">${when(e.ts)}</span><b>${esc(e.event)}</b> ${esc(e.side||e.note||'')}</div>`).join('')||'<div class="empty">No events yet.</div>';
+}catch(e){document.querySelector('#error').textContent='Dashboard data unavailable: '+e.message}}
+refresh();setInterval(refresh,3000);
+</script></body></html>

@@ -1,33 +1,29 @@
-# Cross-Venue Arbitrage Paper Bot
+# BTC 15-minute Wick Demo Bot
 
-Invented is now a **demo-only** scanner for open binary markets on Polymarket and Predict.fun. It excludes markets whose title, category, description, or tags identify crypto.
+This replaces the previous cross-venue arbitrage strategy. It is a **Polymarket-only, paper-trading** bot for the BTC 15-minute UP/DOWN markets. It sends no orders; market data is read-only.
 
-## Strategy
+## Current rules
 
-- Shared simulated bankroll: **$10,000**.
-- Each paper arbitrage requires **500 shares on each venue**.
-- It compares both complementary directions and qualifies only when the visible asks cover both 500-share legs and the estimated **after-fee edge is at least $0.03/share**.
-- Market matching is deliberately strict: exact normalized title plus the same two binary outcome labels. Unmatched, multi-outcome, stale/error, or unrecognized Predict orderbooks are skipped rather than guessed.
-- Current scanner cycles through 24 matched pairs every 10 seconds and refreshes market discovery every 60 seconds.
-- Open paper pairs remain pending until both venue outcomes can be verified. Their cost is removed from available demo cash; no unrealized estimate is reported as realized P&L.
+- Demo bankroll: $10,000; one position at most per 15-minute window; 300 shares.
+- Lower-wick rejection maps to UP; upper-wick rejection maps to DOWN.
+- A wick is unusual relative to recent 15-minute candles. The threshold is the 75th percentile of normalized wick sizes for similar observations: same 15-minute block of the UTC hour and RSI band when there are at least 12 samples; otherwise it falls back to that hour block, then the full sample.
+- Confirmation requires a 50% retrace from the candle extreme and the latest one-minute close moving in the reversal direction. The wick extreme must not cross the previous 15-minute candle's close.
+- Missed signals are latched and may be chased during that same window, but only if the full 300-share paper fill is available at asks no higher than $0.65/share. Insufficient depth or a higher ask means no entry.
+- Open positions are held to the official Polymarket market result. P&L is realized only when the market result is confirmed.
 
-## Data and safety
+## Inputs and caveats
 
-Polymarket market discovery uses Gamma and its public CLOB ask books. Predict.fun uses its read-only `/v1/markets` and market orderbook endpoints. The Predict API key is read only from the server-side `PREDICT_API_KEY` environment variable; set it in Railway Variables, never in client code. No API key is returned by `/api/state`, dashboard HTML, or logs.
+Signal candles use Kraken XBT/USD one-minute OHLC, aggregated into 15-minute and one-hour context; RSI is computed from completed 15-minute closes. Kraken and Polymarket's official resolution reference can differ. Polymarket CLOB asks model the paper entry, and Polymarket market outcomes settle it. The dashboard labels this basis risk. The 15-minute hour block, RSI, hourly direction, comparable-candle count, wick/ATR, and signal score are visible for inspection.
 
-The bot has no wallet, signing, authentication-for-orders, or order-writing path. `LIVE_TRADING=true` is rejected at startup. Orders and balances are simulated only.
+The wick threshold is adaptive and explainable, not a guarantee of predictive accuracy. The current 75th-percentile and confirmation rules are initial model choices; judge them with out-of-sample paper results. Unresolved official market results remain pending and are not counted as wins or losses.
 
-The $0.03 threshold is a model, not guaranteed arbitrage. Book depth can disappear; venue market wording, rules, fee schedules, and settlement may differ. Predict taker fees are modeled using the base fee curve; Polymarket fees use the rate advertised in market metadata and default to zero when metadata does not advertise a rate. Exact-title matching may miss valid opportunities and cannot prove identical resolution rules. Open pairs are not settled or credited until verified resolution handling is available.
+Demo state is kept in memory and resets on process restart. Do not treat paper fills or results as actual trading performance.
 
-Demo state is in memory and resets to $10,000 on process restart. Do not interpret paper fills or modeled edges as real execution or expected profit.
-
-## Run and test
+## Run
 
 ```sh
 npm test
 npm start
 ```
 
-Dashboard: `/` · State: `/api/state` · Health: `/api/healthz`.
-
-Railway retains the existing `node index.js` startup command. Configure `PREDICT_API_KEY` as a server-side Railway variable for Predict.fun reads.
+Dashboard: `/` · State: `/api/state` · Health: `/api/healthz`. Railway retains its existing `node index.js` start command.
