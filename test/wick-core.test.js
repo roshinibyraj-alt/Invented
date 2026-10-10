@@ -54,3 +54,11 @@ test('paper BTC taker fee and official outcome settlement are applied',()=>{
   assert.equal(_test.payout(settled,'DOWN'),0);
   assert.equal(_test.payout({closed:true,outcomes:['Up','Down'],outcomePrices:['.5','.5']},'UP'),null);
 });
+
+test('live CLOB quote selects highest bid and lowest ask with visible sizes',()=>{
+  const q=_test.quoteFromBook({bids:[{price:'0.42',size:'8'},{price:'0.46',size:'3'}],
+    asks:[{price:'0.55',size:'4'},{price:'0.51',size:'7'}]},1234);
+  assert.equal(q.bestBid,.46);assert.equal(q.bidSize,3);
+  assert.equal(q.bestAsk,.51);assert.equal(q.askSize,7);
+  assert.equal(q.updatedAt,1234);assert.equal(q.status,'LIVE');
+});

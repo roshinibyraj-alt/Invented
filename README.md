@@ -26,4 +26,4 @@ npm test
 npm start
 ```
 
-Dashboard: `/` · State: `/api/state` · Health: `/api/healthz`. Railway retains its existing `node index.js` start command.
+The dashboard shows live Polymarket UP and DOWN best bids/asks with visible size and quote age, plus the three latest completed Kraken 15-minute candles. Dashboard: `/` · State: `/api/state` · Health: `/api/healthz`. Railway retains its existing `node index.js` start command.

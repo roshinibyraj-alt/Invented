@@ -2,10 +2,17 @@
 
 const cfg=require('./config');
 const md=require('./wick-market-data');
-const {detectWick}=require('./wick-core');
+const {detectWick,aggregate}=require('./wick-core');
 
 function levels(xs){return (xs||[]).map(x=>({price:Number(x.price),size:Number(x.size)}))
   .filter(x=>Number.isFinite(x.price)&&x.size>0).sort((a,b)=>a.price-b.price)}
+function quoteFromBook(book,updatedAt){
+  const bids=levels(book.bids),asks=levels(book.asks);
+  const bid=bids.sort((a,b)=>b.price-a.price)[0]||null;
+  const ask=asks[0]||null;
+  return {status:bid||ask?'LIVE':'MISSING',bestBid:bid?.price??null,bidSize:bid?.size??0,
+    bestAsk:ask?.price??null,askSize:ask?.size??0,updatedAt,stale:false,error:null};
+}
 function payout(m,side){
   const outcomes=Array.isArray(m.outcomes)?m.outcomes:parse(m.outcomes);
   const prices=Array.isArray(m.outcomePrices)?m.outcomePrices:parse(m.outcomePrices);
@@ -37,11 +44,16 @@ class WickBot{
     this.cash=cfg.DEMO_CAPITAL;this.positions=[];this.events=[];this.status='starting';
     this.error=null;this.market=null;this.candles=[];this.signal=null;this.lastMarketAt=0;
     this.lastCandlesAt=0;this.lastScanAt=null;this.signals={};this.traded={};this.running=false;
+    this.quoteWindowStart=null;this.liveQuotes={UP:{status:'MISSING'},DOWN:{status:'MISSING'}};
   }
   log(event,data={}){const e={ts:Date.now(),event,...data};this.events.unshift(e);this.events.length=Math.min(100,this.events.length);console.log('[wick] '+JSON.stringify(e))}
   async tick(){
     try{
       const now=Date.now(),start=Math.floor(now/cfg.WINDOW_MS)*cfg.WINDOW_MS;
+      if(this.quoteWindowStart!==start){
+        this.quoteWindowStart=start;
+        this.liveQuotes={UP:{status:'MISSING'},DOWN:{status:'MISSING'}};
+      }
       if(!this.market||this.market.start!==start||now-this.lastMarketAt>cfg.MARKET_REFRESH_MS){
         this.market=await md.getBtc15Market(start);this.lastMarketAt=now;
         if(!this.market){
@@ -53,6 +65,7 @@ class WickBot{
       if(!this.candles.length||now-this.lastCandlesAt>cfg.CANDLE_REFRESH_MS){
         this.candles=await md.getMinuteCandles();this.lastCandlesAt=now;
       }
+      await this.refreshLiveQuotes(now);
       const analysis=detectWick({minuteCandles:this.candles,now,windowStart:start});
       this.analysis=analysis;this.lastScanAt=now;this.error=null;
       for(const p of this.positions){
@@ -73,6 +86,21 @@ class WickBot{
       if(!this.lastHeartbeat||now-this.lastHeartbeat>30000){this.lastHeartbeat=now;this.log('HEARTBEAT',{cash:this.cash,windowStart:start})}
     }catch(e){this.status='blocked_or_error';this.error=e.message;
       if(this.lastError!==e.message||Date.now()-this.lastErrorAt>30000){this.lastError=e.message;this.lastErrorAt=Date.now();this.log('SCAN_ERROR',{note:e.message})}}
+  }
+  async refreshLiveQuotes(now){
+    if(!this.market)return;
+    const sides=['UP','DOWN'];
+    const results=await Promise.allSettled(sides.map(side=>md.getBook(this.market.tokens[side])));
+    sides.forEach((side,i)=>{
+      const result=results[i];
+      if(result.status==='fulfilled')this.liveQuotes[side]=quoteFromBook(result.value,now);
+      else{
+        const previous=this.liveQuotes[side]||{};
+        const stale=previous.updatedAt?now-previous.updatedAt>10000:true;
+        this.liveQuotes[side]={...previous,status:previous.updatedAt?(stale?'STALE':'LIVE'):'ERROR',stale,
+          attemptedAt:now,error:result.reason?.message||'Order book unavailable'};
+      }
+    });
   }
   async tryEnter(start,signal){
     if(Date.now()>=start+cfg.WINDOW_MS||this.traded[start])return;
@@ -100,6 +128,8 @@ class WickBot{
     }catch(e){p.status='PENDING_OFFICIAL_RESULT';this.status='awaiting_official_result';}
   }
   snapshot(){
+    const prior=this.market?aggregate(this.candles,cfg.WINDOW_MS)
+      .filter(x=>x.t<this.market.start).slice(-3):[];
     return {now:Date.now(),mode:'DEMO ONLY',status:this.status,error:this.error,
       strategy:{market:'Polymarket BTC 15-minute UP/DOWN',capital:cfg.DEMO_CAPITAL,
         sharesPerWindow:cfg.SHARES_PER_WINDOW,maxEntryAsk:cfg.MAX_ENTRY_ASK,
@@ -107,8 +137,11 @@ class WickBot{
       account:{capital:cfg.DEMO_CAPITAL,cash:this.cash,realizedPnl:this.positions.reduce((s,p)=>s+(p.realizedPnl||0),0),
         openPositions:this.positions.filter(p=>p.status==='OPEN'||p.status==='PENDING_OFFICIAL_RESULT').length},
       window:this.market?{title:this.market.title,slug:this.market.slug,start:this.market.start,end:this.market.end}:null,
+      livePrices:{marketSlug:this.market?.slug||null,updatedAt:Math.max(this.liveQuotes.UP.updatedAt||0,this.liveQuotes.DOWN.updatedAt||0)||null,
+        UP:this.liveQuotes.UP,DOWN:this.liveQuotes.DOWN},
       scanner:{lastScanAt:this.lastScanAt,candleSource:'Kraken XBT/USD 1m; signal candles aggregated to 15m and 1h',
-        marketResolution:'Polymarket official outcome',analysis:this.analysis||null,latchedSignal:this.signals[this.market?.start]||null},
+        marketResolution:'Polymarket official outcome',analysis:this.analysis||null,
+        previousCandles:prior,latchedSignal:this.signals[this.market?.start]||null},
       positions:this.positions.slice(0,50),events:this.events};
   }
   start(){if(this.running)return;this.running=true;this.log('BOT_STARTED',{note:'Demo-only BTC 15m wick strategy; no live orders.'});
@@ -117,4 +150,4 @@ class WickBot{
   stop(){this.running=false;clearTimeout(this.timer)}
 }
 module.exports=WickBot;
-module.exports._test={sweep,feeFor,payout};
+module.exports._test={sweep,feeFor,payout,quoteFromBook};
