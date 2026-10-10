@@ -93,7 +93,7 @@ class ArbBot {
   }
 
   async scanPair(pair) {
-    const feeRate = pair.poly.raw.takerFeeRate ?? pair.poly.raw.feeRate;
+    const feeRate = pair.poly.raw.takerFeeRate ?? pair.poly.raw.feeRate ?? pair.poly.raw.feeSchedule?.rate;
     if (pair.poly.raw.feesEnabled === true
       && (feeRate == null || !Number.isFinite(Number(feeRate)) || Number(feeRate) < 0)) {
       this.log('PAIR_SKIPPED_UNKNOWN_POLY_FEE', { title: pair.title });
@@ -132,7 +132,8 @@ class ArbBot {
       predictFee: (p, q) => 0.02 * Math.min(p, 1 - p) * q,
       polyFee: (p, q) => {
         const rate = Number(feeRate ?? 0);
-        return Math.max(0, rate) * p * (1 - p) * q;
+        const exponent = Number(pair.poly.raw.feeSchedule?.exponent ?? 1);
+        return Math.max(0, rate) * Math.pow(p * (1 - p), exponent) * q;
       },
     });
     for (const opportunity of opportunities) {

@@ -12,11 +12,18 @@ async function json(url, options = {}) {
 
 async function getPolymarketMarkets() {
   const all = [];
-  for (let offset = 0; offset < 5000; offset += 100) {
-    const data = await json(`${GAMMA}/markets?active=true&closed=false&limit=100&offset=${offset}`);
+  let cursor = '';
+  const seenCursors = new Set();
+  for (let page = 0; page < 100; page++) {
+    const url = `${GAMMA}/markets/keyset?active=true&closed=false&limit=100${cursor
+      ? `&after_cursor=${encodeURIComponent(cursor)}` : ''}`;
+    const data = await json(url);
     const rows = Array.isArray(data) ? data : data.markets || [];
     all.push(...rows);
-    if (rows.length < 100) break;
+    const next = data.next_cursor || '';
+    if (!next || !rows.length || seenCursors.has(next)) break;
+    seenCursors.add(next);
+    cursor = next;
   }
   return all;
 }
