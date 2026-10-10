@@ -1,8 +1,8 @@
 {
-  "name": "polymarket-first-fill-paper-demo",
+  "name": "cross-venue-paper-arbitrage",
   "version": "1.0.0",
   "private": true,
-  "description": "Demo-only Polymarket BTC 5-minute two-rung post-only strategy with paper maker-rebate credits.",
+  "description": "Demo-only Polymarket and Predict.fun non-crypto binary market arbitrage scanner.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
@@ -11,7 +11,5 @@
   "engines": {
     "node": ">=18"
   },
-  "dependencies": {
-    "ws": "^8.18.0"
-  }
+  "dependencies": {}
 }

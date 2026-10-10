@@ -7,16 +7,13 @@ async function main() {
     return;
   }
 
-  const Bot = require('./bot');
+  const Bot = require('./arb-bot');
   const startServer = require('./server');
-  const DemoTrader = require('./demo-trader');
-  const trader = new DemoTrader();
-
-  const bot = new Bot(trader, { logger: console });
+  const bot = new Bot({ predictApiKey: process.env.PREDICT_API_KEY });
   bot.start();
   startServer(bot, process.env.PORT || 3000);
 
-  console.log('MODE: DEMO -- public CLOB ask-depth market-entry simulation and post-only TP paper fills; no live order code is loaded.');
+  console.log('MODE: DEMO -- cross-venue non-crypto paper arbitrage only; no live order code is loaded.');
 }
 
 main().catch((e) => {

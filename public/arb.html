@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cross-Venue Arb · Demo</title>
+<style>
+:root{color-scheme:dark;--bg:#090d15;--panel:#111827;--line:#263247;--muted:#8d9bb0;--text:#eef4ff;--green:#39d59a;--red:#ff6b7d;--amber:#ffc45c;--blue:#72adff}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 20% 0,#1a2a44 0,transparent 50%),var(--bg);color:var(--text);font:14px system-ui,-apple-system,Segoe UI,sans-serif}main{max-width:1200px;margin:auto;padding:22px}.head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:18px}.title{font-size:24px;font-weight:800;letter-spacing:-.03em}.subtitle,.muted{color:var(--muted)}.pill{border:1px solid #234b3d;background:#12271f;color:var(--green);padding:7px 12px;border-radius:99px;font-weight:700}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.card,.panel{background:linear-gradient(140deg,rgba(22,32,49,.97),rgba(13,19,30,.97));border:1px solid var(--line);border-radius:16px;padding:16px;box-shadow:0 12px 30px #0003}.label{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted)}.value{font-size:23px;font-weight:800;margin-top:6px}.good{color:var(--green)}.warn{color:var(--amber)}.bad{color:var(--red)}.panel{margin-top:14px}.panel h2{font-size:17px;margin:0 0 12px}.notice{border-left:3px solid var(--amber);padding:10px 12px;background:#2a2114;color:#e8d5ad;border-radius:8px;margin-top:12px}.table-wrap{overflow:auto}table{border-collapse:collapse;width:100%;min-width:720px}th,td{text-align:left;border-bottom:1px solid var(--line);padding:11px 9px;vertical-align:top}th{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}td{font-size:12px}.empty{text-align:center;color:var(--muted);padding:24px}.event{padding:9px 0;border-bottom:1px solid var(--line);font-size:12px}.time{color:var(--muted);margin-right:8px}.error{color:var(--red);white-space:pre-wrap}.foot{font-size:11px;color:var(--muted);line-height:1.55}@media(max-width:800px){main{padding:14px}.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.title{font-size:20px}}@media(max-width:450px){.head{align-items:flex-start;flex-direction:column}.value{font-size:20px}.card{padding:12px}}
+</style>
+</head>
+<body><main>
+<header class="head"><div><div class="title">Cross-Venue Arbitrage</div><div class="subtitle">Non-crypto binary markets · simulation only</div></div><span class="pill" id="status">CONNECTING</span></header>
+<section class="grid">
+<div class="card"><div class="label">Demo capital</div><div class="value" id="capital">—</div></div>
+<div class="card"><div class="label">Available cash</div><div class="value" id="cash">—</div></div>
+<div class="card"><div class="label">Matched pairs</div><div class="value" id="matched">—</div></div>
+<div class="card"><div class="label">Minimum edge</div><div class="value good">$0.03 / share</div></div>
+</section>
+<div class="notice">Each paper opportunity buys 500 shares on each venue, only when the visible books cover both legs and estimated all-in edge meets $0.03/share. Markets are matched by exact normalized title and binary outcome labels. Similar titles are not treated as equivalent. No real orders are sent.</div>
+<div class="error" id="error"></div>
+<section class="panel"><h2>Open paper pairs</h2><div class="table-wrap"><table><thead><tr><th>Market</th><th>Direction</th><th>Shares / leg</th><th>Edge / share</th><th>Cost incl. modeled fees</th><th>Status</th></tr></thead><tbody id="positions"><tr><td colspan="6" class="empty">Waiting for scan</td></tr></tbody></table></div></section>
+<section class="panel"><h2>Scanner health</h2><div class="foot" id="health">Starting…</div></section>
+<section class="panel"><h2>Recent events</h2><div id="events"></div></section>
+<p class="foot">Demo bankroll resets to $10,000 on process restart. Open pairs remain pending; no profit is realized until both source markets report official outcomes. The $0.03 edge is a paper estimate, not a guaranteed arbitrage: market matching, fee schedules, depth, and settlement rules can differ across venues.</p>
+</main>
+<script>
+const esc=x=>String(x==null?'':x).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const usd=x=>'$'+Number(x||0).toFixed(2);const ts=x=>x?new Date(x).toLocaleTimeString(): '—';
+async function refresh(){try{const r=await fetch('/api/state?ts='+Date.now(),{cache:'no-store'}),s=await r.json();document.querySelector('#status').textContent=String(s.status||'UNKNOWN').replaceAll('_',' ').toUpperCase();document.querySelector('#capital').textContent=usd(s.account?.capital);document.querySelector('#cash').textContent=usd(s.account?.cash);document.querySelector('#matched').textContent=Number(s.scanner?.matchedPairs||0);document.querySelector('#error').textContent=s.error||'';document.querySelector('#health').textContent=`${s.strategy?.marketScope||''} · ${s.scanner?.processedPairs||0} candidates cycled · last scan ${ts(s.scanner?.lastScanAt)} · ${s.strategy?.sharesPerLeg||500} shares per leg · key ${s.error?.includes('PREDICT_API_KEY')?'missing':'server-side'}`;const ps=s.positions||[];document.querySelector('#positions').innerHTML=ps.length?ps.map(p=>`<tr><td>${esc(p.title)}</td><td>${esc(p.direction)}</td><td>${p.shares}</td><td>$${Number(p.edgePerShare).toFixed(4)}</td><td>${usd(p.cost)}</td><td>${esc(p.status)}</td></tr>`).join(''):'<tr><td colspan="6" class="empty">No qualifying pairs yet</td></tr>';document.querySelector('#events').innerHTML=(s.events||[]).slice(0,20).map(e=>`<div class="event"><span class="time">${ts(e.ts)}</span><b>${esc(e.event)}</b> ${esc(e.title||e.note||'')}</div>`).join('')||'<div class="muted">No events yet</div>';}catch(e){document.querySelector('#error').textContent='Dashboard state unavailable: '+e.message}}refresh();setInterval(refresh,3000);
+</script></body></html>
