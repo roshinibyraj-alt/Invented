@@ -8,7 +8,7 @@ This replaces the previous cross-venue arbitrage strategy. It is a **Polymarket-
 - Lower-wick rejection maps to UP; upper-wick rejection maps to DOWN.
 - A wick is unusual relative to recent 15-minute candles. The threshold is the 75th percentile of normalized wick sizes for similar observations: same 15-minute block of the UTC hour and RSI band when there are at least 12 samples; otherwise it falls back to that hour block, then the full sample.
 - Confirmation requires a 50% retrace from the candle extreme and the latest one-minute close moving in the reversal direction. The wick extreme must not cross the previous 15-minute candle's close.
-- Missed signals are latched and may be chased during that same window, but only if the full 300-share paper fill is available at asks no higher than $0.65/share. Insufficient depth or a higher ask means no entry.
+- Missed signals are latched and may be chased during that same window, but only if the full 300-share paper fill is available at asks from $0.05 through $0.60/share. Insufficient depth or asks outside that band mean no entry.
 - Open positions are held to the official Polymarket market result. P&L is realized only when the market result is confirmed.
 
 ## Inputs and caveats

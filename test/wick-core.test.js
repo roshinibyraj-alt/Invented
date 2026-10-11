@@ -41,10 +41,12 @@ test('wick detector maps a confirmed lower rejection to UP and permits a latched
   assert.equal(result.signal?.entryType,'CHASE');
 });
 
-test('paper entry requires full 300-share depth at or below the ask ceiling',()=>{
-  assert.equal(_test.sweep([{price:.60,size:300}],300,.65).cost,180);
-  assert.equal(_test.sweep([{price:.66,size:300}],300,.65),null);
-  assert.equal(_test.sweep([{price:.60,size:299}],300,.65),null);
+test('paper entry requires full depth within the $0.05-$0.60 ask band',()=>{
+  assert.equal(_test.sweep([{price:.60,size:300}],300,.60,.05).cost,180);
+  assert.equal(_test.sweep([{price:.05,size:300}],300,.60,.05).cost,15);
+  assert.equal(_test.sweep([{price:.049,size:300}],300,.60,.05),null);
+  assert.equal(_test.sweep([{price:.61,size:300}],300,.60,.05),null);
+  assert.equal(_test.sweep([{price:.60,size:299}],300,.60,.05),null);
 });
 
 test('paper BTC taker fee and official outcome settlement are applied',()=>{

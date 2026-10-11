@@ -23,9 +23,10 @@ function payout(m,side){
   return p>=.99?1:p<=.01?0:null;
 }
 function parse(x){if(typeof x==='string'){try{return JSON.parse(x)}catch(_){}}return []}
-function sweep(asks,qty,maxPrice){
+function sweep(asks,qty,maxPrice,minPrice=cfg.MIN_ENTRY_ASK){
   let left=qty,cost=0;
   for(const x of levels(asks)){
+    if(x.price<minPrice)continue;
     if(x.price>maxPrice)break;
     const take=Math.min(left,x.size);cost+=take*x.price;left-=take;
     if(left<1e-8)break;
@@ -105,7 +106,7 @@ class WickBot{
   async tryEnter(start,signal){
     if(Date.now()>=start+cfg.WINDOW_MS||this.traded[start])return;
     const token=this.market.tokens[signal.side],book=await md.getBook(token);
-    const fill=sweep(book.asks,cfg.SHARES_PER_WINDOW,cfg.MAX_ENTRY_ASK);
+    const fill=sweep(book.asks,cfg.SHARES_PER_WINDOW,cfg.MAX_ENTRY_ASK,cfg.MIN_ENTRY_ASK);
     if(!fill){this.status='signal_waiting_for_ask_or_depth';return}
     const fee=feeFor(this.market.raw,fill.avg,fill.shares),total=fill.cost+fee;
     if(total>this.cash){this.status='insufficient_demo_cash';return}
@@ -132,7 +133,7 @@ class WickBot{
       .filter(x=>x.t<this.market.start).slice(-3):[];
     return {now:Date.now(),mode:'DEMO ONLY',status:this.status,error:this.error,
       strategy:{market:'Polymarket BTC 15-minute UP/DOWN',capital:cfg.DEMO_CAPITAL,
-        sharesPerWindow:cfg.SHARES_PER_WINDOW,maxEntryAsk:cfg.MAX_ENTRY_ASK,
+         sharesPerWindow:cfg.SHARES_PER_WINDOW,minEntryAsk:cfg.MIN_ENTRY_ASK,maxEntryAsk:cfg.MAX_ENTRY_ASK,
         exit:'Hold to official market settlement',execution:'PAPER ONLY'},
       account:{capital:cfg.DEMO_CAPITAL,cash:this.cash,realizedPnl:this.positions.reduce((s,p)=>s+(p.realizedPnl||0),0),
         openPositions:this.positions.filter(p=>p.status==='OPEN'||p.status==='PENDING_OFFICIAL_RESULT').length},
