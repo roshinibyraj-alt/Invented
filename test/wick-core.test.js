@@ -10,30 +10,45 @@ test('aggregates one-minute bars into quarter-hour and hourly slots',()=>{
   assert.deepEqual(bars[0],{t:0,o:10,h:13,l:9,c:12,v:5});
 });
 
-function sampleWindow(previous,current){
+function sampleWindow(previous,current,windowMs=900000){
   const minute=[];
-  for(let j=0;j<15;j++)minute.push({t:j*60000,...previous,v:1});
-  minute.push({t:900000,...current,v:1});
-  return detectMoveLadder({minuteCandles:minute,windowStart:900000});
+  for(let j=0;j<windowMs/60000;j++)minute.push({t:j*60000,...previous,v:1});
+  minute.push({t:windowMs,...current,v:1});
+  return detectMoveLadder({minuteCandles:minute,windowStart:windowMs,windowMs,sharesByLevel:{25:200,50:100}});
 }
 
-test('red previous candle and 50% rise trigger both 100-share DOWN rungs',()=>{
+test('red previous candle and 50% rise trigger 200- and 100-share DOWN rungs',()=>{
   const a=sampleWindow({o:100,h:110,l:90,c:95},{o:95,h:106,l:95,c:105});
-  assert.equal(a.previousColor,'red');assert.equal(a.previousRange,20);
+  assert.equal(a.previousColor,'red');assert.equal(a.previousBody,5);
   assert.equal(a.side,'DOWN');assert.equal(a.observedMove,10);
-  assert.deepEqual(a.rungs.map(r=>[r.levelPct,r.shares,r.crossed]),[[25,100,true],[50,100,true]]);
+  assert.deepEqual(a.rungs.map(r=>[r.levelPct,r.shares,r.crossed]),[[25,200,true],[50,100,true]]);
 });
 
 test('green previous candle and 25% fall triggers only the UP 25% rung',()=>{
-  const a=sampleWindow({o:100,h:110,l:90,c:105},{o:105,h:105,l:99,c:99});
+  const a=sampleWindow({o:100,h:110,l:90,c:105},{o:105,h:105,l:103,c:103.5});
   assert.equal(a.previousColor,'green');assert.equal(a.side,'UP');
-  assert.equal(a.observedMove,6);
+  assert.equal(a.previousBody,5);assert.equal(a.observedMove,1.5);
   assert.deepEqual(a.rungs.map(r=>r.crossed),[true,false]);
 });
 
 test('doji has no side and cannot trigger either rung',()=>{
   const a=sampleWindow({o:100,h:110,l:90,c:100},{o:100,h:111,l:100,c:111});
   assert.equal(a.side,null);assert.deepEqual(a.rungs.map(r=>r.crossed),[false,false]);
+});
+
+test('five-minute windows use previous open-close body and independent rung sizes',()=>{
+  const a=sampleWindow({o:100,h:110,l:90,c:96},{o:96,h:98,l:96,c:98},300000);
+  assert.equal(a.previousBody,4);
+  assert.deepEqual(a.rungs.map(r=>[r.requiredMove,r.shares,r.crossed]),[[1,200,true],[2,100,true]]);
+});
+
+test('five- and fifteen-minute bot instances have fully separate cash and positions',()=>{
+  const MultiBot=require('../multi-bot'),bots=new MultiBot();
+  const five=bots.bots['5m'],fifteen=bots.bots['15m'];
+  assert.notEqual(five,fifteen);assert.equal(five.cash,10000);assert.equal(fifteen.cash,10000);
+  five.cash-=25;assert.equal(fifteen.cash,10000);
+  assert.equal(bots.snapshot().account.capital,20000);
+  assert.equal(bots.snapshot().timeframes['5m'].strategy.sharesByLevel[25],200);
 });
 
 test('paper entry requires full depth within the $0.05-$0.60 ask band',()=>{

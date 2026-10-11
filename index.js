@@ -7,13 +7,13 @@ async function main() {
     return;
   }
 
-  const Bot = require('./wick-bot');
+  const Bot = require('./multi-bot');
   const startServer = require('./server');
   const bot = new Bot();
   bot.start();
   startServer(bot, process.env.PORT || 3000);
 
-  console.log('MODE: DEMO -- Polymarket BTC 15m candle-move strategy only; no live order code is loaded.');
+  console.log('MODE: DEMO -- independent Polymarket BTC 5m and 15m candle-move strategies; no live order code is loaded.');
 }
 
 main().catch((e) => {

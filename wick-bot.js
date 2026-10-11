@@ -41,22 +41,23 @@ function feeFor(m,avg,qty){
 }
 
 class WickBot{
-  constructor(){
-    this.cash=cfg.DEMO_CAPITAL;this.positions=[];this.events=[];this.status='starting';
+  constructor({timeframe='15m',windowMs=cfg.WINDOW_MS,capital=cfg.DEMO_CAPITAL_15M}={}){
+    this.timeframe=timeframe;this.windowMs=windowMs;this.capital=capital;this.cash=capital;
+    this.positions=[];this.events=[];this.status='starting';
     this.error=null;this.market=null;this.candles=[];this.lastMarketAt=0;
     this.lastCandlesAt=0;this.lastScanAt=null;this.rungState={};this.running=false;
     this.quoteWindowStart=null;this.liveQuotes={UP:{status:'MISSING'},DOWN:{status:'MISSING'}};
   }
-  log(event,data={}){const e={ts:Date.now(),event,...data};this.events.unshift(e);this.events.length=Math.min(100,this.events.length);console.log('[wick] '+JSON.stringify(e))}
+  log(event,data={}){const e={ts:Date.now(),timeframe:this.timeframe,event,...data};this.events.unshift(e);this.events.length=Math.min(100,this.events.length);console.log('[wick] '+JSON.stringify(e))}
   async tick(){
     try{
-      const now=Date.now(),start=Math.floor(now/cfg.WINDOW_MS)*cfg.WINDOW_MS;
+      const now=Date.now(),start=Math.floor(now/this.windowMs)*this.windowMs;
       if(this.quoteWindowStart!==start){
         this.quoteWindowStart=start;
         this.liveQuotes={UP:{status:'MISSING'},DOWN:{status:'MISSING'}};
       }
       if(!this.market||this.market.start!==start||now-this.lastMarketAt>cfg.MARKET_REFRESH_MS){
-        this.market=await md.getBtc15Market(start);this.lastMarketAt=now;
+        this.market=await md.getBtcMarket(start,this.windowMs);this.lastMarketAt=now;
         if(!this.market){
           this.status='waiting_for_market';this.lastScanAt=now;
           if(!this.lastHeartbeat||now-this.lastHeartbeat>30000){this.lastHeartbeat=now;this.log('HEARTBEAT',{status:this.status,windowStart:start})}
@@ -67,12 +68,12 @@ class WickBot{
         this.candles=await md.getMinuteCandles();this.lastCandlesAt=now;
       }
       await this.refreshLiveQuotes(now);
-      const analysis=detectMoveLadder({minuteCandles:this.candles,windowStart:start,
-        levelsPct:cfg.TRIGGER_LEVELS_PCT,sharesPerTrigger:cfg.SHARES_PER_TRIGGER});
+      const analysis=detectMoveLadder({minuteCandles:this.candles,windowStart:start,windowMs:this.windowMs,
+        levelsPct:cfg.TRIGGER_LEVELS_PCT,sharesByLevel:cfg.SHARES_BY_LEVEL});
       this.analysis=analysis;this.lastScanAt=now;this.error=null;
       for(const p of this.positions){
         if((p.status==='OPEN'||p.status==='PENDING_OFFICIAL_RESULT')
-          &&now>=p.windowStart+cfg.WINDOW_MS
+          &&now>=p.windowStart+this.windowMs
           &&now-(p.lastSettlementAttempt||0)>=15000) await this.trySettle(p);
       }
       if(analysis.ready){
@@ -113,22 +114,24 @@ class WickBot{
     });
   }
   async tryEnter(start,trigger){
-    if(Date.now()>=start+cfg.WINDOW_MS)return;
+    if(Date.now()>=start+this.windowMs)return;
     const key=String(trigger.levelPct),state=this.rungState[start];
     const token=this.market.tokens[trigger.side],book=await md.getBook(token);
     const fill=sweep(book.asks,trigger.shares,cfg.MAX_ENTRY_ASK,cfg.MIN_ENTRY_ASK);
     if(!fill){state.blocks[key]=`Need ${trigger.shares} shares at asks from $${cfg.MIN_ENTRY_ASK.toFixed(2)} to $${cfg.MAX_ENTRY_ASK.toFixed(2)}`;return}
     const fee=feeFor(this.market.raw,fill.avg,fill.shares),total=fill.cost+fee;
     if(total>this.cash){state.blocks[key]='Insufficient demo cash';return}
-    const p={id:`${start}-${trigger.side}-${trigger.levelPct}`,windowStart:start,marketId:this.market.id,slug:this.market.slug,
+    const p={id:`${this.timeframe}-${start}-${trigger.side}-${trigger.levelPct}`,timeframe:this.timeframe,
+      windowMs:this.windowMs,windowStart:start,marketId:this.market.id,slug:this.market.slug,
       title:this.market.title,side:trigger.side,triggerPct:trigger.levelPct,entryType:'CANDLE_MOVE',shares:fill.shares,
       avgEntry:fill.avg,cost:fill.cost,fees:fee,totalCost:total,status:'OPEN',openedAt:Date.now(),
-      observedMove:trigger.observedMove,requiredMove:trigger.requiredMove,previousRange:trigger.previousRange};
+      observedMove:trigger.observedMove,requiredMove:trigger.requiredMove,previousBody:trigger.previousBody};
     this.cash-=total;this.positions.unshift(p);state.filled[key]=p.id;delete state.blocks[key];this.status='position_open';
-    this.log('PAPER_MOVE_ENTRY',{id:p.id,side:p.side,levelPct:p.triggerPct,shares:p.shares,avgEntry:p.avgEntry,cost:p.totalCost});
+    this.log('PAPER_MOVE_ENTRY',{timeframe:this.timeframe,id:p.id,side:p.side,levelPct:p.triggerPct,
+      shares:p.shares,entryPrice:p.avgEntry,avgEntry:p.avgEntry,cost:p.totalCost});
   }
   async trySettle(p){
-    if(Date.now()<p.windowStart+cfg.WINDOW_MS)return;
+    if(Date.now()<p.windowStart+(p.windowMs||this.windowMs))return;
     p.lastSettlementAttempt=Date.now();
     try{
       const m=await md.getMarket(p.marketId),won=payout(m,p.side);
@@ -139,24 +142,24 @@ class WickBot{
     }catch(e){p.status='PENDING_OFFICIAL_RESULT';this.status='awaiting_official_result';}
   }
   snapshot(){
-    const prior=this.market?aggregate(this.candles,cfg.WINDOW_MS)
+    const prior=this.market?aggregate(this.candles,this.windowMs)
       .filter(x=>x.t<this.market.start).slice(-3):[];
     return {now:Date.now(),mode:'DEMO ONLY',status:this.status,error:this.error,
-       strategy:{market:'Polymarket BTC 15-minute UP/DOWN',capital:cfg.DEMO_CAPITAL,
-         sharesPerTrigger:cfg.SHARES_PER_TRIGGER,maxTriggersPerWindow:cfg.TRIGGER_LEVELS_PCT.length,
+       strategy:{timeframe:this.timeframe,market:`Polymarket BTC ${this.windowMs/60000}-minute UP/DOWN`,capital:this.capital,
+         sharesByLevel:cfg.SHARES_BY_LEVEL,maxTriggersPerWindow:cfg.TRIGGER_LEVELS_PCT.length,
          triggerLevelsPct:cfg.TRIGGER_LEVELS_PCT,minEntryAsk:cfg.MIN_ENTRY_ASK,maxEntryAsk:cfg.MAX_ENTRY_ASK,
         exit:'Hold to official market settlement',execution:'PAPER ONLY'},
-      account:{capital:cfg.DEMO_CAPITAL,cash:this.cash,realizedPnl:this.positions.reduce((s,p)=>s+(p.realizedPnl||0),0),
+       account:{capital:this.capital,cash:this.cash,realizedPnl:this.positions.reduce((s,p)=>s+(p.realizedPnl||0),0),
         openPositions:this.positions.filter(p=>p.status==='OPEN'||p.status==='PENDING_OFFICIAL_RESULT').length},
       window:this.market?{title:this.market.title,slug:this.market.slug,start:this.market.start,end:this.market.end}:null,
       livePrices:{marketSlug:this.market?.slug||null,updatedAt:Math.max(this.liveQuotes.UP.updatedAt||0,this.liveQuotes.DOWN.updatedAt||0)||null,
         UP:this.liveQuotes.UP,DOWN:this.liveQuotes.DOWN},
-       scanner:{lastScanAt:this.lastScanAt,candleSource:'Kraken XBT/USD 1m; current 15m move compared with previous completed 15m candle',
+       scanner:{timeframe:this.timeframe,lastScanAt:this.lastScanAt,candleSource:`Kraken XBT/USD 1m; ${this.windowMs/60000}m current move compared with previous completed window`,
         marketResolution:'Polymarket official outcome',analysis:this.analysis||null,
          previousCandles:prior,rungState:this.rungState[this.market?.start]||null},
       positions:this.positions.slice(0,50),events:this.events};
   }
-  start(){if(this.running)return;this.running=true;this.log('BOT_STARTED',{note:'Demo-only BTC 15m candle-move ladder; no live orders.'});
+  start(){if(this.running)return;this.running=true;this.log('BOT_STARTED',{timeframe:this.timeframe,note:`Demo-only BTC ${this.windowMs/60000}m candle-move ladder; no live orders.`});
     const loop=async()=>{if(!this.running)return;await this.tick();if(this.running)this.timer=setTimeout(loop,cfg.POLL_INTERVAL_MS)};
     void loop();}
   stop(){this.running=false;clearTimeout(this.timer)}

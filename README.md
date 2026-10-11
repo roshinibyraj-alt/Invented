@@ -1,23 +1,17 @@
-# BTC 15-minute Candle-Move Demo Bot
+# BTC 5m + 15m Candle-Move Demo Bots
 
-This replaces the previous cross-venue arbitrage strategy. It is a **Polymarket-only, paper-trading** bot for the BTC 15-minute UP/DOWN markets. It sends no orders; market data is read-only.
+Polymarket-only, paper-trading BTC UP/DOWN bots. The 5-minute and 15-minute bots run independently: each has its own market/window, trigger state, paper positions, and $10,000 demo bankroll ($20,000 combined). No order placement or wallet execution code is used.
 
-## Current rules
+## Strategy (both timeframes)
 
-- Demo bankroll: $10,000; at most two 100-share entries per 15-minute window.
-- Compare the previous completed 15-minute candle with the forming current candle. Previous candle size is its full high-low range; measure current move from the previous candle close.
-- If the previous candle is red and current price rises from that close by 25% of the previous range, trigger a 100-share DOWN entry. At 50%, trigger a second 100-share DOWN entry. If price jumps directly past 50%, both rungs trigger.
-- Mirror rule: if the previous candle is green and current price falls from that close by 25% or 50% of its range, trigger 100-share UP entries at each rung.
-- Each rung triggers at most once per window. A triggered rung remains eligible for a paper fill during the window while the full 100-share depth is available at asks from $0.05 through $0.60/share. No fill occurs outside that band or with insufficient depth.
-- Open positions are held to the official Polymarket market result. P&L is realized only when the market result is confirmed.
+- Compare each active window with the immediately previous completed window of the same duration.
+- Previous candle direction is close versus open. Candle body size is `abs(previous close - previous open)`. Measure the current window's live move from the previous close.
+- Previous candle red + current move upward: buy DOWN. Previous candle green + current move downward: buy UP. Doji: no signal.
+- At 25% of the prior body, trigger 200 shares. At 50%, trigger a separate 100 shares. If the live move jumps past 50%, both rungs trigger.
+- Each rung triggers once per window. Paper fills require full visible ask depth within $0.05-$0.60/share; otherwise the triggered rung retries while its window remains open. Entries are depth-priced and use the existing fee model.
+- Positions settle only from Polymarket's official market outcome. Each timeframe's P&L and cash are tracked separately.
 
-## Inputs and caveats
-
-Signal prices use Kraken XBT/USD one-minute OHLC aggregated into 15-minute candles. Kraken and Polymarket's official resolution reference can differ. Polymarket CLOB asks model the paper entry, and Polymarket market outcomes settle it.
-
-This candle-move rule is a simple paper strategy, not a guarantee of predictive accuracy. Unresolved official market results remain pending and are not counted as wins or losses.
-
-Demo state is kept in memory and resets on process restart. Do not treat paper fills or results as actual trading performance.
+Signal candles use Kraken XBT/USD one-minute OHLC aggregated independently into five- and fifteen-minute windows. Kraken's reference may differ from Polymarket's official resolution source. Paper state is in memory and resets if the service restarts. The dashboard shows each bankroll, live UP/DOWN quotes, thresholds, and entry price in both position and event logs.
 
 ## Run
 
@@ -26,4 +20,4 @@ npm test
 npm start
 ```
 
-The dashboard shows live Polymarket UP and DOWN best bids/asks with visible size and quote age, plus the three latest completed Kraken 15-minute candles. Dashboard: `/` · State: `/api/state` · Health: `/api/healthz`. Railway retains its existing `node index.js` start command.
+Dashboard: `/` · State: `/api/state` · Health: `/api/healthz`. Railway's existing `node index.js` start command remains valid.

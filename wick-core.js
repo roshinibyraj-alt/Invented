@@ -16,14 +16,14 @@ function aggregate(candles, intervalMs) {
   return [...groups.values()];
 }
 
-function detectMoveLadder({minuteCandles,windowStart,levelsPct=[25,50],sharesPerTrigger=100}) {
+function detectMoveLadder({minuteCandles,windowStart,windowMs=900000,levelsPct=[25,50],sharesByLevel={25:100,50:100}}) {
   const minutes=minuteCandles.map(toCandle).sort((a,b)=>a.t-b.t);
-  const bars15=aggregate(minutes,900000);
-  const history=bars15.filter(x=>x.t<windowStart);
-  const current=bars15.find(x=>x.t===windowStart);
-  if(!history.length||!current)return {ready:false,reason:'Waiting for previous and current 15-minute candles'};
+  const bars=aggregate(minutes,windowMs);
+  const history=bars.filter(x=>x.t<windowStart);
+  const current=bars.find(x=>x.t===windowStart);
+  if(!history.length||!current)return {ready:false,reason:`Waiting for previous and current ${windowMs/60000}-minute candles`};
   const previous=history[history.length-1];
-  const previousRange=Math.max(0,previous.h-previous.l);
+  const previousBody=Math.abs(previous.c-previous.o);
   const previousColor=previous.c<previous.o?'red':previous.c>previous.o?'green':'doji';
   const signedMove=current.c-previous.c;
   const expectedMove=previousColor==='red'?'up':previousColor==='green'?'down':null;
@@ -31,11 +31,11 @@ function detectMoveLadder({minuteCandles,windowStart,levelsPct=[25,50],sharesPer
   const observedMove=expectedMove==='up'?Math.max(0,signedMove)
     :expectedMove==='down'?Math.max(0,-signedMove):0;
   const rungs=levelsPct.map(levelPct=>({
-    levelPct,shares:sharesPerTrigger,side,expectedMove,previousRange,
-    requiredMove:previousRange*levelPct/100,
-    observedMove,crossed:Boolean(side)&&observedMove>=previousRange*levelPct/100
+    levelPct,shares:Number(sharesByLevel[levelPct]??100),side,expectedMove,previousBody,
+    requiredMove:previousBody*levelPct/100,
+    observedMove,crossed:Boolean(side)&&observedMove>=previousBody*levelPct/100
   }));
-  return {ready:true,windowStart,previousClose:previous.c,previousRange,previousColor,
+  return {ready:true,windowStart,previousClose:previous.c,previousBody,previousColor,
     expectedMove,side,signedMove,observedMove,previous,current,rungs,
     reason:previousColor==='doji'?'Previous candle is a doji; no trigger side selected':null};
 }
