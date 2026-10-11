@@ -2,51 +2,46 @@
 
 const test=require('node:test');
 const assert=require('node:assert/strict');
-const {aggregate,rsi,hourSlot,detectWick}=require('../wick-core');
+const {aggregate,detectMoveLadder}=require('../wick-core');
 const { _test }=require('../wick-bot');
 
 test('aggregates one-minute bars into quarter-hour and hourly slots',()=>{
   const bars=aggregate([{t:0,o:10,h:12,l:9,c:11,v:2},{t:60000,o:11,h:13,l:10,c:12,v:3}],900000);
   assert.deepEqual(bars[0],{t:0,o:10,h:13,l:9,c:12,v:5});
-  assert.equal(hourSlot(45*60000),3);
 });
 
-test('RSI handles rising, falling, and flat series',()=>{
-  assert.equal(rsi(Array.from({length:15},(_,i)=>i)),100);
-  assert.equal(rsi(Array.from({length:15},(_,i)=>15-i)),0);
-  assert.equal(rsi(Array(15).fill(10)),50);
+function sampleWindow(previous,current){
+  const minute=[];
+  for(let j=0;j<15;j++)minute.push({t:j*60000,...previous,v:1});
+  minute.push({t:900000,...current,v:1});
+  return detectMoveLadder({minuteCandles:minute,windowStart:900000});
+}
+
+test('red previous candle and 50% rise trigger both 100-share DOWN rungs',()=>{
+  const a=sampleWindow({o:100,h:110,l:90,c:95},{o:95,h:106,l:95,c:105});
+  assert.equal(a.previousColor,'red');assert.equal(a.previousRange,20);
+  assert.equal(a.side,'DOWN');assert.equal(a.observedMove,10);
+  assert.deepEqual(a.rungs.map(r=>[r.levelPct,r.shares,r.crossed]),[[25,100,true],[50,100,true]]);
 });
 
-test('wick detector maps a confirmed lower rejection to UP and permits a latched chase',()=>{
-  const minute=[];let base=100;
-  for(let i=0;i<36;i++){
-    const open=base,close=i%2===0?101:100;
-    const high=Math.max(open,close)+.2,low=Math.min(open,close)-.1;
-    const t=i*900000;
-    for(let j=0;j<15;j++)minute.push({t:t+j*60000,o:open,h:high,l:low,c:close,v:1});
-    base=close;
-  }
-  const start=36*900000, previousClose=base;
-  for(let j=0;j<15;j++){
-    let o=100.5,c=100.6,h=101,l=100.05;
-    if(j===0)c=100.4;
-    if(j===14)c=100.9;
-    minute.push({t:start+j*60000,o,h,l,c,v:1});
-  }
-  const result=detectWick({minuteCandles:minute,now:start+15*60000,windowStart:start});
-  assert.equal(result.ready,true);
-  assert.equal(result.previousClose,previousClose);
-  assert.equal(result.signal?.side,'UP');
-  assert.equal(result.signal?.kind,'lower');
-  assert.equal(result.signal?.entryType,'CHASE');
+test('green previous candle and 25% fall triggers only the UP 25% rung',()=>{
+  const a=sampleWindow({o:100,h:110,l:90,c:105},{o:105,h:105,l:99,c:99});
+  assert.equal(a.previousColor,'green');assert.equal(a.side,'UP');
+  assert.equal(a.observedMove,6);
+  assert.deepEqual(a.rungs.map(r=>r.crossed),[true,false]);
+});
+
+test('doji has no side and cannot trigger either rung',()=>{
+  const a=sampleWindow({o:100,h:110,l:90,c:100},{o:100,h:111,l:100,c:111});
+  assert.equal(a.side,null);assert.deepEqual(a.rungs.map(r=>r.crossed),[false,false]);
 });
 
 test('paper entry requires full depth within the $0.05-$0.60 ask band',()=>{
-  assert.equal(_test.sweep([{price:.60,size:300}],300,.60,.05).cost,180);
-  assert.equal(_test.sweep([{price:.05,size:300}],300,.60,.05).cost,15);
-  assert.equal(_test.sweep([{price:.049,size:300}],300,.60,.05),null);
-  assert.equal(_test.sweep([{price:.61,size:300}],300,.60,.05),null);
-  assert.equal(_test.sweep([{price:.60,size:299}],300,.60,.05),null);
+  assert.equal(_test.sweep([{price:.60,size:100}],100,.60,.05).cost,60);
+  assert.equal(_test.sweep([{price:.05,size:100}],100,.60,.05).cost,5);
+  assert.equal(_test.sweep([{price:.049,size:100}],100,.60,.05),null);
+  assert.equal(_test.sweep([{price:.61,size:100}],100,.60,.05),null);
+  assert.equal(_test.sweep([{price:.60,size:99}],100,.60,.05),null);
 });
 
 test('paper BTC taker fee and official outcome settlement are applied',()=>{

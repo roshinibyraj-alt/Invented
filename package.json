@@ -2,7 +2,7 @@
   "name": "btc-wick-paper-demo",
   "version": "1.0.0",
   "private": true,
-  "description": "Demo-only adaptive Polymarket BTC 15-minute wick strategy.",
+  "description": "Demo-only Polymarket BTC 15-minute previous-candle move ladder.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
