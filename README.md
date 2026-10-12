@@ -4,16 +4,14 @@ Polymarket-only, paper-trading BTC UP/DOWN bots. The 5-minute and 15-minute bots
 
 ## Strategy (both timeframes)
 
-- Compare each active window with the immediately previous completed window of the same duration.
-- Previous candle direction is close versus open. Candle body size is `abs(previous close - previous open)`. Measure the current window's live move from the previous close.
-- Previous candle red + current move upward: buy DOWN. Previous candle green + current move downward: buy UP. Doji: no signal.
-- At 25% of the prior body, trigger 200 shares. At 50%, trigger a separate 100 shares. If the live move jumps past 50%, both rungs trigger.
-- If the last three completed candles in that timeframe are the same colour, skip both entries for the next window. Resume when a completed candle closes the other colour. The two timeframes track this independently.
-- In the first window after a 3+ candle same-colour streak is broken by one opposite-colour close, use recovery-only mode: the opposite candle direction signals UP (green) or DOWN (red), the normal rungs are suppressed, and the bot waits for a 300-share ask fill strictly below $0.50. It keeps waiting only within that recovery window; all positions still settle on the official market result.
-- Each rung triggers once per window. Paper fills require full visible ask depth within $0.05-$0.60/share; otherwise the triggered rung retries while its window remains open. Entries are depth-priced and use the existing fee model.
-- Positions settle only from Polymarket's official market outcome. Each timeframe's P&L and cash are tracked separately.
+- Each bot compares its active window with the immediately preceding completed candle of the same duration. Candle body is `abs(previous close - previous open)`; price movement is measured from the previous close.
+- If the previous candle is green, a 25% fall from its close during minute 1 triggers a 100-share UP entry. If the previous candle is red, a 25% rise during minute 1 triggers a 100-share DOWN entry.
+- During minute 2, a return to the previous close triggers 200 additional shares on the same side. The two entries are independent; the second can fire even if the first did not.
+- Entry triggers are restricted to their designated minute. Orders need full visible ask depth within $0.05-$0.60/share before that minute ends; otherwise they expire unfilled.
+- From 180 seconds into the window onward, if BTC is still at least 25% of the previous candle body against the signal direction, the bot sells all remaining shares against visible CLOB bids. If bid depth is insufficient, available shares are sold and the remainder is retried. Exit fills use the configured fee model.
+- Shares remaining at expiry settle on Polymarket's official result. The 5m and 15m strategies run independently with separate $10,000 demo bankrolls.
 
-Signal candles use Kraken XBT/USD one-minute OHLC aggregated independently into five- and fifteen-minute windows. Kraken's reference may differ from Polymarket's official resolution source. Paper state is in memory and resets if the service restarts. Dashboard unrealized P&L marks open shares to the venue's best bid; missing/stale marks are labeled rather than treated as zero. Realized P&L changes only on official settlement.
+Signals use Kraken XBT/USD one-minute OHLC, including the current minute's high/low, refreshed every three seconds. Kraken's reference may differ from Polymarket's official resolution source. Paper state is in memory and resets if the service restarts. Dashboard unrealized P&L marks open shares to best bid; missing/stale marks are labeled. Realized P&L updates on bid-side exits or official settlement.
 
 ## Run
 

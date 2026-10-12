@@ -16,7 +16,7 @@ function aggregate(candles, intervalMs) {
   return [...groups.values()];
 }
 
-function detectMoveLadder({minuteCandles,windowStart,windowMs=900000,levelsPct=[25,50],sharesByLevel={25:100,50:100}}) {
+function detectTimedStrategy({minuteCandles,windowStart,windowMs=900000,now=Date.now()}) {
   const minutes=minuteCandles.map(toCandle).sort((a,b)=>a.t-b.t);
   const bars=aggregate(minutes,windowMs);
   const history=bars.filter(x=>x.t<windowStart);
@@ -25,37 +25,36 @@ function detectMoveLadder({minuteCandles,windowStart,windowMs=900000,levelsPct=[
   const previous=history[history.length-1];
   const previousBody=Math.abs(previous.c-previous.o);
   const previousColor=previous.c<previous.o?'red':previous.c>previous.o?'green':'doji';
-  const lastFour=history.slice(-4);
-  const priorThree=lastFour.slice(0,3);
-  const priorStreakColor=priorThree.length===3
-    ?priorThree[0].c<priorThree[0].o?'red':priorThree[0].c>priorThree[0].o?'green':null:null;
-  const oppositeColor=lastFour.length===4
-    ?lastFour[3].c<lastFour[3].o?'red':lastFour[3].c>lastFour[3].o?'green':null:null;
-  const recoveryActive=Boolean(priorStreakColor&&priorThree.every(x=>
-    (x.c<x.o?'red':x.c>x.o?'green':'doji')===priorStreakColor)&&oppositeColor&&oppositeColor!==priorStreakColor);
-  const recovery={active:recoveryActive,color:recoveryActive?oppositeColor:null,
-    side:recoveryActive?(oppositeColor==='green'?'UP':'DOWN'):null,shares:300};
-  const lastThree=history.slice(-3);
-  const streakColor=lastThree.length===3?lastThree[0].c<lastThree[0].o?'red':lastThree[0].c>lastThree[0].o?'green':null:null;
-  const streakBlocked=Boolean(streakColor&&lastThree.every(x=>(x.c<x.o?'red':x.c>x.o?'green':'doji')===streakColor));
-  const normalEntriesPaused=streakBlocked||recoveryActive;
   const signedMove=current.c-previous.c;
-  const expectedMove=previousColor==='red'?'up':previousColor==='green'?'down':null;
-  const side=expectedMove==='up'?'DOWN':expectedMove==='down'?'UP':null;
-  const observedMove=expectedMove==='up'?Math.max(0,signedMove)
-    :expectedMove==='down'?Math.max(0,-signedMove):0;
-  const rungs=levelsPct.map(levelPct=>({
-    levelPct,shares:Number(sharesByLevel[levelPct]??100),side,expectedMove,previousBody,
-    requiredMove:previousBody*levelPct/100,
-    observedMove,wouldCross:Boolean(side)&&observedMove>=previousBody*levelPct/100,
-    crossed:Boolean(side)&&!normalEntriesPaused&&observedMove>=previousBody*levelPct/100,
-    blockedByStreak:streakBlocked,blockedByRecovery:recoveryActive
-  }));
+  const side=previousColor==='green'?'UP':previousColor==='red'?'DOWN':null;
+  const elapsedMs=now-windowStart,firstMinute=minutes.find(x=>x.t===windowStart);
+  const secondMinute=minutes.find(x=>x.t===windowStart+60000);
+  const firstActive=elapsedMs>=0&&elapsedMs<60000;
+  const secondActive=elapsedMs>=60000&&elapsedMs<120000;
+  const firstThreshold=previousColor==='green'?previous.c-previousBody*.25
+    :previousColor==='red'?previous.c+previousBody*.25:null;
+  const firstTouched=Boolean(side&&firstActive&&firstMinute&&
+    (previousColor==='green'?firstMinute.l<=firstThreshold:firstMinute.h>=firstThreshold));
+  const secondTouched=Boolean(side&&secondActive&&secondMinute&&
+    (previousColor==='green'?secondMinute.h>=previous.c:secondMinute.l<=previous.c));
+  const entries=[
+    {key:'first-minute',label:'Minute 1 · 25% adverse move',shares:100,side,
+      thresholdPrice:firstThreshold,windowEnd:windowStart+60000,crossed:firstTouched,
+      observedPrice:firstMinute?.c??null},
+    {key:'second-minute',label:'Minute 2 · return to 0%',shares:200,side,
+      thresholdPrice:previous.c,windowEnd:windowStart+120000,crossed:secondTouched,
+      observedPrice:secondMinute?.c??null}
+  ];
+  const exitThreshold=previousColor==='green'?previous.c-previousBody*.25
+    :previousColor==='red'?previous.c+previousBody*.25:null;
+  const exitAfterMs=180000;
+  const exitTriggered=Boolean(side&&elapsedMs>=exitAfterMs&&
+    (previousColor==='green'?current.c<=exitThreshold:current.c>=exitThreshold));
+  const exit={eligible:elapsedMs>=exitAfterMs,triggered:exitTriggered,side,
+    thresholdPrice:exitThreshold,currentPrice:current.c,afterSeconds:exitAfterMs/1000};
   return {ready:true,windowStart,previousClose:previous.c,previousBody,previousColor,
-    streak:{blocked:streakBlocked,color:streakColor,candles:lastThree.length,required:3},
-    recovery,entryMode:streakBlocked?'STREAK_PAUSE':recoveryActive?'RECOVERY_ONLY':'NORMAL',
-    expectedMove,side,signedMove,observedMove,previous,current,rungs,
-    reason:previousColor==='doji'?'Previous candle is a doji; no trigger side selected':null};
+    side,signedMove,elapsedMs,entryMode:'TIMED',previous,current,entries,exit,
+    reason:previousColor==='doji'?'Previous candle is a doji; no entry side selected':null};
 }
 
-module.exports={toCandle,aggregate,detectMoveLadder};
+module.exports={toCandle,aggregate,detectTimedStrategy};
