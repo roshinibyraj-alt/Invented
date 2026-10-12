@@ -26,7 +26,11 @@ class MultiBot {
       strategy:{execution:'PAPER ONLY',independentTimeframes:true},
       account:{capital:states.reduce((n,s)=>n+s.account.capital,0),
         cash:states.reduce((n,s)=>n+s.account.cash,0),
-        realizedPnl:states.reduce((n,s)=>n+s.account.realizedPnl,0),openPositions}};
+        realizedPnl:states.reduce((n,s)=>n+s.account.realizedPnl,0),
+        unrealizedPnl:states.reduce((n,s)=>n+s.account.unrealizedPnl,0),
+        equity:states.reduce((n,s)=>n+s.account.equity,0),
+        markedValue:states.reduce((n,s)=>n+s.account.markedValue,0),
+        unpricedOpenPositions:states.reduce((n,s)=>n+s.account.unpricedOpenPositions,0),openPositions}};
   }
 }
 

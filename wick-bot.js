@@ -112,6 +112,19 @@ class WickBot{
           attemptedAt:now,error:result.reason?.message||'Order book unavailable'};
       }
     });
+    const open=this.positions.filter(p=>p.status==='OPEN'||p.status==='PENDING_OFFICIAL_RESULT');
+    for(const p of open){
+      if(p.windowStart===this.market.start){
+        const q=this.liveQuotes[p.side];
+        p.markBid=q?.bestBid??null;p.markUpdatedAt=q?.updatedAt||now;p.markStatus=q?.bestBid!=null?'LIVE':'MISSING';
+      }
+    }
+    const due=open.filter(p=>p.windowStart!==this.market.start&&p.tokenId&&now-(p.lastMarkAttempt||0)>=5000);
+    await Promise.all(due.map(async p=>{
+      p.lastMarkAttempt=now;
+      try{const q=quoteFromBook(await md.getBook(p.tokenId),now);p.markBid=q.bestBid;p.markUpdatedAt=now;p.markStatus=q.bestBid!=null?'LIVE':'MISSING'}
+      catch(_){p.markStatus=p.markBid!=null?'STALE':'MISSING'}
+    }));
   }
   async tryEnter(start,trigger){
     if(Date.now()>=start+this.windowMs)return;
@@ -123,7 +136,7 @@ class WickBot{
     if(total>this.cash){state.blocks[key]='Insufficient demo cash';return}
     const p={id:`${this.timeframe}-${start}-${trigger.side}-${trigger.levelPct}`,timeframe:this.timeframe,
       windowMs:this.windowMs,windowStart:start,marketId:this.market.id,slug:this.market.slug,
-      title:this.market.title,side:trigger.side,triggerPct:trigger.levelPct,entryType:'CANDLE_MOVE',shares:fill.shares,
+      title:this.market.title,side:trigger.side,tokenId:token,triggerPct:trigger.levelPct,entryType:'CANDLE_MOVE',shares:fill.shares,
       avgEntry:fill.avg,cost:fill.cost,fees:fee,totalCost:total,status:'OPEN',openedAt:Date.now(),
       observedMove:trigger.observedMove,requiredMove:trigger.requiredMove,previousBody:trigger.previousBody};
     this.cash-=total;this.positions.unshift(p);state.filled[key]=p.id;delete state.blocks[key];this.status='position_open';
@@ -144,12 +157,26 @@ class WickBot{
   snapshot(){
     const prior=this.market?aggregate(this.candles,this.windowMs)
       .filter(x=>x.t<this.market.start).slice(-3):[];
-    return {now:Date.now(),mode:'DEMO ONLY',status:this.status,error:this.error,
+    const now=Date.now();
+    const realizedPnl=this.positions.reduce((s,p)=>s+(p.realizedPnl||0),0);
+    let unrealizedPnl=0,unpricedOpenPositions=0,markedValue=0;
+    for(const p of this.positions){
+      if(p.status!=='OPEN'&&p.status!=='PENDING_OFFICIAL_RESULT')continue;
+      const mark=p.markBid==null?null:p.markBid*p.shares;
+      p.markValue=mark;
+      p.unrealizedPnl=mark==null?null:mark-p.totalCost;
+      p.markAgeMs=p.markUpdatedAt?Math.max(0,now-p.markUpdatedAt):null;
+      p.markStatus=mark==null?'UNAVAILABLE':p.markAgeMs>15000?'STALE':'LIVE';
+      if(mark==null)unpricedOpenPositions++;else{markedValue+=mark;unrealizedPnl+=p.unrealizedPnl}
+    }
+    return {now,mode:'DEMO ONLY',status:this.status,error:this.error,
        strategy:{timeframe:this.timeframe,market:`Polymarket BTC ${this.windowMs/60000}-minute UP/DOWN`,capital:this.capital,
          sharesByLevel:cfg.SHARES_BY_LEVEL,maxTriggersPerWindow:cfg.TRIGGER_LEVELS_PCT.length,
+         streakLockoutCandles:3,
          triggerLevelsPct:cfg.TRIGGER_LEVELS_PCT,minEntryAsk:cfg.MIN_ENTRY_ASK,maxEntryAsk:cfg.MAX_ENTRY_ASK,
         exit:'Hold to official market settlement',execution:'PAPER ONLY'},
-       account:{capital:this.capital,cash:this.cash,realizedPnl:this.positions.reduce((s,p)=>s+(p.realizedPnl||0),0),
+       account:{capital:this.capital,cash:this.cash,realizedPnl,unrealizedPnl,equity:this.cash+markedValue,
+         markedValue,unpricedOpenPositions,
         openPositions:this.positions.filter(p=>p.status==='OPEN'||p.status==='PENDING_OFFICIAL_RESULT').length},
       window:this.market?{title:this.market.title,slug:this.market.slug,start:this.market.start,end:this.market.end}:null,
       livePrices:{marketSlug:this.market?.slug||null,updatedAt:Math.max(this.liveQuotes.UP.updatedAt||0,this.liveQuotes.DOWN.updatedAt||0)||null,

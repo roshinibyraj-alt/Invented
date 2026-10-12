@@ -51,6 +51,33 @@ test('five- and fifteen-minute bot instances have fully separate cash and positi
   assert.equal(bots.snapshot().timeframes['5m'].strategy.sharesByLevel[25],200);
 });
 
+function windowsLadder(past,current,windowMs=300000){
+  const minute=[];
+  for(let w=0;w<past.length;w++)for(let j=0;j<windowMs/60000;j++)
+    minute.push({t:w*windowMs+j*60000,...past[w],v:1});
+  minute.push({t:past.length*windowMs,...current,v:1});
+  return detectMoveLadder({minuteCandles:minute,windowStart:past.length*windowMs,windowMs});
+}
+
+test('three same-colour completed candles pause the next window; opposite close releases the lock',()=>{
+  const green={o:100,h:105,l:99,c:104},red={o:104,h:105,l:99,c:100};
+  const paused=windowsLadder([green,green,green],{o:104,h:104,l:100,c:100});
+  assert.equal(paused.streak.blocked,true);
+  assert.equal(paused.rungs[0].wouldCross,true);assert.equal(paused.rungs[0].crossed,false);
+  const released=windowsLadder([green,green,red],{o:100,h:102,l:100,c:102});
+  assert.equal(released.streak.blocked,false);assert.equal(released.rungs[1].crossed,true);
+});
+
+test('realized and floating position P&L are computed separately from bid marks',()=>{
+  const Bot=require('../wick-bot'),bot=new Bot({timeframe:'5m',windowMs:300000,capital:1000});
+  bot.cash=900;
+  bot.positions=[{status:'OPEN',side:'UP',shares:200,totalCost:100,markBid:.45,
+    markUpdatedAt:Date.now()},{status:'SETTLED_LOSS',realizedPnl:-5}];
+  const a=bot.snapshot().account;
+  assert.equal(a.realizedPnl,-5);assert.equal(a.unrealizedPnl,-10);
+  assert.equal(a.equity,990);assert.equal(a.openPositions,1);
+});
+
 test('paper entry requires full depth within the $0.05-$0.60 ask band',()=>{
   assert.equal(_test.sweep([{price:.60,size:100}],100,.60,.05).cost,60);
   assert.equal(_test.sweep([{price:.05,size:100}],100,.60,.05).cost,5);
