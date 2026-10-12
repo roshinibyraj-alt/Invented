@@ -40,22 +40,24 @@ test('red previous candle mirrors timed entries on DOWN',()=>{
 test('doji prior candle cannot signal entries or exits',()=>{
   const a=timedWindow({o:100,h:110,l:90,c:100},[{minute:0,o:100,h:120,l:80,c:110}],{elapsedMs:240000});
   assert.equal(a.side,null);assert.deepEqual(a.entries.map(e=>e.crossed),[false,false]);
-  assert.equal(a.exit.triggered,false);
+  assert.equal('exit' in a,false);
 });
 
-test('adverse 25% exit is inactive before 3 minutes and triggers after 3 minutes',()=>{
-  const previous={o:100,h:110,l:99,c:105};
-  const row={minute:3,o:104,h:104,l:103.7,c:103.75};
-  assert.equal(timedWindow(previous,[row],{elapsedMs:179000}).exit.triggered,false);
-  const after=timedWindow(previous,[row],{elapsedMs:180000});
-  assert.equal(after.exit.triggered,true);assert.equal(after.exit.thresholdPrice,103.75);
+test('timed strategy has no sell/exit trigger at any point in a window',()=>{
+  const a=timedWindow({o:100,h:110,l:99,c:105},
+    [{minute:0,o:105,h:105,l:103,c:103},{minute:1,o:103,h:104,l:102,c:102},{minute:4,o:102,h:102,l:90,c:91}],
+    {elapsedMs:240000});
+  assert.equal('exit' in a,false);
+  const Bot=require('../wick-bot'),bot=new Bot({timeframe:'5m',windowMs:300000,capital:1000});
+  assert.equal(typeof bot.tryExit,'undefined');
+  assert.match(bot.snapshot().strategy.exit,/No sell/);
 });
 
 test('same minute schedule scales unchanged to five-minute windows',()=>{
   const a=timedWindow({o:100,h:106,l:99,c:105},
     [{minute:0,o:105,h:105,l:103.5,c:104}],{windowMs:300000,elapsedMs:20000});
   assert.equal(a.entries[0].crossed,true);assert.equal(a.entries[0].shares,100);
-  assert.equal(a.exit.triggered,false);
+  assert.equal('exit' in a,false);
 });
 
 test('five- and fifteen-minute bot instances have fully separate cash and positions',()=>{
@@ -75,28 +77,6 @@ test('realized and floating position P&L are computed separately from bid marks'
   const a=bot.snapshot().account;
   assert.equal(a.realizedPnl,-5);assert.equal(a.unrealizedPnl,-10);
   assert.equal(a.equity,990);assert.equal(a.openPositions,1);
-});
-
-test('forced exits sweep bids best-first and retry leftover shares',async()=>{
-  const Bot=require('../wick-bot'),md=require('../wick-market-data');
-  const original=md.getBook;let call=0;
-  md.getBook=async()=>++call===1
-    ?{bids:[{price:.5,size:30},{price:.6,size:40}],asks:[]}
-    :{bids:[{price:.4,size:30}],asks:[]};
-  try{
-    const bot=new Bot({timeframe:'5m',windowMs:300000,capital:1000});
-    bot.market={raw:{feesEnabled:false}};
-    bot.cash=900;
-    const p={id:'test',status:'OPEN',side:'UP',tokenId:'tok',shares:100,initialShares:100,totalCost:50};
-    bot.positions=[p];
-    await bot.tryExit(p,'test');
-    assert.equal(p.status,'OPEN');assert.equal(p.shares,30);assert.equal(p.realizedPnl,4);
-    assert.equal(bot.cash,939);
-    await bot.tryExit(p,'test');
-    assert.equal(p.status,'EXITED_STOP');assert.equal(p.shares,0);
-    assert.equal(p.realizedPnl,1);assert.equal(p.avgExitPrice,.51);
-    assert.equal(bot.cash,951);assert.equal(bot.snapshot().account.unrealizedPnl,0);
-  }finally{md.getBook=original}
 });
 
 test('paper entry requires full depth within the $0.05-$0.60 ask band',()=>{

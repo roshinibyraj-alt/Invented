@@ -45,15 +45,8 @@ function detectTimedStrategy({minuteCandles,windowStart,windowMs=900000,now=Date
       thresholdPrice:previous.c,windowEnd:windowStart+120000,crossed:secondTouched,
       observedPrice:secondMinute?.c??null}
   ];
-  const exitThreshold=previousColor==='green'?previous.c-previousBody*.25
-    :previousColor==='red'?previous.c+previousBody*.25:null;
-  const exitAfterMs=180000;
-  const exitTriggered=Boolean(side&&elapsedMs>=exitAfterMs&&
-    (previousColor==='green'?current.c<=exitThreshold:current.c>=exitThreshold));
-  const exit={eligible:elapsedMs>=exitAfterMs,triggered:exitTriggered,side,
-    thresholdPrice:exitThreshold,currentPrice:current.c,afterSeconds:exitAfterMs/1000};
   return {ready:true,windowStart,previousClose:previous.c,previousBody,previousColor,
-    side,signedMove,elapsedMs,entryMode:'TIMED',previous,current,entries,exit,
+    side,signedMove,elapsedMs,entryMode:'TIMED',previous,current,entries,
     reason:previousColor==='doji'?'Previous candle is a doji; no entry side selected':null};
 }
 
