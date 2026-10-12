@@ -47,6 +47,7 @@ class WickBot{
     this.error=null;this.market=null;this.candles=[];this.lastMarketAt=0;
     this.lastCandlesAt=0;this.lastScanAt=null;this.rungState={};this.running=false;
     this.quoteWindowStart=null;this.liveQuotes={UP:{status:'MISSING'},DOWN:{status:'MISSING'}};
+    this.recoveryState={};
   }
   log(event,data={}){const e={ts:Date.now(),timeframe:this.timeframe,event,...data};this.events.unshift(e);this.events.length=Math.min(100,this.events.length);console.log('[wick] '+JSON.stringify(e))}
   async tick(){
@@ -78,6 +79,17 @@ class WickBot{
       }
       if(analysis.ready){
         const state=this.rungState[start]||(this.rungState[start]={triggered:{},filled:{},blocks:{}});
+        if(analysis.recovery?.active){
+          const recovery=this.recoveryState[start]||(this.recoveryState[start]={
+            side:analysis.recovery.side,color:analysis.recovery.color,shares:cfg.RECOVERY_SHARES,filled:false,logged:false
+          });
+          if(!recovery.logged){
+            recovery.logged=true;
+            this.log('STREAK_RECOVERY_SIGNAL',{side:recovery.side,candleColor:recovery.color,
+              shares:recovery.shares,maxAsk:cfg.RECOVERY_MAX_ENTRY_ASK});
+          }
+          if(!recovery.filled)await this.tryRecoveryEntry(start,recovery);
+        }
         for(const rung of analysis.rungs){
           const key=String(rung.levelPct);
           if(rung.crossed&&!state.triggered[key]){
@@ -85,11 +97,11 @@ class WickBot{
             this.log('CANDLE_MOVE_TRIGGER',{side:rung.side,levelPct:rung.levelPct,
               shares:rung.shares,observedMove:rung.observedMove,requiredMove:rung.requiredMove});
           }
-          const trigger=state.triggered[key];
+          const trigger=analysis.recovery?.active?null:state.triggered[key];
           if(trigger&&!state.filled[key])await this.tryEnter(start,trigger);
           rung.triggered=Boolean(trigger);
           rung.filled=Boolean(state.filled[key]);
-          rung.block=state.blocks[key]||null;
+          rung.block=analysis.recovery?.active?'Recovery-only window':state.blocks[key]||null;
         }
       }
       const hasOpen=this.positions.some(p=>p.windowStart===start&&p.status==='OPEN');
@@ -143,6 +155,31 @@ class WickBot{
     this.log('PAPER_MOVE_ENTRY',{timeframe:this.timeframe,id:p.id,side:p.side,levelPct:p.triggerPct,
       shares:p.shares,entryPrice:p.avgEntry,avgEntry:p.avgEntry,cost:p.totalCost});
   }
+  async tryRecoveryEntry(start,recovery){
+    if(Date.now()>=start+this.windowMs)return;
+    const token=this.market.tokens[recovery.side],book=await md.getBook(token);
+    const fill=sweep(book.asks,recovery.shares,cfg.RECOVERY_MAX_ENTRY_ASK,0);
+    if(!fill){
+      const asks=levels(book.asks),best=asks.find(x=>x.price>0)?.price;
+      const reason=best!=null&&best>=.50?'Waiting for best ask below $0.50':
+        `Need ${recovery.shares} shares of depth below $0.50`;
+      if(recovery.lastBlock!==reason){recovery.lastBlock=reason;this.log('STREAK_RECOVERY_WAIT',{side:recovery.side,shares:recovery.shares,bestAsk:best??null,note:reason})}
+      return;
+    }
+    const fee=feeFor(this.market.raw,fill.avg,fill.shares),total=fill.cost+fee;
+    if(total>this.cash){
+      if(recovery.lastBlock!=='Insufficient demo cash'){recovery.lastBlock='Insufficient demo cash';this.log('STREAK_RECOVERY_WAIT',{side:recovery.side,note:recovery.lastBlock})}
+      return;
+    }
+    const p={id:`${this.timeframe}-${start}-${recovery.side}-RECOVERY`,timeframe:this.timeframe,
+      windowMs:this.windowMs,windowStart:start,marketId:this.market.id,slug:this.market.slug,
+      title:this.market.title,side:recovery.side,tokenId:token,triggerPct:'RECOVERY',
+      entryType:'STREAK_RECOVERY',shares:fill.shares,avgEntry:fill.avg,cost:fill.cost,fees:fee,
+      totalCost:total,status:'OPEN',openedAt:Date.now(),candleColor:recovery.color};
+    this.cash-=total;this.positions.unshift(p);recovery.filled=true;recovery.positionId=p.id;
+    this.log('PAPER_STREAK_RECOVERY_ENTRY',{id:p.id,side:p.side,candleColor:p.candleColor,
+      shares:p.shares,entryPrice:p.avgEntry,cost:p.totalCost});
+  }
   async trySettle(p){
     if(Date.now()<p.windowStart+(p.windowMs||this.windowMs))return;
     p.lastSettlementAttempt=Date.now();
@@ -172,7 +209,8 @@ class WickBot{
     return {now,mode:'DEMO ONLY',status:this.status,error:this.error,
        strategy:{timeframe:this.timeframe,market:`Polymarket BTC ${this.windowMs/60000}-minute UP/DOWN`,capital:this.capital,
          sharesByLevel:cfg.SHARES_BY_LEVEL,maxTriggersPerWindow:cfg.TRIGGER_LEVELS_PCT.length,
-         streakLockoutCandles:3,
+          streakLockoutCandles:3,recoveryOnlyShares:cfg.RECOVERY_SHARES,
+          recoveryMaxEntryAsk:cfg.RECOVERY_MAX_ENTRY_ASK,
          triggerLevelsPct:cfg.TRIGGER_LEVELS_PCT,minEntryAsk:cfg.MIN_ENTRY_ASK,maxEntryAsk:cfg.MAX_ENTRY_ASK,
         exit:'Hold to official market settlement',execution:'PAPER ONLY'},
        account:{capital:this.capital,cash:this.cash,realizedPnl,unrealizedPnl,equity:this.cash+markedValue,

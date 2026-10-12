@@ -25,9 +25,20 @@ function detectMoveLadder({minuteCandles,windowStart,windowMs=900000,levelsPct=[
   const previous=history[history.length-1];
   const previousBody=Math.abs(previous.c-previous.o);
   const previousColor=previous.c<previous.o?'red':previous.c>previous.o?'green':'doji';
+  const lastFour=history.slice(-4);
+  const priorThree=lastFour.slice(0,3);
+  const priorStreakColor=priorThree.length===3
+    ?priorThree[0].c<priorThree[0].o?'red':priorThree[0].c>priorThree[0].o?'green':null:null;
+  const oppositeColor=lastFour.length===4
+    ?lastFour[3].c<lastFour[3].o?'red':lastFour[3].c>lastFour[3].o?'green':null:null;
+  const recoveryActive=Boolean(priorStreakColor&&priorThree.every(x=>
+    (x.c<x.o?'red':x.c>x.o?'green':'doji')===priorStreakColor)&&oppositeColor&&oppositeColor!==priorStreakColor);
+  const recovery={active:recoveryActive,color:recoveryActive?oppositeColor:null,
+    side:recoveryActive?(oppositeColor==='green'?'UP':'DOWN'):null,shares:300};
   const lastThree=history.slice(-3);
   const streakColor=lastThree.length===3?lastThree[0].c<lastThree[0].o?'red':lastThree[0].c>lastThree[0].o?'green':null:null;
   const streakBlocked=Boolean(streakColor&&lastThree.every(x=>(x.c<x.o?'red':x.c>x.o?'green':'doji')===streakColor));
+  const normalEntriesPaused=streakBlocked||recoveryActive;
   const signedMove=current.c-previous.c;
   const expectedMove=previousColor==='red'?'up':previousColor==='green'?'down':null;
   const side=expectedMove==='up'?'DOWN':expectedMove==='down'?'UP':null;
@@ -37,11 +48,12 @@ function detectMoveLadder({minuteCandles,windowStart,windowMs=900000,levelsPct=[
     levelPct,shares:Number(sharesByLevel[levelPct]??100),side,expectedMove,previousBody,
     requiredMove:previousBody*levelPct/100,
     observedMove,wouldCross:Boolean(side)&&observedMove>=previousBody*levelPct/100,
-    crossed:Boolean(side)&&!streakBlocked&&observedMove>=previousBody*levelPct/100,
-    blockedByStreak:streakBlocked
+    crossed:Boolean(side)&&!normalEntriesPaused&&observedMove>=previousBody*levelPct/100,
+    blockedByStreak:streakBlocked,blockedByRecovery:recoveryActive
   }));
   return {ready:true,windowStart,previousClose:previous.c,previousBody,previousColor,
     streak:{blocked:streakBlocked,color:streakColor,candles:lastThree.length,required:3},
+    recovery,entryMode:streakBlocked?'STREAK_PAUSE':recoveryActive?'RECOVERY_ONLY':'NORMAL',
     expectedMove,side,signedMove,observedMove,previous,current,rungs,
     reason:previousColor==='doji'?'Previous candle is a doji; no trigger side selected':null};
 }

@@ -68,6 +68,29 @@ test('three same-colour completed candles pause the next window; opposite close 
   assert.equal(released.streak.blocked,false);assert.equal(released.rungs[1].crossed,true);
 });
 
+test('first opposite-colour candle creates a one-window recovery signal and suppresses normal rungs',()=>{
+  const green={o:100,h:105,l:99,c:104},red={o:104,h:105,l:99,c:100};
+  const down=windowsLadder([green,green,green,red],{o:100,h:102,l:100,c:102});
+  assert.equal(down.recovery.active,true);assert.equal(down.recovery.color,'red');
+  assert.equal(down.recovery.side,'DOWN');assert.equal(down.entryMode,'RECOVERY_ONLY');
+  assert.deepEqual(down.rungs.map(r=>[r.wouldCross,r.crossed]),[[true,false],[true,false]]);
+  const redBars=[red,red,red],greenBar={o:100,h:105,l:99,c:104};
+  const up=windowsLadder([...redBars,greenBar],{o:104,h:104,l:100,c:100});
+  assert.equal(up.recovery.active,true);assert.equal(up.recovery.side,'UP');
+});
+
+test('recovery detection is one completed opposite candle, not a continuing opposite streak',()=>{
+  const green={o:100,h:105,l:99,c:104},red={o:104,h:105,l:99,c:100};
+  const secondRed=windowsLadder([green,green,red,red],{o:100,h:102,l:100,c:102});
+  assert.equal(secondRed.recovery.active,false);assert.equal(secondRed.entryMode,'NORMAL');
+});
+
+test('recovery entry depth must be fully available strictly below $0.50',()=>{
+  assert.ok(Math.abs(_test.sweep([{price:.499,size:300}],300,.499999,0).avg-.499)<1e-9);
+  assert.equal(_test.sweep([{price:.50,size:300}],300,.499999,0),null);
+  assert.equal(_test.sweep([{price:.40,size:299}],300,.499999,0),null);
+});
+
 test('realized and floating position P&L are computed separately from bid marks',()=>{
   const Bot=require('../wick-bot'),bot=new Bot({timeframe:'5m',windowMs:300000,capital:1000});
   bot.cash=900;
