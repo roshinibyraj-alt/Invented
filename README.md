@@ -11,7 +11,7 @@ Polymarket-only BTC UP/DOWN paper trading. The bot has one 5-minute market loop 
 - Deduct the Polymarket BTC taker fee from each paper buy using the market fee schedule and simulated fill price.
 - At window end, use the final 3-second CLOB UP/DOWN midpoints. A side at $0.98+ wins; if neither reaches that threshold, the side with the higher midpoint wins (an exact tie is assigned to UP). Winning shares receive $1 each; losing shares receive $0.
 
-The dashboard and bot poll at 500 ms. Signals use Kraken XBT/USD 1-minute OHLC; winner resolution uses Polymarket CLOB quotes, not Kraken or Gamma official settlement. If fresh CLOB quotes are unavailable, the position remains pending and is retried. An exact midpoint tie is resolved to UP. Paper state is in memory and resets on process restart.
+The bot polls CLOB quotes every 500 ms and Kraken 1-minute candles every second; the dashboard refreshes every 500 ms. Winner resolution uses Polymarket CLOB quotes, not Kraken or Gamma official settlement. If fresh CLOB quotes are unavailable, the position remains pending and is retried. An exact midpoint tie is resolved to UP. Paper state is in memory and resets on process restart.
 
 ## Run and verify
 
