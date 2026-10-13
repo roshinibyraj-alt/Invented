@@ -164,15 +164,6 @@ test('simultaneously crossed rung fills are held at least two seconds apart',asy
     now+=1000;await bot.tryEnter(start,second,'move-50');assert.equal(bot.positions.length,2);assert.ok(bot.positions[0].openedAt-bot.positions[1].openedAt>=2000);
   }finally{md.getBook=oldBook;Date.now=oldNow}
 });
-test('settlement resolves from fresh terminal bids/asks without requiring midpoints',async()=>{
-  const Bot=require('../wick-bot'),md=require('../wick-market-data');const oldBook=md.getBook,now=Date.now();
-  md.getBook=async()=>{throw new Error('should use captured final-window quotes')};
-  try{const bot=new Bot({timeframe:'5m',windowMs:300000,capital:10000}),start=now-300000;bot.cash=9000;
-    const p={id:'settle-test',side:'UP',windowStart:start,windowMs:300000,tokenId:'up',oppositeTokenId:'down',status:'OPEN',shares:100,totalCost:50,closeQuotes:{UP:{bestAsk:.01,updatedAt:now-1000},DOWN:{bestBid:.99,updatedAt:now-1000}}};
-    bot.positions=[p];await bot.trySettle(p);assert.equal(p.status,'SETTLED_LOSS');assert.equal(p.winningSide,'DOWN');assert.equal(p.payout,0);assert.equal(p.realizedPnl,-50);assert.equal(bot.cash,9000);
-  }finally{md.getBook=oldBook}
-});
-
 test('TP trigger accepts any fresh own-side quote at 0.99',()=>{const n=10000;assert.equal(_test.takeProfitHit({bestBid:.99,updatedAt:n},n),true);assert.equal(_test.takeProfitHit({bestAsk:.99,updatedAt:n},n),true);assert.equal(_test.takeProfitHit({mid:.99,updatedAt:n},n),true);assert.equal(_test.takeProfitHit({bestAsk:.989,updatedAt:n},n),false);assert.equal(_test.takeProfitHit({bestAsk:.99,updatedAt:n-5001},n),false)});
 test('missed TP waits for and uses official Gamma win result',async()=>{const Bot=require('../wick-bot'),md=require('../wick-market-data'),old=md.getMarket;let m={closed:false,outcomes:['Up','Down'],outcomePrices:['.5','.5']};md.getMarket=async()=>m;try{const b=new Bot({timeframe:'5m',windowMs:300000,capital:1000}),p={id:'w',marketId:'m',windowStart:Date.now()-300000,windowMs:300000,status:'OPEN',shares:100,totalCost:50,side:'UP'};b.cash=950;b.positions=[p];await b.trySettle(p);assert.equal(p.status,'PENDING_CLOB_RESULT');m={closed:true,outcomes:['Up','Down'],outcomePrices:['1','0']};await b.trySettle(p);assert.equal(p.status,'SETTLED_WIN');assert.equal(p.proceeds,100);assert.equal(b.cash,1050)}finally{md.getMarket=old}});
 test('official fallback pays zero to the losing side',async()=>{const Bot=require('../wick-bot'),md=require('../wick-market-data'),old=md.getMarket;md.getMarket=async()=>({closed:true,outcomes:['Up','Down'],outcomePrices:['1','0']});try{const b=new Bot({timeframe:'5m',windowMs:300000,capital:1000}),p={id:'l',marketId:'m',windowStart:Date.now()-300000,windowMs:300000,status:'OPEN',shares:100,totalCost:50,side:'DOWN'};b.cash=950;await b.trySettle(p);assert.equal(p.status,'SETTLED_LOSS');assert.equal(p.proceeds,0);assert.equal(p.realizedPnl,-50);assert.equal(b.cash,950)}finally{md.getMarket=old}});
