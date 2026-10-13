@@ -87,6 +87,23 @@ test('paper entry requires full depth within the $0.05-$0.60 ask band',()=>{
   assert.equal(_test.sweep([{price:.60,size:99}],100,.60,.05),null);
 });
 
+test('paper fill records the crossed rung percentage and share size',async()=>{
+  const Bot=require('../wick-bot'),md=require('../wick-market-data');
+  const oldGetBook=md.getBook;
+  md.getBook=async()=>({asks:[{price:.5,size:400}]});
+  try{
+    const bot=new Bot({timeframe:'5m',windowMs:300000,capital:10000});
+    const start=Date.now()-1000;
+    bot.market={id:'test-market',slug:'test',title:'Test',tokens:{UP:'up-token',DOWN:'down-token'},raw:{feesEnabled:false}};
+    bot.rungState[start]={triggered:{},filled:{},blocks:{}};
+    await bot.tryEnter(start,{movePct:50,side:'UP',shares:200,key:'move-50',
+      label:'50% adverse move',windowEnd:Date.now()+10000,thresholdPrice:99,observedPrice:98},'move-50');
+    assert.equal(bot.positions[0].triggerPct,50);
+    assert.equal(bot.positions[0].shares,200);
+    assert.equal(bot.positions[0].entryType,'CANDLE_MOVE_RUNG');
+  }finally{md.getBook=oldGetBook}
+});
+
 test('paper BTC taker fee and official outcome settlement are applied',()=>{
   assert.ok(Math.abs(_test.feeFor({feesEnabled:true,feeSchedule:{rate:.07,exponent:1}},.5,300)-5.25)<1e-9);
   const settled={closed:true,outcomes:['Up','Down'],outcomePrices:['1','0']};
