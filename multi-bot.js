@@ -14,6 +14,8 @@ class MultiBot {
     const states=Object.values(timeframes),positions=states.flatMap(s=>s.positions)
       .sort((a,b)=>b.openedAt-a.openedAt),events=states.flatMap(s=>s.events).sort((a,b)=>b.ts-a.ts).slice(0,100);
     const openPositions=states.reduce((n,s)=>n+s.account.openPositions,0);
+    const totalTrades=states.reduce((n,s)=>n+s.account.totalTrades,0),settledTrades=states.reduce((n,s)=>n+s.account.settledTrades,0);
+    const wins=states.reduce((n,s)=>n+s.account.wins,0),losses=states.reduce((n,s)=>n+s.account.losses,0);
     const status=states.some(s=>s.status==='blocked_or_error')?'blocked_or_error':
       states.some(s=>['scanning','position_open'].includes(s.status))?
         (openPositions?'position_open':'scanning'):'waiting_for_market';
@@ -27,7 +29,7 @@ class MultiBot {
         unrealizedPnl:states.reduce((n,s)=>n+s.account.unrealizedPnl,0),
         equity:states.reduce((n,s)=>n+s.account.equity,0),
         markedValue:states.reduce((n,s)=>n+s.account.markedValue,0),
-        unpricedOpenPositions:states.reduce((n,s)=>n+s.account.unpricedOpenPositions,0),openPositions}};
+        unpricedOpenPositions:states.reduce((n,s)=>n+s.account.unpricedOpenPositions,0),totalTrades,settledTrades,wins,losses,winRate:settledTrades?wins/settledTrades*100:0,openPositions}};
   }
 }
 

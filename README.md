@@ -9,9 +9,9 @@ Polymarket-only BTC UP/DOWN paper trading. The bot has one 5-minute market loop 
 - Rungs: 25% / 100 shares, 50% / 200, 75% / 300, and 90% / 400. Crossed rungs queue in order; paper fills are separated by at least 2 seconds. If all four rungs fill and each settles as a win in one window, invert the signalled side for the next window only. After that opposite-side window settles, return to normal signalling regardless of its result.
 - No new entry signal or fill after 240 seconds into a window. Paper buys require visible ask depth within the configured $0.05–$0.60 band.
 - Deduct the Polymarket BTC taker fee from each paper buy using the market fee schedule and simulated fill price.
-- At window end, use fresh UP/DOWN bid, ask, or midpoint quotes captured in the final 3 seconds. A quote at $0.98+ identifies the winner; a quote at $0.02 or below identifies the opposite side as winner. If neither side has a terminal quote, compare the highest available quote per side. Winning shares receive $1 each; losing shares receive $0.
+- During the window, any fresh bid, ask, or midpoint for the position's own side at $0.99 or higher triggers a simulated take-profit and credits exactly $1 per share. If no quote reaches the target before window close, use the official Gamma market result to credit $1 or $0 per share, retrying until resolved.
 
-The bot polls CLOB quotes every 500 ms and Kraken 1-minute candles every second; the dashboard refreshes every 2 seconds. Winner resolution uses Polymarket CLOB quotes, not Kraken or Gamma official settlement. If no fresh terminal quote is available, the position remains pending and is retried. Exact quote ties are assigned to UP. Paper state is in memory and resets on process restart.
+The bot polls CLOB quotes every 500 ms and Kraken 1-minute candles every second; the dashboard refreshes every 2 seconds. TP detection uses fresh own-side CLOB quotes. If no quote reaches TP, use the official Gamma result and retry while it is pending. Dashboard win rate is calculated over settled individual rung trades; total trades includes open and settled positions. Stale marks are excluded from floating P&L/equity. Paper state is in memory and resets on process restart.
 
 ## Run and verify
 
