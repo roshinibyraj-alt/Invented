@@ -4,10 +4,10 @@ Polymarket-only, paper-trading BTC UP/DOWN bots. The 5-minute and 15-minute bots
 
 ## Strategy (both timeframes)
 
-- Each bot compares its active window with the immediately preceding completed candle of the same duration. Candle body is `abs(previous close - previous open)`; price movement is measured from the previous close.
-- If the previous candle is green, a 25% fall from its close during minute 1 triggers a 100-share UP entry. If the previous candle is red, a 25% rise during minute 1 triggers a 100-share DOWN entry.
-- During minute 2, a return to the previous close triggers 200 additional shares on the same side. The two entries are independent; the second can fire even if the first did not.
-- Entry triggers are restricted to their designated minute. Orders need full visible ask depth within $0.05-$0.60/share before that minute ends; otherwise they expire unfilled.
+- Each bot compares its active window with the immediately preceding completed candle of the same duration. Candle body is `abs(previous close - previous open)`; each move threshold is measured from the previous close using that body size.
+- The four independent rungs are 25% → 100 shares, 50% → 200 shares, 75% → 300 shares, and 90% → 400 shares. Rungs can trigger any time during the window and fire once per rung per window.
+- The entries buy the reversal side: if the previous candle is green, downward moves trigger UP buys; if it is red, upward moves trigger DOWN buys. A doji produces no entries.
+- If a price jump crosses multiple thresholds, every crossed rung can fire. Each paper buy requires full visible ask depth within $0.05-$0.60/share; unfilled rungs remain eligible until the window ends.
 - No sell orders, take-profit, or stop-loss are placed. Filled shares remain open through the window and settle on Polymarket's official result.
 - The 5m and 15m strategies run independently with separate $10,000 demo bankrolls.
 

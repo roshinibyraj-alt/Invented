@@ -17,33 +17,33 @@ function timedWindow(previous,rows,{windowMs=900000,elapsedMs=30000}={}){
   return detectTimedStrategy({minuteCandles:minute,windowStart:windowMs,windowMs,now:windowMs+elapsedMs});
 }
 
-test('green previous candle buys 100 UP on 25% drop during minute one and 200 on return to close in minute two',()=>{
+test('green previous candle triggers the four UP buy rungs on adverse drops throughout the window',()=>{
   const previous={o:100,h:106,l:99,c:105};
-  const first=timedWindow(previous,[{minute:0,o:105,h:106,l:103.7,c:104}],{elapsedMs:30000});
-  assert.equal(first.previousBody,5);assert.equal(first.entries[0].side,'UP');
-  assert.equal(first.entries[0].shares,100);assert.equal(first.entries[0].crossed,true);
-  const second=timedWindow(previous,[{minute:0,o:105,h:106,l:103,c:104},{minute:1,o:104,h:105,l:103.8,c:104.5}],{elapsedMs:90000});
-  assert.equal(second.entries[1].side,'UP');assert.equal(second.entries[1].shares,200);
-  assert.equal(second.entries[1].crossed,true);
+  const all=timedWindow(previous,[{minute:4,o:104,h:105,l:100.4,c:101}],{elapsedMs:270000});
+  assert.equal(all.previousBody,5);assert.equal(all.side,'UP');
+  assert.deepEqual(all.entries.map(e=>e.movePct),[25,50,75,90]);
+  assert.deepEqual(all.entries.map(e=>e.shares),[100,200,300,400]);
+  assert.deepEqual(all.entries.map(e=>e.crossed),[true,true,true,true]);
+  assert.deepEqual(all.entries.map(e=>e.key),['move-25','move-50','move-75','move-90']);
+  assert.ok(all.entries.every(e=>e.windowEnd===all.windowStart+900000));
+  const partial=timedWindow(previous,[{minute:4,o:104,h:105,l:102.4,c:103}],{elapsedMs:270000});
+  assert.deepEqual(partial.entries.map(e=>e.crossed),[true,true,false,false]);
 });
 
-test('red previous candle mirrors timed entries on DOWN',()=>{
+test('red previous candle mirrors the four buy rungs on DOWN throughout the window',()=>{
   const previous={o:105,h:106,l:99,c:100};
-  const first=timedWindow(previous,[{minute:0,o:100,h:101.3,l:99,c:101}],{elapsedMs:30000});
-  assert.equal(first.entries[0].side,'DOWN');assert.equal(first.entries[0].crossed,true);
-  assert.equal(first.entries[0].shares,100);
-  const second=timedWindow(previous,[{minute:0,o:100,h:102,l:99,c:101},{minute:1,o:101,h:101.2,l:100,c:100.5}],{elapsedMs:90000});
-  assert.equal(second.entries[1].side,'DOWN');assert.equal(second.entries[1].crossed,true);
-  assert.equal(second.entries[1].shares,200);
+  const all=timedWindow(previous,[{minute:4,o:104,h:104.6,l:99,c:104}],{elapsedMs:270000});
+  assert.equal(all.side,'DOWN');assert.deepEqual(all.entries.map(e=>e.crossed),[true,true,true,true]);
+  assert.deepEqual(all.entries.map(e=>e.shares),[100,200,300,400]);
 });
 
 test('doji prior candle cannot signal entries or exits',()=>{
   const a=timedWindow({o:100,h:110,l:90,c:100},[{minute:0,o:100,h:120,l:80,c:110}],{elapsedMs:240000});
-  assert.equal(a.side,null);assert.deepEqual(a.entries.map(e=>e.crossed),[false,false]);
+  assert.equal(a.side,null);assert.deepEqual(a.entries.map(e=>e.crossed),[false,false,false,false]);
   assert.equal('exit' in a,false);
 });
 
-test('timed strategy has no sell/exit trigger at any point in a window',()=>{
+test('rung ladder has no sell/exit trigger at any point in a window',()=>{
   const a=timedWindow({o:100,h:110,l:99,c:105},
     [{minute:0,o:105,h:105,l:103,c:103},{minute:1,o:103,h:104,l:102,c:102},{minute:4,o:102,h:102,l:90,c:91}],
     {elapsedMs:240000});
@@ -53,7 +53,7 @@ test('timed strategy has no sell/exit trigger at any point in a window',()=>{
   assert.match(bot.snapshot().strategy.exit,/No sell/);
 });
 
-test('same minute schedule scales unchanged to five-minute windows',()=>{
+test('the 25% rung also works in a five-minute window',()=>{
   const a=timedWindow({o:100,h:106,l:99,c:105},
     [{minute:0,o:105,h:105,l:103.5,c:104}],{windowMs:300000,elapsedMs:20000});
   assert.equal(a.entries[0].crossed,true);assert.equal(a.entries[0].shares,100);

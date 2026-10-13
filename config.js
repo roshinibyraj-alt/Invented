@@ -2,9 +2,12 @@
 
 module.exports = {
   DEMO_CAPITAL: 10000,
-  FIRST_MINUTE_SHARES: 100,
-  SECOND_MINUTE_SHARES: 200,
-  MOVE_TRIGGER_PCT: 25,
+  ENTRY_RUNGS: [
+    { movePct: 25, shares: 100 },
+    { movePct: 50, shares: 200 },
+    { movePct: 75, shares: 300 },
+    { movePct: 90, shares: 400 },
+  ],
   DEMO_CAPITAL_15M: 10000,
   DEMO_CAPITAL_5M: 10000,
   MIN_ENTRY_ASK: 0.05,

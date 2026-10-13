@@ -141,7 +141,7 @@ class WickBot{
     const p={id:`${this.timeframe}-${start}-${trigger.side}-${key}`,timeframe:this.timeframe,
       windowMs:this.windowMs,windowStart:start,marketId:this.market.id,slug:this.market.slug,
       title:this.market.title,side:trigger.side,tokenId:token,entryKey:key,entryLabel:trigger.label,
-      triggerPct:key==='first-minute'?25:0,entryType:'TIMED_CANDLE_MOVE',shares:fill.shares,initialShares:fill.shares,
+      triggerPct:saved.movePct,entryType:'CANDLE_MOVE_RUNG',shares:fill.shares,initialShares:fill.shares,
       avgEntry:fill.avg,cost:fill.cost,fees:fee,totalCost:total,status:'OPEN',openedAt:Date.now(),
       thresholdPrice:trigger.thresholdPrice,observedPrice:trigger.observedPrice};
     this.cash-=total;this.positions.unshift(p);state.filled[key]=p.id;delete state.blocks[key];this.status='position_open';
@@ -178,8 +178,8 @@ class WickBot{
     }
     return {now,mode:'DEMO ONLY',status:this.status,error:this.error,
         strategy:{timeframe:this.timeframe,market:`Polymarket BTC ${this.windowMs/60000}-minute UP/DOWN`,capital:this.capital,
-          entries:[{minute:1,movePct:cfg.MOVE_TRIGGER_PCT,shares:cfg.FIRST_MINUTE_SHARES},
-            {minute:2,returnToPreviousClose:true,shares:cfg.SECOND_MINUTE_SHARES}],
+          entries:cfg.ENTRY_RUNGS.map(rung=>({...rung,reference:'previous candle body from close',
+            timing:'any time during the window'})),
           exit:'No sell orders; hold open shares to official market settlement',
           minEntryAsk:cfg.MIN_ENTRY_ASK,maxEntryAsk:cfg.MAX_ENTRY_ASK,
           execution:'PAPER ONLY'},
