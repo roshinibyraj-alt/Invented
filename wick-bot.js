@@ -44,6 +44,27 @@ function clobWinner(up,down){
   if(!Number.isFinite(up)||!Number.isFinite(down))return null;
   return up>=.98?'UP':down>=.98?'DOWN':up>=down?'UP':'DOWN';
 }
+function clobQuotePrices(q){
+  return [q?.mid,q?.bestBid,q?.bestAsk].map(Number).filter(x=>Number.isFinite(x)&&x>=0&&x<=1);
+}
+function clobQuoteValue(q){const prices=clobQuotePrices(q);return prices.length?Math.max(...prices):null}
+function clobQuoteWinner(up,down){
+  const upPrices=clobQuotePrices(up),downPrices=clobQuotePrices(down);
+  const upHigh=upPrices.some(x=>x>=.98),downHigh=downPrices.some(x=>x>=.98);
+  if(upHigh!==downHigh)return upHigh?'UP':'DOWN';
+  const upLow=upPrices.some(x=>x<=.02),downLow=downPrices.some(x=>x<=.02);
+  if(upLow!==downLow)return upLow?'DOWN':'UP';
+  const u=clobQuoteValue(up),d=clobQuoteValue(down);
+  if(u==null||d==null)return null;
+  return u>=d?'UP':'DOWN';
+}
+function opposite(side){return side==='UP'?'DOWN':'UP'}
+function reverseSignal(analysis){
+  if(!analysis?.ready||!Array.isArray(analysis.entries))return analysis;
+  analysis.signalledSide=analysis.side;analysis.side=opposite(analysis.side);
+  for(const entry of analysis.entries)entry.side=opposite(entry.side);
+  analysis.reversed=true;return analysis;
+}
 
 class WickBot{
   constructor({timeframe='5m',windowMs=cfg.WINDOW_MS,capital=cfg.DEMO_CAPITAL_5M}={}){
@@ -53,6 +74,7 @@ class WickBot{
     this.lastCandlesAt=0;this.lastScanAt=null;this.rungState={};this.running=false;
     this.quoteWindowStart=null;this.liveQuotes={UP:{status:'MISSING'},DOWN:{status:'MISSING'}};
     this.closeQuotes=null;this.lastEntryAt=0;
+    this.reversalWindowStart=null;this.reversalSourceWindow=null;
   }
   log(event,data={}){const e={ts:Date.now(),timeframe:this.timeframe,event,...data};this.events.unshift(e);this.events.length=Math.min(100,this.events.length);console.log('[wick] '+JSON.stringify(e))}
   async tick(){
@@ -86,7 +108,9 @@ class WickBot{
           &&now>=p.windowStart+this.windowMs
           &&now-(p.lastSettlementAttempt||0)>=1000) await this.trySettle(p);
       }
+      this.updateReversalState(now);
       if(analysis.ready){
+        if(this.reversalWindowStart===start)reverseSignal(analysis);else analysis.reversed=false;
         const state=this.rungState[start]||(this.rungState[start]={triggered:{},filled:{},blocks:{}});
         for(const entry of analysis.entries){
           const key=entry.key,trigger=state.triggered[key];
@@ -112,6 +136,23 @@ class WickBot{
       if(!this.lastHeartbeat||now-this.lastHeartbeat>30000){this.lastHeartbeat=now;this.log('HEARTBEAT',{cash:this.cash,windowStart:start})}
     }catch(e){this.status='blocked_or_error';this.error=e.message;
       if(this.lastError!==e.message||Date.now()-this.lastErrorAt>30000){this.lastError=e.message;this.lastErrorAt=Date.now();this.log('SCAN_ERROR',{note:e.message})}}
+  }
+  updateReversalState(now){
+    const expected=['move-25','move-50','move-75','move-90'];
+    const grouped=new Map();
+    for(const p of this.positions){if(!grouped.has(p.windowStart))grouped.set(p.windowStart,[]);grouped.get(p.windowStart).push(p)}
+    for(const [windowStart,positions] of grouped){
+      if(windowStart===this.reversalSourceWindow||windowStart===this.reversalWindowStart)continue;
+      const byKey=new Map(positions.map(p=>[p.entryKey,p])),complete=expected.map(key=>byKey.get(key));
+      if(expected.every(key=>byKey.has(key))&&complete.every(p=>p.status==='SETTLED_WIN')&&complete.every(p=>p.side===complete[0].side)){
+        this.reversalSourceWindow=windowStart;this.reversalWindowStart=windowStart+this.windowMs;
+        this.log('ONE_WINDOW_REVERSAL_ARMED',{sourceWindowStart:windowStart,reversalWindowStart:this.reversalWindowStart,trigger:'all_four_rungs_won'});
+      }
+    }
+    if(this.reversalWindowStart!=null&&now>=this.reversalWindowStart+this.windowMs){
+      const active=this.positions.some(p=>p.windowStart===this.reversalWindowStart&&(p.status==='OPEN'||p.status==='PENDING_CLOB_RESULT'));
+      if(!active){this.log('ONE_WINDOW_REVERSAL_COMPLETE',{windowStart:this.reversalWindowStart,result:'settled_win_or_loss'});this.reversalWindowStart=null}
+    }
   }
   async refreshLiveQuotes(now){
     if(!this.market)return;
@@ -167,21 +208,21 @@ class WickBot{
     p.lastSettlementAttempt=Date.now();
     try{
       let quotes=p.closeQuotes;
-      const usable=q=>q?.mid!=null&&Number.isFinite(q.mid)&&Date.now()-q.updatedAt<=5000;
+      const usable=q=>clobQuoteValue(q)!=null&&Number.isFinite(q.updatedAt)&&Date.now()-q.updatedAt<=5000;
       if(!usable(quotes?.UP)||!usable(quotes?.DOWN)){
         const [u,d]=await Promise.allSettled([md.getBook(p.side==='UP'?p.tokenId:p.oppositeTokenId),
           md.getBook(p.side==='DOWN'?p.tokenId:p.oppositeTokenId)]);
         if(u.status==='fulfilled'&&d.status==='fulfilled')quotes={UP:quoteFromBook(u.value,Date.now()),DOWN:quoteFromBook(d.value,Date.now())};
       }
-      const up=usable(quotes?.UP)?quotes.UP.mid:null,down=usable(quotes?.DOWN)?quotes.DOWN.mid:null;
-      if(up==null||down==null||Math.abs(up-down)<1e-9){p.status='PENDING_CLOB_RESULT';this.status='awaiting_clob_result';return}
-      const winner=clobWinner(up,down);
+      const up=usable(quotes?.UP)?clobQuoteValue(quotes.UP):null,down=usable(quotes?.DOWN)?clobQuoteValue(quotes.DOWN):null;
+      if(up==null||down==null){p.status='PENDING_CLOB_RESULT';this.status='awaiting_clob_result';return}
+      const winner=clobQuoteWinner(quotes.UP,quotes.DOWN);
       if(!winner){p.status='PENDING_CLOB_RESULT';this.status='awaiting_clob_result';return}
       const won=p.side===winner?1:0;
       p.payout=won;p.proceeds=won*p.shares;p.realizedPnl=(p.realizedPnl||0)+p.proceeds-p.totalCost;
-      p.status=won?'SETTLED_WIN':'SETTLED_LOSS';p.settledAt=Date.now();p.settlementBasis='CLOB_MID_FINAL_3S';
-      p.settlementMid=p.side==='UP'?up:down;p.winningSide=winner;this.cash+=p.proceeds;
-      this.log('PAPER_WICK_SETTLED',{id:p.id,status:p.status,pnl:p.realizedPnl,winner,upMid:up,downMid:down,basis:p.settlementBasis});
+      p.status=won?'SETTLED_WIN':'SETTLED_LOSS';p.settledAt=Date.now();p.settlementBasis='CLOB_FINAL_3S_BINARY_QUOTE';
+      p.settlementQuote=p.side==='UP'?up:down;p.winningSide=winner;this.cash+=p.proceeds;
+      this.log('PAPER_WICK_SETTLED',{id:p.id,status:p.status,pnl:p.realizedPnl,winner,upQuote:up,downQuote:down,basis:p.settlementBasis});
     }catch(e){p.status='PENDING_CLOB_RESULT';this.status='awaiting_clob_result';}
   }
   snapshot(){
@@ -205,9 +246,9 @@ class WickBot{
         strategy:{timeframe:'5m',market:'Polymarket BTC 5-minute UP/DOWN',capital:this.capital,
           entries:cfg.ENTRY_RUNGS.map(rung=>({...rung,reference:'previous candle body from close',
             timing:'until 240 seconds; at least 2 seconds between rung fills'})),
-          exit:'Final 3-second CLOB midpoint >= $0.98 wins; otherwise higher midpoint wins',
+          exit:'Final 3-second CLOB bid/ask/mid >= $0.98 wins; otherwise higher available quote wins',
           minEntryAsk:cfg.MIN_ENTRY_ASK,maxEntryAsk:cfg.MAX_ENTRY_ASK,
-          entryCutoffSeconds:240,rungDelaySeconds:2,fees:'Polymarket taker fees on simulated buys',execution:'PAPER ONLY'},
+          entryCutoffSeconds:240,rungDelaySeconds:2,reversal:'All four filled rungs must settle as wins; reverse next window only',fees:'Polymarket taker fees on simulated buys',execution:'PAPER ONLY'},
        account:{capital:this.capital,cash:this.cash,realizedPnl,unrealizedPnl,equity:this.cash+markedValue,
          markedValue,unpricedOpenPositions,
         openPositions:this.positions.filter(p=>p.status==='OPEN'||p.status==='PENDING_CLOB_RESULT').length},
@@ -215,8 +256,8 @@ class WickBot{
       livePrices:{marketSlug:this.market?.slug||null,updatedAt:Math.max(this.liveQuotes.UP.updatedAt||0,this.liveQuotes.DOWN.updatedAt||0)||null,
         UP:this.liveQuotes.UP,DOWN:this.liveQuotes.DOWN},
        scanner:{timeframe:this.timeframe,lastScanAt:this.lastScanAt,candleSource:`Kraken XBT/USD 1m; minute 1/2 extrema and live move compared with previous completed ${this.windowMs/60000}m window`,
-         marketResolution:'Final 3-second CLOB midpoint; >= $0.98 wins, otherwise higher midpoint wins',analysis:this.analysis||null,
-           previousCandles:prior,rungState:this.rungState[this.market?.start]||null},
+         marketResolution:'Final 3-second CLOB bid/ask/mid; >= $0.98 wins, otherwise higher available quote wins',analysis:this.analysis||null,
+           previousCandles:prior,rungState:this.rungState[this.market?.start]||null,reversalWindowStart:this.reversalWindowStart},
       positions:this.positions.slice(0,50),events:this.events};
   }
   start(){if(this.running)return;this.running=true;this.log('BOT_STARTED',{timeframe:this.timeframe,note:`Demo-only BTC ${this.windowMs/60000}m candle-move ladder; no live orders.`});
@@ -225,4 +266,4 @@ class WickBot{
   stop(){this.running=false;clearTimeout(this.timer)}
 }
 module.exports=WickBot;
- module.exports._test={sweep,feeFor,payout,quoteFromBook,clobWinner};
+ module.exports._test={sweep,feeFor,payout,quoteFromBook,clobWinner,clobQuoteWinner,clobQuoteValue,reverseSignal};

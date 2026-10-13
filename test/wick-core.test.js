@@ -50,7 +50,7 @@ test('rung ladder has no sell/exit trigger at any point in a window',()=>{
   assert.equal('exit' in a,false);
   const Bot=require('../wick-bot'),bot=new Bot({timeframe:'5m',windowMs:300000,capital:1000});
   assert.equal(typeof bot.tryExit,'undefined');
-  assert.match(bot.snapshot().strategy.exit,/higher midpoint wins/);
+  assert.match(bot.snapshot().strategy.exit,/higher available quote wins/);
 });
 
 test('the 25% rung also works in a five-minute window',()=>{
@@ -131,4 +131,44 @@ test('five-minute entries are blocked at 240 seconds',()=>{
   const a=timedWindow({o:100,h:106,l:99,c:105},
     [{minute:4,o:105,h:105,l:100,c:101}],{elapsedMs:240000});
   assert.ok(a.entries.every(e=>!e.crossed));
+});
+
+test('terminal one-sided CLOB bid or ask can identify the binary winner',()=>{
+  assert.equal(_test.clobQuoteWinner({bestAsk:.01},{bestBid:.99}),'DOWN');
+  assert.equal(_test.clobQuoteWinner({bestBid:.99},{bestAsk:.01}),'UP');
+  assert.equal(_test.clobQuoteWinner({bestBid:.61},{bestAsk:.59}),'UP');
+  assert.equal(_test.clobQuoteWinner({bestAsk:.01},{}),'DOWN');
+  assert.equal(_test.clobQuoteWinner({},{}),null);
+});
+test('all four rung wins arm one inverted window, then normal signalling resumes',()=>{
+  const Bot=require('../wick-bot'),bot=new Bot({timeframe:'5m',windowMs:300000,capital:10000});
+  const source=900000;bot.positions=['move-25','move-50','move-75','move-90'].map(entryKey=>({windowStart:source,entryKey,status:'SETTLED_WIN',side:'UP'}));
+  bot.updateReversalState(source+300000);assert.equal(bot.reversalWindowStart,source+300000);
+  const a={ready:true,side:'UP',entries:[{side:'UP'},{side:'UP'}]};_test.reverseSignal(a);
+  assert.equal(a.signalledSide,'UP');assert.equal(a.side,'DOWN');assert.ok(a.entries.every(e=>e.side==='DOWN'));
+  bot.positions.push({windowStart:source+300000,entryKey:'move-25',status:'SETTLED_LOSS'});
+  bot.updateReversalState(source+600000);assert.equal(bot.reversalWindowStart,null);
+});
+test('a loss on any rung does not arm the reversal window',()=>{
+  const Bot=require('../wick-bot'),bot=new Bot({timeframe:'5m',windowMs:300000,capital:10000});
+  bot.positions=['move-25','move-50','move-75','move-90'].map((entryKey,i)=>({windowStart:900000,entryKey,status:i===2?'SETTLED_LOSS':'SETTLED_WIN',side:'UP'}));
+  bot.updateReversalState(1200000);assert.equal(bot.reversalWindowStart,null);
+});
+test('simultaneously crossed rung fills are held at least two seconds apart',async()=>{
+  const Bot=require('../wick-bot'),md=require('../wick-market-data');const oldBook=md.getBook,oldNow=Date.now;
+  md.getBook=async()=>({asks:[{price:.5,size:1000}]});let now=100000;Date.now=()=>now;
+  try{const bot=new Bot({timeframe:'5m',windowMs:300000,capital:10000}),start=now-1000;
+    bot.market={id:'t',slug:'t',title:'t',tokens:{UP:'u',DOWN:'d'},raw:{feesEnabled:false}};bot.rungState[start]={triggered:{},filled:{},blocks:{}};
+    const first={side:'UP',shares:100,key:'move-25',label:'25%',windowEnd:now+10000},second={side:'UP',shares:200,key:'move-50',label:'50%',windowEnd:now+10000};
+    await bot.tryEnter(start,first,'move-25');now+=1000;await bot.tryEnter(start,second,'move-50');assert.equal(bot.positions.length,1);
+    now+=1000;await bot.tryEnter(start,second,'move-50');assert.equal(bot.positions.length,2);assert.ok(bot.positions[0].openedAt-bot.positions[1].openedAt>=2000);
+  }finally{md.getBook=oldBook;Date.now=oldNow}
+});
+test('settlement resolves from fresh terminal bids/asks without requiring midpoints',async()=>{
+  const Bot=require('../wick-bot'),md=require('../wick-market-data');const oldBook=md.getBook,now=Date.now();
+  md.getBook=async()=>{throw new Error('should use captured final-window quotes')};
+  try{const bot=new Bot({timeframe:'5m',windowMs:300000,capital:10000}),start=now-300000;bot.cash=9000;
+    const p={id:'settle-test',side:'UP',windowStart:start,windowMs:300000,tokenId:'up',oppositeTokenId:'down',status:'OPEN',shares:100,totalCost:50,closeQuotes:{UP:{bestAsk:.01,updatedAt:now-1000},DOWN:{bestBid:.99,updatedAt:now-1000}}};
+    bot.positions=[p];await bot.trySettle(p);assert.equal(p.status,'SETTLED_LOSS');assert.equal(p.winningSide,'DOWN');assert.equal(p.payout,0);assert.equal(p.realizedPnl,-50);assert.equal(bot.cash,9000);
+  }finally{md.getBook=oldBook}
 });
