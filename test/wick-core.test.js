@@ -10,7 +10,7 @@ test('aggregates one-minute bars into quarter-hour and hourly slots',()=>{
   assert.deepEqual(bars[0],{t:0,o:10,h:13,l:9,c:12,v:5});
 });
 
-function timedWindow(previous,rows,{windowMs=900000,elapsedMs=30000}={}){
+function timedWindow(previous,rows,{windowMs=300000,elapsedMs=30000}={}){
   const minute=[];
   for(let j=0;j<windowMs/60000;j++)minute.push({t:j*60000,...previous,v:1});
   for(const row of rows)minute.push({t:windowMs+row.minute*60000,o:row.o,h:row.h,l:row.l,c:row.c,v:1});
@@ -19,20 +19,20 @@ function timedWindow(previous,rows,{windowMs=900000,elapsedMs=30000}={}){
 
 test('green previous candle triggers the four UP buy rungs on adverse drops throughout the window',()=>{
   const previous={o:100,h:106,l:99,c:105};
-  const all=timedWindow(previous,[{minute:4,o:104,h:105,l:100.4,c:101}],{elapsedMs:270000});
+  const all=timedWindow(previous,[{minute:3,o:104,h:105,l:100.4,c:101}],{elapsedMs:230000});
   assert.equal(all.previousBody,5);assert.equal(all.side,'UP');
   assert.deepEqual(all.entries.map(e=>e.movePct),[25,50,75,90]);
   assert.deepEqual(all.entries.map(e=>e.shares),[100,200,300,400]);
   assert.deepEqual(all.entries.map(e=>e.crossed),[true,true,true,true]);
   assert.deepEqual(all.entries.map(e=>e.key),['move-25','move-50','move-75','move-90']);
-  assert.ok(all.entries.every(e=>e.windowEnd===all.windowStart+900000));
-  const partial=timedWindow(previous,[{minute:4,o:104,h:105,l:102.4,c:103}],{elapsedMs:270000});
+  assert.ok(all.entries.every(e=>e.windowEnd===all.windowStart+300000));
+  const partial=timedWindow(previous,[{minute:3,o:104,h:105,l:102.4,c:103}],{elapsedMs:230000});
   assert.deepEqual(partial.entries.map(e=>e.crossed),[true,true,false,false]);
 });
 
 test('red previous candle mirrors the four buy rungs on DOWN throughout the window',()=>{
   const previous={o:105,h:106,l:99,c:100};
-  const all=timedWindow(previous,[{minute:4,o:104,h:104.6,l:99,c:104}],{elapsedMs:270000});
+  const all=timedWindow(previous,[{minute:3,o:104,h:104.6,l:99,c:104}],{elapsedMs:230000});
   assert.equal(all.side,'DOWN');assert.deepEqual(all.entries.map(e=>e.crossed),[true,true,true,true]);
   assert.deepEqual(all.entries.map(e=>e.shares),[100,200,300,400]);
 });
@@ -50,7 +50,7 @@ test('rung ladder has no sell/exit trigger at any point in a window',()=>{
   assert.equal('exit' in a,false);
   const Bot=require('../wick-bot'),bot=new Bot({timeframe:'5m',windowMs:300000,capital:1000});
   assert.equal(typeof bot.tryExit,'undefined');
-  assert.match(bot.snapshot().strategy.exit,/No sell/);
+  assert.match(bot.snapshot().strategy.exit,/higher midpoint wins/);
 });
 
 test('the 25% rung also works in a five-minute window',()=>{
@@ -60,12 +60,11 @@ test('the 25% rung also works in a five-minute window',()=>{
   assert.equal('exit' in a,false);
 });
 
-test('five- and fifteen-minute bot instances have fully separate cash and positions',()=>{
+test('only one 5-minute bot and one $10,000 demo bankroll are active',()=>{
   const MultiBot=require('../multi-bot'),bots=new MultiBot();
-  const five=bots.bots['5m'],fifteen=bots.bots['15m'];
-  assert.notEqual(five,fifteen);assert.equal(five.cash,10000);assert.equal(fifteen.cash,10000);
-  five.cash-=25;assert.equal(fifteen.cash,10000);
-  assert.equal(bots.snapshot().account.capital,20000);
+  assert.deepEqual(Object.keys(bots.bots),['5m']);
+  assert.equal(bots.bots['5m'].cash,10000);
+  assert.equal(bots.snapshot().account.capital,10000);
   assert.equal(bots.snapshot().timeframes['5m'].strategy.entries[0].shares,100);
 });
 
@@ -106,6 +105,7 @@ test('paper fill records the crossed rung percentage and share size',async()=>{
 
 test('paper BTC taker fee and official outcome settlement are applied',()=>{
   assert.ok(Math.abs(_test.feeFor({feesEnabled:true,feeSchedule:{rate:.07,exponent:1}},.5,300)-5.25)<1e-9);
+  assert.ok(Math.abs(_test.feeFor({feesEnabled:false},.5,300)-5.25)<1e-9);
   const settled={closed:true,outcomes:['Up','Down'],outcomePrices:['1','0']};
   assert.equal(_test.payout(settled,'UP'),1);
   assert.equal(_test.payout(settled,'DOWN'),0);
@@ -118,4 +118,17 @@ test('live CLOB quote selects highest bid and lowest ask with visible sizes',()=
   assert.equal(q.bestBid,.46);assert.equal(q.bidSize,3);
   assert.equal(q.bestAsk,.51);assert.equal(q.askSize,7);
   assert.equal(q.updatedAt,1234);assert.equal(q.status,'LIVE');
+  assert.equal(q.mid,.485);
+});
+
+test('CLOB final settlement prioritizes the 0.98 threshold then the higher midpoint',()=>{
+  assert.equal(_test.clobWinner(.98,.02),'UP');
+  assert.equal(_test.clobWinner(.45,.55),'DOWN');
+  assert.equal(_test.clobWinner(.5,.5),'UP');
+});
+
+test('five-minute entries are blocked at 240 seconds',()=>{
+  const a=timedWindow({o:100,h:106,l:99,c:105},
+    [{minute:4,o:105,h:105,l:100,c:101}],{elapsedMs:240000});
+  assert.ok(a.entries.every(e=>!e.crossed));
 });

@@ -1,7 +1,8 @@
 # Paper bot runbook
 
-1. Verify the 5m and 15m cards show independent $10,000 bankrolls and live UP/DOWN quotes.
-2. The prior candle body is `abs(close-open)`; thresholds are measured from its close.
-3. A green prior candle triggers 100 UP shares on a 25% fall in minute 1, then 200 UP shares if price returns to the prior close in minute 2. A red candle mirrors this for DOWN.
-4. Entry attempts expire at the end of their designated minute if full visible ask depth in the $0.05-$0.60 band is unavailable. Confirm entry and exit prices in the trade list.
-5. No sell orders or stop-loss/take-profit exits are used. Open shares remain until Polymarket's official result. All state resets if Railway restarts.
+1. Verify the dashboard shows one 5-minute market, a $10,000 bankroll, and separate live UP/DOWN CLOB quotes.
+2. The previous completed 5-minute candle's body is `abs(close-open)`. For green candles, a fall from the previous close buys UP; for red candles, a rise buys DOWN.
+3. Rungs: 25%/100 shares, 50%/200, 75%/300, 90%/400. No new trigger or fill after 240 seconds; fills are spaced at least 2 seconds apart.
+4. Entry fills require complete displayed ask depth in the $0.05–$0.60 band. Simulated buys include the Polymarket BTC taker fee.
+5. The final 3 seconds' fresh UP/DOWN CLOB midpoints decide the winner: a midpoint at least $0.98 wins; otherwise the higher midpoint wins (an exact tie is UP). A win pays $1/share; a loss pays $0/share.
+6. Paper trades and account state reset on process restart. No live order placement is present.

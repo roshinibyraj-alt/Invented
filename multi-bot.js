@@ -5,10 +5,7 @@ const Bot=require('./wick-bot');
 
 class MultiBot {
   constructor(){
-    this.bots={
-      '5m':new Bot({timeframe:'5m',windowMs:5*60*1000,capital:cfg.DEMO_CAPITAL_5M}),
-      '15m':new Bot({timeframe:'15m',windowMs:15*60*1000,capital:cfg.DEMO_CAPITAL_15M}),
-    };
+    this.bots={'5m':new Bot({timeframe:'5m',windowMs:5*60*1000,capital:cfg.DEMO_CAPITAL_5M})};
   }
   start(){for(const bot of Object.values(this.bots))bot.start()}
   stop(){for(const bot of Object.values(this.bots))bot.stop()}
@@ -20,10 +17,10 @@ class MultiBot {
     const status=states.some(s=>s.status==='blocked_or_error')?'blocked_or_error':
       states.some(s=>['scanning','position_open'].includes(s.status))?
         (openPositions?'position_open':'scanning'):'waiting_for_market';
-    const primary=timeframes['15m'];
+    const primary=timeframes['5m'];
     return {...primary,now:Date.now(),status,timeframes,positions,events,
       error:states.find(s=>s.error)?.error||null,
-      strategy:{execution:'PAPER ONLY',independentTimeframes:true},
+      strategy:{execution:'PAPER ONLY',timeframes:['5m']},
       account:{capital:states.reduce((n,s)=>n+s.account.capital,0),
         cash:states.reduce((n,s)=>n+s.account.cash,0),
         realizedPnl:states.reduce((n,s)=>n+s.account.realizedPnl,0),

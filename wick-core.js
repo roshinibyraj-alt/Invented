@@ -18,7 +18,7 @@ function aggregate(candles, intervalMs) {
   return [...groups.values()];
 }
 
-function detectTimedStrategy({minuteCandles,windowStart,windowMs=900000,now=Date.now()}) {
+function detectTimedStrategy({minuteCandles,windowStart,windowMs=300000,now=Date.now()}) {
   const minutes=minuteCandles.map(toCandle).sort((a,b)=>a.t-b.t);
   const bars=aggregate(minutes,windowMs);
   const history=bars.filter(x=>x.t<windowStart);
@@ -34,7 +34,7 @@ function detectTimedStrategy({minuteCandles,windowStart,windowMs=900000,now=Date
     const move=previousBody*movePct/100;
     const thresholdPrice=previousColor==='green'?previous.c-move
       :previousColor==='red'?previous.c+move:null;
-    const crossed=Boolean(side&&elapsedMs>=0&&elapsedMs<windowMs&&
+    const crossed=Boolean(side&&elapsedMs>=0&&elapsedMs<cfg.ENTRY_CUTOFF_MS&&
       (previousColor==='green'?current.l<=thresholdPrice:current.h>=thresholdPrice));
     return {key:`move-${movePct}`,label:`${movePct}% adverse move · ${shares} shares`,
       movePct,shares,side,thresholdPrice,windowEnd:windowStart+windowMs,crossed,
