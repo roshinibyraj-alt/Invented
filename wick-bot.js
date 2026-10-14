@@ -46,11 +46,7 @@ function clobQuotePrices(q){
 function clobQuoteValue(q){const prices=clobQuotePrices(q);return prices.length?Math.max(...prices):null}
 function clobQuoteFloor(q){const prices=clobQuotePrices(q);return prices.length?Math.min(...prices):null}
 function takeProfitHit(q,now=Date.now()){return q&&Number.isFinite(q.updatedAt)&&now-q.updatedAt<=5000&&clobQuotePrices(q).some(price=>price>=.99)}
-function stopLossHit(q,now=Date.now()){return q&&Number.isFinite(q.updatedAt)&&now-q.updatedAt<=5000&&clobQuotePrices(q).some(price=>price<=.01)}
-function signalSideEntry(entry){
-  return {...entry,shares:500,key:'one-window-signal',
-    label:'One-window signalled side · 500 shares'};
-}
+function stopLossHit(q,now=Date.now(),threshold=.01){return q&&Number.isFinite(q.updatedAt)&&now-q.updatedAt<=5000&&clobQuotePrices(q).some(price=>price<=threshold)}
 function clobQuoteWinner(up,down){
   const upPrices=clobQuotePrices(up),downPrices=clobQuotePrices(down);
   const upHigh=upPrices.some(x=>x>=.98),downHigh=downPrices.some(x=>x>=.98);
@@ -69,7 +65,6 @@ class WickBot{
     this.lastCandlesAt=0;this.lastScanAt=null;this.rungState={};this.running=false;
     this.quoteWindowStart=null;this.liveQuotes={UP:{status:'MISSING'},DOWN:{status:'MISSING'}};
     this.closeQuotes=null;this.lastEntryAt=0;
-    this.oneWindowOverrides=new Map();this.overrideArmedSources=new Set();
   }
   log(event,data={}){const e={ts:Date.now(),timeframe:this.timeframe,event,...data};this.events.unshift(e);this.events.length=Math.min(100,this.events.length);console.log('[wick] '+JSON.stringify(e))}
   async tick(){
@@ -103,30 +98,23 @@ class WickBot{
           &&now>=p.windowStart+this.windowMs
           &&now-(p.lastSettlementAttempt||0)>=1000) await this.trySettle(p);
       }
-      this.updateOneWindowOverride(now);
       if(analysis.ready){
         const state=this.rungState[start]||(this.rungState[start]={triggered:{},filled:{},blocks:{}});
-        if(this.oneWindowOverrides.has(start)){
-          const key='one-window-signal';
-          let saved=state.triggered[key];
-          if(!saved){
-            const signal=analysis.entries.find(entry=>entry.crossed);
-            if(signal){
-              saved=signalSideEntry(signal);saved.windowEnd=start+this.windowMs;saved.triggeredAt=now;
-              state.triggered[key]=saved;
-              this.log('ONE_WINDOW_SIGNAL_ENTRY',{side:saved.side,shares:500});
-            }
-          }
+        const lateEntry=this.prepareLateFlatEntry(start,analysis,state,now);
+        if(lateEntry)this.log('LATE_FLAT_SIGNAL_TRIGGERED',{side:lateEntry.side,shares:lateEntry.shares,
+          rungFills:lateEntry.rungFills,stopLoss:.35});
+        if(state.pausedForLateFlat){
+          const key='late-flat-500',saved=state.triggered[key];
           if(saved&&!state.filled[key]){
             if(now<saved.windowEnd&&now-start<cfg.ENTRY_CUTOFF_MS)await this.tryEnter(start,saved,key);
             else if(!state.expired?.[key]){
               state.expired=state.expired||{};state.expired[key]=true;
-              this.log('ONE_WINDOW_SIGNAL_EXPIRED',{windowStart:start,shares:500});
+              this.log('LATE_FLAT_SIGNAL_EXPIRED',{windowStart:start,shares:500});
             }
           }
           for(const entry of analysis.entries){
-            entry.triggered=Boolean(saved);entry.filled=Boolean(state.filled[key]);
-            entry.expired=Boolean(state.expired?.[key]);entry.block='One-window 500-share signalled-side trade';
+            entry.triggered=Boolean(state.triggered['late-flat-500']);entry.filled=Boolean(state.filled['late-flat-500']);
+            entry.expired=Boolean(state.expired?.['late-flat-500']);entry.block='Adverse-move rungs paused after 90-second flat entry';
           }
         }else{
           for(const entry of analysis.entries){
@@ -155,24 +143,17 @@ class WickBot{
     }catch(e){this.status='blocked_or_error';this.error=e.message;
       if(this.lastError!==e.message||Date.now()-this.lastErrorAt>30000){this.lastError=e.message;this.lastErrorAt=Date.now();this.log('SCAN_ERROR',{note:e.message})}}
   }
-  updateOneWindowOverride(now=Date.now()){
-    const outcomesByWindow=new Map();
-    for(const p of this.positions){
-      if(p.status!=='SETTLED_WIN'&&p.status!=='SETTLED_LOSS')continue;
-      const outcome=outcomesByWindow.get(p.windowStart)||{wins:0,losses:0};
-      if(p.status==='SETTLED_WIN')outcome.wins++;
-      else outcome.losses++;
-      outcomesByWindow.set(p.windowStart,outcome);
-    }
-    for(const [windowStart,{wins,losses}] of outcomesByWindow){
-      if((wins<3&&losses<3)||this.overrideArmedSources.has(windowStart))continue;
-      this.overrideArmedSources.add(windowStart);
-      const currentStart=Math.floor(now/this.windowMs)*this.windowMs;
-      const nextWindowStart=Math.max(windowStart+this.windowMs,currentStart+this.windowMs);
-      this.oneWindowOverrides.set(nextWindowStart,windowStart);
-      this.log('ONE_WINDOW_SIGNAL_ARMED',{sourceWindowStart:windowStart,wins,losses,nextWindowStart,
-        shares:500,trigger:losses>=3?'three_or_more_settled_rung_losses':'three_or_more_settled_rung_wins'});
-    }
+  prepareLateFlatEntry(start,analysis,state,now=Date.now()){
+    if(state.lateFlatEvaluated||!analysis.side||now-start<90000)return null;
+    state.lateFlatEvaluated=true;
+    const rungFills=cfg.ENTRY_RUNGS.filter(rung=>state.filled[`move-${rung.movePct}`]).length;
+    if(rungFills>1)return null;
+    const entry={side:analysis.side,key:'late-flat-500',shares:500,
+      label:'90-second flat signalled-side · 500 shares',windowEnd:start+this.windowMs,
+      stopLossThreshold:.35,entryType:'LATE_FLAT_SIGNAL',rungFills};
+    state.pausedForLateFlat=true;
+    state.triggered['late-flat-500']={...entry,triggeredAt:now};
+    return entry;
   }
   async refreshLiveQuotes(now){
     if(!this.market)return;
@@ -195,7 +176,9 @@ class WickBot{
         p.markBid=q?.bestBid??null;p.markUpdatedAt=q?.updatedAt||now;p.markStatus=q?.bestBid!=null?'LIVE':'MISSING';
         if(p.status==='OPEN'){
           if(takeProfitHit(q,now))this.finalizePosition(p,true,'TP_HIT_0_99',clobQuoteValue(q));
-          else if(stopLossHit(q,now))this.finalizePosition(p,false,'STOP_LOSS_HIT_0_01',clobQuoteFloor(q));
+          else if(stopLossHit(q,now,p.stopLossThreshold??.01))this.finalizePosition(p,false,
+            `STOP_LOSS_HIT_0_${Math.round((p.stopLossThreshold??.01)*100).toString().padStart(2,'0')}`,
+            clobQuoteFloor(q));
         }
       }
     }
@@ -219,11 +202,12 @@ class WickBot{
     const p={id:`${this.timeframe}-${start}-${trigger.side}-${key}`,timeframe:this.timeframe,
        windowMs:this.windowMs,windowStart:start,marketId:this.market.id,slug:this.market.slug,
       title:this.market.title,side:trigger.side,tokenId:token,entryKey:key,entryLabel:trigger.label,
-      triggerPct:trigger.movePct,entryType:'CANDLE_MOVE_RUNG',shares:fill.shares,initialShares:fill.shares,
+      triggerPct:trigger.movePct,entryType:trigger.entryType||'CANDLE_MOVE_RUNG',shares:fill.shares,initialShares:fill.shares,
        oppositeTokenId:this.market.tokens[trigger.side==='UP'?'DOWN':'UP'],
         avgEntry:fill.avg,cost:fill.cost,fees:fee,totalCost:total,status:'OPEN',openedAt:Date.now(),
         fillModel:'FULL_SIZE_AT_BEST_ASK',visibleAskSize:fill.visibleDepth,simulatedShares:fill.simulatedShares,
-      thresholdPrice:trigger.thresholdPrice,observedPrice:trigger.observedPrice};
+       thresholdPrice:trigger.thresholdPrice,observedPrice:trigger.observedPrice,
+        ...(trigger.stopLossThreshold!=null?{stopLossThreshold:trigger.stopLossThreshold}:{})};
     this.cash-=total;this.positions.unshift(p);state.filled[key]=p.id;delete state.blocks[key];this.status='position_open';this.lastEntryAt=Date.now();
     this.log('PAPER_TIMED_ENTRY',{timeframe:this.timeframe,id:p.id,side:p.side,entry:key,label:p.entryLabel,
       shares:p.shares,entryPrice:p.avgEntry,avgEntry:p.avgEntry,cost:p.totalCost,
@@ -236,7 +220,7 @@ class WickBot{
       this.finalizePosition(p,result===1,result===1?'OFFICIAL_RESOLUTION_WIN':'OFFICIAL_RESOLUTION_LOSS',null);
     }catch(e){p.status='PENDING_CLOB_RESULT';p.settlementError=e.message;if(!p.lastPendingLog||Date.now()-p.lastPendingLog>30000){p.lastPendingLog=Date.now();this.log('PAPER_OFFICIAL_RESULT_PENDING',{id:p.id,marketId:p.marketId,error:e.message})}}
   }
-  finalizePosition(p,won,reason,triggerQuote){if(!['OPEN','PENDING_CLOB_RESULT'].includes(p.status))return;p.payout=won?1:0;p.proceeds=won?p.shares:0;p.realizedPnl=p.proceeds-p.totalCost;p.status=won?'SETTLED_WIN':'SETTLED_LOSS';p.settledAt=Date.now();p.settlementBasis=reason;p.tpTriggerQuote=reason==='TP_HIT_0_99'?triggerQuote:null;p.stopTriggerQuote=reason==='STOP_LOSS_HIT_0_01'?triggerQuote:null;p.winningSide=won?p.side:null;this.cash+=p.proceeds;const event=reason==='TP_HIT_0_99'?'PAPER_TP_HIT':reason==='STOP_LOSS_HIT_0_01'?'PAPER_STOP_LOSS':won?'PAPER_OFFICIAL_WIN':'PAPER_OFFICIAL_LOSS';this.log(event,{id:p.id,status:p.status,pnl:p.realizedPnl,side:p.side,shares:p.shares,proceeds:p.proceeds,triggerQuote,tpTarget:.99,stopLoss:.01,reason})}
+  finalizePosition(p,won,reason,triggerQuote){if(!['OPEN','PENDING_CLOB_RESULT'].includes(p.status))return;p.payout=won?1:0;p.proceeds=won?p.shares:0;p.realizedPnl=p.proceeds-p.totalCost;p.status=won?'SETTLED_WIN':'SETTLED_LOSS';p.settledAt=Date.now();p.settlementBasis=reason;p.tpTriggerQuote=reason==='TP_HIT_0_99'?triggerQuote:null;p.stopTriggerQuote=reason.startsWith('STOP_LOSS_HIT_')?triggerQuote:null;p.winningSide=won?p.side:null;this.cash+=p.proceeds;const event=reason==='TP_HIT_0_99'?'PAPER_TP_HIT':reason.startsWith('STOP_LOSS_HIT_')?'PAPER_STOP_LOSS':won?'PAPER_OFFICIAL_WIN':'PAPER_OFFICIAL_LOSS';this.log(event,{id:p.id,status:p.status,pnl:p.realizedPnl,side:p.side,shares:p.shares,proceeds:p.proceeds,triggerQuote,tpTarget:.99,stopLoss:p.stopLossThreshold??.01,reason})}
   snapshot(){
     const prior=this.market?aggregate(this.candles,this.windowMs)
       .filter(x=>x.t<this.market.start).slice(-3):[];
@@ -257,7 +241,7 @@ class WickBot{
             timing:'until 240 seconds; at least 2 seconds between rung fills'})),
           exit:'Any fresh own-side CLOB bid/ask/mid >= $0.99 immediately pays $1/share; <= $0.01 immediately pays $0/share; otherwise use official Gamma outcome at window close',
           minEntryAsk:cfg.MIN_ENTRY_ASK,maxEntryAsk:cfg.MAX_ENTRY_ASK,
-          entryCutoffSeconds:240,rungDelaySeconds:2,threeWinRule:'Three or more settled rung wins or losses arm one 500-share trade on the next window signal; it buys the signal side and normal strategy resumes after that window',
+          entryCutoffSeconds:240,rungDelaySeconds:2,lateFlatRule:'At 90 seconds, if zero or one adverse rung has filled, buy 500 shares on the signalled side; this position alone stops at $0.35 and pauses adverse rungs for the rest of the window',
           entryFillModel:'Fill the full requested size at the best eligible ask, ignoring displayed size; asks must be within $0.05-$0.60',
           fees:'Polymarket taker fees on simulated buys',execution:'PAPER ONLY'},
        account:{capital:this.capital,cash:this.cash,realizedPnl,unrealizedPnl,equity:this.cash+markedValue,
@@ -268,9 +252,7 @@ class WickBot{
         UP:this.liveQuotes.UP,DOWN:this.liveQuotes.DOWN},
        scanner:{timeframe:this.timeframe,lastScanAt:this.lastScanAt,candleSource:`Kraken XBT/USD 1m; minute 1/2 extrema and live move compared with previous completed ${this.windowMs/60000}m window`,
           marketResolution:'Own-side fresh CLOB quote >= $0.99 settles $1/share, <= $0.01 settles $0/share immediately; otherwise official Gamma result is retried until resolved',analysis:this.analysis||null,
-            previousCandles:prior,rungState:this.rungState[this.market?.start]||null,
-            oneWindowOverride:{active:this.oneWindowOverrides.has(this.market?.start),
-              sourceWindowStart:this.oneWindowOverrides.get(this.market?.start)||null}},
+             previousCandles:prior,rungState:this.rungState[this.market?.start]||null},
       positions:this.positions.slice(0,50),events:this.events};
   }
   start(){if(this.running)return;this.running=true;this.log('BOT_STARTED',{timeframe:this.timeframe,note:`Demo-only BTC ${this.windowMs/60000}m candle-move ladder; no live orders.`});
@@ -279,4 +261,4 @@ class WickBot{
   stop(){this.running=false;clearTimeout(this.timer)}
 }
 module.exports=WickBot;
-module.exports._test={simulateAtBestAsk,feeFor,payout,quoteFromBook,clobWinner,clobQuoteWinner,clobQuoteValue,clobQuoteFloor,takeProfitHit,stopLossHit,signalSideEntry};
+module.exports._test={simulateAtBestAsk,feeFor,payout,quoteFromBook,clobWinner,clobQuoteWinner,clobQuoteValue,clobQuoteFloor,takeProfitHit,stopLossHit};

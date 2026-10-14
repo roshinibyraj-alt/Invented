@@ -158,46 +158,47 @@ test('terminal one-sided CLOB bid or ask can identify the binary winner',()=>{
   assert.equal(_test.clobQuoteWinner({bestAsk:.01},{}),'DOWN');
   assert.equal(_test.clobQuoteWinner({},{}),null);
 });
-test('three settled rung wins arm exactly one signalled-side window',()=>{
-  const Bot=require('../wick-bot'),bot=new Bot({timeframe:'5m',windowMs:300000,capital:10000}),source=900000;
-  bot.positions=['move-25','move-50','move-75'].map(entryKey=>({windowStart:source,entryKey,status:'SETTLED_WIN'}));
-  bot.updateOneWindowOverride(source+1000);
-  assert.equal(bot.oneWindowOverrides.get(source+300000),source);
-  assert.equal(bot.oneWindowOverrides.has(source+600000),false);
+test('after 90 seconds, zero filled rungs trigger a 500-share signal-side fallback and pause rungs',()=>{
+  const Bot=require('../wick-bot'),bot=new Bot({timeframe:'5m',windowMs:300000,capital:10000}),start=900000;
+  const state={triggered:{},filled:{},blocks:{}};
+  const entry=bot.prepareLateFlatEntry(start,{side:'UP'},state,start+90000);
+  assert.equal(entry.side,'UP');assert.equal(entry.shares,500);assert.equal(entry.stopLossThreshold,.35);
+  assert.equal(entry.entryType,'LATE_FLAT_SIGNAL');assert.equal(state.pausedForLateFlat,true);
+  assert.equal(state.triggered['late-flat-500'].side,'UP');
 });
-test('three settled rung losses arm one 500-share signal-side window',()=>{
-  const Bot=require('../wick-bot'),bot=new Bot({timeframe:'5m',windowMs:300000,capital:10000}),source=900000;
-  bot.positions=['move-25','move-50','move-75'].map(entryKey=>({windowStart:source,entryKey,status:'SETTLED_LOSS'}));
-  bot.updateOneWindowOverride(source+1000);
-  assert.equal(bot.oneWindowOverrides.get(source+300000),source);
-  assert.equal(bot.oneWindowOverrides.size,1);
+test('after 90 seconds, one filled rung also triggers the fallback',()=>{
+  const Bot=require('../wick-bot'),bot=new Bot({timeframe:'5m',windowMs:300000,capital:10000}),start=900000;
+  const state={triggered:{},filled:{'move-25':'p1'},blocks:{}};
+  const entry=bot.prepareLateFlatEntry(start,{side:'DOWN'},state,start+90000);
+  assert.equal(entry.side,'DOWN');assert.equal(entry.rungFills,1);assert.equal(state.pausedForLateFlat,true);
 });
-test('fewer than three settled rung losses do not arm an override',()=>{
-  const Bot=require('../wick-bot'),bot=new Bot({timeframe:'5m',windowMs:300000,capital:10000}),source=900000;
-  bot.positions=['move-25','move-50'].map(entryKey=>({windowStart:source,entryKey,status:'SETTLED_LOSS'}));
-  bot.updateOneWindowOverride(source+1000);
-  assert.equal(bot.oneWindowOverrides.size,0);
+test('two or more filled rungs keep the normal adverse strategy active',()=>{
+  const Bot=require('../wick-bot'),bot=new Bot({timeframe:'5m',windowMs:300000,capital:10000}),start=900000;
+  const state={triggered:{},filled:{'move-25':'p1','move-50':'p2'},blocks:{}};
+  assert.equal(bot.prepareLateFlatEntry(start,{side:'UP'},state,start+90000),null);
+  assert.equal(state.pausedForLateFlat,undefined);assert.equal(state.lateFlatEvaluated,true);
 });
-test('late-confirmed losses arm the next upcoming window, not a missed one',()=>{
-  const Bot=require('../wick-bot'),bot=new Bot({timeframe:'5m',windowMs:300000,capital:10000}),source=900000;
-  bot.positions=['move-25','move-50','move-75'].map(entryKey=>({windowStart:source,entryKey,status:'SETTLED_LOSS'}));
-  bot.updateOneWindowOverride(1500000);
-  assert.equal(bot.oneWindowOverrides.get(1800000),source);
+test('late-flat fallback does not trigger before 90 seconds and only triggers once',()=>{
+  const Bot=require('../wick-bot'),bot=new Bot({timeframe:'5m',windowMs:300000,capital:10000}),start=900000;
+  const state={triggered:{},filled:{},blocks:{}};
+  assert.equal(bot.prepareLateFlatEntry(start,{side:'UP'},state,start+89999),null);
+  assert.equal(state.lateFlatEvaluated,undefined);
+  assert.ok(bot.prepareLateFlatEntry(start,{side:'UP'},state,start+90000));
+  assert.equal(bot.prepareLateFlatEntry(start,{side:'UP'},state,start+120000),null);
 });
-test('fewer than three wins do not arm a one-window override',()=>{
-  const Bot=require('../wick-bot'),bot=new Bot({timeframe:'5m',windowMs:300000,capital:10000}),source=900000;
-  bot.positions=['move-25','move-50'].map(entryKey=>({windowStart:source,entryKey,status:'SETTLED_WIN'}));
-  bot.updateOneWindowOverride(source+1000);assert.equal(bot.oneWindowOverrides.size,0);
-});
-test('late-confirmed wins arm the next upcoming window, not a missed one',()=>{
-  const Bot=require('../wick-bot'),bot=new Bot({timeframe:'5m',windowMs:300000,capital:10000}),source=900000;
-  bot.positions=['move-25','move-50','move-75'].map(entryKey=>({windowStart:source,entryKey,status:'SETTLED_WIN'}));
-  bot.updateOneWindowOverride(1500000);assert.equal(bot.oneWindowOverrides.get(1800000),source);
-});
-test('one-window entry buys 500 shares on the signalled side',()=>{
-  assert.deepEqual(_test.signalSideEntry({side:'UP',key:'move-25',shares:100,windowEnd:123}),{
-    side:'UP',key:'one-window-signal',shares:500,label:'One-window signalled side · 500 shares',windowEnd:123
-  });
+test('flat signal entry records its own $0.35 stop-loss threshold',async()=>{
+  const Bot=require('../wick-bot'),md=require('../wick-market-data'),oldBook=md.getBook,oldNow=Date.now;
+  Date.now=()=>100000;md.getBook=async()=>({asks:[{price:.5,size:1}]});
+  try{
+    const bot=new Bot({timeframe:'5m',windowMs:300000,capital:10000}),start=90000;
+    bot.market={id:'t',slug:'t',title:'t',tokens:{UP:'u',DOWN:'d'},raw:{feesEnabled:false}};
+    bot.rungState[start]={triggered:{},filled:{},blocks:{}};
+    await bot.tryEnter(start,{side:'UP',shares:500,key:'late-flat-500',label:'90-second flat',
+      entryType:'LATE_FLAT_SIGNAL',stopLossThreshold:.35,windowEnd:400000},'late-flat-500');
+    assert.equal(bot.positions[0].entryType,'LATE_FLAT_SIGNAL');
+    assert.equal(bot.positions[0].stopLossThreshold,.35);
+    assert.equal(bot.positions[0].shares,500);
+  }finally{md.getBook=oldBook;Date.now=oldNow}
 });
 test('simultaneously crossed rung fills are held at least two seconds apart',async()=>{
   const Bot=require('../wick-bot'),md=require('../wick-market-data');const oldBook=md.getBook,oldNow=Date.now;
@@ -210,7 +211,7 @@ test('simultaneously crossed rung fills are held at least two seconds apart',asy
   }finally{md.getBook=oldBook;Date.now=oldNow}
 });
 test('TP trigger accepts any fresh own-side quote at 0.99',()=>{const n=10000;assert.equal(_test.takeProfitHit({bestBid:.99,updatedAt:n},n),true);assert.equal(_test.takeProfitHit({bestAsk:.99,updatedAt:n},n),true);assert.equal(_test.takeProfitHit({mid:.99,updatedAt:n},n),true);assert.equal(_test.takeProfitHit({bestAsk:.989,updatedAt:n},n),false);assert.equal(_test.takeProfitHit({bestAsk:.99,updatedAt:n-5001},n),false)});
-test('stop-loss trigger accepts any fresh own-side quote at 0.01',()=>{const n=10000;assert.equal(_test.stopLossHit({bestBid:.01,updatedAt:n},n),true);assert.equal(_test.stopLossHit({bestAsk:.01,updatedAt:n},n),true);assert.equal(_test.stopLossHit({mid:.01,updatedAt:n},n),true);assert.equal(_test.stopLossHit({bestBid:.0101,updatedAt:n},n),false);assert.equal(_test.stopLossHit({bestBid:.01,updatedAt:n-5001},n),false)});
+test('stop-loss trigger supports the general $0.01 and position-specific $0.35 thresholds',()=>{const n=10000;assert.equal(_test.stopLossHit({bestBid:.01,updatedAt:n},n),true);assert.equal(_test.stopLossHit({bestAsk:.01,updatedAt:n},n),true);assert.equal(_test.stopLossHit({mid:.01,updatedAt:n},n),true);assert.equal(_test.stopLossHit({bestBid:.35,updatedAt:n},n,.35),true);assert.equal(_test.stopLossHit({bestBid:.351,updatedAt:n},n,.35),false);assert.equal(_test.stopLossHit({bestBid:.0101,updatedAt:n},n),false);assert.equal(_test.stopLossHit({bestBid:.01,updatedAt:n-5001},n),false)});
 test('fresh 0.01 CLOB quote immediately settles the position as a zero-payout loss',async()=>{
   const Bot=require('../wick-bot'),md=require('../wick-market-data'),oldGetBook=md.getBook,oldNow=Date.now;
   let now=100000;Date.now=()=>now;
@@ -229,6 +230,25 @@ test('fresh 0.01 CLOB quote immediately settles the position as a zero-payout lo
     assert.equal(bot.cash,955);
     assert.equal(bot.events[0].event,'PAPER_STOP_LOSS');
     assert.equal(p.stopTriggerQuote,.01);
+  }finally{md.getBook=oldGetBook;Date.now=oldNow}
+});
+test('$0.35 stop applies only to the 90-second flat position',async()=>{
+  const Bot=require('../wick-bot'),md=require('../wick-market-data'),oldGetBook=md.getBook,oldNow=Date.now;
+  let now=100000;Date.now=()=>now;
+  md.getBook=async token=>token==='up'
+    ?{bids:[{price:.35,size:20}],asks:[{price:.36,size:20}]}
+    :{bids:[{price:.64,size:20}],asks:[{price:.65,size:20}]};
+  try{
+    const bot=new Bot({timeframe:'5m',windowMs:300000,capital:1000});
+    bot.market={start:90000,tokens:{UP:'up',DOWN:'down'}};
+    const normal={id:'normal',side:'UP',status:'OPEN',windowStart:90000,totalCost:20,shares:50};
+    const fallback={id:'fallback',side:'UP',status:'OPEN',windowStart:90000,totalCost:20,
+      shares:50,stopLossThreshold:.35};
+    bot.positions=[fallback,normal];
+    await bot.refreshLiveQuotes(now);
+    assert.equal(fallback.status,'SETTLED_LOSS');
+    assert.equal(fallback.stopTriggerQuote,.35);
+    assert.equal(normal.status,'OPEN');
   }finally{md.getBook=oldGetBook;Date.now=oldNow}
 });
 test('fresh 0.99 CLOB quote immediately settles the position as a one-dollar win',async()=>{
