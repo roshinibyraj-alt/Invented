@@ -140,26 +140,27 @@ test('terminal one-sided CLOB bid or ask can identify the binary winner',()=>{
   assert.equal(_test.clobQuoteWinner({bestAsk:.01},{}),'DOWN');
   assert.equal(_test.clobQuoteWinner({},{}),null);
 });
-test('three or more TP hits skip exactly the next two windows',()=>{
+test('three settled rung wins arm exactly one opposite-signal window',()=>{
   const Bot=require('../wick-bot'),bot=new Bot({timeframe:'5m',windowMs:300000,capital:10000}),source=900000;
-  bot.positions=['move-25','move-50','move-75'].map(entryKey=>({windowStart:source,entryKey,status:'SETTLED_WIN',settlementBasis:'TP_HIT_0_99'}));
-  bot.updatePostTpCooldown();
-  assert.equal(bot.isCooldownWindow(source),false);
-  assert.equal(bot.isCooldownWindow(source+300000),true);
-  assert.equal(bot.isCooldownWindow(source+600000),true);
-  assert.equal(bot.isCooldownWindow(source+900000),false);
+  bot.positions=['move-25','move-50','move-75'].map(entryKey=>({windowStart:source,entryKey,status:'SETTLED_WIN'}));
+  bot.updateOneWindowOverride(source+1000);
+  assert.equal(bot.oneWindowOverrides.get(source+300000),source);
+  assert.equal(bot.oneWindowOverrides.has(source+600000),false);
 });
-test('cooldown requires three actual TP wins and arms only once',()=>{
+test('fewer than three wins do not arm the opposite-signal window',()=>{
   const Bot=require('../wick-bot'),bot=new Bot({timeframe:'5m',windowMs:300000,capital:10000}),source=900000;
-  bot.positions=[
-    {windowStart:source,status:'SETTLED_WIN',settlementBasis:'TP_HIT_0_99'},
-    {windowStart:source,status:'SETTLED_WIN',settlementBasis:'TP_HIT_0_99'},
-    {windowStart:source,status:'SETTLED_WIN',settlementBasis:'OFFICIAL_RESOLUTION_WIN'}
-  ];
-  bot.updatePostTpCooldown();assert.equal(bot.isCooldownWindow(source+300000),false);
-  bot.positions.push({windowStart:source,status:'SETTLED_WIN',settlementBasis:'TP_HIT_0_99'});
-  bot.updatePostTpCooldown();assert.equal(bot.isCooldownWindow(source+300000),true);
-  bot.updatePostTpCooldown();assert.equal(bot.tpCooldownSkips.size,2);
+  bot.positions=['move-25','move-50'].map(entryKey=>({windowStart:source,entryKey,status:'SETTLED_WIN'}));
+  bot.updateOneWindowOverride(source+1000);assert.equal(bot.oneWindowOverrides.size,0);
+});
+test('late-confirmed wins arm the next upcoming window, not a missed one',()=>{
+  const Bot=require('../wick-bot'),bot=new Bot({timeframe:'5m',windowMs:300000,capital:10000}),source=900000;
+  bot.positions=['move-25','move-50','move-75'].map(entryKey=>({windowStart:source,entryKey,status:'SETTLED_WIN'}));
+  bot.updateOneWindowOverride(1500000);assert.equal(bot.oneWindowOverrides.get(1800000),source);
+});
+test('one-window entry buys 500 shares on the opposite signal side',()=>{
+  assert.deepEqual(_test.oppositeSignalEntry({side:'UP',key:'move-25',shares:100,windowEnd:123}),{
+    side:'DOWN',key:'one-window-opposite',shares:500,label:'One-window opposite signal · 500 shares',windowEnd:123
+  });
 });
 test('simultaneously crossed rung fills are held at least two seconds apart',async()=>{
   const Bot=require('../wick-bot'),md=require('../wick-market-data');const oldBook=md.getBook,oldNow=Date.now;

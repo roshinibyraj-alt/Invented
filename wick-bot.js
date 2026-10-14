@@ -49,6 +49,10 @@ function clobQuotePrices(q){
 }
 function clobQuoteValue(q){const prices=clobQuotePrices(q);return prices.length?Math.max(...prices):null}
 function takeProfitHit(q,now=Date.now()){return q&&Number.isFinite(q.updatedAt)&&now-q.updatedAt<=5000&&clobQuotePrices(q).some(price=>price>=.99)}
+function oppositeSignalEntry(entry){
+  return {...entry,side:entry.side==='UP'?'DOWN':'UP',shares:500,key:'one-window-opposite',
+    label:'One-window opposite signal · 500 shares'};
+}
 function clobQuoteWinner(up,down){
   const upPrices=clobQuotePrices(up),downPrices=clobQuotePrices(down);
   const upHigh=upPrices.some(x=>x>=.98),downHigh=downPrices.some(x=>x>=.98);
@@ -67,7 +71,7 @@ class WickBot{
     this.lastCandlesAt=0;this.lastScanAt=null;this.rungState={};this.running=false;
     this.quoteWindowStart=null;this.liveQuotes={UP:{status:'MISSING'},DOWN:{status:'MISSING'}};
     this.closeQuotes=null;this.lastEntryAt=0;
-    this.tpCooldownSkips=new Set();this.cooldownArmedSources=new Set();this.cooldownLogged=new Set();
+    this.oneWindowOverrides=new Map();this.overrideArmedSources=new Set();
   }
   log(event,data={}){const e={ts:Date.now(),timeframe:this.timeframe,event,...data};this.events.unshift(e);this.events.length=Math.min(100,this.events.length);console.log('[wick] '+JSON.stringify(e))}
   async tick(){
@@ -101,36 +105,50 @@ class WickBot{
           &&now>=p.windowStart+this.windowMs
           &&now-(p.lastSettlementAttempt||0)>=1000) await this.trySettle(p);
       }
-      this.updatePostTpCooldown();
-      if(analysis.ready&&!this.isCooldownWindow(start)){
+      this.updateOneWindowOverride(now);
+      if(analysis.ready){
         const state=this.rungState[start]||(this.rungState[start]={triggered:{},filled:{},blocks:{}});
-        for(const entry of analysis.entries){
-          const key=entry.key,trigger=state.triggered[key];
-          if(entry.crossed&&!trigger){
-            state.triggered[key]={...entry,triggeredAt:now};
-            this.log('TIMED_ENTRY_TRIGGER',{side:entry.side,entry:key,label:entry.label,
-              shares:entry.shares,thresholdPrice:entry.thresholdPrice,observedPrice:entry.observedPrice});
+        if(this.oneWindowOverrides.has(start)){
+          const key='one-window-opposite';
+          let saved=state.triggered[key];
+          if(!saved){
+            const signal=analysis.entries.find(entry=>entry.crossed);
+            if(signal){
+              saved=oppositeSignalEntry(signal);saved.windowEnd=start+this.windowMs;saved.triggeredAt=now;
+              state.triggered[key]=saved;
+              this.log('ONE_WINDOW_OPPOSITE_SIGNAL',{side:saved.side,signalledSide:signal.side,shares:500});
+            }
           }
-          const saved=state.triggered[key];
           if(saved&&!state.filled[key]){
             if(now<saved.windowEnd&&now-start<cfg.ENTRY_CUTOFF_MS)await this.tryEnter(start,saved,key);
             else if(!state.expired?.[key]){
               state.expired=state.expired||{};state.expired[key]=true;
-              this.log('TIMED_ENTRY_EXPIRED',{entry:key,side:saved.side,shares:saved.shares,note:'Its minute window ended before a paper fill'});
+              this.log('ONE_WINDOW_OPPOSITE_EXPIRED',{windowStart:start,shares:500});
             }
           }
-          entry.triggered=Boolean(saved);entry.filled=Boolean(state.filled[key]);
-          entry.expired=Boolean(state.expired?.[key]);entry.block=state.blocks[key]||null;
-        }
-      }else if(analysis.ready){
-        for(const entry of analysis.entries){
-          entry.triggered=false;entry.filled=false;
-          entry.block='Skipped after 3+ take-profits in a previous window';
-        }
-        if(!this.cooldownLogged.has(start)){
-          this.cooldownLogged.add(start);
-          this.log('POST_TP_COOLDOWN_SKIP',{windowStart:start,windowEnd:start+this.windowMs,
-            resumeWindowStart:start+this.windowMs,reason:'Three or more rungs hit take-profit in a prior window'});
+          for(const entry of analysis.entries){
+            entry.triggered=Boolean(saved);entry.filled=Boolean(state.filled[key]);
+            entry.expired=Boolean(state.expired?.[key]);entry.block='One-window 500-share opposite-signal trade';
+          }
+        }else{
+          for(const entry of analysis.entries){
+            const key=entry.key,trigger=state.triggered[key];
+            if(entry.crossed&&!trigger){
+              state.triggered[key]={...entry,triggeredAt:now};
+              this.log('TIMED_ENTRY_TRIGGER',{side:entry.side,entry:key,label:entry.label,
+                shares:entry.shares,thresholdPrice:entry.thresholdPrice,observedPrice:entry.observedPrice});
+            }
+            const saved=state.triggered[key];
+            if(saved&&!state.filled[key]){
+              if(now<saved.windowEnd&&now-start<cfg.ENTRY_CUTOFF_MS)await this.tryEnter(start,saved,key);
+              else if(!state.expired?.[key]){
+                state.expired=state.expired||{};state.expired[key]=true;
+                this.log('TIMED_ENTRY_EXPIRED',{entry:key,side:saved.side,shares:saved.shares,note:'Its minute window ended before a paper fill'});
+              }
+            }
+            entry.triggered=Boolean(saved);entry.filled=Boolean(state.filled[key]);
+            entry.expired=Boolean(state.expired?.[key]);entry.block=state.blocks[key]||null;
+          }
         }
       }
       const hasOpen=this.positions.some(p=>p.windowStart===start&&p.status==='OPEN');
@@ -139,22 +157,21 @@ class WickBot{
     }catch(e){this.status='blocked_or_error';this.error=e.message;
       if(this.lastError!==e.message||Date.now()-this.lastErrorAt>30000){this.lastError=e.message;this.lastErrorAt=Date.now();this.log('SCAN_ERROR',{note:e.message})}}
   }
-  updatePostTpCooldown(){
-    const hitsByWindow=new Map();
+  updateOneWindowOverride(now=Date.now()){
+    const winsByWindow=new Map();
     for(const p of this.positions){
-      if(p.status!=='SETTLED_WIN'||p.settlementBasis!=='TP_HIT_0_99')continue;
-      hitsByWindow.set(p.windowStart,(hitsByWindow.get(p.windowStart)||0)+1);
+      if(p.status!=='SETTLED_WIN')continue;
+      winsByWindow.set(p.windowStart,(winsByWindow.get(p.windowStart)||0)+1);
     }
-    for(const [windowStart,hits] of hitsByWindow){
-      if(hits<3||this.cooldownArmedSources.has(windowStart))continue;
-      this.cooldownArmedSources.add(windowStart);
-      const skippedWindowStarts=[windowStart+this.windowMs,windowStart+2*this.windowMs];
-      skippedWindowStarts.forEach(start=>this.tpCooldownSkips.add(start));
-      this.log('POST_TP_COOLDOWN_ARMED',{sourceWindowStart:windowStart,tpWins:hits,skippedWindowStarts,
-        resumeWindowStart:windowStart+3*this.windowMs});
+    for(const [windowStart,wins] of winsByWindow){
+      if(wins<3||this.overrideArmedSources.has(windowStart))continue;
+      this.overrideArmedSources.add(windowStart);
+      const currentStart=Math.floor(now/this.windowMs)*this.windowMs;
+      const nextWindowStart=Math.max(windowStart+this.windowMs,currentStart+this.windowMs);
+      this.oneWindowOverrides.set(nextWindowStart,windowStart);
+      this.log('ONE_WINDOW_OPPOSITE_ARMED',{sourceWindowStart:windowStart,wins,nextWindowStart,shares:500});
     }
   }
-  isCooldownWindow(start){return this.tpCooldownSkips.has(start)}
   async refreshLiveQuotes(now){
     if(!this.market)return;
     const sides=['UP','DOWN'];
@@ -233,7 +250,7 @@ class WickBot{
             timing:'until 240 seconds; at least 2 seconds between rung fills'})),
           exit:'Any fresh own-side CLOB bid/ask/mid >= $0.99 pays $1/share; otherwise use official Gamma outcome at window close',
           minEntryAsk:cfg.MIN_ENTRY_ASK,maxEntryAsk:cfg.MAX_ENTRY_ASK,
-          entryCutoffSeconds:240,rungDelaySeconds:2,postTpCooldown:'Three or more rung take-profits in one window skips the next two windows',fees:'Polymarket taker fees on simulated buys',execution:'PAPER ONLY'},
+          entryCutoffSeconds:240,rungDelaySeconds:2,threeWinRule:'Three or more settled rung wins arm one 500-share opposite-signal trade in the next window; normal strategy resumes after that window',fees:'Polymarket taker fees on simulated buys',execution:'PAPER ONLY'},
        account:{capital:this.capital,cash:this.cash,realizedPnl,unrealizedPnl,equity:this.cash+markedValue,
          totalTrades,settledTrades,wins,losses,winRate:settledTrades?wins/settledTrades*100:0,markedValue,unpricedOpenPositions,
         openPositions:this.positions.filter(p=>p.status==='OPEN'||p.status==='PENDING_CLOB_RESULT').length},
@@ -243,7 +260,8 @@ class WickBot{
        scanner:{timeframe:this.timeframe,lastScanAt:this.lastScanAt,candleSource:`Kraken XBT/USD 1m; minute 1/2 extrema and live move compared with previous completed ${this.windowMs/60000}m window`,
          marketResolution:'Own-side CLOB bid/ask/mid >= $0.99 TP; otherwise official Gamma outcome is retried until resolved',analysis:this.analysis||null,
             previousCandles:prior,rungState:this.rungState[this.market?.start]||null,
-            postTpCooldown:{active:this.isCooldownWindow(this.market?.start),skippedWindowStarts:[...this.tpCooldownSkips]}},
+            oneWindowOverride:{active:this.oneWindowOverrides.has(this.market?.start),
+              sourceWindowStart:this.oneWindowOverrides.get(this.market?.start)||null}},
       positions:this.positions.slice(0,50),events:this.events};
   }
   start(){if(this.running)return;this.running=true;this.log('BOT_STARTED',{timeframe:this.timeframe,note:`Demo-only BTC ${this.windowMs/60000}m candle-move ladder; no live orders.`});
@@ -252,4 +270,4 @@ class WickBot{
   stop(){this.running=false;clearTimeout(this.timer)}
 }
 module.exports=WickBot;
- module.exports._test={sweep,feeFor,payout,quoteFromBook,clobWinner,clobQuoteWinner,clobQuoteValue,takeProfitHit};
+ module.exports._test={sweep,feeFor,payout,quoteFromBook,clobWinner,clobQuoteWinner,clobQuoteValue,takeProfitHit,oppositeSignalEntry};
