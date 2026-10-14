@@ -158,18 +158,22 @@ class WickBot{
       if(this.lastError!==e.message||Date.now()-this.lastErrorAt>30000){this.lastError=e.message;this.lastErrorAt=Date.now();this.log('SCAN_ERROR',{note:e.message})}}
   }
   updateOneWindowOverride(now=Date.now()){
-    const winsByWindow=new Map();
+    const outcomesByWindow=new Map();
     for(const p of this.positions){
-      if(p.status!=='SETTLED_WIN')continue;
-      winsByWindow.set(p.windowStart,(winsByWindow.get(p.windowStart)||0)+1);
+      if(p.status!=='SETTLED_WIN'&&p.status!=='SETTLED_LOSS')continue;
+      const outcome=outcomesByWindow.get(p.windowStart)||{wins:0,losses:0};
+      if(p.status==='SETTLED_WIN')outcome.wins++;
+      else outcome.losses++;
+      outcomesByWindow.set(p.windowStart,outcome);
     }
-    for(const [windowStart,wins] of winsByWindow){
-      if(wins<3||this.overrideArmedSources.has(windowStart))continue;
+    for(const [windowStart,{wins,losses}] of outcomesByWindow){
+      if((wins<3&&losses<3)||this.overrideArmedSources.has(windowStart))continue;
       this.overrideArmedSources.add(windowStart);
       const currentStart=Math.floor(now/this.windowMs)*this.windowMs;
       const nextWindowStart=Math.max(windowStart+this.windowMs,currentStart+this.windowMs);
       this.oneWindowOverrides.set(nextWindowStart,windowStart);
-      this.log('ONE_WINDOW_SIGNAL_ARMED',{sourceWindowStart:windowStart,wins,nextWindowStart,shares:500});
+      this.log('ONE_WINDOW_SIGNAL_ARMED',{sourceWindowStart:windowStart,wins,losses,nextWindowStart,
+        shares:500,trigger:losses>=3?'three_or_more_settled_rung_losses':'three_or_more_settled_rung_wins'});
     }
   }
   async refreshLiveQuotes(now){
@@ -250,7 +254,7 @@ class WickBot{
             timing:'until 240 seconds; at least 2 seconds between rung fills'})),
           exit:'Any fresh own-side CLOB bid/ask/mid >= $0.99 pays $1/share; otherwise use official Gamma outcome at window close',
           minEntryAsk:cfg.MIN_ENTRY_ASK,maxEntryAsk:cfg.MAX_ENTRY_ASK,
-          entryCutoffSeconds:240,rungDelaySeconds:2,threeWinRule:'Three or more settled rung wins arm one 500-share trade on the next window signal; normal strategy resumes after that window',fees:'Polymarket taker fees on simulated buys',execution:'PAPER ONLY'},
+          entryCutoffSeconds:240,rungDelaySeconds:2,threeWinRule:'Three or more settled rung wins or losses arm one 500-share trade on the next window signal; it buys the signal side and normal strategy resumes after that window',fees:'Polymarket taker fees on simulated buys',execution:'PAPER ONLY'},
        account:{capital:this.capital,cash:this.cash,realizedPnl,unrealizedPnl,equity:this.cash+markedValue,
          totalTrades,settledTrades,wins,losses,winRate:settledTrades?wins/settledTrades*100:0,markedValue,unpricedOpenPositions,
         openPositions:this.positions.filter(p=>p.status==='OPEN'||p.status==='PENDING_CLOB_RESULT').length},

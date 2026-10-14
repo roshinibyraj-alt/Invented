@@ -147,7 +147,26 @@ test('three settled rung wins arm exactly one signalled-side window',()=>{
   assert.equal(bot.oneWindowOverrides.get(source+300000),source);
   assert.equal(bot.oneWindowOverrides.has(source+600000),false);
 });
-test('fewer than three wins do not arm the opposite-signal window',()=>{
+test('three settled rung losses arm one 500-share signal-side window',()=>{
+  const Bot=require('../wick-bot'),bot=new Bot({timeframe:'5m',windowMs:300000,capital:10000}),source=900000;
+  bot.positions=['move-25','move-50','move-75'].map(entryKey=>({windowStart:source,entryKey,status:'SETTLED_LOSS'}));
+  bot.updateOneWindowOverride(source+1000);
+  assert.equal(bot.oneWindowOverrides.get(source+300000),source);
+  assert.equal(bot.oneWindowOverrides.size,1);
+});
+test('fewer than three settled rung losses do not arm an override',()=>{
+  const Bot=require('../wick-bot'),bot=new Bot({timeframe:'5m',windowMs:300000,capital:10000}),source=900000;
+  bot.positions=['move-25','move-50'].map(entryKey=>({windowStart:source,entryKey,status:'SETTLED_LOSS'}));
+  bot.updateOneWindowOverride(source+1000);
+  assert.equal(bot.oneWindowOverrides.size,0);
+});
+test('late-confirmed losses arm the next upcoming window, not a missed one',()=>{
+  const Bot=require('../wick-bot'),bot=new Bot({timeframe:'5m',windowMs:300000,capital:10000}),source=900000;
+  bot.positions=['move-25','move-50','move-75'].map(entryKey=>({windowStart:source,entryKey,status:'SETTLED_LOSS'}));
+  bot.updateOneWindowOverride(1500000);
+  assert.equal(bot.oneWindowOverrides.get(1800000),source);
+});
+test('fewer than three wins do not arm a one-window override',()=>{
   const Bot=require('../wick-bot'),bot=new Bot({timeframe:'5m',windowMs:300000,capital:10000}),source=900000;
   bot.positions=['move-25','move-50'].map(entryKey=>({windowStart:source,entryKey,status:'SETTLED_WIN'}));
   bot.updateOneWindowOverride(source+1000);assert.equal(bot.oneWindowOverrides.size,0);

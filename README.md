@@ -6,7 +6,7 @@ Polymarket-only BTC UP/DOWN paper trading. The bot has one 5-minute market loop 
 
 - Compare the current BTC window with the previous completed 5-minute candle. Use the previous candle's body (`abs(close - open)`) and measure thresholds from its close.
 - Green previous candle: adverse drops trigger UP. Red previous candle: adverse rises trigger DOWN. A doji has no signal.
-- Rungs: 25% / 100 shares, 50% / 200, 75% / 300, and 90% / 400. Crossed rungs queue in order; paper fills are separated by at least 2 seconds. Three or more winning rungs in one window arm one 500-share trade on the next window’s signalled side; regular trades resume afterward.
+- Rungs: 25% / 100 shares, 50% / 200, 75% / 300, and 90% / 400. Crossed rungs queue in order; paper fills are separated by at least 2 seconds. Three or more settled wins or losses in one window arm one 500-share trade on the next window’s signalled side; regular trades resume afterward.
 - No new entry signal or fill after 240 seconds into a window. Paper buys require visible ask depth within the configured $0.05–$0.60 band.
 - Deduct the Polymarket BTC taker fee from each paper buy using the market fee schedule and simulated fill price.
 - During the window, any fresh bid, ask, or midpoint for the position's own side at $0.99 or higher triggers a simulated take-profit and credits exactly $1 per share. If no quote reaches the target before window close, use the official Gamma market result to credit $1 or $0 per share, retrying until resolved.
