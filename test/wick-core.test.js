@@ -140,7 +140,7 @@ test('terminal one-sided CLOB bid or ask can identify the binary winner',()=>{
   assert.equal(_test.clobQuoteWinner({bestAsk:.01},{}),'DOWN');
   assert.equal(_test.clobQuoteWinner({},{}),null);
 });
-test('three settled rung wins arm exactly one opposite-signal window',()=>{
+test('three settled rung wins arm exactly one signalled-side window',()=>{
   const Bot=require('../wick-bot'),bot=new Bot({timeframe:'5m',windowMs:300000,capital:10000}),source=900000;
   bot.positions=['move-25','move-50','move-75'].map(entryKey=>({windowStart:source,entryKey,status:'SETTLED_WIN'}));
   bot.updateOneWindowOverride(source+1000);
@@ -157,9 +157,9 @@ test('late-confirmed wins arm the next upcoming window, not a missed one',()=>{
   bot.positions=['move-25','move-50','move-75'].map(entryKey=>({windowStart:source,entryKey,status:'SETTLED_WIN'}));
   bot.updateOneWindowOverride(1500000);assert.equal(bot.oneWindowOverrides.get(1800000),source);
 });
-test('one-window entry buys 500 shares on the opposite signal side',()=>{
-  assert.deepEqual(_test.oppositeSignalEntry({side:'UP',key:'move-25',shares:100,windowEnd:123}),{
-    side:'DOWN',key:'one-window-opposite',shares:500,label:'One-window opposite signal · 500 shares',windowEnd:123
+test('one-window entry buys 500 shares on the signalled side',()=>{
+  assert.deepEqual(_test.signalSideEntry({side:'UP',key:'move-25',shares:100,windowEnd:123}),{
+    side:'UP',key:'one-window-signal',shares:500,label:'One-window signalled side · 500 shares',windowEnd:123
   });
 });
 test('simultaneously crossed rung fills are held at least two seconds apart',async()=>{

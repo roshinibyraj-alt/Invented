@@ -49,9 +49,9 @@ function clobQuotePrices(q){
 }
 function clobQuoteValue(q){const prices=clobQuotePrices(q);return prices.length?Math.max(...prices):null}
 function takeProfitHit(q,now=Date.now()){return q&&Number.isFinite(q.updatedAt)&&now-q.updatedAt<=5000&&clobQuotePrices(q).some(price=>price>=.99)}
-function oppositeSignalEntry(entry){
-  return {...entry,side:entry.side==='UP'?'DOWN':'UP',shares:500,key:'one-window-opposite',
-    label:'One-window opposite signal · 500 shares'};
+function signalSideEntry(entry){
+  return {...entry,shares:500,key:'one-window-signal',
+    label:'One-window signalled side · 500 shares'};
 }
 function clobQuoteWinner(up,down){
   const upPrices=clobQuotePrices(up),downPrices=clobQuotePrices(down);
@@ -109,26 +109,26 @@ class WickBot{
       if(analysis.ready){
         const state=this.rungState[start]||(this.rungState[start]={triggered:{},filled:{},blocks:{}});
         if(this.oneWindowOverrides.has(start)){
-          const key='one-window-opposite';
+          const key='one-window-signal';
           let saved=state.triggered[key];
           if(!saved){
             const signal=analysis.entries.find(entry=>entry.crossed);
             if(signal){
-              saved=oppositeSignalEntry(signal);saved.windowEnd=start+this.windowMs;saved.triggeredAt=now;
+              saved=signalSideEntry(signal);saved.windowEnd=start+this.windowMs;saved.triggeredAt=now;
               state.triggered[key]=saved;
-              this.log('ONE_WINDOW_OPPOSITE_SIGNAL',{side:saved.side,signalledSide:signal.side,shares:500});
+              this.log('ONE_WINDOW_SIGNAL_ENTRY',{side:saved.side,shares:500});
             }
           }
           if(saved&&!state.filled[key]){
             if(now<saved.windowEnd&&now-start<cfg.ENTRY_CUTOFF_MS)await this.tryEnter(start,saved,key);
             else if(!state.expired?.[key]){
               state.expired=state.expired||{};state.expired[key]=true;
-              this.log('ONE_WINDOW_OPPOSITE_EXPIRED',{windowStart:start,shares:500});
+              this.log('ONE_WINDOW_SIGNAL_EXPIRED',{windowStart:start,shares:500});
             }
           }
           for(const entry of analysis.entries){
             entry.triggered=Boolean(saved);entry.filled=Boolean(state.filled[key]);
-            entry.expired=Boolean(state.expired?.[key]);entry.block='One-window 500-share opposite-signal trade';
+            entry.expired=Boolean(state.expired?.[key]);entry.block='One-window 500-share signalled-side trade';
           }
         }else{
           for(const entry of analysis.entries){
@@ -169,7 +169,7 @@ class WickBot{
       const currentStart=Math.floor(now/this.windowMs)*this.windowMs;
       const nextWindowStart=Math.max(windowStart+this.windowMs,currentStart+this.windowMs);
       this.oneWindowOverrides.set(nextWindowStart,windowStart);
-      this.log('ONE_WINDOW_OPPOSITE_ARMED',{sourceWindowStart:windowStart,wins,nextWindowStart,shares:500});
+      this.log('ONE_WINDOW_SIGNAL_ARMED',{sourceWindowStart:windowStart,wins,nextWindowStart,shares:500});
     }
   }
   async refreshLiveQuotes(now){
@@ -250,7 +250,7 @@ class WickBot{
             timing:'until 240 seconds; at least 2 seconds between rung fills'})),
           exit:'Any fresh own-side CLOB bid/ask/mid >= $0.99 pays $1/share; otherwise use official Gamma outcome at window close',
           minEntryAsk:cfg.MIN_ENTRY_ASK,maxEntryAsk:cfg.MAX_ENTRY_ASK,
-          entryCutoffSeconds:240,rungDelaySeconds:2,threeWinRule:'Three or more settled rung wins arm one 500-share opposite-signal trade in the next window; normal strategy resumes after that window',fees:'Polymarket taker fees on simulated buys',execution:'PAPER ONLY'},
+          entryCutoffSeconds:240,rungDelaySeconds:2,threeWinRule:'Three or more settled rung wins arm one 500-share trade on the next window signal; normal strategy resumes after that window',fees:'Polymarket taker fees on simulated buys',execution:'PAPER ONLY'},
        account:{capital:this.capital,cash:this.cash,realizedPnl,unrealizedPnl,equity:this.cash+markedValue,
          totalTrades,settledTrades,wins,losses,winRate:settledTrades?wins/settledTrades*100:0,markedValue,unpricedOpenPositions,
         openPositions:this.positions.filter(p=>p.status==='OPEN'||p.status==='PENDING_CLOB_RESULT').length},
@@ -270,4 +270,4 @@ class WickBot{
   stop(){this.running=false;clearTimeout(this.timer)}
 }
 module.exports=WickBot;
- module.exports._test={sweep,feeFor,payout,quoteFromBook,clobWinner,clobQuoteWinner,clobQuoteValue,takeProfitHit,oppositeSignalEntry};
+ module.exports._test={sweep,feeFor,payout,quoteFromBook,clobWinner,clobQuoteWinner,clobQuoteValue,takeProfitHit,signalSideEntry};
