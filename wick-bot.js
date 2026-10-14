@@ -25,15 +25,11 @@ function payout(m,side){
   return p>=.99?1:p<=.01?0:null;
 }
 function parse(x){if(typeof x==='string'){try{return JSON.parse(x)}catch(_){}}return []}
-function sweep(asks,qty,maxPrice,minPrice=cfg.MIN_ENTRY_ASK){
-  let left=qty,cost=0;
-  for(const x of levels(asks)){
-    if(x.price<minPrice)continue;
-    if(x.price>maxPrice)break;
-    const take=Math.min(left,x.size);cost+=take*x.price;left-=take;
-    if(left<1e-8)break;
-  }
-  return left>1e-8?null:{shares:qty,cost,avg:cost/qty};
+function simulateAtBestAsk(asks,qty,maxPrice,minPrice=cfg.MIN_ENTRY_ASK){
+  const best=levels(asks).find(x=>x.price>=minPrice&&x.price<=maxPrice);
+  if(!best)return null;
+  return {shares:qty,cost:qty*best.price,avg:best.price,visibleDepth:best.size,
+    simulatedShares:Math.max(0,qty-best.size)};
 }
 function feeFor(m,avg,qty){
   const rate=Number(m.feeSchedule?.rate??m.takerFeeRate??cfg.FEE_RATE);
@@ -211,7 +207,7 @@ class WickBot{
     if(now-this.lastEntryAt<cfg.RUNG_DELAY_MS)return;
     const state=this.rungState[start];
     const token=this.market.tokens[trigger.side],book=await md.getBook(token);
-    const fill=sweep(book.asks,trigger.shares,cfg.MAX_ENTRY_ASK,cfg.MIN_ENTRY_ASK);
+    const fill=simulateAtBestAsk(book.asks,trigger.shares,cfg.MAX_ENTRY_ASK,cfg.MIN_ENTRY_ASK);
     if(!fill){state.blocks[key]=`Need ${trigger.shares} shares at asks from $${cfg.MIN_ENTRY_ASK.toFixed(2)} to $${cfg.MAX_ENTRY_ASK.toFixed(2)}`;return}
     const fee=feeFor(this.market.raw,fill.avg,fill.shares),total=fill.cost+fee;
     if(total>this.cash){state.blocks[key]='Insufficient demo cash';return}
@@ -220,11 +216,13 @@ class WickBot{
       title:this.market.title,side:trigger.side,tokenId:token,entryKey:key,entryLabel:trigger.label,
       triggerPct:trigger.movePct,entryType:'CANDLE_MOVE_RUNG',shares:fill.shares,initialShares:fill.shares,
        oppositeTokenId:this.market.tokens[trigger.side==='UP'?'DOWN':'UP'],
-       avgEntry:fill.avg,cost:fill.cost,fees:fee,totalCost:total,status:'OPEN',openedAt:Date.now(),
+        avgEntry:fill.avg,cost:fill.cost,fees:fee,totalCost:total,status:'OPEN',openedAt:Date.now(),
+        fillModel:'FULL_SIZE_AT_BEST_ASK',visibleAskSize:fill.visibleDepth,simulatedShares:fill.simulatedShares,
       thresholdPrice:trigger.thresholdPrice,observedPrice:trigger.observedPrice};
     this.cash-=total;this.positions.unshift(p);state.filled[key]=p.id;delete state.blocks[key];this.status='position_open';this.lastEntryAt=Date.now();
     this.log('PAPER_TIMED_ENTRY',{timeframe:this.timeframe,id:p.id,side:p.side,entry:key,label:p.entryLabel,
-      shares:p.shares,entryPrice:p.avgEntry,avgEntry:p.avgEntry,cost:p.totalCost});
+      shares:p.shares,entryPrice:p.avgEntry,avgEntry:p.avgEntry,cost:p.totalCost,
+      fillModel:p.fillModel,visibleAskSize:p.visibleAskSize,simulatedShares:p.simulatedShares});
   }
   async trySettle(p){
     if(Date.now()<p.windowStart+(p.windowMs||this.windowMs))return;if(!['OPEN','PENDING_CLOB_RESULT'].includes(p.status))return;p.lastSettlementAttempt=Date.now();
@@ -254,7 +252,9 @@ class WickBot{
             timing:'until 240 seconds; at least 2 seconds between rung fills'})),
           exit:'Any fresh own-side CLOB bid/ask/mid >= $0.99 pays $1/share; otherwise use official Gamma outcome at window close',
           minEntryAsk:cfg.MIN_ENTRY_ASK,maxEntryAsk:cfg.MAX_ENTRY_ASK,
-          entryCutoffSeconds:240,rungDelaySeconds:2,threeWinRule:'Three or more settled rung wins or losses arm one 500-share trade on the next window signal; it buys the signal side and normal strategy resumes after that window',fees:'Polymarket taker fees on simulated buys',execution:'PAPER ONLY'},
+          entryCutoffSeconds:240,rungDelaySeconds:2,threeWinRule:'Three or more settled rung wins or losses arm one 500-share trade on the next window signal; it buys the signal side and normal strategy resumes after that window',
+          entryFillModel:'Fill the full requested size at the best eligible ask, ignoring displayed size; asks must be within $0.05-$0.60',
+          fees:'Polymarket taker fees on simulated buys',execution:'PAPER ONLY'},
        account:{capital:this.capital,cash:this.cash,realizedPnl,unrealizedPnl,equity:this.cash+markedValue,
          totalTrades,settledTrades,wins,losses,winRate:settledTrades?wins/settledTrades*100:0,markedValue,unpricedOpenPositions,
         openPositions:this.positions.filter(p=>p.status==='OPEN'||p.status==='PENDING_CLOB_RESULT').length},
@@ -274,4 +274,4 @@ class WickBot{
   stop(){this.running=false;clearTimeout(this.timer)}
 }
 module.exports=WickBot;
- module.exports._test={sweep,feeFor,payout,quoteFromBook,clobWinner,clobQuoteWinner,clobQuoteValue,takeProfitHit,signalSideEntry};
+module.exports._test={simulateAtBestAsk,feeFor,payout,quoteFromBook,clobWinner,clobQuoteWinner,clobQuoteValue,takeProfitHit,signalSideEntry};

@@ -78,12 +78,12 @@ test('realized and floating position P&L are computed separately from bid marks'
   assert.equal(a.equity,990);assert.equal(a.openPositions,1);
 });
 
-test('paper entry requires full depth within the $0.05-$0.60 ask band',()=>{
-  assert.equal(_test.sweep([{price:.60,size:100}],100,.60,.05).cost,60);
-  assert.equal(_test.sweep([{price:.05,size:100}],100,.60,.05).cost,5);
-  assert.equal(_test.sweep([{price:.049,size:100}],100,.60,.05),null);
-  assert.equal(_test.sweep([{price:.61,size:100}],100,.60,.05),null);
-  assert.equal(_test.sweep([{price:.60,size:99}],100,.60,.05),null);
+test('demo fills the requested shares at best ask despite short visible depth',()=>{
+  const fill=_test.simulateAtBestAsk([{price:.45,size:50},{price:.46,size:500}],200,.60,.05);
+  assert.deepEqual(fill,{shares:200,cost:90,avg:.45,visibleDepth:50,simulatedShares:150});
+  assert.equal(_test.simulateAtBestAsk([{price:.049,size:100}],100,.60,.05),null);
+  assert.equal(_test.simulateAtBestAsk([{price:.61,size:100}],100,.60,.05),null);
+  assert.equal(_test.simulateAtBestAsk([],100,.60,.05),null);
 });
 
 test('paper fill records the crossed rung percentage and share size',async()=>{
@@ -100,6 +100,24 @@ test('paper fill records the crossed rung percentage and share size',async()=>{
     assert.equal(bot.positions[0].triggerPct,50);
     assert.equal(bot.positions[0].shares,200);
     assert.equal(bot.positions[0].entryType,'CANDLE_MOVE_RUNG');
+  }finally{md.getBook=oldGetBook}
+});
+test('paper entry records simulated shares beyond the visible best-ask size',async()=>{
+  const Bot=require('../wick-bot'),md=require('../wick-market-data');
+  const oldGetBook=md.getBook;
+  md.getBook=async()=>({asks:[{price:.45,size:50}]});
+  try{
+    const bot=new Bot({timeframe:'5m',windowMs:300000,capital:10000});
+    const start=Date.now()-1000;
+    bot.market={id:'test-market',slug:'test',title:'Test',tokens:{UP:'up-token',DOWN:'down-token'},raw:{feesEnabled:false}};
+    bot.rungState[start]={triggered:{},filled:{},blocks:{}};
+    await bot.tryEnter(start,{movePct:50,side:'UP',shares:200,key:'move-50',
+      label:'50% adverse move',windowEnd:Date.now()+10000},'move-50');
+    assert.equal(bot.positions[0].shares,200);
+    assert.equal(bot.positions[0].avgEntry,.45);
+    assert.equal(bot.positions[0].visibleAskSize,50);
+    assert.equal(bot.positions[0].simulatedShares,150);
+    assert.equal(bot.positions[0].fillModel,'FULL_SIZE_AT_BEST_ASK');
   }finally{md.getBook=oldGetBook}
 });
 
