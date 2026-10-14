@@ -7,4 +7,4 @@
 5. Any fresh bid, ask, or midpoint on the position's own side at $0.99 or higher triggers a simulated TP and pays $1/share. If TP is missed, query Polymarket's official Gamma result at close and settle at $1 or $0 per share; retry until the official result is available.
 6. Paper trades and account state reset on process restart. No live order placement is present.
 
-The bot refreshes CLOB books every 500 ms and Kraken candles every second; the dashboard refreshes every 2 seconds. After all four rung positions in one window settle as wins, the following window reverses the signalled side once. After that window settles, normal signal direction resumes.
+The bot refreshes CLOB books every 500 ms and Kraken candles every second; the dashboard refreshes every 2 seconds. Three or more rung take-profits in one window pause entries for the next two 5-minute windows. The bot resumes normal signalling on the following window.
