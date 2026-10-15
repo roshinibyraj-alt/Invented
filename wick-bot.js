@@ -170,7 +170,9 @@ class WickBot{
     const p={id:`${this.timeframe}-${start}-${trigger.side}-${key}`,timeframe:this.timeframe,
        windowMs:this.windowMs,windowStart:start,marketId:this.market.id,slug:this.market.slug,
       title:this.market.title,side:trigger.side,tokenId:token,entryKey:key,entryLabel:trigger.label,
-      triggerPct:trigger.movePct,entryType:'CANDLE_MOVE_RUNG',shares:fill.shares,initialShares:fill.shares,
+       triggerPct:trigger.movePct,entryType:'CANDLE_PATTERN_MOVE_RUNG',
+       signalPattern:trigger.pattern||null,signalStrength:trigger.signalStrength||0,
+       shares:fill.shares,initialShares:fill.shares,
        oppositeTokenId:this.market.tokens[trigger.side==='UP'?'DOWN':'UP'],
         avgEntry:fill.avg,cost:fill.cost,fees:fee,totalCost:total,status:'OPEN',openedAt:Date.now(),
         fillModel:'FULL_SIZE_AT_BEST_ASK',visibleAskSize:fill.visibleDepth,simulatedShares:fill.simulatedShares,
@@ -208,6 +210,7 @@ class WickBot{
             timing:'until 150 seconds; at least 2 seconds between rung fills'})),
           exit:'Any fresh own-side CLOB bid/ask/mid >= $0.99 immediately pays $1/share; <= $0.01 immediately pays $0/share; otherwise use official Gamma outcome at window close',
           minEntryAsk:cfg.MIN_ENTRY_ASK,maxEntryAsk:cfg.MAX_ENTRY_ASK,
+          direction:'Candle pattern detected from completed five-minute candles; no directional pattern means no entry side',
           entryCutoffSeconds:150,rungDelaySeconds:2,
           entryFillModel:'Fill the full requested size at the best eligible ask, ignoring displayed size; asks must be within $0.05-$0.60',
           fees:'Polymarket taker fees on simulated buys',execution:'PAPER ONLY'},
@@ -218,13 +221,13 @@ class WickBot{
       livePrices:{marketSlug:this.market?.slug||null,updatedAt:Math.max(this.liveQuotes.UP.updatedAt||0,this.liveQuotes.DOWN.updatedAt||0)||null,
         UP:this.liveQuotes.UP,DOWN:this.liveQuotes.DOWN},
        scanner:{timeframe:this.timeframe,lastScanAt:this.lastScanAt,
-           candleSource:`Polymarket RTDS Chainlink BTC/USD; one-minute OHLC aggregated from live oracle updates and compared with previous completed ${this.windowMs/60000}m window`,
+            candleSource:`Polymarket RTDS Chainlink BTC/USD; one-minute OHLC aggregated into completed ${this.windowMs/60000}m candles for pattern-based direction`,
            candleFeed:md.getCandleFeedStatus(),
           marketResolution:'Own-side fresh CLOB quote >= $0.99 settles $1/share, <= $0.01 settles $0/share immediately; otherwise official Gamma result is retried until resolved',analysis:this.analysis||null,
              previousCandles:prior,rungState:this.rungState[this.market?.start]||null},
       positions:this.positions.slice(0,50),events:this.events};
   }
-  start(){if(this.running)return;this.running=true;this.log('BOT_STARTED',{timeframe:this.timeframe,note:`Demo-only BTC ${this.windowMs/60000}m candle-move ladder; no live orders.`});
+  start(){if(this.running)return;this.running=true;this.log('BOT_STARTED',{timeframe:this.timeframe,note:`Demo-only BTC ${this.windowMs/60000}m candle-pattern direction with adverse-move entries; no live orders.`});
     const loop=async()=>{if(!this.running)return;await this.tick();if(this.running)this.timer=setTimeout(loop,cfg.POLL_INTERVAL_MS)};
     void loop();}
   stop(){this.running=false;clearTimeout(this.timer)}

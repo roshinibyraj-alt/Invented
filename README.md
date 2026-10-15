@@ -4,14 +4,14 @@ Polymarket-only BTC UP/DOWN paper trading. The bot has one 5-minute market loop 
 
 ## Strategy
 
-- Compare the current BTC window with the previous completed 5-minute candle. Use the previous candle's body (`abs(close - open)`) and measure thresholds from its close.
-- Green previous candle: adverse drops trigger UP. Red previous candle: adverse rises trigger DOWN. A doji has no signal.
-- Rungs: 25% / 100 shares, 50% / 200, 75% / 300, and 90% / 400. Crossed rungs queue in order; paper fills are separated by at least 2 seconds. Three or more settled wins or losses in one window arm one 500-share trade on the next window’s signalled side; regular trades resume afterward.
-- No new entry signal or fill after 240 seconds into a window. Demo buys fill the full requested size at the best eligible ask within $0.05–$0.60, regardless of displayed ask quantity. The fill record shows visible depth and simulated shortfall; this is for strategy testing, not realistic execution.
+- Use patterns in completed 5-minute candles to choose UP or DOWN. The detector recognizes doji variants, hammers and stars, marubozu, engulfing, tweezer, harami, morning/evening stars, and three-soldier/crow formations. Neutral, conflicting, or absent patterns produce no directional signal.
+- Keep the existing adverse-move ladder: measure each threshold from the previous completed candle's close using its body (`abs(close - open)`). UP signals trigger on adverse drops; DOWN signals trigger on adverse rises.
+- Rungs: 25% / 100 shares, 50% / 200, 75% / 300, and 90% / 400. Crossed rungs queue in order; paper fills are separated by at least 2 seconds.
+- No new entry signal or fill after 150 seconds into a window. Demo buys fill the full requested size at the best eligible ask within $0.05–$0.60, regardless of displayed ask quantity. The fill record shows visible depth and simulated shortfall; this is for strategy testing, not realistic execution.
 - Deduct the Polymarket BTC taker fee from each paper buy using the market fee schedule and simulated fill price.
 - During the window, any fresh bid, ask, or midpoint for the position's own side at $0.99 or higher immediately settles it as a $1/share win; at $0.01 or lower immediately settles it as a $0/share loss. If neither threshold is reached, use the official Gamma market result at window close, retrying until resolved.
 
-The bot polls CLOB quotes every 500 ms and consumes Polymarket RTDS Chainlink BTC/USD updates to build 1-minute candles; the dashboard refreshes every 2 seconds. RTDS provides a short recent replay on connection, so the scanner waits until it has rebuilt a completed 5-minute candle after a restart. TP detection uses fresh own-side CLOB quotes. If no quote reaches TP, use the official Gamma result and retry while it is pending. Dashboard win rate is calculated over settled individual rung trades; total trades includes open and settled positions. Stale marks are excluded from floating P&L/equity. Paper state is in memory and resets on process restart.
+The bot polls CLOB quotes every 500 ms and consumes Polymarket RTDS Chainlink BTC/USD updates to build 1-minute candles; the dashboard refreshes every 2 seconds. RTDS provides a short recent replay on connection, so the scanner waits until it has rebuilt enough completed 5-minute candles for pattern analysis after a restart. CLOB quotes remain the simulated entry and exit prices. TP/SL detection uses fresh own-side CLOB quotes. If neither threshold is reached, use the official Gamma result and retry while it is pending. Dashboard win rate is calculated over settled individual rung trades; total trades includes open and settled positions. Stale marks are excluded from floating P&L/equity. Paper state is in memory and resets on process restart.
 
 ## Run and verify
 

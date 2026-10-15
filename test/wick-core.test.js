@@ -2,12 +2,103 @@
 
 const test=require('node:test');
 const assert=require('node:assert/strict');
-const {aggregate,detectTimedStrategy}=require('../wick-core');
+const {aggregate,detectCandlePatternSignal,detectTimedStrategy}=require('../wick-core');
 const { _test }=require('../wick-bot');
 
 test('aggregates one-minute bars into quarter-hour and hourly slots',()=>{
   const bars=aggregate([{t:0,o:10,h:12,l:9,c:11,v:2},{t:60000,o:11,h:13,l:10,c:12,v:3}],900000);
   assert.deepEqual(bars[0],{t:0,o:10,h:13,l:9,c:12,v:5});
+});
+
+test('single-candle patterns select directional sides while neutral doji patterns do not',()=>{
+  assert.equal(detectCandlePatternSignal([{t:0,o:100,h:100.5,l:90,c:100.5}]).side,'UP');
+  assert.equal(detectCandlePatternSignal([{t:0,o:100.5,h:110,l:100.5,c:100}]).side,'DOWN');
+  assert.equal(detectCandlePatternSignal([{t:0,o:100,h:101,l:99,c:100}]).pattern,'Standard Doji');
+  assert.equal(detectCandlePatternSignal([{t:0,o:100,h:101,l:99,c:100}]).side,null);
+  assert.equal(detectCandlePatternSignal([
+    {t:0,o:100,h:101,l:99,c:100},{t:300000,o:100,h:101,l:99,c:100},
+    {t:600000,o:100,h:105,l:95,c:100},
+  ]).pattern,'Long-Legged Doji');
+  const hammer=detectCandlePatternSignal([
+    {t:0,o:115,h:116,l:109,c:110},{t:300000,o:110,h:111,l:104,c:105},
+    {t:600000,o:105,h:106,l:99,c:100},{t:900000,o:100,h:102.1,l:90,c:102},
+  ]);
+  const inverted=detectCandlePatternSignal([
+    {t:0,o:115,h:116,l:109,c:110},{t:300000,o:110,h:111,l:104,c:105},
+    {t:600000,o:105,h:106,l:99,c:100},{t:900000,o:102,h:112,l:99.9,c:100},
+  ]);
+  assert.equal(hammer.pattern,'Hammer');assert.equal(hammer.side,'UP');
+  assert.equal(inverted.pattern,'Inverted Hammer');assert.equal(inverted.side,'UP');
+  const shooting=detectCandlePatternSignal([
+    {t:0,o:100,h:106,l:99,c:105},{t:300000,o:105,h:111,l:104,c:110},
+    {t:600000,o:110,h:116,l:109,c:115},{t:900000,o:102,h:112,l:99.9,c:100},
+  ]);
+  const hanging=detectCandlePatternSignal([
+    {t:0,o:100,h:106,l:99,c:105},{t:300000,o:105,h:111,l:104,c:110},
+    {t:600000,o:110,h:116,l:109,c:115},{t:900000,o:100,c:102,h:102.1,l:90},
+  ]);
+  assert.equal(shooting.pattern,'Shooting Star');assert.equal(shooting.side,'DOWN');
+  assert.equal(hanging.pattern,'Hanging Man');assert.equal(hanging.side,'DOWN');
+});
+
+test('bullish and bearish engulfing patterns override the prior candle color',()=>{
+  const bullish=detectCandlePatternSignal([
+    {t:0,o:110,h:111,l:99,c:100},{t:300000,o:99,h:112,l:98,c:111},
+  ]);
+  const bearish=detectCandlePatternSignal([
+    {t:0,o:100,h:111,l:99,c:110},{t:300000,o:111,h:112,l:98,c:99},
+  ]);
+  assert.equal(bullish.pattern,'Bullish Engulfing');assert.equal(bullish.side,'UP');
+  assert.equal(bearish.pattern,'Bearish Engulfing');assert.equal(bearish.side,'DOWN');
+});
+
+test('tweezer and harami formations are exposed as pattern candidates',()=>{
+  const tweezer=detectCandlePatternSignal([
+    {t:0,o:105,h:110,l:99,c:100},{t:300000,o:100,h:106,l:99,c:105},
+  ]);
+  const harami=detectCandlePatternSignal([
+    {t:0,o:110,h:111,l:99,c:100},{t:300000,o:102,h:105,l:101,c:103},
+  ]);
+  assert.ok(tweezer.patterns.some(x=>x.name==='Tweezer Bottom'&&x.side==='UP'));
+  assert.ok(harami.patterns.some(x=>x.name==='Bullish Harami'&&x.side==='UP'));
+});
+
+test('pattern direction replaces candle color but preserves adverse-move thresholds',()=>{
+  const a=timedWindow({o:100,h:112,l:100,c:101},
+    [{minute:0,o:101,h:102,l:100,c:100.5}],{elapsedMs:30000});
+  assert.equal(a.previousColor,'green');
+  assert.equal(a.signalPattern,'Gravestone Doji');
+  assert.equal(a.side,'DOWN');
+  assert.ok(a.entries.every(e=>e.side==='DOWN'));
+  assert.equal(a.entries[0].thresholdPrice,101.25);
+  assert.equal(a.entries[0].crossed,true);
+});
+
+test('three-candle stars and soldier/crow formations produce directional signals',()=>{
+  const morning=detectCandlePatternSignal([
+    {t:0,o:110,h:111,l:99,c:100},
+    {t:300000,o:100,h:101,l:98,c:99.5},
+    {t:600000,o:99.5,h:112,l:99,c:111},
+  ]);
+  const evening=detectCandlePatternSignal([
+    {t:0,o:100,h:111,l:99,c:110},
+    {t:300000,o:110,h:112,l:109,c:110.5},
+    {t:600000,o:110.5,h:111,l:98,c:99},
+  ]);
+  const soldiers=detectCandlePatternSignal([
+    {t:0,o:100,h:106,l:99,c:105},
+    {t:300000,o:105,h:111,l:104,c:110},
+    {t:600000,o:110,h:116,l:109,c:115},
+  ]);
+  const crows=detectCandlePatternSignal([
+    {t:0,o:115,h:116,l:109,c:110},
+    {t:300000,o:110,h:111,l:104,c:105},
+    {t:600000,o:105,h:106,l:99,c:100},
+  ]);
+  assert.equal(morning.pattern,'Morning Star');assert.equal(morning.side,'UP');
+  assert.equal(evening.pattern,'Evening Star');assert.equal(evening.side,'DOWN');
+  assert.equal(soldiers.pattern,'Three White Soldiers');assert.equal(soldiers.side,'UP');
+  assert.equal(crows.pattern,'Three Black Crows');assert.equal(crows.side,'DOWN');
 });
 
 function timedWindow(previous,rows,{windowMs=300000,elapsedMs=30000}={}){
@@ -18,7 +109,7 @@ function timedWindow(previous,rows,{windowMs=300000,elapsedMs=30000}={}){
 }
 
 test('green previous candle triggers the four UP buy rungs on adverse drops before the cutoff',()=>{
-  const previous={o:100,h:106,l:99,c:105};
+  const previous={o:100,h:105,l:100,c:105};
   const all=timedWindow(previous,[{minute:2,o:104,h:105,l:100.4,c:101}],{elapsedMs:149999});
   assert.equal(all.previousBody,5);assert.equal(all.side,'UP');
   assert.deepEqual(all.entries.map(e=>e.movePct),[25,50,75,90]);
@@ -31,7 +122,7 @@ test('green previous candle triggers the four UP buy rungs on adverse drops befo
 });
 
 test('red previous candle mirrors the four buy rungs on DOWN before the cutoff',()=>{
-  const previous={o:105,h:106,l:99,c:100};
+  const previous={o:105,h:105,l:100,c:100};
   const all=timedWindow(previous,[{minute:2,o:104,h:104.6,l:99,c:104}],{elapsedMs:149999});
   assert.equal(all.side,'DOWN');assert.deepEqual(all.entries.map(e=>e.crossed),[true,true,true,true]);
   assert.deepEqual(all.entries.map(e=>e.shares),[100,200,300,400]);
@@ -54,7 +145,7 @@ test('rung ladder has no sell/exit trigger at any point in a window',()=>{
 });
 
 test('the 25% rung also works in a five-minute window',()=>{
-  const a=timedWindow({o:100,h:106,l:99,c:105},
+  const a=timedWindow({o:100,h:105,l:100,c:105},
     [{minute:0,o:105,h:105,l:103.5,c:104}],{windowMs:300000,elapsedMs:20000});
   assert.equal(a.entries[0].crossed,true);assert.equal(a.entries[0].shares,100);
   assert.equal('exit' in a,false);
@@ -99,7 +190,7 @@ test('paper fill records the crossed rung percentage and share size',async()=>{
       label:'50% adverse move',windowEnd:Date.now()+10000,thresholdPrice:99,observedPrice:98},'move-50');
     assert.equal(bot.positions[0].triggerPct,50);
     assert.equal(bot.positions[0].shares,200);
-    assert.equal(bot.positions[0].entryType,'CANDLE_MOVE_RUNG');
+    assert.equal(bot.positions[0].entryType,'CANDLE_PATTERN_MOVE_RUNG');
   }finally{md.getBook=oldGetBook}
 });
 test('paper entry records simulated shares beyond the visible best-ask size',async()=>{
@@ -146,7 +237,7 @@ test('CLOB final settlement prioritizes the 0.98 threshold then the higher midpo
 });
 
 test('five-minute adverse entries stop at 150 seconds',()=>{
-  const previous={o:100,h:106,l:99,c:105},rows=[{minute:2,o:105,h:105,l:100,c:101}];
+  const previous={o:100,h:105,l:100,c:105},rows=[{minute:2,o:105,h:105,l:100,c:101}];
   const before=timedWindow(previous,rows,{elapsedMs:149999});
   const cutoff=timedWindow(previous,rows,{elapsedMs:150000});
   assert.ok(before.entries.some(e=>e.crossed));
