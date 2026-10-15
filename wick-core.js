@@ -117,11 +117,11 @@ function sign(value,epsilon=1e-10){return value>epsilon?1:value< -epsilon?-1:0}
 function detectMomentumSignal(minuteCandles,now=Date.now()) {
   const minutes=minuteCandles.map(toCandle).filter(x=>x.t<=now).sort((a,b)=>a.t-b.t);
   const closes=minutes.map(x=>x.c),n=closes.length;
-  if(n<14)return {ready:false,reason:'Waiting for at least 14 recent one-minute BTC candles for momentum and trend analysis'};
+  if(n<5)return {ready:false,reason:'Waiting for at least 5 recent one-minute BTC candles for momentum and trend analysis'};
   const fast=ema(closes,5),slow=ema(closes,13);
   const returns={oneMinute:pctChange(closes[n-1],closes[n-2]),
-    threeMinute:pctChange(closes[n-1],closes[n-4]),
-    fiveMinute:pctChange(closes[n-1],closes[n-6])};
+    threeMinute:n>=4?pctChange(closes[n-1],closes[n-4]):0,
+    fiveMinute:n>=6?pctChange(closes[n-1],closes[n-6]):0};
   const slopes={ema5:pctChange(fast[n-1],fast[n-4]),ema13:pctChange(slow[n-1],slow[n-4])};
   const votes=[sign(returns.oneMinute),sign(returns.threeMinute),sign(returns.fiveMinute),
     sign(slopes.ema5),sign(slopes.ema13)];

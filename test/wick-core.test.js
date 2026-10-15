@@ -68,6 +68,12 @@ test('momentum and EMA slopes select UP and DOWN',()=>{
   assert.equal(detectMomentumSignal(momentumCandles(-1),1800000).side,'DOWN');
 });
 
+test('momentum analysis starts with the five bars retained immediately after restart',()=>{
+  const signal=detectMomentumSignal(momentumCandles(1,5),5*60000);
+  assert.equal(signal.ready,true);assert.equal(signal.side,'UP');
+  assert.equal(signal.returns.fiveMinute,0);
+});
+
 test('three-candle stars and soldier/crow formations produce directional signals',()=>{
   const morning=detectCandlePatternSignal([
     {t:0,o:110,h:111,l:99,c:100},
