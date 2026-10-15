@@ -2,7 +2,7 @@
 
 const test=require('node:test');
 const assert=require('node:assert/strict');
-const {aggregate,detectCandlePatternSignal,detectMomentumSignal,detectTimedStrategy}=require('../wick-core');
+const {aggregate,detectCandlePatternSignal,detectTimedStrategy}=require('../wick-core');
 const { _test }=require('../wick-bot');
 
 test('aggregates one-minute bars into quarter-hour and hourly slots',()=>{
@@ -63,17 +63,6 @@ test('tweezer and harami formations are exposed as pattern candidates',()=>{
   assert.ok(harami.patterns.some(x=>x.name==='Bullish Harami'&&x.side==='UP'));
 });
 
-test('momentum and EMA slopes select UP and DOWN',()=>{
-  assert.equal(detectMomentumSignal(momentumCandles(1),1800000).side,'UP');
-  assert.equal(detectMomentumSignal(momentumCandles(-1),1800000).side,'DOWN');
-});
-
-test('momentum analysis starts with the five bars retained immediately after restart',()=>{
-  const signal=detectMomentumSignal(momentumCandles(1,5),5*60000);
-  assert.equal(signal.ready,true);assert.equal(signal.side,'UP');
-  assert.equal(signal.returns.fiveMinute,0);
-});
-
 test('three-candle stars and soldier/crow formations produce directional signals',()=>{
   const morning=detectCandlePatternSignal([
     {t:0,o:110,h:111,l:99,c:100},
@@ -101,27 +90,33 @@ test('three-candle stars and soldier/crow formations produce directional signals
   assert.equal(crows.pattern,'Three Black Crows');assert.equal(crows.side,'DOWN');
 });
 
-function momentumCandles(direction=1,count=24){
-  let prior=100;
-  return Array.from({length:count},(_,i)=>{
-    const close=100+i*direction*.1,bar={t:i*60000,o:prior,c:close,h:Math.max(prior,close)+.02,l:Math.min(prior,close)-.02,v:1};
-    prior=close;return bar;
-  });
-}
-function timedMomentum(direction,elapsedMs=30000,entryShares=500){
-  const windowStart=24*60000;
-  return detectTimedStrategy({minuteCandles:momentumCandles(direction),windowStart,now:windowStart+elapsedMs,entryShares});
+const bullishHistory=[
+  {t:0,o:110,h:111,l:99,c:100},
+  {t:300000,o:99,h:112,l:98,c:111},
+];
+const bearishHistory=[
+  {t:0,o:100,h:111,l:99,c:110},
+  {t:300000,o:111,h:112,l:98,c:99},
+];
+function timedPattern(history,elapsedMs=30000,entryShares=500){
+  const windowStart=history.length*300000;
+  const candles=[...history,{t:windowStart,o:history.at(-1).c,h:history.at(-1).c+1,
+    l:history.at(-1).c-1,c:history.at(-1).c+.5}];
+  return detectTimedStrategy({minuteCandles:candles,windowStart,now:windowStart+elapsedMs,entryShares});
 }
 
-test('momentum signal uses dynamic size and waits for the three-second gate',()=>{
-  const before=timedMomentum(1,2999),due=timedMomentum(1,3000,700);
-  assert.equal(due.side,'UP');assert.equal(due.entries.length,1);
-  assert.equal(due.entries[0].key,'momentum-entry');assert.equal(due.entries[0].shares,700);
-  assert.equal(due.entries[0].crossed,true);assert.equal(before.entries[0].crossed,false);
+test('candle patterns choose UP or DOWN and keep adaptive size with the three-second gate',()=>{
+  const before=timedPattern(bullishHistory,2999),up=timedPattern(bullishHistory,3000,700);
+  const down=timedPattern(bearishHistory,3000,600);
+  assert.equal(up.side,'UP');assert.equal(up.signalPattern,'Bullish Engulfing');
+  assert.equal(up.entries[0].key,'candle-pattern-entry');assert.equal(up.entries[0].shares,700);
+  assert.equal(up.entries[0].crossed,true);assert.equal(before.entries[0].crossed,false);
+  assert.equal(down.side,'DOWN');assert.equal(down.entries[0].shares,600);
 });
 
-test('flat momentum and EMA slopes produce no direction',()=>{
-  const flat=timedMomentum(0);assert.equal(flat.side,null);assert.deepEqual(flat.entries,[]);
+test('neutral candle patterns produce no directional entry',()=>{
+  const result=timedPattern([{t:0,o:100,h:101,l:99,c:100},{t:300000,o:100,h:101,l:99,c:100}],30000);
+  assert.equal(result.side,null);assert.deepEqual(result.entries,[]);
 });
 
 test('single-entry strategy leaves position exits to the existing CLOB rules',()=>{
@@ -131,8 +126,8 @@ test('single-entry strategy leaves position exits to the existing CLOB rules',()
 });
 
 test('the 150-second cutoff still blocks the single entry',()=>{
-  const before=timedMomentum(1,149999);
-  const cutoff=timedMomentum(1,150000);
+  const before=timedPattern(bullishHistory,149999);
+  const cutoff=timedPattern(bullishHistory,150000);
   assert.equal(before.entries[0].crossed,true);
   assert.equal(cutoff.entries[0].crossed,false);assert.equal(cutoff.entries[0].expired,true);
 });
@@ -188,7 +183,7 @@ test('demo fills the requested shares at best ask despite short visible depth',(
   assert.equal(_test.simulateAtBestAsk([],100,.60,.05),null);
 });
 
-test('paper momentum entry records its method and dynamic share size',async()=>{
+test('paper candle-pattern entry records its pattern and dynamic share size',async()=>{
   const Bot=require('../wick-bot'),md=require('../wick-market-data');
   const oldGetBook=md.getBook;
   md.getBook=async()=>({asks:[{price:.5,size:400}]});
@@ -197,13 +192,13 @@ test('paper momentum entry records its method and dynamic share size',async()=>{
     const start=Date.now()-5000;
     bot.market={id:'test-market',slug:'test',title:'Test',tokens:{UP:'up-token',DOWN:'down-token'},raw:{feesEnabled:false}};
     bot.entryState[start]={triggered:{},filled:{},blocks:{}};
-    const trigger={side:'UP',shares:700,key:'momentum-entry',signalMethod:'BTC Momentum/Trend',
-      signalStrength:4,label:'UP momentum/trend · 700 shares',windowEnd:start+300000};
-    await bot.tryEnter(start,trigger,'momentum-entry');
-    assert.equal(bot.positions[0].signalMethod,'BTC Momentum/Trend');
+    const trigger={side:'UP',shares:700,key:'candle-pattern-entry',pattern:'Bullish Engulfing',
+      signalStrength:4,label:'Bullish Engulfing · UP · 700 shares',windowEnd:start+300000};
+    await bot.tryEnter(start,trigger,'candle-pattern-entry');
+    assert.equal(bot.positions[0].signalPattern,'Bullish Engulfing');
     assert.equal(bot.positions[0].shares,700);
-    assert.equal(bot.positions[0].entryType,'MOMENTUM_TREND_SINGLE_ENTRY');
-    await bot.tryEnter(start,trigger,'momentum-entry');
+    assert.equal(bot.positions[0].entryType,'CANDLE_PATTERN_SINGLE_ENTRY');
+    await bot.tryEnter(start,trigger,'candle-pattern-entry');
     assert.equal(bot.positions.length,1);
   }finally{md.getBook=oldGetBook}
 });
@@ -216,8 +211,8 @@ test('paper entry records simulated shares beyond the visible best-ask size',asy
     const start=Date.now()-5000;
     bot.market={id:'test-market',slug:'test',title:'Test',tokens:{UP:'up-token',DOWN:'down-token'},raw:{feesEnabled:false}};
     bot.entryState[start]={triggered:{},filled:{},blocks:{}};
-    await bot.tryEnter(start,{side:'UP',shares:500,key:'momentum-entry',
-      label:'Momentum signal',windowEnd:start+300000,signalMethod:'BTC Momentum/Trend'},'momentum-entry');
+    await bot.tryEnter(start,{side:'UP',shares:500,key:'candle-pattern-entry',
+      label:'Candle pattern',windowEnd:start+300000,pattern:'Bullish Engulfing'},'candle-pattern-entry');
     assert.equal(bot.positions[0].shares,500);
     assert.equal(bot.positions[0].avgEntry,.45);
     assert.equal(bot.positions[0].visibleAskSize,50);
@@ -250,7 +245,7 @@ test('CLOB final settlement prioritizes the 0.98 threshold then the higher midpo
   assert.equal(_test.clobWinner(.5,.5),'UP');
 });
 
-test('the single momentum entry remains gated by the three-second delay',async()=>{
+test('the single candle-pattern entry remains gated by the three-second delay',async()=>{
   const Bot=require('../wick-bot'),md=require('../wick-market-data'),oldBook=md.getBook,oldNow=Date.now;
   md.getBook=async()=>({asks:[{price:.5,size:1000}]});
   let now=100000;Date.now=()=>now;
@@ -258,12 +253,12 @@ test('the single momentum entry remains gated by the three-second delay',async()
     const bot=new Bot({timeframe:'5m',windowMs:300000,capital:10000}),start=now-1000;
     bot.market={id:'t',slug:'t',title:'t',tokens:{UP:'u',DOWN:'d'},raw:{feesEnabled:false}};
     bot.entryState[start]={triggered:{},filled:{},blocks:{}};
-    const trigger={side:'UP',shares:500,key:'momentum-entry',label:'Momentum signal',
-      windowEnd:start+300000,signalMethod:'BTC Momentum/Trend'};
-    await bot.tryEnter(start,trigger,'momentum-entry');
+    const trigger={side:'UP',shares:500,key:'candle-pattern-entry',label:'Candle pattern',
+      windowEnd:start+300000,pattern:'Bullish Engulfing'};
+    await bot.tryEnter(start,trigger,'candle-pattern-entry');
     assert.equal(bot.positions.length,0);
     now=start+3000;
-    await bot.tryEnter(start,trigger,'momentum-entry');
+    await bot.tryEnter(start,trigger,'candle-pattern-entry');
     assert.equal(bot.positions.length,1);
     assert.equal(bot.positions[0].openedAt,now);
   }finally{md.getBook=oldBook;Date.now=oldNow}
