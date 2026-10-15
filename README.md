@@ -11,7 +11,7 @@ Polymarket-only BTC UP/DOWN paper trading. The bot has one 5-minute market loop 
 - Deduct the Polymarket BTC taker fee from each paper buy using the market fee schedule and simulated fill price.
 - During the window, any fresh bid, ask, or midpoint for the position's own side at $0.99 or higher immediately settles it as a $1/share win; at $0.01 or lower immediately settles it as a $0/share loss. If neither threshold is reached, use the official Gamma market result at window close, retrying until resolved.
 
-The bot polls CLOB quotes every 500 ms and Kraken 1-minute candles every second; the dashboard refreshes every 2 seconds. TP detection uses fresh own-side CLOB quotes. If no quote reaches TP, use the official Gamma result and retry while it is pending. Dashboard win rate is calculated over settled individual rung trades; total trades includes open and settled positions. Stale marks are excluded from floating P&L/equity. Paper state is in memory and resets on process restart.
+The bot polls CLOB quotes every 500 ms and consumes Polymarket RTDS Chainlink BTC/USD updates to build 1-minute candles; the dashboard refreshes every 2 seconds. RTDS provides a short recent replay on connection, so the scanner waits until it has rebuilt a completed 5-minute candle after a restart. TP detection uses fresh own-side CLOB quotes. If no quote reaches TP, use the official Gamma result and retry while it is pending. Dashboard win rate is calculated over settled individual rung trades; total trades includes open and settled positions. Stale marks are excluded from floating P&L/equity. Paper state is in memory and resets on process restart.
 
 ## Run and verify
 

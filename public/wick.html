@@ -23,7 +23,7 @@
 <div class="err" id="error"></div>
 <section class="cols" id="timeframe-panels"></section>
 <section class="panel"><h2>Recent paper trades · entry prices and window timestamps</h2><div id="positions" class="empty">No paper trades yet.</div></section>
-<p class="small">Signals use public Kraken XBT/USD 1-minute OHLC; prices and settlement use Polymarket CLOB quotes. The dashboard refreshes every 2 seconds. Paper state resets on process restart. No live orders are sent.</p>
+<p class="small">Signals use Polymarket RTDS Chainlink BTC/USD updates aggregated into 1-minute candles; entries and exits use Polymarket CLOB quotes. The stream has a short replay on connection, so after a restart the scanner waits until it rebuilds a completed 5-minute candle. The dashboard refreshes every 2 seconds. Paper state resets on process restart. No live orders are sent.</p>
 </main>
 <script>
 const esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));

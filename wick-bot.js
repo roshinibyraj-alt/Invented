@@ -217,7 +217,9 @@ class WickBot{
       window:this.market?{title:this.market.title,slug:this.market.slug,start:this.market.start,end:this.market.end}:null,
       livePrices:{marketSlug:this.market?.slug||null,updatedAt:Math.max(this.liveQuotes.UP.updatedAt||0,this.liveQuotes.DOWN.updatedAt||0)||null,
         UP:this.liveQuotes.UP,DOWN:this.liveQuotes.DOWN},
-       scanner:{timeframe:this.timeframe,lastScanAt:this.lastScanAt,candleSource:`Kraken XBT/USD 1m; minute 1/2 extrema and live move compared with previous completed ${this.windowMs/60000}m window`,
+       scanner:{timeframe:this.timeframe,lastScanAt:this.lastScanAt,
+           candleSource:`Polymarket RTDS Chainlink BTC/USD; one-minute OHLC aggregated from live oracle updates and compared with previous completed ${this.windowMs/60000}m window`,
+           candleFeed:md.getCandleFeedStatus(),
           marketResolution:'Own-side fresh CLOB quote >= $0.99 settles $1/share, <= $0.01 settles $0/share immediately; otherwise official Gamma result is retried until resolved',analysis:this.analysis||null,
              previousCandles:prior,rungState:this.rungState[this.market?.start]||null},
       positions:this.positions.slice(0,50),events:this.events};

@@ -2,7 +2,7 @@
 
 const GAMMA='https://gamma-api.polymarket.com';
 const CLOB='https://clob.polymarket.com';
-const KRAKEN='https://api.kraken.com/0/public';
+const chainlinkFeed=require('./chainlink-feed').feed;
 
 async function getJson(url){
   const r=await fetch(url,{signal:AbortSignal.timeout(10000)});
@@ -30,15 +30,12 @@ async function getBtcMarket(windowStart,windowMs){
 }
 
 async function getMinuteCandles(){
-  const data=await getJson(`${KRAKEN}/OHLC?pair=XBTUSD&interval=1`);
-  if(data.error?.length)throw new Error(`Kraken OHLC: ${data.error.join(', ')}`);
-  const key=Object.keys(data.result||{}).find(x=>x!=='last');
-  const rows=key?data.result[key]:[];
-  return rows.map(x=>({t:Number(x[0])*1000,o:+x[1],h:+x[2],l:+x[3],c:+x[4],v:+x[6]}));
+  return chainlinkFeed.getMinuteCandles();
 }
+function getCandleFeedStatus(){return chainlinkFeed.snapshot()}
 async function getBook(tokenId){
   return getJson(`${CLOB}/book?token_id=${encodeURIComponent(tokenId)}`);
 }
 async function getMarket(id){return getJson(`${GAMMA}/markets/${encodeURIComponent(id)}`)}
 
-module.exports={getBtcMarket,getMinuteCandles,getBook,getMarket};
+module.exports={getBtcMarket,getMinuteCandles,getCandleFeedStatus,getBook,getMarket};
