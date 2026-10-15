@@ -60,6 +60,7 @@ function clobQuoteWinner(up,down){
 class WickBot{
   constructor({timeframe='5m',windowMs=cfg.WINDOW_MS,capital=cfg.DEMO_CAPITAL_5M}={}){
     this.timeframe=timeframe;this.windowMs=windowMs;this.capital=capital;this.cash=capital;
+    this.startedAt=Date.now();
     this.positions=[];this.events=[];this.status='starting';
     this.error=null;this.market=null;this.candles=[];this.lastMarketAt=0;
     this.lastCandlesAt=0;this.lastScanAt=null;this.entryState={};this.running=false;
@@ -91,7 +92,8 @@ class WickBot{
         this.closeQuotes={UP:this.liveQuotes.UP,DOWN:this.liveQuotes.DOWN,ts:now};
         for(const p of this.positions)if(p.windowStart===start&&(p.status==='OPEN'||p.status==='PENDING_CLOB_RESULT'))p.closeQuotes=this.closeQuotes;
       }
-      const analysis=detectTimedStrategy({minuteCandles:this.candles,windowStart:start,windowMs:this.windowMs,now});
+      const analysis=detectTimedStrategy({minuteCandles:this.candles,windowStart:start,windowMs:this.windowMs,now,
+        entryShares:this.nextEntryShares()});
       this.analysis=analysis;this.lastScanAt=now;this.error=null;
       for(const p of this.positions){
         if((p.status==='OPEN'||p.status==='PENDING_CLOB_RESULT')
@@ -158,6 +160,15 @@ class WickBot{
       catch(_){p.markStatus=p.markBid!=null?'STALE':'MISSING'}
     }));
   }
+  nextEntryShares(){
+    let shares=cfg.ENTRY_FLOOR_SHARES;
+    const settled=this.positions.filter(p=>p.status==='SETTLED_WIN'||p.status==='SETTLED_LOSS')
+      .sort((a,b)=>(a.settledAt||0)-(b.settledAt||0));
+    for(const p of settled)shares=p.status==='SETTLED_LOSS'
+      ?Math.min(cfg.ENTRY_MAX_SHARES,shares+cfg.ENTRY_SIZE_STEP_SHARES)
+      :Math.max(cfg.ENTRY_FLOOR_SHARES,shares-cfg.ENTRY_SIZE_STEP_SHARES);
+    return shares;
+  }
   async tryEnter(start,trigger,key){
     const now=Date.now();
     if(now<start+cfg.ENTRY_DELAY_MS||now>=trigger.windowEnd||now-start>=cfg.ENTRY_CUTOFF_MS)return;
@@ -171,16 +182,16 @@ class WickBot{
     const p={id:`${this.timeframe}-${start}-${trigger.side}-${key}`,timeframe:this.timeframe,
        windowMs:this.windowMs,windowStart:start,marketId:this.market.id,slug:this.market.slug,
       title:this.market.title,side:trigger.side,tokenId:token,entryKey:key,entryLabel:trigger.label,
-       entryType:'CANDLE_PATTERN_SINGLE_ENTRY',
-       signalPattern:trigger.pattern||null,signalStrength:trigger.signalStrength||0,
+        entryType:'MOMENTUM_TREND_SINGLE_ENTRY',
+        signalMethod:trigger.signalMethod||'BTC Momentum/Trend',signalStrength:trigger.signalStrength||0,
        shares:fill.shares,initialShares:fill.shares,
        oppositeTokenId:this.market.tokens[trigger.side==='UP'?'DOWN':'UP'],
         avgEntry:fill.avg,cost:fill.cost,fees:fee,totalCost:total,status:'OPEN',openedAt:Date.now(),
         fillModel:'FULL_SIZE_AT_BEST_ASK',visibleAskSize:fill.visibleDepth,simulatedShares:fill.simulatedShares,
          observedPrice:trigger.observedPrice};
      this.cash-=total;this.positions.unshift(p);state.filled[key]=p.id;delete state.blocks[key];this.status='position_open';
-     this.log('PAPER_PATTERN_ENTRY',{timeframe:this.timeframe,id:p.id,side:p.side,entry:key,label:p.entryLabel,
-       pattern:p.signalPattern,signalStrength:p.signalStrength,shares:p.shares,entryPrice:p.avgEntry,avgEntry:p.avgEntry,cost:p.totalCost,
+     this.log('PAPER_MOMENTUM_ENTRY',{timeframe:this.timeframe,id:p.id,side:p.side,entry:key,label:p.entryLabel,
+       signalMethod:p.signalMethod,signalStrength:p.signalStrength,shares:p.shares,entryPrice:p.avgEntry,avgEntry:p.avgEntry,cost:p.totalCost,
       fillModel:p.fillModel,visibleAskSize:p.visibleAskSize,simulatedShares:p.simulatedShares});
   }
   async trySettle(p){
@@ -198,6 +209,17 @@ class WickBot{
     const realizedPnl=this.positions.reduce((s,p)=>s+(p.realizedPnl||0),0);
     const wins=this.positions.filter(p=>p.status==='SETTLED_WIN').length,losses=this.positions.filter(p=>p.status==='SETTLED_LOSS').length;
     const settledTrades=wins+losses,totalTrades=this.positions.length;
+    const history=this.positions.filter(p=>p.status==='SETTLED_WIN'||p.status==='SETTLED_LOSS')
+      .sort((a,b)=>(a.settledAt||0)-(b.settledAt||0));
+    const equityCurve=[{ts:this.startedAt,equity:this.capital}];
+    let curveEquity=this.capital,peak=this.capital,maxDrawdown=0,maxConsecutiveLosses=0,lossStreak=0;
+    for(const p of history){
+      curveEquity+=Number(p.realizedPnl)||0;
+      equityCurve.push({ts:p.settledAt||p.openedAt,equity:curveEquity});
+      peak=Math.max(peak,curveEquity);maxDrawdown=Math.max(maxDrawdown,peak-curveEquity);
+      if(p.status==='SETTLED_LOSS'){lossStreak++;maxConsecutiveLosses=Math.max(maxConsecutiveLosses,lossStreak)}
+      else lossStreak=0;
+    }
     let unrealizedPnl=0,unpricedOpenPositions=0,markedValue=0;
     for(const p of this.positions){
       if(p.status!=='OPEN'&&p.status!=='PENDING_CLOB_RESULT'){
@@ -207,28 +229,32 @@ class WickBot{
     }
     return {now,mode:'DEMO ONLY',status:this.status,error:this.error,
         strategy:{timeframe:'5m',market:'Polymarket BTC 5-minute UP/DOWN',capital:this.capital,
-          entries:[{shares:cfg.ENTRY_SHARES,trigger:'pattern signal',
-            delaySeconds:cfg.ENTRY_DELAY_MS/1000,timing:'single paper entry per window'}],
+          entries:[{shares:this.nextEntryShares(),trigger:'momentum/trend signal',
+            floorShares:cfg.ENTRY_FLOOR_SHARES,maxShares:cfg.ENTRY_MAX_SHARES,
+            stepShares:cfg.ENTRY_SIZE_STEP_SHARES,delaySeconds:cfg.ENTRY_DELAY_MS/1000,
+            timing:'single paper entry per window; resize after each settled result'}],
           exit:'Any fresh own-side CLOB bid/ask/mid >= $0.99 immediately pays $1/share; <= $0.01 immediately pays $0/share; otherwise use official Gamma outcome at window close',
           minEntryAsk:cfg.MIN_ENTRY_ASK,maxEntryAsk:cfg.MAX_ENTRY_ASK,
-          direction:'Candle pattern detected from completed five-minute candles; no directional pattern means no entry side',
+          direction:'Recent BTC returns and EMA5/EMA13 slopes vote UP or DOWN; near-ties use longer-term momentum',
           entryCutoffSeconds:cfg.ENTRY_CUTOFF_MS/1000,entryDelaySeconds:cfg.ENTRY_DELAY_MS/1000,
           entryFillModel:'Fill the full requested size at the best eligible ask, ignoring displayed size; asks must be within $0.05-$0.60',
           fees:'Polymarket taker fees on simulated buys',execution:'PAPER ONLY'},
        account:{capital:this.capital,cash:this.cash,realizedPnl,unrealizedPnl,equity:this.cash+markedValue,
          totalTrades,settledTrades,wins,losses,winRate:settledTrades?wins/settledTrades*100:0,markedValue,unpricedOpenPositions,
-        openPositions:this.positions.filter(p=>p.status==='OPEN'||p.status==='PENDING_CLOB_RESULT').length},
+         openPositions:this.positions.filter(p=>p.status==='OPEN'||p.status==='PENDING_CLOB_RESULT').length,
+         maxConsecutiveLosses,maxDrawdown,maxDrawdownPercent:peak?maxDrawdown/peak*100:0,
+         wins,losses,equityCurve,nextEntryShares:this.nextEntryShares()},
       window:this.market?{title:this.market.title,slug:this.market.slug,start:this.market.start,end:this.market.end}:null,
       livePrices:{marketSlug:this.market?.slug||null,updatedAt:Math.max(this.liveQuotes.UP.updatedAt||0,this.liveQuotes.DOWN.updatedAt||0)||null,
         UP:this.liveQuotes.UP,DOWN:this.liveQuotes.DOWN},
        scanner:{timeframe:this.timeframe,lastScanAt:this.lastScanAt,
-            candleSource:`Polymarket RTDS Chainlink BTC/USD; one-minute OHLC aggregated into completed ${this.windowMs/60000}m candles for pattern-based direction`,
+             candleSource:'Polymarket RTDS Chainlink BTC/USD one-minute closes; recent returns and EMA slopes determine momentum/trend direction',
            candleFeed:md.getCandleFeedStatus(),
           marketResolution:'Own-side fresh CLOB quote >= $0.99 settles $1/share, <= $0.01 settles $0/share immediately; otherwise official Gamma result is retried until resolved',analysis:this.analysis||null,
               previousCandles:prior,entryState:this.entryState[this.market?.start]||null},
       positions:this.positions.slice(0,50),events:this.events};
   }
-  start(){if(this.running)return;this.running=true;this.log('BOT_STARTED',{timeframe:this.timeframe,note:`Demo-only BTC ${this.windowMs/60000}m candle-pattern signal; one ${cfg.ENTRY_SHARES}-share entry after ${cfg.ENTRY_DELAY_MS/1000}s, no live orders.`});
+  start(){if(this.running)return;this.running=true;this.log('BOT_STARTED',{timeframe:this.timeframe,note:`Demo-only BTC ${this.windowMs/60000}m momentum/trend signal; one ${this.nextEntryShares()}-share entry after ${cfg.ENTRY_DELAY_MS/1000}s, size adjusts by ${cfg.ENTRY_SIZE_STEP_SHARES} after each win/loss, no live orders.`});
     const loop=async()=>{if(!this.running)return;await this.tick();if(this.running)this.timer=setTimeout(loop,cfg.POLL_INTERVAL_MS)};
     void loop();}
   stop(){this.running=false;clearTimeout(this.timer)}

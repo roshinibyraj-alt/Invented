@@ -29,7 +29,10 @@ class MultiBot {
         unrealizedPnl:states.reduce((n,s)=>n+s.account.unrealizedPnl,0),
         equity:states.reduce((n,s)=>n+s.account.equity,0),
         markedValue:states.reduce((n,s)=>n+s.account.markedValue,0),
-        unpricedOpenPositions:states.reduce((n,s)=>n+s.account.unpricedOpenPositions,0),totalTrades,settledTrades,wins,losses,winRate:settledTrades?wins/settledTrades*100:0,openPositions}};
+         unpricedOpenPositions:states.reduce((n,s)=>n+s.account.unpricedOpenPositions,0),totalTrades,settledTrades,wins,losses,winRate:settledTrades?wins/settledTrades*100:0,openPositions,
+         maxConsecutiveLosses:primary.account.maxConsecutiveLosses,
+         maxDrawdown:primary.account.maxDrawdown,maxDrawdownPercent:primary.account.maxDrawdownPercent,
+         equityCurve:primary.account.equityCurve,nextEntryShares:primary.account.nextEntryShares}};
   }
 }
 

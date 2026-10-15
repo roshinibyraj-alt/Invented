@@ -107,30 +107,44 @@ function detectCandlePatternSignal(history) {
   return {side:selected.side,pattern:selected.name,strength:selected.strength,patterns,reason:null};
 }
 
-function detectTimedStrategy({minuteCandles,windowStart,windowMs=300000,now=Date.now()}) {
-  const minutes=minuteCandles.map(toCandle).sort((a,b)=>a.t-b.t);
-  const bars=aggregate(minutes,windowMs);
-  const history=bars.filter(x=>x.t<windowStart);
-  const current=bars.find(x=>x.t===windowStart);
-  if(!history.length||!current)return {ready:false,reason:`Waiting for previous and current ${windowMs/60000}-minute candles`};
-  const previous=history[history.length-1];
-  const previousBody=Math.abs(previous.c-previous.o);
-  const previousColor=previous.c<previous.o?'red':previous.c>previous.o?'green':'doji';
-  const signedMove=current.c-previous.c;
-  const signal=detectCandlePatternSignal(history);
-  const side=signal.side;
+function ema(values,period) {
+  const alpha=2/(period+1),out=[];
+  for(let i=0;i<values.length;i++)out.push(i===0?values[i]:values[i]*alpha+out[i-1]*(1-alpha));
+  return out;
+}
+function pctChange(current,previous){return previous?((current/previous)-1)*100:0}
+function sign(value,epsilon=1e-10){return value>epsilon?1:value< -epsilon?-1:0}
+function detectMomentumSignal(minuteCandles,now=Date.now()) {
+  const minutes=minuteCandles.map(toCandle).filter(x=>x.t<=now).sort((a,b)=>a.t-b.t);
+  const closes=minutes.map(x=>x.c),n=closes.length;
+  if(n<14)return {ready:false,reason:'Waiting for at least 14 recent one-minute BTC candles for momentum and trend analysis'};
+  const fast=ema(closes,5),slow=ema(closes,13);
+  const returns={oneMinute:pctChange(closes[n-1],closes[n-2]),
+    threeMinute:pctChange(closes[n-1],closes[n-4]),
+    fiveMinute:pctChange(closes[n-1],closes[n-6])};
+  const slopes={ema5:pctChange(fast[n-1],fast[n-4]),ema13:pctChange(slow[n-1],slow[n-4])};
+  const votes=[sign(returns.oneMinute),sign(returns.threeMinute),sign(returns.fiveMinute),
+    sign(slopes.ema5),sign(slopes.ema13)];
+  const score=votes.reduce((sum,value)=>sum+value,0);
+  const tieBreak=sign(returns.fiveMinute)||sign(slopes.ema13)||sign(returns.oneMinute);
+  const side=score?score>0?'UP':'DOWN':tieBreak?tieBreak>0?'UP':'DOWN':null;
+  return {ready:true,side,score,confidence:Math.abs(score)/5,returns,slopes,
+    signalReason:side?null:'Recent returns and moving-average slopes are flat',
+    signalMethod:'BTC Momentum/Trend',latestPrice:closes[n-1],lastCandleAt:minutes[n-1].t};
+}
+function detectTimedStrategy({minuteCandles,windowStart,windowMs=300000,now=Date.now(),entryShares=cfg.ENTRY_FLOOR_SHARES}) {
+  const signal=detectMomentumSignal(minuteCandles,now);
+  if(!signal.ready)return {ready:false,reason:signal.reason};
   const elapsedMs=now-windowStart;
-  const entries=side?[{
-    key:'pattern-500',label:`${signal.pattern} signal · ${cfg.ENTRY_SHARES} shares`,
-    shares:cfg.ENTRY_SHARES,side,windowEnd:windowStart+windowMs,
+  const entries=signal.side?[{
+    key:'momentum-entry',label:`${signal.side} momentum/trend · ${entryShares} shares`,
+    shares:entryShares,side:signal.side,windowEnd:windowStart+windowMs,
     crossed:elapsedMs>=cfg.ENTRY_DELAY_MS&&elapsedMs<cfg.ENTRY_CUTOFF_MS,
-    expired:elapsedMs>=cfg.ENTRY_CUTOFF_MS,observedPrice:current.c,
-    pattern:signal.pattern,signalStrength:signal.strength,
+    expired:elapsedMs>=cfg.ENTRY_CUTOFF_MS,observedPrice:signal.latestPrice,
+    signalMethod:signal.signalMethod,signalStrength:Math.abs(signal.score),
   }]:[];
-  return {ready:true,windowStart,previousClose:previous.c,previousBody,previousColor,
-    side,signalPattern:signal.pattern,signalStrength:signal.strength,signalPatterns:signal.patterns,
-    signalReason:signal.reason,signedMove,elapsedMs,entryMode:'CANDLE_PATTERN_DELAYED_SINGLE_ENTRY',
-    previous,current,entries,reason:signal.reason};
+  return {...signal,windowStart,elapsedMs,entryMode:'MOMENTUM_TREND_SINGLE_ENTRY',
+    entryShares,entries,reason:signal.signalReason};
 }
 
-module.exports={toCandle,aggregate,detectCandlePatternSignal,detectTimedStrategy};
+module.exports={toCandle,aggregate,detectCandlePatternSignal,detectMomentumSignal,detectTimedStrategy};

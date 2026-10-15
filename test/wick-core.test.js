@@ -2,7 +2,7 @@
 
 const test=require('node:test');
 const assert=require('node:assert/strict');
-const {aggregate,detectCandlePatternSignal,detectTimedStrategy}=require('../wick-core');
+const {aggregate,detectCandlePatternSignal,detectMomentumSignal,detectTimedStrategy}=require('../wick-core');
 const { _test }=require('../wick-bot');
 
 test('aggregates one-minute bars into quarter-hour and hourly slots',()=>{
@@ -63,14 +63,9 @@ test('tweezer and harami formations are exposed as pattern candidates',()=>{
   assert.ok(harami.patterns.some(x=>x.name==='Bullish Harami'&&x.side==='UP'));
 });
 
-test('one pattern-side entry triggers at 500 shares after the three-second delay',()=>{
-  const previous={o:100,h:105,l:100,c:105};
-  const before=timedWindow(previous,[{minute:0,o:105,h:105,l:105,c:105}],{elapsedMs:2999});
-  const due=timedWindow(previous,[{minute:0,o:105,h:105,l:105,c:105}],{elapsedMs:3000});
-  assert.equal(due.side,'UP');assert.equal(due.entries.length,1);
-  assert.equal(due.entries[0].key,'pattern-500');assert.equal(due.entries[0].shares,500);
-  assert.equal(due.entries[0].crossed,true);assert.equal(due.entries[0].pattern,'Green Marubozu');
-  assert.equal(before.entries[0].crossed,false);
+test('momentum and EMA slopes select UP and DOWN',()=>{
+  assert.equal(detectMomentumSignal(momentumCandles(1),1800000).side,'UP');
+  assert.equal(detectMomentumSignal(momentumCandles(-1),1800000).side,'DOWN');
 });
 
 test('three-candle stars and soldier/crow formations produce directional signals',()=>{
@@ -100,49 +95,38 @@ test('three-candle stars and soldier/crow formations produce directional signals
   assert.equal(crows.pattern,'Three Black Crows');assert.equal(crows.side,'DOWN');
 });
 
-function timedWindow(previous,rows,{windowMs=300000,elapsedMs=30000}={}){
-  const minute=[];
-  for(let j=0;j<windowMs/60000;j++)minute.push({t:j*60000,...previous,v:1});
-  for(const row of rows)minute.push({t:windowMs+row.minute*60000,o:row.o,h:row.h,l:row.l,c:row.c,v:1});
-  return detectTimedStrategy({minuteCandles:minute,windowStart:windowMs,windowMs,now:windowMs+elapsedMs});
+function momentumCandles(direction=1,count=24){
+  let prior=100;
+  return Array.from({length:count},(_,i)=>{
+    const close=100+i*direction*.1,bar={t:i*60000,o:prior,c:close,h:Math.max(prior,close)+.02,l:Math.min(prior,close)-.02,v:1};
+    prior=close;return bar;
+  });
+}
+function timedMomentum(direction,elapsedMs=30000,entryShares=500){
+  const windowStart=24*60000;
+  return detectTimedStrategy({minuteCandles:momentumCandles(direction),windowStart,now:windowStart+elapsedMs,entryShares});
 }
 
-test('one bearish pattern selects DOWN and still uses the fixed 500-share size',()=>{
-  const previous={o:105,h:105,l:100,c:100};
-  const a=timedWindow(previous,[{minute:0,o:100,h:100,l:100,c:100}],{elapsedMs:3000});
-  assert.equal(a.side,'DOWN');assert.equal(a.entries.length,1);
-  assert.equal(a.entries[0].side,'DOWN');assert.equal(a.entries[0].shares,500);
+test('momentum signal uses dynamic size and waits for the three-second gate',()=>{
+  const before=timedMomentum(1,2999),due=timedMomentum(1,3000,700);
+  assert.equal(due.side,'UP');assert.equal(due.entries.length,1);
+  assert.equal(due.entries[0].key,'momentum-entry');assert.equal(due.entries[0].shares,700);
+  assert.equal(due.entries[0].crossed,true);assert.equal(before.entries[0].crossed,false);
 });
 
-test('a green pattern produces one UP entry without waiting for an adverse move',()=>{
-  const previous={o:100,h:105,l:100,c:105};
-  const all=timedWindow(previous,[{minute:0,o:105,h:105,l:105,c:105}],{elapsedMs:3000});
-  assert.equal(all.previousBody,5);assert.equal(all.side,'UP');
-  assert.equal(all.entries[0].crossed,true);
-  assert.equal(all.entries[0].windowEnd,all.windowStart+300000);
-  assert.equal(all.entries[0].shares,500);
-});
-
-test('doji prior candle cannot signal entries or exits',()=>{
-  const a=timedWindow({o:100,h:110,l:90,c:100},[{minute:0,o:100,h:120,l:80,c:110}],{elapsedMs:240000});
-  assert.equal(a.side,null);assert.deepEqual(a.entries,[]);
-  assert.equal('exit' in a,false);
+test('flat momentum and EMA slopes produce no direction',()=>{
+  const flat=timedMomentum(0);assert.equal(flat.side,null);assert.deepEqual(flat.entries,[]);
 });
 
 test('single-entry strategy leaves position exits to the existing CLOB rules',()=>{
-  const a=timedWindow({o:100,h:110,l:99,c:105},
-    [{minute:0,o:105,h:105,l:103,c:103},{minute:1,o:103,h:104,l:102,c:102},{minute:4,o:102,h:102,l:90,c:91}],
-    {elapsedMs:240000});
-  assert.equal('exit' in a,false);
   const Bot=require('../wick-bot'),bot=new Bot({timeframe:'5m',windowMs:300000,capital:1000});
   assert.equal(typeof bot.tryExit,'undefined');
   assert.match(bot.snapshot().strategy.exit,/bid\/ask\/mid >= \$0\.99/);
 });
 
 test('the 150-second cutoff still blocks the single entry',()=>{
-  const previous={o:100,h:105,l:100,c:105};
-  const before=timedWindow(previous,[{minute:0,o:105,h:105,l:105,c:105}],{elapsedMs:149999});
-  const cutoff=timedWindow(previous,[{minute:0,o:105,h:105,l:105,c:105}],{elapsedMs:150000});
+  const before=timedMomentum(1,149999);
+  const cutoff=timedMomentum(1,150000);
   assert.equal(before.entries[0].crossed,true);
   assert.equal(cutoff.entries[0].crossed,false);assert.equal(cutoff.entries[0].expired,true);
 });
@@ -166,6 +150,30 @@ test('realized and floating position P&L are computed separately from bid marks'
   assert.equal(a.equity,990);assert.equal(a.openPositions,1);
 });
 
+test('share size rises after losses, falls after wins, and stays within 500–1,000',()=>{
+  const Bot=require('../wick-bot'),bot=new Bot({capital:1000});
+  assert.equal(bot.nextEntryShares(),500);
+  bot.positions=Array.from({length:7},(_,i)=>({status:'SETTLED_LOSS',settledAt:i+1}));
+  assert.equal(bot.nextEntryShares(),1000);
+  bot.positions.push({status:'SETTLED_WIN',settledAt:8});
+  assert.equal(bot.nextEntryShares(),900);
+  bot.positions.push(...Array.from({length:10},(_,i)=>({status:'SETTLED_WIN',settledAt:i+9})));
+  assert.equal(bot.nextEntryShares(),500);
+});
+
+test('equity history calculates wins, maximum loss streak, and peak drawdown',()=>{
+  const Bot=require('../wick-bot'),bot=new Bot({capital:1000});
+  bot.positions=[
+    {status:'SETTLED_LOSS',settledAt:1,realizedPnl:-100},
+    {status:'SETTLED_LOSS',settledAt:2,realizedPnl:-50},
+    {status:'SETTLED_WIN',settledAt:3,realizedPnl:80},
+  ];
+  const a=bot.snapshot().account;
+  assert.equal(a.wins,1);assert.equal(a.maxConsecutiveLosses,2);
+  assert.equal(a.maxDrawdown,150);assert.equal(a.maxDrawdownPercent,15);
+  assert.deepEqual(a.equityCurve.map(x=>x.equity),[1000,900,850,930]);
+});
+
 test('demo fills the requested shares at best ask despite short visible depth',()=>{
   const fill=_test.simulateAtBestAsk([{price:.45,size:50},{price:.46,size:500}],200,.60,.05);
   assert.deepEqual(fill,{shares:200,cost:90,avg:.45,visibleDepth:50,simulatedShares:150});
@@ -174,7 +182,7 @@ test('demo fills the requested shares at best ask despite short visible depth',(
   assert.equal(_test.simulateAtBestAsk([],100,.60,.05),null);
 });
 
-test('paper pattern entry records the fixed 500-share signalled trade',async()=>{
+test('paper momentum entry records its method and dynamic share size',async()=>{
   const Bot=require('../wick-bot'),md=require('../wick-market-data');
   const oldGetBook=md.getBook;
   md.getBook=async()=>({asks:[{price:.5,size:400}]});
@@ -183,13 +191,13 @@ test('paper pattern entry records the fixed 500-share signalled trade',async()=>
     const start=Date.now()-5000;
     bot.market={id:'test-market',slug:'test',title:'Test',tokens:{UP:'up-token',DOWN:'down-token'},raw:{feesEnabled:false}};
     bot.entryState[start]={triggered:{},filled:{},blocks:{}};
-    const trigger={side:'UP',shares:500,key:'pattern-500',pattern:'Bullish Engulfing',
-      signalStrength:4,label:'Bullish Engulfing signal · 500 shares',windowEnd:start+300000};
-    await bot.tryEnter(start,trigger,'pattern-500');
-    assert.equal(bot.positions[0].signalPattern,'Bullish Engulfing');
-    assert.equal(bot.positions[0].shares,500);
-    assert.equal(bot.positions[0].entryType,'CANDLE_PATTERN_SINGLE_ENTRY');
-    await bot.tryEnter(start,trigger,'pattern-500');
+    const trigger={side:'UP',shares:700,key:'momentum-entry',signalMethod:'BTC Momentum/Trend',
+      signalStrength:4,label:'UP momentum/trend · 700 shares',windowEnd:start+300000};
+    await bot.tryEnter(start,trigger,'momentum-entry');
+    assert.equal(bot.positions[0].signalMethod,'BTC Momentum/Trend');
+    assert.equal(bot.positions[0].shares,700);
+    assert.equal(bot.positions[0].entryType,'MOMENTUM_TREND_SINGLE_ENTRY');
+    await bot.tryEnter(start,trigger,'momentum-entry');
     assert.equal(bot.positions.length,1);
   }finally{md.getBook=oldGetBook}
 });
@@ -202,8 +210,8 @@ test('paper entry records simulated shares beyond the visible best-ask size',asy
     const start=Date.now()-5000;
     bot.market={id:'test-market',slug:'test',title:'Test',tokens:{UP:'up-token',DOWN:'down-token'},raw:{feesEnabled:false}};
     bot.entryState[start]={triggered:{},filled:{},blocks:{}};
-    await bot.tryEnter(start,{side:'UP',shares:500,key:'pattern-500',
-      label:'Pattern signal',windowEnd:start+300000,pattern:'Bullish Engulfing'},'pattern-500');
+    await bot.tryEnter(start,{side:'UP',shares:500,key:'momentum-entry',
+      label:'Momentum signal',windowEnd:start+300000,signalMethod:'BTC Momentum/Trend'},'momentum-entry');
     assert.equal(bot.positions[0].shares,500);
     assert.equal(bot.positions[0].avgEntry,.45);
     assert.equal(bot.positions[0].visibleAskSize,50);
@@ -236,7 +244,7 @@ test('CLOB final settlement prioritizes the 0.98 threshold then the higher midpo
   assert.equal(_test.clobWinner(.5,.5),'UP');
 });
 
-test('the single pattern entry remains gated by the three-second delay',async()=>{
+test('the single momentum entry remains gated by the three-second delay',async()=>{
   const Bot=require('../wick-bot'),md=require('../wick-market-data'),oldBook=md.getBook,oldNow=Date.now;
   md.getBook=async()=>({asks:[{price:.5,size:1000}]});
   let now=100000;Date.now=()=>now;
@@ -244,12 +252,12 @@ test('the single pattern entry remains gated by the three-second delay',async()=
     const bot=new Bot({timeframe:'5m',windowMs:300000,capital:10000}),start=now-1000;
     bot.market={id:'t',slug:'t',title:'t',tokens:{UP:'u',DOWN:'d'},raw:{feesEnabled:false}};
     bot.entryState[start]={triggered:{},filled:{},blocks:{}};
-    const trigger={side:'UP',shares:500,key:'pattern-500',label:'Pattern signal',
-      windowEnd:start+300000,pattern:'Bullish Engulfing'};
-    await bot.tryEnter(start,trigger,'pattern-500');
+    const trigger={side:'UP',shares:500,key:'momentum-entry',label:'Momentum signal',
+      windowEnd:start+300000,signalMethod:'BTC Momentum/Trend'};
+    await bot.tryEnter(start,trigger,'momentum-entry');
     assert.equal(bot.positions.length,0);
     now=start+3000;
-    await bot.tryEnter(start,trigger,'pattern-500');
+    await bot.tryEnter(start,trigger,'momentum-entry');
     assert.equal(bot.positions.length,1);
     assert.equal(bot.positions[0].openedAt,now);
   }finally{md.getBook=oldBook;Date.now=oldNow}
