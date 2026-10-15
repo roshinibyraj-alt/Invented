@@ -63,15 +63,14 @@ test('tweezer and harami formations are exposed as pattern candidates',()=>{
   assert.ok(harami.patterns.some(x=>x.name==='Bullish Harami'&&x.side==='UP'));
 });
 
-test('pattern direction replaces candle color but preserves adverse-move thresholds',()=>{
-  const a=timedWindow({o:100,h:112,l:100,c:101},
-    [{minute:0,o:101,h:102,l:100,c:100.5}],{elapsedMs:30000});
-  assert.equal(a.previousColor,'green');
-  assert.equal(a.signalPattern,'Gravestone Doji');
-  assert.equal(a.side,'DOWN');
-  assert.ok(a.entries.every(e=>e.side==='DOWN'));
-  assert.equal(a.entries[0].thresholdPrice,101.25);
-  assert.equal(a.entries[0].crossed,true);
+test('one pattern-side entry triggers at 500 shares after the three-second delay',()=>{
+  const previous={o:100,h:105,l:100,c:105};
+  const before=timedWindow(previous,[{minute:0,o:105,h:105,l:105,c:105}],{elapsedMs:2999});
+  const due=timedWindow(previous,[{minute:0,o:105,h:105,l:105,c:105}],{elapsedMs:3000});
+  assert.equal(due.side,'UP');assert.equal(due.entries.length,1);
+  assert.equal(due.entries[0].key,'pattern-500');assert.equal(due.entries[0].shares,500);
+  assert.equal(due.entries[0].crossed,true);assert.equal(due.entries[0].pattern,'Green Marubozu');
+  assert.equal(before.entries[0].crossed,false);
 });
 
 test('three-candle stars and soldier/crow formations produce directional signals',()=>{
@@ -108,33 +107,29 @@ function timedWindow(previous,rows,{windowMs=300000,elapsedMs=30000}={}){
   return detectTimedStrategy({minuteCandles:minute,windowStart:windowMs,windowMs,now:windowMs+elapsedMs});
 }
 
-test('green previous candle triggers the four UP buy rungs on adverse drops before the cutoff',()=>{
-  const previous={o:100,h:105,l:100,c:105};
-  const all=timedWindow(previous,[{minute:2,o:104,h:105,l:100.4,c:101}],{elapsedMs:149999});
-  assert.equal(all.previousBody,5);assert.equal(all.side,'UP');
-  assert.deepEqual(all.entries.map(e=>e.movePct),[25,50,75,90]);
-  assert.deepEqual(all.entries.map(e=>e.shares),[100,200,300,400]);
-  assert.deepEqual(all.entries.map(e=>e.crossed),[true,true,true,true]);
-  assert.deepEqual(all.entries.map(e=>e.key),['move-25','move-50','move-75','move-90']);
-  assert.ok(all.entries.every(e=>e.windowEnd===all.windowStart+300000));
-  const partial=timedWindow(previous,[{minute:2,o:104,h:105,l:102.4,c:103}],{elapsedMs:149999});
-  assert.deepEqual(partial.entries.map(e=>e.crossed),[true,true,false,false]);
+test('one bearish pattern selects DOWN and still uses the fixed 500-share size',()=>{
+  const previous={o:105,h:105,l:100,c:100};
+  const a=timedWindow(previous,[{minute:0,o:100,h:100,l:100,c:100}],{elapsedMs:3000});
+  assert.equal(a.side,'DOWN');assert.equal(a.entries.length,1);
+  assert.equal(a.entries[0].side,'DOWN');assert.equal(a.entries[0].shares,500);
 });
 
-test('red previous candle mirrors the four buy rungs on DOWN before the cutoff',()=>{
-  const previous={o:105,h:105,l:100,c:100};
-  const all=timedWindow(previous,[{minute:2,o:104,h:104.6,l:99,c:104}],{elapsedMs:149999});
-  assert.equal(all.side,'DOWN');assert.deepEqual(all.entries.map(e=>e.crossed),[true,true,true,true]);
-  assert.deepEqual(all.entries.map(e=>e.shares),[100,200,300,400]);
+test('a green pattern produces one UP entry without waiting for an adverse move',()=>{
+  const previous={o:100,h:105,l:100,c:105};
+  const all=timedWindow(previous,[{minute:0,o:105,h:105,l:105,c:105}],{elapsedMs:3000});
+  assert.equal(all.previousBody,5);assert.equal(all.side,'UP');
+  assert.equal(all.entries[0].crossed,true);
+  assert.equal(all.entries[0].windowEnd,all.windowStart+300000);
+  assert.equal(all.entries[0].shares,500);
 });
 
 test('doji prior candle cannot signal entries or exits',()=>{
   const a=timedWindow({o:100,h:110,l:90,c:100},[{minute:0,o:100,h:120,l:80,c:110}],{elapsedMs:240000});
-  assert.equal(a.side,null);assert.deepEqual(a.entries.map(e=>e.crossed),[false,false,false,false]);
+  assert.equal(a.side,null);assert.deepEqual(a.entries,[]);
   assert.equal('exit' in a,false);
 });
 
-test('rung ladder has no sell/exit trigger at any point in a window',()=>{
+test('single-entry strategy leaves position exits to the existing CLOB rules',()=>{
   const a=timedWindow({o:100,h:110,l:99,c:105},
     [{minute:0,o:105,h:105,l:103,c:103},{minute:1,o:103,h:104,l:102,c:102},{minute:4,o:102,h:102,l:90,c:91}],
     {elapsedMs:240000});
@@ -144,11 +139,12 @@ test('rung ladder has no sell/exit trigger at any point in a window',()=>{
   assert.match(bot.snapshot().strategy.exit,/bid\/ask\/mid >= \$0\.99/);
 });
 
-test('the 25% rung also works in a five-minute window',()=>{
-  const a=timedWindow({o:100,h:105,l:100,c:105},
-    [{minute:0,o:105,h:105,l:103.5,c:104}],{windowMs:300000,elapsedMs:20000});
-  assert.equal(a.entries[0].crossed,true);assert.equal(a.entries[0].shares,100);
-  assert.equal('exit' in a,false);
+test('the 150-second cutoff still blocks the single entry',()=>{
+  const previous={o:100,h:105,l:100,c:105};
+  const before=timedWindow(previous,[{minute:0,o:105,h:105,l:105,c:105}],{elapsedMs:149999});
+  const cutoff=timedWindow(previous,[{minute:0,o:105,h:105,l:105,c:105}],{elapsedMs:150000});
+  assert.equal(before.entries[0].crossed,true);
+  assert.equal(cutoff.entries[0].crossed,false);assert.equal(cutoff.entries[0].expired,true);
 });
 
 test('only one 5-minute bot and one $10,000 demo bankroll are active',()=>{
@@ -156,7 +152,8 @@ test('only one 5-minute bot and one $10,000 demo bankroll are active',()=>{
   assert.deepEqual(Object.keys(bots.bots),['5m']);
   assert.equal(bots.bots['5m'].cash,10000);
   assert.equal(bots.snapshot().account.capital,10000);
-  assert.equal(bots.snapshot().timeframes['5m'].strategy.entries[0].shares,100);
+  assert.equal(bots.snapshot().timeframes['5m'].strategy.entries[0].shares,500);
+  assert.equal(bots.snapshot().timeframes['5m'].strategy.entryDelaySeconds,3);
 });
 
 test('realized and floating position P&L are computed separately from bid marks',()=>{
@@ -177,20 +174,23 @@ test('demo fills the requested shares at best ask despite short visible depth',(
   assert.equal(_test.simulateAtBestAsk([],100,.60,.05),null);
 });
 
-test('paper fill records the crossed rung percentage and share size',async()=>{
+test('paper pattern entry records the fixed 500-share signalled trade',async()=>{
   const Bot=require('../wick-bot'),md=require('../wick-market-data');
   const oldGetBook=md.getBook;
   md.getBook=async()=>({asks:[{price:.5,size:400}]});
   try{
     const bot=new Bot({timeframe:'5m',windowMs:300000,capital:10000});
-    const start=Date.now()-1000;
+    const start=Date.now()-5000;
     bot.market={id:'test-market',slug:'test',title:'Test',tokens:{UP:'up-token',DOWN:'down-token'},raw:{feesEnabled:false}};
-    bot.rungState[start]={triggered:{},filled:{},blocks:{}};
-    await bot.tryEnter(start,{movePct:50,side:'UP',shares:200,key:'move-50',
-      label:'50% adverse move',windowEnd:Date.now()+10000,thresholdPrice:99,observedPrice:98},'move-50');
-    assert.equal(bot.positions[0].triggerPct,50);
-    assert.equal(bot.positions[0].shares,200);
-    assert.equal(bot.positions[0].entryType,'CANDLE_PATTERN_MOVE_RUNG');
+    bot.entryState[start]={triggered:{},filled:{},blocks:{}};
+    const trigger={side:'UP',shares:500,key:'pattern-500',pattern:'Bullish Engulfing',
+      signalStrength:4,label:'Bullish Engulfing signal · 500 shares',windowEnd:start+300000};
+    await bot.tryEnter(start,trigger,'pattern-500');
+    assert.equal(bot.positions[0].signalPattern,'Bullish Engulfing');
+    assert.equal(bot.positions[0].shares,500);
+    assert.equal(bot.positions[0].entryType,'CANDLE_PATTERN_SINGLE_ENTRY');
+    await bot.tryEnter(start,trigger,'pattern-500');
+    assert.equal(bot.positions.length,1);
   }finally{md.getBook=oldGetBook}
 });
 test('paper entry records simulated shares beyond the visible best-ask size',async()=>{
@@ -199,15 +199,15 @@ test('paper entry records simulated shares beyond the visible best-ask size',asy
   md.getBook=async()=>({asks:[{price:.45,size:50}]});
   try{
     const bot=new Bot({timeframe:'5m',windowMs:300000,capital:10000});
-    const start=Date.now()-1000;
+    const start=Date.now()-5000;
     bot.market={id:'test-market',slug:'test',title:'Test',tokens:{UP:'up-token',DOWN:'down-token'},raw:{feesEnabled:false}};
-    bot.rungState[start]={triggered:{},filled:{},blocks:{}};
-    await bot.tryEnter(start,{movePct:50,side:'UP',shares:200,key:'move-50',
-      label:'50% adverse move',windowEnd:Date.now()+10000},'move-50');
-    assert.equal(bot.positions[0].shares,200);
+    bot.entryState[start]={triggered:{},filled:{},blocks:{}};
+    await bot.tryEnter(start,{side:'UP',shares:500,key:'pattern-500',
+      label:'Pattern signal',windowEnd:start+300000,pattern:'Bullish Engulfing'},'pattern-500');
+    assert.equal(bot.positions[0].shares,500);
     assert.equal(bot.positions[0].avgEntry,.45);
     assert.equal(bot.positions[0].visibleAskSize,50);
-    assert.equal(bot.positions[0].simulatedShares,150);
+    assert.equal(bot.positions[0].simulatedShares,450);
     assert.equal(bot.positions[0].fillModel,'FULL_SIZE_AT_BEST_ASK');
   }finally{md.getBook=oldGetBook}
 });
@@ -236,12 +236,23 @@ test('CLOB final settlement prioritizes the 0.98 threshold then the higher midpo
   assert.equal(_test.clobWinner(.5,.5),'UP');
 });
 
-test('five-minute adverse entries stop at 150 seconds',()=>{
-  const previous={o:100,h:105,l:100,c:105},rows=[{minute:2,o:105,h:105,l:100,c:101}];
-  const before=timedWindow(previous,rows,{elapsedMs:149999});
-  const cutoff=timedWindow(previous,rows,{elapsedMs:150000});
-  assert.ok(before.entries.some(e=>e.crossed));
-  assert.ok(cutoff.entries.every(e=>!e.crossed));
+test('the single pattern entry remains gated by the three-second delay',async()=>{
+  const Bot=require('../wick-bot'),md=require('../wick-market-data'),oldBook=md.getBook,oldNow=Date.now;
+  md.getBook=async()=>({asks:[{price:.5,size:1000}]});
+  let now=100000;Date.now=()=>now;
+  try{
+    const bot=new Bot({timeframe:'5m',windowMs:300000,capital:10000}),start=now-1000;
+    bot.market={id:'t',slug:'t',title:'t',tokens:{UP:'u',DOWN:'d'},raw:{feesEnabled:false}};
+    bot.entryState[start]={triggered:{},filled:{},blocks:{}};
+    const trigger={side:'UP',shares:500,key:'pattern-500',label:'Pattern signal',
+      windowEnd:start+300000,pattern:'Bullish Engulfing'};
+    await bot.tryEnter(start,trigger,'pattern-500');
+    assert.equal(bot.positions.length,0);
+    now=start+3000;
+    await bot.tryEnter(start,trigger,'pattern-500');
+    assert.equal(bot.positions.length,1);
+    assert.equal(bot.positions[0].openedAt,now);
+  }finally{md.getBook=oldBook;Date.now=oldNow}
 });
 
 test('terminal one-sided CLOB bid or ask can identify the binary winner',()=>{
@@ -250,16 +261,6 @@ test('terminal one-sided CLOB bid or ask can identify the binary winner',()=>{
   assert.equal(_test.clobQuoteWinner({bestBid:.61},{bestAsk:.59}),'UP');
   assert.equal(_test.clobQuoteWinner({bestAsk:.01},{}),'DOWN');
   assert.equal(_test.clobQuoteWinner({},{}),null);
-});
-test('simultaneously crossed rung fills are held at least two seconds apart',async()=>{
-  const Bot=require('../wick-bot'),md=require('../wick-market-data');const oldBook=md.getBook,oldNow=Date.now;
-  md.getBook=async()=>({asks:[{price:.5,size:1000}]});let now=100000;Date.now=()=>now;
-  try{const bot=new Bot({timeframe:'5m',windowMs:300000,capital:10000}),start=now-1000;
-    bot.market={id:'t',slug:'t',title:'t',tokens:{UP:'u',DOWN:'d'},raw:{feesEnabled:false}};bot.rungState[start]={triggered:{},filled:{},blocks:{}};
-    const first={side:'UP',shares:100,key:'move-25',label:'25%',windowEnd:now+10000},second={side:'UP',shares:200,key:'move-50',label:'50%',windowEnd:now+10000};
-    await bot.tryEnter(start,first,'move-25');now+=1000;await bot.tryEnter(start,second,'move-50');assert.equal(bot.positions.length,1);
-    now+=1000;await bot.tryEnter(start,second,'move-50');assert.equal(bot.positions.length,2);assert.ok(bot.positions[0].openedAt-bot.positions[1].openedAt>=2000);
-  }finally{md.getBook=oldBook;Date.now=oldNow}
 });
 test('TP trigger accepts any fresh own-side quote at 0.99',()=>{const n=10000;assert.equal(_test.takeProfitHit({bestBid:.99,updatedAt:n},n),true);assert.equal(_test.takeProfitHit({bestAsk:.99,updatedAt:n},n),true);assert.equal(_test.takeProfitHit({mid:.99,updatedAt:n},n),true);assert.equal(_test.takeProfitHit({bestAsk:.989,updatedAt:n},n),false);assert.equal(_test.takeProfitHit({bestAsk:.99,updatedAt:n-5001},n),false)});
 test('stop-loss trigger remains at $0.01',()=>{const n=10000;assert.equal(_test.stopLossHit({bestBid:.01,updatedAt:n},n),true);assert.equal(_test.stopLossHit({bestAsk:.01,updatedAt:n},n),true);assert.equal(_test.stopLossHit({mid:.01,updatedAt:n},n),true);assert.equal(_test.stopLossHit({bestBid:.35,updatedAt:n},n),false);assert.equal(_test.stopLossHit({bestBid:.0101,updatedAt:n},n),false);assert.equal(_test.stopLossHit({bestBid:.01,updatedAt:n-5001},n),false)});

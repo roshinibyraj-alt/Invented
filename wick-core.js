@@ -120,18 +120,16 @@ function detectTimedStrategy({minuteCandles,windowStart,windowMs=300000,now=Date
   const signal=detectCandlePatternSignal(history);
   const side=signal.side;
   const elapsedMs=now-windowStart;
-  const entries=cfg.ENTRY_RUNGS.map(({movePct,shares})=>{
-    const move=previousBody*movePct/100;
-    const thresholdPrice=side==='UP'?previous.c-move:side==='DOWN'?previous.c+move:null;
-    const crossed=Boolean(side&&elapsedMs>=0&&elapsedMs<cfg.ENTRY_CUTOFF_MS&&
-      (side==='UP'?current.l<=thresholdPrice:current.h>=thresholdPrice));
-    return {key:`move-${movePct}`,label:`${movePct}% adverse move · ${shares} shares`,
-      movePct,shares,side,thresholdPrice,windowEnd:windowStart+windowMs,crossed,
-      observedPrice:current.c,pattern:signal.pattern,signalStrength:signal.strength};
-  });
+  const entries=side?[{
+    key:'pattern-500',label:`${signal.pattern} signal · ${cfg.ENTRY_SHARES} shares`,
+    shares:cfg.ENTRY_SHARES,side,windowEnd:windowStart+windowMs,
+    crossed:elapsedMs>=cfg.ENTRY_DELAY_MS&&elapsedMs<cfg.ENTRY_CUTOFF_MS,
+    expired:elapsedMs>=cfg.ENTRY_CUTOFF_MS,observedPrice:current.c,
+    pattern:signal.pattern,signalStrength:signal.strength,
+  }]:[];
   return {ready:true,windowStart,previousClose:previous.c,previousBody,previousColor,
     side,signalPattern:signal.pattern,signalStrength:signal.strength,signalPatterns:signal.patterns,
-    signalReason:signal.reason,signedMove,elapsedMs,entryMode:'CANDLE_PATTERN_ADVERSE_MOVE_LADDER',
+    signalReason:signal.reason,signedMove,elapsedMs,entryMode:'CANDLE_PATTERN_DELAYED_SINGLE_ENTRY',
     previous,current,entries,reason:signal.reason};
 }
 
