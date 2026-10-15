@@ -46,7 +46,7 @@ function clobQuotePrices(q){
 function clobQuoteValue(q){const prices=clobQuotePrices(q);return prices.length?Math.max(...prices):null}
 function clobQuoteFloor(q){const prices=clobQuotePrices(q);return prices.length?Math.min(...prices):null}
 function takeProfitHit(q,now=Date.now()){return q&&Number.isFinite(q.updatedAt)&&now-q.updatedAt<=5000&&clobQuotePrices(q).some(price=>price>=.99)}
-function stopLossHit(q,now=Date.now(),threshold=.01){return q&&Number.isFinite(q.updatedAt)&&now-q.updatedAt<=5000&&clobQuotePrices(q).some(price=>price<=threshold)}
+function stopLossHit(q,now=Date.now()){return q&&Number.isFinite(q.updatedAt)&&now-q.updatedAt<=5000&&clobQuotePrices(q).some(price=>price<=.01)}
 function clobQuoteWinner(up,down){
   const upPrices=clobQuotePrices(up),downPrices=clobQuotePrices(down);
   const upHigh=upPrices.some(x=>x>=.98),downHigh=downPrices.some(x=>x>=.98);
@@ -100,41 +100,23 @@ class WickBot{
       }
       if(analysis.ready){
         const state=this.rungState[start]||(this.rungState[start]={triggered:{},filled:{},blocks:{}});
-        const lateEntry=this.prepareLateFlatEntry(start,analysis,state,now);
-        if(lateEntry)this.log('LATE_FLAT_SIGNAL_TRIGGERED',{side:lateEntry.side,shares:lateEntry.shares,
-          rungFills:lateEntry.rungFills,stopLoss:.35});
-        if(state.pausedForLateFlat){
-          const key='late-flat-500',saved=state.triggered[key];
+        for(const entry of analysis.entries){
+          const key=entry.key,trigger=state.triggered[key];
+          if(entry.crossed&&!trigger){
+            state.triggered[key]={...entry,triggeredAt:now};
+            this.log('TIMED_ENTRY_TRIGGER',{side:entry.side,entry:key,label:entry.label,
+              shares:entry.shares,thresholdPrice:entry.thresholdPrice,observedPrice:entry.observedPrice});
+          }
+          const saved=state.triggered[key];
           if(saved&&!state.filled[key]){
             if(now<saved.windowEnd&&now-start<cfg.ENTRY_CUTOFF_MS)await this.tryEnter(start,saved,key);
             else if(!state.expired?.[key]){
               state.expired=state.expired||{};state.expired[key]=true;
-              this.log('LATE_FLAT_SIGNAL_EXPIRED',{windowStart:start,shares:500});
+              this.log('TIMED_ENTRY_EXPIRED',{entry:key,side:saved.side,shares:saved.shares,note:'150-second entry cutoff reached before a paper fill'});
             }
           }
-          for(const entry of analysis.entries){
-            entry.triggered=Boolean(state.triggered['late-flat-500']);entry.filled=Boolean(state.filled['late-flat-500']);
-            entry.expired=Boolean(state.expired?.['late-flat-500']);entry.block='Adverse-move rungs paused after 90-second flat entry';
-          }
-        }else{
-          for(const entry of analysis.entries){
-            const key=entry.key,trigger=state.triggered[key];
-            if(entry.crossed&&!trigger){
-              state.triggered[key]={...entry,triggeredAt:now};
-              this.log('TIMED_ENTRY_TRIGGER',{side:entry.side,entry:key,label:entry.label,
-                shares:entry.shares,thresholdPrice:entry.thresholdPrice,observedPrice:entry.observedPrice});
-            }
-            const saved=state.triggered[key];
-            if(saved&&!state.filled[key]){
-              if(now<saved.windowEnd&&now-start<cfg.ENTRY_CUTOFF_MS)await this.tryEnter(start,saved,key);
-              else if(!state.expired?.[key]){
-                state.expired=state.expired||{};state.expired[key]=true;
-                this.log('TIMED_ENTRY_EXPIRED',{entry:key,side:saved.side,shares:saved.shares,note:'Its minute window ended before a paper fill'});
-              }
-            }
-            entry.triggered=Boolean(saved);entry.filled=Boolean(state.filled[key]);
-            entry.expired=Boolean(state.expired?.[key]);entry.block=state.blocks[key]||null;
-          }
+          entry.triggered=Boolean(saved);entry.filled=Boolean(state.filled[key]);
+          entry.expired=Boolean(state.expired?.[key]);entry.block=state.blocks[key]||null;
         }
       }
       const hasOpen=this.positions.some(p=>p.windowStart===start&&p.status==='OPEN');
@@ -142,18 +124,6 @@ class WickBot{
       if(!this.lastHeartbeat||now-this.lastHeartbeat>30000){this.lastHeartbeat=now;this.log('HEARTBEAT',{cash:this.cash,windowStart:start})}
     }catch(e){this.status='blocked_or_error';this.error=e.message;
       if(this.lastError!==e.message||Date.now()-this.lastErrorAt>30000){this.lastError=e.message;this.lastErrorAt=Date.now();this.log('SCAN_ERROR',{note:e.message})}}
-  }
-  prepareLateFlatEntry(start,analysis,state,now=Date.now()){
-    if(state.lateFlatEvaluated||!analysis.side||now-start<90000)return null;
-    state.lateFlatEvaluated=true;
-    const rungFills=cfg.ENTRY_RUNGS.filter(rung=>state.filled[`move-${rung.movePct}`]).length;
-    if(rungFills>1)return null;
-    const entry={side:analysis.side,key:'late-flat-500',shares:500,
-      label:'90-second flat signalled-side · 500 shares',windowEnd:start+this.windowMs,
-      stopLossThreshold:.35,entryType:'LATE_FLAT_SIGNAL',rungFills};
-    state.pausedForLateFlat=true;
-    state.triggered['late-flat-500']={...entry,triggeredAt:now};
-    return entry;
   }
   async refreshLiveQuotes(now){
     if(!this.market)return;
@@ -176,9 +146,7 @@ class WickBot{
         p.markBid=q?.bestBid??null;p.markUpdatedAt=q?.updatedAt||now;p.markStatus=q?.bestBid!=null?'LIVE':'MISSING';
         if(p.status==='OPEN'){
           if(takeProfitHit(q,now))this.finalizePosition(p,true,'TP_HIT_0_99',clobQuoteValue(q));
-          else if(stopLossHit(q,now,p.stopLossThreshold??.01))this.finalizePosition(p,false,
-            `STOP_LOSS_HIT_0_${Math.round((p.stopLossThreshold??.01)*100).toString().padStart(2,'0')}`,
-            clobQuoteFloor(q));
+          else if(stopLossHit(q,now))this.finalizePosition(p,false,'STOP_LOSS_HIT_0_01',clobQuoteFloor(q));
         }
       }
     }
@@ -202,12 +170,11 @@ class WickBot{
     const p={id:`${this.timeframe}-${start}-${trigger.side}-${key}`,timeframe:this.timeframe,
        windowMs:this.windowMs,windowStart:start,marketId:this.market.id,slug:this.market.slug,
       title:this.market.title,side:trigger.side,tokenId:token,entryKey:key,entryLabel:trigger.label,
-      triggerPct:trigger.movePct,entryType:trigger.entryType||'CANDLE_MOVE_RUNG',shares:fill.shares,initialShares:fill.shares,
+      triggerPct:trigger.movePct,entryType:'CANDLE_MOVE_RUNG',shares:fill.shares,initialShares:fill.shares,
        oppositeTokenId:this.market.tokens[trigger.side==='UP'?'DOWN':'UP'],
         avgEntry:fill.avg,cost:fill.cost,fees:fee,totalCost:total,status:'OPEN',openedAt:Date.now(),
         fillModel:'FULL_SIZE_AT_BEST_ASK',visibleAskSize:fill.visibleDepth,simulatedShares:fill.simulatedShares,
-       thresholdPrice:trigger.thresholdPrice,observedPrice:trigger.observedPrice,
-        ...(trigger.stopLossThreshold!=null?{stopLossThreshold:trigger.stopLossThreshold}:{})};
+        thresholdPrice:trigger.thresholdPrice,observedPrice:trigger.observedPrice};
     this.cash-=total;this.positions.unshift(p);state.filled[key]=p.id;delete state.blocks[key];this.status='position_open';this.lastEntryAt=Date.now();
     this.log('PAPER_TIMED_ENTRY',{timeframe:this.timeframe,id:p.id,side:p.side,entry:key,label:p.entryLabel,
       shares:p.shares,entryPrice:p.avgEntry,avgEntry:p.avgEntry,cost:p.totalCost,
@@ -238,10 +205,10 @@ class WickBot{
     return {now,mode:'DEMO ONLY',status:this.status,error:this.error,
         strategy:{timeframe:'5m',market:'Polymarket BTC 5-minute UP/DOWN',capital:this.capital,
           entries:cfg.ENTRY_RUNGS.map(rung=>({...rung,reference:'previous candle body from close',
-            timing:'until 240 seconds; at least 2 seconds between rung fills'})),
+            timing:'until 150 seconds; at least 2 seconds between rung fills'})),
           exit:'Any fresh own-side CLOB bid/ask/mid >= $0.99 immediately pays $1/share; <= $0.01 immediately pays $0/share; otherwise use official Gamma outcome at window close',
           minEntryAsk:cfg.MIN_ENTRY_ASK,maxEntryAsk:cfg.MAX_ENTRY_ASK,
-          entryCutoffSeconds:240,rungDelaySeconds:2,lateFlatRule:'At 90 seconds, if zero or one adverse rung has filled, buy 500 shares on the signalled side; this position alone stops at $0.35 and pauses adverse rungs for the rest of the window',
+          entryCutoffSeconds:150,rungDelaySeconds:2,
           entryFillModel:'Fill the full requested size at the best eligible ask, ignoring displayed size; asks must be within $0.05-$0.60',
           fees:'Polymarket taker fees on simulated buys',execution:'PAPER ONLY'},
        account:{capital:this.capital,cash:this.cash,realizedPnl,unrealizedPnl,equity:this.cash+markedValue,
