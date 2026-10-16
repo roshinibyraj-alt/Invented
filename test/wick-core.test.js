@@ -2,7 +2,7 @@
 
 const test=require('node:test');
 const assert=require('node:assert/strict');
-const {aggregate,detectCandlePatternSignal,detectMacdSignal,detectTimedStrategy}=require('../wick-core');
+const {aggregate,detectCandlePatternSignal,applyPatternAccuracy,detectTimedStrategy}=require('../wick-core');
 const { _test }=require('../wick-bot');
 
 test('aggregates one-minute bars into quarter-hour and hourly slots',()=>{
@@ -100,20 +100,16 @@ const bearishHistory=[
 ];
 function timedPattern(history,elapsedMs=30000,entryShares=500){
   const windowStart=history.length*300000;
-  const expected=detectCandlePatternSignal(history).side==='DOWN'?-1:1;
-  const macdCandles=Array.from({length:45},(_,i)=>{const close=100+expected*(i+i*i*.03);return {t:(i-45)*60000,o:close-.01,h:close+.02,l:close-.02,c:close}});
   const candles=[...history,{t:windowStart,o:history.at(-1).c,h:history.at(-1).c+1,
     l:history.at(-1).c-1,c:history.at(-1).c+.5}];
-  return detectTimedStrategy({minuteCandles:candles,macdCandles,windowStart,now:windowStart+elapsedMs,entryShares});
+  return detectTimedStrategy({minuteCandles:candles,windowStart,now:windowStart+elapsedMs,entryShares});
 }
 
-test('candle patterns choose UP or DOWN and keep adaptive size with the three-second gate',()=>{
-  const before=timedPattern(bullishHistory,2999),up=timedPattern(bullishHistory,3000,700);
-  const down=timedPattern(bearishHistory,3000,600);
-  assert.equal(up.side,'UP');assert.equal(up.signalPattern,'Bullish Engulfing');
-  assert.equal(up.entries[0].key,'candle-pattern-entry');assert.equal(up.entries[0].shares,700);
-  assert.equal(up.entries[0].crossed,true);assert.equal(before.entries[0].crossed,false);
-  assert.equal(down.side,'DOWN');assert.equal(down.entries[0].shares,600);
+test('pattern accuracy maps follow/fade and preserves the three-second gate',()=>{
+  const before=timedPattern(bullishHistory,2999),up=timedPattern(bullishHistory,3000,700),down=timedPattern(bearishHistory,3000,600);
+  assert.equal(up.patternSide,'UP');assert.equal(up.side,'DOWN');assert.equal(up.patternAction,'FADE');assert.equal(up.patternHistoricalWinRate,49.84);
+  assert.equal(up.entries[0].side,'DOWN');assert.equal(up.entries[0].shares,700);assert.equal(up.entries[0].crossed,true);assert.equal(before.entries[0].crossed,false);
+  assert.equal(down.patternSide,'DOWN');assert.equal(down.side,'UP');assert.equal(down.patternAction,'FADE');assert.equal(down.entries[0].shares,600);
 });
 
 test('neutral candle patterns produce no directional entry',()=>{
@@ -323,5 +319,11 @@ test('missed TP waits for and uses official Gamma win result',async()=>{const Bo
 test('official fallback pays zero to the losing side',async()=>{const Bot=require('../wick-bot'),md=require('../wick-market-data'),old=md.getMarket;md.getMarket=async()=>({closed:true,outcomes:['Up','Down'],outcomePrices:['1','0']});try{const b=new Bot({timeframe:'5m',windowMs:300000,capital:1000}),p={id:'l',marketId:'m',windowStart:Date.now()-300000,windowMs:300000,status:'OPEN',shares:100,totalCost:50,side:'DOWN'};b.cash=950;await b.trySettle(p);assert.equal(p.status,'SETTLED_LOSS');assert.equal(p.proceeds,0);assert.equal(p.realizedPnl,-50);assert.equal(b.cash,950)}finally{md.getMarket=old}});
 test('stale marks are excluded from floating P&L and equity',()=>{const Bot=require('../wick-bot'),b=new Bot({timeframe:'5m',windowMs:300000,capital:1000});b.cash=900;b.positions=[{status:'OPEN',side:'UP',shares:200,totalCost:100,markBid:.8,markUpdatedAt:Date.now()-20000}];const a=b.snapshot().account;assert.equal(a.unrealizedPnl,0);assert.equal(a.equity,900);assert.equal(a.unpricedOpenPositions,1)});
 
-test('MACD histogram confirms rising and falling momentum and requires sufficient history',()=>{const make=(direction)=>Array.from({length:45},(_,i)=>{const c=100+i*direction+direction*i*i*.03;return {t:i*60000,o:c-.1,h:c+.2,l:c-.2,c}});assert.equal(detectMacdSignal(make(1)).side,'UP');assert.equal(detectMacdSignal(make(-1)).side,'DOWN');assert.equal(detectMacdSignal(make(1).slice(0,10)).state,'INSUFFICIENT_HISTORY')});
-test('MACD must confirm the candle side and cutoff is 270s',()=>{const r=timedPattern(bullishHistory,270000);assert.equal(r.side,'UP');assert.equal(r.macdSide,'UP');assert.equal(r.entries[0].expired,true);const conflicting=detectTimedStrategy({minuteCandles:[...bullishHistory,{t:600000,o:111,h:112,l:110,c:111}],macdCandles:Array.from({length:45},(_,i)=>{const c=100-i-i*i*.03;return {t:(i-45)*60000,o:c-.1,h:c+.2,l:c-.2,c}}),windowStart:600000,now:630000});assert.equal(conflicting.side,null);assert.deepEqual(conflicting.entries,[])});
+test('patterns above 50% are followed and patterns below 50% are faded',()=>{
+ const follow=applyPatternAccuracy({side:'UP',pattern:'Morning Star'}),fadeUp=applyPatternAccuracy({side:'UP',pattern:'Bullish Engulfing'}),fadeDown=applyPatternAccuracy({side:'DOWN',pattern:'Gravestone Doji'});
+ assert.deepEqual({side:follow.side,action:follow.action,winRate:follow.winRate},{side:'UP',action:'FOLLOW',winRate:51.30});
+ assert.deepEqual({side:fadeUp.side,action:fadeUp.action,winRate:fadeUp.winRate},{side:'DOWN',action:'FADE',winRate:49.84});
+ assert.deepEqual({side:fadeDown.side,action:fadeDown.action,winRate:fadeDown.winRate},{side:'UP',action:'FADE',winRate:43.66});
+ assert.equal(applyPatternAccuracy({side:null,pattern:'Standard Doji'}).side,null);
+ assert.equal(applyPatternAccuracy({side:'UP',pattern:'Unknown Pattern'}).side,null);
+});

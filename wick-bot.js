@@ -107,7 +107,7 @@ class WickBot{
           if(entry.crossed&&!trigger){
             state.triggered[key]={...entry,triggeredAt:now};
             this.log('PATTERN_ENTRY_TRIGGER',{side:entry.side,entry:key,label:entry.label,
-              shares:entry.shares,pattern:entry.pattern,signalStrength:entry.signalStrength,
+              shares:entry.shares,pattern:entry.pattern,patternSide:entry.patternSide,patternAction:entry.patternAction,patternWinRate:entry.patternWinRate,signalStrength:entry.signalStrength,
               observedPrice:entry.observedPrice});
           }
           const saved=state.triggered[key];
@@ -183,7 +183,7 @@ class WickBot{
        windowMs:this.windowMs,windowStart:start,marketId:this.market.id,slug:this.market.slug,
       title:this.market.title,side:trigger.side,tokenId:token,entryKey:key,entryLabel:trigger.label,
         entryType:'CANDLE_PATTERN_SINGLE_ENTRY',
-        signalPattern:trigger.pattern||null,signalStrength:trigger.signalStrength||0,
+        signalPattern:trigger.pattern||null,patternSide:trigger.patternSide||null,patternAction:trigger.patternAction||null,patternWinRate:trigger.patternWinRate??null,signalStrength:trigger.signalStrength||0,
        shares:fill.shares,initialShares:fill.shares,
        oppositeTokenId:this.market.tokens[trigger.side==='UP'?'DOWN':'UP'],
         avgEntry:fill.avg,cost:fill.cost,fees:fee,totalCost:total,status:'OPEN',openedAt:Date.now(),
@@ -191,7 +191,7 @@ class WickBot{
          observedPrice:trigger.observedPrice};
      this.cash-=total;this.positions.unshift(p);state.filled[key]=p.id;delete state.blocks[key];this.status='position_open';
      this.log('PAPER_CANDLE_PATTERN_ENTRY',{timeframe:this.timeframe,id:p.id,side:p.side,entry:key,label:p.entryLabel,
-       pattern:p.signalPattern,signalStrength:p.signalStrength,shares:p.shares,entryPrice:p.avgEntry,avgEntry:p.avgEntry,cost:p.totalCost,
+       pattern:p.signalPattern,patternSide:p.patternSide,patternAction:p.patternAction,patternWinRate:p.patternWinRate,signalStrength:p.signalStrength,shares:p.shares,entryPrice:p.avgEntry,avgEntry:p.avgEntry,cost:p.totalCost,
       fillModel:p.fillModel,visibleAskSize:p.visibleAskSize,simulatedShares:p.simulatedShares});
   }
   async trySettle(p){
@@ -229,13 +229,13 @@ class WickBot{
     }
     return {now,mode:'DEMO ONLY',status:this.status,error:this.error,
         strategy:{timeframe:'5m',market:'Polymarket BTC 5-minute UP/DOWN',capital:this.capital,
-          entries:[{shares:this.nextEntryShares(),trigger:'candle pattern + MACD confirmation',
+          entries:[{shares:this.nextEntryShares(),trigger:'pattern-specific follow/fade',
             floorShares:cfg.ENTRY_FLOOR_SHARES,maxShares:cfg.ENTRY_MAX_SHARES,
             stepShares:cfg.ENTRY_SIZE_STEP_SHARES,delaySeconds:cfg.ENTRY_DELAY_MS/1000,
             timing:'single paper entry per window; resize after each settled result'}],
           exit:'Any fresh own-side CLOB bid/ask/mid >= $0.99 immediately pays $1/share; <= $0.01 immediately pays $0/share; otherwise use official Gamma outcome at window close',
           minEntryAsk:cfg.MIN_ENTRY_ASK,maxEntryAsk:cfg.MAX_ENTRY_ASK,
-          direction:'A completed five-minute candle pattern must agree with MACD 12/26/9 on completed one-minute BTC bars' ,
+          direction:'Follow patterns above 50% measured accuracy; fade patterns below 50%; neutral, uncalibrated, and exactly-50% patterns do not trade',
           entryCutoffSeconds:cfg.ENTRY_CUTOFF_MS/1000,entryDelaySeconds:cfg.ENTRY_DELAY_MS/1000,
           entryFillModel:'Wait for the signaled-side best ask below $0.49, then fill full size; minimum ask $0.05',
           fees:'Polymarket taker fees on simulated buys',execution:'PAPER ONLY'},
@@ -248,7 +248,7 @@ class WickBot{
       livePrices:{marketSlug:this.market?.slug||null,updatedAt:Math.max(this.liveQuotes.UP.updatedAt||0,this.liveQuotes.DOWN.updatedAt||0)||null,
         UP:this.liveQuotes.UP,DOWN:this.liveQuotes.DOWN},
        scanner:{timeframe:this.timeframe,lastScanAt:this.lastScanAt,
-             candleSource:`Polymarket RTDS Chainlink BTC/USD; one-minute candles aggregated into completed ${this.windowMs/60000}-minute bars for pattern analysis`,
+             candleSource:`Polymarket RTDS Chainlink BTC/USD; one-minute feed aggregated into completed ${this.windowMs/60000}-minute pattern bars; no one-minute signal filter`,
            candleFeed:md.getCandleFeedStatus(),
           marketResolution:'Own-side fresh CLOB quote >= $0.99 settles $1/share, <= $0.01 settles $0/share immediately; otherwise official Gamma result is retried until resolved',analysis:this.analysis||null,
               previousCandles:prior,entryState:this.entryState[this.market?.start]||null},
