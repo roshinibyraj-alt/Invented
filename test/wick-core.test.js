@@ -98,18 +98,19 @@ const bearishHistory=[
   {t:0,o:100,h:111,l:99,c:110},
   {t:300000,o:111,h:112,l:98,c:99},
 ];
-function timedPattern(history,elapsedMs=30000,entryShares=500){
-  const windowStart=history.length*300000;
-  const candles=[...history,{t:windowStart,o:history.at(-1).c,h:history.at(-1).c+1,
+function timedPattern(history,elapsedMs=30000,entryShares=500,options={}){
+  const windowMs=options.windowMs??300000,entryDelayMs=options.entryDelayMs??3000,entryCutoffMs=options.entryCutoffMs??270000;
+  const normalized=history.map((c,i)=>({...c,t:i*windowMs})),windowStart=normalized.length*windowMs;
+  const candles=[...normalized,{t:windowStart,o:history.at(-1).c,h:history.at(-1).c+1,
     l:history.at(-1).c-1,c:history.at(-1).c+.5}];
-  return detectTimedStrategy({minuteCandles:candles,windowStart,now:windowStart+elapsedMs,entryShares});
+  return detectTimedStrategy({minuteCandles:candles,windowStart,windowMs,now:windowStart+elapsedMs,entryShares,entryDelayMs,entryCutoffMs});
 }
 
-test('pattern accuracy maps follow/fade and preserves the three-second gate',()=>{
+test('pattern signals always follow the detected side and keep the three-second gate',()=>{
   const before=timedPattern(bullishHistory,2999),up=timedPattern(bullishHistory,3000,700),down=timedPattern(bearishHistory,3000,600);
-  assert.equal(up.patternSide,'UP');assert.equal(up.side,'DOWN');assert.equal(up.patternAction,'FADE');assert.equal(up.patternHistoricalWinRate,49.84);
-  assert.equal(up.entries[0].side,'DOWN');assert.equal(up.entries[0].shares,700);assert.equal(up.entries[0].crossed,true);assert.equal(before.entries[0].crossed,false);
-  assert.equal(down.patternSide,'DOWN');assert.equal(down.side,'UP');assert.equal(down.patternAction,'FADE');assert.equal(down.entries[0].shares,600);
+  assert.equal(up.patternSide,'UP');assert.equal(up.side,'UP');assert.equal(up.patternAction,'FOLLOW');assert.equal(up.patternHistoricalWinRate,49.84);
+  assert.equal(up.entries[0].side,'UP');assert.equal(up.entries[0].shares,700);assert.equal(up.entries[0].crossed,true);assert.equal(before.entries[0].crossed,false);
+  assert.equal(down.patternSide,'DOWN');assert.equal(down.side,'DOWN');assert.equal(down.patternAction,'FOLLOW');assert.equal(down.entries[0].shares,600);
 });
 
 test('neutral candle patterns produce no directional entry',()=>{
@@ -134,13 +135,23 @@ test('the 270-second cutoff still blocks the single entry',()=>{
   assert.equal(cutoff.entries[0].crossed,false);assert.equal(cutoff.entries[0].expired,true);
 });
 
-test('only one 5-minute bot and one $10,000 demo bankroll are active',()=>{
-  const MultiBot=require('../multi-bot'),bots=new MultiBot();
-  assert.deepEqual(Object.keys(bots.bots),['5m']);
-  assert.equal(bots.bots['5m'].cash,10000);
-  assert.equal(bots.snapshot().account.capital,10000);
-  assert.equal(bots.snapshot().timeframes['5m'].strategy.entries[0].shares,500);
-  assert.equal(bots.snapshot().timeframes['5m'].strategy.entryDelaySeconds,3);
+test('5m and 15m bots keep independent bankrolls and scaled timing',()=>{
+  const MultiBot=require('../multi-bot'),bots=new MultiBot(),snapshot=bots.snapshot();
+  assert.deepEqual(Object.keys(bots.bots),['5m','15m']);
+  assert.equal(bots.bots['5m'].cash,10000);assert.equal(bots.bots['15m'].cash,10000);assert.notEqual(bots.bots['5m'].positions,bots.bots['15m'].positions);
+  assert.notEqual(bots.bots['5m'].positions,bots.bots['15m'].positions);
+  assert.equal(snapshot.account.capital,20000);assert.deepEqual(snapshot.strategy.timeframes,['5m','15m']);
+  assert.equal(snapshot.timeframes['5m'].strategy.entryDelaySeconds,3);
+  assert.equal(snapshot.timeframes['5m'].strategy.entryCutoffSeconds,270);
+  assert.equal(snapshot.timeframes['15m'].strategy.entryDelaySeconds,9);
+  assert.equal(snapshot.timeframes['15m'].strategy.entryCutoffSeconds,810);
+});
+test('15m strategy uses an independent 15-minute window and 9/810-second gates',()=>{
+  const before=timedPattern(bullishHistory,8999,500,{windowMs:900000,entryDelayMs:9000,entryCutoffMs:810000});
+  const triggered=timedPattern(bullishHistory,9000,500,{windowMs:900000,entryDelayMs:9000,entryCutoffMs:810000});
+  const cutoff=timedPattern(bullishHistory,810000,500,{windowMs:900000,entryDelayMs:9000,entryCutoffMs:810000});
+  assert.equal(triggered.side,'UP');assert.equal(triggered.entries[0].crossed,true);
+  assert.equal(before.entries[0].crossed,false);assert.equal(cutoff.entries[0].expired,true);
 });
 
 test('realized and floating position P&L are computed separately from bid marks',()=>{
@@ -319,11 +330,11 @@ test('missed TP waits for and uses official Gamma win result',async()=>{const Bo
 test('official fallback pays zero to the losing side',async()=>{const Bot=require('../wick-bot'),md=require('../wick-market-data'),old=md.getMarket;md.getMarket=async()=>({closed:true,outcomes:['Up','Down'],outcomePrices:['1','0']});try{const b=new Bot({timeframe:'5m',windowMs:300000,capital:1000}),p={id:'l',marketId:'m',windowStart:Date.now()-300000,windowMs:300000,status:'OPEN',shares:100,totalCost:50,side:'DOWN'};b.cash=950;await b.trySettle(p);assert.equal(p.status,'SETTLED_LOSS');assert.equal(p.proceeds,0);assert.equal(p.realizedPnl,-50);assert.equal(b.cash,950)}finally{md.getMarket=old}});
 test('stale marks are excluded from floating P&L and equity',()=>{const Bot=require('../wick-bot'),b=new Bot({timeframe:'5m',windowMs:300000,capital:1000});b.cash=900;b.positions=[{status:'OPEN',side:'UP',shares:200,totalCost:100,markBid:.8,markUpdatedAt:Date.now()-20000}];const a=b.snapshot().account;assert.equal(a.unrealizedPnl,0);assert.equal(a.equity,900);assert.equal(a.unpricedOpenPositions,1)});
 
-test('patterns above 50% are followed and patterns below 50% are faded',()=>{
- const follow=applyPatternAccuracy({side:'UP',pattern:'Morning Star'}),fadeUp=applyPatternAccuracy({side:'UP',pattern:'Bullish Engulfing'}),fadeDown=applyPatternAccuracy({side:'DOWN',pattern:'Gravestone Doji'});
- assert.deepEqual({side:follow.side,action:follow.action,winRate:follow.winRate},{side:'UP',action:'FOLLOW',winRate:51.30});
- assert.deepEqual({side:fadeUp.side,action:fadeUp.action,winRate:fadeUp.winRate},{side:'DOWN',action:'FADE',winRate:49.84});
- assert.deepEqual({side:fadeDown.side,action:fadeDown.action,winRate:fadeDown.winRate},{side:'UP',action:'FADE',winRate:43.66});
+test('historical accuracy is informational; every directional pattern is followed',()=>{
+ const followHigh=applyPatternAccuracy({side:'UP',pattern:'Morning Star'}),followLow=applyPatternAccuracy({side:'UP',pattern:'Bullish Engulfing'}),followDown=applyPatternAccuracy({side:'DOWN',pattern:'Gravestone Doji'});
+ assert.deepEqual({side:followHigh.side,action:followHigh.action,winRate:followHigh.winRate},{side:'UP',action:'FOLLOW',winRate:51.30});
+ assert.deepEqual({side:followLow.side,action:followLow.action,winRate:followLow.winRate},{side:'UP',action:'FOLLOW',winRate:49.84});
+ assert.deepEqual({side:followDown.side,action:followDown.action,winRate:followDown.winRate},{side:'DOWN',action:'FOLLOW',winRate:43.66});
  assert.equal(applyPatternAccuracy({side:null,pattern:'Standard Doji'}).side,null);
- assert.equal(applyPatternAccuracy({side:'UP',pattern:'Unknown Pattern'}).side,null);
+ const unknown=applyPatternAccuracy({side:'UP',pattern:'Unknown Pattern'});assert.equal(unknown.side,'UP');assert.equal(unknown.action,'FOLLOW');assert.equal(unknown.winRate,null);
 });

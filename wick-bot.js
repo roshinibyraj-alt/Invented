@@ -58,8 +58,8 @@ function clobQuoteWinner(up,down){
   return u>=d?'UP':'DOWN';
 }
 class WickBot{
-  constructor({timeframe='5m',windowMs=cfg.WINDOW_MS,capital=cfg.DEMO_CAPITAL_5M}={}){
-    this.timeframe=timeframe;this.windowMs=windowMs;this.capital=capital;this.cash=capital;
+  constructor({timeframe='5m',windowMs=cfg.WINDOW_MS,capital=cfg.DEMO_CAPITAL_5M,entryDelayMs=cfg.ENTRY_DELAY_MS,entryCutoffMs=cfg.ENTRY_CUTOFF_MS}={}){
+    this.timeframe=timeframe;this.windowMs=windowMs;this.capital=capital;this.cash=capital;this.entryDelayMs=entryDelayMs;this.entryCutoffMs=entryCutoffMs;
     this.startedAt=Date.now();
     this.positions=[];this.events=[];this.status='starting';
     this.error=null;this.market=null;this.candles=[];this.lastMarketAt=0;
@@ -93,7 +93,7 @@ class WickBot{
         for(const p of this.positions)if(p.windowStart===start&&(p.status==='OPEN'||p.status==='PENDING_CLOB_RESULT'))p.closeQuotes=this.closeQuotes;
       }
       const analysis=detectTimedStrategy({minuteCandles:this.candles,windowStart:start,windowMs:this.windowMs,now,
-        entryShares:this.nextEntryShares()});
+        entryShares:this.nextEntryShares(),entryDelayMs:this.entryDelayMs,entryCutoffMs:this.entryCutoffMs});
       this.analysis=analysis;this.lastScanAt=now;this.error=null;
       for(const p of this.positions){
         if((p.status==='OPEN'||p.status==='PENDING_CLOB_RESULT')
@@ -112,10 +112,10 @@ class WickBot{
           }
           const saved=state.triggered[key];
           if(saved&&!state.filled[key]){
-            if(now<saved.windowEnd&&now-start<cfg.ENTRY_CUTOFF_MS)await this.tryEnter(start,saved,key);
+            if(now<saved.windowEnd&&now-start<this.entryCutoffMs)await this.tryEnter(start,saved,key);
             else if(!state.expired?.[key]){
               state.expired=state.expired||{};state.expired[key]=true;
-              this.log('PATTERN_ENTRY_EXPIRED',{entry:key,side:saved.side,shares:saved.shares,note:'270-second entry cutoff reached before a paper fill'});
+              this.log('PATTERN_ENTRY_EXPIRED',{entry:key,side:saved.side,shares:saved.shares,note:this.entryCutoffMs/1000+'-second entry cutoff reached before a paper fill'});
             }
           }
           entry.triggered=Boolean(saved);entry.filled=Boolean(state.filled[key]);
@@ -171,7 +171,7 @@ class WickBot{
   }
   async tryEnter(start,trigger,key){
     const now=Date.now();
-    if(now<start+cfg.ENTRY_DELAY_MS||now>=trigger.windowEnd||now-start>=cfg.ENTRY_CUTOFF_MS)return;
+    if(now<start+this.entryDelayMs||now>=trigger.windowEnd||now-start>=this.entryCutoffMs)return;
     const state=this.entryState[start];
     if(state.filled[key])return;
     const token=this.market.tokens[trigger.side],book=await md.getBook(token);
@@ -228,15 +228,15 @@ class WickBot{
       const mark=p.markBid==null?null:p.markBid*p.shares;p.markAgeMs=p.markUpdatedAt?Math.max(0,now-p.markUpdatedAt):null;p.markStatus=mark==null?'UNAVAILABLE':p.markAgeMs>15000?'STALE':'LIVE';const freshMark=mark!=null&&p.markAgeMs<=15000;p.markValue=freshMark?mark:null;p.unrealizedPnl=freshMark?mark-p.totalCost:null;if(!freshMark)unpricedOpenPositions++;else{markedValue+=mark;unrealizedPnl+=p.unrealizedPnl}
     }
     return {now,mode:'DEMO ONLY',status:this.status,error:this.error,
-        strategy:{timeframe:'5m',market:'Polymarket BTC 5-minute UP/DOWN',capital:this.capital,
-          entries:[{shares:this.nextEntryShares(),trigger:'pattern-specific follow/fade',
+        strategy:{timeframe:this.timeframe,market:'Polymarket BTC '+(this.windowMs/60000)+'-minute UP/DOWN',capital:this.capital,
+          entries:[{shares:this.nextEntryShares(),trigger:'detected candle pattern side',
             floorShares:cfg.ENTRY_FLOOR_SHARES,maxShares:cfg.ENTRY_MAX_SHARES,
-            stepShares:cfg.ENTRY_SIZE_STEP_SHARES,delaySeconds:cfg.ENTRY_DELAY_MS/1000,
+            stepShares:cfg.ENTRY_SIZE_STEP_SHARES,delaySeconds:this.entryDelayMs/1000,
             timing:'single paper entry per window; resize after each settled result'}],
           exit:'Any fresh own-side CLOB bid/ask/mid >= $0.99 immediately pays $1/share; <= $0.01 immediately pays $0/share; otherwise use official Gamma outcome at window close',
           minEntryAsk:cfg.MIN_ENTRY_ASK,maxEntryAsk:cfg.MAX_ENTRY_ASK,
-          direction:'Follow patterns above 50% measured accuracy; fade patterns below 50%; neutral, uncalibrated, and exactly-50% patterns do not trade',
-          entryCutoffSeconds:cfg.ENTRY_CUTOFF_MS/1000,entryDelaySeconds:cfg.ENTRY_DELAY_MS/1000,
+          direction:'Follow the detected directional pattern side; neutral patterns do not trade',
+          entryCutoffSeconds:this.entryCutoffMs/1000,entryDelaySeconds:this.entryDelayMs/1000,
           entryFillModel:'Wait for the signaled-side best ask below $0.49, then fill full size; minimum ask $0.05',
           fees:'Polymarket taker fees on simulated buys',execution:'PAPER ONLY'},
        account:{capital:this.capital,cash:this.cash,realizedPnl,unrealizedPnl,equity:this.cash+markedValue,
