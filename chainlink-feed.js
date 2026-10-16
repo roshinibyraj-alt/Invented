@@ -3,7 +3,7 @@
 const URL='wss://ws-live-data.polymarket.com';
 const SYMBOL='btc/usd';
 const MAX_AGE_MS=15000;
-const RETAIN_MS=30*60*1000;
+const RETAIN_MS=60*60*1000;
 
 class ChainlinkFeed{
   constructor({WebSocketImpl=globalThis.WebSocket,now=Date.now}={}){

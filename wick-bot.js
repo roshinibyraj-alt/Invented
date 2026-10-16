@@ -26,7 +26,7 @@ function payout(m,side){
 }
 function parse(x){if(typeof x==='string'){try{return JSON.parse(x)}catch(_){}}return []}
 function simulateAtBestAsk(asks,qty,maxPrice,minPrice=cfg.MIN_ENTRY_ASK){
-  const best=levels(asks).find(x=>x.price>=minPrice&&x.price<=maxPrice);
+  const best=levels(asks).find(x=>x.price>=minPrice&&x.price<maxPrice);
   if(!best)return null;
   return {shares:qty,cost:qty*best.price,avg:best.price,visibleDepth:best.size,
     simulatedShares:Math.max(0,qty-best.size)};
@@ -115,7 +115,7 @@ class WickBot{
             if(now<saved.windowEnd&&now-start<cfg.ENTRY_CUTOFF_MS)await this.tryEnter(start,saved,key);
             else if(!state.expired?.[key]){
               state.expired=state.expired||{};state.expired[key]=true;
-              this.log('PATTERN_ENTRY_EXPIRED',{entry:key,side:saved.side,shares:saved.shares,note:'150-second entry cutoff reached before a paper fill'});
+              this.log('PATTERN_ENTRY_EXPIRED',{entry:key,side:saved.side,shares:saved.shares,note:'270-second entry cutoff reached before a paper fill'});
             }
           }
           entry.triggered=Boolean(saved);entry.filled=Boolean(state.filled[key]);
@@ -176,7 +176,7 @@ class WickBot{
     if(state.filled[key])return;
     const token=this.market.tokens[trigger.side],book=await md.getBook(token);
     const fill=simulateAtBestAsk(book.asks,trigger.shares,cfg.MAX_ENTRY_ASK,cfg.MIN_ENTRY_ASK);
-    if(!fill){state.blocks[key]=`Need ${trigger.shares} shares at asks from $${cfg.MIN_ENTRY_ASK.toFixed(2)} to $${cfg.MAX_ENTRY_ASK.toFixed(2)}`;return}
+    if(!fill){state.blocks[key]=`Waiting for signaled-side best ask below ${cfg.MAX_ENTRY_ASK.toFixed(2)} (and at least ${cfg.MIN_ENTRY_ASK.toFixed(2)})`;return}
     const fee=feeFor(this.market.raw,fill.avg,fill.shares),total=fill.cost+fee;
     if(total>this.cash){state.blocks[key]='Insufficient demo cash';return}
     const p={id:`${this.timeframe}-${start}-${trigger.side}-${key}`,timeframe:this.timeframe,
@@ -229,15 +229,15 @@ class WickBot{
     }
     return {now,mode:'DEMO ONLY',status:this.status,error:this.error,
         strategy:{timeframe:'5m',market:'Polymarket BTC 5-minute UP/DOWN',capital:this.capital,
-          entries:[{shares:this.nextEntryShares(),trigger:'candle pattern',
+          entries:[{shares:this.nextEntryShares(),trigger:'candle pattern + MACD confirmation',
             floorShares:cfg.ENTRY_FLOOR_SHARES,maxShares:cfg.ENTRY_MAX_SHARES,
             stepShares:cfg.ENTRY_SIZE_STEP_SHARES,delaySeconds:cfg.ENTRY_DELAY_MS/1000,
             timing:'single paper entry per window; resize after each settled result'}],
           exit:'Any fresh own-side CLOB bid/ask/mid >= $0.99 immediately pays $1/share; <= $0.01 immediately pays $0/share; otherwise use official Gamma outcome at window close',
           minEntryAsk:cfg.MIN_ENTRY_ASK,maxEntryAsk:cfg.MAX_ENTRY_ASK,
-          direction:'Detected candle patterns from completed five-minute candles choose UP or DOWN; neutral/conflicting patterns produce no side',
+          direction:'A completed five-minute candle pattern must agree with MACD 12/26/9 on completed one-minute BTC bars' ,
           entryCutoffSeconds:cfg.ENTRY_CUTOFF_MS/1000,entryDelaySeconds:cfg.ENTRY_DELAY_MS/1000,
-          entryFillModel:'Fill the full requested size at the best eligible ask, ignoring displayed size; asks must be within $0.05-$0.60',
+          entryFillModel:'Wait for the signaled-side best ask below $0.49, then fill full size; minimum ask $0.05',
           fees:'Polymarket taker fees on simulated buys',execution:'PAPER ONLY'},
        account:{capital:this.capital,cash:this.cash,realizedPnl,unrealizedPnl,equity:this.cash+markedValue,
          totalTrades,settledTrades,wins,losses,winRate:settledTrades?wins/settledTrades*100:0,markedValue,unpricedOpenPositions,

@@ -2,7 +2,7 @@
 
 const test=require('node:test');
 const assert=require('node:assert/strict');
-const {aggregate,detectCandlePatternSignal,detectTimedStrategy}=require('../wick-core');
+const {aggregate,detectCandlePatternSignal,detectMacdSignal,detectTimedStrategy}=require('../wick-core');
 const { _test }=require('../wick-bot');
 
 test('aggregates one-minute bars into quarter-hour and hourly slots',()=>{
@@ -100,9 +100,11 @@ const bearishHistory=[
 ];
 function timedPattern(history,elapsedMs=30000,entryShares=500){
   const windowStart=history.length*300000;
+  const expected=detectCandlePatternSignal(history).side==='DOWN'?-1:1;
+  const macdCandles=Array.from({length:45},(_,i)=>{const close=100+expected*(i+i*i*.03);return {t:(i-45)*60000,o:close-.01,h:close+.02,l:close-.02,c:close}});
   const candles=[...history,{t:windowStart,o:history.at(-1).c,h:history.at(-1).c+1,
     l:history.at(-1).c-1,c:history.at(-1).c+.5}];
-  return detectTimedStrategy({minuteCandles:candles,windowStart,now:windowStart+elapsedMs,entryShares});
+  return detectTimedStrategy({minuteCandles:candles,macdCandles,windowStart,now:windowStart+elapsedMs,entryShares});
 }
 
 test('candle patterns choose UP or DOWN and keep adaptive size with the three-second gate',()=>{
@@ -125,9 +127,13 @@ test('single-entry strategy leaves position exits to the existing CLOB rules',()
   assert.match(bot.snapshot().strategy.exit,/bid\/ask\/mid >= \$0\.99/);
 });
 
-test('the 150-second cutoff still blocks the single entry',()=>{
-  const before=timedPattern(bullishHistory,149999);
-  const cutoff=timedPattern(bullishHistory,150000);
+test('the signaled-side ask must be below $0.49 and can qualify after the signal is pending',async()=>{
+ const Bot=require('../wick-bot'),md=require('../wick-market-data'),old=md.getBook;let ask=.49;md.getBook=async()=>({asks:[{price:ask,size:1000}]});
+ try{const bot=new Bot({capital:10000}),start=Date.now()-5000;bot.market={tokens:{UP:'u',DOWN:'d'},raw:{feesEnabled:false}};bot.entryState[start]={triggered:{},filled:{},blocks:{}};const trig={side:'UP',shares:500,key:'candle-pattern-entry',windowEnd:start+300000,pattern:'Hammer',label:'test'};await bot.tryEnter(start,trig,trig.key);assert.equal(bot.positions.length,0);ask=.489;await bot.tryEnter(start,trig,trig.key);assert.equal(bot.positions[0].avgEntry,.489)}finally{md.getBook=old}
+});
+test('the 270-second cutoff still blocks the single entry',()=>{
+  const before=timedPattern(bullishHistory,269999);
+  const cutoff=timedPattern(bullishHistory,270000);
   assert.equal(before.entries[0].crossed,true);
   assert.equal(cutoff.entries[0].crossed,false);assert.equal(cutoff.entries[0].expired,true);
 });
@@ -186,7 +192,7 @@ test('demo fills the requested shares at best ask despite short visible depth',(
 test('paper candle-pattern entry records its pattern and dynamic share size',async()=>{
   const Bot=require('../wick-bot'),md=require('../wick-market-data');
   const oldGetBook=md.getBook;
-  md.getBook=async()=>({asks:[{price:.5,size:400}]});
+  md.getBook=async()=>({asks:[{price:.45,size:400}]});
   try{
     const bot=new Bot({timeframe:'5m',windowMs:300000,capital:10000});
     const start=Date.now()-5000;
@@ -247,7 +253,7 @@ test('CLOB final settlement prioritizes the 0.98 threshold then the higher midpo
 
 test('the single candle-pattern entry remains gated by the three-second delay',async()=>{
   const Bot=require('../wick-bot'),md=require('../wick-market-data'),oldBook=md.getBook,oldNow=Date.now;
-  md.getBook=async()=>({asks:[{price:.5,size:1000}]});
+  md.getBook=async()=>({asks:[{price:.45,size:1000}]});
   let now=100000;Date.now=()=>now;
   try{
     const bot=new Bot({timeframe:'5m',windowMs:300000,capital:10000}),start=now-1000;
@@ -316,3 +322,6 @@ test('fresh 0.99 CLOB quote immediately settles the position as a one-dollar win
 test('missed TP waits for and uses official Gamma win result',async()=>{const Bot=require('../wick-bot'),md=require('../wick-market-data'),old=md.getMarket;let m={closed:false,outcomes:['Up','Down'],outcomePrices:['.5','.5']};md.getMarket=async()=>m;try{const b=new Bot({timeframe:'5m',windowMs:300000,capital:1000}),p={id:'w',marketId:'m',windowStart:Date.now()-300000,windowMs:300000,status:'OPEN',shares:100,totalCost:50,side:'UP'};b.cash=950;b.positions=[p];await b.trySettle(p);assert.equal(p.status,'PENDING_CLOB_RESULT');m={closed:true,outcomes:['Up','Down'],outcomePrices:['1','0']};await b.trySettle(p);assert.equal(p.status,'SETTLED_WIN');assert.equal(p.proceeds,100);assert.equal(b.cash,1050)}finally{md.getMarket=old}});
 test('official fallback pays zero to the losing side',async()=>{const Bot=require('../wick-bot'),md=require('../wick-market-data'),old=md.getMarket;md.getMarket=async()=>({closed:true,outcomes:['Up','Down'],outcomePrices:['1','0']});try{const b=new Bot({timeframe:'5m',windowMs:300000,capital:1000}),p={id:'l',marketId:'m',windowStart:Date.now()-300000,windowMs:300000,status:'OPEN',shares:100,totalCost:50,side:'DOWN'};b.cash=950;await b.trySettle(p);assert.equal(p.status,'SETTLED_LOSS');assert.equal(p.proceeds,0);assert.equal(p.realizedPnl,-50);assert.equal(b.cash,950)}finally{md.getMarket=old}});
 test('stale marks are excluded from floating P&L and equity',()=>{const Bot=require('../wick-bot'),b=new Bot({timeframe:'5m',windowMs:300000,capital:1000});b.cash=900;b.positions=[{status:'OPEN',side:'UP',shares:200,totalCost:100,markBid:.8,markUpdatedAt:Date.now()-20000}];const a=b.snapshot().account;assert.equal(a.unrealizedPnl,0);assert.equal(a.equity,900);assert.equal(a.unpricedOpenPositions,1)});
+
+test('MACD histogram confirms rising and falling momentum and requires sufficient history',()=>{const make=(direction)=>Array.from({length:45},(_,i)=>{const c=100+i*direction+direction*i*i*.03;return {t:i*60000,o:c-.1,h:c+.2,l:c-.2,c}});assert.equal(detectMacdSignal(make(1)).side,'UP');assert.equal(detectMacdSignal(make(-1)).side,'DOWN');assert.equal(detectMacdSignal(make(1).slice(0,10)).state,'INSUFFICIENT_HISTORY')});
+test('MACD must confirm the candle side and cutoff is 270s',()=>{const r=timedPattern(bullishHistory,270000);assert.equal(r.side,'UP');assert.equal(r.macdSide,'UP');assert.equal(r.entries[0].expired,true);const conflicting=detectTimedStrategy({minuteCandles:[...bullishHistory,{t:600000,o:111,h:112,l:110,c:111}],macdCandles:Array.from({length:45},(_,i)=>{const c=100-i-i*i*.03;return {t:(i-45)*60000,o:c-.1,h:c+.2,l:c-.2,c}}),windowStart:600000,now:630000});assert.equal(conflicting.side,null);assert.deepEqual(conflicting.entries,[])});

@@ -107,26 +107,8 @@ function detectCandlePatternSignal(history) {
   return {side:selected.side,pattern:selected.name,strength:selected.strength,patterns,reason:null};
 }
 
-function detectTimedStrategy({minuteCandles,windowStart,windowMs=300000,now=Date.now(),entryShares=cfg.ENTRY_FLOOR_SHARES}) {
-  const minutes=minuteCandles.map(toCandle).sort((a,b)=>a.t-b.t);
-  const bars=aggregate(minutes,windowMs),history=bars.filter(x=>x.t<windowStart);
-  const current=bars.find(x=>x.t===windowStart);
-  if(!history.length||!current)return {ready:false,reason:`Waiting for previous and current ${windowMs/60000}-minute candles`};
-  const previous=history[history.length-1],signal=detectCandlePatternSignal(history);
-  const elapsedMs=now-windowStart;
-  const entries=signal.side?[{
-    key:'candle-pattern-entry',label:`${signal.pattern} · ${signal.side} · ${entryShares} shares`,
-    shares:entryShares,side:signal.side,windowEnd:windowStart+windowMs,
-    crossed:elapsedMs>=cfg.ENTRY_DELAY_MS&&elapsedMs<cfg.ENTRY_CUTOFF_MS,
-    expired:elapsedMs>=cfg.ENTRY_CUTOFF_MS,observedPrice:current.c,
-    pattern:signal.pattern,signalStrength:signal.strength,
-  }]:[];
-  return {ready:true,windowStart,elapsedMs,entryMode:'CANDLE_PATTERN_DELAYED_SINGLE_ENTRY',
-    side:signal.side,signalPattern:signal.pattern,signalStrength:signal.strength,
-    signalPatterns:signal.patterns,signalReason:signal.reason,previous,current,
-    previousClose:previous.c,previousBody:Math.abs(previous.c-previous.o),
-    previousColor:previous.c<previous.o?'red':previous.c>previous.o?'green':'doji',
-    signedMove:current.c-previous.c,entries,reason:signal.reason};
-}
+function emaSeries(values,period){if(values.length<period)return [];const out=Array(values.length).fill(null);let seed=values.slice(0,period).reduce((a,b)=>a+b,0)/period;out[period-1]=seed;const k=2/(period+1);for(let i=period;i<values.length;i++){seed=values[i]*k+seed*(1-k);out[i]=seed}return out}
+function detectMacdSignal(candles,fast=12,slow=26,signalPeriod=9){const closes=candles.map(x=>toCandle(x).c);if(closes.length<slow+signalPeriod)return {side:null,state:'INSUFFICIENT_HISTORY',histogram:null,previousHistogram:null,reason:'Waiting for completed 1-minute bars for MACD 12/26/9'};const f=emaSeries(closes,fast),s=emaSeries(closes,slow),line=closes.map((_,i)=>f[i]!=null&&s[i]!=null?f[i]-s[i]:null),valid=line.filter(x=>x!=null),sig=emaSeries(valid,signalPeriod),hist=valid.map((x,i)=>sig[i]!=null?x-sig[i]:null).filter(x=>x!=null);if(hist.length<2)return {side:null,state:'INSUFFICIENT_HISTORY',histogram:null,previousHistogram:null,reason:'Waiting for MACD histogram history'};const previousHistogram=hist.at(-2),histogram=hist.at(-1);let state='NEUTRAL',side=null;if(histogram<0&&histogram>previousHistogram){state='SHRINKING_RED';side='UP'}else if(histogram>0&&histogram>previousHistogram){state='SOLID_GREEN';side='UP'}else if(histogram>0&&histogram<previousHistogram){state='SHRINKING_GREEN';side='DOWN'}else if(histogram<0&&histogram<previousHistogram){state='SOLID_RED';side='DOWN'}return {side,state,histogram,previousHistogram,reason:side?null:'MACD histogram is flat or at zero'}}
+function detectTimedStrategy({minuteCandles,macdCandles=minuteCandles,windowStart,windowMs=300000,now=Date.now(),entryShares=cfg.ENTRY_FLOOR_SHARES}){const minutes=minuteCandles.map(toCandle).sort((a,b)=>a.t-b.t),bars=aggregate(minutes,windowMs),history=bars.filter(x=>x.t<windowStart),current=bars.find(x=>x.t===windowStart);if(!history.length||!current)return {ready:false,reason:`Waiting for previous and current ${windowMs/60000}-minute candles`};const previous=history.at(-1),pattern=detectCandlePatternSignal(history),closedMinutes=macdCandles.map(toCandle).filter(x=>x.t+60000<=now),macd=detectMacdSignal(closedMinutes),side=pattern.side&&pattern.side===macd.side?pattern.side:null,elapsedMs=now-windowStart,signalReason=!pattern.side?pattern.reason:!macd.side?macd.reason||`MACD ${macd.state.toLowerCase().replaceAll('_',' ')} does not confirm ${pattern.side}`:pattern.side!==macd.side?`MACD ${macd.state.toLowerCase().replaceAll('_',' ')} conflicts with ${pattern.side} candle pattern`:null,entries=side?[{key:'candle-pattern-entry',label:`${pattern.pattern} + MACD ${macd.state} · ${side} · ${entryShares} shares`,shares:entryShares,side,windowEnd:windowStart+windowMs,crossed:elapsedMs>=cfg.ENTRY_DELAY_MS&&elapsedMs<cfg.ENTRY_CUTOFF_MS,expired:elapsedMs>=cfg.ENTRY_CUTOFF_MS,observedPrice:current.c,pattern:pattern.pattern,signalStrength:pattern.strength,macdState:macd.state}]:[];return {ready:true,windowStart,elapsedMs,entryMode:'CANDLE_PATTERN_MACD_SINGLE_ENTRY',side,patternSide:pattern.side,signalPattern:pattern.pattern,signalStrength:pattern.strength,signalPatterns:pattern.patterns,macdSide:macd.side,macdState:macd.state,macdHistogram:macd.histogram,macdPreviousHistogram:macd.previousHistogram,signalReason,previous,current,previousClose:previous.c,previousBody:Math.abs(previous.c-previous.o),previousColor:previous.c<previous.o?'red':previous.c>previous.o?'green':'doji',signedMove:current.c-previous.c,entries,reason:signalReason}}
 
-module.exports={toCandle,aggregate,detectCandlePatternSignal,detectTimedStrategy};
+module.exports={toCandle,aggregate,detectCandlePatternSignal,detectMacdSignal,detectTimedStrategy};
