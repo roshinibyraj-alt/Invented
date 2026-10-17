@@ -124,9 +124,9 @@ test('single-entry strategy leaves position exits to the existing CLOB rules',()
   assert.match(bot.snapshot().strategy.exit,/bid\/ask\/mid >= \$0\.99/);
 });
 
-test('the signaled-side ask must be below $0.49 and can qualify after the signal is pending',async()=>{
- const Bot=require('../wick-bot'),md=require('../wick-market-data'),old=md.getBook;let ask=.49;md.getBook=async()=>({asks:[{price:ask,size:1000}]});
- try{const bot=new Bot({capital:10000}),start=Date.now()-5000;bot.market={tokens:{UP:'u',DOWN:'d'},raw:{feesEnabled:false}};bot.entryState[start]={triggered:{},filled:{},blocks:{}};const trig={side:'UP',shares:500,key:'candle-pattern-entry',windowEnd:start+300000,pattern:'Hammer',label:'test'};await bot.tryEnter(start,trig,trig.key);assert.equal(bot.positions.length,0);ask=.489;await bot.tryEnter(start,trig,trig.key);assert.equal(bot.positions[0].avgEntry,.489)}finally{md.getBook=old}
+test('paper order posts a resting $0.45 limit and fills only after a later ask touches it',async()=>{
+ const Bot=require('../wick-bot'),md=require('../wick-market-data'),old=md.getBook;let ask=.46;md.getBook=async()=>({asks:[{price:ask,size:1000}]});
+ try{const bot=new Bot({capital:10000}),start=Date.now()-15000;bot.market={id:'test-market',start,tokens:{UP:'u',DOWN:'d'},raw:{}};bot.entryState[start]={triggered:{},filled:{},orders:{},blocks:{}};const trig={side:'UP',shares:1111,key:'candle-pattern-entry',windowEnd:start+900000,pattern:'Hammer',label:'test'};await bot.tryEnter(start,trig,trig.key);assert.equal(bot.positions[0].status,'PENDING_LIMIT');assert.equal(bot.positions[0].limitPrice,.45);assert.equal(bot.positions[0].fees,0);ask=.45;await bot.refreshLiveQuotes(Date.now());assert.equal(bot.positions[0].status,'OPEN');assert.equal(bot.positions[0].avgEntry,.45)}finally{md.getBook=old}
 });
 test('the 270-second cutoff still blocks the single entry',()=>{
   const before=timedPattern(bullishHistory,269999);
@@ -135,14 +135,11 @@ test('the 270-second cutoff still blocks the single entry',()=>{
   assert.equal(cutoff.entries[0].crossed,false);assert.equal(cutoff.entries[0].expired,true);
 });
 
-test('5m and 15m bots keep independent bankrolls and scaled timing',()=>{
+test('only the 15m strategy is running',()=>{
   const MultiBot=require('../multi-bot'),bots=new MultiBot(),snapshot=bots.snapshot();
-  assert.deepEqual(Object.keys(bots.bots),['5m','15m']);
-  assert.equal(bots.bots['5m'].cash,10000);assert.equal(bots.bots['15m'].cash,10000);assert.notEqual(bots.bots['5m'].positions,bots.bots['15m'].positions);
-  assert.notEqual(bots.bots['5m'].positions,bots.bots['15m'].positions);
-  assert.equal(snapshot.account.capital,20000);assert.deepEqual(snapshot.strategy.timeframes,['5m','15m']);
-  assert.equal(snapshot.timeframes['5m'].strategy.entryDelaySeconds,3);
-  assert.equal(snapshot.timeframes['5m'].strategy.entryCutoffSeconds,270);
+  assert.deepEqual(Object.keys(bots.bots),['15m']);
+  assert.equal(bots.bots['15m'].cash,10000);
+  assert.equal(snapshot.account.capital,10000);assert.deepEqual(snapshot.strategy.timeframes,['15m']);
   assert.equal(snapshot.timeframes['15m'].strategy.entryDelaySeconds,9);
   assert.equal(snapshot.timeframes['15m'].strategy.entryCutoffSeconds,810);
 });
@@ -164,15 +161,15 @@ test('realized and floating position P&L are computed separately from bid marks'
   assert.equal(a.equity,990);assert.equal(a.openPositions,1);
 });
 
-test('share size rises after losses, falls after wins, and stays within 500–1,000',()=>{
+test('base stake is 5% of capital and one loss arms exactly one doubled entry',()=>{
   const Bot=require('../wick-bot'),bot=new Bot({capital:1000});
-  assert.equal(bot.nextEntryShares(),500);
-  bot.positions=Array.from({length:7},(_,i)=>({status:'SETTLED_LOSS',settledAt:i+1}));
-  assert.equal(bot.nextEntryShares(),1000);
-  bot.positions.push({status:'SETTLED_WIN',settledAt:8});
-  assert.equal(bot.nextEntryShares(),900);
-  bot.positions.push(...Array.from({length:10},(_,i)=>({status:'SETTLED_WIN',settledAt:i+9})));
-  assert.equal(bot.nextEntryShares(),500);
+  assert.equal(bot.nextEntryShares(),111.11);
+  bot.positions=[{status:'SETTLED_LOSS',settledAt:1,realizedPnl:-50,isMartingale:false}];
+  assert.equal(bot.nextEntryIsMartingale(),true);
+  assert.equal(bot.nextEntryShares(),211.11);
+  bot.positions.push({status:'SETTLED_LOSS',settledAt:2,realizedPnl:-95,isMartingale:true});
+  assert.equal(bot.nextEntryIsMartingale(),false);
+  assert.equal(bot.nextEntryShares(),95);
 });
 
 test('equity history calculates wins, maximum loss streak, and peak drawdown',()=>{
@@ -196,47 +193,32 @@ test('demo fills the requested shares at best ask despite short visible depth',(
   assert.equal(_test.simulateAtBestAsk([],100,.60,.05),null);
 });
 
-test('paper candle-pattern entry records its pattern and dynamic share size',async()=>{
+test('paper limit entry records the pattern and a 5% stake with no fee',async()=>{
   const Bot=require('../wick-bot'),md=require('../wick-market-data');
   const oldGetBook=md.getBook;
-  md.getBook=async()=>({asks:[{price:.45,size:400}]});
+  md.getBook=async()=>({asks:[{price:.46,size:400}]});
   try{
-    const bot=new Bot({timeframe:'5m',windowMs:300000,capital:10000});
-    const start=Date.now()-5000;
-    bot.market={id:'test-market',slug:'test',title:'Test',tokens:{UP:'up-token',DOWN:'down-token'},raw:{feesEnabled:false}};
-    bot.entryState[start]={triggered:{},filled:{},blocks:{}};
-    const trigger={side:'UP',shares:700,key:'candle-pattern-entry',pattern:'Bullish Engulfing',
-      signalStrength:4,label:'Bullish Engulfing · UP · 700 shares',windowEnd:start+300000};
+    const bot=new Bot({timeframe:'15m',windowMs:900000,capital:10000});
+    const start=Date.now()-15000;
+    bot.market={id:'test-market',slug:'test',title:'Test',start,tokens:{UP:'up-token',DOWN:'down-token'},raw:{}};
+    bot.entryState[start]={triggered:{},filled:{},orders:{},blocks:{}};
+    const trigger={side:'UP',shares:1111.11,key:'candle-pattern-entry',pattern:'Bullish Engulfing',
+      signalStrength:4,label:'Bullish Engulfing · UP',windowEnd:start+900000};
     await bot.tryEnter(start,trigger,'candle-pattern-entry');
     assert.equal(bot.positions[0].signalPattern,'Bullish Engulfing');
-    assert.equal(bot.positions[0].shares,700);
+    assert.equal(bot.positions[0].shares,1111.11);
     assert.equal(bot.positions[0].entryType,'CANDLE_PATTERN_SINGLE_ENTRY');
+    assert.equal(bot.positions[0].status,'PENDING_LIMIT');
+    assert.ok(Math.abs(bot.positions[0].reservedCost-499.9995)<1e-9);
+    assert.equal(bot.positions[0].fees,0);
     await bot.tryEnter(start,trigger,'candle-pattern-entry');
     assert.equal(bot.positions.length,1);
   }finally{md.getBook=oldGetBook}
 });
-test('paper entry records simulated shares beyond the visible best-ask size',async()=>{
-  const Bot=require('../wick-bot'),md=require('../wick-market-data');
-  const oldGetBook=md.getBook;
-  md.getBook=async()=>({asks:[{price:.45,size:50}]});
-  try{
-    const bot=new Bot({timeframe:'5m',windowMs:300000,capital:10000});
-    const start=Date.now()-5000;
-    bot.market={id:'test-market',slug:'test',title:'Test',tokens:{UP:'up-token',DOWN:'down-token'},raw:{feesEnabled:false}};
-    bot.entryState[start]={triggered:{},filled:{},blocks:{}};
-    await bot.tryEnter(start,{side:'UP',shares:500,key:'candle-pattern-entry',
-      label:'Candle pattern',windowEnd:start+300000,pattern:'Bullish Engulfing'},'candle-pattern-entry');
-    assert.equal(bot.positions[0].shares,500);
-    assert.equal(bot.positions[0].avgEntry,.45);
-    assert.equal(bot.positions[0].visibleAskSize,50);
-    assert.equal(bot.positions[0].simulatedShares,450);
-    assert.equal(bot.positions[0].fillModel,'FULL_SIZE_AT_BEST_ASK');
-  }finally{md.getBook=oldGetBook}
-});
 
-test('paper BTC taker fee and official outcome settlement are applied',()=>{
-  assert.ok(Math.abs(_test.feeFor({feesEnabled:true,feeSchedule:{rate:.07,exponent:1}},.5,300)-5.25)<1e-9);
-  assert.ok(Math.abs(_test.feeFor({feesEnabled:false},.5,300)-5.25)<1e-9);
+test('paper maker orders pay no trading fee and official outcome settlement is applied',()=>{
+  assert.equal(_test.feeFor({feesEnabled:true},.45,300),0);
+  assert.equal(_test.feeFor({feesEnabled:false},.45,300),0);
   const settled={closed:true,outcomes:['Up','Down'],outcomePrices:['1','0']};
   assert.equal(_test.payout(settled,'UP'),1);
   assert.equal(_test.payout(settled,'DOWN'),0);
@@ -258,22 +240,23 @@ test('CLOB final settlement prioritizes the 0.98 threshold then the higher midpo
   assert.equal(_test.clobWinner(.5,.5),'UP');
 });
 
-test('the single candle-pattern entry remains gated by the three-second delay',async()=>{
+test('the single candle-pattern entry remains gated by the 15m delay and posts passively',async()=>{
   const Bot=require('../wick-bot'),md=require('../wick-market-data'),oldBook=md.getBook,oldNow=Date.now;
-  md.getBook=async()=>({asks:[{price:.45,size:1000}]});
+  md.getBook=async()=>({asks:[{price:.46,size:1000}]});
   let now=100000;Date.now=()=>now;
   try{
-    const bot=new Bot({timeframe:'5m',windowMs:300000,capital:10000}),start=now-1000;
-    bot.market={id:'t',slug:'t',title:'t',tokens:{UP:'u',DOWN:'d'},raw:{feesEnabled:false}};
-    bot.entryState[start]={triggered:{},filled:{},blocks:{}};
-    const trigger={side:'UP',shares:500,key:'candle-pattern-entry',label:'Candle pattern',
-      windowEnd:start+300000,pattern:'Bullish Engulfing'};
+    const bot=new Bot({timeframe:'15m',windowMs:900000,capital:10000}),start=now-1000;
+    bot.market={id:'t',slug:'t',title:'t',start,tokens:{UP:'u',DOWN:'d'},raw:{}};
+    bot.entryState[start]={triggered:{},filled:{},orders:{},blocks:{}};
+    const trigger={side:'UP',shares:1111.11,key:'candle-pattern-entry',label:'Candle pattern',
+      windowEnd:start+900000,pattern:'Bullish Engulfing'};
     await bot.tryEnter(start,trigger,'candle-pattern-entry');
     assert.equal(bot.positions.length,0);
-    now=start+3000;
+    now=start+9000;
     await bot.tryEnter(start,trigger,'candle-pattern-entry');
     assert.equal(bot.positions.length,1);
-    assert.equal(bot.positions[0].openedAt,now);
+    assert.equal(bot.positions[0].status,'PENDING_LIMIT');
+    assert.equal(bot.positions[0].submittedAt,now);
   }finally{md.getBook=oldBook;Date.now=oldNow}
 });
 

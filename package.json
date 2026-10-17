@@ -2,7 +2,7 @@
   "name": "btc-wick-paper-demo",
   "version": "1.0.0",
   "private": true,
-  "description": "Demo-only Polymarket BTC 5-minute candle-pattern paper bot.",
+  "description": "Paper-only Polymarket BTC 15-minute pattern strategy with passive maker limits.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",

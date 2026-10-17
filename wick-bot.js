@@ -32,16 +32,15 @@ function simulateAtBestAsk(asks,qty,maxPrice,minPrice=cfg.MIN_ENTRY_ASK){
     simulatedShares:Math.max(0,qty-best.size)};
 }
 function feeFor(m,avg,qty){
-  const rate=Number(m.feeSchedule?.rate??m.takerFeeRate??cfg.FEE_RATE);
-  const exp=Number(m.feeSchedule?.exponent??1);
-  return rate*Math.pow(avg*(1-avg),exp)*qty;
+  return 0;
 }
 function clobWinner(up,down){
   if(!Number.isFinite(up)||!Number.isFinite(down))return null;
   return up>=.98?'UP':down>=.98?'DOWN':up>=down?'UP':'DOWN';
 }
 function clobQuotePrices(q){
-  return [q?.mid,q?.bestBid,q?.bestAsk].map(Number).filter(x=>Number.isFinite(x)&&x>=0&&x<=1);
+  return [q?.mid,q?.bestBid,q?.bestAsk].filter(x=>x!=null&&x!=='').map(Number)
+    .filter(x=>Number.isFinite(x)&&x>=0&&x<=1);
 }
 function clobQuoteValue(q){const prices=clobQuotePrices(q);return prices.length?Math.max(...prices):null}
 function clobQuoteFloor(q){const prices=clobQuotePrices(q);return prices.length?Math.min(...prices):null}
@@ -58,7 +57,7 @@ function clobQuoteWinner(up,down){
   return u>=d?'UP':'DOWN';
 }
 class WickBot{
-  constructor({timeframe='5m',windowMs=cfg.WINDOW_MS,capital=cfg.DEMO_CAPITAL_5M,entryDelayMs=cfg.ENTRY_DELAY_MS,entryCutoffMs=cfg.ENTRY_CUTOFF_MS}={}){
+  constructor({timeframe='15m',windowMs=cfg.WINDOW_MS_15M,capital=cfg.DEMO_CAPITAL_15M,entryDelayMs=cfg.ENTRY_DELAY_15M_MS,entryCutoffMs=cfg.ENTRY_CUTOFF_15M_MS}={}){
     this.timeframe=timeframe;this.windowMs=windowMs;this.capital=capital;this.cash=capital;this.entryDelayMs=entryDelayMs;this.entryCutoffMs=entryCutoffMs;
     this.startedAt=Date.now();
     this.positions=[];this.events=[];this.status='starting';
@@ -101,7 +100,7 @@ class WickBot{
           &&now-(p.lastSettlementAttempt||0)>=1000) await this.trySettle(p);
       }
       if(analysis.ready){
-        const state=this.entryState[start]||(this.entryState[start]={triggered:{},filled:{},blocks:{}});
+        const state=this.entryState[start]||(this.entryState[start]={triggered:{},filled:{},orders:{},blocks:{}});
         for(const entry of analysis.entries){
           const key=entry.key,trigger=state.triggered[key];
           if(entry.crossed&&!trigger){
@@ -111,7 +110,7 @@ class WickBot{
               observedPrice:entry.observedPrice});
           }
           const saved=state.triggered[key];
-          if(saved&&!state.filled[key]){
+          if(saved&&!state.filled[key]&&!state.orders?.[key]){
             if(now<saved.windowEnd&&now-start<this.entryCutoffMs)await this.tryEnter(start,saved,key);
             else if(!state.expired?.[key]){
               state.expired=state.expired||{};state.expired[key]=true;
@@ -119,6 +118,7 @@ class WickBot{
             }
           }
           entry.triggered=Boolean(saved);entry.filled=Boolean(state.filled[key]);
+          entry.pending=Boolean(state.orders?.[key]&&!state.filled[key]);
           entry.expired=Boolean(state.expired?.[key]||entry.expired);entry.block=state.blocks[key]||null;
         }
       }
@@ -142,6 +142,27 @@ class WickBot{
           attemptedAt:now,error:result.reason?.message||'Order book unavailable'};
       }
     });
+    for(const p of this.positions.filter(x=>x.status==='PENDING_LIMIT')){
+      if(now>=p.windowStart+p.windowMs){
+        p.status='CANCELLED_UNFILLED';p.cancelledAt=now;this.cash+=p.reservedCost;
+        const state=this.entryState[p.windowStart];
+        if(state?.orders)delete state.orders[p.entryKey];
+        this.log('PAPER_LIMIT_ORDER_EXPIRED',{id:p.id,side:p.side,price:p.limitPrice,refunded:p.reservedCost});
+        continue;
+      }
+      const q=this.liveQuotes[p.side];
+      if(p.submittedAt<now&&q?.bestAsk!=null&&q.bestAsk<=p.limitPrice){
+        p.status='OPEN';p.openedAt=now;p.filledAt=now;p.avgEntry=p.limitPrice;
+        p.cost=p.reservedCost;p.totalCost=p.reservedCost;p.fees=0;
+        p.makerFeeEquivalent=p.shares*cfg.CRYPTO_TAKER_FEE_RATE*p.limitPrice*(1-p.limitPrice);
+        p.rebateStatus='ELIGIBLE_DAILY_POOL_AMOUNT_UNKNOWN';
+        const state=this.entryState[p.windowStart];
+        if(state){state.filled=state.filled||{};state.filled[p.entryKey]=p.id}
+        this.log('PAPER_MAKER_LIMIT_FILLED',{id:p.id,side:p.side,shares:p.shares,price:p.limitPrice,
+          cost:p.totalCost,fees:0,makerFeeEquivalent:p.makerFeeEquivalent,
+          rebatePoolShare:cfg.CRYPTO_MAKER_REBATE_POOL_SHARE});
+      }
+    }
     const open=this.positions.filter(p=>p.status==='OPEN'||p.status==='PENDING_CLOB_RESULT');
     for(const p of open){
       if(p.windowStart===this.market.start){
@@ -161,38 +182,55 @@ class WickBot{
     }));
   }
   nextEntryShares(){
-    let shares=cfg.ENTRY_FLOOR_SHARES;
     const settled=this.positions.filter(p=>p.status==='SETTLED_WIN'||p.status==='SETTLED_LOSS')
       .sort((a,b)=>(a.settledAt||0)-(b.settledAt||0));
-    for(const p of settled)shares=p.status==='SETTLED_LOSS'
-      ?Math.min(cfg.ENTRY_MAX_SHARES,shares+cfg.ENTRY_SIZE_STEP_SHARES)
-      :Math.max(cfg.ENTRY_FLOOR_SHARES,shares-cfg.ENTRY_SIZE_STEP_SHARES);
-    return shares;
+    let martingale=false,realized=0;
+    for(const p of settled){
+      realized+=Number(p.realizedPnl)||0;
+      martingale=p.isMartingale?false:p.status==='SETTLED_LOSS';
+    }
+    const currentCapital=Math.max(0,this.capital+realized);
+    const stake=currentCapital*cfg.BASE_STAKE_FRACTION*(martingale?cfg.MARTINGALE_MULTIPLIER:1);
+    return Math.floor((stake/cfg.ENTRY_PRICE)*100)/100;
+  }
+  nextEntryIsMartingale(){
+    const settled=this.positions.filter(p=>p.status==='SETTLED_WIN'||p.status==='SETTLED_LOSS')
+      .sort((a,b)=>(a.settledAt||0)-(b.settledAt||0));
+    let martingale=false;
+    for(const p of settled)martingale=p.isMartingale?false:p.status==='SETTLED_LOSS';
+    return martingale;
   }
   async tryEnter(start,trigger,key){
     const now=Date.now();
     if(now<start+this.entryDelayMs||now>=trigger.windowEnd||now-start>=this.entryCutoffMs)return;
     const state=this.entryState[start];
     if(state.filled[key])return;
+    if(state.orders?.[key])return;
+    if(this.positions.some(p=>['PENDING_LIMIT','OPEN','PENDING_CLOB_RESULT'].includes(p.status))){
+      state.blocks[key]='Waiting for the prior paper order or position to finish';return;
+    }
     const token=this.market.tokens[trigger.side],book=await md.getBook(token);
-    const fill=simulateAtBestAsk(book.asks,trigger.shares,cfg.MAX_ENTRY_ASK,cfg.MIN_ENTRY_ASK);
-    if(!fill){state.blocks[key]=`Waiting for signaled-side best ask below ${cfg.MAX_ENTRY_ASK.toFixed(2)} (and at least ${cfg.MIN_ENTRY_ASK.toFixed(2)})`;return}
-    const fee=feeFor(this.market.raw,fill.avg,fill.shares),total=fill.cost+fee;
-    if(total>this.cash){state.blocks[key]='Insufficient demo cash';return}
+    const bestAsk=levels(book.asks)[0]?.price??null;
+    if(bestAsk!=null&&bestAsk<=cfg.ENTRY_PRICE){
+      state.blocks[key]=`Would cross the ask and act as taker; waiting to post passively at $${cfg.ENTRY_PRICE.toFixed(2)}`;return;
+    }
+    const shares=this.nextEntryShares(),isMartingale=this.nextEntryIsMartingale();
+    const cost=shares*cfg.ENTRY_PRICE;
+    if(shares<=0||cost>this.cash){state.blocks[key]='Insufficient paper cash for the limit order';return}
     const p={id:`${this.timeframe}-${start}-${trigger.side}-${key}`,timeframe:this.timeframe,
        windowMs:this.windowMs,windowStart:start,marketId:this.market.id,slug:this.market.slug,
       title:this.market.title,side:trigger.side,tokenId:token,entryKey:key,entryLabel:trigger.label,
         entryType:'CANDLE_PATTERN_SINGLE_ENTRY',
         signalPattern:trigger.pattern||null,patternSide:trigger.patternSide||null,patternAction:trigger.patternAction||null,patternWinRate:trigger.patternWinRate??null,signalStrength:trigger.signalStrength||0,
-       shares:fill.shares,initialShares:fill.shares,
+       shares,initialShares:shares,isMartingale,baseStakeFraction:cfg.BASE_STAKE_FRACTION,
        oppositeTokenId:this.market.tokens[trigger.side==='UP'?'DOWN':'UP'],
-        avgEntry:fill.avg,cost:fill.cost,fees:fee,totalCost:total,status:'OPEN',openedAt:Date.now(),
-        fillModel:'FULL_SIZE_AT_BEST_ASK',visibleAskSize:fill.visibleDepth,simulatedShares:fill.simulatedShares,
+        limitPrice:cfg.ENTRY_PRICE,reservedCost:cost,cost,totalCost:cost,fees:0,status:'PENDING_LIMIT',
+        submittedAt:now,rebateStatus:'AWAITING_MAKER_FILL',
          observedPrice:trigger.observedPrice};
-     this.cash-=total;this.positions.unshift(p);state.filled[key]=p.id;delete state.blocks[key];this.status='position_open';
-     this.log('PAPER_CANDLE_PATTERN_ENTRY',{timeframe:this.timeframe,id:p.id,side:p.side,entry:key,label:p.entryLabel,
-       pattern:p.signalPattern,patternSide:p.patternSide,patternAction:p.patternAction,patternWinRate:p.patternWinRate,signalStrength:p.signalStrength,shares:p.shares,entryPrice:p.avgEntry,avgEntry:p.avgEntry,cost:p.totalCost,
-      fillModel:p.fillModel,visibleAskSize:p.visibleAskSize,simulatedShares:p.simulatedShares});
+     this.cash-=cost;this.positions.unshift(p);state.orders=state.orders||{};state.orders[key]=p.id;delete state.blocks[key];
+     this.log('PAPER_MAKER_LIMIT_POSTED',{timeframe:this.timeframe,id:p.id,side:p.side,entry:key,label:p.entryLabel,
+       pattern:p.signalPattern,shares:p.shares,limitPrice:p.limitPrice,reservedCost:cost,isMartingale,
+       fees:0,rebateEligible:true,rebatePoolShare:cfg.CRYPTO_MAKER_REBATE_POOL_SHARE});
   }
   async trySettle(p){
     if(Date.now()<p.windowStart+(p.windowMs||this.windowMs))return;if(!['OPEN','PENDING_CLOB_RESULT'].includes(p.status))return;p.lastSettlementAttempt=Date.now();
@@ -207,8 +245,10 @@ class WickBot{
       .filter(x=>x.t<this.market.start).slice(-3):[];
     const now=Date.now();
     const realizedPnl=this.positions.reduce((s,p)=>s+(p.realizedPnl||0),0);
+    const rebateFeeEquivalent=this.positions.reduce((s,p)=>s+(p.makerFeeEquivalent||0),0);
+    const pendingOrderValue=this.positions.filter(p=>p.status==='PENDING_LIMIT').reduce((s,p)=>s+(p.reservedCost||0),0);
     const wins=this.positions.filter(p=>p.status==='SETTLED_WIN').length,losses=this.positions.filter(p=>p.status==='SETTLED_LOSS').length;
-    const settledTrades=wins+losses,totalTrades=this.positions.length;
+    const settledTrades=wins+losses,totalTrades=this.positions.filter(p=>p.status!=='CANCELLED_UNFILLED').length;
     const history=this.positions.filter(p=>p.status==='SETTLED_WIN'||p.status==='SETTLED_LOSS')
       .sort((a,b)=>(a.settledAt||0)-(b.settledAt||0));
     const equityCurve=[{ts:this.startedAt,equity:this.capital}];
@@ -228,19 +268,23 @@ class WickBot{
       const mark=p.markBid==null?null:p.markBid*p.shares;p.markAgeMs=p.markUpdatedAt?Math.max(0,now-p.markUpdatedAt):null;p.markStatus=mark==null?'UNAVAILABLE':p.markAgeMs>15000?'STALE':'LIVE';const freshMark=mark!=null&&p.markAgeMs<=15000;p.markValue=freshMark?mark:null;p.unrealizedPnl=freshMark?mark-p.totalCost:null;if(!freshMark)unpricedOpenPositions++;else{markedValue+=mark;unrealizedPnl+=p.unrealizedPnl}
     }
     return {now,mode:'DEMO ONLY',status:this.status,error:this.error,
-        strategy:{timeframe:this.timeframe,market:'Polymarket BTC '+(this.windowMs/60000)+'-minute UP/DOWN',capital:this.capital,
-          entries:[{shares:this.nextEntryShares(),trigger:'detected candle pattern side',
-            floorShares:cfg.ENTRY_FLOOR_SHARES,maxShares:cfg.ENTRY_MAX_SHARES,
-            stepShares:cfg.ENTRY_SIZE_STEP_SHARES,delaySeconds:this.entryDelayMs/1000,
-            timing:'single paper entry per window; resize after each settled result'}],
+        strategy:{timeframe:this.timeframe,market:'Polymarket BTC 15-minute UP/DOWN',capital:this.capital,
+          entries:[{shares:this.nextEntryShares(),trigger:'detected 15-minute candle pattern side',
+            limitPrice:cfg.ENTRY_PRICE,baseStakeFraction:cfg.BASE_STAKE_FRACTION,
+            martingale:this.nextEntryIsMartingale(),martingaleMultiplier:cfg.MARTINGALE_MULTIPLIER,
+            delaySeconds:this.entryDelayMs/1000,timing:'one paper limit order per window; one doubled stake after a loss, then reset'}],
           exit:'Any fresh own-side CLOB bid/ask/mid >= $0.99 immediately pays $1/share; <= $0.01 immediately pays $0/share; otherwise use official Gamma outcome at window close',
-          minEntryAsk:cfg.MIN_ENTRY_ASK,maxEntryAsk:cfg.MAX_ENTRY_ASK,
-          direction:'Follow the detected directional pattern side; neutral patterns do not trade',
+          limitPrice:cfg.ENTRY_PRICE,
+          direction:'Follow the detected directional 15-minute pattern side; neutral patterns do not trade',
           entryCutoffSeconds:this.entryCutoffMs/1000,entryDelaySeconds:this.entryDelayMs/1000,
-          entryFillModel:'Wait for the signaled-side best ask below $0.49, then fill full size; minimum ask $0.05',
-          fees:'Polymarket taker fees on simulated buys',execution:'PAPER ONLY'},
-       account:{capital:this.capital,cash:this.cash,realizedPnl,unrealizedPnl,equity:this.cash+markedValue,
+          entryFillModel:'Paper maker limit at $0.45; reserve capital on posting and fill only when a later ask touches the limit',
+          fees:'$0 maker fees; no taker orders are simulated',
+          rebates:'Crypto makers share 20% of the daily fee pool pro-rata; paid daily in pUSD after $1 accrues. Paper mode cannot know the actual amount.',
+          execution:'PAPER ONLY'},
+       account:{capital:this.capital,cash:this.cash,realizedPnl,unrealizedPnl,equity:this.cash+markedValue+pendingOrderValue,
          totalTrades,settledTrades,wins,losses,winRate:settledTrades?wins/settledTrades*100:0,markedValue,unpricedOpenPositions,
+         pendingOrders:this.positions.filter(p=>p.status==='PENDING_LIMIT').length,pendingOrderValue,
+         makerRebateFeeEquivalent:rebateFeeEquivalent,rebateEstimate:null,
          openPositions:this.positions.filter(p=>p.status==='OPEN'||p.status==='PENDING_CLOB_RESULT').length,
          maxConsecutiveLosses,maxDrawdown,maxDrawdownPercent:peak?maxDrawdown/peak*100:0,
          wins,losses,equityCurve,nextEntryShares:this.nextEntryShares()},
@@ -254,7 +298,7 @@ class WickBot{
               previousCandles:prior,entryState:this.entryState[this.market?.start]||null},
       positions:this.positions.slice(0,50),events:this.events};
   }
-  start(){if(this.running)return;this.running=true;this.log('BOT_STARTED',{timeframe:this.timeframe,note:`Demo-only BTC ${this.windowMs/60000}m candle-pattern signal; one ${this.nextEntryShares()}-share entry after ${cfg.ENTRY_DELAY_MS/1000}s, size adjusts by ${cfg.ENTRY_SIZE_STEP_SHARES} after each win/loss, no live orders.`});
+  start(){if(this.running)return;this.running=true;this.log('BOT_STARTED',{timeframe:this.timeframe,note:`Paper-only BTC 15m pattern signal; $${cfg.ENTRY_PRICE.toFixed(2)} passive limit, base ${cfg.BASE_STAKE_FRACTION*100}% of current capital, one ${cfg.MARTINGALE_MULTIPLIER}x step, no live orders.`});
     const loop=async()=>{if(!this.running)return;await this.tick();if(this.running)this.timer=setTimeout(loop,cfg.POLL_INTERVAL_MS)};
     void loop();}
   stop(){this.running=false;clearTimeout(this.timer)}
