@@ -124,24 +124,32 @@ test('single-entry strategy leaves position exits to the existing CLOB rules',()
   assert.match(bot.snapshot().strategy.exit,/bid\/ask\/mid >= \$0\.99/);
 });
 
-test('timed CLOB entries buy each qualifying side and double shares at every 30-second check',()=>{
+test('only fired entries advance martingale sizing; skipped price checks do not',()=>{
   const Bot=require('../wick-bot'),bot=new Bot(),start=1_000_000,now=start+30000;
   bot.market={id:'m',slug:'m',title:'m',start,tokens:{UP:'u',DOWN:'d'}};
   bot.openStrategyWindow(start,start);
-  bot.liveQuotes={UP:{status:'LIVE',bestAsk:.71,askSize:1000,updatedAt:now},
+  bot.liveQuotes={UP:{status:'LIVE',bestAsk:.70,askSize:1000,updatedAt:now},
     DOWN:{status:'LIVE',bestAsk:.75,askSize:1000,updatedAt:now}};
   bot.processTimedEntries(start,now);
   bot.processTimedEntries(start,now+100);
-  assert.deepEqual(bot.positions.map(p=>p.side),['DOWN','UP']);
-  assert.deepEqual(bot.positions.map(p=>p.shares),[100,100]);
-  assert.ok(bot.positions.every(p=>p.orderType==='MARKET'&&p.avgEntry>0.70));
-  assert.ok(bot.positions.every(p=>p.fees>0&&p.estimatedMakerRebate===0));
+  assert.deepEqual(bot.positions.map(p=>p.side),['DOWN']);
+  assert.equal(bot.positions[0].shares,100);
+  assert.equal(bot.windowFiredEntries,1);
+  assert.equal(bot.windowOrders.find(o=>o.side==='UP').status,'SKIPPED');
+  assert.equal(bot.windowOrders.find(o=>o.side==='UP').shares,null);
   bot.liveQuotes={UP:{status:'LIVE',bestAsk:.72,askSize:1000,updatedAt:now+30000},
     DOWN:{status:'LIVE',bestAsk:.69,askSize:1000,updatedAt:now+30000}};
   bot.processTimedEntries(start,now+30000);
-  assert.equal(bot.positions.filter(p=>p.side==='UP').length,2);
   assert.equal(bot.positions.find(p=>p.id.endsWith('-UP-check-2')).shares,200);
   assert.equal(bot.positions.filter(p=>p.side==='DOWN').length,1);
+  assert.equal(bot.windowFiredEntries,2);
+  bot.liveQuotes={UP:{status:'LIVE',bestAsk:.65,askSize:1000,updatedAt:now+60000},
+    DOWN:{status:'LIVE',bestAsk:.73,askSize:1000,updatedAt:now+60000}};
+  bot.processTimedEntries(start,now+60000);
+  assert.equal(bot.positions.find(p=>p.id.endsWith('-DOWN-check-3')).shares,400);
+  assert.equal(bot.windowFiredEntries,3);
+  assert.ok(bot.positions.every(p=>p.orderType==='MARKET'&&p.avgEntry>0.70));
+  assert.ok(bot.positions.every(p=>p.fees>0&&p.estimatedMakerRebate===0));
 });
 test('the 270-second cutoff still blocks new timed entries',()=>{
   const Bot=require('../wick-bot'),bot=new Bot(),start=1_000_000,now=start+270000;

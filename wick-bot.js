@@ -75,6 +75,7 @@ class WickBot{
     this.positions=[];this.events=[];this.status='starting';
     this.error=null;this.market=null;this.lastMarketAt=0;
     this.lastScanAt=null;this.orders=[];this.windowOrders=[];this.orderWindowStart=null;this.running=false;
+    this.windowFiredEntries=0;
     this.quoteWindowStart=null;this.liveQuotes={UP:{status:'MISSING'},DOWN:{status:'MISSING'}};
     this.closeQuotes=null;
   }
@@ -117,6 +118,7 @@ class WickBot{
   openStrategyWindow(start,now){
     this.orderWindowStart=start;
     this.lastEntryCheckpoint=0;
+    this.windowFiredEntries=0;
     this.windowOrders=[];
     this.log('PAPER_TIMED_ENTRY_STRATEGY_STARTED',{windowStart:start,
       checkIntervalSeconds:cfg.ENTRY_CHECK_INTERVAL_MS/1000,
@@ -129,12 +131,11 @@ class WickBot{
     if(checkpoint<=this.lastEntryCheckpoint)return;
     this.lastEntryCheckpoint=checkpoint;
     if(elapsedMs>=cutoffMs)return;
-    const shares=cfg.BASE_ENTRY_SHARES*Math.pow(cfg.ENTRY_SIZE_MULTIPLIER,checkpoint-1);
     for(const side of ['UP','DOWN']){
       const quote=this.liveQuotes[side],ask=Number(quote?.bestAsk);
       const id=`${this.timeframe}-${start}-${side}-check-${checkpoint}`;
       const order={id,timeframe:this.timeframe,windowStart:start,side,checkpoint,
-        shares,orderType:'MARKET',status:'SKIPPED',createdAt:now};
+        shares:null,orderType:'MARKET',status:'SKIPPED',createdAt:now};
       this.windowOrders.unshift(order);
       this.orders.unshift(order);
       if(this.orders.length>1000)this.orders.length=1000;
@@ -147,6 +148,8 @@ class WickBot{
         order.reason=`Ask is not above $${cfg.ENTRY_PRICE_THRESHOLD.toFixed(2)}.`;
         continue;
       }
+      const shares=cfg.BASE_ENTRY_SHARES*Math.pow(cfg.ENTRY_SIZE_MULTIPLIER,this.windowFiredEntries);
+      order.shares=shares;
       const fee=feeFor(this.market,ask,shares),cost=ask*shares,totalCost=cost+fee;
       if(totalCost>this.cash+1e-9){
         order.status='REJECTED_INSUFFICIENT_CASH';
@@ -163,7 +166,7 @@ class WickBot{
         submittedAt:now,openedAt:now,filledAt:now,visibleAskSize:quote.askSize,
         simulatedShares:Math.max(0,shares-(quote.askSize||0))};
       order.status='FILLED';order.filledAt=now;order.positionId=id;order.fillPrice=ask;order.fee=fee;
-      this.cash-=totalCost;this.positions.unshift(position);
+      this.cash-=totalCost;this.positions.unshift(position);this.windowFiredEntries++;
       this.log('PAPER_TIMED_ENTRY_FILLED',{id,side,
         checkpointSeconds:checkpoint*cfg.ENTRY_CHECK_INTERVAL_MS/1000,
         ask,shares,fee,totalCost,visibleAskSize:quote.askSize});
@@ -240,7 +243,7 @@ class WickBot{
             checkIntervalSeconds:cfg.ENTRY_CHECK_INTERVAL_MS/1000,baseShares:cfg.BASE_ENTRY_SHARES,
             sizeMultiplier:cfg.ENTRY_SIZE_MULTIPLIER,maxEntrySeconds:cfg.MAX_ENTRY_SECONDS,
             sides:['UP','DOWN'],
-            timing:'Check each side every 30 seconds and paper-buy at its fresh best ask when above $0.70; double shares at each check'},
+            timing:'Check both sides every 30 seconds; only a filled entry advances the doubling sequence, while skips do not'},
           exit:'Any fresh own-side CLOB bid/ask/mid >= $0.99 immediately pays $1/share; <= $0.01 immediately pays $0/share; otherwise use official Gamma outcome at window close',
           direction:'CLOB prices only; accumulate UP and DOWN positions independently',
            entryFillModel:'Paper market buys fill at the fresh best ask and include the configured taker fee',

@@ -24,7 +24,7 @@
 <div class="card"><div class="label">Max drawdown</div><div class="value bad" id="maxDrawdown">—</div></div>
 </section>
 <section class="panel"><h2>Combined all-time equity</h2><div id="equityChart" class="chart-wrap"><div class="empty">Waiting for settled trades</div></div><div class="small">Settled-trade equity from the starting bankroll; in-memory history resets if the bot process restarts.</div></section>
-<div class="notice">Every 30 seconds, check UP and DOWN independently. Buy 100 shares when the fresh best ask is above $0.70, doubling the size at each checkpoint (100, 200, 400…). Stop new entries at 270 seconds. These are paper market buys at the current ask and may incur taker fees; they earn no maker rebate. Existing take-profit, stop-loss, and settlement rules remain unchanged.</div>
+<div class="notice">Every 30 seconds, check UP and DOWN independently. Buy at the fresh best ask when it is above $0.70. Start at 100 shares and double only after a successful entry; skipped checks do not advance sizing. Stop new entries at 270 seconds. These are paper market buys at the current ask and may incur taker fees; they earn no maker rebate. Existing take-profit, stop-loss, and settlement rules remain unchanged.</div>
 <div class="err" id="error"></div>
 <section class="cols" id="timeframe-panels"></section>
 <section class="panel"><h2>Recent paper trades · entry prices and window timestamps</h2><div id="positions" class="empty">No paper trades yet.</div></section>

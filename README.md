@@ -5,7 +5,7 @@ Polymarket BTC 5-minute UP/DOWN paper trading only. The bot has a single $10,000
 ## Strategy
 
 - Every 30 seconds, check both sides independently. If a side's fresh CLOB best ask is strictly above $0.70, paper-buy at that ask.
-- Entry size doubles at each checkpoint: 100 shares at 30 seconds, 200 at 60 seconds, 400 at 90 seconds, and so on. A side can accumulate multiple entries, and both sides can enter during the same checkpoint.
+- Entry size doubles on each successfully filled buy: the first fired entry is 100 shares, the next is 200, then 400, and so on. A skipped check does not advance sizing. Both sides can accumulate entries.
 - No new entries at or after 270 seconds into the window. Filled positions remain open for the existing TP/SL or official-result handling.
 - Entries are modeled as taker market buys at the current best ask and use the configured crypto taker fee. They do not earn maker rebates; the rebate dashboard remains for any eligible historical maker fills.
 - During the window, a fresh own-side CLOB bid, ask, or midpoint at $0.99 or higher immediately settles as a $1/share win; at $0.01 or lower it settles as a $0/share loss. Otherwise, use the official Gamma market result at window close, retrying until resolved.
