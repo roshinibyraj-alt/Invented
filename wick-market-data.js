@@ -2,7 +2,6 @@
 
 const GAMMA='https://gamma-api.polymarket.com';
 const CLOB='https://clob.polymarket.com';
-const chainlinkFeed=require('./chainlink-feed').feed;
 
 async function getJson(url){
   const r=await fetch(url,{signal:AbortSignal.timeout(10000)});
@@ -29,13 +28,9 @@ async function getBtcMarket(windowStart,windowMs){
     start:windowStart,end:windowStart+windowMs,tokens,raw:market};
 }
 
-async function getMinuteCandles(){
-  return chainlinkFeed.getMinuteCandles();
-}
-function getCandleFeedStatus(){return chainlinkFeed.snapshot()}
 async function getBook(tokenId){
   return getJson(`${CLOB}/book?token_id=${encodeURIComponent(tokenId)}`);
 }
 async function getMarket(id){return getJson(`${GAMMA}/markets/${encodeURIComponent(id)}`)}
 
-module.exports={getBtcMarket,getMinuteCandles,getCandleFeedStatus,getBook,getMarket};
+module.exports={getBtcMarket,getBook,getMarket};

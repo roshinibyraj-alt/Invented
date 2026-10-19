@@ -6,8 +6,7 @@ const Bot=require('./wick-bot');
 class MultiBot {
   constructor(){
     this.bots={
-      '15m':new Bot({timeframe:'15m',windowMs:cfg.WINDOW_MS_15M,capital:cfg.DEMO_CAPITAL_15M,
-        entryDelayMs:cfg.ENTRY_DELAY_15M_MS,entryCutoffMs:cfg.ENTRY_CUTOFF_15M_MS})
+      '5m':new Bot({timeframe:'5m',windowMs:cfg.WINDOW_MS_5M,capital:cfg.DEMO_CAPITAL_5M})
     };
   }
   start(){for(const bot of Object.values(this.bots))bot.start()}
@@ -22,7 +21,7 @@ class MultiBot {
     const status=states.some(s=>s.status==='blocked_or_error')?'blocked_or_error':
       states.some(s=>['scanning','position_open'].includes(s.status))?
         (openPositions?'position_open':'scanning'):'waiting_for_market';
-    const primary=timeframes['15m'],capital=states.reduce((n,s)=>n+s.account.capital,0);
+    const primary=timeframes['5m'],capital=states.reduce((n,s)=>n+s.account.capital,0);
     const series=states.map(s=>s.account.equityCurve||[]);
     const current=series.map(x=>Number(x[0]?.equity||0));
     const startTs=Math.min(...series.map(x=>Number(x[0]?.ts||Date.now())));
@@ -34,7 +33,7 @@ class MultiBot {
     for(const point of equityCurve){peak=Math.max(peak,point.equity);maxDrawdown=Math.max(maxDrawdown,peak-point.equity);}
     return {...primary,now:Date.now(),status,timeframes,positions,events,
       error:states.find(s=>s.error)?.error||null,
-      strategy:{execution:'PAPER ONLY',timeframes:['15m']},
+      strategy:{execution:'PAPER ONLY',timeframes:['5m']},
       account:{capital,
         cash:states.reduce((n,s)=>n+s.account.cash,0),
         realizedPnl:states.reduce((n,s)=>n+s.account.realizedPnl,0),
@@ -44,7 +43,7 @@ class MultiBot {
          unpricedOpenPositions:states.reduce((n,s)=>n+s.account.unpricedOpenPositions,0),totalTrades,settledTrades,wins,losses,winRate:settledTrades?wins/settledTrades*100:0,openPositions,
          maxConsecutiveLosses:Math.max(...states.map(s=>s.account.maxConsecutiveLosses)),
          maxDrawdown,maxDrawdownPercent:peak?maxDrawdown/peak*100:0,
-         equityCurve,nextEntryShares:primary.account.nextEntryShares}};
+         equityCurve}};
   }
 }
 
