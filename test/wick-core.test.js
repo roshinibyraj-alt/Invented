@@ -131,9 +131,12 @@ test('5m CLOB ladder creates 14 independent resting orders and fills both sides 
   assert.equal(bot.windowOrders.length,14);
   assert.equal(bot.windowOrders.filter(o=>o.side==='UP').length,7);
   assert.deepEqual(bot.windowOrders.filter(o=>o.side==='UP').map(o=>o.limitPrice),[.4,.35,.3,.25,.2,.15,.1]);
-  bot.liveQuotes={UP:{status:'LIVE',bestAsk:.34,askSize:100,updatedAt:now},
+  bot.liveQuotes={UP:{status:'LIVE',bestAsk:.50,askSize:100,updatedAt:now},
     DOWN:{status:'LIVE',bestAsk:.50,askSize:100,updatedAt:now}};
   bot.processLadderOrders(start,now);
+  bot.liveQuotes={UP:{status:'LIVE',bestAsk:.34,askSize:100,updatedAt:now+500},
+    DOWN:{status:'LIVE',bestAsk:.50,askSize:100,updatedAt:now+500}};
+  bot.processLadderOrders(start,now+500);
   assert.deepEqual(bot.positions.map(p=>p.side),['UP','UP']);
   assert.deepEqual(bot.positions.map(p=>p.avgEntry),[.35,.4]);
   assert.ok(bot.windowOrders.filter(o=>o.side==='UP').slice(0,2).every(o=>o.status==='FILLED'));
@@ -177,6 +180,7 @@ test('unfilled ladder orders cancel at the 130-second cutoff',()=>{
   bot.openLadder(start,start);
   bot.liveQuotes={UP:{status:'LIVE',bestAsk:.5,askSize:1000,updatedAt:now},
     DOWN:{status:'LIVE',bestAsk:.5,askSize:1000,updatedAt:now}};
+  bot.processLadderOrders(start,start);
   bot.processLadderOrders(start,now);
   assert.equal(bot.windowOrders.filter(o=>o.status==='CANCELLED_UNFILLED').length,14);
   assert.equal(bot.positions.length,0);
@@ -208,13 +212,34 @@ test('CLOB prices alone can fill 100-share orders on both UP and DOWN',()=>{
   const Bot=require('../wick-bot'),bot=new Bot(),start=Date.now()-1000,now=Date.now();
   bot.market={id:'m',slug:'m',title:'m',start,tokens:{UP:'u',DOWN:'d'}};
   bot.openLadder(start,now);
-  bot.liveQuotes={UP:{status:'LIVE',bestAsk:.39,askSize:1000,updatedAt:now},
-    DOWN:{status:'LIVE',bestAsk:.24,askSize:1000,updatedAt:now}};
+  bot.liveQuotes={UP:{status:'LIVE',bestAsk:.50,askSize:1000,updatedAt:now},
+    DOWN:{status:'LIVE',bestAsk:.50,askSize:1000,updatedAt:now}};
   bot.processLadderOrders(start,now);
+  bot.liveQuotes={UP:{status:'LIVE',bestAsk:.39,askSize:1000,updatedAt:now+500},
+    DOWN:{status:'LIVE',bestAsk:.24,askSize:1000,updatedAt:now+500}};
+  bot.processLadderOrders(start,now+500);
   assert.equal(bot.positions.filter(p=>p.side==='UP').length,1);
   assert.equal(bot.positions.find(p=>p.side==='UP').shares,100);
   assert.equal(bot.positions.filter(p=>p.side==='DOWN').length,4);
-  assert.ok(bot.positions.every(p=>p.orderType==='LIMIT'&&p.shares===100&&p.entryType==='CLOB_LIMIT_LADDER'));
+  assert.ok(bot.positions.every(p=>p.orderType==='LIMIT'&&p.shares===100&&p.entryType==='CLOB_LIMIT_LADDER'&&p.fees===0));
+  assert.ok(bot.snapshot().account.estimatedMakerRebate>0);
+});
+
+test('post-only ladder rejects marketable orders and only estimates rebates on maker fills',()=>{
+  const Bot=require('../wick-bot'),bot=new Bot(),start=Date.now()-1000,now=Date.now();
+  bot.market={id:'m',slug:'m',title:'m',start,tokens:{UP:'u',DOWN:'d'}};
+  bot.openLadder(start,now);
+  bot.liveQuotes={UP:{status:'LIVE',bestAsk:.35,askSize:1000,updatedAt:now},
+    DOWN:{status:'LIVE',bestAsk:.50,askSize:1000,updatedAt:now}};
+  bot.processLadderOrders(start,now);
+  assert.equal(bot.windowOrders.filter(o=>o.side==='UP'&&o.status==='REJECTED_POST_ONLY').length,2);
+  assert.equal(bot.positions.length,0);
+  bot.liveQuotes={UP:{status:'LIVE',bestAsk:.24,askSize:1000,updatedAt:now+500},
+    DOWN:{status:'LIVE',bestAsk:.50,askSize:1000,updatedAt:now+500}};
+  bot.processLadderOrders(start,now+500);
+  assert.equal(bot.positions.length,2);
+  assert.ok(bot.positions.every(p=>p.fees===0&&p.estimatedMakerRebate>0));
+  assert.equal(bot.snapshot().account.takerFees,0);
 });
 
 test('paper market orders pay the configured crypto taker fee and official outcome settlement is applied',()=>{
