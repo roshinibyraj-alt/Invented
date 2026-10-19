@@ -151,7 +151,7 @@ test('only the 5m strategy is running',()=>{
   assert.deepEqual(Object.keys(bots.bots),['5m']);
   assert.equal(bots.bots['5m'].windowMs,300000);
   assert.equal(snapshot.account.capital,10000);assert.deepEqual(snapshot.strategy.timeframes,['5m']);
-  assert.equal(snapshot.timeframes['5m'].strategy.entries.cancelAfterSeconds,180);
+  assert.equal(snapshot.timeframes['5m'].strategy.entries.cancelAfterSeconds,130);
 });
 test('15m strategy uses an independent 15-minute window and 9/810-second gates',()=>{
   const before=timedPattern(bullishHistory,8999,500,{windowMs:900000,entryDelayMs:9000,entryCutoffMs:810000});
@@ -171,8 +171,8 @@ test('realized and floating position P&L are computed separately from bid marks'
   assert.equal(a.equity,990);assert.equal(a.openPositions,1);
 });
 
-test('unfilled ladder orders cancel at the 3-minute cutoff',()=>{
-  const Bot=require('../wick-bot'),bot=new Bot(),start=Date.now()-1000,now=start+180000;
+test('unfilled ladder orders cancel at the 130-second cutoff',()=>{
+  const Bot=require('../wick-bot'),bot=new Bot(),start=Date.now()-1000,now=start+130000;
   bot.market={id:'m',slug:'m',title:'m',start,tokens:{UP:'u',DOWN:'d'}};
   bot.openLadder(start,start);
   bot.liveQuotes={UP:{status:'LIVE',bestAsk:.5,askSize:1000,updatedAt:now},

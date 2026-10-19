@@ -128,7 +128,7 @@ class WickBot{
       if(now>=start+cfg.ORDER_CANCEL_AFTER_MS){
         order.status='CANCELLED_UNFILLED';order.cancelledAt=now;
         this.log('PAPER_LIMIT_ORDER_CANCELLED',{id:order.id,side:order.side,limitPrice:order.limitPrice,
-          shares:order.shares,note:'Unfilled resting order cancelled at the 3-minute cutoff.'});
+          shares:order.shares,note:'Unfilled resting order cancelled at the 130-second cutoff.'});
         continue;
       }
       const quote=this.liveQuotes[order.side];
@@ -223,7 +223,7 @@ class WickBot{
         strategy:{timeframe:this.timeframe,market:'Polymarket BTC 5-minute UP/DOWN',capital:this.capital,
           entries:{orderType:'LIMIT',prices:cfg.LADDER_PRICES,sharesPerOrder:cfg.LADDER_SHARES,
             sides:['UP','DOWN'],cancelAfterSeconds:cfg.ORDER_CANCEL_AFTER_MS/1000,
-            timing:'Place both-side CLOB price ladder orders at window start; cancel unfilled orders after 3 minutes'},
+            timing:'Place both-side CLOB price ladder orders at window start; cancel unfilled orders after 130 seconds'},
           exit:'Any fresh own-side CLOB bid/ask/mid >= $0.99 immediately pays $1/share; <= $0.01 immediately pays $0/share; otherwise use official Gamma outcome at window close',
           direction:'CLOB prices only; accumulate UP and DOWN positions independently',
           entryFillModel:'Paper limit order fills at its rung when the fresh best ask reaches or crosses the limit',
