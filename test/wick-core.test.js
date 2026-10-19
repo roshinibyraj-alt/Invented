@@ -125,11 +125,11 @@ test('single-entry strategy leaves position exits to the existing CLOB rules',()
 });
 
 test('only fired entries advance martingale sizing; skipped price checks do not',()=>{
-  const Bot=require('../wick-bot'),bot=new Bot(),start=1_000_000,now=start+30000;
+  const Bot=require('../wick-bot'),bot=new Bot(),start=1_000_000,now=start+15000;
   bot.market={id:'m',slug:'m',title:'m',start,tokens:{UP:'u',DOWN:'d'}};
   bot.openStrategyWindow(start,start);
-  bot.liveQuotes={UP:{status:'LIVE',bestAsk:.70,askSize:1000,updatedAt:now},
-    DOWN:{status:'LIVE',bestAsk:.75,askSize:1000,updatedAt:now}};
+  bot.liveQuotes={UP:{status:'LIVE',bestAsk:.60,askSize:1000,updatedAt:now},
+    DOWN:{status:'LIVE',bestAsk:.65,askSize:1000,updatedAt:now}};
   bot.processTimedEntries(start,now);
   bot.processTimedEntries(start,now+100);
   assert.deepEqual(bot.positions.map(p=>p.side),['DOWN']);
@@ -137,19 +137,36 @@ test('only fired entries advance martingale sizing; skipped price checks do not'
   assert.equal(bot.windowFiredEntries,1);
   assert.equal(bot.windowOrders.find(o=>o.side==='UP').status,'SKIPPED');
   assert.equal(bot.windowOrders.find(o=>o.side==='UP').shares,null);
-  bot.liveQuotes={UP:{status:'LIVE',bestAsk:.72,askSize:1000,updatedAt:now+30000},
-    DOWN:{status:'LIVE',bestAsk:.69,askSize:1000,updatedAt:now+30000}};
-  bot.processTimedEntries(start,now+30000);
+  bot.liveQuotes={UP:{status:'LIVE',bestAsk:.62,askSize:1000,updatedAt:now+15000},
+    DOWN:{status:'LIVE',bestAsk:.59,askSize:1000,updatedAt:now+15000}};
+  bot.processTimedEntries(start,now+15000);
   assert.equal(bot.positions.find(p=>p.id.endsWith('-UP-check-2')).shares,200);
   assert.equal(bot.positions.filter(p=>p.side==='DOWN').length,1);
   assert.equal(bot.windowFiredEntries,2);
-  bot.liveQuotes={UP:{status:'LIVE',bestAsk:.65,askSize:1000,updatedAt:now+60000},
-    DOWN:{status:'LIVE',bestAsk:.73,askSize:1000,updatedAt:now+60000}};
-  bot.processTimedEntries(start,now+60000);
+  bot.liveQuotes={UP:{status:'LIVE',bestAsk:.55,askSize:1000,updatedAt:now+30000},
+    DOWN:{status:'LIVE',bestAsk:.63,askSize:1000,updatedAt:now+30000}};
+  bot.processTimedEntries(start,now+30000);
   assert.equal(bot.positions.find(p=>p.id.endsWith('-DOWN-check-3')).shares,400);
   assert.equal(bot.windowFiredEntries,3);
-  assert.ok(bot.positions.every(p=>p.orderType==='MARKET'&&p.avgEntry>0.70));
+  assert.ok(bot.positions.every(p=>p.orderType==='MARKET'&&p.avgEntry>0.60));
   assert.ok(bot.positions.every(p=>p.fees>0&&p.estimatedMakerRebate===0));
+});
+test('martingale allows five successful buys total, including the initial buy',()=>{
+  const Bot=require('../wick-bot'),bot=new Bot(),start=1_000_000;
+  bot.market={id:'m',slug:'m',title:'m',start,tokens:{UP:'u',DOWN:'d'}};
+  bot.openStrategyWindow(start,start);
+  for(let checkpoint=1;checkpoint<=4;checkpoint++){
+    const now=start+checkpoint*15000;
+    bot.liveQuotes={UP:{status:'LIVE',bestAsk:.61,askSize:10000,updatedAt:now},
+      DOWN:{status:'LIVE',bestAsk:.62,askSize:10000,updatedAt:now}};
+    bot.processTimedEntries(start,now);
+  }
+  assert.equal(bot.positions.length,5);
+  assert.deepEqual(bot.positions.slice().reverse().map(p=>p.shares),[100,200,400,800,1600]);
+  assert.equal(bot.windowFiredEntries,5);
+  assert.equal(bot.windowOrders.filter(o=>o.status==='FILLED').length,5);
+  assert.ok(bot.windowOrders.some(o=>o.reason==='Maximum of 5 successful entries reached for this window.'));
+  assert.equal(bot.snapshot().strategy.entries.maxSuccessfulEntries,5);
 });
 test('the 270-second cutoff still blocks new timed entries',()=>{
   const Bot=require('../wick-bot'),bot=new Bot(),start=1_000_000,now=start+270000;
@@ -171,7 +188,8 @@ test('only the 5m strategy is running',()=>{
   assert.deepEqual(Object.keys(bots.bots),['5m']);
   assert.equal(bots.bots['5m'].windowMs,300000);
   assert.equal(snapshot.account.capital,10000);assert.deepEqual(snapshot.strategy.timeframes,['5m']);
-  assert.equal(snapshot.timeframes['5m'].strategy.entries.checkIntervalSeconds,30);
+  assert.equal(snapshot.timeframes['5m'].strategy.entries.checkIntervalSeconds,15);
+  assert.equal(snapshot.timeframes['5m'].strategy.entries.maxSuccessfulEntries,5);
   assert.equal(snapshot.timeframes['5m'].strategy.entries.maxEntrySeconds,270);
   assert.equal(snapshot.account.estimatedMakerRebate,1.23);
   assert.equal(snapshot.account.takerFees,0);

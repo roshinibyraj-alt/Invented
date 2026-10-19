@@ -139,6 +139,10 @@ class WickBot{
       this.windowOrders.unshift(order);
       this.orders.unshift(order);
       if(this.orders.length>1000)this.orders.length=1000;
+      if(this.windowFiredEntries>=cfg.MAX_SUCCESSFUL_ENTRIES_PER_WINDOW){
+        order.reason=`Maximum of ${cfg.MAX_SUCCESSFUL_ENTRIES_PER_WINDOW} successful entries reached for this window.`;
+        continue;
+      }
       if(!quote||quote.status!=='LIVE'||now-(quote.updatedAt||0)>5000||!Number.isFinite(ask)){
         order.reason='Fresh executable ask unavailable at this check.';
         continue;
@@ -241,9 +245,10 @@ class WickBot{
         strategy:{timeframe:this.timeframe,market:'Polymarket BTC 5-minute UP/DOWN',capital:this.capital,
           entries:{orderType:'MARKET',triggerAskAbove:cfg.ENTRY_PRICE_THRESHOLD,
             checkIntervalSeconds:cfg.ENTRY_CHECK_INTERVAL_MS/1000,baseShares:cfg.BASE_ENTRY_SHARES,
-            sizeMultiplier:cfg.ENTRY_SIZE_MULTIPLIER,maxEntrySeconds:cfg.MAX_ENTRY_SECONDS,
+            sizeMultiplier:cfg.ENTRY_SIZE_MULTIPLIER,maxSuccessfulEntries:cfg.MAX_SUCCESSFUL_ENTRIES_PER_WINDOW,
+            maxEntrySeconds:cfg.MAX_ENTRY_SECONDS,
             sides:['UP','DOWN'],
-            timing:'Check both sides every 30 seconds; only a filled entry advances the doubling sequence, while skips do not'},
+            timing:`Check both sides every ${cfg.ENTRY_CHECK_INTERVAL_MS/1000} seconds; only a filled entry advances the doubling sequence, while skips do not; maximum ${cfg.MAX_SUCCESSFUL_ENTRIES_PER_WINDOW} successful entries per window`},
           exit:'Any fresh own-side CLOB bid/ask/mid >= $0.99 immediately pays $1/share; <= $0.01 immediately pays $0/share; otherwise use official Gamma outcome at window close',
           direction:'CLOB prices only; accumulate UP and DOWN positions independently',
            entryFillModel:'Paper market buys fill at the fresh best ask and include the configured taker fee',
