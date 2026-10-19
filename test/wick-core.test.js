@@ -150,11 +150,16 @@ test('the 270-second cutoff still blocks the single entry',()=>{
 });
 
 test('only the 5m strategy is running',()=>{
-  const MultiBot=require('../multi-bot'),bots=new MultiBot(),snapshot=bots.snapshot();
+  const MultiBot=require('../multi-bot'),bots=new MultiBot();
+  bots.bots['5m'].positions.push({status:'SETTLED_WIN',settledAt:Date.now(),realizedPnl:0,fees:0,
+    estimatedMakerRebate:1.23,shares:100});
+  const snapshot=bots.snapshot();
   assert.deepEqual(Object.keys(bots.bots),['5m']);
   assert.equal(bots.bots['5m'].windowMs,300000);
   assert.equal(snapshot.account.capital,10000);assert.deepEqual(snapshot.strategy.timeframes,['5m']);
   assert.equal(snapshot.timeframes['5m'].strategy.entries.cancelAfterSeconds,130);
+  assert.equal(snapshot.account.estimatedMakerRebate,1.23);
+  assert.equal(snapshot.account.takerFees,0);
 });
 test('15m strategy uses an independent 15-minute window and 9/810-second gates',()=>{
   const before=timedPattern(bullishHistory,8999,500,{windowMs:900000,entryDelayMs:9000,entryCutoffMs:810000});

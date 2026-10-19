@@ -39,6 +39,8 @@ class MultiBot {
         realizedPnl:states.reduce((n,s)=>n+s.account.realizedPnl,0),
         unrealizedPnl:states.reduce((n,s)=>n+s.account.unrealizedPnl,0),
         equity:states.reduce((n,s)=>n+s.account.equity,0),
+         takerFees:states.reduce((n,s)=>n+s.account.takerFees,0),
+         estimatedMakerRebate:states.reduce((n,s)=>n+s.account.estimatedMakerRebate,0),
         markedValue:states.reduce((n,s)=>n+s.account.markedValue,0),
          unpricedOpenPositions:states.reduce((n,s)=>n+s.account.unpricedOpenPositions,0),totalTrades,settledTrades,wins,losses,winRate:settledTrades?wins/settledTrades*100:0,openPositions,
          maxConsecutiveLosses:Math.max(...states.map(s=>s.account.maxConsecutiveLosses)),
