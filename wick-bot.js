@@ -129,13 +129,13 @@ class WickBot{
     this.martingaleAttempted=false;
     this.windowOrders=[];
     this.log('PAPER_TIMED_ENTRY_STRATEGY_STARTED',{windowStart:start,
-      checkIntervalSeconds:cfg.ENTRY_CHECK_INTERVAL_MS/1000,
-      martingaleDelaySeconds:cfg.MARTINGALE_DELAY_MS/1000,
+      initialEntryDelaySeconds:cfg.INITIAL_ENTRY_DELAY_MS/1000,
       triggerAskAbove:cfg.ENTRY_PRICE_THRESHOLD,
+      initialEntryMaxAsk:cfg.INITIAL_ENTRY_MAX_PRICE,
       baseShares:cfg.BASE_ENTRY_SHARES,
       sizeMultiplier:cfg.ENTRY_SIZE_MULTIPLIER,
       maxSuccessfulEntries:cfg.MAX_SUCCESSFUL_ENTRIES_PER_WINDOW,
-      selectionSchedule:'one initial 500-share entry when a fresh ask is above $0.70 on a 30-second check; after 30 seconds, buy the opposite side immediately when its fresh ask reaches $0.70, once only, for 1000 shares',
+      selectionSchedule:'after a 30-second delay from window start, one initial 500-share entry fires as soon as a fresh ask is above $0.70 and at most $0.75; as soon as its opposite fresh ask reaches $0.70, buy 1000 shares once only',
       cutoffSeconds:cfg.MAX_ENTRY_SECONDS});
   }
   processTimedEntries(start,now){
@@ -143,24 +143,22 @@ class WickBot{
     if(elapsedMs>=cutoffMs||this.windowFiredEntries>=cfg.MAX_SUCCESSFUL_ENTRIES_PER_WINDOW)return;
 
     if(this.windowFiredEntries===0){
-      const checkpoint=Math.floor(elapsedMs/cfg.ENTRY_CHECK_INTERVAL_MS);
-      if(checkpoint<=this.lastEntryCheckpoint)return;
-      this.lastEntryCheckpoint=checkpoint;
+      if(elapsedMs<cfg.INITIAL_ENTRY_DELAY_MS)return;
+      const secondsIntoWindow=Math.floor(elapsedMs/1000);
       const candidates=['UP','DOWN'].map(side=>{
         const quote=this.liveQuotes[side],ask=Number(quote?.bestAsk);
         const fresh=quote?.status==='LIVE'&&Number.isFinite(quote.updatedAt)
           &&now-quote.updatedAt<=5000&&Number.isFinite(ask);
         return {side,ask,fresh};
-      }).filter(q=>q.fresh&&q.ask>cfg.ENTRY_PRICE_THRESHOLD)
+      }).filter(q=>q.fresh&&q.ask>cfg.ENTRY_PRICE_THRESHOLD&&q.ask<=cfg.INITIAL_ENTRY_MAX_PRICE)
         .sort((a,b)=>a.ask-b.ask||a.side.localeCompare(b.side));
       if(candidates.length){
-        this.attemptEntry(start,now,candidates[0].side,cfg.BASE_ENTRY_SHARES,'INITIAL',checkpoint);
+        this.attemptEntry(start,now,candidates[0].side,cfg.BASE_ENTRY_SHARES,'INITIAL',secondsIntoWindow);
       }
       return;
     }
 
-    if(this.windowFiredEntries!==1||this.martingaleAttempted||!this.initialEntrySide
-      ||now-this.initialEntryAt<cfg.MARTINGALE_DELAY_MS)return;
+    if(this.windowFiredEntries!==1||this.martingaleAttempted||!this.initialEntrySide)return;
     const oppositeSide=this.initialEntrySide==='UP'?'DOWN':'UP';
     const quote=this.liveQuotes[oppositeSide],ask=Number(quote?.bestAsk);
     const fresh=quote?.status==='LIVE'&&Number.isFinite(quote.updatedAt)
@@ -168,12 +166,12 @@ class WickBot{
     if(!fresh||ask<cfg.ENTRY_PRICE_THRESHOLD)return;
     this.martingaleAttempted=true;
     this.attemptEntry(start,now,oppositeSide,cfg.BASE_ENTRY_SHARES*cfg.ENTRY_SIZE_MULTIPLIER,
-      'MARTINGALE',Math.floor(elapsedMs/cfg.ENTRY_CHECK_INTERVAL_MS));
+      'MARTINGALE',Math.floor(elapsedMs/1000));
   }
-  attemptEntry(start,now,side,shares,entryType,checkpoint){
+  attemptEntry(start,now,side,shares,entryType,secondsIntoWindow){
     const quote=this.liveQuotes[side],ask=Number(quote?.bestAsk);
     const id=`${this.timeframe}-${start}-${entryType.toLowerCase()}-${side.toLowerCase()}-${now}`;
-    const order={id,timeframe:this.timeframe,windowStart:start,side,checkpoint,
+    const order={id,timeframe:this.timeframe,windowStart:start,side,secondsIntoWindow,
       ask:Number.isFinite(ask)?ask:null,shares,orderType:'MARKET',status:'SKIPPED',createdAt:now,entryType};
     this.windowOrders.unshift(order);this.orders.unshift(order);
     if(this.orders.length>1000)this.orders.length=1000;
@@ -204,7 +202,7 @@ class WickBot{
     this.cash-=totalCost;this.positions.unshift(position);
     this.windowFiredEntries++;this.lastFiredEntryShares=shares;
     if(entryType==='INITIAL'){this.initialEntrySide=side;this.initialEntryAt=now}
-    this.log('PAPER_TIMED_ENTRY_FILLED',{id,side,entryType,checkpointSeconds:checkpoint*cfg.ENTRY_CHECK_INTERVAL_MS/1000,
+    this.log('PAPER_TIMED_ENTRY_FILLED',{id,side,entryType,secondsIntoWindow,
       ask,shares,sizeMultiplier:entryType==='MARTINGALE'?cfg.ENTRY_SIZE_MULTIPLIER:null,
       fee,totalCost,visibleAskSize:quote.askSize});
     return true;
@@ -278,16 +276,16 @@ class WickBot{
     return {now,mode:'DEMO ONLY',status:this.status,error:this.error,
          strategy:{timeframe:this.timeframe,market:'Polymarket BTC 5-minute UP/DOWN',capital:this.capital,
            entries:{orderType:'MARKET',triggerAskAbove:cfg.ENTRY_PRICE_THRESHOLD,
-             checkIntervalSeconds:cfg.ENTRY_CHECK_INTERVAL_MS/1000,
-             martingaleDelaySeconds:cfg.MARTINGALE_DELAY_MS/1000,
+              initialEntryDelaySeconds:cfg.INITIAL_ENTRY_DELAY_MS/1000,
+              initialEntryMaxAsk:cfg.INITIAL_ENTRY_MAX_PRICE,
              baseShares:cfg.BASE_ENTRY_SHARES,sizeMultiplier:cfg.ENTRY_SIZE_MULTIPLIER,
              maxSuccessfulEntries:cfg.MAX_SUCCESSFUL_ENTRIES_PER_WINDOW,
              maxEntrySeconds:cfg.MAX_ENTRY_SECONDS,
-             initialEntry:'One initial entry per window, at the first 30-second check with a fresh ask above $0.70',
-             martingale:'Once per window, 30 seconds after the initial fill, buy the opposite side immediately when its fresh ask is at least $0.70, for 1000 shares',
-             timing:'Initial entry: 500 shares when one fresh ask is above $0.70 at a 30-second check. Martingale: after 30 seconds from the initial fill, immediately buy 1000 shares on the opposite side when its fresh ask reaches $0.70 or higher. One martingale maximum per 5-minute window; stop at 270 seconds or when paper cash is insufficient.'},
+              initialEntry:'After 30 seconds from window start, one initial entry when a fresh ask is above $0.70 and at most $0.75',
+              martingale:'Once per window, immediately after the initial fill when the opposite side has a fresh ask of at least $0.70, buy 1000 shares',
+              timing:'After a 30-second delay from window start, buy 500 shares on the first fresh ask above $0.70 and at most $0.75, at any time. Once filled, immediately buy 1000 shares on the opposite side if its fresh ask is at least $0.70. One martingale maximum per 5-minute window; stop at 270 seconds or when paper cash is insufficient.'},
           exit:'Any fresh own-side CLOB bid/ask/mid >= $0.99 immediately pays $1/share; <= $0.01 immediately pays $0/share; otherwise use official Gamma outcome at window close',
-            direction:'Evaluate UP and DOWN best asks independently; buy every side in the configured price band',
+             direction:'Evaluate UP and DOWN best asks independently; select the lower ask when both qualify for the initial entry',
            entryFillModel:'Paper market buys fill at the fresh best ask and include the configured taker fee',
            fees:'Maker fills have zero fees; estimated crypto maker rebates are tracked separately',
           execution:'PAPER ONLY'},
@@ -304,7 +302,7 @@ class WickBot{
           marketResolution:'Own-side fresh CLOB quote >= $0.99 settles $1/share, <= $0.01 settles $0/share immediately; otherwise official Gamma result is retried until resolved'},
        positions:this.positions.slice(0,50),orders:this.orders.slice(0,100),events:this.events};
   }
-   start(){if(this.running)return;this.running=true;this.log('BOT_STARTED',{timeframe:this.timeframe,note:'Paper-only BTC 5m CLOB scheduled side-selection entries; no live orders.'});
+    start(){if(this.running)return;this.running=true;this.log('BOT_STARTED',{timeframe:this.timeframe,note:'Paper-only BTC 5m CLOB quote-triggered entries; no live orders.'});
     const loop=async()=>{if(!this.running)return;await this.tick();if(this.running)this.timer=setTimeout(loop,cfg.POLL_INTERVAL_MS)};
     void loop();}
   stop(){this.running=false;clearTimeout(this.timer)}

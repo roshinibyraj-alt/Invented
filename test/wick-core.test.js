@@ -124,7 +124,7 @@ test('single-entry strategy leaves position exits to the existing CLOB rules',()
   assert.match(bot.snapshot().strategy.exit,/bid\/ask\/mid >= \$0\.99/);
 });
 
-test('one 500-share initial entry is followed by one immediate 1000-share opposite-side martingale',()=>{
+test('initial entry waits 30 seconds after window start, then immediate opposite-side martingale has no delay',()=>{
   const Bot=require('../wick-bot'),config=require('../config'),bot=new Bot(),start=1_000_000;
   bot.market={id:'m',slug:'m',title:'m',start,tokens:{UP:'u',DOWN:'d'}};
   bot.openStrategyWindow(start,start);
@@ -132,30 +132,30 @@ test('one 500-share initial entry is followed by one immediate 1000-share opposi
     UP:{status:'LIVE',bestAsk:up,askSize:2000,updatedAt:now},
     DOWN:{status:'LIVE',bestAsk:down,askSize:2000,updatedAt:now},
   }};
-  const firstCheck=start+30_000;
-  setQuotes(firstCheck,.75,.80);
-  bot.processTimedEntries(start,firstCheck);
+  const beforeInitial=start+29_999;
+  setQuotes(beforeInitial,.75,.70);
+  bot.processTimedEntries(start,beforeInitial);
+  assert.equal(bot.positions.length,0);
+
+  const firstEntryAt=start+30_500;
+  setQuotes(firstEntryAt,.75,.69);
+  bot.processTimedEntries(start,firstEntryAt);
   assert.deepEqual(bot.positions.map(p=>({side:p.side,shares:p.shares})),[{side:'UP',shares:500}]);
-  assert.equal(bot.initialEntryAt,firstCheck);
+  assert.equal(bot.initialEntryAt,firstEntryAt);
 
-  const beforeDelay=firstCheck+29_999;
-  setQuotes(beforeDelay,.60,.70);
-  bot.processTimedEntries(start,beforeDelay);
-  assert.equal(bot.positions.length,1);
-
-  const afterDelay=firstCheck+30_000;
-  setQuotes(afterDelay,.60,.70);
-  bot.processTimedEntries(start,afterDelay);
+  const martingaleAt=firstEntryAt+500;
+  setQuotes(martingaleAt,.60,.70);
+  bot.processTimedEntries(start,martingaleAt);
   assert.deepEqual(bot.positions.map(p=>({side:p.side,shares:p.shares})),[
     {side:'DOWN',shares:1000},{side:'UP',shares:500},
   ]);
-  setQuotes(afterDelay+500,.60,.90);
-  bot.processTimedEntries(start,afterDelay+500);
+  setQuotes(martingaleAt+500,.60,.90);
+  bot.processTimedEntries(start,martingaleAt+500);
   assert.equal(bot.positions.length,2);
 
-  assert.equal(config.ENTRY_CHECK_INTERVAL_MS,30_000);
-  assert.equal(config.MARTINGALE_DELAY_MS,30_000);
+  assert.equal(config.INITIAL_ENTRY_DELAY_MS,30_000);
   assert.equal(config.ENTRY_PRICE_THRESHOLD,.70);
+  assert.equal(config.INITIAL_ENTRY_MAX_PRICE,.75);
   assert.equal(config.BASE_ENTRY_SHARES,500);
   assert.equal(config.ENTRY_SIZE_MULTIPLIER,2);
   assert.equal(config.MAX_SUCCESSFUL_ENTRIES_PER_WINDOW,2);
@@ -168,21 +168,28 @@ test('one 500-share initial entry is followed by one immediate 1000-share opposi
   assert.equal(bot.initialEntrySide,null);
   assert.equal(bot.martingaleAttempted,false);
 });
-test('initial entry threshold is strict, martingale threshold is inclusive, and both need fresh quotes',()=>{
+test('initial ask is strictly above $0.70 and at most $0.75; martingale is inclusive and both need fresh quotes',()=>{
   const Bot=require('../wick-bot'),config=require('../config'),bot=new Bot(),start=1_000_000;
   bot.market={id:'m',slug:'m',title:'m',start,tokens:{UP:'u',DOWN:'d'}};
   bot.openStrategyWindow(start,start);
-  let now=start+config.ENTRY_CHECK_INTERVAL_MS;
+  let now=start+config.INITIAL_ENTRY_DELAY_MS;
   bot.liveQuotes={UP:{status:'LIVE',bestAsk:.70,askSize:1000,updatedAt:now},
     DOWN:{status:'LIVE',bestAsk:.69,askSize:1000,updatedAt:now}};
   bot.processTimedEntries(start,now);
   assert.equal(bot.positions.length,0);
-  now+=config.ENTRY_CHECK_INTERVAL_MS;
-  bot.liveQuotes={UP:{status:'LIVE',bestAsk:.71,askSize:1000,updatedAt:now},
+
+  now+=500;
+  bot.liveQuotes={UP:{status:'LIVE',bestAsk:.751,askSize:1000,updatedAt:now},
     DOWN:{status:'LIVE',bestAsk:.69,askSize:1000,updatedAt:now-6000}};
   bot.processTimedEntries(start,now);
+  assert.equal(bot.positions.length,0);
+
+  now+=500;
+  bot.liveQuotes={UP:{status:'LIVE',bestAsk:.75,askSize:1000,updatedAt:now},
+    DOWN:{status:'LIVE',bestAsk:.70,askSize:1000,updatedAt:now-6000}};
+  bot.processTimedEntries(start,now);
   assert.deepEqual(bot.positions.map(p=>({side:p.side,shares:p.shares})),[{side:'UP',shares:500}]);
-  now+=config.MARTINGALE_DELAY_MS;
+  now+=500;
   bot.liveQuotes={UP:{status:'LIVE',bestAsk:.65,askSize:1000,updatedAt:now},
     DOWN:{status:'LIVE',bestAsk:.70,askSize:1000,updatedAt:now-6000}};
   bot.processTimedEntries(start,now);
@@ -233,7 +240,8 @@ test('only the 5m strategy is running',()=>{
   assert.deepEqual(Object.keys(bots.bots),['5m']);
   assert.equal(bots.bots['5m'].windowMs,300000);
   assert.equal(snapshot.account.capital,10000);assert.deepEqual(snapshot.strategy.timeframes,['5m']);
-  assert.equal(snapshot.timeframes['5m'].strategy.entries.checkIntervalSeconds,30);
+  assert.equal(snapshot.timeframes['5m'].strategy.entries.initialEntryDelaySeconds,30);
+  assert.equal(snapshot.timeframes['5m'].strategy.entries.initialEntryMaxAsk,.75);
   assert.equal(snapshot.timeframes['5m'].strategy.entries.baseShares,500);
   assert.equal(snapshot.timeframes['5m'].strategy.entries.sizeMultiplier,2);
   assert.equal(snapshot.timeframes['5m'].strategy.entries.maxSuccessfulEntries,2);
