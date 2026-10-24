@@ -176,7 +176,7 @@ class WickBot{
     const position={id,timeframe:this.timeframe,windowMs:this.windowMs,windowStart:start,
       marketId:this.market.id,slug:this.market.slug,title:this.market.title,side,
       tokenId:this.market.tokens[side],entryKey:id,
-      entryLabel:(entryType==='EARLY_CHEAPEST'?'Early cheapest-side':'Late expensive-side')+' buy '+usdPrice(ask)+' · '+shares+' shares,
+      entryLabel:(entryType==='EARLY_CHEAPEST'?'Early cheapest-side':'Late expensive-side')+' buy '+usdPrice(ask)+' · '+shares+' shares',
       entryType:`CLOB_${entryType}`,orderType:'MARKET',fillModel:'PAPER_AT_BEST_ASK',
       shares,initialShares:shares,avgEntry:ask,cost,totalCost,fees:fee,
       makerFeeEquivalent:0,estimatedMakerRebate:0,status:'OPEN',
