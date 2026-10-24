@@ -129,44 +129,28 @@ class WickBot{
     this.martingaleAttempted=false;
     this.windowOrders=[];
     this.log('PAPER_TIMED_ENTRY_STRATEGY_STARTED',{windowStart:start,
-      initialEntryDelaySeconds:cfg.INITIAL_ENTRY_DELAY_MS/1000,
-      triggerAskAbove:cfg.ENTRY_PRICE_THRESHOLD,
-      initialEntryMaxAsk:cfg.INITIAL_ENTRY_MAX_PRICE,
+      checkIntervalSeconds:cfg.ENTRY_CHECK_INTERVAL_MS/1000,
+      earlyEntryEndSeconds:cfg.EARLY_ENTRY_END_SECONDS,
+      lateEntryStartSeconds:cfg.LATE_ENTRY_START_SECONDS,
       baseShares:cfg.BASE_ENTRY_SHARES,
-      sizeMultiplier:cfg.ENTRY_SIZE_MULTIPLIER,
       maxSuccessfulEntries:cfg.MAX_SUCCESSFUL_ENTRIES_PER_WINDOW,
-      selectionSchedule:'after a 30-second delay from window start, one initial 500-share entry fires as soon as a fresh ask is above $0.70 and at most $0.75; as soon as its opposite fresh ask reaches $0.70, buy 1000 shares once only',
+      selectionSchedule:'Buy 100 shares on the cheaper side every 10 seconds before 90 seconds; pause from 90 to 150 seconds; buy 100 shares on the more expensive side every 10 seconds from 150 to 240 seconds',
       cutoffSeconds:cfg.MAX_ENTRY_SECONDS});
   }
   processTimedEntries(start,now){
     const elapsedMs=now-start,cutoffMs=cfg.MAX_ENTRY_SECONDS*1000;
-    if(elapsedMs>=cutoffMs||this.windowFiredEntries>=cfg.MAX_SUCCESSFUL_ENTRIES_PER_WINDOW)return;
-
-    if(this.windowFiredEntries===0){
-      if(elapsedMs<cfg.INITIAL_ENTRY_DELAY_MS)return;
-      const secondsIntoWindow=Math.floor(elapsedMs/1000);
-      const candidates=['UP','DOWN'].map(side=>{
-        const quote=this.liveQuotes[side],ask=Number(quote?.bestAsk);
-        const fresh=quote?.status==='LIVE'&&Number.isFinite(quote.updatedAt)
-          &&now-quote.updatedAt<=5000&&Number.isFinite(ask);
-        return {side,ask,fresh};
-      }).filter(q=>q.fresh&&q.ask>cfg.ENTRY_PRICE_THRESHOLD&&q.ask<=cfg.INITIAL_ENTRY_MAX_PRICE)
-        .sort((a,b)=>a.ask-b.ask||a.side.localeCompare(b.side));
-      if(candidates.length){
-        this.attemptEntry(start,now,candidates[0].side,cfg.BASE_ENTRY_SHARES,'INITIAL',secondsIntoWindow);
-      }
-      return;
-    }
-
-    if(this.windowFiredEntries!==1||this.martingaleAttempted||!this.initialEntrySide)return;
-    const oppositeSide=this.initialEntrySide==='UP'?'DOWN':'UP';
-    const quote=this.liveQuotes[oppositeSide],ask=Number(quote?.bestAsk);
-    const fresh=quote?.status==='LIVE'&&Number.isFinite(quote.updatedAt)
-      &&now-quote.updatedAt<=5000&&Number.isFinite(ask);
-    if(!fresh||ask<cfg.ENTRY_PRICE_THRESHOLD)return;
-    this.martingaleAttempted=true;
-    this.attemptEntry(start,now,oppositeSide,cfg.BASE_ENTRY_SHARES*cfg.ENTRY_SIZE_MULTIPLIER,
-      'MARTINGALE',Math.floor(elapsedMs/1000));
+    if(elapsedMs>cutoffMs||this.windowFiredEntries>=cfg.MAX_SUCCESSFUL_ENTRIES_PER_WINDOW)return;
+    const checkpoint=Math.floor(elapsedMs/cfg.ENTRY_CHECK_INTERVAL_MS);
+    if(checkpoint<1||checkpoint<=this.lastEntryCheckpoint)return;
+    this.lastEntryCheckpoint=checkpoint;
+    const checkpointMs=checkpoint*cfg.ENTRY_CHECK_INTERVAL_MS;
+    if(checkpointMs>cutoffMs)return;
+    let entryType,compare;
+    if(checkpointMs<cfg.EARLY_ENTRY_END_SECONDS*1000){entryType='EARLY_CHEAPEST';compare=(a,b)=>a.ask-b.ask;}
+    else if(checkpointMs>=cfg.LATE_ENTRY_START_SECONDS*1000){entryType='LATE_EXPENSIVE';compare=(a,b)=>b.ask-a.ask;}
+    else return;
+    const candidates=['UP','DOWN'].map(side=>{const quote=this.liveQuotes[side],ask=Number(quote?.bestAsk);return {side,ask,fresh:quote?.status==='LIVE'&&Number.isFinite(quote.updatedAt)&&now-quote.updatedAt<=5000&&Number.isFinite(ask)}}).filter(q=>q.fresh).sort((a,b)=>compare(a,b)||a.side.localeCompare(b.side));
+    if(candidates.length)this.attemptEntry(start,now,candidates[0].side,cfg.BASE_ENTRY_SHARES,entryType,checkpoint*cfg.ENTRY_CHECK_INTERVAL_MS/1000);
   }
   attemptEntry(start,now,side,shares,entryType,secondsIntoWindow){
     const quote=this.liveQuotes[side],ask=Number(quote?.bestAsk);
@@ -192,7 +176,7 @@ class WickBot{
     const position={id,timeframe:this.timeframe,windowMs:this.windowMs,windowStart:start,
       marketId:this.market.id,slug:this.market.slug,title:this.market.title,side,
       tokenId:this.market.tokens[side],entryKey:id,
-      entryLabel:`${entryType==='INITIAL'?'Initial':'Martingale'} buy ${usdPrice(ask)} · ${shares} shares`,
+      entryLabel:(entryType==='EARLY_CHEAPEST'?'Early cheapest-side':'Late expensive-side')+' buy '+usdPrice(ask)+' · '+shares+' shares,
       entryType:`CLOB_${entryType}`,orderType:'MARKET',fillModel:'PAPER_AT_BEST_ASK',
       shares,initialShares:shares,avgEntry:ask,cost,totalCost,fees:fee,
       makerFeeEquivalent:0,estimatedMakerRebate:0,status:'OPEN',
@@ -201,9 +185,9 @@ class WickBot{
     order.status='FILLED';order.filledAt=now;order.positionId=id;order.fillPrice=ask;order.fee=fee;
     this.cash-=totalCost;this.positions.unshift(position);
     this.windowFiredEntries++;this.lastFiredEntryShares=shares;
-    if(entryType==='INITIAL'){this.initialEntrySide=side;this.initialEntryAt=now}
+    
     this.log('PAPER_TIMED_ENTRY_FILLED',{id,side,entryType,secondsIntoWindow,
-      ask,shares,sizeMultiplier:entryType==='MARTINGALE'?cfg.ENTRY_SIZE_MULTIPLIER:null,
+      ask,shares,
       fee,totalCost,visibleAskSize:quote.askSize});
     return true;
   }
@@ -275,15 +259,7 @@ class WickBot{
     }
     return {now,mode:'DEMO ONLY',status:this.status,error:this.error,
          strategy:{timeframe:this.timeframe,market:'Polymarket BTC 5-minute UP/DOWN',capital:this.capital,
-           entries:{orderType:'MARKET',triggerAskAbove:cfg.ENTRY_PRICE_THRESHOLD,
-              initialEntryDelaySeconds:cfg.INITIAL_ENTRY_DELAY_MS/1000,
-              initialEntryMaxAsk:cfg.INITIAL_ENTRY_MAX_PRICE,
-             baseShares:cfg.BASE_ENTRY_SHARES,sizeMultiplier:cfg.ENTRY_SIZE_MULTIPLIER,
-             maxSuccessfulEntries:cfg.MAX_SUCCESSFUL_ENTRIES_PER_WINDOW,
-             maxEntrySeconds:cfg.MAX_ENTRY_SECONDS,
-              initialEntry:'After 30 seconds from window start, one initial entry when a fresh ask is above $0.70 and at most $0.75',
-              martingale:'Once per window, immediately after the initial fill when the opposite side has a fresh ask of at least $0.70, buy 1000 shares',
-              timing:'After a 30-second delay from window start, buy 500 shares on the first fresh ask above $0.70 and at most $0.75, at any time. Once filled, immediately buy 1000 shares on the opposite side if its fresh ask is at least $0.70. One martingale maximum per 5-minute window; stop at 270 seconds or when paper cash is insufficient.'},
+           entries:{orderType:'MARKET',checkIntervalSeconds:cfg.ENTRY_CHECK_INTERVAL_MS/1000,earlyEntryEndSeconds:cfg.EARLY_ENTRY_END_SECONDS,lateEntryStartSeconds:cfg.LATE_ENTRY_START_SECONDS,baseShares:cfg.BASE_ENTRY_SHARES,maxSuccessfulEntries:cfg.MAX_SUCCESSFUL_ENTRIES_PER_WINDOW,maxEntrySeconds:cfg.MAX_ENTRY_SECONDS,earlyEntry:'Every 10 seconds before 90 seconds, buy 100 shares on the cheaper side',pause:'No entries from 90 through 140 seconds; resume at 150 seconds',lateEntry:'Every 10 seconds from 150 through 240 seconds, buy 100 shares on the more expensive side',timing:'Cheapest side at 10-80 seconds, pause at 90-140 seconds, then expensive side at 150-240 seconds; fresh quotes required. Existing exits and settlement are unchanged.'},
           exit:'Any fresh own-side CLOB bid/ask/mid >= $0.99 immediately pays $1/share; <= $0.01 immediately pays $0/share; otherwise use official Gamma outcome at window close',
              direction:'Evaluate UP and DOWN best asks independently; select the lower ask when both qualify for the initial entry',
            entryFillModel:'Paper market buys fill at the fresh best ask and include the configured taker fee',
