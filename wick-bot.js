@@ -261,7 +261,7 @@ class WickBot{
          strategy:{timeframe:this.timeframe,market:'Polymarket BTC 5-minute UP/DOWN',capital:this.capital,
            entries:{orderType:'MARKET',checkIntervalSeconds:cfg.ENTRY_CHECK_INTERVAL_MS/1000,earlyEntryEndSeconds:cfg.EARLY_ENTRY_END_SECONDS,lateEntryStartSeconds:cfg.LATE_ENTRY_START_SECONDS,baseShares:cfg.BASE_ENTRY_SHARES,maxSuccessfulEntries:cfg.MAX_SUCCESSFUL_ENTRIES_PER_WINDOW,maxEntrySeconds:cfg.MAX_ENTRY_SECONDS,earlyEntry:'Every 10 seconds before 90 seconds, buy 100 shares on the cheaper side',pause:'No entries from 90 through 140 seconds; resume at 150 seconds',lateEntry:'Every 10 seconds from 150 through 240 seconds, buy 100 shares on the more expensive side',timing:'Cheapest side at 10-80 seconds, pause at 90-140 seconds, then expensive side at 150-240 seconds; fresh quotes required. Existing exits and settlement are unchanged.'},
           exit:'Any fresh own-side CLOB bid/ask/mid >= $0.99 immediately pays $1/share; <= $0.01 immediately pays $0/share; otherwise use official Gamma outcome at window close',
-             direction:'Evaluate UP and DOWN best asks independently; select the lower ask when both qualify for the initial entry',
+             direction:'Select the lower fresh ask before 90 seconds and the higher fresh ask from 150 through 240 seconds',
            entryFillModel:'Paper market buys fill at the fresh best ask and include the configured taker fee',
            fees:'Maker fills have zero fees; estimated crypto maker rebates are tracked separately',
           execution:'PAPER ONLY'},

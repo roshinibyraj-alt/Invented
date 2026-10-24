@@ -156,12 +156,12 @@ test('only the 5m strategy is running',()=>{
   assert.deepEqual(Object.keys(bots.bots),['5m']);
   assert.equal(bots.bots['5m'].windowMs,300000);
   assert.equal(snapshot.account.capital,10000);assert.deepEqual(snapshot.strategy.timeframes,['5m']);
-  assert.equal(snapshot.timeframes['5m'].strategy.entries.initialEntryDelaySeconds,30);
-  assert.equal(snapshot.timeframes['5m'].strategy.entries.initialEntryMaxAsk,.75);
-  assert.equal(snapshot.timeframes['5m'].strategy.entries.baseShares,500);
-  assert.equal(snapshot.timeframes['5m'].strategy.entries.sizeMultiplier,2);
-  assert.equal(snapshot.timeframes['5m'].strategy.entries.maxSuccessfulEntries,2);
-  assert.equal(snapshot.timeframes['5m'].strategy.entries.maxEntrySeconds,270);
+  assert.equal(snapshot.timeframes['5m'].strategy.entries.checkIntervalSeconds,10);
+  assert.equal(snapshot.timeframes['5m'].strategy.entries.earlyEntryEndSeconds,90);
+  assert.equal(snapshot.timeframes['5m'].strategy.entries.baseShares,100);
+  assert.equal(snapshot.timeframes['5m'].strategy.entries.lateEntryStartSeconds,150);
+  assert.equal(snapshot.timeframes['5m'].strategy.entries.maxSuccessfulEntries,18);
+  assert.equal(snapshot.timeframes['5m'].strategy.entries.maxEntrySeconds,240);
   assert.equal(snapshot.account.estimatedMakerRebate,1.23);
   assert.equal(snapshot.account.takerFees,0);
 });
