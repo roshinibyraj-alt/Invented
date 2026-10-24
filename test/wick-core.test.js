@@ -124,9 +124,9 @@ test('single-entry strategy leaves position exits to the existing CLOB rules',()
   assert.match(bot.snapshot().strategy.exit,/bid\/ask\/mid >= \$0\.99/);
 });
 
-test('timed strategy buys 100 shares of the cheaper side at 10-80s, pauses 90-140s, then buys the expensive side at 150-240s',()=>{
- const Bot=require('../wick-bot'),bot=new Bot(),start=1_000_000;bot.market={id:'m',slug:'m',title:'m',start,tokens:{UP:'u',DOWN:'d'}};bot.openStrategyWindow(start,start);for(let s=10;s<=240;s+=10){const now=start+s*1000;bot.liveQuotes=s<90?{UP:{status:'LIVE',bestAsk:.4,askSize:1000,updatedAt:now},DOWN:{status:'LIVE',bestAsk:.6,askSize:1000,updatedAt:now}}:{UP:{status:'LIVE',bestAsk:.7,askSize:1000,updatedAt:now},DOWN:{status:'LIVE',bestAsk:.3,askSize:1000,updatedAt:now}};bot.processTimedEntries(start,now)}assert.equal(bot.positions.length,18);assert.ok(bot.positions.every(p=>p.shares===100&&p.side==='UP'));assert.equal(bot.snapshot().strategy.entries.maxEntrySeconds,240)});
-test('scheduled entries require fresh quotes on both sides and respect the pause boundary',()=>{const Bot=require('../wick-bot'),bot=new Bot(),start=1_000_000;bot.market={id:'m',slug:'m',title:'m',start,tokens:{UP:'u',DOWN:'d'}};bot.openStrategyWindow(start,start);let now=start+10_000;bot.liveQuotes={UP:{status:'LIVE',bestAsk:.4,askSize:100,updatedAt:now},DOWN:{status:'STALE',bestAsk:.2,askSize:100,updatedAt:now}};bot.processTimedEntries(start,now);assert.equal(bot.positions.length,0);for(const s of [90,100,110,120,130,140]){now=start+s*1000;bot.liveQuotes={UP:{status:'LIVE',bestAsk:.9,askSize:100,updatedAt:now},DOWN:{status:'LIVE',bestAsk:.1,askSize:100,updatedAt:now}};bot.processTimedEntries(start,now)}assert.equal(bot.positions.length,0);now=start+150_000;bot.liveQuotes={UP:{status:'LIVE',bestAsk:.7,askSize:100,updatedAt:now},DOWN:{status:'LIVE',bestAsk:.3,askSize:100,updatedAt:now}};bot.processTimedEntries(start,now);assert.equal(bot.positions.length,1);assert.equal(bot.positions[0].side,'UP')});
+test('timed strategy places cheaper then expensive side limit orders without instant fills',()=>{
+ const Bot=require('../wick-bot'),bot=new Bot(),start=1_000_000;bot.market={id:'m',slug:'m',title:'m',start,tokens:{UP:'u',DOWN:'d'}};bot.openStrategyWindow(start,start);for(let s=10;s<=240;s+=10){const now=start+s*1000;bot.liveQuotes=s<90?{UP:{status:'LIVE',bestBid:.38,bestAsk:.4,askSize:1000,updatedAt:now},DOWN:{status:'LIVE',bestBid:.58,bestAsk:.6,askSize:1000,updatedAt:now}}:{UP:{status:'LIVE',bestBid:.68,bestAsk:.7,askSize:1000,updatedAt:now},DOWN:{status:'LIVE',bestBid:.28,bestAsk:.3,askSize:1000,updatedAt:now}};bot.processTimedEntries(start,now)}assert.equal(bot.positions.length,0);assert.equal(bot.windowOrders.length,18);assert.ok(bot.windowOrders.every(o=>o.status==='PENDING'&&o.orderType==='LIMIT'&&o.shares===100&&o.side==='UP'));assert.equal(bot.windowOrders[0].limitPrice,.68);assert.equal(bot.snapshot().strategy.entries.maxEntrySeconds,240)});
+test('scheduled limit orders require fresh quotes on both sides and respect the pause boundary',()=>{const Bot=require('../wick-bot'),bot=new Bot(),start=1_000_000;bot.market={id:'m',slug:'m',title:'m',start,tokens:{UP:'u',DOWN:'d'}};bot.openStrategyWindow(start,start);let now=start+10_000;bot.liveQuotes={UP:{status:'LIVE',bestBid:.38,bestAsk:.4,updatedAt:now},DOWN:{status:'STALE',bestBid:.18,bestAsk:.2,updatedAt:now}};bot.processTimedEntries(start,now);assert.equal(bot.windowOrders.length,0);for(const s of [90,100,110,120,130,140]){now=start+s*1000;bot.liveQuotes={UP:{status:'LIVE',bestBid:.88,bestAsk:.9,updatedAt:now},DOWN:{status:'LIVE',bestBid:.08,bestAsk:.1,updatedAt:now}};bot.processTimedEntries(start,now)}assert.equal(bot.windowOrders.length,0);now=start+150_000;bot.liveQuotes={UP:{status:'LIVE',bestBid:.68,bestAsk:.7,updatedAt:now},DOWN:{status:'LIVE',bestBid:.28,bestAsk:.3,updatedAt:now}};bot.processTimedEntries(start,now);assert.equal(bot.windowOrders.length,1);assert.equal(bot.windowOrders[0].status,'PENDING');assert.equal(bot.windowOrders[0].side,'UP')});
 test('a best bid below $0.30 does not trigger a forced sale or lock entries',async()=>{
   const Bot=require('../wick-bot'),md=require('../wick-market-data'),oldGetBook=md.getBook,oldNow=Date.now;
   let now=2_000_000;Date.now=()=>now;
@@ -216,20 +216,58 @@ test('demo fills the requested shares at best ask despite short visible depth',(
   assert.equal(_test.simulateAtBestAsk([{price:.61,size:100}],100,1+1e-9,0).avg,.61);
 });
 
-test('a timed entry requires a fresh live CLOB ask',()=>{
+test('a timed limit order requires fresh live CLOB bid and ask quotes',()=>{
   const Bot=require('../wick-bot'),bot=new Bot(),start=1_000_000,now=start+30000;
   bot.market={id:'m',slug:'m',title:'m',start,tokens:{UP:'u',DOWN:'d'}};
   bot.openStrategyWindow(start,start);
-  bot.liveQuotes={UP:{status:'STALE',bestAsk:.80,askSize:1000,updatedAt:now},
-    DOWN:{status:'LIVE',bestAsk:.80,askSize:1000,updatedAt:now-6000}};
+  bot.liveQuotes={UP:{status:'STALE',bestBid:.78,bestAsk:.80,askSize:1000,updatedAt:now},
+    DOWN:{status:'LIVE',bestBid:.78,bestAsk:.80,askSize:1000,updatedAt:now-6000}};
   bot.processTimedEntries(start,now);
   assert.equal(bot.positions.length,0);
   assert.equal(bot.windowOrders.length,0);
 });
 
-test('paper market orders pay the configured crypto taker fee and official outcome settlement is applied',()=>{
+test('maker limit fills have no trading fee; crypto rebate estimate follows the fee curve',()=>{
   assert.ok(Math.abs(_test.feeFor({feesEnabled:true},.45,300)-.07*.45*.55*300)<1e-12);
   assert.equal(_test.feeFor({feesEnabled:false},.45,300),0);
+  const estimate=_test.makerRebateFor({feesEnabled:true},.5,100);
+  assert.ok(Math.abs(estimate.feeEquivalent-1.75)<1e-12);
+  assert.ok(Math.abs(estimate.estimate-.35)<1e-12);
+  assert.deepEqual(_test.makerRebateFor({feesEnabled:false},.5,100),{feeEquivalent:0,estimate:0});
+});
+test('a limit fill requires a later fresh ask walkthrough and deducts only limit-price cost',()=>{
+  const Bot=require('../wick-bot'),bot=new Bot(),start=1_000_000,submittedAt=start+10_000;
+  bot.market={id:'m',slug:'m',title:'m',start,tokens:{UP:'u',DOWN:'d'},feesEnabled:true};
+  bot.cash=1000;bot.openStrategyWindow(start,start);
+  bot.liveQuotes={UP:{status:'LIVE',bestBid:.40,bestAsk:.45,updatedAt:submittedAt},
+    DOWN:{status:'LIVE',bestBid:.30,bestAsk:.35,updatedAt:submittedAt}};
+  bot.attemptEntry(start,submittedAt,'UP',100,'EARLY_CHEAPEST',10);
+  const order=bot.windowOrders[0];
+  bot.liveQuotes.UP={status:'LIVE',bestBid:.40,bestAsk:.41,updatedAt:submittedAt+500};
+  bot.processPendingLimitOrders(submittedAt+500);
+  assert.equal(order.status,'PENDING');
+  bot.liveQuotes.UP={status:'LIVE',bestBid:.40,bestAsk:.40,updatedAt:submittedAt+1000};
+  bot.processPendingLimitOrders(submittedAt+1000);
+  assert.equal(order.status,'FILLED');
+  assert.equal(bot.positions[0].avgEntry,.40);
+  assert.equal(bot.positions[0].fees,0);
+  assert.equal(bot.cash,960);
+  assert.ok(Math.abs(bot.positions[0].makerFeeEquivalent-1.68)<1e-12);
+  assert.ok(Math.abs(bot.positions[0].estimatedMakerRebate-.336)<1e-12);
+  assert.match(bot.positions[0].rebateEstimateNote,/Illustrative only/);
+});
+test('unfilled limit orders expire when the five-minute window ends',()=>{
+  const Bot=require('../wick-bot'),bot=new Bot(),start=1_000_000,now=start+10_000;
+  bot.market={id:'m',slug:'m',title:'m',start,tokens:{UP:'u',DOWN:'d'}};
+  bot.openStrategyWindow(start,start);
+  bot.liveQuotes={UP:{status:'LIVE',bestBid:.4,bestAsk:.45,updatedAt:now},
+    DOWN:{status:'LIVE',bestBid:.3,bestAsk:.35,updatedAt:now}};
+  bot.attemptEntry(start,now,'UP',100,'EARLY_CHEAPEST',10);
+  bot.processPendingLimitOrders(start+300_000);
+  assert.equal(bot.windowOrders[0].status,'EXPIRED_UNFILLED');
+  assert.equal(bot.positions.length,0);
+});
+test('official outcome settlement remains available for limit-filled positions',()=>{
   const settled={closed:true,outcomes:['Up','Down'],outcomePrices:['1','0']};
   assert.equal(_test.payout(settled,'UP'),1);
   assert.equal(_test.payout(settled,'DOWN'),0);
