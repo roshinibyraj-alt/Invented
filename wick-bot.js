@@ -150,7 +150,8 @@ class WickBot{
     else if(checkpointMs>=cfg.LATE_ENTRY_START_SECONDS*1000){entryType='LATE_EXPENSIVE';compare=(a,b)=>b.ask-a.ask;}
     else return;
     const candidates=['UP','DOWN'].map(side=>{const quote=this.liveQuotes[side],ask=Number(quote?.bestAsk);return {side,ask,fresh:quote?.status==='LIVE'&&Number.isFinite(quote.updatedAt)&&now-quote.updatedAt<=5000&&Number.isFinite(ask)}}).filter(q=>q.fresh).sort((a,b)=>compare(a,b)||a.side.localeCompare(b.side));
-    if(candidates.length)this.attemptEntry(start,now,candidates[0].side,cfg.BASE_ENTRY_SHARES,entryType,checkpoint*cfg.ENTRY_CHECK_INTERVAL_MS/1000);
+    if(candidates.length!==2)return;
+    this.attemptEntry(start,now,candidates[0].side,cfg.BASE_ENTRY_SHARES,entryType,checkpoint*cfg.ENTRY_CHECK_INTERVAL_MS/1000);
   }
   attemptEntry(start,now,side,shares,entryType,secondsIntoWindow){
     const quote=this.liveQuotes[side],ask=Number(quote?.bestAsk);
