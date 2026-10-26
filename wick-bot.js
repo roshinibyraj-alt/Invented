@@ -56,8 +56,8 @@ function clobQuotePrices(q){
 }
 function clobQuoteValue(q){const prices=clobQuotePrices(q);return prices.length?Math.max(...prices):null}
 function clobQuoteFloor(q){const prices=clobQuotePrices(q);return prices.length?Math.min(...prices):null}
-function takeProfitHit(q,now=Date.now()){return q&&Number.isFinite(q.updatedAt)&&now-q.updatedAt<=5000&&clobQuotePrices(q).some(price=>price>=.99)}
-function stopLossHit(q,now=Date.now()){return q&&Number.isFinite(q.updatedAt)&&now-q.updatedAt<=5000&&clobQuotePrices(q).some(price=>price<=.01)}
+function takeProfitHit(q,now=Date.now()){const bid=Number(q?.bestBid);return q&&Number.isFinite(q.updatedAt)&&now-q.updatedAt<=5000&&q.bestBid!=null&&Number.isFinite(bid)&&bid>=.99}
+function stopLossHit(q,now=Date.now()){const bid=Number(q?.bestBid);return q&&Number.isFinite(q.updatedAt)&&now-q.updatedAt<=5000&&q.bestBid!=null&&Number.isFinite(bid)&&bid<=.01}
 function clobQuoteWinner(up,down){
   const upPrices=clobQuotePrices(up),downPrices=clobQuotePrices(down);
   const upHigh=upPrices.some(x=>x>=.98),downHigh=downPrices.some(x=>x>=.98);
@@ -295,8 +295,8 @@ class WickBot{
         const q=this.liveQuotes[p.side];
         p.markBid=q?.bestBid??null;p.markUpdatedAt=q?.updatedAt||now;p.markStatus=q?.bestBid!=null?'LIVE':'MISSING';
         if(p.status==='OPEN'){
-          if(takeProfitHit(q,now))this.finalizePosition(p,true,'TP_HIT_0_99',clobQuoteValue(q));
-          else if(stopLossHit(q,now))this.finalizePosition(p,false,'STOP_LOSS_HIT_0_01',clobQuoteFloor(q));
+          if(takeProfitHit(q,now))this.finalizeExit(p,Number(q.bestBid),'TAKE_PROFIT_BID');
+          else if(stopLossHit(q,now))this.finalizeExit(p,Number(q.bestBid),'STOP_LOSS_BID');
         }
       }
     }
@@ -314,11 +314,20 @@ class WickBot{
       this.finalizePosition(p,result===1,result===1?'OFFICIAL_RESOLUTION_WIN':'OFFICIAL_RESOLUTION_LOSS',null);
     }catch(e){p.status='PENDING_CLOB_RESULT';p.settlementError=e.message;if(!p.lastPendingLog||Date.now()-p.lastPendingLog>30000){p.lastPendingLog=Date.now();this.log('PAPER_OFFICIAL_RESULT_PENDING',{id:p.id,marketId:p.marketId,error:e.message})}}
   }
+  finalizeExit(p,exitPrice,reason){
+    if(!['OPEN','PENDING_CLOB_RESULT'].includes(p.status)||!Number.isFinite(exitPrice)||exitPrice<0||exitPrice>1)return;
+    const proceeds=exitPrice*p.shares,exitFee=feeFor(this.market,exitPrice,p.shares);
+    p.exitPrice=exitPrice;p.proceeds=proceeds;p.exitFees=exitFee;p.realizedPnl=proceeds-exitFee-p.totalCost;
+    p.status='SETTLED_EXIT';p.settledAt=Date.now();p.settlementBasis=reason;p.exitReason=reason;
+    this.cash+=proceeds-exitFee;
+    this.log('PAPER_PRICE_EXIT',{id:p.id,side:p.side,shares:p.shares,exitPrice,proceeds,exitFee,realizedPnl:p.realizedPnl,reason});
+  }
   finalizePosition(p,won,reason,triggerQuote){if(!['OPEN','PENDING_CLOB_RESULT'].includes(p.status))return;p.payout=won?1:0;p.proceeds=won?p.shares:0;p.realizedPnl=p.proceeds-p.totalCost;p.status=won?'SETTLED_WIN':'SETTLED_LOSS';p.settledAt=Date.now();p.settlementBasis=reason;p.tpTriggerQuote=reason==='TP_HIT_0_99'?triggerQuote:null;p.stopTriggerQuote=reason.startsWith('STOP_LOSS_HIT_')?triggerQuote:null;p.winningSide=won?p.side:null;this.cash+=p.proceeds;const event=reason==='TP_HIT_0_99'?'PAPER_TP_HIT':reason.startsWith('STOP_LOSS_HIT_')?'PAPER_STOP_LOSS':won?'PAPER_OFFICIAL_WIN':'PAPER_OFFICIAL_LOSS';this.log(event,{id:p.id,status:p.status,pnl:p.realizedPnl,side:p.side,shares:p.shares,proceeds:p.proceeds,triggerQuote,tpTarget:.99,stopLoss:p.stopLossThreshold??.01,reason})}
   snapshot(){
     const now=Date.now();
     const positionRealizedPnl=this.positions.reduce((s,p)=>s+(p.realizedPnl||0),0);
     const mergeRealizedPnl=this.mergeEvents.reduce((s,e)=>s+(e.realizedPnl||0),0);
+    const mergeCostBasis=this.mergeEvents.reduce((s,e)=>s+(e.costBasis||0),0);
     const realizedPnl=positionRealizedPnl+mergeRealizedPnl;
      const takerFees=this.positions.reduce((s,p)=>s+(p.fees||0)+(p.exitFees||0),0);
       const estimatedMakerRebate=this.positions.reduce((s,p)=>s+(p.estimatedMakerRebate||0),0);
@@ -346,11 +355,15 @@ class WickBot{
       }
       const mark=p.markBid==null?null:p.markBid*p.shares;p.markAgeMs=p.markUpdatedAt?Math.max(0,now-p.markUpdatedAt):null;p.markStatus=mark==null?'UNAVAILABLE':p.markAgeMs>15000?'STALE':'LIVE';const freshMark=mark!=null&&p.markAgeMs<=15000;p.markValue=freshMark?mark:null;p.unrealizedPnl=freshMark?mark-p.totalCost:null;if(!freshMark)unpricedOpenPositions++;else{markedValue+=mark;unrealizedPnl+=p.unrealizedPnl}
     }
-    return {now,mode:'DEMO ONLY',status:this.status,error:this.error,
+    const activePositions=this.positions.filter(p=>p.status==='OPEN'&&p.marketId===this.market?.id);
+    const unmatchedUpShares=activePositions.filter(p=>p.side==='UP').reduce((s,p)=>s+(Number(p.shares)||0),0);
+    const unmatchedDownShares=activePositions.filter(p=>p.side==='DOWN').reduce((s,p)=>s+(Number(p.shares)||0),0);
+    const mergeStatus={marketId:this.market?.id||null,lotShares:cfg.MERGE_LOT_SHARES,upShares:unmatchedUpShares,downShares:unmatchedDownShares,totalUnmatchedShares:unmatchedUpShares+unmatchedDownShares,pairableShares:Math.floor(Math.min(unmatchedUpShares,unmatchedDownShares)/cfg.MERGE_LOT_SHARES)*cfg.MERGE_LOT_SHARES};
+    return {now,mode:'DEMO ONLY',status:this.status,error:this.error,mergeStatus,
           strategy:{timeframe:this.timeframe,market:'Polymarket BTC 5-minute UP/DOWN',capital:this.capital,
             entries:{orderType:'LIMIT',checkIntervalSeconds:cfg.ENTRY_CHECK_INTERVAL_MS/1000,baseShares:cfg.BASE_ENTRY_SHARES,sideIndependent:true,priceReference:'midpoint',limitOffset:cfg.LIMIT_PRICE_OFFSET,entryWindowSeconds:this.windowMs/1000,entry:'Every 5 seconds, independently place 50-share UP and DOWN limit buys at each side midpoint minus $0.05',fill:'A limit fills only after a later fresh best ask walks down to or through its limit',unfilled:'Unfilled orders expire at the five-minute window close'},
             merge:{enabled:true,lotShares:cfg.MERGE_LOT_SHARES,rule:'Merge each matched 50-share UP + 50-share DOWN complete set into 50 pUSD; leave unmatched shares open',execution:'PAPER SIMULATION ONLY'},
-          exit:'Any fresh own-side CLOB bid/ask/mid >= $0.99 immediately pays $1/share; <= $0.01 immediately pays $0/share; otherwise use official Gamma outcome at window close',
+          exit:'A fresh own-side best bid >= $0.99 or <= $0.01 triggers a paper sale at that bid, less applicable taker fee; otherwise use official Gamma outcome at window close',
               direction:'UP and DOWN are accumulated independently at midpoint minus $0.05',
             entryFillModel:'Paper limit buys are priced five cents below each side midpoint; fill is confirmed when a later fresh best ask walks down to or through the limit',
             fees:'Maker fills have zero fees. Crypto rebate estimates use the published fee-equivalent weight and 20% pool rate; actual daily rebates depend on market-wide maker activity.',
@@ -358,7 +371,7 @@ class WickBot{
          account:{capital:this.capital,cash:this.cash,realizedPnl,mergeRealizedPnl,unrealizedPnl,equity:this.cash+markedValue,takerFees,estimatedMakerRebate,makerFeeEquivalent,
          totalTrades,settledTrades,wins,losses,winRate:settledTrades?wins/settledTrades*100:0,markedValue,unpricedOpenPositions,
          mergedSets:this.mergeEvents.length,mergedShares:this.mergeEvents.reduce((s,e)=>s+e.shares,0),
-         mergeProceeds:this.mergeEvents.reduce((s,e)=>s+e.proceeds,0),
+         mergeProceeds:this.mergeEvents.reduce((s,e)=>s+e.proceeds,0),mergeCostBasis,mergeRealizedPnl,
          openPositions:this.positions.filter(p=>p.status==='OPEN'||p.status==='PENDING_CLOB_RESULT').length,
          maxConsecutiveLosses,maxDrawdown,maxDrawdownPercent:peak?maxDrawdown/peak*100:0,
           wins,losses,equityCurve},
@@ -367,7 +380,7 @@ class WickBot{
         UP:this.liveQuotes.UP,DOWN:this.liveQuotes.DOWN},
         scanner:{timeframe:this.timeframe,lastScanAt:this.lastScanAt,
           source:'Polymarket market discovery and UP/DOWN CLOB order books only',
-          marketResolution:'Own-side fresh CLOB quote >= $0.99 settles $1/share, <= $0.01 settles $0/share immediately; otherwise official Gamma result is retried until resolved'},
+          marketResolution:'Price exits sell at the fresh own-side best bid and subtract the applicable taker fee; otherwise official Gamma result is retried until resolved'},
         positions:this.positions.slice(0,50),orders:this.orders.slice(0,100),
         merges:this.mergeEvents.slice(0,100),events:this.events};
   }

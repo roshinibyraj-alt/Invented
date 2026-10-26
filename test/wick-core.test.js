@@ -301,6 +301,9 @@ test('matching 50-share UP and DOWN fills merge once for $50 without later doubl
   assert.equal(bot.mergeEvents[0].costBasis,42.5);
   const account=bot.snapshot().account;
   assert.equal(account.realizedPnl,7.5);
+  assert.equal(account.mergeCostBasis,42.5);
+  assert.equal(account.mergeProceeds,50);
+  assert.equal(account.mergeRealizedPnl,7.5);
   assert.equal(account.mergeRealizedPnl,7.5);
   assert.equal(account.mergedSets,1);
   assert.equal(account.mergedShares,50);
@@ -348,49 +351,17 @@ test('terminal one-sided CLOB bid or ask can identify the binary winner',()=>{
   assert.equal(_test.clobQuoteWinner({bestAsk:.01},{}),'DOWN');
   assert.equal(_test.clobQuoteWinner({},{}),null);
 });
-test('TP trigger accepts any fresh own-side quote at 0.99',()=>{const n=10000;assert.equal(_test.takeProfitHit({bestBid:.99,updatedAt:n},n),true);assert.equal(_test.takeProfitHit({bestAsk:.99,updatedAt:n},n),true);assert.equal(_test.takeProfitHit({mid:.99,updatedAt:n},n),true);assert.equal(_test.takeProfitHit({bestAsk:.989,updatedAt:n},n),false);assert.equal(_test.takeProfitHit({bestAsk:.99,updatedAt:n-5001},n),false)});
-test('stop-loss trigger remains at $0.01',()=>{const n=10000;assert.equal(_test.stopLossHit({bestBid:.01,updatedAt:n},n),true);assert.equal(_test.stopLossHit({bestAsk:.01,updatedAt:n},n),true);assert.equal(_test.stopLossHit({mid:.01,updatedAt:n},n),true);assert.equal(_test.stopLossHit({bestBid:.35,updatedAt:n},n),false);assert.equal(_test.stopLossHit({bestBid:.0101,updatedAt:n},n),false);assert.equal(_test.stopLossHit({bestBid:.01,updatedAt:n-5001},n),false)});
-test('fresh 0.01 CLOB quote immediately settles the position as a zero-payout loss',async()=>{
+test('take-profit triggers only on a fresh executable best bid at $0.99',()=>{const n=10000;assert.equal(_test.takeProfitHit({bestBid:.99,updatedAt:n},n),true);assert.equal(_test.takeProfitHit({bestAsk:.99,updatedAt:n},n),false);assert.equal(_test.takeProfitHit({mid:.99,updatedAt:n},n),false);assert.equal(_test.takeProfitHit({bestBid:.989,updatedAt:n},n),false);assert.equal(_test.takeProfitHit({bestBid:.99,updatedAt:n-5001},n),false)});test('stop-loss triggers only on a fresh executable best bid at $0.01',()=>{const n=10000;assert.equal(_test.stopLossHit({bestBid:.01,updatedAt:n},n),true);assert.equal(_test.stopLossHit({bestAsk:.01,updatedAt:n},n),false);assert.equal(_test.stopLossHit({mid:.01,updatedAt:n},n),false);assert.equal(_test.stopLossHit({bestBid:.35,updatedAt:n},n),false);assert.equal(_test.stopLossHit({bestBid:.0101,updatedAt:n},n),false);assert.equal(_test.stopLossHit({bestBid:.01,updatedAt:n-5001},n),false)});test('fresh $0.01 best bid exits at the bid instead of zero payout',async()=>{
   const Bot=require('../wick-bot'),md=require('../wick-market-data'),oldGetBook=md.getBook,oldNow=Date.now;
   let now=100000;Date.now=()=>now;
-  md.getBook=async token=>token==='up'
-    ?{bids:[{price:.01,size:50}],asks:[{price:.02,size:10}]}
-    :{bids:[{price:.90,size:10}],asks:[{price:.91,size:10}]};
-  try{
-    const bot=new Bot({timeframe:'5m',windowMs:300000,capital:1000});
-    bot.cash=955;bot.market={start:90000,tokens:{UP:'up',DOWN:'down'}};
-    const p={id:'stop-loss',side:'UP',status:'OPEN',windowStart:90000,totalCost:45,shares:100};
-    bot.positions=[p];
-    await bot.refreshLiveQuotes(now);
-    assert.equal(p.status,'SETTLED_LOSS');
-    assert.equal(p.proceeds,0);
-    assert.equal(p.realizedPnl,-45);
-    assert.equal(bot.cash,955);
-    assert.equal(bot.events[0].event,'PAPER_STOP_LOSS');
-    assert.equal(p.stopTriggerQuote,.01);
-  }finally{md.getBook=oldGetBook;Date.now=oldNow}
-});
-test('fresh 0.99 CLOB quote immediately settles the position as a one-dollar win',async()=>{
+  md.getBook=async token=>token==='up'?{bids:[{price:.01,size:50}],asks:[{price:.02,size:10}]}:{bids:[{price:.90,size:10}],asks:[{price:.91,size:10}]};
+  try{const bot=new Bot({timeframe:'5m',windowMs:300000,capital:1000});bot.cash=955;bot.market={start:90000,tokens:{UP:'up',DOWN:'down'},feesEnabled:false};const p={id:'stop-loss',side:'UP',status:'OPEN',windowStart:90000,totalCost:45,shares:100};bot.positions=[p];await bot.refreshLiveQuotes(now);assert.equal(p.status,'SETTLED_EXIT');assert.equal(p.exitPrice,.01);assert.equal(p.proceeds,1);assert.equal(p.realizedPnl,-44);assert.equal(bot.cash,956);assert.equal(bot.events[0].event,'PAPER_PRICE_EXIT')}finally{md.getBook=oldGetBook;Date.now=oldNow}
+});test('fresh $0.99 best bid exits at the bid instead of $1 payout',async()=>{
   const Bot=require('../wick-bot'),md=require('../wick-market-data'),oldGetBook=md.getBook,oldNow=Date.now;
   let now=100000;Date.now=()=>now;
-  md.getBook=async token=>token==='up'
-    ?{bids:[{price:.99,size:50}],asks:[{price:.995,size:10}]}
-    :{bids:[{price:.01,size:10}],asks:[{price:.02,size:10}]};
-  try{
-    const bot=new Bot({timeframe:'5m',windowMs:300000,capital:1000});
-    bot.cash=955;bot.market={start:90000,tokens:{UP:'up',DOWN:'down'}};
-    const p={id:'take-profit',side:'UP',status:'OPEN',windowStart:90000,totalCost:45,shares:100};
-    bot.positions=[p];
-    await bot.refreshLiveQuotes(now);
-    assert.equal(p.status,'SETTLED_WIN');
-    assert.equal(p.proceeds,100);
-    assert.equal(p.realizedPnl,55);
-    assert.equal(bot.cash,1055);
-    assert.equal(bot.events[0].event,'PAPER_TP_HIT');
-    assert.ok(p.tpTriggerQuote>=.99);
-  }finally{md.getBook=oldGetBook;Date.now=oldNow}
-});
-test('missed TP waits for and uses official Gamma win result',async()=>{const Bot=require('../wick-bot'),md=require('../wick-market-data'),old=md.getMarket;let m={closed:false,outcomes:['Up','Down'],outcomePrices:['.5','.5']};md.getMarket=async()=>m;try{const b=new Bot({timeframe:'5m',windowMs:300000,capital:1000}),p={id:'w',marketId:'m',windowStart:Date.now()-300000,windowMs:300000,status:'OPEN',shares:100,totalCost:50,side:'UP'};b.cash=950;b.positions=[p];await b.trySettle(p);assert.equal(p.status,'PENDING_CLOB_RESULT');m={closed:true,outcomes:['Up','Down'],outcomePrices:['1','0']};await b.trySettle(p);assert.equal(p.status,'SETTLED_WIN');assert.equal(p.proceeds,100);assert.equal(b.cash,1050)}finally{md.getMarket=old}});
+  md.getBook=async token=>token==='up'?{bids:[{price:.99,size:50}],asks:[{price:.995,size:10}]}:{bids:[{price:.01,size:10}],asks:[{price:.02,size:10}]};
+  try{const bot=new Bot({timeframe:'5m',windowMs:300000,capital:1000});bot.cash=955;bot.market={start:90000,tokens:{UP:'up',DOWN:'down'},feesEnabled:false};const p={id:'take-profit',side:'UP',status:'OPEN',windowStart:90000,totalCost:45,shares:100};bot.positions=[p];await bot.refreshLiveQuotes(now);assert.equal(p.status,'SETTLED_EXIT');assert.equal(p.exitPrice,.99);assert.equal(p.proceeds,99);assert.equal(p.realizedPnl,54);assert.equal(bot.cash,1054);assert.equal(bot.events[0].event,'PAPER_PRICE_EXIT')}finally{md.getBook=oldGetBook;Date.now=oldNow}
+});test('missed TP waits for and uses official Gamma win result',async()=>{const Bot=require('../wick-bot'),md=require('../wick-market-data'),old=md.getMarket;let m={closed:false,outcomes:['Up','Down'],outcomePrices:['.5','.5']};md.getMarket=async()=>m;try{const b=new Bot({timeframe:'5m',windowMs:300000,capital:1000}),p={id:'w',marketId:'m',windowStart:Date.now()-300000,windowMs:300000,status:'OPEN',shares:100,totalCost:50,side:'UP'};b.cash=950;b.positions=[p];await b.trySettle(p);assert.equal(p.status,'PENDING_CLOB_RESULT');m={closed:true,outcomes:['Up','Down'],outcomePrices:['1','0']};await b.trySettle(p);assert.equal(p.status,'SETTLED_WIN');assert.equal(p.proceeds,100);assert.equal(b.cash,1050)}finally{md.getMarket=old}});
 test('official fallback pays zero to the losing side',async()=>{const Bot=require('../wick-bot'),md=require('../wick-market-data'),old=md.getMarket;md.getMarket=async()=>({closed:true,outcomes:['Up','Down'],outcomePrices:['1','0']});try{const b=new Bot({timeframe:'5m',windowMs:300000,capital:1000}),p={id:'l',marketId:'m',windowStart:Date.now()-300000,windowMs:300000,status:'OPEN',shares:100,totalCost:50,side:'DOWN'};b.cash=950;await b.trySettle(p);assert.equal(p.status,'SETTLED_LOSS');assert.equal(p.proceeds,0);assert.equal(p.realizedPnl,-50);assert.equal(b.cash,950)}finally{md.getMarket=old}});
 test('stale marks are excluded from floating P&L and equity',()=>{const Bot=require('../wick-bot'),b=new Bot({timeframe:'5m',windowMs:300000,capital:1000});b.cash=900;b.positions=[{status:'OPEN',side:'UP',shares:200,totalCost:100,markBid:.8,markUpdatedAt:Date.now()-20000}];const a=b.snapshot().account;assert.equal(a.unrealizedPnl,0);assert.equal(a.equity,900);assert.equal(a.unpricedOpenPositions,1)});
 
@@ -401,4 +372,10 @@ test('historical accuracy is informational; every directional pattern is followe
  assert.deepEqual({side:followDown.side,action:followDown.action,winRate:followDown.winRate},{side:'DOWN',action:'FOLLOW',winRate:43.66});
  assert.equal(applyPatternAccuracy({side:null,pattern:'Standard Doji'}).side,null);
  const unknown=applyPatternAccuracy({side:'UP',pattern:'Unknown Pattern'});assert.equal(unknown.side,'UP');assert.equal(unknown.action,'FOLLOW');assert.equal(unknown.winRate,null);
+});
+
+test('snapshot exposes unmatched shares waiting for a counterpart',()=>{const Bot=require('../wick-bot'),b=new Bot({priceFeed:{snapshot:()=>({status:'idle'})}});b.market={id:'active-market'};b.positions=[{status:'OPEN',marketId:'active-market',side:'UP',shares:100,totalCost:20}];assert.deepEqual(b.snapshot().mergeStatus,{marketId:'active-market',lotShares:50,upShares:100,downShares:0,totalUnmatchedShares:100,pairableShares:0})});
+
+test('best-bid exits include the configured taker fee in cash and realized P&L',async()=>{
+ const Bot=require('../wick-bot'),md=require('../wick-market-data'),oldBook=md.getBook,oldNow=Date.now;let now=100000;Date.now=()=>now;md.getBook=async token=>token==='up'?{bids:[{price:.99,size:100}],asks:[{price:.995,size:10}]}:{bids:[{price:.01,size:10}],asks:[{price:.02,size:10}]};try{const b=new Bot({timeframe:'5m',windowMs:300000,capital:1000});b.cash=955;b.market={start:90000,tokens:{UP:'up',DOWN:'down'},feeSchedule:{rate:.07,exponent:1}};const p={id:'fee-exit',side:'UP',status:'OPEN',windowStart:90000,totalCost:45,shares:100};b.positions=[p];await b.refreshLiveQuotes(now);assert.ok(Math.abs(p.exitFees-.0693)<1e-9);assert.ok(Math.abs(p.realizedPnl-53.9307)<1e-9);assert.ok(Math.abs(b.cash-1053.9307)<1e-9);assert.ok(Math.abs(b.snapshot().account.takerFees-.0693)<1e-9)}finally{md.getBook=oldBook;Date.now=oldNow}
 });
