@@ -18,6 +18,7 @@ class MultiBot {
     const openPositions=states.reduce((n,s)=>n+s.account.openPositions,0);
     const totalTrades=states.reduce((n,s)=>n+s.account.totalTrades,0),settledTrades=states.reduce((n,s)=>n+s.account.settledTrades,0);
     const wins=states.reduce((n,s)=>n+s.account.wins,0),losses=states.reduce((n,s)=>n+s.account.losses,0);
+    const profitableExits=states.reduce((n,s)=>n+(s.account.profitableExits||0),0),losingExits=states.reduce((n,s)=>n+(s.account.losingExits||0),0),breakEvenExits=states.reduce((n,s)=>n+(s.account.breakEvenExits||0),0);
     const status=states.some(s=>s.status==='blocked_or_error')?'blocked_or_error':
       states.some(s=>['scanning','position_open'].includes(s.status))?
         (openPositions?'position_open':'scanning'):'waiting_for_market';
@@ -47,7 +48,7 @@ class MultiBot {
          takerFees:states.reduce((n,s)=>n+s.account.takerFees,0),
          estimatedMakerRebate:states.reduce((n,s)=>n+s.account.estimatedMakerRebate,0),
         markedValue:states.reduce((n,s)=>n+s.account.markedValue,0),
-         unpricedOpenPositions:states.reduce((n,s)=>n+s.account.unpricedOpenPositions,0),totalTrades,settledTrades,wins,losses,winRate:settledTrades?wins/settledTrades*100:0,openPositions,
+         unpricedOpenPositions:states.reduce((n,s)=>n+s.account.unpricedOpenPositions,0),totalTrades,settledTrades,wins,losses,profitableExits,losingExits,breakEvenExits,winRate:settledTrades?wins/settledTrades*100:0,openPositions,
          maxConsecutiveLosses:Math.max(...states.map(s=>s.account.maxConsecutiveLosses)),
          maxDrawdown,maxDrawdownPercent:peak?maxDrawdown/peak*100:0,
          equityCurve}};

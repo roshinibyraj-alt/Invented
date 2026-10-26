@@ -332,9 +332,13 @@ class WickBot{
      const takerFees=this.positions.reduce((s,p)=>s+(p.fees||0)+(p.exitFees||0),0);
       const estimatedMakerRebate=this.positions.reduce((s,p)=>s+(p.estimatedMakerRebate||0),0);
       const makerFeeEquivalent=this.positions.reduce((s,p)=>s+(p.makerFeeEquivalent||0),0);
-    const wins=this.positions.filter(p=>p.status==='SETTLED_WIN').length,losses=this.positions.filter(p=>p.status==='SETTLED_LOSS').length;
+    const officialWins=this.positions.filter(p=>p.status==='SETTLED_WIN').length,officialLosses=this.positions.filter(p=>p.status==='SETTLED_LOSS').length;
     const exits=this.positions.filter(p=>p.status==='SETTLED_EXIT').length;
-    const settledTrades=wins+losses+exits,totalTrades=this.positions.filter(p=>p.status!=='CANCELLED_UNFILLED').length;
+    const profitableExits=this.positions.filter(p=>p.status==='SETTLED_EXIT'&&(Number(p.realizedPnl)||0)>0).length;
+    const losingExits=this.positions.filter(p=>p.status==='SETTLED_EXIT'&&(Number(p.realizedPnl)||0)<0).length;
+    const breakEvenExits=exits-profitableExits-losingExits;
+    const wins=officialWins+profitableExits,losses=officialLosses+losingExits;
+    const settledTrades=officialWins+officialLosses+exits,totalTrades=this.positions.filter(p=>p.status!=='CANCELLED_UNFILLED').length;
     const history=[
       ...this.positions.filter(p=>p.status==='SETTLED_WIN'||p.status==='SETTLED_LOSS'||p.status==='SETTLED_EXIT'),
       ...this.mergeEvents.map(e=>({settledAt:e.mergedAt,realizedPnl:e.realizedPnl})),
@@ -369,7 +373,7 @@ class WickBot{
             fees:'Maker fills have zero fees. Crypto rebate estimates use the published fee-equivalent weight and 20% pool rate; actual daily rebates depend on market-wide maker activity.',
           execution:'PAPER ONLY'},
          account:{capital:this.capital,cash:this.cash,realizedPnl,mergeRealizedPnl,unrealizedPnl,equity:this.cash+markedValue,takerFees,estimatedMakerRebate,makerFeeEquivalent,
-         totalTrades,settledTrades,wins,losses,winRate:settledTrades?wins/settledTrades*100:0,markedValue,unpricedOpenPositions,
+         totalTrades,settledTrades,wins,losses,profitableExits,losingExits,breakEvenExits,winRate:settledTrades?wins/settledTrades*100:0,markedValue,unpricedOpenPositions,
          mergedSets:this.mergeEvents.length,mergedShares:this.mergeEvents.reduce((s,e)=>s+e.shares,0),
          mergeProceeds:this.mergeEvents.reduce((s,e)=>s+e.proceeds,0),mergeCostBasis,mergeRealizedPnl,
          openPositions:this.positions.filter(p=>p.status==='OPEN'||p.status==='PENDING_CLOB_RESULT').length,
