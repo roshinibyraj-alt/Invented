@@ -121,7 +121,7 @@ test('neutral candle patterns produce no directional entry',()=>{
 test('single-entry strategy leaves position exits to the existing CLOB rules',()=>{
   const Bot=require('../wick-bot'),bot=new Bot({timeframe:'5m',windowMs:300000,capital:1000});
   assert.equal(typeof bot.tryExit,'undefined');
-  assert.match(bot.snapshot().strategy.exit,/bid\/ask\/mid >= \$0\.99/);
+  assert.match(bot.snapshot().strategy.exit,/best bid >= \$0\.99.*taker fee/);
 });
 
 test('every five seconds both sides independently place 50-share limits five cents below midpoint',()=>{
