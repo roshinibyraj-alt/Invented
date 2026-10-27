@@ -1,16 +1,15 @@
-# BTC 5m CLOB Timed-Entry Paper Bot
+# BTC 5m Contrarian Candle Paper Bot
 
-Polymarket BTC 5-minute UP/DOWN paper trading only. The bot has a single $10,000 demo bankroll and never submits live orders or uses wallet credentials.
+Polymarket BTC 5-minute UP/DOWN paper trading only. The bot uses a single $10,000 demo bankroll and never submits live orders or uses wallet credentials.
 
 ## Strategy
 
-- At 10-second checkpoints from 10 through 80 seconds, buy 100 shares on the side with the lower fresh best ask.
-- Do not open entries from 90 through 140 seconds. From 150 through 240 seconds, buy 100 shares on the side with the higher fresh best ask at each 10-second checkpoint.
-- Stop opening entries after the 240-second checkpoint. Existing take-profit, stop-loss, and official settlement rules remain in effect.
-- Entries are modeled as taker market buys at the current best ask and use the configured crypto taker fee. They do not earn maker rebates; the rebate dashboard remains for any eligible historical maker fills.
-- During the window, a fresh own-side CLOB bid, ask, or midpoint at $0.99 or higher immediately settles as a $1/share win; at $0.01 or lower it settles as a $0/share loss. Otherwise, use the official Gamma market result at window close, retrying until resolved.
+- Use the previous complete 5-minute Chainlink BTC/USD candle to determine the signal: green means UP, red means DOWN, and dojis follow the source candle rule.
+- For each valid signal, immediately submit one 500-share paper market buy on the opposite outcome side at the fresh best ask. No limit rungs or conditional flip cycles are used.
+- If the signal or fresh ask is not available at window open, wait until it is available; cancel any unfilled market entry at window rollover.
+- A fresh own-side best bid at $0.99 or higher pays $1/share; at $0.01 or lower pays $0/share and completes the window. Otherwise positions close at their own bid (or $0 if no bid) when the window rolls over. No official market results are used.
 
-The strategy uses Polymarket market metadata and CLOB quotes only; candle patterns and external BTC feeds do not drive entries. The dashboard shows the 5-minute market, both-side prices, timed entries, positions, equity, fees, and estimated rebates. Paper history resets on process restart.
+The BTC regime display is informational and does not block entries. Dashboard: `/` · State: `/api/state` · Health: `/api/healthz`. Paper history resets on process restart.
 
 ## Run and verify
 
@@ -18,5 +17,3 @@ The strategy uses Polymarket market metadata and CLOB quotes only; candle patter
 npm test
 npm start
 ```
-
-Dashboard: `/` · State: `/api/state` · Health: `/api/healthz`. Railway's existing `node index.js` start command remains valid.

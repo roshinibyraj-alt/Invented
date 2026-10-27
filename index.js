@@ -13,7 +13,7 @@ async function main() {
   bot.start();
   startServer(bot, process.env.PORT || 3000);
 
-  console.log('MODE: DEMO -- Polymarket BTC 5m CLOB timed-threshold entries; no live order code is loaded.');
+  console.log('MODE: DEMO -- BTC 5m candle signals; one 500-share paper market buy opposite each valid signal; no live orders.');
 }
 
 main().catch((e) => {
