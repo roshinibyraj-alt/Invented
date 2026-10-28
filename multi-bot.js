@@ -6,7 +6,8 @@ const Bot=require('./wick-bot');
 class MultiBot {
   constructor(){
     this.bots={
-      '5m':new Bot({timeframe:'5m',windowMs:cfg.WINDOW_MS_5M,capital:cfg.DEMO_CAPITAL_5M})
+      '5m':new Bot({timeframe:'5m',windowMs:cfg.WINDOW_MS_5M,capital:cfg.DEMO_CAPITAL_5M}),
+      '15m':new Bot({timeframe:'15m',windowMs:cfg.WINDOW_MS_15M,capital:cfg.DEMO_CAPITAL_15M})
     };
   }
   start(){for(const bot of Object.values(this.bots))bot.start()}
@@ -34,7 +35,7 @@ class MultiBot {
     for(const point of equityCurve){peak=Math.max(peak,point.equity);maxDrawdown=Math.max(maxDrawdown,peak-point.equity);}
     return {...primary,now:Date.now(),status,timeframes,positions,events,
       error:states.find(s=>s.error)?.error||null,
-      strategy:{execution:'PAPER ONLY',timeframes:['5m']},
+       strategy:{execution:'PAPER ONLY',timeframes:Object.keys(timeframes)},
       account:{capital,
         cash:states.reduce((n,s)=>n+s.account.cash,0),
         realizedPnl:states.reduce((n,s)=>n+s.account.realizedPnl,0),

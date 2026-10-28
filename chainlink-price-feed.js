@@ -4,13 +4,19 @@ const URL = 'wss://ws-live-data.polymarket.com';
 const SYMBOL = 'btc/usd';
 const MAX_AGE_MS = 15_000;
 const RETAIN_MS = 60 * 60 * 1000;
+const HISTORY_URL = 'https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=100';
 
 class ChainlinkPriceFeed {
-  constructor({ WebSocketImpl = globalThis.WebSocket, now = Date.now } = {}) {
+  constructor({ WebSocketImpl = globalThis.WebSocket, now = Date.now, fetchImpl = globalThis.fetch } = {}) {
     this.WebSocketImpl = WebSocketImpl;
     this.now = now;
+    this.fetchImpl = fetchImpl;
     this.ticks = [];
     this.minuteBars = new Map();
+    this.historicalCandles = [];
+    this.historyStatus = 'waiting';
+    this.historyError = null;
+    this.historyRetryTimer = null;
     this.socket = null;
     this.started = false;
     this.status = 'starting';
@@ -23,12 +29,59 @@ class ChainlinkPriceFeed {
   start() {
     if (this.started) return;
     this.started = true;
+    void this.loadHistoricalCandles();
     if (typeof this.WebSocketImpl !== 'function') {
       this.status = 'unsupported';
       this.error = 'Node.js WebSocket support is required (Node 22 or newer)';
       return;
     }
     this.connect();
+  }
+
+  async loadHistoricalCandles() {
+    if (typeof this.fetchImpl !== 'function') {
+      this.historyStatus = 'error';
+      this.historyError = 'Fetch is unavailable for Binance history';
+      return;
+    }
+    this.historyStatus = 'loading';
+    try {
+      const response = await this.fetchImpl(HISTORY_URL, { signal: AbortSignal.timeout(10_000) });
+      if (!response.ok) throw new Error(`Binance history request failed (${response.status})`);
+      const rows = await response.json();
+      const now = this.now();
+      this.historicalCandles = (Array.isArray(rows) ? rows : []).flatMap(row => {
+        const start = Number(row?.[0]);
+        const closeTime = Number(row?.[6]);
+        const open = Number(row?.[1]);
+        const high = Number(row?.[2]);
+        const low = Number(row?.[3]);
+        const close = Number(row?.[4]);
+        if (!Number.isFinite(start) || !Number.isFinite(closeTime) || start + 300_000 > now ||
+            ![open, high, low, close].every(value => Number.isFinite(value) && value > 0)) return [];
+        return [{
+          start, end: start + 300_000, open, high, low, close,
+          color: close > open ? 'GREEN' : close < open ? 'RED' : 'DOJI',
+          source: 'BINANCE_HISTORY',
+        }];
+      });
+      this.historyStatus = this.historicalCandles.length ? 'ready' : 'empty';
+      this.historyError = null;
+    } catch (error) {
+      this.historyStatus = 'error';
+      this.historyError = error?.message || 'Binance history request failed';
+      if (this.started && !this.historyRetryTimer) {
+        this.historyRetryTimer = setTimeout(() => {
+          this.historyRetryTimer = null;
+          void this.loadHistoricalCandles();
+        }, 30_000);
+        this.historyRetryTimer.unref?.();
+      }
+    }
+  }
+
+  getHistoricalCandles() {
+    return this.historicalCandles.map(candle => ({ ...candle }));
   }
 
   connect() {
@@ -169,6 +222,12 @@ class ChainlinkPriceFeed {
       ticks: this.ticks.length,
       minuteBars: this.minuteBars.size,
       error: this.error,
+      history: {
+        source: 'Binance BTCUSDT 5-minute candles (history only)',
+        status: this.historyStatus,
+        candles: this.historicalCandles.length,
+        error: this.historyError,
+      },
     };
   }
 
@@ -176,6 +235,8 @@ class ChainlinkPriceFeed {
     this.started = false;
     clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
+    clearTimeout(this.historyRetryTimer);
+    this.historyRetryTimer = null;
     const socket = this.socket;
     this.socket = null;
     if (socket) socket.close();

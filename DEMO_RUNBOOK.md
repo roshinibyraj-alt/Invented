@@ -1,11 +1,8 @@
 # Paper bot runbook
 
-1. Verify the dashboard shows one 5-minute market, a $10,000 demo bankroll, and live UP/DOWN CLOB quotes.
-2. At window start, the paper model creates seven 100-share buy limits on each side: $0.40 down to $0.10 in $0.05 steps.
-3. A rung fills at its limit when the fresh CLOB ask reaches or crosses that price. UP and DOWN positions are independent; both sides may fill.
-4. Every 15 seconds, check each side's fresh best ask; buy at the ask if it is above $0.60. Start at 100 shares and double only after a successful fill; skipped checks do not advance sizing. Allow at most five successful buys total per window, including the initial buy. Do not open new entries at or after 270 seconds.
-5. Existing TP/SL behavior remains: own-side CLOB quote at $0.99 or higher settles at $1/share; $0.01 or lower settles at $0/share. Otherwise retry the official Gamma result at close.
-6. Timed entries are paper market buys at the current best ask and include configured taker fees. They are not maker fills and earn no maker rebate. The dashboard's rebate figure is only an estimate for eligible maker fills.
-7. Paper trades and account state reset on process restart. No live order placement is present.
-
-The bot refreshes Polymarket market metadata and CLOB books every 500 ms. It does not use candle patterns or an external BTC price feed for entries. The dashboard refreshes every 2 seconds; paper orders and account history reset on process restart.
+1. Confirm the dashboard shows separate 5m and 15m bots, $10,000 demo bankrolls, and live UP/DOWN CLOB quotes.
+2. Each window uses the latest completed candle: green signals UP, red signals DOWN, and a doji reverses only after a run of at least two same-color candles. The bot waits when no valid direction exists.
+3. Each signal window submits 500-share limit orders at $0.30 and $0.20. New fills stop at 180 seconds for 5m and 540 seconds for 15m.
+4. Fresh own-side bids of at least $0.99 pay $1/share; bids of at most $0.01 pay $0/share and complete that window. Remaining positions close at their own bid or $0 if no bid is available.
+5. A rung take-profit arms one opposite-side recovery buy for the next window, using its live best ask. Stake begins at 500 shares, doubles after losses to the configured limit, and resets to 500 after a win or maximum-level loss.
+6. State is in memory and resets on process restart. No live order placement or official-market settlement is used.
