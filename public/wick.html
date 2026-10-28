@@ -148,7 +148,7 @@ async function refreshRealBalance(){
     document.querySelector('#realCollateral').textContent=ready?usd(data.collateral):'—';
     document.querySelector('#realPositionValue').textContent=ready?usd(data.positionValue):'—';
     document.querySelector('#realBalanceStatus').textContent=ready
-      ?`Live balance updated ${when(data.asOf)} · ${Number(data.positionCount||0)} positions`
+      ?`Live balance updated ${when(data.asOf)} · ${Number(data.positionCount||0)} positions · ${data.tradingEnabled?'entry orders enabled':'entry orders paused'}`
       :`Real balance ${String(data.status||'unavailable').replaceAll('_',' ')}${data.error?`: ${data.error}`:''}`;
   }catch(e){document.querySelector('#realBalanceStatus').textContent='Real balance unavailable'}
 }
