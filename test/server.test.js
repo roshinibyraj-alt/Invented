@@ -31,3 +31,15 @@ test('health endpoint returns demo service status without exposing secrets', asy
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { ok: true, mode: 'DEMO', status: 'scanning', now: 123 });
 });
+
+test('real-balance proxy returns the upstream account summary',async(t)=>{
+  const expected={status:'ready',collateral:125,positionValue:40,equity:165,positionCount:2};
+  const server=startServer({snapshot:()=>({})},0,async()=>{
+    return{ok:true,json:async()=>expected};
+  });
+  await new Promise(resolve=>server.once('listening',resolve));
+  t.after(()=>new Promise(resolve=>server.close(resolve)));
+  const response=await fetch(`http://127.0.0.1:${server.address().port}/api/real-balance`);
+  assert.equal(response.status,200);
+  assert.deepEqual(await response.json(),expected);
+});

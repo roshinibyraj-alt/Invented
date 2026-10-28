@@ -5,8 +5,22 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const INDEX_HTML = fs.readFileSync(path.join(__dirname, 'public', 'wick.html'));
+const LIVE_BALANCE_URL = 'https://polymarket-btc-5m-bot-production.up.railway.app/api/live-balance';
 
-function startServer(bot, port) {
+function startServer(bot, port, fetcher=globalThis.fetch) {
+  let liveBalanceCache=null,liveBalanceAt=0,liveBalanceRequest=null;
+  async function getLiveBalance(){
+    if(liveBalanceCache&&Date.now()-liveBalanceAt<10000)return liveBalanceCache;
+    if(!liveBalanceRequest){
+      liveBalanceRequest=fetcher(LIVE_BALANCE_URL,{signal:AbortSignal.timeout(8000)})
+        .then(async response=>{
+          if(!response.ok)throw new Error(`Live account service returned ${response.status}`);
+          const value=await response.json();
+          liveBalanceCache=value;liveBalanceAt=Date.now();return value;
+        }).finally(()=>{liveBalanceRequest=null});
+    }
+    return liveBalanceRequest;
+  }
   const server = http.createServer((req, res) => {
     const pathname = new URL(req.url, 'http://localhost').pathname;
     if (pathname === '/api/healthz') {
@@ -20,6 +34,16 @@ function startServer(bot, port) {
       const body = JSON.stringify(bot.snapshot());
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
       res.end(body);
+      return;
+    }
+    if(pathname==='/api/real-balance'){
+      getLiveBalance().then(body=>{
+        res.writeHead(200,{'Content-Type':'application/json','Cache-Control':'no-store'});
+        res.end(JSON.stringify(body));
+      }).catch(()=>{
+        res.writeHead(503,{'Content-Type':'application/json','Cache-Control':'no-store'});
+        res.end(JSON.stringify({status:'unavailable',collateral:null,positionValue:null,equity:null,asOf:null}));
+      });
       return;
     }
     if (pathname === '/' || pathname === '/index.html') {

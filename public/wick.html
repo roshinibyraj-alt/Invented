@@ -29,6 +29,15 @@
  <div class="card danger"><div class="label">Losses</div><div class="value" id="losses">—</div></div>
  <div class="card"><div class="label">Open positions</div><div class="value" id="open">—</div></div>
  </section>
+ <section class="panel">
+   <h2>Real Polymarket account · read-only</h2>
+   <div class="grid">
+     <div class="card"><div class="label">Real equity</div><div class="value" id="realEquity">—</div></div>
+     <div class="card"><div class="label">USDC collateral</div><div class="value" id="realCollateral">—</div></div>
+     <div class="card"><div class="label">Position value</div><div class="value" id="realPositionValue">—</div></div>
+   </div>
+   <div class="small" id="realBalanceStatus">Connecting to the live account balance…</div>
+ </section>
  <section class="panel"><h2>Active market windows</h2><div id="timeframe-panels" class="windows"></div></section>
  <section class="panel"><h2>Floating positions · live own-side marks</h2><p class="small section-note">Open shares are marked using their own-side best bid. Stale or missing marks are not shown as current unrealized P&amp;L.</p><div id="openPositions" class="table-wrap"></div><h2 class="subhead">Recent closed trades · realized P&amp;L</h2><div id="closedPositions" class="table-wrap"></div></section>
  <section class="panel"><h2>Recent bot events</h2><div id="events"></div></section>
@@ -130,5 +139,18 @@ function equitySvg(points){if(!Array.isArray(points)||points.length<2)return '<d
    document.querySelector('#events').innerHTML=(s.events||[]).slice(0,16).map(e=>`<div class="event"><span class="muted">${timestamp(e.ts)}</span> · <b>${esc(e.event)}</b> · ${esc(e.note||e.pattern||e.side||'')}</div>`).join('')||'<div class="empty">Waiting for events.</div>';
    document.querySelector('#error').textContent=s.error||'';
  }catch(e){document.querySelector('#error').textContent='Dashboard data unavailable: '+e.message}}
-refresh();setInterval(refresh,2000);
+async function refreshRealBalance(){
+  try{
+    const response=await fetch('/api/real-balance?ts='+Date.now(),{cache:'no-store'});
+    const data=await response.json();
+    const ready=data.status==='ready';
+    document.querySelector('#realEquity').textContent=ready?usd(data.equity):'—';
+    document.querySelector('#realCollateral').textContent=ready?usd(data.collateral):'—';
+    document.querySelector('#realPositionValue').textContent=ready?usd(data.positionValue):'—';
+    document.querySelector('#realBalanceStatus').textContent=ready
+      ?`Live balance updated ${when(data.asOf)} · ${Number(data.positionCount||0)} positions`
+      :`Real balance ${String(data.status||'unavailable').replaceAll('_',' ')}${data.error?`: ${data.error}`:''}`;
+  }catch(e){document.querySelector('#realBalanceStatus').textContent='Real balance unavailable'}
+}
+refresh();setInterval(refresh,2000);refreshRealBalance();setInterval(refreshRealBalance,15000);
 </script></body></html>
