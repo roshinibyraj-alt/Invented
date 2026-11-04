@@ -6,8 +6,7 @@ const Bot=require('./wick-bot');
 class MultiBot {
   constructor(){
     this.bots={
-      '5m':new Bot({timeframe:'5m',windowMs:cfg.WINDOW_MS_5M,capital:cfg.DEMO_CAPITAL_5M}),
-      '15m':new Bot({timeframe:'15m',windowMs:cfg.WINDOW_MS_15M,capital:cfg.DEMO_CAPITAL_15M})
+      '5m':new Bot({timeframe:'5m',windowMs:cfg.WINDOW_MS_5M,capital:cfg.DEMO_CAPITAL_5M})
     };
   }
   start(){for(const bot of Object.values(this.bots))bot.start()}
@@ -20,6 +19,7 @@ class MultiBot {
     const totalTrades=states.reduce((n,s)=>n+s.account.totalTrades,0),settledTrades=states.reduce((n,s)=>n+s.account.settledTrades,0);
     const wins=states.reduce((n,s)=>n+s.account.wins,0),losses=states.reduce((n,s)=>n+s.account.losses,0);
     const status=states.some(s=>s.status==='blocked_or_error')?'blocked_or_error':
+      states.some(s=>s.status==='strategy_stopped')?'strategy_stopped':
       states.some(s=>['scanning','position_open'].includes(s.status))?
         (openPositions?'position_open':'scanning'):
         states.every(s=>s.status==='window_complete')?'window_complete':'waiting_for_market';
