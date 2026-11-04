@@ -43,3 +43,19 @@ test('real-balance proxy returns the upstream account summary',async(t)=>{
   assert.equal(response.status,200);
   assert.deepEqual(await response.json(),expected);
 });
+
+test('dashboard shows the OCO strategy and both highest-streak metrics',async(t)=>{
+  const server=startServer({snapshot:()=>({})},0);
+  await new Promise(resolve=>server.once('listening',resolve));
+  t.after(()=>new Promise(resolve=>server.close(resolve)));
+  const response=await fetch(`http://127.0.0.1:${server.address().port}/`);
+  const html=await response.text();
+  assert.equal(response.status,200);
+  assert.match(html,/Highest consecutive wins/);
+  assert.match(html,/Highest consecutive losses/);
+  assert.match(html,/maxConsecutiveWins/);
+  assert.match(html,/maxConsecutiveLosses/);
+  assert.match(html,/30-share resting limit buys on UP and DOWN at \$0\.25/);
+  assert.match(html,/official Polymarket resolution/);
+  assert.doesNotMatch(html,/market stop-loss/);
+});

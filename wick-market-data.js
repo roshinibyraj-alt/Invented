@@ -33,4 +33,19 @@ async function getBook(tokenId){
 }
 async function getMarket(id){return getJson(`${GAMMA}/markets/${encodeURIComponent(id)}`)}
 
-module.exports={getBtcMarket,getBook,getMarket};
+function resolvedWinner(market){
+  if(!market||!(market.closed===true||market.closed==='true'))return null;
+  const outcomes=parseArray(market.outcomes);
+  const prices=parseArray(market.outcomePrices??market.outcome_prices).map(Number);
+  if(outcomes.length!==prices.length||prices.some(price=>!Number.isFinite(price)))return null;
+  const winners=prices.map((price,index)=>price>=0.999?index:-1).filter(index=>index>=0);
+  if(winners.length!==1)return null;
+  const label=String(typeof outcomes[winners[0]]==='string'
+    ?outcomes[winners[0]]
+    :outcomes[winners[0]]?.name||outcomes[winners[0]]?.label||'').trim().toLowerCase();
+  if(label==='up'||label==='yes')return 'UP';
+  if(label==='down'||label==='no')return 'DOWN';
+  return null;
+}
+
+module.exports={getBtcMarket,getBook,getMarket,resolvedWinner};

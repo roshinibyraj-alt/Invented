@@ -45,7 +45,8 @@ class MultiBot {
          estimatedMakerRebate:states.reduce((n,s)=>n+s.account.estimatedMakerRebate,0),
         markedValue:states.reduce((n,s)=>n+s.account.markedValue,0),
          unpricedOpenPositions:states.reduce((n,s)=>n+s.account.unpricedOpenPositions,0),totalTrades,settledTrades,wins,losses,winRate:settledTrades?wins/settledTrades*100:0,openPositions,
-         maxConsecutiveLosses:Math.max(...states.map(s=>s.account.maxConsecutiveLosses)),
+          maxConsecutiveWins:Math.max(...states.map(s=>s.account.maxConsecutiveWins)),
+          maxConsecutiveLosses:Math.max(...states.map(s=>s.account.maxConsecutiveLosses)),
          maxDrawdown,maxDrawdownPercent:peak?maxDrawdown/peak*100:0,
          equityCurve}};
   }
@@ -63,7 +64,8 @@ class MultiBot {
       const settled=items.filter(item=>item.status==='SETTLED_EXIT');
       const wins=settled.filter(item=>(Number(item.realizedPnl)||0)>0).length;
       const losses=settled.filter(item=>(Number(item.realizedPnl)||0)<0).length;
-      return {positions:items.length,settled:settled.length,open:items.filter(item=>item.status==='OPEN').length,
+      return {positions:items.length,settled:settled.length,
+        open:items.filter(item=>['OPEN','PENDING_RESOLUTION'].includes(item.status)).length,
         wins,losses,winRate:settled.length?wins/settled.length*100:0,
         realizedPnl:settled.reduce((sum,item)=>sum+(Number(item.realizedPnl)||0),0),
         totalCost:items.reduce((sum,item)=>sum+(Number(item.totalCost)||0),0),
