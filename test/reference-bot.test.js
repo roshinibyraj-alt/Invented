@@ -120,6 +120,7 @@ test("there is no stop-loss; the $0.99 take-profit pays $1 per share", async () 
   assert.equal(position.proceeds, 30);
   assert.equal(position.realizedPnl, 22.5);
   assert.equal(bot.cash, 322.5);
+  assert.equal(position.strategyOutcome, "WIN");
   assert.equal(bot.stakeProgression.martingaleLevel, 0);
   assert.equal(bot.stakeProgression.shares, 30);
 });
@@ -135,13 +136,23 @@ test("positions without a take-profit wait for official Polymarket resolution", 
   assert.equal(position.realizedPnl, undefined);
   assert.equal(bot.cash, 292.5);
   assert.equal(bot.snapshot().account.openPositions, 1);
+  assert.equal(position.strategyOutcome, "LOSS");
+  assert.equal(position.strategyOutcomeReason, "TAKE_PROFIT_NOT_HIT_BY_WINDOW_END");
+  assert.equal(bot.stakeProgression.martingaleLevel, 1);
+  assert.equal(bot.stakeProgression.shares, 42);
+  assert.equal(bot.snapshot().account.maxConsecutiveLosses, 1);
+
+  bot.market = { ...bot.market, start: nextStart };
+  bot.openStrategyWindow(nextStart, nextStart);
+  bot.placeWindowEntryOrders(nextStart, nextStart);
+  assert.ok(bot.windowOrders.every(order => order.shares === 42));
 
   const originalGetMarket = marketData.getMarket;
   try {
     marketData.getMarket = async () => ({
       closed: true,
       outcomes: ["Up", "Down"],
-      outcomePrices: ["0", "1"],
+      outcomePrices: ["1", "0"],
     });
     await bot.resolvePendingPositions(nextStart + config.RESOLUTION_POLL_MS);
   } finally {
@@ -150,21 +161,22 @@ test("positions without a take-profit wait for official Polymarket resolution", 
 
   assert.equal(position.status, "SETTLED_EXIT");
   assert.equal(position.settlementBasis, "POLYMARKET_RESOLUTION");
-  assert.equal(position.payout, 0);
-  assert.equal(position.realizedPnl, -7.5);
+  assert.equal(position.payout, 1);
+  assert.equal(position.realizedPnl, 22.5);
   assert.equal(bot.stakeProgression.martingaleLevel, 1);
   assert.equal(bot.stakeProgression.shares, 42);
+  assert.equal(position.strategyOutcome, "LOSS", "resolution payout must not rewrite the window strategy result");
+  assert.equal(bot.snapshot().account.maxConsecutiveLosses, 1);
 });
 
 test("resolved wins reset to 30 shares and seven losses then reset after level seven", () => {
   const bot = makeBot();
   for (let level = 0; level <= config.MAX_MULTIPLIER_LEVELS; level++) {
-    bot.updateStakeProgressionAfterClose({
+    bot.recordStrategyOutcome({
       id: `loss-${level}`,
-      progressionApplied: false,
+      strategyOutcomeApplied: false,
       progressionLevel: level,
-      realizedPnl: -1,
-    });
+    }, "LOSS");
     if (level < config.MAX_MULTIPLIER_LEVELS) {
       assert.equal(bot.stakeProgression.martingaleLevel, level + 1);
       assert.equal(
@@ -178,12 +190,11 @@ test("resolved wins reset to 30 shares and seven losses then reset after level s
   }
 
   bot.stakeProgression = { baseShares: 30, shares: 82.32, martingaleLevel: 3, lastOutcome: "LOSS" };
-  bot.updateStakeProgressionAfterClose({
+  bot.recordStrategyOutcome({
     id: "win",
-    progressionApplied: false,
+    strategyOutcomeApplied: false,
     progressionLevel: 3,
-    realizedPnl: 1,
-  });
+  }, "WIN");
   assert.equal(bot.stakeProgression.martingaleLevel, 0);
   assert.equal(bot.stakeProgression.shares, 30);
 });
@@ -206,14 +217,17 @@ test("market outcomes are used only after Polymarket marks the market closed", (
   }), null);
 });
 
-test("dashboard account reports highest consecutive wins and losses", () => {
+test("dashboard streaks use strategy outcomes, including unresolved positions", () => {
   const multi = new MultiBot();
-  multi.bots["5m"].positions = [1, 1, -1, -1, -1, 0, 1, 1, 1].map((pnl, index) => ({
-    id: `settled-${index}`,
-    status: "SETTLED_EXIT",
-    realizedPnl: pnl,
+  const outcomes = ["WIN", "WIN", "LOSS", "LOSS", "LOSS", "WIN", "WIN", "WIN"];
+  multi.bots["5m"].positions = outcomes.map((strategyOutcome, index) => ({
+    id: `trade-${index}`,
+    status: index === 2 ? "PENDING_RESOLUTION" : "SETTLED_EXIT",
+    strategyOutcome,
+    strategyOutcomeAt: FIRST_START + index,
+    realizedPnl: strategyOutcome === "WIN" ? -1 : 1,
     totalCost: 1,
-    settledAt: FIRST_START + index,
+    settledAt: index === 2 ? undefined : FIRST_START + index,
   }));
 
   const account = multi.snapshot().account;

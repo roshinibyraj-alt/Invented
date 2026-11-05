@@ -51,8 +51,10 @@ test('dashboard shows the OCO strategy and both highest-streak metrics',async(t)
   const response=await fetch(`http://127.0.0.1:${server.address().port}/`);
   const html=await response.text();
   assert.equal(response.status,200);
-  assert.match(html,/Highest consecutive wins/);
-  assert.match(html,/Highest consecutive losses/);
+  assert.match(html,/Highest consecutive strategy wins/);
+  assert.match(html,/Highest consecutive strategy losses/);
+  assert.match(html,/TP missed by window end/);
+  assert.match(html,/immediate strategy loss, then market resolution/);
   assert.match(html,/maxConsecutiveWins/);
   assert.match(html,/maxConsecutiveLosses/);
   assert.match(html,/30-share resting limit buys on UP and DOWN at \$0\.25/);

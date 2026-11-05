@@ -27,8 +27,8 @@
  <div class="card primary"><div class="label">Win rate</div><div class="value" id="winRate">—</div><span class="metric-note">wins ÷ settled trades</span></div>
  <div class="card success"><div class="label">Wins</div><div class="value" id="wins">—</div></div>
  <div class="card danger"><div class="label">Losses</div><div class="value" id="losses">—</div></div>
-  <div class="card success"><div class="label">Highest consecutive wins</div><div class="value" id="maxConsecutiveWins">—</div></div>
-  <div class="card danger"><div class="label">Highest consecutive losses</div><div class="value" id="maxConsecutiveLosses">—</div></div>
+  <div class="card success"><div class="label">Highest consecutive strategy wins</div><div class="value" id="maxConsecutiveWins">—</div><span class="metric-note">TP hit</span></div>
+  <div class="card danger"><div class="label">Highest consecutive strategy losses</div><div class="value" id="maxConsecutiveLosses">—</div><span class="metric-note">TP missed by window end</span></div>
  <div class="card"><div class="label">Open positions</div><div class="value" id="open">—</div></div>
  </section>
  <section class="panel">
@@ -43,7 +43,7 @@
  <section class="panel"><h2>Active market windows</h2><div id="timeframe-panels" class="windows"></div></section>
  <section class="panel"><h2>Floating positions · live own-side marks</h2><p class="small section-note">Open shares are marked using their own-side best bid. Stale or missing marks are not shown as current unrealized P&amp;L.</p><div id="openPositions" class="table-wrap"></div><h2 class="subhead">Recent closed trades · realized P&amp;L</h2><div id="closedPositions" class="table-wrap"></div></section>
  <section class="panel"><h2>Recent bot events</h2><div id="events"></div></section>
-   <p class="small">At the start of each BTC 5-minute window, the bot places 30-share resting limit buys on UP and DOWN at $0.25. The first fill cancels the opposite order. There is no stop-loss. A $0.99 take-profit credits $1 per share; if it does not fill before window end, the position waits for official Polymarket resolution. After a resolved loss, the next window uses 1.4× the share size, for up to seven multiplier levels; a win or a loss at level seven resets to 30 shares. Unfilled orders expire without changing progression. This is demo-only; paper history resets on process restart.</p>
+    <p class="small">At the start of each BTC 5-minute window, the bot places 30-share resting limit buys on UP and DOWN at $0.25. The first fill cancels the opposite order. There is no stop-loss. A $0.99 take-profit credits $1 per share and immediately resets the strategy to base size. If TP is not hit by window end, the window counts as a strategy loss immediately, progression steps up by 1.4×, and only that filled position waits for official Polymarket resolution. Resolution later updates actual cash P&amp;L but does not rewrite the strategy result. The streak cards follow strategy outcomes; realized P&amp;L follows actual payout. Unfilled orders expire without changing progression. This is demo-only; paper history resets on process restart.</p>
  <div class="err" id="error"></div>
 </main>
 <script>
@@ -51,7 +51,7 @@ const esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&
  const usd=x=>'$'+Number(x||0).toFixed(2),fmt=x=>Number.isFinite(Number(x))?Number(x).toFixed(3):'—',sharesFmt=x=>Number(x||0).toLocaleString(undefined,{maximumFractionDigits:3}),when=x=>x?new Date(x).toLocaleTimeString():'—',timestamp=x=>Number(x)>0?new Date(Number(x)).toLocaleString([],{month:'short',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',timeZoneName:'short'}):'—';
 const px=x=>x==null?'—':'$'+Number(x).toFixed(3),btc=x=>x==null?'—':'$'+Number(x).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}),pct=x=>`${Number(x||0)>=0?'+':''}${Number(x||0).toFixed(3)}%`;
 function metric(k,v){return `<div class="metric"><span class="muted">${esc(k)}</span><b>${esc(v)}</b></div>`}
-  function settlementLabel(p){if(p.settlementBasis==='TAKE_PROFIT_BID')return 'Take-profit · $1/share credit';if(p.settlementBasis==='POLYMARKET_RESOLUTION')return 'Official Polymarket resolution';if(p.status==='PENDING_RESOLUTION')return 'Awaiting Polymarket resolution';if(p.status==='OPEN')return 'Open · monitoring $0.99 take-profit';return 'Paper settlement'}
+   function settlementLabel(p){if(p.settlementBasis==='TAKE_PROFIT_BID')return 'Take-profit · $1/share credit';if(p.settlementBasis==='POLYMARKET_RESOLUTION')return 'Official Polymarket resolution';if(p.status==='PENDING_RESOLUTION')return 'Strategy loss · awaiting Polymarket resolution';if(p.status==='OPEN')return 'Open · monitoring $0.99 take-profit';return 'Paper settlement'}
 let countdownState=null;
 function paintCountdown(){
   if(!countdownState)return;
@@ -92,19 +92,20 @@ setInterval(paintCountdown,250);
       <div class="metric"><span>Entry trigger</span><b>${esc(trigger)}</b></div>
       <div class="metric"><span>Entry order</span><b>${esc(entryOrder)}</b></div>
       <div class="metric"><span>Stake ladder</span><b>${esc(ladder)}</b></div>
-      <div class="metric"><span>Exit rules</span><b>$0.99 TP pays $1/share · otherwise market resolution</b></div>
+      <div class="metric"><span>Exit rules</span><b>$0.99 TP pays $1/share · otherwise immediate strategy loss, then market resolution</b></div>
       <div class="metric"><span>Open shares / paper cash</span><b>${positions.reduce((n,p)=>n+Number(p.shares||0),0)} / ${usd(t.account?.cash)}</b></div>
     </article>`;
   }
  function positionTable(positions,open){
    if(!positions.length)return `<div class="empty">${open?'No open positions are floating right now.':'No closed trades yet.'}</div>`;
-    const headers=open?['Window','Side','Shares','Avg entry','Est. maker rebate','Own bid · value','Unrealized P&L','Mark status']:['Window','Side','Shares','Avg entry','Est. maker rebate','Exit','Proceeds','Realized P&L','Closed'];
+     const headers=open?['Window','Side','Shares','Avg entry','Est. maker rebate','Strategy result','Own bid · value','Unrealized P&L','Mark status']:['Window','Side','Shares','Avg entry','Est. maker rebate','Strategy result','Exit','Proceeds','Realized P&L','Closed'];
    const rows=positions.map(p=>{
      const fresh=p.markStatus==='LIVE'&&p.markBid!=null&&p.markValue!=null;
      const common=`<td>${esc(p.timeframe||'5m')} · ${esc(p.slug||'')}</td><td class="${p.side==='UP'?'good':'bad'}">${esc(p.side)}</td><td>${Number(p.shares||0).toLocaleString()}</td><td>${px(p.avgEntry)}</td>`;
-      if(open)return `<tr>${common}<td>${usd(p.estimatedMakerRebate)}</td><td>${fresh?`${px(p.markBid)} · ${usd(p.markValue)}`:'—'}</td><td>${fresh?usd(p.unrealizedPnl):'—'}</td><td>${esc(fresh?'LIVE':p.markStatus||'UNAVAILABLE')}</td></tr>`;
+       const strategyResult=p.strategyOutcome==='WIN'?'WIN · TP hit':p.strategyOutcome==='LOSS'?'LOSS · TP missed by expiry':p.status==='PENDING_RESOLUTION'?'LOSS · awaiting payout':'Pending';
+       if(open)return `<tr>${common}<td>${usd(p.estimatedMakerRebate)}</td><td>${esc(strategyResult)}</td><td>${fresh?`${px(p.markBid)} · ${usd(p.markValue)}`:'—'}</td><td>${fresh?usd(p.unrealizedPnl):'—'}</td><td>${esc(fresh?'LIVE':p.markStatus||'UNAVAILABLE')}</td></tr>`;
        const exit=p.settlementBasis==='POLYMARKET_RESOLUTION'?`Resolution · ${esc(p.resolutionWinner||'result')}`:px(p.exitBid);
-       return `<tr>${common}<td>${usd(p.estimatedMakerRebate)}</td><td>${exit}</td><td>${p.proceeds==null?'—':usd(p.proceeds)}</td><td class="${Number(p.realizedPnl)>=0?'good':'bad'}">${p.realizedPnl==null?'—':usd(p.realizedPnl)}</td><td>${timestamp(p.settledAt)}</td></tr>`;
+        return `<tr>${common}<td>${usd(p.estimatedMakerRebate)}</td><td>${esc(strategyResult)}</td><td>${exit}</td><td>${p.proceeds==null?'—':usd(p.proceeds)}</td><td class="${Number(p.realizedPnl)>=0?'good':'bad'}">${p.realizedPnl==null?'—':usd(p.realizedPnl)}</td><td>${timestamp(p.settledAt)}</td></tr>`;
    }).join('');
    return `<table><thead><tr>${headers.map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table>`;
  }

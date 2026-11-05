@@ -134,13 +134,16 @@ class WickBot{
       }
     }
     for(const p of open){
+      this.recordStrategyOutcome(p,'LOSS',now,'TAKE_PROFIT_NOT_HIT_BY_WINDOW_END');
       p.status='PENDING_RESOLUTION';
       p.pendingResolutionSince=now;
       p.markStatus='PENDING_RESOLUTION';
       p.markValue=null;
       p.unrealizedPnl=null;
       this.log('PAPER_POSITION_AWAITING_POLYMARKET_RESOLUTION',{
-        id:p.id,windowStart:p.windowStart,side:p.side,shares:p.shares,marketId:p.marketId});
+        id:p.id,windowStart:p.windowStart,side:p.side,shares:p.shares,marketId:p.marketId,
+        strategyOutcome:p.strategyOutcome,nextShares:this.stakeProgression.shares,
+        martingaleLevel:this.stakeProgression.martingaleLevel});
     }
     for(const windowStart of previousStarts){
       this.log('PAPER_WINDOW_ROLLED_OVER',{windowStart,currentStart,closedPositions:open.filter(p=>p.windowStart===windowStart).length,
@@ -222,14 +225,19 @@ class WickBot{
       shares,upOrderId:this.windowOrders[0].id,downOrderId:this.windowOrders[1].id});
     return true;
   }
-  updateStakeProgressionAfterClose(position){
-    if(position.progressionApplied)return;
+  recordStrategyOutcome(position,outcome,now=Date.now(),reason=outcome){
+    if(position.strategyOutcomeApplied)return;
+    if(!['WIN','LOSS'].includes(outcome))return;
+    position.strategyOutcomeApplied=true;
+    position.strategyOutcome=outcome;
+    position.strategyOutcomeAt=now;
+    position.strategyOutcomeReason=reason;
     position.progressionApplied=true;
-    const pnl=Number(position.realizedPnl)||0,progress=this.stakeProgression;
-    if(pnl>1e-9){
+    const progress=this.stakeProgression;
+    if(outcome==='WIN'){
       progress.shares=progress.baseShares;
       progress.martingaleLevel=0;progress.lastOutcome='WIN';
-    }else if(pnl < -1e-9){
+    }else{
       progress.lastOutcome='LOSS';
       if(Number(position.progressionLevel)<cfg.MAX_MULTIPLIER_LEVELS){
         progress.martingaleLevel=Number(position.progressionLevel)+1;
@@ -239,8 +247,8 @@ class WickBot{
         progress.martingaleLevel=0;
         progress.shares=progress.baseShares;
       }
-    }else progress.lastOutcome='BREAKEVEN';
-    this.log('PAPER_STAKE_PROGRESSION_UPDATED',{positionId:position.id,pnl,
+    }
+    this.log('PAPER_STAKE_PROGRESSION_UPDATED',{positionId:position.id,outcome,reason,
       baseShares:progress.baseShares,nextShares:progress.shares,
       martingaleLevel:progress.martingaleLevel,lastOutcome:progress.lastOutcome});
   }
@@ -357,7 +365,7 @@ class WickBot{
     this.cash+=p.proceeds-p.exitFees;
     this.log('PAPER_TP_HIT',{id:p.id,status:p.status,pnl:p.realizedPnl,side:p.side,shares:p.shares,
       proceeds:p.proceeds,exitFees:p.exitFees,triggerQuote,tpTarget:cfg.TAKE_PROFIT_PRICE});
-    this.updateStakeProgressionAfterClose(p);
+    this.recordStrategyOutcome(p,'WIN',settledAt,'TAKE_PROFIT_HIT');
   }
   finalizeResolution(p,winner,now=Date.now()){
     if(p.status!=='PENDING_RESOLUTION')return false;
@@ -381,7 +389,6 @@ class WickBot{
     this.log(won?'PAPER_OFFICIAL_WIN':'PAPER_OFFICIAL_LOSS',{
       id:p.id,side:p.side,winner,shares:p.shares,payout:p.payout,proceeds:p.proceeds,
       pnl:p.realizedPnl,windowStart:p.windowStart});
-    this.updateStakeProgressionAfterClose(p);
     return true;
   }
   async completeWindow(windowStart,triggerPosition,triggerWon,triggerReason,triggerQuote,now=Date.now()){
@@ -398,6 +405,7 @@ class WickBot{
       if(p===triggerPosition&&triggerReason==='TAKE_PROFIT_BID'){
         this.finalizePosition(p,triggerWon,triggerReason,triggerQuote,now);
       }else{
+        this.recordStrategyOutcome(p,'LOSS',now,'TAKE_PROFIT_NOT_HIT_BY_WINDOW_END');
         p.status='PENDING_RESOLUTION';
         p.pendingResolutionSince=now;
         p.markStatus='PENDING_RESOLUTION';
@@ -420,24 +428,25 @@ class WickBot{
      const wins=profitableExits,losses=losingExits;
      const settledTrades=exits;
     const totalTrades=this.positions.filter(p=>p.status!=='CANCELLED_UNFILLED').length;
-    const history=this.positions.filter(p=>p.status==='SETTLED_EXIT')
+     const history=this.positions.filter(p=>p.status==='SETTLED_EXIT')
       .sort((a,b)=>(a.settledAt||0)-(b.settledAt||0));
+     const strategyHistory=this.positions.filter(p=>p.strategyOutcome==='WIN'||p.strategyOutcome==='LOSS')
+       .sort((a,b)=>(a.strategyOutcomeAt||a.windowStart||0)-(b.strategyOutcomeAt||b.windowStart||0));
     const equityCurve=[{ts:this.startedAt,equity:this.capital}];
      let curveEquity=this.capital,peak=this.capital,maxDrawdown=0;
-     let maxConsecutiveLosses=0,maxConsecutiveWins=0,lossStreak=0,winStreak=0;
+      let maxConsecutiveLosses=0,maxConsecutiveWins=0,lossStreak=0,winStreak=0;
     for(const p of history){
       curveEquity+=Number(p.realizedPnl)||0;
       equityCurve.push({ts:p.settledAt||p.openedAt,equity:curveEquity});
       peak=Math.max(peak,curveEquity);maxDrawdown=Math.max(maxDrawdown,peak-curveEquity);
-       const pnl=Number(p.realizedPnl)||0;
-       if(pnl<0){
+     }
+     for(const p of strategyHistory){
+        if(p.strategyOutcome==='LOSS'){
          lossStreak++;winStreak=0;
          maxConsecutiveLosses=Math.max(maxConsecutiveLosses,lossStreak);
-       }else if(pnl>0){
+        }else if(p.strategyOutcome==='WIN'){
          winStreak++;lossStreak=0;
          maxConsecutiveWins=Math.max(maxConsecutiveWins,winStreak);
-       }else{
-         lossStreak=0;winStreak=0;
        }
     }
     let unrealizedPnl=0,unpricedOpenPositions=0,markedValue=0;
