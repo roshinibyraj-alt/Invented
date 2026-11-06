@@ -99,7 +99,7 @@ setInterval(paintCountdown,250);
    const rows=positions.map(p=>{
      const fresh=p.markStatus==='LIVE'&&p.markBid!=null&&p.markValue!=null;
       const common=`<td>${esc(p.timeframe||'5m')} · ${esc(p.slug||'')}</td><td class="${p.side==='UP'?'good':'bad'}">${esc(p.side)}</td><td>${Number(p.shares||0).toLocaleString()}</td><td>${px(p.avgEntry)}</td><td>${px(p.takeProfitPrice)}</td>`;
-       const strategyResult=p.strategyOutcome==='WIN'?'WIN · TP hit':p.strategyOutcome==='LOSS'?'LOSS · TP missed by expiry':p.status==='PENDING_RESOLUTION'?'LOSS · awaiting payout':'Pending';
+       const strategyResult=p.strategyOutcome==='WIN'?'WIN · TP hit':p.strategyOutcome==='LOSS'?'LOSS · TP not hit by window end':p.status==='PENDING_RESOLUTION'?'LOSS · awaiting payout':'Pending';
        if(open)return `<tr>${common}<td>${usd(p.estimatedMakerRebate)}</td><td>${esc(strategyResult)}</td><td>${fresh?`${px(p.markBid)} · ${usd(p.markValue)}`:'—'}</td><td>${fresh?usd(p.unrealizedPnl):'—'}</td><td>${esc(fresh?'LIVE':p.markStatus||'UNAVAILABLE')}</td></tr>`;
        const exit=p.settlementBasis==='POLYMARKET_RESOLUTION'?`Resolution · ${esc(p.resolutionWinner||'result')}`:px(p.exitBid);
         return `<tr>${common}<td>${usd(p.estimatedMakerRebate)}</td><td>${esc(strategyResult)}</td><td>${exit}</td><td>${p.proceeds==null?'—':usd(p.proceeds)}</td><td class="${Number(p.realizedPnl)>=0?'good':'bad'}">${p.realizedPnl==null?'—':usd(p.realizedPnl)}</td><td>${timestamp(p.settledAt)}</td></tr>`;
