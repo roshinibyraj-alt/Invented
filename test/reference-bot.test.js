@@ -72,8 +72,12 @@ test("window start places four independent 100-share limit buys", () => {
   assert.equal(bot.windowEntryPlaced, true);
 });
 
-test("a limit buy fills only at or below its price and immediately creates its matched TP sell", () => {
+test("a limit buy books exactly its posted price after the ask reaches or betters it", () => {
   const bot = makeBot();
+  quote(bot, "UP", FIRST_START + 500, { mid: 0.11, bid: 0.10, ask: 0.11 });
+  bot.processPendingLimitOrders(FIRST_START + 500);
+  assert.equal(bot.positions.length, 0, "an ask above the limit must not fill");
+
   quote(bot, "UP", FIRST_START + 1_000, { mid: 0.11, bid: 0.09, ask: 0.10 });
   quote(bot, "DOWN", FIRST_START + 1_000, { mid: 0.30, bid: 0.29, ask: 0.30 });
   bot.processPendingLimitOrders(FIRST_START + 1_000);
@@ -83,6 +87,8 @@ test("a limit buy fills only at or below its price and immediately creates its m
   assert.equal(position.side, "UP");
   assert.equal(position.shares, 100);
   assert.equal(position.avgEntry, 0.10);
+  assert.equal(position.fillPrice, 0.10);
+  assert.equal(position.cost, 10);
   assert.equal(position.takeProfitPrice, 0.20);
   assert.equal(bot.cash, 290);
   const entry = bot.orders.find(order => order.id === position.id);
@@ -111,12 +117,14 @@ test("take-profit resting sell fills only when a fresh bid reaches target", () =
   bot.processPendingTakeProfitOrders(FIRST_START + 2_000);
   assert.equal(position.status, "OPEN");
 
-  quote(bot, "UP", FIRST_START + 3_000, { mid: 0.20, bid: 0.20, ask: 0.21 });
+  quote(bot, "UP", FIRST_START + 3_000, { mid: 0.24, bid: 0.24, ask: 0.25 });
   bot.processPendingTakeProfitOrders(FIRST_START + 3_000);
   assert.equal(takeProfit.status, "FILLED");
   assert.equal(takeProfit.fillPrice, 0.20);
   assert.equal(position.status, "SETTLED_EXIT");
   assert.equal(position.settlementBasis, "TAKE_PROFIT_LIMIT");
+  assert.equal(position.tpTriggerQuote, 0.24);
+  assert.equal(position.exitBid, 0.20);
   assert.equal(position.proceeds, 20);
   assert.equal(position.realizedPnl, 10);
   assert.equal(bot.cash, 310);

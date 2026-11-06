@@ -248,7 +248,7 @@ class WickBot{
     for(const {order,quote,ask} of candidates){
       if(order.status!=='PENDING')continue;
       const shares=Number((order.remainingShares||order.shares).toFixed(6));
-      const fillPrice=Math.min(order.limitPrice,ask);
+      const fillPrice=order.limitPrice;
       const cost=Number((fillPrice*shares).toFixed(6));
       if(cost>this.cash+1e-9){
         order.status='REJECTED_INSUFFICIENT_CASH';
@@ -306,10 +306,10 @@ class WickBot{
       const quote=this.liveQuotes[order.side];
       if(!takeProfitHit(quote,now,order.limitPrice))continue;
       const bid=Number(quote.bestBid);
-      const fillPrice=Math.max(order.limitPrice,bid);
+      const fillPrice=order.limitPrice;
       order.status='FILLED';order.filledAt=now;order.fillPrice=fillPrice;
       order.remainingShares=0;
-      this.finalizePosition(position,'TAKE_PROFIT_LIMIT',fillPrice,now,order);
+       this.finalizePosition(position,'TAKE_PROFIT_LIMIT',bid,now,order);
     }
   }
   async refreshLiveQuotes(now){
@@ -338,8 +338,7 @@ class WickBot{
   }
   finalizePosition(p,reason,triggerQuote,settledAt,takeProfitOrder){
     if(p.status!=='OPEN'||reason!=='TAKE_PROFIT_LIMIT'||!takeProfitOrder)return false;
-    const exitPrice=Math.max(takeProfitOrder.limitPrice,
-      Number.isFinite(Number(triggerQuote))?Math.min(1,Number(triggerQuote)):takeProfitOrder.limitPrice);
+    const exitPrice=takeProfitOrder.limitPrice;
     const maker=makerRebateFor(p.feeContext,exitPrice,p.shares);
     p.payout=exitPrice;
     p.proceeds=p.shares*exitPrice;
@@ -460,7 +459,7 @@ class WickBot{
                 stopLoss:null,
                 windowEnd:'Cancel remaining orders; hold any position without a take-profit fill for original-market resolution.'},
               timing:'At window start, place 100-share UP and DOWN limit buys at $0.10 and $0.05. Cancel unfilled buys 180 seconds after placement.',
-              fill:'Each buy fills independently on a newer fresh ask at or below its limit. Each fill immediately receives its matching resting limit take-profit sell; no OCO cancellation.',
+               fill:'Each buy fills independently when a newer fresh ask is at or below its limit, and books at exactly the posted limit price. Each fill immediately receives its matching resting limit take-profit sell, which fills at exactly its posted target when a fresh bid reaches or exceeds it; no OCO cancellation.',
               unfilled:'Any unfilled buy is cancelled after 180 seconds. Filled shares that miss take-profit by window end wait for official Polymarket resolution.',
               fees:'Limit buys and take-profit sells use the illustrative maker-rebate estimate; official resolution has no exit fee.',
              execution:'PAPER ONLY'},
@@ -475,7 +474,7 @@ class WickBot{
         UP:this.liveQuotes.UP,DOWN:this.liveQuotes.DOWN},
          scanner:{timeframe:this.timeframe,lastScanAt:this.lastScanAt,
              source:'Polymarket BTC 5-minute Gamma/CLOB order books',
-              marketResolution:'Resting take-profit sells fill at their target or better; remaining filled positions wait for the official Polymarket market result.'},
+               marketResolution:'Resting take-profit sells fill at exactly their posted target price; remaining filled positions wait for the official Polymarket market result.'},
        inventory,positions:this.positions.slice(0,50),orders:this.orders.slice(0,100),events:this.events};
   }
          start(){if(this.running)return;this.running=true;this.log('BOT_STARTED',{timeframe:this.timeframe,
