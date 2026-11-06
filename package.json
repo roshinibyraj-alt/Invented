@@ -2,7 +2,7 @@
   "name": "btc-wick-paper-demo",
   "version": "1.0.0",
   "private": true,
-  "description": "Demo-only Polymarket BTC 5-minute paired OCO limit strategy.",
+  "description": "Demo-only Polymarket BTC 5-minute two-sided limit ladder strategy.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",

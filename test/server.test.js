@@ -44,7 +44,7 @@ test('real-balance proxy returns the upstream account summary',async(t)=>{
   assert.deepEqual(await response.json(),expected);
 });
 
-test('dashboard shows the OCO strategy and both highest-streak metrics',async(t)=>{
+test('dashboard shows the limit-ladder strategy and both highest-streak metrics',async(t)=>{
   const server=startServer({snapshot:()=>({})},0);
   await new Promise(resolve=>server.once('listening',resolve));
   t.after(()=>new Promise(resolve=>server.close(resolve)));
@@ -54,10 +54,11 @@ test('dashboard shows the OCO strategy and both highest-streak metrics',async(t)
   assert.match(html,/Highest consecutive strategy wins/);
   assert.match(html,/Highest consecutive strategy losses/);
   assert.match(html,/TP missed by window end/);
-  assert.match(html,/immediate strategy loss, then market resolution/);
+  assert.match(html,/180 seconds after placement/);
   assert.match(html,/maxConsecutiveWins/);
   assert.match(html,/maxConsecutiveLosses/);
-  assert.match(html,/30-share resting limit buys on UP and DOWN at \$0\.25/);
+  assert.match(html,/four independent resting limit buys/);
+  assert.match(html,/\$0\.10 entry → \$0\.20 TP/);
   assert.match(html,/official Polymarket resolution/);
   assert.doesNotMatch(html,/market stop-loss/);
 });

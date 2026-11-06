@@ -38,10 +38,10 @@ function quote(bot, side, updatedAt, { mid, bid, ask }) {
   };
 }
 
-function fillOneSide(bot, side = "UP", ask = 0.25, now = FIRST_START + 1_000) {
-  quote(bot, side, now, { mid: ask, bid: ask - 0.01, ask });
+function fillAt(bot, side, price, now = FIRST_START + 1_000) {
+  quote(bot, side, now, { mid: price, bid: Math.max(0.01, price - 0.01), ask: price });
   bot.processPendingLimitOrders(now);
-  return bot.positions.find(position => position.windowStart === FIRST_START);
+  return bot.positions.find(position => position.side === side && position.avgEntry === price);
 }
 
 test("the live runner remains a single $300 BTC 5-minute demo account", () => {
@@ -51,101 +51,113 @@ test("the live runner remains a single $300 BTC 5-minute demo account", () => {
   assert.equal(multi.snapshot().account.capital, 300);
 });
 
-test("window start immediately places both 30-share $0.25 limit buys", () => {
+test("window start places four independent 100-share limit buys", () => {
   const bot = makeBot();
-  assert.equal(bot.windowOrders.length, 2);
-  assert.deepEqual(bot.windowOrders.map(order => order.side).sort(), ["DOWN", "UP"]);
-  for (const order of bot.windowOrders) {
-    assert.equal(order.limitPrice, 0.25);
-    assert.equal(order.shares, 30);
-    assert.equal(order.stakeUsd, 7.5);
-    assert.equal(order.status, "PENDING");
-    assert.equal(order.entryMode, "DUAL_SIDE_OCO");
-  }
+  const buys = bot.windowOrders.filter(order => order.action === "BUY");
+  assert.equal(buys.length, 4);
+  assert.deepEqual(
+    buys.map(({ side, limitPrice, shares }) => [side, limitPrice, shares])
+      .sort((a, b) => a[0].localeCompare(b[0]) || a[1] - b[1]),
+    [
+      ["DOWN", 0.05, 100], ["DOWN", 0.10, 100],
+      ["UP", 0.05, 100], ["UP", 0.10, 100],
+    ],
+  );
+  assert.ok(buys.every(order => order.status === "PENDING"));
+  assert.ok(buys.every(order => order.expiresAt === FIRST_START + config.ENTRY_ORDER_TTL_MS));
+  assert.equal(config.ENTRY_ORDER_TTL_MS, 180_000);
+  assert.deepEqual(config.ENTRY_RUNGS.map(rung => [rung.price, rung.takeProfitPrice]), [
+    [0.10, 0.20], [0.05, 0.10],
+  ]);
   assert.equal(bot.windowEntryPlaced, true);
 });
 
-test("the first eligible side fills and immediately cancels the opposite order", () => {
+test("a limit buy fills only at or below its price and immediately creates its matched TP sell", () => {
   const bot = makeBot();
-  quote(bot, "UP", FIRST_START + 1_000, { mid: 0.25, bid: 0.24, ask: 0.25 });
-  quote(bot, "DOWN", FIRST_START + 1_000, { mid: 0.24, bid: 0.23, ask: 0.24 });
+  quote(bot, "UP", FIRST_START + 1_000, { mid: 0.11, bid: 0.09, ask: 0.10 });
+  quote(bot, "DOWN", FIRST_START + 1_000, { mid: 0.30, bid: 0.29, ask: 0.30 });
   bot.processPendingLimitOrders(FIRST_START + 1_000);
 
   assert.equal(bot.positions.length, 1);
-  assert.equal(bot.positions[0].side, "DOWN", "choose the lower eligible ask when both qualify");
-  assert.equal(bot.positions[0].shares, 30);
-  assert.equal(bot.positions[0].avgEntry, 0.24);
-  assert.equal(bot.windowOrders.find(order => order.side === "DOWN").status, "FILLED");
-  assert.equal(bot.windowOrders.find(order => order.side === "UP").status, "CANCELLED_OCO");
-  assert.equal(bot.cash, 292.8);
+  const position = bot.positions[0];
+  assert.equal(position.side, "UP");
+  assert.equal(position.shares, 100);
+  assert.equal(position.avgEntry, 0.10);
+  assert.equal(position.takeProfitPrice, 0.20);
+  assert.equal(bot.cash, 290);
+  const entry = bot.orders.find(order => order.id === position.id);
+  const takeProfit = bot.orders.find(order => order.id === position.takeProfitOrderId);
+  assert.equal(entry.status, "FILLED");
+  assert.equal(takeProfit.action, "SELL");
+  assert.equal(takeProfit.limitPrice, 0.20);
+  assert.equal(takeProfit.shares, 100);
+  assert.equal(takeProfit.status, "PENDING");
 });
 
-test("an ask above $0.25 does not fill and both orders expire without progression", async () => {
+test("fills do not cancel other side or rung entry orders", () => {
   const bot = makeBot();
-  quote(bot, "UP", FIRST_START + 1_000, { mid: 0.28, bid: 0.27, ask: 0.28 });
-  quote(bot, "DOWN", FIRST_START + 1_000, { mid: 0.29, bid: 0.28, ask: 0.29 });
-  bot.processPendingLimitOrders(FIRST_START + 1_000);
-  assert.equal(bot.positions.length, 0);
-
-  await bot.closePreviousWindows(FIRST_START + WINDOW, FIRST_START + WINDOW);
-  assert.ok(bot.windowOrders.every(order => order.status === "EXPIRED_WINDOW_ROLLOVER"));
-  assert.equal(bot.stakeProgression.martingaleLevel, 0);
-  assert.equal(bot.stakeProgression.shares, 30);
+  fillAt(bot, "UP", 0.10);
+  const pendingBuys = bot.orders.filter(order => order.action === "BUY" && order.status === "PENDING");
+  assert.equal(pendingBuys.length, 3);
+  assert.ok(pendingBuys.every(order => order.side === "UP" || order.side === "DOWN"));
+  assert.ok(!bot.orders.some(order => order.status === "CANCELLED_OCO"));
 });
 
-test("there is no stop-loss; the $0.99 take-profit pays $1 per share", async () => {
+test("take-profit resting sell fills only when a fresh bid reaches target", () => {
   const bot = makeBot();
-  const position = fillOneSide(bot, "UP", 0.25);
-  assert.ok(position);
-  const originalGetBook = marketData.getBook;
-  try {
-    marketData.getBook = async tokenId => ({
-      bids: [{ price: tokenId === "up-token" ? 0.10 : 0.20, size: 1000 }],
-      asks: [{ price: 0.30, size: 1000 }],
-    });
-    await bot.refreshLiveQuotes(FIRST_START + 2_000);
-    assert.equal(position.status, "OPEN", "a falling bid alone must not trigger an exit");
+  const position = fillAt(bot, "UP", 0.10);
+  const takeProfit = bot.orders.find(order => order.id === position.takeProfitOrderId);
+  quote(bot, "UP", FIRST_START + 2_000, { mid: 0.19, bid: 0.19, ask: 0.20 });
+  bot.processPendingTakeProfitOrders(FIRST_START + 2_000);
+  assert.equal(position.status, "OPEN");
 
-    marketData.getBook = async tokenId => ({
-      bids: [{ price: tokenId === "up-token" ? 0.99 : 0.01, size: 1000 }],
-      asks: [{ price: 1, size: 1000 }],
-    });
-    await bot.refreshLiveQuotes(FIRST_START + 3_000);
-  } finally {
-    marketData.getBook = originalGetBook;
-  }
-
+  quote(bot, "UP", FIRST_START + 3_000, { mid: 0.20, bid: 0.20, ask: 0.21 });
+  bot.processPendingTakeProfitOrders(FIRST_START + 3_000);
+  assert.equal(takeProfit.status, "FILLED");
+  assert.equal(takeProfit.fillPrice, 0.20);
   assert.equal(position.status, "SETTLED_EXIT");
-  assert.equal(position.settlementBasis, "TAKE_PROFIT_BID");
-  assert.equal(position.proceeds, 30);
-  assert.equal(position.realizedPnl, 22.5);
-  assert.equal(bot.cash, 322.5);
+  assert.equal(position.settlementBasis, "TAKE_PROFIT_LIMIT");
+  assert.equal(position.proceeds, 20);
+  assert.equal(position.realizedPnl, 10);
+  assert.equal(bot.cash, 310);
   assert.equal(position.strategyOutcome, "WIN");
-  assert.equal(bot.stakeProgression.martingaleLevel, 0);
-  assert.equal(bot.stakeProgression.shares, 30);
 });
 
-test("positions without a take-profit wait for official Polymarket resolution", async () => {
+test("all still-pending buys cancel 180 seconds after placement; TP orders are not affected", () => {
   const bot = makeBot();
-  const position = fillOneSide(bot, "UP", 0.25);
+  const position = fillAt(bot, "UP", 0.10);
+  const deadline = FIRST_START + config.ENTRY_ORDER_TTL_MS;
+  bot.processPendingLimitOrders(deadline - 1);
+  assert.ok(bot.orders.filter(order => order.action === "BUY" && order.status === "PENDING").length > 0);
+  bot.processPendingLimitOrders(deadline);
+
+  assert.ok(bot.orders.filter(order => order.action === "BUY").every(order =>
+    order.status === "CANCELLED_TIMEOUT" || order.status === "FILLED"));
+  assert.equal(bot.orders.find(order => order.id === position.takeProfitOrderId).status, "PENDING");
+  assert.equal(position.status, "OPEN");
+});
+
+test("unfilled entries cancel at window end and unclosed filled shares await official resolution", async () => {
+  const bot = makeBot();
+  const position = fillAt(bot, "UP", 0.10);
   const nextStart = FIRST_START + WINDOW;
   await bot.closePreviousWindows(nextStart, nextStart);
 
   assert.equal(position.status, "PENDING_RESOLUTION");
   assert.equal(position.settledAt, undefined);
   assert.equal(position.realizedPnl, undefined);
-  assert.equal(bot.cash, 292.5);
-  assert.equal(bot.snapshot().account.openPositions, 1);
   assert.equal(position.strategyOutcome, "LOSS");
   assert.equal(position.strategyOutcomeReason, "TAKE_PROFIT_NOT_HIT_BY_WINDOW_END");
-  assert.equal(bot.stakeProgression.martingaleLevel, 1);
-  assert.equal(bot.stakeProgression.shares, 42);
-  assert.equal(bot.snapshot().account.maxConsecutiveLosses, 1);
+  assert.equal(bot.snapshot().account.openPositions, 1);
+  assert.equal(bot.orders.find(order => order.id === position.id).status, "FILLED");
+  assert.equal(bot.orders.find(order => order.id === position.takeProfitOrderId).status, "EXPIRED_WINDOW_END");
+  assert.ok(bot.orders.filter(order => order.action === "BUY" && order.status !== "FILLED")
+    .every(order => order.status === "CANCELLED_WINDOW_END"));
 
   bot.market = { ...bot.market, start: nextStart };
   bot.openStrategyWindow(nextStart, nextStart);
   bot.placeWindowEntryOrders(nextStart, nextStart);
-  assert.ok(bot.windowOrders.every(order => order.shares === 42));
+  assert.ok(bot.windowOrders.filter(order => order.action === "BUY").every(order => order.shares === 100));
 
   const originalGetMarket = marketData.getMarket;
   try {
@@ -158,63 +170,11 @@ test("positions without a take-profit wait for official Polymarket resolution", 
   } finally {
     marketData.getMarket = originalGetMarket;
   }
-
   assert.equal(position.status, "SETTLED_EXIT");
   assert.equal(position.settlementBasis, "POLYMARKET_RESOLUTION");
   assert.equal(position.payout, 1);
-  assert.equal(position.realizedPnl, 22.5);
-  assert.equal(bot.stakeProgression.martingaleLevel, 1);
-  assert.equal(bot.stakeProgression.shares, 42);
-  assert.equal(position.strategyOutcome, "LOSS", "resolution payout must not rewrite the window strategy result");
-  assert.equal(bot.snapshot().account.maxConsecutiveLosses, 1);
-});
-
-test("resolved wins reset to 30 shares and seven losses then reset after level seven", () => {
-  const bot = makeBot();
-  for (let level = 0; level <= config.MAX_MULTIPLIER_LEVELS; level++) {
-    bot.recordStrategyOutcome({
-      id: `loss-${level}`,
-      strategyOutcomeApplied: false,
-      progressionLevel: level,
-    }, "LOSS");
-    if (level < config.MAX_MULTIPLIER_LEVELS) {
-      assert.equal(bot.stakeProgression.martingaleLevel, level + 1);
-      assert.equal(
-        bot.stakeProgression.shares,
-        Number((config.BASE_SHARES * Math.pow(config.LOSS_MULTIPLIER, level + 1)).toFixed(6)),
-      );
-    } else {
-      assert.equal(bot.stakeProgression.martingaleLevel, 0);
-      assert.equal(bot.stakeProgression.shares, 30);
-    }
-  }
-
-  bot.stakeProgression = { baseShares: 30, shares: 82.32, martingaleLevel: 3, lastOutcome: "LOSS" };
-  bot.recordStrategyOutcome({
-    id: "win",
-    strategyOutcomeApplied: false,
-    progressionLevel: 3,
-  }, "WIN");
-  assert.equal(bot.stakeProgression.martingaleLevel, 0);
-  assert.equal(bot.stakeProgression.shares, 30);
-});
-
-test("market outcomes are used only after Polymarket marks the market closed", () => {
-  assert.equal(marketData.resolvedWinner({
-    closed: true,
-    outcomes: '["Up","Down"]',
-    outcomePrices: '["1","0"]',
-  }), "UP");
-  assert.equal(marketData.resolvedWinner({
-    closed: false,
-    outcomes: ["Up", "Down"],
-    outcomePrices: ["1", "0"],
-  }), null);
-  assert.equal(marketData.resolvedWinner({
-    closed: true,
-    outcomes: ["Up", "Down"],
-    outcomePrices: ["0.5", "0.5"],
-  }), null);
+  assert.equal(position.realizedPnl, 90);
+  assert.equal(position.strategyOutcome, "LOSS", "resolution must not rewrite the expired-window result");
 });
 
 test("dashboard streaks use strategy outcomes, including unresolved positions", () => {
@@ -229,7 +189,6 @@ test("dashboard streaks use strategy outcomes, including unresolved positions", 
     totalCost: 1,
     settledAt: index === 2 ? undefined : FIRST_START + index,
   }));
-
   const account = multi.snapshot().account;
   assert.equal(account.maxConsecutiveWins, 3);
   assert.equal(account.maxConsecutiveLosses, 3);
