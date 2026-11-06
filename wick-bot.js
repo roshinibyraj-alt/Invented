@@ -51,7 +51,6 @@ class WickBot{
     this.windowOrders=[];this.orderWindowStart=null;this.running=false;
     this.windowEntryPlaced=false;
     this.windowEntryOrderIds=[];
-    this.entryOrderDeadline=null;
      this.resolutionAttempts=new Map();
     this.quoteWindowStart=null;this.liveQuotes={UP:{status:'MISSING'},DOWN:{status:'MISSING'}};
     this.closeQuotes=null;
@@ -175,7 +174,6 @@ class WickBot{
     this.windowOrders=[];
     this.windowEntryPlaced=false;
     this.windowEntryOrderIds=[];
-    this.entryOrderDeadline=null;
     this.log('PAPER_LIMIT_LADDER_WINDOW_STARTED',{windowStart:start,timeframe:this.timeframe,
       rungs:cfg.ENTRY_RUNGS});
   }
@@ -183,7 +181,7 @@ class WickBot{
     if(this.completedWindows.has(start)||this.orderWindowStart!==start||this.windowEntryPlaced||
        !this.market||this.market.start!==start)return false;
     this.windowEntryPlaced=true;
-    this.entryOrderDeadline=now+cfg.ENTRY_ORDER_TTL_MS;
+    const windowEnd=start+this.windowMs;
     for(const side of ['UP','DOWN']){
       for(const rung of cfg.ENTRY_RUNGS){
         const quote=this.liveQuotes[side]||{};
@@ -195,7 +193,7 @@ class WickBot{
           entryMode:'FIXED_TWO_SIDED_LIMIT_LADDER',entryType:'LIMIT_LADDER_BUY',
           limitPrice:rung.price,takeProfitPrice:rung.takeProfitPrice,stakeUsd,shares,
           remainingShares:shares,status:'PENDING',createdAt:now,submittedAt:now,
-          quoteAtSubmission:quote.updatedAt||now,expiresAt:this.entryOrderDeadline,
+          quoteAtSubmission:quote.updatedAt||now,expiresAt:windowEnd,
           fee:0,estimatedMakerRebate:makerRebateFor(this.market,rung.price,shares).estimate,
           fillModel:'PAPER_RESTING_LIMIT_ASK_AT_OR_BELOW_LIMIT'};
         this.totalOrderAttempts++;
@@ -204,7 +202,7 @@ class WickBot{
       }
     }
     if(this.orders.length>1000)this.orders.length=1000;
-    this.log('PAPER_LIMIT_LADDER_ORDERS_PLACED',{windowStart:start,expiresAt:this.entryOrderDeadline,
+    this.log('PAPER_LIMIT_LADDER_ORDERS_PLACED',{windowStart:start,expiresAt:windowEnd,
       orders:this.windowOrders.map(order=>({id:order.id,side:order.side,price:order.limitPrice,shares:order.shares}))});
     return true;
   }
@@ -218,22 +216,17 @@ class WickBot{
     this.log('PAPER_POSITION_OUTCOME_RECORDED',{positionId:position.id,outcome,reason});
   }
   processPendingLimitOrders(now){
-    let timedOut=0;
     for(const order of this.orders){
       if(order.status!=='PENDING'||order.action!=='BUY')continue;
       if(this.completedWindows.has(order.windowStart)){
         order.status='CANCELLED_WINDOW_END';order.expiredAt=now;order.remainingShares=0;continue;
       }
-      if(now>=order.expiresAt||now>=order.windowStart+this.windowMs){
-        order.status=now>=order.windowStart+this.windowMs?'CANCELLED_WINDOW_END':'CANCELLED_TIMEOUT';
+      if(now>=order.windowStart+this.windowMs){
+        order.status='CANCELLED_WINDOW_END';
         order.cancelledAt=now;order.remainingShares=0;
-        order.cancelReason=order.status==='CANCELLED_TIMEOUT'
-          ?'Not filled within 180 seconds of placement.':'Window ended before the entry filled.';
-        timedOut++;
+        order.cancelReason='Window ended before the entry filled.';
       }
     }
-    if(timedOut)this.log('PAPER_ENTRY_ORDERS_CANCELLED_TIMEOUT',{
-      windowStart:this.orderWindowStart,count:timedOut,timeoutMs:cfg.ENTRY_ORDER_TTL_MS});
     if(!this.market)return;
     const candidates=this.orders.filter(order=>order.status==='PENDING'&&
       order.action==='BUY'&&
@@ -445,7 +438,7 @@ class WickBot{
         return {now,mode:'DEMO ONLY',status:this.status,error:this.error,
            strategy:{timeframe:this.timeframe,market:'Polymarket BTC 5-minute UP/DOWN',capital:this.capital,
               entries:{orderType:'LIMIT',sideIndependent:true,entryPlaced:this.windowEntryPlaced,
-                timeoutMs:cfg.ENTRY_ORDER_TTL_MS,expiresAt:this.entryOrderDeadline,
+                expiresAt:this.market?this.market.start+this.windowMs:null,
                 totalOrders:this.windowEntryOrderIds.length,
                 rungs:cfg.ENTRY_RUNGS.map(rung=>({...rung})),
                 orders:this.windowOrders.filter(order=>order.action==='BUY').map(order=>({
@@ -458,9 +451,9 @@ class WickBot{
                   entryPrice:rung.price,takeProfitPrice:rung.takeProfitPrice,shares:rung.shares})),
                 stopLoss:null,
                 windowEnd:'Cancel remaining orders; hold any position without a take-profit fill for original-market resolution.'},
-              timing:'At window start, place 100-share UP and DOWN limit buys at $0.10 and $0.05. Cancel unfilled buys 180 seconds after placement.',
+              timing:'At window start, place 100-share UP and DOWN limit buys at $0.10 and $0.05. Keep unfilled buys active until the window ends.',
                fill:'Each buy fills independently when a newer fresh ask is at or below its limit, and books at exactly the posted limit price. Each fill immediately receives its matching resting limit take-profit sell, which fills at exactly its posted target when a fresh bid reaches or exceeds it; no OCO cancellation.',
-              unfilled:'Any unfilled buy is cancelled after 180 seconds. Filled shares that miss take-profit by window end wait for official Polymarket resolution.',
+              unfilled:'Unfilled buys are cancelled only at window end. Filled shares that miss take-profit by window end wait for official Polymarket resolution.',
               fees:'Limit buys and take-profit sells use the illustrative maker-rebate estimate; official resolution has no exit fee.',
              execution:'PAPER ONLY'},
          account:{capital:this.capital,cash:this.cash,realizedPnl,unrealizedPnl,equity:this.cash+markedValue,takerFees,estimatedMakerRebate,
@@ -478,7 +471,7 @@ class WickBot{
        inventory,positions:this.positions.slice(0,50),orders:this.orders.slice(0,100),events:this.events};
   }
          start(){if(this.running)return;this.running=true;this.log('BOT_STARTED',{timeframe:this.timeframe,
-          note:'Paper-only BTC 5-minute two-sided limit ladder: $0.10/$0.05 buys, matched $0.20/$0.10 take-profit sells, 180-second entry timeout.'});
+          note:'Paper-only BTC 5-minute two-sided limit ladder: $0.10/$0.05 buys, matched $0.20/$0.10 take-profit sells; unfilled entries remain active until window end.'});
     const loop=async()=>{if(!this.running)return;await this.tick();if(this.running)this.timer=setTimeout(loop,cfg.POLL_INTERVAL_MS)};
     void loop();}
   stop(){this.running=false;clearTimeout(this.timer)}

@@ -56,7 +56,7 @@ test('dashboard shows the limit-ladder strategy and both highest-streak metrics'
   assert.match(html,/TP missed by window end/);
   assert.match(html,/LOSS · TP not hit by window end/);
   assert.doesNotMatch(html,/LOSS · TP missed by expiry/);
-  assert.match(html,/180 seconds after placement/);
+  assert.match(html,/remain active until the window ends/);
   assert.match(html,/maxConsecutiveWins/);
   assert.match(html,/maxConsecutiveLosses/);
   assert.match(html,/four independent resting limit buys/);

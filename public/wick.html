@@ -43,7 +43,7 @@
  <section class="panel"><h2>Active market windows</h2><div id="timeframe-panels" class="windows"></div></section>
  <section class="panel"><h2>Floating positions · live own-side marks</h2><p class="small section-note">Open shares are marked using their own-side best bid. Stale or missing marks are not shown as current unrealized P&amp;L.</p><div id="openPositions" class="table-wrap"></div><h2 class="subhead">Recent closed trades · realized P&amp;L</h2><div id="closedPositions" class="table-wrap"></div></section>
  <section class="panel"><h2>Recent bot events</h2><div id="events"></div></section>
-    <p class="small">At the start of each BTC 5-minute window, the bot places four independent resting limit buys: 100 shares on UP and DOWN at $0.10, plus 100 shares on UP and DOWN at $0.05. Each filled buy immediately gets its own resting limit take-profit sell: $0.20 for a $0.10 entry and $0.10 for a $0.05 entry. There is no stop-loss and no opposite-side cancellation. All unfilled buy orders are cancelled 180 seconds after placement. Filled shares whose take-profit does not fill before the window ends wait for official Polymarket resolution. This is demo-only; paper history resets on process restart.</p>
+    <p class="small">At the start of each BTC 5-minute window, the bot places four independent resting limit buys: 100 shares on UP and DOWN at $0.10, plus 100 shares on UP and DOWN at $0.05. Each filled buy immediately gets its own resting limit take-profit sell: $0.20 for a $0.10 entry and $0.10 for a $0.05 entry. There is no stop-loss and no opposite-side cancellation. Unfilled buy orders remain active until the window ends, then are cancelled. Filled shares whose take-profit does not fill before the window ends wait for official Polymarket resolution. This is demo-only; paper history resets on process restart.</p>
  <div class="err" id="error"></div>
 </main>
 <script>
@@ -79,8 +79,7 @@ setInterval(paintCountdown,250);
     const positions=(t.positions||[]).filter(p=>p.windowStart===w.start&&p.status==='OPEN');
     const remaining=w.end?Math.max(0,Math.floor((w.end-Date.now())/1000)):0;
     const entryOrder=orders.map(o=>`${o.action||'BUY'} ${o.side} ${px(o.limitPrice)} · ${sharesFmt(o.shares)} shares · ${o.status}`).join(' · ')||'No orders yet';
-    const timeoutSeconds=entries.expiresAt?Math.max(0,Math.ceil((entries.expiresAt-Date.now())/1000)):null;
-    const timeoutLabel=timeoutSeconds==null?'Not placed':timeoutSeconds>0?`${timeoutSeconds}s remaining`:'Expired';
+    const entryEnd=entries.expiresAt?new Date(entries.expiresAt).toLocaleTimeString():'—';
     const trigger=signal.reason||'Waiting for the BTC window';
     return `<article class="card window bot-card"><h2>BTC ${esc(tf)} · ${esc(w.slug||'Waiting for market')}</h2>
       <div class="metric"><span>Status</span><b>${esc(t.status||'starting')}</b></div>
@@ -88,7 +87,7 @@ setInterval(paintCountdown,250);
       <div class="metric"><span>UP / DOWN midpoint</span><b>${px(quotes.UP?.mid)} / ${px(quotes.DOWN?.mid)}</b></div>
       <div class="metric"><span>Entry plan</span><b>${esc(trigger)}</b></div>
       <div class="metric"><span>Order activity</span><b>${esc(entryOrder)}</b></div>
-      <div class="metric"><span>Unfilled buy timeout</span><b>${esc(timeoutLabel)} · 180s</b></div>
+      <div class="metric"><span>Unfilled buy cutoff</span><b>Window end · ${esc(entryEnd)}</b></div>
       <div class="metric"><span>Exit rules</span><b>$0.10 entry → $0.20 TP · $0.05 entry → $0.10 TP · no stop-loss</b></div>
       <div class="metric"><span>Open shares / paper cash</span><b>${positions.reduce((n,p)=>n+Number(p.shares||0),0)} / ${usd(t.account?.cash)}</b></div>
     </article>`;

@@ -64,8 +64,7 @@ test("window start places four independent 100-share limit buys", () => {
     ],
   );
   assert.ok(buys.every(order => order.status === "PENDING"));
-  assert.ok(buys.every(order => order.expiresAt === FIRST_START + config.ENTRY_ORDER_TTL_MS));
-  assert.equal(config.ENTRY_ORDER_TTL_MS, 180_000);
+  assert.ok(buys.every(order => order.expiresAt === FIRST_START + WINDOW));
   assert.deepEqual(config.ENTRY_RUNGS.map(rung => [rung.price, rung.takeProfitPrice]), [
     [0.10, 0.20], [0.05, 0.10],
   ]);
@@ -131,16 +130,16 @@ test("take-profit resting sell fills only when a fresh bid reaches target", () =
   assert.equal(position.strategyOutcome, "WIN");
 });
 
-test("all still-pending buys cancel 180 seconds after placement; TP orders are not affected", () => {
+test("pending buys remain active until window end; TP orders are not affected", () => {
   const bot = makeBot();
   const position = fillAt(bot, "UP", 0.10);
-  const deadline = FIRST_START + config.ENTRY_ORDER_TTL_MS;
-  bot.processPendingLimitOrders(deadline - 1);
+  const beforeWindowEnd = FIRST_START + WINDOW - 1;
+  bot.processPendingLimitOrders(beforeWindowEnd);
   assert.ok(bot.orders.filter(order => order.action === "BUY" && order.status === "PENDING").length > 0);
-  bot.processPendingLimitOrders(deadline);
+  bot.processPendingLimitOrders(FIRST_START + WINDOW);
 
   assert.ok(bot.orders.filter(order => order.action === "BUY").every(order =>
-    order.status === "CANCELLED_TIMEOUT" || order.status === "FILLED"));
+    order.status === "CANCELLED_WINDOW_END" || order.status === "FILLED"));
   assert.equal(bot.orders.find(order => order.id === position.takeProfitOrderId).status, "PENDING");
   assert.equal(position.status, "OPEN");
 });
