@@ -48,7 +48,7 @@ class WickBot{
     this.timeframe=timeframe;this.windowMs=windowMs;this.capital=capital;this.cash=capital;
     this.strategyId=strategyId;this.strategyName=strategyName;
     this.rules={entryLimitPrice:cfg.ENTRY_LIMIT_PRICE,
-      entryFillFallbackMs:cfg.ENTRY_FILL_FALLBACK_MS,sharesPerSide:cfg.ENTRY_SHARES,
+      sharesPerSide:cfg.ENTRY_SHARES,
       takeProfitInitialPrice:cfg.TAKE_PROFIT_PRICE,
       takeProfitPayoutThreshold:cfg.TAKE_PROFIT_PAYOUT_THRESHOLD,
       takeProfitPayout:cfg.TAKE_PROFIT_PAYOUT,takeProfitDelayMs:0,
@@ -200,7 +200,6 @@ class WickBot{
       signalScanLeadMs:this.rules.signalScanLeadMs,
       signalCompareLeadMs:this.rules.signalCompareLeadMs,
       entryLimitPrice:this.rules.entryLimitPrice,
-      entryFillFallbackMs:this.rules.entryFillFallbackMs,
       shares:this.rules.sharesPerSide});
   }
   processStrategyEntry(){return false}
@@ -420,7 +419,7 @@ class WickBot{
                    sideSelection:'Final 57-second BTC move versus the previous closed one-minute candle: higher UP; otherwise DOWN.',
                   sharesPerSide:this.rules.sharesPerSide,
                   limitPrice:this.rules.entryLimitPrice,
-                  fillFallbackAfterMs:this.rules.entryFillFallbackMs,
+                   fillPolicy:'Fresh visible ask liquidity at or below the limit price only.',
                   signalScanSecondsBeforeWindow:this.rules.signalScanLeadMs/1000,
                   signalCompareSecondsBeforeWindow:this.rules.signalCompareLeadMs/1000,
                   triggerPriceSource:'live BTC price versus previous closed one-minute candle close',
@@ -438,7 +437,8 @@ class WickBot{
                  timing:'Compare BTC at T−3 seconds with the previous closed 1-minute candle; submit a $0.45 limit buy on the signalled side at window open.',
                  sizing:`${this.rules.sharesPerSide} shares on the signalled side at a $${this.rules.entryLimitPrice.toFixed(2)} limit.`,
                  trigger:'At T−3s, compare BTC with the previous closed 1-minute candle close: higher is green/UP; equal or lower is red/DOWN. This represents the final 57 seconds.',
-                unfilled:`Use actual ask fills at or below $${this.rules.entryLimitPrice.toFixed(2)} and record better prices. If any shares remain unfilled after ${this.rules.entryFillFallbackMs/1000}s, paper-fill the remainder at the limit. Shares without TP fills by window end await official Polymarket resolution.`,
+                 fillPolicy:`Paper fills require fresh, visible ask liquidity at or below $${this.rules.entryLimitPrice.toFixed(2)}. Only observed available shares fill; the remaining order stays pending and is cancelled at window end.`,
+                 unfilled:`Only fresh visible ask liquidity at or below $${this.rules.entryLimitPrice.toFixed(2)} fills, at the observed ask price. Unfilled shares remain pending until the order is cancelled at window end; no timeout or assumed fill is used. Shares without TP fills by window end await official Polymarket resolution.`,
                 fees:'Limit buys and sells have no taker fees. The paper account credits an estimated maker rebate on fills.',
               execution:'PAPER ONLY'},
          account:{capital:this.capital,cash:this.cash,realizedPnl,unrealizedPnl,equity:this.cash+markedValue,takerFees,estimatedMakerRebate,

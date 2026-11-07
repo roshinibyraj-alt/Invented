@@ -103,7 +103,7 @@ class SignalLimitBot extends WickBot {
       orderType:'LIMIT',entryMode:'CANDLE_SIGNAL_LIMIT_BUY',entryType:'LIMIT_MAKER_BUY',
       limitPrice:this.rules.entryLimitPrice,requestedShares:this.rules.sharesPerSide,
       shares:this.rules.sharesPerSide,filledShares:0,remainingShares:this.rules.sharesPerSide,
-      createdAt:now,submittedAt:now,fillFallbackAt:now+this.rules.entryFillFallbackMs,
+      createdAt:now,submittedAt:now,
       expiresAt:start+this.windowMs,status:'PENDING',fee:0,estimatedMakerRebate:0,
     };
     this.entryOrderPlaced=true;
@@ -113,7 +113,8 @@ class SignalLimitBot extends WickBot {
     this.windowOrders.unshift(order);
     this.log('PAPER_SIGNAL_LIMIT_ORDER_PLACED',{
       id,side,limitPrice:order.limitPrice,shares:order.shares,
-      fallbackAt:order.fillFallbackAt,expiresAt:order.expiresAt,
+      fillPolicy:'fresh visible ask liquidity at or below limit only',
+      expiresAt:order.expiresAt,
     });
   }
 
@@ -152,16 +153,11 @@ class SignalLimitBot extends WickBot {
         const shares=Math.min(order.remainingShares,level.size);
         if(shares<=0)continue;
         level.size-=shares;
-        this.applySignalLimitFill(order,shares,level.price,now,false);
+        this.applySignalLimitFill(order,shares,level.price,now);
         filled=true;
       }
     }
 
-    if(order.remainingShares>1e-9&&now>=order.fillFallbackAt){
-      const fallbackShares=order.remainingShares;
-      this.applySignalLimitFill(order,fallbackShares,order.limitPrice,now,true);
-      filled=true;
-    }
     if(order.remainingShares<=1e-9){
       order.remainingShares=0;
       order.status='FILLED';
@@ -172,7 +168,7 @@ class SignalLimitBot extends WickBot {
     return filled;
   }
 
-  applySignalLimitFill(order,shares,price,now,timeoutFallback){
+  applySignalLimitFill(order,shares,price,now){
     const safeShares=Number(shares.toFixed(6));
     const safePrice=Number(price.toFixed(6));
     const cost=Number((safeShares*safePrice).toFixed(6));
@@ -198,10 +194,11 @@ class SignalLimitBot extends WickBot {
         side:order.side,tokenId:order.tokenId,entryKey:order.id,
         entryLabel:`${order.side} $${order.limitPrice.toFixed(2)} signal limit · ${order.requestedShares} shares`,
         entryMode:order.entryMode,entryType:order.entryType,phase:'signal-limit',
+        entryFillSource:'VISIBLE_ASK_DEPTH_AT_OR_BELOW_LIMIT',
         strategyId:this.strategyId,strategyName:this.strategyName,
         takeProfitThreshold:this.rules.takeProfitInitialPrice,
         takeProfitPrice:this.rules.takeProfitInitialPrice,takeProfitPendingAt:order.windowStart,
-        orderType:'LIMIT',fillModel:'PAPER_LIMIT_BETTER_PRICE_OR_TIMEOUT',
+        orderType:'LIMIT',fillModel:'PAPER_VISIBLE_ASK_DEPTH_AT_OR_BELOW_LIMIT',
         shares:0,requestedShares:order.requestedShares,initialShares:order.requestedShares,
         avgEntry:safePrice,fillPrice:safePrice,cost:0,totalCost:0,fees:0,exitFees:0,
         estimatedMakerRebate:0,status:'OPEN',submittedAt:order.submittedAt,
@@ -244,10 +241,10 @@ class SignalLimitBot extends WickBot {
     order.lastFillAt=now;
     order.lastFillPrice=safePrice;
     order.lastFillShares=safeShares;
-    order.lastFillWasFallback=timeoutFallback;
+    order.lastFillSource='VISIBLE_ASK_DEPTH_AT_OR_BELOW_LIMIT';
     this.cash=Number((this.cash-cost+rebate).toFixed(6));
 
-    this.log(timeoutFallback?'PAPER_SIGNAL_LIMIT_TIMEOUT_FILLED':'PAPER_SIGNAL_LIMIT_BETTER_PRICE_FILLED',{
+    this.log('PAPER_SIGNAL_LIMIT_VISIBLE_ASK_FILLED',{
       id:order.id,positionId:position.id,side:order.side,shares:safeShares,
       fillPrice:safePrice,limitPrice:order.limitPrice,cost,fees:0,
       makerRebateCredited:rebate,remainingShares:order.remainingShares,

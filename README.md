@@ -7,9 +7,8 @@ A single BTC 5-minute paper strategy with a $10,000 demo account. It sends no li
 - During the final 10 seconds before a window opens, scan the upcoming market and candle feed.
 - At T−3 seconds, compare live BTC with the previous completed one-minute candle close. This uses the final 57 seconds of the ending window: higher means UP; equal or lower means DOWN.
 - At the first bot poll at or just after window open (500ms polling), place one $0.45 limit buy for 500 shares on the signalled side.
-- If fresh ask depth is available at or below $0.45, book the actual better ask price. The paper model charges no taker fee and credits an estimated maker rebate.
-- If shares remain unfilled one second after order placement, paper-fill the remainder at $0.45 and credit the estimated maker rebate. This is a simulation rule, not a guaranteed real-market fill.
-- The buy order expires at the market window's end.
+- Fill only against fresh, visible ask depth at or below $0.45, at the observed ask price and up to the observed available shares. The paper model charges no taker fee and credits an estimated maker rebate.
+- There is no timeout fill or assumed fill. Any unfilled remainder stays pending until the market window ends, then is cancelled.
 
 ## Exit and account
 
@@ -18,6 +17,7 @@ A single BTC 5-minute paper strategy with a $10,000 demo account. It sends no li
 - Shares without a TP fill by window end wait for the original market's official resolution.
 - The dashboard shows the single account's cash, equity, win rate, equity curve, open positions, UP/DOWN inventory, limit-order status, fees, and estimated maker rebate.
 - Paper account history is held in process memory and resets on restart or redeployment.
+- Paper fills are simulations based on observed order-book depth; they are not confirmation of a real order or trade.
 
 ## Run and verify
 
