@@ -3,17 +3,18 @@
 const cfg=require('./config');
 const Bot=require('./wick-bot');
 const PrebuyBot=require('./prebuy-bot');
+const {feed:chainlinkFeed}=require('./chainlink-feed');
 
 class MultiBot {
   constructor(){
     this.bots={
       'trigger-5m':new Bot({timeframe:'5m',windowMs:cfg.WINDOW_MS_5M,
         capital:cfg.DEMO_CAPITAL,strategyId:'trigger-5m',
-        strategyName:'4-minute paired market-buy strategy'}),
+        strategyName:'4-minute two-rung limit strategy'}),
       'prebuy-5m':new PrebuyBot(),
     };
   }
-  start(){for(const bot of Object.values(this.bots))bot.start()}
+  start(){chainlinkFeed.start();for(const bot of Object.values(this.bots))bot.start()}
   stop(){for(const bot of Object.values(this.bots))bot.stop()}
   snapshot(){
     const strategies=Object.fromEntries(Object.entries(this.bots).map(([k,b])=>[k,b.snapshot()]));

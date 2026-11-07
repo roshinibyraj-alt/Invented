@@ -69,7 +69,7 @@
    <div class="small" id="realBalanceStatus">Connecting to the live account balance…</div>
  </section>
  <section class="panel"><h2>Floating positions · live own-side marks</h2><p class="small section-note">Open shares are marked using their own-side best bid. Stale or missing marks are not shown as current unrealized P&amp;L.</p><div id="openPositions" class="table-wrap"></div><h2 class="subhead">Recent closed trades · realized P&amp;L</h2><div id="closedPositions" class="table-wrap"></div></section>
-    <p class="small">Both strategies are paper-only. The 4-minute strategy waits until 4:00, then checks every tick. If either fresh best ask is strictly above $0.42 and below $0.59, it market-buys 300 UP and 300 DOWN shares. The pre-buy strategy attempts 500 shares on each side 10 seconds before the next window and places both $0.70 take-profit limits one second after the window opens. When either strategy's first take-profit fills, that strategy's opposite-side take profit moves to $0.99, counted as $1 per share. Positions without a TP fill by window end wait for official Polymarket resolution. Each demo account has separate balances and performance. Paper history resets on process restart.</p>
+    <p class="small">Both strategies are paper-only. At 4:00, the first strategy places 300-share UP and DOWN limit buys at $0.20 and $0.10, with matching $0.80 and $0.90 take-profit sells. When a take-profit fills, the other side's pending take-profits move to $0.99, counted as $1 per share. The pre-buy strategy reads the latest fully closed one-minute BTC candle five seconds before a 5-minute window, then market-buys 500 shares on the signaled side two seconds before open: green means UP, red means DOWN, and a doji skips entry. One second after open, it places a $0.70 take-profit. Positions without a TP fill by window end wait for official Polymarket resolution. Each demo account has separate balances and performance. Paper history resets on process restart.</p>
  <div class="err" id="error"></div>
 </main>
 <script>
@@ -172,6 +172,11 @@ function strategyPanel(id,t){
     ['Trades settled',`${a.settledTrades??0} / ${a.totalTrades??0}`],
     ['Open positions',a.openPositions??0],
   ];
+  const entrySize=isPrebuy?'500 shares on the candle-signaled side':
+    '300 shares per side at each limit rung';
+  const takeProfit=isPrebuy
+    ?`${px(exit.initialTakeProfitPrice)} after ${exit.takeProfitDelayMs/1000}s; no opposite side`
+    :'$0.20 entry → $0.80 TP; $0.10 entry → $0.90 TP; opposite side moves to $0.99 after a TP fill';
   return `<article class="strategy-card ${isPrebuy?'prebuy':''}" data-testid="card-strategy-${esc(id)}">
     <div class="strategy-head"><div><div class="strategy-title">${esc(s.name||id)}</div>
       <div class="strategy-status">${esc(String(t.status||'waiting').replaceAll('_',' '))} · ${esc(windowLabel)}</div></div>
@@ -180,9 +185,9 @@ function strategyPanel(id,t){
     <div class="strategy-chart"><h3>Equity curve</h3><div class="chart-wrap">${equitySvg(a.equityCurve)}</div></div>
     <div class="strategy-rules">
       <div class="metric"><span>Entry timing</span><b>${esc(s.timing||'—')}</b></div>
-      <div class="metric"><span>Entry size</span><b>${esc(s.sizing||'—')}</b></div>
+      <div class="metric"><span>Entry size</span><b>${esc(entrySize)}</b></div>
       <div class="metric"><span>Entry rule</span><b>${esc(s.trigger||'—')}</b></div>
-      <div class="metric"><span>Take profit</span><b>${px(exit.initialTakeProfitPrice)}${exit.takeProfitDelayMs?` after ${exit.takeProfitDelayMs/1000}s`:''}; opposite ${px(exit.oppositeTakeProfitAfterFirstFill)}</b></div>
+      <div class="metric"><span>Take profit</span><b>${esc(takeProfit)}</b></div>
     </div>
     <div class="strategy-quotes">
       <div class="strategy-quote up"><div class="strategy-quote-title">UP · best ask</div><div class="strategy-quote-price">${px(q.UP?.bestAsk)}</div></div>

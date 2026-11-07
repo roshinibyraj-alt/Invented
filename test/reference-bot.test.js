@@ -41,7 +41,7 @@ function quote(bot, side, updatedAt, { bid, ask, bidSize = 1000, askSize = 1000,
   };
 }
 
-function quotePair(bot, updatedAt, { upBid = 0.19, upAsk = 0.20, downBid = 0.29, downAsk = 0.30, upLevels, downLevels } = {}) {
+function quotePair(bot, updatedAt, { upBid = 0.49, upAsk = 0.50, downBid = 0.59, downAsk = 0.60, upLevels, downLevels } = {}) {
   quote(bot, "UP", updatedAt, { bid: upBid, ask: upAsk, askLevels: upLevels });
   quote(bot, "DOWN", updatedAt, { bid: downBid, ask: downAsk, askLevels: downLevels });
 }
@@ -67,84 +67,103 @@ test("both independent strategies use separate $10,000 demo accounts on BTC 5-mi
   assert.deepEqual(multi.snapshot().strategy.timeframes, ["5m"]);
 });
 
-test("prebuy strategy selects the next market 10 seconds before its window", () => {
+test("prebuy scans the next market and uses separate signal and entry times", () => {
   const bot = new PrebuyBot();
   const currentStart = FIRST_START;
   assert.equal(bot.getWindowStartToScan(currentStart + WINDOW_5M - 10_001, currentStart),
     currentStart);
-  assert.equal(bot.getWindowStartToScan(currentStart + WINDOW_5M - 10_000, currentStart),
+  assert.equal(bot.getWindowStartToScan(currentStart + WINDOW_5M - config.PREBUY_SCAN_LEAD_MS, currentStart),
     currentStart + WINDOW_5M);
   assert.equal(bot.getWindowStartToScan(currentStart + WINDOW_5M, currentStart + WINDOW_5M),
     currentStart + WINDOW_5M);
+  assert.equal(config.PREBUY_SIGNAL_LEAD_MS, 5000);
+  assert.equal(config.PREBUY_ORDER_LEAD_MS, 2000);
 });
 
-test("prebuy buys 500 shares on each side before open and activates $0.70 TPs at second one", async () => {
-  const bot = new PrebuyBot();
-  bot.log = () => {};
+test("green closed candle buys UP at two seconds before open and activates $0.70 TP at second one", () => {
   const start = FIRST_START + WINDOW_5M;
+  const candleFeed = { getMinuteCandles: () => [
+    { t: start - 120_000, o: 100, c: 101 },
+    { t: start - 60_000, o: 101, c: 99 },
+  ] };
+  const bot = new PrebuyBot({ candleFeed });
+  bot.log = () => {};
   bot.market = {
     id: "5m-prebuy-market", slug: "btc-updown-5m-prebuy",
     title: "BTC 5m prebuy test", start,
     tokens: { UP: "up-token", DOWN: "down-token" },
     feesEnabled: false,
   };
-  const entryAt = start - config.PREBUY_LEAD_MS;
-  bot.openStrategyWindow(start, entryAt);
-  quotePair(bot, entryAt, { upAsk: 0.40, downAsk: 0.60 });
+  const scanAt = start - config.PREBUY_SCAN_LEAD_MS;
+  bot.openStrategyWindow(start, scanAt);
+  quotePair(bot, scanAt, { upAsk: 0.40, downAsk: 0.60 });
 
-  assert.equal(bot.processPairedEntry(entryAt), true);
-  assert.equal(bot.positions.length, 2);
-  await bot.closePreviousWindows(start - WINDOW_5M, entryAt);
-  assert.ok(bot.positions.every(position => position.status === "OPEN"),
-    "the upcoming market's pre-bought positions must not be closed by the previous window");
-  assert.ok(bot.positions.every(position => position.shares === 500));
-  assert.ok(bot.positions.every(position => position.strategyId === "prebuy-5m"));
-  assert.equal(bot.orders.filter(order => order.action === "BUY").length, 2);
+  assert.equal(bot.processPairedEntry(scanAt), false);
+  const signalAt = start - config.PREBUY_SIGNAL_LEAD_MS;
+  assert.equal(bot.processPairedEntry(signalAt), false);
+  assert.equal(bot.entryTriggerSide, "UP");
+  assert.equal(bot.entryTriggerCandle.close, 101,
+    "the still-forming latest minute must not replace the last closed candle");
+
+  const orderAt = start - config.PREBUY_ORDER_LEAD_MS;
+  quotePair(bot, orderAt, { upAsk: 0.40, downAsk: 0.60 });
+  assert.equal(bot.processPairedEntry(orderAt), true);
+  assert.equal(bot.positions.length, 1);
+  assert.equal(bot.positions[0].side, "UP");
+  assert.equal(bot.positions[0].shares, 500);
+  assert.equal(bot.positions[0].filledAt, orderAt);
+  assert.equal(bot.positions[0].strategyId, "prebuy-5m");
+  assert.equal(bot.orders.filter(order => order.action === "BUY").length, 1);
   assert.equal(bot.orders.filter(order => order.action === "SELL").length, 0,
     "TP limits are deferred until one second after the window opens");
-  assert.equal(bot.activateDeferredTakeProfits(start + 999), false);
-  assert.equal(bot.activateDeferredTakeProfits(start + 1000), true);
+  assert.equal(bot.activateDeferredTakeProfits(start + config.PREBUY_TAKE_PROFIT_DELAY_MS - 1), false);
+  assert.equal(bot.activateDeferredTakeProfits(start + config.PREBUY_TAKE_PROFIT_DELAY_MS), true);
 
   const takeProfits = bot.orders.filter(order => order.action === "SELL");
-  assert.equal(takeProfits.length, 2);
-  assert.ok(takeProfits.every(order => order.limitPrice === 0.70));
-  assert.equal(bot.activateDeferredTakeProfits(start + 1001), false,
+  assert.equal(takeProfits.length, 1);
+  assert.equal(takeProfits[0].limitPrice, 0.70);
+  assert.equal(bot.activateDeferredTakeProfits(start + config.PREBUY_TAKE_PROFIT_DELAY_MS + 1), false,
     "activation must not create duplicate take-profit orders");
 });
 
-test("prebuy first TP fill moves only the opposite TP to $0.99", () => {
-  const bot = new PrebuyBot();
-  bot.log = () => {};
+test("red candle buys only DOWN and a doji skips the pre-buy", () => {
   const start = FIRST_START + WINDOW_5M;
+  const redFeed = { getMinuteCandles: () => [{ t: start - 120_000, o: 101, c: 100 }] };
+  const bot = new PrebuyBot({ candleFeed: redFeed });
+  bot.log = () => {};
   bot.market = {
     id: "5m-prebuy-market", slug: "btc-updown-5m-prebuy",
     title: "BTC 5m prebuy test", start,
     tokens: { UP: "up-token", DOWN: "down-token" },
     feesEnabled: false,
   };
-  const entryAt = start - config.PREBUY_LEAD_MS;
-  bot.openStrategyWindow(start, entryAt);
-  quotePair(bot, entryAt, { upAsk: 0.40, downAsk: 0.60 });
-  bot.processPairedEntry(entryAt);
-  bot.activateDeferredTakeProfits(start + config.PREBUY_TAKE_PROFIT_DELAY_MS);
-  const up = bot.positions.find(position => position.side === "UP");
-  const down = bot.positions.find(position => position.side === "DOWN");
-  const downTp = bot.orders.find(order => order.action === "SELL" && order.side === "DOWN");
+  const scanAt = start - config.PREBUY_SCAN_LEAD_MS;
+  bot.openStrategyWindow(start, scanAt);
+  quotePair(bot, start - config.PREBUY_ORDER_LEAD_MS);
+  bot.processPairedEntry(start - config.PREBUY_SIGNAL_LEAD_MS);
+  assert.equal(bot.entryTriggerSide, "DOWN");
+  assert.equal(bot.processPairedEntry(start - config.PREBUY_ORDER_LEAD_MS), true);
+  assert.equal(bot.positions.length, 1);
+  assert.equal(bot.positions[0].side, "DOWN");
 
-  quote(bot, "UP", start + 1200, { bid: 0.70, ask: 0.72 });
-  quote(bot, "DOWN", start + 1200, { bid: 0.65, ask: 0.67 });
-  bot.processPendingTakeProfitOrders(start + 1200);
-  assert.equal(up.status, "SETTLED_EXIT");
-  assert.equal(down.status, "OPEN");
-  assert.equal(downTp.limitPrice, 0.99);
-  assert.equal(down.takeProfitPrice, 0.99);
+  const dojiBot = new PrebuyBot({ candleFeed: {
+    getMinuteCandles: () => [{ t: start - 120_000, o: 100, c: 100 }],
+  } });
+  dojiBot.log = () => {};
+  dojiBot.market = { ...bot.market, start };
+  dojiBot.openStrategyWindow(start, scanAt);
+  quotePair(dojiBot, start - config.PREBUY_ORDER_LEAD_MS);
+  dojiBot.processPairedEntry(start - config.PREBUY_SIGNAL_LEAD_MS);
+  assert.equal(dojiBot.entryAttemptMissed, true);
+  assert.equal(dojiBot.positions.length, 0);
 });
 
-test("prebuy tick fetches the upcoming market early and keeps positions through its open", async () => {
-  const bot = new PrebuyBot();
-  bot.log = () => {};
+test("prebuy tick scans early, reads the candle at five seconds, and buys at two seconds", async () => {
   const start = FIRST_START + WINDOW_5M;
-  let now = start - config.PREBUY_LEAD_MS;
+  const candleFeed = { getMinuteCandles: () => [{ t: start - 120_000, o: 100, c: 101 }] };
+  const bot = new PrebuyBot({ candleFeed });
+  bot.log = () => {};
+  let now = start - config.PREBUY_SCAN_LEAD_MS;
   const originalNow = Date.now;
   const originalGetBtcMarket = marketData.getBtcMarket;
   const originalGetBook = marketData.getBook;
@@ -161,19 +180,23 @@ test("prebuy tick fetches the upcoming market early and keeps positions through 
   });
   try {
     await bot.tick();
-    assert.equal(bot.positions.length, 2);
-    assert.ok(bot.positions.every(position => position.status === "OPEN"));
+    assert.equal(bot.positions.length, 0);
 
-    now = start - 100;
+    now = start - config.PREBUY_SIGNAL_LEAD_MS;
     await bot.tick();
-    assert.ok(bot.positions.every(position => position.status === "OPEN"),
-      "the future window's positions remain open immediately before the boundary");
+    assert.equal(bot.entryTriggerSide, "UP");
+    assert.equal(bot.positions.length, 0);
+
+    now = start - config.PREBUY_ORDER_LEAD_MS;
+    await bot.tick();
+    assert.equal(bot.positions.length, 1);
+    assert.equal(bot.positions[0].side, "UP");
+    assert.equal(bot.positions[0].shares, 500);
 
     now = start + config.PREBUY_TAKE_PROFIT_DELAY_MS;
     await bot.tick();
-    assert.equal(bot.orders.filter(order => order.action === "SELL").length, 2);
-    assert.ok(bot.orders.filter(order => order.action === "SELL")
-      .every(order => order.limitPrice === 0.70));
+    assert.equal(bot.orders.filter(order => order.action === "SELL").length, 1);
+    assert.equal(bot.orders.filter(order => order.action === "SELL")[0].limitPrice, 0.70);
   } finally {
     Date.now = originalNow;
     marketData.getBtcMarket = originalGetBtcMarket;
@@ -191,148 +214,133 @@ test("prebuy does not enter after the upcoming window has already opened", () =>
     tokens: { UP: "up-token", DOWN: "down-token" },
     feesEnabled: false,
   };
-  bot.openStrategyWindow(start, start - config.PREBUY_LEAD_MS);
+  bot.openStrategyWindow(start, start - config.PREBUY_SCAN_LEAD_MS);
   quotePair(bot, start, { upAsk: 0.40, downAsk: 0.60 });
   assert.equal(bot.processPairedEntry(start), false);
   assert.equal(bot.entryAttemptMissed, true);
   assert.equal(bot.positions.length, 0);
 });
 
-test("does not enter before 4:00 or at the strict price-band boundaries", () => {
+test("waits until 4:00, then places all four fixed-price limit buys without the old band", () => {
   const bot = makeBot();
   assert.equal(fire(bot, 239_999, { upAsk: 0.50, downAsk: 0.52 }), false);
   assert.equal(fire(bot, 240_000, { upAsk: 0.42, downAsk: 0.59 }), false);
   assert.equal(bot.positions.length, 0);
+  const buys = bot.orders.filter(order => order.action === "BUY");
+  assert.equal(buys.length, 4);
+  assert.ok(buys.every(order => order.status === "PENDING" && order.orderType === "LIMIT"));
+  assert.deepEqual(buys.map(order => order.limitPrice).sort((a, b) => a - b), [0.10, 0.10, 0.20, 0.20]);
 });
 
-test("one qualifying ask triggers 300-share market buys on both sides once", () => {
+test("each rung fills only at its fixed limit and immediately receives its own TP", () => {
   const bot = makeBot();
   assert.equal(fire(bot, 240_000, {
-    upAsk: 0.50, downAsk: 0.65,
-    upLevels: [{ price: 0.50, size: 200 }, { price: 0.52, size: 100 }],
-    downLevels: [{ price: 0.65, size: 300 }],
+    upAsk: 0.20, downAsk: 0.10,
+    upLevels: [{ price: 0.20, size: 300 }],
+    downLevels: [{ price: 0.10, size: 600 }],
   }), true);
-  assert.equal(bot.positions.length, 2);
-  const bySide = Object.fromEntries(bot.positions.map(position => [position.side, position]));
-  assert.equal(bySide.UP.shares, 300);
-  assert.equal(bySide.DOWN.shares, 300);
-  assert.ok(bySide.UP.avgEntry > 0.50, "sweeping deeper asks can worsen the average fill");
-  assert.equal(bot.orders.filter(order => order.action === "BUY").length, 2);
-  assert.ok(bot.orders.filter(order => order.action === "BUY").every(order => order.orderType === "MARKET"));
-
-  fire(bot, 250_000, { upAsk: 0.50, downAsk: 0.52 });
-  fire(bot, 299_999, { upAsk: 0.50, downAsk: 0.52 });
-  assert.equal(bot.positions.length, 2, "a persistent signal must not repeat buys in one window");
+  const up20 = bot.positions.find(position => position.side === "UP" && position.rungId === "0.20");
+  const down20 = bot.positions.find(position => position.side === "DOWN" && position.rungId === "0.20");
+  const down10 = bot.positions.find(position => position.side === "DOWN" && position.rungId === "0.10");
+  assert.equal(bot.positions.length, 3);
+  assert.equal(up20.avgEntry, 0.20);
+  assert.equal(down20.avgEntry, 0.20);
+  assert.equal(down10.avgEntry, 0.10);
+  assert.equal(up20.takeProfitPrice, 0.80);
+  assert.equal(down20.takeProfitPrice, 0.80);
+  assert.equal(down10.takeProfitPrice, 0.90);
+  assert.ok(bot.orders.filter(order => order.action === "SELL").every(order => order.status === "PENDING"));
+  assert.equal(bot.snapshot().account.takerFees, 0);
+  assert.ok(bot.snapshot().account.estimatedMakerRebate > 0);
 });
 
-test("a seen trigger waits for fresh books without losing the signal", () => {
-  const bot = makeBot();
-  const at = FIRST_START + 240_000;
-  quotePair(bot, at, { upAsk: 0.50, downAsk: 0.52 });
-  bot.liveQuotes.DOWN.updatedAt = at - 6000;
-  assert.equal(bot.processPairedEntry(at), false);
-  assert.equal(bot.entryTriggerLatched, true);
-  assert.equal(bot.entryPairPlaced, false);
-  quotePair(bot, at + 500, { upAsk: 0.65, downAsk: 0.62 });
-  assert.equal(bot.processPairedEntry(at + 500), true);
-  assert.equal(bot.positions.length, 2);
-});
-
-test("paired market buys sweep ask depth and charge taker fees", () => {
+test("a partial limit fill books actual shares and completes without rearming", () => {
   const bot = makeBot();
   fire(bot, 240_000, {
-    upAsk: 0.50, downAsk: 0.55,
-    upLevels: [{ price: 0.50, size: 200 }, { price: 0.52, size: 100 }],
-    downLevels: [{ price: 0.55, size: 300 }],
+    upAsk: 0.20, downAsk: 0.60,
+    upLevels: [{ price: 0.20, size: 4 }],
   });
-  const up = bot.positions.find(position => position.side === "UP");
-  const down = bot.positions.find(position => position.side === "DOWN");
-  const expectedUpFee = fee(0.50, 200) + fee(0.52, 100);
-  assert.equal(up.shares, 300);
-  assert.ok(Math.abs(up.cost - 152) < 1e-9);
-  assert.ok(Math.abs(up.fees - expectedUpFee) < 1e-9);
-  assert.equal(down.shares, 300);
-  assert.ok(Math.abs(down.fees - fee(0.55, 300)) < 1e-9);
-  assert.equal(up.takeProfitPrice, 0.80);
-  assert.equal(down.takeProfitPrice, 0.80);
-  assert.equal(bot.orders.filter(order => order.action === "SELL").length, 2);
-});
-
-test("limited displayed depth records the actual partial fill on either paired leg", () => {
-  const bot = makeBot();
-  fire(bot, 1000, {
-    upAsk: 0.50,
-    downAsk: 0.55,
-    upLevels: [{ price: 0.50, size: 4 }],
-  });
-  assert.equal(bot.positions.length, 0, "entries remain disabled until the last minute");
-  fire(bot, 240_000, {
-    upAsk: 0.50,
-    downAsk: 0.55,
-    upLevels: [{ price: 0.50, size: 4 }],
-  });
-  const up = bot.positions.find(position => position.side === "UP");
-  const upBuy = bot.orders.find(order => order.action === "BUY" && order.side === "UP");
+  const up = bot.positions.find(position => position.side === "UP" && position.rungId === "0.20");
+  const upBuy = bot.orders.find(order => order.action === "BUY" && order.side === "UP" && order.rungId === "0.20");
   const upSell = bot.orders.find(order => order.action === "SELL" && order.side === "UP");
   assert.equal(up.shares, 4);
   assert.equal(up.requestedShares, 300);
-  assert.equal(upBuy.status, "PARTIALLY_FILLED");
+  assert.equal(upBuy.status, "FILLED");
   assert.equal(upBuy.cancelledRemainderShares, 296);
   assert.equal(upSell.shares, 4);
 });
 
-test("first $0.80 TP moves the other limit sell to $0.99 for $1-per-share payout", () => {
+test("the $0.20 TP is $0.80, the $0.10 TP is $0.90, opposite sells retain the $0.99 rule", () => {
   const bot = makeBot();
-  fire(bot, 240_000, { upAsk: 0.50, downAsk: 0.55 });
-  const up = bot.positions.find(position => position.side === "UP");
-  const down = bot.positions.find(position => position.side === "DOWN");
-  const upTp = bot.orders.find(order => order.action === "SELL" && order.side === "UP");
-  const downTp = bot.orders.find(order => order.action === "SELL" && order.side === "DOWN");
-  assert.equal(upTp.limitPrice, 0.80);
-  assert.equal(downTp.limitPrice, 0.80);
+  fire(bot, 240_000, {
+    upAsk: 0.10, downAsk: 0.10,
+    upLevels: [{ price: 0.10, size: 600 }],
+    downLevels: [{ price: 0.10, size: 600 }],
+  });
+  const up20 = bot.positions.find(position => position.side === "UP" && position.rungId === "0.20");
+  const up10 = bot.positions.find(position => position.side === "UP" && position.rungId === "0.10");
+  const down20 = bot.positions.find(position => position.side === "DOWN" && position.rungId === "0.20");
+  const down10 = bot.positions.find(position => position.side === "DOWN" && position.rungId === "0.10");
+  const up20Tp = bot.orders.find(order => order.action === "SELL" && order.positionId === up20.id);
+  const up10Tp = bot.orders.find(order => order.action === "SELL" && order.positionId === up10.id);
+  const down20Tp = bot.orders.find(order => order.action === "SELL" && order.positionId === down20.id);
+  const down10Tp = bot.orders.find(order => order.action === "SELL" && order.positionId === down10.id);
+  assert.equal(up20Tp.limitPrice, 0.80);
+  assert.equal(up10Tp.limitPrice, 0.90);
+  assert.equal(down20Tp.limitPrice, 0.80);
+  assert.equal(down10Tp.limitPrice, 0.90);
 
   quote(bot, "UP", FIRST_START + 241_000, { bid: 0.80, ask: 0.82 });
   quote(bot, "DOWN", FIRST_START + 241_000, { bid: 0.70, ask: 0.72 });
   bot.processPendingTakeProfitOrders(FIRST_START + 241_000);
-  assert.equal(up.status, "SETTLED_EXIT");
-  assert.equal(up.payout, 0.80);
-  assert.equal(up.proceeds, 240);
-  assert.equal(down.status, "OPEN");
-  assert.equal(downTp.limitPrice, 0.99);
-  assert.equal(down.takeProfitPrice, 0.99);
+  assert.equal(up20.status, "SETTLED_EXIT");
+  assert.equal(up20.payout, 0.80);
+  assert.equal(up20.proceeds, 240);
+  assert.equal(up10.status, "OPEN");
+  assert.equal(up10Tp.limitPrice, 0.90);
+  assert.equal(down20.status, "OPEN");
+  assert.equal(down10.status, "OPEN");
+  assert.equal(down20Tp.limitPrice, 0.99);
+  assert.equal(down10Tp.limitPrice, 0.99);
 
   quote(bot, "DOWN", FIRST_START + 242_000, { bid: 0.99, ask: 1 });
   bot.processPendingTakeProfitOrders(FIRST_START + 242_000);
-  assert.equal(down.status, "SETTLED_EXIT");
-  assert.equal(down.payout, 1);
-  assert.equal(down.proceeds, 300);
-  assert.equal(downTp.fillPrice, 0.99);
-  assert.ok(Math.abs(bot.snapshot().account.takerFees -
-    (fee(0.50, 300) + fee(0.55, 300))) < 1e-9);
+  assert.equal(down20.status, "SETTLED_EXIT");
+  assert.equal(down20.payout, 1);
+  assert.equal(down20.proceeds, 300);
+  assert.equal(down20Tp.fillPrice, 0.99);
+  assert.equal(bot.snapshot().account.takerFees, 0);
 });
 
 test("take-profit outcome and exit counts follow realized net P&L", () => {
   const bot = makeBot();
   bot.market.feesEnabled = false;
-  fire(bot, 240_000, { upAsk: 0.80, downAsk: 0.50 });
-  const up = bot.positions.find(position => position.side === "UP");
+  fire(bot, 240_000, {
+    upAsk: 0.20, downAsk: 0.60,
+    upLevels: [{ price: 0.20, size: 300 }],
+  });
+  const up = bot.positions.find(position => position.side === "UP" && position.rungId === "0.20");
   quote(bot, "UP", FIRST_START + 241_000, { bid: 0.80, ask: 0.82 });
   quote(bot, "DOWN", FIRST_START + 241_000, { bid: 0.70, ask: 0.72 });
   bot.processPendingTakeProfitOrders(FIRST_START + 241_000);
 
-  assert.equal(up.realizedPnl, 0);
-  assert.equal(up.strategyOutcome, "BREAK_EVEN");
+  assert.equal(up.realizedPnl, 180);
+  assert.equal(up.strategyOutcome, "WIN");
   const account = bot.snapshot().account;
-  assert.equal(account.profitableExits, 0);
+  assert.equal(account.profitableExits, 1);
   assert.equal(account.losingExits, 0);
-  assert.equal(account.breakEvenExits, 1);
+  assert.equal(account.breakEvenExits, 0);
 });
 
 test("positions missing TP at window end wait for official resolution", async () => {
   const bot = makeBot();
-  fire(bot, 240_000, { upAsk: 0.50, downAsk: 0.55 });
-  const up = bot.positions.find(position => position.side === "UP");
-  const down = bot.positions.find(position => position.side === "DOWN");
+  fire(bot, 240_000, {
+    upAsk: 0.20, downAsk: 0.20,
+    upLevels: [{ price: 0.20, size: 300 }],
+    downLevels: [{ price: 0.20, size: 300 }],
+  });
+  const up = bot.positions.find(position => position.side === "UP" && position.rungId === "0.20");
+  const down = bot.positions.find(position => position.side === "DOWN" && position.rungId === "0.20");
   const nextStart = FIRST_START + WINDOW_5M;
   await bot.closePreviousWindows(nextStart, nextStart);
   assert.equal(up.status, "PENDING_RESOLUTION");
