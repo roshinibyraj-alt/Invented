@@ -104,6 +104,8 @@ test('available ask liquidity fills at the better price and credits rebate witho
   assert.equal(order.status,'FILLED');
   assert.equal(order.filledShares,500);
   assert.equal(order.averagePrice,0.42);
+  assert.equal(order.fillEvents[0].source,'IMMEDIATE_MARKETABLE_LIMIT');
+  assert.equal(order.fillEvents[0].price,0.42);
   const position=bot.positions[0];
   assert.equal(position.avgEntry,0.42);
   assert.equal(position.totalCost,210);
@@ -118,6 +120,45 @@ test('available ask liquidity fills at the better price and credits rebate witho
   assert.equal(bot.orders.some(item=>item.kind==='STOP_LOSS'),false);
   assert.equal(bot.snapshot().account.takerFees,0);
   assert.equal(bot.snapshot().strategy.exit.stopLoss,null);
+});
+
+test('a lower ask appearing after the order rests fills at the $0.45 limit',()=>{
+  const bot=makeBot();
+  latchSignal(bot);
+  const order=openEntry(bot,{side:'UP',ask:0.60,askSize:1000});
+  assert.equal(order.status,'PENDING');
+
+  quote(bot,'UP',START+500,{ask:0.40,askSize:500});
+  bot.processStrategyEntry(START+500);
+  assert.equal(order.status,'FILLED');
+  assert.equal(order.filledShares,500);
+  assert.equal(order.averagePrice,0.45);
+  assert.equal(order.fillEvents[0].source,'RESTING_LIMIT_MATCH');
+  assert.equal(order.fillEvents[0].price,0.45);
+  assert.equal(bot.positions[0].avgEntry,0.45);
+});
+
+test('unchanged visible ask depth is not counted repeatedly across polls',()=>{
+  const bot=makeBot();
+  latchSignal(bot);
+  const order=openEntry(bot,{side:'UP',ask:0.60,askSize:1000});
+
+  quote(bot,'UP',START+500,{ask:0.40,askSize:100});
+  bot.processStrategyEntry(START+500);
+  assert.equal(order.status,'PARTIALLY_FILLED');
+  assert.equal(order.filledShares,100);
+  assert.equal(order.averagePrice,0.45);
+
+  quote(bot,'UP',START+1000,{ask:0.40,askSize:100});
+  bot.processStrategyEntry(START+1000);
+  assert.equal(order.status,'PARTIALLY_FILLED');
+  assert.equal(order.filledShares,100);
+
+  quote(bot,'UP',START+1500,{ask:0.40,askSize:140});
+  bot.processStrategyEntry(START+1500);
+  assert.equal(order.filledShares,140);
+  assert.equal(order.remainingShares,360);
+  assert.equal(order.averagePrice,0.45);
 });
 
 test('a $0.76 ask with 16 shares never fills the $0.45 limit',async()=>{

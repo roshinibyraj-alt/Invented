@@ -103,7 +103,7 @@ class SignalLimitBot extends WickBot {
       orderType:'LIMIT',entryMode:'CANDLE_SIGNAL_LIMIT_BUY',entryType:'LIMIT_MAKER_BUY',
       limitPrice:this.rules.entryLimitPrice,requestedShares:this.rules.sharesPerSide,
       shares:this.rules.sharesPerSide,filledShares:0,remainingShares:this.rules.sharesPerSide,
-      createdAt:now,submittedAt:now,
+      createdAt:now,submittedAt:now,fillEvents:[],maxObservedAskSizeByPrice:{},
       expiresAt:start+this.windowMs,status:'PENDING',fee:0,estimatedMakerRebate:0,
     };
     this.entryOrderPlaced=true;
@@ -113,7 +113,7 @@ class SignalLimitBot extends WickBot {
     this.windowOrders.unshift(order);
     this.log('PAPER_SIGNAL_LIMIT_ORDER_PLACED',{
       id,side,limitPrice:order.limitPrice,shares:order.shares,
-      fillPolicy:'fresh visible ask liquidity at or below limit only',
+      fillPolicy:'better-price asks only if present at submission; later resting fills at limit price',
       expiresAt:order.expiresAt,
     });
   }
@@ -142,18 +142,31 @@ class SignalLimitBot extends WickBot {
     const fresh=quote?.status==='LIVE'&&Number.isFinite(quote.updatedAt)&&now-quote.updatedAt<=5000;
     let filled=false;
     if(fresh&&order.remainingShares>1e-9){
-      const levels=(Array.isArray(quote.askLevels)&&quote.askLevels.length
+      const atSubmission=now===order.submittedAt;
+      const observedLevels=(Array.isArray(quote.askLevels)&&quote.askLevels.length
         ?quote.askLevels:[{price:Number(quote.bestAsk),size:Number(quote.askSize)}])
         .map(level=>({price:Number(level.price),size:Number(level.size)}))
         .filter(level=>Number.isFinite(level.price)&&level.price>0&&
-          level.price<=order.limitPrice&&Number.isFinite(level.size)&&level.size>0)
+          Number.isFinite(level.size)&&level.size>0)
         .sort((a,b)=>a.price-b.price);
+      const levels=[];
+      for(const level of observedLevels){
+        const key=level.price.toFixed(6);
+        const previousMax=Number(order.maxObservedAskSizeByPrice[key]||0);
+        const newlyObserved=atSubmission?level.size:Math.max(0,level.size-previousMax);
+        order.maxObservedAskSizeByPrice[key]=Math.max(previousMax,level.size);
+        if(level.price<=order.limitPrice&&newlyObserved>1e-9){
+          levels.push({price:level.price,size:newlyObserved});
+        }
+      }
       for(const level of levels){
         if(order.remainingShares<=1e-9)break;
         const shares=Math.min(order.remainingShares,level.size);
         if(shares<=0)continue;
         level.size-=shares;
-        this.applySignalLimitFill(order,shares,level.price,now);
+        const fillSource=atSubmission?'IMMEDIATE_MARKETABLE_LIMIT':'RESTING_LIMIT_MATCH';
+        const fillPrice=atSubmission?level.price:order.limitPrice;
+        this.applySignalLimitFill(order,shares,fillPrice,now,fillSource);
         filled=true;
       }
     }
@@ -168,7 +181,7 @@ class SignalLimitBot extends WickBot {
     return filled;
   }
 
-  applySignalLimitFill(order,shares,price,now){
+  applySignalLimitFill(order,shares,price,now,fillSource){
     const safeShares=Number(shares.toFixed(6));
     const safePrice=Number(price.toFixed(6));
     const cost=Number((safeShares*safePrice).toFixed(6));
@@ -194,11 +207,11 @@ class SignalLimitBot extends WickBot {
         side:order.side,tokenId:order.tokenId,entryKey:order.id,
         entryLabel:`${order.side} $${order.limitPrice.toFixed(2)} signal limit · ${order.requestedShares} shares`,
         entryMode:order.entryMode,entryType:order.entryType,phase:'signal-limit',
-        entryFillSource:'VISIBLE_ASK_DEPTH_AT_OR_BELOW_LIMIT',
+        entryFillSource:fillSource,
         strategyId:this.strategyId,strategyName:this.strategyName,
         takeProfitThreshold:this.rules.takeProfitInitialPrice,
         takeProfitPrice:this.rules.takeProfitInitialPrice,takeProfitPendingAt:order.windowStart,
-        orderType:'LIMIT',fillModel:'PAPER_VISIBLE_ASK_DEPTH_AT_OR_BELOW_LIMIT',
+        orderType:'LIMIT',fillModel:'PAPER_LIMIT_ORDER_BOOK_DEPTH',
         shares:0,requestedShares:order.requestedShares,initialShares:order.requestedShares,
         avgEntry:safePrice,fillPrice:safePrice,cost:0,totalCost:0,fees:0,exitFees:0,
         estimatedMakerRebate:0,status:'OPEN',submittedAt:order.submittedAt,
@@ -221,6 +234,7 @@ class SignalLimitBot extends WickBot {
     position.avgEntry=Number((position.cost/position.shares).toFixed(6));
     position.fillPrice=position.avgEntry;
     position.estimatedMakerRebate=Number((position.estimatedMakerRebate+rebate).toFixed(6));
+    if(position.entryFillSource!==fillSource)position.entryFillSource='MIXED_LIMIT_FILL_SOURCES';
     position.updatedAt=now;
     position.visibleAskSize=this.liveQuotes[order.side]?.askSize||0;
     position.simulatedShares=position.shares;
@@ -241,12 +255,13 @@ class SignalLimitBot extends WickBot {
     order.lastFillAt=now;
     order.lastFillPrice=safePrice;
     order.lastFillShares=safeShares;
-    order.lastFillSource='VISIBLE_ASK_DEPTH_AT_OR_BELOW_LIMIT';
+    order.lastFillSource=fillSource;
+    order.fillEvents.push({filledAt:now,shares:safeShares,price:safePrice,source:fillSource});
     this.cash=Number((this.cash-cost+rebate).toFixed(6));
 
     this.log('PAPER_SIGNAL_LIMIT_VISIBLE_ASK_FILLED',{
       id:order.id,positionId:position.id,side:order.side,shares:safeShares,
-      fillPrice:safePrice,limitPrice:order.limitPrice,cost,fees:0,
+      fillPrice:safePrice,limitPrice:order.limitPrice,fillSource,cost,fees:0,
       makerRebateCredited:rebate,remainingShares:order.remainingShares,
     });
     return position;

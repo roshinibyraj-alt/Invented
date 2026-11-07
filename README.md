@@ -7,7 +7,8 @@ A single BTC 5-minute paper strategy with a $10,000 demo account. It sends no li
 - During the final 10 seconds before a window opens, scan the upcoming market and candle feed.
 - At T−3 seconds, compare live BTC with the previous completed one-minute candle close. This uses the final 57 seconds of the ending window: higher means UP; equal or lower means DOWN.
 - At the first bot poll at or just after window open (500ms polling), place one $0.45 limit buy for 500 shares on the signalled side.
-- Fill only against fresh, visible ask depth at or below $0.45, at the observed ask price and up to the observed available shares. The paper model charges no taker fee and credits an estimated maker rebate.
+- A $0.45 limit buy never fills above $0.45. If fresh asks below $0.45 are already available at submission, the immediate marketable fill may use the lower ask price. If the order rests first, later fills are booked at $0.45.
+- Fill no more than newly observed ask depth; unchanged displayed depth is not reused across polling cycles. The paper model charges no taker fee and credits an estimated maker rebate.
 - There is no timeout fill or assumed fill. Any unfilled remainder stays pending until the market window ends, then is cancelled.
 
 ## Exit and account
