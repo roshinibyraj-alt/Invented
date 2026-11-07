@@ -71,9 +71,11 @@ test('dashboard shows only the BTC signal-limit paper strategy and removes the r
   assert.match(html,/asks below \$0\.45 are already present when submitted/);
   assert.match(html,/later fills are recorded at \$0\.45/);
   assert.match(html,/no timeout or assumed fill/);
-  assert.match(html,/estimated maker rebates are credited/);
-  assert.match(html,/Once filled, place a \$0\.99 limit sell/);
-  assert.match(html,/no stop loss/);
+  assert.match(html,/Entry fills may receive an estimated maker rebate/);
+  assert.match(html,/no take-profit or stop-loss exit/);
+  assert.match(html,/original market’s official Polymarket resolution/);
+  assert.doesNotMatch(html,/TP limit/);
+  assert.doesNotMatch(html,/TAKE_PROFIT/);
   assert.match(html,/lower price only at submission/);
   assert.doesNotMatch(html,/fallback after 1s/);
   assert.doesNotMatch(html,/paper-fill the remainder/);

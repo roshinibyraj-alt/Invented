@@ -48,14 +48,14 @@
  <div class="card"><div class="label">Floating P&amp;L</div><div class="value" id="unrealized">—</div></div>
  <div class="card primary"><div class="label">Total trades</div><div class="value" id="totalTrades">—</div><span class="metric-note" id="settledTrades">— settled</span></div>
  <div class="card danger"><div class="label">Taker fees paid</div><div class="value" id="takerFees">—</div><span class="metric-note">entry fills</span></div>
- <div class="card success"><div class="label">Estimated maker rebate</div><div class="value" id="makerRebate">—</div><span class="metric-note">credited paper estimate · entry and TP fills</span></div>
+ <div class="card success"><div class="label">Estimated maker rebate</div><div class="value" id="makerRebate">—</div><span class="metric-note">credited paper estimate · entry fills only</span></div>
  <div class="card primary"><div class="label">Win rate</div><div class="value" id="winRate">—</div><span class="metric-note">wins ÷ settled trades</span></div>
  <div class="card success"><div class="label">Wins</div><div class="value" id="wins">—</div></div>
  <div class="card danger"><div class="label">Losses</div><div class="value" id="losses">—</div></div>
   <div class="card success"><div class="label">Profitable exits</div><div class="value" id="profitableExits">—</div></div>
   <div class="card danger"><div class="label">Losing exits</div><div class="value" id="losingExits">—</div></div>
   <div class="card"><div class="label">Break-even exits</div><div class="value" id="breakEvenExits">—</div></div>
-  <div class="card success"><div class="label">Highest consecutive strategy wins</div><div class="value" id="maxConsecutiveWins">—</div><span class="metric-note">TP or resolution win</span></div>
+  <div class="card success"><div class="label">Highest consecutive strategy wins</div><div class="value" id="maxConsecutiveWins">—</div><span class="metric-note">Official resolution win</span></div>
   <div class="card danger"><div class="label">Highest consecutive strategy losses</div><div class="value" id="maxConsecutiveLosses">—</div><span class="metric-note">Official resolution loss</span></div>
  <div class="card"><div class="label">Open positions</div><div class="value" id="open">—</div></div>
  </section>
@@ -69,7 +69,7 @@
    <div class="small" id="realBalanceStatus">Connecting to the live account balance…</div>
  </section>
  <section class="panel"><h2>Floating positions · live own-side marks</h2><p class="small section-note">Open shares are marked using their own-side best bid. Stale or missing marks are not shown as current unrealized P&amp;L.</p><div id="openPositions" class="table-wrap"></div><h2 class="subhead">Recent closed trades · realized P&amp;L</h2><div id="closedPositions" class="table-wrap"></div></section>
-     <p class="small">Paper-only BTC 5-minute strategy. At T−3 seconds, compare live BTC with the previous closed one-minute candle close using the final 57 seconds: higher means UP; equal or lower means DOWN. At window open, place one $0.45 limit buy for 500 shares on the signalled side. It cannot fill above $0.45. If asks below $0.45 are already present when submitted, the immediate match may fill at the lower ask; if the order rests first, later fills are recorded at $0.45. Only newly observed book depth is counted, and there is no timeout or assumed fill. Any remaining shares stay unfilled until the order is cancelled at window end. Entry and take-profit limit fills have no fees; estimated maker rebates are credited to the paper account. Once filled, place a $0.99 limit sell, counted as $1 per share. No stop loss. Any shares without a TP fill by window end wait for official Polymarket resolution. Paper history resets on process restart.</p>
+      <p class="small">Paper-only BTC 5-minute strategy. At T−3 seconds, compare live BTC with the previous closed one-minute candle close using the final 57 seconds: higher means UP; equal or lower means DOWN. At window open, place one $0.45 limit buy for 500 shares on the signalled side. It cannot fill above $0.45. If asks below $0.45 are already present when submitted, the immediate match may fill at the lower ask; if the order rests first, later fills are recorded at $0.45. Only newly observed book depth is counted, and there is no timeout or assumed fill. Any remaining entry shares are cancelled at window end. Filled positions have no take-profit or stop-loss exit; they remain open until the original market’s official Polymarket resolution. Entry fills may receive an estimated maker rebate. Paper history resets on process restart.</p>
  <div class="err" id="error"></div>
 </main>
 <script>
@@ -77,7 +77,7 @@ const esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&
  const usd=x=>'$'+Number(x||0).toFixed(2),fmt=x=>Number.isFinite(Number(x))?Number(x).toFixed(3):'—',sharesFmt=x=>Number(x||0).toLocaleString(undefined,{maximumFractionDigits:3}),when=x=>x?new Date(x).toLocaleTimeString():'—',timestamp=x=>Number(x)>0?new Date(Number(x)).toLocaleString([],{month:'short',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',timeZoneName:'short'}):'—';
 const px=x=>x==null?'—':'$'+Number(x).toFixed(3),btc=x=>x==null?'—':'$'+Number(x).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}),pct=x=>`${Number(x||0)>=0?'+':''}${Number(x||0).toFixed(3)}%`;
 function metric(k,v){return `<div class="metric"><span class="muted">${esc(k)}</span><b>${esc(v)}</b></div>`}
-   function settlementLabel(p){if(p.settlementBasis==='TAKE_PROFIT_LIMIT')return `Take-profit limit filled · ${px(p.exitBid)}`;if(p.settlementBasis==='POLYMARKET_RESOLUTION')return 'Official Polymarket resolution';if(p.status==='PENDING_RESOLUTION')return 'Take-profit not hit · awaiting resolution';if(p.status==='OPEN')return `Open · TP limit ${px(p.takeProfitPrice)}`;return 'Paper settlement'}
+   function settlementLabel(p){if(p.settlementBasis==='POLYMARKET_RESOLUTION')return 'Official Polymarket resolution';if(p.status==='PENDING_RESOLUTION')return 'Awaiting official resolution';if(p.status==='OPEN')return 'Open · held for resolution';return 'Paper settlement'}
 let countdownState=null;
 function paintCountdown(){
   if(!countdownState)return;
@@ -100,11 +100,11 @@ function paintCountdown(){
 setInterval(paintCountdown,250);
  function positionTable(positions,open){
    if(!positions.length)return `<div class="empty">${open?'No open positions are floating right now.':'No closed trades yet.'}</div>`;
-    const headers=open?['Strategy / window','Side','Shares','Avg entry','TP limit','Taker fees / rebate est.','Strategy result','Own bid · value','Unrealized P&L','Mark status']:['Strategy / window','Side','Shares','Avg entry','TP limit','Taker fees / rebate est.','Strategy result','Exit','Proceeds','Realized P&L','Closed'];
+    const headers=open?['Strategy / window','Side','Shares','Avg entry','Fees / rebate est.','Strategy result','Own bid · value','Unrealized P&L','Mark status']:['Strategy / window','Side','Shares','Avg entry','Fees / rebate est.','Strategy result','Exit','Proceeds','Realized P&L','Closed'];
    const rows=positions.map(p=>{
      const fresh=p.markStatus==='LIVE'&&p.markBid!=null&&p.markValue!=null;
-      const common=`<td>${esc(p.strategyName||p.strategyId||'Strategy')} · ${esc(p.slug||'')}</td><td class="${p.side==='UP'?'good':'bad'}">${esc(p.side)}</td><td>${sharesFmt(p.shares)}</td><td>${px(p.avgEntry)}</td><td>${px(p.takeProfitPrice)}</td>`;
-       const strategyResult=p.strategyOutcome==='WIN'?'WIN · TP/resolution':p.strategyOutcome==='LOSS'?'LOSS · resolution':p.status==='PENDING_RESOLUTION'?'Awaiting resolution':'Pending';
+      const common=`<td>${esc(p.strategyName||p.strategyId||'Strategy')} · ${esc(p.slug||'')}</td><td class="${p.side==='UP'?'good':'bad'}">${esc(p.side)}</td><td>${sharesFmt(p.shares)}</td><td>${px(p.avgEntry)}</td>`;
+       const strategyResult=p.strategyOutcome==='WIN'?'WIN · resolution':p.strategyOutcome==='LOSS'?'LOSS · resolution':p.status==='PENDING_RESOLUTION'?'Awaiting resolution':'Pending';
        const feeAndRebate=`${usd(Number(p.fees||0)+Number(p.exitFees||0))} / ${usd(p.estimatedMakerRebate)}`;
        if(open)return `<tr>${common}<td>${feeAndRebate}</td><td>${esc(strategyResult)}</td><td>${fresh?`${px(p.markBid)} · ${usd(p.markValue)}`:'—'}</td><td>${fresh?usd(p.unrealizedPnl):'—'}</td><td>${esc(fresh?'LIVE':p.markStatus||'UNAVAILABLE')}</td></tr>`;
        const exit=p.settlementBasis==='POLYMARKET_RESOLUTION'?`Resolution · ${esc(p.resolutionWinner||'result')}`:px(p.exitBid);
@@ -149,7 +149,7 @@ function strategyPanel(id,t){
       <div class="metric"><span>Entry size</span><b>${esc(entrySize)}</b></div>
       <div class="metric"><span>Limit order</span><b>$0.45 max · ${esc(entry.orderStatus||'NOT_PLACED')} · lower price only at submission</b></div>
       <div class="metric"><span>Entry rule</span><b>${esc(s.trigger||'—')}</b></div>
-      <div class="metric"><span>Take profit</span><b>${esc(takeProfit)}</b></div>
+       <div class="metric"><span>Exit rule</span><b>Hold filled positions; settle only on original-market Polymarket resolution. No TP or SL.</b></div>
     </div>
     <div class="strategy-quotes">
       <div class="strategy-quote up"><div class="strategy-quote-title">UP · best ask</div><div class="strategy-quote-price">${px(q.UP?.bestAsk)}</div></div>

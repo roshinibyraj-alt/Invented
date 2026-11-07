@@ -112,12 +112,10 @@ test('available ask liquidity fills at the better price and credits rebate witho
   assert.equal(position.fees,0);
   assert.ok(position.estimatedMakerRebate>0);
   assert.ok(bot.cash>10000-210);
-  const tp=bot.orders.find(item=>item.kind==='TAKE_PROFIT');
-  assert.equal(tp.orderType,'LIMIT');
-  assert.equal(tp.limitPrice,0.99);
-  assert.equal(tp.shares,500);
-  assert.equal(bot.orders.filter(item=>item.action==='SELL').length,1);
-  assert.equal(bot.orders.some(item=>item.kind==='STOP_LOSS'),false);
+  assert.equal(bot.orders.filter(item=>item.action==='SELL').length,0);
+  assert.equal(bot.orders.some(item=>item.kind==='TAKE_PROFIT'),false);
+  assert.equal(bot.snapshot().strategy.exit.orderType,'POLYMARKET_RESOLUTION_ONLY');
+  assert.equal(bot.snapshot().strategy.exit.takeProfit,null);
   assert.equal(bot.snapshot().account.takerFees,0);
   assert.equal(bot.snapshot().strategy.exit.stopLoss,null);
 });
@@ -190,7 +188,7 @@ test('partial eligible ask depth stays partial when later asks exceed the limit'
   assert.equal(order.status,'PARTIALLY_FILLED');
   assert.equal(order.filledShares,100);
   assert.equal(bot.positions[0].avgEntry,0.40);
-  assert.equal(bot.orders.find(item=>item.kind==='TAKE_PROFIT').shares,100);
+  assert.equal(bot.orders.some(item=>item.kind==='TAKE_PROFIT'),false);
 
   quote(bot,'UP',START+1000,{ask:0.46,askSize:500});
   bot.processStrategyEntry(START+1000);
@@ -201,37 +199,23 @@ test('partial eligible ask depth stays partial when later asks exceed the limit'
   assert.equal(bot.positions.length,1);
   assert.equal(bot.positions[0].shares,100);
   assert.equal(bot.positions[0].totalCost,40);
-  assert.equal(bot.orders.filter(item=>item.kind==='TAKE_PROFIT').length,1);
-  assert.equal(bot.orders.find(item=>item.kind==='TAKE_PROFIT').shares,100);
+  assert.equal(bot.orders.filter(item=>item.action==='SELL').length,0);
 });
 
-test('$0.99 take profit pays $1 per share, has no stop loss, and rebates enter P&L',()=>{
+test('price moves never exit a position; filled shares wait for official resolution',async()=>{
   const bot=makeBot();
   latchSignal(bot);
   openEntry(bot,{side:'UP',ask:0.45});
   bot.processStrategyEntry(START+1000);
   const position=bot.positions[0];
-  const tp=bot.orders.find(item=>item.kind==='TAKE_PROFIT');
   quote(bot,'UP',START+2000,{bid:0.99,ask:1});
-  bot.processPendingTakeProfitOrders(START+2000);
-  assert.equal(tp.status,'FILLED');
-  assert.equal(position.status,'SETTLED_EXIT');
-  assert.equal(position.payout,1);
-  assert.equal(position.proceeds,500);
-  assert.ok(position.estimatedMakerRebate>0);
-  assert.equal(position.realizedPnl,500-position.totalCost+position.estimatedMakerRebate);
-  assert.equal(bot.orders.some(item=>item.kind==='STOP_LOSS'),false);
-});
-
-test('open positions move to official resolution at window end if TP did not fill',async()=>{
-  const bot=makeBot();
-  latchSignal(bot);
-  const order=openEntry(bot,{side:'UP',ask:0.45});
-  assert.equal(order.status,'FILLED');
-  const position=bot.positions[0];
   assert.equal(position.status,'OPEN');
+  quote(bot,'UP',START+3000,{bid:0.01,ask:0.02});
+  assert.equal(position.status,'OPEN');
+  assert.equal(bot.orders.filter(item=>item.action==='SELL').length,0);
+  assert.ok(position.estimatedMakerRebate>0);
   await bot.closePreviousWindows(START+WINDOW,START+WINDOW);
   assert.equal(position.status,'PENDING_RESOLUTION');
   assert.equal(position.markStatus,'PENDING_RESOLUTION');
-  assert.equal(bot.orders.find(item=>item.kind==='TAKE_PROFIT').status,'EXPIRED_WINDOW_END');
+  assert.equal(bot.orders.filter(item=>item.action==='SELL').length,0);
 });

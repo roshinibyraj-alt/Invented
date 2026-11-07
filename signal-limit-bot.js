@@ -209,8 +209,6 @@ class SignalLimitBot extends WickBot {
         entryMode:order.entryMode,entryType:order.entryType,phase:'signal-limit',
         entryFillSource:fillSource,
         strategyId:this.strategyId,strategyName:this.strategyName,
-        takeProfitThreshold:this.rules.takeProfitInitialPrice,
-        takeProfitPrice:this.rules.takeProfitInitialPrice,takeProfitPendingAt:order.windowStart,
         orderType:'LIMIT',fillModel:'PAPER_LIMIT_ORDER_BOOK_DEPTH',
         shares:0,requestedShares:order.requestedShares,initialShares:order.requestedShares,
         avgEntry:safePrice,fillPrice:safePrice,cost:0,totalCost:0,fees:0,exitFees:0,
@@ -222,10 +220,6 @@ class SignalLimitBot extends WickBot {
       this.positions.unshift(position);
       order.positionId=id;
       order.positionIds=[id];
-      const tp=this.buildTakeProfitOrder(position,this.rules.takeProfitInitialPrice,now);
-      this.orders.unshift(tp);
-      this.windowOrders.unshift(tp);
-      order.takeProfitOrderId=tp.id;
     }
 
     position.shares=Number((position.shares+safeShares).toFixed(6));
@@ -238,11 +232,6 @@ class SignalLimitBot extends WickBot {
     position.updatedAt=now;
     position.visibleAskSize=this.liveQuotes[order.side]?.askSize||0;
     position.simulatedShares=position.shares;
-    const tp=this.orders.find(item=>item.id===order.takeProfitOrderId);
-    if(tp){
-      tp.shares=position.shares;
-      tp.remainingShares=position.shares;
-    }
 
     order.filledShares=Number((order.filledShares+safeShares).toFixed(6));
     order.remainingShares=Number(Math.max(0,order.requestedShares-order.filledShares).toFixed(6));
