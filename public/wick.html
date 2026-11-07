@@ -69,7 +69,7 @@
    <div class="small" id="realBalanceStatus">Connecting to the live account balance…</div>
  </section>
  <section class="panel"><h2>Floating positions · live own-side marks</h2><p class="small section-note">Open shares are marked using their own-side best bid. Stale or missing marks are not shown as current unrealized P&amp;L.</p><div id="openPositions" class="table-wrap"></div><h2 class="subhead">Recent closed trades · realized P&amp;L</h2><div id="closedPositions" class="table-wrap"></div></section>
-    <p class="small">Both strategies are paper-only. At 4:00, the first strategy places 300-share UP and DOWN limit buys at $0.20 and $0.10, with matching $0.80 and $0.90 take-profit sells. When a take-profit fills, the other side's pending take-profits move to $0.99, counted as $1 per share. The pre-buy strategy reads the latest fully closed one-minute BTC candle five seconds before a 5-minute window, then market-buys 500 shares on the signaled side two seconds before open: green means UP, red means DOWN, and a doji skips entry. One second after open, it places a $0.70 take-profit. Positions without a TP fill by window end wait for official Polymarket resolution. Each demo account has separate balances and performance. Paper history resets on process restart.</p>
+    <p class="small">Both strategies are paper-only. From 4:00 to window end, strategy one watches every tick; if either side's fresh best ask is strictly above $0.32 and below $0.70, it latches the trigger and places 300-share UP and DOWN limit buys at $0.20 and $0.10, with matching $0.80 and $0.90 take-profit sells. When a take-profit fills, the other side's pending take-profits move to $0.99, counted as $1 per share. Strategy two compares BTC at three seconds before the next 5-minute window with the previous completed one-minute candle close, using the final 57 seconds (roughly second 241–297) of the ending window: higher means green/UP; equal or lower means red/DOWN. It market-buys 500 shares on that side two seconds before open and places a $0.70 take-profit one second after open. Positions without a TP fill by window end wait for official Polymarket resolution. Each demo account has separate balances and performance. Paper history resets on process restart.</p>
  <div class="err" id="error"></div>
 </main>
 <script>
@@ -114,23 +114,23 @@ setInterval(paintCountdown,250);
          <div class="inventory-meta"><span>Cost basis incl. fees</span><b>${usd(item?.cost)}</b></div>
        </div>`;
      };
-     const triggerState=entries.pairPlaced?'Paired market-buy attempt complete':
+      const triggerState=entries.pairPlaced?'Four limit orders submitted':
        entries.triggerLatched?'Trigger seen · waiting for both fresh order books':
-       remaining>0&&Date.now()-(w.start||0)>=240000?'Monitoring trigger band':'Waiting until 4:00';
+        remaining>0&&Date.now()-(w.start||0)>=240000?'Monitoring trigger band':'Waiting until 4:00';
      const initialTp=px(exit.initialTakeProfitPrice);
      const raisedTp=px(exit.oppositeTakeProfitAfterFirstFill);
     return `<article class="card window bot-card"><h2>BTC ${esc(tf)} · ${esc(w.slug||'Waiting for market')}</h2>
       <div class="metric"><span>Status</span><b>${esc(t.status||'starting')}</b></div>
       <div class="metric"><span>Window remaining</span><b>${Math.floor(remaining/60)}:${String(remaining%60).padStart(2,'0')}</b></div>
       <div class="metric"><span>UP / DOWN ask</span><b>${px(quotes.UP?.bestAsk)} / ${px(quotes.DOWN?.bestAsk)}</b></div>
-       <div class="metric"><span>Entry</span><b>MARKET BUY · ${entries.sharesPerSide||300} shares per side</b></div>
+       <div class="metric"><span>Entry</span><b>LIMIT BUY · ${entries.sharesPerSide||300} shares per side at each rung</b></div>
        <div class="metric"><span>Trigger</span><b>After 4:00, either fresh best ask &gt; ${px(entries.triggerPriceMin)} and &lt; ${px(entries.triggerPriceMax)}</b></div>
        <div class="metric"><span>Trigger status</span><b>${esc(triggerState)} · ${esc(trigger)}</b></div>
        <div class="inventory-grid">
          ${inventoryCard('UP',inventory.UP,'up')}
          ${inventoryCard('DOWN',inventory.DOWN,'down')}
        </div>
-       <div class="metric"><span>Take profit</span><b>Both sides at ${initialTp}; after one fills, the other moves to ${raisedTp} ($1/share)</b></div>
+       <div class="metric"><span>Take profit</span><b>$0.20 entry → $0.80; $0.10 entry → $0.90; after one fills, opposite moves to ${raisedTp} ($1/share)</b></div>
        <div class="metric"><span>Demo cash</span><b>${usd(t.account?.cash)} of ${usd(t.account?.capital)}</b></div>
     </article>`;
   }

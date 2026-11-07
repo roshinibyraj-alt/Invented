@@ -23,6 +23,7 @@ test('Chainlink RTDS updates are aggregated into minute OHLC bars',()=>{
   assert.deepEqual(feed.getMinuteCandles(),[
     {t:now,o:100,h:104,l:97,c:102,v:0},
   ]);
+  assert.deepEqual(feed.getLatestPrice(),{price:102,timestamp:now+3000});
   assert.equal(feed.snapshot().status,'live');
 });
 
@@ -35,6 +36,7 @@ test('Chainlink RTDS ignores other symbols and rejects stale data',()=>{
   feed.onMessage(JSON.stringify({payload:{symbol:'btc/usd',timestamp:now,value:100}}));
   now+=MAX_AGE_MS+1;
   assert.throws(()=>feed.getMinuteCandles(),/feed stale/);
+  assert.throws(()=>feed.getLatestPrice(),/feed stale/);
 });
 
 test('Chainlink RTDS accepts replay arrays and second-based timestamps',()=>{

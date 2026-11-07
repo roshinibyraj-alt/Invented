@@ -65,6 +65,8 @@ class WickBot{
     this.timeframe=timeframe;this.windowMs=windowMs;this.capital=capital;this.cash=capital;
     this.strategyId=strategyId;this.strategyName=strategyName;
     this.rules={entryWindowStartMs:cfg.ENTRY_WINDOW_START_MS,
+      entryTriggerPriceMin:cfg.ENTRY_TRIGGER_PRICE_MIN,
+      entryTriggerPriceMax:cfg.ENTRY_TRIGGER_PRICE_MAX,
       entryRungs:cfg.ENTRY_LIMIT_RUNGS,sharesPerSide:cfg.SHARES_PER_SIDE,
       takeProfitInitialPrice:cfg.TAKE_PROFIT_INITIAL_PRICE,
       takeProfitAfterOppositeHit:cfg.TAKE_PROFIT_AFTER_OPPOSITE_HIT,
@@ -76,7 +78,8 @@ class WickBot{
     this.lastScanAt=null;this.orders=[];this.totalOrderAttempts=0;
     this.windowOrders=[];this.orderWindowStart=null;this.running=false;
     this.entryTriggerLatched=false;this.entryTriggerAt=null;this.entryTriggerSide=null;
-    this.entryTriggerCandle=null;this.entryTriggerReason=null;this.entryPairPlaced=false;
+    this.entryTriggerCandle=null;this.entryTriggerPrice=null;
+    this.entryTriggerReason=null;this.entryPairPlaced=false;
     this.resolutionAttempts=new Map();
     this.quoteWindowStart=null;this.liveQuotes={UP:{status:'MISSING'},DOWN:{status:'MISSING'}};
     this.closeQuotes=null;
@@ -206,12 +209,15 @@ class WickBot{
     this.entryTriggerAt=null;
     this.entryTriggerSide=null;
     this.entryTriggerCandle=null;
+    this.entryTriggerPrice=null;
     this.entryTriggerReason=null;
     this.entryPairPlaced=false;
     this.entryAttemptMissed=false;
     this.log('PAPER_STRATEGY_WINDOW_STARTED',{windowStart:start,timeframe:this.timeframe,
       strategyId:this.strategyId,strategyName:this.strategyName,windowMs:this.windowMs,
       entryWindowStartMs:this.rules.entryWindowStartMs,
+      triggerPriceMin:this.rules.entryTriggerPriceMin,
+      triggerPriceMax:this.rules.entryTriggerPriceMax,
       entryRungs:this.rules.entryRungs||null,
       sharesPerSide:this.rules.sharesPerSide,prebuyOrderLeadMs:this.rules.prebuyOrderLeadMs||null});
   }
@@ -225,17 +231,33 @@ class WickBot{
     const elapsed=now-start;
     if(elapsed<this.rules.entryWindowStartMs||elapsed>=this.windowMs)return false;
     if(!this.entryPairPlaced){
+      const triggeringSide=['UP','DOWN'].find(side=>{
+        const quote=this.liveQuotes[side];
+        const price=Number(quote?.bestAsk);
+        return quote?.status==='LIVE'&&Number.isFinite(quote.updatedAt)&&
+          now-quote.updatedAt<=5000&&Number.isFinite(price)&&
+          price>this.rules.entryTriggerPriceMin&&price<this.rules.entryTriggerPriceMax;
+      });
+      if(!triggeringSide)return false;
+      const triggerPrice=Number(this.liveQuotes[triggeringSide].bestAsk);
       this.entryPairPlaced=true;
       this.entryTriggerLatched=true;
       this.entryTriggerAt=now;
-      this.entryTriggerReason='Placed resting buy limits on both sides at both entry rungs.';
+      this.entryTriggerSide=triggeringSide;
+      this.entryTriggerPrice=triggerPrice;
+      this.entryTriggerReason=`${triggeringSide} best ask ${usdPrice(triggerPrice)} entered the trigger band; placed all four resting limit buys.`;
       this.totalOrderAttempts+=2*this.rules.entryRungs.length;
       for(const side of ['UP','DOWN']){
         for(const rung of this.rules.entryRungs)this.placeLimitEntryOrder(side,rung,now,start);
       }
+      this.log('PAPER_TRIGGER_PRICE_BAND_MATCHED',{strategyId:this.strategyId,
+        windowStart:start,triggerSide:triggeringSide,triggerPrice,
+        triggerPriceMin:this.rules.entryTriggerPriceMin,
+        triggerPriceMax:this.rules.entryTriggerPriceMax});
       this.log('PAPER_LIMIT_ENTRY_LADDER_PLACED',{strategyId:this.strategyId,
         windowStart:start,orderCount:2*this.rules.entryRungs.length,
-        sharesPerOrder:this.rules.sharesPerSide,rungs:this.rules.entryRungs});
+        sharesPerOrder:this.rules.sharesPerSide,rungs:this.rules.entryRungs,
+        triggerSide:triggeringSide,triggerPrice});
     }
     return this.processPendingLimitBuyOrders(now);
   }
@@ -631,26 +653,29 @@ class WickBot{
            :this.entryTriggerLatched?'Signal latched; waiting for the order time or a fresh quote.'
            :currentEntryWindow
              ?isCandlePrebuy?'Pre-buy phase active; waiting for the candle signal or market-open buy time.'
-               :'Four-minute limit orders are active.'
+                :'Monitoring both best asks for the $0.32–$0.70 trigger band.'
              :isCandlePrebuy?'Waiting for the final 10 seconds before the next window.'
                :'Waiting until 4:00 into the 5-minute window.');
         return {now,mode:'DEMO ONLY',status:this.status,error:this.error,
              strategy:{id:this.strategyId,name:this.strategyName,timeframe:this.timeframe,
                market:'Polymarket BTC 5-minute UP/DOWN',
               capital:this.capital,execution:'PAPER ONLY',
-                entries:{orderType:isCandlePrebuy?'MARKET':'LIMIT',
+              entries:{orderType:isCandlePrebuy?'MARKET':'LIMIT',
                    sideSelection:isCandlePrebuy
-                     ?'Latest fully closed one-minute candle: green UP, red DOWN.'
-                     :'Both sides at both fixed-price entry rungs.',
+                     ?'Final 57-second BTC move versus the previous closed one-minute candle: higher UP; otherwise DOWN.'
+                     :'Either side triggers both sides when its fresh best ask enters the price band.',
                   sharesPerSide:this.rules.sharesPerSide,
                    rungs:this.rules.entryRungs,
                   windowStartMs:this.rules.entryWindowStartMs,windowEndMs:this.windowMs,
+                  triggerPriceMin:isCandlePrebuy?null:this.rules.entryTriggerPriceMin,
+                  triggerPriceMax:isCandlePrebuy?null:this.rules.entryTriggerPriceMax,
                    prebuyScanSecondsBeforeWindow:this.rules.prebuyScanLeadMs/1000,
                    prebuySignalSecondsBeforeWindow:this.rules.prebuySignalLeadMs/1000,
                    prebuyOrderSecondsBeforeWindow:this.rules.prebuyOrderLeadMs/1000,
-                   triggerPriceSource:isCandlePrebuy?'last closed BTC one-minute candle':'fixed limit rungs',
+                  triggerPriceSource:isCandlePrebuy?'live BTC price versus previous closed one-minute candle close':'fresh UP/DOWN best ask',
                  triggerLatched:this.entryTriggerLatched,triggerAt:this.entryTriggerAt,
-                 triggerSide:this.entryTriggerSide,pairPlaced:this.entryPairPlaced,
+                  triggerSide:this.entryTriggerSide,triggerPrice:this.entryTriggerPrice,
+                  pairPlaced:this.entryPairPlaced,
                   attemptMissed:this.entryAttemptMissed===true,
                   signal:{side:this.entryTriggerSide,reason:signalReason,
                     candle:this.entryTriggerCandle,ready:this.entryTriggerLatched}},
@@ -660,14 +685,14 @@ class WickBot{
                   oppositeTakeProfitPayout:this.rules.takeProfitPayout,stopLoss:null,
                  windowEnd:'Expire take-profit orders; hold positions without a fill for official market resolution.'},
                  timing:isCandlePrebuy
-                   ?'Read the latest closed 1-minute candle 5 seconds before window open; market-buy its side 2 seconds before open.'
-                   :'At 4:00, place fixed-price limit buys and leave them open until filled or the 5-minute window ends.',
+                   ?'Compare BTC at 3 seconds before open with the previous closed 1-minute candle close; market-buy the indicated side 2 seconds before open.'
+                   :'From 4:00, monitor every tick; when either side is above $0.32 and below $0.70, place both-side limit buys.',
                  sizing:isCandlePrebuy
                    ?`Market-buy ${this.rules.sharesPerSide} shares on the one-minute candle's indicated side.`
                    :`${this.rules.sharesPerSide} shares per side at each of the $0.20 and $0.10 limit rungs.`,
                  trigger:isCandlePrebuy
-                   ?'Green latest closed 1-minute candle signals UP; red signals DOWN; doji has no entry.'
-                   :'Buy UP and DOWN at $0.20 (TP $0.80) and $0.10 (TP $0.90).',
+                   ?'At T−3s, compare BTC with the previous closed 1-minute candle close: higher is green/UP; equal or lower is red/DOWN. This represents the final 57 seconds.'
+                   :'A fresh UP or DOWN best ask strictly inside $0.32–$0.70 latches the trigger; then place UP and DOWN limits at $0.20 and $0.10.',
                 unfilled:isCandlePrebuy
                   ?'A buy requires a fresh ask-side book before window open; unfilled entries are skipped. Positions without TP fills by window end await official Polymarket resolution.'
                   :'Limit buys fill only against visible ask size at or below their fixed limit. Unfilled entries are canceled at window end; filled positions await TP or official resolution.',

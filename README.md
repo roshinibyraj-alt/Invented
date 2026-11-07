@@ -4,8 +4,8 @@ Polymarket BTC 5-minute paper trading with two independent strategies. Each stra
 
 ## Strategy A: 4-minute two-rung limit strategy
 
-- The bot waits until 4:00 into each 5-minute window, then checks every 500ms.
-- At 4:00, it places four resting limit buys: 300 UP and 300 DOWN at $0.20, plus 300 UP and 300 DOWN at $0.10.
+- From 4:00 until the 5-minute window ends, the bot checks every 500ms for either side's fresh best ask to be strictly above $0.32 and below $0.70.
+- The first qualifying tick latches the trigger and places four resting limit buys: 300 UP and 300 DOWN at $0.20, plus 300 UP and 300 DOWN at $0.10. The trigger stays active if that side's price later leaves the band.
 - A limit buy fills only against visible ask size at or below its limit, and is recorded at its fixed limit price. Actual partial fills are booked as the actual number of shares and the unfilled remainder is canceled.
 - Each fill immediately gets a resting limit sell: the $0.20 rung targets $0.80 and the $0.10 rung targets $0.90.
 - When a take-profit fills, the other side's remaining TP orders move to $0.99. A $0.99 fill records proceeds as $1 per share; rung TPs at $0.80 or $0.90 record their stated price.
@@ -17,7 +17,7 @@ Polymarket BTC 5-minute paper trading with two independent strategies. Each stra
 
 - This strategy runs in a separate bot instance with its own $10,000 demo balance, positions, win rate, and equity curve.
 - It begins scanning for the upcoming BTC 5-minute market during the final 10 seconds before open.
-- Five seconds before open, it chooses the latest fully closed one-minute BTC candle. Green signals UP; red signals DOWN; a doji does not enter.
+- Three seconds before open, it compares the live BTC price with the close of the previous completed one-minute candle. This is the final 57-second segment, from roughly second 241 to second 297 of the ending window. A higher price is green/UP; an equal or lower price is red/DOWN.
 - Two seconds before open, it attempts one market buy of 500 shares on the signaled side, only if that side's order book is fresh. It skips rather than entering late.
 - One second after the window opens, it creates a $0.70 limit take-profit for shares filled on that side.
 - Market buys sweep visible ask depth and incur taker fees. Limit sells have no taker fee; the estimated maker rebate is displayed but is not added to demo cash.

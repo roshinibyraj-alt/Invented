@@ -52,6 +52,12 @@ function fire(bot, elapsedMs, prices = {}) {
   return bot.processPairedEntry(at);
 }
 
+function triggerLimitLadder(bot, elapsedMs = 240_000) {
+  return fire(bot, elapsedMs, {
+    upBid: 0.49, upAsk: 0.50, downBid: 0.59, downAsk: 0.60,
+  });
+}
+
 function fee(price, shares) {
   return TAKER_RATE * price * (1 - price) * shares;
 }
@@ -67,7 +73,7 @@ test("both independent strategies use separate $10,000 demo accounts on BTC 5-mi
   assert.deepEqual(multi.snapshot().strategy.timeframes, ["5m"]);
 });
 
-test("prebuy scans the next market and uses separate signal and entry times", () => {
+test("prebuy scans the next market and uses separate final-segment signal and entry times", () => {
   const bot = new PrebuyBot();
   const currentStart = FIRST_START;
   assert.equal(bot.getWindowStartToScan(currentStart + WINDOW_5M - 10_001, currentStart),
@@ -76,16 +82,20 @@ test("prebuy scans the next market and uses separate signal and entry times", ()
     currentStart + WINDOW_5M);
   assert.equal(bot.getWindowStartToScan(currentStart + WINDOW_5M, currentStart + WINDOW_5M),
     currentStart + WINDOW_5M);
-  assert.equal(config.PREBUY_SIGNAL_LEAD_MS, 5000);
+  assert.equal(config.PREBUY_SIGNAL_LEAD_MS, 3000);
   assert.equal(config.PREBUY_ORDER_LEAD_MS, 2000);
 });
 
-test("green closed candle buys UP at two seconds before open and activates $0.70 TP at second one", () => {
+test("a 57-second BTC rise above the previous candle close buys UP", () => {
   const start = FIRST_START + WINDOW_5M;
-  const candleFeed = { getMinuteCandles: () => [
-    { t: start - 120_000, o: 100, c: 101 },
-    { t: start - 60_000, o: 101, c: 99 },
-  ] };
+  const candleFeed = {
+    getMinuteCandles: () => [
+      { t: start - 180_000, o: 100, c: 101 },
+      { t: start - 120_000, o: 101, c: 99 },
+      { t: start - 60_000, o: 99, c: 150 },
+    ],
+    getLatestPrice: () => ({ price: 102, timestamp: start - 3_000 }),
+  };
   const bot = new PrebuyBot({ candleFeed });
   bot.log = () => {};
   bot.market = {
@@ -102,8 +112,10 @@ test("green closed candle buys UP at two seconds before open and activates $0.70
   const signalAt = start - config.PREBUY_SIGNAL_LEAD_MS;
   assert.equal(bot.processPairedEntry(signalAt), false);
   assert.equal(bot.entryTriggerSide, "UP");
-  assert.equal(bot.entryTriggerCandle.close, 101,
-    "the still-forming latest minute must not replace the last closed candle");
+  assert.equal(bot.entryTriggerCandle.referenceClose, 99,
+    "the still-forming candle must not replace the previous closed candle's close");
+  assert.equal(bot.entryTriggerCandle.currentPrice, 102);
+  assert.equal(bot.entryTriggerCandle.durationSeconds, 57);
 
   const orderAt = start - config.PREBUY_ORDER_LEAD_MS;
   quotePair(bot, orderAt, { upAsk: 0.40, downAsk: 0.60 });
@@ -126,9 +138,12 @@ test("green closed candle buys UP at two seconds before open and activates $0.70
     "activation must not create duplicate take-profit orders");
 });
 
-test("red candle buys only DOWN and a doji skips the pre-buy", () => {
+test("a BTC price at or below the previous candle close buys only DOWN", () => {
   const start = FIRST_START + WINDOW_5M;
-  const redFeed = { getMinuteCandles: () => [{ t: start - 120_000, o: 101, c: 100 }] };
+  const redFeed = {
+    getMinuteCandles: () => [{ t: start - 120_000, o: 101, c: 100 }],
+    getLatestPrice: () => ({ price: 99, timestamp: start - 3_000 }),
+  };
   const bot = new PrebuyBot({ candleFeed: redFeed });
   bot.log = () => {};
   bot.market = {
@@ -146,21 +161,27 @@ test("red candle buys only DOWN and a doji skips the pre-buy", () => {
   assert.equal(bot.positions.length, 1);
   assert.equal(bot.positions[0].side, "DOWN");
 
-  const dojiBot = new PrebuyBot({ candleFeed: {
-    getMinuteCandles: () => [{ t: start - 120_000, o: 100, c: 100 }],
+  const equalBot = new PrebuyBot({ candleFeed: {
+    getMinuteCandles: () => [{ t: start - 120_000, o: 101, c: 100 }],
+    getLatestPrice: () => ({ price: 100, timestamp: start - 3_000 }),
   } });
-  dojiBot.log = () => {};
-  dojiBot.market = { ...bot.market, start };
-  dojiBot.openStrategyWindow(start, scanAt);
-  quotePair(dojiBot, start - config.PREBUY_ORDER_LEAD_MS);
-  dojiBot.processPairedEntry(start - config.PREBUY_SIGNAL_LEAD_MS);
-  assert.equal(dojiBot.entryAttemptMissed, true);
-  assert.equal(dojiBot.positions.length, 0);
+  equalBot.log = () => {};
+  equalBot.market = { ...bot.market, start };
+  equalBot.openStrategyWindow(start, scanAt);
+  quotePair(equalBot, start - config.PREBUY_ORDER_LEAD_MS);
+  equalBot.processPairedEntry(start - config.PREBUY_SIGNAL_LEAD_MS);
+  assert.equal(equalBot.entryTriggerSide, "DOWN",
+    "equal to the prior close counts as red/DOWN, not a no-trade doji");
+  assert.equal(equalBot.processPairedEntry(start - config.PREBUY_ORDER_LEAD_MS), true);
+  assert.equal(equalBot.positions[0].side, "DOWN");
 });
 
-test("prebuy tick scans early, reads the candle at five seconds, and buys at two seconds", async () => {
+test("prebuy tick scans early, reads the 57-second comparison at three seconds, and buys at two seconds", async () => {
   const start = FIRST_START + WINDOW_5M;
-  const candleFeed = { getMinuteCandles: () => [{ t: start - 120_000, o: 100, c: 101 }] };
+  const candleFeed = {
+    getMinuteCandles: () => [{ t: start - 120_000, o: 99, c: 100 }],
+    getLatestPrice: () => ({ price: 101, timestamp: start - 3_000 }),
+  };
   const bot = new PrebuyBot({ candleFeed });
   bot.log = () => {};
   let now = start - config.PREBUY_SCAN_LEAD_MS;
@@ -221,20 +242,37 @@ test("prebuy does not enter after the upcoming window has already opened", () =>
   assert.equal(bot.positions.length, 0);
 });
 
-test("waits until 4:00, then places all four fixed-price limit buys without the old band", () => {
+test("waits until 4:00, then latches either side's trigger-band tick and places four fixed-price limits", () => {
   const bot = makeBot();
   assert.equal(fire(bot, 239_999, { upAsk: 0.50, downAsk: 0.52 }), false);
-  assert.equal(fire(bot, 240_000, { upAsk: 0.42, downAsk: 0.59 }), false);
+  assert.equal(fire(bot, 240_000, {
+    upBid: 0.31, upAsk: 0.32, downBid: 0.69, downAsk: 0.70,
+  }), false, "both trigger-band boundaries are exclusive");
   assert.equal(bot.positions.length, 0);
+  assert.equal(bot.orders.filter(order => order.action === "BUY").length, 0);
+
+  fire(bot, 240_500, {
+    upBid: 0.70, upAsk: 0.71, downBid: 0.49, downAsk: 0.50,
+  });
   const buys = bot.orders.filter(order => order.action === "BUY");
   assert.equal(buys.length, 4);
   assert.ok(buys.every(order => order.status === "PENDING" && order.orderType === "LIMIT"));
   assert.deepEqual(buys.map(order => order.limitPrice).sort((a, b) => a - b), [0.10, 0.10, 0.20, 0.20]);
+  assert.equal(bot.entryTriggerSide, "DOWN");
+  assert.equal(bot.entryTriggerPrice, 0.50);
+
+  fire(bot, 241_000, {
+    upBid: 0.31, upAsk: 0.32, downBid: 0.70, downAsk: 0.71,
+  });
+  assert.equal(bot.orders.filter(order => order.action === "BUY").length, 4,
+    "leaving the band after the trigger must not cancel or re-place the ladder");
+  assert.equal(bot.entryTriggerPrice, 0.50);
 });
 
 test("each rung fills only at its fixed limit and immediately receives its own TP", () => {
   const bot = makeBot();
-  assert.equal(fire(bot, 240_000, {
+  triggerLimitLadder(bot);
+  assert.equal(fire(bot, 240_500, {
     upAsk: 0.20, downAsk: 0.10,
     upLevels: [{ price: 0.20, size: 300 }],
     downLevels: [{ price: 0.10, size: 600 }],
@@ -256,7 +294,8 @@ test("each rung fills only at its fixed limit and immediately receives its own T
 
 test("a partial limit fill books actual shares and completes without rearming", () => {
   const bot = makeBot();
-  fire(bot, 240_000, {
+  triggerLimitLadder(bot);
+  fire(bot, 240_500, {
     upAsk: 0.20, downAsk: 0.60,
     upLevels: [{ price: 0.20, size: 4 }],
   });
@@ -272,7 +311,8 @@ test("a partial limit fill books actual shares and completes without rearming", 
 
 test("the $0.20 TP is $0.80, the $0.10 TP is $0.90, opposite sells retain the $0.99 rule", () => {
   const bot = makeBot();
-  fire(bot, 240_000, {
+  triggerLimitLadder(bot);
+  fire(bot, 240_500, {
     upAsk: 0.10, downAsk: 0.10,
     upLevels: [{ price: 0.10, size: 600 }],
     downLevels: [{ price: 0.10, size: 600 }],
@@ -315,7 +355,8 @@ test("the $0.20 TP is $0.80, the $0.10 TP is $0.90, opposite sells retain the $0
 test("take-profit outcome and exit counts follow realized net P&L", () => {
   const bot = makeBot();
   bot.market.feesEnabled = false;
-  fire(bot, 240_000, {
+  triggerLimitLadder(bot);
+  fire(bot, 240_500, {
     upAsk: 0.20, downAsk: 0.60,
     upLevels: [{ price: 0.20, size: 300 }],
   });
@@ -334,7 +375,8 @@ test("take-profit outcome and exit counts follow realized net P&L", () => {
 
 test("positions missing TP at window end wait for official resolution", async () => {
   const bot = makeBot();
-  fire(bot, 240_000, {
+  triggerLimitLadder(bot);
+  fire(bot, 240_500, {
     upAsk: 0.20, downAsk: 0.20,
     upLevels: [{ price: 0.20, size: 300 }],
     downLevels: [{ price: 0.20, size: 300 }],

@@ -15,6 +15,8 @@ class ChainlinkFeed{
     this.status='starting';
     this.error=null;
     this.lastUpdateAt=null;
+    this.lastPrice=null;
+    this.lastPriceAt=null;
     this.retryMs=1000;
     this.reconnectTimer=null;
   }
@@ -106,6 +108,10 @@ class ChainlinkFeed{
       if(timestamp<bar.firstTs){bar.o=price;bar.firstTs=timestamp}
       if(timestamp>=bar.lastTs){bar.c=price;bar.lastTs=timestamp}
     }
+    if(this.lastPriceAt==null||timestamp>=this.lastPriceAt){
+      this.lastPrice=price;
+      this.lastPriceAt=timestamp;
+    }
     return true;
   }
 
@@ -115,6 +121,21 @@ class ChainlinkFeed{
   }
 
   getMinuteCandles(){
+    this.assertFresh();
+    return [...this.bars.values()].sort((a,b)=>a.t-b.t)
+      .map(({t,o,h,l,c,v})=>({t,o,h,l,c,v}));
+  }
+
+  getLatestPrice(){
+    this.assertFresh();
+    if(!Number.isFinite(this.lastPrice)||!Number.isFinite(this.lastPriceAt))
+      throw new Error('Chainlink BTC/USD feed has no current price');
+    if(this.now()-this.lastPriceAt>MAX_AGE_MS)
+      throw new Error('Chainlink BTC/USD price timestamp is stale');
+    return {price:this.lastPrice,timestamp:this.lastPriceAt};
+  }
+
+  assertFresh(){
     this.start();
     const ageMs=this.lastUpdateAt==null?null:Math.max(0,this.now()-this.lastUpdateAt);
     if(this.lastUpdateAt==null||ageMs>MAX_AGE_MS){
@@ -125,8 +146,6 @@ class ChainlinkFeed{
       }
       throw new Error(this.error||`Chainlink BTC/USD feed ${this.status}; waiting for a fresh price update`);
     }
-    return [...this.bars.values()].sort((a,b)=>a.t-b.t)
-      .map(({t,o,h,l,c,v})=>({t,o,h,l,c,v}));
   }
 
   snapshot(){

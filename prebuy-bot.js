@@ -11,7 +11,7 @@ class PrebuyBot extends WickBot {
       windowMs:cfg.WINDOW_MS_5M,
       capital:cfg.DEMO_CAPITAL_PREBUY,
       strategyId:'prebuy-5m',
-      strategyName:'One-minute candle pre-buy',
+      strategyName:'57-second BTC comparison pre-buy',
       rules:{
         entryWindowStartMs:-cfg.PREBUY_ORDER_LEAD_MS,
         sharesPerSide:cfg.PREBUY_SHARES_PER_SIDE,
@@ -55,28 +55,37 @@ class PrebuyBot extends WickBot {
           Number(candle.t)+60000<=signalAt)
           .sort((a,b)=>Number(a.t)-Number(b.t));
         const candle=closed.at(-1);
-        if(!candle)throw new Error('No fully closed one-minute BTC candle is available.');
+        if(!candle)throw new Error('No previous closed one-minute BTC candle is available.');
         const candleCloseAt=Number(candle.t)+60000;
         if(signalAt-candleCloseAt>90000)
-          throw new Error('The latest fully closed one-minute BTC candle is stale.');
-        const open=Number(candle.o),close=Number(candle.c);
-        if(!Number.isFinite(open)||!Number.isFinite(close))
-          throw new Error('The latest one-minute candle has invalid OHLC values.');
+          throw new Error('The previous closed one-minute BTC candle is stale.');
+        const referenceClose=Number(candle.c);
+        if(!Number.isFinite(referenceClose))
+          throw new Error('The previous closed one-minute candle has an invalid close.');
+        const livePrice=this.candleFeed.getLatestPrice();
+        const currentPrice=Number(livePrice?.price);
+        const currentPriceAt=Number(livePrice?.timestamp);
+        if(!Number.isFinite(currentPrice)||!Number.isFinite(currentPriceAt))
+          throw new Error('The live Chainlink BTC price is unavailable.');
+        if(currentPriceAt<=candleCloseAt||currentPriceAt>signalAt+1000)
+          throw new Error('The live BTC price is outside the final 57-second signal segment.');
         this.entryTriggerAt=now;
-        this.entryTriggerCandle={start:Number(candle.t),closedAt:candleCloseAt,open,close};
-        this.entryTriggerSide=close>open?'UP':close<open?'DOWN':null;
-        this.entryTriggerReason=this.entryTriggerSide
-          ?`${close>open?'Green':'Red'} latest closed one-minute candle signals ${this.entryTriggerSide}.`
-          :'Latest closed one-minute candle is a doji; no pre-buy.';
+        this.entryTriggerCandle={
+          start:candleCloseAt,end:currentPriceAt,durationSeconds:57,
+          referenceCandleStart:Number(candle.t),referenceCandleClosedAt:candleCloseAt,
+          referenceClose,currentPrice,currentPriceAt,
+        };
+        this.entryTriggerSide=currentPrice>referenceClose?'UP':'DOWN';
+        this.entryTriggerReason=currentPrice>referenceClose
+          ?`BTC rose from the previous closed 1-minute candle's $${referenceClose} close during the final 57 seconds; signal UP.`
+          :`BTC was at or below the previous closed 1-minute candle's $${referenceClose} close during the final 57 seconds; signal DOWN.`;
         this.entryTriggerLatched=true;
-        this.log(this.entryTriggerSide?'PAPER_PREBUY_CANDLE_SIGNAL':'PAPER_PREBUY_DOJI_NO_ENTRY',{
+        this.log('PAPER_PREBUY_57S_SIGNAL',{
           strategyId:this.strategyId,windowStart:start,signalAt,readAt:now,
-          candleStart:this.entryTriggerCandle.start,candleClosedAt:candleCloseAt,
-          open,close,side:this.entryTriggerSide});
-        if(!this.entryTriggerSide){
-          this.entryAttemptMissed=true;
-          return false;
-        }
+          segmentStartAt:candleCloseAt,segmentEndAt:currentPriceAt,
+          segmentSeconds:57,referenceCandleStart:Number(candle.t),
+          referenceCandleClosedAt:candleCloseAt,referenceClose,currentPrice,
+          currentPriceAt,side:this.entryTriggerSide});
       }catch(error){
         if(!this.lastCandleWaitLogAt||now-this.lastCandleWaitLogAt>=5000){
           this.lastCandleWaitLogAt=now;
