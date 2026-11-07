@@ -2,18 +2,24 @@
 
 const cfg=require('./config');
 const Bot=require('./wick-bot');
+const PrebuyBot=require('./prebuy-bot');
 
 class MultiBot {
   constructor(){
     this.bots={
-      '5m':new Bot({timeframe:'5m',windowMs:cfg.WINDOW_MS_5M,capital:cfg.DEMO_CAPITAL})
+      'trigger-5m':new Bot({timeframe:'5m',windowMs:cfg.WINDOW_MS_5M,
+        capital:cfg.DEMO_CAPITAL,strategyId:'trigger-5m',
+        strategyName:'4-minute paired market-buy strategy'}),
+      'prebuy-5m':new PrebuyBot(),
     };
   }
   start(){for(const bot of Object.values(this.bots))bot.start()}
   stop(){for(const bot of Object.values(this.bots))bot.stop()}
   snapshot(){
-    const timeframes=Object.fromEntries(Object.entries(this.bots).map(([k,b])=>[k,b.snapshot()]));
-    const states=Object.values(timeframes),positions=states.flatMap(s=>s.positions)
+    const strategies=Object.fromEntries(Object.entries(this.bots).map(([k,b])=>[k,b.snapshot()]));
+    const primary=strategies['trigger-5m'];
+    const timeframes={'5m':primary};
+    const states=Object.values(strategies),positions=states.flatMap(s=>s.positions)
       .sort((a,b)=>b.openedAt-a.openedAt),events=states.flatMap(s=>s.events).sort((a,b)=>b.ts-a.ts).slice(0,100);
     const openPositions=states.reduce((n,s)=>n+s.account.openPositions,0);
     const totalTrades=states.reduce((n,s)=>n+s.account.totalTrades,0),settledTrades=states.reduce((n,s)=>n+s.account.settledTrades,0);
@@ -26,7 +32,7 @@ class MultiBot {
       states.some(s=>['scanning','position_open'].includes(s.status))?
         (openPositions?'position_open':'scanning'):
         states.every(s=>s.status==='window_complete')?'window_complete':'waiting_for_market';
-    const primary=timeframes['5m'],capital=states.reduce((n,s)=>n+s.account.capital,0);
+    const capital=states.reduce((n,s)=>n+s.account.capital,0);
     const series=states.map(s=>s.account.equityCurve||[]);
     const current=series.map(x=>Number(x[0]?.equity||0));
     const startTs=Math.min(...series.map(x=>Number(x[0]?.ts||Date.now())));
@@ -36,9 +42,9 @@ class MultiBot {
     for(const point of settled){current[point.index]=Number(point.equity);equityCurve.push({ts:point.ts,equity:current.reduce((n,x)=>n+x,0)});}
     let peak=equityCurve[0]?.equity||capital,maxDrawdown=0;
     for(const point of equityCurve){peak=Math.max(peak,point.equity);maxDrawdown=Math.max(maxDrawdown,peak-point.equity);}
-    return {...primary,now:Date.now(),status,timeframes,positions,events,
+    return {...primary,now:Date.now(),status,timeframes,strategies,positions,events,
       error:states.find(s=>s.error)?.error||null,
-       strategy:{execution:'PAPER ONLY',timeframes:Object.keys(timeframes)},
+       strategy:{execution:'PAPER ONLY',timeframes:['5m'],strategyIds:Object.keys(strategies)},
       account:{capital,
         cash:states.reduce((n,s)=>n+s.account.cash,0),
         realizedPnl:states.reduce((n,s)=>n+s.account.realizedPnl,0),
@@ -56,8 +62,8 @@ class MultiBot {
   }
   diagnostics(){
     const state=this.snapshot();
-    const perTimeframe=Object.fromEntries(Object.entries(this.bots).map(([timeframe,bot])=>[
-      timeframe,{sessionStartedAt:bot.startedAt,tradeCount:bot.positions.length,
+    const perStrategy=Object.fromEntries(Object.entries(this.bots).map(([strategyId,bot])=>[
+      strategyId,{sessionStartedAt:bot.startedAt,tradeCount:bot.positions.length,
         orderAttempts:bot.totalOrderAttempts,retainedOrders:bot.orders.length},
     ]));
     const trades=Object.values(this.bots).flatMap(bot=>bot.positions)
@@ -78,12 +84,14 @@ class MultiBot {
     const group=(items,keyOf)=>Object.fromEntries([...new Set(items.map(keyOf).filter(Boolean))]
       .sort().map(key=>[key,summarize(items.filter(item=>keyOf(item)===key))]));
     return {generatedAt:Date.now(),mode:'DEMO ONLY',execution:'PAPER ONLY',
-      account:state.account,equityCurve:state.account.equityCurve,timeframes:perTimeframe,
+      account:state.account,equityCurve:state.account.equityCurve,
+      strategies:perStrategy,
       tradeCount:trades.length,orderAttempts:Object.values(this.bots)
         .reduce((sum,bot)=>sum+bot.totalOrderAttempts,0),
       retainedOrderCount:orders.length,orderHistoryTruncated:orders.length<
         Object.values(this.bots).reduce((sum,bot)=>sum+bot.totalOrderAttempts,0),
       summary:{bySide:group(trades,item=>item.side),
+        byStrategy:group(trades,item=>item.strategyId||'UNKNOWN'),
         byEntryMode:group(trades,item=>item.entryMode||'UNKNOWN'),
         byExitReason:group(trades,item=>item.exitReason||item.settlementBasis||'OPEN')},
       trades,orders};

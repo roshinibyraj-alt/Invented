@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const config = require("../config.js");
 const Bot = require("../wick-bot.js");
+const PrebuyBot = require("../prebuy-bot.js");
 const MultiBot = require("../multi-bot.js");
 const marketData = require("../wick-market-data.js");
 
@@ -55,12 +56,146 @@ function fee(price, shares) {
   return TAKER_RATE * price * (1 - price) * shares;
 }
 
-test("only the 5-minute BTC bot runs with the $10,000 demo allocation", () => {
+test("both independent strategies use separate $10,000 demo accounts on BTC 5-minute windows", () => {
   const multi = new MultiBot();
-  assert.deepEqual(Object.keys(multi.bots), ["5m"]);
-  assert.equal(multi.bots["5m"].capital, 10000);
-  assert.equal(multi.snapshot().account.capital, 10000);
+  assert.deepEqual(Object.keys(multi.bots), ["trigger-5m", "prebuy-5m"]);
+  assert.equal(multi.bots["trigger-5m"].capital, 10000);
+  assert.equal(multi.bots["prebuy-5m"].capital, 10000);
+  assert.equal(multi.snapshot().strategies["trigger-5m"].account.capital, 10000);
+  assert.equal(multi.snapshot().strategies["prebuy-5m"].account.capital, 10000);
+  assert.equal(multi.snapshot().account.capital, 20000);
   assert.deepEqual(multi.snapshot().strategy.timeframes, ["5m"]);
+});
+
+test("prebuy strategy selects the next market 10 seconds before its window", () => {
+  const bot = new PrebuyBot();
+  const currentStart = FIRST_START;
+  assert.equal(bot.getWindowStartToScan(currentStart + WINDOW_5M - 10_001, currentStart),
+    currentStart);
+  assert.equal(bot.getWindowStartToScan(currentStart + WINDOW_5M - 10_000, currentStart),
+    currentStart + WINDOW_5M);
+  assert.equal(bot.getWindowStartToScan(currentStart + WINDOW_5M, currentStart + WINDOW_5M),
+    currentStart + WINDOW_5M);
+});
+
+test("prebuy buys 500 shares on each side before open and activates $0.70 TPs at second one", async () => {
+  const bot = new PrebuyBot();
+  bot.log = () => {};
+  const start = FIRST_START + WINDOW_5M;
+  bot.market = {
+    id: "5m-prebuy-market", slug: "btc-updown-5m-prebuy",
+    title: "BTC 5m prebuy test", start,
+    tokens: { UP: "up-token", DOWN: "down-token" },
+    feesEnabled: false,
+  };
+  const entryAt = start - config.PREBUY_LEAD_MS;
+  bot.openStrategyWindow(start, entryAt);
+  quotePair(bot, entryAt, { upAsk: 0.40, downAsk: 0.60 });
+
+  assert.equal(bot.processPairedEntry(entryAt), true);
+  assert.equal(bot.positions.length, 2);
+  await bot.closePreviousWindows(start - WINDOW_5M, entryAt);
+  assert.ok(bot.positions.every(position => position.status === "OPEN"),
+    "the upcoming market's pre-bought positions must not be closed by the previous window");
+  assert.ok(bot.positions.every(position => position.shares === 500));
+  assert.ok(bot.positions.every(position => position.strategyId === "prebuy-5m"));
+  assert.equal(bot.orders.filter(order => order.action === "BUY").length, 2);
+  assert.equal(bot.orders.filter(order => order.action === "SELL").length, 0,
+    "TP limits are deferred until one second after the window opens");
+  assert.equal(bot.activateDeferredTakeProfits(start + 999), false);
+  assert.equal(bot.activateDeferredTakeProfits(start + 1000), true);
+
+  const takeProfits = bot.orders.filter(order => order.action === "SELL");
+  assert.equal(takeProfits.length, 2);
+  assert.ok(takeProfits.every(order => order.limitPrice === 0.70));
+  assert.equal(bot.activateDeferredTakeProfits(start + 1001), false,
+    "activation must not create duplicate take-profit orders");
+});
+
+test("prebuy first TP fill moves only the opposite TP to $0.99", () => {
+  const bot = new PrebuyBot();
+  bot.log = () => {};
+  const start = FIRST_START + WINDOW_5M;
+  bot.market = {
+    id: "5m-prebuy-market", slug: "btc-updown-5m-prebuy",
+    title: "BTC 5m prebuy test", start,
+    tokens: { UP: "up-token", DOWN: "down-token" },
+    feesEnabled: false,
+  };
+  const entryAt = start - config.PREBUY_LEAD_MS;
+  bot.openStrategyWindow(start, entryAt);
+  quotePair(bot, entryAt, { upAsk: 0.40, downAsk: 0.60 });
+  bot.processPairedEntry(entryAt);
+  bot.activateDeferredTakeProfits(start + config.PREBUY_TAKE_PROFIT_DELAY_MS);
+  const up = bot.positions.find(position => position.side === "UP");
+  const down = bot.positions.find(position => position.side === "DOWN");
+  const downTp = bot.orders.find(order => order.action === "SELL" && order.side === "DOWN");
+
+  quote(bot, "UP", start + 1200, { bid: 0.70, ask: 0.72 });
+  quote(bot, "DOWN", start + 1200, { bid: 0.65, ask: 0.67 });
+  bot.processPendingTakeProfitOrders(start + 1200);
+  assert.equal(up.status, "SETTLED_EXIT");
+  assert.equal(down.status, "OPEN");
+  assert.equal(downTp.limitPrice, 0.99);
+  assert.equal(down.takeProfitPrice, 0.99);
+});
+
+test("prebuy tick fetches the upcoming market early and keeps positions through its open", async () => {
+  const bot = new PrebuyBot();
+  bot.log = () => {};
+  const start = FIRST_START + WINDOW_5M;
+  let now = start - config.PREBUY_LEAD_MS;
+  const originalNow = Date.now;
+  const originalGetBtcMarket = marketData.getBtcMarket;
+  const originalGetBook = marketData.getBook;
+  Date.now = () => now;
+  marketData.getBtcMarket = async marketStart => ({
+    id: "5m-prebuy-tick-market", slug: "btc-updown-5m-prebuy-tick",
+    title: "BTC 5m prebuy tick test", start: marketStart,
+    tokens: { UP: "up-token", DOWN: "down-token" },
+    feesEnabled: false,
+  });
+  marketData.getBook = async tokenId => ({
+    bids: [{ price: tokenId === "up-token" ? "0.39" : "0.59", size: "1000" }],
+    asks: [{ price: tokenId === "up-token" ? "0.40" : "0.60", size: "1000" }],
+  });
+  try {
+    await bot.tick();
+    assert.equal(bot.positions.length, 2);
+    assert.ok(bot.positions.every(position => position.status === "OPEN"));
+
+    now = start - 100;
+    await bot.tick();
+    assert.ok(bot.positions.every(position => position.status === "OPEN"),
+      "the future window's positions remain open immediately before the boundary");
+
+    now = start + config.PREBUY_TAKE_PROFIT_DELAY_MS;
+    await bot.tick();
+    assert.equal(bot.orders.filter(order => order.action === "SELL").length, 2);
+    assert.ok(bot.orders.filter(order => order.action === "SELL")
+      .every(order => order.limitPrice === 0.70));
+  } finally {
+    Date.now = originalNow;
+    marketData.getBtcMarket = originalGetBtcMarket;
+    marketData.getBook = originalGetBook;
+  }
+});
+
+test("prebuy does not enter after the upcoming window has already opened", () => {
+  const bot = new PrebuyBot();
+  bot.log = () => {};
+  const start = FIRST_START + WINDOW_5M;
+  bot.market = {
+    id: "5m-prebuy-late-market", slug: "btc-updown-5m-prebuy-late",
+    title: "BTC 5m late prebuy test", start,
+    tokens: { UP: "up-token", DOWN: "down-token" },
+    feesEnabled: false,
+  };
+  bot.openStrategyWindow(start, start - config.PREBUY_LEAD_MS);
+  quotePair(bot, start, { upAsk: 0.40, downAsk: 0.60 });
+  assert.equal(bot.processPairedEntry(start), false);
+  assert.equal(bot.entryAttemptMissed, true);
+  assert.equal(bot.positions.length, 0);
 });
 
 test("does not enter before 4:00 or at the strict price-band boundaries", () => {

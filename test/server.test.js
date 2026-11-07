@@ -44,7 +44,7 @@ test('real-balance proxy returns the upstream account summary',async(t)=>{
   assert.deepEqual(await response.json(),expected);
 });
 
-test('dashboard shows the 5-minute paired market-buy strategy and no order feed',async(t)=>{
+test('dashboard shows two independent strategy portfolios with separate equity curves',async(t)=>{
   const server=startServer({snapshot:()=>({})},0);
   await new Promise(resolve=>server.once('listening',resolve));
   t.after(()=>new Promise(resolve=>server.close(resolve)));
@@ -53,8 +53,15 @@ test('dashboard shows the 5-minute paired market-buy strategy and no order feed'
   assert.equal(response.status,200);
   assert.match(html,/Highest consecutive strategy wins/);
   assert.match(html,/Highest consecutive strategy losses/);
-  assert.match(html,/BTC 5-Minute Paired Market-Buy Paper Bot/);
-  assert.match(html,/\$10,000 demo capital/);
+  assert.match(html,/BTC Strategy Lab/);
+  assert.match(html,/separate \$10,000 demo accounts/);
+  assert.match(html,/Independent strategy portfolios/);
+  assert.match(html,/strategy-panels/);
+  assert.match(html,/Equity curve/);
+  assert.match(html,/id==='prebuy-5m'/);
+  assert.match(html,/s\.strategies/);
+  assert.match(html,/equitySvg\(a\.equityCurve\)/);
+  assert.match(html,/strategyId/);
   assert.match(html,/Taker fees paid/);
   assert.match(html,/Profitable exits/);
   assert.match(html,/Losing exits/);
@@ -62,7 +69,6 @@ test('dashboard shows the 5-minute paired market-buy strategy and no order feed'
   assert.match(html,/waits until 4:00/);
   assert.match(html,/strictly above \$0\.42 and below \$0\.59/);
   assert.match(html,/300 UP and 300 DOWN shares/);
-  assert.match(html,/Filled shares receive \$0\.80 limit sells/);
   assert.match(html,/moves to \$0\.99, counted as \$1 per share/);
   assert.match(html,/takerFees/);
   assert.match(html,/Accumulated \$\{side\}/);
