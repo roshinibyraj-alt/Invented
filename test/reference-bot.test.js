@@ -8,18 +8,16 @@ const MultiBot = require("../multi-bot.js");
 const marketData = require("../wick-market-data.js");
 
 const WINDOW_5M = config.WINDOW_MS_5M;
-const WINDOW_15M = config.WINDOW_MS_15M;
 const FIRST_START = 1_800_000_000_000;
 const TAKER_RATE = config.CRYPTO_TAKER_FEE_RATE;
 
-function makeBot(timeframe = "5m") {
-  const windowMs = timeframe === "15m" ? WINDOW_15M : WINDOW_5M;
-  const bot = new Bot({ timeframe, windowMs, capital: 5000 });
+function makeBot() {
+  const bot = new Bot({ timeframe: "5m", windowMs: WINDOW_5M, capital: config.DEMO_CAPITAL });
   bot.log = () => {};
   bot.market = {
-    id: `${timeframe}-test-market`,
-    slug: `btc-updown-${timeframe}-test`,
-    title: `BTC ${timeframe} test`,
+    id: "5m-test-market",
+    slug: "btc-updown-5m-test",
+    title: "BTC 5m test",
     start: FIRST_START,
     tokens: { UP: "up-token", DOWN: "down-token" },
     feesEnabled: true,
@@ -50,189 +48,160 @@ function quotePair(bot, updatedAt, { upBid = 0.19, upAsk = 0.20, downBid = 0.29,
 function fire(bot, elapsedMs, prices = {}) {
   const at = FIRST_START + elapsedMs;
   quotePair(bot, at, prices);
-  return bot.processScheduledEntry(at);
+  return bot.processPairedEntry(at);
 }
 
 function fee(price, shares) {
   return TAKER_RATE * price * (1 - price) * shares;
 }
 
-test("both BTC timeframe bots share the $10,000 demo allocation", () => {
+test("only the 5-minute BTC bot runs with the $10,000 demo allocation", () => {
   const multi = new MultiBot();
-  assert.deepEqual(Object.keys(multi.bots), ["5m", "15m"]);
-  assert.equal(multi.bots["5m"].capital, 5000);
-  assert.equal(multi.bots["15m"].capital, 5000);
+  assert.deepEqual(Object.keys(multi.bots), ["5m"]);
+  assert.equal(multi.bots["5m"].capital, 10000);
   assert.equal(multi.snapshot().account.capital, 10000);
-  assert.deepEqual(multi.snapshot().strategy.timeframes, ["5m", "15m"]);
+  assert.deepEqual(multi.snapshot().strategy.timeframes, ["5m"]);
 });
 
-test("5-minute schedule buys cheap side 0–1m, then expensive side 1–3m", () => {
-  const bot = makeBot("5m");
-  fire(bot, 1000, { upAsk: 0.20, downAsk: 0.30 });
-  fire(bot, 9999, { upAsk: 0.20, downAsk: 0.30 });
-  assert.equal(bot.positions.length, 1, "do not fire more than once within one 10-second slot");
-  assert.equal(bot.positions[0].side, "UP");
-  assert.equal(bot.positions[0].shares, 10);
-  assert.equal(bot.positions[0].phase, "cheap");
-
-  fire(bot, 10_000, { upAsk: 0.30, downAsk: 0.15 });
-  assert.equal(bot.positions[0].side, "DOWN");
-  assert.equal(bot.positions[0].shares, 15);
-  fire(bot, 20_000, { upAsk: 0.10, downAsk: 0.20 });
-  assert.equal(bot.positions[0].side, "UP");
-  assert.equal(bot.positions[0].shares, 22.5);
-  const accumulated = bot.snapshot().inventory;
-  assert.equal(accumulated.UP.shares, 32.5);
-  assert.equal(accumulated.DOWN.shares, 15);
-  assert.ok(accumulated.UP.averageCost > 0);
-
-  fire(bot, 60_000, { upAsk: 0.60, downAsk: 0.20 });
-  assert.equal(bot.positions[0].phase, "expensive");
-  assert.equal(bot.positions[0].side, "UP");
-  assert.equal(bot.positions[0].shares, 50);
-  fire(bot, 80_000, { upAsk: 0.60, downAsk: 0.20 });
-  assert.equal(bot.positions[0].shares, 75);
-
-  const beforeInactivePhase = bot.positions.length;
-  assert.equal(fire(bot, 180_000, { upAsk: 0.60, downAsk: 0.20 }), false);
-  assert.equal(bot.positions.length, beforeInactivePhase);
+test("does not enter before 4:00 or at the strict price-band boundaries", () => {
+  const bot = makeBot();
+  assert.equal(fire(bot, 239_999, { upAsk: 0.50, downAsk: 0.52 }), false);
+  assert.equal(fire(bot, 240_000, { upAsk: 0.42, downAsk: 0.59 }), false);
+  assert.equal(bot.positions.length, 0);
 });
 
-test("15-minute schedule scales phase lengths and intervals by three", () => {
-  const bot = makeBot("15m");
-  assert.equal(bot.schedule.scale, 3);
-  assert.equal(bot.schedule.cheap.endMs, 180_000);
-  assert.equal(bot.schedule.cheap.intervalMs, 30_000);
-  assert.equal(bot.schedule.expensive.startMs, 180_000);
-  assert.equal(bot.schedule.expensive.endMs, 540_000);
-  assert.equal(bot.schedule.expensive.intervalMs, 60_000);
+test("one qualifying ask triggers 300-share market buys on both sides once", () => {
+  const bot = makeBot();
+  assert.equal(fire(bot, 240_000, {
+    upAsk: 0.50, downAsk: 0.65,
+    upLevels: [{ price: 0.50, size: 200 }, { price: 0.52, size: 100 }],
+    downLevels: [{ price: 0.65, size: 300 }],
+  }), true);
+  assert.equal(bot.positions.length, 2);
+  const bySide = Object.fromEntries(bot.positions.map(position => [position.side, position]));
+  assert.equal(bySide.UP.shares, 300);
+  assert.equal(bySide.DOWN.shares, 300);
+  assert.ok(bySide.UP.avgEntry > 0.50, "sweeping deeper asks can worsen the average fill");
+  assert.equal(bot.orders.filter(order => order.action === "BUY").length, 2);
+  assert.ok(bot.orders.filter(order => order.action === "BUY").every(order => order.orderType === "MARKET"));
 
-  fire(bot, 1000, { upAsk: 0.10, downAsk: 0.20 });
-  assert.equal(bot.positions[0].shares, 10);
-  fire(bot, 30_000, { upAsk: 0.20, downAsk: 0.10 });
-  assert.equal(bot.positions[0].shares, 15);
-  fire(bot, 180_000, { upAsk: 0.60, downAsk: 0.30 });
-  assert.equal(bot.positions[0].phase, "expensive");
-  assert.equal(bot.positions[0].shares, 50);
-  fire(bot, 240_000, { upAsk: 0.60, downAsk: 0.30 });
-  assert.equal(bot.positions[0].shares, 75);
-  const count = bot.positions.length;
-  assert.equal(fire(bot, 540_000, { upAsk: 0.60, downAsk: 0.30 }), false);
-  assert.equal(bot.positions.length, count);
+  fire(bot, 250_000, { upAsk: 0.50, downAsk: 0.52 });
+  fire(bot, 299_999, { upAsk: 0.50, downAsk: 0.52 });
+  assert.equal(bot.positions.length, 2, "a persistent signal must not repeat buys in one window");
 });
 
-test("15-minute market lookup uses the BTC 15m market slug and token IDs", async () => {
-  const originalFetch = global.fetch;
-  const requested = [];
-  try {
-    global.fetch = async url => {
-      requested.push(String(url));
-      return {
-        ok: true,
-        json: async () => [{
-          id: "gamma-15m-market",
-          slug: `btc-updown-15m-${Math.floor(FIRST_START / 1000)}`,
-          question: "BTC up or down 15m",
-          outcomes: '["Up","Down"]',
-          clobTokenIds: '["up-15m-token","down-15m-token"]',
-          feesEnabled: true,
-        }],
-      };
-    };
-    const market = await marketData.getBtcMarket(FIRST_START, WINDOW_15M);
-    assert.ok(requested[0].includes(`btc-updown-15m-${Math.floor(FIRST_START / 1000)}`));
-    assert.equal(market.id, "gamma-15m-market");
-    assert.equal(market.tokens.UP, "up-15m-token");
-    assert.equal(market.tokens.DOWN, "down-15m-token");
-    assert.equal(market.end, FIRST_START + WINDOW_15M);
-  } finally {
-    global.fetch = originalFetch;
-  }
+test("a seen trigger waits for fresh books without losing the signal", () => {
+  const bot = makeBot();
+  const at = FIRST_START + 240_000;
+  quotePair(bot, at, { upAsk: 0.50, downAsk: 0.52 });
+  bot.liveQuotes.DOWN.updatedAt = at - 6000;
+  assert.equal(bot.processPairedEntry(at), false);
+  assert.equal(bot.entryTriggerLatched, true);
+  assert.equal(bot.entryPairPlaced, false);
+  quotePair(bot, at + 500, { upAsk: 0.65, downAsk: 0.62 });
+  assert.equal(bot.processPairedEntry(at + 500), true);
+  assert.equal(bot.positions.length, 2);
 });
 
-test("taker buys sweep displayed ask levels and charge the configured fee", () => {
+test("paired market buys sweep ask depth and charge taker fees", () => {
+  const bot = makeBot();
+  fire(bot, 240_000, {
+    upAsk: 0.50, downAsk: 0.55,
+    upLevels: [{ price: 0.50, size: 200 }, { price: 0.52, size: 100 }],
+    downLevels: [{ price: 0.55, size: 300 }],
+  });
+  const up = bot.positions.find(position => position.side === "UP");
+  const down = bot.positions.find(position => position.side === "DOWN");
+  const expectedUpFee = fee(0.50, 200) + fee(0.52, 100);
+  assert.equal(up.shares, 300);
+  assert.ok(Math.abs(up.cost - 152) < 1e-9);
+  assert.ok(Math.abs(up.fees - expectedUpFee) < 1e-9);
+  assert.equal(down.shares, 300);
+  assert.ok(Math.abs(down.fees - fee(0.55, 300)) < 1e-9);
+  assert.equal(up.takeProfitPrice, 0.80);
+  assert.equal(down.takeProfitPrice, 0.80);
+  assert.equal(bot.orders.filter(order => order.action === "SELL").length, 2);
+});
+
+test("limited displayed depth records the actual partial fill on either paired leg", () => {
   const bot = makeBot();
   fire(bot, 1000, {
-    upAsk: 0.10,
-    downAsk: 0.30,
-    upLevels: [{ price: 0.10, size: 5 }, { price: 0.20, size: 5 }],
+    upAsk: 0.50,
+    downAsk: 0.55,
+    upLevels: [{ price: 0.50, size: 4 }],
   });
-  const position = bot.positions[0];
-  assert.equal(position.side, "UP");
-  assert.equal(position.shares, 10);
-  assert.equal(position.cost, 1.5);
-  assert.equal(position.avgEntry, 0.15);
-  const expectedFee = fee(0.10, 5) + fee(0.20, 5);
-  assert.ok(Math.abs(position.fees - expectedFee) < 1e-9);
-  assert.equal(position.totalCost, 1.5 + expectedFee);
-  assert.equal(bot.cash, 5000 - position.totalCost);
-  const buy = bot.orders.find(order => order.action === "BUY");
-  assert.equal(buy.status, "FILLED");
-  assert.equal(buy.orderType, "MARKET");
-  assert.ok(Math.abs(buy.fee - expectedFee) < 1e-9);
-});
-
-test("limited displayed depth records the actual partial fill", () => {
-  const bot = makeBot();
-  fire(bot, 1000, {
-    upAsk: 0.10,
-    downAsk: 0.30,
-    upLevels: [{ price: 0.10, size: 4 }],
+  assert.equal(bot.positions.length, 0, "entries remain disabled until the last minute");
+  fire(bot, 240_000, {
+    upAsk: 0.50,
+    downAsk: 0.55,
+    upLevels: [{ price: 0.50, size: 4 }],
   });
-  const position = bot.positions[0];
-  const buy = bot.orders.find(order => order.action === "BUY");
-  assert.equal(position.shares, 4);
-  assert.equal(position.requestedShares, 10);
-  assert.equal(buy.status, "PARTIALLY_FILLED");
-  assert.equal(buy.cancelledRemainderShares, 6);
-  assert.equal(bot.orders.find(order => order.action === "SELL").shares, 4);
+  const up = bot.positions.find(position => position.side === "UP");
+  const upBuy = bot.orders.find(order => order.action === "BUY" && order.side === "UP");
+  const upSell = bot.orders.find(order => order.action === "SELL" && order.side === "UP");
+  assert.equal(up.shares, 4);
+  assert.equal(up.requestedShares, 300);
+  assert.equal(upBuy.status, "PARTIALLY_FILLED");
+  assert.equal(upBuy.cancelledRemainderShares, 296);
+  assert.equal(upSell.shares, 4);
 });
 
-test("each phase compounds its share size by 1.5 within the window", () => {
+test("first $0.80 TP moves the other limit sell to $0.99 for $1-per-share payout", () => {
   const bot = makeBot();
-  const cheapSizes = [];
-  for (const seconds of [0, 10, 20, 30, 40, 50]) {
-    fire(bot, seconds * 1000 + 1000, { upAsk: 0.10, downAsk: 0.20 });
-    cheapSizes.push(bot.positions[0].shares);
-  }
-  assert.deepEqual(cheapSizes, [10, 15, 22.5, 33.75, 50.625, 75.9375]);
+  fire(bot, 240_000, { upAsk: 0.50, downAsk: 0.55 });
+  const up = bot.positions.find(position => position.side === "UP");
+  const down = bot.positions.find(position => position.side === "DOWN");
+  const upTp = bot.orders.find(order => order.action === "SELL" && order.side === "UP");
+  const downTp = bot.orders.find(order => order.action === "SELL" && order.side === "DOWN");
+  assert.equal(upTp.limitPrice, 0.80);
+  assert.equal(downTp.limitPrice, 0.80);
 
-  const expensiveSizes = [];
-  for (const seconds of [60, 80, 100, 120, 140, 160]) {
-    fire(bot, seconds * 1000, { upAsk: 0.70, downAsk: 0.30 });
-    expensiveSizes.push(bot.positions[0].shares);
-  }
-  assert.deepEqual(expensiveSizes, [50, 75, 112.5, 168.75, 253.125, 379.6875]);
+  quote(bot, "UP", FIRST_START + 241_000, { bid: 0.80, ask: 0.82 });
+  quote(bot, "DOWN", FIRST_START + 241_000, { bid: 0.70, ask: 0.72 });
+  bot.processPendingTakeProfitOrders(FIRST_START + 241_000);
+  assert.equal(up.status, "SETTLED_EXIT");
+  assert.equal(up.payout, 0.80);
+  assert.equal(up.proceeds, 240);
+  assert.equal(down.status, "OPEN");
+  assert.equal(downTp.limitPrice, 0.99);
+  assert.equal(down.takeProfitPrice, 0.99);
+
+  quote(bot, "DOWN", FIRST_START + 242_000, { bid: 0.99, ask: 1 });
+  bot.processPendingTakeProfitOrders(FIRST_START + 242_000);
+  assert.equal(down.status, "SETTLED_EXIT");
+  assert.equal(down.payout, 1);
+  assert.equal(down.proceeds, 300);
+  assert.equal(downTp.fillPrice, 0.99);
+  assert.ok(Math.abs(bot.snapshot().account.takerFees -
+    (fee(0.50, 300) + fee(0.55, 300))) < 1e-9);
 });
 
-test("a $0.99 TP trigger records $1 per share and includes entry fees in P&L", () => {
+test("take-profit outcome and exit counts follow realized net P&L", () => {
   const bot = makeBot();
-  fire(bot, 1000, { upAsk: 0.20, downAsk: 0.30 });
-  const position = bot.positions[0];
-  const takeProfit = bot.orders.find(order => order.action === "SELL");
-  assert.equal(takeProfit.limitPrice, 0.99);
-  assert.equal(takeProfit.shares, 10);
-  quote(bot, "UP", FIRST_START + 2000, { bid: 0.99, ask: 1, askSize: 1000 });
-  bot.processPendingTakeProfitOrders(FIRST_START + 2000);
+  bot.market.feesEnabled = false;
+  fire(bot, 240_000, { upAsk: 0.80, downAsk: 0.50 });
+  const up = bot.positions.find(position => position.side === "UP");
+  quote(bot, "UP", FIRST_START + 241_000, { bid: 0.80, ask: 0.82 });
+  quote(bot, "DOWN", FIRST_START + 241_000, { bid: 0.70, ask: 0.72 });
+  bot.processPendingTakeProfitOrders(FIRST_START + 241_000);
 
-  const entryCost = 2 + fee(0.20, 10);
-  assert.equal(position.status, "SETTLED_EXIT");
-  assert.equal(position.payout, 1);
-  assert.equal(position.proceeds, 10);
-  assert.ok(Math.abs(position.realizedPnl - (10 - entryCost)) < 1e-9);
-  assert.equal(takeProfit.fillPrice, 0.99);
-  assert.equal(position.strategyOutcome, "WIN");
-  assert.ok(Math.abs(bot.snapshot().account.takerFees - fee(0.20, 10)) < 1e-9);
+  assert.equal(up.realizedPnl, 0);
+  assert.equal(up.strategyOutcome, "BREAK_EVEN");
+  const account = bot.snapshot().account;
+  assert.equal(account.profitableExits, 0);
+  assert.equal(account.losingExits, 0);
+  assert.equal(account.breakEvenExits, 1);
 });
 
 test("positions missing TP at window end wait for official resolution", async () => {
   const bot = makeBot();
-  fire(bot, 1000, { upAsk: 0.20, downAsk: 0.30 });
-  const position = bot.positions[0];
+  fire(bot, 240_000, { upAsk: 0.50, downAsk: 0.55 });
+  const up = bot.positions.find(position => position.side === "UP");
+  const down = bot.positions.find(position => position.side === "DOWN");
   const nextStart = FIRST_START + WINDOW_5M;
   await bot.closePreviousWindows(nextStart, nextStart);
-  assert.equal(position.status, "PENDING_RESOLUTION");
-  assert.equal(position.strategyOutcome, undefined);
+  assert.equal(up.status, "PENDING_RESOLUTION");
+  assert.equal(down.status, "PENDING_RESOLUTION");
 
   const originalGetMarket = marketData.getMarket;
   try {
@@ -245,11 +214,12 @@ test("positions missing TP at window end wait for official resolution", async ()
   } finally {
     marketData.getMarket = originalGetMarket;
   }
-  const entryCost = 2 + fee(0.20, 10);
-  assert.equal(position.status, "SETTLED_EXIT");
-  assert.equal(position.settlementBasis, "POLYMARKET_RESOLUTION");
-  assert.equal(position.payout, 1);
-  assert.equal(position.proceeds, 10);
-  assert.ok(Math.abs(position.realizedPnl - (10 - entryCost)) < 1e-9);
-  assert.equal(position.strategyOutcome, "WIN");
+  assert.equal(up.status, "SETTLED_EXIT");
+  assert.equal(up.settlementBasis, "POLYMARKET_RESOLUTION");
+  assert.equal(up.payout, 1);
+  assert.equal(up.proceeds, 300);
+  assert.equal(up.strategyOutcome, "WIN");
+  assert.equal(down.status, "SETTLED_EXIT");
+  assert.equal(down.proceeds, 0);
+  assert.equal(down.strategyOutcome, "LOSS");
 });

@@ -44,7 +44,7 @@ test('real-balance proxy returns the upstream account summary',async(t)=>{
   assert.deepEqual(await response.json(),expected);
 });
 
-test('dashboard shows both BTC windows, the scheduled strategy, and fee metrics',async(t)=>{
+test('dashboard shows the 5-minute paired market-buy strategy and no order feed',async(t)=>{
   const server=startServer({snapshot:()=>({})},0);
   await new Promise(resolve=>server.once('listening',resolve));
   t.after(()=>new Promise(resolve=>server.close(resolve)));
@@ -53,14 +53,17 @@ test('dashboard shows both BTC windows, the scheduled strategy, and fee metrics'
   assert.equal(response.status,200);
   assert.match(html,/Highest consecutive strategy wins/);
   assert.match(html,/Highest consecutive strategy losses/);
-  assert.match(html,/BTC 5m \/ 15m Scheduled Paper Bot/);
-  assert.match(html,/\$10,000 total demo capital/);
+  assert.match(html,/BTC 5-Minute Paired Market-Buy Paper Bot/);
+  assert.match(html,/\$10,000 demo capital/);
   assert.match(html,/Taker fees paid/);
-  assert.match(html,/minute 0 to 1/);
-  assert.match(html,/minute 1 to 3/);
-  assert.match(html,/1\.5× the prior interval size/);
-  assert.match(html,/15-minute bot scales all times and intervals by 3/);
-  assert.match(html,/resting \$0\.99 take-profit, counted as \$1 per share/);
+  assert.match(html,/Profitable exits/);
+  assert.match(html,/Losing exits/);
+  assert.match(html,/Break-even exits/);
+  assert.match(html,/waits until 4:00/);
+  assert.match(html,/strictly above \$0\.42 and below \$0\.59/);
+  assert.match(html,/300 UP and 300 DOWN shares/);
+  assert.match(html,/Filled shares receive \$0\.80 limit sells/);
+  assert.match(html,/moves to \$0\.99, counted as \$1 per share/);
   assert.match(html,/takerFees/);
   assert.match(html,/Accumulated \$\{side\}/);
   assert.match(html,/inventoryCard\('UP',inventory\.UP,'up'\)/);
@@ -71,7 +74,8 @@ test('dashboard shows both BTC windows, the scheduled strategy, and fee metrics'
   assert.match(html,/maxConsecutiveLosses/);
   assert.match(html,/official Polymarket resolution/);
   assert.doesNotMatch(html,/market stop-loss/);
-  assert.doesNotMatch(html,/Limit Ladder/);
+  assert.doesNotMatch(html,/15m/);
+  assert.doesNotMatch(html,/1\.5×/);
   assert.doesNotMatch(html,/Order activity/);
   assert.doesNotMatch(html,/Recent bot events/);
 });

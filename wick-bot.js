@@ -16,15 +16,6 @@ function quoteFromBook(book,updatedAt){
     bestAsk,askSize:ask?.size??0,mid:bestBid!=null&&bestAsk!=null?(bestBid+bestAsk)/2:null,
     askLevels:asks,updatedAt,stale:false,error:null};
 }
-function scheduleForWindow(windowMs){
-  const scale=windowMs/cfg.BASE_WINDOW_MS;
-  const cheap={key:'cheap',label:'cheap side',startMs:0,endMs:cfg.CHEAP_PHASE_END_MS*scale,
-    intervalMs:cfg.CHEAP_INTERVAL_MS*scale,baseShares:cfg.CHEAP_BASE_SHARES};
-  const expensive={key:'expensive',label:'expensive side',
-    startMs:cfg.EXPENSIVE_PHASE_START_MS*scale,endMs:cfg.EXPENSIVE_PHASE_END_MS*scale,
-    intervalMs:cfg.EXPENSIVE_INTERVAL_MS*scale,baseShares:cfg.EXPENSIVE_BASE_SHARES};
-  return {scale,cheap,expensive};
-}
 function takeAsks(quote,shares,market){
   const askLevels=Array.isArray(quote?.askLevels)&&quote.askLevels.length
     ?quote.askLevels:[{price:Number(quote?.bestAsk),size:Number(quote?.askSize)}];
@@ -69,15 +60,15 @@ function clobQuoteWinner(up,down){
   return u>=d?'UP':'DOWN';
 }
 class WickBot{
-  constructor({timeframe='5m',windowMs=cfg.WINDOW_MS_5M,capital=cfg.DEMO_CAPITAL_5M}={}){
+  constructor({timeframe='5m',windowMs=cfg.WINDOW_MS_5M,capital=cfg.DEMO_CAPITAL}={}){
     this.timeframe=timeframe;this.windowMs=windowMs;this.capital=capital;this.cash=capital;
-    this.schedule=scheduleForWindow(windowMs);
     this.startedAt=Date.now();
     this.positions=[];this.events=[];this.status='starting';this.completedWindows=new Map();
     this.error=null;this.market=null;this.lastMarketAt=0;
     this.lastScanAt=null;this.orders=[];this.totalOrderAttempts=0;
     this.windowOrders=[];this.orderWindowStart=null;this.running=false;
-    this.lastScheduledSlot={cheap:-1,expensive:-1};
+    this.entryTriggerLatched=false;this.entryTriggerAt=null;this.entryTriggerSide=null;
+    this.entryPairPlaced=false;
     this.resolutionAttempts=new Map();
     this.quoteWindowStart=null;this.liveQuotes={UP:{status:'MISSING'},DOWN:{status:'MISSING'}};
     this.closeQuotes=null;
@@ -125,7 +116,7 @@ class WickBot{
       }
       await this.refreshLiveQuotes(now);
       if(this.orderWindowStart!==start)this.openStrategyWindow(start,now);
-      this.processScheduledEntry(now);
+      this.processPairedEntry(now);
       if(now>=start+this.windowMs-3000&&now<start+this.windowMs){
         this.closeQuotes={UP:this.liveQuotes.UP,DOWN:this.liveQuotes.DOWN,ts:now};
         for(const p of this.positions)if(p.windowStart===start&&p.status==='OPEN')p.closeQuotes=this.closeQuotes;
@@ -198,54 +189,58 @@ class WickBot{
   openStrategyWindow(start,now){
     this.orderWindowStart=start;
     this.windowOrders=[];
-    this.lastScheduledSlot={cheap:-1,expensive:-1};
+    this.entryTriggerLatched=false;
+    this.entryTriggerAt=null;
+    this.entryTriggerSide=null;
+    this.entryPairPlaced=false;
     this.log('PAPER_STRATEGY_WINDOW_STARTED',{windowStart:start,timeframe:this.timeframe,
-      windowMs:this.windowMs,schedule:this.schedule});
+      windowMs:this.windowMs,entryWindowStartMs:cfg.ENTRY_WINDOW_START_MS,
+      triggerBand:[cfg.ENTRY_PRICE_MIN,cfg.ENTRY_PRICE_MAX],sharesPerSide:cfg.SHARES_PER_SIDE});
   }
-  processScheduledEntry(now){
+  processPairedEntry(now){
     const start=this.orderWindowStart;
     if(!this.market||this.market.start!==start||this.completedWindows.has(start))return false;
     const elapsed=now-start;
-    const phase=elapsed>=this.schedule.cheap.startMs&&elapsed<this.schedule.cheap.endMs
-      ?this.schedule.cheap
-      :elapsed>=this.schedule.expensive.startMs&&elapsed<this.schedule.expensive.endMs
-        ?this.schedule.expensive:null;
-    if(!phase)return false;
-    const slot=Math.floor((elapsed-phase.startMs)/phase.intervalMs);
-    if(slot<0||slot<=this.lastScheduledSlot[phase.key])return false;
-    this.lastScheduledSlot[phase.key]=slot;
-    const shares=Number((phase.baseShares*Math.pow(cfg.SIZE_MULTIPLIER,slot)).toFixed(6));
+    if(elapsed<cfg.ENTRY_WINDOW_START_MS||elapsed>=this.windowMs||this.entryPairPlaced)return false;
     const up=this.liveQuotes.UP,down=this.liveQuotes.DOWN;
     const fresh=quote=>quote?.status==='LIVE'&&Number.isFinite(quote.updatedAt)&&
       now-quote.updatedAt<=5000&&Number(quote.bestAsk)>0&&Number(quote.bestAsk)<1;
-    const scheduledAt=start+phase.startMs+slot*phase.intervalMs;
-    const id=`${this.timeframe}-${start}-${phase.key}-${slot}`;
-    const upAsk=Number(up?.bestAsk),downAsk=Number(down?.bestAsk);
-    const side=phase.key==='cheap'
-      ?(upAsk<=downAsk?'UP':'DOWN')
-      :(upAsk>=downAsk?'UP':'DOWN');
-    const quote=this.liveQuotes[side];
-    const order={id,timeframe:this.timeframe,windowStart:start,scheduledAt,side,
-      action:'BUY',kind:'ENTRY',tokenId:this.market.tokens?.[side]||null,
-      orderType:'MARKET',entryMode:'INTRAWINDOW_CHEAP_EXPENSIVE_TAKER',
-      entryType:'SCHEDULED_TAKER_BUY',phase:phase.key,intervalIndex:slot,
-      multiplier:cfg.SIZE_MULTIPLIER,requestedShares:shares,shares,
-      remainingShares:0,createdAt:now,submittedAt:now,status:'SUBMITTED',
-      takeProfitPrice:cfg.TAKE_PROFIT_TRIGGER,fee:0};
-    this.totalOrderAttempts++;
-    if(!fresh(up)||!fresh(down)){
-      order.status='SKIPPED_NO_LIVE_QUOTES';
-      order.reason='Both side ask quotes must be fresh to select the cheap or expensive side.';
-      this.orders.unshift(order);this.windowOrders.unshift(order);
-      this.log('PAPER_SCHEDULED_ENTRY_SKIPPED',{id,phase:phase.key,slot,shares,reason:order.reason});
-      return false;
+    if(!this.entryTriggerLatched){
+      const triggeredSide=['UP','DOWN'].find(side=>{
+        const quote=this.liveQuotes[side];
+        const ask=Number(quote?.bestAsk);
+        return fresh(quote)&&ask>cfg.ENTRY_PRICE_MIN&&ask<cfg.ENTRY_PRICE_MAX;
+      });
+      if(!triggeredSide)return false;
+      this.entryTriggerLatched=true;
+      this.entryTriggerAt=now;
+      this.entryTriggerSide=triggeredSide;
+      this.log('PAPER_PAIRED_ENTRY_TRIGGERED',{windowStart:start,triggeredSide,
+        triggerPrice:this.liveQuotes[triggeredSide].bestAsk,
+        sharesPerSide:cfg.SHARES_PER_SIDE});
     }
+    if(!fresh(up)||!fresh(down))return false;
+    this.entryPairPlaced=true;
+    this.totalOrderAttempts+=2;
+    const results=['UP','DOWN'].map(side=>this.placePairedMarketBuy(side,now,start));
+    return results.some(Boolean);
+  }
+  placePairedMarketBuy(side,now,start){
+    const shares=cfg.SHARES_PER_SIDE;
+    const id=`${this.timeframe}-${start}-${side.toLowerCase()}-paired-entry`;
+    const quote=this.liveQuotes[side];
+    const order={id,timeframe:this.timeframe,windowStart:start,side,
+      action:'BUY',kind:'ENTRY',tokenId:this.market.tokens?.[side]||null,
+      orderType:'MARKET',entryMode:'PAIRED_MARKET_BUY',
+      entryType:'TRIGGERED_PAIRED_TAKER_BUY',requestedShares:shares,shares,
+      remainingShares:0,createdAt:now,submittedAt:now,status:'SUBMITTED',
+      takeProfitPrice:cfg.TAKE_PROFIT_INITIAL_PRICE,fee:0};
     const fill=takeAsks(quote,shares,this.market);
     if(fill.filledShares<=0){
-      order.status='SKIPPED_NO_LIQUIDITY';
-      order.reason='No ask-side liquidity was available for the scheduled taker buy.';
+      order.status='NO_LIQUIDITY';
+      order.reason=`No ask-side liquidity was available for the ${side} market buy.`;
       this.orders.unshift(order);this.windowOrders.unshift(order);
-      this.log('PAPER_SCHEDULED_ENTRY_SKIPPED',{id,phase:phase.key,slot,shares,reason:order.reason});
+      this.log('PAPER_PAIRED_MARKET_BUY_UNFILLED',{id,side,shares,reason:order.reason});
       return false;
     }
     const cost=Number(fill.notional.toFixed(6));
@@ -253,9 +248,9 @@ class WickBot{
     const totalCost=Number((cost+fees).toFixed(6));
     if(totalCost>this.cash+1e-9){
       order.status='REJECTED_INSUFFICIENT_CASH';
-      order.reason='The paper cash balance was insufficient for the scheduled taker buy and fees.';
+      order.reason=`The paper cash balance was insufficient for the ${side} market buy and fees.`;
       this.orders.unshift(order);this.windowOrders.unshift(order);
-      this.log('PAPER_SCHEDULED_ENTRY_REJECTED',{id,phase:phase.key,slot,shares,
+      this.log('PAPER_PAIRED_MARKET_BUY_REJECTED',{id,side,shares,
         totalCost,availableCash:this.cash,reason:order.reason});
       return false;
     }
@@ -265,11 +260,11 @@ class WickBot{
     const position={id,timeframe:this.timeframe,windowMs:this.windowMs,windowStart:start,
       marketId:this.market.id,slug:this.market.slug,title:this.market.title,side,
       tokenId:this.market.tokens[side],entryKey:id,
-      entryLabel:`${phase.label} taker buy · ${filledShares} shares`,
-      entryMode:order.entryMode,entryType:order.entryType,phase:phase.key,
-      intervalIndex:slot,multiplier:cfg.SIZE_MULTIPLIER,
-      takeProfitThreshold:cfg.TAKE_PROFIT_TRIGGER,takeProfitPrice:cfg.TAKE_PROFIT_TRIGGER,
-      takeProfitOrderId,orderType:'MARKET',fillModel:'PAPER_TAKER_ASK_DEPTH',
+      entryLabel:`triggered market buy · ${filledShares} shares`,
+      entryMode:order.entryMode,entryType:order.entryType,phase:'paired',
+      takeProfitThreshold:cfg.TAKE_PROFIT_INITIAL_PRICE,
+      takeProfitPrice:cfg.TAKE_PROFIT_INITIAL_PRICE,takeProfitOrderId,
+      orderType:'MARKET',fillModel:'PAPER_TAKER_ASK_DEPTH',
       shares:filledShares,requestedShares:shares,initialShares:filledShares,
       avgEntry:fillPrice,fillPrice,cost,totalCost,fees,exitFees:0,
       estimatedMakerRebate:0,status:'OPEN',submittedAt:now,openedAt:now,filledAt:now,
@@ -278,7 +273,8 @@ class WickBot{
     const takeProfitOrder={id:takeProfitOrderId,timeframe:this.timeframe,windowStart:start,
       side,action:'SELL',kind:'TAKE_PROFIT',tokenId:position.tokenId,
       positionId:id,parentOrderId:id,orderType:'LIMIT',entryType:'LIMIT_TAKE_PROFIT',
-      limitPrice:cfg.TAKE_PROFIT_TRIGGER,shares:filledShares,remainingShares:filledShares,
+      limitPrice:cfg.TAKE_PROFIT_INITIAL_PRICE,initialLimitPrice:cfg.TAKE_PROFIT_INITIAL_PRICE,
+      shares:filledShares,remainingShares:filledShares,
       status:'PENDING',createdAt:now,submittedAt:now,
       expiresAt:start+this.windowMs,fee:0,estimatedMakerRebate:0,
       fillModel:'PAPER_RESTING_LIMIT_BID_AT_OR_ABOVE_TARGET'};
@@ -286,22 +282,39 @@ class WickBot{
     order.filledAt=now;order.positionId=id;order.fillPrice=fillPrice;
     order.filledShares=filledShares;order.fee=fees;order.cost=cost;
     order.totalCost=totalCost;order.averagePrice=fillPrice;
-    order.remainingShares=0;order.cancelledRemainderShares=fill.remainingShares;
+    order.cancelledRemainderShares=fill.remainingShares;
     order.takeProfitOrderId=takeProfitOrderId;
     this.cash-=totalCost;
     this.positions.unshift(position);
     this.orders.unshift(takeProfitOrder,order);
     this.windowOrders.unshift(takeProfitOrder,order);
     if(this.orders.length>1000)this.orders.length=1000;
-    this.log('PAPER_SCHEDULED_TAKER_BUY_FILLED',{id,side,phase:phase.key,slot,shares,
-      filledShares,averagePrice:fillPrice,notional:cost,fees,totalCost,
-      takeProfitPrice:cfg.TAKE_PROFIT_TRIGGER,takeProfitPayout:cfg.TAKE_PROFIT_PAYOUT,
+    this.log('PAPER_PAIRED_MARKET_BUY_FILLED',{id,side,shares,filledShares,
+      averagePrice:fillPrice,notional:cost,fees,totalCost,
+      takeProfitPrice:cfg.TAKE_PROFIT_INITIAL_PRICE,
       canceledRemainderShares:fill.remainingShares});
     return true;
   }
+  raiseOppositeTakeProfits(position,now){
+    for(const order of this.orders){
+      if(order.action!=='SELL'||order.status!=='PENDING'||
+         order.windowStart!==position.windowStart||order.side===position.side||
+         order.limitPrice>=cfg.TAKE_PROFIT_AFTER_OPPOSITE_HIT)continue;
+      const opposite=this.positions.find(item=>item.id===order.positionId&&item.status==='OPEN');
+      if(!opposite)continue;
+      const previousPrice=order.limitPrice;
+      order.limitPrice=cfg.TAKE_PROFIT_AFTER_OPPOSITE_HIT;
+      order.updatedAt=now;
+      order.priceChangedReason='opposite_side_take_profit_filled';
+      opposite.takeProfitPrice=cfg.TAKE_PROFIT_AFTER_OPPOSITE_HIT;
+      opposite.takeProfitThreshold=cfg.TAKE_PROFIT_AFTER_OPPOSITE_HIT;
+      this.log('PAPER_OPPOSITE_TAKE_PROFIT_RAISED',{positionId:opposite.id,
+        from:previousPrice,to:order.limitPrice,triggeredByPositionId:position.id});
+    }
+  }
   recordStrategyOutcome(position,outcome,now=Date.now(),reason=outcome){
     if(position.strategyOutcomeApplied)return;
-    if(!['WIN','LOSS'].includes(outcome))return;
+    if(!['WIN','LOSS','BREAK_EVEN'].includes(outcome))return;
     position.strategyOutcomeApplied=true;
     position.strategyOutcome=outcome;
     position.strategyOutcomeAt=now;
@@ -326,7 +339,9 @@ class WickBot{
       const fillPrice=order.limitPrice;
       order.status='FILLED';order.filledAt=now;order.fillPrice=fillPrice;
       order.remainingShares=0;
-       this.finalizePosition(position,'TAKE_PROFIT_LIMIT',bid,now,order);
+      if(this.finalizePosition(position,'TAKE_PROFIT_LIMIT',bid,now,order)){
+        this.raiseOppositeTakeProfits(position,now);
+      }
     }
   }
   async refreshLiveQuotes(now){
@@ -356,8 +371,9 @@ class WickBot{
     if(p.status!=='OPEN'||reason!=='TAKE_PROFIT_LIMIT'||!takeProfitOrder)return false;
     const exitPrice=takeProfitOrder.limitPrice;
     const maker=makerRebateFor(p.feeContext,exitPrice,p.shares);
-    p.payout=cfg.TAKE_PROFIT_PAYOUT;
-    p.proceeds=p.shares*cfg.TAKE_PROFIT_PAYOUT;
+    p.payout=exitPrice>=cfg.TAKE_PROFIT_AFTER_OPPOSITE_HIT
+      ?cfg.TAKE_PROFIT_099_PAYOUT:exitPrice;
+    p.proceeds=p.shares*p.payout;
     p.exitFees=0;
     p.realizedPnl=p.proceeds-p.totalCost-p.exitFees;
     p.estimatedMakerRebate=(p.estimatedMakerRebate||0)+maker.estimate;
@@ -373,9 +389,10 @@ class WickBot{
     takeProfitOrder.estimatedMakerRebate=maker.estimate;
     this.log('PAPER_TP_LIMIT_FILLED',{id:p.id,status:p.status,pnl:p.realizedPnl,side:p.side,
       shares:p.shares,limitPrice:takeProfitOrder.limitPrice,fillPrice:exitPrice,
-      payoutPerShare:cfg.TAKE_PROFIT_PAYOUT,proceeds:p.proceeds,exitFees:p.exitFees,
+      payoutPerShare:p.payout,proceeds:p.proceeds,exitFees:p.exitFees,
       triggerQuote,estimatedMakerRebate:maker.estimate});
-    this.recordStrategyOutcome(p,'WIN',settledAt,'TAKE_PROFIT_LIMIT_FILLED');
+    const outcome=p.realizedPnl>0?'WIN':p.realizedPnl<0?'LOSS':'BREAK_EVEN';
+    this.recordStrategyOutcome(p,outcome,settledAt,`TAKE_PROFIT_LIMIT_FILLED_AT_${exitPrice}`);
     return true;
   }
   finalizeResolution(p,winner,now=Date.now()){
@@ -417,7 +434,7 @@ class WickBot{
     const totalTrades=this.positions.filter(p=>p.status!=='CANCELLED_UNFILLED').length;
      const history=this.positions.filter(p=>p.status==='SETTLED_EXIT')
       .sort((a,b)=>(a.settledAt||0)-(b.settledAt||0));
-     const strategyHistory=this.positions.filter(p=>p.strategyOutcome==='WIN'||p.strategyOutcome==='LOSS')
+      const strategyHistory=this.positions.filter(p=>['WIN','LOSS','BREAK_EVEN'].includes(p.strategyOutcome))
        .sort((a,b)=>(a.strategyOutcomeAt||a.windowStart||0)-(b.strategyOutcomeAt||b.windowStart||0));
     const equityCurve=[{ts:this.startedAt,equity:this.capital}];
      let curveEquity=this.capital,peak=this.capital,maxDrawdown=0;
@@ -434,6 +451,8 @@ class WickBot{
         }else if(p.strategyOutcome==='WIN'){
          winStreak++;lossStreak=0;
          maxConsecutiveWins=Math.max(maxConsecutiveWins,winStreak);
+        }else{
+          winStreak=0;lossStreak=0;
        }
     }
     let unrealizedPnl=0,unpricedOpenPositions=0,markedValue=0;
@@ -460,41 +479,37 @@ class WickBot{
        const sideInventory=inventory[side];
        sideInventory.averageCost=sideInventory.shares?sideInventory.cost/sideInventory.shares:null;
      }
-        const elapsedMs=this.market?Math.max(0,now-this.market.start):0;
-        const activePhase=this.market&&elapsedMs<this.schedule.cheap.endMs?'cheap':
-          elapsedMs>=this.schedule.expensive.startMs&&elapsedMs<this.schedule.expensive.endMs
-            ?(this.market?'expensive':null):null;
-        const phaseSchedule=phase=>({startMs:phase.startMs,endMs:phase.endMs,
-          intervalMs:phase.intervalMs,baseShares:phase.baseShares,
-          fires:Math.ceil((phase.endMs-phase.startMs)/phase.intervalMs)});
-        const nextFireAt=activePhase&&this.market
-          ?this.market.start+this.schedule[activePhase].startMs+
-            (this.lastScheduledSlot[activePhase]+1)*this.schedule[activePhase].intervalMs:null;
-        const currentWindowBuys=this.windowOrders.filter(order=>order.action==='BUY');
+         const elapsedMs=this.market?Math.max(0,now-this.market.start):0;
+         const currentEntryWindow=!!this.market&&elapsedMs>=cfg.ENTRY_WINDOW_START_MS&&elapsedMs<this.windowMs;
         const safeQuotes=this.captureQuotePair(now);
         return {now,mode:'DEMO ONLY',status:this.status,error:this.error,
-           strategy:{timeframe:this.timeframe,market:`Polymarket BTC ${this.timeframe} UP/DOWN`,
-             capital:this.capital,execution:'PAPER ONLY',
-              schedule:{scale:this.schedule.scale,cheap:phaseSchedule(this.schedule.cheap),
-                expensive:phaseSchedule(this.schedule.expensive),multiplier:cfg.SIZE_MULTIPLIER,
-                activePhase,nextFireAt},
-              entries:{orderType:'MARKET',sideSelection:'Cheapest ask during cheap phase; highest ask during expensive phase.',
-                totalOrders:currentWindowBuys.length,
-                orders:currentWindowBuys.map(order=>({id:order.id,side:order.side,
-                  phase:order.phase,shares:order.shares,requestedShares:order.requestedShares,
-                  fillPrice:order.fillPrice,fees:order.fee,status:order.status,
-                  scheduledAt:order.scheduledAt})),
-                signal:{side:null,reason:activePhase
-                  ?`Buying the ${activePhase} side on its scheduled interval.`
-                  :'Waiting for the next active strategy phase.',ready:!!activePhase}},
-              exit:{orderType:'LIMIT',takeProfitPrice:cfg.TAKE_PROFIT_TRIGGER,
-                takeProfitPayout:cfg.TAKE_PROFIT_PAYOUT,stopLoss:null,
-                windowEnd:'Expire take-profit order; hold any position without a fill for official market resolution.'},
-              timing:`${this.schedule.cheap.startMs/1000}-${this.schedule.cheap.endMs/1000}s cheap-side phase every ${this.schedule.cheap.intervalMs/1000}s; ${this.schedule.expensive.startMs/1000}-${this.schedule.expensive.endMs/1000}s expensive-side phase every ${this.schedule.expensive.intervalMs/1000}s.`,
-              sizing:`${this.schedule.cheap.baseShares} cheap-side base and ${this.schedule.expensive.baseShares} expensive-side base; multiply each phase's next scheduled fire by ${cfg.SIZE_MULTIPLIER} within the window.`,
-              unfilled:'Taker buys fill immediately from visible ask-side depth. Any unfilled remainder is canceled; open positions without a TP fill at window end wait for official Polymarket resolution.',
-              fees:'Taker fees are charged on entry fills using the market fee schedule; passive take-profit orders have no taker fee. Resolution payouts have no fee.',
-             execution:'PAPER ONLY'},
+            strategy:{timeframe:'5m',market:'Polymarket BTC 5-minute UP/DOWN',
+              capital:this.capital,execution:'PAPER ONLY',
+               entries:{orderType:'MARKET',sideSelection:'Buy both UP and DOWN.',
+                 sharesPerSide:cfg.SHARES_PER_SIDE,
+                 windowStartMs:cfg.ENTRY_WINDOW_START_MS,windowEndMs:this.windowMs,
+                 triggerPriceMin:cfg.ENTRY_PRICE_MIN,triggerPriceMax:cfg.ENTRY_PRICE_MAX,
+                 triggerPriceSource:'fresh best ask',
+                 triggerLatched:this.entryTriggerLatched,triggerAt:this.entryTriggerAt,
+                 triggerSide:this.entryTriggerSide,pairPlaced:this.entryPairPlaced,
+                 signal:{side:null,reason:this.entryPairPlaced
+                   ?'Paired market buys were attempted for UP and DOWN.'
+                   :this.entryTriggerLatched
+                     ?'Trigger seen; waiting for both fresh order books.'
+                     :currentEntryWindow
+                       ?'Watching both best asks for a price strictly inside the trigger band.'
+                       :'Waiting for the final minute of the 5-minute window.',
+                   ready:this.entryTriggerLatched}},
+               exit:{orderType:'LIMIT',initialTakeProfitPrice:cfg.TAKE_PROFIT_INITIAL_PRICE,
+                 oppositeTakeProfitAfterFirstFill:cfg.TAKE_PROFIT_AFTER_OPPOSITE_HIT,
+                 oppositeTakeProfitPayout:cfg.TAKE_PROFIT_099_PAYOUT,stopLoss:null,
+                 windowEnd:'Expire take-profit orders; hold positions without a fill for official market resolution.'},
+               timing:`Wait 240 seconds, then monitor every ${cfg.POLL_INTERVAL_MS}ms until the 5-minute window ends.`,
+               sizing:`Market-buy ${cfg.SHARES_PER_SIDE} requested shares on UP and ${cfg.SHARES_PER_SIDE} on DOWN after the trigger.`,
+               trigger:`Either fresh best ask must be >${cfg.ENTRY_PRICE_MIN} and <${cfg.ENTRY_PRICE_MAX}.`,
+               unfilled:'Market buys sweep visible ask depth. Partial fills are recorded; unfilled remainder is canceled. Positions without TP fills by window end wait for official Polymarket resolution.',
+               fees:'Taker fees are charged on entry fills using the market fee schedule; limit sells can earn the estimated maker rebate. Resolution payouts have no fee.',
+              execution:'PAPER ONLY'},
          account:{capital:this.capital,cash:this.cash,realizedPnl,unrealizedPnl,equity:this.cash+markedValue,takerFees,estimatedMakerRebate,
           totalTrades,settledTrades,wins,losses,profitableExits,losingExits,breakEvenExits,winRate:settledTrades?wins/settledTrades*100:0,markedValue,unpricedOpenPositions,
            openPositions:this.positions.filter(p=>['OPEN','PENDING_RESOLUTION'].includes(p.status)).length,
@@ -506,11 +521,11 @@ class WickBot{
         UP:safeQuotes.UP,DOWN:safeQuotes.DOWN},
          scanner:{timeframe:this.timeframe,lastScanAt:this.lastScanAt,
              source:`Polymarket BTC ${this.timeframe} Gamma/CLOB order books`,
-               marketResolution:'Positions without a $0.99 take-profit fill wait for the official Polymarket market result.'},
+                marketResolution:'Positions without a take-profit fill wait for the official Polymarket market result.'},
        inventory,positions:this.positions.slice(0,50),orders:this.orders.slice(0,100),events:this.events};
   }
          start(){if(this.running)return;this.running=true;this.log('BOT_STARTED',{timeframe:this.timeframe,
-          note:`Paper-only BTC ${this.timeframe} bot: scheduled cheap/expensive-side taker buys with 1.5x intra-window sizing and $0.99 take-profit.`});
+          note:'Paper-only BTC 5-minute bot: final-minute paired market buys after the 0.42–0.59 ask trigger.'});
     const loop=async()=>{if(!this.running)return;await this.tick();if(this.running)this.timer=setTimeout(loop,cfg.POLL_INTERVAL_MS)};
     void loop();}
   stop(){this.running=false;clearTimeout(this.timer)}
