@@ -41,9 +41,8 @@
    </div>
    <div class="small" id="realBalanceStatus">Connecting to the live account balance…</div>
  </section>
- <section class="panel"><h2>Active market windows</h2><div id="timeframe-panels" class="windows"></div></section>
+  <section class="panel"><h2>Active market windows</h2><div id="timeframe-panels" class="windows"></div></section>
  <section class="panel"><h2>Floating positions · live own-side marks</h2><p class="small section-note">Open shares are marked using their own-side best bid. Stale or missing marks are not shown as current unrealized P&amp;L.</p><div id="openPositions" class="table-wrap"></div><h2 class="subhead">Recent closed trades · realized P&amp;L</h2><div id="closedPositions" class="table-wrap"></div></section>
- <section class="panel"><h2>Recent bot events</h2><div id="events"></div></section>
     <p class="small">The 5-minute bot buys the cheaper side every 10 seconds from minute 0 to 1, starting at 10 shares, then the more expensive side every 20 seconds from minute 1 to 3, starting at 50 shares. Each interval buy is 1.5× the prior interval size within that phase. The 15-minute bot scales all times and intervals by 3. Taker buys use displayed ask depth and include fees. Each fill gets a resting $0.99 take-profit, counted as $1 per share; positions without a TP fill by window end wait for official Polymarket resolution. The $10,000 demo capital is split $5,000 per timeframe. Paper history resets on process restart.</p>
  <div class="err" id="error"></div>
 </main>
@@ -77,11 +76,19 @@ setInterval(paintCountdown,250);
     const w=t.window||{},entries=t.strategy?.entries||{},signal=entries.signal||{};
     const quotes=t.livePrices||{};
     const schedule=t.strategy?.schedule||{};
-    const orders=(t.orders||[]).filter(o=>o.windowStart===w.start);
     const positions=(t.positions||[]).filter(p=>p.windowStart===w.start&&p.status==='OPEN');
     const remaining=w.end?Math.max(0,Math.floor((w.end-Date.now())/1000)):0;
-    const entryOrder=orders.map(o=>`${o.action||'BUY'} ${o.side||'—'} ${o.action==='BUY'?'@ '+px(o.fillPrice):px(o.limitPrice)} · ${sharesFmt(o.filledShares??o.shares)} shares · ${o.status}`).join(' · ')||'No orders yet';
     const trigger=signal.reason||'Waiting for the BTC window';
+     const inventory=t.inventory||{};
+     const inventoryCard=(side,item,sideClass)=>{
+       const shares=Number(item?.shares)||0;
+       return `<div class="inventory-card ${sideClass}">
+         <div class="side-title ${side==='UP'?'up-color':'down-color'}">Accumulated ${side}</div>
+         <div class="inventory-count">${sharesFmt(shares)} shares</div>
+         <div class="inventory-meta"><span>Average cost</span><b>${shares?usd(item.averageCost):'—'}</b></div>
+         <div class="inventory-meta"><span>Cost basis incl. fees</span><b>${usd(item?.cost)}</b></div>
+       </div>`;
+     };
     const scheduleText=schedule.cheap&&schedule.expensive
       ?`Cheap 0–${schedule.cheap.endMs/60000}m / ${schedule.cheap.intervalMs/1000}s from ${sharesFmt(schedule.cheap.baseShares)} shares; expensive ${schedule.expensive.startMs/60000}–${schedule.expensive.endMs/60000}m / ${schedule.expensive.intervalMs/1000}s from ${sharesFmt(schedule.expensive.baseShares)} shares; ×${schedule.multiplier||1.5} each interval.`
       :'Waiting for schedule';
@@ -90,10 +97,13 @@ setInterval(paintCountdown,250);
       <div class="metric"><span>Status</span><b>${esc(t.status||'starting')}</b></div>
       <div class="metric"><span>Window remaining</span><b>${Math.floor(remaining/60)}:${String(remaining%60).padStart(2,'0')}</b></div>
       <div class="metric"><span>UP / DOWN ask</span><b>${px(quotes.UP?.bestAsk)} / ${px(quotes.DOWN?.bestAsk)}</b></div>
-      <div class="metric"><span>Entry plan</span><b>${esc(trigger)}</b></div>
+       <div class="metric"><span>Entry type / plan</span><b>MARKET BUY · ${esc(trigger)}</b></div>
       <div class="metric"><span>Schedule</span><b>${esc(scheduleText)}</b></div>
       <div class="metric"><span>Active phase / next fire</span><b>${esc(schedule.activePhase||'inactive')} / ${esc(nextFire)}</b></div>
-      <div class="metric"><span>Order activity</span><b>${esc(entryOrder)}</b></div>
+       <div class="inventory-grid">
+         ${inventoryCard('UP',inventory.UP,'up')}
+         ${inventoryCard('DOWN',inventory.DOWN,'down')}
+       </div>
       <div class="metric"><span>Exit rules</span><b>$0.99 TP trigger → $1/share · unresolved shares go to resolution</b></div>
       <div class="metric"><span>Open shares / timeframe cash</span><b>${sharesFmt(positions.reduce((n,p)=>n+Number(p.shares||0),0))} / ${usd(t.account?.cash)} of ${usd(t.account?.capital)}</b></div>
     </article>`;
@@ -142,7 +152,6 @@ function equitySvg(points){if(!Array.isArray(points)||points.length<2)return '<d
      .sort((x,y)=>(Number(y.settledAt)||0)-(Number(x.settledAt)||0)).slice(0,30);
    document.querySelector('#openPositions').innerHTML=positionTable(openPositions,true);
    document.querySelector('#closedPositions').innerHTML=positionTable(closedPositions,false);
-   document.querySelector('#events').innerHTML=(s.events||[]).slice(0,16).map(e=>`<div class="event"><span class="muted">${timestamp(e.ts)}</span> · <b>${esc(e.event)}</b> · ${esc(e.note||e.pattern||e.side||'')}</div>`).join('')||'<div class="empty">Waiting for events.</div>';
    document.querySelector('#error').textContent=s.error||'';
  }catch(e){document.querySelector('#error').textContent='Dashboard data unavailable: '+e.message}}
 async function refreshRealBalance(){

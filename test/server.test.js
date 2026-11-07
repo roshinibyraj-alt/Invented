@@ -62,9 +62,16 @@ test('dashboard shows both BTC windows, the scheduled strategy, and fee metrics'
   assert.match(html,/15-minute bot scales all times and intervals by 3/);
   assert.match(html,/resting \$0\.99 take-profit, counted as \$1 per share/);
   assert.match(html,/takerFees/);
+  assert.match(html,/Accumulated \$\{side\}/);
+  assert.match(html,/inventoryCard\('UP',inventory\.UP,'up'\)/);
+  assert.match(html,/inventoryCard\('DOWN',inventory\.DOWN,'down'\)/);
+  assert.match(html,/Cost basis incl\. fees/);
+  assert.match(html,/MARKET BUY/);
   assert.match(html,/maxConsecutiveWins/);
   assert.match(html,/maxConsecutiveLosses/);
   assert.match(html,/official Polymarket resolution/);
   assert.doesNotMatch(html,/market stop-loss/);
   assert.doesNotMatch(html,/Limit Ladder/);
+  assert.doesNotMatch(html,/Order activity/);
+  assert.doesNotMatch(html,/Recent bot events/);
 });

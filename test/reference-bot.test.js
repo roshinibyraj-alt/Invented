@@ -81,6 +81,10 @@ test("5-minute schedule buys cheap side 0–1m, then expensive side 1–3m", () 
   fire(bot, 20_000, { upAsk: 0.10, downAsk: 0.20 });
   assert.equal(bot.positions[0].side, "UP");
   assert.equal(bot.positions[0].shares, 22.5);
+  const accumulated = bot.snapshot().inventory;
+  assert.equal(accumulated.UP.shares, 32.5);
+  assert.equal(accumulated.DOWN.shares, 15);
+  assert.ok(accumulated.UP.averageCost > 0);
 
   fire(bot, 60_000, { upAsk: 0.60, downAsk: 0.20 });
   assert.equal(bot.positions[0].phase, "expensive");
