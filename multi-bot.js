@@ -6,7 +6,8 @@ const Bot=require('./wick-bot');
 class MultiBot {
   constructor(){
     this.bots={
-      '5m':new Bot({timeframe:'5m',windowMs:cfg.WINDOW_MS_5M,capital:cfg.DEMO_CAPITAL_5M})
+      '5m':new Bot({timeframe:'5m',windowMs:cfg.WINDOW_MS_5M,capital:cfg.DEMO_CAPITAL_5M}),
+      '15m':new Bot({timeframe:'15m',windowMs:cfg.WINDOW_MS_15M,capital:cfg.DEMO_CAPITAL_15M})
     };
   }
   start(){for(const bot of Object.values(this.bots))bot.start()}

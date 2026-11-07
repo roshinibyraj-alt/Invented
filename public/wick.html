@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>BTC 5-Minute Limit Ladder Paper Bot</title>
+<title>BTC 5m / 15m Scheduled Paper Bot</title>
 <style>
 :root{color-scheme:dark;--bg:#080c14;--panel:#121a28;--line:#27364d;--muted:#92a1b7;--text:#eef4ff;--green:#34d399;--red:#fb7185;--gold:#fbbf24;--cyan:#67e8f9}
 .signal-reason{font-weight:900;text-align:right;max-width:72%}
@@ -16,19 +16,20 @@
     .grid{grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.card{min-height:96px;box-shadow:0 8px 26px #0003}.card.primary{border-color:#3879c7;background:linear-gradient(145deg,#19355a,#111c2d)}.card.success{border-color:#23784b;background:linear-gradient(145deg,#153a2c,#111c2d)}.card.danger{border-color:#9d3848;background:linear-gradient(145deg,#3b1b2a,#111c2d)}.card.primary .value{color:#8ec5ff}.card.success .value{color:var(--green)}.card.danger .value{color:var(--red)}.metric-note{display:block;margin-top:6px;font-size:10px;color:var(--muted)}.windows{grid-template-columns:1fr}.bot-card{border-top:3px solid var(--cyan)}.subhead{margin:18px 0 4px;padding-top:14px;border-top:1px solid var(--line)}.section-note{margin:0 0 8px}.event{padding:7px 0;border-bottom:1px solid var(--line);font-size:12px}
     @media(max-width:700px){.grid{grid-template-columns:repeat(2,1fr)}}
   </style></head><body><main>
-   <header class="head"><div><div class="title">BTC 5-Minute Limit Ladder Paper Bot</div><div class="sub">BTC 5-minute Polymarket market · $300 demo capital · paper only</div></div><span class="pill" id="status">CONNECTING</span></header>
+   <header class="head"><div><div class="title">BTC 5m / 15m Scheduled Paper Bot</div><div class="sub">BTC Polymarket windows · $10,000 total demo capital · paper only</div></div><span class="pill" id="status">CONNECTING</span></header>
  <section class="grid">
   <div class="card primary"><div class="label">Demo equity</div><div class="value" id="equity">—</div></div>
  <div class="card"><div class="label">Cash</div><div class="value" id="cash">—</div></div>
  <div class="card"><div class="label">Realized P&amp;L</div><div class="value" id="realized">—</div></div>
  <div class="card"><div class="label">Floating P&amp;L</div><div class="value" id="unrealized">—</div></div>
  <div class="card primary"><div class="label">Total trades</div><div class="value" id="totalTrades">—</div><span class="metric-note" id="settledTrades">— settled</span></div>
-  <div class="card success"><div class="label">Estimated maker rebate</div><div class="value" id="makerRebate">—</div><span class="metric-note">filled limit orders · illustrative</span></div>
+ <div class="card danger"><div class="label">Taker fees paid</div><div class="value" id="takerFees">—</div><span class="metric-note">entry fills</span></div>
+ <div class="card success"><div class="label">Estimated maker rebate</div><div class="value" id="makerRebate">—</div><span class="metric-note">TP limit orders · estimate only</span></div>
  <div class="card primary"><div class="label">Win rate</div><div class="value" id="winRate">—</div><span class="metric-note">wins ÷ settled trades</span></div>
  <div class="card success"><div class="label">Wins</div><div class="value" id="wins">—</div></div>
  <div class="card danger"><div class="label">Losses</div><div class="value" id="losses">—</div></div>
-  <div class="card success"><div class="label">Highest consecutive strategy wins</div><div class="value" id="maxConsecutiveWins">—</div><span class="metric-note">TP hit</span></div>
-  <div class="card danger"><div class="label">Highest consecutive strategy losses</div><div class="value" id="maxConsecutiveLosses">—</div><span class="metric-note">TP missed by window end</span></div>
+  <div class="card success"><div class="label">Highest consecutive strategy wins</div><div class="value" id="maxConsecutiveWins">—</div><span class="metric-note">TP or resolution win</span></div>
+  <div class="card danger"><div class="label">Highest consecutive strategy losses</div><div class="value" id="maxConsecutiveLosses">—</div><span class="metric-note">Official resolution loss</span></div>
  <div class="card"><div class="label">Open positions</div><div class="value" id="open">—</div></div>
  </section>
  <section class="panel">
@@ -43,7 +44,7 @@
  <section class="panel"><h2>Active market windows</h2><div id="timeframe-panels" class="windows"></div></section>
  <section class="panel"><h2>Floating positions · live own-side marks</h2><p class="small section-note">Open shares are marked using their own-side best bid. Stale or missing marks are not shown as current unrealized P&amp;L.</p><div id="openPositions" class="table-wrap"></div><h2 class="subhead">Recent closed trades · realized P&amp;L</h2><div id="closedPositions" class="table-wrap"></div></section>
  <section class="panel"><h2>Recent bot events</h2><div id="events"></div></section>
-    <p class="small">At the start of each BTC 5-minute window, the bot places four independent resting limit buys: 100 shares on UP and DOWN at $0.10, plus 100 shares on UP and DOWN at $0.05. Each filled buy immediately gets its own resting limit take-profit sell: $0.20 for a $0.10 entry and $0.10 for a $0.05 entry. There is no stop-loss and no opposite-side cancellation. Unfilled buy orders remain active until the window ends, then are cancelled. Filled shares whose take-profit does not fill before the window ends wait for official Polymarket resolution. This is demo-only; paper history resets on process restart.</p>
+    <p class="small">The 5-minute bot buys the cheaper side every 10 seconds from minute 0 to 1, starting at 10 shares, then the more expensive side every 20 seconds from minute 1 to 3, starting at 50 shares. Each interval buy is 1.5× the prior interval size within that phase. The 15-minute bot scales all times and intervals by 3. Taker buys use displayed ask depth and include fees. Each fill gets a resting $0.99 take-profit, counted as $1 per share; positions without a TP fill by window end wait for official Polymarket resolution. The $10,000 demo capital is split $5,000 per timeframe. Paper history resets on process restart.</p>
  <div class="err" id="error"></div>
 </main>
 <script>
@@ -75,33 +76,39 @@ setInterval(paintCountdown,250);
   function timeframePanel(tf,t){
     const w=t.window||{},entries=t.strategy?.entries||{},signal=entries.signal||{};
     const quotes=t.livePrices||{};
+    const schedule=t.strategy?.schedule||{};
     const orders=(t.orders||[]).filter(o=>o.windowStart===w.start);
     const positions=(t.positions||[]).filter(p=>p.windowStart===w.start&&p.status==='OPEN');
     const remaining=w.end?Math.max(0,Math.floor((w.end-Date.now())/1000)):0;
-    const entryOrder=orders.map(o=>`${o.action||'BUY'} ${o.side} ${px(o.limitPrice)} · ${sharesFmt(o.shares)} shares · ${o.status}`).join(' · ')||'No orders yet';
-    const entryEnd=entries.expiresAt?new Date(entries.expiresAt).toLocaleTimeString():'—';
+    const entryOrder=orders.map(o=>`${o.action||'BUY'} ${o.side||'—'} ${o.action==='BUY'?'@ '+px(o.fillPrice):px(o.limitPrice)} · ${sharesFmt(o.filledShares??o.shares)} shares · ${o.status}`).join(' · ')||'No orders yet';
     const trigger=signal.reason||'Waiting for the BTC window';
+    const scheduleText=schedule.cheap&&schedule.expensive
+      ?`Cheap 0–${schedule.cheap.endMs/60000}m / ${schedule.cheap.intervalMs/1000}s from ${sharesFmt(schedule.cheap.baseShares)} shares; expensive ${schedule.expensive.startMs/60000}–${schedule.expensive.endMs/60000}m / ${schedule.expensive.intervalMs/1000}s from ${sharesFmt(schedule.expensive.baseShares)} shares; ×${schedule.multiplier||1.5} each interval.`
+      :'Waiting for schedule';
+    const nextFire=schedule.nextFireAt?new Date(schedule.nextFireAt).toLocaleTimeString():'—';
     return `<article class="card window bot-card"><h2>BTC ${esc(tf)} · ${esc(w.slug||'Waiting for market')}</h2>
       <div class="metric"><span>Status</span><b>${esc(t.status||'starting')}</b></div>
       <div class="metric"><span>Window remaining</span><b>${Math.floor(remaining/60)}:${String(remaining%60).padStart(2,'0')}</b></div>
-      <div class="metric"><span>UP / DOWN midpoint</span><b>${px(quotes.UP?.mid)} / ${px(quotes.DOWN?.mid)}</b></div>
+      <div class="metric"><span>UP / DOWN ask</span><b>${px(quotes.UP?.bestAsk)} / ${px(quotes.DOWN?.bestAsk)}</b></div>
       <div class="metric"><span>Entry plan</span><b>${esc(trigger)}</b></div>
+      <div class="metric"><span>Schedule</span><b>${esc(scheduleText)}</b></div>
+      <div class="metric"><span>Active phase / next fire</span><b>${esc(schedule.activePhase||'inactive')} / ${esc(nextFire)}</b></div>
       <div class="metric"><span>Order activity</span><b>${esc(entryOrder)}</b></div>
-      <div class="metric"><span>Unfilled buy cutoff</span><b>Window end · ${esc(entryEnd)}</b></div>
-      <div class="metric"><span>Exit rules</span><b>$0.10 entry → $0.20 TP · $0.05 entry → $0.10 TP · no stop-loss</b></div>
-      <div class="metric"><span>Open shares / paper cash</span><b>${positions.reduce((n,p)=>n+Number(p.shares||0),0)} / ${usd(t.account?.cash)}</b></div>
+      <div class="metric"><span>Exit rules</span><b>$0.99 TP trigger → $1/share · unresolved shares go to resolution</b></div>
+      <div class="metric"><span>Open shares / timeframe cash</span><b>${sharesFmt(positions.reduce((n,p)=>n+Number(p.shares||0),0))} / ${usd(t.account?.cash)} of ${usd(t.account?.capital)}</b></div>
     </article>`;
   }
  function positionTable(positions,open){
    if(!positions.length)return `<div class="empty">${open?'No open positions are floating right now.':'No closed trades yet.'}</div>`;
-    const headers=open?['Window','Side','Shares','Avg entry','TP limit','Est. maker rebate','Strategy result','Own bid · value','Unrealized P&L','Mark status']:['Window','Side','Shares','Avg entry','TP limit','Est. maker rebate','Strategy result','Exit','Proceeds','Realized P&L','Closed'];
+    const headers=open?['Window','Side','Shares','Avg entry','TP limit','Taker fees / rebate est.','Strategy result','Own bid · value','Unrealized P&L','Mark status']:['Window','Side','Shares','Avg entry','TP limit','Taker fees / rebate est.','Strategy result','Exit','Proceeds','Realized P&L','Closed'];
    const rows=positions.map(p=>{
      const fresh=p.markStatus==='LIVE'&&p.markBid!=null&&p.markValue!=null;
-      const common=`<td>${esc(p.timeframe||'5m')} · ${esc(p.slug||'')}</td><td class="${p.side==='UP'?'good':'bad'}">${esc(p.side)}</td><td>${Number(p.shares||0).toLocaleString()}</td><td>${px(p.avgEntry)}</td><td>${px(p.takeProfitPrice)}</td>`;
-       const strategyResult=p.strategyOutcome==='WIN'?'WIN · TP hit':p.strategyOutcome==='LOSS'?'LOSS · TP not hit by window end':p.status==='PENDING_RESOLUTION'?'LOSS · awaiting payout':'Pending';
-       if(open)return `<tr>${common}<td>${usd(p.estimatedMakerRebate)}</td><td>${esc(strategyResult)}</td><td>${fresh?`${px(p.markBid)} · ${usd(p.markValue)}`:'—'}</td><td>${fresh?usd(p.unrealizedPnl):'—'}</td><td>${esc(fresh?'LIVE':p.markStatus||'UNAVAILABLE')}</td></tr>`;
+      const common=`<td>${esc(p.timeframe||'5m')} · ${esc(p.slug||'')}</td><td class="${p.side==='UP'?'good':'bad'}">${esc(p.side)}</td><td>${sharesFmt(p.shares)}</td><td>${px(p.avgEntry)}</td><td>${px(p.takeProfitPrice)}</td>`;
+       const strategyResult=p.strategyOutcome==='WIN'?'WIN · TP/resolution':p.strategyOutcome==='LOSS'?'LOSS · resolution':p.status==='PENDING_RESOLUTION'?'Awaiting resolution':'Pending';
+       const feeAndRebate=`${usd(Number(p.fees||0)+Number(p.exitFees||0))} / ${usd(p.estimatedMakerRebate)}`;
+       if(open)return `<tr>${common}<td>${feeAndRebate}</td><td>${esc(strategyResult)}</td><td>${fresh?`${px(p.markBid)} · ${usd(p.markValue)}`:'—'}</td><td>${fresh?usd(p.unrealizedPnl):'—'}</td><td>${esc(fresh?'LIVE':p.markStatus||'UNAVAILABLE')}</td></tr>`;
        const exit=p.settlementBasis==='POLYMARKET_RESOLUTION'?`Resolution · ${esc(p.resolutionWinner||'result')}`:px(p.exitBid);
-        return `<tr>${common}<td>${usd(p.estimatedMakerRebate)}</td><td>${esc(strategyResult)}</td><td>${exit}</td><td>${p.proceeds==null?'—':usd(p.proceeds)}</td><td class="${Number(p.realizedPnl)>=0?'good':'bad'}">${p.realizedPnl==null?'—':usd(p.realizedPnl)}</td><td>${timestamp(p.settledAt)}</td></tr>`;
+        return `<tr>${common}<td>${feeAndRebate}</td><td>${esc(strategyResult)}</td><td>${exit}</td><td>${p.proceeds==null?'—':usd(p.proceeds)}</td><td class="${Number(p.realizedPnl)>=0?'good':'bad'}">${p.realizedPnl==null?'—':usd(p.realizedPnl)}</td><td>${timestamp(p.settledAt)}</td></tr>`;
    }).join('');
    return `<table><thead><tr>${headers.map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table>`;
  }
@@ -120,6 +127,7 @@ function equitySvg(points){if(!Array.isArray(points)||points.length<2)return '<d
    document.querySelector('#open').textContent=a.openPositions??0;
    document.querySelector('#totalTrades').textContent=a.totalTrades??0;
     document.querySelector('#makerRebate').textContent=usd(a.estimatedMakerRebate);
+    document.querySelector('#takerFees').textContent=usd(a.takerFees);
    document.querySelector('#settledTrades').textContent=`${a.settledTrades??0} settled · ${a.openPositions??0} open`;
    document.querySelector('#winRate').textContent=`${Number(a.winRate||0).toFixed(1)}%`;
    document.querySelector('#wins').textContent=a.wins??0;

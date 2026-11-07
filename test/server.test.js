@@ -44,7 +44,7 @@ test('real-balance proxy returns the upstream account summary',async(t)=>{
   assert.deepEqual(await response.json(),expected);
 });
 
-test('dashboard shows the limit-ladder strategy and both highest-streak metrics',async(t)=>{
+test('dashboard shows both BTC windows, the scheduled strategy, and fee metrics',async(t)=>{
   const server=startServer({snapshot:()=>({})},0);
   await new Promise(resolve=>server.once('listening',resolve));
   t.after(()=>new Promise(resolve=>server.close(resolve)));
@@ -53,14 +53,18 @@ test('dashboard shows the limit-ladder strategy and both highest-streak metrics'
   assert.equal(response.status,200);
   assert.match(html,/Highest consecutive strategy wins/);
   assert.match(html,/Highest consecutive strategy losses/);
-  assert.match(html,/TP missed by window end/);
-  assert.match(html,/LOSS · TP not hit by window end/);
-  assert.doesNotMatch(html,/LOSS · TP missed by expiry/);
-  assert.match(html,/remain active until the window ends/);
+  assert.match(html,/BTC 5m \/ 15m Scheduled Paper Bot/);
+  assert.match(html,/\$10,000 total demo capital/);
+  assert.match(html,/Taker fees paid/);
+  assert.match(html,/minute 0 to 1/);
+  assert.match(html,/minute 1 to 3/);
+  assert.match(html,/1\.5× the prior interval size/);
+  assert.match(html,/15-minute bot scales all times and intervals by 3/);
+  assert.match(html,/resting \$0\.99 take-profit, counted as \$1 per share/);
+  assert.match(html,/takerFees/);
   assert.match(html,/maxConsecutiveWins/);
   assert.match(html,/maxConsecutiveLosses/);
-  assert.match(html,/four independent resting limit buys/);
-  assert.match(html,/\$0\.10 entry → \$0\.20 TP/);
   assert.match(html,/official Polymarket resolution/);
   assert.doesNotMatch(html,/market stop-loss/);
+  assert.doesNotMatch(html,/Limit Ladder/);
 });

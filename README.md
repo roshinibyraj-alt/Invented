@@ -1,16 +1,16 @@
-# Polymarket BTC 5-Minute Limit Ladder Paper Bot
+# Polymarket BTC 5m / 15m Scheduled Paper Bot
 
-Polymarket BTC 5-minute paper trading with a $300 demo bankroll. The bot sends no live orders and holds no wallet credentials.
+Polymarket BTC 5-minute and 15-minute paper trading with $10,000 total demo capital, allocated $5,000 to each timeframe. The bot sends no live orders and holds no wallet credentials.
 
 ## Strategy
 
-- At each 5-minute window start, place four independent resting limit buys: 100 UP and 100 DOWN shares at $0.10, plus 100 UP and 100 DOWN shares at $0.05.
-- Each buy is independent; a fill does not cancel any other side or rung. The paper fill model requires a fresh best ask at or below that order's limit and books the fill at exactly the posted limit price.
-- Each filled $0.10 buy immediately gets a resting $0.20 limit take-profit sell. Each filled $0.05 buy gets a resting $0.10 limit take-profit sell.
-- A take-profit sell fills when a fresh best bid reaches or exceeds its limit; the paper proceeds use exactly the posted take-profit price, even if the observed bid is higher. There is no stop-loss.
-- Keep unfilled buys active until the window ends, then cancel them; pending take-profit orders also expire at window end. Filled positions without a take-profit fill wait for the original Polymarket market's official resolution.
-- Window-end positions without a take-profit fill count as strategy losses at that point; later resolution determines actual cash P&L and does not rewrite the strategy outcome. Unfilled orders do not count as wins or losses.
-- Limit-order maker-rebate values are estimates only and are not added to cash or realized P&L.
+- The 5-minute bot trades BTC 5-minute markets; the 15-minute bot trades BTC 15-minute markets. Their schedules are independent.
+- During minutes 0–1, buy the side with the lower current ask every 10 seconds, starting at 10 shares. During minutes 1–3, buy the side with the higher current ask every 20 seconds, starting at 50 shares.
+- Within each phase and window, each scheduled order grows by 1.5× from the previous interval's size. The progression restarts at the phase's base size in every new window. Fractional paper shares are retained to six decimal places.
+- The 15-minute schedule scales all timing by 3: the cheap-side phase is 0–3 minutes with 30-second intervals; the expensive-side phase is 3–9 minutes with 60-second intervals.
+- Simulated buys are taker orders consuming displayed ask depth. Entry fees are calculated using the market's fee schedule (or the configured crypto taker formula); available depth can produce a partial fill, and insufficient demo cash rejects an order.
+- Each filled position receives a resting $0.99 limit take-profit. When the best bid reaches $0.99, the demo records proceeds as $1 per share. If TP does not fill before the market window ends, the position waits for the original market's official Polymarket resolution.
+- No stop-loss is used. Taker fees are included in cost and realized P&L; passive TP sells and official resolution have no taker fee. Maker rebate is shown as an estimate only, not credited to cash.
 
 The dashboard refreshes every 2 seconds. Paper state is kept in process memory and resets on restart or redeployment.
 

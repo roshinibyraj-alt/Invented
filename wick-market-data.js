@@ -25,7 +25,8 @@ async function getBtcMarket(windowStart,windowMs){
   }
   if(!tokens.UP||!tokens.DOWN)throw new Error(`BTC ${minutes}-minute market outcomes could not be mapped to UP/DOWN`);
   return {id:String(market.id||market.conditionId),slug,title:market.question||market.title||slug,
-    start:windowStart,end:windowStart+windowMs,tokens,raw:market};
+    start:windowStart,end:windowStart+windowMs,tokens,feesEnabled:market.feesEnabled,
+    feeSchedule:market.feeSchedule,takerFeeRate:market.takerFeeRate,raw:market};
 }
 
 async function getBook(tokenId){
