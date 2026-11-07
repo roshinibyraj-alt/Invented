@@ -1,24 +1,19 @@
 'use strict';
 
-const cfg=require('./config');
-const Bot=require('./wick-bot');
-const PrebuyBot=require('./prebuy-bot');
+const SignalLimitBot=require('./signal-limit-bot');
 const {feed:chainlinkFeed}=require('./chainlink-feed');
 
 class MultiBot {
   constructor(){
     this.bots={
-      'trigger-5m':new Bot({timeframe:'5m',windowMs:cfg.WINDOW_MS_5M,
-        capital:cfg.DEMO_CAPITAL,strategyId:'trigger-5m',
-        strategyName:'4-minute two-rung limit strategy'}),
-      'prebuy-5m':new PrebuyBot(),
+      'btc-5m-signal':new SignalLimitBot(),
     };
   }
   start(){chainlinkFeed.start();for(const bot of Object.values(this.bots))bot.start()}
   stop(){for(const bot of Object.values(this.bots))bot.stop()}
   snapshot(){
     const strategies=Object.fromEntries(Object.entries(this.bots).map(([k,b])=>[k,b.snapshot()]));
-    const primary=strategies['trigger-5m'];
+    const primary=strategies['btc-5m-signal'];
     const timeframes={'5m':primary};
     const states=Object.values(strategies),positions=states.flatMap(s=>s.positions)
       .sort((a,b)=>b.openedAt-a.openedAt),events=states.flatMap(s=>s.events).sort((a,b)=>b.ts-a.ts).slice(0,100);

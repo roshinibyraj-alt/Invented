@@ -44,7 +44,7 @@ test('real-balance proxy returns the upstream account summary',async(t)=>{
   assert.deepEqual(await response.json(),expected);
 });
 
-test('dashboard shows two independent strategy portfolios with separate equity curves',async(t)=>{
+test('dashboard shows only the BTC signal-limit paper strategy and removes the retired strategy',async(t)=>{
   const server=startServer({snapshot:()=>({})},0);
   await new Promise(resolve=>server.once('listening',resolve));
   t.after(()=>new Promise(resolve=>server.close(resolve)));
@@ -54,11 +54,11 @@ test('dashboard shows two independent strategy portfolios with separate equity c
   assert.match(html,/Highest consecutive strategy wins/);
   assert.match(html,/Highest consecutive strategy losses/);
   assert.match(html,/BTC Strategy Lab/);
-  assert.match(html,/separate \$10,000 demo accounts/);
-  assert.match(html,/Independent strategy portfolios/);
+  assert.match(html,/One BTC 5-minute paper strategy · \$10,000 demo account/);
+  assert.match(html,/Demo account overview/);
   assert.match(html,/strategy-panels/);
   assert.match(html,/Equity curve/);
-  assert.match(html,/id==='prebuy-5m'/);
+  assert.match(html,/id==='btc-5m-signal'/);
   assert.match(html,/s\.strategies/);
   assert.match(html,/equitySvg\(a\.equityCurve\)/);
   assert.match(html,/strategyId/);
@@ -66,28 +66,23 @@ test('dashboard shows two independent strategy portfolios with separate equity c
   assert.match(html,/Profitable exits/);
   assert.match(html,/Losing exits/);
   assert.match(html,/Break-even exits/);
-  assert.match(html,/From 4:00 to window end/);
-  assert.match(html,/300-share UP and DOWN limit buys at \$0\.20 and \$0\.10/);
-  assert.match(html,/matching \$0\.80 and \$0\.90 take-profit sells/);
-  assert.match(html,/either side's fresh best ask is strictly above \$0\.32 and below \$0\.70/);
   assert.match(html,/final 57 seconds/);
-  assert.match(html,/market-buys 500 shares on that side two seconds before open/);
-  assert.match(html,/places a \$0\.99 limit sell at window open \(counted as \$1 per share\)/);
-  assert.match(html,/Strategy two has no stop loss/);
-  assert.match(html,/limit sell at window open; counts as \$1\/share; no stop loss/);
-  assert.match(html,/equal or lower means red\/DOWN/);
-  assert.match(html,/move to \$0\.99, counted as \$1 per share/);
+  assert.match(html,/At window open, place one \$0\.45 limit buy for 500 shares/);
+  assert.match(html,/paper-fill the remainder at \$0\.45/);
+  assert.match(html,/estimated maker rebates are credited/);
+  assert.match(html,/Once filled, place a \$0\.99 limit sell/);
+  assert.match(html,/no stop loss/);
+  assert.match(html,/0\.45 fallback after 1s/);
+  assert.match(html,/equal or lower means DOWN/);
   assert.match(html,/takerFees/);
-  assert.match(html,/Accumulated \$\{side\}/);
-  assert.match(html,/inventoryCard\('UP',inventory\.UP,'up'\)/);
-  assert.match(html,/inventoryCard\('DOWN',inventory\.DOWN,'down'\)/);
-  assert.match(html,/Cost basis incl\. fees/);
-  assert.match(html,/500 shares on the candle-signaled side/);
   assert.match(html,/maxConsecutiveWins/);
   assert.match(html,/maxConsecutiveLosses/);
   assert.match(html,/official Polymarket resolution/);
-  assert.doesNotMatch(html,/strictly above \$0\.42 and below \$0\.59/);
-  assert.doesNotMatch(html,/market stop-loss/);
+  assert.doesNotMatch(html,/prebuy-5m/);
+  assert.doesNotMatch(html,/trigger-5m/);
+  assert.doesNotMatch(html,/two independent strategies/);
+  assert.doesNotMatch(html,/300-share UP and DOWN limit buys/);
+  assert.doesNotMatch(html,/market-buys 500 shares/);
   assert.doesNotMatch(html,/15m/);
   assert.doesNotMatch(html,/1\.5×/);
   assert.doesNotMatch(html,/Order activity/);

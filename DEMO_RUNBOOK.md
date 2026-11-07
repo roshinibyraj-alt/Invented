@@ -1,10 +1,15 @@
-# Paper bot runbook
+# Demo runbook
 
-1. Confirm the dashboard shows two separate BTC 5-minute demo accounts, each funded with $10,000, and live UP/DOWN CLOB asks.
-2. **4-minute two-rung strategy:** from 4:00 to window end, check each tick for either fresh side's best ask strictly between $0.32 and $0.70. The first qualifying tick latches the trigger and places limit buys for 300 shares per side at $0.20 and $0.10. Match visible ask liquidity only at or below the limit; record actual filled shares at the fixed limit price, and cancel each unfilled remainder after a partial fill or at window end.
-3. Place each filled rung's limit sell immediately: $0.20 entry → $0.80 TP; $0.10 entry → $0.90 TP.
-4. **57-second pre-buy strategy:** discover the next market during the final 10 seconds. At T−3s, compare the latest live BTC price with the close of the previous completed one-minute candle, covering approximately seconds 241–297 of the ending window. Higher is green/UP; equal or lower is red/DOWN. Buy 500 shares on that side at T−2s only with a fresh book.
-5. At window open, place a $0.99 limit TP for the pre-buy fill, booked as $1/share. Strategy 2 has no stop loss. On the four-minute strategy, when any TP fills, move the other side's pending TPs to $0.99, booked as $1/share.
-6. Market buys incur market fees. Maker limit buys and sells have no taker fee; estimated maker rebates are displayed but not added to cash.
-7. Positions without a TP fill by window end wait for official Polymarket resolution. Neither strategy uses a stop-loss or live orders.
-8. Each dashboard portfolio panel shows its own capital, results, equity curve, live quotes, and UP/DOWN inventory. Paper history resets on process restart or redeployment.
+The app runs one BTC 5-minute paper strategy and one $10,000 paper account.
+
+1. During the final 10 seconds before a window opens, the bot scans the upcoming BTC market.
+2. At T−3 seconds, it compares live BTC with the previous closed 1-minute candle close. The comparison represents the final 57 seconds: higher selects UP; equal or lower selects DOWN.
+3. At window open, it submits a simulated $0.45 limit buy for 500 shares on the selected side.
+4. Fresh visible asks at or below $0.45 fill at the actual better price. Any remaining shares are simulated at exactly $0.45 one second after the order was placed.
+5. No taker fee is charged in the paper model. Estimated maker rebates for entry and TP fills are credited to the account and included in P&L.
+6. After an entry fill, the bot places a $0.99 limit sell, with the ledger paying $1 per share when it fills. There is no stop loss.
+7. Positions not sold by the end of the market window wait for official Polymarket resolution.
+
+The one-second fill is a paper simulation rule, not a claim that a live limit order would fill. Account history is process-local and clears on restart or redeployment.
+
+Run checks with `npm test`; start the app with `npm start`.
