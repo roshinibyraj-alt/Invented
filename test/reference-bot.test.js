@@ -127,14 +127,19 @@ test("a 57-second BTC rise above the previous candle close buys UP", () => {
   assert.equal(bot.positions[0].strategyId, "prebuy-5m");
   assert.equal(bot.orders.filter(order => order.action === "BUY").length, 1);
   assert.equal(bot.orders.filter(order => order.action === "SELL").length, 0,
-    "TP limits are deferred until one second after the window opens");
-  assert.equal(bot.activateDeferredTakeProfits(start + config.PREBUY_TAKE_PROFIT_DELAY_MS - 1), false);
-  assert.equal(bot.activateDeferredTakeProfits(start + config.PREBUY_TAKE_PROFIT_DELAY_MS), true);
+    "the $0.99 TP is deferred until the window opens");
+  assert.equal(bot.activateDeferredTakeProfits(start - 1), false);
+  assert.equal(bot.activateDeferredTakeProfits(start), true);
 
   const takeProfits = bot.orders.filter(order => order.action === "SELL");
   assert.equal(takeProfits.length, 1);
-  assert.equal(takeProfits[0].limitPrice, 0.70);
-  assert.equal(bot.activateDeferredTakeProfits(start + config.PREBUY_TAKE_PROFIT_DELAY_MS + 1), false,
+  assert.equal(takeProfits[0].limitPrice, 0.99);
+  assert.equal(takeProfits[0].createdAt, start);
+  assert.equal(bot.positions[0].stopLossPrice, undefined,
+    "strategy 2 has no stop-loss rule");
+  assert.equal(bot.orders.some(order => order.kind === "STOP_LOSS"), false,
+    "strategy 2 must not create stop-loss orders");
+  assert.equal(bot.activateDeferredTakeProfits(start + 1), false,
     "activation must not create duplicate take-profit orders");
 });
 
@@ -217,7 +222,8 @@ test("prebuy tick scans early, reads the 57-second comparison at three seconds, 
     now = start + config.PREBUY_TAKE_PROFIT_DELAY_MS;
     await bot.tick();
     assert.equal(bot.orders.filter(order => order.action === "SELL").length, 1);
-    assert.equal(bot.orders.filter(order => order.action === "SELL")[0].limitPrice, 0.70);
+    assert.equal(bot.orders.filter(order => order.action === "SELL")[0].limitPrice, 0.99);
+    assert.equal(bot.orders.filter(order => order.action === "SELL")[0].createdAt, start);
   } finally {
     Date.now = originalNow;
     marketData.getBtcMarket = originalGetBtcMarket;

@@ -69,7 +69,7 @@
    <div class="small" id="realBalanceStatus">Connecting to the live account balance…</div>
  </section>
  <section class="panel"><h2>Floating positions · live own-side marks</h2><p class="small section-note">Open shares are marked using their own-side best bid. Stale or missing marks are not shown as current unrealized P&amp;L.</p><div id="openPositions" class="table-wrap"></div><h2 class="subhead">Recent closed trades · realized P&amp;L</h2><div id="closedPositions" class="table-wrap"></div></section>
-    <p class="small">Both strategies are paper-only. From 4:00 to window end, strategy one watches every tick; if either side's fresh best ask is strictly above $0.32 and below $0.70, it latches the trigger and places 300-share UP and DOWN limit buys at $0.20 and $0.10, with matching $0.80 and $0.90 take-profit sells. When a take-profit fills, the other side's pending take-profits move to $0.99, counted as $1 per share. Strategy two compares BTC at three seconds before the next 5-minute window with the previous completed one-minute candle close, using the final 57 seconds (roughly second 241–297) of the ending window: higher means green/UP; equal or lower means red/DOWN. It market-buys 500 shares on that side two seconds before open and places a $0.70 take-profit one second after open. Positions without a TP fill by window end wait for official Polymarket resolution. Each demo account has separate balances and performance. Paper history resets on process restart.</p>
+    <p class="small">Both strategies are paper-only. From 4:00 to window end, strategy one watches every tick; if either side's fresh best ask is strictly above $0.32 and below $0.70, it latches the trigger and places 300-share UP and DOWN limit buys at $0.20 and $0.10, with matching $0.80 and $0.90 take-profit sells. When a take-profit fills, the other side's pending take-profits move to $0.99, counted as $1 per share. Strategy two compares BTC at three seconds before the next 5-minute window with the previous completed one-minute candle close, using the final 57 seconds (roughly second 241–297) of the ending window: higher means green/UP; equal or lower means red/DOWN. It market-buys 500 shares on that side two seconds before open, then places a $0.99 limit sell at window open (counted as $1 per share). Strategy two has no stop loss. Positions without a TP fill by window end wait for official Polymarket resolution. Each demo account has separate balances and performance. Paper history resets on process restart.</p>
  <div class="err" id="error"></div>
 </main>
 <script>
@@ -175,7 +175,7 @@ function strategyPanel(id,t){
   const entrySize=isPrebuy?'500 shares on the candle-signaled side':
     '300 shares per side at each limit rung';
   const takeProfit=isPrebuy
-    ?`${px(exit.initialTakeProfitPrice)} after ${exit.takeProfitDelayMs/1000}s; no opposite side`
+    ?`${px(exit.initialTakeProfitPrice)} limit sell at window open; counts as $1/share; no stop loss`
     :'$0.20 entry → $0.80 TP; $0.10 entry → $0.90 TP; opposite side moves to $0.99 after a TP fill';
   return `<article class="strategy-card ${isPrebuy?'prebuy':''}" data-testid="card-strategy-${esc(id)}">
     <div class="strategy-head"><div><div class="strategy-title">${esc(s.name||id)}</div>

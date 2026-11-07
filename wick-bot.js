@@ -403,7 +403,7 @@ class WickBot{
       estimatedMakerRebate:0,status:'OPEN',submittedAt:now,openedAt:now,filledAt:now,
       visibleAskSize:quote.askSize,simulatedShares:filledShares,
       entryQuotes:this.captureQuotePair(now),entryQuoteAt:now,feeContext:feeContext(this.market)};
-    const takeProfitOrder=this.rules.takeProfitDelayMs>0?null:
+    const takeProfitOrder=this.rules.takeProfitDelayMs>0||now<position.takeProfitPendingAt?null:
       this.buildTakeProfitOrder(position,this.rules.takeProfitInitialPrice,now);
     order.status=fill.remainingShares<=1e-9?'FILLED':'PARTIALLY_FILLED';
     order.filledAt=now;order.positionId=id;order.fillPrice=fillPrice;

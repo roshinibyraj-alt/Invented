@@ -19,7 +19,8 @@ Polymarket BTC 5-minute paper trading with two independent strategies. Each stra
 - It begins scanning for the upcoming BTC 5-minute market during the final 10 seconds before open.
 - Three seconds before open, it compares the live BTC price with the close of the previous completed one-minute candle. This is the final 57-second segment, from roughly second 241 to second 297 of the ending window. A higher price is green/UP; an equal or lower price is red/DOWN.
 - Two seconds before open, it attempts one market buy of 500 shares on the signaled side, only if that side's order book is fresh. It skips rather than entering late.
-- One second after the window opens, it creates a $0.70 limit take-profit for shares filled on that side.
+- Immediately after the window opens, it creates a $0.99 limit take-profit for shares filled on that side; the payout is counted as $1 per share.
+- Strategy 2 has no stop loss. Shares without a take-profit fill by window end wait for official market resolution.
 - Market buys sweep visible ask depth and incur taker fees. Limit sells have no taker fee; the estimated maker rebate is displayed but is not added to demo cash.
 - Shares still open at window end wait for the original market's official Polymarket resolution.
 

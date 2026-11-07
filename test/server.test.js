@@ -72,6 +72,9 @@ test('dashboard shows two independent strategy portfolios with separate equity c
   assert.match(html,/either side's fresh best ask is strictly above \$0\.32 and below \$0\.70/);
   assert.match(html,/final 57 seconds/);
   assert.match(html,/market-buys 500 shares on that side two seconds before open/);
+  assert.match(html,/places a \$0\.99 limit sell at window open \(counted as \$1 per share\)/);
+  assert.match(html,/Strategy two has no stop loss/);
+  assert.match(html,/limit sell at window open; counts as \$1\/share; no stop loss/);
   assert.match(html,/equal or lower means red\/DOWN/);
   assert.match(html,/move to \$0\.99, counted as \$1 per share/);
   assert.match(html,/takerFees/);
