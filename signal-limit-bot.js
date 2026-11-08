@@ -18,8 +18,80 @@ class SignalLimitBot extends WickBot {
       strategyId:'btc-5m-signal',
       strategyName:'57-second BTC signal limit strategy',
     });
+    this.baseCapital=cfg.DEMO_CAPITAL;
+    this.baseShareSize=cfg.ENTRY_SHARES;
+    this.variantProfitTarget=cfg.VARIANT_PROFIT_TARGET;
+    this.capital=this.baseCapital*2;
+    this.cash=this.capital;
+    this.activeVariantId='signal';
+    this.variants={
+      signal:{id:'signal',name:'With signal',mode:'SIGNAL',startingCapital:this.baseCapital,
+        cash:this.baseCapital,shareSize:this.baseShareSize,cycleNumber:1,cycleProfit:0,
+        active:true,activatedAt:this.startedAt,settledTrades:0,wins:0,losses:0,equityCurve:[]},
+      against:{id:'against',name:'Against signal',mode:'AGAINST_SIGNAL',startingCapital:this.baseCapital,
+        cash:this.baseCapital,shareSize:this.baseShareSize,cycleNumber:0,cycleProfit:0,
+        active:false,activatedAt:null,settledTrades:0,wins:0,losses:0,equityCurve:[]},
+    };
+    for(const variant of Object.values(this.variants))
+      variant.equityCurve=[{ts:this.startedAt,equity:variant.startingCapital}];
     this.candleFeed=candleFeed;
     this.lastCandleWaitLogAt=0;
+  }
+
+  getTradeSide(signalSide,variantId=this.activeVariantId){
+    const variant=this.variants[variantId];
+    if(variant?.mode==='SIGNAL')return signalSide;
+    return oppositeSide(signalSide);
+  }
+
+  switchVariantAfterTarget(variant,now){
+    if(this.activeVariantId!==variant.id||variant.cycleProfit<this.variantProfitTarget)return false;
+    for(const order of this.orders){
+      if(order.variantId!==variant.id||order.windowStart!==this.market?.start
+        ||!['PENDING','PARTIALLY_FILLED'].includes(order.status)||order.remainingShares<=0)continue;
+      order.cancelledRemainderShares=order.remainingShares;
+      order.remainingShares=0;
+      order.status='CANCELLED_VARIANT_PAUSED';
+      order.cancelledAt=now;
+      this.log('PAPER_ENTRY_CANCELLED_VARIANT_PAUSED',{
+        orderId:order.id,variantId:variant.id,cancelledShares:order.cancelledRemainderShares,
+      });
+    }
+    const nextId=variant.id==='signal'?'against':'signal';
+    variant.active=false;
+    variant.shareSize=this.baseShareSize;
+    const next=this.variants[nextId];
+    next.cycleNumber+=1;
+    next.cycleProfit=0;
+    next.shareSize=nextId==='against'?this.baseShareSize*2:this.baseShareSize;
+    next.active=true;
+    next.activatedAt=now;
+    this.activeVariantId=nextId;
+    this.log('PAPER_VARIANT_TARGET_REACHED',{
+      targetProfit:this.variantProfitTarget,completedVariantId:variant.id,
+      completedVariantProfit:variant.cycleProfit,activatedVariantId:next.id,
+      activatedShareSize:next.shareSize,cycleNumber:next.cycleNumber,
+    });
+    return true;
+  }
+
+  finalizeResolution(position,winner,now=Date.now()){
+    const finalized=super.finalizeResolution(position,winner,now);
+    if(!finalized)return false;
+    const variant=this.variants[position.variantId];
+    if(!variant)return true;
+    variant.cash+=Number(position.proceeds)||0;
+    variant.settledTrades+=1;
+    if(position.realizedPnl>0)variant.wins+=1;
+    else if(position.realizedPnl<0)variant.losses+=1;
+    if(position.cycleNumber===variant.cycleNumber){
+      variant.cycleProfit=Number((variant.cycleProfit+position.realizedPnl).toFixed(6));
+    }
+    const curveLast=variant.equityCurve.at(-1)?.equity??variant.startingCapital;
+    variant.equityCurve.push({ts:now,equity:Number((curveLast+position.realizedPnl).toFixed(6))});
+    if(variant.equityCurve.length>1000)variant.equityCurve.splice(1,variant.equityCurve.length-1000);
+    this.switchVariantAfterTarget(variant,now);
+    return true;
   }
 
   getWindowStartToScan(now,currentStart){
@@ -100,20 +172,22 @@ class SignalLimitBot extends WickBot {
 
   placeSignalLimitOrder(now,start){
     const signalSide=this.entryTriggerSide;
-    const side=oppositeSide(signalSide);
+    const variant=this.variants[this.activeVariantId];
+    const side=this.getTradeSide(signalSide,variant.id);
     if(!side){
       this.entryAttemptMissed=true;
       this.log('PAPER_SIGNAL_ENTRY_SKIPPED',{strategyId:this.strategyId,
         windowStart:start,signalSide,reason:'The latched signal has no valid opposite outcome side.'});
       return;
     }
-    const id=`${this.strategyId}-${this.timeframe}-${start}-${side.toLowerCase()}-entry`;
+    const id=`${this.strategyId}-${variant.id}-${this.timeframe}-${start}-${side.toLowerCase()}-entry`;
     const order={
       id,timeframe:this.timeframe,windowStart:start,side,signalSide,action:'BUY',kind:'ENTRY',
+      variantId:variant.id,variantName:variant.name,cycleNumber:variant.cycleNumber,
       strategyId:this.strategyId,tokenId:this.market.tokens?.[side]||null,
       orderType:'LIMIT',entryMode:'CANDLE_SIGNAL_LIMIT_BUY',entryType:'LIMIT_MAKER_BUY',
-      limitPrice:this.rules.entryLimitPrice,requestedShares:this.rules.sharesPerSide,
-      shares:this.rules.sharesPerSide,filledShares:0,remainingShares:this.rules.sharesPerSide,
+      limitPrice:this.rules.entryLimitPrice,requestedShares:variant.shareSize,
+      shares:variant.shareSize,filledShares:0,remainingShares:variant.shareSize,
       createdAt:now,submittedAt:now,fillEvents:[],maxObservedAskSizeByPrice:{},
       expiresAt:start+this.windowMs,status:'PENDING',fee:0,estimatedMakerRebate:0,
     };
@@ -123,7 +197,8 @@ class SignalLimitBot extends WickBot {
     this.orders.unshift(order);
     this.windowOrders.unshift(order);
     this.log('PAPER_SIGNAL_LIMIT_ORDER_PLACED',{
-      id,side,signalSide,limitPrice:order.limitPrice,shares:order.shares,
+      id,variantId:variant.id,variantName:variant.name,cycleNumber:variant.cycleNumber,
+      side,signalSide,limitPrice:order.limitPrice,shares:order.shares,
       fillPolicy:'better-price asks only if present at submission; later resting fills at limit price',
       expiresAt:order.expiresAt,
     });
@@ -197,13 +272,15 @@ class SignalLimitBot extends WickBot {
     const safePrice=Number(price.toFixed(6));
     const cost=Number((safeShares*safePrice).toFixed(6));
     const rebate=makerRebateFor(this.market,safePrice,safeShares).estimate;
-    if(cost>this.cash+1e-9){
+    const variant=this.variants[order.variantId];
+    const availableCash=variant?.cash??this.cash;
+    if(cost>availableCash+1e-9){
       order.status='REJECTED_INSUFFICIENT_CASH';
       order.reason='The paper balance cannot fund the limit-order fill.';
       order.remainingShares=0;
       this.log('PAPER_SIGNAL_LIMIT_ORDER_REJECTED',{
         id:order.id,side:order.side,limitPrice:order.limitPrice,
-        availableCash:this.cash,reason:order.reason,
+        availableCash,reason:order.reason,
       });
       return null;
     }
@@ -215,11 +292,13 @@ class SignalLimitBot extends WickBot {
       position={
         id,timeframe:this.timeframe,windowMs:this.windowMs,windowStart:order.windowStart,
         marketId:this.market.id,slug:this.market.slug,title:this.market.title,
-         side:order.side,signalSide:order.signalSide,tokenId:order.tokenId,entryKey:order.id,
+         side:order.side,signalSide:order.signalSide,variantId:order.variantId,
+        variantName:order.variantName,cycleNumber:order.cycleNumber,
+        tokenId:order.tokenId,entryKey:order.id,
         entryLabel:`${order.side} $${order.limitPrice.toFixed(2)} signal limit · ${order.requestedShares} shares`,
         entryMode:order.entryMode,entryType:order.entryType,phase:'signal-limit',
         entryFillSource:fillSource,
-        strategyId:this.strategyId,strategyName:this.strategyName,
+        strategyId:this.strategyId,strategyName:order.variantName,
         orderType:'LIMIT',fillModel:'PAPER_LIMIT_ORDER_BOOK_DEPTH',
         shares:0,requestedShares:order.requestedShares,initialShares:order.requestedShares,
         avgEntry:safePrice,fillPrice:safePrice,cost:0,totalCost:0,fees:0,exitFees:0,
@@ -258,6 +337,7 @@ class SignalLimitBot extends WickBot {
     order.lastFillSource=fillSource;
     order.fillEvents.push({filledAt:now,shares:safeShares,price:safePrice,source:fillSource});
     this.cash=Number((this.cash-cost+rebate).toFixed(6));
+    if(variant)variant.cash=Number((variant.cash-cost+rebate).toFixed(6));
 
     this.log('PAPER_SIGNAL_LIMIT_VISIBLE_ASK_FILLED',{
       id:order.id,positionId:position.id,side:order.side,shares:safeShares,
@@ -265,6 +345,61 @@ class SignalLimitBot extends WickBot {
       makerRebateCredited:rebate,remainingShares:order.remainingShares,
     });
     return position;
+  }
+
+  snapshot(){
+    const state=super.snapshot();
+    const variants=Object.fromEntries(Object.entries(this.variants).map(([id,variant])=>{
+      const positions=this.positions.filter(position=>position.variantId===id);
+      const open=positions.filter(position=>['OPEN','PENDING_RESOLUTION'].includes(position.status));
+      const settled=positions.filter(position=>position.status==='SETTLED_EXIT');
+      const openCost=open.reduce((sum,position)=>sum+(Number(position.totalCost)||0),0);
+      const realizedPnl=variant.cash+openCost-variant.startingCapital;
+      const allMarked=open.every(position=>Number.isFinite(position.markValue));
+      const markedValue=allMarked?open.reduce((sum,position)=>sum+(Number(position.markValue)||0),0):null;
+      const curve=[{ts:this.startedAt,equity:variant.startingCapital}];
+      let equity=variant.startingCapital;
+      for(const position of settled.slice().sort((a,b)=>(a.settledAt||0)-(b.settledAt||0))){
+        equity+=Number(position.realizedPnl)||0;
+        curve.push({ts:position.settledAt||position.openedAt,equity});
+      }
+      return [id,{
+        id,name:variant.name,mode:variant.mode,active:variant.active,
+        status:variant.active?'ACTIVE':'PAUSED',shareSize:variant.shareSize,
+        baseShareSize:this.baseShareSize,targetProfit:this.variantProfitTarget,
+        cycleNumber:variant.cycleNumber,cycleProfit:variant.cycleProfit,
+        remainingToTarget:Math.max(0,this.variantProfitTarget-variant.cycleProfit),
+        startingCapital:variant.startingCapital,cash:variant.cash,
+        realizedPnl,wins:variant.wins,losses:variant.losses,
+        settledTrades:variant.settledTrades,
+        winRate:variant.settledTrades?variant.wins/variant.settledTrades*100:0,
+        totalTrades:positions.length,openPositions:open.length,
+        markedValue,unrealizedPnl:markedValue==null?null:markedValue-openCost,
+        equity:markedValue==null?null:variant.cash+markedValue,
+        equityCurve:curve,
+        positions:positions.slice().sort((a,b)=>(b.openedAt||0)-(a.openedAt||0)).slice(0,30),
+      }];
+    }));
+    const active=this.variants[this.activeVariantId];
+    const tradeSide=this.getTradeSide(this.entryTriggerSide,active.id);
+    const strategy={
+      ...state.strategy,
+      name:'BTC 5-minute signal / against-signal target rotation',
+      activeVariantId:this.activeVariantId,
+      variantProfitTarget:this.variantProfitTarget,
+      entries:{
+        ...state.strategy.entries,
+        sharesPerSide:active.shareSize,
+        remainingShares:state.strategy.entries.orderPlaced
+          ?state.strategy.entries.remainingShares:active.shareSize,
+        sideSelection:active.mode==='SIGNAL'?'Trade on the candle signal side.':'Trade against the candle signal side.',
+        signal:{...state.strategy.entries.signal,tradeSide},
+      },
+      trigger:`Active version ${active.name} trades ${active.mode==='SIGNAL'?'with':'against'} the candle signal.`,
+      timing:`At window open, trade ${active.mode==='SIGNAL'?'with':'against'} the signal.`,
+      sizing:`${active.shareSize} shares on the ${active.mode==='SIGNAL'?'signalled':'opposite'} side at a $${this.rules.entryLimitPrice.toFixed(2)} limit.`,
+    };
+    return {...state,strategy,activeVariantId:this.activeVariantId,variants};
   }
 }
 

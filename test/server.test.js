@@ -44,7 +44,7 @@ test('real-balance proxy returns the upstream account summary',async(t)=>{
   assert.deepEqual(await response.json(),expected);
 });
 
-test('dashboard shows only the BTC signal-limit paper strategy and removes the retired strategy',async(t)=>{
+test('dashboard shows both isolated BTC signal variants and their target rotation',async(t)=>{
   const server=startServer({snapshot:()=>({})},0);
   await new Promise(resolve=>server.once('listening',resolve));
   t.after(()=>new Promise(resolve=>server.close(resolve)));
@@ -54,7 +54,9 @@ test('dashboard shows only the BTC signal-limit paper strategy and removes the r
   assert.match(html,/Highest consecutive strategy wins/);
   assert.match(html,/Highest consecutive strategy losses/);
   assert.match(html,/BTC Strategy Lab/);
-  assert.match(html,/One BTC 5-minute paper strategy · \$10,000 demo account/);
+  assert.match(html,/Two independent BTC 5-minute paper versions · \$10,000 each/);
+  assert.match(html,/Signal performance comparison/);
+  assert.match(html,/Each version has its own \$10,000 account/);
   assert.match(html,/Demo account overview/);
   assert.match(html,/strategy-panels/);
   assert.match(html,/Equity curve/);
@@ -67,20 +69,13 @@ test('dashboard shows only the BTC signal-limit paper strategy and removes the r
   assert.match(html,/Losing exits/);
   assert.match(html,/Break-even exits/);
   assert.match(html,/final 57 seconds/);
-  assert.match(html,/At window open, place one \$0\.45 limit buy for 100 shares/);
-  assert.match(html,/asks below \$0\.45 are already present when submitted/);
-  assert.match(html,/later fills are recorded at \$0\.45/);
-  assert.match(html,/no timeout or assumed fill/);
-  assert.match(html,/Entry fills may receive an estimated maker rebate/);
-  assert.match(html,/no take-profit or stop-loss exit/);
+  assert.match(html,/When its net realized profit reaches \$300/);
+  assert.match(html,/the opposite version starts at 200 shares/);
+  assert.match(html,/Independent equity curve/);
+  assert.match(html,/Recent resolved trades/);
   assert.match(html,/original market’s official Polymarket resolution/);
-  assert.doesNotMatch(html,/TP limit/);
-  assert.doesNotMatch(html,/TAKE_PROFIT/);
-  assert.match(html,/lower price only at submission/);
-  assert.doesNotMatch(html,/fallback after 1s/);
-  assert.doesNotMatch(html,/paper-fill the remainder/);
   assert.match(html,/equal or lower signals DOWN/);
-  assert.match(html,/on the opposite side of the signal/);
+  assert.match(html,/the active version buys either the signal side or the opposite side/i);
   assert.match(html,/takerFees/);
   assert.match(html,/maxConsecutiveWins/);
   assert.match(html,/maxConsecutiveLosses/);
