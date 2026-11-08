@@ -79,7 +79,8 @@ test('dashboard shows only the BTC signal-limit paper strategy and removes the r
   assert.match(html,/lower price only at submission/);
   assert.doesNotMatch(html,/fallback after 1s/);
   assert.doesNotMatch(html,/paper-fill the remainder/);
-  assert.match(html,/equal or lower means DOWN/);
+  assert.match(html,/equal or lower signals DOWN/);
+  assert.match(html,/on the opposite side of the signal/);
   assert.match(html,/takerFees/);
   assert.match(html,/maxConsecutiveWins/);
   assert.match(html,/maxConsecutiveLosses/);

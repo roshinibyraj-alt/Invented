@@ -69,7 +69,7 @@
    <div class="small" id="realBalanceStatus">Connecting to the live account balance…</div>
  </section>
  <section class="panel"><h2>Floating positions · live own-side marks</h2><p class="small section-note">Open shares are marked using their own-side best bid. Stale or missing marks are not shown as current unrealized P&amp;L.</p><div id="openPositions" class="table-wrap"></div><h2 class="subhead">Recent closed trades · realized P&amp;L</h2><div id="closedPositions" class="table-wrap"></div></section>
-      <p class="small">Paper-only BTC 5-minute strategy. At T−3 seconds, compare live BTC with the previous closed one-minute candle close using the final 57 seconds: higher means UP; equal or lower means DOWN. At window open, place one $0.45 limit buy for 500 shares on the signalled side. It cannot fill above $0.45. If asks below $0.45 are already present when submitted, the immediate match may fill at the lower ask; if the order rests first, later fills are recorded at $0.45. Only newly observed book depth is counted, and there is no timeout or assumed fill. Any remaining entry shares are cancelled at window end. Filled positions have no take-profit or stop-loss exit; they remain open until the original market’s official Polymarket resolution. Entry fills may receive an estimated maker rebate. Paper history resets on process restart.</p>
+      <p class="small">Paper-only BTC 5-minute strategy. At T−3 seconds, compare live BTC with the previous closed one-minute candle close using the final 57 seconds: higher signals UP; equal or lower signals DOWN. At window open, place one $0.45 limit buy for 500 shares on the opposite side of the signal. It cannot fill above $0.45. If asks below $0.45 are already present when submitted, the immediate match may fill at the lower ask; if the order rests first, later fills are recorded at $0.45. Only newly observed book depth is counted, and there is no timeout or assumed fill. Any remaining entry shares are cancelled at window end. Filled positions have no take-profit or stop-loss exit; they remain open until the original market’s official Polymarket resolution. Entry fills may receive an estimated maker rebate. Paper history resets on process restart.</p>
  <div class="err" id="error"></div>
 </main>
 <script>
@@ -103,7 +103,7 @@ setInterval(paintCountdown,250);
     const headers=open?['Strategy / window','Side','Shares','Avg entry','Fees / rebate est.','Strategy result','Own bid · value','Unrealized P&L','Mark status']:['Strategy / window','Side','Shares','Avg entry','Fees / rebate est.','Strategy result','Exit','Proceeds','Realized P&L','Closed'];
    const rows=positions.map(p=>{
      const fresh=p.markStatus==='LIVE'&&p.markBid!=null&&p.markValue!=null;
-      const common=`<td>${esc(p.strategyName||p.strategyId||'Strategy')} · ${esc(p.slug||'')}</td><td class="${p.side==='UP'?'good':'bad'}">${esc(p.side)}</td><td>${sharesFmt(p.shares)}</td><td>${px(p.avgEntry)}</td>`;
+     const common=`<td>${esc(p.strategyName||p.strategyId||'Strategy')} · ${esc(p.slug||'')}</td><td class="${p.side==='UP'?'good':'bad'}">${esc(p.side)}${p.signalSide?` <span class="muted">(signal ${esc(p.signalSide)})</span>`:''}</td><td>${sharesFmt(p.shares)}</td><td>${px(p.avgEntry)}</td>`;
        const strategyResult=p.strategyOutcome==='WIN'?'WIN · resolution':p.strategyOutcome==='LOSS'?'LOSS · resolution':p.status==='PENDING_RESOLUTION'?'Awaiting resolution':'Pending';
        const feeAndRebate=`${usd(Number(p.fees||0)+Number(p.exitFees||0))} / ${usd(p.estimatedMakerRebate)}`;
        if(open)return `<tr>${common}<td>${feeAndRebate}</td><td>${esc(strategyResult)}</td><td>${fresh?`${px(p.markBid)} · ${usd(p.markValue)}`:'—'}</td><td>${fresh?usd(p.unrealizedPnl):'—'}</td><td>${esc(fresh?'LIVE':p.markStatus||'UNAVAILABLE')}</td></tr>`;
@@ -118,7 +118,9 @@ function strategyPanel(id,t){
   const q=t.livePrices||{},inv=t.inventory||{},isSignal=id==='btc-5m-signal';
   const timeToOpen=w.start?Math.ceil((Number(w.start)-Date.now())/1000):null;
   const windowLabel=timeToOpen>0?`Opens in ${timeToOpen}s`:`${Math.max(0,Math.ceil((Number(w.end||0)-Date.now())/1000))}s left`;
-  const signal=entry.signal?.reason||'Waiting for market data';
+  const signal=entry.signal?.side
+    ?`Signal ${entry.signal.side} → trade ${entry.signal.tradeSide||'the opposite side'}. ${entry.signal.reason||''}`
+    :entry.signal?.reason||'Waiting for market data';
   const inventoryCard=(side,item)=>{
     const shares=Number(item?.shares)||0;
     return `<div class="inventory-card ${side.toLowerCase()}">
@@ -136,7 +138,7 @@ function strategyPanel(id,t){
     ['Trades settled',`${a.settledTrades??0} / ${a.totalTrades??0}`],
     ['Open positions',a.openPositions??0],
   ];
-  const entrySize=`${entry.sharesPerSide||500} shares at ${px(entry.limitPrice||0.45)} on the candle-signalled side`;
+  const entrySize=`${entry.sharesPerSide||500} shares at ${px(entry.limitPrice||0.45)} on the side opposite the signal`;
   const takeProfit=`${px(exit.initialTakeProfitPrice||0.99)} limit sell after entry fill; counts as $1/share; no stop loss`;
   return `<article class="strategy-card ${isSignal?'signal':''}" data-testid="card-strategy-${esc(id)}">
     <div class="strategy-head"><div><div class="strategy-title">${esc(s.name||id)}</div>
@@ -148,7 +150,7 @@ function strategyPanel(id,t){
       <div class="metric"><span>Entry timing</span><b>${esc(s.timing||'—')}</b></div>
       <div class="metric"><span>Entry size</span><b>${esc(entrySize)}</b></div>
       <div class="metric"><span>Limit order</span><b>$0.45 max · ${esc(entry.orderStatus||'NOT_PLACED')} · lower price only at submission</b></div>
-      <div class="metric"><span>Entry rule</span><b>${esc(s.trigger||'—')}</b></div>
+      <div class="metric"><span>Signal → trade</span><b>${esc(s.trigger||'—')}</b></div>
        <div class="metric"><span>Exit rule</span><b>Hold filled positions; settle only on original-market Polymarket resolution. No TP or SL.</b></div>
     </div>
     <div class="strategy-quotes">
