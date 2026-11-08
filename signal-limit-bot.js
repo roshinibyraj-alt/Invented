@@ -5,6 +5,10 @@ const WickBot=require('./wick-bot');
 const {makerRebateFor,feeContext}=WickBot._test;
 const {feed:defaultCandleFeed}=require('./chainlink-feed');
 
+function oppositeSide(side){
+  return side==='UP'?'DOWN':side==='DOWN'?'UP':null;
+}
+
 class SignalLimitBot extends WickBot {
   constructor({candleFeed=defaultCandleFeed}={}){
     super({
@@ -95,10 +99,17 @@ class SignalLimitBot extends WickBot {
   }
 
   placeSignalLimitOrder(now,start){
-    const side=this.entryTriggerSide;
+    const signalSide=this.entryTriggerSide;
+    const side=oppositeSide(signalSide);
+    if(!side){
+      this.entryAttemptMissed=true;
+      this.log('PAPER_SIGNAL_ENTRY_SKIPPED',{strategyId:this.strategyId,
+        windowStart:start,signalSide,reason:'The latched signal has no valid opposite outcome side.'});
+      return;
+    }
     const id=`${this.strategyId}-${this.timeframe}-${start}-${side.toLowerCase()}-entry`;
     const order={
-      id,timeframe:this.timeframe,windowStart:start,side,action:'BUY',kind:'ENTRY',
+      id,timeframe:this.timeframe,windowStart:start,side,signalSide,action:'BUY',kind:'ENTRY',
       strategyId:this.strategyId,tokenId:this.market.tokens?.[side]||null,
       orderType:'LIMIT',entryMode:'CANDLE_SIGNAL_LIMIT_BUY',entryType:'LIMIT_MAKER_BUY',
       limitPrice:this.rules.entryLimitPrice,requestedShares:this.rules.sharesPerSide,
@@ -112,7 +123,7 @@ class SignalLimitBot extends WickBot {
     this.orders.unshift(order);
     this.windowOrders.unshift(order);
     this.log('PAPER_SIGNAL_LIMIT_ORDER_PLACED',{
-      id,side,limitPrice:order.limitPrice,shares:order.shares,
+      id,side,signalSide,limitPrice:order.limitPrice,shares:order.shares,
       fillPolicy:'better-price asks only if present at submission; later resting fills at limit price',
       expiresAt:order.expiresAt,
     });
@@ -204,7 +215,7 @@ class SignalLimitBot extends WickBot {
       position={
         id,timeframe:this.timeframe,windowMs:this.windowMs,windowStart:order.windowStart,
         marketId:this.market.id,slug:this.market.slug,title:this.market.title,
-        side:order.side,tokenId:order.tokenId,entryKey:order.id,
+         side:order.side,signalSide:order.signalSide,tokenId:order.tokenId,entryKey:order.id,
         entryLabel:`${order.side} $${order.limitPrice.toFixed(2)} signal limit · ${order.requestedShares} shares`,
         entryMode:order.entryMode,entryType:order.entryType,phase:'signal-limit',
         entryFillSource:fillSource,
