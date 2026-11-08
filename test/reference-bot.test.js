@@ -49,18 +49,22 @@ function openEntry(bot,{side='UP',at=START,ask=0.60,askSize=1000,askLevels}={}){
   return bot.orders.find(order=>order.kind==='ENTRY');
 }
 
-test('only one independent $10,000 BTC 5-minute paper account remains',()=>{
+test('two independent $10,000 signal versions share one BTC 5-minute engine',()=>{
   const multi=new MultiBot();
   assert.deepEqual(Object.keys(multi.bots),['btc-5m-signal']);
   const state=multi.snapshot();
-  assert.equal(state.account.capital,10000);
-  assert.equal(state.strategies['btc-5m-signal'].account.capital,10000);
+  assert.equal(state.account.capital,20000);
+  assert.equal(state.strategies['btc-5m-signal'].account.capital,20000);
+  assert.equal(state.strategies['btc-5m-signal'].variants.signal.startingCapital,10000);
+  assert.equal(state.strategies['btc-5m-signal'].variants.against.startingCapital,10000);
+  assert.equal(state.strategies['btc-5m-signal'].variants.signal.active,true);
+  assert.equal(state.strategies['btc-5m-signal'].variants.against.active,false);
   assert.equal(state.strategies['trigger-5m'],undefined);
   assert.equal(state.strategies['prebuy-5m'],undefined);
   assert.deepEqual(state.strategy.timeframes,['5m']);
 });
 
-test('the previous completed 1-minute candle signal is inverted for the traded side',()=>{
+test('the active signal version trades with the previous completed 1-minute candle signal',()=>{
   const up=makeBot({currentPrice:101,previousClose:100});
   assert.equal(latchSignal(up),'UP');
   assert.equal(up.entryTriggerCandle.referenceClose,100);
@@ -70,17 +74,51 @@ test('the previous completed 1-minute candle signal is inverted for the traded s
   const equal=makeBot({currentPrice:100,previousClose:100});
   assert.equal(latchSignal(equal),'DOWN');
 
-  const upOrder=openEntry(up,{side:'DOWN',ask:0.60});
+  const upOrder=openEntry(up,{side:'UP',ask:0.60});
   assert.equal(upOrder.signalSide,'UP');
-  assert.equal(upOrder.side,'DOWN');
-  assert.equal(upOrder.tokenId,'down-token');
+  assert.equal(upOrder.side,'UP');
+  assert.equal(upOrder.tokenId,'up-token');
 
   const down=makeBot({currentPrice:99,previousClose:100});
   assert.equal(latchSignal(down),'DOWN');
-  const downOrder=openEntry(down,{side:'UP',ask:0.60});
+  const downOrder=openEntry(down,{side:'DOWN',ask:0.60});
   assert.equal(downOrder.signalSide,'DOWN');
-  assert.equal(downOrder.side,'UP');
-  assert.equal(downOrder.tokenId,'up-token');
+  assert.equal(downOrder.side,'DOWN');
+  assert.equal(downOrder.tokenId,'down-token');
+});
+
+test('each $300 realized target switches versions and adjusts the active share size',()=>{
+  const bot=makeBot();
+  const first={id:'signal-target',variantId:'signal',cycleNumber:1,side:'UP',
+    status:'PENDING_RESOLUTION',shares:300,totalCost:0,estimatedMakerRebate:0,
+    windowStart:START,openedAt:START};
+  bot.positions.push(first);
+  const resting={id:'signal-resting',variantId:'signal',windowStart:START,
+    status:'PENDING',remainingShares:70};
+  bot.orders.push(resting);
+  assert.equal(bot.finalizeResolution(first,'UP',START+WINDOW),true);
+  assert.equal(first.realizedPnl,300);
+  assert.equal(bot.activeVariantId,'against');
+  assert.equal(bot.variants.against.active,true);
+  assert.equal(bot.variants.against.shareSize,200);
+  assert.equal(bot.getTradeSide('UP'),'DOWN');
+  assert.equal(bot.variants.signal.active,false);
+  assert.equal(resting.status,'CANCELLED_VARIANT_PAUSED');
+  assert.equal(resting.remainingShares,0);
+  assert.equal(bot.variants.signal.cash,10300);
+
+  const second={id:'against-target',variantId:'against',cycleNumber:1,side:'DOWN',
+    status:'PENDING_RESOLUTION',shares:300,totalCost:0,estimatedMakerRebate:0,
+    windowStart:START+WINDOW,openedAt:START+WINDOW};
+  bot.positions.push(second);
+  assert.equal(bot.finalizeResolution(second,'DOWN',START+2*WINDOW),true);
+  assert.equal(bot.activeVariantId,'signal');
+  assert.equal(bot.variants.against.shareSize,100);
+  assert.equal(bot.variants.against.active,false);
+  assert.equal(bot.variants.signal.active,true);
+  assert.equal(bot.variants.signal.shareSize,100);
+  assert.equal(bot.variants.signal.cycleNumber,2);
+  assert.equal(bot.variants.signal.cycleProfit,0);
 });
 
 test('scan the upcoming market during the final 10 seconds and signal at T−3s',()=>{
@@ -97,13 +135,13 @@ test('no entry is placed before the window opens; one $0.45 limit is placed afte
   assert.equal(latchSignal(bot),'UP');
   bot.processStrategyEntry(START-1);
   assert.equal(bot.orders.length,0);
-  const order=openEntry(bot,{side:'DOWN',ask:0.60});
+  const order=openEntry(bot,{side:'UP',ask:0.60});
   assert.ok(order);
   assert.equal(order.orderType,'LIMIT');
   assert.equal(order.limitPrice,0.45);
   assert.equal(order.requestedShares,100);
   assert.equal(order.signalSide,'UP');
-  assert.equal(order.side,'DOWN');
+  assert.equal(order.side,'UP');
   assert.equal(order.status,'PENDING');
 });
 
@@ -111,7 +149,7 @@ test('available ask liquidity fills at the better price and credits rebate witho
   const bot=makeBot();
   latchSignal(bot);
   const order=openEntry(bot,{
-    side:'DOWN',ask:0.42,askSize:100,
+    side:'UP',ask:0.42,askSize:100,
     askLevels:[{price:0.42,size:100}],
   });
   assert.equal(order.status,'FILLED');
@@ -121,12 +159,12 @@ test('available ask liquidity fills at the better price and credits rebate witho
   assert.equal(order.fillEvents[0].price,0.42);
   const position=bot.positions[0];
   assert.equal(position.signalSide,'UP');
-  assert.equal(position.side,'DOWN');
+  assert.equal(position.side,'UP');
   assert.equal(position.avgEntry,0.42);
   assert.equal(position.totalCost,42);
   assert.equal(position.fees,0);
   assert.ok(position.estimatedMakerRebate>0);
-  assert.ok(bot.cash>10000-42);
+  assert.ok(bot.cash>20000-42);
   assert.equal(bot.orders.filter(item=>item.action==='SELL').length,0);
   assert.equal(bot.orders.some(item=>item.kind==='TAKE_PROFIT'),false);
   assert.equal(bot.snapshot().strategy.exit.orderType,'POLYMARKET_RESOLUTION_ONLY');
@@ -138,10 +176,10 @@ test('available ask liquidity fills at the better price and credits rebate witho
 test('a lower ask appearing after the order rests fills at the $0.45 limit',()=>{
   const bot=makeBot();
   latchSignal(bot);
-  const order=openEntry(bot,{side:'DOWN',ask:0.60,askSize:1000});
+  const order=openEntry(bot,{side:'UP',ask:0.60,askSize:1000});
   assert.equal(order.status,'PENDING');
 
-  quote(bot,'DOWN',START+500,{ask:0.40,askSize:100});
+  quote(bot,'UP',START+500,{ask:0.40,askSize:100});
   bot.processStrategyEntry(START+500);
   assert.equal(order.status,'FILLED');
   assert.equal(order.filledShares,100);
@@ -154,20 +192,20 @@ test('a lower ask appearing after the order rests fills at the $0.45 limit',()=>
 test('unchanged visible ask depth is not counted repeatedly across polls',()=>{
   const bot=makeBot();
   latchSignal(bot);
-  const order=openEntry(bot,{side:'DOWN',ask:0.60,askSize:1000});
+  const order=openEntry(bot,{side:'UP',ask:0.60,askSize:1000});
 
-  quote(bot,'DOWN',START+500,{ask:0.40,askSize:20});
+  quote(bot,'UP',START+500,{ask:0.40,askSize:20});
   bot.processStrategyEntry(START+500);
   assert.equal(order.status,'PARTIALLY_FILLED');
   assert.equal(order.filledShares,20);
   assert.equal(order.averagePrice,0.45);
 
-  quote(bot,'DOWN',START+1000,{ask:0.40,askSize:20});
+  quote(bot,'UP',START+1000,{ask:0.40,askSize:20});
   bot.processStrategyEntry(START+1000);
   assert.equal(order.status,'PARTIALLY_FILLED');
   assert.equal(order.filledShares,20);
 
-  quote(bot,'DOWN',START+1500,{ask:0.40,askSize:30});
+  quote(bot,'UP',START+1500,{ask:0.40,askSize:30});
   bot.processStrategyEntry(START+1500);
   assert.equal(order.filledShares,30);
   assert.equal(order.remainingShares,70);
@@ -177,7 +215,7 @@ test('unchanged visible ask depth is not counted repeatedly across polls',()=>{
 test('a $0.76 ask with 16 shares never fills the $0.45 limit',async()=>{
   const bot=makeBot();
   latchSignal(bot);
-  const order=openEntry(bot,{side:'DOWN',ask:0.76,askSize:16});
+  const order=openEntry(bot,{side:'UP',ask:0.76,askSize:16});
   bot.processStrategyEntry(START+999);
   assert.equal(order.status,'PENDING');
   assert.equal(bot.positions.length,0);
@@ -187,7 +225,7 @@ test('a $0.76 ask with 16 shares never fills the $0.45 limit',async()=>{
   assert.equal(order.filledShares,0);
   assert.equal(order.remainingShares,100);
   assert.equal(bot.positions.length,0);
-  assert.equal(bot.cash,10000);
+   assert.equal(bot.cash,20000);
   await bot.closePreviousWindows(START+WINDOW,START+WINDOW);
   assert.equal(order.status,'CANCELLED_WINDOW_END');
   assert.equal(order.remainingShares,0);
@@ -197,7 +235,7 @@ test('partial eligible ask depth stays partial when later asks exceed the limit'
   const bot=makeBot();
   latchSignal(bot);
   const order=openEntry(bot,{
-    side:'DOWN',ask:0.40,askSize:20,
+    side:'UP',ask:0.40,askSize:20,
     askLevels:[{price:0.40,size:20}],
   });
   assert.equal(order.status,'PARTIALLY_FILLED');
@@ -205,7 +243,7 @@ test('partial eligible ask depth stays partial when later asks exceed the limit'
   assert.equal(bot.positions[0].avgEntry,0.40);
   assert.equal(bot.orders.some(item=>item.kind==='TAKE_PROFIT'),false);
 
-  quote(bot,'DOWN',START+1000,{ask:0.46,askSize:500});
+  quote(bot,'UP',START+1000,{ask:0.46,askSize:500});
   bot.processStrategyEntry(START+1000);
   assert.equal(order.status,'PARTIALLY_FILLED');
   assert.equal(order.filledShares,20);
@@ -220,12 +258,12 @@ test('partial eligible ask depth stays partial when later asks exceed the limit'
 test('price moves never exit a position; filled shares wait for official resolution',async()=>{
   const bot=makeBot();
   latchSignal(bot);
-  openEntry(bot,{side:'DOWN',ask:0.45});
+  openEntry(bot,{side:'UP',ask:0.45});
   bot.processStrategyEntry(START+1000);
   const position=bot.positions[0];
-  quote(bot,'DOWN',START+2000,{bid:0.99,ask:1});
+  quote(bot,'UP',START+2000,{bid:0.99,ask:1});
   assert.equal(position.status,'OPEN');
-  quote(bot,'DOWN',START+3000,{bid:0.01,ask:0.02});
+  quote(bot,'UP',START+3000,{bid:0.01,ask:0.02});
   assert.equal(position.status,'OPEN');
   assert.equal(bot.orders.filter(item=>item.action==='SELL').length,0);
   assert.ok(position.estimatedMakerRebate>0);
