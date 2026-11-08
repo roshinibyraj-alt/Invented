@@ -67,7 +67,7 @@ test('dashboard shows only the BTC signal-limit paper strategy and removes the r
   assert.match(html,/Losing exits/);
   assert.match(html,/Break-even exits/);
   assert.match(html,/final 57 seconds/);
-  assert.match(html,/At window open, place one \$0\.45 limit buy for 500 shares/);
+  assert.match(html,/At window open, place one \$0\.45 limit buy for 100 shares/);
   assert.match(html,/asks below \$0\.45 are already present when submitted/);
   assert.match(html,/later fills are recorded at \$0\.45/);
   assert.match(html,/no timeout or assumed fill/);
