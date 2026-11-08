@@ -85,11 +85,11 @@
     document.querySelector('#ethStatus').textContent=w.slug?'ETH 5M':'WAITING';
     const signal=s.signal||strategy.entries?.signal||{};
     document.querySelector('#signal').textContent=signal.reason||'Waiting for the first qualifying BTC/ETH side.';
-    const progress=entry.open?Math.max(0,Math.min(100,(Number(entry.elapsedMs||0)/Number(entry.cutoffMs||180000))*100)):100;
+    const progress=entry.open?Math.max(0,Math.min(100,(Number(entry.elapsedMs||0)/Number(entry.cutoffMs||240000))*100)):100;
     document.querySelector('#entryProgress').style.width=progress+'%';
     document.querySelector('#entryTimer').textContent=entry.open
-      ?`Entry window open · ${entry.secondsRemaining}s until the final-two-minute cutoff · ${w.title||''}`
-      :`Entry window closed · no new buys during the final two minutes · ${w.title||''}`;
+      ?`Entry window open · ${entry.secondsRemaining}s until the final-minute cutoff · ${w.title||''}`
+      :`Entry window closed · no new buys during the final minute · ${w.title||''}`;
     document.querySelector('#winRate').textContent=`${Number(a.winRate||0).toFixed(1)}%`;
     document.querySelector('#winsLosses').textContent=`${a.wins??0} / ${a.losses??0}`;
     document.querySelector('#fees').textContent=usd(a.takerFees);

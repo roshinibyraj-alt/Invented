@@ -5,7 +5,7 @@ const WickBot = require('./wick-bot');
 const marketData = require('./wick-market-data');
 const { quoteFromBook, takerFeeFor, feeContext } = WickBot._test;
 
-const ENTRY_CUTOFF_MS = 3 * 60 * 1000;
+const ENTRY_CUTOFF_MS = 4 * 60 * 1000;
 const BTC_SIGNAL_MIN = 0.80;
 const ETH_ENTRY_MAX = 0.60;
 const TAKE_PROFIT_LIMIT = 0.99;
@@ -412,7 +412,7 @@ class CrossAssetBot extends WickBot {
       side: null,
       reason: withinEntryWindow
         ? `Waiting for BTC UP or DOWN at $0.80+ and the matching ETH side below $0.60. ${sideStatus('UP')} · ${sideStatus('DOWN')}.`
-        : 'New entries are allowed only during the first three minutes; the final two minutes are cutoff.',
+        : 'New entries are allowed only during the first four minutes; the final minute is cutoff.',
       ready: false,
     };
     const strategy = {
@@ -432,7 +432,7 @@ class CrossAssetBot extends WickBot {
           ? this.orders.find(order => order.id === this.entryOrderId)?.status || 'UNKNOWN'
           : 'NOT_PLACED',
         cutoffSecondsAfterOpen: ENTRY_CUTOFF_MS / 1000,
-        trigger: `During seconds 0–179, BTC same-side best ask ≥ $${BTC_SIGNAL_MIN.toFixed(2)} and ETH best ask < $${ETH_ENTRY_MAX.toFixed(2)}.`,
+        trigger: `During seconds 0–239, BTC same-side best ask ≥ $${BTC_SIGNAL_MIN.toFixed(2)} and ETH best ask < $${ETH_ENTRY_MAX.toFixed(2)}.`,
         fillPolicy: 'Immediate paper taker buy sweeps only visible ETH ask depth; any unfilled remainder is cancelled.',
       },
       exit: {
@@ -441,7 +441,7 @@ class CrossAssetBot extends WickBot {
         stopLoss: null,
         windowEnd: 'Any remaining ETH shares settle only after confirmed resolution of that exact ETH market.',
       },
-      timing: 'Watch the matching BTC and ETH 5-minute sides from window open through second 179; no new buy during the final two minutes.',
+      timing: 'Watch the matching BTC and ETH 5-minute sides from window open through second 239; no new buy during the final minute.',
       sizing: `${this.rules.sharesPerSide} ETH shares on the BTC-signalled side.`,
       trigger: `BTC side ask ≥ $${BTC_SIGNAL_MIN.toFixed(2)} while the matching ETH ask is below $${ETH_ENTRY_MAX.toFixed(2)}.`,
       executionNote: 'Paper market buys use visible ETH ask depth and the market’s taker fee schedule.',

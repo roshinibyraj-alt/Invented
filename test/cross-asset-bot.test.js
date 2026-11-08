@@ -135,16 +135,16 @@ test('BTC threshold is inclusive at $0.80, while ETH must be strictly below $0.6
   assert.equal(atEthBoundary.positions.length, 0);
 });
 
-test('entry is allowed through second 179 but blocked exactly at second 180', () => {
+test('entry is allowed through second 239 but blocked exactly at second 240', () => {
   const lastAllowed = fixture().bot;
-  assert.equal(qualify(lastAllowed, 'UP', START + 179999), true);
+  assert.equal(qualify(lastAllowed, 'UP', START + 239999), true);
 
   const cutoff = fixture().bot;
-  setQuote(cutoff, 'BTC', 'UP', { ask: 0.9, at: START + 180000 });
-  setQuote(cutoff, 'ETH', 'UP', { ask: 0.5, at: START + 180000 });
-  assert.equal(cutoff.processStrategyEntry(START + 180000), false);
+  setQuote(cutoff, 'BTC', 'UP', { ask: 0.9, at: START + 240000 });
+  setQuote(cutoff, 'ETH', 'UP', { ask: 0.5, at: START + 240000 });
+  assert.equal(cutoff.processStrategyEntry(START + 240000), false);
   assert.equal(cutoff.positions.length, 0);
-  assert.equal(CrossAssetBot.constants.ENTRY_CUTOFF_MS, 180000);
+  assert.equal(CrossAssetBot.constants.ENTRY_CUTOFF_MS, 240000);
 });
 
 test('taker market buy sweeps visible ETH asks, charges fees, and cancels unfilled remainder', () => {
@@ -256,7 +256,7 @@ test('ETH market mapping accepts both outcomes and rejects unsupported assets', 
   const data = require('../wick-market-data');
   assert.equal(typeof data.getEthMarket, 'function');
   assert.equal(typeof data.getBtcMarket, 'function');
-  assert.equal(CrossAssetBot.constants.ENTRY_CUTOFF_MS, 180000);
+  assert.equal(CrossAssetBot.constants.ENTRY_CUTOFF_MS, 240000);
   assert.equal(CrossAssetBot.constants.BTC_SIGNAL_MIN, 0.8);
   assert.equal(CrossAssetBot.constants.ETH_ENTRY_MAX, 0.6);
   await assert.rejects(data.getAssetMarket('SOL', START, WINDOW), /Unsupported asset/);
