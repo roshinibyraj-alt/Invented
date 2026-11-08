@@ -14,7 +14,7 @@ function quoteFromBook(book,updatedAt){
   const bestBid=bid?.price??null,bestAsk=ask?.price??null;
   return {status:bid||ask?'LIVE':'MISSING',bestBid,bidSize:bid?.size??0,
     bestAsk,askSize:ask?.size??0,mid:bestBid!=null&&bestAsk!=null?(bestBid+bestAsk)/2:null,
-    askLevels:asks,updatedAt,stale:false,error:null};
+    bidLevels:bids,askLevels:asks,updatedAt,stale:false,error:null};
 }
 function takerFeeFor(m,price,qty){
   if(m?.feesEnabled===false)return 0;
@@ -43,13 +43,11 @@ function clobQuoteWinner(up,down){
 }
 class WickBot{
   constructor({timeframe='5m',windowMs=cfg.WINDOW_MS_5M,capital=cfg.DEMO_CAPITAL,
-    strategyId='btc-5m-signal',strategyName='57-second BTC signal limit strategy',rules={}}={}){
+    strategyId='paper-strategy',strategyName='Paper strategy',rules={},marketData=md}={}){
     this.timeframe=timeframe;this.windowMs=windowMs;this.capital=capital;this.cash=capital;
+    this.marketData=marketData;
     this.strategyId=strategyId;this.strategyName=strategyName;
-    this.rules={entryLimitPrice:cfg.ENTRY_LIMIT_PRICE,
-      sharesPerSide:cfg.ENTRY_SHARES,
-      signalScanLeadMs:cfg.SIGNAL_SCAN_LEAD_MS,
-      signalCompareLeadMs:cfg.SIGNAL_COMPARE_LEAD_MS,...rules};
+    this.rules={sharesPerSide:cfg.ENTRY_SHARES,...rules};
     this.startedAt=Date.now();
     this.positions=[];this.events=[];this.status='starting';this.completedWindows=new Map();
     this.error=null;this.market=null;this.lastMarketAt=0;
@@ -97,7 +95,7 @@ class WickBot{
       await this.closePreviousWindows(currentStart,now);
        await this.resolvePendingPositions(now);
       if(!this.market||this.market.start!==start||now-this.lastMarketAt>cfg.MARKET_REFRESH_MS){
-        this.market=await md.getBtcMarket(start,this.windowMs);this.lastMarketAt=now;
+        this.market=await this.loadMarket(start,this.windowMs);this.lastMarketAt=now;
         if(!this.market){
           this.status='waiting_for_market';this.lastScanAt=now;
           if(!this.lastHeartbeat||now-this.lastHeartbeat>30000){this.lastHeartbeat=now;this.log('HEARTBEAT',{status:this.status,windowStart:start})}
@@ -118,6 +116,7 @@ class WickBot{
     }catch(e){this.status='blocked_or_error';this.error=e.message;
       if(this.lastError!==e.message||Date.now()-this.lastErrorAt>30000){this.lastError=e.message;this.lastErrorAt=Date.now();this.log('SCAN_ERROR',{note:e.message})}}
   }
+  loadMarket(start,windowMs){return this.marketData.getBtcMarket(start,windowMs)}
   getWindowStartToScan(_now,currentStart){return currentStart}
   async closePreviousWindows(currentStart,now=Date.now()){
     const previousOrders=this.orders.filter(order=>order.action==='BUY'&&
@@ -145,6 +144,10 @@ class WickBot{
       p.markStatus='PENDING_RESOLUTION';
       p.markValue=null;
       p.unrealizedPnl=null;
+      if(p.takeProfitOrder?.status==='RESTING'){
+        p.takeProfitOrder.status='CANCELLED_WINDOW_END';
+        p.takeProfitOrder.cancelledAt=now;
+      }
       this.log('PAPER_POSITION_AWAITING_POLYMARKET_RESOLUTION',{
         id:p.id,windowStart:p.windowStart,side:p.side,shares:p.shares,marketId:p.marketId,
         strategyOutcome:p.strategyOutcome});
@@ -162,8 +165,8 @@ class WickBot{
     for(const marketId of marketIds){
       this.resolutionAttempts.set(marketId,now);
       try{
-        const market=await md.getMarket(marketId);
-        const winner=md.resolvedWinner(market);
+        const market=await this.marketData.getMarket(marketId);
+        const winner=this.marketData.resolvedWinner(market);
         if(!winner)continue;
         for(const p of due.filter(item=>item.marketId===marketId)){
           if(p.status!=='PENDING_RESOLUTION')continue;
@@ -192,9 +195,6 @@ class WickBot{
     this.entryAttemptMissed=false;
     this.log('PAPER_STRATEGY_WINDOW_STARTED',{windowStart:start,timeframe:this.timeframe,
       strategyId:this.strategyId,strategyName:this.strategyName,windowMs:this.windowMs,
-      signalScanLeadMs:this.rules.signalScanLeadMs,
-      signalCompareLeadMs:this.rules.signalCompareLeadMs,
-      entryLimitPrice:this.rules.entryLimitPrice,
       shares:this.rules.sharesPerSide});
   }
   processStrategyEntry(){return false}
@@ -210,7 +210,7 @@ class WickBot{
   async refreshLiveQuotes(now){
     if(!this.market)return;
     const sides=['UP','DOWN'];
-    const results=await Promise.allSettled(sides.map(side=>md.getBook(this.market.tokens[side])));
+    const results=await Promise.allSettled(sides.map(side=>this.marketData.getBook(this.market.tokens[side])));
     sides.forEach((side,i)=>{
       const result=results[i];
       if(result.status==='fulfilled')this.liveQuotes[side]=quoteFromBook(result.value,now);
@@ -235,7 +235,12 @@ class WickBot{
     p.payout=won?1:0;
     p.proceeds=p.shares*p.payout;
     p.exitFees=0;
-    p.realizedPnl=p.proceeds-p.totalCost+(p.estimatedMakerRebate||0);
+    const totalCost=Number(p.initialTotalCost??p.totalCost)||0;
+    const totalFees=Number(p.initialFees??p.fees)||0;
+    const takeProfitProceeds=Number(p.takeProfitProceeds)||0;
+    p.resolutionProceeds=p.shares*p.payout;
+    p.proceeds=takeProfitProceeds+p.resolutionProceeds;
+    p.realizedPnl=p.proceeds-totalCost-totalFees+(p.estimatedMakerRebate||0);
     p.status='SETTLED_EXIT';
     p.settledAt=now;
     p.settlementBasis='POLYMARKET_RESOLUTION';
@@ -246,18 +251,19 @@ class WickBot{
     p.markValue=0;
     p.unrealizedPnl=0;
     p.markStatus='CLOSED';
-    this.cash+=p.proceeds;
+    this.cash+=p.resolutionProceeds;
     this.completedWindows.set(p.windowStart,{completedAt:now,reason:'POLYMARKET_RESOLUTION',winner});
     this.log(won?'PAPER_OFFICIAL_WIN':'PAPER_OFFICIAL_LOSS',{
       id:p.id,side:p.side,winner,shares:p.shares,payout:p.payout,proceeds:p.proceeds,
       pnl:p.realizedPnl,windowStart:p.windowStart});
-    this.recordStrategyOutcome(p,won?'WIN':'LOSS',now,'POLYMARKET_RESOLUTION');
+    const outcome=p.realizedPnl>0?'WIN':p.realizedPnl<0?'LOSS':'BREAK_EVEN';
+    this.recordStrategyOutcome(p,outcome,now,'POLYMARKET_RESOLUTION');
     return true;
   }
   snapshot(){
     const now=Date.now();
     const realizedPnl=this.positions.reduce((s,p)=>s+(p.realizedPnl||0),0);
-     const takerFees=this.positions.reduce((s,p)=>s+(p.fees||0)+(p.exitFees||0),0);
+     const takerFees=this.positions.reduce((s,p)=>s+(p.initialFees??p.fees??0)+(p.exitFees||0),0);
      const estimatedMakerRebate=this.positions.reduce((s,p)=>s+(p.estimatedMakerRebate||0),0);
     const exits=this.positions.filter(p=>p.status==='SETTLED_EXIT').length;
     const profitableExits=this.positions.filter(p=>p.status==='SETTLED_EXIT'&&(Number(p.realizedPnl)||0)>0).length;
@@ -299,7 +305,7 @@ class WickBot{
        if(p.status!=='OPEN'){
         p.markValue=0;p.unrealizedPnl=0;p.markStatus='CLOSED';continue;
       }
-      const mark=p.markBid==null?null:p.markBid*p.shares;p.markAgeMs=p.markUpdatedAt?Math.max(0,now-p.markUpdatedAt):null;p.markStatus=mark==null?'UNAVAILABLE':p.markAgeMs>15000?'STALE':'LIVE';const freshMark=mark!=null&&p.markAgeMs<=15000;p.markValue=freshMark?mark:null;p.unrealizedPnl=freshMark?mark-p.totalCost+(p.estimatedMakerRebate||0):null;if(!freshMark)unpricedOpenPositions++;else{markedValue+=mark;unrealizedPnl+=p.unrealizedPnl}
+       const mark=p.markBid==null?null:p.markBid*p.shares;p.markAgeMs=p.markUpdatedAt?Math.max(0,now-p.markUpdatedAt):null;p.markStatus=mark==null?'UNAVAILABLE':p.markAgeMs>15000?'STALE':'LIVE';const freshMark=mark!=null&&p.markAgeMs<=15000;p.markValue=freshMark?mark:null;p.unrealizedPnl=freshMark?mark-p.totalCost-(p.fees||0)+(p.estimatedMakerRebate||0):null;if(!freshMark)unpricedOpenPositions++;else{markedValue+=mark;unrealizedPnl+=p.unrealizedPnl}
     }
     const inventory={UP:{shares:0,cost:0,averageCost:null,positions:0},DOWN:{shares:0,cost:0,averageCost:null,positions:0}};
       for(const p of this.positions){
@@ -313,48 +319,33 @@ class WickBot{
        const sideInventory=inventory[side];
        sideInventory.averageCost=sideInventory.shares?sideInventory.cost/sideInventory.shares:null;
      }
-          const elapsedMs=this.market?now-this.market.start:0;
-          const currentEntryWindow=!!this.market&&
-            elapsedMs>=-this.rules.signalScanLeadMs&&elapsedMs<this.windowMs;
+           const elapsedMs=this.market?now-this.market.start:null;
+           const currentEntryWindow=!!this.market&&elapsedMs>=0&&elapsedMs<this.windowMs;
         const safeQuotes=this.captureQuotePair(now);
         const entryOrder=this.entryOrderId?this.orders.find(order=>order.id===this.entryOrderId):null;
         const orderStatus=entryOrder?.status||'NOT_PLACED';
-        const signalReason=this.entryTriggerReason||
-          (entryOrder?`$${this.rules.entryLimitPrice.toFixed(2)} limit buy ${orderStatus.toLowerCase()} on ${entryOrder.side}.`:
-            this.entryAttemptMissed?'The candle signal or entry order was missed for this window.':
-            this.entryTriggerLatched?'Candle signal ready; waiting for the window to open.':
-            currentEntryWindow?'Waiting for the final-segment BTC comparison.':
-            'Waiting for the final 10 seconds before the next window.');
+         const signalReason=this.entryTriggerReason||
+           (entryOrder?`${entryOrder.orderType||'Market'} buy ${orderStatus.toLowerCase()} on ${entryOrder.side}.`:
+             currentEntryWindow?'Waiting for the strategy entry conditions.':
+             'Waiting for the next market window.');
         return {now,mode:'DEMO ONLY',status:this.status,error:this.error,
              strategy:{id:this.strategyId,name:this.strategyName,timeframe:this.timeframe,
-               market:'Polymarket BTC 5-minute UP/DOWN',
+                market:`Polymarket ${this.market?.asset||'binary'} ${this.timeframe} UP/DOWN`,
               capital:this.capital,execution:'PAPER ONLY',
-              entries:{orderType:'LIMIT',
-                   sideSelection:'Final 57-second BTC move versus the previous closed one-minute candle: higher UP; otherwise DOWN.',
-                  sharesPerSide:this.rules.sharesPerSide,
-                  limitPrice:this.rules.entryLimitPrice,
-                   fillPolicy:'Better-price asks only if present at submission; later resting fills at limit price.',
-                  signalScanSecondsBeforeWindow:this.rules.signalScanLeadMs/1000,
-                  signalCompareSecondsBeforeWindow:this.rules.signalCompareLeadMs/1000,
-                  triggerPriceSource:'live BTC price versus previous closed one-minute candle close',
+               entries:{orderType:entryOrder?.orderType||'MARKET',
+                 sharesPerSide:this.rules.sharesPerSide,
                  triggerLatched:this.entryTriggerLatched,triggerAt:this.entryTriggerAt,
-                  triggerSide:this.entryTriggerSide,
-                  orderPlaced:!!entryOrder,orderStatus,filledShares:entryOrder?.filledShares||0,
-                  remainingShares:entryOrder?.remainingShares??this.rules.sharesPerSide,
-                  attemptMissed:this.entryAttemptMissed===true,
-                  signal:{side:this.entryTriggerSide,
-                    tradeSide:this.entryTriggerSide==='UP'?'DOWN':this.entryTriggerSide==='DOWN'?'UP':null,
-                    reason:signalReason,
-                    candle:this.entryTriggerCandle,ready:this.entryTriggerLatched}},
-                exit:{orderType:'POLYMARKET_RESOLUTION_ONLY',takeProfit:null,stopLoss:null,
-                 windowEnd:'Hold filled positions through the window; settle only from the original market’s confirmed Polymarket resolution.'},
-                 timing:'Compare BTC at T−3 seconds with the previous closed 1-minute candle; at window open, buy the opposite side of that signal.',
-                 sizing:`${this.rules.sharesPerSide} shares on the side opposite the signal at a $${this.rules.entryLimitPrice.toFixed(2)} limit.`,
-                 trigger:'At T−3s, compare BTC with the previous closed 1-minute candle close: higher is green/UP; equal or lower is red/DOWN. This represents the final 57 seconds.',
-                 fillPolicy:`At submission, fresh asks below $${this.rules.entryLimitPrice.toFixed(2)} may fill at their lower price. If the order rests first, later fills book at $${this.rules.entryLimitPrice.toFixed(2)}. Never above the limit.`,
-                  unfilled:`Only fresh, newly observed ask depth at or below $${this.rules.entryLimitPrice.toFixed(2)} can match. Asks already below the limit at submission may fill at that lower price; later fills of a resting order book at the limit price. No timeout fill is used; unmatched entry shares are cancelled at window end. Filled shares remain open until the original market’s official Polymarket resolution.`,
-                 fees:'Limit entry fills have no taker fee; estimated maker rebates are applied to entry fills only.',
-              execution:'PAPER ONLY'},
+                 triggerSide:this.entryTriggerSide,
+                 orderPlaced:!!entryOrder,orderStatus,filledShares:entryOrder?.filledShares||0,
+                 remainingShares:entryOrder?.remainingShares??this.rules.sharesPerSide,
+                 signal:{side:this.entryTriggerSide,tradeSide:this.entryTriggerSide,
+                   reason:signalReason,ready:this.entryTriggerLatched}},
+               exit:{orderType:'POLYMARKET_RESOLUTION_ONLY',takeProfit:null,stopLoss:null,
+                 windowEnd:'Unexited shares wait for confirmed resolution of their original market.'},
+               timing:'Follow the configured strategy timing for this market.',
+               sizing:`${this.rules.sharesPerSide} shares per entry.`,
+               trigger:'Waiting for the configured market conditions.',
+               execution:'PAPER ONLY'},
          account:{capital:this.capital,cash:this.cash,realizedPnl,unrealizedPnl,equity:this.cash+markedValue,takerFees,estimatedMakerRebate,
           totalTrades,settledTrades,wins,losses,profitableExits,losingExits,breakEvenExits,winRate:settledTrades?wins/settledTrades*100:0,markedValue,unpricedOpenPositions,
            openPositions:this.positions.filter(p=>['OPEN','PENDING_RESOLUTION'].includes(p.status)).length,
@@ -365,7 +356,7 @@ class WickBot{
        livePrices:{marketSlug:this.market?.slug||null,updatedAt:Math.max(this.liveQuotes.UP.updatedAt||0,this.liveQuotes.DOWN.updatedAt||0)||null,
         UP:safeQuotes.UP,DOWN:safeQuotes.DOWN},
          scanner:{timeframe:this.timeframe,lastScanAt:this.lastScanAt,
-             source:`Polymarket BTC ${this.timeframe} Gamma/CLOB order books`,
+              source:`Polymarket ${this.market?.asset||'market'} ${this.timeframe} Gamma/CLOB order books`,
                  marketResolution:'Every filled position waits for the official resolution of its original Polymarket market.'},
        inventory,positions:this.positions.slice(0,50),orders:this.orders.slice(0,100),events:this.events};
   }

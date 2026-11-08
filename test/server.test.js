@@ -4,89 +4,50 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const startServer = require('../server');
 
-test('state endpoint accepts the dashboard cache-buster query string', async (t) => {
-  const expected = { mode: 'DEMO', account: { capital: 1000 } };
+test('state endpoint returns the current strategy with no cache', async t => {
+  const expected = { mode: 'DEMO ONLY', strategy: { id: 'eth-5m-btc-confirmed' } };
   const server = startServer({ snapshot: () => expected }, 0);
-  await new Promise((resolve) => server.once('listening', resolve));
-  t.after(() => new Promise((resolve) => server.close(resolve)));
-  const response = await fetch('http://127.0.0.1:' + server.address().port + '/api/state?ts=123');
+  await new Promise(resolve => server.once('listening', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/api/state?ts=123`);
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), expected);
   assert.equal(response.headers.get('cache-control'), 'no-store');
 });
 
-test('unknown dashboard paths still return 404', async (t) => {
-  const server = startServer({ snapshot: () => ({}) }, 0);
-  await new Promise((resolve) => server.once('listening', resolve));
-  t.after(() => new Promise((resolve) => server.close(resolve)));
-  const response = await fetch('http://127.0.0.1:' + server.address().port + '/not-a-route');
-  assert.equal(response.status, 404);
-});
-
-test('health endpoint returns demo service status without exposing secrets', async (t) => {
+test('health endpoint reports the demo service without secrets', async t => {
   const server = startServer({ snapshot: () => ({ mode: 'DEMO ONLY', status: 'scanning', now: 123 }) }, 0);
-  await new Promise((resolve) => server.once('listening', resolve));
-  t.after(() => new Promise((resolve) => server.close(resolve)));
-  const response = await fetch('http://127.0.0.1:' + server.address().port + '/api/healthz');
+  await new Promise(resolve => server.once('listening', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/api/healthz`);
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { ok: true, mode: 'DEMO', status: 'scanning', now: 123 });
 });
 
-test('real-balance proxy returns the upstream account summary',async(t)=>{
-  const expected={status:'ready',collateral:125,positionValue:40,equity:165,positionCount:2};
-  const server=startServer({snapshot:()=>({})},0,async()=>{
-    return{ok:true,json:async()=>expected};
-  });
-  await new Promise(resolve=>server.once('listening',resolve));
-  t.after(()=>new Promise(resolve=>server.close(resolve)));
-  const response=await fetch(`http://127.0.0.1:${server.address().port}/api/real-balance`);
-  assert.equal(response.status,200);
-  assert.deepEqual(await response.json(),expected);
+test('dashboard shows the cross-asset rules and omits the retired strategy UI', async t => {
+  const server = startServer({ snapshot: () => ({}) }, 0);
+  await new Promise(resolve => server.once('listening', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/`);
+  const html = await response.text();
+  assert.equal(response.status, 200);
+  assert.match(html, /BTC → ETH Signal Bot/);
+  assert.match(html, /BTC trigger ≥ \$0\.80/);
+  assert.match(html, /ETH entry &lt; \$0\.60/);
+  assert.match(html, /100 shares · TP \$0\.99/);
+  assert.match(html, /final-two-minute cutoff/);
+  assert.match(html, /No stop loss/);
+  assert.match(html, /exact ETH market/);
+  assert.doesNotMatch(html, /BTC Strategy Lab/);
+  assert.doesNotMatch(html, /Against signal/);
+  assert.doesNotMatch(html, /57-second/);
+  assert.doesNotMatch(html, /Chainlink/);
 });
 
-test('dashboard shows both isolated BTC signal variants and their target rotation',async(t)=>{
-  const server=startServer({snapshot:()=>({})},0);
-  await new Promise(resolve=>server.once('listening',resolve));
-  t.after(()=>new Promise(resolve=>server.close(resolve)));
-  const response=await fetch(`http://127.0.0.1:${server.address().port}/`);
-  const html=await response.text();
-  assert.equal(response.status,200);
-  assert.match(html,/Highest consecutive strategy wins/);
-  assert.match(html,/Highest consecutive strategy losses/);
-  assert.match(html,/BTC Strategy Lab/);
-  assert.match(html,/Two independent BTC 5-minute paper versions · \$10,000 each/);
-  assert.match(html,/Signal performance comparison/);
-  assert.match(html,/Each version has its own \$10,000 account/);
-  assert.match(html,/Demo account overview/);
-  assert.match(html,/strategy-panels/);
-  assert.match(html,/Equity curve/);
-  assert.match(html,/id==='btc-5m-signal'/);
-  assert.match(html,/s\.strategies/);
-  assert.match(html,/equitySvg\(a\.equityCurve\)/);
-  assert.match(html,/strategyId/);
-  assert.match(html,/Taker fees paid/);
-  assert.match(html,/Profitable exits/);
-  assert.match(html,/Losing exits/);
-  assert.match(html,/Break-even exits/);
-  assert.match(html,/final 57 seconds/);
-  assert.match(html,/When its net realized profit reaches \$300/);
-  assert.match(html,/the opposite version starts at 200 shares/);
-  assert.match(html,/Independent equity curve/);
-  assert.match(html,/Recent resolved trades/);
-  assert.match(html,/original market’s official Polymarket resolution/);
-  assert.match(html,/equal or lower signals DOWN/);
-  assert.match(html,/the active version buys either the signal side or the opposite side/i);
-  assert.match(html,/takerFees/);
-  assert.match(html,/maxConsecutiveWins/);
-  assert.match(html,/maxConsecutiveLosses/);
-  assert.match(html,/official Polymarket resolution/);
-  assert.doesNotMatch(html,/prebuy-5m/);
-  assert.doesNotMatch(html,/trigger-5m/);
-  assert.doesNotMatch(html,/two independent strategies/);
-  assert.doesNotMatch(html,/300-share UP and DOWN limit buys/);
-  assert.doesNotMatch(html,/market-buys 500 shares/);
-  assert.doesNotMatch(html,/15m/);
-  assert.doesNotMatch(html,/1\.5×/);
-  assert.doesNotMatch(html,/Order activity/);
-  assert.doesNotMatch(html,/Recent bot events/);
+test('unknown dashboard paths still return 404', async t => {
+  const server = startServer({ snapshot: () => ({}) }, 0);
+  await new Promise(resolve => server.once('listening', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/not-a-route`);
+  assert.equal(response.status, 404);
 });

@@ -1,19 +1,18 @@
 'use strict';
 
-const SignalLimitBot=require('./signal-limit-bot');
-const {feed:chainlinkFeed}=require('./chainlink-feed');
+const CrossAssetBot=require('./cross-asset-bot');
 
 class MultiBot {
   constructor(){
     this.bots={
-      'btc-5m-signal':new SignalLimitBot(),
+      'eth-5m-btc-confirmed':new CrossAssetBot(),
     };
   }
-  start(){chainlinkFeed.start();for(const bot of Object.values(this.bots))bot.start()}
+  start(){for(const bot of Object.values(this.bots))bot.start()}
   stop(){for(const bot of Object.values(this.bots))bot.stop()}
   snapshot(){
     const strategies=Object.fromEntries(Object.entries(this.bots).map(([k,b])=>[k,b.snapshot()]));
-    const primary=strategies['btc-5m-signal'];
+    const primary=strategies['eth-5m-btc-confirmed'];
     const timeframes={'5m':primary};
     const states=Object.values(strategies),positions=states.flatMap(s=>s.positions)
       .sort((a,b)=>b.openedAt-a.openedAt),events=states.flatMap(s=>s.events).sort((a,b)=>b.ts-a.ts).slice(0,100);
@@ -40,7 +39,7 @@ class MultiBot {
     for(const point of equityCurve){peak=Math.max(peak,point.equity);maxDrawdown=Math.max(maxDrawdown,peak-point.equity);}
     return {...primary,now:Date.now(),status,timeframes,strategies,positions,events,
       error:states.find(s=>s.error)?.error||null,
-       strategy:{execution:'PAPER ONLY',timeframes:['5m'],strategyIds:Object.keys(strategies)},
+        strategy:{...primary.strategy,execution:'PAPER ONLY',timeframes:['5m'],strategyIds:Object.keys(strategies)},
       account:{capital,
         cash:states.reduce((n,s)=>n+s.account.cash,0),
         realizedPnl:states.reduce((n,s)=>n+s.account.realizedPnl,0),

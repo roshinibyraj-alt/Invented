@@ -1,15 +1,8 @@
-# Demo runbook
+# Paper strategy runbook
 
-The app runs one BTC 5-minute paper strategy and one $10,000 paper account.
-
-1. During the final 10 seconds before a window opens, the bot scans the upcoming BTC market.
-2. At T−3 seconds, it compares live BTC with the previous closed 1-minute candle close. The comparison represents the final 57 seconds: higher selects UP; equal or lower selects DOWN.
-3. At window open, it submits a simulated $0.45 limit buy for 100 shares on the side opposite the signal.
-4. The $0.45 buy cannot fill above its limit. Asks below $0.45 already present at submission may fill at their lower prices; if the order rests first, subsequent resting-order fills are recorded at $0.45. Count only newly observed depth, not the same unchanged book on every poll. There is no timeout fill. The remaining order stays pending and is cancelled at window end.
-5. No taker fee is charged in the paper model. Estimated maker rebates for entry and TP fills are credited to the account and included in P&L.
-6. Filled positions have no take-profit or stop-loss order.
-7. Positions remain open through window end and wait for official Polymarket resolution.
-
-Paper fills are simulated from visible order-book depth and are not confirmation of a real order or trade. Account history is process-local and clears on restart or redeployment.
-
-Run checks with `npm test`; start the app with `npm start`.
+1. Confirm both BTC and ETH 5-minute markets are available for the same window.
+2. During the first 180 seconds, a matching side triggers when BTC's best ask is at least $0.80 and ETH's best ask is below $0.60.
+3. The bot submits one 100-share paper market buy on the matching ETH side, filling only against the currently visible ETH ask depth. It cancels any market-order remainder.
+4. The TP is modeled at $0.99 and credited as $1/share, subject to newly observed bid depth at $0.99 or better. There is no stop loss.
+5. At the ETH window end, unexited shares wait for confirmed Polymarket resolution of that exact ETH market.
+6. The service is paper-only. A process restart clears its in-memory account and history.

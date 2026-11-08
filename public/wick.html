@@ -1,241 +1,111 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>BTC 5-Minute Paper Bot</title>
-<style>
-:root{color-scheme:dark;--bg:#080c14;--panel:#121a28;--line:#27364d;--muted:#92a1b7;--text:#eef4ff;--green:#34d399;--red:#fb7185;--gold:#fbbf24;--cyan:#67e8f9}
-.signal-reason{font-weight:900;text-align:right;max-width:72%}
-*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 15% 0,#1a2a47 0,transparent 45%),var(--bg);color:var(--text);font:14px system-ui,sans-serif}main{max-width:1100px;margin:auto;padding:20px}.head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:16px}.title{font-size:24px;font-weight:850}.muted,.sub{color:var(--muted)}.sub{margin-top:4px}.pill{border:1px solid #215844;background:#10281f;color:var(--green);padding:7px 12px;border-radius:99px;font-weight:800}.grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:11px}.card,.panel{background:linear-gradient(145deg,#151f30,#101723);border:1px solid var(--line);border-radius:15px;padding:15px}.label{font-size:10px;text-transform:uppercase;letter-spacing:.12em;color:var(--muted)}.value{font-size:22px;font-weight:800;margin-top:7px}.panel{margin-top:12px}.panel h2{font-size:16px;margin:0 0 12px}.cols{display:grid;grid-template-columns:1fr 1fr;gap:12px}.notice{margin:12px 0;padding:12px;border-left:3px solid var(--gold);background:#292313;color:#f7e4b2;border-radius:9px;line-height:1.5}.metric{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--line);gap:10px}.metric:last-child{border:0}.good{color:var(--green)}.bad{color:var(--red)}.gold{color:var(--gold)}.time{color:var(--muted);margin-right:7px}.empty{color:var(--muted);padding:12px 0}.err{color:var(--red);white-space:pre-wrap}.small{font-size:11px;line-height:1.5;color:var(--muted)}@media(max-width:700px){main{padding:13px}.grid{grid-template-columns:repeat(2,1fr)}.cols{grid-template-columns:1fr}.title{font-size:20px}}@media(max-width:430px){.head{align-items:flex-start;flex-direction:column}.value{font-size:19px}.card{padding:12px}}
-.price-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.side-card{padding:12px;border:1px solid var(--line);border-radius:12px;background:#0d1420}.side-title{font-weight:850;font-size:15px;margin-bottom:9px}.quote-row{display:flex;justify-content:space-between;gap:8px;padding:6px 0}.quote-row small{display:block;color:var(--muted);font-size:10px}.quote-price{font-size:17px;font-weight:800}.quote-status{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}.table-wrap{overflow-x:auto}table{width:100%;border-collapse:collapse;min-width:430px}th,td{text-align:right;padding:8px 6px;border-bottom:1px solid var(--line);font-size:12px}th{font-size:10px;color:var(--muted);text-transform:uppercase}th:first-child,td:first-child{text-align:left}.up-candle{color:var(--green)}.down-candle{color:var(--red)}
-  .chart-wrap{width:100%;margin:2px 0 8px;padding:8px;border:1px solid var(--line);border-radius:10px;background:#0b121d}.chart-wrap svg{display:block;width:100%;height:auto}.chart-grid{stroke:#28354a;stroke-width:1}.chart-label{fill:var(--muted);font:10px system-ui,sans-serif}.chart-up{stroke:var(--green);fill:var(--green)}.chart-down{stroke:var(--red);fill:var(--red)}.equity-line{fill:none;stroke:#67e8f9;stroke-width:2.5}.trade-times{display:block;margin-top:4px;line-height:1.45}
- .bot-card{border-top:3px solid var(--cyan)}.bot-card.tf15{border-top-color:#c084fc}.tf-label{color:var(--cyan);font-weight:900}.up-color{color:var(--green)}.down-color{color:var(--red)}.money-color{color:#60a5fa}.lockout{color:var(--gold);font-weight:900}.ready{color:var(--green);font-weight:900}.entry{display:flex;justify-content:space-between;gap:8px;padding:8px 0;border-bottom:1px solid var(--line)}.tiny{font-size:11px;color:var(--muted)}
- .inventory-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:12px}.inventory-card{background:linear-gradient(145deg,#151f30,#101723);border:1px solid var(--line);border-radius:15px;padding:17px}.inventory-card.up{border-top:3px solid var(--green)}.inventory-card.down{border-top:3px solid var(--red)}.inventory-count{font-size:26px;font-weight:850;margin:8px 0 11px}.inventory-meta{display:flex;justify-content:space-between;align-items:center;gap:10px;padding-top:9px;border-top:1px solid var(--line);color:var(--muted)}.inventory-meta b{color:var(--text);font-size:16px}.inventory-live{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:10px;padding-top:10px;border-top:1px solid var(--line)}.inventory-live-label{color:var(--muted);font-size:11px}.inventory-quote{font-weight:750}.inventory-quote-status{display:block;margin-top:3px;color:var(--muted);font-size:10px;text-align:right;text-transform:uppercase;letter-spacing:.06em}
- @media(max-width:430px){.inventory-grid{grid-template-columns:1fr}}
-  .download-button{display:inline-flex;align-items:center;padding:10px 14px;border:1px solid #2563eb;border-radius:9px;background:#15305c;color:#eaf2ff;text-decoration:none;font-weight:800}.download-button:hover{background:#1d4078}
-  </style>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#090d1c">
+  <title>BTC → ETH Paper Bot</title>
   <style>
-    .grid{grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.card{min-height:96px;box-shadow:0 8px 26px #0003}.card.primary{border-color:#3879c7;background:linear-gradient(145deg,#19355a,#111c2d)}.card.success{border-color:#23784b;background:linear-gradient(145deg,#153a2c,#111c2d)}.card.danger{border-color:#9d3848;background:linear-gradient(145deg,#3b1b2a,#111c2d)}.card.primary .value{color:#8ec5ff}.card.success .value{color:var(--green)}.card.danger .value{color:var(--red)}.metric-note{display:block;margin-top:6px;font-size:10px;color:var(--muted)}.windows{grid-template-columns:1fr}.bot-card{border-top:3px solid var(--cyan)}.subhead{margin:18px 0 4px;padding-top:14px;border-top:1px solid var(--line)}.section-note{margin:0 0 8px}.event{padding:7px 0;border-bottom:1px solid var(--line);font-size:12px}
-    @media(max-width:700px){.grid{grid-template-columns:repeat(2,1fr)}}
-  </style></head><body><main>
-  <style>
-    :root{--bg:#080b18;--panel:#11162b;--line:#303a62;--muted:#a5b4d2;--text:#f6f7ff;--green:#43f0ad;--red:#ff6688;--gold:#ffd166;--cyan:#48e6ff}
-    body{background:radial-gradient(ellipse at 8% -5%,#272b69 0,transparent 36%),radial-gradient(ellipse at 100% 12%,#4b214d 0,transparent 32%),linear-gradient(150deg,#090d1d,#0e1428 55%,#101022)}
-    main{max-width:1320px;padding:24px}.title{font-size:clamp(26px,4vw,38px);letter-spacing:-.04em;background:linear-gradient(90deg,#fff,#6cecff 55%,#c49bff);-webkit-background-clip:text;background-clip:text;color:transparent}
-    .head{padding:10px 3px 18px}.pill{border-color:#2a816e;background:linear-gradient(120deg,#103c38,#122a39);box-shadow:0 0 22px #2de9bd2b;color:#5fffd0}
-    .panel,.card,.inventory-card{background:linear-gradient(145deg,#171e39ef,#10162bee);border-color:#333d68;box-shadow:0 16px 45px #03061175}
-    .panel{padding:19px}.panel h2{font-size:18px;letter-spacing:-.02em}.overview-title{font-size:14px;text-transform:uppercase;letter-spacing:.12em;color:#91a5da;margin:20px 2px 10px}
-    .grid{gap:12px}.card{border-radius:16px}.card.primary{background:linear-gradient(135deg,#153e69,#211c51 75%);border-color:#4aa7ff}.card.success{background:linear-gradient(135deg,#124a46,#163326);border-color:#27c992}.card.danger{background:linear-gradient(135deg,#582139,#34192f);border-color:#fa5a89}
-    .value{font-size:25px;letter-spacing:-.03em}.label{font-weight:850;color:#afbbdc}.metric{border-color:#344066}.good{color:#51ffc2}.bad{color:#ff718d}
-    .strategy-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.strategy-card{position:relative;overflow:hidden;border:1px solid #3d4a77;border-radius:20px;padding:19px;background:linear-gradient(145deg,#182445,#12182c 65%,#20183a);box-shadow:0 18px 50px #02040c8a}
-    .strategy-card:before{content:"";position:absolute;inset:0 0 auto;height:4px;background:linear-gradient(90deg,#36d6ff,#756cff,#e070ff)}.strategy-card.signal:before{background:linear-gradient(90deg,#ffb84d,#ff6f91,#b279ff)}
-    .strategy-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:14px}.strategy-title{font-size:20px;font-weight:950;letter-spacing:-.03em}.strategy-tag{font-size:10px;font-weight:900;letter-spacing:.1em;text-transform:uppercase;color:#b9ceff;border:1px solid #526493;background:#252d4f;padding:6px 9px;border-radius:99px}
-    .strategy-metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px}.strategy-metric{min-width:0;border:1px solid #3a466f;border-radius:13px;padding:10px;background:linear-gradient(145deg,#202a49,#151b32)}.strategy-metric .label{font-size:9px}.strategy-metric .value{font-size:19px;margin-top:5px}
-    .strategy-rules{display:grid;grid-template-columns:1fr 1fr;gap:0 16px;margin-top:10px}.strategy-rules .metric{font-size:12px}.strategy-rules b{text-align:right;max-width:70%}
-    .strategy-quotes{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}.strategy-quote{padding:11px 13px;border-radius:14px;background:#10162a;border:1px solid #344168}.strategy-quote.up{border-left:4px solid #43f0ad}.strategy-quote.down{border-left:4px solid #ff6688}.strategy-quote-title{font-size:10px;letter-spacing:.12em;font-weight:900}.strategy-quote-price{font-size:25px;font-weight:950;letter-spacing:-.04em;margin-top:3px}.strategy-quote.up .strategy-quote-price{color:#43f0ad}.strategy-quote.down .strategy-quote-price{color:#ff6688}
-    .strategy-inventory{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}.strategy-inventory .inventory-card{padding:12px;border-radius:14px;background:#11172b}.strategy-inventory .inventory-count{font-size:22px}.strategy-chart{margin-top:12px;border:1px solid #333e66;border-radius:14px;background:#0e1426}.strategy-chart h3{font-size:11px;color:#b7c3e2;text-transform:uppercase;letter-spacing:.1em;padding:12px 12px 0;margin:0}
-    .strategy-description{font-size:11px;color:#b1bdd9;line-height:1.6;margin:12px 2px 0}.strategy-status{font-size:11px;font-weight:850;color:#53f0c1;margin-top:8px}
-    .chart-wrap{border:0;background:transparent}.equity-line{stroke:#5ceaff;stroke-width:3.5;filter:drop-shadow(0 0 5px #5ceaff88)}
-    .bot-card{border-top:3px solid #48e6ff}.inventory-card.up{border-top-color:#43f0ad}.inventory-card.down{border-top-color:#ff6688}
-    @media(max-width:850px){.strategy-grid{grid-template-columns:1fr}.strategy-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}
-    @media(max-width:500px){main{padding:13px}.strategy-card{padding:14px}.strategy-rules{grid-template-columns:1fr}.strategy-quotes{gap:7px}.strategy-quote-price{font-size:21px}.strategy-inventory{gap:7px}}
+    :root{color-scheme:dark;--bg:#090d1c;--panel:#121a30;--line:#29385f;--muted:#9eacd0;--text:#f5f7ff;--green:#4cf0ae;--red:#ff668c;--cyan:#63e4ff;--purple:#c39bff;--gold:#ffd166}
+    *{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 9% 0,#26326d 0,transparent 34%),radial-gradient(ellipse at 100% 12%,#52234a 0,transparent 31%),linear-gradient(150deg,#080b19,#0f1730 60%,#111124);color:var(--text);font:14px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}
+    main{max-width:1100px;margin:auto;padding:22px}.head{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin-bottom:17px}.title{font-size:clamp(26px,4vw,38px);font-weight:950;letter-spacing:-.045em;background:linear-gradient(90deg,#fff,var(--cyan),var(--purple));background-clip:text;color:transparent}.subtitle{color:var(--muted);margin-top:2px}.badge{display:inline-flex;align-items:center;gap:8px;padding:7px 11px;border:1px solid #2e8c70;background:#12382f;border-radius:99px;color:#70ffd0;font-size:11px;font-weight:900;letter-spacing:.08em;white-space:nowrap}
+    .pulse{width:8px;height:8px;background:var(--green);border-radius:50%;box-shadow:0 0 12px var(--green)}.panel,.card{border:1px solid var(--line);border-radius:17px;background:linear-gradient(145deg,#192342f2,#11172bee);box-shadow:0 14px 42px #02040c66}.panel{padding:17px;margin-top:13px}.panel h2{font-size:16px;margin:0 0 12px}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.card{padding:13px 15px;min-height:84px}.card.capital{border-color:#4783ed;background:linear-gradient(140deg,#183c68,#191c3e)}.card.pnl{border-color:#269b70;background:linear-gradient(140deg,#124839,#132a32)}.card.loss{border-color:#be4969;background:linear-gradient(140deg,#542037,#2a1934)}.label{text-transform:uppercase;letter-spacing:.1em;color:var(--muted);font-size:10px;font-weight:850}.value{font-size:22px;font-weight:950;letter-spacing:-.03em;margin-top:5px;font-variant-numeric:tabular-nums}.green{color:var(--green)}.red{color:var(--red)}.cyan{color:var(--cyan)}.muted{color:var(--muted)}.small{font-size:11px;color:var(--muted)}.markets{display:grid;grid-template-columns:1fr 1fr;gap:12px}.market{border:1px solid var(--line);border-radius:14px;padding:14px;background:#0d1428}.market.btc{border-top:3px solid var(--cyan)}.market.eth{border-top:3px solid var(--purple)}.market-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}.market-name{font-size:17px;font-weight:950}.side-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}.side{padding:11px;border-radius:11px;background:#151d36;border:1px solid #2c395b}.side.up{border-left:4px solid var(--green)}.side.down{border-left:4px solid var(--red)}.side-label{font-size:10px;font-weight:900;letter-spacing:.1em;color:var(--muted)}.side-price{font-size:26px;line-height:1.2;font-weight:950;margin-top:3px;font-variant-numeric:tabular-nums}.side.up .side-price{color:var(--green)}.side.down .side-price{color:var(--red)}.quote-meta{display:flex;justify-content:space-between;gap:8px;margin-top:6px;font-size:10px;color:var(--muted)}
+    .signal-box{border:1px solid #554c86;background:linear-gradient(100deg,#1c2447,#221d3c);border-radius:13px;padding:13px 15px;margin-top:12px}.signal-title{font-size:12px;font-weight:950;color:#d4c0ff;text-transform:uppercase;letter-spacing:.09em}.signal-text{margin-top:4px;font-weight:750}.rule-row{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:10px}.rule{border:1px solid var(--line);border-radius:10px;background:#10172c;padding:9px 10px}.rule b{display:block;font-size:13px}.rule span{display:block;color:var(--muted);font-size:10px;margin-top:2px}.bar{height:8px;border-radius:10px;background:#27324f;overflow:hidden;margin:8px 0}.bar i{display:block;height:100%;background:linear-gradient(90deg,var(--cyan),var(--purple),var(--green));transition:width .3s}.chart{border:1px solid #303b62;border-radius:12px;background:#0b1122;padding:8px}.chart svg{display:block;width:100%;height:auto}.chart-grid{stroke:#293552;stroke-width:1}.chart-line{fill:none;stroke:var(--cyan);stroke-width:3;filter:drop-shadow(0 0 5px #63e4ff77)}.chart-text{fill:var(--muted);font:11px system-ui,sans-serif}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;min-width:620px}th,td{padding:9px 8px;border-bottom:1px solid #283451;text-align:left;font-size:12px}th{color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.08em}tr:last-child td{border:0}.pill{display:inline-block;border-radius:99px;padding:3px 8px;background:#202c4b;color:#d7e2ff;font-size:10px;font-weight:850}.empty{padding:17px;color:var(--muted);text-align:center}.footer{margin:11px 2px;color:#7784a5;font-size:10px}.error{display:none;padding:10px 12px;color:#ffb5c3;border:1px solid #843e55;background:#351a2a;border-radius:10px;margin-top:10px}.error.show{display:block}
+    @media(max-width:700px){main{padding:14px}.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.markets{grid-template-columns:1fr}.rule-row{grid-template-columns:1fr}.head{align-items:flex-start}.value{font-size:20px}}
+    @media(max-width:420px){.badge{font-size:9px}.card{padding:11px}.side-price{font-size:22px}}
   </style>
-   <header class="head"><div><div class="title">BTC Strategy Lab</div><div class="sub">Two independent BTC 5-minute paper versions · $10,000 each</div></div><span class="pill" id="status">CONNECTING</span></header>
-  <section class="panel"><h2>Signal performance comparison</h2><p class="small section-note">Each version has its own $10,000 account, results, and equity curve. Only the active version opens new positions; the other remains paused.</p><div id="strategy-panels" class="strategy-grid"></div></section>
- <h2 class="overview-title">Demo account overview</h2>
- <section class="grid">
-  <div class="card primary"><div class="label">Demo equity</div><div class="value" id="equity">—</div></div>
- <div class="card"><div class="label">Cash</div><div class="value" id="cash">—</div></div>
- <div class="card"><div class="label">Realized P&amp;L</div><div class="value" id="realized">—</div></div>
- <div class="card"><div class="label">Floating P&amp;L</div><div class="value" id="unrealized">—</div></div>
- <div class="card primary"><div class="label">Total trades</div><div class="value" id="totalTrades">—</div><span class="metric-note" id="settledTrades">— settled</span></div>
- <div class="card danger"><div class="label">Taker fees paid</div><div class="value" id="takerFees">—</div><span class="metric-note">entry fills</span></div>
- <div class="card success"><div class="label">Estimated maker rebate</div><div class="value" id="makerRebate">—</div><span class="metric-note">credited paper estimate · entry fills only</span></div>
- <div class="card primary"><div class="label">Win rate</div><div class="value" id="winRate">—</div><span class="metric-note">wins ÷ settled trades</span></div>
- <div class="card success"><div class="label">Wins</div><div class="value" id="wins">—</div></div>
- <div class="card danger"><div class="label">Losses</div><div class="value" id="losses">—</div></div>
-  <div class="card success"><div class="label">Profitable exits</div><div class="value" id="profitableExits">—</div></div>
-  <div class="card danger"><div class="label">Losing exits</div><div class="value" id="losingExits">—</div></div>
-  <div class="card"><div class="label">Break-even exits</div><div class="value" id="breakEvenExits">—</div></div>
-  <div class="card success"><div class="label">Highest consecutive strategy wins</div><div class="value" id="maxConsecutiveWins">—</div><span class="metric-note">Official resolution win</span></div>
-  <div class="card danger"><div class="label">Highest consecutive strategy losses</div><div class="value" id="maxConsecutiveLosses">—</div><span class="metric-note">Official resolution loss</span></div>
- <div class="card"><div class="label">Open positions</div><div class="value" id="open">—</div></div>
- </section>
- <section class="panel">
-   <h2>Real Polymarket account · read-only</h2>
-   <div class="grid">
-     <div class="card"><div class="label">Real equity</div><div class="value" id="realEquity">—</div></div>
-     <div class="card"><div class="label">USDC collateral</div><div class="value" id="realCollateral">—</div></div>
-     <div class="card"><div class="label">Position value</div><div class="value" id="realPositionValue">—</div></div>
-   </div>
-   <div class="small" id="realBalanceStatus">Connecting to the live account balance…</div>
- </section>
- <section class="panel"><h2>Floating positions · live own-side marks</h2><p class="small section-note">Open shares are marked using their own-side best bid. Stale or missing marks are not shown as current unrealized P&amp;L.</p><div id="openPositions" class="table-wrap"></div><h2 class="subhead">Recent closed trades · realized P&amp;L</h2><div id="closedPositions" class="table-wrap"></div></section>
-       <p class="small">Paper-only BTC 5-minute comparison. At T−3 seconds, compare live BTC with the previous closed one-minute candle close; this represents the final 57 seconds. Higher signals UP; equal or lower signals DOWN. The active version buys either the signal side or the opposite side using the existing $0.45 limit-entry rules; filled positions remain open until the original market’s official Polymarket resolution. The signal version starts at 100 shares. When its net realized profit reaches $300 for that activation, it pauses and the opposite version starts at 200 shares. When that version reaches its own $300 target, its size resets to 100 and the signal version resumes at 100. Paper history resets on process restart.</p>
- <div class="err" id="error"></div>
+</head>
+<body><main>
+  <header class="head">
+    <div><div class="title">BTC → ETH Signal Bot</div><div class="subtitle">One 5-minute ETH paper strategy · BTC confirms direction</div></div>
+    <span class="badge"><i class="pulse"></i><span id="status">CONNECTING</span></span>
+  </header>
+  <section class="grid">
+    <div class="card capital"><div class="label">Paper capital</div><div class="value" id="capital">—</div></div>
+    <div class="card"><div class="label">Equity</div><div class="value" id="equity">—</div></div>
+    <div class="card"><div class="label">Cash</div><div class="value" id="cash">—</div></div>
+    <div class="card pnl"><div class="label">Net P&amp;L</div><div class="value" id="pnl">—</div></div>
+  </section>
+  <section class="panel">
+    <h2>Live market prices</h2>
+    <div class="markets">
+      <article class="market btc"><div class="market-head"><div class="market-name">BTC · signal</div><span class="pill" id="btcStatus">WAITING</span></div><div class="side-grid" id="btcQuotes"></div></article>
+      <article class="market eth"><div class="market-head"><div class="market-name">ETH · trade</div><span class="pill" id="ethStatus">WAITING</span></div><div class="side-grid" id="ethQuotes"></div></article>
+    </div>
+    <div class="signal-box"><div class="signal-title">Signal and entry window</div><div class="signal-text" id="signal">Waiting for fresh BTC and ETH prices…</div><div class="bar"><i id="entryProgress" style="width:0"></i></div><div class="small" id="entryTimer">—</div>
+      <div class="rule-row"><div class="rule"><b>BTC trigger ≥ $0.80</b><span>Same-side BTC best ask</span></div><div class="rule"><b>ETH entry &lt; $0.60</b><span>Matching ETH best ask</span></div><div class="rule"><b>100 shares · TP $0.99</b><span>TP credited as $1/share</span></div></div>
+    </div>
+  </section>
+  <section class="grid" style="margin-top:12px">
+    <div class="card"><div class="label">Win rate</div><div class="value cyan" id="winRate">—</div></div>
+    <div class="card"><div class="label">Wins / losses</div><div class="value" id="winsLosses">—</div></div>
+    <div class="card loss"><div class="label">Taker fees</div><div class="value" id="fees">—</div></div>
+    <div class="card"><div class="label">Open positions</div><div class="value" id="openPositions">—</div></div>
+  </section>
+  <section class="panel"><h2>Equity history</h2><div class="chart" id="equityChart"><div class="empty">Settled trades will appear here.</div></div></section>
+  <section class="panel"><h2>ETH positions</h2><div class="table-wrap" id="positions"><div class="empty">No positions yet.</div></div><div class="small" style="margin-top:9px">Paper-only simulation. Market buys use visible ETH ask depth and modeled taker fees. TP fills require fresh visible bid depth at $0.99 or higher; remaining shares wait for the exact ETH market’s confirmed resolution. No stop loss.</div></section>
+  <div class="error" id="error"></div>
+  <div class="footer">No live orders are sent. Paper account history resets if the service restarts.</div>
 </main>
 <script>
-const esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
- const usd=x=>'$'+Number(x||0).toFixed(2),fmt=x=>Number.isFinite(Number(x))?Number(x).toFixed(3):'—',sharesFmt=x=>Number(x||0).toLocaleString(undefined,{maximumFractionDigits:3}),when=x=>x?new Date(x).toLocaleTimeString():'—',timestamp=x=>Number(x)>0?new Date(Number(x)).toLocaleString([],{month:'short',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',timeZoneName:'short'}):'—';
-const px=x=>x==null?'—':'$'+Number(x).toFixed(3),btc=x=>x==null?'—':'$'+Number(x).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}),pct=x=>`${Number(x||0)>=0?'+':''}${Number(x||0).toFixed(3)}%`;
-function metric(k,v){return `<div class="metric"><span class="muted">${esc(k)}</span><b>${esc(v)}</b></div>`}
-   function settlementLabel(p){if(p.settlementBasis==='POLYMARKET_RESOLUTION')return 'Official Polymarket resolution';if(p.status==='PENDING_RESOLUTION')return 'Awaiting official resolution';if(p.status==='OPEN')return 'Open · held for resolution';return 'Paper settlement'}
-let countdownState=null;
-function paintCountdown(){
-  if(!countdownState)return;
-  const {serverNow,receivedAt,start,intervalMs,windowMs}=countdownState;
-  const now=serverNow+Date.now()-receivedAt,elapsed=now-start;
-  let label='Waiting';
-  if(Number.isFinite(start)&&start>0&&intervalMs>0){
-    if(elapsed>=windowMs)label='Window ended';
-    else{
-      const nextAt=start+(Math.floor(Math.max(0,elapsed)/intervalMs)+1)*intervalMs;
-      const seconds=Math.max(0,Math.ceil((nextAt-now)/1000));
-      label=`${String(Math.floor(seconds/60)).padStart(2,'0')}:${String(seconds%60).padStart(2,'0')}`;
+  const esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const usd=x=>'$'+Number(x||0).toFixed(2);
+  const price=x=>x==null?'—':'$'+Number(x).toFixed(3);
+  const shares=x=>Number(x||0).toLocaleString(undefined,{maximumFractionDigits:2});
+  const stamp=x=>x?new Date(x).toLocaleTimeString():'—';
+  function quoteCard(side,q){
+    const active=q?.status==='LIVE'&&!q?.stale;
+    return `<div class="side ${side.toLowerCase()}"><div class="side-label">${side} · best ask</div><div class="side-price">${price(q?.bestAsk)}</div><div class="quote-meta"><span>Best bid ${price(q?.bestBid)}</span><span>${active?'LIVE':'STALE'}</span></div></div>`;
+  }
+  function equitySvg(points){
+    const valid=Array.isArray(points)?points.filter(p=>Number.isFinite(Number(p.equity))):[];
+    if(valid.length<2)return '<div class="empty">Settled trades will appear here.</div>';
+    const w=900,h=220,pad=28,vals=valid.map(p=>Number(p.equity)),min=Math.min(...vals),max=Math.max(...vals),span=max-min||1;
+    const coords=vals.map((v,i)=>`${pad+i*(w-pad*2)/(vals.length-1)},${h-pad-(v-min)*(h-pad*2)/span}`).join(' ');
+    return `<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="Paper account equity history"><line class="chart-grid" x1="${pad}" y1="${pad}" x2="${w-pad}" y2="${pad}"/><line class="chart-grid" x1="${pad}" y1="${h/2}" x2="${w-pad}" y2="${h/2}"/><line class="chart-grid" x1="${pad}" y1="${h-pad}" x2="${w-pad}" y2="${h-pad}"/><polyline class="chart-line" points="${coords}"/><text class="chart-text" x="${pad}" y="18">${usd(max)}</text><text class="chart-text" x="${pad}" y="${h-5}">${usd(min)}</text><text class="chart-text" x="${w-pad}" y="${h-5}" text-anchor="end">${valid.length-1} settlements</text></svg>`;
+  }
+  function positionTable(items){
+    if(!items.length)return '<div class="empty">No positions yet.</div>';
+    const rows=items.map(p=>{
+      const state=p.status==='OPEN'?'OPEN':p.status==='PENDING_RESOLUTION'?'AWAITING RESOLUTION':p.status==='SETTLED_EXIT'?(p.exitType==='TAKE_PROFIT'?'TAKE PROFIT':'SETTLED'):p.status;
+      return `<tr><td><b class="${p.side==='UP'?'green':'red'}">${esc(p.side)}</b></td><td>${shares(p.shares||p.initialShares)} / ${shares(p.initialShares)}</td><td>${price(p.avgEntry)}</td><td>${price(p.takeProfitOrder?.limitPrice||.99)}</td><td><span class="pill">${esc(state)}</span></td><td>${esc(p.resolutionWinner||p.exitReason||'—')}</td><td>${usd(p.realizedPnl)}</td><td>${esc(p.slug||'')}</td></tr>`;
+    }).join('');
+    return `<table><thead><tr><th>Side</th><th>Shares</th><th>Avg entry</th><th>TP</th><th>Status</th><th>Exit / result</th><th>Net P&amp;L</th><th>ETH window</th></tr></thead><tbody>${rows}</tbody></table>`;
+  }
+  function render(s){
+    const a=s.account||{},btc=s.btcPrices||{},eth=s.livePrices||{},w=s.window||{},strategy=s.strategy||{},entry=s.entryWindow||{};
+    document.querySelector('#status').textContent=`${String(s.status||'waiting').replaceAll('_',' ')} · ${s.mode||'PAPER'}`.toUpperCase();
+    document.querySelector('#capital').textContent=usd(a.capital);
+    document.querySelector('#equity').textContent=usd(a.equity);
+    document.querySelector('#cash').textContent=usd(a.cash);
+    const pnl=document.querySelector('#pnl');pnl.textContent=usd(a.realizedPnl);pnl.className='value '+(Number(a.realizedPnl)>=0?'green':'red');
+    document.querySelector('#btcQuotes').innerHTML=['UP','DOWN'].map(side=>quoteCard(side,btc[side])).join('');
+    document.querySelector('#ethQuotes').innerHTML=['UP','DOWN'].map(side=>quoteCard(side,eth[side])).join('');
+    document.querySelector('#btcStatus').textContent=btc.marketSlug?'BTC 5M':'WAITING';
+    document.querySelector('#ethStatus').textContent=w.slug?'ETH 5M':'WAITING';
+    const signal=s.signal||strategy.entries?.signal||{};
+    document.querySelector('#signal').textContent=signal.reason||'Waiting for the first qualifying BTC/ETH side.';
+    const progress=entry.open?Math.max(0,Math.min(100,(Number(entry.elapsedMs||0)/Number(entry.cutoffMs||180000))*100)):100;
+    document.querySelector('#entryProgress').style.width=progress+'%';
+    document.querySelector('#entryTimer').textContent=entry.open
+      ?`Entry window open · ${entry.secondsRemaining}s until the final-two-minute cutoff · ${w.title||''}`
+      :`Entry window closed · no new buys during the final two minutes · ${w.title||''}`;
+    document.querySelector('#winRate').textContent=`${Number(a.winRate||0).toFixed(1)}%`;
+    document.querySelector('#winsLosses').textContent=`${a.wins??0} / ${a.losses??0}`;
+    document.querySelector('#fees').textContent=usd(a.takerFees);
+    document.querySelector('#openPositions').textContent=a.openPositions??0;
+    document.querySelector('#equityChart').innerHTML=equitySvg(a.equityCurve);
+    document.querySelector('#positions').innerHTML=positionTable(Array.isArray(s.positions)?s.positions:[]);
+  }
+  async function refresh(){
+    try{
+      const response=await fetch('/api/state?ts='+Date.now(),{cache:'no-store'});
+      if(!response.ok)throw new Error('State request failed: '+response.status);
+      render(await response.json());
+      const error=document.querySelector('#error');error.textContent='';error.classList.remove('show');
+    }catch(e){
+      const error=document.querySelector('#error');error.textContent=e?.message||String(e);error.classList.add('show');
     }
   }
-  for(const side of ['UP','DOWN']){
-    const node=document.querySelector(`#countdown-${side}`);
-    if(node)node.textContent=label;
-  }
-}
-setInterval(paintCountdown,250);
- function positionTable(positions,open){
-   if(!positions.length)return `<div class="empty">${open?'No open positions are floating right now.':'No closed trades yet.'}</div>`;
-    const headers=open?['Strategy / window','Side','Shares','Avg entry','Fees / rebate est.','Strategy result','Own bid · value','Unrealized P&L','Mark status']:['Strategy / window','Side','Shares','Avg entry','Fees / rebate est.','Strategy result','Exit','Proceeds','Realized P&L','Closed'];
-   const rows=positions.map(p=>{
-     const fresh=p.markStatus==='LIVE'&&p.markBid!=null&&p.markValue!=null;
-     const common=`<td>${esc(p.strategyName||p.strategyId||'Strategy')} · ${esc(p.slug||'')}</td><td class="${p.side==='UP'?'good':'bad'}">${esc(p.side)}${p.signalSide?` <span class="muted">(signal ${esc(p.signalSide)})</span>`:''}</td><td>${sharesFmt(p.shares)}</td><td>${px(p.avgEntry)}</td>`;
-       const strategyResult=p.strategyOutcome==='WIN'?'WIN · resolution':p.strategyOutcome==='LOSS'?'LOSS · resolution':p.status==='PENDING_RESOLUTION'?'Awaiting resolution':'Pending';
-       const feeAndRebate=`${usd(Number(p.fees||0)+Number(p.exitFees||0))} / ${usd(p.estimatedMakerRebate)}`;
-       if(open)return `<tr>${common}<td>${feeAndRebate}</td><td>${esc(strategyResult)}</td><td>${fresh?`${px(p.markBid)} · ${usd(p.markValue)}`:'—'}</td><td>${fresh?usd(p.unrealizedPnl):'—'}</td><td>${esc(fresh?'LIVE':p.markStatus||'UNAVAILABLE')}</td></tr>`;
-       const exit=p.settlementBasis==='POLYMARKET_RESOLUTION'?`Resolution · ${esc(p.resolutionWinner||'result')}`:px(p.exitBid);
-        return `<tr>${common}<td>${feeAndRebate}</td><td>${esc(strategyResult)}</td><td>${exit}</td><td>${p.proceeds==null?'—':usd(p.proceeds)}</td><td class="${Number(p.realizedPnl)>=0?'good':'bad'}">${p.realizedPnl==null?'—':usd(p.realizedPnl)}</td><td>${timestamp(p.settledAt)}</td></tr>`;
-   }).join('');
-   return `<table><thead><tr>${headers.map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table>`;
- }
-function equitySvg(points){if(!Array.isArray(points)||points.length<2)return '<div class="empty">Settled trades will appear here.</div>';const vals=points.map(p=>Number(p.equity)).filter(Number.isFinite);if(vals.length<2)return '<div class="empty">Settled trades will appear here.</div>';const w=900,h=220,pad=28,min=Math.min(...vals),max=Math.max(...vals),span=max-min||1,coords=vals.map((v,i)=>`${pad+i*(w-pad*2)/(vals.length-1)},${h-pad-(v-min)*(h-pad*2)/span}`).join(' ');return `<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="Settled account equity over time"><line class="chart-grid" x1="${pad}" y1="${pad}" x2="${w-pad}" y2="${pad}"/><line class="chart-grid" x1="${pad}" y1="${h/2}" x2="${w-pad}" y2="${h/2}"/><line class="chart-grid" x1="${pad}" y1="${h-pad}" x2="${w-pad}" y2="${h-pad}"/><polyline class="equity-line" points="${coords}"/><text class="chart-label" x="${pad}" y="16">${usd(max)}</text><text class="chart-label" x="${pad}" y="${h-5}">${usd(min)}</text><text class="chart-label" x="${w-pad}" y="${h-5}" text-anchor="end">${vals.length-1} settled trades</text></svg>`}
- function variantPanel(v){
-   const active=v.active===true,sideMode=v.mode==='SIGNAL'?'With signal':'Against signal';
-   const progress=Number(v.cycleProfit)||0,target=Number(v.targetProfit)||300;
-   const recent=(v.positions||[]).filter(p=>p.status==='SETTLED_EXIT').slice(0,5);
-   const recentRows=recent.length?recent.map(p=>`<div class="metric"><span>${esc(p.side)} · ${esc(p.slug||'window')}</span><b class="${Number(p.realizedPnl)>=0?'good':'bad'}">${esc(p.strategyOutcome||'SETTLED')} · ${usd(p.realizedPnl)}</b></div>`).join(''):'<div class="empty">No resolved trades for this version yet.</div>';
-   const metrics=[
-     ['Capital',usd(v.startingCapital)],['Equity',usd(v.equity)],['Cash',usd(v.cash)],
-     ['Realized P&L',usd(v.realizedPnl)],['Win rate',`${Number(v.winRate||0).toFixed(1)}%`],
-     ['Wins / losses',`${v.wins??0} / ${v.losses??0}`],
-     ['Settled / total',`${v.settledTrades??0} / ${v.totalTrades??0}`],
-     ['Open positions',v.openPositions??0],
-   ];
-   return `<article class="strategy-card ${active?'signal':''}" data-testid="variant-${esc(v.id)}">
-     <div class="strategy-head"><div><div class="strategy-title">${esc(v.name||sideMode)}</div>
-       <div class="strategy-status">${active?'ACTIVE · taking new entries':'PAUSED · existing positions still resolve'} · cycle ${Number(v.cycleNumber)||0}</div></div>
-       <span class="strategy-tag">${active?'ACTIVE':'PAUSED'}</span></div>
-     <div class="strategy-metrics">${metrics.map(([label,value])=>`<div class="strategy-metric"><div class="label">${esc(label)}</div><div class="value">${esc(value)}</div></div>`).join('')}</div>
-     <div class="strategy-rules">
-       <div class="metric"><span>Signal handling</span><b>${esc(sideMode)}</b></div>
-       <div class="metric"><span>Current size</span><b>${sharesFmt(v.shareSize)} shares</b></div>
-       <div class="metric"><span>Cycle target</span><b>${usd(progress)} / ${usd(target)}</b></div>
-       <div class="metric"><span>Remaining</span><b>${usd(v.remainingToTarget)}</b></div>
-     </div>
-     <div class="strategy-chart"><h3>Independent equity curve</h3><div class="chart-wrap">${equitySvg(v.equityCurve)}</div></div>
-     <div class="strategy-chart"><h3>Recent resolved trades</h3><div style="padding:0 12px 8px">${recentRows}</div></div>
-   </article>`;
- }
- function strategyPanel(id,t){
-   if(t.variants)return Object.values(t.variants).map(variantPanel).join('');
-  const a=t.account||{},s=t.strategy||{},w=t.window||{},entry=s.entries||{},exit=s.exit||{};
-  const q=t.livePrices||{},inv=t.inventory||{},isSignal=id==='btc-5m-signal';
-  const timeToOpen=w.start?Math.ceil((Number(w.start)-Date.now())/1000):null;
-  const windowLabel=timeToOpen>0?`Opens in ${timeToOpen}s`:`${Math.max(0,Math.ceil((Number(w.end||0)-Date.now())/1000))}s left`;
-  const signal=entry.signal?.side
-    ?`Signal ${entry.signal.side} → trade ${entry.signal.tradeSide||'the opposite side'}. ${entry.signal.reason||''}`
-    :entry.signal?.reason||'Waiting for market data';
-  const inventoryCard=(side,item)=>{
-    const shares=Number(item?.shares)||0;
-    return `<div class="inventory-card ${side.toLowerCase()}">
-      <div class="side-title ${side==='UP'?'up-color':'down-color'}">${side} inventory</div>
-      <div class="inventory-count">${sharesFmt(shares)} shares</div>
-      <div class="inventory-meta"><span>Average cost</span><b>${shares?usd(item.averageCost):'—'}</b></div>
-      <div class="inventory-meta"><span>Cost basis</span><b>${usd(item?.cost)}</b></div>
-    </div>`;
-  };
-  const metrics=[
-    ['Demo capital',usd(a.capital)],['Equity',usd(a.equity)],
-    ['Cash',usd(a.cash)],['Realized P&L',usd(a.realizedPnl)],
-    ['Win rate',`${Number(a.winRate||0).toFixed(1)}%`],
-    ['Wins / losses',`${a.wins??0} / ${a.losses??0}`],
-    ['Trades settled',`${a.settledTrades??0} / ${a.totalTrades??0}`],
-    ['Open positions',a.openPositions??0],
-  ];
-  const entrySize=`${entry.sharesPerSide||100} shares at ${px(entry.limitPrice||0.45)} on the side opposite the signal`;
-  const takeProfit=`${px(exit.initialTakeProfitPrice||0.99)} limit sell after entry fill; counts as $1/share; no stop loss`;
-  return `<article class="strategy-card ${isSignal?'signal':''}" data-testid="card-strategy-${esc(id)}">
-    <div class="strategy-head"><div><div class="strategy-title">${esc(s.name||id)}</div>
-      <div class="strategy-status">${esc(String(t.status||'waiting').replaceAll('_',' '))} · ${esc(windowLabel)}</div></div>
-      <span class="strategy-tag">Single paper strategy</span></div>
-    <div class="strategy-metrics">${metrics.map(([label,value])=>`<div class="strategy-metric"><div class="label">${esc(label)}</div><div class="value">${esc(value)}</div></div>`).join('')}</div>
-    <div class="strategy-chart"><h3>Equity curve</h3><div class="chart-wrap">${equitySvg(a.equityCurve)}</div></div>
-    <div class="strategy-rules">
-      <div class="metric"><span>Entry timing</span><b>${esc(s.timing||'—')}</b></div>
-      <div class="metric"><span>Entry size</span><b>${esc(entrySize)}</b></div>
-      <div class="metric"><span>Limit order</span><b>$0.45 max · ${esc(entry.orderStatus||'NOT_PLACED')} · lower price only at submission</b></div>
-      <div class="metric"><span>Signal → trade</span><b>${esc(s.trigger||'—')}</b></div>
-       <div class="metric"><span>Exit rule</span><b>Hold filled positions; settle only on original-market Polymarket resolution. No TP or SL.</b></div>
-    </div>
-    <div class="strategy-quotes">
-      <div class="strategy-quote up"><div class="strategy-quote-title">UP · best ask</div><div class="strategy-quote-price">${px(q.UP?.bestAsk)}</div></div>
-      <div class="strategy-quote down"><div class="strategy-quote-title">DOWN · best ask</div><div class="strategy-quote-price">${px(q.DOWN?.bestAsk)}</div></div>
-    </div>
-    <div class="strategy-inventory">${inventoryCard('UP',inv.UP)}${inventoryCard('DOWN',inv.DOWN)}</div>
-    <p class="strategy-description">${esc(signal)}${w.slug?` · ${esc(w.slug)}`:''}</p>
-  </article>`;
-}
- async function refresh(){try{
-   const r=await fetch('/api/state?ts='+Date.now(),{cache:'no-store'});
-   if(!r.ok)throw Error('State request failed: '+r.status);
-   const s=await r.json(),a=s.account||{},t=s.timeframes?.['5m']||s;
-   document.querySelector('#status').textContent=String(s.status||'unknown').replaceAll('_',' ').toUpperCase();
-   document.querySelector('#equity').textContent=usd(a.equity);
-   document.querySelector('#cash').textContent=usd(a.cash);
-   const realized=document.querySelector('#realized'),unrealized=document.querySelector('#unrealized');
-   realized.textContent=usd(a.realizedPnl);realized.className='value '+(Number(a.realizedPnl)>=0?'good':'bad');
-   unrealized.textContent=usd(a.unrealizedPnl)+(a.unpricedOpenPositions?` · ${a.unpricedOpenPositions} unpriced`:'');
-   unrealized.className='value '+(Number(a.unrealizedPnl)>=0?'good':'bad');
-   document.querySelector('#open').textContent=a.openPositions??0;
-   document.querySelector('#totalTrades').textContent=a.totalTrades??0;
-    document.querySelector('#makerRebate').textContent=usd(a.estimatedMakerRebate);
-    document.querySelector('#takerFees').textContent=usd(a.takerFees);
-   document.querySelector('#settledTrades').textContent=`${a.settledTrades??0} settled · ${a.openPositions??0} open`;
-   document.querySelector('#winRate').textContent=`${Number(a.winRate||0).toFixed(1)}%`;
-   document.querySelector('#wins').textContent=a.wins??0;
-   document.querySelector('#losses').textContent=a.losses??0;
-    document.querySelector('#profitableExits').textContent=a.profitableExits??0;
-    document.querySelector('#losingExits').textContent=a.losingExits??0;
-    document.querySelector('#breakEvenExits').textContent=a.breakEvenExits??0;
-    document.querySelector('#maxConsecutiveWins').textContent=a.maxConsecutiveWins??0;
-    document.querySelector('#maxConsecutiveLosses').textContent=a.maxConsecutiveLosses??0;
-    const strategyStates=s.strategies||{'btc-5m-signal':t};
-    document.querySelector('#strategy-panels').innerHTML=Object.entries(strategyStates)
-      .map(([id,state])=>strategyPanel(id,state)).join('');
-   const positions=Array.isArray(s.positions)?s.positions:[];
-    const openPositions=positions.filter(p=>['OPEN','PENDING_CLOB_RESULT','PENDING_RESOLUTION'].includes(p.status));
-   const closedPositions=positions.filter(p=>['SETTLED_EXIT','SETTLED_WIN','SETTLED_LOSS'].includes(p.status))
-     .sort((x,y)=>(Number(y.settledAt)||0)-(Number(x.settledAt)||0)).slice(0,30);
-   document.querySelector('#openPositions').innerHTML=positionTable(openPositions,true);
-   document.querySelector('#closedPositions').innerHTML=positionTable(closedPositions,false);
-   document.querySelector('#error').textContent=s.error||'';
- }catch(e){document.querySelector('#error').textContent='Dashboard data unavailable: '+e.message}}
-async function refreshRealBalance(){
-  try{
-    const response=await fetch('/api/real-balance?ts='+Date.now(),{cache:'no-store'});
-    const data=await response.json();
-    const ready=data.status==='ready';
-    document.querySelector('#realEquity').textContent=ready?usd(data.equity):'—';
-    document.querySelector('#realCollateral').textContent=ready?usd(data.collateral):'—';
-    document.querySelector('#realPositionValue').textContent=ready?usd(data.positionValue):'—';
-    document.querySelector('#realBalanceStatus').textContent=ready
-      ?`Live balance updated ${when(data.asOf)} · ${Number(data.positionCount||0)} positions · ${data.tradingEnabled?'entry orders enabled':'entry orders paused'}`
-      :`Real balance ${String(data.status||'unavailable').replaceAll('_',' ')}${data.error?`: ${data.error}`:''}`;
-  }catch(e){document.querySelector('#realBalanceStatus').textContent='Real balance unavailable'}
-}
-refresh();setInterval(refresh,2000);refreshRealBalance();setInterval(refreshRealBalance,15000);
+  refresh();setInterval(refresh,1000);
 </script></body></html>

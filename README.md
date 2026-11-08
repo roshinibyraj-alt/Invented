@@ -1,28 +1,23 @@
-# Polymarket BTC 5-Minute Signal Paper Bot
+# BTC-confirmed ETH 5-minute paper bot
 
-A single BTC 5-minute paper strategy with a $10,000 demo account. It sends no live orders and stores no wallet credentials.
+This repository runs a single paper-only strategy for Polymarket ETH Up/Down 5-minute markets. BTC Up/Down prices provide the signal; the bot buys the corresponding ETH side. It never submits live orders.
 
-## Signal and entry
+## Entry strategy
 
-- During the final 10 seconds before a window opens, scan the upcoming market and candle feed.
-- At T−3 seconds, compare live BTC with the previous completed one-minute candle close. This uses the final 57 seconds of the ending window: higher means UP; equal or lower means DOWN.
-- At the first bot poll at or just after window open (500ms polling), place one $0.45 limit buy for 100 shares on the side opposite the signal.
-- A $0.45 limit buy never fills above $0.45. If fresh asks below $0.45 are already available at submission, the immediate marketable fill may use the lower ask price. If the order rests first, later fills are booked at $0.45.
-- Fill no more than newly observed ask depth; unchanged displayed depth is not reused across polling cycles. The paper model charges no taker fee and credits an estimated maker rebate.
-- There is no timeout fill or assumed fill. Any unfilled remainder stays pending until the market window ends, then is cancelled.
+- Watch the BTC and ETH markets with the same 5-minute window start.
+- During seconds 0–179 after the window opens, buy once if one matching side qualifies: BTC best ask is at least $0.80 and ETH best ask is below $0.60.
+- Buy 100 ETH shares on that same UP or DOWN side using a simulated taker market order.
+- Simulated fills sweep only fresh, visible ETH ask depth. Entry prices are depth-weighted, taker fees use that ETH market's published fee schedule, and any unfilled market-order remainder is cancelled rather than invented or retried.
+- The last two minutes are closed to new entries.
 
-## Exit and account
+## Exits and settlement
 
-- Filled shares have no take-profit or stop-loss order and wait for the original market's official resolution.
-- The dashboard shows the single account's cash, equity, win rate, equity curve, open positions, UP/DOWN inventory, limit-order status, fees, and estimated maker rebate.
-- Paper account history is held in process memory and resets on restart or redeployment.
-- Paper fills are simulations based on observed order-book depth; they are not confirmation of a real order or trade.
+- A resting paper take-profit is modeled at $0.99 and credited as $1.00 per share when fresh visible bids at $0.99 or better support the fill. Partial fills reduce the open share count and cost basis; unchanged visible depth is not reused on later polls.
+- No stop loss is used.
+- Any remaining shares move to pending settlement after the ETH window closes and settle only against the confirmed result of that exact original ETH market.
 
-## Run and verify
+## Dashboard and runtime
 
-```sh
-npm test
-npm start
-```
+The dashboard presents the current ETH window, BTC/ETH UP and DOWN asks, entry cutoff, signal status, account summary, equity history, and recent positions. Account history is process-memory state and resets when the Railway service restarts.
 
-Dashboard: `/` · State: `/api/state` · Health: `/api/healthz`.
+Run `npm test` to verify the market mapping, signal thresholds and side mapping, time cutoff, visible-depth taker fills, TP accounting, exact-market resolution, and dashboard contract.
