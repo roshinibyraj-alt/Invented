@@ -41,7 +41,7 @@ function fixture() {
     async getBook(tokenId) {
       return tokenId.startsWith('btc')
         ? { bids: [{ price: 0.8, size: 100 }], asks: [{ price: 0.81, size: 100 }] }
-        : { bids: [{ price: 0.3, size: 100 }], asks: [{ price: 0.5, size: 100 }] };
+        : { bids: [{ price: 0.3, size: 100 }], asks: [{ price: 0.49, size: 100 }] };
     },
     async getMarket(id) {
       requestedMarkets.push({ resolutionId: id });
@@ -68,7 +68,7 @@ function fixture() {
 }
 
 function setQuote(bot, asset, side, {
-  bid = 0.3, bidSize = 1000, ask = 0.5, askSize = 1000, at = START + 1000,
+  bid = 0.3, bidSize = 1000, ask = 0.49, askSize = 1000, at = START + 60000,
   bidLevels, askLevels,
 } = {}) {
   const quotes = asset === 'BTC' ? bot.btcLiveQuotes : bot.liveQuotes;
@@ -81,8 +81,8 @@ function setQuote(bot, asset, side, {
   };
 }
 
-function qualify(bot, side = 'UP', at = START + 1000, {
-  btcAsk = 0.81, ethAsk = 0.5, ethAskSize = 1000, ethAskLevels,
+function qualify(bot, side = 'UP', at = START + 60000, {
+  btcAsk = 0.81, ethAsk = 0.49, ethAskSize = 1000, ethAskLevels,
 } = {}) {
   setQuote(bot, 'BTC', side, { ask: btcAsk, at });
   setQuote(bot, 'ETH', side, { ask: ethAsk, askSize: ethAskSize, askLevels: ethAskLevels, at });
@@ -122,34 +122,51 @@ test('BTC UP confirms an ETH UP taker entry and BTC DOWN confirms ETH DOWN', () 
   assert.equal(down.positions[0].signalSide, 'DOWN');
 });
 
-test('BTC threshold is inclusive at $0.80, while ETH must be strictly below $0.60', () => {
+test('BTC threshold is inclusive at $0.80, while ETH must be strictly below $0.50', () => {
   const atBtcBoundary = fixture().bot;
-  assert.equal(qualify(atBtcBoundary, 'UP', START + 1000, { btcAsk: 0.8, ethAsk: 0.599 }), true);
+  assert.equal(qualify(atBtcBoundary, 'UP', START + 60000, { btcAsk: 0.8, ethAsk: 0.499 }), true);
 
   const belowBtcBoundary = fixture().bot;
-  assert.equal(qualify(belowBtcBoundary, 'UP', START + 1000, { btcAsk: 0.799, ethAsk: 0.5 }), false);
+  assert.equal(qualify(belowBtcBoundary, 'UP', START + 60000, { btcAsk: 0.799, ethAsk: 0.49 }), false);
   assert.equal(belowBtcBoundary.positions.length, 0);
 
   const atEthBoundary = fixture().bot;
-  assert.equal(qualify(atEthBoundary, 'UP', START + 1000, { btcAsk: 0.9, ethAsk: 0.6 }), false);
+  assert.equal(qualify(atEthBoundary, 'UP', START + 60000, { btcAsk: 0.9, ethAsk: 0.5 }), false);
   assert.equal(atEthBoundary.positions.length, 0);
 });
 
-test('entry is allowed through second 239 but blocked exactly at second 240', () => {
-  const lastAllowed = fixture().bot;
-  assert.equal(qualify(lastAllowed, 'UP', START + 239999), true);
+test('entry waits for the first minute, then remains open until the 5-minute window ends', () => {
+  const firstMinute = fixture().bot;
+  setQuote(firstMinute, 'BTC', 'UP', { ask: 0.9, at: START + 59999 });
+  setQuote(firstMinute, 'ETH', 'UP', { ask: 0.49, at: START + 59999 });
+  assert.equal(firstMinute.processStrategyEntry(START + 59999), false);
+  assert.equal(firstMinute.positions.length, 0);
+  const originalNow = Date.now;
+  Date.now = () => START + 59999;
+  try {
+    assert.equal(firstMinute.snapshot().entryWindow.waiting, true);
+  } finally {
+    Date.now = originalNow;
+  }
 
-  const cutoff = fixture().bot;
-  setQuote(cutoff, 'BTC', 'UP', { ask: 0.9, at: START + 240000 });
-  setQuote(cutoff, 'ETH', 'UP', { ask: 0.5, at: START + 240000 });
-  assert.equal(cutoff.processStrategyEntry(START + 240000), false);
-  assert.equal(cutoff.positions.length, 0);
-  assert.equal(CrossAssetBot.constants.ENTRY_CUTOFF_MS, 240000);
+  const opensAtOneMinute = fixture().bot;
+  assert.equal(qualify(opensAtOneMinute, 'UP', START + 60000), true);
+
+  const finalSecond = fixture().bot;
+  assert.equal(qualify(finalSecond, 'UP', START + 299999), true);
+
+  const closedWindow = fixture().bot;
+  setQuote(closedWindow, 'BTC', 'UP', { ask: 0.9, at: START + 300000 });
+  setQuote(closedWindow, 'ETH', 'UP', { ask: 0.49, at: START + 300000 });
+  assert.equal(closedWindow.processStrategyEntry(START + 300000), false);
+  assert.equal(closedWindow.positions.length, 0);
+  assert.equal(CrossAssetBot.constants.ENTRY_WAIT_MS, 60000);
+  assert.equal(CrossAssetBot.constants.ENTRY_CUTOFF_MS, 300000);
 });
 
 test('taker market buy sweeps visible ETH asks, charges fees, and cancels unfilled remainder', () => {
   const { bot } = fixture();
-  qualify(bot, 'UP', START + 1000, {
+  qualify(bot, 'UP', START + 60000, {
     ethAsk: 0.45,
     ethAskSize: 100,
     ethAskLevels: [{ price: 0.45, size: 40 }, { price: 0.5, size: 60 }],
@@ -167,8 +184,8 @@ test('taker market buy sweeps visible ETH asks, charges fees, and cancels unfill
   assert.equal(position.takeProfitOrder.creditedPrice, 1);
 
   const partial = fixture().bot;
-  qualify(partial, 'UP', START + 1000, {
-    ethAsk: 0.5, ethAskSize: 20, ethAskLevels: [{ price: 0.5, size: 20 }],
+  qualify(partial, 'UP', START + 60000, {
+    ethAsk: 0.49, ethAskSize: 20, ethAskLevels: [{ price: 0.5, size: 20 }],
   });
   assert.equal(partial.positions[0].shares, 20);
   assert.equal(partial.orders[0].status, 'PARTIALLY_FILLED_REMAINDER_CANCELLED');
@@ -177,9 +194,9 @@ test('taker market buy sweeps visible ETH asks, charges fees, and cancels unfill
 
 test('missing ask depth never creates an assumed fill', () => {
   const { bot } = fixture();
-  setQuote(bot, 'BTC', 'UP', { ask: 0.9, at: START + 1000 });
-  setQuote(bot, 'ETH', 'UP', { ask: 0.5, askSize: 0, askLevels: [], at: START + 1000 });
-  assert.equal(bot.processStrategyEntry(START + 1000), true);
+  setQuote(bot, 'BTC', 'UP', { ask: 0.9, at: START + 60000 });
+  setQuote(bot, 'ETH', 'UP', { ask: 0.49, askSize: 0, askLevels: [], at: START + 60000 });
+  assert.equal(bot.processStrategyEntry(START + 60000), true);
   assert.equal(bot.positions.length, 0);
   assert.equal(bot.orders[0].status, 'REJECTED_NO_VISIBLE_ASK_DEPTH');
   assert.equal(bot.cash, config.DEMO_CAPITAL);
@@ -256,8 +273,9 @@ test('ETH market mapping accepts both outcomes and rejects unsupported assets', 
   const data = require('../wick-market-data');
   assert.equal(typeof data.getEthMarket, 'function');
   assert.equal(typeof data.getBtcMarket, 'function');
-  assert.equal(CrossAssetBot.constants.ENTRY_CUTOFF_MS, 240000);
+  assert.equal(CrossAssetBot.constants.ENTRY_WAIT_MS, 60000);
+  assert.equal(CrossAssetBot.constants.ENTRY_CUTOFF_MS, 300000);
   assert.equal(CrossAssetBot.constants.BTC_SIGNAL_MIN, 0.8);
-  assert.equal(CrossAssetBot.constants.ETH_ENTRY_MAX, 0.6);
+  assert.equal(CrossAssetBot.constants.ETH_ENTRY_MAX, 0.5);
   await assert.rejects(data.getAssetMarket('SOL', START, WINDOW), /Unsupported asset/);
 });

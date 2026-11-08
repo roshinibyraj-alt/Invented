@@ -33,9 +33,10 @@ test('dashboard shows the cross-asset rules and omits the retired strategy UI', 
   assert.equal(response.status, 200);
   assert.match(html, /BTC → ETH Signal Bot/);
   assert.match(html, /BTC trigger ≥ \$0\.80/);
-  assert.match(html, /ETH entry &lt; \$0\.60/);
+  assert.match(html, /ETH entry &lt; \$0\.50/);
   assert.match(html, /100 shares · TP \$0\.99/);
-  assert.match(html, /final-minute cutoff/);
+  assert.match(html, /First-minute wait/);
+  assert.match(html, /the ETH window has ended/);
   assert.match(html, /No stop loss/);
   assert.match(html, /exact ETH market/);
   assert.doesNotMatch(html, /BTC Strategy Lab/);

@@ -5,9 +5,10 @@ const WickBot = require('./wick-bot');
 const marketData = require('./wick-market-data');
 const { quoteFromBook, takerFeeFor, feeContext } = WickBot._test;
 
-const ENTRY_CUTOFF_MS = 4 * 60 * 1000;
+const ENTRY_WAIT_MS = 60 * 1000;
+const ENTRY_CUTOFF_MS = cfg.WINDOW_MS_5M;
 const BTC_SIGNAL_MIN = 0.80;
-const ETH_ENTRY_MAX = 0.60;
+const ETH_ENTRY_MAX = 0.50;
 const TAKE_PROFIT_LIMIT = 0.99;
 const TAKE_PROFIT_CREDIT = 1;
 const QUOTE_MAX_AGE_MS = 2000;
@@ -94,7 +95,7 @@ class CrossAssetBot extends WickBot {
     const start = this.orderWindowStart;
     if (!this.market || this.market.start !== start || this.completedWindows.has(start)) return false;
     const elapsed = now - start;
-    if (elapsed < 0 || elapsed >= ENTRY_CUTOFF_MS || this.entryAttemptedWindow === start) return false;
+    if (elapsed < ENTRY_WAIT_MS || elapsed >= ENTRY_CUTOFF_MS || this.entryAttemptedWindow === start) return false;
 
     const candidates = ['UP', 'DOWN'].filter(side => {
       const btc = this.btcLiveQuotes[side];
@@ -114,7 +115,7 @@ class CrossAssetBot extends WickBot {
     const btcAsk = Number(this.btcLiveQuotes[side].bestAsk);
     const ethAsk = Number(this.liveQuotes[side].bestAsk);
     this.entryTriggerReason =
-      `BTC ${side} ask ${btcAsk.toFixed(3)} met the $0.80 trigger while ETH ${side} ask ${ethAsk.toFixed(3)} was below $0.60.`;
+      `BTC ${side} ask ${btcAsk.toFixed(3)} met the $0.80 trigger while ETH ${side} ask ${ethAsk.toFixed(3)} was below $0.50.`;
     this.entrySignal = {
       side,
       btcAsk,
@@ -396,23 +397,27 @@ class CrossAssetBot extends WickBot {
     const state = super.snapshot();
     const now = Date.now();
     const elapsedMs = state.window ? now - Number(state.window.start) : null;
-    const withinEntryWindow = elapsedMs != null && elapsedMs >= 0 && elapsedMs < ENTRY_CUTOFF_MS;
+    const waitingForEntry = elapsedMs != null && elapsedMs >= 0 && elapsedMs < ENTRY_WAIT_MS;
+    const withinEntryWindow = elapsedMs != null && elapsedMs >= ENTRY_WAIT_MS && elapsedMs < ENTRY_CUTOFF_MS;
     const btcPrices = this.captureQuotePair(now, this.btcLiveQuotes);
     const ethPrices = state.livePrices;
     const sideStatus = side => {
       const btc = btcPrices[side];
       const eth = ethPrices?.[side];
-      if (!withinEntryWindow) return 'ENTRY WINDOW CLOSED';
+      if (waitingForEntry) return 'FIRST-MINUTE WAIT';
+      if (!withinEntryWindow) return 'WINDOW CLOSED';
       if (!this.isFreshAsk(btc, now) || !this.isFreshAsk(eth, now)) return 'WAITING FOR FRESH BTC/ETH QUOTES';
       if (Number(btc.bestAsk) < BTC_SIGNAL_MIN) return `BTC ${side} below $0.80`;
-      if (Number(eth.bestAsk) >= ETH_ENTRY_MAX) return `ETH ${side} is not below $0.60`;
+      if (Number(eth.bestAsk) >= ETH_ENTRY_MAX) return `ETH ${side} is not below $0.50`;
       return 'TRIGGER READY';
     };
     const signal = this.entrySignal || {
       side: null,
-      reason: withinEntryWindow
-        ? `Waiting for BTC UP or DOWN at $0.80+ and the matching ETH side below $0.60. ${sideStatus('UP')} · ${sideStatus('DOWN')}.`
-        : 'New entries are allowed only during the first four minutes; the final minute is cutoff.',
+      reason: waitingForEntry
+        ? 'First-minute wait is active; entries start after 60 seconds.'
+        : withinEntryWindow
+          ? `Waiting for BTC UP or DOWN at $0.80+ and the matching ETH side below $0.50. ${sideStatus('UP')} · ${sideStatus('DOWN')}.`
+          : 'The ETH window has ended; no new entries are allowed.',
       ready: false,
     };
     const strategy = {
@@ -426,13 +431,14 @@ class CrossAssetBot extends WickBot {
         orderType: 'MARKET',
         sideSelection: 'Buy the ETH side matching the BTC side that meets the threshold.',
         sharesPerSide: this.rules.sharesPerSide,
+        waitSecondsAfterOpen: ENTRY_WAIT_MS / 1000,
         signal: { ...signal, tradeSide: signal.side, sideStatus: { UP: sideStatus('UP'), DOWN: sideStatus('DOWN') } },
         orderPlaced: this.entryOrderPlaced,
         orderStatus: this.entryOrderId
           ? this.orders.find(order => order.id === this.entryOrderId)?.status || 'UNKNOWN'
           : 'NOT_PLACED',
         cutoffSecondsAfterOpen: ENTRY_CUTOFF_MS / 1000,
-        trigger: `During seconds 0–239, BTC same-side best ask ≥ $${BTC_SIGNAL_MIN.toFixed(2)} and ETH best ask < $${ETH_ENTRY_MAX.toFixed(2)}.`,
+        trigger: `During seconds 60–299, BTC same-side best ask ≥ $${BTC_SIGNAL_MIN.toFixed(2)} and ETH best ask < $${ETH_ENTRY_MAX.toFixed(2)}.`,
         fillPolicy: 'Immediate paper taker buy sweeps only visible ETH ask depth; any unfilled remainder is cancelled.',
       },
       exit: {
@@ -441,7 +447,7 @@ class CrossAssetBot extends WickBot {
         stopLoss: null,
         windowEnd: 'Any remaining ETH shares settle only after confirmed resolution of that exact ETH market.',
       },
-      timing: 'Watch the matching BTC and ETH 5-minute sides from window open through second 239; no new buy during the final minute.',
+      timing: 'Wait the first 60 seconds, then watch the matching BTC and ETH 5-minute sides through window close; no final-minute cutoff.',
       sizing: `${this.rules.sharesPerSide} ETH shares on the BTC-signalled side.`,
       trigger: `BTC side ask ≥ $${BTC_SIGNAL_MIN.toFixed(2)} while the matching ETH ask is below $${ETH_ENTRY_MAX.toFixed(2)}.`,
       executionNote: 'Paper market buys use visible ETH ask depth and the market’s taker fee schedule.',
@@ -458,8 +464,11 @@ class CrossAssetBot extends WickBot {
       signal: { ...signal, sideStatus: { UP: sideStatus('UP'), DOWN: sideStatus('DOWN') } },
       entryWindow: {
         elapsedMs,
+        waitMs: ENTRY_WAIT_MS,
         cutoffMs: ENTRY_CUTOFF_MS,
+        waiting: waitingForEntry,
         open: withinEntryWindow,
+        secondsUntilOpen: waitingForEntry ? Math.ceil((ENTRY_WAIT_MS - elapsedMs) / 1000) : 0,
         secondsRemaining: withinEntryWindow ? Math.ceil((ENTRY_CUTOFF_MS - elapsedMs) / 1000) : 0,
       },
       scanner: {
@@ -473,6 +482,7 @@ class CrossAssetBot extends WickBot {
 }
 
 CrossAssetBot.constants = {
+  ENTRY_WAIT_MS,
   ENTRY_CUTOFF_MS,
   BTC_SIGNAL_MIN,
   ETH_ENTRY_MAX,

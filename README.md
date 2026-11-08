@@ -5,10 +5,10 @@ This repository runs a single paper-only strategy for Polymarket ETH Up/Down 5-m
 ## Entry strategy
 
 - Watch the BTC and ETH markets with the same 5-minute window start.
-- During seconds 0–239 after the window opens, buy once if one matching side qualifies: BTC best ask is at least $0.80 and ETH best ask is below $0.60.
+- After waiting 60 seconds, during seconds 60–299, buy once if one matching side qualifies: BTC best ask is at least $0.80 and the matching ETH best ask is below $0.50.
 - Buy 100 ETH shares on that same UP or DOWN side using a simulated taker market order.
 - Simulated fills sweep only fresh, visible ETH ask depth. Entry prices are depth-weighted, taker fees use that ETH market's published fee schedule, and any unfilled market-order remainder is cancelled rather than invented or retried.
-- The final minute is closed to new entries.
+- No entry is allowed during the first minute or after the 5-minute window ends; there is no final-minute cutoff.
 
 ## Exits and settlement
 

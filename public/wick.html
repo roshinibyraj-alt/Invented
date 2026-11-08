@@ -33,7 +33,7 @@
       <article class="market eth"><div class="market-head"><div class="market-name">ETH · trade</div><span class="pill" id="ethStatus">WAITING</span></div><div class="side-grid" id="ethQuotes"></div></article>
     </div>
     <div class="signal-box"><div class="signal-title">Signal and entry window</div><div class="signal-text" id="signal">Waiting for fresh BTC and ETH prices…</div><div class="bar"><i id="entryProgress" style="width:0"></i></div><div class="small" id="entryTimer">—</div>
-      <div class="rule-row"><div class="rule"><b>BTC trigger ≥ $0.80</b><span>Same-side BTC best ask</span></div><div class="rule"><b>ETH entry &lt; $0.60</b><span>Matching ETH best ask</span></div><div class="rule"><b>100 shares · TP $0.99</b><span>TP credited as $1/share</span></div></div>
+      <div class="rule-row"><div class="rule"><b>BTC trigger ≥ $0.80</b><span>Same-side BTC best ask</span></div><div class="rule"><b>ETH entry &lt; $0.50</b><span>Matching ETH best ask</span></div><div class="rule"><b>100 shares · TP $0.99</b><span>TP credited as $1/share</span></div></div>
     </div>
   </section>
   <section class="grid" style="margin-top:12px">
@@ -85,11 +85,13 @@
     document.querySelector('#ethStatus').textContent=w.slug?'ETH 5M':'WAITING';
     const signal=s.signal||strategy.entries?.signal||{};
     document.querySelector('#signal').textContent=signal.reason||'Waiting for the first qualifying BTC/ETH side.';
-    const progress=entry.open?Math.max(0,Math.min(100,(Number(entry.elapsedMs||0)/Number(entry.cutoffMs||240000))*100)):100;
+    const progress=Math.max(0,Math.min(100,(Number(entry.elapsedMs||0)/Number(entry.cutoffMs||300000))*100));
     document.querySelector('#entryProgress').style.width=progress+'%';
-    document.querySelector('#entryTimer').textContent=entry.open
-      ?`Entry window open · ${entry.secondsRemaining}s until the final-minute cutoff · ${w.title||''}`
-      :`Entry window closed · no new buys during the final minute · ${w.title||''}`;
+    document.querySelector('#entryTimer').textContent=entry.waiting
+      ?`First-minute wait · ${entry.secondsUntilOpen}s until entries open · ${w.title||''}`
+      :entry.open
+        ?`Entries open · ${entry.secondsRemaining}s until the ETH window ends · ${w.title||''}`
+        :`Entry window closed · the ETH window has ended · ${w.title||''}`;
     document.querySelector('#winRate').textContent=`${Number(a.winRate||0).toFixed(1)}%`;
     document.querySelector('#winsLosses').textContent=`${a.wins??0} / ${a.losses??0}`;
     document.querySelector('#fees').textContent=usd(a.takerFees);
