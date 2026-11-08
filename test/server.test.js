@@ -32,9 +32,13 @@ test('dashboard shows the cross-asset rules and omits the retired strategy UI', 
   const html = await response.text();
   assert.equal(response.status, 200);
   assert.match(html, /BTC → ETH Signal Bot/);
-  assert.match(html, /BTC trigger ≥ \$0\.80/);
-  assert.match(html, /ETH entry &lt; \$0\.50/);
-  assert.match(html, /100 shares · TP \$0\.99/);
+  assert.match(html, /BTC ≥ \$0\.80 · ETH &lt; \$0\.60/);
+  assert.match(html, /100 shares · one fire per window/);
+  assert.match(html, /BTC ≥ \$0\.90 · ETH &lt; \$0\.70/);
+  assert.match(html, /200 shares · one fire per window/);
+  assert.match(html, /BTC ≥ \$0\.95 · ETH &lt; \$0\.80/);
+  assert.match(html, /400 shares · one fire per window/);
+  assert.match(html, /Up to 3 fires · 700 shares total per window/);
   assert.match(html, /First-minute wait/);
   assert.match(html, /the ETH window has ended/);
   assert.match(html, /No stop loss/);

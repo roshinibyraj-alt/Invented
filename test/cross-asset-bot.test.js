@@ -82,7 +82,7 @@ function setQuote(bot, asset, side, {
 }
 
 function qualify(bot, side = 'UP', at = START + 60000, {
-  btcAsk = 0.81, ethAsk = 0.49, ethAskSize = 1000, ethAskLevels,
+  btcAsk = 0.81, ethAsk = 0.59, ethAskSize = 1000, ethAskLevels,
 } = {}) {
   setQuote(bot, 'BTC', side, { ask: btcAsk, at });
   setQuote(bot, 'ETH', side, { ask: ethAsk, askSize: ethAskSize, askLevels: ethAskLevels, at });
@@ -122,17 +122,65 @@ test('BTC UP confirms an ETH UP taker entry and BTC DOWN confirms ETH DOWN', () 
   assert.equal(down.positions[0].signalSide, 'DOWN');
 });
 
-test('BTC threshold is inclusive at $0.80, while ETH must be strictly below $0.50', () => {
+test('base trigger includes BTC $0.80 and requires ETH strictly below $0.60', () => {
   const atBtcBoundary = fixture().bot;
-  assert.equal(qualify(atBtcBoundary, 'UP', START + 60000, { btcAsk: 0.8, ethAsk: 0.499 }), true);
+  assert.equal(qualify(atBtcBoundary, 'UP', START + 60000, { btcAsk: 0.8, ethAsk: 0.599 }), true);
 
   const belowBtcBoundary = fixture().bot;
-  assert.equal(qualify(belowBtcBoundary, 'UP', START + 60000, { btcAsk: 0.799, ethAsk: 0.49 }), false);
+  assert.equal(qualify(belowBtcBoundary, 'UP', START + 60000, { btcAsk: 0.799, ethAsk: 0.59 }), false);
   assert.equal(belowBtcBoundary.positions.length, 0);
 
   const atEthBoundary = fixture().bot;
-  assert.equal(qualify(atEthBoundary, 'UP', START + 60000, { btcAsk: 0.9, ethAsk: 0.5 }), false);
+  assert.equal(qualify(atEthBoundary, 'UP', START + 60000, { btcAsk: 0.81, ethAsk: 0.6 }), false);
   assert.equal(atEthBoundary.positions.length, 0);
+});
+
+test('all three independent triggers can fire once in one window for up to 700 shares', () => {
+  const { bot } = fixture();
+  assert.equal(qualify(bot, 'UP', START + 60000, { btcAsk: 0.95, ethAsk: 0.59 }), true);
+
+  const sharesByTrigger = Object.fromEntries(bot.orders.map(order => [
+    order.triggerId, order.requestedShares,
+  ]));
+  assert.deepEqual(sharesByTrigger, {
+    'btc-080-eth-060-100': 100,
+    'btc-090-eth-070-200': 200,
+    'btc-095-eth-080-400': 400,
+  });
+  assert.equal(bot.positions.reduce((sum, position) => sum + position.shares, 0), 700);
+  assert.equal(bot.entryFiredTriggers.size, 3);
+  assert.equal(bot.processStrategyEntry(START + 60000), false, 'fired triggers do not rearm');
+  assert.equal(bot.orders.length, 3);
+  assert.equal(bot.snapshot().strategy.entries.maxSharesPerWindow, 700);
+});
+
+test('higher tiers use their own thresholds and can fire later in the same window', () => {
+  const { bot } = fixture();
+  assert.equal(qualify(bot, 'UP', START + 60000, { btcAsk: 0.9, ethAsk: 0.65 }), true);
+  assert.deepEqual(bot.orders.map(order => order.requestedShares), [200]);
+
+  setQuote(bot, 'BTC', 'UP', { ask: 0.95, at: START + 70000 });
+  setQuote(bot, 'ETH', 'UP', { ask: 0.75, at: START + 70000 });
+  assert.equal(bot.processStrategyEntry(START + 70000), true);
+  assert.deepEqual(bot.orders.map(order => order.requestedShares), [400, 200]);
+  assert.equal(bot.positions.reduce((sum, position) => sum + position.shares, 0), 600);
+  assert.equal(bot.processStrategyEntry(START + 70000), false);
+});
+
+test('higher trigger boundaries are inclusive for BTC and strict for ETH', () => {
+  const rung200 = fixture().bot;
+  assert.equal(qualify(rung200, 'UP', START + 60000, { btcAsk: 0.9, ethAsk: 0.699 }), true);
+  assert.deepEqual(rung200.orders.map(order => order.requestedShares), [200]);
+
+  const eth200Boundary = fixture().bot;
+  assert.equal(qualify(eth200Boundary, 'UP', START + 60000, { btcAsk: 0.9, ethAsk: 0.7 }), false);
+
+  const rung400 = fixture().bot;
+  assert.equal(qualify(rung400, 'UP', START + 60000, { btcAsk: 0.95, ethAsk: 0.799 }), true);
+  assert.deepEqual(rung400.orders.map(order => order.requestedShares), [400]);
+
+  const eth400Boundary = fixture().bot;
+  assert.equal(qualify(eth400Boundary, 'UP', START + 60000, { btcAsk: 0.95, ethAsk: 0.8 }), false);
 });
 
 test('entry waits for the first minute, then remains open until the 5-minute window ends', () => {
@@ -276,6 +324,9 @@ test('ETH market mapping accepts both outcomes and rejects unsupported assets', 
   assert.equal(CrossAssetBot.constants.ENTRY_WAIT_MS, 60000);
   assert.equal(CrossAssetBot.constants.ENTRY_CUTOFF_MS, 300000);
   assert.equal(CrossAssetBot.constants.BTC_SIGNAL_MIN, 0.8);
-  assert.equal(CrossAssetBot.constants.ETH_ENTRY_MAX, 0.5);
+  assert.equal(CrossAssetBot.constants.ETH_ENTRY_MAX, 0.6);
+  assert.deepEqual(CrossAssetBot.constants.ENTRY_TRIGGERS.map(trigger => [
+    trigger.btcAskMin, trigger.ethAskMax, trigger.shares,
+  ]), [[0.8, 0.6, 100], [0.9, 0.7, 200], [0.95, 0.8, 400]]);
   await assert.rejects(data.getAssetMarket('SOL', START, WINDOW), /Unsupported asset/);
 });

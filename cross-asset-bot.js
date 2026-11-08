@@ -7,8 +7,13 @@ const { quoteFromBook, takerFeeFor, feeContext } = WickBot._test;
 
 const ENTRY_WAIT_MS = 60 * 1000;
 const ENTRY_CUTOFF_MS = cfg.WINDOW_MS_5M;
-const BTC_SIGNAL_MIN = 0.80;
-const ETH_ENTRY_MAX = 0.50;
+const ENTRY_TRIGGERS = Object.freeze([
+  Object.freeze({ id: 'btc-080-eth-060-100', btcAskMin: 0.80, ethAskMax: 0.60, shares: 100 }),
+  Object.freeze({ id: 'btc-090-eth-070-200', btcAskMin: 0.90, ethAskMax: 0.70, shares: 200 }),
+  Object.freeze({ id: 'btc-095-eth-080-400', btcAskMin: 0.95, ethAskMax: 0.80, shares: 400 }),
+]);
+const BTC_SIGNAL_MIN = ENTRY_TRIGGERS[0].btcAskMin;
+const ETH_ENTRY_MAX = ENTRY_TRIGGERS[0].ethAskMax;
 const TAKE_PROFIT_LIMIT = 0.99;
 const TAKE_PROFIT_CREDIT = 1;
 const QUOTE_MAX_AGE_MS = 2000;
@@ -31,7 +36,8 @@ class CrossAssetBot extends WickBot {
     this.crossAssetData = data;
     this.btcMarket = null;
     this.btcLiveQuotes = { UP: { status: 'MISSING' }, DOWN: { status: 'MISSING' } };
-    this.entryAttemptedWindow = null;
+    this.entryFiredTriggers = new Set();
+    this.entrySignalsByTrigger = Object.create(null);
     this.entrySignal = null;
   }
 
@@ -78,7 +84,8 @@ class CrossAssetBot extends WickBot {
 
   openStrategyWindow(start, now) {
     super.openStrategyWindow(start, now);
-    this.entryAttemptedWindow = null;
+    this.entryFiredTriggers = new Set();
+    this.entrySignalsByTrigger = Object.create(null);
     this.entrySignal = null;
     this.btcLiveQuotes = this.btcLiveQuotes || { UP: { status: 'MISSING' }, DOWN: { status: 'MISSING' } };
   }
@@ -95,52 +102,66 @@ class CrossAssetBot extends WickBot {
     const start = this.orderWindowStart;
     if (!this.market || this.market.start !== start || this.completedWindows.has(start)) return false;
     const elapsed = now - start;
-    if (elapsed < ENTRY_WAIT_MS || elapsed >= ENTRY_CUTOFF_MS || this.entryAttemptedWindow === start) return false;
+    if (elapsed < ENTRY_WAIT_MS || elapsed >= ENTRY_CUTOFF_MS) return false;
 
-    const candidates = ['UP', 'DOWN'].filter(side => {
-      const btc = this.btcLiveQuotes[side];
-      const eth = this.liveQuotes[side];
-      return this.isFreshAsk(btc, now) && this.isFreshAsk(eth, now) &&
-        Number(btc.bestAsk) >= BTC_SIGNAL_MIN && Number(eth.bestAsk) < ETH_ENTRY_MAX;
-    }).sort((a, b) => Number(this.btcLiveQuotes[b].bestAsk) - Number(this.btcLiveQuotes[a].bestAsk));
-    const side = candidates[0];
-    if (!side) return false;
+    let firedCount = 0;
+    for (const trigger of ENTRY_TRIGGERS) {
+      if (this.entryFiredTriggers.has(trigger.id)) continue;
+      const candidates = ['UP', 'DOWN'].filter(side => {
+        const btc = this.btcLiveQuotes[side];
+        const eth = this.liveQuotes[side];
+        return this.isFreshAsk(btc, now) && this.isFreshAsk(eth, now) &&
+          Number(btc.bestAsk) >= trigger.btcAskMin &&
+          Number(eth.bestAsk) < trigger.ethAskMax;
+      }).sort((a, b) => Number(this.btcLiveQuotes[b].bestAsk) - Number(this.btcLiveQuotes[a].bestAsk));
+      const side = candidates[0];
+      if (!side) continue;
 
-    this.entryAttemptedWindow = start;
-    this.entryTriggerLatched = true;
-    this.entryTriggerAt = now;
-    this.entryTriggerSide = side;
-    this.entryOrderPlaced = true;
-    this.entryAttemptMissed = false;
-    const btcAsk = Number(this.btcLiveQuotes[side].bestAsk);
-    const ethAsk = Number(this.liveQuotes[side].bestAsk);
-    this.entryTriggerReason =
-      `BTC ${side} ask ${btcAsk.toFixed(3)} met the $0.80 trigger while ETH ${side} ask ${ethAsk.toFixed(3)} was below $0.50.`;
-    this.entrySignal = {
-      side,
-      btcAsk,
-      ethAsk,
-      elapsedMs: elapsed,
-      windowStart: start,
-      triggeredAt: now,
-    };
-    this.log('PAPER_BTC_CONFIRMED_ETH_SIGNAL', {
-      strategyId: this.strategyId,
-      windowStart: start,
-      side,
-      btcAsk,
-      ethAsk,
-      elapsedMs: elapsed,
-      entryCutoffMs: ENTRY_CUTOFF_MS,
-    });
-    this.placeTakerBuy(now, start, side);
-    return true;
+      this.entryFiredTriggers.add(trigger.id);
+      this.entryTriggerLatched = true;
+      this.entryTriggerAt = now;
+      this.entryTriggerSide = side;
+      this.entryOrderPlaced = true;
+      this.entryAttemptMissed = false;
+      const btcAsk = Number(this.btcLiveQuotes[side].bestAsk);
+      const ethAsk = Number(this.liveQuotes[side].bestAsk);
+      const signal = {
+        triggerId: trigger.id,
+        requestedShares: trigger.shares,
+        side,
+        btcAsk,
+        ethAsk,
+        elapsedMs: elapsed,
+        windowStart: start,
+        triggeredAt: now,
+      };
+      this.entrySignalsByTrigger[trigger.id] = signal;
+      this.entrySignal = signal;
+      this.entryTriggerReason =
+        `${trigger.shares}-share trigger: BTC ${side} ask ${btcAsk.toFixed(3)} met $${trigger.btcAskMin.toFixed(2)} while ETH ${side} ask ${ethAsk.toFixed(3)} was below $${trigger.ethAskMax.toFixed(2)}.`;
+      this.log('PAPER_BTC_CONFIRMED_ETH_SIGNAL', {
+        strategyId: this.strategyId,
+        windowStart: start,
+        triggerId: trigger.id,
+        requestedShares: trigger.shares,
+        btcAskMin: trigger.btcAskMin,
+        ethAskMax: trigger.ethAskMax,
+        side,
+        btcAsk,
+        ethAsk,
+        elapsedMs: elapsed,
+        entryCutoffMs: ENTRY_CUTOFF_MS,
+      });
+      this.placeTakerBuy(now, start, side, trigger, signal);
+      firedCount += 1;
+    }
+    return firedCount > 0;
   }
 
-  placeTakerBuy(now, start, side) {
-    const requestedShares = this.rules.sharesPerSide;
+  placeTakerBuy(now, start, side, trigger, signal) {
+    const requestedShares = trigger.shares;
     const order = {
-      id: `${this.strategyId}-${start}-${side.toLowerCase()}-market-buy`,
+      id: `${this.strategyId}-${start}-${trigger.id}-${side.toLowerCase()}-market-buy`,
       timeframe: this.timeframe,
       windowStart: start,
       marketId: this.market.id,
@@ -149,6 +170,9 @@ class CrossAssetBot extends WickBot {
       tokenId: this.market.tokens?.[side] || null,
       side,
       signalSide: side,
+      triggerId: trigger.id,
+      btcAskMin: trigger.btcAskMin,
+      ethAskMax: trigger.ethAskMax,
       action: 'BUY',
       kind: 'ENTRY',
       orderType: 'MARKET',
@@ -235,14 +259,17 @@ class CrossAssetBot extends WickBot {
       asset: 'ETH',
       side,
       signalSide: side,
-      btcSignalAsk: this.entrySignal.btcAsk,
-      ethTriggerAsk: this.entrySignal.ethAsk,
+      btcSignalAsk: signal.btcAsk,
+      ethTriggerAsk: signal.ethAsk,
       tokenId: this.market.tokens?.[side] || null,
       entryKey: order.id,
-      entryLabel: `ETH ${side} taker buy · ${round(filledShares)} shares`,
+      entryLabel: `ETH ${side} taker buy · ${round(filledShares)} of ${requestedShares} shares`,
       entryMode: order.entryMode,
       entryType: 'MARKET_TAKER_BUY',
-      phase: 'btc-confirmed-eth-entry',
+      phase: `btc-confirmed-eth-entry-${trigger.id}`,
+      signalTriggerId: trigger.id,
+      btcAskMin: trigger.btcAskMin,
+      ethAskMax: trigger.ethAskMax,
       entryFillSource: 'VISIBLE_ASK_DEPTH',
       strategyId: this.strategyId,
       strategyName: this.strategyName,
@@ -294,6 +321,9 @@ class CrossAssetBot extends WickBot {
     this.log('PAPER_TAKER_BUY_FILLED', {
       orderId: order.id,
       positionId: position.id,
+      triggerId: trigger.id,
+      btcAskMin: trigger.btcAskMin,
+      ethAskMax: trigger.ethAskMax,
       asset: 'ETH',
       side,
       requestedShares,
@@ -401,25 +431,54 @@ class CrossAssetBot extends WickBot {
     const withinEntryWindow = elapsedMs != null && elapsedMs >= ENTRY_WAIT_MS && elapsedMs < ENTRY_CUTOFF_MS;
     const btcPrices = this.captureQuotePair(now, this.btcLiveQuotes);
     const ethPrices = state.livePrices;
-    const sideStatus = side => {
+    const sideStatus = (side, trigger) => {
       const btc = btcPrices[side];
       const eth = ethPrices?.[side];
       if (waitingForEntry) return 'FIRST-MINUTE WAIT';
       if (!withinEntryWindow) return 'WINDOW CLOSED';
+      const firedSignal = this.entrySignalsByTrigger[trigger.id];
+      if (firedSignal) return firedSignal.side === side ? 'FIRED' : 'ALREADY FIRED';
       if (!this.isFreshAsk(btc, now) || !this.isFreshAsk(eth, now)) return 'WAITING FOR FRESH BTC/ETH QUOTES';
-      if (Number(btc.bestAsk) < BTC_SIGNAL_MIN) return `BTC ${side} below $0.80`;
-      if (Number(eth.bestAsk) >= ETH_ENTRY_MAX) return `ETH ${side} is not below $0.50`;
+      if (Number(btc.bestAsk) < trigger.btcAskMin) return `BTC ${side} below $${trigger.btcAskMin.toFixed(2)}`;
+      if (Number(eth.bestAsk) >= trigger.ethAskMax) return `ETH ${side} is not below $${trigger.ethAskMax.toFixed(2)}`;
       return 'TRIGGER READY';
     };
-    const signal = this.entrySignal || {
-      side: null,
-      reason: waitingForEntry
-        ? 'First-minute wait is active; entries start after 60 seconds.'
-        : withinEntryWindow
-          ? `Waiting for BTC UP or DOWN at $0.80+ and the matching ETH side below $0.50. ${sideStatus('UP')} · ${sideStatus('DOWN')}.`
-          : 'The ETH window has ended; no new entries are allowed.',
-      ready: false,
-    };
+    const triggerStatuses = ENTRY_TRIGGERS.map(trigger => ({
+      id: trigger.id,
+      btcAskMin: trigger.btcAskMin,
+      ethAskMax: trigger.ethAskMax,
+      shares: trigger.shares,
+      fired: this.entryFiredTriggers.has(trigger.id),
+      side: this.entrySignalsByTrigger[trigger.id]?.side || null,
+      orderStatus: this.orders.find(order =>
+        order.windowStart === this.orderWindowStart && order.triggerId === trigger.id)?.status || null,
+      sideStatus: {
+        UP: sideStatus('UP', trigger),
+        DOWN: sideStatus('DOWN', trigger),
+      },
+    }));
+    const firedSignals = ENTRY_TRIGGERS
+      .map(trigger => this.entrySignalsByTrigger[trigger.id])
+      .filter(Boolean);
+    const summarizedSideStatus = side => triggerStatuses
+      .map(trigger => `${trigger.shares} shares: ${trigger.sideStatus[side]}`)
+      .join(' · ');
+    const signal = this.entrySignal
+      ? {
+        ...this.entrySignal,
+        reason: `${firedSignals.length} of ${ENTRY_TRIGGERS.length} triggers fired. Latest: ${this.entryTriggerReason}`,
+        ready: false,
+      }
+      : {
+        side: null,
+        reason: waitingForEntry
+          ? 'First-minute wait is active; entries start after 60 seconds.'
+          : withinEntryWindow
+            ? `Waiting for any of three BTC/ETH price triggers. UP: ${summarizedSideStatus('UP')}. DOWN: ${summarizedSideStatus('DOWN')}.`
+            : 'The ETH window has ended; no new entries are allowed.',
+        ready: triggerStatuses.some(trigger =>
+          trigger.sideStatus.UP === 'TRIGGER READY' || trigger.sideStatus.DOWN === 'TRIGGER READY'),
+      };
     const strategy = {
       id: this.strategyId,
       name: this.strategyName,
@@ -431,14 +490,24 @@ class CrossAssetBot extends WickBot {
         orderType: 'MARKET',
         sideSelection: 'Buy the ETH side matching the BTC side that meets the threshold.',
         sharesPerSide: this.rules.sharesPerSide,
+        maxSharesPerWindow: ENTRY_TRIGGERS.reduce((sum, trigger) => sum + trigger.shares, 0),
+        maxFiresPerWindow: ENTRY_TRIGGERS.length,
         waitSecondsAfterOpen: ENTRY_WAIT_MS / 1000,
-        signal: { ...signal, tradeSide: signal.side, sideStatus: { UP: sideStatus('UP'), DOWN: sideStatus('DOWN') } },
+        triggers: triggerStatuses,
+        signal: {
+          ...signal,
+          tradeSide: signal.side,
+          sideStatus: {
+            UP: summarizedSideStatus('UP'),
+            DOWN: summarizedSideStatus('DOWN'),
+          },
+        },
         orderPlaced: this.entryOrderPlaced,
         orderStatus: this.entryOrderId
           ? this.orders.find(order => order.id === this.entryOrderId)?.status || 'UNKNOWN'
           : 'NOT_PLACED',
         cutoffSecondsAfterOpen: ENTRY_CUTOFF_MS / 1000,
-        trigger: `During seconds 60–299, BTC same-side best ask ≥ $${BTC_SIGNAL_MIN.toFixed(2)} and ETH best ask < $${ETH_ENTRY_MAX.toFixed(2)}.`,
+        trigger: `During seconds 60–299, each tier fires once when matching BTC/ETH asks qualify: 100 shares at BTC ≥ $0.80 and ETH < $0.60; 200 at BTC ≥ $0.90 and ETH < $0.70; 400 at BTC ≥ $0.95 and ETH < $0.80.`,
         fillPolicy: 'Immediate paper taker buy sweeps only visible ETH ask depth; any unfilled remainder is cancelled.',
       },
       exit: {
@@ -448,8 +517,8 @@ class CrossAssetBot extends WickBot {
         windowEnd: 'Any remaining ETH shares settle only after confirmed resolution of that exact ETH market.',
       },
       timing: 'Wait the first 60 seconds, then watch the matching BTC and ETH 5-minute sides through window close; no final-minute cutoff.',
-      sizing: `${this.rules.sharesPerSide} ETH shares on the BTC-signalled side.`,
-      trigger: `BTC side ask ≥ $${BTC_SIGNAL_MIN.toFixed(2)} while the matching ETH ask is below $${ETH_ENTRY_MAX.toFixed(2)}.`,
+      sizing: '100, 200, or 400 ETH shares per trigger; up to 700 shares in one window.',
+      trigger: 'Three independent, once-per-window BTC-confirmed ETH triggers; all matching tiers may fire.',
       executionNote: 'Paper market buys use visible ETH ask depth and the market’s taker fee schedule.',
     };
     return {
@@ -461,7 +530,13 @@ class CrossAssetBot extends WickBot {
         UP: btcPrices.UP,
         DOWN: btcPrices.DOWN,
       },
-      signal: { ...signal, sideStatus: { UP: sideStatus('UP'), DOWN: sideStatus('DOWN') } },
+      signal: {
+        ...signal,
+        sideStatus: {
+          UP: summarizedSideStatus('UP'),
+          DOWN: summarizedSideStatus('DOWN'),
+        },
+      },
       entryWindow: {
         elapsedMs,
         waitMs: ENTRY_WAIT_MS,
@@ -484,6 +559,7 @@ class CrossAssetBot extends WickBot {
 CrossAssetBot.constants = {
   ENTRY_WAIT_MS,
   ENTRY_CUTOFF_MS,
+  ENTRY_TRIGGERS,
   BTC_SIGNAL_MIN,
   ETH_ENTRY_MAX,
   TAKE_PROFIT_LIMIT,
