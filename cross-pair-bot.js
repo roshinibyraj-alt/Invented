@@ -7,7 +7,6 @@ const { quoteFromBook, takerFeeFor, feeContext } = WickBot._test;
 
 const ENTRY_TIERS = Object.freeze(cfg.CROSS_PAIR_ENTRY_TIERS.map(tier => Object.freeze({ ...tier })));
 const SHARES_PER_LEG = ENTRY_TIERS[0].sharesPerLeg;
-const ENTRY_ASK_SUM_MAX = ENTRY_TIERS[0].combinedAskThreshold;
 const MAX_ENTRY_PRICE = cfg.CROSS_PAIR_MAX_ENTRY_PRICE;
 const QUOTE_MAX_AGE_MS = 2000;
 const PAIRS = Object.freeze([
@@ -31,6 +30,56 @@ const PAIRS = Object.freeze([
 
 function round(value) {
   return Number(Number(value).toFixed(6));
+}
+
+function emptyInventoryBoxes() {
+  return Object.fromEntries(['BTC', 'ETH'].map(asset => [asset, Object.fromEntries(
+    ['UP', 'DOWN'].map(side => [side, {
+      shares: 0,
+      costBasis: 0,
+      averageEntry: null,
+      positionCount: 0,
+      unrealizedPnl: null,
+      unpricedPositions: 0,
+    }]),
+  )]));
+}
+
+function aggregateInventory(positions, predicate, includeUnrealized) {
+  const boxes = emptyInventoryBoxes();
+  const floatingTotals = new Map();
+  for (const position of positions) {
+    if (!predicate(position)) continue;
+    const box = boxes[position.asset]?.[position.side];
+    if (!box) continue;
+    const shares = Number(position.shares) || 0;
+    if (shares <= 0) continue;
+    box.shares = round(box.shares + shares);
+    const cost = Number(position.totalCost);
+    box.costBasis = round(box.costBasis +
+      (Number.isFinite(cost) ? cost : (Number(position.avgEntry) || 0) * shares));
+    box.positionCount += 1;
+    if (!includeUnrealized) continue;
+    if (position.unrealizedPnl == null || !Number.isFinite(Number(position.unrealizedPnl))) {
+      box.unpricedPositions += 1;
+      continue;
+    }
+    floatingTotals.set(`${position.asset}:${position.side}`,
+      (floatingTotals.get(`${position.asset}:${position.side}`) || 0) +
+      Number(position.unrealizedPnl));
+  }
+  for (const asset of ['BTC', 'ETH']) {
+    for (const side of ['UP', 'DOWN']) {
+      const box = boxes[asset][side];
+      box.averageEntry = box.shares ? round(box.costBasis / box.shares) : null;
+      if (includeUnrealized) {
+        box.unrealizedPnl = box.unpricedPositions
+          ? null
+          : round(floatingTotals.get(`${asset}:${side}`) || 0);
+      }
+    }
+  }
+  return boxes;
 }
 
 function sortedLevels(levels, action) {
@@ -602,6 +651,12 @@ class CrossPairBot extends WickBot {
     const windowOpen = elapsedMs != null && elapsedMs >= 0 && elapsedMs < this.windowMs;
     const btcPrices = this.captureQuotePair(now, this.btcLiveQuotes);
     const ethPrices = state.livePrices;
+    const positionBuckets = {
+      currentWindow: aggregateInventory(this.positions, position =>
+        position.status === 'OPEN' && Number(position.windowStart) === Number(state.window?.start), true),
+      awaitingResolution: aggregateInventory(this.positions,
+        position => position.status === 'PENDING_RESOLUTION', false),
+    };
     const pairSnapshots = PAIRS.map(pair => {
       const pairState = this.pairStates[pair.id] || emptyPairState(pair);
       const marketPair = this.pairQuote(pair, now);
@@ -648,7 +703,6 @@ class CrossPairBot extends WickBot {
         sharesPerLeg: SHARES_PER_LEG,
         entryAskSum: marketPair.askSum,
         asksFresh: marketPair.asksFresh,
-        entryThreshold: ENTRY_ASK_SUM_MAX,
         maxEntryPricePerShare: MAX_ENTRY_PRICE,
         cycleCount: pairState.cycleCount,
         tiers,
@@ -714,15 +768,16 @@ class CrossPairBot extends WickBot {
         maxPricePerShare: MAX_ENTRY_PRICE,
         pairs: PAIRS.map(pair => ({ id: pair.id, label: pair.label, status:
           pairSnapshots.find(item => item.id === pair.id)?.status || 'ARMED' })),
-        trigger: 'For each pair, latch the base trigger below $0.90 and add-on triggers at or below $0.80, $0.70, $0.60, and $0.50.',
+        trigger: 'For each pair, independently trigger one tier at combined asks of $0.80, $0.70, $0.60, $0.50, and $0.40 or lower.',
         fillPolicy: 'Each tier sweeps visible asks up to $0.99 per share. Book only when both legs fully fill that tier size; otherwise book zero and retry that latched tier.',
       },
       settlement: {
         intraWindowSells: false,
+        resolutionPollIntervalMs: cfg.RESOLUTION_POLL_MS,
         windowEnd: 'Any unsold shares wait for confirmed resolution of their exact original BTC or ETH market.',
       },
       timing: 'Monitor both pairings throughout each aligned 5-minute window; no startup wait or entry cutoff.',
-      sizing: 'Base tier: 200 shares per leg below $0.90; each of the four lower combined-ask tiers adds 300 shares per leg. Both pairings are independent.',
+      sizing: 'Each of the five combined-ask tiers buys 100 shares per leg. Both pairings are independent.',
       trigger: 'BTC UP + ETH DOWN and ETH UP + BTC DOWN are monitored independently.',
       executionNote: 'Demo-only simulation. No positions are sold during the window; all filled shares are held for exact-market resolution.',
     };
@@ -748,6 +803,7 @@ class CrossPairBot extends WickBot {
         secondsRemaining: windowOpen ? Math.ceil((this.windowMs - elapsedMs) / 1000) : 0,
       },
       pairStates: pairSnapshots,
+      positionBuckets,
       recentPairCycles: this.pairCycles.slice(0, 20).map(cycle => ({
         ...cycle,
         legs: cycle.legPositionIds.map(id => {
@@ -767,10 +823,11 @@ class CrossPairBot extends WickBot {
         lastScanAt: this.lastScanAt,
         source: 'Polymarket BTC and ETH 5-minute Gamma/CLOB order books',
         marketResolution: 'Unexited legs resolve only against the confirmed result of their exact original BTC or ETH market.',
+        resolutionPollIntervalMs: cfg.RESOLUTION_POLL_MS,
       },
     };
   }
 }
 
-CrossPairBot.constants = { SHARES_PER_LEG, ENTRY_ASK_SUM_MAX, ENTRY_TIERS, QUOTE_MAX_AGE_MS, PAIRS };
+CrossPairBot.constants = { SHARES_PER_LEG, ENTRY_TIERS, QUOTE_MAX_AGE_MS, PAIRS };
 module.exports = CrossPairBot;

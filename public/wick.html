@@ -13,6 +13,15 @@
     .signal-box{border:1px solid #554c86;background:linear-gradient(100deg,#1c2447,#221d3c);border-radius:13px;padding:13px 15px;margin-top:12px}.signal-title{font-size:12px;font-weight:950;color:#d4c0ff;text-transform:uppercase;letter-spacing:.09em}.signal-text{margin-top:4px;font-weight:750}.rule-row{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:10px}.rule{border:1px solid var(--line);border-radius:10px;background:#10172c;padding:9px 10px}.rule b{display:block;font-size:13px}.rule span{display:block;color:var(--muted);font-size:10px;margin-top:2px}.bar{height:8px;border-radius:10px;background:#27324f;overflow:hidden;margin:8px 0}.bar i{display:block;height:100%;background:linear-gradient(90deg,var(--cyan),var(--purple),var(--green));transition:width .3s}.chart{border:1px solid #303b62;border-radius:12px;background:#0b1122;padding:8px}.chart svg{display:block;width:100%;height:auto}.chart-grid{stroke:#293552;stroke-width:1}.chart-line{fill:none;stroke:var(--cyan);stroke-width:3;filter:drop-shadow(0 0 5px #63e4ff77)}.chart-text{fill:var(--muted);font:11px system-ui,sans-serif}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;min-width:620px}th,td{padding:9px 8px;border-bottom:1px solid #283451;text-align:left;font-size:12px}th{color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.08em}tr:last-child td{border:0}.pill{display:inline-block;border-radius:99px;padding:3px 8px;background:#202c4b;color:#d7e2ff;font-size:10px;font-weight:850}.empty{padding:17px;color:var(--muted);text-align:center}.footer{margin:11px 2px;color:#7784a5;font-size:10px}.error{display:none;padding:10px 12px;color:#ffb5c3;border:1px solid #843e55;background:#351a2a;border-radius:10px;margin-top:10px}.error.show{display:block}
     @media(max-width:700px){main{padding:14px}.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.markets{grid-template-columns:1fr}.rule-row{grid-template-columns:1fr}.head{align-items:flex-start}.value{font-size:20px}}
     @media(max-width:420px){.badge{font-size:9px}.card{padding:11px}.side-price{font-size:22px}}
+     .overview-grid{grid-template-columns:repeat(5,minmax(0,1fr))}.inventory-grid{grid-template-columns:repeat(4,minmax(0,1fr))}
+     .inventory-card{border:1px solid var(--line);border-left:4px solid var(--cyan);border-radius:12px;padding:12px;background:#10172c}
+     .inventory-card.down{border-left-color:var(--red)}.inventory-heading{font-size:12px;font-weight:950;letter-spacing:.06em}
+     .inventory-heading span{margin-left:5px}.inventory-shares{font-size:23px;font-weight:950;margin:5px 0}
+     .inventory-meta{display:flex;justify-content:space-between;gap:8px;font-size:10px;color:var(--muted);margin-top:3px}
+     .inventory-state{font-size:10px;font-weight:850;margin-top:7px}.card-note{display:block;margin-top:4px;font-size:9px;color:var(--muted)}
+     @media(max-width:900px){.overview-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
+     @media(max-width:700px){.overview-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.inventory-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+     @media(max-width:420px){.inventory-card{padding:10px}.inventory-shares{font-size:20px}}
   </style>
   <style>
     .activity-list{display:grid;gap:8px}.activity-item{padding:11px 12px;border:1px solid var(--line);border-radius:11px;background:#10172c}.activity-head{display:flex;justify-content:space-between;align-items:center;gap:10px}.activity-head b{font-size:12px}.activity-time{font-size:10px;color:var(--muted);white-space:nowrap}.activity-item p{margin:4px 0 0;color:#c5cee7;font-size:11px;line-height:1.45}.activity-item.good{border-left:3px solid var(--green)}.activity-item.wait{border-left:3px solid var(--gold)}.activity-item.exit{border-left:3px solid var(--cyan)}.activity-item.error{display:block;border-left:3px solid var(--red)}
@@ -23,11 +32,12 @@
     <div><div class="title">BTC × ETH Cross-Pair Arbitrage</div><div class="subtitle">Two independent 5-minute pairings · paper trading only</div></div>
     <span class="badge"><i class="pulse"></i><span id="status">CONNECTING</span></span>
   </header>
-  <section class="grid">
+  <section class="grid overview-grid">
     <div class="card capital"><div class="label">Paper capital</div><div class="value" id="capital">—</div></div>
-    <div class="card"><div class="label">Equity</div><div class="value" id="equity">—</div></div>
+    <div class="card"><div class="label">Marked equity</div><div class="value" id="equity">—</div><small class="card-note">Pending-resolution shares excluded until result</small></div>
     <div class="card"><div class="label">Cash</div><div class="value" id="cash">—</div></div>
-    <div class="card pnl"><div class="label">Net P&amp;L</div><div class="value" id="pnl">—</div></div>
+    <div class="card pnl"><div class="label">Realized P&amp;L</div><div class="value" id="realizedPnl">—</div></div>
+    <div class="card"><div class="label">Unrealized P&amp;L</div><div class="value" id="unrealizedPnl">—</div><small class="card-note" id="unrealizedNote">Open positions marked at current bid</small></div>
   </section>
   <section class="panel">
     <h2>Live market prices</h2>
@@ -37,12 +47,14 @@
     </div>
     <div class="signal-box"><div class="signal-title">Cross-pair trading rules</div><div class="signal-text" id="signal">Waiting for fresh BTC and ETH prices…</div><div class="bar"><i id="entryProgress" style="width:0"></i></div><div class="small" id="entryTimer">—</div>
       <div class="rule-row" id="triggerRules">
-        <div class="rule"><b>BTC UP + ETH DOWN</b><span>Base: combined asks &lt; $0.90, 200 shares per leg.</span><span>Add 300 per leg at combined asks ≤ $0.80, $0.70, $0.60, and $0.50. Hold to resolution.</span></div>
-        <div class="rule"><b>ETH UP + BTC DOWN</b><span>Base: combined asks &lt; $0.90, 200 shares per leg.</span><span>Add 300 per leg at combined asks ≤ $0.80, $0.70, $0.60, and $0.50. Hold to resolution.</span></div>
+        <div class="rule"><b>BTC UP + ETH DOWN</b><span>100 shares per leg at combined asks ≤ $0.80, $0.70, $0.60, $0.50, and $0.40.</span><span>Each tier fires once per window. Hold filled shares for resolution.</span></div>
+        <div class="rule"><b>ETH UP + BTC DOWN</b><span>100 shares per leg at combined asks ≤ $0.80, $0.70, $0.60, $0.50, and $0.40.</span><span>Each tier fires once per window. Hold filled shares for resolution.</span></div>
       </div>
       <div class="small" id="triggerCap">Each tier fires once per pair/window. Both legs must fully fill at or below $0.99 per share; otherwise that tier books no shares and retries. No intra-window selling.</div>
     </div>
   </section>
+  <section class="panel"><h2>Current-window accumulated shares</h2><div class="grid inventory-grid" id="currentInventory"></div><div class="small" style="margin-top:8px">Average entry excludes fees. Floating P&amp;L uses the current best bid; stale or missing marks are shown as unavailable.</div></section>
+  <section class="panel"><h2>Accumulated shares awaiting resolution</h2><div class="grid inventory-grid" id="resolutionInventory"></div><div class="small" style="margin-top:8px" id="resolutionNote">The bot checks each market every 5 seconds and waits for its confirmed Polymarket result.</div></section>
   <section class="grid" style="margin-top:12px">
     <div class="card"><div class="label">Win rate</div><div class="value cyan" id="winRate">—</div></div>
     <div class="card"><div class="label">Wins / losses</div><div class="value" id="winsLosses">—</div></div>
@@ -76,9 +88,33 @@
     if(!items.length)return '<div class="empty">No positions yet.</div>';
     const rows=items.map(p=>{
       const state=p.status==='OPEN'?'OPEN':p.status==='PENDING_RESOLUTION'?'AWAITING RESOLUTION':p.status==='SETTLED_EXIT'?'RESOLVED':p.status;
-      return `<tr><td>${esc(p.pairLabel||p.pairId||'—')}</td><td>${esc(p.entryTierLabel||'—')}</td><td>${esc(p.asset||'')} <b class="${p.side==='UP'?'green':'red'}">${esc(p.side)}</b></td><td>${shares(p.shares||p.initialShares)} / ${shares(p.initialShares)}</td><td>${price(p.avgEntry)}</td><td><span class="pill">${esc(state)}</span></td><td>${esc(p.resolutionWinner||p.exitReason||'—')}</td><td>${usd(p.realizedPnl)}</td><td>${esc(p.slug||'')}</td></tr>`;
+      const floating=p.status==='OPEN'?p.unrealizedPnl:null;
+      const realized=p.status==='SETTLED_EXIT'?p.realizedPnl:null;
+      const result=p.resolutionWinner||(p.status==='PENDING_RESOLUTION'?'Waiting':'—');
+      return `<tr><td>${esc(p.pairLabel||p.pairId||'—')}</td><td>${esc(p.entryTierLabel||'—')}</td><td>${esc(p.asset||'')} <b class="${p.side==='UP'?'green':'red'}">${esc(p.side)}</b></td><td>${shares(p.shares||p.initialShares)} / ${shares(p.initialShares)}</td><td>${price(p.avgEntry)}</td><td><span class="pill">${esc(state)}</span></td><td>${esc(result)}</td><td>${pnlCell(floating)}</td><td>${pnlCell(realized)}</td><td>${esc(p.slug||'')}</td></tr>`;
     }).join('');
-    return `<table><thead><tr><th>Pair</th><th>Entry tier</th><th>Leg</th><th>Shares</th><th>Avg entry</th><th>Status</th><th>Resolution</th><th>Net P&amp;L</th><th>Market window</th></tr></thead><tbody>${rows}</tbody></table>`;
+    return `<table><thead><tr><th>Pair</th><th>Entry tier</th><th>Leg</th><th>Shares</th><th>Avg entry</th><th>Status</th><th>Resolution</th><th>Floating P&amp;L</th><th>Realized P&amp;L</th><th>Market window</th></tr></thead><tbody>${rows}</tbody></table>`;
+  }
+  function pnlCell(value){
+    if(value==null||!Number.isFinite(Number(value)))return '<span class="muted">—</span>';
+    return `<b class="${Number(value)>=0?'green':'red'}">${usd(value)}</b>`;
+  }
+  const INVENTORY_SIDES=[['BTC','UP'],['BTC','DOWN'],['ETH','UP'],['ETH','DOWN']];
+  function inventoryCards(boxes,pending=false){
+    return INVENTORY_SIDES.map(([asset,side])=>{
+      const item=boxes?.[asset]?.[side]||{};
+      const count=Number(item.shares)||0;
+      const floating=item.unrealizedPnl;
+      const state=pending
+        ?(count?'Waiting for official result':'No shares waiting')
+        :count
+          ?(floating==null
+            ?`Floating P&amp;L unavailable${item.unpricedPositions?` · ${item.unpricedPositions} unpriced`:''}`
+            :`Floating P&amp;L ${usd(floating)}`)
+          :'No open shares';
+      const stateClass=!pending&&floating!=null?(Number(floating)>=0?'green':'red'):'muted';
+      return `<article class="inventory-card ${side.toLowerCase()}"><div class="inventory-heading">${asset} <span class="${side==='UP'?'green':'red'}">${side}</span></div><div class="inventory-shares">${shares(count)} <span class="small">shares</span></div><div class="inventory-meta"><span>Average entry</span><b>${price(item.averageEntry)}</b></div><div class="inventory-meta"><span>Cost basis</span><b>${usd(item.costBasis)}</b></div><div class="inventory-state ${stateClass}">${state}</div><div class="small">${Number(item.positionCount||0)} position(s)</div></article>`;
+    }).join('');
   }
   function activityMessage(e){
     const pair=e.pairLabel||e.pairId||'Cross-pair';
@@ -126,9 +162,15 @@
     document.querySelector('#capital').textContent=usd(a.capital);
     document.querySelector('#equity').textContent=usd(a.equity);
     document.querySelector('#cash').textContent=usd(a.cash);
-    const pnl=document.querySelector('#pnl');pnl.textContent=usd(a.realizedPnl);pnl.className='value '+(Number(a.realizedPnl)>=0?'green':'red');
+     const realized=document.querySelector('#realizedPnl');realized.textContent=usd(a.realizedPnl);realized.className='value '+(Number(a.realizedPnl)>=0?'green':'red');
+     const floating=document.querySelector('#unrealizedPnl');floating.textContent=usd(a.unrealizedPnl);floating.className='value '+(Number(a.unrealizedPnl)>=0?'green':'red');
+     document.querySelector('#unrealizedNote').textContent=Number(a.unpricedOpenPositions||0)
+       ?`${a.unpricedOpenPositions} open position(s) have stale or unavailable marks`
+       :'Open positions marked at current bid';
     document.querySelector('#btcQuotes').innerHTML=['UP','DOWN'].map(side=>quoteCard(side,btc[side])).join('');
     document.querySelector('#ethQuotes').innerHTML=['UP','DOWN'].map(side=>quoteCard(side,eth[side])).join('');
+     document.querySelector('#currentInventory').innerHTML=inventoryCards(s.positionBuckets?.currentWindow);
+     document.querySelector('#resolutionInventory').innerHTML=inventoryCards(s.positionBuckets?.awaitingResolution,true);
     document.querySelector('#btcStatus').textContent=btc.marketSlug?'BTC 5M':'WAITING';
     document.querySelector('#ethStatus').textContent=w.slug?'ETH 5M':'WAITING';
     document.querySelector('#signal').textContent=s.signal?.reason||'Waiting for fresh BTC and ETH quotes.';
@@ -142,7 +184,9 @@
       return `<article class="rule"><b>${esc(pair.label)} <span class="pill">${esc(pair.status)}</span></b><span>Current combined asks: ${price(pair.entryAskSum)} · max buy: ${price(pair.maxEntryPricePerShare)}</span><span>${tierSummary||esc(pair.reason)}</span><span>${inventory?`Holding: ${inventory}`:'No shares held yet'} · successful tiers: ${Number(pair.cycleCount||0)}</span></article>`;
     }).join('');
     document.querySelector('#triggerCap').textContent=
-      'Each threshold is latched once per pair and window. If price jumps past lower rungs, every newly qualified rung is attempted; incomplete tiers book no shares and retry. No intra-window selling; hold all fills for exact-market resolution.';
+       'Each threshold is latched once per pair and window. If price jumps past lower tiers, every newly qualified tier is attempted; incomplete tiers book no shares and retry. No intra-window selling; hold fills for exact-market resolution.';
+     const pollSeconds=Number(s.strategy?.settlement?.resolutionPollIntervalMs||5000)/1000;
+     document.querySelector('#resolutionNote').textContent=`Checks every ${pollSeconds} seconds. Positions remain pending until Polymarket publishes a confirmed result for that exact market.`;
     const progress=Math.max(0,Math.min(100,(Number(entry.elapsedMs||0)/Number(entry.cutoffMs||300000))*100));
     document.querySelector('#entryProgress').style.width=progress+'%';
     document.querySelector('#entryTimer').textContent=entry.open

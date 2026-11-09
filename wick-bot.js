@@ -57,6 +57,7 @@ class WickBot{
     this.entryTriggerCandle=null;
     this.entryTriggerReason=null;this.entryOrderPlaced=false;this.entryOrderId=null;
     this.resolutionAttempts=new Map();
+    this.resolutionInFlight=new Set();
     this.quoteWindowStart=null;this.liveQuotes={UP:{status:'MISSING'},DOWN:{status:'MISSING'}};
     this.closeQuotes=null;
   }
@@ -93,7 +94,11 @@ class WickBot{
         this.closeQuotes=null;
       }
       await this.closePreviousWindows(currentStart,now);
-       await this.resolvePendingPositions(now);
+      this.resolvePendingPositions(now).catch(error=>{
+        this.log('POLYMARKET_RESOLUTION_CHECK_ERROR',{
+          note:error?.message||'Could not complete resolution checks',
+        });
+      });
       if(!this.market||this.market.start!==start||now-this.lastMarketAt>cfg.MARKET_REFRESH_MS){
         this.market=await this.loadMarket(start,this.windowMs);this.lastMarketAt=now;
         if(!this.market){
@@ -160,17 +165,23 @@ class WickBot{
   }
   async resolvePendingPositions(now=Date.now()){
     const due=this.positions.filter(p=>p.status==='PENDING_RESOLUTION'&&p.marketId&&
+      !this.resolutionInFlight.has(p.marketId)&&
       now-(this.resolutionAttempts.get(p.marketId)||0)>=cfg.RESOLUTION_POLL_MS);
     const marketIds=[...new Set(due.map(p=>p.marketId))];
     for(const marketId of marketIds){
       this.resolutionAttempts.set(marketId,now);
+      this.resolutionInFlight.add(marketId);
+    }
+    await Promise.all(marketIds.map(async marketId=>{
       try{
         const market=await this.marketData.getMarket(marketId);
         const winner=this.marketData.resolvedWinner(market);
-        if(!winner)continue;
-        for(const p of due.filter(item=>item.marketId===marketId)){
-          if(p.status!=='PENDING_RESOLUTION')continue;
-          this.finalizeResolution(p,winner,now);
+        if(winner){
+          for(const p of this.positions.filter(item=>
+            item.status==='PENDING_RESOLUTION'&&item.marketId===marketId)){
+            this.finalizeResolution(p,winner,now);
+          }
+          this.resolutionAttempts.delete(marketId);
         }
       }catch(error){
         const message=error?.message||'Could not fetch market resolution';
@@ -179,8 +190,10 @@ class WickBot{
           this.lastResolutionError=message;this.lastResolutionErrorAt=now;
           this.log('POLYMARKET_RESOLUTION_CHECK_ERROR',{marketId,note:message});
         }
+      }finally{
+        this.resolutionInFlight.delete(marketId);
       }
-    }
+    }));
   }
   openStrategyWindow(start,now){
     this.orderWindowStart=start;

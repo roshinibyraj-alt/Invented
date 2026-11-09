@@ -32,12 +32,14 @@ test('dashboard shows all cross-pair entry tiers and resolution-only exits', asy
   const html = await response.text();
   assert.equal(response.status, 200);
   assert.match(html, /BTC × ETH Cross-Pair Arbitrage/);
-  assert.match(html, /combined asks &lt; \$0\.90/);
-  assert.match(html, /combined asks ≤ \$0\.80, \$0\.70, \$0\.60, and \$0\.50/);
+  assert.match(html, /100 shares per leg at combined asks ≤ \$0\.80, \$0\.70, \$0\.60, \$0\.50, and \$0\.40/);
   assert.match(html, /No intra-window selling/);
   assert.match(html, /BTC UP \+ ETH DOWN/);
   assert.match(html, /ETH UP \+ BTC DOWN/);
-  assert.match(html, /300 per leg at combined asks/);
+  assert.match(html, /Current-window accumulated shares/);
+  assert.match(html, /Accumulated shares awaiting resolution/);
+  assert.match(html, /Floating P&amp;L/);
+  assert.match(html, /Realized P&amp;L/);
   assert.match(html, /fully fill at or below \$0\.99 per share/);
   assert.match(html, /that tier books no shares and retries/);
   assert.match(html, /Recent activity/);
