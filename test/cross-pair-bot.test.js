@@ -267,3 +267,20 @@ test('misaligned BTC and ETH markets are rejected', async () => {
   } });
   await assert.rejects(bot.loadMarket(START, WINDOW), /same 5-minute window start/);
 });
+
+test('a triggered rung pauses the opposite direction on that rung only', () => {
+  const { bot } = fixture();
+  assert.equal(setRoute(bot, { leaderAsk: 0.60, targetAsk: 0.49 }), true);
+  assert.equal(setRoute(bot, {
+    leaderSide: 'DOWN', targetSide: 'DOWN', leaderAsk: 0.60, targetAsk: 0.49, at: START + 2000,
+  }), false);
+  assert.equal(bot.positions.length, 1);
+  const down = bot.pairStates['btc-down-leads-eth-down'].tiers['tier-060-050'];
+  assert.equal(down.status, 'PAUSED_BY_OPPOSITE');
+  // A different rung is still independent.
+  assert.equal(setRoute(bot, {
+    leaderSide: 'DOWN', targetSide: 'DOWN', leaderAsk: 0.70, targetAsk: 0.59, at: START + 3000,
+  }), true);
+  assert.equal(bot.positions.length, 2);
+  assert.equal(bot.positions[0].entryTierId, 'tier-070-060');
+});
