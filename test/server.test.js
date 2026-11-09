@@ -36,8 +36,12 @@ test('dashboard shows cross-pair ask and bid rules without the retired strategy'
   assert.match(html, /combined bids ≥ \$1\.10/);
   assert.match(html, /BTC UP \+ ETH DOWN/);
   assert.match(html, /ETH UP \+ BTC DOWN/);
-  assert.match(html, /200 shares per leg/);
+  assert.match(html, /fully fill 200 each/);
+  assert.match(html, /at ≤ \$0\.99\/share/);
+  assert.match(html, /no pair entry is booked/);
   assert.match(html, /asks to buy · bids to sell/i);
+  assert.match(html, /Recent activity/);
+  assert.match(html, /No raw event payloads/);
   assert.match(html, /exact original BTC or ETH market/);
   assert.doesNotMatch(html, /BTC Strategy Lab/);
   assert.doesNotMatch(html, /Against signal/);

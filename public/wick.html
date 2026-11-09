@@ -14,6 +14,9 @@
     @media(max-width:700px){main{padding:14px}.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.markets{grid-template-columns:1fr}.rule-row{grid-template-columns:1fr}.head{align-items:flex-start}.value{font-size:20px}}
     @media(max-width:420px){.badge{font-size:9px}.card{padding:11px}.side-price{font-size:22px}}
   </style>
+  <style>
+    .activity-list{display:grid;gap:8px}.activity-item{padding:11px 12px;border:1px solid var(--line);border-radius:11px;background:#10172c}.activity-head{display:flex;justify-content:space-between;align-items:center;gap:10px}.activity-head b{font-size:12px}.activity-time{font-size:10px;color:var(--muted);white-space:nowrap}.activity-item p{margin:4px 0 0;color:#c5cee7;font-size:11px;line-height:1.45}.activity-item.good{border-left:3px solid var(--green)}.activity-item.wait{border-left:3px solid var(--gold)}.activity-item.exit{border-left:3px solid var(--cyan)}.activity-item.error{display:block;border-left:3px solid var(--red)}
+  </style>
 </head>
 <body><main>
   <header class="head">
@@ -34,10 +37,10 @@
     </div>
     <div class="signal-box"><div class="signal-title">Cross-pair trading rules</div><div class="signal-text" id="signal">Waiting for fresh BTC and ETH prices…</div><div class="bar"><i id="entryProgress" style="width:0"></i></div><div class="small" id="entryTimer">—</div>
       <div class="rule-row" id="triggerRules">
-        <div class="rule"><b>BTC UP + ETH DOWN</b><span>Buy 200 shares per leg when combined asks &lt; $0.90.</span><span>Sell at combined bids ≥ $1.10; then rearm.</span></div>
-        <div class="rule"><b>ETH UP + BTC DOWN</b><span>Buy 200 shares per leg when combined asks &lt; $0.90.</span><span>Sell at combined bids ≥ $1.10; then rearm.</span></div>
+        <div class="rule"><b>BTC UP + ETH DOWN</b><span>Enter when combined asks &lt; $0.90.</span><span>Both legs must fully fill 200 each at ≤ $0.99/share; exit on bids ≥ $1.10.</span></div>
+        <div class="rule"><b>ETH UP + BTC DOWN</b><span>Enter when combined asks &lt; $0.90.</span><span>Both legs must fully fill 200 each at ≤ $0.99/share; exit on bids ≥ $1.10.</span></div>
       </div>
-      <div class="small" id="triggerCap">Asks to buy · bids to sell. Both pairings operate independently.</div>
+      <div class="small" id="triggerCap">Asks to buy · bids to sell. If either leg lacks 200 shares at or below $0.99, no pair entry is booked and the bot retries.</div>
     </div>
   </section>
   <section class="grid" style="margin-top:12px">
@@ -48,6 +51,7 @@
   </section>
   <section class="panel"><h2>Equity history</h2><div class="chart" id="equityChart"><div class="empty">Settled trades will appear here.</div></div></section>
   <section class="panel"><h2>Pair positions</h2><div class="table-wrap" id="positions"><div class="empty">No positions yet.</div></div><div class="small" style="margin-top:9px">Paper only. Entries sweep visible asks; exits sweep visible bids. Taker fees are modeled for both legs. Any unsold shares await the exact original BTC or ETH market resolution.</div></section>
+  <section class="panel"><h2>Recent activity</h2><div class="small" style="margin:-6px 0 10px">Readable entry, fill, exit, and resolution updates. No raw event payloads.</div><div class="activity-list" id="activity"><div class="empty">No strategy activity yet.</div></div></section>
   <div class="error" id="error"></div>
   <div class="footer">No live orders are sent. Paper account history resets if the service restarts.</div>
 </main>
@@ -76,6 +80,50 @@
     }).join('');
     return `<table><thead><tr><th>Pair</th><th>Leg</th><th>Shares</th><th>Avg entry</th><th>Status</th><th>Exit / result</th><th>Net P&amp;L</th><th>Market window</th></tr></thead><tbody>${rows}</tbody></table>`;
   }
+  function activityMessage(e){
+    const pair=e.pairLabel||e.pairId||'Cross-pair';
+    switch(e.event){
+      case 'PAPER_CROSS_PAIR_ENTRY_WAITING_FOR_FULL_FILL':{
+        const legs=(e.legs||[]).map(leg=>`${leg.asset} ${leg.side}: ${shares(leg.availableSharesWithinCap)}/${shares(leg.requestedShares)} shares`).join(' · ');
+        return {kind:'wait',title:`${pair} · waiting for complete entry`,detail:`Max buy price ${price(e.maxPricePerShare)} per share. Available: ${legs||'no visible ask depth'}. No shares were booked; the bot will retry.`};
+      }
+      case 'PAPER_CROSS_PAIR_ENTRY_BLOCKED_CASH':
+        return {kind:'wait',title:`${pair} · entry not placed`,detail:`The complete pair needs ${usd(e.requiredCash)} including fees; paper cash is ${usd(e.availableCash)}. No shares were booked.`};
+      case 'PAPER_CROSS_PAIR_ENTRY_FILLED':{
+        const legs=(e.legs||[]).map(leg=>`${leg.asset} ${leg.side}: ${shares(leg.filledShares)}/${shares(leg.requestedShares)} @ ${price(leg.averageAsk)}`).join(' · ');
+        return {kind:'good',title:`${pair} · both legs fully filled`,detail:`Best-ask sum ${price(e.combinedAsk)}; depth-weighted average-price sum ${price(e.combinedAverageFillPrice)}. ${legs}. Cost ${usd(e.entryCost)} + ${usd(e.fees)} fees.`};
+      }
+      case 'PAPER_CROSS_PAIR_EXIT_TRIGGERED':
+        return {kind:'exit',title:`${pair} · sell condition reached`,detail:`Combined best bids ${price(e.combinedBestBid)} met the ${price(e.threshold)} exit rule. Selling available bids on both held legs.`};
+      case 'PAPER_CROSS_PAIR_LEG_SOLD':
+        return {kind:'exit',title:`${e.asset} ${e.side} · shares sold`,detail:`Sold ${shares(e.sharesSold)} at average bid ${price(e.averageBid)}; proceeds ${usd(e.proceeds)}, fee ${usd(e.takerFee)}, remaining ${shares(e.remainingShares)}.`};
+      case 'PAPER_CROSS_PAIR_CLOSED':
+        return {kind:'good',title:`${pair} · cycle closed and rearmed`,detail:`Both held legs are sold. Net cycle P&L: ${usd(e.realizedPnl)}.`};
+      case 'PAPER_STRATEGY_WINDOW_STARTED':
+        return {kind:'',title:'New aligned 5-minute window',detail:'BTC and ETH markets are being checked for the two cross-pair combinations.'};
+      case 'PAPER_POSITION_AWAITING_POLYMARKET_RESOLUTION':
+        return {kind:'wait',title:`${e.side||'Position'} · awaiting official resolution`,detail:`${shares(e.shares)} shares remain in market ${e.marketId||'—'}. The position will settle only when that exact market resolves.`};
+      case 'PAPER_OFFICIAL_WIN':
+      case 'PAPER_OFFICIAL_LOSS':
+        return {kind:e.event==='PAPER_OFFICIAL_WIN'?'good':'wait',title:`${e.side||'Position'} · official resolution`,detail:`Winning side: ${e.winner||'—'}. ${shares(e.shares)} shares; payout ${usd(e.payout)}; proceeds ${usd(e.proceeds)}; net P&L ${usd(e.pnl)}.`};
+      case 'PAPER_POSITION_OUTCOME_RECORDED':
+        return {kind:e.outcome==='WIN'?'good':'',title:`Position outcome · ${e.outcome||'recorded'}`,detail:`Result source: ${(e.reason||'—').replaceAll('_',' ').toLowerCase()}.`};
+      case 'SCAN_ERROR':
+        return {kind:'error',title:'Bot scan error',detail:e.note||'The bot could not complete this market scan.'};
+      case 'POLYMARKET_RESOLUTION_CHECK_ERROR':
+        return {kind:'error',title:'Resolution check delayed',detail:`Market ${e.marketId||'—'}: ${e.note||'The result is not available yet.'}`};
+      default:
+        return {kind:'',title:String(e.event||'Bot update').replaceAll('_',' ').toLowerCase(),detail:e.note||e.message||`Window ${e.windowStart?new Date(e.windowStart).toLocaleString():'—'}.`};
+    }
+  }
+  function activityList(events){
+    const items=(Array.isArray(events)?events:[]).filter(e=>e.event!=='HEARTBEAT').slice(0,12);
+    if(!items.length)return '<div class="empty">No strategy activity yet.</div>';
+    return items.map(e=>{
+      const message=activityMessage(e);
+      return `<article class="activity-item ${message.kind}"><div class="activity-head"><b>${esc(message.title)}</b><span class="activity-time">${esc(stamp(e.ts))}</span></div><p>${esc(message.detail)}</p></article>`;
+    }).join('');
+  }
   function render(s){
     const a=s.account||{},btc=s.btcPrices||{},eth=s.livePrices||{},w=s.window||{},entry=s.entryWindow||{};
     document.querySelector('#status').textContent=`${String(s.status||'waiting').replaceAll('_',' ')} · ${s.mode||'PAPER'}`.toUpperCase();
@@ -94,10 +142,10 @@
       const legSummary=active?.legs?.map(leg=>
         `${esc(leg.asset)} ${esc(leg.side)}: ${shares(leg.shares)} shares @ ${price(leg.averageEntry)}`
       ).join(' · ');
-      return `<article class="rule"><b>${esc(pair.label)} <span class="pill">${esc(pair.status)}</span></b><span>Combined asks · buy: ${price(pair.entryAskSum)} | combined bids · sell: ${price(pair.exitBidSum)}</span><span>${active?`Cycle ${active.cycleNumber} · ${legSummary||''}`:esc(pair.reason)}</span><span>Cycles: ${Number(pair.cycleCount||0)} · 200 shares per leg</span></article>`;
+      return `<article class="rule"><b>${esc(pair.label)} <span class="pill">${esc(pair.status)}</span></b><span>Combined asks · buy: ${price(pair.entryAskSum)} | combined bids · sell: ${price(pair.exitBidSum)} | max buy: ${price(pair.maxEntryPricePerShare)}</span><span>${active?`Cycle ${active.cycleNumber} · ${legSummary||''}`:esc(pair.reason)}</span><span>Cycles: ${Number(pair.cycleCount||0)} · full 200-share fill required per leg</span></article>`;
     }).join('');
     document.querySelector('#triggerCap').textContent=
-      'Asks to buy · bids to sell. Entry: combined asks < $0.90. Exit: combined bids ≥ $1.10. Each pair rearms after both legs sell.';
+      'Asks to buy · bids to sell. Enter below $0.90 combined asks only if both 200-share legs fully fill at or below $0.99 each; otherwise no shares are booked and the bot retries. Exit at combined bids ≥ $1.10, then rearm.';
     const progress=Math.max(0,Math.min(100,(Number(entry.elapsedMs||0)/Number(entry.cutoffMs||300000))*100));
     document.querySelector('#entryProgress').style.width=progress+'%';
     document.querySelector('#entryTimer').textContent=entry.open
@@ -109,6 +157,7 @@
     document.querySelector('#openPositions').textContent=a.openPositions??0;
     document.querySelector('#equityChart').innerHTML=equitySvg(a.equityCurve);
     document.querySelector('#positions').innerHTML=positionTable(Array.isArray(s.positions)?s.positions:[]);
+    document.querySelector('#activity').innerHTML=activityList(s.events);
   }
   async function refresh(){
     try{

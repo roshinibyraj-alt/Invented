@@ -150,7 +150,7 @@ test('the reverse pairing is independent and both pairs may enter in the same sc
   );
 });
 
-test('entry boundary is strict and paired taker entries only book visible ask depth', () => {
+test('entry boundary is strict and an incomplete pair books no shares', () => {
   const boundary = fixture().bot;
   assert.equal(enterBtcUpEthDown(boundary, START + 1000, { btcAsk: 0.40, ethAsk: 0.50 }), false);
   assert.equal(boundary.positions.length, 0);
@@ -158,14 +158,42 @@ test('entry boundary is strict and paired taker entries only book visible ask de
   const shallow = fixture().bot;
   assert.equal(enterBtcUpEthDown(shallow, START + 1000, {
     btcAsk: 0.40, ethAsk: 0.49, askSize: 199,
-  }), true);
-  assert.equal(shallow.positions.length, 2);
-  assert.ok(shallow.positions.every(position => position.shares === 199));
-  assert.ok(shallow.orders.filter(order => order.action === 'BUY')
-    .every(order => order.status === 'PARTIALLY_FILLED_REMAINDER_CANCELLED'));
+  }), false);
+  assert.equal(shallow.positions.length, 0);
+  assert.equal(shallow.orders.length, 0);
+  assert.equal(pairState(shallow).status, 'WAITING_FOR_FULL_FILL');
+  assert.match(pairState(shallow).lastReason, /No shares were booked/);
 
   const qualifies = fixture().bot;
   assert.equal(enterBtcUpEthDown(qualifies, START + 1000, { btcAsk: 0.40, ethAsk: 0.499 }), true);
+});
+
+test('entry sweeps asks up to $0.99 and requires full size on both legs', () => {
+  const { bot } = fixture();
+  const now = START + 1000;
+  setQuote(bot, 'BTC', 'UP', {
+    ask: 0.40, askLevels: [{ price: 0.40, size: 100 }, { price: 0.99, size: 100 }], at: now,
+  });
+  setQuote(bot, 'ETH', 'DOWN', {
+    ask: 0.49, askLevels: [{ price: 0.49, size: 200 }], at: now,
+  });
+  assert.equal(bot.processStrategyEntry(now), true);
+  const btc = bot.positions.find(position => position.asset === 'BTC');
+  assert.equal(btc.shares, 200);
+  assert.equal(btc.avgEntry, 0.695);
+  assert.equal(btc.maxEntryPrice, 0.99);
+  assert.equal(bot.snapshot().strategy.entries.maxPricePerShare, 0.99);
+
+  const blocked = fixture().bot;
+  setQuote(blocked, 'BTC', 'UP', {
+    ask: 0.40, askLevels: [{ price: 0.40, size: 100 }, { price: 0.991, size: 100 }], at: now,
+  });
+  setQuote(blocked, 'ETH', 'DOWN', {
+    ask: 0.49, askLevels: [{ price: 0.49, size: 200 }], at: now,
+  });
+  assert.equal(blocked.processStrategyEntry(now), false);
+  assert.equal(blocked.positions.length, 0);
+  assert.match(pairState(blocked).lastReason, /100\/200/);
 });
 
 test('stale or missing quotes cannot trigger a pair entry', () => {
@@ -177,16 +205,18 @@ test('stale or missing quotes cannot trigger a pair entry', () => {
   assert.equal(bot.positions.length, 0);
 });
 
-test('one leg may partially fill, and only actually filled shares are exited', () => {
+test('if either leg lacks full depth, neither leg is booked; bot retries the pair', () => {
   const { bot } = fixture();
   setQuote(bot, 'BTC', 'UP', { ask: 0.40, askSize: 0 });
   setQuote(bot, 'ETH', 'DOWN', { ask: 0.49, askSize: 200 });
-  assert.equal(bot.processStrategyEntry(START + 1000), true);
-  assert.equal(bot.positions.length, 1);
-  assert.equal(bot.positions[0].asset, 'ETH');
-  assert.equal(bot.positions[0].shares, 200);
-  assert.equal(bot.orders.find(order => order.asset === 'BTC' && order.action === 'BUY')
-    .status, 'REJECTED_NO_VISIBLE_ASK_DEPTH');
+  assert.equal(bot.processStrategyEntry(START + 1000), false);
+  assert.equal(bot.positions.length, 0);
+  assert.equal(bot.orders.length, 0);
+  assert.equal(pairState(bot).status, 'WAITING_FOR_FULL_FILL');
+  setQuote(bot, 'BTC', 'UP', { ask: 0.40, askSize: 200, at: START + 2000 });
+  setQuote(bot, 'ETH', 'DOWN', { ask: 0.49, askSize: 200, at: START + 2000 });
+  assert.equal(bot.processStrategyEntry(START + 2000), true);
+  assert.equal(bot.positions.length, 2);
 
   const now = START + 5000;
   setQuote(bot, 'BTC', 'UP', { bid: 0.56, ask: 0.60, at: now });

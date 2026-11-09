@@ -8,6 +8,7 @@ const { quoteFromBook, takerFeeFor, feeContext } = WickBot._test;
 const SHARES_PER_LEG = cfg.CROSS_PAIR_SHARES_PER_LEG;
 const ENTRY_ASK_SUM_MAX = cfg.CROSS_PAIR_ENTRY_ASK_SUM_MAX;
 const EXIT_BID_SUM_MIN = cfg.CROSS_PAIR_EXIT_BID_SUM_MIN;
+const MAX_ENTRY_PRICE = cfg.CROSS_PAIR_MAX_ENTRY_PRICE;
 const QUOTE_MAX_AGE_MS = 2000;
 const PAIRS = Object.freeze([
   Object.freeze({
@@ -40,11 +41,12 @@ function sortedLevels(levels, action) {
     .sort((a, b) => action === 'BUY' ? a.price - b.price : b.price - a.price);
 }
 
-function sweepBook(levels, requestedShares, action) {
+function sweepBook(levels, requestedShares, action, maxPrice = null) {
   let remaining = requestedShares;
   let notional = 0;
   const fills = [];
   for (const level of sortedLevels(levels, action)) {
+    if (action === 'BUY' && maxPrice != null && level.price > maxPrice + 1e-9) break;
     if (remaining <= 1e-9) break;
     const shares = Math.min(remaining, level.size);
     const value = shares * level.price;
@@ -78,6 +80,10 @@ function emptyPairState(pair) {
     lastReason: 'Waiting for both ask quotes.',
     lastEntryAskSum: null,
     lastExitBidSum: null,
+    lastDepthNotice: null,
+    lastDepthNoticeAt: 0,
+    lastBlockNotice: null,
+    lastBlockNoticeAt: 0,
   };
 }
 
@@ -214,6 +220,8 @@ class CrossPairBot extends WickBot {
       if (marketPair.askSum >= ENTRY_ASK_SUM_MAX) {
         pairState.status = 'ARMED';
         pairState.lastReason = `Combined ask ${marketPair.askSum.toFixed(3)} is not below $${ENTRY_ASK_SUM_MAX.toFixed(2)}.`;
+        pairState.lastDepthNotice = null;
+        pairState.lastBlockNotice = null;
         continue;
       }
       pairState.status = 'ENTRY_READY';
@@ -227,19 +235,55 @@ class CrossPairBot extends WickBot {
   buyPair(pair, pairState, marketPair, now) {
     const fills = marketPair.legs.map(leg => ({
       ...leg,
-      fill: sweepBook(leg.quote.askLevels, SHARES_PER_LEG, 'BUY'),
+      fill: sweepBook(leg.quote.askLevels, SHARES_PER_LEG, 'BUY', MAX_ENTRY_PRICE),
     }));
-    const filledLegs = fills.filter(leg => leg.fill.filledShares > 1e-9);
-    if (!filledLegs.length) {
-      pairState.lastReason = 'Combined ask qualifies, but neither leg has visible ask depth; waiting for liquidity.';
-      return false;
-    }
     for (const leg of fills) {
       leg.fee = feesFor(leg.market, leg.fill.fills);
     }
+    const incomplete = fills.filter(leg => leg.fill.filledShares + 1e-9 < SHARES_PER_LEG);
+    if (incomplete.length) {
+      const depthSummary = fills.map(leg =>
+        `${leg.asset} ${leg.side} ${leg.fill.filledShares}/${SHARES_PER_LEG}`).join(', ');
+      const reason = `Waiting for a complete pair: visible asks at or below $${MAX_ENTRY_PRICE.toFixed(2)} can fill ${depthSummary}. No shares were booked; retrying.`;
+      pairState.status = 'WAITING_FOR_FULL_FILL';
+      pairState.lastReason = reason;
+      if (pairState.lastDepthNotice !== depthSummary ||
+          now - pairState.lastDepthNoticeAt >= 5000) {
+        this.log('PAPER_CROSS_PAIR_ENTRY_WAITING_FOR_FULL_FILL', {
+          pairId: pair.id,
+          pairLabel: pair.label,
+          combinedBestAsk: marketPair.askSum,
+          maxPricePerShare: MAX_ENTRY_PRICE,
+          requestedSharesPerLeg: SHARES_PER_LEG,
+          legs: fills.map(leg => ({
+            asset: leg.asset,
+            side: leg.side,
+            requestedShares: SHARES_PER_LEG,
+            availableSharesWithinCap: leg.fill.filledShares,
+          })),
+          message: 'No entry was booked because both legs could not fill completely.',
+        });
+        pairState.lastDepthNotice = depthSummary;
+        pairState.lastDepthNoticeAt = now;
+      }
+      return false;
+    }
     const totalDebit = fills.reduce((sum, leg) => sum + leg.fill.notional + leg.fee, 0);
     if (totalDebit > this.cash + 1e-9) {
-      pairState.lastReason = `Combined ask qualifies, but the $${round(totalDebit).toFixed(2)} paired entry exceeds available cash.`;
+      pairState.status = 'BLOCKED_INSUFFICIENT_CASH';
+      const reason = `Complete pair needs $${round(totalDebit).toFixed(2)} including fees; available paper cash is $${round(this.cash).toFixed(2)}. No shares were booked.`;
+      pairState.lastReason = reason;
+      if (pairState.lastBlockNotice !== reason || now - pairState.lastBlockNoticeAt >= 5000) {
+        this.log('PAPER_CROSS_PAIR_ENTRY_BLOCKED_CASH', {
+          pairId: pair.id,
+          pairLabel: pair.label,
+          requiredCash: round(totalDebit),
+          availableCash: round(this.cash),
+          maxPricePerShare: MAX_ENTRY_PRICE,
+        });
+        pairState.lastBlockNotice = reason;
+        pairState.lastBlockNoticeAt = now;
+      }
       return false;
     }
 
@@ -254,6 +298,7 @@ class CrossPairBot extends WickBot {
       status: 'OPEN',
       entryAt: now,
       entryAskSum: marketPair.askSum,
+      entryAveragePriceSum: round(fills.reduce((sum, leg) => sum + leg.fill.averagePrice, 0)),
       entryCost: round(fills.reduce((sum, leg) => sum + leg.fill.notional, 0)),
       entryFees: round(fills.reduce((sum, leg) => sum + leg.fee, 0)),
       legPositionIds: [],
@@ -280,7 +325,7 @@ class CrossPairBot extends WickBot {
         kind: 'PAIR_ENTRY',
         orderType: 'MARKET',
         requestedShares: SHARES_PER_LEG,
-        filledShares: leg.fill.filledShares,
+        filledShares: SHARES_PER_LEG,
         remainingShares: 0,
         cost: leg.fill.notional,
         fee: leg.fee,
@@ -293,33 +338,14 @@ class CrossPairBot extends WickBot {
           fee: round(takerFeeFor(leg.market, fill.price, fill.shares)),
           source: 'VISIBLE_ASK_DEPTH',
         })),
-        cancelledRemainderShares: leg.fill.remainingShares,
+        cancelledRemainderShares: 0,
+        maxPricePerShare: MAX_ENTRY_PRICE,
         createdAt: now,
         submittedAt: now,
-        filledAt: leg.fill.filledShares > 0 ? now : null,
-        status: leg.fill.filledShares <= 1e-9
-          ? 'REJECTED_NO_VISIBLE_ASK_DEPTH'
-          : leg.fill.remainingShares > 1e-9
-            ? 'PARTIALLY_FILLED_REMAINDER_CANCELLED'
-            : 'FILLED',
+        filledAt: now,
+        status: 'FILLED',
       };
-      const positionId = leg.fill.filledShares > 1e-9
-        ? `${cycleId}-${leg.asset.toLowerCase()}-${leg.side.toLowerCase()}`
-        : null;
-      if (!positionId) {
-        order.positionId = null;
-        order.positionIds = [];
-        leg.orderId = orderId;
-        this.orders.unshift(order);
-        this.windowOrders.unshift(order);
-        this.totalOrderAttempts += 1;
-        cycle.legs.push({
-          asset: leg.asset, side: leg.side,
-          requestedShares: SHARES_PER_LEG, filledShares: 0,
-          positionId: null, orderId,
-        });
-        continue;
-      }
+      const positionId = `${cycleId}-${leg.asset.toLowerCase()}-${leg.side.toLowerCase()}`;
       const position = {
         id: positionId,
         timeframe: this.timeframe,
@@ -343,10 +369,11 @@ class CrossPairBot extends WickBot {
         strategyId: this.strategyId,
         strategyName: this.strategyName,
         orderType: 'MARKET',
-        fillModel: 'PAPER_VISIBLE_ASK_DEPTH',
-        shares: leg.fill.filledShares,
-        initialShares: leg.fill.filledShares,
+        fillModel: 'PAPER_VISIBLE_ASK_DEPTH_WITH_MAX_PRICE',
+        shares: SHARES_PER_LEG,
+        initialShares: SHARES_PER_LEG,
         requestedShares: SHARES_PER_LEG,
+        maxEntryPrice: MAX_ENTRY_PRICE,
         avgEntry: leg.fill.averagePrice,
         fillPrice: leg.fill.averagePrice,
         cost: leg.fill.notional,
@@ -381,7 +408,7 @@ class CrossPairBot extends WickBot {
       leg.position = position;
       cycle.legs.push({
         asset: leg.asset, side: leg.side,
-        requestedShares: SHARES_PER_LEG, filledShares: leg.fill.filledShares,
+        requestedShares: SHARES_PER_LEG, filledShares: SHARES_PER_LEG,
         positionId, orderId,
       });
       this.orders.unshift(order);
@@ -396,9 +423,9 @@ class CrossPairBot extends WickBot {
     pairState.status = 'IN_POSITION';
     pairState.activeCycle = cycle;
     pairState.lastEntryAskSum = marketPair.askSum;
-    pairState.lastReason = fills.some(leg => leg.fill.remainingShares > 1e-9)
-      ? `Only visible depth filled (${fills.map(leg => `${leg.asset} ${leg.side} ${leg.fill.filledShares}/${SHARES_PER_LEG}`).join(', ')}); waiting for the bid exit.`
-      : `Bought ${SHARES_PER_LEG} shares on each leg; waiting for combined best bids of $${EXIT_BID_SUM_MIN.toFixed(2)} or more.`;
+    pairState.lastReason = `Both legs fully filled for ${SHARES_PER_LEG} shares each; waiting for combined best bids of $${EXIT_BID_SUM_MIN.toFixed(2)} or more.`;
+    pairState.lastDepthNotice = null;
+    pairState.lastBlockNotice = null;
     this.pairCycles.unshift(cycle);
     this.entryOrderPlaced = true;
     this.entryOrderId = this.orders[0]?.id || null;
@@ -419,14 +446,16 @@ class CrossPairBot extends WickBot {
       pairLabel: pair.label,
       sharesPerLeg: SHARES_PER_LEG,
       combinedAsk: marketPair.askSum,
+      combinedAverageFillPrice: cycle.entryAveragePriceSum,
+      maxPricePerShare: MAX_ENTRY_PRICE,
       entryCost: cycle.entryCost,
       fees: cycle.entryFees,
       legs: fills.map(leg => ({
         asset: leg.asset,
         side: leg.side,
         requestedShares: SHARES_PER_LEG,
-        filledShares: leg.fill.filledShares,
-        cancelledRemainderShares: leg.fill.remainingShares,
+        filledShares: SHARES_PER_LEG,
+        cancelledRemainderShares: 0,
         averageAsk: leg.fill.averagePrice,
         cost: leg.fill.notional,
         fee: leg.fee,
@@ -662,11 +691,14 @@ class CrossPairBot extends WickBot {
         ? activeCycle.exitTriggeredAt ? 'EXITING' : 'IN POSITION'
         : !windowOpen ? 'WINDOW CLOSED'
           : !marketPair.asksFresh ? 'WAITING FOR QUOTES'
-            : marketPair.askSum < ENTRY_ASK_SUM_MAX ? 'ENTRY READY' : 'ARMED';
+            : marketPair.askSum < ENTRY_ASK_SUM_MAX
+              ? pairState.status === 'WAITING_FOR_FULL_FILL' ? 'WAITING FOR FULL FILL'
+                : pairState.status === 'BLOCKED_INSUFFICIENT_CASH' ? 'BLOCKED BY CASH' : 'ENTRY READY'
+              : 'ARMED';
       const reason = activeCycle
         ? activeCycle.exitTriggeredAt
           ? `Exit triggered at combined bids ${Number(activeCycle.exitBidSum).toFixed(3)}; completing visible-depth sells.`
-          : `Exit at combined best bids of $${EXIT_BID_SUM_MIN.toFixed(2)} or more; actual leg sizes reflect visible ask fills.`
+          : `Both legs fully filled at or below $${MAX_ENTRY_PRICE.toFixed(2)} per share; exit at combined bids of $${EXIT_BID_SUM_MIN.toFixed(2)} or more.`
         : !windowOpen ? 'Waiting for the next aligned 5-minute BTC/ETH window.'
           : !marketPair.asksFresh ? 'Waiting for fresh ask quotes on both legs.'
             : marketPair.askSum < ENTRY_ASK_SUM_MAX
@@ -684,12 +716,14 @@ class CrossPairBot extends WickBot {
         bidsFresh: marketPair.bidsFresh,
         entryThreshold: ENTRY_ASK_SUM_MAX,
         exitThreshold: EXIT_BID_SUM_MIN,
+        maxEntryPricePerShare: MAX_ENTRY_PRICE,
         cycleCount: pairState.cycleCount,
         activeCycle: activeCycle ? {
           id: activeCycle.id,
           cycleNumber: activeCycle.cycleNumber,
           status: activeCycle.status,
           entryAskSum: activeCycle.entryAskSum,
+          entryAveragePriceSum: activeCycle.entryAveragePriceSum,
           entryCost: activeCycle.entryCost,
           entryFees: activeCycle.entryFees,
           exitTriggeredAt: activeCycle.exitTriggeredAt,
@@ -706,10 +740,15 @@ class CrossPairBot extends WickBot {
         } : null,
       };
     });
-    const entryReadyCount = pairSnapshots.filter(pair => pair.status === 'ENTRY READY').length;
+    const entryReadyCount = pairSnapshots.filter(pair =>
+      ['ENTRY READY', 'WAITING FOR FULL FILL', 'BLOCKED BY CASH'].includes(pair.status)).length;
+    const fullFillPendingCount = pairSnapshots.filter(pair =>
+      pair.status === 'WAITING FOR FULL FILL').length;
     const signalReason = windowOpen
-      ? entryReadyCount
-        ? `${entryReadyCount} cross-pair combination(s) meet the ask threshold; checking both legs' visible depth.`
+      ? fullFillPendingCount
+        ? `${fullFillPendingCount} pair(s) meet the ask threshold but lack enough visible asks under $${MAX_ENTRY_PRICE.toFixed(2)} to fill both 200-share legs completely; no entry is booked.`
+        : entryReadyCount
+        ? `${entryReadyCount} cross-pair combination(s) meet the ask threshold; checking for complete fills on both legs.`
         : 'Monitoring both cross-pair combinations for combined asks below $0.90.'
       : 'Waiting for the next aligned BTC and ETH 5-minute window.';
     const strategy = {
@@ -723,10 +762,11 @@ class CrossPairBot extends WickBot {
         orderType: 'MARKET',
         sharesPerLeg: SHARES_PER_LEG,
         combinedAskMaximum: ENTRY_ASK_SUM_MAX,
+        maxPricePerShare: MAX_ENTRY_PRICE,
         pairs: PAIRS.map(pair => ({ id: pair.id, label: pair.label, status:
           pairSnapshots.find(item => item.id === pair.id)?.status || 'ARMED' })),
         trigger: 'Independently buy 200 shares of both legs when that pair’s fresh best asks sum to less than $0.90.',
-        fillPolicy: 'Paper market buys sweep visible ask depth independently on both legs. Any unfilled remainder is recorded as unfilled; no assumed fills.',
+        fillPolicy: 'Sweep visible asks up to $0.99 per share. Book the paired entry only if all 200 shares on both legs fill; otherwise book zero and retry.',
       },
       exit: {
         orderType: 'MARKET_SELL_ON_COMBINED_BID',
@@ -738,7 +778,7 @@ class CrossPairBot extends WickBot {
       timing: 'Monitor both pairings throughout each aligned 5-minute window; no startup wait or entry cutoff.',
       sizing: '200 shares per leg for each qualifying pairing; the two pairings are independent.',
       trigger: 'BTC UP + ETH DOWN and ETH UP + BTC DOWN are monitored independently.',
-      executionNote: 'Demo-only simulation; entry asks and exit bids are distinct, and visible book depth determines modeled fill prices.',
+      executionNote: 'Demo-only simulation; entry asks and exit bids are distinct. Both entry legs must fully sweep visible depth under the $0.99 per-share cap.',
     };
     return {
       ...state,
