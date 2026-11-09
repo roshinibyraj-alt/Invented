@@ -1,18 +1,18 @@
 'use strict';
 
-const CrossAssetBot=require('./cross-asset-bot');
+const CrossPairBot=require('./cross-pair-bot');
 
 class MultiBot {
   constructor(){
     this.bots={
-      'eth-5m-btc-confirmed':new CrossAssetBot(),
+      'btc-eth-cross-pair-arbitrage':new CrossPairBot(),
     };
   }
   start(){for(const bot of Object.values(this.bots))bot.start()}
   stop(){for(const bot of Object.values(this.bots))bot.stop()}
   snapshot(){
     const strategies=Object.fromEntries(Object.entries(this.bots).map(([k,b])=>[k,b.snapshot()]));
-    const primary=strategies['eth-5m-btc-confirmed'];
+    const primary=strategies['btc-eth-cross-pair-arbitrage'];
     const timeframes={'5m':primary};
     const states=Object.values(strategies),positions=states.flatMap(s=>s.positions)
       .sort((a,b)=>b.openedAt-a.openedAt),events=states.flatMap(s=>s.events).sort((a,b)=>b.ts-a.ts).slice(0,100);

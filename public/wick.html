@@ -4,20 +4,20 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#090d1c">
-  <title>BTC → ETH Paper Bot</title>
+  <title>BTC × ETH Cross-Pair Arbitrage</title>
   <style>
     :root{color-scheme:dark;--bg:#090d1c;--panel:#121a30;--line:#29385f;--muted:#9eacd0;--text:#f5f7ff;--green:#4cf0ae;--red:#ff668c;--cyan:#63e4ff;--purple:#c39bff;--gold:#ffd166}
     *{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 9% 0,#26326d 0,transparent 34%),radial-gradient(ellipse at 100% 12%,#52234a 0,transparent 31%),linear-gradient(150deg,#080b19,#0f1730 60%,#111124);color:var(--text);font:14px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}
     main{max-width:1100px;margin:auto;padding:22px}.head{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin-bottom:17px}.title{font-size:clamp(26px,4vw,38px);font-weight:950;letter-spacing:-.045em;background:linear-gradient(90deg,#fff,var(--cyan),var(--purple));background-clip:text;color:transparent}.subtitle{color:var(--muted);margin-top:2px}.badge{display:inline-flex;align-items:center;gap:8px;padding:7px 11px;border:1px solid #2e8c70;background:#12382f;border-radius:99px;color:#70ffd0;font-size:11px;font-weight:900;letter-spacing:.08em;white-space:nowrap}
     .pulse{width:8px;height:8px;background:var(--green);border-radius:50%;box-shadow:0 0 12px var(--green)}.panel,.card{border:1px solid var(--line);border-radius:17px;background:linear-gradient(145deg,#192342f2,#11172bee);box-shadow:0 14px 42px #02040c66}.panel{padding:17px;margin-top:13px}.panel h2{font-size:16px;margin:0 0 12px}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.card{padding:13px 15px;min-height:84px}.card.capital{border-color:#4783ed;background:linear-gradient(140deg,#183c68,#191c3e)}.card.pnl{border-color:#269b70;background:linear-gradient(140deg,#124839,#132a32)}.card.loss{border-color:#be4969;background:linear-gradient(140deg,#542037,#2a1934)}.label{text-transform:uppercase;letter-spacing:.1em;color:var(--muted);font-size:10px;font-weight:850}.value{font-size:22px;font-weight:950;letter-spacing:-.03em;margin-top:5px;font-variant-numeric:tabular-nums}.green{color:var(--green)}.red{color:var(--red)}.cyan{color:var(--cyan)}.muted{color:var(--muted)}.small{font-size:11px;color:var(--muted)}.markets{display:grid;grid-template-columns:1fr 1fr;gap:12px}.market{border:1px solid var(--line);border-radius:14px;padding:14px;background:#0d1428}.market.btc{border-top:3px solid var(--cyan)}.market.eth{border-top:3px solid var(--purple)}.market-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}.market-name{font-size:17px;font-weight:950}.side-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}.side{padding:11px;border-radius:11px;background:#151d36;border:1px solid #2c395b}.side.up{border-left:4px solid var(--green)}.side.down{border-left:4px solid var(--red)}.side-label{font-size:10px;font-weight:900;letter-spacing:.1em;color:var(--muted)}.side-price{font-size:26px;line-height:1.2;font-weight:950;margin-top:3px;font-variant-numeric:tabular-nums}.side.up .side-price{color:var(--green)}.side.down .side-price{color:var(--red)}.quote-meta{display:flex;justify-content:space-between;gap:8px;margin-top:6px;font-size:10px;color:var(--muted)}
-    .signal-box{border:1px solid #554c86;background:linear-gradient(100deg,#1c2447,#221d3c);border-radius:13px;padding:13px 15px;margin-top:12px}.signal-title{font-size:12px;font-weight:950;color:#d4c0ff;text-transform:uppercase;letter-spacing:.09em}.signal-text{margin-top:4px;font-weight:750}.rule-row{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:10px}.rule{border:1px solid var(--line);border-radius:10px;background:#10172c;padding:9px 10px}.rule b{display:block;font-size:13px}.rule span{display:block;color:var(--muted);font-size:10px;margin-top:2px}.bar{height:8px;border-radius:10px;background:#27324f;overflow:hidden;margin:8px 0}.bar i{display:block;height:100%;background:linear-gradient(90deg,var(--cyan),var(--purple),var(--green));transition:width .3s}.chart{border:1px solid #303b62;border-radius:12px;background:#0b1122;padding:8px}.chart svg{display:block;width:100%;height:auto}.chart-grid{stroke:#293552;stroke-width:1}.chart-line{fill:none;stroke:var(--cyan);stroke-width:3;filter:drop-shadow(0 0 5px #63e4ff77)}.chart-text{fill:var(--muted);font:11px system-ui,sans-serif}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;min-width:620px}th,td{padding:9px 8px;border-bottom:1px solid #283451;text-align:left;font-size:12px}th{color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.08em}tr:last-child td{border:0}.pill{display:inline-block;border-radius:99px;padding:3px 8px;background:#202c4b;color:#d7e2ff;font-size:10px;font-weight:850}.empty{padding:17px;color:var(--muted);text-align:center}.footer{margin:11px 2px;color:#7784a5;font-size:10px}.error{display:none;padding:10px 12px;color:#ffb5c3;border:1px solid #843e55;background:#351a2a;border-radius:10px;margin-top:10px}.error.show{display:block}
+    .signal-box{border:1px solid #554c86;background:linear-gradient(100deg,#1c2447,#221d3c);border-radius:13px;padding:13px 15px;margin-top:12px}.signal-title{font-size:12px;font-weight:950;color:#d4c0ff;text-transform:uppercase;letter-spacing:.09em}.signal-text{margin-top:4px;font-weight:750}.rule-row{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:10px}.rule{border:1px solid var(--line);border-radius:10px;background:#10172c;padding:9px 10px}.rule b{display:block;font-size:13px}.rule span{display:block;color:var(--muted);font-size:10px;margin-top:2px}.bar{height:8px;border-radius:10px;background:#27324f;overflow:hidden;margin:8px 0}.bar i{display:block;height:100%;background:linear-gradient(90deg,var(--cyan),var(--purple),var(--green));transition:width .3s}.chart{border:1px solid #303b62;border-radius:12px;background:#0b1122;padding:8px}.chart svg{display:block;width:100%;height:auto}.chart-grid{stroke:#293552;stroke-width:1}.chart-line{fill:none;stroke:var(--cyan);stroke-width:3;filter:drop-shadow(0 0 5px #63e4ff77)}.chart-text{fill:var(--muted);font:11px system-ui,sans-serif}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;min-width:620px}th,td{padding:9px 8px;border-bottom:1px solid #283451;text-align:left;font-size:12px}th{color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.08em}tr:last-child td{border:0}.pill{display:inline-block;border-radius:99px;padding:3px 8px;background:#202c4b;color:#d7e2ff;font-size:10px;font-weight:850}.empty{padding:17px;color:var(--muted);text-align:center}.footer{margin:11px 2px;color:#7784a5;font-size:10px}.error{display:none;padding:10px 12px;color:#ffb5c3;border:1px solid #843e55;background:#351a2a;border-radius:10px;margin-top:10px}.error.show{display:block}
     @media(max-width:700px){main{padding:14px}.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.markets{grid-template-columns:1fr}.rule-row{grid-template-columns:1fr}.head{align-items:flex-start}.value{font-size:20px}}
     @media(max-width:420px){.badge{font-size:9px}.card{padding:11px}.side-price{font-size:22px}}
   </style>
 </head>
 <body><main>
   <header class="head">
-    <div><div class="title">BTC → ETH Signal Bot</div><div class="subtitle">One 5-minute ETH paper strategy · BTC confirms direction</div></div>
+    <div><div class="title">BTC × ETH Cross-Pair Arbitrage</div><div class="subtitle">Two independent 5-minute pairings · paper trading only</div></div>
     <span class="badge"><i class="pulse"></i><span id="status">CONNECTING</span></span>
   </header>
   <section class="grid">
@@ -29,15 +29,15 @@
   <section class="panel">
     <h2>Live market prices</h2>
     <div class="markets">
-      <article class="market btc"><div class="market-head"><div class="market-name">BTC · signal</div><span class="pill" id="btcStatus">WAITING</span></div><div class="side-grid" id="btcQuotes"></div></article>
-      <article class="market eth"><div class="market-head"><div class="market-name">ETH · trade</div><span class="pill" id="ethStatus">WAITING</span></div><div class="side-grid" id="ethQuotes"></div></article>
+      <article class="market btc"><div class="market-head"><div class="market-name">BTC · 5-minute market</div><span class="pill" id="btcStatus">WAITING</span></div><div class="side-grid" id="btcQuotes"></div></article>
+      <article class="market eth"><div class="market-head"><div class="market-name">ETH · 5-minute market</div><span class="pill" id="ethStatus">WAITING</span></div><div class="side-grid" id="ethQuotes"></div></article>
     </div>
-    <div class="signal-box"><div class="signal-title">Signal and entry window</div><div class="signal-text" id="signal">Waiting for fresh BTC and ETH prices…</div><div class="bar"><i id="entryProgress" style="width:0"></i></div><div class="small" id="entryTimer">—</div>
+    <div class="signal-box"><div class="signal-title">Cross-pair trading rules</div><div class="signal-text" id="signal">Waiting for fresh BTC and ETH prices…</div><div class="bar"><i id="entryProgress" style="width:0"></i></div><div class="small" id="entryTimer">—</div>
       <div class="rule-row" id="triggerRules">
-        <div class="rule"><b>BTC ≥ $0.80 · ETH &lt; $0.60</b><span>100 shares · one fire per window</span></div>
-        <div class="rule"><b>BTC ≥ $0.90 · ETH &lt; $0.70</b><span>200 shares · one fire per window</span></div>
-        <div class="rule"><b>BTC ≥ $0.95 · ETH &lt; $0.80</b><span>400 shares · one fire per window</span></div>
-      </div><div class="small" id="triggerCap">Up to 3 fires · 700 shares total per window</div>
+        <div class="rule"><b>BTC UP + ETH DOWN</b><span>Buy 200 shares per leg when combined asks &lt; $0.90.</span><span>Sell at combined bids ≥ $1.10; then rearm.</span></div>
+        <div class="rule"><b>ETH UP + BTC DOWN</b><span>Buy 200 shares per leg when combined asks &lt; $0.90.</span><span>Sell at combined bids ≥ $1.10; then rearm.</span></div>
+      </div>
+      <div class="small" id="triggerCap">Asks to buy · bids to sell. Both pairings operate independently.</div>
     </div>
   </section>
   <section class="grid" style="margin-top:12px">
@@ -47,7 +47,7 @@
     <div class="card"><div class="label">Open positions</div><div class="value" id="openPositions">—</div></div>
   </section>
   <section class="panel"><h2>Equity history</h2><div class="chart" id="equityChart"><div class="empty">Settled trades will appear here.</div></div></section>
-  <section class="panel"><h2>ETH positions</h2><div class="table-wrap" id="positions"><div class="empty">No positions yet.</div></div><div class="small" style="margin-top:9px">Paper-only simulation. Market buys use visible ETH ask depth and modeled taker fees. TP fills require fresh visible bid depth at $0.99 or higher; remaining shares wait for the exact ETH market’s confirmed resolution. No stop loss.</div></section>
+  <section class="panel"><h2>Pair positions</h2><div class="table-wrap" id="positions"><div class="empty">No positions yet.</div></div><div class="small" style="margin-top:9px">Paper only. Entries sweep visible asks; exits sweep visible bids. Taker fees are modeled for both legs. Any unsold shares await the exact original BTC or ETH market resolution.</div></section>
   <div class="error" id="error"></div>
   <div class="footer">No live orders are sent. Paper account history resets if the service restarts.</div>
 </main>
@@ -71,13 +71,13 @@
   function positionTable(items){
     if(!items.length)return '<div class="empty">No positions yet.</div>';
     const rows=items.map(p=>{
-      const state=p.status==='OPEN'?'OPEN':p.status==='PENDING_RESOLUTION'?'AWAITING RESOLUTION':p.status==='SETTLED_EXIT'?(p.exitType==='TAKE_PROFIT'?'TAKE PROFIT':'SETTLED'):p.status;
-      return `<tr><td><b class="${p.side==='UP'?'green':'red'}">${esc(p.side)}</b></td><td>${shares(p.shares||p.initialShares)} / ${shares(p.initialShares)}</td><td>${price(p.avgEntry)}</td><td>${price(p.takeProfitOrder?.limitPrice||.99)}</td><td><span class="pill">${esc(state)}</span></td><td>${esc(p.resolutionWinner||p.exitReason||'—')}</td><td>${usd(p.realizedPnl)}</td><td>${esc(p.slug||'')}</td></tr>`;
+      const state=p.status==='OPEN'?'OPEN':p.status==='PENDING_RESOLUTION'?'AWAITING RESOLUTION':p.status==='SETTLED_EXIT'?(p.exitType==='CROSS_PAIR_MARKET_SELL'?'SOLD':'RESOLVED'):p.status;
+      return `<tr><td>${esc(p.pairLabel||p.pairId||'—')}</td><td>${esc(p.asset||'')} <b class="${p.side==='UP'?'green':'red'}">${esc(p.side)}</b></td><td>${shares(p.shares||p.initialShares)} / ${shares(p.initialShares)}</td><td>${price(p.avgEntry)}</td><td><span class="pill">${esc(state)}</span></td><td>${esc(p.resolutionWinner||p.exitReason||'—')}</td><td>${usd(p.realizedPnl)}</td><td>${esc(p.slug||'')}</td></tr>`;
     }).join('');
-    return `<table><thead><tr><th>Side</th><th>Shares</th><th>Avg entry</th><th>TP</th><th>Status</th><th>Exit / result</th><th>Net P&amp;L</th><th>ETH window</th></tr></thead><tbody>${rows}</tbody></table>`;
+    return `<table><thead><tr><th>Pair</th><th>Leg</th><th>Shares</th><th>Avg entry</th><th>Status</th><th>Exit / result</th><th>Net P&amp;L</th><th>Market window</th></tr></thead><tbody>${rows}</tbody></table>`;
   }
   function render(s){
-    const a=s.account||{},btc=s.btcPrices||{},eth=s.livePrices||{},w=s.window||{},strategy=s.strategy||{},entry=s.entryWindow||{};
+    const a=s.account||{},btc=s.btcPrices||{},eth=s.livePrices||{},w=s.window||{},entry=s.entryWindow||{};
     document.querySelector('#status').textContent=`${String(s.status||'waiting').replaceAll('_',' ')} · ${s.mode||'PAPER'}`.toUpperCase();
     document.querySelector('#capital').textContent=usd(a.capital);
     document.querySelector('#equity').textContent=usd(a.equity);
@@ -87,23 +87,22 @@
     document.querySelector('#ethQuotes').innerHTML=['UP','DOWN'].map(side=>quoteCard(side,eth[side])).join('');
     document.querySelector('#btcStatus').textContent=btc.marketSlug?'BTC 5M':'WAITING';
     document.querySelector('#ethStatus').textContent=w.slug?'ETH 5M':'WAITING';
-    const signal=s.signal||strategy.entries?.signal||{};
-    document.querySelector('#signal').textContent=signal.reason||'Waiting for the first qualifying BTC/ETH side.';
-    const triggers=strategy.entries?.triggers||[];
-    if(triggers.length){
-      document.querySelector('#triggerRules').innerHTML=triggers.map(t=>
-        `<div class="rule"><b>BTC ≥ ${usd(t.btcAskMin)} · ETH &lt; ${usd(t.ethAskMax)}</b><span>${Number(t.shares)} shares · ${t.fired?'FIRED · '+esc(t.side||''):'not fired'}</span></div>`
-      ).join('');
-      document.querySelector('#triggerCap').textContent=
-        `${triggers.filter(t=>t.fired).length} of ${triggers.length} triggers fired · up to ${Number(strategy.entries.maxSharesPerWindow||700)} shares per window`;
-    }
+    document.querySelector('#signal').textContent=s.signal?.reason||'Waiting for fresh BTC and ETH quotes.';
+    const pairs=Array.isArray(s.pairStates)?s.pairStates:[];
+    document.querySelector('#triggerRules').innerHTML=pairs.map(pair=>{
+      const active=pair.activeCycle;
+      const legSummary=active?.legs?.map(leg=>
+        `${esc(leg.asset)} ${esc(leg.side)}: ${shares(leg.shares)} shares @ ${price(leg.averageEntry)}`
+      ).join(' · ');
+      return `<article class="rule"><b>${esc(pair.label)} <span class="pill">${esc(pair.status)}</span></b><span>Combined asks · buy: ${price(pair.entryAskSum)} | combined bids · sell: ${price(pair.exitBidSum)}</span><span>${active?`Cycle ${active.cycleNumber} · ${legSummary||''}`:esc(pair.reason)}</span><span>Cycles: ${Number(pair.cycleCount||0)} · 200 shares per leg</span></article>`;
+    }).join('');
+    document.querySelector('#triggerCap').textContent=
+      'Asks to buy · bids to sell. Entry: combined asks < $0.90. Exit: combined bids ≥ $1.10. Each pair rearms after both legs sell.';
     const progress=Math.max(0,Math.min(100,(Number(entry.elapsedMs||0)/Number(entry.cutoffMs||300000))*100));
     document.querySelector('#entryProgress').style.width=progress+'%';
-    document.querySelector('#entryTimer').textContent=entry.waiting
-      ?`First-minute wait · ${entry.secondsUntilOpen}s until entries open · ${w.title||''}`
-      :entry.open
-        ?`Entries open · ${entry.secondsRemaining}s until the ETH window ends · ${w.title||''}`
-        :`Entry window closed · the ETH window has ended · ${w.title||''}`;
+    document.querySelector('#entryTimer').textContent=entry.open
+      ?`Scanning continuously · ${entry.secondsRemaining}s left in the aligned 5-minute window · ${w.title||''}`
+      :`Waiting for the next aligned BTC/ETH 5-minute window · ${w.title||''}`;
     document.querySelector('#winRate').textContent=`${Number(a.winRate||0).toFixed(1)}%`;
     document.querySelector('#winsLosses').textContent=`${a.wins??0} / ${a.losses??0}`;
     document.querySelector('#fees').textContent=usd(a.takerFees);

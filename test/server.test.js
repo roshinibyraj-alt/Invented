@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const startServer = require('../server');
 
 test('state endpoint returns the current strategy with no cache', async t => {
-  const expected = { mode: 'DEMO ONLY', strategy: { id: 'eth-5m-btc-confirmed' } };
+  const expected = { mode: 'DEMO ONLY', strategy: { id: 'btc-eth-cross-pair-arbitrage' } };
   const server = startServer({ snapshot: () => expected }, 0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -24,25 +24,21 @@ test('health endpoint reports the demo service without secrets', async t => {
   assert.deepEqual(await response.json(), { ok: true, mode: 'DEMO', status: 'scanning', now: 123 });
 });
 
-test('dashboard shows the cross-asset rules and omits the retired strategy UI', async t => {
+test('dashboard shows cross-pair ask and bid rules without the retired strategy', async t => {
   const server = startServer({ snapshot: () => ({}) }, 0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
   const response = await fetch(`http://127.0.0.1:${server.address().port}/`);
   const html = await response.text();
   assert.equal(response.status, 200);
-  assert.match(html, /BTC → ETH Signal Bot/);
-  assert.match(html, /BTC ≥ \$0\.80 · ETH &lt; \$0\.60/);
-  assert.match(html, /100 shares · one fire per window/);
-  assert.match(html, /BTC ≥ \$0\.90 · ETH &lt; \$0\.70/);
-  assert.match(html, /200 shares · one fire per window/);
-  assert.match(html, /BTC ≥ \$0\.95 · ETH &lt; \$0\.80/);
-  assert.match(html, /400 shares · one fire per window/);
-  assert.match(html, /Up to 3 fires · 700 shares total per window/);
-  assert.match(html, /First-minute wait/);
-  assert.match(html, /the ETH window has ended/);
-  assert.match(html, /No stop loss/);
-  assert.match(html, /exact ETH market/);
+  assert.match(html, /BTC × ETH Cross-Pair Arbitrage/);
+  assert.match(html, /combined asks &lt; \$0\.90/);
+  assert.match(html, /combined bids ≥ \$1\.10/);
+  assert.match(html, /BTC UP \+ ETH DOWN/);
+  assert.match(html, /ETH UP \+ BTC DOWN/);
+  assert.match(html, /200 shares per leg/);
+  assert.match(html, /asks to buy · bids to sell/i);
+  assert.match(html, /exact original BTC or ETH market/);
   assert.doesNotMatch(html, /BTC Strategy Lab/);
   assert.doesNotMatch(html, /Against signal/);
   assert.doesNotMatch(html, /57-second/);

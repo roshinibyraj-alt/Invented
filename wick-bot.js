@@ -233,14 +233,14 @@ class WickBot{
     if(p.status!=='PENDING_RESOLUTION')return false;
     const won=p.side===winner;
     p.payout=won?1:0;
-    p.proceeds=p.shares*p.payout;
-    p.exitFees=0;
     const totalCost=Number(p.initialTotalCost??p.totalCost)||0;
     const totalFees=Number(p.initialFees??p.fees)||0;
     const takeProfitProceeds=Number(p.takeProfitProceeds)||0;
+    const priorExitProceeds=Number(p.exitProceeds)||0;
+    const priorExitFees=Number(p.exitFees)||0;
     p.resolutionProceeds=p.shares*p.payout;
-    p.proceeds=takeProfitProceeds+p.resolutionProceeds;
-    p.realizedPnl=p.proceeds-totalCost-totalFees+(p.estimatedMakerRebate||0);
+    p.proceeds=takeProfitProceeds+priorExitProceeds+p.resolutionProceeds;
+    p.realizedPnl=p.proceeds-totalCost-totalFees-priorExitFees+(p.estimatedMakerRebate||0);
     p.status='SETTLED_EXIT';
     p.settledAt=now;
     p.settlementBasis='POLYMARKET_RESOLUTION';
@@ -360,9 +360,9 @@ class WickBot{
                  marketResolution:'Every filled position waits for the official resolution of its original Polymarket market.'},
        inventory,positions:this.positions.slice(0,50),orders:this.orders.slice(0,100),events:this.events};
   }
-          start(){if(this.running)return;this.running=true;this.log('BOT_STARTED',{timeframe:this.timeframe,
-           strategyId:this.strategyId,strategyName:this.strategyName,
-           note:`Paper-only BTC 5-minute strategy: ${this.strategyName}.`});
+     start(){if(this.running)return;this.running=true;this.log('BOT_STARTED',{timeframe:this.timeframe,
+            strategyId:this.strategyId,strategyName:this.strategyName,
+            note:`Paper-only strategy started: ${this.strategyName}.`});
     const loop=async()=>{if(!this.running)return;await this.tick();if(this.running)this.timer=setTimeout(loop,cfg.POLL_INTERVAL_MS)};
     void loop();}
   stop(){this.running=false;clearTimeout(this.timer)}

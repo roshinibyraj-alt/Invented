@@ -13,7 +13,7 @@ async function main() {
   bot.start();
   startServer(bot, process.env.PORT || 3000);
 
-  console.log('MODE: DEMO -- one BTC-confirmed ETH 5-minute paper strategy; no live order code is loaded.');
+  console.log('MODE: DEMO -- BTC/ETH 5-minute cross-pair paper arbitrage; no live order code is loaded.');
 }
 
 main().catch((e) => {

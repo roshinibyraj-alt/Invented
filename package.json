@@ -2,11 +2,11 @@
   "name": "btc-wick-paper-demo",
   "version": "1.0.0",
   "private": true,
-  "description": "Demo-only Polymarket ETH 5-minute strategy triggered by BTC prices.",
+  "description": "Demo-only Polymarket BTC/ETH 5-minute cross-pair paper arbitrage bot.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "test": "node --test test/cross-asset-bot.test.js test/server.test.js"
+    "test": "node --test test/cross-pair-bot.test.js test/server.test.js"
   },
   "engines": {
     "node": ">=22"

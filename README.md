@@ -1,23 +1,22 @@
-# BTC-confirmed ETH 5-minute paper bot
+# BTC/ETH cross-pair arbitrage paper bot
 
-This repository runs a single paper-only strategy for Polymarket ETH Up/Down 5-minute markets. BTC Up/Down prices provide the signal; the bot buys the corresponding ETH side. It never submits live orders.
+This service runs a demo-only strategy on aligned Polymarket BTC and ETH 5-minute Up/Down markets. It never submits live orders.
 
-## Entry strategy
+## Strategy
 
-- Watch the BTC and ETH markets with the same 5-minute window start.
-- After waiting 60 seconds, during seconds 60–299, buy once if one matching side qualifies: BTC best ask is at least $0.80 and the matching ETH best ask is below $0.50.
-- Buy 100 ETH shares on that same UP or DOWN side using a simulated taker market order.
-- Simulated fills sweep only fresh, visible ETH ask depth. Entry prices are depth-weighted, taker fees use that ETH market's published fee schedule, and any unfilled market-order remainder is cancelled rather than invented or retried.
-- No entry is allowed during the first minute or after the 5-minute window ends; there is no final-minute cutoff.
+Two combinations are monitored independently:
 
-## Exits and settlement
+1. BTC UP + ETH DOWN
+2. ETH UP + BTC DOWN
 
-- A resting paper take-profit is modeled at $0.99 and credited as $1.00 per share when fresh visible bids at $0.99 or better support the fill. Partial fills reduce the open share count and cost basis; unchanged visible depth is not reused on later polls.
-- No stop loss is used.
-- Any remaining shares move to pending settlement after the ETH window closes and settle only against the confirmed result of that exact original ETH market.
+When a combination's fresh best asks sum to **less than $0.90**, the bot simulates a market buy for **200 shares on each leg**. Each leg is priced only from visible ask depth; partial fills and unfilled remainders are recorded honestly, and market taker fees are applied.
+
+Once a pair has filled shares, when its fresh best bids sum to **$1.10 or more**, the bot simulates market sells from visible bid depth. Partial sells are tracked without reusing unchanged displayed depth. The pair cannot rearm until every filled leg is fully sold; after that it can enter another cycle during the same window.
+
+Unsold shares at window end move to resolution and are settled only against the confirmed outcome of each leg's exact original BTC or ETH market. No old signal, stop-loss, or take-profit rule is used.
 
 ## Dashboard and runtime
 
-The dashboard presents the current ETH window, BTC/ETH UP and DOWN asks, entry cutoff, signal status, account summary, equity history, and recent positions. Account history is process-memory state and resets when the Railway service restarts.
+The dashboard shows both markets' UP/DOWN asks and bids, each pairing's combined prices and state, per-leg inventory, account performance, and recent positions. Demo account history is held in process memory and resets when the Railway service restarts.
 
-Run `npm test` to verify the market mapping, signal thresholds and side mapping, time cutoff, visible-depth taker fills, TP accounting, exact-market resolution, and dashboard contract.
+Run `npm test` to verify market alignment, both pairings, strict entry and exit thresholds, visible-depth fills, partial-exit handling, exact-market resolution, and dashboard content.
