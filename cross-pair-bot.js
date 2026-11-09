@@ -189,6 +189,7 @@ class CrossPairBot extends WickBot {
     this.pairCycles = [];
     this.maxObservedAskDepthByToken = new Map();
     this.consumedAskDepthByToken = new Map();
+    this.directionTierLocks = {};
   }
 
   getWindowStartToScan(_now, currentStart) {
@@ -251,6 +252,7 @@ class CrossPairBot extends WickBot {
   openStrategyWindow(start, now) {
     super.openStrategyWindow(start, now);
     this.pairStates = Object.fromEntries(PAIRS.map(pair => [pair.id, emptyPairState(pair)]));
+    this.directionTierLocks = {};
     this.maxObservedAskDepthByToken.clear();
     this.consumedAskDepthByToken.clear();
   }
@@ -394,10 +396,27 @@ class CrossPairBot extends WickBot {
       }
       for (const tier of ENTRY_TIERS) {
         const tierState = pairState.tiers[tier.id];
+        const lockedSide = this.directionTierLocks[tier.id];
+        if (lockedSide && lockedSide !== pair.leaderSide) {
+          if (tierState.status !== 'FILLED') {
+            tierState.status = 'PAUSED_BY_OPPOSITE';
+            tierState.lastReason = `Paused: a ${lockedSide} route triggered the ${tier.id} rung in this window.`;
+          }
+          continue;
+        }
         const qualified = signal.leaderPrice >= tier.leaderMinPrice &&
           signal.targetAsk >= MIN_ENTRY_PRICE &&
           signal.targetAsk < tier.targetMaxPriceExclusive;
         if (qualified && tierState.status !== 'FILLED') {
+          if (!lockedSide) {
+            this.directionTierLocks[tier.id] = pair.leaderSide;
+            this.log('OPPOSITE_DIRECTION_RUNG_PAUSED', {
+              pairId: pair.id,
+              tierId: tier.id,
+              triggeredSide: pair.leaderSide,
+              pausedSide: pair.leaderSide === 'UP' ? 'DOWN' : 'UP',
+            });
+          }
           const firstQualification = tierState.qualifiedAt == null;
           if (firstQualification) {
           tierState.qualifiedAt = now;
