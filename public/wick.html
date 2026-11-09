@@ -37,10 +37,10 @@
     </div>
     <div class="signal-box"><div class="signal-title">Cross-pair trading rules</div><div class="signal-text" id="signal">Waiting for fresh BTC and ETH prices…</div><div class="bar"><i id="entryProgress" style="width:0"></i></div><div class="small" id="entryTimer">—</div>
       <div class="rule-row" id="triggerRules">
-        <div class="rule"><b>BTC UP + ETH DOWN</b><span>Enter when combined asks &lt; $0.90.</span><span>Both legs must fully fill 200 each at ≤ $0.99/share; exit on bids ≥ $1.10.</span></div>
-        <div class="rule"><b>ETH UP + BTC DOWN</b><span>Enter when combined asks &lt; $0.90.</span><span>Both legs must fully fill 200 each at ≤ $0.99/share; exit on bids ≥ $1.10.</span></div>
+        <div class="rule"><b>BTC UP + ETH DOWN</b><span>Base: combined asks &lt; $0.90, 200 shares per leg.</span><span>Add 300 per leg at combined asks ≤ $0.80, $0.70, $0.60, and $0.50. Hold to resolution.</span></div>
+        <div class="rule"><b>ETH UP + BTC DOWN</b><span>Base: combined asks &lt; $0.90, 200 shares per leg.</span><span>Add 300 per leg at combined asks ≤ $0.80, $0.70, $0.60, and $0.50. Hold to resolution.</span></div>
       </div>
-      <div class="small" id="triggerCap">Asks to buy · bids to sell. If either leg lacks 200 shares at or below $0.99, no pair entry is booked and the bot retries.</div>
+      <div class="small" id="triggerCap">Each tier fires once per pair/window. Both legs must fully fill at or below $0.99 per share; otherwise that tier books no shares and retries. No intra-window selling.</div>
     </div>
   </section>
   <section class="grid" style="margin-top:12px">
@@ -50,8 +50,8 @@
     <div class="card"><div class="label">Open positions</div><div class="value" id="openPositions">—</div></div>
   </section>
   <section class="panel"><h2>Equity history</h2><div class="chart" id="equityChart"><div class="empty">Settled trades will appear here.</div></div></section>
-  <section class="panel"><h2>Pair positions</h2><div class="table-wrap" id="positions"><div class="empty">No positions yet.</div></div><div class="small" style="margin-top:9px">Paper only. Entries sweep visible asks; exits sweep visible bids. Taker fees are modeled for both legs. Any unsold shares await the exact original BTC or ETH market resolution.</div></section>
-  <section class="panel"><h2>Recent activity</h2><div class="small" style="margin:-6px 0 10px">Readable entry, fill, exit, and resolution updates. No raw event payloads.</div><div class="activity-list" id="activity"><div class="empty">No strategy activity yet.</div></div></section>
+  <section class="panel"><h2>Pair positions</h2><div class="table-wrap" id="positions"><div class="empty">No positions yet.</div></div><div class="small" style="margin-top:9px">Paper only. Entries sweep visible asks and include modeled taker fees. No shares are sold during a window; every filled leg is held for its exact original BTC or ETH market resolution.</div></section>
+  <section class="panel"><h2>Recent activity</h2><div class="small" style="margin:-6px 0 10px">Readable tier triggers, fill waits, completed entries, and resolutions. No raw event payloads.</div><div class="activity-list" id="activity"><div class="empty">No strategy activity yet.</div></div></section>
   <div class="error" id="error"></div>
   <div class="footer">No live orders are sent. Paper account history resets if the service restarts.</div>
 </main>
@@ -75,30 +75,26 @@
   function positionTable(items){
     if(!items.length)return '<div class="empty">No positions yet.</div>';
     const rows=items.map(p=>{
-      const state=p.status==='OPEN'?'OPEN':p.status==='PENDING_RESOLUTION'?'AWAITING RESOLUTION':p.status==='SETTLED_EXIT'?(p.exitType==='CROSS_PAIR_MARKET_SELL'?'SOLD':'RESOLVED'):p.status;
-      return `<tr><td>${esc(p.pairLabel||p.pairId||'—')}</td><td>${esc(p.asset||'')} <b class="${p.side==='UP'?'green':'red'}">${esc(p.side)}</b></td><td>${shares(p.shares||p.initialShares)} / ${shares(p.initialShares)}</td><td>${price(p.avgEntry)}</td><td><span class="pill">${esc(state)}</span></td><td>${esc(p.resolutionWinner||p.exitReason||'—')}</td><td>${usd(p.realizedPnl)}</td><td>${esc(p.slug||'')}</td></tr>`;
+      const state=p.status==='OPEN'?'OPEN':p.status==='PENDING_RESOLUTION'?'AWAITING RESOLUTION':p.status==='SETTLED_EXIT'?'RESOLVED':p.status;
+      return `<tr><td>${esc(p.pairLabel||p.pairId||'—')}</td><td>${esc(p.entryTierLabel||'—')}</td><td>${esc(p.asset||'')} <b class="${p.side==='UP'?'green':'red'}">${esc(p.side)}</b></td><td>${shares(p.shares||p.initialShares)} / ${shares(p.initialShares)}</td><td>${price(p.avgEntry)}</td><td><span class="pill">${esc(state)}</span></td><td>${esc(p.resolutionWinner||p.exitReason||'—')}</td><td>${usd(p.realizedPnl)}</td><td>${esc(p.slug||'')}</td></tr>`;
     }).join('');
-    return `<table><thead><tr><th>Pair</th><th>Leg</th><th>Shares</th><th>Avg entry</th><th>Status</th><th>Exit / result</th><th>Net P&amp;L</th><th>Market window</th></tr></thead><tbody>${rows}</tbody></table>`;
+    return `<table><thead><tr><th>Pair</th><th>Entry tier</th><th>Leg</th><th>Shares</th><th>Avg entry</th><th>Status</th><th>Resolution</th><th>Net P&amp;L</th><th>Market window</th></tr></thead><tbody>${rows}</tbody></table>`;
   }
   function activityMessage(e){
     const pair=e.pairLabel||e.pairId||'Cross-pair';
     switch(e.event){
       case 'PAPER_CROSS_PAIR_ENTRY_WAITING_FOR_FULL_FILL':{
         const legs=(e.legs||[]).map(leg=>`${leg.asset} ${leg.side}: ${shares(leg.availableSharesWithinCap)}/${shares(leg.requestedShares)} shares`).join(' · ');
-        return {kind:'wait',title:`${pair} · waiting for complete entry`,detail:`Max buy price ${price(e.maxPricePerShare)} per share. Available: ${legs||'no visible ask depth'}. No shares were booked; the bot will retry.`};
+        return {kind:'wait',title:`${pair} · ${e.tierLabel||'entry tier'} waiting for full fill`,detail:`Max buy price ${price(e.maxPricePerShare)} per share. Available: ${legs||'no visible ask depth'}. No shares were booked; the bot will retry this tier.`};
       }
       case 'PAPER_CROSS_PAIR_ENTRY_BLOCKED_CASH':
-        return {kind:'wait',title:`${pair} · entry not placed`,detail:`The complete pair needs ${usd(e.requiredCash)} including fees; paper cash is ${usd(e.availableCash)}. No shares were booked.`};
+        return {kind:'wait',title:`${pair} · ${e.tierLabel||'entry tier'} not placed`,detail:`The complete pair needs ${usd(e.requiredCash)} including fees; paper cash is ${usd(e.availableCash)}. No shares were booked.`};
+      case 'PAPER_CROSS_PAIR_ENTRY_TIER_QUALIFIED':
+        return {kind:'',title:`${pair} · ${e.tierLabel||'entry tier'} triggered`,detail:`Combined asks reached ${price(e.combinedAsk)}. Attempting ${shares(e.sharesPerLeg)} shares on both legs.`};
       case 'PAPER_CROSS_PAIR_ENTRY_FILLED':{
         const legs=(e.legs||[]).map(leg=>`${leg.asset} ${leg.side}: ${shares(leg.filledShares)}/${shares(leg.requestedShares)} @ ${price(leg.averageAsk)}`).join(' · ');
-        return {kind:'good',title:`${pair} · both legs fully filled`,detail:`Best-ask sum ${price(e.combinedAsk)}; depth-weighted average-price sum ${price(e.combinedAverageFillPrice)}. ${legs}. Cost ${usd(e.entryCost)} + ${usd(e.fees)} fees.`};
+        return {kind:'good',title:`${pair} · ${e.tierLabel||'entry tier'} fully filled`,detail:`Best-ask sum ${price(e.combinedAsk)}; depth-weighted average-price sum ${price(e.combinedAverageFillPrice)}. ${legs}. Cost ${usd(e.entryCost)} + ${usd(e.fees)} fees. Held to resolution; no intra-window sell.`};
       }
-      case 'PAPER_CROSS_PAIR_EXIT_TRIGGERED':
-        return {kind:'exit',title:`${pair} · sell condition reached`,detail:`Combined best bids ${price(e.combinedBestBid)} met the ${price(e.threshold)} exit rule. Selling available bids on both held legs.`};
-      case 'PAPER_CROSS_PAIR_LEG_SOLD':
-        return {kind:'exit',title:`${e.asset} ${e.side} · shares sold`,detail:`Sold ${shares(e.sharesSold)} at average bid ${price(e.averageBid)}; proceeds ${usd(e.proceeds)}, fee ${usd(e.takerFee)}, remaining ${shares(e.remainingShares)}.`};
-      case 'PAPER_CROSS_PAIR_CLOSED':
-        return {kind:'good',title:`${pair} · cycle closed and rearmed`,detail:`Both held legs are sold. Net cycle P&L: ${usd(e.realizedPnl)}.`};
       case 'PAPER_STRATEGY_WINDOW_STARTED':
         return {kind:'',title:'New aligned 5-minute window',detail:'BTC and ETH markets are being checked for the two cross-pair combinations.'};
       case 'PAPER_POSITION_AWAITING_POLYMARKET_RESOLUTION':
@@ -138,14 +134,15 @@
     document.querySelector('#signal').textContent=s.signal?.reason||'Waiting for fresh BTC and ETH quotes.';
     const pairs=Array.isArray(s.pairStates)?s.pairStates:[];
     document.querySelector('#triggerRules').innerHTML=pairs.map(pair=>{
-      const active=pair.activeCycle;
-      const legSummary=active?.legs?.map(leg=>
-        `${esc(leg.asset)} ${esc(leg.side)}: ${shares(leg.shares)} shares @ ${price(leg.averageEntry)}`
+      const tierSummary=(pair.tiers||[]).map(tier=>
+        `${esc(tier.label)}: ${esc(tier.status.replaceAll('_',' ').toLowerCase())}`
       ).join(' · ');
-      return `<article class="rule"><b>${esc(pair.label)} <span class="pill">${esc(pair.status)}</span></b><span>Combined asks · buy: ${price(pair.entryAskSum)} | combined bids · sell: ${price(pair.exitBidSum)} | max buy: ${price(pair.maxEntryPricePerShare)}</span><span>${active?`Cycle ${active.cycleNumber} · ${legSummary||''}`:esc(pair.reason)}</span><span>Cycles: ${Number(pair.cycleCount||0)} · full 200-share fill required per leg</span></article>`;
+      const inventory=Object.entries(pair.heldSharesByLeg||{})
+        .map(([leg,count])=>`${esc(leg)} ${shares(count)}`).join(' · ');
+      return `<article class="rule"><b>${esc(pair.label)} <span class="pill">${esc(pair.status)}</span></b><span>Current combined asks: ${price(pair.entryAskSum)} · max buy: ${price(pair.maxEntryPricePerShare)}</span><span>${tierSummary||esc(pair.reason)}</span><span>${inventory?`Holding: ${inventory}`:'No shares held yet'} · successful tiers: ${Number(pair.cycleCount||0)}</span></article>`;
     }).join('');
     document.querySelector('#triggerCap').textContent=
-      'Asks to buy · bids to sell. Enter below $0.90 combined asks only if both 200-share legs fully fill at or below $0.99 each; otherwise no shares are booked and the bot retries. Exit at combined bids ≥ $1.10, then rearm.';
+      'Each threshold is latched once per pair and window. If price jumps past lower rungs, every newly qualified rung is attempted; incomplete tiers book no shares and retry. No intra-window selling; hold all fills for exact-market resolution.';
     const progress=Math.max(0,Math.min(100,(Number(entry.elapsedMs||0)/Number(entry.cutoffMs||300000))*100));
     document.querySelector('#entryProgress').style.width=progress+'%';
     document.querySelector('#entryTimer').textContent=entry.open

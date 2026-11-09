@@ -9,14 +9,14 @@ Two combinations are monitored independently:
 1. BTC UP + ETH DOWN
 2. ETH UP + BTC DOWN
 
-When a combination's fresh best asks sum to **less than $0.90**, the bot sweeps visible asks up to a **$0.99 per-share ceiling**. It books the paired entry only if it can fill the full **200 shares on both legs** within that ceiling. If either leg lacks enough depth, neither leg is booked and the bot retries; no partial or assumed entry fills are recorded. Market taker fees are applied to completed fills.
+Each combination has five entry tiers. When fresh best asks sum to **less than $0.90**, the base tier buys **200 shares per leg**. Additional tiers buy **300 shares per leg** when combined asks reach **$0.80, $0.70, $0.60, and $0.50 or lower**. Each tier can fill once per pair per window; if price skips past multiple tiers, every newly qualified tier is attempted. A qualified tier stays latched and retries until it fills or the window ends.
 
-Once a pair has filled shares, when its fresh best bids sum to **$1.10 or more**, the bot simulates market sells from visible bid depth. Partial sells are tracked without reusing unchanged displayed depth. The pair cannot rearm until every filled leg is fully sold; after that it can enter another cycle during the same window.
+The bot sweeps visible asks up to a **$0.99 per-share ceiling** and books a tier only if it can fill the complete requested size on both legs. If either leg lacks depth, neither leg is booked and that tier retries; no partial or assumed entry fills are recorded. Ask depth consumed by one tier is not reused by another tier. Market taker fees are applied to completed fills.
 
-Unsold shares at window end move to resolution and are settled only against the confirmed outcome of each leg's exact original BTC or ETH market. No old signal, stop-loss, or take-profit rule is used.
+The bot does **not sell during a window**. All filled positions remain open until the exact original BTC or ETH market resolves, then settle against that market's confirmed result.
 
 ## Dashboard and runtime
 
-The dashboard shows both markets' UP/DOWN asks and bids, each pairing's combined prices and state, per-leg inventory, account performance, recent positions, and a plain-language activity feed that explains entry waits, full fills, exits, and resolution. Demo account history is held in process memory and resets when the Railway service restarts.
+The dashboard shows both markets' UP/DOWN prices, each pairing's combined asks, tier progress and inventory, account performance, recent positions, and a plain-language activity feed for tier triggers, full fills, waits, and resolutions. Demo account history is held in process memory and resets when the Railway service restarts.
 
-Run `npm test` to verify market alignment, both pairings, strict entry and exit thresholds, visible-depth fills, partial-exit handling, exact-market resolution, and dashboard content.
+Run `npm test` to verify market alignment, both pairings, all five entry tiers, latching across skipped prices, complete visible-depth fills without reuse, no intra-window sells, exact-market resolution, and dashboard content.

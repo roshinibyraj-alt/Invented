@@ -24,7 +24,7 @@ test('health endpoint reports the demo service without secrets', async t => {
   assert.deepEqual(await response.json(), { ok: true, mode: 'DEMO', status: 'scanning', now: 123 });
 });
 
-test('dashboard shows cross-pair ask and bid rules without the retired strategy', async t => {
+test('dashboard shows all cross-pair entry tiers and resolution-only exits', async t => {
   const server = startServer({ snapshot: () => ({}) }, 0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -33,17 +33,20 @@ test('dashboard shows cross-pair ask and bid rules without the retired strategy'
   assert.equal(response.status, 200);
   assert.match(html, /BTC × ETH Cross-Pair Arbitrage/);
   assert.match(html, /combined asks &lt; \$0\.90/);
-  assert.match(html, /combined bids ≥ \$1\.10/);
+  assert.match(html, /combined asks ≤ \$0\.80, \$0\.70, \$0\.60, and \$0\.50/);
+  assert.match(html, /No intra-window selling/);
   assert.match(html, /BTC UP \+ ETH DOWN/);
   assert.match(html, /ETH UP \+ BTC DOWN/);
-  assert.match(html, /fully fill 200 each/);
-  assert.match(html, /at ≤ \$0\.99\/share/);
-  assert.match(html, /no pair entry is booked/);
-  assert.match(html, /asks to buy · bids to sell/i);
+  assert.match(html, /300 per leg at combined asks/);
+  assert.match(html, /fully fill at or below \$0\.99 per share/);
+  assert.match(html, /that tier books no shares and retries/);
   assert.match(html, /Recent activity/);
+  assert.match(html, /Entry tier/);
   assert.match(html, /No raw event payloads/);
   assert.match(html, /exact original BTC or ETH market/);
   assert.doesNotMatch(html, /BTC Strategy Lab/);
+  assert.doesNotMatch(html, /combined bids.*sell/i);
+  assert.doesNotMatch(html, /exit on bids/i);
   assert.doesNotMatch(html, /Against signal/);
   assert.doesNotMatch(html, /57-second/);
   assert.doesNotMatch(html, /Chainlink/);
