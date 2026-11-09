@@ -2,7 +2,7 @@
   "name": "btc-wick-paper-demo",
   "version": "1.0.0",
   "private": true,
-  "description": "Demo-only Polymarket BTC/ETH 5-minute cross-pair paper arbitrage bot.",
+  "description": "Demo-only Polymarket BTC/ETH 5-minute same-direction price-gap paper bot.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",

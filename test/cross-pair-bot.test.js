@@ -34,9 +34,7 @@ function fixture() {
       resolutionChecks.push(id);
       return { id, closed: true, winner: winners[id] };
     },
-    resolvedWinner(market) {
-      return market?.closed ? market.winner : null;
-    },
+    resolvedWinner(market) { return market?.closed ? market.winner : null; },
   };
   const bot = new CrossPairBot({ marketData: data });
   bot.log = () => {};
@@ -80,367 +78,192 @@ function setQuote(bot, asset, side, {
   return quote;
 }
 
-function enterBtcUpEthDown(bot, now = START + 1000, {
-  btcAsk = 0.30, ethAsk = 0.49, askSize = 1000,
+function setRoute(bot, {
+  leaderAsset = 'BTC',
+  leaderSide = 'UP',
+  leaderAsk = 0.60,
+  targetAsset = 'ETH',
+  targetSide = 'UP',
+  targetAsk = 0.49,
+  at = START + 1000,
+  targetAskLevels,
 } = {}) {
-  setQuote(bot, 'BTC', 'UP', { ask: btcAsk, askSize, at: now });
-  setQuote(bot, 'ETH', 'DOWN', { ask: ethAsk, askSize, at: now });
-  return bot.processStrategyEntry(now);
+  setQuote(bot, leaderAsset, leaderSide, { ask: leaderAsk, at });
+  setQuote(bot, targetAsset, targetSide, {
+    ask: targetAsk,
+    askLevels: targetAskLevels,
+    at,
+  });
+  return bot.processStrategyEntry(at);
 }
 
-function pairState(bot, id = 'btc-up-eth-down') {
+function routeState(bot, id = 'btc-up-leads-eth-up') {
   return bot.pairStates[id];
 }
 
-test('only the two independent BTC/ETH 5-minute pairings are configured', async () => {
+test('strategy snapshot exposes the four same-side tiers and 270-second cutoff', () => {
   const { bot } = fixture();
   const multi = new MultiBot();
+  const snapshot = bot.snapshot();
   assert.deepEqual(Object.keys(multi.bots), ['btc-eth-cross-pair-arbitrage']);
-  assert.equal(multi.snapshot().strategy.id, 'btc-eth-cross-pair-arbitrage');
   assert.equal(multi.snapshot().account.capital, 3000);
-  assert.deepEqual(CrossPairBot.constants.PAIRS.map(pair => pair.label), [
-    'BTC UP + ETH DOWN',
-    'ETH UP + BTC DOWN',
+  assert.equal(CrossPairBot.constants.ENTRY_CUTOFF_MS, 270_000);
+  assert.equal(snapshot.strategy.entries.entryCutoffMs, 270_000);
+  assert.equal(snapshot.strategy.entries.minTargetPrice, 0.20);
+  assert.deepEqual(snapshot.strategy.entries.tiers.map(tier => [
+    tier.leaderMinPrice, tier.targetMaxPriceExclusive, tier.sharesPerFire,
+  ]), [
+    [0.60, 0.50, 100],
+    [0.70, 0.60, 100],
+    [0.80, 0.70, 100],
+    [0.90, 0.80, 100],
   ]);
-  assert.deepEqual(bot.snapshot().strategy.entries.tiers.map(tier =>
-    [tier.combinedAskThreshold, tier.sharesPerLeg]), [
-    [0.8, 100], [0.7, 100], [0.6, 100], [0.5, 100], [0.4, 100],
+  assert.deepEqual(CrossPairBot.constants.PAIRS.map(route =>
+    [route.leaderAsset, route.leaderSide, route.targetAsset, route.targetSide]), [
+    ['BTC', 'UP', 'ETH', 'UP'],
+    ['ETH', 'UP', 'BTC', 'UP'],
+    ['BTC', 'DOWN', 'ETH', 'DOWN'],
+    ['ETH', 'DOWN', 'BTC', 'DOWN'],
   ]);
-  assert.equal(bot.snapshot().strategy.settlement.intraWindowSells, false);
-  assert.equal(bot.snapshot().strategy.exit, undefined);
-
-  const loaded = new CrossPairBot({ marketData: {
-    ...require('../wick-market-data'),
-    getBtcMarket: async (start, windowMs) => ({ asset: 'BTC', start, windowMs }),
-    getEthMarket: async (start, windowMs) => ({ asset: 'ETH', start, windowMs }),
-  } });
-  loaded.market = await loaded.loadMarket(START, WINDOW);
-  assert.equal(loaded.btcMarket.start, loaded.market.start);
+  assert.equal(snapshot.strategy.settlement.intraWindowSells, false);
+  assert.equal(snapshot.strategy.settlement.resolutionPollIntervalMs, 5000);
 });
 
-test('BTC UP + ETH DOWN buys 100 shares on both legs at the $0.80 tier', () => {
+test('each route buys 100 target shares in the same direction, never both legs', () => {
+  const cases = [
+    {
+      routeId: 'btc-up-leads-eth-up',
+      leaderAsset: 'BTC', leaderSide: 'UP', leaderAsk: 0.60,
+      targetAsset: 'ETH', targetSide: 'UP', targetAsk: 0.49,
+      tierId: 'tier-060-050',
+    },
+    {
+      routeId: 'eth-up-leads-btc-up',
+      leaderAsset: 'ETH', leaderSide: 'UP', leaderAsk: 0.70,
+      targetAsset: 'BTC', targetSide: 'UP', targetAsk: 0.59,
+      tierId: 'tier-070-060',
+    },
+    {
+      routeId: 'btc-down-leads-eth-down',
+      leaderAsset: 'BTC', leaderSide: 'DOWN', leaderAsk: 0.80,
+      targetAsset: 'ETH', targetSide: 'DOWN', targetAsk: 0.69,
+      tierId: 'tier-080-070',
+    },
+    {
+      routeId: 'eth-down-leads-btc-down',
+      leaderAsset: 'ETH', leaderSide: 'DOWN', leaderAsk: 0.90,
+      targetAsset: 'BTC', targetSide: 'DOWN', targetAsk: 0.79,
+      tierId: 'tier-090-080',
+    },
+  ];
+
+  for (const scenario of cases) {
+    const { bot } = fixture();
+    assert.equal(setRoute(bot, scenario), true, scenario.routeId);
+    assert.equal(bot.positions.length, 1, scenario.routeId);
+    const [position] = bot.positions;
+    assert.equal(position.asset, scenario.targetAsset);
+    assert.equal(position.side, scenario.targetSide);
+    assert.equal(position.shares, 100);
+    assert.equal(position.entryTierId, scenario.tierId);
+    assert.equal(position.leaderAsset, scenario.leaderAsset);
+    assert.equal(position.leaderSide, scenario.leaderSide);
+    assert.equal(position.leaderPriceAtEntry, scenario.leaderAsk);
+    assert.equal(position.targetPriceAtEntry, scenario.targetAsk);
+    assert.equal(bot.orders.filter(order => order.action === 'BUY').length, 1);
+    assert.ok(position.fees > 0);
+  }
+});
+
+test('leader threshold is inclusive, target ceiling is exclusive, and $0.20 floor is inclusive', () => {
   const { bot } = fixture();
-  assert.equal(enterBtcUpEthDown(bot), true);
-  assert.equal(bot.positions.length, 2);
-  const btc = bot.positions.find(position => position.asset === 'BTC');
-  const eth = bot.positions.find(position => position.asset === 'ETH');
-  assert.equal(btc.side, 'UP');
-  assert.equal(eth.side, 'DOWN');
-  assert.equal(btc.shares, 100);
-  assert.equal(eth.shares, 100);
-  assert.equal(btc.pairCycleId, eth.pairCycleId);
-  assert.equal(btc.marketId, 'btc-market');
-  assert.equal(eth.marketId, 'eth-market');
-  assert.equal(bot.orders.filter(order => order.action === 'BUY').length, 2);
-  assert.equal(bot.cash < config.DEMO_CAPITAL, true);
-  assert.ok(bot.positions.every(position => position.fees > 0));
-  assert.equal(pairState(bot).status, 'HOLDING TO RESOLUTION');
+  assert.equal(setRoute(bot, { leaderAsk: 0.599, targetAsk: 0.20 }), false);
+  assert.equal(setRoute(bot, { leaderAsk: 0.60, targetAsk: 0.50 }), false);
+  assert.equal(setRoute(bot, { leaderAsk: 0.60, targetAsk: 0.199 }), false);
+  assert.equal(setRoute(bot, { leaderAsk: 0.60, targetAsk: 0.20 }), true);
+  assert.equal(bot.positions.length, 1);
+  assert.equal(bot.positions[0].avgEntry, 0.20);
 });
 
-test('the reverse pairing is independent and both pairs may enter in the same scan', () => {
+test('separate tiers can fire in one route, but a filled tier cannot fire twice in a window', () => {
   const { bot } = fixture();
-  setQuote(bot, 'BTC', 'UP', { ask: 0.30 });
-  setQuote(bot, 'ETH', 'DOWN', { ask: 0.49 });
-  setQuote(bot, 'ETH', 'UP', { ask: 0.39 });
-  setQuote(bot, 'BTC', 'DOWN', { ask: 0.40 });
-  assert.equal(bot.processStrategyEntry(START + 1000), true);
-  assert.equal(bot.positions.length, 4);
-  assert.equal(pairState(bot, 'btc-up-eth-down').status, 'HOLDING TO RESOLUTION');
-  assert.equal(pairState(bot, 'eth-up-btc-down').status, 'HOLDING TO RESOLUTION');
-  assert.deepEqual(
-    bot.positions.filter(position => position.pairId === 'eth-up-btc-down')
-      .map(position => `${position.asset} ${position.side}`).sort(),
-    ['BTC DOWN', 'ETH UP'],
-  );
-});
-
-test('the $0.80 boundary is inclusive and an incomplete pair books no shares', () => {
-  const boundary = fixture().bot;
-  assert.equal(enterBtcUpEthDown(boundary, START + 1000, { btcAsk: 0.40, ethAsk: 0.40 }), true);
-  assert.equal(boundary.positions.length, 2);
-  assert.equal(pairState(boundary).tiers['tier-080'].status, 'FILLED');
-
-  const shallow = fixture().bot;
-  assert.equal(enterBtcUpEthDown(shallow, START + 1000, {
-    btcAsk: 0.40, ethAsk: 0.39, askSize: 99,
+  assert.equal(setRoute(bot, { leaderAsk: 0.60, targetAsk: 0.49 }), true);
+  assert.equal(setRoute(bot, {
+    leaderAsk: 0.70, targetAsk: 0.59, at: START + 2000,
+  }), true);
+  assert.equal(setRoute(bot, {
+    leaderAsk: 0.70, targetAsk: 0.59, at: START + 2500,
   }), false);
-  assert.equal(shallow.positions.length, 0);
-  assert.equal(shallow.orders.length, 0);
-  assert.equal(pairState(shallow).tiers['tier-080'].status, 'WAITING_FOR_FULL_FILL');
-  assert.match(pairState(shallow).lastReason, /No shares were booked/);
-
-  const qualifies = fixture().bot;
-  assert.equal(enterBtcUpEthDown(qualifies, START + 1000, { btcAsk: 0.40, ethAsk: 0.399 }), true);
-});
-
-test('entry sweeps asks up to $0.99 and requires full size on both legs', () => {
-  const { bot } = fixture();
-  const now = START + 1000;
-  setQuote(bot, 'BTC', 'UP', {
-    ask: 0.40, askLevels: [{ price: 0.40, size: 50 }, { price: 0.99, size: 50 }], at: now,
-  });
-  setQuote(bot, 'ETH', 'DOWN', {
-    ask: 0.39, askLevels: [{ price: 0.39, size: 100 }], at: now,
-  });
-  assert.equal(bot.processStrategyEntry(now), true);
-  const btc = bot.positions.find(position => position.asset === 'BTC');
-  assert.equal(btc.shares, 100);
-  assert.equal(btc.avgEntry, 0.695);
-  assert.equal(btc.maxEntryPrice, 0.99);
-  assert.equal(bot.snapshot().strategy.entries.maxPricePerShare, 0.99);
-
-  const blocked = fixture().bot;
-  setQuote(blocked, 'BTC', 'UP', {
-    ask: 0.40, askLevels: [{ price: 0.40, size: 50 }, { price: 0.991, size: 50 }], at: now,
-  });
-  setQuote(blocked, 'ETH', 'DOWN', {
-    ask: 0.39, askLevels: [{ price: 0.39, size: 100 }], at: now,
-  });
-  assert.equal(blocked.processStrategyEntry(now), false);
-  assert.equal(blocked.positions.length, 0);
-  assert.match(pairState(blocked).lastReason, /50\/100/);
-});
-
-test('stale or missing quotes cannot trigger a pair entry', () => {
-  const { bot } = fixture();
-  const now = START + 5000;
-  setQuote(bot, 'BTC', 'UP', { ask: 0.40, at: now - 2500 });
-  setQuote(bot, 'ETH', 'DOWN', { ask: 0.49, at: now });
-  assert.equal(bot.processStrategyEntry(now), false);
-  assert.equal(bot.positions.length, 0);
-});
-
-test('if either leg lacks full depth, neither leg is booked; bot retries the tier', () => {
-  const { bot } = fixture();
-  setQuote(bot, 'BTC', 'UP', { ask: 0.40, askSize: 0 });
-  setQuote(bot, 'ETH', 'DOWN', { ask: 0.39, askSize: 100 });
-  assert.equal(bot.processStrategyEntry(START + 1000), false);
-  assert.equal(bot.positions.length, 0);
-  assert.equal(bot.orders.length, 0);
-  assert.equal(pairState(bot).tiers['tier-080'].status, 'WAITING_FOR_FULL_FILL');
-  setQuote(bot, 'BTC', 'UP', { ask: 0.40, askSize: 100, at: START + 2000 });
-  setQuote(bot, 'ETH', 'DOWN', { ask: 0.39, askSize: 100, at: START + 2000 });
-  assert.equal(bot.processStrategyEntry(START + 2000), true);
   assert.equal(bot.positions.length, 2);
-
-  const now = START + 5000;
-  setQuote(bot, 'BTC', 'UP', { bid: 0.99, ask: 0.99, at: now });
-  setQuote(bot, 'ETH', 'DOWN', { bid: 0.99, ask: 0.99, at: now });
-  assert.equal(bot.processStrategyEntry(now), false);
-  assert.ok(bot.positions.every(position => position.status === 'OPEN'));
-  assert.equal(bot.orders.some(order => order.action === 'SELL'), false);
+  assert.deepEqual(bot.positions.map(position => position.entryTierId), [
+    'tier-070-060', 'tier-060-050',
+  ]);
+  assert.ok(bot.positions.every(position => position.shares === 100));
 });
 
-test('all qualifying tiers fire once when one tick crosses multiple thresholds without reusing depth', () => {
+test('a tier requires full visible target depth strictly below its ceiling and retries safely', () => {
   const { bot } = fixture();
-  const now = START + 1000;
-  setQuote(bot, 'BTC', 'UP', { ask: 0.20, askSize: 500, at: now });
-  setQuote(bot, 'ETH', 'DOWN', { ask: 0.20, askSize: 500, at: now });
-  assert.equal(bot.processStrategyEntry(now), true);
-  const positions = bot.positions.filter(position => position.pairId === 'btc-up-eth-down');
-  assert.equal(positions.length, 10);
-  assert.deepEqual(Object.fromEntries(
-    positions.filter(position => position.asset === 'BTC')
-      .map(position => [position.entryTierId, position.shares]),
-  ), {
-    'tier-080': 100,
-    'tier-070': 100,
-    'tier-060': 100,
-    'tier-050': 100,
-    'tier-040': 100,
-  });
-  assert.equal(bot.processStrategyEntry(now + 500), false);
-  assert.equal(bot.positions.filter(position => position.pairId === 'btc-up-eth-down').length, 10);
-  assert.equal(bot.orders.some(order => order.action === 'SELL'), false);
-});
-
-test('each rung consumes visible ask depth once across later ticks', () => {
-  const { bot } = fixture();
-  const first = START + 1000;
-  setQuote(bot, 'BTC', 'UP', { ask: 0.35, askSize: 100, at: first });
-  setQuote(bot, 'ETH', 'DOWN', { ask: 0.45, askSize: 100, at: first });
-  assert.equal(bot.processStrategyEntry(first), true);
-  assert.deepEqual([...new Set(bot.positions.map(position => position.entryTierId))].sort(),
-    ['tier-080']);
-  assert.equal(bot.positions.filter(position => position.asset === 'BTC')
-    .reduce((sum, position) => sum + position.shares, 0), 100);
-
-  const next = first + 500;
-  setQuote(bot, 'BTC', 'UP', { ask: 0.25, askSize: 100, at: next });
-  setQuote(bot, 'ETH', 'DOWN', { ask: 0.45, askSize: 100, at: next });
-  assert.equal(bot.processStrategyEntry(next), false);
-  assert.equal(pairState(bot).tiers['tier-070'].status, 'WAITING_FOR_FULL_FILL');
-  assert.equal(bot.positions.filter(position => position.asset === 'BTC')
-    .reduce((sum, position) => sum + position.shares, 0), 100);
-
-  const replenished = next + 500;
-  setQuote(bot, 'BTC', 'UP', { ask: 0.25, askSize: 100, at: replenished });
-  setQuote(bot, 'ETH', 'DOWN', { ask: 0.45, askSize: 200, at: replenished });
-  assert.equal(bot.processStrategyEntry(replenished), true);
-  assert.equal(pairState(bot).tiers['tier-070'].status, 'FILLED');
-  assert.equal(bot.positions.filter(position => position.asset === 'BTC')
-    .reduce((sum, position) => sum + position.shares, 0), 200);
-});
-
-test('newly crossed lower tiers fire once even when the price skips over their thresholds', () => {
-  const { bot } = fixture();
-  const first = START + 1000;
-  setQuote(bot, 'BTC', 'UP', { ask: 0.35, askSize: 2000, at: first });
-  setQuote(bot, 'ETH', 'DOWN', { ask: 0.45, askSize: 2000, at: first });
-  assert.equal(bot.processStrategyEntry(first), true);
-  assert.deepEqual(
-    [...new Set(bot.positions.map(position => position.entryTierId))].sort(),
-    ['tier-080'],
-  );
-
-  const lower = first + 500;
-  setQuote(bot, 'BTC', 'UP', { ask: 0.20, askSize: 2000, at: lower });
-  setQuote(bot, 'ETH', 'DOWN', { ask: 0.20, askSize: 2000, at: lower });
-  assert.equal(bot.processStrategyEntry(lower), true);
-  assert.deepEqual(
-    [...new Set(bot.positions.map(position => position.entryTierId))].sort(),
-    ['tier-040', 'tier-050', 'tier-060', 'tier-070', 'tier-080'],
-  );
-  assert.equal(bot.positions.filter(position => position.asset === 'BTC')
-    .reduce((sum, position) => sum + position.shares, 0), 500);
-});
-
-test('a qualified tier stays latched and retries until complete two-leg depth is available', () => {
-  const { bot } = fixture();
-  const first = START + 1000;
-  setQuote(bot, 'BTC', 'UP', { ask: 0.30, askSize: 100, at: first });
-  setQuote(bot, 'ETH', 'DOWN', { ask: 0.49, askSize: 99, at: first });
-  assert.equal(bot.processStrategyEntry(first), false);
-  assert.equal(pairState(bot).tiers['tier-080'].status, 'WAITING_FOR_FULL_FILL');
+  assert.equal(setRoute(bot, {
+    leaderAsk: 0.60,
+    targetAsk: 0.49,
+    targetAskLevels: [
+      { price: 0.49, size: 40 },
+      { price: 0.50, size: 100 },
+    ],
+  }), false);
   assert.equal(bot.positions.length, 0);
+  assert.equal(routeState(bot).tiers['tier-060-050'].status, 'WAITING_FOR_FULL_FILL');
 
-  const later = first + 500;
-  setQuote(bot, 'BTC', 'UP', { ask: 0.46, askSize: 100, at: later });
-  setQuote(bot, 'ETH', 'DOWN', { ask: 0.49, askSize: 100, at: later });
-  assert.equal(bot.processStrategyEntry(later), true);
-  const tierFill = bot.positions.filter(position => position.entryTierId === 'tier-080');
-  assert.equal(tierFill.length, 2);
-  assert.ok(tierFill.every(position => position.shares === 100));
-  assert.equal(tierFill.find(position => position.asset === 'BTC').avgEntry, 0.46);
+  assert.equal(setRoute(bot, {
+    leaderAsk: 0.60,
+    targetAsk: 0.49,
+    at: START + 2000,
+    targetAskLevels: [{ price: 0.49, size: 100 }],
+  }), true);
+  assert.equal(bot.positions.length, 1);
+  assert.equal(bot.positions[0].avgEntry, 0.49);
+  assert.ok(bot.positions[0].maxEntryPrice < 0.50);
 });
 
-test('unsold BTC and ETH legs resolve against their own exact original markets', async () => {
+test('no new orders are opened at or after the 270-second cutoff', () => {
+  const { bot } = fixture();
+  const cutoff = START + 270_000;
+  assert.equal(setRoute(bot, {
+    leaderAsk: 0.60,
+    targetAsk: 0.49,
+    at: cutoff,
+  }), false);
+  assert.equal(bot.positions.length, 0);
+  assert.equal(routeState(bot).tiers['tier-060-050'].status, 'CUTOFF_REACHED');
+  assert.equal(bot.snapshot().strategy.entries.entryCutoffMs, 270_000);
+});
+
+test('a filled position has no intra-window exit and resolves against its exact market', async () => {
   const { bot, resolutionChecks } = fixture();
-  enterBtcUpEthDown(bot);
-  const originalPositions = bot.positions.slice();
+  assert.equal(setRoute(bot, {
+    leaderAsset: 'BTC',
+    leaderSide: 'UP',
+    leaderAsk: 0.60,
+    targetAsset: 'ETH',
+    targetSide: 'UP',
+    targetAsk: 0.49,
+  }), true);
+  const [position] = bot.positions;
+  assert.equal(position.status, 'OPEN');
+  assert.equal(position.exitOrder, undefined);
   await bot.closePreviousWindows(START + WINDOW, START + WINDOW);
-  assert.ok(originalPositions.every(position => position.status === 'PENDING_RESOLUTION'));
+  assert.equal(position.status, 'PENDING_RESOLUTION');
   await bot.resolvePendingPositions(START + WINDOW + config.RESOLUTION_POLL_MS);
-  assert.deepEqual(resolutionChecks.sort(), ['btc-market', 'eth-market']);
-  const btc = originalPositions.find(position => position.asset === 'BTC');
-  const eth = originalPositions.find(position => position.asset === 'ETH');
-  assert.equal(btc.resolutionWinner, 'UP');
-  assert.equal(eth.resolutionWinner, 'DOWN');
-  assert.ok(originalPositions.every(position => position.status === 'SETTLED_EXIT'));
+  assert.deepEqual(resolutionChecks, ['eth-market']);
+  assert.equal(position.resolutionWinner, 'DOWN');
+  assert.equal(position.status, 'SETTLED_EXIT');
   assert.equal(bot.pairCycles[0].status, 'RESOLVED');
 });
 
-test('current-window inventory moves into four resolution boxes at window end', async () => {
-  const { bot } = fixture();
-  const now = START + 1000;
-  setQuote(bot, 'BTC', 'UP', { bid: 0.35, ask: 0.40, at: now });
-  setQuote(bot, 'ETH', 'DOWN', { bid: 0.35, ask: 0.40, at: now });
-  setQuote(bot, 'ETH', 'UP', { bid: 0.35, ask: 0.40, at: now });
-  setQuote(bot, 'BTC', 'DOWN', { bid: 0.35, ask: 0.40, at: now });
-  assert.equal(bot.processStrategyEntry(now), true);
-  assert.equal(bot.positions.length, 4);
-  for (const position of bot.positions) {
-    position.markBid = 0.50;
-    position.markUpdatedAt = Date.now();
-  }
-
-  const open = bot.snapshot().positionBuckets.currentWindow;
-  for (const [asset, side] of [['BTC', 'UP'], ['BTC', 'DOWN'], ['ETH', 'UP'], ['ETH', 'DOWN']]) {
-    assert.equal(open[asset][side].shares, 100);
-    assert.equal(open[asset][side].averageEntry, 0.4);
-    assert.equal(typeof open[asset][side].unrealizedPnl, 'number');
-  }
-
-  await bot.closePreviousWindows(START + WINDOW, START + WINDOW);
-  const snapshot = bot.snapshot();
-  for (const [asset, side] of [['BTC', 'UP'], ['BTC', 'DOWN'], ['ETH', 'UP'], ['ETH', 'DOWN']]) {
-    assert.equal(snapshot.positionBuckets.currentWindow[asset][side].shares, 0);
-    assert.equal(snapshot.positionBuckets.awaitingResolution[asset][side].shares, 100);
-    assert.equal(snapshot.positionBuckets.awaitingResolution[asset][side].averageEntry, 0.4);
-    assert.equal(snapshot.positionBuckets.awaitingResolution[asset][side].unrealizedPnl, null);
-  }
-});
-
-test('resolution checks are concurrent and retry no sooner than five seconds', async () => {
-  const { bot, data, winners } = fixture();
-  const entryAt = START + 1000;
-  setQuote(bot, 'BTC', 'UP', { ask: 0.40, at: entryAt });
-  setQuote(bot, 'ETH', 'DOWN', { ask: 0.40, at: entryAt });
-  setQuote(bot, 'ETH', 'UP', { ask: 0.40, at: entryAt });
-  setQuote(bot, 'BTC', 'DOWN', { ask: 0.40, at: entryAt });
-  bot.processStrategyEntry(entryAt);
-  await bot.closePreviousWindows(START + WINDOW, START + WINDOW);
-
-  const checks = [];
-  const firstResponses = [];
-  let active = 0;
-  let maxActive = 0;
-  data.getMarket = id => {
-    checks.push(id);
-    active += 1;
-    maxActive = Math.max(maxActive, active);
-    return new Promise(resolve => firstResponses.push(() => {
-      active -= 1;
-      resolve({ id, closed: false });
-    }));
-  };
-
-  const firstPollAt = START + WINDOW;
-  const firstPoll = bot.resolvePendingPositions(firstPollAt);
-  await new Promise(resolve => setImmediate(resolve));
-  assert.deepEqual(checks.sort(), ['btc-market', 'eth-market']);
-  assert.equal(maxActive, 2);
-  for (const respond of firstResponses) respond();
-  await firstPoll;
-
-  await bot.resolvePendingPositions(firstPollAt + config.RESOLUTION_POLL_MS - 1);
-  assert.equal(checks.length, 2);
-  data.getMarket = async id => {
-    checks.push(id);
-    return { id, closed: true, winner: winners[id] };
-  };
-  await bot.resolvePendingPositions(firstPollAt + config.RESOLUTION_POLL_MS);
-  assert.equal(checks.length, 4);
-  assert.ok(bot.positions.every(position => position.status === 'SETTLED_EXIT'));
-});
-
-test('entry tier constants retain the specified size and price ladder', async () => {
-  const { bot } = fixture();
-  assert.deepEqual(CrossPairBot.constants.ENTRY_TIERS.map(tier =>
-    [tier.id, tier.combinedAskThreshold, tier.sharesPerLeg]), [
-    ['tier-080', 0.80, 100],
-    ['tier-070', 0.70, 100],
-    ['tier-060', 0.60, 100],
-    ['tier-050', 0.50, 100],
-    ['tier-040', 0.40, 100],
-  ]);
-  assert.equal(bot.snapshot().strategy.settlement.intraWindowSells, false);
-  assert.equal(bot.snapshot().strategy.settlement.resolutionPollIntervalMs, 5000);
-});
-
-test('misaligned BTC and ETH markets are rejected rather than paired', async () => {
-  const mismatched = new CrossPairBot({ marketData: {
+test('misaligned BTC and ETH markets are rejected', async () => {
+  const bot = new CrossPairBot({ marketData: {
     getBtcMarket: async start => ({ start }),
     getEthMarket: async start => ({ start: start + WINDOW }),
   } });
-  await assert.rejects(mismatched.loadMarket(START, WINDOW), /same 5-minute window start/);
-});
-
-test('Polymarket market mapping supports aligned BTC and ETH markets', async () => {
-  const data = require('../wick-market-data');
-  assert.equal(typeof data.getEthMarket, 'function');
-  assert.equal(typeof data.getBtcMarket, 'function');
-  assert.equal(CrossPairBot.constants.SHARES_PER_LEG, 100);
-  assert.equal('EXIT_BID_SUM_MIN' in CrossPairBot.constants, false);
-  await assert.rejects(data.getAssetMarket('SOL', START, WINDOW), /Unsupported asset/);
+  await assert.rejects(bot.loadMarket(START, WINDOW), /same 5-minute window start/);
 });

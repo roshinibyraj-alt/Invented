@@ -6,25 +6,43 @@ const marketData = require('./wick-market-data');
 const { quoteFromBook, takerFeeFor, feeContext } = WickBot._test;
 
 const ENTRY_TIERS = Object.freeze(cfg.CROSS_PAIR_ENTRY_TIERS.map(tier => Object.freeze({ ...tier })));
-const SHARES_PER_LEG = ENTRY_TIERS[0].sharesPerLeg;
+const SHARES_PER_FIRE = ENTRY_TIERS[0].sharesPerFire;
 const MAX_ENTRY_PRICE = cfg.CROSS_PAIR_MAX_ENTRY_PRICE;
+const MIN_ENTRY_PRICE = cfg.CROSS_PAIR_MIN_ENTRY_PRICE;
+const ENTRY_CUTOFF_MS = cfg.CROSS_PAIR_ENTRY_CUTOFF_MS;
 const QUOTE_MAX_AGE_MS = 2000;
 const PAIRS = Object.freeze([
   Object.freeze({
-    id: 'btc-up-eth-down',
-    label: 'BTC UP + ETH DOWN',
-    legs: Object.freeze([
-      Object.freeze({ asset: 'BTC', side: 'UP' }),
-      Object.freeze({ asset: 'ETH', side: 'DOWN' }),
-    ]),
+    id: 'btc-up-leads-eth-up',
+    label: 'BTC UP leads → buy ETH UP',
+    leaderAsset: 'BTC',
+    leaderSide: 'UP',
+    targetAsset: 'ETH',
+    targetSide: 'UP',
   }),
   Object.freeze({
-    id: 'eth-up-btc-down',
-    label: 'ETH UP + BTC DOWN',
-    legs: Object.freeze([
-      Object.freeze({ asset: 'ETH', side: 'UP' }),
-      Object.freeze({ asset: 'BTC', side: 'DOWN' }),
-    ]),
+    id: 'eth-up-leads-btc-up',
+    label: 'ETH UP leads → buy BTC UP',
+    leaderAsset: 'ETH',
+    leaderSide: 'UP',
+    targetAsset: 'BTC',
+    targetSide: 'UP',
+  }),
+  Object.freeze({
+    id: 'btc-down-leads-eth-down',
+    label: 'BTC DOWN leads → buy ETH DOWN',
+    leaderAsset: 'BTC',
+    leaderSide: 'DOWN',
+    targetAsset: 'ETH',
+    targetSide: 'DOWN',
+  }),
+  Object.freeze({
+    id: 'eth-down-leads-btc-down',
+    label: 'ETH DOWN leads → buy BTC DOWN',
+    leaderAsset: 'ETH',
+    leaderSide: 'DOWN',
+    targetAsset: 'BTC',
+    targetSide: 'DOWN',
   }),
 ]);
 
@@ -123,27 +141,33 @@ function emptyPairState(pair) {
   return {
     id: pair.id,
     label: pair.label,
+    leaderAsset: pair.leaderAsset,
+    leaderSide: pair.leaderSide,
+    targetAsset: pair.targetAsset,
+    targetSide: pair.targetSide,
     cycleCount: 0,
     status: 'ARMED',
     cycleIds: [],
     tiers: Object.fromEntries(ENTRY_TIERS.map(tier => [tier.id, {
       id: tier.id,
       label: tier.label,
-      combinedAskThreshold: tier.combinedAskThreshold,
-      comparison: tier.comparison,
-      sharesPerLeg: tier.sharesPerLeg,
+      leaderMinPrice: tier.leaderMinPrice,
+      targetMaxPriceExclusive: tier.targetMaxPriceExclusive,
+      minEntryPrice: MIN_ENTRY_PRICE,
+      sharesPerFire: tier.sharesPerFire,
       status: 'ARMED',
       qualifiedAt: null,
       filledAt: null,
       cycleId: null,
-      lastReason: `Waiting for combined asks ${tier.comparison === 'LT' ? 'below' : 'at or below'} $${tier.combinedAskThreshold.toFixed(2)}.`,
+      lastReason: `Waiting for ${pair.leaderAsset} ${pair.leaderSide} ≥ $${tier.leaderMinPrice.toFixed(2)} and ${pair.targetAsset} ${pair.targetSide} at $${MIN_ENTRY_PRICE.toFixed(2)}–below $${tier.targetMaxPriceExclusive.toFixed(2)}.`,
       lastDepthNotice: null,
       lastDepthNoticeAt: 0,
       lastBlockNotice: null,
       lastBlockNoticeAt: 0,
     }])),
-    lastReason: 'Waiting for both ask quotes.',
-    lastEntryAskSum: null,
+    lastReason: 'Waiting for fresh leader and target asks.',
+    lastLeaderPrice: null,
+    lastTargetAsk: null,
   };
 }
 
@@ -154,8 +178,8 @@ class CrossPairBot extends WickBot {
       windowMs: cfg.WINDOW_MS_5M,
       capital: cfg.DEMO_CAPITAL,
       strategyId: 'btc-eth-cross-pair-arbitrage',
-      strategyName: 'BTC/ETH cross-pair arbitrage',
-      rules: { sharesPerSide: SHARES_PER_LEG },
+      strategyName: 'BTC/ETH same-direction lagging-price entries',
+      rules: { sharesPerSide: SHARES_PER_FIRE },
       marketData: data,
     });
     this.crossAssetData = data;
@@ -311,17 +335,27 @@ class CrossPairBot extends WickBot {
       now - Number(quote.updatedAt) <= QUOTE_MAX_AGE_MS;
   }
 
-  pairQuote(pair, now) {
-    const legs = pair.legs.map(leg => ({
-      ...leg,
-      quote: this.quoteFor(leg.asset, leg.side),
-      market: this.marketFor(leg.asset),
-    }));
-    const asksFresh = legs.every(leg => this.isFreshQuote(leg.quote, now, 'bestAsk'));
+  linkQuote(pair, now) {
+    const leader = {
+      asset: pair.leaderAsset,
+      side: pair.leaderSide,
+      quote: this.quoteFor(pair.leaderAsset, pair.leaderSide),
+      market: this.marketFor(pair.leaderAsset),
+    };
+    const target = {
+      asset: pair.targetAsset,
+      side: pair.targetSide,
+      quote: this.quoteFor(pair.targetAsset, pair.targetSide),
+      market: this.marketFor(pair.targetAsset),
+    };
+    const quotesFresh = this.isFreshQuote(leader.quote, now, 'bestAsk') &&
+      this.isFreshQuote(target.quote, now, 'bestAsk');
     return {
-      legs,
-      asksFresh,
-      askSum: asksFresh ? round(legs.reduce((sum, leg) => sum + Number(leg.quote.bestAsk), 0)) : null,
+      leader,
+      target,
+      quotesFresh,
+      leaderPrice: quotesFresh ? Number(leader.quote.bestAsk) : null,
+      targetAsk: quotesFresh ? Number(target.quote.bestAsk) : null,
     };
   }
 
@@ -331,45 +365,71 @@ class CrossPairBot extends WickBot {
         this.btcMarket.start !== start || this.completedWindows.has(start)) return false;
     const elapsed = now - start;
     if (elapsed < 0 || elapsed >= this.windowMs) return false;
+    if (elapsed >= ENTRY_CUTOFF_MS) {
+      for (const pair of PAIRS) {
+        const pairState = this.pairStates[pair.id];
+        pairState.status = 'ENTRY CUTOFF REACHED';
+        pairState.lastReason = `The ${Math.round(ENTRY_CUTOFF_MS / 1000)}-second entry cutoff has passed.`;
+        for (const tierState of Object.values(pairState.tiers)) {
+          if (tierState.status === 'FILLED') continue;
+          tierState.status = 'CUTOFF_REACHED';
+          tierState.lastReason = 'No new entries are allowed after the 270-second cutoff.';
+        }
+      }
+      this.lastScanAt = now;
+      return false;
+    }
 
     let changed = false;
     for (const pair of PAIRS) {
       const pairState = this.pairStates[pair.id];
-      const marketPair = this.pairQuote(pair, now);
-      pairState.lastEntryAskSum = marketPair.askSum;
-      if (!marketPair.asksFresh) {
+      const signal = this.linkQuote(pair, now);
+      pairState.lastLeaderPrice = signal.leaderPrice;
+      pairState.lastTargetAsk = signal.targetAsk;
+      pairState.quotesFresh = signal.quotesFresh;
+      if (!signal.quotesFresh) {
         pairState.status = 'WAITING_FOR_QUOTES';
-        pairState.lastReason = 'Waiting for fresh asks on both legs.';
+        pairState.lastReason = 'Waiting for fresh asks on the leader and target outcomes.';
         continue;
       }
       for (const tier of ENTRY_TIERS) {
         const tierState = pairState.tiers[tier.id];
-        const qualified = tier.comparison === 'LT'
-          ? marketPair.askSum < tier.combinedAskThreshold
-          : marketPair.askSum <= tier.combinedAskThreshold;
-        if (qualified && !tierState.qualifiedAt) {
+        const qualified = signal.leaderPrice >= tier.leaderMinPrice &&
+          signal.targetAsk >= MIN_ENTRY_PRICE &&
+          signal.targetAsk < tier.targetMaxPriceExclusive;
+        if (qualified && tierState.status !== 'FILLED') {
+          const firstQualification = tierState.qualifiedAt == null;
+          if (firstQualification) {
           tierState.qualifiedAt = now;
-          tierState.status = 'QUALIFIED';
-          tierState.lastReason = `Combined asks ${marketPair.askSum.toFixed(3)} reached ${tier.comparison === 'LT' ? 'below' : 'at or below'} $${tier.combinedAskThreshold.toFixed(2)}.`;
-          this.log('PAPER_CROSS_PAIR_ENTRY_TIER_QUALIFIED', {
+            tierState.lastReason = `${pair.leaderAsset} ${pair.leaderSide} at ${signal.leaderPrice.toFixed(3)}; ${pair.targetAsset} ${pair.targetSide} at ${signal.targetAsk.toFixed(3)}.`;
+            this.log('PAPER_LAGGING_ENTRY_TIER_QUALIFIED', {
             pairId: pair.id,
             pairLabel: pair.label,
             tierId: tier.id,
             tierLabel: tier.label,
-            combinedAsk: marketPair.askSum,
-            threshold: tier.combinedAskThreshold,
-            sharesPerLeg: tier.sharesPerLeg,
+              leaderAsset: pair.leaderAsset,
+              leaderSide: pair.leaderSide,
+              leaderPrice: signal.leaderPrice,
+              targetAsset: pair.targetAsset,
+              targetSide: pair.targetSide,
+              targetAsk: signal.targetAsk,
+              sharesPerFire: tier.sharesPerFire,
           });
+          }
+          tierState.status = 'ENTRY_READY';
+          if (this.buySignal(pair, pairState, signal, now, tier, tierState)) changed = true;
+        } else if (tierState.status !== 'FILLED') {
+          if (tierState.qualifiedAt != null) {
+            tierState.qualifiedAt = null;
+            tierState.status = 'ARMED';
+          }
+          tierState.lastReason = signal.targetAsk < MIN_ENTRY_PRICE
+            ? `${pair.targetAsset} ${pair.targetSide} is below the $${MIN_ENTRY_PRICE.toFixed(2)} minimum entry price.`
+            : `Waiting for leader ≥ $${tier.leaderMinPrice.toFixed(2)} and target ask ≥ $${MIN_ENTRY_PRICE.toFixed(2)} but < $${tier.targetMaxPriceExclusive.toFixed(2)}.`;
         }
       }
-      for (const tier of ENTRY_TIERS) {
-        const tierState = pairState.tiers[tier.id];
-        if (!tierState.qualifiedAt || tierState.status === 'FILLED') continue;
-        tierState.status = 'ENTRY_READY';
-        if (this.buyPair(pair, pairState, marketPair, now, tier, tierState)) changed = true;
-      }
       const tiers = Object.values(pairState.tiers);
-      const pending = tiers.filter(tier => tier.qualifiedAt && tier.status !== 'FILLED');
+      const pending = tiers.filter(tier => tier.qualifiedAt != null && tier.status !== 'FILLED');
       const filled = tiers.filter(tier => tier.status === 'FILLED');
       pairState.status = pending.some(tier => tier.status === 'WAITING_FOR_FULL_FILL')
         ? 'WAITING FOR FULL FILL'
@@ -383,66 +443,71 @@ class CrossPairBot extends WickBot {
       pairState.lastReason = pending.length
         ? pending.map(tier => tier.lastReason).join(' ')
         : filled.length
-          ? `${filled.length} entry tier(s) filled. No intra-window sells; holding shares for exact-market resolution.`
-          : `Combined asks ${marketPair.askSum.toFixed(3)}; watching all entry tiers.`;
+          ? `${filled.length} tier(s) filled. Holding target shares for exact-market resolution.`
+          : signal.targetAsk < MIN_ENTRY_PRICE
+            ? `${pair.targetAsset} ${pair.targetSide} ask ${signal.targetAsk.toFixed(3)} is below the $${MIN_ENTRY_PRICE.toFixed(2)} entry floor.`
+            : `${pair.leaderAsset} ${pair.leaderSide} ask ${signal.leaderPrice.toFixed(3)}; ${pair.targetAsset} ${pair.targetSide} ask ${signal.targetAsk.toFixed(3)}. Watching leader/laggard tiers.`;
     }
     this.lastScanAt = now;
     return changed;
   }
 
-  buyPair(pair, pairState, marketPair, now, tier, tierState) {
-    const fills = marketPair.legs.map(leg => ({
-      ...leg,
-      fill: sweepBook(this.availableAskLevels(leg), tier.sharesPerLeg, 'BUY', MAX_ENTRY_PRICE),
-    }));
-    for (const leg of fills) {
-      leg.fee = feesFor(leg.market, leg.fill.fills);
-    }
-    const incomplete = fills.filter(leg => leg.fill.filledShares + 1e-9 < tier.sharesPerLeg);
-    if (incomplete.length) {
-      const depthSummary = fills.map(leg =>
-        `${leg.asset} ${leg.side} ${leg.fill.filledShares}/${tier.sharesPerLeg}`).join(', ');
-      const reason = `${tier.label}: asks at or below $${MAX_ENTRY_PRICE.toFixed(2)} can fill ${depthSummary}. No shares were booked; retrying.`;
+  buySignal(pair, pairState, signal, now, tier, tierState) {
+    const target = signal.target;
+    const requestedShares = tier.sharesPerFire;
+    const maxTargetFillPrice = Math.min(
+      MAX_ENTRY_PRICE,
+      tier.targetMaxPriceExclusive - 1e-6,
+    );
+    const fill = sweepBook(
+      this.availableAskLevels(target),
+      requestedShares,
+      'BUY',
+      maxTargetFillPrice,
+    );
+    const fee = feesFor(target.market, fill.fills);
+    if (fill.filledShares + 1e-9 < requestedShares) {
+      const reason = `${pair.label} · ${tier.label}: visible asks under $${tier.targetMaxPriceExclusive.toFixed(2)} can fill ${fill.filledShares}/${requestedShares} shares. No shares booked; retrying only while the signal remains valid.`;
       tierState.status = 'WAITING_FOR_FULL_FILL';
       tierState.lastReason = reason;
-      if (tierState.lastDepthNotice !== depthSummary ||
+      if (tierState.lastDepthNotice !== `${fill.filledShares}/${requestedShares}` ||
           now - tierState.lastDepthNoticeAt >= 5000) {
-        this.log('PAPER_CROSS_PAIR_ENTRY_WAITING_FOR_FULL_FILL', {
+        this.log('PAPER_LAGGING_ENTRY_WAITING_FOR_FULL_FILL', {
           pairId: pair.id,
           pairLabel: pair.label,
           tierId: tier.id,
           tierLabel: tier.label,
-          threshold: tier.combinedAskThreshold,
-          combinedBestAsk: marketPair.askSum,
-          maxPricePerShare: MAX_ENTRY_PRICE,
-          requestedSharesPerLeg: tier.sharesPerLeg,
-          legs: fills.map(leg => ({
-            asset: leg.asset,
-            side: leg.side,
-            requestedShares: tier.sharesPerLeg,
-            availableSharesWithinCap: leg.fill.filledShares,
-          })),
-          message: 'No entry was booked because both legs could not fill completely.',
+          leaderPrice: signal.leaderPrice,
+          targetAsk: signal.targetAsk,
+          targetAsset: target.asset,
+          targetSide: target.side,
+          requestedShares,
+          availableSharesWithinCap: fill.filledShares,
+          maxPricePerShare: maxTargetFillPrice,
+          message: 'No position was booked because the full 100-share target entry was not available within its tier price cap.',
         });
-        tierState.lastDepthNotice = depthSummary;
+        tierState.lastDepthNotice = `${fill.filledShares}/${requestedShares}`;
         tierState.lastDepthNoticeAt = now;
       }
       return false;
     }
-    const totalDebit = fills.reduce((sum, leg) => sum + leg.fill.notional + leg.fee, 0);
+
+    const totalDebit = fill.notional + fee;
     if (totalDebit > this.cash + 1e-9) {
       tierState.status = 'BLOCKED_INSUFFICIENT_CASH';
-      const reason = `${tier.label}: complete pair needs $${round(totalDebit).toFixed(2)} including fees; paper cash is $${round(this.cash).toFixed(2)}. No shares were booked.`;
+      const reason = `${tier.label}: 100-share target entry needs $${round(totalDebit).toFixed(2)} including fees; paper cash is $${round(this.cash).toFixed(2)}.`;
       tierState.lastReason = reason;
-      if (tierState.lastBlockNotice !== reason || now - tierState.lastBlockNoticeAt >= 5000) {
-        this.log('PAPER_CROSS_PAIR_ENTRY_BLOCKED_CASH', {
+      if (tierState.lastBlockNotice !== reason ||
+          now - tierState.lastBlockNoticeAt >= 5000) {
+        this.log('PAPER_LAGGING_ENTRY_BLOCKED_CASH', {
           pairId: pair.id,
           pairLabel: pair.label,
           tierId: tier.id,
           tierLabel: tier.label,
           requiredCash: round(totalDebit),
           availableCash: round(this.cash),
-          maxPricePerShare: MAX_ENTRY_PRICE,
+          requestedShares,
+          maxPricePerShare: maxTargetFillPrice,
         });
         tierState.lastBlockNotice = reason;
         tierState.lastBlockNoticeAt = now;
@@ -450,196 +515,197 @@ class CrossPairBot extends WickBot {
       return false;
     }
 
-    for (const leg of fills) {
-      this.consumeAskDepth(leg.market.tokens[leg.side], leg.fill.fills);
-    }
-
+    this.consumeAskDepth(target.market.tokens[target.side], fill.fills);
     const cycleNumber = pairState.cycleCount + 1;
     const cycleId = `${pair.id}-${this.orderWindowStart}-${tier.id}-${cycleNumber}`;
+    const orderId = `${cycleId}-${target.asset.toLowerCase()}-${target.side.toLowerCase()}-buy`;
+    const positionId = `${cycleId}-${target.asset.toLowerCase()}-${target.side.toLowerCase()}`;
+    const fillEvents = fill.fills.map(level => ({
+      filledAt: now,
+      shares: level.shares,
+      price: level.price,
+      cost: level.value,
+      fee: round(takerFeeFor(target.market, level.price, level.shares)),
+      source: 'VISIBLE_ASK_DEPTH',
+    }));
+    const order = {
+      id: orderId,
+      pairId: pair.id,
+      pairCycleId: cycleId,
+      timeframe: this.timeframe,
+      windowStart: this.orderWindowStart,
+      marketId: target.market.id,
+      marketSlug: target.market.slug,
+      asset: target.asset,
+      tokenId: target.market.tokens[target.side],
+      side: target.side,
+      action: 'BUY',
+      kind: 'SAME_DIRECTION_LAGGING_ENTRY',
+      orderType: 'MARKET',
+      requestedShares,
+      filledShares: requestedShares,
+      remainingShares: 0,
+      cost: fill.notional,
+      fee,
+      averagePrice: fill.averagePrice,
+      fillEvents,
+      cancelledRemainderShares: 0,
+      maxPricePerShare: maxTargetFillPrice,
+      createdAt: now,
+      submittedAt: now,
+      filledAt: now,
+      status: 'FILLED',
+      positionId,
+      positionIds: [positionId],
+    };
+    const position = {
+      id: positionId,
+      timeframe: this.timeframe,
+      windowMs: this.windowMs,
+      windowStart: this.orderWindowStart,
+      marketId: target.market.id,
+      slug: target.market.slug,
+      title: target.market.title,
+      asset: target.asset,
+      side: target.side,
+      tokenId: target.market.tokens[target.side],
+      pairId: pair.id,
+      pairLabel: pair.label,
+      entryTierId: tier.id,
+      entryTierLabel: tier.label,
+      entryThreshold: tier.leaderMinPrice,
+      leaderAsset: pair.leaderAsset,
+      leaderSide: pair.leaderSide,
+      leaderPriceAtEntry: signal.leaderPrice,
+      targetPriceAtEntry: signal.targetAsk,
+      targetMaxPriceExclusive: tier.targetMaxPriceExclusive,
+      pairCycleId: cycleId,
+      pairCycleNumber: cycleNumber,
+      entryKey: orderId,
+      entryLabel: `${pair.label} · ${tier.label} · ${target.asset} ${target.side}`,
+      entryMode: 'SAME_DIRECTION_LAGGING_MARKET_BUY',
+      entryType: 'MARKET_TAKER_BUY',
+      strategyId: this.strategyId,
+      strategyName: this.strategyName,
+      orderType: 'MARKET',
+      fillModel: 'PAPER_VISIBLE_ASK_DEPTH_WITH_TIER_PRICE_CAP',
+      shares: requestedShares,
+      initialShares: requestedShares,
+      requestedShares,
+      maxEntryPrice: maxTargetFillPrice,
+      avgEntry: fill.averagePrice,
+      fillPrice: fill.averagePrice,
+      cost: fill.notional,
+      totalCost: fill.notional,
+      initialTotalCost: fill.notional,
+      fees: fee,
+      initialFees: fee,
+      exitFees: 0,
+      exitProceeds: 0,
+      estimatedMakerRebate: 0,
+      status: 'OPEN',
+      submittedAt: now,
+      openedAt: now,
+      filledAt: now,
+      updatedAt: now,
+      entryFillEvents: fillEvents,
+      entryQuotes: this.captureQuotePair(
+        now,
+        target.asset === 'BTC' ? this.btcLiveQuotes : this.liveQuotes,
+      ),
+      entryQuoteAt: now,
+      feeContext: feeContext(target.market),
+      markBid: target.quote.bestBid ?? null,
+      markUpdatedAt: target.quote.updatedAt || now,
+      markStatus: 'LIVE',
+      maxObservedBidSizeByPrice: {},
+    };
     const cycle = {
       id: cycleId,
       pairId: pair.id,
       pairLabel: pair.label,
       entryTierId: tier.id,
       entryTierLabel: tier.label,
-      entryThreshold: tier.combinedAskThreshold,
-      sharesPerLeg: tier.sharesPerLeg,
+      entryThreshold: tier.leaderMinPrice,
+      leaderAsset: pair.leaderAsset,
+      leaderSide: pair.leaderSide,
+      leaderPrice: signal.leaderPrice,
+      targetAsset: target.asset,
+      targetSide: target.side,
+      targetAsk: signal.targetAsk,
+      sharesPerFire: requestedShares,
       cycleNumber,
       windowStart: this.orderWindowStart,
       status: 'HOLDING_TO_RESOLUTION',
       entryAt: now,
-      entryAskSum: marketPair.askSum,
-      entryAveragePriceSum: round(fills.reduce((sum, leg) => sum + leg.fill.averagePrice, 0)),
-      entryCost: round(fills.reduce((sum, leg) => sum + leg.fill.notional, 0)),
-      entryFees: round(fills.reduce((sum, leg) => sum + leg.fee, 0)),
-      legPositionIds: [],
-      legs: [],
+      entryAveragePrice: fill.averagePrice,
+      entryCost: fill.notional,
+      entryFees: fee,
+      legPositionIds: [positionId],
+      legs: [{
+        asset: target.asset,
+        side: target.side,
+        requestedShares,
+        filledShares: requestedShares,
+        positionId,
+        orderId,
+      }],
       realizedPnl: null,
     };
 
-    for (const leg of fills) {
-      const orderId = `${cycleId}-${leg.asset.toLowerCase()}-${leg.side.toLowerCase()}-buy`;
-      const order = {
-        id: orderId,
-        pairId: pair.id,
-        pairCycleId: cycleId,
-        timeframe: this.timeframe,
-        windowStart: this.orderWindowStart,
-        marketId: leg.market.id,
-        marketSlug: leg.market.slug,
-        asset: leg.asset,
-        tokenId: leg.market.tokens[leg.side],
-        side: leg.side,
-        action: 'BUY',
-        kind: 'PAIR_ENTRY_TIER',
-        orderType: 'MARKET',
-        requestedShares: tier.sharesPerLeg,
-        filledShares: tier.sharesPerLeg,
-        remainingShares: 0,
-        cost: leg.fill.notional,
-        fee: leg.fee,
-        averagePrice: leg.fill.averagePrice,
-        fillEvents: leg.fill.fills.map(fill => ({
-          filledAt: now,
-          shares: fill.shares,
-          price: fill.price,
-          cost: fill.value,
-          fee: round(takerFeeFor(leg.market, fill.price, fill.shares)),
-          source: 'VISIBLE_ASK_DEPTH',
-        })),
-        cancelledRemainderShares: 0,
-        maxPricePerShare: MAX_ENTRY_PRICE,
-        createdAt: now,
-        submittedAt: now,
-        filledAt: now,
-        status: 'FILLED',
-      };
-      const positionId = `${cycleId}-${leg.asset.toLowerCase()}-${leg.side.toLowerCase()}`;
-      const position = {
-        id: positionId,
-        timeframe: this.timeframe,
-        windowMs: this.windowMs,
-        windowStart: this.orderWindowStart,
-        marketId: leg.market.id,
-        slug: leg.market.slug,
-        title: leg.market.title,
-        asset: leg.asset,
-        side: leg.side,
-        tokenId: leg.market.tokens[leg.side],
-        pairId: pair.id,
-        pairLabel: pair.label,
-        entryTierId: tier.id,
-        entryTierLabel: tier.label,
-        entryThreshold: tier.combinedAskThreshold,
-        pairCycleId: cycleId,
-        pairCycleNumber: cycleNumber,
-        pairedWith: `${fills.find(other => other !== leg).asset} ${fills.find(other => other !== leg).side}`,
-        entryKey: orderId,
-        entryLabel: `${pair.label} · ${tier.label} · ${leg.asset} ${leg.side}`,
-        entryMode: 'CROSS_PAIR_MARKET_BUY',
-        entryType: 'MARKET_TAKER_BUY',
-        strategyId: this.strategyId,
-        strategyName: this.strategyName,
-        orderType: 'MARKET',
-        fillModel: 'PAPER_VISIBLE_ASK_DEPTH_WITH_MAX_PRICE',
-        shares: tier.sharesPerLeg,
-        initialShares: tier.sharesPerLeg,
-        requestedShares: tier.sharesPerLeg,
-        maxEntryPrice: MAX_ENTRY_PRICE,
-        avgEntry: leg.fill.averagePrice,
-        fillPrice: leg.fill.averagePrice,
-        cost: leg.fill.notional,
-        totalCost: leg.fill.notional,
-        initialTotalCost: leg.fill.notional,
-        fees: leg.fee,
-        initialFees: leg.fee,
-        exitFees: 0,
-        exitProceeds: 0,
-        estimatedMakerRebate: 0,
-        status: 'OPEN',
-        submittedAt: now,
-        openedAt: now,
-        filledAt: now,
-        updatedAt: now,
-        entryFillEvents: order.fillEvents,
-        entryQuotes: this.captureQuotePair(
-          now,
-          leg.asset === 'BTC' ? this.btcLiveQuotes : this.liveQuotes,
-        ),
-        entryQuoteAt: now,
-        feeContext: feeContext(leg.market),
-        markBid: leg.quote.bestBid ?? null,
-        markUpdatedAt: leg.quote.updatedAt || now,
-        markStatus: 'LIVE',
-        maxObservedBidSizeByPrice: {},
-      };
-      order.positionId = positionId;
-      order.positionIds = [positionId];
-      leg.positionId = positionId;
-      leg.orderId = orderId;
-      leg.position = position;
-      cycle.legs.push({
-        asset: leg.asset, side: leg.side,
-        requestedShares: tier.sharesPerLeg, filledShares: tier.sharesPerLeg,
-        positionId, orderId,
-      });
-      this.orders.unshift(order);
-      this.windowOrders.unshift(order);
-      this.positions.unshift(position);
-      this.totalOrderAttempts += 1;
-      cycle.legPositionIds.push(positionId);
-    }
-
+    this.orders.unshift(order);
+    this.windowOrders.unshift(order);
+    this.positions.unshift(position);
+    this.totalOrderAttempts += 1;
     this.cash = round(this.cash - totalDebit);
     pairState.cycleCount = cycleNumber;
     pairState.cycleIds.push(cycleId);
+    pairState.lastReason = `Bought ${requestedShares} ${target.asset} ${target.side} shares; holding for exact-market resolution.`;
     tierState.status = 'FILLED';
     tierState.filledAt = now;
     tierState.cycleId = cycleId;
-    tierState.lastReason = `Filled both ${tier.sharesPerLeg}-share legs at combined asks ${marketPair.askSum.toFixed(3)}; holding to resolution.`;
-    pairState.lastEntryAskSum = marketPair.askSum;
+    tierState.lastReason = `Filled ${requestedShares} target shares at ${fill.averagePrice.toFixed(3)} average; holding for resolution.`;
     this.pairCycles.unshift(cycle);
     this.entryOrderPlaced = true;
-    this.entryOrderId = this.orders[0]?.id || null;
+    this.entryOrderId = order.id;
     this.entryTriggerLatched = true;
     this.entryTriggerAt = now;
-    this.entryTriggerSide = `${pair.id}:${tier.id}`;
-    this.entryTriggerReason = `${pair.label} ${tier.label} entered at combined asks ${marketPair.askSum.toFixed(3)}.`;
+    this.entryTriggerSide = `${target.asset} ${target.side}`;
+    this.entryTriggerReason = `${pair.label} · ${tier.label}; bought ${requestedShares} ${target.asset} ${target.side}.`;
     this.entrySignal = {
       pairId: pair.id,
       pairLabel: pair.label,
       tierId: tier.id,
       tierLabel: tier.label,
-      threshold: tier.combinedAskThreshold,
-      askSum: marketPair.askSum,
+      leaderAsset: pair.leaderAsset,
+      leaderSide: pair.leaderSide,
+      leaderPrice: signal.leaderPrice,
+      targetAsset: target.asset,
+      targetSide: target.side,
+      targetAsk: signal.targetAsk,
       windowStart: this.orderWindowStart,
       triggeredAt: now,
     };
-    this.log('PAPER_CROSS_PAIR_ENTRY_FILLED', {
+    this.log('PAPER_LAGGING_ENTRY_FILLED', {
       cycleId,
       pairId: pair.id,
       pairLabel: pair.label,
       tierId: tier.id,
       tierLabel: tier.label,
-      threshold: tier.combinedAskThreshold,
-      sharesPerLeg: tier.sharesPerLeg,
-      combinedAsk: marketPair.askSum,
-      combinedAverageFillPrice: cycle.entryAveragePriceSum,
-      maxPricePerShare: MAX_ENTRY_PRICE,
-      entryCost: cycle.entryCost,
-      fees: cycle.entryFees,
-      legs: fills.map(leg => ({
-        asset: leg.asset,
-        side: leg.side,
-        requestedShares: tier.sharesPerLeg,
-        filledShares: tier.sharesPerLeg,
-        cancelledRemainderShares: 0,
-        averageAsk: leg.fill.averagePrice,
-        cost: leg.fill.notional,
-        fee: leg.fee,
-        orderId: leg.orderId,
-        positionId: leg.positionId,
-      })),
+      leaderAsset: pair.leaderAsset,
+      leaderSide: pair.leaderSide,
+      leaderPrice: signal.leaderPrice,
+      targetAsset: target.asset,
+      targetSide: target.side,
+      targetAsk: signal.targetAsk,
+      requestedShares,
+      filledShares: requestedShares,
+      averageFillPrice: fill.averagePrice,
+      maxPricePerShare: maxTargetFillPrice,
+      entryCost: fill.notional,
+      fees: fee,
+      orderId,
+      positionId,
     });
     return true;
   }
@@ -649,6 +715,7 @@ class CrossPairBot extends WickBot {
     const now = Date.now();
     const elapsedMs = state.window ? now - Number(state.window.start) : null;
     const windowOpen = elapsedMs != null && elapsedMs >= 0 && elapsedMs < this.windowMs;
+    const entryOpen = windowOpen && elapsedMs < ENTRY_CUTOFF_MS;
     const btcPrices = this.captureQuotePair(now, this.btcLiveQuotes);
     const ethPrices = state.livePrices;
     const positionBuckets = {
@@ -659,7 +726,7 @@ class CrossPairBot extends WickBot {
     };
     const pairSnapshots = PAIRS.map(pair => {
       const pairState = this.pairStates[pair.id] || emptyPairState(pair);
-      const marketPair = this.pairQuote(pair, now);
+      const signal = this.linkQuote(pair, now);
       const tiers = ENTRY_TIERS.map(tier => {
         const tierState = pairState.tiers[tier.id];
         const cycle = tierState.cycleId
@@ -673,36 +740,43 @@ class CrossPairBot extends WickBot {
       const activeCycles = pairState.cycleIds
         .map(id => this.pairCycles.find(cycle => cycle.id === id))
         .filter(Boolean);
-      const pendingTiers = tiers.filter(tier => tier.qualifiedAt && tier.status !== 'FILLED');
+      const pendingTiers = tiers.filter(tier =>
+        tier.qualifiedAt != null && tier.status !== 'FILLED' && tier.status !== 'CUTOFF_REACHED');
       const filledTiers = tiers.filter(tier => tier.status === 'FILLED');
-      const unfilledTiers = tiers.filter(tier => tier.status !== 'FILLED');
-      const nextTier = unfilledTiers[0];
       const status = !windowOpen ? 'WINDOW CLOSED'
-        : !marketPair.asksFresh ? 'WAITING FOR QUOTES'
+        : !entryOpen ? 'ENTRY CUTOFF REACHED'
+          : !signal.quotesFresh ? 'WAITING FOR QUOTES'
           : pendingTiers.some(tier => tier.status === 'WAITING_FOR_FULL_FILL') ? 'WAITING FOR FULL FILL'
             : pendingTiers.some(tier => tier.status === 'BLOCKED_INSUFFICIENT_CASH') ? 'BLOCKED BY CASH'
               : pendingTiers.length ? 'ENTRY READY'
                 : filledTiers.length ? 'HOLDING TO RESOLUTION'
                   : 'ARMED';
       const reason = !windowOpen ? 'Waiting for the next aligned 5-minute BTC/ETH window.'
-        : !marketPair.asksFresh ? 'Waiting for fresh ask quotes on both legs.'
+        : !entryOpen ? 'The 270-second entry cutoff has passed; no new buys will be placed this window.'
+          : !signal.quotesFresh ? 'Waiting for fresh asks on the leader and target outcomes.'
           : pendingTiers.length ? pendingTiers.map(tier => tier.lastReason).join(' ')
             : filledTiers.length
-              ? `${filledTiers.length} tier(s) filled. No intra-window sells; holding all shares for exact-market resolution.`
-              : nextTier
-                ? `Combined asks ${marketPair.askSum.toFixed(3)}; next trigger is ${nextTier.comparison === 'LT' ? 'below' : 'at or below'} $${nextTier.combinedAskThreshold.toFixed(2)}.`
-                : 'All entry tiers have filled; holding for exact-market resolution.';
+              ? `${filledTiers.length} tier(s) filled. Holding target-side shares for exact-market resolution.`
+              : signal.targetAsk < MIN_ENTRY_PRICE
+                ? `Target ask ${signal.targetAsk.toFixed(3)} is below the $${MIN_ENTRY_PRICE.toFixed(2)} floor.`
+                : `${pair.leaderAsset} ${pair.leaderSide} ask ${signal.leaderPrice.toFixed(3)}; ${pair.targetAsset} ${pair.targetSide} ask ${signal.targetAsk.toFixed(3)}. Waiting for a tier match.`;
       const currentWindowPositions = this.positions.filter(position =>
         position.pairId === pair.id && position.windowStart === this.orderWindowStart &&
         ['OPEN', 'PENDING_RESOLUTION'].includes(position.status));
       return {
         id: pair.id,
         label: pair.label,
+        leaderAsset: pair.leaderAsset,
+        leaderSide: pair.leaderSide,
+        targetAsset: pair.targetAsset,
+        targetSide: pair.targetSide,
         status,
         reason,
-        sharesPerLeg: SHARES_PER_LEG,
-        entryAskSum: marketPair.askSum,
-        asksFresh: marketPair.asksFresh,
+        sharesPerFire: SHARES_PER_FIRE,
+        leaderPrice: signal.leaderPrice,
+        targetAsk: signal.targetAsk,
+        quotesFresh: signal.quotesFresh,
+        minEntryPrice: MIN_ENTRY_PRICE,
         maxEntryPricePerShare: MAX_ENTRY_PRICE,
         cycleCount: pairState.cycleCount,
         tiers,
@@ -711,10 +785,15 @@ class CrossPairBot extends WickBot {
           cycleNumber: cycle.cycleNumber,
           tierId: cycle.entryTierId,
           tierLabel: cycle.entryTierLabel,
-          sharesPerLeg: cycle.sharesPerLeg,
+          leaderAsset: cycle.leaderAsset,
+          leaderSide: cycle.leaderSide,
+          leaderPrice: cycle.leaderPrice,
+          targetAsset: cycle.targetAsset,
+          targetSide: cycle.targetSide,
+          targetAsk: cycle.targetAsk,
+          sharesPerFire: cycle.sharesPerFire,
           status: cycle.status,
-          entryAskSum: cycle.entryAskSum,
-          entryAveragePriceSum: cycle.entryAveragePriceSum,
+          entryAveragePrice: cycle.entryAveragePrice,
           entryCost: cycle.entryCost,
           entryFees: cycle.entryFees,
           legs: cycle.legPositionIds.map(id => this.positions.find(position => position.id === id))
@@ -735,19 +814,22 @@ class CrossPairBot extends WickBot {
       };
     });
     const pendingTierCount = pairSnapshots.reduce((count, pair) =>
-      count + pair.tiers.filter(tier => tier.qualifiedAt && tier.status !== 'FILLED').length, 0);
+      count + pair.tiers.filter(tier =>
+        tier.qualifiedAt != null && tier.status !== 'FILLED' && tier.status !== 'CUTOFF_REACHED').length, 0);
     const fullFillPendingCount = pairSnapshots.reduce((count, pair) =>
       count + pair.tiers.filter(tier => tier.status === 'WAITING_FOR_FULL_FILL').length, 0);
     const filledTierCount = pairSnapshots.reduce((count, pair) =>
       count + pair.tiers.filter(tier => tier.status === 'FILLED').length, 0);
-    const signalReason = windowOpen
+    const signalReason = windowOpen && !entryOpen
+      ? 'The 270-second entry cutoff has passed. No additional buys will be placed in this window.'
+      : entryOpen
       ? fullFillPendingCount
-        ? `${fullFillPendingCount} triggered tier(s) lack visible depth to fill both legs completely under $${MAX_ENTRY_PRICE.toFixed(2)}; no shares were booked and the tiers will retry.`
+        ? `${fullFillPendingCount} triggered tier(s) lack full 100-share depth within their target-price caps; no shares were booked and they will retry only while their signals remain valid.`
         : pendingTierCount
-          ? `${pendingTierCount} triggered tier(s) are awaiting complete fills on both legs.`
+          ? `${pendingTierCount} triggered tier(s) are awaiting a complete 100-share target fill.`
           : filledTierCount
-            ? `${filledTierCount} entry tier(s) filled; positions are held for resolution while lower ask tiers are monitored.`
-            : 'Monitoring both cross-pair combinations for the five combined-ask entry tiers.'
+            ? `${filledTierCount} tier fire(s) filled; target-side positions are held for official resolution.`
+            : 'Monitoring same-direction BTC/ETH leader and laggard prices across four tiers.'
       : 'Waiting for the next aligned BTC and ETH 5-minute window.';
     const strategy = {
       id: this.strategyId,
@@ -761,24 +843,27 @@ class CrossPairBot extends WickBot {
         tiers: ENTRY_TIERS.map(tier => ({
           id: tier.id,
           label: tier.label,
-          combinedAskThreshold: tier.combinedAskThreshold,
-          comparison: tier.comparison,
-          sharesPerLeg: tier.sharesPerLeg,
+          leaderMinPrice: tier.leaderMinPrice,
+          targetMaxPriceExclusive: tier.targetMaxPriceExclusive,
+          minEntryPrice: MIN_ENTRY_PRICE,
+          sharesPerFire: tier.sharesPerFire,
         })),
+        minTargetPrice: MIN_ENTRY_PRICE,
         maxPricePerShare: MAX_ENTRY_PRICE,
-        pairs: PAIRS.map(pair => ({ id: pair.id, label: pair.label, status:
+        entryCutoffMs: ENTRY_CUTOFF_MS,
+        routes: PAIRS.map(pair => ({ id: pair.id, label: pair.label, status:
           pairSnapshots.find(item => item.id === pair.id)?.status || 'ARMED' })),
-        trigger: 'For each pair, independently trigger one tier at combined asks of $0.80, $0.70, $0.60, $0.50, and $0.40 or lower.',
-        fillPolicy: 'Each tier sweeps visible asks up to $0.99 per share. Book only when both legs fully fill that tier size; otherwise book zero and retry that latched tier.',
+        trigger: 'For UP and DOWN independently, buy the same-side target when the leader ask meets a tier floor and the target ask is at or above $0.20 but below its tier ceiling.',
+        fillPolicy: 'Each valid route/tier fires once per window for 100 target shares. Sweep visible target asks strictly below that tier ceiling, capped at $0.99; book only a complete fill and retry only while the price signal remains valid.',
       },
       settlement: {
         intraWindowSells: false,
         resolutionPollIntervalMs: cfg.RESOLUTION_POLL_MS,
-        windowEnd: 'Any unsold shares wait for confirmed resolution of their exact original BTC or ETH market.',
+        windowEnd: 'All filled shares wait for confirmed resolution of their exact original BTC or ETH market.',
       },
-      timing: 'Monitor both pairings throughout each aligned 5-minute window; no startup wait or entry cutoff.',
-      sizing: 'Each of the five combined-ask tiers buys 100 shares per leg. Both pairings are independent.',
-      trigger: 'BTC UP + ETH DOWN and ETH UP + BTC DOWN are monitored independently.',
+      timing: 'Monitor aligned 5-minute BTC/ETH markets from window open; stop all new entries at 270 seconds.',
+      sizing: 'Each qualifying route/tier fire buys 100 shares on the target outcome only.',
+      trigger: 'Compare BTC UP with ETH UP and BTC DOWN with ETH DOWN; buy the same-side outcome on the cheaper target market.',
       executionNote: 'Demo-only simulation. No positions are sold during the window; all filled shares are held for exact-market resolution.',
     };
     return {
@@ -792,19 +877,22 @@ class CrossPairBot extends WickBot {
         DOWN: btcPrices.DOWN,
       },
       livePrices: ethPrices,
-      signal: { pairId: null, reason: signalReason, ready: pendingTierCount > 0 },
+       signal: { pairId: null, reason: signalReason, ready: pendingTierCount > 0 || filledTierCount > 0 },
       entryWindow: {
         elapsedMs,
         waitMs: 0,
-        cutoffMs: this.windowMs,
-        waiting: !windowOpen,
-        open: windowOpen,
+        cutoffMs: ENTRY_CUTOFF_MS,
+        waiting: elapsedMs == null || elapsedMs < 0,
+        open: entryOpen,
+        windowOpen,
+        cutoffReached: windowOpen && !entryOpen,
         secondsUntilOpen: 0,
-        secondsRemaining: windowOpen ? Math.ceil((this.windowMs - elapsedMs) / 1000) : 0,
+        secondsRemaining: entryOpen ? Math.ceil((ENTRY_CUTOFF_MS - elapsedMs) / 1000) : 0,
+        secondsToWindowEnd: windowOpen ? Math.ceil((this.windowMs - elapsedMs) / 1000) : 0,
       },
       pairStates: pairSnapshots,
       positionBuckets,
-      recentPairCycles: this.pairCycles.slice(0, 20).map(cycle => ({
+      recentEntryFires: this.pairCycles.slice(0, 20).map(cycle => ({
         ...cycle,
         legs: cycle.legPositionIds.map(id => {
           const position = this.positions.find(item => item.id === id);
@@ -822,12 +910,19 @@ class CrossPairBot extends WickBot {
         timeframe: '5m',
         lastScanAt: this.lastScanAt,
         source: 'Polymarket BTC and ETH 5-minute Gamma/CLOB order books',
-        marketResolution: 'Unexited legs resolve only against the confirmed result of their exact original BTC or ETH market.',
+        marketResolution: 'Unexited shares resolve only against the confirmed result of their exact original BTC or ETH market.',
         resolutionPollIntervalMs: cfg.RESOLUTION_POLL_MS,
       },
     };
   }
 }
 
-CrossPairBot.constants = { SHARES_PER_LEG, ENTRY_TIERS, QUOTE_MAX_AGE_MS, PAIRS };
+CrossPairBot.constants = {
+  SHARES_PER_FIRE,
+  ENTRY_TIERS,
+  ENTRY_CUTOFF_MS,
+  MIN_ENTRY_PRICE,
+  QUOTE_MAX_AGE_MS,
+  PAIRS,
+};
 module.exports = CrossPairBot;

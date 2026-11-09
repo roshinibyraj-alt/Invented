@@ -24,24 +24,27 @@ test('health endpoint reports the demo service without secrets', async t => {
   assert.deepEqual(await response.json(), { ok: true, mode: 'DEMO', status: 'scanning', now: 123 });
 });
 
-test('dashboard shows all cross-pair entry tiers and resolution-only exits', async t => {
+test('dashboard shows same-direction leader-laggard tiers and resolution-only exits', async t => {
   const server = startServer({ snapshot: () => ({}) }, 0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
   const response = await fetch(`http://127.0.0.1:${server.address().port}/`);
   const html = await response.text();
   assert.equal(response.status, 200);
-  assert.match(html, /BTC × ETH Cross-Pair Arbitrage/);
-  assert.match(html, /100 shares per leg at combined asks ≤ \$0\.80, \$0\.70, \$0\.60, \$0\.50, and \$0\.40/);
+  assert.match(html, /BTC × ETH Same-Direction Price-Gap Bot/);
+  assert.match(html, /BTC UP ↔ ETH UP · BTC DOWN ↔ ETH DOWN/);
+  assert.match(html, /≥ \$0\.60 \/ &lt; \$0\.50; ≥ \$0\.70 \/ &lt; \$0\.60; ≥ \$0\.80 \/ &lt; \$0\.70; ≥ \$0\.90 \/ &lt; \$0\.80/);
+  assert.match(html, /Buy 100 target shares per fire/);
+  assert.match(html, /at or after 270 seconds/);
   assert.match(html, /No intra-window selling/);
-  assert.match(html, /BTC UP \+ ETH DOWN/);
-  assert.match(html, /ETH UP \+ BTC DOWN/);
+  assert.doesNotMatch(html, /BTC UP \+ ETH DOWN/);
+  assert.doesNotMatch(html, /ETH UP \+ BTC DOWN/);
   assert.match(html, /Current-window accumulated shares/);
   assert.match(html, /Accumulated shares awaiting resolution/);
   assert.match(html, /Floating P&amp;L/);
   assert.match(html, /Realized P&amp;L/);
-  assert.match(html, /fully fill at or below \$0\.99 per share/);
-  assert.match(html, /that tier books no shares and retries/);
+  assert.match(html, /target asks and include modeled taker fees/);
+  assert.match(html, /retry only while the signal remains valid/);
   assert.match(html, /Recent activity/);
   assert.match(html, /Entry tier/);
   assert.match(html, /No raw event payloads/);
