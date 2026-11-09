@@ -1,7 +1,7 @@
 'use strict';
 
 module.exports = {
-  DEMO_CAPITAL: 1000,
+  DEMO_CAPITAL: 3000,
   WINDOW_MS_5M: 5 * 60 * 1000,
   ENTRY_SHARES: 100,
   CROSS_PAIR_ENTRY_TIERS: [

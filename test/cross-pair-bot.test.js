@@ -97,7 +97,7 @@ test('only the two independent BTC/ETH 5-minute pairings are configured', async 
   const multi = new MultiBot();
   assert.deepEqual(Object.keys(multi.bots), ['btc-eth-cross-pair-arbitrage']);
   assert.equal(multi.snapshot().strategy.id, 'btc-eth-cross-pair-arbitrage');
-  assert.equal(multi.snapshot().account.capital, 1000);
+  assert.equal(multi.snapshot().account.capital, 3000);
   assert.deepEqual(CrossPairBot.constants.PAIRS.map(pair => pair.label), [
     'BTC UP + ETH DOWN',
     'ETH UP + BTC DOWN',
