@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#090d1c">
-  <title>BTC × ETH Same-Direction Price-Gap Bot</title>
+  <title>BTC × ETH Cross-Pair Bot</title>
   <style>
     :root{color-scheme:dark;--bg:#090d1c;--panel:#121a30;--line:#29385f;--muted:#9eacd0;--text:#f5f7ff;--green:#4cf0ae;--red:#ff668c;--cyan:#63e4ff;--purple:#c39bff;--gold:#ffd166}
     *{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 9% 0,#26326d 0,transparent 34%),radial-gradient(ellipse at 100% 12%,#52234a 0,transparent 31%),linear-gradient(150deg,#080b19,#0f1730 60%,#111124);color:var(--text);font:14px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}
@@ -29,7 +29,7 @@
 </head>
 <body><main>
   <header class="head">
-    <div><div class="title">BTC × ETH Same-Direction Price-Gap Bot</div><div class="subtitle">BTC/ETH same-side leader-laggard signals · paper trading only</div></div>
+    <div><div class="title">BTC × ETH Cross-Pair Bot</div><div class="subtitle">Opposite-direction paired entries · 5-minute markets · paper trading only</div></div>
     <span class="badge"><i class="pulse"></i><span id="status">CONNECTING</span></span>
   </header>
   <section class="grid overview-grid">
@@ -45,11 +45,11 @@
       <article class="market btc"><div class="market-head"><div class="market-name">BTC · 5-minute market</div><span class="pill" id="btcStatus">WAITING</span></div><div class="side-grid" id="btcQuotes"></div></article>
       <article class="market eth"><div class="market-head"><div class="market-name">ETH · 5-minute market</div><span class="pill" id="ethStatus">WAITING</span></div><div class="side-grid" id="ethQuotes"></div></article>
     </div>
-    <div class="signal-box"><div class="signal-title">Same-direction trading rules</div><div class="signal-text" id="signal">Waiting for fresh BTC and ETH prices…</div><div class="bar"><i id="entryProgress" style="width:0"></i></div><div class="small" id="entryTimer">—</div>
+    <div class="signal-box"><div class="signal-title">Cross-pair trading rules</div><div class="signal-text" id="signal">Waiting for fresh BTC and ETH prices…</div><div class="bar"><i id="entryProgress" style="width:0"></i></div><div class="small" id="entryTimer">—</div>
       <div class="rule-row" id="triggerRules">
-        <div class="rule"><b>BTC UP ↔ ETH UP · BTC DOWN ↔ ETH DOWN</b><span>Leader/target tiers: ≥ $0.60 / &lt; $0.50; ≥ $0.70 / &lt; $0.60; ≥ $0.80 / &lt; $0.70; ≥ $0.90 / &lt; $0.80.</span><span>Buy 100 target shares per fire. Target price must be at least $0.20; no entries at or after 270 seconds.</span></div>
+        <div class="rule"><b>BTC UP + ETH DOWN · ETH UP + BTC DOWN</b><span>Combined-ask rungs: &lt; $0.90; ≤ $0.80; ≤ $0.70; ≤ $0.60; ≤ $0.50.</span><span>Buy 100 shares on both legs when both complete fills are available, up to $0.99 per leg. Scan the full 5-minute window.</span></div>
       </div>
-      <div class="small" id="triggerCap">Each route/tier can fill once per window. Filled target shares are held for exact-market resolution; no intra-window selling.</div>
+      <div class="small" id="triggerCap">Each pair/rung can fill once per window. Filled pairs are held for exact-market resolution; no intra-window selling.</div>
     </div>
   </section>
   <section class="panel"><h2>Current-window accumulated shares</h2><div class="grid inventory-grid" id="currentInventory"></div><div class="small" style="margin-top:8px">Average entry excludes fees. Floating P&amp;L uses the current best bid; stale or missing marks are shown as unavailable.</div></section>
@@ -61,7 +61,7 @@
     <div class="card"><div class="label">Open positions</div><div class="value" id="openPositions">—</div></div>
   </section>
   <section class="panel"><h2>Equity history</h2><div class="chart" id="equityChart"><div class="empty">Settled trades will appear here.</div></div></section>
-  <section class="panel"><h2>Positions</h2><div class="table-wrap" id="positions"><div class="empty">No positions yet.</div></div><div class="small" style="margin-top:9px">Paper only. Entries sweep visible target asks and include modeled taker fees. No shares are sold during a window; filled positions are held for their exact original BTC or ETH market resolution.</div></section>
+  <section class="panel"><h2>Positions</h2><div class="table-wrap" id="positions"><div class="empty">No positions yet.</div></div><div class="small" style="margin-top:9px">Paper only. Each entry requires full visible ask depth on both legs and includes modeled taker fees. No shares are sold during a window; both legs are held for their exact original BTC or ETH market resolutions.</div></section>
   <section class="panel"><h2>Recent activity</h2><div class="small" style="margin:-6px 0 10px">Readable tier triggers, fill waits, completed entries, and resolutions. No raw event payloads.</div><div class="activity-list" id="activity"><div class="empty">No strategy activity yet.</div></div></section>
   <div class="error" id="error"></div>
   <div class="footer">No live orders are sent. Paper account history resets if the service restarts.</div>
@@ -118,16 +118,18 @@
   function activityMessage(e){
     const pair=e.pairLabel||e.pairId||'Same-direction signal';
     switch(e.event){
-      case 'PAPER_LAGGING_ENTRY_WAITING_FOR_FULL_FILL':
-        return {kind:'wait',title:`${pair} · ${e.tierLabel||'tier'} waiting for full fill`,detail:`Leader ${e.leaderAsset||''} ${e.leaderSide||''} at ${price(e.leaderPrice)}; target ${e.targetAsset||''} ${e.targetSide||''} at ${price(e.targetAsk)}. Visible depth: ${shares(e.availableSharesWithinCap)}/${shares(e.requestedShares)} under the target cap. No shares booked; retry only while the signal remains valid.`};
-      case 'PAPER_LAGGING_ENTRY_BLOCKED_CASH':
-        return {kind:'wait',title:`${pair} · ${e.tierLabel||'tier'} blocked by cash`,detail:`The 100-share target entry needs ${usd(e.requiredCash)} including fees; available paper cash is ${usd(e.availableCash)}.`};
-      case 'PAPER_LAGGING_ENTRY_TIER_QUALIFIED':
-        return {kind:'',title:`${pair} · ${e.tierLabel||'tier'} triggered`,detail:`Leader ask ${price(e.leaderPrice)}; target ask ${price(e.targetAsk)}. Attempting ${shares(e.sharesPerFire)} shares on the target side.`};
-      case 'PAPER_LAGGING_ENTRY_FILLED':
-        return {kind:'good',title:`${pair} · ${e.tierLabel||'tier'} filled`,detail:`Bought ${shares(e.filledShares)} ${e.targetAsset||''} ${e.targetSide||''} at ${price(e.averageFillPrice)} average. Cost ${usd(e.entryCost)} + ${usd(e.fees)} fees; held to exact-market resolution.`};
+      case 'OPPOSITE_RUNG_PAUSED':
+        return {kind:'wait',title:`${pair} · rung ${e.tierId} paused opposite pair`,detail:'The first pair to trigger this combined-ask rung owns it for this 5-minute window. Other rungs remain independent.'};
+      case 'PAPER_CROSS_PAIR_WAITING_FOR_FULL_FILL':
+        return {kind:'wait',title:`${pair} · ${e.tierLabel||'rung'} waiting for paired depth`,detail:`${(e.legs||[]).map(leg=>`${leg.asset} ${leg.side}: ${shares(leg.availableShares)}/${shares(e.requestedSharesPerLeg)}`).join('; ')}. No shares were booked because both 100-share legs must fill.`};
+      case 'PAPER_CROSS_PAIR_BLOCKED_CASH':
+        return {kind:'wait',title:`${pair} · ${e.tierLabel||'rung'} blocked by cash`,detail:`Both legs need ${usd(e.requiredCash)} including fees; paper cash is ${usd(e.availableCash)}.`};
+      case 'PAPER_CROSS_PAIR_TIER_QUALIFIED':
+        return {kind:'',title:`${pair} · ${e.tierLabel||'rung'} triggered`,detail:`Combined ask ${price(e.combinedAsk)}. Attempting ${shares(e.sharesPerLeg)} shares on both legs.`};
+      case 'PAPER_CROSS_PAIR_ENTRY_FILLED':
+        return {kind:'good',title:`${pair} · ${e.tierLabel||'rung'} filled`,detail:`Bought both ${shares(e.sharesPerLeg)}-share legs at combined asks ${price(e.combinedAsk)}. Gross cost ${usd(e.combinedFillCost)} + ${usd(e.fees)} fees; held to exact-market resolution.`};
       case 'PAPER_STRATEGY_WINDOW_STARTED':
-        return {kind:'',title:'New aligned 5-minute window',detail:'BTC UP/ETH UP and BTC DOWN/ETH DOWN leader-laggard routes are being checked until the 270-second cutoff.'};
+        return {kind:'',title:'New aligned 5-minute window',detail:'BTC UP + ETH DOWN and ETH UP + BTC DOWN combined asks are scanned for the full window.'};
       case 'PAPER_POSITION_AWAITING_POLYMARKET_RESOLUTION':
         return {kind:'wait',title:`${e.side||'Position'} · awaiting official resolution`,detail:`${shares(e.shares)} shares remain in market ${e.marketId||'—'}. The position will settle only when that exact market resolves.`};
       case 'PAPER_OFFICIAL_WIN':
@@ -172,23 +174,22 @@
     const pairs=Array.isArray(s.pairStates)?s.pairStates:[];
     document.querySelector('#triggerRules').innerHTML=pairs.map(pair=>{
       const tierSummary=(pair.tiers||[]).map(tier=>
-        `${esc(tier.label)}: ${esc(tier.status.replaceAll('_',' ').toLowerCase())}`
+        `${esc(tier.id)}: ${esc(tier.status.replaceAll('_',' ').toLowerCase())}`
       ).join(' · ');
       const inventory=Object.entries(pair.heldSharesByLeg||{})
         .map(([leg,count])=>`${esc(leg)} ${shares(count)}`).join(' · ');
-      return `<article class="rule"><b>${esc(pair.label)} <span class="pill">${esc(pair.status)}</span></b><span>Leader ask: ${price(pair.leaderPrice)} · target ask: ${price(pair.targetAsk)} · target range: ≥ ${price(pair.minEntryPrice)} and &lt; tier ceiling</span><span>${tierSummary||esc(pair.reason)}</span><span>${inventory?`Holding: ${inventory}`:'No shares held yet'} · filled fires: ${Number(pair.cycleCount||0)}</span></article>`;
+      const asks=(pair.legs||[]).map((leg,index)=>`${esc(leg.asset)} ${esc(leg.side)} ${price(pair.legAsks?.[index])}`).join(' + ');
+      return `<article class="rule"><b>${esc(pair.label)} <span class="pill">${esc(pair.status)}</span></b><span>Leg asks: ${asks||'Waiting for fresh asks'} · combined ask: ${price(pair.combinedAsk)}</span><span>${tierSummary||esc(pair.reason)}</span><span>${inventory?`Holding: ${inventory}`:'No shares held yet'} · paired entries: ${Number(pair.cycleCount||0)}</span></article>`;
     }).join('');
     document.querySelector('#triggerCap').textContent=
-       'Each route/tier can buy 100 shares once per window. A market buy is capped below that tier’s target ceiling; incomplete fills book zero and retry only while the price conditions still qualify. No intra-window selling; filled positions wait for exact-market resolution.';
+       'Each pair/rung can fill once per window. The first pair to trigger a rung pauses the opposite pair on that rung only; other rungs remain independent. Both legs need full visible depth. No intra-window selling; positions wait for exact-market resolution.';
      const pollSeconds=Number(s.strategy?.settlement?.resolutionPollIntervalMs||5000)/1000;
      document.querySelector('#resolutionNote').textContent=`Checks every ${pollSeconds} seconds. Positions remain pending until Polymarket publishes a confirmed result for that exact market.`;
-    const progress=Math.max(0,Math.min(100,(Number(entry.elapsedMs||0)/Number(entry.cutoffMs||300000))*100));
+    const progress=Math.max(0,Math.min(100,(Number(entry.elapsedMs||0)/Number(w.end-w.start||300000))*100));
     document.querySelector('#entryProgress').style.width=progress+'%';
      document.querySelector('#entryTimer').textContent=entry.open
-       ?`Entry window open · ${entry.secondsRemaining}s until the 270s cutoff · ${entry.secondsToWindowEnd||0}s until market close · ${w.title||''}`
-       :entry.cutoffReached
-         ?`270s entry cutoff reached · ${entry.secondsToWindowEnd||0}s until market close · no more entries this window · ${w.title||''}`
-         :`Waiting for the next aligned BTC/ETH 5-minute window · ${w.title||''}`;
+        ?`Scanning for entries · ${entry.secondsToWindowEnd||0}s until 5-minute market close · ${w.title||''}`
+        :`Waiting for the next aligned BTC/ETH 5-minute window · ${w.title||''}`;
     document.querySelector('#winRate').textContent=`${Number(a.winRate||0).toFixed(1)}%`;
     document.querySelector('#winsLosses').textContent=`${a.wins??0} / ${a.losses??0}`;
     document.querySelector('#fees').textContent=usd(a.takerFees);
