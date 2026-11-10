@@ -109,7 +109,7 @@ class WickBot{
       }
       await this.refreshLiveQuotes(now);
       if(this.orderWindowStart!==start)this.openStrategyWindow(start,now);
-      this.processStrategyEntry(now);
+      await this.processStrategyEntry(now);
       if(now>=currentStart+this.windowMs-3000&&now<currentStart+this.windowMs){
         this.closeQuotes={UP:this.liveQuotes.UP,DOWN:this.liveQuotes.DOWN,ts:now};
         for(const p of this.positions)if(p.windowStart===currentStart&&p.status==='OPEN')p.closeQuotes=this.closeQuotes;

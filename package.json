@@ -2,11 +2,11 @@
   "name": "btc-wick-paper-demo",
   "version": "1.0.0",
   "private": true,
-  "description": "Demo-only Polymarket BTC/ETH 5-minute same-direction price-gap paper bot.",
+  "description": "Demo-only Polymarket BTC/ETH 5-minute next-candle signal paper bot.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "test": "node --test test/cross-pair-bot.test.js test/server.test.js"
+    "test": "node --test test/*.test.js"
   },
   "engines": {
     "node": ">=22"

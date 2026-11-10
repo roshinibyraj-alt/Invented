@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0b1725">
+  <title>Invented · BTC &amp; ETH Signal Desk</title>
+  <style>
+    :root{color-scheme:dark;--bg:#0b1725;--surface:#121f31;--surface2:#192a40;--line:#293c53;--muted:#91a1b5;--text:#eff5f7;--lime:#c9f36b;--teal:#43d1ad;--rose:#ff7f98;--amber:#f0c46f;--blue:#8cb8ff}
+    *{box-sizing:border-box}
+    body{margin:0;background:radial-gradient(ellipse at 12% 0,#20344a 0,transparent 36%),var(--bg);color:var(--text);font:14px/1.45 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+    main{max-width:1480px;margin:auto;padding:26px 30px 42px}
+    .topbar{display:flex;align-items:center;gap:24px;min-height:58px;border-bottom:1px solid #26394e;padding-bottom:15px;margin-bottom:28px}
+    .brand{display:flex;align-items:center;gap:10px;min-width:210px}
+    .brand-mark{display:grid;place-items:center;width:34px;height:34px;border-radius:9px;background:var(--lime);color:#142031;font-weight:950}
+    .brand-name{font-size:17px;font-weight:850;letter-spacing:-.7px}.brand-name span{color:var(--lime)}
+    .brand-sub{font:9px ui-monospace,SFMono-Regular,Menlo,monospace;color:#91a1b5;letter-spacing:1px;margin-top:2px}
+    .crumb{font:10px ui-monospace,SFMono-Regular,Menlo,monospace;color:#a7b6c5;letter-spacing:.6px}
+    .top-right{margin-left:auto;display:flex;align-items:center;gap:12px}
+    .demo-pill,.health-pill,.tag{border:1px solid var(--line);border-radius:4px;padding:7px 9px;font:9px ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.55px;color:#b9c7d5;white-space:nowrap}
+    .demo-pill{color:var(--lime);border-color:#607443}
+    .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--teal);margin-right:6px;box-shadow:0 0 0 3px #43d1ad20}
+    .dot.warn{background:var(--amber);box-shadow:0 0 0 3px #f0c46f20}.dot.bad{background:var(--rose);box-shadow:0 0 0 3px #ff7f9820}
+    .heading{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;margin-bottom:22px}
+    .eyebrow,.section-kicker{font:10px ui-monospace,SFMono-Regular,Menlo,monospace;color:#9bacc0;letter-spacing:1px;text-transform:uppercase}
+    .eyebrow .dot{width:6px;height:6px}
+    h1{font-size:clamp(30px,4vw,44px);letter-spacing:-2px;line-height:1;margin:12px 0 8px;font-weight:750}
+    h1 em{font-style:normal;color:var(--lime)}
+    .subtitle{margin:0;color:#a4b2c1;font-size:13px}
+    .session{display:flex;align-items:center;gap:11px;border:1px solid var(--line);background:#111f30;border-radius:5px;padding:11px 13px;min-width:235px}
+    .session-icon{color:var(--lime);font-size:17px}
+    .session small{display:block;font:9px ui-monospace,SFMono-Regular,Menlo,monospace;color:#91a1b5;letter-spacing:.7px}
+    .session strong{display:block;margin-top:3px;font:11px ui-monospace,SFMono-Regular,Menlo,monospace}
+    .session-time{margin-left:auto;color:#dce7ed;font:11px ui-monospace,SFMono-Regular,Menlo,monospace}
+    .notice,.error{padding:11px 14px;margin-bottom:16px;border-radius:5px;font-size:12px}
+    .notice{border:1px solid #385675;background:#132840;color:#d4e4f6}
+    .error{display:none;border:1px solid #8f4055;background:#351b28;color:#ffdce3}
+    .metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:11px;margin-bottom:28px}
+    .metric{background:linear-gradient(145deg,#172940,#111f30);border:1px solid var(--line);border-radius:6px;padding:14px 17px;min-height:91px}
+    .metric-label{font:9px ui-monospace,SFMono-Regular,Menlo,monospace;color:#9aabc0;letter-spacing:.7px;text-transform:uppercase}
+    .metric-value{font-size:23px;font-weight:800;letter-spacing:-.8px;margin-top:9px;font-variant-numeric:tabular-nums}
+    .positive{color:var(--teal)!important}.negative{color:var(--rose)!important}.neutral{color:var(--amber)!important}
+    .section-head{display:flex;justify-content:space-between;align-items:flex-end;gap:14px;margin-bottom:12px}
+    .section-title{display:flex;align-items:baseline;gap:10px}
+    .section-title h2{margin:0;font-size:18px;letter-spacing:-.45px}
+    .section-sub{margin:5px 0 0 28px;color:#92a2b6;font-size:11px}
+    .feed-status{font:9px ui-monospace,SFMono-Regular,Menlo,monospace;color:#aebdca;letter-spacing:.55px}
+    .signals{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:15px}
+    .signal-card{position:relative;overflow:hidden;background:#f2f6f5;color:#142236;border:1px solid #d8e2e2;border-radius:6px;padding:17px 18px 14px;box-shadow:0 12px 30px #0003}
+    .signal-card:before{position:absolute;content:"";top:0;bottom:0;left:0;width:4px;background:var(--teal)}
+    .signal-card.eth:before{background:var(--rose)}
+    .asset-head{display:flex;align-items:center;gap:10px}
+    .coin{display:grid;place-items:center;width:35px;height:35px;border-radius:50%;background:#d9f2e8;color:#13896d;font-weight:900;font-size:17px}
+    .eth .coin{background:#f6e0e6;color:#cb4e69}
+    .asset-name{font-size:16px;font-weight:750;letter-spacing:-.3px}
+    .asset-meta{margin-top:3px;font:9px ui-monospace,SFMono-Regular,Menlo,monospace;color:#75869a;letter-spacing:.35px}
+    .asset-status{margin-left:auto;text-align:right;font:9px ui-monospace,SFMono-Regular,Menlo,monospace;color:#687b8e}
+    .spot-price{display:flex;align-items:baseline;gap:9px;margin:17px 0 13px}
+    .spot-price strong{font-size:25px;letter-spacing:-1px}
+    .spot-price span{font:10px ui-monospace,SFMono-Regular,Menlo,monospace;color:#718194}
+    .signal-banner{display:grid;grid-template-columns:1.1fr .9fr .9fr;align-items:center;gap:8px;padding:11px 13px;border-radius:4px;margin-bottom:13px}
+    .signal-banner.up{background:#def4e8}.signal-banner.down{background:#f8e5e9}.signal-banner.neutral{background:#f5efd9}
+    .signal-direction{display:flex;align-items:center;gap:9px}
+    .signal-icon{display:grid;place-items:center;width:32px;height:32px;border-radius:4px;background:#c7ecd7;color:#158665;font-size:20px;font-weight:900}
+    .down .signal-icon{background:#f0d1d9;color:#c64b65}.neutral .signal-icon{background:#eee1b7;color:#8e742d}
+    .signal-direction small,.score-label,.timer-label{display:block;font:8px ui-monospace,SFMono-Regular,Menlo,monospace;color:#647b77;letter-spacing:.65px}
+    .signal-direction b{display:block;font-size:18px;color:#127c62;line-height:1.15}
+    .down .signal-direction b{color:#bb415c}.neutral .signal-direction b{color:#8d722b}
+    .score-block,.timer-block{text-align:right}
+    .score-value,.timer-value{display:block;margin-top:4px;font:16px ui-monospace,SFMono-Regular,Menlo,monospace;color:#18382e}
+    .timer-block{border-left:1px solid #bed9ca;padding-left:10px}
+    .down .timer-block{border-color:#e4c5cb}
+    .score-label{white-space:nowrap}
+    .score-note{font:7px ui-monospace,SFMono-Regular,Menlo,monospace;color:#687b77;margin-top:2px}
+    .market-label{display:flex;justify-content:space-between;gap:10px;margin:12px 0 7px;color:#6e8090;font:8px ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.65px}
+    .asks{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+    .ask{display:grid;grid-template-columns:1fr auto;align-items:center;padding:8px 10px;border:1px solid #d8e1e3;border-radius:4px}
+    .ask span{grid-row:1/3;color:#718094;font:9px ui-monospace,SFMono-Regular,Menlo,monospace}
+    .ask b{font:15px ui-monospace,SFMono-Regular,Menlo,monospace;text-align:right;color:#344358}
+    .ask small{font:7px ui-monospace,SFMono-Regular,Menlo,monospace;color:#8996a2;text-align:right;letter-spacing:.35px}
+    .ask.chosen{border-color:#8edbb6;background:#eaf8f0}.eth .ask.chosen{border-color:#e6a3b1;background:#fff1f3}
+    .ask.chosen b{color:#118765}.eth .ask.chosen b{color:#c94e67}
+    .gate{margin-top:10px;padding:10px 11px;border-radius:4px;background:#e5edf0}
+    .gate.wait{background:#f4ebdc}.gate.triggered{background:#e6f0c8}.gate.filled{background:#d8f2e6}
+    .gate-top{display:flex;align-items:center;gap:8px}
+    .gate-label{font:8px ui-monospace,SFMono-Regular,Menlo,monospace;color:#607285;letter-spacing:.6px}
+    .gate-state{margin-left:auto;font:8px ui-monospace,SFMono-Regular,Menlo,monospace;color:#36556b;letter-spacing:.45px}
+    .gate p{margin:7px 0 0;font-size:9px;line-height:1.5;color:#516477}
+    .gate p strong{font-weight:700;color:#23384a}
+    .factor-head{display:flex;justify-content:space-between;gap:10px;margin:13px 0 6px;color:#6d8091;font:8px ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.55px}
+    .candle-strip{display:grid;grid-template-columns:repeat(5,1fr);gap:6px}
+    .candle{display:flex;align-items:center;gap:6px;border:1px solid #dce5e5;background:#f7f9f8;border-radius:3px;padding:6px 7px;min-width:0}
+    .candle-mark{display:grid;place-items:center;width:18px;height:18px;border-radius:3px;font:11px ui-monospace,SFMono-Regular,Menlo,monospace}
+    .candle-mark.up{background:#d5f0e1;color:#148564}.candle-mark.down{background:#f5dce2;color:#c74a64}.candle-mark.flat{background:#ece8d7;color:#84753b}
+    .candle-data{min-width:0}.candle-data b{display:block;font:8px ui-monospace,SFMono-Regular,Menlo,monospace;color:#536579}.candle-data small{display:block;font:7px ui-monospace,SFMono-Regular,Menlo,monospace;color:#8a97a3;margin-top:2px}
+    .factors{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-top:9px}
+    .factor{border-top:1px solid #dce4e5;padding-top:7px}
+    .factor small{display:block;font:7px ui-monospace,SFMono-Regular,Menlo,monospace;color:#84919e;letter-spacing:.4px;text-transform:uppercase}
+    .factor b{display:block;margin-top:3px;font:10px ui-monospace,SFMono-Regular,Menlo,monospace;color:#34495d}
+    .model-note{display:flex;justify-content:space-between;gap:12px;border-top:1px solid #dce5e5;margin-top:10px;padding-top:8px;color:#758496;font:7px ui-monospace,SFMono-Regular,Menlo,monospace}
+    .rules{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin:15px 0 22px;padding:12px 14px;border:1px solid var(--line);background:#111f30;border-radius:5px}
+    .rules-title{display:flex;align-items:center;gap:7px;color:var(--lime);font-weight:700;white-space:nowrap}
+    .rules-title span{font:8px ui-monospace,SFMono-Regular,Menlo,monospace;color:#8e9fb2;letter-spacing:.5px}
+    .rule{border-left:1px solid #34485e;padding-left:14px;color:#afbdc9;font-size:10px}
+    .rule b{color:#e3f49b}
+    .lower{display:grid;grid-template-columns:1.15fr .85fr;gap:14px}
+    .panel{background:#142338;border:1px solid var(--line);border-radius:5px;padding:15px 16px;min-width:0}
+    .panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}
+    .panel-title{display:flex;align-items:center;gap:10px}
+    .panel-title h2{margin:0;font-size:16px;letter-spacing:-.3px}
+    .panel-note{margin:4px 0 0 28px;color:#8d9eb1;font-size:10px}
+    .count-pill{border:1px solid #354a62;border-radius:20px;padding:4px 8px;color:#adbdca;font:8px ui-monospace,SFMono-Regular,Menlo,monospace}
+    .table-wrap{overflow:auto}
+    table{width:100%;min-width:620px;border-collapse:collapse;text-align:left}
+    th{padding:0 8px 8px;border-bottom:1px solid #2a3d53;color:#8799ae;font:8px ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.55px}
+    td{padding:9px 8px;border-bottom:1px solid #27394f;color:#d7e1e8;font-size:10px;white-space:nowrap}
+    td small{display:block;margin-top:2px;color:#8496a9;font:8px ui-monospace,SFMono-Regular,Menlo,monospace}
+    .side-pill{display:inline-block;border-radius:3px;padding:4px 6px;font:8px ui-monospace,SFMono-Regular,Menlo,monospace}
+    .side-pill.up{background:#1d443b;color:#78dfb9}.side-pill.down{background:#492d3b;color:#ff9aaa}
+    .status-text{color:#b9d9cd;font:8px ui-monospace,SFMono-Regular,Menlo,monospace}
+    .status-text.pending{color:#f2d08c}.empty{padding:13px;border:1px dashed #344960;border-radius:4px;color:#91a2b6;font-size:11px}
+    .event-list{display:grid;gap:8px;max-height:330px;overflow:auto}
+    .event{border-left:3px solid var(--blue);background:#0e1b2a;border-radius:0 4px 4px 0;padding:8px 10px}
+    .event.good{border-color:var(--teal)}.event.wait{border-color:var(--amber)}.event.bad{border-color:var(--rose)}
+    .event b{display:block;font-size:10px;color:#e0e8ed}.event span{display:block;margin-top:3px;color:#91a1b5;font-size:9px}
+    .event time{display:block;margin-top:5px;color:#71839a;font:8px ui-monospace,SFMono-Regular,Menlo,monospace}
+    footer{display:flex;align-items:flex-start;gap:12px;flex-wrap:wrap;border-top:1px solid #26394e;margin-top:18px;padding-top:12px;color:#8697ab;font-size:9px}
+    footer strong{color:#bdcbd4;font:8px ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.4px}
+    footer p{margin:0}
+    @media(max-width:900px){main{padding:20px 18px 34px}.metrics{grid-template-columns:repeat(2,1fr)}.lower{grid-template-columns:1fr}.topbar{gap:14px}.brand{min-width:180px}}
+    @media(max-width:650px){main{padding:16px 12px 28px}.topbar{gap:8px}.crumb{display:none}.brand{min-width:auto}.brand-sub{font-size:7px}.demo-pill{font-size:7px;padding:6px}.heading{display:block}.session{margin-top:15px;width:100%}.metrics{gap:8px}.metric{padding:11px;min-height:80px}.metric-value{font-size:19px}.signals{grid-template-columns:1fr}.section-head{align-items:flex-start}.feed-status{font-size:7px;text-align:right;margin-top:4px}.signal-card{padding:14px 13px 12px}.signal-banner{grid-template-columns:1fr .85fr .85fr;padding:9px}.score-label{font-size:7px}.score-value,.timer-value{font-size:13px}.candle-strip{gap:4px}.candle{padding:5px 4px;gap:4px}.candle-mark{width:15px;height:15px}.candle-data b{font-size:7px}.candle-data small{font-size:6px}.rules{gap:9px;padding:11px}.rules-title{width:100%}.rule{width:100%;border:0;padding:0}.panel{padding:12px 10px}.panel-note{font-size:9px}.model-note{font-size:6px}.factor b{font-size:9px}}
+  </style>
+</head>
+<body>
+  <main>
+    <nav class="topbar" aria-label="Dashboard">
+      <div class="brand"><div class="brand-mark">W</div><div><div class="brand-name">invented<span>signal</span></div><div class="brand-sub">PAPER SIGNAL ROOM</div></div></div>
+      <div class="crumb">MARKETS &nbsp;/&nbsp; BTC + ETH · 5 MIN</div>
+      <div class="top-right"><span class="demo-pill"><i class="dot"></i> DEMO · PAPER ONLY</span><span class="health-pill" id="health"><i class="dot warn"></i><span id="healthText">CONNECTING</span></span></div>
+    </nav>
+
+    <section class="heading">
+      <div><div class="eyebrow"><i class="dot"></i> LIVE CONTROL ROOM · INDEPENDENT ASSET SIGNALS</div><h1>Signal <em>desk</em>.</h1><p class="subtitle">Five-minute candle reads, with each entry condition shown in plain language.</p></div>
+      <div class="session"><span class="session-icon">◉</span><div><small>SESSION STATUS</small><strong id="sessionStatus">CONNECTING</strong></div><span class="session-time" id="windowClock">—</span></div>
+    </section>
+    <div class="notice" id="notice">Connecting to the paper bot…</div>
+    <div class="error" id="error"></div>
+
+    <section class="metrics" aria-label="Paper account">
+      <div class="metric"><div class="metric-label">Paper equity</div><div class="metric-value" id="equity">—</div></div>
+      <div class="metric"><div class="metric-label">Available cash</div><div class="metric-value" id="cash">—</div></div>
+      <div class="metric"><div class="metric-label">Realized P&amp;L · fees included</div><div class="metric-value" id="realized">—</div></div>
+      <div class="metric"><div class="metric-label">Open · awaiting resolution</div><div class="metric-value" id="openCount">—</div></div>
+    </section>
+
+    <div class="section-head">
+      <div><div class="section-title"><span class="section-kicker">01</span><h2>Market signals</h2></div><p class="section-sub">WickyWackyTrader Next Candle Predictor · five completed Binance 5-minute candles</p></div>
+      <div class="feed-status" id="feedStatus">WAITING FOR FEEDS</div>
+    </div>
+    <section class="signals" id="signals" aria-live="polite"></section>
+
+    <section class="rules" aria-label="Entry rules">
+      <div class="rules-title">ENTRY RULES <span>· PAPER EXECUTION</span></div>
+      <div class="rule"><b>00:00–00:59</b> &nbsp;Signaled-side ask must be <b>below $0.40</b></div>
+      <div class="rule"><b>01:00 onward</b> &nbsp;Trigger at <b>$0.60 or less</b>; otherwise wait until below $0.60</div>
+      <div class="rule">100 shares per asset · at most one entry per window</div>
+    </section>
+
+    <section class="lower">
+      <div class="panel">
+        <div class="panel-head"><div><div class="panel-title"><span class="section-kicker">02</span><h2>Positions</h2></div><p class="panel-note">Active positions and shares waiting for the exact market result.</p></div><span class="count-pill" id="positionCount">0 RECORDS</span></div>
+        <div class="table-wrap" id="positions"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><div><div class="panel-title"><span class="section-kicker">03</span><h2>Recent activity</h2></div><p class="panel-note">Signals, price triggers, fills and official settlements.</p></div></div>
+        <div class="event-list" id="events"></div>
+      </div>
+    </section>
+    <footer><strong><i class="dot"></i> PAPER ONLY · NO LIVE ORDERS</strong><p>Directional score is not a probability. Only full visible ask-depth fills count; fees apply. No in-window sells. Open shares wait for exact-market resolution on Polymarket.</p></footer>
+  </main>
+  <script>
+    const $=id=>document.getElementById(id);
+    const esc=value=>String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+    const valid=value=>value!==null&&value!==undefined&&value!==''&&Number.isFinite(Number(value));
+    const money=value=>valid(value)?'$'+Number(value).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}):'—';
+    const price=value=>valid(value)?'$'+Number(value).toFixed(3):'—';
+    const signed=value=>valid(value)?(Number(value)>0?'+':'')+Number(value).toFixed(3):'—';
+    const qty=value=>Number(value||0).toLocaleString('en-US',{maximumFractionDigits:2});
+    const utcTime=value=>Number(value)>0?new Date(Number(value)).toLocaleTimeString('en-GB',{timeZone:'UTC',hour:'2-digit',minute:'2-digit',second:'2-digit'})+' UTC':'—';
+    const cls=value=>Number(value)>0?'positive':Number(value)<0?'negative':'';
+    const elapsedText=value=>{const n=Math.max(0,Number(value)||0)/1000;return String(Math.floor(n/60)).padStart(2,'0')+':'+String(Math.floor(n%60)).padStart(2,'0')};
+    function freshness(value,now){if(!valid(value))return 'No candle time';const seconds=Math.max(0,Math.floor((Number(now)-Number(value))/1000));return seconds<60?seconds+'s ago':Math.floor(seconds/60)+'m ago'}
+    function fmtCrypto(value,asset){if(!valid(value))return '—';return '$'+Number(value).toLocaleString('en-US',{minimumFractionDigits:asset==='BTC'?2:2,maximumFractionDigits:2})}
+    function signalDirection(signal){return signal?.direction==='BULLISH'?'UP':signal?.direction==='BEARISH'?'DOWN':signal?.direction==='NEUTRAL'?'NEUTRAL':signal?.direction||'PENDING'}
+    function gateInfo(signal,state){
+      const status=signal?.entry?.status||'WAITING_FOR_SIGNAL';
+      const labels={WAITING_FOR_SIGNAL:'WAITING FOR SIGNAL',WATCHING_FIRST_MINUTE:'WATCHING FIRST MINUTE',WAITING_FOR_FRESH_ASK:'WAITING FOR FRESH ASK',WAITING_FOR_PRICE_BELOW_0_60:'WAITING FOR ASK ≤ $0.60',TRIGGERED:'PRICE GATE MET · CHECKING',WAITING_FOR_FULL_FILL:'WAITING FOR FULL DEPTH',WAITING_FOR_PRICE_RETURN:'WAITING FOR ASK TO RETURN',BLOCKED_INSUFFICIENT_CASH:'BLOCKED · NOT ENOUGH CASH',FILLED:'PAPER ENTRY FILLED',NO_TRADE_NEUTRAL:'NEUTRAL · NO ENTRY',NO_TRADE_DATA:'NO ENTRY · DATA UNAVAILABLE'};
+      const tone=status==='FILLED'?'filled':status==='TRIGGERED'?'triggered':status.includes('WAITING')||status==='WATCHING_FIRST_MINUTE'?'wait':status.startsWith('BLOCKED')?'wait':'';
+      const phase=Number(signal?.entry?.elapsedMs||0)<60000?'FIRST MINUTE':'AFTER 01:00';
+      const explanation=signal?.entry?.lastReason||'Waiting for the entry conditions.';
+      const threshold=phase==='FIRST MINUTE'?'below $0.40':'$0.60 or less; if above, wait until below $0.60';
+      return `<div class="gate ${tone}"><div class="gate-top"><span class="gate-label">ENTRY GATE · ${phase}</span><b class="gate-state">${esc(labels[status]||status.replaceAll('_',' '))}</b></div><p>${esc(explanation)} ${signal?.entry?.triggerAsk!=null?`Trigger ask: <strong>${price(signal.entry.triggerAsk)}</strong>. `:''}Current rule: signaled-side ask ${threshold}.</p></div>`;
+    }
+    function renderCandles(bars){
+      if(!Array.isArray(bars)||!bars.length)return '<div class="empty">Waiting for five completed Binance candles.</div>';
+      return `<div class="candle-strip">${bars.map((bar,index)=>{const direction=bar.direction==='BULLISH'?'up':bar.direction==='BEARISH'?'down':'flat';const icon=direction==='up'?'↑':direction==='down'?'↓':'·';return `<div class="candle" title="Open ${esc(bar.open)} · close ${esc(bar.close)}"><span class="candle-mark ${direction}">${icon}</span><span class="candle-data"><b>${index+1} · ${esc(bar.direction)}</b><small>${valid(bar.relativeVolume)?Number(bar.relativeVolume).toFixed(2)+'× vol':''}</small></span></div>`}).join('')}</div>`;
+    }
+    function renderSignalCard(asset,signal,state){
+      const isBtc=asset==='BTC',direction=signalDirection(signal),side=signal?.side;
+      const tone=direction==='UP'?'up':direction==='DOWN'?'down':'neutral';
+      const quotes=signal?.quotes||{},up=quotes.UP||{},down=quotes.DOWN||{};
+      const chosen=side==='UP'?up:side==='DOWN'?down:null;
+      const spot=signal?.bars?.at(-1)?.close;
+      const elapsed=signal?.entry?.elapsedMs;
+      const scoreText=valid(signal?.score)?signed(signal.score):'—';
+      const scoreClass=direction==='UP'?'positive':direction==='DOWN'?'negative':'neutral';
+      const statusText=signal?.indicatorStatus==='READY'?'BINANCE DATA · READY':signal?.indicatorStatus==='UNAVAILABLE'?'BINANCE DATA · UNAVAILABLE':'LOADING BINANCE DATA';
+      const marketTime=state.window?.start?`${utcTime(state.window.start)} — ${utcTime(state.window.end)}`:'Waiting for current market';
+      const body=signal?.averageBody==null?'—':fmtCrypto(signal.averageBody,asset);
+      const wick=signal?.averageWick==null?'—':fmtCrypto(signal.averageWick,asset);
+      const volume=valid(signal?.latestRelativeVolume)?Number(signal.latestRelativeVolume).toFixed(2)+'×':'—';
+      return `<article class="signal-card ${isBtc?'btc':'eth'}">
+        <div class="asset-head"><div class="coin">${isBtc?'₿':'Ξ'}</div><div><div class="asset-name">${isBtc?'Bitcoin':'Ethereum'}</div><div class="asset-meta">${asset} / USD · BINANCE 5M · <span class="dot"></span>${esc(statusText)}</div></div><div class="asset-status">${esc(freshness(signal?.latestCandleCloseTime,state.now))}<br>${esc(marketTime)}</div></div>
+        <div class="spot-price"><strong>${fmtCrypto(spot,asset)}</strong><span>LAST COMPLETED CANDLE CLOSE</span></div>
+        <div class="signal-banner ${tone}"><div class="signal-direction"><span class="signal-icon">${direction==='UP'?'↑':direction==='DOWN'?'↓':'·'}</span><div><small>MODEL DIRECTION</small><b>${esc(direction)}</b></div></div><div class="score-block"><span class="score-label">DIRECTIONAL SCORE</span><b class="score-value ${scoreClass}">${esc(scoreText)}</b><div class="score-note">NOT A PROBABILITY · ±${Number(signal?.sensitivity??.05).toFixed(2)} threshold</div></div><div class="timer-block"><span class="timer-label">WINDOW ELAPSED</span><b class="timer-value">${elapsed==null?'—':elapsedText(elapsed)} <small>/ 05:00</small></b></div></div>
+        <div class="market-label"><span>POLYMARKET · BEST ASK</span><span>${esc(signal?.marketSlug||'Market loading')}</span></div>
+        <div class="asks"><div class="ask ${side==='UP'?'chosen':''}"><span>UP ${side==='UP'?'· SIGNAL':''}</span><b>${price(up.bestAsk)}</b><small>${up.status==='LIVE'&&!up.stale?'LIVE':'STALE / MISSING'}</small></div><div class="ask ${side==='DOWN'?'chosen':''}"><span>DOWN ${side==='DOWN'?'· SIGNAL':''}</span><b>${price(down.bestAsk)}</b><small>${down.status==='LIVE'&&!down.stale?'LIVE':'STALE / MISSING'}</small></div></div>
+        ${gateInfo(signal,state)}
+        <div class="factor-head"><span>LAST ${esc(signal?.lookback||5)} COMPLETED CANDLES</span><span>BODY · WICK · RELATIVE VOLUME</span></div>
+        ${renderCandles(signal?.bars)}
+        <div class="factors"><div class="factor"><small>Average body</small><b>${esc(body)}</b></div><div class="factor"><small>Average wick</small><b>${esc(wick)}</b></div><div class="factor"><small>Latest relative volume</small><b>${esc(volume)}</b></div></div>
+        <div class="model-note"><span>WickyWackyTrader indicator factors · Binance only uses closed candles</span><span>CALCULATED ${esc(utcTime(signal?.generatedAt))}</span></div>
+      </article>`;
+    }
+    function renderPositions(positions){
+      const rows=(positions||[]).slice(0,25);
+      if(!rows.length)return '<div class="empty">No paper positions yet.</div>';
+      return `<table><thead><tr><th>OPENED · UTC</th><th>MARKET</th><th>SIDE</th><th>SHARES</th><th>AVG ENTRY</th><th>FEES</th><th>STATUS</th><th>NET P&amp;L</th></tr></thead><tbody>${rows.map(p=>{const pending=p.status==='PENDING_RESOLUTION';const status=pending?'AWAITING RESOLUTION':p.status==='OPEN'?'ACTIVE':p.status==='SETTLED_EXIT'?`RESOLVED · ${p.resolutionWinner||'—'}`:String(p.status||'—').replaceAll('_',' ');const pnl=p.status==='SETTLED_EXIT'?p.realizedPnl:p.status==='OPEN'?p.unrealizedPnl:null;return `<tr><td>${esc(utcTime(p.openedAt))}</td><td>${esc(p.asset)} 5M<small>${esc(p.slug||'')}</small></td><td><span class="side-pill ${p.side==='UP'?'up':'down'}">${esc(p.side)}</span></td><td>${esc(qty(p.shares||p.initialShares))}</td><td>${price(p.avgEntry)}<small>+ ${money(p.initialFees??p.fees)} fee</small></td><td>${money(p.initialFees??p.fees)}</td><td><span class="status-text ${pending?'pending':''}">${esc(status)}</span></td><td class="${cls(pnl)}">${money(pnl)}</td></tr>`}).join('')}</tbody></table>`;
+    }
+    function eventMessage(event){
+      const asset=event.asset||'Bot',side=event.side||'',moneyPair=`${money(event.entryCost)} cost · ${money(event.fees)} fees`;
+      switch(event.event){
+        case 'WICKY_SIGNAL_READY': return {tone:'',title:`${asset} ${event.direction||''} signal ready`,detail:`Directional score ${signed(event.score)} from ${event.lookback||5} closed Binance candles.`};
+        case 'WICKY_SIGNAL_UNAVAILABLE': return {tone:'bad',title:`${asset} signal unavailable`,detail:event.note||'No entry without completed candle data.'};
+        case 'WICKY_ENTRY_TRIGGERED': return {tone:'wait',title:`${asset} ${side} price gate triggered`,detail:`Best ask ${price(event.ask)} · cap ${price(event.maxEntryPrice)} · ${event.phase==='FIRST_MINUTE'?'first minute':'after first minute'}.`};
+        case 'PAPER_WICKY_WAITING_FOR_FULL_FILL': return {tone:'wait',title:`${asset} ${side} waiting for full depth`,detail:`${qty(event.availableShares)}/${qty(event.requestedShares)} shares visible at or below ${price(event.maxEntryPrice)}. No partial position recorded.`};
+        case 'PAPER_WICKY_BLOCKED_CASH': return {tone:'wait',title:`${asset} ${side} entry blocked by cash`,detail:`Needs ${money(event.requiredCash)}; available ${money(event.availableCash)}.`};
+        case 'PAPER_WICKY_ENTRY_FILLED': return {tone:'good',title:`${asset} ${side} paper fill`,detail:`${qty(event.sharesBought)} shares at ${price(event.averageFillPrice)} average · ${moneyPair}.`};
+        case 'PAPER_POSITION_AWAITING_POLYMARKET_RESOLUTION': return {tone:'wait',title:`${asset} ${side} awaiting resolution`,detail:`${qty(event.shares)} shares · exact market ${event.marketId||'—'}.`};
+        case 'PAPER_OFFICIAL_WIN':
+        case 'PAPER_OFFICIAL_LOSS': return {tone:event.event==='PAPER_OFFICIAL_WIN'?'good':'bad',title:`${asset} ${side} official result · ${event.winner||'—'}`,detail:`Proceeds ${money(event.proceeds)} · net P&L ${money(event.pnl)}.`};
+        case 'SCAN_ERROR':
+        case 'POLYMARKET_RESOLUTION_CHECK_ERROR': return {tone:'bad',title:'Bot update error',detail:event.note||'The bot could not complete this check.'};
+        default:return {tone:'',title:String(event.event||'Bot update').replaceAll('_',' '),detail:event.note||event.message||''};
+      }
+    }
+    function renderEvents(events){
+      const rows=(events||[]).filter(e=>e.event!=='HEARTBEAT').slice(0,18);
+      if(!rows.length)return '<div class="empty">Waiting for strategy activity.</div>';
+      return rows.map(event=>{const item=eventMessage(event);return `<article class="event ${item.tone}"><b>${esc(item.title)}</b><span>${esc(item.detail)}</span><time>${esc(utcTime(event.ts))}</time></article>`}).join('');
+    }
+    function render(state){
+      const account=state.account||{},signals=state.signals||{},windowInfo=state.window||{};
+      const healthy=!state.error&&state.status!=='blocked_or_error';
+      $('health').innerHTML=`<i class="dot ${healthy?'':'bad'}"></i><span id="healthText">${healthy?'BOT ONLINE':'BOT ERROR'}</span>`;
+      $('sessionStatus').textContent=healthy?String(state.status||'MONITORING').replaceAll('_',' ').toUpperCase():'NEEDS ATTENTION';
+      $('windowClock').textContent=windowInfo.start?`${utcTime(windowInfo.start)} — ${utcTime(windowInfo.end)}`:'WAITING';
+      $('notice').textContent=`${state.strategy?.timeframe||'5m'} window · ${state.signal?.reason||'Waiting for independent BTC and ETH signals.'} · ${state.entryWindow?.secondsRemaining??0}s remaining · paper capital ${money(account.capital)}`;
+      $('error').style.display=state.error?'block':'none';$('error').textContent=state.error||'';
+      $('equity').textContent=money(account.equity);$('cash').textContent=money(account.cash);
+      $('realized').textContent=money(account.realizedPnl);$('realized').className='metric-value '+cls(account.realizedPnl);
+      $('openCount').textContent=`${account.openPositions||0} open · ${account.pendingResolutionPositions||0} pending`;
+      $('feedStatus').innerHTML=`<i class="dot"></i> ${Object.values(signals).filter(s=>s.indicatorStatus==='READY').length}/2 SIGNALS READY · CLOB ASKS ${state.status==='blocked_or_error'?'CHECK':''}`;
+      $('signals').innerHTML=['BTC','ETH'].map(asset=>renderSignalCard(asset,signals[asset]||{},state)).join('');
+      const positions=state.positions||[];
+      $('positionCount').textContent=`${positions.length} RECORDS`;
+      $('positions').innerHTML=renderPositions(positions);
+      $('events').innerHTML=renderEvents(state.events);
+    }
+    async function refresh(){
+      try{const response=await fetch('/api/state?ts='+Date.now(),{cache:'no-store'});if(!response.ok)throw new Error('State request failed ('+response.status+')');render(await response.json())}
+      catch(error){$('health').innerHTML='<i class="dot bad"></i>OFFLINE';$('sessionStatus').textContent='OFFLINE';$('error').style.display='block';$('error').textContent='Dashboard data unavailable: '+error.message}
+    }
+    refresh();setInterval(refresh,2000);
+  </script>
+</body>
+</html>

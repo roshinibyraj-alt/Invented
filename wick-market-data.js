@@ -2,6 +2,7 @@
 
 const GAMMA='https://gamma-api.polymarket.com';
 const CLOB='https://clob.polymarket.com';
+const BINANCE_DATA='https://data-api.binance.vision';
 
 async function getJson(url){
   const r=await fetch(url,{signal:AbortSignal.timeout(10000)});
@@ -42,6 +43,38 @@ async function getAssetMarket(asset,windowStart,windowMs){
 async function getBook(tokenId){
   return getJson(`${CLOB}/book?token_id=${encodeURIComponent(tokenId)}`);
 }
+async function getBinanceCandles(asset,windowStart,lookback=5){
+  const normalized=String(asset).toUpperCase();
+  if(!['BTC','ETH'].includes(normalized))throw new Error(`Unsupported candle asset: ${asset}`);
+  const start=Number(windowStart);
+  const count=Number(lookback);
+  if(!Number.isFinite(start)||!Number.isInteger(count)||count<2||count>20){
+    throw new Error('Invalid Binance candle request.');
+  }
+  const params=new URLSearchParams({
+    symbol:`${normalized}USDT`,
+    interval:'5m',
+    endTime:String(Math.floor(start)-1),
+    limit:String(Math.min(count+1,1000)),
+  });
+  const rows=await getJson(`${BINANCE_DATA}/api/v3/klines?${params}`);
+  const candles=(Array.isArray(rows)?rows:[])
+    .filter(row=>Array.isArray(row)&&Number(row[6])<start)
+    .slice(-count)
+    .map(row=>({
+      openTime:Number(row[0]),
+      open:Number(row[1]),
+      high:Number(row[2]),
+      low:Number(row[3]),
+      close:Number(row[4]),
+      volume:Number(row[5]),
+      closeTime:Number(row[6]),
+    }));
+  if(candles.length<count){
+    throw new Error(`Binance returned ${candles.length} completed ${normalized} candles; ${count} are required.`);
+  }
+  return candles;
+}
 async function getMarket(id){return getJson(`${GAMMA}/markets/${encodeURIComponent(id)}`)}
 
 function resolvedWinner(market){
@@ -59,4 +92,4 @@ function resolvedWinner(market){
   return null;
 }
 
-module.exports={getAssetMarket,getBtcMarket,getEthMarket,getBook,getMarket,resolvedWinner};
+module.exports={getAssetMarket,getBtcMarket,getEthMarket,getBook,getBinanceCandles,getMarket,resolvedWinner};
