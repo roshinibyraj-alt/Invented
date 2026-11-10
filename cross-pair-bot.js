@@ -128,6 +128,7 @@ function emptyPairState(pair) {
       sharesPerFire: tier.sharesPerFire,
       status: 'ARMED',
       pausedByPairId: null,
+      selectedLeg: null,
       qualifiedAt: null,
       filledAt: null,
       cycleId: null,
@@ -368,7 +369,7 @@ class CrossPairBot extends WickBot {
             ask: signal.legAsks[index],
           })),
           combinedAsk: round(signal.combinedAsk),
-          sharesPerLeg: tier.sharesPerFire,
+          sharesPerEntry: tier.sharesPerFire,
         });
         if (this.buySignal(pair, signal, now, tier, tierState)) changed = true;
         break;
@@ -386,13 +387,13 @@ class CrossPairBot extends WickBot {
         state.lastReason = 'Waiting for fresh asks on both pair legs.';
       } else {
         state.status = pending.some(tier => tier.status === 'WAITING_FOR_FULL_FILL')
-          ? 'WAITING FOR FULL PAIRED FILL'
+          ? 'WAITING FOR FULL FILL'
           : pending.length ? 'BLOCKED BY CASH'
             : filled.length ? 'HOLDING TO RESOLUTION' : 'ARMED';
         state.lastReason = pending.length
           ? pending.map(tier => tier.lastReason).join(' ')
           : filled.length
-            ? `${filled.length} rung(s) filled. Both pair legs are held for exact-market resolution.`
+            ? `${filled.length} rung(s) filled. The selected cheaper legs are held for exact-market resolution.`
             : `Combined ask ${signal.combinedAsk.toFixed(3)}. Watching the five combined-ask rungs.`;
       }
     }
@@ -433,23 +434,38 @@ class CrossPairBot extends WickBot {
 
   buySignal(pair, signal, now, tier, tierState) {
     const requestedShares = tier.sharesPerFire;
-    const executions = signal.legs.map(leg => {
-      const fill = sweepBook(
-        this.availableAskLevels(leg),
-        requestedShares,
-        'BUY',
-        MAX_ENTRY_PRICE,
-      );
-      return { ...leg, fill, fee: feesFor(leg.market, fill.fills) };
-    });
+    const cheapestIndex = signal.legAsks[0] <= signal.legAsks[1] ? 0 : 1;
+    if (!tierState.selectedLeg) {
+      const cheapestLeg = signal.legs[cheapestIndex];
+      tierState.selectedLeg = {
+        asset: cheapestLeg.asset,
+        side: cheapestLeg.side,
+        askAtTrigger: round(signal.legAsks[cheapestIndex]),
+      };
+    }
+    const selectedIndex = signal.legs.findIndex(leg =>
+      leg.asset === tierState.selectedLeg.asset && leg.side === tierState.selectedLeg.side);
+    if (selectedIndex < 0) {
+      throw new Error(`Selected entry leg is no longer part of ${pair.label}.`);
+    }
+    const selectedLeg = signal.legs[selectedIndex];
+    const fill = sweepBook(
+      this.availableAskLevels(selectedLeg),
+      requestedShares,
+      'BUY',
+      MAX_ENTRY_PRICE,
+    );
+    const executions = [{
+      ...selectedLeg,
+      fill,
+      fee: feesFor(selectedLeg.market, fill.fills),
+    }];
     const incomplete = executions.find(execution =>
       execution.fill.filledShares + 1e-9 < requestedShares);
     if (incomplete) {
-      const available = executions.map(item =>
-        `${item.asset} ${item.side}: ${item.fill.filledShares}/${requestedShares}`).join('; ');
       tierState.status = 'WAITING_FOR_FULL_FILL';
-      tierState.lastReason = `Waiting for full paired depth (${available}). No leg is booked unless both legs can fill.`;
-      if (tierState.lastDepthNotice !== available ||
+      tierState.lastReason = `Waiting for full visible depth on selected leg ${selectedLeg.asset} ${selectedLeg.side} (${fill.filledShares}/${requestedShares}). No partial position is booked.`;
+      if (tierState.lastDepthNotice !== `${fill.filledShares}/${requestedShares}` ||
           now - tierState.lastDepthNoticeAt >= 5000) {
         this.log('PAPER_CROSS_PAIR_WAITING_FOR_FULL_FILL', {
           pairId: pair.id,
@@ -457,15 +473,16 @@ class CrossPairBot extends WickBot {
           tierId: tier.id,
           tierLabel: tier.label,
           combinedAsk: round(signal.combinedAsk),
-          requestedSharesPerLeg: requestedShares,
-          legs: executions.map(item => ({
-            asset: item.asset,
-            side: item.side,
-            availableShares: item.fill.filledShares,
-          })),
-          message: 'No position was recorded because full visible depth was not available on both legs.',
+          selectedLeg: {
+            asset: selectedLeg.asset,
+            side: selectedLeg.side,
+            askAtTrigger: tierState.selectedLeg.askAtTrigger,
+            availableShares: fill.filledShares,
+          },
+          requestedShares,
+          message: 'No position was recorded because full visible ask depth was not available on the selected cheaper leg.',
         });
-        tierState.lastDepthNotice = available;
+        tierState.lastDepthNotice = `${fill.filledShares}/${requestedShares}`;
         tierState.lastDepthNoticeAt = now;
       }
       return false;
@@ -476,7 +493,7 @@ class CrossPairBot extends WickBot {
     const totalDebit = grossCost + totalFees;
     if (totalDebit > this.cash + 1e-9) {
       tierState.status = 'BLOCKED_INSUFFICIENT_CASH';
-      tierState.lastReason = `Both 100-share legs need $${round(totalDebit).toFixed(2)} including fees; paper cash is $${round(this.cash).toFixed(2)}.`;
+      tierState.lastReason = `The selected 100-share leg needs $${round(totalDebit).toFixed(2)} including fees; paper cash is $${round(this.cash).toFixed(2)}.`;
       this.log('PAPER_CROSS_PAIR_BLOCKED_CASH', {
         pairId: pair.id,
         pairLabel: pair.label,
@@ -491,7 +508,7 @@ class CrossPairBot extends WickBot {
     const pairState = this.pairStates[pair.id];
     const cycleNumber = pairState.cycleCount + 1;
     const cycleId = `${pair.id}-${this.orderWindowStart}-${tier.id}-${cycleNumber}`;
-    const created = executions.map((execution, index) => {
+    const created = executions.map(execution => {
       this.consumeAskDepth(execution.market.tokens[execution.side], execution.fill.fills);
       const positionId = `${cycleId}-${execution.asset.toLowerCase()}-${execution.side.toLowerCase()}`;
       const orderId = `${positionId}-buy`;
@@ -549,7 +566,7 @@ class CrossPairBot extends WickBot {
         entryTierId: tier.id,
         entryTierLabel: tier.label,
         combinedAskAtEntry: signal.combinedAsk,
-        legAskAtEntry: signal.legAsks[index],
+        legAskAtEntry: signal.legAsks[selectedIndex],
         pairCycleId: cycleId,
         pairCycleNumber: cycleNumber,
         entryKey: orderId,
@@ -559,7 +576,7 @@ class CrossPairBot extends WickBot {
         strategyId: this.strategyId,
         strategyName: this.strategyName,
         orderType: 'MARKET',
-        fillModel: 'PAPER_VISIBLE_ASK_DEPTH_FULL_PAIRED_FILL',
+        fillModel: 'PAPER_VISIBLE_ASK_DEPTH_SINGLE_CHEAPER_LEG_FILL',
         shares: requestedShares,
         initialShares: requestedShares,
         requestedShares,
@@ -616,6 +633,11 @@ class CrossPairBot extends WickBot {
       entryCost: round(grossCost),
       entryFees: round(totalFees),
       legPositionIds: positionIds,
+      selectedLeg: {
+        asset: selectedLeg.asset,
+        side: selectedLeg.side,
+        askAtTrigger: tierState.selectedLeg.askAtTrigger,
+      },
       legs: created.map(item => ({
         asset: item.execution.asset,
         side: item.execution.side,
@@ -631,24 +653,29 @@ class CrossPairBot extends WickBot {
     };
     pairState.cycleCount = cycleNumber;
     pairState.cycleIds.push(cycleId);
-    pairState.lastReason = `Bought ${requestedShares} shares on both legs; holding for exact-market resolution.`;
+    pairState.lastReason = `Bought ${requestedShares} ${selectedLeg.asset} ${selectedLeg.side} shares; holding for exact-market resolution.`;
     tierState.status = 'FILLED';
     tierState.filledAt = now;
     tierState.cycleId = cycleId;
-    tierState.lastReason = `Filled both ${requestedShares}-share legs at combined asks ${signal.combinedAsk.toFixed(3)}; holding to resolution.`;
+    tierState.lastReason = `Filled ${requestedShares} ${selectedLeg.asset} ${selectedLeg.side} shares, the cheaper leg at trigger; holding to resolution.`;
     this.pairCycles.unshift(cycle);
     this.entryOrderPlaced = true;
     this.entryOrderId = created[0].order.id;
     this.entryTriggerLatched = true;
     this.entryTriggerAt = now;
-    this.entryTriggerSide = pair.label;
-    this.entryTriggerReason = `${pair.label} · ${tier.label}; bought both legs.`;
+    this.entryTriggerSide = `${selectedLeg.asset} ${selectedLeg.side}`;
+    this.entryTriggerReason = `${pair.label} · ${tier.label}; bought the cheaper ${selectedLeg.asset} ${selectedLeg.side} leg.`;
     this.entrySignal = {
       pairId: pair.id,
       pairLabel: pair.label,
       tierId: tier.id,
       tierLabel: tier.label,
       combinedAsk: round(signal.combinedAsk),
+      selectedLeg: {
+        asset: selectedLeg.asset,
+        side: selectedLeg.side,
+        askAtTrigger: tierState.selectedLeg.askAtTrigger,
+      },
       legs: pair.legs.map((leg, index) => ({
         ...leg,
         ask: signal.legAsks[index],
@@ -663,12 +690,13 @@ class CrossPairBot extends WickBot {
       tierId: tier.id,
       tierLabel: tier.label,
       combinedAsk: round(signal.combinedAsk),
-      sharesPerLeg: requestedShares,
-      legs: cycle.legs.map(({ orderId, positionId, ...leg }) => leg),
-      combinedFillCost: round(grossCost),
+      selectedLeg: cycle.selectedLeg,
+      sharesBought: requestedShares,
+      entryCost: round(grossCost),
       fees: round(totalFees),
-      orderIds: created.map(item => item.order.id),
+      orderId: created[0].order.id,
       positionIds,
+      averageFillPrice: created[0].execution.fill.averagePrice,
     });
     return true;
   }
@@ -687,6 +715,9 @@ class CrossPairBot extends WickBot {
       awaitingResolution: aggregateInventory(this.positions,
         position => position.status === 'PENDING_RESOLUTION', false),
     };
+    const openPositions = this.positions.filter(position => position.status === 'OPEN').length;
+    const pendingResolutionPositions =
+      this.positions.filter(position => position.status === 'PENDING_RESOLUTION').length;
     const pairSnapshots = PAIRS.map(pair => {
       const pairState = this.pairStates[pair.id] || emptyPairState(pair);
       const signal = this.linkQuote(pair, now);
@@ -708,7 +739,7 @@ class CrossPairBot extends WickBot {
       const filledTiers = tiers.filter(tier => tier.status === 'FILLED');
       const status = !windowOpen ? 'WINDOW CLOSED'
         : !signal.quotesFresh ? 'WAITING FOR QUOTES'
-          : pendingTiers.some(tier => tier.status === 'WAITING_FOR_FULL_FILL') ? 'WAITING FOR FULL PAIRED FILL'
+          : pendingTiers.some(tier => tier.status === 'WAITING_FOR_FULL_FILL') ? 'WAITING FOR FULL ENTRY FILL'
             : pendingTiers.length ? 'BLOCKED BY CASH'
               : filledTiers.length ? 'HOLDING TO RESOLUTION'
                 : tiers.every(tier => tier.status === 'PAUSED_BY_OPPOSITE')
@@ -718,7 +749,7 @@ class CrossPairBot extends WickBot {
         : !signal.quotesFresh ? 'Waiting for fresh asks on both pair legs.'
           : pendingTiers.length ? pendingTiers.map(tier => tier.lastReason).join(' ')
             : filledTiers.length
-              ? `${filledTiers.length} rung(s) filled. Both legs are held for exact-market resolution.`
+              ? `${filledTiers.length} rung(s) filled. The selected cheaper legs are held for exact-market resolution.`
               : `Combined ask ${signal.combinedAsk?.toFixed(3) ?? '—'}. Watching five combined-ask rungs.`;
       const currentWindowPositions = this.positions.filter(position =>
         position.pairId === pair.id && position.windowStart === this.orderWindowStart &&
@@ -774,11 +805,11 @@ class CrossPairBot extends WickBot {
       count + pair.tiers.filter(tier => tier.status === 'FILLED').length, 0);
     const signalReason = windowOpen
       ? fullFillPendingCount
-        ? `${fullFillPendingCount} triggered rung(s) are waiting for full 100-share depth on both legs; no partial pair is recorded.`
+        ? `${fullFillPendingCount} triggered rung(s) are waiting for full 100-share depth on the selected cheaper leg; no partial position is recorded.`
         : pendingTierCount
           ? `${pendingTierCount} triggered rung(s) are blocked by insufficient paper cash.`
           : filledTierCount
-            ? `${filledTierCount} pair/rung entries filled; both legs are held for official resolution.`
+            ? `${filledTierCount} pair/rung entries filled; only each trigger's cheaper leg is held for official resolution.`
             : 'Monitoring BTC UP + ETH DOWN and ETH UP + BTC DOWN combined asks across five rungs.'
       : 'Waiting for the next aligned BTC and ETH 5-minute window.';
     const strategy = {
@@ -795,13 +826,13 @@ class CrossPairBot extends WickBot {
           label: tier.label,
           threshold: tier.threshold,
           strict: tier.strict,
-          sharesPerLeg: tier.sharesPerFire,
+          sharesPerEntry: tier.sharesPerFire,
         })),
         maxPricePerShare: MAX_ENTRY_PRICE,
         routes: PAIRS.map(pair => ({ id: pair.id, label: pair.label, status:
           pairSnapshots.find(item => item.id === pair.id)?.status || 'ARMED' })),
-        trigger: 'Buy 100 BTC UP + ETH DOWN or ETH UP + BTC DOWN shares per leg when the combined asks reach a configured rung.',
-        fillPolicy: 'Each pair/rung can fill once per 5-minute window. Sweep visible asks up to $0.99 per leg and book only when both 100-share fills are complete.',
+        trigger: 'When either opposite-direction pair reaches a configured combined-ask rung, buy only the cheaper leg in that pair.',
+        fillPolicy: 'Each pair/rung can fill once per 5-minute window. Buy 100 shares of the cheaper leg at its visible asks up to $0.99; require a complete selected-leg fill. If asks tie, select the pair’s first-listed leg.',
         oppositePairRule: 'The first pair to trigger a rung pauses the opposite pair on that rung for the rest of the window; other rungs remain independent.',
       },
       settlement: {
@@ -810,12 +841,17 @@ class CrossPairBot extends WickBot {
         windowEnd: 'All filled shares wait for confirmed resolution of their exact original BTC or ETH market.',
       },
       timing: 'Monitor aligned 5-minute BTC/ETH markets for the full window.',
-      sizing: 'Each qualifying pair/rung buys 100 shares on both legs.',
+      sizing: 'Each qualifying pair/rung buys 100 shares of only the cheaper leg.',
       trigger: 'Compare BTC UP + ETH DOWN and ETH UP + BTC DOWN combined asks.',
-      executionNote: 'Demo-only simulation. No positions are sold during the window; all filled shares are held for exact-market resolution.',
+      executionNote: 'Demo-only simulation. No positions are sold during the window; each purchased cheaper leg is held for exact-market resolution.',
     };
     return {
       ...state,
+      account: {
+        ...state.account,
+        openPositions,
+        pendingResolutionPositions,
+      },
       strategy,
       btcPrices: {
         marketSlug: this.btcMarket?.slug || null,

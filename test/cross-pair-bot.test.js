@@ -99,7 +99,7 @@ function setPair(bot, {
   return bot.processStrategyEntry(at);
 }
 
-test('snapshot matches Pumpfun entry tiers and 5-minute aligned markets', () => {
+test('snapshot keeps Pumpfun trigger rungs and 5-minute aligned markets', () => {
   const { bot } = fixture();
   const snapshot = bot.snapshot();
   const multi = new MultiBot();
@@ -112,20 +112,38 @@ test('snapshot matches Pumpfun entry tiers and 5-minute aligned markets', () => 
   assert.deepEqual(CrossPairBot.constants.PAIRS.map(pair => pair.id),
     ['btc-up-eth-down', 'eth-up-btc-down']);
   assert.equal(snapshot.strategy.settlement.intraWindowSells, false);
+  assert.match(snapshot.strategy.entries.trigger, /buy only the cheaper leg/);
+  assert.match(snapshot.strategy.entries.fillPolicy, /complete selected-leg fill/);
   assert.match(snapshot.strategy.entries.oppositePairRule, /other rungs remain independent/);
 });
 
-test('qualifying a pair/rung buys both 100-share legs as one paired fill', () => {
+test('qualifying a pair/rung buys only one 100-share leg', () => {
   const { bot } = fixture();
   assert.equal(setPair(bot), true);
-  assert.equal(bot.positions.length, 2);
-  assert.deepEqual(bot.positions.map(position => [position.asset, position.side, position.shares])
-    .sort(), [['BTC', 'UP', 100], ['ETH', 'DOWN', 100]]);
-  assert.equal(bot.orders.filter(order => order.action === 'BUY').length, 2);
-  assert.ok(bot.positions.every(position => position.pairCycleId === bot.positions[0].pairCycleId));
-  assert.ok(bot.positions.every(position => position.fees > 0));
+  assert.equal(bot.positions.length, 1);
+  assert.deepEqual(
+    bot.positions.map(position => [position.asset, position.side, position.shares]),
+    [['BTC', 'UP', 100]],
+  );
+  assert.equal(bot.orders.filter(order => order.action === 'BUY').length, 1);
+  assert.ok(bot.positions[0].fees > 0);
   assert.equal(bot.pairStates['btc-up-eth-down'].tiers['0.90'].status, 'FILLED');
+  assert.deepEqual(bot.pairStates['btc-up-eth-down'].tiers['0.90'].selectedLeg, {
+    asset: 'BTC', side: 'UP', askAtTrigger: 0.44,
+  });
   assert.equal(bot.pairStates['eth-up-btc-down'].tiers['0.90'].status, 'PAUSED_BY_OPPOSITE');
+});
+
+test('the cheapest leg is selected from the trigger quotes and the other is not bought', () => {
+  const { bot } = fixture();
+  assert.equal(setPair(bot, { btcAsk: 0.52, ethAsk: 0.28 }), true);
+  assert.equal(bot.positions.length, 2);
+  assert.ok(bot.positions.every(position => position.asset === 'ETH' && position.side === 'DOWN'));
+  assert.equal(bot.orders.filter(order => order.action === 'BUY').length, 2);
+  assert.ok(bot.pairCycles.every(cycle =>
+    cycle.selectedLeg.asset === 'ETH' && cycle.selectedLeg.side === 'DOWN'));
+  assert.equal(bot.pairStates['eth-up-btc-down'].tiers['0.90'].status, 'PAUSED_BY_OPPOSITE');
+  assert.equal(bot.pairStates['eth-up-btc-down'].tiers['0.80'].status, 'PAUSED_BY_OPPOSITE');
 });
 
 test('combined asks use strict 0.90 and inclusive lower thresholds', () => {
@@ -133,7 +151,8 @@ test('combined asks use strict 0.90 and inclusive lower thresholds', () => {
   assert.equal(setPair(bot, { btcAsk: 0.50, ethAsk: 0.40 }), false);
   assert.equal(bot.positions.length, 0);
   assert.equal(setPair(bot, { btcAsk: 0.50, ethAsk: 0.30, at: START + 2000 }), true);
-  assert.equal(bot.positions.length, 4);
+  assert.equal(bot.positions.length, 2);
+  assert.ok(bot.positions.every(position => position.asset === 'ETH' && position.side === 'DOWN'));
   assert.deepEqual([...new Set(bot.positions.map(position => position.entryTierId))].sort(),
     ['0.80', '0.90']);
 });
@@ -144,7 +163,7 @@ test('each pair can fill multiple independent rungs but not repeat a filled rung
   assert.equal(setPair(bot, { btcAsk: 0.40, ethAsk: 0.40, at: START + 2000 }), true);
   assert.equal(setPair(bot, { btcAsk: 0.40, ethAsk: 0.40, at: START + 3000 }), false);
   assert.equal(setPair(bot, { btcAsk: 0.35, ethAsk: 0.35, at: START + 4000 }), true);
-  assert.equal(bot.positions.length, 6);
+  assert.equal(bot.positions.length, 3);
   assert.deepEqual([...new Set(bot.positions.map(p => p.entryTierId))].sort(),
     ['0.70', '0.80', '0.90']);
 });
@@ -153,48 +172,57 @@ test('the first pair pauses only its opposite pair on the triggered rung', () =>
   const { bot } = fixture();
   assert.equal(setPair(bot), true);
   assert.equal(setPair(bot, { pairId: 'eth-up-btc-down', at: START + 2000 }), false);
-  assert.equal(bot.positions.length, 2);
+  assert.equal(bot.positions.length, 1);
   assert.equal(bot.pairStates['eth-up-btc-down'].tiers['0.90'].status, 'PAUSED_BY_OPPOSITE');
   assert.equal(setPair(bot, {
     pairId: 'eth-up-btc-down', btcAsk: 0.40, ethAsk: 0.40, at: START + 3000,
   }), true);
-  assert.equal(bot.positions.length, 4);
+  assert.equal(bot.positions.length, 2);
   assert.equal(bot.positions[0].entryTierId, '0.80');
   assert.equal(bot.positions[0].pairId, 'eth-up-btc-down');
 });
 
-test('both legs need full visible depth; incomplete paired fills book neither leg', () => {
+test('only the trigger-selected cheapest leg needs full depth; no partial fill is booked', () => {
   const { bot } = fixture();
   assert.equal(setPair(bot, {
-    btcAskLevels: [{ price: 0.44, size: 50 }],
-    ethAskLevels: [{ price: 0.44, size: 100 }],
+    btcAsk: 0.45,
+    ethAsk: 0.44,
+    btcAskLevels: [{ price: 0.45, size: 100 }],
+    ethAskLevels: [{ price: 0.44, size: 50 }],
   }), false);
   assert.equal(bot.positions.length, 0);
   assert.equal(bot.cash, 3000);
   assert.equal(bot.pairStates['btc-up-eth-down'].tiers['0.90'].status, 'WAITING_FOR_FULL_FILL');
   assert.equal(setPair(bot, {
     at: START + 2000,
-    btcAskLevels: [{ price: 0.44, size: 100 }],
-    ethAskLevels: [{ price: 0.44, size: 100 }],
+    btcAsk: 0.40,
+    ethAsk: 0.43,
+    btcAskLevels: [{ price: 0.40, size: 100 }],
+    ethAskLevels: [{ price: 0.43, size: 100 }],
   }), true);
-  assert.equal(bot.positions.length, 2);
+  assert.equal(bot.positions.length, 1);
+  assert.equal(bot.positions[0].asset, 'ETH');
+  assert.equal(bot.positions[0].side, 'DOWN');
+  assert.equal(bot.pairStates['btc-up-eth-down'].tiers['0.90'].selectedLeg.askAtTrigger, 0.44);
 });
 
 test('entries remain allowed through the 5-minute window and stop at its end', () => {
   const { bot } = fixture();
   assert.equal(setPair(bot, { at: START + 4 * 60 * 1000 }), true);
-  assert.equal(bot.positions.length, 2);
+  assert.equal(bot.positions.length, 1);
   assert.equal(bot.processStrategyEntry(START + WINDOW), false);
 });
 
-test('both legs resolve only against their exact original markets', async () => {
+test('the selected leg resolves only against its exact original market', async () => {
   const { bot, resolutionChecks } = fixture();
   assert.equal(setPair(bot), true);
   const positions = bot.positions.slice();
   await bot.closePreviousWindows(START + WINDOW, START + WINDOW);
+  assert.equal(positions.length, 1);
+  assert.equal(positions[0].asset, 'BTC');
   assert.ok(positions.every(position => position.status === 'PENDING_RESOLUTION'));
   await bot.resolvePendingPositions(START + WINDOW + config.RESOLUTION_POLL_MS);
-  assert.deepEqual([...resolutionChecks].sort(), ['btc-market', 'eth-market']);
+  assert.deepEqual([...resolutionChecks].sort(), ['btc-market']);
   assert.ok(positions.every(position => position.status === 'SETTLED_EXIT'));
   assert.equal(bot.pairCycles[0].status, 'RESOLVED');
 });

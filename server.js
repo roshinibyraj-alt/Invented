@@ -4,7 +4,7 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const INDEX_HTML = fs.readFileSync(path.join(__dirname, 'public', 'wick.html'));
+const INDEX_HTML = fs.readFileSync(path.join(__dirname, 'public', 'cross-pair.html'));
 const LIVE_BALANCE_URL = 'https://polymarket-btc-5m-bot-production.up.railway.app/api/live-balance';
 
 function startServer(bot, port, fetcher=globalThis.fetch) {

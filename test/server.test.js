@@ -24,29 +24,31 @@ test('health endpoint reports the demo service without secrets', async t => {
   assert.deepEqual(await response.json(), { ok: true, mode: 'DEMO', status: 'scanning', now: 123 });
 });
 
-test('dashboard shows paired cross-pair tiers and resolution-only exits', async t => {
+test('dashboard uses the Pumpfun-style layout and explains cheaper-leg entries', async t => {
   const server = startServer({ snapshot: () => ({}) }, 0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
   const response = await fetch(`http://127.0.0.1:${server.address().port}/`);
   const html = await response.text();
   assert.equal(response.status, 200);
-  assert.match(html, /BTC × ETH Cross-Pair Bot/);
-  assert.match(html, /BTC UP \+ ETH DOWN · ETH UP \+ BTC DOWN/);
-  assert.match(html, /Combined-ask rungs: &lt; \$0\.90; ≤ \$0\.80; ≤ \$0\.70; ≤ \$0\.60; ≤ \$0\.50/);
-  assert.match(html, /Buy 100 shares on both legs/);
-  assert.match(html, /Scan the full 5-minute window/);
-  assert.match(html, /No intra-window selling/);
-  assert.match(html, /Current-window accumulated shares/);
-  assert.match(html, /Accumulated shares awaiting resolution/);
-  assert.match(html, /Floating P&amp;L/);
+  assert.match(html, /BTC <span>×<\/span> ETH Cheapest-Leg Bot/);
+  assert.match(html, /5-minute paper strategy · combined-ask triggers · buy only the cheaper leg/);
+  assert.match(html, /Trigger on the combined asks; buy only the cheaper leg at trigger/);
+  assert.match(html, /Equal asks select the first-listed leg/);
+  assert.match(html, /opposite route pauses on this rung/);
+  assert.match(html, /Combined ask/);
+  assert.match(html, /no in-window exits/);
+  assert.match(html, /Current 5-minute window/);
+  assert.match(html, /Awaiting Polymarket resolution/);
+  assert.match(html, /Floating P&amp;L uses fresh best bids/);
   assert.match(html, /Realized P&amp;L/);
-  assert.match(html, /both legs and includes modeled taker fees/);
-  assert.match(html, /first pair to trigger a rung pauses the opposite pair/);
-  assert.match(html, /Recent activity/);
-  assert.match(html, /Entry tier/);
-  assert.match(html, /No raw event payloads/);
-  assert.match(html, /exact original BTC or ETH market/);
+  assert.match(html, /Position records/);
+  assert.match(html, /Activity/);
+  assert.match(html, /cheaper leg at trigger/);
+  assert.match(html, /exact-market resolution/);
+  assert.match(html, /fresh best bids/);
+  assert.doesNotMatch(html, /buy 100 shares on both legs/i);
+  assert.doesNotMatch(html, /both 100-share fills/i);
   assert.doesNotMatch(html, /BTC Strategy Lab/);
   assert.doesNotMatch(html, /combined bids.*sell/i);
   assert.doesNotMatch(html, /exit on bids/i);
