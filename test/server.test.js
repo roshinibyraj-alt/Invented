@@ -24,7 +24,7 @@ test('health endpoint reports the demo service without secrets', async t => {
   assert.deepEqual(await response.json(), { ok: true, mode: 'DEMO', status: 'scanning', now: 123 });
 });
 
-test('dashboard explains separate candle signals and exact entry rules', async t => {
+test('dashboard explains immediate signal entries without a price filter', async t => {
   const server = startServer({ snapshot: () => ({}) }, 0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -35,9 +35,8 @@ test('dashboard explains separate candle signals and exact entry rules', async t
   assert.match(html, /WickyWackyTrader Next Candle Predictor/);
   assert.match(html, /DIRECTIONAL SCORE/);
   assert.match(html, /not a probability/i);
-  assert.match(html, /00:00–00:59/);
-  assert.match(html, /below \$0\.40/);
-  assert.match(html, /\$0\.60 or less/);
+  assert.match(html, /no price filter/i);
+  assert.match(html, /buy the signaled side immediately/i);
   assert.match(html, /full visible ask-depth/i);
   assert.match(html, /no in-window sells/i);
   assert.match(html, /five completed Binance 5-minute candles/);
@@ -47,6 +46,7 @@ test('dashboard explains separate candle signals and exact entry rules', async t
   assert.match(html, /Positions/);
   assert.match(html, /exact-market resolution/);
   assert.doesNotMatch(html, /cheapest leg/i);
+  assert.doesNotMatch(html, /\$0\.40|\$0\.60/);
   assert.doesNotMatch(html, /combined.ask rungs/i);
   assert.doesNotMatch(html, /buy 100 shares on both legs/i);
 });

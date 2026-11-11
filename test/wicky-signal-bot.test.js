@@ -109,7 +109,7 @@ function setSignalQuote(bot, asset, ask, at, size = 1000, levels = null) {
   }
 }
 
-test('snapshot exposes separate 5-minute BTC and ETH signal gates', async () => {
+test('snapshot exposes independent 5-minute BTC and ETH signals without price filters', async () => {
   const { bot } = fixture();
   await bot.processStrategyEntry(START + 1000);
   const snapshot = bot.snapshot();
@@ -117,8 +117,8 @@ test('snapshot exposes separate 5-minute BTC and ETH signal gates', async () => 
   assert.equal(snapshot.strategy.timeframe, '5m');
   assert.equal(snapshot.strategy.capital, 3000);
   assert.equal(snapshot.strategy.entries.sharesPerAsset, 100);
-  assert.equal(snapshot.strategy.entries.firstMinute.triggerBelow, 0.4);
-  assert.equal(snapshot.strategy.entries.afterFirstMinute.triggerAtOrBelow, 0.6);
+  assert.equal(snapshot.strategy.entries.priceFilter, null);
+  assert.match(snapshot.strategy.entries.fillPolicy, /no price filter/i);
   assert.equal(snapshot.signals.BTC.side, 'UP');
   assert.equal(snapshot.signals.ETH.side, 'DOWN');
   assert.equal(snapshot.signals.BTC.lookback, 5);
@@ -134,44 +134,27 @@ test('service wrapper publishes the new strategy as its only 5-minute bot', () =
   assert.equal(snapshot.timeframes['5m'].strategy.id, 'btc-eth-next-candle-predictor');
 });
 
-test('first-minute gate is strict below $0.40', async () => {
+test('signal buys immediately at a high ask during the first minute', async () => {
   const { bot } = fixture();
   const early = START + 30_000;
-  setSignalQuote(bot, 'BTC', 0.4, early);
+  setSignalQuote(bot, 'BTC', 0.85, early);
   await bot.processStrategyEntry(early);
-  assert.equal(bot.positions.length, 0);
-  assert.equal(bot.assetSignals.BTC.entryStatus, 'WATCHING_FIRST_MINUTE');
-
-  setSignalQuote(bot, 'BTC', 0.399, early + 500);
-  await bot.processStrategyEntry(early + 500);
   assert.equal(bot.positions.length, 1);
   assert.equal(bot.positions[0].asset, 'BTC');
   assert.equal(bot.positions[0].side, 'UP');
-  assert.equal(bot.positions[0].maxEntryPrice, 0.4);
+  assert.equal(bot.positions[0].avgEntry, 0.85);
+  assert.equal(bot.positions[0].maxEntryPrice, null);
+  assert.equal(bot.assetSignals.BTC.triggerPhase, 'IMMEDIATE_SIGNAL');
 });
 
-test('after the first minute, an ask of exactly $0.60 qualifies', async () => {
+test('signal buys immediately above the old $0.60 cap after one minute', async () => {
   const { bot } = fixture();
-  const atGate = START + 60_000;
-  setSignalQuote(bot, 'BTC', 0.6, atGate);
-  await bot.processStrategyEntry(atGate);
+  const afterGate = START + 90_000;
+  setSignalQuote(bot, 'BTC', 0.92, afterGate);
+  await bot.processStrategyEntry(afterGate);
   assert.equal(bot.positions.length, 1);
-  assert.equal(bot.positions[0].maxEntryPrice, 0.6);
-  assert.equal(bot.assetSignals.BTC.triggerPhase, 'AFTER_FIRST_MINUTE');
-});
-
-test('after the first minute, an ask above $0.60 waits until it falls', async () => {
-  const { bot } = fixture();
-  const atGate = START + 60_001;
-  setSignalQuote(bot, 'BTC', 0.601, atGate);
-  await bot.processStrategyEntry(atGate);
-  assert.equal(bot.positions.length, 0);
-  assert.equal(bot.assetSignals.BTC.entryStatus, 'WAITING_FOR_PRICE_BELOW_0_60');
-
-  setSignalQuote(bot, 'BTC', 0.599, atGate + 500);
-  await bot.processStrategyEntry(atGate + 500);
-  assert.equal(bot.positions.length, 1);
-  assert.equal(bot.positions[0].side, 'UP');
+  assert.equal(bot.positions[0].avgEntry, 0.92);
+  assert.equal(bot.assetSignals.BTC.triggerPhase, 'IMMEDIATE_SIGNAL');
 });
 
 test('BTC and ETH use independent signals and may each enter once', async () => {
@@ -198,16 +181,16 @@ test('neutral signal does not enter even when the ask is cheap', async () => {
   assert.equal(bot.assetSignals.ETH.entryStatus, 'NO_TRADE_NEUTRAL');
 });
 
-test('no partial position is recorded when full visible ask depth is missing', async () => {
+test('no partial position is recorded when full visible ask depth is missing at any price', async () => {
   const { bot } = fixture();
   const early = START + 20_000;
-  setSignalQuote(bot, 'BTC', 0.39, early, 40, [{ price: 0.39, size: 40 }]);
+  setSignalQuote(bot, 'BTC', 0.94, early, 40, [{ price: 0.94, size: 40 }]);
   await bot.processStrategyEntry(early);
   assert.equal(bot.positions.length, 0);
   assert.equal(bot.cash, 3000);
   assert.equal(bot.assetSignals.BTC.entryStatus, 'WAITING_FOR_FULL_FILL');
 
-  setSignalQuote(bot, 'BTC', 0.39, early + 500, 100, [{ price: 0.39, size: 100 }]);
+  setSignalQuote(bot, 'BTC', 0.94, early + 500, 100, [{ price: 0.94, size: 100 }]);
   await bot.processStrategyEntry(early + 500);
   assert.equal(bot.positions.length, 1);
   assert.equal(bot.positions[0].shares, 100);
@@ -216,7 +199,7 @@ test('no partial position is recorded when full visible ask depth is missing', a
 test('each asset can fill only once per window and fees are recorded', async () => {
   const { bot } = fixture();
   const early = START + 20_000;
-  setSignalQuote(bot, 'BTC', 0.39, early);
+  setSignalQuote(bot, 'BTC', 0.85, early);
   await bot.processStrategyEntry(early);
   const cashAfterFill = bot.cash;
   setSignalQuote(bot, 'BTC', 0.3, early + 1000);
@@ -230,7 +213,7 @@ test('each asset can fill only once per window and fees are recorded', async () 
 test('held positions settle only through the base exact-market resolution flow', async () => {
   const { bot } = fixture();
   const early = START + 20_000;
-  setSignalQuote(bot, 'BTC', 0.39, early);
+  setSignalQuote(bot, 'BTC', 0.85, early);
   await bot.processStrategyEntry(early);
   const position = bot.positions[0];
   position.status = 'PENDING_RESOLUTION';

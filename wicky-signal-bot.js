@@ -100,7 +100,7 @@ function sweepBook(levels, requestedShares, maxPrice) {
   let notional = 0;
   const fills = [];
   for (const level of sortedLevels(levels)) {
-    if (level.price > maxPrice + 1e-9) break;
+    if (Number.isFinite(maxPrice) && level.price > maxPrice + 1e-9) break;
     if (remaining <= 1e-9) break;
     const shares = Math.min(remaining, level.size);
     const value = shares * level.price;
@@ -222,7 +222,7 @@ class WickySignalBot extends WickBot {
           indicatorStatus: 'READY',
           source: 'BINANCE_5M',
           generatedAt: now,
-          entryStatus: prediction.side ? 'WATCHING_FIRST_MINUTE' : 'NO_TRADE_NEUTRAL',
+          entryStatus: prediction.side ? 'WAITING_FOR_FRESH_ASK' : 'NO_TRADE_NEUTRAL',
           lastReason: prediction.side
             ? `${prediction.direction} signal from ${prediction.lookback} completed Binance candles.`
             : 'Predictor is neutral; this asset will not enter this window.',
@@ -337,25 +337,8 @@ class WickySignalBot extends WickBot {
 
       const ask = Number(quote.bestAsk);
       if (!state.triggered) {
-        if (elapsed < cfg.ENTRY_FIRST_MINUTE_MS) {
-          if (ask >= cfg.ENTRY_FIRST_MINUTE_MAX_PRICE) {
-            state.entryStatus = 'WATCHING_FIRST_MINUTE';
-            state.lastReason =
-              `Waiting for ${state.side} ask below $${cfg.ENTRY_FIRST_MINUTE_MAX_PRICE.toFixed(2)} during the first minute.`;
-            continue;
-          }
-          state.triggerPhase = 'FIRST_MINUTE';
-          state.maxEntryPrice = cfg.ENTRY_FIRST_MINUTE_MAX_PRICE;
-        } else {
-          if (ask > cfg.ENTRY_LATER_MAX_PRICE) {
-            state.entryStatus = 'WAITING_FOR_PRICE_BELOW_0_60';
-            state.lastReason =
-              `The first minute has passed; waiting for ${state.side} ask at or below $${cfg.ENTRY_LATER_MAX_PRICE.toFixed(2)}.`;
-            continue;
-          }
-          state.triggerPhase = 'AFTER_FIRST_MINUTE';
-          state.maxEntryPrice = cfg.ENTRY_LATER_MAX_PRICE;
-        }
+        state.triggerPhase = 'IMMEDIATE_SIGNAL';
+        state.maxEntryPrice = null;
         state.triggered = true;
         state.triggeredAt = now;
         state.triggerAsk = round(ask);
@@ -364,19 +347,12 @@ class WickySignalBot extends WickBot {
           asset,
           side: state.side,
           ask: round(ask),
-          maxEntryPrice: state.maxEntryPrice,
           phase: state.triggerPhase,
           score: state.score,
           windowStart: start,
         });
       }
 
-      if (ask > Number(state.maxEntryPrice) + 1e-9) {
-        state.entryStatus = 'WAITING_FOR_PRICE_RETURN';
-        state.lastReason =
-          `Triggered at ${priceText(state.triggerAsk)}; waiting for ask to return to $${Number(state.maxEntryPrice).toFixed(2)} or less.`;
-        continue;
-      }
       if (this.buySignal(asset, state, market, quote, now)) changed = true;
     }
     this.lastScanAt = now;
@@ -385,13 +361,13 @@ class WickySignalBot extends WickBot {
 
   buySignal(asset, state, market, quote, now) {
     const requestedShares = cfg.ENTRY_SHARES;
-    const maxPrice = Number(state.maxEntryPrice);
+    const maxPrice = null;
     const levels = this.availableAskLevels(asset, state.side, market, quote);
-    const fill = sweepBook(levels, requestedShares, maxPrice);
+    const fill = sweepBook(levels, requestedShares, null);
     if (fill.filledShares + 1e-9 < requestedShares) {
       state.entryStatus = 'WAITING_FOR_FULL_FILL';
       state.lastReason =
-        `Visible ask depth covers ${fill.filledShares}/${requestedShares} shares at or below $${maxPrice.toFixed(2)}; no partial position is recorded.`;
+        `Visible ask depth covers ${fill.filledShares}/${requestedShares} shares; no partial position is recorded.`;
       if (state.lastDepthNotice !== `${fill.filledShares}/${requestedShares}` ||
           now - state.lastDepthNoticeAt >= 5000) {
         this.log('PAPER_WICKY_WAITING_FOR_FULL_FILL', {
@@ -399,7 +375,6 @@ class WickySignalBot extends WickBot {
           side: state.side,
           availableShares: fill.filledShares,
           requestedShares,
-          maxEntryPrice: maxPrice,
           triggerAsk: state.triggerAsk,
           windowStart: this.orderWindowStart,
         });
@@ -478,7 +453,7 @@ class WickySignalBot extends WickBot {
       signalSensitivity: state.sensitivity,
       signalLookback: state.lookback,
       entryGate: state.triggerPhase,
-      entryThreshold: maxPrice,
+      entryThreshold: null,
       triggerAsk: state.triggerAsk,
       entryKey: orderId,
       entryLabel: `${asset} ${state.side} · ${state.direction} candle signal`,
@@ -491,7 +466,7 @@ class WickySignalBot extends WickBot {
       shares: requestedShares,
       initialShares: requestedShares,
       requestedShares,
-      maxEntryPrice: maxPrice,
+      maxEntryPrice: null,
       avgEntry: fill.averagePrice,
       fillPrice: fill.averagePrice,
       cost: fill.notional,
@@ -542,14 +517,14 @@ class WickySignalBot extends WickBot {
     this.entryTriggerLatched = true;
     this.entryTriggerAt = state.triggeredAt;
     this.entryTriggerSide = `${asset} ${state.side}`;
-    this.entryTriggerReason = `${asset} ${state.direction} signal; entered at ${priceText(state.triggerAsk)} under the ${priceText(maxPrice)} gate.`;
+    this.entryTriggerReason = `${asset} ${state.direction} signal; bought immediately from visible asks at ${priceText(state.triggerAsk)}.`;
     this.entrySignal = {
       asset,
       direction: state.direction,
       score: state.score,
       side: state.side,
       triggerAsk: state.triggerAsk,
-      maxEntryPrice: maxPrice,
+      maxEntryPrice: null,
       triggeredAt: state.triggeredAt,
     };
     this.log('PAPER_WICKY_ENTRY_FILLED', {
@@ -660,9 +635,8 @@ class WickySignalBot extends WickBot {
         orderType: 'MARKET',
         sharesPerAsset: cfg.ENTRY_SHARES,
         maximumEntriesPerAssetPerWindow: 1,
-        firstMinute: { triggerBelow: cfg.ENTRY_FIRST_MINUTE_MAX_PRICE },
-        afterFirstMinute: { triggerAtOrBelow: cfg.ENTRY_LATER_MAX_PRICE },
-        fillPolicy: 'Require a complete fill from currently visible ask depth at or below the active price cap. No partial positions or timeout fills.',
+        priceFilter: null,
+        fillPolicy: 'Buy immediately on the signaled side with no price filter, only when the full requested size is visible in fresh asks. No partial or timeout fills.',
       },
       settlement: {
         intraWindowSells: false,
@@ -670,7 +644,7 @@ class WickySignalBot extends WickBot {
         windowEnd: 'All filled shares wait for confirmed resolution of their exact original BTC or ETH market.',
       },
       timing: 'Read five completed Binance 5-minute candles, then monitor each Polymarket market for the full aligned window.',
-      trigger: 'Use independent BTC and ETH signals. First-minute entry requires ask below $0.40; after one minute, enter at $0.60 or less or keep waiting for the ask to fall below $0.60.',
+      trigger: 'Use independent BTC and ETH signals. Buy the predicted side immediately when the signal is ready and a fresh ask book is available; there is no price filter.',
       sizing: `${cfg.ENTRY_SHARES} shares per asset per 5-minute window.`,
       executionNote: 'Demo-only simulation. No live orders are sent; positions are held to exact-market resolution.',
     };
@@ -732,9 +706,6 @@ function moneyText(value) {
 WickySignalBot.constants = {
   ASSETS,
   QUOTE_MAX_AGE_MS,
-  ENTRY_FIRST_MINUTE_MS: cfg.ENTRY_FIRST_MINUTE_MS,
-  ENTRY_FIRST_MINUTE_MAX_PRICE: cfg.ENTRY_FIRST_MINUTE_MAX_PRICE,
-  ENTRY_LATER_MAX_PRICE: cfg.ENTRY_LATER_MAX_PRICE,
 };
 
 WickySignalBot._test = { sweepBook, aggregateInventory };

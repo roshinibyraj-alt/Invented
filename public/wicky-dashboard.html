@@ -140,7 +140,7 @@
     </nav>
 
     <section class="heading">
-      <div><div class="eyebrow"><i class="dot"></i> LIVE CONTROL ROOM · INDEPENDENT ASSET SIGNALS</div><h1>Signal <em>desk</em>.</h1><p class="subtitle">Five-minute candle reads, with each entry condition shown in plain language.</p></div>
+      <div><div class="eyebrow"><i class="dot"></i> LIVE CONTROL ROOM · INDEPENDENT ASSET SIGNALS</div><h1>Signal <em>desk</em>.</h1><p class="subtitle">Five-minute candle reads, with immediate entries from each asset's signal.</p></div>
       <div class="session"><span class="session-icon">◉</span><div><small>SESSION STATUS</small><strong id="sessionStatus">CONNECTING</strong></div><span class="session-time" id="windowClock">—</span></div>
     </section>
     <div class="notice" id="notice">Connecting to the paper bot…</div>
@@ -161,8 +161,8 @@
 
     <section class="rules" aria-label="Entry rules">
       <div class="rules-title">ENTRY RULES <span>· PAPER EXECUTION</span></div>
-      <div class="rule"><b>00:00–00:59</b> &nbsp;Signaled-side ask must be <b>below $0.40</b></div>
-      <div class="rule"><b>01:00 onward</b> &nbsp;Trigger at <b>$0.60 or less</b>; otherwise wait until below $0.60</div>
+      <div class="rule">When signal is ready &nbsp;Buy the signaled side immediately at the current ask</div>
+      <div class="rule">No entry price filter &nbsp;Full requested size must be visible in fresh asks</div>
       <div class="rule">100 shares per asset · at most one entry per window</div>
     </section>
 
@@ -194,12 +194,10 @@
     function signalDirection(signal){return signal?.direction==='BULLISH'?'UP':signal?.direction==='BEARISH'?'DOWN':signal?.direction==='NEUTRAL'?'NEUTRAL':signal?.direction||'PENDING'}
     function gateInfo(signal,state){
       const status=signal?.entry?.status||'WAITING_FOR_SIGNAL';
-      const labels={WAITING_FOR_SIGNAL:'WAITING FOR SIGNAL',WATCHING_FIRST_MINUTE:'WATCHING FIRST MINUTE',WAITING_FOR_FRESH_ASK:'WAITING FOR FRESH ASK',WAITING_FOR_PRICE_BELOW_0_60:'WAITING FOR ASK ≤ $0.60',TRIGGERED:'PRICE GATE MET · CHECKING',WAITING_FOR_FULL_FILL:'WAITING FOR FULL DEPTH',WAITING_FOR_PRICE_RETURN:'WAITING FOR ASK TO RETURN',BLOCKED_INSUFFICIENT_CASH:'BLOCKED · NOT ENOUGH CASH',FILLED:'PAPER ENTRY FILLED',NO_TRADE_NEUTRAL:'NEUTRAL · NO ENTRY',NO_TRADE_DATA:'NO ENTRY · DATA UNAVAILABLE'};
-      const tone=status==='FILLED'?'filled':status==='TRIGGERED'?'triggered':status.includes('WAITING')||status==='WATCHING_FIRST_MINUTE'?'wait':status.startsWith('BLOCKED')?'wait':'';
-      const phase=Number(signal?.entry?.elapsedMs||0)<60000?'FIRST MINUTE':'AFTER 01:00';
-      const explanation=signal?.entry?.lastReason||'Waiting for the entry conditions.';
-      const threshold=phase==='FIRST MINUTE'?'below $0.40':'$0.60 or less; if above, wait until below $0.60';
-      return `<div class="gate ${tone}"><div class="gate-top"><span class="gate-label">ENTRY GATE · ${phase}</span><b class="gate-state">${esc(labels[status]||status.replaceAll('_',' '))}</b></div><p>${esc(explanation)} ${signal?.entry?.triggerAsk!=null?`Trigger ask: <strong>${price(signal.entry.triggerAsk)}</strong>. `:''}Current rule: signaled-side ask ${threshold}.</p></div>`;
+      const labels={WAITING_FOR_SIGNAL:'WAITING FOR SIGNAL',WAITING_FOR_FRESH_ASK:'WAITING FOR FRESH ASK',TRIGGERED:'SIGNAL READY · CHECKING',WAITING_FOR_FULL_FILL:'WAITING FOR FULL DEPTH',BLOCKED_INSUFFICIENT_CASH:'BLOCKED · NOT ENOUGH CASH',FILLED:'PAPER ENTRY FILLED',NO_TRADE_NEUTRAL:'NEUTRAL · NO ENTRY',NO_TRADE_DATA:'NO ENTRY · DATA UNAVAILABLE'};
+      const tone=status==='FILLED'?'filled':status==='TRIGGERED'?'triggered':status.includes('WAITING')?'wait':status.startsWith('BLOCKED')?'wait':'';
+      const explanation=signal?.entry?.lastReason||'Waiting for the directional signal.';
+      return `<div class="gate ${tone}"><div class="gate-top"><span class="gate-label">SIGNAL EXECUTION</span><b class="gate-state">${esc(labels[status]||status.replaceAll('_',' '))}</b></div><p>${esc(explanation)} ${signal?.entry?.triggerAsk!=null?`Signal-time ask: <strong>${price(signal.entry.triggerAsk)}</strong>. `:''}No entry price filter; full fresh ask depth and sufficient paper cash are still required.</p></div>`;
     }
     function renderCandles(bars){
       if(!Array.isArray(bars)||!bars.length)return '<div class="empty">Waiting for five completed Binance candles.</div>';
@@ -242,8 +240,8 @@
       switch(event.event){
         case 'WICKY_SIGNAL_READY': return {tone:'',title:`${asset} ${event.direction||''} signal ready`,detail:`Directional score ${signed(event.score)} from ${event.lookback||5} closed Binance candles.`};
         case 'WICKY_SIGNAL_UNAVAILABLE': return {tone:'bad',title:`${asset} signal unavailable`,detail:event.note||'No entry without completed candle data.'};
-        case 'WICKY_ENTRY_TRIGGERED': return {tone:'wait',title:`${asset} ${side} price gate triggered`,detail:`Best ask ${price(event.ask)} · cap ${price(event.maxEntryPrice)} · ${event.phase==='FIRST_MINUTE'?'first minute':'after first minute'}.`};
-        case 'PAPER_WICKY_WAITING_FOR_FULL_FILL': return {tone:'wait',title:`${asset} ${side} waiting for full depth`,detail:`${qty(event.availableShares)}/${qty(event.requestedShares)} shares visible at or below ${price(event.maxEntryPrice)}. No partial position recorded.`};
+        case 'WICKY_ENTRY_TRIGGERED': return {tone:'wait',title:`${asset} ${side} signal triggered`,detail:`Buying immediately at the current ask ${price(event.ask)}; no price filter.`};
+        case 'PAPER_WICKY_WAITING_FOR_FULL_FILL': return {tone:'wait',title:`${asset} ${side} waiting for full depth`,detail:`${qty(event.availableShares)}/${qty(event.requestedShares)} shares visible in the current ask book. No partial position recorded.`};
         case 'PAPER_WICKY_BLOCKED_CASH': return {tone:'wait',title:`${asset} ${side} entry blocked by cash`,detail:`Needs ${money(event.requiredCash)}; available ${money(event.availableCash)}.`};
         case 'PAPER_WICKY_ENTRY_FILLED': return {tone:'good',title:`${asset} ${side} paper fill`,detail:`${qty(event.sharesBought)} shares at ${price(event.averageFillPrice)} average · ${moneyPair}.`};
         case 'PAPER_POSITION_AWAITING_POLYMARKET_RESOLUTION': return {tone:'wait',title:`${asset} ${side} awaiting resolution`,detail:`${qty(event.shares)} shares · exact market ${event.marketId||'—'}.`};
