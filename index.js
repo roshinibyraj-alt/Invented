@@ -13,7 +13,7 @@ async function main() {
   bot.start();
   startServer(bot, process.env.PORT || 3000);
 
-  console.log('MODE: DEMO -- independent BTC/ETH 5-minute candle-signal paper strategy; no live order code is loaded.');
+  console.log('MODE: DEMO -- BTC/ETH 5-minute opening-range breakout paper strategy; no live order code is loaded.');
 }
 
 main().catch((e) => {

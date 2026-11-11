@@ -1,7 +1,8 @@
-# Paper strategy runbook
+# Opening-range breakout paper runbook
 
-1. Confirm the BTC and ETH 5-minute markets have the same window start.
-2. Monitor BTC UP + ETH DOWN and ETH UP + BTC DOWN independently throughout the window.
-3. Start with $3,000 paper capital. Trigger at combined asks below $0.90, then at $0.80, $0.70, $0.60, and $0.50 or lower. Buy 100 shares of only the cheaper leg at each trigger.
-4. Each rung is one-shot per pair/window. The first pair to trigger a rung pauses the opposite pair on that rung; other rungs remain independent. Choose the cheaper leg from the asks at the first trigger, require full visible depth on that leg at or below $0.99 per share, and reserve consumed ask depth so another rung cannot reuse it. If the selected leg cannot fully fill, book zero and retry that same leg.
-5. Do not sell during the window. At window close, move all filled shares into the BTC UP, BTC DOWN, ETH UP, or ETH DOWN awaiting-resolution box. Check each exact original market for confirmed resolution every 5 seconds; do not settle from an unconfirmed price. The service is paper-only; a process restart clears its in-memory account and history.
+1. Keep the bot in demo mode. Live order execution is not available.
+2. For each aligned 5-minute BTC and ETH window, wait until two one-minute Binance candles have closed.
+3. A valid setup requires two same-direction candles, a second-candle close beyond the first candle's high/low, and a second-candle body at least 1.25 times the prior 20-candle median body.
+4. From 2:02 through 3:00, enter only if the signaled-side ask is $0.35–$0.65, the spread is at most $0.04, and the quote is fresh. Size each asset to at most $15 total debit including fees.
+5. Require full visible ask depth for the complete risk-sized order at or below $0.65. Do not record partial fills, add to positions, martingale, or sell during the window.
+6. Hold filled shares for confirmed resolution of their exact original market. Demo account state is held in process memory and resets when the Railway service restarts.

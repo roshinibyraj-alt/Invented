@@ -75,6 +75,44 @@ async function getBinanceCandles(asset,windowStart,lookback=5){
   }
   return candles;
 }
+
+async function getOpeningRangeCandles(asset,windowStart,now=Date.now()){
+  const normalized=String(asset).toUpperCase();
+  const start=Number(windowStart),timestamp=Number(now);
+  if(!['BTC','ETH'].includes(normalized))throw new Error(`Unsupported candle asset: ${asset}`);
+  if(!Number.isFinite(start)||!Number.isFinite(timestamp)||timestamp<start+120000){
+    throw new Error('Two completed opening-range candles are not available yet.');
+  }
+  const params=new URLSearchParams({
+    symbol:`${normalized}USDT`,
+    interval:'1m',
+    startTime:String(Math.floor(start-20*60000)),
+    endTime:String(Math.floor(Math.min(timestamp-1,start+120000-1))),
+    limit:'25',
+  });
+  const rows=await getJson(`${BINANCE_DATA}/api/v3/klines?${params}`);
+  const candles=(Array.isArray(rows)?rows:[])
+    .filter(row=>Array.isArray(row)&&Number(row[6])<timestamp)
+    .map(row=>({
+      openTime:Number(row[0]),
+      open:Number(row[1]),
+      high:Number(row[2]),
+      low:Number(row[3]),
+      close:Number(row[4]),
+      volume:Number(row[5]),
+      closeTime:Number(row[6]),
+    }));
+  const previous=candles.filter(candle=>candle.openTime<start).slice(-20);
+  const opening=candles.filter(candle=>
+    candle.openTime>=start&&candle.openTime<start+120000).slice(0,2);
+  if(previous.length<20||opening.length<2){
+    throw new Error(`Binance returned ${previous.length} prior and ${opening.length} opening candles; 20 and 2 are required.`);
+  }
+  if(opening[0].openTime!==start||opening[1].openTime!==start+60000){
+    throw new Error('Binance opening candles do not align with this Polymarket window.');
+  }
+  return {previous,opening};
+}
 async function getMarket(id){return getJson(`${GAMMA}/markets/${encodeURIComponent(id)}`)}
 
 function resolvedWinner(market){
@@ -92,4 +130,5 @@ function resolvedWinner(market){
   return null;
 }
 
-module.exports={getAssetMarket,getBtcMarket,getEthMarket,getBook,getBinanceCandles,getMarket,resolvedWinner};
+module.exports={getAssetMarket,getBtcMarket,getEthMarket,getBook,getBinanceCandles,
+  getOpeningRangeCandles,getMarket,resolvedWinner};

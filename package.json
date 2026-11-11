@@ -1,8 +1,8 @@
 {
-  "name": "btc-wick-paper-demo",
+  "name": "invented-opening-range-paper-bot",
   "version": "1.0.0",
   "private": true,
-  "description": "Demo-only Polymarket BTC/ETH 5-minute next-candle signal paper bot.",
+  "description": "Demo-only Polymarket BTC/ETH 5-minute opening-range breakout paper bot.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",

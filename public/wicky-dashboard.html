@@ -88,7 +88,7 @@
     .gate p{margin:7px 0 0;font-size:9px;line-height:1.5;color:#516477}
     .gate p strong{font-weight:700;color:#23384a}
     .factor-head{display:flex;justify-content:space-between;gap:10px;margin:13px 0 6px;color:#6d8091;font:8px ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.55px}
-    .candle-strip{display:grid;grid-template-columns:repeat(5,1fr);gap:6px}
+     .candle-strip{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
     .candle{display:flex;align-items:center;gap:6px;border:1px solid #dce5e5;background:#f7f9f8;border-radius:3px;padding:6px 7px;min-width:0}
     .candle-mark{display:grid;place-items:center;width:18px;height:18px;border-radius:3px;font:11px ui-monospace,SFMono-Regular,Menlo,monospace}
     .candle-mark.up{background:#d5f0e1;color:#148564}.candle-mark.down{background:#f5dce2;color:#c74a64}.candle-mark.flat{background:#ece8d7;color:#84753b}
@@ -134,13 +134,13 @@
 <body>
   <main>
     <nav class="topbar" aria-label="Dashboard">
-      <div class="brand"><div class="brand-mark">W</div><div><div class="brand-name">invented<span>signal</span></div><div class="brand-sub">PAPER SIGNAL ROOM</div></div></div>
+      <div class="brand"><div class="brand-mark">O</div><div><div class="brand-name">invented<span>breakout</span></div><div class="brand-sub">PAPER STRATEGY ROOM</div></div></div>
       <div class="crumb">MARKETS &nbsp;/&nbsp; BTC + ETH · 5 MIN</div>
       <div class="top-right"><span class="demo-pill"><i class="dot"></i> DEMO · PAPER ONLY</span><span class="health-pill" id="health"><i class="dot warn"></i><span id="healthText">CONNECTING</span></span></div>
     </nav>
 
     <section class="heading">
-      <div><div class="eyebrow"><i class="dot"></i> LIVE CONTROL ROOM · INDEPENDENT ASSET SIGNALS</div><h1>Signal <em>desk</em>.</h1><p class="subtitle">Five-minute candle reads, with immediate entries from each asset's signal.</p></div>
+      <div><div class="eyebrow"><i class="dot"></i> PAPER CONTROL ROOM · OPENING-RANGE STRATEGY</div><h1>Opening-range <em>breakout</em>.</h1><p class="subtitle">Wait for a confirmed one-minute range break, then trade with a strict per-position risk cap.</p></div>
       <div class="session"><span class="session-icon">◉</span><div><small>SESSION STATUS</small><strong id="sessionStatus">CONNECTING</strong></div><span class="session-time" id="windowClock">—</span></div>
     </section>
     <div class="notice" id="notice">Connecting to the paper bot…</div>
@@ -154,16 +154,16 @@
     </section>
 
     <div class="section-head">
-      <div><div class="section-title"><span class="section-kicker">01</span><h2>Market signals</h2></div><p class="section-sub">WickyWackyTrader Next Candle Predictor · five completed Binance 5-minute candles</p></div>
+      <div><div class="section-title"><span class="section-kicker">01</span><h2>Breakout checks</h2></div><p class="section-sub">First two completed Binance 1-minute candles · second close must break the first candle’s range</p></div>
       <div class="feed-status" id="feedStatus">WAITING FOR FEEDS</div>
     </div>
     <section class="signals" id="signals" aria-live="polite"></section>
 
     <section class="rules" aria-label="Entry rules">
       <div class="rules-title">ENTRY RULES <span>· PAPER EXECUTION</span></div>
-      <div class="rule">When signal is ready &nbsp;Buy the signaled side immediately at the current ask</div>
-      <div class="rule">No entry price filter &nbsp;Full requested size must be visible in fresh asks</div>
-      <div class="rule">100 shares per asset · at most one entry per window</div>
+      <div class="rule">Wait 2:02 &nbsp;Confirm same-direction candles and a close beyond the opening range</div>
+      <div class="rule">$0.35–$0.65 ask · spread ≤ $0.04 &nbsp;Use fresh visible asks only</div>
+      <div class="rule">Max $15 including fees per asset · one entry per window</div>
     </section>
 
     <section class="lower">
@@ -176,7 +176,7 @@
         <div class="event-list" id="events"></div>
       </div>
     </section>
-    <footer><strong><i class="dot"></i> PAPER ONLY · NO LIVE ORDERS</strong><p>Directional score is not a probability. Only full visible ask-depth fills count; fees apply. No in-window sells. Open shares wait for exact-market resolution on Polymarket.</p></footer>
+    <footer><strong><i class="dot"></i> PAPER ONLY · NO LIVE ORDERS</strong><p>Body multiple is a filter, not a probability. No martingale, adds, or in-window sells. Entries require full visible ask depth within the $15 fee-inclusive cap; filled shares wait for exact-market resolution.</p></footer>
   </main>
   <script>
     const $=id=>document.getElementById(id);
@@ -191,43 +191,47 @@
     const elapsedText=value=>{const n=Math.max(0,Number(value)||0)/1000;return String(Math.floor(n/60)).padStart(2,'0')+':'+String(Math.floor(n%60)).padStart(2,'0')};
     function freshness(value,now){if(!valid(value))return 'No candle time';const seconds=Math.max(0,Math.floor((Number(now)-Number(value))/1000));return seconds<60?seconds+'s ago':Math.floor(seconds/60)+'m ago'}
     function fmtCrypto(value,asset){if(!valid(value))return '—';return '$'+Number(value).toLocaleString('en-US',{minimumFractionDigits:asset==='BTC'?2:2,maximumFractionDigits:2})}
-    function signalDirection(signal){return signal?.direction==='BULLISH'?'UP':signal?.direction==='BEARISH'?'DOWN':signal?.direction==='NEUTRAL'?'NEUTRAL':signal?.direction||'PENDING'}
+    function signalDirection(signal){if(signal?.side)return signal.side;if(signal?.setupStatus==='WEAK_BREAKOUT')return `${signal.direction||'BREAKOUT'} · WEAK`;if(signal?.setupStatus==='NO_BREAKOUT')return 'NO BREAKOUT';return signal?.direction||'WAITING'}
     function gateInfo(signal,state){
       const status=signal?.entry?.status||'WAITING_FOR_SIGNAL';
-      const labels={WAITING_FOR_SIGNAL:'WAITING FOR SIGNAL',WAITING_FOR_FRESH_ASK:'WAITING FOR FRESH ASK',TRIGGERED:'SIGNAL READY · CHECKING',WAITING_FOR_FULL_FILL:'WAITING FOR FULL DEPTH',BLOCKED_INSUFFICIENT_CASH:'BLOCKED · NOT ENOUGH CASH',FILLED:'PAPER ENTRY FILLED',NO_TRADE_NEUTRAL:'NEUTRAL · NO ENTRY',NO_TRADE_DATA:'NO ENTRY · DATA UNAVAILABLE'};
-      const tone=status==='FILLED'?'filled':status==='TRIGGERED'?'triggered':status.includes('WAITING')?'wait':status.startsWith('BLOCKED')?'wait':'';
-      const explanation=signal?.entry?.lastReason||'Waiting for the directional signal.';
-      return `<div class="gate ${tone}"><div class="gate-top"><span class="gate-label">SIGNAL EXECUTION</span><b class="gate-state">${esc(labels[status]||status.replaceAll('_',' '))}</b></div><p>${esc(explanation)} ${signal?.entry?.triggerAsk!=null?`Signal-time ask: <strong>${price(signal.entry.triggerAsk)}</strong>. `:''}No entry price filter; full fresh ask depth and sufficient paper cash are still required.</p></div>`;
+      const labels={WAITING_FOR_CONFIRMATION:'WAITING FOR 2:02 CONFIRMATION',WAITING_FOR_FRESH_BOOK:'WAITING FOR FRESH BOOK',WAITING_FOR_PRICE_BAND:'WAITING FOR PRICE BAND',WAITING_FOR_TIGHT_SPREAD:'WAITING FOR TIGHT SPREAD',WAITING_FOR_FULL_DEPTH:'WAITING FOR FULL DEPTH',BLOCKED_INSUFFICIENT_CASH:'BLOCKED · CASH LIMIT',FILLED:'PAPER ENTRY FILLED',NO_TRADE_NO_BREAKOUT:'NO BREAKOUT · NO ENTRY',NO_TRADE_WEAK_BREAKOUT:'WEAK BREAKOUT · NO ENTRY',NO_TRADE_DATA:'NO ENTRY · DATA UNAVAILABLE',NO_TRADE_CUTOFF:'ENTRY CUTOFF PASSED'};
+      const tone=status==='FILLED'?'filled':status.includes('WAITING')?'wait':status.startsWith('BLOCKED')?'wait':'';
+      const explanation=signal?.entry?.lastReason||'Waiting for a valid opening-range setup.';
+      return `<div class="gate ${tone}"><div class="gate-top"><span class="gate-label">PAPER EXECUTION</span><b class="gate-state">${esc(labels[status]||status.replaceAll('_',' '))}</b></div><p>${esc(explanation)} ${signal?.entry?.triggerAsk!=null?`Trigger ask: <strong>${price(signal.entry.triggerAsk)}</strong>. `:''}Ask band $0.35–$0.65; spread ≤ $0.04; full depth required.</p></div>`;
     }
-    function renderCandles(bars){
-      if(!Array.isArray(bars)||!bars.length)return '<div class="empty">Waiting for five completed Binance candles.</div>';
-      return `<div class="candle-strip">${bars.map((bar,index)=>{const direction=bar.direction==='BULLISH'?'up':bar.direction==='BEARISH'?'down':'flat';const icon=direction==='up'?'↑':direction==='down'?'↓':'·';return `<div class="candle" title="Open ${esc(bar.open)} · close ${esc(bar.close)}"><span class="candle-mark ${direction}">${icon}</span><span class="candle-data"><b>${index+1} · ${esc(bar.direction)}</b><small>${valid(bar.relativeVolume)?Number(bar.relativeVolume).toFixed(2)+'× vol':''}</small></span></div>`}).join('')}</div>`;
+    function renderCandles(signal,asset){
+      const bars=signal?.openingCandles;
+      if(!Array.isArray(bars)||bars.length<2)return '<div class="empty">Waiting for two completed Binance 1-minute candles.</div>';
+      const first=bars[0],second=bars[1],direction=value=>Number(value.close)>Number(value.open)?'up':Number(value.close)<Number(value.open)?'down':'flat';
+      const icon=value=>value==='up'?'↑':value==='down'?'↓':'·';
+      return `<div class="candle-strip"><div class="candle" title="First candle defines the opening range"><span class="candle-mark ${direction(first)}">${icon(direction(first))}</span><span class="candle-data"><b>1 · OPENING RANGE</b><small>H ${fmtCrypto(first.high,asset)} · L ${fmtCrypto(first.low,asset)}</small></span></div><div class="candle" title="Second candle must confirm the breakout"><span class="candle-mark ${direction(second)}">${icon(direction(second))}</span><span class="candle-data"><b>2 · CONFIRMATION</b><small>C ${fmtCrypto(second.close,asset)} · ${valid(signal.bodyMultiple)?Number(signal.bodyMultiple).toFixed(2)+'× median':''}</small></span></div></div>`;
     }
     function renderSignalCard(asset,signal,state){
       const isBtc=asset==='BTC',direction=signalDirection(signal),side=signal?.side;
-      const tone=direction==='UP'?'up':direction==='DOWN'?'down':'neutral';
+      const tone=side==='UP'?'up':side==='DOWN'?'down':'neutral';
       const quotes=signal?.quotes||{},up=quotes.UP||{},down=quotes.DOWN||{};
       const chosen=side==='UP'?up:side==='DOWN'?down:null;
-      const spot=signal?.bars?.at(-1)?.close;
+      const spot=signal?.secondCandle?.close;
       const elapsed=signal?.entry?.elapsedMs;
-      const scoreText=valid(signal?.score)?signed(signal.score):'—';
-      const scoreClass=direction==='UP'?'positive':direction==='DOWN'?'negative':'neutral';
-      const statusText=signal?.indicatorStatus==='READY'?'BINANCE DATA · READY':signal?.indicatorStatus==='UNAVAILABLE'?'BINANCE DATA · UNAVAILABLE':'LOADING BINANCE DATA';
+      const scoreText=valid(signal?.bodyMultiple)?Number(signal.bodyMultiple).toFixed(2)+'×':'—';
+      const scoreClass=side==='UP'?'positive':side==='DOWN'?'negative':'neutral';
+      const statusText=signal?.indicatorStatus==='READY'?'BINANCE 1M · CHECKED':signal?.indicatorStatus==='UNAVAILABLE'?'BINANCE DATA · UNAVAILABLE':'WAITING FOR 2:02';
       const marketTime=state.window?.start?`${utcTime(state.window.start)} — ${utcTime(state.window.end)}`:'Waiting for current market';
-      const body=signal?.averageBody==null?'—':fmtCrypto(signal.averageBody,asset);
-      const wick=signal?.averageWick==null?'—':fmtCrypto(signal.averageWick,asset);
-      const volume=valid(signal?.latestRelativeVolume)?Number(signal.latestRelativeVolume).toFixed(2)+'×':'—';
+      const rangeHigh=valid(signal?.openingRangeHigh)?fmtCrypto(signal.openingRangeHigh,asset):'—';
+      const rangeLow=valid(signal?.openingRangeLow)?fmtCrypto(signal.openingRangeLow,asset):'—';
+      const medianBody=valid(signal?.medianBodyPercent)?Number(signal.medianBodyPercent).toFixed(4)+'%':'—';
+      const confirmation=valid(signal?.confirmationBodyPercent)?Number(signal.confirmationBodyPercent).toFixed(4)+'%':'—';
       return `<article class="signal-card ${isBtc?'btc':'eth'}">
-        <div class="asset-head"><div class="coin">${isBtc?'₿':'Ξ'}</div><div><div class="asset-name">${isBtc?'Bitcoin':'Ethereum'}</div><div class="asset-meta">${asset} / USD · BINANCE 5M · <span class="dot"></span>${esc(statusText)}</div></div><div class="asset-status">${esc(freshness(signal?.latestCandleCloseTime,state.now))}<br>${esc(marketTime)}</div></div>
-        <div class="spot-price"><strong>${fmtCrypto(spot,asset)}</strong><span>LAST COMPLETED CANDLE CLOSE</span></div>
-        <div class="signal-banner ${tone}"><div class="signal-direction"><span class="signal-icon">${direction==='UP'?'↑':direction==='DOWN'?'↓':'·'}</span><div><small>MODEL DIRECTION</small><b>${esc(direction)}</b></div></div><div class="score-block"><span class="score-label">DIRECTIONAL SCORE</span><b class="score-value ${scoreClass}">${esc(scoreText)}</b><div class="score-note">NOT A PROBABILITY · ±${Number(signal?.sensitivity??.05).toFixed(2)} threshold</div></div><div class="timer-block"><span class="timer-label">WINDOW ELAPSED</span><b class="timer-value">${elapsed==null?'—':elapsedText(elapsed)} <small>/ 05:00</small></b></div></div>
+        <div class="asset-head"><div class="coin">${isBtc?'₿':'Ξ'}</div><div><div class="asset-name">${isBtc?'Bitcoin':'Ethereum'}</div><div class="asset-meta">${asset} / USD · BINANCE 1M · <span class="dot"></span>${esc(statusText)}</div></div><div class="asset-status">${esc(signal?.setupStatus||'WAITING')}<br>${esc(marketTime)}</div></div>
+        <div class="spot-price"><strong>${fmtCrypto(spot,asset)}</strong><span>SECOND CONFIRMATION CANDLE CLOSE</span></div>
+        <div class="signal-banner ${tone}"><div class="signal-direction"><span class="signal-icon">${side==='UP'?'↑':side==='DOWN'?'↓':'·'}</span><div><small>SETUP</small><b>${esc(direction)}</b></div></div><div class="score-block"><span class="score-label">BODY / MEDIAN</span><b class="score-value ${scoreClass}">${esc(scoreText)}</b><div class="score-note">REQUIRES ≥ 1.25×</div></div><div class="timer-block"><span class="timer-label">WINDOW ELAPSED</span><b class="timer-value">${elapsed==null?'—':elapsedText(elapsed)} <small>/ 05:00</small></b></div></div>
         <div class="market-label"><span>POLYMARKET · BEST ASK</span><span>${esc(signal?.marketSlug||'Market loading')}</span></div>
         <div class="asks"><div class="ask ${side==='UP'?'chosen':''}"><span>UP ${side==='UP'?'· SIGNAL':''}</span><b>${price(up.bestAsk)}</b><small>${up.status==='LIVE'&&!up.stale?'LIVE':'STALE / MISSING'}</small></div><div class="ask ${side==='DOWN'?'chosen':''}"><span>DOWN ${side==='DOWN'?'· SIGNAL':''}</span><b>${price(down.bestAsk)}</b><small>${down.status==='LIVE'&&!down.stale?'LIVE':'STALE / MISSING'}</small></div></div>
         ${gateInfo(signal,state)}
-        <div class="factor-head"><span>LAST ${esc(signal?.lookback||5)} COMPLETED CANDLES</span><span>BODY · WICK · RELATIVE VOLUME</span></div>
-        ${renderCandles(signal?.bars)}
-        <div class="factors"><div class="factor"><small>Average body</small><b>${esc(body)}</b></div><div class="factor"><small>Average wick</small><b>${esc(wick)}</b></div><div class="factor"><small>Latest relative volume</small><b>${esc(volume)}</b></div></div>
-        <div class="model-note"><span>WickyWackyTrader indicator factors · Binance only uses closed candles</span><span>CALCULATED ${esc(utcTime(signal?.generatedAt))}</span></div>
+        <div class="factor-head"><span>OPENING RANGE &amp; CONFIRMATION</span><span>2 CLOSED 1M CANDLES</span></div>
+        ${renderCandles(signal,asset)}
+        <div class="factors"><div class="factor"><small>Opening high / low</small><b>${esc(rangeHigh)} / ${esc(rangeLow)}</b></div><div class="factor"><small>Prior 20 median body</small><b>${esc(medianBody)}</b></div><div class="factor"><small>Confirm candle body</small><b>${esc(confirmation)}</b></div></div>
+        <div class="model-note"><span>Breakout strength is a filter, not a probability</span><span>CHECKED ${esc(utcTime(signal?.generatedAt))}</span></div>
       </article>`;
     }
     function renderPositions(positions){
@@ -238,12 +242,10 @@
     function eventMessage(event){
       const asset=event.asset||'Bot',side=event.side||'',moneyPair=`${money(event.entryCost)} cost · ${money(event.fees)} fees`;
       switch(event.event){
-        case 'WICKY_SIGNAL_READY': return {tone:'',title:`${asset} ${event.direction||''} signal ready`,detail:`Directional score ${signed(event.score)} from ${event.lookback||5} closed Binance candles.`};
-        case 'WICKY_SIGNAL_UNAVAILABLE': return {tone:'bad',title:`${asset} signal unavailable`,detail:event.note||'No entry without completed candle data.'};
-        case 'WICKY_ENTRY_TRIGGERED': return {tone:'wait',title:`${asset} ${side} signal triggered`,detail:`Buying immediately at the current ask ${price(event.ask)}; no price filter.`};
-        case 'PAPER_WICKY_WAITING_FOR_FULL_FILL': return {tone:'wait',title:`${asset} ${side} waiting for full depth`,detail:`${qty(event.availableShares)}/${qty(event.requestedShares)} shares visible in the current ask book. No partial position recorded.`};
-        case 'PAPER_WICKY_BLOCKED_CASH': return {tone:'wait',title:`${asset} ${side} entry blocked by cash`,detail:`Needs ${money(event.requiredCash)}; available ${money(event.availableCash)}.`};
-        case 'PAPER_WICKY_ENTRY_FILLED': return {tone:'good',title:`${asset} ${side} paper fill`,detail:`${qty(event.sharesBought)} shares at ${price(event.averageFillPrice)} average · ${moneyPair}.`};
+        case 'OPENING_RANGE_ANALYZED': return {tone:'',title:`${asset} ${event.side||event.setupStatus||'no breakout'}`,detail:`${valid(event.bodyMultiple)?Number(event.bodyMultiple).toFixed(2)+'× prior median body':'No confirmed setup'} · two completed one-minute candles.`};
+        case 'OPENING_RANGE_UNAVAILABLE': return {tone:'bad',title:`${asset} candles unavailable`,detail:event.note||'No trade without completed opening candles.'};
+        case 'PAPER_BREAKOUT_ENTRY_FILLED': return {tone:'good',title:`${asset} ${side} paper fill`,detail:`${qty(event.sharesBought)} shares at ${price(event.averageFillPrice)} average · ${moneyPair} · total debit ${money(event.totalDebit)}.`};
+        case 'PAPER_BREAKOUT_WAITING_FOR_FULL_DEPTH': return {tone:'wait',title:`${asset} ${side} waiting for full depth`,detail:`Visible asks do not yet support the risk-sized entry within the price cap.`};
         case 'PAPER_POSITION_AWAITING_POLYMARKET_RESOLUTION': return {tone:'wait',title:`${asset} ${side} awaiting resolution`,detail:`${qty(event.shares)} shares · exact market ${event.marketId||'—'}.`};
         case 'PAPER_OFFICIAL_WIN':
         case 'PAPER_OFFICIAL_LOSS': return {tone:event.event==='PAPER_OFFICIAL_WIN'?'good':'bad',title:`${asset} ${side} official result · ${event.winner||'—'}`,detail:`Proceeds ${money(event.proceeds)} · net P&L ${money(event.pnl)}.`};
@@ -263,12 +265,12 @@
       $('health').innerHTML=`<i class="dot ${healthy?'':'bad'}"></i><span id="healthText">${healthy?'BOT ONLINE':'BOT ERROR'}</span>`;
       $('sessionStatus').textContent=healthy?String(state.status||'MONITORING').replaceAll('_',' ').toUpperCase():'NEEDS ATTENTION';
       $('windowClock').textContent=windowInfo.start?`${utcTime(windowInfo.start)} — ${utcTime(windowInfo.end)}`:'WAITING';
-      $('notice').textContent=`${state.strategy?.timeframe||'5m'} window · ${state.signal?.reason||'Waiting for independent BTC and ETH signals.'} · ${state.entryWindow?.secondsRemaining??0}s remaining · paper capital ${money(account.capital)}`;
+      $('notice').textContent=`${state.strategy?.timeframe||'5m'} window · ${state.signal?.reason||'Waiting for opening-range confirmation.'} · ${state.entryWindow?.secondsRemaining??0}s remaining · paper capital ${money(account.capital)}`;
       $('error').style.display=state.error?'block':'none';$('error').textContent=state.error||'';
       $('equity').textContent=money(account.equity);$('cash').textContent=money(account.cash);
       $('realized').textContent=money(account.realizedPnl);$('realized').className='metric-value '+cls(account.realizedPnl);
       $('openCount').textContent=`${account.openPositions||0} open · ${account.pendingResolutionPositions||0} pending`;
-      $('feedStatus').innerHTML=`<i class="dot"></i> ${Object.values(signals).filter(s=>s.indicatorStatus==='READY').length}/2 SIGNALS READY · CLOB ASKS ${state.status==='blocked_or_error'?'CHECK':''}`;
+      $('feedStatus').innerHTML=`<i class="dot"></i> ${Object.values(signals).filter(s=>s.indicatorStatus==='READY').length}/2 RANGE CHECKS READY · CLOB ASKS ${state.status==='blocked_or_error'?'CHECK':''}`;
       $('signals').innerHTML=['BTC','ETH'].map(asset=>renderSignalCard(asset,signals[asset]||{},state)).join('');
       const positions=state.positions||[];
       $('positionCount').textContent=`${positions.length} RECORDS`;

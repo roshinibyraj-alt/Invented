@@ -1,18 +1,18 @@
 'use strict';
 
-const WickySignalBot=require('./wicky-signal-bot');
+const OpeningRangeBot=require('./opening-range-bot');
 
 class MultiBot {
   constructor(){
     this.bots={
-      'btc-eth-next-candle-predictor':new WickySignalBot(),
+      'opening-range-breakout':new OpeningRangeBot(),
     };
   }
   start(){for(const bot of Object.values(this.bots))bot.start()}
   stop(){for(const bot of Object.values(this.bots))bot.stop()}
   snapshot(){
     const strategies=Object.fromEntries(Object.entries(this.bots).map(([k,b])=>[k,b.snapshot()]));
-    const primary=strategies['btc-eth-next-candle-predictor'];
+    const primary=strategies['opening-range-breakout'];
     const timeframes={'5m':primary};
     const states=Object.values(strategies),positions=states.flatMap(s=>s.positions)
       .sort((a,b)=>b.openedAt-a.openedAt),events=states.flatMap(s=>s.events).sort((a,b)=>b.ts-a.ts).slice(0,100);
