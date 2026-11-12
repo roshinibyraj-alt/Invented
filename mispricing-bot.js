@@ -480,6 +480,10 @@ class MispricingBot extends WickBot {
     }
 
     this.model = this.modelSnapshot(now);
+    const currentWindowPosition = this.positions.find((position) =>
+      position.status === 'OPEN' && Number(position.windowStart) === windowStart);
+    if (currentWindowPosition) return this.processTakeProfit(currentWindowPosition, now);
+
     const elapsedMs = now - windowStart;
     if (!this.model.ready) {
       this.signal = { side: null, reason: this.model.reason, modelReady: false };
@@ -500,17 +504,6 @@ class MispricingBot extends WickBot {
     }
     if (this.rearmReadyAt != null && now < this.rearmReadyAt) {
       this.signal = { side: null, reason: 'Take-profit filled; waiting for the next signal scan.' };
-      return false;
-    }
-
-    const activePosition = this.positions.find((position) =>
-      ['OPEN', 'PENDING_RESOLUTION'].includes(position.status));
-    if (activePosition?.status === 'OPEN') return this.processTakeProfit(activePosition, now);
-    if (activePosition?.status === 'PENDING_RESOLUTION') {
-      this.signal = {
-        side: activePosition.side,
-        reason: 'Holding the previous position to official resolution; no new entry until it settles.',
-      };
       return false;
     }
 
@@ -764,16 +757,14 @@ class MispricingBot extends WickBot {
     const model = this.model || this.modelSnapshot(now);
     const windowStart = this.getActiveWindowStart();
     const windowEnd = windowStart == null ? null : windowStart + config.WINDOW_MS_5M;
-    const pendingPosition = this.positions.find((position) =>
-      position.status === 'PENDING_RESOLUTION' && Number(position.windowStart) === windowStart);
-    const activePosition = this.positions.find((position) =>
-      ['OPEN', 'PENDING_RESOLUTION'].includes(position.status));
-    const currentPosition = activePosition || pendingPosition || null;
+    const currentPosition = this.positions.find((position) =>
+      position.status === 'OPEN' && Number(position.windowStart) === windowStart) || null;
     const feed = this.priceFeed.snapshot?.() || {};
     const account = {
       ...state.account,
       startingCapital: state.account.capital,
       tradeCount: state.account.totalTrades,
+      openPositions: this.positions.filter((position) => position.status === 'OPEN').length,
       settledPositions: state.account.settledTrades,
       pendingResolutionPositions: this.positions.filter((position) => position.status === 'PENDING_RESOLUTION').length,
       closedPositions: this.positions.filter((position) => position.status === 'SETTLED_EXIT').length,
@@ -816,13 +807,14 @@ class MispricingBot extends WickBot {
         takeProfitNetReturn: config.TAKE_PROFIT_NET_RETURN,
         takeProfitMaximumPrice: config.TAKE_PROFIT_MAX_PRICE,
         rearmAfterTakeProfit: true,
-        maximumConcurrentPositions: 1,
+        maximumOpenPositionsPerWindow: 1,
+        unresolvedPositionsBlockNextWindow: false,
         entries: {
           orderType: 'PAPER_ASK_SWEEP',
           sharesPerSide: config.ENTRY_SHARES,
           entryDelayMs: config.ENTRY_DELAY_MS,
           minimumNetEdgePerShare: config.MIN_NET_EDGE_PER_SHARE,
-          orderStatus: activePosition?.status === 'OPEN' ? 'FILLED' : 'NOT_PLACED',
+          orderStatus: currentPosition ? 'FILLED' : 'NOT_PLACED',
           signal: this.signal,
         },
         exit: {

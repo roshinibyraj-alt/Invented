@@ -128,19 +128,42 @@ test('book sweep refuses partial execution', () => {
   assert.equal(full.filledShares, 100);
 });
 
-test('unfilled position blocks new entries until official resolution', async () => {
+test('new window keeps its 10-second wait and ignores prior unresolved positions', async () => {
   let now = WINDOW_START + config.ENTRY_DELAY_MS;
-  const bot = makeBot({ getNow: () => now });
-  bot.positions.push({
-    id: 'prior-window-position',
-    status: 'PENDING_RESOLUTION',
-    side: 'DOWN',
-    windowStart: WINDOW_START - config.WINDOW_MS_5M,
-    shares: 100,
-  });
+  const feed = makeFeed(() => now);
+  const bot = makeBot({ getNow: () => now, feed });
+  assert.equal(await bot.processStrategyEntry(now), true);
+  const previousPosition = bot.positions[0];
+  previousPosition.status = 'PENDING_RESOLUTION';
+
+  const nextWindowStart = WINDOW_START + config.WINDOW_MS_5M;
+  bot.market.start = nextWindowStart;
+  bot.market.end = nextWindowStart + config.WINDOW_MS_5M;
+  bot.market.slug = `btc-updown-5m-${nextWindowStart / 1000}`;
+  bot.orderWindowStart = nextWindowStart;
+  feed.currentCandle = {
+    ...feed.currentCandle,
+    start: nextWindowStart,
+  };
+  now = nextWindowStart + config.ENTRY_DELAY_MS - 1;
+  bot.liveQuotes.UP.updatedAt = now;
+  bot.liveQuotes.DOWN.updatedAt = now;
+  bot.books.UP.updatedAt = now;
+  bot.books.DOWN.updatedAt = now;
+
   assert.equal(await bot.processStrategyEntry(now), false);
   assert.equal(bot.positions.filter((position) => position.status === 'OPEN').length, 0);
-  assert.match(bot.signal.reason, /official resolution/i);
+  assert.match(bot.signal.reason, /Waiting 1s/);
+
+  now = nextWindowStart + config.ENTRY_DELAY_MS;
+  bot.liveQuotes.UP.updatedAt = now;
+  bot.liveQuotes.DOWN.updatedAt = now;
+  bot.books.UP.updatedAt = now;
+  bot.books.DOWN.updatedAt = now;
+  assert.equal(await bot.processStrategyEntry(now), true);
+  assert.equal(previousPosition.status, 'PENDING_RESOLUTION');
+  assert.equal(bot.positions.filter((position) => position.status === 'OPEN').length, 1);
+  assert.equal(bot.positions[0].windowStart, nextWindowStart);
 });
 
 test('entry waits 10 seconds, then buys the best qualifying full-size side', async () => {
