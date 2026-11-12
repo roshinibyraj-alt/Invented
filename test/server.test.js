@@ -52,10 +52,10 @@ test('dashboard explains the BTC mispricing strategy and take-profit rules', asy
   const html = await response.text();
   assert.equal(response.status, 200);
   assert.match(html, /Invented · BTCUSDT Mispricing Paper Bot/);
-  assert.match(html, /Wait 10 seconds after each BTC 5-minute window opens/);
+  assert.match(html, /No fixed wait after a BTC 5-minute window opens/);
   assert.match(html, /50% net return after fees/);
   assert.match(html, /hold until official Polymarket resolution/i);
-  assert.match(html, /Each 5-minute window starts independently/i);
+  assert.match(html, /Each 5-minute window starts independently with no fixed open delay/i);
   assert.match(html, /After every full take-profit fill, wait 10 seconds/i);
   assert.match(html, /Binance and Polymarket feeds stay connected/i);
   assert.match(html, /After every full take-profit fill, wait 10 seconds/i);

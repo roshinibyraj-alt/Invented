@@ -128,8 +128,8 @@ test('book sweep refuses partial execution', () => {
   assert.equal(full.filledShares, 100);
 });
 
-test('new window keeps its 10-second wait and ignores prior unresolved positions', async () => {
-  let now = WINDOW_START + config.ENTRY_DELAY_MS;
+test('new window starts immediately and ignores prior unresolved positions', async () => {
+  let now = WINDOW_START;
   const feed = makeFeed(() => now);
   const bot = makeBot({ getNow: () => now, feed });
   assert.equal(await bot.processStrategyEntry(now), true);
@@ -145,38 +145,21 @@ test('new window keeps its 10-second wait and ignores prior unresolved positions
     ...feed.currentCandle,
     start: nextWindowStart,
   };
-  now = nextWindowStart + config.ENTRY_DELAY_MS - 1;
+  now = nextWindowStart;
   bot.liveQuotes.UP.updatedAt = now;
   bot.liveQuotes.DOWN.updatedAt = now;
   bot.books.UP.updatedAt = now;
   bot.books.DOWN.updatedAt = now;
 
-  assert.equal(await bot.processStrategyEntry(now), false);
-  assert.equal(bot.positions.filter((position) => position.status === 'OPEN').length, 0);
-  assert.match(bot.signal.reason, /Waiting 1s/);
-
-  now = nextWindowStart + config.ENTRY_DELAY_MS;
-  bot.liveQuotes.UP.updatedAt = now;
-  bot.liveQuotes.DOWN.updatedAt = now;
-  bot.books.UP.updatedAt = now;
-  bot.books.DOWN.updatedAt = now;
   assert.equal(await bot.processStrategyEntry(now), true);
   assert.equal(previousPosition.status, 'PENDING_RESOLUTION');
   assert.equal(bot.positions.filter((position) => position.status === 'OPEN').length, 1);
   assert.equal(bot.positions[0].windowStart, nextWindowStart);
 });
 
-test('entry waits 10 seconds, then buys the best qualifying full-size side', async () => {
-  let now = WINDOW_START + 9_999;
+test('entry starts immediately when the model and full-size book are ready', async () => {
+  let now = WINDOW_START;
   const bot = makeBot({ getNow: () => now });
-  assert.equal(await bot.processStrategyEntry(now), false);
-  assert.equal(bot.positions.length, 0);
-
-  now = WINDOW_START + config.ENTRY_DELAY_MS;
-  bot.liveQuotes.UP.updatedAt = now;
-  bot.liveQuotes.DOWN.updatedAt = now;
-  bot.books.UP.updatedAt = now;
-  bot.books.DOWN.updatedAt = now;
   assert.equal(await bot.processStrategyEntry(now), true);
   assert.equal(bot.positions.length, 1);
   assert.equal(bot.positions[0].side, 'UP');
