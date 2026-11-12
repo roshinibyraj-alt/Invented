@@ -407,10 +407,10 @@ class MispricingBot extends WickBot {
       volatility5m,
       secondsRemaining,
     }) : null;
-    let reason = 'Waiting for a fresh Binance tick and three closed 5-minute candles.';
+    let reason = `Waiting for a fresh Binance tick and ${config.VOLATILITY_CANDLES} closed 5-minute candles.`;
     if (feed.error && !tickFresh) reason = `Binance feed: ${feed.error}`;
     else if (!tickFresh) reason = 'Waiting for a Binance tick no more than 2 seconds old.';
-    else if (!historyReady) reason = 'Waiting for three closed 5-minute candles.';
+    else if (!historyReady) reason = `Waiting for ${config.VOLATILITY_CANDLES} closed 5-minute candles.`;
     else if (!(windowOpenPrice > 0)) reason = 'Waiting for the official Binance 5-minute candle open.';
     else if (!(secondsRemaining > 0)) reason = 'The current BTC 5-minute window has ended.';
     else reason = 'Signal model ready.';

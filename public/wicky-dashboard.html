@@ -91,7 +91,7 @@
       .feed-row:first-of-type { border-top: 0; }
       .feed-label { color: var(--muted); }
       .feed-value { text-align: right; font-weight: 750; font-variant-numeric: tabular-nums; }
-      .candles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; margin-top: 15px; }
+      .candles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; margin-top: 15px; }
       .candle {
         min-width: 0; padding: 11px 12px; border: 1px solid var(--line); border-radius: 13px;
         background: rgba(10, 16, 32, .58);
@@ -257,12 +257,11 @@
             <span class="badge" id="feedFreshness">Waiting for ticks</span>
           </div>
           <div class="feed-row"><span class="feed-label">Binance price at window open</span><strong class="feed-value" id="windowOpen">—</strong></div>
-          <div class="feed-row"><span class="feed-label">Last-three-candle volatility</span><strong class="feed-value" id="volatility">—</strong></div>
+          <div class="feed-row"><span class="feed-label">Last-two-candle volatility</span><strong class="feed-value" id="volatility">—</strong></div>
           <div class="feed-row"><span class="feed-label">Polymarket market window</span><strong class="feed-value" id="marketName">—</strong></div>
           <div class="candles" id="candles">
             <div class="candle"><div class="candle-time">Candle 1</div><div class="candle-return">Waiting</div></div>
             <div class="candle"><div class="candle-time">Candle 2</div><div class="candle-return">Waiting</div></div>
-            <div class="candle"><div class="candle-time">Candle 3</div><div class="candle-return">Waiting</div></div>
           </div>
         </article>
 
@@ -289,7 +288,7 @@
           <div class="decision">
             <div class="decision-title">Current decision</div>
             <div class="decision-text" id="signalSide">Waiting for live inputs</div>
-            <div class="decision-reason" id="signalReason">No signal is evaluated until the three candle returns, Binance tick, and Polymarket book are fresh.</div>
+            <div class="decision-reason" id="signalReason">No signal is evaluated until the two candle returns, Binance tick, and Polymarket book are fresh.</div>
           </div>
         </article>
       </section>
@@ -348,7 +347,7 @@
             <span class="badge">100-share base</span>
           </div>
           <div class="rules">
-            <div class="rule"><b>Signal</b>Three closed Binance 5m candles; no partial candle in volatility.</div>
+            <div class="rule"><b>Signal</b>Two closed Binance 5m candles; no partial candle in volatility.</div>
             <div class="rule"><b>Entry</b>No fixed wait after a BTC 5-minute window opens. Buy 100 shares as soon as the official Binance open, fresh model, full visible asks, and fees show at least 5¢ net edge per share.</div>
             <div class="rule"><b>Take profit</b>Rest a paper limit sell at the price that targets 50% net return after fees. Require full visible bid depth; no partial fills.</div>
             <div class="rule"><b>Resolution</b>Otherwise hold until official Polymarket resolution for that exact market.</div>
@@ -359,7 +358,7 @@
       </section>
 
       <div class="notice">
-        This is an experimental probability model, not risk-free arbitrage. Volatility estimated from only three candles is noisy, Binance prices may differ from Polymarket’s settlement reference, and the official Polymarket result determines paper settlement.
+        This is an experimental probability model, not risk-free arbitrage. Volatility estimated from only two candles can be noisy, Binance prices may differ from Polymarket’s settlement reference, and the official Polymarket result determines paper settlement.
       </div>
 
       <section class="grid two-col">
@@ -411,8 +410,8 @@
       const pnlClass = (value) => Number(value) > 0 ? "positive" : Number(value) < 0 ? "negative" : "neutral";
 
       function renderCandles(candles) {
-        const rows = Array.isArray(candles) ? candles.slice(-3) : [];
-        $("candles").innerHTML = [0, 1, 2].map((index) => {
+        const rows = Array.isArray(candles) ? candles.slice(-2) : [];
+        $("candles").innerHTML = [0, 1].map((index) => {
           const candle = rows[index];
           if (!candle) return `<div class="candle"><div class="candle-time">Candle ${index + 1}</div><div class="candle-return">Waiting</div></div>`;
           const change = (Number(candle.close) / Number(candle.open)) - 1;
@@ -495,12 +494,12 @@
         setText("windowOpen", money(model.windowOpenPrice, 2));
         setText("volatility", Number.isFinite(Number(model.volatility5m))
           ? (Number(model.volatility5m) * 100).toFixed(3) + "% RMS / candle"
-          : "Waiting for 3 candles");
+          : "Waiting for 2 candles");
         setText("marketName", state.market?.title || state.market?.slug || "Market not loaded");
         setText("feedFreshness", Number.isFinite(Number(binance.tickAgeMs))
           ? `Tick age ${Math.max(0, Math.round(Number(binance.tickAgeMs)))} ms`
           : "Waiting for ticks");
-        setText("modelStatus", model.ready ? "READY · 3 CLOSED CANDLES" : "MODEL WAITING");
+        setText("modelStatus", model.ready ? "READY · 2 CLOSED CANDLES" : "MODEL WAITING");
         setText("upProbability", percent(model.probabilityUp));
         setText("downProbability", percent(model.probabilityDown));
         setText("upAsk", contractPrice(up.bestAsk));

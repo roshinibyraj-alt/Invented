@@ -84,14 +84,16 @@ function makeBot({ getNow, feed } = {}) {
   return bot;
 }
 
-test('volatility uses the latest three closed candle returns', () => {
+test('volatility uses the latest two closed candle returns', () => {
   const candles = makeCandles();
-  const expected = Math.sqrt(candles.reduce((sum, candle) => {
+  const sample = candles.slice(-config.VOLATILITY_CANDLES);
+  const expected = Math.sqrt(sample.reduce((sum, candle) => {
     const value = Math.log(candle.close / candle.open);
     return sum + value ** 2;
-  }, 0) / 3);
-  assert.equal(calculateVolatility(candles, 3), expected);
-  assert.equal(calculateVolatility(candles.slice(1), 3), null);
+  }, 0) / config.VOLATILITY_CANDLES);
+  assert.equal(config.VOLATILITY_CANDLES, 2);
+  assert.equal(calculateVolatility(candles), expected);
+  assert.equal(calculateVolatility(candles.slice(-1)), null);
 });
 
 test('probability is 50% at the window open and rises with price', () => {

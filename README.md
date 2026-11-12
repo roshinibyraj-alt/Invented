@@ -5,7 +5,7 @@ This service runs a BTC-only, demo-only strategy on Polymarket 5-minute Up/Down 
 ## Strategy
 
 - There is no fixed delay after a BTC 5-minute window starts. It can enter as soon as the official Binance window open, a fresh model, and the Polymarket book are ready.
-- Binance BTCUSDT ticks and the current candle open feed a probability model. Volatility uses the three latest closed 5-minute candles.
+- Binance BTCUSDT ticks and the current candle open feed a probability model. Volatility uses the two latest closed 5-minute candles.
 - The bot compares UP and DOWN probabilities with fresh Polymarket asks, including entry fees. It buys **100 shares** on the higher qualifying side only when the estimated net edge is at least $0.05 per share.
 - Entry fills require all 100 shares in fresh, visible ask depth. Partial fills are not recorded.
 - After entry, it rests a paper limit sell priced for at least **50% net return after entry and exit fees**. A take-profit fill also requires all shares to be available in visible bid depth; partial exits are not recorded.
