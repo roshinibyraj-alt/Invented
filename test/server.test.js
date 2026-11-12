@@ -56,7 +56,10 @@ test('dashboard explains the BTC mispricing strategy and take-profit rules', asy
   assert.match(html, /50% net return after fees/);
   assert.match(html, /hold until official Polymarket resolution/i);
   assert.match(html, /Each 5-minute window starts independently/i);
-  assert.match(html, /rearm for the next qualifying signal/i);
+  assert.match(html, /After every full take-profit fill, wait 10 seconds/i);
+  assert.match(html, /Binance and Polymarket feeds stay connected/i);
+  assert.match(html, /After every full take-profit fill, wait 10 seconds/i);
+  assert.match(html, /Binance and Polymarket feeds stay connected/i);
   assert.match(html, /Binance BTCUSDT aggregate-trade WebSocket/);
   assert.match(html, /Polymarket CLOB quotes/);
   assert.match(html, /Recent trades/);

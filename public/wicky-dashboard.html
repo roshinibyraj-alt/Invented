@@ -352,7 +352,7 @@
             <div class="rule"><b>Entry</b>Wait 10 seconds after each BTC 5-minute window opens, then buy 100 shares only when full visible asks and fees leave at least 5¢ net edge per share.</div>
             <div class="rule"><b>Take profit</b>Rest a paper limit sell at the price that targets 50% net return after fees. Require full visible bid depth; no partial fills.</div>
             <div class="rule"><b>Resolution</b>Otherwise hold until official Polymarket resolution for that exact market.</div>
-            <div class="rule"><b>Window reset</b>Each 5-minute window starts independently after its own 10-second wait. Unresolved older positions do not block new entries. After a full take-profit fill, rearm for the next qualifying signal.</div>
+            <div class="rule"><b>Window &amp; TP waits</b>Each 5-minute window starts independently after 10 seconds; older unresolved positions do not block it. After every full take-profit fill, wait 10 seconds before a new signal. Binance and Polymarket feeds stay connected and keep updating.</div>
             <div class="rule"><b>Execution</b>Paper-only. No wallet or real order is connected.</div>
           </div>
         </article>

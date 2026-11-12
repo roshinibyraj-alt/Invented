@@ -205,10 +205,22 @@ test('a changed opposite signal does not flip an open position', async () => {
   assert.equal(bot.cash, originalCash);
 });
 
-test('take-profit requires all shares and then permits a later re-entry', async () => {
+test('take-profit requires all shares, then waits 10 seconds while both feeds stay connected', async () => {
   let now = WINDOW_START + config.ENTRY_DELAY_MS;
   const feed = makeFeed(() => now);
+  let binanceStopCount = 0;
+  feed.stop = () => { binanceStopCount += 1; };
   const bot = makeBot({ getNow: () => now, feed });
+  let polymarketCloseCount = 0;
+  bot.marketStream = { close: () => { polymarketCloseCount += 1; } };
+  bot.market.tokens = { UP: 'up-token', DOWN: 'down-token' };
+  bot.websocket = {
+    status: 'CONNECTED',
+    connectedAt: now,
+    lastMessageAt: now,
+    reconnectCount: 0,
+    error: null,
+  };
   await bot.processStrategyEntry(now);
   const position = bot.positions[0];
   const limit = position.takeProfitOrder.limitPrice;
@@ -229,8 +241,34 @@ test('take-profit requires all shares and then permits a later re-entry', async 
   assert.equal(await bot.processStrategyEntry(now), true);
   assert.equal(position.status, 'SETTLED_EXIT');
   assert.ok(position.realizedPnl >= (position.initialTotalCost + position.initialFees) * 0.5 - 1e-6);
+  const takeProfitFilledAt = now;
+  assert.equal(bot.rearmReadyAt, takeProfitFilledAt + config.POST_TP_COOLDOWN_MS);
 
-  now += config.POLL_INTERVAL_MS + 1;
+  now = takeProfitFilledAt + 5_000;
+  feed.price = 100.06;
+  feed.currentCandle.close = feed.price;
+  bot.liveQuotes.UP.updatedAt = now;
+  bot.liveQuotes.DOWN.updatedAt = now;
+  bot.books.UP.updatedAt = now;
+  bot.books.DOWN.updatedAt = now;
+  bot.handleMarketMessage({
+    event_type: 'book',
+    asset_id: 'up-token',
+    bids: [{ price: '0.10', size: '100' }],
+    asks: [{ price: '0.40', size: '100' }],
+    timestamp: String(now),
+  });
+  assert.equal(bot.liveQuotes.UP.updatedAt, now);
+  assert.equal(bot.websocket.status, 'CONNECTED');
+  assert.equal(bot.websocket.lastMessageAt, now);
+  assert.equal(feed.status, 'CONNECTED');
+  assert.equal(binanceStopCount, 0);
+  assert.equal(polymarketCloseCount, 0);
+  assert.equal(await bot.processStrategyEntry(now), false);
+  assert.equal(bot.positions.length, 1);
+  assert.match(bot.signal.reason, /waiting 5s/i);
+
+  now = takeProfitFilledAt + config.POST_TP_COOLDOWN_MS;
   bot.liveQuotes.UP.updatedAt = now;
   bot.liveQuotes.DOWN.updatedAt = now;
   bot.books.UP.updatedAt = now;

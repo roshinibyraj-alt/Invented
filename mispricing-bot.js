@@ -476,7 +476,6 @@ class MispricingBot extends WickBot {
     if (this.strategyWindowStart !== windowStart) {
       this.strategyWindowStart = windowStart;
       this.entriesThisWindow = 0;
-      this.rearmReadyAt = null;
     }
 
     this.model = this.modelSnapshot(now);
@@ -502,9 +501,19 @@ class MispricingBot extends WickBot {
       this.signal = { side: null, reason: 'Window closed; any unfilled position is held to resolution.' };
       return false;
     }
-    if (this.rearmReadyAt != null && now < this.rearmReadyAt) {
-      this.signal = { side: null, reason: 'Take-profit filled; waiting for the next signal scan.' };
-      return false;
+    if (this.rearmReadyAt != null) {
+      const cooldownRemainingMs = this.rearmReadyAt - now;
+      if (cooldownRemainingMs > 0) {
+        const remainingSeconds = Math.ceil(cooldownRemainingMs / 1000);
+        this.signal = {
+          side: null,
+          reason: `Take-profit filled; waiting ${remainingSeconds}s before following another signal.`,
+          cooldownUntil: this.rearmReadyAt,
+          cooldownRemainingMs,
+        };
+        return false;
+      }
+      this.rearmReadyAt = null;
     }
 
     const market = this.market || {};
@@ -702,12 +711,14 @@ class MispricingBot extends WickBot {
     position.strategyOutcomeAt = now;
     this.cash += sweep.netProceeds;
     this.lastTakeProfitAt = now;
-    this.rearmReadyAt = now + config.POLL_INTERVAL_MS;
+    this.rearmReadyAt = now + config.POST_TP_COOLDOWN_MS;
     this.entryTriggeredThisWindow = false;
     this.entryOrderPlaced = false;
     this.signal = {
       side: null,
-      reason: 'Take-profit filled; rearmed for the next qualifying signal.',
+      reason: 'Take-profit filled; waiting 10 seconds before following another signal.',
+      cooldownUntil: this.rearmReadyAt,
+      cooldownRemainingMs: config.POST_TP_COOLDOWN_MS,
       lastExitPositionId: position.id,
       realizedPnl: position.realizedPnl,
     };
@@ -806,6 +817,7 @@ class MispricingBot extends WickBot {
         entryDelaySeconds: config.ENTRY_DELAY_MS / 1000,
         takeProfitNetReturn: config.TAKE_PROFIT_NET_RETURN,
         takeProfitMaximumPrice: config.TAKE_PROFIT_MAX_PRICE,
+        postTakeProfitCooldownSeconds: config.POST_TP_COOLDOWN_MS / 1000,
         rearmAfterTakeProfit: true,
         maximumOpenPositionsPerWindow: 1,
         unresolvedPositionsBlockNextWindow: false,
@@ -867,6 +879,8 @@ class MispricingBot extends WickBot {
         enabled: true,
         entriesThisWindow: this.entriesThisWindow,
         readyAt: this.rearmReadyAt,
+        cooldownMs: config.POST_TP_COOLDOWN_MS,
+        cooldownRemainingMs: this.rearmReadyAt == null ? 0 : Math.max(0, this.rearmReadyAt - now),
         lastTakeProfitAt: this.lastTakeProfitAt,
       },
     };
