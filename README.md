@@ -1,19 +1,19 @@
-# BTC/ETH opening-range breakout paper bot
+# Invented BTC 5-minute mispricing paper bot
 
-This service runs a demo-only opening-range breakout strategy on aligned Polymarket BTC and ETH 5-minute Up/Down markets. It never submits live orders.
+This service runs a BTC-only, demo-only strategy on Polymarket 5-minute Up/Down markets. It never submits live orders.
 
 ## Strategy
 
-- BTC and ETH are evaluated independently in every aligned 5-minute market window.
-- Wait until two one-minute Binance candles inside the window have closed. The first candle defines the opening high/low range.
-- A setup needs both candles to move in the same direction, the second candle to close beyond the first candle's range, and its body to be at least **1.25× the median body of the prior 20 completed one-minute candles**.
-- Entries are allowed from 2:02 through 3:00 of the market window. The signaled side's ask must be $0.35–$0.65, its spread no wider than $0.04, and its quote no more than two seconds old.
-- Each asset has a **$15 maximum total debit, including taker fees**, with a minimum risk-sized order of 10 whole shares. At most one position is opened per asset per window; no adding or martingale.
-- The complete calculated order size must be supported by fresh visible ask depth at or below $0.65 and fit inside the $15 cap. Partial or timeout fills are never recorded.
-- The bot does **not sell during a window**. Filled shares wait for confirmed resolution of their exact original BTC or ETH market.
+- It waits **10 seconds** after each BTC 5-minute window starts.
+- Binance BTCUSDT ticks and the current candle open feed a probability model. Volatility uses the three latest closed 5-minute candles.
+- The bot compares UP and DOWN probabilities with fresh Polymarket asks, including entry fees. It buys **100 shares** on the higher qualifying side only when the estimated net edge is at least $0.05 per share.
+- Entry fills require all 100 shares in fresh, visible ask depth. Partial fills are not recorded.
+- After entry, it rests a paper limit sell priced for at least **50% net return after entry and exit fees**. A take-profit fill also requires all shares to be available in visible bid depth; partial exits are not recorded.
+- It does not flip on an opposite signal. If take-profit does not fill, the position stays open through the original market's official resolution. No new position is opened while any position is still open or awaiting resolution.
+- After a take-profit fill or official settlement, it can rearm for another qualifying signal.
 
 ## Dashboard and runtime
 
-The dashboard shows each asset's opening-range high/low, confirmation candle, body multiple, Polymarket asks, entry filters, risk-sized fill status, account totals, positions, and activity. The body multiple is a filter, not a probability. Demo account state is held in process memory and resets when the Railway service restarts.
+The dashboard mirrors the colorful BTC mispricing dashboard and shows the model probabilities, Binance candle/stream status, Polymarket UP/DOWN quotes, position and take-profit order, paper account totals, trades, and activity. Paper history is held in process memory and resets when Railway restarts.
 
-Run `npm test` to verify candle alignment, breakout confirmation, quote and price filters, risk sizing, full-depth paper fills, fee accounting, one entry per asset/window, exact-market settlement, and dashboard content.
+Run `npm test` to verify probability and volatility calculations, the 10-second delay, full-depth entries and take-profits, fee-aware 50% return targets, no partial fills or signal flips, WebSocket subscriptions, re-entry, and dashboard content.

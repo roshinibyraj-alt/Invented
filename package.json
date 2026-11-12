@@ -1,8 +1,8 @@
 {
-  "name": "invented-opening-range-paper-bot",
+  "name": "invented-btc-mispricing-paper-bot",
   "version": "1.0.0",
   "private": true,
-  "description": "Demo-only Polymarket BTC/ETH 5-minute opening-range breakout paper bot.",
+  "description": "Demo-only BTC 5-minute Binance mispricing paper bot with fee-aware take-profit.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",

@@ -25,12 +25,12 @@ function startServer(bot, port, fetcher=globalThis.fetch) {
     const pathname = new URL(req.url, 'http://localhost').pathname;
     if (pathname === '/api/healthz') {
       const state = bot.snapshot();
-      const healthy = state.status !== 'blocked_or_error';
+      const healthy = state.status !== 'blocked_or_error' && state.status !== 'ERROR';
       res.writeHead(healthy ? 200 : 503, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
       res.end(JSON.stringify({ ok: healthy, mode: 'DEMO', status: state.status, now: state.now }));
       return;
     }
-    if (pathname === '/api/state') {
+    if (pathname === '/api/state' || pathname === '/api/strategy/state') {
       const body = JSON.stringify(bot.snapshot());
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
       res.end(body);
