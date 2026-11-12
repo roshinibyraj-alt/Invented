@@ -252,6 +252,28 @@ test('take-profit requires all shares, then waits 10 seconds while both feeds st
   assert.match(bot.signal.reason, /waiting 5s/i);
 
   now = takeProfitFilledAt + config.POST_TP_COOLDOWN_MS;
+  feed.price = 101;
+  feed.currentCandle.close = feed.price;
+  bot.liveQuotes.UP = book(0.6);
+  bot.liveQuotes.UP.updatedAt = now;
+  bot.liveQuotes.DOWN.updatedAt = now;
+  bot.books.UP.updatedAt = now;
+  bot.books.DOWN.updatedAt = now;
+  assert.equal(await bot.processStrategyEntry(now), false);
+  assert.equal(bot.positions.length, 1);
+  assert.equal(bot.signal.blockedSide, 'UP');
+  assert.match(bot.signal.reason, /above \$0\.50/);
+
+  now += 500;
+  bot.liveQuotes.UP.updatedAt = now;
+  bot.liveQuotes.DOWN.updatedAt = now;
+  bot.books.UP.updatedAt = now;
+  bot.books.DOWN.updatedAt = now;
+  assert.equal(await bot.processStrategyEntry(now), false);
+  assert.equal(bot.postTakeProfitBlockedSide, 'UP');
+
+  now += 500;
+  bot.liveQuotes.UP = book(0.5);
   bot.liveQuotes.UP.updatedAt = now;
   bot.liveQuotes.DOWN.updatedAt = now;
   bot.books.UP.updatedAt = now;
@@ -259,4 +281,36 @@ test('take-profit requires all shares, then waits 10 seconds while both feeds st
   assert.equal(await bot.processStrategyEntry(now), true);
   assert.equal(bot.positions.length, 2);
   assert.equal(bot.positions.filter((item) => item.status === 'OPEN').length, 1);
+});
+
+test('a fresh opposite signal clears a voided post-take-profit signal', async () => {
+  let now = WINDOW_START;
+  const feed = makeFeed(() => now);
+  const bot = makeBot({ getNow: () => now, feed });
+  bot.rearmReadyAt = now;
+  feed.price = 101;
+  feed.currentCandle.close = feed.price;
+  bot.liveQuotes.UP = book(0.6);
+  bot.liveQuotes.DOWN = book(0.6);
+  bot.liveQuotes.UP.updatedAt = now;
+  bot.liveQuotes.DOWN.updatedAt = now;
+  bot.books.UP.updatedAt = now;
+  bot.books.DOWN.updatedAt = now;
+
+  assert.equal(await bot.processStrategyEntry(now), false);
+  assert.equal(bot.signal.blockedSide, 'UP');
+
+  now += 500;
+  feed.price = 99;
+  feed.currentCandle.close = feed.price;
+  bot.liveQuotes.UP = book(0.6);
+  bot.liveQuotes.DOWN = book(0.6);
+  bot.liveQuotes.UP.updatedAt = now;
+  bot.liveQuotes.DOWN.updatedAt = now;
+  bot.books.UP.updatedAt = now;
+  bot.books.DOWN.updatedAt = now;
+
+  assert.equal(await bot.processStrategyEntry(now), true);
+  assert.equal(bot.positions[0].side, 'DOWN');
+  assert.equal(bot.postTakeProfitBlockedSide, null);
 });

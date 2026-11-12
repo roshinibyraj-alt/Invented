@@ -145,6 +145,7 @@ class MispricingBot extends WickBot {
     this.positionSequence = 0;
     this.rearmReadyAt = null;
     this.lastTakeProfitAt = null;
+    this.postTakeProfitBlockedSide = null;
     this.books = { UP: null, DOWN: null };
     this.bookMarketId = null;
     this.marketStream = null;
@@ -476,6 +477,7 @@ class MispricingBot extends WickBot {
     if (this.strategyWindowStart !== windowStart) {
       this.strategyWindowStart = windowStart;
       this.entriesThisWindow = 0;
+      this.postTakeProfitBlockedSide = null;
     }
 
     this.model = this.modelSnapshot(now);
@@ -501,6 +503,7 @@ class MispricingBot extends WickBot {
       this.signal = { side: null, reason: 'Window closed; any unfilled position is held to resolution.' };
       return false;
     }
+    let postTakeProfitCooldownJustEnded = false;
     if (this.rearmReadyAt != null) {
       const cooldownRemainingMs = this.rearmReadyAt - now;
       if (cooldownRemainingMs > 0) {
@@ -514,6 +517,7 @@ class MispricingBot extends WickBot {
         return false;
       }
       this.rearmReadyAt = null;
+      postTakeProfitCooldownJustEnded = true;
     }
 
     const market = this.market || {};
@@ -524,6 +528,15 @@ class MispricingBot extends WickBot {
       && candidate.expectedEdgePerShare >= config.MIN_NET_EDGE_PER_SHARE);
     candidates.sort((a, b) => b.expectedEdgePerShare - a.expectedEdgePerShare);
     const selected = candidates[0];
+    if (this.postTakeProfitBlockedSide != null) {
+      const sameBlockedSignal = selected?.side === this.postTakeProfitBlockedSide;
+      const askRecovered = sameBlockedSignal
+        && Number(selected.bestAsk) <= config.POST_TP_REARM_MAX_ASK + EPSILON;
+      if (sameBlockedSignal && !askRecovered) {
+        return this.blockHighAskPostTakeProfitSignal(selected);
+      }
+      this.postTakeProfitBlockedSide = null;
+    }
     if (!selected) {
       this.signal = {
         side: null,
@@ -534,11 +547,30 @@ class MispricingBot extends WickBot {
       };
       return false;
     }
+    if (postTakeProfitCooldownJustEnded
+      && Number(selected.bestAsk) > config.POST_TP_REARM_MAX_ASK + EPSILON) {
+      return this.blockHighAskPostTakeProfitSignal(selected);
+    }
     if (selected.allInCost > this.cash + EPSILON) {
       this.signal = { side: selected.side, reason: 'Signal qualified, but demo cash is insufficient.' };
       return false;
     }
     return this.openPosition(selected, market, now, windowStart);
+  }
+
+  blockHighAskPostTakeProfitSignal(candidate) {
+    const ask = Number(candidate.bestAsk);
+    const threshold = config.POST_TP_REARM_MAX_ASK;
+    this.postTakeProfitBlockedSide = candidate.side;
+    this.signal = {
+      side: null,
+      blockedSide: candidate.side,
+      reason: `${candidate.side} signal voided after take-profit: best ask $${ask.toFixed(2)} is above $${threshold.toFixed(2)}. Waiting for a new signal or the ${candidate.side} ask to fall to $${threshold.toFixed(2)} or below.`,
+      modelReady: true,
+      bestAsk: ask,
+      priceThreshold: threshold,
+    };
+    return false;
   }
 
   openPosition(candidate, market, now, windowStart) {
@@ -630,6 +662,7 @@ class MispricingBot extends WickBot {
     this.entryTriggeredThisWindow = true;
     this.entryOrderPlaced = true;
     this.lastTakeProfitAt = null;
+    this.postTakeProfitBlockedSide = null;
     this.signal = {
       side: candidate.side,
       reason: `${candidate.side} selected at ${(candidate.probability * 100).toFixed(1)}% model probability and $${candidate.expectedEdgePerShare.toFixed(3)} net edge/share.`,
@@ -712,6 +745,7 @@ class MispricingBot extends WickBot {
     this.cash += sweep.netProceeds;
     this.lastTakeProfitAt = now;
     this.rearmReadyAt = now + config.POST_TP_COOLDOWN_MS;
+    this.postTakeProfitBlockedSide = null;
     this.entryTriggeredThisWindow = false;
     this.entryOrderPlaced = false;
     this.signal = {
@@ -882,6 +916,8 @@ class MispricingBot extends WickBot {
         cooldownMs: config.POST_TP_COOLDOWN_MS,
         cooldownRemainingMs: this.rearmReadyAt == null ? 0 : Math.max(0, this.rearmReadyAt - now),
         lastTakeProfitAt: this.lastTakeProfitAt,
+        blockedSide: this.postTakeProfitBlockedSide,
+        maxAskAfterCooldown: config.POST_TP_REARM_MAX_ASK,
       },
     };
   }

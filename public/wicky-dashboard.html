@@ -352,7 +352,7 @@
             <div class="rule"><b>Entry</b>No fixed wait after a BTC 5-minute window opens. Buy 100 shares as soon as the official Binance open, fresh model, full visible asks, and fees show at least 5¢ net edge per share.</div>
             <div class="rule"><b>Take profit</b>Rest a paper limit sell at the price that targets 50% net return after fees. Require full visible bid depth; no partial fills.</div>
             <div class="rule"><b>Resolution</b>Otherwise hold until official Polymarket resolution for that exact market.</div>
-            <div class="rule"><b>Window &amp; TP waits</b>Each 5-minute window starts independently with no fixed open delay; older unresolved positions do not block it. After every full take-profit fill, wait 10 seconds before a new signal. Binance and Polymarket feeds stay connected and keep updating.</div>
+            <div class="rule"><b>Window &amp; TP waits</b>Each 5-minute window starts independently with no fixed open delay; older unresolved positions do not block it. After a full take-profit, wait 10 seconds. If the first qualifying signal's best ask is above 50¢, void it and wait for a fresh signal or that side's ask to fall to 50¢ or below. Binance and Polymarket feeds stay connected.</div>
             <div class="rule"><b>Execution</b>Paper-only. No wallet or real order is connected.</div>
           </div>
         </article>
@@ -505,7 +505,9 @@
         setText("downProbability", percent(model.probabilityDown));
         setText("upAsk", contractPrice(up.bestAsk));
         setText("downAsk", contractPrice(down.bestAsk));
-        setText("signalSide", state.signal?.side ? `${state.signal.side} signal` : "No trade signal");
+        setText("signalSide", state.signal?.blockedSide
+          ? `${state.signal.blockedSide} signal voided`
+          : state.signal?.side ? `${state.signal.side} signal` : "No trade signal");
         setText("signalReason", state.signal?.reason || model.reason || "Waiting for inputs.");
         setText("clobStatus", `Polymarket ${String(state.websocket?.status || "waiting").toLowerCase()}`);
         setText("upAskBook", contractPrice(up.bestAsk));
