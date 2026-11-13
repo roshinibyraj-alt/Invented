@@ -146,6 +146,12 @@ test('UP and DOWN can both enter independently when each net edge qualifies', as
   const feed = makeFeed(() => now);
   feed.currentCandle.openSource = 'FIRST_TICK';
   const bot = makeBot({ getNow: () => now, feed });
+  for (const side of ['UP', 'DOWN']) {
+    setBook(bot, side, {
+      asks: [{ price: 0.35, size: 100 }],
+      bids: [{ price: 0.1, size: 100 }],
+    }, now);
+  }
   assert.equal(await bot.processStrategyEntry(now), true);
   assert.equal(bot.positions.length, 2);
   assert.deepEqual(bot.positions.map((position) => position.side).sort(), ['DOWN', 'UP']);
@@ -161,12 +167,12 @@ test('entry has no fixed price ceiling but still requires model edge', async () 
   const feed = makeFeed(() => now);
   const bot = makeBot({ getNow: () => now, feed });
   setPrice(feed, 120);
-  setBook(bot, 'UP', { asks: [{ price: 0.94, size: 100 }], bids: [{ price: 0.1, size: 100 }] }, now);
+  setBook(bot, 'UP', { asks: [{ price: 0.89, size: 100 }], bids: [{ price: 0.1, size: 100 }] }, now);
   setBook(bot, 'DOWN', { asks: [{ price: 0.99, size: 100 }], bids: [{ price: 0.1, size: 100 }] }, now);
   assert.equal(await bot.processStrategyEntry(now), true);
   assert.equal(bot.positions.length, 1);
   assert.equal(bot.positions[0].side, 'UP');
-  assert.equal(bot.positions[0].entryPrice, 0.94);
+  assert.equal(bot.positions[0].entryPrice, 0.89);
   assert.equal(bot.positions[0].takeProfitPrice, 0.9);
 });
 
@@ -281,6 +287,12 @@ test('new window starts immediately despite an older unresolved position', async
   let now = WINDOW_START;
   const feed = makeFeed(() => now);
   const bot = makeBot({ getNow: () => now, feed });
+  for (const side of ['UP', 'DOWN']) {
+    setBook(bot, side, {
+      asks: [{ price: 0.35, size: 100 }],
+      bids: [{ price: 0.1, size: 100 }],
+    }, now);
+  }
   assert.equal(await bot.processStrategyEntry(now), true);
   const previousPositions = [...bot.positions];
   for (const position of previousPositions) position.status = 'PENDING_RESOLUTION';
@@ -358,8 +370,8 @@ test('strategy snapshot reports dual independent entries and per-position take-p
   const bot = makeBot();
   const state = bot.snapshot();
   assert.equal(state.strategy.volatilityLookbackCandles, 2);
-  assert.equal(state.strategy.version, 'btc-5m-binance-mispricing-2candle-v6');
-  assert.equal(state.strategy.minimumNetEdgePerShare, 0.05);
+  assert.equal(state.strategy.version, 'btc-5m-binance-mispricing-2candle-v7');
+  assert.equal(state.strategy.minimumNetEdgePerShare, 0.10);
   assert.equal(state.strategy.oppositeLegBypassesModelEdge, true);
   assert.equal(state.strategy.entryPriceCeiling, null);
   assert.equal(state.strategy.entries.priceCeiling, null);

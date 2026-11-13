@@ -1008,7 +1008,7 @@ class MispricingBot extends WickBot {
         ...state.strategy,
         id: 'btc-5m-binance-mispricing-2candle-dual-tp',
         name: 'BTC 5-minute Binance signal accumulation strategy',
-        version: 'btc-5m-binance-mispricing-2candle-v6',
+        version: 'btc-5m-binance-mispricing-2candle-v7',
         execution: 'PAPER ONLY',
         symbol: 'BTCUSDT',
         timeframe: '5m',

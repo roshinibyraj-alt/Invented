@@ -365,7 +365,7 @@
           </div>
           <div class="rules">
             <div class="rule"><b>Signal</b>Two closed Binance 5m candles; no partial candle in volatility.</div>
-            <div class="rule"><b>Entry</b>Every fresh qualifying signal adds 100 shares, even if that side already has a position. Full visible ask depth is required at any price; first and same-side signals need 5¢ net model edge, while the first opposite-side entry may bypass it.</div>
+            <div class="rule"><b>Entry</b>Every fresh qualifying signal adds 100 shares, even if that side already has a position. Full visible ask depth is required at any price; first and same-side signals need 10¢ net model edge, while the first opposite-side entry may bypass it.</div>
             <div class="rule"><b>Take-profit</b>After every add, replace the limit sell for all accumulated shares at $0.90. Count it filled when the fresh best bid reaches $0.90; do not require a bid-depth sweep or charge a sell fee.</div>
             <div class="rule"><b>New signal</b>One add is allowed per qualifying signal cycle. The signal must stop qualifying and then qualify again before another 100-share add.</div>
             <div class="rule"><b>Resolution</b>If a take-profit does not fill before the window ends, cancel it and hold that position for official resolution of its original market.</div>
