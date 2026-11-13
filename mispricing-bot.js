@@ -49,7 +49,7 @@ function estimateUpProbability({ currentPrice, windowOpenPrice, volatility5m, se
 function sweepLevels(levels, shares, {
   side,
   minimumPrice = 0,
-  maximumPriceExclusive = Infinity,
+  maximumPrice = Infinity,
   market,
 } = {}) {
   const ordered = (Array.isArray(levels) ? levels : [])
@@ -59,7 +59,7 @@ function sweepLevels(levels, shares, {
     }))
     .filter((level) => level.price >= 0 && level.price <= 1 && level.size > 0)
     .filter((level) => side === 'SELL' ? level.price + EPSILON >= minimumPrice : true)
-    .filter((level) => side === 'BUY' ? level.price < maximumPriceExclusive : true)
+    .filter((level) => side === 'BUY' ? level.price <= maximumPrice + EPSILON : true)
     .sort((a, b) => side === 'SELL' ? b.price - a.price : a.price - b.price);
   let remaining = Number(shares);
   let gross = 0;
@@ -106,7 +106,7 @@ class MispricingBot extends WickBot {
         sharesPerSide: config.ENTRY_SHARES,
         entryDelayMs: config.ENTRY_DELAY_MS,
         minimumNetEdgePerShare: config.MIN_NET_EDGE_PER_SHARE,
-        maximumEntryPriceExclusive: config.ENTRY_MAX_PRICE_EXCLUSIVE,
+        maximumEntryPrice: config.ENTRY_MAX_PRICE,
         takeProfitMultiplier: config.TAKE_PROFIT_MULTIPLIER,
       },
       marketData,
@@ -432,7 +432,7 @@ class MispricingBot extends WickBot {
     now = this.now(),
     consume = false,
     minimumPrice = 0,
-    maximumPriceExclusive = Infinity,
+    maximumPrice = Infinity,
   } = {}) {
     const quote = this.getFreshQuote(side, now);
     const book = this.books?.[side];
@@ -446,7 +446,7 @@ class MispricingBot extends WickBot {
     const execution = sweepLevels(levels, shares, {
       side: isBuy ? 'BUY' : 'SELL',
       minimumPrice,
-      maximumPriceExclusive,
+      maximumPrice,
       market: this.market || {},
     });
     if (!execution.complete) return execution;
@@ -473,7 +473,7 @@ class MispricingBot extends WickBot {
   buildEntryCandidate(side, probability, market, now) {
     const execution = this.sweep(side, 'asks', config.ENTRY_SHARES, {
       now,
-      maximumPriceExclusive: config.ENTRY_MAX_PRICE_EXCLUSIVE,
+      maximumPrice: config.ENTRY_MAX_PRICE,
     });
     if (!execution?.complete || !(execution.gross > 0)) return null;
     const allInCost = execution.totalCost;
@@ -550,10 +550,10 @@ class MispricingBot extends WickBot {
         };
         continue;
       }
-      if (!(Number(quote.bestAsk) < config.ENTRY_MAX_PRICE_EXCLUSIVE)) {
+      if (Number(quote.bestAsk) > config.ENTRY_MAX_PRICE + EPSILON) {
         this.sideSignals[side] = {
           status: 'ASK_AT_OR_ABOVE_LIMIT',
-          reason: `Waiting for the ${side} ask to fall below $${config.ENTRY_MAX_PRICE_EXCLUSIVE.toFixed(2)}.`,
+          reason: `Waiting for the ${side} ask to be at or below $${config.ENTRY_MAX_PRICE.toFixed(2)}.`,
         };
         continue;
       }
@@ -562,7 +562,7 @@ class MispricingBot extends WickBot {
       if (!candidate) {
         this.sideSignals[side] = {
           status: 'WAITING_FOR_FULL_DEPTH',
-          reason: `Waiting for a complete ${config.ENTRY_SHARES}-share ask sweep below $${config.ENTRY_MAX_PRICE_EXCLUSIVE.toFixed(2)}.`,
+          reason: `Waiting for a complete ${config.ENTRY_SHARES}-share ask sweep at or below $${config.ENTRY_MAX_PRICE.toFixed(2)}.`,
         };
         continue;
       }
@@ -583,7 +583,7 @@ class MispricingBot extends WickBot {
       this.sideSignals[side] = {
         status: edgeBypassed ? 'OPPOSITE_PRICE_ONLY_QUALIFIED' : 'QUALIFIED',
         reason: edgeBypassed
-          ? `Opposite leg qualifies on full depth below $${config.ENTRY_MAX_PRICE_EXCLUSIVE.toFixed(2)}; model edge is bypassed.`
+          ? `Opposite leg qualifies on full depth at or below $${config.ENTRY_MAX_PRICE.toFixed(2)}; model edge is bypassed.`
           : `Qualified at ${candidate.bestAsk.toFixed(3)} ask and ${candidate.expectedEdgePerShare.toFixed(3)} net edge/share.`,
         expectedEdgePerShare: candidate.expectedEdgePerShare,
         edgeBypassed,
@@ -604,7 +604,7 @@ class MispricingBot extends WickBot {
       const execution = this.sweep(candidate.side, 'asks', config.ENTRY_SHARES, {
         now,
         consume: true,
-        maximumPriceExclusive: config.ENTRY_MAX_PRICE_EXCLUSIVE,
+        maximumPrice: config.ENTRY_MAX_PRICE,
       });
       if (!execution?.complete) {
         this.sideSignals[candidate.side] = {
@@ -742,7 +742,7 @@ class MispricingBot extends WickBot {
       positionId: id,
       action: 'BUY',
       side: candidate.side,
-      orderType: 'PAPER_ASK_SWEEP_BELOW_0_50',
+      orderType: 'PAPER_ASK_SWEEP_AT_OR_BELOW_MAX_PRICE',
       status: 'FILLED',
       requestedShares: config.ENTRY_SHARES,
       filledShares: config.ENTRY_SHARES,
@@ -803,8 +803,8 @@ class MispricingBot extends WickBot {
     this.signal = {
       side: candidate.side,
       reason: candidate.edgeBypassed
-        ? `${candidate.side} opposite leg entered below $${config.ENTRY_MAX_PRICE_EXCLUSIVE.toFixed(2)} on price/depth; its $${candidate.expectedEdgePerShare.toFixed(3)} model edge was bypassed.`
-        : `${candidate.side} entered below $${config.ENTRY_MAX_PRICE_EXCLUSIVE.toFixed(2)} with $${candidate.expectedEdgePerShare.toFixed(3)} net edge/share.`,
+        ? `${candidate.side} opposite leg entered at or below $${config.ENTRY_MAX_PRICE.toFixed(2)} on price/depth; its $${candidate.expectedEdgePerShare.toFixed(3)} model edge was bypassed.`
+        : `${candidate.side} entered at or below $${config.ENTRY_MAX_PRICE.toFixed(2)} with $${candidate.expectedEdgePerShare.toFixed(3)} net edge/share.`,
       expectedEdgePerShare: candidate.expectedEdgePerShare,
       probability: candidate.probability,
       edgeBypassed: candidate.edgeBypassed === true,
@@ -941,7 +941,7 @@ class MispricingBot extends WickBot {
         ...state.strategy,
         id: 'btc-5m-binance-mispricing-2candle-dual-tp',
         name: 'BTC 5-minute Binance independent-side take-profit strategy',
-        version: 'btc-5m-binance-mispricing-2candle-v4',
+        version: 'btc-5m-binance-mispricing-2candle-v5',
         execution: 'PAPER ONLY',
         symbol: 'BTCUSDT',
         timeframe: '5m',
@@ -950,7 +950,7 @@ class MispricingBot extends WickBot {
         minimumNetEdgePerShare: config.MIN_NET_EDGE_PER_SHARE,
         oppositeLegBypassesModelEdge: config.OPPOSITE_LEG_BYPASSES_EDGE,
         minimumNetEdgeAppliesToFirstAndSameSideReentries: true,
-        entryPriceCeilingExclusive: config.ENTRY_MAX_PRICE_EXCLUSIVE,
+        entryPriceCeilingInclusive: config.ENTRY_MAX_PRICE,
         takeProfitMultiplier: config.TAKE_PROFIT_MULTIPLIER,
         entryDelaySeconds: config.ENTRY_DELAY_MS / 1000,
         maximumOpenPositionsPerWindow: 2,
@@ -960,13 +960,13 @@ class MispricingBot extends WickBot {
         sideSignals: { ...this.sideSignals },
         unresolvedPositionsBlockNextWindow: false,
         entries: {
-          orderType: 'PAPER_ASK_SWEEP_BELOW_0_50',
+          orderType: 'PAPER_ASK_SWEEP_AT_OR_BELOW_MAX_PRICE',
           sharesPerSide: config.ENTRY_SHARES,
           entryDelayMs: config.ENTRY_DELAY_MS,
           minimumNetEdgePerShare: config.MIN_NET_EDGE_PER_SHARE,
           oppositeLegBypassesModelEdge: config.OPPOSITE_LEG_BYPASSES_EDGE,
           minimumNetEdgeAppliesToFirstAndSameSideReentries: true,
-          maximumPriceExclusive: config.ENTRY_MAX_PRICE_EXCLUSIVE,
+          maximumPriceInclusive: config.ENTRY_MAX_PRICE,
           oneOpenPositionPerSide: true,
           entryCountBySide: { ...this.sideEntryCountsThisWindow },
           triggeredThisWindow: this.entryTriggeredThisWindow,
@@ -983,7 +983,7 @@ class MispricingBot extends WickBot {
         },
         timing: 'Scan immediately and every 500 ms; manage UP and DOWN entries and take-profits independently.',
         sizing: `${config.ENTRY_SHARES} shares per entry; at most one open position per side, re-armed after that side takes profit.`,
-        trigger: `The first entry and same-side re-entries require at least $${config.MIN_NET_EDGE_PER_SHARE.toFixed(2)} net model edge. The first opposite-side entry may bypass that edge rule but still requires a full ${config.ENTRY_SHARES}-share ask sweep below $${config.ENTRY_MAX_PRICE_EXCLUSIVE.toFixed(2)}.`,
+        trigger: `Entries require a full ${config.ENTRY_SHARES}-share ask sweep at or below $${config.ENTRY_MAX_PRICE.toFixed(2)}. The first entry and same-side re-entries also require at least $${config.MIN_NET_EDGE_PER_SHARE.toFixed(2)} net model edge; the first opposite-side entry may bypass that edge rule.`,
         exitPolicy: `Place a resting limit sell at ${config.TAKE_PROFIT_MULTIPLIER.toFixed(1)}x entry price; if it does not fill, hold to official resolution.`,
       },
       account,
