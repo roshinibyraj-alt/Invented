@@ -126,13 +126,13 @@ test('snapshot exposes independent 5-minute BTC and ETH signals without price fi
   assert.equal(snapshot.pairStates, undefined);
 });
 
-test('service wrapper publishes only the replacement BTC mispricing strategy', () => {
+test('service wrapper publishes only the replacement BTC market maker', () => {
   const multi = new MultiBot();
   const snapshot = multi.snapshot();
-  assert.equal(multi.bot.strategyId, 'btc-5m-binance-mispricing-2candle-dual-tp');
-  assert.equal(snapshot.strategy.id, 'btc-5m-binance-mispricing-2candle-dual-tp');
+  assert.equal(multi.bot.strategyId, 'btc-5m-inventory-aware-market-maker');
+  assert.equal(snapshot.strategy.id, 'btc-5m-inventory-aware-market-maker');
   assert.equal(snapshot.strategy.timeframe, '5m');
-  assert.equal(snapshot.strategy.baseShares, 100);
+  assert.equal(snapshot.strategy.quoteSizeShares, 20);
   assert.equal(snapshot.strategy.execution, 'PAPER ONLY');
 });
 

@@ -1,10 +1,10 @@
 'use strict';
 
-const MispricingBot = require('./mispricing-bot');
+const MarketMakerBot = require('./market-maker-bot');
 
 class MultiBot {
   constructor(options = {}) {
-    this.bot = options.bot || new MispricingBot(options);
+    this.bot = options.bot || new MarketMakerBot(options);
   }
 
   start() {

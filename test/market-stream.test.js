@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const marketData = require('../wick-market-data');
-const MispricingBot = require('../mispricing-bot');
+const MarketMakerBot = require('../market-maker-bot');
 
 class FakeWebSocket {
   static instances = [];
@@ -63,7 +63,7 @@ test('Polymarket stream subscribes to both outcome tokens and forwards updates',
 
 test('market book events update visible depth for paper fills', () => {
   let now = 1000;
-  const bot = new MispricingBot({ now: () => now, marketData: {}, priceFeed: { snapshot: () => ({}) } });
+  const bot = new MarketMakerBot({ now: () => now, marketData: {}, priceFeed: { snapshot: () => ({}) } });
   bot.market = { tokens: { UP: 'up-token', DOWN: 'down-token' } };
   bot.handleMarketMessage({
     event_type: 'book',

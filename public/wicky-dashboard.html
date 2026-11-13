@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#101628">
-    <title>Invented · BTCUSDT Mispricing Paper Bot</title>
+    <title>Invented · BTCUSDT Market Maker</title>
     <style>
       :root {
         color-scheme: dark;
@@ -197,8 +197,8 @@
         <div class="brand">
           <div class="brand-mark" aria-hidden="true">₿</div>
           <div>
-            <div class="eyebrow">Invented · BTC mispricing paper bot</div>
-            <h1>BTCUSDT Mispricing Paper Bot</h1>
+            <div class="eyebrow">Invented · BTCUSDT Market Maker</div>
+            <h1>BTCUSDT Market Maker</h1>
           </div>
         </div>
         <div class="top-meta">
@@ -210,9 +210,9 @@
 
       <section class="hero" aria-labelledby="heroTitle">
         <div>
-          <div class="eyebrow">Binance model × Polymarket 5-minute BTC</div>
-          <h2 id="heroTitle">Every fresh signal can add 100 shares; each side sells its full position at $0.90.</h2>
-          <p>The bot uses the Binance BTCUSDT model and fresh Polymarket order books. There is no fixed entry-price ceiling; each side accumulates shares independently.</p>
+          <div class="eyebrow">Binance fair value × Polymarket 5-minute BTC</div>
+          <h2 id="heroTitle">Inventory-aware passive quotes on both outcomes.</h2>
+          <p>This paper-only bot replaces ask-sweeping entries with post-only limit quotes. It adjusts prices to the Binance fair value, volatility, and accumulated UP/DOWN inventory.</p>
         </div>
         <div class="hero-state">
           <span class="badge" id="windowBadge">Window waiting</span>
@@ -253,7 +253,7 @@
         <article class="panel">
           <div class="panel-head">
             <div>
-              <div class="panel-title">Binance signal inputs</div>
+              <div class="panel-title">Binance model inputs</div>
               <div class="panel-subtitle">Live BTCUSDT aggregate trades · 5-minute window</div>
             </div>
             <span class="badge" id="feedFreshness">Waiting for ticks</span>
@@ -270,8 +270,8 @@
         <article class="panel">
           <div class="panel-head">
             <div>
-              <div class="panel-title">Model probabilities</div>
-              <div class="panel-subtitle">Estimated chance of each side paying $1 at resolution</div>
+              <div class="panel-title">Fair values and model</div>
+              <div class="panel-subtitle">Estimated payout probability, adjusted for current inventory</div>
             </div>
             <span class="badge" id="modelStatus">Model waiting</span>
           </div>
@@ -279,18 +279,18 @@
             <div class="prob-card up">
               <div class="prob-head"><span class="side-label">UP</span><span class="tag">BINANCE MODEL</span></div>
               <div class="prob-value" id="upProbability">—</div>
-              <div class="prob-detail">Polymarket ask <strong id="upAsk">—</strong></div>
+              <div class="prob-detail">Polymarket bid/ask <strong id="upAsk">—</strong></div>
             </div>
             <div class="prob-card down">
               <div class="prob-head"><span class="side-label">DOWN</span><span class="tag">BINANCE MODEL</span></div>
               <div class="prob-value" id="downProbability">—</div>
-              <div class="prob-detail">Polymarket ask <strong id="downAsk">—</strong></div>
+              <div class="prob-detail">Polymarket bid/ask <strong id="downAsk">—</strong></div>
             </div>
           </div>
           <div class="decision">
-            <div class="decision-title">Current decision</div>
+            <div class="decision-title">Market maker status</div>
             <div class="decision-text" id="signalSide">Waiting for live inputs</div>
-            <div class="decision-reason" id="signalReason">No signal is evaluated until the two candle returns, Binance tick, and Polymarket book are fresh.</div>
+            <div class="decision-reason" id="signalReason">Quotes require a ready Binance model and fresh two-sided Polymarket books.</div>
           </div>
         </article>
       </section>
@@ -325,58 +325,58 @@
 
         <article class="panel">
           <div class="panel-head">
-            <div><div class="panel-title">UP and DOWN positions</div><div class="panel-subtitle">Each new qualifying signal adds 100 shares · fixed $0.90 limit sell</div></div>
-            <span class="badge" id="positionStatus">0 / 2 sides open</span>
+            <div><div class="panel-title">Inventory and maker quotes</div><div class="panel-subtitle">20-share quote clips · inventory capped at 100 per outcome</div></div>
+            <span class="badge" id="positionStatus">0 / 4 orders active</span>
           </div>
           <div class="position-pair">
             <div class="position-box">
               <div class="position-icon up" id="upPositionIcon">UP</div>
               <div class="position-main">
-                <strong id="upPositionTitle">UP side ready</strong>
-                <small id="upPositionDetail">Waiting for its independent entry signal</small>
+                <strong id="upPositionTitle">UP inventory · 0 shares</strong>
+                <small id="upPositionDetail">Waiting for fair value and fresh book</small>
               </div>
               <div class="position-pnl">
                 <strong id="upPositionPnl">—</strong>
-                <small id="upPositionTakeProfit">TP at $0.90</small>
+                <small id="upPositionQuotes">Bid — · Ask —</small>
               </div>
             </div>
             <div class="position-box">
               <div class="position-icon down" id="downPositionIcon">DOWN</div>
               <div class="position-main">
-                <strong id="downPositionTitle">DOWN side ready</strong>
-                <small id="downPositionDetail">Waiting for its independent entry signal</small>
+                <strong id="downPositionTitle">DOWN inventory · 0 shares</strong>
+                <small id="downPositionDetail">Waiting for fair value and fresh book</small>
               </div>
               <div class="position-pnl">
                 <strong id="downPositionPnl">—</strong>
-                <small id="downPositionTakeProfit">TP at $0.90</small>
+                <small id="downPositionQuotes">Bid — · Ask —</small>
               </div>
             </div>
           </div>
           <div class="feed-row"><span class="feed-label">Positions awaiting resolution</span><strong class="feed-value" id="pendingCount">—</strong></div>
-          <div class="feed-row"><span class="feed-label">Entries this window</span><strong class="feed-value" id="entryCounts">—</strong></div>
-          <div class="feed-row"><span class="feed-label">Buy fees</span><strong class="feed-value" id="fees">—</strong></div>
+          <div class="feed-row"><span class="feed-label">Active maker orders</span><strong class="feed-value" id="entryCounts">—</strong></div>
+          <div class="feed-row"><span class="feed-label">Modeled taker fees</span><strong class="feed-value" id="fees">—</strong></div>
           <div class="feed-row"><span class="feed-label">Estimated maker rebates</span><strong class="feed-value" id="makerRebate">—</strong></div>
         </article>
 
         <article class="panel">
           <div class="panel-head">
-            <div><div class="panel-title">Rules in effect</div><div class="panel-subtitle">This replaces the previous active bot</div></div>
-            <span class="badge">100-share base</span>
+            <div><div class="panel-title">Market-making rules</div><div class="panel-subtitle">Passive quotes · controlled inventory · paper fills only</div></div>
+            <span class="badge">20-share clips</span>
           </div>
           <div class="rules">
-            <div class="rule"><b>Signal</b>Two closed Binance 5m candles; no partial candle in volatility.</div>
-            <div class="rule"><b>Entry</b>Every fresh qualifying signal adds 100 shares, even if that side already has a position. Full visible ask depth is required at any price; first and same-side signals need 10¢ net model edge, while the first opposite-side entry may bypass it.</div>
-            <div class="rule"><b>Take-profit</b>After every add, replace the limit sell for all accumulated shares at $0.90. Count it filled when the fresh best bid reaches $0.90; do not require a bid-depth sweep or charge a sell fee.</div>
-            <div class="rule"><b>New signal</b>One add is allowed per qualifying signal cycle. The signal must stop qualifying and then qualify again before another 100-share add.</div>
-            <div class="rule"><b>Resolution</b>If a take-profit does not fill before the window ends, cancel it and hold that position for official resolution of its original market.</div>
-            <div class="rule"><b>Window independence</b>Each 5-minute window starts immediately, even if an older position awaits resolution.</div>
-            <div class="rule"><b>Execution</b>Paper-only. No wallet or real order is connected.</div>
+            <div class="rule"><b>Fair value</b>Binance BTC model uses the two latest completed 5-minute candles and the current window’s live price.</div>
+            <div class="rule"><b>Quotes</b>Place post-only simulated bids and inventory-backed asks for UP and DOWN, at least one tick from the opposing best price.</div>
+            <div class="rule"><b>Spread</b>Start at a 2¢ half-spread and widen with volatility, up to an 8¢ half-spread.</div>
+            <div class="rule"><b>Inventory</b>Quote 20 shares at a time; cap unresolved inventory at 100 shares per outcome. Skew prices to reduce the heavier side.</div>
+            <div class="rule"><b>Fill simulation</b>A book touch alone never fills. Require a fresh CLOB trade print from the opposite taker side at or through the limit after estimated queue volume is consumed.</div>
+            <div class="rule"><b>Window cutoff</b>Cancel resting quotes in the last 30 seconds. Remaining inventory waits for official resolution of its original market.</div>
+            <div class="rule"><b>Execution</b>Paper-only. No wallet or real order is connected; maker rebates shown are estimates.</div>
           </div>
         </article>
       </section>
 
       <div class="notice">
-        This is an experimental probability model, not risk-free arbitrage. A fixed $0.90 sell can be below an entry above $0.90; the maker rebate shown is an estimate, not a guaranteed live credit. Two-candle volatility can be noisy, and the official Polymarket result determines paper settlement for positions without a take-profit.
+        Market-making P&amp;L is not guaranteed: quotes can fill just before prices move against inventory, and fills may be partial. Public trade prints do not reveal your true queue position, so paper fills use a conservative queue buffer but remain estimates. Maker rebates are not guaranteed. Any inventory left at expiry is settled using the official Polymarket result.
       </div>
 
       <section class="grid two-col">
@@ -394,7 +394,7 @@
         </article>
         <article class="panel">
           <div class="panel-head">
-            <div><div class="panel-title">Activity</div><div class="panel-subtitle">Independent entries, take-profit fills, and official settlements</div></div>
+            <div><div class="panel-title">Activity</div><div class="panel-subtitle">Quote changes, maker fills, cancellations, and official settlements</div></div>
             <span class="badge" id="activityCount">0 events</span>
           </div>
           <div class="activity-list" id="activity"><div class="empty-row">Waiting for bot activity</div></div>
@@ -402,7 +402,7 @@
       </section>
 
       <footer class="footer">
-        Paper simulation only · Binance BTCUSDT aggregate-trade WebSocket · Polymarket CLOB quotes and official resolution · <span id="persistenceStatus">Ledger starting</span>
+        Paper simulation only · Binance BTCUSDT aggregate-trade WebSocket · Polymarket CLOB order book and trade feed · <span id="persistenceStatus">Ledger starting</span>
       </footer>
     </main>
     <script>
@@ -473,9 +473,9 @@
           return;
         }
         $("activity").innerHTML = rows.slice(0, 35).map((event) => {
-          const type = String(event.type || "").toLowerCase();
+          const type = String(event.type || event.event || "").toLowerCase();
           const kind = type.includes("resolved") || type.includes("settled") ? "resolve"
-            : type.includes("buy") || type.includes("take_profit") ? "trade" : "";
+            : type.includes("maker") || type.includes("buy") || type.includes("sell") ? "trade" : "";
           return `<div class="activity-item ${kind}">
             <div class="activity-dot"></div>
             <div><div class="activity-message">${escapeHtml(event.message || event.type || "Update")}</div>
@@ -489,6 +489,9 @@
         const model = state.model || {};
         const binance = state.binance || {};
         const quotes = state.quotes || {};
+        const fairValues = state.fairValues || {};
+        const makerQuotes = state.makerQuotes || {};
+        const inventory = state.inventory || {};
         const up = quotes.UP || {};
         const down = quotes.DOWN || {};
         const status = String(state.status || "WAITING").toUpperCase();
@@ -519,14 +522,12 @@
           ? `Tick age ${Math.max(0, Math.round(Number(binance.tickAgeMs)))} ms`
           : "Waiting for ticks");
         setText("modelStatus", model.ready ? "READY · 2 CLOSED CANDLES" : "MODEL WAITING");
-        setText("upProbability", percent(model.probabilityUp));
-        setText("downProbability", percent(model.probabilityDown));
-        setText("upAsk", contractPrice(up.bestAsk));
-        setText("downAsk", contractPrice(down.bestAsk));
-        setText("signalSide", state.signal?.blockedSide
-          ? `${state.signal.blockedSide} signal voided`
-          : state.signal?.side ? `${state.signal.side} signal` : "No trade signal");
-        setText("signalReason", state.signal?.reason || model.reason || "Waiting for inputs.");
+        setText("upProbability", percent(fairValues.UP ?? model.probabilityUp));
+        setText("downProbability", percent(fairValues.DOWN ?? model.probabilityDown));
+        setText("upAsk", `bid ${contractPrice(up.bestBid)} · ask ${contractPrice(up.bestAsk)}`);
+        setText("downAsk", `bid ${contractPrice(down.bestBid)} · ask ${contractPrice(down.bestAsk)}`);
+        setText("signalSide", state.marketMakerState?.status || "Waiting for quotes");
+        setText("signalReason", state.marketMakerState?.reason || state.signal?.reason || model.reason || "Waiting for inputs.");
         setText("clobStatus", `Polymarket ${String(state.websocket?.status || "waiting").toLowerCase()}`);
         setText("upAskBook", contractPrice(up.bestAsk));
         setText("upAskSize", Number(up.askSize || 0).toLocaleString());
@@ -538,29 +539,34 @@
         setText("downBidSize", Number(down.bidSize || 0).toLocaleString());
 
         const positionsBySide = state.positionsBySide || {};
-        const sideSignals = state.sideSignals || state.strategy?.sideSignals || {};
-        const entryCounts = state.sideEntryCountsThisWindow || state.strategy?.sideEntryCountsThisWindow || {};
-        let openSides = 0;
+        let activeOrders = 0;
         for (const side of ["UP", "DOWN"]) {
           const key = side.toLowerCase();
           const position = positionsBySide[side] || null;
-          const sideSignal = sideSignals[side] || {};
-          const entries = Number(entryCounts[side] || 0);
-          if (position) openSides += 1;
+          const makerQuote = makerQuotes[side] || {};
+          const sideInventory = inventory[side] || {};
+          const shares = Number(makerQuote.inventoryShares ?? sideInventory.shares ?? position?.shares ?? 0);
+          const maxShares = Number(makerQuote.maxInventoryShares ?? sideInventory.maxShares ?? state.strategy?.maxInventoryPerSide ?? 0);
+          const bidOrder = makerQuote.bid || null;
+          const askOrder = makerQuote.ask || null;
+          const bidActive = bidOrder && ["RESTING", "PARTIALLY_FILLED"].includes(bidOrder.status);
+          const askActive = askOrder && ["RESTING", "PARTIALLY_FILLED"].includes(askOrder.status);
+          if (bidActive) activeOrders += 1;
+          if (askActive) activeOrders += 1;
           setText(`${key}PositionIcon`, side);
-          setText(`${key}PositionTitle`, position ? `${side} position · ${position.shares} accumulated shares` : `${side} side ready`);
+          setText(`${key}PositionTitle`, `${side} inventory · ${shares}/${maxShares} shares`);
           setText(`${key}PositionDetail`, position
-            ? `Entry ${contractPrice(position.entryPrice)} · ${entries} ${entries === 1 ? "entry" : "entries"} this window${position.entryEdgeBypassed ? " · price-only opposite leg" : ""}`
-            : `${entries} entries · ${sideSignal.reason || "Waiting for a qualifying signal"}`);
+            ? `Fair ${percent(makerQuote.fairValue)} · average buy ${contractPrice(position.entryPrice)} · unresolved inventory counts toward cap`
+            : `Fair ${percent(makerQuote.fairValue)} · ${makerQuote.reason || "Waiting for fresh market data"}`);
           setText(`${key}PositionPnl`, position ? signedMoney(position.unrealizedPnl) : "—");
           $(`${key}PositionPnl`).className = pnlClass(position?.unrealizedPnl);
-          setText(`${key}PositionTakeProfit`, position
-            ? `TP ${contractPrice(position.takeProfitPrice)} · best bid ${contractPrice(position.markPrice)}`
-            : `TP ${contractPrice(state.strategy?.takeProfitPrice ?? 0.90)}`);
+          setText(`${key}PositionQuotes`, position
+            ? `Bid ${contractPrice(bidOrder?.price ?? makerQuote.bidPrice)} ${bidOrder?.status || makerQuote.bidStatus} · Ask ${contractPrice(askOrder?.price ?? makerQuote.askPrice)} ${askOrder?.status || makerQuote.askStatus}`
+            : `Bid ${contractPrice(bidOrder?.price ?? makerQuote.bidPrice)} ${bidOrder?.status || makerQuote.bidStatus} · Ask ${contractPrice(makerQuote.askPrice)} ${makerQuote.askStatus}`);
         }
-        setText("positionStatus", `${openSides} / 2 sides open`);
+        setText("positionStatus", `${activeOrders} / 4 orders active`);
         setText("pendingCount", Number(account.pendingResolutionPositions || 0).toLocaleString());
-        setText("entryCounts", `${Number(entryCounts.UP || 0)} UP · ${Number(entryCounts.DOWN || 0)} DOWN`);
+        setText("entryCounts", `${activeOrders} active · ${Number(state.makerStats?.ordersPlaced || 0)} placed total`);
         setText("fees", money(account.takerFees));
         setText("makerRebate", money(account.estimatedMakerRebate));
         setText("persistenceStatus", state.persistence?.status === "CONNECTED"

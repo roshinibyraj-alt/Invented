@@ -1,20 +1,22 @@
-# Invented BTC 5-minute mispricing paper bot
+# Invented BTC 5-minute market-maker paper bot
 
-This service runs a BTC 5-minute Binance mispricing strategy with a two-closed-candle volatility lookback. It is BTC-only, paper-only, and never submits live orders.
+This service runs a paper-only, inventory-aware market maker for Polymarket BTC 5-minute UP/DOWN markets. It uses Binance BTCUSDT ticks, the two most recent completed 5-minute candles, and Polymarket's public CLOB market stream. It does not submit live orders.
 
 ## Strategy
 
-- There is no fixed delay after a BTC 5-minute window starts. It can enter as soon as the Binance window open, a fresh model, and the Polymarket book are ready.
-- Binance BTCUSDT ticks and the current candle open feed a probability model. Volatility uses the two latest closed 5-minute candles.
-- UP and DOWN entries are evaluated independently from the Binance model. Either or both sides may be open in the same 5-minute window.
-- Every fresh qualifying signal adds **100 shares**, even if that side already has a position. One add is allowed per qualifying signal cycle; the edge must fall below its threshold before a later signal can add again. The first entry and later same-side signals require at least **$0.10 net model edge per share**; the first opposite-side entry may bypass that edge filter.
-- Entries require a complete 100-share visible ask sweep, but there is **no fixed entry-price ceiling**. The model-edge rule still applies where noted, and partial fills are not recorded.
-- After each add, replace the side’s resting limit sell for **all accumulated shares** at **$0.90**. In the paper simulation, a fresh best bid at or above $0.90 fills the whole position without checking bid depth or charging a sell fee. The configured maker rebate is an estimate, not a guaranteed credit.
-- Because the sell target is fixed, an entry above $0.90 can close below its cost and lose money. No take-profit before window end means the order is cancelled and the position waits for official resolution.
-- If a take-profit has not filled by window end, it is cancelled and the position remains tied to its original market through official resolution. New 5-minute windows start independently; unresolved older positions do not block them.
+- Estimate fair values for UP and DOWN from the Binance model.
+- Place one passive bid quote on each outcome. Once shares are held, place a passive ask against that inventory; the bot never shorts or sells shares it does not own.
+- Keep quotes at least one tick away from the visible opposing best price. Reprice only when the target moves enough to avoid unnecessary queue resets.
+- Start with a 2¢ half-spread and widen it with observed volatility, up to 8¢. Skew both fair values to encourage reducing the heavier UP/DOWN inventory.
+- Quote 20 shares at a time and cap unresolved inventory at 100 shares per outcome, including positions waiting for older windows to resolve. Resting buy orders reserve available demo cash.
+- Stop opening or repricing quotes in the final 30 seconds of a window. Cancel remaining quotes at the cutoff; any held shares wait for official resolution of their original market.
+- Paper fills require a fresh Polymarket `last_trade_price` event from the opposite taker side at or through the limit. At the exact limit, the simulated trade volume must clear the visible queue plus an extra queue buffer. A price touch or book update alone does not fill an order.
+- Maker orders pay no modeled taker fee. Any maker rebate is shown as an estimate only and is not treated as guaranteed.
+
+The public trade feed cannot reveal the bot's actual queue position. Queue-buffer fills are therefore an estimate, not a guaranteed exchange fill. A maker quote can fill just before the fair value moves against the acquired inventory; profits are not guaranteed.
 
 ## Dashboard and runtime
 
-The dashboard shows model probabilities, two-candle volatility, Binance stream status, Polymarket UP/DOWN quotes, each side’s open position and take-profit, entry counts, paper account totals, trades, and activity. Paper history is held in process memory and resets when Railway restarts.
+The dashboard shows fair values, Binance and Polymarket feed status, order-book prices, each outcome's working bid/ask, queue estimate, inventory, account totals, fills, cancellations, and settlements. The paper ledger is held in process memory and resets when Railway restarts.
 
-Run `npm test` to verify probability and volatility calculations, uncapped entry prices with full ask depth, signal-cycle accumulation, opposite-side edge bypass, aggregate $0.90 limit sells without depth sweeps or sell fees, maker-rebate estimates, resolution behavior, WebSocket subscriptions, and dashboard content.
+Run `npm test` for model, quote-safety, inventory cap, queue-aware trade-print fill, partial-fill, cancellation, settlement, WebSocket, and dashboard checks.

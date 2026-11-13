@@ -1,8 +1,8 @@
 {
-  "name": "invented-btc-mispricing-paper-bot",
+  "name": "invented-btc-market-maker-paper-bot",
   "version": "1.0.0",
   "private": true,
-  "description": "Paper-only BTC 5-minute Binance mispricing bot with independent UP/DOWN entries and take-profits.",
+  "description": "Paper-only, inventory-aware BTC 5-minute UP/DOWN market maker.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",

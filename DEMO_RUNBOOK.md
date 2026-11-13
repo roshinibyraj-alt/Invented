@@ -1,8 +1,9 @@
-# Opening-range breakout paper runbook
+# Paper market-maker runbook
 
-1. Keep the bot in demo mode. Live order execution is not available.
-2. For each aligned 5-minute BTC and ETH window, wait until two one-minute Binance candles have closed.
-3. A valid setup requires two same-direction candles, a second-candle close beyond the first candle's high/low, and a second-candle body at least 1.25 times the prior 20-candle median body.
-4. From 2:02 through 3:00, enter only if the signaled-side ask is $0.35–$0.65, the spread is at most $0.04, and the quote is fresh. Size each asset to at most $15 total debit including fees.
-5. Require full visible ask depth for the complete risk-sized order at or below $0.65. Do not record partial fills, add to positions, martingale, or sell during the window.
-6. Hold filled shares for confirmed resolution of their exact original market. Demo account state is held in process memory and resets when the Railway service restarts.
+1. The bot is paper-only. It sends no wallet or live order instructions.
+2. It calculates UP/DOWN fair values from the latest Binance BTCUSDT tick, the current 5-minute window open, and two completed 5-minute candles.
+3. It places passive 20-share bid quotes on both outcome tokens, capped at 100 unresolved shares per outcome. As inventory is acquired, it posts passive sell quotes only for shares it owns.
+4. Quote prices stay at least one tick from the opposing visible best price. Volatility widens the spread; inventory imbalance skews the fair values to reduce the heavy side.
+5. A book touch is not a fill. Paper fills require a fresh public trade print from the opposite taker side at or through the order price, after the estimated queue ahead is cleared.
+6. Quotes stop and are cancelled during the final 30 seconds of the window. Remaining inventory is held for confirmed resolution of its original market.
+7. The dashboard reports estimated maker rebates, not guaranteed credits. Public data does not reveal actual queue priority, so simulated fills remain estimates.
