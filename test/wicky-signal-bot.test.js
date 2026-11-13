@@ -129,8 +129,8 @@ test('snapshot exposes independent 5-minute BTC and ETH signals without price fi
 test('service wrapper publishes only the replacement BTC mispricing strategy', () => {
   const multi = new MultiBot();
   const snapshot = multi.snapshot();
-  assert.equal(multi.bot.strategyId, 'btc-5m-binance-mispricing-2candle-flip');
-  assert.equal(snapshot.strategy.id, 'btc-5m-binance-mispricing-2candle-flip');
+  assert.equal(multi.bot.strategyId, 'btc-5m-binance-mispricing-2candle-dual-tp');
+  assert.equal(snapshot.strategy.id, 'btc-5m-binance-mispricing-2candle-dual-tp');
   assert.equal(snapshot.strategy.timeframe, '5m');
   assert.equal(snapshot.strategy.baseShares, 100);
   assert.equal(snapshot.strategy.execution, 'PAPER ONLY');

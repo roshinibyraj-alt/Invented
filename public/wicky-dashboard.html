@@ -129,6 +129,7 @@
         display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 14px;
         padding: 15px; border: 1px solid var(--line); border-radius: 14px; background: rgba(10, 16, 32, .55);
       }
+      .position-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
       .position-icon { display: grid; place-items: center; width: 44px; height: 44px; border-radius: 14px; font-weight: 900; }
       .position-icon.up { color: #071b17; background: var(--green); }
       .position-icon.down { color: #2b0d16; background: var(--red); }
@@ -180,6 +181,7 @@
         .three-col { grid-template-columns: 1fr; }
         .candles { grid-template-columns: 1fr; }
         .rules { grid-template-columns: 1fr; }
+        .position-pair { grid-template-columns: 1fr; }
         .position-box { grid-template-columns: auto 1fr; }
         .position-pnl { grid-column: 2; text-align: left; }
       }
@@ -209,8 +211,8 @@
       <section class="hero" aria-labelledby="heroTitle">
         <div>
           <div class="eyebrow">Binance model × Polymarket 5-minute BTC</div>
-          <h2 id="heroTitle">Trade only when estimated probability beats the full ask sweep.</h2>
-          <p>The bot estimates UP and DOWN probabilities from the Binance BTCUSDT price, time left, and exactly three completed 5-minute candles. It uses visible Polymarket order-book depth and fees before entering.</p>
+          <h2 id="heroTitle">Trade UP and DOWN independently when their asks are below $0.50.</h2>
+          <p>The bot uses the Binance BTCUSDT model and fresh Polymarket order books. Each side can hold one position at a time, with its own 50% take-profit and re-entry cycle.</p>
         </div>
         <div class="hero-state">
           <span class="badge" id="windowBadge">Window waiting</span>
@@ -323,22 +325,35 @@
 
         <article class="panel">
           <div class="panel-head">
-            <div><div class="panel-title">Current position</div><div class="panel-subtitle">No averaging or partial buys</div></div>
-            <span class="badge" id="positionStatus">Flat</span>
+            <div><div class="panel-title">UP and DOWN positions</div><div class="panel-subtitle">One open position per side · re-arm after take-profit</div></div>
+            <span class="badge" id="positionStatus">0 / 2 sides open</span>
           </div>
-          <div class="position-box">
-            <div class="position-icon empty" id="positionIcon">—</div>
-            <div class="position-main">
-              <strong id="positionTitle">No open position</strong>
-              <small id="positionDetail">Waiting for a qualifying full-size entry</small>
+          <div class="position-pair">
+            <div class="position-box">
+              <div class="position-icon up" id="upPositionIcon">UP</div>
+              <div class="position-main">
+                <strong id="upPositionTitle">UP side ready</strong>
+                <small id="upPositionDetail">Waiting for its independent entry signal</small>
+              </div>
+              <div class="position-pnl">
+                <strong id="upPositionPnl">—</strong>
+                <small id="upPositionTakeProfit">TP at 1.5× entry</small>
+              </div>
             </div>
-            <div class="position-pnl">
-              <strong id="positionPnl">—</strong>
-              <small id="positionMark">unrealized at best bid</small>
+            <div class="position-box">
+              <div class="position-icon down" id="downPositionIcon">DOWN</div>
+              <div class="position-main">
+                <strong id="downPositionTitle">DOWN side ready</strong>
+                <small id="downPositionDetail">Waiting for its independent entry signal</small>
+              </div>
+              <div class="position-pnl">
+                <strong id="downPositionPnl">—</strong>
+                <small id="downPositionTakeProfit">TP at 1.5× entry</small>
+              </div>
             </div>
           </div>
           <div class="feed-row"><span class="feed-label">Positions awaiting resolution</span><strong class="feed-value" id="pendingCount">—</strong></div>
-          <div class="feed-row"><span class="feed-label">Flip confirmation / count</span><strong class="feed-value" id="flipStatus">—</strong></div>
+          <div class="feed-row"><span class="feed-label">Entries this window</span><strong class="feed-value" id="entryCounts">—</strong></div>
           <div class="feed-row"><span class="feed-label">Fees recorded</span><strong class="feed-value" id="fees">—</strong></div>
         </article>
 
@@ -349,10 +364,11 @@
           </div>
           <div class="rules">
             <div class="rule"><b>Signal</b>Two closed Binance 5m candles; no partial candle in volatility.</div>
-            <div class="rule"><b>Entry</b>Buy 100 shares immediately when the Binance window open, fresh model, full visible asks, and fees show at least 5¢ net edge per share.</div>
-            <div class="rule"><b>Profitable flip</b>Sell all shares only if the full visible bid sweep is profitable after fees and the opposite side has at least 10¢ net edge/share. Confirm with two fresh Binance updates 500–2,000 ms apart; allow one flip per window.</div>
-            <div class="rule"><b>Resolution</b>Without an eligible profitable flip, hold until official resolution of that exact Polymarket market.</div>
-            <div class="rule"><b>Window independence</b>Each 5-minute window starts immediately, even if an older position awaits resolution. No take-profit limit or post-exit cooldown is used.</div>
+            <div class="rule"><b>Entry</b>UP and DOWN qualify independently. Buy 100 shares only when the full visible ask sweep stays below $0.50 and net model edge is at least 5¢ per share.</div>
+            <div class="rule"><b>Take-profit</b>Place a resting limit sell at 1.5× that position’s average entry price. The target is before exit fees; a full-position fill is required.</div>
+            <div class="rule"><b>Re-entry</b>After a side’s take-profit fills, only that side re-arms. It can enter again when a fresh signal qualifies; both sides may be open together.</div>
+            <div class="rule"><b>Resolution</b>If a take-profit does not fill before the window ends, cancel it and hold that position for official resolution of its original market.</div>
+            <div class="rule"><b>Window independence</b>Each 5-minute window starts immediately, even if an older position awaits resolution.</div>
             <div class="rule"><b>Execution</b>Paper-only. No wallet or real order is connected.</div>
           </div>
         </article>
@@ -377,7 +393,7 @@
         </article>
         <article class="panel">
           <div class="panel-head">
-            <div><div class="panel-title">Activity</div><div class="panel-subtitle">Entries, profitable flips, and official settlements</div></div>
+            <div><div class="panel-title">Activity</div><div class="panel-subtitle">Independent entries, take-profit fills, and official settlements</div></div>
             <span class="badge" id="activityCount">0 events</span>
           </div>
           <div class="activity-list" id="activity"><div class="empty-row">Waiting for bot activity</div></div>
@@ -457,7 +473,7 @@
         $("activity").innerHTML = rows.slice(0, 35).map((event) => {
           const type = String(event.type || "").toLowerCase();
           const kind = type.includes("resolved") || type.includes("settled") ? "resolve"
-            : type.includes("buy") || type.includes("flip") ? "trade" : "";
+            : type.includes("buy") || type.includes("take_profit") ? "trade" : "";
           return `<div class="activity-item ${kind}">
             <div class="activity-dot"></div>
             <div><div class="activity-message">${escapeHtml(event.message || event.type || "Update")}</div>
@@ -519,21 +535,30 @@
         setText("downBidBook", contractPrice(down.bestBid));
         setText("downBidSize", Number(down.bidSize || 0).toLocaleString());
 
-        const position = state.position;
-        const icon = $("positionIcon");
-        icon.className = `position-icon ${position ? String(position.side).toLowerCase() : "empty"}`;
-        setText("positionIcon", position ? position.side : "—");
-        setText("positionStatus", position ? `${position.side} · ${position.shares} shares` : "Flat");
-        setText("positionTitle", position ? `${position.side} position · ${position.shares} shares` : "No open position");
-        setText("positionDetail", position
-          ? `Entry ${contractPrice(position.entryPrice)} · cost ${money(position.totalCost)} · flips allowed ${Number(state.strategy?.maximumFlipsPerWindow || 1)}`
-          : "Waiting for a qualifying full-size entry");
-        setText("positionPnl", position ? signedMoney(position.unrealizedPnl) : "—");
-        $("positionPnl").className = pnlClass(position?.unrealizedPnl);
-        setText("positionMark", position ? `best bid ${contractPrice(position.markPrice)}` : "unrealized at best bid");
+        const positionsBySide = state.positionsBySide || {};
+        const sideSignals = state.sideSignals || state.strategy?.sideSignals || {};
+        const entryCounts = state.sideEntryCountsThisWindow || state.strategy?.sideEntryCountsThisWindow || {};
+        let openSides = 0;
+        for (const side of ["UP", "DOWN"]) {
+          const key = side.toLowerCase();
+          const position = positionsBySide[side] || null;
+          const sideSignal = sideSignals[side] || {};
+          const entries = Number(entryCounts[side] || 0);
+          if (position) openSides += 1;
+          setText(`${key}PositionIcon`, side);
+          setText(`${key}PositionTitle`, position ? `${side} position · ${position.shares} shares` : `${side} side ready`);
+          setText(`${key}PositionDetail`, position
+            ? `Entry ${contractPrice(position.entryPrice)} · ${entries} ${entries === 1 ? "entry" : "entries"} this window`
+            : `${entries} entries · ${sideSignal.reason || "Waiting for a qualifying signal"}`);
+          setText(`${key}PositionPnl`, position ? signedMoney(position.unrealizedPnl) : "—");
+          $(`${key}PositionPnl`).className = pnlClass(position?.unrealizedPnl);
+          setText(`${key}PositionTakeProfit`, position
+            ? `TP ${contractPrice(position.takeProfitPrice)} · best bid ${contractPrice(position.markPrice)}`
+            : `TP ${Number(state.strategy?.takeProfitMultiplier || 1.5).toFixed(1)}× entry`);
+        }
+        setText("positionStatus", `${openSides} / 2 sides open`);
         setText("pendingCount", Number(account.pendingResolutionPositions || 0).toLocaleString());
-        const flipConfirmation = state.strategy?.flipConfirmation || {};
-        setText("flipStatus", `${Number(flipConfirmation.count || 0)}/2 · ${Number(state.strategy?.flipsThisWindow || 0)}/1 this window`);
+        setText("entryCounts", `${Number(entryCounts.UP || 0)} UP · ${Number(entryCounts.DOWN || 0)} DOWN`);
         setText("fees", money(account.takerFees));
         setText("persistenceStatus", state.persistence?.status === "CONNECTED"
           ? "paper ledger saved" : `ledger ${String(state.persistence?.status || "starting").toLowerCase()}`);
