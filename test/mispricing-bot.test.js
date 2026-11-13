@@ -189,6 +189,54 @@ test('entry does not sweep asks at or above 0.50 to complete a full position', a
   assert.equal(bot.orders.length, 0);
 });
 
+test('first entry still requires the minimum net model edge', async () => {
+  const now = WINDOW_START;
+  const feed = makeFeed(() => now);
+  const bot = makeBot({ getNow: () => now, feed });
+  setPrice(feed, 100);
+  for (const side of ['UP', 'DOWN']) {
+    setBook(bot, side, {
+      asks: [{ price: 0.49, size: 100 }],
+      bids: [{ price: 0.1, size: 100 }],
+    }, now);
+  }
+
+  assert.equal(await bot.processStrategyEntry(now), false);
+  assert.equal(bot.positions.length, 0);
+  assert.equal(bot.sideSignals.UP.status, 'EDGE_TOO_LOW');
+  assert.equal(bot.sideSignals.DOWN.status, 'EDGE_TOO_LOW');
+});
+
+test('first opposite-side entry bypasses edge but keeps the strict price and depth gates', async () => {
+  let now = WINDOW_START;
+  const feed = makeFeed(() => now);
+  const bot = makeBot({ getNow: () => now, feed });
+  setPrice(feed, 101);
+  setBook(bot, 'UP', { asks: [{ price: 0.4, size: 100 }], bids: [{ price: 0.1, size: 100 }] }, now);
+  setBook(bot, 'DOWN', { asks: [{ price: 0.8, size: 100 }], bids: [{ price: 0.1, size: 100 }] }, now);
+  assert.equal(await bot.processStrategyEntry(now), true);
+  assert.equal(bot.positions.length, 1);
+  assert.equal(bot.positions[0].side, 'UP');
+
+  now += 500;
+  setBook(bot, 'DOWN', { asks: [{ price: 0.5, size: 100 }], bids: [{ price: 0.1, size: 100 }] }, now);
+  assert.equal(await bot.processStrategyEntry(now), false);
+  assert.equal(bot.positions.length, 1);
+  assert.equal(bot.sideSignals.DOWN.status, 'ASK_AT_OR_ABOVE_LIMIT');
+
+  now += 500;
+  setBook(bot, 'DOWN', { asks: [{ price: 0.49, size: 100 }], bids: [{ price: 0.1, size: 100 }] }, now);
+  assert.equal(await bot.processStrategyEntry(now), true);
+  const downPosition = bot.positions.find((position) => position.side === 'DOWN');
+  assert.equal(downPosition.status, 'OPEN');
+  assert.equal(downPosition.shares, 100);
+  assert.equal(downPosition.entryEdgeBypassed, true);
+  assert.ok(downPosition.entryEdgePerShare < config.MIN_NET_EDGE_PER_SHARE);
+  assert.equal(downPosition.takeProfitPrice, 0.735);
+  const downEntryOrder = bot.orders.find((order) => order.positionId === downPosition.id && order.action === 'BUY');
+  assert.equal(downEntryOrder.edgeBypassed, true);
+});
+
 test('take-profit waits for the full position to sell at or above its target', async () => {
   let now = WINDOW_START;
   const bot = makeBot({ getNow: () => now });
@@ -295,11 +343,32 @@ test('same side re-arms after take-profit while the opposite side remains indepe
   assert.equal(bot.positions.filter((position) => position.status === 'OPEN').length, 2);
 });
 
+test('same-side re-entry keeps the model-edge requirement after take-profit', async () => {
+  let now = WINDOW_START;
+  const feed = makeFeed(() => now);
+  const bot = makeBot({ getNow: () => now, feed });
+  setBook(bot, 'DOWN', { asks: [{ price: 0.8, size: 100 }], bids: [{ price: 0.1, size: 100 }] }, now);
+  assert.equal(await bot.processStrategyEntry(now), true);
+  const original = bot.positions[0];
+
+  now += 500;
+  setPrice(feed, 100);
+  setBook(bot, 'UP', { asks: [{ price: 0.49, size: 100 }], bids: [{ price: 0.6, size: 100 }] }, now);
+  setBook(bot, 'DOWN', { asks: [{ price: 0.8, size: 100 }], bids: [{ price: 0.1, size: 100 }] }, now);
+  assert.equal(await bot.processStrategyEntry(now), true);
+  assert.equal(original.status, 'SETTLED_EXIT');
+  assert.equal(bot.sideEntryCountsThisWindow.UP, 1);
+  assert.equal(bot.positions.filter((position) => position.side === 'UP' && position.status === 'OPEN').length, 0);
+  assert.equal(bot.sideSignals.UP.status, 'EDGE_TOO_LOW');
+});
+
 test('strategy snapshot reports dual independent entries and per-position take-profit rules', () => {
   const bot = makeBot();
   const state = bot.snapshot();
   assert.equal(state.strategy.volatilityLookbackCandles, 2);
+  assert.equal(state.strategy.version, 'btc-5m-binance-mispricing-2candle-v4');
   assert.equal(state.strategy.minimumNetEdgePerShare, 0.05);
+  assert.equal(state.strategy.oppositeLegBypassesModelEdge, true);
   assert.equal(state.strategy.entryPriceCeilingExclusive, 0.5);
   assert.equal(state.strategy.takeProfitMultiplier, 1.5);
   assert.equal(state.strategy.maximumOpenPositionsPerWindow, 2);

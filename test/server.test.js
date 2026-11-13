@@ -52,8 +52,10 @@ test('dashboard explains independent entries and take-profit rules', async t => 
   const html = await response.text();
   assert.equal(response.status, 200);
   assert.match(html, /Invented · BTCUSDT Mispricing Paper Bot/);
-  assert.match(html, /UP and DOWN qualify independently/i);
-  assert.match(html, /full visible ask sweep stays below \$0\.50/i);
+  assert.match(html, /Trade UP and DOWN independently/i);
+  assert.match(html, /first entry and same-side re-entries need 5¢ net model edge/i);
+  assert.match(html, /first opposite-side entry may ignore edge/i);
+  assert.match(html, /full 100-share ask sweep below \$0\.50/i);
   assert.match(html, /resting limit sell at 1\.5× that position’s average entry price/i);
   assert.match(html, /After a side’s take-profit fills, only that side re-arms/i);
   assert.match(html, /hold that position for official resolution of its original market/i);

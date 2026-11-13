@@ -364,7 +364,7 @@
           </div>
           <div class="rules">
             <div class="rule"><b>Signal</b>Two closed Binance 5m candles; no partial candle in volatility.</div>
-            <div class="rule"><b>Entry</b>UP and DOWN qualify independently. Buy 100 shares only when the full visible ask sweep stays below $0.50 and net model edge is at least 5¢ per share.</div>
+            <div class="rule"><b>Entry</b>The first entry and same-side re-entries need 5¢ net model edge. The first opposite-side entry may ignore edge, but still needs a full 100-share ask sweep below $0.50.</div>
             <div class="rule"><b>Take-profit</b>Place a resting limit sell at 1.5× that position’s average entry price. The target is before exit fees; a full-position fill is required.</div>
             <div class="rule"><b>Re-entry</b>After a side’s take-profit fills, only that side re-arms. It can enter again when a fresh signal qualifies; both sides may be open together.</div>
             <div class="rule"><b>Resolution</b>If a take-profit does not fill before the window ends, cancel it and hold that position for official resolution of its original market.</div>
@@ -548,7 +548,7 @@
           setText(`${key}PositionIcon`, side);
           setText(`${key}PositionTitle`, position ? `${side} position · ${position.shares} shares` : `${side} side ready`);
           setText(`${key}PositionDetail`, position
-            ? `Entry ${contractPrice(position.entryPrice)} · ${entries} ${entries === 1 ? "entry" : "entries"} this window`
+            ? `Entry ${contractPrice(position.entryPrice)} · ${entries} ${entries === 1 ? "entry" : "entries"} this window${position.entryEdgeBypassed ? " · price-only opposite leg" : ""}`
             : `${entries} entries · ${sideSignal.reason || "Waiting for a qualifying signal"}`);
           setText(`${key}PositionPnl`, position ? signedMoney(position.unrealizedPnl) : "—");
           $(`${key}PositionPnl`).className = pnlClass(position?.unrealizedPnl);
