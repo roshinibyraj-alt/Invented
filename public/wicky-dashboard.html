@@ -211,8 +211,8 @@
       <section class="hero" aria-labelledby="heroTitle">
         <div>
           <div class="eyebrow">Binance model × Polymarket 5-minute BTC</div>
-          <h2 id="heroTitle">Trade UP and DOWN independently when their asks are at or below $0.66.</h2>
-          <p>The bot uses the Binance BTCUSDT model and fresh Polymarket order books. Each side can hold one position at a time, with its own 50% take-profit and re-entry cycle.</p>
+          <h2 id="heroTitle">Every fresh signal can add 100 shares; each side sells its full position at $0.90.</h2>
+          <p>The bot uses the Binance BTCUSDT model and fresh Polymarket order books. There is no fixed entry-price ceiling; each side accumulates shares independently.</p>
         </div>
         <div class="hero-state">
           <span class="badge" id="windowBadge">Window waiting</span>
@@ -230,7 +230,7 @@
         <article class="metric">
           <div class="metric-label">Realized P&amp;L</div>
           <div class="metric-value" id="realizedPnl">—</div>
-          <div class="metric-sub">after recorded trading fees</div>
+          <div class="metric-sub">after buy fees and estimated sell rebates</div>
         </article>
         <article class="metric">
           <div class="metric-label">Paper cash</div>
@@ -325,7 +325,7 @@
 
         <article class="panel">
           <div class="panel-head">
-            <div><div class="panel-title">UP and DOWN positions</div><div class="panel-subtitle">One open position per side · re-arm after take-profit</div></div>
+            <div><div class="panel-title">UP and DOWN positions</div><div class="panel-subtitle">Each new qualifying signal adds 100 shares · fixed $0.90 limit sell</div></div>
             <span class="badge" id="positionStatus">0 / 2 sides open</span>
           </div>
           <div class="position-pair">
@@ -337,7 +337,7 @@
               </div>
               <div class="position-pnl">
                 <strong id="upPositionPnl">—</strong>
-                <small id="upPositionTakeProfit">TP at 1.5× entry</small>
+                <small id="upPositionTakeProfit">TP at $0.90</small>
               </div>
             </div>
             <div class="position-box">
@@ -348,13 +348,14 @@
               </div>
               <div class="position-pnl">
                 <strong id="downPositionPnl">—</strong>
-                <small id="downPositionTakeProfit">TP at 1.5× entry</small>
+                <small id="downPositionTakeProfit">TP at $0.90</small>
               </div>
             </div>
           </div>
           <div class="feed-row"><span class="feed-label">Positions awaiting resolution</span><strong class="feed-value" id="pendingCount">—</strong></div>
           <div class="feed-row"><span class="feed-label">Entries this window</span><strong class="feed-value" id="entryCounts">—</strong></div>
-          <div class="feed-row"><span class="feed-label">Fees recorded</span><strong class="feed-value" id="fees">—</strong></div>
+          <div class="feed-row"><span class="feed-label">Buy fees</span><strong class="feed-value" id="fees">—</strong></div>
+          <div class="feed-row"><span class="feed-label">Estimated maker rebates</span><strong class="feed-value" id="makerRebate">—</strong></div>
         </article>
 
         <article class="panel">
@@ -364,9 +365,9 @@
           </div>
           <div class="rules">
             <div class="rule"><b>Signal</b>Two closed Binance 5m candles; no partial candle in volatility.</div>
-            <div class="rule"><b>Entry</b>Every entry needs a complete 100-share ask sweep at or below $0.66. The first entry and same-side re-entries need 5¢ net model edge; the first opposite-side entry may ignore edge.</div>
-            <div class="rule"><b>Take-profit</b>Place a resting limit sell at 1.5× that position’s average entry price. The target is before exit fees; a full-position fill is required.</div>
-            <div class="rule"><b>Re-entry</b>After a side’s take-profit fills, only that side re-arms. It can enter again when a fresh signal qualifies; both sides may be open together.</div>
+            <div class="rule"><b>Entry</b>Every fresh qualifying signal adds 100 shares, even if that side already has a position. Full visible ask depth is required at any price; first and same-side signals need 5¢ net model edge, while the first opposite-side entry may bypass it.</div>
+            <div class="rule"><b>Take-profit</b>After every add, replace the limit sell for all accumulated shares at $0.90. Count it filled when the fresh best bid reaches $0.90; do not require a bid-depth sweep or charge a sell fee.</div>
+            <div class="rule"><b>New signal</b>One add is allowed per qualifying signal cycle. The signal must stop qualifying and then qualify again before another 100-share add.</div>
             <div class="rule"><b>Resolution</b>If a take-profit does not fill before the window ends, cancel it and hold that position for official resolution of its original market.</div>
             <div class="rule"><b>Window independence</b>Each 5-minute window starts immediately, even if an older position awaits resolution.</div>
             <div class="rule"><b>Execution</b>Paper-only. No wallet or real order is connected.</div>
@@ -375,7 +376,7 @@
       </section>
 
       <div class="notice">
-        This is an experimental probability model, not risk-free arbitrage. Volatility estimated from only two candles can be noisy, Binance prices may differ from Polymarket’s settlement reference, and the official Polymarket result determines paper settlement.
+        This is an experimental probability model, not risk-free arbitrage. A fixed $0.90 sell can be below an entry above $0.90; the maker rebate shown is an estimate, not a guaranteed live credit. Two-candle volatility can be noisy, and the official Polymarket result determines paper settlement for positions without a take-profit.
       </div>
 
       <section class="grid two-col">
@@ -386,8 +387,8 @@
           </div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>Time</th><th>Side</th><th>Shares</th><th>Entry</th><th>Fees</th><th>Status</th><th>P&amp;L</th></tr></thead>
-              <tbody id="recentTrades"><tr><td class="empty-row" colspan="7">Waiting for the first trade</td></tr></tbody>
+              <thead><tr><th>Time</th><th>Side</th><th>Shares</th><th>Entry</th><th>Buy fees</th><th>Est. rebate</th><th>Status</th><th>P&amp;L</th></tr></thead>
+              <tbody id="recentTrades"><tr><td class="empty-row" colspan="8">Waiting for the first trade</td></tr></tbody>
             </table>
           </div>
         </article>
@@ -445,7 +446,7 @@
         const rows = Array.isArray(trades) ? trades : [];
         setText("tradeHistoryCount", `${Number(total || rows.length)} records`);
         if (!rows.length) {
-          $("recentTrades").innerHTML = `<tr><td class="empty-row" colspan="7">Waiting for the first trade</td></tr>`;
+          $("recentTrades").innerHTML = `<tr><td class="empty-row" colspan="8">Waiting for the first trade</td></tr>`;
           return;
         }
         $("recentTrades").innerHTML = rows.slice(0, 30).map((trade) => {
@@ -457,6 +458,7 @@
             <td>${Number(trade.shares || 0)}</td>
             <td>${contractPrice(trade.entryPrice)}</td>
             <td>${money(trade.fees || 0)}</td>
+            <td>${money(trade.estimatedMakerRebate || 0)}</td>
             <td><span class="tag ${outcomeClass}">${escapeHtml(trade.status || "—")}</span></td>
             <td class="${pnlClass(pnl)}">${pnl == null ? "—" : signedMoney(pnl)}</td>
           </tr>`;
@@ -546,7 +548,7 @@
           const entries = Number(entryCounts[side] || 0);
           if (position) openSides += 1;
           setText(`${key}PositionIcon`, side);
-          setText(`${key}PositionTitle`, position ? `${side} position · ${position.shares} shares` : `${side} side ready`);
+          setText(`${key}PositionTitle`, position ? `${side} position · ${position.shares} accumulated shares` : `${side} side ready`);
           setText(`${key}PositionDetail`, position
             ? `Entry ${contractPrice(position.entryPrice)} · ${entries} ${entries === 1 ? "entry" : "entries"} this window${position.entryEdgeBypassed ? " · price-only opposite leg" : ""}`
             : `${entries} entries · ${sideSignal.reason || "Waiting for a qualifying signal"}`);
@@ -554,12 +556,13 @@
           $(`${key}PositionPnl`).className = pnlClass(position?.unrealizedPnl);
           setText(`${key}PositionTakeProfit`, position
             ? `TP ${contractPrice(position.takeProfitPrice)} · best bid ${contractPrice(position.markPrice)}`
-            : `TP ${Number(state.strategy?.takeProfitMultiplier || 1.5).toFixed(1)}× entry`);
+            : `TP ${contractPrice(state.strategy?.takeProfitPrice ?? 0.90)}`);
         }
         setText("positionStatus", `${openSides} / 2 sides open`);
         setText("pendingCount", Number(account.pendingResolutionPositions || 0).toLocaleString());
         setText("entryCounts", `${Number(entryCounts.UP || 0)} UP · ${Number(entryCounts.DOWN || 0)} DOWN`);
         setText("fees", money(account.takerFees));
+        setText("makerRebate", money(account.estimatedMakerRebate));
         setText("persistenceStatus", state.persistence?.status === "CONNECTED"
           ? "paper ledger saved" : `ledger ${String(state.persistence?.status || "starting").toLowerCase()}`);
         renderCandles(model.volatilityCandles);

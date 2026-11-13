@@ -5,7 +5,7 @@ const WickBot = require('./wick-bot');
 const BinanceTickFeed = require('./binance-tick-feed');
 const defaultMarketData = require('./wick-market-data');
 
-const { takerFeeFor } = WickBot._test;
+const { takerFeeFor, makerRebateFor } = WickBot._test;
 const SECONDS_PER_WINDOW = config.WINDOW_MS_5M / 1000;
 const EPSILON = 1e-8;
 
@@ -106,8 +106,7 @@ class MispricingBot extends WickBot {
         sharesPerSide: config.ENTRY_SHARES,
         entryDelayMs: config.ENTRY_DELAY_MS,
         minimumNetEdgePerShare: config.MIN_NET_EDGE_PER_SHARE,
-        maximumEntryPrice: config.ENTRY_MAX_PRICE,
-        takeProfitMultiplier: config.TAKE_PROFIT_MULTIPLIER,
+        takeProfitPrice: config.TAKE_PROFIT_PRICE,
       },
       marketData,
       now,
@@ -121,6 +120,7 @@ class MispricingBot extends WickBot {
     this.strategyWindowStart = null;
     this.entryTriggeredThisWindow = false;
     this.sideEntryCountsThisWindow = { UP: 0, DOWN: 0 };
+    this.signalConsumed = { UP: false, DOWN: false };
     this.sideSignals = {
       UP: { status: 'WAITING', reason: 'Waiting for a qualifying UP signal.' },
       DOWN: { status: 'WAITING', reason: 'Waiting for a qualifying DOWN signal.' },
@@ -471,10 +471,7 @@ class MispricingBot extends WickBot {
   }
 
   buildEntryCandidate(side, probability, market, now) {
-    const execution = this.sweep(side, 'asks', config.ENTRY_SHARES, {
-      now,
-      maximumPrice: config.ENTRY_MAX_PRICE,
-    });
+    const execution = this.sweep(side, 'asks', config.ENTRY_SHARES, { now });
     if (!execution?.complete || !(execution.gross > 0)) return null;
     const allInCost = execution.totalCost;
     const expectedEdgePerShare = (probability * config.ENTRY_SHARES - allInCost) / config.ENTRY_SHARES;
@@ -500,6 +497,7 @@ class MispricingBot extends WickBot {
       this.strategyWindowStart = windowStart;
       this.entryTriggeredThisWindow = false;
       this.sideEntryCountsThisWindow = { UP: 0, DOWN: 0 };
+      this.signalConsumed = { UP: false, DOWN: false };
     }
 
     this.sideSignals = { UP: null, DOWN: null };
@@ -530,30 +528,11 @@ class MispricingBot extends WickBot {
       ['UP', this.model.probabilityUp],
       ['DOWN', this.model.probabilityDown],
     ]) {
-      if (this.hasOpenPosition(side, windowStart)) {
-        if (!this.sideSignals[side]) {
-          const position = this.getOpenPosition(side, windowStart);
-          this.sideSignals[side] = {
-            status: 'OPEN',
-            reason: `${side} position is open with take-profit at $${position.takeProfitPrice.toFixed(3)}.`,
-            positionId: position.id,
-          };
-        }
-        continue;
-      }
-
       const quote = this.getFreshQuote(side, now);
       if (!quote) {
         this.sideSignals[side] = {
           status: 'WAITING_FOR_FRESH_BOOK',
-          reason: 'Waiting for a fresh Polymarket ask and full visible depth.',
-        };
-        continue;
-      }
-      if (Number(quote.bestAsk) > config.ENTRY_MAX_PRICE + EPSILON) {
-        this.sideSignals[side] = {
-          status: 'ASK_AT_OR_ABOVE_LIMIT',
-          reason: `Waiting for the ${side} ask to be at or below $${config.ENTRY_MAX_PRICE.toFixed(2)}.`,
+          reason: 'Waiting for a fresh Polymarket ask and full 100-share visible depth.',
         };
         continue;
       }
@@ -562,7 +541,7 @@ class MispricingBot extends WickBot {
       if (!candidate) {
         this.sideSignals[side] = {
           status: 'WAITING_FOR_FULL_DEPTH',
-          reason: `Waiting for a complete ${config.ENTRY_SHARES}-share ask sweep at or below $${config.ENTRY_MAX_PRICE.toFixed(2)}.`,
+          reason: `Waiting for a complete ${config.ENTRY_SHARES}-share visible ask sweep; there is no fixed entry price ceiling.`,
         };
         continue;
       }
@@ -573,6 +552,7 @@ class MispricingBot extends WickBot {
       const edgeBypassed = isFirstOppositeEntry
         && candidate.expectedEdgePerShare < config.MIN_NET_EDGE_PER_SHARE;
       if (candidate.expectedEdgePerShare < config.MIN_NET_EDGE_PER_SHARE && !edgeBypassed) {
+        this.signalConsumed[side] = false;
         this.sideSignals[side] = {
           status: 'EDGE_TOO_LOW',
           reason: `Net model edge is ${candidate.expectedEdgePerShare.toFixed(3)} per share; needs $${config.MIN_NET_EDGE_PER_SHARE.toFixed(2)}.`,
@@ -580,10 +560,18 @@ class MispricingBot extends WickBot {
         };
         continue;
       }
+      if (this.signalConsumed[side]) {
+        this.sideSignals[side] = {
+          status: 'SIGNAL_ALREADY_CONSUMED',
+          reason: `This ${side} signal has already added 100 shares. Wait for it to stop qualifying before another add.`,
+          expectedEdgePerShare: candidate.expectedEdgePerShare,
+        };
+        continue;
+      }
       this.sideSignals[side] = {
         status: edgeBypassed ? 'OPPOSITE_PRICE_ONLY_QUALIFIED' : 'QUALIFIED',
         reason: edgeBypassed
-          ? `Opposite leg qualifies on full depth at or below $${config.ENTRY_MAX_PRICE.toFixed(2)}; model edge is bypassed.`
+          ? 'The first opposite-side entry qualifies on full visible depth; the model edge is bypassed.'
           : `Qualified at ${candidate.bestAsk.toFixed(3)} ask and ${candidate.expectedEdgePerShare.toFixed(3)} net edge/share.`,
         expectedEdgePerShare: candidate.expectedEdgePerShare,
         edgeBypassed,
@@ -604,7 +592,6 @@ class MispricingBot extends WickBot {
       const execution = this.sweep(candidate.side, 'asks', config.ENTRY_SHARES, {
         now,
         consume: true,
-        maximumPrice: config.ENTRY_MAX_PRICE,
       });
       if (!execution?.complete) {
         this.sideSignals[candidate.side] = {
@@ -621,19 +608,19 @@ class MispricingBot extends WickBot {
       this.signal = {
         side: enteredSides.length === 1 ? enteredSides[0] : null,
         sides: enteredSides,
-        reason: `${enteredSides.join(' and ')} entered independently; each has its own 50% take-profit.`,
+        reason: `${enteredSides.join(' and ')} signal${enteredSides.length === 1 ? '' : 's'} added ${config.ENTRY_SHARES} shares per side; each aggregate position has a $${config.TAKE_PROFIT_PRICE.toFixed(2)} limit sell.`,
         modelReady: true,
       };
     } else if (takeProfitsFilled > 0) {
       this.signal = {
         side: null,
-        reason: 'Take-profit filled; that side is re-armed for another qualifying signal.',
+        reason: 'Take-profit filled; another add needs a fresh qualifying signal cycle.',
         modelReady: true,
       };
     } else if (takeProfitsFilled === 0) {
       this.signal = {
         side: null,
-        reason: 'No side currently meets its price, depth, and applicable signal rules.',
+        reason: 'No new qualifying signal is ready to add shares.',
         modelReady: true,
         probabilityUp: this.model.probabilityUp,
         probabilityDown: this.model.probabilityDown,
@@ -661,32 +648,32 @@ class MispricingBot extends WickBot {
       const order = position.takeProfitOrder;
       if (!order || order.status !== 'RESTING') continue;
 
-      const available = this.sweep(position.side, 'bids', position.shares, {
-        now,
-        minimumPrice: order.limitPrice,
-      });
-      if (!available?.complete) {
-        const quote = this.getFreshQuote(position.side, now);
-        if (Number(quote?.bestBid) + EPSILON >= order.limitPrice) {
-          this.sideSignals[position.side] = {
-            status: 'TAKE_PROFIT_WAITING_FOR_DEPTH',
-            reason: `Take-profit reached; waiting for full ${position.shares}-share bid depth at or above $${order.limitPrice.toFixed(3)}.`,
-            positionId: position.id,
-          };
-        }
+      const quote = this.getFreshQuote(position.side, now);
+      const bestBid = Number(quote?.bestBid);
+      if (!quote || !Number.isFinite(bestBid) || bestBid + EPSILON < order.limitPrice) {
         continue;
       }
-
-      const execution = this.sweep(position.side, 'bids', position.shares, {
-        now,
-        consume: true,
-        minimumPrice: order.limitPrice,
-      });
-      if (!execution?.complete) continue;
+      const shares = Number(position.shares);
+      const fillPrice = order.limitPrice;
+      const gross = shares * fillPrice;
+      const makerRebate = makerRebateFor(this.market || {}, fillPrice, shares).estimate;
+      const execution = {
+        complete: true,
+        requestedShares: shares,
+        filledShares: shares,
+        remainingShares: 0,
+        gross,
+        fees: 0,
+        makerRebate,
+        netProceeds: gross + makerRebate,
+        averagePrice: fillPrice,
+        fills: [{ price: fillPrice, shares }],
+        triggerBestBid: bestBid,
+      };
       this.closePosition(position, execution, now);
       this.sideSignals[position.side] = {
         status: 'TAKE_PROFIT_FILLED',
-        reason: `${position.side} take-profit filled; that side is re-armed for another signal.`,
+        reason: `${position.side} limit sell filled at $${fillPrice.toFixed(2)} for all ${shares} accumulated shares; no sell fee or depth sweep.`,
         positionId: position.id,
       };
       filledCount += 1;
@@ -694,62 +681,145 @@ class MispricingBot extends WickBot {
     return filledCount;
   }
 
-  openPosition(candidate, execution, market, now, windowStart) {
-    const id = `${windowStart}-btc-${candidate.side.toLowerCase()}-${++this.positionSequence}`;
-    const takeProfitPrice = Math.ceil(
-      execution.averagePrice * config.TAKE_PROFIT_MULTIPLIER * 1000 - EPSILON,
-    ) / 1000;
-    const position = {
-      id,
-      strategyId: 'btc-5m-binance-mispricing-2candle-dual-tp',
-      marketId: market.id || market.conditionId || market.slug || null,
-      marketSlug: market.slug || null,
-      marketTitle: market.title || market.slug || 'BTC 5-minute Up/Down',
-      windowStart,
-      windowEnd: windowStart + config.WINDOW_MS_5M,
-      asset: 'BTC',
-      side: candidate.side,
-      status: 'OPEN',
-      shares: config.ENTRY_SHARES,
-      initialShares: config.ENTRY_SHARES,
-      entryPrice: execution.averagePrice,
-      totalCost: execution.gross,
-      initialTotalCost: execution.gross,
-      fees: execution.fees,
-      initialFees: execution.fees,
-      entryFees: execution.fees,
-      openedAt: now,
-      filledAt: now,
-      markPrice: null,
-      unrealizedPnl: null,
-      estimatedMakerRebate: 0,
-      entryEdgePerShare: candidate.expectedEdgePerShare,
-      entryProbability: candidate.probability,
-      entryEdgeBypassed: candidate.edgeBypassed === true,
-      entryFills: execution.fills,
-      takeProfitPrice,
-      takeProfitMultiplier: config.TAKE_PROFIT_MULTIPLIER,
-      takeProfitProceeds: 0,
-      exitProceeds: 0,
-      exitFees: 0,
-      proceeds: 0,
-      realizedPnl: null,
-      feeContext: WickBot._test.feeContext(market),
+  createTakeProfitOrder(position, now) {
+    const previous = position.takeProfitOrder;
+    const sequence = Number(position.takeProfitOrderSequence || 0) + 1;
+    const order = {
+      id: `${position.id}-take-profit-${sequence}`,
+      positionId: position.id,
+      action: 'SELL',
+      side: position.side,
+      orderType: 'PAPER_LIMIT_TAKE_PROFIT',
+      status: 'RESTING',
+      requestedShares: position.shares,
+      filledShares: 0,
+      remainingShares: position.shares,
+      limitPrice: config.TAKE_PROFIT_PRICE,
+      createdAt: now,
+      windowStart: position.windowStart,
       paperOnly: true,
+      fillRule: 'FULL_POSITION_ON_FRESH_BEST_BID_AT_OR_ABOVE_LIMIT_NO_DEPTH_SWEEP',
+      sellFee: 0,
     };
+    if (previous?.status === 'RESTING') {
+      previous.status = 'CANCELLED_REPLACED';
+      previous.cancelledAt = now;
+      previous.replacedByOrderId = order.id;
+      previous.remainingShares = 0;
+    }
+    position.takeProfitOrderSequence = sequence;
+    position.takeProfitPrice = order.limitPrice;
+    position.takeProfitOrder = order;
+    position.takeProfitOrderId = order.id;
+    this.orders.unshift(order);
+    return order;
+  }
+
+  openPosition(candidate, execution, market, now, windowStart) {
+    const entryNumber = this.sideEntryCountsThisWindow[candidate.side] + 1;
+    const addedShares = Number(execution.filledShares);
+    let position = this.getOpenPosition(candidate.side, windowStart);
+    if (position) {
+      const previousShares = Number(position.shares);
+      const nextShares = previousShares + addedShares;
+      position.totalCost += execution.gross;
+      position.initialTotalCost = position.totalCost;
+      position.shares = nextShares;
+      position.initialShares = nextShares;
+      position.entryPrice = position.totalCost / nextShares;
+      position.fees += execution.fees;
+      position.initialFees = position.fees;
+      position.entryFees = position.fees;
+      position.entryEdgePerShare = (
+        Number(position.entryEdgePerShare) * previousShares
+        + candidate.expectedEdgePerShare * addedShares
+      ) / nextShares;
+      position.entryProbability = (
+        Number(position.entryProbability) * previousShares
+        + candidate.probability * addedShares
+      ) / nextShares;
+      position.entryEdgeBypassed ||= candidate.edgeBypassed === true;
+      position.entryFills.push(...execution.fills.map((fill) => ({ ...fill, entryNumber })));
+      position.entrySignals.push({
+        entryNumber,
+        at: now,
+        shares: addedShares,
+        averagePrice: execution.averagePrice,
+        fees: execution.fees,
+        expectedEdgePerShare: candidate.expectedEdgePerShare,
+        probability: candidate.probability,
+        edgeBypassed: candidate.edgeBypassed === true,
+      });
+      position.lastAddedAt = now;
+    } else {
+      const id = `${windowStart}-btc-${candidate.side.toLowerCase()}-${++this.positionSequence}`;
+      position = {
+        id,
+        strategyId: 'btc-5m-binance-mispricing-2candle-dual-tp',
+        marketId: market.id || market.conditionId || market.slug || null,
+        marketSlug: market.slug || null,
+        marketTitle: market.title || market.slug || 'BTC 5-minute Up/Down',
+        windowStart,
+        windowEnd: windowStart + config.WINDOW_MS_5M,
+        asset: 'BTC',
+        side: candidate.side,
+        status: 'OPEN',
+        shares: addedShares,
+        initialShares: addedShares,
+        entryPrice: execution.averagePrice,
+        totalCost: execution.gross,
+        initialTotalCost: execution.gross,
+        fees: execution.fees,
+        initialFees: execution.fees,
+        entryFees: execution.fees,
+        openedAt: now,
+        filledAt: now,
+        markPrice: null,
+        unrealizedPnl: null,
+        estimatedMakerRebate: 0,
+        entryEdgePerShare: candidate.expectedEdgePerShare,
+        entryProbability: candidate.probability,
+        entryEdgeBypassed: candidate.edgeBypassed === true,
+        entryFills: execution.fills.map((fill) => ({ ...fill, entryNumber })),
+        entrySignals: [{
+          entryNumber,
+          at: now,
+          shares: addedShares,
+          averagePrice: execution.averagePrice,
+          fees: execution.fees,
+          expectedEdgePerShare: candidate.expectedEdgePerShare,
+          probability: candidate.probability,
+          edgeBypassed: candidate.edgeBypassed === true,
+        }],
+        takeProfitOrderSequence: 0,
+        takeProfitPrice: config.TAKE_PROFIT_PRICE,
+        takeProfitProceeds: 0,
+        exitProceeds: 0,
+        exitFees: 0,
+        proceeds: 0,
+        realizedPnl: null,
+        feeContext: WickBot._test.feeContext(market),
+        paperOnly: true,
+      };
+      this.positions.unshift(position);
+    }
+    this.cash -= execution.totalCost;
+    const takeProfitOrder = this.createTakeProfitOrder(position, now);
     const entryOrder = {
-      id: `${id}-entry`,
-      positionId: id,
+      id: `${position.id}-entry-${entryNumber}`,
+      positionId: position.id,
       action: 'BUY',
       side: candidate.side,
-      orderType: 'PAPER_ASK_SWEEP_AT_OR_BELOW_MAX_PRICE',
+      orderType: 'PAPER_FULL_VISIBLE_ASK_SWEEP',
       status: 'FILLED',
-      requestedShares: config.ENTRY_SHARES,
-      filledShares: config.ENTRY_SHARES,
+      entryNumber,
+      requestedShares: addedShares,
+      filledShares: addedShares,
       remainingShares: 0,
-      averagePrice: position.entryPrice,
+      averagePrice: execution.averagePrice,
       grossCost: execution.gross,
       fees: execution.fees,
+      positionSharesAfterFill: position.shares,
       edgeBypassed: candidate.edgeBypassed === true,
       fills: execution.fills,
       windowStart,
@@ -757,31 +827,16 @@ class MispricingBot extends WickBot {
       filledAt: now,
       paperOnly: true,
     };
-    const takeProfitOrder = {
-      id: `${id}-take-profit`,
-      positionId: id,
-      action: 'SELL',
-      side: candidate.side,
-      orderType: 'PAPER_LIMIT_TAKE_PROFIT',
-      status: 'RESTING',
-      requestedShares: config.ENTRY_SHARES,
-      filledShares: 0,
-      remainingShares: config.ENTRY_SHARES,
-      limitPrice: takeProfitPrice,
-      createdAt: now,
-      windowStart,
-      paperOnly: true,
-    };
+    position.lastEntryOrderId = entryOrder.id;
+    position.lastEntryAt = now;
     position.takeProfitOrder = takeProfitOrder;
     position.takeProfitOrderId = takeProfitOrder.id;
-    this.cash -= execution.totalCost;
-    this.positions.unshift(position);
-    this.orders.unshift(takeProfitOrder);
     this.orders.unshift(entryOrder);
     this.windowOrders.unshift(entryOrder);
     this.totalOrderAttempts += 1;
     this.entryTriggeredThisWindow = true;
-    this.sideEntryCountsThisWindow[candidate.side] += 1;
+    this.sideEntryCountsThisWindow[candidate.side] = entryNumber;
+    this.signalConsumed[candidate.side] = true;
     this.entryOrderPlaced = true;
     this.entryOrderId = entryOrder.id;
     this.entryTriggerLatched = true;
@@ -793,18 +848,18 @@ class MispricingBot extends WickBot {
     this.sideSignals[candidate.side] = {
       status: 'OPEN',
       reason: candidate.edgeBypassed
-        ? `${candidate.side} opposite leg entered on price and depth; take-profit is $${takeProfitPrice.toFixed(3)}.`
-        : `${candidate.side} entered at $${position.entryPrice.toFixed(3)}; take-profit is $${takeProfitPrice.toFixed(3)}.`,
-      positionId: id,
-      takeProfitPrice,
-      entriesThisWindow: this.sideEntryCountsThisWindow[candidate.side],
+        ? `${candidate.side} added ${addedShares} shares on price and depth; total ${position.shares} shares now have a $${takeProfitOrder.limitPrice.toFixed(2)} limit sell.`
+        : `${candidate.side} added ${addedShares} shares; total ${position.shares} shares now have a $${takeProfitOrder.limitPrice.toFixed(2)} limit sell.`,
+      positionId: position.id,
+      takeProfitPrice: takeProfitOrder.limitPrice,
+      entriesThisWindow: entryNumber,
       edgeBypassed: candidate.edgeBypassed === true,
     };
     this.signal = {
       side: candidate.side,
       reason: candidate.edgeBypassed
-        ? `${candidate.side} opposite leg entered at or below $${config.ENTRY_MAX_PRICE.toFixed(2)} on price/depth; its $${candidate.expectedEdgePerShare.toFixed(3)} model edge was bypassed.`
-        : `${candidate.side} entered at or below $${config.ENTRY_MAX_PRICE.toFixed(2)} with $${candidate.expectedEdgePerShare.toFixed(3)} net edge/share.`,
+        ? `${candidate.side} added ${addedShares} shares as the first opposite-side price/depth entry; model edge was bypassed.`
+        : `${candidate.side} qualifying signal added ${addedShares} shares with $${candidate.expectedEdgePerShare.toFixed(3)} net edge/share.`,
       expectedEdgePerShare: candidate.expectedEdgePerShare,
       probability: candidate.probability,
       edgeBypassed: candidate.edgeBypassed === true,
@@ -816,12 +871,18 @@ class MispricingBot extends WickBot {
       event: 'ENTRY_FILLED',
       type: 'ENTRY_FILLED',
       message: candidate.edgeBypassed
-        ? `Paper bought ${config.ENTRY_SHARES} ${candidate.side} shares at an average ${position.entryPrice.toFixed(3)} as the opposite price-only leg; its model edge was bypassed. Take-profit set at ${takeProfitPrice.toFixed(3)}.`
-        : `Paper bought ${config.ENTRY_SHARES} ${candidate.side} shares at an average ${position.entryPrice.toFixed(3)}; take-profit set at ${takeProfitPrice.toFixed(3)}.`,
+        ? `Paper added ${addedShares} ${candidate.side} shares as the opposite price-only signal; the position now totals ${position.shares} shares with a $${takeProfitOrder.limitPrice.toFixed(2)} limit sell.`
+        : `Paper added ${addedShares} ${candidate.side} shares; the position now totals ${position.shares} shares with a $${takeProfitOrder.limitPrice.toFixed(2)} limit sell.`,
       details: {
-        positionId: id,
+        positionId: position.id,
+        entryOrderId: entryOrder.id,
+        takeProfitOrderId: takeProfitOrder.id,
+        entryNumber,
+        addedShares,
+        accumulatedShares: position.shares,
         grossCost: execution.gross,
         fees: execution.fees,
+        takeProfitPrice: takeProfitOrder.limitPrice,
         entryEdgePerShare: candidate.expectedEdgePerShare,
         entryProbability: candidate.probability,
         edgeBypassed: candidate.edgeBypassed === true,
@@ -834,15 +895,19 @@ class MispricingBot extends WickBot {
 
   closePosition(position, execution, now) {
     const order = position.takeProfitOrder;
+    const makerRebate = Number(execution.makerRebate) || 0;
     order.status = 'FILLED';
     order.filledShares = execution.filledShares;
     order.remainingShares = 0;
     order.averagePrice = execution.averagePrice;
     order.grossProceeds = execution.gross;
-    order.fees = execution.fees;
+    order.fees = 0;
+    order.sellFee = 0;
+    order.estimatedMakerRebate = makerRebate;
+    order.triggerBestBid = execution.triggerBestBid;
     order.fills = execution.fills;
     order.filledAt = now;
-    const netProceeds = execution.netProceeds;
+    const netProceeds = execution.gross + makerRebate;
     position.status = 'SETTLED_EXIT';
     position.settlementStatus = 'TAKE_PROFIT_FILLED';
     position.closedAt = now;
@@ -854,8 +919,9 @@ class MispricingBot extends WickBot {
     position.exitBid = execution.averagePrice;
     position.exitProceeds = execution.gross;
     position.takeProfitProceeds = execution.gross;
-    position.exitFees = execution.fees;
-    position.proceeds = execution.gross;
+    position.exitFees = 0;
+    position.estimatedMakerRebate = makerRebate;
+    position.proceeds = netProceeds;
     position.realizedPnl = netProceeds - Number(position.totalCost) - Number(position.fees || 0);
     position.outcome = position.realizedPnl > 0 ? 'WIN'
       : position.realizedPnl < 0 ? 'LOSS' : 'BREAK_EVEN';
@@ -870,11 +936,12 @@ class MispricingBot extends WickBot {
       at: now,
       event: 'PAPER_TAKE_PROFIT_FILLED',
       type: 'PAPER_TAKE_PROFIT_FILLED',
-      message: `Paper take-profit sold all ${execution.filledShares} ${position.side} shares at an average ${execution.averagePrice.toFixed(3)} for a net result of $${position.realizedPnl.toFixed(2)}.`,
+      message: `Paper $${execution.averagePrice.toFixed(2)} limit sell filled all ${execution.filledShares} ${position.side} shares without a depth sweep; estimated maker rebate $${makerRebate.toFixed(3)}, sell fee $0.00, net result $${position.realizedPnl.toFixed(2)}.`,
       details: {
         positionId: position.id,
         grossProceeds: execution.gross,
-        exitFees: execution.fees,
+        exitFees: 0,
+        estimatedMakerRebate: makerRebate,
         realizedPnl: position.realizedPnl,
         fills: execution.fills,
       },
@@ -940,8 +1007,8 @@ class MispricingBot extends WickBot {
       strategy: {
         ...state.strategy,
         id: 'btc-5m-binance-mispricing-2candle-dual-tp',
-        name: 'BTC 5-minute Binance independent-side take-profit strategy',
-        version: 'btc-5m-binance-mispricing-2candle-v5',
+        name: 'BTC 5-minute Binance signal accumulation strategy',
+        version: 'btc-5m-binance-mispricing-2candle-v6',
         execution: 'PAPER ONLY',
         symbol: 'BTCUSDT',
         timeframe: '5m',
@@ -950,24 +1017,26 @@ class MispricingBot extends WickBot {
         minimumNetEdgePerShare: config.MIN_NET_EDGE_PER_SHARE,
         oppositeLegBypassesModelEdge: config.OPPOSITE_LEG_BYPASSES_EDGE,
         minimumNetEdgeAppliesToFirstAndSameSideReentries: true,
-        entryPriceCeilingInclusive: config.ENTRY_MAX_PRICE,
-        takeProfitMultiplier: config.TAKE_PROFIT_MULTIPLIER,
+        entryPriceCeiling: null,
+        takeProfitPrice: config.TAKE_PROFIT_PRICE,
         entryDelaySeconds: config.ENTRY_DELAY_MS / 1000,
         maximumOpenPositionsPerWindow: 2,
         maximumOpenPositionsPerSide: 1,
-        reentryAfterTakeProfit: true,
+        accumulatesSharesOnFreshSignals: true,
+        freshSignalMustRequalifyAfterEdgeDrop: true,
         sideEntryCountsThisWindow: { ...this.sideEntryCountsThisWindow },
         sideSignals: { ...this.sideSignals },
         unresolvedPositionsBlockNextWindow: false,
         entries: {
-          orderType: 'PAPER_ASK_SWEEP_AT_OR_BELOW_MAX_PRICE',
-          sharesPerSide: config.ENTRY_SHARES,
+          orderType: 'PAPER_FULL_VISIBLE_ASK_SWEEP',
+          sharesPerSignal: config.ENTRY_SHARES,
           entryDelayMs: config.ENTRY_DELAY_MS,
           minimumNetEdgePerShare: config.MIN_NET_EDGE_PER_SHARE,
           oppositeLegBypassesModelEdge: config.OPPOSITE_LEG_BYPASSES_EDGE,
           minimumNetEdgeAppliesToFirstAndSameSideReentries: true,
-          maximumPriceInclusive: config.ENTRY_MAX_PRICE,
-          oneOpenPositionPerSide: true,
+          priceCeiling: null,
+          accumulatesIntoOnePositionPerSide: true,
+          oneAddPerQualifyingSignalCycle: true,
           entryCountBySide: { ...this.sideEntryCountsThisWindow },
           triggeredThisWindow: this.entryTriggeredThisWindow,
           orderStatus: currentPositions.length ? 'FILLED' : 'NOT_PLACED',
@@ -975,16 +1044,21 @@ class MispricingBot extends WickBot {
         },
         exit: {
           orderType: 'PAPER_LIMIT_TAKE_PROFIT',
-          takeProfitMultiplier: config.TAKE_PROFIT_MULTIPLIER,
+          takeProfitPrice: config.TAKE_PROFIT_PRICE,
+          replacesOrderAfterEveryAdd: true,
+          coversAllAccumulatedShares: true,
+          fillRule: 'Fresh best bid at or above the limit fills the full paper position without a book-depth sweep.',
+          sellFee: 0,
+          estimatedMakerRebateRate: config.CRYPTO_MAKER_REBATE_RATE,
           fullFillOnly: true,
           stopLoss: null,
           flip: { enabled: false },
           windowEnd: 'Cancel unfilled take-profit orders at window end; hold remaining positions to official resolution.',
         },
         timing: 'Scan immediately and every 500 ms; manage UP and DOWN entries and take-profits independently.',
-        sizing: `${config.ENTRY_SHARES} shares per entry; at most one open position per side, re-armed after that side takes profit.`,
-        trigger: `Entries require a full ${config.ENTRY_SHARES}-share ask sweep at or below $${config.ENTRY_MAX_PRICE.toFixed(2)}. The first entry and same-side re-entries also require at least $${config.MIN_NET_EDGE_PER_SHARE.toFixed(2)} net model edge; the first opposite-side entry may bypass that edge rule.`,
-        exitPolicy: `Place a resting limit sell at ${config.TAKE_PROFIT_MULTIPLIER.toFixed(1)}x entry price; if it does not fill, hold to official resolution.`,
+        sizing: `${config.ENTRY_SHARES} shares per fresh signal; add to one aggregate position per side and window.`,
+        trigger: `Each distinct qualifying signal can add ${config.ENTRY_SHARES} shares using full visible ask depth at any listed price. The first entry and same-side signals require at least $${config.MIN_NET_EDGE_PER_SHARE.toFixed(2)} net model edge; the first opposite-side entry may bypass that edge rule.`,
+        exitPolicy: `After every add, replace the limit sell for all accumulated shares at $${config.TAKE_PROFIT_PRICE.toFixed(2)}. A fresh best bid at or above the limit fills the paper position without a depth sweep or sell fee; maker rebate is estimated. Entries above the limit can exit at a loss.`,
       },
       account,
       model,

@@ -141,7 +141,7 @@ test('book sweeps require all requested shares', () => {
   assert.equal(full.filledShares, 100);
 });
 
-test('UP and DOWN can both enter independently when each net edge qualifies at or below 0.66', async () => {
+test('UP and DOWN can both enter independently when each net edge qualifies', async () => {
   let now = WINDOW_START;
   const feed = makeFeed(() => now);
   feed.currentCandle.openSource = 'FIRST_TICK';
@@ -151,38 +151,31 @@ test('UP and DOWN can both enter independently when each net edge qualifies at o
   assert.deepEqual(bot.positions.map((position) => position.side).sort(), ['DOWN', 'UP']);
   assert.ok(bot.positions.every((position) => position.shares === 100));
   assert.ok(bot.positions.every((position) => position.status === 'OPEN'));
-  assert.ok(bot.positions.every((position) => position.takeProfitPrice === 0.6));
+  assert.ok(bot.positions.every((position) => position.takeProfitPrice === 0.9));
   assert.equal(bot.orders.filter((order) => order.action === 'BUY').length, 2);
   assert.equal(bot.orders.filter((order) => order.action === 'SELL' && order.status === 'RESTING').length, 2);
 });
 
-test('entry accepts the inclusive 0.66 ceiling but still requires model edge', async () => {
+test('entry has no fixed price ceiling but still requires model edge', async () => {
   let now = WINDOW_START;
   const feed = makeFeed(() => now);
   const bot = makeBot({ getNow: () => now, feed });
-  setBook(bot, 'UP', { asks: [{ price: 0.67, size: 100 }], bids: [{ price: 0.1, size: 100 }] }, now);
-  setBook(bot, 'DOWN', { asks: [{ price: 0.67, size: 100 }], bids: [{ price: 0.1, size: 100 }] }, now);
-  assert.equal(await bot.processStrategyEntry(now), false);
-  assert.equal(bot.positions.length, 0);
-  assert.equal(bot.sideSignals.UP.status, 'ASK_AT_OR_ABOVE_LIMIT');
-
-  now += 500;
-  setPrice(feed, 101);
-  setBook(bot, 'UP', { asks: [{ price: 0.66, size: 100 }], bids: [{ price: 0.1, size: 100 }] }, now);
-  setBook(bot, 'DOWN', { asks: [{ price: 0.9, size: 100 }], bids: [{ price: 0.1, size: 100 }] }, now);
+  setPrice(feed, 120);
+  setBook(bot, 'UP', { asks: [{ price: 0.94, size: 100 }], bids: [{ price: 0.1, size: 100 }] }, now);
+  setBook(bot, 'DOWN', { asks: [{ price: 0.99, size: 100 }], bids: [{ price: 0.1, size: 100 }] }, now);
   assert.equal(await bot.processStrategyEntry(now), true);
   assert.equal(bot.positions.length, 1);
   assert.equal(bot.positions[0].side, 'UP');
-  assert.equal(bot.positions[0].entryPrice, 0.66);
-  assert.equal(bot.positions[0].takeProfitPrice, 0.99);
+  assert.equal(bot.positions[0].entryPrice, 0.94);
+  assert.equal(bot.positions[0].takeProfitPrice, 0.9);
 });
 
-test('entry does not sweep asks above 0.66 to complete a full position', async () => {
+test('entry still requires all 100 visible ask shares without a price ceiling', async () => {
   const now = WINDOW_START;
   const bot = makeBot({ getNow: () => now });
   for (const side of ['UP', 'DOWN']) {
     setBook(bot, side, {
-      asks: [{ price: 0.65, size: 99 }, { price: 0.67, size: 100 }],
+      asks: [{ price: 0.94, size: 99 }],
       bids: [{ price: 0.1, size: 100 }],
     }, now);
   }
@@ -209,51 +202,46 @@ test('first entry still requires the minimum net model edge', async () => {
   assert.equal(bot.sideSignals.DOWN.status, 'EDGE_TOO_LOW');
 });
 
-test('first opposite-side entry bypasses edge but keeps the 0.66 ceiling and depth gate', async () => {
+test('first opposite-side entry bypasses edge at any price if full ask depth is visible', async () => {
   let now = WINDOW_START;
   const feed = makeFeed(() => now);
   const bot = makeBot({ getNow: () => now, feed });
   setPrice(feed, 101);
   setBook(bot, 'UP', { asks: [{ price: 0.4, size: 100 }], bids: [{ price: 0.1, size: 100 }] }, now);
-  setBook(bot, 'DOWN', { asks: [{ price: 0.8, size: 100 }], bids: [{ price: 0.1, size: 100 }] }, now);
+  setBook(bot, 'DOWN', { asks: [{ price: 0.8, size: 99 }], bids: [{ price: 0.1, size: 100 }] }, now);
   assert.equal(await bot.processStrategyEntry(now), true);
   assert.equal(bot.positions.length, 1);
   assert.equal(bot.positions[0].side, 'UP');
 
   now += 500;
-  setBook(bot, 'DOWN', { asks: [{ price: 0.67, size: 100 }], bids: [{ price: 0.1, size: 100 }] }, now);
-  assert.equal(await bot.processStrategyEntry(now), false);
-  assert.equal(bot.positions.length, 1);
-  assert.equal(bot.sideSignals.DOWN.status, 'ASK_AT_OR_ABOVE_LIMIT');
-
-  now += 500;
-  setBook(bot, 'DOWN', { asks: [{ price: 0.66, size: 100 }], bids: [{ price: 0.1, size: 100 }] }, now);
+  setBook(bot, 'DOWN', { asks: [{ price: 0.8, size: 100 }], bids: [{ price: 0.1, size: 100 }] }, now);
   assert.equal(await bot.processStrategyEntry(now), true);
+  assert.equal(bot.positions.length, 2);
   const downPosition = bot.positions.find((position) => position.side === 'DOWN');
   assert.equal(downPosition.status, 'OPEN');
   assert.equal(downPosition.shares, 100);
+  assert.equal(downPosition.entryPrice, 0.8);
   assert.equal(downPosition.entryEdgeBypassed, true);
+  assert.equal(downPosition.takeProfitPrice, 0.9);
   assert.ok(downPosition.entryEdgePerShare < config.MIN_NET_EDGE_PER_SHARE);
-  assert.equal(downPosition.takeProfitPrice, 0.99);
-  const downEntryOrder = bot.orders.find((order) => order.positionId === downPosition.id && order.action === 'BUY');
-  assert.equal(downEntryOrder.edgeBypassed, true);
+  assert.equal(bot.orders.filter((order) => order.side === 'DOWN' && order.action === 'BUY').length, 1);
 });
 
-test('take-profit waits for the full position to sell at or above its target', async () => {
+test('fixed 0.90 limit sell fills on price crossing without a bid-depth sweep or sell fee', async () => {
   let now = WINDOW_START;
   const bot = makeBot({ getNow: () => now });
-  setBook(bot, 'DOWN', { asks: [{ price: 0.8, size: 100 }], bids: [{ price: 0.1, size: 100 }] }, now);
+  setBook(bot, 'DOWN', { asks: [{ price: 0.8, size: 99 }], bids: [{ price: 0.1, size: 100 }] }, now);
   await bot.processStrategyEntry(now);
   const position = bot.positions[0];
   const takeProfitOrder = position.takeProfitOrder;
   assert.equal(position.side, 'UP');
   assert.equal(takeProfitOrder.status, 'RESTING');
-  assert.equal(takeProfitOrder.limitPrice, 0.6);
+  assert.equal(takeProfitOrder.limitPrice, 0.9);
 
   now += 500;
   setBook(bot, 'UP', {
     asks: [{ price: 0.4, size: 100 }],
-    bids: [{ price: 0.599, size: 100 }],
+    bids: [{ price: 0.899, size: 1 }],
   }, now);
   assert.equal(await bot.processStrategyEntry(now), false);
   assert.equal(position.status, 'OPEN');
@@ -262,22 +250,16 @@ test('take-profit waits for the full position to sell at or above its target', a
   now += 500;
   setBook(bot, 'UP', {
     asks: [{ price: 0.4, size: 100 }],
-    bids: [{ price: 0.6, size: 99 }, { price: 0.59, size: 1 }],
-  }, now);
-  assert.equal(await bot.processStrategyEntry(now), false);
-  assert.equal(position.status, 'OPEN');
-  assert.equal(takeProfitOrder.status, 'RESTING');
-
-  now += 500;
-  setBook(bot, 'UP', {
-    asks: [{ price: 0.4, size: 100 }],
-    bids: [{ price: 0.61, size: 100 }],
+    bids: [{ price: 0.9, size: 1 }],
   }, now);
   assert.equal(await bot.processStrategyEntry(now), true);
   assert.equal(position.status, 'SETTLED_EXIT');
   assert.equal(position.exitReason, 'TAKE_PROFIT');
   assert.equal(takeProfitOrder.status, 'FILLED');
-  assert.equal(takeProfitOrder.averagePrice, 0.61);
+  assert.equal(takeProfitOrder.averagePrice, 0.9);
+  assert.equal(takeProfitOrder.filledShares, 100);
+  assert.equal(position.exitFees, 0);
+  assert.ok(position.estimatedMakerRebate > 0);
   assert.ok(position.realizedPnl > 0);
 });
 
@@ -319,64 +301,75 @@ test('new window starts immediately despite an older unresolved position', async
   assert.equal(currentWindowPositions.length, 2);
 });
 
-test('same side re-arms after take-profit while the opposite side remains independent', async () => {
-  let now = WINDOW_START;
-  const bot = makeBot({ getNow: () => now });
-  setBook(bot, 'DOWN', { asks: [{ price: 0.8, size: 100 }], bids: [{ price: 0.1, size: 100 }] }, now);
-  assert.equal(await bot.processStrategyEntry(now), true);
-  const originalUp = bot.positions.find((position) => position.side === 'UP');
-
-  now += 500;
-  setBook(bot, 'UP', {
-    asks: [{ price: 0.4, size: 100 }],
-    bids: [{ price: 0.6, size: 100 }],
-  }, now);
-  assert.equal(await bot.processStrategyEntry(now), true);
-  const openUpPositions = bot.positions.filter((position) => position.side === 'UP' && position.status === 'OPEN');
-  assert.equal(originalUp.status, 'SETTLED_EXIT');
-  assert.equal(openUpPositions.length, 1);
-  assert.equal(bot.sideEntryCountsThisWindow.UP, 2);
-
-  now += 500;
-  setBook(bot, 'DOWN', { asks: [{ price: 0.4, size: 100 }], bids: [{ price: 0.1, size: 100 }] }, now);
-  refreshQuotes(bot, now);
-  await bot.processStrategyEntry(now);
-  assert.equal(bot.positions.filter((position) => position.side === 'DOWN' && position.status === 'OPEN').length, 1);
-  assert.equal(bot.positions.filter((position) => position.status === 'OPEN').length, 2);
-});
-
-test('same-side re-entry keeps the model-edge requirement after take-profit', async () => {
+test('fresh signals add shares to an open side and replace its aggregate take-profit', async () => {
   let now = WINDOW_START;
   const feed = makeFeed(() => now);
   const bot = makeBot({ getNow: () => now, feed });
-  setBook(bot, 'DOWN', { asks: [{ price: 0.8, size: 100 }], bids: [{ price: 0.1, size: 100 }] }, now);
+  setPrice(feed, 101);
+  setBook(bot, 'UP', { asks: [{ price: 0.44, size: 100 }], bids: [{ price: 0.1, size: 100 }] }, now);
+  setBook(bot, 'DOWN', { asks: [{ price: 0.99, size: 99 }], bids: [{ price: 0.1, size: 100 }] }, now);
   assert.equal(await bot.processStrategyEntry(now), true);
-  const original = bot.positions[0];
+  const position = bot.positions.find((item) => item.side === 'UP');
+  const firstTakeProfit = position.takeProfitOrder;
+  assert.equal(position.shares, 100);
+  assert.equal(firstTakeProfit.requestedShares, 100);
+
+  now += 500;
+  setBook(bot, 'UP', { asks: [{ price: 0.44, size: 100 }], bids: [{ price: 0.1, size: 100 }] }, now);
+  assert.equal(await bot.processStrategyEntry(now), false);
+  assert.equal(position.shares, 100);
+  assert.equal(bot.sideSignals.UP.status, 'SIGNAL_ALREADY_CONSUMED');
 
   now += 500;
   setPrice(feed, 100);
-  setBook(bot, 'UP', { asks: [{ price: 0.49, size: 100 }], bids: [{ price: 0.6, size: 100 }] }, now);
-  setBook(bot, 'DOWN', { asks: [{ price: 0.8, size: 100 }], bids: [{ price: 0.1, size: 100 }] }, now);
+  setBook(bot, 'UP', { asks: [{ price: 0.44, size: 100 }], bids: [{ price: 0.1, size: 100 }] }, now);
+  assert.equal(await bot.processStrategyEntry(now), false);
+  assert.equal(bot.signalConsumed.UP, false);
+
+  now += 500;
+  setPrice(feed, 101);
+  setBook(bot, 'UP', { asks: [{ price: 0.45, size: 100 }], bids: [{ price: 0.1, size: 100 }] }, now);
   assert.equal(await bot.processStrategyEntry(now), true);
-  assert.equal(original.status, 'SETTLED_EXIT');
-  assert.equal(bot.sideEntryCountsThisWindow.UP, 1);
-  assert.equal(bot.positions.filter((position) => position.side === 'UP' && position.status === 'OPEN').length, 0);
-  assert.equal(bot.sideSignals.UP.status, 'EDGE_TOO_LOW');
+  assert.equal(bot.positions.length, 1);
+  assert.equal(position.status, 'OPEN');
+  assert.equal(position.shares, 200);
+  assert.equal(position.entryPrice, 0.445);
+  assert.equal(position.takeProfitPrice, 0.9);
+  assert.equal(firstTakeProfit.status, 'CANCELLED_REPLACED');
+  assert.equal(position.takeProfitOrder.requestedShares, 200);
+  assert.equal(position.takeProfitOrder.limitPrice, 0.9);
+  assert.equal(bot.sideEntryCountsThisWindow.UP, 2);
+  assert.equal(bot.orders.filter((order) => order.side === 'UP' && order.action === 'BUY').length, 2);
+
+  now += 500;
+  setBook(bot, 'UP', {
+    asks: [{ price: 0.45, size: 100 }],
+    bids: [{ price: 0.9, size: 1 }],
+  }, now);
+  assert.equal(await bot.processStrategyEntry(now), true);
+  assert.equal(position.status, 'SETTLED_EXIT');
+  assert.equal(position.takeProfitOrder.requestedShares, 200);
+  assert.equal(position.takeProfitOrder.filledShares, 200);
+  assert.equal(position.exitFees, 0);
+  assert.ok(position.estimatedMakerRebate > 0);
 });
 
 test('strategy snapshot reports dual independent entries and per-position take-profit rules', () => {
   const bot = makeBot();
   const state = bot.snapshot();
   assert.equal(state.strategy.volatilityLookbackCandles, 2);
-  assert.equal(state.strategy.version, 'btc-5m-binance-mispricing-2candle-v5');
+  assert.equal(state.strategy.version, 'btc-5m-binance-mispricing-2candle-v6');
   assert.equal(state.strategy.minimumNetEdgePerShare, 0.05);
   assert.equal(state.strategy.oppositeLegBypassesModelEdge, true);
-  assert.equal(state.strategy.entryPriceCeilingInclusive, 0.66);
-  assert.equal(state.strategy.entries.maximumPriceInclusive, 0.66);
-  assert.equal(state.strategy.takeProfitMultiplier, 1.5);
+  assert.equal(state.strategy.entryPriceCeiling, null);
+  assert.equal(state.strategy.entries.priceCeiling, null);
+  assert.equal(state.strategy.takeProfitPrice, 0.9);
+  assert.equal(state.strategy.accumulatesSharesOnFreshSignals, true);
   assert.equal(state.strategy.maximumOpenPositionsPerWindow, 2);
   assert.equal(state.strategy.maximumOpenPositionsPerSide, 1);
-  assert.equal(state.strategy.reentryAfterTakeProfit, true);
+  assert.equal(state.strategy.exit.coversAllAccumulatedShares, true);
+  assert.equal(state.strategy.exit.sellFee, 0);
+  assert.equal(state.strategy.exit.estimatedMakerRebateRate, config.CRYPTO_MAKER_REBATE_RATE);
   assert.equal(state.strategy.exit.orderType, 'PAPER_LIMIT_TAKE_PROFIT');
   assert.equal(state.strategy.exit.flip.enabled, false);
   assert.equal(state.positionsBySide.UP, null);
