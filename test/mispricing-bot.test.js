@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const MispricingBot = require('../mispricing-bot');
 const config = require('../config');
 
-const { calculateVolatility, estimateUpProbability, calculateTakeProfitLimit, sweepLevels } = MispricingBot._test;
+const { calculateVolatility, estimateUpProbability, sweepLevels } = MispricingBot._test;
 const WINDOW_START = 1_800_000_000_000;
 
 function makeCandles() {
@@ -41,22 +41,50 @@ function makeFeed(getNow) {
   };
 }
 
-function book(price, size = 100) {
-  return {
-    status: 'LIVE',
+function levels(items) {
+  return items.map(({ price, size }) => ({
+    price,
+    size,
+    availableSize: size,
+  }));
+}
+
+function setBook(bot, side, { asks, bids }, updatedAt) {
+  const normalizedAsks = levels(asks).sort((a, b) => a.price - b.price);
+  const normalizedBids = levels(bids).sort((a, b) => b.price - a.price);
+  const book = {
+    asks: normalizedAsks,
+    bids: normalizedBids,
+    updatedAt,
+    sourceTimestamp: updatedAt,
+  };
+  bot.books[side] = book;
+  const ask = normalizedAsks[0];
+  const bid = normalizedBids[0];
+  bot.liveQuotes[side] = {
+    status: ask || bid ? 'LIVE' : 'MISSING',
     stale: false,
-    updatedAt: 0,
-    bestAsk: price,
-    askSize: size,
-    askLevels: [{ price, size }],
-    bestBid: 0.1,
-    bidSize: 100,
-    bidLevels: [{ price: 0.1, size: 100 }],
+    bestAsk: ask?.price ?? null,
+    askSize: ask?.availableSize ?? 0,
+    bestBid: bid?.price ?? null,
+    bidSize: bid?.availableSize ?? 0,
+    askLevels: normalizedAsks.map((level) => ({ ...level })),
+    bidLevels: normalizedBids.map((level) => ({ ...level })),
+    updatedAt,
   };
 }
 
+function refreshQuotes(bot, now) {
+  for (const side of ['UP', 'DOWN']) {
+    setBook(bot, side, {
+      asks: bot.books[side].asks,
+      bids: bot.books[side].bids,
+    }, now);
+  }
+}
+
 function makeBot({ getNow, feed } = {}) {
-  const clock = getNow || (() => WINDOW_START + 10_000);
+  const clock = getNow || (() => WINDOW_START);
   const priceFeed = feed || makeFeed(clock);
   const bot = new MispricingBot({
     priceFeed,
@@ -71,20 +99,28 @@ function makeBot({ getNow, feed } = {}) {
     end: WINDOW_START + config.WINDOW_MS_5M,
   };
   bot.orderWindowStart = WINDOW_START;
-  bot.liveQuotes = {
-    UP: book(0.4),
-    DOWN: book(0.4),
-  };
-  bot.liveQuotes.UP.updatedAt = clock();
-  bot.liveQuotes.DOWN.updatedAt = clock();
-  bot.books = {
-    UP: { updatedAt: clock() },
-    DOWN: { updatedAt: clock() },
-  };
+  setBook(bot, 'UP', { asks: [{ price: 0.4, size: 100 }], bids: [{ price: 0.1, size: 100 }] }, clock());
+  setBook(bot, 'DOWN', { asks: [{ price: 0.4, size: 100 }], bids: [{ price: 0.1, size: 100 }] }, clock());
   return bot;
 }
 
-test('volatility uses the latest two closed candle returns', () => {
+function setPrice(feed, price) {
+  feed.price = price;
+  feed.currentCandle.close = price;
+}
+
+function setFlipBook(bot, now, { exitBid = 0.6, exitSize = 100, oppositeAsk = 0.4, askSize = 100 } = {}) {
+  setBook(bot, 'UP', {
+    asks: [{ price: 0.4, size: 100 }],
+    bids: [{ price: exitBid, size: exitSize }],
+  }, now);
+  setBook(bot, 'DOWN', {
+    asks: [{ price: oppositeAsk, size: askSize }],
+    bids: [{ price: 0.1, size: 100 }],
+  }, now);
+}
+
+test('volatility uses exactly the latest two closed candle returns', () => {
   const candles = makeCandles();
   const sample = candles.slice(-config.VOLATILITY_CANDLES);
   const expected = Math.sqrt(sample.reduce((sum, candle) => {
@@ -96,7 +132,7 @@ test('volatility uses the latest two closed candle returns', () => {
   assert.equal(calculateVolatility(candles.slice(-1)), null);
 });
 
-test('probability is 50% at the window open and rises with price', () => {
+test('probability is 50% at the window open and follows price direction', () => {
   const base = {
     windowOpenPrice: 100,
     volatility5m: 0.01,
@@ -107,30 +143,207 @@ test('probability is 50% at the window open and rises with price', () => {
   assert.ok(estimateUpProbability({ ...base, currentPrice: 99 }) < 0.5);
 });
 
-test('take-profit limit targets at least 50% net return after fees', () => {
-  const target = calculateTakeProfitLimit({
-    market: {},
-    shares: 100,
-    entryGross: 40,
-    entryFees: 0,
-  });
-  assert.equal(target.possible, true);
-  const fee = require('../wick-bot')._test.takerFeeFor({}, target.limitPrice, 100);
-  const previousTickFee = require('../wick-bot')._test.takerFeeFor({}, target.limitPrice - config.PRICE_TICK, 100);
-  assert.ok(target.limitPrice * 100 - fee >= target.targetNetProceeds - 1e-8);
-  assert.ok((target.limitPrice - config.PRICE_TICK) * 100 - previousTickFee < target.targetNetProceeds);
-});
-
-test('book sweep refuses partial execution', () => {
-  const partial = sweepLevels([{ price: 0.6, size: 99 }], 100, { side: 'SELL', minimumPrice: 0.6, market: {} });
-  const full = sweepLevels([{ price: 0.6, size: 100 }], 100, { side: 'SELL', minimumPrice: 0.6, market: {} });
+test('book sweeps require all requested shares', () => {
+  const partial = sweepLevels([{ price: 0.6, size: 99 }], 100, { side: 'SELL', market: {} });
+  const full = sweepLevels([{ price: 0.6, size: 100 }], 100, { side: 'SELL', market: {} });
   assert.equal(partial.complete, false);
   assert.equal(partial.filledShares, 99);
   assert.equal(full.complete, true);
   assert.equal(full.filledShares, 100);
 });
 
-test('new window starts immediately and ignores prior unresolved positions', async () => {
+test('entry buys 100 shares immediately when the full-size net edge qualifies', async () => {
+  let now = WINDOW_START;
+  const feed = makeFeed(() => now);
+  feed.currentCandle.openSource = 'FIRST_TICK';
+  const bot = makeBot({ getNow: () => now, feed });
+  assert.equal(await bot.processStrategyEntry(now), true);
+  assert.equal(bot.positions.length, 1);
+  assert.equal(bot.positions[0].side, 'UP');
+  assert.equal(bot.positions[0].shares, 100);
+  assert.equal(bot.positions[0].status, 'OPEN');
+  assert.equal(bot.orders.length, 1);
+  assert.equal(bot.orders[0].action, 'BUY');
+  assert.equal(bot.orders.some((order) => order.action === 'SELL'), false);
+});
+
+test('entry waits instead of recording a partial buy', async () => {
+  let now = WINDOW_START;
+  const bot = makeBot({ getNow: () => now });
+  setBook(bot, 'UP', {
+    asks: [{ price: 0.4, size: 99 }],
+    bids: [{ price: 0.1, size: 100 }],
+  }, now);
+  setBook(bot, 'DOWN', {
+    asks: [{ price: 0.4, size: 99 }],
+    bids: [{ price: 0.1, size: 100 }],
+  }, now);
+
+  assert.equal(await bot.processStrategyEntry(now), false);
+  assert.equal(bot.positions.length, 0);
+  assert.equal(bot.orders.length, 0);
+});
+
+test('an open position does not take profit without a qualifying opposite signal', async () => {
+  let now = WINDOW_START;
+  const feed = makeFeed(() => now);
+  const bot = makeBot({ getNow: () => now, feed });
+  await bot.processStrategyEntry(now);
+  const original = bot.positions[0];
+
+  now += 500;
+  setPrice(feed, 100.2);
+  setBook(bot, 'UP', {
+    asks: [{ price: 0.4, size: 100 }],
+    bids: [{ price: 0.99, size: 100 }],
+  }, now);
+  setBook(bot, 'DOWN', {
+    asks: [{ price: 0.99, size: 100 }],
+    bids: [{ price: 0.1, size: 100 }],
+  }, now);
+
+  assert.equal(await bot.processStrategyEntry(now), false);
+  assert.equal(original.status, 'OPEN');
+  assert.equal(bot.orders.some((order) => order.action === 'SELL'), false);
+});
+
+test('profitable opposite signal flips only after two fresh Binance updates', async () => {
+  let now = WINDOW_START;
+  const feed = makeFeed(() => now);
+  const bot = makeBot({ getNow: () => now, feed });
+  assert.equal(await bot.processStrategyEntry(now), true);
+  const original = bot.positions[0];
+
+  now += 500;
+  setPrice(feed, 99.8);
+  setFlipBook(bot, now);
+  assert.equal(await bot.processStrategyEntry(now), false);
+  assert.equal(bot.flipConfirmation.count, 1);
+  assert.equal(original.status, 'OPEN');
+
+  now += 500;
+  refreshQuotes(bot, now);
+  assert.equal(await bot.processStrategyEntry(now), true);
+  assert.equal(original.status, 'CLOSED');
+  assert.equal(original.exitReason, 'PROFITABLE_MODEL_FLIP');
+  assert.ok(original.realizedPnl > 0);
+  assert.equal(bot.positions.filter((position) => position.status === 'OPEN').length, 1);
+  assert.equal(bot.positions.find((position) => position.status === 'OPEN').side, 'DOWN');
+  assert.equal(bot.flipsThisWindow, 1);
+  assert.equal(bot.orders.filter((order) => order.action === 'SELL').length, 1);
+  assert.equal(bot.orders.filter((order) => order.action === 'BUY').length, 2);
+});
+
+test('flip confirmations require 500 ms spacing and reset after a 2-second gap', () => {
+  const bot = makeBot();
+  const first = WINDOW_START + 1_000;
+  assert.equal(bot.recordFlipConfirmation('DOWN', { tickAt: first }, first), false);
+  assert.equal(bot.recordFlipConfirmation('DOWN', { tickAt: first + 400 }, first + 400), false);
+  assert.equal(bot.flipConfirmation.count, 1);
+  assert.equal(bot.recordFlipConfirmation('DOWN', { tickAt: first + 500 }, first + 500), true);
+  assert.equal(bot.flipConfirmation.count, 2);
+
+  const afterGap = first + 2_501;
+  assert.equal(bot.recordFlipConfirmation('DOWN', { tickAt: afterGap }, afterGap), false);
+  assert.equal(bot.flipConfirmation.count, 1);
+});
+
+test('does not flip when the current position cannot be sold profitably after fees', async () => {
+  let now = WINDOW_START;
+  const feed = makeFeed(() => now);
+  const bot = makeBot({ getNow: () => now, feed });
+  await bot.processStrategyEntry(now);
+  const position = bot.positions[0];
+
+  now += 500;
+  setPrice(feed, 99.8);
+  setFlipBook(bot, now, { exitBid: 0.3 });
+  assert.equal(await bot.processStrategyEntry(now), false);
+  assert.equal(position.status, 'OPEN');
+  assert.equal(bot.flipConfirmation.count, 0);
+  assert.match(bot.signal.reason, /would not be profitable after fees/i);
+});
+
+test('does not flip when the opposite entry edge is below 10 cents per share', async () => {
+  let now = WINDOW_START;
+  const feed = makeFeed(() => now);
+  const bot = makeBot({ getNow: () => now, feed });
+  await bot.processStrategyEntry(now);
+  const position = bot.positions[0];
+
+  now += 500;
+  setPrice(feed, 99.99);
+  setFlipBook(bot, now);
+  assert.equal(await bot.processStrategyEntry(now), false);
+  assert.equal(position.status, 'OPEN');
+  assert.equal(bot.flipConfirmation.count, 0);
+  assert.match(bot.signal.reason, /needs at least \$0\.10 net edge/i);
+});
+
+test('does not sell partially when the full current-side bid sweep is unavailable', async () => {
+  let now = WINDOW_START;
+  const feed = makeFeed(() => now);
+  const bot = makeBot({ getNow: () => now, feed });
+  await bot.processStrategyEntry(now);
+  const position = bot.positions[0];
+
+  now += 500;
+  setPrice(feed, 99.8);
+  setFlipBook(bot, now, { exitBid: 0.6, exitSize: 99 });
+  assert.equal(await bot.processStrategyEntry(now), false);
+  assert.equal(position.status, 'OPEN');
+  assert.equal(bot.orders.some((order) => order.action === 'SELL'), false);
+  assert.match(bot.signal.reason, /cannot sell all shares/i);
+});
+
+test('does not sell if the full opposite-side ask sweep is unavailable', async () => {
+  let now = WINDOW_START;
+  const feed = makeFeed(() => now);
+  const bot = makeBot({ getNow: () => now, feed });
+  await bot.processStrategyEntry(now);
+  const position = bot.positions[0];
+
+  now += 500;
+  setPrice(feed, 99.8);
+  setFlipBook(bot, now, { exitBid: 0.6, oppositeAsk: 0.4, askSize: 99 });
+  assert.equal(await bot.processStrategyEntry(now), false);
+  assert.equal(position.status, 'OPEN');
+  assert.equal(bot.orders.some((order) => order.action === 'SELL'), false);
+});
+
+test('only one flip is allowed in a window', async () => {
+  let now = WINDOW_START;
+  const feed = makeFeed(() => now);
+  const bot = makeBot({ getNow: () => now, feed });
+  await bot.processStrategyEntry(now);
+
+  now += 500;
+  setPrice(feed, 99.8);
+  setFlipBook(bot, now);
+  await bot.processStrategyEntry(now);
+  now += 500;
+  refreshQuotes(bot, now);
+  await bot.processStrategyEntry(now);
+  const flippedPosition = bot.positions.find((position) => position.status === 'OPEN');
+  assert.equal(flippedPosition.side, 'DOWN');
+
+  now += 500;
+  setPrice(feed, 100.2);
+  setBook(bot, 'UP', {
+    asks: [{ price: 0.4, size: 100 }],
+    bids: [{ price: 0.1, size: 100 }],
+  }, now);
+  setBook(bot, 'DOWN', {
+    asks: [{ price: 0.4, size: 100 }],
+    bids: [{ price: 0.6, size: 100 }],
+  }, now);
+  assert.equal(await bot.processStrategyEntry(now), false);
+  assert.equal(bot.flipsThisWindow, 1);
+  assert.equal(flippedPosition.status, 'OPEN');
+  assert.equal(bot.orders.filter((order) => order.action === 'SELL').length, 1);
+});
+
+test('new window starts immediately despite an older unresolved position', async () => {
   let now = WINDOW_START;
   const feed = makeFeed(() => now);
   const bot = makeBot({ getNow: () => now, feed });
@@ -143,15 +356,9 @@ test('new window starts immediately and ignores prior unresolved positions', asy
   bot.market.end = nextWindowStart + config.WINDOW_MS_5M;
   bot.market.slug = `btc-updown-5m-${nextWindowStart / 1000}`;
   bot.orderWindowStart = nextWindowStart;
-  feed.currentCandle = {
-    ...feed.currentCandle,
-    start: nextWindowStart,
-  };
+  feed.currentCandle = { ...feed.currentCandle, start: nextWindowStart };
   now = nextWindowStart;
-  bot.liveQuotes.UP.updatedAt = now;
-  bot.liveQuotes.DOWN.updatedAt = now;
-  bot.books.UP.updatedAt = now;
-  bot.books.DOWN.updatedAt = now;
+  refreshQuotes(bot, now);
 
   assert.equal(await bot.processStrategyEntry(now), true);
   assert.equal(previousPosition.status, 'PENDING_RESOLUTION');
@@ -159,160 +366,15 @@ test('new window starts immediately and ignores prior unresolved positions', asy
   assert.equal(bot.positions[0].windowStart, nextWindowStart);
 });
 
-test('entry starts immediately when the model and full-size book are ready', async () => {
-  let now = WINDOW_START;
-  const bot = makeBot({ getNow: () => now });
-  assert.equal(await bot.processStrategyEntry(now), true);
-  assert.equal(bot.positions.length, 1);
-  assert.equal(bot.positions[0].side, 'UP');
-  assert.equal(bot.positions[0].shares, 100);
-  assert.equal(bot.positions[0].takeProfitOrder.status, 'RESTING');
-});
-
-test('a changed opposite signal does not flip an open position', async () => {
-  let now = WINDOW_START + config.ENTRY_DELAY_MS;
-  const feed = makeFeed(() => now);
-  const bot = makeBot({ getNow: () => now, feed });
-  await bot.processStrategyEntry(now);
-  const originalCash = bot.cash;
-
-  now += 500;
-  feed.price = 99.95;
-  feed.currentCandle.close = 99.95;
-  bot.liveQuotes.UP.updatedAt = now;
-  bot.liveQuotes.DOWN.updatedAt = now;
-  bot.books.UP.updatedAt = now;
-  bot.books.DOWN.updatedAt = now;
-  bot.liveQuotes.UP.bidLevels = [{ price: 0.1, size: 100 }];
-  assert.equal(await bot.processStrategyEntry(now), false);
-  assert.equal(bot.positions.filter((position) => position.status === 'OPEN').length, 1);
-  assert.equal(bot.positions[0].side, 'UP');
-  assert.equal(bot.cash, originalCash);
-});
-
-test('take-profit requires all shares, then waits 10 seconds while both feeds stay connected', async () => {
-  let now = WINDOW_START + config.ENTRY_DELAY_MS;
-  const feed = makeFeed(() => now);
-  let binanceStopCount = 0;
-  feed.stop = () => { binanceStopCount += 1; };
-  const bot = makeBot({ getNow: () => now, feed });
-  let polymarketCloseCount = 0;
-  bot.marketStream = { close: () => { polymarketCloseCount += 1; } };
-  bot.market.tokens = { UP: 'up-token', DOWN: 'down-token' };
-  bot.websocket = {
-    status: 'CONNECTED',
-    connectedAt: now,
-    lastMessageAt: now,
-    reconnectCount: 0,
-    error: null,
-  };
-  await bot.processStrategyEntry(now);
-  const position = bot.positions[0];
-  const limit = position.takeProfitOrder.limitPrice;
-
-  now += 500;
-  bot.liveQuotes.UP.updatedAt = now;
-  bot.books.UP.updatedAt = now;
-  bot.liveQuotes.UP.bidLevels = [{ price: limit, size: 99 }];
-  const cashBeforePartial = bot.cash;
-  assert.equal(await bot.processStrategyEntry(now), false);
-  assert.equal(position.status, 'OPEN');
-  assert.equal(bot.cash, cashBeforePartial);
-
-  now += 500;
-  bot.liveQuotes.UP.updatedAt = now;
-  bot.books.UP.updatedAt = now;
-  bot.liveQuotes.UP.bidLevels = [{ price: limit, size: 100 }];
-  assert.equal(await bot.processStrategyEntry(now), true);
-  assert.equal(position.status, 'SETTLED_EXIT');
-  assert.ok(position.realizedPnl >= (position.initialTotalCost + position.initialFees) * 0.5 - 1e-6);
-  const takeProfitFilledAt = now;
-  assert.equal(bot.rearmReadyAt, takeProfitFilledAt + config.POST_TP_COOLDOWN_MS);
-
-  now = takeProfitFilledAt + 5_000;
-  feed.price = 100.06;
-  feed.currentCandle.close = feed.price;
-  bot.liveQuotes.UP.updatedAt = now;
-  bot.liveQuotes.DOWN.updatedAt = now;
-  bot.books.UP.updatedAt = now;
-  bot.books.DOWN.updatedAt = now;
-  bot.handleMarketMessage({
-    event_type: 'book',
-    asset_id: 'up-token',
-    bids: [{ price: '0.10', size: '100' }],
-    asks: [{ price: '0.40', size: '100' }],
-    timestamp: String(now),
-  });
-  assert.equal(bot.liveQuotes.UP.updatedAt, now);
-  assert.equal(bot.websocket.status, 'CONNECTED');
-  assert.equal(bot.websocket.lastMessageAt, now);
-  assert.equal(feed.status, 'CONNECTED');
-  assert.equal(binanceStopCount, 0);
-  assert.equal(polymarketCloseCount, 0);
-  assert.equal(await bot.processStrategyEntry(now), false);
-  assert.equal(bot.positions.length, 1);
-  assert.match(bot.signal.reason, /waiting 5s/i);
-
-  now = takeProfitFilledAt + config.POST_TP_COOLDOWN_MS;
-  feed.price = 101;
-  feed.currentCandle.close = feed.price;
-  bot.liveQuotes.UP = book(0.6);
-  bot.liveQuotes.UP.updatedAt = now;
-  bot.liveQuotes.DOWN.updatedAt = now;
-  bot.books.UP.updatedAt = now;
-  bot.books.DOWN.updatedAt = now;
-  assert.equal(await bot.processStrategyEntry(now), false);
-  assert.equal(bot.positions.length, 1);
-  assert.equal(bot.signal.blockedSide, 'UP');
-  assert.match(bot.signal.reason, /above \$0\.50/);
-
-  now += 500;
-  bot.liveQuotes.UP.updatedAt = now;
-  bot.liveQuotes.DOWN.updatedAt = now;
-  bot.books.UP.updatedAt = now;
-  bot.books.DOWN.updatedAt = now;
-  assert.equal(await bot.processStrategyEntry(now), false);
-  assert.equal(bot.postTakeProfitBlockedSide, 'UP');
-
-  now += 500;
-  bot.liveQuotes.UP = book(0.5);
-  bot.liveQuotes.UP.updatedAt = now;
-  bot.liveQuotes.DOWN.updatedAt = now;
-  bot.books.UP.updatedAt = now;
-  bot.books.DOWN.updatedAt = now;
-  assert.equal(await bot.processStrategyEntry(now), true);
-  assert.equal(bot.positions.length, 2);
-  assert.equal(bot.positions.filter((item) => item.status === 'OPEN').length, 1);
-});
-
-test('a fresh opposite signal clears a voided post-take-profit signal', async () => {
-  let now = WINDOW_START;
-  const feed = makeFeed(() => now);
-  const bot = makeBot({ getNow: () => now, feed });
-  bot.rearmReadyAt = now;
-  feed.price = 101;
-  feed.currentCandle.close = feed.price;
-  bot.liveQuotes.UP = book(0.6);
-  bot.liveQuotes.DOWN = book(0.6);
-  bot.liveQuotes.UP.updatedAt = now;
-  bot.liveQuotes.DOWN.updatedAt = now;
-  bot.books.UP.updatedAt = now;
-  bot.books.DOWN.updatedAt = now;
-
-  assert.equal(await bot.processStrategyEntry(now), false);
-  assert.equal(bot.signal.blockedSide, 'UP');
-
-  now += 500;
-  feed.price = 99;
-  feed.currentCandle.close = feed.price;
-  bot.liveQuotes.UP = book(0.6);
-  bot.liveQuotes.DOWN = book(0.6);
-  bot.liveQuotes.UP.updatedAt = now;
-  bot.liveQuotes.DOWN.updatedAt = now;
-  bot.books.UP.updatedAt = now;
-  bot.books.DOWN.updatedAt = now;
-
-  assert.equal(await bot.processStrategyEntry(now), true);
-  assert.equal(bot.positions[0].side, 'DOWN');
-  assert.equal(bot.postTakeProfitBlockedSide, null);
+test('strategy snapshot reports the source flip rules and no take-profit policy', () => {
+  const bot = makeBot();
+  const state = bot.snapshot();
+  assert.equal(state.strategy.volatilityLookbackCandles, 2);
+  assert.equal(state.strategy.minimumNetEdgePerShare, 0.05);
+  assert.equal(state.strategy.minimumFlipNetEdgePerShare, 0.1);
+  assert.equal(state.strategy.flipConfirmationUpdates, 2);
+  assert.equal(state.strategy.maximumFlipsPerWindow, 1);
+  assert.equal(state.strategy.exit.flip.enabled, true);
+  assert.equal(state.strategy.takeProfitNetReturn, undefined);
+  assert.equal(state.rearm, undefined);
 });

@@ -2,7 +2,7 @@
   "name": "invented-btc-mispricing-paper-bot",
   "version": "1.0.0",
   "private": true,
-  "description": "Demo-only BTC 5-minute Binance mispricing paper bot with fee-aware take-profit.",
+  "description": "Paper-only BTC 5-minute Binance mispricing bot with profitable flips.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",

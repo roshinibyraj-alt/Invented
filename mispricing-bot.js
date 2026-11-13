@@ -7,7 +7,7 @@ const defaultMarketData = require('./wick-market-data');
 
 const { takerFeeFor } = WickBot._test;
 const SECONDS_PER_WINDOW = config.WINDOW_MS_5M / 1000;
-const EPSILON = 1e-9;
+const EPSILON = 1e-8;
 
 function erf(value) {
   const sign = value < 0 ? -1 : 1;
@@ -24,7 +24,8 @@ function normalCdf(value) {
 
 function calculateVolatility(candles, count = config.VOLATILITY_CANDLES) {
   const sample = (Array.isArray(candles) ? candles : [])
-    .filter((candle) => Number(candle?.open) > 0 && Number(candle?.close) > 0)
+    .filter((candle) => candle?.closed !== false
+      && Number(candle?.open) > 0 && Number(candle?.close) > 0)
     .slice(-count);
   if (sample.length !== count) return null;
   const returns = sample.map((candle) => Math.log(Number(candle.close) / Number(candle.open)));
@@ -47,7 +48,10 @@ function estimateUpProbability({ currentPrice, windowOpenPrice, volatility5m, se
 
 function sweepLevels(levels, shares, { side, minimumPrice = 0, market } = {}) {
   const ordered = (Array.isArray(levels) ? levels : [])
-    .map((level) => ({ price: Number(level.price), size: Number(level.size) }))
+    .map((level) => ({
+      price: Number(level.price),
+      size: Number(level.availableSize ?? level.size),
+    }))
     .filter((level) => level.price >= 0 && level.price <= 1 && level.size > 0)
     .filter((level) => side === 'SELL' ? level.price + EPSILON >= minimumPrice : true)
     .sort((a, b) => side === 'SELL' ? b.price - a.price : a.price - b.price);
@@ -78,40 +82,6 @@ function sweepLevels(levels, shares, { side, minimumPrice = 0, market } = {}) {
   };
 }
 
-function calculateTakeProfitLimit({ market, shares, entryGross, entryFees }) {
-  const allInCost = Number(entryGross) + Number(entryFees);
-  if (!(allInCost > 0) || !(Number(shares) > 0)) {
-    return { possible: false, reason: 'Entry cost is unavailable.', allInCost, targetNetProceeds: null };
-  }
-  const targetNetProceeds = allInCost * (1 + config.TAKE_PROFIT_NET_RETURN);
-  const netAt = (price) => price * shares - takerFeeFor(market, price, shares);
-  if (netAt(config.TAKE_PROFIT_MAX_PRICE) + EPSILON < targetNetProceeds) {
-    return {
-      possible: false,
-      reason: 'A 50% net return cannot be reached at or below the $0.99 limit.',
-      allInCost,
-      targetNetProceeds,
-    };
-  }
-  let low = 0;
-  let high = config.TAKE_PROFIT_MAX_PRICE;
-  for (let iteration = 0; iteration < 60; iteration += 1) {
-    const middle = (low + high) / 2;
-    if (netAt(middle) + EPSILON >= targetNetProceeds) high = middle;
-    else low = middle;
-  }
-  const ticks = Math.ceil((high - EPSILON) / config.PRICE_TICK);
-  const limitPrice = Number((ticks * config.PRICE_TICK).toFixed(2));
-  return {
-    possible: limitPrice <= config.TAKE_PROFIT_MAX_PRICE + EPSILON,
-    limitPrice,
-    allInCost,
-    targetNetProceeds,
-    targetNetProfit: allInCost * config.TAKE_PROFIT_NET_RETURN,
-    reason: null,
-  };
-}
-
 class MispricingBot extends WickBot {
   constructor({
     marketData = defaultMarketData,
@@ -121,7 +91,7 @@ class MispricingBot extends WickBot {
     WebSocketImpl = globalThis.WebSocket,
   } = {}) {
     super({
-      strategyId: 'btc-5m-binance-mispricing-tp50',
+      strategyId: 'btc-5m-binance-mispricing-2candle-flip',
       strategyName: 'BTC 5-minute Binance mispricing paper strategy',
       timeframe: '5m',
       windowMs: config.WINDOW_MS_5M,
@@ -130,6 +100,7 @@ class MispricingBot extends WickBot {
         sharesPerSide: config.ENTRY_SHARES,
         entryDelayMs: config.ENTRY_DELAY_MS,
         minimumNetEdgePerShare: config.MIN_NET_EDGE_PER_SHARE,
+        minimumFlipNetEdgePerShare: config.MIN_FLIP_NET_EDGE_PER_SHARE,
       },
       marketData,
       now,
@@ -141,11 +112,10 @@ class MispricingBot extends WickBot {
     this.model = null;
     this.signal = { side: null, reason: 'Waiting for Binance feed and market data.' };
     this.strategyWindowStart = null;
-    this.entriesThisWindow = 0;
+    this.entryTriggeredThisWindow = false;
+    this.flipsThisWindow = 0;
+    this.flipConfirmation = { side: null, count: 0, lastTickAt: null };
     this.positionSequence = 0;
-    this.rearmReadyAt = null;
-    this.lastTakeProfitAt = null;
-    this.postTakeProfitBlockedSide = null;
     this.books = { UP: null, DOWN: null };
     this.bookMarketId = null;
     this.marketStream = null;
@@ -383,7 +353,6 @@ class MispricingBot extends WickBot {
     const currentCandle = feed.currentCandle;
     const windowOpenPrice = currentCandle
       && Number(currentCandle.start) === windowStart
-      && currentCandle.openSource !== 'FIRST_TICK'
       ? Number(currentCandle.open)
       : null;
     const secondsRemaining = windowStart == null
@@ -449,22 +418,82 @@ class MispricingBot extends WickBot {
     return quote;
   }
 
-  buildEntryCandidate(side, probability, market, now) {
+  resetFlipConfirmation() {
+    this.flipConfirmation = { side: null, count: 0, lastTickAt: null };
+  }
+
+  recordFlipConfirmation(side, model, now) {
+    const tickAt = Number(model?.tickAt);
+    if (!Number.isFinite(tickAt) || tickAt > now
+      || now - tickAt > config.MAX_DATA_AGE_MS) {
+      this.resetFlipConfirmation();
+      return false;
+    }
+    const state = this.flipConfirmation;
+    if (state.side !== side || state.lastTickAt == null) {
+      this.flipConfirmation = { side, count: 1, lastTickAt: tickAt };
+      return false;
+    }
+    if (tickAt <= state.lastTickAt) return false;
+    const interval = tickAt - state.lastTickAt;
+    if (interval > config.FLIP_CONFIRMATION_MAX_INTERVAL_MS) {
+      this.flipConfirmation = { side, count: 1, lastTickAt: tickAt };
+      return false;
+    }
+    if (interval < config.FLIP_CONFIRMATION_MIN_INTERVAL_MS) return false;
+    this.flipConfirmation = { side, count: state.count + 1, lastTickAt: tickAt };
+    return this.flipConfirmation.count >= config.FLIP_CONFIRMATION_UPDATES;
+  }
+
+  sweep(side, bookSide, shares, { now = this.now(), consume = false } = {}) {
     const quote = this.getFreshQuote(side, now);
-    if (!quote || !Array.isArray(quote.askLevels)) return null;
-    const sweep = sweepLevels(quote.askLevels, config.ENTRY_SHARES, { side: 'BUY', market });
-    if (!sweep.complete || !(sweep.gross > 0)) return null;
-    const allInCost = sweep.gross + sweep.fees;
+    const book = this.books?.[side];
+    const levels = book?.[bookSide];
+    if (!quote || !Array.isArray(levels) || !levels.length) return null;
+    const isBuy = bookSide === 'asks';
+    const quotedBest = Number(isBuy ? quote.bestAsk : quote.bestBid);
+    const bookBest = Number(levels[0]?.price);
+    if (!Number.isFinite(quotedBest) || !Number.isFinite(bookBest)
+      || Math.abs(quotedBest - bookBest) > EPSILON) return null;
+    const execution = sweepLevels(levels, shares, {
+      side: isBuy ? 'BUY' : 'SELL',
+      market: this.market || {},
+    });
+    if (!execution.complete) return execution;
+    if (consume) {
+      for (const fill of execution.fills) {
+        let remaining = Number(fill.shares);
+        for (const level of levels) {
+          if (Math.abs(Number(level.price) - Number(fill.price)) > EPSILON || remaining <= EPSILON) continue;
+          const available = Number(level.availableSize ?? level.size);
+          const used = Math.min(remaining, available);
+          level.availableSize = Math.max(0, available - used);
+          remaining -= used;
+        }
+      }
+      this.updateQuoteFromBook(side, book, now);
+    }
+    return {
+      ...execution,
+      totalCost: isBuy ? execution.gross + execution.fees : null,
+      netProceeds: isBuy ? null : execution.gross - execution.fees,
+    };
+  }
+
+  buildEntryCandidate(side, probability, market, now) {
+    const execution = this.sweep(side, 'asks', config.ENTRY_SHARES, { now });
+    if (!execution?.complete || !(execution.gross > 0)) return null;
+    const allInCost = execution.totalCost;
     const expectedEdgePerShare = (probability * config.ENTRY_SHARES - allInCost) / config.ENTRY_SHARES;
     return {
       side,
       probability,
-      bestAsk: quote.bestAsk,
+      bestAsk: this.liveQuotes[side]?.bestAsk ?? null,
       expectedEdgePerShare,
-      grossCost: sweep.gross,
-      entryFees: sweep.fees,
+      grossCost: execution.gross,
+      entryFees: execution.fees,
       allInCost,
-      fills: sweep.fills,
+      fills: execution.fills,
     };
   }
 
@@ -476,48 +505,30 @@ class MispricingBot extends WickBot {
     }
     if (this.strategyWindowStart !== windowStart) {
       this.strategyWindowStart = windowStart;
-      this.entriesThisWindow = 0;
-      this.postTakeProfitBlockedSide = null;
+      this.entryTriggeredThisWindow = false;
+      this.flipsThisWindow = 0;
+      this.resetFlipConfirmation();
     }
 
     this.model = this.modelSnapshot(now);
-    const currentWindowPosition = this.positions.find((position) =>
-      position.status === 'OPEN' && Number(position.windowStart) === windowStart);
-    if (currentWindowPosition) return this.processTakeProfit(currentWindowPosition, now);
-
-    const elapsedMs = now - windowStart;
     if (!this.model.ready) {
+      this.resetFlipConfirmation();
       this.signal = { side: null, reason: this.model.reason, modelReady: false };
       return false;
     }
-    if (elapsedMs < config.ENTRY_DELAY_MS) {
-      const remaining = Math.ceil((config.ENTRY_DELAY_MS - elapsedMs) / 1000);
-      this.signal = {
-        side: null,
-        reason: `Waiting ${remaining}s after window open before following signals.`,
-        modelReady: true,
-      };
-      return false;
-    }
+    const currentPosition = this.positions.find((position) =>
+      position.status === 'OPEN' && Number(position.windowStart) === windowStart);
+    if (currentPosition) return this.evaluateFlip(currentPosition, now);
+
+    const elapsedMs = now - windowStart;
     if (elapsedMs >= config.WINDOW_MS_5M) {
-      this.signal = { side: null, reason: 'Window closed; any unfilled position is held to resolution.' };
+      this.resetFlipConfirmation();
+      this.signal = { side: null, reason: 'Window closed; any open position waits for official resolution.' };
       return false;
     }
-    let postTakeProfitCooldownJustEnded = false;
-    if (this.rearmReadyAt != null) {
-      const cooldownRemainingMs = this.rearmReadyAt - now;
-      if (cooldownRemainingMs > 0) {
-        const remainingSeconds = Math.ceil(cooldownRemainingMs / 1000);
-        this.signal = {
-          side: null,
-          reason: `Take-profit filled; waiting ${remainingSeconds}s before following another signal.`,
-          cooldownUntil: this.rearmReadyAt,
-          cooldownRemainingMs,
-        };
-        return false;
-      }
-      this.rearmReadyAt = null;
-      postTakeProfitCooldownJustEnded = true;
+    if (this.entryTriggeredThisWindow) {
+      this.signal = { ...this.signal, reason: 'This window already used its entry; waiting for official resolution.' };
+      return false;
     }
 
     const market = this.market || {};
@@ -528,80 +539,126 @@ class MispricingBot extends WickBot {
       && candidate.expectedEdgePerShare >= config.MIN_NET_EDGE_PER_SHARE);
     candidates.sort((a, b) => b.expectedEdgePerShare - a.expectedEdgePerShare);
     const selected = candidates[0];
-    if (this.postTakeProfitBlockedSide != null) {
-      const sameBlockedSignal = selected?.side === this.postTakeProfitBlockedSide;
-      const askRecovered = sameBlockedSignal
-        && Number(selected.bestAsk) <= config.POST_TP_REARM_MAX_ASK + EPSILON;
-      if (sameBlockedSignal && !askRecovered) {
-        return this.blockHighAskPostTakeProfitSignal(selected);
-      }
-      this.postTakeProfitBlockedSide = null;
-    }
     if (!selected) {
       this.signal = {
         side: null,
-        reason: `No full 100-share entry has at least $${config.MIN_NET_EDGE_PER_SHARE.toFixed(2)} net edge per share.`,
+        reason: `No complete 100-share ask sweep has at least $${config.MIN_NET_EDGE_PER_SHARE.toFixed(2)} net edge per share.`,
         modelReady: true,
         probabilityUp: this.model.probabilityUp,
         probabilityDown: this.model.probabilityDown,
       };
       return false;
     }
-    if (postTakeProfitCooldownJustEnded
-      && Number(selected.bestAsk) > config.POST_TP_REARM_MAX_ASK + EPSILON) {
-      return this.blockHighAskPostTakeProfitSignal(selected);
-    }
     if (selected.allInCost > this.cash + EPSILON) {
       this.signal = { side: selected.side, reason: 'Signal qualified, but demo cash is insufficient.' };
       return false;
     }
-    return this.openPosition(selected, market, now, windowStart);
+    const execution = this.sweep(selected.side, 'asks', config.ENTRY_SHARES, { now, consume: true });
+    if (!execution?.complete) {
+      this.signal = { side: selected.side, reason: 'The full 100-share ask sweep is no longer available.' };
+      return false;
+    }
+    return this.openPosition(selected, execution, market, now, windowStart);
   }
 
-  blockHighAskPostTakeProfitSignal(candidate) {
-    const ask = Number(candidate.bestAsk);
-    const threshold = config.POST_TP_REARM_MAX_ASK;
-    this.postTakeProfitBlockedSide = candidate.side;
+  evaluateFlip(position, now) {
+    const windowEnd = Number(position.windowStart) + config.WINDOW_MS_5M;
+    if (now >= windowEnd) {
+      this.resetFlipConfirmation();
+      this.signal = { side: position.side, reason: 'Window ended; holding this position for official resolution.' };
+      return false;
+    }
+    if (this.flipsThisWindow >= config.MAX_FLIPS_PER_WINDOW) {
+      this.resetFlipConfirmation();
+      this.signal = { side: position.side, reason: 'Maximum one profitable flip reached; holding for official resolution.' };
+      return false;
+    }
+
+    const oppositeSide = position.side === 'UP' ? 'DOWN' : 'UP';
+    const liquidation = this.sweep(position.side, 'bids', position.shares, { now });
+    if (!liquidation?.complete) {
+      this.resetFlipConfirmation();
+      this.signal = { side: position.side, reason: 'Holding: fresh visible bid depth cannot sell all shares.' };
+      return false;
+    }
+    const realizedIfClosed = liquidation.netProceeds - Number(position.totalCost) - Number(position.fees || 0);
+    if (realizedIfClosed <= EPSILON) {
+      this.resetFlipConfirmation();
+      this.signal = {
+        side: position.side,
+        reason: `Holding: a full sell sweep would not be profitable after fees (${realizedIfClosed.toFixed(2)}).`,
+        liquidationPnl: realizedIfClosed,
+      };
+      return false;
+    }
+
+    const oppositeProbability = oppositeSide === 'UP'
+      ? this.model.probabilityUp : this.model.probabilityDown;
+    const candidate = this.buildEntryCandidate(oppositeSide, oppositeProbability, this.market || {}, now);
+    if (!candidate || candidate.expectedEdgePerShare < config.MIN_FLIP_NET_EDGE_PER_SHARE) {
+      this.resetFlipConfirmation();
+      this.signal = {
+        side: position.side,
+        reason: `Holding: opposite side needs at least $${config.MIN_FLIP_NET_EDGE_PER_SHARE.toFixed(2)} net edge per share.`,
+        oppositeSide,
+        oppositeEdgePerShare: candidate?.expectedEdgePerShare ?? null,
+      };
+      return false;
+    }
+    if (this.cash + liquidation.netProceeds + EPSILON < candidate.allInCost) {
+      this.resetFlipConfirmation();
+      this.signal = { side: position.side, reason: 'Holding: demo cash after the sell cannot fund the full opposite entry.' };
+      return false;
+    }
+    if (!this.recordFlipConfirmation(oppositeSide, this.model, now)) {
+      this.signal = {
+        side: position.side,
+        reason: `Opposite ${oppositeSide} signal is profitable; confirming fresh Binance update ${this.flipConfirmation.count}/${config.FLIP_CONFIRMATION_UPDATES}.`,
+        oppositeSide,
+        oppositeEdgePerShare: candidate.expectedEdgePerShare,
+        confirmation: { ...this.flipConfirmation },
+      };
+      return false;
+    }
+
+    const sale = this.sweep(position.side, 'bids', position.shares, { now, consume: true });
+    if (!sale?.complete) {
+      this.resetFlipConfirmation();
+      this.signal = { side: position.side, reason: 'Flip cancelled: full visible bid depth disappeared before selling.' };
+      return false;
+    }
+    this.closePosition(position, sale, now, oppositeSide);
+    const purchase = this.sweep(oppositeSide, 'asks', config.ENTRY_SHARES, { now, consume: true });
+    if (!purchase?.complete) {
+      this.resetFlipConfirmation();
+      this.signal = { side: null, reason: 'Flip sell completed, but the full opposite ask sweep became unavailable.' };
+      return true;
+    }
+    const flippedCandidate = {
+      ...candidate,
+      grossCost: purchase.gross,
+      entryFees: purchase.fees,
+      allInCost: purchase.totalCost,
+      fills: purchase.fills,
+    };
+    this.flipsThisWindow += 1;
+    this.openPosition(flippedCandidate, purchase, this.market || {}, now, Number(position.windowStart), true);
+    this.resetFlipConfirmation();
     this.signal = {
-      side: null,
-      blockedSide: candidate.side,
-      reason: `${candidate.side} signal voided after take-profit: best ask $${ask.toFixed(2)} is above $${threshold.toFixed(2)}. Waiting for a new signal or the ${candidate.side} ask to fall to $${threshold.toFixed(2)} or below.`,
-      modelReady: true,
-      bestAsk: ask,
-      priceThreshold: threshold,
+      side: oppositeSide,
+      reason: `Profitable flip: sold ${position.side} and bought ${oppositeSide} after two fresh Binance confirmations.`,
+      expectedEdgePerShare: candidate.expectedEdgePerShare,
+      probability: oppositeProbability,
+      flipCount: this.flipsThisWindow,
     };
-    return false;
+    return true;
   }
 
-  openPosition(candidate, market, now, windowStart) {
+  openPosition(candidate, execution, market, now, windowStart, isFlip = false) {
     const id = `${windowStart}-btc-${candidate.side.toLowerCase()}-${++this.positionSequence}`;
-    const target = calculateTakeProfitLimit({
-      market,
-      shares: config.ENTRY_SHARES,
-      entryGross: candidate.grossCost,
-      entryFees: candidate.entryFees,
-    });
-    const tpOrder = {
-      id: `${id}-tp`,
-      positionId: id,
-      action: 'SELL',
-      side: candidate.side,
-      orderType: 'LIMIT',
-      status: target.possible ? 'RESTING' : 'UNAVAILABLE',
-      requestedShares: config.ENTRY_SHARES,
-      filledShares: 0,
-      remainingShares: config.ENTRY_SHARES,
-      limitPrice: target.possible ? target.limitPrice : null,
-      targetNetReturn: config.TAKE_PROFIT_NET_RETURN,
-      targetNetProceeds: target.targetNetProceeds,
-      targetNetProfit: target.targetNetProfit,
-      reason: target.reason,
-      createdAt: now,
-      paperOnly: true,
-    };
     const position = {
       id,
-      strategyId: 'btc-5m-binance-mispricing-tp50',
+      strategyId: 'btc-5m-binance-mispricing-2candle-flip',
       marketId: market.id || market.conditionId || market.slug || null,
       marketSlug: market.slug || null,
       marketTitle: market.title || market.slug || 'BTC 5-minute Up/Down',
@@ -612,28 +669,27 @@ class MispricingBot extends WickBot {
       status: 'OPEN',
       shares: config.ENTRY_SHARES,
       initialShares: config.ENTRY_SHARES,
-      entryPrice: candidate.grossCost / config.ENTRY_SHARES,
-      totalCost: candidate.grossCost,
-      initialTotalCost: candidate.grossCost,
-      fees: candidate.entryFees,
-      initialFees: candidate.entryFees,
-      entryFees: candidate.entryFees,
+      entryPrice: execution.averagePrice,
+      totalCost: execution.gross,
+      initialTotalCost: execution.gross,
+      fees: execution.fees,
+      initialFees: execution.fees,
+      entryFees: execution.fees,
       openedAt: now,
       filledAt: now,
       markPrice: null,
       unrealizedPnl: null,
       estimatedMakerRebate: 0,
-      takeProfitOrder: tpOrder,
-      takeProfitTarget: target,
       entryEdgePerShare: candidate.expectedEdgePerShare,
       entryProbability: candidate.probability,
-      entryFills: candidate.fills,
+      entryFills: execution.fills,
       exitProceeds: 0,
       exitFees: 0,
       proceeds: 0,
       realizedPnl: null,
       feeContext: WickBot._test.feeContext(market),
       paperOnly: true,
+      openedByFlip: isFlip,
     };
     const entryOrder = {
       id: `${id}-entry`,
@@ -646,154 +702,101 @@ class MispricingBot extends WickBot {
       filledShares: config.ENTRY_SHARES,
       remainingShares: 0,
       averagePrice: position.entryPrice,
-      grossCost: candidate.grossCost,
-      fees: candidate.entryFees,
+      grossCost: execution.gross,
+      fees: execution.fees,
+      fills: execution.fills,
       createdAt: now,
       filledAt: now,
       paperOnly: true,
     };
-
-    this.cash -= candidate.allInCost;
+    this.cash -= execution.totalCost;
     this.positions.unshift(position);
-    this.orders.unshift(entryOrder, tpOrder);
-    this.windowOrders.unshift(entryOrder, tpOrder);
-    this.totalOrderAttempts += 2;
-    this.entriesThisWindow += 1;
+    this.orders.unshift(entryOrder);
+    this.windowOrders.unshift(entryOrder);
+    this.totalOrderAttempts += 1;
     this.entryTriggeredThisWindow = true;
     this.entryOrderPlaced = true;
-    this.lastTakeProfitAt = null;
-    this.postTakeProfitBlockedSide = null;
-    this.signal = {
-      side: candidate.side,
-      reason: `${candidate.side} selected at ${(candidate.probability * 100).toFixed(1)}% model probability and $${candidate.expectedEdgePerShare.toFixed(3)} net edge/share.`,
-      expectedEdgePerShare: candidate.expectedEdgePerShare,
-      probability: candidate.probability,
-      entryOrderId: entryOrder.id,
-    };
+    this.entryOrderId = entryOrder.id;
+    this.entryTriggerLatched = true;
+    this.entryTriggerAt = now;
+    this.entryTriggerSide = candidate.side;
+    this.entryTriggerReason = `${candidate.side} qualifying model signal`;
+    if (!isFlip) {
+      this.signal = {
+        side: candidate.side,
+        reason: `${candidate.side} selected at ${(candidate.probability * 100).toFixed(1)}% model probability and $${candidate.expectedEdgePerShare.toFixed(3)} net edge/share.`,
+        expectedEdgePerShare: candidate.expectedEdgePerShare,
+        probability: candidate.probability,
+        entryOrderId: entryOrder.id,
+      };
+    }
     this.events.unshift({
       ts: now,
-      event: 'ENTRY_FILLED',
-      type: 'ENTRY_FILLED',
-      message: `Paper bought ${config.ENTRY_SHARES} ${candidate.side} shares at an average ${position.entryPrice.toFixed(3)}.`,
-      details: { positionId: id, grossCost: candidate.grossCost, fees: candidate.entryFees },
+      at: now,
+      event: isFlip ? 'FLIP_ENTRY_FILLED' : 'ENTRY_FILLED',
+      type: isFlip ? 'FLIP_ENTRY_FILLED' : 'ENTRY_FILLED',
+      message: `Paper bought ${config.ENTRY_SHARES} ${candidate.side} shares at an average ${position.entryPrice.toFixed(3)}${isFlip ? ' after a profitable flip' : ''}.`,
+      details: { positionId: id, grossCost: execution.gross, fees: execution.fees, fills: execution.fills },
     });
     if (this.events.length > 200) this.events.length = 200;
     return true;
   }
 
-  processTakeProfit(position, now) {
-    const order = position.takeProfitOrder;
-    if (!order || order.status !== 'RESTING' || !Number.isFinite(Number(order.limitPrice))) {
-      this.signal = {
-        side: position.side,
-        reason: order?.status === 'UNAVAILABLE'
-          ? order.reason
-          : 'Holding this position to official resolution; no early flip.',
-      };
-      return false;
-    }
-    const quote = this.getFreshQuote(position.side, now);
-    if (!quote || !Array.isArray(quote.bidLevels)) {
-      this.signal = { side: position.side, reason: 'Take-profit limit is resting; waiting for fresh bid data.' };
-      return false;
-    }
-    const sweep = sweepLevels(quote.bidLevels, position.shares, {
-      side: 'SELL',
-      minimumPrice: Number(order.limitPrice),
-      market: this.market || {},
-    });
-    if (!sweep.complete) {
-      this.signal = {
-        side: position.side,
-        reason: `Take-profit limit at ${Number(order.limitPrice).toFixed(2)} is resting; full-size bid depth is not available.`,
-      };
-      return false;
-    }
-    const allInCost = Number(position.initialTotalCost) + Number(position.initialFees);
-    const minimumNetProceeds = allInCost * (1 + config.TAKE_PROFIT_NET_RETURN);
-    if (sweep.netProceeds + EPSILON < minimumNetProceeds) {
-      this.signal = {
-        side: position.side,
-        reason: 'Bid sweep did not meet the 50% net-return target after fees; holding to resolution.',
-      };
-      return false;
-    }
-
-    order.status = 'FILLED';
-    order.filledShares = sweep.filledShares;
-    order.remainingShares = 0;
-    order.averagePrice = sweep.averagePrice;
-    order.grossProceeds = sweep.gross;
-    order.fees = sweep.fees;
-    order.fills = sweep.fills;
-    order.filledAt = now;
-    position.status = 'SETTLED_EXIT';
-    position.settledAt = now;
+  closePosition(position, execution, now, oppositeSide) {
+    const order = {
+      id: `${position.id}-flip-exit-${now}`,
+      positionId: position.id,
+      action: 'SELL',
+      side: position.side,
+      orderType: 'PAPER_BID_SWEEP',
+      status: 'FILLED',
+      requestedShares: position.shares,
+      filledShares: execution.filledShares,
+      remainingShares: 0,
+      averagePrice: execution.averagePrice,
+      grossProceeds: execution.gross,
+      fees: execution.fees,
+      fills: execution.fills,
+      createdAt: now,
+      filledAt: now,
+      paperOnly: true,
+    };
+    const netProceeds = execution.netProceeds;
+    position.status = 'CLOSED';
+    position.settlementStatus = 'CLOSED';
     position.closedAt = now;
-    position.exitReason = 'TAKE_PROFIT';
-    position.exitType = 'LIMIT';
-    position.exitPrice = sweep.averagePrice;
-    position.exitProceeds = sweep.gross;
-    position.takeProfitProceeds = sweep.gross;
-    position.exitFees = sweep.fees;
-    position.proceeds = sweep.gross;
-    position.realizedPnl = sweep.gross - allInCost - sweep.fees;
+    position.exitReason = 'PROFITABLE_MODEL_FLIP';
+    position.exitType = 'PAPER_BID_SWEEP';
+    position.exitSide = oppositeSide;
+    position.exitPrice = execution.averagePrice;
+    position.exitProceeds = execution.gross;
+    position.exitFees = execution.fees;
+    position.proceeds = execution.gross;
+    position.realizedPnl = netProceeds - Number(position.totalCost) - Number(position.fees || 0);
+    position.outcome = 'EXIT';
+    position.strategyOutcome = null;
+    position.markPrice = execution.averagePrice;
     position.unrealizedPnl = 0;
-    position.markPrice = sweep.averagePrice;
-    position.strategyOutcome = 'WIN';
-    position.strategyOutcomeAt = now;
-    this.cash += sweep.netProceeds;
-    this.lastTakeProfitAt = now;
-    this.rearmReadyAt = now + config.POST_TP_COOLDOWN_MS;
-    this.postTakeProfitBlockedSide = null;
-    this.entryTriggeredThisWindow = false;
-    this.entryOrderPlaced = false;
-    this.signal = {
-      side: null,
-      reason: 'Take-profit filled; waiting 10 seconds before following another signal.',
-      cooldownUntil: this.rearmReadyAt,
-      cooldownRemainingMs: config.POST_TP_COOLDOWN_MS,
-      lastExitPositionId: position.id,
-      realizedPnl: position.realizedPnl,
-    };
-    const orderRecord = this.orders.find((item) => item.id === order.id);
-    if (orderRecord) Object.assign(orderRecord, order);
-    const windowOrder = this.windowOrders.find((item) => item.id === order.id);
-    if (windowOrder) Object.assign(windowOrder, order);
+    position.exitFills = execution.fills;
+    this.cash += netProceeds;
+    this.orders.unshift(order);
+    this.windowOrders.unshift(order);
+    this.totalOrderAttempts += 1;
     this.events.unshift({
       ts: now,
-      event: 'TAKE_PROFIT_FILLED',
-      type: 'TAKE_PROFIT_FILLED',
-      message: `Paper limit sell filled all ${sweep.filledShares} ${position.side} shares for a 50%+ net return after fees.`,
-      details: { positionId: position.id, proceeds: sweep.gross, fees: sweep.fees, realizedPnl: position.realizedPnl },
+      at: now,
+      event: 'PROFITABLE_MODEL_FLIP_EXIT',
+      type: 'PROFITABLE_MODEL_FLIP_EXIT',
+      message: `Paper sold all ${execution.filledShares} ${position.side} shares for a net exit profit of $${position.realizedPnl.toFixed(2)} before buying ${oppositeSide}.`,
+      details: {
+        positionId: position.id,
+        grossProceeds: execution.gross,
+        exitFees: execution.fees,
+        realizedPnl: position.realizedPnl,
+        fills: execution.fills,
+      },
     });
     if (this.events.length > 200) this.events.length = 200;
-    return true;
-  }
-
-  async closePreviousWindows(currentStart, now) {
-    const closing = this.positions.filter((position) =>
-      position.status === 'OPEN' && Number(position.windowStart) < currentStart);
-    const closed = await super.closePreviousWindows(currentStart, now);
-    for (const position of closing) {
-      if (position.status !== 'PENDING_RESOLUTION') continue;
-      const order = position.takeProfitOrder;
-      if (!order || order.status !== 'RESTING') continue;
-      order.status = 'CANCELLED_WINDOW_END';
-      order.cancelledAt = now;
-      const orderRecord = this.orders.find((item) => item.id === order.id);
-      if (orderRecord) Object.assign(orderRecord, order);
-      const windowOrder = this.windowOrders.find((item) => item.id === order.id);
-      if (windowOrder) Object.assign(windowOrder, order);
-      this.events.unshift({
-        ts: now,
-        event: 'TAKE_PROFIT_CANCELLED',
-        type: 'TAKE_PROFIT_CANCELLED',
-        message: 'Unfilled paper take-profit order cancelled at window end; position remains through resolution.',
-        details: { positionId: position.id },
-      });
-    }
-    return closed;
   }
 
   snapshot() {
@@ -812,7 +815,8 @@ class MispricingBot extends WickBot {
       openPositions: this.positions.filter((position) => position.status === 'OPEN').length,
       settledPositions: state.account.settledTrades,
       pendingResolutionPositions: this.positions.filter((position) => position.status === 'PENDING_RESOLUTION').length,
-      closedPositions: this.positions.filter((position) => position.status === 'SETTLED_EXIT').length,
+      closedPositions: this.positions.filter((position) =>
+        ['CLOSED', 'SETTLED_EXIT'].includes(position.status)).length,
     };
     const recentTrades = [...(state.positions || [])].slice(0, 100);
     const quotes = Object.fromEntries(['UP', 'DOWN'].map((side) => {
@@ -839,20 +843,23 @@ class MispricingBot extends WickBot {
       statusReason: this.signal?.reason || state.statusReason || 'Paper strategy is scanning.',
       strategy: {
         ...state.strategy,
-        id: 'btc-5m-binance-mispricing-tp50',
-        name: 'BTC 5-minute Binance mispricing',
-        version: 'btc-5m-binance-mispricing-tp50-v1',
+        id: 'btc-5m-binance-mispricing-2candle-flip',
+        name: 'BTC 5-minute Binance mispricing with profitable flip',
+        version: 'btc-5m-binance-mispricing-2candle-v2',
         execution: 'PAPER ONLY',
         symbol: 'BTCUSDT',
         timeframe: '5m',
         baseShares: config.ENTRY_SHARES,
         volatilityLookbackCandles: config.VOLATILITY_CANDLES,
         minimumNetEdgePerShare: config.MIN_NET_EDGE_PER_SHARE,
+        minimumFlipNetEdgePerShare: config.MIN_FLIP_NET_EDGE_PER_SHARE,
         entryDelaySeconds: config.ENTRY_DELAY_MS / 1000,
-        takeProfitNetReturn: config.TAKE_PROFIT_NET_RETURN,
-        takeProfitMaximumPrice: config.TAKE_PROFIT_MAX_PRICE,
-        postTakeProfitCooldownSeconds: config.POST_TP_COOLDOWN_MS / 1000,
-        rearmAfterTakeProfit: true,
+        flipConfirmationUpdates: config.FLIP_CONFIRMATION_UPDATES,
+        flipConfirmationMinIntervalMs: config.FLIP_CONFIRMATION_MIN_INTERVAL_MS,
+        flipConfirmationMaxIntervalMs: config.FLIP_CONFIRMATION_MAX_INTERVAL_MS,
+        flipConfirmation: { ...this.flipConfirmation },
+        flipsThisWindow: this.flipsThisWindow,
+        maximumFlipsPerWindow: config.MAX_FLIPS_PER_WINDOW,
         maximumOpenPositionsPerWindow: 1,
         unresolvedPositionsBlockNextWindow: false,
         entries: {
@@ -860,20 +867,27 @@ class MispricingBot extends WickBot {
           sharesPerSide: config.ENTRY_SHARES,
           entryDelayMs: config.ENTRY_DELAY_MS,
           minimumNetEdgePerShare: config.MIN_NET_EDGE_PER_SHARE,
+          triggeredThisWindow: this.entryTriggeredThisWindow,
           orderStatus: currentPosition ? 'FILLED' : 'NOT_PLACED',
           signal: this.signal,
         },
         exit: {
-          orderType: 'PAPER_LIMIT_SELL',
-          takeProfitNetReturn: config.TAKE_PROFIT_NET_RETURN,
+          orderType: 'PAPER_BID_SWEEP_ON_PROFITABLE_FLIP',
           stopLoss: null,
-          flip: false,
-          windowEnd: 'If take-profit does not fill, hold the position to official resolution.',
+          flip: {
+            enabled: true,
+            maximumPerWindow: config.MAX_FLIPS_PER_WINDOW,
+            minimumNetEdgePerShare: config.MIN_FLIP_NET_EDGE_PER_SHARE,
+            confirmationUpdates: config.FLIP_CONFIRMATION_UPDATES,
+            minimumUpdateIntervalMs: config.FLIP_CONFIRMATION_MIN_INTERVAL_MS,
+            maximumUpdateIntervalMs: config.FLIP_CONFIRMATION_MAX_INTERVAL_MS,
+          },
+          windowEnd: 'Without an eligible profitable flip, hold the position to official resolution.',
         },
-        timing: 'Wait 10 seconds after window open, then scan on each 500 ms strategy tick.',
-        sizing: `One ${config.ENTRY_SHARES}-share entry at a time.`,
+        timing: 'Scan immediately and every 500 ms; require fresh data for entries and flips.',
+        sizing: `${config.ENTRY_SHARES} shares per entry; at most one profitable opposite-side flip per window.`,
         trigger: 'Buy the side with the higher qualifying Binance-derived net edge.',
-        exitPolicy: 'Resting paper limit sell for 50% net return after fees; otherwise hold to official resolution.',
+        exitPolicy: 'Only sell all shares to flip when the exit is profitable after fees and the opposite entry qualifies; otherwise wait for official resolution.',
       },
       account,
       model,
@@ -909,16 +923,6 @@ class MispricingBot extends WickBot {
       } : null,
       trades: recentTrades,
       persistence: { status: 'MEMORY ONLY', detail: 'Railway restarts reset paper history.' },
-      rearm: {
-        enabled: true,
-        entriesThisWindow: this.entriesThisWindow,
-        readyAt: this.rearmReadyAt,
-        cooldownMs: config.POST_TP_COOLDOWN_MS,
-        cooldownRemainingMs: this.rearmReadyAt == null ? 0 : Math.max(0, this.rearmReadyAt - now),
-        lastTakeProfitAt: this.lastTakeProfitAt,
-        blockedSide: this.postTakeProfitBlockedSide,
-        maxAskAfterCooldown: config.POST_TP_REARM_MAX_ASK,
-      },
     };
   }
 }
@@ -926,7 +930,6 @@ class MispricingBot extends WickBot {
 MispricingBot._test = {
   calculateVolatility,
   estimateUpProbability,
-  calculateTakeProfitLimit,
   normalCdf,
   sweepLevels,
 };

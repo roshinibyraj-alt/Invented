@@ -338,6 +338,7 @@
             </div>
           </div>
           <div class="feed-row"><span class="feed-label">Positions awaiting resolution</span><strong class="feed-value" id="pendingCount">—</strong></div>
+          <div class="feed-row"><span class="feed-label">Flip confirmation / count</span><strong class="feed-value" id="flipStatus">—</strong></div>
           <div class="feed-row"><span class="feed-label">Fees recorded</span><strong class="feed-value" id="fees">—</strong></div>
         </article>
 
@@ -348,10 +349,10 @@
           </div>
           <div class="rules">
             <div class="rule"><b>Signal</b>Two closed Binance 5m candles; no partial candle in volatility.</div>
-            <div class="rule"><b>Entry</b>No fixed wait after a BTC 5-minute window opens. Buy 100 shares as soon as the official Binance open, fresh model, full visible asks, and fees show at least 5¢ net edge per share.</div>
-            <div class="rule"><b>Take profit</b>Rest a paper limit sell at the price that targets 50% net return after fees. Require full visible bid depth; no partial fills.</div>
-            <div class="rule"><b>Resolution</b>Otherwise hold until official Polymarket resolution for that exact market.</div>
-            <div class="rule"><b>Window &amp; TP waits</b>Each 5-minute window starts independently with no fixed open delay; older unresolved positions do not block it. After a full take-profit, wait 10 seconds. If the first qualifying signal's best ask is above 50¢, void it and wait for a fresh signal or that side's ask to fall to 50¢ or below. Binance and Polymarket feeds stay connected.</div>
+            <div class="rule"><b>Entry</b>Buy 100 shares immediately when the Binance window open, fresh model, full visible asks, and fees show at least 5¢ net edge per share.</div>
+            <div class="rule"><b>Profitable flip</b>Sell all shares only if the full visible bid sweep is profitable after fees and the opposite side has at least 10¢ net edge/share. Confirm with two fresh Binance updates 500–2,000 ms apart; allow one flip per window.</div>
+            <div class="rule"><b>Resolution</b>Without an eligible profitable flip, hold until official resolution of that exact Polymarket market.</div>
+            <div class="rule"><b>Window independence</b>Each 5-minute window starts immediately, even if an older position awaits resolution. No take-profit limit or post-exit cooldown is used.</div>
             <div class="rule"><b>Execution</b>Paper-only. No wallet or real order is connected.</div>
           </div>
         </article>
@@ -376,7 +377,7 @@
         </article>
         <article class="panel">
           <div class="panel-head">
-            <div><div class="panel-title">Activity</div><div class="panel-subtitle">Entries, take-profit fills, and official settlements</div></div>
+            <div><div class="panel-title">Activity</div><div class="panel-subtitle">Entries, profitable flips, and official settlements</div></div>
             <span class="badge" id="activityCount">0 events</span>
           </div>
           <div class="activity-list" id="activity"><div class="empty-row">Waiting for bot activity</div></div>
@@ -525,12 +526,14 @@
         setText("positionStatus", position ? `${position.side} · ${position.shares} shares` : "Flat");
         setText("positionTitle", position ? `${position.side} position · ${position.shares} shares` : "No open position");
         setText("positionDetail", position
-          ? `Entry ${contractPrice(position.entryPrice)} · cost ${money(position.totalCost)} · TP ${position.takeProfitOrder?.status === "RESTING" ? contractPrice(position.takeProfitOrder.limitPrice) : String(position.takeProfitOrder?.status || "hold to resolution").toLowerCase()}`
+          ? `Entry ${contractPrice(position.entryPrice)} · cost ${money(position.totalCost)} · flips allowed ${Number(state.strategy?.maximumFlipsPerWindow || 1)}`
           : "Waiting for a qualifying full-size entry");
         setText("positionPnl", position ? signedMoney(position.unrealizedPnl) : "—");
         $("positionPnl").className = pnlClass(position?.unrealizedPnl);
         setText("positionMark", position ? `best bid ${contractPrice(position.markPrice)}` : "unrealized at best bid");
         setText("pendingCount", Number(account.pendingResolutionPositions || 0).toLocaleString());
+        const flipConfirmation = state.strategy?.flipConfirmation || {};
+        setText("flipStatus", `${Number(flipConfirmation.count || 0)}/2 · ${Number(state.strategy?.flipsThisWindow || 0)}/1 this window`);
         setText("fees", money(account.takerFees));
         setText("persistenceStatus", state.persistence?.status === "CONNECTED"
           ? "paper ledger saved" : `ledger ${String(state.persistence?.status || "starting").toLowerCase()}`);

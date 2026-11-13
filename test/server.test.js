@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const startServer = require('../server');
 
 test('state endpoint returns the current strategy with no cache', async t => {
-  const expected = { mode: 'DEMO ONLY', strategy: { id: 'btc-5m-binance-mispricing-tp50' } };
+  const expected = { mode: 'DEMO ONLY', strategy: { id: 'btc-5m-binance-mispricing-2candle-flip' } };
   const server = startServer({ snapshot: () => expected }, 0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -16,7 +16,7 @@ test('state endpoint returns the current strategy with no cache', async t => {
 });
 
 test('dashboard state route serves the same live strategy snapshot', async t => {
-  const expected = { mode: 'DEMO ONLY', strategy: { id: 'btc-5m-binance-mispricing-tp50' } };
+  const expected = { mode: 'DEMO ONLY', strategy: { id: 'btc-5m-binance-mispricing-2candle-flip' } };
   const server = startServer({ snapshot: () => expected }, 0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -44,7 +44,7 @@ test('health endpoint reports strategy errors as unhealthy', async t => {
   assert.deepEqual(await response.json(), { ok: false, mode: 'DEMO', status: 'ERROR', now: 123 });
 });
 
-test('dashboard explains the BTC mispricing strategy and take-profit rules', async t => {
+test('dashboard explains the BTC mispricing strategy and profitable flip rules', async t => {
   const server = startServer({ snapshot: () => ({}) }, 0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -52,20 +52,19 @@ test('dashboard explains the BTC mispricing strategy and take-profit rules', asy
   const html = await response.text();
   assert.equal(response.status, 200);
   assert.match(html, /Invented · BTCUSDT Mispricing Paper Bot/);
-  assert.match(html, /No fixed wait after a BTC 5-minute window opens/);
-  assert.match(html, /50% net return after fees/);
-  assert.match(html, /hold until official Polymarket resolution/i);
-  assert.match(html, /Each 5-minute window starts independently with no fixed open delay/i);
-  assert.match(html, /first qualifying signal's best ask is above 50¢/);
-  assert.match(html, /After a full take-profit, wait 10 seconds/i);
-  assert.match(html, /void it and wait for a fresh signal or that side's ask to fall to 50¢ or below/i);
-  assert.match(html, /Binance and Polymarket feeds stay connected/i);
+  assert.match(html, /Buy 100 shares immediately/);
+  assert.match(html, /two fresh Binance updates 500–2,000 ms apart/i);
+  assert.match(html, /10¢ net edge\/share/i);
+  assert.match(html, /hold until official resolution of that exact Polymarket market/i);
+  assert.match(html, /Each 5-minute window starts immediately/i);
+  assert.match(html, /No take-profit limit or post-exit cooldown is used/i);
   assert.match(html, /Binance BTCUSDT aggregate-trade WebSocket/);
   assert.match(html, /Polymarket CLOB quotes/);
   assert.match(html, /Recent trades/);
   assert.match(html, /Activity/);
   assert.doesNotMatch(html, /BTC &amp; ETH Signal Desk/);
-  assert.doesNotMatch(html, /profitable flip/i);
+  assert.match(html, /profitable flip/i);
+  assert.doesNotMatch(html, /50% net return after fees/i);
 });
 
 test('unknown dashboard paths still return 404', async t => {
