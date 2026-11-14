@@ -191,3 +191,55 @@ test('dashboard snapshot exposes rung deadlines, status, and accumulated positio
   assert.equal(snapshot.positionsBySide.UP, null);
   assert.equal(snapshot.strategy.exitPolicy.includes('no take-profit'), true);
 });
+
+test('backs off repeated Gamma 429 errors and resumes market scanning', async () => {
+  let now = WINDOW_START + 1000;
+  let scans = 0;
+  const marketData = {
+    async getBtcMarket(start, windowMs) {
+      scans += 1;
+      if (scans < 3) throw new Error('gamma-api.polymarket.com HTTP 429');
+      return {
+        id: 'btc-market',
+        conditionId: 'btc-condition',
+        slug: `btc-updown-5m-${start / 1000}`,
+        title: 'BTC Up or Down',
+        start,
+        end: start + windowMs,
+        tokens: { UP: 'up-token', DOWN: 'down-token' },
+      };
+    },
+    async getBook() {
+      return {
+        bids: [{ price: '0.59', size: '50' }],
+        asks: [{ price: '0.60', size: '50' }],
+      };
+    },
+    connectMarketStream() { return { close() {} }; },
+    async getMarket() { return null; },
+    resolvedWinner() { return null; },
+  };
+  const bot = new MarketMakerBot({ marketData, now: () => now, initialCapital: 3000 });
+
+  await bot.tick(now);
+  assert.equal(scans, 1);
+  assert.equal(bot.status, 'blocked_or_error');
+
+  now += config.MARKET_SCAN_RETRY_BASE_MS - 1;
+  await bot.tick(now);
+  assert.equal(scans, 1, 'does not retry within the initial backoff');
+
+  now += 1;
+  await bot.tick(now);
+  assert.equal(scans, 2);
+
+  now += config.MARKET_SCAN_RETRY_BASE_MS * 2 - 1;
+  await bot.tick(now);
+  assert.equal(scans, 2, 'backs off longer after another failure');
+
+  now += 1;
+  await bot.tick(now);
+  assert.equal(scans, 3);
+  assert.equal(bot.status, 'scanning');
+  assert.equal(bot.error, null);
+});

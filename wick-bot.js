@@ -51,6 +51,7 @@ class WickBot{
     this.startedAt=Date.now();
     this.positions=[];this.events=[];this.status='starting';this.completedWindows=new Map();
     this.error=null;this.market=null;this.lastMarketAt=0;
+    this.marketScanFailures=0;this.nextMarketScanAt=0;this.marketScanWindowStart=null;
     this.lastScanAt=null;this.orders=[];this.totalOrderAttempts=0;
     this.windowOrders=[];this.orderWindowStart=null;this.running=false;
     this.entryTriggerLatched=false;this.entryTriggerAt=null;this.entryTriggerSide=null;
@@ -84,10 +85,16 @@ class WickBot{
     p.exitQuotes=this.captureQuotePair(now,source,{[p.side]:ownQuote});
     p.exitQuoteAt=now;
   }
-  async tick(){
+  async tick(now=Date.now()){
+    let marketScanInProgress=false;
     try{
-      const now=Date.now(),currentStart=Math.floor(now/this.windowMs)*this.windowMs;
+      const currentStart=Math.floor(now/this.windowMs)*this.windowMs;
       const start=this.getWindowStartToScan(now,currentStart);
+      if(this.marketScanWindowStart!==start){
+        this.marketScanWindowStart=start;
+        this.marketScanFailures=0;
+        this.nextMarketScanAt=0;
+      }
       if(this.quoteWindowStart!==start){
         this.quoteWindowStart=start;
         this.liveQuotes={UP:{status:'MISSING'},DOWN:{status:'MISSING'}};
@@ -99,13 +106,24 @@ class WickBot{
           note:error?.message||'Could not complete resolution checks',
         });
       });
-      if(!this.market||this.market.start!==start||now-this.lastMarketAt>cfg.MARKET_REFRESH_MS){
-        this.market=await this.loadMarket(start,this.windowMs);this.lastMarketAt=now;
+      const needsMarket=!this.market||this.market.start!==start||now-this.lastMarketAt>cfg.MARKET_REFRESH_MS;
+      if(needsMarket&&now>=this.nextMarketScanAt){
+        marketScanInProgress=true;
+        this.market=await this.loadMarket(start,this.windowMs);
+        marketScanInProgress=false;
+        this.lastMarketAt=now;
         if(!this.market){
+          this.marketScanFailures+=1;
+          this.nextMarketScanAt=now+this.marketScanRetryDelay();
           this.status='waiting_for_market';this.lastScanAt=now;
           if(!this.lastHeartbeat||now-this.lastHeartbeat>30000){this.lastHeartbeat=now;this.log('HEARTBEAT',{status:this.status,windowStart:start})}
           return;
         }
+        this.marketScanFailures=0;this.nextMarketScanAt=0;
+      }
+      if(needsMarket&&(!this.market||this.market.start!==start)){
+        this.status=this.error?'blocked_or_error':'waiting_for_market';
+        return;
       }
       await this.refreshLiveQuotes(now);
       if(this.orderWindowStart!==start)this.openStrategyWindow(start,now);
@@ -118,8 +136,18 @@ class WickBot{
       const hasOpen=this.positions.some(p=>p.windowStart===this.market?.start&&p.status==='OPEN');
        this.status=this.completedWindows.has(start)?'window_complete':hasOpen?'position_open':'scanning';
       if(!this.lastHeartbeat||now-this.lastHeartbeat>30000){this.lastHeartbeat=now;this.log('HEARTBEAT',{cash:this.cash,windowStart:start})}
-    }catch(e){this.status='blocked_or_error';this.error=e.message;
-      if(this.lastError!==e.message||Date.now()-this.lastErrorAt>30000){this.lastError=e.message;this.lastErrorAt=Date.now();this.log('SCAN_ERROR',{note:e.message})}}
+    }catch(e){
+      if(marketScanInProgress){
+        this.marketScanFailures+=1;
+        this.nextMarketScanAt=now+this.marketScanRetryDelay();
+      }
+      this.status='blocked_or_error';this.error=e.message;
+      if(this.lastError!==e.message||now-this.lastErrorAt>30000){this.lastError=e.message;this.lastErrorAt=now;this.log('SCAN_ERROR',{note:e.message})}
+    }
+  }
+  marketScanRetryDelay(){
+    return Math.min(cfg.MARKET_SCAN_RETRY_MAX_MS,
+      cfg.MARKET_SCAN_RETRY_BASE_MS*2**Math.max(0,this.marketScanFailures-1));
   }
   loadMarket(start,windowMs){return this.marketData.getBtcMarket(start,windowMs)}
   getWindowStartToScan(_now,currentStart){return currentStart}
