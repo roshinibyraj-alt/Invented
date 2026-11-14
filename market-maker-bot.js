@@ -1464,8 +1464,20 @@ class MarketMakerBot extends MispricingBot {
     for (const position of currentlyOpenPositions) {
       const shares = Math.max(0, Number(position.shares) || 0);
       const costBasis = Math.max(0, Number(position.totalCost) || 0);
-      const markBid = position.markBid == null ? null : Number(position.markBid);
-      const markAgeMs = now - Number(position.markUpdatedAt);
+      const sameWindow = Number(position.windowStart) === Number(this.market?.start);
+      const currentQuote = sameWindow ? state.quotes?.[position.side] : null;
+      const currentQuoteBid = currentQuote?.bestBid == null ? null : Number(currentQuote.bestBid);
+      const currentQuoteAt = Number(currentQuote?.updatedAt);
+      const currentQuoteFresh = Number.isFinite(currentQuoteBid)
+        && currentQuoteBid >= 0
+        && currentQuoteBid <= 1
+        && Number.isFinite(currentQuoteAt)
+        && now - currentQuoteAt <= 15_000;
+      const markBid = currentQuoteFresh
+        ? currentQuoteBid
+        : position.markBid == null ? null : Number(position.markBid);
+      const markUpdatedAt = currentQuoteFresh ? currentQuoteAt : Number(position.markUpdatedAt);
+      const markAgeMs = now - markUpdatedAt;
       if (!Number.isFinite(markBid) || markBid < 0 || markBid > 1
         || !Number.isFinite(markAgeMs) || markAgeMs > 15_000) {
         unpricedOpenCostBasis += costBasis;

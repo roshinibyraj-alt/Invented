@@ -402,6 +402,21 @@ test('equity includes last-known pending bids and reports unpriced cost separate
   assert.equal(account.equity, fixture.bot.cash + 2.5);
 });
 
+test('marks current inventory from the live CLOB quote when the position has no mark field', () => {
+  const fixture = makeBot();
+  const placedAt = fixture.tickAt(1_000);
+  const upOrder = activeOrders(fixture.bot, 'UP', 'BUY')[0];
+  fixture.setNow(placedAt + 100);
+  setBook(fixture.bot, 'UP', 0.25, upOrder.limitPrice, placedAt + 100);
+
+  const position = fixture.bot.positions.find((item) => item.side === 'UP');
+  assert.equal(position.markBid, undefined);
+  const account = fixture.bot.snapshot().account;
+  assert.equal(account.markedValue, 1.25);
+  assert.equal(account.openPositionCostBasisUnpriced, 0);
+  assert.equal(account.equity, fixture.bot.cash + 1.25);
+});
+
 test('summarizes accumulated inventory and weighted average entry by side', () => {
   const fixture = makeBot();
   fixture.bot.positions.push({
