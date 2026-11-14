@@ -3,214 +3,126 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#08131f">
-  <title>CLOB Flow · BTC 5m Paper Maker</title>
+  <meta name="theme-color" content="#f2f1e9">
+  <title>Invented · BTC 5-minute paper bot</title>
   <style>
     :root {
-      color-scheme: dark;
-      --bg: #08131f;
-      --surface: #101e2d;
-      --surface-2: #14263a;
-      --line: rgba(174, 205, 230, .13);
-      --muted: #91a6ba;
-      --text: #edf6ff;
-      --up: #3be0a3;
-      --up-dim: rgba(59, 224, 163, .13);
-      --down: #ff718c;
-      --down-dim: rgba(255, 113, 140, .14);
-      --blue: #72baff;
-      --amber: #ffc56d;
-      --shadow: 0 18px 54px rgba(0, 0, 0, .24);
+      color-scheme: light;
+      --canvas: #f2f1e9;
+      --paper: #fbfaf5;
+      --paper-deep: #e9e8dd;
+      --ink: #192c2a;
+      --muted: #71807a;
+      --line: #d9ded5;
+      --up: #087e68;
+      --up-soft: #e2f1eb;
+      --down: #bd5546;
+      --down-soft: #f8e9e3;
+      --gold: #a46b20;
+      --gold-soft: #f4eddd;
+      --shadow: 0 12px 34px rgba(39, 55, 45, .055);
     }
     * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      min-height: 100vh;
-      background:
-        radial-gradient(ellipse at 4% 0%, rgba(42, 114, 169, .18), transparent 34rem),
-        radial-gradient(ellipse at 98% 6%, rgba(30, 139, 105, .12), transparent 27rem),
-        var(--bg);
-      color: var(--text);
-      font: 14px/1.5 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    body { margin: 0; min-height: 100dvh; background: var(--canvas); color: var(--ink); font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+    .shell { width: min(1320px, calc(100% - 40px)); margin: auto; padding: 27px 0 40px; }
+    .topbar, .brand, .top-actions, .section-head, .window-heading, .book-head, .book-quote, .account-head, .ladder-title, .footline { display:flex; align-items:center; justify-content:space-between; gap:14px; }
+    .topbar { margin-bottom: 29px; }
+    .brand { justify-content:flex-start; gap:12px; }
+    .brand-mark { display:grid; place-items:center; width:39px; height:39px; border-radius:12px; background:var(--ink); color:#e9e8dd; font:700 17px/1 Georgia,serif; letter-spacing:-.09em; }
+    .brand-name { font-size:14px; font-weight:850; letter-spacing:.08em; }
+    .brand-sub, .eyebrow, .micro, .section-kicker { color:var(--muted); font-size:10px; font-weight:750; letter-spacing:.11em; text-transform:uppercase; }
+    .brand-sub { margin-top:3px; letter-spacing:.06em; }
+    .top-actions { justify-content:flex-end; flex-wrap:wrap; }
+    .badge, .status { display:inline-flex; align-items:center; gap:7px; min-height:27px; padding:5px 10px; border:1px solid var(--line); border-radius:999px; background:var(--paper); color:var(--muted); font-size:10px; font-weight:800; letter-spacing:.055em; white-space:nowrap; }
+    .badge.paper { color:var(--up); background:var(--up-soft); border-color:#c7e3d7; }
+    .status::before { content:""; width:6px; height:6px; border-radius:50%; background:currentColor; }
+    .status.good { color:var(--up); background:var(--up-soft); border-color:#c7e3d7; }
+    .status.warn { color:var(--gold); background:var(--gold-soft); border-color:#eadbb9; }
+    .status.bad { color:var(--down); background:var(--down-soft); border-color:#edc9bd; }
+    .hero { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:28px; align-items:center; padding:27px 30px; border:1px solid #d5ddd3; border-radius:18px; background:var(--paper); box-shadow:var(--shadow); }
+    .hero h1 { margin:5px 0 6px; font:500 clamp(25px,3vw,37px)/1.08 Georgia,"Times New Roman",serif; letter-spacing:-.035em; }
+    .hero p { max-width:630px; margin:0; color:var(--muted); font-size:13px; }
+    .window-panel { min-width:230px; padding-left:24px; border-left:1px solid var(--line); text-align:right; }
+    .window-panel strong { display:block; margin:1px 0 4px; font:500 29px/1.1 Georgia,serif; font-variant-numeric:tabular-nums; }
+    .window-panel .slug { color:var(--muted); font-size:11px; overflow-wrap:anywhere; }
+    .hero-status { display:flex; justify-content:flex-end; margin-top:9px; }
+    .overview { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:11px; margin-top:13px; }
+    .metric { min-height:90px; padding:15px 17px; border:1px solid var(--line); border-radius:13px; background:rgba(251,250,245,.72); }
+    .metric strong { display:block; margin-top:8px; font-size:23px; font-weight:760; letter-spacing:-.04em; font-variant-numeric:tabular-nums; }
+    .metric small { display:block; margin-top:2px; color:var(--muted); font-size:10px; }
+    .positive { color:var(--up) !important; } .negative { color:var(--down) !important; }
+    .section-head { align-items:flex-end; margin:27px 1px 11px; }
+    .section-head h2 { margin:3px 0 0; font:500 21px/1.2 Georgia,"Times New Roman",serif; letter-spacing:-.02em; }
+    .section-head p { margin:3px 0 0; color:var(--muted); font-size:11px; }
+    .book-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
+    .book { overflow:hidden; border:1px solid var(--line); border-radius:15px; background:var(--paper); box-shadow:var(--shadow); }
+    .book.up { border-top:3px solid var(--up); } .book.down { border-top:3px solid var(--down); }
+    .book-head { padding:15px 18px 13px; border-bottom:1px solid var(--line); }
+    .side-title { display:flex; align-items:center; gap:10px; }
+    .side-mark { display:grid; place-items:center; width:31px; height:31px; border-radius:10px; font-size:11px; font-weight:850; }
+    .up .side-mark { color:var(--up); background:var(--up-soft); } .down .side-mark { color:var(--down); background:var(--down-soft); }
+    .side-title h3 { margin:0; font-size:16px; letter-spacing:.01em; }
+    .side-title small { display:block; color:var(--muted); font-size:10px; }
+    .book-body { padding:15px 18px 17px; }
+    .quotes { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+    .quote { padding:10px 12px; border-radius:10px; background:#f1f1e9; }
+    .quote span { display:block; color:var(--muted); font-size:9px; font-weight:750; letter-spacing:.1em; text-transform:uppercase; }
+    .quote strong { display:block; margin-top:3px; font-size:20px; font-weight:730; font-variant-numeric:tabular-nums; }
+    .position-line { display:flex; align-items:center; justify-content:space-between; gap:12px; margin:12px 0 15px; padding:11px 12px; border:1px solid var(--line); border-radius:10px; }
+    .position-line strong { font-size:14px; font-variant-numeric:tabular-nums; }
+    .position-line .pos-detail { color:var(--muted); font-size:10px; text-align:right; }
+    .ladder-title { margin:0 0 7px; }
+    .ladder-title h4 { margin:0; font-size:11px; font-weight:820; letter-spacing:.04em; }
+    .ladder-title span { color:var(--muted); font-size:10px; }
+    .ladder-scroll { overflow-x:auto; }
+    .ladder { width:100%; border-collapse:collapse; font-size:11px; white-space:nowrap; }
+    .ladder th { padding:7px 8px; border-bottom:1px solid var(--line); color:var(--muted); font-size:9px; font-weight:760; letter-spacing:.08em; text-align:left; text-transform:uppercase; }
+    .ladder td { padding:8px; border-bottom:1px solid #eceee7; font-variant-numeric:tabular-nums; }
+    .ladder tbody tr:last-child td { border-bottom:0; }
+    .ladder td:first-child { color:var(--muted); }
+    .state { display:inline-flex; align-items:center; padding:3px 7px; border-radius:999px; background:#eceee8; color:#68756d; font-size:9px; font-weight:800; letter-spacing:.04em; }
+    .state.resting, .state.partial { color:var(--gold); background:var(--gold-soft); }
+    .state.filled { color:var(--up); background:var(--up-soft); }
+    .state.cancelled { color:#768078; background:#eceee8; }
+    .state.waiting { color:#66736b; background:#f0f0e9; }
+    .status-detail { margin-left:7px; color:var(--muted); font-size:9px; }
+    .strategy-strip { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:13px 16px; border:1px solid var(--line); border-radius:12px; background:var(--paper); }
+    .strategy-name { font-size:12px; font-weight:800; }
+    .strategy-meta { color:var(--muted); font-size:10px; text-align:right; }
+    .strategy-meta b { color:var(--ink); font-weight:750; }
+    .error-banner { display:none; margin-top:12px; padding:10px 13px; border:1px solid #edc9bd; border-radius:10px; background:var(--down-soft); color:#8d4035; font-size:12px; }
+    .footline { margin-top:24px; padding-top:12px; border-top:1px solid var(--line); color:var(--muted); font-size:10px; }
+    .mono { font-variant-numeric:tabular-nums; }
+    @media (max-width:800px) {
+      .shell { width:min(100% - 28px, 620px); padding-top:18px; }
+      .topbar { align-items:flex-start; margin-bottom:19px; }
+      .top-actions { gap:5px; }
+      .hero { grid-template-columns:1fr; gap:17px; padding:21px; }
+      .window-panel { display:grid; grid-template-columns:1fr auto; align-items:center; gap:3px 12px; padding:12px 0 0; border-left:0; border-top:1px solid var(--line); text-align:left; }
+      .window-panel strong { grid-column:2; grid-row:1 / span 2; font-size:25px; text-align:right; }
+      .window-panel .slug { grid-column:1; }
+      .hero-status { grid-column:1 / -1; justify-content:flex-start; margin-top:4px; }
+      .overview { grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
+      .metric { padding:12px; min-height:82px; }
+      .metric strong { font-size:21px; }
+      .book-grid { grid-template-columns:1fr; }
+      .section-head { align-items:flex-start; flex-direction:column; gap:5px; }
+      .strategy-strip { align-items:flex-start; flex-direction:column; gap:5px; }
+      .strategy-meta { text-align:left; }
+      .footline { align-items:flex-start; flex-direction:column; gap:5px; }
     }
-    .shell { width: min(1440px, calc(100% - 36px)); margin: 0 auto; padding: 26px 0 48px; }
-    .topbar, .brand, .top-meta, .hero-row, .panel-head, .side-head, .book-line, .order-row, .footer {
-      display: flex; align-items: center; justify-content: space-between; gap: 14px;
-    }
-    .topbar { margin-bottom: 28px; }
-    .brand { justify-content: flex-start; gap: 13px; }
-    .brand-mark {
-      display: grid; place-items: center; width: 42px; height: 42px; border-radius: 14px;
-      color: #07151e; font-weight: 950; letter-spacing: -.08em;
-      background: linear-gradient(140deg, var(--up), #87f0d0);
-      box-shadow: 0 0 30px rgba(59, 224, 163, .19);
-    }
-    .brand-name { font-size: 15px; font-weight: 800; letter-spacing: .02em; }
-    .brand-sub, .eyebrow, .metric-label, .label, .table th, .micro-label {
-      color: var(--muted); text-transform: uppercase; letter-spacing: .105em; font-size: 10px; font-weight: 750;
-    }
-    .top-meta { justify-content: flex-end; flex-wrap: wrap; }
-    .pill, .tag {
-      display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--line);
-      border-radius: 999px; padding: 6px 10px; font-size: 10px; font-weight: 800; letter-spacing: .06em;
-      white-space: nowrap;
-    }
-    .pill::before { content: ""; width: 6px; height: 6px; background: currentColor; border-radius: 50%; box-shadow: 0 0 12px currentColor; }
-    .pill.good { color: var(--up); background: var(--up-dim); }
-    .pill.warn { color: var(--amber); background: rgba(255,197,109,.1); }
-    .pill.bad { color: var(--down); background: var(--down-dim); }
-    .tag { color: #b7c8d8; padding: 5px 8px; background: rgba(255,255,255,.035); }
-    .tag.green { color: var(--up); background: var(--up-dim); border-color: rgba(59,224,163,.23); }
-    .tag.red { color: var(--down); background: var(--down-dim); border-color: rgba(255,113,140,.24); }
-    .tag.blue { color: var(--blue); background: rgba(114,186,255,.12); border-color: rgba(114,186,255,.2); }
-    .hero {
-      position: relative; overflow: hidden; padding: 27px 30px; border: 1px solid var(--line); border-radius: 22px;
-      background: linear-gradient(112deg, rgba(20, 42, 61, .96), rgba(14, 31, 47, .93));
-      box-shadow: var(--shadow); margin-bottom: 16px;
-    }
-    .hero::after {
-      content: ""; position: absolute; width: 240px; height: 240px; border-radius: 50%; right: 9%; top: -180px;
-      border: 1px solid rgba(59,224,163,.17); box-shadow: 0 0 0 26px rgba(59,224,163,.025), 0 0 0 54px rgba(59,224,163,.02);
-      pointer-events: none;
-    }
-    h1 { margin: 5px 0 7px; font-size: clamp(23px, 3.3vw, 38px); line-height: 1.12; letter-spacing: -.045em; }
-    .hero-copy { color: #b5c5d4; max-width: 700px; margin: 0; }
-    .hero-row { position: relative; z-index: 1; align-items: flex-end; }
-    .window-box { text-align: right; min-width: 200px; }
-    .window-box strong { display: block; font-size: 24px; font-variant-numeric: tabular-nums; }
-    .window-box span { color: var(--muted); font-size: 11px; }
-    .inventory-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; margin:14px 0; }
-    .inventory-card {
-      padding:16px 18px; border:1px solid var(--line); border-radius:17px;
-      background:linear-gradient(145deg,rgba(18,34,50,.98),rgba(13,27,41,.98)); box-shadow:var(--shadow);
-    }
-    .inventory-card.up { border-top:2px solid var(--up); }
-    .inventory-card.down { border-top:2px solid var(--down); }
-    .inventory-head { display:flex; align-items:center; justify-content:space-between; gap:10px; }
-    .inventory-shares { margin:10px 0 13px; font-size:clamp(27px,4vw,38px); line-height:1; font-weight:850; letter-spacing:-.05em; font-variant-numeric:tabular-nums; }
-    .inventory-values { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:9px; }
-    .inventory-value { padding:9px 10px; border-radius:10px; background:rgba(255,255,255,.035); }
-    .inventory-value span { display:block; color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.08em; }
-    .inventory-value strong { display:block; margin-top:4px; font-size:15px; font-variant-numeric:tabular-nums; }
-    .historical-inventory { display:grid; gap:11px; }
-    .historical-window { padding:13px; border:1px solid var(--line); border-radius:15px; background:rgba(16,30,45,.72); }
-    .historical-head { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:10px; }
-    .historical-head strong { display:block; font-size:12px; }
-    .historical-head small { color:var(--muted); font-size:10px; }
-    .historical-side-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:9px; }
-    .historical-side { padding:10px 12px; border-radius:11px; background:rgba(255,255,255,.03); }
-    .historical-side.up { border-left:2px solid var(--up); }
-    .historical-side.down { border-left:2px solid var(--down); }
-    .historical-side strong { margin-right:9px; font-size:12px; }
-    .historical-side span { font-size:12px; font-weight:750; }
-    .historical-side small { display:block; margin-top:5px; color:var(--muted); font-size:10px; }
-    .metrics { display: grid; grid-template-columns: repeat(6, minmax(0,1fr)); gap: 12px; margin: 14px 0; }
-    .metric, .panel, .side-card {
-      border: 1px solid var(--line); border-radius: 17px; background: linear-gradient(150deg, rgba(18,34,50,.98), rgba(13,27,41,.98));
-      box-shadow: var(--shadow);
-    }
-    .metric { padding: 16px 17px; min-height: 105px; }
-    .metric-value { margin-top: 8px; font-size: clamp(19px, 2.4vw, 27px); font-weight: 820; letter-spacing: -.035em; font-variant-numeric: tabular-nums; }
-    .metric-sub { margin-top: 2px; color: var(--muted); font-size: 11px; }
-    .positive { color: var(--up) !important; } .negative { color: var(--down) !important; }
-    .section-title { display:flex; align-items:center; justify-content:space-between; gap:12px; margin: 28px 1px 11px; }
-    .section-title h2 { margin:0; font-size: 15px; letter-spacing: -.01em; }
-    .section-title p { margin:0; color:var(--muted); font-size:11px; }
-    .side-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }
-    .side-card { overflow:hidden; }
-    .side-card.up { border-top: 2px solid var(--up); }
-    .side-card.down { border-top: 2px solid var(--down); }
-    .side-head { padding: 18px 20px 14px; border-bottom:1px solid var(--line); }
-    .side-name { display:flex; align-items:center; gap:11px; }
-    .side-orb { width:35px; height:35px; display:grid; place-items:center; border-radius:12px; font-weight:900; }
-    .up .side-orb { color:var(--up); background:var(--up-dim); }
-    .down .side-orb { color:var(--down); background:var(--down-dim); }
-    .side-name h3 { margin:0; font-size:17px; letter-spacing:.01em; }
-    .side-name span { color:var(--muted); font-size:11px; }
-    .side-body { padding: 17px 20px 20px; }
-    .midpoint-row { display:grid; grid-template-columns:1fr auto; align-items:end; gap:12px; }
-    .midpoint { font-size:39px; line-height:1; font-weight:850; letter-spacing:-.055em; font-variant-numeric:tabular-nums; }
-    .midpoint-caption { margin-top:7px; color:var(--muted); font-size:11px; }
-    .limit-box { text-align:right; }
-    .limit-price { margin-top:4px; font-size:22px; font-weight:780; color:var(--blue); font-variant-numeric:tabular-nums; }
-    .book-line { justify-content:flex-start; gap:8px; margin-top:17px; }
-    .book-quote { flex:1; border-radius:11px; background:rgba(255,255,255,.035); padding:9px 11px; }
-    .book-quote span { display:block; color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.08em; }
-    .book-quote strong { display:block; margin-top:3px; font-size:15px; font-variant-numeric:tabular-nums; }
-    .side-stats { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin-top:14px; }
-    .side-stat { padding:10px 11px; border-radius:11px; background:rgba(255,255,255,.028); }
-    .side-stat strong { display:block; margin-top:4px; font-size:16px; font-variant-numeric:tabular-nums; }
-    .orders-block { margin-top:15px; padding-top:13px; border-top:1px solid var(--line); }
-    .orders-title { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:9px; }
-    .order-list { display:grid; gap:7px; }
-    .order-row { justify-content:flex-start; padding:9px 10px; gap:10px; border-radius:10px; background:rgba(114,186,255,.075); }
-    .order-row .order-main { flex:1; min-width:0; }
-    .order-row strong { display:block; font-size:12px; }
-    .order-row small { color:var(--muted); font-size:10px; }
-    .order-row .order-time { text-align:right; color:var(--blue); font-size:11px; font-variant-numeric:tabular-nums; white-space:nowrap; }
-    .empty { color:var(--muted); font-size:11px; padding:9px 0; }
-    .rules { display:grid; grid-template-columns:repeat(5,1fr); gap:10px; }
-    .rule { padding:14px 15px; border:1px solid var(--line); border-radius:14px; background:rgba(16,30,45,.76); }
-    .rule-num { color:var(--blue); font-size:10px; font-weight:900; letter-spacing:.12em; }
-    .rule strong { display:block; margin:5px 0 4px; font-size:12px; }
-    .rule p { margin:0; color:var(--muted); font-size:11px; line-height:1.55; }
-    .note { margin-top:12px; padding:12px 14px; border:1px solid rgba(255,197,109,.2); border-radius:12px; background:rgba(255,197,109,.06); color:#e9d3a8; font-size:11px; }
-    .panel { overflow:hidden; }
-    .panel-head { padding:15px 18px; border-bottom:1px solid var(--line); }
-    .panel-head h3 { margin:0; font-size:13px; }
-    .panel-head p { margin:3px 0 0; color:var(--muted); font-size:10px; }
-    .table-scroll { overflow:auto; max-height:410px; }
-    .table { width:100%; border-collapse:collapse; white-space:nowrap; }
-    .table th { position:sticky; top:0; z-index:1; padding:10px 13px; background:#122235; text-align:left; }
-    .table td { padding:10px 13px; border-top:1px solid rgba(174,205,230,.07); font-size:11px; color:#d8e5f0; }
-    .table tr:hover td { background:rgba(255,255,255,.025); }
-    .table-empty { padding:24px !important; color:var(--muted) !important; text-align:center; }
-    .lower-grid { display:grid; grid-template-columns:1.55fr 1fr; gap:14px; }
-    .activity-list { display:grid; gap:0; padding:4px 17px 12px; max-height:410px; overflow:auto; }
-    .activity-item { display:grid; grid-template-columns:9px 1fr; gap:10px; padding:10px 0; border-bottom:1px solid rgba(174,205,230,.07); }
-    .activity-dot { width:7px; height:7px; margin-top:5px; border-radius:50%; background:var(--blue); box-shadow:0 0 10px currentColor; }
-    .activity-item.fill .activity-dot { background:var(--up); color:var(--up); }
-    .activity-item.cancel .activity-dot { background:var(--amber); color:var(--amber); }
-    .activity-message { font-size:11px; color:#dbe8f4; }
-    .activity-time { margin-top:2px; color:var(--muted); font-size:10px; }
-    .footer { margin-top:18px; padding:0 2px; color:var(--muted); font-size:10px; }
-    @media (max-width: 1000px) {
-      .metrics { grid-template-columns:repeat(3,1fr); }
-      .rules { grid-template-columns:repeat(2,1fr); }
-    }
-    @media (max-width: 700px) {
-      .shell { width:min(100% - 20px, 580px); padding-top:14px; }
-      .topbar { align-items:flex-start; margin-bottom:15px; }
-      .top-meta { gap:6px; }
-      .top-meta .badge-muted { display:none; }
-      .hero { padding:20px 18px; border-radius:17px; }
-      .hero-row { align-items:flex-start; flex-direction:column; }
-      .window-box { text-align:left; }
-      .window-box strong { font-size:19px; }
-      .inventory-grid { gap:8px; }
-      .inventory-card { padding:13px; }
-      .inventory-shares { font-size:29px; }
-      .inventory-value { padding:8px; }
-      .inventory-value strong { font-size:13px; }
-      .metrics { grid-template-columns:repeat(2,1fr); gap:8px; }
-      .metric { min-height:92px; padding:13px; }
-      .metric-value { font-size:20px; }
-      .side-grid, .lower-grid { grid-template-columns:1fr; }
-      .side-head { padding:15px 14px 12px; }
-      .side-body { padding:14px; }
-      .midpoint { font-size:34px; }
-      .side-stats { gap:6px; }
-      .side-stat { padding:9px 8px; }
-      .rules { grid-template-columns:1fr 1fr; gap:7px; }
-      .rule { padding:11px; }
-      .section-title { align-items:flex-start; flex-direction:column; gap:3px; margin-top:22px; }
-      .footer { align-items:flex-start; flex-direction:column; gap:4px; }
-    }
-    @media (max-width: 390px) {
-      .brand-sub { font-size:9px; }
-      .pill, .tag { padding:5px 7px; font-size:9px; }
-      .side-stats { grid-template-columns:1fr 1fr; }
-      .rules { grid-template-columns:1fr; }
+    @media (max-width:420px) {
+      .shell { width:calc(100% - 20px); }
+      .brand-mark { width:34px; height:34px; }
+      .brand-name { font-size:12px; }
+      .brand-sub { font-size:8px; }
+      .badge, .status { padding:4px 7px; font-size:9px; }
+      .top-actions .updated { display:none; }
+      .hero { padding:18px 15px; }
+      .book-head { padding:13px 13px 11px; }
+      .book-body { padding:12px; }
+      .ladder th, .ladder td { padding:7px 5px; }
+      .ladder { font-size:10px; }
     }
   </style>
 </head>
@@ -218,129 +130,58 @@
   <main class="shell">
     <header class="topbar">
       <div class="brand">
-        <div class="brand-mark" aria-hidden="true">C</div>
-        <div>
-          <div class="brand-name">CLOB FLOW</div>
-          <div class="brand-sub">Invented · BTC five-minute maker</div>
-        </div>
+        <div class="brand-mark" aria-hidden="true">i.</div>
+        <div><div class="brand-name">INVENTED</div><div class="brand-sub">BTC · five-minute paper bot</div></div>
       </div>
-      <div class="top-meta">
-        <span class="tag green">PAPER ONLY</span>
-        <span id="statusPill" class="pill warn">Connecting</span>
-        <span class="tag badge-muted">Updated <span id="lastUpdated">—</span></span>
+      <div class="top-actions" aria-label="Bot and connection status">
+        <span class="badge paper">PAPER ONLY</span>
+        <span id="botStatus" class="status warn">Connecting</span>
+        <span id="connectionStatus" class="badge">Polymarket · waiting</span>
+        <span class="badge updated">Updated <time id="lastUpdated">—</time></span>
       </div>
     </header>
 
-    <section class="hero">
-      <div class="hero-row">
-        <div>
-          <div class="eyebrow">Polymarket order books · no external signal feed</div>
-          <h1>Two books. Two independent quote loops.</h1>
-          <p class="hero-copy">The bot watches the UP and DOWN midpoints separately, rests small maker bids, and manages filled shares with passive take-profit orders.</p>
-        </div>
-        <div class="window-box">
-          <span id="marketTitle">BTC 5-minute market loading</span>
-          <strong id="windowClock">Waiting for market</strong>
-          <span id="statusReason">Connecting to the paper bot…</span>
-        </div>
+    <section class="hero" aria-labelledby="pageTitle">
+      <div>
+        <div class="eyebrow">BTC · Polymarket · limit orders only</div>
+        <h1 id="pageTitle">Eight prices. Both sides.<br>One five-minute window.</h1>
+        <p>A fixed-price paper ladder works UP and DOWN independently. Each rung requests 100 shares, then cancels on its own schedule.</p>
+      </div>
+      <div class="window-panel" aria-label="Current market window">
+        <span class="micro">Current window</span>
+        <strong id="countdown" class="mono">Waiting</strong>
+        <span id="windowSlug" class="slug">BTC 5-minute market</span>
+        <div class="hero-status"><span id="reason" class="micro">Waiting for bot state</span></div>
       </div>
     </section>
 
-    <section class="inventory-grid" aria-label="Accumulated UP and DOWN shares">
-      <article class="inventory-card up" aria-labelledby="upInventoryTitle">
-        <div class="inventory-head"><span id="upInventoryTitle" class="metric-label">Accumulated UP shares</span><span class="tag green">UP</span></div>
-        <div class="inventory-shares" id="upInventoryShares">—</div>
-        <div class="inventory-values">
-          <div class="inventory-value"><span>Average entry</span><strong id="upAverageEntry">—</strong></div>
-          <div class="inventory-value"><span>Cost basis</span><strong id="upCostBasis">—</strong></div>
-        </div>
-      </article>
-      <article class="inventory-card down" aria-labelledby="downInventoryTitle">
-        <div class="inventory-head"><span id="downInventoryTitle" class="metric-label">Accumulated DOWN shares</span><span class="tag red">DOWN</span></div>
-        <div class="inventory-shares" id="downInventoryShares">—</div>
-        <div class="inventory-values">
-          <div class="inventory-value"><span>Average entry</span><strong id="downAverageEntry">—</strong></div>
-          <div class="inventory-value"><span>Cost basis</span><strong id="downCostBasis">—</strong></div>
-        </div>
-      </article>
+    <section class="overview" aria-label="Paper account results">
+      <article class="metric"><div class="micro">Paper equity</div><strong id="equity">—</strong><small>Cash plus marked positions</small></article>
+      <article class="metric"><div class="micro">Cash</div><strong id="cash">—</strong><small>Paper account balance</small></article>
+      <article class="metric"><div class="micro">Realized / unrealized</div><strong id="pnl">—</strong><small id="pnlDetail">Awaiting account state</small></article>
+      <article class="metric"><div class="micro">Trades</div><strong id="tradeCount">—</strong><small id="tradeDetail">Paper fills</small></article>
     </section>
+    <div id="errorBanner" class="error-banner" role="alert"></div>
 
-    <section class="metrics" aria-label="Paper account summary">
-      <article class="metric"><div class="metric-label">Paper equity</div><div class="metric-value" id="equity">—</div><div class="metric-sub" id="equityDetail">cash plus marked positions</div></article>
-      <article class="metric"><div class="metric-label">Realized P&amp;L</div><div class="metric-value" id="realizedPnl">—</div><div class="metric-sub">includes estimated maker rebates</div></article>
-      <article class="metric"><div class="metric-label">Paper cash</div><div class="metric-value" id="cash">—</div><div class="metric-sub">rebate amount is estimated</div></article>
-      <article class="metric"><div class="metric-label">Open positions</div><div class="metric-value" id="openPositions">—</div><div class="metric-sub" id="positionDetail">current and unresolved</div></article>
-      <article class="metric"><div class="metric-label">Estimated rebates</div><div class="metric-value" id="rebate">—</div><div class="metric-sub">not an exchange-confirmed credit</div></article>
-      <article class="metric"><div class="metric-label">Pending cost basis</div><div class="metric-value" id="pendingCostBasis">—</div><div class="metric-sub">unresolved shares still held</div></article>
-    </section>
-
-    <div class="section-title">
-      <div><h2>Current five-minute window</h2><p>Live CLOB book and order state for each contract</p></div>
-      <span id="streamStatus" class="tag blue">CLOB stream connecting</span>
+    <div class="section-head">
+      <div><div class="section-kicker">Live window</div><h2>Books &amp; ladder orders</h2><p>Current best prices, held shares and every configured rung.</p></div>
+      <span id="bookState" class="badge">Book state · waiting</span>
     </div>
-    <section class="side-grid" aria-label="Independent UP and DOWN trading loops">
-      <article id="upCard" class="side-card up"><div class="side-body"><div class="empty">Loading UP book…</div></div></article>
-      <article id="downCard" class="side-card down"><div class="side-body"><div class="empty">Loading DOWN book…</div></div></article>
+    <section class="book-grid" aria-label="Current UP and DOWN book and order ladder">
+      <article id="upBook" class="book up" aria-label="UP book and ladder"></article>
+      <article id="downBook" class="book down" aria-label="DOWN book and ladder"></article>
     </section>
 
-    <section id="previousInventorySection" hidden>
-      <div class="section-title">
-        <div><h2>Previous window holdings</h2><p>Closed-window shares remain separate while awaiting sale or resolution</p></div>
-      </div>
-      <div id="previousInventoryList" class="historical-inventory"></div>
-    </section>
-
-    <div class="section-title">
-      <div><h2>Strategy rules</h2><p>Each contract operates independently; matching sides merge as soon as both are held</p></div>
-      <span class="tag">NO TAKER ORDERS</span>
-      <span id="mergeSummary" class="tag blue">0 shares merged · $0.00 returned</span>
+    <div class="section-head">
+      <div><div class="section-kicker">Execution rules</div><h2>Fixed-price ladder</h2></div>
     </div>
-    <section class="rules">
-      <article class="rule"><div class="rule-num">01 · ENTRY</div><strong>Every second</strong><p>Rest a 5-share passive buy limit on both sides, each priced at its own current midpoint minus $0.05.</p></article>
-      <article class="rule"><div class="rule-num">02 · EXPIRY</div><strong>Five-second lifetime</strong><p>Cancel the unfilled remainder after five seconds.</p></article>
-      <article class="rule"><div class="rule-num">03 · TAKE PROFIT</div><strong>$0.99 passive sell</strong><p>After shares fill, post or resize a maker sell for held shares at $0.99 per share.</p></article>
-      <article class="rule"><div class="rule-num">04 · PAPER FILLS</div><strong>Best-ask touch</strong><p>Confirm the remaining buy order when a fresh best ask reaches or falls below its limit. This ignores queue and displayed size.</p></article>
-      <article class="rule"><div class="rule-num">05 · MERGE</div><strong>Automatic complete sets</strong><p>As soon as both sides hold shares in the same open window, merge the smaller side’s full amount for $1 collateral per matched pair. Keep any unmatched shares and restore their take-profit order.</p></article>
+    <section class="strategy-strip" aria-label="Active strategy configuration">
+      <div><div class="strategy-name" id="strategyName">Eight-rung fixed-price ladder</div><div class="micro" id="execution">Simulated limit execution · no live orders</div></div>
+      <div class="strategy-meta" id="ladderSummary">8 rungs per side <b>·</b> 100 shares each</div>
     </section>
-    <div class="note"><strong>Accounting note:</strong> a matched UP/DOWN pair returns $1 of paper collateral; merge profit is that $1 minus both shares’ cost basis, not an extra $1 profit. Equity uses the latest available bid for unresolved shares; shares without a mark are excluded from equity and listed at cost basis. Maker rebates shown here are estimates, not guaranteed credits.</div>
-
-    <div class="section-title">
-      <div><h2>Order and position ledger</h2><p>Paper orders, partial fills, cancellations, and settlement status</p></div>
-      <span id="orderSummary" class="tag">0 active orders</span>
-    </div>
-    <section class="panel">
-      <div class="panel-head"><div><h3>Recent orders</h3><p>Newest first · all simulated orders use passive limits</p></div><span id="orderCount" class="tag">0 records</span></div>
-      <div class="table-scroll">
-        <table class="table">
-          <thead><tr><th>Time</th><th>Action</th><th>Side</th><th>Purpose</th><th>Requested</th><th>Filled</th><th>Limit</th><th>Expires / status</th></tr></thead>
-          <tbody id="orders"><tr><td colspan="8" class="table-empty">Waiting for orders</td></tr></tbody>
-        </table>
-      </div>
-    </section>
-
-    <div class="section-title">
-      <div><h2>Recent activity</h2><p>Order lifecycle and paper fills</p></div>
-      <span id="activityCount" class="tag">0 events</span>
-    </div>
-    <section class="lower-grid">
-      <article class="panel">
-        <div class="panel-head"><div><h3>Position ledger</h3><p>Open shares and completed exits or resolutions</p></div><span id="tradeCount" class="tag">0 positions</span></div>
-        <div class="table-scroll">
-          <table class="table">
-            <thead><tr><th>Window</th><th>Side</th><th>Shares</th><th>Avg entry</th><th>Status</th><th>P&amp;L</th></tr></thead>
-            <tbody id="positions"><tr><td colspan="6" class="table-empty">Waiting for positions</td></tr></tbody>
-          </table>
-        </div>
-      </article>
-      <article class="panel">
-        <div class="panel-head"><div><h3>Activity feed</h3><p>Latest bot events</p></div></div>
-        <div id="activity" class="activity-list"><div class="empty">Waiting for activity</div></div>
-      </article>
-    </section>
-
-    <footer class="footer">
-      <span>Invented BTC 5m CLOB midpoint maker · paper mode only</span>
-      <span id="ledgerStatus">Paper history is held in memory and resets on service restart.</span>
+    <footer class="footline">
+      <span>Invented BTC 5m · simulated trading only · no live orders are sent</span>
+      <span>State refreshes every second · <span id="apiState">Connecting to /api/state</span></span>
     </footer>
   </main>
 
@@ -349,187 +190,127 @@
     const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({
       "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
     })[char]);
-    const numeric = (value) => value == null || value === "" || !Number.isFinite(Number(value)) ? null : Number(value);
-    const money = (value) => numeric(value) == null ? "—" : "$" + numeric(value).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    const price = (value) => numeric(value) == null ? "—" : "$" + numeric(value).toFixed(2);
-    const shares = (value) => numeric(value) == null ? "0" : numeric(value).toLocaleString(undefined, { maximumFractionDigits: 2 });
-    const dateTime = (value) => numeric(value) == null ? "—" : new Date(Number(value)).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-    const pnlClass = (value) => numeric(value) == null ? "" : Number(value) >= 0 ? "positive" : "negative";
-    const signedMoney = (value) => numeric(value) == null ? "—" : `${Number(value) >= 0 ? "+" : "−"}${money(Math.abs(Number(value)))}`;
-
-    function orderExpiry(order, now) {
-      if (numeric(order.expiresAt) == null) return order.status || "—";
-      const ms = Number(order.expiresAt) - Number(now);
-      return ms > 0 ? `cancel in ${(ms / 1000).toFixed(1)}s` : "expiry due";
+    const num = (value) => value == null || value === "" || !Number.isFinite(Number(value)) ? null : Number(value);
+    const money = (value) => num(value) == null ? "—" : "$" + Number(value).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const price = (value) => num(value) == null ? "—" : "$" + Number(value).toFixed(2);
+    const shares = (value) => num(value) == null ? "0" : Number(value).toLocaleString(undefined, { maximumFractionDigits: 2 });
+    const signedMoney = (value) => num(value) == null ? "—" : `${Number(value) >= 0 ? "+" : "−"}${money(Math.abs(Number(value)))}`;
+    const defaultRungs = [0.40, 0.35, 0.30, 0.25, 0.20, 0.15, 0.10, 0.05].map((price, i) => ({ price, cancelAtSeconds: [10, 50, 160, 200, 220, 230, 250, 270][i], requestedShares: 100, status: "WAITING" }));
+    function stateLabel(value) {
+      const label = String(value || "WAITING").replaceAll("_", " ").toLowerCase();
+      return label.replace(/\b\w/g, (char) => char.toUpperCase());
     }
-    function renderSide(side, state) {
+    function stateClass(value) {
+      const status = String(value || "waiting").toLowerCase();
+      if (status.includes("partial")) return "partial";
+      if (status.includes("rest") || status.includes("open")) return "resting";
+      if (status.includes("fill")) return "filled";
+      if (status.includes("cancel") || status.includes("expir")) return "cancelled";
+      return "waiting";
+    }
+    function renderBook(side, state) {
       const key = side.toLowerCase();
       const quote = state.quotes?.[side] || {};
-      const maker = state.makerQuotes?.[side] || {};
       const position = state.positionsBySide?.[side] || null;
-      const buys = Array.isArray(maker.buyOrders) ? maker.buyOrders : [];
-      const tp = maker.takeProfitOrder;
-      const mid = numeric(quote.mid ?? maker.midpoint);
-      const limit = numeric(maker.entryLimitPrice);
-      const bidSize = quote.bidSize ?? quote.bestBidSize ?? 0;
-      const askSize = quote.askSize ?? quote.bestAskSize ?? 0;
-      const card = $(key + "Card");
-      const orderItems = buys.length ? buys.map((order) => `
-        <div class="order-row">
-          <span class="tag blue">BUY</span>
-          <div class="order-main"><strong>${shares(order.remainingShares)} shares at ${price(order.price)}</strong><small>${shares(order.filledShares)} filled · ${esc(order.status)}</small></div>
-          <div class="order-time">${esc(orderExpiry(order, state.now))}</div>
-        </div>`).join("") : `<div class="empty">${esc(maker.sideSignal?.reason || "No resting entry order right now.")}</div>`;
-      const tpStatus = tp
-        ? `${shares(tp.remainingShares)} shares at ${price(tp.price)} · ${esc(tp.status)}`
-        : position ? `Waiting to place ${price(state.strategy?.takeProfitPrice)} sell`
-          : "No shares held in this window";
-      card.innerHTML = `
-        <div class="side-head">
-          <div class="side-name"><div class="side-orb">${side === "UP" ? "↑" : "↓"}</div><div><h3>${side}</h3><span>Independent ${side.toLowerCase()} book</span></div></div>
-          <span class="tag ${side === "UP" ? "green" : "red"}">${esc(maker.bidStatus || "WAITING")}</span>
+      const rungs = Array.isArray(state.ladder?.[side]) ? state.ladder[side] : [];
+      const configured = rungs.length ? rungs : defaultRungs;
+      const rows = configured.map((rung, index) => {
+        const status = rung.status || "WAITING";
+        const cancelAt = num(rung.cancelAtSeconds);
+        const filled = num(rung.filledShares) ?? 0;
+        const requested = num(rung.requestedShares) ?? num(state.strategy?.sizePerOrder ?? state.strategy?.orderSize) ?? 100;
+        const remaining = num(rung.remainingShares) ?? Math.max(0, requested - filled);
+        const detail = status.toLowerCase().includes("rest") || status.toLowerCase().includes("partial")
+          ? `${shares(filled)} filled · ${shares(remaining)} left` : "";
+        return `<tr>
+          <td>${String(index + 1).padStart(2, "0")}</td>
+          <td><strong>${price(rung.price)}</strong></td>
+          <td>${cancelAt == null ? "—" : `${cancelAt}s`}</td>
+          <td>${shares(requested)}</td>
+          <td><span class="state ${stateClass(status)}">${esc(stateLabel(status))}</span>${detail ? `<span class="status-detail">${esc(detail)}</span>` : ""}</td>
+        </tr>`;
+      }).join("");
+      const bookStatus = quote.status || "WAITING";
+      const sideClass = side === "UP" ? "up" : "down";
+      $(key + "Book").innerHTML = `
+        <div class="book-head">
+          <div class="side-title"><span class="side-mark">${side === "UP" ? "UP" : "DN"}</span><div><h3>${side}</h3><small>Polymarket order book</small></div></div>
+          <span class="state ${stateClass(bookStatus)}">${esc(stateLabel(bookStatus))}</span>
         </div>
-        <div class="side-body">
-          <div class="midpoint-row">
-            <div><div class="label">CLOB midpoint</div><div class="midpoint">${mid == null ? "—" : "$" + mid.toFixed(3)}</div><div class="midpoint-caption">best bid / ask midpoint</div></div>
-            <div class="limit-box"><div class="label">Next buy limit</div><div class="limit-price">${price(limit)}</div><div class="midpoint-caption">midpoint − $0.05</div></div>
+        <div class="book-body">
+          <div class="quotes" aria-label="${side} best quotes">
+            <div class="quote"><span>Best bid</span><strong>${price(quote.bestBid)}</strong></div>
+            <div class="quote"><span>Best ask</span><strong>${price(quote.bestAsk)}</strong></div>
           </div>
-          <div class="book-line">
-            <div class="book-quote"><span>Best bid · size</span><strong>${price(quote.bestBid)} · ${shares(bidSize)}</strong></div>
-            <div class="book-quote"><span>Best ask · size</span><strong>${price(quote.bestAsk)} · ${shares(askSize)}</strong></div>
+          <div class="position-line">
+            <div><div class="micro">Accumulated shares</div><strong>${shares(position?.shares)} shares</strong></div>
+            <div class="pos-detail">Average cost<br><strong>${price(position?.averageCost ?? position?.averagePrice ?? position?.entryPrice)}</strong></div>
           </div>
-          <div class="side-stats">
-            <div class="side-stat"><div class="micro-label">Current shares</div><strong>${shares(position?.shares)}</strong></div>
-            <div class="side-stat"><div class="micro-label">Average entry</div><strong>${price(position?.entryPrice)}</strong></div>
-            <div class="side-stat"><div class="micro-label">Unrealized P&amp;L</div><strong class="${pnlClass(position?.unrealizedPnl)}">${signedMoney(position?.unrealizedPnl)}</strong></div>
-          </div>
-          <div class="orders-block">
-            <div class="orders-title"><span class="label">Resting entry buys</span><span class="tag">${buys.length} active</span></div>
-            <div class="order-list">${orderItems}</div>
-          </div>
-          <div class="orders-block">
-            <div class="orders-title"><span class="label">Take-profit sell</span><span class="tag ${tp ? "green" : ""}">${tp ? "PASSIVE" : "NOT POSTED"}</span></div>
-            <div class="empty">${tpStatus}</div>
+          <div class="ladder-title"><h4>${side} order ladder</h4><span>${configured.length} configured rungs</span></div>
+          <div class="ladder-scroll">
+            <table class="ladder">
+              <thead><tr><th>Rung</th><th>Limit</th><th>Cancel after</th><th>Shares</th><th>Order state</th></tr></thead>
+              <tbody>${rows}</tbody>
+            </table>
           </div>
         </div>`;
     }
-
-    function renderOrders(orders, now) {
-      const rows = (orders || []).slice(0, 80);
-      $("orderCount").textContent = `${rows.length} records`;
-      const active = rows.filter((o) => ["RESTING", "PARTIALLY_FILLED"].includes(o.status)).length;
-      $("orderSummary").textContent = `${active} active orders`;
-      $("orders").innerHTML = rows.length ? rows.map((order) => `
-        <tr>
-          <td>${dateTime(order.createdAt)}</td>
-          <td><span class="tag ${order.action === "BUY" ? "blue" : "green"}">${esc(order.action)}</span></td>
-          <td><span class="tag ${order.side === "UP" ? "green" : "red"}">${esc(order.side)}</span></td>
-          <td>${esc((order.purpose || "ORDER").replaceAll("_", " "))}</td>
-          <td>${shares(order.requestedShares)}</td><td>${shares(order.filledShares)}</td><td>${price(order.limitPrice)}</td>
-          <td>${esc(orderExpiry(order, now))} · ${esc(order.status)}</td>
-        </tr>`).join("") : `<tr><td colspan="8" class="table-empty">No orders yet</td></tr>`;
-    }
-
-    function renderPositions(positions) {
-      const rows = (positions || []).slice(0, 60);
-      $("tradeCount").textContent = `${rows.length} positions`;
-      $("positions").innerHTML = rows.length ? rows.map((position) => `
-        <tr>
-          <td>${esc(position.marketTitle || position.marketSlug || dateTime(position.windowStart))}</td>
-          <td><span class="tag ${position.side === "UP" ? "green" : "red"}">${esc(position.side)}</span></td>
-          <td>${shares(position.shares)}</td><td>${price(position.entryPrice)}</td>
-          <td>${esc(position.status || "—")}</td><td class="${pnlClass(position.realizedPnl ?? position.unrealizedPnl)}">${signedMoney(position.realizedPnl ?? position.unrealizedPnl)}</td>
-        </tr>`).join("") : `<tr><td colspan="6" class="table-empty">No positions yet</td></tr>`;
-    }
-
-    function renderActivity(events) {
-      const rows = (events || []).slice(0, 24);
-      $("activityCount").textContent = `${rows.length} events`;
-      $("activity").innerHTML = rows.length ? rows.map((event) => {
-        const type = String(event.event || event.type || "");
-        const kind = /FILLED|SETTLED|RESOLVED|MERGED/i.test(type) ? "fill" : /CANCEL/i.test(type) ? "cancel" : "";
-        const summary = event.reason || event.message || `${type.replaceAll("_", " ")}${event.side ? " · " + event.side : ""}${event.shares ? " · " + shares(event.shares) + " shares" : ""}`;
-        return `<div class="activity-item ${kind}"><div class="activity-dot"></div><div><div class="activity-message">${esc(summary)}</div><div class="activity-time">${dateTime(event.ts ?? event.at)}</div></div></div>`;
-      }).join("") : `<div class="empty">Waiting for activity</div>`;
-    }
-
-    function renderInventory(state) {
-      for (const side of ["UP", "DOWN"]) {
-        const key = side.toLowerCase();
-        const inventory = state.inventorySummary?.[side] || {};
-        $(key + "InventoryShares").textContent = `${shares(inventory.shares)} shares`;
-        $(key + "AverageEntry").textContent = price(inventory.averageEntry);
-        $(key + "CostBasis").textContent = money(inventory.costBasis);
-      }
-    }
-
-    function renderPreviousInventory(state) {
-      const section = $("previousInventorySection");
-      const list = $("previousInventoryList");
-      const windows = Array.isArray(state.previousWindowInventory) ? state.previousWindowInventory : [];
-      section.hidden = windows.length === 0;
-      list.innerHTML = windows.map((window) => `
-        <article class="historical-window">
-          <div class="historical-head">
-            <div><strong>${esc(window.marketTitle || "Previous BTC 5-minute window")}</strong><small>${dateTime(window.windowStart)} – ${dateTime(window.windowEnd)}</small></div>
-            <span class="tag">Previous window</span>
-          </div>
-          <div class="historical-side-grid">
-            ${["UP", "DOWN"].map((side) => {
-              const inventory = window[side] || {};
-              return `<div class="historical-side ${side.toLowerCase()}"><strong>${side}</strong><span>${shares(inventory.shares)} shares</span><small>Average entry ${price(inventory.averageEntry)} · Cost basis ${money(inventory.costBasis)}</small></div>`;
-            }).join("")}
-          </div>
-        </article>`).join("");
-    }
-
     function render(state) {
-      renderInventory(state);
-      renderPreviousInventory(state);
       const account = state.account || {};
-      $("statusPill").textContent = String(state.status || "WAITING").toUpperCase();
-      $("statusPill").className = "pill " + (state.status === "RUNNING" ? "good" : state.status === "ERROR" ? "bad" : "warn");
-      $("statusReason").textContent = state.statusReason || "Waiting for bot status.";
-      $("lastUpdated").textContent = dateTime(state.now);
-      $("marketTitle").textContent = state.market?.title || state.market?.slug || "BTC 5-minute market";
-      $("windowClock").textContent = Number.isFinite(Number(state.window?.secondsRemaining))
-        ? `${Math.max(0, Math.floor(Number(state.window.secondsRemaining)))}s remaining`
-        : "Window pending";
+      const botStatus = String(state.status || "WAITING").toUpperCase();
+      $("botStatus").textContent = botStatus;
+      $("botStatus").className = "status " + (botStatus === "RUNNING" ? "good" : botStatus === "ERROR" || botStatus === "FAILED" ? "bad" : "warn");
+      $("reason").textContent = state.statusReason || "Bot status";
+      $("windowSlug").textContent = state.window?.slug || "BTC 5-minute market";
+      const seconds = num(state.window?.secondsRemaining);
+      $("countdown").textContent = seconds == null ? "Waiting" : `${Math.max(0, Math.floor(seconds))}s`;
+      const wsStatus = String(state.websocket?.status || "waiting").toLowerCase();
+      const messageValue = state.websocket?.lastMessageAt;
+      const messageTime = num(messageValue) == null ? Date.parse(messageValue) : Number(messageValue);
+      const messageAge = Number.isFinite(messageTime)
+        ? Math.max(0, Math.floor((Date.now() - (messageTime < 1e12 ? messageTime * 1000 : messageTime)) / 1000))
+        : null;
+      $("connectionStatus").textContent = `Polymarket · ${wsStatus}${messageAge == null ? "" : ` · ${messageAge}s ago`}`;
+      $("connectionStatus").className = "badge " + (/connected|open|live/.test(wsStatus) ? "paper" : "");
+      const quoteStatuses = ["UP", "DOWN"].map((side) => String(state.quotes?.[side]?.status || "").toLowerCase()).filter(Boolean);
+      const bookStatus = quoteStatuses.length ? [...new Set(quoteStatuses.map(stateLabel))].join(" / ") : wsStatus;
+      $("bookState").textContent = `Book state · ${bookStatus}`;
       $("equity").textContent = money(account.equity);
-      $("equityDetail").textContent = "last bids; unpriced inventory shown separately";
-      $("realizedPnl").textContent = money(account.realizedPnl);
-      $("realizedPnl").className = "metric-value " + pnlClass(account.realizedPnl);
       $("cash").textContent = money(account.cash);
-      $("openPositions").textContent = Number(account.openPositions || 0).toLocaleString();
-      const pendingCount = Number(account.pendingResolutionPositions || 0);
-      const unpricedCost = Number(account.openPositionCostBasisUnpriced || 0)
-        + Number(account.unpricedPendingCostBasis || 0);
-      const positionParts = [];
-      if (pendingCount) positionParts.push(`${pendingCount} awaiting`);
-      if (unpricedCost > 0) positionParts.push(`${money(unpricedCost)} unpriced`);
-      $("positionDetail").textContent = positionParts.join(" · ") || "current-window holdings";
-      $("rebate").textContent = money(account.estimatedMakerRebate);
-      $("pendingCostBasis").textContent = money(account.pendingResolutionCostBasis);
-      const mergeStats = state.mergeStats || {};
-      $("mergeSummary").textContent = `${shares(mergeStats.pairsMerged)} shares merged · ${money(mergeStats.collateralReturned)} returned`;
-      $("streamStatus").textContent = `Polymarket CLOB · ${String(state.websocket?.status || "connecting").toLowerCase()}`;
-      $("ledgerStatus").textContent = state.persistence?.detail || "Paper history is held in memory.";
-      renderSide("UP", state);
-      renderSide("DOWN", state);
-      renderOrders(state.orders, state.now);
-      renderPositions(state.trades || state.positions);
-      renderActivity(state.events);
+      const realized = num(account.realizedPnl);
+      const unrealized = num(account.unrealizedPnl);
+      $("pnl").textContent = `${signedMoney(realized)} / ${signedMoney(unrealized)}`;
+      $("pnl").className = (realized ?? 0) + (unrealized ?? 0) >= 0 ? "positive" : "negative";
+      $("pnlDetail").textContent = "Realized / unrealized P&L";
+      const count = num(account.tradeCount ?? account.trades ?? account.filledOrders);
+      $("tradeCount").textContent = count == null ? "—" : shares(count);
+      $("tradeDetail").textContent = account.openPositions == null ? "Completed paper trades" : `${shares(account.openPositions)} open positions`;
+      $("lastUpdated").textContent = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+      const strategy = state.strategy || {};
+      $("strategyName").textContent = strategy.name || "Eight-rung fixed-price ladder";
+      $("execution").textContent = strategy.execution || "Simulated limit execution · no live orders";
+      const strategyRungs = Array.isArray(strategy.rungPrices) ? strategy.rungPrices.length : defaultRungs.length;
+      const size = num(strategy.sizePerOrder ?? strategy.orderSize) ?? num(strategy.sizes?.[0]) ?? 100;
+      $("ladderSummary").innerHTML = `${strategyRungs} rungs per side <b>·</b> ${shares(size)} shares each`;
+      renderBook("UP", state);
+      renderBook("DOWN", state);
+      $("errorBanner").style.display = "none";
+      $("apiState").textContent = "Connected";
+      document.body.dataset.loaded = "true";
     }
-
     async function refresh() {
       try {
-        const response = await fetch("/api/strategy/state", { cache: "no-store" });
+        const response = await fetch("/api/state", { cache: "no-store" });
         if (!response.ok) throw new Error(`State request failed (${response.status})`);
         render(await response.json());
       } catch (error) {
-        $("statusPill").textContent = "API ERROR";
-        $("statusPill").className = "pill bad";
-        $("statusReason").textContent = error?.message || "Could not load bot state.";
+        $("botStatus").textContent = "API ERROR";
+        $("botStatus").className = "status bad";
+        $("connectionStatus").textContent = "Polymarket · unavailable";
+        $("connectionStatus").className = "badge";
+        $("apiState").textContent = "Retrying";
+        $("errorBanner").textContent = error?.message || "Could not load bot state. Retrying automatically.";
+        $("errorBanner").style.display = "block";
       }
     }
     refresh();

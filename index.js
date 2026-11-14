@@ -13,7 +13,7 @@ async function main() {
   bot.start();
   startServer(bot, process.env.PORT || 3000);
 
-  console.log('MODE: DEMO -- Polymarket CLOB midpoint maker strategy; no live order code is loaded.');
+  console.log('MODE: DEMO -- Polymarket BTC 5-minute fixed-price limit ladder; no live orders are sent.');
 }
 
 main().catch((e) => {

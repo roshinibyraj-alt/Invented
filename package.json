@@ -1,8 +1,8 @@
 {
-  "name": "invented-btc-market-maker-paper-bot",
+  "name": "invented-btc-fixed-ladder-paper-bot",
   "version": "1.0.0",
   "private": true,
-  "description": "Paper-only BTC 5-minute UP/DOWN CLOB midpoint maker strategy.",
+  "description": "Paper-only BTC 5-minute UP/DOWN fixed-price limit ladder.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",

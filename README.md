@@ -1,21 +1,30 @@
-# Invented BTC 5-minute CLOB midpoint maker paper bot
+# Invented BTC 5-minute fixed-price ladder
 
-This service simulates independent Polymarket BTC 5-minute UP and DOWN maker strategies using only the public CLOB books and trade stream. It does not submit live orders or use Binance signals.
+This is a paper-only Polymarket BTC 5-minute bot. It places independent resting buy orders on both UP and DOWN at eight fixed prices. It does not use a Binance prediction signal and does not submit live orders.
 
 ## Strategy
 
-- Once per second, each side independently posts a 5-share passive buy limit at its fresh best-bid/best-ask midpoint minus $0.05.
-- Cancel any unfilled entry remainder after five seconds. There is no fixed inventory cap; available paper cash is the limit.
-- An entry fills in the paper simulation when a fresh best ask reaches or falls below its limit, without checking displayed size, trade prints, or queue position. This touch-based rule can overstate real fills.
-- After a fill, post or resize a passive sell for the held shares at $0.99. The paper ledger records actual sell proceeds at $0.99; $1.00 is paid only by official resolution of a winning share.
-- Immediately merge equal UP and DOWN shares from the same open market. Each complete pair returns $1 of paper collateral; any unmatched shares remain held and keep a resized $0.99 take-profit order. Merge P&L is the $1 returned minus both shares' cost basis.
-- Cancel all resting orders at the end of the 5-minute window. Unsold positions wait for confirmed resolution of their original market.
-- Maker rebates are estimates in paper mode, not guaranteed exchange credits. Passive orders model zero trading fees.
+At the start of each 5-minute window, the bot posts 100-share post-only limit buys for both sides at each price below. Every cancellation deadline is measured from the window start. An unfilled remainder is cancelled at that deadline.
 
-Paper fills are estimates, not guaranteed exchange executions. Public data does not reveal actual queue priority, and profits are not guaranteed.
+| Limit price | Cancel after |
+|---:|---:|
+| $0.40 | 10 seconds |
+| $0.35 | 50 seconds |
+| $0.30 | 160 seconds |
+| $0.25 | 200 seconds |
+| $0.20 | 220 seconds |
+| $0.15 | 230 seconds |
+| $0.10 | 250 seconds |
+| $0.05 | 270 seconds |
 
-## Dashboard and runtime
+The bot waits for a fresh Polymarket book before posting. If a limit would immediately match rather than rest, it is rejected as marketable instead of being counted as a resting order. Each side and price rung is independent.
 
-The dashboard shows both CLOB books, each side's midpoint and next limit, active and expiring orders, filled inventory, take-profit sells, account totals, estimated rebates, and the order/activity ledgers. The UP and DOWN summary cards at the top show only the current window; held shares from ended windows move into separate cards grouped by their original window. Equity uses current best bids and the last available bid for unresolved shares. If a position has no bid mark, it is excluded from equity and its cost basis is reported separately. The paper ledger is held in process memory and resets when Railway restarts.
+Paper fills require fresh opposing-side Polymarket trade prints at or through the resting limit. At the exact limit, the simulated queue estimate is consumed first; partial fills are allowed and any remaining quantity is cancelled at the rung's deadline. A book touch by itself never creates a fill.
 
-Run `node --test test/market-maker-bot.test.js test/server.test.js` for midpoint pricing, independent one-second order cadence, five-second expiry, ask-touch entry fills, complete-set merge and resolution accounting, take-profit behavior, and dashboard checks.
+Filled shares remain open for the official result of their original market. This strategy places no take-profit sells, stop-losses, or automatic merges. The paper ledger is held in memory and resets when Railway restarts the service.
+
+## Dashboard and checks
+
+The dashboard summarizes the active window, Polymarket connection and books, current UP/DOWN shares and average cost, account results, and each rung's status. State is available at `/api/state`; health is available at `/api/healthz`.
+
+Run `node --test test/*.test.js` to verify rung placement, fixed-window cancellation deadlines, queue-aware paper fills, and dashboard rendering.

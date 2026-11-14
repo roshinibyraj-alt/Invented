@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const startServer = require('../server');
 
 test('state endpoint returns the current strategy with no cache', async t => {
-  const expected = { mode: 'DEMO ONLY', strategy: { id: 'btc-5m-clob-midpoint-maker' } };
+  const expected = { mode: 'DEMO ONLY', strategy: { id: 'btc-5m-fixed-price-ladder' } };
   const server = startServer({ snapshot: () => expected }, 0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -16,7 +16,7 @@ test('state endpoint returns the current strategy with no cache', async t => {
 });
 
 test('dashboard state route serves the same live strategy snapshot', async t => {
-  const expected = { mode: 'DEMO ONLY', strategy: { id: 'btc-5m-clob-midpoint-maker' } };
+  const expected = { mode: 'DEMO ONLY', strategy: { id: 'btc-5m-fixed-price-ladder' } };
   const server = startServer({ snapshot: () => expected }, 0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -44,34 +44,29 @@ test('health endpoint reports strategy errors as unhealthy', async t => {
   assert.deepEqual(await response.json(), { ok: false, mode: 'DEMO', status: 'ERROR', now: 123 });
 });
 
-test('dashboard explains the CLOB midpoint maker rules', async t => {
+test('dashboard explains the fixed-price ladder rules', async t => {
   const server = startServer({ snapshot: () => ({}) }, 0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
   const response = await fetch(`http://127.0.0.1:${server.address().port}/`);
   const html = await response.text();
   assert.equal(response.status, 200);
-  assert.match(html, /CLOB FLOW/);
-  assert.match(html, /Every second/i);
-  assert.match(html, /5-share passive buy limit/i);
-  assert.match(html, /Cancel the unfilled remainder after five seconds/i);
-  assert.match(html, /midpoint minus \$0\.05/i);
-  assert.match(html, /best ask reaches or falls below/i);
-  assert.match(html, /Accumulated UP shares/i);
-  assert.match(html, /Accumulated DOWN shares/i);
-  assert.match(html, /upInventoryShares/);
-  assert.match(html, /downAverageEntry/);
-  assert.match(html, /Previous window holdings/i);
-  assert.match(html, /previousWindowInventory/);
-  assert.match(html, /Automatic complete sets/i);
-  assert.match(html, /matched UP\/DOWN pair returns \$1/i);
-  assert.match(html, /Pending cost basis/i);
-  assert.match(html, /post or resize a maker sell for held shares at \$0\.99/i);
-  assert.match(html, /Estimated rebates/i);
-  assert.match(html, /Polymarket CLOB/);
-  assert.match(html, /Recent orders/);
-  assert.match(html, /Activity feed/);
-  assert.doesNotMatch(html, /Binance model inputs/i);
+  assert.match(html, /Eight prices\. Both sides\./);
+  assert.match(html, /0\.40/);
+  assert.match(html, /0\.35/);
+  assert.match(html, /0\.30/);
+  assert.match(html, /0\.25/);
+  assert.match(html, /0\.20/);
+  assert.match(html, /0\.15/);
+  assert.match(html, /0\.10/);
+  assert.match(html, /0\.05/);
+  assert.match(html, /Accumulated shares/i);
+  assert.match(html, /Polymarket/);
+  assert.match(html, /api\/state/);
+  assert.match(html, /100 shares each/i);
+  assert.match(html, /Polymarket order book/);
+  assert.match(html, /Cancel after/i);
+  assert.doesNotMatch(html, /midpoint|take-profit|complete sets|estimated rebates/i);
   assert.doesNotMatch(html, /BTC &amp; ETH Signal Desk/);
   assert.doesNotMatch(html, /profitable flip/i);
   assert.doesNotMatch(html, /two fresh Binance updates/i);

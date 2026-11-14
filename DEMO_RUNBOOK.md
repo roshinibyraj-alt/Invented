@@ -1,12 +1,8 @@
-# CLOB midpoint maker paper-bot runbook
+# Fixed-price ladder runbook
 
-1. The bot is paper-only and does not submit live orders.
-2. UP and DOWN each use their own fresh Polymarket CLOB best bid and ask; Binance is not part of the strategy.
-3. Every second, each side posts a 5-share passive buy at midpoint minus $0.05, provided the book is fresh, two-sided, and the paper account has enough unreserved cash.
-4. Any unfilled entry remainder is cancelled after five seconds.
-5. In paper mode, a fresh best ask at or below the entry limit confirms the full remaining order. This deliberately ignores displayed size and queue position, so it can overstate real fills.
-6. Each side's held shares get a passive $0.99 take-profit sell, resized after additional buys. A $0.99 fill is credited as $0.99/share; official resolution may instead pay $1.00 for a winning share.
-7. Whenever both sides hold shares in the same open market, immediately merge the smaller side's full amount. Each paired UP/DOWN share returns $1 of paper collateral, so 20 UP and 30 DOWN returns $20 and leaves 10 DOWN. Gross merge P&L is the collateral returned minus both matched cost bases.
-8. Cancel or resize take-profit orders around a merge so an order never remains on shares already merged; unmatched shares keep their $0.99 take-profit.
-9. All resting orders are cancelled at window end. Unsold shares wait for confirmed resolution of their original market. Estimated maker rebates are not guaranteed exchange credits.
-10. Top UP/DOWN inventory cards show the active window only. Holdings from ended windows appear in separate cards grouped by original window until sold or resolved. Equity includes last available bids for unresolved positions; unpriced inventory is shown at cost basis separately.
+1. Confirm the dashboard shows PAPER ONLY and a live Polymarket connection.
+2. At the start of each BTC 5-minute window, the bot posts 100-share UP and DOWN limit buys at $0.40, $0.35, $0.30, $0.25, $0.20, $0.15, $0.10, and $0.05.
+3. Each rung expires at its matching elapsed-window deadline: 10s, 50s, 160s, 200s, 220s, 230s, 250s, and 270s. The bot cancels any unfilled remainder.
+4. Fresh opposing-side trade prints can fill a resting order. At the exact limit, the estimated queue ahead must be consumed first. Book touches do not create fills.
+5. Filled shares remain open until the official resolution of their original market. There are no take-profit sells, stop-losses, or automatic merges.
+6. The paper ledger is in memory and resets when Railway restarts the service.

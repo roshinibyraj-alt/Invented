@@ -7,7 +7,7 @@ const { makerRebateFor, feeContext } = WickBot._test;
 
 const EPSILON = 1e-8;
 const ACTIVE_ORDER_STATES = new Set(['RESTING', 'PARTIALLY_FILLED']);
-const ORDER_TYPE = 'PAPER_POST_ONLY_LIMIT';
+const ORDER_TYPE = 'PAPER_RESTING_LIMIT_BUY';
 const SIDES = ['UP', 'DOWN'];
 
 function clamp(value, minimum, maximum) {
@@ -17,14 +17,13 @@ function clamp(value, minimum, maximum) {
 class MarketMakerBot extends MispricingBot {
   constructor(options = {}) {
     super({ ...options, useBinanceFeed: false });
-    this.strategyId = 'btc-5m-clob-midpoint-maker';
-    this.strategyName = 'BTC 5-minute CLOB midpoint maker paper strategy';
+    this.strategyId = 'btc-5m-fixed-price-ladder';
+    this.strategyName = 'BTC 5-minute fixed-price resting buy ladder';
     this.rules = {
-      sharesPerOrder: config.CLOB_ENTRY_SHARES,
-      orderIntervalMs: config.CLOB_ENTRY_INTERVAL_MS,
-      orderTtlMs: config.CLOB_ENTRY_TTL_MS,
-      midpointOffset: config.CLOB_ENTRY_MIDPOINT_OFFSET,
-      takeProfitPrice: config.CLOB_TAKE_PROFIT_PRICE,
+      sharesPerOrder: config.MAKER_LADDER_SHARES,
+      rungs: config.MAKER_LADDER_RUNGS,
+      fillRule: 'Fresh opposite-side trade prints consume estimated queue; book touches do not fill.',
+      exitPolicy: 'Hold filled shares for official resolution.',
     };
     this.strategyWindowStart = null;
     this.makerQuotes = this.emptyMakerQuotes();
@@ -48,7 +47,8 @@ class MarketMakerBot extends MispricingBot {
     this.mergeSequence = 0;
     this.lastOrderSlot = 0;
     this.lastOrderAt = null;
-    this.lastOrderResult = 'Waiting for the first one-second order cycle.';
+    this.lastOrderResult = 'Waiting for the current five-minute window.';
+    this.rungOutcomes = new Map();
     this.seenMakerTrades = new Map();
   }
 
@@ -57,7 +57,7 @@ class MarketMakerBot extends MispricingBot {
       midpoint: null,
       bidPrice: null,
       entryLimitPrice: null,
-      askPrice: config.CLOB_TAKE_PROFIT_PRICE,
+      askPrice: null,
       bidOrderId: null,
       askOrderId: null,
       bidStatus: 'WAITING',
@@ -75,7 +75,8 @@ class MarketMakerBot extends MispricingBot {
     this.fairValues = null;
     this.lastOrderSlot = 0;
     this.lastOrderAt = null;
-    this.lastOrderResult = 'Waiting for the first one-second order cycle.';
+    this.lastOrderResult = 'Placing the fixed-price UP and DOWN ladders.';
+    this.rungOutcomes.clear();
     this.entryTriggeredThisWindow = false;
     this.sideEntryCountsThisWindow = { UP: 0, DOWN: 0 };
     this.signalConsumed = { UP: false, DOWN: false };
@@ -84,8 +85,8 @@ class MarketMakerBot extends MispricingBot {
       reason: 'Waiting for the next one-second CLOB price check.',
     }]));
     this.marketMakerState = {
-      status: 'SCANNING_CLOB',
-      reason: 'Waiting for independent UP and DOWN midpoint orders.',
+      status: 'POSTING_LADDER',
+      reason: 'Waiting for fresh Polymarket books to post the fixed-price ladder.',
     };
     this.signal = { side: null, reason: this.marketMakerState.reason };
   }
@@ -110,13 +111,127 @@ class MarketMakerBot extends MispricingBot {
     const type = event.event_type || event.eventType;
     super.handleMarketMessage(event);
     if (type === 'last_trade_price') this.processMakerTrade(event, this.now());
-    else if (['book', 'price_change', 'best_bid_ask'].includes(type)) {
-      this.processEntryBookTouches(this.now());
-    }
   }
 
   processStrategyEntry(now = this.now()) {
-    return this.processClobMidpointStrategy(now);
+    return this.processFixedPriceLadder(now);
+  }
+
+  processFixedPriceLadder(now = this.now()) {
+    const windowStart = this.getActiveWindowStart();
+    if (windowStart == null) {
+      this.marketMakerState = {
+        status: 'WAITING_FOR_MARKET',
+        reason: 'Waiting for the current BTC 5-minute market.',
+      };
+      this.signal = { side: null, reason: this.marketMakerState.reason };
+      return false;
+    }
+    if (this.strategyWindowStart !== windowStart) this.openStrategyWindow(windowStart, now);
+
+    const windowEnd = windowStart + this.windowMs;
+    if (now >= windowEnd) {
+      const cancelled = this.cancelWindowOrders(
+        windowStart,
+        now,
+        'CANCELLED_WINDOW_END',
+        'The market window ended.',
+      );
+      this.marketMakerState = {
+        status: 'WINDOW_CLOSED',
+        reason: 'Window ended; filled shares wait for official resolution.',
+      };
+      this.signal = { side: null, reason: this.marketMakerState.reason };
+      return cancelled > 0;
+    }
+
+    let changed = this.expireEntryOrders(now, windowStart);
+    const elapsedMs = Math.max(0, now - windowStart);
+    for (const side of SIDES) {
+      for (const [index, rung] of config.MAKER_LADDER_RUNGS.entries()) {
+        const key = `${side}:${index}`;
+        const alreadyAttempted = this.orders.some((order) =>
+          Number(order.windowStart) === Number(windowStart)
+          && order.side === side
+          && Number(order.rungIndex) === index + 1);
+        if (alreadyAttempted || this.rungOutcomes.has(key)) continue;
+
+        const expiresAt = windowStart + rung.cancelAfterSeconds * 1000;
+        if (now >= expiresAt) {
+          this.rungOutcomes.set(key, {
+            status: 'MISSED_DEADLINE',
+            reason: 'The cancellation deadline passed before the order could be posted.',
+          });
+          continue;
+        }
+
+        const quote = this.getFreshQuote(side, now);
+        const bestAsk = Number(quote?.bestAsk);
+        if (!quote || !Number.isFinite(bestAsk)) continue;
+
+        if (bestAsk <= rung.price + EPSILON) {
+          this.rungOutcomes.set(key, {
+            status: 'REJECTED_POST_ONLY',
+            reason: 'The limit would have matched immediately, so it was not treated as a resting order.',
+          });
+          continue;
+        }
+
+        const reservedCash = this.reservedBuyNotional(windowStart);
+        const requiredCash = rung.price * config.MAKER_LADDER_SHARES;
+        if (this.cash - reservedCash + EPSILON < requiredCash) {
+          this.rungOutcomes.set(key, {
+            status: 'SKIPPED_INSUFFICIENT_CASH',
+            reason: `The full ${config.MAKER_LADDER_SHARES}-share order cannot be reserved from available paper cash.`,
+          });
+          continue;
+        }
+
+        this.createMakerOrder(
+          side,
+          'BUY',
+          rung.price,
+          config.MAKER_LADDER_SHARES,
+          now,
+          windowStart,
+          {
+            purpose: 'ENTRY',
+            rungIndex: index + 1,
+            cancelAtSeconds: rung.cancelAfterSeconds,
+            expiresAt,
+            fillRule: 'OPPOSING_TRADE_PRINT_AT_OR_THROUGH_LIMIT_AFTER_ESTIMATED_QUEUE',
+          },
+        );
+        changed = true;
+      }
+    }
+
+    const currentOrders = this.orders.filter((order) =>
+      order.orderType === ORDER_TYPE
+      && Number(order.windowStart) === Number(windowStart));
+    const activeCount = currentOrders.filter((order) => ACTIVE_ORDER_STATES.has(order.status)).length;
+    const remainingRungs = config.MAKER_LADDER_RUNGS.length * SIDES.length
+      - currentOrders.length
+      - this.rungOutcomes.size;
+    const activeFills = currentOrders.reduce((total, order) =>
+      total + Number(order.filledShares || 0), 0);
+    this.marketMakerState = {
+      status: activeCount ? 'RESTING_ORDERS' : remainingRungs > 0 ? 'WAITING_FOR_BOOK' : 'LADDER_COMPLETE',
+      reason: activeCount
+        ? `${activeCount} resting buy orders are active; ${activeFills.toFixed(0)} shares filled so far.`
+        : remainingRungs > 0
+          ? 'Waiting for fresh UP and DOWN order books to post eligible rungs.'
+          : 'No ladder orders remain active; filled shares wait for official resolution.',
+    };
+    this.lastOrderAt = changed ? now : this.lastOrderAt;
+    this.lastOrderResult = this.marketMakerState.reason;
+    this.signal = {
+      side: null,
+      reason: this.marketMakerState.reason,
+      reference: 'FIXED_CLOB_PRICE_LADDER',
+      windowElapsedSeconds: elapsedMs / 1000,
+    };
+    return changed;
   }
 
   processClobMidpointStrategy(now = this.now()) {
@@ -332,15 +447,15 @@ class MarketMakerBot extends MispricingBot {
         order,
         now,
         'CANCELLED_TIMEOUT',
-        `Unfilled remainder cancelled after ${config.CLOB_ENTRY_TTL_MS / 1000} seconds.`,
+        `Unfilled remainder cancelled at the ${order.cancelAtSeconds}-second window deadline.`,
       ) || changed;
       if (this.sideSignals[order.side]?.orderId === order.id) {
         this.sideSignals[order.side] = {
           ...this.sideSignals[order.side],
           status: order.filledShares > 0 ? 'PARTIAL_TIMEOUT' : 'CANCELLED_TIMEOUT',
           reason: order.filledShares > 0
-            ? `Filled ${Number(order.filledShares).toFixed(2)} shares; cancelled the remaining quantity after five seconds.`
-            : 'Unfilled order cancelled after five seconds.',
+            ? `Filled ${Number(order.filledShares).toFixed(2)} shares; cancelled the remaining quantity at the ${order.cancelAtSeconds}-second deadline.`
+            : `Unfilled order cancelled at the ${order.cancelAtSeconds}-second deadline.`,
         };
       }
     }
@@ -985,6 +1100,7 @@ class MarketMakerBot extends MispricingBot {
 
   cancelMakerOrder(order, now, status = 'CANCELLED_REPLACED', reason = '') {
     if (!order || !ACTIVE_ORDER_STATES.has(order.status)) return false;
+    order.cancelledShares = Math.max(0, Number(order.remainingShares) || 0);
     order.status = status;
     order.cancelledAt = now;
     order.cancelReason = reason;
@@ -1098,7 +1214,8 @@ class MarketMakerBot extends MispricingBot {
       const expectedTakerSide = action === 'BUY' ? 'SELL' : 'BUY';
       if (takerSide !== expectedTakerSide) continue;
       const candidates = this.activeMakerOrders(side, action, windowStart)
-        .filter((order) => action !== 'BUY' || order.purpose !== 'ENTRY');
+        .filter((order) => action === 'BUY' && order.purpose === 'ENTRY')
+        .sort((left, right) => Number(right.limitPrice) - Number(left.limitPrice));
       let availableVolume = tradeSize;
       for (let index = 0; index < candidates.length && availableVolume > EPSILON; index += 1) {
         const order = candidates[index];
@@ -1718,20 +1835,134 @@ class MarketMakerBot extends MispricingBot {
     };
   }
 
+  snapshot() {
+    const state = super.snapshot();
+    const now = this.now();
+    const windowStart = this.getActiveWindowStart();
+    const windowEnd = windowStart == null ? null : windowStart + this.windowMs;
+    const activeWindow = windowStart != null && now >= windowStart && now < windowEnd;
+    const currentOrders = windowStart == null ? [] : this.orders.filter((order) =>
+      order.orderType === ORDER_TYPE
+      && Number(order.windowStart) === Number(windowStart));
+    const openWindowPositions = activeWindow
+      ? this.positions.filter((position) =>
+        position.status === 'OPEN' && Number(position.windowStart) === Number(windowStart))
+      : [];
+    const positionsBySide = Object.fromEntries(SIDES.map((side) => [
+      side,
+      openWindowPositions.find((position) => position.side === side) || null,
+    ]));
+    const ladder = Object.fromEntries(SIDES.map((side) => [
+      side,
+      config.MAKER_LADDER_RUNGS.map((rung, index) => {
+        const order = currentOrders.find((item) =>
+          item.side === side && Number(item.rungIndex) === index + 1);
+        const attempt = this.rungOutcomes.get(`${side}:${index}`);
+        const expiresAt = windowStart == null
+          ? null
+          : windowStart + rung.cancelAfterSeconds * 1000;
+        const status = order?.status
+          || attempt?.status
+          || (windowStart == null ? 'WAITING_FOR_WINDOW'
+            : now >= expiresAt ? 'MISSED_DEADLINE' : 'WAITING');
+        return {
+          rungIndex: index + 1,
+          price: rung.price,
+          cancelAfterSeconds: rung.cancelAfterSeconds,
+          cancelAtSeconds: rung.cancelAfterSeconds,
+          requestedShares: order?.requestedShares ?? config.MAKER_LADDER_SHARES,
+          filledShares: order?.filledShares ?? 0,
+          remainingShares: order?.remainingShares ?? 0,
+          cancelledShares: order?.cancelledShares ?? 0,
+          status,
+          orderId: order?.id || null,
+          createdAt: order?.createdAt ?? null,
+          expiresAt: order?.expiresAt ?? expiresAt,
+          reason: order?.cancelReason || attempt?.reason || null,
+        };
+      }),
+    ]));
+    const activeOrders = currentOrders.filter((order) => ACTIVE_ORDER_STATES.has(order.status));
+    const liveStatus = state.status === 'ERROR' || state.status === 'blocked_or_error' ? 'ERROR' : 'RUNNING';
+
+    return {
+      ...state,
+      mode: 'DEMO ONLY',
+      status: liveStatus,
+      statusReason: this.marketMakerState.reason || 'Fixed-price ladder is waiting for Polymarket books.',
+      strategy: {
+        id: this.strategyId,
+        name: this.strategyName,
+        version: 'btc-5m-fixed-price-ladder-v1',
+        execution: 'PAPER ONLY',
+        symbol: 'BTC',
+        timeframe: '5m',
+        orderType: 'POST_ONLY_LIMIT_BUY',
+        sizePerOrder: config.MAKER_LADDER_SHARES,
+        orderSize: config.MAKER_LADDER_SHARES,
+        rungPrices: config.MAKER_LADDER_RUNGS.map((rung) => rung.price),
+        rungs: config.MAKER_LADDER_RUNGS.map((rung, index) => ({
+          rungIndex: index + 1,
+          price: rung.price,
+          cancelAfterSeconds: rung.cancelAfterSeconds,
+          shares: config.MAKER_LADDER_SHARES,
+        })),
+        independentSides: true,
+        fillRule: 'Only fresh opposing Polymarket trade prints can fill; book touches do not fill. Same-price prints consume estimated queue first.',
+        timeoutRule: 'Each deadline is measured from the start of the 5-minute window. Any unfilled remainder is cancelled at that deadline.',
+        exitPolicy: 'Filled shares remain open for official Polymarket resolution; no take-profit, sell, or merge orders are used.',
+        accumulatesInventory: true,
+      },
+      model: null,
+      binance: null,
+      fairValues: null,
+      marketMakerState: {
+        ...this.marketMakerState,
+        activeBuyOrders: activeOrders.length,
+        filledShares: currentOrders.reduce((total, order) =>
+          total + Number(order.filledShares || 0), 0),
+      },
+      quotes: state.quotes,
+      window: windowStart == null ? null : {
+        ...state.window,
+        start: windowStart,
+        end: windowEnd,
+        secondsRemaining: Math.max(0, (windowEnd - now) / 1000),
+      },
+      positionsBySide,
+      openWindowPositions,
+      ladder,
+      orders: this.orders.slice(0, 200).map((order) => this.orderView(order)),
+      trades: state.positions || [],
+      account: {
+        ...state.account,
+        openPositions: this.positions.filter((position) => position.status === 'OPEN').length,
+        pendingResolutionPositions: this.positions.filter((position) =>
+          position.status === 'PENDING_RESOLUTION').length,
+        tradeCount: this.positions.length,
+      },
+      persistence: { status: 'MEMORY ONLY', detail: 'Paper history resets on Railway restart.' },
+    };
+  }
+
   orderView(order) {
     if (!order) return null;
     return {
       id: order.id,
       action: order.action,
       side: order.side,
+      rungIndex: order.rungIndex ?? null,
       status: order.status,
       price: order.limitPrice,
       requestedShares: order.requestedShares,
       filledShares: order.filledShares,
       remainingShares: order.remainingShares,
+      cancelledShares: order.cancelledShares ?? 0,
       queueAheadShares: order.queueAheadShares,
       createdAt: order.createdAt,
       expiresAt: order.expiresAt,
+      cancelAtSeconds: order.cancelAtSeconds ?? null,
+      cancelReason: order.cancelReason ?? null,
       purpose: order.purpose,
       referenceMidpoint: order.referenceMidpoint,
       fillRule: order.fillRule,
