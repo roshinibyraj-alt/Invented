@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#101628">
-    <title>Invented · BTCUSDT Market Maker</title>
+    <title>Invented · BTCUSDT Fair-Value Strategy</title>
     <style>
       :root {
         color-scheme: dark;
@@ -211,8 +211,8 @@
       <section class="hero" aria-labelledby="heroTitle">
         <div>
           <div class="eyebrow">Binance fair value × Polymarket 5-minute BTC</div>
-          <h2 id="heroTitle">Inventory-aware passive quotes on both outcomes.</h2>
-          <p>This paper-only bot replaces ask-sweeping entries with post-only limit quotes. It adjusts prices to the Binance fair value, volatility, and accumulated UP/DOWN inventory.</p>
+          <h2 id="heroTitle">Buy the favored side only when it is priced below $0.40.</h2>
+          <p>Every 10 seconds, this paper-only bot buys 100 shares when that side's Binance fair value is above 50% and its best ask is below $0.40. Passive sell orders remain limited to shares already held.</p>
         </div>
         <div class="hero-state">
           <span class="badge" id="windowBadge">Window waiting</span>
@@ -271,7 +271,7 @@
           <div class="panel-head">
             <div>
               <div class="panel-title">Fair values and model</div>
-              <div class="panel-subtitle">Estimated payout probability, adjusted for current inventory</div>
+              <div class="panel-subtitle">Binance payout probability; above 50% qualifies for an entry check</div>
             </div>
             <span class="badge" id="modelStatus">Model waiting</span>
           </div>
@@ -288,9 +288,9 @@
             </div>
           </div>
           <div class="decision">
-            <div class="decision-title">Market maker status</div>
+            <div class="decision-title">Entry strategy status</div>
             <div class="decision-text" id="signalSide">Waiting for live inputs</div>
-            <div class="decision-reason" id="signalReason">Quotes require a ready Binance model and fresh two-sided Polymarket books.</div>
+            <div class="decision-reason" id="signalReason">A fresh model and book are required for each scheduled check.</div>
           </div>
         </article>
       </section>
@@ -325,58 +325,58 @@
 
         <article class="panel">
           <div class="panel-head">
-            <div><div class="panel-title">Inventory and maker quotes</div><div class="panel-subtitle">20-share quote clips · inventory capped at 100 per outcome</div></div>
-            <span class="badge" id="positionStatus">0 / 4 orders active</span>
+            <div><div class="panel-title">Current positions and sell orders</div><div class="panel-subtitle">100-share entries every 10 seconds · no fixed position cap</div></div>
+            <span class="badge" id="positionStatus">0 passive sells active</span>
           </div>
           <div class="position-pair">
             <div class="position-box">
               <div class="position-icon up" id="upPositionIcon">UP</div>
               <div class="position-main">
-                <strong id="upPositionTitle">UP inventory · 0 shares</strong>
+                <strong id="upPositionTitle">UP position · 0 shares</strong>
                 <small id="upPositionDetail">Waiting for fair value and fresh book</small>
               </div>
               <div class="position-pnl">
                 <strong id="upPositionPnl">—</strong>
-                <small id="upPositionQuotes">Bid — · Ask —</small>
+                <small id="upPositionQuotes">Entry — · Sell —</small>
               </div>
             </div>
             <div class="position-box">
               <div class="position-icon down" id="downPositionIcon">DOWN</div>
               <div class="position-main">
-                <strong id="downPositionTitle">DOWN inventory · 0 shares</strong>
+                <strong id="downPositionTitle">DOWN position · 0 shares</strong>
                 <small id="downPositionDetail">Waiting for fair value and fresh book</small>
               </div>
               <div class="position-pnl">
                 <strong id="downPositionPnl">—</strong>
-                <small id="downPositionQuotes">Bid — · Ask —</small>
+                <small id="downPositionQuotes">Entry — · Sell —</small>
               </div>
             </div>
           </div>
           <div class="feed-row"><span class="feed-label">Positions awaiting resolution</span><strong class="feed-value" id="pendingCount">—</strong></div>
-          <div class="feed-row"><span class="feed-label">Active maker orders</span><strong class="feed-value" id="entryCounts">—</strong></div>
+          <div class="feed-row"><span class="feed-label">Active passive sell orders</span><strong class="feed-value" id="entryCounts">—</strong></div>
+          <div class="feed-row"><span class="feed-label">Next 10-second entry check</span><strong class="feed-value" id="nextEntryCheck">—</strong></div>
           <div class="feed-row"><span class="feed-label">Modeled taker fees</span><strong class="feed-value" id="fees">—</strong></div>
           <div class="feed-row"><span class="feed-label">Estimated maker rebates</span><strong class="feed-value" id="makerRebate">—</strong></div>
         </article>
 
         <article class="panel">
           <div class="panel-head">
-            <div><div class="panel-title">Market-making rules</div><div class="panel-subtitle">Passive quotes · controlled inventory · paper fills only</div></div>
-            <span class="badge">20-share clips</span>
+            <div><div class="panel-title">Entry and exit rules</div><div class="panel-subtitle">Signal-driven buys · paper fills only</div></div>
+            <span class="badge">100 shares / check</span>
           </div>
           <div class="rules">
             <div class="rule"><b>Fair value</b>Binance BTC model uses the two latest completed 5-minute candles and the current window’s live price.</div>
-            <div class="rule"><b>Quotes</b>Place post-only simulated bids and inventory-backed asks for UP and DOWN, at least one tick from the opposing best price.</div>
-            <div class="rule"><b>Spread</b>Start at a 2¢ half-spread and widen with volatility, up to an 8¢ half-spread.</div>
-            <div class="rule"><b>Inventory</b>Quote 20 shares at a time; cap unresolved inventory at 100 shares per outcome. Skew prices to reduce the heavier side.</div>
-            <div class="rule"><b>Fill simulation</b>A book touch alone never fills. Require a fresh CLOB trade print from the opposite taker side at or through the limit after estimated queue volume is consumed.</div>
-            <div class="rule"><b>Window cutoff</b>Cancel resting quotes in the last 30 seconds. Remaining inventory waits for official resolution of its original market.</div>
-            <div class="rule"><b>Execution</b>Paper-only. No wallet or real order is connected; maker rebates shown are estimates.</div>
+            <div class="rule"><b>Signal</b>Every 10 seconds, UP or DOWN qualifies only when its model probability is above 50%.</div>
+            <div class="rule"><b>Price</b>The qualifying side's best ask and all 100 shares swept must be below $0.40.</div>
+            <div class="rule"><b>Repeat buys</b>Every qualifying 10-second check adds another 100 shares, subject to available paper cash and visible ask depth.</div>
+            <div class="rule"><b>Sell handling</b>Passive sell orders can be posted only for owned shares and stop in the final 30 seconds; remaining shares wait for resolution.</div>
+            <div class="rule"><b>Execution</b>Paper-only. No wallet or real order is connected. Taker entry fees are modeled; any sell rebate is only an estimate.</div>
           </div>
         </article>
       </section>
 
       <div class="notice">
-        Market-making P&amp;L is not guaranteed: quotes can fill just before prices move against inventory, and fills may be partial. Public trade prints do not reveal your true queue position, so paper fills use a conservative queue buffer but remain estimates. Maker rebates are not guaranteed. Any inventory left at expiry is settled using the official Polymarket result.
+        This is a simulation, not an exchange execution or a profit guarantee. A buy is recorded only when the current visible asks can cover all 100 shares below $0.40; entries include modeled taker fees. Passive sell fills remain estimates because public trade prints do not reveal queue priority. Any inventory left at expiry is settled using the official Polymarket result.
       </div>
 
       <section class="grid two-col">
@@ -394,7 +394,7 @@
         </article>
         <article class="panel">
           <div class="panel-head">
-            <div><div class="panel-title">Activity</div><div class="panel-subtitle">Quote changes, maker fills, cancellations, and official settlements</div></div>
+            <div><div class="panel-title">Activity</div><div class="panel-subtitle">Signal buys, passive sell fills, cancellations, and official settlements</div></div>
             <span class="badge" id="activityCount">0 events</span>
           </div>
           <div class="activity-list" id="activity"><div class="empty-row">Waiting for bot activity</div></div>
@@ -489,7 +489,6 @@
         const model = state.model || {};
         const binance = state.binance || {};
         const quotes = state.quotes || {};
-        const fairValues = state.fairValues || {};
         const makerQuotes = state.makerQuotes || {};
         const inventory = state.inventory || {};
         const up = quotes.UP || {};
@@ -522,11 +521,11 @@
           ? `Tick age ${Math.max(0, Math.round(Number(binance.tickAgeMs)))} ms`
           : "Waiting for ticks");
         setText("modelStatus", model.ready ? "READY · 2 CLOSED CANDLES" : "MODEL WAITING");
-        setText("upProbability", percent(fairValues.UP ?? model.probabilityUp));
-        setText("downProbability", percent(fairValues.DOWN ?? model.probabilityDown));
+        setText("upProbability", percent(model.probabilityUp));
+        setText("downProbability", percent(model.probabilityDown));
         setText("upAsk", `bid ${contractPrice(up.bestBid)} · ask ${contractPrice(up.bestAsk)}`);
         setText("downAsk", `bid ${contractPrice(down.bestBid)} · ask ${contractPrice(down.bestAsk)}`);
-        setText("signalSide", state.marketMakerState?.status || "Waiting for quotes");
+        setText("signalSide", state.marketMakerState?.status || "Waiting for signal check");
         setText("signalReason", state.marketMakerState?.reason || state.signal?.reason || model.reason || "Waiting for inputs.");
         setText("clobStatus", `Polymarket ${String(state.websocket?.status || "waiting").toLowerCase()}`);
         setText("upAskBook", contractPrice(up.bestAsk));
@@ -546,27 +545,27 @@
           const makerQuote = makerQuotes[side] || {};
           const sideInventory = inventory[side] || {};
           const shares = Number(makerQuote.inventoryShares ?? sideInventory.shares ?? position?.shares ?? 0);
-          const maxShares = Number(makerQuote.maxInventoryShares ?? sideInventory.maxShares ?? state.strategy?.maxInventoryPerSide ?? 0);
-          const bidOrder = makerQuote.bid || null;
           const askOrder = makerQuote.ask || null;
-          const bidActive = bidOrder && ["RESTING", "PARTIALLY_FILLED"].includes(bidOrder.status);
           const askActive = askOrder && ["RESTING", "PARTIALLY_FILLED"].includes(askOrder.status);
-          if (bidActive) activeOrders += 1;
           if (askActive) activeOrders += 1;
           setText(`${key}PositionIcon`, side);
-          setText(`${key}PositionTitle`, `${side} inventory · ${shares}/${maxShares} shares`);
+          setText(`${key}PositionTitle`, `${side} position · ${shares.toLocaleString()} shares`);
           setText(`${key}PositionDetail`, position
-            ? `Fair ${percent(makerQuote.fairValue)} · average buy ${contractPrice(position.entryPrice)} · unresolved inventory counts toward cap`
-            : `Fair ${percent(makerQuote.fairValue)} · ${makerQuote.reason || "Waiting for fresh market data"}`);
+            ? `Fair ${percent(makerQuote.fairValue)} · average buy ${contractPrice(position.entryPrice)} · ${makerQuote.signalReason || "held for sell or resolution"}`
+            : `Fair ${percent(makerQuote.fairValue)} · ${makerQuote.signalReason || makerQuote.reason || "Waiting for fresh market data"}`);
           setText(`${key}PositionPnl`, position ? signedMoney(position.unrealizedPnl) : "—");
           $(`${key}PositionPnl`).className = pnlClass(position?.unrealizedPnl);
           setText(`${key}PositionQuotes`, position
-            ? `Bid ${contractPrice(bidOrder?.price ?? makerQuote.bidPrice)} ${bidOrder?.status || makerQuote.bidStatus} · Ask ${contractPrice(askOrder?.price ?? makerQuote.askPrice)} ${askOrder?.status || makerQuote.askStatus}`
-            : `Bid ${contractPrice(bidOrder?.price ?? makerQuote.bidPrice)} ${bidOrder?.status || makerQuote.bidStatus} · Ask ${contractPrice(makerQuote.askPrice)} ${makerQuote.askStatus}`);
+            ? `Entry ${makerQuote.signalStatus || "—"} · Sell ${contractPrice(askOrder?.price ?? makerQuote.askPrice)} ${askOrder?.status || makerQuote.askStatus}`
+            : `Entry ${makerQuote.signalStatus || "—"} · Sell ${contractPrice(makerQuote.askPrice)} ${makerQuote.askStatus}`);
         }
-        setText("positionStatus", `${activeOrders} / 4 orders active`);
+        setText("positionStatus", `${activeOrders} passive sells active`);
         setText("pendingCount", Number(account.pendingResolutionPositions || 0).toLocaleString());
         setText("entryCounts", `${activeOrders} active · ${Number(state.makerStats?.ordersPlaced || 0)} placed total`);
+        setText("nextEntryCheck", state.strategy?.nextEntryCheckAt != null
+          && Number.isFinite(Number(state.strategy.nextEntryCheckAt))
+          ? time(state.strategy.nextEntryCheckAt)
+          : "Waiting for market");
         setText("fees", money(account.takerFees));
         setText("makerRebate", money(account.estimatedMakerRebate));
         setText("persistenceStatus", state.persistence?.status === "CONNECTED"

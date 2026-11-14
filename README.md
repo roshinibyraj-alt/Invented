@@ -1,22 +1,20 @@
-# Invented BTC 5-minute market-maker paper bot
+# Invented BTC 5-minute fair-value accumulation paper bot
 
-This service runs a paper-only, inventory-aware market maker for Polymarket BTC 5-minute UP/DOWN markets. It uses Binance BTCUSDT ticks, the two most recent completed 5-minute candles, and Polymarket's public CLOB market stream. It does not submit live orders.
+This service simulates Polymarket BTC 5-minute UP/DOWN entries using Binance BTCUSDT ticks, the two most recent completed 5-minute candles, and Polymarket's public CLOB market stream. It does not submit live orders.
 
 ## Strategy
 
-- Estimate fair values for UP and DOWN from the Binance model.
-- Place one passive bid quote on each outcome. Once shares are held, place a passive ask against that inventory; the bot never shorts or sells shares it does not own.
-- Keep quotes at least one tick away from the visible opposing best price. Reprice only when the target moves enough to avoid unnecessary queue resets.
-- Start with a 2¢ half-spread and widen it with observed volatility, up to 8¢. Skew both fair values to encourage reducing the heavier UP/DOWN inventory.
-- Quote 20 shares at a time and cap unresolved inventory at 100 shares per outcome, including positions waiting for older windows to resolve. Resting buy orders reserve available demo cash.
-- Stop opening or repricing quotes in the final 30 seconds of a window. Cancel remaining quotes at the cutoff; any held shares wait for official resolution of their original market.
-- Paper fills require a fresh Polymarket `last_trade_price` event from the opposite taker side at or through the limit. At the exact limit, the simulated trade volume must clear the visible queue plus an extra queue buffer. A price touch or book update alone does not fill an order.
-- Maker orders pay no modeled taker fee. Any maker rebate is shown as an estimate only and is not treated as guaranteed.
+- Estimate UP and DOWN payout probabilities from the Binance model.
+- At each 10-second check, buy 100 shares on a side only if that side's model probability is strictly above 50%.
+- Require a fresh best ask below $0.40 and enough visible ask depth to fill the full 100 shares strictly below $0.40. A partial entry is not recorded.
+- Repeat the 100-share buy at every later qualifying check, with no fixed per-side share cap. Available paper cash and visible ask liquidity are the practical limits.
+- Entry orders use ask-book sweeps and include modeled taker fees. Passive sell orders remain available only for shares already owned; their fills use fresh trade prints and a conservative queue estimate.
+- Stop posting passive sell orders in the final 30 seconds. Any shares still held wait for official resolution of their original market.
 
-The public trade feed cannot reveal the bot's actual queue position. Queue-buffer fills are therefore an estimate, not a guaranteed exchange fill. A maker quote can fill just before the fair value moves against the acquired inventory; profits are not guaranteed.
+Paper fills are estimates, not guaranteed exchange executions. Public data does not reveal actual queue priority, and profits are not guaranteed.
 
 ## Dashboard and runtime
 
-The dashboard shows fair values, Binance and Polymarket feed status, order-book prices, each outcome's working bid/ask, queue estimate, inventory, account totals, fills, cancellations, and settlements. The paper ledger is held in process memory and resets when Railway restarts.
+The dashboard shows raw fair values, the next 10-second check, signal qualification per side, Polymarket prices and visible depth, positions, modeled taker fees, passive sell orders, and official settlements. The paper ledger is held in process memory and resets when Railway restarts.
 
-Run `npm test` for model, quote-safety, inventory cap, queue-aware trade-print fill, partial-fill, cancellation, settlement, WebSocket, and dashboard checks.
+Run `npm test` for signal thresholds, check cadence, full-size ask depth, passive sell fills, settlement, WebSocket, and dashboard checks.

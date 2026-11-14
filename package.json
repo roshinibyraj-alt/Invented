@@ -2,7 +2,7 @@
   "name": "invented-btc-market-maker-paper-bot",
   "version": "1.0.0",
   "private": true,
-  "description": "Paper-only, inventory-aware BTC 5-minute UP/DOWN market maker.",
+  "description": "Paper-only, fair-value BTC 5-minute UP/DOWN signal strategy.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",

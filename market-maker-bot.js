@@ -17,12 +17,12 @@ function clamp(value, minimum, maximum) {
 class MarketMakerBot extends MispricingBot {
   constructor(options = {}) {
     super(options);
-    this.strategyId = 'btc-5m-inventory-aware-market-maker';
-    this.strategyName = 'BTC 5-minute inventory-aware paper market maker';
+    this.strategyId = 'btc-5m-fair-value-40c-accumulator';
+    this.strategyName = 'BTC 5-minute fair-value accumulation paper strategy';
     this.rules = {
-      sharesPerSide: config.MAKER_QUOTE_SHARES,
-      quoteSize: config.MAKER_QUOTE_SHARES,
-      maxInventoryPerSide: config.MAKER_MAX_INVENTORY_PER_SIDE,
+      sharesPerCheck: config.SIGNAL_ENTRY_SHARES,
+      checkIntervalMs: config.SIGNAL_ENTRY_INTERVAL_MS,
+      maximumAskPriceExclusive: config.SIGNAL_ENTRY_MAX_PRICE,
     };
     this.strategyWindowStart = null;
     this.makerQuotes = this.emptyMakerQuotes();
@@ -40,6 +40,9 @@ class MarketMakerBot extends MispricingBot {
       lastFillAt: null,
       lastFillSide: null,
     };
+    this.lastEntryCheckSlot = 0;
+    this.lastEntryCheckAt = null;
+    this.lastEntryCheckResult = 'Waiting for the first 10-second entry check.';
     this.seenMakerTrades = new Map();
   }
 
@@ -64,10 +67,21 @@ class MarketMakerBot extends MispricingBot {
     this.strategyWindowStart = start;
     this.makerQuotes = this.emptyMakerQuotes();
     this.fairValues = null;
+    this.entryTriggeredThisWindow = false;
+    this.sideEntryCountsThisWindow = { UP: 0, DOWN: 0 };
+    this.signalConsumed = { UP: false, DOWN: false };
+    this.sideSignals = Object.fromEntries(SIDES.map((side) => [side, {
+      status: 'WAITING',
+      reason: `Waiting for the next ${config.SIGNAL_ENTRY_INTERVAL_MS / 1000}-second entry check.`,
+    }]));
     this.marketMakerState = {
       status: 'SCANNING',
-      reason: 'Waiting for the first valid fair value and order book.',
+      reason: 'Waiting for a qualifying fair-value and price check.',
     };
+    this.signal = { side: null, reason: this.marketMakerState.reason };
+    this.lastEntryCheckSlot = 0;
+    this.lastEntryCheckAt = null;
+    this.lastEntryCheckResult = 'Waiting for the first 10-second entry check.';
   }
 
   async closePreviousWindows(currentStart, now = this.now()) {
@@ -105,15 +119,25 @@ class MarketMakerBot extends MispricingBot {
     if (this.strategyWindowStart !== windowStart) {
       this.strategyWindowStart = windowStart;
       this.makerQuotes = this.emptyMakerQuotes();
+      this.entryTriggeredThisWindow = false;
+      this.sideEntryCountsThisWindow = { UP: 0, DOWN: 0 };
+      this.signalConsumed = { UP: false, DOWN: false };
+      this.sideSignals = Object.fromEntries(SIDES.map((side) => [side, {
+        status: 'WAITING',
+        reason: `Waiting for the next ${config.SIGNAL_ENTRY_INTERVAL_MS / 1000}-second entry check.`,
+      }]));
+      this.lastEntryCheckSlot = 0;
+      this.lastEntryCheckAt = null;
+      this.lastEntryCheckResult = 'Waiting for the first 10-second entry check.';
     }
 
     this.model = this.modelSnapshot(now);
     if (!this.model.ready) {
       this.cancelWindowOrders(windowStart, now, 'CANCELLED_STALE_INPUTS', 'Market inputs are stale.');
       for (const side of SIDES) {
-        this.makerQuotes[side].bidStatus = 'CANCELLED_STALE_INPUTS';
+        this.makerQuotes[side].bidStatus = 'WAITING_FOR_MODEL';
         this.makerQuotes[side].askStatus = 'CANCELLED_STALE_INPUTS';
-        this.makerQuotes[side].reason = 'Quotes are cancelled until fresh Binance and Polymarket data return.';
+        this.makerQuotes[side].reason = 'Entries wait for fresh Binance and Polymarket data.';
       }
       this.marketMakerState = {
         status: 'WAITING_FOR_DATA',
@@ -127,16 +151,11 @@ class MarketMakerBot extends MispricingBot {
       0,
       windowStart + config.WINDOW_MS_5M - now,
     );
-    if (millisecondsRemaining <= config.MAKER_WINDOW_CUTOFF_MS) {
-      this.cancelWindowOrders(windowStart, now, 'CANCELLED_WINDOW_CUTOFF', 'Quote cutoff before resolution.');
-      for (const side of SIDES) {
-        this.makerQuotes[side].bidStatus = 'CANCELLED_WINDOW_CUTOFF';
-        this.makerQuotes[side].askStatus = 'CANCELLED_WINDOW_CUTOFF';
-        this.makerQuotes[side].reason = 'All quotes are cancelled for the final 30 seconds.';
-      }
+    if (millisecondsRemaining <= 0) {
+      this.cancelWindowOrders(windowStart, now, 'CANCELLED_WINDOW_END', 'Market window ended.');
       this.marketMakerState = {
-        status: 'CUTOFF',
-        reason: 'Quotes are cancelled for the final 30 seconds; inventory waits for official resolution.',
+        status: 'WINDOW_CLOSED',
+        reason: 'Window ended; remaining inventory waits for official resolution.',
       };
       this.signal = { side: null, reason: this.marketMakerState.reason, modelReady: true };
       return false;
@@ -144,16 +163,10 @@ class MarketMakerBot extends MispricingBot {
 
     const inventory = this.totalInventoryBySide();
     const netInventory = inventory.UP - inventory.DOWN;
-    const normalizedInventory = clamp(
-      netInventory / config.MAKER_MAX_INVENTORY_PER_SIDE,
-      -1,
-      1,
-    );
-    const inventorySkew = normalizedInventory * config.MAKER_MAX_INVENTORY_SKEW;
     const baseFairUp = this.model.probabilityUp;
     const baseFairDown = this.model.probabilityDown;
-    const fairUp = clamp(baseFairUp - inventorySkew, 0.01, 0.99);
-    const fairDown = clamp(baseFairDown + inventorySkew, 0.01, 0.99);
+    const fairUp = baseFairUp;
+    const fairDown = baseFairDown;
     const halfSpread = clamp(
       config.MAKER_BASE_HALF_SPREAD
         + Number(this.model.volatility5m || 0) * config.MAKER_VOLATILITY_SPREAD_MULTIPLIER,
@@ -165,23 +178,46 @@ class MarketMakerBot extends MispricingBot {
       DOWN: fairDown,
       baseUP: baseFairUp,
       baseDOWN: baseFairDown,
-      inventorySkew,
+      inventorySkew: 0,
       netInventory,
       halfSpread,
       volatility5m: this.model.volatility5m,
     };
 
+    const checkSlot = Math.floor((now - windowStart) / config.SIGNAL_ENTRY_INTERVAL_MS);
+    let checkResult = null;
+    if (checkSlot > this.lastEntryCheckSlot) {
+      this.lastEntryCheckSlot = checkSlot;
+      this.lastEntryCheckAt = now;
+      checkResult = this.runSignalEntryCheck(now, windowStart);
+      this.lastEntryCheckResult = checkResult.reason;
+    }
+
+    const withinSellQuoteCutoff = millisecondsRemaining <= config.MAKER_WINDOW_CUTOFF_MS;
     let changed = false;
     for (const side of SIDES) {
-      const fairValue = side === 'UP' ? fairUp : fairDown;
-      changed = this.reconcileSideQuotes({
-        side,
-        fairValue,
-        halfSpread,
-        inventorySkew,
-        now,
-        windowStart,
-      }) || changed;
+      if (withinSellQuoteCutoff) {
+        changed = this.cancelSideOrders(
+          side,
+          windowStart,
+          now,
+          'CANCELLED_WINDOW_CUTOFF',
+          'Passive sell quotes stop in the final 30 seconds.',
+        ) > 0 || changed;
+        this.makerQuotes[side].bidStatus = 'SIGNAL_ONLY';
+        this.makerQuotes[side].askStatus = 'CANCELLED_WINDOW_CUTOFF';
+        this.makerQuotes[side].reason = 'Signal checks continue; passive sell quotes stop in the final 30 seconds.';
+      } else {
+        const fairValue = side === 'UP' ? fairUp : fairDown;
+        changed = this.reconcileSideQuotes({
+          side,
+          fairValue,
+          halfSpread,
+          inventorySkew: 0,
+          now,
+          windowStart,
+        }) || changed;
+      }
     }
 
     const activeCount = this.orders.filter((order) =>
@@ -189,21 +225,148 @@ class MarketMakerBot extends MispricingBot {
       && order.windowStart === windowStart
       && ACTIVE_ORDER_STATES.has(order.status)).length;
     this.marketMakerState = {
-      status: activeCount ? 'QUOTING' : 'NO_QUOTES',
-      reason: activeCount
-        ? 'Resting maker quotes are active; fills require observed Polymarket trade prints.'
-        : 'No safe passive quotes are available at the current fair value and book.',
+      status: checkResult?.enteredSides?.length
+        ? 'ENTRY_ADDED'
+        : activeCount ? 'MANAGING_SELLS' : 'SCANNING',
+      reason: checkResult?.reason || (activeCount
+        ? 'No buy signal this check; passive sell orders manage shares already held.'
+        : 'Waiting for the next 10-second check: fair value above 50% and best ask below $0.40.'),
     };
     this.signal = {
-      side: null,
+      ...(checkResult?.enteredSides?.length === 1 ? { side: checkResult.enteredSides[0] } : {}),
       reason: this.marketMakerState.reason,
       modelReady: true,
       fairValueUP: fairUp,
       fairValueDOWN: fairDown,
       netInventory,
       halfSpread,
+      nextEntryCheckAt: windowStart
+        + (this.lastEntryCheckSlot + 1) * config.SIGNAL_ENTRY_INTERVAL_MS,
     };
     return changed;
+  }
+
+  runSignalEntryCheck(now, windowStart) {
+    const enteredSides = [];
+    const results = [];
+    const market = this.market || {};
+    for (const side of SIDES) {
+      const probability = side === 'UP'
+        ? this.model.probabilityUp
+        : this.model.probabilityDown;
+      if (!(probability > 0.5)) {
+        this.sideSignals[side] = {
+          status: 'MODEL_NOT_ABOVE_50',
+          probability,
+          reason: `${side} fair value must be strictly above 50%.`,
+        };
+        results.push(`${side} fair value is not above 50%`);
+        continue;
+      }
+
+      const quote = this.getFreshQuote(side, now);
+      if (!quote) {
+        this.sideSignals[side] = {
+          status: 'WAITING_FOR_FRESH_BOOK',
+          probability,
+          reason: `Waiting for a fresh ${side} order book.`,
+        };
+        results.push(`${side} book is not fresh`);
+        continue;
+      }
+      const bestAsk = Number(quote.bestAsk);
+      if (!(bestAsk < config.SIGNAL_ENTRY_MAX_PRICE)) {
+        this.sideSignals[side] = {
+          status: 'ASK_ABOVE_LIMIT',
+          probability,
+          bestAsk,
+          reason: `${side} best ask must be below $${config.SIGNAL_ENTRY_MAX_PRICE.toFixed(2)}.`,
+        };
+        results.push(`${side} ask is not below $${config.SIGNAL_ENTRY_MAX_PRICE.toFixed(2)}`);
+        continue;
+      }
+
+      const maximumFillPrice = config.SIGNAL_ENTRY_MAX_PRICE - 2 * EPSILON;
+      const visibleExecution = this.sweep(
+        side,
+        'asks',
+        config.SIGNAL_ENTRY_SHARES,
+        { now, maximumPrice: maximumFillPrice },
+      );
+      if (!visibleExecution?.complete || !(visibleExecution.gross > 0)) {
+        this.sideSignals[side] = {
+          status: 'WAITING_FOR_FULL_DEPTH',
+          probability,
+          bestAsk,
+          reason: `Need all ${config.SIGNAL_ENTRY_SHARES} shares visible below $${config.SIGNAL_ENTRY_MAX_PRICE.toFixed(2)}.`,
+        };
+        results.push(`${side} lacks full ${config.SIGNAL_ENTRY_SHARES}-share ask depth below the limit`);
+        continue;
+      }
+
+      if (visibleExecution.totalCost > this.cash + EPSILON) {
+        this.sideSignals[side] = {
+          status: 'INSUFFICIENT_CASH',
+          probability,
+          bestAsk,
+          reason: 'The full 100-share entry exceeds available paper cash.',
+        };
+        results.push(`${side} entry exceeds available paper cash`);
+        continue;
+      }
+
+      const execution = this.sweep(
+        side,
+        'asks',
+        config.SIGNAL_ENTRY_SHARES,
+        { now, consume: true, maximumPrice: maximumFillPrice },
+      );
+      if (!execution?.complete || !(execution.gross > 0)) {
+        this.sideSignals[side] = {
+          status: 'WAITING_FOR_FULL_DEPTH',
+          probability,
+          bestAsk,
+          reason: 'Visible ask depth changed before the full paper entry could be simulated.',
+        };
+        results.push(`${side} ask depth changed before entry`);
+        continue;
+      }
+
+      const expectedEdgePerShare = (
+        probability * config.SIGNAL_ENTRY_SHARES - execution.totalCost
+      ) / config.SIGNAL_ENTRY_SHARES;
+      const candidate = {
+        side,
+        probability,
+        bestAsk,
+        expectedEdgePerShare,
+        grossCost: execution.gross,
+        entryFees: execution.fees,
+        allInCost: execution.totalCost,
+        fills: execution.fills,
+        edgeBypassed: false,
+      };
+      this.openPosition(candidate, execution, market, now, windowStart, {
+        createTakeProfit: false,
+        orderType: 'PAPER_TAKER_ASK_SWEEP',
+        managementText: 'owned shares remain eligible for passive selling and official resolution',
+      });
+      this.sideSignals[side] = {
+        status: 'ENTRY_ADDED',
+        probability,
+        bestAsk,
+        sharesAdded: config.SIGNAL_ENTRY_SHARES,
+        sharesHeld: this.totalInventoryForSide(side),
+        reason: `${side}: added ${config.SIGNAL_ENTRY_SHARES} shares at this 10-second check.`,
+      };
+      enteredSides.push(side);
+      results.push(`${side} bought ${config.SIGNAL_ENTRY_SHARES} shares`);
+    }
+
+    const reason = enteredSides.length
+      ? `10-second check added ${config.SIGNAL_ENTRY_SHARES} ${enteredSides.join(' and ')} shares.`
+      : `10-second check: ${results.join('; ')}.`;
+    return { enteredSides, reason };
   }
 
   reconcileSideQuotes({ side, fairValue, halfSpread, inventorySkew, now, windowStart }) {
@@ -227,19 +390,21 @@ class MarketMakerBot extends MispricingBot {
       return false;
     }
 
-    const bidPrice = this.passiveBidPrice(fairValue, halfSpread, bestAsk);
     const askPrice = this.passiveAskPrice(fairValue, halfSpread, bestBid);
-    sideState.bidPrice = bidPrice;
+    sideState.bidPrice = null;
     sideState.askPrice = askPrice;
-    sideState.reason = 'Quotes are kept at least one tick away from crossing the visible opposite side.';
+    sideState.bidStatus = 'SIGNAL_ONLY';
+    sideState.reason = 'Buys only occur on 10-second fair-value checks; passive asks can sell owned inventory.';
 
-    const changedBid = this.reconcileMakerOrder({
-      side,
-      action: 'BUY',
-      targetPrice: bidPrice,
-      now,
-      windowStart,
-    });
+    const activeBid = this.activeMakerOrder(side, 'BUY', windowStart);
+    const changedBid = activeBid
+      ? this.cancelMakerOrder(
+        activeBid,
+        now,
+        'CANCELLED_STRATEGY_REPLACED',
+        'Passive buys are disabled; entries use the fair-value signal check.',
+      )
+      : false;
     const changedAsk = this.reconcileMakerOrder({
       side,
       action: 'SELL',
@@ -248,17 +413,11 @@ class MarketMakerBot extends MispricingBot {
       windowStart,
     });
 
-    const bidOrder = this.activeMakerOrder(side, 'BUY', windowStart);
     const askOrder = this.activeMakerOrder(side, 'SELL', windowStart);
-    sideState.bidOrderId = bidOrder?.id || null;
+    sideState.bidOrderId = null;
     sideState.askOrderId = askOrder?.id || null;
-    sideState.bidStatus = bidOrder?.status || (bidPrice == null ? 'NO_SAFE_QUOTE' : 'NOT_POSTED');
+    sideState.bidStatus = 'SIGNAL_ONLY';
     sideState.askStatus = askOrder?.status || (askPrice == null ? 'NO_INVENTORY' : 'NOT_POSTED');
-    if (!bidOrder
-      && this.totalInventoryForSide(side) >= config.MAKER_MAX_INVENTORY_PER_SIDE) {
-      sideState.bidStatus = 'INVENTORY_CAP';
-      sideState.reason = 'The unresolved inventory cap includes this and older windows.';
-    }
     return changedBid || changedAsk;
   }
 
@@ -323,7 +482,8 @@ class MarketMakerBot extends MispricingBot {
     }
 
     const sellableShares = Number(position?.shares || 0);
-    if (active && passive && sellableShares >= active.remainingShares - EPSILON
+    if (active && passive
+      && Math.abs(sellableShares - active.remainingShares) < EPSILON
       && Math.abs(active.limitPrice - targetPrice)
         < config.MAKER_REPRICE_TICKS * tick - EPSILON) {
       return false;
@@ -679,8 +839,12 @@ class MarketMakerBot extends MispricingBot {
 
     const allBuyCost = Number(position.initialTotalCost) || 0;
     const remainingCost = Number(position.totalCost) || 0;
+    const realizedCostFraction = allBuyCost > 0
+      ? Math.max(0, allBuyCost - remainingCost) / allBuyCost
+      : 0;
     position.realizedPnl = position.exitProceeds
       - Math.max(0, allBuyCost - remainingCost)
+      - Number(position.initialFees || 0) * realizedCostFraction
       + position.estimatedMakerRebate;
     if (position.shares <= EPSILON) {
       position.shares = 0;
@@ -691,7 +855,10 @@ class MarketMakerBot extends MispricingBot {
       position.settlementBasis = 'PAPER_MAKER_SELL';
       position.exitReason = 'MAKER_SELL';
       position.exitType = ORDER_TYPE;
-      position.realizedPnl = position.exitProceeds - allBuyCost + position.estimatedMakerRebate;
+      position.realizedPnl = position.exitProceeds
+        - allBuyCost
+        - Number(position.initialFees || 0)
+        + position.estimatedMakerRebate;
       position.outcome = position.realizedPnl > 0 ? 'WIN'
         : position.realizedPnl < 0 ? 'LOSS' : 'BREAK_EVEN';
       this.recordStrategyOutcome(position, position.outcome, now, 'MAKER_SELL');
@@ -736,7 +903,9 @@ class MarketMakerBot extends MispricingBot {
         bid: this.orderView(bidOrder),
         ask: this.orderView(askOrder),
         inventoryShares: this.totalInventoryForSide(side),
-        maxInventoryShares: config.MAKER_MAX_INVENTORY_PER_SIDE,
+        maxInventoryShares: null,
+        signalStatus: this.sideSignals[side]?.status || 'WAITING',
+        signalReason: this.sideSignals[side]?.reason || 'Waiting for the next entry check.',
       }];
     }));
 
@@ -746,37 +915,44 @@ class MarketMakerBot extends MispricingBot {
       strategy: {
         id: this.strategyId,
         name: this.strategyName,
-        version: 'btc-5m-inventory-aware-market-maker-v1',
+        version: 'btc-5m-fair-value-40c-accumulator-v1',
         execution: 'PAPER ONLY',
         symbol: 'BTCUSDT',
         timeframe: '5m',
         model: 'Binance probability model using the last two completed 5-minute candles.',
-        quoteMode: 'Inventory-aware passive limit quotes on both outcomes.',
-        orderType: ORDER_TYPE,
-        postOnly: true,
-        quoteSizeShares: config.MAKER_QUOTE_SHARES,
-        maxInventoryPerSide: config.MAKER_MAX_INVENTORY_PER_SIDE,
-        maxTotalInventoryShares: config.MAKER_MAX_INVENTORY_PER_SIDE * 2,
+        quoteMode: '100-share ask sweeps every 10 seconds when fair value is above 50% and best ask is below $0.40; passive sells manage owned inventory.',
+        orderType: 'PAPER_TAKER_ASK_SWEEP',
+        postOnly: false,
+        entryShares: config.SIGNAL_ENTRY_SHARES,
+        entryIntervalMs: config.SIGNAL_ENTRY_INTERVAL_MS,
+        fairValueThresholdExclusive: 0.5,
+        maximumEntryAskExclusive: config.SIGNAL_ENTRY_MAX_PRICE,
+        maxInventoryPerSide: null,
+        maxTotalInventoryShares: null,
         baseHalfSpread: config.MAKER_BASE_HALF_SPREAD,
         maxHalfSpread: config.MAKER_MAX_HALF_SPREAD,
         volatilitySpreadMultiplier: config.MAKER_VOLATILITY_SPREAD_MULTIPLIER,
-        maxInventorySkew: config.MAKER_MAX_INVENTORY_SKEW,
         tickSize: config.MAKER_TICK_SIZE,
         windowCutoffMs: config.MAKER_WINDOW_CUTOFF_MS,
         fairValues: this.fairValues,
-        entryPriceCeiling: null,
+        entryPriceCeiling: config.SIGNAL_ENTRY_MAX_PRICE,
         accumulatesInventory: true,
-        usesTakerOrders: false,
+        usesTakerOrders: true,
         inventoryIncludesUnresolvedPositions: true,
-        fillRule: 'A paper fill requires a fresh last_trade_price print from the opposite taker side at or through the resting limit after the estimated queue is consumed. Price touches alone do not fill.',
+        fillRule: 'A signal buy requires a fresh book with enough visible asks to fill all 100 shares below $0.40. Passive sell fills still require fresh last_trade_price prints after the estimated queue is consumed.',
         makerRebateRateEstimate: config.CRYPTO_MAKER_REBATE_RATE,
         estimatedMakerRebateOnly: true,
+        lastEntryCheckAt: this.lastEntryCheckAt,
+        lastEntryCheckResult: this.lastEntryCheckResult,
+        nextEntryCheckAt: windowStart == null ? null : windowStart
+          + (this.lastEntryCheckSlot + 1) * config.SIGNAL_ENTRY_INTERVAL_MS,
+        sideSignals: { ...this.sideSignals },
         exits: {
           takeProfit: null,
           stopLoss: null,
-          windowEnd: 'Cancel resting quotes 30 seconds before expiry; remaining inventory waits for official resolution.',
+          windowEnd: 'Cancel passive sell quotes 30 seconds before expiry; remaining inventory waits for official resolution.',
         },
-        trigger: 'Quote both outcomes around the Binance fair value; skew prices away from accumulated inventory and widen the spread with volatility.',
+        trigger: `Every ${config.SIGNAL_ENTRY_INTERVAL_MS / 1000} seconds, buy ${config.SIGNAL_ENTRY_SHARES} shares on a side only when its fair value is above 50% and its best ask is below $${config.SIGNAL_ENTRY_MAX_PRICE.toFixed(2)}; require full visible ask depth below the price limit.`,
       },
       account: {
         ...state.account,
@@ -799,12 +975,12 @@ class MarketMakerBot extends MispricingBot {
         UP: {
           ...state.inventory?.UP,
           shares: this.totalInventoryForSide('UP'),
-          maxShares: config.MAKER_MAX_INVENTORY_PER_SIDE,
+          maxShares: null,
         },
         DOWN: {
           ...state.inventory?.DOWN,
           shares: this.totalInventoryForSide('DOWN'),
-          maxShares: config.MAKER_MAX_INVENTORY_PER_SIDE,
+          maxShares: null,
         },
         netShares: this.totalInventoryForSide('UP') - this.totalInventoryForSide('DOWN'),
       },

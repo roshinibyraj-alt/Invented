@@ -19,6 +19,7 @@ function erf(value) {
 }
 
 function normalCdf(value) {
+  if (Math.abs(Number(value)) <= 1e-12) return 0.5;
   return Math.max(0, Math.min(1, 0.5 * (1 + erf(value / Math.sqrt(2)))));
 }
 
@@ -715,7 +716,11 @@ class MispricingBot extends WickBot {
     return order;
   }
 
-  openPosition(candidate, execution, market, now, windowStart) {
+  openPosition(candidate, execution, market, now, windowStart, {
+    createTakeProfit = true,
+    orderType = 'PAPER_FULL_VISIBLE_ASK_SWEEP',
+    managementText = null,
+  } = {}) {
     const entryNumber = this.sideEntryCountsThisWindow[candidate.side] + 1;
     const addedShares = Number(execution.filledShares);
     let position = this.getOpenPosition(candidate.side, windowStart);
@@ -755,7 +760,7 @@ class MispricingBot extends WickBot {
       const id = `${windowStart}-btc-${candidate.side.toLowerCase()}-${++this.positionSequence}`;
       position = {
         id,
-        strategyId: 'btc-5m-binance-mispricing-2candle-dual-tp',
+        strategyId: this.strategyId,
         marketId: market.id || market.conditionId || market.slug || null,
         marketSlug: market.slug || null,
         marketTitle: market.title || market.slug || 'BTC 5-minute Up/Down',
@@ -777,6 +782,9 @@ class MispricingBot extends WickBot {
         markPrice: null,
         unrealizedPnl: null,
         estimatedMakerRebate: 0,
+        makerRebateEstimate: 0,
+        makerSellOrderId: null,
+        realizedCostBasis: 0,
         entryEdgePerShare: candidate.expectedEdgePerShare,
         entryProbability: candidate.probability,
         entryEdgeBypassed: candidate.edgeBypassed === true,
@@ -792,7 +800,7 @@ class MispricingBot extends WickBot {
           edgeBypassed: candidate.edgeBypassed === true,
         }],
         takeProfitOrderSequence: 0,
-        takeProfitPrice: config.TAKE_PROFIT_PRICE,
+        takeProfitPrice: createTakeProfit ? config.TAKE_PROFIT_PRICE : null,
         takeProfitProceeds: 0,
         exitProceeds: 0,
         exitFees: 0,
@@ -804,13 +812,15 @@ class MispricingBot extends WickBot {
       this.positions.unshift(position);
     }
     this.cash -= execution.totalCost;
-    const takeProfitOrder = this.createTakeProfitOrder(position, now);
+    const takeProfitOrder = createTakeProfit
+      ? this.createTakeProfitOrder(position, now)
+      : null;
     const entryOrder = {
       id: `${position.id}-entry-${entryNumber}`,
       positionId: position.id,
       action: 'BUY',
       side: candidate.side,
-      orderType: 'PAPER_FULL_VISIBLE_ASK_SWEEP',
+      orderType,
       status: 'FILLED',
       entryNumber,
       requestedShares: addedShares,
@@ -830,7 +840,7 @@ class MispricingBot extends WickBot {
     position.lastEntryOrderId = entryOrder.id;
     position.lastEntryAt = now;
     position.takeProfitOrder = takeProfitOrder;
-    position.takeProfitOrderId = takeProfitOrder.id;
+    position.takeProfitOrderId = takeProfitOrder?.id || null;
     this.orders.unshift(entryOrder);
     this.windowOrders.unshift(entryOrder);
     this.totalOrderAttempts += 1;
@@ -847,11 +857,13 @@ class MispricingBot extends WickBot {
       : `${candidate.side} qualifying model signal`;
     this.sideSignals[candidate.side] = {
       status: 'OPEN',
-      reason: candidate.edgeBypassed
-        ? `${candidate.side} added ${addedShares} shares on price and depth; total ${position.shares} shares now have a $${takeProfitOrder.limitPrice.toFixed(2)} limit sell.`
-        : `${candidate.side} added ${addedShares} shares; total ${position.shares} shares now have a $${takeProfitOrder.limitPrice.toFixed(2)} limit sell.`,
+      reason: takeProfitOrder
+        ? candidate.edgeBypassed
+          ? `${candidate.side} added ${addedShares} shares on price and depth; total ${position.shares} shares now have a $${takeProfitOrder.limitPrice.toFixed(2)} limit sell.`
+          : `${candidate.side} added ${addedShares} shares; total ${position.shares} shares now have a $${takeProfitOrder.limitPrice.toFixed(2)} limit sell.`
+        : `${candidate.side} added ${addedShares} shares; total ${position.shares} shares are held for passive selling or official resolution.`,
       positionId: position.id,
-      takeProfitPrice: takeProfitOrder.limitPrice,
+      takeProfitPrice: takeProfitOrder?.limitPrice ?? null,
       entriesThisWindow: entryNumber,
       edgeBypassed: candidate.edgeBypassed === true,
     };
@@ -859,7 +871,9 @@ class MispricingBot extends WickBot {
       side: candidate.side,
       reason: candidate.edgeBypassed
         ? `${candidate.side} added ${addedShares} shares as the first opposite-side price/depth entry; model edge was bypassed.`
-        : `${candidate.side} qualifying signal added ${addedShares} shares with $${candidate.expectedEdgePerShare.toFixed(3)} net edge/share.`,
+        : takeProfitOrder
+          ? `${candidate.side} qualifying signal added ${addedShares} shares with $${candidate.expectedEdgePerShare.toFixed(3)} net edge/share.`
+          : `${candidate.side} fair-value signal added ${addedShares} shares; ${managementText || 'position management remains unchanged.'}`,
       expectedEdgePerShare: candidate.expectedEdgePerShare,
       probability: candidate.probability,
       edgeBypassed: candidate.edgeBypassed === true,
@@ -871,18 +885,22 @@ class MispricingBot extends WickBot {
       event: 'ENTRY_FILLED',
       type: 'ENTRY_FILLED',
       message: candidate.edgeBypassed
-        ? `Paper added ${addedShares} ${candidate.side} shares as the opposite price-only signal; the position now totals ${position.shares} shares with a $${takeProfitOrder.limitPrice.toFixed(2)} limit sell.`
-        : `Paper added ${addedShares} ${candidate.side} shares; the position now totals ${position.shares} shares with a $${takeProfitOrder.limitPrice.toFixed(2)} limit sell.`,
+        ? takeProfitOrder
+          ? `Paper added ${addedShares} ${candidate.side} shares as the opposite price-only signal; the position now totals ${position.shares} shares with a $${takeProfitOrder.limitPrice.toFixed(2)} limit sell.`
+          : `Paper added ${addedShares} ${candidate.side} shares as the opposite price-only signal.`
+        : takeProfitOrder
+          ? `Paper added ${addedShares} ${candidate.side} shares; the position now totals ${position.shares} shares with a $${takeProfitOrder.limitPrice.toFixed(2)} limit sell.`
+          : `Paper added ${addedShares} ${candidate.side} shares; ${managementText || 'position management remains unchanged.'}`,
       details: {
         positionId: position.id,
         entryOrderId: entryOrder.id,
-        takeProfitOrderId: takeProfitOrder.id,
+        takeProfitOrderId: takeProfitOrder?.id || null,
         entryNumber,
         addedShares,
         accumulatedShares: position.shares,
         grossCost: execution.gross,
         fees: execution.fees,
-        takeProfitPrice: takeProfitOrder.limitPrice,
+        takeProfitPrice: takeProfitOrder?.limitPrice ?? null,
         entryEdgePerShare: candidate.expectedEdgePerShare,
         entryProbability: candidate.probability,
         edgeBypassed: candidate.edgeBypassed === true,
