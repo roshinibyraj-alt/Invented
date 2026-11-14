@@ -54,8 +54,15 @@ test('dashboard explains the CLOB midpoint maker rules', async t => {
   assert.match(html, /CLOB FLOW/);
   assert.match(html, /Every second/i);
   assert.match(html, /5-share passive buy limit/i);
-  assert.match(html, /Cancel the unfilled remainder after two seconds/i);
-  assert.match(html, /midpoint minus \$0\.02/i);
+  assert.match(html, /Cancel the unfilled remainder after five seconds/i);
+  assert.match(html, /midpoint minus \$0\.05/i);
+  assert.match(html, /best ask reaches or falls below/i);
+  assert.match(html, /Accumulated UP shares/i);
+  assert.match(html, /Accumulated DOWN shares/i);
+  assert.match(html, /upInventoryShares/);
+  assert.match(html, /downAverageEntry/);
+  assert.match(html, /Previous window holdings/i);
+  assert.match(html, /previousWindowInventory/);
   assert.match(html, /post or resize a maker sell for held shares at \$0\.99/i);
   assert.match(html, /Estimated rebates/i);
   assert.match(html, /a \$0\.99 sell fill credits \$0\.99 per share/i);
