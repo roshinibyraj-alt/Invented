@@ -1,20 +1,20 @@
-# Invented BTC 5-minute fair-value accumulation paper bot
+# Invented BTC 5-minute CLOB midpoint maker paper bot
 
-This service simulates Polymarket BTC 5-minute UP/DOWN entries using Binance BTCUSDT ticks, the two most recent completed 5-minute candles, and Polymarket's public CLOB market stream. It does not submit live orders.
+This service simulates independent Polymarket BTC 5-minute UP and DOWN maker strategies using only the public CLOB books and trade stream. It does not submit live orders or use Binance signals.
 
 ## Strategy
 
-- Estimate UP and DOWN payout probabilities from the Binance model.
-- At each 10-second check, buy 100 shares on a side only if that side's model probability is strictly above 50%.
-- Require a fresh best ask below $0.40 and enough visible ask depth to fill the full 100 shares strictly below $0.40. A partial entry is not recorded.
-- Repeat the 100-share buy at every later qualifying check, with no fixed per-side share cap. Available paper cash and visible ask liquidity are the practical limits.
-- Entry orders use ask-book sweeps and include modeled taker fees. Passive sell orders remain available only for shares already owned; their fills use fresh trade prints and a conservative queue estimate.
-- Stop posting passive sell orders in the final 30 seconds. Any shares still held wait for official resolution of their original market.
+- Once per second, each side independently posts a 5-share passive buy limit at its fresh best-bid/best-ask midpoint minus $0.02.
+- Cancel any unfilled entry remainder after two seconds. There is no fixed inventory cap; available paper cash is the limit.
+- A buy fills only from a fresh opposing-side CLOB trade print at or through its limit after the estimated queue clears. Book touches and timeout do not create fills.
+- After a fill, post or resize a passive sell for the held shares at $0.99. The paper ledger records actual sell proceeds at $0.99; $1.00 is paid only by official resolution of a winning share.
+- Cancel all resting orders at the end of the 5-minute window. Unsold positions wait for confirmed resolution of their original market.
+- Maker rebates are estimates in paper mode, not guaranteed exchange credits. Passive orders model zero trading fees.
 
 Paper fills are estimates, not guaranteed exchange executions. Public data does not reveal actual queue priority, and profits are not guaranteed.
 
 ## Dashboard and runtime
 
-The dashboard shows raw fair values, the next 10-second check, signal qualification per side, Polymarket prices and visible depth, positions, modeled taker fees, passive sell orders, and official settlements. The paper ledger is held in process memory and resets when Railway restarts.
+The dashboard shows both CLOB books, each side's midpoint and next limit, active and expiring orders, filled inventory, take-profit sells, account totals, estimated rebates, and the order/activity ledgers. The paper ledger is held in process memory and resets when Railway restarts.
 
-Run `npm test` for signal thresholds, check cadence, full-size ask depth, passive sell fills, settlement, WebSocket, and dashboard checks.
+Run `npm test` for midpoint pricing, independent one-second order cadence, two-second expiry, queue-aware maker fills, take-profit accounting, WebSocket, and dashboard checks.

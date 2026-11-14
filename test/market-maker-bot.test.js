@@ -7,59 +7,21 @@ const config = require('../config');
 
 const WINDOW_START = 1_800_000_000_000;
 
-function makeCandles() {
-  return [
-    { start: WINDOW_START - 10 * 60_000, open: 101, close: 100, closed: true },
-    { start: WINDOW_START - 5 * 60_000, open: 100, close: 101, closed: true },
-  ];
-}
-
-function makeFeed(getNow, price = 100.1) {
-  return {
-    status: 'CONNECTED',
-    historyStatus: 'READY',
-    error: null,
-    price,
-    tickAt: getNow(),
-    currentCandle: {
-      start: WINDOW_START,
-      open: 100,
-      high: Math.max(100, price),
-      low: Math.min(100, price),
-      close: price,
-      openSource: 'BINANCE_KLINE',
-    },
-    candles: makeCandles(),
-    snapshot() {
-      this.tickAt = getNow();
-      return { ...this, candles: this.candles.map((candle) => ({ ...candle })) };
-    },
-    start() {},
-    stop() {},
-  };
-}
-
-function setBook(bot, side, bestBid, bestAsk, now, bidSize = 300, askSize = 250) {
+function setBook(bot, side, bid, ask, now, bidSize = 300, askSize = 300) {
   bot.applyBookSnapshot({
     asset_id: side === 'UP' ? 'up-token' : 'down-token',
     timestamp: String(now),
-    bids: [{ price: bestBid.toFixed(2), size: String(bidSize) }],
-    asks: [{ price: bestAsk.toFixed(2), size: String(askSize) }],
+    bids: [{ price: bid.toFixed(2), size: String(bidSize) }],
+    asks: [{ price: ask.toFixed(2), size: String(askSize) }],
   }, now);
 }
 
-function makeBot({
-  initialPrice = 100.1,
-  upAsk = 0.39,
-  downAsk = 0.39,
-  askSize = 250,
-} = {}) {
+function makeBot() {
   let now = WINDOW_START;
-  const feed = makeFeed(() => now, initialPrice);
   const bot = new MarketMakerBot({
     now: () => now,
     marketData: {},
-    priceFeed: feed,
+    initialCapital: 100,
   });
   bot.market = {
     id: 'btc-market',
@@ -73,218 +35,196 @@ function makeBot({
     takerFeeRate: 0.07,
   };
   bot.orderWindowStart = WINDOW_START;
-  const refreshBooks = (at, upPrice = upAsk, downPrice = downAsk, size = askSize) => {
-    setBook(bot, 'UP', 0.30, upPrice, at, 300, size);
-    setBook(bot, 'DOWN', 0.30, downPrice, at, 300, size);
+  bot.openStrategyWindow(WINDOW_START, now);
+  const refreshBooks = (at) => {
+    setBook(bot, 'UP', 0.40, 0.50, at);
+    setBook(bot, 'DOWN', 0.30, 0.44, at);
   };
   refreshBooks(now);
 
   return {
     bot,
-    feed,
-    setNow(value) {
-      now = value;
-    },
-    setPrice(value) {
-      feed.price = value;
-      feed.currentCandle.close = value;
-      feed.currentCandle.high = Math.max(feed.currentCandle.high, value);
-      feed.currentCandle.low = Math.min(feed.currentCandle.low, value);
-    },
+    setNow(value) { now = value; },
     refreshBooks,
+    tickAt(elapsedMs) {
+      now = WINDOW_START + elapsedMs;
+      refreshBooks(now);
+      bot.processStrategyEntry(now);
+      return now;
+    },
   };
 }
 
-function buyOrders(bot) {
-  return bot.orders.filter((order) => order.action === 'BUY');
-}
-
-function prepareCheck(fixture, elapsedMs, options = {}) {
-  const now = WINDOW_START + elapsedMs;
-  fixture.setNow(now);
-  if (options.price != null) fixture.setPrice(options.price);
-  fixture.refreshBooks(
-    now,
-    options.upAsk ?? 0.39,
-    options.downAsk ?? 0.39,
-    options.askSize ?? 250,
-  );
-  fixture.bot.processStrategyEntry(now);
-  return now;
-}
-
-function tradeEvent({ side = 'UP', action = 'BUY', price, size, timestamp }) {
+function tradeEvent({ side = 'UP', takerSide, price, size, timestamp }) {
   return {
     event_type: 'last_trade_price',
     asset_id: side === 'UP' ? 'up-token' : 'down-token',
     market: 'btc-condition',
     price: String(price),
     size: String(size),
-    side: action,
+    side: takerSide,
     timestamp: String(timestamp),
   };
 }
 
-test('buys exactly 100 UP shares at the first qualifying 10-second check', () => {
+function activeOrders(bot, side, action) {
+  return bot.orders.filter((order) =>
+    order.side === side
+    && order.action === action
+    && ['RESTING', 'PARTIALLY_FILLED'].includes(order.status));
+}
+
+test('posts independent 5-share bids at each side midpoint minus two cents', () => {
   const fixture = makeBot();
-  const now = prepareCheck(fixture, 10_000);
+  fixture.tickAt(1_000);
   const { bot } = fixture;
 
-  assert.ok(bot.model.probabilityUp > 0.5);
-  assert.equal(bot.positions.length, 1);
-  assert.equal(bot.positions[0].side, 'UP');
-  assert.equal(bot.positions[0].shares, 100);
-  assert.equal(bot.positions[0].entryFees > 0, true);
-  assert.equal(buyOrders(bot).length, 1);
-  assert.equal(buyOrders(bot)[0].orderType, 'PAPER_TAKER_ASK_SWEEP');
-  assert.equal(buyOrders(bot)[0].filledShares, 100);
-  assert.equal(buyOrders(bot)[0].createdAt, now);
-  assert.equal(bot.positions[0].takeProfitOrder, null);
-  assert.equal(bot.sideSignals.UP.status, 'ENTRY_ADDED');
-  assert.equal(bot.sideSignals.DOWN.status, 'MODEL_NOT_ABOVE_50');
+  const up = activeOrders(bot, 'UP', 'BUY')[0];
+  const down = activeOrders(bot, 'DOWN', 'BUY')[0];
+  assert.ok(up);
+  assert.ok(down);
+  assert.equal(up.requestedShares, 5);
+  assert.equal(down.requestedShares, 5);
+  assert.equal(up.limitPrice, 0.43);
+  assert.equal(down.limitPrice, 0.35);
+  assert.equal(up.referenceMidpoint, 0.45);
+  assert.equal(down.referenceMidpoint, 0.37);
+  assert.equal(up.expiresAt, up.createdAt + 2_000);
+  assert.equal(down.expiresAt, down.createdAt + 2_000);
+  assert.equal(bot.priceFeed, null);
+  assert.equal(bot.positions.length, 0);
 });
 
-test('repeats a 100-share buy at each later check, not between checks', () => {
+test('skips only the side whose book is missing one side', () => {
   const fixture = makeBot();
-  prepareCheck(fixture, 10_000);
-  assert.equal(buyOrders(fixture.bot).length, 1);
-
-  prepareCheck(fixture, 15_000);
-  assert.equal(buyOrders(fixture.bot).length, 1);
-
-  prepareCheck(fixture, 20_000);
-  assert.equal(buyOrders(fixture.bot).length, 2);
-  assert.equal(fixture.bot.positions[0].shares, 200);
-  assert.equal(fixture.bot.positions[0].entrySignals.length, 2);
-  assert.ok(buyOrders(fixture.bot).every((order) => order.filledShares === 100));
-});
-
-test('applies the same fair-value and ask rule to DOWN', () => {
-  const fixture = makeBot({ initialPrice: 99.9 });
-  prepareCheck(fixture, 10_000, { price: 99.9 });
-  const { bot } = fixture;
-
-  assert.ok(bot.model.probabilityDown > 0.5);
-  assert.equal(bot.positions.length, 1);
-  assert.equal(bot.positions[0].side, 'DOWN');
-  assert.equal(bot.positions[0].shares, 100);
-  assert.equal(bot.sideSignals.DOWN.status, 'ENTRY_ADDED');
-  assert.equal(bot.sideSignals.UP.status, 'MODEL_NOT_ABOVE_50');
-});
-
-test('does not buy when the ask is exactly $0.40', () => {
-  const fixture = makeBot();
-  prepareCheck(fixture, 10_000, { upAsk: 0.40 });
-
-  assert.equal(fixture.bot.positions.length, 0);
-  assert.equal(buyOrders(fixture.bot).length, 0);
-  assert.equal(fixture.bot.sideSignals.UP.status, 'ASK_ABOVE_LIMIT');
-});
-
-test('requires all 100 shares to be visible below $0.40 and never records a partial entry', () => {
-  const fixture = makeBot();
-  prepareCheck(fixture, 10_000, { askSize: 99 });
-
-  assert.equal(fixture.bot.positions.length, 0);
-  assert.equal(buyOrders(fixture.bot).length, 0);
-  assert.equal(fixture.bot.sideSignals.UP.status, 'WAITING_FOR_FULL_DEPTH');
-});
-
-test('does not buy when neither model probability is strictly above 50%', () => {
-  const fixture = makeBot({ initialPrice: 100 });
-  prepareCheck(fixture, 10_000, { price: 100 });
-
-  assert.ok(Math.abs(fixture.bot.model.probabilityUp - 0.5) < 1e-8);
-  assert.equal(fixture.bot.positions.length, 0);
-  assert.equal(buyOrders(fixture.bot).length, 0);
-});
-
-test('does not sweep asks at or above $0.40 to complete a qualifying entry', () => {
-  const fixture = makeBot();
-  const now = WINDOW_START + 10_000;
+  const now = WINDOW_START + 1_000;
   fixture.setNow(now);
-  fixture.refreshBooks(now);
   fixture.bot.applyBookSnapshot({
     asset_id: 'up-token',
     timestamp: String(now),
-    bids: [{ price: '0.30', size: '300' }],
-    asks: [
-      { price: '0.39', size: '50' },
-      { price: '0.40', size: '100' },
-    ],
+    bids: [{ price: '0.40', size: '300' }],
+    asks: [],
   }, now);
+  setBook(fixture.bot, 'DOWN', 0.30, 0.44, now);
   fixture.bot.processStrategyEntry(now);
 
+  assert.equal(activeOrders(fixture.bot, 'UP', 'BUY').length, 0);
+  assert.equal(activeOrders(fixture.bot, 'DOWN', 'BUY').length, 1);
+  assert.equal(fixture.bot.makerQuotes.UP.entryLimitPrice, null);
+});
+
+test('places once per second and allows two overlapping orders on each side', () => {
+  const fixture = makeBot();
+  fixture.tickAt(1_000);
+  fixture.tickAt(1_500);
+  assert.equal(botOrderCount(fixture.bot, 'BUY'), 2);
+
+  fixture.tickAt(2_000);
+  assert.equal(botOrderCount(fixture.bot, 'BUY'), 4);
+  assert.equal(activeOrders(fixture.bot, 'UP', 'BUY').length, 2);
+  assert.equal(activeOrders(fixture.bot, 'DOWN', 'BUY').length, 2);
+
+  fixture.tickAt(3_000);
+  const expired = fixture.bot.orders.filter((order) => order.status === 'CANCELLED_TIMEOUT');
+  assert.equal(expired.length, 2);
+  assert.equal(activeOrders(fixture.bot, 'UP', 'BUY').length, 2);
+  assert.equal(activeOrders(fixture.bot, 'DOWN', 'BUY').length, 2);
+});
+
+test('does not create fills from a book touch or when a two-second timer expires', () => {
+  const fixture = makeBot();
+  fixture.tickAt(1_000);
+  fixture.tickAt(3_000);
+  fixture.tickAt(4_000);
+
   assert.equal(fixture.bot.positions.length, 0);
-  assert.equal(buyOrders(fixture.bot).length, 0);
-  assert.equal(fixture.bot.sideSignals.UP.status, 'WAITING_FOR_FULL_DEPTH');
+  assert.ok(fixture.bot.orders.some((order) => order.status === 'CANCELLED_TIMEOUT'));
+  assert.ok(fixture.bot.orders.filter((order) =>
+    order.action === 'BUY' && order.createdAt <= WINDOW_START + 2_000)
+    .every((order) => order.status === 'CANCELLED_TIMEOUT'));
 });
 
-test('does not place passive buys and posts passive asks only for held shares', () => {
+test('uses opposing trade prints after queue clearance and preserves partial fills on expiry', () => {
   const fixture = makeBot();
-  prepareCheck(fixture, 10_000);
-  const { bot } = fixture;
+  const placedAt = fixture.tickAt(1_000);
+  const upOrder = activeOrders(fixture.bot, 'UP', 'BUY')[0];
 
-  assert.equal(buyOrders(bot).filter((order) => order.orderType === 'PAPER_POST_ONLY_LIMIT').length, 0);
-  const sellOrder = bot.orders.find((order) =>
-    order.orderType === 'PAPER_POST_ONLY_LIMIT' && order.action === 'SELL' && order.side === 'UP');
-  assert.ok(sellOrder);
-  assert.equal(sellOrder.requestedShares, 100);
-
-  const now = WINDOW_START + 10_100;
-  assert.equal(bot.processMakerTrade(tradeEvent({
-    price: sellOrder.limitPrice,
-    size: sellOrder.queueAheadShares + 5,
-    timestamp: now,
-  }), now), true);
-  assert.equal(bot.positions[0].shares, 95);
-  assert.equal(bot.positions[0].exitFees, 0);
-  assert.equal(Number.isFinite(bot.positions[0].makerRebateEstimate), true);
-});
-
-test('continues scheduled signal checks through the final 30 seconds', () => {
-  const fixture = makeBot();
-  prepareCheck(fixture, config.WINDOW_MS_5M - config.MAKER_WINDOW_CUTOFF_MS);
-
+  const changed = fixture.bot.processMakerTrade(tradeEvent({
+    side: 'UP',
+    takerSide: 'SELL',
+    price: upOrder.limitPrice,
+    size: upOrder.queueAheadShares + 2,
+    timestamp: placedAt + 100,
+  }), placedAt + 200);
+  assert.equal(changed, true);
   assert.equal(fixture.bot.positions.length, 1);
-  assert.equal(fixture.bot.positions[0].shares, 100);
-  assert.equal(fixture.bot.sideSignals.UP.status, 'ENTRY_ADDED');
-  assert.equal(fixture.bot.orders.some((order) =>
-    order.orderType === 'PAPER_POST_ONLY_LIMIT' && order.status === 'RESTING'), false);
+  assert.equal(fixture.bot.positions[0].shares, 2);
+  assert.equal(upOrder.status, 'PARTIALLY_FILLED');
+  assert.equal(fixture.bot.positions[0].fees, 0);
+
+  fixture.tickAt(3_000);
+  assert.equal(upOrder.status, 'CANCELLED_TIMEOUT');
+  assert.equal(upOrder.filledShares, 2);
+  assert.equal(fixture.bot.positions[0].shares, 2);
+  const takeProfit = activeOrders(fixture.bot, 'UP', 'SELL')[0];
+  assert.ok(takeProfit);
+  assert.equal(takeProfit.limitPrice, 0.99);
+  assert.equal(takeProfit.requestedShares, 2);
 });
 
-test('resets the entry check cadence and per-window counts at a new window', async () => {
+test('records a $0.99 maker take-profit at the actual limit price', () => {
   const fixture = makeBot();
-  prepareCheck(fixture, 10_000);
-  const previousPosition = fixture.bot.positions[0];
-  const nextWindowStart = WINDOW_START + config.WINDOW_MS_5M;
-  await fixture.bot.closePreviousWindows(nextWindowStart, nextWindowStart);
+  const placedAt = fixture.tickAt(1_000);
+  const buy = activeOrders(fixture.bot, 'UP', 'BUY')[0];
+  fixture.bot.processMakerTrade(tradeEvent({
+    takerSide: 'SELL',
+    price: buy.limitPrice,
+    size: buy.queueAheadShares + 5,
+    timestamp: placedAt + 100,
+  }), placedAt + 200);
+  const takeProfit = activeOrders(fixture.bot, 'UP', 'SELL')[0];
+  assert.ok(takeProfit);
+  assert.equal(takeProfit.limitPrice, 0.99);
 
-  fixture.bot.market.start = nextWindowStart;
-  fixture.bot.market.end = nextWindowStart + config.WINDOW_MS_5M;
-  fixture.bot.market.slug = `btc-updown-5m-${nextWindowStart / 1000}`;
-  fixture.bot.openStrategyWindow(nextWindowStart, nextWindowStart);
-  fixture.feed.currentCandle.start = nextWindowStart;
-  fixture.feed.currentCandle.open = 100;
-  prepareCheck(fixture, config.WINDOW_MS_5M + 10_000);
+  fixture.setNow(placedAt + 400);
+  fixture.refreshBooks(placedAt + 400);
+  fixture.bot.processMakerTrade(tradeEvent({
+    takerSide: 'BUY',
+    price: 0.99,
+    size: takeProfit.queueAheadShares + 5,
+    timestamp: placedAt + 300,
+  }), placedAt + 400);
 
-  assert.equal(previousPosition.status, 'PENDING_RESOLUTION');
-  assert.equal(fixture.bot.sideEntryCountsThisWindow.UP, 1);
-  assert.equal(fixture.bot.positions.filter((position) => position.status === 'OPEN').length, 1);
-  assert.equal(fixture.bot.positions.find((position) => position.status === 'OPEN').windowStart, nextWindowStart);
+  const position = fixture.bot.positions[0];
+  assert.equal(position.status, 'SETTLED_EXIT');
+  assert.equal(position.shares, 0);
+  assert.equal(position.exitProceeds, 4.95);
+  assert.equal(position.exitFees, 0);
+  assert.ok(position.realizedPnl > 0);
 });
 
-test('strategy snapshot shows the 100-share, 10-second signal rules as paper-only', () => {
-  const bot = makeBot().bot;
-  const state = bot.snapshot();
+test('closes the order window at five minutes and exposes the CLOB-only strategy', () => {
+  const fixture = makeBot();
+  fixture.tickAt(1_000);
+  const now = WINDOW_START + config.WINDOW_MS_5M;
+  fixture.setNow(now);
+  fixture.refreshBooks(now);
+  fixture.bot.processStrategyEntry(now);
+  const snapshot = fixture.bot.snapshot();
 
-  assert.equal(state.strategy.id, 'btc-5m-fair-value-40c-accumulator');
-  assert.equal(state.strategy.execution, 'PAPER ONLY');
-  assert.equal(state.strategy.entryShares, 100);
-  assert.equal(state.strategy.entryIntervalMs, 10_000);
-  assert.equal(state.strategy.fairValueThresholdExclusive, 0.5);
-  assert.equal(state.strategy.maximumEntryAskExclusive, 0.40);
-  assert.equal(state.strategy.usesTakerOrders, true);
-  assert.equal(state.strategy.maxInventoryPerSide, null);
-  assert.equal(state.mode, 'DEMO ONLY');
+  assert.equal(snapshot.strategy.id, 'btc-5m-clob-midpoint-maker');
+  assert.equal(snapshot.strategy.execution, 'PAPER ONLY');
+  assert.equal(snapshot.strategy.priceReference, 'BEST_BID_ASK_MIDPOINT');
+  assert.equal(snapshot.strategy.entryShares, 5);
+  assert.equal(snapshot.strategy.entryIntervalMs, 1_000);
+  assert.equal(snapshot.strategy.entryTtlMs, 2_000);
+  assert.equal(snapshot.strategy.takeProfitPrice, 0.99);
+  assert.equal(snapshot.binance.status, 'NOT_USED');
+  assert.equal(snapshot.marketMakerState.status, 'WINDOW_CLOSED');
+  assert.equal(activeOrders(fixture.bot, 'UP', 'BUY').length, 0);
+  assert.equal(activeOrders(fixture.bot, 'DOWN', 'BUY').length, 0);
 });
+
+function botOrderCount(bot, action) {
+  return bot.orders.filter((order) => order.action === action).length;
+}

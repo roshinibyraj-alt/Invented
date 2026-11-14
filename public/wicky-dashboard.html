@@ -1,593 +1,438 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="theme-color" content="#101628">
-    <title>Invented · BTCUSDT Fair-Value Strategy</title>
-    <style>
-      :root {
-        color-scheme: dark;
-        --bg: #0b1020;
-        --panel: #141c31;
-        --panel-raised: #1a2540;
-        --line: #293552;
-        --muted: #98a6c4;
-        --text: #f4f7ff;
-        --cyan: #50d5e8;
-        --blue: #7397ff;
-        --green: #42d6a4;
-        --red: #ff718e;
-        --yellow: #ffd36a;
-        --purple: #c59aff;
-      }
-      * { box-sizing: border-box; }
-      body {
-        margin: 0;
-        min-width: 320px;
-        color: var(--text);
-        background:
-          radial-gradient(ellipse at 10% -10%, rgba(61, 112, 216, .22), transparent 34rem),
-          radial-gradient(ellipse at 95% 5%, rgba(31, 183, 180, .12), transparent 28rem),
-          var(--bg);
-        font: 15px/1.5 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      }
-      a { color: var(--cyan); }
-      .shell { width: min(1440px, calc(100% - 36px)); margin: 0 auto; padding: 28px 0 50px; }
-      .topbar { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-bottom: 24px; }
-      .brand { display: flex; align-items: center; gap: 14px; }
-      .brand-mark {
-        display: grid; place-items: center; width: 46px; height: 46px; border-radius: 15px;
-        color: #07131e; font-weight: 900; background: linear-gradient(135deg, var(--cyan), #80f1c6);
-        box-shadow: 0 9px 28px rgba(80, 213, 232, .2);
-      }
-      .eyebrow { color: var(--cyan); font-size: 11px; font-weight: 800; letter-spacing: .14em; text-transform: uppercase; }
-      h1 { margin: 2px 0 0; font-size: clamp(22px, 3vw, 31px); line-height: 1.15; letter-spacing: -.035em; }
-      .top-meta { display: flex; align-items: center; justify-content: flex-end; gap: 9px; flex-wrap: wrap; }
-      .pill, .badge {
-        display: inline-flex; align-items: center; gap: 7px; min-height: 30px; padding: 5px 11px;
-        border: 1px solid var(--line); border-radius: 999px; color: var(--muted);
-        background: rgba(20, 28, 49, .86); font-size: 12px; font-weight: 750;
-      }
-      .pill::before { content: ""; width: 7px; height: 7px; border-radius: 99px; background: currentColor; }
-      .pill.good { color: var(--green); border-color: rgba(66, 214, 164, .3); }
-      .pill.warn { color: var(--yellow); border-color: rgba(255, 211, 106, .3); }
-      .pill.bad { color: var(--red); border-color: rgba(255, 113, 142, .3); }
-      .hero {
-        position: relative; overflow: hidden; display: grid; grid-template-columns: 1.35fr .65fr;
-        gap: 24px; align-items: center; padding: 25px 28px; margin-bottom: 18px;
-        border: 1px solid rgba(80, 213, 232, .21); border-radius: 22px;
-        background: linear-gradient(112deg, rgba(25, 46, 78, .96), rgba(21, 29, 51, .94) 60%, rgba(33, 36, 71, .9));
-      }
-      .hero::after {
-        content: ""; position: absolute; width: 290px; height: 290px; right: -100px; top: -170px;
-        border: 1px solid rgba(80, 213, 232, .2); border-radius: 50%;
-        box-shadow: 0 0 0 30px rgba(80, 213, 232, .035), 0 0 0 65px rgba(80, 213, 232, .025);
-        pointer-events: none;
-      }
-      .hero h2 { position: relative; z-index: 1; margin: 7px 0 8px; font-size: clamp(19px, 2.4vw, 25px); letter-spacing: -.025em; }
-      .hero p { position: relative; z-index: 1; max-width: 740px; margin: 0; color: #c0cde6; }
-      .hero-state { position: relative; z-index: 1; justify-self: end; text-align: right; }
-      .hero-state strong { display: block; margin-top: 7px; font-size: 17px; }
-      .hero-state small { color: var(--muted); }
-      .grid { display: grid; gap: 14px; }
-      .metrics { grid-template-columns: repeat(5, minmax(0, 1fr)); margin-bottom: 14px; }
-      .two-col { grid-template-columns: minmax(0, 1.15fr) minmax(320px, .85fr); margin-bottom: 14px; }
-      .three-col { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-bottom: 14px; }
-      .panel, .metric {
-        min-width: 0; border: 1px solid var(--line); border-radius: 18px;
-        background: linear-gradient(155deg, rgba(23, 32, 55, .98), rgba(17, 24, 42, .98));
-      }
-      .panel { padding: 18px; }
-      .metric { padding: 15px 17px; }
-      .metric-label, .panel-kicker { color: var(--muted); font-size: 11px; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; }
-      .metric-value { margin-top: 8px; font-size: clamp(21px, 2.4vw, 28px); font-weight: 800; letter-spacing: -.04em; font-variant-numeric: tabular-nums; }
-      .metric-sub { margin-top: 4px; color: var(--muted); font-size: 12px; }
-      .panel-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 15px; }
-      h2, h3 { margin: 0; }
-      .panel-title { font-size: 16px; font-weight: 800; letter-spacing: -.015em; }
-      .panel-subtitle { margin-top: 3px; color: var(--muted); font-size: 12px; }
-      .feed-row { display: flex; justify-content: space-between; gap: 16px; padding: 10px 0; border-top: 1px solid rgba(41, 53, 82, .7); }
-      .feed-row:first-of-type { border-top: 0; }
-      .feed-label { color: var(--muted); }
-      .feed-value { text-align: right; font-weight: 750; font-variant-numeric: tabular-nums; }
-      .candles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; margin-top: 15px; }
-      .candle {
-        min-width: 0; padding: 11px 12px; border: 1px solid var(--line); border-radius: 13px;
-        background: rgba(10, 16, 32, .58);
-      }
-      .candle.green { border-color: rgba(66, 214, 164, .35); }
-      .candle.red { border-color: rgba(255, 113, 142, .35); }
-      .candle-time { color: var(--muted); font-size: 10px; }
-      .candle-return { margin-top: 5px; font-weight: 800; font-variant-numeric: tabular-nums; }
-      .probabilities { display: grid; grid-template-columns: 1fr 1fr; gap: 11px; }
-      .prob-card {
-        padding: 16px; border: 1px solid var(--line); border-radius: 15px;
-        background: linear-gradient(140deg, rgba(34, 50, 82, .85), rgba(15, 22, 40, .8));
-      }
-      .prob-card.up { border-color: rgba(66, 214, 164, .35); }
-      .prob-card.down { border-color: rgba(255, 113, 142, .35); }
-      .prob-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-      .side-label { font-size: 12px; font-weight: 850; letter-spacing: .1em; }
-      .prob-value { margin: 10px 0 3px; font-size: clamp(29px, 4vw, 40px); font-weight: 900; letter-spacing: -.05em; }
-      .prob-detail { color: var(--muted); font-size: 12px; }
-      .decision {
-        padding: 15px 16px; margin-top: 13px; border: 1px solid rgba(197, 154, 255, .3);
-        border-radius: 14px; background: rgba(103, 69, 153, .13);
-      }
-      .decision-title { color: var(--purple); font-size: 11px; font-weight: 850; letter-spacing: .1em; text-transform: uppercase; }
-      .decision-text { margin-top: 5px; font-weight: 750; }
-      .decision-reason { margin-top: 4px; color: #c2cbe0; font-size: 12px; }
-      .quote-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 11px; }
-      .quote-card { padding: 14px; border: 1px solid var(--line); border-radius: 14px; background: rgba(10, 16, 32, .55); }
-      .quote-card h3 { margin-bottom: 12px; font-size: 13px; }
-      .quote-values { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-      .quote-cell { padding: 9px; border-radius: 10px; background: rgba(26, 37, 64, .78); }
-      .quote-cell span { display: block; color: var(--muted); font-size: 10px; text-transform: uppercase; }
-      .quote-cell strong { display: block; margin-top: 3px; font-size: 16px; font-variant-numeric: tabular-nums; }
-      .position-box {
-        display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 14px;
-        padding: 15px; border: 1px solid var(--line); border-radius: 14px; background: rgba(10, 16, 32, .55);
-      }
-      .position-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-      .position-icon { display: grid; place-items: center; width: 44px; height: 44px; border-radius: 14px; font-weight: 900; }
-      .position-icon.up { color: #071b17; background: var(--green); }
-      .position-icon.down { color: #2b0d16; background: var(--red); }
-      .position-icon.empty { color: var(--muted); background: #283550; }
-      .position-main strong { display: block; font-size: 17px; }
-      .position-main small, .position-pnl small { color: var(--muted); }
-      .position-pnl { text-align: right; font-variant-numeric: tabular-nums; }
-      .position-pnl strong { display: block; font-size: 19px; }
-      .rules { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
-      .rule {
-        padding: 12px; border-radius: 12px; background: rgba(10, 16, 32, .5);
-        color: #d4def4; font-size: 12px;
-      }
-      .rule b { display: block; margin-bottom: 4px; color: var(--cyan); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
-      .table-wrap { overflow-x: auto; }
-      table { width: 100%; border-collapse: collapse; min-width: 620px; font-size: 12px; }
-      th { padding: 9px 8px; color: var(--muted); font-size: 10px; text-align: left; text-transform: uppercase; letter-spacing: .08em; }
-      td { padding: 10px 8px; border-top: 1px solid rgba(41, 53, 82, .7); vertical-align: top; font-variant-numeric: tabular-nums; }
-      .empty-row { color: var(--muted); text-align: center; padding: 22px 8px; }
-      .tag { display: inline-flex; padding: 3px 7px; border-radius: 999px; font-size: 10px; font-weight: 800; background: rgba(115, 151, 255, .15); color: #a9bcff; }
-      .tag.win { color: var(--green); background: rgba(66, 214, 164, .12); }
-      .tag.loss { color: var(--red); background: rgba(255, 113, 142, .12); }
-      .activity-list { display: grid; gap: 8px; max-height: 340px; overflow: auto; }
-      .activity-item { display: grid; grid-template-columns: 10px 1fr; gap: 10px; padding: 10px; border-radius: 12px; background: rgba(10, 16, 32, .5); }
-      .activity-dot { width: 8px; height: 8px; margin-top: 6px; border-radius: 50%; background: var(--blue); }
-      .activity-item.trade .activity-dot { background: var(--green); }
-      .activity-item.resolve .activity-dot { background: var(--yellow); }
-      .activity-message { font-size: 12px; }
-      .activity-time { margin-top: 3px; color: var(--muted); font-size: 10px; }
-      .notice {
-        padding: 12px 14px; margin: 14px 0; border: 1px solid rgba(255, 211, 106, .25);
-        border-radius: 13px; color: #d9d2b9; background: rgba(119, 91, 30, .12); font-size: 12px;
-      }
-      .footer { margin-top: 15px; color: var(--muted); font-size: 11px; text-align: center; }
-      .positive { color: var(--green) !important; }
-      .negative { color: var(--red) !important; }
-      .neutral { color: var(--muted) !important; }
-      @media (max-width: 1050px) {
-        .metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-        .two-col { grid-template-columns: 1fr; }
-      }
-      @media (max-width: 680px) {
-        .shell { width: min(100% - 22px, 1440px); padding-top: 16px; }
-        .topbar { align-items: flex-start; flex-direction: column; }
-        .top-meta { justify-content: flex-start; }
-        .hero { grid-template-columns: 1fr; padding: 20px; }
-        .hero-state { justify-self: start; text-align: left; }
-        .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-        .three-col { grid-template-columns: 1fr; }
-        .candles { grid-template-columns: 1fr; }
-        .rules { grid-template-columns: 1fr; }
-        .position-pair { grid-template-columns: 1fr; }
-        .position-box { grid-template-columns: auto 1fr; }
-        .position-pnl { grid-column: 2; text-align: left; }
-      }
-      @media (max-width: 400px) {
-        .metrics { grid-template-columns: 1fr 1fr; }
-        .probabilities, .quote-grid { grid-template-columns: 1fr; }
-      }
-    </style>
-  </head>
-  <body>
-    <main class="shell">
-      <header class="topbar">
-        <div class="brand">
-          <div class="brand-mark" aria-hidden="true">₿</div>
-          <div>
-            <div class="eyebrow">Invented · BTCUSDT Market Maker</div>
-            <h1>BTCUSDT Market Maker</h1>
-          </div>
-        </div>
-        <div class="top-meta">
-          <span class="badge">PAPER ONLY</span>
-          <span id="statusPill" class="pill warn">Connecting</span>
-          <span class="badge">Updated <span id="lastUpdated">—</span></span>
-        </div>
-      </header>
-
-      <section class="hero" aria-labelledby="heroTitle">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#08131f">
+  <title>CLOB Flow · BTC 5m Paper Maker</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #08131f;
+      --surface: #101e2d;
+      --surface-2: #14263a;
+      --line: rgba(174, 205, 230, .13);
+      --muted: #91a6ba;
+      --text: #edf6ff;
+      --up: #3be0a3;
+      --up-dim: rgba(59, 224, 163, .13);
+      --down: #ff718c;
+      --down-dim: rgba(255, 113, 140, .14);
+      --blue: #72baff;
+      --amber: #ffc56d;
+      --shadow: 0 18px 54px rgba(0, 0, 0, .24);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(ellipse at 4% 0%, rgba(42, 114, 169, .18), transparent 34rem),
+        radial-gradient(ellipse at 98% 6%, rgba(30, 139, 105, .12), transparent 27rem),
+        var(--bg);
+      color: var(--text);
+      font: 14px/1.5 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    .shell { width: min(1440px, calc(100% - 36px)); margin: 0 auto; padding: 26px 0 48px; }
+    .topbar, .brand, .top-meta, .hero-row, .panel-head, .side-head, .book-line, .order-row, .footer {
+      display: flex; align-items: center; justify-content: space-between; gap: 14px;
+    }
+    .topbar { margin-bottom: 28px; }
+    .brand { justify-content: flex-start; gap: 13px; }
+    .brand-mark {
+      display: grid; place-items: center; width: 42px; height: 42px; border-radius: 14px;
+      color: #07151e; font-weight: 950; letter-spacing: -.08em;
+      background: linear-gradient(140deg, var(--up), #87f0d0);
+      box-shadow: 0 0 30px rgba(59, 224, 163, .19);
+    }
+    .brand-name { font-size: 15px; font-weight: 800; letter-spacing: .02em; }
+    .brand-sub, .eyebrow, .metric-label, .label, .table th, .micro-label {
+      color: var(--muted); text-transform: uppercase; letter-spacing: .105em; font-size: 10px; font-weight: 750;
+    }
+    .top-meta { justify-content: flex-end; flex-wrap: wrap; }
+    .pill, .tag {
+      display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--line);
+      border-radius: 999px; padding: 6px 10px; font-size: 10px; font-weight: 800; letter-spacing: .06em;
+      white-space: nowrap;
+    }
+    .pill::before { content: ""; width: 6px; height: 6px; background: currentColor; border-radius: 50%; box-shadow: 0 0 12px currentColor; }
+    .pill.good { color: var(--up); background: var(--up-dim); }
+    .pill.warn { color: var(--amber); background: rgba(255,197,109,.1); }
+    .pill.bad { color: var(--down); background: var(--down-dim); }
+    .tag { color: #b7c8d8; padding: 5px 8px; background: rgba(255,255,255,.035); }
+    .tag.green { color: var(--up); background: var(--up-dim); border-color: rgba(59,224,163,.23); }
+    .tag.red { color: var(--down); background: var(--down-dim); border-color: rgba(255,113,140,.24); }
+    .tag.blue { color: var(--blue); background: rgba(114,186,255,.12); border-color: rgba(114,186,255,.2); }
+    .hero {
+      position: relative; overflow: hidden; padding: 27px 30px; border: 1px solid var(--line); border-radius: 22px;
+      background: linear-gradient(112deg, rgba(20, 42, 61, .96), rgba(14, 31, 47, .93));
+      box-shadow: var(--shadow); margin-bottom: 16px;
+    }
+    .hero::after {
+      content: ""; position: absolute; width: 240px; height: 240px; border-radius: 50%; right: 9%; top: -180px;
+      border: 1px solid rgba(59,224,163,.17); box-shadow: 0 0 0 26px rgba(59,224,163,.025), 0 0 0 54px rgba(59,224,163,.02);
+      pointer-events: none;
+    }
+    h1 { margin: 5px 0 7px; font-size: clamp(23px, 3.3vw, 38px); line-height: 1.12; letter-spacing: -.045em; }
+    .hero-copy { color: #b5c5d4; max-width: 700px; margin: 0; }
+    .hero-row { position: relative; z-index: 1; align-items: flex-end; }
+    .window-box { text-align: right; min-width: 200px; }
+    .window-box strong { display: block; font-size: 24px; font-variant-numeric: tabular-nums; }
+    .window-box span { color: var(--muted); font-size: 11px; }
+    .metrics { display: grid; grid-template-columns: repeat(5, minmax(0,1fr)); gap: 12px; margin: 14px 0; }
+    .metric, .panel, .side-card {
+      border: 1px solid var(--line); border-radius: 17px; background: linear-gradient(150deg, rgba(18,34,50,.98), rgba(13,27,41,.98));
+      box-shadow: var(--shadow);
+    }
+    .metric { padding: 16px 17px; min-height: 105px; }
+    .metric-value { margin-top: 8px; font-size: clamp(19px, 2.4vw, 27px); font-weight: 820; letter-spacing: -.035em; font-variant-numeric: tabular-nums; }
+    .metric-sub { margin-top: 2px; color: var(--muted); font-size: 11px; }
+    .positive { color: var(--up) !important; } .negative { color: var(--down) !important; }
+    .section-title { display:flex; align-items:center; justify-content:space-between; gap:12px; margin: 28px 1px 11px; }
+    .section-title h2 { margin:0; font-size: 15px; letter-spacing: -.01em; }
+    .section-title p { margin:0; color:var(--muted); font-size:11px; }
+    .side-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }
+    .side-card { overflow:hidden; }
+    .side-card.up { border-top: 2px solid var(--up); }
+    .side-card.down { border-top: 2px solid var(--down); }
+    .side-head { padding: 18px 20px 14px; border-bottom:1px solid var(--line); }
+    .side-name { display:flex; align-items:center; gap:11px; }
+    .side-orb { width:35px; height:35px; display:grid; place-items:center; border-radius:12px; font-weight:900; }
+    .up .side-orb { color:var(--up); background:var(--up-dim); }
+    .down .side-orb { color:var(--down); background:var(--down-dim); }
+    .side-name h3 { margin:0; font-size:17px; letter-spacing:.01em; }
+    .side-name span { color:var(--muted); font-size:11px; }
+    .side-body { padding: 17px 20px 20px; }
+    .midpoint-row { display:grid; grid-template-columns:1fr auto; align-items:end; gap:12px; }
+    .midpoint { font-size:39px; line-height:1; font-weight:850; letter-spacing:-.055em; font-variant-numeric:tabular-nums; }
+    .midpoint-caption { margin-top:7px; color:var(--muted); font-size:11px; }
+    .limit-box { text-align:right; }
+    .limit-price { margin-top:4px; font-size:22px; font-weight:780; color:var(--blue); font-variant-numeric:tabular-nums; }
+    .book-line { justify-content:flex-start; gap:8px; margin-top:17px; }
+    .book-quote { flex:1; border-radius:11px; background:rgba(255,255,255,.035); padding:9px 11px; }
+    .book-quote span { display:block; color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.08em; }
+    .book-quote strong { display:block; margin-top:3px; font-size:15px; font-variant-numeric:tabular-nums; }
+    .side-stats { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin-top:14px; }
+    .side-stat { padding:10px 11px; border-radius:11px; background:rgba(255,255,255,.028); }
+    .side-stat strong { display:block; margin-top:4px; font-size:16px; font-variant-numeric:tabular-nums; }
+    .orders-block { margin-top:15px; padding-top:13px; border-top:1px solid var(--line); }
+    .orders-title { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:9px; }
+    .order-list { display:grid; gap:7px; }
+    .order-row { justify-content:flex-start; padding:9px 10px; gap:10px; border-radius:10px; background:rgba(114,186,255,.075); }
+    .order-row .order-main { flex:1; min-width:0; }
+    .order-row strong { display:block; font-size:12px; }
+    .order-row small { color:var(--muted); font-size:10px; }
+    .order-row .order-time { text-align:right; color:var(--blue); font-size:11px; font-variant-numeric:tabular-nums; white-space:nowrap; }
+    .empty { color:var(--muted); font-size:11px; padding:9px 0; }
+    .rules { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; }
+    .rule { padding:14px 15px; border:1px solid var(--line); border-radius:14px; background:rgba(16,30,45,.76); }
+    .rule-num { color:var(--blue); font-size:10px; font-weight:900; letter-spacing:.12em; }
+    .rule strong { display:block; margin:5px 0 4px; font-size:12px; }
+    .rule p { margin:0; color:var(--muted); font-size:11px; line-height:1.55; }
+    .note { margin-top:12px; padding:12px 14px; border:1px solid rgba(255,197,109,.2); border-radius:12px; background:rgba(255,197,109,.06); color:#e9d3a8; font-size:11px; }
+    .panel { overflow:hidden; }
+    .panel-head { padding:15px 18px; border-bottom:1px solid var(--line); }
+    .panel-head h3 { margin:0; font-size:13px; }
+    .panel-head p { margin:3px 0 0; color:var(--muted); font-size:10px; }
+    .table-scroll { overflow:auto; max-height:410px; }
+    .table { width:100%; border-collapse:collapse; white-space:nowrap; }
+    .table th { position:sticky; top:0; z-index:1; padding:10px 13px; background:#122235; text-align:left; }
+    .table td { padding:10px 13px; border-top:1px solid rgba(174,205,230,.07); font-size:11px; color:#d8e5f0; }
+    .table tr:hover td { background:rgba(255,255,255,.025); }
+    .table-empty { padding:24px !important; color:var(--muted) !important; text-align:center; }
+    .lower-grid { display:grid; grid-template-columns:1.55fr 1fr; gap:14px; }
+    .activity-list { display:grid; gap:0; padding:4px 17px 12px; max-height:410px; overflow:auto; }
+    .activity-item { display:grid; grid-template-columns:9px 1fr; gap:10px; padding:10px 0; border-bottom:1px solid rgba(174,205,230,.07); }
+    .activity-dot { width:7px; height:7px; margin-top:5px; border-radius:50%; background:var(--blue); box-shadow:0 0 10px currentColor; }
+    .activity-item.fill .activity-dot { background:var(--up); color:var(--up); }
+    .activity-item.cancel .activity-dot { background:var(--amber); color:var(--amber); }
+    .activity-message { font-size:11px; color:#dbe8f4; }
+    .activity-time { margin-top:2px; color:var(--muted); font-size:10px; }
+    .footer { margin-top:18px; padding:0 2px; color:var(--muted); font-size:10px; }
+    @media (max-width: 1000px) {
+      .metrics { grid-template-columns:repeat(3,1fr); }
+      .rules { grid-template-columns:repeat(2,1fr); }
+    }
+    @media (max-width: 700px) {
+      .shell { width:min(100% - 20px, 580px); padding-top:14px; }
+      .topbar { align-items:flex-start; margin-bottom:15px; }
+      .top-meta { gap:6px; }
+      .top-meta .badge-muted { display:none; }
+      .hero { padding:20px 18px; border-radius:17px; }
+      .hero-row { align-items:flex-start; flex-direction:column; }
+      .window-box { text-align:left; }
+      .window-box strong { font-size:19px; }
+      .metrics { grid-template-columns:repeat(2,1fr); gap:8px; }
+      .metric { min-height:92px; padding:13px; }
+      .metric-value { font-size:20px; }
+      .side-grid, .lower-grid { grid-template-columns:1fr; }
+      .side-head { padding:15px 14px 12px; }
+      .side-body { padding:14px; }
+      .midpoint { font-size:34px; }
+      .side-stats { gap:6px; }
+      .side-stat { padding:9px 8px; }
+      .rules { grid-template-columns:1fr 1fr; gap:7px; }
+      .rule { padding:11px; }
+      .section-title { align-items:flex-start; flex-direction:column; gap:3px; margin-top:22px; }
+      .footer { align-items:flex-start; flex-direction:column; gap:4px; }
+    }
+    @media (max-width: 390px) {
+      .brand-sub { font-size:9px; }
+      .pill, .tag { padding:5px 7px; font-size:9px; }
+      .side-stats { grid-template-columns:1fr 1fr; }
+      .rules { grid-template-columns:1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">C</div>
         <div>
-          <div class="eyebrow">Binance fair value × Polymarket 5-minute BTC</div>
-          <h2 id="heroTitle">Buy the favored side only when it is priced below $0.40.</h2>
-          <p>Every 10 seconds, this paper-only bot buys 100 shares when that side's Binance fair value is above 50% and its best ask is below $0.40. Passive sell orders remain limited to shares already held.</p>
+          <div class="brand-name">CLOB FLOW</div>
+          <div class="brand-sub">Invented · BTC five-minute maker</div>
         </div>
-        <div class="hero-state">
-          <span class="badge" id="windowBadge">Window waiting</span>
-          <strong id="statusReason">Connecting to Binance ticks and Polymarket order books…</strong>
-          <small id="windowClock">— seconds remaining</small>
-        </div>
-      </section>
-
-      <section class="grid metrics" aria-label="Paper account summary">
-        <article class="metric">
-          <div class="metric-label">Paper equity</div>
-          <div class="metric-value" id="equity">—</div>
-          <div class="metric-sub">cash plus currently marked position</div>
-        </article>
-        <article class="metric">
-          <div class="metric-label">Realized P&amp;L</div>
-          <div class="metric-value" id="realizedPnl">—</div>
-          <div class="metric-sub">after buy fees and estimated sell rebates</div>
-        </article>
-        <article class="metric">
-          <div class="metric-label">Paper cash</div>
-          <div class="metric-value" id="cash">—</div>
-          <div class="metric-sub">available before a new buy</div>
-        </article>
-        <article class="metric">
-          <div class="metric-label">BTC price</div>
-          <div class="metric-value" id="btcPrice">—</div>
-          <div class="metric-sub" id="binanceStatus">Binance stream waiting</div>
-        </article>
-        <article class="metric">
-          <div class="metric-label">Ledger positions</div>
-          <div class="metric-value" id="tradeCount">—</div>
-          <div class="metric-sub" id="ledgerDetail">own ledger · not mixed with prior strategy</div>
-        </article>
-      </section>
-
-      <section class="grid two-col">
-        <article class="panel">
-          <div class="panel-head">
-            <div>
-              <div class="panel-title">Binance model inputs</div>
-              <div class="panel-subtitle">Live BTCUSDT aggregate trades · 5-minute window</div>
-            </div>
-            <span class="badge" id="feedFreshness">Waiting for ticks</span>
-          </div>
-          <div class="feed-row"><span class="feed-label">Binance price at window open</span><strong class="feed-value" id="windowOpen">—</strong></div>
-          <div class="feed-row"><span class="feed-label">Last-two-candle volatility</span><strong class="feed-value" id="volatility">—</strong></div>
-          <div class="feed-row"><span class="feed-label">Polymarket market window</span><strong class="feed-value" id="marketName">—</strong></div>
-          <div class="candles" id="candles">
-            <div class="candle"><div class="candle-time">Candle 1</div><div class="candle-return">Waiting</div></div>
-            <div class="candle"><div class="candle-time">Candle 2</div><div class="candle-return">Waiting</div></div>
-          </div>
-        </article>
-
-        <article class="panel">
-          <div class="panel-head">
-            <div>
-              <div class="panel-title">Fair values and model</div>
-              <div class="panel-subtitle">Binance payout probability; above 50% qualifies for an entry check</div>
-            </div>
-            <span class="badge" id="modelStatus">Model waiting</span>
-          </div>
-          <div class="probabilities">
-            <div class="prob-card up">
-              <div class="prob-head"><span class="side-label">UP</span><span class="tag">BINANCE MODEL</span></div>
-              <div class="prob-value" id="upProbability">—</div>
-              <div class="prob-detail">Polymarket bid/ask <strong id="upAsk">—</strong></div>
-            </div>
-            <div class="prob-card down">
-              <div class="prob-head"><span class="side-label">DOWN</span><span class="tag">BINANCE MODEL</span></div>
-              <div class="prob-value" id="downProbability">—</div>
-              <div class="prob-detail">Polymarket bid/ask <strong id="downAsk">—</strong></div>
-            </div>
-          </div>
-          <div class="decision">
-            <div class="decision-title">Entry strategy status</div>
-            <div class="decision-text" id="signalSide">Waiting for live inputs</div>
-            <div class="decision-reason" id="signalReason">A fresh model and book are required for each scheduled check.</div>
-          </div>
-        </article>
-      </section>
-
-      <section class="grid three-col">
-        <article class="panel">
-          <div class="panel-head">
-            <div><div class="panel-title">Polymarket book</div><div class="panel-subtitle">Best visible bid/ask and top-level size</div></div>
-            <span class="badge" id="clobStatus">WebSocket waiting</span>
-          </div>
-          <div class="quote-grid">
-            <div class="quote-card">
-              <h3>UP contract</h3>
-              <div class="quote-values">
-                <div class="quote-cell"><span>Best ask</span><strong id="upAskBook">—</strong></div>
-                <div class="quote-cell"><span>Ask size</span><strong id="upAskSize">—</strong></div>
-                <div class="quote-cell"><span>Best bid</span><strong id="upBidBook">—</strong></div>
-                <div class="quote-cell"><span>Bid size</span><strong id="upBidSize">—</strong></div>
-              </div>
-            </div>
-            <div class="quote-card">
-              <h3>DOWN contract</h3>
-              <div class="quote-values">
-                <div class="quote-cell"><span>Best ask</span><strong id="downAskBook">—</strong></div>
-                <div class="quote-cell"><span>Ask size</span><strong id="downAskSize">—</strong></div>
-                <div class="quote-cell"><span>Best bid</span><strong id="downBidBook">—</strong></div>
-                <div class="quote-cell"><span>Bid size</span><strong id="downBidSize">—</strong></div>
-              </div>
-            </div>
-          </div>
-        </article>
-
-        <article class="panel">
-          <div class="panel-head">
-            <div><div class="panel-title">Current positions and sell orders</div><div class="panel-subtitle">100-share entries every 10 seconds · no fixed position cap</div></div>
-            <span class="badge" id="positionStatus">0 passive sells active</span>
-          </div>
-          <div class="position-pair">
-            <div class="position-box">
-              <div class="position-icon up" id="upPositionIcon">UP</div>
-              <div class="position-main">
-                <strong id="upPositionTitle">UP position · 0 shares</strong>
-                <small id="upPositionDetail">Waiting for fair value and fresh book</small>
-              </div>
-              <div class="position-pnl">
-                <strong id="upPositionPnl">—</strong>
-                <small id="upPositionQuotes">Entry — · Sell —</small>
-              </div>
-            </div>
-            <div class="position-box">
-              <div class="position-icon down" id="downPositionIcon">DOWN</div>
-              <div class="position-main">
-                <strong id="downPositionTitle">DOWN position · 0 shares</strong>
-                <small id="downPositionDetail">Waiting for fair value and fresh book</small>
-              </div>
-              <div class="position-pnl">
-                <strong id="downPositionPnl">—</strong>
-                <small id="downPositionQuotes">Entry — · Sell —</small>
-              </div>
-            </div>
-          </div>
-          <div class="feed-row"><span class="feed-label">Positions awaiting resolution</span><strong class="feed-value" id="pendingCount">—</strong></div>
-          <div class="feed-row"><span class="feed-label">Active passive sell orders</span><strong class="feed-value" id="entryCounts">—</strong></div>
-          <div class="feed-row"><span class="feed-label">Next 10-second entry check</span><strong class="feed-value" id="nextEntryCheck">—</strong></div>
-          <div class="feed-row"><span class="feed-label">Modeled taker fees</span><strong class="feed-value" id="fees">—</strong></div>
-          <div class="feed-row"><span class="feed-label">Estimated maker rebates</span><strong class="feed-value" id="makerRebate">—</strong></div>
-        </article>
-
-        <article class="panel">
-          <div class="panel-head">
-            <div><div class="panel-title">Entry and exit rules</div><div class="panel-subtitle">Signal-driven buys · paper fills only</div></div>
-            <span class="badge">100 shares / check</span>
-          </div>
-          <div class="rules">
-            <div class="rule"><b>Fair value</b>Binance BTC model uses the two latest completed 5-minute candles and the current window’s live price.</div>
-            <div class="rule"><b>Signal</b>Every 10 seconds, UP or DOWN qualifies only when its model probability is above 50%.</div>
-            <div class="rule"><b>Price</b>The qualifying side's best ask and all 100 shares swept must be below $0.40.</div>
-            <div class="rule"><b>Repeat buys</b>Every qualifying 10-second check adds another 100 shares, subject to available paper cash and visible ask depth.</div>
-            <div class="rule"><b>Sell handling</b>Passive sell orders can be posted only for owned shares and stop in the final 30 seconds; remaining shares wait for resolution.</div>
-            <div class="rule"><b>Execution</b>Paper-only. No wallet or real order is connected. Taker entry fees are modeled; any sell rebate is only an estimate.</div>
-          </div>
-        </article>
-      </section>
-
-      <div class="notice">
-        This is a simulation, not an exchange execution or a profit guarantee. A buy is recorded only when the current visible asks can cover all 100 shares below $0.40; entries include modeled taker fees. Passive sell fills remain estimates because public trade prints do not reveal queue priority. Any inventory left at expiry is settled using the official Polymarket result.
       </div>
+      <div class="top-meta">
+        <span class="tag green">PAPER ONLY</span>
+        <span id="statusPill" class="pill warn">Connecting</span>
+        <span class="tag badge-muted">Updated <span id="lastUpdated">—</span></span>
+      </div>
+    </header>
 
-      <section class="grid two-col">
-        <article class="panel">
-          <div class="panel-head">
-            <div><div class="panel-title">Recent trades</div><div class="panel-subtitle">BTC-only paper ledger · history resets on Railway restart</div></div>
-            <span class="badge" id="tradeHistoryCount">0 records</span>
+    <section class="hero">
+      <div class="hero-row">
+        <div>
+          <div class="eyebrow">Polymarket order books · no external signal feed</div>
+          <h1>Two books. Two independent quote loops.</h1>
+          <p class="hero-copy">The bot watches the UP and DOWN midpoints separately, rests small maker bids, and manages filled shares with passive take-profit orders.</p>
+        </div>
+        <div class="window-box">
+          <span id="marketTitle">BTC 5-minute market loading</span>
+          <strong id="windowClock">Waiting for market</strong>
+          <span id="statusReason">Connecting to the paper bot…</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="metrics" aria-label="Paper account summary">
+      <article class="metric"><div class="metric-label">Paper equity</div><div class="metric-value" id="equity">—</div><div class="metric-sub">cash plus marked positions</div></article>
+      <article class="metric"><div class="metric-label">Realized P&amp;L</div><div class="metric-value" id="realizedPnl">—</div><div class="metric-sub">includes estimated maker rebates</div></article>
+      <article class="metric"><div class="metric-label">Paper cash</div><div class="metric-value" id="cash">—</div><div class="metric-sub">rebate amount is estimated</div></article>
+      <article class="metric"><div class="metric-label">Open positions</div><div class="metric-value" id="openPositions">—</div><div class="metric-sub" id="positionDetail">current and unresolved</div></article>
+      <article class="metric"><div class="metric-label">Estimated rebates</div><div class="metric-value" id="rebate">—</div><div class="metric-sub">not an exchange-confirmed credit</div></article>
+    </section>
+
+    <div class="section-title">
+      <div><h2>Current five-minute window</h2><p>Live CLOB book and order state for each contract</p></div>
+      <span id="streamStatus" class="tag blue">CLOB stream connecting</span>
+    </div>
+    <section class="side-grid" aria-label="Independent UP and DOWN trading loops">
+      <article id="upCard" class="side-card up"><div class="side-body"><div class="empty">Loading UP book…</div></div></article>
+      <article id="downCard" class="side-card down"><div class="side-body"><div class="empty">Loading DOWN book…</div></div></article>
+    </section>
+
+    <div class="section-title">
+      <div><h2>Strategy rules</h2><p>Each contract operates independently; no fair-value or Binance filter</p></div>
+      <span class="tag">NO TAKER ORDERS</span>
+    </div>
+    <section class="rules">
+      <article class="rule"><div class="rule-num">01 · ENTRY</div><strong>Every second</strong><p>Rest a 5-share passive buy limit on both sides, each priced at its own current midpoint minus $0.02.</p></article>
+      <article class="rule"><div class="rule-num">02 · EXPIRY</div><strong>Two-second lifetime</strong><p>Cancel the unfilled remainder after two seconds. A timer never invents a fill.</p></article>
+      <article class="rule"><div class="rule-num">03 · TAKE PROFIT</div><strong>$0.99 passive sell</strong><p>After shares fill, post or resize a maker sell for held shares at $0.99 per share.</p></article>
+      <article class="rule"><div class="rule-num">04 · PAPER FILLS</div><strong>Queue-aware prints</strong><p>Fills require a fresh opposing CLOB trade print at or through the limit after estimated queue clearance.</p></article>
+    </section>
+    <div class="note"><strong>Accounting note:</strong> a $0.99 sell fill credits $0.99 per share. A winning share only pays $1.00 when the market officially resolves. Maker rebates shown here are estimates, not guaranteed credits.</div>
+
+    <div class="section-title">
+      <div><h2>Order and position ledger</h2><p>Paper orders, partial fills, cancellations, and settlement status</p></div>
+      <span id="orderSummary" class="tag">0 active orders</span>
+    </div>
+    <section class="panel">
+      <div class="panel-head"><div><h3>Recent orders</h3><p>Newest first · all simulated orders use passive limits</p></div><span id="orderCount" class="tag">0 records</span></div>
+      <div class="table-scroll">
+        <table class="table">
+          <thead><tr><th>Time</th><th>Action</th><th>Side</th><th>Purpose</th><th>Requested</th><th>Filled</th><th>Limit</th><th>Expires / status</th></tr></thead>
+          <tbody id="orders"><tr><td colspan="8" class="table-empty">Waiting for orders</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <div class="section-title">
+      <div><h2>Recent activity</h2><p>Order lifecycle and paper fills</p></div>
+      <span id="activityCount" class="tag">0 events</span>
+    </div>
+    <section class="lower-grid">
+      <article class="panel">
+        <div class="panel-head"><div><h3>Position ledger</h3><p>Open shares and completed exits or resolutions</p></div><span id="tradeCount" class="tag">0 positions</span></div>
+        <div class="table-scroll">
+          <table class="table">
+            <thead><tr><th>Window</th><th>Side</th><th>Shares</th><th>Avg entry</th><th>Status</th><th>P&amp;L</th></tr></thead>
+            <tbody id="positions"><tr><td colspan="6" class="table-empty">Waiting for positions</td></tr></tbody>
+          </table>
+        </div>
+      </article>
+      <article class="panel">
+        <div class="panel-head"><div><h3>Activity feed</h3><p>Latest bot events</p></div></div>
+        <div id="activity" class="activity-list"><div class="empty">Waiting for activity</div></div>
+      </article>
+    </section>
+
+    <footer class="footer">
+      <span>Invented BTC 5m CLOB midpoint maker · paper mode only</span>
+      <span id="ledgerStatus">Paper history is held in memory and resets on service restart.</span>
+    </footer>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+    })[char]);
+    const numeric = (value) => value == null || value === "" || !Number.isFinite(Number(value)) ? null : Number(value);
+    const money = (value) => numeric(value) == null ? "—" : "$" + numeric(value).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const price = (value) => numeric(value) == null ? "—" : "$" + numeric(value).toFixed(2);
+    const shares = (value) => numeric(value) == null ? "0" : numeric(value).toLocaleString(undefined, { maximumFractionDigits: 2 });
+    const dateTime = (value) => numeric(value) == null ? "—" : new Date(Number(value)).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    const pnlClass = (value) => numeric(value) == null ? "" : Number(value) >= 0 ? "positive" : "negative";
+    const signedMoney = (value) => numeric(value) == null ? "—" : `${Number(value) >= 0 ? "+" : "−"}${money(Math.abs(Number(value)))}`;
+
+    function orderExpiry(order, now) {
+      if (numeric(order.expiresAt) == null) return order.status || "—";
+      const ms = Number(order.expiresAt) - Number(now);
+      return ms > 0 ? `cancel in ${(ms / 1000).toFixed(1)}s` : "expiry due";
+    }
+    function renderSide(side, state) {
+      const key = side.toLowerCase();
+      const quote = state.quotes?.[side] || {};
+      const maker = state.makerQuotes?.[side] || {};
+      const position = state.positionsBySide?.[side] || null;
+      const buys = Array.isArray(maker.buyOrders) ? maker.buyOrders : [];
+      const tp = maker.takeProfitOrder;
+      const mid = numeric(quote.mid ?? maker.midpoint);
+      const limit = numeric(maker.entryLimitPrice);
+      const bidSize = quote.bidSize ?? quote.bestBidSize ?? 0;
+      const askSize = quote.askSize ?? quote.bestAskSize ?? 0;
+      const card = $(key + "Card");
+      const orderItems = buys.length ? buys.map((order) => `
+        <div class="order-row">
+          <span class="tag blue">BUY</span>
+          <div class="order-main"><strong>${shares(order.remainingShares)} shares at ${price(order.price)}</strong><small>${shares(order.filledShares)} filled · ${esc(order.status)}</small></div>
+          <div class="order-time">${esc(orderExpiry(order, state.now))}</div>
+        </div>`).join("") : `<div class="empty">${esc(maker.sideSignal?.reason || "No resting entry order right now.")}</div>`;
+      const tpStatus = tp
+        ? `${shares(tp.remainingShares)} shares at ${price(tp.price)} · ${esc(tp.status)}`
+        : position ? `Waiting to place ${price(state.strategy?.takeProfitPrice)} sell`
+          : "No shares held in this window";
+      card.innerHTML = `
+        <div class="side-head">
+          <div class="side-name"><div class="side-orb">${side === "UP" ? "↑" : "↓"}</div><div><h3>${side}</h3><span>Independent ${side.toLowerCase()} book</span></div></div>
+          <span class="tag ${side === "UP" ? "green" : "red"}">${esc(maker.bidStatus || "WAITING")}</span>
+        </div>
+        <div class="side-body">
+          <div class="midpoint-row">
+            <div><div class="label">CLOB midpoint</div><div class="midpoint">${mid == null ? "—" : "$" + mid.toFixed(3)}</div><div class="midpoint-caption">best bid / ask midpoint</div></div>
+            <div class="limit-box"><div class="label">Next buy limit</div><div class="limit-price">${price(limit)}</div><div class="midpoint-caption">midpoint − $0.02</div></div>
           </div>
-          <div class="table-wrap">
-            <table>
-              <thead><tr><th>Time</th><th>Side</th><th>Shares</th><th>Entry</th><th>Buy fees</th><th>Est. rebate</th><th>Status</th><th>P&amp;L</th></tr></thead>
-              <tbody id="recentTrades"><tr><td class="empty-row" colspan="8">Waiting for the first trade</td></tr></tbody>
-            </table>
+          <div class="book-line">
+            <div class="book-quote"><span>Best bid · size</span><strong>${price(quote.bestBid)} · ${shares(bidSize)}</strong></div>
+            <div class="book-quote"><span>Best ask · size</span><strong>${price(quote.bestAsk)} · ${shares(askSize)}</strong></div>
           </div>
-        </article>
-        <article class="panel">
-          <div class="panel-head">
-            <div><div class="panel-title">Activity</div><div class="panel-subtitle">Signal buys, passive sell fills, cancellations, and official settlements</div></div>
-            <span class="badge" id="activityCount">0 events</span>
+          <div class="side-stats">
+            <div class="side-stat"><div class="micro-label">Current shares</div><strong>${shares(position?.shares)}</strong></div>
+            <div class="side-stat"><div class="micro-label">Average entry</div><strong>${price(position?.entryPrice)}</strong></div>
+            <div class="side-stat"><div class="micro-label">Unrealized P&amp;L</div><strong class="${pnlClass(position?.unrealizedPnl)}">${signedMoney(position?.unrealizedPnl)}</strong></div>
           </div>
-          <div class="activity-list" id="activity"><div class="empty-row">Waiting for bot activity</div></div>
-        </article>
-      </section>
+          <div class="orders-block">
+            <div class="orders-title"><span class="label">Resting entry buys</span><span class="tag">${buys.length} active</span></div>
+            <div class="order-list">${orderItems}</div>
+          </div>
+          <div class="orders-block">
+            <div class="orders-title"><span class="label">Take-profit sell</span><span class="tag ${tp ? "green" : ""}">${tp ? "PASSIVE" : "NOT POSTED"}</span></div>
+            <div class="empty">${tpStatus}</div>
+          </div>
+        </div>`;
+    }
 
-      <footer class="footer">
-        Paper simulation only · Binance BTCUSDT aggregate-trade WebSocket · Polymarket CLOB order book and trade feed · <span id="persistenceStatus">Ledger starting</span>
-      </footer>
-    </main>
-    <script>
-      const $ = (id) => document.getElementById(id);
-      const money = (value, digits = 2) => Number.isFinite(Number(value))
-        ? "$" + Number(value).toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits })
-        : "—";
-      const contractPrice = (value) => Number.isFinite(Number(value)) ? "$" + Number(value).toFixed(3) : "—";
-      const percent = (value) => Number.isFinite(Number(value)) ? (Number(value) * 100).toFixed(1) + "%" : "—";
-      const signedMoney = (value) => Number.isFinite(Number(value))
-        ? (Number(value) >= 0 ? "+" : "−") + money(Math.abs(Number(value)))
-        : "—";
-      const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({
-        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-      })[char]);
-      const time = (value) => Number.isFinite(Number(value))
-        ? new Date(Number(value)).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
-        : "—";
-      const dateTime = (value) => Number.isFinite(Number(value))
-        ? new Date(Number(value)).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" })
-        : "—";
-      const setText = (id, value) => { if ($(id)) $(id).textContent = value; };
-      const pnlClass = (value) => Number(value) > 0 ? "positive" : Number(value) < 0 ? "negative" : "neutral";
+    function renderOrders(orders, now) {
+      const rows = (orders || []).slice(0, 80);
+      $("orderCount").textContent = `${rows.length} records`;
+      const active = rows.filter((o) => ["RESTING", "PARTIALLY_FILLED"].includes(o.status)).length;
+      $("orderSummary").textContent = `${active} active orders`;
+      $("orders").innerHTML = rows.length ? rows.map((order) => `
+        <tr>
+          <td>${dateTime(order.createdAt)}</td>
+          <td><span class="tag ${order.action === "BUY" ? "blue" : "green"}">${esc(order.action)}</span></td>
+          <td><span class="tag ${order.side === "UP" ? "green" : "red"}">${esc(order.side)}</span></td>
+          <td>${esc((order.purpose || "ORDER").replaceAll("_", " "))}</td>
+          <td>${shares(order.requestedShares)}</td><td>${shares(order.filledShares)}</td><td>${price(order.limitPrice)}</td>
+          <td>${esc(orderExpiry(order, now))} · ${esc(order.status)}</td>
+        </tr>`).join("") : `<tr><td colspan="8" class="table-empty">No orders yet</td></tr>`;
+    }
 
-      function renderCandles(candles) {
-        const rows = Array.isArray(candles) ? candles.slice(-2) : [];
-        $("candles").innerHTML = [0, 1].map((index) => {
-          const candle = rows[index];
-          if (!candle) return `<div class="candle"><div class="candle-time">Candle ${index + 1}</div><div class="candle-return">Waiting</div></div>`;
-          const change = (Number(candle.close) / Number(candle.open)) - 1;
-          const tone = change >= 0 ? "green" : "red";
-          const label = change >= 0 ? "UP candle" : "DOWN candle";
-          return `<div class="candle ${tone}">
-            <div class="candle-time">${escapeHtml(new Date(Number(candle.start)).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }))} · ${label}</div>
-            <div class="candle-return">${change >= 0 ? "+" : "−"}${Math.abs(change * 100).toFixed(3)}%</div>
-          </div>`;
-        }).join("");
+    function renderPositions(positions) {
+      const rows = (positions || []).slice(0, 60);
+      $("tradeCount").textContent = `${rows.length} positions`;
+      $("positions").innerHTML = rows.length ? rows.map((position) => `
+        <tr>
+          <td>${esc(position.marketTitle || position.marketSlug || dateTime(position.windowStart))}</td>
+          <td><span class="tag ${position.side === "UP" ? "green" : "red"}">${esc(position.side)}</span></td>
+          <td>${shares(position.shares)}</td><td>${price(position.entryPrice)}</td>
+          <td>${esc(position.status || "—")}</td><td class="${pnlClass(position.realizedPnl ?? position.unrealizedPnl)}">${signedMoney(position.realizedPnl ?? position.unrealizedPnl)}</td>
+        </tr>`).join("") : `<tr><td colspan="6" class="table-empty">No positions yet</td></tr>`;
+    }
+
+    function renderActivity(events) {
+      const rows = (events || []).slice(0, 24);
+      $("activityCount").textContent = `${rows.length} events`;
+      $("activity").innerHTML = rows.length ? rows.map((event) => {
+        const type = String(event.event || event.type || "");
+        const kind = /FILLED|SETTLED|RESOLVED/i.test(type) ? "fill" : /CANCEL/i.test(type) ? "cancel" : "";
+        const summary = event.reason || event.message || `${type.replaceAll("_", " ")}${event.side ? " · " + event.side : ""}${event.shares ? " · " + shares(event.shares) + " shares" : ""}`;
+        return `<div class="activity-item ${kind}"><div class="activity-dot"></div><div><div class="activity-message">${esc(summary)}</div><div class="activity-time">${dateTime(event.ts ?? event.at)}</div></div></div>`;
+      }).join("") : `<div class="empty">Waiting for activity</div>`;
+    }
+
+    function render(state) {
+      const account = state.account || {};
+      $("statusPill").textContent = String(state.status || "WAITING").toUpperCase();
+      $("statusPill").className = "pill " + (state.status === "RUNNING" ? "good" : state.status === "ERROR" ? "bad" : "warn");
+      $("statusReason").textContent = state.statusReason || "Waiting for bot status.";
+      $("lastUpdated").textContent = dateTime(state.now);
+      $("marketTitle").textContent = state.market?.title || state.market?.slug || "BTC 5-minute market";
+      $("windowClock").textContent = Number.isFinite(Number(state.window?.secondsRemaining))
+        ? `${Math.max(0, Math.floor(Number(state.window.secondsRemaining)))}s remaining`
+        : "Window pending";
+      $("equity").textContent = money(account.equity);
+      $("realizedPnl").textContent = money(account.realizedPnl);
+      $("realizedPnl").className = "metric-value " + pnlClass(account.realizedPnl);
+      $("cash").textContent = money(account.cash);
+      $("openPositions").textContent = Number(account.openPositions || 0).toLocaleString();
+      $("positionDetail").textContent = `${Number(account.pendingResolutionPositions || 0)} awaiting resolution`;
+      $("rebate").textContent = money(account.estimatedMakerRebate);
+      $("streamStatus").textContent = `Polymarket CLOB · ${String(state.websocket?.status || "connecting").toLowerCase()}`;
+      $("ledgerStatus").textContent = state.persistence?.detail || "Paper history is held in memory.";
+      renderSide("UP", state);
+      renderSide("DOWN", state);
+      renderOrders(state.orders, state.now);
+      renderPositions(state.trades || state.positions);
+      renderActivity(state.events);
+    }
+
+    async function refresh() {
+      try {
+        const response = await fetch("/api/strategy/state", { cache: "no-store" });
+        if (!response.ok) throw new Error(`State request failed (${response.status})`);
+        render(await response.json());
+      } catch (error) {
+        $("statusPill").textContent = "API ERROR";
+        $("statusPill").className = "pill bad";
+        $("statusReason").textContent = error?.message || "Could not load bot state.";
       }
-
-      function renderTrades(trades, total) {
-        const rows = Array.isArray(trades) ? trades : [];
-        setText("tradeHistoryCount", `${Number(total || rows.length)} records`);
-        if (!rows.length) {
-          $("recentTrades").innerHTML = `<tr><td class="empty-row" colspan="8">Waiting for the first trade</td></tr>`;
-          return;
-        }
-        $("recentTrades").innerHTML = rows.slice(0, 30).map((trade) => {
-          const pnl = Number.isFinite(Number(trade.realizedPnl)) ? Number(trade.realizedPnl) : null;
-          const outcomeClass = trade.outcome === "WIN" ? "win" : trade.outcome === "LOSS" ? "loss" : "";
-          return `<tr>
-            <td>${dateTime(trade.openedAt)}</td>
-            <td><strong>${escapeHtml(trade.side || "—")}</strong></td>
-            <td>${Number(trade.shares || 0)}</td>
-            <td>${contractPrice(trade.entryPrice)}</td>
-            <td>${money(trade.fees || 0)}</td>
-            <td>${money(trade.estimatedMakerRebate || 0)}</td>
-            <td><span class="tag ${outcomeClass}">${escapeHtml(trade.status || "—")}</span></td>
-            <td class="${pnlClass(pnl)}">${pnl == null ? "—" : signedMoney(pnl)}</td>
-          </tr>`;
-        }).join("");
-      }
-
-      function renderActivity(events) {
-        const rows = Array.isArray(events) ? events : [];
-        setText("activityCount", `${rows.length} events`);
-        if (!rows.length) {
-          $("activity").innerHTML = `<div class="empty-row">Waiting for bot activity</div>`;
-          return;
-        }
-        $("activity").innerHTML = rows.slice(0, 35).map((event) => {
-          const type = String(event.type || event.event || "").toLowerCase();
-          const kind = type.includes("resolved") || type.includes("settled") ? "resolve"
-            : type.includes("maker") || type.includes("buy") || type.includes("sell") ? "trade" : "";
-          return `<div class="activity-item ${kind}">
-            <div class="activity-dot"></div>
-            <div><div class="activity-message">${escapeHtml(event.message || event.type || "Update")}</div>
-            <div class="activity-time">${dateTime(event.at)}</div></div>
-          </div>`;
-        }).join("");
-      }
-
-      function render(state) {
-        const account = state.account || {};
-        const model = state.model || {};
-        const binance = state.binance || {};
-        const quotes = state.quotes || {};
-        const makerQuotes = state.makerQuotes || {};
-        const inventory = state.inventory || {};
-        const up = quotes.UP || {};
-        const down = quotes.DOWN || {};
-        const status = String(state.status || "WAITING").toUpperCase();
-        const statusPill = $("statusPill");
-        statusPill.textContent = status;
-        statusPill.className = "pill " + (status === "RUNNING" ? "good" : status === "ERROR" ? "bad" : "warn");
-        setText("statusReason", state.statusReason || state.error || "Waiting for bot status.");
-        setText("lastUpdated", time(state.now));
-        setText("windowBadge", state.window?.slug || "BTC 5m window");
-        setText("windowClock", Number.isFinite(Number(state.window?.secondsRemaining))
-          ? `${Math.max(0, Math.floor(Number(state.window.secondsRemaining)))} seconds remaining`
-          : "Window pending");
-
-        setText("equity", money(account.equity));
-        setText("realizedPnl", money(account.realizedPnl));
-        $("realizedPnl").className = "metric-value " + pnlClass(account.realizedPnl);
-        setText("cash", money(account.cash));
-        setText("btcPrice", money(binance.price, 2));
-        setText("binanceStatus", binance.status === "CONNECTED" ? "Binance tick stream connected" : `Binance ${String(binance.status || "waiting").toLowerCase()}`);
-        setText("tradeCount", Number(account.tradeCount || 0).toLocaleString());
-        setText("ledgerDetail", `${Number(account.openPositions || 0)} open · ${Number(account.pendingResolutionPositions || 0)} awaiting resolution`);
-        setText("windowOpen", money(model.windowOpenPrice, 2));
-        setText("volatility", Number.isFinite(Number(model.volatility5m))
-          ? (Number(model.volatility5m) * 100).toFixed(3) + "% RMS / candle"
-          : "Waiting for 2 candles");
-        setText("marketName", state.market?.title || state.market?.slug || "Market not loaded");
-        setText("feedFreshness", Number.isFinite(Number(binance.tickAgeMs))
-          ? `Tick age ${Math.max(0, Math.round(Number(binance.tickAgeMs)))} ms`
-          : "Waiting for ticks");
-        setText("modelStatus", model.ready ? "READY · 2 CLOSED CANDLES" : "MODEL WAITING");
-        setText("upProbability", percent(model.probabilityUp));
-        setText("downProbability", percent(model.probabilityDown));
-        setText("upAsk", `bid ${contractPrice(up.bestBid)} · ask ${contractPrice(up.bestAsk)}`);
-        setText("downAsk", `bid ${contractPrice(down.bestBid)} · ask ${contractPrice(down.bestAsk)}`);
-        setText("signalSide", state.marketMakerState?.status || "Waiting for signal check");
-        setText("signalReason", state.marketMakerState?.reason || state.signal?.reason || model.reason || "Waiting for inputs.");
-        setText("clobStatus", `Polymarket ${String(state.websocket?.status || "waiting").toLowerCase()}`);
-        setText("upAskBook", contractPrice(up.bestAsk));
-        setText("upAskSize", Number(up.askSize || 0).toLocaleString());
-        setText("upBidBook", contractPrice(up.bestBid));
-        setText("upBidSize", Number(up.bidSize || 0).toLocaleString());
-        setText("downAskBook", contractPrice(down.bestAsk));
-        setText("downAskSize", Number(down.askSize || 0).toLocaleString());
-        setText("downBidBook", contractPrice(down.bestBid));
-        setText("downBidSize", Number(down.bidSize || 0).toLocaleString());
-
-        const positionsBySide = state.positionsBySide || {};
-        let activeOrders = 0;
-        for (const side of ["UP", "DOWN"]) {
-          const key = side.toLowerCase();
-          const position = positionsBySide[side] || null;
-          const makerQuote = makerQuotes[side] || {};
-          const sideInventory = inventory[side] || {};
-          const shares = Number(makerQuote.inventoryShares ?? sideInventory.shares ?? position?.shares ?? 0);
-          const askOrder = makerQuote.ask || null;
-          const askActive = askOrder && ["RESTING", "PARTIALLY_FILLED"].includes(askOrder.status);
-          if (askActive) activeOrders += 1;
-          setText(`${key}PositionIcon`, side);
-          setText(`${key}PositionTitle`, `${side} position · ${shares.toLocaleString()} shares`);
-          setText(`${key}PositionDetail`, position
-            ? `Fair ${percent(makerQuote.fairValue)} · average buy ${contractPrice(position.entryPrice)} · ${makerQuote.signalReason || "held for sell or resolution"}`
-            : `Fair ${percent(makerQuote.fairValue)} · ${makerQuote.signalReason || makerQuote.reason || "Waiting for fresh market data"}`);
-          setText(`${key}PositionPnl`, position ? signedMoney(position.unrealizedPnl) : "—");
-          $(`${key}PositionPnl`).className = pnlClass(position?.unrealizedPnl);
-          setText(`${key}PositionQuotes`, position
-            ? `Entry ${makerQuote.signalStatus || "—"} · Sell ${contractPrice(askOrder?.price ?? makerQuote.askPrice)} ${askOrder?.status || makerQuote.askStatus}`
-            : `Entry ${makerQuote.signalStatus || "—"} · Sell ${contractPrice(makerQuote.askPrice)} ${makerQuote.askStatus}`);
-        }
-        setText("positionStatus", `${activeOrders} passive sells active`);
-        setText("pendingCount", Number(account.pendingResolutionPositions || 0).toLocaleString());
-        setText("entryCounts", `${activeOrders} active · ${Number(state.makerStats?.ordersPlaced || 0)} placed total`);
-        setText("nextEntryCheck", state.strategy?.nextEntryCheckAt != null
-          && Number.isFinite(Number(state.strategy.nextEntryCheckAt))
-          ? time(state.strategy.nextEntryCheckAt)
-          : "Waiting for market");
-        setText("fees", money(account.takerFees));
-        setText("makerRebate", money(account.estimatedMakerRebate));
-        setText("persistenceStatus", state.persistence?.status === "CONNECTED"
-          ? "paper ledger saved" : `ledger ${String(state.persistence?.status || "starting").toLowerCase()}`);
-        renderCandles(model.volatilityCandles);
-        renderTrades(state.trades, account.tradeCount);
-        renderActivity(state.events);
-      }
-
-      async function refresh() {
-        try {
-          const response = await fetch("/api/strategy/state", { cache: "no-store" });
-          if (!response.ok) throw new Error(`State request failed (${response.status})`);
-          render(await response.json());
-        } catch (error) {
-          $("statusPill").textContent = "API ERROR";
-          $("statusPill").className = "pill bad";
-          setText("statusReason", error?.message || "Could not load bot state.");
-        }
-      }
-      refresh();
-      setInterval(refresh, 1_000);
-    </script>
-  </body>
+    }
+    refresh();
+    setInterval(refresh, 1000);
+  </script>
+</body>
 </html>

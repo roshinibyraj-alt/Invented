@@ -2,7 +2,7 @@
   "name": "invented-btc-market-maker-paper-bot",
   "version": "1.0.0",
   "private": true,
-  "description": "Paper-only, fair-value BTC 5-minute UP/DOWN signal strategy.",
+  "description": "Paper-only BTC 5-minute UP/DOWN CLOB midpoint maker strategy.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",

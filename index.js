@@ -13,7 +13,7 @@ async function main() {
   bot.start();
   startServer(bot, process.env.PORT || 3000);
 
-  console.log('MODE: DEMO -- BTC 5-minute Binance mispricing paper strategy; no live order code is loaded.');
+  console.log('MODE: DEMO -- Polymarket CLOB midpoint maker strategy; no live order code is loaded.');
 }
 
 main().catch((e) => {

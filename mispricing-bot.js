@@ -96,6 +96,7 @@ class MispricingBot extends WickBot {
     now = Date.now,
     initialCapital = config.DEMO_CAPITAL,
     WebSocketImpl = globalThis.WebSocket,
+    useBinanceFeed = true,
   } = {}) {
     super({
       strategyId: 'btc-5m-binance-mispricing-2candle-dual-tp',
@@ -113,7 +114,7 @@ class MispricingBot extends WickBot {
       now,
     });
     this.config = config;
-    this.priceFeed = priceFeed || new BinanceTickFeed({ now });
+    this.priceFeed = priceFeed || (useBinanceFeed ? new BinanceTickFeed({ now }) : null);
     this.WebSocketImpl = WebSocketImpl;
     this.now = now;
     this.model = null;
@@ -141,14 +142,14 @@ class MispricingBot extends WickBot {
   }
 
   start() {
-    void this.priceFeed.start?.();
+    void this.priceFeed?.start?.();
     return super.start();
   }
 
   stop() {
     super.stop();
     this.closeMarketStream();
-    this.priceFeed.stop?.();
+    this.priceFeed?.stop?.();
   }
 
   async refreshLiveQuotes(now = this.now()) {
@@ -358,7 +359,7 @@ class MispricingBot extends WickBot {
 
   modelSnapshot(now = this.now()) {
     const windowStart = this.getActiveWindowStart();
-    const feed = this.priceFeed.snapshot?.() || {};
+    const feed = this.priceFeed?.snapshot?.() || {};
     const candles = (feed.candles || []).slice(-config.VOLATILITY_CANDLES);
     const volatility5m = calculateVolatility(candles, config.VOLATILITY_CANDLES);
     const currentCandle = feed.currentCandle;
@@ -975,7 +976,7 @@ class MispricingBot extends WickBot {
     const windowEnd = windowStart == null ? null : windowStart + config.WINDOW_MS_5M;
     const currentPositions = this.positions.filter((position) =>
       position.status === 'OPEN' && Number(position.windowStart) === Number(windowStart));
-    const feed = this.priceFeed.snapshot?.() || {};
+    const feed = this.priceFeed?.snapshot?.() || {};
     const account = {
       ...state.account,
       startingCapital: state.account.capital,
