@@ -6,5 +6,7 @@
 4. Any unfilled entry remainder is cancelled after five seconds.
 5. In paper mode, a fresh best ask at or below the entry limit confirms the full remaining order. This deliberately ignores displayed size and queue position, so it can overstate real fills.
 6. Each side's held shares get a passive $0.99 take-profit sell, resized after additional buys. A $0.99 fill is credited as $0.99/share; official resolution may instead pay $1.00 for a winning share.
-7. All resting orders are cancelled at window end. Unsold shares wait for confirmed resolution of their original market. Estimated maker rebates are not guaranteed exchange credits.
-8. Top UP/DOWN inventory cards show the active window only. Holdings from ended windows appear in separate cards grouped by original window until sold or resolved.
+7. Whenever both sides hold shares in the same open market, immediately merge the smaller side's full amount. Each paired UP/DOWN share returns $1 of paper collateral, so 20 UP and 30 DOWN returns $20 and leaves 10 DOWN. Gross merge P&L is the collateral returned minus both matched cost bases.
+8. Cancel or resize take-profit orders around a merge so an order never remains on shares already merged; unmatched shares keep their $0.99 take-profit.
+9. All resting orders are cancelled at window end. Unsold shares wait for confirmed resolution of their original market. Estimated maker rebates are not guaranteed exchange credits.
+10. Top UP/DOWN inventory cards show the active window only. Holdings from ended windows appear in separate cards grouped by original window until sold or resolved. Equity includes last available bids for unresolved positions; unpriced inventory is shown at cost basis separately.

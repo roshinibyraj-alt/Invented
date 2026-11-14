@@ -104,7 +104,7 @@
     .historical-side strong { margin-right:9px; font-size:12px; }
     .historical-side span { font-size:12px; font-weight:750; }
     .historical-side small { display:block; margin-top:5px; color:var(--muted); font-size:10px; }
-    .metrics { display: grid; grid-template-columns: repeat(5, minmax(0,1fr)); gap: 12px; margin: 14px 0; }
+    .metrics { display: grid; grid-template-columns: repeat(6, minmax(0,1fr)); gap: 12px; margin: 14px 0; }
     .metric, .panel, .side-card {
       border: 1px solid var(--line); border-radius: 17px; background: linear-gradient(150deg, rgba(18,34,50,.98), rgba(13,27,41,.98));
       box-shadow: var(--shadow);
@@ -149,7 +149,7 @@
     .order-row small { color:var(--muted); font-size:10px; }
     .order-row .order-time { text-align:right; color:var(--blue); font-size:11px; font-variant-numeric:tabular-nums; white-space:nowrap; }
     .empty { color:var(--muted); font-size:11px; padding:9px 0; }
-    .rules { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; }
+    .rules { display:grid; grid-template-columns:repeat(5,1fr); gap:10px; }
     .rule { padding:14px 15px; border:1px solid var(--line); border-radius:14px; background:rgba(16,30,45,.76); }
     .rule-num { color:var(--blue); font-size:10px; font-weight:900; letter-spacing:.12em; }
     .rule strong { display:block; margin:5px 0 4px; font-size:12px; }
@@ -266,11 +266,12 @@
     </section>
 
     <section class="metrics" aria-label="Paper account summary">
-      <article class="metric"><div class="metric-label">Paper equity</div><div class="metric-value" id="equity">—</div><div class="metric-sub">cash plus marked positions</div></article>
+      <article class="metric"><div class="metric-label">Paper equity</div><div class="metric-value" id="equity">—</div><div class="metric-sub" id="equityDetail">cash plus marked positions</div></article>
       <article class="metric"><div class="metric-label">Realized P&amp;L</div><div class="metric-value" id="realizedPnl">—</div><div class="metric-sub">includes estimated maker rebates</div></article>
       <article class="metric"><div class="metric-label">Paper cash</div><div class="metric-value" id="cash">—</div><div class="metric-sub">rebate amount is estimated</div></article>
       <article class="metric"><div class="metric-label">Open positions</div><div class="metric-value" id="openPositions">—</div><div class="metric-sub" id="positionDetail">current and unresolved</div></article>
       <article class="metric"><div class="metric-label">Estimated rebates</div><div class="metric-value" id="rebate">—</div><div class="metric-sub">not an exchange-confirmed credit</div></article>
+      <article class="metric"><div class="metric-label">Pending cost basis</div><div class="metric-value" id="pendingCostBasis">—</div><div class="metric-sub">unresolved shares still held</div></article>
     </section>
 
     <div class="section-title">
@@ -290,16 +291,18 @@
     </section>
 
     <div class="section-title">
-      <div><h2>Strategy rules</h2><p>Each contract operates independently; no fair-value or Binance filter</p></div>
+      <div><h2>Strategy rules</h2><p>Each contract operates independently; matching sides merge as soon as both are held</p></div>
       <span class="tag">NO TAKER ORDERS</span>
+      <span id="mergeSummary" class="tag blue">0 shares merged · $0.00 returned</span>
     </div>
     <section class="rules">
       <article class="rule"><div class="rule-num">01 · ENTRY</div><strong>Every second</strong><p>Rest a 5-share passive buy limit on both sides, each priced at its own current midpoint minus $0.05.</p></article>
       <article class="rule"><div class="rule-num">02 · EXPIRY</div><strong>Five-second lifetime</strong><p>Cancel the unfilled remainder after five seconds.</p></article>
       <article class="rule"><div class="rule-num">03 · TAKE PROFIT</div><strong>$0.99 passive sell</strong><p>After shares fill, post or resize a maker sell for held shares at $0.99 per share.</p></article>
       <article class="rule"><div class="rule-num">04 · PAPER FILLS</div><strong>Best-ask touch</strong><p>Confirm the remaining buy order when a fresh best ask reaches or falls below its limit. This ignores queue and displayed size.</p></article>
+      <article class="rule"><div class="rule-num">05 · MERGE</div><strong>Automatic complete sets</strong><p>As soon as both sides hold shares in the same open window, merge the smaller side’s full amount for $1 collateral per matched pair. Keep any unmatched shares and restore their take-profit order.</p></article>
     </section>
-    <div class="note"><strong>Accounting note:</strong> a $0.99 sell fill credits $0.99 per share. A winning share only pays $1.00 when the market officially resolves. Maker rebates shown here are estimates, not guaranteed credits.</div>
+    <div class="note"><strong>Accounting note:</strong> a matched UP/DOWN pair returns $1 of paper collateral; merge profit is that $1 minus both shares’ cost basis, not an extra $1 profit. Equity uses the latest available bid for unresolved shares; shares without a mark are excluded from equity and listed at cost basis. Maker rebates shown here are estimates, not guaranteed credits.</div>
 
     <div class="section-title">
       <div><h2>Order and position ledger</h2><p>Paper orders, partial fills, cancellations, and settlement status</p></div>
@@ -444,7 +447,7 @@
       $("activityCount").textContent = `${rows.length} events`;
       $("activity").innerHTML = rows.length ? rows.map((event) => {
         const type = String(event.event || event.type || "");
-        const kind = /FILLED|SETTLED|RESOLVED/i.test(type) ? "fill" : /CANCEL/i.test(type) ? "cancel" : "";
+        const kind = /FILLED|SETTLED|RESOLVED|MERGED/i.test(type) ? "fill" : /CANCEL/i.test(type) ? "cancel" : "";
         const summary = event.reason || event.message || `${type.replaceAll("_", " ")}${event.side ? " · " + event.side : ""}${event.shares ? " · " + shares(event.shares) + " shares" : ""}`;
         return `<div class="activity-item ${kind}"><div class="activity-dot"></div><div><div class="activity-message">${esc(summary)}</div><div class="activity-time">${dateTime(event.ts ?? event.at)}</div></div></div>`;
       }).join("") : `<div class="empty">Waiting for activity</div>`;
@@ -493,12 +496,22 @@
         ? `${Math.max(0, Math.floor(Number(state.window.secondsRemaining)))}s remaining`
         : "Window pending";
       $("equity").textContent = money(account.equity);
+      $("equityDetail").textContent = "last bids; unpriced inventory shown separately";
       $("realizedPnl").textContent = money(account.realizedPnl);
       $("realizedPnl").className = "metric-value " + pnlClass(account.realizedPnl);
       $("cash").textContent = money(account.cash);
       $("openPositions").textContent = Number(account.openPositions || 0).toLocaleString();
-      $("positionDetail").textContent = `${Number(account.pendingResolutionPositions || 0)} awaiting resolution`;
+      const pendingCount = Number(account.pendingResolutionPositions || 0);
+      const unpricedCost = Number(account.openPositionCostBasisUnpriced || 0)
+        + Number(account.unpricedPendingCostBasis || 0);
+      const positionParts = [];
+      if (pendingCount) positionParts.push(`${pendingCount} awaiting`);
+      if (unpricedCost > 0) positionParts.push(`${money(unpricedCost)} unpriced`);
+      $("positionDetail").textContent = positionParts.join(" · ") || "current-window holdings";
       $("rebate").textContent = money(account.estimatedMakerRebate);
+      $("pendingCostBasis").textContent = money(account.pendingResolutionCostBasis);
+      const mergeStats = state.mergeStats || {};
+      $("mergeSummary").textContent = `${shares(mergeStats.pairsMerged)} shares merged · ${money(mergeStats.collateralReturned)} returned`;
       $("streamStatus").textContent = `Polymarket CLOB · ${String(state.websocket?.status || "connecting").toLowerCase()}`;
       $("ledgerStatus").textContent = state.persistence?.detail || "Paper history is held in memory.";
       renderSide("UP", state);

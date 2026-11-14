@@ -215,6 +215,132 @@ test('records a $0.99 maker take-profit at the actual limit price', () => {
   assert.ok(position.realizedPnl > 0);
 });
 
+test('auto-merges equal shares immediately for $1 per pair and cancels overlapping take-profits', () => {
+  const fixture = makeBot();
+  const placedAt = fixture.tickAt(1_000);
+  const upEntry = activeOrders(fixture.bot, 'UP', 'BUY')[0];
+  const downEntry = activeOrders(fixture.bot, 'DOWN', 'BUY')[0];
+
+  fixture.setNow(placedAt + 100);
+  setBook(fixture.bot, 'UP', 0.39, upEntry.limitPrice, placedAt + 100);
+  const upPosition = fixture.bot.currentPosition('UP', WINDOW_START);
+  const upTakeProfit = activeOrders(fixture.bot, 'UP', 'SELL')[0];
+  assert.ok(upPosition);
+  assert.ok(upTakeProfit);
+
+  fixture.setNow(placedAt + 200);
+  setBook(fixture.bot, 'DOWN', 0.31, downEntry.limitPrice, placedAt + 200);
+
+  const downPosition = fixture.bot.positions.find((position) =>
+    position.side === 'DOWN' && Number(position.windowStart) === WINDOW_START);
+  const settledUpPosition = fixture.bot.positions.find((position) =>
+    position.side === 'UP' && Number(position.windowStart) === WINDOW_START);
+  assert.equal(fixture.bot.mergeHistory.length, 1);
+  assert.equal(fixture.bot.mergeHistory[0].sharesPerSide, 5);
+  assert.equal(fixture.bot.mergeHistory[0].collateralReturned, 5);
+  assert.equal(fixture.bot.mergeHistory[0].totalCostBasis, 3.6);
+  assert.equal(fixture.bot.mergeHistory[0].realizedPnl, 1.4);
+  assert.equal(settledUpPosition.status, 'SETTLED_EXIT');
+  assert.equal(downPosition.status, 'SETTLED_EXIT');
+  assert.equal(settledUpPosition.shares, 0);
+  assert.equal(downPosition.shares, 0);
+  assert.equal(upTakeProfit.status, 'CANCELLED_MERGED');
+  assert.equal(activeOrders(fixture.bot, 'UP', 'SELL').length, 0);
+  assert.equal(activeOrders(fixture.bot, 'DOWN', 'SELL').length, 0);
+
+  const rebates = settledUpPosition.estimatedMakerRebate + downPosition.estimatedMakerRebate;
+  assert.ok(Math.abs(fixture.bot.cash - (100 - 3.6 + 5 + rebates)) < 1e-8);
+  assert.ok(Math.abs(settledUpPosition.realizedPnl + downPosition.realizedPnl - (1.4 + rebates)) < 1e-8);
+});
+
+test('merges only the matched shares from the same window and restores the unmatched take-profit', () => {
+  const fixture = makeBot();
+  const { bot } = fixture;
+  const position = (id, side, windowStart, shares, totalCost) => ({
+    id,
+    strategyId: bot.strategyId,
+    marketId: `market-${windowStart}`,
+    windowStart,
+    windowEnd: windowStart + config.WINDOW_MS_5M,
+    marketTitle: 'BTC Up or Down',
+    side,
+    status: 'OPEN',
+    openedAt: windowStart,
+    shares,
+    initialShares: shares,
+    totalCost,
+    initialTotalCost: totalCost,
+    entryPrice: totalCost / shares,
+    fees: 0,
+    initialFees: 0,
+    estimatedMakerRebate: 0,
+    entryEstimatedMakerRebate: 0,
+    realizedEntryMakerRebate: 0,
+    realizedSellMakerRebate: 0,
+    mergeProceeds: 0,
+    mergeCostBasis: 0,
+    exitProceeds: 0,
+    proceeds: 0,
+  });
+  const up = position('up-20', 'UP', WINDOW_START, 20, 8);
+  const down = position('down-30', 'DOWN', WINDOW_START, 30, 18);
+  const otherWindowDown = position('old-down', 'DOWN', WINDOW_START - config.WINDOW_MS_5M, 7, 3.5);
+  bot.positions.push(up, down, otherWindowDown);
+  bot.cash -= 26;
+  bot.ensureTakeProfitOrders(WINDOW_START + 1_000, WINDOW_START);
+
+  assert.equal(bot.mergeMatchedInventory(WINDOW_START, WINDOW_START + 1_000), true);
+  bot.ensureTakeProfitOrders(WINDOW_START + 1_000, WINDOW_START);
+
+  assert.equal(bot.mergeHistory[0].sharesPerSide, 20);
+  assert.equal(bot.mergeHistory[0].collateralReturned, 20);
+  assert.equal(bot.mergeHistory[0].totalCostBasis, 20);
+  assert.equal(bot.mergeHistory[0].realizedPnl, 0);
+  assert.equal(up.status, 'SETTLED_EXIT');
+  assert.equal(down.shares, 10);
+  assert.equal(down.totalCost, 6);
+  assert.equal(down.status, 'OPEN');
+  assert.equal(otherWindowDown.shares, 7);
+  assert.equal(otherWindowDown.status, 'OPEN');
+  assert.equal(bot.cash, 94);
+  assert.equal(activeOrders(bot, 'UP', 'SELL').length, 0);
+  assert.equal(activeOrders(bot, 'DOWN', 'SELL').length, 1);
+  assert.equal(activeOrders(bot, 'DOWN', 'SELL')[0].requestedShares, 10);
+});
+
+test('includes merged collateral and leftover shares in official-resolution profit math', () => {
+  const fixture = makeBot();
+  const { bot } = fixture;
+  const up = {
+    id: 'up-20', side: 'UP', status: 'OPEN', windowStart: WINDOW_START,
+    marketId: 'btc-market', shares: 20, initialShares: 20, totalCost: 8,
+    initialTotalCost: 8, entryPrice: 0.4, estimatedMakerRebate: 0,
+    entryEstimatedMakerRebate: 0, realizedEntryMakerRebate: 0,
+    realizedSellMakerRebate: 0, mergeProceeds: 0, exitProceeds: 0,
+    initialFees: 0, fees: 0,
+  };
+  const down = {
+    id: 'down-30', side: 'DOWN', status: 'OPEN', windowStart: WINDOW_START,
+    marketId: 'btc-market', shares: 30, initialShares: 30, totalCost: 18,
+    initialTotalCost: 18, entryPrice: 0.6, estimatedMakerRebate: 0,
+    entryEstimatedMakerRebate: 0, realizedEntryMakerRebate: 0,
+    realizedSellMakerRebate: 0, mergeProceeds: 0, exitProceeds: 0,
+    initialFees: 0, fees: 0,
+  };
+  bot.positions.push(up, down);
+  bot.cash -= 26;
+  bot.mergeMatchedInventory(WINDOW_START, WINDOW_START + 1_000);
+
+  down.status = 'PENDING_RESOLUTION';
+  assert.equal(bot.finalizeResolution(down, 'DOWN', WINDOW_START + config.WINDOW_MS_5M), true);
+  assert.equal(down.resolutionProceeds, 10);
+  assert.equal(down.proceeds, 20);
+  assert.equal(down.realizedPnl, 2);
+  assert.equal(up.realizedPnl, 2);
+  assert.equal(bot.cash, 104);
+  assert.equal(up.realizedPnl + down.realizedPnl, 4);
+});
+
 test('closes the order window at five minutes and exposes the CLOB-only strategy', () => {
   const fixture = makeBot();
   fixture.tickAt(1_000);
@@ -233,10 +359,47 @@ test('closes the order window at five minutes and exposes the CLOB-only strategy
   assert.equal(snapshot.strategy.midpointOffset, 0.05);
   assert.match(snapshot.strategy.fillRule, /best ask reaches or falls below/i);
   assert.equal(snapshot.strategy.takeProfitPrice, 0.99);
+  assert.match(snapshot.strategy.mergeRule, /merge min\(UP, DOWN\)/i);
   assert.equal(snapshot.binance.status, 'NOT_USED');
   assert.equal(snapshot.marketMakerState.status, 'WINDOW_CLOSED');
   assert.equal(activeOrders(fixture.bot, 'UP', 'BUY').length, 0);
   assert.equal(activeOrders(fixture.bot, 'DOWN', 'BUY').length, 0);
+});
+
+test('equity includes last-known pending bids and reports unpriced cost separately', () => {
+  const fixture = makeBot();
+  fixture.bot.positions.push(
+    {
+      id: 'pending-marked',
+      side: 'UP',
+      status: 'PENDING_RESOLUTION',
+      windowStart: WINDOW_START - config.WINDOW_MS_5M,
+      shares: 10,
+      totalCost: 4,
+      markBid: 0.25,
+      estimatedMakerRebate: 0.02,
+      entryEstimatedMakerRebate: 0.02,
+      realizedEntryMakerRebate: 0,
+    },
+    {
+      id: 'pending-unpriced',
+      side: 'DOWN',
+      status: 'PENDING_RESOLUTION',
+      windowStart: WINDOW_START - 2 * config.WINDOW_MS_5M,
+      shares: 5,
+      totalCost: 1,
+      markBid: null,
+      estimatedMakerRebate: 0,
+      entryEstimatedMakerRebate: 0,
+      realizedEntryMakerRebate: 0,
+    },
+  );
+
+  const account = fixture.bot.snapshot().account;
+  assert.equal(account.pendingResolutionMarkedValue, 2.5);
+  assert.equal(account.pendingResolutionCostBasis, 5);
+  assert.equal(account.unpricedPendingCostBasis, 1);
+  assert.equal(account.equity, fixture.bot.cash + 2.5);
 });
 
 test('summarizes accumulated inventory and weighted average entry by side', () => {

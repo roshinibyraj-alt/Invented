@@ -250,9 +250,10 @@ class WickBot{
     const totalFees=Number(p.initialFees??p.fees)||0;
     const takeProfitProceeds=Number(p.takeProfitProceeds)||0;
     const priorExitProceeds=Number(p.exitProceeds)||0;
+    const mergeProceeds=Number(p.mergeProceeds)||0;
     const priorExitFees=Number(p.exitFees)||0;
     p.resolutionProceeds=p.shares*p.payout;
-    p.proceeds=takeProfitProceeds+priorExitProceeds+p.resolutionProceeds;
+    p.proceeds=takeProfitProceeds+priorExitProceeds+mergeProceeds+p.resolutionProceeds;
     p.realizedPnl=p.proceeds-totalCost-totalFees-priorExitFees+(p.estimatedMakerRebate||0);
     p.status='SETTLED_EXIT';
     p.settledAt=now;

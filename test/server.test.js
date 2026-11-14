@@ -63,9 +63,11 @@ test('dashboard explains the CLOB midpoint maker rules', async t => {
   assert.match(html, /downAverageEntry/);
   assert.match(html, /Previous window holdings/i);
   assert.match(html, /previousWindowInventory/);
+  assert.match(html, /Automatic complete sets/i);
+  assert.match(html, /matched UP\/DOWN pair returns \$1/i);
+  assert.match(html, /Pending cost basis/i);
   assert.match(html, /post or resize a maker sell for held shares at \$0\.99/i);
   assert.match(html, /Estimated rebates/i);
-  assert.match(html, /a \$0\.99 sell fill credits \$0\.99 per share/i);
   assert.match(html, /Polymarket CLOB/);
   assert.match(html, /Recent orders/);
   assert.match(html, /Activity feed/);

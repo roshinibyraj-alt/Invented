@@ -38,10 +38,14 @@ class MarketMakerBot extends MispricingBot {
       ordersCancelled: 0,
       makerBuyShares: 0,
       makerSellShares: 0,
+      mergedPairs: 0,
+      mergedCollateral: 0,
       lastTradeAt: null,
       lastFillAt: null,
       lastFillSide: null,
     };
+    this.mergeHistory = [];
+    this.mergeSequence = 0;
     this.lastOrderSlot = 0;
     this.lastOrderAt = null;
     this.lastOrderResult = 'Waiting for the first one-second order cycle.';
@@ -140,6 +144,7 @@ class MarketMakerBot extends MispricingBot {
     }
 
     let changed = this.expireEntryOrders(now, windowStart);
+    changed = this.mergeMatchedInventory(windowStart, now) || changed;
     changed = this.ensureTakeProfitOrders(now, windowStart) || changed;
 
     const slot = Math.floor((now - windowStart) / config.CLOB_ENTRY_INTERVAL_MS);
@@ -182,6 +187,136 @@ class MarketMakerBot extends MispricingBot {
     };
     this.updateSideOrderState(windowStart);
     return changed;
+  }
+
+  mergeMatchedInventory(windowStart, now = this.now()) {
+    const openInWindow = this.positions.filter((position) =>
+      position.status === 'OPEN'
+      && Number(position.windowStart) === Number(windowStart)
+      && Number(position.shares) > EPSILON);
+    const upPositions = openInWindow.filter((position) => position.side === 'UP')
+      .sort((left, right) => Number(left.openedAt) - Number(right.openedAt));
+    const downPositions = openInWindow.filter((position) => position.side === 'DOWN')
+      .sort((left, right) => Number(left.openedAt) - Number(right.openedAt));
+    if (!upPositions.length || !downPositions.length) return false;
+    const availablePairs = Math.floor(
+      (Math.min(
+        upPositions.reduce((sum, position) => sum + Number(position.shares || 0), 0),
+        downPositions.reduce((sum, position) => sum + Number(position.shares || 0), 0),
+      ) + EPSILON) * 1_000_000,
+    ) / 1_000_000;
+    if (!(availablePairs > EPSILON)) return false;
+
+    const upSellOrders = this.activeMakerOrders('UP', 'SELL', windowStart);
+    const downSellOrders = this.activeMakerOrders('DOWN', 'SELL', windowStart);
+    for (const order of [...upSellOrders, ...downSellOrders]) {
+      this.cancelMakerOrder(
+        order,
+        now,
+        'CANCELLED_MERGED',
+        'Cancelling take-profit orders before merging matching UP and DOWN shares.',
+      );
+    }
+
+    let upIndex = 0;
+    let downIndex = 0;
+    let changed = false;
+    while (upIndex < upPositions.length && downIndex < downPositions.length) {
+      const up = upPositions[upIndex];
+      const down = downPositions[downIndex];
+      const shares = Math.floor(
+        (Math.min(Number(up.shares), Number(down.shares)) + EPSILON) * 1_000_000,
+      ) / 1_000_000;
+      if (!(shares > EPSILON)) break;
+
+      const upSharesBefore = Number(up.shares);
+      const downSharesBefore = Number(down.shares);
+      const upCostBasis = Number(up.totalCost || 0) * shares / upSharesBefore;
+      const downCostBasis = Number(down.totalCost || 0) * shares / downSharesBefore;
+      const collateralReturned = shares;
+      const mergeId = `${windowStart}-btc-merge-${++this.mergeSequence}`;
+
+      for (const [position, costBasis] of [[up, upCostBasis], [down, downCostBasis]]) {
+        const remainingEntryRebate = Math.max(
+          0,
+          (Number(position.entryEstimatedMakerRebate) || 0)
+            - (Number(position.realizedEntryMakerRebate) || 0),
+        );
+        position.realizedEntryMakerRebate = (Number(position.realizedEntryMakerRebate) || 0)
+          + remainingEntryRebate * shares / Number(position.shares);
+        position.shares = Math.max(0, Number(position.shares) - shares);
+        position.totalCost = Math.max(0, Number(position.totalCost || 0) - costBasis);
+        position.realizedCostBasis = (Number(position.realizedCostBasis) || 0) + costBasis;
+        position.mergeCostBasis = (Number(position.mergeCostBasis) || 0) + costBasis;
+        position.mergeProceeds = (Number(position.mergeProceeds) || 0) + collateralReturned / 2;
+        position.proceeds = (Number(position.exitProceeds) || 0) + Number(position.mergeProceeds);
+        position.lastMergeId = mergeId;
+        position.lastMergeAt = now;
+        position.realizedPnl = this.calculateRealizedPnl(position);
+      }
+
+      this.cash += collateralReturned;
+      this.makerStats.mergedPairs += shares;
+      this.makerStats.mergedCollateral += collateralReturned;
+      const realizedPnl = collateralReturned - upCostBasis - downCostBasis;
+      const merge = {
+        id: mergeId,
+        at: now,
+        windowStart,
+        marketId: up.marketId || down.marketId || null,
+        sharesPerSide: shares,
+        collateralReturned,
+        upCostBasis,
+        downCostBasis,
+        totalCostBasis: upCostBasis + downCostBasis,
+        realizedPnl,
+        upPositionId: up.id,
+        downPositionId: down.id,
+        paperOnly: true,
+      };
+      this.mergeHistory.unshift(merge);
+      if (this.mergeHistory.length > 500) this.mergeHistory.length = 500;
+      this.log('PAPER_COMPLETE_SET_MERGED', {
+        ...merge,
+        message: `Merged ${shares.toFixed(2)} UP + ${shares.toFixed(2)} DOWN for ${collateralReturned.toFixed(2)} paper collateral; gross P&L before rebates ${realizedPnl.toFixed(2)}; remaining UP ${Math.max(0, Number(up.shares)).toFixed(2)}, DOWN ${Math.max(0, Number(down.shares)).toFixed(2)}.`,
+      });
+
+      for (const position of [up, down]) {
+        if (Number(position.shares) > EPSILON) continue;
+        position.shares = 0;
+        position.totalCost = 0;
+        position.status = 'SETTLED_EXIT';
+        position.closedAt = now;
+        position.settledAt = now;
+        position.settlementBasis = 'PAPER_COMPLETE_SET_MERGE';
+        position.exitReason = 'COMPLETE_SET_MERGE';
+        position.exitType = 'PAPER_MERGE';
+        position.outcome = position.realizedPnl > 0 ? 'WIN'
+          : position.realizedPnl < 0 ? 'LOSS' : 'BREAK_EVEN';
+        this.recordStrategyOutcome(position, position.outcome, now, 'PAPER_COMPLETE_SET_MERGE');
+      }
+
+      changed = true;
+      if (Number(up.shares) <= EPSILON) upIndex += 1;
+      if (Number(down.shares) <= EPSILON) downIndex += 1;
+    }
+    return changed;
+  }
+
+  calculateRealizedPnl(position) {
+    const totalBuyCost = Number(position.initialTotalCost) || 0;
+    const remainingCost = Math.max(0, Number(position.totalCost) || 0);
+    const realizedCost = Math.max(0, totalBuyCost - remainingCost);
+    const realizedCostFraction = totalBuyCost > 0
+      ? Math.min(1, realizedCost / totalBuyCost)
+      : 0;
+    const realizedProceeds = (Number(position.exitProceeds) || 0)
+      + (Number(position.mergeProceeds) || 0);
+    return realizedProceeds
+      - realizedCost
+      - (Number(position.initialFees) || 0) * realizedCostFraction
+      + (Number(position.realizedEntryMakerRebate) || 0)
+      + (Number(position.realizedSellMakerRebate) || 0);
   }
 
   expireEntryOrders(now, windowStart) {
@@ -1119,6 +1254,11 @@ class MarketMakerBot extends MispricingBot {
         unrealizedPnl: null,
         estimatedMakerRebate: 0,
         makerRebateEstimate: 0,
+        entryEstimatedMakerRebate: 0,
+        realizedEntryMakerRebate: 0,
+        realizedSellMakerRebate: 0,
+        mergeProceeds: 0,
+        mergeCostBasis: 0,
         entryFills: [],
         entrySignals: [],
         exitProceeds: 0,
@@ -1140,8 +1280,9 @@ class MarketMakerBot extends MispricingBot {
     position.filledAt = now;
     position.estimatedMakerRebate += rebate;
     position.makerRebateEstimate += rebate;
+    position.entryEstimatedMakerRebate = (Number(position.entryEstimatedMakerRebate) || 0) + rebate;
     position.entryFills.push({ ...fill, orderId: order.id, maker: true });
-    position.proceeds = Number(position.exitProceeds) || 0;
+    position.proceeds = (Number(position.exitProceeds) || 0) + (Number(position.mergeProceeds) || 0);
     order.positionId = position.id;
     this.cash -= gross;
     this.cash += rebate;
@@ -1163,11 +1304,19 @@ class MarketMakerBot extends MispricingBot {
     const previousShares = Number(position.shares);
     const previousCost = Number(position.totalCost);
     const costBasis = previousShares > 0 ? previousCost * shares / previousShares : 0;
+    const remainingEntryRebate = Math.max(
+      0,
+      (Number(position.entryEstimatedMakerRebate) || 0)
+        - (Number(position.realizedEntryMakerRebate) || 0),
+    );
+    position.realizedEntryMakerRebate = (Number(position.realizedEntryMakerRebate) || 0)
+      + (previousShares > 0 ? remainingEntryRebate * shares / previousShares : 0);
+    position.realizedSellMakerRebate = (Number(position.realizedSellMakerRebate) || 0) + rebate;
     position.shares = Math.max(0, previousShares - shares);
     position.totalCost = Math.max(0, previousCost - costBasis);
     position.realizedCostBasis = (Number(position.realizedCostBasis) || 0) + costBasis;
     position.exitProceeds = (Number(position.exitProceeds) || 0) + gross;
-    position.proceeds = position.exitProceeds;
+    position.proceeds = Number(position.exitProceeds) + (Number(position.mergeProceeds) || 0);
     position.exitFees = 0;
     position.estimatedMakerRebate += rebate;
     position.makerRebateEstimate += rebate;
@@ -1179,15 +1328,7 @@ class MarketMakerBot extends MispricingBot {
     order.grossProceeds += gross;
     this.cash += gross + rebate;
 
-    const allBuyCost = Number(position.initialTotalCost) || 0;
-    const remainingCost = Number(position.totalCost) || 0;
-    const realizedCostFraction = allBuyCost > 0
-      ? Math.max(0, allBuyCost - remainingCost) / allBuyCost
-      : 0;
-    position.realizedPnl = position.exitProceeds
-      - Math.max(0, allBuyCost - remainingCost)
-      - Number(position.initialFees || 0) * realizedCostFraction
-      + position.estimatedMakerRebate;
+    position.realizedPnl = this.calculateRealizedPnl(position);
     if (position.shares <= EPSILON) {
       position.shares = 0;
       position.totalCost = 0;
@@ -1197,10 +1338,7 @@ class MarketMakerBot extends MispricingBot {
       position.settlementBasis = 'PAPER_MAKER_SELL';
       position.exitReason = 'MAKER_SELL';
       position.exitType = ORDER_TYPE;
-      position.realizedPnl = position.exitProceeds
-        - allBuyCost
-        - Number(position.initialFees || 0)
-        + position.estimatedMakerRebate;
+      position.realizedPnl = this.calculateRealizedPnl(position);
       position.outcome = position.realizedPnl > 0 ? 'WIN'
         : position.realizedPnl < 0 ? 'LOSS' : 'BREAK_EVEN';
       this.recordStrategyOutcome(position, position.outcome, now, 'MAKER_SELL');
@@ -1308,6 +1446,62 @@ class MarketMakerBot extends MispricingBot {
     }));
     const nextOrderAt = windowStart == null ? null : windowStart
       + (this.lastOrderSlot + 1) * config.CLOB_ENTRY_INTERVAL_MS;
+    const pendingResolutionPositions = this.positions.filter((position) =>
+      position.status === 'PENDING_RESOLUTION');
+    const currentlyOpenPositions = this.positions.filter((position) => position.status === 'OPEN');
+    let openMarkedValue = 0;
+    let openUnrealizedPnl = 0;
+    let unpricedOpenCostBasis = 0;
+    let pendingResolutionMarkedValue = 0;
+    let pendingResolutionUnrealizedPnl = 0;
+    let pendingResolutionCostBasis = 0;
+    let unpricedPendingCostBasis = 0;
+    const remainingEntryRebate = (position) => Math.max(
+      0,
+      (Number(position.entryEstimatedMakerRebate) || 0)
+        - (Number(position.realizedEntryMakerRebate) || 0),
+    );
+    for (const position of currentlyOpenPositions) {
+      const shares = Math.max(0, Number(position.shares) || 0);
+      const costBasis = Math.max(0, Number(position.totalCost) || 0);
+      const markBid = position.markBid == null ? null : Number(position.markBid);
+      const markAgeMs = now - Number(position.markUpdatedAt);
+      if (!Number.isFinite(markBid) || markBid < 0 || markBid > 1
+        || !Number.isFinite(markAgeMs) || markAgeMs > 15_000) {
+        unpricedOpenCostBasis += costBasis;
+        continue;
+      }
+      const markValue = markBid * shares;
+      openMarkedValue += markValue;
+      openUnrealizedPnl += markValue - costBasis + remainingEntryRebate(position)
+        - (Number(position.fees) || 0);
+    }
+    for (const position of pendingResolutionPositions) {
+      const shares = Math.max(0, Number(position.shares) || 0);
+      const costBasis = Math.max(0, Number(position.totalCost) || 0);
+      pendingResolutionCostBasis += costBasis;
+      const markBid = position.markBid == null ? null : Number(position.markBid);
+      if (!Number.isFinite(markBid) || markBid < 0 || markBid > 1) {
+        unpricedPendingCostBasis += costBasis;
+        continue;
+      }
+      const markValue = markBid * shares;
+      pendingResolutionMarkedValue += markValue;
+      pendingResolutionUnrealizedPnl += markValue - costBasis + remainingEntryRebate(position)
+        - (Number(position.fees) || 0);
+    }
+    const markedValue = openMarkedValue + pendingResolutionMarkedValue;
+    const paperAccount = {
+      ...state.account,
+      markedValue,
+      equity: this.cash + markedValue,
+      unrealizedPnl: openUnrealizedPnl + pendingResolutionUnrealizedPnl,
+      openPositionCostBasisUnpriced: unpricedOpenCostBasis,
+      pendingResolutionMarkedValue,
+      pendingResolutionCostBasis,
+      unpricedPendingCostBasis,
+      pendingResolutionMarkMethod: 'Current positions use a fresh CLOB best bid; unresolved positions use their last available CLOB best bid. Unpriced inventory is excluded from equity and shown at cost basis.',
+    };
 
     return {
       ...state,
@@ -1317,7 +1511,7 @@ class MarketMakerBot extends MispricingBot {
       strategy: {
         id: this.strategyId,
         name: this.strategyName,
-        version: 'btc-5m-clob-midpoint-maker-v2',
+        version: 'btc-5m-clob-midpoint-maker-v3',
         execution: 'PAPER ONLY',
         symbol: 'BTC UP/DOWN',
         timeframe: '5m',
@@ -1332,6 +1526,7 @@ class MarketMakerBot extends MispricingBot {
         priceReference: 'BEST_BID_ASK_MIDPOINT',
         takeProfitPrice: config.CLOB_TAKE_PROFIT_PRICE,
         takeProfitReferenceValue: 1,
+        mergeMode: 'Automatically merge matched UP and DOWN shares from the same open five-minute market for $1 collateral per pair.',
         maxInventoryPerSide: null,
         maxTotalInventoryShares: null,
         fees: 0,
@@ -1351,10 +1546,11 @@ class MarketMakerBot extends MispricingBot {
           stopLoss: null,
           windowEnd: 'Cancel resting orders at the window end; remaining shares await official resolution.',
         },
-        trigger: `Every second, place ${config.CLOB_ENTRY_SHARES} shares per side at its fresh midpoint minus $${config.CLOB_ENTRY_MIDPOINT_OFFSET.toFixed(2)}. Confirm entry fills when the fresh best ask reaches or falls below the limit. Cancel any unfilled remainder after ${config.CLOB_ENTRY_TTL_MS / 1000} seconds. Sell accumulated shares with a passive $${config.CLOB_TAKE_PROFIT_PRICE.toFixed(2)} limit.`,
+        mergeRule: 'As soon as both sides have shares in the same open window, merge min(UP, DOWN) shares. Credit $1 per complete pair, preserve the unmatched remainder, and recreate its take-profit order.',
+        trigger: `Every second, place ${config.CLOB_ENTRY_SHARES} shares per side at its fresh midpoint minus $${config.CLOB_ENTRY_MIDPOINT_OFFSET.toFixed(2)}. Confirm entry fills when the fresh best ask reaches or falls below the limit. Cancel any unfilled remainder after ${config.CLOB_ENTRY_TTL_MS / 1000} seconds. Sell accumulated shares with a passive $${config.CLOB_TAKE_PROFIT_PRICE.toFixed(2)} limit. Immediately merge matched UP/DOWN shares in the same window for $1 collateral per pair.`,
       },
       account: {
-        ...state.account,
+        ...paperAccount,
         tradeCount: this.positions.filter((position) => position.status !== 'CANCELLED_UNFILLED').length,
         openPositions: this.positions.filter((position) => position.status === 'OPEN').length,
         pendingResolutionPositions: this.positions.filter((position) =>
@@ -1371,6 +1567,12 @@ class MarketMakerBot extends MispricingBot {
       fairValues: null,
       makerQuotes,
       makerStats: { ...this.makerStats },
+      mergeStats: {
+        pairsMerged: this.makerStats.mergedPairs,
+        collateralReturned: this.makerStats.mergedCollateral,
+        mergeCount: this.mergeHistory.length,
+      },
+      mergeHistory: this.mergeHistory.slice(0, 100),
       positionsBySide,
       inventorySummary,
       previousWindowInventory,
