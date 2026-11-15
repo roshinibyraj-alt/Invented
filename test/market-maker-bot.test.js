@@ -182,7 +182,7 @@ test('dashboard snapshot exposes rung deadlines, live exit rules, and accumulate
   assert.equal(snapshot.ladder.UP[2].takeProfitPrice, 0.71);
   assert.equal(snapshot.positionsBySide.UP, null);
   assert.equal(snapshot.strategy.takeProfitPairPriceSum, 1.01);
-  assert.match(snapshot.strategy.takeProfitRule, /original deadline/);
+  assert.match(snapshot.strategy.takeProfitRule, /original rung deadline/);
   assert.equal(snapshot.strategy.stopLossBid, 0.01);
   assert.equal(snapshot.strategy.stopLossPayoutPerShare, 0);
   assert.match(snapshot.strategy.exitPolicy, /official resolution/);
@@ -231,7 +231,7 @@ test('a rung take-profit sells at its target and re-arms before the original dea
   assert.equal(rearmed.cancelAtSeconds, 160);
 });
 
-test('a take-profit after a rung deadline closes but does not re-arm it', () => {
+test('a missed rung target moves to $0.99 at timeout and books $1 per share', () => {
   const fixture = makeBot();
   fixture.tickAt(500);
   for (const order of activeOrders(fixture.bot, { side: 'UP' })) {
@@ -246,15 +246,40 @@ test('a take-profit after a rung deadline closes but does not re-arm it', () => 
   fixture.bot.processBookPriceCross('UP', entryAt);
   const position = fixture.bot.positions.find((item) =>
     item.side === 'UP' && item.rungIndex === 1);
+  const originalTakeProfit = fixture.bot.orders.find((order) =>
+    order.action === 'SELL' && order.positionId === position.id);
   assert.equal(position.takeProfitPrice, 0.61);
 
-  const takeProfitAt = WINDOW_START + 10_000;
-  fixture.setNow(takeProfitAt);
-  fixture.setBook('UP', 0.61, 0.62, takeProfitAt);
-  fixture.bot.processBookPriceCross('UP', takeProfitAt);
+  const deadline = WINDOW_START + 10_000;
+  fixture.setNow(deadline);
+  fixture.setBook('UP', 0.61, 0.62, deadline);
+  fixture.bot.processBookPriceCross('UP', deadline);
 
+  const fallbackTakeProfit = activeOrders(fixture.bot, { side: 'UP' }).find((order) =>
+    order.action === 'SELL' && order.positionId === position.id);
+  assert.equal(position.status, 'OPEN');
+  assert.equal(originalTakeProfit.status, 'CANCELLED_TAKE_PROFIT_TIMEOUT');
+  assert.equal(fallbackTakeProfit.limitPrice, 0.99);
+  assert.equal(fallbackTakeProfit.payoutPerShare, 1);
+  assert.equal(fallbackTakeProfit.takeProfitStage, 'RUNG_TIMEOUT_FALLBACK');
+  assert.equal(position.takeProfitPrice, 0.99);
+  assert.equal(position.takeProfitStage, 'RUNG_TIMEOUT_FALLBACK');
+  assert.equal(fixture.bot.snapshot().ladder.UP[0].takeProfitPrice, 0.99);
+  assert.equal(fixture.bot.snapshot().ladder.UP[0].takeProfitStage, 'RUNG_TIMEOUT_FALLBACK');
+
+  const fallbackAt = deadline + 1_000;
+  fixture.setNow(fallbackAt);
+  fixture.setBook('UP', 0.99, 0.99, fallbackAt);
+  fixture.bot.processBookPriceCross('UP', fallbackAt);
+
+  assert.equal(fallbackTakeProfit.status, 'FILLED');
   assert.equal(position.status, 'SETTLED_EXIT');
-  assert.equal(position.exitReason, 'RUNG_TAKE_PROFIT');
+  assert.equal(position.exitReason, 'RUNG_TIMEOUT_TAKE_PROFIT');
+  assert.equal(position.exitPrice, 1);
+  assert.equal(position.exitBid, 0.99);
+  assert.equal(position.exitProceeds, 100);
+  assert.equal(fixture.bot.snapshot().lastExitBySide.UP.exitReason, 'RUNG_TIMEOUT_TAKE_PROFIT');
+  assert.equal(fixture.bot.snapshot().ladder.UP[0].takeProfitPrice, 0.99);
   assert.equal(activeOrders(fixture.bot, { side: 'UP' })
     .some((order) => order.action === 'BUY' && order.rungIndex === 1), false);
   assert.equal(fixture.bot.snapshot().ladder.UP[0].status, 'TAKE_PROFIT_NO_REARM');

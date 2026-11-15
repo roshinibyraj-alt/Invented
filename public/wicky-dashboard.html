@@ -148,7 +148,7 @@
       <div>
         <div class="eyebrow">BTC · Polymarket · limit orders only</div>
         <h1 id="pageTitle">Eight prices. Both sides.<br>One five-minute window.</h1>
-        <p>A fixed-price paper ladder works UP and DOWN independently. Each 100-share rung has its own take-profit and can re-arm only until its original deadline.</p>
+        <p>A fixed-price paper ladder works UP and DOWN independently. If a rung is still open at its deadline, its take-profit moves to $0.99, booked as $1 per share.</p>
       </div>
       <div class="window-panel" aria-label="Current market window">
         <span class="micro">Current window</span>
@@ -226,8 +226,9 @@
         const requested = num(rung.requestedShares) ?? num(state.strategy?.sizePerOrder ?? state.strategy?.orderSize) ?? 100;
         const remaining = num(rung.remainingShares) ?? Math.max(0, requested - filled);
         const cycle = num(rung.rungCycle) ?? 1;
+        const timeoutFallback = rung.takeProfitStage === "RUNG_TIMEOUT_FALLBACK";
         const detail = status.toLowerCase().includes("take_profit_resting")
-          ? `${shares(rung.takeProfitShares)} shares · cycle ${cycle}`
+          ? `${shares(rung.takeProfitShares)} shares · cycle ${cycle}${timeoutFallback ? " · timeout fallback" : ""}`
           : status.toLowerCase().includes("rearm_pending")
             ? `cycle ${cycle} queued`
             : status.toLowerCase().includes("rest") || status.toLowerCase().includes("partial")
@@ -263,7 +264,7 @@
             <div class="pos-detail">Floating P&amp;L<br><strong class="${(num(position?.unrealizedPnl) ?? 0) >= 0 ? "positive" : "negative"}">${signedMoney(position?.unrealizedPnl)}</strong></div>
           </div>
           <div class="position-line position-exit">
-            <div><div class="micro">Latest exit this window</div><strong>${lastExit ? (["RUNG_TAKE_PROFIT", "TAKE_PROFIT_THRESHOLD"].includes(lastExit.exitReason) ? "Take profit" : "Stop loss") : "—"}</strong></div>
+            <div><div class="micro">Latest exit this window</div><strong>${lastExit ? (["RUNG_TAKE_PROFIT", "RUNG_TIMEOUT_TAKE_PROFIT", "TAKE_PROFIT_THRESHOLD"].includes(lastExit.exitReason) ? "Take profit" : "Stop loss") : "—"}</strong></div>
             <div class="pos-detail">${lastExit ? `${shares(lastExit.shares)} shares · ${signedMoney(lastExit.realizedPnl)}` : "No threshold exit"}</div>
           </div>
           <div class="ladder-title"><h4>${side} order ladder</h4><span>${configured.length} configured rungs</span></div>
