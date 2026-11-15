@@ -13,6 +13,11 @@ const TAKE_PROFIT_BID = 0.99;
 const STOP_LOSS_BID = 0.01;
 const TAKE_PROFIT_PAYOUT = 1;
 const STOP_LOSS_PAYOUT = 0;
+const COMPLEMENTARY_TAKE_PROFIT_SUM = 1.01;
+
+function rungTakeProfitPrice(entryPrice) {
+  return Number((COMPLEMENTARY_TAKE_PROFIT_SUM - Number(entryPrice)).toFixed(2));
+}
 
 function clamp(value, minimum, maximum) {
   return Math.max(minimum, Math.min(maximum, value));
@@ -27,7 +32,8 @@ class MarketMakerBot extends MispricingBot {
       sharesPerOrder: config.MAKER_LADDER_SHARES,
       rungs: config.MAKER_LADDER_RUNGS,
       fillRule: 'A fresh best ask or opposing sell trade print at or below a rung counts the full order as filled.',
-      exitPolicy: 'Best bid at $0.99 exits at $1/share; best bid at $0.01 exits at $0/share; otherwise hold for resolution.',
+      takeProfitRule: 'Each rung sells at its opposite-side equivalent price ($1.01 minus the buy rung).',
+      exitPolicy: 'Per-rung limit take-profit; best bid at $0.01 exits at $0/share; otherwise hold for resolution.',
     };
     this.strategyWindowStart = null;
     this.makerQuotes = this.emptyMakerQuotes();
@@ -53,6 +59,7 @@ class MarketMakerBot extends MispricingBot {
     this.lastOrderAt = null;
     this.lastOrderResult = 'Waiting for the current five-minute window.';
     this.rungOutcomes = new Map();
+    this.rungRearmQueue = new Map();
     this.seenMakerTrades = new Map();
   }
 
@@ -81,6 +88,7 @@ class MarketMakerBot extends MispricingBot {
     this.lastOrderAt = null;
     this.lastOrderResult = 'Placing the fixed-price UP and DOWN ladders.';
     this.rungOutcomes.clear();
+    this.rungRearmQueue.clear();
     this.entryTriggeredThisWindow = false;
     this.sideEntryCountsThisWindow = { UP: 0, DOWN: 0 };
     this.signalConsumed = { UP: false, DOWN: false };
@@ -160,18 +168,31 @@ class MarketMakerBot extends MispricingBot {
     for (const side of SIDES) {
       for (const [index, rung] of config.MAKER_LADDER_RUNGS.entries()) {
         const key = `${side}:${index}`;
-        const alreadyAttempted = this.orders.some((order) =>
+        const entryOrders = this.orders.filter((order) =>
           Number(order.windowStart) === Number(windowStart)
           && order.side === side
+          && order.action === 'BUY'
+          && order.purpose === 'ENTRY'
           && Number(order.rungIndex) === index + 1);
-        if (alreadyAttempted || this.rungOutcomes.has(key)) continue;
+        const activeEntry = entryOrders.some((order) => ACTIVE_ORDER_STATES.has(order.status));
+        const rearm = this.rungRearmQueue.get(key);
+        if (activeEntry) continue;
+        if (!rearm && (entryOrders.length > 0 || this.rungOutcomes.has(key))) continue;
 
         const expiresAt = windowStart + rung.cancelAfterSeconds * 1000;
         if (now >= expiresAt) {
-          this.rungOutcomes.set(key, {
-            status: 'MISSED_DEADLINE',
-            reason: 'The cancellation deadline passed before the order could be posted.',
-          });
+          if (rearm) {
+            this.rungRearmQueue.delete(key);
+            this.rungOutcomes.set(key, {
+              status: 'TAKE_PROFIT_NO_REARM',
+              reason: 'The rung take-profit completed after its original re-arm deadline.',
+            });
+          } else if (entryOrders.length === 0 && !this.rungOutcomes.has(key)) {
+            this.rungOutcomes.set(key, {
+              status: 'MISSED_DEADLINE',
+              reason: 'The cancellation deadline passed before the order could be posted.',
+            });
+          }
           continue;
         }
 
@@ -180,23 +201,40 @@ class MarketMakerBot extends MispricingBot {
         if (!quote || !Number.isFinite(bestAsk)) continue;
 
         if (bestAsk <= rung.price + EPSILON) {
-          this.rungOutcomes.set(key, {
-            status: 'REJECTED_POST_ONLY',
-            reason: 'The limit would have matched immediately, so it was not treated as a resting order.',
-          });
+          if (rearm) {
+            this.rungOutcomes.set(key, {
+              status: 'REARM_WAITING_PASSIVE',
+              reason: 'Waiting for the rung price to become passive before its original deadline.',
+            });
+          } else {
+            this.rungOutcomes.set(key, {
+              status: 'REJECTED_POST_ONLY',
+              reason: 'The limit would have matched immediately, so it was not treated as a resting order.',
+            });
+          }
           continue;
         }
 
         const reservedCash = this.reservedBuyNotional(windowStart);
         const requiredCash = rung.price * config.MAKER_LADDER_SHARES;
         if (this.cash - reservedCash + EPSILON < requiredCash) {
-          this.rungOutcomes.set(key, {
-            status: 'SKIPPED_INSUFFICIENT_CASH',
-            reason: `The full ${config.MAKER_LADDER_SHARES}-share order cannot be reserved from available paper cash.`,
-          });
+          if (rearm) {
+            this.rungOutcomes.set(key, {
+              status: 'REARM_WAITING_CASH',
+              reason: 'Waiting for enough unreserved paper cash before the original deadline.',
+            });
+          } else {
+            this.rungOutcomes.set(key, {
+              status: 'SKIPPED_INSUFFICIENT_CASH',
+              reason: `The full ${config.MAKER_LADDER_SHARES}-share order cannot be reserved from available paper cash.`,
+            });
+          }
           continue;
         }
 
+        const latestCycle = entryOrders.reduce((cycle, order) =>
+          Math.max(cycle, Number(order.rungCycle) || 0), 0);
+        const rungCycle = rearm?.cycle ?? Math.max(1, latestCycle + 1);
         this.createMakerOrder(
           side,
           'BUY',
@@ -207,31 +245,62 @@ class MarketMakerBot extends MispricingBot {
           {
             purpose: 'ENTRY',
             rungIndex: index + 1,
+            rungCycle,
+            rungPrice: rung.price,
+            takeProfitPrice: rungTakeProfitPrice(rung.price),
             cancelAtSeconds: rung.cancelAfterSeconds,
             expiresAt,
             fillRule: 'OPPOSING_TRADE_PRINT_AT_OR_THROUGH_LIMIT_AFTER_ESTIMATED_QUEUE',
           },
         );
+        if (rearm) this.rungRearmQueue.delete(key);
+        this.rungOutcomes.delete(key);
         changed = true;
       }
     }
 
+    changed = this.ensureRungTakeProfitOrders(now, windowStart) || changed;
     const currentOrders = this.orders.filter((order) =>
       order.orderType === ORDER_TYPE
       && Number(order.windowStart) === Number(windowStart));
-    const activeCount = currentOrders.filter((order) => ACTIVE_ORDER_STATES.has(order.status)).length;
-    const remainingRungs = config.MAKER_LADDER_RUNGS.length * SIDES.length
-      - currentOrders.length
-      - this.rungOutcomes.size;
-    const activeFills = currentOrders.reduce((total, order) =>
-      total + Number(order.filledShares || 0), 0);
+    const activeBuyCount = currentOrders.filter((order) =>
+      order.action === 'BUY'
+      && order.purpose === 'ENTRY'
+      && ACTIVE_ORDER_STATES.has(order.status)).length;
+    const activeTakeProfitCount = currentOrders.filter((order) =>
+      order.action === 'SELL'
+      && order.purpose === 'TAKE_PROFIT'
+      && ACTIVE_ORDER_STATES.has(order.status)).length;
+    const activeCount = activeBuyCount + activeTakeProfitCount;
+    const remainingRungs = SIDES.reduce((total, currentSide) =>
+      total + config.MAKER_LADDER_RUNGS.reduce((sideTotal, rung, index) => {
+        const key = `${currentSide}:${index}`;
+        const entryOrders = currentOrders.filter((order) =>
+          order.side === currentSide
+          && order.action === 'BUY'
+          && order.purpose === 'ENTRY'
+          && Number(order.rungIndex) === index + 1);
+        const activeEntry = entryOrders.some((order) => ACTIVE_ORDER_STATES.has(order.status));
+        const openPosition = this.positions.some((position) =>
+          position.status === 'OPEN'
+          && position.side === currentSide
+          && Number(position.windowStart) === Number(windowStart)
+          && Number(position.rungIndex) === index + 1);
+        const canStillPost = now < windowStart + rung.cancelAfterSeconds * 1000
+          && (this.rungRearmQueue.has(key)
+            || (entryOrders.length === 0 && !this.rungOutcomes.has(key)));
+        return sideTotal + (activeEntry || openPosition || canStillPost ? 1 : 0);
+      }, 0), 0);
+    const activeFills = currentOrders
+      .filter((order) => order.action === 'BUY' && order.purpose === 'ENTRY')
+      .reduce((total, order) => total + Number(order.filledShares || 0), 0);
     this.marketMakerState = {
       status: activeCount ? 'RESTING_ORDERS' : remainingRungs > 0 ? 'WAITING_FOR_BOOK' : 'LADDER_COMPLETE',
       reason: activeCount
-        ? `${activeCount} resting buy orders are active; ${activeFills.toFixed(0)} shares filled so far.`
+        ? `${activeBuyCount} resting buy orders and ${activeTakeProfitCount} take-profit sells are active; ${activeFills.toFixed(0)} entry shares bought so far.`
         : remainingRungs > 0
           ? 'Waiting for fresh UP and DOWN order books to post eligible rungs.'
-          : 'No ladder orders remain active; filled shares wait for official resolution.',
+          : 'No ladder orders remain active; any remaining shares wait for official resolution.',
     };
     this.lastOrderAt = changed ? now : this.lastOrderAt;
     this.lastOrderResult = this.marketMakerState.reason;
@@ -621,6 +690,77 @@ class MarketMakerBot extends MispricingBot {
       position.takeProfitOrder = order;
       position.takeProfitOrderId = order.id;
       position.takeProfitPrice = config.CLOB_TAKE_PROFIT_PRICE;
+      changed = true;
+    }
+    return changed;
+  }
+
+  ensureRungTakeProfitOrders(now, windowStart) {
+    let changed = false;
+    for (const side of SIDES) {
+      for (const order of this.activeMakerOrders(side, 'SELL', windowStart)) {
+        const position = this.positions.find((item) => item.id === order.positionId);
+        if (order.purpose === 'TAKE_PROFIT'
+          && (!position || position.status !== 'OPEN' || !(Number(position.shares) > EPSILON))) {
+          changed = this.cancelMakerOrder(
+            order,
+            now,
+            'CANCELLED_NO_INVENTORY',
+            'The rung position no longer has shares to sell.',
+          ) || changed;
+        }
+      }
+    }
+
+    const openRungPositions = this.positions.filter((position) =>
+      position.status === 'OPEN'
+      && Number(position.windowStart) === Number(windowStart)
+      && Number(position.rungIndex) >= 1
+      && Number(position.shares) > EPSILON);
+    for (const position of openRungPositions) {
+      const price = Number(position.takeProfitPrice)
+        || rungTakeProfitPrice(position.rungPrice ?? position.entryPrice);
+      const active = this.activeMakerOrders(position.side, 'SELL', windowStart)
+        .find((order) => order.purpose === 'TAKE_PROFIT'
+          && order.positionId === position.id);
+      if (active
+        && Math.abs(Number(active.limitPrice) - price) < EPSILON
+        && Math.abs(Number(active.remainingShares) - Number(position.shares)) < EPSILON) {
+        position.makerSellOrderId = active.id;
+        position.takeProfitOrderId = active.id;
+        position.takeProfitOrder = active;
+        position.takeProfitPrice = price;
+        continue;
+      }
+
+      if (active) {
+        changed = this.cancelMakerOrder(
+          active,
+          now,
+          'CANCELLED_RESIZED',
+          'Replacing the rung take-profit order to cover current shares.',
+        ) || changed;
+      }
+      const order = this.createMakerOrder(
+        position.side,
+        'SELL',
+        price,
+        Number(position.shares),
+        now,
+        windowStart,
+        {
+          purpose: 'TAKE_PROFIT',
+          positionId: position.id,
+          rungIndex: position.rungIndex,
+          rungCycle: position.rungCycle,
+          takeProfitPrice: price,
+          fillRule: 'FULL_REMAINDER_ON_FRESH_BEST_BID_OR_BUY_TRADE_AT_OR_ABOVE_LIMIT',
+        },
+      );
+      position.makerSellOrderId = order.id;
+      position.takeProfitOrderId = order.id;
+      position.takeProfitOrder = order;
+      position.takeProfitPrice = price;
       changed = true;
     }
     return changed;
@@ -1178,6 +1318,22 @@ class MarketMakerBot extends MispricingBot {
       && Number(position.windowStart) === Number(windowStart)) || null;
   }
 
+  positionForOrder(order) {
+    if (order?.positionId) {
+      return this.positions.find((position) =>
+        position.id === order.positionId && position.status === 'OPEN') || null;
+    }
+    if (Number(order?.rungIndex) >= 1) {
+      return this.positions.find((position) =>
+        position.status === 'OPEN'
+        && position.side === order.side
+        && Number(position.windowStart) === Number(order.windowStart)
+        && Number(position.rungIndex) === Number(order.rungIndex)
+        && Number(position.rungCycle) === Number(order.rungCycle)) || null;
+    }
+    return this.currentPosition(order.side, order.windowStart);
+  }
+
   reservedBuyNotional(windowStart, excludedOrderId = null) {
     return this.orders.reduce((total, order) => {
       if (order.orderType !== ORDER_TYPE
@@ -1290,7 +1446,7 @@ class MarketMakerBot extends MispricingBot {
     if (!side
       || !(tradePrice > 0 && tradePrice < 1)
       || !(tradeSize > 0)
-      || takerSide !== 'SELL'
+      || !['BUY', 'SELL'].includes(takerSide)
       || !Number.isFinite(tradeAt)
       || tradeAt > receivedAt + 1000
       || receivedAt - tradeAt > config.MAKER_MAX_TRADE_AGE_MS) return false;
@@ -1310,36 +1466,88 @@ class MarketMakerBot extends MispricingBot {
       this.seenMakerTrades.delete(this.seenMakerTrades.keys().next().value);
     }
     this.makerStats.lastTradeAt = tradeAt;
-    return this.fillCrossedBuyRungs(side, tradePrice, receivedAt, {
+    if (takerSide === 'SELL') {
+      return this.fillCrossedBuyRungs(side, tradePrice, receivedAt, {
+        crossAt: tradeAt,
+        tradeAt,
+        tradePrice,
+        tradeSize,
+        tradeSide: 'SELL',
+        confirmation: 'OPPOSING_SELL_TRADE_CROSSED_LIMIT_FULL_FILL',
+      });
+    }
+    return this.fillCrossedTakeProfitOrders(side, tradePrice, receivedAt, {
       crossAt: tradeAt,
       tradeAt,
       tradePrice,
       tradeSize,
-      tradeSide: 'SELL',
-      confirmation: 'OPPOSING_SELL_TRADE_CROSSED_LIMIT_FULL_FILL',
+      tradeSide: 'BUY',
+      confirmation: 'BUY_TRADE_CROSSED_TAKE_PROFIT_FULL_FILL',
     });
   }
 
   processBookPriceCross(side, now = this.now()) {
     const exited = this.processPositionThresholdExits(now, side);
+    if (exited) this.processStrategyEntry(now);
     const quote = this.liveQuotes?.[side];
     const bestAsk = Number(quote?.bestAsk);
+    const bestBid = Number(quote?.bestBid);
     const quoteAt = Number(quote?.updatedAt);
     const quoteAge = now - quoteAt;
     if (quote?.stale === true
       || quote?.status !== 'LIVE'
       || !(bestAsk > 0 && bestAsk < 1)
+      || !(bestBid >= 0 && bestBid < 1)
       || !Number.isFinite(quoteAt)
       || quoteAge < 0
       || quoteAge > config.MAKER_MAX_TRADE_AGE_MS) return exited;
-    const filled = this.fillCrossedBuyRungs(side, bestAsk, now, {
+    const filledTakeProfits = this.fillCrossedTakeProfitOrders(side, bestBid, now, {
+      crossAt: quoteAt,
+      tradeAt: quoteAt,
+      tradePrice: bestBid,
+      tradeSide: 'QUOTE',
+      confirmation: 'FRESH_BEST_BID_CROSSED_TAKE_PROFIT_FULL_FILL',
+    });
+    const filledEntries = this.fillCrossedBuyRungs(side, bestAsk, now, {
       crossAt: quoteAt,
       tradeAt: quoteAt,
       tradePrice: bestAsk,
       tradeSide: 'QUOTE',
       confirmation: 'FRESH_BEST_ASK_CROSSED_LIMIT_FULL_FILL',
     });
-    return filled || exited;
+    return filledEntries || filledTakeProfits || exited;
+  }
+
+  fillCrossedTakeProfitOrders(side, crossingPrice, now, details = {}) {
+    const windowStart = this.getActiveWindowStart();
+    const crossAt = Number(details.crossAt ?? now);
+    const price = Number(crossingPrice);
+    if (!side || windowStart == null
+      || now >= windowStart + this.windowMs
+      || !(price > 0 && price < 1)
+      || !Number.isFinite(crossAt)) return false;
+
+    const candidates = this.activeMakerOrders(side, 'SELL', windowStart)
+      .filter((order) => order.purpose === 'TAKE_PROFIT'
+        && crossAt >= Number(order.createdAt)
+        && crossAt < Number(order.windowEnd)
+        && price >= Number(order.limitPrice) - EPSILON)
+      .sort((left, right) => Number(left.limitPrice) - Number(right.limitPrice));
+    let changed = false;
+    for (const order of candidates) {
+      const shares = Number(order.remainingShares);
+      if (!(shares > EPSILON)) continue;
+      const filled = this.applyMakerFill(order, shares, now, {
+        tradeAt: details.tradeAt ?? crossAt,
+        tradePrice: details.tradePrice ?? price,
+        tradeSize: details.tradeSize ?? shares,
+        tradeSide: details.tradeSide ?? 'QUOTE',
+        confirmation: details.confirmation || 'CLOB_PRICE_CROSSED_RUNG_TAKE_PROFIT_FULL_FILL',
+      });
+      changed = filled || changed;
+    }
+    if (changed) this.processStrategyEntry(now);
+    return changed;
   }
 
   processPositionThresholdExits(now = this.now(), onlySide = null) {
@@ -1361,7 +1569,9 @@ class MarketMakerBot extends MispricingBot {
         && quoteAge <= 15_000
         && quote?.stale !== true;
       if (!fresh) continue;
-      if (bestBid >= TAKE_PROFIT_BID - EPSILON) {
+      const hasRungTakeProfit = Number.isFinite(Number(position.rungIndex))
+        && Number(position.rungIndex) >= 1;
+      if (!hasRungTakeProfit && bestBid >= TAKE_PROFIT_BID - EPSILON) {
         changed = this.closePositionAtThreshold(
           position,
           'TAKE_PROFIT_THRESHOLD',
@@ -1419,6 +1629,16 @@ class MarketMakerBot extends MispricingBot {
     position.closedAt = now;
     position.settledAt = now;
     position.settlementBasis = `PAPER_${exitReason}`;
+    for (const order of this.activeMakerOrders(position.side, 'SELL', position.windowStart)) {
+      if (order.positionId === position.id) {
+        this.cancelMakerOrder(
+          order,
+          now,
+          'CANCELLED_EXITED_POSITION',
+          'The rung position exited through its stop-loss threshold.',
+        );
+      }
+    }
     position.unrealizedPnl = 0;
     position.markValue = 0;
     position.markStatus = 'CLOSED';
@@ -1479,7 +1699,7 @@ class MarketMakerBot extends MispricingBot {
 
   applyMakerFill(order, availableShares, now, trade) {
     const position = order.action === 'SELL'
-      ? this.currentPosition(order.side, order.windowStart)
+      ? this.positionForOrder(order)
       : null;
     if (order.action === 'SELL' && !position) {
       this.cancelMakerOrder(order, now, 'CANCELLED_NO_INVENTORY', 'No sellable shares remain.');
@@ -1547,7 +1767,7 @@ class MarketMakerBot extends MispricingBot {
 
   applyMakerBuy(order, shares, gross, rebate, now, fill) {
     const side = order.side;
-    let position = this.currentPosition(side, order.windowStart);
+    let position = this.positionForOrder(order);
     const previousShares = Number(position?.shares) || 0;
     const previousCost = Number(position?.totalCost) || 0;
     if (!position) {
@@ -1563,6 +1783,13 @@ class MarketMakerBot extends MispricingBot {
         asset: 'BTC',
         side,
         status: 'OPEN',
+        rungIndex: order.rungIndex ?? null,
+        rungCycle: order.rungCycle ?? null,
+        rungPrice: order.rungPrice ?? order.limitPrice,
+        takeProfitPrice: order.takeProfitPrice
+          ?? (Number(order.rungIndex) >= 1 ? rungTakeProfitPrice(order.limitPrice) : null),
+        rungDeadlineAt: order.expiresAt ?? null,
+        entryOrderId: order.id,
         shares: 0,
         initialShares: 0,
         entryPrice: null,
@@ -1595,6 +1822,14 @@ class MarketMakerBot extends MispricingBot {
       this.positions.unshift(position);
     }
 
+    position.rungIndex = order.rungIndex ?? position.rungIndex ?? null;
+    position.rungCycle = order.rungCycle ?? position.rungCycle ?? null;
+    position.rungPrice = order.rungPrice ?? position.rungPrice ?? order.limitPrice;
+    position.takeProfitPrice = order.takeProfitPrice
+      ?? position.takeProfitPrice
+      ?? (Number(order.rungIndex) >= 1 ? rungTakeProfitPrice(order.limitPrice) : null);
+    position.rungDeadlineAt = order.expiresAt ?? position.rungDeadlineAt ?? null;
+    position.entryOrderId = order.id;
     position.shares = previousShares + shares;
     position.initialShares = (Number(position.initialShares) || 0) + shares;
     position.totalCost = previousCost + gross;
@@ -1659,12 +1894,15 @@ class MarketMakerBot extends MispricingBot {
       position.closedAt = now;
       position.settledAt = now;
       position.settlementBasis = 'PAPER_MAKER_SELL';
-      position.exitReason = 'MAKER_SELL';
+      position.exitReason = order.purpose === 'TAKE_PROFIT' && Number(position.rungIndex) >= 1
+        ? 'RUNG_TAKE_PROFIT'
+        : 'MAKER_SELL';
       position.exitType = ORDER_TYPE;
       position.realizedPnl = this.calculateRealizedPnl(position);
       position.outcome = position.realizedPnl > 0 ? 'WIN'
         : position.realizedPnl < 0 ? 'LOSS' : 'BREAK_EVEN';
-      this.recordStrategyOutcome(position, position.outcome, now, 'MAKER_SELL');
+      this.recordStrategyOutcome(position, position.outcome, now, position.exitReason);
+      if (position.exitReason === 'RUNG_TAKE_PROFIT') this.scheduleRungRearm(position, now);
     }
 
     this.log('PAPER_MAKER_SELL_FILLED', {
@@ -1679,6 +1917,43 @@ class MarketMakerBot extends MispricingBot {
       realizedPnl: position.realizedPnl,
       tradePrice: fill.tradePrice,
     });
+  }
+
+  scheduleRungRearm(position, now) {
+    const rungIndex = Number(position.rungIndex);
+    const rung = config.MAKER_LADDER_RUNGS[rungIndex - 1];
+    if (!rung || !Number.isFinite(Number(position.windowStart))) return false;
+    const key = `${position.side}:${rungIndex - 1}`;
+    const expiresAt = Number(position.rungDeadlineAt)
+      || Number(position.windowStart) + rung.cancelAfterSeconds * 1000;
+    if (now >= expiresAt) {
+      this.rungOutcomes.set(key, {
+        status: 'TAKE_PROFIT_NO_REARM',
+        reason: 'The take-profit completed after this rung’s original window deadline.',
+      });
+      return false;
+    }
+
+    const nextCycle = Math.max(1, Number(position.rungCycle) || 1) + 1;
+    this.rungRearmQueue.set(key, {
+      cycle: nextCycle,
+      expiresAt,
+      previousPositionId: position.id,
+    });
+    this.rungOutcomes.set(key, {
+      status: 'REARM_PENDING',
+      reason: `Take-profit completed; rung cycle ${nextCycle} can re-arm until its original deadline.`,
+    });
+    this.log('PAPER_RUNG_REARM_QUEUED', {
+      side: position.side,
+      rungIndex,
+      rungCycle: nextCycle,
+      rungPrice: position.rungPrice,
+      takeProfitPrice: position.takeProfitPrice,
+      expiresAt,
+      positionId: position.id,
+    });
+    return true;
   }
 
   snapshot() {
@@ -2144,16 +2419,49 @@ class MarketMakerBot extends MispricingBot {
       ? allOpenPositions.filter((position) =>
         Number(position.windowStart) === Number(windowStart))
       : [];
-    const positionsBySide = Object.fromEntries(SIDES.map((side) => [
-      side,
-      openWindowPositions.find((position) => position.side === side) || null,
-    ]));
+    const positionsBySide = Object.fromEntries(SIDES.map((side) => {
+      const positions = openWindowPositions.filter((position) => position.side === side);
+      if (!positions.length) return [side, null];
+      const shares = positions.reduce((total, position) =>
+        total + Math.max(0, Number(position.shares) || 0), 0);
+      const totalCost = positions.reduce((total, position) =>
+        total + Math.max(0, Number(position.totalCost) || 0), 0);
+      const allMarked = positions.every((position) =>
+        position.markPrice != null && Number.isFinite(Number(position.markPrice)));
+      const markValue = allMarked
+        ? positions.reduce((total, position) =>
+          total + Number(position.markPrice) * Number(position.shares), 0)
+        : null;
+      const allPnlMarked = positions.every((position) =>
+        position.unrealizedPnl != null && Number.isFinite(Number(position.unrealizedPnl)));
+      return [side, {
+        ...positions[0],
+        id: `${windowStart}-btc-${side.toLowerCase()}-aggregate`,
+        side,
+        shares,
+        initialShares: positions.reduce((total, position) =>
+          total + (Number(position.initialShares) || 0), 0),
+        totalCost,
+        entryPrice: shares > EPSILON ? totalCost / shares : null,
+        averageCost: shares > EPSILON ? totalCost / shares : null,
+        markValue,
+        markPrice: markValue == null || shares <= EPSILON ? null : markValue / shares,
+        unrealizedPnl: allPnlMarked
+          ? positions.reduce((total, position) => total + Number(position.unrealizedPnl), 0)
+          : null,
+        rungIndex: null,
+        takeProfitPrice: null,
+        rungCount: positions.length,
+        takeProfitPrices: [...new Set(positions.map((position) =>
+          Number(position.takeProfitPrice)).filter(Number.isFinite))].sort((left, right) => left - right),
+      }];
+    }));
     const lastExitBySide = Object.fromEntries(SIDES.map((side) => {
       const lastExit = this.positions
         .filter((position) => Number(position.windowStart) === Number(windowStart)
           && position.side === side
           && position.status === 'SETTLED_EXIT'
-          && ['TAKE_PROFIT_THRESHOLD', 'STOP_LOSS_THRESHOLD'].includes(position.exitReason))
+          && ['RUNG_TAKE_PROFIT', 'TAKE_PROFIT_THRESHOLD', 'STOP_LOSS_THRESHOLD'].includes(position.exitReason))
         .sort((left, right) => Number(right.settledAt || 0) - Number(left.settledAt || 0))[0];
       return [side, lastExit ? {
         exitReason: lastExit.exitReason,
@@ -2181,29 +2489,52 @@ class MarketMakerBot extends MispricingBot {
     const ladder = Object.fromEntries(SIDES.map((side) => [
       side,
       config.MAKER_LADDER_RUNGS.map((rung, index) => {
-        const order = currentOrders.find((item) =>
-          item.side === side && Number(item.rungIndex) === index + 1);
-        const attempt = this.rungOutcomes.get(`${side}:${index}`);
+        const key = `${side}:${index}`;
+        const entryOrders = currentOrders.filter((item) =>
+          item.side === side
+          && item.action === 'BUY'
+          && item.purpose === 'ENTRY'
+          && Number(item.rungIndex) === index + 1);
+        const order = entryOrders.sort((left, right) =>
+          (Number(right.rungCycle) || 0) - (Number(left.rungCycle) || 0)
+          || Number(right.createdAt) - Number(left.createdAt))[0];
+        const takeProfitOrder = currentOrders.find((item) =>
+          item.side === side
+          && item.action === 'SELL'
+          && item.purpose === 'TAKE_PROFIT'
+          && Number(item.rungIndex) === index + 1
+          && ACTIVE_ORDER_STATES.has(item.status));
+        const rearm = this.rungRearmQueue.get(key);
+        const attempt = this.rungOutcomes.get(key);
         const expiresAt = windowStart == null
           ? null
           : windowStart + rung.cancelAfterSeconds * 1000;
-        const status = order?.status
-          || attempt?.status
+        const status = takeProfitOrder ? 'TAKE_PROFIT_RESTING'
+          : rearm ? 'REARM_PENDING'
+            : attempt?.status
+          || order?.status
           || (windowStart == null ? 'WAITING_FOR_WINDOW'
             : now >= expiresAt ? 'MISSED_DEADLINE' : 'WAITING');
+        const rungCycle = rearm?.cycle ?? order?.rungCycle ?? null;
         return {
           rungIndex: index + 1,
           price: rung.price,
+          takeProfitPrice: rungTakeProfitPrice(rung.price),
           cancelAfterSeconds: rung.cancelAfterSeconds,
           cancelAtSeconds: rung.cancelAfterSeconds,
+          rungCycle,
+          rearmCount: Math.max(0, Number(rungCycle || 1) - 1),
           requestedShares: order?.requestedShares ?? config.MAKER_LADDER_SHARES,
           filledShares: order?.filledShares ?? 0,
           remainingShares: order?.remainingShares ?? 0,
           cancelledShares: order?.cancelledShares ?? 0,
           status,
           orderId: order?.id || null,
+          takeProfitOrderId: takeProfitOrder?.id || null,
+          takeProfitStatus: takeProfitOrder?.status || null,
+          takeProfitShares: takeProfitOrder?.remainingShares ?? 0,
           createdAt: order?.createdAt ?? null,
-          expiresAt: order?.expiresAt ?? expiresAt,
+          expiresAt: order?.expiresAt ?? rearm?.expiresAt ?? expiresAt,
           reason: order?.cancelReason || attempt?.reason || null,
         };
       }),
@@ -2223,24 +2554,26 @@ class MarketMakerBot extends MispricingBot {
         execution: 'PAPER ONLY',
         symbol: 'BTC',
         timeframe: '5m',
-        orderType: 'POST_ONLY_LIMIT_BUY',
+        orderType: 'POST_ONLY_LIMIT_BUY_AND_SELL',
         sizePerOrder: config.MAKER_LADDER_SHARES,
         orderSize: config.MAKER_LADDER_SHARES,
         rungPrices: config.MAKER_LADDER_RUNGS.map((rung) => rung.price),
         rungs: config.MAKER_LADDER_RUNGS.map((rung, index) => ({
           rungIndex: index + 1,
           price: rung.price,
+          takeProfitPrice: rungTakeProfitPrice(rung.price),
           cancelAfterSeconds: rung.cancelAfterSeconds,
           shares: config.MAKER_LADDER_SHARES,
         })),
         independentSides: true,
         fillRule: 'A fresh best ask at or below a buy limit, or an opposing sell trade print through it, counts as a full 100-share paper fill; queue and print size are ignored.',
-        timeoutRule: 'Each deadline is measured from the start of the 5-minute window. Any unfilled remainder is cancelled at that deadline.',
-        takeProfitBid: TAKE_PROFIT_BID,
-        takeProfitPayoutPerShare: TAKE_PROFIT_PAYOUT,
+        timeoutRule: 'Each rung deadline is measured from window start. Re-armed buys use that same original deadline and do not extend it.',
+        takeProfitRule: 'Each rung has a resting limit sell at $1.01 minus its buy price; when it fills, that rung can re-arm only before its original deadline.',
+        takeProfitPairPriceSum: COMPLEMENTARY_TAKE_PROFIT_SUM,
+        takeProfitFillRule: 'A fresh best bid at or above a rung take-profit, or a BUY trade print through it, counts the full remaining paper sell as filled.',
         stopLossBid: STOP_LOSS_BID,
         stopLossPayoutPerShare: STOP_LOSS_PAYOUT,
-        exitPolicy: 'During the window, a best bid of $0.99 closes at $1/share and a best bid of $0.01 closes at $0/share. Positions not triggered are held for official resolution.',
+        exitPolicy: 'Each rung exits with its own resting limit sell at the opposite-side equivalent price. A best bid of $0.01 exits at $0/share; remaining positions wait for official resolution.',
         accumulatesInventory: true,
       },
       model: null,
@@ -2248,8 +2581,13 @@ class MarketMakerBot extends MispricingBot {
       fairValues: null,
       marketMakerState: {
         ...this.marketMakerState,
-        activeBuyOrders: activeOrders.length,
-        filledShares: currentOrders.reduce((total, order) =>
+        activeBuyOrders: activeOrders.filter((order) =>
+          order.action === 'BUY' && order.purpose === 'ENTRY').length,
+        activeTakeProfitOrders: activeOrders.filter((order) =>
+          order.action === 'SELL' && order.purpose === 'TAKE_PROFIT').length,
+        filledShares: currentOrders
+          .filter((order) => order.action === 'BUY' && order.purpose === 'ENTRY')
+          .reduce((total, order) =>
           total + Number(order.filledShares || 0), 0),
       },
       quotes: state.quotes,
@@ -2293,6 +2631,8 @@ class MarketMakerBot extends MispricingBot {
       createdAt: order.createdAt,
       expiresAt: order.expiresAt,
       cancelAtSeconds: order.cancelAtSeconds ?? null,
+      rungCycle: order.rungCycle ?? null,
+      takeProfitPrice: order.takeProfitPrice ?? null,
       cancelReason: order.cancelReason ?? null,
       purpose: order.purpose,
       referenceMidpoint: order.referenceMidpoint,

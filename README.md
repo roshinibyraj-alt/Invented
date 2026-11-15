@@ -6,25 +6,25 @@ This is a paper-only Polymarket BTC 5-minute bot. It places independent resting 
 
 At the start of each 5-minute window, the bot posts 100-share post-only limit buys for both sides at each price below. Every cancellation deadline is measured from the window start. An unfilled remainder is cancelled at that deadline.
 
-| Limit price | Cancel after |
-|---:|---:|
-| $0.40 | 10 seconds |
-| $0.35 | 50 seconds |
-| $0.30 | 160 seconds |
-| $0.25 | 200 seconds |
-| $0.20 | 220 seconds |
-| $0.15 | 230 seconds |
-| $0.10 | 250 seconds |
-| $0.05 | 270 seconds |
+| Buy rung | Take-profit limit | Cancel/re-arm deadline |
+|---:|---:|---:|
+| $0.40 | $0.61 | 10 seconds |
+| $0.35 | $0.66 | 50 seconds |
+| $0.30 | $0.71 | 160 seconds |
+| $0.25 | $0.76 | 200 seconds |
+| $0.20 | $0.81 | 220 seconds |
+| $0.15 | $0.86 | 230 seconds |
+| $0.10 | $0.91 | 250 seconds |
+| $0.05 | $0.96 | 270 seconds |
 
 The bot waits for a fresh Polymarket book before posting. If a limit would immediately match rather than rest, it is rejected as marketable instead of being counted as a resting order. Each side and price rung is independent.
 
-For this paper simulation, a fresh best ask at or below a resting buy limit, or an opposing sell trade print at or below it, counts the full 100-share rung as filled. It deliberately ignores queue depth and print size, so it is an optimistic simulation rather than a prediction of actual exchange fills. Uncrossed orders are cancelled at their rung deadlines.
+For this paper simulation, a fresh best ask at or below a resting buy limit, or an opposing sell trade print at or below it, counts the full 100-share rung as filled. It deliberately ignores queue depth and print size, so it is an optimistic simulation rather than a prediction of actual exchange fills. Each rung's take-profit is a resting limit sell at `$1.01 - buy price`, matching the opposite-side equivalent in the user's examples. A fresh best bid or a BUY trade print at or above that target counts the full sell as filled.
 
-Open positions are marked to the current best bid. Floating P&L updates with live CLOB quotes and is included in paper equity. If the best bid reaches $0.99, the paper position exits at $1 per share; if it reaches $0.01, it exits at $0 per share. Otherwise, the position remains open for official resolution. Positions awaiting resolution retain their latest available CLOB mark. The paper ledger is held in memory and resets when Railway restarts the service.
+When a rung take-profit fills, that same rung can place another 100-share buy only if its original deadline from window start has not passed. Re-arming does not restart or extend its timer. The best-bid $0.01 stop-loss books $0 per share; otherwise, shares remain open for official resolution. Open positions are marked to the current best bid, floating P&L is included in paper equity, and positions awaiting resolution retain their latest available CLOB mark. The paper ledger is held in memory and resets when Railway restarts the service.
 
 ## Dashboard and checks
 
-The dashboard summarizes the active window, Polymarket connection and books, current UP/DOWN shares and average cost, account results, and each rung's status. State is available at `/api/state`; health is available at `/api/healthz`.
+The dashboard summarizes the active window, Polymarket connection and books, current UP/DOWN shares and average cost, account results, each rung's buy and take-profit prices, re-arm cycle, and original deadline. State is available at `/api/state`; health is available at `/api/healthz`.
 
-Run `node --test test/*.test.js` to verify rung placement, fixed-window cancellation deadlines, full-rung crossing fills, TP/SL exits, live P&L marking, and dashboard rendering.
+Run `node --test test/*.test.js` to verify rung placement, fixed-window cancellation deadlines, full-rung crossing fills, rung-specific take-profits and deadline-bound re-arming, stop-loss exits, live P&L marking, and dashboard rendering.
