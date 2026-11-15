@@ -930,13 +930,64 @@ class OrderFlowBot extends MispricingBot {
       Number(order.windowStart) === Number(windowStart)
       && ['FILLED', 'PARTIALLY_FILLED', 'RESTING'].includes(order.status));
     const completedWindowStats = this.completedWindowStats(now);
-    const globalEquityCurve = [...(state.account?.equityCurve || [])];
-    if (Number.isFinite(Number(state.account?.equity))) {
+    const accountState = { ...(state.account || {}) };
+    let markedValue = 0;
+    let unrealizedPnl = 0;
+    let unpricedOpenPositions = 0;
+    for (const position of this.positions) {
+      if (position.status === 'PENDING_RESOLUTION') {
+        position.markValue = null;
+        position.unrealizedPnl = null;
+        position.markStatus = 'PENDING_RESOLUTION';
+        unpricedOpenPositions += 1;
+        continue;
+      }
+      if (position.status !== 'OPEN') continue;
+
+      const quote = this.getFreshQuote(position.side, now);
+      const markPrice = Number(quote?.bestBid);
+      const updatedAt = Number(quote?.updatedAt);
+      const hasFreshMark = Number.isFinite(markPrice)
+        && markPrice >= 0
+        && markPrice <= 1
+        && Number.isFinite(updatedAt)
+        && updatedAt <= now
+        && now - updatedAt <= config.MAX_DATA_AGE_MS;
+      if (!hasFreshMark) {
+        position.markValue = null;
+        position.unrealizedPnl = null;
+        position.markStatus = 'UNAVAILABLE';
+        unpricedOpenPositions += 1;
+        continue;
+      }
+
+      const shares = Number(position.shares) || 0;
+      const positionMark = markPrice * shares;
+      position.markBid = markPrice;
+      position.markPrice = markPrice;
+      position.markUpdatedAt = updatedAt;
+      position.markAgeMs = Math.max(0, now - updatedAt);
+      position.markValue = positionMark;
+      position.markStatus = 'LIVE';
+      position.unrealizedPnl = positionMark
+        - (Number(position.totalCost) || 0)
+        - (Number(position.fees) || 0)
+        + (Number(position.estimatedMakerRebate) || 0);
+      markedValue += positionMark;
+      unrealizedPnl += position.unrealizedPnl;
+    }
+    accountState.markedValue = markedValue;
+    accountState.unrealizedPnl = unrealizedPnl;
+    accountState.unpricedOpenPositions = unpricedOpenPositions;
+    accountState.equity = (Number(accountState.cash) || 0) + markedValue;
+
+    const globalEquityCurve = [...(accountState.equityCurve || [])];
+    if (Number.isFinite(Number(accountState.equity))) {
       const lastPoint = globalEquityCurve.at(-1);
       if (!lastPoint || Number(lastPoint.ts) !== now) {
-        globalEquityCurve.push({ ts: now, equity: Number(state.account.equity), live: true });
+        globalEquityCurve.push({ ts: now, equity: Number(accountState.equity), live: true });
       } else {
-        lastPoint.equity = Number(state.account.equity);
+        lastPoint.equity = Number(accountState.equity);
         lastPoint.live = true;
       }
     }
@@ -1021,7 +1072,7 @@ class OrderFlowBot extends MispricingBot {
       pressure: flow,
       signal: this.signal,
       account: {
-        ...state.account,
+        ...accountState,
         equityCurve: globalEquityCurve,
         completedWindowCount: completedWindowStats.completed,
         completedWindowWins: completedWindowStats.wins,

@@ -386,3 +386,25 @@ test('snapshot identifies the paper-only pressure strategy and exposes flow scor
   assert.ok(state.pressure.binance.score > 0);
   assert.ok(state.pressure.polymarket.score > 0);
 });
+
+test('global equity includes fresh bid marks for open positions', () => {
+  const { bot, feed, nowRef } = makeBot();
+  for (let second = 0; second < 3; second += 1) {
+    step(bot, feed, nowRef, WINDOW_START + second * 1000, true);
+  }
+
+  const fillAt = WINDOW_START + 3000;
+  nowRef.value = fillAt;
+  setAskAt(bot, 'UP', fillAt, 0.58, 0.57);
+  bot.processStrategyEntry(fillAt);
+
+  const state = bot.snapshot();
+  const position = state.openWindowPositions[0];
+  assert.equal(position.markStatus, 'LIVE');
+  assert.equal(position.markBid, 0.57);
+  assert.ok(Math.abs(position.markValue - 57) < 1e-8);
+  assert.ok(Math.abs(state.account.markedValue - 57) < 1e-8);
+  assert.equal(state.account.unpricedOpenPositions, 0);
+  assert.ok(Math.abs(state.account.equity - (state.account.cash + 57)) < 1e-8);
+  assert.equal(state.account.equityCurve.at(-1).equity, state.account.equity);
+});
