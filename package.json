@@ -1,8 +1,8 @@
 {
-  "name": "invented-btc-fixed-ladder-paper-bot",
+  "name": "invented-btc-order-flow-paper-bot",
   "version": "1.0.0",
   "private": true,
-  "description": "Paper-only BTC 5-minute UP/DOWN fixed-price limit ladder.",
+  "description": "Paper-only BTC 5-minute Binance and Polymarket order-flow strategy.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",

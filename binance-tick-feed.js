@@ -16,6 +16,7 @@ class BinanceTickFeed {
     this.tickAt = null;
     this.currentCandle = null;
     this.candles = [];
+    this.recentTrades = [];
     this.socket = null;
     this.retryTimer = null;
     this.historyTimer = null;
@@ -135,6 +136,17 @@ class BinanceTickFeed {
       if (!(price > 0) || !Number.isFinite(tickAt)) return;
       this.price = price;
       this.tickAt = tickAt;
+      const quantity = Number(message.q);
+      if (quantity > 0 && typeof message.m === 'boolean') {
+        this.recentTrades.push({
+          price,
+          quantity,
+          notional: price * quantity,
+          aggressor: message.m ? 'SELL' : 'BUY',
+          timestamp: tickAt,
+        });
+        this.pruneRecentTrades(tickAt);
+      }
       const start = Math.floor(tickAt / WINDOW_MS) * WINDOW_MS;
       if (!this.currentCandle || this.currentCandle.start !== start) {
         const previousStart = this.currentCandle?.start;
@@ -162,6 +174,43 @@ class BinanceTickFeed {
     this.error = error instanceof Error ? error.message : String(error);
   }
 
+  pruneRecentTrades(now = this.now()) {
+    this.recentTrades = this.recentTrades
+      .filter((trade) => now - trade.timestamp <= 10_000)
+      .slice(-5000);
+  }
+
+  tradeFlow(now = this.now()) {
+    this.pruneRecentTrades(now);
+    const start = now - 5000;
+    const trades = this.recentTrades.filter((trade) => trade.timestamp >= start);
+    const buyNotional = trades
+      .filter((trade) => trade.aggressor === 'BUY')
+      .reduce((sum, trade) => sum + trade.notional, 0);
+    const sellNotional = trades
+      .filter((trade) => trade.aggressor === 'SELL')
+      .reduce((sum, trade) => sum + trade.notional, 0);
+    const totalNotional = buyNotional + sellNotional;
+    const first = trades[0];
+    const last = trades.at(-1);
+    return {
+      windowMs: 5000,
+      tradeCount: trades.length,
+      buyCount: trades.filter((trade) => trade.aggressor === 'BUY').length,
+      sellCount: trades.filter((trade) => trade.aggressor === 'SELL').length,
+      buyNotional,
+      sellNotional,
+      signedNotional: buyNotional - sellNotional,
+      totalNotional,
+      imbalance: totalNotional > 0 ? (buyNotional - sellNotional) / totalNotional : null,
+      priceChangePct: first && last && first.price > 0
+        ? (last.price - first.price) / first.price
+        : null,
+      firstTradeAt: first?.timestamp ?? null,
+      lastTradeAt: last?.timestamp ?? null,
+    };
+  }
+
   snapshot() {
     const tickAgeMs = this.tickAt == null ? null : Math.max(0, this.now() - this.tickAt);
     return {
@@ -173,6 +222,7 @@ class BinanceTickFeed {
       tickAgeMs,
       currentCandle: this.currentCandle ? { ...this.currentCandle } : null,
       candles: this.candles.map((candle) => ({ ...candle })),
+      tradeFlow: this.tradeFlow(),
       reconnectCount: this.reconnectCount,
     };
   }
