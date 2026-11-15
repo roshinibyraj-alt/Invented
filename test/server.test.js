@@ -66,7 +66,8 @@ test('dashboard explains the fixed-price ladder rules', async t => {
   assert.match(html, /100 shares each/i);
   assert.match(html, /Polymarket order book/);
   assert.match(html, /Cancel after/i);
-  assert.doesNotMatch(html, /midpoint|take-profit|complete sets|estimated rebates/i);
+  assert.doesNotMatch(html, /midpoint|complete sets|estimated rebates/i);
+  assert.match(html, /exitRules|Floating P&amp;L/i);
   assert.doesNotMatch(html, /BTC &amp; ETH Signal Desk/);
   assert.doesNotMatch(html, /profitable flip/i);
   assert.doesNotMatch(html, /two fresh Binance updates/i);

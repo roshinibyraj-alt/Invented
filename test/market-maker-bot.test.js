@@ -112,7 +112,7 @@ test('uses exact configured prices and expires each rung from window open', () =
   assert.equal(upThirtyFive.status, 'RESTING');
 });
 
-test('book touches do not create fills; opposing trade prints do', () => {
+test('fresh best-ask crossing fills the whole rung regardless of displayed size', () => {
   const fixture = makeBot();
   const placedAt = fixture.tickAt(500);
   const order = activeOrders(fixture.bot, { side: 'UP' })
@@ -124,24 +124,14 @@ test('book touches do not create fills; opposing trade prints do', () => {
     asset_id: 'up-token',
     timestamp: String(placedAt + 100),
     bids: [{ price: '0.39', size: '200' }],
-    asks: [{ price: '0.40', size: '100' }],
+    asks: [{ price: '0.40', size: '1' }],
   });
-  assert.equal(order.status, 'RESTING');
-  assert.equal(order.filledShares, 0);
-  assert.equal(fixture.bot.positions.length, 0);
-
-  fixture.setNow(placedAt + 200);
-  fixture.bot.processMakerTrade(tradeEvent({
-    price: 0.40,
-    size: order.queueAheadShares + 100,
-    timestamp: placedAt + 200,
-  }), placedAt + 200);
   assert.equal(order.status, 'FILLED');
   assert.equal(order.filledShares, 100);
   assert.equal(fixture.bot.currentPosition('UP', WINDOW_START).shares, 100);
 });
 
-test('partial trade fills consume queue first and preserve the remainder until timeout', () => {
+test('a sell print through a rung fills all shares even when the print is small', () => {
   const fixture = makeBot();
   const placedAt = fixture.tickAt(500);
   const order = activeOrders(fixture.bot, { side: 'UP' })
@@ -149,19 +139,18 @@ test('partial trade fills consume queue first and preserve the remainder until t
 
   fixture.setNow(placedAt + 100);
   fixture.bot.processMakerTrade(tradeEvent({
-    price: 0.40,
-    size: order.queueAheadShares + 30,
+    price: 0.39,
+    size: 1,
     timestamp: placedAt + 100,
   }), placedAt + 100);
-  assert.equal(order.status, 'PARTIALLY_FILLED');
-  assert.equal(order.filledShares, 30);
-  assert.equal(order.remainingShares, 70);
+  assert.equal(order.status, 'FILLED');
+  assert.equal(order.filledShares, 100);
+  assert.equal(order.remainingShares, 0);
 
   fixture.setNow(WINDOW_START + 10_000);
   fixture.bot.processStrategyEntry(WINDOW_START + 10_000);
-  assert.equal(order.status, 'CANCELLED_TIMEOUT');
-  assert.equal(order.cancelledShares, 70);
-  assert.equal(fixture.bot.currentPosition('UP', WINDOW_START).shares, 30);
+  assert.equal(order.status, 'FILLED');
+  assert.equal(fixture.bot.currentPosition('UP', WINDOW_START).shares, 100);
 });
 
 test('rejects a rung that would immediately match instead of resting', () => {
@@ -177,7 +166,7 @@ test('rejects a rung that would immediately match instead of resting', () => {
   assert.equal(ladder[1].status, 'RESTING');
 });
 
-test('dashboard snapshot exposes rung deadlines, status, and accumulated positions', () => {
+test('dashboard snapshot exposes rung deadlines, live exit rules, and accumulated positions', () => {
   const fixture = makeBot();
   fixture.tickAt(500);
   const snapshot = fixture.bot.snapshot();
@@ -189,7 +178,71 @@ test('dashboard snapshot exposes rung deadlines, status, and accumulated positio
     [10, 50, 160, 200, 220, 230, 250, 270]);
   assert.equal(snapshot.ladder.DOWN[0].price, 0.40);
   assert.equal(snapshot.positionsBySide.UP, null);
-  assert.equal(snapshot.strategy.exitPolicy.includes('no take-profit'), true);
+  assert.equal(snapshot.strategy.takeProfitBid, 0.99);
+  assert.equal(snapshot.strategy.takeProfitPayoutPerShare, 1);
+  assert.equal(snapshot.strategy.stopLossBid, 0.01);
+  assert.equal(snapshot.strategy.stopLossPayoutPerShare, 0);
+  assert.match(snapshot.strategy.exitPolicy, /official resolution/);
+});
+
+test('open-position floating P&L updates from the live best bid and is included in equity', () => {
+  const fixture = makeBot();
+  const placedAt = fixture.tickAt(500);
+  fixture.setNow(placedAt + 100);
+  fixture.bot.processMakerTrade(tradeEvent({
+    price: 0.40,
+    size: 1,
+    timestamp: placedAt + 100,
+  }), placedAt + 100);
+  const position = fixture.bot.currentPosition('UP', WINDOW_START);
+  fixture.setNow(placedAt + 200);
+  fixture.setBook('UP', 0.30, 0.31, placedAt + 200);
+
+  const snapshot = fixture.bot.snapshot();
+  const displayed = snapshot.positionsBySide.UP;
+  const expectedUnrealized = 30 - position.totalCost
+    + position.entryEstimatedMakerRebate - position.fees;
+  assert.equal(displayed.markPrice, 0.30);
+  assert.ok(Math.abs(displayed.unrealizedPnl - expectedUnrealized) < 1e-8);
+  assert.ok(Math.abs(snapshot.account.equity - (snapshot.account.cash + 30)) < 1e-8);
+  assert.ok(Math.abs(snapshot.account.unrealizedPnl - displayed.unrealizedPnl) < 1e-8);
+});
+
+test('best-bid thresholds close positions at the configured $1 or $0 payout', () => {
+  for (const testCase of [
+    { bid: 0.99, ask: 1.00, reason: 'TAKE_PROFIT_THRESHOLD', payout: 1, pnlSign: 1 },
+    { bid: 0.01, ask: 0.02, reason: 'STOP_LOSS_THRESHOLD', payout: 0, pnlSign: -1 },
+  ]) {
+    const fixture = makeBot();
+    const placedAt = fixture.tickAt(500);
+    fixture.setNow(placedAt + 100);
+    fixture.bot.processMakerTrade(tradeEvent({
+      price: 0.40,
+      size: 1,
+      timestamp: placedAt + 100,
+    }), placedAt + 100);
+    const position = fixture.bot.currentPosition('UP', WINDOW_START);
+    for (const order of activeOrders(fixture.bot, { side: 'UP' })) {
+      fixture.bot.cancelMakerOrder(order, placedAt + 150, 'CANCELLED_TEST', 'Test setup.');
+    }
+
+    const exitAt = placedAt + 200;
+    fixture.setNow(exitAt);
+    fixture.bot.handleMarketMessage({
+      event_type: 'book',
+      asset_id: 'up-token',
+      timestamp: String(exitAt),
+      bids: [{ price: testCase.bid.toFixed(2), size: '100' }],
+      asks: [{ price: testCase.ask.toFixed(2), size: '100' }],
+    });
+
+    assert.equal(position.status, 'SETTLED_EXIT');
+    assert.equal(position.exitReason, testCase.reason);
+    assert.equal(position.exitPrice, testCase.payout);
+    assert.equal(position.shares, 0);
+    assert.ok(testCase.pnlSign * position.realizedPnl > 0);
+    assert.equal(fixture.bot.snapshot().lastExitBySide.UP.exitReason, testCase.reason);
+  }
 });
 
 test('backs off repeated Gamma 429 errors and resumes market scanning', async () => {

@@ -71,6 +71,9 @@
     .position-line { display:flex; align-items:center; justify-content:space-between; gap:12px; margin:12px 0 15px; padding:11px 12px; border:1px solid var(--line); border-radius:10px; }
     .position-line strong { font-size:14px; font-variant-numeric:tabular-nums; }
     .position-line .pos-detail { color:var(--muted); font-size:10px; text-align:right; }
+    .position-mark { margin-top:-7px; padding:9px 12px; border:1px solid var(--line); border-radius:10px; background:#f1f1e9; }
+    .position-mark strong { display:block; margin-top:2px; font-size:13px; font-variant-numeric:tabular-nums; }
+    .position-exit { margin-top:-7px; padding:9px 12px; background:#f1f1e9; }
     .ladder-title { margin:0 0 7px; }
     .ladder-title h4 { margin:0; font-size:11px; font-weight:820; letter-spacing:.04em; }
     .ladder-title span { color:var(--muted); font-size:10px; }
@@ -176,7 +179,7 @@
       <div><div class="section-kicker">Execution rules</div><h2>Fixed-price ladder</h2></div>
     </div>
     <section class="strategy-strip" aria-label="Active strategy configuration">
-      <div><div class="strategy-name" id="strategyName">Eight-rung fixed-price ladder</div><div class="micro" id="execution">Simulated limit execution · no live orders</div></div>
+      <div><div class="strategy-name" id="strategyName">Eight-rung fixed-price ladder</div><div class="micro" id="execution">Full-rung paper fills · no live orders</div><div class="micro" id="exitRules">TP/SL during the window; otherwise official resolution</div></div>
       <div class="strategy-meta" id="ladderSummary">8 rungs per side <b>·</b> 100 shares each</div>
     </section>
     <footer class="footline">
@@ -212,6 +215,7 @@
       const key = side.toLowerCase();
       const quote = state.quotes?.[side] || {};
       const position = state.positionsBySide?.[side] || null;
+      const lastExit = state.lastExitBySide?.[side] || null;
       const rungs = Array.isArray(state.ladder?.[side]) ? state.ladder[side] : [];
       const configured = rungs.length ? rungs : defaultRungs;
       const rows = configured.map((rung, index) => {
@@ -245,6 +249,14 @@
           <div class="position-line">
             <div><div class="micro">Accumulated shares</div><strong>${shares(position?.shares)} shares</strong></div>
             <div class="pos-detail">Average cost<br><strong>${price(position?.averageCost ?? position?.averagePrice ?? position?.entryPrice)}</strong></div>
+          </div>
+          <div class="position-line position-mark">
+            <div><div class="micro">Live mark · best bid</div><strong>${price(position?.markPrice)}</strong></div>
+            <div class="pos-detail">Floating P&amp;L<br><strong class="${(num(position?.unrealizedPnl) ?? 0) >= 0 ? "positive" : "negative"}">${signedMoney(position?.unrealizedPnl)}</strong></div>
+          </div>
+          <div class="position-line position-exit">
+            <div><div class="micro">Latest exit this window</div><strong>${lastExit ? (lastExit.exitReason === "TAKE_PROFIT_THRESHOLD" ? "Take profit" : "Stop loss") : "—"}</strong></div>
+            <div class="pos-detail">${lastExit ? `${shares(lastExit.shares)} shares · ${signedMoney(lastExit.realizedPnl)}` : "No threshold exit"}</div>
           </div>
           <div class="ladder-title"><h4>${side} order ladder</h4><span>${configured.length} configured rungs</span></div>
           <div class="ladder-scroll">
@@ -288,7 +300,8 @@
       $("lastUpdated").textContent = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
       const strategy = state.strategy || {};
       $("strategyName").textContent = strategy.name || "Eight-rung fixed-price ladder";
-      $("execution").textContent = strategy.execution || "Simulated limit execution · no live orders";
+      $("execution").textContent = strategy.fillRule || "Full-rung paper fills · no live orders";
+      $("exitRules").textContent = strategy.exitPolicy || "TP/SL during the window; otherwise official resolution";
       const strategyRungs = Array.isArray(strategy.rungPrices) ? strategy.rungPrices.length : defaultRungs.length;
       const size = num(strategy.sizePerOrder ?? strategy.orderSize) ?? num(strategy.sizes?.[0]) ?? 100;
       $("ladderSummary").innerHTML = `${strategyRungs} rungs per side <b>·</b> ${shares(size)} shares each`;

@@ -19,12 +19,12 @@ At the start of each 5-minute window, the bot posts 100-share post-only limit bu
 
 The bot waits for a fresh Polymarket book before posting. If a limit would immediately match rather than rest, it is rejected as marketable instead of being counted as a resting order. Each side and price rung is independent.
 
-Paper fills require fresh opposing-side Polymarket trade prints at or through the resting limit. At the exact limit, the simulated queue estimate is consumed first; partial fills are allowed and any remaining quantity is cancelled at the rung's deadline. A book touch by itself never creates a fill.
+For this paper simulation, a fresh best ask at or below a resting buy limit, or an opposing sell trade print at or below it, counts the full 100-share rung as filled. It deliberately ignores queue depth and print size, so it is an optimistic simulation rather than a prediction of actual exchange fills. Uncrossed orders are cancelled at their rung deadlines.
 
-Filled shares remain open for the official result of their original market. This strategy places no take-profit sells, stop-losses, or automatic merges. The paper ledger is held in memory and resets when Railway restarts the service.
+Open positions are marked to the current best bid. Floating P&L updates with live CLOB quotes and is included in paper equity. If the best bid reaches $0.99, the paper position exits at $1 per share; if it reaches $0.01, it exits at $0 per share. Otherwise, the position remains open for official resolution. Positions awaiting resolution retain their latest available CLOB mark. The paper ledger is held in memory and resets when Railway restarts the service.
 
 ## Dashboard and checks
 
 The dashboard summarizes the active window, Polymarket connection and books, current UP/DOWN shares and average cost, account results, and each rung's status. State is available at `/api/state`; health is available at `/api/healthz`.
 
-Run `node --test test/*.test.js` to verify rung placement, fixed-window cancellation deadlines, queue-aware paper fills, and dashboard rendering.
+Run `node --test test/*.test.js` to verify rung placement, fixed-window cancellation deadlines, full-rung crossing fills, TP/SL exits, live P&L marking, and dashboard rendering.

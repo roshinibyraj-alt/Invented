@@ -9,6 +9,10 @@ const EPSILON = 1e-8;
 const ACTIVE_ORDER_STATES = new Set(['RESTING', 'PARTIALLY_FILLED']);
 const ORDER_TYPE = 'PAPER_RESTING_LIMIT_BUY';
 const SIDES = ['UP', 'DOWN'];
+const TAKE_PROFIT_BID = 0.99;
+const STOP_LOSS_BID = 0.01;
+const TAKE_PROFIT_PAYOUT = 1;
+const STOP_LOSS_PAYOUT = 0;
 
 function clamp(value, minimum, maximum) {
   return Math.max(minimum, Math.min(maximum, value));
@@ -22,8 +26,8 @@ class MarketMakerBot extends MispricingBot {
     this.rules = {
       sharesPerOrder: config.MAKER_LADDER_SHARES,
       rungs: config.MAKER_LADDER_RUNGS,
-      fillRule: 'Fresh opposite-side trade prints consume estimated queue; book touches do not fill.',
-      exitPolicy: 'Hold filled shares for official resolution.',
+      fillRule: 'A fresh best ask or opposing sell trade print at or below a rung counts the full order as filled.',
+      exitPolicy: 'Best bid at $0.99 exits at $1/share; best bid at $0.01 exits at $0/share; otherwise hold for resolution.',
     };
     this.strategyWindowStart = null;
     this.makerQuotes = this.emptyMakerQuotes();
@@ -110,11 +114,17 @@ class MarketMakerBot extends MispricingBot {
     if (!event || typeof event !== 'object') return;
     const type = event.event_type || event.eventType;
     super.handleMarketMessage(event);
-    if (type === 'last_trade_price') this.processMakerTrade(event, this.now());
+    if (type === 'last_trade_price') {
+      this.processMakerTrade(event, this.now());
+    } else if (['book', 'price_change', 'best_bid_ask'].includes(type)) {
+      const side = this.sideForToken(event.asset_id || event.assetId);
+      if (side) this.processBookPriceCross(side, this.now());
+    }
   }
 
   processStrategyEntry(now = this.now()) {
-    return this.processFixedPriceLadder(now);
+    const exited = this.processPositionThresholdExits(now);
+    return this.processFixedPriceLadder(now) || exited;
   }
 
   processFixedPriceLadder(now = this.now()) {
@@ -1052,8 +1062,8 @@ class MarketMakerBot extends MispricingBot {
       grossProceeds: 0,
       fees: 0,
       estimatedMakerRebate: 0,
-      queueAheadShares: visibleQueue + earlierSamePriceOrders + config.MAKER_QUEUE_BUFFER_SHARES,
-      initialQueueAheadShares: visibleQueue + earlierSamePriceOrders + config.MAKER_QUEUE_BUFFER_SHARES,
+      queueAheadShares: 0,
+      initialQueueAheadShares: 0,
       fills: [],
       createdAt: now,
       expiresAt: details.expiresAt ?? null,
@@ -1061,7 +1071,7 @@ class MarketMakerBot extends MispricingBot {
       windowStart,
       windowEnd: windowStart + this.windowMs,
       fillRule: action === 'BUY' && (details.purpose || 'ENTRY') === 'ENTRY'
-        ? 'BEST_ASK_TOUCH_AT_OR_BELOW_LIMIT'
+        ? 'FULL_REMAINDER_ON_FRESH_BEST_ASK_OR_OPPOSING_SELL_PRINT_AT_OR_BELOW_LIMIT'
         : 'TRADE_PRINT_AT_OR_THROUGH_PRICE_AFTER_ESTIMATED_QUEUE',
       ...details,
     };
@@ -1179,7 +1189,7 @@ class MarketMakerBot extends MispricingBot {
     }, 0);
   }
 
-  processMakerTrade(event, receivedAt = this.now()) {
+  processMakerTradeLegacy(event, receivedAt = this.now()) {
     const side = this.sideForToken(event.asset_id || event.assetId);
     const tradePrice = Number(event.price);
     const tradeSize = Number(event.size);
@@ -1271,6 +1281,202 @@ class MarketMakerBot extends MispricingBot {
     return changed;
   }
 
+  processMakerTrade(event, receivedAt = this.now()) {
+    const side = this.sideForToken(event.asset_id || event.assetId);
+    const tradePrice = Number(event.price);
+    const tradeSize = Number(event.size);
+    const takerSide = String(event.side || '').toUpperCase();
+    const tradeAt = Number(event.timestamp);
+    if (!side
+      || !(tradePrice > 0 && tradePrice < 1)
+      || !(tradeSize > 0)
+      || takerSide !== 'SELL'
+      || !Number.isFinite(tradeAt)
+      || tradeAt > receivedAt + 1000
+      || receivedAt - tradeAt > config.MAKER_MAX_TRADE_AGE_MS) return false;
+
+    const txHash = event.transaction_hash || event.transactionHash || '';
+    const tradeKey = [
+      txHash,
+      event.asset_id || event.assetId,
+      tradeAt,
+      tradePrice,
+      tradeSize,
+      takerSide,
+    ].join(':');
+    if (this.seenMakerTrades.has(tradeKey)) return false;
+    this.seenMakerTrades.set(tradeKey, tradeAt);
+    while (this.seenMakerTrades.size > 4096) {
+      this.seenMakerTrades.delete(this.seenMakerTrades.keys().next().value);
+    }
+    this.makerStats.lastTradeAt = tradeAt;
+    return this.fillCrossedBuyRungs(side, tradePrice, receivedAt, {
+      crossAt: tradeAt,
+      tradeAt,
+      tradePrice,
+      tradeSize,
+      tradeSide: 'SELL',
+      confirmation: 'OPPOSING_SELL_TRADE_CROSSED_LIMIT_FULL_FILL',
+    });
+  }
+
+  processBookPriceCross(side, now = this.now()) {
+    const exited = this.processPositionThresholdExits(now, side);
+    const quote = this.liveQuotes?.[side];
+    const bestAsk = Number(quote?.bestAsk);
+    const quoteAt = Number(quote?.updatedAt);
+    const quoteAge = now - quoteAt;
+    if (quote?.stale === true
+      || quote?.status !== 'LIVE'
+      || !(bestAsk > 0 && bestAsk < 1)
+      || !Number.isFinite(quoteAt)
+      || quoteAge < 0
+      || quoteAge > config.MAKER_MAX_TRADE_AGE_MS) return exited;
+    const filled = this.fillCrossedBuyRungs(side, bestAsk, now, {
+      crossAt: quoteAt,
+      tradeAt: quoteAt,
+      tradePrice: bestAsk,
+      tradeSide: 'QUOTE',
+      confirmation: 'FRESH_BEST_ASK_CROSSED_LIMIT_FULL_FILL',
+    });
+    return filled || exited;
+  }
+
+  processPositionThresholdExits(now = this.now(), onlySide = null) {
+    const windowStart = this.getActiveWindowStart();
+    if (windowStart == null || now >= windowStart + this.windowMs) return false;
+    let changed = false;
+    for (const position of this.positions) {
+      if (position.status !== 'OPEN'
+        || Number(position.windowStart) !== Number(windowStart)
+        || (onlySide && position.side !== onlySide)) continue;
+      const quote = this.liveQuotes?.[position.side];
+      const bestBid = quote?.bestBid == null ? null : Number(quote.bestBid);
+      const quoteAt = Number(quote?.updatedAt);
+      const quoteAge = now - quoteAt;
+      const fresh = Number.isFinite(bestBid)
+        && bestBid >= 0 && bestBid <= 1
+        && Number.isFinite(quoteAt)
+        && quoteAge >= 0
+        && quoteAge <= 15_000
+        && quote?.stale !== true;
+      if (!fresh) continue;
+      if (bestBid >= TAKE_PROFIT_BID - EPSILON) {
+        changed = this.closePositionAtThreshold(
+          position,
+          'TAKE_PROFIT_THRESHOLD',
+          TAKE_PROFIT_PAYOUT,
+          bestBid,
+          now,
+        ) || changed;
+      } else if (bestBid <= STOP_LOSS_BID + EPSILON) {
+        changed = this.closePositionAtThreshold(
+          position,
+          'STOP_LOSS_THRESHOLD',
+          STOP_LOSS_PAYOUT,
+          bestBid,
+          now,
+        ) || changed;
+      }
+    }
+    return changed;
+  }
+
+  closePositionAtThreshold(position, exitReason, payoutPerShare, triggerBid, now) {
+    if (position.status !== 'OPEN') return false;
+    const shares = Math.max(0, Number(position.shares) || 0);
+    if (!(shares > EPSILON)) return false;
+    const costBasis = Math.max(0, Number(position.totalCost) || 0);
+    const remainingEntryRebate = Math.max(
+      0,
+      (Number(position.entryEstimatedMakerRebate) || 0)
+        - (Number(position.realizedEntryMakerRebate) || 0),
+    );
+    const proceeds = shares * payoutPerShare;
+    position.realizedEntryMakerRebate = (Number(position.realizedEntryMakerRebate) || 0)
+      + remainingEntryRebate;
+    position.realizedCostBasis = (Number(position.realizedCostBasis) || 0) + costBasis;
+    position.shares = 0;
+    position.totalCost = 0;
+    position.exitProceeds = (Number(position.exitProceeds) || 0) + proceeds;
+    position.proceeds = Number(position.exitProceeds) + (Number(position.mergeProceeds) || 0);
+    position.exitPrice = payoutPerShare;
+    position.exitBid = triggerBid;
+    position.exitFees = 0;
+    position.exitReason = exitReason;
+    position.exitType = 'PAPER_THRESHOLD_EXIT';
+    position.exitPolicy = 'INTRAWINDOW_BEST_BID_THRESHOLD';
+    position.exitFills = [...(position.exitFills || []), {
+      at: now,
+      shares,
+      price: payoutPerShare,
+      triggerBid,
+      proceeds,
+      reason: exitReason,
+      paperOnly: true,
+    }];
+    position.status = 'SETTLED_EXIT';
+    position.closedAt = now;
+    position.settledAt = now;
+    position.settlementBasis = `PAPER_${exitReason}`;
+    position.unrealizedPnl = 0;
+    position.markValue = 0;
+    position.markStatus = 'CLOSED';
+    this.cash += proceeds;
+    position.realizedPnl = this.calculateRealizedPnl(position);
+    position.outcome = position.realizedPnl > 0 ? 'WIN'
+      : position.realizedPnl < 0 ? 'LOSS' : 'BREAK_EVEN';
+    this.recordStrategyOutcome(position, position.outcome, now, exitReason);
+    this.log(exitReason === 'TAKE_PROFIT_THRESHOLD'
+      ? 'PAPER_TAKE_PROFIT_EXIT'
+      : 'PAPER_STOP_LOSS_EXIT', {
+      positionId: position.id,
+      side: position.side,
+      shares,
+      triggerBid,
+      payoutPerShare,
+      proceeds,
+      realizedPnl: position.realizedPnl,
+      windowStart: position.windowStart,
+      message: exitReason === 'TAKE_PROFIT_THRESHOLD'
+        ? `Best bid reached $${TAKE_PROFIT_BID.toFixed(2)}; booked $1.00 per share and closed ${shares.toFixed(2)} ${position.side} shares.`
+        : `Best bid reached $${STOP_LOSS_BID.toFixed(2)}; booked $0.00 per share and closed ${shares.toFixed(2)} ${position.side} shares.`,
+    });
+    return true;
+  }
+
+  fillCrossedBuyRungs(side, crossingPrice, now, details = {}) {
+    const windowStart = this.getActiveWindowStart();
+    const crossAt = Number(details.crossAt ?? now);
+    const price = Number(crossingPrice);
+    if (!side || windowStart == null
+      || !(price > 0 && price < 1)
+      || !Number.isFinite(crossAt)) return false;
+
+    const candidates = this.activeMakerOrders(side, 'BUY', windowStart)
+      .filter((order) => order.purpose === 'ENTRY'
+        && crossAt >= Number(order.createdAt)
+        && (order.expiresAt == null || crossAt < Number(order.expiresAt))
+        && price <= Number(order.limitPrice) + EPSILON)
+      .sort((left, right) => Number(right.limitPrice) - Number(left.limitPrice));
+    let changed = false;
+    for (const order of candidates) {
+      const shares = Number(order.remainingShares);
+      if (!(shares > EPSILON)) continue;
+      order.queueAheadShares = 0;
+      const filled = this.applyMakerFill(order, shares, now, {
+        tradeAt: details.tradeAt ?? crossAt,
+        tradePrice: details.tradePrice ?? price,
+        tradeSize: details.tradeSize ?? shares,
+        tradeSide: details.tradeSide ?? 'QUOTE',
+        confirmation: details.confirmation || 'CLOB_PRICE_CROSSED_RUNG_FULL_FILL',
+      });
+      changed = filled || changed;
+    }
+    if (changed) this.processStrategyEntry(now);
+    return changed;
+  }
+
   applyMakerFill(order, availableShares, now, trade) {
     const position = order.action === 'SELL'
       ? this.currentPosition(order.side, order.windowStart)
@@ -1302,7 +1508,7 @@ class MarketMakerBot extends MispricingBot {
       tradeAt: trade.tradeAt,
       tradePrice: trade.tradePrice,
       tradeSize: Number(trade.tradeSize ?? availableShares),
-      tradeSide: order.action === 'BUY' ? 'SELL' : 'BUY',
+      tradeSide: trade.tradeSide || (order.action === 'BUY' ? 'SELL' : 'BUY'),
       confirmation: trade.confirmation || 'OPPOSING_TRADE_PRINT',
       estimatedQueueAheadRemaining: order.queueAheadShares,
     };
@@ -1494,6 +1700,22 @@ class MarketMakerBot extends MispricingBot {
       side,
       openWindowPositions.find((position) => position.side === side) || null,
     ]));
+    const lastExitBySide = Object.fromEntries(SIDES.map((side) => {
+      const lastExit = this.positions
+        .filter((position) => Number(position.windowStart) === Number(windowStart)
+          && position.side === side
+          && position.status === 'SETTLED_EXIT'
+          && ['TAKE_PROFIT_THRESHOLD', 'STOP_LOSS_THRESHOLD'].includes(position.exitReason))
+        .sort((left, right) => Number(right.settledAt || 0) - Number(left.settledAt || 0))[0];
+      return [side, lastExit ? {
+        exitReason: lastExit.exitReason,
+        shares: lastExit.initialShares,
+        exitPrice: lastExit.exitPrice,
+        triggerBid: lastExit.exitBid,
+        realizedPnl: lastExit.realizedPnl,
+        settledAt: lastExit.settledAt,
+      } : null];
+    }));
     const summarizePositions = (positions) => {
       const shares = positions.reduce((total, position) =>
         total + Math.max(0, Number(position.shares) || 0), 0);
@@ -1844,14 +2066,118 @@ class MarketMakerBot extends MispricingBot {
     const currentOrders = windowStart == null ? [] : this.orders.filter((order) =>
       order.orderType === ORDER_TYPE
       && Number(order.windowStart) === Number(windowStart));
+    const remainingEntryRebate = (position) => Math.max(
+      0,
+      (Number(position.entryEstimatedMakerRebate ?? position.estimatedMakerRebate) || 0)
+        - (Number(position.realizedEntryMakerRebate) || 0),
+    );
+    let openMarkedValue = 0;
+    let openUnrealizedPnl = 0;
+    let unpricedOpenCostBasis = 0;
+    let pendingResolutionMarkedValue = 0;
+    let pendingResolutionUnrealizedPnl = 0;
+    let pendingResolutionCostBasis = 0;
+    let unpricedPendingCostBasis = 0;
+    for (const position of this.positions) {
+      const shares = Math.max(0, Number(position.shares) || 0);
+      const costBasis = Math.max(0, Number(position.totalCost) || 0);
+      const isOpen = position.status === 'OPEN';
+      const isPending = position.status === 'PENDING_RESOLUTION';
+      if (!isOpen && !isPending) continue;
+
+      const quote = isOpen
+        && Number(position.windowStart) === Number(this.market?.start)
+        ? state.quotes?.[position.side]
+        : null;
+      const quoteBid = quote?.bestBid == null ? null : Number(quote.bestBid);
+      const quoteAt = Number(quote?.updatedAt);
+      const quoteAge = now - quoteAt;
+      const quoteIsFresh = quote?.status === 'LIVE'
+        && quote?.stale !== true
+        && Number.isFinite(quoteBid)
+        && quoteBid >= 0 && quoteBid <= 1
+        && Number.isFinite(quoteAt)
+        && quoteAge >= 0
+        && quoteAge <= 15_000;
+      if (quoteIsFresh) {
+        position.markBid = quoteBid;
+        position.markUpdatedAt = quoteAt;
+      }
+
+      const markBid = position.markBid == null ? null : Number(position.markBid);
+      const markAt = Number(position.markUpdatedAt);
+      const markAgeMs = Number.isFinite(markAt) ? Math.max(0, now - markAt) : null;
+      const markIsFresh = Number.isFinite(markBid)
+        && markBid >= 0 && markBid <= 1
+        && markAgeMs != null && markAgeMs <= 15_000;
+      const markValue = markIsFresh ? markBid * shares : null;
+      const floatingPnl = markIsFresh
+        ? markValue - costBasis + remainingEntryRebate(position) - (Number(position.fees) || 0)
+        : null;
+      position.markPrice = markIsFresh ? markBid : null;
+      position.markValue = markValue;
+      position.markAgeMs = markAgeMs;
+      position.markStatus = markIsFresh ? 'LIVE' : markBid == null ? 'UNAVAILABLE' : 'STALE';
+      position.unrealizedPnl = floatingPnl;
+
+      if (isOpen) {
+        if (markIsFresh) {
+          openMarkedValue += markValue;
+          openUnrealizedPnl += floatingPnl;
+        } else {
+          unpricedOpenCostBasis += costBasis;
+        }
+      } else {
+        pendingResolutionCostBasis += costBasis;
+        if (Number.isFinite(markBid) && markBid >= 0 && markBid <= 1) {
+          const pendingValue = markBid * shares;
+          pendingResolutionMarkedValue += pendingValue;
+          pendingResolutionUnrealizedPnl += pendingValue - costBasis
+            + remainingEntryRebate(position) - (Number(position.fees) || 0);
+        } else {
+          unpricedPendingCostBasis += costBasis;
+        }
+      }
+    }
+    const allOpenPositions = this.positions.filter((position) => position.status === 'OPEN');
     const openWindowPositions = activeWindow
-      ? this.positions.filter((position) =>
-        position.status === 'OPEN' && Number(position.windowStart) === Number(windowStart))
+      ? allOpenPositions.filter((position) =>
+        Number(position.windowStart) === Number(windowStart))
       : [];
     const positionsBySide = Object.fromEntries(SIDES.map((side) => [
       side,
       openWindowPositions.find((position) => position.side === side) || null,
     ]));
+    const lastExitBySide = Object.fromEntries(SIDES.map((side) => {
+      const lastExit = this.positions
+        .filter((position) => Number(position.windowStart) === Number(windowStart)
+          && position.side === side
+          && position.status === 'SETTLED_EXIT'
+          && ['TAKE_PROFIT_THRESHOLD', 'STOP_LOSS_THRESHOLD'].includes(position.exitReason))
+        .sort((left, right) => Number(right.settledAt || 0) - Number(left.settledAt || 0))[0];
+      return [side, lastExit ? {
+        exitReason: lastExit.exitReason,
+        shares: lastExit.initialShares,
+        exitPrice: lastExit.exitPrice,
+        triggerBid: lastExit.exitBid,
+        realizedPnl: lastExit.realizedPnl,
+        settledAt: lastExit.settledAt,
+      } : null];
+    }));
+    const markedValue = openMarkedValue + pendingResolutionMarkedValue;
+    const paperAccount = {
+      ...state.account,
+      markedValue,
+      equity: this.cash + markedValue,
+      currentCapital: this.cash + markedValue,
+      totalPnl: this.cash + markedValue - Number(state.account?.startingCapital ?? state.account?.capital ?? 0),
+      unrealizedPnl: openUnrealizedPnl + pendingResolutionUnrealizedPnl,
+      openPositionCostBasisUnpriced: unpricedOpenCostBasis,
+      pendingResolutionMarkedValue,
+      pendingResolutionCostBasis,
+      unpricedPendingCostBasis,
+      pendingResolutionMarkMethod: 'Current open positions use the fresh CLOB best bid; positions awaiting resolution use their last available bid.',
+    };
     const ladder = Object.fromEntries(SIDES.map((side) => [
       side,
       config.MAKER_LADDER_RUNGS.map((rung, index) => {
@@ -1908,9 +2234,13 @@ class MarketMakerBot extends MispricingBot {
           shares: config.MAKER_LADDER_SHARES,
         })),
         independentSides: true,
-        fillRule: 'Only fresh opposing Polymarket trade prints can fill; book touches do not fill. Same-price prints consume estimated queue first.',
+        fillRule: 'A fresh best ask at or below a buy limit, or an opposing sell trade print through it, counts as a full 100-share paper fill; queue and print size are ignored.',
         timeoutRule: 'Each deadline is measured from the start of the 5-minute window. Any unfilled remainder is cancelled at that deadline.',
-        exitPolicy: 'Filled shares remain open for official Polymarket resolution; no take-profit, sell, or merge orders are used.',
+        takeProfitBid: TAKE_PROFIT_BID,
+        takeProfitPayoutPerShare: TAKE_PROFIT_PAYOUT,
+        stopLossBid: STOP_LOSS_BID,
+        stopLossPayoutPerShare: STOP_LOSS_PAYOUT,
+        exitPolicy: 'During the window, a best bid of $0.99 closes at $1/share and a best bid of $0.01 closes at $0/share. Positions not triggered are held for official resolution.',
         accumulatesInventory: true,
       },
       model: null,
@@ -1931,11 +2261,12 @@ class MarketMakerBot extends MispricingBot {
       },
       positionsBySide,
       openWindowPositions,
+      lastExitBySide,
       ladder,
       orders: this.orders.slice(0, 200).map((order) => this.orderView(order)),
       trades: state.positions || [],
       account: {
-        ...state.account,
+        ...paperAccount,
         openPositions: this.positions.filter((position) => position.status === 'OPEN').length,
         pendingResolutionPositions: this.positions.filter((position) =>
           position.status === 'PENDING_RESOLUTION').length,
