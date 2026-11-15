@@ -4,7 +4,7 @@ const MispricingBot = require('./mispricing-bot');
 const WickBot = require('./wick-bot');
 const config = require('./config');
 const { sweepLevels } = MispricingBot._test;
-const { feeContext } = WickBot._test;
+const { feeContext, makerRebateFor } = WickBot._test;
 
 const EPSILON = 1e-8;
 const SIDES = ['UP', 'DOWN'];
@@ -59,12 +59,11 @@ function orderBookPressure(book, tradeImbalance) {
 class OrderFlowBot extends MispricingBot {
   constructor(options = {}) {
     super(options);
-    this.strategyId = 'btc-5m-combined-orderflow-reversal';
-    this.strategyName = 'BTC 5-minute combined order-flow reversal paper strategy';
+    this.strategyId = 'btc-5m-combined-orderflow-accumulation';
+    this.strategyName = 'BTC 5-minute combined order-flow accumulation paper strategy';
     this.rules = {
       sharesPerSide: config.FLOW_ENTRY_SHARES,
       entryShares: config.FLOW_ENTRY_SHARES,
-      maxInventoryPerSide: config.FLOW_MAX_INVENTORY_PER_SIDE,
     };
     this.strategyWindowStart = null;
     this.clobTrades = { UP: [], DOWN: [] };
@@ -85,7 +84,6 @@ class OrderFlowBot extends MispricingBot {
     this.signal = { side: null, action: 'WAIT', reason: this.pressure.reason };
     this.flowState = { status: 'WAITING_FOR_DATA', reason: this.pressure.reason };
     this.orderSequence = 0;
-    this.lastExitAttemptAt = new Map();
   }
 
   openStrategyWindow(start, now) {
@@ -97,7 +95,6 @@ class OrderFlowBot extends MispricingBot {
     this.pendingSide = null;
     this.confirmationCount = 0;
     this.confirmedSide = null;
-    this.lastExitAttemptAt.clear();
     this.pressure = {
       status: 'SCANNING',
       reason: 'Collecting live order flow for the new BTC window.',
@@ -323,6 +320,7 @@ class OrderFlowBot extends MispricingBot {
     }
     if (this.strategyWindowStart !== windowStart) this.openStrategyWindow(windowStart, now);
 
+    const thresholdExits = this.processThresholdExits(now);
     const nextPressure = this.buildPressureSnapshot(now);
     this.pressure = nextPressure;
     const evaluationDue = this.lastEvaluationAt == null
@@ -375,7 +373,6 @@ class OrderFlowBot extends MispricingBot {
       confirmationCount: this.confirmationCount,
       requiredConfirmations: config.FLOW_CONFIRMATION_COUNT,
     };
-    this.retryRequestedExits(now);
     if (!this.confirmedSide || nextPressure.status === 'NEUTRAL') {
       this.signal = {
         side: null,
@@ -384,51 +381,53 @@ class OrderFlowBot extends MispricingBot {
         combinedScore: nextPressure.combinedScore,
       };
     }
-    return changed;
+    return changed || thresholdExits > 0;
   }
 
   handleConfirmedSignal(side, now) {
-    const windowStart = this.getActiveWindowStart();
-    for (const position of this.positions) {
-      if (position.status !== 'OPEN'
-        || Number(position.windowStart) !== Number(windowStart)
-        || position.side === side
-        || !(Number(position.shares) > EPSILON)) continue;
-      position.exitRequested = true;
-      position.exitRequestedAt = now;
-      position.exitReason = `CONFIRMED_REVERSAL_TO_${side}`;
-    }
-
-    const sold = this.retryRequestedExits(now);
     const bought = this.submitBuy(side, now, this.pressure);
     this.signal = {
       side,
       action: side === 'UP' ? 'BUY_UP' : 'BUY_DOWN',
-      reason: `${side} pressure confirmed; submitted a ${config.FLOW_ENTRY_SHARES}-share paper buy. Opposite-side exit attempted independently.`,
+      reason: `${side} pressure confirmed; submitted a ${config.FLOW_ENTRY_SHARES}-share paper buy. Existing UP and DOWN shares remain open unless their own TP or stop-loss triggers.`,
       combinedScore: this.pressure.combinedScore,
       binanceScore: this.pressure.binance?.score,
       polymarketScore: this.pressure.polymarket?.score,
       buyFilledShares: bought.filledShares || 0,
-      oppositeExitFilledShares: sold,
     };
-    return bought.filledShares > 0 || sold > 0;
+    return bought.filledShares > 0;
   }
 
-  retryRequestedExits(now = this.now()) {
+  processThresholdExits(now = this.now()) {
     const windowStart = this.getActiveWindowStart();
-    let soldShares = 0;
+    let exitedPositions = 0;
     for (const position of this.positions) {
       if (position.status !== 'OPEN'
         || Number(position.windowStart) !== Number(windowStart)
-        || position.exitRequested !== true
         || !(Number(position.shares) > EPSILON)) continue;
-      const lastAttempt = Number(this.lastExitAttemptAt.get(position.id)) || 0;
-      if (now - lastAttempt < config.FLOW_EVAL_INTERVAL_MS) continue;
-      this.lastExitAttemptAt.set(position.id, now);
-      const result = this.submitSell(position, now);
-      soldShares += Number(result?.filledShares) || 0;
+      const quote = this.getFreshQuote(position.side, now);
+      if (!quote || quote.bestBid == null) continue;
+      const bestBid = Number(quote.bestBid);
+      if (!Number.isFinite(bestBid)) continue;
+      if (bestBid + EPSILON >= config.FLOW_TAKE_PROFIT_TRIGGER) {
+        this.closePositionAtThreshold(position, now, {
+          reason: 'TAKE_PROFIT',
+          triggerPrice: config.FLOW_TAKE_PROFIT_TRIGGER,
+          triggerBid: bestBid,
+          payoutPerShare: config.FLOW_TAKE_PROFIT_PAYOUT,
+        });
+        exitedPositions += 1;
+      } else if (bestBid <= config.FLOW_STOP_LOSS_TRIGGER + EPSILON) {
+        this.closePositionAtThreshold(position, now, {
+          reason: 'STOP_LOSS',
+          triggerPrice: config.FLOW_STOP_LOSS_TRIGGER,
+          triggerBid: bestBid,
+          payoutPerShare: config.FLOW_STOP_LOSS_PAYOUT,
+        });
+        exitedPositions += 1;
+      }
     }
-    return soldShares;
+    return exitedPositions;
   }
 
   paperSweep(side, action, requestedShares, now = this.now(), enforceCash = false) {
@@ -490,12 +489,8 @@ class OrderFlowBot extends MispricingBot {
   }
 
   submitBuy(side, now, signal) {
-    const capacity = config.FLOW_MAX_INVENTORY_PER_SIDE - this.totalInventoryForSide(side);
-    const requestedShares = Math.max(0, Math.min(config.FLOW_ENTRY_SHARES, capacity));
-    if (!(requestedShares > EPSILON)) {
-      this.log('PAPER_FLOW_BUY_SKIPPED', { side, reason: 'OUTCOME_INVENTORY_CAP', capacity });
-      return { filledShares: 0, reason: 'OUTCOME_INVENTORY_CAP' };
-    }
+    const requestedShares = config.FLOW_ENTRY_SHARES;
+    if (!(requestedShares > EPSILON)) return { filledShares: 0, reason: 'INVALID_ENTRY_SIZE' };
     const execution = this.paperSweep(side, 'BUY', requestedShares, now, true);
     if (!execution) {
       this.log('PAPER_FLOW_BUY_SKIPPED', {
@@ -522,6 +517,9 @@ class OrderFlowBot extends MispricingBot {
     position.filledAt = now;
     position.lastAddedAt = now;
     position.entryFills.push(...execution.fills.map((fill) => ({ ...fill, at: now })));
+    position.takeProfitPrice = config.FLOW_TAKE_PROFIT_TRIGGER;
+    position.stopLossPrice = config.FLOW_STOP_LOSS_TRIGGER;
+    this.createTakeProfitOrder(position, now);
     position.entrySignals.push({
       at: now,
       side,
@@ -553,6 +551,8 @@ class OrderFlowBot extends MispricingBot {
       fees: execution.fees,
       positionShares: position.shares,
       combinedScore: signal?.combinedScore ?? null,
+      takeProfitPrice: position.takeProfitPrice,
+      stopLossPrice: position.stopLossPrice,
     });
     return { ...execution, orderId: order.id };
   }
@@ -594,6 +594,9 @@ class OrderFlowBot extends MispricingBot {
       exitProceeds: 0,
       proceeds: 0,
       realizedPnl: null,
+      takeProfitPrice: config.FLOW_TAKE_PROFIT_TRIGGER,
+      stopLossPrice: config.FLOW_STOP_LOSS_TRIGGER,
+      takeProfitOrderSequence: 0,
       feeContext: feeContext(this.market || {}),
       paperOnly: true,
     };
@@ -601,72 +604,152 @@ class OrderFlowBot extends MispricingBot {
     return position;
   }
 
-  submitSell(position, now) {
-    const requestedShares = Number(position.shares);
-    if (!(requestedShares > EPSILON)) return { filledShares: 0 };
-    const execution = this.paperSweep(position.side, 'SELL', requestedShares, now, false);
-    if (!execution || !(execution.filledShares > EPSILON)) return { filledShares: 0 };
-
-    const previousShares = Number(position.shares);
-    const filledShares = Number(execution.filledShares);
-    const costBasis = Number(position.totalCost) * filledShares / previousShares;
-    const entryFeeShare = Number(position.fees) * filledShares / previousShares;
-    position.shares = Math.max(0, previousShares - filledShares);
-    position.totalCost = Math.max(0, Number(position.totalCost) - costBasis);
-    position.fees = Math.max(0, Number(position.fees) - entryFeeShare);
-    position.realizedCostBasis = (Number(position.realizedCostBasis) || 0) + costBasis;
-    position.realizedEntryFees = (Number(position.realizedEntryFees) || 0) + entryFeeShare;
-    position.exitProceeds = (Number(position.exitProceeds) || 0) + execution.gross;
-    position.proceeds = position.exitProceeds;
-    position.exitFees = (Number(position.exitFees) || 0) + execution.fees;
-    position.exitFills.push(...execution.fills.map((fill) => ({ ...fill, at: now })));
-    position.exitPrice = position.exitProceeds / (position.initialShares - position.shares);
-    position.exitBid = execution.averagePrice;
-    position.realizedPnl = position.exitProceeds
-      - position.realizedCostBasis
-      - position.realizedEntryFees
-      - position.exitFees
-      + (Number(position.estimatedMakerRebate) || 0);
-    this.cash += execution.netProceeds;
-
-    const order = this.recordOrder({
-      side: position.side,
+  createTakeProfitOrder(position, now) {
+    const previous = position.takeProfitOrder;
+    const sequence = Number(position.takeProfitOrderSequence || 0) + 1;
+    const order = {
+      id: `${position.id}-take-profit-${sequence}`,
+      strategyId: this.strategyId,
+      positionId: position.id,
       action: 'SELL',
-      requestedShares,
-      execution,
-      now,
-      positionId: position.id,
-      exitReason: position.exitReason,
-    });
-    position.lastExitOrderId = order.id;
-    if (position.shares <= EPSILON) {
-      position.shares = 0;
-      position.totalCost = 0;
-      position.fees = 0;
-      position.status = 'SETTLED_EXIT';
-      position.closedAt = now;
-      position.settledAt = now;
-      position.settlementBasis = 'PAPER_CONFIRMED_PRESSURE_REVERSAL';
-      position.exitType = ORDER_TYPE;
-      position.exitRequested = false;
-      position.outcome = position.realizedPnl > 0 ? 'WIN'
-        : position.realizedPnl < 0 ? 'LOSS' : 'BREAK_EVEN';
-      this.recordStrategyOutcome(position, position.outcome, now, 'CONFIRMED_PRESSURE_REVERSAL');
-    }
-    this.log('PAPER_FLOW_SELL_FILLED', {
-      positionId: position.id,
-      orderId: order.id,
       side: position.side,
-      requestedShares,
-      filledShares,
+      orderType: 'PAPER_LIMIT_TAKE_PROFIT',
+      status: 'RESTING',
+      requestedShares: position.shares,
+      filledShares: 0,
       remainingShares: position.shares,
-      averagePrice: execution.averagePrice,
-      grossProceeds: execution.gross,
-      fees: execution.fees,
+      limitPrice: config.FLOW_TAKE_PROFIT_TRIGGER,
+      createdAt: now,
+      windowStart: position.windowStart,
+      paperOnly: true,
+      fillRule: 'FULL_POSITION_ON_FRESH_BEST_BID_AT_OR_ABOVE_0_99_COUNTS_AS_1_DOLLAR_PER_SHARE',
+      sellFee: 0,
+    };
+    if (previous?.status === 'RESTING') {
+      previous.status = 'CANCELLED_REPLACED';
+      previous.cancelledAt = now;
+      previous.replacedByOrderId = order.id;
+      previous.remainingShares = 0;
+    }
+    position.takeProfitOrderSequence = sequence;
+    position.takeProfitOrder = order;
+    position.takeProfitOrderId = order.id;
+    this.orders.unshift(order);
+    this.windowOrders.unshift(order);
+    return order;
+  }
+
+  closePositionAtThreshold(position, now, { reason, triggerPrice, triggerBid, payoutPerShare }) {
+    const shares = Number(position.shares);
+    if (!(shares > EPSILON) || position.status !== 'OPEN') return false;
+    const gross = shares * payoutPerShare;
+    const rebate = reason === 'TAKE_PROFIT'
+      ? makerRebateFor(this.market || {}, triggerPrice, shares).estimate
+      : 0;
+    const exitOrder = reason === 'TAKE_PROFIT'
+      ? position.takeProfitOrder
+      : {
+        id: `${position.id}-stop-loss`,
+        strategyId: this.strategyId,
+        positionId: position.id,
+        action: 'SELL',
+        side: position.side,
+        orderType: 'PAPER_STOP_LOSS',
+        createdAt: now,
+        windowStart: position.windowStart,
+        paperOnly: true,
+      };
+    if (!exitOrder) return false;
+
+    if (reason === 'STOP_LOSS' && position.takeProfitOrder?.status === 'RESTING') {
+      position.takeProfitOrder.status = 'CANCELLED_STOP_LOSS';
+      position.takeProfitOrder.cancelledAt = now;
+      position.takeProfitOrder.remainingShares = 0;
+    }
+    exitOrder.status = 'FILLED';
+    exitOrder.requestedShares = shares;
+    exitOrder.filledShares = shares;
+    exitOrder.remainingShares = 0;
+    exitOrder.averagePrice = payoutPerShare;
+    exitOrder.grossProceeds = gross;
+    exitOrder.fees = 0;
+    exitOrder.sellFee = 0;
+    exitOrder.estimatedMakerRebate = rebate;
+    exitOrder.triggerPrice = triggerPrice;
+    exitOrder.triggerBestBid = triggerBid;
+    exitOrder.exitReason = reason;
+    exitOrder.filledAt = now;
+    exitOrder.fills = [{ price: payoutPerShare, shares }];
+    if (reason === 'STOP_LOSS') {
+      this.orders.unshift(exitOrder);
+      this.windowOrders.unshift(exitOrder);
+    }
+
+    position.exitReason = reason;
+    position.exitType = reason === 'TAKE_PROFIT' ? 'PAPER_LIMIT_TAKE_PROFIT' : 'PAPER_STOP_LOSS';
+    position.exitPrice = payoutPerShare;
+    position.exitBid = triggerBid;
+    position.exitProceeds = gross;
+    position.takeProfitProceeds = reason === 'TAKE_PROFIT' ? gross : 0;
+    position.exitFees = 0;
+    position.estimatedMakerRebate = rebate;
+    position.proceeds = gross + rebate;
+    position.realizedPnl = position.proceeds
+      - Number(position.totalCost || 0)
+      - Number(position.fees || 0);
+    position.exitFills = [{ price: payoutPerShare, shares, at: now }];
+    position.status = 'SETTLED_EXIT';
+    position.settlementStatus = reason === 'TAKE_PROFIT' ? 'TAKE_PROFIT_FILLED' : 'STOP_LOSS_FILLED';
+    position.closedAt = now;
+    position.settledAt = now;
+    position.settlementBasis = reason === 'TAKE_PROFIT' ? 'PAPER_TAKE_PROFIT' : 'PAPER_STOP_LOSS';
+    position.shares = 0;
+    position.totalCost = 0;
+    position.fees = 0;
+    position.markPrice = triggerBid;
+    position.markValue = 0;
+    position.markStatus = 'CLOSED';
+    position.unrealizedPnl = 0;
+    position.outcome = position.realizedPnl > 0 ? 'WIN'
+      : position.realizedPnl < 0 ? 'LOSS' : 'BREAK_EVEN';
+    this.cash += gross + rebate;
+    this.totalOrderAttempts += 1;
+    this.recordStrategyOutcome(position, position.outcome, now, reason);
+    this.log(`PAPER_FLOW_${reason}_FILLED`, {
+      positionId: position.id,
+      orderId: exitOrder.id,
+      side: position.side,
+      shares,
+      triggerPrice,
+      triggerBid,
+      payoutPerShare,
+      grossProceeds: gross,
+      fees: 0,
+      estimatedMakerRebate: rebate,
       realizedPnl: position.realizedPnl,
-      exitReason: position.exitReason,
     });
-    return { ...execution, orderId: order.id };
+    this.events.unshift({
+      ts: now,
+      at: now,
+      event: `PAPER_${reason}_FILLED`,
+      type: `PAPER_${reason}_FILLED`,
+      message: reason === 'TAKE_PROFIT'
+        ? `UP/DOWN $${triggerPrice.toFixed(2)} take-profit touched; ${shares} ${position.side} shares closed at $1.00 per share.`
+        : `UP/DOWN $${triggerPrice.toFixed(2)} stop-loss touched; ${shares} ${position.side} shares closed at $0.00 per share.`,
+      details: {
+        positionId: position.id,
+        orderId: exitOrder.id,
+        side: position.side,
+        shares,
+        triggerPrice,
+        triggerBid,
+        payoutPerShare,
+        realizedPnl: position.realizedPnl,
+        estimatedMakerRebate: rebate,
+      },
+    });
+    if (this.events.length > 200) this.events.length = 200;
+    return true;
   }
 
   recordOrder({ side, action, requestedShares, execution, now, positionId, exitReason }) {
@@ -713,6 +796,8 @@ class OrderFlowBot extends MispricingBot {
       side,
       currentOpen.find((position) => position.side === side) || null,
     ]));
+    const pendingResolutionPositions = this.positions.filter((position) =>
+      position.status === 'PENDING_RESOLUTION');
     const flow = this.pressure?.evaluatedAt === now
       ? this.pressure
       : this.buildPressureSnapshot(now);
@@ -720,10 +805,11 @@ class OrderFlowBot extends MispricingBot {
       side,
       this.totalInventoryForSide(side),
     ]));
-    const activeOrders = this.orders.filter((order) =>
-      order.orderType === ORDER_TYPE
-      && Number(order.windowStart) === Number(windowStart)
-      && ['FILLED', 'PARTIALLY_FILLED'].includes(order.status));
+    const strategyOrders = this.orders.filter((order) =>
+      order.strategyId === this.strategyId);
+    const activeOrders = strategyOrders.filter((order) =>
+      Number(order.windowStart) === Number(windowStart)
+      && ['FILLED', 'PARTIALLY_FILLED', 'RESTING'].includes(order.status));
     const model = {
       ready: flow.ready,
       reason: flow.reason,
@@ -746,7 +832,7 @@ class OrderFlowBot extends MispricingBot {
       strategy: {
         id: this.strategyId,
         name: this.strategyName,
-        version: 'btc-5m-combined-orderflow-reversal-v1',
+        version: 'btc-5m-combined-orderflow-accumulation-v1',
         execution: 'PAPER ONLY',
         symbol: 'BTCUSDT',
         timeframe: '5m',
@@ -757,29 +843,37 @@ class OrderFlowBot extends MispricingBot {
         combinedSignalThreshold: config.FLOW_SIGNAL_THRESHOLD,
         componentMinimum: config.FLOW_COMPONENT_MIN,
         entrySharesPerSignal: config.FLOW_ENTRY_SHARES,
-        maxInventoryPerSide: config.FLOW_MAX_INVENTORY_PER_SIDE,
-        maxTotalInventoryShares: config.FLOW_MAX_INVENTORY_PER_SIDE * 2,
+        maxInventoryPerSide: null,
+        maxTotalInventoryShares: null,
         orderType: ORDER_TYPE,
         usesTakerOrders: true,
         accumulatesInventory: true,
         entries: {
           orderType: ORDER_TYPE,
           sharesPerSignal: config.FLOW_ENTRY_SHARES,
-          maxInventoryPerSide: config.FLOW_MAX_INVENTORY_PER_SIDE,
           oneEntryPerConfirmedSignalEpisode: true,
-          maxInventoryIncludesUnresolvedPositions: true,
+          inventoryLimit: 'Available paper cash and visible ask depth only.',
         },
         exit: {
-          orderType: ORDER_TYPE,
-          trigger: 'Three consecutive one-second opposite-pressure confirmations.',
-          fills: 'Sweep visible best-bid depth; partial paper fills are recorded and retried while fresh data remains available.',
-          fees: 'Modeled Polymarket taker fees are deducted.',
-          takeProfit: null,
-          stopLoss: null,
+          orderType: 'PAPER_LIMIT_TAKE_PROFIT_AND_STOP_LOSS',
+          trigger: `A fresh ${config.FLOW_TAKE_PROFIT_TRIGGER.toFixed(2)} best bid closes all accumulated shares at $${config.FLOW_TAKE_PROFIT_PAYOUT.toFixed(2)} each; a fresh ${config.FLOW_STOP_LOSS_TRIGGER.toFixed(2)}-or-lower best bid closes them at $${config.FLOW_STOP_LOSS_PAYOUT.toFixed(2)} each.`,
+          fills: 'Threshold touches close the full side position in the paper ledger; no opposite-signal sale.',
+          fees: 'Entry taker fees are modeled; terminal threshold exits have no modeled sell fee.',
+          takeProfit: {
+            triggerPrice: config.FLOW_TAKE_PROFIT_TRIGGER,
+            payoutPerShare: config.FLOW_TAKE_PROFIT_PAYOUT,
+            orderType: 'PAPER_LIMIT_TAKE_PROFIT',
+          },
+          stopLoss: {
+            triggerPrice: config.FLOW_STOP_LOSS_TRIGGER,
+            payoutPerShare: config.FLOW_STOP_LOSS_PAYOUT,
+            orderType: 'PAPER_STOP_LOSS',
+          },
+          oppositeSignal: 'Buy the signalled side and keep existing shares open.',
           windowEnd: 'Any unsold shares wait for official resolution of their original market.',
         },
         timing: 'Recalculate flow every second using the preceding five seconds of Binance and Polymarket data.',
-        sizing: `${config.FLOW_ENTRY_SHARES} shares per confirmed signal, capped at ${config.FLOW_MAX_INVENTORY_PER_SIDE} outstanding shares per outcome.`,
+        sizing: `${config.FLOW_ENTRY_SHARES} shares requested per new confirmed signal; UP and DOWN accumulate independently without a per-side share cap.`,
         trigger: `Require Binance and Polymarket directional pressure to agree, each component to exceed ${config.FLOW_COMPONENT_MIN.toFixed(2)}, and combined pressure to reach ±${config.FLOW_SIGNAL_THRESHOLD.toFixed(2)} for ${config.FLOW_CONFIRMATION_COUNT} consecutive checks.`,
         currentSignal: this.signal,
       },
@@ -803,27 +897,26 @@ class OrderFlowBot extends MispricingBot {
       },
       positionsBySide,
       openWindowPositions: currentOpen,
+      pendingResolutionPositions,
       inventory: {
         ...state.inventory,
         UP: {
           ...state.inventory?.UP,
           shares: Number(state.inventory?.UP?.shares) || 0,
-          maxShares: config.FLOW_MAX_INVENTORY_PER_SIDE,
           outstandingShares: totalInventory.UP,
         },
         DOWN: {
           ...state.inventory?.DOWN,
           shares: Number(state.inventory?.DOWN?.shares) || 0,
-          maxShares: config.FLOW_MAX_INVENTORY_PER_SIDE,
           outstandingShares: totalInventory.DOWN,
         },
         totalOutstandingShares: totalInventory.UP + totalInventory.DOWN,
       },
       flowState: { ...this.flowState },
       flowStats: {
-        ordersPlaced: this.orders.filter((order) => order.orderType === ORDER_TYPE).length,
-        buys: this.orders.filter((order) => order.orderType === ORDER_TYPE && order.action === 'BUY').length,
-        sells: this.orders.filter((order) => order.orderType === ORDER_TYPE && order.action === 'SELL').length,
+        ordersPlaced: strategyOrders.length,
+        buys: strategyOrders.filter((order) => order.action === 'BUY').length,
+        sells: strategyOrders.filter((order) => order.action === 'SELL').length,
         activeWindowOrders: activeOrders.length,
         inventoryBySide: totalInventory,
       },

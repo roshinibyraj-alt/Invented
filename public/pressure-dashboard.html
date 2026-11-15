@@ -79,6 +79,7 @@
       .price span { display: block; color: var(--muted); font-size: 11px; }
       .price strong { font-size: 17px; font-variant-numeric: tabular-nums; }
       .position { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; }
+      .risk-rule { display: block; margin-top: 9px; color: var(--amber); }
       .rules { display: grid; gap: 10px; }
       .rule { display: grid; grid-template-columns: 115px 1fr; gap: 12px; padding-bottom: 10px; border-bottom: 1px solid #203148; }
       .rule b { color: var(--blue); }
@@ -107,7 +108,7 @@
       <header>
         <div class="brand">
           <div class="mark" aria-hidden="true">₿</div>
-          <div><div class="eyebrow">Invented · BTC 5-minute</div><h1>Order-flow signal bot</h1></div>
+          <div><div class="eyebrow">Invented · BTC 5-minute</div><h1>Order-flow accumulation bot</h1></div>
         </div>
         <div class="badges"><span class="badge paper">PAPER ONLY</span><span class="pill warn" id="statusPill">CONNECTING</span><span class="badge" id="updatedAt">Updated —</span></div>
       </header>
@@ -115,8 +116,8 @@
       <section class="hero">
         <div>
           <div class="eyebrow">Binance aggressor trades × Polymarket CLOB</div>
-          <h2>Buy the side supported by both live flows.</h2>
-          <p>Each second, the bot compares aggressive BTC buying or selling with Polymarket UP/DOWN trade flow, top-book depth, and microprice. It requires three consecutive aligned checks before acting.</p>
+          <h2>Buy each confirmed side; hold both independently.</h2>
+          <p>Every new confirmed signal requests 100 shares for its side. An opposite signal adds to that side without selling the existing position. Each current-window side has a $0.99 take-profit and $0.01 stop-loss trigger.</p>
         </div>
         <div class="hero-state">
           <span class="badge" id="window">Waiting for market</span>
@@ -153,32 +154,42 @@
           <div class="panel-head"><div><div class="panel-title">Current Polymarket books</div><div class="panel-sub" id="marketTitle">BTC 5-minute UP/DOWN</div></div><span class="badge" id="clobStatus">CLOB waiting</span></div>
           <div class="side-grid">
             <div class="side-card up">
-              <div class="side-head"><strong>UP</strong><span class="badge" id="upPressure">Pressure —</span></div>
+              <div class="side-head"><strong>UP · current window</strong><span class="badge" id="upPressure">Pressure —</span></div>
               <div class="price-grid"><div class="price"><span>Best bid · size</span><strong id="upBid">—</strong></div><div class="price"><span>Best ask · size</span><strong id="upAsk">—</strong></div></div>
-              <div class="position"><strong id="upPosition">0 / 100 shares</strong><span id="upPnl">No open position</span></div>
+              <div class="position"><strong id="upPosition">0 shares · — avg</strong><span id="upPnl">No open position</span></div>
+              <small class="risk-rule" id="upRisk">TP $0.99 → $1/share · SL $0.01 → $0/share</small>
             </div>
             <div class="side-card down">
-              <div class="side-head"><strong>DOWN</strong><span class="badge" id="downPressure">Pressure —</span></div>
+              <div class="side-head"><strong>DOWN · current window</strong><span class="badge" id="downPressure">Pressure —</span></div>
               <div class="price-grid"><div class="price"><span>Best bid · size</span><strong id="downBid">—</strong></div><div class="price"><span>Best ask · size</span><strong id="downAsk">—</strong></div></div>
-              <div class="position"><strong id="downPosition">0 / 100 shares</strong><span id="downPnl">No open position</span></div>
+              <div class="position"><strong id="downPosition">0 shares · — avg</strong><span id="downPnl">No open position</span></div>
+              <small class="risk-rule" id="downRisk">TP $0.99 → $1/share · SL $0.01 → $0/share</small>
             </div>
           </div>
         </article>
       </section>
 
+      <section class="grid">
+        <article class="panel">
+          <div class="panel-head"><div><div class="panel-title">Waiting for official resolution</div><div class="panel-sub">Positions from ended windows are separate from current-window UP and DOWN boxes</div></div><span class="badge" id="resolutionCount">0 positions</span></div>
+          <div class="table-wrap"><table><thead><tr><th>Market</th><th>Side</th><th>Shares</th><th>Average entry</th><th>Window ended</th><th>Status</th></tr></thead><tbody id="resolutionPositions"><tr><td class="empty" colspan="6">No positions waiting for resolution</td></tr></tbody></table></div>
+        </article>
+      </section>
+
       <section class="grid two">
         <article class="panel">
-          <div class="panel-head"><div><div class="panel-title">How the strategy trades</div><div class="panel-sub">The active rules used by this paper bot</div></div><span class="badge">20-share clips</span></div>
+          <div class="panel-head"><div><div class="panel-title">How the strategy trades</div><div class="panel-sub">The active rules used by this paper bot</div></div><span class="badge">100 shares per signal</span></div>
           <div class="rules">
             <div class="rule"><b>Measure</b><span>Use the last five seconds of Binance aggressor notional and Polymarket CLOB trade flow, top-three-level depth imbalance, and microprice.</span></div>
             <div class="rule"><b>Confirm</b><span>Binance and Polymarket must point the same way; each must exceed 0.10 pressure and their combined score must reach ±0.30 for three one-second checks.</span></div>
-            <div class="rule"><b>Buy</b><span>On a newly confirmed UP or DOWN signal, sweep visible ask depth for up to 20 shares. Add no more while that signal remains active; outstanding inventory is capped at 100 shares per outcome.</span></div>
-            <div class="rule"><b>Reverse</b><span>A confirmed opposite signal independently attempts to sell the old side through visible bids and buy 20 shares of the new side. Partial exits are retried when fresh book depth is available.</span></div>
-            <div class="rule"><b>Settle</b><span>Shares still open at the end of their window wait for that exact Polymarket market’s official resolution. Taker fees are modeled; paper outcomes do not guarantee live execution.</span></div>
+            <div class="rule"><b>Buy</b><span>Each new confirmed signal requests 100 shares on that side and sweeps visible asks. UP and DOWN accumulate independently; opposite signals never sell existing shares. There is no per-side share cap.</span></div>
+            <div class="rule"><b>Take profit</b><span>A fresh best bid at $0.99 closes all accumulated shares on that side at $1 per share in the paper ledger. Sell fee is zero; the limit fill may earn a modeled maker rebate.</span></div>
+            <div class="rule"><b>Stop loss</b><span>A fresh best bid at $0.01 or lower closes all accumulated shares on that side at $0 per share in the paper ledger.</span></div>
+            <div class="rule"><b>Settle</b><span>Shares still open at the end of their window leave the current UP/DOWN boxes and wait in the resolution section for that market’s official result. Entry taker fees are modeled.</span></div>
           </div>
         </article>
         <article class="panel">
-          <div class="panel-head"><div><div class="panel-title">Recent orders</div><div class="panel-sub">Paper sweeps and modeled fees</div></div><span class="badge" id="orderCount">0 orders</span></div>
+          <div class="panel-head"><div><div class="panel-title">Recent orders</div><div class="panel-sub">Paper buys, TP/SL exits, and modeled fees</div></div><span class="badge" id="orderCount">0 orders</span></div>
           <div class="table-wrap"><table><thead><tr><th>Time</th><th>Action</th><th>Side</th><th>Filled / requested</th><th>Average</th><th>Fees</th><th>Status</th></tr></thead><tbody id="orders"><tr><td class="empty" colspan="7">Waiting for a confirmed signal</td></tr></tbody></table></div>
         </article>
       </section>
@@ -265,16 +276,25 @@
           set(`${key}Bid`,`${price(quote.bestBid)} · ${fmtShares(quote.bidSize)}`);
           set(`${key}Ask`,`${price(quote.bestAsk)} · ${fmtShares(quote.askSize)}`);
           set(`${key}Pressure`,`Pressure ${score(book.score)}`);
-          set(`${key}Position`,`${fmtShares(sideInventory.shares||position?.shares)}/${Number(sideInventory.maxShares||100)} shares · ${money(sideInventory.averageCost ?? position?.entryPrice)} avg`);
+          const shares = sideInventory.shares != null ? sideInventory.shares : position?.shares;
+          set(`${key}Position`,`${fmtShares(shares)} shares · ${money(sideInventory.averageCost ?? position?.entryPrice)} avg`);
           set(`${key}Pnl`,position ? `${money(position.unrealizedPnl)} floating` : "No open position");
           if (position) $(`${key}Pnl`).className = pnlClass(position.unrealizedPnl);
         }
-        const orders = Array.isArray(state.orders) ? state.orders.filter(x => x.orderType === "PAPER_MARKET_SWEEP") : [];
+        const orders = Array.isArray(state.orders) ? state.orders.filter(x =>
+          ["PAPER_MARKET_SWEEP","PAPER_LIMIT_TAKE_PROFIT","PAPER_STOP_LOSS"].includes(x.orderType)) : [];
         set("orderCount",`${orders.length} orders`);
         $("orders").innerHTML = orders.length ? orders.slice(0,25).map(order => `<tr>
-          <td>${time(order.createdAt)}</td><td><span class="tag">${esc(order.action)}</span></td><td>${esc(order.side)}</td>
-          <td>${fmtShares(order.filledShares)} / ${fmtShares(order.requestedShares)}</td><td>${price(order.averagePrice)}</td>
+          <td>${time(order.filledAt || order.createdAt)}</td><td><span class="tag">${esc(order.exitReason || order.action)}</span></td><td>${esc(order.side)}</td>
+          <td>${fmtShares(order.filledShares)} / ${fmtShares(order.requestedShares)}</td><td>${price(order.averagePrice ?? order.limitPrice)}</td>
           <td>${money(order.fees)}</td><td>${esc(order.status)}</td></tr>`).join("") : `<tr><td class="empty" colspan="7">Waiting for a confirmed signal</td></tr>`;
+        const pending = Array.isArray(state.pendingResolutionPositions) ? state.pendingResolutionPositions : [];
+        set("resolutionCount",`${pending.length} positions`);
+        $("resolutionPositions").innerHTML = pending.length ? pending.map(position => `<tr>
+          <td>${esc(position.marketTitle || position.marketSlug || "BTC 5-minute market")}</td>
+          <td><strong>${esc(position.side)}</strong></td><td>${fmtShares(position.shares)}</td>
+          <td>${price(position.entryPrice)}</td><td>${dt(position.windowEnd)}</td><td>${esc(position.status)}</td>
+        </tr>`).join("") : `<tr><td class="empty" colspan="6">No positions waiting for resolution</td></tr>`;
         const trades = Array.isArray(state.trades) ? state.trades : [];
         set("positionCount",`${trades.length} positions`);
         $("positions").innerHTML = trades.length ? trades.slice(0,30).map(position => `<tr>

@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const startServer = require('../server');
 
 test('state endpoint returns the current strategy with no cache', async t => {
-  const expected = { mode: 'DEMO ONLY', strategy: { id: 'btc-5m-combined-orderflow-reversal' } };
+  const expected = { mode: 'DEMO ONLY', strategy: { id: 'btc-5m-combined-orderflow-accumulation' } };
   const server = startServer({ snapshot: () => expected }, 0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -16,7 +16,7 @@ test('state endpoint returns the current strategy with no cache', async t => {
 });
 
 test('dashboard state route serves the same live strategy snapshot', async t => {
-  const expected = { mode: 'DEMO ONLY', strategy: { id: 'btc-5m-combined-orderflow-reversal' } };
+  const expected = { mode: 'DEMO ONLY', strategy: { id: 'btc-5m-combined-orderflow-accumulation' } };
   const server = startServer({ snapshot: () => expected }, 0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -44,7 +44,7 @@ test('health endpoint reports strategy errors as unhealthy', async t => {
   assert.deepEqual(await response.json(), { ok: false, mode: 'DEMO', status: 'ERROR', now: 123 });
 });
 
-test('dashboard explains the combined pressure strategy and reversal rules', async t => {
+test('dashboard explains independent accumulation, TP/SL, and resolution rules', async t => {
   const server = startServer({ snapshot: () => ({}) }, 0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -52,12 +52,15 @@ test('dashboard explains the combined pressure strategy and reversal rules', asy
   const html = await response.text();
   assert.equal(response.status, 200);
   assert.match(html, /Invented · BTC 5-minute/);
-  assert.match(html, /Order-flow signal bot/i);
-  assert.match(html, /three consecutive aligned checks/i);
+  assert.match(html, /Order-flow accumulation bot/i);
+  assert.match(html, /three one-second checks/i);
   assert.match(html, /last five seconds/i);
-  assert.match(html, /20-share clips/i);
-  assert.match(html, /100 shares per outcome/i);
-  assert.match(html, /confirmed opposite signal/i);
+  assert.match(html, /100 shares per signal/i);
+  assert.match(html, /opposite signals never sell existing shares/i);
+  assert.match(html, /0\.99/);
+  assert.match(html, /0\.01/);
+  assert.match(html, /Waiting for official resolution/i);
+  assert.match(html, /current-window UP and DOWN boxes/i);
   assert.match(html, /official resolution/i);
   assert.match(html, /PAPER ONLY/);
   assert.match(html, /Binance BTCUSDT aggregate-trade WebSocket/);
