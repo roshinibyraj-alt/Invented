@@ -57,11 +57,11 @@ test('dashboard explains independent accumulation, TP/SL, and resolution rules',
   assert.match(html, /last five seconds/i);
   assert.match(html, /100 shares per signal/i);
   assert.match(html, /opposite signal never sells existing shares/i);
-  assert.match(html, /rests a 100-share maker buy/i);
-  assert.match(html, /\$0\.03/);
+  assert.match(html, /immediately sweeps visible asks/i);
+  assert.match(html, /taker fees/i);
   assert.match(html, /Global equity curve/i);
   assert.match(html, /Completed-window win rate/i);
-  assert.match(html, /estimated maker rebate/i);
+  assert.match(html, /estimated TP maker rebates/i);
   assert.match(html, /0\.99/);
   assert.match(html, /0\.01/);
   assert.match(html, /Waiting for official resolution/i);

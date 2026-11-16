@@ -3,11 +3,11 @@
 const MispricingBot = require('./mispricing-bot');
 const WickBot = require('./wick-bot');
 const config = require('./config');
-const { feeContext, makerRebateFor } = WickBot._test;
+const { feeContext, makerRebateFor, takerFeeFor } = WickBot._test;
 
 const EPSILON = 1e-8;
 const SIDES = ['UP', 'DOWN'];
-const ORDER_TYPE = 'PAPER_LIMIT_MAKER';
+const ORDER_TYPE = 'PAPER_TAKER_SWEEP';
 
 function clamp(value, minimum = -1, maximum = 1) {
   return Math.max(minimum, Math.min(maximum, Number(value) || 0));
@@ -86,8 +86,6 @@ class OrderFlowBot extends MispricingBot {
   }
 
   openStrategyWindow(start, now) {
-    this.cancelPendingMakerEntries(now, 'WINDOW_END', (order) =>
-      Number(order.windowStart) !== Number(start));
     super.openStrategyWindow(start, now);
     this.strategyWindowStart = start;
     this.clobTrades = { UP: [], DOWN: [] };
@@ -321,7 +319,6 @@ class OrderFlowBot extends MispricingBot {
     }
     if (this.strategyWindowStart !== windowStart) this.openStrategyWindow(windowStart, now);
 
-    const makerFills = this.processPendingMakerBuys(now);
     const thresholdExits = this.processThresholdExits(now);
     const nextPressure = this.buildPressureSnapshot(now);
     this.pressure = nextPressure;
@@ -383,61 +380,36 @@ class OrderFlowBot extends MispricingBot {
         combinedScore: nextPressure.combinedScore,
       };
     }
-    return changed || makerFills > 0 || thresholdExits > 0;
+    return changed || thresholdExits > 0;
   }
 
   handleConfirmedSignal(side, now) {
-    this.cancelPendingMakerEntries(now, 'NEXT_SIGNAL');
-    const submitted = this.submitBuyLimit(side, now, this.pressure);
+    const submitted = this.submitBuyTakerSweep(side, now, this.pressure);
+    const filledShares = Number(submitted.filledShares) || 0;
+    const requestedShares = Number(config.FLOW_ENTRY_SHARES) || 0;
+    const averagePrice = Number.isFinite(Number(submitted.averagePrice))
+      ? Number(submitted.averagePrice)
+      : null;
     this.signal = {
       side,
       action: side === 'UP' ? 'BUY_UP' : 'BUY_DOWN',
-      reason: submitted.status === 'RESTING'
-        ? `${side} pressure confirmed; resting ${config.FLOW_ENTRY_SHARES} shares at $${submitted.limitPrice.toFixed(2)}.`
-        : `${side} pressure confirmed, but no maker order was placed: ${submitted.reason}.`,
+      reason: filledShares > 0
+        ? `${side} pressure confirmed; taker sweep filled ${filledShares.toFixed(2)} of ${requestedShares} shares at an average $${averagePrice.toFixed(3)}. ${submitted.unfilledShares > EPSILON ? `${submitted.unfilledShares.toFixed(2)} unfilled shares were cancelled.` : ''}`
+        : `${side} pressure confirmed, but no shares filled: ${submitted.reason || 'no executable ask depth was available'}.`,
       combinedScore: this.pressure.combinedScore,
       binanceScore: this.pressure.binance?.score,
       polymarketScore: this.pressure.polymarket?.score,
-      buyFilledShares: submitted.filledShares || 0,
+      buyFilledShares: filledShares,
+      buyUnfilledShares: Number(submitted.unfilledShares) || 0,
+      averagePrice,
+      fees: Number(submitted.fees) || 0,
       orderId: submitted.orderId || null,
       orderStatus: submitted.status || 'NOT_PLACED',
-      limitPrice: submitted.limitPrice ?? null,
     };
-    return submitted.status === 'RESTING';
+    return filledShares > 0;
   }
 
-  cancelPendingMakerEntries(now, reason, predicate = () => true) {
-    let cancelled = 0;
-    for (const order of this.orders) {
-      if (order.action !== 'BUY'
-        || order.orderType !== ORDER_TYPE
-        || order.status !== 'RESTING'
-        || !predicate(order)) continue;
-      order.status = `CANCELLED_${reason}`;
-      order.cancelledAt = now;
-      order.cancelReason = reason;
-      order.remainingShares = 0;
-      cancelled += 1;
-      this.log('PAPER_FLOW_BUY_LIMIT_CANCELLED', {
-        orderId: order.id,
-        side: order.side,
-        limitPrice: order.limitPrice,
-        reason,
-      });
-      this.events.unshift({
-        ts: now,
-        at: now,
-        event: 'PAPER_BUY_LIMIT_CANCELLED',
-        type: 'PAPER_BUY_LIMIT_CANCELLED',
-        message: `${order.side} resting buy at $${Number(order.limitPrice).toFixed(2)} cancelled: ${reason === 'NEXT_SIGNAL' ? 'a new signal arrived' : 'the window ended'}.`,
-        details: { orderId: order.id, side: order.side, reason },
-      });
-    }
-    if (this.events.length > 200) this.events.length = 200;
-    return cancelled;
-  }
-
-  submitBuyLimit(side, now, signal) {
+  submitBuyTakerSweep(side, now, signal) {
     const requestedShares = config.FLOW_ENTRY_SHARES;
     if (!(requestedShares > EPSILON)) return { filledShares: 0, reason: 'INVALID_ENTRY_SIZE' };
     const quote = this.flowQuote(side, now);
@@ -445,32 +417,21 @@ class OrderFlowBot extends MispricingBot {
     if (!quote || !Number.isFinite(bestAsk)) {
       return { filledShares: 0, reason: 'NO_FRESH_ASK' };
     }
-    const limitPrice = Number((bestAsk - config.FLOW_ENTRY_OFFSET).toFixed(2));
-    if (!(limitPrice >= 0.01 && limitPrice < bestAsk)) {
-      return { filledShares: 0, reason: 'ASK_MINUS_OFFSET_IS_OUTSIDE_VALID_PRICE_RANGE' };
-    }
-    const reservedCash = this.orders
-      .filter((order) => order.action === 'BUY'
-        && order.orderType === ORDER_TYPE
-        && order.status === 'RESTING')
-      .reduce((sum, order) => sum + Number(order.limitPrice) * Number(order.remainingShares), 0);
-    if (limitPrice * requestedShares > this.cash - reservedCash + EPSILON) {
-      return { filledShares: 0, reason: 'INSUFFICIENT_PAPER_CASH' };
-    }
 
     const windowStart = this.getActiveWindowStart();
     const order = {
-      id: `${windowStart}-btc-${side.toLowerCase()}-buy-maker-${++this.orderSequence}`,
+      id: `${windowStart}-btc-${side.toLowerCase()}-buy-taker-${++this.orderSequence}`,
       strategyId: this.strategyId,
       action: 'BUY',
       side,
       orderType: ORDER_TYPE,
-      status: 'RESTING',
+      status: 'SUBMITTED',
       requestedShares,
       filledShares: 0,
       remainingShares: requestedShares,
       unfilledShares: requestedShares,
-      limitPrice,
+      cancelledShares: 0,
+      maxAskPrice: config.FLOW_TAKER_MAX_PRICE,
       averagePrice: null,
       grossCost: 0,
       fees: 0,
@@ -478,8 +439,9 @@ class OrderFlowBot extends MispricingBot {
       createdAt: now,
       windowStart,
       paperOnly: true,
-      immediateOrCancel: false,
-      fillRule: 'FULL_ORDER_ON_FRESH_BEST_ASK_AT_OR_BELOW_LIMIT; QUEUE_AND_AVAILABLE_SIZE_IGNORED',
+      timeInForce: 'FAK',
+      immediateOrCancel: true,
+      fillRule: 'SWEEP_FRESH_VISIBLE_ASK_LEVELS_IN_PRICE_ORDER_UP_TO_MAX_PRICE; FAK_REMAINDER_CANCELLED; TAKER_FEES_MODELED',
       signal: {
         combinedScore: signal?.combinedScore ?? null,
         binanceScore: signal?.binance?.score ?? null,
@@ -489,131 +451,152 @@ class OrderFlowBot extends MispricingBot {
     this.orders.unshift(order);
     this.windowOrders.unshift(order);
     this.totalOrderAttempts += 1;
-    this.log('PAPER_FLOW_BUY_LIMIT_RESTING', {
+    const asks = (Array.isArray(quote.askLevels) ? quote.askLevels : [])
+      .map((level) => ({
+        price: Number(level?.price),
+        size: Number(level?.availableSize ?? level?.size),
+      }))
+      .filter((level) => Number.isFinite(level.price)
+        && level.price >= 0.01
+        && level.price <= config.FLOW_TAKER_MAX_PRICE + EPSILON
+        && Number.isFinite(level.size)
+        && level.size > 0)
+      .sort((a, b) => a.price - b.price);
+    if (asks.length === 0 && Number(quote.askSize) > 0
+      && bestAsk >= 0.01 && bestAsk <= config.FLOW_TAKER_MAX_PRICE + EPSILON) {
+      asks.push({ price: bestAsk, size: Number(quote.askSize) });
+    }
+
+    const fills = [];
+    let remainingShares = requestedShares;
+    let grossCost = 0;
+    let fees = 0;
+    let cashAvailable = Number(this.cash) || 0;
+    for (const ask of asks) {
+      if (remainingShares <= EPSILON || cashAvailable <= EPSILON) break;
+      const feePerShare = takerFeeFor(this.market || {}, ask.price, 1);
+      const costPerShare = ask.price + feePerShare;
+      if (!(costPerShare > 0)) continue;
+      const affordableShares = cashAvailable / costPerShare;
+      const shares = Number(Math.min(remainingShares, ask.size, affordableShares).toFixed(6));
+      if (!(shares > EPSILON)) break;
+      const gross = ask.price * shares;
+      const fee = takerFeeFor(this.market || {}, ask.price, shares);
+      if (gross + fee > cashAvailable + EPSILON) break;
+      fills.push({ price: ask.price, shares, fee });
+      grossCost += gross;
+      fees += fee;
+      cashAvailable -= gross + fee;
+      remainingShares = Math.max(0, requestedShares - fills.reduce((sum, fill) => sum + fill.shares, 0));
+    }
+
+    const filledShares = fills.reduce((sum, fill) => sum + fill.shares, 0);
+    const averagePrice = filledShares > EPSILON ? grossCost / filledShares : null;
+    const unfilledShares = Math.max(0, requestedShares - filledShares);
+    const remainderReason = cashAvailable <= EPSILON
+      ? 'INSUFFICIENT_PAPER_CASH'
+      : asks.length === 0
+        ? 'NO_EXECUTABLE_ASK_DEPTH'
+        : 'INSUFFICIENT_ASK_DEPTH';
+    const status = unfilledShares <= EPSILON
+      ? 'FILLED'
+      : filledShares > EPSILON
+        ? 'PARTIALLY_FILLED'
+        : 'UNFILLED';
+    order.status = status;
+    order.filledShares = filledShares;
+    order.remainingShares = 0;
+    order.unfilledShares = unfilledShares;
+    order.cancelledShares = unfilledShares;
+    order.cancelledAt = unfilledShares > EPSILON ? now : null;
+    order.cancelReason = unfilledShares > EPSILON ? 'FAK_REMAINDER_CANCELLED' : null;
+    order.averagePrice = averagePrice;
+    order.grossCost = grossCost;
+    order.fees = fees;
+    order.fills = fills.map((fill) => ({ ...fill, at: now }));
+    order.levelsSwept = fills.length;
+    order.filledAt = filledShares > EPSILON ? now : null;
+
+    let position = null;
+    if (filledShares > EPSILON) {
+      position = this.currentPosition(side, windowStart)
+        || this.createPosition(side, windowStart, now);
+      position.shares += filledShares;
+      position.initialShares += filledShares;
+      position.totalCost += grossCost;
+      position.initialTotalCost += grossCost;
+      position.entryPrice = position.initialTotalCost / position.initialShares;
+      position.avgEntry = position.entryPrice;
+      position.fees = Number(position.fees || 0) + fees;
+      position.initialFees = Number(position.initialFees || 0) + fees;
+      position.entryFees = Number(position.entryFees || 0) + fees;
+      position.filledAt = now;
+      position.lastAddedAt = now;
+      position.entryFills.push(...fills.map((fill) => ({ ...fill, at: now })));
+      position.takeProfitPrice = config.FLOW_TAKE_PROFIT_TRIGGER;
+      position.stopLossPrice = config.FLOW_STOP_LOSS_TRIGGER;
+      position.entrySignals.push({
+        at: now,
+        side,
+        shares: filledShares,
+        averagePrice,
+        fees,
+        combinedScore: order.signal?.combinedScore ?? null,
+        binanceScore: order.signal?.binanceScore ?? null,
+        polymarketScore: order.signal?.polymarketScore ?? null,
+        orderId: order.id,
+      });
+      this.cash -= grossCost + fees;
+      order.positionId = position.id;
+      position.lastEntryOrderId = order.id;
+      this.createTakeProfitOrder(position, now);
+    }
+
+    this.log('PAPER_FLOW_BUY_TAKER_SWEEP', {
       orderId: order.id,
+      positionId: position?.id || null,
       side,
       requestedShares,
-      bestAsk,
-      limitPrice,
-      offset: config.FLOW_ENTRY_OFFSET,
-      expiresOn: 'NEXT_CONFIRMED_SIGNAL_OR_WINDOW_END',
+      filledShares,
+      unfilledShares,
+      averagePrice,
+      grossCost,
+      fees,
+      askLevelsSwept: fills.length,
+      maxAskPrice: config.FLOW_TAKER_MAX_PRICE,
+      status,
     });
     this.events.unshift({
       ts: now,
       at: now,
-      event: 'PAPER_BUY_LIMIT_RESTING',
-      type: 'PAPER_BUY_LIMIT_RESTING',
-      message: `${side} resting maker buy placed for ${requestedShares} shares at $${limitPrice.toFixed(2)} (best ask $${bestAsk.toFixed(2)} minus $${config.FLOW_ENTRY_OFFSET.toFixed(2)}).`,
-      details: { orderId: order.id, side, requestedShares, bestAsk, limitPrice },
-    });
-    if (this.events.length > 200) this.events.length = 200;
-    return { filledShares: 0, orderId: order.id, status: order.status, limitPrice };
-  }
-
-  processPendingMakerBuys(now = this.now()) {
-    let filled = 0;
-    for (const order of this.orders) {
-      if (order.action !== 'BUY'
-        || order.orderType !== ORDER_TYPE
-        || order.status !== 'RESTING') continue;
-      if (Number(order.windowStart) !== Number(this.getActiveWindowStart())) {
-        this.cancelPendingMakerEntries(now, 'WINDOW_END', (candidate) => candidate.id === order.id);
-        continue;
-      }
-      const quote = this.flowQuote(order.side, now);
-      const bestAsk = Number(quote?.bestAsk);
-      if (!quote || !Number.isFinite(bestAsk)
-        || bestAsk > Number(order.limitPrice) + EPSILON) continue;
-      if (this.fillMakerBuy(order, Math.min(bestAsk, Number(order.limitPrice)), now)) filled += 1;
-    }
-    return filled;
-  }
-
-  fillMakerBuy(order, fillPrice, now) {
-    const shares = Number(order.remainingShares);
-    const gross = fillPrice * shares;
-    if (!(shares > EPSILON) || !(fillPrice > 0) || gross > this.cash + EPSILON) {
-      order.status = 'CANCELLED_INSUFFICIENT_CASH';
-      order.cancelledAt = now;
-      order.remainingShares = 0;
-      return false;
-    }
-
-    const rebate = makerRebateFor(this.market || {}, fillPrice, shares).estimate;
-    const windowStart = Number(order.windowStart);
-    const position = this.currentPosition(order.side, windowStart)
-      || this.createPosition(order.side, windowStart, now);
-    position.shares += shares;
-    position.initialShares += shares;
-    position.totalCost += gross;
-    position.initialTotalCost += gross;
-    position.entryPrice = position.initialTotalCost / position.initialShares;
-    position.avgEntry = position.entryPrice;
-    position.fees = 0;
-    position.initialFees = 0;
-    position.entryFees = 0;
-    position.estimatedMakerRebate = Number(position.estimatedMakerRebate || 0) + rebate;
-    position.makerRebateEstimate = position.estimatedMakerRebate;
-    position.estimatedEntryMakerRebate = Number(position.estimatedEntryMakerRebate || 0) + rebate;
-    position.filledAt = now;
-    position.lastAddedAt = now;
-    position.entryFills.push({ price: fillPrice, shares, at: now });
-    position.takeProfitPrice = config.FLOW_TAKE_PROFIT_TRIGGER;
-    position.stopLossPrice = config.FLOW_STOP_LOSS_TRIGGER;
-    position.entrySignals.push({
-      at: now,
-      side: order.side,
-      shares,
-      averagePrice: fillPrice,
-      combinedScore: order.signal?.combinedScore ?? null,
-      binanceScore: order.signal?.binanceScore ?? null,
-      polymarketScore: order.signal?.polymarketScore ?? null,
-      orderId: order.id,
-    });
-    this.cash -= gross - rebate;
-
-    order.status = 'FILLED';
-    order.filledShares = shares;
-    order.remainingShares = 0;
-    order.unfilledShares = 0;
-    order.averagePrice = fillPrice;
-    order.grossCost = gross;
-    order.fees = 0;
-    order.estimatedMakerRebate = rebate;
-    order.fillRule = 'FILLED_ON_FRESH_BEST_ASK_TOUCH_OR_CROSS; QUEUE_AND_AVAILABLE_SIZE_IGNORED';
-    order.filledAt = now;
-    order.fills = [{ price: fillPrice, shares }];
-    order.positionId = position.id;
-    position.lastEntryOrderId = order.id;
-    this.createTakeProfitOrder(position, now);
-    this.log('PAPER_FLOW_BUY_LIMIT_FILLED', {
-      orderId: order.id,
-      positionId: position.id,
-      side: order.side,
-      shares,
-      fillPrice,
-      grossCost: gross,
-      fees: 0,
-      estimatedMakerRebate: rebate,
-      positionShares: position.shares,
-    });
-    this.events.unshift({
-      ts: now,
-      at: now,
-      event: 'PAPER_BUY_LIMIT_FILLED',
-      type: 'PAPER_BUY_LIMIT_FILLED',
-      message: `${shares} ${order.side} shares paper-filled at $${fillPrice.toFixed(2)}; taker fee $0.00 and estimated maker rebate $${rebate.toFixed(3)}.`,
+      event: 'PAPER_BUY_TAKER_SWEEP',
+      type: 'PAPER_BUY_TAKER_SWEEP',
+      message: filledShares > EPSILON
+        ? `${filledShares.toFixed(2)} of ${requestedShares} ${side} shares swept across ${fills.length} ask level(s) at $${averagePrice.toFixed(3)} average; taker fees $${fees.toFixed(3)}.${unfilledShares > EPSILON ? ` ${unfilledShares.toFixed(2)} unfilled shares cancelled (${remainderReason.toLowerCase().replaceAll('_', ' ')}).` : ''}`
+        : `${side} taker sweep had no fill; ${requestedShares} shares cancelled (${remainderReason.toLowerCase().replaceAll('_', ' ')}).`,
       details: {
         orderId: order.id,
-        positionId: position.id,
-        side: order.side,
-        shares,
-        fillPrice,
-        estimatedMakerRebate: rebate,
+        positionId: position?.id || null,
+        side,
+        requestedShares,
+        filledShares,
+        unfilledShares,
+        averagePrice,
+        fees,
+        askLevelsSwept: fills.length,
+        maxAskPrice: config.FLOW_TAKER_MAX_PRICE,
       },
     });
     if (this.events.length > 200) this.events.length = 200;
-    return true;
+    return {
+      filledShares,
+      unfilledShares,
+      averagePrice,
+      fees,
+      orderId: order.id,
+      status,
+      reason: unfilledShares > EPSILON ? remainderReason : null,
+    };
   }
 
   processThresholdExits(now = this.now()) {
@@ -1013,7 +996,7 @@ class OrderFlowBot extends MispricingBot {
       strategy: {
         id: this.strategyId,
         name: this.strategyName,
-        version: 'btc-5m-combined-orderflow-accumulation-v1',
+        version: 'btc-5m-combined-orderflow-taker-sweep-v2',
         execution: 'PAPER ONLY',
         symbol: 'BTCUSDT',
         timeframe: '5m',
@@ -1024,27 +1007,27 @@ class OrderFlowBot extends MispricingBot {
         combinedSignalThreshold: config.FLOW_SIGNAL_THRESHOLD,
         componentMinimum: config.FLOW_COMPONENT_MIN,
         entrySharesPerSignal: config.FLOW_ENTRY_SHARES,
-        entryOffsetFromBestAsk: config.FLOW_ENTRY_OFFSET,
+        entryMaxAskPrice: config.FLOW_TAKER_MAX_PRICE,
         maxInventoryPerSide: null,
         maxTotalInventoryShares: null,
         orderType: ORDER_TYPE,
-        usesTakerOrders: false,
+        usesTakerOrders: true,
         accumulatesInventory: true,
         entries: {
           orderType: ORDER_TYPE,
           sharesPerSignal: config.FLOW_ENTRY_SHARES,
-          limitOffsetFromBestAsk: config.FLOW_ENTRY_OFFSET,
+          maxAskPrice: config.FLOW_TAKER_MAX_PRICE,
+          timeInForce: 'FAK',
           oneEntryPerConfirmedSignalEpisode: true,
-          cancelUnfilledOnNextConfirmedSignal: true,
-          cancelUnfilledAtWindowEnd: true,
-          paperFillRule: 'A fresh best ask touching or crossing the limit fills the full order; queue position and available size are not simulated.',
+          cancelUnfilledImmediately: true,
+          paperFillRule: 'Sweep fresh displayed ask levels in ascending price order up to the maximum ask price and requested shares; model taker fees; cancel any unfilled FAK remainder.',
           inventoryLimit: 'Available paper cash only.',
         },
         exit: {
           orderType: 'PAPER_LIMIT_TAKE_PROFIT_AND_STOP_LOSS',
           trigger: `A fresh ${config.FLOW_TAKE_PROFIT_TRIGGER.toFixed(2)} best bid closes all accumulated shares at $${config.FLOW_TAKE_PROFIT_PAYOUT.toFixed(2)} each; a fresh ${config.FLOW_STOP_LOSS_TRIGGER.toFixed(2)}-or-lower best bid closes them at $${config.FLOW_STOP_LOSS_PAYOUT.toFixed(2)} each.`,
           fills: 'Threshold touches close the full side position in the paper ledger; no opposite-signal sale.',
-          fees: 'Maker buy orders have no modeled taker fee; estimated maker rebates are not guaranteed. Terminal threshold exits have no modeled sell fee.',
+          fees: 'Entry taker fees use the market fee schedule. A maker take-profit may earn an estimated rebate; terminal threshold exits have no modeled sell fee.',
           takeProfit: {
             triggerPrice: config.FLOW_TAKE_PROFIT_TRIGGER,
             payoutPerShare: config.FLOW_TAKE_PROFIT_PAYOUT,
@@ -1058,7 +1041,7 @@ class OrderFlowBot extends MispricingBot {
           oppositeSignal: 'Buy the signalled side and keep existing shares open.',
           windowEnd: 'Any unsold shares wait for official resolution of their original market.',
         },
-        timing: 'Recalculate flow every second using the preceding five seconds of Binance and Polymarket data; cancel unfilled maker buys on the next confirmed signal or window end.',
+        timing: 'Recalculate flow every second using the preceding five seconds of Binance and Polymarket data; submit an immediate taker sweep when a new signal is confirmed.',
         sizing: `${config.FLOW_ENTRY_SHARES} shares requested per new confirmed signal; UP and DOWN accumulate independently without a per-side share cap.`,
         trigger: `Require Binance and Polymarket directional pressure to agree, each component to exceed ${config.FLOW_COMPONENT_MIN.toFixed(2)}, and combined pressure to reach ±${config.FLOW_SIGNAL_THRESHOLD.toFixed(2)} for ${config.FLOW_CONFIRMATION_COUNT} consecutive checks.`,
         currentSignal: this.signal,
@@ -1114,8 +1097,8 @@ class OrderFlowBot extends MispricingBot {
         buys: strategyOrders.filter((order) => order.action === 'BUY').length,
         sells: strategyOrders.filter((order) => order.action === 'SELL').length,
         activeWindowOrders: activeOrders.length,
-        pendingMakerBuys: activeOrders.filter((order) =>
-          order.action === 'BUY' && order.orderType === ORDER_TYPE && order.status === 'RESTING').length,
+        pendingTakerBuys: activeOrders.filter((order) =>
+          order.action === 'BUY' && order.orderType === ORDER_TYPE && order.status === 'SUBMITTED').length,
         inventoryBySide: totalInventory,
       },
       window: windowStart == null ? null : {
