@@ -44,7 +44,7 @@ test('health endpoint reports strategy errors as unhealthy', async t => {
   assert.deepEqual(await response.json(), { ok: false, mode: 'DEMO', status: 'ERROR', now: 123 });
 });
 
-test('dashboard explains independent accumulation, TP/SL, and resolution rules', async t => {
+test('dashboard explains resting entries, independent accumulation, TP/SL, and resolution rules', async t => {
   const server = startServer({ snapshot: () => ({}) }, 0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -57,11 +57,12 @@ test('dashboard explains independent accumulation, TP/SL, and resolution rules',
   assert.match(html, /last five seconds/i);
   assert.match(html, /100 shares per signal/i);
   assert.match(html, /opposite signal never sells existing shares/i);
-  assert.match(html, /immediately sweeps visible asks/i);
-  assert.match(html, /taker fees/i);
+  assert.match(html, /resting buy limit/i);
+  assert.match(html, /midpoint drops at least \$0\.01 below the limit/i);
+  assert.match(html, /no modeled taker fee/i);
   assert.match(html, /Global equity curve/i);
   assert.match(html, /Completed-window win rate/i);
-  assert.match(html, /estimated TP maker rebates/i);
+  assert.match(html, /estimated maker rebates/i);
   assert.match(html, /0\.99/);
   assert.match(html, /0\.01/);
   assert.match(html, /Waiting for official resolution/i);
