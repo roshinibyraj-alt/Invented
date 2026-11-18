@@ -114,7 +114,7 @@
       <header>
         <div class="brand">
           <div class="mark" aria-hidden="true">₿</div>
-          <div><div class="eyebrow">Invented · BTC 5-minute</div><h1>Order-flow accumulation bot</h1></div>
+          <div><div class="eyebrow">Invented · BTC 5-minute</div><h1>Order-flow flip bot</h1></div>
         </div>
         <div class="badges"><span class="badge paper">PAPER ONLY</span><span class="pill warn" id="statusPill">CONNECTING</span><span class="badge" id="updatedAt">Updated —</span></div>
       </header>
@@ -122,8 +122,8 @@
       <section class="hero">
         <div>
           <div class="eyebrow">Binance aggressor trades × Polymarket CLOB</div>
-          <h2>Buy opposite each confirmed signal; hold both independently.</h2>
-          <p>Each newly confirmed UP signal places a 100-share resting buy limit on DOWN; a DOWN signal buys UP. The limit uses the bought side’s current midpoint and fills in full only after a fresh midpoint drops at least $0.01 below the limit. A later confirmed signal or window end cancels an unfilled order. Entries have no modeled taker fee, and eligible maker rebates are estimated. TP $0.99 and SL $0.01 stay unchanged.</p>
+          <h2>Buy the signalled side; keep only one active side.</h2>
+          <p>Each confirmed signal places a resting buy on that same side. A new signal in the active direction adds 100 shares. An opposite signal sells the full current position at the best bid, then places a resting buy for the same share count on the new side. The $0.99 take-profit and $0.01 stop-loss remain active.</p>
         </div>
         <div class="hero-state">
           <span class="badge" id="window">Waiting for market</span>
@@ -202,12 +202,13 @@
 
       <section class="grid two">
         <article class="panel">
-          <div class="panel-head"><div><div class="panel-title">How the strategy trades</div><div class="panel-sub">The active rules used by this paper bot</div></div><span class="badge">100 shares per signal</span></div>
+          <div class="panel-head"><div><div class="panel-title">How the strategy trades</div><div class="panel-sub">The active rules used by this paper bot</div></div><span class="badge">100 shares per same-side signal</span></div>
           <div class="rules">
             <div class="rule"><b>Measure</b><span>Use the last five seconds of Binance aggressor notional and Polymarket CLOB trade flow, top-three-level depth imbalance, and microprice.</span></div>
             <div class="rule"><b>Confirm</b><span>Binance and Polymarket must point the same way; each must exceed 0.10 pressure and their combined score must reach ±0.30 for three one-second checks.</span></div>
-            <div class="rule"><b>Resting limit entry</b><span>An UP signal buys DOWN; a DOWN signal buys UP. Each confirmed signal places a 100-share limit at the bought side's current midpoint. A fresh midpoint drops at least $0.01 below the limit to count as a full fill at the limit price, regardless of displayed depth. The paper fill does not model queue position.</span></div>
-            <div class="rule"><b>Order replacement</b><span>An unfilled entry rests until the next confirmed signal or the end of the current window. A new signal cancels the old pending order and places a fresh midpoint limit on the opposite side; it never sells existing shares.</span></div>
+            <div class="rule"><b>Resting limit entry</b><span>An UP signal buys UP; a DOWN signal buys DOWN. Same-side signal episodes add 100 shares. The limit is placed at that side's current midpoint and counts as fully filled at the limit price after a fresh midpoint drops at least $0.01 below it. The paper fill does not model queue position.</span></div>
+            <div class="rule"><b>Opposite-signal flip</b><span>Only one side can have an open position in the current window. An opposite confirmed signal sells all shares on the old side at its fresh best bid, then places a resting limit buy on the newly signalled side for the same share count. The flip sell includes a modeled taker fee.</span></div>
+            <div class="rule"><b>Order replacement</b><span>An unfilled entry rests until the next confirmed signal or the end of the current window. A new signal cancels any unfilled entry before submitting the new signalled-side order.</span></div>
             <div class="rule"><b>Take profit</b><span>A fresh best bid at $0.99 closes all accumulated shares on that side at $1 per share in the paper ledger. Sell fee is zero; the limit fill may earn a modeled maker rebate.</span></div>
             <div class="rule"><b>Stop loss</b><span>A fresh best bid at $0.01 or lower closes all accumulated shares on that side at $0 per share in the paper ledger.</span></div>
             <div class="rule"><b>Fees and rebates</b><span>Resting entries have no modeled taker fee. Eligible filled entries and resting take-profits may earn an estimated maker rebate; estimates are not guaranteed and depend on the market's fee and rebate rules.</span></div>
@@ -215,7 +216,7 @@
           </div>
         </article>
         <article class="panel">
-          <div class="panel-head"><div><div class="panel-title">Recent orders</div><div class="panel-sub">Resting midpoint entries, TP/SL exits, and estimated maker rebates</div></div><span class="badge" id="orderCount">0 orders</span></div>
+          <div class="panel-head"><div><div class="panel-title">Recent orders</div><div class="panel-sub">Resting entries, flip sells, TP/SL exits, and estimated maker rebates</div></div><span class="badge" id="orderCount">0 orders</span></div>
           <div class="table-wrap"><table><thead><tr><th>Time</th><th>Action</th><th>Side</th><th>Filled / requested</th><th>Limit / fill</th><th>Fees / rebate</th><th>Status</th></tr></thead><tbody id="orders"><tr><td class="empty" colspan="7">Waiting for a confirmed signal</td></tr></tbody></table></div>
         </article>
       </section>
@@ -358,7 +359,7 @@
           if (position) $(`${key}Pnl`).className = pnlClass(position.unrealizedPnl);
         }
         const orders = Array.isArray(state.orders) ? state.orders.filter(x =>
-          ["PAPER_LIMIT_RESTING_BUY","PAPER_LIMIT_TAKE_PROFIT","PAPER_STOP_LOSS"].includes(x.orderType)) : [];
+          ["PAPER_LIMIT_RESTING_BUY","PAPER_LIMIT_TAKE_PROFIT","PAPER_STOP_LOSS","PAPER_MARKET_SIGNAL_FLIP"].includes(x.orderType)) : [];
         set("orderCount",`${orders.length} orders`);
         $("orders").innerHTML = orders.length ? orders.slice(0,25).map(order => `<tr>
           <td>${time(order.filledAt || order.createdAt)}</td><td><span class="tag">${esc(order.exitReason || order.action)}</span></td><td>${order.signalSide ? `${esc(order.signalSide)} signal → buy ${esc(order.side)}` : esc(order.side)}</td>

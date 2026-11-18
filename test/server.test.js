@@ -44,7 +44,7 @@ test('health endpoint reports strategy errors as unhealthy', async t => {
   assert.deepEqual(await response.json(), { ok: false, mode: 'DEMO', status: 'ERROR', now: 123 });
 });
 
-test('dashboard explains resting entries, independent accumulation, TP/SL, and resolution rules', async t => {
+test('dashboard explains same-side entries, flip behavior, TP/SL, and resolution rules', async t => {
   const server = startServer({ snapshot: () => ({}) }, 0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -52,15 +52,17 @@ test('dashboard explains resting entries, independent accumulation, TP/SL, and r
   const html = await response.text();
   assert.equal(response.status, 200);
   assert.match(html, /Invented · BTC 5-minute/);
-  assert.match(html, /Order-flow accumulation bot/i);
+  assert.match(html, /Order-flow flip bot/i);
   assert.match(html, /three one-second checks/i);
   assert.match(html, /last five seconds/i);
-  assert.match(html, /100 shares per signal/i);
-  assert.match(html, /An UP signal buys DOWN; a DOWN signal buys UP/i);
+  assert.match(html, /100 shares per same-side signal/i);
+  assert.match(html, /An UP signal buys UP; a DOWN signal buys DOWN/i);
+  assert.match(html, /opposite confirmed signal sells all shares on the old side/i);
   assert.match(html, /state\.signal\?\.signalSide && state\.signal\?\.buySide/);
-  assert.match(html, /resting buy limit/i);
-  assert.match(html, /midpoint drops at least \$0\.01 below the limit/i);
-  assert.match(html, /no modeled taker fee/i);
+  assert.match(html, /resting limit buy/i);
+  assert.match(html, /fresh midpoint drops at least \$0\.01 below it/i);
+  assert.match(html, /flip sell includes a modeled taker fee/i);
+  assert.match(html, /PAPER_MARKET_SIGNAL_FLIP/);
   assert.match(html, /Global equity curve/i);
   assert.match(html, /Completed-window win rate/i);
   assert.match(html, /estimated maker rebates/i);
