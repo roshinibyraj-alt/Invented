@@ -122,8 +122,8 @@
       <section class="hero">
         <div>
           <div class="eyebrow">Binance aggressor trades × Polymarket CLOB</div>
-          <h2>Buy each confirmed side; hold both independently.</h2>
-          <p>Each new confirmed signal places a 100-share resting buy limit at the current midpoint. It fills in full only after a fresh midpoint drops at least $0.01 below the limit; a later confirmed signal or window end cancels it if still unfilled. Entries have no modeled taker fee, and eligible maker rebates are estimated. TP $0.99 and SL $0.01 stay unchanged.</p>
+          <h2>Buy opposite each confirmed signal; hold both independently.</h2>
+          <p>Each newly confirmed UP signal places a 100-share resting buy limit on DOWN; a DOWN signal buys UP. The limit uses the bought side’s current midpoint and fills in full only after a fresh midpoint drops at least $0.01 below the limit. A later confirmed signal or window end cancels an unfilled order. Entries have no modeled taker fee, and eligible maker rebates are estimated. TP $0.99 and SL $0.01 stay unchanged.</p>
         </div>
         <div class="hero-state">
           <span class="badge" id="window">Waiting for market</span>
@@ -206,8 +206,8 @@
           <div class="rules">
             <div class="rule"><b>Measure</b><span>Use the last five seconds of Binance aggressor notional and Polymarket CLOB trade flow, top-three-level depth imbalance, and microprice.</span></div>
             <div class="rule"><b>Confirm</b><span>Binance and Polymarket must point the same way; each must exceed 0.10 pressure and their combined score must reach ±0.30 for three one-second checks.</span></div>
-            <div class="rule"><b>Resting limit entry</b><span>Each new confirmed signal places a 100-share buy limit at that side's current midpoint. A fresh midpoint reaching at least $0.01 below the limit counts as a full fill at the limit price, regardless of displayed depth. The paper fill does not model queue position.</span></div>
-            <div class="rule"><b>Order replacement</b><span>An unfilled entry rests until the next confirmed signal or the end of the current window. A new signal cancels the old pending order and places a fresh midpoint limit on the newly signalled side; an opposite signal never sells existing shares.</span></div>
+            <div class="rule"><b>Resting limit entry</b><span>An UP signal buys DOWN; a DOWN signal buys UP. Each confirmed signal places a 100-share limit at the bought side's current midpoint. A fresh midpoint drops at least $0.01 below the limit to count as a full fill at the limit price, regardless of displayed depth. The paper fill does not model queue position.</span></div>
+            <div class="rule"><b>Order replacement</b><span>An unfilled entry rests until the next confirmed signal or the end of the current window. A new signal cancels the old pending order and places a fresh midpoint limit on the opposite side; it never sells existing shares.</span></div>
             <div class="rule"><b>Take profit</b><span>A fresh best bid at $0.99 closes all accumulated shares on that side at $1 per share in the paper ledger. Sell fee is zero; the limit fill may earn a modeled maker rebate.</span></div>
             <div class="rule"><b>Stop loss</b><span>A fresh best bid at $0.01 or lower closes all accumulated shares on that side at $0 per share in the paper ledger.</span></div>
             <div class="rule"><b>Fees and rebates</b><span>Resting entries have no modeled taker fee. Eligible filled entries and resting take-profits may earn an estimated maker rebate; estimates are not guaranteed and depend on the market's fee and rebate rules.</span></div>
@@ -305,9 +305,11 @@
         set("updatedAt", `Updated ${time(state.now)}`);
         set("window", state.window?.slug || "BTC 5-minute window");
         set("remaining", Number.isFinite(Number(state.window?.secondsRemaining)) ? `${Math.max(0,Math.floor(Number(state.window.secondsRemaining)))} sec` : "—");
-        const signalLabel = state.signal?.action && state.signal.action !== "WAIT"
-          ? `${state.signal.action} · ${state.signal.side || pressure.confirmedSide || ""}`
-          : pressure.confirmedSide ? `CONFIRMED · ${pressure.confirmedSide}` : pressure.status || "WAITING";
+        const signalLabel = state.signal?.signalSide && state.signal?.buySide
+          ? `${state.signal.signalSide} SIGNAL → BUY ${state.signal.buySide}`
+          : state.signal?.action && state.signal.action !== "WAIT"
+            ? `${state.signal.action} · ${state.signal.side || pressure.confirmedSide || ""}`
+            : pressure.confirmedSide ? `CONFIRMED · ${pressure.confirmedSide}` : pressure.status || "WAITING";
         set("signal",signalLabel);
         set("reason", state.statusReason || state.signal?.reason || pressure.reason || "Waiting for both feeds.");
         set("equity", money(account.equity));
@@ -359,7 +361,7 @@
           ["PAPER_LIMIT_RESTING_BUY","PAPER_LIMIT_TAKE_PROFIT","PAPER_STOP_LOSS"].includes(x.orderType)) : [];
         set("orderCount",`${orders.length} orders`);
         $("orders").innerHTML = orders.length ? orders.slice(0,25).map(order => `<tr>
-          <td>${time(order.filledAt || order.createdAt)}</td><td><span class="tag">${esc(order.exitReason || order.action)}</span></td><td>${esc(order.side)}</td>
+          <td>${time(order.filledAt || order.createdAt)}</td><td><span class="tag">${esc(order.exitReason || order.action)}</span></td><td>${order.signalSide ? `${esc(order.signalSide)} signal → buy ${esc(order.side)}` : esc(order.side)}</td>
           <td>${fmtShares(order.filledShares)} / ${fmtShares(order.requestedShares)}</td><td>${price(order.averagePrice ?? order.limitPrice)}</td>
           <td>${money(order.fees)} / ${money(order.estimatedMakerRebate)}</td><td>${esc(order.status)}</td></tr>`).join("") : `<tr><td class="empty" colspan="7">Waiting for a confirmed signal</td></tr>`;
         const pending = Array.isArray(state.pendingResolutionPositions) ? state.pendingResolutionPositions : [];

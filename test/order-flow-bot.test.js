@@ -144,7 +144,7 @@ test('Binance aggregate trades classify aggressive buyer and seller flow', () =>
   assert.ok(flow.priceChangePct > 0);
 });
 
-test('three aligned checks place a resting midpoint limit; a one-cent walk fills all shares with maker rebate', () => {
+test('three aligned UP checks buy DOWN at its midpoint; a one-cent walk fills all shares with maker rebate', () => {
   const { bot, feed, nowRef } = makeBot();
   step(bot, feed, nowRef, WINDOW_START, true);
   step(bot, feed, nowRef, WINDOW_START + 1000, true);
@@ -155,38 +155,40 @@ test('three aligned checks place a resting midpoint limit; a one-cent walk fills
   assert.equal(order.orderType, 'PAPER_LIMIT_RESTING_BUY');
   assert.equal(order.status, 'RESTING');
   assert.equal(order.requestedShares, 100);
-  assert.equal(order.limitPrice, 0.60);
-  assert.equal(order.midpointAtPlacement, 0.60);
+  assert.equal(order.side, 'DOWN');
+  assert.equal(order.signalSide, 'UP');
+  assert.equal(bot.signal.signalSide, 'UP');
+  assert.equal(bot.signal.buySide, 'DOWN');
+  assert.equal(order.limitPrice, 0.40);
+  assert.equal(order.midpointAtPlacement, 0.40);
   assert.equal(order.timeInForce, 'GTC');
   assert.equal(order.filledShares, 0);
   assert.equal(order.remainingShares, 100);
   assert.equal(order.fees, 0);
-  assert.equal(bot.currentPosition('UP', WINDOW_START), null);
+  assert.equal(bot.currentPosition('DOWN', WINDOW_START), null);
   assert.equal(bot.cash, 3000);
 
   const fillAt = WINDOW_START + 3000;
   nowRef.value = fillAt;
   updateInputs(bot, feed, nowRef, true);
-  setAskAt(bot, 'UP', fillAt, 0.60, 0.58, 1);
+  setAskAt(bot, 'DOWN', fillAt, 0.39, 0.38, 1);
   bot.processStrategyEntry(fillAt);
 
   assert.equal(order.status, 'FILLED');
   assert.equal(order.filledShares, 100);
   assert.equal(order.remainingShares, 0);
-  assert.equal(order.averagePrice, 0.60);
-  assert.equal(order.fillTriggerMidpoint, 0.59);
-  assert.equal(order.midpointAtFill, 0.59);
-  assert.equal(order.grossCost, 60);
+  assert.equal(order.averagePrice, 0.40);
+  assert.equal(order.fillTriggerMidpoint, 0.39);
+  assert.equal(order.midpointAtFill, 0.385);
+  assert.equal(order.grossCost, 40);
   assert.equal(order.fees, 0);
   assert.ok(Math.abs(order.estimatedMakerRebate - 0.336) < 1e-9);
-  const position = bot.currentPosition('UP', WINDOW_START);
+  const position = bot.currentPosition('DOWN', WINDOW_START);
   assert.equal(position.shares, 100);
-  assert.equal(position.entryPrice, 0.60);
+  assert.equal(position.entryPrice, 0.40);
   assert.equal(position.fees, 0);
   assert.ok(Math.abs(position.estimatedEntryMakerRebate - 0.336) < 1e-9);
-  assert.ok(Math.abs(bot.cash - (3000 - 60 + 0.336)) < 1e-9);
-  assert.equal(bot.pressure.confirmedSide, 'UP');
-  assert.equal(bot.pressure.confirmationCount, 4);
+  assert.ok(Math.abs(bot.cash - (3000 - 40 + 0.336)) < 1e-9);
 });
 
 test('a new confirmed signal cancels the old unfilled order and places a new midpoint limit', () => {
@@ -194,18 +196,19 @@ test('a new confirmed signal cancels the old unfilled order and places a new mid
   for (let second = 0; second < 3; second += 1) {
     step(bot, feed, nowRef, WINDOW_START + second * 1000, true);
   }
-  const oldOrder = bot.orders.find(order => order.action === 'BUY' && order.side === 'UP');
+  const oldOrder = bot.orders.find(order => order.action === 'BUY' && order.side === 'DOWN');
   assert.equal(oldOrder.status, 'RESTING');
 
   neutralStep(bot, feed, nowRef, WINDOW_START + 3000);
   for (let second = 4; second < 7; second += 1) {
     step(bot, feed, nowRef, WINDOW_START + second * 1000, false);
   }
-  const newOrder = bot.orders.find(order => order.action === 'BUY' && order.side === 'DOWN');
+  const newOrder = bot.orders.find(order => order.action === 'BUY' && order.side === 'UP');
   assert.equal(oldOrder.status, 'CANCELLED_REPLACED');
   assert.equal(oldOrder.cancelReason, 'REPLACED_BY_NEW_SIGNAL');
   assert.equal(newOrder.status, 'RESTING');
-  assert.equal(newOrder.limitPrice, 0.40);
+  assert.equal(newOrder.signalSide, 'DOWN');
+  assert.equal(newOrder.limitPrice, 0.60);
   assert.equal(newOrder.requestedShares, 100);
   assert.equal(bot.positions.length, 0);
 });
@@ -216,7 +219,7 @@ test('a persistent confirmed signal does not repeat the same entry', () => {
     step(bot, feed, nowRef, WINDOW_START + second * 1000, true);
   }
 
-  assert.equal(bot.currentPosition('UP', WINDOW_START), null);
+  assert.equal(bot.currentPosition('DOWN', WINDOW_START), null);
   assert.equal(bot.orders.filter(order => order.action === 'BUY').length, 1);
   assert.equal(bot.orders.find(order => order.action === 'BUY').status, 'RESTING');
 });
@@ -229,19 +232,21 @@ test('opposite confirmed signals accumulate both sides without selling', () => {
   for (let second = 3; second < 6; second += 1) {
     step(bot, feed, nowRef, WINDOW_START + second * 1000, false);
   }
-  const upOrder = bot.orders.find(order => order.action === 'BUY' && order.side === 'UP');
-  assert.equal(upOrder.status, 'CANCELLED_REPLACED');
   const downOrder = bot.orders.find(order => order.action === 'BUY' && order.side === 'DOWN');
-  assert.ok(downOrder);
-  assert.equal(downOrder.status, 'RESTING');
-  assert.equal(bot.currentPosition('UP', WINDOW_START), null);
+  assert.equal(downOrder.status, 'CANCELLED_REPLACED');
+  const upOrder = bot.orders.find(order => order.action === 'BUY' && order.side === 'UP');
+  assert.ok(upOrder);
+  assert.equal(upOrder.status, 'RESTING');
+  assert.equal(upOrder.signalSide, 'DOWN');
+  assert.equal(bot.currentPosition('DOWN', WINDOW_START), null);
   assert.equal(bot.currentPosition('DOWN', WINDOW_START), null);
   assert.equal(bot.orders.filter(order =>
     order.action === 'SELL' && order.orderType !== 'PAPER_LIMIT_TAKE_PROFIT').length, 0);
   assert.equal(bot.orders.filter(order =>
     order.action === 'SELL' && order.orderType === 'PAPER_LIMIT_TAKE_PROFIT').length, 0);
   assert.equal(bot.orders.filter(order => order.action === 'BUY').length, 2);
-  assert.equal(bot.signal.action, 'BUY_DOWN');
+  assert.equal(bot.signal.action, 'BUY_UP');
+  assert.equal(bot.signal.signalSide, 'DOWN');
 });
 
 test('a later signal episode replaces the previous unfilled order without changing its 100-share size', () => {
@@ -254,13 +259,13 @@ test('a later signal episode replaces the previous unfilled order without changi
     step(bot, feed, nowRef, WINDOW_START + second * 1000, true);
   }
 
-  const orders = bot.orders.filter(order => order.action === 'BUY' && order.side === 'UP');
+  const orders = bot.orders.filter(order => order.action === 'BUY' && order.side === 'DOWN');
   assert.equal(orders.length, 2);
   assert.equal(orders[0].status, 'RESTING');
   assert.equal(orders[1].status, 'CANCELLED_REPLACED');
   assert.equal(orders[1].cancelReason, 'REPLACED_BY_NEW_SIGNAL');
-  assert.equal(bot.currentPosition('UP', WINDOW_START), null);
-  assert.equal(bot.totalInventoryForSide('UP'), 0);
+  assert.equal(bot.currentPosition('DOWN', WINDOW_START), null);
+  assert.equal(bot.totalInventoryForSide('DOWN'), 0);
   assert.equal(bot.orders.filter(order => order.action === 'BUY').length, 2);
 });
 
@@ -272,16 +277,16 @@ test('the 0.99 TP closes maker-filled inventory and keeps estimated entry rebate
   const fillAt = WINDOW_START + 3000;
   nowRef.value = fillAt;
   updateInputs(bot, feed, nowRef, true);
-  setAskAt(bot, 'UP', fillAt, 0.60, 0.58);
+  setAskAt(bot, 'DOWN', fillAt, 0.40, 0.38);
   bot.processStrategyEntry(fillAt);
-  const position = bot.currentPosition('UP', WINDOW_START);
+  const position = bot.currentPosition('DOWN', WINDOW_START);
   assert.equal(position.shares, 100);
   assert.equal(position.fees, 0);
   assert.ok(position.estimatedEntryMakerRebate > 0);
   assert.equal(position.lastEntryOrderId && bot.orders.find(order => order.id === position.lastEntryOrderId).status, 'FILLED');
   const closeAt = fillAt + 1000;
   nowRef.value = closeAt;
-  setAskAt(bot, 'UP', closeAt, 0.995, 0.99);
+  setAskAt(bot, 'DOWN', closeAt, 0.995, 0.99);
 
   bot.processStrategyEntry(closeAt);
 
@@ -304,12 +309,12 @@ test('the 0.01 stop-loss closes maker-filled inventory at zero', () => {
   const fillAt = WINDOW_START + 3000;
   nowRef.value = fillAt;
   updateInputs(bot, feed, nowRef, true);
-  setAskAt(bot, 'UP', fillAt, 0.60, 0.58);
+  setAskAt(bot, 'DOWN', fillAt, 0.40, 0.38);
   bot.processStrategyEntry(fillAt);
-  const position = bot.currentPosition('UP', WINDOW_START);
+  const position = bot.currentPosition('DOWN', WINDOW_START);
   const closeAt = fillAt + 1000;
   nowRef.value = closeAt;
-  setAskAt(bot, 'UP', closeAt, 0.99, 0.01);
+  setAskAt(bot, 'DOWN', closeAt, 0.99, 0.01);
 
   bot.processStrategyEntry(closeAt);
 
@@ -331,9 +336,9 @@ test('positions not stopped or taken profit move to resolution after window end'
   const fillAt = WINDOW_START + 3000;
   nowRef.value = fillAt;
   updateInputs(bot, feed, nowRef, true);
-  setAskAt(bot, 'UP', fillAt, 0.60, 0.58);
+  setAskAt(bot, 'DOWN', fillAt, 0.40, 0.38);
   bot.processStrategyEntry(fillAt);
-  const position = bot.currentPosition('UP', WINDOW_START);
+  const position = bot.currentPosition('DOWN', WINDOW_START);
   const nextWindow = WINDOW_START + config.WINDOW_MS_5M;
   const closeAt = nextWindow + 1000;
 
@@ -349,7 +354,7 @@ test('positions not stopped or taken profit move to resolution after window end'
 
   assert.equal(position.status, 'PENDING_RESOLUTION');
   assert.equal(position.shares, 100);
-  assert.equal(state.positionsBySide.UP, null);
+  assert.equal(state.positionsBySide.DOWN, null);
   assert.equal(state.pendingResolutionPositions.length, 1);
   assert.equal(state.pendingResolutionPositions[0].id, position.id);
 });
@@ -421,8 +426,9 @@ test('unresolved shares remain visible but do not cap new signals', () => {
   for (let second = 0; second < 3; second += 1) {
     step(bot, feed, nowRef, WINDOW_START + second * 1000, true);
   }
-  const currentOrder = bot.orders.find(order => order.action === 'BUY' && order.side === 'UP');
+  const currentOrder = bot.orders.find(order => order.action === 'BUY' && order.side === 'DOWN');
   assert.equal(currentOrder.status, 'RESTING');
+  assert.equal(currentOrder.signalSide, 'UP');
   assert.equal(bot.totalInventoryForSide('UP'), 150);
 });
 
@@ -434,6 +440,8 @@ test('snapshot identifies the paper-only pressure strategy and exposes flow scor
   assert.equal(state.strategy.id, 'btc-5m-combined-orderflow-accumulation');
   assert.equal(state.strategy.execution, 'PAPER ONLY');
   assert.equal(state.strategy.entrySharesPerSignal, 100);
+  assert.equal(state.strategy.version, 'btc-5m-combined-orderflow-opposite-signal-v4');
+  assert.equal(state.strategy.entries.sideMapping, 'BUY_OPPOSITE_SIGNAL');
   assert.equal(state.strategy.maxInventoryPerSide, null);
   assert.equal(state.strategy.usesTakerOrders, false);
   assert.equal(state.strategy.usesMakerOrders, true);
@@ -458,16 +466,16 @@ test('global equity includes fresh bid marks for open positions', () => {
 
   const fillAt = WINDOW_START + 3000;
   nowRef.value = fillAt;
-  setAskAt(bot, 'UP', fillAt, 0.58, 0.57);
+  setAskAt(bot, 'DOWN', fillAt, 0.39, 0.38);
   bot.processStrategyEntry(fillAt);
 
   const state = bot.snapshot();
   const position = state.openWindowPositions[0];
   assert.equal(position.markStatus, 'LIVE');
-  assert.equal(position.markBid, 0.57);
-  assert.ok(Math.abs(position.markValue - 57) < 1e-8);
-  assert.ok(Math.abs(state.account.markedValue - 57) < 1e-8);
+  assert.equal(position.markBid, 0.38);
+  assert.ok(Math.abs(position.markValue - 38) < 1e-8);
+  assert.ok(Math.abs(state.account.markedValue - 38) < 1e-8);
   assert.equal(state.account.unpricedOpenPositions, 0);
-  assert.ok(Math.abs(state.account.equity - (state.account.cash + 57)) < 1e-8);
+  assert.ok(Math.abs(state.account.equity - (state.account.cash + 38)) < 1e-8);
   assert.equal(state.account.equityCurve.at(-1).equity, state.account.equity);
 });

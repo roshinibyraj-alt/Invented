@@ -56,7 +56,8 @@ test('dashboard explains resting entries, independent accumulation, TP/SL, and r
   assert.match(html, /three one-second checks/i);
   assert.match(html, /last five seconds/i);
   assert.match(html, /100 shares per signal/i);
-  assert.match(html, /opposite signal never sells existing shares/i);
+  assert.match(html, /An UP signal buys DOWN; a DOWN signal buys UP/i);
+  assert.match(html, /state\.signal\?\.signalSide && state\.signal\?\.buySide/);
   assert.match(html, /resting buy limit/i);
   assert.match(html, /midpoint drops at least \$0\.01 below the limit/i);
   assert.match(html, /no modeled taker fee/i);

@@ -386,10 +386,11 @@ class OrderFlowBot extends MispricingBot {
     return changed || thresholdExits > 0 || makerFills > 0;
   }
 
-  handleConfirmedSignal(side, now) {
+  handleConfirmedSignal(signalSide, now) {
+    const buySide = signalSide === 'UP' ? 'DOWN' : 'UP';
     this.cancelPendingBuyOrders(now, 'REPLACED_BY_NEW_SIGNAL', (order) =>
       Number(order.windowStart) === Number(this.getActiveWindowStart()));
-    const submitted = this.submitBuyLimitMidpoint(side, now, this.pressure);
+    const submitted = this.submitBuyLimitMidpoint(buySide, now, this.pressure, signalSide);
     const filledShares = Number(submitted.filledShares) || 0;
     const requestedShares = Number(config.FLOW_ENTRY_SHARES) || 0;
     const averagePrice = Number.isFinite(Number(submitted.averagePrice))
@@ -399,11 +400,13 @@ class OrderFlowBot extends MispricingBot {
       ? Number(submitted.limitPrice)
       : null;
     this.signal = {
-      side,
-      action: side === 'UP' ? 'BUY_UP' : 'BUY_DOWN',
+      side: buySide,
+      signalSide,
+      buySide,
+      action: buySide === 'UP' ? 'BUY_UP' : 'BUY_DOWN',
       reason: submitted.orderId
-        ? `${side} pressure confirmed; a ${requestedShares}-share resting limit buy was placed at the current midpoint of $${limitPrice.toFixed(3)}. It fills in full when a fresh midpoint reaches $${(limitPrice - 0.01).toFixed(3)} or lower.`
-        : `${side} pressure confirmed, but no resting order was placed: ${submitted.reason || 'no fresh midpoint was available'}.`,
+        ? `${signalSide} pressure confirmed; the bot bought the opposite ${buySide} side with a ${requestedShares}-share resting limit at the current midpoint of $${limitPrice.toFixed(3)}. It fills in full when a fresh midpoint reaches $${(limitPrice - 0.01).toFixed(3)} or lower.`
+        : `${signalSide} pressure confirmed, but the opposite ${buySide} resting order was not placed: ${submitted.reason || 'no fresh midpoint was available'}.`,
       combinedScore: this.pressure.combinedScore,
       binanceScore: this.pressure.binance?.score,
       polymarketScore: this.pressure.polymarket?.score,
@@ -419,7 +422,7 @@ class OrderFlowBot extends MispricingBot {
     return Boolean(submitted.orderId);
   }
 
-  submitBuyLimitMidpoint(side, now, signal) {
+  submitBuyLimitMidpoint(side, now, signal, signalSide = null) {
     const requestedShares = config.FLOW_ENTRY_SHARES;
     if (!(requestedShares > EPSILON)) return { filledShares: 0, reason: 'INVALID_ENTRY_SIZE' };
     const quote = this.flowQuote(side, now);
@@ -436,6 +439,7 @@ class OrderFlowBot extends MispricingBot {
       strategyId: this.strategyId,
       action: 'BUY',
       side,
+      signalSide,
       orderType: ORDER_TYPE,
       status: 'RESTING',
       requestedShares,
@@ -468,6 +472,7 @@ class OrderFlowBot extends MispricingBot {
     this.totalOrderAttempts += 1;
     this.log('PAPER_FLOW_BUY_LIMIT_RESTING', {
       orderId: order.id,
+      signalSide,
       side,
       requestedShares,
       limitPrice: order.limitPrice,
@@ -479,9 +484,10 @@ class OrderFlowBot extends MispricingBot {
       at: now,
       event: 'PAPER_BUY_LIMIT_RESTING',
       type: 'PAPER_BUY_LIMIT_RESTING',
-      message: `${side} resting limit buy placed for ${requestedShares} shares at the current midpoint of $${order.limitPrice.toFixed(3)}; it fills in full if a fresh midpoint reaches $${(order.limitPrice - 0.01).toFixed(3)} or lower. No taker fee; maker rebate is estimated if eligible.`,
+      message: `${signalSide ? `${signalSide} signal → buy ${side}` : side} resting limit placed for ${requestedShares} shares at the current midpoint of $${order.limitPrice.toFixed(3)}; it fills in full if a fresh midpoint reaches $${(order.limitPrice - 0.01).toFixed(3)} or lower. No taker fee; maker rebate is estimated if eligible.`,
       details: {
         orderId: order.id,
+        signalSide,
         side,
         requestedShares,
         limitPrice: order.limitPrice,
@@ -520,10 +526,11 @@ class OrderFlowBot extends MispricingBot {
     if (this.signal?.orderId === order.id) {
       this.signal.orderStatus = order.status;
       this.signal.buyUnfilledShares = cancelledShares;
-      this.signal.reason = `Resting ${order.side} limit order cancelled: ${reason.toLowerCase().replaceAll('_', ' ')}.`;
+      this.signal.reason = `Resting ${order.signalSide ? `${order.signalSide} signal → ${order.side} buy` : `${order.side} limit`} cancelled: ${reason.toLowerCase().replaceAll('_', ' ')}.`;
     }
     this.log('PAPER_FLOW_BUY_LIMIT_CANCELLED', {
       orderId: order.id,
+      signalSide: order.signalSide || null,
       side: order.side,
       cancelledShares,
       reason,
@@ -533,7 +540,7 @@ class OrderFlowBot extends MispricingBot {
       at: now,
       event: 'PAPER_BUY_LIMIT_CANCELLED',
       type: 'PAPER_BUY_LIMIT_CANCELLED',
-      message: `${order.side} resting limit buy cancelled (${reason.toLowerCase().replaceAll('_', ' ')}).`,
+      message: `${order.signalSide ? `${order.signalSide} signal → ${order.side} buy` : order.side} resting limit cancelled (${reason.toLowerCase().replaceAll('_', ' ')}).`,
       details: { orderId: order.id, side: order.side, cancelledShares, reason },
     });
     if (this.events.length > 200) this.events.length = 200;
@@ -615,6 +622,7 @@ class OrderFlowBot extends MispricingBot {
       position.makerRebateEstimate = position.estimatedMakerRebate;
       position.entrySignals.push({
         at: now,
+        signalSide: order.signalSide || null,
         side: order.side,
         shares,
         averagePrice: limitPrice,
@@ -637,12 +645,13 @@ class OrderFlowBot extends MispricingBot {
         this.signal.buyUnfilledShares = 0;
         this.signal.averagePrice = limitPrice;
         this.signal.estimatedMakerRebate = estimatedMakerRebate;
-        this.signal.reason = `${order.side} resting limit filled all ${shares} shares at $${limitPrice.toFixed(3)} after the fresh midpoint reached $${Number(fillTrigger.toFixed(3))} or lower. No taker fee; estimated maker rebate $${estimatedMakerRebate.toFixed(3)}.`;
+        this.signal.reason = `${order.signalSide ? `${order.signalSide} signal → buy ${order.side}` : order.side} resting limit filled all ${shares} shares at $${limitPrice.toFixed(3)} after the fresh midpoint reached $${Number(fillTrigger.toFixed(3))} or lower. No taker fee; estimated maker rebate $${estimatedMakerRebate.toFixed(3)}.`;
       }
 
       this.log('PAPER_FLOW_BUY_LIMIT_FILLED', {
         orderId: order.id,
         positionId: position.id,
+        signalSide: order.signalSide || null,
         side: order.side,
         shares,
         limitPrice,
@@ -657,10 +666,11 @@ class OrderFlowBot extends MispricingBot {
         at: now,
         event: 'PAPER_BUY_LIMIT_FILLED',
         type: 'PAPER_BUY_LIMIT_FILLED',
-        message: `${order.side} resting limit filled all ${shares} shares at $${limitPrice.toFixed(3)} after midpoint reached $${Number(fillTrigger.toFixed(3))} or lower; no taker fee, estimated maker rebate $${estimatedMakerRebate.toFixed(3)}.`,
+        message: `${order.signalSide ? `${order.signalSide} signal → buy ${order.side}` : order.side} resting limit filled all ${shares} shares at $${limitPrice.toFixed(3)} after midpoint reached $${Number(fillTrigger.toFixed(3))} or lower; no taker fee, estimated maker rebate $${estimatedMakerRebate.toFixed(3)}.`,
         details: {
           orderId: order.id,
           positionId: position.id,
+          signalSide: order.signalSide || null,
           side: order.side,
           shares,
           limitPrice,
@@ -1075,7 +1085,7 @@ class OrderFlowBot extends MispricingBot {
       strategy: {
         id: this.strategyId,
         name: this.strategyName,
-        version: 'btc-5m-combined-orderflow-resting-midpoint-v3',
+        version: 'btc-5m-combined-orderflow-opposite-signal-v4',
         execution: 'PAPER ONLY',
         symbol: 'BTCUSDT',
         timeframe: '5m',
@@ -1096,6 +1106,7 @@ class OrderFlowBot extends MispricingBot {
         entries: {
           orderType: ORDER_TYPE,
           sharesPerSignal: config.FLOW_ENTRY_SHARES,
+          sideMapping: 'BUY_OPPOSITE_SIGNAL',
           limitPriceSource: 'CURRENT_MIDPOINT',
           fillTrigger: 'Fresh midpoint at least $0.01 below the placed limit price.',
           timeInForce: 'GTC',
@@ -1120,10 +1131,10 @@ class OrderFlowBot extends MispricingBot {
             payoutPerShare: config.FLOW_STOP_LOSS_PAYOUT,
             orderType: 'PAPER_STOP_LOSS',
           },
-          oppositeSignal: 'Buy the signalled side and keep existing shares open.',
+          oppositeSignal: 'Buy the opposite side of each confirmed signal and keep all existing shares open.',
           windowEnd: 'Any unsold shares wait for official resolution of their original market.',
         },
-        timing: 'Recalculate flow every second using the preceding five seconds of Binance and Polymarket data; place a resting limit buy at the current midpoint when a new signal is confirmed. Keep it until full price-walk fill, a new confirmed signal, or window end.',
+        timing: 'Recalculate flow every second using the preceding five seconds of Binance and Polymarket data; place a resting limit buy on the side opposite the confirmed signal at that side’s current midpoint. Keep it until full price-walk fill, a new confirmed signal, or window end.',
         sizing: `${config.FLOW_ENTRY_SHARES} shares requested per new confirmed signal; UP and DOWN accumulate independently without a per-side share cap.`,
         trigger: `Require Binance and Polymarket directional pressure to agree, each component to exceed ${config.FLOW_COMPONENT_MIN.toFixed(2)}, and combined pressure to reach ±${config.FLOW_SIGNAL_THRESHOLD.toFixed(2)} for ${config.FLOW_CONFIRMATION_COUNT} consecutive checks.`,
         currentSignal: this.signal,
