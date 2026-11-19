@@ -51,17 +51,20 @@ test('dashboard explains same-side entries, flip behavior, TP/SL, and resolution
   const response = await fetch(`http://127.0.0.1:${server.address().port}/`);
   const html = await response.text();
   assert.equal(response.status, 200);
+  assert.ok(html.indexOf('Current Polymarket books') < html.indexOf('Paper equity'));
   assert.match(html, /Invented · BTC 5-minute/);
   assert.match(html, /Order-flow flip bot/i);
   assert.match(html, /three one-second checks/i);
   assert.match(html, /last five seconds/i);
   assert.match(html, /100 shares per same-side signal/i);
   assert.match(html, /An UP signal buys UP; a DOWN signal buys DOWN/i);
-  assert.match(html, /opposite confirmed signal sells all shares on the old side/i);
+  assert.match(html, /An opposite signal flips only if selling the current position/i);
+  assert.match(html, /Profitable flips only/i);
   assert.match(html, /state\.signal\?\.signalSide && state\.signal\?\.buySide/);
-  assert.match(html, /resting limit buy/i);
+  assert.match(html, /resting buy/i);
   assert.match(html, /fresh midpoint drops at least \$0\.01 below it/i);
-  assert.match(html, /flip sell includes a modeled taker fee/i);
+  assert.match(html, /modeled taker fee/i);
+  assert.match(html, /FLIP SKIPPED/);
   assert.match(html, /PAPER_MARKET_SIGNAL_FLIP/);
   assert.match(html, /Global equity curve/i);
   assert.match(html, /Completed-window win rate/i);
@@ -77,7 +80,7 @@ test('dashboard explains same-side entries, flip behavior, TP/SL, and resolution
   assert.match(html, /Recent orders/);
   assert.match(html, /Bot activity/);
   assert.doesNotMatch(html, /BTC &amp; ETH Signal Desk/);
-  assert.doesNotMatch(html, /profitable flip/i);
+  assert.match(html, /Profitable flips only/i);
   assert.doesNotMatch(html, /two fresh Binance updates/i);
 });
 

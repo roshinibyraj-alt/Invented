@@ -123,7 +123,7 @@
         <div>
           <div class="eyebrow">Binance aggressor trades × Polymarket CLOB</div>
           <h2>Buy the signalled side; keep only one active side.</h2>
-          <p>Each confirmed signal places a resting buy on that same side. A new signal in the active direction adds 100 shares. An opposite signal sells the full current position at the best bid, then places a resting buy for the same share count on the new side. The $0.99 take-profit and $0.01 stop-loss remain active.</p>
+          <p>Each confirmed signal places a resting buy on that same side. A new same-side signal episode adds 100 shares. An opposite signal flips only if selling the current position at the best bid remains profitable after the modeled taker fee; otherwise the bot holds and skips that signal. Take-profit, stop-loss, and resolution rules remain active.</p>
         </div>
         <div class="hero-state">
           <span class="badge" id="window">Waiting for market</span>
@@ -131,6 +131,26 @@
           <small id="reason">Both data feeds must be fresh and agree.</small>
           <div class="stat"><span class="label">Window time left</span><strong id="remaining">—</strong></div>
         </div>
+      </section>
+
+      <section class="grid">
+        <article class="panel">
+          <div class="panel-head"><div><div class="panel-title">Current Polymarket books</div><div class="panel-sub" id="marketTitle">BTC 5-minute UP/DOWN</div></div><span class="badge" id="clobStatus">CLOB waiting</span></div>
+          <div class="side-grid">
+            <div class="side-card up">
+              <div class="side-head"><strong>UP · current window</strong><span class="badge" id="upPressure">Pressure —</span></div>
+              <div class="price-grid"><div class="price"><span>Best bid · size</span><strong id="upBid">—</strong></div><div class="price"><span>Best ask · size</span><strong id="upAsk">—</strong></div></div>
+              <div class="position"><strong id="upPosition">0 shares · — avg</strong><span id="upPnl">No open position</span></div>
+              <small class="risk-rule" id="upRisk">TP $0.99 → $1/share · SL $0.01 → $0/share</small>
+            </div>
+            <div class="side-card down">
+              <div class="side-head"><strong>DOWN · current window</strong><span class="badge" id="downPressure">Pressure —</span></div>
+              <div class="price-grid"><div class="price"><span>Best bid · size</span><strong id="downBid">—</strong></div><div class="price"><span>Best ask · size</span><strong id="downAsk">—</strong></div></div>
+              <div class="position"><strong id="downPosition">0 shares · — avg</strong><span id="downPnl">No open position</span></div>
+              <small class="risk-rule" id="downRisk">TP $0.99 → $1/share · SL $0.01 → $0/share</small>
+            </div>
+          </div>
+        </article>
       </section>
 
       <section class="grid metrics">
@@ -158,7 +178,7 @@
         </article>
       </section>
 
-      <section class="grid two">
+      <section class="grid">
         <article class="panel">
           <div class="panel-head"><div><div class="panel-title">Buyer–seller pressure</div><div class="panel-sub">Normalized scores from −1 (selling) to +1 (buying)</div></div><span class="badge" id="pressureStatus">WAITING</span></div>
           <div class="score-cards">
@@ -174,23 +194,6 @@
           </div>
         </article>
 
-        <article class="panel">
-          <div class="panel-head"><div><div class="panel-title">Current Polymarket books</div><div class="panel-sub" id="marketTitle">BTC 5-minute UP/DOWN</div></div><span class="badge" id="clobStatus">CLOB waiting</span></div>
-          <div class="side-grid">
-            <div class="side-card up">
-              <div class="side-head"><strong>UP · current window</strong><span class="badge" id="upPressure">Pressure —</span></div>
-              <div class="price-grid"><div class="price"><span>Best bid · size</span><strong id="upBid">—</strong></div><div class="price"><span>Best ask · size</span><strong id="upAsk">—</strong></div></div>
-              <div class="position"><strong id="upPosition">0 shares · — avg</strong><span id="upPnl">No open position</span></div>
-              <small class="risk-rule" id="upRisk">TP $0.99 → $1/share · SL $0.01 → $0/share</small>
-            </div>
-            <div class="side-card down">
-              <div class="side-head"><strong>DOWN · current window</strong><span class="badge" id="downPressure">Pressure —</span></div>
-              <div class="price-grid"><div class="price"><span>Best bid · size</span><strong id="downBid">—</strong></div><div class="price"><span>Best ask · size</span><strong id="downAsk">—</strong></div></div>
-              <div class="position"><strong id="downPosition">0 shares · — avg</strong><span id="downPnl">No open position</span></div>
-              <small class="risk-rule" id="downRisk">TP $0.99 → $1/share · SL $0.01 → $0/share</small>
-            </div>
-          </div>
-        </article>
       </section>
 
       <section class="grid">
@@ -207,7 +210,7 @@
             <div class="rule"><b>Measure</b><span>Use the last five seconds of Binance aggressor notional and Polymarket CLOB trade flow, top-three-level depth imbalance, and microprice.</span></div>
             <div class="rule"><b>Confirm</b><span>Binance and Polymarket must point the same way; each must exceed 0.10 pressure and their combined score must reach ±0.30 for three one-second checks.</span></div>
             <div class="rule"><b>Resting limit entry</b><span>An UP signal buys UP; a DOWN signal buys DOWN. Same-side signal episodes add 100 shares. The limit is placed at that side's current midpoint and counts as fully filled at the limit price after a fresh midpoint drops at least $0.01 below it. The paper fill does not model queue position.</span></div>
-            <div class="rule"><b>Opposite-signal flip</b><span>Only one side can have an open position in the current window. An opposite confirmed signal sells all shares on the old side at its fresh best bid, then places a resting limit buy on the newly signalled side for the same share count. The flip sell includes a modeled taker fee.</span></div>
+            <div class="rule"><b>Profitable flips only</b><span>Only one side can have an open position in the current window. On an opposite confirmed signal, estimate liquidation P&amp;L using the fresh best bid, modeled taker fee, entry cost, and entry rebate. Sell all old-side shares and place a same-size resting buy only if net P&amp;L is positive; otherwise hold and skip the opposite signal.</span></div>
             <div class="rule"><b>Order replacement</b><span>An unfilled entry rests until the next confirmed signal or the end of the current window. A new signal cancels any unfilled entry before submitting the new signalled-side order.</span></div>
             <div class="rule"><b>Take profit</b><span>A fresh best bid at $0.99 closes all accumulated shares on that side at $1 per share in the paper ledger. Sell fee is zero; the limit fill may earn a modeled maker rebate.</span></div>
             <div class="rule"><b>Stop loss</b><span>A fresh best bid at $0.01 or lower closes all accumulated shares on that side at $0 per share in the paper ledger.</span></div>
@@ -306,8 +309,10 @@
         set("updatedAt", `Updated ${time(state.now)}`);
         set("window", state.window?.slug || "BTC 5-minute window");
         set("remaining", Number.isFinite(Number(state.window?.secondsRemaining)) ? `${Math.max(0,Math.floor(Number(state.window.secondsRemaining)))} sec` : "—");
-        const signalLabel = state.signal?.signalSide && state.signal?.buySide
-          ? `${state.signal.signalSide} SIGNAL → BUY ${state.signal.buySide}`
+        const signalLabel = state.signal?.orderStatus === "FLIP_BLOCKED_UNPROFITABLE"
+          ? `FLIP SKIPPED · HOLD ${state.signal.side || "POSITION"}`
+          : state.signal?.signalSide && state.signal?.buySide
+            ? `${state.signal.signalSide} SIGNAL → BUY ${state.signal.buySide}`
           : state.signal?.action && state.signal.action !== "WAIT"
             ? `${state.signal.action} · ${state.signal.side || pressure.confirmedSide || ""}`
             : pressure.confirmedSide ? `CONFIRMED · ${pressure.confirmedSide}` : pressure.status || "WAITING";

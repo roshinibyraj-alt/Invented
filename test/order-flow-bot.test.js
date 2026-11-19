@@ -224,7 +224,7 @@ test('a persistent confirmed signal does not repeat the same entry', () => {
   assert.equal(bot.orders.find(order => order.action === 'BUY').status, 'RESTING');
 });
 
-test('an opposite confirmed signal sells all old-side shares and submits the same size on the signalled side', () => {
+test('a profitable opposite signal sells the old side and submits the same size on the signalled side', () => {
   const { bot, feed, nowRef } = makeBot();
   for (let second = 0; second < 3; second += 1) {
     step(bot, feed, nowRef, WINDOW_START + second * 1000, true);
@@ -236,7 +236,14 @@ test('an opposite confirmed signal sells all old-side shares and submits the sam
   setAskAt(bot, 'UP', fillAt, 0.59, 0.58);
   bot.processStrategyEntry(fillAt);
   assert.equal(upEntry.status, 'FILLED');
-  assert.equal(bot.currentPosition('UP', WINDOW_START).shares, 100);
+  const oldPosition = bot.currentPosition('UP', WINDOW_START);
+  assert.equal(oldPosition.shares, 100);
+  // Model a position whose average entry has improved before the reversal signal.
+  oldPosition.totalCost = 50;
+  oldPosition.initialTotalCost = 50;
+  oldPosition.entryPrice = 0.50;
+  oldPosition.avgEntry = 0.50;
+  bot.cash += 10;
 
   for (let second = 4; second < 7; second += 1) {
     step(bot, feed, nowRef, WINDOW_START + second * 1000, false);
@@ -257,16 +264,41 @@ test('an opposite confirmed signal sells all old-side shares and submits the sam
   assert.equal(flipSell.filledShares, 100);
   assert.equal(flipSell.averagePrice, 0.59);
   assert.ok(flipSell.sellFee > 0);
-  const oldPosition = bot.positions.find(position => position.side === 'UP');
   assert.equal(oldPosition.status, 'SETTLED_EXIT');
   assert.equal(oldPosition.exitReason, 'SIGNAL_FLIP');
   assert.equal(oldPosition.settlementBasis, 'PAPER_SIGNAL_FLIP');
-  assert.ok(oldPosition.realizedPnl < 0);
+  assert.ok(oldPosition.realizedPnl > 0);
   assert.equal(bot.snapshot().strategy.entries.sideMapping, 'BUY_SIGNALLED_SIDE');
   assert.equal(bot.snapshot().strategy.maxActiveSidesPerWindow, 1);
   assert.equal(bot.orders.filter(order => order.action === 'BUY').length, 2);
   assert.equal(bot.signal.action, 'BUY_DOWN');
   assert.equal(bot.signal.signalSide, 'DOWN');
+});
+
+test('an unprofitable opposite signal is ignored and the current position remains open', () => {
+  const { bot, feed, nowRef } = makeBot();
+  for (let second = 0; second < 3; second += 1) {
+    step(bot, feed, nowRef, WINDOW_START + second * 1000, true);
+  }
+  const fillAt = WINDOW_START + 3000;
+  nowRef.value = fillAt;
+  updateInputs(bot, feed, nowRef, true);
+  setAskAt(bot, 'UP', fillAt, 0.59, 0.58);
+  bot.processStrategyEntry(fillAt);
+
+  for (let second = 4; second < 7; second += 1) {
+    step(bot, feed, nowRef, WINDOW_START + second * 1000, false);
+  }
+
+  const position = bot.currentPosition('UP', WINDOW_START);
+  assert.equal(position.shares, 100);
+  assert.equal(position.status, 'OPEN');
+  assert.equal(bot.currentPosition('DOWN', WINDOW_START), null);
+  assert.equal(bot.orders.some(order => order.orderType === 'PAPER_MARKET_SIGNAL_FLIP'), false);
+  assert.equal(bot.orders.some(order => order.action === 'BUY' && order.side === 'DOWN'), false);
+  assert.equal(bot.signal.orderStatus, 'FLIP_BLOCKED_UNPROFITABLE');
+  assert.ok(bot.signal.currentPositionNetPnl < 0);
+  assert.match(bot.signal.reason, /Holding the position; flip skipped/i);
 });
 
 test('a later same-side signal episode adds another 100 shares to the existing side', () => {
@@ -492,9 +524,10 @@ test('snapshot identifies the paper-only pressure strategy and exposes flow scor
   assert.equal(state.strategy.id, 'btc-5m-combined-orderflow-accumulation');
   assert.equal(state.strategy.execution, 'PAPER ONLY');
   assert.equal(state.strategy.entrySharesPerSignal, 100);
-  assert.equal(state.strategy.version, 'btc-5m-combined-orderflow-single-side-flip-v5');
+  assert.equal(state.strategy.version, 'btc-5m-combined-orderflow-profitable-flip-v6');
   assert.equal(state.strategy.entries.sideMapping, 'BUY_SIGNALLED_SIDE');
   assert.equal(state.strategy.maxActiveSidesPerWindow, 1);
+  assert.match(state.strategy.entries.flipProfitabilityRule, /after modeled taker sell fee/i);
   assert.equal(state.strategy.maxInventoryPerSide, null);
   assert.equal(state.strategy.usesTakerOrders, true);
   assert.equal(state.strategy.usesMakerOrders, true);
