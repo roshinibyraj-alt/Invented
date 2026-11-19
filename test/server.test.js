@@ -44,7 +44,7 @@ test('health endpoint reports strategy errors as unhealthy', async t => {
   assert.deepEqual(await response.json(), { ok: false, mode: 'DEMO', status: 'ERROR', now: 123 });
 });
 
-test('dashboard explains same-side entries, profit-only exits, TP/SL, and resolution rules', async t => {
+test('dashboard explains independent-side entries, profitable exits, final TP/SL, and resolution rules', async t => {
   const server = startServer({ snapshot: () => ({}) }, 0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -53,28 +53,22 @@ test('dashboard explains same-side entries, profit-only exits, TP/SL, and resolu
   assert.equal(response.status, 200);
   assert.ok(html.indexOf('Current Polymarket books') < html.indexOf('Paper equity'));
   assert.match(html, /Invented · BTC 5-minute/);
-  assert.match(html, /Order-flow profit-exit bot/i);
+  assert.match(html, /Independent-side pressure bot/i);
   assert.match(html, /three one-second checks/i);
   assert.match(html, /last five seconds/i);
-  assert.match(html, /100 shares per same-side signal/i);
-  assert.match(html, /An UP signal buys UP; a DOWN signal buys DOWN/i);
-  assert.match(html, /An opposite signal can only sell the current position/i);
-  assert.match(html, /Opposite signal: profit exit only/i);
+  assert.match(html, /100 shares per signal/i);
+  assert.match(html, /Each newly confirmed signal sweeps visible asks for 100 shares on that same side/i);
+  assert.match(html, /buy the signalled side regardless of the opposite position/i);
+  assert.match(html, /Final take-profit/i);
   assert.match(html, /state\.signal\?\.signalSide && state\.signal\?\.buySide/);
-  assert.match(html, /immediately sweeps visible asks/i);
+  assert.match(html, /Every newly confirmed UP or DOWN signal market-buys that side/i);
   assert.match(html, /partial fills are allowed/i);
-  assert.match(html, /best ask is below \$0\.05/i);
-  assert.match(html, /taker fees are modeled/i);
-  assert.match(html, /market entries/i);
+  assert.match(html, /below a \$0\.05 best ask are blocked/i);
+  assert.match(html, /include modeled taker fees/i);
   assert.match(html, /PAPER_MARKET_BUY/);
-  assert.match(html, /PAPER_FLOW_/);
-  assert.match(html, /PAPER_POSITION_OUTCOME_RECORDED/);
   assert.match(html, /modeled taker fee/i);
-  assert.match(html, /OPPOSITE SIGNAL BLOCKED/);
   assert.match(html, /PAPER_MARKET_OPPOSITE_SIGNAL_EXIT/);
-  assert.match(html, /Global equity curve/i);
   assert.match(html, /Completed-window win rate/i);
-  assert.match(html, /estimated maker rebates/i);
   assert.match(html, /0\.99/);
   assert.match(html, /0\.01/);
   assert.match(html, /Waiting for official resolution/i);
@@ -84,9 +78,10 @@ test('dashboard explains same-side entries, profit-only exits, TP/SL, and resolu
   assert.match(html, /Binance BTCUSDT aggregate-trade WebSocket/);
   assert.match(html, /Polymarket CLOB books and trades/);
   assert.match(html, /Recent orders/);
-  assert.match(html, /Bot activity/);
+  assert.doesNotMatch(html, /Global equity curve/i);
+  assert.doesNotMatch(html, /Position history/i);
+  assert.doesNotMatch(html, /Bot activity/i);
   assert.doesNotMatch(html, /BTC &amp; ETH Signal Desk/);
-  assert.match(html, /Opposite signal: profit exit only/i);
   assert.doesNotMatch(html, /two fresh Binance updates/i);
 });
 

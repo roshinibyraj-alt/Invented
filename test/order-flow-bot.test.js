@@ -263,7 +263,7 @@ test('a persistent confirmed signal does not repeat the same entry', () => {
   assert.equal(bot.orders.find(order => order.action === 'BUY').status, 'FILLED');
 });
 
-test('a profitable opposite signal sells the old side without buying the other side', () => {
+test('an opposite signal buys its own side and independently sells profitable opposite shares', () => {
   const { bot, feed, nowRef } = makeBot();
   for (let second = 0; second < 3; second += 1) {
     step(bot, feed, nowRef, WINDOW_START + second * 1000, true);
@@ -288,9 +288,11 @@ test('a profitable opposite signal sells the old side without buying the other s
     step(bot, feed, nowRef, WINDOW_START + second * 1000, false);
   }
   const downOrder = bot.orders.find(order => order.action === 'BUY' && order.side === 'DOWN');
-  assert.equal(downOrder, undefined);
+  assert.ok(downOrder);
+  assert.equal(downOrder.status, 'FILLED');
+  assert.equal(downOrder.requestedShares, 100);
   assert.equal(bot.currentPosition('UP', WINDOW_START), null);
-  assert.equal(bot.currentPosition('DOWN', WINDOW_START), null);
+  assert.equal(bot.currentPosition('DOWN', WINDOW_START).shares, 100);
   const profitExit = bot.orders.find(order => order.action === 'SELL'
     && order.orderType === 'PAPER_MARKET_OPPOSITE_SIGNAL_EXIT');
   assert.ok(profitExit);
@@ -303,16 +305,17 @@ test('a profitable opposite signal sells the old side without buying the other s
   assert.equal(oldPosition.exitReason, 'OPPOSITE_SIGNAL_PROFIT_EXIT');
   assert.equal(oldPosition.settlementBasis, 'PAPER_OPPOSITE_SIGNAL_EXIT');
   assert.ok(oldPosition.realizedPnl > 0);
-  assert.equal(bot.snapshot().strategy.entries.sideMapping, 'BUY_SIGNALLED_SIDE');
-  assert.equal(bot.snapshot().strategy.maxActiveSidesPerWindow, 1);
-  assert.equal(bot.orders.filter(order => order.action === 'BUY').length, 1);
-  assert.equal(bot.signal.action, 'SELL_PROFITABLE_POSITION');
-  assert.equal(bot.signal.buySide, null);
-  assert.equal(bot.signal.orderStatus, 'OPPOSITE_SIGNAL_PROFIT_EXIT');
+  assert.equal(bot.snapshot().strategy.entries.sideMapping, 'BUY_SIGNALLED_SIDE_INDEPENDENTLY');
+  assert.equal(bot.snapshot().strategy.maxActiveSidesPerWindow, 2);
+  assert.equal(bot.orders.filter(order => order.action === 'BUY').length, 2);
+  assert.equal(bot.signal.action, 'BUY_DOWN');
+  assert.equal(bot.signal.buySide, 'DOWN');
+  assert.equal(bot.signal.oppositeExitStatus, 'SOLD_PROFITABLE_OPPOSITE');
+  assert.equal(bot.signal.oppositeSharesSold, 100);
   assert.equal(bot.signal.signalSide, 'DOWN');
 });
 
-test('an unprofitable opposite signal is ignored and the current position remains open', () => {
+test('an unprofitable opposite position stays open while the new signal side is bought', () => {
   const { bot, feed, nowRef } = makeBot();
   for (let second = 0; second < 3; second += 1) {
     step(bot, feed, nowRef, WINDOW_START + second * 1000, true);
@@ -330,13 +333,14 @@ test('an unprofitable opposite signal is ignored and the current position remain
   const position = bot.currentPosition('UP', WINDOW_START);
   assert.equal(position.shares, 100);
   assert.equal(position.status, 'OPEN');
-  assert.equal(bot.currentPosition('DOWN', WINDOW_START), null);
+  assert.equal(bot.currentPosition('DOWN', WINDOW_START).shares, 100);
   assert.equal(bot.orders.some(order => order.orderType === 'PAPER_MARKET_OPPOSITE_SIGNAL_EXIT'), false);
-  assert.equal(bot.orders.some(order => order.action === 'BUY' && order.side === 'DOWN'), false);
-  assert.equal(bot.signal.orderStatus, 'OPPOSITE_SIGNAL_BLOCKED_UNPROFITABLE');
-  assert.equal(bot.signal.buySide, null);
+  assert.equal(bot.orders.some(order => order.action === 'BUY' && order.side === 'DOWN'), true);
+  assert.equal(bot.signal.buySide, 'DOWN');
+  assert.equal(bot.signal.oppositeExitStatus, 'HELD_NOT_PROFITABLE');
   assert.ok(bot.signal.currentPositionNetPnl < 0);
-  assert.match(bot.signal.reason, /Holding the position; no opposite-side buy is placed/i);
+  assert.match(bot.signal.reason, /Held 100 UP shares/);
+  assert.equal(bot.snapshot().strategy.activeSide, 'BOTH');
 });
 
 test('a later same-side signal episode adds another 100 shares to the existing side', () => {
@@ -547,10 +551,10 @@ test('snapshot identifies the paper-only pressure strategy and exposes flow scor
   assert.equal(state.strategy.id, 'btc-5m-combined-orderflow-accumulation');
   assert.equal(state.strategy.execution, 'PAPER ONLY');
   assert.equal(state.strategy.entrySharesPerSignal, 100);
-  assert.equal(state.strategy.version, 'btc-5m-combined-orderflow-profitable-exit-v8');
-  assert.equal(state.strategy.entries.sideMapping, 'BUY_SIGNALLED_SIDE');
-  assert.equal(state.strategy.maxActiveSidesPerWindow, 1);
-  assert.match(state.strategy.entries.oppositeSignalProfitabilityRule, /never triggers a buy on the opposite side/i);
+  assert.equal(state.strategy.version, 'btc-5m-independent-side-profit-exit-v9');
+  assert.equal(state.strategy.entries.sideMapping, 'BUY_SIGNALLED_SIDE_INDEPENDENTLY');
+  assert.equal(state.strategy.maxActiveSidesPerWindow, 2);
+  assert.match(state.strategy.entries.oppositeSignalProfitabilityRule, /signal always triggers its own side buy independently/i);
   assert.equal(state.strategy.maxInventoryPerSide, null);
   assert.equal(state.strategy.usesTakerOrders, true);
   assert.equal(state.strategy.usesMakerOrders, true);

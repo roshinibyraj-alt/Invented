@@ -54,7 +54,6 @@
       .metric-value { font-size: 23px; font-weight: 850; letter-spacing: -.04em; margin-top: 8px; }
       .positive { color: var(--green); } .negative { color: var(--red); } .neutral { color: var(--text); }
       .two { grid-template-columns: repeat(2,minmax(0,1fr)); }
-      .three { grid-template-columns: repeat(3,minmax(0,1fr)); }
       .panel-head { margin-bottom: 14px; }
       .panel-title { font-weight: 800; font-size: 15px; }
       .panel-sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
@@ -88,22 +87,9 @@
       th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid #203148; white-space: nowrap; }
       th { color: var(--muted); font-weight: 700; }
       .tag { display: inline-flex; border: 1px solid var(--line); border-radius: 999px; padding: 3px 7px; font-size: 10px; font-weight: 800; }
-      .activity { display: grid; gap: 9px; max-height: 380px; overflow: auto; }
-      .activity-item { border-left: 2px solid var(--blue); padding: 4px 0 4px 11px; }
-      .activity-item.trade { border-color: var(--green); }
-      .activity-item.resolve { border-color: var(--amber); }
-      .activity-item.win { border-color: var(--green); color: #8cf2bd; }
-      .activity-item.loss { border-color: var(--red); color: #ff9baa; }
-      .activity-time { color: var(--muted); font-size: 11px; margin-top: 3px; }
-      .equity-chart { width: 100%; height: 230px; display: block; }
-      .equity-chart text { fill: var(--muted); font: 11px ui-sans-serif, system-ui, sans-serif; }
-      .equity-chart .gridline { stroke: #24364b; stroke-width: 1; }
-      .equity-chart .curve { fill: none; stroke: var(--green); stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
-      .equity-chart .current { fill: var(--green); stroke: #07111f; stroke-width: 3; }
-      .chart-caption { display: flex; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 12px; }
       .empty { color: var(--muted); padding: 14px 4px; }
       footer { color: var(--muted); text-align: center; padding: 12px 4px 4px; font-size: 11px; }
-      @media(max-width:860px) { .metrics { grid-template-columns: repeat(2,minmax(0,1fr)); } .three { grid-template-columns: 1fr; } }
+      @media(max-width:860px) { .metrics { grid-template-columns: repeat(2,minmax(0,1fr)); } }
       @media(max-width:620px) {
         .shell { padding: 12px; } header { align-items: flex-start; } .hero, .two { grid-template-columns: 1fr; }
         .score-cards { grid-template-columns: 1fr; } .badges { max-width: 140px; }
@@ -116,16 +102,16 @@
       <header>
         <div class="brand">
           <div class="mark" aria-hidden="true">₿</div>
-          <div><div class="eyebrow">Invented · BTC 5-minute</div><h1>Order-flow profit-exit bot</h1></div>
+          <div><div class="eyebrow">Invented · BTC 5-minute</div><h1>Independent-side pressure bot</h1></div>
         </div>
         <div class="badges"><span class="badge paper">PAPER ONLY</span><span class="pill warn" id="statusPill">CONNECTING</span><span class="badge" id="updatedAt">Updated —</span></div>
       </header>
 
       <section class="hero">
         <div>
-          <div class="eyebrow">Binance aggressor trades × Polymarket CLOB</div>
-          <h2>Keep adding on-side; never flip on an opposite signal.</h2>
-          <p>Each newly confirmed signal immediately sweeps visible asks for up to 100 shares on its signalled side. Partial fills are allowed; buys below a $0.05 best ask are blocked. An opposite signal can only sell the current position if its estimated net proceeds are profitable after taker fees. It never buys the other side on that signal. Take-profit, stop-loss, and resolution rules remain active.</p>
+          <div class="eyebrow">Binance order flow × Polymarket UP/DOWN</div>
+          <h2>Buy each signalled side independently.</h2>
+          <p>Every newly confirmed UP or DOWN signal market-buys that side. If the opposite side already has shares, the bot also sells them when the estimated net result is profitable after fees. Both sides can remain open. The $0.99 final take-profit, $0.01 stop, and resolution handling stay active.</p>
         </div>
         <div class="hero-state">
           <span class="badge" id="window">Waiting for market</span>
@@ -143,13 +129,13 @@
               <div class="side-head"><strong>UP · current window</strong><span class="badge" id="upPressure">Pressure —</span></div>
               <div class="price-grid"><div class="price"><span>Best bid · size</span><strong id="upBid">—</strong></div><div class="price"><span>Best ask · size</span><strong id="upAsk">—</strong></div></div>
               <div class="position"><strong id="upPosition">0 shares · — avg</strong><span id="upPnl">No open position</span></div>
-              <small class="risk-rule" id="upRisk">TP $0.99 → $1/share · SL $0.01 → $0/share</small>
+              <small class="risk-rule" id="upRisk">Final TP $0.99 → $1/share · SL $0.01 → $0/share</small>
             </div>
             <div class="side-card down">
               <div class="side-head"><strong>DOWN · current window</strong><span class="badge" id="downPressure">Pressure —</span></div>
               <div class="price-grid"><div class="price"><span>Best bid · size</span><strong id="downBid">—</strong></div><div class="price"><span>Best ask · size</span><strong id="downAsk">—</strong></div></div>
               <div class="position"><strong id="downPosition">0 shares · — avg</strong><span id="downPnl">No open position</span></div>
-              <small class="risk-rule" id="downRisk">TP $0.99 → $1/share · SL $0.01 → $0/share</small>
+              <small class="risk-rule" id="downRisk">Final TP $0.99 → $1/share · SL $0.01 → $0/share</small>
             </div>
           </div>
         </article>
@@ -162,24 +148,6 @@
         <article class="metric"><div class="label">Completed-window win rate</div><div class="metric-value" id="completedWinRate">—</div><small id="completedWindowCount">No completed trading windows</small></article>
       </section>
 
-      <section class="grid two">
-        <article class="panel">
-          <div class="panel-head"><div><div class="panel-title">Global equity curve</div><div class="panel-sub">Account-wide equity: realized results plus current marked positions</div></div><span class="badge" id="equityCurveRange">Waiting for history</span></div>
-          <svg class="equity-chart" id="equityChart" viewBox="0 0 900 230" role="img" aria-label="Global account equity over time"></svg>
-          <div class="chart-caption"><span id="equityChartStart">—</span><span id="equityChartEnd">—</span></div>
-        </article>
-        <article class="panel">
-          <div class="panel-head"><div><div class="panel-title">Account performance</div><div class="panel-sub">Only completed trading windows are included in win rate</div></div></div>
-          <div class="stats">
-            <div class="stat"><span class="label">Completed windows</span><strong id="completedWindows">0</strong></div>
-            <div class="stat"><span class="label">Wins / losses</span><strong id="completedWinsLosses">0 / 0</strong></div>
-            <div class="stat"><span class="label">Window win rate</span><strong id="completedRateDetail">—</strong></div>
-            <div class="stat"><span class="label">Estimated maker rebates</span><strong id="makerRebates">—</strong></div>
-          </div>
-          <small>Rebates are estimates; actual eligibility and amounts depend on Polymarket’s market fee and rebate rules.</small>
-        </article>
-      </section>
-
       <section class="grid">
         <article class="panel">
           <div class="panel-head"><div><div class="panel-title">Buyer–seller pressure</div><div class="panel-sub">Normalized scores from −1 (selling) to +1 (buying)</div></div><span class="badge" id="pressureStatus">WAITING</span></div>
@@ -187,12 +155,6 @@
             <div class="score-box"><div class="label">Binance trade flow</div><div class="score-value" id="binanceScore">—</div><div class="score-meta" id="binanceFlowDetail">Waiting for trades</div><div class="meter up"><span id="binanceMeter"></span></div></div>
             <div class="score-box"><div class="label">Polymarket pressure</div><div class="score-value" id="clobScore">—</div><div class="score-meta" id="clobFlowDetail">Waiting for books</div><div class="meter down"><span id="clobMeter"></span></div></div>
             <div class="score-box"><div class="label">Combined signal</div><div class="score-value" id="combinedScore">—</div><div class="score-meta" id="confirmation">0 / 3 checks</div><div class="meter up"><span id="combinedMeter"></span></div></div>
-          </div>
-          <div class="stats">
-            <div class="stat"><span class="label">Binance aggressive buy / sell</span><strong id="binanceBuySell">—</strong></div>
-            <div class="stat"><span class="label">BTC move, last 5 seconds</span><strong id="btcMove">—</strong></div>
-            <div class="stat"><span class="label">CLOB UP / DOWN trade count</span><strong id="clobTrades">—</strong></div>
-            <div class="stat"><span class="label">Signal requires both sources</span><strong id="sourceAgreement">—</strong></div>
           </div>
         </article>
 
@@ -207,17 +169,15 @@
 
       <section class="grid two">
         <article class="panel">
-          <div class="panel-head"><div><div class="panel-title">How the strategy trades</div><div class="panel-sub">The active rules used by this paper bot</div></div><span class="badge">100 shares per same-side signal</span></div>
+          <div class="panel-head"><div><div class="panel-title">Current strategy</div><div class="panel-sub">The rules currently running in this paper bot</div></div><span class="badge">100 shares per signal</span></div>
           <div class="rules">
             <div class="rule"><b>Measure</b><span>Use the last five seconds of Binance aggressor notional and Polymarket CLOB trade flow, top-three-level depth imbalance, and microprice.</span></div>
             <div class="rule"><b>Confirm</b><span>Binance and Polymarket must point the same way; each must exceed 0.10 pressure and their combined score must reach ±0.30 for three one-second checks.</span></div>
-            <div class="rule"><b>Market entry</b><span>An UP signal buys UP; a DOWN signal buys DOWN. Each new confirmed same-side signal requests 100 shares and immediately sweeps visible asks from best to worse. Partial fills are allowed and any unfilled remainder is cancelled immediately. A buy is skipped when the best ask is below $0.05; taker fees are modeled at each fill price.</span></div>
-            <div class="rule"><b>Opposite signal: profit exit only</b><span>On an opposite confirmed signal, estimate liquidation P&amp;L using the fresh best bid, modeled taker fee, entry cost, and entry rebate. Sell all current-side shares only if net P&amp;L is positive. Never place a buy on the opposite side from that signal; if the position is not profitable to sell, keep holding it.</span></div>
-            <div class="rule"><b>Partial fills</b><span>Each market order uses only the ask shares visible at submission. The bot records the actual filled quantity and average price; any remaining requested shares are not left resting.</span></div>
-            <div class="rule"><b>Take profit</b><span>A fresh best bid at $0.99 closes all accumulated shares on that side at $1 per share in the paper ledger. Sell fee is zero; the limit fill may earn a modeled maker rebate.</span></div>
-            <div class="rule"><b>Stop loss</b><span>A fresh best bid at $0.01 or lower closes all accumulated shares on that side at $0 per share in the paper ledger.</span></div>
-            <div class="rule"><b>Fees and rebates</b><span>Market entries and opposite-signal profit exits pay modeled taker fees. Limit take-profits may earn an estimated maker rebate; estimates are not guaranteed and depend on market rules.</span></div>
-            <div class="rule"><b>Settle</b><span>Shares still open at the end of their window leave the current UP/DOWN boxes and wait in the resolution section for that market’s official result.</span></div>
+            <div class="rule"><b>Independent buys</b><span>Each newly confirmed signal sweeps visible asks for 100 shares on that same side. UP and DOWN may both stay open. Partial fills are allowed; remaining shares cancel immediately. Buys below a $0.05 best ask are blocked.</span></div>
+            <div class="rule"><b>Profitable opposite exit</b><span>During a signal trigger, buy the signalled side regardless of the opposite position. Also sell all opposite-side shares only when the fresh-bid estimate is net-profitable after fees; otherwise hold them.</span></div>
+            <div class="rule"><b>Final take-profit</b><span>A fresh best bid at $0.99 closes that side at $1 per share. This is the final TP, separate from profitable signal-triggered exits.</span></div>
+            <div class="rule"><b>Stop and settle</b><span>A fresh best bid at $0.01 or lower closes that side at $0. At window end, any remaining shares wait for that market’s official result.</span></div>
+            <div class="rule"><b>Costs</b><span>Market buys and signal-triggered sells include modeled taker fees; the final limit TP may earn an estimated rebate.</span></div>
           </div>
         </article>
         <article class="panel">
@@ -226,16 +186,6 @@
         </article>
       </section>
 
-      <section class="grid two">
-        <article class="panel">
-          <div class="panel-head"><div><div class="panel-title">Position history</div><div class="panel-sub">Current and resolved paper positions</div></div><span class="badge" id="positionCount">0 positions</span></div>
-          <div class="table-wrap"><table><thead><tr><th>Opened</th><th>Side</th><th>Shares</th><th>Avg entry</th><th>Status</th><th>Result</th><th>P&amp;L</th></tr></thead><tbody id="positions"><tr><td class="empty" colspan="7">Waiting for the first position</td></tr></tbody></table></div>
-        </article>
-        <article class="panel">
-          <div class="panel-head"><div><div class="panel-title">Bot activity</div><div class="panel-sub">Confirmed signals, fills, reversals, and resolution</div></div><span class="badge" id="activityCount">0 events</span></div>
-          <div class="activity" id="activity"><div class="empty">Waiting for bot activity</div></div>
-        </article>
-      </section>
       <footer>Paper simulation only · Binance BTCUSDT aggregate-trade WebSocket · Polymarket CLOB books and trades · Railway restarts reset the in-memory paper ledger</footer>
     </main>
     <script>
@@ -249,42 +199,6 @@
       const set = (id, value) => { if ($(id)) $(id).textContent = value; };
       const pnlClass = value => Number(value) > 0 ? "positive" : Number(value) < 0 ? "negative" : "neutral";
       const fmtShares = value => Number(value || 0).toLocaleString(undefined,{maximumFractionDigits:2});
-      function renderEquityCurve(points) {
-        const svg = $("equityChart");
-        const series = (Array.isArray(points) ? points : [])
-          .filter(point => Number.isFinite(Number(point?.equity)) && Number.isFinite(Number(point?.ts)))
-          .slice(-160);
-        if (!series.length) {
-          svg.innerHTML = `<text x="450" y="118" text-anchor="middle">Equity history will appear here</text>`;
-          set("equityCurveRange","Waiting for history");
-          set("equityChartStart","—");
-          set("equityChartEnd","—");
-          return;
-        }
-        const width = 900, height = 230, left = 76, right = 14, top = 12, bottom = 24;
-        let min = Math.min(...series.map(point => Number(point.equity)));
-        let max = Math.max(...series.map(point => Number(point.equity)));
-        if (max - min < 0.01) { min -= 0.5; max += 0.5; }
-        const pad = Math.max((max - min) * 0.08, 0.1);
-        min -= pad; max += pad;
-        const plotWidth = width - left - right;
-        const plotHeight = height - top - bottom;
-        const yFor = value => top + (max - value) / (max - min) * plotHeight;
-        const coords = series.map((point, index) => {
-          const x = left + (series.length === 1 ? plotWidth : index / (series.length - 1) * plotWidth);
-          return `${x.toFixed(1)},${yFor(Number(point.equity)).toFixed(1)}`;
-        });
-        const grid = Array.from({length: 4}, (_, index) => {
-          const value = max - (max - min) * index / 3;
-          const y = yFor(value);
-          return `<line class="gridline" x1="${left}" y1="${y.toFixed(1)}" x2="${width-right}" y2="${y.toFixed(1)}"/><text x="${left-8}" y="${(y+4).toFixed(1)}" text-anchor="end">${money(value)}</text>`;
-        }).join("");
-        const last = coords.at(-1).split(",");
-        svg.innerHTML = `${grid}<polyline class="curve" points="${coords.join(" ")}"/><circle class="current" cx="${last[0]}" cy="${last[1]}" r="5"/>`;
-        set("equityCurveRange",`${series.length} points · ${money(series.at(-1).equity)} now`);
-        set("equityChartStart",`Start ${money(series[0].equity)} · ${dt(series[0].ts)}`);
-        set("equityChartEnd",`Current ${money(series.at(-1).equity)} · ${dt(series.at(-1).ts)}`);
-      }
       function setScore(id, meterId, value) {
         const n = Number(value);
         set(id, score(value));
@@ -311,12 +225,8 @@
         set("updatedAt", `Updated ${time(state.now)}`);
         set("window", state.window?.slug || "BTC 5-minute window");
         set("remaining", Number.isFinite(Number(state.window?.secondsRemaining)) ? `${Math.max(0,Math.floor(Number(state.window.secondsRemaining)))} sec` : "—");
-        const signalLabel = state.signal?.orderStatus === "OPPOSITE_SIGNAL_BLOCKED_UNPROFITABLE"
-          ? `OPPOSITE SIGNAL BLOCKED · HOLD ${state.signal.side || "POSITION"}`
-          : state.signal?.orderStatus === "OPPOSITE_SIGNAL_WAITING_FOR_FRESH_BID"
-            ? `OPPOSITE SIGNAL · WAIT TO SELL ${state.signal.side || "POSITION"}`
-          : state.signal?.signalSide && state.signal?.buySide
-            ? `${state.signal.signalSide} SIGNAL → BUY ${state.signal.buySide}`
+        const signalLabel = state.signal?.signalSide && state.signal?.buySide
+          ? `${state.signal.signalSide} SIGNAL → BUY ${state.signal.buySide}${Number(state.signal.oppositeSharesSold) > 0 ? ` · SOLD ${fmtShares(state.signal.oppositeSharesSold)} ${state.signal.buySide === "UP" ? "DOWN" : "UP"}` : ""}`
           : state.signal?.action && state.signal.action !== "WAIT"
             ? `${state.signal.action} · ${state.signal.side || pressure.confirmedSide || ""}`
             : pressure.confirmedSide ? `CONFIRMED · ${pressure.confirmedSide}` : pressure.status || "WAITING";
@@ -329,15 +239,9 @@
         const completed = state.completedWindowStats || {};
         const completedCount = Number(completed.completed ?? account.completedWindowCount ?? 0);
         const completedWins = Number(completed.wins ?? account.completedWindowWins ?? 0);
-        const completedLosses = Number(completed.losses ?? account.completedWindowLosses ?? 0);
         const winRate = Number(completed.winRate ?? account.completedWindowWinRate ?? 0);
         set("completedWinRate",completedCount ? `${winRate.toFixed(1)}%` : "—");
         set("completedWindowCount",`${completedCount} completed · ${completedWins} wins`);
-        set("completedWindows",completedCount);
-        set("completedWinsLosses",`${completedWins} / ${completedLosses}`);
-        set("completedRateDetail",completedCount ? `${winRate.toFixed(1)}%` : "—");
-        set("makerRebates",money(account.estimatedMakerRebate));
-        renderEquityCurve(account.equityCurve);
         set("btcPrice", money(state.binance?.price,2));
         set("binanceStatus", `${String(state.binance?.status || "waiting")} · ${binance.tickAgeMs == null ? "—" : Math.max(0,Math.round(binance.tickAgeMs))+" ms old"}`);
         set("pressureStatus", pressure.status || "WAITING");
@@ -347,10 +251,6 @@
         set("binanceFlowDetail",`${Number(binance.tradeCount||0)} trades · ${money(binance.buyNotional,2)} buy / ${money(binance.sellNotional,2)} sell`);
         set("clobFlowDetail",`UP ${score(outcomes.UP?.score?.score)} · DOWN ${score(outcomes.DOWN?.score?.score)} outcome pressure`);
         set("confirmation",`${Number(pressure.confirmationCount||0)} / ${Number(pressure.requiredConfirmations||3)} checks${pressure.candidateSide?` · ${pressure.candidateSide}`:""}`);
-        set("binanceBuySell",`${Number(binance.buyCount||0)} / ${Number(binance.sellCount||0)} trades`);
-        set("btcMove",binance.priceChangePct == null ? "—" : `${Number(binance.priceChangePct)>=0?"+":""}${(Number(binance.priceChangePct)*100).toFixed(4)}%`);
-        set("clobTrades",`${Number(poly.trades?.UP?.tradeCount||0)} / ${Number(poly.trades?.DOWN?.tradeCount||0)}`);
-        set("sourceAgreement",pressure.agreement ? "Aligned" : "Not aligned");
         set("clobStatus",`Polymarket ${String(state.websocket?.status||"waiting").toLowerCase()}`);
         set("marketTitle",state.market?.title || state.market?.slug || "BTC 5-minute UP/DOWN");
         for (const side of ["UP","DOWN"]) {
@@ -381,37 +281,6 @@
           <td><strong>${esc(position.side)}</strong></td><td>${fmtShares(position.shares)}</td>
           <td>${price(position.entryPrice)}</td><td>${dt(position.windowEnd)}</td><td>${esc(position.status)}</td>
         </tr>`).join("") : `<tr><td class="empty" colspan="6">No positions waiting for resolution</td></tr>`;
-        const trades = Array.isArray(state.trades) ? state.trades : [];
-        set("positionCount",`${trades.length} positions`);
-        $("positions").innerHTML = trades.length ? trades.slice(0,30).map(position => `<tr>
-          <td>${dt(position.openedAt)}</td><td><strong>${esc(position.side)}</strong></td><td>${fmtShares(position.shares)}</td>
-          <td>${price(position.entryPrice)}</td><td>${esc(position.status)}</td><td>${esc(position.outcome || position.resolutionWinner || "—")}</td>
-          <td class="${pnlClass(position.realizedPnl ?? position.unrealizedPnl)}">${money(position.realizedPnl ?? position.unrealizedPnl)}</td></tr>`).join("") : `<tr><td class="empty" colspan="7">Waiting for the first position</td></tr>`;
-         const events = (Array.isArray(state.events) ? state.events : []).filter(event => {
-          const type = String(event.type || event.event || "").toUpperCase();
-          return !type.startsWith("PAPER_FLOW_")
-            && type !== "HEARTBEAT"
-            && type !== "PAPER_POSITION_OUTCOME_RECORDED"
-            && type !== "PAPER_STRATEGY_WINDOW_STARTED";
-         });
-         set("activityCount",`${events.length} events`);
-         $("activity").innerHTML = events.length ? events.slice(0,30).map(event => {
-          const rawType = String(event.type || event.event || "UPDATE");
-          const type = rawType.toUpperCase();
-          const details = event.details || {};
-          const pnl = Number(details.realizedPnl ?? details.pnl);
-          const result = String(details.outcome || "").toUpperCase();
-          const isWin = Number.isFinite(pnl) && pnl > 0 || result === "WIN" || type.includes("OFFICIAL_WIN");
-          const isLoss = Number.isFinite(pnl) && pnl < 0 || result === "LOSS" || type.includes("OFFICIAL_LOSS");
-          const kind = isWin ? "win" : isLoss ? "loss" : type.includes("resolved") || type.includes("settled") ? "resolve" : type.includes("buy") || type.includes("sell") ? "trade" : "";
-          const fallback = type === "PAPER_OFFICIAL_WIN"
-            ? `${details.side || "Position"} resolved as the winner · ${money(pnl)} net`
-            : type === "PAPER_OFFICIAL_LOSS"
-              ? `${details.side || "Position"} resolved as the loser · ${money(pnl)} net`
-              : rawType.replace(/^PAPER_/, "").replaceAll("_", " ").toLowerCase();
-          const text = event.message || event.note || details.note || fallback;
-          return `<div class="activity-item ${kind}"><div>${esc(text)}</div><div class="activity-time">${dt(event.at ?? event.ts)}</div></div>`;
-         }).join("") : `<div class="empty">Waiting for bot activity</div>`;
       }
       async function refresh() {
         try {
