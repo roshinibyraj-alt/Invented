@@ -59,7 +59,7 @@ class OrderFlowBot extends MispricingBot {
   constructor(options = {}) {
     super(options);
     this.strategyId = 'btc-5m-combined-orderflow-accumulation';
-    this.strategyName = 'BTC 5-minute single-side order-flow flip paper strategy';
+    this.strategyName = 'BTC 5-minute order-flow profit-exit paper strategy';
     this.rules = {
       sharesPerSide: config.FLOW_ENTRY_SHARES,
       entryShares: config.FLOW_ENTRY_SHARES,
@@ -392,42 +392,39 @@ class OrderFlowBot extends MispricingBot {
       Number(order.windowStart) === Number(this.getActiveWindowStart()));
 
     const windowStart = Number(this.getActiveWindowStart());
-    const positionsToFlip = this.positions.filter((position) =>
+    const positionsToExit = this.positions.filter((position) =>
       position.status === 'OPEN'
       && Number(position.windowStart) === windowStart
       && position.side !== buySide
       && Number(position.shares) > EPSILON);
-    const flipShares = positionsToFlip.reduce((total, position) =>
+    const sharesToExit = positionsToExit.reduce((total, position) =>
       total + Number(position.shares), 0);
-    let requestedShares = config.FLOW_ENTRY_SHARES;
-    let flippedFromSide = null;
-    let flipExitPrice = null;
 
-    if (positionsToFlip.length) {
-      const oldSide = positionsToFlip[0].side;
+    if (positionsToExit.length) {
+      const oldSide = positionsToExit[0].side;
       const quote = this.flowQuote(oldSide, now);
       const bestBid = Number(quote?.bestBid);
       if (!quote || !Number.isFinite(bestBid) || !(bestBid > 0 && bestBid < 1)) {
         this.signal = {
-          side: buySide,
+          side: oldSide,
           signalSide,
-          buySide,
+          buySide: null,
           action: 'WAIT',
-          reason: `The ${signalSide} signal is confirmed, but the existing ${oldSide} position cannot flip without a fresh best bid. No new-side order was placed.`,
+          reason: `The ${signalSide} signal is confirmed, but the ${oldSide} position cannot be sold without a fresh best bid. The position is held; no opposite-side buy is placed.`,
           combinedScore: this.pressure.combinedScore,
-          orderStatus: 'FLIP_WAITING_FOR_FRESH_BID',
+          orderStatus: 'OPPOSITE_SIGNAL_WAITING_FOR_FRESH_BID',
         };
-        this.log('PAPER_FLOW_SIGNAL_FLIP_WAITING_FOR_BID', {
+        this.log('PAPER_FLOW_OPPOSITE_SIGNAL_WAITING_FOR_BID', {
           signalSide,
           oldSide,
-          requestedShares: flipShares,
+          requestedShares: sharesToExit,
         });
         return false;
       }
 
-      const flipSellFeeEstimate = positionsToFlip.reduce((total, position) =>
+      const sellFeeEstimate = positionsToExit.reduce((total, position) =>
         total + takerFeeFor(this.market || {}, bestBid, Number(position.shares) || 0), 0);
-      const flipNetPnlEstimate = positionsToFlip.reduce((total, position) => {
+      const netPnlEstimate = positionsToExit.reduce((total, position) => {
         const shares = Number(position.shares) || 0;
         const grossProceeds = shares * bestBid;
         const sellFee = takerFeeFor(this.market || {}, bestBid, shares);
@@ -436,54 +433,66 @@ class OrderFlowBot extends MispricingBot {
         const entryRebate = Number(position.estimatedMakerRebate) || 0;
         return total + grossProceeds - sellFee - cost - entryFees + entryRebate;
       }, 0);
-      if (!(flipNetPnlEstimate > EPSILON)) {
-        const reason = `The ${signalSide} signal is confirmed, but the ${positionsToFlip[0].side} position is not net-profitable to sell at the $${bestBid.toFixed(3)} best bid after the estimated $${flipSellFeeEstimate.toFixed(3)} sell fee (projected P&L $${flipNetPnlEstimate.toFixed(3)}). Holding the position; flip skipped.`;
+      if (!(netPnlEstimate > EPSILON)) {
+        const reason = `The ${signalSide} signal is confirmed, but the ${positionsToExit[0].side} position is not net-profitable to sell at the $${bestBid.toFixed(3)} best bid after the estimated $${sellFeeEstimate.toFixed(3)} sell fee (projected P&L $${netPnlEstimate.toFixed(3)}). Holding the position; no opposite-side buy is placed.`;
         this.signal = {
-          side: positionsToFlip[0].side,
+          side: positionsToExit[0].side,
           signalSide,
-          buySide,
+          buySide: null,
           action: 'WAIT',
           reason,
           combinedScore: this.pressure.combinedScore,
-          orderStatus: 'FLIP_BLOCKED_UNPROFITABLE',
-          currentPositionNetPnl: flipNetPnlEstimate,
-          flipSellFeeEstimate,
-          flipBestBid: bestBid,
+          orderStatus: 'OPPOSITE_SIGNAL_BLOCKED_UNPROFITABLE',
+          currentPositionNetPnl: netPnlEstimate,
+          sellFeeEstimate,
+          sellBestBid: bestBid,
         };
-        this.flowState = { status: 'FLIP_BLOCKED_UNPROFITABLE', reason };
-        this.log('PAPER_FLOW_SIGNAL_FLIP_BLOCKED_UNPROFITABLE', {
+        this.flowState = { status: 'OPPOSITE_SIGNAL_BLOCKED_UNPROFITABLE', reason };
+        this.log('PAPER_FLOW_OPPOSITE_SIGNAL_BLOCKED_UNPROFITABLE', {
           signalSide,
-          currentSide: positionsToFlip[0].side,
-          shares: flipShares,
+          currentSide: positionsToExit[0].side,
+          shares: sharesToExit,
           bestBid,
-          estimatedSellFee: flipSellFeeEstimate,
-          projectedNetPnl: flipNetPnlEstimate,
+          estimatedSellFee: sellFeeEstimate,
+          projectedNetPnl: netPnlEstimate,
         });
         this.events.unshift({
           ts: now,
           at: now,
-          event: 'PAPER_SIGNAL_FLIP_BLOCKED_UNPROFITABLE',
-          type: 'PAPER_SIGNAL_FLIP_BLOCKED_UNPROFITABLE',
-          message: `${signalSide} signal ignored: holding ${positionsToFlip[0].side} because selling at $${bestBid.toFixed(3)} would not be profitable after the estimated taker fee.`,
+          event: 'PAPER_OPPOSITE_SIGNAL_BLOCKED_UNPROFITABLE',
+          type: 'PAPER_OPPOSITE_SIGNAL_BLOCKED_UNPROFITABLE',
+          message: `${signalSide} signal: holding ${positionsToExit[0].side}; selling at $${bestBid.toFixed(3)} would not be profitable after the estimated taker fee. No opposite-side buy was placed.`,
           details: {
             signalSide,
-            currentSide: positionsToFlip[0].side,
-            shares: flipShares,
+            currentSide: positionsToExit[0].side,
+            shares: sharesToExit,
             bestBid,
-            estimatedSellFee: flipSellFeeEstimate,
-            projectedNetPnl: flipNetPnlEstimate,
+            estimatedSellFee: sellFeeEstimate,
+            projectedNetPnl: netPnlEstimate,
           },
         });
         if (this.events.length > 200) this.events.length = 200;
         return false;
       }
 
-      for (const position of positionsToFlip) {
-        if (!this.closePositionAtSignalFlip(position, now, bestBid, buySide)) return false;
+      for (const position of positionsToExit) {
+        if (!this.closePositionOnOppositeSignal(position, now, bestBid, signalSide)) return false;
       }
-      requestedShares = flipShares;
-      flippedFromSide = oldSide;
-      flipExitPrice = bestBid;
+      const reason = `The ${signalSide} signal appeared while holding ${oldSide}. Sold all ${sharesToExit} ${oldSide} shares at the $${bestBid.toFixed(3)} best bid for an estimated net profit of $${netPnlEstimate.toFixed(3)} after the modeled taker fee. No ${signalSide} buy was placed.`;
+      this.signal = {
+        side: oldSide,
+        signalSide,
+        buySide: null,
+        action: 'SELL_PROFITABLE_POSITION',
+        reason,
+        combinedScore: this.pressure.combinedScore,
+        orderStatus: 'OPPOSITE_SIGNAL_PROFIT_EXIT',
+        currentPositionNetPnl: netPnlEstimate,
+        sellFeeEstimate,
+        sellBestBid: bestBid,
+      };
+      this.flowState = { status: 'OPPOSITE_SIGNAL_PROFIT_EXIT', reason };
+      return true;
     }
 
     const submitted = this.submitBuyLimitMidpoint(
@@ -491,8 +500,7 @@ class OrderFlowBot extends MispricingBot {
       now,
       this.pressure,
       signalSide,
-      requestedShares,
-      flippedFromSide,
+      config.FLOW_ENTRY_SHARES,
     );
     const filledShares = Number(submitted.filledShares) || 0;
     const averagePrice = Number.isFinite(Number(submitted.averagePrice))
@@ -507,9 +515,7 @@ class OrderFlowBot extends MispricingBot {
       buySide,
       action: buySide === 'UP' ? 'BUY_UP' : 'BUY_DOWN',
       reason: submitted.orderId
-        ? flippedFromSide
-          ? `${signalSide} pressure confirmed; sold all ${flipShares} ${flippedFromSide} shares at the $${flipExitPrice.toFixed(3)} best bid, then placed a ${requestedShares}-share ${buySide} resting limit at the current midpoint of $${limitPrice.toFixed(3)}.`
-          : `${signalSide} pressure confirmed; placed a ${requestedShares}-share ${buySide} resting limit at the current midpoint of $${limitPrice.toFixed(3)}. It fills in full when a fresh midpoint reaches $${(limitPrice - 0.01).toFixed(3)} or lower.`
+        ? `${signalSide} pressure confirmed; placed a ${config.FLOW_ENTRY_SHARES}-share ${buySide} resting limit at the current midpoint of $${limitPrice.toFixed(3)}. It fills in full when a fresh midpoint reaches $${(limitPrice - 0.01).toFixed(3)} or lower.`
         : `${signalSide} pressure confirmed, but the ${buySide} resting order was not placed: ${submitted.reason || 'no fresh midpoint was available'}.`,
       combinedScore: this.pressure.combinedScore,
       binanceScore: this.pressure.binance?.score,
@@ -522,9 +528,6 @@ class OrderFlowBot extends MispricingBot {
       estimatedMakerRebate: Number(submitted.estimatedMakerRebate) || 0,
       orderId: submitted.orderId || null,
       orderStatus: submitted.status || 'NOT_PLACED',
-      flippedFromSide,
-      flipShares: flippedFromSide ? flipShares : 0,
-      flipExitPrice,
     };
     return Boolean(submitted.orderId);
   }
@@ -535,7 +538,6 @@ class OrderFlowBot extends MispricingBot {
     signal,
     signalSide = null,
     requestedShares = config.FLOW_ENTRY_SHARES,
-    flippedFromSide = null,
   ) {
     requestedShares = Number(requestedShares);
     if (!(requestedShares > EPSILON)) return { filledShares: 0, reason: 'INVALID_ENTRY_SIZE' };
@@ -554,7 +556,6 @@ class OrderFlowBot extends MispricingBot {
       action: 'BUY',
       side,
       signalSide,
-      flippedFromSide,
       orderType: ORDER_TYPE,
       status: 'RESTING',
       requestedShares,
@@ -604,7 +605,6 @@ class OrderFlowBot extends MispricingBot {
         orderId: order.id,
         signalSide,
         side,
-        flippedFromSide,
         requestedShares,
         limitPrice: order.limitPrice,
         midpointAtPlacement: order.midpointAtPlacement,
@@ -933,7 +933,7 @@ class OrderFlowBot extends MispricingBot {
     return order;
   }
 
-  closePositionAtSignalFlip(position, now, bestBid, nextSide) {
+  closePositionOnOppositeSignal(position, now, bestBid, signalSide) {
     const shares = Number(position.shares);
     const exitPrice = Number(bestBid);
     if (!(shares > EPSILON) || position.status !== 'OPEN'
@@ -945,12 +945,12 @@ class OrderFlowBot extends MispricingBot {
     const entryFees = Number(position.fees) || 0;
     const entryRebate = Number(position.estimatedMakerRebate) || 0;
     const exitOrder = {
-      id: `${position.id}-signal-flip-${now}`,
+      id: `${position.id}-opposite-signal-exit-${now}`,
       strategyId: this.strategyId,
       positionId: position.id,
       action: 'SELL',
       side: position.side,
-      orderType: 'PAPER_MARKET_SIGNAL_FLIP',
+      orderType: 'PAPER_MARKET_OPPOSITE_SIGNAL_EXIT',
       status: 'FILLED',
       requestedShares: shares,
       filledShares: shares,
@@ -960,9 +960,9 @@ class OrderFlowBot extends MispricingBot {
       fees: sellFee,
       sellFee,
       estimatedMakerRebate: 0,
-      exitReason: 'SIGNAL_FLIP',
+      exitReason: 'OPPOSITE_SIGNAL_PROFIT_EXIT',
       triggerBestBid: exitPrice,
-      nextSide,
+      signalSide,
       createdAt: now,
       filledAt: now,
       windowStart: position.windowStart,
@@ -971,15 +971,15 @@ class OrderFlowBot extends MispricingBot {
     };
 
     if (position.takeProfitOrder?.status === 'RESTING') {
-      position.takeProfitOrder.status = 'CANCELLED_SIGNAL_FLIP';
+      position.takeProfitOrder.status = 'CANCELLED_OPPOSITE_SIGNAL_EXIT';
       position.takeProfitOrder.cancelledAt = now;
       position.takeProfitOrder.remainingShares = 0;
     }
     this.orders.unshift(exitOrder);
     this.windowOrders.unshift(exitOrder);
 
-    position.exitReason = 'SIGNAL_FLIP';
-    position.exitType = 'PAPER_MARKET_SIGNAL_FLIP';
+    position.exitReason = 'OPPOSITE_SIGNAL_PROFIT_EXIT';
+    position.exitType = 'PAPER_MARKET_OPPOSITE_SIGNAL_EXIT';
     position.exitPrice = exitPrice;
     position.exitBid = exitPrice;
     position.exitProceeds = gross;
@@ -991,10 +991,10 @@ class OrderFlowBot extends MispricingBot {
     position.realizedPnl = position.proceeds - entryCost - entryFees;
     position.exitFills = [{ price: exitPrice, shares, at: now }];
     position.status = 'SETTLED_EXIT';
-    position.settlementStatus = 'SIGNAL_FLIP_FILLED';
+    position.settlementStatus = 'OPPOSITE_SIGNAL_PROFIT_EXIT_FILLED';
     position.closedAt = now;
     position.settledAt = now;
-    position.settlementBasis = 'PAPER_SIGNAL_FLIP';
+    position.settlementBasis = 'PAPER_OPPOSITE_SIGNAL_EXIT';
     position.shares = 0;
     position.totalCost = 0;
     position.fees = 0;
@@ -1006,13 +1006,13 @@ class OrderFlowBot extends MispricingBot {
       : position.realizedPnl < -EPSILON ? 'LOSS' : 'BREAK_EVEN';
     this.cash += gross - sellFee;
     this.totalOrderAttempts += 1;
-    this.recordStrategyOutcome(position, position.outcome, now, 'SIGNAL_FLIP');
+    this.recordStrategyOutcome(position, position.outcome, now, 'OPPOSITE_SIGNAL_PROFIT_EXIT');
 
-    this.log('PAPER_FLOW_SIGNAL_FLIP_SELL_FILLED', {
+    this.log('PAPER_FLOW_OPPOSITE_SIGNAL_PROFIT_EXIT_FILLED', {
       orderId: exitOrder.id,
       positionId: position.id,
       oldSide: position.side,
-      nextSide,
+      signalSide,
       shares,
       exitPrice,
       grossProceeds: gross,
@@ -1023,14 +1023,14 @@ class OrderFlowBot extends MispricingBot {
     this.events.unshift({
       ts: now,
       at: now,
-      event: 'PAPER_SIGNAL_FLIP_SELL_FILLED',
-      type: 'PAPER_SIGNAL_FLIP_SELL_FILLED',
-      message: `${shares} ${position.side} shares sold at the $${exitPrice.toFixed(3)} best bid to flip to ${nextSide}; modeled taker fee $${sellFee.toFixed(3)}.`,
+      event: 'PAPER_OPPOSITE_SIGNAL_PROFIT_EXIT',
+      type: 'PAPER_OPPOSITE_SIGNAL_PROFIT_EXIT',
+      message: `${shares} ${position.side} shares sold at the $${exitPrice.toFixed(3)} best bid after a profitable ${signalSide} signal; modeled taker fee $${sellFee.toFixed(3)}. No opposite-side buy was placed.`,
       details: {
         orderId: exitOrder.id,
         positionId: position.id,
         oldSide: position.side,
-        nextSide,
+        signalSide,
         shares,
         exitPrice,
         grossProceeds: gross,
@@ -1310,7 +1310,7 @@ class OrderFlowBot extends MispricingBot {
       strategy: {
         id: this.strategyId,
         name: this.strategyName,
-        version: 'btc-5m-combined-orderflow-profitable-flip-v6',
+        version: 'btc-5m-combined-orderflow-profitable-exit-v7',
         execution: 'PAPER ONLY',
         symbol: 'BTCUSDT',
         timeframe: '5m',
@@ -1326,7 +1326,7 @@ class OrderFlowBot extends MispricingBot {
         maxTotalInventoryShares: null,
         maxActiveSidesPerWindow: 1,
         activeSide: currentOpen[0]?.side || null,
-        orderType: `${ORDER_TYPE} + PAPER_MARKET_SIGNAL_FLIP`,
+        orderType: `${ORDER_TYPE} + PAPER_MARKET_OPPOSITE_SIGNAL_EXIT`,
         usesTakerOrders: true,
         usesMakerOrders: true,
         accumulatesInventory: true,
@@ -1340,19 +1340,19 @@ class OrderFlowBot extends MispricingBot {
           oneEntryPerConfirmedSignalEpisode: true,
           sameSideSignalAction: 'ADD_100_SHARES',
           maxActiveSidesPerWindow: 1,
-          oppositeSignalAction: 'ONLY_IF_NET_PROFITABLE_AFTER_TAKER_FEE_SELL_ALL_AT_BEST_BID_THEN_BUY_SAME_SHARE_COUNT_ON_SIGNALLED_SIDE',
-          flipSellOrderType: 'PAPER_MARKET_SIGNAL_FLIP',
-          flipProfitabilityRule: 'Current position liquidation proceeds at fresh best bid, after modeled taker sell fee and entry fees, plus entry rebate, must exceed total entry cost.',
+          oppositeSignalAction: 'SELL_ALL_CURRENT_SIDE_ONLY_IF_NET_PROFITABLE_AFTER_TAKER_FEE; NEVER_BUY_OPPOSITE_SIDE_ON_THAT_SIGNAL',
+          oppositeSignalSellOrderType: 'PAPER_MARKET_OPPOSITE_SIGNAL_EXIT',
+          oppositeSignalProfitabilityRule: 'Current position liquidation proceeds at fresh best bid, after modeled taker sell fee and entry fees, plus entry rebate, must exceed total entry cost. Selling never triggers a buy on the opposite side.',
           cancelUnfilledOnNextSignal: true,
           cancelUnfilledAtWindowEnd: true,
-          paperFillRule: 'Place at the signalled side midpoint; full requested shares fill at the limit price when a fresh midpoint reaches limit minus $0.01 or lower. Same-side signal episodes request 100 shares; an opposite signal closes all old-side shares and requests the same count on the new side.',
+          paperFillRule: 'Place at the signalled side midpoint; full requested shares fill at the limit price when a fresh midpoint reaches limit minus $0.01 or lower. Each newly confirmed signal episode buys 100 shares on the signalled side. An opposite signal may close all current-side shares only if net-profitable after the modeled sell fee; it never buys the opposite side.',
           inventoryLimit: 'Available paper cash only.',
         },
         exit: {
-          orderType: 'PAPER_MARKET_SIGNAL_FLIP + PAPER_LIMIT_TAKE_PROFIT_AND_STOP_LOSS',
+          orderType: 'PAPER_MARKET_OPPOSITE_SIGNAL_EXIT + PAPER_LIMIT_TAKE_PROFIT_AND_STOP_LOSS',
           trigger: `A fresh ${config.FLOW_TAKE_PROFIT_TRIGGER.toFixed(2)} best bid closes all accumulated shares at $${config.FLOW_TAKE_PROFIT_PAYOUT.toFixed(2)} each; a fresh ${config.FLOW_STOP_LOSS_TRIGGER.toFixed(2)}-or-lower best bid closes them at $${config.FLOW_STOP_LOSS_PAYOUT.toFixed(2)} each.`,
-          fills: 'An opposite confirmed signal flips only when the current position has positive net P&L at the fresh best bid after modeled taker sell fee; otherwise it is held and the signal is ignored. A profitable flip sells all current-side shares and submits a resting buy for the same share count on the signalled side. TP and SL touches still close all shares on that side.',
-          fees: 'Resting entries have no modeled taker fee and may earn an estimated maker rebate. Signal-flip sells use a modeled taker fee. A maker take-profit may also earn an estimated rebate; threshold stop-loss exits have no modeled sell fee.',
+          fills: 'An opposite confirmed signal sells all current-side shares only when the current position has positive net P&L at the fresh best bid after modeled taker sell fee; otherwise it is held. The opposite signal never places a buy. TP and SL touches still close all shares on that side.',
+          fees: 'Resting entries have no modeled taker fee and may earn an estimated maker rebate. Opposite-signal profit exits use a modeled taker fee. A maker take-profit may also earn an estimated rebate; threshold stop-loss exits have no modeled sell fee.',
           takeProfit: {
             triggerPrice: config.FLOW_TAKE_PROFIT_TRIGGER,
             payoutPerShare: config.FLOW_TAKE_PROFIT_PAYOUT,
@@ -1363,11 +1363,11 @@ class OrderFlowBot extends MispricingBot {
             payoutPerShare: config.FLOW_STOP_LOSS_PAYOUT,
             orderType: 'PAPER_STOP_LOSS',
           },
-          oppositeSignal: 'Buy on the signalled side. Add 100 shares on a same-side signal; flip on an opposite signal only when liquidating the current position at the fresh best bid remains net-profitable after the modeled taker fee. Otherwise hold and skip the flip.',
+          oppositeSignal: 'Add 100 shares on each newly confirmed same-side signal. On an opposite signal, sell all current-side shares only if liquidation at the fresh best bid is net-profitable after the modeled taker fee; never buy the opposite side on that signal. If the position is not profitable to sell, keep holding.',
           windowEnd: 'Any unsold shares wait for official resolution of their original market.',
         },
-        timing: 'Recalculate flow every second using the preceding five seconds of Binance and Polymarket data; place a resting limit buy on the signalled side at its current midpoint. Same-side signal episodes add 100 shares. An opposite confirmed signal flips only when current-side liquidation net of the modeled taker fee is profitable; otherwise hold the position.',
-        sizing: `${config.FLOW_ENTRY_SHARES} shares per same-side signal episode; an opposite signal flips the full current position to the signalled side using the same share count. Only one side is active per window.`,
+        timing: 'Recalculate flow every second using the preceding five seconds of Binance and Polymarket data; place a resting limit buy on the signalled side at its current midpoint. Each newly confirmed same-side signal episode adds 100 shares. An opposite signal can only sell the current position when net-profitable after modeled taker fee; it never buys the other side.',
+        sizing: `${config.FLOW_ENTRY_SHARES} shares per newly confirmed same-side signal episode. Opposite signals never initiate a buy; they can only close the current side when net-profitable.`,
         trigger: `Require Binance and Polymarket directional pressure to agree, each component to exceed ${config.FLOW_COMPONENT_MIN.toFixed(2)}, and combined pressure to reach ±${config.FLOW_SIGNAL_THRESHOLD.toFixed(2)} for ${config.FLOW_CONFIRMATION_COUNT} consecutive checks.`,
         currentSignal: this.signal,
       },
