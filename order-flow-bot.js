@@ -7,7 +7,8 @@ const { feeContext, makerRebateFor, takerFeeFor } = WickBot._test;
 
 const EPSILON = 1e-8;
 const SIDES = ['UP', 'DOWN'];
-const ORDER_TYPE = 'PAPER_LIMIT_RESTING_BUY';
+const ORDER_TYPE = 'PAPER_MARKET_BUY';
+const MIN_ENTRY_ASK = 0.05;
 
 function clamp(value, minimum = -1, maximum = 1) {
   return Math.max(minimum, Math.min(maximum, Number(value) || 0));
@@ -86,8 +87,6 @@ class OrderFlowBot extends MispricingBot {
   }
 
   openStrategyWindow(start, now) {
-    this.cancelPendingBuyOrders(now, 'WINDOW_ENDED', (order) =>
-      Number(order.windowStart) !== Number(start));
     super.openStrategyWindow(start, now);
     this.strategyWindowStart = start;
     this.clobTrades = { UP: [], DOWN: [] };
@@ -382,14 +381,11 @@ class OrderFlowBot extends MispricingBot {
         combinedScore: nextPressure.combinedScore,
       };
     }
-    const makerFills = this.processPendingMakerBuys(now);
-    return changed || thresholdExits > 0 || makerFills > 0;
+    return changed || thresholdExits > 0;
   }
 
   handleConfirmedSignal(signalSide, now) {
     const buySide = signalSide;
-    this.cancelPendingBuyOrders(now, 'REPLACED_BY_NEW_SIGNAL', (order) =>
-      Number(order.windowStart) === Number(this.getActiveWindowStart()));
 
     const windowStart = Number(this.getActiveWindowStart());
     const positionsToExit = this.positions.filter((position) =>
@@ -495,7 +491,7 @@ class OrderFlowBot extends MispricingBot {
       return true;
     }
 
-    const submitted = this.submitBuyLimitMidpoint(
+    const submitted = this.submitMarketBuy(
       buySide,
       now,
       this.pressure,
@@ -506,33 +502,37 @@ class OrderFlowBot extends MispricingBot {
     const averagePrice = Number.isFinite(Number(submitted.averagePrice))
       ? Number(submitted.averagePrice)
       : null;
-    const limitPrice = Number.isFinite(Number(submitted.limitPrice))
-      ? Number(submitted.limitPrice)
+    const bestAskAtSubmission = Number.isFinite(Number(submitted.bestAskAtSubmission))
+      ? Number(submitted.bestAskAtSubmission)
       : null;
     this.signal = {
       side: buySide,
       signalSide,
       buySide,
-      action: buySide === 'UP' ? 'BUY_UP' : 'BUY_DOWN',
+      action: submitted.status === 'BLOCKED_PRICE_FLOOR'
+        ? 'BUY_BLOCKED_PRICE_FLOOR'
+        : buySide === 'UP' ? 'BUY_UP' : 'BUY_DOWN',
       reason: submitted.orderId
-        ? `${signalSide} pressure confirmed; placed a ${config.FLOW_ENTRY_SHARES}-share ${buySide} resting limit at the current midpoint of $${limitPrice.toFixed(3)}. It fills in full when a fresh midpoint reaches $${(limitPrice - 0.01).toFixed(3)} or lower.`
-        : `${signalSide} pressure confirmed, but the ${buySide} resting order was not placed: ${submitted.reason || 'no fresh midpoint was available'}.`,
+        ? filledShares > 0
+          ? `${signalSide} pressure confirmed; market buy swept ${filledShares} of ${config.FLOW_ENTRY_SHARES} ${buySide} shares across visible asks at an average $${averagePrice.toFixed(3)}; taker fee $${Number(submitted.fees || 0).toFixed(3)}.`
+          : `${signalSide} pressure confirmed, but no ${buySide} shares filled: ${submitted.reason || 'no visible ask liquidity'}.`
+        : `${signalSide} pressure confirmed, but the ${buySide} market buy was not placed: ${submitted.reason || 'no fresh ask available'}.`,
       combinedScore: this.pressure.combinedScore,
       binanceScore: this.pressure.binance?.score,
       polymarketScore: this.pressure.polymarket?.score,
       buyFilledShares: filledShares,
       buyUnfilledShares: Number(submitted.unfilledShares) || 0,
       averagePrice,
-      limitPrice,
-      fees: 0,
+      bestAskAtSubmission,
+      fees: Number(submitted.fees) || 0,
       estimatedMakerRebate: Number(submitted.estimatedMakerRebate) || 0,
       orderId: submitted.orderId || null,
       orderStatus: submitted.status || 'NOT_PLACED',
     };
-    return Boolean(submitted.orderId);
+    return filledShares > 0;
   }
 
-  submitBuyLimitMidpoint(
+  submitMarketBuy(
     side,
     now,
     signal,
@@ -542,265 +542,234 @@ class OrderFlowBot extends MispricingBot {
     requestedShares = Number(requestedShares);
     if (!(requestedShares > EPSILON)) return { filledShares: 0, reason: 'INVALID_ENTRY_SIZE' };
     const quote = this.flowQuote(side, now);
-    const midpoint = quote?.mid != null
-      ? Number(quote.mid)
-      : (Number(quote?.bestBid) + Number(quote?.bestAsk)) / 2;
-    if (!quote || !Number.isFinite(midpoint) || midpoint <= 0 || midpoint >= 1) {
-      return { filledShares: 0, reason: 'NO_FRESH_MIDPOINT' };
+    const book = this.books?.[side];
+    const asks = book?.asks;
+    const bestAsk = Number(quote?.bestAsk);
+    if (!quote || !Array.isArray(asks) || !asks.length
+      || !Number.isFinite(bestAsk) || !(bestAsk > 0 && bestAsk < 1)) {
+      return { filledShares: 0, reason: 'NO_FRESH_ASK_BOOK' };
+    }
+    if (bestAsk < MIN_ENTRY_ASK) {
+      const reason = `Best ask $${bestAsk.toFixed(3)} is below the $${MIN_ENTRY_ASK.toFixed(2)} minimum; buy skipped.`;
+      this.log('PAPER_FLOW_BUY_BLOCKED_PRICE_FLOOR', {
+        signalSide,
+        side,
+        bestAskAtSubmission: bestAsk,
+        minimumAsk: MIN_ENTRY_ASK,
+      });
+      this.events.unshift({
+        ts: now,
+        at: now,
+        event: 'PAPER_BUY_BLOCKED_PRICE_FLOOR',
+        type: 'PAPER_BUY_BLOCKED_PRICE_FLOOR',
+        message: `${signalSide || side} signal skipped: ${reason}`,
+        details: { signalSide, side, bestAskAtSubmission: bestAsk, minimumAsk: MIN_ENTRY_ASK },
+      });
+      if (this.events.length > 200) this.events.length = 200;
+      return {
+        filledShares: 0,
+        unfilledShares: requestedShares,
+        bestAskAtSubmission: bestAsk,
+        fees: 0,
+        estimatedMakerRebate: 0,
+        status: 'BLOCKED_PRICE_FLOOR',
+        reason,
+      };
     }
 
     const windowStart = this.getActiveWindowStart();
     const order = {
-      id: `${windowStart}-btc-${side.toLowerCase()}-buy-maker-${++this.orderSequence}`,
+      id: `${windowStart}-btc-${side.toLowerCase()}-buy-market-${++this.orderSequence}`,
       strategyId: this.strategyId,
       action: 'BUY',
       side,
       signalSide,
       orderType: ORDER_TYPE,
-      status: 'RESTING',
+      status: 'UNFILLED_NO_LIQUIDITY',
       requestedShares,
       filledShares: 0,
-      remainingShares: requestedShares,
+      remainingShares: 0,
       unfilledShares: requestedShares,
-      cancelledShares: 0,
-      limitPrice: Number(midpoint.toFixed(3)),
-      midpointAtPlacement: Number(midpoint.toFixed(3)),
+      cancelledShares: requestedShares,
+      bestAskAtSubmission: bestAsk,
+      referencePrice: bestAsk,
       averagePrice: null,
       grossCost: 0,
       fees: 0,
       estimatedMakerRebate: 0,
       createdAt: now,
-      expiresAt: windowStart + this.windowMs,
       windowStart,
       paperOnly: true,
-      timeInForce: 'GTC',
-      immediateOrCancel: false,
-      cancelOnNextConfirmedSignal: true,
-      fillRule: 'FILL_FULL_REQUESTED_SHARES_WHEN_FRESH_MIDPOINT_REACHES_LIMIT_MINUS_0_01; FILL_AT_LIMIT_PRICE; NO_PARTIALS; ZERO_TAKER_FEE; ESTIMATED_MAKER_REBATE',
+      timeInForce: 'FAK',
+      immediateOrCancel: true,
+      cancelOnNextConfirmedSignal: false,
+      fillRule: 'SWEEP_VISIBLE_ASKS_UP_TO_REQUESTED_SHARES; PARTIAL_FILL_ALLOWED; CANCEL_UNFILLED_REMAINDER; MODELED_TAKER_FEES; NEVER_BUY_BELOW_0_05',
       signal: {
         combinedScore: signal?.combinedScore ?? null,
         binanceScore: signal?.binance?.score ?? null,
         polymarketScore: signal?.polymarket?.score ?? null,
       },
     };
-    this.orders.unshift(order);
-    this.windowOrders.unshift(order);
-    this.totalOrderAttempts += 1;
-    this.log('PAPER_FLOW_BUY_LIMIT_RESTING', {
-      orderId: order.id,
-      signalSide,
-      side,
-      requestedShares,
-      limitPrice: order.limitPrice,
-      midpointAtPlacement: order.midpointAtPlacement,
-      status: order.status,
-    });
-    this.events.unshift({
-      ts: now,
-      at: now,
-      event: 'PAPER_BUY_LIMIT_RESTING',
-      type: 'PAPER_BUY_LIMIT_RESTING',
-      message: `${signalSide ? `${signalSide} signal → buy ${side}` : side} resting limit placed for ${requestedShares} shares at the current midpoint of $${order.limitPrice.toFixed(3)}; it fills in full if a fresh midpoint reaches $${(order.limitPrice - 0.01).toFixed(3)} or lower. No taker fee; maker rebate is estimated if eligible.`,
-      details: {
-        orderId: order.id,
-        signalSide,
-        side,
-        requestedShares,
-        limitPrice: order.limitPrice,
-        midpointAtPlacement: order.midpointAtPlacement,
-        fillTriggerMidpoint: Number((order.limitPrice - 0.01).toFixed(3)),
-        fees: 0,
-        status: order.status,
-      },
-    });
-    if (this.events.length > 200) this.events.length = 200;
-    return {
-      filledShares: 0,
-      unfilledShares: requestedShares,
-      averagePrice: null,
-      limitPrice: order.limitPrice,
-      fees: 0,
-      estimatedMakerRebate: 0,
-      orderId: order.id,
-      status: order.status,
-    };
-  }
+    const fills = [];
+    let sharesRemaining = requestedShares;
+    let cashRemaining = Math.max(0, Number(this.cash) || 0);
+    let grossCost = 0;
+    let fees = 0;
+    for (const level of asks) {
+      if (sharesRemaining <= EPSILON || cashRemaining <= EPSILON) break;
+      const price = Number(level.price);
+      const availableSize = Number(level.availableSize ?? level.size);
+      if (!(price >= MIN_ENTRY_ASK && price < 1 && availableSize > 0)) continue;
 
-  cancelRestingBuyOrder(order, now, reason) {
-    if (!order || order.action !== 'BUY' || order.status !== 'RESTING') return false;
-    const cancelledShares = Math.max(0, Number(order.remainingShares) || 0);
-    order.status = reason === 'WINDOW_ENDED'
-      ? 'CANCELLED_WINDOW_END'
-      : reason === 'INSUFFICIENT_PAPER_CASH'
-        ? 'CANCELLED_INSUFFICIENT_CASH'
-        : 'CANCELLED_REPLACED';
-    order.cancelledAt = now;
-    order.cancelReason = reason;
-    order.cancelledShares = cancelledShares;
-    order.unfilledShares = cancelledShares;
+      let shares = Math.min(sharesRemaining, availableSize);
+      const costAt = quantity => quantity * price + takerFeeFor(this.market || {}, price, quantity);
+      if (costAt(shares) > cashRemaining + EPSILON) {
+        let low = 0;
+        let high = shares;
+        for (let iteration = 0; iteration < 48; iteration += 1) {
+          const middle = (low + high) / 2;
+          if (costAt(middle) <= cashRemaining + EPSILON) low = middle;
+          else high = middle;
+        }
+        shares = low;
+      }
+      if (!(shares > EPSILON)) continue;
+
+      const levelGross = shares * price;
+      const levelFees = takerFeeFor(this.market || {}, price, shares);
+      const fill = { price, shares, at: now, orderId: order.id };
+      fills.push(fill);
+      grossCost += levelGross;
+      fees += levelFees;
+      cashRemaining = Math.max(0, cashRemaining - levelGross - levelFees);
+      sharesRemaining = Math.max(0, sharesRemaining - shares);
+      level.availableSize = Math.max(0, availableSize - shares);
+    }
+
+    const filledShares = requestedShares - sharesRemaining;
+    const averagePrice = filledShares > EPSILON ? grossCost / filledShares : null;
+    const unfilledShares = Math.max(0, requestedShares - filledShares);
+    const fullFill = unfilledShares <= EPSILON;
+    order.status = fullFill
+      ? 'FILLED'
+      : filledShares > EPSILON ? 'PARTIALLY_FILLED' : 'UNFILLED_NO_LIQUIDITY';
+    order.filledShares = filledShares;
     order.remainingShares = 0;
-    if (this.signal?.orderId === order.id) {
-      this.signal.orderStatus = order.status;
-      this.signal.buyUnfilledShares = cancelledShares;
-      this.signal.reason = `Resting ${order.signalSide ? `${order.signalSide} signal → ${order.side} buy` : `${order.side} limit`} cancelled: ${reason.toLowerCase().replaceAll('_', ' ')}.`;
-    }
-    this.log('PAPER_FLOW_BUY_LIMIT_CANCELLED', {
-      orderId: order.id,
-      signalSide: order.signalSide || null,
-      side: order.side,
-      cancelledShares,
-      reason,
-    });
-    this.events.unshift({
-      ts: now,
-      at: now,
-      event: 'PAPER_BUY_LIMIT_CANCELLED',
-      type: 'PAPER_BUY_LIMIT_CANCELLED',
-      message: `${order.signalSide ? `${order.signalSide} signal → ${order.side} buy` : order.side} resting limit cancelled (${reason.toLowerCase().replaceAll('_', ' ')}).`,
-      details: { orderId: order.id, side: order.side, cancelledShares, reason },
-    });
-    if (this.events.length > 200) this.events.length = 200;
-    return true;
-  }
+    order.unfilledShares = unfilledShares;
+    order.cancelledShares = unfilledShares;
+    order.averagePrice = averagePrice;
+    order.grossCost = grossCost;
+    order.fees = fees;
+    order.estimatedMakerRebate = 0;
+    order.filledAt = filledShares > EPSILON ? now : null;
+    order.cancelledAt = unfilledShares > EPSILON ? now : null;
+    order.cancelReason = unfilledShares > EPSILON ? 'FAK_REMAINDER_CANCELLED' : null;
+    order.fills = fills;
 
-  cancelPendingBuyOrders(now, reason, shouldCancel = () => true) {
-    let cancelled = 0;
-    for (const order of this.orders) {
-      if (order.action === 'BUY' && order.status === 'RESTING' && shouldCancel(order)) {
-        if (this.cancelRestingBuyOrder(order, now, reason)) cancelled += 1;
-      }
-    }
-    return cancelled;
-  }
-
-  processPendingMakerBuys(now = this.now()) {
-    let filledOrders = 0;
-    for (const order of this.orders) {
-      if (order.action !== 'BUY' || order.orderType !== ORDER_TYPE || order.status !== 'RESTING') continue;
-      if (Number.isFinite(Number(order.expiresAt)) && Number(order.expiresAt) <= now) {
-        this.cancelRestingBuyOrder(order, now, 'WINDOW_ENDED');
-        continue;
-      }
-      const quote = this.flowQuote(order.side, now);
-      if (!quote) continue;
-      const midpoint = quote.mid != null
-        ? Number(quote.mid)
-        : (Number(quote.bestBid) + Number(quote.bestAsk)) / 2;
-      const limitPrice = Number(order.limitPrice);
-      const fillTrigger = limitPrice - 0.01;
-      if (!Number.isFinite(midpoint) || !Number.isFinite(limitPrice)
-        || midpoint > fillTrigger + EPSILON) continue;
-
-      const shares = Number(order.requestedShares) || 0;
-      const grossCost = limitPrice * shares;
-      if (!(shares > EPSILON)) {
-        this.cancelRestingBuyOrder(order, now, 'INVALID_ORDER_SIZE');
-        continue;
-      }
-      if ((Number(this.cash) || 0) + EPSILON < grossCost) {
-        this.cancelRestingBuyOrder(order, now, 'INSUFFICIENT_PAPER_CASH');
-        continue;
-      }
-
-      const estimatedMakerRebate = makerRebateFor(this.market || {}, limitPrice, shares).estimate;
-      const fill = { price: limitPrice, shares, at: now, orderId: order.id };
-      order.status = 'FILLED';
-      order.filledShares = shares;
-      order.remainingShares = 0;
-      order.unfilledShares = 0;
-      order.averagePrice = limitPrice;
-      order.grossCost = grossCost;
-      order.fees = 0;
-      order.estimatedMakerRebate = estimatedMakerRebate;
-      order.filledAt = now;
-      order.fillTriggerMidpoint = Number(fillTrigger.toFixed(3));
-      order.midpointAtFill = Number(midpoint.toFixed(3));
-      order.fills = [{ ...fill }];
-
-      const windowStart = Number(order.windowStart);
-      const position = this.currentPosition(order.side, windowStart)
-        || this.createPosition(order.side, windowStart, now);
-      position.shares += shares;
-      position.initialShares += shares;
+    let position = null;
+    if (filledShares > EPSILON) {
+      position = this.currentPosition(side, windowStart)
+        || this.createPosition(side, windowStart, now);
+      position.shares += filledShares;
+      position.initialShares += filledShares;
       position.totalCost += grossCost;
       position.initialTotalCost += grossCost;
+      position.fees += fees;
+      position.initialFees += fees;
+      position.entryFees += fees;
       position.entryPrice = position.initialTotalCost / position.initialShares;
       position.avgEntry = position.entryPrice;
       position.filledAt = now;
       position.lastAddedAt = now;
-      position.entryFills.push({ ...fill });
+      position.entryFills.push(...fills);
       position.takeProfitPrice = config.FLOW_TAKE_PROFIT_TRIGGER;
       position.stopLossPrice = config.FLOW_STOP_LOSS_TRIGGER;
-      position.estimatedEntryMakerRebate = Number(position.estimatedEntryMakerRebate || 0)
-        + estimatedMakerRebate;
-      position.estimatedMakerRebate = Number(position.estimatedMakerRebate || 0)
-        + estimatedMakerRebate;
-      position.makerRebateEstimate = position.estimatedMakerRebate;
       position.entrySignals.push({
         at: now,
-        signalSide: order.signalSide || null,
-        side: order.side,
-        shares,
-        averagePrice: limitPrice,
-        fees: 0,
-        estimatedMakerRebate,
-        combinedScore: order.signal?.combinedScore ?? null,
-        binanceScore: order.signal?.binanceScore ?? null,
-        polymarketScore: order.signal?.polymarketScore ?? null,
+        signalSide: signalSide || null,
+        side,
+        shares: filledShares,
+        averagePrice,
+        fees,
+        estimatedMakerRebate: 0,
+        combinedScore: signal?.combinedScore ?? null,
+        binanceScore: signal?.binance?.score ?? null,
+        polymarketScore: signal?.polymarket?.score ?? null,
         orderId: order.id,
       });
-      this.cash -= grossCost;
-      this.cash += estimatedMakerRebate;
+      this.cash -= grossCost + fees;
       order.positionId = position.id;
       position.lastEntryOrderId = order.id;
       this.createTakeProfitOrder(position, now);
-
-      if (this.signal?.orderId === order.id) {
-        this.signal.orderStatus = order.status;
-        this.signal.buyFilledShares = shares;
-        this.signal.buyUnfilledShares = 0;
-        this.signal.averagePrice = limitPrice;
-        this.signal.estimatedMakerRebate = estimatedMakerRebate;
-        this.signal.reason = `${order.signalSide ? `${order.signalSide} signal → buy ${order.side}` : order.side} resting limit filled all ${shares} shares at $${limitPrice.toFixed(3)} after the fresh midpoint reached $${Number(fillTrigger.toFixed(3))} or lower. No taker fee; estimated maker rebate $${estimatedMakerRebate.toFixed(3)}.`;
-      }
-
-      this.log('PAPER_FLOW_BUY_LIMIT_FILLED', {
-        orderId: order.id,
-        positionId: position.id,
-        signalSide: order.signalSide || null,
-        side: order.side,
-        shares,
-        limitPrice,
-        fillTriggerMidpoint: order.fillTriggerMidpoint,
-        midpointAtFill: order.midpointAtFill,
-        grossCost,
-        fees: 0,
-        estimatedMakerRebate,
-      });
-      this.events.unshift({
-        ts: now,
-        at: now,
-        event: 'PAPER_BUY_LIMIT_FILLED',
-        type: 'PAPER_BUY_LIMIT_FILLED',
-        message: `${order.signalSide ? `${order.signalSide} signal → buy ${order.side}` : order.side} resting limit filled all ${shares} shares at $${limitPrice.toFixed(3)} after midpoint reached $${Number(fillTrigger.toFixed(3))} or lower; no taker fee, estimated maker rebate $${estimatedMakerRebate.toFixed(3)}.`,
-        details: {
-          orderId: order.id,
-          positionId: position.id,
-          signalSide: order.signalSide || null,
-          side: order.side,
-          shares,
-          limitPrice,
-          fillTriggerMidpoint: order.fillTriggerMidpoint,
-          midpointAtFill: order.midpointAtFill,
-          grossCost,
-          fees: 0,
-          estimatedMakerRebate,
-        },
-      });
-      if (this.events.length > 200) this.events.length = 200;
-      filledOrders += 1;
+      this.updateQuoteFromBook(side, book, now);
     }
-    return filledOrders;
+
+    const noFillReason = filledShares > EPSILON
+      ? null
+      : this.cash <= EPSILON ? 'INSUFFICIENT_PAPER_CASH' : 'NO_VISIBLE_ASK_LIQUIDITY';
+    const resultMessage = filledShares > EPSILON
+      ? `${signalSide || side} signal market buy filled ${filledShares} of ${requestedShares} ${side} shares at an average $${averagePrice.toFixed(3)} across visible asks; taker fee $${fees.toFixed(3)}${unfilledShares > EPSILON ? `, unfilled ${unfilledShares} cancelled` : ''}.`
+      : `${signalSide || side} signal market buy did not fill: ${noFillReason === 'INSUFFICIENT_PAPER_CASH' ? 'insufficient paper cash' : 'no visible ask liquidity'}.`;
+    this.orders.unshift(order);
+    this.windowOrders.unshift(order);
+    this.totalOrderAttempts += 1;
+    this.log(filledShares > EPSILON ? 'PAPER_FLOW_MARKET_BUY_EXECUTED' : 'PAPER_FLOW_MARKET_BUY_UNFILLED', {
+      orderId: order.id,
+      positionId: position?.id || null,
+      signalSide,
+      side,
+      requestedShares,
+      filledShares,
+      unfilledShares,
+      bestAskAtSubmission: bestAsk,
+      averagePrice,
+      grossCost,
+      fees,
+      fills,
+      status: order.status,
+      reason: noFillReason,
+    });
+    this.events.unshift({
+      ts: now,
+      at: now,
+      event: filledShares > EPSILON
+        ? fullFill ? 'PAPER_MARKET_BUY_FILLED' : 'PAPER_MARKET_BUY_PARTIAL'
+        : 'PAPER_MARKET_BUY_UNFILLED',
+      type: filledShares > EPSILON
+        ? fullFill ? 'PAPER_MARKET_BUY_FILLED' : 'PAPER_MARKET_BUY_PARTIAL'
+        : 'PAPER_MARKET_BUY_UNFILLED',
+      message: resultMessage,
+      details: {
+        orderId: order.id,
+        positionId: position?.id || null,
+        signalSide,
+        side,
+        requestedShares,
+        filledShares,
+        unfilledShares,
+        bestAskAtSubmission: bestAsk,
+        averagePrice,
+        grossCost,
+        fees,
+        estimatedMakerRebate: 0,
+        fills,
+        status: order.status,
+        reason: noFillReason,
+      },
+    });
+    if (this.events.length > 200) this.events.length = 200;
+    return {
+      filledShares,
+      unfilledShares,
+      averagePrice,
+      bestAskAtSubmission: bestAsk,
+      grossCost,
+      fees,
+      estimatedMakerRebate: 0,
+      orderId: order.id,
+      status: order.status,
+      reason: noFillReason,
+    };
   }
 
   processThresholdExits(now = this.now()) {
@@ -1310,7 +1279,7 @@ class OrderFlowBot extends MispricingBot {
       strategy: {
         id: this.strategyId,
         name: this.strategyName,
-        version: 'btc-5m-combined-orderflow-profitable-exit-v7',
+        version: 'btc-5m-combined-orderflow-profitable-exit-v8',
         execution: 'PAPER ONLY',
         symbol: 'BTCUSDT',
         timeframe: '5m',
@@ -1321,7 +1290,9 @@ class OrderFlowBot extends MispricingBot {
         combinedSignalThreshold: config.FLOW_SIGNAL_THRESHOLD,
         componentMinimum: config.FLOW_COMPONENT_MIN,
         entrySharesPerSignal: config.FLOW_ENTRY_SHARES,
-        entryLimitPriceSource: 'CURRENT_MIDPOINT',
+        entryPriceSource: 'VISIBLE_ASK_MARKET_SWEEP',
+        minimumEntryAsk: MIN_ENTRY_ASK,
+        entrySlippageCeiling: null,
         maxInventoryPerSide: null,
         maxTotalInventoryShares: null,
         maxActiveSidesPerWindow: 1,
@@ -1334,25 +1305,28 @@ class OrderFlowBot extends MispricingBot {
           orderType: ORDER_TYPE,
           sharesPerSignal: config.FLOW_ENTRY_SHARES,
           sideMapping: 'BUY_SIGNALLED_SIDE',
-          limitPriceSource: 'CURRENT_MIDPOINT',
-          fillTrigger: 'Fresh midpoint at least $0.01 below the placed limit price.',
-          timeInForce: 'GTC',
+          execution: 'Sweep visible asks immediately from best to worse.',
+          minimumAsk: MIN_ENTRY_ASK,
+          slippageCeiling: null,
+          timeInForce: 'FAK',
+          partialFillsAllowed: true,
+          unfilledRemainder: 'Cancelled immediately after the visible ask sweep.',
           oneEntryPerConfirmedSignalEpisode: true,
           sameSideSignalAction: 'ADD_100_SHARES',
           maxActiveSidesPerWindow: 1,
           oppositeSignalAction: 'SELL_ALL_CURRENT_SIDE_ONLY_IF_NET_PROFITABLE_AFTER_TAKER_FEE; NEVER_BUY_OPPOSITE_SIDE_ON_THAT_SIGNAL',
           oppositeSignalSellOrderType: 'PAPER_MARKET_OPPOSITE_SIGNAL_EXIT',
           oppositeSignalProfitabilityRule: 'Current position liquidation proceeds at fresh best bid, after modeled taker sell fee and entry fees, plus entry rebate, must exceed total entry cost. Selling never triggers a buy on the opposite side.',
-          cancelUnfilledOnNextSignal: true,
-          cancelUnfilledAtWindowEnd: true,
-          paperFillRule: 'Place at the signalled side midpoint; full requested shares fill at the limit price when a fresh midpoint reaches limit minus $0.01 or lower. Each newly confirmed signal episode buys 100 shares on the signalled side. An opposite signal may close all current-side shares only if net-profitable after the modeled sell fee; it never buys the opposite side.',
-          inventoryLimit: 'Available paper cash only.',
+          cancelUnfilledOnNextSignal: false,
+          cancelUnfilledAtWindowEnd: false,
+          paperFillRule: 'Immediately sweep current visible ask levels for up to 100 shares; partial fills are allowed, and any remainder is cancelled. Do not buy when the best ask is below $0.05. Model taker fees on each fill level.',
+          inventoryLimit: 'Available paper cash only; order quantities are reduced to affordable visible liquidity.',
         },
         exit: {
           orderType: 'PAPER_MARKET_OPPOSITE_SIGNAL_EXIT + PAPER_LIMIT_TAKE_PROFIT_AND_STOP_LOSS',
           trigger: `A fresh ${config.FLOW_TAKE_PROFIT_TRIGGER.toFixed(2)} best bid closes all accumulated shares at $${config.FLOW_TAKE_PROFIT_PAYOUT.toFixed(2)} each; a fresh ${config.FLOW_STOP_LOSS_TRIGGER.toFixed(2)}-or-lower best bid closes them at $${config.FLOW_STOP_LOSS_PAYOUT.toFixed(2)} each.`,
           fills: 'An opposite confirmed signal sells all current-side shares only when the current position has positive net P&L at the fresh best bid after modeled taker sell fee; otherwise it is held. The opposite signal never places a buy. TP and SL touches still close all shares on that side.',
-          fees: 'Resting entries have no modeled taker fee and may earn an estimated maker rebate. Opposite-signal profit exits use a modeled taker fee. A maker take-profit may also earn an estimated rebate; threshold stop-loss exits have no modeled sell fee.',
+          fees: 'Market entries and opposite-signal profit exits use modeled taker fees. Limit take-profits may earn an estimated maker rebate; threshold stop-loss exits have no modeled sell fee.',
           takeProfit: {
             triggerPrice: config.FLOW_TAKE_PROFIT_TRIGGER,
             payoutPerShare: config.FLOW_TAKE_PROFIT_PAYOUT,
@@ -1366,7 +1340,7 @@ class OrderFlowBot extends MispricingBot {
           oppositeSignal: 'Add 100 shares on each newly confirmed same-side signal. On an opposite signal, sell all current-side shares only if liquidation at the fresh best bid is net-profitable after the modeled taker fee; never buy the opposite side on that signal. If the position is not profitable to sell, keep holding.',
           windowEnd: 'Any unsold shares wait for official resolution of their original market.',
         },
-        timing: 'Recalculate flow every second using the preceding five seconds of Binance and Polymarket data; place a resting limit buy on the signalled side at its current midpoint. Each newly confirmed same-side signal episode adds 100 shares. An opposite signal can only sell the current position when net-profitable after modeled taker fee; it never buys the other side.',
+        timing: 'Recalculate flow every second using the preceding five seconds of Binance and Polymarket data; immediately sweep visible asks when a signal is confirmed. Each newly confirmed same-side signal episode requests 100 shares. An opposite signal can only sell the current position when net-profitable after modeled taker fee; it never buys the other side.',
         sizing: `${config.FLOW_ENTRY_SHARES} shares per newly confirmed same-side signal episode. Opposite signals never initiate a buy; they can only close the current side when net-profitable.`,
         trigger: `Require Binance and Polymarket directional pressure to agree, each component to exceed ${config.FLOW_COMPONENT_MIN.toFixed(2)}, and combined pressure to reach ±${config.FLOW_SIGNAL_THRESHOLD.toFixed(2)} for ${config.FLOW_CONFIRMATION_COUNT} consecutive checks.`,
         currentSignal: this.signal,

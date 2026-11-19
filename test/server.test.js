@@ -61,8 +61,14 @@ test('dashboard explains same-side entries, profit-only exits, TP/SL, and resolu
   assert.match(html, /An opposite signal can only sell the current position/i);
   assert.match(html, /Opposite signal: profit exit only/i);
   assert.match(html, /state\.signal\?\.signalSide && state\.signal\?\.buySide/);
-  assert.match(html, /resting buy/i);
-  assert.match(html, /fresh midpoint drops at least \$0\.01 below it/i);
+  assert.match(html, /immediately sweeps visible asks/i);
+  assert.match(html, /partial fills are allowed/i);
+  assert.match(html, /best ask is below \$0\.05/i);
+  assert.match(html, /taker fees are modeled/i);
+  assert.match(html, /market entries/i);
+  assert.match(html, /PAPER_MARKET_BUY/);
+  assert.match(html, /PAPER_FLOW_/);
+  assert.match(html, /PAPER_POSITION_OUTCOME_RECORDED/);
   assert.match(html, /modeled taker fee/i);
   assert.match(html, /OPPOSITE SIGNAL BLOCKED/);
   assert.match(html, /PAPER_MARKET_OPPOSITE_SIGNAL_EXIT/);
