@@ -254,13 +254,23 @@ class OrderFlowBot extends MispricingBot {
       ? clamp((binanceScore + clobScore) / 2)
       : null;
     let candidateSide = null;
+    let priceBlockedSide = null;
     let agreement = false;
     if (binanceReady && clobReady) {
       agreement = Math.abs(binanceScore) >= config.FLOW_COMPONENT_MIN
         && Math.abs(clobScore) >= config.FLOW_COMPONENT_MIN
         && Math.sign(binanceScore) === Math.sign(clobScore);
-      if (agreement && combinedScore >= config.FLOW_SIGNAL_THRESHOLD) candidateSide = 'UP';
-      if (agreement && combinedScore <= -config.FLOW_SIGNAL_THRESHOLD) candidateSide = 'DOWN';
+      const pressureSide = agreement && combinedScore >= config.FLOW_SIGNAL_THRESHOLD
+        ? 'UP'
+        : agreement && combinedScore <= -config.FLOW_SIGNAL_THRESHOLD ? 'DOWN' : null;
+      if (pressureSide) {
+        const bestAsk = Number(books[pressureSide]?.bestAsk);
+        if (!Number.isFinite(bestAsk) || bestAsk > config.FLOW_MAX_ENTRY_ASK + EPSILON) {
+          priceBlockedSide = pressureSide;
+        } else {
+          candidateSide = pressureSide;
+        }
+      }
     }
 
     let reason = 'Both feeds need fresh data before a signal can qualify.';
@@ -270,6 +280,10 @@ class OrderFlowBot extends MispricingBot {
       reason = `Waiting for at least ${config.FLOW_MIN_BINANCE_TRADES} recent Binance trades.`;
     } else if (!clobReady) reason = 'Waiting for fresh, two-sided UP and DOWN books.';
     else if (!agreement) reason = 'Binance and Polymarket pressure do not yet agree.';
+    else if (priceBlockedSide) {
+      const bestAsk = Number(books[priceBlockedSide]?.bestAsk);
+      reason = `${priceBlockedSide} pressure meets the signal rules, but its best ask $${Number.isFinite(bestAsk) ? bestAsk.toFixed(3) : '—'} is above the $${config.FLOW_MAX_ENTRY_ASK.toFixed(2)} entry maximum.`;
+    }
     else if (!candidateSide) reason = `Combined pressure is below the ±${config.FLOW_SIGNAL_THRESHOLD.toFixed(2)} trigger.`;
     else reason = `${candidateSide} pressure qualifies; confirming consecutive one-second checks.`;
 
@@ -304,6 +318,8 @@ class OrderFlowBot extends MispricingBot {
       agreement,
       threshold: config.FLOW_SIGNAL_THRESHOLD,
       componentMinimum: config.FLOW_COMPONENT_MIN,
+      maximumEntryAsk: config.FLOW_MAX_ENTRY_ASK,
+      priceBlockedSide,
       candidateSide,
       confirmedSide: this.confirmedSide,
       confirmationCount: this.confirmationCount,
@@ -479,6 +495,8 @@ class OrderFlowBot extends MispricingBot {
       buySide,
       action: submitted.status === 'BLOCKED_PRICE_FLOOR'
         ? 'BUY_BLOCKED_PRICE_FLOOR'
+        : submitted.status === 'BLOCKED_PRICE_CEILING'
+          ? 'BUY_BLOCKED_PRICE_CEILING'
         : buySide === 'UP' ? 'BUY_UP' : 'BUY_DOWN',
       reason: [entryReason, oppositeExitReason].filter(Boolean).join(' '),
       combinedScore: this.pressure.combinedScore,
@@ -517,6 +535,33 @@ class OrderFlowBot extends MispricingBot {
     if (!quote || !Array.isArray(asks) || !asks.length
       || !Number.isFinite(bestAsk) || !(bestAsk > 0 && bestAsk < 1)) {
       return { filledShares: 0, reason: 'NO_FRESH_ASK_BOOK' };
+    }
+    if (bestAsk > config.FLOW_MAX_ENTRY_ASK + EPSILON) {
+      const reason = `Best ask $${bestAsk.toFixed(3)} is above the $${config.FLOW_MAX_ENTRY_ASK.toFixed(2)} entry maximum; buy skipped.`;
+      this.log('PAPER_FLOW_BUY_BLOCKED_PRICE_CEILING', {
+        signalSide,
+        side,
+        bestAskAtSubmission: bestAsk,
+        maximumAsk: config.FLOW_MAX_ENTRY_ASK,
+      });
+      this.events.unshift({
+        ts: now,
+        at: now,
+        event: 'PAPER_BUY_BLOCKED_PRICE_CEILING',
+        type: 'PAPER_BUY_BLOCKED_PRICE_CEILING',
+        message: `${signalSide || side} signal skipped: ${reason}`,
+        details: { signalSide, side, bestAskAtSubmission: bestAsk, maximumAsk: config.FLOW_MAX_ENTRY_ASK },
+      });
+      if (this.events.length > 200) this.events.length = 200;
+      return {
+        filledShares: 0,
+        unfilledShares: requestedShares,
+        bestAskAtSubmission: bestAsk,
+        fees: 0,
+        estimatedMakerRebate: 0,
+        status: 'BLOCKED_PRICE_CEILING',
+        reason,
+      };
     }
     if (bestAsk < MIN_ENTRY_ASK) {
       const reason = `Best ask $${bestAsk.toFixed(3)} is below the $${MIN_ENTRY_ASK.toFixed(2)} minimum; buy skipped.`;
@@ -572,7 +617,7 @@ class OrderFlowBot extends MispricingBot {
       timeInForce: 'FAK',
       immediateOrCancel: true,
       cancelOnNextConfirmedSignal: false,
-      fillRule: 'SWEEP_VISIBLE_ASKS_UP_TO_REQUESTED_SHARES; PARTIAL_FILL_ALLOWED; CANCEL_UNFILLED_REMAINDER; MODELED_TAKER_FEES; NEVER_BUY_BELOW_0_05',
+      fillRule: `SWEEP_VISIBLE_ASKS_UP_TO_REQUESTED_SHARES_AT_PRICES_${MIN_ENTRY_ASK.toFixed(2)}_TO_${config.FLOW_MAX_ENTRY_ASK.toFixed(2)}; PARTIAL_FILL_ALLOWED; CANCEL_UNFILLED_REMAINDER; MODELED_TAKER_FEES`,
       signal: {
         combinedScore: signal?.combinedScore ?? null,
         binanceScore: signal?.binance?.score ?? null,
@@ -588,7 +633,10 @@ class OrderFlowBot extends MispricingBot {
       if (sharesRemaining <= EPSILON || cashRemaining <= EPSILON) break;
       const price = Number(level.price);
       const availableSize = Number(level.availableSize ?? level.size);
-      if (!(price >= MIN_ENTRY_ASK && price < 1 && availableSize > 0)) continue;
+      if (!(price >= MIN_ENTRY_ASK
+        && price <= config.FLOW_MAX_ENTRY_ASK + EPSILON
+        && price < 1
+        && availableSize > 0)) continue;
 
       let shares = Math.min(sharesRemaining, availableSize);
       const costAt = quantity => quantity * price + takerFeeFor(this.market || {}, price, quantity);
@@ -1248,7 +1296,7 @@ class OrderFlowBot extends MispricingBot {
       strategy: {
         id: this.strategyId,
         name: this.strategyName,
-        version: 'btc-5m-independent-side-profit-exit-v9',
+        version: 'btc-5m-independent-side-profit-exit-v10-entry-ask-cap',
         execution: 'PAPER ONLY',
         symbol: 'BTCUSDT',
         timeframe: '5m',
@@ -1261,6 +1309,7 @@ class OrderFlowBot extends MispricingBot {
         entrySharesPerSignal: config.FLOW_ENTRY_SHARES,
         entryPriceSource: 'VISIBLE_ASK_MARKET_SWEEP',
         minimumEntryAsk: MIN_ENTRY_ASK,
+        maximumEntryAsk: config.FLOW_MAX_ENTRY_ASK,
         entrySlippageCeiling: null,
         maxInventoryPerSide: null,
         maxTotalInventoryShares: null,
@@ -1277,6 +1326,7 @@ class OrderFlowBot extends MispricingBot {
           sideMapping: 'BUY_SIGNALLED_SIDE_INDEPENDENTLY',
           execution: 'Sweep visible asks immediately from best to worse.',
           minimumAsk: MIN_ENTRY_ASK,
+          maximumAsk: config.FLOW_MAX_ENTRY_ASK,
           slippageCeiling: null,
           timeInForce: 'FAK',
           partialFillsAllowed: true,
@@ -1289,7 +1339,7 @@ class OrderFlowBot extends MispricingBot {
           oppositeSignalProfitabilityRule: 'A signal always triggers its own side buy independently. If the opposite side has current-window shares, sell all of them only when liquidation at its fresh best bid is net-profitable after modeled sell fees and entry costs.',
           cancelUnfilledOnNextSignal: false,
           cancelUnfilledAtWindowEnd: false,
-          paperFillRule: 'Immediately sweep current visible ask levels for up to 100 shares; partial fills are allowed, and any remainder is cancelled. Do not buy when the best ask is below $0.05. Model taker fees on each fill level.',
+          paperFillRule: `Immediately sweep visible asks for up to 100 shares, only at prices from $${MIN_ENTRY_ASK.toFixed(2)} through $${config.FLOW_MAX_ENTRY_ASK.toFixed(2)}; partial fills are allowed and any remainder is cancelled. Model taker fees on each fill level.`,
           inventoryLimit: 'Available paper cash only; order quantities are reduced to affordable visible liquidity.',
         },
         exit: {
@@ -1312,7 +1362,7 @@ class OrderFlowBot extends MispricingBot {
         },
         timing: 'Recalculate flow every second using the preceding five seconds of Binance and Polymarket data; immediately sweep visible asks on every newly confirmed UP or DOWN signal. Each signal buys its own side and independently checks whether the opposite side can be sold for net profit.',
         sizing: `${config.FLOW_ENTRY_SHARES} shares per newly confirmed signal episode on that signal's side. UP and DOWN positions may both stay open in one window.`,
-        trigger: `Require Binance and Polymarket directional pressure to agree, each component to exceed ${config.FLOW_COMPONENT_MIN.toFixed(2)}, and combined pressure to reach ±${config.FLOW_SIGNAL_THRESHOLD.toFixed(2)} for ${config.FLOW_CONFIRMATION_COUNT} consecutive checks.`,
+        trigger: `Require Binance and Polymarket directional pressure to agree, each component to exceed ${config.FLOW_COMPONENT_MIN.toFixed(2)}, combined pressure to reach ±${config.FLOW_SIGNAL_THRESHOLD.toFixed(2)} for ${config.FLOW_CONFIRMATION_COUNT} consecutive checks, and the signalled side's best ask to be no higher than $${config.FLOW_MAX_ENTRY_ASK.toFixed(2)}.`,
         currentSignal: this.signal,
       },
       model,

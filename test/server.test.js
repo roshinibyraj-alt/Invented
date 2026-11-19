@@ -63,7 +63,8 @@ test('dashboard explains independent-side entries, profitable exits, final TP/SL
   assert.match(html, /state\.signal\?\.signalSide && state\.signal\?\.buySide/);
   assert.match(html, /Every newly confirmed UP or DOWN signal market-buys that side/i);
   assert.match(html, /partial fills are allowed/i);
-  assert.match(html, /below a \$0\.05 best ask are blocked/i);
+  assert.match(html, /best ask is between \$0\.05 and \$0\.49/i);
+  assert.match(html, /No signal triggers above \$0\.49/i);
   assert.match(html, /include modeled taker fees/i);
   assert.match(html, /PAPER_MARKET_BUY/);
   assert.match(html, /modeled taker fee/i);

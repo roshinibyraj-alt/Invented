@@ -111,7 +111,7 @@
         <div>
           <div class="eyebrow">Binance order flow × Polymarket UP/DOWN</div>
           <h2>Buy each signalled side independently.</h2>
-          <p>Every newly confirmed UP or DOWN signal market-buys that side. If the opposite side already has shares, the bot also sells them when the estimated net result is profitable after fees. Both sides can remain open. The $0.99 final take-profit, $0.01 stop, and resolution handling stay active.</p>
+          <p>Every newly confirmed UP or DOWN signal market-buys that side only when its best ask is $0.49 or lower. If the opposite side already has shares, the bot also sells them when the estimated net result is profitable after fees. Both sides can remain open. The $0.99 final take-profit, $0.01 stop, and resolution handling stay active.</p>
         </div>
         <div class="hero-state">
           <span class="badge" id="window">Waiting for market</span>
@@ -173,7 +173,7 @@
           <div class="rules">
             <div class="rule"><b>Measure</b><span>Use the last five seconds of Binance aggressor notional and Polymarket CLOB trade flow, top-three-level depth imbalance, and microprice.</span></div>
             <div class="rule"><b>Confirm</b><span>Binance and Polymarket must point the same way; each must exceed 0.10 pressure and their combined score must reach ±0.30 for three one-second checks.</span></div>
-            <div class="rule"><b>Independent buys</b><span>Each newly confirmed signal sweeps visible asks for 100 shares on that same side. UP and DOWN may both stay open. Partial fills are allowed; remaining shares cancel immediately. Buys below a $0.05 best ask are blocked.</span></div>
+            <div class="rule"><b>Independent buys</b><span>Each newly confirmed signal sweeps visible asks for 100 shares on that same side only when the signalled side’s best ask is between $0.05 and $0.49. No signal triggers above $0.49, and asks above $0.49 are excluded from the sweep. UP and DOWN may both stay open. Partial fills are allowed; remaining shares cancel immediately.</span></div>
             <div class="rule"><b>Profitable opposite exit</b><span>During a signal trigger, buy the signalled side regardless of the opposite position. Also sell all opposite-side shares only when the fresh-bid estimate is net-profitable after fees; otherwise hold them.</span></div>
             <div class="rule"><b>Final take-profit</b><span>A fresh best bid at $0.99 closes that side at $1 per share. This is the final TP, separate from profitable signal-triggered exits.</span></div>
             <div class="rule"><b>Stop and settle</b><span>A fresh best bid at $0.01 or lower closes that side at $0. At window end, any remaining shares wait for that market’s official result.</span></div>

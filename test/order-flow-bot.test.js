@@ -69,8 +69,8 @@ function setBook(bot, side, now, bullish, upBidSize = 100) {
   bot.applyBookSnapshot({
     asset_id: side === 'UP' ? 'up-token' : 'down-token',
     timestamp: String(now),
-    bids: [{ price: side === 'UP' ? '0.59' : '0.39', size: String(actualBidSize) }],
-    asks: [{ price: side === 'UP' ? '0.61' : '0.41', size: String(actualAskSize) }],
+    bids: [{ price: side === 'UP' ? '0.47' : '0.39', size: String(actualBidSize) }],
+    asks: [{ price: side === 'UP' ? '0.49' : '0.41', size: String(actualAskSize) }],
   }, now);
 }
 
@@ -144,7 +144,7 @@ test('Binance aggregate trades classify aggressive buyer and seller flow', () =>
   assert.ok(flow.priceChangePct > 0);
 });
 
-test('three aligned UP checks immediately sweep asks and account for taker fees', () => {
+test('three aligned UP checks at the $0.49 cap immediately sweep asks and account for taker fees', () => {
   const { bot, feed, nowRef } = makeBot();
   step(bot, feed, nowRef, WINDOW_START, true);
   step(bot, feed, nowRef, WINDOW_START + 1000, true);
@@ -162,8 +162,8 @@ test('three aligned UP checks immediately sweep asks and account for taker fees'
   assert.equal(order.signalSide, 'UP');
   assert.equal(bot.signal.signalSide, 'UP');
   assert.equal(bot.signal.buySide, 'UP');
-  assert.equal(order.bestAskAtSubmission, 0.61);
-  assert.equal(order.averagePrice, 0.61);
+  assert.equal(order.bestAskAtSubmission, 0.49);
+  assert.equal(order.averagePrice, 0.49);
   assert.equal(order.fills.length, 1);
   assert.ok(order.fees > 0);
   assert.equal(order.estimatedMakerRebate, 0);
@@ -172,7 +172,7 @@ test('three aligned UP checks immediately sweep asks and account for taker fees'
   assert.match(order.fillRule, /PARTIAL_FILL_ALLOWED/);
   const position = bot.currentPosition('UP', WINDOW_START);
   assert.equal(position.shares, 100);
-  assert.equal(position.entryPrice, 0.61);
+  assert.equal(position.entryPrice, 0.49);
   assert.equal(position.fees, order.fees);
   assert.equal(position.estimatedEntryMakerRebate, 0);
   assert.ok(Math.abs(bot.cash - (3000 - order.grossCost - order.fees)) < 1e-9);
@@ -185,7 +185,7 @@ test('a shallow ask book partially fills and cancels the unfilled market-order r
   const fillAt = WINDOW_START + 2000;
   nowRef.value = fillAt;
   updateInputs(bot, feed, nowRef, true);
-  setAskAt(bot, 'UP', fillAt, 0.61, 0.59, 40);
+  setAskAt(bot, 'UP', fillAt, 0.48, 0.46, 40);
   bot.processStrategyEntry(fillAt);
 
   const order = bot.orders.find(item => item.action === 'BUY');
@@ -209,17 +209,64 @@ test('market entry sweeps multiple ask levels and records the weighted average f
   const fillAt = WINDOW_START + 2000;
   nowRef.value = fillAt;
   updateInputs(bot, feed, nowRef, true);
-  setAskAt(bot, 'UP', fillAt, 0.61, 0.59, 40);
-  bot.books.UP.asks.push({ price: 0.62, size: 500, availableSize: 500 });
+  setAskAt(bot, 'UP', fillAt, 0.48, 0.46, 40);
+  bot.books.UP.asks.push({ price: 0.49, size: 500, availableSize: 500 });
   bot.processStrategyEntry(fillAt);
 
   const order = bot.orders.find(item => item.action === 'BUY');
   assert.equal(order.status, 'FILLED');
-  assert.deepEqual(order.fills.map(fill => [fill.price, fill.shares]), [[0.61, 40], [0.62, 60]]);
-  assert.equal(order.grossCost, 61.6);
-  assert.equal(order.averagePrice, 0.616);
+  assert.deepEqual(order.fills.map(fill => [fill.price, fill.shares]), [[0.48, 40], [0.49, 60]]);
+  assert.ok(Math.abs(order.grossCost - 48.6) < 1e-9);
+  assert.ok(Math.abs(order.averagePrice - 0.486) < 1e-9);
   assert.ok(order.fees > 0);
   assert.equal(bot.currentPosition('UP', WINDOW_START).shares, 100);
+});
+
+test('a best ask above $0.49 blocks the signal without placing an order', () => {
+  const { bot, feed, nowRef } = makeBot();
+  step(bot, feed, nowRef, WINDOW_START, true);
+  step(bot, feed, nowRef, WINDOW_START + 1000, true);
+  const blockedAt = WINDOW_START + 2000;
+  nowRef.value = blockedAt;
+  updateInputs(bot, feed, nowRef, true);
+  setAskAt(bot, 'UP', blockedAt, 0.50, 0.48);
+  bot.processStrategyEntry(blockedAt);
+
+  assert.equal(bot.orders.filter(order => order.action === 'BUY').length, 0);
+  assert.equal(bot.currentPosition('UP', WINDOW_START), null);
+  assert.equal(bot.pressure.candidateSide, null);
+  assert.equal(bot.pressure.priceBlockedSide, 'UP');
+  assert.match(bot.pressure.reason, /above the \$0\.49 entry maximum/);
+  assert.equal(bot.pressure.confirmationCount, 0);
+});
+
+test('the final buy guard also refuses a price that rises above $0.49', () => {
+  const { bot, nowRef } = makeBot();
+  setAskAt(bot, 'UP', nowRef.value, 0.50, 0.48);
+
+  const result = bot.submitMarketBuy('UP', nowRef.value, {}, 'UP');
+
+  assert.equal(result.status, 'BLOCKED_PRICE_CEILING');
+  assert.equal(result.filledShares, 0);
+  assert.equal(bot.orders.filter(order => order.action === 'BUY').length, 0);
+});
+
+test('ask levels above $0.49 are not swept even when the signal qualifies at the cap', () => {
+  const { bot, feed, nowRef } = makeBot();
+  step(bot, feed, nowRef, WINDOW_START, true);
+  step(bot, feed, nowRef, WINDOW_START + 1000, true);
+  const fillAt = WINDOW_START + 2000;
+  nowRef.value = fillAt;
+  updateInputs(bot, feed, nowRef, true);
+  setAskAt(bot, 'UP', fillAt, 0.49, 0.47, 40);
+  bot.books.UP.asks.push({ price: 0.50, size: 500, availableSize: 500 });
+  bot.processStrategyEntry(fillAt);
+
+  const order = bot.orders.find(item => item.action === 'BUY');
+  assert.equal(order.status, 'PARTIALLY_FILLED');
+  assert.equal(order.filledShares, 40);
+  assert.deepEqual(order.fills.map(fill => fill.price), [0.49]);
+  assert.equal(bot.currentPosition('UP', WINDOW_START).shares, 40);
 });
 
 test('a best ask below five cents blocks entry, while exactly five cents is allowed', () => {
@@ -278,11 +325,11 @@ test('an opposite signal buys its own side and independently sells profitable op
   const oldPosition = bot.currentPosition('UP', WINDOW_START);
   assert.equal(oldPosition.shares, 100);
   // Model a position whose average entry has improved before the reversal signal.
-  oldPosition.totalCost = 50;
-  oldPosition.initialTotalCost = 50;
-  oldPosition.entryPrice = 0.50;
-  oldPosition.avgEntry = 0.50;
-  bot.cash += 10;
+  oldPosition.totalCost = 40;
+  oldPosition.initialTotalCost = 40;
+  oldPosition.entryPrice = 0.40;
+  oldPosition.avgEntry = 0.40;
+  bot.cash += 9;
 
   for (let second = 4; second < 7; second += 1) {
     step(bot, feed, nowRef, WINDOW_START + second * 1000, false);
@@ -299,7 +346,7 @@ test('an opposite signal buys its own side and independently sells profitable op
   assert.equal(profitExit.status, 'FILLED');
   assert.equal(profitExit.side, 'UP');
   assert.equal(profitExit.filledShares, 100);
-  assert.equal(profitExit.averagePrice, 0.59);
+  assert.equal(profitExit.averagePrice, 0.47);
   assert.ok(profitExit.sellFee > 0);
   assert.equal(oldPosition.status, 'SETTLED_EXIT');
   assert.equal(oldPosition.exitReason, 'OPPOSITE_SIGNAL_PROFIT_EXIT');
@@ -469,7 +516,7 @@ test('market-order remainders are cancelled immediately and never rest into a ne
   const fillAt = WINDOW_START + 2000;
   nowRef.value = fillAt;
   updateInputs(bot, feed, nowRef, true);
-  setAskAt(bot, 'UP', fillAt, 0.61, 0.59, 40);
+  setAskAt(bot, 'UP', fillAt, 0.48, 0.46, 40);
   bot.processStrategyEntry(fillAt);
   const order = bot.orders.find(item => item.action === 'BUY');
   assert.equal(order.status, 'PARTIALLY_FILLED');
@@ -551,7 +598,7 @@ test('snapshot identifies the paper-only pressure strategy and exposes flow scor
   assert.equal(state.strategy.id, 'btc-5m-combined-orderflow-accumulation');
   assert.equal(state.strategy.execution, 'PAPER ONLY');
   assert.equal(state.strategy.entrySharesPerSignal, 100);
-  assert.equal(state.strategy.version, 'btc-5m-independent-side-profit-exit-v9');
+  assert.equal(state.strategy.version, 'btc-5m-independent-side-profit-exit-v10-entry-ask-cap');
   assert.equal(state.strategy.entries.sideMapping, 'BUY_SIGNALLED_SIDE_INDEPENDENTLY');
   assert.equal(state.strategy.maxActiveSidesPerWindow, 2);
   assert.match(state.strategy.entries.oppositeSignalProfitabilityRule, /signal always triggers its own side buy independently/i);
@@ -561,6 +608,7 @@ test('snapshot identifies the paper-only pressure strategy and exposes flow scor
   assert.equal(state.strategy.orderType, 'PAPER_MARKET_BUY + PAPER_MARKET_OPPOSITE_SIGNAL_EXIT');
   assert.equal(state.strategy.entryPriceSource, 'VISIBLE_ASK_MARKET_SWEEP');
   assert.equal(state.strategy.entries.minimumAsk, 0.05);
+  assert.equal(state.strategy.entries.maximumAsk, 0.49);
   assert.equal(state.strategy.entries.timeInForce, 'FAK');
   assert.equal(state.strategy.entries.partialFillsAllowed, true);
   assert.equal(state.strategy.entries.cancelUnfilledOnNextSignal, false);
