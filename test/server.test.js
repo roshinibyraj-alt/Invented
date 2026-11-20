@@ -54,9 +54,9 @@ test('dashboard explains the resting limits, midpoint reversal, and resolution-o
   assert.ok(html.indexOf('Current Polymarket books') < html.indexOf('Paper equity'));
   assert.match(html, /Invented · BTC 5-minute/);
   assert.match(html, /Two-sided limit-entry bot/i);
-  assert.match(html, /100-share buys at \$0\.20 on both sides/i);
-  assert.match(html, /best ask reaches \$0\.20/i);
-  assert.match(html, /midpoint reaches \$0\.10 or lower/i);
+  assert.match(html, /100-share buys at \$0\.30 on both sides/i);
+  assert.match(html, /best ask reaches \$0\.30/i);
+  assert.match(html, /midpoint reaches \$0\.20 or lower/i);
   assert.match(html, /market-buys 200 shares on the opposite side/i);
   assert.match(html, /There are no sells, take-profits, or stop-losses/i);
   assert.match(html, /official resolution/i);

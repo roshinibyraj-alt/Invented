@@ -144,18 +144,18 @@ test('Binance aggregate trades classify aggressive buyer and seller flow', () =>
   assert.ok(flow.priceChangePct > 0);
 });
 
-test('both $0.20 resting entries are placed and the first best-ask touch cancels its opposite', () => {
+test('both $0.30 resting entries are placed and the first best-ask touch cancels its opposite', () => {
   const { bot, feed, nowRef } = makeBot();
   step(bot, feed, nowRef, WINDOW_START, true);
   let orders = bot.orders.filter(order => order.orderType === 'PAPER_LIMIT_BUY');
   assert.equal(orders.length, 2);
   assert.ok(orders.every(order => order.status === 'RESTING'));
-  assert.ok(orders.every(order => order.limitPrice === 0.20 && order.requestedShares === 100));
+  assert.ok(orders.every(order => order.limitPrice === 0.30 && order.requestedShares === 100));
   assert.equal(bot.positions.length, 0);
 
   const fillAt = WINDOW_START + 1000;
   nowRef.value = fillAt;
-  setAskAt(bot, 'UP', fillAt, 0.20, 0.18);
+  setAskAt(bot, 'UP', fillAt, 0.30, 0.28);
   bot.processStrategyEntry(fillAt);
   const order = bot.orders.find(item => item.orderType === 'PAPER_LIMIT_BUY' && item.side === 'UP');
   const opposite = bot.orders.find(item => item.orderType === 'PAPER_LIMIT_BUY' && item.side === 'DOWN');
@@ -165,7 +165,7 @@ test('both $0.20 resting entries are placed and the first best-ask touch cancels
   assert.equal(order.filledShares, 100);
   assert.equal(order.remainingShares, 0);
   assert.equal(order.side, 'UP');
-  assert.equal(order.averagePrice, 0.20);
+  assert.equal(order.averagePrice, 0.30);
   assert.equal(order.fees, 0);
   assert.equal(opposite.status, 'CANCELLED_OTHER_SIDE_FILLED');
   assert.equal(opposite.cancelReason, 'OTHER_SIDE_FILLED');
@@ -175,10 +175,10 @@ test('both $0.20 resting entries are placed and the first best-ask touch cancels
   assert.equal(order.immediateOrCancel, false);
   const position = bot.currentPosition('UP', WINDOW_START);
   assert.equal(position.shares, 100);
-  assert.equal(position.entryPrice, 0.20);
+  assert.equal(position.entryPrice, 0.30);
   assert.equal(position.fees, 0);
   assert.equal(position.estimatedEntryMakerRebate, 0);
-  assert.equal(bot.cash, 2980);
+  assert.equal(bot.cash, 2970);
   assert.equal(bot.firstFilledSide, 'UP');
 });
 
@@ -262,12 +262,12 @@ test('resting limit orders remain active until a fill or the window boundary', (
   assert.equal(bot.orders.filter(order => order.orderType === 'PAPER_LIMIT_BUY' && order.status === 'RESTING').length, 2);
 });
 
-test('a filled-side midpoint of $0.10 buys 200 opposite shares once and never sells', () => {
+test('a filled-side midpoint at or below $0.20 buys 200 opposite shares once and never sells', () => {
   const { bot, feed, nowRef } = makeBot();
   step(bot, feed, nowRef, WINDOW_START, true);
   const fillAt = WINDOW_START + 1000;
   nowRef.value = fillAt;
-  setAskAt(bot, 'UP', fillAt, 0.20, 0.18);
+  setAskAt(bot, 'UP', fillAt, 0.30, 0.28);
   setAskAt(bot, 'DOWN', fillAt, 0.41, 0.39);
   bot.processStrategyEntry(fillAt);
   const firstSidePosition = bot.currentPosition('UP', WINDOW_START);
@@ -275,7 +275,7 @@ test('a filled-side midpoint of $0.10 buys 200 opposite shares once and never se
 
   const triggerAt = fillAt + 1000;
   nowRef.value = triggerAt;
-  setAskAt(bot, 'UP', triggerAt, 0.10, 0.08);
+  setAskAt(bot, 'UP', triggerAt, 0.20, 0.18);
   setAskAt(bot, 'DOWN', triggerAt, 0.41, 0.39);
   bot.processStrategyEntry(triggerAt);
   bot.processStrategyEntry(triggerAt + 1);
@@ -321,7 +321,7 @@ test('a low midpoint buys the opposite side without selling the filled position'
   step(bot, feed, nowRef, WINDOW_START, true);
   const fillAt = WINDOW_START + 1000;
   nowRef.value = fillAt;
-  setAskAt(bot, 'DOWN', fillAt, 0.20, 0.18);
+  setAskAt(bot, 'DOWN', fillAt, 0.30, 0.28);
   setAskAt(bot, 'UP', fillAt, 0.41, 0.39);
   bot.processStrategyEntry(fillAt);
   const position = bot.currentPosition('DOWN', WINDOW_START);
@@ -346,7 +346,7 @@ test('open positions move to official resolution at window end', async () => {
   step(bot, feed, nowRef, WINDOW_START, true);
   const fillAt = WINDOW_START + 1000;
   nowRef.value = fillAt;
-  setAskAt(bot, 'DOWN', fillAt, 0.20, 0.18);
+  setAskAt(bot, 'DOWN', fillAt, 0.30, 0.28);
   bot.processStrategyEntry(fillAt);
   const position = bot.currentPosition('DOWN', WINDOW_START);
   const nextWindow = WINDOW_START + config.WINDOW_MS_5M;
@@ -437,7 +437,7 @@ test('stale Binance input does not block CLOB price-triggered fills', () => {
   step(bot, feed, nowRef, WINDOW_START, true);
   const fillAt = WINDOW_START + 1000;
   nowRef.value = fillAt;
-  setAskAt(bot, 'UP', fillAt, 0.20, 0.18);
+  setAskAt(bot, 'UP', fillAt, 0.23, 0.18);
   bot.processStrategyEntry(fillAt);
   assert.equal(bot.currentPosition('UP', WINDOW_START).shares, 100);
   assert.equal(bot.priceStrategyState.firstFilledSide, 'UP');
@@ -469,7 +469,7 @@ test('snapshot identifies the paper-only price strategy and its active orders', 
   assert.equal(state.strategy.id, 'btc-5m-two-sided-limit-and-reversal');
   assert.equal(state.strategy.execution, 'PAPER ONLY');
   assert.equal(state.strategy.entrySharesPerSignal, 100);
-  assert.equal(state.strategy.version, 'btc-5m-dual-020-resting-limit-midpoint-010-reversal-v13');
+  assert.equal(state.strategy.version, 'btc-5m-dual-030-resting-limit-midpoint-020-reversal-v14');
   assert.equal(state.strategy.entries.sideMapping, 'REST_BOTH_UP_AND_DOWN_LIMIT_BUYS');
   assert.equal(state.strategy.maxActiveSidesPerWindow, 2);
   assert.equal(state.strategy.maxInventoryPerSide, null);
@@ -477,11 +477,11 @@ test('snapshot identifies the paper-only price strategy and its active orders', 
   assert.equal(state.strategy.usesMakerOrders, true);
   assert.equal(state.strategy.orderType, 'PAPER_LIMIT_BUY + PAPER_MARKET_BUY');
   assert.equal(state.strategy.entryPriceSource, 'RESTING_LIMIT_AT_FIXED_PRICE');
-  assert.equal(state.strategy.entries.limitPrice, 0.20);
+  assert.equal(state.strategy.entries.limitPrice, 0.30);
   assert.equal(state.strategy.entries.sharesPerSide, 100);
   assert.equal(state.strategy.entries.partialFillsAllowed, false);
   assert.equal(state.strategy.entries.cancelOtherSideOnFill, true);
-  assert.equal(state.strategy.entries.reversalTrigger, 'FILLED_SIDE_MIDPOINT_AT_OR_BELOW_0.10');
+  assert.equal(state.strategy.entries.reversalTrigger, 'FILLED_SIDE_MIDPOINT_AT_OR_BELOW_0.20');
   assert.equal(state.strategy.entries.reversalShares, 200);
   assert.equal(state.account.completedWindowCount, 0);
   assert.ok(Array.isArray(state.account.equityCurve));
@@ -498,7 +498,7 @@ test('global equity includes fresh bid marks for open positions', () => {
   step(bot, feed, nowRef, WINDOW_START, true);
   const fillAt = WINDOW_START + 1000;
   nowRef.value = fillAt;
-  setAskAt(bot, 'UP', fillAt, 0.20, 0.18);
+  setAskAt(bot, 'UP', fillAt, 0.23, 0.18);
   bot.processStrategyEntry(fillAt);
 
   const state = bot.snapshot();

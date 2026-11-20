@@ -110,8 +110,8 @@
       <section class="hero">
         <div>
           <div class="eyebrow">Polymarket UP/DOWN prices</div>
-          <h2>Rest 100-share buys at $0.20 on both sides.</h2>
-          <p>The first side whose best ask reaches $0.20 fills and cancels the other resting order. If the filled side’s midpoint reaches $0.10 or lower, the bot market-buys 200 shares on the opposite side. No early sells; positions wait for official resolution.</p>
+          <h2>Rest 100-share buys at $0.30 on both sides.</h2>
+          <p>The first side whose best ask reaches $0.30 fills and cancels the other resting order. If the filled side’s midpoint reaches $0.20 or lower, the bot market-buys 200 shares on the opposite side. No early sells; positions wait for official resolution.</p>
         </div>
         <div class="hero-state">
           <span class="badge" id="window">Waiting for market</span>
@@ -129,13 +129,13 @@
               <div class="side-head"><strong>UP · current window</strong><span class="badge" id="upOrderStatus">Limit —</span></div>
               <div class="price-grid"><div class="price"><span>Best bid · size</span><strong id="upBid">—</strong></div><div class="price"><span>Best ask · size</span><strong id="upAsk">—</strong></div></div>
               <div class="position"><strong id="upPosition">0 shares · — avg</strong><span id="upPnl">No open position</span></div>
-              <small class="risk-rule" id="upRisk">Resting buy: 100 shares at $0.20</small>
+              <small class="risk-rule" id="upRisk">Resting buy: 100 shares at $0.30</small>
             </div>
             <div class="side-card down">
               <div class="side-head"><strong>DOWN · current window</strong><span class="badge" id="downOrderStatus">Limit —</span></div>
               <div class="price-grid"><div class="price"><span>Best bid · size</span><strong id="downBid">—</strong></div><div class="price"><span>Best ask · size</span><strong id="downAsk">—</strong></div></div>
               <div class="position"><strong id="downPosition">0 shares · — avg</strong><span id="downPnl">No open position</span></div>
-              <small class="risk-rule" id="downRisk">Resting buy: 100 shares at $0.20</small>
+              <small class="risk-rule" id="downRisk">Resting buy: 100 shares at $0.30</small>
             </div>
           </div>
         </article>
@@ -152,9 +152,9 @@
         <article class="panel">
           <div class="panel-head"><div><div class="panel-title">Price-trigger status</div><div class="panel-sub">This strategy uses Polymarket prices, not pressure scores</div></div><span class="badge" id="pressureStatus">PRICE MONITORING</span></div>
           <div class="score-cards">
-            <div class="score-box"><div class="label">UP limit order</div><div class="score-value" id="upLimitStatus">—</div><div class="score-meta">100 shares · $0.20 limit</div></div>
-            <div class="score-box"><div class="label">DOWN limit order</div><div class="score-value" id="downLimitStatus">—</div><div class="score-meta">100 shares · $0.20 limit</div></div>
-            <div class="score-box"><div class="label">Opposite-side trigger</div><div class="score-value" id="reversalStatus">—</div><div class="score-meta" id="reversalDetail">Midpoint ≤ $0.10 → buy 200</div></div>
+            <div class="score-box"><div class="label">UP limit order</div><div class="score-value" id="upLimitStatus">—</div><div class="score-meta">100 shares · $0.30 limit</div></div>
+            <div class="score-box"><div class="label">DOWN limit order</div><div class="score-value" id="downLimitStatus">—</div><div class="score-meta">100 shares · $0.30 limit</div></div>
+            <div class="score-box"><div class="label">Opposite-side trigger</div><div class="score-value" id="reversalStatus">—</div><div class="score-meta" id="reversalDetail">Midpoint ≤ $0.20 → buy 200</div></div>
           </div>
         </article>
 
@@ -171,15 +171,15 @@
         <article class="panel">
           <div class="panel-head"><div><div class="panel-title">Current strategy</div><div class="panel-sub">The rules currently running in this paper bot</div></div><span class="badge">100 shares per signal</span></div>
           <div class="rules">
-            <div class="rule"><b>Initial orders</b><span>At each window open, place resting buy limits for 100 UP shares and 100 DOWN shares, both at $0.20.</span></div>
-            <div class="rule"><b>First fill</b><span>A fresh best ask at or below $0.20 confirms the 100-share fill at that ask, capped at the $0.20 limit; then cancel the other side’s resting order.</span></div>
-            <div class="rule"><b>Reversal buy</b><span>If the filled side’s midpoint reaches $0.10 or lower, immediately market-buy 200 shares on the opposite side. This triggers at most once per window; taker fees are modeled.</span></div>
+            <div class="rule"><b>Initial orders</b><span>At each window open, place resting buy limits for 100 UP shares and 100 DOWN shares, both at $0.30.</span></div>
+            <div class="rule"><b>First fill</b><span>A fresh best ask at or below $0.30 confirms the 100-share fill at that ask, capped at the $0.30 limit; then cancel the other side’s resting order.</span></div>
+            <div class="rule"><b>Reversal buy</b><span>If the filled side’s midpoint reaches $0.20 or lower, immediately market-buy 200 shares on the opposite side. This triggers at most once per window; taker fees are modeled.</span></div>
             <div class="rule"><b>Hold to resolution</b><span>There are no sells, take-profits, or stop-losses. Filled shares stay open until the official result of their original market settles them.</span></div>
             <div class="rule"><b>Unfilled limits</b><span>If neither side fills, both limits remain resting until the window ends; then they are cancelled.</span></div>
           </div>
         </article>
         <article class="panel">
-          <div class="panel-head"><div><div class="panel-title">Recent orders</div><div class="panel-sub">Resting $0.20 limits and any $0.10-triggered opposite market buy</div></div><span class="badge" id="orderCount">0 orders</span></div>
+          <div class="panel-head"><div><div class="panel-title">Recent orders</div><div class="panel-sub">Resting $0.30 limits and any $0.20-triggered opposite market buy</div></div><span class="badge" id="orderCount">0 orders</span></div>
           <div class="table-wrap"><table><thead><tr><th>Time</th><th>Action</th><th>Side</th><th>Filled / requested</th><th>Fill / limit price</th><th>Fees / rebate</th><th>Status</th></tr></thead><tbody id="orders"><tr><td class="empty" colspan="7">Waiting for a price trigger</td></tr></tbody></table></div>
         </article>
       </section>
@@ -232,8 +232,8 @@
         const triggerMid = priceState.firstSideMidpoint;
         set("reversalStatus", priceState.reversalTriggered ? "TRIGGERED" : triggerMid == null ? "ARMED" : money(triggerMid));
         set("reversalDetail", priceState.firstFilledSide
-          ? `${priceState.firstFilledSide} midpoint ${triggerMid == null ? "—" : money(triggerMid)} · trigger ≤ $0.10`
-          : "Waiting for first $0.20 fill");
+          ? `${priceState.firstFilledSide} midpoint ${triggerMid == null ? "—" : money(triggerMid)} · trigger ≤ $0.20`
+          : "Waiting for first $0.30 fill");
         set("clobStatus",`Polymarket ${String(state.websocket?.status||"waiting").toLowerCase()}`);
         set("marketTitle",state.market?.title || state.market?.slug || "BTC 5-minute UP/DOWN");
         for (const side of ["UP","DOWN"]) {

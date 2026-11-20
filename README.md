@@ -4,9 +4,9 @@ This service runs a paper-only strategy for Polymarket BTC 5-minute UP/DOWN mark
 
 ## Strategy
 
-- At each 5-minute window open, place two resting limit buys: 100 UP shares at $0.20 and 100 DOWN shares at $0.20.
-- A fresh best ask at or below $0.20 confirms a full 100-share fill at the best ask, with a maximum fill price of $0.20. The other side's resting order is cancelled immediately. Unfilled orders expire at window end.
-- If the filled side's midpoint reaches $0.10 or below, immediately submit one 200-share market buy on the opposite side. This trigger can happen once per window; visible ask liquidity controls the market fill, partial fills are allowed, unfilled remainder is cancelled, and taker fees are modeled.
+- At each 5-minute window open, place two resting limit buys: 100 UP shares at $0.30 and 100 DOWN shares at $0.30.
+- A fresh best ask at or below $0.30 confirms a full 100-share fill at the best ask, with a maximum fill price of $0.30. The other side's resting order is cancelled immediately. Unfilled orders expire at window end.
+- If the filled side's midpoint reaches $0.20 or below, immediately submit one 200-share market buy on the opposite side. This trigger can happen once per window; visible ask liquidity controls the market fill, partial fills are allowed, unfilled remainder is cancelled, and taker fees are modeled.
 - There are no sells, take-profits, or stop-losses. All filled shares stay open until the official result for their original market settles them. Resting limit fills have no modeled taker fee or maker rebate.
 
 The price triggers are paper assumptions, not predictions or guaranteed real-world executions. The simulated 100-share limit fill is confirmed from the best ask crossing the limit; the separate 200-share reversal buy uses visible ask depth but does not model latency or book changes during a sweep.
