@@ -73,6 +73,7 @@
       .source-tag { max-width: 58%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; font-size: 10px; font-weight: 850; color: var(--muted); }
       .source-tag.exact { color: var(--green); }
       .source-tag.proxy { color: var(--amber); }
+      .source-tag.live { color: var(--blue); }
       .outcomes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 10px; }
       .outcome { padding: 10px; border: 1px solid var(--line); border-radius: 12px; background: #101e30; }
       .outcome.up { border-left: 3px solid var(--green); }
@@ -166,11 +167,12 @@
             <div class="decision rule-list">
               <div class="rule"><span>Entry threshold</span><strong>&lt; $0.90 asks</strong></div>
               <div class="rule"><span>Shares per leg</span><strong>10</strong></div>
+              <div class="rule"><span>Beat gap / volatility band</span><strong id="beatComparison">—</strong></div>
               <div class="rule"><span>Modeled pair fees</span><strong id="pairFees">—</strong></div>
               <div class="rule"><span>Minimum net payout edge</span><strong id="minProfit">—</strong></div>
             </div>
           </div>
-          <div class="notice">Strike data is labeled by source. CoinGecko is only a proxy when Chainlink history is unavailable; proxy-based paper results are not a guaranteed arbitrage or proof of the official Chainlink strike.</div>
+          <div class="notice">Beat snapshots prefer the nearest Binance BTCUSDT trade within 2 seconds of each market start. A rolling 60-second Binance price range sets the equal-beat band, floored at $2 and capped at $100. Binance estimates are not the official Chainlink resolution price.</div>
         </article>
       </section>
 
@@ -184,6 +186,8 @@
           <div class="rule-list">
             <div class="rule"><span>Active strategy</span><strong>Paired 5m/15m BTC</strong></div>
             <div class="rule"><span>Exit</span><strong>Official market resolution</strong></div>
+            <div class="rule"><span>Binance trade feed</span><strong id="binanceStatus">Waiting</strong></div>
+            <div class="rule"><span>Last 60s BTC range / band</span><strong id="binanceRange">—</strong></div>
             <div class="rule"><span>Book feed</span><strong id="feedDetail">—</strong></div>
             <div class="rule"><span>Ledger</span><strong>Fresh on Railway restart</strong></div>
           </div>
@@ -228,14 +232,15 @@
         const beat = market?.beatPrice;
         $(`${prefix}Beat`).textContent = Number(beat?.value) > 0 ? money(beat.value, 2) : '—';
         const source = $(`${prefix}Source`);
-        const chainlinkOffset = Number.isFinite(Number(beat?.offsetMs))
-          ? Math.round(Math.abs(Number(beat.offsetMs)) / 1000) : null;
+        const offsetMs = Number(beat?.offsetMs);
+        const signedOffset = Number.isFinite(offsetMs)
+          ? `${offsetMs > 0 ? '+' : ''}${(offsetMs / 1000).toFixed(1)}s` : null;
         source.textContent = beat?.source === 'CHAINLINK_DATA_STREAMS'
-          ? `CHAINLINK · ${chainlinkOffset === 0 ? 'exact time' : `${chainlinkOffset ?? '—'}s offset`}`
-          : beat?.source === 'COINGECKO_SPOT_PROXY'
-            ? `COINGECKO SPOT · +${Math.round(chainlinkOffset ?? 0)}s · APPROXIMATE`
+          ? `CHAINLINK · ${signedOffset === '0.0s' ? 'exact time' : `${signedOffset || '—'} offset`}`
+          : beat?.source === 'BINANCE_WS_ESTIMATE'
+            ? `BINANCE WS · ${signedOffset || 'near open'}`
             : beat?.source === 'COINGECKO_PROXY' ? 'COINGECKO HISTORY · APPROXIMATE' : 'Waiting for strike data';
-        source.className = `source-tag ${beat?.source === 'CHAINLINK_DATA_STREAMS' ? 'exact' : ['COINGECKO_PROXY', 'COINGECKO_SPOT_PROXY'].includes(beat?.source) ? 'proxy' : ''}`;
+        source.className = `source-tag ${beat?.source === 'CHAINLINK_DATA_STREAMS' ? 'exact' : beat?.source === 'BINANCE_WS_ESTIMATE' ? 'live' : beat?.source === 'COINGECKO_PROXY' ? 'proxy' : ''}`;
         const outcomes = market?.outcomes || {};
         $(`${prefix}Outcomes`).innerHTML = `${outcomeHtml('UP', outcomes.UP)}${outcomeHtml('DOWN', outcomes.DOWN)}`;
       }
@@ -288,6 +293,7 @@
         const account = state.account || {};
         const pair = state.marketPair || {};
         const opportunity = state.opportunity || {};
+        const volatility = state.binance?.volatility || opportunity.volatility || pair.volatility || {};
         const stats = {
           completed: Number(account.completedPairs) || 0,
           wins: Number(account.pairWins) || 0,
@@ -318,8 +324,18 @@
           : opportunity.reason || 'Waiting for a synchronized pair';
         $('pairFees').textContent = opportunity.fees != null ? money(opportunity.fees, 3) : '—';
         $('minProfit').textContent = opportunity.minimumNetProfit != null ? money(opportunity.minimumNetProfit, 3) : '—';
+        $('beatComparison').textContent = opportunity.beatGapUsd != null
+          ? `${money(opportunity.beatGapUsd, 2)} / ${money(opportunity.beatToleranceUsd ?? volatility.bandUsd, 2)}`
+          : volatility.bandUsd != null ? `band ${money(volatility.bandUsd, 2)}` : '—';
         $('socketStatus').textContent = state.websocket?.status || 'CLOB waiting';
         $('feedDetail').textContent = state.websocket?.lastMessageAt ? `WebSocket · ${Math.max(0, Date.now() - state.websocket.lastMessageAt)}ms since update` : 'Waiting for market stream';
+        const tickAge = Number(volatility.lastTickAgeMs);
+        $('binanceStatus').textContent = state.binance?.status === 'CONNECTED' && Number.isFinite(tickAge)
+          ? `${volatility.ready ? 'LIVE' : volatility.sampleCount >= 2 ? 'STALE' : 'WARMING'} · ${tickAge}ms ago`
+          : state.binance?.status || 'Waiting';
+        $('binanceRange').textContent = volatility.bandUsd != null
+          ? `${money(volatility.rangeUsd, 2)} / ${money(volatility.bandUsd, 2)}`
+          : 'Waiting for ticks';
         $('drawdown').textContent = `Max drawdown ${money(account.maxDrawdown)}`;
         drawEquity(account.equityCurve);
         renderPairs(state.pairHistory);

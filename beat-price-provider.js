@@ -4,7 +4,6 @@ const CHAINLINK_URL = 'https://data.chain.link/streams/btc-usd/reports';
 const COINGECKO_URL = 'https://api.coingecko.com/api/v3/coins/bitcoin/market_chart/range';
 const MAX_REPORT_DISTANCE_MS = 15_000;
 const MAX_FALLBACK_DISTANCE_MS = 60_000;
-const MAX_RECENT_SPOT_FALLBACK_AGE_MS = 5 * 60_000;
 
 function timestampMs(value) {
   if (typeof value === 'number' || /^\d+(\.\d+)?$/.test(String(value || ''))) {
@@ -29,9 +28,8 @@ function nearestPrice(rows, targetMs, getTimestamp, getPrice, maxDistanceMs) {
 }
 
 class BeatPriceProvider {
-  constructor({ fetchImpl = globalThis.fetch, now = Date.now } = {}) {
+  constructor({ fetchImpl = globalThis.fetch } = {}) {
     this.fetch = fetchImpl;
-    this.now = now;
   }
 
   async getAtTimestamp(targetTimestamp) {
@@ -84,8 +82,7 @@ class BeatPriceProvider {
     }
 
     try {
-      const nowMs = this.now();
-      const nowSeconds = Math.floor(nowMs / 1000);
+      const nowSeconds = Math.floor(Date.now() / 1000);
       const from = targetSeconds;
       const to = Math.min(targetSeconds + 60, nowSeconds);
       if (to < from) {
@@ -127,46 +124,16 @@ class BeatPriceProvider {
           chainlinkError,
         };
       }
-    } catch (error) {
-      // Continue to the recent-spot fallback when history is unavailable.
+    } catch {
+      // A live Binance tick is preferred by the bot; history is the fallback.
     }
 
-    const nowMs = this.now();
-    const ageMs = nowMs - targetMs;
-    let historyError = 'No historical BTC price was found close enough to the market start.';
-    if (ageMs >= 0 && ageMs <= MAX_RECENT_SPOT_FALLBACK_AGE_MS) {
-      try {
-        const response = await this.fetch(
-          'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd',
-          {
-            headers: {
-              Accept: 'application/json',
-              'User-Agent': 'InventedPaperArbitrage/1.0',
-            },
-            signal: AbortSignal.timeout(3000),
-          },
-        );
-        if (!response.ok) throw new Error(`CoinGecko spot HTTP ${response.status}`);
-        const payload = await response.json();
-        const value = Number(payload?.bitcoin?.usd);
-        if (Number.isFinite(value) && value > 0) {
-          return {
-            value,
-            source: 'COINGECKO_SPOT_PROXY',
-            sourceTimestamp: nowMs,
-            exact: false,
-            offsetMs: ageMs,
-            note: 'Current spot estimate captured after market open; not the exact Chainlink start price.',
-            chainlinkError,
-          };
-        }
-        historyError = `${historyError} CoinGecko returned no valid current spot price.`;
-      } catch (error) {
-        historyError = `${historyError} Current spot fallback failed: ${error?.message || 'unknown error'}`;
-      }
-    }
-
-    return { value: null, source: null, error: historyError, chainlinkError };
+    return {
+      value: null,
+      source: null,
+      error: 'No historical BTC price was found close enough to the market start.',
+      chainlinkError,
+    };
   }
 }
 

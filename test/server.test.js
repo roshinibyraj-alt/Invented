@@ -57,7 +57,9 @@ test('dashboard explains synchronized markets, paired entries, and paper-only se
   assert.match(html, /market-start beat prices/i);
   assert.match(html, /&lt; \$0\.90 asks/);
   assert.match(html, /10 shares in each selected leg/i);
-  assert.match(html, /CoinGecko is only a proxy/i);
+  assert.match(html, /nearest Binance BTCUSDT trade within 2 seconds/i);
+  assert.match(html, /rolling 60-second Binance price range/i);
+  assert.match(html, /\$2 and capped at \$100/i);
   assert.match(html, /official market resolution/i);
   assert.match(html, /Paired trade history/i);
   assert.match(html, /PAPER ONLY/);

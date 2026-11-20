@@ -4,6 +4,7 @@ const config = require('./config');
 const WickBot = require('./wick-bot');
 const defaultMarketData = require('./wick-market-data');
 const BeatPriceProvider = require('./beat-price-provider');
+const BinanceBeatFeed = require('./binance-beat-feed');
 
 const { quoteFromBook, takerFeeFor, feeContext } = WickBot._test;
 const FIVE_MINUTES_MS = 5 * 60 * 1000;
@@ -11,7 +12,7 @@ const FIFTEEN_MINUTES_MS = 15 * 60 * 1000;
 const STRATEGY = Object.freeze({
   id: 'btc-synchronized-5m-15m-arbitrage-paper',
   name: 'BTC synchronized 5m/15m paired arbitrage',
-  version: 'btc-synchronized-5m-15m-paper-v1',
+  version: 'btc-synchronized-5m-15m-paper-v2',
   quantity: 10,
   arbitrageThreshold: 0.90,
   strongOpportunityGap: 0.05,
@@ -20,6 +21,9 @@ const STRATEGY = Object.freeze({
   pairMarketRefreshMs: 15_000,
   bookRefreshMs: 10_000,
   beatRetryMs: 30_000,
+  beatVolatilityWindowMs: 60_000,
+  minimumBeatToleranceUsd: 2,
+  maximumBeatToleranceUsd: 100,
 });
 const SIDES = ['UP', 'DOWN'];
 const TIMEFRAMES = ['5m', '15m'];
@@ -74,7 +78,15 @@ function getQuotePairSum(upQuote, downQuote) {
   return up + down;
 }
 
-function detectOpportunity({ market5m, market15m, beat5m, beat15m, quotes, threshold = 0.90 }) {
+function detectOpportunity({
+  market5m,
+  market15m,
+  beat5m,
+  beat15m,
+  quotes,
+  threshold = 0.90,
+  beatToleranceUsd = 0,
+}) {
   if (!synchronizedMarkets(market5m, market15m)) {
     return { exists: false, case: null, reason: 'The BTC markets do not share the same end time.' };
   }
@@ -82,6 +94,8 @@ function detectOpportunity({ market5m, market15m, beat5m, beat15m, quotes, thres
   if (values.some((value) => !Number.isFinite(value) || value <= 0)) {
     return { exists: false, case: null, reason: 'A trustworthy market-start beat price is not available.' };
   }
+  const beatGapUsd = Math.abs(values[0] - values[1]);
+  const toleranceUsd = Math.max(0, Number(beatToleranceUsd) || 0);
   const candidates = [];
   const addCandidate = (caseId, upMarket, downMarket) => {
     const upQuote = quotes?.[upMarket]?.UP;
@@ -101,13 +115,13 @@ function detectOpportunity({ market5m, market15m, beat5m, beat15m, quotes, thres
     });
   };
 
-  if (values[1] > values[0]) {
-    addCandidate('A', '5m', '15m');
-  } else if (values[0] > values[1]) {
-    addCandidate('B', '15m', '5m');
-  } else {
+  if (beatGapUsd <= toleranceUsd + EPSILON) {
     addCandidate('C', '5m', '15m');
     addCandidate('C', '15m', '5m');
+  } else if (values[1] > values[0]) {
+    addCandidate('A', '5m', '15m');
+  } else {
+    addCandidate('B', '15m', '5m');
   }
 
   const selected = candidates.find((candidate) => candidate.prices.sumPrice < threshold);
@@ -116,19 +130,23 @@ function detectOpportunity({ market5m, market15m, beat5m, beat15m, quotes, thres
       exists: true,
       ...selected,
       beatPrices: { beat5m: values[0], beat15m: values[1] },
+      beatGapUsd,
+      beatToleranceUsd: toleranceUsd,
       endTime: actualMarketEnd(market5m),
-      reason: `Paired best asks sum to $${selected.prices.sumPrice.toFixed(3)}, below the $${threshold.toFixed(2)} threshold.`,
+      reason: `Beat gap $${beatGapUsd.toFixed(2)} versus $${toleranceUsd.toFixed(2)} volatility band; paired asks sum to $${selected.prices.sumPrice.toFixed(3)}, below $${threshold.toFixed(2)}.`,
     };
   }
   const lowest = candidates.sort((a, b) => a.prices.sumPrice - b.prices.sumPrice)[0];
   return {
     exists: false,
-    case: lowest?.case || (values[0] === values[1] ? 'C' : values[1] > values[0] ? 'A' : 'B'),
+    case: lowest?.case || (beatGapUsd <= toleranceUsd + EPSILON ? 'C' : values[1] > values[0] ? 'A' : 'B'),
     direction: lowest?.direction || null,
     prices: lowest?.prices || null,
     beatPrices: { beat5m: values[0], beat15m: values[1] },
+    beatGapUsd,
+    beatToleranceUsd: toleranceUsd,
     reason: lowest
-      ? `Lowest eligible paired ask sum is $${lowest.prices.sumPrice.toFixed(3)}; it must be below $${threshold.toFixed(2)}.`
+      ? `Beat gap $${beatGapUsd.toFixed(2)} versus $${toleranceUsd.toFixed(2)} volatility band. Lowest eligible paired ask sum is $${lowest.prices.sumPrice.toFixed(3)}; it must be below $${threshold.toFixed(2)}.`
       : 'Fresh asks for the required paired outcomes are unavailable.',
   };
 }
@@ -137,6 +155,7 @@ class CrossTimeframeArbitrageBot extends WickBot {
   constructor({
     marketData = defaultMarketData,
     beatPriceProvider = null,
+    binanceFeed = null,
     now = Date.now,
     initialCapital = config.DEMO_CAPITAL,
     WebSocketImpl = globalThis.WebSocket,
@@ -157,6 +176,8 @@ class CrossTimeframeArbitrageBot extends WickBot {
     this.beatPriceProvider = beatPriceProvider || new BeatPriceProvider();
     this.now = now;
     this.WebSocketImpl = WebSocketImpl;
+    this.binanceFeed = binanceFeed || new BinanceBeatFeed({ WebSocketImpl, now });
+    this.currentVolatility = null;
     this.pairMarkets = { '5m': null, '15m': null };
     this.pairBooks = this.emptyBookPair();
     this.pairQuotes = this.emptyQuotePair();
@@ -206,6 +227,12 @@ class CrossTimeframeArbitrageBot extends WickBot {
   stop() {
     super.stop();
     this.closeMarketStream();
+    this.binanceFeed?.stop?.();
+  }
+
+  start() {
+    this.binanceFeed?.start?.();
+    super.start();
   }
 
   openStrategyWindow(start, now) {
@@ -449,15 +476,38 @@ class CrossTimeframeArbitrageBot extends WickBot {
     }
     const key = `${marketKey(market)}:${start}`;
     let cached = this.beatPriceCache.get(key);
+    const binanceBeat = this.binanceFeed?.getBeatPriceAt?.(start);
+    if (binanceBeat?.value > 0) {
+      if (!cached) {
+        cached = { at: now, value: binanceBeat, loading: null };
+        this.beatPriceCache.set(key, cached);
+      } else {
+        cached.at = now;
+        cached.value = binanceBeat;
+        cached.loading = null;
+      }
+      this.setCurrentBeatPrice(market, binanceBeat);
+      return binanceBeat;
+    }
     if (cached?.value?.value > 0) return cached.value;
     if (cached?.loading) return cached.loading;
     if (cached && now - cached.at < STRATEGY.beatRetryMs) return cached.value;
 
     const entry = { at: now, value: null, loading: null };
     entry.loading = Promise.resolve()
-      .then(() => this.beatPriceProvider.getAtTimestamp(start))
+      .then(async () => {
+        const liveBeat = this.binanceFeed?.getBeatPriceAt?.(start);
+        if (liveBeat?.value > 0) return liveBeat;
+        const fallback = await this.beatPriceProvider.getAtTimestamp(start);
+        return this.binanceFeed?.getBeatPriceAt?.(start) || fallback;
+      })
       .then((value) => {
-        entry.value = value || { value: null, source: null, error: 'No beat price was returned.' };
+        const liveBeat = this.binanceFeed?.getBeatPriceAt?.(start);
+        entry.value = liveBeat?.value > 0
+          ? liveBeat
+          : entry.value?.source === 'BINANCE_WS_ESTIMATE'
+            ? entry.value
+            : value || { value: null, source: null, error: 'No beat price was returned.' };
         entry.at = this.now();
         entry.loading = null;
         this.setCurrentBeatPrice(market, entry.value);
@@ -505,6 +555,23 @@ class CrossTimeframeArbitrageBot extends WickBot {
       return false;
     }
 
+    const volatility = this.binanceFeed?.getVolatilityBand?.(now) || {
+      ready: false,
+      bandUsd: null,
+      rangeUsd: null,
+      sampleCount: 0,
+      lastTickAgeMs: null,
+    };
+    this.currentVolatility = volatility;
+    if (!volatility.ready) {
+      this.setWaitingOpportunity(
+        'Waiting for fresh Binance BTC trade ticks to calculate the volatility band.',
+        'WAITING_FOR_BINANCE_DATA',
+        { volatility },
+      );
+      return false;
+    }
+
     const [beat5m, beat15m] = await Promise.all([
       this.getBeatPrice(market5m, now),
       this.getBeatPrice(market15m, now),
@@ -533,6 +600,7 @@ class CrossTimeframeArbitrageBot extends WickBot {
       beat15m,
       quotes,
       threshold: STRATEGY.arbitrageThreshold,
+      beatToleranceUsd: volatility.bandUsd,
     });
     this.opportunity = {
       ...opportunity,
@@ -542,6 +610,7 @@ class CrossTimeframeArbitrageBot extends WickBot {
         '5m': beat5m,
         '15m': beat15m,
       },
+      volatility,
     };
     this.signal = {
       action: opportunity.exists ? 'PAIR_QUALIFIED' : 'WAIT',
@@ -736,6 +805,9 @@ class CrossTimeframeArbitrageBot extends WickBot {
       market5mId: marketKey(this.pairMarkets['5m']),
       market15mId: marketKey(this.pairMarkets['15m']),
       beatPrices: { ...opportunity.beatPrices },
+      beatGapUsd: opportunity.beatGapUsd,
+      beatToleranceUsd: opportunity.beatToleranceUsd,
+      volatility: opportunity.volatility || this.currentVolatility,
       beatPriceSources: {
         '5m': opportunity.beatPriceSources?.['5m'] || opportunity.beatPrices?.['5m']?.source || null,
         '15m': opportunity.beatPriceSources?.['15m'] || opportunity.beatPrices?.['15m']?.source || null,
@@ -781,6 +853,8 @@ class CrossTimeframeArbitrageBot extends WickBot {
       case: opportunity.case,
       direction: opportunity.direction,
       windowEnd: opportunity.endTime,
+      beatGapUsd: opportunity.beatGapUsd,
+      beatToleranceUsd: opportunity.beatToleranceUsd,
       sharesPerLeg: STRATEGY.quantity,
       bestAskSum: opportunity.prices.sumPrice,
       grossCost,
@@ -932,6 +1006,8 @@ class CrossTimeframeArbitrageBot extends WickBot {
     const state = super.snapshot();
     const now = this.now();
     const pairStats = this.completedPairStats();
+    const volatility = this.binanceFeed?.getVolatilityBand?.(now) || this.currentVolatility;
+    if (volatility) this.currentVolatility = volatility;
     const beatPrices = this.opportunity?.beatPrices || this.currentBeatPrices;
     const market5m = this.marketSnapshot('5m', beatPrices?.['5m'] || null);
     const market15m = this.marketSnapshot('15m', beatPrices?.['15m'] || null);
@@ -954,6 +1030,10 @@ class CrossTimeframeArbitrageBot extends WickBot {
         arbitrageThreshold: STRATEGY.arbitrageThreshold,
         strongOpportunityGap: STRATEGY.strongOpportunityGap,
         limitSlippage: STRATEGY.limitSlippage,
+        beatPriceSource: 'Binance BTCUSDT aggregate-trade WebSocket estimate, with Chainlink/CoinGecko historical fallback.',
+        beatVolatilityWindowMs: STRATEGY.beatVolatilityWindowMs,
+        minimumBeatToleranceUsd: STRATEGY.minimumBeatToleranceUsd,
+        maximumBeatToleranceUsd: STRATEGY.maximumBeatToleranceUsd,
         onePairPerSharedEndTime: true,
         synchronizedEndTimeRequired: true,
         exit: 'Hold each leg until its own official Polymarket resolution.',
@@ -983,6 +1063,9 @@ class CrossTimeframeArbitrageBot extends WickBot {
         fees: opportunity.fees ?? null,
         totalCost: opportunity.totalCost ?? null,
         minimumNetProfit: opportunity.minimumNetProfit ?? null,
+        beatGapUsd: opportunity.beatGapUsd ?? null,
+        beatToleranceUsd: opportunity.beatToleranceUsd ?? volatility?.bandUsd ?? null,
+        volatility: opportunity.volatility || volatility || null,
         orderIds: opportunity.orderIds || [],
         depth: opportunity.depth || null,
       },
@@ -991,7 +1074,16 @@ class CrossTimeframeArbitrageBot extends WickBot {
         commonEnd: synchronized ? actualMarketEnd(this.pairMarkets['5m']) : null,
         fiveMinute: market5m,
         fifteenMinute: market15m,
+        volatility,
         note: 'Only 5-minute and 15-minute markets with the exact same end time are eligible; that is every third 5-minute window.',
+      },
+      binance: {
+        status: this.binanceFeed?.status || 'UNAVAILABLE',
+        error: this.binanceFeed?.error || null,
+        connectedAt: this.binanceFeed?.connectedAt || null,
+        reconnectCount: this.binanceFeed?.reconnectCount || 0,
+        volatility,
+        detail: 'BTCUSDT aggregate-trade WebSocket; beat price uses the nearest tick within 2 seconds of market start.',
       },
       websocket: {
         ...this.websocket,

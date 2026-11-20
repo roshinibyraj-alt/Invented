@@ -32,6 +32,25 @@ function makeBot({ asks = {}, beats = {} } = {}) {
   const bot = new CrossTimeframeArbitrageBot({
     now: () => nowRef.value,
     marketData: {},
+    binanceFeed: {
+      status: 'CONNECTED',
+      start() {},
+      stop() {},
+      getBeatPriceAt() { return null; },
+      getVolatilityBand() {
+        return {
+          ready: true,
+          bandUsd: 2,
+          rangeUsd: 1,
+          sampleCount: 20,
+          windowMs: 60_000,
+          lastTickAt: nowRef.value,
+          lastTickAgeMs: 0,
+          minBandUsd: 2,
+          maxBandUsd: 100,
+        };
+      },
+    },
     beatPriceProvider: {
       async getAtTimestamp(timestamp) {
         const value = beats[timestamp] || 62_000;
@@ -161,6 +180,57 @@ test('equal strikes choose the first qualifying cross-market pair', () => {
   assert.equal(opportunity.case, 'C');
   assert.deepEqual(opportunity.direction, { upMarket: '5m', downMarket: '15m' });
   assert.equal(opportunity.prices.sumPrice, 0.8);
+});
+
+test('beat gaps within the volatility band evaluate both pair directions', () => {
+  const { _test } = CrossTimeframeArbitrageBot;
+  const opportunity = _test.detectOpportunity({
+    market5m: makeMarket('5m', FIVE_START, '5m'),
+    market15m: makeMarket('15m', FIFTEEN_START, '15m'),
+    beat5m: { value: 62_000 },
+    beat15m: { value: 62_001.5 },
+    beatToleranceUsd: 2,
+    quotes: {
+      '5m': { UP: { bestAsk: 0.30 }, DOWN: { bestAsk: 0.60 } },
+      '15m': { UP: { bestAsk: 0.60 }, DOWN: { bestAsk: 0.30 } },
+    },
+  });
+  assert.equal(opportunity.case, 'C');
+  assert.equal(opportunity.beatGapUsd, 1.5);
+  assert.equal(opportunity.beatToleranceUsd, 2);
+  assert.deepEqual(opportunity.direction, { upMarket: '5m', downMarket: '15m' });
+});
+
+test('beat gaps beyond the volatility band select the higher-beat direction', () => {
+  const { _test } = CrossTimeframeArbitrageBot;
+  const opportunity = _test.detectOpportunity({
+    market5m: makeMarket('5m', FIVE_START, '5m'),
+    market15m: makeMarket('15m', FIFTEEN_START, '15m'),
+    beat5m: { value: 62_000 },
+    beat15m: { value: 62_003 },
+    beatToleranceUsd: 2,
+    quotes: {
+      '5m': { UP: { bestAsk: 0.30 }, DOWN: { bestAsk: 0.60 } },
+      '15m': { UP: { bestAsk: 0.60 }, DOWN: { bestAsk: 0.30 } },
+    },
+  });
+  assert.equal(opportunity.case, 'A');
+  assert.equal(opportunity.beatGapUsd, 3);
+});
+
+test('waits for fresh Binance ticks instead of evaluating with a stale volatility band', async () => {
+  const { bot } = makeBot();
+  bot.binanceFeed.getVolatilityBand = () => ({
+    ready: false,
+    bandUsd: 2,
+    rangeUsd: 0,
+    sampleCount: 0,
+    windowMs: 60_000,
+    lastTickAgeMs: 10_000,
+  });
+  assert.equal(await bot.processStrategyEntry(), false);
+  assert.equal(bot.opportunity.status, 'WAITING_FOR_BINANCE_DATA');
+  assert.equal(bot.positions.length, 0);
 });
 
 test('pair threshold is strict and rejects a sum equal to $0.90', () => {
