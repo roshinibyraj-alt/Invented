@@ -1,18 +1,19 @@
-# Invented BTC 5-minute two-sided limit-entry paper bot
+# Invented BTC synchronized 5m/15m arbitrage paper bot
 
-This service runs a paper-only strategy for Polymarket BTC 5-minute UP/DOWN markets. Entry and reversal decisions use Polymarket CLOB quotes only. Binance remains connected for telemetry but is not part of this strategy. It does not submit live orders.
+Invented now runs a paper-only paired strategy across Polymarket BTC 5-minute and 15-minute UP/DOWN markets. It does not submit live orders or use wallet credentials.
 
 ## Strategy
 
-- At each 5-minute window open, place two resting limit buys: 100 UP shares at $0.30 and 100 DOWN shares at $0.30.
-- A fresh best ask at or below $0.30 confirms a full 100-share fill at the best ask, with a maximum fill price of $0.30. The other side's resting order is cancelled immediately. Unfilled orders expire at window end.
-- If the filled side's midpoint reaches $0.20 or below, immediately submit one 200-share market buy on the opposite side. This trigger can happen once per window; visible ask liquidity controls the market fill, partial fills are allowed, unfilled remainder is cancelled, and taker fees are modeled.
-- There are no sells, take-profits, or stop-losses. All filled shares stay open until the official result for their original market settles them. Resting limit fills have no modeled taker fee or maker rebate.
+- Evaluate only when the 5-minute and 15-minute markets have the exact same official end time. This occurs on the last 5-minute interval inside each 15-minute window.
+- Compare each market's BTC beat price at its start. If the 15-minute beat is higher, buy UP in 5m and DOWN in 15m; if the 5-minute beat is higher, reverse those legs. If the beats match, check both pairings and choose the first one below threshold.
+- Enter one pair per shared end time when the paired best asks sum to less than $0.90. The default is 10 shares per leg.
+- Model stronger opportunities as market-style fills; nearer-threshold opportunities use per-leg limit caps with at most 2% slippage. Both legs must have full visible ask depth. The paper pair is recorded only if both legs fill and the combined cost plus modeled taker fees is below the $10 minimum combined payout.
+- Hold each leg until the official result for its own Polymarket market is available. Pair P&L combines both payouts and both entry costs.
 
-The price triggers are paper assumptions, not predictions or guaranteed real-world executions. The simulated 100-share limit fill is confirmed from the best ask crossing the limit; the separate 200-share reversal buy uses visible ask depth but does not model latency or book changes during a sweep.
+The historical beat-price provider tries Chainlink Data Streams first. If that endpoint is unavailable, it uses a clearly labeled CoinGecko historical proxy. That proxy is not the official Chainlink resolution feed; proxy-based results are estimates, not guaranteed arbitrage or proof of the exact official strike. The dashboard shows which source was used.
 
 ## Dashboard and runtime
 
-The compact dashboard shows both UP/DOWN books and limit-order states, the filled-side midpoint and reversal status, current positions, paper equity, realized P&L, cash, recent orders, and positions waiting for official resolution. The paper ledger is held in process memory and resets when Railway restarts.
+The dashboard shows synchronized market times and beat prices, all four CLOB books, the paired entry check, modeled fees, paper equity, paired win rate, and resolved pair history. The ledger is held in process memory and resets when Railway restarts.
 
-Run `npm test` for two-sided resting entries, first-fill cancellation, midpoint-triggered opposite buys, maker/taker accounting, expiry at window end, resolution-only settlement, completed-window statistics, CLOB-only entry behavior, market-stream updates, and dashboard checks.
+Run `npm test` for beat-price source labeling, timestamp alignment, all three arbitrage cases, depth and fee checks, duplicate-entry prevention, paired settlement accounting, API routes, and dashboard content.

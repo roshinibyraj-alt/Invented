@@ -7,13 +7,13 @@ async function main() {
     return;
   }
 
-  const Bot = require('./multi-bot');
+  const Bot = require('./cross-timeframe-arbitrage-bot');
   const startServer = require('./server');
   const bot = new Bot();
   bot.start();
   startServer(bot, process.env.PORT || 3000);
 
-  console.log('MODE: DEMO -- Polymarket BTC 5-minute combined order-flow reversal paper strategy; no live orders are sent.');
+  console.log('MODE: DEMO -- Synchronized BTC 5m/15m paired arbitrage; no live orders are sent.');
 }
 
 main().catch((e) => {

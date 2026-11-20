@@ -1,10 +1,10 @@
 'use strict';
 
-const OrderFlowBot = require('./order-flow-bot');
+const CrossTimeframeArbitrageBot = require('./cross-timeframe-arbitrage-bot');
 
 class MultiBot {
   constructor(options = {}) {
-    this.bot = options.bot || new OrderFlowBot(options);
+    this.bot = options.bot || new CrossTimeframeArbitrageBot(options);
   }
 
   start() {

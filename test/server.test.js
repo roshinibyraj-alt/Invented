@@ -44,37 +44,24 @@ test('health endpoint reports strategy errors as unhealthy', async t => {
   assert.deepEqual(await response.json(), { ok: false, mode: 'DEMO', status: 'ERROR', now: 123 });
 });
 
-test('dashboard explains the resting limits, midpoint reversal, and resolution-only exits', async t => {
+test('dashboard explains synchronized markets, paired entries, and paper-only settlement', async t => {
   const server = startServer({ snapshot: () => ({}) }, 0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
   const response = await fetch(`http://127.0.0.1:${server.address().port}/`);
   const html = await response.text();
   assert.equal(response.status, 200);
-  assert.ok(html.indexOf('Current Polymarket books') < html.indexOf('Paper equity'));
-  assert.match(html, /Invented · BTC 5-minute/);
-  assert.match(html, /Two-sided limit-entry bot/i);
-  assert.match(html, /100-share buys at \$0\.30 on both sides/i);
-  assert.match(html, /best ask reaches \$0\.30/i);
-  assert.match(html, /midpoint reaches \$0\.20 or lower/i);
-  assert.match(html, /market-buys 200 shares on the opposite side/i);
-  assert.match(html, /There are no sells, take-profits, or stop-losses/i);
-  assert.match(html, /official resolution/i);
-  assert.match(html, /PAPER_LIMIT_BUY/);
-  assert.match(html, /Completed-window win rate/i);
-  assert.doesNotMatch(html, /PAPER_MARKET_OPPOSITE_SIGNAL_EXIT|PAPER_LIMIT_TAKE_PROFIT|PAPER_STOP_LOSS/);
-  assert.doesNotMatch(html, /pressure signals are confirmed/i);
-  assert.match(html, /Waiting for official resolution/i);
-  assert.match(html, /current-window UP and DOWN boxes/i);
-  assert.match(html, /official resolution/i);
+  assert.match(html, /Invented · BTC 5m \+ 15m/);
+  assert.match(html, /Paired arbitrage paper bot/i);
+  assert.match(html, /same end time/i);
+  assert.match(html, /market-start beat prices/i);
+  assert.match(html, /&lt; \$0\.90 asks/);
+  assert.match(html, /10 shares in each selected leg/i);
+  assert.match(html, /CoinGecko is only a proxy/i);
+  assert.match(html, /official market resolution/i);
+  assert.match(html, /Paired trade history/i);
   assert.match(html, /PAPER ONLY/);
-  assert.match(html, /Polymarket CLOB price triggers/);
-  assert.match(html, /Recent orders/);
-  assert.doesNotMatch(html, /Global equity curve/i);
-  assert.doesNotMatch(html, /Position history/i);
-  assert.doesNotMatch(html, /Bot activity/i);
-  assert.doesNotMatch(html, /BTC &amp; ETH Signal Desk/);
-  assert.doesNotMatch(html, /two fresh Binance updates/i);
+  assert.doesNotMatch(html, /100-share buys at \$0\.30|midpoint reaches \$0\.20|200 shares on the opposite side/);
 });
 
 test('unknown dashboard paths still return 404', async t => {
