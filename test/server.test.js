@@ -44,7 +44,7 @@ test('health endpoint reports strategy errors as unhealthy', async t => {
   assert.deepEqual(await response.json(), { ok: false, mode: 'DEMO', status: 'ERROR', now: 123 });
 });
 
-test('dashboard explains independent-side entries, profitable exits, final TP/SL, and resolution rules', async t => {
+test('dashboard explains reversed entries, profitable exits, final TP/SL, and resolution rules', async t => {
   const server = startServer({ snapshot: () => ({}) }, 0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -57,14 +57,13 @@ test('dashboard explains independent-side entries, profitable exits, final TP/SL
   assert.match(html, /three one-second checks/i);
   assert.match(html, /last five seconds/i);
   assert.match(html, /100 shares per signal/i);
-  assert.match(html, /Each newly confirmed signal sweeps visible asks for 100 shares on that same side/i);
-  assert.match(html, /buy the signalled side regardless of the opposite position/i);
+  assert.match(html, /An UP signal sweeps visible DOWN asks for 100 shares/i);
+  assert.match(html, /buy the opposite of the signalled side/i);
   assert.match(html, /Final take-profit/i);
   assert.match(html, /state\.signal\?\.signalSide && state\.signal\?\.buySide/);
-  assert.match(html, /Every newly confirmed UP or DOWN signal market-buys that side/i);
+  assert.match(html, /Every newly confirmed UP signal market-buys DOWN/i);
   assert.match(html, /partial fills are allowed/i);
-  assert.match(html, /best ask is between \$0\.05 and \$0\.49/i);
-  assert.match(html, /No signal triggers above \$0\.49/i);
+  assert.match(html, /There is no entry-price floor or ceiling/i);
   assert.match(html, /include modeled taker fees/i);
   assert.match(html, /PAPER_MARKET_BUY/);
   assert.match(html, /modeled taker fee/i);
