@@ -111,7 +111,7 @@
         <div>
           <div class="eyebrow">Binance order flow × Polymarket UP/DOWN</div>
           <h2>Buy the side opposite each confirmed signal.</h2>
-          <p>Every newly confirmed UP signal market-buys DOWN; every DOWN signal buys UP. There is no entry-price floor or ceiling. If the side opposite the new buy already has shares, the bot also sells them when the estimated net result is profitable after fees. Both sides can remain open. The $0.99 final take-profit, $0.01 stop, and resolution handling stay active.</p>
+          <p>Every newly confirmed UP signal market-buys DOWN; every DOWN signal buys UP. There is no entry-price floor or ceiling. The bot never sells early: opposite signals only add the new reversed-side buy, and all filled shares stay open until official market resolution.</p>
         </div>
         <div class="hero-state">
           <span class="badge" id="window">Waiting for market</span>
@@ -129,13 +129,13 @@
               <div class="side-head"><strong>UP · current window</strong><span class="badge" id="upPressure">Pressure —</span></div>
               <div class="price-grid"><div class="price"><span>Best bid · size</span><strong id="upBid">—</strong></div><div class="price"><span>Best ask · size</span><strong id="upAsk">—</strong></div></div>
               <div class="position"><strong id="upPosition">0 shares · — avg</strong><span id="upPnl">No open position</span></div>
-              <small class="risk-rule" id="upRisk">Final TP $0.99 → $1/share · SL $0.01 → $0/share</small>
+              <small class="risk-rule" id="upRisk">No early sells · hold to official resolution</small>
             </div>
             <div class="side-card down">
               <div class="side-head"><strong>DOWN · current window</strong><span class="badge" id="downPressure">Pressure —</span></div>
               <div class="price-grid"><div class="price"><span>Best bid · size</span><strong id="downBid">—</strong></div><div class="price"><span>Best ask · size</span><strong id="downAsk">—</strong></div></div>
               <div class="position"><strong id="downPosition">0 shares · — avg</strong><span id="downPnl">No open position</span></div>
-              <small class="risk-rule" id="downRisk">Final TP $0.99 → $1/share · SL $0.01 → $0/share</small>
+              <small class="risk-rule" id="downRisk">No early sells · hold to official resolution</small>
             </div>
           </div>
         </article>
@@ -174,14 +174,13 @@
             <div class="rule"><b>Measure</b><span>Use the last five seconds of Binance aggressor notional and Polymarket CLOB trade flow, top-three-level depth imbalance, and microprice.</span></div>
             <div class="rule"><b>Confirm</b><span>Binance and Polymarket must point the same way; each must exceed 0.10 pressure and their combined score must reach ±0.30 for three one-second checks.</span></div>
             <div class="rule"><b>Reversed buys</b><span>An UP signal sweeps visible DOWN asks for 100 shares; a DOWN signal sweeps visible UP asks. There is no entry-price floor or ceiling. UP and DOWN may both stay open. Partial fills are allowed; remaining shares cancel immediately.</span></div>
-            <div class="rule"><b>Profitable other-side exit</b><span>During a signal trigger, buy the opposite of the signalled side. Also sell all shares on the other side of that buy only when the fresh-bid estimate is net-profitable after fees; otherwise hold them.</span></div>
-            <div class="rule"><b>Final take-profit</b><span>A fresh best bid at $0.99 closes that side at $1 per share. This is the final TP, separate from profitable signal-triggered exits.</span></div>
-            <div class="rule"><b>Stop and settle</b><span>A fresh best bid at $0.01 or lower closes that side at $0. At window end, any remaining shares wait for that market’s official result.</span></div>
-            <div class="rule"><b>Costs</b><span>Market buys and signal-triggered sells include modeled taker fees; the final limit TP may earn an estimated rebate.</span></div>
+            <div class="rule"><b>No early sells</b><span>There are no opposite-signal sells, take-profit orders, or stop-loss exits. An opposite signal only adds a new buy on the reversed side.</span></div>
+            <div class="rule"><b>Hold to resolution</b><span>Filled shares remain open for the rest of their window, then wait for the official result of that exact market. Resolution proceeds update the paper balance.</span></div>
+            <div class="rule"><b>Costs</b><span>Only market-entry taker fees are modeled; the bot creates no sell orders or sell fees.</span></div>
           </div>
         </article>
         <article class="panel">
-          <div class="panel-head"><div><div class="panel-title">Recent orders</div><div class="panel-sub">Market entries, profitable opposite-signal exits, TP/SL exits, and estimated maker rebates</div></div><span class="badge" id="orderCount">0 orders</span></div>
+          <div class="panel-head"><div><div class="panel-title">Recent orders</div><div class="panel-sub">Reversed-side paper market buys only · no sells before resolution</div></div><span class="badge" id="orderCount">0 orders</span></div>
           <div class="table-wrap"><table><thead><tr><th>Time</th><th>Action</th><th>Side</th><th>Filled / requested</th><th>Average / best ask</th><th>Fees / rebate</th><th>Status</th></tr></thead><tbody id="orders"><tr><td class="empty" colspan="7">Waiting for a confirmed signal</td></tr></tbody></table></div>
         </article>
       </section>
@@ -226,7 +225,7 @@
         set("window", state.window?.slug || "BTC 5-minute window");
         set("remaining", Number.isFinite(Number(state.window?.secondsRemaining)) ? `${Math.max(0,Math.floor(Number(state.window.secondsRemaining)))} sec` : "—");
         const signalLabel = state.signal?.signalSide && state.signal?.buySide
-          ? `${state.signal.signalSide} SIGNAL → BUY ${state.signal.buySide}${Number(state.signal.oppositeSharesSold) > 0 ? ` · SOLD ${fmtShares(state.signal.oppositeSharesSold)} ${state.signal.buySide === "UP" ? "DOWN" : "UP"}` : ""}`
+          ? `${state.signal.signalSide} SIGNAL → BUY ${state.signal.buySide} · HOLD TO RESOLUTION`
           : state.signal?.action && state.signal.action !== "WAIT"
             ? `${state.signal.action} · ${state.signal.side || pressure.confirmedSide || ""}`
             : pressure.confirmedSide ? `CONFIRMED · ${pressure.confirmedSide}` : pressure.status || "WAITING";
@@ -268,7 +267,7 @@
           if (position) $(`${key}Pnl`).className = pnlClass(position.unrealizedPnl);
         }
          const orders = Array.isArray(state.orders) ? state.orders.filter(x =>
-          ["PAPER_MARKET_BUY","PAPER_LIMIT_TAKE_PROFIT","PAPER_STOP_LOSS","PAPER_MARKET_OPPOSITE_SIGNAL_EXIT"].includes(x.orderType)) : [];
+          x.orderType === "PAPER_MARKET_BUY") : [];
         set("orderCount",`${orders.length} orders`);
         $("orders").innerHTML = orders.length ? orders.slice(0,25).map(order => `<tr>
           <td>${time(order.filledAt ?? order.createdAt)}</td><td><span class="tag">${esc(order.exitReason || order.action)}</span></td><td>${order.signalSide ? `${esc(order.signalSide)} signal → ${order.action === "BUY" ? "buy" : "sell"} ${esc(order.side)}` : esc(order.side)}</td>

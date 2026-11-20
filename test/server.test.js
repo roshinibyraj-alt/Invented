@@ -44,7 +44,7 @@ test('health endpoint reports strategy errors as unhealthy', async t => {
   assert.deepEqual(await response.json(), { ok: false, mode: 'DEMO', status: 'ERROR', now: 123 });
 });
 
-test('dashboard explains reversed entries, profitable exits, final TP/SL, and resolution rules', async t => {
+test('dashboard explains reversed entries, no early sells, and resolution-only exits', async t => {
   const server = startServer({ snapshot: () => ({}) }, 0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -58,19 +58,19 @@ test('dashboard explains reversed entries, profitable exits, final TP/SL, and re
   assert.match(html, /last five seconds/i);
   assert.match(html, /100 shares per signal/i);
   assert.match(html, /An UP signal sweeps visible DOWN asks for 100 shares/i);
-  assert.match(html, /buy the opposite of the signalled side/i);
-  assert.match(html, /Final take-profit/i);
+  assert.match(html, /No early sells/i);
+  assert.match(html, /There are no opposite-signal sells, take-profit orders, or stop-loss exits/i);
+  assert.match(html, /official resolution/i);
   assert.match(html, /state\.signal\?\.signalSide && state\.signal\?\.buySide/);
   assert.match(html, /Every newly confirmed UP signal market-buys DOWN/i);
   assert.match(html, /partial fills are allowed/i);
   assert.match(html, /There is no entry-price floor or ceiling/i);
-  assert.match(html, /include modeled taker fees/i);
+  assert.match(html, /Only market-entry taker fees are modeled/i);
   assert.match(html, /PAPER_MARKET_BUY/);
-  assert.match(html, /modeled taker fee/i);
-  assert.match(html, /PAPER_MARKET_OPPOSITE_SIGNAL_EXIT/);
   assert.match(html, /Completed-window win rate/i);
-  assert.match(html, /0\.99/);
-  assert.match(html, /0\.01/);
+  assert.doesNotMatch(html, /PAPER_MARKET_OPPOSITE_SIGNAL_EXIT/);
+  assert.doesNotMatch(html, /PAPER_LIMIT_TAKE_PROFIT|PAPER_STOP_LOSS/);
+  assert.doesNotMatch(html, /0\.99|0\.01/);
   assert.match(html, /Waiting for official resolution/i);
   assert.match(html, /current-window UP and DOWN boxes/i);
   assert.match(html, /official resolution/i);

@@ -3,7 +3,7 @@
 const MispricingBot = require('./mispricing-bot');
 const WickBot = require('./wick-bot');
 const config = require('./config');
-const { feeContext, makerRebateFor, takerFeeFor } = WickBot._test;
+const { feeContext, takerFeeFor } = WickBot._test;
 
 const EPSILON = 1e-8;
 const SIDES = ['UP', 'DOWN'];
@@ -321,7 +321,6 @@ class OrderFlowBot extends MispricingBot {
     }
     if (this.strategyWindowStart !== windowStart) this.openStrategyWindow(windowStart, now);
 
-    const thresholdExits = this.processThresholdExits(now);
     const nextPressure = this.buildPressureSnapshot(now);
     this.pressure = nextPressure;
     const evaluationDue = this.lastEvaluationAt == null
@@ -382,78 +381,18 @@ class OrderFlowBot extends MispricingBot {
         combinedScore: nextPressure.combinedScore,
       };
     }
-    return changed || thresholdExits > 0;
+    return changed;
   }
 
   handleConfirmedSignal(signalSide, now) {
     const buySide = signalSide === 'UP' ? 'DOWN' : 'UP';
-    const oppositeSide = signalSide;
-
     const windowStart = Number(this.getActiveWindowStart());
-    const positionsToExit = this.positions.filter((position) =>
-      position.status === 'OPEN'
-      && Number(position.windowStart) === windowStart
-      && position.side === oppositeSide
-      && Number(position.shares) > EPSILON);
-    const sharesToExit = positionsToExit.reduce((total, position) =>
-      total + Number(position.shares), 0);
-    let oppositeExitStatus = 'NO_OPPOSITE_POSITION';
-    let oppositeExitReason = '';
-    let oppositeExitPnl = null;
-    let oppositeExitBid = null;
-    let oppositeSharesSold = 0;
-
-    if (positionsToExit.length) {
-      const quote = this.flowQuote(oppositeSide, now);
-      const bestBid = Number(quote?.bestBid);
-      if (!quote || !Number.isFinite(bestBid) || !(bestBid > 0 && bestBid < 1)) {
-        oppositeExitStatus = 'HELD_NO_FRESH_BID';
-        oppositeExitReason = `The ${oppositeSide} position was held because no fresh best bid was available for its profit check.`;
-        this.log('PAPER_FLOW_OPPOSITE_SIGNAL_WAITING_FOR_BID', {
-          signalSide,
-          oppositeSide,
-          requestedShares: sharesToExit,
-        });
-      } else {
-        oppositeExitBid = bestBid;
-        const sellFeeEstimate = positionsToExit.reduce((total, position) =>
-          total + takerFeeFor(this.market || {}, bestBid, Number(position.shares) || 0), 0);
-        oppositeExitPnl = positionsToExit.reduce((total, position) => {
-          const shares = Number(position.shares) || 0;
-          const grossProceeds = shares * bestBid;
-          const sellFee = takerFeeFor(this.market || {}, bestBid, shares);
-          const cost = Number(position.totalCost) || 0;
-          const entryFees = Number(position.fees) || 0;
-          const entryRebate = Number(position.estimatedMakerRebate) || 0;
-          return total + grossProceeds - sellFee - cost - entryFees + entryRebate;
-        }, 0);
-        if (oppositeExitPnl > EPSILON) {
-          for (const position of positionsToExit) {
-            if (this.closePositionOnOppositeSignal(position, now, bestBid, signalSide)) {
-              oppositeSharesSold += Number(position.initialShares || position.shares) || 0;
-            }
-          }
-          if (oppositeSharesSold > EPSILON) {
-            oppositeExitStatus = 'SOLD_PROFITABLE_OPPOSITE';
-            oppositeExitReason = `Sold ${oppositeSharesSold} ${oppositeSide} shares at $${bestBid.toFixed(3)} for estimated net profit of $${oppositeExitPnl.toFixed(2)}.`;
-          } else {
-            oppositeExitStatus = 'HELD_SELL_NOT_COMPLETED';
-            oppositeExitReason = `The ${oppositeSide} position stayed open because its sell did not complete.`;
-          }
-        } else {
-          oppositeExitStatus = 'HELD_NOT_PROFITABLE';
-          oppositeExitReason = `Held ${sharesToExit} ${oppositeSide} shares; selling at $${bestBid.toFixed(3)} would not produce a net profit after estimated fees (projected $${oppositeExitPnl.toFixed(2)}).`;
-          this.log('PAPER_FLOW_OPPOSITE_SIGNAL_BLOCKED_UNPROFITABLE', {
-          signalSide,
-          currentSide: oppositeSide,
-          shares: sharesToExit,
-          bestBid,
-          estimatedSellFee: sellFeeEstimate,
-            projectedNetPnl: oppositeExitPnl,
-          });
-        }
-      }
-    }
+    const heldOtherSideShares = this.positions
+      .filter((position) => position.status === 'OPEN'
+        && Number(position.windowStart) === windowStart
+        && position.side === signalSide
+        && Number(position.shares) > EPSILON)
+      .reduce((total, position) => total + Number(position.shares), 0);
 
     const submitted = this.submitMarketBuy(
       buySide,
@@ -479,7 +418,7 @@ class OrderFlowBot extends MispricingBot {
       signalSide,
       buySide,
       action: buySide === 'UP' ? 'BUY_UP' : 'BUY_DOWN',
-      reason: [entryReason, oppositeExitReason].filter(Boolean).join(' '),
+      reason: `${entryReason} Existing shares on either side are held until official resolution; no early sells.`,
       combinedScore: this.pressure.combinedScore,
       binanceScore: this.pressure.binance?.score,
       polymarketScore: this.pressure.polymarket?.score,
@@ -491,13 +430,11 @@ class OrderFlowBot extends MispricingBot {
       estimatedMakerRebate: Number(submitted.estimatedMakerRebate) || 0,
       orderId: submitted.orderId || null,
       orderStatus: submitted.status || 'NOT_PLACED',
-      oppositeExitStatus,
-      oppositeSharesSold,
-      oppositeExitPnl,
-      currentPositionNetPnl: oppositeExitPnl,
-      oppositeExitBid,
+      oppositeExitStatus: 'DISABLED_HOLD_TO_RESOLUTION',
+      oppositeSharesSold: 0,
+      heldOtherSideShares,
     };
-    return filledShares > 0 || oppositeSharesSold > EPSILON;
+    return filledShares > 0;
   }
 
   submitMarketBuy(
@@ -624,8 +561,6 @@ class OrderFlowBot extends MispricingBot {
       position.filledAt = now;
       position.lastAddedAt = now;
       position.entryFills.push(...fills);
-      position.takeProfitPrice = config.FLOW_TAKE_PROFIT_TRIGGER;
-      position.stopLossPrice = config.FLOW_STOP_LOSS_TRIGGER;
       position.entrySignals.push({
         at: now,
         signalSide: signalSide || null,
@@ -642,7 +577,6 @@ class OrderFlowBot extends MispricingBot {
       this.cash -= grossCost + fees;
       order.positionId = position.id;
       position.lastEntryOrderId = order.id;
-      this.createTakeProfitOrder(position, now);
       this.updateQuoteFromBook(side, book, now);
     }
 
@@ -714,38 +648,6 @@ class OrderFlowBot extends MispricingBot {
     };
   }
 
-  processThresholdExits(now = this.now()) {
-    const windowStart = this.getActiveWindowStart();
-    let exitedPositions = 0;
-    for (const position of this.positions) {
-      if (position.status !== 'OPEN'
-        || Number(position.windowStart) !== Number(windowStart)
-        || !(Number(position.shares) > EPSILON)) continue;
-      const quote = this.getFreshQuote(position.side, now);
-      if (!quote || quote.bestBid == null) continue;
-      const bestBid = Number(quote.bestBid);
-      if (!Number.isFinite(bestBid)) continue;
-      if (bestBid + EPSILON >= config.FLOW_TAKE_PROFIT_TRIGGER) {
-        this.closePositionAtThreshold(position, now, {
-          reason: 'TAKE_PROFIT',
-          triggerPrice: config.FLOW_TAKE_PROFIT_TRIGGER,
-          triggerBid: bestBid,
-          payoutPerShare: config.FLOW_TAKE_PROFIT_PAYOUT,
-        });
-        exitedPositions += 1;
-      } else if (bestBid <= config.FLOW_STOP_LOSS_TRIGGER + EPSILON) {
-        this.closePositionAtThreshold(position, now, {
-          reason: 'STOP_LOSS',
-          triggerPrice: config.FLOW_STOP_LOSS_TRIGGER,
-          triggerBid: bestBid,
-          payoutPerShare: config.FLOW_STOP_LOSS_PAYOUT,
-        });
-        exitedPositions += 1;
-      }
-    }
-    return exitedPositions;
-  }
-
   totalInventoryForSide(side) {
     return this.positions.reduce((total, position) => {
       if (position.side !== side || !['OPEN', 'PENDING_RESOLUTION'].includes(position.status)) return total;
@@ -799,275 +701,11 @@ class OrderFlowBot extends MispricingBot {
       exitProceeds: 0,
       proceeds: 0,
       realizedPnl: null,
-      takeProfitPrice: config.FLOW_TAKE_PROFIT_TRIGGER,
-      stopLossPrice: config.FLOW_STOP_LOSS_TRIGGER,
-      takeProfitOrderSequence: 0,
       feeContext: feeContext(this.market || {}),
       paperOnly: true,
     };
     this.positions.unshift(position);
     return position;
-  }
-
-  createTakeProfitOrder(position, now) {
-    const previous = position.takeProfitOrder;
-    const sequence = Number(position.takeProfitOrderSequence || 0) + 1;
-    const order = {
-      id: `${position.id}-take-profit-${sequence}`,
-      strategyId: this.strategyId,
-      positionId: position.id,
-      action: 'SELL',
-      side: position.side,
-      orderType: 'PAPER_LIMIT_TAKE_PROFIT',
-      status: 'RESTING',
-      requestedShares: position.shares,
-      filledShares: 0,
-      remainingShares: position.shares,
-      limitPrice: config.FLOW_TAKE_PROFIT_TRIGGER,
-      createdAt: now,
-      windowStart: position.windowStart,
-      paperOnly: true,
-      fillRule: 'FULL_POSITION_ON_FRESH_BEST_BID_AT_OR_ABOVE_0_99_COUNTS_AS_1_DOLLAR_PER_SHARE',
-      sellFee: 0,
-    };
-    if (previous?.status === 'RESTING') {
-      previous.status = 'CANCELLED_REPLACED';
-      previous.cancelledAt = now;
-      previous.replacedByOrderId = order.id;
-      previous.remainingShares = 0;
-    }
-    position.takeProfitOrderSequence = sequence;
-    position.takeProfitOrder = order;
-    position.takeProfitOrderId = order.id;
-    this.orders.unshift(order);
-    this.windowOrders.unshift(order);
-    return order;
-  }
-
-  closePositionOnOppositeSignal(position, now, bestBid, signalSide) {
-    const shares = Number(position.shares);
-    const exitPrice = Number(bestBid);
-    if (!(shares > EPSILON) || position.status !== 'OPEN'
-      || !(exitPrice > 0 && exitPrice < 1)) return false;
-
-    const gross = shares * exitPrice;
-    const sellFee = takerFeeFor(this.market || {}, exitPrice, shares);
-    const entryCost = Number(position.totalCost) || 0;
-    const entryFees = Number(position.fees) || 0;
-    const entryRebate = Number(position.estimatedMakerRebate) || 0;
-    const exitOrder = {
-      id: `${position.id}-opposite-signal-exit-${now}`,
-      strategyId: this.strategyId,
-      positionId: position.id,
-      action: 'SELL',
-      side: position.side,
-      orderType: 'PAPER_MARKET_OPPOSITE_SIGNAL_EXIT',
-      status: 'FILLED',
-      requestedShares: shares,
-      filledShares: shares,
-      remainingShares: 0,
-      averagePrice: exitPrice,
-      grossProceeds: gross,
-      fees: sellFee,
-      sellFee,
-      estimatedMakerRebate: 0,
-      exitReason: 'OPPOSITE_SIGNAL_PROFIT_EXIT',
-      triggerBestBid: exitPrice,
-      signalSide,
-      createdAt: now,
-      filledAt: now,
-      windowStart: position.windowStart,
-      paperOnly: true,
-      fills: [{ price: exitPrice, shares }],
-    };
-
-    if (position.takeProfitOrder?.status === 'RESTING') {
-      position.takeProfitOrder.status = 'CANCELLED_OPPOSITE_SIGNAL_EXIT';
-      position.takeProfitOrder.cancelledAt = now;
-      position.takeProfitOrder.remainingShares = 0;
-    }
-    this.orders.unshift(exitOrder);
-    this.windowOrders.unshift(exitOrder);
-
-    position.exitReason = 'OPPOSITE_SIGNAL_PROFIT_EXIT';
-    position.exitType = 'PAPER_MARKET_OPPOSITE_SIGNAL_EXIT';
-    position.exitPrice = exitPrice;
-    position.exitBid = exitPrice;
-    position.exitProceeds = gross;
-    position.takeProfitProceeds = 0;
-    position.exitFees = sellFee;
-    position.realizedCostBasis = entryCost;
-    position.realizedEntryFees = entryFees;
-    position.proceeds = gross - sellFee + entryRebate;
-    position.realizedPnl = position.proceeds - entryCost - entryFees;
-    position.exitFills = [{ price: exitPrice, shares, at: now }];
-    position.status = 'SETTLED_EXIT';
-    position.settlementStatus = 'OPPOSITE_SIGNAL_PROFIT_EXIT_FILLED';
-    position.closedAt = now;
-    position.settledAt = now;
-    position.settlementBasis = 'PAPER_OPPOSITE_SIGNAL_EXIT';
-    position.shares = 0;
-    position.totalCost = 0;
-    position.fees = 0;
-    position.markPrice = exitPrice;
-    position.markValue = 0;
-    position.markStatus = 'CLOSED';
-    position.unrealizedPnl = 0;
-    position.outcome = position.realizedPnl > EPSILON ? 'WIN'
-      : position.realizedPnl < -EPSILON ? 'LOSS' : 'BREAK_EVEN';
-    this.cash += gross - sellFee;
-    this.totalOrderAttempts += 1;
-    this.recordStrategyOutcome(position, position.outcome, now, 'OPPOSITE_SIGNAL_PROFIT_EXIT');
-
-    this.log('PAPER_FLOW_OPPOSITE_SIGNAL_PROFIT_EXIT_FILLED', {
-      orderId: exitOrder.id,
-      positionId: position.id,
-      oldSide: position.side,
-      signalSide,
-      shares,
-      exitPrice,
-      grossProceeds: gross,
-      sellFee,
-      estimatedEntryMakerRebate: entryRebate,
-      realizedPnl: position.realizedPnl,
-    });
-    this.events.unshift({
-      ts: now,
-      at: now,
-      event: 'PAPER_OPPOSITE_SIGNAL_PROFIT_EXIT',
-      type: 'PAPER_OPPOSITE_SIGNAL_PROFIT_EXIT',
-      message: `${shares} ${position.side} shares sold at the $${exitPrice.toFixed(3)} best bid after a profitable ${signalSide} signal; modeled taker fee $${sellFee.toFixed(3)}. The ${signalSide} signal also places its own independent buy.`,
-      details: {
-        orderId: exitOrder.id,
-        positionId: position.id,
-        oldSide: position.side,
-        signalSide,
-        shares,
-        exitPrice,
-        grossProceeds: gross,
-        sellFee,
-        realizedPnl: position.realizedPnl,
-      },
-    });
-    if (this.events.length > 200) this.events.length = 200;
-    return true;
-  }
-
-  closePositionAtThreshold(position, now, { reason, triggerPrice, triggerBid, payoutPerShare }) {
-    const shares = Number(position.shares);
-    if (!(shares > EPSILON) || position.status !== 'OPEN') return false;
-    const gross = shares * payoutPerShare;
-    const exitRebate = reason === 'TAKE_PROFIT'
-      ? makerRebateFor(this.market || {}, triggerPrice, shares).estimate
-      : 0;
-    const rebate = Number(position.estimatedMakerRebate || 0) + exitRebate;
-    const exitOrder = reason === 'TAKE_PROFIT'
-      ? position.takeProfitOrder
-      : {
-        id: `${position.id}-stop-loss`,
-        strategyId: this.strategyId,
-        positionId: position.id,
-        action: 'SELL',
-        side: position.side,
-        orderType: 'PAPER_STOP_LOSS',
-        createdAt: now,
-        windowStart: position.windowStart,
-        paperOnly: true,
-      };
-    if (!exitOrder) return false;
-
-    if (reason === 'STOP_LOSS' && position.takeProfitOrder?.status === 'RESTING') {
-      position.takeProfitOrder.status = 'CANCELLED_STOP_LOSS';
-      position.takeProfitOrder.cancelledAt = now;
-      position.takeProfitOrder.remainingShares = 0;
-    }
-    exitOrder.status = 'FILLED';
-    exitOrder.requestedShares = shares;
-    exitOrder.filledShares = shares;
-    exitOrder.remainingShares = 0;
-    exitOrder.averagePrice = payoutPerShare;
-    exitOrder.grossProceeds = gross;
-    exitOrder.fees = 0;
-    exitOrder.sellFee = 0;
-    exitOrder.estimatedMakerRebate = exitRebate;
-    exitOrder.triggerPrice = triggerPrice;
-    exitOrder.triggerBestBid = triggerBid;
-    exitOrder.exitReason = reason;
-    exitOrder.filledAt = now;
-    exitOrder.fills = [{ price: payoutPerShare, shares }];
-    if (reason === 'STOP_LOSS') {
-      this.orders.unshift(exitOrder);
-      this.windowOrders.unshift(exitOrder);
-    }
-
-    position.exitReason = reason;
-    position.exitType = reason === 'TAKE_PROFIT' ? 'PAPER_LIMIT_TAKE_PROFIT' : 'PAPER_STOP_LOSS';
-    position.exitPrice = payoutPerShare;
-    position.exitBid = triggerBid;
-    position.exitProceeds = gross;
-    position.takeProfitProceeds = reason === 'TAKE_PROFIT' ? gross : 0;
-    position.exitFees = 0;
-    position.estimatedMakerRebate = rebate;
-    position.estimatedExitMakerRebate = exitRebate;
-    position.proceeds = gross + rebate;
-    position.realizedPnl = position.proceeds
-      - Number(position.totalCost || 0)
-      - Number(position.fees || 0);
-    position.exitFills = [{ price: payoutPerShare, shares, at: now }];
-    position.status = 'SETTLED_EXIT';
-    position.settlementStatus = reason === 'TAKE_PROFIT' ? 'TAKE_PROFIT_FILLED' : 'STOP_LOSS_FILLED';
-    position.closedAt = now;
-    position.settledAt = now;
-    position.settlementBasis = reason === 'TAKE_PROFIT' ? 'PAPER_TAKE_PROFIT' : 'PAPER_STOP_LOSS';
-    position.shares = 0;
-    position.totalCost = 0;
-    position.fees = 0;
-    position.markPrice = triggerBid;
-    position.markValue = 0;
-    position.markStatus = 'CLOSED';
-    position.unrealizedPnl = 0;
-    position.outcome = position.realizedPnl > 0 ? 'WIN'
-      : position.realizedPnl < 0 ? 'LOSS' : 'BREAK_EVEN';
-    this.cash += gross + exitRebate;
-    this.totalOrderAttempts += 1;
-    this.recordStrategyOutcome(position, position.outcome, now, reason);
-    this.log(`PAPER_FLOW_${reason}_FILLED`, {
-      positionId: position.id,
-      orderId: exitOrder.id,
-      side: position.side,
-      shares,
-      triggerPrice,
-      triggerBid,
-      payoutPerShare,
-      grossProceeds: gross,
-      fees: 0,
-      estimatedMakerRebate: rebate,
-      estimatedExitMakerRebate: exitRebate,
-      realizedPnl: position.realizedPnl,
-    });
-    this.events.unshift({
-      ts: now,
-      at: now,
-      event: `PAPER_${reason}_FILLED`,
-      type: `PAPER_${reason}_FILLED`,
-      message: reason === 'TAKE_PROFIT'
-        ? `UP/DOWN $${triggerPrice.toFixed(2)} take-profit touched; ${shares} ${position.side} shares closed at $1.00 per share.`
-        : `UP/DOWN $${triggerPrice.toFixed(2)} stop-loss touched; ${shares} ${position.side} shares closed at $0.00 per share.`,
-      details: {
-        positionId: position.id,
-        orderId: exitOrder.id,
-        side: position.side,
-        shares,
-        triggerPrice,
-        triggerBid,
-        payoutPerShare,
-        realizedPnl: position.realizedPnl,
-        estimatedMakerRebate: rebate,
-        estimatedExitMakerRebate: exitRebate,
-      },
-    });
-    if (this.events.length > 200) this.events.length = 200;
-    return true;
   }
 
   completedWindowStats(now = this.now()) {
@@ -1221,7 +859,7 @@ class OrderFlowBot extends MispricingBot {
       strategy: {
         id: this.strategyId,
         name: this.strategyName,
-        version: 'btc-5m-independent-side-profit-exit-v11-reversed-no-entry-price-filter',
+        version: 'btc-5m-reversed-pressure-resolution-only-v12',
         execution: 'PAPER ONLY',
         symbol: 'BTCUSDT',
         timeframe: '5m',
@@ -1240,9 +878,9 @@ class OrderFlowBot extends MispricingBot {
         maxActiveSidesPerWindow: 2,
         activeSide: currentOpen.length > 1 ? 'BOTH' : currentOpen[0]?.side || null,
         activeSides: SIDES.filter((side) => positionsBySide[side]),
-        orderType: `${ORDER_TYPE} + PAPER_MARKET_OPPOSITE_SIGNAL_EXIT`,
+        orderType: ORDER_TYPE,
         usesTakerOrders: true,
-        usesMakerOrders: true,
+        usesMakerOrders: false,
         accumulatesInventory: true,
         entries: {
           orderType: ORDER_TYPE,
@@ -1257,33 +895,25 @@ class OrderFlowBot extends MispricingBot {
           oneEntryPerConfirmedSignalEpisode: true,
           sameSideSignalAction: 'ADD_100_SHARES_TO_OPPOSITE_OF_PRESSURE_SIGNAL_ON_EACH_NEWLY_CONFIRMED_EPISODE',
           maxActiveSidesPerWindow: 2,
-          oppositeSignalAction: 'BUY_OPPOSITE_OF_PRESSURE_SIGNAL; ALSO_SELL_ALL_SHARES_ON_THE_OTHER_SIDE_IF_NET_PROFITABLE_AFTER_TAKER_FEE',
-          oppositeSignalSellOrderType: 'PAPER_MARKET_OPPOSITE_SIGNAL_EXIT',
-          oppositeSignalProfitabilityRule: 'A pressure signal always triggers a buy on the opposite outcome side independently. If the other outcome side has current-window shares, sell all of them only when liquidation at its fresh best bid is net-profitable after modeled sell fees and entry costs.',
+          oppositeSignalAction: 'BUY_OPPOSITE_OF_PRESSURE_SIGNAL; KEEP_ALL_EXISTING_SHARES_UNTIL_OFFICIAL_RESOLUTION',
+          oppositeSignalSellOrderType: null,
+          oppositeSignalProfitabilityRule: 'Opposite signals never sell. Existing shares remain open until official resolution of their original market.',
           cancelUnfilledOnNextSignal: false,
           cancelUnfilledAtWindowEnd: false,
           paperFillRule: 'Immediately sweep all valid visible asks for up to 100 shares with no entry price floor or ceiling; partial fills are allowed and any remainder is cancelled. Model taker fees on each fill level.',
           inventoryLimit: 'Available paper cash only; order quantities are reduced to affordable visible liquidity.',
         },
         exit: {
-          orderType: 'PAPER_MARKET_OPPOSITE_SIGNAL_EXIT + PAPER_LIMIT_TAKE_PROFIT_AND_STOP_LOSS',
-          trigger: `A fresh ${config.FLOW_TAKE_PROFIT_TRIGGER.toFixed(2)} best bid is the final take-profit and closes that side at $${config.FLOW_TAKE_PROFIT_PAYOUT.toFixed(2)} per share; a fresh ${config.FLOW_STOP_LOSS_TRIGGER.toFixed(2)}-or-lower best bid closes it at $${config.FLOW_STOP_LOSS_PAYOUT.toFixed(2)} per share.`,
-          fills: 'Each confirmed pressure signal buys the opposite outcome side. On that trigger, the side opposite the new buy is also sold if its accumulated current-window shares can be exited for net profit after modeled fees. The buy is not blocked by a missing or unprofitable opposite-side sale. Final TP and stop-loss touches close only the affected side.',
-          fees: 'Market entries and opposite-signal profit exits use modeled taker fees. Limit take-profits may earn an estimated maker rebate; threshold stop-loss exits have no modeled sell fee.',
-          takeProfit: {
-            triggerPrice: config.FLOW_TAKE_PROFIT_TRIGGER,
-            payoutPerShare: config.FLOW_TAKE_PROFIT_PAYOUT,
-            orderType: 'PAPER_LIMIT_TAKE_PROFIT',
-          },
-          stopLoss: {
-            triggerPrice: config.FLOW_STOP_LOSS_TRIGGER,
-            payoutPerShare: config.FLOW_STOP_LOSS_PAYOUT,
-            orderType: 'PAPER_STOP_LOSS',
-          },
-          oppositeSignal: 'Each newly confirmed UP signal buys 100 DOWN shares; each newly confirmed DOWN signal buys 100 UP shares. During the trigger, sell all accumulated shares on the other side of that new buy only when liquidation at the fresh best bid is net-profitable after modeled fees. If that position is not profitable or has no fresh bid, keep it open and still submit the buy.',
-          windowEnd: 'Any unsold shares wait for official resolution of their original market.',
+          orderType: 'POLYMARKET_RESOLUTION_ONLY',
+          trigger: 'No early sells. There is no take-profit, stop-loss, or opposite-signal exit.',
+          fills: 'Every filled position stays open for the full window and then waits for official resolution of its original market.',
+          fees: 'Only entry taker fees are modeled. No sell order or sell fee is created.',
+          takeProfit: null,
+          stopLoss: null,
+          oppositeSignal: 'Opposite signals add a new reversed-side buy; they never sell existing shares.',
+          windowEnd: 'At window end, open shares move to pending resolution and settle only from the official result of their original market.',
         },
-        timing: 'Recalculate flow every second using the preceding five seconds of Binance and Polymarket data; immediately sweep visible asks on the opposite side for every newly confirmed UP or DOWN signal. Each signal independently checks whether the other outcome side can be sold for net profit.',
+        timing: 'Recalculate flow every second using the preceding five seconds of Binance and Polymarket data; immediately sweep visible asks on the opposite side for every newly confirmed UP or DOWN signal. Never sell before official resolution.',
         sizing: `${config.FLOW_ENTRY_SHARES} shares per newly confirmed pressure-signal episode, bought on the opposite outcome side. UP and DOWN positions may both stay open in one window.`,
         trigger: `Require Binance and Polymarket directional pressure to agree, each component to exceed ${config.FLOW_COMPONENT_MIN.toFixed(2)}, and combined pressure to reach ±${config.FLOW_SIGNAL_THRESHOLD.toFixed(2)} for ${config.FLOW_CONFIRMATION_COUNT} consecutive checks. No entry price floor or ceiling applies.`,
         currentSignal: this.signal,

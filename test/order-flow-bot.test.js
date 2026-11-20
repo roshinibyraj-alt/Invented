@@ -269,7 +269,7 @@ test('a persistent confirmed signal does not repeat the same reversed entry', ()
   assert.equal(bot.orders.find(order => order.action === 'BUY').status, 'FILLED');
 });
 
-test('an opposite pressure signal buys its reversed side and sells profitable old inventory', () => {
+test('an opposite pressure signal buys its reversed side but never sells old inventory', () => {
   const { bot, feed, nowRef } = makeBot();
   for (let second = 0; second < 3; second += 1) {
     step(bot, feed, nowRef, WINDOW_START + second * 1000, true);
@@ -283,13 +283,6 @@ test('an opposite pressure signal buys its reversed side and sells profitable ol
   assert.equal(downEntry.status, 'FILLED');
   const oldPosition = bot.currentPosition('DOWN', WINDOW_START);
   assert.equal(oldPosition.shares, 100);
-  // Model a position whose average entry has improved before the reversal signal.
-  oldPosition.totalCost = 30;
-  oldPosition.initialTotalCost = 30;
-  oldPosition.entryPrice = 0.30;
-  oldPosition.avgEntry = 0.30;
-  bot.cash += 11;
-
   for (let second = 4; second < 7; second += 1) {
     step(bot, feed, nowRef, WINDOW_START + second * 1000, false);
   }
@@ -297,31 +290,25 @@ test('an opposite pressure signal buys its reversed side and sells profitable ol
   assert.ok(upOrder);
   assert.equal(upOrder.status, 'FILLED');
   assert.equal(upOrder.requestedShares, 100);
-  assert.equal(bot.currentPosition('DOWN', WINDOW_START), null);
+  assert.equal(bot.currentPosition('DOWN', WINDOW_START), oldPosition);
+  assert.equal(oldPosition.status, 'OPEN');
+  assert.equal(oldPosition.shares, 100);
   assert.equal(bot.currentPosition('UP', WINDOW_START).shares, 100);
-  const profitExit = bot.orders.find(order => order.action === 'SELL'
-    && order.orderType === 'PAPER_MARKET_OPPOSITE_SIGNAL_EXIT');
-  assert.ok(profitExit);
-  assert.equal(profitExit.status, 'FILLED');
-  assert.equal(profitExit.side, 'DOWN');
-  assert.equal(profitExit.filledShares, 100);
-  assert.equal(profitExit.averagePrice, 0.39);
-  assert.ok(profitExit.sellFee > 0);
-  assert.equal(oldPosition.status, 'SETTLED_EXIT');
-  assert.equal(oldPosition.exitReason, 'OPPOSITE_SIGNAL_PROFIT_EXIT');
-  assert.equal(oldPosition.settlementBasis, 'PAPER_OPPOSITE_SIGNAL_EXIT');
-  assert.ok(oldPosition.realizedPnl > 0);
+  assert.equal(bot.orders.some(order => order.action === 'SELL'), false);
+  assert.equal(oldPosition.takeProfitOrder, undefined);
+  assert.equal(oldPosition.exitReason, undefined);
   assert.equal(bot.snapshot().strategy.entries.sideMapping, 'BUY_OPPOSITE_OF_PRESSURE_SIGNAL');
   assert.equal(bot.snapshot().strategy.maxActiveSidesPerWindow, 2);
   assert.equal(bot.orders.filter(order => order.action === 'BUY').length, 2);
   assert.equal(bot.signal.action, 'BUY_UP');
   assert.equal(bot.signal.buySide, 'UP');
-  assert.equal(bot.signal.oppositeExitStatus, 'SOLD_PROFITABLE_OPPOSITE');
-  assert.equal(bot.signal.oppositeSharesSold, 100);
+  assert.equal(bot.signal.oppositeExitStatus, 'DISABLED_HOLD_TO_RESOLUTION');
+  assert.equal(bot.signal.oppositeSharesSold, 0);
+  assert.equal(bot.signal.heldOtherSideShares, 100);
   assert.equal(bot.signal.signalSide, 'DOWN');
 });
 
-test('an unprofitable opposite position stays open while the new signal side is bought', () => {
+test('an opposite position stays open regardless of profitability while the new side is bought', () => {
   const { bot, feed, nowRef } = makeBot();
   for (let second = 0; second < 3; second += 1) {
     step(bot, feed, nowRef, WINDOW_START + second * 1000, true);
@@ -341,11 +328,12 @@ test('an unprofitable opposite position stays open while the new signal side is 
   assert.equal(position.status, 'OPEN');
   assert.equal(bot.currentPosition('UP', WINDOW_START).shares, 100);
   assert.equal(bot.orders.some(order => order.orderType === 'PAPER_MARKET_OPPOSITE_SIGNAL_EXIT'), false);
+  assert.equal(bot.orders.some(order => order.action === 'SELL'), false);
   assert.equal(bot.orders.some(order => order.action === 'BUY' && order.side === 'DOWN'), true);
   assert.equal(bot.signal.buySide, 'UP');
-  assert.equal(bot.signal.oppositeExitStatus, 'HELD_NOT_PROFITABLE');
-  assert.ok(bot.signal.currentPositionNetPnl < 0);
-  assert.match(bot.signal.reason, /Held 100 DOWN shares/);
+  assert.equal(bot.signal.oppositeExitStatus, 'DISABLED_HOLD_TO_RESOLUTION');
+  assert.equal(bot.signal.heldOtherSideShares, 100);
+  assert.match(bot.signal.reason, /held until official resolution/);
   assert.equal(bot.snapshot().strategy.activeSide, 'BOTH');
 });
 
@@ -388,7 +376,7 @@ test('each separate confirmed signal episode submits a fresh immediate market bu
   assert.equal(bot.orders.filter(order => order.action === 'BUY').length, 2);
 });
 
-test('the 0.99 TP closes market-bought inventory and retains only its own rebate', () => {
+test('a 0.99 bid never triggers an early sell; the position remains open', () => {
   const { bot, feed, nowRef } = makeBot();
   for (let second = 0; second < 3; second += 1) {
     step(bot, feed, nowRef, WINDOW_START + second * 1000, true);
@@ -404,18 +392,14 @@ test('the 0.99 TP closes market-bought inventory and retains only its own rebate
 
   bot.processStrategyEntry(closeAt);
 
-  assert.equal(position.status, 'SETTLED_EXIT');
-  assert.equal(position.shares, 0);
-  assert.equal(position.exitReason, 'TAKE_PROFIT');
-  assert.equal(position.exitBid, 0.99);
-  assert.equal(position.exitPrice, 1);
-  assert.equal(position.exitProceeds, 100);
-  assert.equal(position.exitFees, 0);
-  assert.ok(position.estimatedExitMakerRebate > 0);
-  assert.equal(position.takeProfitOrder.status, 'FILLED');
+  assert.equal(position.status, 'OPEN');
+  assert.equal(position.shares, 100);
+  assert.equal(position.exitReason, undefined);
+  assert.equal(position.takeProfitOrder, undefined);
+  assert.equal(bot.orders.some(order => order.action === 'SELL'), false);
 });
 
-test('the 0.01 stop-loss closes market-bought inventory at zero', () => {
+test('a 0.01 bid never triggers an early sale; the position remains open', () => {
   const { bot, feed, nowRef } = makeBot();
   for (let second = 0; second < 3; second += 1) {
     step(bot, feed, nowRef, WINDOW_START + second * 1000, true);
@@ -427,14 +411,11 @@ test('the 0.01 stop-loss closes market-bought inventory at zero', () => {
 
   bot.processStrategyEntry(closeAt);
 
-  assert.equal(position.status, 'SETTLED_EXIT');
-  assert.equal(position.shares, 0);
-  assert.equal(position.exitReason, 'STOP_LOSS');
-  assert.equal(position.exitBid, 0.01);
-  assert.equal(position.exitPrice, 0);
-  assert.equal(position.exitProceeds, 0);
-  assert.equal(position.outcome, 'LOSS');
-  assert.equal(position.takeProfitOrder.status, 'CANCELLED_STOP_LOSS');
+  assert.equal(position.status, 'OPEN');
+  assert.equal(position.shares, 100);
+  assert.equal(position.exitReason, undefined);
+  assert.equal(position.takeProfitOrder, undefined);
+  assert.equal(bot.orders.some(order => order.action === 'SELL'), false);
 });
 
 test('positions not stopped or taken profit move to resolution after window end', async () => {
@@ -557,14 +538,15 @@ test('snapshot identifies the paper-only pressure strategy and exposes flow scor
   assert.equal(state.strategy.id, 'btc-5m-combined-orderflow-accumulation');
   assert.equal(state.strategy.execution, 'PAPER ONLY');
   assert.equal(state.strategy.entrySharesPerSignal, 100);
-  assert.equal(state.strategy.version, 'btc-5m-independent-side-profit-exit-v11-reversed-no-entry-price-filter');
+  assert.equal(state.strategy.version, 'btc-5m-reversed-pressure-resolution-only-v12');
   assert.equal(state.strategy.entries.sideMapping, 'BUY_OPPOSITE_OF_PRESSURE_SIGNAL');
   assert.equal(state.strategy.maxActiveSidesPerWindow, 2);
-  assert.match(state.strategy.entries.oppositeSignalProfitabilityRule, /pressure signal always triggers a buy on the opposite outcome side independently/i);
+  assert.match(state.strategy.entries.oppositeSignalProfitabilityRule, /never sell/i);
+  assert.equal(state.strategy.entries.oppositeSignalSellOrderType, null);
   assert.equal(state.strategy.maxInventoryPerSide, null);
   assert.equal(state.strategy.usesTakerOrders, true);
-  assert.equal(state.strategy.usesMakerOrders, true);
-  assert.equal(state.strategy.orderType, 'PAPER_MARKET_BUY + PAPER_MARKET_OPPOSITE_SIGNAL_EXIT');
+  assert.equal(state.strategy.usesMakerOrders, false);
+  assert.equal(state.strategy.orderType, 'PAPER_MARKET_BUY');
   assert.equal(state.strategy.entryPriceSource, 'VISIBLE_ASK_MARKET_SWEEP');
   assert.equal(state.strategy.entries.priceFilter, null);
   assert.equal(state.strategy.entries.timeInForce, 'FAK');
@@ -572,8 +554,10 @@ test('snapshot identifies the paper-only pressure strategy and exposes flow scor
   assert.equal(state.strategy.entries.cancelUnfilledOnNextSignal, false);
   assert.equal(state.account.completedWindowCount, 0);
   assert.ok(Array.isArray(state.account.equityCurve));
-  assert.equal(state.strategy.exit.takeProfit.triggerPrice, 0.99);
-  assert.equal(state.strategy.exit.stopLoss.triggerPrice, 0.01);
+  assert.equal(state.strategy.exit.takeProfit, null);
+  assert.equal(state.strategy.exit.stopLoss, null);
+  assert.equal(state.strategy.exit.orderType, 'POLYMARKET_RESOLUTION_ONLY');
+  assert.match(state.strategy.exit.trigger, /No early sells/);
   assert.equal(state.pressure.requiredConfirmations, 3);
   assert.ok(state.pressure.binance.score > 0);
   assert.ok(state.pressure.polymarket.score > 0);
