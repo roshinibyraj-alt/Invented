@@ -102,21 +102,21 @@
       <header>
         <div class="brand">
           <div class="mark" aria-hidden="true">₿</div>
-          <div><div class="eyebrow">Invented · BTC 5-minute</div><h1>Independent-side pressure bot</h1></div>
+          <div><div class="eyebrow">Invented · BTC 5-minute</div><h1>Two-sided limit-entry bot</h1></div>
         </div>
         <div class="badges"><span class="badge paper">PAPER ONLY</span><span class="pill warn" id="statusPill">CONNECTING</span><span class="badge" id="updatedAt">Updated —</span></div>
       </header>
 
       <section class="hero">
         <div>
-          <div class="eyebrow">Binance order flow × Polymarket UP/DOWN</div>
-          <h2>Buy the side opposite each confirmed signal.</h2>
-          <p>Every newly confirmed UP signal market-buys DOWN; every DOWN signal buys UP. There is no entry-price floor or ceiling. The bot never sells early: opposite signals only add the new reversed-side buy, and all filled shares stay open until official market resolution.</p>
+          <div class="eyebrow">Polymarket UP/DOWN prices</div>
+          <h2>Rest 100-share buys at $0.20 on both sides.</h2>
+          <p>The first side whose best ask reaches $0.20 fills and cancels the other resting order. If the filled side’s midpoint reaches $0.10 or lower, the bot market-buys 200 shares on the opposite side. No early sells; positions wait for official resolution.</p>
         </div>
         <div class="hero-state">
           <span class="badge" id="window">Waiting for market</span>
-          <strong id="signal">Waiting for fresh data</strong>
-          <small id="reason">Both data feeds must be fresh and agree.</small>
+          <strong id="signal">Waiting for both CLOB books</strong>
+          <small id="reason">Price triggers only; Binance pressure signals are not used.</small>
           <div class="stat"><span class="label">Window time left</span><strong id="remaining">—</strong></div>
         </div>
       </section>
@@ -126,16 +126,16 @@
           <div class="panel-head"><div><div class="panel-title">Current Polymarket books</div><div class="panel-sub" id="marketTitle">BTC 5-minute UP/DOWN</div></div><span class="badge" id="clobStatus">CLOB waiting</span></div>
           <div class="side-grid">
             <div class="side-card up">
-              <div class="side-head"><strong>UP · current window</strong><span class="badge" id="upPressure">Pressure —</span></div>
+              <div class="side-head"><strong>UP · current window</strong><span class="badge" id="upOrderStatus">Limit —</span></div>
               <div class="price-grid"><div class="price"><span>Best bid · size</span><strong id="upBid">—</strong></div><div class="price"><span>Best ask · size</span><strong id="upAsk">—</strong></div></div>
               <div class="position"><strong id="upPosition">0 shares · — avg</strong><span id="upPnl">No open position</span></div>
-              <small class="risk-rule" id="upRisk">No early sells · hold to official resolution</small>
+              <small class="risk-rule" id="upRisk">Resting buy: 100 shares at $0.20</small>
             </div>
             <div class="side-card down">
-              <div class="side-head"><strong>DOWN · current window</strong><span class="badge" id="downPressure">Pressure —</span></div>
+              <div class="side-head"><strong>DOWN · current window</strong><span class="badge" id="downOrderStatus">Limit —</span></div>
               <div class="price-grid"><div class="price"><span>Best bid · size</span><strong id="downBid">—</strong></div><div class="price"><span>Best ask · size</span><strong id="downAsk">—</strong></div></div>
               <div class="position"><strong id="downPosition">0 shares · — avg</strong><span id="downPnl">No open position</span></div>
-              <small class="risk-rule" id="downRisk">No early sells · hold to official resolution</small>
+              <small class="risk-rule" id="downRisk">Resting buy: 100 shares at $0.20</small>
             </div>
           </div>
         </article>
@@ -150,11 +150,11 @@
 
       <section class="grid">
         <article class="panel">
-          <div class="panel-head"><div><div class="panel-title">Buyer–seller pressure</div><div class="panel-sub">Normalized scores from −1 (selling) to +1 (buying)</div></div><span class="badge" id="pressureStatus">WAITING</span></div>
+          <div class="panel-head"><div><div class="panel-title">Price-trigger status</div><div class="panel-sub">This strategy uses Polymarket prices, not pressure scores</div></div><span class="badge" id="pressureStatus">PRICE MONITORING</span></div>
           <div class="score-cards">
-            <div class="score-box"><div class="label">Binance trade flow</div><div class="score-value" id="binanceScore">—</div><div class="score-meta" id="binanceFlowDetail">Waiting for trades</div><div class="meter up"><span id="binanceMeter"></span></div></div>
-            <div class="score-box"><div class="label">Polymarket pressure</div><div class="score-value" id="clobScore">—</div><div class="score-meta" id="clobFlowDetail">Waiting for books</div><div class="meter down"><span id="clobMeter"></span></div></div>
-            <div class="score-box"><div class="label">Combined signal</div><div class="score-value" id="combinedScore">—</div><div class="score-meta" id="confirmation">0 / 3 checks</div><div class="meter up"><span id="combinedMeter"></span></div></div>
+            <div class="score-box"><div class="label">UP limit order</div><div class="score-value" id="upLimitStatus">—</div><div class="score-meta">100 shares · $0.20 limit</div></div>
+            <div class="score-box"><div class="label">DOWN limit order</div><div class="score-value" id="downLimitStatus">—</div><div class="score-meta">100 shares · $0.20 limit</div></div>
+            <div class="score-box"><div class="label">Opposite-side trigger</div><div class="score-value" id="reversalStatus">—</div><div class="score-meta" id="reversalDetail">Midpoint ≤ $0.10 → buy 200</div></div>
           </div>
         </article>
 
@@ -171,50 +171,34 @@
         <article class="panel">
           <div class="panel-head"><div><div class="panel-title">Current strategy</div><div class="panel-sub">The rules currently running in this paper bot</div></div><span class="badge">100 shares per signal</span></div>
           <div class="rules">
-            <div class="rule"><b>Measure</b><span>Use the last five seconds of Binance aggressor notional and Polymarket CLOB trade flow, top-three-level depth imbalance, and microprice.</span></div>
-            <div class="rule"><b>Confirm</b><span>Binance and Polymarket must point the same way; each must exceed 0.10 pressure and their combined score must reach ±0.30 for three one-second checks.</span></div>
-            <div class="rule"><b>Reversed buys</b><span>An UP signal sweeps visible DOWN asks for 100 shares; a DOWN signal sweeps visible UP asks. There is no entry-price floor or ceiling. UP and DOWN may both stay open. Partial fills are allowed; remaining shares cancel immediately.</span></div>
-            <div class="rule"><b>No early sells</b><span>There are no opposite-signal sells, take-profit orders, or stop-loss exits. An opposite signal only adds a new buy on the reversed side.</span></div>
-            <div class="rule"><b>Hold to resolution</b><span>Filled shares remain open for the rest of their window, then wait for the official result of that exact market. Resolution proceeds update the paper balance.</span></div>
-            <div class="rule"><b>Costs</b><span>Only market-entry taker fees are modeled; the bot creates no sell orders or sell fees.</span></div>
+            <div class="rule"><b>Initial orders</b><span>At each window open, place resting buy limits for 100 UP shares and 100 DOWN shares, both at $0.20.</span></div>
+            <div class="rule"><b>First fill</b><span>A fresh best ask at or below $0.20 confirms the 100-share fill at that ask, capped at the $0.20 limit; then cancel the other side’s resting order.</span></div>
+            <div class="rule"><b>Reversal buy</b><span>If the filled side’s midpoint reaches $0.10 or lower, immediately market-buy 200 shares on the opposite side. This triggers at most once per window; taker fees are modeled.</span></div>
+            <div class="rule"><b>Hold to resolution</b><span>There are no sells, take-profits, or stop-losses. Filled shares stay open until the official result of their original market settles them.</span></div>
+            <div class="rule"><b>Unfilled limits</b><span>If neither side fills, both limits remain resting until the window ends; then they are cancelled.</span></div>
           </div>
         </article>
         <article class="panel">
-          <div class="panel-head"><div><div class="panel-title">Recent orders</div><div class="panel-sub">Reversed-side paper market buys only · no sells before resolution</div></div><span class="badge" id="orderCount">0 orders</span></div>
-          <div class="table-wrap"><table><thead><tr><th>Time</th><th>Action</th><th>Side</th><th>Filled / requested</th><th>Average / best ask</th><th>Fees / rebate</th><th>Status</th></tr></thead><tbody id="orders"><tr><td class="empty" colspan="7">Waiting for a confirmed signal</td></tr></tbody></table></div>
+          <div class="panel-head"><div><div class="panel-title">Recent orders</div><div class="panel-sub">Resting $0.20 limits and any $0.10-triggered opposite market buy</div></div><span class="badge" id="orderCount">0 orders</span></div>
+          <div class="table-wrap"><table><thead><tr><th>Time</th><th>Action</th><th>Side</th><th>Filled / requested</th><th>Fill / limit price</th><th>Fees / rebate</th><th>Status</th></tr></thead><tbody id="orders"><tr><td class="empty" colspan="7">Waiting for a price trigger</td></tr></tbody></table></div>
         </article>
       </section>
 
-      <footer>Paper simulation only · Binance BTCUSDT aggregate-trade WebSocket · Polymarket CLOB books and trades · Railway restarts reset the in-memory paper ledger</footer>
+      <footer>Paper simulation only · Polymarket CLOB price triggers · no early sells · Railway restarts reset the in-memory paper ledger</footer>
     </main>
     <script>
       const $ = id => document.getElementById(id);
       const money = value => value != null && value !== "" && Number.isFinite(Number(value)) ? "$" + Number(value).toFixed(2) : "—";
       const price = value => value != null && value !== "" && Number.isFinite(Number(value)) ? "$" + Number(value).toFixed(2) : "—";
-      const score = value => value != null && value !== "" && Number.isFinite(Number(value)) ? (Number(value) > 0 ? "+" : "") + Number(value).toFixed(2) : "—";
       const time = value => value != null && value !== "" && Number.isFinite(Number(value)) ? new Date(Number(value)).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit",second:"2-digit"}) : "—";
       const dt = value => value != null && value !== "" && Number.isFinite(Number(value)) ? new Date(Number(value)).toLocaleString([], {month:"short",day:"numeric",hour:"2-digit",minute:"2-digit",second:"2-digit"}) : "—";
       const esc = value => String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
       const set = (id, value) => { if ($(id)) $(id).textContent = value; };
       const pnlClass = value => Number(value) > 0 ? "positive" : Number(value) < 0 ? "negative" : "neutral";
       const fmtShares = value => Number(value || 0).toLocaleString(undefined,{maximumFractionDigits:2});
-      function setScore(id, meterId, value) {
-        const n = Number(value);
-        set(id, score(value));
-        const el = $(id);
-        if (el) el.className = "score-value " + pnlClass(n);
-        const meter = $(meterId);
-        if (meter) {
-          meter.style.width = `${Math.min(100,Math.abs(Number.isFinite(n)?n:0)*100)}%`;
-          meter.parentElement.className = "meter " + (n < 0 ? "down" : "up");
-        }
-      }
       function render(state) {
         const account = state.account || {};
-        const pressure = state.pressure || {};
-        const binance = pressure.binance || {};
-        const poly = pressure.polymarket || {};
-        const outcomes = poly.outcomes || {};
+        const priceState = state.priceStrategyState || {};
         const quotes = state.quotes || {};
         const inventory = state.inventory || {};
         const positions = state.positionsBySide || {};
@@ -224,13 +208,8 @@
         set("updatedAt", `Updated ${time(state.now)}`);
         set("window", state.window?.slug || "BTC 5-minute window");
         set("remaining", Number.isFinite(Number(state.window?.secondsRemaining)) ? `${Math.max(0,Math.floor(Number(state.window.secondsRemaining)))} sec` : "—");
-        const signalLabel = state.signal?.signalSide && state.signal?.buySide
-          ? `${state.signal.signalSide} SIGNAL → BUY ${state.signal.buySide} · HOLD TO RESOLUTION`
-          : state.signal?.action && state.signal.action !== "WAIT"
-            ? `${state.signal.action} · ${state.signal.side || pressure.confirmedSide || ""}`
-            : pressure.confirmedSide ? `CONFIRMED · ${pressure.confirmedSide}` : pressure.status || "WAITING";
-        set("signal",signalLabel);
-        set("reason", state.statusReason || state.signal?.reason || pressure.reason || "Waiting for both feeds.");
+        set("signal", priceState.status || state.signal?.action || "WAITING_FOR_WINDOW");
+        set("reason", priceState.reason || state.statusReason || "Watching Polymarket prices.");
         set("equity", money(account.equity));
         set("realized", money(account.realizedPnl));
         $("realized").className = "metric-value " + pnlClass(account.realizedPnl);
@@ -241,38 +220,42 @@
         const winRate = Number(completed.winRate ?? account.completedWindowWinRate ?? 0);
         set("completedWinRate",completedCount ? `${winRate.toFixed(1)}%` : "—");
         set("completedWindowCount",`${completedCount} completed · ${completedWins} wins`);
-        set("btcPrice", money(state.binance?.price,2));
-        set("binanceStatus", `${String(state.binance?.status || "waiting")} · ${binance.tickAgeMs == null ? "—" : Math.max(0,Math.round(binance.tickAgeMs))+" ms old"}`);
-        set("pressureStatus", pressure.status || "WAITING");
-        setScore("binanceScore","binanceMeter",binance.score);
-        setScore("clobScore","clobMeter",poly.score);
-        setScore("combinedScore","combinedMeter",pressure.combinedScore);
-        set("binanceFlowDetail",`${Number(binance.tradeCount||0)} trades · ${money(binance.buyNotional,2)} buy / ${money(binance.sellNotional,2)} sell`);
-        set("clobFlowDetail",`UP ${score(outcomes.UP?.score?.score)} · DOWN ${score(outcomes.DOWN?.score?.score)} outcome pressure`);
-        set("confirmation",`${Number(pressure.confirmationCount||0)} / ${Number(pressure.requiredConfirmations||3)} checks${pressure.candidateSide?` · ${pressure.candidateSide}`:""}`);
+        set("pressureStatus", "CLOB PRICE RULES");
+        const entryOrders = Array.isArray(state.entryOrders) ? state.entryOrders : [];
+        const orderForSide = side => entryOrders.find(order => order.side === side);
+        const orderStatus = side => {
+          const order = orderForSide(side);
+          return order ? String(order.status || "UNKNOWN").replaceAll("_", " ") : "NOT PLACED";
+        };
+        set("upLimitStatus", orderStatus("UP"));
+        set("downLimitStatus", orderStatus("DOWN"));
+        const triggerMid = priceState.firstSideMidpoint;
+        set("reversalStatus", priceState.reversalTriggered ? "TRIGGERED" : triggerMid == null ? "ARMED" : money(triggerMid));
+        set("reversalDetail", priceState.firstFilledSide
+          ? `${priceState.firstFilledSide} midpoint ${triggerMid == null ? "—" : money(triggerMid)} · trigger ≤ $0.10`
+          : "Waiting for first $0.20 fill");
         set("clobStatus",`Polymarket ${String(state.websocket?.status||"waiting").toLowerCase()}`);
         set("marketTitle",state.market?.title || state.market?.slug || "BTC 5-minute UP/DOWN");
         for (const side of ["UP","DOWN"]) {
           const key = side.toLowerCase();
           const quote = quotes[side] || {};
-          const book = outcomes[side]?.score || {};
           const position = positions[side];
           const sideInventory = inventory[side] || {};
           set(`${key}Bid`,`${price(quote.bestBid)} · ${fmtShares(quote.bidSize)}`);
           set(`${key}Ask`,`${price(quote.bestAsk)} · ${fmtShares(quote.askSize)}`);
-          set(`${key}Pressure`,`Pressure ${score(book.score)}`);
+          set(`${key}OrderStatus`, orderStatus(side));
           const shares = sideInventory.shares != null ? sideInventory.shares : position?.shares;
           set(`${key}Position`,`${fmtShares(shares)} shares · ${money(sideInventory.averageCost ?? position?.entryPrice)} avg`);
           set(`${key}Pnl`,position ? `${money(position.unrealizedPnl)} floating` : "No open position");
           if (position) $(`${key}Pnl`).className = pnlClass(position.unrealizedPnl);
         }
          const orders = Array.isArray(state.orders) ? state.orders.filter(x =>
-          x.orderType === "PAPER_MARKET_BUY") : [];
+          ["PAPER_LIMIT_BUY","PAPER_MARKET_BUY"].includes(x.orderType)) : [];
         set("orderCount",`${orders.length} orders`);
         $("orders").innerHTML = orders.length ? orders.slice(0,25).map(order => `<tr>
           <td>${time(order.filledAt ?? order.createdAt)}</td><td><span class="tag">${esc(order.exitReason || order.action)}</span></td><td>${order.signalSide ? `${esc(order.signalSide)} signal → ${order.action === "BUY" ? "buy" : "sell"} ${esc(order.side)}` : esc(order.side)}</td>
           <td>${fmtShares(order.filledShares)} / ${fmtShares(order.requestedShares)}</td><td>${price(order.averagePrice ?? order.bestAskAtSubmission ?? order.limitPrice)}</td>
-          <td>${money(order.fees)} / ${money(order.estimatedMakerRebate)}</td><td>${esc(order.status)}</td></tr>`).join("") : `<tr><td class="empty" colspan="7">Waiting for a confirmed signal</td></tr>`;
+           <td>${money(order.fees)} / ${money(order.estimatedMakerRebate)}</td><td>${esc(order.status)}</td></tr>`).join("") : `<tr><td class="empty" colspan="7">Waiting for a price trigger</td></tr>`;
         const pending = Array.isArray(state.pendingResolutionPositions) ? state.pendingResolutionPositions : [];
         set("resolutionCount",`${pending.length} positions`);
         $("resolutionPositions").innerHTML = pending.length ? pending.map(position => `<tr>

@@ -153,7 +153,8 @@ class WickBot{
   getWindowStartToScan(_now,currentStart){return currentStart}
   async closePreviousWindows(currentStart,now=Date.now()){
     const previousOrders=this.orders.filter(order=>order.action==='BUY'&&
-      ['PENDING','LIVE','MARKET_PENDING','PARTIALLY_FILLED'].includes(order.status)&&
+      ['PENDING','LIVE','MARKET_PENDING','PARTIALLY_FILLED','RESTING'].includes(order.status)&&
+      (order.status!=='PARTIALLY_FILLED'||Number(order.remainingShares)>0)&&
       Number(order.windowStart)+this.windowMs<=currentStart);
     const open=this.positions.filter(p=>p.status==='OPEN'&&Number(p.windowStart)+this.windowMs<=currentStart);
     if(!previousOrders.length&&!open.length)return 0;

@@ -8,6 +8,7 @@ const { feeContext, takerFeeFor } = WickBot._test;
 const EPSILON = 1e-8;
 const SIDES = ['UP', 'DOWN'];
 const ORDER_TYPE = 'PAPER_MARKET_BUY';
+const LIMIT_ORDER_TYPE = 'PAPER_LIMIT_BUY';
 
 function clamp(value, minimum = -1, maximum = 1) {
   return Math.max(minimum, Math.min(maximum, Number(value) || 0));
@@ -58,13 +59,24 @@ function orderBookPressure(book, tradeImbalance) {
 class OrderFlowBot extends MispricingBot {
   constructor(options = {}) {
     super(options);
-    this.strategyId = 'btc-5m-combined-orderflow-accumulation';
-    this.strategyName = 'BTC 5-minute independent-side order-flow paper strategy';
+    this.strategyId = 'btc-5m-two-sided-limit-and-reversal';
+    this.strategyName = 'BTC 5-minute two-sided limit-entry paper strategy';
     this.rules = {
-      sharesPerSide: config.FLOW_ENTRY_SHARES,
-      entryShares: config.FLOW_ENTRY_SHARES,
+      sharesPerSide: config.PRICE_LIMIT_SHARES,
+      entryShares: config.PRICE_LIMIT_SHARES,
+      limitPrice: config.PRICE_LIMIT_ENTRY,
+      reversalTriggerMid: config.PRICE_REVERSAL_TRIGGER_MID,
+      reversalShares: config.PRICE_REVERSAL_SHARES,
     };
     this.strategyWindowStart = null;
+    this.firstFilledSide = null;
+    this.reversalTriggered = false;
+    this.priceStrategyState = {
+      status: 'WAITING_FOR_WINDOW',
+      reason: 'Waiting for the current BTC 5-minute market.',
+      firstFilledSide: null,
+      reversalTriggered: false,
+    };
     this.clobTrades = { UP: [], DOWN: [] };
     this.seenClobTrades = new Set();
     this.lastEvaluationAt = null;
@@ -88,6 +100,8 @@ class OrderFlowBot extends MispricingBot {
   openStrategyWindow(start, now) {
     super.openStrategyWindow(start, now);
     this.strategyWindowStart = start;
+    this.firstFilledSide = null;
+    this.reversalTriggered = false;
     this.clobTrades = { UP: [], DOWN: [] };
     this.seenClobTrades.clear();
     this.lastEvaluationAt = null;
@@ -95,16 +109,27 @@ class OrderFlowBot extends MispricingBot {
     this.confirmationCount = 0;
     this.confirmedSide = null;
     this.pressure = {
-      status: 'SCANNING',
-      reason: 'Collecting live order flow for the new BTC window.',
+      status: 'PRICE_ONLY',
+      reason: 'Pressure scores are not used by this price-trigger strategy.',
       combinedScore: null,
       candidateSide: null,
       confirmedSide: null,
       confirmationCount: 0,
-      requiredConfirmations: config.FLOW_CONFIRMATION_COUNT,
+      requiredConfirmations: 0,
     };
-    this.signal = { side: null, action: 'WAIT', reason: this.pressure.reason };
-    this.flowState = { status: 'SCANNING', reason: this.pressure.reason };
+    this.priceStrategyState = {
+      status: 'RESTING_LIMITS',
+      reason: `UP and DOWN $${this.rules.limitPrice.toFixed(2)} limit buys are resting.`,
+      firstFilledSide: null,
+      reversalTriggered: false,
+    };
+    this.signal = {
+      side: null,
+      action: 'RESTING_LIMIT_BUYS',
+      reason: this.priceStrategyState.reason,
+    };
+    this.flowState = { status: 'PRICE_MONITORING', reason: this.priceStrategyState.reason };
+    this.placeRestingEntryOrders(start, now);
   }
 
   handleMarketMessage(event) {
@@ -316,125 +341,272 @@ class OrderFlowBot extends MispricingBot {
     const windowStart = this.getActiveWindowStart();
     if (windowStart == null) {
       this.flowState = { status: 'WAITING', reason: 'Waiting for the current BTC 5-minute market.' };
+      this.priceStrategyState = {
+        status: 'WAITING_FOR_WINDOW',
+        reason: this.flowState.reason,
+        firstFilledSide: null,
+        reversalTriggered: false,
+      };
       this.signal = { side: null, action: 'WAIT', reason: this.flowState.reason };
       return false;
     }
     if (this.strategyWindowStart !== windowStart) this.openStrategyWindow(windowStart, now);
 
-    const nextPressure = this.buildPressureSnapshot(now);
-    this.pressure = nextPressure;
-    const evaluationDue = this.lastEvaluationAt == null
-      || now - this.lastEvaluationAt >= config.FLOW_EVAL_INTERVAL_MS;
-    let changed = false;
-    if (!nextPressure.ready) {
-      this.pendingSide = null;
-      this.confirmationCount = 0;
-      this.flowState = { status: 'WAITING_FOR_DATA', reason: nextPressure.reason };
-    } else if (evaluationDue) {
-      this.lastEvaluationAt = now;
-      if (!nextPressure.candidateSide) {
-        this.pendingSide = null;
-        this.confirmationCount = 0;
-        this.confirmedSide = null;
-        this.flowState = { status: 'NEUTRAL', reason: nextPressure.reason };
-      } else {
-        const side = nextPressure.candidateSide;
-        if (this.pendingSide === side) this.confirmationCount += 1;
-        else {
-          this.pendingSide = side;
-          this.confirmationCount = 1;
-        }
-        if (this.confirmationCount >= config.FLOW_CONFIRMATION_COUNT) {
-          const newlyConfirmed = this.confirmedSide !== side;
-          this.confirmedSide = side;
-          this.flowState = {
-            status: newlyConfirmed ? 'CONFIRMED' : 'ACTIVE',
-            reason: newlyConfirmed
-              ? `${side} pressure confirmed for ${this.confirmationCount} consecutive one-second checks.`
-              : `${side} pressure remains confirmed.`,
-          };
-          if (newlyConfirmed) {
-            changed = this.handleConfirmedSignal(side, now) || changed;
-          }
-        } else {
-          this.flowState = {
-            status: 'CONFIRMING',
-            reason: `Confirming ${side}: ${this.confirmationCount}/${config.FLOW_CONFIRMATION_COUNT} one-second checks.`,
-          };
-        }
-      }
-    }
-
+    let changed = this.processRestingEntryOrders(now);
+    changed = this.processMidpointReversal(now) || changed;
+    const reason = this.priceStrategyState?.reason || 'Monitoring Polymarket prices.';
+    this.flowState = { status: this.priceStrategyState?.status || 'PRICE_MONITORING', reason };
     this.pressure = {
-      ...nextPressure,
-      status: this.flowState.status,
-      reason: this.flowState.reason,
-      confirmedSide: this.confirmedSide,
-      confirmationCount: this.confirmationCount,
-      requiredConfirmations: config.FLOW_CONFIRMATION_COUNT,
+      ...this.pressure,
+      status: 'PRICE_ONLY',
+      reason: 'Order-flow scores are informational only; entries use CLOB prices.',
+      evaluatedAt: now,
+      candidateSide: null,
+      confirmedSide: null,
+      confirmationCount: 0,
+      requiredConfirmations: 0,
     };
-    if (!this.confirmedSide || nextPressure.status === 'NEUTRAL') {
-      this.signal = {
-        side: null,
-        action: 'WAIT',
-        reason: this.flowState.reason,
-        combinedScore: nextPressure.combinedScore,
-      };
-    }
     return changed;
   }
 
-  handleConfirmedSignal(signalSide, now) {
-    const buySide = signalSide === 'UP' ? 'DOWN' : 'UP';
-    const windowStart = Number(this.getActiveWindowStart());
-    const heldOtherSideShares = this.positions
-      .filter((position) => position.status === 'OPEN'
-        && Number(position.windowStart) === windowStart
-        && position.side === signalSide
-        && Number(position.shares) > EPSILON)
-      .reduce((total, position) => total + Number(position.shares), 0);
+  placeRestingEntryOrders(windowStart, now) {
+    for (const side of SIDES) {
+      const order = {
+        id: `${windowStart}-btc-${side.toLowerCase()}-limit-buy-${++this.orderSequence}`,
+        strategyId: this.strategyId,
+        action: 'BUY',
+        side,
+        orderType: LIMIT_ORDER_TYPE,
+        status: 'RESTING',
+        requestedShares: this.rules.sharesPerSide,
+        filledShares: 0,
+        remainingShares: this.rules.sharesPerSide,
+        cancelledShares: 0,
+        limitPrice: this.rules.limitPrice,
+        referencePrice: this.rules.limitPrice,
+        averagePrice: null,
+        grossCost: 0,
+        fees: 0,
+        estimatedMakerRebate: 0,
+        createdAt: now,
+        windowStart,
+        paperOnly: true,
+        timeInForce: 'GTD_WINDOW',
+        immediateOrCancel: false,
+        fillRule: 'FULL_100_SHARE_FILL_WHEN_FRESH_BEST_ASK_IS_AT_OR_BELOW_LIMIT; PRICE_IMPROVEMENT_AT_BEST_ASK; NO_TAKER_FEE',
+      };
+      this.orders.unshift(order);
+      this.windowOrders.unshift(order);
+      this.totalOrderAttempts += 1;
+    }
+    this.log('PAPER_TWO_SIDED_LIMIT_BUYS_PLACED', {
+      windowStart,
+      limitPrice: this.rules.limitPrice,
+      sharesPerSide: this.rules.sharesPerSide,
+      sides: SIDES,
+    });
+    this.priceStrategyState = {
+      status: 'RESTING_LIMITS',
+      reason: `UP and DOWN ${this.rules.sharesPerSide}-share limit buys are resting at $${this.rules.limitPrice.toFixed(2)}.`,
+      firstFilledSide: null,
+      reversalTriggered: false,
+    };
+    return true;
+  }
 
+  processRestingEntryOrders(now) {
+    if (this.firstFilledSide) return false;
+    const windowStart = Number(this.getActiveWindowStart());
+    const eligible = this.orders
+      .filter((order) => order.strategyId === this.strategyId
+        && order.orderType === LIMIT_ORDER_TYPE
+        && order.status === 'RESTING'
+        && Number(order.windowStart) === windowStart)
+      .map((order) => ({ order, quote: this.flowQuote(order.side, now) }))
+      .filter(({ quote }) => quote && Number(quote.bestAsk) <= this.rules.limitPrice)
+      .sort((a, b) => Number(a.quote.updatedAt) - Number(b.quote.updatedAt)
+        || SIDES.indexOf(a.order.side) - SIDES.indexOf(b.order.side));
+    const first = eligible[0];
+    if (!first) return false;
+    const { order, quote } = first;
+    const fillPrice = Math.min(this.rules.limitPrice, Number(quote.bestAsk));
+    const filledShares = Number(order.requestedShares);
+    const grossCost = filledShares * fillPrice;
+    if (grossCost > Math.max(0, Number(this.cash) || 0) + EPSILON) {
+      this.priceStrategyState = {
+        status: 'INSUFFICIENT_CASH',
+        reason: `The ${order.side} ask reached $${fillPrice.toFixed(2)}, but paper cash cannot cover the 100-share limit fill.`,
+        firstFilledSide: null,
+        reversalTriggered: false,
+      };
+      return false;
+    }
+
+    const position = this.currentPosition(order.side, windowStart)
+      || this.createPosition(order.side, windowStart, now);
+    const fill = { price: fillPrice, shares: filledShares, at: now, orderId: order.id };
+    position.shares += filledShares;
+    position.initialShares += filledShares;
+    position.totalCost += grossCost;
+    position.initialTotalCost += grossCost;
+    position.entryPrice = position.initialTotalCost / position.initialShares;
+    position.avgEntry = position.entryPrice;
+    position.filledAt = now;
+    position.lastAddedAt = now;
+    position.entryFills.push(fill);
+    position.entrySignals.push({
+      at: now,
+      signalSide: null,
+      side: order.side,
+      shares: filledShares,
+      averagePrice: fillPrice,
+      fees: 0,
+      estimatedMakerRebate: 0,
+      orderId: order.id,
+      reason: 'RESTING_LIMIT_ASK_TOUCH',
+    });
+    position.markPrice = Number(quote.bestBid);
+    position.markStatus = 'LIVE';
+    position.feeContext = feeContext(this.market || {});
+    this.cash -= grossCost;
+
+    order.status = 'FILLED';
+    order.filledShares = filledShares;
+    order.remainingShares = 0;
+    order.averagePrice = fillPrice;
+    order.grossCost = grossCost;
+    order.fees = 0;
+    order.filledAt = now;
+    order.fills = [fill];
+    order.positionId = position.id;
+    this.firstFilledSide = order.side;
+    this.cancelOtherRestingOrder(order.side, now, windowStart);
+    this.log('PAPER_LIMIT_BUY_FILLED', {
+      orderId: order.id,
+      positionId: position.id,
+      side: order.side,
+      limitPrice: order.limitPrice,
+      bestAskAtFill: quote.bestAsk,
+      shares: filledShares,
+      averagePrice: fillPrice,
+      grossCost,
+      fees: 0,
+    });
+    this.events.unshift({
+      ts: now,
+      at: now,
+      event: 'PAPER_LIMIT_BUY_FILLED',
+      type: 'PAPER_LIMIT_BUY_FILLED',
+      message: `${filledShares} ${order.side} shares filled by the $${order.limitPrice.toFixed(2)} resting limit when the fresh best ask reached $${Number(quote.bestAsk).toFixed(3)}.`,
+      details: {
+        orderId: order.id,
+        positionId: position.id,
+        side: order.side,
+        shares: filledShares,
+        limitPrice: order.limitPrice,
+        bestAskAtFill: quote.bestAsk,
+        averagePrice: fillPrice,
+      },
+    });
+    if (this.events.length > 200) this.events.length = 200;
+    this.priceStrategyState = {
+      status: 'POSITION_OPEN',
+      reason: `${filledShares} ${order.side} shares filled at $${fillPrice.toFixed(2)}; watching its midpoint for $${this.rules.reversalTriggerMid.toFixed(2)} or lower.`,
+      firstFilledSide: order.side,
+      reversalTriggered: false,
+      fillPrice,
+      filledShares,
+    };
+    this.signal = {
+      side: order.side,
+      action: 'LIMIT_ENTRY_FILLED',
+      reason: this.priceStrategyState.reason,
+    };
+    return true;
+  }
+
+  cancelOtherRestingOrder(filledSide, now, windowStart) {
+    for (const order of this.orders) {
+      if (order.strategyId !== this.strategyId
+        || order.orderType !== LIMIT_ORDER_TYPE
+        || order.status !== 'RESTING'
+        || Number(order.windowStart) !== Number(windowStart)
+        || order.side === filledSide) continue;
+      order.status = 'CANCELLED_OTHER_SIDE_FILLED';
+      order.cancelledShares = Number(order.remainingShares) || 0;
+      order.remainingShares = 0;
+      order.cancelledAt = now;
+      order.cancelReason = 'OTHER_SIDE_FILLED';
+      this.log('PAPER_OPPOSITE_LIMIT_BUY_CANCELLED', {
+        orderId: order.id,
+        side: order.side,
+        filledSide,
+        cancelledShares: order.cancelledShares,
+      });
+    }
+  }
+
+  processMidpointReversal(now) {
+    if (!this.firstFilledSide || this.reversalTriggered) return false;
+    const quote = this.flowQuote(this.firstFilledSide, now);
+    if (!quote) return false;
+    const midpoint = (Number(quote.bestBid) + Number(quote.bestAsk)) / 2;
+    this.priceStrategyState = {
+      ...this.priceStrategyState,
+      firstSideMidpoint: midpoint,
+      reversalTriggered: false,
+    };
+    if (!Number.isFinite(midpoint) || midpoint > this.rules.reversalTriggerMid) return false;
+
+    this.reversalTriggered = true;
+    const oppositeSide = this.firstFilledSide === 'UP' ? 'DOWN' : 'UP';
     const submitted = this.submitMarketBuy(
-      buySide,
+      oppositeSide,
       now,
-      this.pressure,
-      signalSide,
-      config.FLOW_ENTRY_SHARES,
+      { combinedScore: null, binance: {}, polymarket: {} },
+      'MIDPOINT_010_TRIGGER',
+      this.rules.reversalShares,
     );
     const filledShares = Number(submitted.filledShares) || 0;
-    const averagePrice = Number.isFinite(Number(submitted.averagePrice))
-      ? Number(submitted.averagePrice)
-      : null;
-    const bestAskAtSubmission = Number.isFinite(Number(submitted.bestAskAtSubmission))
-      ? Number(submitted.bestAskAtSubmission)
-      : null;
-    const entryReason = submitted.orderId
-      ? filledShares > 0
-        ? `${signalSide} signal bought ${filledShares} ${buySide} shares at an average $${averagePrice.toFixed(3)}; taker fee $${Number(submitted.fees || 0).toFixed(3)}.`
-        : `${signalSide} signal tried to buy ${buySide}, but no shares filled: ${submitted.reason || 'no visible ask liquidity'}.`
-      : `${signalSide} signal tried to buy ${buySide}, but the order was not placed: ${submitted.reason || 'no fresh ask available'}.`;
+    const reason = filledShares > 0
+      ? `${this.firstFilledSide} midpoint reached $${midpoint.toFixed(3)}; immediately market-bought ${filledShares} ${oppositeSide} shares.`
+      : `${this.firstFilledSide} midpoint reached $${midpoint.toFixed(3)}; the opposite market buy was attempted but did not fill (${submitted.reason || 'no visible ask liquidity'}).`;
+    this.priceStrategyState = {
+      ...this.priceStrategyState,
+      status: filledShares > 0 ? 'REVERSAL_BOUGHT' : 'REVERSAL_ATTEMPTED',
+      reason,
+      firstFilledSide: this.firstFilledSide,
+      firstSideMidpoint: midpoint,
+      reversalTriggered: true,
+      reversalSide: oppositeSide,
+      reversalRequestedShares: this.rules.reversalShares,
+      reversalFilledShares: filledShares,
+      reversalOrderId: submitted.orderId || null,
+      reversalOrderStatus: submitted.status || 'NOT_PLACED',
+    };
     this.signal = {
-      side: buySide,
-      signalSide,
-      buySide,
-      action: buySide === 'UP' ? 'BUY_UP' : 'BUY_DOWN',
-      reason: `${entryReason} Existing shares on either side are held until official resolution; no early sells.`,
-      combinedScore: this.pressure.combinedScore,
-      binanceScore: this.pressure.binance?.score,
-      polymarketScore: this.pressure.polymarket?.score,
+      side: oppositeSide,
+      signalSide: this.firstFilledSide,
+      buySide: oppositeSide,
+      action: filledShares > 0 ? 'BUY_OPPOSITE_200' : 'REVERSAL_BUY_ATTEMPTED',
+      reason,
       buyFilledShares: filledShares,
       buyUnfilledShares: Number(submitted.unfilledShares) || 0,
-      averagePrice,
-      bestAskAtSubmission,
+      averagePrice: submitted.averagePrice ?? null,
       fees: Number(submitted.fees) || 0,
-      estimatedMakerRebate: Number(submitted.estimatedMakerRebate) || 0,
       orderId: submitted.orderId || null,
       orderStatus: submitted.status || 'NOT_PLACED',
-      oppositeExitStatus: 'DISABLED_HOLD_TO_RESOLUTION',
-      oppositeSharesSold: 0,
-      heldOtherSideShares,
     };
-    return filledShares > 0;
+    this.log('PAPER_MIDPOINT_REVERSAL_TRIGGERED', {
+      positionSide: this.firstFilledSide,
+      midpoint,
+      oppositeSide,
+      requestedShares: this.rules.reversalShares,
+      filledShares,
+      orderId: submitted.orderId || null,
+      orderStatus: submitted.status || 'NOT_PLACED',
+    });
+    return true;
   }
 
   submitMarketBuy(
@@ -763,9 +935,16 @@ class OrderFlowBot extends MispricingBot {
     ]));
     const pendingResolutionPositions = this.positions.filter((position) =>
       position.status === 'PENDING_RESOLUTION');
-    const flow = this.pressure?.evaluatedAt === now
-      ? this.pressure
-      : this.buildPressureSnapshot(now);
+    const flow = {
+      status: 'PRICE_ONLY',
+      reason: 'Pressure scores are not used by this strategy.',
+      ready: false,
+      evaluatedAt: now,
+      candidateSide: null,
+      confirmedSide: null,
+      confirmationCount: 0,
+      requiredConfirmations: 0,
+    };
     const totalInventory = Object.fromEntries(SIDES.map((side) => [
       side,
       this.totalInventoryForSide(side),
@@ -859,64 +1038,59 @@ class OrderFlowBot extends MispricingBot {
       strategy: {
         id: this.strategyId,
         name: this.strategyName,
-        version: 'btc-5m-reversed-pressure-resolution-only-v12',
+        version: 'btc-5m-dual-020-resting-limit-midpoint-010-reversal-v13',
         execution: 'PAPER ONLY',
         symbol: 'BTCUSDT',
         timeframe: '5m',
-        signalSource: 'Binance aggressor trade flow + Polymarket order-book imbalance, microprice, and trade flow.',
-        lookbackMs: config.FLOW_WINDOW_MS,
-        evaluationIntervalMs: config.FLOW_EVAL_INTERVAL_MS,
-        confirmationsRequired: config.FLOW_CONFIRMATION_COUNT,
-        combinedSignalThreshold: config.FLOW_SIGNAL_THRESHOLD,
-        componentMinimum: config.FLOW_COMPONENT_MIN,
-        entrySharesPerSignal: config.FLOW_ENTRY_SHARES,
-        entryPriceSource: 'VISIBLE_ASK_MARKET_SWEEP',
-        entryPriceFilter: 'NONE',
+        signalSource: 'Polymarket CLOB best ask and UP/DOWN midpoint only.',
+        entrySharesPerSignal: config.PRICE_LIMIT_SHARES,
+        entryPriceSource: 'RESTING_LIMIT_AT_FIXED_PRICE',
+        entryPriceFilter: `BEST_ASK_AT_OR_BELOW_${config.PRICE_LIMIT_ENTRY.toFixed(2)}`,
         entrySlippageCeiling: null,
         maxInventoryPerSide: null,
         maxTotalInventoryShares: null,
         maxActiveSidesPerWindow: 2,
         activeSide: currentOpen.length > 1 ? 'BOTH' : currentOpen[0]?.side || null,
         activeSides: SIDES.filter((side) => positionsBySide[side]),
-        orderType: ORDER_TYPE,
+        orderType: `${LIMIT_ORDER_TYPE} + ${ORDER_TYPE}`,
         usesTakerOrders: true,
-        usesMakerOrders: false,
+        usesMakerOrders: true,
         accumulatesInventory: true,
         entries: {
-          orderType: ORDER_TYPE,
-          sharesPerSignal: config.FLOW_ENTRY_SHARES,
-          sideMapping: 'BUY_OPPOSITE_OF_PRESSURE_SIGNAL',
-          execution: 'Sweep all valid visible asks immediately from best to worse; no entry price floor or ceiling.',
-          priceFilter: null,
-          slippageCeiling: null,
-          timeInForce: 'FAK',
-          partialFillsAllowed: true,
-          unfilledRemainder: 'Cancelled immediately after the visible ask sweep.',
-          oneEntryPerConfirmedSignalEpisode: true,
-          sameSideSignalAction: 'ADD_100_SHARES_TO_OPPOSITE_OF_PRESSURE_SIGNAL_ON_EACH_NEWLY_CONFIRMED_EPISODE',
-          maxActiveSidesPerWindow: 2,
-          oppositeSignalAction: 'BUY_OPPOSITE_OF_PRESSURE_SIGNAL; KEEP_ALL_EXISTING_SHARES_UNTIL_OFFICIAL_RESOLUTION',
-          oppositeSignalSellOrderType: null,
-          oppositeSignalProfitabilityRule: 'Opposite signals never sell. Existing shares remain open until official resolution of their original market.',
-          cancelUnfilledOnNextSignal: false,
-          cancelUnfilledAtWindowEnd: false,
-          paperFillRule: 'Immediately sweep all valid visible asks for up to 100 shares with no entry price floor or ceiling; partial fills are allowed and any remainder is cancelled. Model taker fees on each fill level.',
-          inventoryLimit: 'Available paper cash only; order quantities are reduced to affordable visible liquidity.',
+          orderType: LIMIT_ORDER_TYPE,
+          sharesPerSide: config.PRICE_LIMIT_SHARES,
+          limitPrice: config.PRICE_LIMIT_ENTRY,
+          sideMapping: 'REST_BOTH_UP_AND_DOWN_LIMIT_BUYS',
+          execution: 'Place a resting limit buy for 100 shares at $0.20 on both sides immediately after the window opens.',
+          fillRule: 'A fresh best ask at or below $0.20 confirms all 100 shares filled at the best ask, capped at the $0.20 limit.',
+          priceFilter: `BEST_ASK_AT_OR_BELOW_${config.PRICE_LIMIT_ENTRY.toFixed(2)}`,
+          timeInForce: 'UNTIL_FIRST_FILL_OR_WINDOW_END',
+          partialFillsAllowed: false,
+          cancelOtherSideOnFill: true,
+          cancelUnfilledAtWindowEnd: true,
+          limitEntryFees: 'No taker fee is modeled for the resting limit fill; maker rebate is not estimated.',
+          reversalOrderType: ORDER_TYPE,
+          reversalTrigger: `FILLED_SIDE_MIDPOINT_AT_OR_BELOW_${config.PRICE_REVERSAL_TRIGGER_MID.toFixed(2)}`,
+          reversalShares: config.PRICE_REVERSAL_SHARES,
+          reversalExecution: 'Immediately sweep visible asks on the opposite side; partial fills are allowed and the unfilled remainder is cancelled.',
+          reversalOncePerWindow: true,
+          inventoryLimit: 'Available paper cash; an entry is not recorded if its full 100-share limit fill cannot be funded.',
         },
         exit: {
           orderType: 'POLYMARKET_RESOLUTION_ONLY',
-          trigger: 'No early sells. There is no take-profit, stop-loss, or opposite-signal exit.',
+          trigger: 'No early sells. There is no take-profit or stop-loss exit.',
           fills: 'Every filled position stays open for the full window and then waits for official resolution of its original market.',
-          fees: 'Only entry taker fees are modeled. No sell order or sell fee is created.',
+          fees: 'Resting limit entries have no modeled taker fee; the 200-share reversal market buy has modeled taker fees.',
           takeProfit: null,
           stopLoss: null,
-          oppositeSignal: 'Opposite signals add a new reversed-side buy; they never sell existing shares.',
+          oppositeSignal: 'A filled-side midpoint at or below $0.10 triggers one opposite-side market buy for 200 shares; no shares are sold.',
           windowEnd: 'At window end, open shares move to pending resolution and settle only from the official result of their original market.',
         },
-        timing: 'Recalculate flow every second using the preceding five seconds of Binance and Polymarket data; immediately sweep visible asks on the opposite side for every newly confirmed UP or DOWN signal. Never sell before official resolution.',
-        sizing: `${config.FLOW_ENTRY_SHARES} shares per newly confirmed pressure-signal episode, bought on the opposite outcome side. UP and DOWN positions may both stay open in one window.`,
-        trigger: `Require Binance and Polymarket directional pressure to agree, each component to exceed ${config.FLOW_COMPONENT_MIN.toFixed(2)}, and combined pressure to reach ±${config.FLOW_SIGNAL_THRESHOLD.toFixed(2)} for ${config.FLOW_CONFIRMATION_COUNT} consecutive checks. No entry price floor or ceiling applies.`,
+        timing: 'Place both $0.20 resting limit orders at window open, monitor best asks and the filled side midpoint continuously, and cancel the opposite resting order on the first confirmed fill.',
+        sizing: `${config.PRICE_LIMIT_SHARES} shares per resting side; one ${config.PRICE_REVERSAL_SHARES}-share opposite-side taker buy when the filled side midpoint reaches $${config.PRICE_REVERSAL_TRIGGER_MID.toFixed(2)} or lower.`,
+        trigger: `Rest 100 UP and 100 DOWN limit buys at $${config.PRICE_LIMIT_ENTRY.toFixed(2)}. A best ask at or below that price fills one side; the filled side midpoint at or below $${config.PRICE_REVERSAL_TRIGGER_MID.toFixed(2)} triggers the opposite-side buy.`,
         currentSignal: this.signal,
+        priceState: this.priceStrategyState,
       },
       model,
       binance: {
@@ -939,7 +1113,7 @@ class OrderFlowBot extends MispricingBot {
       statusReason: this.flowState?.reason || flow.reason || state.statusReason,
       websocket: {
         ...this.websocket,
-        detail: 'Binance aggregate trades and Polymarket UP/DOWN CLOB books/trades are combined for paper signals.',
+        detail: 'Polymarket CLOB UP/DOWN prices control all entries; Binance data is not used by this strategy.',
       },
       quotes: {
         ...state.livePrices,
@@ -964,13 +1138,17 @@ class OrderFlowBot extends MispricingBot {
         totalOutstandingShares: totalInventory.UP + totalInventory.DOWN,
       },
       flowState: { ...this.flowState },
+      priceStrategyState: { ...this.priceStrategyState },
+      entryOrders: strategyOrders.filter((order) =>
+        order.orderType === LIMIT_ORDER_TYPE
+        && Number(order.windowStart) === Number(windowStart)),
       flowStats: {
         ordersPlaced: strategyOrders.length,
         buys: strategyOrders.filter((order) => order.action === 'BUY').length,
         sells: strategyOrders.filter((order) => order.action === 'SELL').length,
         activeWindowOrders: activeOrders.length,
         pendingMakerBuys: activeOrders.filter((order) =>
-          order.action === 'BUY' && order.orderType === ORDER_TYPE && order.status === 'RESTING').length,
+          order.action === 'BUY' && order.orderType === LIMIT_ORDER_TYPE && order.status === 'RESTING').length,
         inventoryBySide: totalInventory,
       },
       window: windowStart == null ? null : {

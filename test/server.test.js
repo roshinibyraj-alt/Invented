@@ -44,7 +44,7 @@ test('health endpoint reports strategy errors as unhealthy', async t => {
   assert.deepEqual(await response.json(), { ok: false, mode: 'DEMO', status: 'ERROR', now: 123 });
 });
 
-test('dashboard explains reversed entries, no early sells, and resolution-only exits', async t => {
+test('dashboard explains the resting limits, midpoint reversal, and resolution-only exits', async t => {
   const server = startServer({ snapshot: () => ({}) }, 0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -53,30 +53,22 @@ test('dashboard explains reversed entries, no early sells, and resolution-only e
   assert.equal(response.status, 200);
   assert.ok(html.indexOf('Current Polymarket books') < html.indexOf('Paper equity'));
   assert.match(html, /Invented · BTC 5-minute/);
-  assert.match(html, /Independent-side pressure bot/i);
-  assert.match(html, /three one-second checks/i);
-  assert.match(html, /last five seconds/i);
-  assert.match(html, /100 shares per signal/i);
-  assert.match(html, /An UP signal sweeps visible DOWN asks for 100 shares/i);
-  assert.match(html, /No early sells/i);
-  assert.match(html, /There are no opposite-signal sells, take-profit orders, or stop-loss exits/i);
+  assert.match(html, /Two-sided limit-entry bot/i);
+  assert.match(html, /100-share buys at \$0\.20 on both sides/i);
+  assert.match(html, /best ask reaches \$0\.20/i);
+  assert.match(html, /midpoint reaches \$0\.10 or lower/i);
+  assert.match(html, /market-buys 200 shares on the opposite side/i);
+  assert.match(html, /There are no sells, take-profits, or stop-losses/i);
   assert.match(html, /official resolution/i);
-  assert.match(html, /state\.signal\?\.signalSide && state\.signal\?\.buySide/);
-  assert.match(html, /Every newly confirmed UP signal market-buys DOWN/i);
-  assert.match(html, /partial fills are allowed/i);
-  assert.match(html, /There is no entry-price floor or ceiling/i);
-  assert.match(html, /Only market-entry taker fees are modeled/i);
-  assert.match(html, /PAPER_MARKET_BUY/);
+  assert.match(html, /PAPER_LIMIT_BUY/);
   assert.match(html, /Completed-window win rate/i);
-  assert.doesNotMatch(html, /PAPER_MARKET_OPPOSITE_SIGNAL_EXIT/);
-  assert.doesNotMatch(html, /PAPER_LIMIT_TAKE_PROFIT|PAPER_STOP_LOSS/);
-  assert.doesNotMatch(html, /0\.99|0\.01/);
+  assert.doesNotMatch(html, /PAPER_MARKET_OPPOSITE_SIGNAL_EXIT|PAPER_LIMIT_TAKE_PROFIT|PAPER_STOP_LOSS/);
+  assert.doesNotMatch(html, /pressure signals are confirmed/i);
   assert.match(html, /Waiting for official resolution/i);
   assert.match(html, /current-window UP and DOWN boxes/i);
   assert.match(html, /official resolution/i);
   assert.match(html, /PAPER ONLY/);
-  assert.match(html, /Binance BTCUSDT aggregate-trade WebSocket/);
-  assert.match(html, /Polymarket CLOB books and trades/);
+  assert.match(html, /Polymarket CLOB price triggers/);
   assert.match(html, /Recent orders/);
   assert.doesNotMatch(html, /Global equity curve/i);
   assert.doesNotMatch(html, /Position history/i);
