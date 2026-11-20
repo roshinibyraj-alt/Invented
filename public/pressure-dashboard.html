@@ -232,8 +232,10 @@
           ? Math.round(Math.abs(Number(beat.offsetMs)) / 1000) : null;
         source.textContent = beat?.source === 'CHAINLINK_DATA_STREAMS'
           ? `CHAINLINK · ${chainlinkOffset === 0 ? 'exact time' : `${chainlinkOffset ?? '—'}s offset`}`
-          : beat?.source === 'COINGECKO_PROXY' ? 'COINGECKO · APPROXIMATE' : 'Waiting for strike data';
-        source.className = `source-tag ${beat?.source === 'CHAINLINK_DATA_STREAMS' ? 'exact' : beat?.source === 'COINGECKO_PROXY' ? 'proxy' : ''}`;
+          : beat?.source === 'COINGECKO_SPOT_PROXY'
+            ? `COINGECKO SPOT · +${Math.round(chainlinkOffset ?? 0)}s · APPROXIMATE`
+            : beat?.source === 'COINGECKO_PROXY' ? 'COINGECKO HISTORY · APPROXIMATE' : 'Waiting for strike data';
+        source.className = `source-tag ${beat?.source === 'CHAINLINK_DATA_STREAMS' ? 'exact' : ['COINGECKO_PROXY', 'COINGECKO_SPOT_PROXY'].includes(beat?.source) ? 'proxy' : ''}`;
         const outcomes = market?.outcomes || {};
         $(`${prefix}Outcomes`).innerHTML = `${outcomeHtml('UP', outcomes.UP)}${outcomeHtml('DOWN', outcomes.DOWN)}`;
       }

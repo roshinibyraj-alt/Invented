@@ -10,7 +10,7 @@ Invented now runs a paper-only paired strategy across Polymarket BTC 5-minute an
 - Model stronger opportunities as market-style fills; nearer-threshold opportunities use per-leg limit caps with at most 2% slippage. Both legs must have full visible ask depth. The paper pair is recorded only if both legs fill and the combined cost plus modeled taker fees is below the $10 minimum combined payout.
 - Hold each leg until the official result for its own Polymarket market is available. Pair P&L combines both payouts and both entry costs.
 
-The historical beat-price provider tries Chainlink Data Streams first. If that endpoint is unavailable, it uses a clearly labeled CoinGecko historical proxy. That proxy is not the official Chainlink resolution feed; proxy-based results are estimates, not guaranteed arbitrage or proof of the exact official strike. The dashboard shows which source was used.
+The historical beat-price provider tries Chainlink Data Streams first, then a timestamped CoinGecko historical proxy. If neither can provide a price and the market opened within the last five minutes, it can use a clearly labeled current CoinGecko spot estimate so a missing recent history sample does not block every entry. That spot estimate is taken after market open and is not the exact Chainlink start price. Proxy-based results are estimates, not guaranteed arbitrage or proof of the exact official strike. The dashboard shows which source was used and the spot estimate's age.
 
 ## Dashboard and runtime
 
