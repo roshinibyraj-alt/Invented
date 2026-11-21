@@ -3,7 +3,6 @@
 const config = require('./config');
 const WickBot = require('./wick-bot');
 const defaultMarketData = require('./wick-market-data');
-const BeatPriceProvider = require('./beat-price-provider');
 const BinanceBeatFeed = require('./binance-beat-feed');
 
 const { quoteFromBook, takerFeeFor, feeContext } = WickBot._test;
@@ -12,15 +11,15 @@ const FIFTEEN_MINUTES_MS = 15 * 60 * 1000;
 const STRATEGY = Object.freeze({
   id: 'btc-every-5m-paired-5m-15m-paper',
   name: 'BTC every-5m paired 5m/15m paper strategy',
-  version: 'btc-every-5m-paired-paper-v5',
+  version: 'btc-every-5m-paired-paper-v6',
   quantity: 100,
   askSumTarget: 0.60,
   entryAskSumThresholds: Object.freeze([0.80, 0.70, 0.60]),
   sweepPriceCeiling: 0.99,
-  maxQuoteAgeMs: 5000,
+  takeProfitTrigger: 0.99,
+  takeProfitPayout: 1.00,
+  maxQuoteAgeMs: 15_000,
   pairMarketRefreshMs: 15_000,
-  bookRefreshMs: 10_000,
-  beatRetryMs: 30_000,
   beatVolatilityWindowMs: 60_000,
   minimumBeatToleranceUsd: 2,
   maximumBeatToleranceUsd: 100,
@@ -103,7 +102,6 @@ function detectOpportunity({
   askSumThresholds = STRATEGY.entryAskSumThresholds,
   beatToleranceUsd = 0,
   allowBeatDirection = true,
-  fallbackReason = 'Beat or volatility reference unavailable',
 }) {
   if (!validPairMarkets(market5m, market15m)) {
     return { exists: false, case: null, reason: 'The current 5-minute market is not contained in the active 15-minute market.' };
@@ -111,7 +109,21 @@ function detectOpportunity({
   const values = [beat5m?.value, beat15m?.value].map((value) =>
     value == null || value === '' ? NaN : Number(value));
   const beatsAvailable = values.every((value) => Number.isFinite(value) && value > 0);
-  const useBeatDirection = allowBeatDirection && beatsAvailable;
+  if (!allowBeatDirection || !beatsAvailable) {
+    return {
+      exists: false,
+      case: null,
+      selectionMode: 'BINANCE_WS_ONLY',
+      beatPrices: {
+        beat5m: Number.isFinite(values[0]) ? values[0] : null,
+        beat15m: Number.isFinite(values[1]) ? values[1] : null,
+      },
+      beatGapUsd: null,
+      beatToleranceUsd: null,
+      reason: 'Waiting for valid 5m and 15m beat prices from the Binance WebSocket.',
+    };
+  }
+  const useBeatDirection = true;
   const beatGapUsd = beatsAvailable ? Math.abs(values[0] - values[1]) : null;
   const toleranceUsd = Math.max(0, Number(beatToleranceUsd) || 0);
   const candidates = [];
@@ -133,10 +145,7 @@ function detectOpportunity({
     });
   };
 
-  if (!useBeatDirection) {
-    addCandidate('F', '5m', '15m');
-    addCandidate('F', '15m', '5m');
-  } else if (beatGapUsd <= toleranceUsd + EPSILON) {
+  if (beatGapUsd <= toleranceUsd + EPSILON) {
     addCandidate('C', '5m', '15m');
     addCandidate('C', '15m', '5m');
   } else if (values[1] > values[0]) {
@@ -149,18 +158,16 @@ function detectOpportunity({
   if (!selected) {
     return {
       exists: false,
-      case: useBeatDirection
-        ? beatGapUsd <= toleranceUsd + EPSILON ? 'C' : values[1] > values[0] ? 'A' : 'B'
-        : 'F',
+      case: beatGapUsd <= toleranceUsd + EPSILON ? 'C' : values[1] > values[0] ? 'A' : 'B',
       direction: null,
       prices: null,
-      selectionMode: useBeatDirection ? 'BEAT_GAP' : 'ASK_SUM_FALLBACK',
+      selectionMode: 'BEAT_GAP',
       beatPrices: {
         beat5m: Number.isFinite(values[0]) ? values[0] : null,
         beat15m: Number.isFinite(values[1]) ? values[1] : null,
       },
       beatGapUsd,
-      beatToleranceUsd: useBeatDirection ? toleranceUsd : null,
+      beatToleranceUsd: toleranceUsd,
       reason: 'Fresh asks for the selected UP and DOWN legs are unavailable.',
     };
   }
@@ -172,7 +179,7 @@ function detectOpportunity({
     selected.prices.sumPrice < threshold - EPSILON);
   const activeThreshold = qualifyingThresholds[0] ?? thresholds[0] ?? Number(askSumTarget);
   const askSumUnderTarget = qualifyingThresholds.length > 0;
-  const selectionMode = useBeatDirection ? 'BEAT_GAP' : 'ASK_SUM_FALLBACK';
+  const selectionMode = 'BEAT_GAP';
   const sharedOpportunity = {
     ...selected,
     selectionMode,
@@ -181,7 +188,7 @@ function detectOpportunity({
       beat15m: Number.isFinite(values[1]) ? values[1] : null,
     },
     beatGapUsd,
-    beatToleranceUsd: useBeatDirection ? toleranceUsd : null,
+    beatToleranceUsd: toleranceUsd,
     askSumTarget: activeThreshold,
     askSumThresholds: thresholds,
     qualifyingThresholds,
@@ -202,16 +209,13 @@ function detectOpportunity({
     ...sharedOpportunity,
     exists: true,
     waitingForAskSum: false,
-    reason: `${useBeatDirection
-      ? `Beat gap $${beatGapUsd.toFixed(2)} versus $${toleranceUsd.toFixed(2)} volatility band`
-      : `${fallbackReason}; selected the lower combined asks`}; paired asks sum to $${selected.prices.sumPrice.toFixed(3)}, below at least one entry threshold.`,
+    reason: `Beat gap $${beatGapUsd.toFixed(2)} versus $${toleranceUsd.toFixed(2)} volatility band; paired asks sum to $${selected.prices.sumPrice.toFixed(3)}, below at least one entry threshold.`,
   };
 }
 
 class CrossTimeframeArbitrageBot extends WickBot {
   constructor({
     marketData = defaultMarketData,
-    beatPriceProvider = null,
     binanceFeed = null,
     now = Date.now,
     initialCapital = config.DEMO_CAPITAL,
@@ -230,7 +234,6 @@ class CrossTimeframeArbitrageBot extends WickBot {
     this.strategyName = STRATEGY.name;
     this.rules = { sharesPerSide: STRATEGY.quantity, quantityPerLeg: STRATEGY.quantity };
     this.marketData = marketData;
-    this.beatPriceProvider = beatPriceProvider || new BeatPriceProvider();
     this.now = now;
     this.WebSocketImpl = WebSocketImpl;
     this.binanceFeed = binanceFeed || new BinanceBeatFeed({ WebSocketImpl, now });
@@ -242,10 +245,8 @@ class CrossTimeframeArbitrageBot extends WickBot {
     this.tokenRefs = new Map();
     this.pairKey = null;
     this.pairMarketRefreshAt = 0;
-    this.lastBookRefreshAt = 0;
     this.marketStream = null;
     this.streamGeneration = 0;
-    this.beatPriceCache = new Map();
     this.currentBeatPrices = { '5m': null, '15m': null };
     this.lastBeatWindow = { '5m': null, '15m': null };
     this.processedEntryThresholds = new Set();
@@ -343,14 +344,9 @@ class CrossTimeframeArbitrageBot extends WickBot {
       this.pairBooks = this.emptyBookPair();
       this.pairQuotes = this.emptyQuotePair();
       this.rebuildTokenRefs();
-      this.lastBookRefreshAt = 0;
       if (five) {
-        await this.refreshPairBooks(now);
         this.startMarketStream();
       }
-    } else if (now - this.lastBookRefreshAt >= STRATEGY.bookRefreshMs
-      || this.pairHasStaleBooks(now)) {
-      await this.refreshPairBooks(now);
     }
 
     for (const side of SIDES) {
@@ -371,34 +367,6 @@ class CrossTimeframeArbitrageBot extends WickBot {
         if (tokenId) this.tokenRefs.set(String(tokenId), { timeframe, side });
       }
     }
-  }
-
-  pairHasStaleBooks(now) {
-    return TIMEFRAMES.some((timeframe) => SIDES.some((side) => {
-      const updatedAt = Number(this.pairBooks[timeframe][side]?.updatedAt);
-      return !Number.isFinite(updatedAt) || now - updatedAt > STRATEGY.maxQuoteAgeMs;
-    }));
-  }
-
-  async refreshPairBooks(now) {
-    const requests = [];
-    for (const timeframe of TIMEFRAMES) {
-      const market = this.pairMarkets[timeframe];
-      if (!market?.tokens) continue;
-      for (const side of SIDES) {
-        const tokenId = market.tokens[side];
-        if (!tokenId) continue;
-        requests.push({ timeframe, side, tokenId });
-      }
-    }
-    const results = await Promise.allSettled(requests.map(({ tokenId }) => this.marketData.getBook(tokenId)));
-    results.forEach((result, index) => {
-      if (result.status !== 'fulfilled' || !result.value) return;
-      const { timeframe, side } = requests[index];
-      this.applyBookSnapshot(timeframe, side, result.value, now);
-    });
-    this.lastBookRefreshAt = now;
-    this.syncBaseQuotes();
   }
 
   applyBookSnapshot(timeframe, side, book, now = this.now()) {
@@ -490,13 +458,40 @@ class CrossTimeframeArbitrageBot extends WickBot {
       reconnectMaxMs: 15_000,
       onStatus: (update) => {
         if (generation !== this.streamGeneration) return;
-        this.websocket = { ...this.websocket, ...update };
-        if (update.status === 'CONNECTED') this.websocket.connectedAt = this.now();
+        const wasConnected = this.websocket.status === 'CONNECTED';
+        const connectedNow = update.status === 'CONNECTED' && !wasConnected;
+        this.websocket = {
+          ...this.websocket,
+          ...update,
+          ...(connectedNow ? { connectedAt: this.now(), lastMessageAt: null } : {}),
+        };
+        if (connectedNow) {
+          this.pairBooks = this.emptyBookPair();
+          this.pairQuotes = this.emptyQuotePair();
+          this.syncBaseQuotes();
+        } else if (update.heartbeat) {
+          const heartbeatAt = this.now();
+          this.websocket.lastMessageAt = heartbeatAt;
+          this.refreshBookHeartbeats(heartbeatAt);
+        }
       },
       onMessage: (message) => {
         if (generation === this.streamGeneration) this.handleMarketMessage(message);
       },
     });
+  }
+
+  refreshBookHeartbeats(now) {
+    for (const timeframe of TIMEFRAMES) {
+      for (const side of SIDES) {
+        const book = this.pairBooks[timeframe]?.[side];
+        if (!book || !this.pairQuotes[timeframe]?.[side]) continue;
+        book.updatedAt = now;
+        this.pairQuotes[timeframe][side] = quoteFromBook(book, now);
+        this.updatePositionMarks(now, timeframe, side);
+      }
+    }
+    this.syncBaseQuotes();
   }
 
   closeMarketStream() {
@@ -518,12 +513,107 @@ class CrossTimeframeArbitrageBot extends WickBot {
       if (timeframe && (position.timeframe !== timeframe || position.side !== side)) continue;
       const quote = this.pairQuotes[position.timeframe]?.[position.side];
       if (quote?.bestBid != null && Number.isFinite(Number(quote.updatedAt))) {
-        position.markBid = Number(quote.bestBid);
-        position.markPrice = Number(quote.bestBid);
+        const bestBid = Number(quote.bestBid);
+        position.markBid = bestBid;
+        position.markPrice = bestBid;
         position.markUpdatedAt = Number(quote.updatedAt);
         position.markStatus = now - position.markUpdatedAt <= STRATEGY.maxQuoteAgeMs ? 'LIVE' : 'STALE';
+        if (position.markStatus === 'LIVE' && bestBid >= STRATEGY.takeProfitTrigger - EPSILON) {
+          this.finalizeTakeProfit(position, bestBid, now);
+        }
       }
     }
+  }
+
+  finalizeTakeProfit(position, triggerBid, now = this.now()) {
+    if (position.status !== 'OPEN' || Number(triggerBid) < STRATEGY.takeProfitTrigger - EPSILON) return false;
+    const shares = Number(position.shares) || 0;
+    const proceeds = shares * STRATEGY.takeProfitPayout;
+    const totalCost = Number(position.initialTotalCost ?? position.totalCost) || 0;
+    const entryFees = Number(position.initialFees ?? position.fees) || 0;
+    const exitFees = Number(position.exitFees) || 0;
+    position.takeProfitTrigger = STRATEGY.takeProfitTrigger;
+    position.takeProfitPayout = STRATEGY.takeProfitPayout;
+    position.takeProfitProceeds = proceeds;
+    position.resolutionProceeds = 0;
+    position.proceeds = proceeds + (Number(position.exitProceeds) || 0) + (Number(position.mergeProceeds) || 0);
+    position.payout = STRATEGY.takeProfitPayout;
+    position.realizedPnl = position.proceeds - totalCost - entryFees - exitFees
+      + (Number(position.estimatedMakerRebate) || 0);
+    position.status = 'SETTLED_EXIT';
+    position.settledAt = now;
+    position.settlementBasis = 'TAKE_PROFIT_099';
+    position.exitReason = 'TAKE_PROFIT_099';
+    position.exitType = 'TAKE_PROFIT';
+    position.exitPrice = STRATEGY.takeProfitPayout;
+    position.exitBid = Number(triggerBid);
+    position.exitFees = exitFees;
+    position.exitFills = [{
+      price: STRATEGY.takeProfitPayout,
+      triggerBid: Number(triggerBid),
+      shares,
+      at: now,
+      orderType: 'PAPER_TAKE_PROFIT',
+    }];
+    position.markValue = 0;
+    position.unrealizedPnl = 0;
+    position.markStatus = 'CLOSED';
+    this.cash += proceeds;
+    const outcome = position.realizedPnl > EPSILON ? 'WIN'
+      : position.realizedPnl < -EPSILON ? 'LOSS' : 'BREAK_EVEN';
+    this.recordStrategyOutcome(position, outcome, now, 'TAKE_PROFIT_099');
+    this.log('PAPER_TAKE_PROFIT_FILLED', {
+      positionId: position.id,
+      pairId: position.pairId,
+      timeframe: position.timeframe,
+      side: position.side,
+      shares,
+      triggerBid: Number(triggerBid),
+      assumedExitPrice: STRATEGY.takeProfitPayout,
+      proceeds,
+      entryFees,
+      realizedPnl: position.realizedPnl,
+    });
+    this.updatePairSettlement(position.pairId, now);
+    return true;
+  }
+
+  updatePairSettlement(pairId, now = this.now()) {
+    if (!pairId) return null;
+    const pair = this.pairs.find((item) => item.id === pairId);
+    if (!pair) return null;
+    const legs = this.positions.filter((item) => item.pairId === pairId);
+    pair.settledLegs = legs.filter((item) => item.status === 'SETTLED_EXIT').length;
+    pair.legResults = legs.map((item) => ({
+      timeframe: item.timeframe,
+      side: item.side,
+      status: item.status,
+      exitReason: item.exitReason || null,
+      exitPrice: item.exitPrice ?? null,
+      realizedPnl: item.realizedPnl ?? null,
+    }));
+    if (pair.settledLegs === legs.length && legs.length === 2) {
+      pair.status = 'SETTLED';
+      pair.settledAt = Math.max(...legs.map((item) => Number(item.settledAt) || now));
+      pair.realizedPnl = legs.reduce((sum, item) => sum + (Number(item.realizedPnl) || 0), 0);
+      pair.outcome = pair.realizedPnl > EPSILON ? 'WIN'
+        : pair.realizedPnl < -EPSILON ? 'LOSS' : 'BREAK_EVEN';
+      this.log('PAPER_PAIR_SETTLED', {
+        pairId: pair.id,
+        outcome: pair.outcome,
+        realizedPnl: pair.realizedPnl,
+        legResults: legs.map((item) => ({
+          timeframe: item.timeframe,
+          side: item.side,
+          exitReason: item.exitReason,
+          winner: item.resolutionWinner || null,
+          pnl: item.realizedPnl,
+        })),
+      });
+    } else if (pair.settledLegs > 0) {
+      pair.status = 'PARTIALLY_SETTLED';
+    }
+    return pair;
   }
 
   async getBeatPrice(market, now) {
@@ -531,54 +621,82 @@ class CrossTimeframeArbitrageBot extends WickBot {
     if (!Number.isFinite(start) || Math.abs(start - Number(market.start)) > 1000) {
       return { value: null, source: null, error: 'Market-start timestamp does not match its window.' };
     }
-    const key = `${marketKey(market)}:${start}`;
-    let cached = this.beatPriceCache.get(key);
-    const binanceBeat = this.binanceFeed?.getBeatPriceAt?.(start);
+    const binanceBeat = this.binanceFeed?.status === 'CONNECTED'
+      ? this.binanceFeed?.getBeatPriceAt?.(start)
+      : null;
     if (binanceBeat?.value > 0) {
-      if (!cached) {
-        cached = { at: now, value: binanceBeat, loading: null };
-        this.beatPriceCache.set(key, cached);
-      } else {
-        cached.at = now;
-        cached.value = binanceBeat;
-        cached.loading = null;
-      }
       this.setCurrentBeatPrice(market, binanceBeat);
       return binanceBeat;
     }
-    if (cached?.value?.value > 0) return cached.value;
-    if (cached?.loading) return cached.loading;
-    if (cached && now - cached.at < STRATEGY.beatRetryMs) return cached.value;
+    const waiting = {
+      value: null,
+      source: 'BINANCE_WS_ONLY',
+      error: this.binanceFeed?.status === 'CONNECTED'
+        ? 'No Binance WebSocket tick was captured within 2 seconds of this market start.'
+        : 'Waiting for the Binance WebSocket connection.',
+    };
+    this.setCurrentBeatPrice(market, waiting);
+    return waiting;
+  }
 
-    const entry = { at: now, value: null, loading: null };
-    entry.loading = Promise.resolve()
-      .then(async () => {
-        const liveBeat = this.binanceFeed?.getBeatPriceAt?.(start);
-        if (liveBeat?.value > 0) return liveBeat;
-        const fallback = await this.beatPriceProvider.getAtTimestamp(start);
-        return this.binanceFeed?.getBeatPriceAt?.(start) || fallback;
-      })
-      .then((value) => {
-        const liveBeat = this.binanceFeed?.getBeatPriceAt?.(start);
-        entry.value = liveBeat?.value > 0
-          ? liveBeat
-          : entry.value?.source === 'BINANCE_WS_ESTIMATE'
-            ? entry.value
-            : value || { value: null, source: null, error: 'No beat price was returned.' };
-        entry.at = this.now();
-        entry.loading = null;
-        this.setCurrentBeatPrice(market, entry.value);
-        return entry.value;
-      })
-      .catch((error) => {
-        entry.value = { value: null, source: null, error: error?.message || 'Beat-price request failed.' };
-        entry.at = this.now();
-        entry.loading = null;
-        this.setCurrentBeatPrice(market, entry.value);
-        return entry.value;
+  async closePreviousWindows(_currentStart, now = this.now()) {
+    const activeOrderStatuses = ['PENDING', 'LIVE', 'MARKET_PENDING', 'PARTIALLY_FILLED', 'RESTING'];
+    const expiredOrders = this.orders.filter((order) => order.action === 'BUY'
+      && activeOrderStatuses.includes(order.status)
+      && (order.status !== 'PARTIALLY_FILLED' || Number(order.remainingShares) > 0)
+      && Number(order.windowEnd || (Number(order.windowStart) + this.windowMs)) <= now);
+    const expiringPositions = this.positions.filter((position) => position.status === 'OPEN'
+      && Number(position.windowEnd) > 0 && Number(position.windowEnd) <= now);
+    if (!expiredOrders.length && !expiringPositions.length) return 0;
+
+    for (const order of expiredOrders) {
+      order.status = 'CANCELLED_WINDOW_END';
+      order.expiredAt = now;
+      order.remainingShares = 0;
+    }
+    const previousStarts = new Set([
+      ...expiredOrders.map((order) => order.windowStart),
+      ...expiringPositions.map((position) => position.windowStart),
+    ]);
+    for (const windowStart of previousStarts) {
+      if (Number.isFinite(Number(windowStart)) && !this.completedWindows.has(windowStart)) {
+        this.completedWindows.set(windowStart, {
+          completedAt: now,
+          reason: expiringPositions.some((position) => position.windowStart === windowStart)
+            ? 'PENDING_POLYMARKET_RESOLUTION'
+            : 'WINDOW_END',
+        });
+      }
+    }
+    for (const position of expiringPositions) {
+      position.status = 'PENDING_RESOLUTION';
+      position.pendingResolutionSince = now;
+      position.markStatus = 'PENDING_RESOLUTION';
+      position.markValue = null;
+      position.unrealizedPnl = null;
+      if (position.takeProfitOrder?.status === 'RESTING') {
+        position.takeProfitOrder.status = 'CANCELLED_WINDOW_END';
+        position.takeProfitOrder.cancelledAt = now;
+      }
+      this.log('PAPER_POSITION_AWAITING_POLYMARKET_RESOLUTION', {
+        id: position.id,
+        windowStart: position.windowStart,
+        windowEnd: position.windowEnd,
+        side: position.side,
+        shares: position.shares,
+        marketId: position.marketId,
+        strategyOutcome: position.strategyOutcome,
       });
-    this.beatPriceCache.set(key, entry);
-    return entry.loading;
+    }
+    for (const windowStart of previousStarts) {
+      this.log('PAPER_WINDOW_ROLLED_OVER', {
+        windowStart,
+        currentStart: this.orderWindowStart,
+        closedPositions: expiringPositions.filter((position) => position.windowStart === windowStart).length,
+        cancelledOrders: expiredOrders.filter((order) => order.windowStart === windowStart).length,
+      });
+    }
+    return expiringPositions.length;
   }
 
   setCurrentBeatPrice(market, value) {
@@ -617,10 +735,35 @@ class CrossTimeframeArbitrageBot extends WickBot {
       lastTickAgeMs: null,
     };
     this.currentVolatility = volatility;
+    if (this.binanceFeed?.status !== 'CONNECTED' || !volatility.ready) {
+      const reason = this.binanceFeed?.status !== 'CONNECTED'
+        ? 'Waiting for the Binance WebSocket to reconnect.'
+        : 'Waiting for fresh Binance WebSocket ticks to rebuild the volatility sample.';
+      this.setWaitingOpportunity(reason, 'WAITING_FOR_BINANCE_WS', { volatility });
+      return false;
+    }
     const [beat5m, beat15m] = await Promise.all([
       this.getBeatPrice(market5m, now),
       this.getBeatPrice(market15m, now),
     ]);
+    if (![beat5m?.value, beat15m?.value].every((value) => Number.isFinite(Number(value)) && Number(value) > 0)) {
+      this.setWaitingOpportunity('Waiting for Binance WebSocket ticks captured near both market starts.', 'WAITING_FOR_BINANCE_BEATS', {
+        beatPrices: { '5m': beat5m, '15m': beat15m },
+        volatility,
+      });
+      return false;
+    }
+
+    const lastPolymarketMessageAt = Number(this.websocket.lastMessageAt);
+    if (this.websocket.status !== 'CONNECTED'
+      || !Number.isFinite(lastPolymarketMessageAt)
+      || now - lastPolymarketMessageAt > STRATEGY.maxQuoteAgeMs) {
+      this.setWaitingOpportunity('Waiting for fresh Polymarket WebSocket book updates.', 'WAITING_FOR_POLYMARKET_WS', {
+        beatPrices: { '5m': beat5m, '15m': beat15m },
+        volatility,
+      });
+      return false;
+    }
 
     const quotes = this.getFreshPairQuotes(now);
     if (!quotes) {
@@ -638,10 +781,7 @@ class CrossTimeframeArbitrageBot extends WickBot {
       askSumTarget: STRATEGY.askSumTarget,
       askSumThresholds: STRATEGY.entryAskSumThresholds,
       beatToleranceUsd: volatility.bandUsd,
-      allowBeatDirection: Boolean(volatility.ready),
-      fallbackReason: !volatility.ready
-        ? 'Binance volatility band is not ready'
-        : 'Market-start beat price is unavailable',
+      allowBeatDirection: true,
     });
     this.opportunity = {
       ...opportunity,
@@ -1028,6 +1168,9 @@ class CrossTimeframeArbitrageBot extends WickBot {
       markBid: this.pairQuotes[leg.timeframe][leg.side]?.bestBid ?? null,
       markPrice: this.pairQuotes[leg.timeframe][leg.side]?.bestBid ?? null,
       markUpdatedAt: this.pairQuotes[leg.timeframe][leg.side]?.updatedAt ?? null,
+      takeProfitTrigger: STRATEGY.takeProfitTrigger,
+      takeProfitPayout: STRATEGY.takeProfitPayout,
+      takeProfitProceeds: 0,
       unrealizedPnl: null,
       estimatedMakerRebate: 0,
       makerRebateEstimate: 0,
@@ -1057,32 +1200,7 @@ class CrossTimeframeArbitrageBot extends WickBot {
   finalizeResolution(position, winner, now = this.now()) {
     const finalized = super.finalizeResolution(position, winner, now);
     if (!finalized || !position.pairId) return finalized;
-    const pair = this.pairs.find((item) => item.id === position.pairId);
-    if (!pair) return finalized;
-    const legs = this.positions.filter((item) => item.pairId === pair.id);
-    pair.settledLegs = legs.filter((item) => item.status === 'SETTLED_EXIT').length;
-    if (pair.settledLegs === 2) {
-      pair.status = 'SETTLED';
-      pair.settledAt = Math.max(...legs.map((item) => Number(item.settledAt) || now));
-      pair.realizedPnl = legs.reduce((sum, item) => sum + (Number(item.realizedPnl) || 0), 0);
-      pair.outcome = pair.realizedPnl > EPSILON ? 'WIN'
-        : pair.realizedPnl < -EPSILON ? 'LOSS' : 'BREAK_EVEN';
-      this.completedWindows.set(pair.windowStart, {
-        completedAt: pair.settledAt,
-        reason: 'PAIRED_MARKETS_RESOLVED',
-        outcome: pair.outcome,
-        realizedPnl: pair.realizedPnl,
-      });
-      this.log('PAPER_PAIR_SETTLED', {
-        pairId: pair.id,
-        outcome: pair.outcome,
-        realizedPnl: pair.realizedPnl,
-        legResults: legs.map((item) => ({ timeframe: item.timeframe, side: item.side, winner: item.resolutionWinner, pnl: item.realizedPnl })),
-      });
-    } else {
-      pair.status = 'PARTIALLY_SETTLED';
-      pair.settledLegs = pair.settledLegs || 1;
-    }
+    this.updatePairSettlement(position.pairId, now);
     return finalized;
   }
 
@@ -1155,14 +1273,17 @@ class CrossTimeframeArbitrageBot extends WickBot {
         forceEntryAboveAskSumTarget: false,
         entryOnlyBelowAskSumTarget: true,
         sweepPriceCeiling: STRATEGY.sweepPriceCeiling,
-        beatPriceSource: 'Binance BTCUSDT aggregate-trade WebSocket estimate, with Chainlink/CoinGecko historical fallback.',
+        beatPriceSource: 'Binance BTCUSDT aggregate-trade WebSocket only; wait if missing.',
+        bookPriceSource: 'Polymarket CLOB WebSocket only; wait if missing or stale.',
         beatVolatilityWindowMs: STRATEGY.beatVolatilityWindowMs,
         minimumBeatToleranceUsd: STRATEGY.minimumBeatToleranceUsd,
         maximumBeatToleranceUsd: STRATEGY.maximumBeatToleranceUsd,
         onePairPerFiveMinuteWindow: false,
         oneEntryPerAskSumThreshold: true,
         synchronizedEndTimeRequired: false,
-        exit: 'Hold each leg until its own official Polymarket resolution.',
+        takeProfitTrigger: STRATEGY.takeProfitTrigger,
+        takeProfitPayoutPerShare: STRATEGY.takeProfitPayout,
+        exit: 'Close a leg when its best bid reaches $0.99; model $1.00 per share. Otherwise send it to official resolution at window end.',
         liveOrdersEnabled: false,
       },
       account: {

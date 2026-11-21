@@ -44,7 +44,7 @@ test('health endpoint reports strategy errors as unhealthy', async t => {
   assert.deepEqual(await response.json(), { ok: false, mode: 'DEMO', status: 'ERROR', now: 123 });
 });
 
-test('dashboard prioritizes floating positions and explains tiered paper entries', async t => {
+test('dashboard puts paired history first and explains WebSocket-only paper rules', async t => {
   const server = startServer({ snapshot: () => ({}) }, 0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -59,15 +59,19 @@ test('dashboard prioritizes floating positions and explains tiered paper entries
   assert.match(html, /below \$0\.80, \$0\.70, and \$0\.60/i);
   assert.match(html, /Entry levels/i);
   assert.match(html, /100 shares per leg/i);
-  assert.match(html, /not guaranteed arbitrage/i);
-  assert.match(html, /nearest Binance BTCUSDT trade within 2 seconds/i);
-  assert.match(html, /rolling 60-second Binance price range/i);
-  assert.match(html, /\$2 and capped at \$100/i);
-  assert.match(html, /official market resolution/i);
+  assert.match(html, /both legs can lose/i);
+  assert.match(html, /nearest Binance BTCUSDT aggregate-trade within 2 seconds/i);
+  assert.match(html, /rolling 60-second Binance range/i);
+  assert.match(html, /\$2 minimum and \$100 maximum/i);
+  assert.match(html, /best bid of \$0\.99/i);
+  assert.match(html, /modeled payout \$1\.00\/share/i);
+  assert.match(html, /pauses entries until data returns/i);
+  assert.doesNotMatch(html, /Chainlink Data Streams and timestamped CoinGecko history are fallback/i);
+  assert.doesNotMatch(html, /compares both pairings and selects the lower ask sum/i);
   assert.match(html, /Paired trade history/i);
   assert.match(html, /Strategy and feed details/i);
+  assert.ok(html.indexOf('Paired trade history') < html.indexOf('Current positions'));
   assert.ok(html.indexOf('Current positions') < html.indexOf('Strategy and feed details'));
-  assert.ok(html.indexOf('Strategy and feed details') > html.indexOf('Paired trade history'));
   assert.match(html, /PAPER ONLY/);
   assert.doesNotMatch(html, /100-share buys at \$0\.30|midpoint reaches \$0\.20|200 shares on the opposite side/);
 });

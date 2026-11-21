@@ -96,7 +96,16 @@ function connectMarketStream(tokenIds,options={}){
     current.addEventListener('message',event=>{
       if(stopped||current!==socket)return;
       void parseMessage(event?.data).then(text=>{
-        if(text==='PONG'||text==='PING'||!text)return;
+        if(text==='PONG'){
+          report('CONNECTED',{heartbeat:true});
+          return;
+        }
+        if(text==='PING'){
+          try{current.send('PONG')}catch(_){}
+          report('CONNECTED',{heartbeat:true});
+          return;
+        }
+        if(!text)return;
         let parsed;
         try{parsed=JSON.parse(text)}
         catch(error){report('ERROR',{error:'Received an unreadable market WebSocket message.'});return}

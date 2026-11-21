@@ -39,11 +39,13 @@ class FakeWebSocket {
 test('Polymarket stream subscribes to both outcome tokens and forwards updates', async () => {
   FakeWebSocket.instances = [];
   const received = [];
+  const statuses = [];
   const stream = marketData.connectMarketStream(['up-token', 'down-token', 'up-token'], {
     WebSocketImpl: FakeWebSocket,
     heartbeatMs: 60_000,
     reconnect: false,
     onMessage: (message) => received.push(message),
+    onStatus: (status) => statuses.push(status),
   });
   const socket = FakeWebSocket.instances[0];
   assert.equal(socket.url, 'wss://ws-subscriptions-clob.polymarket.com/ws/market');
@@ -58,6 +60,11 @@ test('Polymarket stream subscribes to both outcome tokens and forwards updates',
   socket.emit('message', { data: JSON.stringify(payload) });
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(received, [payload]);
+  socket.emit('message', { data: 'PONG' });
+  socket.emit('message', { data: 'PING' });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(statuses.filter((status) => status.heartbeat).length, 2);
+  assert.ok(socket.sent.includes('PONG'));
   stream.close();
 });
 

@@ -36,7 +36,10 @@ function makeBot({ asks = {}, beats = {} } = {}) {
       status: 'CONNECTED',
       start() {},
       stop() {},
-      getBeatPriceAt() { return null; },
+      getBeatPriceAt(timestamp) {
+        const value = beats[timestamp] || 62_000;
+        return { value, source: 'BINANCE_WS_ESTIMATE', exact: false, sourceTimestamp: timestamp, offsetMs: 0 };
+      },
       getVolatilityBand() {
         return {
           ready: true,
@@ -51,12 +54,6 @@ function makeBot({ asks = {}, beats = {} } = {}) {
         };
       },
     },
-    beatPriceProvider: {
-      async getAtTimestamp(timestamp) {
-        const value = beats[timestamp] || 62_000;
-        return { value, source: 'CHAINLINK_DATA_STREAMS', exact: true, sourceTimestamp: timestamp };
-      },
-    },
   });
   const five = makeMarket('5m', FIVE_START, 'market-5m');
   const fifteen = makeMarket('15m', FIFTEEN_START, 'market-15m');
@@ -64,6 +61,13 @@ function makeBot({ asks = {}, beats = {} } = {}) {
   bot.pairMarkets = { '5m': five, '15m': fifteen };
   bot.orderWindowStart = FIVE_START;
   bot.pairKey = 'market-5m|market-15m';
+  bot.websocket = {
+    status: 'CONNECTED',
+    connectedAt: nowRef.value,
+    lastMessageAt: nowRef.value,
+    reconnectCount: 0,
+    error: null,
+  };
   bot.rebuildTokenRefs();
   const defaultAsks = {
     '5m.UP': 0.27,
@@ -230,7 +234,7 @@ test('beat gaps beyond the volatility band select the higher-beat direction', ()
   assert.equal(opportunity.beatGapUsd, 3);
 });
 
-test('uses the lower-ask fallback instead of skipping when the Binance band is stale', async () => {
+test('pauses entries when the Binance WebSocket volatility sample is stale', async () => {
   const { bot } = makeBot();
   bot.binanceFeed.getVolatilityBand = () => ({
     ready: false,
@@ -240,19 +244,32 @@ test('uses the lower-ask fallback instead of skipping when the Binance band is s
     windowMs: 60_000,
     lastTickAgeMs: 10_000,
   });
-  assert.equal(await bot.processStrategyEntry(), true);
-  assert.equal(bot.opportunity.selectionMode, 'ASK_SUM_FALLBACK');
-  assert.equal(bot.positions.length, 6);
-  assert.equal(bot.pairs.length, 3);
+  assert.equal(await bot.processStrategyEntry(), false);
+  assert.equal(bot.opportunity.status, 'WAITING_FOR_BINANCE_WS');
+  assert.equal(bot.positions.length, 0);
+  assert.equal(bot.pairs.length, 0);
 });
 
-test('uses the lower-ask fallback when market-start beat prices are unavailable', async () => {
+test('pauses entries when a Binance WebSocket beat snapshot is missing', async () => {
   const { bot } = makeBot();
-  bot.getBeatPrice = async () => ({ value: null, source: null, error: 'No historical price near market start.' });
+  bot.binanceFeed.getBeatPriceAt = () => null;
+  assert.equal(await bot.processStrategyEntry(), false);
+  assert.equal(bot.opportunity.status, 'WAITING_FOR_BINANCE_BEATS');
+  assert.equal(bot.positions.length, 0);
+  assert.equal(bot.pairs.length, 0);
+});
+
+test('does not use fresh cached CLOB books while its WebSocket is disconnected', async () => {
+  const { bot, nowRef } = makeBot();
+  bot.websocket.status = 'DISCONNECTED';
+  assert.equal(await bot.processStrategyEntry(), false);
+  assert.equal(bot.opportunity.status, 'WAITING_FOR_POLYMARKET_WS');
+  assert.equal(bot.positions.length, 0);
+
+  bot.websocket.status = 'CONNECTED';
+  bot.websocket.lastMessageAt = nowRef.value;
   assert.equal(await bot.processStrategyEntry(), true);
-  assert.equal(bot.opportunity.selectionMode, 'ASK_SUM_FALLBACK');
-  assert.equal(bot.opportunity.case, 'F');
-  assert.equal(bot.pairs[0].selectionMode, 'ASK_SUM_FALLBACK');
+  assert.equal(bot.pairs.length, 3);
 });
 
 test('a $0.60 ask sum qualifies the $0.80 and $0.70 entries, but not $0.60', () => {
@@ -405,6 +422,51 @@ test('paper execution fills three 100-share pairs below their ask-sum gates', as
   assert.equal(bot.pairs.length, 3);
 });
 
+test('a best bid at $0.99 closes a leg at the modeled $1.00 payout', async () => {
+  const { bot, nowRef } = makeBot({
+    beats: { [FIVE_START]: 62_000, [FIFTEEN_START]: 62_500 },
+  });
+  await bot.processStrategyEntry();
+  const position = bot.positions.find((item) => item.pairId === bot.pairs[0].id && item.timeframe === '5m');
+  const cashBefore = bot.cash;
+  nowRef.value += 1_000;
+  bot.pairQuotes['5m'][position.side] = {
+    ...bot.pairQuotes['5m'][position.side],
+    bestBid: 0.99,
+    updatedAt: nowRef.value,
+  };
+
+  bot.updatePositionMarks(nowRef.value, '5m', position.side);
+
+  const closed = bot.positions.filter((item) => item.timeframe === '5m' && item.side === position.side);
+  assert.equal(closed.length, 3);
+  assert.ok(closed.every((item) => item.status === 'SETTLED_EXIT'));
+  assert.ok(closed.every((item) => item.settlementBasis === 'TAKE_PROFIT_099'));
+  assert.ok(closed.every((item) => item.exitBid === 0.99));
+  assert.ok(closed.every((item) => item.exitPrice === 1));
+  assert.ok(closed.every((item) => item.takeProfitProceeds === item.shares));
+  assert.ok(closed.every((item) => item.realizedPnl > 0));
+  assert.equal(bot.cash, cashBefore + closed.reduce((sum, item) => sum + item.shares, 0));
+  assert.equal(bot.pairs.find((pair) => pair.id === position.pairId).status, 'PARTIALLY_SETTLED');
+});
+
+test('positions that miss take-profit wait for their own market resolution time', async () => {
+  const { bot, five } = makeBot({
+    beats: { [FIVE_START]: 62_000, [FIFTEEN_START]: 62_500 },
+  });
+  await bot.processStrategyEntry();
+  const pair = bot.pairs[0];
+  const fiveLeg = bot.positions.find((position) => position.pairId === pair.id && position.timeframe === '5m');
+  const fifteenLeg = bot.positions.find((position) => position.pairId === pair.id && position.timeframe === '15m');
+
+  await bot.closePreviousWindows(five.end, five.end);
+  assert.equal(fiveLeg.status, 'PENDING_RESOLUTION');
+  assert.equal(fifteenLeg.status, 'OPEN');
+
+  await bot.closePreviousWindows(fifteenLeg.windowEnd, fifteenLeg.windowEnd);
+  assert.equal(fifteenLeg.status, 'PENDING_RESOLUTION');
+});
+
 test('enters each of three 5m markets while reusing their containing 15m market', async () => {
   const { bot, nowRef, fifteen } = makeBot({
     beats: { [FIVE_START]: 62_000, [FIFTEEN_START]: 62_500 },
@@ -418,6 +480,8 @@ test('enters each of three 5m markets while reusing their containing 15m market'
   bot.pairMarkets['15m'] = fifteen;
   bot.orderWindowStart = nextFiveStart;
   bot.pairKey = `${nextFive.id}|${fifteen.id}`;
+  bot.websocket.connectedAt = nowRef.value;
+  bot.websocket.lastMessageAt = nowRef.value;
   bot.rebuildTokenRefs();
   for (const timeframe of ['5m', '15m']) {
     for (const side of ['UP', 'DOWN']) {
