@@ -13,7 +13,7 @@ async function main() {
   bot.start();
   startServer(bot, process.env.PORT || 3000);
 
-  console.log('MODE: DEMO -- Synchronized BTC 5m/15m paired arbitrage; no live orders are sent.');
+  console.log('MODE: DEMO -- BTC paired strategy attempts one entry every 5m; no live orders are sent.');
 }
 
 main().catch((e) => {

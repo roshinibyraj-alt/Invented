@@ -1,8 +1,8 @@
 {
-  "name": "invented-btc-cross-timeframe-arbitrage-paper-bot",
+  "name": "invented-btc-every-5m-paired-paper-bot",
   "version": "1.0.0",
   "private": true,
-  "description": "Paper-only BTC 5-minute/15-minute synchronized-market arbitrage bot.",
+  "description": "Paper-only BTC strategy pairing every 5-minute market with its active 15-minute market.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",

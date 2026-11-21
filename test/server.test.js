@@ -44,7 +44,7 @@ test('health endpoint reports strategy errors as unhealthy', async t => {
   assert.deepEqual(await response.json(), { ok: false, mode: 'DEMO', status: 'ERROR', now: 123 });
 });
 
-test('dashboard explains synchronized markets, paired entries, and paper-only settlement', async t => {
+test('dashboard explains every-5m paired entries and paper-only settlement', async t => {
   const server = startServer({ snapshot: () => ({}) }, 0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -52,11 +52,12 @@ test('dashboard explains synchronized markets, paired entries, and paper-only se
   const html = await response.text();
   assert.equal(response.status, 200);
   assert.match(html, /Invented · BTC 5m \+ 15m/);
-  assert.match(html, /Paired arbitrage paper bot/i);
-  assert.match(html, /same end time/i);
-  assert.match(html, /market-start beat prices/i);
-  assert.match(html, /&lt; \$0\.90 asks/);
-  assert.match(html, /10 shares in each selected leg/i);
+  assert.match(html, /Paired window paper bot/i);
+  assert.match(html, /one pair attempt every 5 minutes/i);
+  assert.match(html, /each market's start price/i);
+  assert.match(html, /&lt; \$0\.50; override if needed/i);
+  assert.match(html, /100 shares per leg/i);
+  assert.match(html, /not guaranteed arbitrage/i);
   assert.match(html, /nearest Binance BTCUSDT trade within 2 seconds/i);
   assert.match(html, /rolling 60-second Binance price range/i);
   assert.match(html, /\$2 and capped at \$100/i);

@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <meta name="theme-color" content="#07111f">
-    <title>Invented · BTC Paired Arbitrage</title>
+    <title>Invented · BTC Paired Window Paper Bot</title>
     <style>
       :root {
         color-scheme: dark;
@@ -115,22 +115,22 @@
       <header>
         <div class="brand">
           <div class="mark" aria-hidden="true">₿</div>
-          <div><div class="eyebrow">Invented · BTC 5m + 15m</div><h1>Paired arbitrage paper bot</h1></div>
+          <div><div class="eyebrow">Invented · BTC 5m + 15m</div><h1>Paired window paper bot</h1></div>
         </div>
         <div class="badges"><span class="badge paper">PAPER ONLY</span><span class="pill warn" id="statusPill">CONNECTING</span><span class="badge" id="updatedAt">Updated —</span></div>
       </header>
 
       <section class="hero grid">
         <div>
-          <div class="eyebrow">One shared market end time</div>
-          <h2>Buy opposite outcomes across the 5m and 15m BTC markets.</h2>
-          <p>Only markets that share the same end time are eligible. The bot compares their market-start beat prices, then checks paired asks against the $0.90 threshold.</p>
+          <div class="eyebrow">One pair attempt every 5 minutes</div>
+          <h2>Pair opposite outcomes in the current 5m and active 15m BTC markets.</h2>
+          <p>The bot compares each market's start price to choose the pair. The combined-ask target is below $0.50, but it still enters when the target is missed. The markets settle at different times, so this is not guaranteed arbitrage and can lose money.</p>
         </div>
         <div class="hero-state">
           <span class="badge" id="windowBadge">Waiting for markets</span>
-          <strong id="signal">Waiting for both BTC markets</strong>
+            <strong id="signal">Waiting for BTC markets</strong>
           <small id="reason">No live orders are sent.</small>
-          <div class="row" style="margin-top:10px"><span class="label">Shared end time</span><strong id="commonEnd">—</strong></div>
+            <div class="row" style="margin-top:10px"><span class="label">Current 5m ends</span><strong id="commonEnd">—</strong></div>
           <div class="row"><span class="label">Current 5m time left</span><strong id="remaining">—</strong></div>
         </div>
       </section>
@@ -161,18 +161,19 @@
 
       <section class="grid">
         <article class="panel">
-          <div class="panel-head"><div><div class="panel-title">Pair evaluation</div><div class="panel-sub">10 shares in each selected leg · one pair per shared end time</div></div><span class="badge" id="caseBadge">No case</span></div>
+          <div class="panel-head"><div><div class="panel-title">Pair evaluation</div><div class="panel-sub">100 shares per leg · one pair attempt per 5-minute window</div></div><span class="badge" id="caseBadge">No case</span></div>
           <div class="opportunity">
-            <div class="decision"><div class="eyebrow">Current decision</div><div class="decision-value" id="pairSum">—</div><div class="muted" id="pairDirection">Waiting for a synchronized pair</div></div>
+            <div class="decision"><div class="eyebrow">Selected pair · best asks combined</div><div class="decision-value" id="pairSum">—</div><div class="muted" id="pairDirection">Waiting for an eligible 5m/15m pair</div></div>
             <div class="decision rule-list">
-              <div class="rule"><span>Entry threshold</span><strong>&lt; $0.90 asks</strong></div>
-              <div class="rule"><span>Shares per leg</span><strong>10</strong></div>
+              <div class="rule"><span>Ask-sum target</span><strong>&lt; $0.50; override if needed</strong></div>
+              <div class="rule"><span>Shares per leg</span><strong>100</strong></div>
+              <div class="rule"><span>Market sweep ceiling</span><strong>$0.99 per share</strong></div>
               <div class="rule"><span>Beat gap / volatility band</span><strong id="beatComparison">—</strong></div>
               <div class="rule"><span>Modeled pair fees</span><strong id="pairFees">—</strong></div>
-              <div class="rule"><span>Minimum net payout edge</span><strong id="minProfit">—</strong></div>
+              <div class="rule"><span>Last pair entry cost</span><strong id="lastEntryCost">—</strong></div>
             </div>
           </div>
-          <div class="notice">Beat snapshots prefer the nearest Binance BTCUSDT trade within 2 seconds of each market start. A rolling 60-second Binance price range sets the equal-beat band, floored at $2 and capped at $100. Binance estimates are not the official Chainlink resolution price.</div>
+          <div class="notice">Beat snapshots prefer the nearest Binance BTCUSDT trade within 2 seconds of each market start. A rolling 60-second Binance price range sets the equal-beat band, floored at $2 and capped at $100; Binance estimates are not the official Chainlink resolution price. A 15-minute market can be reused for three consecutive 5-minute entries, accumulating up to 300 shares on that leg. Orders sweep visible asks up to $0.99. Missing/stale feeds, insufficient depth, or low paper cash can still prevent a fill. Different settlement times mean both legs can lose.</div>
         </article>
       </section>
 
@@ -184,8 +185,9 @@
         <article class="panel">
           <div class="panel-head"><div><div class="panel-title">Strategy and feed status</div><div class="panel-sub">No legacy signals or live execution</div></div><span class="badge" id="socketStatus">CLOB waiting</span></div>
           <div class="rule-list">
-            <div class="rule"><span>Active strategy</span><strong>Paired 5m/15m BTC</strong></div>
+            <div class="rule"><span>Active strategy</span><strong>Every 5m · paired 5m/15m</strong></div>
             <div class="rule"><span>Exit</span><strong>Official market resolution</strong></div>
+            <div class="rule"><span>Ask-sum target</span><strong>$0.50 · not a hard gate</strong></div>
             <div class="rule"><span>Binance trade feed</span><strong id="binanceStatus">Waiting</strong></div>
             <div class="rule"><span>Last 60s BTC range / band</span><strong id="binanceRange">—</strong></div>
             <div class="rule"><span>Book feed</span><strong id="feedDetail">—</strong></div>
@@ -196,11 +198,11 @@
 
       <section class="grid">
         <article class="panel">
-          <div class="panel-head"><div><div class="panel-title">Paired trade history</div><div class="panel-sub">Both market legs settle independently; pair P&amp;L combines both results.</div></div><span class="badge" id="historyCount">0 pairs</span></div>
+          <div class="panel-head"><div><div class="panel-title">Paired trade history</div><div class="panel-sub">Each leg settles independently; this is a paired strategy, not guaranteed arbitrage.</div></div><span class="badge" id="historyCount">0 pairs</span></div>
           <div class="table-wrap"><table><thead><tr><th>Window end</th><th>Case</th><th>UP market · avg</th><th>DOWN market · avg</th><th>Shares / leg</th><th>Ask sum</th><th>Fees</th><th>Status</th><th>Net P&amp;L</th></tr></thead><tbody id="pairRows"><tr><td colspan="9" class="empty">No pairs entered yet.</td></tr></tbody></table></div>
         </article>
       </section>
-      <footer>Paper simulation only · Fees are modeled from Polymarket market metadata · Railway restart clears the in-memory paper history</footer>
+      <footer>Paper simulation only · Fees are modeled from Polymarket market metadata · A Railway restart clears paper history · Results are not guaranteed</footer>
     </main>
 
     <script>
@@ -300,12 +302,12 @@
           winRate: Number(account.pairWinRate) || 0,
         };
         $('statusPill').textContent = state.status || 'RUNNING';
-        $('statusPill').className = `pill ${state.status === 'ERROR' ? 'bad' : pair.synchronized ? 'good' : 'warn'}`;
+        $('statusPill').className = `pill ${state.status === 'ERROR' ? 'bad' : pair.eligible ? 'good' : 'warn'}`;
         $('updatedAt').textContent = `Updated ${new Date(Number(state.now) || Date.now()).toLocaleTimeString()}`;
-        $('windowBadge').textContent = pair.synchronized ? 'SYNCHRONIZED' : 'WAITING FOR ALIGNED MARKETS';
+        $('windowBadge').textContent = pair.eligible ? '5M PAIR READY' : 'WAITING FOR MARKETS';
         $('signal').textContent = state.signal?.action || 'WAIT';
         $('reason').textContent = state.signal?.reason || state.statusReason || 'Waiting for the next market update.';
-        $('commonEnd').textContent = dateTime(pair.commonEnd);
+        $('commonEnd').textContent = dateTime(pair.fiveMinute?.end);
         $('remaining').textContent = state.window?.secondsRemaining != null ? `${Math.max(0, Math.ceil(state.window.secondsRemaining))} sec` : '—';
 
         $('equity').textContent = money(account.equity);
@@ -320,10 +322,10 @@
         $('caseBadge').textContent = opportunity.case ? `CASE ${opportunity.case}` : opportunity.status || 'No case';
         $('pairSum').textContent = opportunity.prices?.sumPrice != null ? money(opportunity.prices.sumPrice, 3) : '—';
         $('pairDirection').textContent = opportunity.direction
-          ? `Buy UP in ${opportunity.direction.upMarket} · DOWN in ${opportunity.direction.downMarket}`
-          : opportunity.reason || 'Waiting for a synchronized pair';
+          ? `Buy UP in ${opportunity.direction.upMarket} · DOWN in ${opportunity.direction.downMarket}${opportunity.forcedEntry ? ' · target overridden' : opportunity.askSumUnderTarget ? ' · target met' : ''}`
+          : opportunity.reason || 'Waiting for a 5m/15m pair';
         $('pairFees').textContent = opportunity.fees != null ? money(opportunity.fees, 3) : '—';
-        $('minProfit').textContent = opportunity.minimumNetProfit != null ? money(opportunity.minimumNetProfit, 3) : '—';
+        $('lastEntryCost').textContent = opportunity.totalCost != null ? money(opportunity.totalCost, 3) : '—';
         $('beatComparison').textContent = opportunity.beatGapUsd != null
           ? `${money(opportunity.beatGapUsd, 2)} / ${money(opportunity.beatToleranceUsd ?? volatility.bandUsd, 2)}`
           : volatility.bandUsd != null ? `band ${money(volatility.bandUsd, 2)}` : '—';
