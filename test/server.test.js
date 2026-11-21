@@ -53,9 +53,9 @@ test('dashboard explains every-5m paired entries and paper-only settlement', asy
   assert.equal(response.status, 200);
   assert.match(html, /Invented · BTC 5m \+ 15m/);
   assert.match(html, /Paired window paper bot/i);
-  assert.match(html, /one pair attempt every 5 minutes/i);
+  assert.match(html, /one qualifying pair per 5-minute window/i);
   assert.match(html, /each market's start price/i);
-  assert.match(html, /&lt; \$0\.50; override if needed/i);
+  assert.match(html, /combined asks &lt; \$0\.60/i);
   assert.match(html, /100 shares per leg/i);
   assert.match(html, /not guaranteed arbitrage/i);
   assert.match(html, /falls back to the lower current ask sum/i);

@@ -122,9 +122,9 @@
 
       <section class="hero grid">
         <div>
-          <div class="eyebrow">One pair attempt every 5 minutes</div>
+          <div class="eyebrow">Up to one qualifying pair per 5-minute window</div>
           <h2>Pair opposite outcomes in the current 5m and active 15m BTC markets.</h2>
-          <p>The bot compares each market's start price to choose the pair. The combined-ask target is below $0.50, but it still enters when the target is missed. If beat or volatility data is unavailable, it falls back to the lower current ask sum. The markets settle at different times, so this is not guaranteed arbitrage and can lose money.</p>
+          <p>The bot compares each market's start price to choose the pair. It enters only when the selected pair's combined best asks are below $0.60. If they are higher, it keeps watching until the 5-minute window ends and skips that window if the price never qualifies. If beat or volatility data is unavailable, it falls back to the lower current ask sum.</p>
         </div>
         <div class="hero-state">
           <span class="badge" id="windowBadge">Waiting for markets</span>
@@ -161,11 +161,11 @@
 
       <section class="grid">
         <article class="panel">
-          <div class="panel-head"><div><div class="panel-title">Pair evaluation</div><div class="panel-sub">100 shares per leg · one pair attempt per 5-minute window</div></div><span class="badge" id="caseBadge">No case</span></div>
+          <div class="panel-head"><div><div class="panel-title">Pair evaluation</div><div class="panel-sub">100 shares per leg · one qualifying pair per 5-minute window</div></div><span class="badge" id="caseBadge">No case</span></div>
           <div class="opportunity">
             <div class="decision"><div class="eyebrow">Selected pair · best asks combined</div><div class="decision-value" id="pairSum">—</div><div class="muted" id="pairDirection">Waiting for an eligible 5m/15m pair</div></div>
             <div class="decision rule-list">
-              <div class="rule"><span>Ask-sum target</span><strong>&lt; $0.50; override if needed</strong></div>
+              <div class="rule"><span>Entry gate</span><strong>Combined asks &lt; $0.60</strong></div>
               <div class="rule"><span>Shares per leg</span><strong>100</strong></div>
               <div class="rule"><span>Market sweep ceiling</span><strong>$0.99 per share</strong></div>
               <div class="rule"><span>Beat gap / volatility band</span><strong id="beatComparison">—</strong></div>
@@ -187,7 +187,7 @@
           <div class="rule-list">
             <div class="rule"><span>Active strategy</span><strong>Every 5m · paired 5m/15m</strong></div>
             <div class="rule"><span>Exit</span><strong>Official market resolution</strong></div>
-            <div class="rule"><span>Ask-sum target</span><strong>$0.50 · not a hard gate</strong></div>
+            <div class="rule"><span>Entry gate</span><strong>Wait for combined asks &lt; $0.60</strong></div>
             <div class="rule"><span>Binance trade feed</span><strong id="binanceStatus">Waiting</strong></div>
             <div class="rule"><span>Last 60s BTC range / band</span><strong id="binanceRange">—</strong></div>
             <div class="rule"><span>Book feed</span><strong id="feedDetail">—</strong></div>
@@ -302,9 +302,9 @@
           winRate: Number(account.pairWinRate) || 0,
         };
         $('statusPill').textContent = state.status || 'RUNNING';
-        $('statusPill').className = `pill ${state.status === 'ERROR' ? 'bad' : pair.eligible ? 'good' : 'warn'}`;
+        $('statusPill').className = `pill ${state.status === 'ERROR' ? 'bad' : opportunity.waitingForAskSum || !pair.eligible ? 'warn' : 'good'}`;
         $('updatedAt').textContent = `Updated ${new Date(Number(state.now) || Date.now()).toLocaleTimeString()}`;
-        $('windowBadge').textContent = pair.eligible ? '5M PAIR READY' : 'WAITING FOR MARKETS';
+        $('windowBadge').textContent = pair.eligible ? '5M WINDOW OPEN' : 'WAITING FOR MARKETS';
         $('signal').textContent = state.signal?.action || 'WAIT';
         $('reason').textContent = state.signal?.reason || state.statusReason || 'Waiting for the next market update.';
         $('commonEnd').textContent = dateTime(pair.fiveMinute?.end);
@@ -319,12 +319,14 @@
 
         renderMarket('five', pair.fiveMinute);
         renderMarket('fifteen', pair.fifteenMinute);
-        $('caseBadge').textContent = opportunity.selectionMode === 'ASK_SUM_FALLBACK'
+        $('caseBadge').textContent = opportunity.waitingForAskSum
+          ? 'WAIT FOR PRICE'
+          : opportunity.selectionMode === 'ASK_SUM_FALLBACK'
           ? 'ASK FALLBACK'
           : opportunity.case ? `CASE ${opportunity.case}` : opportunity.status || 'No case';
         $('pairSum').textContent = opportunity.prices?.sumPrice != null ? money(opportunity.prices.sumPrice, 3) : '—';
         $('pairDirection').textContent = opportunity.direction
-          ? `Buy UP in ${opportunity.direction.upMarket} · DOWN in ${opportunity.direction.downMarket}${opportunity.selectionMode === 'ASK_SUM_FALLBACK' ? ' · ask-based fallback' : ''}${opportunity.forcedEntry ? ' · target overridden' : opportunity.askSumUnderTarget ? ' · target met' : ''}`
+          ? `Buy UP in ${opportunity.direction.upMarket} · DOWN in ${opportunity.direction.downMarket}${opportunity.selectionMode === 'ASK_SUM_FALLBACK' ? ' · ask-based fallback' : ''}${opportunity.waitingForAskSum ? ' · waiting for combined asks below $0.60' : opportunity.askSumUnderTarget ? ' · entry threshold met' : ''}`
           : opportunity.reason || 'Waiting for a 5m/15m pair';
         $('pairFees').textContent = opportunity.fees != null ? money(opportunity.fees, 3) : '—';
         $('lastEntryCost').textContent = opportunity.totalCost != null ? money(opportunity.totalCost, 3) : '—';

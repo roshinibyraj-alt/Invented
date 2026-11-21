@@ -12,9 +12,9 @@ const FIFTEEN_MINUTES_MS = 15 * 60 * 1000;
 const STRATEGY = Object.freeze({
   id: 'btc-every-5m-paired-5m-15m-paper',
   name: 'BTC every-5m paired 5m/15m paper strategy',
-  version: 'btc-every-5m-paired-paper-v3',
+  version: 'btc-every-5m-paired-paper-v4',
   quantity: 100,
-  askSumTarget: 0.50,
+  askSumTarget: 0.60,
   sweepPriceCeiling: 0.99,
   maxQuoteAgeMs: 5000,
   pairMarketRefreshMs: 15_000,
@@ -164,8 +164,7 @@ function detectOpportunity({
   }
   const askSumUnderTarget = selected.prices.sumPrice < Number(askSumTarget) - EPSILON;
   const selectionMode = useBeatDirection ? 'BEAT_GAP' : 'ASK_SUM_FALLBACK';
-  return {
-    exists: true,
+  const sharedOpportunity = {
     ...selected,
     selectionMode,
     beatPrices: {
@@ -176,11 +175,23 @@ function detectOpportunity({
     beatToleranceUsd: useBeatDirection ? toleranceUsd : null,
     askSumTarget: Number(askSumTarget),
     askSumUnderTarget,
-    forcedEntry: !askSumUnderTarget,
     endTime: actualMarketEnd(market5m),
+  };
+  if (!askSumUnderTarget) {
+    return {
+      ...sharedOpportunity,
+      exists: false,
+      waitingForAskSum: true,
+      reason: `Selected combined best asks are $${selected.prices.sumPrice.toFixed(3)}; waiting for them to fall below $${Number(askSumTarget).toFixed(2)} before this 5-minute window ends.`,
+    };
+  }
+  return {
+    ...sharedOpportunity,
+    exists: true,
+    waitingForAskSum: false,
     reason: `${useBeatDirection
       ? `Beat gap $${beatGapUsd.toFixed(2)} versus $${toleranceUsd.toFixed(2)} volatility band`
-      : `${fallbackReason}; selected the lower combined asks`}; paired asks sum to $${selected.prices.sumPrice.toFixed(3)}${askSumUnderTarget ? ', below the $0.50 target.' : ', above the $0.50 target; entering anyway.'}`,
+      : `${fallbackReason}; selected the lower combined asks`}; paired asks sum to $${selected.prices.sumPrice.toFixed(3)}, below the $${Number(askSumTarget).toFixed(2)} entry threshold.`,
   };
 }
 
@@ -580,6 +591,10 @@ class CrossTimeframeArbitrageBot extends WickBot {
       this.setWaitingOpportunity('The active 15-minute market does not contain the current 5-minute window.', 'INVALID_MARKET_TIMES');
       return false;
     }
+    if (now >= actualMarketEnd(market5m)) {
+      this.setWaitingOpportunity('The 5-minute window ended without a qualifying ask sum; skipping it.', 'WINDOW_EXPIRED');
+      return false;
+    }
 
     const volatility = this.binanceFeed?.getVolatilityBand?.(now) || {
       ready: false,
@@ -616,7 +631,8 @@ class CrossTimeframeArbitrageBot extends WickBot {
     });
     this.opportunity = {
       ...opportunity,
-      status: opportunity.exists ? 'ENTRY_SELECTED' : 'NO_OPPORTUNITY',
+      status: opportunity.exists ? 'ENTRY_SELECTED'
+        : opportunity.waitingForAskSum ? 'WAITING_FOR_ASK_SUM' : 'NO_OPPORTUNITY',
       checkedAt: now,
       beatPrices: {
         '5m': beat5m,
@@ -813,7 +829,6 @@ class CrossTimeframeArbitrageBot extends WickBot {
       bestAskSum: opportunity.prices.sumPrice,
       askSumTarget: STRATEGY.askSumTarget,
       askSumUnderTarget: opportunity.askSumUnderTarget,
-      forcedEntry: opportunity.forcedEntry,
       upPrice: executions[0].averagePrice,
       downPrice: executions[1].averagePrice,
       averagePriceSum: executions.reduce((sum, execution) => sum + execution.averagePrice, 0),
@@ -837,7 +852,7 @@ class CrossTimeframeArbitrageBot extends WickBot {
     this.opportunity = {
       ...this.opportunity,
       status: 'PAIR_ENTERED',
-      reason: `Paper pair filled: ${STRATEGY.quantity} shares per leg; ask-sum target ${opportunity.askSumUnderTarget ? 'met' : 'overridden'}; combined cost $${totalCost.toFixed(3)} including $${fees.toFixed(3)} fees.`,
+      reason: `Paper pair filled: ${STRATEGY.quantity} shares per leg after the combined ask-sum threshold was met; total cost $${totalCost.toFixed(3)} including $${fees.toFixed(3)} fees.`,
       pairId,
       grossCost,
       fees,
@@ -859,7 +874,6 @@ class CrossTimeframeArbitrageBot extends WickBot {
       totalCost,
       askSumTarget: STRATEGY.askSumTarget,
       askSumUnderTarget: opportunity.askSumUnderTarget,
-      forcedEntry: opportunity.forcedEntry,
       orderType,
     });
     this.events.unshift({
@@ -872,7 +886,6 @@ class CrossTimeframeArbitrageBot extends WickBot {
         case: opportunity.case,
         direction: opportunity.direction,
         askSumUnderTarget: opportunity.askSumUnderTarget,
-        forcedEntry: opportunity.forcedEntry,
         selectionMode: opportunity.selectionMode,
         grossCost,
         fees,
@@ -1038,7 +1051,8 @@ class CrossTimeframeArbitrageBot extends WickBot {
         timeframes: ['5m', '15m'],
         sharesPerLeg: STRATEGY.quantity,
         askSumTarget: STRATEGY.askSumTarget,
-        forceEntryAboveAskSumTarget: true,
+        forceEntryAboveAskSumTarget: false,
+        entryOnlyBelowAskSumTarget: true,
         sweepPriceCeiling: STRATEGY.sweepPriceCeiling,
         beatPriceSource: 'Binance BTCUSDT aggregate-trade WebSocket estimate, with Chainlink/CoinGecko historical fallback.',
         beatVolatilityWindowMs: STRATEGY.beatVolatilityWindowMs,
@@ -1074,7 +1088,6 @@ class CrossTimeframeArbitrageBot extends WickBot {
         totalCost: opportunity.totalCost ?? null,
         askSumTarget: opportunity.askSumTarget ?? STRATEGY.askSumTarget,
         askSumUnderTarget: opportunity.askSumUnderTarget ?? null,
-        forcedEntry: opportunity.forcedEntry ?? null,
         selectionMode: opportunity.selectionMode ?? null,
         beatGapUsd: opportunity.beatGapUsd ?? null,
         beatToleranceUsd: opportunity.beatToleranceUsd ?? volatility?.bandUsd ?? null,
