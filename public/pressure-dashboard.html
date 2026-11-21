@@ -124,7 +124,7 @@
         <div>
           <div class="eyebrow">One pair attempt every 5 minutes</div>
           <h2>Pair opposite outcomes in the current 5m and active 15m BTC markets.</h2>
-          <p>The bot compares each market's start price to choose the pair. The combined-ask target is below $0.50, but it still enters when the target is missed. The markets settle at different times, so this is not guaranteed arbitrage and can lose money.</p>
+          <p>The bot compares each market's start price to choose the pair. The combined-ask target is below $0.50, but it still enters when the target is missed. If beat or volatility data is unavailable, it falls back to the lower current ask sum. The markets settle at different times, so this is not guaranteed arbitrage and can lose money.</p>
         </div>
         <div class="hero-state">
           <span class="badge" id="windowBadge">Waiting for markets</span>
@@ -319,14 +319,18 @@
 
         renderMarket('five', pair.fiveMinute);
         renderMarket('fifteen', pair.fifteenMinute);
-        $('caseBadge').textContent = opportunity.case ? `CASE ${opportunity.case}` : opportunity.status || 'No case';
+        $('caseBadge').textContent = opportunity.selectionMode === 'ASK_SUM_FALLBACK'
+          ? 'ASK FALLBACK'
+          : opportunity.case ? `CASE ${opportunity.case}` : opportunity.status || 'No case';
         $('pairSum').textContent = opportunity.prices?.sumPrice != null ? money(opportunity.prices.sumPrice, 3) : '—';
         $('pairDirection').textContent = opportunity.direction
-          ? `Buy UP in ${opportunity.direction.upMarket} · DOWN in ${opportunity.direction.downMarket}${opportunity.forcedEntry ? ' · target overridden' : opportunity.askSumUnderTarget ? ' · target met' : ''}`
+          ? `Buy UP in ${opportunity.direction.upMarket} · DOWN in ${opportunity.direction.downMarket}${opportunity.selectionMode === 'ASK_SUM_FALLBACK' ? ' · ask-based fallback' : ''}${opportunity.forcedEntry ? ' · target overridden' : opportunity.askSumUnderTarget ? ' · target met' : ''}`
           : opportunity.reason || 'Waiting for a 5m/15m pair';
         $('pairFees').textContent = opportunity.fees != null ? money(opportunity.fees, 3) : '—';
         $('lastEntryCost').textContent = opportunity.totalCost != null ? money(opportunity.totalCost, 3) : '—';
-        $('beatComparison').textContent = opportunity.beatGapUsd != null
+        $('beatComparison').textContent = opportunity.selectionMode === 'ASK_SUM_FALLBACK'
+          ? 'Ask-based fallback'
+          : opportunity.beatGapUsd != null
           ? `${money(opportunity.beatGapUsd, 2)} / ${money(opportunity.beatToleranceUsd ?? volatility.bandUsd, 2)}`
           : volatility.bandUsd != null ? `band ${money(volatility.bandUsd, 2)}` : '—';
         $('socketStatus').textContent = state.websocket?.status || 'CLOB waiting';

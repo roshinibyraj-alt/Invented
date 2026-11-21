@@ -58,6 +58,7 @@ test('dashboard explains every-5m paired entries and paper-only settlement', asy
   assert.match(html, /&lt; \$0\.50; override if needed/i);
   assert.match(html, /100 shares per leg/i);
   assert.match(html, /not guaranteed arbitrage/i);
+  assert.match(html, /falls back to the lower current ask sum/i);
   assert.match(html, /nearest Binance BTCUSDT trade within 2 seconds/i);
   assert.match(html, /rolling 60-second Binance price range/i);
   assert.match(html, /\$2 and capped at \$100/i);

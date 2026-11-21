@@ -230,7 +230,7 @@ test('beat gaps beyond the volatility band select the higher-beat direction', ()
   assert.equal(opportunity.beatGapUsd, 3);
 });
 
-test('waits for fresh Binance ticks instead of evaluating with a stale volatility band', async () => {
+test('uses the lower-ask fallback instead of skipping when the Binance band is stale', async () => {
   const { bot } = makeBot();
   bot.binanceFeed.getVolatilityBand = () => ({
     ready: false,
@@ -240,9 +240,18 @@ test('waits for fresh Binance ticks instead of evaluating with a stale volatilit
     windowMs: 60_000,
     lastTickAgeMs: 10_000,
   });
-  assert.equal(await bot.processStrategyEntry(), false);
-  assert.equal(bot.opportunity.status, 'WAITING_FOR_BINANCE_DATA');
-  assert.equal(bot.positions.length, 0);
+  assert.equal(await bot.processStrategyEntry(), true);
+  assert.equal(bot.opportunity.selectionMode, 'ASK_SUM_FALLBACK');
+  assert.equal(bot.positions.length, 2);
+});
+
+test('uses the lower-ask fallback when market-start beat prices are unavailable', async () => {
+  const { bot } = makeBot();
+  bot.getBeatPrice = async () => ({ value: null, source: null, error: 'No historical price near market start.' });
+  assert.equal(await bot.processStrategyEntry(), true);
+  assert.equal(bot.opportunity.selectionMode, 'ASK_SUM_FALLBACK');
+  assert.equal(bot.opportunity.case, 'F');
+  assert.equal(bot.pairs[0].selectionMode, 'ASK_SUM_FALLBACK');
 });
 
 test('combined ask target is not a hard gate, including at exactly $0.50', () => {

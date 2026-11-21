@@ -100,15 +100,17 @@ function detectOpportunity({
   quotes,
   askSumTarget = STRATEGY.askSumTarget,
   beatToleranceUsd = 0,
+  allowBeatDirection = true,
+  fallbackReason = 'Beat or volatility reference unavailable',
 }) {
   if (!validPairMarkets(market5m, market15m)) {
     return { exists: false, case: null, reason: 'The current 5-minute market is not contained in the active 15-minute market.' };
   }
-  const values = [beat5m?.value, beat15m?.value].map(Number);
-  if (values.some((value) => !Number.isFinite(value) || value <= 0)) {
-    return { exists: false, case: null, reason: 'A trustworthy market-start beat price is not available.' };
-  }
-  const beatGapUsd = Math.abs(values[0] - values[1]);
+  const values = [beat5m?.value, beat15m?.value].map((value) =>
+    value == null || value === '' ? NaN : Number(value));
+  const beatsAvailable = values.every((value) => Number.isFinite(value) && value > 0);
+  const useBeatDirection = allowBeatDirection && beatsAvailable;
+  const beatGapUsd = beatsAvailable ? Math.abs(values[0] - values[1]) : null;
   const toleranceUsd = Math.max(0, Number(beatToleranceUsd) || 0);
   const candidates = [];
   const addCandidate = (caseId, upMarket, downMarket) => {
@@ -129,7 +131,10 @@ function detectOpportunity({
     });
   };
 
-  if (beatGapUsd <= toleranceUsd + EPSILON) {
+  if (!useBeatDirection) {
+    addCandidate('F', '5m', '15m');
+    addCandidate('F', '15m', '5m');
+  } else if (beatGapUsd <= toleranceUsd + EPSILON) {
     addCandidate('C', '5m', '15m');
     addCandidate('C', '15m', '5m');
   } else if (values[1] > values[0]) {
@@ -142,27 +147,40 @@ function detectOpportunity({
   if (!selected) {
     return {
       exists: false,
-      case: beatGapUsd <= toleranceUsd + EPSILON ? 'C' : values[1] > values[0] ? 'A' : 'B',
+      case: useBeatDirection
+        ? beatGapUsd <= toleranceUsd + EPSILON ? 'C' : values[1] > values[0] ? 'A' : 'B'
+        : 'F',
       direction: null,
       prices: null,
-      beatPrices: { beat5m: values[0], beat15m: values[1] },
+      selectionMode: useBeatDirection ? 'BEAT_GAP' : 'ASK_SUM_FALLBACK',
+      beatPrices: {
+        beat5m: Number.isFinite(values[0]) ? values[0] : null,
+        beat15m: Number.isFinite(values[1]) ? values[1] : null,
+      },
       beatGapUsd,
-      beatToleranceUsd: toleranceUsd,
+      beatToleranceUsd: useBeatDirection ? toleranceUsd : null,
       reason: 'Fresh asks for the selected UP and DOWN legs are unavailable.',
     };
   }
   const askSumUnderTarget = selected.prices.sumPrice < Number(askSumTarget) - EPSILON;
+  const selectionMode = useBeatDirection ? 'BEAT_GAP' : 'ASK_SUM_FALLBACK';
   return {
     exists: true,
     ...selected,
-    beatPrices: { beat5m: values[0], beat15m: values[1] },
+    selectionMode,
+    beatPrices: {
+      beat5m: Number.isFinite(values[0]) ? values[0] : null,
+      beat15m: Number.isFinite(values[1]) ? values[1] : null,
+    },
     beatGapUsd,
-    beatToleranceUsd: toleranceUsd,
+    beatToleranceUsd: useBeatDirection ? toleranceUsd : null,
     askSumTarget: Number(askSumTarget),
     askSumUnderTarget,
     forcedEntry: !askSumUnderTarget,
     endTime: actualMarketEnd(market5m),
-    reason: `Beat gap $${beatGapUsd.toFixed(2)} versus $${toleranceUsd.toFixed(2)} volatility band; selected paired asks sum to $${selected.prices.sumPrice.toFixed(3)}${askSumUnderTarget ? ', below the $0.50 target.' : ', above the $0.50 target; entering anyway.'}`,
+    reason: `${useBeatDirection
+      ? `Beat gap $${beatGapUsd.toFixed(2)} versus $${toleranceUsd.toFixed(2)} volatility band`
+      : `${fallbackReason}; selected the lower combined asks`}; paired asks sum to $${selected.prices.sumPrice.toFixed(3)}${askSumUnderTarget ? ', below the $0.50 target.' : ', above the $0.50 target; entering anyway.'}`,
   };
 }
 
@@ -571,28 +589,10 @@ class CrossTimeframeArbitrageBot extends WickBot {
       lastTickAgeMs: null,
     };
     this.currentVolatility = volatility;
-    if (!volatility.ready) {
-      this.setWaitingOpportunity(
-        'Waiting for fresh Binance BTC trade ticks to calculate the volatility band.',
-        'WAITING_FOR_BINANCE_DATA',
-        { volatility },
-      );
-      return false;
-    }
-
     const [beat5m, beat15m] = await Promise.all([
       this.getBeatPrice(market5m, now),
       this.getBeatPrice(market15m, now),
     ]);
-    if (!(Number(beat5m?.value) > 0) || !(Number(beat15m?.value) > 0)) {
-      const error = [beat5m?.error, beat15m?.error].filter(Boolean).join(' / ');
-      this.setWaitingOpportunity(
-        error ? `Waiting for market-start beat prices: ${error}` : 'Waiting for both market-start beat prices.',
-        'WAITING_FOR_BEAT_PRICES',
-        { beatPrices: { '5m': beat5m, '15m': beat15m } },
-      );
-      return false;
-    }
 
     const quotes = this.getFreshPairQuotes(now);
     if (!quotes) {
@@ -609,6 +609,10 @@ class CrossTimeframeArbitrageBot extends WickBot {
       quotes,
       askSumTarget: STRATEGY.askSumTarget,
       beatToleranceUsd: volatility.bandUsd,
+      allowBeatDirection: Boolean(volatility.ready),
+      fallbackReason: !volatility.ready
+        ? 'Binance volatility band is not ready'
+        : 'Market-start beat price is unavailable',
     });
     this.opportunity = {
       ...opportunity,
@@ -623,6 +627,7 @@ class CrossTimeframeArbitrageBot extends WickBot {
     this.signal = {
       action: opportunity.exists ? 'PAIR_SELECTED' : 'WAIT',
       case: opportunity.case || null,
+      selectionMode: opportunity.selectionMode || null,
       reason: opportunity.reason,
     };
 
@@ -798,6 +803,7 @@ class CrossTimeframeArbitrageBot extends WickBot {
       beatPrices: { ...opportunity.beatPrices },
       beatGapUsd: opportunity.beatGapUsd,
       beatToleranceUsd: opportunity.beatToleranceUsd,
+      selectionMode: opportunity.selectionMode,
       volatility: opportunity.volatility || this.currentVolatility,
       beatPriceSources: {
         '5m': opportunity.beatPriceSources?.['5m'] || opportunity.beatPrices?.['5m']?.source || null,
@@ -867,6 +873,7 @@ class CrossTimeframeArbitrageBot extends WickBot {
         direction: opportunity.direction,
         askSumUnderTarget: opportunity.askSumUnderTarget,
         forcedEntry: opportunity.forcedEntry,
+        selectionMode: opportunity.selectionMode,
         grossCost,
         fees,
         totalCost,
@@ -1068,6 +1075,7 @@ class CrossTimeframeArbitrageBot extends WickBot {
         askSumTarget: opportunity.askSumTarget ?? STRATEGY.askSumTarget,
         askSumUnderTarget: opportunity.askSumUnderTarget ?? null,
         forcedEntry: opportunity.forcedEntry ?? null,
+        selectionMode: opportunity.selectionMode ?? null,
         beatGapUsd: opportunity.beatGapUsd ?? null,
         beatToleranceUsd: opportunity.beatToleranceUsd ?? volatility?.bandUsd ?? null,
         volatility: opportunity.volatility || volatility || null,
