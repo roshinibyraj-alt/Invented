@@ -12,9 +12,10 @@ const FIFTEEN_MINUTES_MS = 15 * 60 * 1000;
 const STRATEGY = Object.freeze({
   id: 'btc-every-5m-paired-5m-15m-paper',
   name: 'BTC every-5m paired 5m/15m paper strategy',
-  version: 'btc-every-5m-paired-paper-v4',
+  version: 'btc-every-5m-paired-paper-v5',
   quantity: 100,
   askSumTarget: 0.60,
+  entryAskSumThresholds: Object.freeze([0.80, 0.70, 0.60]),
   sweepPriceCeiling: 0.99,
   maxQuoteAgeMs: 5000,
   pairMarketRefreshMs: 15_000,
@@ -99,6 +100,7 @@ function detectOpportunity({
   beat15m,
   quotes,
   askSumTarget = STRATEGY.askSumTarget,
+  askSumThresholds = STRATEGY.entryAskSumThresholds,
   beatToleranceUsd = 0,
   allowBeatDirection = true,
   fallbackReason = 'Beat or volatility reference unavailable',
@@ -162,7 +164,14 @@ function detectOpportunity({
       reason: 'Fresh asks for the selected UP and DOWN legs are unavailable.',
     };
   }
-  const askSumUnderTarget = selected.prices.sumPrice < Number(askSumTarget) - EPSILON;
+  const thresholds = (Array.isArray(askSumThresholds) ? askSumThresholds : [askSumTarget])
+    .map(Number)
+    .filter((threshold) => Number.isFinite(threshold) && threshold > 0 && threshold < 2)
+    .sort((a, b) => b - a);
+  const qualifyingThresholds = thresholds.filter((threshold) =>
+    selected.prices.sumPrice < threshold - EPSILON);
+  const activeThreshold = qualifyingThresholds[0] ?? thresholds[0] ?? Number(askSumTarget);
+  const askSumUnderTarget = qualifyingThresholds.length > 0;
   const selectionMode = useBeatDirection ? 'BEAT_GAP' : 'ASK_SUM_FALLBACK';
   const sharedOpportunity = {
     ...selected,
@@ -173,16 +182,20 @@ function detectOpportunity({
     },
     beatGapUsd,
     beatToleranceUsd: useBeatDirection ? toleranceUsd : null,
-    askSumTarget: Number(askSumTarget),
+    askSumTarget: activeThreshold,
+    askSumThresholds: thresholds,
+    qualifyingThresholds,
     askSumUnderTarget,
     endTime: actualMarketEnd(market5m),
   };
   if (!askSumUnderTarget) {
+    const nextThreshold = thresholds[0] ?? Number(askSumTarget);
     return {
       ...sharedOpportunity,
       exists: false,
       waitingForAskSum: true,
-      reason: `Selected combined best asks are $${selected.prices.sumPrice.toFixed(3)}; waiting for them to fall below $${Number(askSumTarget).toFixed(2)} before this 5-minute window ends.`,
+      nextAskSumTarget: nextThreshold,
+      reason: `Selected combined best asks are $${selected.prices.sumPrice.toFixed(3)}; the next entry triggers below $${nextThreshold.toFixed(2)}.`,
     };
   }
   return {
@@ -191,7 +204,7 @@ function detectOpportunity({
     waitingForAskSum: false,
     reason: `${useBeatDirection
       ? `Beat gap $${beatGapUsd.toFixed(2)} versus $${toleranceUsd.toFixed(2)} volatility band`
-      : `${fallbackReason}; selected the lower combined asks`}; paired asks sum to $${selected.prices.sumPrice.toFixed(3)}, below the $${Number(askSumTarget).toFixed(2)} entry threshold.`,
+      : `${fallbackReason}; selected the lower combined asks`}; paired asks sum to $${selected.prices.sumPrice.toFixed(3)}, below at least one entry threshold.`,
   };
 }
 
@@ -235,7 +248,7 @@ class CrossTimeframeArbitrageBot extends WickBot {
     this.beatPriceCache = new Map();
     this.currentBeatPrices = { '5m': null, '15m': null };
     this.lastBeatWindow = { '5m': null, '15m': null };
-    this.processedPairEnds = new Set();
+    this.processedEntryThresholds = new Set();
     this.pairs = [];
     this.pairSequence = 0;
     this.orderSequence = 0;
@@ -623,6 +636,7 @@ class CrossTimeframeArbitrageBot extends WickBot {
       beat15m,
       quotes,
       askSumTarget: STRATEGY.askSumTarget,
+      askSumThresholds: STRATEGY.entryAskSumThresholds,
       beatToleranceUsd: volatility.bandUsd,
       allowBeatDirection: Boolean(volatility.ready),
       fallbackReason: !volatility.ready
@@ -639,30 +653,111 @@ class CrossTimeframeArbitrageBot extends WickBot {
         '15m': beat15m,
       },
       volatility,
+      entryTiers: this.currentEntryTiers(opportunity.prices?.sumPrice, market5m.start),
+    };
+    const endTime = Number(opportunity.endTime || actualMarketEnd(market5m));
+    const qualifyingThresholds = (opportunity.qualifyingThresholds || [])
+      .filter((threshold) => !this.processedEntryThresholds.has(this.entryThresholdKey(endTime, threshold)));
+    const nextAskSumTarget = STRATEGY.entryAskSumThresholds
+      .find((threshold) => !this.processedEntryThresholds.has(this.entryThresholdKey(endTime, threshold)));
+    this.opportunity = {
+      ...this.opportunity,
+      nextAskSumTarget: nextAskSumTarget ?? null,
+      entryTiers: this.currentEntryTiers(opportunity.prices?.sumPrice, market5m.start),
     };
     this.signal = {
-      action: opportunity.exists ? 'PAIR_SELECTED' : 'WAIT',
+      action: qualifyingThresholds.length ? 'PAIR_READY' : 'WAIT',
       case: opportunity.case || null,
       selectionMode: opportunity.selectionMode || null,
       reason: opportunity.reason,
     };
 
-    if (!opportunity.exists) return false;
-    if (this.processedPairEnds.has(Number(opportunity.endTime))) {
-      const existingPair = this.pairs.find((pair) => Number(pair.windowEnd) === Number(opportunity.endTime));
+    if (!opportunity.prices) return false;
+    if (!qualifyingThresholds.length) {
+      const fired = this.currentEntryTiers(opportunity.prices.sumPrice, market5m.start)
+        .filter((tier) => tier.status === 'FIRED');
       this.opportunity = {
         ...this.opportunity,
-        status: 'PAIR_ALREADY_ENTERED',
-        reason: 'One paired entry is already recorded for this 5-minute window.',
-        pairId: existingPair?.id || null,
-        grossCost: existingPair?.grossCost ?? null,
-        fees: existingPair?.fees ?? null,
-        totalCost: existingPair?.totalCost ?? null,
-        orderIds: existingPair?.orderIds || [],
+        status: fired.length === STRATEGY.entryAskSumThresholds.length
+          ? 'WINDOW_ENTRIES_COMPLETE'
+          : fired.length ? 'WAITING_FOR_NEXT_THRESHOLD'
+            : opportunity.waitingForAskSum ? 'WAITING_FOR_ASK_SUM' : 'NO_OPPORTUNITY',
+        reason: fired.length === STRATEGY.entryAskSumThresholds.length
+          ? 'All three ask-sum entries have fired in this 5-minute window.'
+          : fired.length
+            ? `Entry at ${fired.map((tier) => `$${tier.threshold.toFixed(2)}`).join(', ')} already fired; waiting for the next lower ask-sum threshold.`
+            : opportunity.reason,
       };
       return false;
     }
-    return this.executePaperPair(opportunity, now);
+
+    let enteredAny = false;
+    let blockedAttempt = null;
+    for (const threshold of qualifyingThresholds) {
+      const entered = this.executePaperPair({
+        ...opportunity,
+        askSumTarget: threshold,
+      }, now);
+      if (!entered) {
+        blockedAttempt = {
+          status: this.opportunity.status,
+          reason: this.opportunity.reason,
+        };
+        break;
+      }
+      enteredAny = true;
+      this.processedEntryThresholds.add(this.entryThresholdKey(endTime, threshold));
+      while (this.processedEntryThresholds.size > 1500) {
+        this.processedEntryThresholds.delete(this.processedEntryThresholds.values().next().value);
+      }
+    }
+
+    const entryTiers = this.currentEntryTiers(opportunity.prices.sumPrice, market5m.start);
+    const fired = entryTiers.filter((tier) => tier.status === 'FIRED');
+    const next = entryTiers.find((tier) => tier.status !== 'FIRED');
+    this.opportunity = {
+      ...this.opportunity,
+      entryTiers,
+      nextAskSumTarget: next?.threshold ?? null,
+      status: fired.length === STRATEGY.entryAskSumThresholds.length
+        ? 'WINDOW_ENTRIES_COMPLETE'
+        : blockedAttempt ? blockedAttempt.status
+        : enteredAny ? 'PAIR_ENTRY_FILLED'
+          : this.opportunity.status,
+      reason: fired.length === STRATEGY.entryAskSumThresholds.length
+        ? 'All three ask-sum entries have fired in this 5-minute window.'
+        : blockedAttempt
+          ? `${fired.length} of ${STRATEGY.entryAskSumThresholds.length} ask-sum entries fired; the next qualifying entry is blocked: ${blockedAttempt.reason}`
+        : enteredAny
+          ? `${fired.length} of ${STRATEGY.entryAskSumThresholds.length} ask-sum entries fired; waiting for the next qualifying level.`
+          : this.opportunity.reason,
+    };
+    this.signal = {
+      action: enteredAny ? 'PAIR_ENTRY_FILLED' : this.signal.action,
+      case: opportunity.case || null,
+      selectionMode: opportunity.selectionMode || null,
+      reason: this.opportunity.reason,
+    };
+    return enteredAny;
+  }
+
+  entryThresholdKey(windowEnd, threshold) {
+    return `${Number(windowEnd)}:${Number(threshold).toFixed(2)}`;
+  }
+
+  currentEntryTiers(currentAskSum, windowStart) {
+    const sum = Number(currentAskSum);
+    return STRATEGY.entryAskSumThresholds.map((threshold) => {
+      const pair = this.pairs.find((item) =>
+        Number(item.windowStart) === Number(windowStart)
+        && Math.abs(Number(item.askSumTarget) - threshold) < EPSILON);
+      return {
+        threshold,
+        status: pair ? 'FIRED'
+          : Number.isFinite(sum) && sum < threshold - EPSILON ? 'READY' : 'WAITING',
+        pairId: pair?.id || null,
+      };
+    });
   }
 
   setWaitingOpportunity(reason, status, extra = {}) {
@@ -763,6 +858,8 @@ class CrossTimeframeArbitrageBot extends WickBot {
     }
 
     const pairId = `${Math.round(Number(opportunity.endTime))}-pair-${++this.pairSequence}`;
+    const entryNumber = this.pairs.filter((item) =>
+      Number(item.windowStart) === Number(this.market.start)).length + 1;
     const positionIds = [];
     const orderIds = [];
     for (let index = 0; index < opportunity.legs.length; index += 1) {
@@ -797,6 +894,8 @@ class CrossTimeframeArbitrageBot extends WickBot {
         filledAt: now,
         windowStart: Number(this.market.start),
         windowEnd: Number(opportunity.endTime),
+        entryNumber,
+        askSumTarget: Number(opportunity.askSumTarget),
         paperOnly: true,
       };
       orderIds.push(orderId);
@@ -814,6 +913,7 @@ class CrossTimeframeArbitrageBot extends WickBot {
       direction: { ...opportunity.direction },
       windowStart: Number(this.market.start),
       windowEnd: Number(opportunity.endTime),
+      entryNumber,
       market5mId: marketKey(this.pairMarkets['5m']),
       market15mId: marketKey(this.pairMarkets['15m']),
       beatPrices: { ...opportunity.beatPrices },
@@ -827,7 +927,7 @@ class CrossTimeframeArbitrageBot extends WickBot {
       },
       sharesPerLeg: STRATEGY.quantity,
       bestAskSum: opportunity.prices.sumPrice,
-      askSumTarget: STRATEGY.askSumTarget,
+      askSumTarget: Number(opportunity.askSumTarget),
       askSumUnderTarget: opportunity.askSumUnderTarget,
       upPrice: executions[0].averagePrice,
       downPrice: executions[1].averagePrice,
@@ -845,14 +945,10 @@ class CrossTimeframeArbitrageBot extends WickBot {
     };
     this.pairs.unshift(pair);
     this.pairs.length = Math.min(this.pairs.length, 250);
-    this.processedPairEnds.add(Number(opportunity.endTime));
-    while (this.processedPairEnds.size > 500) {
-      this.processedPairEnds.delete(this.processedPairEnds.values().next().value);
-    }
     this.opportunity = {
       ...this.opportunity,
       status: 'PAIR_ENTERED',
-      reason: `Paper pair filled: ${STRATEGY.quantity} shares per leg after the combined ask-sum threshold was met; total cost $${totalCost.toFixed(3)} including $${fees.toFixed(3)} fees.`,
+      reason: `Paper pair filled: ${STRATEGY.quantity} shares per leg at the $${Number(opportunity.askSumTarget).toFixed(2)} ask-sum tier; total cost $${totalCost.toFixed(3)} including $${fees.toFixed(3)} fees.`,
       pairId,
       grossCost,
       fees,
@@ -869,10 +965,11 @@ class CrossTimeframeArbitrageBot extends WickBot {
       beatToleranceUsd: opportunity.beatToleranceUsd,
       sharesPerLeg: STRATEGY.quantity,
       bestAskSum: opportunity.prices.sumPrice,
+      entryNumber: pair.entryNumber,
       grossCost,
       fees,
       totalCost,
-      askSumTarget: STRATEGY.askSumTarget,
+      askSumTarget: Number(opportunity.askSumTarget),
       askSumUnderTarget: opportunity.askSumUnderTarget,
       orderType,
     });
@@ -885,6 +982,8 @@ class CrossTimeframeArbitrageBot extends WickBot {
         pairId,
         case: opportunity.case,
         direction: opportunity.direction,
+        entryNumber: pair.entryNumber,
+        askSumTarget: Number(opportunity.askSumTarget),
         askSumUnderTarget: opportunity.askSumUnderTarget,
         selectionMode: opportunity.selectionMode,
         grossCost,
@@ -1051,6 +1150,8 @@ class CrossTimeframeArbitrageBot extends WickBot {
         timeframes: ['5m', '15m'],
         sharesPerLeg: STRATEGY.quantity,
         askSumTarget: STRATEGY.askSumTarget,
+        entryAskSumThresholds: STRATEGY.entryAskSumThresholds,
+        maxPairsPerFiveMinuteWindow: STRATEGY.entryAskSumThresholds.length,
         forceEntryAboveAskSumTarget: false,
         entryOnlyBelowAskSumTarget: true,
         sweepPriceCeiling: STRATEGY.sweepPriceCeiling,
@@ -1058,7 +1159,8 @@ class CrossTimeframeArbitrageBot extends WickBot {
         beatVolatilityWindowMs: STRATEGY.beatVolatilityWindowMs,
         minimumBeatToleranceUsd: STRATEGY.minimumBeatToleranceUsd,
         maximumBeatToleranceUsd: STRATEGY.maximumBeatToleranceUsd,
-        onePairPerFiveMinuteWindow: true,
+        onePairPerFiveMinuteWindow: false,
+        oneEntryPerAskSumThreshold: true,
         synchronizedEndTimeRequired: false,
         exit: 'Hold each leg until its own official Polymarket resolution.',
         liveOrdersEnabled: false,
@@ -1087,6 +1189,13 @@ class CrossTimeframeArbitrageBot extends WickBot {
         fees: opportunity.fees ?? null,
         totalCost: opportunity.totalCost ?? null,
         askSumTarget: opportunity.askSumTarget ?? STRATEGY.askSumTarget,
+        askSumThresholds: STRATEGY.entryAskSumThresholds,
+        qualifyingThresholds: opportunity.qualifyingThresholds || [],
+        nextAskSumTarget: opportunity.nextAskSumTarget ?? STRATEGY.entryAskSumThresholds[0],
+        entryTiers: opportunity.entryTiers || this.currentEntryTiers(
+          opportunity.prices?.sumPrice,
+          this.pairMarkets['5m']?.start,
+        ),
         askSumUnderTarget: opportunity.askSumUnderTarget ?? null,
         selectionMode: opportunity.selectionMode ?? null,
         beatGapUsd: opportunity.beatGapUsd ?? null,

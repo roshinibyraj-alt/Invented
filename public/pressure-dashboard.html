@@ -100,6 +100,25 @@
       th { color: var(--muted); font-weight: 750; }
       .tag { display: inline-flex; border: 1px solid var(--line); border-radius: 999px; padding: 3px 7px; font-size: 10px; font-weight: 850; }
       .empty { padding: 14px 4px; color: var(--muted); }
+      .position-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+      .position-card { min-width: 0; padding: 14px; border: 1px solid var(--line); border-left: 4px solid var(--blue); border-radius: 14px; background: #091726; }
+      .position-card.up { border-left-color: var(--green); }
+      .position-card.down { border-left-color: var(--red); }
+      .position-card.pending { border-style: dashed; }
+      .position-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+      .position-side { font-size: 16px; font-weight: 900; }
+      .position-pnl { margin: 8px 0 10px; font-size: clamp(22px, 4vw, 30px); font-weight: 950; font-variant-numeric: tabular-nums; }
+      .position-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+      .position-field { min-width: 0; padding: 8px; border-radius: 9px; background: #112137; }
+      .position-field span { display: block; color: var(--muted); font-size: 10px; }
+      .position-field strong { display: block; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+      .tier-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
+      .tier { padding: 10px; border: 1px solid var(--line); border-radius: 11px; background: #091726; }
+      .tier strong { display: block; font-size: 16px; }
+      .tier span { color: var(--muted); font-size: 10px; font-weight: 800; }
+      .tier.fired { border-color: #27694f; background: #102b2a; }
+      .tier.ready { border-color: #715f3f; background: #2d291e; }
+      .tier.waiting { opacity: .72; }
       footer { padding: 12px 4px 4px; color: var(--muted); text-align: center; font-size: 11px; }
       @media(max-width: 850px) { .metrics { grid-template-columns: repeat(2, minmax(0,1fr)); } }
       @media(max-width: 620px) {
@@ -107,6 +126,10 @@
         .hero, .markets, .opportunity { grid-template-columns: 1fr; }
         .badges { max-width: 140px; } .panel, .metric { padding: 13px; }
         .metric-value { font-size: 23px; } .market-name { min-height: 0; }
+        .position-grid { grid-template-columns: 1fr; }
+        .tier-list { gap: 5px; }
+        .tier { padding: 8px 6px; text-align: center; }
+        .tier strong { font-size: 14px; }
       }
     </style>
   </head>
@@ -122,9 +145,9 @@
 
       <section class="hero grid">
         <div>
-          <div class="eyebrow">Up to one qualifying pair per 5-minute window</div>
+          <div class="eyebrow">Up to three qualifying pairs per 5-minute window</div>
           <h2>Pair opposite outcomes in the current 5m and active 15m BTC markets.</h2>
-          <p>The bot compares each market's start price to choose the pair. It enters only when the selected pair's combined best asks are below $0.60. If they are higher, it keeps watching until the 5-minute window ends and skips that window if the price never qualifies. If beat or volatility data is unavailable, it falls back to the lower current ask sum.</p>
+          <p>The bot uses the selected UP/DOWN pairing and can enter once at each combined-ask level: below $0.80, $0.70, and $0.60. Each entry is 100 shares per leg.</p>
         </div>
         <div class="hero-state">
           <span class="badge" id="windowBadge">Waiting for markets</span>
@@ -137,9 +160,19 @@
 
       <section class="grid metrics">
         <article class="metric"><div class="label">Paper equity</div><div class="metric-value" id="equity">—</div><small>Cash plus current bid marks</small></article>
-        <article class="metric"><div class="label">Net realized P&amp;L</div><div class="metric-value" id="realized">—</div><small>After modeled taker fees</small></article>
+        <article class="metric"><div class="label">Floating P&amp;L</div><div class="metric-value" id="floatPnl">—</div><small>Open positions · fresh best bids</small></article>
         <article class="metric"><div class="label">Available cash</div><div class="metric-value" id="cash">—</div><small>Paper account only</small></article>
-        <article class="metric"><div class="label">Paired win rate</div><div class="metric-value" id="pairWinRate">—</div><small id="pairCount">No settled pairs</small></article>
+        <article class="metric"><div class="label">Net realized P&amp;L</div><div class="metric-value" id="realized">—</div><small>After modeled taker fees</small></article>
+      </section>
+
+      <section class="grid">
+        <article class="panel">
+          <div class="panel-head">
+            <div><div class="panel-title">Current positions</div><div class="panel-sub">Live P&amp;L uses the latest fresh best bid; positions awaiting resolution show their last mark separately.</div></div>
+            <span class="badge" id="positionCount">0 active</span>
+          </div>
+          <div class="position-grid" id="positionCards"><div class="empty">No active positions.</div></div>
+        </article>
       </section>
 
       <section class="grid markets">
@@ -161,19 +194,20 @@
 
       <section class="grid">
         <article class="panel">
-          <div class="panel-head"><div><div class="panel-title">Pair evaluation</div><div class="panel-sub">100 shares per leg · one qualifying pair per 5-minute window</div></div><span class="badge" id="caseBadge">No case</span></div>
+          <div class="panel-head"><div><div class="panel-title">Pair evaluation</div><div class="panel-sub">100 shares per leg at each ask-sum threshold · up to three entries per window</div></div><span class="badge" id="caseBadge">No case</span></div>
           <div class="opportunity">
             <div class="decision"><div class="eyebrow">Selected pair · best asks combined</div><div class="decision-value" id="pairSum">—</div><div class="muted" id="pairDirection">Waiting for an eligible 5m/15m pair</div></div>
             <div class="decision rule-list">
-              <div class="rule"><span>Entry gate</span><strong>Combined asks &lt; $0.60</strong></div>
-              <div class="rule"><span>Shares per leg</span><strong>100</strong></div>
+              <div class="rule"><span>Entry levels</span><strong>&lt; $0.80 · $0.70 · $0.60</strong></div>
+              <div class="rule"><span>Order per entry</span><strong>100 shares per leg</strong></div>
               <div class="rule"><span>Market sweep ceiling</span><strong>$0.99 per share</strong></div>
               <div class="rule"><span>Beat gap / volatility band</span><strong id="beatComparison">—</strong></div>
               <div class="rule"><span>Modeled pair fees</span><strong id="pairFees">—</strong></div>
               <div class="rule"><span>Last pair entry cost</span><strong id="lastEntryCost">—</strong></div>
             </div>
           </div>
-          <div class="notice">Beat snapshots prefer the nearest Binance BTCUSDT trade within 2 seconds of each market start. A rolling 60-second Binance price range sets the equal-beat band, floored at $2 and capped at $100; Binance estimates are not the official Chainlink resolution price. A 15-minute market can be reused for three consecutive 5-minute entries, accumulating up to 300 shares on that leg. Orders sweep visible asks up to $0.99. Missing/stale feeds, insufficient depth, or low paper cash can still prevent a fill. Different settlement times mean both legs can lose.</div>
+          <div class="tier-list" id="entryTierStatus" aria-label="Ask-sum entry levels"></div>
+          <div class="notice">Each threshold can fire once per 5-minute window. If the ask sum jumps below several unused levels between checks, the bot attempts each qualifying entry once, from $0.80 down to $0.60. Each pair uses 100 shares per leg and visible asks up to $0.99. Different settlement times mean both legs can lose.</div>
         </article>
       </section>
 
@@ -183,23 +217,33 @@
           <svg class="chart" id="equityChart" viewBox="0 0 720 170" role="img" aria-label="Paper equity curve"></svg>
         </article>
         <article class="panel">
-          <div class="panel-head"><div><div class="panel-title">Strategy and feed status</div><div class="panel-sub">No legacy signals or live execution</div></div><span class="badge" id="socketStatus">CLOB waiting</span></div>
-          <div class="rule-list">
-            <div class="rule"><span>Active strategy</span><strong>Every 5m · paired 5m/15m</strong></div>
-            <div class="rule"><span>Exit</span><strong>Official market resolution</strong></div>
-            <div class="rule"><span>Entry gate</span><strong>Wait for combined asks &lt; $0.60</strong></div>
-            <div class="rule"><span>Binance trade feed</span><strong id="binanceStatus">Waiting</strong></div>
-            <div class="rule"><span>Last 60s BTC range / band</span><strong id="binanceRange">—</strong></div>
-            <div class="rule"><span>Book feed</span><strong id="feedDetail">—</strong></div>
-            <div class="rule"><span>Ledger</span><strong>Fresh on Railway restart</strong></div>
-          </div>
+          <div class="panel-head"><div><div class="panel-title">Results</div><div class="panel-sub">Completed paired windows</div></div></div>
+          <div class="metric-value" id="pairWinRate">—</div>
+          <small id="pairCount">No settled pairs</small>
         </article>
       </section>
 
       <section class="grid">
         <article class="panel">
           <div class="panel-head"><div><div class="panel-title">Paired trade history</div><div class="panel-sub">Each leg settles independently; this is a paired strategy, not guaranteed arbitrage.</div></div><span class="badge" id="historyCount">0 pairs</span></div>
-          <div class="table-wrap"><table><thead><tr><th>Window end</th><th>Case</th><th>UP market · avg</th><th>DOWN market · avg</th><th>Shares / leg</th><th>Ask sum</th><th>Fees</th><th>Status</th><th>Net P&amp;L</th></tr></thead><tbody id="pairRows"><tr><td colspan="9" class="empty">No pairs entered yet.</td></tr></tbody></table></div>
+          <div class="table-wrap"><table><thead><tr><th>Window end</th><th>Entry</th><th>Case</th><th>UP market · avg</th><th>DOWN market · avg</th><th>Shares / leg</th><th>Ask sum</th><th>Fees</th><th>Status</th><th>Net P&amp;L</th></tr></thead><tbody id="pairRows"><tr><td colspan="10" class="empty">No pairs entered yet.</td></tr></tbody></table></div>
+        </article>
+      </section>
+      <section class="grid">
+        <article class="panel">
+          <div class="panel-head"><div><div class="panel-title">Strategy and feed details</div><div class="panel-sub">Reference information, kept below live positions and account status</div></div><span class="badge" id="socketStatus">CLOB waiting</span></div>
+          <div class="rule-list">
+            <div class="rule"><span>Active strategy</span><strong>BTC paired 5m/15m · paper only</strong></div>
+            <div class="rule"><span>Entry levels</span><strong>Combined asks below $0.80, $0.70, and $0.60</strong></div>
+            <div class="rule"><span>Entry sizing</span><strong>100 shares per leg · one pair per level</strong></div>
+            <div class="rule"><span>Exit</span><strong>Official market resolution</strong></div>
+            <div class="rule"><span>Market sweep ceiling</span><strong>$0.99 per share</strong></div>
+            <div class="rule"><span>Binance trade feed</span><strong id="binanceStatus">Waiting</strong></div>
+            <div class="rule"><span>Last 60s BTC range / band</span><strong id="binanceRange">—</strong></div>
+            <div class="rule"><span>Polymarket book feed</span><strong id="feedDetail">—</strong></div>
+            <div class="rule"><span>Paper ledger</span><strong>In memory · restart clears history</strong></div>
+          </div>
+          <div class="notice">Beat prices use the nearest Binance BTCUSDT trade within 2 seconds of market start, with historical fallback when available. The rolling 60-second Binance price range sets the equal-beat band, floored at $2 and capped at $100. If beat or volatility data is unavailable, the bot compares both pairings and selects the lower ask sum.</div>
         </article>
       </section>
       <footer>Paper simulation only · Fees are modeled from Polymarket market metadata · A Railway restart clears paper history · Results are not guaranteed</footer>
@@ -207,8 +251,9 @@
 
     <script>
       const $ = (id) => document.getElementById(id);
-      const money = (value, digits = 2) => Number.isFinite(Number(value)) ? '$' + Number(value).toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits }) : '—';
-      const shares = (value) => Number.isFinite(Number(value)) ? Number(value).toLocaleString(undefined, { maximumFractionDigits: 2 }) : '—';
+      const hasNumber = (value) => value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value));
+      const money = (value, digits = 2) => hasNumber(value) ? '$' + Number(value).toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits }) : '—';
+      const shares = (value) => hasNumber(value) ? Number(value).toLocaleString(undefined, { maximumFractionDigits: 2 }) : '—';
       const dateTime = (value) => value ? new Date(Number(value)).toLocaleString() : '—';
       const safe = (value) => String(value ?? '').replace(/[&<>"']/g, (ch) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
       const signClass = (value) => Number(value) > 0 ? 'positive' : Number(value) < 0 ? 'negative' : 'neutral';
@@ -272,7 +317,7 @@
         const rows = Array.isArray(pairs) ? pairs : [];
         $('historyCount').textContent = `${rows.length} pairs`;
         if (!rows.length) {
-          $('pairRows').innerHTML = '<tr><td colspan="9" class="empty">No pairs entered yet.</td></tr>';
+          $('pairRows').innerHTML = '<tr><td colspan="10" class="empty">No pairs entered yet.</td></tr>';
           return;
         }
         $('pairRows').innerHTML = rows.map((pair) => {
@@ -282,11 +327,82 @@
           const downMarket = pair.direction?.downMarket || '—';
           return `<tr>
             <td>${safe(new Date(Number(pair.windowEnd)).toLocaleTimeString())}</td>
+            <td>#${shares(pair.entryNumber)} · &lt; ${money(pair.askSumTarget, 2)}</td>
             <td><span class="tag">CASE ${safe(pair.case)}</span></td>
             <td>${safe(upMarket)} · ${money(pair.upPrice, 3)}</td><td>${safe(downMarket)} · ${money(pair.downPrice, 3)}</td>
             <td>${shares(pair.sharesPerLeg)}</td><td>${money(pair.bestAskSum, 3)}</td><td>${money(pair.fees, 3)}</td>
             <td>${safe(status)}</td><td class="${signClass(pnl)}">${pnl == null ? '—' : money(pnl, 3)}</td>
           </tr>`;
+        }).join('');
+      }
+
+      function markedPnl(position) {
+        const bid = Number(position.markBid);
+        const quantity = Number(position.shares);
+        const cost = Number(position.totalCost ?? position.initialTotalCost);
+        if (!hasNumber(position.markBid) || !hasNumber(position.shares)
+          || !hasNumber(position.totalCost ?? position.initialTotalCost)) return null;
+        if (!Number.isFinite(bid) || !Number.isFinite(quantity) || !Number.isFinite(cost)) return null;
+        return bid * quantity - cost - (Number(position.fees ?? position.initialFees) || 0)
+          + (Number(position.estimatedMakerRebate) || 0);
+      }
+
+      function renderPositions(positions, account, now) {
+        const active = (Array.isArray(positions) ? positions : [])
+          .filter((position) => ['OPEN', 'PENDING_RESOLUTION'].includes(position.status));
+        const live = active.filter((position) => position.status === 'OPEN'
+          && position.markStatus === 'LIVE' && hasNumber(position.unrealizedPnl));
+        const livePnl = live.reduce((sum, position) => sum + Number(position.unrealizedPnl), 0);
+        $('floatPnl').textContent = live.length ? money(livePnl) : '—';
+        $('floatPnl').className = `metric-value ${signClass(livePnl)}`;
+        $('positionCount').textContent = `${active.length} active · ${live.length} live marks`;
+        if (!active.length) {
+          $('positionCards').innerHTML = '<div class="empty">No active positions in this paper ledger.</div>';
+          return;
+        }
+
+        $('positionCards').innerHTML = active.map((position) => {
+          const isLive = position.status === 'OPEN';
+          const isFresh = isLive && position.markStatus === 'LIVE'
+            && hasNumber(position.unrealizedPnl);
+          const lastEstimate = !isLive ? markedPnl(position) : null;
+          const pnl = isFresh ? Number(position.unrealizedPnl) : lastEstimate;
+          const pnlCaption = isFresh ? 'Floating P&amp;L · fresh bid'
+            : !isLive && pnl != null ? 'Last-mark P&amp;L · not live'
+              : isLive ? `Floating P&amp;L · ${safe(position.markStatus || 'unavailable')}`
+                : 'Awaiting official resolution';
+          const markAge = hasNumber(position.markUpdatedAt)
+            ? `${Math.max(0, Math.round((Number(now) - Number(position.markUpdatedAt)) / 1000))}s old`
+            : 'age unknown';
+          const statusLabel = isLive ? 'OPEN' : 'PENDING RESOLUTION';
+          const entryPrice = Number(position.entryPrice ?? position.avgEntry);
+          const entryCost = Number(position.totalCost ?? position.initialTotalCost)
+            + (Number(position.fees ?? position.initialFees) || 0);
+          return `<article class="position-card ${String(position.side).toLowerCase()} ${isLive ? '' : 'pending'}">
+            <div class="position-top">
+              <div class="position-side">${safe(position.timeframe || 'BTC')} · ${safe(position.side)}</div>
+              <span class="badge">${statusLabel}</span>
+            </div>
+            <div class="position-pnl ${pnl == null ? 'neutral' : signClass(pnl)}">${pnl == null ? '—' : money(pnl, 3)}</div>
+            <small>${pnlCaption}${!isLive && position.markBid != null ? ` · bid ${money(position.markBid, 3)} · ${markAge}` : ''}</small>
+            <div class="position-fields" style="margin-top:10px">
+              <div class="position-field"><span>Shares</span><strong>${shares(position.shares)}</strong></div>
+              <div class="position-field"><span>Average entry</span><strong>${money(entryPrice, 3)}</strong></div>
+              <div class="position-field"><span>Entry cost + fees</span><strong>${money(entryCost, 2)}</strong></div>
+              <div class="position-field"><span>Best bid mark</span><strong>${isFresh || !isLive ? money(position.markBid, 3) : 'Stale / unavailable'}</strong></div>
+              <div class="position-field"><span>Market</span><strong>${safe(position.timeframe || '—')} · ends ${safe(new Date(Number(position.windowEnd)).toLocaleTimeString())}</strong></div>
+              <div class="position-field"><span>Settlement</span><strong>${isLive ? 'Market still active' : 'Polymarket result pending'}</strong></div>
+            </div>
+          </article>`;
+        }).join('');
+      }
+
+      function renderEntryTiers(tiers) {
+        const list = Array.isArray(tiers) ? tiers : [];
+        $('entryTierStatus').innerHTML = list.map((tier) => {
+          const status = String(tier.status || 'WAITING').toLowerCase();
+          const label = status === 'fired' ? 'FIRED' : status === 'ready' ? 'READY' : 'WAITING';
+          return `<div class="tier ${status}"><strong>${money(tier.threshold, 2)}</strong><span>${label}</span></div>`;
         }).join('');
       }
 
@@ -316,6 +432,7 @@
         $('cash').textContent = money(account.cash);
         $('pairWinRate').textContent = stats.completed ? `${stats.winRate.toFixed(1)}%` : '—';
         $('pairCount').textContent = `${stats.wins} wins · ${stats.completed} settled pairs · ${Number(account.pendingPairs) || 0} pending`;
+        renderPositions(state.positions, account, state.now);
 
         renderMarket('five', pair.fiveMinute);
         renderMarket('fifteen', pair.fifteenMinute);
@@ -326,8 +443,9 @@
           : opportunity.case ? `CASE ${opportunity.case}` : opportunity.status || 'No case';
         $('pairSum').textContent = opportunity.prices?.sumPrice != null ? money(opportunity.prices.sumPrice, 3) : '—';
         $('pairDirection').textContent = opportunity.direction
-          ? `Buy UP in ${opportunity.direction.upMarket} · DOWN in ${opportunity.direction.downMarket}${opportunity.selectionMode === 'ASK_SUM_FALLBACK' ? ' · ask-based fallback' : ''}${opportunity.waitingForAskSum ? ' · waiting for combined asks below $0.60' : opportunity.askSumUnderTarget ? ' · entry threshold met' : ''}`
+          ? `Buy UP in ${opportunity.direction.upMarket} · DOWN in ${opportunity.direction.downMarket}${opportunity.selectionMode === 'ASK_SUM_FALLBACK' ? ' · ask-based fallback' : ''}${opportunity.nextAskSumTarget != null ? ` · next entry below ${money(opportunity.nextAskSumTarget, 2)}` : opportunity.status === 'WINDOW_ENTRIES_COMPLETE' ? ' · all levels fired' : ''}`
           : opportunity.reason || 'Waiting for a 5m/15m pair';
+        renderEntryTiers(opportunity.entryTiers);
         $('pairFees').textContent = opportunity.fees != null ? money(opportunity.fees, 3) : '—';
         $('lastEntryCost').textContent = opportunity.totalCost != null ? money(opportunity.totalCost, 3) : '—';
         $('beatComparison').textContent = opportunity.selectionMode === 'ASK_SUM_FALLBACK'

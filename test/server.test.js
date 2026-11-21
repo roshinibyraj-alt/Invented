@@ -44,7 +44,7 @@ test('health endpoint reports strategy errors as unhealthy', async t => {
   assert.deepEqual(await response.json(), { ok: false, mode: 'DEMO', status: 'ERROR', now: 123 });
 });
 
-test('dashboard explains every-5m paired entries and paper-only settlement', async t => {
+test('dashboard prioritizes floating positions and explains tiered paper entries', async t => {
   const server = startServer({ snapshot: () => ({}) }, 0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -53,17 +53,21 @@ test('dashboard explains every-5m paired entries and paper-only settlement', asy
   assert.equal(response.status, 200);
   assert.match(html, /Invented · BTC 5m \+ 15m/);
   assert.match(html, /Paired window paper bot/i);
-  assert.match(html, /one qualifying pair per 5-minute window/i);
-  assert.match(html, /each market's start price/i);
-  assert.match(html, /combined asks &lt; \$0\.60/i);
+  assert.match(html, /three qualifying pairs per 5-minute window/i);
+  assert.match(html, /Current positions/i);
+  assert.match(html, /Floating P&amp;L/i);
+  assert.match(html, /below \$0\.80, \$0\.70, and \$0\.60/i);
+  assert.match(html, /Entry levels/i);
   assert.match(html, /100 shares per leg/i);
   assert.match(html, /not guaranteed arbitrage/i);
-  assert.match(html, /falls back to the lower current ask sum/i);
   assert.match(html, /nearest Binance BTCUSDT trade within 2 seconds/i);
   assert.match(html, /rolling 60-second Binance price range/i);
   assert.match(html, /\$2 and capped at \$100/i);
   assert.match(html, /official market resolution/i);
   assert.match(html, /Paired trade history/i);
+  assert.match(html, /Strategy and feed details/i);
+  assert.ok(html.indexOf('Current positions') < html.indexOf('Strategy and feed details'));
+  assert.ok(html.indexOf('Strategy and feed details') > html.indexOf('Paired trade history'));
   assert.match(html, /PAPER ONLY/);
   assert.doesNotMatch(html, /100-share buys at \$0\.30|midpoint reaches \$0\.20|200 shares on the opposite side/);
 });
