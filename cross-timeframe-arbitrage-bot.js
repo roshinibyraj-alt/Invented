@@ -10,11 +10,11 @@ const FIVE_MINUTES_MS = 5 * 60 * 1000;
 const FIFTEEN_MINUTES_MS = 15 * 60 * 1000;
 const STRATEGY = Object.freeze({
   id: 'btc-every-5m-paired-5m-15m-paper',
-  name: 'BTC every-5m paired 5m/15m paper strategy',
-  version: 'btc-every-5m-paired-paper-v6',
-  quantity: 100,
-  askSumTarget: 0.60,
-  entryAskSumThresholds: Object.freeze([0.80, 0.70, 0.60]),
+  name: 'BTC first-5m paired 5m/15m paper strategy',
+  version: 'btc-every-5m-paired-paper-v7-first-slot-500',
+  quantity: 500,
+  askSumTarget: 0.80,
+  entryAskSumThresholds: Object.freeze([0.80]),
   sweepPriceCeiling: 0.99,
   takeProfitTrigger: 0.99,
   takeProfitPayout: 1.00,
@@ -44,6 +44,14 @@ function actualMarketStart(market) {
 
 function actualMarketEnd(market) {
   return readMarketTime(market, 'endDate', market?.end);
+}
+
+function isFirstFiveMinuteSlot(market5m, market15m) {
+  const fiveStart = actualMarketStart(market5m);
+  const fifteenStart = actualMarketStart(market15m);
+  return Number.isFinite(fiveStart)
+    && Number.isFinite(fifteenStart)
+    && Math.abs(fiveStart - fifteenStart) <= 1000;
 }
 
 function normalizeTimestamp(value, fallback) {
@@ -722,6 +730,13 @@ class CrossTimeframeArbitrageBot extends WickBot {
       this.setWaitingOpportunity('The active 15-minute market does not contain the current 5-minute window.', 'INVALID_MARKET_TIMES');
       return false;
     }
+    if (!isFirstFiveMinuteSlot(market5m, market15m)) {
+      this.setWaitingOpportunity(
+        'Entry is limited to the first 5-minute segment of each 15-minute window.',
+        'OUTSIDE_FIRST_FIVE_MINUTE_SLOT',
+      );
+      return false;
+    }
     if (now >= actualMarketEnd(market5m)) {
       this.setWaitingOpportunity('The 5-minute window ended without a qualifying ask sum; skipping it.', 'WINDOW_EXPIRED');
       return false;
@@ -823,9 +838,9 @@ class CrossTimeframeArbitrageBot extends WickBot {
           : fired.length ? 'WAITING_FOR_NEXT_THRESHOLD'
             : opportunity.waitingForAskSum ? 'WAITING_FOR_ASK_SUM' : 'NO_OPPORTUNITY',
         reason: fired.length === STRATEGY.entryAskSumThresholds.length
-          ? 'All three ask-sum entries have fired in this 5-minute window.'
+          ? 'The $0.80 ask-sum entry has fired for this 5-minute window.'
           : fired.length
-            ? `Entry at ${fired.map((tier) => `$${tier.threshold.toFixed(2)}`).join(', ')} already fired; waiting for the next lower ask-sum threshold.`
+            ? `Entry at ${fired.map((tier) => `$${tier.threshold.toFixed(2)}`).join(', ')} already fired for this 5-minute window.`
             : opportunity.reason,
       };
       return false;
@@ -865,11 +880,11 @@ class CrossTimeframeArbitrageBot extends WickBot {
         : enteredAny ? 'PAIR_ENTRY_FILLED'
           : this.opportunity.status,
       reason: fired.length === STRATEGY.entryAskSumThresholds.length
-        ? 'All three ask-sum entries have fired in this 5-minute window.'
+        ? 'The $0.80 ask-sum entry has fired for this 5-minute window.'
         : blockedAttempt
-          ? `${fired.length} of ${STRATEGY.entryAskSumThresholds.length} ask-sum entries fired; the next qualifying entry is blocked: ${blockedAttempt.reason}`
+          ? `The $0.80 ask-sum entry is blocked: ${blockedAttempt.reason}`
         : enteredAny
-          ? `${fired.length} of ${STRATEGY.entryAskSumThresholds.length} ask-sum entries fired; waiting for the next qualifying level.`
+          ? 'The $0.80 ask-sum entry has fired for this 5-minute window.'
           : this.opportunity.reason,
     };
     this.signal = {
@@ -1269,7 +1284,9 @@ class CrossTimeframeArbitrageBot extends WickBot {
         sharesPerLeg: STRATEGY.quantity,
         askSumTarget: STRATEGY.askSumTarget,
         entryAskSumThresholds: STRATEGY.entryAskSumThresholds,
-        maxPairsPerFiveMinuteWindow: STRATEGY.entryAskSumThresholds.length,
+        maxPairsPerFiveMinuteWindow: 1,
+        maxPairsPerFifteenMinuteWindow: 1,
+        firstFiveMinuteSlotOnly: true,
         forceEntryAboveAskSumTarget: false,
         entryOnlyBelowAskSumTarget: true,
         sweepPriceCeiling: STRATEGY.sweepPriceCeiling,
@@ -1278,7 +1295,8 @@ class CrossTimeframeArbitrageBot extends WickBot {
         beatVolatilityWindowMs: STRATEGY.beatVolatilityWindowMs,
         minimumBeatToleranceUsd: STRATEGY.minimumBeatToleranceUsd,
         maximumBeatToleranceUsd: STRATEGY.maximumBeatToleranceUsd,
-        onePairPerFiveMinuteWindow: false,
+        onePairPerFiveMinuteWindow: true,
+        onePairPerFirstFiveMinuteSlot: true,
         oneEntryPerAskSumThreshold: true,
         synchronizedEndTimeRequired: false,
         takeProfitTrigger: STRATEGY.takeProfitTrigger,
@@ -1332,7 +1350,7 @@ class CrossTimeframeArbitrageBot extends WickBot {
         fiveMinute: market5m,
         fifteenMinute: market15m,
         volatility,
-        note: 'Each 5-minute market pairs with the active 15-minute market that contains it. The same 15-minute market may be used for three consecutive 5-minute entries.',
+        note: 'A single pair may enter only during the first 5-minute segment of each 15-minute market.',
       },
       binance: {
         status: this.binanceFeed?.status || 'UNAVAILABLE',
@@ -1360,6 +1378,7 @@ CrossTimeframeArbitrageBot._test = {
   actualMarketStart,
   detectOpportunity,
   getQuotePairSum,
+  isFirstFiveMinuteSlot,
   validPairMarkets,
   synchronizedMarkets,
 };

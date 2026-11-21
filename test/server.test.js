@@ -44,7 +44,7 @@ test('health endpoint reports strategy errors as unhealthy', async t => {
   assert.deepEqual(await response.json(), { ok: false, mode: 'DEMO', status: 'ERROR', now: 123 });
 });
 
-test('dashboard puts paired history first and explains WebSocket-only paper rules', async t => {
+test('dashboard puts paired history first and shows the active first-slot strategy', async t => {
   const server = startServer({ snapshot: () => ({}) }, 0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -53,12 +53,12 @@ test('dashboard puts paired history first and explains WebSocket-only paper rule
   assert.equal(response.status, 200);
   assert.match(html, /Invented · BTC 5m \+ 15m/);
   assert.match(html, /Paired window paper bot/i);
-  assert.match(html, /three qualifying pairs per 5-minute window/i);
+  assert.match(html, /one entry · first 5 minutes of each 15-minute window/i);
   assert.match(html, /Current positions/i);
   assert.match(html, /Floating P&amp;L/i);
-  assert.match(html, /below \$0\.80, \$0\.70, and \$0\.60/i);
-  assert.match(html, /Entry levels/i);
-  assert.match(html, /100 shares per leg/i);
+  assert.match(html, /combined asks are below \$0\.80, with 500 shares per leg/i);
+  assert.match(html, /Entry level/i);
+  assert.match(html, /500 shares per leg/i);
   assert.match(html, /both legs can lose/i);
   assert.match(html, /nearest Binance BTCUSDT aggregate-trade within 2 seconds/i);
   assert.match(html, /rolling 60-second Binance range/i);

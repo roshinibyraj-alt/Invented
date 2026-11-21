@@ -184,9 +184,9 @@
 
       <section class="hero grid">
         <div>
-          <div class="eyebrow">Up to three qualifying pairs per 5-minute window</div>
+          <div class="eyebrow">One entry · first 5 minutes of each 15-minute window</div>
           <h2>Pair opposite outcomes in the current 5m and active 15m BTC markets.</h2>
-          <p>The bot uses the selected UP/DOWN pairing and can enter once at each combined-ask level: below $0.80, $0.70, and $0.60. Each entry is 100 shares per leg.</p>
+          <p>The bot uses the selected UP/DOWN pairing only in the first five-minute segment. It enters once when combined asks are below $0.80, with 500 shares per leg.</p>
         </div>
         <div class="hero-state">
           <span class="badge" id="windowBadge">Waiting for markets</span>
@@ -238,12 +238,12 @@
 
       <section class="grid">
         <article class="panel">
-          <div class="panel-head"><div><div class="panel-title">Pair evaluation</div><div class="panel-sub">100 shares per leg at each ask-sum threshold · up to three entries per window</div></div><span class="badge" id="caseBadge">No case</span></div>
+          <div class="panel-head"><div><div class="panel-title">Pair evaluation</div><div class="panel-sub">500 shares per leg · first 5-minute segment only</div></div><span class="badge" id="caseBadge">No case</span></div>
           <div class="opportunity">
             <div class="decision"><div class="eyebrow">Selected pair · best asks combined</div><div class="decision-value" id="pairSum">—</div><div class="muted" id="pairDirection">Waiting for an eligible 5m/15m pair</div></div>
             <div class="decision rule-list">
-              <div class="rule"><span>Entry levels</span><strong>&lt; $0.80 · $0.70 · $0.60</strong></div>
-              <div class="rule"><span>Order per entry</span><strong>100 shares per leg</strong></div>
+              <div class="rule"><span>Entry level</span><strong>Combined asks &lt; $0.80</strong></div>
+              <div class="rule"><span>Order per entry</span><strong>500 shares per leg</strong></div>
               <div class="rule"><span>Market sweep ceiling</span><strong>$0.99 per share</strong></div>
               <div class="rule"><span>Beat gap / volatility band</span><strong id="beatComparison">—</strong></div>
               <div class="rule"><span>Modeled pair fees</span><strong id="pairFees">—</strong></div>
@@ -251,7 +251,7 @@
             </div>
           </div>
           <div class="tier-list" id="entryTierStatus" aria-label="Ask-sum entry levels"></div>
-          <div class="notice">Each threshold can fire once per 5-minute window. If the ask sum jumps below several unused levels between checks, the bot attempts each qualifying entry once, from $0.80 down to $0.60. Each pair uses 100 shares per leg and visible asks up to $0.99. Different settlement times mean both legs can lose.</div>
+          <div class="notice">The bot can enter once, and only in the first 5-minute segment of each 15-minute window. The paired entry requires combined asks below $0.80 and uses 500 shares on each leg, sweeping visible asks up to $0.99. Different settlement times mean both legs can lose.</div>
         </article>
       </section>
 
@@ -273,8 +273,9 @@
           <div class="details-body">
             <div class="rule-list">
               <div class="rule"><span>Active strategy</span><strong>BTC paired 5m/15m · paper only</strong></div>
-              <div class="rule"><span>Entry levels</span><strong>Combined asks below $0.80, $0.70, and $0.60</strong></div>
-              <div class="rule"><span>Entry sizing</span><strong>100 shares per leg · one pair per level</strong></div>
+              <div class="rule"><span>Entry window</span><strong>First 5 minutes of each 15-minute market</strong></div>
+              <div class="rule"><span>Entry level</span><strong>Combined asks below $0.80</strong></div>
+              <div class="rule"><span>Entry sizing</span><strong>500 shares per leg · one pair per window</strong></div>
               <div class="rule"><span>Take-profit</span><strong>Best bid ≥ $0.99 · modeled payout $1.00/share</strong></div>
               <div class="rule"><span>If TP does not hit</span><strong>Hold to that market’s official resolution</strong></div>
               <div class="rule"><span>Market sweep ceiling</span><strong>$0.99 per share</strong></div>
