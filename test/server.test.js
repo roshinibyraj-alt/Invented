@@ -44,7 +44,7 @@ test('health endpoint reports strategy errors as unhealthy', async t => {
   assert.deepEqual(await response.json(), { ok: false, mode: 'DEMO', status: 'ERROR', now: 123 });
 });
 
-test('dashboard puts paired history first and explains the rolling ask-only strategy', async t => {
+test('dashboard puts paired history first and explains fixed-side entries', async t => {
   const server = startServer({ snapshot: () => ({}) }, 0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -52,21 +52,21 @@ test('dashboard puts paired history first and explains the rolling ask-only stra
   const html = await response.text();
   assert.equal(response.status, 200);
   assert.match(html, /Invented · BTC 5m \+ 15m/);
-  assert.match(html, /Paired window paper bot/i);
-  assert.match(html, /up to three entries · all 5-minute slots/i);
+  assert.match(html, /Fixed-side window paper bot/i);
+  assert.match(html, /One scheduled entry at every 5-minute start/i);
   assert.match(html, /Current positions/i);
   assert.match(html, /Floating P&amp;L/i);
-  assert.match(html, /each ask is at least \$0\.20/i);
-  assert.match(html, /adds 300 shares to the selected 15-minute side/i);
-  assert.match(html, /Entry level/i);
+  assert.match(html, /buy DOWN in the new 5m market and UP in the active 15m market/i);
+  assert.match(html, /adds 300 UP shares to the active 15m market/i);
+  assert.match(html, /Combined asks are not checked/i);
+  assert.match(html, /Combined asks.*Not used as a filter/i);
   assert.match(html, /300 shares per leg/i);
   assert.match(html, /the two markets can resolve differently/i);
-  assert.match(html, /Binance beat prices do not choose the side/i);
+  assert.match(html, /Direction is fixed by timeframe/i);
   assert.match(html, /best bid of \$0\.99/i);
   assert.match(html, /modeled payout \$1\.00\/share/i);
-  assert.match(html, /Entry selection uses fresh Polymarket CLOB WebSocket asks only/i);
+  assert.match(html, /Fresh Polymarket CLOB WebSocket asks and enough visible depth up to \$0\.99 are still required/i);
   assert.doesNotMatch(html, /Chainlink Data Streams and timestamped CoinGecko history are fallback/i);
-  assert.match(html, /Binance beat filter/i);
   assert.match(html, /Paired trade history/i);
   assert.match(html, /Strategy and feed details/i);
   assert.ok(html.indexOf('Paired trade history') < html.indexOf('Current positions'));

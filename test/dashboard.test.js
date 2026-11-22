@@ -100,7 +100,7 @@ test('dashboard groups same-market positions and labels pending P&L clearly', ()
   assert.doesNotMatch(rows, /position-card/);
 });
 
-test('paired history renders compact rows instead of a wide table', () => {
+test('fixed-side history renders compact rows instead of a wide table', () => {
   const html = fs.readFileSync(path.join(__dirname, '../public/pressure-dashboard.html'), 'utf8');
   const script = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)][0]?.[1];
   const elements = new Map();
@@ -124,8 +124,8 @@ test('paired history renders compact rows instead of a wide table', () => {
   context.renderPairs([{
     windowEnd: Date.now(),
     entryNumber: 2,
-    case: 'A',
-    direction: { upMarket: '5m', downMarket: '15m' },
+    case: 'FIXED',
+    direction: { upMarket: '15m', downMarket: '5m' },
     upPrice: 0.31,
     downPrice: 0.29,
     sharesPerLeg: 100,
@@ -133,14 +133,14 @@ test('paired history renders compact rows instead of a wide table', () => {
     fees: 1.23,
     status: 'OPEN',
     realizedPnl: null,
-    askSumTarget: 0.85,
+    askSumTarget: null,
   }]);
 
   const rows = elements.get('pairRows').innerHTML;
   assert.match(rows, /Entry 2/);
-  assert.match(rows, /5m UP \+ 15m DOWN/);
+  assert.match(rows, /15m UP \+ 5m DOWN/);
   assert.match(rows, /100 shares\/leg/);
-  assert.match(rows, /tier \$0\.85/);
+  assert.match(rows, /fixed sides/);
   assert.doesNotMatch(rows, /<table/);
   assert.ok(html.indexOf('Paired trade history') < html.indexOf('Current positions'));
   assert.ok(html.indexOf('Current positions') < html.indexOf('Strategy and feed details'));

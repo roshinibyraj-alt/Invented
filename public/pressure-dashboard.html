@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <meta name="theme-color" content="#07111f">
-    <title>Invented · BTC Paired Window Paper Bot</title>
+    <title>Invented · BTC Fixed-Side Window Paper Bot</title>
     <style>
       :root {
         color-scheme: dark;
@@ -167,7 +167,7 @@
       <header>
         <div class="brand">
           <div class="mark" aria-hidden="true">₿</div>
-          <div><div class="eyebrow">Invented · BTC 5m + 15m</div><h1>Paired window paper bot</h1></div>
+          <div><div class="eyebrow">Invented · BTC 5m + 15m</div><h1>Fixed-side window paper bot</h1></div>
         </div>
         <div class="badges"><span class="badge paper">PAPER ONLY</span><span class="pill warn" id="statusPill">CONNECTING</span><span class="badge" id="updatedAt">Updated —</span></div>
       </header>
@@ -175,7 +175,7 @@
       <section class="grid">
         <article class="panel history-panel">
           <div class="panel-head">
-            <div><div class="panel-title">Paired trade history</div><div class="panel-sub">Newest entries first · each row is one paired entry</div></div>
+            <div><div class="panel-title">Paired trade history</div><div class="panel-sub">Newest entries first · each row is one 5m start</div></div>
             <span class="badge" id="historyCount">0 pairs</span>
           </div>
           <div class="history-list" id="pairRows"><div class="empty">No pairs entered yet.</div></div>
@@ -184,9 +184,9 @@
 
       <section class="hero grid">
         <div>
-          <div class="eyebrow">Up to three entries · all 5-minute slots</div>
-          <h2>Pair opposite outcomes in the current 5m and active 15m BTC markets.</h2>
-          <p>At each 5-minute slot, it picks the cheapest eligible complementary UP/DOWN pair when asks total below $0.85 and each ask is at least $0.20. It buys 300 shares in each market and adds 300 shares to the selected 15-minute side. The next entry may use the opposite pairing; already-filled positions are not sold or reversed. Binance beat prices do not choose the side.</p>
+          <div class="eyebrow">One scheduled entry at every 5-minute start</div>
+          <h2>Buy DOWN in the new 5m market and UP in the active 15m market.</h2>
+          <p>Each 5-minute start buys 300 DOWN shares in that 5m market and adds 300 UP shares to the active 15m market. The sides are fixed by timeframe; combined asks, Binance beats, and price comparisons do not choose or block the sides.</p>
         </div>
         <div class="hero-state">
           <span class="badge" id="windowBadge">Waiting for markets</span>
@@ -216,7 +216,7 @@
 
       <section class="grid">
         <article class="panel">
-          <div class="panel-head"><div><div class="panel-title">Live paired window</div><div class="panel-sub">One active 5m market inside its containing 15m market</div></div><span class="badge">BTC · paired</span></div>
+          <div class="panel-head"><div><div class="panel-title">Live 5m and 15m windows</div><div class="panel-sub">The current 5m market inside its active 15m market</div></div><span class="badge">BTC · fixed sides</span></div>
           <div class="market-pair">
             <section class="market-card five">
               <div class="market-title"><strong>BTC · 5-minute</strong><span class="badge" id="fiveStatus">WAITING</span></div>
@@ -238,21 +238,20 @@
 
       <section class="grid">
         <article class="panel">
-          <div class="panel-head"><div><div class="panel-title">Pair evaluation</div><div class="panel-sub">300 shares in each 5m market · 300 added to 15m each slot</div></div><span class="badge" id="caseBadge">No pair</span></div>
+          <div class="panel-head"><div><div class="panel-title">Fixed-side entry</div><div class="panel-sub">300 shares per leg at each 5m start · one entry per slot</div></div><span class="badge" id="caseBadge">Waiting</span></div>
           <div class="opportunity">
-            <div class="decision"><div class="eyebrow">Selected pair · best asks combined</div><div class="decision-value" id="pairSum">—</div><div class="muted" id="pairDirection">Waiting for an eligible 5m/15m pair</div></div>
+            <div class="decision"><div class="eyebrow">Scheduled buys</div><div class="decision-value" id="pairSum">15m UP + 5m DOWN</div><div class="muted" id="pairDirection">Waiting for fresh asks on both scheduled sides</div></div>
             <div class="decision rule-list">
-              <div class="rule"><span>Entry level</span><strong>Combined asks &lt; $0.85</strong></div>
-              <div class="rule"><span>Individual ask floor</span><strong>$0.20 per leg</strong></div>
+              <div class="rule"><span>5m entry</span><strong>Buy DOWN at each start</strong></div>
+              <div class="rule"><span>15m entry</span><strong>Add UP at each 5m start</strong></div>
               <div class="rule"><span>Order per slot</span><strong>300 shares per leg</strong></div>
               <div class="rule"><span>Market sweep ceiling</span><strong>$0.99 per share</strong></div>
-              <div class="rule"><span>Binance beat filter</span><strong id="beatComparison">Ignored</strong></div>
+              <div class="rule"><span>Combined asks</span><strong>Not used as a filter</strong></div>
               <div class="rule"><span>Modeled pair fees</span><strong id="pairFees">—</strong></div>
               <div class="rule"><span>Last pair entry cost</span><strong id="lastEntryCost">—</strong></div>
             </div>
           </div>
-          <div class="tier-list" id="entryTierStatus" aria-label="Ask-sum entry levels"></div>
-          <div class="notice">Each of the three 5-minute slots can enter once when the selected 5m and 15m asks total below $0.85 and each ask is at least $0.20. It buys 300 shares in that 5m market and adds 300 shares to the selected 15m outcome per slot (up to 900 shares in 15m). It chooses the lowest-cost qualifying complementary pair for each new entry, so a later entry may switch pairings; existing positions are not sold or reversed. Binance beat prices do not select or block entries. Paper taker buys sweep visible asks up to $0.99; the two markets can resolve differently.</div>
+          <div class="notice">At each 5m boundary, buy 300 DOWN shares in the new 5m market and 300 UP shares in the active 15m market. Across three slots this can add up to 900 UP shares to one 15m market. Combined asks are not checked. The two markets can resolve differently. Paper taker buys sweep visible asks up to $0.99; stale or missing books, insufficient depth, or insufficient paper cash can delay or prevent a fill.</div>
         </article>
       </section>
 
@@ -273,9 +272,9 @@
           <summary class="panel-head"><span>Strategy and feed details</span><span class="badge" id="socketStatus">CLOB waiting</span></summary>
           <div class="details-body">
             <div class="rule-list">
-              <div class="rule"><span>Active strategy</span><strong>BTC paired 5m/15m · paper only</strong></div>
-              <div class="rule"><span>Entry window</span><strong>All three 5-minute slots per 15-minute market</strong></div>
-              <div class="rule"><span>Entry level</span><strong>Combined asks below $0.85; each ask ≥ $0.20</strong></div>
+              <div class="rule"><span>Active strategy</span><strong>BTC fixed-side 5m/15m · paper only</strong></div>
+              <div class="rule"><span>Entry window</span><strong>Every 5-minute start</strong></div>
+              <div class="rule"><span>Fixed sides</span><strong>5m DOWN + active 15m UP</strong></div>
               <div class="rule"><span>Entry sizing</span><strong>300 shares per 5m slot + 300 added to 15m</strong></div>
               <div class="rule"><span>Take-profit</span><strong>Best bid ≥ $0.99 · modeled payout $1.00/share</strong></div>
               <div class="rule"><span>If TP does not hit</span><strong>Hold to that market’s official resolution</strong></div>
@@ -285,7 +284,7 @@
               <div class="rule"><span>Polymarket book feed</span><strong id="feedDetail">—</strong></div>
               <div class="rule"><span>Paper ledger</span><strong>In memory · restart clears history</strong></div>
             </div>
-            <div class="notice">Entry selection uses fresh Polymarket CLOB WebSocket asks only. Binance beat prices and volatility are informational and do not select sides or block entries. The bot pauses only when required Polymarket books or the CLOB WebSocket are missing or stale. Market IDs and official resolutions still use Polymarket’s API.</div>
+            <div class="notice">Direction is fixed by timeframe and is not selected from prices. Combined asks are not a gate. Fresh Polymarket CLOB WebSocket asks and enough visible depth up to $0.99 are still required for paper fills. Binance data is informational only. Market IDs and official resolutions still use Polymarket’s API.</div>
           </div>
         </details>
       </section>
@@ -364,8 +363,8 @@
         $('pairRows').innerHTML = rows.map((pair) => {
           const status = pair.status === 'SETTLED' ? pair.outcome : pair.status;
           const pnl = pair.realizedPnl;
-          const upMarket = pair.direction?.upMarket || '—';
-          const downMarket = pair.direction?.downMarket || '—';
+          const upMarket = pair.direction?.upMarket || '15m';
+          const downMarket = pair.direction?.downMarket || '5m';
           const time = new Date(Number(pair.windowEnd)).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
           const closedLegs = (pair.legResults || []).filter((leg) => leg.status === 'SETTLED_EXIT');
           const exitSummary = closedLegs.map((leg) =>
@@ -377,12 +376,12 @@
             </div>
             <div class="history-details">
               <strong>UP ${money(pair.upPrice, 2)} · DOWN ${money(pair.downPrice, 2)}</strong>
-              <small>${shares(pair.sharesPerLeg)} shares/leg · ask sum ${money(pair.bestAskSum, 2)} · fees ${money(pair.fees, 2)}</small>
+              <small>${shares(pair.sharesPerLeg)} shares/leg · combined asks not filtered · fees ${money(pair.fees, 2)}</small>
             </div>
             <div class="history-result">
               <strong class="${pnl == null ? 'history-status' : signClass(pnl)} ${pair.status === 'SETTLED' ? 'settled' : ''}">${pnl == null ? safe(status) : money(pnl, 2)}</strong>
               <small>${pnl == null
-                ? `${safe(exitSummary || `${Number(pair.settledLegs) || 0}/2 legs closed`)} · tier ${money(pair.askSumTarget, 2)}`
+                ? `${safe(exitSummary || `${Number(pair.settledLegs) || 0}/2 legs closed`)} · fixed sides`
                 : 'Net P&amp;L'}</small>
             </div>
           </div>`;
@@ -458,15 +457,6 @@
         }).join('');
       }
 
-      function renderEntryTiers(tiers) {
-        const list = Array.isArray(tiers) ? tiers : [];
-        $('entryTierStatus').innerHTML = list.map((tier) => {
-          const status = String(tier.status || 'WAITING').toLowerCase();
-          const label = status === 'fired' ? 'FIRED' : status === 'ready' ? 'READY' : 'WAITING';
-          return `<div class="tier ${status}"><strong>${money(tier.threshold, 2)}</strong><span>${label}</span></div>`;
-        }).join('');
-      }
-
       function render(state) {
         const strategy = state.strategy || {};
         const account = state.account || {};
@@ -480,7 +470,7 @@
         };
         $('statusPill').textContent = state.status || 'RUNNING';
         const waitingForData = String(opportunity.status || '').startsWith('WAITING_FOR_');
-        $('statusPill').className = `pill ${state.status === 'ERROR' ? 'bad' : waitingForData || opportunity.waitingForAskSum || !pair.eligible ? 'warn' : 'good'}`;
+        $('statusPill').className = `pill ${state.status === 'ERROR' ? 'bad' : waitingForData || !pair.eligible ? 'warn' : 'good'}`;
         $('updatedAt').textContent = `Updated ${new Date(Number(state.now) || Date.now()).toLocaleTimeString()}`;
         $('windowBadge').textContent = pair.eligible ? '5M WINDOW OPEN' : 'WAITING FOR MARKETS';
         $('signal').textContent = state.signal?.action || 'WAIT';
@@ -498,17 +488,13 @@
 
         renderMarket('five', pair.fiveMinute);
         renderMarket('fifteen', pair.fifteenMinute);
-        $('caseBadge').textContent = opportunity.waitingForAskSum
-          ? 'WAIT FOR PRICE'
-          : opportunity.case ? `CASE ${opportunity.case}` : opportunity.status || 'No case';
-        $('pairSum').textContent = opportunity.prices?.sumPrice != null ? money(opportunity.prices.sumPrice, 3) : '—';
+        $('caseBadge').textContent = opportunity.status || 'Waiting';
+        $('pairSum').textContent = '15m UP + 5m DOWN';
         $('pairDirection').textContent = opportunity.direction
-          ? `Buy UP in ${opportunity.direction.upMarket} · DOWN in ${opportunity.direction.downMarket}${opportunity.nextAskSumTarget != null ? ` · next entry below ${money(opportunity.nextAskSumTarget, 2)}` : opportunity.status === 'WINDOW_ENTRIES_COMPLETE' ? ' · all levels fired' : ''}`
-          : opportunity.reason || 'Waiting for a 5m/15m pair';
-        renderEntryTiers(opportunity.entryTiers);
+          ? `Fixed sides · ${shares(strategy.sharesPerLeg)} shares each · combined asks do not gate`
+          : opportunity.reason || 'Waiting for fresh asks on the scheduled sides';
         $('pairFees').textContent = opportunity.fees != null ? money(opportunity.fees, 3) : '—';
         $('lastEntryCost').textContent = opportunity.totalCost != null ? money(opportunity.totalCost, 3) : '—';
-        $('beatComparison').textContent = 'Ignored for entry selection';
         $('socketStatus').textContent = state.websocket?.status || 'CLOB waiting';
         $('feedDetail').textContent = state.websocket?.lastMessageAt ? `WebSocket · ${Math.max(0, Date.now() - state.websocket.lastMessageAt)}ms since update` : 'Waiting for market stream';
         const tickAge = Number(volatility.lastTickAgeMs);
