@@ -184,9 +184,9 @@
 
       <section class="hero grid">
         <div>
-          <div class="eyebrow">One scheduled entry at every 5-minute start</div>
+          <div class="eyebrow">First slot immediate · later slots price-triggered</div>
           <h2>Buy DOWN in the new 5m market and UP in the active 15m market.</h2>
-          <p>Each 5-minute start buys 300 DOWN shares in that 5m market and adds 300 UP shares to the active 15m market. The sides are fixed by timeframe; combined asks, Binance beats, and price comparisons do not choose or block the sides.</p>
+          <p>The first 5-minute slot enters when fresh books are ready. In slots two and three, wait for the 5m DOWN best ask to reach $0.40 or lower; then submit 300 DOWN shares in 5m and 300 UP shares in 15m together.</p>
         </div>
         <div class="hero-state">
           <span class="badge" id="windowBadge">Waiting for markets</span>
@@ -238,12 +238,13 @@
 
       <section class="grid">
         <article class="panel">
-          <div class="panel-head"><div><div class="panel-title">Fixed-side entry</div><div class="panel-sub">300 shares per leg at each 5m start · one entry per slot</div></div><span class="badge" id="caseBadge">Waiting</span></div>
+          <div class="panel-head"><div><div class="panel-title">Fixed-side entry</div><div class="panel-sub">300 shares per leg · first slot immediate, later slots wait for the trigger</div></div><span class="badge" id="caseBadge">Waiting</span></div>
           <div class="opportunity">
             <div class="decision"><div class="eyebrow">Scheduled buys</div><div class="decision-value" id="pairSum">15m UP + 5m DOWN</div><div class="muted" id="pairDirection">Waiting for fresh asks on both scheduled sides</div></div>
             <div class="decision rule-list">
-              <div class="rule"><span>5m entry</span><strong>Buy DOWN at each start</strong></div>
-              <div class="rule"><span>15m entry</span><strong>Add UP at each 5m start</strong></div>
+              <div class="rule"><span>First 5m slot</span><strong>Enter when fresh books are ready</strong></div>
+              <div class="rule"><span>Slots two and three</span><strong>Wait for 5m DOWN ask ≤ $0.40</strong></div>
+              <div class="rule"><span>Paired entry</span><strong>5m DOWN + 15m UP together</strong></div>
               <div class="rule"><span>Order per slot</span><strong>300 shares per leg</strong></div>
               <div class="rule"><span>Market sweep ceiling</span><strong>$0.99 per share</strong></div>
               <div class="rule"><span>Combined asks</span><strong>Not used as a filter</strong></div>
@@ -251,7 +252,7 @@
               <div class="rule"><span>Last pair entry cost</span><strong id="lastEntryCost">—</strong></div>
             </div>
           </div>
-          <div class="notice">At each 5m boundary, buy 300 DOWN shares in the new 5m market and 300 UP shares in the active 15m market. Across three slots this can add up to 900 UP shares to one 15m market. Combined asks are not checked. The two markets can resolve differently. Paper taker buys sweep visible asks up to $0.99; stale or missing books, insufficient depth, or insufficient paper cash can delay or prevent a fill.</div>
+          <div class="notice">Slot 1 has no $0.40 price gate. In slots 2 and 3, the first fresh 5m DOWN best ask at or below $0.40 arms the paired entry; if a book, depth, or cash check briefly blocks execution, the trigger stays armed and the bot retries the pair. If the price never reaches $0.40 during that 5m slot, that slot is skipped. Combined asks are not checked. The two markets can resolve differently. Paper taker buys sweep visible asks up to $0.99.</div>
         </article>
       </section>
 
@@ -490,8 +491,10 @@
         renderMarket('fifteen', pair.fifteenMinute);
         $('caseBadge').textContent = opportunity.status || 'Waiting';
         $('pairSum').textContent = '15m UP + 5m DOWN';
-        $('pairDirection').textContent = opportunity.direction
-          ? `Fixed sides · ${shares(strategy.sharesPerLeg)} shares each · combined asks do not gate`
+        $('pairDirection').textContent = opportunity.waitingForPriceTrigger
+          ? `Slot ${Number(opportunity.fiveMinuteSlot) + 1}: waiting for 5m DOWN ask ≤ ${money(opportunity.triggerPrice, 2)}`
+          : opportunity.direction
+            ? `Fixed sides · ${shares(strategy.sharesPerLeg)} shares each · combined asks do not gate`
           : opportunity.reason || 'Waiting for fresh asks on the scheduled sides';
         $('pairFees').textContent = opportunity.fees != null ? money(opportunity.fees, 3) : '—';
         $('lastEntryCost').textContent = opportunity.totalCost != null ? money(opportunity.totalCost, 3) : '—';

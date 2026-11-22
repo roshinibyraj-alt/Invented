@@ -11,8 +11,9 @@ const FIFTEEN_MINUTES_MS = 15 * 60 * 1000;
 const STRATEGY = Object.freeze({
   id: 'btc-fixed-direction-5m-down-15m-up-paper',
   name: 'BTC fixed-direction 5m/15m paper strategy',
-  version: 'btc-fixed-directions-v10-no-ask-sum',
+  version: 'btc-fixed-directions-v11-later-slot-down-ask-040',
   quantity: 300,
+  laterSlotDownAskTrigger: 0.40,
   sweepPriceCeiling: 0.99,
   takeProfitTrigger: 0.99,
   takeProfitPayout: 1.00,
@@ -104,6 +105,7 @@ function detectOpportunity({
   market5m,
   market15m,
   quotes,
+  priceTriggerSatisfied = false,
 }) {
   if (!validPairMarkets(market5m, market15m)) {
     return { exists: false, case: null, reason: 'The current 5-minute market is not contained in the active 15-minute market.' };
@@ -123,6 +125,27 @@ function detectOpportunity({
     };
   }
   const sum = upPrice + downPrice;
+  const triggerSatisfied = fiveMinuteSlot === 0
+    || priceTriggerSatisfied
+    || downPrice <= STRATEGY.laterSlotDownAskTrigger + EPSILON;
+  if (!triggerSatisfied) {
+    return {
+      exists: false,
+      case: 'FIXED',
+      direction: { upMarket: '15m', downMarket: '5m' },
+      prices: { upPrice, downPrice, sumPrice: sum },
+      selectionMode: 'FIXED_TIMEFRAME_SIDES',
+      askSumTarget: null,
+      askSumThresholds: [],
+      qualifyingThresholds: [],
+      askSumUnderTarget: null,
+      endTime: actualMarketEnd(market5m),
+      fiveMinuteSlot,
+      waitingForPriceTrigger: true,
+      triggerPrice: STRATEGY.laterSlotDownAskTrigger,
+      reason: `5-minute slot ${fiveMinuteSlot + 1}: waiting for the 5m DOWN best ask to reach $${STRATEGY.laterSlotDownAskTrigger.toFixed(2)} or lower before submitting both legs.`,
+    };
+  }
   const selected = {
     case: 'FIXED',
     direction: { upMarket: '15m', downMarket: '5m' },
@@ -138,12 +161,16 @@ function detectOpportunity({
     askSumUnderTarget: null,
     endTime: actualMarketEnd(market5m),
     fiveMinuteSlot,
+    waitingForPriceTrigger: false,
+    triggerPrice: fiveMinuteSlot === 0 ? null : STRATEGY.laterSlotDownAskTrigger,
   };
   return {
     ...selected,
     exists: true,
     waitingForAskSum: false,
-    reason: `Fixed entry for 5-minute slot ${fiveMinuteSlot + 1}: buy ${STRATEGY.quantity} UP shares in the active 15m market and ${STRATEGY.quantity} DOWN shares in this 5m market. Combined asks are informational only.`,
+    reason: fiveMinuteSlot === 0
+      ? `First 5-minute slot: enter ${STRATEGY.quantity} DOWN shares in the 5m market and ${STRATEGY.quantity} UP shares in the active 15m market as soon as both fresh books are ready.`
+      : `5-minute slot ${fiveMinuteSlot + 1} price trigger reached: enter ${STRATEGY.quantity} DOWN shares in the 5m market and ${STRATEGY.quantity} UP shares in the active 15m market together.`,
   };
 }
 
@@ -184,6 +211,7 @@ class CrossTimeframeArbitrageBot extends WickBot {
     this.currentBeatPrices = { '5m': null, '15m': null };
     this.lastBeatWindow = { '5m': null, '15m': null };
     this.processedFiveMinuteEntries = new Set();
+    this.priceTriggeredFiveMinuteEntries = new Set();
     this.pairs = [];
     this.pairSequence = 0;
     this.orderSequence = 0;
@@ -231,7 +259,7 @@ class CrossTimeframeArbitrageBot extends WickBot {
     super.openStrategyWindow(start, now);
     this.opportunity = {
       status: 'WAITING',
-      reason: 'Checking the current 5-minute window against its active 15-minute market.',
+      reason: 'Checking the current 5-minute slot and its entry timing.',
       windowStart: start,
     };
     this.signal = { action: 'WAIT', reason: this.opportunity.reason };
@@ -687,22 +715,51 @@ class CrossTimeframeArbitrageBot extends WickBot {
       return false;
     }
 
+    const entryKey = `${marketKey(market5m)}:${Number(actualMarketStart(market5m))}`;
     const quotes = this.getFreshPairQuotes(now);
+    let priceTriggerSatisfied = fiveMinuteSlot === 0
+      || this.priceTriggeredFiveMinuteEntries.has(entryKey);
+    const downAsk = Number(quotes?.['5m']?.DOWN?.bestAsk);
+    if (fiveMinuteSlot > 0 && !priceTriggerSatisfied
+      && Number.isFinite(downAsk)
+      && downAsk <= STRATEGY.laterSlotDownAskTrigger + EPSILON) {
+      this.priceTriggeredFiveMinuteEntries.add(entryKey);
+      priceTriggerSatisfied = true;
+      while (this.priceTriggeredFiveMinuteEntries.size > 1500) {
+        this.priceTriggeredFiveMinuteEntries.delete(this.priceTriggeredFiveMinuteEntries.values().next().value);
+      }
+      this.log('FIVE_MINUTE_DOWN_040_TRIGGERED', {
+        market5mId: marketKey(market5m),
+        market15mId: marketKey(market15m),
+        fiveMinuteSlot: fiveMinuteSlot + 1,
+        bestAsk: downAsk,
+        triggerPrice: STRATEGY.laterSlotDownAskTrigger,
+      });
+    }
     const opportunity = detectOpportunity({
       market5m,
       market15m,
       quotes,
+      priceTriggerSatisfied,
     });
     this.opportunity = {
       ...opportunity,
-      status: opportunity.exists ? 'ENTRY_SELECTED' : 'WAITING_FOR_BOOKS',
+      status: opportunity.exists
+        ? 'ENTRY_SELECTED'
+        : opportunity.waitingForPriceTrigger
+          ? 'WAITING_FOR_DOWN_ASK_040'
+          : 'WAITING_FOR_BOOKS',
       checkedAt: now,
       volatility,
       fiveMinuteSlot,
       entryTiers: [],
     };
     this.signal = {
-      action: opportunity.exists ? 'FIXED_ENTRY_READY' : 'WAIT',
+      action: opportunity.exists
+        ? 'FIXED_ENTRY_READY'
+        : opportunity.waitingForPriceTrigger
+          ? 'WAIT_FOR_DOWN_ASK_040'
+          : 'WAIT',
       case: 'FIXED',
       selectionMode: opportunity.selectionMode || null,
       reason: opportunity.reason,
@@ -712,7 +769,6 @@ class CrossTimeframeArbitrageBot extends WickBot {
       return false;
     }
 
-    const entryKey = `${marketKey(market5m)}:${Number(actualMarketStart(market5m))}`;
     if (this.processedFiveMinuteEntries.has(entryKey)
       || this.pairs.some((pair) => pair.market5mId === marketKey(market5m))) {
       this.opportunity = {
@@ -1114,7 +1170,10 @@ class CrossTimeframeArbitrageBot extends WickBot {
         firstFiveMinuteSlotOnly: false,
         forceEntryAboveAskSumTarget: true,
         entryOnlyBelowAskSumTarget: false,
-        sideSelectionMode: 'At every 5m start, buy 300 DOWN shares in the new 5m market and add 300 UP shares to the active 15m market. Combined asks do not gate entry.',
+        sideSelectionMode: 'Slot 1 enters immediately when books are ready. Slots 2 and 3 wait for the 5m DOWN best ask to reach $0.40 or lower, then enter 300 DOWN shares in 5m and 300 UP shares in 15m together.',
+        laterSlotDownAskTrigger: STRATEGY.laterSlotDownAskTrigger,
+        firstFiveMinuteSlotImmediate: true,
+        laterFiveMinuteSlotsRequirePriceTrigger: true,
         sweepPriceCeiling: STRATEGY.sweepPriceCeiling,
         beatPriceSource: 'Not used for entry selection.',
         bookPriceSource: 'Polymarket CLOB WebSocket only; wait if missing or stale.',
@@ -1148,6 +1207,9 @@ class CrossTimeframeArbitrageBot extends WickBot {
         reason: opportunity.reason || null,
         case: opportunity.case || null,
         direction: opportunity.direction || null,
+        fiveMinuteSlot: opportunity.fiveMinuteSlot ?? null,
+        waitingForPriceTrigger: Boolean(opportunity.waitingForPriceTrigger),
+        triggerPrice: opportunity.triggerPrice ?? null,
         prices: opportunity.prices || null,
         beatPrices: opportunity.beatPrices || null,
         checkedAt: this.lastEvaluationAt || opportunity.checkedAt || null,
@@ -1175,7 +1237,7 @@ class CrossTimeframeArbitrageBot extends WickBot {
         fiveMinute: market5m,
         fifteenMinute: market15m,
         volatility,
-        note: 'At each 5-minute start, the bot buys 300 DOWN shares in that 5m market and adds 300 UP shares to the active 15m market, without a combined-ask filter.',
+        note: 'Slot 1 enters immediately when fresh books are ready. Slots 2 and 3 wait for 5m DOWN best ask <= $0.40, then enter 5m DOWN and 15m UP together. No combined-ask filter.',
       },
       binance: {
         status: this.binanceFeed?.status || 'UNAVAILABLE',

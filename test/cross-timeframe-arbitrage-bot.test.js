@@ -158,6 +158,40 @@ test('combined asks and asks below the old floor do not gate the fixed-side sign
   assert.equal(opportunity.askSumTarget, null);
 });
 
+test('first 5m slot enters without waiting for the $0.40 price trigger', () => {
+  const { _test } = CrossTimeframeArbitrageBot;
+  const opportunity = _test.detectOpportunity({
+    market5m: makeMarket('5m', FIVE_START, '5m'),
+    market15m: makeMarket('15m', FIFTEEN_START, '15m'),
+    quotes: {
+      '5m': { UP: { bestAsk: 0.20 }, DOWN: { bestAsk: 0.80 } },
+      '15m': { UP: { bestAsk: 0.20 }, DOWN: { bestAsk: 0.80 } },
+    },
+  });
+  assert.equal(opportunity.exists, true);
+  assert.equal(opportunity.fiveMinuteSlot, 0);
+  assert.equal(opportunity.triggerPrice, null);
+});
+
+test('second and third 5m slots require the DOWN best ask to reach $0.40', () => {
+  const { _test } = CrossTimeframeArbitrageBot;
+  for (const offset of [5, 10]) {
+    const opportunity = (downAsk) => _test.detectOpportunity({
+      market5m: makeMarket('5m', FIFTEEN_START + offset * 60 * 1000, `5m-${offset}`),
+      market15m: makeMarket('15m', FIFTEEN_START, '15m'),
+      quotes: {
+        '5m': { UP: { bestAsk: 0.30 }, DOWN: { bestAsk: downAsk } },
+        '15m': { UP: { bestAsk: 0.50 }, DOWN: { bestAsk: 0.50 } },
+      },
+    });
+    const waiting = opportunity(0.41);
+    assert.equal(waiting.exists, false);
+    assert.equal(waiting.waitingForPriceTrigger, true);
+    assert.equal(waiting.triggerPrice, 0.40);
+    assert.equal(opportunity(0.40).exists, true);
+  }
+});
+
 test('ask-only entries do not depend on the Binance volatility feed', async () => {
   const { bot } = makeBot();
   bot.binanceFeed.status = 'DISCONNECTED';
@@ -337,7 +371,7 @@ test('positions that miss take-profit wait for their own market resolution time'
   assert.equal(fifteenLeg.status, 'PENDING_RESOLUTION');
 });
 
-test('each of the three 5m starts always adds UP to 15m and buys DOWN in 5m', async () => {
+test('first slot enters immediately; later slots wait for $0.40 before both entries', async () => {
   const { bot, nowRef, fifteen } = makeBot();
   assert.equal(await bot.processStrategyEntry(), true);
   assert.equal(await bot.processStrategyEntry(), false);
@@ -351,9 +385,7 @@ test('each of the three 5m starts always adds UP to 15m and buys DOWN in 5m', as
     bot.orderWindowStart = nextFiveStart;
     bot.pairKey = `${nextFive.id}|${fifteen.id}`;
     bot.websocket.lastMessageAt = nowRef.value;
-    const asks = index === 0
-      ? { '5m.UP': 0.32, '5m.DOWN': 0.25, '15m.UP': 0.30, '15m.DOWN': 0.32 }
-      : { '5m.UP': 0.24, '5m.DOWN': 0.32, '15m.UP': 0.32, '15m.DOWN': 0.30 };
+    const asks = { '5m.UP': 0.32, '5m.DOWN': 0.41, '15m.UP': 0.30, '15m.DOWN': 0.32 };
     for (const timeframe of ['5m', '15m']) {
       for (const side of ['UP', 'DOWN']) {
         const ask = asks[`${timeframe}.${side}`];
@@ -364,6 +396,13 @@ test('each of the three 5m starts always adds UP to 15m and buys DOWN in 5m', as
         }, nowRef.value);
       }
     }
+    assert.equal(await bot.processStrategyEntry(), false);
+    assert.equal(bot.opportunity.status, 'WAITING_FOR_DOWN_ASK_040');
+    bot.applyBookSnapshot('5m', 'DOWN', {
+      timestamp: nowRef.value,
+      bids: [{ price: '0.38', size: '1000' }],
+      asks: [{ price: '0.40', size: '1000' }],
+    }, nowRef.value);
     assert.equal(await bot.processStrategyEntry(), true);
     assert.equal(bot.pairs[0].entryNumber, index + 2);
   }
@@ -382,6 +421,53 @@ test('each of the three 5m starts always adds UP to 15m and buys DOWN in 5m', as
   assert.ok(fivePositions.every((position) => position.side === 'DOWN'));
   assert.ok(fifteenPositions.every((position) => position.windowStart === FIFTEEN_START));
   assert.deepEqual(bot.pairs.map((pair) => pair.entryNumber), [3, 2, 1]);
+});
+
+test('later-slot price trigger stays armed if pair depth is briefly unavailable', async () => {
+  const { bot, nowRef, fifteen } = makeBot({
+    asks: {
+      '5m.DOWN': 0.41,
+      '15m.UP.size': 100,
+    },
+  });
+  const secondStart = FIFTEEN_START + 5 * 60 * 1000;
+  const secondFive = makeMarket('5m', secondStart, 'market-5m-second');
+  nowRef.value = secondStart + 1_000;
+  bot.market = secondFive;
+  bot.pairMarkets['5m'] = secondFive;
+  bot.pairMarkets['15m'] = fifteen;
+  bot.orderWindowStart = secondStart;
+  bot.pairKey = `${secondFive.id}|${fifteen.id}`;
+  bot.websocket.lastMessageAt = nowRef.value;
+  for (const timeframe of ['5m', '15m']) {
+    for (const side of ['UP', 'DOWN']) {
+      const ask = timeframe === '5m' && side === 'DOWN' ? 0.40 : 0.35;
+      const size = timeframe === '15m' && side === 'UP' ? 100 : 1_000;
+      bot.applyBookSnapshot(timeframe, side, {
+        timestamp: nowRef.value,
+        bids: [{ price: (ask - 0.02).toFixed(2), size: '1000' }],
+        asks: [{ price: ask.toFixed(2), size: String(size) }],
+      }, nowRef.value);
+    }
+  }
+  assert.equal(await bot.processStrategyEntry(), false);
+  assert.equal(bot.opportunity.status, 'WAITING_FOR_FULL_DEPTH');
+  assert.equal(bot.priceTriggeredFiveMinuteEntries.size, 1);
+
+  nowRef.value += 1_000;
+  bot.websocket.lastMessageAt = nowRef.value;
+  bot.applyBookSnapshot('5m', 'DOWN', {
+    timestamp: nowRef.value,
+    bids: [{ price: '0.48', size: '1000' }],
+    asks: [{ price: '0.50', size: '1000' }],
+  }, nowRef.value);
+  bot.applyBookSnapshot('15m', 'UP', {
+    timestamp: nowRef.value,
+    bids: [{ price: '0.33', size: '1000' }],
+    asks: [{ price: '0.35', size: '1000' }],
+  }, nowRef.value);
+  assert.equal(await bot.processStrategyEntry(), true);
+  assert.equal(bot.pairs.length, 1);
 });
 
 test('allows a pair whose modeled total cost exceeds a single winning leg payout', async () => {
@@ -439,6 +525,9 @@ test('snapshot exposes the fixed-side 300-share strategy without ask-sum gates',
   assert.equal(snapshot.strategy.sharesPerLeg, 300);
   assert.equal(snapshot.strategy.sharesPerFiveMinuteEntry, 300);
   assert.equal(snapshot.strategy.sharesAddedToFifteenMinuteMarketPerSlot, 300);
+  assert.equal(snapshot.strategy.laterSlotDownAskTrigger, 0.40);
+  assert.equal(snapshot.strategy.firstFiveMinuteSlotImmediate, true);
+  assert.equal(snapshot.strategy.laterFiveMinuteSlotsRequirePriceTrigger, true);
   assert.equal(snapshot.strategy.individualAskFloor, null);
   assert.equal(snapshot.strategy.askSumTarget, null);
   assert.deepEqual(snapshot.strategy.entryAskSumThresholds, []);
@@ -448,8 +537,9 @@ test('snapshot exposes the fixed-side 300-share strategy without ask-sum gates',
   assert.equal(snapshot.strategy.onePairPerFiveMinuteWindow, true);
   assert.equal(snapshot.strategy.onePairPerFirstFiveMinuteSlot, false);
   assert.equal(snapshot.strategy.onePairPerFiveMinuteSlot, true);
-  assert.match(snapshot.strategy.sideSelectionMode, /buy 300 DOWN shares in the new 5m market/i);
-  assert.match(snapshot.strategy.sideSelectionMode, /add 300 UP shares to the active 15m market/i);
+  assert.match(snapshot.strategy.sideSelectionMode, /slot 1 enters immediately/i);
+  assert.match(snapshot.strategy.sideSelectionMode, /slots 2 and 3 wait for the 5m DOWN best ask to reach \$0\.40 or lower/i);
+  assert.match(snapshot.strategy.sideSelectionMode, /enter 300 DOWN shares in 5m and 300 UP shares in 15m together/i);
   assert.equal(snapshot.strategy.synchronizedEndTimeRequired, false);
   assert.equal(snapshot.strategy.forceEntryAboveAskSumTarget, true);
   assert.equal(snapshot.marketPair.synchronized, false);

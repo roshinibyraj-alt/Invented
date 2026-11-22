@@ -4,7 +4,8 @@ Invented runs a paper-only strategy across Polymarket BTC 5-minute and 15-minute
 
 ## Strategy
 
-- At every 5-minute market start, enter once: buy 300 DOWN shares in that 5-minute market and buy 300 UP shares in the active 15-minute market.
+- In the first 5-minute slot of each 15-minute market, buy 300 DOWN shares in the 5-minute market and 300 UP shares in the active 15-minute market as soon as both fresh books are ready.
+- In slots two and three, wait for the current 5-minute DOWN best ask to reach $0.40 or lower. Then enter the 300-share 5m DOWN and 300-share 15m UP legs together. Once touched, the trigger stays armed while the bot retries a blocked pair entry; if $0.40 is never reached during that 5m slot, skip that slot.
 - Over the three 5-minute slots in a 15-minute market, the strategy can add up to 900 UP shares to that same 15-minute market. It does not change sides or sell early.
 - There is no combined-ask condition and no individual ask floor. Prices do not choose the sides.
 - Fresh Polymarket CLOB WebSocket asks are still required for the scheduled markets. If the feed or either required quote is missing or stale, wait for data.
@@ -17,4 +18,4 @@ The Binance feed connects to the public market-data WebSocket and records timest
 
 The mobile-first dashboard puts paired trade history at the top, consolidates each 5m/15m entry into one panel, and groups similar positions. It shows current positions, take-profit and resolution status, floating P&L, fixed entry sides, fees, equity, and win rate. Strategy and feed details are collapsed at the bottom. The ledger is held in process memory and resets when Railway restarts.
 
-Run `npm test` for fixed-side selection, combined-ask independence, one entry per 5m slot, 300-share entries across all three slots, $0.99 entry sweeps and take-profit, depth and cash checks, duplicate-entry prevention, per-market resolution timing, paired settlement accounting, API routes, live floating P&L, and dashboard content.
+Run `npm test` for fixed-side selection, slot-specific price triggers, combined-ask independence, paired entries, 300-share legs, $0.99 entry sweeps and take-profit, depth and cash checks, duplicate-entry prevention, per-market resolution timing, paired settlement accounting, API routes, live floating P&L, and dashboard content.

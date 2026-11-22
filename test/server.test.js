@@ -53,11 +53,12 @@ test('dashboard puts paired history first and explains fixed-side entries', asyn
   assert.equal(response.status, 200);
   assert.match(html, /Invented · BTC 5m \+ 15m/);
   assert.match(html, /Fixed-side window paper bot/i);
-  assert.match(html, /One scheduled entry at every 5-minute start/i);
+  assert.match(html, /First slot immediate · later slots price-triggered/i);
   assert.match(html, /Current positions/i);
   assert.match(html, /Floating P&amp;L/i);
-  assert.match(html, /buy DOWN in the new 5m market and UP in the active 15m market/i);
-  assert.match(html, /adds 300 UP shares to the active 15m market/i);
+  assert.match(html, /Buy DOWN in the new 5m market and UP in the active 15m market/i);
+  assert.match(html, /slots two and three, wait for the 5m DOWN best ask to reach \$0\.40 or lower/i);
+  assert.match(html, /first fresh 5m DOWN best ask at or below \$0\.40 arms the paired entry/i);
   assert.match(html, /Combined asks are not checked/i);
   assert.match(html, /Combined asks.*Not used as a filter/i);
   assert.match(html, /300 shares per leg/i);
