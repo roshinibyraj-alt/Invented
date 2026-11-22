@@ -89,7 +89,7 @@ test('only a midpoint strictly below $0.35 arms a side', () => {
   assert.equal(bot.snapshot().strategy.dipBelow, 0.35);
 });
 
-test('a dip then rebound places one resting limit and a later bid touch fills all 100 shares at $0.48', () => {
+test('a dip then rebound immediately buys 100 shares at asks with taker fees', () => {
   const { bot, setNow } = makeBot();
   const start = 1_800_000_000_000;
   const record = setMarket(bot, 'BTC', '5m', start);
@@ -101,19 +101,22 @@ test('a dip then rebound places one resting limit and a later bid touch fills al
 
   setNow(start + 2000);
   bot.applyBook(record, 'UP', book(0.49, 0.51), start + 2000);
-  assert.equal(bot.orders[0].status, 'RESTING');
-  assert.equal(bot.orders[0].limitPrice, 0.48);
+  assert.equal(bot.orders[0].status, 'FILLED');
+  assert.equal(bot.orders[0].action, 'BUY_TAKER');
+  assert.equal(bot.orders[0].limitPrice, 0.99);
   assert.equal(bot.orders[0].requestedShares, 100);
-  assert.equal(bot.positions.length, 0, 'the placement tick cannot also confirm a fill');
+  assert.equal(bot.positions.length, 1, 'taker entry fills on the trigger tick');
 
   setNow(start + 3000);
   bot.applyBook(record, 'UP', book(0.47, 0.49), start + 3000);
   assert.equal(bot.orders[0].status, 'FILLED');
-  assert.equal(bot.orders[0].fillPrice, 0.48);
+  assert.equal(bot.orders[0].fillPrice, 0.51);
   assert.equal(bot.orders[0].filledShares, 100);
   assert.equal(bot.positions[0].shares, 100);
-  assert.equal(bot.positions[0].totalCost, 48);
-  assert.equal(bot.cash, 2952);
+  assert.equal(bot.positions[0].totalCost, 51);
+  assert.ok(Math.abs(bot.positions[0].fees - 1.2495) < 1e-8);
+  assert.ok(Math.abs(bot.cash - 2947.7505) < 1e-8);
+  assert.equal(bot.orders.length, 1, 'later ticks do not buy again');
   assert.equal(bot.accountSnapshot().settledPositions, 0);
   assert.equal(bot.accountSnapshot().wins, 0);
   assert.equal(bot.accountSnapshot().losses, 0);
@@ -133,7 +136,7 @@ test('UP and DOWN qualify independently in the same market window', () => {
 
   assert.equal(bot.orders.length, 2);
   assert.deepEqual(bot.orders.map((order) => order.side).sort(), ['DOWN', 'UP']);
-  assert.ok(bot.orders.every((order) => order.status === 'RESTING'));
+  assert.ok(bot.orders.every((order) => order.status === 'FILLED'));
 });
 
 test('a $0.99 best bid take-profit credits $1 per share and no stop-loss is applied', () => {
@@ -158,11 +161,11 @@ test('a $0.99 best bid take-profit credits $1 per share and no stop-loss is appl
   assert.equal(position.status, 'TAKE_PROFIT');
   assert.equal(position.exitPrice, 0.99);
   assert.equal(position.exitPayout, 1);
-  assert.equal(position.realizedPnl, 52);
-  assert.equal(bot.cash, 3052);
+  assert.ok(Math.abs(position.realizedPnl - 48.7501) < 1e-8);
+  assert.ok(Math.abs(bot.cash - 3048.7501) < 1e-8);
 });
 
-test('window end cancels unfilled limits and holds filled positions for official resolution', async () => {
+test('window end holds both taker positions for official resolution', async () => {
   const start = 1_800_000_000_000;
   let resolution = null;
   const { bot, setNow } = makeBot({
@@ -190,16 +193,50 @@ test('window end cancels unfilled limits and holds filled positions for official
 
   setNow(record.market.end);
   bot.expireMarket(record, record.market.end);
-  assert.equal(unfilled.status, 'CANCELLED_WINDOW_END');
+  assert.equal(unfilled.status, 'FILLED');
   assert.equal(position.status, 'PENDING_RESOLUTION');
-  assert.equal(bot.cash, 2952);
+  assert.ok(Math.abs(bot.cash - 2897.5002) < 1e-8);
   assert.equal(bot.snapshot().strategy.stopLoss, null);
 
   setNow(record.market.end + 10_001);
   await bot.checkResolutions(record.market.end + 10_001);
   resolution = position.status;
   assert.equal(resolution, 'RESOLVED_WIN');
-  assert.equal(position.realizedPnl, 52);
-  assert.equal(bot.cash, 3052);
+  assert.ok(Math.abs(position.realizedPnl - 48.7501) < 1e-8);
+  assert.ok(Math.abs(bot.cash - 2997.5002) < 1e-8);
+});
+
+test('taker sweep uses multiple ask levels and cancels shallow-book remainder', () => {
+  const { bot, setNow } = makeBot();
+  const start = 1_800_000_000_000;
+  const record = setMarket(bot);
+  setNow(start + 1000);
+  bot.applyBook(record, 'UP', book(0.33, 0.35), start + 1000);
+  setNow(start + 2000);
+  bot.applyBook(record, 'UP', {
+    bids: [{ price: '0.49', size: '500' }],
+    asks: [{ price: '0.51', size: '20' }, { price: '0.52', size: '30' }],
+  }, start + 2000);
+  assert.equal(bot.orders[0].status, 'PARTIALLY_FILLED');
+  assert.equal(bot.positions[0].shares, 50);
+  assert.ok(Math.abs(bot.positions[0].entryPrice - 0.516) < 1e-8);
+  assert.equal(bot.orders[0].unfilledShares, 50);
+  assert.equal(bot.orders[0].reservedCash, 0);
+  setNow(start + 3000);
+  bot.applyBook(record, 'UP', book(0.49, 0.51), start + 3000);
+  assert.equal(bot.positions.length, 1);
+  assert.equal(bot.positions[0].shares, 50);
+});
+
+test('missing books do not arm a dip or create invented taker fills', () => {
+  const { bot, setNow } = makeBot();
+  const start = 1_800_000_000_000;
+  const record = setMarket(bot);
+  setNow(start + 1000);
+  bot.applyBook(record, 'UP', book(null, null), start + 1000);
+  assert.equal(record.sideStates.UP.dipSeen, false);
+  setNow(start + 2000);
+  bot.applyBook(record, 'UP', book(0.49, 0.51), start + 2000);
+  assert.equal(bot.orders.length, 0);
 });
 

@@ -10,18 +10,18 @@ const WINDOWS_MS = { '5m': 5 * 60_000, '15m': 15 * 60_000 };
 const STRATEGY = Object.freeze({
   id: 'multi-asset-dip-bounce-paper',
   name: 'Multi-asset dip-and-bounce paper strategy',
-  version: 'dip-bounce-v1',
+  version: 'dip-bounce-taker-v2',
   assets: ASSETS,
   timeframes: TIMEFRAMES,
   sharesPerEntry: config.DIP_BOUNCE_SHARES,
   dipBelow: config.DIP_BOUNCE_PRICE_DIP,
   reboundTo: config.DIP_BOUNCE_PRICE_BOUNCE,
-  limitBuyPrice: config.DIP_BOUNCE_LIMIT_PRICE,
-  fillBidAtOrBelow: config.DIP_BOUNCE_FILL_BID,
+  orderType: 'TAKER',
+  sweepCap: config.DIP_BOUNCE_TAKER_CAP,
   takeProfitBid: config.DIP_BOUNCE_TAKE_PROFIT_BID,
   takeProfitPayoutPerShare: config.DIP_BOUNCE_TAKE_PROFIT_PAYOUT,
   stopLoss: null,
-  windowEnd: 'Unfilled limits are cancelled; open shares wait for official resolution.',
+  windowEnd: 'Open shares wait for official resolution.',
 });
 
 function normalizeTimestamp(value, fallback) {
@@ -70,7 +70,7 @@ function emptySideState() {
     orderStatus: 'WAITING_FOR_DIP',
     requestedShares: config.DIP_BOUNCE_SHARES,
     filledShares: 0,
-    limitPrice: config.DIP_BOUNCE_LIMIT_PRICE,
+    limitPrice: config.DIP_BOUNCE_TAKER_CAP,
     lastObservedMid: null,
     lastObservedAt: null,
     reason: 'Waiting for midpoint below $0.35.',
@@ -440,7 +440,6 @@ class DipBounceBot {
     state.lastObservedMid = quote.mid;
     state.lastObservedAt = updatedAt;
     this.processSide(record, side, quote, sequence);
-    this.tryFillOrder(record, side, quote, sequence);
     this.markPositions(this.now(), record.key, side);
     this.checkTakeProfits(record, side, quote, this.now());
   }
@@ -452,7 +451,7 @@ class DipBounceBot {
     if (!market || record.marketStatus !== 'OPEN' || now < market.start || now >= market.end) return;
     const isFresh = Number.isFinite(Number(quote.updatedAt))
       && now - Number(quote.updatedAt) <= config.DIP_BOUNCE_MAX_QUOTE_AGE_MS;
-    if (!isFresh || !Number.isFinite(Number(quote.mid))) return;
+    if (!isFresh || !Number.isFinite(quote.mid)) return;
 
     if (!sideState.entryConsumed && Number(quote.mid) < config.DIP_BOUNCE_PRICE_DIP) {
       if (!sideState.dipSeen) {
@@ -471,7 +470,29 @@ class DipBounceBot {
     sideState.bounceSeen = true;
     sideState.bounceAt = now;
 
-    const orderCost = config.DIP_BOUNCE_LIMIT_PRICE * config.DIP_BOUNCE_SHARES;
+    // Simulate immediate execution against visible asks, not a later pullback.
+    const feeRate = market.feesEnabled === false ? 0
+      : Number(market.feeSchedule?.rate ?? (record.asset === 'BTC' ? 0.05 : 0.01));
+    if (!Number.isFinite(feeRate) || feeRate < 0) return;
+    let remaining = config.DIP_BOUNCE_SHARES;
+    let cost = 0;
+    let fees = 0;
+    const fills = [];
+    for (const level of quote.asks) {
+      if (level.price > config.DIP_BOUNCE_TAKER_CAP || remaining <= 0) break;
+      const quantity = Math.min(remaining, level.size);
+      const fee = quantity * feeRate * level.price * (1 - level.price);
+      fills.push({ price: level.price, shares: quantity, fee });
+      cost += quantity * level.price;
+      fees += fee;
+      remaining -= quantity;
+    }
+    const shares = config.DIP_BOUNCE_SHARES - remaining;
+    if (shares <= 0) {
+      sideState.reason = 'Rebound qualified; waiting for executable asks for a taker buy.';
+      return;
+    }
+    const orderCost = cost + fees;
     if (this.availableCash() + 1e-8 < orderCost) {
       sideState.orderStatus = 'WAITING_FOR_CASH';
       sideState.reason = `Rebound qualified, but $${orderCost.toFixed(2)} paper collateral is unavailable.`;
@@ -488,52 +509,25 @@ class DipBounceBot {
       windowStart: market.start,
       windowEnd: market.end,
       side,
-      action: 'BUY_LIMIT',
-      status: 'RESTING',
-      limitPrice: config.DIP_BOUNCE_LIMIT_PRICE,
+      action: 'BUY_TAKER',
+      status: remaining > 0 ? 'PARTIALLY_FILLED' : 'FILLED',
+      limitPrice: config.DIP_BOUNCE_TAKER_CAP,
       requestedShares: config.DIP_BOUNCE_SHARES,
-      filledShares: 0,
+      filledShares: shares,
       placedAt: now,
       placedSequence: sequence,
-      reservedCash: orderCost,
-      fees: 0,
-      fillRule: 'A later CLOB book update has best bid at or below $0.47.',
+      reservedCash: 0,
+      fees,
+      fills,
+      filledAt: now,
+      fillPrice: cost / shares,
+      unfilledShares: remaining,
+      fillRule: 'Immediate visible-ask sweep up to $0.99; any unfilled remainder is cancelled.',
     };
     this.orders.unshift(order);
     sideState.entryConsumed = true;
     sideState.orderId = order.id;
-    sideState.orderStatus = 'RESTING';
-    sideState.reason = 'Rebound reached $0.50; resting 100-share paper limit at $0.48.';
-    this.log(`${side} rebound reached $0.50; placed a 100-share paper limit at $0.48.`, {
-      asset: record.asset, timeframe: record.timeframe, side, now,
-    });
-  }
-
-  tryFillOrder(record, side, quote, sequence) {
-    const sideState = record.sideStates[side];
-    const order = this.orders.find((item) => item.id === sideState.orderId);
-    if (!order || order.status !== 'RESTING' || sequence <= order.placedSequence) return;
-    if (!(Number(quote.bestBid) <= config.DIP_BOUNCE_FILL_BID)) return;
-    const shares = config.DIP_BOUNCE_SHARES;
-    const cost = config.DIP_BOUNCE_LIMIT_PRICE * shares;
-    if (this.cash + 1e-8 < cost) {
-      order.status = 'CANCELLED_INSUFFICIENT_CASH';
-      order.cancelledAt = this.now();
-      order.reservedCash = 0;
-      sideState.orderStatus = order.status;
-      sideState.reason = 'The paper account no longer has enough free cash to record the fill.';
-      this.log(`${side} paper order could not fill: free cash was insufficient.`, {
-        asset: record.asset, timeframe: record.timeframe, side, outcome: 'bad', type: 'ORDER_ERROR',
-      });
-      return;
-    }
-    const now = this.now();
-    order.status = 'FILLED';
-    order.filledAt = now;
-    order.fillPrice = config.DIP_BOUNCE_LIMIT_PRICE;
-    order.filledShares = shares;
-    order.reservedCash = 0;
-    this.cash -= cost;
+    this.cash -= orderCost;
 
     const position = {
       id: `position-${++this.positionSequence}`,
@@ -545,9 +539,9 @@ class DipBounceBot {
       side,
       status: 'OPEN',
       shares,
-      entryPrice: config.DIP_BOUNCE_LIMIT_PRICE,
+      entryPrice: order.fillPrice,
       totalCost: cost,
-      fees: 0,
+      fees,
       estimatedMakerRebate: 0,
       entryAt: now,
       windowStart: order.windowStart,
@@ -556,7 +550,7 @@ class DipBounceBot {
       markUpdatedAt: quote.updatedAt,
       markStatus: 'LIVE',
       unrealizedPnl: Number.isFinite(Number(quote.bestBid))
-        ? Number(quote.bestBid) * shares - cost
+        ? Number(quote.bestBid) * shares - cost - fees
         : null,
       realizedPnl: null,
       exitPrice: null,
@@ -564,10 +558,10 @@ class DipBounceBot {
       exitReason: null,
     };
     this.positions.unshift(position);
-    sideState.orderStatus = 'FILLED';
+    sideState.orderStatus = order.status;
     sideState.filledShares = shares;
-    sideState.reason = 'Filled at the $0.48 limit after a later bid reached $0.47 or lower.';
-    this.log(`${side} paper limit filled: ${shares} shares at the fixed $0.48 limit.`, {
+    sideState.reason = `Taker buy filled ${shares} shares at $${order.fillPrice.toFixed(4)} average; $${fees.toFixed(4)} entry fees.`;
+    this.log(`${side} paper taker filled: ${shares} shares at $${order.fillPrice.toFixed(4)} average, fees $${fees.toFixed(4)}.`, {
       asset: record.asset, timeframe: record.timeframe, side, outcome: 'good', type: 'BUY_FILLED', now,
     });
     this.updateAccountMetrics(now, true);
@@ -795,12 +789,12 @@ class DipBounceBot {
       strategy: {
         ...STRATEGY,
         execution: 'PAPER ONLY',
-        entry: 'Midpoint below $0.35 arms a side; midpoint at or above $0.50 places one resting $0.48 paper buy for 100 shares.',
-        fill: 'Only a later CLOB update with best bid at or below $0.47 confirms a full-size simulated fill at $0.48.',
+        entry: 'Midpoint below $0.35 arms a side; midpoint at or above $0.50 immediately triggers a 100-share paper taker buy.',
+        fill: 'Sweep visible asks immediately up to $0.99; record volume-weighted price, available shares and taker fees. No resting remainder.',
         takeProfit: 'Best bid at or above $0.99 closes at a modeled $1.00 payout per share.',
         stopLoss: null,
         resolution: 'No stop-loss. Anything not at take-profit by its own window end waits for official resolution.',
-        expiry: 'Unfilled limit orders cancel at their market window end.',
+        expiry: 'Unfilled taker quantity cancels immediately.',
       },
       account,
       websocket: { ...this.websocket },
