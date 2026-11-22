@@ -7,13 +7,13 @@ async function main() {
     return;
   }
 
-  const Bot = require('./cross-timeframe-arbitrage-bot');
+  const Bot = require('./dip-bounce-bot');
   const startServer = require('./server');
   const bot = new Bot();
   bot.start();
   startServer(bot, process.env.PORT || 3000);
 
-  console.log('MODE: DEMO -- BTC paired strategy attempts one entry every 5m; no live orders are sent.');
+  console.log('MODE: DEMO -- BTC/ETH/SOL/DOGE 5m+15m dip-and-bounce paper strategy; no live orders are sent.');
 }
 
 main().catch((e) => {

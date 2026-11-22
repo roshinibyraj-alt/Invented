@@ -23,7 +23,7 @@ async function getEthMarket(windowStart,windowMs){
 async function getAssetMarket(asset,windowStart,windowMs){
   const minutes=windowMs/60000;
   const normalized=String(asset).toLowerCase();
-  if(!['btc','eth'].includes(normalized))throw new Error(`Unsupported asset: ${asset}`);
+  if(!['btc','eth','sol','doge'].includes(normalized))throw new Error(`Unsupported asset: ${asset}`);
   const slug=`${normalized}-updown-${minutes}m-${Math.floor(windowStart/1000)}`;
   const data=await getJson(`${GAMMA}/markets?slug=${encodeURIComponent(slug)}`);
   const market=(Array.isArray(data)?data:data.markets||[])[0];

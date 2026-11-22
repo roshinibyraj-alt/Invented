@@ -1,8 +1,8 @@
 {
-  "name": "invented-btc-every-5m-paired-paper-bot",
+  "name": "invented-multi-asset-dip-bounce-paper-bot",
   "version": "1.0.0",
   "private": true,
-  "description": "Paper-only BTC strategy pairing every 5-minute market with its active 15-minute market.",
+  "description": "Paper-only dip-and-bounce strategy for BTC, ETH, SOL, and DOGE 5m/15m markets.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",

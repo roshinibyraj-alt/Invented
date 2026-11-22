@@ -1,21 +1,29 @@
-# Invented BTC fixed-side 5m/15m paper bot
+# Invented multi-asset dip-and-bounce paper bot
 
-Invented runs a paper-only strategy across Polymarket BTC 5-minute and 15-minute UP/DOWN markets. It does not submit live orders or use wallet credentials.
+Invented tracks Polymarket BTC, ETH, SOL, and DOGE UP/DOWN markets on both 5-minute and 15-minute windows. It is a paper simulator only and does not submit real orders or use wallet credentials.
 
 ## Strategy
 
-- In the first 5-minute slot of each 15-minute market, buy 300 DOWN shares in the 5-minute market and 300 UP shares in the active 15-minute market as soon as both fresh books are ready.
-- In slots two and three, wait for the current 5-minute DOWN best ask to reach $0.40 or lower. Then enter the 300-share 5m DOWN and 300-share 15m UP legs together. Once touched, the trigger stays armed while the bot retries a blocked pair entry; if $0.40 is never reached during that 5m slot, skip that slot.
-- Over the three 5-minute slots in a 15-minute market, the strategy can add up to 900 UP shares to that same 15-minute market. It does not change sides or sell early.
-- There is no combined-ask condition and no individual ask floor. Prices do not choose the sides.
-- Fresh Polymarket CLOB WebSocket asks are still required for the scheduled markets. If the feed or either required quote is missing or stale, wait for data.
-- Paper buys sweep visible asks up to $0.99 per share and model taker fees. Both 300-share legs must have full visible ask depth and enough paper cash; if either leg cannot fill fully within the cap, neither leg is recorded as filled.
-- A leg exits at take-profit when its best bid reaches $0.99; the paper ledger books $1.00 per share. If it does not hit before that leg's market ends, keep it pending for that market's official resolution. Since the 5m and 15m legs resolve at different times, this is not guaranteed arbitrage; both legs can lose.
+Each of the eight asset/timeframe markets is independent. From the time its CLOB feed is first observed during the active window:
 
-The Binance feed connects to the public market-data WebSocket and records timestamped aggregate trades. The Polymarket CLOB WebSocket supplies the UP/DOWN books; the strategy does not use REST book polling as a fallback. Polymarket's API is still used to discover active market IDs and check official resolutions, not as an alternate price feed.
+1. Watch the UP and DOWN midpoint independently.
+2. When a side's midpoint goes below $0.40, arm that side.
+3. When its midpoint later reaches $0.50 or higher, place one simulated resting limit buy for 100 shares at $0.48.
+4. Count the full 100-share paper fill at exactly $0.48 only after a later Polymarket CLOB book update shows that side's best bid at or below $0.47. This is the requested paper touch rule, not a claim that a real resting order filled.
+5. If a filled position's best bid reaches $0.99, close it at a modeled $1.00 payout per share. There is no stop-loss. If take-profit has not hit by the market's end, hold the position for its official resolution.
+6. Cancel unfilled resting limits at their market's own window end.
 
-## Dashboard and runtime
+The paper ledger starts at $3,000 and is held in process memory. A Railway deployment/restart clears the prior positions, orders, and results and starts a fresh ledger. No old strategy state is imported.
 
-The mobile-first dashboard puts paired trade history at the top, consolidates each 5m/15m entry into one panel, and groups similar positions. It shows current positions, take-profit and resolution status, floating P&L, fixed entry sides, fees, equity, and win rate. Strategy and feed details are collapsed at the bottom. The ledger is held in process memory and resets when Railway restarts.
+## Data and dashboard
 
-Run `npm test` for fixed-side selection, slot-specific price triggers, combined-ask independence, paired entries, 300-share legs, $0.99 entry sweeps and take-profit, depth and cash checks, duplicate-entry prevention, per-market resolution timing, paired settlement accounting, API routes, live floating P&L, and dashboard content.
+Market metadata and official results come from Polymarket Gamma; live order-book updates come from one Polymarket CLOB WebSocket subscription covering active token IDs. There is no Binance price input or REST order-book fallback. If a market or feed is unavailable, the affected market waits for data while the other markets continue.
+
+The mobile-first dashboard shows the account summary, all eight market windows, each side's midpoint/dip/bounce/order state, open or resolution-pending positions, recent paper orders, events, and an equity curve. Strategy rules and paper-only limitations are visible on the page.
+
+## Run
+
+```sh
+npm test
+npm start
+```

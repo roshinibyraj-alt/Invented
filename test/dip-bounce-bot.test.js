@@ -1,0 +1,188 @@
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const DipBounceBot = require('../dip-bounce-bot');
+
+function fakeMarket(asset, timeframe, start) {
+  const windowMs = timeframe === '5m' ? 300_000 : 900_000;
+  return {
+    id: `${asset}-${timeframe}-${start}`,
+    slug: `${asset.toLowerCase()}-updown-${timeframe}-${Math.floor(start / 1000)}`,
+    title: `${asset} ${timeframe} market`,
+    asset,
+    timeframe,
+    start,
+    end: start + windowMs,
+    tokens: { UP: `${asset}-${timeframe}-up`, DOWN: `${asset}-${timeframe}-down` },
+  };
+}
+
+function makeBot({ now = 1_800_000_000_100, marketData = {} } = {}) {
+  let clock = now;
+  const data = {
+    getAssetMarket: async (asset, start, windowMs) => ({
+      ...fakeMarket(asset.toUpperCase(), windowMs === 300_000 ? '5m' : '15m', start),
+      end: start + windowMs,
+    }),
+    connectMarketStream: (tokenIds, options) => ({
+      tokenIds,
+      options,
+      close() {},
+    }),
+    getMarket: async () => null,
+    resolvedWinner: () => null,
+    ...marketData,
+  };
+  const bot = new DipBounceBot({ marketData: data, now: () => clock, initialCapital: 3000 });
+  bot.running = true;
+  return {
+    bot,
+    data,
+    setNow(value) { clock = value; },
+  };
+}
+
+function setMarket(bot, asset = 'BTC', timeframe = '5m', start = 1_800_000_000_000) {
+  const record = bot.records.get(`${asset}:${timeframe}`);
+  record.targetStart = start;
+  record.market = fakeMarket(asset, timeframe, start);
+  record.marketStatus = 'OPEN';
+  return record;
+}
+
+function book(bid, ask) {
+  return {
+    bids: bid == null ? [] : [{ price: String(bid), size: '500' }],
+    asks: ask == null ? [] : [{ price: String(ask), size: '500' }],
+  };
+}
+
+test('scans all four assets across both window lengths and subscribes to their CLOB tokens', async () => {
+  const start = 1_800_000_000_000;
+  const { bot } = makeBot({ now: start + 1000 });
+  await bot.tick(start + 1000);
+
+  const state = bot.snapshot();
+  assert.equal(state.markets.length, 8);
+  assert.deepEqual(state.scanner.assets, ['BTC', 'ETH', 'SOL', 'DOGE']);
+  assert.deepEqual(state.scanner.timeframes, ['5m', '15m']);
+  assert.ok(state.markets.every((market) => market.marketStatus === 'OPEN'));
+  assert.equal(bot.tokenRefs.size, 16);
+  bot.stop();
+});
+
+test('a dip then rebound places one resting limit and a later bid touch fills all 100 shares at $0.48', () => {
+  const { bot, setNow } = makeBot();
+  const start = 1_800_000_000_000;
+  const record = setMarket(bot, 'BTC', '5m', start);
+
+  setNow(start + 1000);
+  bot.applyBook(record, 'UP', book(0.38, 0.40), start + 1000);
+  assert.equal(record.sideStates.UP.dipSeen, true);
+  assert.equal(record.sideStates.UP.orderStatus, 'WAITING_FOR_BOUNCE');
+
+  setNow(start + 2000);
+  bot.applyBook(record, 'UP', book(0.49, 0.51), start + 2000);
+  assert.equal(bot.orders[0].status, 'RESTING');
+  assert.equal(bot.orders[0].limitPrice, 0.48);
+  assert.equal(bot.orders[0].requestedShares, 100);
+  assert.equal(bot.positions.length, 0, 'the placement tick cannot also confirm a fill');
+
+  setNow(start + 3000);
+  bot.applyBook(record, 'UP', book(0.47, 0.49), start + 3000);
+  assert.equal(bot.orders[0].status, 'FILLED');
+  assert.equal(bot.orders[0].fillPrice, 0.48);
+  assert.equal(bot.orders[0].filledShares, 100);
+  assert.equal(bot.positions[0].shares, 100);
+  assert.equal(bot.positions[0].totalCost, 48);
+  assert.equal(bot.cash, 2952);
+  assert.equal(bot.accountSnapshot().settledPositions, 0);
+  assert.equal(bot.accountSnapshot().wins, 0);
+  assert.equal(bot.accountSnapshot().losses, 0);
+});
+
+test('UP and DOWN qualify independently in the same market window', () => {
+  const { bot, setNow } = makeBot();
+  const start = 1_800_000_000_000;
+  const record = setMarket(bot, 'ETH', '15m', start);
+
+  setNow(start + 1000);
+  bot.applyBook(record, 'UP', book(0.38, 0.40), start + 1000);
+  bot.applyBook(record, 'DOWN', book(0.37, 0.39), start + 1001);
+  setNow(start + 2000);
+  bot.applyBook(record, 'UP', book(0.49, 0.51), start + 2000);
+  bot.applyBook(record, 'DOWN', book(0.50, 0.52), start + 2001);
+
+  assert.equal(bot.orders.length, 2);
+  assert.deepEqual(bot.orders.map((order) => order.side).sort(), ['DOWN', 'UP']);
+  assert.ok(bot.orders.every((order) => order.status === 'RESTING'));
+});
+
+test('a $0.99 best bid take-profit credits $1 per share and no stop-loss is applied', () => {
+  const { bot, setNow } = makeBot();
+  const start = 1_800_000_000_000;
+  const record = setMarket(bot, 'SOL', '5m', start);
+
+  setNow(start + 1000);
+  bot.applyBook(record, 'DOWN', book(0.38, 0.40), start + 1000);
+  setNow(start + 2000);
+  bot.applyBook(record, 'DOWN', book(0.49, 0.51), start + 2000);
+  setNow(start + 3000);
+  bot.applyBook(record, 'DOWN', book(0.47, 0.49), start + 3000);
+  const position = bot.positions[0];
+
+  setNow(start + 4000);
+  bot.applyBook(record, 'DOWN', book(0.01, 0.03), start + 4000);
+  assert.equal(position.status, 'OPEN', 'a low bid does not trigger a stop-loss');
+
+  setNow(start + 5000);
+  bot.applyBook(record, 'DOWN', book(0.99, 1.00), start + 5000);
+  assert.equal(position.status, 'TAKE_PROFIT');
+  assert.equal(position.exitPrice, 0.99);
+  assert.equal(position.exitPayout, 1);
+  assert.equal(position.realizedPnl, 52);
+  assert.equal(bot.cash, 3052);
+});
+
+test('window end cancels unfilled limits and holds filled positions for official resolution', async () => {
+  const start = 1_800_000_000_000;
+  let resolution = null;
+  const { bot, setNow } = makeBot({
+    now: start + 1000,
+    marketData: {
+      getMarket: async () => ({ closed: true, outcomes: ['Up', 'Down'], outcomePrices: [0, 1] }),
+      resolvedWinner: (market) => market?.closed ? 'DOWN' : null,
+    },
+  });
+  const record = setMarket(bot, 'DOGE', '15m', start);
+
+  setNow(start + 1000);
+  bot.applyBook(record, 'UP', book(0.38, 0.40), start + 1000);
+  setNow(start + 2000);
+  bot.applyBook(record, 'UP', book(0.49, 0.51), start + 2000);
+  const unfilled = bot.orders[0];
+
+  setNow(start + 3000);
+  bot.applyBook(record, 'DOWN', book(0.38, 0.40), start + 3000);
+  setNow(start + 4000);
+  bot.applyBook(record, 'DOWN', book(0.49, 0.51), start + 4000);
+  setNow(start + 5000);
+  bot.applyBook(record, 'DOWN', book(0.47, 0.49), start + 5000);
+  const position = bot.positions[0];
+
+  setNow(record.market.end);
+  bot.expireMarket(record, record.market.end);
+  assert.equal(unfilled.status, 'CANCELLED_WINDOW_END');
+  assert.equal(position.status, 'PENDING_RESOLUTION');
+  assert.equal(bot.cash, 2952);
+  assert.equal(bot.snapshot().strategy.stopLoss, null);
+
+  setNow(record.market.end + 10_001);
+  await bot.checkResolutions(record.market.end + 10_001);
+  resolution = position.status;
+  assert.equal(resolution, 'RESOLVED_WIN');
+  assert.equal(position.realizedPnl, 52);
+  assert.equal(bot.cash, 3052);
+});
+
