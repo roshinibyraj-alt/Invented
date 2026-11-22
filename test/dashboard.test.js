@@ -133,14 +133,14 @@ test('paired history renders compact rows instead of a wide table', () => {
     fees: 1.23,
     status: 'OPEN',
     realizedPnl: null,
-    askSumTarget: 0.7,
+    askSumTarget: 0.85,
   }]);
 
   const rows = elements.get('pairRows').innerHTML;
   assert.match(rows, /Entry 2/);
   assert.match(rows, /5m UP \+ 15m DOWN/);
   assert.match(rows, /100 shares\/leg/);
-  assert.match(rows, /tier \$0\.70/);
+  assert.match(rows, /tier \$0\.85/);
   assert.doesNotMatch(rows, /<table/);
   assert.ok(html.indexOf('Paired trade history') < html.indexOf('Current positions'));
   assert.ok(html.indexOf('Current positions') < html.indexOf('Strategy and feed details'));

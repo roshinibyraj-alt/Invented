@@ -170,7 +170,7 @@ test('individual asks below $0.20 are excluded even when their sum is cheap', ()
   assert.match(opportunity.reason, /individual ask below the \$0\.20 minimum/);
 });
 
-test('an ask exactly at $0.20 is allowed when the combined sum is below $0.70', () => {
+test('an ask exactly at $0.20 is allowed when the combined sum is below $0.85', () => {
   const { _test } = CrossTimeframeArbitrageBot;
   const opportunity = _test.detectOpportunity({
     market5m: makeMarket('5m', FIVE_START, '5m'),
@@ -199,18 +199,18 @@ test('missing asks on one pairing do not block the other eligible pairing', () =
   assert.equal(Number(opportunity.prices.sumPrice.toFixed(2)), 0.57);
 });
 
-test('combined asks equal to $0.70 do not qualify', () => {
+test('combined asks equal to $0.85 do not qualify', () => {
   const { _test } = CrossTimeframeArbitrageBot;
   const opportunity = _test.detectOpportunity({
     market5m: makeMarket('5m', FIVE_START, '5m'),
     market15m: makeMarket('15m', FIFTEEN_START, '15m'),
     quotes: {
-      '5m': { UP: { bestAsk: 0.35 }, DOWN: { bestAsk: 0.36 } },
-      '15m': { UP: { bestAsk: 0.34 }, DOWN: { bestAsk: 0.35 } },
+      '5m': { UP: { bestAsk: 0.42 }, DOWN: { bestAsk: 0.41 } },
+      '15m': { UP: { bestAsk: 0.44 }, DOWN: { bestAsk: 0.43 } },
     },
   });
   assert.equal(opportunity.exists, false);
-  assert.equal(opportunity.prices.sumPrice, 0.70);
+  assert.equal(opportunity.prices.sumPrice, 0.85);
   assert.equal(opportunity.waitingForAskSum, true);
 });
 
@@ -251,7 +251,7 @@ test('does not use fresh cached CLOB books while its WebSocket is disconnected',
   assert.equal(bot.pairs.length, 1);
 });
 
-test('a combined ask sum below $0.70 qualifies the single configured entry tier', () => {
+test('a combined ask sum below $0.85 qualifies the single configured entry tier', () => {
   const { _test } = CrossTimeframeArbitrageBot;
   const opportunity = _test.detectOpportunity({
     market5m: makeMarket('5m', FIVE_START, '5m'),
@@ -264,11 +264,11 @@ test('a combined ask sum below $0.70 qualifies the single configured entry tier'
   assert.equal(opportunity.exists, true);
   assert.equal(opportunity.prices.sumPrice, 0.6);
   assert.equal(opportunity.askSumUnderTarget, true);
-  assert.deepEqual(opportunity.qualifyingThresholds, [0.7]);
+  assert.deepEqual(opportunity.qualifyingThresholds, [0.85]);
   assert.equal(opportunity.waitingForAskSum, false);
 });
 
-test('a $0.59 ask sum qualifies the $0.70 entry tier', () => {
+test('a $0.59 ask sum qualifies the $0.85 entry tier', () => {
   const { _test } = CrossTimeframeArbitrageBot;
   const opportunity = _test.detectOpportunity({
     market5m: makeMarket('5m', FIVE_START, '5m'),
@@ -282,16 +282,16 @@ test('a $0.59 ask sum qualifies the $0.70 entry tier', () => {
   assert.equal(opportunity.prices.sumPrice, 0.59);
   assert.equal(opportunity.askSumUnderTarget, true);
   assert.equal(opportunity.waitingForAskSum, false);
-  assert.deepEqual(opportunity.qualifyingThresholds, [0.7]);
+  assert.deepEqual(opportunity.qualifyingThresholds, [0.85]);
 });
 
-test('the $0.70 ask-sum entry fires once per 5m market', async () => {
+test('the $0.85 ask-sum entry fires once per 5m market', async () => {
   const { bot, nowRef } = makeBot({
     asks: {
-      '5m.UP': 0.40,
-      '15m.DOWN': 0.35,
-      '15m.UP': 0.45,
-      '5m.DOWN': 0.46,
+      '5m.UP': 0.51,
+      '15m.DOWN': 0.36,
+      '15m.UP': 0.46,
+      '5m.DOWN': 0.45,
     },
   });
   assert.equal(await bot.processStrategyEntry(), false);
@@ -313,7 +313,7 @@ test('the $0.70 ask-sum entry fires once per 5m market', async () => {
 
   updatePairAsks(0.32, 0.32);
   assert.equal(await bot.processStrategyEntry(), true);
-  assert.deepEqual(bot.pairs.map((pair) => pair.askSumTarget), [0.7]);
+  assert.deepEqual(bot.pairs.map((pair) => pair.askSumTarget), [0.85]);
   assert.equal(await bot.processStrategyEntry(), false);
   assert.equal(bot.pairs.length, 1);
 
@@ -327,7 +327,7 @@ test('the $0.70 ask-sum entry fires once per 5m market', async () => {
   assert.equal(bot.positions.length, 2);
 });
 
-test('skips a 5m slot if the combined asks never fall below $0.70', async () => {
+test('skips a 5m slot if the combined asks never fall below $0.85', async () => {
   const { bot, nowRef, five } = makeBot({
     asks: {
       '5m.UP': 0.50,
@@ -344,11 +344,11 @@ test('skips a 5m slot if the combined asks never fall below $0.70', async () => 
   assert.equal(bot.positions.length, 0);
 });
 
-test('a jump below $0.70 produces one pair for the active 5m slot', async () => {
+test('a jump below $0.85 produces one pair for the active 5m slot', async () => {
   const { bot } = makeBot();
   assert.equal(await bot.processStrategyEntry(), true);
   assert.equal(bot.pairs.length, 1);
-  assert.equal(bot.pairs[0].askSumTarget, 0.7);
+  assert.equal(bot.pairs[0].askSumTarget, 0.85);
   assert.equal(bot.pairs[0].sharesPerLeg, 300);
   assert.equal(await bot.processStrategyEntry(), false);
   assert.equal(bot.pairs.length, 1);
@@ -373,7 +373,7 @@ test('CLOB price changes update the matching timeframe book and quote', () => {
   assert.equal(quote.updatedAt, nowRef.value);
 });
 
-test('paper execution fills 300 shares on each leg below the $0.70 gate', async () => {
+test('paper execution fills 300 shares on each leg below the $0.85 gate', async () => {
   const { bot } = makeBot();
   const entered = await bot.processStrategyEntry();
   assert.equal(entered, true);
@@ -435,7 +435,7 @@ test('positions that miss take-profit wait for their own market resolution time'
   assert.equal(fifteenLeg.status, 'PENDING_RESOLUTION');
 });
 
-test('enters once in all three 5m slots and adds 300 shares to each selected 15m side', async () => {
+test('reselects sides on new entries without selling filled positions', async () => {
   const { bot, nowRef, fifteen } = makeBot();
   assert.equal(await bot.processStrategyEntry(), true);
   assert.equal(await bot.processStrategyEntry(), false);
@@ -466,6 +466,8 @@ test('enters once in all three 5m slots and adds 300 shares to each selected 15m
     assert.equal(bot.pairs[0].entryNumber, index + 2);
   }
   assert.equal(bot.pairs.length, 3);
+  assert.deepEqual(bot.pairs.map((pair) => pair.case), ['A', 'B', 'A']);
+  assert.ok(bot.orders.every((order) => order.id.endsWith('-buy')));
   assert.ok(bot.orders.every((order) => order.filledShares === 300));
   const fifteenPositions = bot.positions.filter((position) => position.timeframe === '15m');
   assert.equal(fifteenPositions.reduce((sum, position) => sum + position.shares, 0), 900);
@@ -533,8 +535,8 @@ test('snapshot exposes the rolling ask-only 300-share strategy', () => {
   assert.equal(snapshot.strategy.sharesPerFiveMinuteEntry, 300);
   assert.equal(snapshot.strategy.sharesAddedToFifteenMinuteMarketPerSlot, 300);
   assert.equal(snapshot.strategy.individualAskFloor, 0.2);
-  assert.equal(snapshot.strategy.askSumTarget, 0.7);
-  assert.deepEqual(snapshot.strategy.entryAskSumThresholds, [0.7]);
+  assert.equal(snapshot.strategy.askSumTarget, 0.85);
+  assert.deepEqual(snapshot.strategy.entryAskSumThresholds, [0.85]);
   assert.equal(snapshot.strategy.maxPairsPerFiveMinuteWindow, 1);
   assert.equal(snapshot.strategy.maxPairsPerFifteenMinuteWindow, 3);
   assert.equal(snapshot.strategy.firstFiveMinuteSlotOnly, false);
@@ -542,6 +544,7 @@ test('snapshot exposes the rolling ask-only 300-share strategy', () => {
   assert.equal(snapshot.strategy.onePairPerFirstFiveMinuteSlot, false);
   assert.equal(snapshot.strategy.onePairPerFiveMinuteSlot, true);
   assert.equal(snapshot.strategy.sideSelectionMode.includes('ignore Binance beat'), true);
+  assert.equal(snapshot.strategy.sideSelectionMode.includes('never closes filled positions'), true);
   assert.equal(snapshot.strategy.synchronizedEndTimeRequired, false);
   assert.equal(snapshot.strategy.forceEntryAboveAskSumTarget, false);
   assert.equal(snapshot.marketPair.synchronized, false);

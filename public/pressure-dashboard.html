@@ -186,7 +186,7 @@
         <div>
           <div class="eyebrow">Up to three entries · all 5-minute slots</div>
           <h2>Pair opposite outcomes in the current 5m and active 15m BTC markets.</h2>
-          <p>At each 5-minute slot, it picks the cheapest eligible complementary UP/DOWN pair when asks total below $0.70 and each ask is at least $0.20. It buys 300 shares in each market and adds 300 shares to the selected 15-minute side. Binance beat prices do not choose the side.</p>
+          <p>At each 5-minute slot, it picks the cheapest eligible complementary UP/DOWN pair when asks total below $0.85 and each ask is at least $0.20. It buys 300 shares in each market and adds 300 shares to the selected 15-minute side. The next entry may use the opposite pairing; already-filled positions are not sold or reversed. Binance beat prices do not choose the side.</p>
         </div>
         <div class="hero-state">
           <span class="badge" id="windowBadge">Waiting for markets</span>
@@ -242,7 +242,7 @@
           <div class="opportunity">
             <div class="decision"><div class="eyebrow">Selected pair · best asks combined</div><div class="decision-value" id="pairSum">—</div><div class="muted" id="pairDirection">Waiting for an eligible 5m/15m pair</div></div>
             <div class="decision rule-list">
-              <div class="rule"><span>Entry level</span><strong>Combined asks &lt; $0.70</strong></div>
+              <div class="rule"><span>Entry level</span><strong>Combined asks &lt; $0.85</strong></div>
               <div class="rule"><span>Individual ask floor</span><strong>$0.20 per leg</strong></div>
               <div class="rule"><span>Order per slot</span><strong>300 shares per leg</strong></div>
               <div class="rule"><span>Market sweep ceiling</span><strong>$0.99 per share</strong></div>
@@ -252,7 +252,7 @@
             </div>
           </div>
           <div class="tier-list" id="entryTierStatus" aria-label="Ask-sum entry levels"></div>
-          <div class="notice">Each of the three 5-minute slots can enter once when the selected 5m and 15m asks total below $0.70 and each ask is at least $0.20. It buys 300 shares in that 5m market and adds 300 shares to the selected 15m outcome per slot (up to 900 shares in 15m). It chooses the lowest-cost qualifying complementary pair and ignores Binance beat prices. Paper taker buys sweep visible asks up to $0.99; the two markets can resolve differently.</div>
+          <div class="notice">Each of the three 5-minute slots can enter once when the selected 5m and 15m asks total below $0.85 and each ask is at least $0.20. It buys 300 shares in that 5m market and adds 300 shares to the selected 15m outcome per slot (up to 900 shares in 15m). It chooses the lowest-cost qualifying complementary pair for each new entry, so a later entry may switch pairings; existing positions are not sold or reversed. Binance beat prices do not select or block entries. Paper taker buys sweep visible asks up to $0.99; the two markets can resolve differently.</div>
         </article>
       </section>
 
@@ -275,7 +275,7 @@
             <div class="rule-list">
               <div class="rule"><span>Active strategy</span><strong>BTC paired 5m/15m · paper only</strong></div>
               <div class="rule"><span>Entry window</span><strong>All three 5-minute slots per 15-minute market</strong></div>
-              <div class="rule"><span>Entry level</span><strong>Combined asks below $0.70; each ask ≥ $0.20</strong></div>
+              <div class="rule"><span>Entry level</span><strong>Combined asks below $0.85; each ask ≥ $0.20</strong></div>
               <div class="rule"><span>Entry sizing</span><strong>300 shares per 5m slot + 300 added to 15m</strong></div>
               <div class="rule"><span>Take-profit</span><strong>Best bid ≥ $0.99 · modeled payout $1.00/share</strong></div>
               <div class="rule"><span>If TP does not hit</span><strong>Hold to that market’s official resolution</strong></div>

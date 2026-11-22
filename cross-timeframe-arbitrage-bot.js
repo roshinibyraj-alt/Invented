@@ -11,10 +11,10 @@ const FIFTEEN_MINUTES_MS = 15 * 60 * 1000;
 const STRATEGY = Object.freeze({
   id: 'btc-every-5m-paired-5m-15m-paper',
   name: 'BTC rolling 5m/15m ask-pair paper strategy',
-  version: 'btc-every-5m-paired-paper-v8-rolling-300',
+  version: 'btc-every-5m-paired-paper-v9-ask85-next-entry-switch',
   quantity: 300,
-  askSumTarget: 0.70,
-  entryAskSumThresholds: Object.freeze([0.70]),
+  askSumTarget: 0.85,
+  entryAskSumThresholds: Object.freeze([0.85]),
   minimumIndividualAsk: 0.20,
   sweepPriceCeiling: 0.99,
   takeProfitTrigger: 0.99,
@@ -780,7 +780,7 @@ class CrossTimeframeArbitrageBot extends WickBot {
           : fired.length ? 'WAITING_FOR_NEXT_THRESHOLD'
             : opportunity.waitingForAskSum ? 'WAITING_FOR_ASK_SUM' : 'NO_OPPORTUNITY',
         reason: fired.length === STRATEGY.entryAskSumThresholds.length
-          ? 'The $0.70 ask-sum entry has fired for this 5-minute window.'
+          ? 'The $0.85 ask-sum entry has fired for this 5-minute window.'
           : fired.length
             ? `Entry at ${fired.map((tier) => `$${tier.threshold.toFixed(2)}`).join(', ')} already fired for this 5-minute window.`
             : opportunity.reason,
@@ -822,11 +822,11 @@ class CrossTimeframeArbitrageBot extends WickBot {
         : enteredAny ? 'PAIR_ENTRY_FILLED'
           : this.opportunity.status,
       reason: fired.length === STRATEGY.entryAskSumThresholds.length
-        ? 'The $0.70 ask-sum entry has fired for this 5-minute window.'
+        ? 'The $0.85 ask-sum entry has fired for this 5-minute window.'
         : blockedAttempt
-          ? `The $0.70 ask-sum entry is blocked: ${blockedAttempt.reason}`
+          ? `The $0.85 ask-sum entry is blocked: ${blockedAttempt.reason}`
         : enteredAny
-          ? 'The $0.70 ask-sum entry has fired for this 5-minute window.'
+          ? 'The $0.85 ask-sum entry has fired for this 5-minute window.'
           : this.opportunity.reason,
     };
     this.signal = {
@@ -1234,7 +1234,7 @@ class CrossTimeframeArbitrageBot extends WickBot {
         firstFiveMinuteSlotOnly: false,
         forceEntryAboveAskSumTarget: false,
         entryOnlyBelowAskSumTarget: true,
-        sideSelectionMode: 'Choose the lowest-cost eligible complementary UP/DOWN pair; ignore Binance beat prices.',
+        sideSelectionMode: 'Choose the lowest-cost eligible complementary UP/DOWN pair for each new 5m entry; an opposite pairing never closes filled positions; ignore Binance beat prices.',
         sweepPriceCeiling: STRATEGY.sweepPriceCeiling,
         beatPriceSource: 'Not used for entry selection.',
         bookPriceSource: 'Polymarket CLOB WebSocket only; wait if missing or stale.',
