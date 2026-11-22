@@ -73,7 +73,7 @@ function emptySideState() {
     limitPrice: config.DIP_BOUNCE_LIMIT_PRICE,
     lastObservedMid: null,
     lastObservedAt: null,
-    reason: 'Waiting for midpoint below $0.40.',
+    reason: 'Waiting for midpoint below $0.35.',
   };
 }
 
@@ -460,7 +460,7 @@ class DipBounceBot {
         sideState.dipAt = now;
         sideState.orderStatus = 'WAITING_FOR_BOUNCE';
         sideState.reason = `Midpoint dipped below $${config.DIP_BOUNCE_PRICE_DIP.toFixed(2)}; waiting for $${config.DIP_BOUNCE_PRICE_BOUNCE.toFixed(2)} rebound.`;
-        this.log(`${side} midpoint dipped below $0.40; armed for rebound.`, {
+        this.log(`${side} midpoint dipped below $0.35; armed for rebound.`, {
           asset: record.asset, timeframe: record.timeframe, side, now,
         });
       }
@@ -795,7 +795,7 @@ class DipBounceBot {
       strategy: {
         ...STRATEGY,
         execution: 'PAPER ONLY',
-        entry: 'Midpoint below $0.40 arms a side; midpoint at or above $0.50 places one resting $0.48 paper buy for 100 shares.',
+        entry: 'Midpoint below $0.35 arms a side; midpoint at or above $0.50 places one resting $0.48 paper buy for 100 shares.',
         fill: 'Only a later CLOB update with best bid at or below $0.47 confirms a full-size simulated fill at $0.48.',
         takeProfit: 'Best bid at or above $0.99 closes at a modeled $1.00 payout per share.',
         stopLoss: null,

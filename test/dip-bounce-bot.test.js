@@ -72,13 +72,30 @@ test('scans all four assets across both window lengths and subscribes to their C
   bot.stop();
 });
 
+test('only a midpoint strictly below $0.35 arms a side', () => {
+  const { bot, setNow } = makeBot();
+  const start = 1_800_000_000_000;
+  const record = setMarket(bot, 'BTC', '5m', start);
+
+  for (const [offset, bid, ask] of [[1000, 0.38, 0.40], [2000, 0.34, 0.36], [3000, 0.49, 0.51]]) {
+    setNow(start + offset);
+    bot.applyBook(record, 'UP', book(bid, ask), start + offset);
+    assert.equal(record.sideStates.UP.dipSeen, false);
+    assert.equal(bot.orders.length, 0);
+  }
+  setNow(start + 4000);
+  bot.applyBook(record, 'UP', book(0.33, 0.35), start + 4000);
+  assert.equal(record.sideStates.UP.dipSeen, true);
+  assert.equal(bot.snapshot().strategy.dipBelow, 0.35);
+});
+
 test('a dip then rebound places one resting limit and a later bid touch fills all 100 shares at $0.48', () => {
   const { bot, setNow } = makeBot();
   const start = 1_800_000_000_000;
   const record = setMarket(bot, 'BTC', '5m', start);
 
   setNow(start + 1000);
-  bot.applyBook(record, 'UP', book(0.38, 0.40), start + 1000);
+  bot.applyBook(record, 'UP', book(0.33, 0.35), start + 1000);
   assert.equal(record.sideStates.UP.dipSeen, true);
   assert.equal(record.sideStates.UP.orderStatus, 'WAITING_FOR_BOUNCE');
 
@@ -108,8 +125,8 @@ test('UP and DOWN qualify independently in the same market window', () => {
   const record = setMarket(bot, 'ETH', '15m', start);
 
   setNow(start + 1000);
-  bot.applyBook(record, 'UP', book(0.38, 0.40), start + 1000);
-  bot.applyBook(record, 'DOWN', book(0.37, 0.39), start + 1001);
+  bot.applyBook(record, 'UP', book(0.33, 0.35), start + 1000);
+  bot.applyBook(record, 'DOWN', book(0.32, 0.34), start + 1001);
   setNow(start + 2000);
   bot.applyBook(record, 'UP', book(0.49, 0.51), start + 2000);
   bot.applyBook(record, 'DOWN', book(0.50, 0.52), start + 2001);
@@ -125,7 +142,7 @@ test('a $0.99 best bid take-profit credits $1 per share and no stop-loss is appl
   const record = setMarket(bot, 'SOL', '5m', start);
 
   setNow(start + 1000);
-  bot.applyBook(record, 'DOWN', book(0.38, 0.40), start + 1000);
+  bot.applyBook(record, 'DOWN', book(0.33, 0.35), start + 1000);
   setNow(start + 2000);
   bot.applyBook(record, 'DOWN', book(0.49, 0.51), start + 2000);
   setNow(start + 3000);
@@ -158,13 +175,13 @@ test('window end cancels unfilled limits and holds filled positions for official
   const record = setMarket(bot, 'DOGE', '15m', start);
 
   setNow(start + 1000);
-  bot.applyBook(record, 'UP', book(0.38, 0.40), start + 1000);
+  bot.applyBook(record, 'UP', book(0.33, 0.35), start + 1000);
   setNow(start + 2000);
   bot.applyBook(record, 'UP', book(0.49, 0.51), start + 2000);
   const unfilled = bot.orders[0];
 
   setNow(start + 3000);
-  bot.applyBook(record, 'DOWN', book(0.38, 0.40), start + 3000);
+  bot.applyBook(record, 'DOWN', book(0.33, 0.35), start + 3000);
   setNow(start + 4000);
   bot.applyBook(record, 'DOWN', book(0.49, 0.51), start + 4000);
   setNow(start + 5000);

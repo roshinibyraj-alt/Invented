@@ -7,7 +7,7 @@ Invented tracks Polymarket BTC, ETH, SOL, and DOGE UP/DOWN markets on both 5-min
 Each of the eight asset/timeframe markets is independent. From the time its CLOB feed is first observed during the active window:
 
 1. Watch the UP and DOWN midpoint independently.
-2. When a side's midpoint goes below $0.40, arm that side.
+2. When a side's midpoint goes below $0.35, arm that side.
 3. When its midpoint later reaches $0.50 or higher, place one simulated resting limit buy for 100 shares at $0.48.
 4. Count the full 100-share paper fill at exactly $0.48 only after a later Polymarket CLOB book update shows that side's best bid at or below $0.47. This is the requested paper touch rule, not a claim that a real resting order filled.
 5. If a filled position's best bid reaches $0.99, close it at a modeled $1.00 payout per share. There is no stop-loss. If take-profit has not hit by the market's end, hold the position for its official resolution.

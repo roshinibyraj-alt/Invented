@@ -55,7 +55,7 @@ test('dashboard serves the multi-asset dip-and-bounce strategy', async t => {
   assert.match(html, /Eight independent Polymarket windows/);
   assert.match(html, /BTC, ETH, SOL and DOGE/);
   assert.match(html, /Midpoint dip → bounce/);
-  assert.match(html, /below \$0\.40/);
+  assert.match(html, /below \$0\.35/);
   assert.match(html, /at \$0\.50 or higher/);
   assert.match(html, /100 shares at a \$0\.48 limit/);
   assert.match(html, /best bid at or below \$0\.47/);

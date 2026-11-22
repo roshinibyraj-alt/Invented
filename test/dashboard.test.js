@@ -86,7 +86,7 @@ test('mobile dashboard renders all eight markets, trading rules, and paper-only 
   assert.match(elements.get('eventList').innerHTML, /Take-profit hit/);
   assert.match(elements.get('eventList').innerHTML, /#176e4c/);
   assert.match(elements.get('eventList').innerHTML, /#e66854/);
-  assert.match(html, /Arm below \$0\.40/);
+  assert.match(html, /Arm below \$0\.35/);
   assert.match(html, /midpoint at \$0\.50 or higher/);
   assert.match(html, /best bid at or below \$0\.47/);
   assert.match(html, /100 shares at a \$0\.48 limit/);
