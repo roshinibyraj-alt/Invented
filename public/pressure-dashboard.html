@@ -184,9 +184,9 @@
 
       <section class="hero grid">
         <div>
-          <div class="eyebrow">One entry · first 5 minutes of each 15-minute window</div>
+          <div class="eyebrow">Up to three entries · all 5-minute slots</div>
           <h2>Pair opposite outcomes in the current 5m and active 15m BTC markets.</h2>
-          <p>The bot uses the selected UP/DOWN pairing only in the first five-minute segment. It enters once when combined asks are below $0.80, with 500 shares per leg.</p>
+          <p>At each 5-minute slot, it picks the cheapest eligible complementary UP/DOWN pair when asks total below $0.70 and each ask is at least $0.20. It buys 300 shares in each market and adds 300 shares to the selected 15-minute side. Binance beat prices do not choose the side.</p>
         </div>
         <div class="hero-state">
           <span class="badge" id="windowBadge">Waiting for markets</span>
@@ -221,14 +221,14 @@
             <section class="market-card five">
               <div class="market-title"><strong>BTC · 5-minute</strong><span class="badge" id="fiveStatus">WAITING</span></div>
               <div class="market-name" id="fiveName">Market not loaded</div>
-              <div class="beat"><div><small>Beat at market start</small><br><strong id="fiveBeat">—</strong></div><span class="source-tag" id="fiveSource">Waiting for strike data</span></div>
+              <div class="beat"><div><small>Beat price · informational</small><br><strong id="fiveBeat">—</strong></div><span class="source-tag" id="fiveSource">Waiting for feed</span></div>
               <div class="outcomes" id="fiveOutcomes"></div>
               <div class="row muted" style="margin-top:9px"><span>Ends</span><strong id="fiveEnd">—</strong></div>
             </section>
             <section class="market-card fifteen">
               <div class="market-title"><strong>BTC · 15-minute</strong><span class="badge" id="fifteenStatus">WAITING</span></div>
               <div class="market-name" id="fifteenName">Market not loaded</div>
-              <div class="beat"><div><small>Beat at market start</small><br><strong id="fifteenBeat">—</strong></div><span class="source-tag" id="fifteenSource">Waiting for strike data</span></div>
+              <div class="beat"><div><small>Beat price · informational</small><br><strong id="fifteenBeat">—</strong></div><span class="source-tag" id="fifteenSource">Waiting for feed</span></div>
               <div class="outcomes" id="fifteenOutcomes"></div>
               <div class="row muted" style="margin-top:9px"><span>Ends</span><strong id="fifteenEnd">—</strong></div>
             </section>
@@ -238,20 +238,21 @@
 
       <section class="grid">
         <article class="panel">
-          <div class="panel-head"><div><div class="panel-title">Pair evaluation</div><div class="panel-sub">500 shares per leg · first 5-minute segment only</div></div><span class="badge" id="caseBadge">No case</span></div>
+          <div class="panel-head"><div><div class="panel-title">Pair evaluation</div><div class="panel-sub">300 shares in each 5m market · 300 added to 15m each slot</div></div><span class="badge" id="caseBadge">No pair</span></div>
           <div class="opportunity">
             <div class="decision"><div class="eyebrow">Selected pair · best asks combined</div><div class="decision-value" id="pairSum">—</div><div class="muted" id="pairDirection">Waiting for an eligible 5m/15m pair</div></div>
             <div class="decision rule-list">
-              <div class="rule"><span>Entry level</span><strong>Combined asks &lt; $0.80</strong></div>
-              <div class="rule"><span>Order per entry</span><strong>500 shares per leg</strong></div>
+              <div class="rule"><span>Entry level</span><strong>Combined asks &lt; $0.70</strong></div>
+              <div class="rule"><span>Individual ask floor</span><strong>$0.20 per leg</strong></div>
+              <div class="rule"><span>Order per slot</span><strong>300 shares per leg</strong></div>
               <div class="rule"><span>Market sweep ceiling</span><strong>$0.99 per share</strong></div>
-              <div class="rule"><span>Beat gap / volatility band</span><strong id="beatComparison">—</strong></div>
+              <div class="rule"><span>Binance beat filter</span><strong id="beatComparison">Ignored</strong></div>
               <div class="rule"><span>Modeled pair fees</span><strong id="pairFees">—</strong></div>
               <div class="rule"><span>Last pair entry cost</span><strong id="lastEntryCost">—</strong></div>
             </div>
           </div>
           <div class="tier-list" id="entryTierStatus" aria-label="Ask-sum entry levels"></div>
-          <div class="notice">The bot can enter once, and only in the first 5-minute segment of each 15-minute window. The paired entry requires combined asks below $0.80 and uses 500 shares on each leg, sweeping visible asks up to $0.99. Different settlement times mean both legs can lose.</div>
+          <div class="notice">Each of the three 5-minute slots can enter once when the selected 5m and 15m asks total below $0.70 and each ask is at least $0.20. It buys 300 shares in that 5m market and adds 300 shares to the selected 15m outcome per slot (up to 900 shares in 15m). It chooses the lowest-cost qualifying complementary pair and ignores Binance beat prices. Paper taker buys sweep visible asks up to $0.99; the two markets can resolve differently.</div>
         </article>
       </section>
 
@@ -273,18 +274,18 @@
           <div class="details-body">
             <div class="rule-list">
               <div class="rule"><span>Active strategy</span><strong>BTC paired 5m/15m · paper only</strong></div>
-              <div class="rule"><span>Entry window</span><strong>First 5 minutes of each 15-minute market</strong></div>
-              <div class="rule"><span>Entry level</span><strong>Combined asks below $0.80</strong></div>
-              <div class="rule"><span>Entry sizing</span><strong>500 shares per leg · one pair per window</strong></div>
+              <div class="rule"><span>Entry window</span><strong>All three 5-minute slots per 15-minute market</strong></div>
+              <div class="rule"><span>Entry level</span><strong>Combined asks below $0.70; each ask ≥ $0.20</strong></div>
+              <div class="rule"><span>Entry sizing</span><strong>300 shares per 5m slot + 300 added to 15m</strong></div>
               <div class="rule"><span>Take-profit</span><strong>Best bid ≥ $0.99 · modeled payout $1.00/share</strong></div>
               <div class="rule"><span>If TP does not hit</span><strong>Hold to that market’s official resolution</strong></div>
               <div class="rule"><span>Market sweep ceiling</span><strong>$0.99 per share</strong></div>
               <div class="rule"><span>Binance trade feed</span><strong id="binanceStatus">Waiting</strong></div>
-              <div class="rule"><span>Last 60s BTC range / band</span><strong id="binanceRange">—</strong></div>
+              <div class="rule"><span>BTC volatility · informational</span><strong id="binanceRange">—</strong></div>
               <div class="rule"><span>Polymarket book feed</span><strong id="feedDetail">—</strong></div>
               <div class="rule"><span>Paper ledger</span><strong>In memory · restart clears history</strong></div>
             </div>
-            <div class="notice">Price inputs are WebSocket-only: use the nearest Binance BTCUSDT aggregate-trade within 2 seconds of each market start and Polymarket CLOB updates for books. If either feed, a market-start beat, or a required fresh book is missing, the bot pauses entries until data returns. Market IDs and official resolutions still use Polymarket’s API; that API is not used as a price fallback. The rolling 60-second Binance range sets the equal-beat band, with a $2 minimum and $100 maximum.</div>
+            <div class="notice">Entry selection uses fresh Polymarket CLOB WebSocket asks only. Binance beat prices and volatility are informational and do not select sides or block entries. The bot pauses only when required Polymarket books or the CLOB WebSocket are missing or stale. Market IDs and official resolutions still use Polymarket’s API.</div>
           </div>
         </details>
       </section>
@@ -326,7 +327,7 @@
           ? `${offsetMs > 0 ? '+' : ''}${(offsetMs / 1000).toFixed(1)}s` : null;
         source.textContent = beat?.source === 'BINANCE_WS_ESTIMATE'
           ? `BINANCE WS · ${signedOffset || 'near open'}`
-          : beat?.error || 'Waiting for Binance WebSocket beat';
+          : beat?.error || 'Informational only · not used for entry';
         source.className = `source-tag ${beat?.source === 'BINANCE_WS_ESTIMATE' ? 'live' : ''}`;
         const outcomes = market?.outcomes || {};
         $(`${prefix}Outcomes`).innerHTML = `${outcomeHtml('UP', outcomes.UP)}${outcomeHtml('DOWN', outcomes.DOWN)}`;
@@ -507,9 +508,7 @@
         renderEntryTiers(opportunity.entryTiers);
         $('pairFees').textContent = opportunity.fees != null ? money(opportunity.fees, 3) : '—';
         $('lastEntryCost').textContent = opportunity.totalCost != null ? money(opportunity.totalCost, 3) : '—';
-        $('beatComparison').textContent = opportunity.beatGapUsd != null
-          ? `${money(opportunity.beatGapUsd, 2)} / ${money(opportunity.beatToleranceUsd ?? volatility.bandUsd, 2)}`
-          : volatility.bandUsd != null ? `band ${money(volatility.bandUsd, 2)}` : '—';
+        $('beatComparison').textContent = 'Ignored for entry selection';
         $('socketStatus').textContent = state.websocket?.status || 'CLOB waiting';
         $('feedDetail').textContent = state.websocket?.lastMessageAt ? `WebSocket · ${Math.max(0, Date.now() - state.websocket.lastMessageAt)}ms since update` : 'Waiting for market stream';
         const tickAge = Number(volatility.lastTickAgeMs);
