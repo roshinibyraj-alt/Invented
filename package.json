@@ -1,8 +1,8 @@
 {
-  "name": "invented-multi-asset-dip-bounce-paper-bot",
+  "name": "invented-btc-eth-5m-dip-bounce-paper-bot",
   "version": "1.0.0",
   "private": true,
-  "description": "Paper-only dip-and-bounce strategy for BTC, ETH, SOL, and DOGE 5m/15m markets.",
+  "description": "Paper-only BTC and ETH 5-minute dip-and-bounce strategy with independent share sizing.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",

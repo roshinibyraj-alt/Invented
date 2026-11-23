@@ -44,7 +44,7 @@ test('health endpoint reports strategy errors as unhealthy', async t => {
   assert.deepEqual(await response.json(), { ok: false, mode: 'DEMO', status: 'ERROR', now: 123 });
 });
 
-test('dashboard serves the multi-asset dip-and-bounce strategy', async t => {
+test('dashboard serves the BTC and ETH 5-minute strategy', async t => {
   const server = startServer({ snapshot: () => ({}) }, 0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -52,19 +52,19 @@ test('dashboard serves the multi-asset dip-and-bounce strategy', async t => {
   const html = await response.text();
   assert.equal(response.status, 200);
   assert.match(html, /Invented/);
-  assert.match(html, /Eight independent Polymarket windows/);
-  assert.match(html, /BTC, ETH, SOL and DOGE/);
+  assert.match(html, /Two active 5-minute markets/);
+  assert.match(html, /BTC and ETH only/);
   assert.match(html, /Midpoint dip → bounce/);
   assert.match(html, /below \$0\.35/);
   assert.match(html, /first side to later reach \$0\.50 or higher/);
-  assert.match(html, /100-share taker buy/);
+  assert.match(html, /Adaptive-size taker buy/);
+  assert.match(html, /100-share floor/);
   assert.match(html, /Sweep visible asks up to \$0\.99/);
   assert.match(html, /Take profit at \$0\.99; stop at \$0\.00/);
   assert.match(html, /stop at \$0\.00/);
   assert.match(html, /only the first trigger/);
   assert.match(html, /official resolution/);
   assert.match(html, /SIMULATION ONLY/);
-  assert.match(html, /marketFilters/);
   assert.match(html, /positionList/);
   assert.match(html, /orderList/);
   assert.match(html, /eventList/);

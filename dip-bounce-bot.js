@@ -8,12 +8,18 @@ const TIMEFRAMES = [...config.DIP_BOUNCE_TIMEFRAMES];
 const SIDES = ['UP', 'DOWN'];
 const WINDOWS_MS = { '5m': 5 * 60_000, '15m': 15 * 60_000 };
 const STRATEGY = Object.freeze({
-  id: 'multi-asset-dip-bounce-paper',
-  name: 'Multi-asset dip-and-bounce paper strategy',
-  version: 'dip-bounce-first-side-sl-v3',
+  id: 'btc-eth-5m-dip-bounce-paper',
+  name: 'BTC and ETH 5m dip-and-bounce paper strategy',
+  version: 'btc-eth-5m-first-side-adaptive-size-v4',
   assets: ASSETS,
   timeframes: TIMEFRAMES,
   sharesPerEntry: config.DIP_BOUNCE_SHARES,
+  sizing: {
+    baseShares: config.DIP_BOUNCE_SHARES,
+    floorShares: config.DIP_BOUNCE_SHARES,
+    stepShares: config.DIP_BOUNCE_SIZING_STEP_SHARES,
+    progression: 'Per asset: add 100 shares after a loss; subtract 100 after a win, with a 100-share floor.',
+  },
   dipBelow: config.DIP_BOUNCE_PRICE_DIP,
   reboundTo: config.DIP_BOUNCE_PRICE_BOUNCE,
   orderType: 'TAKER',
@@ -59,7 +65,7 @@ function quoteFromBook(book, updatedAt, sequence) {
   };
 }
 
-function emptySideState() {
+function emptySideState(requestedShares = config.DIP_BOUNCE_SHARES) {
   return {
     dipSeen: false,
     dipAt: null,
@@ -68,7 +74,7 @@ function emptySideState() {
     entryConsumed: false,
     orderId: null,
     orderStatus: 'WAITING_FOR_DIP',
-    requestedShares: config.DIP_BOUNCE_SHARES,
+    requestedShares,
     filledShares: 0,
     limitPrice: config.DIP_BOUNCE_TAKER_CAP,
     lastObservedMid: null,
@@ -113,6 +119,13 @@ class DipBounceBot {
     this.initialCapital = Number(initialCapital);
     this.cash = this.initialCapital;
     this.WebSocketImpl = WebSocketImpl;
+    this.sizingByAsset = Object.fromEntries(ASSETS.map((asset) => [asset, {
+      nextShares: config.DIP_BOUNCE_SHARES,
+      lastOutcome: null,
+      lastUpdatedAt: null,
+      wins: 0,
+      losses: 0,
+    }]));
     this.records = new Map();
     for (const asset of ASSETS) {
       for (const timeframe of TIMEFRAMES) {
@@ -141,7 +154,7 @@ class DipBounceBot {
     this.resolutionInFlight = new Set();
     this.completedWindows = new Set();
     this.status = 'STARTING';
-    this.statusReason = 'Loading the current BTC, ETH, SOL, and DOGE markets.';
+    this.statusReason = 'Loading the current BTC and ETH 5-minute markets.';
     this.running = false;
     this.timer = null;
     this.tickInFlight = false;
@@ -208,7 +221,7 @@ class DipBounceBot {
         this.statusReason = 'Markets are loaded; waiting for the Polymarket CLOB WebSocket to connect.';
       } else {
         this.status = 'SCANNING';
-        this.statusReason = 'Searching for the current BTC, ETH, SOL, and DOGE 5m/15m windows.';
+        this.statusReason = 'Searching for the current BTC and ETH 5-minute windows.';
       }
     } catch (error) {
       this.status = 'ERROR';
@@ -231,7 +244,8 @@ class DipBounceBot {
       record.lookupError = null;
       record.books = Object.fromEntries(SIDES.map((side) => [side, { bids: [], asks: [] }]));
       record.quotes = Object.fromEntries(SIDES.map((side) => [side, quoteFromBook({}, null, 0)]));
-      record.sideStates = Object.fromEntries(SIDES.map((side) => [side, emptySideState()]));
+      const nextShares = this.sizingByAsset[record.asset]?.nextShares ?? config.DIP_BOUNCE_SHARES;
+      record.sideStates = Object.fromEntries(SIDES.map((side) => [side, emptySideState(nextShares)]));
       record.triggeredSide = null;
     }
     if (record.market || now < record.nextLookupAt) return;
@@ -473,7 +487,9 @@ class DipBounceBot {
     const feeRate = market.feesEnabled === false ? 0
       : Number(market.feeSchedule?.rate ?? (record.asset === 'BTC' ? 0.05 : 0.01));
     if (!Number.isFinite(feeRate) || feeRate < 0) return;
-    let remaining = config.DIP_BOUNCE_SHARES;
+    const requestedShares = this.sizingByAsset[record.asset]?.nextShares ?? config.DIP_BOUNCE_SHARES;
+    sideState.requestedShares = requestedShares;
+    let remaining = requestedShares;
     let cost = 0;
     let fees = 0;
     const fills = [];
@@ -486,7 +502,7 @@ class DipBounceBot {
       fees += fee;
       remaining -= quantity;
     }
-    const shares = config.DIP_BOUNCE_SHARES - remaining;
+    const shares = requestedShares - remaining;
     if (shares <= 0) {
       sideState.reason = 'Rebound qualified; waiting for executable asks for a taker buy.';
       return;
@@ -511,7 +527,7 @@ class DipBounceBot {
       action: 'BUY_TAKER',
       status: remaining > 0 ? 'PARTIALLY_FILLED' : 'FILLED',
       limitPrice: config.DIP_BOUNCE_TAKER_CAP,
-      requestedShares: config.DIP_BOUNCE_SHARES,
+      requestedShares,
       filledShares: shares,
       placedAt: now,
       placedSequence: sequence,
@@ -555,6 +571,9 @@ class DipBounceBot {
       exitPrice: null,
       exitPayout: null,
       exitReason: null,
+      requestedShares,
+      sizingApplied: false,
+      nextEntryShares: null,
     };
     this.positions.unshift(position);
     sideState.orderStatus = order.status;
@@ -580,6 +599,7 @@ class DipBounceBot {
       position.exitPayout = config.DIP_BOUNCE_TAKE_PROFIT_PAYOUT;
       position.exitReason = 'TAKE_PROFIT_099';
       position.realizedPnl = payout - position.totalCost - position.fees + position.estimatedMakerRebate;
+      this.updateSizingAfterClose(position, true, now);
       position.markBid = config.DIP_BOUNCE_TAKE_PROFIT_BID;
       position.markUpdatedAt = quote.updatedAt;
       position.markStatus = 'CLOSED';
@@ -613,6 +633,7 @@ class DipBounceBot {
       position.exitPayout = 0;
       position.exitReason = 'STOP_LOSS_000';
       position.realizedPnl = -position.totalCost - position.fees + position.estimatedMakerRebate;
+      this.updateSizingAfterClose(position, false, now);
       position.markBid = 0;
       position.markUpdatedAt = quote.updatedAt;
       position.markStatus = 'CLOSED';
@@ -699,6 +720,7 @@ class DipBounceBot {
       position.exitPayout = won ? 1 : 0;
       position.exitReason = 'OFFICIAL_RESOLUTION';
       position.realizedPnl = payout - position.totalCost - position.fees + position.estimatedMakerRebate;
+      this.updateSizingAfterClose(position, won, now);
       position.markStatus = 'CLOSED';
       position.unrealizedPnl = null;
       this.log(`${position.side} resolved ${won ? 'WIN' : 'LOSS'}; official market winner was ${winner}.`, {
@@ -711,6 +733,33 @@ class DipBounceBot {
       });
     }
     this.updateAccountMetrics(now, true);
+  }
+
+  updateSizingAfterClose(position, won, now) {
+    if (position.sizingApplied) return;
+    const state = this.sizingByAsset[position.asset];
+    if (!state) return;
+    state.nextShares = won
+      ? Math.max(config.DIP_BOUNCE_SHARES, state.nextShares - config.DIP_BOUNCE_SIZING_STEP_SHARES)
+      : state.nextShares + config.DIP_BOUNCE_SIZING_STEP_SHARES;
+    state.lastOutcome = won ? 'WIN' : 'LOSS';
+    state.lastUpdatedAt = now;
+    if (won) state.wins += 1;
+    else state.losses += 1;
+    position.sizingApplied = true;
+    position.sizingOutcome = state.lastOutcome;
+    position.nextEntryShares = state.nextShares;
+    this.log(
+      `${position.asset} next entry size ${state.nextShares} shares after ${state.lastOutcome.toLowerCase()}.`,
+      {
+        asset: position.asset,
+        timeframe: position.timeframe,
+        side: position.side,
+        outcome: won ? 'good' : 'bad',
+        type: 'SIZING_UPDATE',
+        now,
+      },
+    );
   }
 
   updateAccountMetrics(now, forceSample = false) {
@@ -822,8 +871,9 @@ class DipBounceBot {
       strategy: {
         ...STRATEGY,
         execution: 'PAPER ONLY',
-        entry: 'Midpoint below $0.35 arms a side; the first side to reach $0.50 after arming triggers one 100-share paper taker buy. The opposite side is blocked for that market window.',
+        entry: 'BTC and ETH 5-minute windows only. Midpoint below $0.35 arms a side; the first side to reach $0.50 triggers one paper taker buy. The opposite side is blocked for that market window.',
         fill: 'Sweep visible asks immediately up to $0.99; record volume-weighted price, available shares and taker fees. No resting remainder.',
+        sizing: 'Each asset starts at 100 shares. After a loss, add 100 shares to that asset’s next entry; after a win, subtract 100, with a 100-share floor. A $0.00 stop is a zero-payout loss, with no sell order or sell fee.',
         takeProfit: 'Best bid at or above $0.99 closes at a modeled $1.00 payout per share.',
         stopLoss: '$0.00 best bid; an empty bid book is treated as zero.',
         resolution: 'An open position that has not hit take-profit or the $0.00 stop waits for official resolution at window end.',
@@ -840,6 +890,7 @@ class DipBounceBot {
         lastMessageAgeMs: this.websocket.lastMessageAt == null
           ? null : Math.max(0, now - this.websocket.lastMessageAt),
       },
+      sizingByAsset: Object.fromEntries(ASSETS.map((asset) => [asset, { ...this.sizingByAsset[asset] }])),
       markets,
       positions: this.positions.slice(0, 300).map((position) => ({ ...position })),
       orders: this.orders.slice(0, 300).map((order) => ({ ...order })),

@@ -58,24 +58,25 @@ function book(bid, ask) {
   };
 }
 
-test('scans all four assets across both window lengths and subscribes to their CLOB tokens', async () => {
+test('scans only BTC and ETH 5-minute markets and subscribes to their CLOB tokens', async () => {
   const start = 1_800_000_000_000;
   const { bot } = makeBot({ now: start + 1000 });
   await bot.tick(start + 1000);
 
   const state = bot.snapshot();
-  assert.equal(state.markets.length, 8);
-  assert.deepEqual(state.scanner.assets, ['BTC', 'ETH', 'SOL', 'DOGE']);
-  assert.deepEqual(state.scanner.timeframes, ['5m', '15m']);
+  assert.equal(state.markets.length, 2);
+  assert.deepEqual(state.scanner.assets, ['BTC', 'ETH']);
+  assert.deepEqual(state.scanner.timeframes, ['5m']);
   assert.ok(state.markets.every((market) => market.marketStatus === 'OPEN'));
-  assert.equal(bot.tokenRefs.size, 16);
+  assert.equal(bot.tokenRefs.size, 4);
+  assert.deepEqual(Object.keys(state.sizingByAsset), ['BTC', 'ETH']);
   bot.stop();
 });
 
 test('only a midpoint strictly below $0.35 arms a side', () => {
   const { bot, setNow } = makeBot();
   const start = 1_800_000_000_000;
-  const record = setMarket(bot, 'BTC', '5m', start);
+  const record = setMarket(bot, 'ETH', '5m', start);
 
   for (const [offset, bid, ask] of [[1000, 0.38, 0.40], [2000, 0.34, 0.36], [3000, 0.49, 0.51]]) {
     setNow(start + offset);
@@ -125,7 +126,7 @@ test('a dip then rebound immediately buys 100 shares at asks with taker fees', (
 test('the first side to trigger blocks the opposite side for the whole market window', () => {
   const { bot, setNow } = makeBot();
   const start = 1_800_000_000_000;
-  const record = setMarket(bot, 'ETH', '15m', start);
+  const record = setMarket(bot, 'ETH', '5m', start);
 
   setNow(start + 1000);
   bot.applyBook(record, 'UP', book(0.33, 0.35), start + 1000);
@@ -144,7 +145,7 @@ test('the first side to trigger blocks the opposite side for the whole market wi
 test('an empty bid book triggers the $0.00 stop-loss without waiting for resolution', () => {
   const { bot, setNow } = makeBot();
   const start = 1_800_000_000_000;
-  const record = setMarket(bot, 'SOL', '5m', start);
+  const record = setMarket(bot, 'ETH', '5m', start);
 
   setNow(start + 1000);
   bot.applyBook(record, 'DOWN', book(0.33, 0.35), start + 1000);
@@ -167,12 +168,15 @@ test('an empty bid book triggers the $0.00 stop-loss without waiting for resolut
   assert.ok(Math.abs(position.realizedPnl + 51.2499) < 1e-8);
   assert.ok(Math.abs(bot.cash - 2948.7501) < 1e-8);
   assert.equal(bot.snapshot().strategy.stopLoss, '$0.00 best bid; an empty bid book is treated as zero.');
+  assert.equal(bot.sizingByAsset.ETH.nextShares, 200);
+  assert.equal(bot.sizingByAsset.BTC.nextShares, 100, 'ETH sizing changes do not affect BTC');
+  assert.equal(position.fees, 0.2499, 'only the entry fee is charged; zero-stop adds no sell fee');
 });
 
 test('$0.99 take-profit still credits $1 per share', () => {
   const { bot, setNow } = makeBot();
   const start = 1_800_000_000_000;
-  const record = setMarket(bot, 'SOL', '5m', start);
+  const record = setMarket(bot, 'ETH', '5m', start);
 
   setNow(start + 1000);
   bot.applyBook(record, 'UP', book(0.33, 0.35), start + 1000);
@@ -186,6 +190,7 @@ test('$0.99 take-profit still credits $1 per share', () => {
   assert.equal(position.exitPayout, 1);
   assert.ok(Math.abs(position.realizedPnl - 48.7501) < 1e-8);
   assert.ok(Math.abs(bot.cash - 3048.7501) < 1e-8);
+  assert.equal(bot.sizingByAsset.ETH.nextShares, 100, 'a win at the floor keeps the next size at 100');
 });
 
 test('window end sends the first triggered position to official resolution', async () => {
@@ -198,7 +203,7 @@ test('window end sends the first triggered position to official resolution', asy
       resolvedWinner: (market) => market?.closed ? 'UP' : null,
     },
   });
-  const record = setMarket(bot, 'DOGE', '15m', start);
+  const record = setMarket(bot, 'ETH', '5m', start);
 
   setNow(start + 1000);
   bot.applyBook(record, 'UP', book(0.33, 0.35), start + 1000);
@@ -224,6 +229,7 @@ test('window end sends the first triggered position to official resolution', asy
   assert.equal(resolution, 'RESOLVED_WIN');
   assert.ok(Math.abs(position.realizedPnl - 48.7501) < 1e-8);
   assert.ok(Math.abs(bot.cash - 3048.7501) < 1e-8);
+  assert.equal(bot.sizingByAsset.ETH.nextShares, 100);
 });
 
 test('taker sweep uses multiple ask levels and cancels shallow-book remainder', () => {
@@ -258,5 +264,37 @@ test('missing books do not arm a dip or create invented taker fills', () => {
   setNow(start + 2000);
   bot.applyBook(record, 'UP', book(0.49, 0.51), start + 2000);
   assert.equal(bot.orders.length, 0);
+});
+
+test('a loss increases only that asset next entry size and a later win steps it back', async () => {
+  const start = 1_800_000_000_000;
+  const { bot, setNow } = makeBot({ now: start + 1000 });
+  const record = setMarket(bot, 'BTC', '5m', start);
+
+  setNow(start + 1000);
+  bot.applyBook(record, 'UP', book(0.33, 0.35), start + 1000);
+  setNow(start + 2000);
+  bot.applyBook(record, 'UP', book(0.49, 0.51), start + 2000);
+  setNow(start + 3000);
+  bot.applyBook(record, 'UP', book(null, 0.01), start + 3000);
+  assert.equal(bot.sizingByAsset.BTC.nextShares, 200);
+  assert.equal(bot.sizingByAsset.ETH.nextShares, 100);
+
+  const nextStart = start + 300_000;
+  setNow(nextStart + 1000);
+  await bot.refreshMarket(record, nextStart + 1000);
+  assert.equal(record.market.start, nextStart);
+  assert.equal(record.sideStates.UP.requestedShares, 200);
+  bot.applyBook(record, 'UP', book(0.33, 0.35), nextStart + 1000);
+  setNow(nextStart + 2000);
+  bot.applyBook(record, 'UP', book(0.49, 0.51), nextStart + 2000);
+  assert.equal(bot.orders[0].requestedShares, 200);
+  assert.equal(bot.positions[0].shares, 200);
+
+  setNow(nextStart + 3000);
+  bot.applyBook(record, 'UP', book(0.99, 1.00), nextStart + 3000);
+  assert.equal(bot.positions[0].status, 'TAKE_PROFIT');
+  assert.equal(bot.sizingByAsset.BTC.nextShares, 100);
+  assert.equal(bot.positions[0].nextEntryShares, 100);
 });
 

@@ -98,17 +98,10 @@
     .metric-value { overflow:hidden; margin-top:7px; font-size:clamp(21px,6vw,29px); line-height:1; font-weight:950; letter-spacing:-.065em; text-overflow:ellipsis; font-variant-numeric:tabular-nums; }
     .metric-detail { display:block; margin-top:7px; color:var(--muted); font-size:10px; }
     .positive { color:var(--green)!important; } .negative { color:var(--coral)!important; } .neutral { color:var(--ink)!important; }
-    .market-tools { display:flex; align-items:center; gap:6px; overflow:auto; padding:2px 0 5px; scrollbar-width:none; }
-    .market-tools::-webkit-scrollbar { display:none; }
-    .filter { padding:8px 11px; cursor:pointer; }
-    .filter[aria-pressed="true"] { border-color:var(--ink); color:var(--paper); background:var(--ink); }
-    .market-count { margin-left:auto; color:var(--muted); font-size:10px; white-space:nowrap; }
     .market-grid { display:grid; grid-template-columns:1fr; gap:10px; }
     .market-card { min-width:0; overflow:hidden; border:1px solid var(--line); border-radius:18px; background:var(--paper); box-shadow:var(--shadow); }
     .market-card[data-asset="BTC"] { --asset-color:#d7a929; --asset-wash:#fff6d8; }
     .market-card[data-asset="ETH"] { --asset-color:#687bd1; --asset-wash:#eef0ff; }
-    .market-card[data-asset="SOL"] { --asset-color:#198b73; --asset-wash:#e3f5ef; }
-    .market-card[data-asset="DOGE"] { --asset-color:#be752e; --asset-wash:#fff0df; }
     .market-card-head { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; padding:14px 14px 12px; border-bottom:1px solid #edf0e9; }
     .asset-lockup { display:flex; align-items:center; gap:10px; min-width:0; }
     .asset-token { display:grid; width:37px; height:37px; flex:none; place-items:center; border-radius:12px; color:var(--asset-color); background:var(--asset-wash); font-size:11px; font-weight:950; letter-spacing:-.04em; }
@@ -148,8 +141,11 @@
     .panel-head h3 { margin:0; font-size:15px; letter-spacing:-.035em; }
     .panel-head p { margin:3px 0 0; color:var(--muted); font-size:10px; }
     .count-chip { flex:none; padding:6px 8px; border-radius:8px; color:#4f5f53; background:#edf1e8; font-size:9px; font-weight:900; }
-    .position-list, .activity-list { display:grid; gap:7px; }
-    .position-card, .activity-card { padding:11px; border:1px solid #e9ede5; border-radius:12px; background:#fafbf7; }
+    .position-list, .activity-list { display:grid; gap:8px; }
+    .position-card, .activity-card { padding:12px; border:1px solid #e9ede5; border-radius:14px; background:#fafbf7; }
+    .position-card { border-left:4px solid #8c9a8c; }
+    .position-card.up { border-left-color:#34a66b; background:linear-gradient(105deg,#e9f8ee,#fffefa 60%); }
+    .position-card.down { border-left-color:#ef735e; background:linear-gradient(105deg,#fff0eb,#fffefa 60%); }
     .position-top, .activity-top { display:flex; justify-content:space-between; gap:8px; align-items:flex-start; }
     .position-title strong, .activity-title strong { font-size:12px; }
     .position-title small, .activity-title small { display:block; margin-top:2px; color:var(--muted); font-size:9px; }
@@ -157,8 +153,20 @@
     .position-values div { min-width:0; }
     .position-values span { display:block; color:var(--muted); font-size:8px; font-weight:800; text-transform:uppercase; }
     .position-values strong { display:block; overflow:hidden; margin-top:2px; font-size:11px; text-overflow:ellipsis; white-space:nowrap; font-variant-numeric:tabular-nums; }
+    .position-pnl { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:9px; padding-top:9px; border-top:1px solid rgba(37,53,34,.11); }
+    .position-pnl span { color:var(--muted); font-size:9px; font-weight:850; letter-spacing:.05em; text-transform:uppercase; }
+    .position-pnl strong { font-size:20px; line-height:1; font-weight:950; letter-spacing:-.05em; font-variant-numeric:tabular-nums; }
     .badge-side { padding:4px 6px; border-radius:6px; color:#276d48; background:#e1f2e7; font-size:8px; font-weight:900; }
     .badge-side.down { color:#a6493b; background:#ffebe5; }
+    .sizing-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:11px; }
+    .sizing-card { min-width:0; padding:11px 12px; border:1px solid #dce7d8; border-radius:14px; background:#f8fbf2; }
+    .sizing-card[data-asset="BTC"] { border-top:4px solid #e2b632; }
+    .sizing-card[data-asset="ETH"] { border-top:4px solid #7887dd; }
+    .sizing-label { display:flex; justify-content:space-between; gap:6px; color:var(--muted); font-size:9px; font-weight:900; letter-spacing:.08em; text-transform:uppercase; }
+    .sizing-value { display:block; margin-top:6px; font-size:23px; line-height:1; font-weight:950; letter-spacing:-.06em; font-variant-numeric:tabular-nums; }
+    .sizing-note { display:block; margin-top:6px; color:var(--muted); font-size:9px; }
+    .sizing-result { color:#657167; font-size:8px; font-weight:850; }
+    .sizing-result.win { color:#176e4c; } .sizing-result.loss { color:#bf4d3d; }
     .list-scroll { max-height:400px; overflow:auto; }
     .activity-line { display:flex; align-items:flex-start; gap:9px; padding:9px 2px; border-bottom:1px solid #edf0e9; }
     .activity-line:last-child { border-bottom:0; }
@@ -201,7 +209,7 @@
     @media (min-width:980px) {
       .shell { padding-top:26px; }
       .market-grid { grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
-      .section { margin-top:26px; }
+      .section { margin-top:22px; }
       .market-card-body { padding:14px; }
       .side-card { padding:12px; }
       .bottom-grid { display:grid; grid-template-columns:1.1fr .9fr; gap:12px; align-items:start; }
@@ -239,12 +247,12 @@
 
     <section class="hero" aria-labelledby="pageTitle">
       <div class="hero-copy">
-        <div class="eyebrow">Eight independent Polymarket windows</div>
+        <div class="eyebrow">Two active 5-minute markets</div>
         <h1 id="pageTitle">The market pulse, at a glance.</h1>
-        <p>Paper-only midpoint strategy across BTC, ETH, SOL and DOGE. Every window gets its own signal, order state and position.</p>
+        <p>BTC and ETH only · 5-minute markets · independent sizing progress for each asset.</p>
       </div>
       <div class="hero-side">
-        <div class="hero-stat"><span>Markets live</span><strong id="marketLiveCount">— / 8</strong></div>
+        <div class="hero-stat"><span>Markets live</span><strong id="marketLiveCount">— / 2</strong></div>
         <div class="hero-stat"><span>Open positions</span><strong id="openPositionCount">—</strong></div>
         <div class="hero-stat wide"><span>Current status</span><strong id="statusReason">Waiting for the first state update</strong></div>
       </div>
@@ -254,6 +262,27 @@
       <div><strong>State feed unavailable</strong><small id="errorMessage">Trying to reconnect…</small></div>
       <button class="retry" id="retryButton" type="button">Retry now</button>
     </div>
+
+    <section class="section" aria-labelledby="positionsHeading">
+      <div class="section-head">
+        <div><div class="section-kicker">Live first</div><h2 id="positionsHeading">Positions &amp; orders</h2></div>
+        <div class="section-note">Paper simulation only · no real orders</div>
+      </div>
+      <div class="sizing-grid" id="sizingGrid" aria-label="Next paper entry size by asset">
+        <div class="sizing-card" data-asset="BTC"><span class="sizing-label">BTC next size</span><strong class="sizing-value">100 shares</strong><small class="sizing-note">Base size</small></div>
+        <div class="sizing-card" data-asset="ETH"><span class="sizing-label">ETH next size</span><strong class="sizing-value">100 shares</strong><small class="sizing-note">Base size</small></div>
+      </div>
+      <div class="split">
+        <article class="panel">
+          <div class="panel-head"><div><h3>Open positions</h3><p>Live best-bid marks and floating P&amp;L</p></div><span class="count-chip" id="positionCount">0 positions</span></div>
+          <div class="position-list" id="positionList"><div class="empty">Loading paper positions…</div></div>
+        </article>
+        <article class="panel">
+          <div class="panel-head"><div><h3>Recent orders</h3><p>Actual simulated taker fills</p></div><span class="count-chip" id="orderCount">0 orders</span></div>
+          <div class="list-scroll" id="orderList"><div class="empty">Loading order history…</div></div>
+        </article>
+      </div>
+    </section>
 
     <section class="section" aria-label="Paper account summary">
       <div class="section-head">
@@ -270,36 +299,12 @@
 
     <section class="section" aria-labelledby="marketsHeading">
       <div class="section-head">
-        <div><div class="section-kicker">Independent market windows</div><h2 id="marketsHeading">Live market board</h2></div>
-        <div class="section-note">Midpoint is the signal. Best bid and ask are the book.</div>
+        <div><div class="section-kicker">BTC + ETH · 5m only</div><h2 id="marketsHeading">Live market board</h2></div>
+        <div class="section-note">Midpoint is the signal · bid/ask is the book</div>
       </div>
-      <div class="market-tools" id="marketFilters" role="group" aria-label="Filter markets by asset">
-        <button class="filter" type="button" data-filter="ALL" aria-pressed="true">All assets</button>
-        <button class="filter" type="button" data-filter="BTC" aria-pressed="false">BTC</button>
-        <button class="filter" type="button" data-filter="ETH" aria-pressed="false">ETH</button>
-        <button class="filter" type="button" data-filter="SOL" aria-pressed="false">SOL</button>
-        <button class="filter" type="button" data-filter="DOGE" aria-pressed="false">DOGE</button>
-        <span class="market-count" id="marketCount">0 windows</span>
-      </div>
+      <div class="section-note" id="marketCount">0 windows</div>
       <div class="market-grid" id="marketGrid" aria-live="polite">
         <div class="loading-card" aria-label="Loading markets"></div><div class="loading-card" aria-label="Loading markets"></div>
-      </div>
-    </section>
-
-    <section class="section" aria-labelledby="positionsHeading">
-      <div class="section-head">
-        <div><div class="section-kicker">Paper ledger</div><h2 id="positionsHeading">Positions &amp; orders</h2></div>
-        <div class="section-note">No real CLOB orders are sent.</div>
-      </div>
-      <div class="split">
-        <article class="panel">
-          <div class="panel-head"><div><h3>Open positions</h3><p>Best-bid marks from the current feed</p></div><span class="count-chip" id="positionCount">0 positions</span></div>
-          <div class="position-list" id="positionList"><div class="empty">Loading paper positions…</div></div>
-        </article>
-        <article class="panel">
-          <div class="panel-head"><div><h3>Recent orders</h3><p>Paper taker buys and actual simulated fills</p></div><span class="count-chip" id="orderCount">0 orders</span></div>
-          <div class="list-scroll" id="orderList"><div class="empty">Loading order history…</div></div>
-        </article>
       </div>
     </section>
 
@@ -331,8 +336,9 @@
         <div class="strategy-steps">
           <div class="strategy-step"><span class="step-num">1</span><div><strong>Watch both sides; allow only the first trigger</strong><span>Track both midpoints, but once one side qualifies and triggers an entry, block the opposite side for that market window.</span></div></div>
           <div class="strategy-step"><span class="step-num">2</span><div><strong>Arm below $0.35; trigger at or above $0.50</strong><span>Once a side's midpoint dips under $0.35, the first side to later reach $0.50 or higher takes the window's single entry.</span></div></div>
-          <div class="strategy-step"><span class="step-num">3</span><div><strong>100-share taker buy</strong><span>Sweep visible asks up to $0.99. Actual simulated average price and entry fees apply; shallow books can partially fill. No resting order.</span></div></div>
-          <div class="strategy-step"><span class="step-num">4</span><div><strong>Take profit at $0.99; stop at $0.00</strong><span>TP credits $1 per share. A zero best bid (including an empty bid book) closes at $0; otherwise open positions go to official resolution at window end.</span></div></div>
+          <div class="strategy-step"><span class="step-num">3</span><div><strong>Adaptive-size taker buy</strong><span>Each asset starts at 100 shares. Sweep visible asks up to $0.99 using that asset’s next size; actual average price and entry fees apply.</span></div></div>
+          <div class="strategy-step"><span class="step-num">4</span><div><strong>Step size by result, per asset</strong><span>After a loss, add 100 shares; after a win, subtract 100, with a 100-share floor. BTC and ETH sizing stay separate.</span></div></div>
+          <div class="strategy-step"><span class="step-num">5</span><div><strong>Take profit at $0.99; stop at $0.00</strong><span>TP credits $1 per share. The zero stop records a loss at zero payout; it does not submit a sell order or charge a sell fee. Otherwise, positions wait for official resolution.</span></div></div>
         </div>
         <div class="strategy-meta">
           <span class="meta-pill">Taker entry fees included</span>
@@ -341,7 +347,7 @@
         </div>
       </div>
     </section>
-    <footer>Paper simulation only · Not a real CLOB order · Positions still open after TP/SL are sent to official resolution</footer>
+    <footer>Paper simulation only · No real CLOB orders · Unclosed positions wait for official market resolution</footer>
   </main>
 
   <script>
@@ -378,7 +384,6 @@
       };
       const label = (value, fallback = '—') => value === null || value === undefined || value === '' ? fallback : String(value);
       let latestState = null;
-      let activeFilter = 'ALL';
       let requesting = false;
 
       function sideHtml(side, data) {
@@ -424,12 +429,33 @@
 
       function renderMarkets(markets) {
         const all = Array.isArray(markets) ? markets : [];
-        const filtered = activeFilter === 'ALL' ? all : all.filter((market) => String(market.asset || '').toUpperCase() === activeFilter);
-        $('marketCount').textContent = `${filtered.length} ${filtered.length === 1 ? 'window' : 'windows'}`;
-        $('marketLiveCount').textContent = `${all.filter((market) => String(market.marketStatus || '').toUpperCase() === 'OPEN').length} / 8`;
-        $('marketGrid').innerHTML = filtered.length
-          ? filtered.map(marketHtml).join('')
-          : `<div class="empty">${all.length ? 'No windows for this asset right now.' : 'No market windows have arrived from the state feed yet.'}</div>`;
+        const supported = all.filter((market) =>
+          ['BTC', 'ETH'].includes(String(market.asset || '').toUpperCase())
+          && String(market.timeframe || '').toLowerCase() === '5m');
+        const live = supported.filter((market) => String(market.marketStatus || '').toUpperCase() === 'OPEN').length;
+        $('marketCount').textContent = `${live} live · ${supported.length} tracked`;
+        $('marketLiveCount').textContent = `${live} / ${supported.length || 2}`;
+        $('marketGrid').innerHTML = supported.length
+          ? supported.map(marketHtml).join('')
+          : '<div class="empty">Waiting for the current BTC and ETH 5-minute markets.</div>';
+      }
+
+      function renderSizing(sizingByAsset) {
+        const sizing = sizingByAsset || {};
+        $('sizingGrid').innerHTML = ['BTC', 'ETH'].map((asset) => {
+          const state = sizing[asset] || {};
+          const nextShares = hasNumber(state.nextShares) ? Number(state.nextShares) : 100;
+          const outcome = String(state.lastOutcome || '').toUpperCase();
+          const outcomeClass = outcome === 'WIN' ? 'win' : outcome === 'LOSS' ? 'loss' : '';
+          const note = outcome
+            ? `After last ${outcome.toLowerCase()} · ${Number(state.wins) || 0}W / ${Number(state.losses) || 0}L`
+            : 'Starting size · 100-share floor';
+          return `<article class="sizing-card" data-asset="${asset}">
+            <span class="sizing-label">${asset} next entry <span class="sizing-result ${outcomeClass}">${safe(outcome || 'BASE')}</span></span>
+            <strong class="sizing-value">${shares(nextShares)} shares</strong>
+            <small class="sizing-note">${safe(note)}</small>
+          </article>`;
+        }).join('');
       }
 
       function renderPositions(positions) {
@@ -444,7 +470,7 @@
         $('positionList').innerHTML = open.map((position) => {
           const side = String(position.side || '').toUpperCase();
           const pnl = position.unrealizedPnl;
-          return `<article class="position-card">
+          return `<article class="position-card ${side.toLowerCase()}">
             <div class="position-top">
               <div class="position-title"><strong>${safe(label(position.asset))} ${safe(label(position.timeframe))} · ${safe(side || '—')}</strong><small>${safe(label(position.marketTitle, 'Market'))} · ends ${safe(clockTime(position.windowEnd))}</small></div>
               <span class="badge-side ${side === 'DOWN' ? 'down' : ''}">${safe(label(position.status))}</span>
@@ -454,7 +480,8 @@
               <div><span>Entry</span><strong>${money(position.entryPrice, 3)}</strong></div>
               <div><span>Mark bid</span><strong>${money(position.markBid, 3)}</strong></div>
             </div>
-            <div class="position-values"><div><span>Total cost</span><strong>${money(position.totalCost)}</strong></div><div><span>Open P&amp;L</span><strong class="${signClass(pnl)}">${money(pnl)}</strong></div></div>
+            <div class="position-values"><div><span>Total cost</span><strong>${money(position.totalCost)}</strong></div><div><span>Mark status</span><strong>${safe(label(position.markStatus))}</strong></div></div>
+            <div class="position-pnl"><span>Floating P&amp;L</span><strong class="${signClass(pnl)}">${money(pnl)}</strong></div>
           </article>`;
         }).join('');
       }
@@ -527,7 +554,7 @@
         $('statusPill').textContent = status;
         const statusUpper = status.toUpperCase();
         $('statusPill').className = `live-pill ${statusUpper.includes('ERROR') || statusUpper.includes('OFFLINE') ? 'bad' : statusUpper.includes('WAIT') || statusUpper.includes('CONNECT') ? 'warn' : ''}`;
-        $('statusReason').textContent = label(latestState.statusReason, 'Monitoring midpoint and book updates');
+        $('statusReason').textContent = label(latestState.statusReason, 'Monitoring BTC and ETH 5-minute markets');
         $('updatedAt').textContent = `Updated ${clockTime(latestState.now)}`;
         $('equity').textContent = money(account.equity);
         $('cash').textContent = money(account.cash);
@@ -537,7 +564,7 @@
         $('unrealized').className = `metric-value ${signClass(account.unrealizedPnl)}`;
         $('capitalDetail').textContent = `Initial capital ${money(account.initialCapital)}`;
         const strategy = latestState.strategy || {};
-        $('strategyVersion').textContent = `${label(strategy.name, 'Midpoint dip and bounce')} · ${label(strategy.version, '—')}`;
+        $('strategyVersion').textContent = `${label(strategy.name, 'BTC/ETH 5m dip and bounce')} · ${label(strategy.version, '—')}`;
         $('drawdown').textContent = `Max DD ${money(account.maxDrawdown)}${hasNumber(account.maxDrawdownPercent) ? ` · ${Number(account.maxDrawdownPercent).toFixed(1)}%` : ''}`;
         $('winRate').textContent = `Win rate ${hasNumber(account.winRate) ? `${Number(account.winRate).toFixed(1)}%` : '—'}`;
         $('winsLosses').textContent = `${Number(account.wins) || 0} wins · ${Number(account.losses) || 0} losses`;
@@ -545,6 +572,7 @@
         const socketTime = socket.lastMessageAt ? ` · last book ${clockTime(socket.lastMessageAt)}` : '';
         $('marketCount').setAttribute('title', `Feed ${label(socket.status, 'waiting')}${socketTime}`);
         renderMarkets(markets);
+        renderSizing(latestState.sizingByAsset);
         renderPositions(latestState.positions);
         renderOrders(latestState.orders);
         renderEvents(latestState.events);
@@ -574,15 +602,6 @@
         }
       }
 
-      $('marketFilters').addEventListener('click', (event) => {
-        const button = event.target.closest('button[data-filter]');
-        if (!button) return;
-        activeFilter = button.dataset.filter;
-        $('marketFilters').querySelectorAll('button[data-filter]').forEach((item) => {
-          item.setAttribute('aria-pressed', String(item === button));
-        });
-        renderMarkets(latestState?.markets);
-      });
       $('retryButton').addEventListener('click', refresh);
       refresh();
       setInterval(refresh, 1000);

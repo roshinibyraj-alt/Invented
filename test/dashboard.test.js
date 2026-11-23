@@ -46,12 +46,12 @@ function renderDashboard(state) {
   return new Promise((resolve) => setImmediate(() => resolve(elements)));
 }
 
-test('mobile dashboard renders all eight markets, trading rules, and paper-only status', async () => {
+test('mobile dashboard puts positions first and shows only BTC/ETH five-minute markets', async () => {
   assert.ok(script, 'dashboard inline script is present');
-  const markets = ['BTC', 'ETH', 'SOL', 'DOGE'].flatMap((asset) => ['5m', '15m'].map((timeframe) => ({
+  const markets = ['BTC', 'ETH'].map((asset) => ({
     asset,
-    timeframe,
-    title: `${asset} ${timeframe} Up or Down`,
+    timeframe: '5m',
+    title: `${asset} 5m Up or Down`,
     start: 1_800_000_000_000,
     end: 1_800_000_300_000,
     marketStatus: 'OPEN',
@@ -59,13 +59,17 @@ test('mobile dashboard renders all eight markets, trading rules, and paper-only 
       UP: { mid: 0.5, bestBid: 0.49, bestAsk: 0.51, dipSeen: true, bounceSeen: true, orderStatus: 'RESTING', limitPrice: 0.48, requestedShares: 100, filledShares: 0 },
       DOWN: { mid: 0.3, bestBid: 0.29, bestAsk: 0.31, dipSeen: false, bounceSeen: false, orderStatus: 'WAITING_FOR_DIP', limitPrice: 0.48, requestedShares: 100, filledShares: 0 },
     },
-  })));
+  }));
   const elements = await renderDashboard({
     now: 1_800_000_001_000,
     mode: 'DEMO ONLY',
     status: 'RUNNING',
     statusReason: 'Monitoring CLOB updates',
     strategy: { name: 'Midpoint dip and bounce', version: 'dip-bounce-v1' },
+    sizingByAsset: {
+      BTC: { nextShares: 200, lastOutcome: 'LOSS', wins: 2, losses: 1 },
+      ETH: { nextShares: 100, lastOutcome: 'WIN', wins: 3, losses: 1 },
+    },
     websocket: { status: 'CONNECTED', lastMessageAt: 1_800_000_001_000 },
     account: { initialCapital: 3000, cash: 2952, availableCash: 2952, equity: 2999, realizedPnl: 0, unrealizedPnl: -1, openPositions: 1, wins: 0, losses: 0, winRate: 0, maxDrawdown: 1, maxDrawdownPercent: 0.03, equityCurve: [] },
     markets,
@@ -77,20 +81,28 @@ test('mobile dashboard renders all eight markets, trading rules, and paper-only 
     ],
   });
 
-  assert.equal(elements.get('marketLiveCount').textContent, '8 / 8');
+  assert.equal(elements.get('marketLiveCount').textContent, '2 / 2');
   assert.match(elements.get('marketGrid').innerHTML, /BTC/);
-  assert.match(elements.get('marketGrid').innerHTML, /DOGE/);
+  assert.match(elements.get('marketGrid').innerHTML, /ETH/);
+  assert.doesNotMatch(elements.get('marketGrid').innerHTML, /DOGE|SOL|15m/);
   assert.match(elements.get('marketGrid').innerHTML, /WAITING_FOR_DIP/);
   assert.match(elements.get('positionList').innerHTML, /100/);
   assert.match(elements.get('orderList').innerHTML, /FILLED/);
+  assert.match(elements.get('sizingGrid').innerHTML, /200 shares/);
+  assert.match(elements.get('sizingGrid').innerHTML, /BTC next entry/);
   assert.match(elements.get('eventList').innerHTML, /Take-profit hit/);
   assert.match(elements.get('eventList').innerHTML, /#176e4c/);
   assert.match(elements.get('eventList').innerHTML, /#e66854/);
   assert.match(html, /Arm below \$0\.35/);
   assert.match(html, /first side to later reach \$0\.50 or higher/);
   assert.match(html, /Sweep visible asks up to \$0\.99/);
-  assert.match(html, /100-share taker buy/);
+  assert.match(html, /Adaptive-size taker buy/);
+  assert.match(html, /Step size by result, per asset/);
+  assert.match(html, /subtract 100/);
   assert.match(html, /stop at \$0\.00/);
+  assert.ok(html.indexOf('id="positionsHeading"') < html.indexOf('aria-label="Paper account summary"'), 'positions appear before account metrics');
+  assert.match(html, /BTC and ETH only · 5-minute markets/);
+  assert.doesNotMatch(html, /marketFilters/);
   assert.match(html, /only the first trigger/);
   assert.match(html, /official resolution/);
   assert.match(html, /SIMULATION ONLY/);
@@ -102,7 +114,7 @@ test('dashboard escapes market and event text before rendering it', async () => 
     status: 'RUNNING',
     now: Date.now(),
     account: {},
-    markets: [{ asset: '<script>', timeframe: '5m', title: '<img src=x>', marketStatus: 'OPEN', sideStates: {} }],
+    markets: [{ asset: 'BTC', timeframe: '5m', title: '<img src=x>', marketStatus: 'OPEN', sideStates: {} }],
     positions: [],
     orders: [],
     events: [{ time: Date.now(), message: '<script>alert(1)</script>', outcome: 'neutral' }],
@@ -111,5 +123,5 @@ test('dashboard escapes market and event text before rendering it', async () => 
   });
   assert.doesNotMatch(elements.get('marketGrid').innerHTML, /<script>|<img/);
   assert.doesNotMatch(elements.get('eventList').innerHTML, /<script>/);
-  assert.match(elements.get('marketGrid').innerHTML, /&lt;SCRIPT&gt;/);
+  assert.match(elements.get('marketGrid').innerHTML, /&lt;img/);
 });
