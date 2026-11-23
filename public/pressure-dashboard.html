@@ -324,7 +324,7 @@
       </div>
     </section>
 
-    <section class="section bottom-grid" aria-label="Performance and activity">
+    <section class="section" aria-label="Performance">
       <article class="panel">
         <div class="panel-head">
           <div><h3>Equity curve</h3><p>Paper account value through time</p></div>
@@ -336,10 +336,6 @@
           <span class="meta-pill" id="winRate">Win rate —</span>
           <span class="meta-pill" id="winsLosses">0 wins · 0 losses</span>
         </div>
-      </article>
-      <article class="panel">
-        <div class="panel-head"><div><h3>Market activity</h3><p>Latest strategy and feed events</p></div><span class="count-chip" id="eventCount">0 events</span></div>
-        <div class="list-scroll" id="eventList"><div class="empty">No activity yet.</div></div>
       </article>
     </section>
 
@@ -393,9 +389,16 @@
         <div class="strategy-meta">
           <span class="meta-pill">Taker entry fees included</span>
           <span class="meta-pill">No live trading</span>
+          <span class="meta-pill" id="resolutionPolling">Checking official results —</span>
           <span class="meta-pill" id="strategyVersion">Strategy —</span>
         </div>
       </div>
+    </section>
+    <section class="section" aria-label="Market activity">
+      <article class="panel">
+        <div class="panel-head"><div><h3>Market activity</h3><p>Latest strategy and feed events</p></div><span class="count-chip" id="eventCount">0 events</span></div>
+        <div class="list-scroll" id="eventList"><div class="empty">No activity yet.</div></div>
+      </article>
     </section>
     <footer>Paper simulation only · No real CLOB orders · History is saved in persistent Railway storage · Legs still open at window end wait for official resolution</footer>
   </main>
@@ -431,6 +434,14 @@
       const clockTime = (value) => {
         const date = toDate(value);
         return date ? date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' }) : '—';
+      };
+      const elapsedTime = (start, end) => {
+        const first = Number(start);
+        const last = Number(end);
+        if (!Number.isFinite(first) || !Number.isFinite(last) || last < first) return '';
+        const seconds = Math.floor((last - first) / 1000);
+        const minutes = Math.floor(seconds / 60);
+        return minutes ? `${minutes}m ${String(seconds % 60).padStart(2, '0')}s` : `${seconds}s`;
       };
       const label = (value, fallback = '—') => value === null || value === undefined || value === '' ? fallback : String(value);
       let latestState = null;
@@ -520,7 +531,8 @@
           markText = 'Held to resolution · no TP/SL';
         } else if (status === 'PENDING_RESOLUTION') {
           statusLabel = 'Awaiting official result';
-          markText = 'Last pre-resolution mark · not final';
+          const wait = elapsedTime(position?.pendingResolutionAt, latestState?.now);
+          markText = `Last pre-resolution mark · not final${wait ? ` · waiting ${wait}` : ''}`;
         } else if (status === 'RESOLVED_WIN') markText = 'Official resolution · WON';
         else if (status === 'RESOLVED_LOSS') markText = 'Official resolution · LOST';
         const filled = position?.shares ?? order?.filledShares ?? leg.filledShares;
@@ -740,6 +752,10 @@
         $('unrealized').className = `metric-value ${signClass(account.unrealizedPnl)}`;
         $('capitalDetail').textContent = `Initial capital ${money(account.initialCapital)}`;
         const strategy = latestState.strategy || {};
+        const resolutionPollSeconds = Number(strategy.resolutionPollMs) / 1000;
+        $('resolutionPolling').textContent = Number.isFinite(resolutionPollSeconds) && resolutionPollSeconds > 0
+          ? `Official result checked every ${resolutionPollSeconds}s`
+          : 'Checking official results';
         $('strategyVersion').textContent = `${label(strategy.name, 'BTC/ETH cross-pair')} · ${label(strategy.version, '—')}`;
         $('drawdown').textContent = `Max DD ${money(account.maxDrawdown)}${hasNumber(account.maxDrawdownPercent) ? ` · ${Number(account.maxDrawdownPercent).toFixed(1)}%` : ''}`;
         $('winRate').textContent = `Win rate ${hasNumber(account.winRate) ? `${Number(account.winRate).toFixed(1)}%` : '—'}`;

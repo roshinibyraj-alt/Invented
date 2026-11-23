@@ -63,6 +63,8 @@ test('dashboard serves the BTC/ETH 5-minute cross-pair strategy', async t => {
   assert.match(html, /Hold every filled leg for official resolution/);
   assert.match(html, /There is no take-profit or stop-loss/);
   assert.doesNotMatch(html, /TP \$0\.99|SL on empty bid|empty-bid stop/i);
+  assert.match(html, /Official result checked every/);
+  assert.match(html, /Last pre-resolution mark/);
   assert.match(html, /pair-grid/);
   assert.match(html, /Recent trades/);
   assert.match(html, /official resolution/);
@@ -71,7 +73,9 @@ test('dashboard serves the BTC/ETH 5-minute cross-pair strategy', async t => {
   assert.match(html, /orderList/);
   assert.match(html, /eventList/);
   assert.ok(html.indexOf('aria-label="Paper account summary"') < html.indexOf('id="positionsHeading"'));
-  assert.ok(html.indexOf('aria-label="Performance and activity"') < html.indexOf('id="positionsHeading"'));
+  assert.ok(html.indexOf('aria-label="Performance"') < html.indexOf('id="positionsHeading"'));
+  assert.ok(html.indexOf('aria-label="Market activity"') > html.indexOf('aria-labelledby="strategyHeading"'));
+  assert.ok(html.indexOf('aria-label="Market activity"') < html.indexOf('<footer>'));
 });
 
 test('unknown dashboard paths still return 404', async t => {

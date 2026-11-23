@@ -57,6 +57,7 @@ const STRATEGY = Object.freeze({
   entryAskSumBelow: ASK_SUM_THRESHOLD,
   orderType: 'TAKER',
   sweepCap: SWEEP_CAP,
+  resolutionPollMs: config.DIP_BOUNCE_RESOLUTION_POLL_MS,
   exit: 'No take-profit or stop-loss. Hold every filled leg through the window and settle only from official Polymarket resolution.',
   sizing: 'Always 100 shares per leg on every entry in all four cross-pairs. No size progression after wins or losses.',
   execution: 'PAPER ONLY',
@@ -649,7 +650,7 @@ class CrossPairBot extends DipBounceBot {
       entry: 'Monitor all four BTC/ETH UP/DOWN combinations independently. Enter a pair when its fresh best asks sum to strictly less than $0.80; one entry per pair per 5-minute window.',
       fill: 'Paper taker sweep of visible asks up to $0.99. Actual filled quantity, average entry, and market taker fees are recorded; unfilled remainder is cancelled.',
       sizing: STRATEGY.sizing,
-      settlement: 'There is no intra-window take-profit or stop-loss. Each open leg moves to official resolution at window end; sizing updates after both pair legs resolve.',
+      settlement: `There is no intra-window take-profit or stop-loss. Each open leg moves to official resolution at window end; the bot checks for an official result every ${config.DIP_BOUNCE_RESOLUTION_POLL_MS / 1000} seconds.`,
       execution: 'PAPER ONLY',
     };
     state.sizingByAsset = undefined;

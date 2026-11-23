@@ -15,7 +15,7 @@ For each pair, the bot watches the two fresh best asks from the Polymarket CLOB 
 
 Each leg always requests 100 shares, regardless of previous results. The paper simulator sweeps visible asks up to $0.99, records actual filled quantities, volume-weighted entry prices, and modeled taker fees, and cancels any unfilled remainder. Entry is skipped while the same cross-pair has an earlier position awaiting official resolution.
 
-There is no take-profit or stop-loss. Every filled leg stays open through the 5-minute window, then waits for the official result of its exact BTC or ETH market. Before the window ends, each dashboard card shows a provisional mark based on the latest best bid; that mark is not the final result. While a position is awaiting resolution, the card retains its last pre-expiry mark and floating P&L, clearly labeled as last mark.
+There is no take-profit or stop-loss. Every filled leg stays open through the 5-minute window, then waits for the official result of its exact BTC or ETH market. The bot checks pending markets every 5 seconds and settles only after Polymarket publishes a closed market and a definitive winning outcome. Before the window ends, each dashboard card shows a provisional mark based on the latest best bid; that mark is not the final result. While a position is awaiting resolution, the card retains its last pre-expiry mark and floating P&L, clearly labeled as last mark and showing the time spent waiting.
 
 Wins and losses do not change sizing. Each pair can have one entry per window. A delayed official result delays the next entry for that same pair, but does not block the other pairs.
 

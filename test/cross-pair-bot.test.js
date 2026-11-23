@@ -3,6 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const CrossPairBot = require('../cross-pair-bot');
+const config = require('../config');
 
 const WINDOW_MS = 5 * 60_000;
 const START = Math.floor(Date.now() / WINDOW_MS) * WINDOW_MS;
@@ -86,6 +87,7 @@ test('four pairs are independent and each requires a strict ask-sum below $0.80'
   assert.ok(bot.crossPairCycles.every(cycle => cycle.legPositionIds.length === 2));
   assert.equal(bot.snapshot().crossPairs.length, 4);
   assert.equal(bot.snapshot().strategy.id, CrossPairBot.STRATEGY.id);
+  assert.equal(bot.snapshot().strategy.resolutionPollMs, 5000);
 });
 
 test('all pair sizes stay at 100 after wins or losses', () => {
@@ -200,6 +202,40 @@ test('open positions wait for official resolution at window end', () => {
   settlePair(bot, cycle, 'UP', 'DOWN', end + 1);
   assert.equal(cycle.status, 'CLOSED');
   assert.equal(cycle.sizingOutcome, 'AT_LEAST_ONE_WIN');
+});
+
+test('official outcomes are checked every five seconds and settle only when published', async () => {
+  assert.equal(config.DIP_BOUNCE_RESOLUTION_POLL_MS, 5000);
+  const { bot, getNow } = createBot();
+  bot.evaluateCrossPairs(getNow());
+  const end = START + WINDOW_MS;
+  bot.expireMarket(bot.records.get('BTC:5m'), end);
+  bot.expireMarket(bot.records.get('ETH:5m'), end);
+
+  let shouldResolve = false;
+  let checks = 0;
+  bot.marketData.getMarket = async id => {
+    checks += 1;
+    return {
+      id,
+      closed: shouldResolve,
+      outcomes: ['Up', 'Down'],
+      outcomePrices: shouldResolve ? ['1', '0'] : ['0.5', '0.5'],
+    };
+  };
+  bot.marketData.resolvedWinner = market => market.closed ? 'UP' : null;
+
+  await bot.checkResolutions(end);
+  assert.equal(checks, 2, 'check once for each BTC and ETH market');
+  assert.ok(bot.positions.every(position => position.status === 'PENDING_RESOLUTION'));
+
+  await bot.checkResolutions(end + 4999);
+  assert.equal(checks, 2, 'do not poll faster than the configured interval');
+
+  shouldResolve = true;
+  await bot.checkResolutions(end + 5000);
+  assert.equal(checks, 4);
+  assert.ok(bot.positions.every(position => position.status === 'RESOLVED_WIN' || position.status === 'RESOLVED_LOSS'));
 });
 
 test('a pair waits for its unresolved previous cycle, without blocking the other pair', () => {
