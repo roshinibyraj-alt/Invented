@@ -10,7 +10,7 @@ const WINDOWS_MS = { '5m': 5 * 60_000, '15m': 15 * 60_000 };
 const STRATEGY = Object.freeze({
   id: 'btc-eth-5m-dip-bounce-paper',
   name: 'BTC and ETH 5m dip-and-bounce paper strategy',
-  version: 'btc-eth-5m-first-side-adaptive-size-v4',
+  version: 'btc-eth-5m-recovery-reset-v5',
   assets: ASSETS,
   timeframes: TIMEFRAMES,
   sharesPerEntry: config.DIP_BOUNCE_SHARES,
@@ -18,7 +18,8 @@ const STRATEGY = Object.freeze({
     baseShares: config.DIP_BOUNCE_SHARES,
     floorShares: config.DIP_BOUNCE_SHARES,
     stepShares: config.DIP_BOUNCE_SIZING_STEP_SHARES,
-    progression: 'Per asset: add 100 shares after a loss; subtract 100 after a win, with a 100-share floor.',
+    progression: 'Per asset: add 100 shares after a loss; subtract 100 after a win. Reset to 100 when recovery-round net P&L reaches +$40.',
+    recoveryProfitUsd: config.DIP_BOUNCE_RECOVERY_PROFIT_USD,
   },
   dipBelow: config.DIP_BOUNCE_PRICE_DIP,
   reboundTo: config.DIP_BOUNCE_PRICE_BOUNCE,
@@ -113,6 +114,7 @@ class DipBounceBot {
     now = Date.now,
     initialCapital = config.DEMO_CAPITAL,
     WebSocketImpl = globalThis.WebSocket,
+    ledgerStore = null,
   } = {}) {
     this.marketData = marketData;
     this.now = now;
@@ -125,6 +127,9 @@ class DipBounceBot {
       lastUpdatedAt: null,
       wins: 0,
       losses: 0,
+      recoveryNetPnl: 0,
+      recoveryActive: false,
+      recoveryResetCount: 0,
     }]));
     this.records = new Map();
     for (const asset of ASSETS) {
@@ -162,6 +167,16 @@ class DipBounceBot {
     this.peakEquity = this.initialCapital;
     this.maxDrawdown = 0;
     this.equityCurve = [{ at: this.now(), equity: this.initialCapital }];
+    this.ledgerStore = ledgerStore;
+    this.ledgerSaveTimer = null;
+    this.ledgerSaveInFlight = null;
+    this.ledgerDirty = false;
+    this.ledgerPersistenceState = {
+      enabled: Boolean(ledgerStore),
+      restored: false,
+      lastSavedAt: null,
+      error: null,
+    };
   }
 
   log(message, { asset = null, timeframe = null, side = null, outcome = 'neutral', type = 'INFO', now = this.now() } = {}) {
@@ -177,6 +192,7 @@ class DipBounceBot {
     this.events.unshift(event);
     if (this.events.length > 200) this.events.length = 200;
     console.log(`[dip-bounce] ${JSON.stringify(event)}`);
+    this.scheduleLedgerSave();
     return event;
   }
 
@@ -198,6 +214,122 @@ class DipBounceBot {
     this.timer = null;
     this.closeMarketStream();
     this.status = 'STOPPED';
+  }
+
+  restoreLedger(ledger) {
+    const snapshot = ledger?.snapshot || ledger;
+    if (!snapshot || snapshot.strategy?.id !== STRATEGY.id || !snapshot.account) {
+      throw new Error('Saved paper ledger is invalid or belongs to another strategy.');
+    }
+    const account = snapshot.account;
+    const initialCapital = Number(account.initialCapital);
+    const cash = Number(account.cash);
+    if (!Number.isFinite(initialCapital) || !Number.isFinite(cash)) {
+      throw new Error('Saved paper ledger has invalid account balances.');
+    }
+
+    this.initialCapital = initialCapital;
+    this.cash = cash;
+    this.positions = Array.isArray(snapshot.positions) ? snapshot.positions.map((position) => ({ ...position })) : [];
+    this.orders = Array.isArray(snapshot.orders) ? snapshot.orders.map((order) => ({ ...order })) : [];
+    this.events = Array.isArray(snapshot.events) ? snapshot.events.map((event) => ({ ...event })).slice(0, 200) : [];
+    this.sizingByAsset = Object.fromEntries(ASSETS.map((asset) => {
+      const saved = snapshot.sizingByAsset?.[asset] || {};
+      const nextShares = Number(saved.nextShares);
+      return [asset, {
+        nextShares: Number.isFinite(nextShares) && nextShares >= config.DIP_BOUNCE_SHARES
+          ? nextShares : config.DIP_BOUNCE_SHARES,
+        lastOutcome: saved.lastOutcome || null,
+        lastUpdatedAt: Number.isFinite(Number(saved.lastUpdatedAt)) ? Number(saved.lastUpdatedAt) : null,
+        wins: Number.isFinite(Number(saved.wins)) ? Number(saved.wins) : 0,
+        losses: Number.isFinite(Number(saved.losses)) ? Number(saved.losses) : 0,
+        recoveryNetPnl: Number.isFinite(Number(saved.recoveryNetPnl)) ? Number(saved.recoveryNetPnl) : 0,
+        recoveryActive: Boolean(saved.recoveryActive),
+        recoveryResetCount: Number.isFinite(Number(saved.recoveryResetCount)) ? Number(saved.recoveryResetCount) : 0,
+      }];
+    }));
+    this.peakEquity = Number.isFinite(Number(account.peakEquity)) ? Number(account.peakEquity) : cash;
+    this.maxDrawdown = Number.isFinite(Number(account.maxDrawdown)) ? Number(account.maxDrawdown) : 0;
+    this.equityCurve = Array.isArray(account.equityCurve)
+      ? account.equityCurve.map((point) => ({ at: Number(point.at), equity: Number(point.equity) }))
+        .filter((point) => Number.isFinite(point.at) && Number.isFinite(point.equity)).slice(-1000)
+      : [{ at: this.now(), equity: cash }];
+    this.lastEquitySampleAt = this.equityCurve.at(-1)?.at || 0;
+    this.orderSequence = this.orders.length;
+    this.positionSequence = this.positions.length;
+    const now = this.now();
+    for (const position of this.positions) {
+      const windowEnd = Number(position.windowEnd);
+      if (position.status === 'OPEN' && Number.isFinite(windowEnd) && windowEnd <= now) {
+        position.status = 'PENDING_RESOLUTION';
+        position.pendingResolutionAt = now;
+      }
+      if (position.status === 'OPEN') {
+        position.markStatus = 'STALE';
+        position.markBid = null;
+        position.markUpdatedAt = null;
+        position.unrealizedPnl = null;
+      } else if (position.status === 'PENDING_RESOLUTION') {
+        position.markStatus = 'PENDING_RESOLUTION';
+        position.unrealizedPnl = null;
+      }
+      if (position.sizingApplied == null) {
+        position.sizingApplied = position.status !== 'OPEN' && position.status !== 'PENDING_RESOLUTION';
+      }
+    }
+    this.ledgerPersistenceState.restored = true;
+    this.updateAccountMetrics(now, true);
+    this.log(`Restored ${this.positions.length} saved paper positions and their account history.`, { type: 'LEDGER_RESTORED', now });
+    this.scheduleLedgerSave();
+  }
+
+  exportLedger() {
+    const snapshot = this.snapshot();
+    snapshot.positions = this.positions.map((position) => ({ ...position }));
+    snapshot.orders = this.orders.map((order) => ({ ...order }));
+    snapshot.events = this.events.map((event) => ({ ...event }));
+    return {
+      schemaVersion: 1,
+      strategyId: STRATEGY.id,
+      savedAt: this.now(),
+      snapshot,
+    };
+  }
+
+  scheduleLedgerSave() {
+    if (!this.ledgerStore) return;
+    this.ledgerDirty = true;
+    if (this.ledgerSaveTimer) return;
+    this.ledgerSaveTimer = setTimeout(() => {
+      this.ledgerSaveTimer = null;
+      void this.flushLedger();
+    }, 500);
+    this.ledgerSaveTimer.unref?.();
+  }
+
+  async flushLedger() {
+    if (!this.ledgerStore) return;
+    if (this.ledgerSaveTimer) clearTimeout(this.ledgerSaveTimer);
+    this.ledgerSaveTimer = null;
+    if (this.ledgerSaveInFlight) {
+      this.ledgerDirty = true;
+      await this.ledgerSaveInFlight;
+      if (this.ledgerDirty) return this.flushLedger();
+      return;
+    }
+    this.ledgerDirty = false;
+    this.ledgerSaveInFlight = Promise.resolve().then(() => this.ledgerStore.save(this.exportLedger()));
+    try {
+      await this.ledgerSaveInFlight;
+      this.ledgerPersistenceState.lastSavedAt = this.now();
+      this.ledgerPersistenceState.error = null;
+    } catch (error) {
+      this.ledgerPersistenceState.error = error?.message || 'Paper history save failed.';
+      console.error('[dip-bounce] Could not persist paper history:', this.ledgerPersistenceState.error);
+    } finally {
+      this.ledgerSaveInFlight = null;
+      if (this.ledgerDirty) this.scheduleLedgerSave();
+    }
   }
 
   async tick(now = this.now()) {
@@ -229,6 +361,7 @@ class DipBounceBot {
       this.log(this.statusReason, { outcome: 'bad', type: 'ERROR', now });
     } finally {
       this.tickInFlight = false;
+      this.scheduleLedgerSave();
     }
   }
 
@@ -275,6 +408,7 @@ class DipBounceBot {
       };
       record.marketStatus = now >= record.market.end ? 'ENDED' : 'OPEN';
       record.lookupError = null;
+      this.applyRestoredWindowConsumption(record);
       if (record.marketStatus === 'OPEN') {
         this.log(`Loaded ${record.asset} ${record.timeframe} market. Watching both sides from this point onward.`, {
           asset: record.asset,
@@ -293,6 +427,24 @@ class DipBounceBot {
         now,
       });
     }
+  }
+
+  applyRestoredWindowConsumption(record) {
+    if (!record.market) return;
+    const marketId = String(record.market.id || record.market.slug);
+    const previousPosition = this.positions.find((position) =>
+      position.marketId === marketId && position.timeframe === record.timeframe);
+    if (!previousPosition) return;
+    record.triggeredSide = previousPosition.side;
+    const consumed = record.sideStates[previousPosition.side];
+    consumed.entryConsumed = true;
+    consumed.requestedShares = Number(previousPosition.requestedShares) || Number(previousPosition.shares) || config.DIP_BOUNCE_SHARES;
+    consumed.filledShares = Number(previousPosition.shares) || 0;
+    consumed.orderStatus = previousPosition.status;
+    consumed.reason = 'This market window already has a recorded entry; it remains one entry per window after restart.';
+    const other = record.sideStates[previousPosition.side === 'UP' ? 'DOWN' : 'UP'];
+    other.orderStatus = 'BLOCKED_FIRST_TRIGGER';
+    other.reason = `${previousPosition.side} already entered this window before the restart.`;
   }
 
   expireMarket(record, now) {
@@ -446,6 +598,7 @@ class DipBounceBot {
     this.markPositions(this.now(), record.key, side);
     this.checkStopLosses(record, side, quote, this.now());
     this.checkTakeProfits(record, side, quote, this.now());
+    this.scheduleLedgerSave();
   }
 
   processSide(record, side, quote, sequence) {
@@ -739,27 +892,44 @@ class DipBounceBot {
     if (position.sizingApplied) return;
     const state = this.sizingByAsset[position.asset];
     if (!state) return;
-    state.nextShares = won
-      ? Math.max(config.DIP_BOUNCE_SHARES, state.nextShares - config.DIP_BOUNCE_SIZING_STEP_SHARES)
-      : state.nextShares + config.DIP_BOUNCE_SIZING_STEP_SHARES;
+    const netPnl = Number(position.realizedPnl) || 0;
+    if (won) {
+      if (state.recoveryActive) state.recoveryNetPnl += netPnl;
+      state.nextShares = Math.max(config.DIP_BOUNCE_SHARES, state.nextShares - config.DIP_BOUNCE_SIZING_STEP_SHARES);
+    } else {
+      if (!state.recoveryActive) state.recoveryNetPnl = 0;
+      state.recoveryActive = true;
+      state.recoveryNetPnl += netPnl;
+      state.nextShares += config.DIP_BOUNCE_SIZING_STEP_SHARES;
+    }
     state.lastOutcome = won ? 'WIN' : 'LOSS';
     state.lastUpdatedAt = now;
     if (won) state.wins += 1;
     else state.losses += 1;
+    let recovered = false;
+    let recoveredNetPnl = null;
+    if (state.recoveryActive && state.recoveryNetPnl >= config.DIP_BOUNCE_RECOVERY_PROFIT_USD) {
+      recovered = true;
+      recoveredNetPnl = state.recoveryNetPnl;
+      state.nextShares = config.DIP_BOUNCE_SHARES;
+      state.recoveryNetPnl = 0;
+      state.recoveryActive = false;
+      state.recoveryResetCount += 1;
+    }
     position.sizingApplied = true;
     position.sizingOutcome = state.lastOutcome;
     position.nextEntryShares = state.nextShares;
-    this.log(
-      `${position.asset} next entry size ${state.nextShares} shares after ${state.lastOutcome.toLowerCase()}.`,
-      {
-        asset: position.asset,
-        timeframe: position.timeframe,
-        side: position.side,
-        outcome: won ? 'good' : 'bad',
-        type: 'SIZING_UPDATE',
-        now,
-      },
-    );
+    position.recoveryRoundNetPnl = state.recoveryNetPnl;
+    this.log(recovered
+      ? `${position.asset} recovered the sizing-round losses and reached +$${recoveredNetPnl.toFixed(2)} net; next entry reset to 100 shares.`
+      : `${position.asset} next entry size ${state.nextShares} shares after ${state.lastOutcome.toLowerCase()}; recovery round net ${state.recoveryActive ? `$${state.recoveryNetPnl.toFixed(2)}` : 'not active'}.`, {
+      asset: position.asset,
+      timeframe: position.timeframe,
+      side: position.side,
+      outcome: recovered || won ? 'good' : 'bad',
+      type: recovered ? 'SIZING_RECOVERY_RESET' : 'SIZING_UPDATE',
+      now,
+    });
   }
 
   updateAccountMetrics(now, forceSample = false) {
@@ -873,9 +1043,9 @@ class DipBounceBot {
         execution: 'PAPER ONLY',
         entry: 'BTC and ETH 5-minute windows only. Midpoint below $0.35 arms a side; the first side to reach $0.50 triggers one paper taker buy. The opposite side is blocked for that market window.',
         fill: 'Sweep visible asks immediately up to $0.99; record volume-weighted price, available shares and taker fees. No resting remainder.',
-        sizing: 'Each asset starts at 100 shares. After a loss, add 100 shares to that asset’s next entry; after a win, subtract 100, with a 100-share floor. A $0.00 stop is a zero-payout loss, with no sell order or sell fee.',
-        takeProfit: 'Best bid at or above $0.99 closes at a modeled $1.00 payout per share.',
-        stopLoss: '$0.00 best bid; an empty bid book is treated as zero.',
+        sizing: 'Each asset starts at 100 shares. A loss adds 100; a win subtracts 100, with a 100-share floor. When recovery-round net realized P&L reaches +$40 after fees, reset immediately to 100 shares.',
+        takeProfit: 'Best bid at or above $0.99 records a win and credits a modeled $1.00 payout per share; this is a paper payout, not a sell order.',
+        stopLoss: '$0.00 best bid; an empty bid book is a zero-payout loss, not a sell order.',
         resolution: 'An open position that has not hit take-profit or the $0.00 stop waits for official resolution at window end.',
         expiry: 'Unfilled taker quantity cancels immediately.',
       },
@@ -891,6 +1061,12 @@ class DipBounceBot {
           ? null : Math.max(0, now - this.websocket.lastMessageAt),
       },
       sizingByAsset: Object.fromEntries(ASSETS.map((asset) => [asset, { ...this.sizingByAsset[asset] }])),
+      ledgerPersistence: {
+        enabled: this.ledgerPersistenceState.enabled,
+        restored: this.ledgerPersistenceState.restored,
+        lastSavedAt: this.ledgerPersistenceState.lastSavedAt,
+        error: this.ledgerPersistenceState.error,
+      },
       markets,
       positions: this.positions.slice(0, 300).map((position) => ({ ...position })),
       orders: this.orders.slice(0, 300).map((order) => ({ ...order })),

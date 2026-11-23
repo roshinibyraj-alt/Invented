@@ -67,9 +67,10 @@ test('mobile dashboard puts positions first and shows only BTC/ETH five-minute m
     statusReason: 'Monitoring CLOB updates',
     strategy: { name: 'Midpoint dip and bounce', version: 'dip-bounce-v1' },
     sizingByAsset: {
-      BTC: { nextShares: 200, lastOutcome: 'LOSS', wins: 2, losses: 1 },
+      BTC: { nextShares: 200, lastOutcome: 'LOSS', wins: 2, losses: 1, recoveryNetPnl: -52.25, recoveryActive: true },
       ETH: { nextShares: 100, lastOutcome: 'WIN', wins: 3, losses: 1 },
     },
+    ledgerPersistence: { enabled: true, restored: true, lastSavedAt: 1_800_000_001_000, error: null },
     websocket: { status: 'CONNECTED', lastMessageAt: 1_800_000_001_000 },
     account: { initialCapital: 3000, cash: 2952, availableCash: 2952, equity: 2999, realizedPnl: 0, unrealizedPnl: -1, openPositions: 1, wins: 0, losses: 0, winRate: 0, maxDrawdown: 1, maxDrawdownPercent: 0.03, equityCurve: [] },
     markets,
@@ -90,6 +91,8 @@ test('mobile dashboard puts positions first and shows only BTC/ETH five-minute m
   assert.match(elements.get('orderList').innerHTML, /FILLED/);
   assert.match(elements.get('sizingGrid').innerHTML, /200 shares/);
   assert.match(elements.get('sizingGrid').innerHTML, /BTC next entry/);
+  assert.match(elements.get('sizingGrid').innerHTML, /Recovery round net/);
+  assert.match(elements.get('ledgerPersistence').textContent, /Paper history saved/);
   assert.match(elements.get('eventList').innerHTML, /Take-profit hit/);
   assert.match(elements.get('eventList').innerHTML, /#176e4c/);
   assert.match(elements.get('eventList').innerHTML, /#e66854/);
@@ -97,9 +100,9 @@ test('mobile dashboard puts positions first and shows only BTC/ETH five-minute m
   assert.match(html, /first side to later reach \$0\.50 or higher/);
   assert.match(html, /Sweep visible asks up to \$0\.99/);
   assert.match(html, /Adaptive-size taker buy/);
-  assert.match(html, /Step size by result, per asset/);
+  assert.match(html, /Reset to 100 after \+\$40 recovery/);
   assert.match(html, /subtract 100/);
-  assert.match(html, /stop at \$0\.00/);
+  assert.match(html, /\$0\.99 TP win is not a sell; \$0 stop is a loss/);
   assert.ok(html.indexOf('id="positionsHeading"') < html.indexOf('aria-label="Paper account summary"'), 'positions appear before account metrics');
   assert.match(html, /BTC and ETH only · 5-minute markets/);
   assert.doesNotMatch(html, /marketFilters/);

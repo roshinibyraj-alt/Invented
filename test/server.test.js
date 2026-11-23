@@ -59,9 +59,10 @@ test('dashboard serves the BTC and ETH 5-minute strategy', async t => {
   assert.match(html, /first side to later reach \$0\.50 or higher/);
   assert.match(html, /Adaptive-size taker buy/);
   assert.match(html, /100-share floor/);
+  assert.match(html, /Reset to 100 after \+\$40 recovery/);
+  assert.match(html, /History is saved in persistent Railway storage/);
   assert.match(html, /Sweep visible asks up to \$0\.99/);
-  assert.match(html, /Take profit at \$0\.99; stop at \$0\.00/);
-  assert.match(html, /stop at \$0\.00/);
+  assert.match(html, /\$0\.99 TP win is not a sell; \$0 stop is a loss/);
   assert.match(html, /only the first trigger/);
   assert.match(html, /official resolution/);
   assert.match(html, /SIMULATION ONLY/);

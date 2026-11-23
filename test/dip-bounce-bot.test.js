@@ -167,7 +167,7 @@ test('an empty bid book triggers the $0.00 stop-loss without waiting for resolut
   assert.equal(position.exitReason, 'STOP_LOSS_000');
   assert.ok(Math.abs(position.realizedPnl + 51.2499) < 1e-8);
   assert.ok(Math.abs(bot.cash - 2948.7501) < 1e-8);
-  assert.equal(bot.snapshot().strategy.stopLoss, '$0.00 best bid; an empty bid book is treated as zero.');
+  assert.equal(bot.snapshot().strategy.stopLoss, '$0.00 best bid; an empty bid book is a zero-payout loss, not a sell order.');
   assert.equal(bot.sizingByAsset.ETH.nextShares, 200);
   assert.equal(bot.sizingByAsset.BTC.nextShares, 100, 'ETH sizing changes do not affect BTC');
   assert.equal(position.fees, 0.2499, 'only the entry fee is charged; zero-stop adds no sell fee');
@@ -221,7 +221,7 @@ test('window end sends the first triggered position to official resolution', asy
   bot.expireMarket(record, record.market.end);
   assert.equal(position.status, 'PENDING_RESOLUTION');
   assert.ok(Math.abs(bot.cash - 2948.7501) < 1e-8);
-  assert.equal(bot.snapshot().strategy.stopLoss, '$0.00 best bid; an empty bid book is treated as zero.');
+  assert.equal(bot.snapshot().strategy.stopLoss, '$0.00 best bid; an empty bid book is a zero-payout loss, not a sell order.');
 
   setNow(record.market.end + 10_001);
   await bot.checkResolutions(record.market.end + 10_001);
@@ -266,7 +266,7 @@ test('missing books do not arm a dip or create invented taker fills', () => {
   assert.equal(bot.orders.length, 0);
 });
 
-test('a loss increases only that asset next entry size and a later win steps it back', async () => {
+test('a later win resets an asset to base once the recovery round exceeds $40 net', async () => {
   const start = 1_800_000_000_000;
   const { bot, setNow } = makeBot({ now: start + 1000 });
   const record = setMarket(bot, 'BTC', '5m', start);
@@ -279,6 +279,8 @@ test('a loss increases only that asset next entry size and a later win steps it 
   bot.applyBook(record, 'UP', book(null, 0.01), start + 3000);
   assert.equal(bot.sizingByAsset.BTC.nextShares, 200);
   assert.equal(bot.sizingByAsset.ETH.nextShares, 100);
+  assert.equal(bot.sizingByAsset.BTC.recoveryActive, true);
+  assert.ok(bot.sizingByAsset.BTC.recoveryNetPnl < 0);
 
   const nextStart = start + 300_000;
   setNow(nextStart + 1000);
@@ -296,5 +298,98 @@ test('a loss increases only that asset next entry size and a later win steps it 
   assert.equal(bot.positions[0].status, 'TAKE_PROFIT');
   assert.equal(bot.sizingByAsset.BTC.nextShares, 100);
   assert.equal(bot.positions[0].nextEntryShares, 100);
+  assert.equal(bot.sizingByAsset.BTC.recoveryActive, false);
+  assert.equal(bot.sizingByAsset.BTC.recoveryNetPnl, 0);
+  assert.equal(bot.sizingByAsset.BTC.recoveryResetCount, 1);
+  assert.equal(bot.positions[0].sizingOutcome, 'WIN', '$0.99 take-profit stays classified as a win');
+});
+
+test('recovery can span multiple wins until cumulative net P&L reaches $40', () => {
+  const { bot } = makeBot();
+  const sizing = bot.sizingByAsset.BTC;
+  sizing.nextShares = 300;
+  sizing.recoveryActive = true;
+  sizing.recoveryNetPnl = -100;
+
+  bot.updateSizingAfterClose({
+    asset: 'BTC', timeframe: '5m', side: 'UP',
+    realizedPnl: 55, sizingApplied: false,
+  }, true, 1_800_000_001_000);
+  assert.equal(sizing.nextShares, 200);
+  assert.equal(sizing.recoveryNetPnl, -45);
+  assert.equal(sizing.recoveryActive, true);
+
+  bot.updateSizingAfterClose({
+    asset: 'BTC', timeframe: '5m', side: 'DOWN',
+    realizedPnl: 90, sizingApplied: false,
+  }, true, 1_800_000_002_000);
+  assert.equal(sizing.nextShares, 100);
+  assert.equal(sizing.recoveryNetPnl, 0);
+  assert.equal(sizing.recoveryActive, false);
+  assert.equal(sizing.recoveryResetCount, 1);
+});
+
+test('restoring a ledger preserves balance, sizing round and one-entry-per-window state', async () => {
+  const start = 1_800_000_000_000;
+  let saved;
+  const ledgerStore = { async save(value) { saved = value; } };
+  const { bot, setNow } = makeBot({ now: start + 1000 });
+  bot.ledgerStore = ledgerStore;
+  bot.ledgerPersistenceState.enabled = true;
+  const market = fakeMarket('BTC', '5m', start);
+  const snapshot = {
+    mode: 'DEMO ONLY',
+    strategy: { id: 'btc-eth-5m-dip-bounce-paper' },
+    account: {
+      initialCapital: 3000,
+      cash: 2900,
+      peakEquity: 3100,
+      maxDrawdown: 200,
+      equityCurve: [{ at: start, equity: 3000 }, { at: start + 500, equity: 2900 }],
+    },
+    sizingByAsset: {
+      BTC: { nextShares: 200, recoveryNetPnl: -60, recoveryActive: true, wins: 2, losses: 1 },
+      ETH: { nextShares: 100, recoveryNetPnl: 0, recoveryActive: false, wins: 1, losses: 0 },
+    },
+    positions: [{
+      id: 'existing-position',
+      marketId: market.id,
+      marketTitle: market.title,
+      asset: 'BTC',
+      timeframe: '5m',
+      side: 'UP',
+      status: 'OPEN',
+      shares: 100,
+      requestedShares: 200,
+      totalCost: 50,
+      fees: 0.5,
+      estimatedMakerRebate: 0,
+      windowStart: start,
+      windowEnd: start + 300_000,
+      markBid: 0.5,
+      unrealizedPnl: 0,
+    }],
+    orders: [{ id: 'existing-order', asset: 'BTC', timeframe: '5m', requestedShares: 200 }],
+    events: [{ time: start, type: 'BUY_FILLED', message: 'Saved event' }],
+  };
+
+  bot.restoreLedger(snapshot);
+  await bot.flushLedger();
+  assert.equal(bot.cash, 2900);
+  assert.equal(bot.positions.length, 1);
+  assert.equal(bot.orders.length, 1);
+  assert.equal(bot.sizingByAsset.BTC.nextShares, 200);
+  assert.equal(bot.sizingByAsset.BTC.recoveryNetPnl, -60);
+  assert.equal(bot.sizingByAsset.BTC.recoveryActive, true);
+  assert.equal(bot.accountSnapshot().maxDrawdown, 200);
+  assert.equal(saved.snapshot.account.cash, 2900);
+
+  const record = bot.records.get('BTC:5m');
+  setNow(start + 1000);
+  await bot.refreshMarket(record, start + 1000);
+  assert.equal(record.triggeredSide, 'UP');
+  bot.applyBook(record, 'DOWN', book(0.33, 0.35), start + 1000);
+  bot.applyBook(record, 'DOWN', book(0.49, 0.51), start + 2000);
+  assert.equal(bot.positions.length, 1, 'a restart must not permit a second entry in the same market');
 });
 

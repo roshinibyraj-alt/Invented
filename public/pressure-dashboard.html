@@ -167,6 +167,8 @@
     .sizing-note { display:block; margin-top:6px; color:var(--muted); font-size:9px; }
     .sizing-result { color:#657167; font-size:8px; font-weight:850; }
     .sizing-result.win { color:#176e4c; } .sizing-result.loss { color:#bf4d3d; }
+    .persistence-note { margin:8px 2px 0; color:#526047; font-size:10px; line-height:1.35; font-weight:800; }
+    .persistence-note.error { color:#a33d35; }
     .list-scroll { max-height:400px; overflow:auto; }
     .activity-line { display:flex; align-items:flex-start; gap:9px; padding:9px 2px; border-bottom:1px solid #edf0e9; }
     .activity-line:last-child { border-bottom:0; }
@@ -272,6 +274,7 @@
         <div class="sizing-card" data-asset="BTC"><span class="sizing-label">BTC next size</span><strong class="sizing-value">100 shares</strong><small class="sizing-note">Base size</small></div>
         <div class="sizing-card" data-asset="ETH"><span class="sizing-label">ETH next size</span><strong class="sizing-value">100 shares</strong><small class="sizing-note">Base size</small></div>
       </div>
+      <p class="persistence-note" id="ledgerPersistence" aria-live="polite">Paper history storage status: checking</p>
       <div class="split">
         <article class="panel">
           <div class="panel-head"><div><h3>Open positions</h3><p>Live best-bid marks and floating P&amp;L</p></div><span class="count-chip" id="positionCount">0 positions</span></div>
@@ -337,8 +340,8 @@
           <div class="strategy-step"><span class="step-num">1</span><div><strong>Watch both sides; allow only the first trigger</strong><span>Track both midpoints, but once one side qualifies and triggers an entry, block the opposite side for that market window.</span></div></div>
           <div class="strategy-step"><span class="step-num">2</span><div><strong>Arm below $0.35; trigger at or above $0.50</strong><span>Once a side's midpoint dips under $0.35, the first side to later reach $0.50 or higher takes the window's single entry.</span></div></div>
           <div class="strategy-step"><span class="step-num">3</span><div><strong>Adaptive-size taker buy</strong><span>Each asset starts at 100 shares. Sweep visible asks up to $0.99 using that asset’s next size; actual average price and entry fees apply.</span></div></div>
-          <div class="strategy-step"><span class="step-num">4</span><div><strong>Step size by result, per asset</strong><span>After a loss, add 100 shares; after a win, subtract 100, with a 100-share floor. BTC and ETH sizing stay separate.</span></div></div>
-          <div class="strategy-step"><span class="step-num">5</span><div><strong>Take profit at $0.99; stop at $0.00</strong><span>TP credits $1 per share. The zero stop records a loss at zero payout; it does not submit a sell order or charge a sell fee. Otherwise, positions wait for official resolution.</span></div></div>
+          <div class="strategy-step"><span class="step-num">4</span><div><strong>Reset to 100 after +$40 recovery</strong><span>After a loss, add 100 shares; after a win, subtract 100, never below the 100-share floor. Track each asset’s realized net P&amp;L after fees; when its loss-recovery round reaches +$40, reset its next size straight to 100. BTC and ETH stay separate.</span></div></div>
+          <div class="strategy-step"><span class="step-num">5</span><div><strong>$0.99 TP win is not a sell; $0 stop is a loss</strong><span>TP credits a modeled $1 per share. The zero stop records zero payout without a sell order or sell fee. Otherwise, positions wait for official resolution.</span></div></div>
         </div>
         <div class="strategy-meta">
           <span class="meta-pill">Taker entry fees included</span>
@@ -347,7 +350,7 @@
         </div>
       </div>
     </section>
-    <footer>Paper simulation only · No real CLOB orders · Unclosed positions wait for official market resolution</footer>
+    <footer>Paper simulation only · No real CLOB orders · History is saved in persistent Railway storage · Unclosed positions wait for official market resolution</footer>
   </main>
 
   <script>
@@ -447,15 +450,37 @@
           const nextShares = hasNumber(state.nextShares) ? Number(state.nextShares) : 100;
           const outcome = String(state.lastOutcome || '').toUpperCase();
           const outcomeClass = outcome === 'WIN' ? 'win' : outcome === 'LOSS' ? 'loss' : '';
-          const note = outcome
-            ? `After last ${outcome.toLowerCase()} · ${Number(state.wins) || 0}W / ${Number(state.losses) || 0}L`
-            : 'Starting size · 100-share floor';
+          const roundNote = state.recoveryActive
+            ? `Recovery round net ${money(state.recoveryNetPnl)} · reset at +$40`
+            : `No recovery round · ${Number(state.recoveryResetCount) || 0} resets`;
+          const note = `${outcome ? `Last ${outcome.toLowerCase()} · ` : ''}${Number(state.wins) || 0}W / ${Number(state.losses) || 0}L · ${roundNote}`;
           return `<article class="sizing-card" data-asset="${asset}">
             <span class="sizing-label">${asset} next entry <span class="sizing-result ${outcomeClass}">${safe(outcome || 'BASE')}</span></span>
             <strong class="sizing-value">${shares(nextShares)} shares</strong>
             <small class="sizing-note">${safe(note)}</small>
           </article>`;
         }).join('');
+      }
+
+      function renderLedgerPersistence(persistence) {
+        const state = persistence || {};
+        const line = $('ledgerPersistence');
+        if (state.error) {
+          line.textContent = `History save error · ${state.error}`;
+          line.className = 'persistence-note error';
+        } else if (state.enabled && state.lastSavedAt) {
+          line.textContent = `Paper history saved · last save ${clockTime(state.lastSavedAt)}`;
+          line.className = 'persistence-note';
+        } else if (state.enabled && state.restored) {
+          line.textContent = 'Previous paper history restored · saving updates';
+          line.className = 'persistence-note';
+        } else if (state.enabled) {
+          line.textContent = 'Persistent paper-history storage is ready';
+          line.className = 'persistence-note';
+        } else {
+          line.textContent = 'Paper history persistence is not configured';
+          line.className = 'persistence-note error';
+        }
       }
 
       function renderPositions(positions) {
@@ -556,6 +581,7 @@
         $('statusPill').className = `live-pill ${statusUpper.includes('ERROR') || statusUpper.includes('OFFLINE') ? 'bad' : statusUpper.includes('WAIT') || statusUpper.includes('CONNECT') ? 'warn' : ''}`;
         $('statusReason').textContent = label(latestState.statusReason, 'Monitoring BTC and ETH 5-minute markets');
         $('updatedAt').textContent = `Updated ${clockTime(latestState.now)}`;
+        renderLedgerPersistence(latestState.ledgerPersistence);
         $('equity').textContent = money(account.equity);
         $('cash').textContent = money(account.cash);
         $('realized').textContent = money(account.realizedPnl);
