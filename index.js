@@ -1,5 +1,23 @@
 'use strict';
 
+async function restoreOrResetLedger(bot, savedLedger, strategyId) {
+  const savedStrategyId = savedLedger?.snapshot?.strategy?.id || savedLedger?.strategyId;
+  if (savedLedger && savedStrategyId === strategyId) {
+    bot.restoreLedger(savedLedger);
+    await bot.flushLedger();
+    return 'restored';
+  }
+  if (savedLedger) {
+    bot.log('Paper history reset for the inverse-pair exit and TP/SL strategy.', {
+      type: 'LEDGER_RESET',
+      now: Date.now(),
+    });
+    await bot.flushLedger();
+    return 'reset';
+  }
+  return 'fresh';
+}
+
 async function main() {
   if (process.env.LIVE_TRADING === 'true') {
     console.error('Live execution was removed. Unset LIVE_TRADING; this bot runs in demo mode only.');
@@ -19,17 +37,7 @@ async function main() {
   }
   const bot = new Bot({ ledgerStore });
   const savedLedger = ledgerStore?.load() || PaperLedgerStore.decodeBootstrap(process.env.PAPER_LEDGER_BOOTSTRAP);
-  const savedStrategyId = savedLedger?.snapshot?.strategy?.id || savedLedger?.strategyId;
-  if (savedLedger && savedStrategyId === Bot.STRATEGY.id) {
-    bot.restoreLedger(savedLedger);
-    await bot.flushLedger();
-  } else if (savedLedger) {
-    bot.log('Paper history reset for the inverse-pair exit and TP/SL strategy.', {
-      type: 'LEDGER_RESET',
-      now: Date.now(),
-    });
-    await bot.flushLedger();
-  }
+  await restoreOrResetLedger(bot, savedLedger, Bot.STRATEGY.id);
   bot.start();
   const server = startServer(bot, process.env.PORT || 3000);
 
@@ -52,7 +60,11 @@ async function main() {
   process.once('SIGINT', shutdown);
 }
 
-main().catch((e) => {
-  console.error('Fatal startup error:', e);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((e) => {
+    console.error('Fatal startup error:', e);
+    process.exit(1);
+  });
+}
+
+module.exports = { restoreOrResetLedger };
