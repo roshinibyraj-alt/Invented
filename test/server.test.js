@@ -56,11 +56,12 @@ test('dashboard serves the multi-asset dip-and-bounce strategy', async t => {
   assert.match(html, /BTC, ETH, SOL and DOGE/);
   assert.match(html, /Midpoint dip → bounce/);
   assert.match(html, /below \$0\.35/);
-  assert.match(html, /at \$0\.50 or higher/);
+  assert.match(html, /first side to later reach \$0\.50 or higher/);
   assert.match(html, /100-share taker buy/);
   assert.match(html, /Sweep visible asks up to \$0\.99/);
-  assert.match(html, /Take profit at \$0\.99 best bid/);
-  assert.match(html, /No stop-loss/);
+  assert.match(html, /Take profit at \$0\.99; stop at \$0\.00/);
+  assert.match(html, /stop at \$0\.00/);
+  assert.match(html, /only the first trigger/);
   assert.match(html, /official resolution/);
   assert.match(html, /SIMULATION ONLY/);
   assert.match(html, /marketFilters/);

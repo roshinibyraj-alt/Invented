@@ -10,7 +10,7 @@ const WINDOWS_MS = { '5m': 5 * 60_000, '15m': 15 * 60_000 };
 const STRATEGY = Object.freeze({
   id: 'multi-asset-dip-bounce-paper',
   name: 'Multi-asset dip-and-bounce paper strategy',
-  version: 'dip-bounce-taker-v2',
+  version: 'dip-bounce-first-side-sl-v3',
   assets: ASSETS,
   timeframes: TIMEFRAMES,
   sharesPerEntry: config.DIP_BOUNCE_SHARES,
@@ -20,8 +20,8 @@ const STRATEGY = Object.freeze({
   sweepCap: config.DIP_BOUNCE_TAKER_CAP,
   takeProfitBid: config.DIP_BOUNCE_TAKE_PROFIT_BID,
   takeProfitPayoutPerShare: config.DIP_BOUNCE_TAKE_PROFIT_PAYOUT,
-  stopLoss: null,
-  windowEnd: 'Open shares wait for official resolution.',
+  stopLoss: 0,
+  windowEnd: 'Positions not closed by take-profit or the $0.00 stop wait for official resolution.',
 });
 
 function normalizeTimestamp(value, fallback) {
@@ -92,6 +92,7 @@ function emptyMarketRecord(asset, timeframe) {
     books: Object.fromEntries(SIDES.map((side) => [side, { bids: [], asks: [] }])),
     quotes: Object.fromEntries(SIDES.map((side) => [side, quoteFromBook({}, null, 0)])),
     sideStates: Object.fromEntries(SIDES.map((side) => [side, emptySideState()])),
+    triggeredSide: null,
   };
 }
 
@@ -231,6 +232,7 @@ class DipBounceBot {
       record.books = Object.fromEntries(SIDES.map((side) => [side, { bids: [], asks: [] }]));
       record.quotes = Object.fromEntries(SIDES.map((side) => [side, quoteFromBook({}, null, 0)]));
       record.sideStates = Object.fromEntries(SIDES.map((side) => [side, emptySideState()]));
+      record.triggeredSide = null;
     }
     if (record.market || now < record.nextLookupAt) return;
 
@@ -283,19 +285,6 @@ class DipBounceBot {
     const market = record.market;
     if (!market) return;
     const marketId = String(market.id || market.slug);
-    let cancelled = 0;
-    for (const order of this.orders) {
-      if (order.marketId !== marketId || order.status !== 'RESTING') continue;
-      order.status = 'CANCELLED_WINDOW_END';
-      order.cancelledAt = now;
-      order.reservedCash = 0;
-      const state = record.sideStates[order.side];
-      if (state.orderId === order.id) {
-        state.orderStatus = 'CANCELLED_WINDOW_END';
-        state.reason = 'The $0.48 paper limit was not touched before the market window ended.';
-      }
-      cancelled += 1;
-    }
     let awaiting = 0;
     for (const position of this.positions) {
       if (position.marketId !== marketId || position.status !== 'OPEN') continue;
@@ -305,11 +294,11 @@ class DipBounceBot {
       position.unrealizedPnl = null;
       awaiting += 1;
     }
-    if (record.marketStatus !== 'ENDED' || cancelled || awaiting) {
+    if (record.marketStatus !== 'ENDED' || awaiting) {
       record.marketStatus = 'ENDED';
       this.completedWindows.add(`${marketId}:${record.timeframe}`);
       this.log(
-        `Window ended: ${cancelled} unfilled limit(s) cancelled; ${awaiting} position(s) sent to official resolution.`,
+        `Window ended: ${awaiting} position(s) sent to official resolution.`,
         { asset: record.asset, timeframe: record.timeframe, now },
       );
     }
@@ -441,6 +430,7 @@ class DipBounceBot {
     state.lastObservedAt = updatedAt;
     this.processSide(record, side, quote, sequence);
     this.markPositions(this.now(), record.key, side);
+    this.checkStopLosses(record, side, quote, this.now());
     this.checkTakeProfits(record, side, quote, this.now());
   }
 
@@ -449,6 +439,11 @@ class DipBounceBot {
     const now = this.now();
     const sideState = record.sideStates[side];
     if (!market || record.marketStatus !== 'OPEN' || now < market.start || now >= market.end) return;
+    if (record.triggeredSide && record.triggeredSide !== side) {
+      sideState.orderStatus = 'BLOCKED_FIRST_TRIGGER';
+      sideState.reason = `${record.triggeredSide} triggered first; only one side may enter this window.`;
+      return;
+    }
     const isFresh = Number.isFinite(Number(quote.updatedAt))
       && now - Number(quote.updatedAt) <= config.DIP_BOUNCE_MAX_QUOTE_AGE_MS;
     if (!isFresh || !Number.isFinite(quote.mid)) return;
@@ -467,8 +462,12 @@ class DipBounceBot {
 
     if (!sideState.dipSeen || sideState.entryConsumed
       || Number(quote.mid) < config.DIP_BOUNCE_PRICE_BOUNCE) return;
+    record.triggeredSide = side;
     sideState.bounceSeen = true;
     sideState.bounceAt = now;
+    const otherSideState = record.sideStates[side === 'UP' ? 'DOWN' : 'UP'];
+    otherSideState.orderStatus = 'BLOCKED_FIRST_TRIGGER';
+    otherSideState.reason = `${side} triggered first; only one side may enter this window.`;
 
     // Simulate immediate execution against visible asks, not a later pullback.
     const feeRate = market.feesEnabled === false ? 0
@@ -594,6 +593,39 @@ class DipBounceBot {
         side,
         outcome: position.realizedPnl >= 0 ? 'good' : 'bad',
         type: 'TAKE_PROFIT',
+        now,
+      });
+      this.updateAccountMetrics(now, true);
+    }
+  }
+
+  checkStopLosses(record, side, quote, now) {
+    if (!record.market || record.marketStatus !== 'OPEN') return;
+    const fresh = Number.isFinite(Number(quote.updatedAt))
+      && now - Number(quote.updatedAt) <= config.DIP_BOUNCE_MAX_QUOTE_AGE_MS;
+    if (!fresh || (quote.bestBid != null && Number(quote.bestBid) > 0)) return;
+    for (const position of this.positions) {
+      if (position.marketId !== String(record.market.id || record.market.slug)
+        || position.side !== side || position.status !== 'OPEN') continue;
+      position.status = 'STOP_LOSS';
+      position.exitAt = now;
+      position.exitPrice = 0;
+      position.exitPayout = 0;
+      position.exitReason = 'STOP_LOSS_000';
+      position.realizedPnl = -position.totalCost - position.fees + position.estimatedMakerRebate;
+      position.markBid = 0;
+      position.markUpdatedAt = quote.updatedAt;
+      position.markStatus = 'CLOSED';
+      position.unrealizedPnl = null;
+      const state = record.sideStates[side];
+      state.orderStatus = 'STOP_LOSS';
+      state.reason = 'The $0.00 stop-loss triggered; position closed at zero payout.';
+      this.log(`${side} stop-loss hit at $0.00; closed with zero payout.`, {
+        asset: record.asset,
+        timeframe: record.timeframe,
+        side,
+        outcome: 'bad',
+        type: 'STOP_LOSS',
         now,
       });
       this.updateAccountMetrics(now, true);
@@ -755,6 +787,7 @@ class DipBounceBot {
         lookupError: record.lookupError,
         feedStatus: this.websocket.status,
         secondsRemaining: market ? Math.max(0, (market.end - now) / 1000) : null,
+        triggeredSide: record.triggeredSide,
         sideStates: Object.fromEntries(SIDES.map((side) => {
           const quote = record.quotes[side];
           const sideState = record.sideStates[side];
@@ -789,11 +822,11 @@ class DipBounceBot {
       strategy: {
         ...STRATEGY,
         execution: 'PAPER ONLY',
-        entry: 'Midpoint below $0.35 arms a side; midpoint at or above $0.50 immediately triggers a 100-share paper taker buy.',
+        entry: 'Midpoint below $0.35 arms a side; the first side to reach $0.50 after arming triggers one 100-share paper taker buy. The opposite side is blocked for that market window.',
         fill: 'Sweep visible asks immediately up to $0.99; record volume-weighted price, available shares and taker fees. No resting remainder.',
         takeProfit: 'Best bid at or above $0.99 closes at a modeled $1.00 payout per share.',
-        stopLoss: null,
-        resolution: 'No stop-loss. Anything not at take-profit by its own window end waits for official resolution.',
+        stopLoss: '$0.00 best bid; an empty bid book is treated as zero.',
+        resolution: 'An open position that has not hit take-profit or the $0.00 stop waits for official resolution at window end.',
         expiry: 'Unfilled taker quantity cancels immediately.',
       },
       account,

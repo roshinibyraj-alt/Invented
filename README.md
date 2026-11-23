@@ -6,11 +6,11 @@ Invented tracks Polymarket BTC, ETH, SOL, and DOGE UP/DOWN markets on both 5-min
 
 Each of the eight asset/timeframe markets is independent. From the time its CLOB feed is first observed during the active window:
 
-1. Watch the UP and DOWN midpoint independently.
-2. When a side's midpoint goes below $0.35, arm that side.
-3. When its midpoint later reaches $0.50 or higher, immediately sweep visible asks for a 100-share simulated taker buy, capped at $0.99.
+1. Watch both UP and DOWN midpoints.
+2. When either side's midpoint goes below $0.35, arm that side.
+3. The first armed side whose midpoint later reaches $0.50 or higher owns that market window; block the opposite side and immediately sweep visible asks for a 100-share simulated taker buy, capped at $0.99.
 4. Record the volume-weighted fill price and available quantity, including partial fills. Deduct entry taker fees using market metadata (BTC fallback rate 0.05; other crypto 0.01) and `shares * rate * price * (1-price)` per level. No maker rebates are credited. This remains simulated, not real execution.
-5. If a filled position's best bid reaches $0.99, close it at a modeled $1.00 payout per share. There is no stop-loss. If take-profit has not hit by the market's end, hold the position for its official resolution.
+5. If a filled position's best bid reaches $0.99, close it at a modeled $1.00 payout per share. If the best bid reaches $0.00 or the bid book is empty, close it at a $0.00 payout. If neither exit hits by the market's end, hold the position for its official resolution.
 6. Cancel any unfilled taker remainder immediately; no resting entries remain.
 
 The paper ledger starts at $3,000 and is held in process memory. A Railway deployment/restart clears the prior positions, orders, and results and starts a fresh ledger. No old strategy state is imported.

@@ -329,10 +329,10 @@
       </div>
       <div>
         <div class="strategy-steps">
-          <div class="strategy-step"><span class="step-num">1</span><div><strong>Watch both sides from each window open</strong><span>Continuously track UP and DOWN midpoints independently for all eight markets.</span></div></div>
-          <div class="strategy-step"><span class="step-num">2</span><div><strong>Arm below $0.35; trigger at or above $0.50</strong><span>Once a side's midpoint dips under $0.35, a later midpoint at $0.50 or higher triggers one immediate paper taker buy.</span></div></div>
+          <div class="strategy-step"><span class="step-num">1</span><div><strong>Watch both sides; allow only the first trigger</strong><span>Track both midpoints, but once one side qualifies and triggers an entry, block the opposite side for that market window.</span></div></div>
+          <div class="strategy-step"><span class="step-num">2</span><div><strong>Arm below $0.35; trigger at or above $0.50</strong><span>Once a side's midpoint dips under $0.35, the first side to later reach $0.50 or higher takes the window's single entry.</span></div></div>
           <div class="strategy-step"><span class="step-num">3</span><div><strong>100-share taker buy</strong><span>Sweep visible asks up to $0.99. Actual simulated average price and entry fees apply; shallow books can partially fill. No resting order.</span></div></div>
-          <div class="strategy-step"><span class="step-num">4</span><div><strong>Take profit at $0.99 best bid</strong><span>Credit $1 per share. No stop-loss; positions not taken off at TP remain for official resolution.</span></div></div>
+          <div class="strategy-step"><span class="step-num">4</span><div><strong>Take profit at $0.99; stop at $0.00</strong><span>TP credits $1 per share. A zero best bid (including an empty bid book) closes at $0; otherwise open positions go to official resolution at window end.</span></div></div>
         </div>
         <div class="strategy-meta">
           <span class="meta-pill">Taker entry fees included</span>
@@ -341,7 +341,7 @@
         </div>
       </div>
     </section>
-    <footer>Paper simulation only · Not a real CLOB order · Positions held past take-profit remain for official market resolution</footer>
+    <footer>Paper simulation only · Not a real CLOB order · Positions still open after TP/SL are sent to official resolution</footer>
   </main>
 
   <script>

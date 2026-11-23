@@ -122,7 +122,7 @@ test('a dip then rebound immediately buys 100 shares at asks with taker fees', (
   assert.equal(bot.accountSnapshot().losses, 0);
 });
 
-test('UP and DOWN qualify independently in the same market window', () => {
+test('the first side to trigger blocks the opposite side for the whole market window', () => {
   const { bot, setNow } = makeBot();
   const start = 1_800_000_000_000;
   const record = setMarket(bot, 'ETH', '15m', start);
@@ -134,12 +134,14 @@ test('UP and DOWN qualify independently in the same market window', () => {
   bot.applyBook(record, 'UP', book(0.49, 0.51), start + 2000);
   bot.applyBook(record, 'DOWN', book(0.50, 0.52), start + 2001);
 
-  assert.equal(bot.orders.length, 2);
-  assert.deepEqual(bot.orders.map((order) => order.side).sort(), ['DOWN', 'UP']);
-  assert.ok(bot.orders.every((order) => order.status === 'FILLED'));
+  assert.equal(bot.orders.length, 1);
+  assert.equal(bot.orders[0].side, 'UP');
+  assert.equal(record.triggeredSide, 'UP');
+  assert.equal(record.sideStates.DOWN.orderStatus, 'BLOCKED_FIRST_TRIGGER');
+  assert.equal(bot.positions.length, 1);
 });
 
-test('a $0.99 best bid take-profit credits $1 per share and no stop-loss is applied', () => {
+test('an empty bid book triggers the $0.00 stop-loss without waiting for resolution', () => {
   const { bot, setNow } = makeBot();
   const start = 1_800_000_000_000;
   const record = setMarket(bot, 'SOL', '5m', start);
@@ -154,10 +156,31 @@ test('a $0.99 best bid take-profit credits $1 per share and no stop-loss is appl
 
   setNow(start + 4000);
   bot.applyBook(record, 'DOWN', book(0.01, 0.03), start + 4000);
-  assert.equal(position.status, 'OPEN', 'a low bid does not trigger a stop-loss');
+  assert.equal(position.status, 'OPEN', 'a positive bid does not trigger the zero stop');
 
   setNow(start + 5000);
-  bot.applyBook(record, 'DOWN', book(0.99, 1.00), start + 5000);
+  bot.applyBook(record, 'DOWN', book(null, 0.01), start + 5000);
+  assert.equal(position.status, 'STOP_LOSS');
+  assert.equal(position.exitPrice, 0);
+  assert.equal(position.exitPayout, 0);
+  assert.equal(position.exitReason, 'STOP_LOSS_000');
+  assert.ok(Math.abs(position.realizedPnl + 51.2499) < 1e-8);
+  assert.ok(Math.abs(bot.cash - 2948.7501) < 1e-8);
+  assert.equal(bot.snapshot().strategy.stopLoss, '$0.00 best bid; an empty bid book is treated as zero.');
+});
+
+test('$0.99 take-profit still credits $1 per share', () => {
+  const { bot, setNow } = makeBot();
+  const start = 1_800_000_000_000;
+  const record = setMarket(bot, 'SOL', '5m', start);
+
+  setNow(start + 1000);
+  bot.applyBook(record, 'UP', book(0.33, 0.35), start + 1000);
+  setNow(start + 2000);
+  bot.applyBook(record, 'UP', book(0.49, 0.51), start + 2000);
+  const position = bot.positions[0];
+  setNow(start + 3000);
+  bot.applyBook(record, 'UP', book(0.99, 1.00), start + 3000);
   assert.equal(position.status, 'TAKE_PROFIT');
   assert.equal(position.exitPrice, 0.99);
   assert.equal(position.exitPayout, 1);
@@ -165,14 +188,14 @@ test('a $0.99 best bid take-profit credits $1 per share and no stop-loss is appl
   assert.ok(Math.abs(bot.cash - 3048.7501) < 1e-8);
 });
 
-test('window end holds both taker positions for official resolution', async () => {
+test('window end sends the first triggered position to official resolution', async () => {
   const start = 1_800_000_000_000;
   let resolution = null;
   const { bot, setNow } = makeBot({
     now: start + 1000,
     marketData: {
-      getMarket: async () => ({ closed: true, outcomes: ['Up', 'Down'], outcomePrices: [0, 1] }),
-      resolvedWinner: (market) => market?.closed ? 'DOWN' : null,
+      getMarket: async () => ({ closed: true, outcomes: ['Up', 'Down'], outcomePrices: [1, 0] }),
+      resolvedWinner: (market) => market?.closed ? 'UP' : null,
     },
   });
   const record = setMarket(bot, 'DOGE', '15m', start);
@@ -181,29 +204,26 @@ test('window end holds both taker positions for official resolution', async () =
   bot.applyBook(record, 'UP', book(0.33, 0.35), start + 1000);
   setNow(start + 2000);
   bot.applyBook(record, 'UP', book(0.49, 0.51), start + 2000);
-  const unfilled = bot.orders[0];
-
   setNow(start + 3000);
   bot.applyBook(record, 'DOWN', book(0.33, 0.35), start + 3000);
   setNow(start + 4000);
   bot.applyBook(record, 'DOWN', book(0.49, 0.51), start + 4000);
-  setNow(start + 5000);
-  bot.applyBook(record, 'DOWN', book(0.47, 0.49), start + 5000);
   const position = bot.positions[0];
+  assert.equal(bot.positions.length, 1);
+  assert.equal(record.sideStates.DOWN.orderStatus, 'BLOCKED_FIRST_TRIGGER');
 
   setNow(record.market.end);
   bot.expireMarket(record, record.market.end);
-  assert.equal(unfilled.status, 'FILLED');
   assert.equal(position.status, 'PENDING_RESOLUTION');
-  assert.ok(Math.abs(bot.cash - 2897.5002) < 1e-8);
-  assert.equal(bot.snapshot().strategy.stopLoss, null);
+  assert.ok(Math.abs(bot.cash - 2948.7501) < 1e-8);
+  assert.equal(bot.snapshot().strategy.stopLoss, '$0.00 best bid; an empty bid book is treated as zero.');
 
   setNow(record.market.end + 10_001);
   await bot.checkResolutions(record.market.end + 10_001);
   resolution = position.status;
   assert.equal(resolution, 'RESOLVED_WIN');
   assert.ok(Math.abs(position.realizedPnl - 48.7501) < 1e-8);
-  assert.ok(Math.abs(bot.cash - 2997.5002) < 1e-8);
+  assert.ok(Math.abs(bot.cash - 3048.7501) < 1e-8);
 });
 
 test('taker sweep uses multiple ask levels and cancels shallow-book remainder', () => {
