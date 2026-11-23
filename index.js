@@ -24,7 +24,7 @@ async function main() {
     bot.restoreLedger(savedLedger);
     await bot.flushLedger();
   } else if (savedLedger) {
-    bot.log('Paper history reset for the fixed-size four-pair strategy.', {
+    bot.log('Paper history reset for the inverse-pair exit and TP/SL strategy.', {
       type: 'LEDGER_RESET',
       now: Date.now(),
     });
@@ -33,7 +33,7 @@ async function main() {
   bot.start();
   const server = startServer(bot, process.env.PORT || 3000);
 
-  console.log('MODE: DEMO -- BTC/ETH 5-minute four-pair fixed-size strategy; no live orders are sent.');
+  console.log('MODE: DEMO -- BTC/ETH 5-minute inverse-pair strategy; no live orders are sent.');
 
   let stopping = false;
   const shutdown = async () => {

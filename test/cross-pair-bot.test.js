@@ -98,7 +98,7 @@ test('all pair sizes stay at 100 after wins or losses', () => {
 
   settlePair(bot, btcUpEthDown, 'DOWN', 'UP', getNow() + 1000);
   assert.equal(bot.crossPairSizing['btc-up-eth-down'].nextShares, 100);
-  assert.equal(btcUpEthDown.sizingOutcome, 'BOTH_LEGS_LOST');
+  assert.equal(btcUpEthDown.sizingOutcome, 'PAIR_LOSS');
   assert.ok(Object.values(bot.crossPairSizing).every(item => item.nextShares === 100));
 
   const nextStart = START + WINDOW_MS;
@@ -116,7 +116,7 @@ test('all pair sizes stay at 100 after wins or losses', () => {
   assert.equal(nextCycle.sharesPerLeg, 100);
 });
 
-test('a $0.99 best bid does not close a leg before official resolution', () => {
+test('a $0.99 best bid closes at the modeled $1-per-share payout', () => {
   const { bot, getNow } = createBot();
   bot.evaluateCrossPairs(getNow());
   const cycle = bot.crossPairCycles.find(item => item.pairId === 'btc-up-eth-down');
@@ -128,15 +128,15 @@ test('a $0.99 best bid does not close a leg before official resolution', () => {
 
   bot.checkTakeProfits(record, position.side, quote, getNow() + 100);
 
-  assert.equal(position.status, 'OPEN');
-  assert.equal(position.exitPrice, null);
-  assert.equal(position.exitPayout, null);
-  assert.equal(position.realizedPnl, null);
+  assert.equal(position.status, 'TAKE_PROFIT');
+  assert.equal(position.exitPrice, 0.99);
+  assert.equal(position.exitPayout, 1);
+  assert.ok(position.realizedPnl > 0);
   assert.equal(cycle.status, 'OPEN');
   assert.equal(bot.crossPairSizing[cycle.pairId].nextShares, 100);
 });
 
-test('an empty bid does not stop or close a position', () => {
+test('a fresh empty bid book triggers the $0 stop-loss', () => {
   const { bot, getNow } = createBot();
   bot.evaluateCrossPairs(getNow());
   const cycle = bot.crossPairCycles.find(item => item.pairId === 'btc-up-eth-down');
@@ -148,14 +148,14 @@ test('an empty bid does not stop or close a position', () => {
     quote.bestBid = null;
     quote.updatedAt = getNow() + 100;
     bot.checkStopLosses(record, position.side, quote, getNow() + 100);
-    assert.equal(position.status, 'OPEN');
-    assert.equal(position.exitPrice, null);
-    assert.equal(position.exitPayout, null);
-    assert.equal(position.realizedPnl, null);
+    assert.equal(position.status, 'STOP_LOSS');
+    assert.equal(position.exitPrice, 0);
+    assert.equal(position.exitPayout, 0);
+    assert.ok(position.realizedPnl < 0);
   }
 
-  assert.equal(cycle.status, 'OPEN');
-  assert.equal(cycle.sizingOutcome, undefined);
+  assert.equal(cycle.status, 'CLOSED');
+  assert.equal(cycle.sizingOutcome, 'PAIR_LOSS');
   assert.equal(bot.crossPairSizing[cycle.pairId].nextShares, 100);
   assert.ok(Object.values(bot.crossPairSizing).every(item => item.nextShares === 100));
 });
@@ -201,7 +201,137 @@ test('open positions wait for official resolution at window end', () => {
 
   settlePair(bot, cycle, 'UP', 'DOWN', end + 1);
   assert.equal(cycle.status, 'CLOSED');
-  assert.equal(cycle.sizingOutcome, 'AT_LEAST_ONE_WIN');
+  assert.equal(cycle.sizingOutcome, 'PAIR_PROFIT');
+});
+
+test('a pair exits only at its own $1.22 ask sum, then its inverse enters only below $0.80', () => {
+  let now = START + 1000;
+  const bot = new CrossPairBot({ now: () => now });
+  setWindow(bot, START, {
+    btcUp: 0.30,
+    btcDown: 0.60,
+    ethUp: 0.55,
+    ethDown: 0.40,
+  }, now);
+  bot.evaluateCrossPairs(now);
+  const firstPair = bot.crossPairCycles.find(item => item.pairId === 'btc-up-eth-down');
+  assert.ok(firstPair);
+  assert.equal(bot.crossPairCycles.length, 1, 'only the intended first pair should qualify');
+
+  const setQuote = (asset, side, ask, bid, tick) => {
+    const quote = bot.records.get(`${asset}:5m`).quotes[side];
+    quote.bestAsk = ask;
+    quote.bestBid = bid;
+    quote.updatedAt = tick;
+    quote.sequence = tick;
+    quote.asks = [{ price: ask, size: 2000 }];
+    quote.bids = [{ price: bid, size: 2000 }];
+  };
+  now += 500;
+  setQuote('BTC', 'UP', 0.62, 0.61, now);
+  setQuote('ETH', 'DOWN', 0.60, 0.59, now);
+  setQuote('ETH', 'UP', 0.39, 0.38, now);
+  setQuote('BTC', 'DOWN', 0.38, 0.37, now);
+  bot.evaluateCrossPairs(now);
+
+  assert.equal(firstPair.reverseExitAskSum, 1.22);
+  assert.equal(firstPair.reverseExitStatus, 'SOLD');
+  assert.equal(firstPair.legPositionIds.every(id =>
+    bot.positions.find(position => position.id === id)?.status === 'PAIR_REVERSE_EXIT'), true);
+  assert.equal(bot.orders.filter(order =>
+    order.pairCycleId === firstPair.id && order.action === 'SELL_TAKER').length, 2);
+
+  const inverseCycle = bot.crossPairCycles.find(item =>
+    item.pairId === 'eth-up-btc-down' && item.windowStart === START);
+  assert.ok(inverseCycle, 'the inverse should enter after its own asks fall below $0.80');
+  assert.equal(inverseCycle.entryAskSum, 0.77);
+  assert.ok(inverseCycle.legPositionIds.every(id =>
+    bot.positions.find(position => position.id === id)?.status === 'OPEN'));
+  assert.equal(bot.snapshot().strategy.inverseExitAskSumAtOrAbove, 1.22);
+});
+
+test('the inverse pair does not enter when its own combined asks are not below $0.80', () => {
+  let now = START + 1000;
+  const bot = new CrossPairBot({ now: () => now });
+  setWindow(bot, START, {
+    btcUp: 0.30,
+    btcDown: 0.60,
+    ethUp: 0.55,
+    ethDown: 0.40,
+  }, now);
+  bot.evaluateCrossPairs(now);
+  const firstPair = bot.crossPairCycles.find(item => item.pairId === 'btc-up-eth-down');
+  assert.ok(firstPair);
+
+  const setQuote = (asset, side, ask, bid, tick) => {
+    const quote = bot.records.get(`${asset}:5m`).quotes[side];
+    quote.bestAsk = ask;
+    quote.bestBid = bid;
+    quote.updatedAt = tick;
+    quote.sequence = tick;
+    quote.asks = [{ price: ask, size: 2000 }];
+    quote.bids = [{ price: bid, size: 2000 }];
+  };
+  now += 500;
+  setQuote('BTC', 'UP', 0.62, 0.61, now);
+  setQuote('ETH', 'DOWN', 0.60, 0.59, now);
+  setQuote('ETH', 'UP', 0.45, 0.44, now);
+  setQuote('BTC', 'DOWN', 0.40, 0.39, now);
+  bot.evaluateCrossPairs(now);
+
+  assert.equal(firstPair.reverseExitStatus, 'SOLD');
+  assert.equal(bot.crossPairCycles.some(item => item.pairId === 'eth-up-btc-down'), false);
+});
+
+test('inverse exits sell visible bid depth and account for a later partial-fill retry', () => {
+  let now = START + 1000;
+  const bot = new CrossPairBot({ now: () => now });
+  setWindow(bot, START, {
+    btcUp: 0.30,
+    btcDown: 0.60,
+    ethUp: 0.55,
+    ethDown: 0.40,
+  }, now);
+  bot.evaluateCrossPairs(now);
+  const cycle = bot.crossPairCycles.find(item => item.pairId === 'btc-up-eth-down');
+  const btcPosition = bot.positions.find(item =>
+    item.pairCycleId === cycle.id && item.asset === 'BTC');
+  assert.ok(cycle);
+  assert.ok(btcPosition);
+
+  const setQuote = (asset, side, ask, bid, size, tick) => {
+    const quote = bot.records.get(`${asset}:5m`).quotes[side];
+    quote.bestAsk = ask;
+    quote.bestBid = bid;
+    quote.updatedAt = tick;
+    quote.sequence = tick;
+    quote.asks = [{ price: ask, size: 2000 }];
+    quote.bids = [{ price: bid, size }];
+  };
+  now += 500;
+  setQuote('BTC', 'UP', 0.62, 0.61, 50, now);
+  setQuote('ETH', 'DOWN', 0.60, 0.59, 2000, now);
+  setQuote('ETH', 'UP', 0.39, 0.38, 2000, now);
+  setQuote('BTC', 'DOWN', 0.38, 0.37, 2000, now);
+  bot.evaluateCrossPairs(now);
+
+  assert.equal(btcPosition.status, 'OPEN');
+  assert.equal(btcPosition.shares, 50);
+  assert.equal(btcPosition.soldShares, 50);
+  assert.equal(btcPosition.totalCost, 15);
+  assert.equal(btcPosition.partialRealizedPnl, 15.5);
+  assert.equal(cycle.reverseExitStatus, 'SELLING_REMAINDER');
+  assert.equal(bot.accountSnapshot().realizedPnl, 34.5);
+
+  now += 200;
+  setQuote('BTC', 'UP', 0.62, 0.60, 50, now);
+  bot.evaluateCrossPairs(now);
+  assert.equal(btcPosition.status, 'PAIR_REVERSE_EXIT');
+  assert.equal(btcPosition.shares, 0);
+  assert.equal(btcPosition.soldShares, 100);
+  assert.equal(btcPosition.realizedPnl, 30.5);
+  assert.equal(cycle.reverseExitStatus, 'SOLD');
+  assert.equal(cycle.realizedPnl, 49.5);
 });
 
 test('official outcomes are checked every five seconds and settle only when published', async () => {

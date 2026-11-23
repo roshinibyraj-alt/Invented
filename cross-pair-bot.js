@@ -7,8 +7,14 @@ const BASE_STRATEGY_ID = DipBounceBot._test.STRATEGY.id;
 const BASE_SHARES = config.CROSS_PAIR_BASE_SHARES;
 const ASK_SUM_THRESHOLD = config.CROSS_PAIR_ENTRY_ASK_SUM_MAX;
 const SWEEP_CAP = config.CROSS_PAIR_TAKER_SWEEP_CAP;
+const INVERSE_EXIT_ASK_SUM_THRESHOLD = 1.22;
+const TAKE_PROFIT_BID = config.DIP_BOUNCE_TAKE_PROFIT_BID;
+const TAKE_PROFIT_PAYOUT = config.DIP_BOUNCE_TAKE_PROFIT_PAYOUT;
 const QUOTE_MAX_AGE_MS = config.DIP_BOUNCE_MAX_QUOTE_AGE_MS;
 const CLOSED_POSITION_STATUSES = new Set([
+  'TAKE_PROFIT',
+  'STOP_LOSS',
+  'PAIR_REVERSE_EXIT',
   'RESOLVED_WIN',
   'RESOLVED_LOSS',
 ]);
@@ -16,6 +22,7 @@ const PAIRS = Object.freeze([
   Object.freeze({
     id: 'btc-up-eth-down',
     label: 'BTC UP + ETH DOWN',
+    inversePairId: 'eth-up-btc-down',
     legs: Object.freeze([
       Object.freeze({ asset: 'BTC', side: 'UP' }),
       Object.freeze({ asset: 'ETH', side: 'DOWN' }),
@@ -24,6 +31,7 @@ const PAIRS = Object.freeze([
   Object.freeze({
     id: 'eth-up-btc-down',
     label: 'ETH UP + BTC DOWN',
+    inversePairId: 'btc-up-eth-down',
     legs: Object.freeze([
       Object.freeze({ asset: 'ETH', side: 'UP' }),
       Object.freeze({ asset: 'BTC', side: 'DOWN' }),
@@ -32,6 +40,7 @@ const PAIRS = Object.freeze([
   Object.freeze({
     id: 'btc-up-eth-up',
     label: 'BTC UP + ETH UP',
+    inversePairId: 'btc-down-eth-down',
     legs: Object.freeze([
       Object.freeze({ asset: 'BTC', side: 'UP' }),
       Object.freeze({ asset: 'ETH', side: 'UP' }),
@@ -40,6 +49,7 @@ const PAIRS = Object.freeze([
   Object.freeze({
     id: 'btc-down-eth-down',
     label: 'BTC DOWN + ETH DOWN',
+    inversePairId: 'btc-up-eth-up',
     legs: Object.freeze([
       Object.freeze({ asset: 'BTC', side: 'DOWN' }),
       Object.freeze({ asset: 'ETH', side: 'DOWN' }),
@@ -48,9 +58,9 @@ const PAIRS = Object.freeze([
 ]);
 
 const STRATEGY = Object.freeze({
-  id: 'btc-eth-four-pair-fixed-100-resolution-paper',
+  id: 'btc-eth-four-pair-inverse-exit-tpsl-paper',
   name: 'BTC/ETH four-pair fixed-size paper strategy',
-  version: 'four-pairs-080-fixed-100-resolution-only-v4',
+  version: 'four-pairs-080-inverse-122-tp-099-empty-book-sl-000-v5',
   assets: ['BTC', 'ETH'],
   timeframes: ['5m'],
   sharesPerLeg: BASE_SHARES,
@@ -58,7 +68,11 @@ const STRATEGY = Object.freeze({
   orderType: 'TAKER',
   sweepCap: SWEEP_CAP,
   resolutionPollMs: config.DIP_BOUNCE_RESOLUTION_POLL_MS,
-  exit: 'No take-profit or stop-loss. Hold every filled leg through the window and settle only from official Polymarket resolution.',
+  inverseExitAskSumAtOrAbove: INVERSE_EXIT_ASK_SUM_THRESHOLD,
+  takeProfitBid: TAKE_PROFIT_BID,
+  takeProfitPayoutPerShare: TAKE_PROFIT_PAYOUT,
+  stopLoss: 'Fresh empty best-bid book; settle remaining shares at $0.',
+  exit: 'Sell a pair when its own combined asks reach $1.22. The inverse pair enters only if its own asks are below $0.80. Also apply the $0.99 bid take-profit ($1/share) and empty-bid $0 stop; any remaining open shares go to official resolution at window end.',
   sizing: 'Always 100 shares per leg on every entry in all four cross-pairs. No size progression after wins or losses.',
   execution: 'PAPER ONLY',
 });
@@ -97,6 +111,15 @@ function sortLevels(levels) {
     .sort((a, b) => a.price - b.price);
 }
 
+function marketTakerFeeRate(market) {
+  const configuredRate = Number(
+    market?.feeSchedule?.rate ?? market?.takerFeeRate ??
+    (market?.asset === 'BTC' ? 0.05 : 0.01),
+  );
+  if (market?.feesEnabled === false) return 0;
+  return Number.isFinite(configuredRate) && configuredRate >= 0 ? configuredRate : null;
+}
+
 function sweepAsks(levels, requestedShares, market) {
   let remaining = requestedShares;
   let notional = 0;
@@ -132,6 +155,38 @@ function sweepAsks(levels, requestedShares, market) {
   };
 }
 
+function sweepBids(levels, requestedShares, market) {
+  let remaining = requestedShares;
+  let notional = 0;
+  let fees = 0;
+  const fills = [];
+  const feeRate = marketTakerFeeRate(market);
+  if (feeRate == null) {
+    return { filledShares: 0, remainingShares: requestedShares, notional: 0, fees: 0, averagePrice: null, fills: [] };
+  }
+
+  const descendingBids = sortLevels(levels).sort((a, b) => b.price - a.price);
+  for (const level of descendingBids) {
+    if (remaining <= 1e-9) break;
+    const shares = Math.min(remaining, level.size);
+    const value = shares * level.price;
+    const fee = shares * feeRate * level.price * (1 - level.price);
+    fills.push({ shares: round(shares), price: round(level.price), value: round(value), fee: round(fee) });
+    notional += value;
+    fees += fee;
+    remaining -= shares;
+  }
+  const filledShares = requestedShares - remaining;
+  return {
+    filledShares: round(filledShares),
+    remainingShares: round(remaining),
+    notional: round(notional),
+    fees: round(fees),
+    averagePrice: filledShares > 0 ? round(notional / filledShares) : null,
+    fills,
+  };
+}
+
 class CrossPairBot extends DipBounceBot {
   constructor(options = {}) {
     super(options);
@@ -142,6 +197,7 @@ class CrossPairBot extends DipBounceBot {
     this.pairWindowStates = {};
     this.crossPairCycles = [];
     this.lastCrossPairScanAt = null;
+    this.bidDepthByToken = new Map();
   }
 
   log(message, {
@@ -208,16 +264,11 @@ class CrossPairBot extends DipBounceBot {
       }));
   }
 
-  processSide(_record, _side, _quote) {
-    this.evaluateCrossPairs(this.now());
-  }
-
-  checkTakeProfits() {
-    // This strategy intentionally has no intra-window take-profit.
-  }
-
-  checkStopLosses() {
-    // This strategy intentionally has no intra-window stop-loss.
+  processSide(record, side, quote) {
+    const now = this.now();
+    this.checkStopLosses(record, side, quote, now);
+    this.checkTakeProfits(record, side, quote, now);
+    this.evaluateCrossPairs(now);
   }
 
   updateCycleAfterPositionClose(position, now) {
@@ -236,15 +287,53 @@ class CrossPairBot extends DipBounceBot {
     cycle.realizedPnl = round(positions.reduce(
       (sum, item) => sum + Number(item.realizedPnl || 0), 0,
     ));
+    cycle.sizingOutcome = cycle.realizedPnl > 1e-9 ? 'PAIR_PROFIT'
+      : cycle.realizedPnl < -1e-9 ? 'PAIR_LOSS' : 'PAIR_FLAT';
     this.applyPairSizing(cycle, positions, now);
   }
 
-  updateSizingAfterClose() {
-    // Pair outcome is recorded only after both legs close; size always remains 100.
+  updateSizingAfterClose(position, _won, now = this.now()) {
+    this.updateCycleAfterPositionClose(position, now);
+  }
+
+  markPositions(now, onlyRecordKey = null, onlySide = null) {
+    super.markPositions(now, onlyRecordKey, onlySide);
+    for (const position of this.positions) {
+      if (position.status !== 'OPEN') continue;
+      if (onlySide && position.side !== onlySide) continue;
+      const record = this.records.get(`${position.asset}:${position.timeframe}`);
+      if (!record || (onlyRecordKey && record.key !== onlyRecordKey)) continue;
+      if (String(record.market?.id || record.market?.slug) !== position.marketId) continue;
+      if (position.markStatus !== 'LIVE' || !Number.isFinite(Number(position.markBid))) continue;
+      const remainingEntryFees = Number.isFinite(Number(position.remainingEntryFees))
+        ? Number(position.remainingEntryFees)
+        : Number(position.fees) || 0;
+      position.unrealizedPnl = round(
+        Number(position.markBid) * Number(position.shares)
+        - Number(position.totalCost || 0)
+        - remainingEntryFees,
+      );
+    }
+  }
+
+  accountSnapshot() {
+    const account = super.accountSnapshot();
+    const closedPnl = this.positions.reduce((sum, position) =>
+      sum + (Number.isFinite(Number(position.realizedPnl)) ? Number(position.realizedPnl) : 0), 0);
+    const openPartialPnl = this.positions
+      .filter(position => ['OPEN', 'PENDING_RESOLUTION'].includes(position.status))
+      .reduce((sum, position) => sum + (Number(position.partialRealizedPnl) || 0), 0);
+    const totalFees = this.positions.reduce((sum, position) =>
+      sum + (Number(position.fees) || 0) + (Number(position.exitFees) || 0), 0);
+    return {
+      ...account,
+      realizedPnl: round(closedPnl + openPartialPnl),
+      totalFees: round(totalFees),
+    };
   }
 
   evaluateCrossPairs(now = this.now()) {
-    let changed = false;
+    let changed = this.processInversePairExits(now);
     for (const pair of PAIRS) {
       const marketPair = this.pairQuotes(pair, now);
       if (!marketPair.marketsAligned || marketPair.windowStart == null) continue;
@@ -283,6 +372,302 @@ class CrossPairBot extends DipBounceBot {
     return changed;
   }
 
+  processInversePairExits(now) {
+    let changed = false;
+    for (const cycle of this.crossPairCycles) {
+      if (!cycle.legPositionIds?.length ||
+          cycle.windowStart == null ||
+          now < Number(cycle.windowStart) ||
+          now >= Number(cycle.windowEnd)) continue;
+      const pair = PAIRS.find(item => item.id === cycle.pairId);
+      if (!pair) continue;
+      const marketPair = this.pairQuotes(pair, now);
+      if (!marketPair.marketsAligned || !marketPair.asksFresh ||
+          Number(marketPair.windowStart) !== Number(cycle.windowStart)) continue;
+      const activePositions = cycle.legPositionIds
+        .map(id => this.positions.find(position => position.id === id))
+        .filter(position => position?.status === 'OPEN' && Number(position.shares) > 1e-9);
+      if (!activePositions.length) continue;
+
+      if (!cycle.reverseExitTriggeredAt && marketPair.askSum < INVERSE_EXIT_ASK_SUM_THRESHOLD) continue;
+      if (!cycle.reverseExitTriggeredAt) {
+        cycle.reverseExitTriggeredAt = now;
+        cycle.reverseExitAskSum = marketPair.askSum;
+        cycle.reverseExitReason = `Own combined asks reached $${marketPair.askSum.toFixed(3)} (threshold $${INVERSE_EXIT_ASK_SUM_THRESHOLD.toFixed(2)}).`;
+        cycle.reverseExitStatus = 'SELLING';
+        changed = true;
+        this.log(`${pair.label} inverse exit triggered at combined asks $${marketPair.askSum.toFixed(3)}; selling its remaining legs.`, {
+          timeframe: '5m',
+          outcome: 'neutral',
+          type: 'INVERSE_PAIR_EXIT_TRIGGER',
+          now,
+        });
+      }
+
+      for (const position of activePositions) {
+        const leg = marketPair.legs.find(item =>
+          item.asset === position.asset && item.side === position.side);
+        if (!leg) continue;
+        const order = this.sellPositionAtBids(cycle, position, leg, now);
+        if (order?.filledShares > 0) changed = true;
+      }
+
+      const remaining = cycle.legPositionIds
+        .map(id => this.positions.find(position => position.id === id))
+        .filter(position => position?.status === 'OPEN' && Number(position.shares) > 1e-9);
+      cycle.reverseExitStatus = remaining.length ? 'SELLING_REMAINDER' : 'SOLD';
+      const pairState = this.pairWindowState(pair, marketPair.windowStart);
+      pairState.status = remaining.length ? 'REVERSAL_EXITING' : 'CLOSED';
+      pairState.lastReason = remaining.length
+        ? `Inverse exit triggered at $${cycle.reverseExitAskSum.toFixed(3)}; retrying the remaining bid-side sell quantity.`
+        : `Sold this pair after combined asks reached $${cycle.reverseExitAskSum.toFixed(3)}. Its inverse pair was evaluated independently against its own $0.80 entry gate.`;
+      if (!remaining.length) {
+        cycle.status = 'CLOSED';
+        cycle.closedAt = now;
+        cycle.realizedPnl = round(cycle.legPositionIds.reduce((sum, id) => {
+          const position = this.positions.find(item => item.id === id);
+          return sum + (Number(position?.realizedPnl) || 0);
+        }, 0));
+        this.applyPairSizing(cycle, cycle.legPositionIds
+          .map(id => this.positions.find(item => item.id === id)).filter(Boolean), now);
+      }
+    }
+    if (changed) {
+      this.updateAccountMetrics(now, true);
+      this.scheduleLedgerSave();
+    }
+    return changed;
+  }
+
+  availableBidLevels(leg) {
+    const tokenId = `${String(leg.market?.id || leg.market?.slug || '')}:${leg.side}`;
+    if (tokenId === ':') return [];
+    const quote = leg.quote || {};
+    const sequence = Number(quote.sequence) || Number(quote.updatedAt) || 0;
+    let state = this.bidDepthByToken.get(tokenId);
+    if (!state || state.sequence !== sequence) {
+      state = {
+        sequence,
+        remainingByPrice: new Map(sortLevels(quote.bids).map(level => [level.price, level.size])),
+      };
+      this.bidDepthByToken.set(tokenId, state);
+    }
+    return sortLevels(quote.bids)
+      .map(level => ({ price: level.price, size: Math.min(
+        level.size,
+        Number(state.remainingByPrice.get(level.price)) || 0,
+      ) }))
+      .filter(level => level.size > 1e-9)
+      .sort((a, b) => b.price - a.price);
+  }
+
+  consumeBidLevels(leg, fills) {
+    const tokenId = `${String(leg.market?.id || leg.market?.slug || '')}:${leg.side}`;
+    const state = this.bidDepthByToken.get(tokenId);
+    if (!state) return;
+    for (const fill of fills) {
+      const previous = Number(state.remainingByPrice.get(fill.price)) || 0;
+      state.remainingByPrice.set(fill.price, Math.max(0, previous - Number(fill.shares)));
+    }
+  }
+
+  sellPositionAtBids(cycle, position, leg, now) {
+    const requestedShares = Number(position.shares) || 0;
+    if (requestedShares <= 1e-9) return null;
+    const bidLevels = this.availableBidLevels(leg);
+    const fill = sweepBids(bidLevels, requestedShares, leg.market);
+    if (fill.filledShares <= 1e-9) return null;
+
+    this.consumeBidLevels(leg, fill.fills);
+    const beforeShares = Number(position.shares);
+    const shareRatio = fill.filledShares / beforeShares;
+    const costAllocated = Number(position.totalCost || 0) * shareRatio;
+    const remainingFeesBefore = Number.isFinite(Number(position.remainingEntryFees))
+      ? Number(position.remainingEntryFees)
+      : Number(position.fees) || 0;
+    const entryFeesAllocated = remainingFeesBefore * shareRatio;
+    const partialNet = fill.notional - costAllocated - entryFeesAllocated - fill.fees;
+    position.partialRealizedPnl = round((Number(position.partialRealizedPnl) || 0) + partialNet);
+    position.totalCost = round(Math.max(0, Number(position.totalCost || 0) - costAllocated));
+    position.remainingEntryFees = round(Math.max(0, remainingFeesBefore - entryFeesAllocated));
+    position.shares = round(Math.max(0, beforeShares - fill.filledShares));
+    position.soldShares = round((Number(position.soldShares) || 0) + fill.filledShares);
+    position.exitProceeds = round((Number(position.exitProceeds) || 0) + fill.notional);
+    position.exitFees = round((Number(position.exitFees) || 0) + fill.fees);
+    position.exitFills = [...(position.exitFills || []), ...fill.fills.map(item => ({
+      ...item,
+      filledAt: now,
+      reason: 'INVERSE_PAIR_ASK_SUM_1.22',
+    }))];
+    this.cash = round(this.cash + fill.notional - fill.fees);
+
+    const orderId = `cross-${++this.orderSequence}`;
+    const fullyFilled = position.shares <= 1e-9;
+    const order = {
+      id: orderId,
+      pairId: cycle.pairId,
+      pairCycleId: cycle.id,
+      pairLabel: cycle.pairLabel,
+      marketId: position.marketId,
+      marketSlug: position.marketSlug,
+      marketTitle: position.marketTitle,
+      asset: position.asset,
+      timeframe: position.timeframe,
+      windowStart: position.windowStart,
+      windowEnd: position.windowEnd,
+      side: position.side,
+      action: 'SELL_TAKER',
+      kind: 'INVERSE_PAIR_EXIT',
+      orderType: 'MARKET',
+      status: fill.remainingShares <= 1e-9 ? 'FILLED'
+        : fill.filledShares > 0 ? 'PARTIALLY_FILLED_RETRY_REMAINDER' : 'NO_FILL',
+      requestedShares,
+      filledShares: fill.filledShares,
+      remainingShares: fill.remainingShares,
+      proceeds: fill.notional,
+      fee: fill.fees,
+      averagePrice: fill.averagePrice,
+      fills: fill.fills,
+      fillRule: 'Sell against currently visible CLOB bids; retry any unfilled remainder while the exit is latched.',
+      positionId: position.id,
+      createdAt: now,
+      submittedAt: now,
+      filledAt: fill.filledShares > 0 ? now : null,
+      triggerAskSum: cycle.reverseExitAskSum,
+    };
+    this.orders.unshift(order);
+    this.totalOrderAttempts += 1;
+    position.exitOrderIds = [...(position.exitOrderIds || []), orderId];
+    position.lastExitOrderId = orderId;
+    if (fullyFilled) {
+      position.closedSharesAtExit = 0;
+      position.status = 'PAIR_REVERSE_EXIT';
+      position.exitAt = now;
+      position.exitPrice = position.soldShares > 0
+        ? round(position.exitProceeds / position.soldShares)
+        : fill.averagePrice;
+      position.exitReason = 'INVERSE_PAIR_ASK_SUM_1.22';
+      position.realizedPnl = round(Number(position.partialRealizedPnl) || 0);
+      position.markStatus = 'CLOSED';
+      position.markBid = leg.quote.bestBid ?? null;
+      position.markUpdatedAt = leg.quote.updatedAt || now;
+      position.unrealizedPnl = null;
+      this.updateSizingAfterClose(position, position.realizedPnl > 0, now);
+    } else {
+      position.partialExitReason = 'INVERSE_PAIR_ASK_SUM_1.22';
+      position.markBid = leg.quote.bestBid ?? null;
+      position.markUpdatedAt = leg.quote.updatedAt || now;
+      position.markStatus = 'LIVE';
+      position.unrealizedPnl = position.markBid == null ? null : round(
+        Number(position.markBid) * position.shares
+        - position.totalCost
+        - position.remainingEntryFees,
+      );
+    }
+    cycle.legs.forEach(item => {
+      if (item.positionId !== position.id) return;
+      item.soldShares = position.soldShares || 0;
+      item.lastExitOrderId = orderId;
+      item.exitStatus = order.status;
+    });
+    this.log(`${position.asset} ${position.side} inverse-pair sell filled ${fill.filledShares}/${requestedShares} at average $${fill.averagePrice.toFixed(3)}; net sell fees $${fill.fees.toFixed(3)}.`, {
+      timeframe: '5m',
+      side: position.side,
+      outcome: fill.filledShares > 0 ? 'good' : 'neutral',
+      type: 'INVERSE_PAIR_SELL',
+      now,
+    });
+    return order;
+  }
+
+  checkTakeProfits(record, side, quote, now) {
+    if (!record?.market || record.marketStatus !== 'OPEN' ||
+        Number(quote?.bestBid) < TAKE_PROFIT_BID) return;
+    if (!Number.isFinite(Number(quote?.updatedAt)) ||
+        now - Number(quote.updatedAt) > config.DIP_BOUNCE_MAX_QUOTE_AGE_MS) return;
+    const marketId = String(record.market.id || record.market.slug);
+    for (const position of this.positions) {
+      if (position.marketId !== marketId || position.side !== side || position.status !== 'OPEN') continue;
+      const remainingShares = Number(position.shares) || 0;
+      const payout = remainingShares * TAKE_PROFIT_PAYOUT;
+      const remainingEntryFees = Number.isFinite(Number(position.remainingEntryFees))
+        ? Number(position.remainingEntryFees)
+        : Number(position.fees) || 0;
+      this.cash = round(this.cash + payout);
+      position.partialRealizedPnl = Number(position.partialRealizedPnl) || 0;
+      position.realizedPnl = round(
+        position.partialRealizedPnl + payout
+        - Number(position.totalCost || 0)
+        - remainingEntryFees,
+      );
+      position.status = 'TAKE_PROFIT';
+      position.closedSharesAtExit = remainingShares;
+      position.shares = 0;
+      position.exitAt = now;
+      position.exitPrice = TAKE_PROFIT_BID;
+      position.exitPayout = TAKE_PROFIT_PAYOUT;
+      position.exitReason = 'TAKE_PROFIT_099';
+      position.takeProfitPayout = round((Number(position.takeProfitPayout) || 0) + payout);
+      position.remainingEntryFees = 0;
+      position.markBid = TAKE_PROFIT_BID;
+      position.markUpdatedAt = quote.updatedAt;
+      position.markStatus = 'CLOSED';
+      position.unrealizedPnl = null;
+      this.updateSizingAfterClose(position, position.realizedPnl > 0, now);
+      this.log(`${position.asset} ${side} take-profit hit at $0.99; credited $1.00 per remaining share.`, {
+        asset: position.asset,
+        timeframe: position.timeframe,
+        side,
+        outcome: position.realizedPnl >= 0 ? 'good' : 'bad',
+        type: 'TAKE_PROFIT',
+        now,
+      });
+      this.updateAccountMetrics(now, true);
+    }
+  }
+
+  checkStopLosses(record, side, quote, now) {
+    if (!record?.market || record.marketStatus !== 'OPEN') return;
+    const fresh = Number.isFinite(Number(quote?.updatedAt))
+      && now - Number(quote.updatedAt) <= config.DIP_BOUNCE_MAX_QUOTE_AGE_MS;
+    if (!fresh || (quote.bestBid != null && Number(quote.bestBid) > 0)) return;
+    const marketId = String(record.market.id || record.market.slug);
+    for (const position of this.positions) {
+      if (position.marketId !== marketId || position.side !== side || position.status !== 'OPEN') continue;
+      const remainingEntryFees = Number.isFinite(Number(position.remainingEntryFees))
+        ? Number(position.remainingEntryFees)
+        : Number(position.fees) || 0;
+      position.partialRealizedPnl = Number(position.partialRealizedPnl) || 0;
+      position.realizedPnl = round(
+        position.partialRealizedPnl
+        - Number(position.totalCost || 0)
+        - remainingEntryFees,
+      );
+      position.status = 'STOP_LOSS';
+      position.closedSharesAtExit = Number(position.shares) || 0;
+      position.shares = 0;
+      position.exitAt = now;
+      position.exitPrice = 0;
+      position.exitPayout = 0;
+      position.exitReason = 'STOP_LOSS_000';
+      position.remainingEntryFees = 0;
+      position.markBid = 0;
+      position.markUpdatedAt = quote.updatedAt;
+      position.markStatus = 'CLOSED';
+      position.unrealizedPnl = null;
+      this.updateSizingAfterClose(position, false, now);
+      this.log(`${position.asset} ${side} stop-loss hit: the fresh bid book is empty; remaining shares count as a $0 payout.`, {
+        asset: position.asset,
+        timeframe: position.timeframe,
+        side,
+        outcome: 'bad',
+        type: 'STOP_LOSS',
+        now,
+      });
+      this.updateAccountMetrics(now, true);
+    }
+  }
+
   buyCrossPair(pair, pairState, marketPair, sharesPerLeg, now) {
     const fills = marketPair.legs.map(leg => ({
       ...leg,
@@ -310,10 +695,14 @@ class CrossPairBot extends DipBounceBot {
       status: 'OPEN',
       entryAt: now,
       entryAskSum: marketPair.askSum,
+      inversePairId: pair.inversePairId,
       sharesPerLeg,
       legPositionIds: [],
       legs: [],
       sizingApplied: false,
+      reverseExitTriggeredAt: null,
+      reverseExitAskSum: null,
+      reverseExitStatus: null,
     };
 
     for (const leg of fills) {
@@ -366,6 +755,8 @@ class CrossPairBot extends DipBounceBot {
         requestedShares: sharesPerLeg,
         filledShares: leg.fill.filledShares,
         averageEntry: leg.fill.averagePrice,
+        soldShares: 0,
+        exitOrderIds: [],
       });
       if (!positionId) continue;
 
@@ -384,6 +775,15 @@ class CrossPairBot extends DipBounceBot {
         entryPrice: leg.fill.averagePrice,
         totalCost: leg.fill.notional,
         fees: leg.fill.fees,
+        initialCost: leg.fill.notional,
+        initialFees: leg.fill.fees,
+        remainingEntryFees: leg.fill.fees,
+        partialRealizedPnl: 0,
+        soldShares: 0,
+        exitProceeds: 0,
+        exitFees: 0,
+        exitOrderIds: [],
+        exitFills: [],
         estimatedMakerRebate: 0,
         entryAt: now,
         windowStart: pairState.windowStart,
@@ -416,7 +816,7 @@ class CrossPairBot extends DipBounceBot {
     pairState.cycleId = cycleId;
     pairState.status = cycle.legPositionIds.length ? 'IN_POSITION' : 'NO_FILL';
     pairState.lastReason = cycle.legPositionIds.length
-      ? `Bought ${cycle.legs.map(leg => `${leg.asset} ${leg.side}: ${leg.filledShares}/${sharesPerLeg}`).join(' · ')}; holding all filled shares for official resolution.`
+      ? `Bought ${cycle.legs.map(leg => `${leg.asset} ${leg.side}: ${leg.filledShares}/${sharesPerLeg}`).join(' · ')}; exit at own ask sum $1.22, TP $0.99, empty-bid SL $0, or official resolution.`
       : 'The combined-ask trigger fired, but neither visible ask book could fill shares.';
 
     if (cycle.legPositionIds.length) {
@@ -432,7 +832,7 @@ class CrossPairBot extends DipBounceBot {
     this.entryTriggerSide = pair.id;
     this.entryTriggerReason = `${pair.label} combined asks ${marketPair.askSum.toFixed(3)}.`;
     this.log(cycle.legPositionIds.length
-      ? `${pair.label} entered at combined asks $${marketPair.askSum.toFixed(3)}; no TP or SL, holding for official resolution.`
+      ? `${pair.label} entered at combined asks $${marketPair.askSum.toFixed(3)}; pair exit $1.22, TP $0.99, empty-bid SL $0, otherwise resolution.`
       : `${pair.label} qualified at $${marketPair.askSum.toFixed(3)}, but no ask depth filled.`, {
       timeframe: '5m',
       outcome: cycle.legPositionIds.length ? 'good' : 'neutral',
@@ -445,8 +845,44 @@ class CrossPairBot extends DipBounceBot {
   }
 
   settleMarket(marketId, winner, now) {
-    super.settleMarket(marketId, winner, now);
+    for (const position of this.positions) {
+      if (position.marketId !== marketId || position.status !== 'PENDING_RESOLUTION') continue;
+      const won = position.side === winner;
+      const resolvedShares = Number(position.shares) || 0;
+      const payout = won ? resolvedShares : 0;
+      const remainingEntryFees = Number.isFinite(Number(position.remainingEntryFees))
+        ? Number(position.remainingEntryFees)
+        : Number(position.fees) || 0;
+      this.cash = round(this.cash + payout);
+      position.partialRealizedPnl = Number(position.partialRealizedPnl) || 0;
+      position.status = won ? 'RESOLVED_WIN' : 'RESOLVED_LOSS';
+      position.closedSharesAtExit = resolvedShares;
+      position.shares = 0;
+      position.resolvedAt = now;
+      position.resolutionWinner = winner;
+      position.exitPrice = won ? 1 : 0;
+      position.exitPayout = won ? 1 : 0;
+      position.exitReason = 'OFFICIAL_RESOLUTION';
+      position.realizedPnl = round(
+        position.partialRealizedPnl + payout
+        - Number(position.totalCost || 0)
+        - remainingEntryFees,
+      );
+      position.remainingEntryFees = 0;
+      position.markStatus = 'CLOSED';
+      position.unrealizedPnl = null;
+      this.updateSizingAfterClose(position, won, now);
+      this.log(`${position.asset} ${position.side} resolved ${won ? 'WIN' : 'LOSS'}; official market winner was ${winner}.`, {
+        asset: position.asset,
+        timeframe: position.timeframe,
+        side: position.side,
+        outcome: won ? 'good' : 'bad',
+        type: 'RESOLUTION',
+        now,
+      });
+    }
     this.applyResolvedPairSizing(now);
+    this.updateAccountMetrics(now, true);
   }
 
   expireMarket(record, now) {
@@ -499,13 +935,11 @@ class CrossPairBot extends DipBounceBot {
 
   applyPairSizing(cycle, positions, now) {
     if (cycle.sizingApplied || positions.some(position => !CLOSED_POSITION_STATUSES.has(position.status))) return;
-    const bothLost = positions.length === 2 &&
-      positions.every(position => position.status === 'RESOLVED_LOSS');
-    const hasWin = positions.some(position => position.status === 'RESOLVED_WIN');
+    const netPnl = positions.reduce((sum, position) => sum + (Number(position.realizedPnl) || 0), 0);
     const sizing = this.crossPairSizing[cycle.pairId] || emptySizing();
     sizing.nextShares = BASE_SHARES;
-    cycle.sizingOutcome = bothLost ? 'BOTH_LEGS_LOST'
-      : hasWin ? 'AT_LEAST_ONE_WIN' : 'INCOMPLETE_PAIR';
+    cycle.sizingOutcome = netPnl > 1e-9 ? 'PAIR_PROFIT'
+      : netPnl < -1e-9 ? 'PAIR_LOSS' : 'PAIR_FLAT';
     sizing.lastOutcome = cycle.sizingOutcome;
     sizing.lastUpdatedAt = now;
     this.crossPairSizing[cycle.pairId] = sizing;
@@ -527,14 +961,9 @@ class CrossPairBot extends DipBounceBot {
       position.nextEntryShares = sizing.nextShares;
       position.pairRealizedPnl = cycle.realizedPnl;
     }
-    const description = cycle.sizingOutcome === 'BOTH_LEGS_LOST'
-      ? `both legs lost; next qualifying entry remains ${BASE_SHARES} shares per leg`
-      : cycle.sizingOutcome === 'AT_LEAST_ONE_WIN'
-        ? `at least one leg won; next qualifying entry remains ${BASE_SHARES} shares per leg`
-        : `pair cycle closed; next qualifying entry remains ${BASE_SHARES} shares per leg`;
-    this.log(`${cycle.pairLabel} closed; ${description}.`, {
+    this.log(`${cycle.pairLabel} closed with ${cycle.sizingOutcome.toLowerCase()}; size remains ${BASE_SHARES} shares per leg.`, {
       timeframe: '5m',
-      outcome: cycle.sizingOutcome === 'BOTH_LEGS_LOST' ? 'bad' : 'good',
+      outcome: netPnl < -1e-9 ? 'bad' : 'good',
       type: 'CROSS_PAIR_SIZING',
       now,
     });
@@ -637,7 +1066,7 @@ class CrossPairBot extends DipBounceBot {
           filledShares: this.positions
             .filter(position => paired.some(pair => pair.id === position.pairId) &&
               position.windowStart === market.start && position.asset === market.asset &&
-              position.side === side)
+              position.side === side && ['OPEN', 'PENDING_RESOLUTION'].includes(position.status))
             .reduce((sum, position) => sum + Number(position.shares || 0), 0),
           pairLabel: paired.map(pair => pair.label).join(' / ') || `${market.asset} ${side} · ${other}`,
           reason: pairStates.map(item => item.state?.lastReason).filter(Boolean).join(' · ')
@@ -650,7 +1079,10 @@ class CrossPairBot extends DipBounceBot {
       entry: 'Monitor all four BTC/ETH UP/DOWN combinations independently. Enter a pair when its fresh best asks sum to strictly less than $0.80; one entry per pair per 5-minute window.',
       fill: 'Paper taker sweep of visible asks up to $0.99. Actual filled quantity, average entry, and market taker fees are recorded; unfilled remainder is cancelled.',
       sizing: STRATEGY.sizing,
-      settlement: `There is no intra-window take-profit or stop-loss. Each open leg moves to official resolution at window end; the bot checks for an official result every ${config.DIP_BOUNCE_RESOLUTION_POLL_MS / 1000} seconds.`,
+      inverseExit: `If a pair's own combined asks reach $${INVERSE_EXIT_ASK_SUM_THRESHOLD.toFixed(2)}, sell its remaining shares against visible bids. Its inverse pair is not forced to sell and can enter only when its own combined asks are below $${ASK_SUM_THRESHOLD.toFixed(2)}.`,
+      takeProfit: `When a side's best bid reaches $${TAKE_PROFIT_BID.toFixed(2)}, model a $${TAKE_PROFIT_PAYOUT.toFixed(2)} payout per remaining share.`,
+      stopLoss: 'A fresh empty best-bid book triggers the $0.00 stop-loss for that side.',
+      settlement: `Any shares still open at window end move to official Polymarket resolution; the bot checks for an official result every ${config.DIP_BOUNCE_RESOLUTION_POLL_MS / 1000} seconds.`,
       execution: 'PAPER ONLY',
     };
     state.sizingByAsset = undefined;
@@ -666,6 +1098,7 @@ class CrossPairBot extends DipBounceBot {
     }));
     state.crossPairCycles = this.crossPairCycles.map(cycle => ({ ...cycle }));
     state.crossPairs = PAIRS.map(pair => {
+      const inversePair = PAIRS.find(item => item.id === pair.inversePairId);
       const marketPair = this.pairQuotes(pair, now);
       const windowState = marketPair.windowStart == null
         ? this.pairWindowStates[pair.id] || emptyWindowState(pair, null)
@@ -682,10 +1115,16 @@ class CrossPairBot extends DipBounceBot {
       let status = windowState.status;
       let reason = windowState.lastReason;
       if (windowState.entered) {
-        status = currentCyclePending ? 'PENDING_RESOLUTION' : currentCycleClosed ? 'CLOSED' : 'ENTERED';
+        status = currentCyclePending ? 'PENDING_RESOLUTION'
+          : currentCycleClosed ? 'CLOSED'
+            : currentCycleState?.reverseExitStatus === 'SELLING_REMAINDER' ? 'REVERSAL_EXITING'
+              : 'ENTERED';
         reason = currentCyclePending
           ? 'One or more legs are waiting for official resolution.'
-          : currentCycleClosed ? 'All filled legs in this pair have closed.' : reason;
+          : currentCycleClosed ? 'All filled legs in this pair have closed.'
+            : currentCycleState?.reverseExitStatus === 'SELLING_REMAINDER'
+              ? `Inverse exit is active; selling remaining shares. ${inversePair?.label || 'The inverse pair'} still needs its own ask sum below $0.80 to enter.`
+              : reason;
       } else if (unresolved) {
         status = 'WAITING_FOR_RESOLUTION';
         reason = 'Waiting for the previous entry in this pair to fully resolve before sizing the next one.';
@@ -751,11 +1190,14 @@ class CrossPairBot extends DipBounceBot {
       return {
         id: pair.id,
         label: pair.label,
+        inversePairId: pair.inversePairId,
+        inversePairLabel: inversePair?.label || null,
         legs,
         windowStart: marketPair.windowStart,
         secondsRemaining: marketPair.windowEnd == null ? null : Math.max(0, (marketPair.windowEnd - now) / 1000),
         combinedAsk: marketPair.askSum,
         entryThreshold: ASK_SUM_THRESHOLD,
+        inverseExitThreshold: INVERSE_EXIT_ASK_SUM_THRESHOLD,
         fresh: marketPair.asksFresh,
         status,
         reason,
@@ -780,6 +1222,9 @@ CrossPairBot.constants = {
   BASE_SHARES,
   ASK_SUM_THRESHOLD,
   SWEEP_CAP,
+  INVERSE_EXIT_ASK_SUM_THRESHOLD,
+  TAKE_PROFIT_BID,
+  TAKE_PROFIT_PAYOUT,
   QUOTE_MAX_AGE_MS,
 };
 

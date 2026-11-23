@@ -171,7 +171,7 @@
     .pair-state.active { color:#176e4c; background:#e1f2e7; }
     .pair-state.loss { color:#a94739; background:#ffebe5; }
     .pair-body { display:grid; gap:10px; padding:11px; }
-    .pair-summary { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:6px; }
+    .pair-summary { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:6px; }
     .pair-summary div { min-width:0; padding:8px; border-radius:10px; background:#f2f4ee; }
     .pair-summary span { display:block; color:var(--muted); font-size:8px; font-weight:850; letter-spacing:.05em; text-transform:uppercase; }
     .pair-summary strong { display:block; overflow:hidden; margin-top:3px; font-size:12px; text-overflow:ellipsis; white-space:nowrap; font-variant-numeric:tabular-nums; }
@@ -376,7 +376,7 @@
 
     <section class="section strategy-card" aria-labelledby="strategyHeading">
       <div class="strategy-title">
-        <div><div class="eyebrow">Strategy rules</div><h3 id="strategyHeading">Cross-pair ask-sum entry</h3></div>
+        <div><div class="eyebrow">Strategy rules</div><h3 id="strategyHeading">Inverse-pair exits + ask-sum entries</h3></div>
         <span class="paper-stamp">PAPER SIMULATION</span>
       </div>
       <div>
@@ -384,7 +384,8 @@
           <div class="strategy-step"><span class="step-num">1</span><div><strong>Evaluate all four combinations independently</strong><span>BTC UP + ETH DOWN, ETH UP + BTC DOWN, BTC UP + ETH UP, and BTC DOWN + ETH DOWN can each trigger in the same 5-minute window.</span></div></div>
           <div class="strategy-step"><span class="step-num">2</span><div><strong>Enter when combined best asks are below $0.80</strong><span>Each pair has one entry per window. Both current best asks must be fresh, and their sum must be strictly below $0.80.</span></div></div>
           <div class="strategy-step"><span class="step-num">3</span><div><strong>Always buy 100 shares on each leg</strong><span>Every qualifying entry stays flat at 100 requested shares per leg, regardless of previous wins or losses. Paper taker sweeps are capped at $0.99.</span></div></div>
-          <div class="strategy-step"><span class="step-num">4</span><div><strong>Hold every filled leg for official resolution</strong><span>There is no take-profit or stop-loss. At window end, each position waits for the result of its exact BTC or ETH market.</span></div></div>
+          <div class="strategy-step"><span class="step-num">4</span><div><strong>Exit one pair without forcing its inverse to sell</strong><span>If this pair’s own combined asks reach $1.22, sell its remaining shares against visible bids. Its inverse enters only when its own fresh asks are below $0.80.</span></div></div>
+          <div class="strategy-step"><span class="step-num">5</span><div><strong>Keep the previous take-profit, stop, and resolution rules</strong><span>At a $0.99 best bid, count $1 per remaining share. An empty fresh bid book counts as a $0 stop. Any shares still open at window end go to official resolution.</span></div></div>
         </div>
         <div class="strategy-meta">
           <span class="meta-pill">Taker entry fees included</span>
@@ -400,7 +401,7 @@
         <div class="list-scroll" id="eventList"><div class="empty">No activity yet.</div></div>
       </article>
     </section>
-    <footer>Paper simulation only · No real CLOB orders · History is saved in persistent Railway storage · Legs still open at window end wait for official resolution</footer>
+    <footer>Paper simulation only · No real CLOB orders · History is saved in persistent Railway storage · Open shares at window end wait for official resolution</footer>
   </main>
 
   <script>
@@ -505,9 +506,10 @@
       function tradeStatusText(cycle, legs) {
         const statuses = legs.map(leg => String(leg.position?.status || leg.order?.status || '').toUpperCase());
         if (statuses.some(status => status === 'PENDING_RESOLUTION')) return 'Pending resolution';
-        if (statuses.length && statuses.every(status => ['RESOLVED_WIN', 'RESOLVED_LOSS'].includes(status))) {
-          return 'Resolved';
-        }
+        if (statuses.length && statuses.every(status => [
+          'TAKE_PROFIT', 'STOP_LOSS', 'PAIR_REVERSE_EXIT', 'RESOLVED_WIN', 'RESOLVED_LOSS',
+        ].includes(status))) return statuses.every(status => ['RESOLVED_WIN', 'RESOLVED_LOSS'].includes(status))
+          ? 'Resolved' : 'Closed';
         return String(cycle?.status || 'OPEN').replaceAll('_', ' ');
       }
 
@@ -518,30 +520,38 @@
         const status = String(position?.status || order?.status || 'NO_FILL').toUpperCase();
         const isActive = ['OPEN', 'PENDING_RESOLUTION'].includes(status);
         const pnl = isActive
-          ? position.unrealizedPnl
+          ? (Number(position?.unrealizedPnl || 0) + Number(position?.partialRealizedPnl || 0))
           : position?.realizedPnl;
         let statusLabel = status.replaceAll('_', ' ');
-        let statusClass = status === 'RESOLVED_WIN' ? 'win' : status === 'RESOLVED_LOSS' ? 'loss' : '';
+        let statusClass = hasNumber(pnl) ? (Number(pnl) >= 0 ? 'win' : 'loss') : '';
         let markText = 'No position filled';
         if (status === 'OPEN') {
           statusLabel = hasNumber(pnl)
             ? `Open · provisional ${Number(pnl) >= 0 ? 'profit' : 'loss'}`
             : 'Open · waiting for mark';
           statusClass = hasNumber(pnl) ? (Number(pnl) >= 0 ? 'win' : 'loss') : '';
-          markText = 'Held to resolution · no TP/SL';
+          markText = Number(position?.soldShares) > 0
+            ? `${shares(position.soldShares)} sold; retrying/holding ${shares(position.shares)} remaining`
+            : 'Watching $0.99 take-profit, empty-book stop, and inverse-pair exit';
         } else if (status === 'PENDING_RESOLUTION') {
           statusLabel = 'Awaiting official result';
           const wait = elapsedTime(position?.pendingResolutionAt, latestState?.now);
           markText = `Last pre-resolution mark · not final${wait ? ` · waiting ${wait}` : ''}`;
         } else if (status === 'RESOLVED_WIN') markText = 'Official resolution · WON';
         else if (status === 'RESOLVED_LOSS') markText = 'Official resolution · LOST';
-        const filled = position?.shares ?? order?.filledShares ?? leg.filledShares;
+        else if (status === 'TAKE_PROFIT') markText = 'Take-profit payout · $1 per remaining share';
+        else if (status === 'STOP_LOSS') markText = 'Empty bid book · $0 stop-loss';
+        else if (status === 'PAIR_REVERSE_EXIT') markText = `Sold at average ${money(position?.exitPrice, 3)} after pair ask-sum trigger`;
+        const filled = position?.initialShares ?? order?.filledShares ?? leg.filledShares;
+        const sold = Number(position?.soldShares) || 0;
         const requested = position?.requestedShares ?? order?.requestedShares ?? leg.requestedShares;
         const avg = position?.entryPrice ?? order?.averagePrice ?? leg.averageEntry;
-        const total = Number(position?.totalCost || 0) + Number(position?.fees || 0);
-        const priceLabel = status === 'PENDING_RESOLUTION'
-          ? 'Last bid before resolution'
-          : status.startsWith('RESOLVED_') ? 'Resolution payout' : 'Live best bid';
+        const total = Number(position?.initialCost ?? position?.totalCost ?? 0)
+          + Number(position?.initialFees ?? position?.fees ?? 0);
+        const priceLabel = status === 'PENDING_RESOLUTION' ? 'Last bid before resolution'
+          : ['RESOLVED_WIN', 'RESOLVED_LOSS'].includes(status) ? 'Resolution payout'
+            : ['TAKE_PROFIT', 'STOP_LOSS', 'PAIR_REVERSE_EXIT'].includes(status) ? 'Exit price'
+              : 'Live best bid';
         const pnlLabel = status === 'PENDING_RESOLUTION'
           ? 'Last floating P&L'
           : isActive ? 'Floating P&L' : 'Realized P&L';
@@ -551,7 +561,9 @@
             <div><span>Filled / requested</span><strong>${shares(filled)} / ${shares(requested)}</strong></div>
             <div><span>Average entry</span><strong>${money(avg, 4)}</strong></div>
             <div><span>Cost + entry fees</span><strong>${position ? money(total, 3) : '—'}</strong></div>
-            <div><span>${priceLabel}</span><strong>${money(position?.markBid, 3)}</strong></div>
+            <div><span>${isActive ? 'Sold / remaining' : 'Sold / closed'}</span><strong>${position ? `${shares(sold)} / ${shares(isActive ? position.shares : position.closedSharesAtExit)}` : '—'}</strong></div>
+            <div><span>${priceLabel}</span><strong>${money(position?.exitPrice ?? position?.markBid, 3)}</strong></div>
+            <div><span>Exit fees</span><strong>${money(position?.exitFees, 3)}</strong></div>
           </div>
           <div class="trade-pnl"><span>${pnlLabel}</span><strong class="${signClass(pnl)}">${money(pnl)}</strong></div>
           <div class="sizing-note">${safe(markText)}${position?.resolutionMarkAt ? ` · ${safe(clockTime(position.resolutionMarkAt))}` : ''}</div>
@@ -561,14 +573,15 @@
       function tradeCardHtml(cycle, recent = false, currentWindowStart = null) {
         const legs = Array.isArray(cycle.legs) ? cycle.legs : [];
         const pnlValues = legs.map(leg => ['OPEN', 'PENDING_RESOLUTION'].includes(leg.position?.status)
-          ? leg.position.unrealizedPnl : leg.position?.realizedPnl);
+          ? Number(leg.position.unrealizedPnl || 0) + Number(leg.position.partialRealizedPnl || 0)
+          : leg.position?.realizedPnl);
         const knownPnlValues = pnlValues.filter(hasNumber);
         const pnl = knownPnlValues.length
           ? knownPnlValues.reduce((sum, value) => sum + Number(value), 0)
           : cycle.realizedPnl;
         const status = tradeStatusText(cycle, legs);
         const statusClass = status === 'Resolved'
-          ? cycle.sizingOutcome === 'BOTH_LEGS_LOST' ? 'loss' : 'win'
+          ? cycle.sizingOutcome === 'PAIR_LOSS' ? 'loss' : 'win'
           : '';
         const pnlLabel = status === 'Resolved' ? 'Pair realized P&L'
           : status === 'Pending resolution' ? 'Last pair mark P&L'
@@ -596,24 +609,25 @@
           const nextShares = hasNumber(pair.nextSharesPerLeg) ? Number(pair.nextSharesPerLeg) : 100;
           const status = String(pair.status || 'WAITING_FOR_QUOTES').replaceAll('_', ' ');
           const outcome = String(pair.lastOutcome || '').replaceAll('_', ' ');
-          const outcomeClass = pair.lastOutcome === 'BOTH_LEGS_LOST' ? 'loss' :
+          const outcomeClass = pair.lastOutcome === 'PAIR_LOSS' ? 'loss' :
             pair.lastOutcome ? 'win' : '';
           const stateClass = pair.status === 'CLOSED'
-            ? pair.currentCycle?.sizingOutcome === 'BOTH_LEGS_LOST' ? 'loss' : 'active'
-            : ['ENTERED', 'ENTRY_READY', 'PENDING_RESOLUTION'].includes(pair.status) ? 'active' : '';
+            ? pair.currentCycle?.sizingOutcome === 'PAIR_LOSS' ? 'loss' : 'active'
+            : ['ENTERED', 'ENTRY_READY', 'PENDING_RESOLUTION', 'REVERSAL_EXITING'].includes(pair.status) ? 'active' : '';
           const current = pair.currentCycle;
           const trades = Array.isArray(pair.trades) ? pair.trades : [];
           const history = trades.filter(trade => trade.id !== current?.id).slice(0, 6);
           const seconds = hasNumber(pair.secondsRemaining) ? `${Math.ceil(pair.secondsRemaining)}s left` : 'Window waiting';
           return `<article class="pair-card" data-pair="${safe(id)}">
             <div class="pair-head">
-              <div><h3>${safe(label(pair.label))}</h3><small>${safe(seconds)} · ${pair.fresh ? 'fresh books' : 'waiting for fresh books'}</small></div>
+              <div><h3>${safe(label(pair.label))}</h3><small>Inverse: ${safe(label(pair.inversePairLabel, '—'))} · ${safe(seconds)}</small></div>
               <span class="pair-state ${stateClass}">${safe(status)}</span>
             </div>
             <div class="pair-body">
               <div class="pair-summary">
                 <div><span>Current ask sum</span><strong>${money(pair.combinedAsk, 3)}</strong></div>
                 <div><span>Entry trigger</span><strong>&lt; $0.800</strong></div>
+                <div><span>Own pair exit</span><strong>≥ $1.220</strong></div>
                 <div><span>Next size</span><strong>${shares(nextShares)} / leg</strong></div>
               </div>
               ${current ? tradeCardHtml(current, false, pair.windowStart) : '<div class="trade-empty">No entry in this window. Waiting for the ask sum trigger.</div>'}
@@ -663,12 +677,12 @@
               <span class="badge-side ${side === 'DOWN' ? 'down' : ''}">${safe(label(position.status))}</span>
             </div>
             <div class="position-values">
-              <div><span>Shares</span><strong>${shares(position.shares)}</strong></div>
+              <div><span>Shares remaining</span><strong>${shares(position.shares)}</strong></div>
               <div><span>Entry</span><strong>${money(position.entryPrice, 3)}</strong></div>
               <div><span>Mark bid</span><strong>${money(position.markBid, 3)}</strong></div>
             </div>
             <div class="position-values"><div><span>Total cost</span><strong>${money(position.totalCost)}</strong></div><div><span>Mark status</span><strong>${safe(label(position.markStatus))}</strong></div></div>
-            <div class="position-pnl"><span>Floating P&amp;L</span><strong class="${signClass(pnl)}">${money(pnl)}</strong></div>
+            <div class="position-pnl"><span>Total open P&amp;L</span><strong class="${signClass(Number(pnl || 0) + Number(position.partialRealizedPnl || 0))}">${money(Number(pnl || 0) + Number(position.partialRealizedPnl || 0))}</strong></div>
           </article>`;
         }).join('');
       }
@@ -683,7 +697,7 @@
         $('orderList').innerHTML = list.slice(0, 40).map((order) => `<div class="activity-line">
           <span class="activity-dot"></span>
           <div class="activity-copy"><strong>${safe(label(order.action))} · ${safe(label(order.asset))} ${safe(label(order.timeframe))} ${safe(label(order.side))}</strong>
-            <small>${safe(clockTime(order.placedAt))} · avg ${money(order.fillPrice, 4)} · fee ${money(order.fees, 4)} · ${shares(order.filledShares)}/${shares(order.requestedShares)} shares · ends ${safe(clockTime(order.windowEnd))}</small></div>
+            <small>${safe(clockTime(order.createdAt || order.placedAt))} · avg ${money(order.averagePrice ?? order.fillPrice, 4)} · fee ${money(order.fee ?? order.fees, 4)} · ${shares(order.filledShares)}/${shares(order.requestedShares)} shares · ends ${safe(clockTime(order.windowEnd))}</small></div>
           <span class="activity-state">${safe(label(order.status))}</span>
         </div>`).join('');
       }
