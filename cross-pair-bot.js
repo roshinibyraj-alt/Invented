@@ -8,12 +8,7 @@ const BASE_SHARES = config.CROSS_PAIR_BASE_SHARES;
 const ASK_SUM_THRESHOLD = config.CROSS_PAIR_ENTRY_ASK_SUM_MAX;
 const SWEEP_CAP = config.CROSS_PAIR_TAKER_SWEEP_CAP;
 const QUOTE_MAX_AGE_MS = config.DIP_BOUNCE_MAX_QUOTE_AGE_MS;
-const TAKE_PROFIT_BID = config.DIP_BOUNCE_TAKE_PROFIT_BID;
-const TAKE_PROFIT_PAYOUT = config.DIP_BOUNCE_TAKE_PROFIT_PAYOUT;
-const STOP_LOSS_BID = 0;
 const CLOSED_POSITION_STATUSES = new Set([
-  'TAKE_PROFIT',
-  'STOP_LOSS',
   'RESOLVED_WIN',
   'RESOLVED_LOSS',
 ]);
@@ -53,16 +48,16 @@ const PAIRS = Object.freeze([
 ]);
 
 const STRATEGY = Object.freeze({
-  id: 'btc-eth-four-pair-fixed-100-paper',
+  id: 'btc-eth-four-pair-fixed-100-resolution-paper',
   name: 'BTC/ETH four-pair fixed-size paper strategy',
-  version: 'four-pairs-080-fixed-100-tp099-sl000-v3',
+  version: 'four-pairs-080-fixed-100-resolution-only-v4',
   assets: ['BTC', 'ETH'],
   timeframes: ['5m'],
   sharesPerLeg: BASE_SHARES,
   entryAskSumBelow: ASK_SUM_THRESHOLD,
   orderType: 'TAKER',
   sweepCap: SWEEP_CAP,
-  exit: 'Close a leg at a $0.99 best bid for a $1.00/share payout, or at $0.00 when its fresh book has no bid. Any leg still open at window end waits for official resolution.',
+  exit: 'No take-profit or stop-loss. Hold every filled leg through the window and settle only from official Polymarket resolution.',
   sizing: 'Always 100 shares per leg on every entry in all four cross-pairs. No size progression after wins or losses.',
   execution: 'PAPER ONLY',
 });
@@ -216,77 +211,12 @@ class CrossPairBot extends DipBounceBot {
     this.evaluateCrossPairs(this.now());
   }
 
-  checkTakeProfits(record, side, quote, now) {
-    if (!record?.market || record.marketStatus !== 'OPEN') return;
-    if (!Number.isFinite(Number(quote?.bestBid)) ||
-        Number(quote.bestBid) < TAKE_PROFIT_BID) return;
-    const marketId = String(record.market.id || record.market.slug);
-    for (const position of this.positions) {
-      if (position.marketId !== marketId || position.side !== side ||
-          position.status !== 'OPEN') continue;
-      this.closePosition(position, {
-        status: 'TAKE_PROFIT',
-        exitPrice: TAKE_PROFIT_BID,
-        exitPayout: TAKE_PROFIT_PAYOUT,
-        exitReason: 'TAKE_PROFIT_099',
-        now,
-        quote,
-        message: `Take-profit hit at $${TAKE_PROFIT_BID.toFixed(2)} bid; credited $${TAKE_PROFIT_PAYOUT.toFixed(2)} per share.`,
-      });
-    }
+  checkTakeProfits() {
+    // This strategy intentionally has no intra-window take-profit.
   }
 
-  checkStopLosses(record, side, quote, now) {
-    if (!record?.market || record.marketStatus !== 'OPEN') return;
-    const fresh = Number.isFinite(Number(quote?.updatedAt)) &&
-      now - Number(quote.updatedAt) <= QUOTE_MAX_AGE_MS;
-    if (!fresh || (quote.bestBid != null &&
-        (!Number.isFinite(Number(quote.bestBid)) || Number(quote.bestBid) > STOP_LOSS_BID))) return;
-    const marketId = String(record.market.id || record.market.slug);
-    for (const position of this.positions) {
-      if (position.marketId !== marketId || position.side !== side ||
-          position.status !== 'OPEN') continue;
-      this.closePosition(position, {
-        status: 'STOP_LOSS',
-        exitPrice: STOP_LOSS_BID,
-        exitPayout: 0,
-        exitReason: 'STOP_LOSS_000',
-        now,
-        quote,
-        message: 'Stop-loss hit: fresh book has no bid, so the position closed at $0.00 payout.',
-      });
-    }
-  }
-
-  closePosition(position, { status, exitPrice, exitPayout, exitReason, now, quote, message }) {
-    if (!position || position.status !== 'OPEN') return false;
-    const payout = Number(position.shares || 0) * Number(exitPayout || 0);
-    this.cash = round(this.cash + payout);
-    position.status = status;
-    position.exitAt = now;
-    position.exitPrice = exitPrice;
-    position.exitPayout = exitPayout;
-    position.exitReason = exitReason;
-    position.realizedPnl = round(
-      payout - Number(position.totalCost || 0) - Number(position.fees || 0)
-        + Number(position.estimatedMakerRebate || 0),
-    );
-    position.markBid = exitPrice;
-    position.markUpdatedAt = quote?.updatedAt ?? now;
-    position.markStatus = 'CLOSED';
-    position.unrealizedPnl = null;
-    this.updateCycleAfterPositionClose(position, now);
-    this.log(`${position.asset} ${position.side}: ${message}`, {
-      asset: position.asset,
-      timeframe: position.timeframe,
-      side: position.side,
-      outcome: position.realizedPnl >= 0 ? 'good' : 'bad',
-      type: status,
-      now,
-    });
-    this.updateAccountMetrics(now, true);
-    this.scheduleLedgerSave();
-    return true;
+  checkStopLosses() {
+    // This strategy intentionally has no intra-window stop-loss.
   }
 
   updateCycleAfterPositionClose(position, now) {
@@ -485,7 +415,7 @@ class CrossPairBot extends DipBounceBot {
     pairState.cycleId = cycleId;
     pairState.status = cycle.legPositionIds.length ? 'IN_POSITION' : 'NO_FILL';
     pairState.lastReason = cycle.legPositionIds.length
-      ? `Bought ${cycle.legs.map(leg => `${leg.asset} ${leg.side}: ${leg.filledShares}/${sharesPerLeg}`).join(' · ')}; TP $${TAKE_PROFIT_BID.toFixed(2)}, empty-bid SL $0.00, then resolution if still open.`
+      ? `Bought ${cycle.legs.map(leg => `${leg.asset} ${leg.side}: ${leg.filledShares}/${sharesPerLeg}`).join(' · ')}; holding all filled shares for official resolution.`
       : 'The combined-ask trigger fired, but neither visible ask book could fill shares.';
 
     if (cycle.legPositionIds.length) {
@@ -501,7 +431,7 @@ class CrossPairBot extends DipBounceBot {
     this.entryTriggerSide = pair.id;
     this.entryTriggerReason = `${pair.label} combined asks ${marketPair.askSum.toFixed(3)}.`;
     this.log(cycle.legPositionIds.length
-      ? `${pair.label} entered at combined asks $${marketPair.askSum.toFixed(3)}; TP $${TAKE_PROFIT_BID.toFixed(2)}, empty-bid SL $0.00, resolution fallback.`
+      ? `${pair.label} entered at combined asks $${marketPair.askSum.toFixed(3)}; no TP or SL, holding for official resolution.`
       : `${pair.label} qualified at $${marketPair.askSum.toFixed(3)}, but no ask depth filled.`, {
       timeframe: '5m',
       outcome: cycle.legPositionIds.length ? 'good' : 'neutral',
@@ -519,9 +449,24 @@ class CrossPairBot extends DipBounceBot {
   }
 
   expireMarket(record, now) {
-    super.expireMarket(record, now);
     if (!record?.market) return;
     const marketId = String(record.market.id || record.market.slug);
+    for (const position of this.positions) {
+      if (position.marketId !== marketId || position.status !== 'OPEN') continue;
+      position.resolutionMarkBid = position.markBid;
+      position.resolutionMarkAt = position.markUpdatedAt;
+      position.resolutionMarkPnl = position.unrealizedPnl;
+    }
+    super.expireMarket(record, now);
+    for (const position of this.positions) {
+      if (position.marketId !== marketId || position.status !== 'PENDING_RESOLUTION') continue;
+      position.markStatus = position.resolutionMarkBid == null
+        ? 'PENDING_RESOLUTION'
+        : 'LAST_MARK_PENDING_RESOLUTION';
+      position.unrealizedPnl = Number.isFinite(Number(position.resolutionMarkPnl))
+        ? Number(position.resolutionMarkPnl)
+        : null;
+    }
     for (const cycle of this.crossPairCycles) {
       const hasMarketLeg = cycle.legPositionIds.some(id =>
         this.positions.some(position => position.id === id && position.marketId === marketId));
@@ -554,8 +499,8 @@ class CrossPairBot extends DipBounceBot {
   applyPairSizing(cycle, positions, now) {
     if (cycle.sizingApplied || positions.some(position => !CLOSED_POSITION_STATUSES.has(position.status))) return;
     const bothLost = positions.length === 2 &&
-      positions.every(position => ['STOP_LOSS', 'RESOLVED_LOSS'].includes(position.status));
-    const hasWin = positions.some(position => ['TAKE_PROFIT', 'RESOLVED_WIN'].includes(position.status));
+      positions.every(position => position.status === 'RESOLVED_LOSS');
+    const hasWin = positions.some(position => position.status === 'RESOLVED_WIN');
     const sizing = this.crossPairSizing[cycle.pairId] || emptySizing();
     sizing.nextShares = BASE_SHARES;
     cycle.sizingOutcome = bothLost ? 'BOTH_LEGS_LOST'
@@ -625,6 +570,20 @@ class CrossPairBot extends DipBounceBot {
       }
       : { ...originalSnapshot, strategy: { ...originalSnapshot.strategy, id: BASE_STRATEGY_ID } };
     super.restoreLedger(compatibilityLedger);
+    for (const position of this.positions) {
+      if (position.status !== 'PENDING_RESOLUTION' ||
+          !Number.isFinite(Number(position.resolutionMarkPnl))) continue;
+      position.unrealizedPnl = Number(position.resolutionMarkPnl);
+      position.markBid = Number.isFinite(Number(position.resolutionMarkBid))
+        ? Number(position.resolutionMarkBid)
+        : position.markBid;
+      position.markUpdatedAt = Number.isFinite(Number(position.resolutionMarkAt))
+        ? Number(position.resolutionMarkAt)
+        : position.markUpdatedAt;
+      position.markStatus = position.markBid == null
+        ? 'PENDING_RESOLUTION'
+        : 'LAST_MARK_PENDING_RESOLUTION';
+    }
     this.strategyId = STRATEGY.id;
     this.strategyName = STRATEGY.name;
   }
@@ -690,7 +649,7 @@ class CrossPairBot extends DipBounceBot {
       entry: 'Monitor all four BTC/ETH UP/DOWN combinations independently. Enter a pair when its fresh best asks sum to strictly less than $0.80; one entry per pair per 5-minute window.',
       fill: 'Paper taker sweep of visible asks up to $0.99. Actual filled quantity, average entry, and market taker fees are recorded; unfilled remainder is cancelled.',
       sizing: STRATEGY.sizing,
-      settlement: 'Each leg closes independently at the $0.99 take-profit or on a fresh empty bid at $0.00. Any still-open leg is sent to official resolution at window end; sizing updates after both pair legs close.',
+      settlement: 'There is no intra-window take-profit or stop-loss. Each open leg moves to official resolution at window end; sizing updates after both pair legs resolve.',
       execution: 'PAPER ONLY',
     };
     state.sizingByAsset = undefined;
@@ -774,7 +733,9 @@ class CrossPairBot extends DipBounceBot {
         .filter(item => item.pairId === pair.id)
         .slice(0, 8)
         .map(cycleDetails);
-      const cycle = pairCycles.find(item => item.windowStart === marketPair.windowStart) || null;
+      const cycle = pairCycles.find(item => ['OPEN', 'PENDING_RESOLUTION'].includes(item.status))
+        || pairCycles.find(item => item.windowStart === marketPair.windowStart)
+        || null;
       const legs = pair.legs.map(leg => {
         const record = this.records.get(`${leg.asset}:5m`);
         const quote = record?.quotes?.[leg.side] || {};

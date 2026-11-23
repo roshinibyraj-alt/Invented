@@ -114,7 +114,7 @@ test('all pair sizes stay at 100 after wins or losses', () => {
   assert.equal(nextCycle.sharesPerLeg, 100);
 });
 
-test('a $0.99 best bid closes a leg with a $1.00 per-share payout', () => {
+test('a $0.99 best bid does not close a leg before official resolution', () => {
   const { bot, getNow } = createBot();
   bot.evaluateCrossPairs(getNow());
   const cycle = bot.crossPairCycles.find(item => item.pairId === 'btc-up-eth-down');
@@ -126,15 +126,15 @@ test('a $0.99 best bid closes a leg with a $1.00 per-share payout', () => {
 
   bot.checkTakeProfits(record, position.side, quote, getNow() + 100);
 
-  assert.equal(position.status, 'TAKE_PROFIT');
-  assert.equal(position.exitPrice, 0.99);
-  assert.equal(position.exitPayout, 1);
-  assert.equal(position.realizedPnl, position.shares - position.totalCost - position.fees);
-  assert.equal(cycle.status, 'OPEN', 'the paired leg is still open');
+  assert.equal(position.status, 'OPEN');
+  assert.equal(position.exitPrice, null);
+  assert.equal(position.exitPayout, null);
+  assert.equal(position.realizedPnl, null);
+  assert.equal(cycle.status, 'OPEN');
   assert.equal(bot.crossPairSizing[cycle.pairId].nextShares, 100);
 });
 
-test('a fresh empty bid closes at zero without changing the fixed size', () => {
+test('an empty bid does not stop or close a position', () => {
   const { bot, getNow } = createBot();
   bot.evaluateCrossPairs(getNow());
   const cycle = bot.crossPairCycles.find(item => item.pairId === 'btc-up-eth-down');
@@ -146,32 +146,45 @@ test('a fresh empty bid closes at zero without changing the fixed size', () => {
     quote.bestBid = null;
     quote.updatedAt = getNow() + 100;
     bot.checkStopLosses(record, position.side, quote, getNow() + 100);
-    assert.equal(position.status, 'STOP_LOSS');
-    assert.equal(position.exitPrice, 0);
-    assert.equal(position.exitPayout, 0);
+    assert.equal(position.status, 'OPEN');
+    assert.equal(position.exitPrice, null);
+    assert.equal(position.exitPayout, null);
+    assert.equal(position.realizedPnl, null);
   }
 
-  assert.equal(cycle.status, 'CLOSED');
-  assert.equal(cycle.sizingOutcome, 'BOTH_LEGS_LOST');
+  assert.equal(cycle.status, 'OPEN');
+  assert.equal(cycle.sizingOutcome, undefined);
   assert.equal(bot.crossPairSizing[cycle.pairId].nextShares, 100);
   assert.ok(Object.values(bot.crossPairSizing).every(item => item.nextShares === 100));
 });
 
-test('a stale empty bid does not trigger the stop-loss', () => {
+test('positions keep their final live mark while awaiting resolution', () => {
   const { bot, getNow } = createBot();
   bot.evaluateCrossPairs(getNow());
-  const position = bot.positions.find(item => item.pairId === 'btc-up-eth-down');
+  const cycle = bot.crossPairCycles.find(item => item.pairId === 'btc-up-eth-down');
+  const position = bot.positions.find(item => item.id === cycle.legPositionIds[0]);
   const record = bot.records.get(`${position.asset}:5m`);
   const quote = record.quotes[position.side];
-  quote.bestBid = null;
-  quote.updatedAt = getNow() - CrossPairBot.constants.QUOTE_MAX_AGE_MS - 1;
+  quote.bestBid = 0.31;
+  quote.updatedAt = getNow() + 20;
+  bot.markPositions(getNow() + 20, record.key, position.side);
+  const lastMarkPnl = position.unrealizedPnl;
 
-  bot.checkStopLosses(record, position.side, quote, getNow());
+  bot.expireMarket(record, START + WINDOW_MS);
+  assert.equal(position.status, 'PENDING_RESOLUTION');
+  assert.equal(position.markBid, 0.31);
+  assert.equal(position.unrealizedPnl, lastMarkPnl);
+  assert.equal(position.markStatus, 'LAST_MARK_PENDING_RESOLUTION');
 
-  assert.equal(position.status, 'OPEN');
+  const restored = new CrossPairBot({ now: getNow });
+  restored.restoreLedger(bot.exportLedger());
+  const restoredPosition = restored.positions.find(item => item.id === position.id);
+  assert.equal(restoredPosition.status, 'PENDING_RESOLUTION');
+  assert.equal(restoredPosition.markBid, 0.31);
+  assert.equal(restoredPosition.unrealizedPnl, lastMarkPnl);
 });
 
-test('legs not closed by TP or SL wait for official resolution at window end', () => {
+test('open positions wait for official resolution at window end', () => {
   const { bot, getNow } = createBot();
   bot.evaluateCrossPairs(getNow());
   const cycle = bot.crossPairCycles.find(item => item.pairId === 'btc-up-eth-down');
@@ -197,6 +210,8 @@ test('a pair waits for its unresolved previous cycle, without blocking the other
   assert.ok(cycle);
   assert.ok(otherCycle);
   settlePair(bot, otherCycle, 'DOWN', 'UP', getNow() + 500);
+  bot.expireMarket(bot.records.get('BTC:5m'), START + WINDOW_MS);
+  bot.expireMarket(bot.records.get('ETH:5m'), START + WINDOW_MS);
 
   const nextStart = START + WINDOW_MS;
   const nextNow = nextStart + 1000;
@@ -213,6 +228,9 @@ test('a pair waits for its unresolved previous cycle, without blocking the other
   assert.equal(bot.crossPairCycles.filter(item => item.pairId === 'btc-up-eth-up').length, 1);
   assert.equal(bot.crossPairCycles.filter(item => item.pairId === 'btc-down-eth-down').length, 1);
   assert.equal(bot.pairWindowStates['btc-up-eth-down'].status, 'WAITING_FOR_RESOLUTION');
+  const pairCard = bot.snapshot(nextNow).crossPairs.find(item => item.id === 'btc-up-eth-down');
+  assert.equal(pairCard.currentCycle.status, 'PENDING_RESOLUTION');
+  assert.ok(pairCard.currentCycle.legs.some(leg => leg.position?.status === 'PENDING_RESOLUTION'));
 });
 
 test('the new ledger stores pair sizing and restores open pair positions', () => {

@@ -301,7 +301,7 @@
       </div>
       <div class="hero-side">
         <div class="hero-stat"><span>Markets live</span><strong id="marketLiveCount">— / 2</strong></div>
-        <div class="hero-stat"><span>Open positions</span><strong id="openPositionCount">—</strong></div>
+        <div class="hero-stat"><span>Active positions</span><strong id="openPositionCount">—</strong></div>
         <div class="hero-stat wide"><span>Current status</span><strong id="statusReason">Waiting for the first state update</strong></div>
       </div>
     </section>
@@ -311,30 +311,6 @@
       <button class="retry" id="retryButton" type="button">Retry now</button>
     </div>
 
-    <section class="section" aria-labelledby="positionsHeading">
-      <div class="section-head">
-        <div><div class="section-kicker">Live first</div><h2 id="positionsHeading">Cross-pair trade cards</h2></div>
-        <div class="section-note">Entry, both legs, P&amp;L, and exit state per pair</div>
-      </div>
-      <div class="pair-grid" id="sizingGrid" aria-label="Cross-pair trades and sizing">
-        <div class="loading-card" aria-label="Loading BTC UP plus ETH DOWN"></div>
-        <div class="loading-card" aria-label="Loading ETH UP plus BTC DOWN"></div>
-        <div class="loading-card" aria-label="Loading BTC UP plus ETH UP"></div>
-        <div class="loading-card" aria-label="Loading BTC DOWN plus ETH DOWN"></div>
-      </div>
-      <p class="persistence-note" id="ledgerPersistence" aria-live="polite">Paper history storage status: checking</p>
-      <div class="split">
-        <article class="panel">
-          <div class="panel-head"><div><h3>All open positions</h3><p>Quick cross-check of live marks and pending outcomes</p></div><span class="count-chip" id="positionCount">0 positions</span></div>
-          <div class="position-list" id="positionList"><div class="empty">Loading paper positions…</div></div>
-        </article>
-        <article class="panel">
-          <div class="panel-head"><div><h3>Recent orders</h3><p>Actual simulated taker fills</p></div><span class="count-chip" id="orderCount">0 orders</span></div>
-          <div class="list-scroll" id="orderList"><div class="empty">Loading order history…</div></div>
-        </article>
-      </div>
-    </section>
-
     <section class="section" aria-label="Paper account summary">
       <div class="section-head">
         <div><div class="section-kicker">Paper account</div><h2>Balance &amp; performance</h2></div>
@@ -343,19 +319,8 @@
       <div class="metrics">
         <article class="metric"><div class="metric-label">Equity</div><div class="metric-value" id="equity">—</div><small class="metric-detail">Cash + marked positions</small></article>
         <article class="metric"><div class="metric-label">Available cash</div><div class="metric-value" id="cash">—</div><small class="metric-detail" id="capitalDetail">Paper balance</small></article>
-        <article class="metric"><div class="metric-label">Realized P&amp;L</div><div class="metric-value" id="realized">—</div><small class="metric-detail">Closed paper trades</small></article>
-        <article class="metric"><div class="metric-label">Unrealized P&amp;L</div><div class="metric-value" id="unrealized">—</div><small class="metric-detail">Current open marks</small></article>
-      </div>
-    </section>
-
-    <section class="section" aria-labelledby="marketsHeading">
-      <div class="section-head">
-        <div><div class="section-kicker">BTC + ETH · 5m only</div><h2 id="marketsHeading">Live market books</h2></div>
-        <div class="section-note">Combined best asks trigger each cross-pair</div>
-      </div>
-      <div class="section-note" id="marketCount">0 windows</div>
-      <div class="market-grid" id="marketGrid" aria-live="polite">
-        <div class="loading-card" aria-label="Loading markets"></div><div class="loading-card" aria-label="Loading markets"></div>
+        <article class="metric"><div class="metric-label">Realized P&amp;L</div><div class="metric-value" id="realized">—</div><small class="metric-detail">Resolved paper trades</small></article>
+        <article class="metric"><div class="metric-label">Unrealized P&amp;L</div><div class="metric-value" id="unrealized">—</div><small class="metric-detail">Current live marks</small></article>
       </div>
     </section>
 
@@ -378,6 +343,41 @@
       </article>
     </section>
 
+    <section class="section" aria-labelledby="positionsHeading">
+      <div class="section-head">
+        <div><div class="section-kicker">Four live pair boxes</div><h2 id="positionsHeading">Cross-pair positions</h2></div>
+        <div class="section-note">Both legs, cost, live marks, and resolution status</div>
+      </div>
+      <div class="pair-grid" id="sizingGrid" aria-label="Cross-pair trades and sizing">
+        <div class="loading-card" aria-label="Loading BTC UP plus ETH DOWN"></div>
+        <div class="loading-card" aria-label="Loading ETH UP plus BTC DOWN"></div>
+        <div class="loading-card" aria-label="Loading BTC UP plus ETH UP"></div>
+        <div class="loading-card" aria-label="Loading BTC DOWN plus ETH DOWN"></div>
+      </div>
+      <p class="persistence-note" id="ledgerPersistence" aria-live="polite">Paper history storage status: checking</p>
+      <div class="split">
+        <article class="panel">
+          <div class="panel-head"><div><h3>All open positions</h3><p>Quick cross-check of live marks and pending outcomes</p></div><span class="count-chip" id="positionCount">0 positions</span></div>
+          <div class="position-list" id="positionList"><div class="empty">Loading paper positions…</div></div>
+        </article>
+        <article class="panel">
+          <div class="panel-head"><div><h3>Recent orders</h3><p>Actual simulated taker fills</p></div><span class="count-chip" id="orderCount">0 orders</span></div>
+          <div class="list-scroll" id="orderList"><div class="empty">Loading order history…</div></div>
+        </article>
+      </div>
+    </section>
+
+    <section class="section" aria-labelledby="marketsHeading">
+      <div class="section-head">
+        <div><div class="section-kicker">BTC + ETH · 5m only</div><h2 id="marketsHeading">Live market books</h2></div>
+        <div class="section-note">Combined best asks trigger each cross-pair</div>
+      </div>
+      <div class="section-note" id="marketCount">0 windows</div>
+      <div class="market-grid" id="marketGrid" aria-live="polite">
+        <div class="loading-card" aria-label="Loading markets"></div><div class="loading-card" aria-label="Loading markets"></div>
+      </div>
+    </section>
+
     <section class="section strategy-card" aria-labelledby="strategyHeading">
       <div class="strategy-title">
         <div><div class="eyebrow">Strategy rules</div><h3 id="strategyHeading">Cross-pair ask-sum entry</h3></div>
@@ -388,8 +388,7 @@
           <div class="strategy-step"><span class="step-num">1</span><div><strong>Evaluate all four combinations independently</strong><span>BTC UP + ETH DOWN, ETH UP + BTC DOWN, BTC UP + ETH UP, and BTC DOWN + ETH DOWN can each trigger in the same 5-minute window.</span></div></div>
           <div class="strategy-step"><span class="step-num">2</span><div><strong>Enter when combined best asks are below $0.80</strong><span>Each pair has one entry per window. Both current best asks must be fresh, and their sum must be strictly below $0.80.</span></div></div>
           <div class="strategy-step"><span class="step-num">3</span><div><strong>Always buy 100 shares on each leg</strong><span>Every qualifying entry stays flat at 100 requested shares per leg, regardless of previous wins or losses. Paper taker sweeps are capped at $0.99.</span></div></div>
-          <div class="strategy-step"><span class="step-num">4</span><div><strong>Use the $0.99 take-profit and empty-bid stop</strong><span>A fresh best bid at $0.99 credits $1.00 per share. A fresh book with no bid closes that leg at $0.00.</span></div></div>
-          <div class="strategy-step"><span class="step-num">5</span><div><strong>Send remaining open legs to resolution</strong><span>If neither exit happens before the 5-minute window ends, the remaining position waits for official resolution.</span></div></div>
+          <div class="strategy-step"><span class="step-num">4</span><div><strong>Hold every filled leg for official resolution</strong><span>There is no take-profit or stop-loss. At window end, each position waits for the result of its exact BTC or ETH market.</span></div></div>
         </div>
         <div class="strategy-meta">
           <span class="meta-pill">Taker entry fees included</span>
@@ -495,8 +494,8 @@
       function tradeStatusText(cycle, legs) {
         const statuses = legs.map(leg => String(leg.position?.status || leg.order?.status || '').toUpperCase());
         if (statuses.some(status => status === 'PENDING_RESOLUTION')) return 'Pending resolution';
-        if (statuses.length && statuses.every(status => ['TAKE_PROFIT', 'STOP_LOSS', 'RESOLVED_WIN', 'RESOLVED_LOSS'].includes(status))) {
-          return 'Closed';
+        if (statuses.length && statuses.every(status => ['RESOLVED_WIN', 'RESOLVED_LOSS'].includes(status))) {
+          return 'Resolved';
         }
         return String(cycle?.status || 'OPEN').replaceAll('_', ' ');
       }
@@ -506,52 +505,70 @@
         const order = leg.order || null;
         const side = String(leg.side || '').toUpperCase();
         const status = String(position?.status || order?.status || 'NO_FILL').toUpperCase();
-        const statusClass = ['TAKE_PROFIT', 'RESOLVED_WIN'].includes(status) ? 'win'
-          : ['STOP_LOSS', 'RESOLVED_LOSS'].includes(status) ? 'loss' : '';
-        const pnl = position?.status === 'OPEN'
+        const isActive = ['OPEN', 'PENDING_RESOLUTION'].includes(status);
+        const pnl = isActive
           ? position.unrealizedPnl
           : position?.realizedPnl;
-        let exitText = 'No position filled';
-        if (status === 'OPEN') exitText = 'Open · TP $0.99 · SL on empty bid';
-        else if (status === 'PENDING_RESOLUTION') exitText = 'Waiting for official resolution';
-        else if (status === 'TAKE_PROFIT') exitText = 'TP hit · $1.00/share credited';
-        else if (status === 'STOP_LOSS') exitText = 'Empty-bid stop · $0.00 payout';
-        else if (status === 'RESOLVED_WIN') exitText = 'Resolution · WIN';
-        else if (status === 'RESOLVED_LOSS') exitText = 'Resolution · LOSS';
+        let statusLabel = status.replaceAll('_', ' ');
+        let statusClass = status === 'RESOLVED_WIN' ? 'win' : status === 'RESOLVED_LOSS' ? 'loss' : '';
+        let markText = 'No position filled';
+        if (status === 'OPEN') {
+          statusLabel = hasNumber(pnl)
+            ? `Open · provisional ${Number(pnl) >= 0 ? 'profit' : 'loss'}`
+            : 'Open · waiting for mark';
+          statusClass = hasNumber(pnl) ? (Number(pnl) >= 0 ? 'win' : 'loss') : '';
+          markText = 'Held to resolution · no TP/SL';
+        } else if (status === 'PENDING_RESOLUTION') {
+          statusLabel = 'Awaiting official result';
+          markText = 'Last pre-resolution mark · not final';
+        } else if (status === 'RESOLVED_WIN') markText = 'Official resolution · WON';
+        else if (status === 'RESOLVED_LOSS') markText = 'Official resolution · LOST';
         const filled = position?.shares ?? order?.filledShares ?? leg.filledShares;
         const requested = position?.requestedShares ?? order?.requestedShares ?? leg.requestedShares;
         const avg = position?.entryPrice ?? order?.averagePrice ?? leg.averageEntry;
         const total = Number(position?.totalCost || 0) + Number(position?.fees || 0);
+        const priceLabel = status === 'PENDING_RESOLUTION'
+          ? 'Last bid before resolution'
+          : status.startsWith('RESOLVED_') ? 'Resolution payout' : 'Live best bid';
+        const pnlLabel = status === 'PENDING_RESOLUTION'
+          ? 'Last floating P&L'
+          : isActive ? 'Floating P&L' : 'Realized P&L';
         return `<article class="trade-leg ${side === 'DOWN' ? 'down' : ''}">
-          <div class="trade-leg-head"><strong>${safe(label(leg.asset))} ${safe(side)}</strong><span class="trade-status ${statusClass}">${safe(status.replaceAll('_', ' '))}</span></div>
+          <div class="trade-leg-head"><strong>${safe(label(leg.asset))} ${safe(side)}</strong><span class="trade-status ${statusClass}">${safe(statusLabel)}</span></div>
           <div class="trade-leg-metrics">
             <div><span>Filled / requested</span><strong>${shares(filled)} / ${shares(requested)}</strong></div>
             <div><span>Average entry</span><strong>${money(avg, 4)}</strong></div>
             <div><span>Cost + entry fees</span><strong>${position ? money(total, 3) : '—'}</strong></div>
-            <div><span>Current / exit bid</span><strong>${money(position?.markBid, 3)}</strong></div>
+            <div><span>${priceLabel}</span><strong>${money(position?.markBid, 3)}</strong></div>
           </div>
-          <div class="trade-pnl"><span>${position?.status === 'OPEN' ? 'Floating P&L' : 'Realized P&L'}</span><strong class="${signClass(pnl)}">${money(pnl)}</strong></div>
-          <div class="sizing-note">${safe(exitText)}${position?.exitPrice != null ? ` · exit ${money(position.exitPrice, 3)}` : ''}</div>
+          <div class="trade-pnl"><span>${pnlLabel}</span><strong class="${signClass(pnl)}">${money(pnl)}</strong></div>
+          <div class="sizing-note">${safe(markText)}${position?.resolutionMarkAt ? ` · ${safe(clockTime(position.resolutionMarkAt))}` : ''}</div>
         </article>`;
       }
 
-      function tradeCardHtml(cycle, recent = false) {
+      function tradeCardHtml(cycle, recent = false, currentWindowStart = null) {
         const legs = Array.isArray(cycle.legs) ? cycle.legs : [];
-        const pnlValues = legs.map(leg => leg.position?.status === 'OPEN'
+        const pnlValues = legs.map(leg => ['OPEN', 'PENDING_RESOLUTION'].includes(leg.position?.status)
           ? leg.position.unrealizedPnl : leg.position?.realizedPnl);
         const knownPnlValues = pnlValues.filter(hasNumber);
         const pnl = knownPnlValues.length
           ? knownPnlValues.reduce((sum, value) => sum + Number(value), 0)
           : cycle.realizedPnl;
         const status = tradeStatusText(cycle, legs);
-        const statusClass = status === 'Closed'
+        const statusClass = status === 'Resolved'
           ? cycle.sizingOutcome === 'BOTH_LEGS_LOST' ? 'loss' : 'win'
           : '';
-        const pnlLabel = status === 'Closed' ? 'Pair realized P&L'
-          : knownPnlValues.length < legs.length ? 'Known pair P&L' : 'Pair floating P&L';
+        const pnlLabel = status === 'Resolved' ? 'Pair realized P&L'
+          : status === 'Pending resolution' ? 'Last pair mark P&L'
+            : knownPnlValues.length < legs.length ? 'Known pair P&L' : 'Pair floating P&L';
+        const oldWindow = currentWindowStart != null &&
+          Number(cycle.windowStart) !== Number(currentWindowStart);
+        const heading = status === 'Pending resolution' ? 'Awaiting result'
+          : oldWindow ? 'Previous window entry'
+            : recent ? 'Past entry' : 'This window’s entry';
         return `<article class="trade-card ${recent ? 'recent' : ''}">
           <div class="trade-head">
-            <div><strong>${recent ? 'Past entry' : 'This window’s entry'} · ${safe(dateTime(cycle.entryAt || cycle.windowStart))}</strong>
+            <div><strong>${heading} · ${safe(dateTime(cycle.entryAt || cycle.windowStart))}</strong>
               <small>Combined asks ${money(cycle.entryAskSum, 3)} · ${shares(cycle.sharesPerLeg)} shares requested per leg</small></div>
             <span class="trade-status ${statusClass}">${safe(status)}</span>
           </div>
@@ -587,9 +604,9 @@
                 <div><span>Entry trigger</span><strong>&lt; $0.800</strong></div>
                 <div><span>Next size</span><strong>${shares(nextShares)} / leg</strong></div>
               </div>
-              ${current ? tradeCardHtml(current) : '<div class="trade-empty">No entry in this window. Waiting for the ask sum trigger.</div>'}
+              ${current ? tradeCardHtml(current, false, pair.windowStart) : '<div class="trade-empty">No entry in this window. Waiting for the ask sum trigger.</div>'}
               ${outcome ? `<small class="sizing-note">Previous sizing result: <strong class="${outcomeClass}">${safe(outcome)}</strong></small>` : ''}
-              ${history.length ? `<details class="trade-history"><summary>Recent trades · ${trades.length - (current ? 1 : 0)} older entries</summary><div class="trade-history-list">${history.map(trade => tradeCardHtml(trade, true)).join('')}</div></details>` : ''}
+              ${history.length ? `<details class="trade-history"><summary>Recent trades · ${trades.length - (current ? 1 : 0)} older entries</summary><div class="trade-history-list">${history.map(trade => tradeCardHtml(trade, true, pair.windowStart)).join('')}</div></details>` : ''}
             </div>
           </article>`;
         }).join('') : '<div class="empty">Waiting for the four cross-pair markets.</div>';

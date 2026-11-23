@@ -15,21 +15,17 @@ For each pair, the bot watches the two fresh best asks from the Polymarket CLOB 
 
 Each leg always requests 100 shares, regardless of previous results. The paper simulator sweeps visible asks up to $0.99, records actual filled quantities, volume-weighted entry prices, and modeled taker fees, and cancels any unfilled remainder. Entry is skipped while the same cross-pair has an earlier position awaiting official resolution.
 
-Each filled leg is managed independently:
-
-- When its fresh best bid reaches $0.99, the simulator closes it and credits $1.00 per share.
-- When a fresh book has no bid, the simulator closes it at $0.00 payout.
-- Any leg still open when the 5-minute window ends is sent to official resolution.
+There is no take-profit or stop-loss. Every filled leg stays open through the 5-minute window, then waits for the official result of its exact BTC or ETH market. Before the window ends, each dashboard card shows a provisional mark based on the latest best bid; that mark is not the final result. While a position is awaiting resolution, the card retains its last pre-expiry mark and floating P&L, clearly labeled as last mark.
 
 Wins and losses do not change sizing. Each pair can have one entry per window. A delayed official result delays the next entry for that same pair, but does not block the other pairs.
 
 ## Data and dashboard
 
-Market metadata and official outcomes come from Polymarket Gamma. The live order books use a Polymarket CLOB WebSocket subscription for the active BTC and ETH token IDs. The mobile-first dashboard has a separate card for each of the four cross-pairs. Each card shows the current entry and recent trade details for both legs, live P&L, exit status, and fixed 100-share size.
+Market metadata and official outcomes come from Polymarket Gamma. The live order books use a Polymarket CLOB WebSocket subscription for the active BTC and ETH token IDs. The mobile-first dashboard puts balance and performance at the top, followed by four persistent cross-pair cards. Each card shows both legs' shares, average entry, cost and fees, live bid, provisional floating P&L, and final result after official resolution.
 
 ## Persistent paper history
 
-On Railway, `PAPER_LEDGER_PATH` should point into the mounted persistent volume. Each strategy replacement uses its own strategy ID. When the app starts with a ledger from the prior strategy, it intentionally starts a clean ledger for this replacement and saves the fresh state to the configured ledger path. Later restarts restore the four-pair history and open positions.
+On Railway, `PAPER_LEDGER_PATH` should point into the mounted persistent volume. This resolution-only release uses a new strategy ID, so deployment starts with a clean paper ledger and saves the fresh state to the configured ledger path. Later restarts restore the four-pair history and open positions.
 
 ## Run
 
