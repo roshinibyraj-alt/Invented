@@ -13,17 +13,23 @@ For each pair, the bot watches the two fresh best asks from the Polymarket CLOB 
 
 Each leg requests 100 shares at the base size. The paper simulator sweeps visible asks up to $0.99, records actual filled quantities, volume-weighted entry prices, and modeled taker fees, and cancels any unfilled remainder. Entry is skipped while the same cross-pair has an earlier position awaiting official resolution, so the next size is based on known outcomes.
 
-Filled positions are held until official market resolution. There is no intrawindow take-profit or stop-loss. Once both legs of a cross-pair entry have resolved:
+Each filled leg is managed independently:
+
+- When its fresh best bid reaches $0.99, the simulator closes it and credits $1.00 per share.
+- When a fresh book has no bid, the simulator closes it at $0.00 payout.
+- Any leg still open when the 5-minute window ends is sent to official resolution.
+
+Once both legs in a cross-pair entry have closed, the next size is selected as follows:
 
 - If both legs lost, that cross-pair's next qualifying entry uses 1,000 shares per leg.
 - If at least one leg won, the next size remains at 100 shares per leg.
-- After a 1,000-share entry resolves, the next size returns to 100 shares per leg, regardless of outcome.
+- After a 1,000-share entry closes, the next size returns to 100 shares per leg, regardless of outcome.
 
 Sizing is tracked separately for the two cross-pairs. A delayed official result delays the next entry for that same pair, but does not block the other pair.
 
 ## Data and dashboard
 
-Market metadata and official outcomes come from Polymarket Gamma. The live order books use a Polymarket CLOB WebSocket subscription for the active BTC and ETH token IDs. The mobile-first dashboard shows the two pair triggers and next sizes first, then live positions, order fills, account performance, market books, and the strategy rules.
+Market metadata and official outcomes come from Polymarket Gamma. The live order books use a Polymarket CLOB WebSocket subscription for the active BTC and ETH token IDs. The mobile-first dashboard has a separate card for each cross-pair. Each card shows the current entry and recent trade details for both legs, live P&L, exit status, and the next size.
 
 ## Persistent paper history
 

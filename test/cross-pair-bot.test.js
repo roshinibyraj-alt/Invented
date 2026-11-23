@@ -102,6 +102,81 @@ test('both losing legs set only that pair to 1,000; at least one win leaves base
   assert.equal(ethUpBtcDown.sizingOutcome, 'AT_LEAST_ONE_WIN');
 });
 
+test('a $0.99 best bid closes a leg with a $1.00 per-share payout', () => {
+  const { bot, getNow } = createBot();
+  bot.evaluateCrossPairs(getNow());
+  const cycle = bot.crossPairCycles.find(item => item.pairId === 'btc-up-eth-down');
+  const position = bot.positions.find(item => item.id === cycle.legPositionIds[0]);
+  const record = bot.records.get(`${position.asset}:5m`);
+  const quote = record.quotes[position.side];
+  quote.bestBid = 0.99;
+  quote.updatedAt = getNow() + 100;
+
+  bot.checkTakeProfits(record, position.side, quote, getNow() + 100);
+
+  assert.equal(position.status, 'TAKE_PROFIT');
+  assert.equal(position.exitPrice, 0.99);
+  assert.equal(position.exitPayout, 1);
+  assert.equal(position.realizedPnl, position.shares - position.totalCost - position.fees);
+  assert.equal(cycle.status, 'OPEN', 'the paired leg is still open');
+  assert.equal(bot.crossPairSizing[cycle.pairId].nextShares, 100);
+});
+
+test('a fresh empty bid closes at zero and two losing legs advance only that pair', () => {
+  const { bot, getNow } = createBot();
+  bot.evaluateCrossPairs(getNow());
+  const cycle = bot.crossPairCycles.find(item => item.pairId === 'btc-up-eth-down');
+
+  for (const positionId of cycle.legPositionIds) {
+    const position = bot.positions.find(item => item.id === positionId);
+    const record = bot.records.get(`${position.asset}:5m`);
+    const quote = record.quotes[position.side];
+    quote.bestBid = null;
+    quote.updatedAt = getNow() + 100;
+    bot.checkStopLosses(record, position.side, quote, getNow() + 100);
+    assert.equal(position.status, 'STOP_LOSS');
+    assert.equal(position.exitPrice, 0);
+    assert.equal(position.exitPayout, 0);
+  }
+
+  assert.equal(cycle.status, 'CLOSED');
+  assert.equal(cycle.sizingOutcome, 'BOTH_LEGS_LOST');
+  assert.equal(bot.crossPairSizing[cycle.pairId].nextShares, 1000);
+  assert.equal(bot.crossPairSizing['eth-up-btc-down'].nextShares, 100);
+});
+
+test('a stale empty bid does not trigger the stop-loss', () => {
+  const { bot, getNow } = createBot();
+  bot.evaluateCrossPairs(getNow());
+  const position = bot.positions.find(item => item.pairId === 'btc-up-eth-down');
+  const record = bot.records.get(`${position.asset}:5m`);
+  const quote = record.quotes[position.side];
+  quote.bestBid = null;
+  quote.updatedAt = getNow() - CrossPairBot.constants.QUOTE_MAX_AGE_MS - 1;
+
+  bot.checkStopLosses(record, position.side, quote, getNow());
+
+  assert.equal(position.status, 'OPEN');
+});
+
+test('legs not closed by TP or SL wait for official resolution at window end', () => {
+  const { bot, getNow } = createBot();
+  bot.evaluateCrossPairs(getNow());
+  const cycle = bot.crossPairCycles.find(item => item.pairId === 'btc-up-eth-down');
+  const end = START + WINDOW_MS;
+  bot.expireMarket(bot.records.get('BTC:5m'), end);
+  bot.expireMarket(bot.records.get('ETH:5m'), end);
+
+  assert.equal(cycle.status, 'PENDING_RESOLUTION');
+  assert.ok(cycle.legPositionIds.every(id =>
+    bot.positions.find(position => position.id === id)?.status === 'PENDING_RESOLUTION'));
+  assert.equal(cycle.sizingApplied, false);
+
+  settlePair(bot, cycle, 'UP', 'DOWN', end + 1);
+  assert.equal(cycle.status, 'CLOSED');
+  assert.equal(cycle.sizingOutcome, 'AT_LEAST_ONE_WIN');
+});
+
 test('a resolved 1,000-share recovery attempt always returns its pair to 100 shares', () => {
   const { bot, setNow, getNow } = createBot();
   bot.evaluateCrossPairs(getNow());
@@ -167,4 +242,7 @@ test('the new ledger stores pair sizing and restores open pair positions', () =>
   assert.equal(restored.positions.length, 4);
   assert.equal(restored.crossPairCycles.length, 2);
   assert.equal(restored.snapshot().strategy.id, CrossPairBot.STRATEGY.id);
+  const pair = restored.snapshot().crossPairs.find(item => item.id === 'btc-up-eth-down');
+  assert.equal(pair.trades[0].legs[0].position.shares, 100);
+  assert.equal(pair.trades.length, 1);
 });

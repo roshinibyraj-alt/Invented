@@ -9,6 +9,15 @@ const RECOVERY_SHARES = config.CROSS_PAIR_BOTH_LOSS_SHARES;
 const ASK_SUM_THRESHOLD = config.CROSS_PAIR_ENTRY_ASK_SUM_MAX;
 const SWEEP_CAP = config.CROSS_PAIR_TAKER_SWEEP_CAP;
 const QUOTE_MAX_AGE_MS = config.DIP_BOUNCE_MAX_QUOTE_AGE_MS;
+const TAKE_PROFIT_BID = config.DIP_BOUNCE_TAKE_PROFIT_BID;
+const TAKE_PROFIT_PAYOUT = config.DIP_BOUNCE_TAKE_PROFIT_PAYOUT;
+const STOP_LOSS_BID = 0;
+const CLOSED_POSITION_STATUSES = new Set([
+  'TAKE_PROFIT',
+  'STOP_LOSS',
+  'RESOLVED_WIN',
+  'RESOLVED_LOSS',
+]);
 const PAIRS = Object.freeze([
   Object.freeze({
     id: 'btc-up-eth-down',
@@ -31,15 +40,15 @@ const PAIRS = Object.freeze([
 const STRATEGY = Object.freeze({
   id: 'btc-eth-cross-pair-ask-sum-paper',
   name: 'BTC/ETH cross-pair ask-sum paper strategy',
-  version: 'cross-pair-080-double-on-both-losses-v1',
+  version: 'cross-pair-080-tp099-sl000-double-on-both-losses-v2',
   assets: ['BTC', 'ETH'],
   timeframes: ['5m'],
   sharesPerLeg: BASE_SHARES,
   entryAskSumBelow: ASK_SUM_THRESHOLD,
   orderType: 'TAKER',
   sweepCap: SWEEP_CAP,
-  exit: 'Hold every filled leg to official resolution; no intrawindow TP or stop-loss.',
-  sizing: 'Each cross-pair starts at 100 shares per leg. If both legs lose, its next qualifying entry uses 1,000 shares per leg. After that 1,000-share entry resolves, reset to 100 whether it wins or loses. Any entry with at least one winning leg stays at 100.',
+  exit: 'Close a leg at a $0.99 best bid for a $1.00/share payout, or at $0.00 when its fresh book has no bid. Any leg still open at window end waits for official resolution.',
+  sizing: 'Each cross-pair starts at 100 shares per leg. If both legs lose, its next qualifying entry uses 1,000 shares per leg. After that 1,000-share entry closes, reset to 100 whether it wins or loses. Any entry with at least one winning leg stays at 100.',
   execution: 'PAPER ONLY',
 });
 
@@ -194,12 +203,96 @@ class CrossPairBot extends DipBounceBot {
     this.evaluateCrossPairs(this.now());
   }
 
-  checkTakeProfits() {
-    // This strategy holds positions to official market resolution.
+  checkTakeProfits(record, side, quote, now) {
+    if (!record?.market || record.marketStatus !== 'OPEN') return;
+    if (!Number.isFinite(Number(quote?.bestBid)) ||
+        Number(quote.bestBid) < TAKE_PROFIT_BID) return;
+    const marketId = String(record.market.id || record.market.slug);
+    for (const position of this.positions) {
+      if (position.marketId !== marketId || position.side !== side ||
+          position.status !== 'OPEN') continue;
+      this.closePosition(position, {
+        status: 'TAKE_PROFIT',
+        exitPrice: TAKE_PROFIT_BID,
+        exitPayout: TAKE_PROFIT_PAYOUT,
+        exitReason: 'TAKE_PROFIT_099',
+        now,
+        quote,
+        message: `Take-profit hit at $${TAKE_PROFIT_BID.toFixed(2)} bid; credited $${TAKE_PROFIT_PAYOUT.toFixed(2)} per share.`,
+      });
+    }
   }
 
-  checkStopLosses() {
-    // This strategy has no intrawindow stop-loss.
+  checkStopLosses(record, side, quote, now) {
+    if (!record?.market || record.marketStatus !== 'OPEN') return;
+    const fresh = Number.isFinite(Number(quote?.updatedAt)) &&
+      now - Number(quote.updatedAt) <= QUOTE_MAX_AGE_MS;
+    if (!fresh || (quote.bestBid != null &&
+        (!Number.isFinite(Number(quote.bestBid)) || Number(quote.bestBid) > STOP_LOSS_BID))) return;
+    const marketId = String(record.market.id || record.market.slug);
+    for (const position of this.positions) {
+      if (position.marketId !== marketId || position.side !== side ||
+          position.status !== 'OPEN') continue;
+      this.closePosition(position, {
+        status: 'STOP_LOSS',
+        exitPrice: STOP_LOSS_BID,
+        exitPayout: 0,
+        exitReason: 'STOP_LOSS_000',
+        now,
+        quote,
+        message: 'Stop-loss hit: fresh book has no bid, so the position closed at $0.00 payout.',
+      });
+    }
+  }
+
+  closePosition(position, { status, exitPrice, exitPayout, exitReason, now, quote, message }) {
+    if (!position || position.status !== 'OPEN') return false;
+    const payout = Number(position.shares || 0) * Number(exitPayout || 0);
+    this.cash = round(this.cash + payout);
+    position.status = status;
+    position.exitAt = now;
+    position.exitPrice = exitPrice;
+    position.exitPayout = exitPayout;
+    position.exitReason = exitReason;
+    position.realizedPnl = round(
+      payout - Number(position.totalCost || 0) - Number(position.fees || 0)
+        + Number(position.estimatedMakerRebate || 0),
+    );
+    position.markBid = exitPrice;
+    position.markUpdatedAt = quote?.updatedAt ?? now;
+    position.markStatus = 'CLOSED';
+    position.unrealizedPnl = null;
+    this.updateCycleAfterPositionClose(position, now);
+    this.log(`${position.asset} ${position.side}: ${message}`, {
+      asset: position.asset,
+      timeframe: position.timeframe,
+      side: position.side,
+      outcome: position.realizedPnl >= 0 ? 'good' : 'bad',
+      type: status,
+      now,
+    });
+    this.updateAccountMetrics(now, true);
+    this.scheduleLedgerSave();
+    return true;
+  }
+
+  updateCycleAfterPositionClose(position, now) {
+    const cycle = this.crossPairCycles.find(item => item.id === position.pairCycleId);
+    if (!cycle) return;
+    const positions = cycle.legPositionIds
+      .map(id => this.positions.find(item => item.id === id))
+      .filter(Boolean);
+    if (positions.some(item => !CLOSED_POSITION_STATUSES.has(item.status))) {
+      cycle.status = positions.some(item => item.status === 'PENDING_RESOLUTION')
+        ? 'PENDING_RESOLUTION' : 'OPEN';
+      return;
+    }
+    cycle.status = 'CLOSED';
+    cycle.closedAt = now;
+    cycle.realizedPnl = round(positions.reduce(
+      (sum, item) => sum + Number(item.realizedPnl || 0), 0,
+    ));
+    this.applyPairSizing(cycle, positions, now);
   }
 
   updateSizingAfterClose() {
@@ -380,7 +473,7 @@ class CrossPairBot extends DipBounceBot {
     pairState.cycleId = cycleId;
     pairState.status = cycle.legPositionIds.length ? 'IN_POSITION' : 'NO_FILL';
     pairState.lastReason = cycle.legPositionIds.length
-      ? `Bought ${cycle.legs.map(leg => `${leg.asset} ${leg.side}: ${leg.filledShares}/${sharesPerLeg}`).join(' · ')}; holding to resolution.`
+      ? `Bought ${cycle.legs.map(leg => `${leg.asset} ${leg.side}: ${leg.filledShares}/${sharesPerLeg}`).join(' · ')}; TP $${TAKE_PROFIT_BID.toFixed(2)}, empty-bid SL $0.00, then resolution if still open.`
       : 'The combined-ask trigger fired, but neither visible ask book could fill shares.';
 
     if (cycle.legPositionIds.length) {
@@ -396,7 +489,7 @@ class CrossPairBot extends DipBounceBot {
     this.entryTriggerSide = pair.id;
     this.entryTriggerReason = `${pair.label} combined asks ${marketPair.askSum.toFixed(3)}.`;
     this.log(cycle.legPositionIds.length
-      ? `${pair.label} entered at combined asks $${marketPair.askSum.toFixed(3)}; holding both filled legs to resolution.`
+      ? `${pair.label} entered at combined asks $${marketPair.askSum.toFixed(3)}; TP $${TAKE_PROFIT_BID.toFixed(2)}, empty-bid SL $0.00, resolution fallback.`
       : `${pair.label} qualified at $${marketPair.askSum.toFixed(3)}, but no ask depth filled.`, {
       timeframe: '5m',
       outcome: cycle.legPositionIds.length ? 'good' : 'neutral',
@@ -413,6 +506,26 @@ class CrossPairBot extends DipBounceBot {
     this.applyResolvedPairSizing(now);
   }
 
+  expireMarket(record, now) {
+    super.expireMarket(record, now);
+    if (!record?.market) return;
+    const marketId = String(record.market.id || record.market.slug);
+    for (const cycle of this.crossPairCycles) {
+      const hasMarketLeg = cycle.legPositionIds.some(id =>
+        this.positions.some(position => position.id === id && position.marketId === marketId));
+      if (!hasMarketLeg || cycle.sizingApplied) continue;
+      const legs = cycle.legPositionIds
+        .map(id => this.positions.find(position => position.id === id))
+        .filter(Boolean);
+      if (legs.some(position => position.status === 'PENDING_RESOLUTION') &&
+          cycle.status !== 'PENDING_RESOLUTION') {
+        cycle.status = 'PENDING_RESOLUTION';
+        cycle.pendingResolutionAt = now;
+      }
+    }
+    this.scheduleLedgerSave();
+  }
+
   applyResolvedPairSizing(now) {
     for (const cycle of this.crossPairCycles) {
       if (cycle.sizingApplied || !cycle.legPositionIds.length) continue;
@@ -420,55 +533,63 @@ class CrossPairBot extends DipBounceBot {
         .map(id => this.positions.find(position => position.id === id))
         .filter(Boolean);
       if (positions.length !== cycle.legPositionIds.length ||
-          positions.some(position => !['RESOLVED_WIN', 'RESOLVED_LOSS'].includes(position.status))) {
-        continue;
-      }
-
-      const bothLost = positions.length === 2 &&
-        positions.every(position => position.status === 'RESOLVED_LOSS');
-      const sizing = this.crossPairSizing[cycle.pairId] || emptySizing();
-      const wasRecoveryAttempt = cycle.recoveryAttempt || cycle.sharesPerLeg >= RECOVERY_SHARES;
-      if (wasRecoveryAttempt) {
-        sizing.nextShares = BASE_SHARES;
-        sizing.highSizeResets += 1;
-        cycle.sizingOutcome = 'RECOVERY_ATTEMPT_RESET';
-      } else if (bothLost) {
-        sizing.nextShares = RECOVERY_SHARES;
-        sizing.bothLegLosses += 1;
-        cycle.sizingOutcome = 'BOTH_LEGS_LOST';
-      } else {
-        sizing.nextShares = BASE_SHARES;
-        cycle.sizingOutcome = positions.some(position => position.status === 'RESOLVED_WIN')
-          ? 'AT_LEAST_ONE_WIN' : 'INCOMPLETE_PAIR';
-      }
-      sizing.lastOutcome = cycle.sizingOutcome;
-      sizing.lastUpdatedAt = now;
-      this.crossPairSizing[cycle.pairId] = sizing;
-      cycle.sizingApplied = true;
-      cycle.status = 'SETTLED';
-      cycle.settledAt = now;
-      cycle.realizedPnl = round(positions.reduce(
-        (sum, position) => sum + Number(position.realizedPnl || 0), 0,
-      ));
-      for (const position of positions) {
-        position.sizingApplied = true;
-        position.sizingOutcome = cycle.sizingOutcome;
-        position.nextEntryShares = sizing.nextShares;
-        position.pairRealizedPnl = cycle.realizedPnl;
-      }
-      const description = cycle.sizingOutcome === 'BOTH_LEGS_LOST'
-        ? `both legs lost; next qualifying entry is ${RECOVERY_SHARES} shares per leg`
-        : cycle.sizingOutcome === 'RECOVERY_ATTEMPT_RESET'
-          ? `the ${RECOVERY_SHARES}-share recovery attempt resolved; reset to ${BASE_SHARES} per leg`
-          : `at least one leg won; remain at ${BASE_SHARES} shares per leg`;
-      this.log(`${cycle.pairLabel} resolved; ${description}.`, {
-        timeframe: '5m',
-        outcome: cycle.sizingOutcome === 'BOTH_LEGS_LOST' ? 'bad' : 'good',
-        type: 'CROSS_PAIR_SIZING',
-        now,
-      });
+          positions.some(position => !CLOSED_POSITION_STATUSES.has(position.status))) continue;
+      this.applyPairSizing(cycle, positions, now);
     }
     this.scheduleLedgerSave();
+  }
+
+  applyPairSizing(cycle, positions, now) {
+    if (cycle.sizingApplied || positions.some(position => !CLOSED_POSITION_STATUSES.has(position.status))) return;
+    const bothLost = positions.length === 2 &&
+      positions.every(position => ['STOP_LOSS', 'RESOLVED_LOSS'].includes(position.status));
+    const hasWin = positions.some(position => ['TAKE_PROFIT', 'RESOLVED_WIN'].includes(position.status));
+    const sizing = this.crossPairSizing[cycle.pairId] || emptySizing();
+    const wasRecoveryAttempt = cycle.recoveryAttempt || cycle.sharesPerLeg >= RECOVERY_SHARES;
+    if (wasRecoveryAttempt) {
+      sizing.nextShares = BASE_SHARES;
+      sizing.highSizeResets += 1;
+      cycle.sizingOutcome = 'RECOVERY_ATTEMPT_RESET';
+    } else if (bothLost) {
+      sizing.nextShares = RECOVERY_SHARES;
+      sizing.bothLegLosses += 1;
+      cycle.sizingOutcome = 'BOTH_LEGS_LOST';
+    } else {
+      sizing.nextShares = BASE_SHARES;
+      cycle.sizingOutcome = hasWin ? 'AT_LEAST_ONE_WIN' : 'INCOMPLETE_PAIR';
+    }
+    sizing.lastOutcome = cycle.sizingOutcome;
+    sizing.lastUpdatedAt = now;
+    this.crossPairSizing[cycle.pairId] = sizing;
+    cycle.sizingApplied = true;
+    cycle.closedAt = now;
+    if (positions.some(position => position.status === 'PENDING_RESOLUTION')) {
+      cycle.status = 'PENDING_RESOLUTION';
+    } else {
+      cycle.status = 'CLOSED';
+      cycle.settledAt = positions.some(position =>
+        ['RESOLVED_WIN', 'RESOLVED_LOSS'].includes(position.status)) ? now : cycle.settledAt;
+    }
+    cycle.realizedPnl = round(positions.reduce(
+      (sum, position) => sum + Number(position.realizedPnl || 0), 0,
+    ));
+    for (const position of positions) {
+      position.sizingApplied = true;
+      position.sizingOutcome = cycle.sizingOutcome;
+      position.nextEntryShares = sizing.nextShares;
+      position.pairRealizedPnl = cycle.realizedPnl;
+    }
+    const description = cycle.sizingOutcome === 'BOTH_LEGS_LOST'
+      ? `both legs lost; next qualifying entry is ${RECOVERY_SHARES} shares per leg`
+      : cycle.sizingOutcome === 'RECOVERY_ATTEMPT_RESET'
+        ? `the ${RECOVERY_SHARES}-share recovery attempt closed; reset to ${BASE_SHARES} per leg`
+        : `at least one leg won; remain at ${BASE_SHARES} shares per leg`;
+    this.log(`${cycle.pairLabel} closed; ${description}.`, {
+      timeframe: '5m',
+      outcome: cycle.sizingOutcome === 'BOTH_LEGS_LOST' ? 'bad' : 'good',
+      type: 'CROSS_PAIR_SIZING',
+      now,
+    });
   }
 
   restoreLedger(ledger) {
@@ -562,7 +683,7 @@ class CrossPairBot extends DipBounceBot {
       entry: 'Monitor BTC UP + ETH DOWN and ETH UP + BTC DOWN independently. Enter a pair when its fresh best asks sum to strictly less than $0.80; one entry per pair per 5-minute window.',
       fill: 'Paper taker sweep of visible asks up to $0.99. Actual filled quantity, average entry, and market taker fees are recorded; unfilled remainder is cancelled.',
       sizing: STRATEGY.sizing,
-      settlement: 'Hold all filled legs to official resolution. Sizing changes only after both filled legs in a cross-pair have resolved.',
+      settlement: 'Each leg closes independently at the $0.99 take-profit or on a fresh empty bid at $0.00. Any still-open leg is sent to official resolution at window end; sizing updates after both pair legs close.',
       execution: 'PAPER ONLY',
     };
     state.sizingByAsset = undefined;
@@ -584,10 +705,20 @@ class CrossPairBot extends DipBounceBot {
         : this.pairWindowState(pair, marketPair.windowStart);
       const sizing = this.crossPairSizing[pair.id] || emptySizing();
       const unresolved = this.hasUnresolvedCycle(pair.id);
+      const currentCycleState = this.crossPairCycles.find(item =>
+        item.pairId === pair.id && item.windowStart === marketPair.windowStart);
+      const currentCyclePositions = currentCycleState?.legPositionIds
+        .map(id => this.positions.find(item => item.id === id)).filter(Boolean) || [];
+      const currentCyclePending = currentCyclePositions.some(item => item.status === 'PENDING_RESOLUTION');
+      const currentCycleClosed = currentCyclePositions.length > 0 &&
+        currentCyclePositions.every(item => CLOSED_POSITION_STATUSES.has(item.status));
       let status = windowState.status;
       let reason = windowState.lastReason;
       if (windowState.entered) {
-        status = 'ENTERED';
+        status = currentCyclePending ? 'PENDING_RESOLUTION' : currentCycleClosed ? 'CLOSED' : 'ENTERED';
+        reason = currentCyclePending
+          ? 'One or more legs are waiting for official resolution.'
+          : currentCycleClosed ? 'All filled legs in this pair have closed.' : reason;
       } else if (unresolved) {
         status = 'WAITING_FOR_RESOLUTION';
         reason = 'Waiting for the previous entry in this pair to fully resolve before sizing the next one.';
@@ -605,8 +736,38 @@ class CrossPairBot extends DipBounceBot {
           ? 'Waiting for fresh asks on both legs.'
           : `Combined asks $${marketPair.askSum.toFixed(3)}; trigger is below $${ASK_SUM_THRESHOLD.toFixed(2)}.`;
       }
-      const cycle = this.crossPairCycles.find(item =>
-        item.pairId === pair.id && item.windowStart === marketPair.windowStart);
+      const cycleDetails = cycle => ({
+        ...cycle,
+        status: cycle.legPositionIds.some(id =>
+          this.positions.find(item => item.id === id)?.status === 'PENDING_RESOLUTION')
+          ? 'PENDING_RESOLUTION'
+          : cycle.legPositionIds.every(id => CLOSED_POSITION_STATUSES.has(
+            this.positions.find(item => item.id === id)?.status,
+          )) ? 'CLOSED' : 'OPEN',
+        legs: cycle.legs.map(leg => {
+          const position = this.positions.find(item => item.id === leg.positionId);
+          const order = this.orders.find(item => item.id === leg.orderId);
+          return {
+            ...leg,
+            order: order ? {
+              status: order.status,
+              requestedShares: order.requestedShares,
+              filledShares: order.filledShares,
+              cancelledRemainderShares: order.cancelledRemainderShares,
+              averagePrice: order.averagePrice,
+              cost: order.cost,
+              fee: order.fee,
+              createdAt: order.createdAt,
+            } : null,
+            position: position ? { ...position } : null,
+          };
+        }),
+      });
+      const pairCycles = this.crossPairCycles
+        .filter(item => item.pairId === pair.id)
+        .slice(0, 8)
+        .map(cycleDetails);
+      const cycle = pairCycles.find(item => item.windowStart === marketPair.windowStart) || null;
       const legs = pair.legs.map(leg => {
         const record = this.records.get(`${leg.asset}:5m`);
         const quote = record?.quotes?.[leg.side] || {};
@@ -634,12 +795,9 @@ class CrossPairBot extends DipBounceBot {
         lastOutcome: sizing.lastOutcome,
         unresolvedPreviousCycle: unresolved,
         currentCycle: cycle ? {
-          id: cycle.id,
-          sharesPerLeg: cycle.sharesPerLeg,
-          status: cycle.status,
-          legPositionIds: [...cycle.legPositionIds],
-          realizedPnl: cycle.realizedPnl ?? null,
+          ...cycle,
         } : null,
+        trades: pairCycles,
       };
     });
     state.lastCrossPairScanAt = this.lastCrossPairScanAt;

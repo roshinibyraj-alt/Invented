@@ -158,6 +158,46 @@
     .position-pnl strong { font-size:20px; line-height:1; font-weight:950; letter-spacing:-.05em; font-variant-numeric:tabular-nums; }
     .badge-side { padding:4px 6px; border-radius:6px; color:#276d48; background:#e1f2e7; font-size:8px; font-weight:900; }
     .badge-side.down { color:#a6493b; background:#ffebe5; }
+    .pair-grid { display:grid; grid-template-columns:1fr; gap:10px; margin-bottom:10px; }
+    .pair-card { min-width:0; overflow:hidden; border:1px solid var(--line); border-radius:18px; background:var(--paper); box-shadow:var(--shadow); }
+    .pair-card[data-pair="btc-up-eth-down"] { border-top:4px solid #e2b632; }
+    .pair-card[data-pair="eth-up-btc-down"] { border-top:4px solid #7887dd; }
+    .pair-head { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; padding:13px 13px 10px; border-bottom:1px solid #edf0e9; }
+    .pair-head h3 { margin:0; font-size:14px; letter-spacing:-.03em; }
+    .pair-head small { display:block; margin-top:3px; color:var(--muted); font-size:9px; }
+    .pair-state { flex:none; padding:5px 7px; border-radius:999px; color:#80620e; background:#fff2c8; font-size:8px; font-weight:900; text-transform:uppercase; }
+    .pair-state.active { color:#176e4c; background:#e1f2e7; }
+    .pair-state.loss { color:#a94739; background:#ffebe5; }
+    .pair-body { display:grid; gap:10px; padding:11px; }
+    .pair-summary { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:6px; }
+    .pair-summary div { min-width:0; padding:8px; border-radius:10px; background:#f2f4ee; }
+    .pair-summary span { display:block; color:var(--muted); font-size:8px; font-weight:850; letter-spacing:.05em; text-transform:uppercase; }
+    .pair-summary strong { display:block; overflow:hidden; margin-top:3px; font-size:12px; text-overflow:ellipsis; white-space:nowrap; font-variant-numeric:tabular-nums; }
+    .trade-card { min-width:0; padding:10px; border:1px solid #e7ebe2; border-radius:13px; background:#fbfcf8; }
+    .trade-card.recent { background:#f7f8f4; }
+    .trade-head { display:flex; align-items:flex-start; justify-content:space-between; gap:8px; margin-bottom:8px; }
+    .trade-head strong { display:block; font-size:10px; }
+    .trade-head small { display:block; margin-top:2px; color:var(--muted); font-size:8px; }
+    .trade-status { flex:none; padding:4px 6px; border-radius:6px; color:#59675d; background:#eef0e9; font-size:8px; font-weight:900; text-transform:uppercase; }
+    .trade-status.win { color:#176e4c; background:#e1f2e7; }
+    .trade-status.loss { color:#a94739; background:#ffebe5; }
+    .trade-legs { display:grid; grid-template-columns:1fr; gap:7px; }
+    .trade-leg { min-width:0; padding:9px; border-radius:10px; background:#fff; border-left:3px solid #d7a929; }
+    .trade-leg.down { border-left-color:#e5826e; }
+    .trade-leg-head { display:flex; justify-content:space-between; gap:6px; align-items:center; }
+    .trade-leg-head strong { font-size:10px; }
+    .trade-leg-head span { color:var(--muted); font-size:8px; font-weight:850; text-transform:uppercase; }
+    .trade-leg-metrics { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:6px 8px; margin-top:7px; }
+    .trade-leg-metrics div { min-width:0; }
+    .trade-leg-metrics span { display:block; color:var(--muted); font-size:7px; font-weight:850; text-transform:uppercase; }
+    .trade-leg-metrics strong { display:block; overflow:hidden; margin-top:2px; font-size:10px; text-overflow:ellipsis; white-space:nowrap; font-variant-numeric:tabular-nums; }
+    .trade-pnl { display:flex; justify-content:space-between; gap:8px; margin-top:7px; padding-top:6px; border-top:1px solid #edf0e9; }
+    .trade-pnl span { color:var(--muted); font-size:8px; font-weight:850; text-transform:uppercase; }
+    .trade-pnl strong { font-size:13px; font-weight:950; font-variant-numeric:tabular-nums; }
+    .trade-empty { padding:13px 10px; border:1px dashed #dce2d8; border-radius:10px; color:var(--muted); text-align:center; font-size:9px; }
+    .trade-history summary { color:var(--muted); font-size:9px; font-weight:850; cursor:pointer; }
+    .trade-history-list { display:grid; gap:7px; margin-top:8px; }
+    .trade-history { display:grid; gap:7px; }
     .sizing-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:11px; }
     .sizing-card { min-width:0; padding:11px 12px; border:1px solid #dce7d8; border-radius:14px; background:#f8fbf2; }
     .sizing-card[data-asset="BTC"] { border-top:4px solid #e2b632; }
@@ -209,6 +249,8 @@
       .strategy-card { grid-template-columns:.8fr 1.2fr; align-items:start; padding:22px; }
       .strategy-title { display:block; }
       .paper-stamp { display:inline-flex; margin-top:14px; }
+      .pair-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
+      .trade-legs { grid-template-columns:1fr 1fr; }
     }
     @media (min-width:980px) {
       .shell { padding-top:26px; }
@@ -269,17 +311,17 @@
 
     <section class="section" aria-labelledby="positionsHeading">
       <div class="section-head">
-        <div><div class="section-kicker">Live first</div><h2 id="positionsHeading">Positions &amp; orders</h2></div>
-        <div class="section-note">Paper simulation only · no real orders</div>
+        <div><div class="section-kicker">Live first</div><h2 id="positionsHeading">Cross-pair trade cards</h2></div>
+        <div class="section-note">Entry, both legs, P&amp;L, and exit state per pair</div>
       </div>
-      <div class="sizing-grid" id="sizingGrid" aria-label="Cross-pair entry status and next size">
-        <div class="sizing-card" data-pair="btc-up-eth-down"><span class="sizing-label">BTC UP + ETH DOWN</span><strong class="sizing-value">100 shares / leg</strong><small class="sizing-note">Waiting for asks below $0.80 combined</small></div>
-        <div class="sizing-card" data-pair="eth-up-btc-down"><span class="sizing-label">ETH UP + BTC DOWN</span><strong class="sizing-value">100 shares / leg</strong><small class="sizing-note">Waiting for asks below $0.80 combined</small></div>
+      <div class="pair-grid" id="sizingGrid" aria-label="Cross-pair trades and sizing">
+        <div class="loading-card" aria-label="Loading BTC UP plus ETH DOWN"></div>
+        <div class="loading-card" aria-label="Loading ETH UP plus BTC DOWN"></div>
       </div>
       <p class="persistence-note" id="ledgerPersistence" aria-live="polite">Paper history storage status: checking</p>
       <div class="split">
         <article class="panel">
-          <div class="panel-head"><div><h3>Open positions</h3><p>Live best-bid marks and floating P&amp;L · held to resolution</p></div><span class="count-chip" id="positionCount">0 positions</span></div>
+          <div class="panel-head"><div><h3>All open positions</h3><p>Quick cross-check of live marks and pending outcomes</p></div><span class="count-chip" id="positionCount">0 positions</span></div>
           <div class="position-list" id="positionList"><div class="empty">Loading paper positions…</div></div>
         </article>
         <article class="panel">
@@ -341,9 +383,10 @@
         <div class="strategy-steps">
           <div class="strategy-step"><span class="step-num">1</span><div><strong>Evaluate both combinations independently</strong><span>BTC UP + ETH DOWN and ETH UP + BTC DOWN can each trigger in the same 5-minute window.</span></div></div>
           <div class="strategy-step"><span class="step-num">2</span><div><strong>Enter when combined best asks are below $0.80</strong><span>Each pair has one entry per window. Both current best asks must be fresh, and their sum must be strictly below $0.80.</span></div></div>
-          <div class="strategy-step"><span class="step-num">3</span><div><strong>Buy 100 shares on each leg</strong><span>Paper taker orders sweep visible asks up to $0.99. Actual filled shares, average prices, and modeled taker fees are recorded.</span></div></div>
-          <div class="strategy-step"><span class="step-num">4</span><div><strong>Hold filled legs to official resolution</strong><span>No take-profit or stop-loss closes positions early. A pair’s next sizing decision waits until both filled legs resolve.</span></div></div>
-          <div class="strategy-step"><span class="step-num">5</span><div><strong>Increase only after both legs lose</strong><span>If both legs lose, that pair’s next entry is 1,000 shares per leg. If at least one leg wins, keep 100. After a 1,000-share entry resolves, return to 100 whether it wins or loses.</span></div></div>
+          <div class="strategy-step"><span class="step-num">3</span><div><strong>Buy the pair size on both legs</strong><span>Start at 100 shares per leg. After both legs lose, the next qualifying entry uses 1,000 shares per leg. Paper taker sweeps are capped at $0.99.</span></div></div>
+          <div class="strategy-step"><span class="step-num">4</span><div><strong>Use the $0.99 take-profit and empty-bid stop</strong><span>A fresh best bid at $0.99 credits $1.00 per share. A fresh book with no bid closes that leg at $0.00.</span></div></div>
+          <div class="strategy-step"><span class="step-num">5</span><div><strong>Send remaining open legs to resolution</strong><span>If neither exit happens before the 5-minute window ends, the remaining position waits for official resolution.</span></div></div>
+          <div class="strategy-step"><span class="step-num">6</span><div><strong>Increase only after both legs lose</strong><span>If both legs lose, that pair’s next entry is 1,000 shares per leg. If at least one leg wins, keep 100. After a 1,000-share entry closes, return to 100.</span></div></div>
         </div>
         <div class="strategy-meta">
           <span class="meta-pill">Taker entry fees included</span>
@@ -352,7 +395,7 @@
         </div>
       </div>
     </section>
-    <footer>Paper simulation only · No real CLOB orders · History is saved in persistent Railway storage · Unclosed positions wait for official market resolution</footer>
+    <footer>Paper simulation only · No real CLOB orders · History is saved in persistent Railway storage · Legs still open at window end wait for official resolution</footer>
   </main>
 
   <script>
@@ -446,7 +489,75 @@
           : '<div class="empty">Waiting for the current BTC and ETH 5-minute markets.</div>';
       }
 
-      function renderSizing(pairs) {
+      function tradeStatusText(cycle, legs) {
+        const statuses = legs.map(leg => String(leg.position?.status || leg.order?.status || '').toUpperCase());
+        if (statuses.some(status => status === 'PENDING_RESOLUTION')) return 'Pending resolution';
+        if (statuses.length && statuses.every(status => ['TAKE_PROFIT', 'STOP_LOSS', 'RESOLVED_WIN', 'RESOLVED_LOSS'].includes(status))) {
+          return 'Closed';
+        }
+        return String(cycle?.status || 'OPEN').replaceAll('_', ' ');
+      }
+
+      function tradeLegHtml(leg) {
+        const position = leg.position || null;
+        const order = leg.order || null;
+        const side = String(leg.side || '').toUpperCase();
+        const status = String(position?.status || order?.status || 'NO_FILL').toUpperCase();
+        const statusClass = ['TAKE_PROFIT', 'RESOLVED_WIN'].includes(status) ? 'win'
+          : ['STOP_LOSS', 'RESOLVED_LOSS'].includes(status) ? 'loss' : '';
+        const pnl = position?.status === 'OPEN'
+          ? position.unrealizedPnl
+          : position?.realizedPnl;
+        let exitText = 'No position filled';
+        if (status === 'OPEN') exitText = 'Open · TP $0.99 · SL on empty bid';
+        else if (status === 'PENDING_RESOLUTION') exitText = 'Waiting for official resolution';
+        else if (status === 'TAKE_PROFIT') exitText = 'TP hit · $1.00/share credited';
+        else if (status === 'STOP_LOSS') exitText = 'Empty-bid stop · $0.00 payout';
+        else if (status === 'RESOLVED_WIN') exitText = 'Resolution · WIN';
+        else if (status === 'RESOLVED_LOSS') exitText = 'Resolution · LOSS';
+        const filled = position?.shares ?? order?.filledShares ?? leg.filledShares;
+        const requested = position?.requestedShares ?? order?.requestedShares ?? leg.requestedShares;
+        const avg = position?.entryPrice ?? order?.averagePrice ?? leg.averageEntry;
+        const total = Number(position?.totalCost || 0) + Number(position?.fees || 0);
+        return `<article class="trade-leg ${side === 'DOWN' ? 'down' : ''}">
+          <div class="trade-leg-head"><strong>${safe(label(leg.asset))} ${safe(side)}</strong><span class="trade-status ${statusClass}">${safe(status.replaceAll('_', ' '))}</span></div>
+          <div class="trade-leg-metrics">
+            <div><span>Filled / requested</span><strong>${shares(filled)} / ${shares(requested)}</strong></div>
+            <div><span>Average entry</span><strong>${money(avg, 4)}</strong></div>
+            <div><span>Cost + entry fees</span><strong>${position ? money(total, 3) : '—'}</strong></div>
+            <div><span>Current / exit bid</span><strong>${money(position?.markBid, 3)}</strong></div>
+          </div>
+          <div class="trade-pnl"><span>${position?.status === 'OPEN' ? 'Floating P&L' : 'Realized P&L'}</span><strong class="${signClass(pnl)}">${money(pnl)}</strong></div>
+          <div class="sizing-note">${safe(exitText)}${position?.exitPrice != null ? ` · exit ${money(position.exitPrice, 3)}` : ''}</div>
+        </article>`;
+      }
+
+      function tradeCardHtml(cycle, recent = false) {
+        const legs = Array.isArray(cycle.legs) ? cycle.legs : [];
+        const pnlValues = legs.map(leg => leg.position?.status === 'OPEN'
+          ? leg.position.unrealizedPnl : leg.position?.realizedPnl);
+        const knownPnlValues = pnlValues.filter(hasNumber);
+        const pnl = knownPnlValues.length
+          ? knownPnlValues.reduce((sum, value) => sum + Number(value), 0)
+          : cycle.realizedPnl;
+        const status = tradeStatusText(cycle, legs);
+        const statusClass = status === 'Closed'
+          ? cycle.sizingOutcome === 'BOTH_LEGS_LOST' ? 'loss' : 'win'
+          : '';
+        const pnlLabel = status === 'Closed' ? 'Pair realized P&L'
+          : knownPnlValues.length < legs.length ? 'Known pair P&L' : 'Pair floating P&L';
+        return `<article class="trade-card ${recent ? 'recent' : ''}">
+          <div class="trade-head">
+            <div><strong>${recent ? 'Past entry' : 'This window’s entry'} · ${safe(dateTime(cycle.entryAt || cycle.windowStart))}</strong>
+              <small>Combined asks ${money(cycle.entryAskSum, 3)} · ${shares(cycle.sharesPerLeg)} shares requested per leg</small></div>
+            <span class="trade-status ${statusClass}">${safe(status)}</span>
+          </div>
+          <div class="trade-legs">${legs.length ? legs.map(tradeLegHtml).join('') : '<div class="trade-empty">No filled legs for this entry.</div>'}</div>
+          <div class="trade-pnl"><span>${pnlLabel}</span><strong class="${signClass(pnl)}">${money(pnl)}</strong></div>
+        </article>`;
+      }
+
+      function renderPairCards(pairs) {
         const byId = new Map((Array.isArray(pairs) ? pairs : []).map(pair => [pair.id, pair]));
         $('sizingGrid').innerHTML = [
           ['btc-up-eth-down', 'BTC UP + ETH DOWN'],
@@ -458,14 +569,28 @@
           const outcome = String(pair.lastOutcome || '').replaceAll('_', ' ');
           const outcomeClass = pair.lastOutcome === 'BOTH_LEGS_LOST' ? 'loss' :
             pair.lastOutcome ? 'win' : '';
-          const askText = hasNumber(pair.combinedAsk)
-            ? `Combined asks ${money(pair.combinedAsk, 3)} · trigger below $0.80`
-            : 'Waiting for fresh asks on both legs';
-          const note = `${status}${outcome ? ` · last result: ${outcome}` : ''} · ${askText}`;
-          return `<article class="sizing-card" data-pair="${safe(id)}">
-            <span class="sizing-label">${safe(label(pair.label, fallbackLabel))}<span class="sizing-result ${outcomeClass}">${safe(status)}</span></span>
-            <strong class="sizing-value">${shares(nextShares)} shares / leg</strong>
-            <small class="sizing-note">${safe(note)}</small>
+          const stateClass = pair.status === 'CLOSED'
+            ? pair.currentCycle?.sizingOutcome === 'BOTH_LEGS_LOST' ? 'loss' : 'active'
+            : ['ENTERED', 'ENTRY_READY', 'PENDING_RESOLUTION'].includes(pair.status) ? 'active' : '';
+          const current = pair.currentCycle;
+          const trades = Array.isArray(pair.trades) ? pair.trades : [];
+          const history = trades.filter(trade => trade.id !== current?.id).slice(0, 6);
+          const seconds = hasNumber(pair.secondsRemaining) ? `${Math.ceil(pair.secondsRemaining)}s left` : 'Window waiting';
+          return `<article class="pair-card" data-pair="${safe(id)}">
+            <div class="pair-head">
+              <div><h3>${safe(label(pair.label, fallbackLabel))}</h3><small>${safe(seconds)} · ${pair.fresh ? 'fresh books' : 'waiting for fresh books'}</small></div>
+              <span class="pair-state ${stateClass}">${safe(status)}</span>
+            </div>
+            <div class="pair-body">
+              <div class="pair-summary">
+                <div><span>Current ask sum</span><strong>${money(pair.combinedAsk, 3)}</strong></div>
+                <div><span>Entry trigger</span><strong>&lt; $0.800</strong></div>
+                <div><span>Next size</span><strong>${shares(nextShares)} / leg</strong></div>
+              </div>
+              ${current ? tradeCardHtml(current) : '<div class="trade-empty">No entry in this window. Waiting for the ask sum trigger.</div>'}
+              ${outcome ? `<small class="sizing-note">Previous sizing result: <strong class="${outcomeClass}">${safe(outcome)}</strong></small>` : ''}
+              ${history.length ? `<details class="trade-history"><summary>Recent trades · ${trades.length - (current ? 1 : 0)} older entries</summary><div class="trade-history-list">${history.map(trade => tradeCardHtml(trade, true)).join('')}</div></details>` : ''}
+            </div>
           </article>`;
         }).join('');
       }
@@ -606,7 +731,7 @@
         const socketTime = socket.lastMessageAt ? ` · last book ${clockTime(socket.lastMessageAt)}` : '';
         $('marketCount').setAttribute('title', `Feed ${label(socket.status, 'waiting')}${socketTime}`);
         renderMarkets(markets);
-        renderSizing(latestState.crossPairs);
+        renderPairCards(latestState.crossPairs);
         renderPositions(latestState.positions);
         renderOrders(latestState.orders);
         renderEvents(latestState.events);
